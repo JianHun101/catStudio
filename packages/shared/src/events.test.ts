@@ -23,10 +23,16 @@ describe('Events', () => {
     expect(Events.SESSION_MESSAGES_CLEARED).toBe('session-messages-cleared')
     expect(Events.AGENT_TYPING).toBe('agent-typing')
     expect(Events.ERROR).toBe('error')
+    expect(Events.MESSAGE_RETRACTED).toBe('message-retracted')
+    expect(Events.MESSAGE_AGENT_STATUS).toBe('message-agent-status')
   })
 
-  it('has exactly 15 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(15)
+  it('has MESSAGE_RETRACT client→server event', () => {
+    expect(Events.MESSAGE_RETRACT).toBe('message-retract')
+  })
+
+  it('has exactly 18 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(18)
   })
 })
 

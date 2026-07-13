@@ -67,9 +67,16 @@ async function handleCreate(): Promise<void> {
     await store.fetchData()
   } catch (err: any) {
     console.error('[AgentPanel] create agent failed:', err)
-    // 尝试解析嵌套错误信息
-    const msg = err?.body?.message || err?.body?.error || err.message || '创建失败'
-    createError.value = typeof msg === 'string' ? msg : '创建失败'
+    // 解析后端返回的友好错误信息，否则用通用中文提示
+    let msg = err?.body?.message || err?.body?.error || err.message || ''
+    if (msg.includes('UNIQUE constraint') || msg.includes('已存在')) {
+      msg = '同名猫咪已存在，请换一个名字'
+    } else if (msg.includes('API key') || msg.includes('apiKey')) {
+      msg = 'API Key 无效或缺失，请检查后重试'
+    } else if (!msg || msg.includes('Internal Server Error')) {
+      msg = '服务器内部错误，请查看后端日志'
+    }
+    createError.value = msg || '创建失败'
   } finally {
     creating.value = false
   }
@@ -122,8 +129,14 @@ async function handleCreate(): Promise<void> {
         </div>
       </div>
 
+      <!-- 等待服务器启动 -->
+      <div v-if="store.waitingForServer" class="agent-status">
+        <span class="status-spinner"></span>
+        <p>等待服务器…</p>
+      </div>
+
       <!-- 数据加载中 -->
-      <div v-if="store.loading" class="agent-status">
+      <div v-else-if="store.loading" class="agent-status">
         <span class="status-spinner"></span>
         <p>加载中…</p>
       </div>

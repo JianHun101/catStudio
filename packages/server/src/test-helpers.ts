@@ -67,6 +67,9 @@ const SCHEMA_SQL = `
     ended_at TEXT,
     latency_ms INTEGER,
     error_message TEXT,
+    message_id TEXT,
+    commit_hash TEXT,
+    packages_installed TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
   );

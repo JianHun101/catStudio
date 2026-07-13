@@ -8,15 +8,25 @@ const input = ref('')
 const chatContainer = ref<HTMLDivElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
 const clearingMessages = ref(false)
+const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次执行
+const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 
 const { mentionActive, mentionSuggestions, mentionIndex, detect, select, navigate } =
   useMention(() => store.agents)
 
 async function handleClearMessages(): Promise<void> {
   if (!store.activeSessionId) return
+  // 两步确认
+  if (!clearConfirm.value) {
+    clearConfirm.value = true
+    // 3 秒后自动重置
+    setTimeout(() => { clearConfirm.value = false }, 3000)
+    return
+  }
   clearingMessages.value = true
   try {
     await store.clearSessionMessages(store.activeSessionId)
+    clearConfirm.value = false
   } catch (err) {
     console.error('[ChatPanel] clear messages failed:', err)
   } finally {
@@ -117,6 +127,50 @@ function senderName(agentId: string | null): string {
   const info = store.agentInfo(agentId)
   return info?.name || agentId
 }
+
+/** 获取某条消息的 Agent 执行状态列表 */
+function statusForMessage(msgId: string) {
+  return store.messageStatus.get(msgId) || []
+}
+
+/** 是否是当前 session 中最新一条用户消息 */
+function isLatestUserMessage(msg: Message): boolean {
+  if (msg.role !== 'user') return false
+  const userMsgs = store.activeMessages.filter((m) => m.role === 'user')
+  if (userMsgs.length === 0) return false
+  return userMsgs[userMsgs.length - 1].id === msg.id
+}
+
+async function handleRetract(msgId: string): Promise<void> {
+  if (!store.activeSessionId) return
+  if (retractConfirm.value !== msgId) {
+    retractConfirm.value = msgId
+    setTimeout(() => { retractConfirm.value = null }, 3000)
+    return
+  }
+  retractConfirm.value = null
+  await store.retractMessage(store.activeSessionId, msgId)
+}
+
+function statusEmoji(status: string): string {
+  switch (status) {
+    case 'queued': return '📨'
+    case 'thinking': return '🤔'
+    case 'replying': return '⌨️'
+    case 'done': return '✅'
+    default: return '⏳'
+  }
+}
+
+function statusLabelZh(status: string): string {
+  switch (status) {
+    case 'queued': return '已收到'
+    case 'thinking': return '思考中'
+    case 'replying': return '回复中'
+    case 'done': return '完成'
+    default: return status
+  }
+}
 </script>
 
 <template>
@@ -126,11 +180,14 @@ function senderName(agentId: string | null): string {
       <div class="chat-header-left">
         <h2 v-if="store.activeSession">{{ store.activeSession.title }}</h2>
         <span v-else class="placeholder">选择会话开始聊天</span>
+        <!-- 连接状态指示器 -->
+        <span class="connection-dot" :class="{ online: store.serverOnline }" :title="store.serverOnline ? '已连接' : '连接断开'"></span>
       </div>
 
       <div v-if="store.activeSessionId" class="chat-header-actions">
         <button
           class="btn-clear"
+          :class="{ 'btn-clear-confirm': clearConfirm }"
           title="清空所有消息"
           :disabled="clearingMessages"
           @click="handleClearMessages"
@@ -138,7 +195,7 @@ function senderName(agentId: string | null): string {
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M2 4h12M5.5 4V2.5h5V4M6.5 7v5M9.5 7v5M3.5 4l.7 9.1a1 1 0 001 .9h5.6a1 1 0 001-.9l.7-9.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          {{ clearingMessages ? '…' : '清空' }}
+          {{ clearingMessages ? '…' : clearConfirm ? '确认清空？' : '清空' }}
         </button>
 
         <div class="broadcast-toggle" title="开启后 Agent 可以看到其他 Agent 的回复">
@@ -163,7 +220,8 @@ function senderName(agentId: string | null): string {
       <div v-if="!store.activeSessionId" class="empty-state">
         <div class="empty-icon">🐱</div>
         <h3>欢迎来到 CatStudy</h3>
-        <p>从左侧选择一个会话，或创建一个新会话开始聊天</p>
+        <p v-if="store.sessions.length > 0">从左侧选择一个会话开始聊天</p>
+        <p v-else>点击左下角按钮创建一个新会话</p>
         <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>
       </div>
 
@@ -179,6 +237,32 @@ function senderName(agentId: string | null): string {
           <div class="msg-bubble">
             <p class="msg-text">{{ msg.content }}</p>
           </div>
+        </div>
+
+        <!-- Agent status indicators (on user messages) -->
+        <div
+          v-if="msg.role === 'user' && statusForMessage(msg.id).length > 0"
+          class="msg-agent-status"
+        >
+          <div
+            v-for="s in statusForMessage(msg.id)"
+            :key="s.agentId"
+            class="agent-status-row"
+          >
+            <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
+            <span class="status-avatar">{{ s.agentAvatar }}</span>
+            <span class="status-name">{{ s.agentName }}</span>
+            <span class="status-label">{{ statusLabelZh(s.status) }}</span>
+          </div>
+          <!-- Retract button (only on latest user message) -->
+          <button
+            v-if="isLatestUserMessage(msg)"
+            class="btn-retract"
+            :class="{ 'btn-retract-confirm': retractConfirm === msg.id }"
+            @click="handleRetract(msg.id)"
+          >
+            {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
+          </button>
         </div>
 
         <!-- Typing cursor -->
@@ -259,6 +343,25 @@ function senderName(agentId: string | null): string {
   letter-spacing: -0.2px;
 }
 
+.chat-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Connection dot */
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-red);
+  flex-shrink: 0;
+  transition: background var(--ease-out);
+}
+.connection-dot.online {
+  background: var(--accent-green);
+}
+
 .placeholder {
   font-size: 14px;
   color: var(--text-muted);
@@ -293,6 +396,77 @@ function senderName(agentId: string | null): string {
   color: var(--accent-red);
   border-color: var(--accent-red);
   background: rgba(224, 85, 106, 0.06);
+}
+
+.btn-clear-confirm {
+  color: var(--accent-red) !important;
+  border-color: var(--accent-red) !important;
+  background: rgba(224, 85, 106, 0.12) !important;
+  font-weight: 600;
+}
+
+/* ─── Agent Status Indicators ──────────── */
+
+.msg-agent-status {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+
+.agent-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.status-emoji {
+  font-size: 14px;
+}
+
+.status-avatar {
+  font-size: 16px;
+}
+
+.status-name {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.status-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+/* ─── Retract Button ───────────────────── */
+
+.btn-retract {
+  margin-top: 4px;
+  padding: 2px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.btn-retract:hover {
+  color: var(--accent-red);
+  border-color: var(--accent-red);
+}
+
+.btn-retract-confirm {
+  color: var(--accent-red) !important;
+  border-color: var(--accent-red) !important;
+  background: rgba(224, 85, 106, 0.1) !important;
+  font-weight: 600;
 }
 
 .btn-clear:disabled {

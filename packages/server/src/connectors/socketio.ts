@@ -16,12 +16,24 @@ import { dispatch, completeExecution, initAgentSlot, getAllAgentStates, getAgent
 import { getAdapterForAgent } from '../llm/registry.js'
 import { saveMessageMemory, buildMemoryContext } from '../memory/index.js'
 import { createLogger } from '../logger.js'
+import {
+  getHeadCommit,
+  gitCommit,
+  gitResetHard,
+  gitCleanWorkingTree,
+  snapshotPackageDeps,
+  diffNewPackages,
+  npmUninstall,
+} from '../llm/git-utils.js'
 import type { AgentConfig, LLMMessage, Message } from '@cat-study/shared'
 
 const log = createLogger('socketio')
 
 /** 模块级 io 实例引用，供路由等模块获取 */
 let _io: SocketServer | null = null
+
+/** 正在执行的消息 ID → 是否被撤回（runAgentReply 检查此标志以提前终止） */
+const retractionRequests = new Map<string, boolean>()
 
 /** 获取 Socket.IO Server 实例（需在 createSocketIO() 之后调用） */
 export function getIO(): SocketServer | null {
@@ -160,8 +172,110 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         ? agents.filter((a: any) => mentions.includes(a.name))
         : agents
 
+      // 发送 MESSAGE_AGENT_STATUS: queued — 让前端知道消息已被 Agent 接收
+      for (const a of targets) {
+        io.to(`session:${data.sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+          messageId: msgId,
+          agentId: a.id,
+          agentName: a.name,
+          agentAvatar: a.avatar,
+          status: 'queued',
+        })
+      }
+
       // 按 FIFO 串行执行（不 await，让多个消息的 Agent 执行可以交错）
       executeAgentsSerial(io, data.sessionId, targets as AgentConfig[], msg, db, traceId)
+    })
+
+    // ─── Message retraction ───────────────────────
+
+    socket.on(Events.MESSAGE_RETRACT, (data: { sessionId: string; messageId: string }) => {
+      const db = getDb()
+
+      // 1. 验证该消息是最新一条用户消息
+      const msg = db.prepare(
+        'SELECT * FROM messages WHERE id = ? AND session_id = ? AND role = ?',
+      ).get(data.messageId, data.sessionId, 'user') as any
+      if (!msg) {
+        socket.emit(Events.ERROR, { message: '消息不存在或不是用户消息' })
+        return
+      }
+
+      const latestUser = db.prepare(
+        'SELECT id FROM messages WHERE session_id = ? AND role = ? ORDER BY created_at DESC LIMIT 1',
+      ).get(data.sessionId, 'user') as any
+      if (!latestUser || latestUser.id !== data.messageId) {
+        socket.emit(Events.ERROR, { message: '只能撤回最新一条消息' })
+        return
+      }
+
+      // 2. 标记撤回（让正在执行的 runAgentReply 提前终止）
+      retractionRequests.set(data.messageId, true)
+
+      // 3. 查 execution_logs 找关联的 commit + packages
+      const execLogs = db.prepare(
+        'SELECT * FROM execution_logs WHERE triggered_by_message_id = ?',
+      ).all(data.messageId) as any[]
+
+      let hasCommit = false
+      for (const ex of execLogs) {
+        if (ex.commit_hash) {
+          hasCommit = true
+          break
+        }
+      }
+
+      // 4. 回滚文件改动
+      if (hasCommit) {
+        gitResetHard()
+      } else {
+        gitCleanWorkingTree()
+      }
+
+      // 5. 卸载安装的包
+      const pkgSet = new Set<string>()
+      for (const ex of execLogs) {
+        if (ex.packages_installed) {
+          try {
+            for (const pkg of JSON.parse(ex.packages_installed)) {
+              pkgSet.add(pkg)
+            }
+          } catch { /* ignore */ }
+        }
+      }
+      if (pkgSet.size > 0) {
+        npmUninstall(Array.from(pkgSet))
+      }
+
+      // 6. 删除该消息触发的所有 agent 回复和该消息本身
+      // 先删 execution_logs (外键)
+      db.prepare('DELETE FROM execution_logs WHERE triggered_by_message_id = ?').run(data.messageId)
+      // 找 agent 回复消息的 id
+      const agentReplies = db.prepare(
+        'SELECT id FROM messages WHERE session_id = ? AND role = ? AND created_at > ?',
+      ).all(data.sessionId, 'agent', msg.created_at) as any[]
+      for (const reply of agentReplies) {
+        db.prepare('DELETE FROM messages WHERE id = ?').run(reply.id)
+      }
+      // 删原消息
+      db.prepare('DELETE FROM messages WHERE id = ?').run(data.messageId)
+
+      // 7. 清理
+      retractionRequests.delete(data.messageId)
+
+      // 8. 广播给所有客户端
+      io.emit(Events.MESSAGE_RETRACTED, {
+        sessionId: data.sessionId,
+        messageId: data.messageId,
+        agentReplyIds: agentReplies.map((r: any) => r.id),
+      })
+
+      log.info('message retracted', {
+        sessionId: data.sessionId,
+        messageId: data.messageId,
+        hadCommit: hasCommit,
+        packagesRemoved: pkgSet.size,
+      })
     })
 
     // ─── Broadcast mode toggle ────────────────────
@@ -364,12 +478,20 @@ async function executeAgentsSerial(
     }
   }
 
-  // 顶层调度完成后清理 mentionCounts，防止内存泄漏
+  // 顶层调度完成后清理 + 自动提交
   if (depth === 0) {
     for (const key of mentionCounts.keys()) {
       if (key.startsWith(`${traceId}:`)) {
         mentionCounts.delete(key)
       }
+    }
+    // 自动 git commit（忽略非 git 仓库或无改动的情况）
+    const commitHash = gitCommit(`catstudy [${triggerMsg.id}]`)
+    if (commitHash) {
+      // 将 commit hash 写回 execution_logs（本轮所有相关日志）
+      db.prepare(
+        'UPDATE execution_logs SET commit_hash = ? WHERE triggered_by_message_id = ?',
+      ).run(commitHash, triggerMsg.id)
     }
   }
 }
@@ -391,6 +513,15 @@ async function runAgentReply(
     agentName: agent.name,
     provider: agent.llmProvider,
     model: agent.llmModel,
+  })
+
+  // 状态：思考中
+  io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+    messageId: triggerMsg.id,
+    agentId: agent.id,
+    agentName: agent.name,
+    agentAvatar: agent.avatar,
+    status: 'thinking',
   })
 
   // 构建对话上下文：只包含与该 Agent 相关的消息
@@ -536,15 +667,32 @@ async function runAgentReply(
   let fullContent = ''
   const msgId = uuid()
 
+  // 记录执行前的包依赖快照
+  const depsBefore = snapshotPackageDeps()
+
   io.to(`session:${sessionId}`).emit(Events.AGENT_TYPING, {
     agentId: agent.id,
     messageId: msgId,
     content: '',
   })
 
+  // 状态：回复中
+  io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+    messageId: triggerMsg.id,
+    agentId: agent.id,
+    agentName: agent.name,
+    agentAvatar: agent.avatar,
+    status: 'replying',
+  })
+
   const stream = adapter.chatStream(llmMessages, { model: agent.llmModel })
 
   for await (const chunk of stream) {
+    // 检查是否被撤回
+    if (retractionRequests.get(triggerMsg.id)) {
+      log.info('agent reply aborted (retracted)', { traceId, agentId: agent.id })
+      return { content: fullContent || '[消息已撤回]', msgId }
+    }
     if (chunk.content) {
       fullContent += chunk.content
       io.to(`session:${sessionId}`).emit(Events.AGENT_TYPING, {
@@ -585,13 +733,30 @@ async function runAgentReply(
 
   io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, finalMsg)
 
-  // 将延迟写回 execution_logs
+  // 状态：完成
+  io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+    messageId: triggerMsg.id,
+    agentId: agent.id,
+    agentName: agent.name,
+    agentAvatar: agent.avatar,
+    status: 'done',
+  })
+
+  // 记录新安装的包
+  const depsAfter = snapshotPackageDeps()
+  const newPkgs = diffNewPackages(depsBefore, depsAfter)
+  if (newPkgs.length > 0) {
+    log.info('new packages installed', { traceId, agentId: agent.id, packages: newPkgs })
+  }
+
+  // 将延迟 + 包信息写回 execution_logs
   db.prepare(`
     UPDATE execution_logs
-    SET latency_ms = ?
+    SET latency_ms = ?,
+        packages_installed = ?
     WHERE agent_id = ? AND status = 'running'
     ORDER BY started_at DESC LIMIT 1
-  `).run(latencyMs, agent.id)
+  `).run(latencyMs, JSON.stringify(newPkgs), agent.id)
 
   return { content: fullContent, msgId }
 }

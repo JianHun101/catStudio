@@ -126,7 +126,10 @@ describe('chatStore', () => {
       store.sessions = [mockSession]
       store.joinSession('s1')
       expect(store.activeSessionId).toBe('s1')
-      expect(store.messages).toEqual([])
+      // 欢迎消息被添加到 messages（因 agents 为空，显示通用指引）
+      expect(store.messages).toHaveLength(1)
+      expect(store.messages[0].role).toBe('system')
+      expect(store.messages[0].id).toBe('welcome-s1')
       expect(mockEmit).toHaveBeenCalledWith(Events.JOIN_SESSION, 's1')
       expect(mockEmit).toHaveBeenCalledWith('get-agent-states')
     })

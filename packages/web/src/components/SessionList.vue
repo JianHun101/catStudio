@@ -38,17 +38,24 @@ async function handleDelete(id: string): Promise<void> {
         <span class="section-count" v-if="store.sessions.length">{{ store.sessions.length }}</span>
       </div>
 
-      <!-- 加载中 -->
-      <div v-if="store.loading" class="status-box">
+      <!-- 等待服务器启动（health check 轮询中） -->
+      <div v-if="store.waitingForServer" class="status-box">
         <span class="status-spinner"></span>
-        <p>连接服务器中…</p>
-        <p class="hint">等待后端启动</p>
+        <p>等待服务器启动…</p>
+        <p class="hint">后端正在初始化，请稍候</p>
       </div>
 
-      <!-- 加载失败（服务器未就绪或网络错误） -->
+      <!-- 加载中 -->
+      <div v-else-if="store.loading" class="status-box">
+        <span class="status-spinner"></span>
+        <p>加载数据中…</p>
+        <p class="hint">正在获取会话列表</p>
+      </div>
+
+      <!-- 加载失败 -->
       <div v-else-if="store.dataError" class="status-box status-error">
         <span class="status-icon">⚠️</span>
-        <p>无法连接服务器</p>
+        <p>数据加载失败</p>
         <p class="hint">{{ store.dataError }}</p>
         <button class="btn-retry" @click="store.fetchData()">重试</button>
       </div>

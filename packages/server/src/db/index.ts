@@ -130,6 +130,18 @@ export function initDb(): void {
       name: 'task_id on messages',
       sql: `ALTER TABLE messages ADD COLUMN task_id TEXT`,
     },
+    {
+      name: 'message_id on execution_logs',
+      sql: `ALTER TABLE execution_logs ADD COLUMN message_id TEXT`,
+    },
+    {
+      name: 'commit_hash on execution_logs',
+      sql: `ALTER TABLE execution_logs ADD COLUMN commit_hash TEXT`,
+    },
+    {
+      name: 'packages_installed on execution_logs',
+      sql: `ALTER TABLE execution_logs ADD COLUMN packages_installed TEXT`,
+    },
   ]
 
   for (const m of migrations) {

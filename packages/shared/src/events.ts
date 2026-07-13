@@ -24,6 +24,13 @@ export const Events = {
   SESSION_MESSAGES_CLEARED: 'session-messages-cleared',
   AGENT_TYPING:     'agent-typing',       // 流式输出的增量
   ERROR:            'error',
+
+  // 消息撤回
+  MESSAGE_RETRACT:  'message-retract',     // 用户→服务器
+  MESSAGE_RETRACTED: 'message-retracted',  // 服务器→客户端
+
+  // Agent 执行状态（每条消息对应的 Agent 状态）
+  MESSAGE_AGENT_STATUS: 'message-agent-status',
 } as const
 
 // ─── Redis Channel Patterns ─────────────────────────

@@ -16,7 +16,12 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
     if (!res.ok) {
       const body = await res.json().catch(() => null)
       const detail = body?.message || body?.error || res.statusText
-      const err = new Error(detail || `HTTP ${res.status}`) as any
+      // 根据状态码提供中文前缀
+      let prefix = ''
+      if (res.status === 404) prefix = '资源不存在：'
+      else if (res.status === 409) prefix = '冲突：'
+      else if (res.status >= 500) prefix = '服务器错误：'
+      const err = new Error(`${prefix}${detail || `HTTP ${res.status}`}`) as any
       err.status = res.status
       err.body = body
       throw err

@@ -65,6 +65,7 @@ export class ClaudeAdapter implements LLMAdapter {
       '-p', prompt,
       '--output-format', 'stream-json',
       '--verbose',
+      '--permission-mode', 'bypassPermissions',
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
