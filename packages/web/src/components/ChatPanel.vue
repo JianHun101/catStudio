@@ -2,6 +2,7 @@
 import { ref, watch, nextTick } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
+import { renderMarkdown } from '@/utils/markdown'
 
 const store = useChatStore()
 const input = ref('')
@@ -235,7 +236,7 @@ function statusLabelZh(status: string): string {
         <div class="msg-body">
           <div v-if="msg.role === 'agent'" class="msg-sender">{{ senderName(msg.agentId) }}</div>
           <div class="msg-bubble">
-            <p class="msg-text">{{ msg.content }}</p>
+            <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
           </div>
         </div>
 
@@ -641,9 +642,15 @@ function statusLabelZh(status: string): string {
 .msg-text {
   font-size: 14px;
   line-height: 1.65;
-  white-space: pre-wrap;
-  word-break: break-word;
   color: var(--text-primary);
+}
+
+/* first/last paragraph margins */
+.msg-text :deep(p) {
+  margin: 0 0 0.6em;
+}
+.msg-text :deep(p:last-child) {
+  margin-bottom: 0;
 }
 
 /* Typing */
@@ -786,5 +793,154 @@ function statusLabelZh(status: string): string {
 .btn-send:disabled {
   opacity: 0.3;
   cursor: default;
+}
+</style>
+
+<!-- Non-scoped: markdown content rendered via v-html -->
+<style>
+/* ─── Inline formatting ────────────────── */
+
+.chat-panel .msg-text strong,
+.chat-panel .msg-text b {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chat-panel .msg-text em,
+.chat-panel .msg-text i {
+  font-style: italic;
+}
+
+.chat-panel .msg-text del,
+.chat-panel .msg-text s {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.chat-panel .msg-text a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.chat-panel .msg-text a:hover {
+  opacity: 0.8;
+}
+
+/* ─── Inline code ───────────────────────── */
+
+.chat-panel .msg-text code {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', 'Monaco', monospace;
+  font-size: 0.9em;
+  background: rgba(127, 127, 127, 0.12);
+  padding: 1px 5px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+/* ─── Code blocks ───────────────────────── */
+
+.chat-panel .msg-text pre {
+  background: #1e1e2e;
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.chat-panel .msg-text pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.85em;
+  color: #cdd6f4;
+  line-height: 1.55;
+  border-radius: 0;
+  word-break: normal;
+  white-space: pre;
+}
+
+/* ─── Headings ──────────────────────────── */
+
+.chat-panel .msg-text h1,
+.chat-panel .msg-text h2,
+.chat-panel .msg-text h3,
+.chat-panel .msg-text h4,
+.chat-panel .msg-text h5,
+.chat-panel .msg-text h6 {
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+
+.chat-panel .msg-text h1:first-child,
+.chat-panel .msg-text h2:first-child,
+.chat-panel .msg-text h3:first-child {
+  margin-top: 0;
+}
+
+.chat-panel .msg-text h1 { font-size: 1.3em; }
+.chat-panel .msg-text h2 { font-size: 1.15em; }
+.chat-panel .msg-text h3 { font-size: 1.05em; }
+
+/* ─── Lists ─────────────────────────────── */
+
+.chat-panel .msg-text ul,
+.chat-panel .msg-text ol {
+  margin: 4px 0;
+  padding-left: 1.6em;
+}
+
+.chat-panel .msg-text li {
+  margin: 2px 0;
+}
+
+.chat-panel .msg-text ul {
+  list-style: disc;
+}
+.chat-panel .msg-text ol {
+  list-style: decimal;
+}
+
+/* ─── Blockquote ────────────────────────── */
+
+.chat-panel .msg-text blockquote {
+  margin: 6px 0;
+  padding: 4px 0 4px 12px;
+  border-left: 3px solid var(--accent);
+  opacity: 0.85;
+  color: var(--text-secondary);
+}
+
+.chat-panel .msg-text blockquote p {
+  margin: 0;
+}
+
+/* ─── Horizontal rule ───────────────────── */
+
+.chat-panel .msg-text hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 10px 0;
+}
+
+/* ─── Tables ────────────────────────────── */
+
+.chat-panel .msg-text table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 0.92em;
+}
+
+.chat-panel .msg-text th,
+.chat-panel .msg-text td {
+  border: 1px solid var(--border-subtle);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.chat-panel .msg-text th {
+  background: var(--bg-hover);
+  font-weight: 600;
 }
 </style>
