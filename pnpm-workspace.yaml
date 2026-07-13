@@ -1,0 +1,10 @@
+packages:
+  - 'packages/*'
+allowBuilds:
+  better-sqlite3: true
+  sqlite-vec: true
+  esbuild: true
+  vue-demi: true
+  protobufjs: true
+  sharp: true
+  onnxruntime-node: true

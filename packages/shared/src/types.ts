@@ -1,0 +1,113 @@
+/** Agent 槽位状态 */
+export type SlotStatus = 'idle' | 'thinking' | 'busy'
+
+/** 消息角色 */
+export type MessageRole = 'user' | 'agent' | 'system'
+
+/** Agent 执行状态 */
+export type ExecutionStatus = 'queued' | 'running' | 'completed' | 'failed'
+
+/** Channel 渠道类型 */
+export type ChannelType = 'web' | 'qq'
+
+// ─── Agent ──────────────────────────────────────────
+
+export interface AgentConfig {
+  id: string
+  name: string
+  avatar: string                   // emoji or URL
+  systemPrompt: string
+  llmProvider: string              // 'deepseek' | 'claude' | 'openai' | 'custom'
+  llmModel: string                 // 'deepseek-v4-pro' | 'claude-sonnet-4-6' | ...
+  llmApiKey: string
+  llmBaseUrl?: string              // for custom providers
+}
+
+/** Agent 运行时状态（广播到前端） */
+export interface AgentRuntimeState {
+  agentId: string
+  sessionId: string | null         // 当前在哪个 Session 里忙
+  status: SlotStatus
+  queueLength: number
+}
+
+// ─── Session ────────────────────────────────────────
+
+export interface SessionConfig {
+  id: string
+  title: string
+  agentIds: string[]
+  broadcastMode: boolean           // true = Agent 可以看到其他 Agent 的回复
+  createdAt: string                // ISO 8601
+  updatedAt: string
+}
+
+// ─── Message ────────────────────────────────────────
+
+export interface Message {
+  id: string
+  sessionId: string
+  agentId: string | null           // null = user or system
+  role: MessageRole
+  content: string
+  mentions: string[]               // agent names mentioned with @
+  taskId?: string                  // 任务 ID，串联同一任务的多轮 agent 交互
+  createdAt: string
+}
+
+// ─── Memory ─────────────────────────────────────────
+
+export interface MemoryEntry {
+  id: string
+  agentId: string
+  content: string                  // human-readable summary
+  embedding: number[]              // vector (dim depends on embedding provider)
+  sourceMessageId: string
+  createdAt: string
+}
+
+// ─── Execution Log ──────────────────────────────────
+
+export interface ExecutionLog {
+  id: string
+  sessionId: string
+  agentId: string
+  triggeredByMessageId: string
+  status: ExecutionStatus
+  traceId: string                    // 请求追踪 ID，串联 dispatch → LLM → reply
+  startedAt: string | null
+  endedAt: string | null
+  latencyMs: number | null           // 实际 LLM 调用耗时（毫秒）
+  errorMessage: string | null        // 失败时的错误信息
+}
+
+// ─── Dispatch ───────────────────────────────────────
+
+/** 调度器发给 Agent 的指令 */
+export interface DispatchCommand {
+  sessionId: string
+  agentId: string
+  triggerMessageId: string
+  triggerContent: string
+  mentions: string[]
+  taskId?: string                  // 任务 ID，Agent 间交互继承同一个 taskId
+}
+
+// ─── LLM ────────────────────────────────────────────
+
+export interface LLMMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+export interface ChatOptions {
+  model: string
+  maxTokens?: number
+  temperature?: number
+  timeoutMs?: number  // fetch + stream 总超时（毫秒），默认 120000
+}
+
+export interface Chunk {
+  content: string
+  done: boolean
+}
