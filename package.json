@@ -1,0 +1,24 @@
+{
+  "name": "cat-study",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:server": "pnpm --filter @cat-study/server dev",
+    "dev:web": "pnpm --filter @cat-study/web dev",
+    "seed": "node scripts/seed.js",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "stop": "node scripts/stop.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:server": "pnpm --filter @cat-study/server test",
+    "test:web": "pnpm --filter @cat-study/web test",
+    "test:shared": "pnpm --filter @cat-study/shared test"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.9",
+    "vitest": "^4.1.9"
+  }
+}

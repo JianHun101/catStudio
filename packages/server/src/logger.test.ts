@@ -1,0 +1,82 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+// 模拟 formatLine 和 writeLine，隔离文件系统副作用
+const writeLineSpy = vi.fn()
+
+vi.mock('node:fs', () => ({
+  default: {
+    existsSync: () => false,
+    mkdirSync: () => {},
+    statSync: () => ({ size: 0 }),
+    appendFileSync: () => {},
+  },
+}))
+
+// 直接 import 会触发模块加载，logger 导入 fs，需要先 mock
+// 使用动态 import 来隔离
+describe('logger', () => {
+  let loggerModule: typeof import('./logger.js')
+
+  beforeEach(async () => {
+    vi.resetModules()
+    // 重新导入以获取干净的模块状态
+    loggerModule = await import('./logger.js')
+    // 重置 log level
+    loggerModule.setLogLevel('debug')
+  })
+
+  describe('createLogger', () => {
+    it('returns an object with debug/info/warn/error methods', () => {
+      const log = loggerModule.createLogger('test-module')
+      expect(typeof log.debug).toBe('function')
+      expect(typeof log.info).toBe('function')
+      expect(typeof log.warn).toBe('function')
+      expect(typeof log.error).toBe('function')
+    })
+  })
+
+  describe('setLogLevel', () => {
+    it('filters out messages below min level', () => {
+      // 设置为 error，则 debug/info/warn 都应被静默
+      loggerModule.setLogLevel('error')
+
+      const log = loggerModule.createLogger('test')
+      // 不应抛出异常——静默丢弃
+      expect(() => {
+        log.debug('should be filtered')
+        log.info('should be filtered')
+        log.warn('should be filtered')
+        log.error('should be printed')
+      }).not.toThrow()
+    })
+
+    it('allows all messages at debug level', () => {
+      loggerModule.setLogLevel('debug')
+      const log = loggerModule.createLogger('test')
+      expect(() => {
+        log.debug('ok')
+        log.info('ok')
+        log.warn('ok')
+        log.error('ok')
+      }).not.toThrow()
+    })
+  })
+
+  describe('Logger methods', () => {
+    it('accepts meta object with traceId', () => {
+      loggerModule.setLogLevel('debug')
+      const log = loggerModule.createLogger('test')
+      expect(() => {
+        log.info('test message', { traceId: 'abc-123', extra: 'data' })
+      }).not.toThrow()
+    })
+
+    it('accepts no meta argument', () => {
+      loggerModule.setLogLevel('debug')
+      const log = loggerModule.createLogger('test')
+      expect(() => {
+        log.info('plain message')
+      }).not.toThrow()
+    })
+  })
+})

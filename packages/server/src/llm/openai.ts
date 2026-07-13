@@ -1,0 +1,118 @@
+import { spawn } from 'node:child_process'
+import type { Chunk, ChatOptions, LLMMessage } from '@cat-study/shared'
+import type { LLMAdapter } from './adapter.js'
+import {
+  resolveBin,
+  messagesToPrompt,
+  parseCodexOutput,
+  ensureProxy,
+  attachIdleTimeout,
+  attachExitError,
+} from './cli-utils.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('openai')
+
+interface OpenAIConfig {
+  apiKey: string
+  model: string
+  baseUrl?: string
+}
+
+/** Codex CLI 二进制路径（模块加载时解析） */
+let CODEX_BIN: string
+try {
+  CODEX_BIN = resolveBin('codex', '@openai/codex')
+} catch (err: any) {
+  log.warn('Codex CLI 未安装', { error: err.message })
+  CODEX_BIN = ''
+}
+
+/**
+ * Codex CLI 适配器。
+ *
+ * 通过 spawn Codex 子进程 → 解析 NDJSON 流 → 输出 Chunk。
+ * Codex 经 codex-proxy 将 Responses API 转为 DeepSeek Chat Completions。
+ *
+ * 前置要求:
+ *   1. npm i -g @openai/codex
+ *   2. codex-proxy 已安装于 ~/codex-proxy/codex_proxy.py
+ */
+export class OpenAIAdapter implements LLMAdapter {
+  readonly provider = 'openai'
+  private apiKey: string
+  private model: string
+
+  constructor(config: OpenAIConfig) {
+    this.apiKey = config.apiKey
+    this.model = config.model
+  }
+
+  async *chatStream(
+    messages: LLMMessage[],
+    _options: ChatOptions,
+  ): AsyncIterable<Chunk> {
+    if (!CODEX_BIN) {
+      yield {
+        content: 'Codex CLI 未安装。请运行: npm i -g @openai/codex',
+        done: true,
+      }
+      return
+    }
+
+    // 确保 codex-proxy 在运行
+    try {
+      ensureProxy(this.apiKey)
+    } catch (err: any) {
+      yield {
+        content: `codex-proxy 启动失败: ${err.message}`,
+        done: true,
+      }
+      return
+    }
+
+    const prompt = messagesToPrompt(messages)
+
+    log.info('启动 Codex CLI', { model: this.model })
+
+    let child
+
+    // Windows: PowerShell 管道传 prompt，避免 stdin 阻塞
+    if (process.platform === 'win32' && CODEX_BIN.endsWith('.cmd')) {
+      const escapedPrompt = prompt.replace(/"/g, '`"')
+      const psCmd = `$input | & "${CODEX_BIN}" exec --skip-git-repo-check --json -`
+      child = spawn('powershell.exe', ['-NoProfile', '-Command', psCmd], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false,
+        env: { ...process.env, DEEPSEEK_API_KEY: this.apiKey },
+      })
+      child.stdin!.write(escapedPrompt)
+      child.stdin!.end()
+    } else {
+      child = spawn(CODEX_BIN, ['exec', '--skip-git-repo-check', '--json', prompt], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false,
+        env: { ...process.env, DEEPSEEK_API_KEY: this.apiKey },
+      })
+      child.stdin!.write(prompt)
+      child.stdin!.end()
+    }
+
+    const cleanupIdle = attachIdleTimeout(child)
+    attachExitError(child, 'codex')
+
+    child.on('error', (err) => {
+      log.error('spawn 失败', { error: err.message })
+    })
+
+    try {
+      for await (const chunk of parseCodexOutput(child)) {
+        yield chunk
+      }
+    } finally {
+      cleanupIdle()
+    }
+
+    yield { content: '', done: true }
+  }
+}
