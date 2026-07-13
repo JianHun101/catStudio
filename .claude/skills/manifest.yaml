@@ -1,0 +1,91 @@
+# CatStudy 技能路由清单
+# 定义 catStudy 自定义技能的分类、触发条件、输出和衔接关系
+
+skills:
+
+  quality-gate:
+    category: "审查流程"
+    description: |
+      代码变更提交审查前的自查门。
+      检查编码规范、测试覆盖、架构边界、安全性和未完成项。
+    triggers:
+      - "自查"
+      - "quality gate"
+      - "提交前检查"
+      - "检查一下代码"
+    not_for:
+      - "纯对话无代码变更"
+      - "已在审查循环中"
+    output: "Quality Gate Report（通过/未通过 + 逐项结果）"
+    next: "request-review"
+    refs:
+      - "CODING_STANDARDS.md"
+      - "refs/review-standards.md"
+
+  request-review:
+    category: "审查流程"
+    description: |
+      打包完成的工作并发送审查请求。
+      按照审查配对规则选择审查者，使用标准模板格式。
+    triggers:
+      - "发起审查"
+      - "request review"
+      - "让人看看"
+      - "review 一下"
+    not_for:
+      - "quality-gate 未通过"
+      - "无代码变更"
+      - "自己审查自己"
+    output: "审查请求文档（按模板格式 + @审查者）"
+    next: "receive-review"
+    refs:
+      - "refs/review-request-template.md"
+      - "refs/shared-rules.md"
+    preconditions:
+      - "quality-gate PASS"
+      - "pnpm test 全过"
+      - "pnpm lint 无新增错误"
+
+  receive-review:
+    category: "审查流程"
+    description: |
+      接收并处理审查反馈。
+      逐项核实审查发现，按 P1/P2/P3 分类处理，拒绝表演性同意。
+    triggers:
+      - "处理审查"
+      - "receive review"
+      - "审查反馈"
+      - "@吐槽猫 的审查结果"
+    not_for:
+      - "审查结论是 ✅ 可以合并"
+      - "自己是审查者"
+    output: "修复确认表（逐项状态 + 测试结果）"
+    next: "request-review (如需重新审查)"
+    refs:
+      - "refs/review-standards.md"
+      - "refs/shared-rules.md"
+
+  session-summary:
+    category: "文档"
+    description: |
+      已有技能（来自 mattpocock/skills）。
+      生成 CatStudy 格式的结构化会议总结。
+    triggers:
+      - "总结"
+      - "session summary"
+      - "会议总结"
+    output: "docs/sessions/cat-study-{slug}-summary.md"
+
+# 审查流程链
+# quality-gate → request-review → receive-review → (loop until ✅)
+pipeline:
+  review:
+    - quality-gate
+    - request-review
+    - receive-review
+
+# 三条铁律
+iron_laws:
+  - "禁止自审：店长和服务员写代码，吐槽猫审查"
+  - "禁止冒充：每只猫有固定身份和角色"
+  - "依赖声明优先：安装任何包前必须声明并获得吐槽猫批准"
