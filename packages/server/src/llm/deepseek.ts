@@ -27,6 +27,13 @@ export class DeepSeekAdapter implements LLMAdapter {
     messages: LLMMessage[],
     options: ChatOptions,
   ): AsyncIterable<Chunk> {
+    const externalSignal = options.signal
+
+    if (externalSignal?.aborted) {
+      yield { content: '', done: true }
+      return
+    }
+
     const chatMessages = messages.map((m) => ({
       role: m.role,
       content: m.content,
@@ -41,7 +48,12 @@ export class DeepSeekAdapter implements LLMAdapter {
     }
 
     const controller = new AbortController()
-    const timeoutMs = options.timeoutMs || 120_000 // 默认 2 分钟超时
+    const timeoutMs = options.timeoutMs || 120_000
+
+    // 外部信号：转发 abort 事件到内部 controller
+    const onExternalAbort = () => controller.abort()
+    externalSignal?.addEventListener('abort', onExternalAbort)
+
     const timer = setTimeout(() => controller.abort(), timeoutMs)
 
     let response: Response
@@ -57,7 +69,11 @@ export class DeepSeekAdapter implements LLMAdapter {
       })
     } catch (err: any) {
       clearTimeout(timer)
+      externalSignal?.removeEventListener('abort', onExternalAbort)
       if (err.name === 'AbortError') {
+        if (externalSignal?.aborted) {
+          throw new Error('请求被取消')
+        }
         throw new Error(`DeepSeek API 请求超时 (${timeoutMs / 1000}s)`)
       }
       throw err
@@ -65,6 +81,7 @@ export class DeepSeekAdapter implements LLMAdapter {
     clearTimeout(timer)
 
     if (!response.ok) {
+      externalSignal?.removeEventListener('abort', onExternalAbort)
       const err = await response.text()
       throw new Error(`DeepSeek API error ${response.status}: ${err}`)
     }
@@ -76,13 +93,24 @@ export class DeepSeekAdapter implements LLMAdapter {
     let buffer = ''
 
     while (true) {
+      if (externalSignal?.aborted) {
+        externalSignal?.removeEventListener('abort', onExternalAbort)
+        yield { content: '', done: true }
+        return
+      }
+
       let readResult: ReadableStreamReadResult<Uint8Array>
       try {
         const chunkTimer = setTimeout(() => controller.abort(), streamTimeoutMs)
         readResult = await reader.read()
         clearTimeout(chunkTimer)
       } catch (err: any) {
+        externalSignal?.removeEventListener('abort', onExternalAbort)
         if (err.name === 'AbortError') {
+          if (externalSignal?.aborted) {
+            yield { content: '', done: true }
+            return
+          }
           throw new Error('DeepSeek API 流读取超时')
         }
         throw err
@@ -101,6 +129,7 @@ export class DeepSeekAdapter implements LLMAdapter {
 
         const data = trimmed.slice(6)
         if (data === '[DONE]') {
+          externalSignal?.removeEventListener('abort', onExternalAbort)
           yield { content: '', done: true }
           return
         }
@@ -117,6 +146,7 @@ export class DeepSeekAdapter implements LLMAdapter {
       }
     }
 
+    externalSignal?.removeEventListener('abort', onExternalAbort)
     yield { content: '', done: true }
   }
 }

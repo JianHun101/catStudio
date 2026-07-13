@@ -104,7 +104,8 @@ export interface ChatOptions {
   model: string
   maxTokens?: number
   temperature?: number
-  timeoutMs?: number  // fetch + stream 总超时（毫秒），默认 120000
+  timeoutMs?: number   // fetch + stream 总超时（毫秒），默认 120000
+  signal?: AbortSignal // 外部取消信号，用于中断正在进行的 LLM 调用
 }
 
 export interface Chunk {

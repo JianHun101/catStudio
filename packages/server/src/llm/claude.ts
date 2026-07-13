@@ -46,8 +46,15 @@ export class ClaudeAdapter implements LLMAdapter {
 
   async *chatStream(
     messages: LLMMessage[],
-    _options: ChatOptions,
+    options: ChatOptions,
   ): AsyncIterable<Chunk> {
+    const signal = options.signal
+
+    if (signal?.aborted) {
+      yield { content: '', done: true }
+      return
+    }
+
     if (!CLAUDE_BIN) {
       yield {
         content: 'Claude Code CLI 未安装。请运行: npm i -g @anthropic-ai/claude-code',
@@ -71,6 +78,22 @@ export class ClaudeAdapter implements LLMAdapter {
       shell: false,
       env,
     })
+
+    // ─── Abort 处理：收到取消信号时 kill 子进程 ───
+    const GRACE_MS = 5000
+    const onAbort = () => {
+      if (!child.killed && child.exitCode === null) {
+        log.warn('收到取消信号，发送 SIGTERM', { model: this.model })
+        child.kill('SIGTERM')
+        setTimeout(() => {
+          if (!child.killed && child.exitCode === null) {
+            log.warn('SIGTERM 未响应，发送 SIGKILL')
+            child.kill('SIGKILL')
+          }
+        }, GRACE_MS)
+      }
+    }
+    signal?.addEventListener('abort', onAbort)
 
     const cleanupIdle = attachIdleTimeout(child)
 
@@ -96,11 +119,19 @@ export class ClaudeAdapter implements LLMAdapter {
 
     try {
       for await (const chunk of parseClaudeCodeOutput(child)) {
+        if (signal?.aborted) break
         hasOutput = true
         yield chunk
       }
     } finally {
+      signal?.removeEventListener('abort', onAbort)
       cleanupIdle()
+    }
+
+    // 被取消时不产出后续错误信息
+    if (signal?.aborted) {
+      yield { content: '', done: true }
+      return
     }
 
     // 进程非零退出或无输出 → 产出错误信息

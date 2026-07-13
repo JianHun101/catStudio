@@ -357,7 +357,7 @@ async function handleCreate(): Promise<void> {
 }
 
 .dot-idle {
-  background: var(--status-idle);
+  background: var(--text-muted);
 }
 
 .dot-busy {

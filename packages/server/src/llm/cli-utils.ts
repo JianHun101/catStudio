@@ -214,13 +214,29 @@ export async function* parseCodexOutput(
 
 // ─── Child Process Helpers ────────────────────────────────
 
-const MAX_IDLE_MS = 5 * 60 * 1000 // 5 分钟无输出视为超时
+/** CLI 空闲超时：10 分钟无 stdout/stderr 输出视为挂死。
+ *  参照 clowder-ai 的 CLI 进程超时（30min），CatStudy 任务更轻量，
+ *  使用 10min + 按输出重置 timer 的设计。
+ *  环境变量 CLI_IDLE_TIMEOUT_MS 可覆盖（设为 0 禁用）。 */
+const CLI_IDLE_TIMEOUT_MS = parseInt(process.env.CLI_IDLE_TIMEOUT_MS || '') || 10 * 60 * 1000
+/** SIGTERM → SIGKILL 的等待间隔 */
 const GRACE_MS = 5000
 
 /**
- * 给子进程挂上空闲超时检测。超时后先 SIGTERM，再 SIGKILL。
+ * 给子进程挂上空闲超时检测。
+ *
+ * 每次 stdout/stderr 有数据时重置 timer——跟 clowder-ai 的
+ * CLI 进程超时机制一致：持续产出内容的进程不会被误杀，
+ * 只有真正无输出的进程才会超时终止。
+ *
+ * 超时后先 SIGTERM（给进程清理机会），5 秒后若仍存活则 SIGKILL 强杀。
+ *
+ * @returns cleanup 函数，用于提前取消 timer
  */
 export function attachIdleTimeout(child: ChildProcess): () => void {
+  // 超时被禁用（CLI_IDLE_TIMEOUT_MS=0）
+  if (CLI_IDLE_TIMEOUT_MS <= 0) return () => {}
+
   let lastActivity = Date.now()
 
   const bump = () => {
@@ -230,9 +246,9 @@ export function attachIdleTimeout(child: ChildProcess): () => void {
   child.stderr?.on('data', bump)
 
   const timer = setInterval(() => {
-    if (Date.now() - lastActivity > MAX_IDLE_MS) {
+    if (Date.now() - lastActivity > CLI_IDLE_TIMEOUT_MS) {
       const idleSec = Math.round((Date.now() - lastActivity) / 1000)
-      log.error('子进程无输出，发送 SIGTERM', { idleSec })
+      log.error('子进程无输出，发送 SIGTERM', { idleSec, timeoutMs: CLI_IDLE_TIMEOUT_MS })
       child.kill('SIGTERM')
       setTimeout(() => {
         if (!child.killed && child.exitCode === null) {

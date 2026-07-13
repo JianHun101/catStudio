@@ -226,6 +226,18 @@ async function handleDelete(id: string): Promise<void> {
   background: var(--bg-surface);
   color: var(--text-primary);
   box-shadow: var(--shadow-sm);
+  position: relative;
+}
+
+.session-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
 }
 
 .session-icon {

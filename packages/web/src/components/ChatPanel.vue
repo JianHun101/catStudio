@@ -539,7 +539,7 @@ function statusLabelZh(status: string): string {
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 /* Empty State */
@@ -841,6 +841,7 @@ function statusLabelZh(status: string): string {
 
 .chat-panel .msg-text pre {
   background: #1e1e2e;
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
   padding: 12px 14px;
   overflow-x: auto;
@@ -919,28 +920,151 @@ function statusLabelZh(status: string): string {
 
 .chat-panel .msg-text hr {
   border: none;
-  border-top: 1px solid var(--border-subtle);
-  margin: 10px 0;
+  border-top: 1px solid var(--border-default);
+  margin: 12px 0;
+}
+
+/* ─── Task list (GFM) ──────────────────── */
+
+.chat-panel .msg-text ul input[type="checkbox"],
+.chat-panel .msg-text ol input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  border: 1.5px solid var(--border-default);
+  border-radius: 3px;
+  background: transparent;
+  margin-right: 6px;
+  vertical-align: text-bottom;
+  cursor: default;
+  position: relative;
+  flex-shrink: 0;
+  transition: all var(--ease-out);
+}
+
+.chat-panel .msg-text ul input[type="checkbox"]:checked,
+.chat-panel .msg-text ol input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.chat-panel .msg-text ul input[type="checkbox"]:checked::after,
+.chat-panel .msg-text ol input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 3.5px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--bg-deep);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.chat-panel .msg-text li:has(input[type="checkbox"]:checked) {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+/* Fix list items containing checkboxes */
+.chat-panel .msg-text ul:has(input[type="checkbox"]),
+.chat-panel .msg-text ol:has(input[type="checkbox"]) {
+  list-style: none;
+  padding-left: 0.4em;
+}
+
+/* ─── Keyboard / kbd ────────────────────── */
+
+.chat-panel .msg-text kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  box-shadow: 0 1px 0 var(--border-default);
+}
+
+/* ─── Superscript / Subscript ───────────── */
+
+.chat-panel .msg-text sup,
+.chat-panel .msg-text sub {
+  font-size: 0.78em;
+}
+
+.chat-panel .msg-text sup {
+  vertical-align: super;
+}
+
+.chat-panel .msg-text sub {
+  vertical-align: sub;
+}
+
+/* ─── Images (if allowed in future) ─────── */
+
+.chat-panel .msg-text img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+  margin: 6px 0;
 }
 
 /* ─── Tables ────────────────────────────── */
 
 .chat-panel .msg-text table {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   width: 100%;
-  margin: 8px 0;
-  font-size: 0.92em;
+  margin: 10px 0;
+  font-size: 0.9em;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-table);
 }
 
 .chat-panel .msg-text th,
 .chat-panel .msg-text td {
-  border: 1px solid var(--border-subtle);
-  padding: 6px 10px;
+  border-right: 1px solid var(--border-table);
+  border-bottom: 1px solid var(--border-table);
+  padding: 8px 12px;
   text-align: left;
+  vertical-align: top;
 }
 
-.chat-panel .msg-text th {
+.chat-panel .msg-text th:last-child,
+.chat-panel .msg-text td:last-child {
+  border-right: none;
+}
+
+.chat-panel .msg-text tr:last-child td {
+  border-bottom: none;
+}
+
+/* 表头 */
+.chat-panel .msg-text thead th {
   background: var(--bg-hover);
   font-weight: 600;
+  color: var(--text-primary);
+  font-size: 0.95em;
+  border-bottom: 2px solid var(--border-table);
+}
+
+/* 斑马纹 */
+.chat-panel .msg-text tbody tr:nth-child(even) {
+  background: rgba(127, 127, 127, 0.04);
+}
+
+/* 行悬停 */
+.chat-panel .msg-text tbody tr:hover {
+  background: rgba(212, 165, 116, 0.06);
+}
+
+/* 表体行无额外背景时保持透明 */
+.chat-panel .msg-text tbody tr:first-child td {
+  padding-top: 10px;
 }
 </style>

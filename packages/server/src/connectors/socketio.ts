@@ -151,26 +151,36 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         })
         .filter(Boolean) as AgentConfig[]
 
+      // P0-2 防护：过滤掉不存在于 agents 表或缺少 API key 的无效 Agent
+      const validAgents = agents.filter((a) => {
+        const exists = db.prepare('SELECT id FROM agents WHERE id = ?').get(a.id)
+        if (!exists) {
+          log.warn('agent not in DB, skipping dispatch', { agentId: a.id, agentName: a.name, traceId })
+          return false
+        }
+        return true
+      })
+
       // 将用户消息保存为向量记忆（异步不阻塞消息流）
-      saveMessageMemory(data.sessionId, data.content, msgId, agentIds).catch((err) => {
+      saveMessageMemory(data.sessionId, data.content, msgId, validAgents.map(a => a.id)).catch((err) => {
         log.warn('记忆存储失败', { error: err.message, traceId })
       })
 
       // 初始化 Agent 槽位并存储
-      for (const a of agents) {
+      for (const a of validAgents) {
         if (!getAgentState(a.id)) {
           initAgentSlot(a.id)
         }
       }
 
       // 4. 调度 + 执行
-      await dispatch(data.sessionId, msg, agents as AgentConfig[], traceId)
+      await dispatch(data.sessionId, msg, validAgents, traceId)
 
       // 获取需要立即执行的 Agent（被 @ 的，或广播下的所有 Agent）
       const mentions = data.mentions || []
       const targets = mentions.length > 0
-        ? agents.filter((a: any) => mentions.includes(a.name))
-        : agents
+        ? validAgents.filter((a: any) => mentions.includes(a.name))
+        : validAgents
 
       // 发送 MESSAGE_AGENT_STATUS: queued — 让前端知道消息已被 Agent 接收
       for (const a of targets) {
@@ -308,8 +318,23 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
   return io
 }
 
-/** 单 Agent 最大执行时间（毫秒），超时后强行释放槽位 */
-const AGENT_TIMEOUT_MS = 180_000 // 3 分钟
+/**
+ * Agent 执行超时机制（参照 clowder-ai 多层纵深设计）。
+ *
+ *   层级 1 — CLI idle timeout（cli-utils.ts）:
+ *     10 分钟无 stdout 输出 → SIGTERM → SIGKILL
+ *     每次输出重置 timer，持续产出的 agent 不会被误杀
+ *
+ *   层级 2 — Dispatch hard timeout（此处）:
+ *     15 分钟 AbortController 绝对上限
+ *     无论 agent 是否在输出，到时间必定终止，释放槽位
+ *
+ *   比例: hard ≈ 1.5x idle，idle 先触发，hard 是最终防线。
+ *   参考 clowder-ai: idle=30min / hard=60min（2x）。
+ *
+ * 可通过 AGENT_HARD_TIMEOUT_MS 环境变量覆盖（设为 0 禁用）。 */
+const AGENT_HARD_TIMEOUT_MS =
+  parseInt(process.env.AGENT_HARD_TIMEOUT_MS || '') || 15 * 60 * 1000 // 15 分钟
 
 /** Agent 间调度的最大递归深度（防止无限循环） */
 const MAX_AGENT_DISPATCH_DEPTH = 10
@@ -391,18 +416,21 @@ async function executeAgentsSerial(
     }
 
     let reply: { content: string; msgId: string } = { content: '', msgId: '' }
+    const abortController = new AbortController()
     try {
       // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
+      // AbortController 确保超时后子进程被 kill（P0-1 修复）
       reply = await Promise.race([
-        runAgentReply(io, sessionId, agent, triggerMsg, db, traceId),
+        runAgentReply(io, sessionId, agent, triggerMsg, db, traceId, abortController.signal),
         new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`执行超时 (${AGENT_TIMEOUT_MS / 1000}s)`)),
-            AGENT_TIMEOUT_MS,
-          ),
+          setTimeout(() => {
+            abortController.abort()
+            reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
+          }, AGENT_HARD_TIMEOUT_MS),
         ),
       ])
     } catch (err: any) {
+      abortController.abort() // 确保任何异常都 kill 子进程
       log.error('agent execution failed', {
         agentId: agent.id,
         agentName: agent.name,
@@ -503,6 +531,7 @@ async function runAgentReply(
   triggerMsg: { id: string; content: string; mentions: string[]; taskId?: string },
   db: ReturnType<typeof getDb>,
   traceId: string,
+  signal?: AbortSignal,
 ): Promise<{ content: string; msgId: string }> {
   const adapter = getAdapterForAgent(agent)
   const t0 = Date.now()
@@ -685,13 +714,17 @@ async function runAgentReply(
     status: 'replying',
   })
 
-  const stream = adapter.chatStream(llmMessages, { model: agent.llmModel })
+  const stream = adapter.chatStream(llmMessages, { model: agent.llmModel, signal })
 
   for await (const chunk of stream) {
-    // 检查是否被撤回
+    // 检查是否被撤回或超时取消
     if (retractionRequests.get(triggerMsg.id)) {
       log.info('agent reply aborted (retracted)', { traceId, agentId: agent.id })
       return { content: fullContent || '[消息已撤回]', msgId }
+    }
+    if (signal?.aborted) {
+      log.info('agent reply aborted (timeout)', { traceId, agentId: agent.id })
+      return { content: fullContent, msgId }
     }
     if (chunk.content) {
       fullContent += chunk.content
@@ -701,6 +734,12 @@ async function runAgentReply(
         content: fullContent,
       })
     }
+  }
+
+  // 超时取消时不写入消息也不更新状态（由 catch 块处理）
+  if (signal?.aborted) {
+    log.info('agent reply discarded after stream (timeout)', { traceId, agentId: agent.id })
+    return { content: fullContent, msgId }
   }
 
   const latencyMs = Date.now() - t0
@@ -757,6 +796,9 @@ async function runAgentReply(
     WHERE agent_id = ? AND status = 'running'
     ORDER BY started_at DESC LIMIT 1
   `).run(latencyMs, JSON.stringify(newPkgs), agent.id)
+
+  // P2: 清理 retractionRequests，防止内存泄漏
+  retractionRequests.delete(triggerMsg.id)
 
   return { content: fullContent, msgId }
 }

@@ -50,8 +50,15 @@ export class OpenAIAdapter implements LLMAdapter {
 
   async *chatStream(
     messages: LLMMessage[],
-    _options: ChatOptions,
+    options: ChatOptions,
   ): AsyncIterable<Chunk> {
+    const signal = options.signal
+
+    if (signal?.aborted) {
+      yield { content: '', done: true }
+      return
+    }
+
     if (!CODEX_BIN) {
       yield {
         content: 'Codex CLI 未安装。请运行: npm i -g @openai/codex',
@@ -98,6 +105,22 @@ export class OpenAIAdapter implements LLMAdapter {
       child.stdin!.end()
     }
 
+    // ─── Abort 处理 ───
+    const GRACE_MS = 5000
+    const onAbort = () => {
+      if (!child.killed && child.exitCode === null) {
+        log.warn('收到取消信号，发送 SIGTERM')
+        child.kill('SIGTERM')
+        setTimeout(() => {
+          if (!child.killed && child.exitCode === null) {
+            log.warn('SIGTERM 未响应，发送 SIGKILL')
+            child.kill('SIGKILL')
+          }
+        }, GRACE_MS)
+      }
+    }
+    signal?.addEventListener('abort', onAbort)
+
     const cleanupIdle = attachIdleTimeout(child)
     attachExitError(child, 'codex')
 
@@ -107,9 +130,11 @@ export class OpenAIAdapter implements LLMAdapter {
 
     try {
       for await (const chunk of parseCodexOutput(child)) {
+        if (signal?.aborted) break
         yield chunk
       }
     } finally {
+      signal?.removeEventListener('abort', onAbort)
       cleanupIdle()
     }
 
