@@ -80,7 +80,8 @@ async function main(): Promise<void> {
   })
 
   // 全局错误处理：记录完整错误并返回结构化响应
-  app.setErrorHandler((err, req, reply) => {
+  app.setErrorHandler((rawErr, req, reply) => {
+    const err = rawErr as any
     log.error('request error', {
       method: req.method,
       url: req.url,

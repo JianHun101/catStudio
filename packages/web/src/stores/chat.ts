@@ -80,7 +80,7 @@ export const useChatStore = defineStore('chat', () => {
 
     // 阶段 1：等待服务器启动（轮询 /api/health，500ms 间隔，最长 30s）
     // 测试环境跳过（无真实后端）
-    const isTest = typeof process !== 'undefined' && process.env?.NODE_ENV === 'test'
+    const isTest = import.meta.env?.MODE === 'test'
     if (typeof fetch === 'function' && !isTest) {
       const maxWait = 30_000
       const interval = 500
@@ -262,6 +262,10 @@ export const useChatStore = defineStore('chat', () => {
 
     socket.on(Events.NEW_MESSAGE, (msg: Message) => {
       messages.value.push(msg)
+      // Agent 完成回复后清除打字状态，停止闪烁光标
+      if (msg.role === 'agent' && msg.agentId) {
+        typingStates.value.delete(msg.agentId)
+      }
     })
 
     socket.on(Events.AGENT_TYPING, (data: { agentId: string; messageId: string; content: string }) => {
@@ -270,6 +274,10 @@ export const useChatStore = defineStore('chat', () => {
 
     socket.on(Events.AGENT_STATUS, (state: AgentRuntimeState) => {
       agentStates.value.set(state.agentId, state)
+      // Agent 空闲时清除打字状态（处理超时/中止等未发 NEW_MESSAGE 的情况）
+      if (state.slotState === 'idle') {
+        typingStates.value.delete(state.agentId)
+      }
     })
 
     socket.on('all-agent-states', (states: AgentRuntimeState[]) => {

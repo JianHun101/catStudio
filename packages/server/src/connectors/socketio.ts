@@ -26,6 +26,7 @@ import {
   npmUninstall,
 } from '../llm/git-utils.js'
 import type { AgentConfig, LLMMessage, Message } from '@cat-study/shared'
+import { parseMentionsFromReply } from './a2a-mentions.js'
 
 const log = createLogger('socketio')
 
@@ -319,33 +320,27 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 }
 
 /**
- * Agent 执行超时机制（参照 clowder-ai 多层纵深设计）。
+ * Agent 执行超时机制（多层纵深设计）。
  *
  *   层级 1 — CLI idle timeout（cli-utils.ts）:
- *     10 分钟无 stdout 输出 → SIGTERM → SIGKILL
+ *     20 分钟无 stdout 输出 → SIGTERM → SIGKILL
  *     每次输出重置 timer，持续产出的 agent 不会被误杀
  *
  *   层级 2 — Dispatch hard timeout（此处）:
- *     15 分钟 AbortController 绝对上限
+ *     30 分钟 AbortController 绝对上限
  *     无论 agent 是否在输出，到时间必定终止，释放槽位
  *
- *   比例: hard ≈ 1.5x idle，idle 先触发，hard 是最终防线。
- *   参考 clowder-ai: idle=30min / hard=60min（2x）。
+ *   比例: hard = 1.5x idle，idle 先触发，hard 是最终防线。
  *
  * 可通过 AGENT_HARD_TIMEOUT_MS 环境变量覆盖（设为 0 禁用）。 */
 const AGENT_HARD_TIMEOUT_MS =
-  parseInt(process.env.AGENT_HARD_TIMEOUT_MS || '') || 15 * 60 * 1000 // 15 分钟
+  parseInt(process.env.AGENT_HARD_TIMEOUT_MS || '') || 30 * 60 * 1000 // 30 分钟
 
 /** Agent 间调度的最大递归深度（防止无限循环） */
 const MAX_AGENT_DISPATCH_DEPTH = 10
 
 /** 单个 Agent 在同一 traceId 下被 @ 的最大次数 */
 const MAX_MENTIONS_PER_AGENT = 3
-
-/** 从回复文本中提取 @mention 的 Agent 名称 */
-function parseMentionsFromReply(content: string, agentNames: string[]): string[] {
-  return agentNames.filter((name) => content.includes(`@${name}`))
-}
 
 // ─── Serial Agent Execution ─────────────────────────
 
@@ -591,11 +586,12 @@ async function runAgentReply(
 
   // 过滤规则：
   // - Agent 自己发的消息 → 保留
+  // - 其他 Agent 的回复中 @mention 了当前 Agent → 保留（review 链关键）
   // - 用户消息 @ 了该 Agent → 保留
   // - 用户消息没有 @ 任何人（广播）→ 保留
   // - 用户消息 @ 了其他 Agent → 丢弃
   // - 广播模式下：保留所有 Agent 的回复
-  // - 非广播模式下：丢弃其他 Agent 的回复
+  // - 非广播模式下：丢弃本次执行无关的 Agent 回复
   const relevantMessages: any[] = []
 
   // 读取 Session 的广播模式
@@ -609,6 +605,11 @@ async function runAgentReply(
       if (isBroadcastMode) {
         relevantMessages.push(m)
       } else if (m.agent_id === agent.id) {
+        relevantMessages.push(m)
+      } else if (mentions.includes(agent.name)) {
+        // 其他 Agent 的回复中 @mention 了当前 Agent → 可见
+        // 这是 agent-to-agent review 链的核心：coder 的交接文档
+        // 中 @reviewer → reviewer 必须能看到该文档
         relevantMessages.push(m)
       }
       continue

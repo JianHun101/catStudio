@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
+import type { Message } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { renderMarkdown } from '@/utils/markdown'
@@ -583,6 +584,18 @@ function statusLabelZh(status: string): string {
   gap: 10px;
   padding: 4px 0;
   align-items: flex-start;
+  animation: msg-in 0.25s ease-out;
+}
+
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .message.user {
@@ -619,6 +632,7 @@ function statusLabelZh(status: string): string {
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 
 .message.user .msg-bubble {
@@ -989,6 +1003,33 @@ function statusLabelZh(status: string): string {
   box-shadow: 0 1px 0 var(--border-default);
 }
 
+/* ─── Definition Lists ──────────────────── */
+
+.chat-panel .msg-text dl {
+  margin: 6px 0;
+}
+
+.chat-panel .msg-text dt {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-top: 6px;
+}
+
+.chat-panel .msg-text dd {
+  margin-left: 1.2em;
+  color: var(--text-secondary);
+  font-size: 0.95em;
+}
+
+/* ─── Abbreviation ──────────────────────── */
+
+.chat-panel .msg-text abbr {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: help;
+  color: var(--text-secondary);
+}
+
 /* ─── Superscript / Subscript ───────────── */
 
 .chat-panel .msg-text sup,
@@ -1044,23 +1085,34 @@ function statusLabelZh(status: string): string {
   border-bottom: none;
 }
 
+/* 列对齐（GFM table 对齐语法 :--- :---: ---:） */
+.chat-panel .msg-text th[align="center"],
+.chat-panel .msg-text td[align="center"] {
+  text-align: center;
+}
+
+.chat-panel .msg-text th[align="right"],
+.chat-panel .msg-text td[align="right"] {
+  text-align: right;
+}
+
 /* 表头 */
 .chat-panel .msg-text thead th {
   background: var(--bg-hover);
   font-weight: 600;
   color: var(--text-primary);
   font-size: 0.95em;
-  border-bottom: 2px solid var(--border-table);
+  border-bottom: 2px solid var(--border-focus);
 }
 
 /* 斑马纹 */
 .chat-panel .msg-text tbody tr:nth-child(even) {
-  background: rgba(127, 127, 127, 0.04);
+  background: rgba(127, 127, 127, 0.08);
 }
 
 /* 行悬停 */
 .chat-panel .msg-text tbody tr:hover {
-  background: rgba(212, 165, 116, 0.06);
+  background: rgba(212, 165, 116, 0.12);
 }
 
 /* 表体行无额外背景时保持透明 */

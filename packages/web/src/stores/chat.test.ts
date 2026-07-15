@@ -61,6 +61,7 @@ const mockSession: SessionConfig = {
 const mockMessage: Message = {
   id: 'm1',
   sessionId: 's1',
+  agentId: null,
   role: 'user',
   content: '你好',
   mentions: ['店长'],
@@ -267,7 +268,7 @@ describe('chatStore', () => {
     it('NEW_MESSAGE appends to messages', () => {
       // Find the NEW_MESSAGE handler from bindEvents
       const newMsgHandler = mockOn.mock.calls.find(
-        (call: [string, Function]) => call[0] === Events.NEW_MESSAGE,
+        (call) => call[0] === Events.NEW_MESSAGE,
       )?.[1] as ((msg: Message) => void) | undefined
 
       expect(newMsgHandler).toBeDefined()
@@ -277,7 +278,7 @@ describe('chatStore', () => {
 
     it('AGENT_TYPING sets typing state', () => {
       const handler = mockOn.mock.calls.find(
-        (call: [string, Function]) => call[0] === Events.AGENT_TYPING,
+        (call) => call[0] === Events.AGENT_TYPING,
       )?.[1] as ((data: any) => void) | undefined
 
       handler!({ agentId: 'a1', messageId: 'm1', content: 'hello...' })
@@ -290,7 +291,7 @@ describe('chatStore', () => {
 
     it('AGENT_STATUS updates agent state map', () => {
       const handler = mockOn.mock.calls.find(
-        (call: [string, Function]) => call[0] === Events.AGENT_STATUS,
+        (call) => call[0] === Events.AGENT_STATUS,
       )?.[1] as ((data: any) => void) | undefined
 
       handler!({ agentId: 'a1', status: 'busy', sessionId: 's1', queueLength: 0 })
@@ -302,7 +303,7 @@ describe('chatStore', () => {
       store.activeSessionId = 's1'
 
       const handler = mockOn.mock.calls.find(
-        (call: [string, Function]) => call[0] === Events.SESSION_DELETED,
+        (call) => call[0] === Events.SESSION_DELETED,
       )?.[1] as ((data: any) => void) | undefined
 
       handler!({ sessionId: 's1' })

@@ -20,7 +20,7 @@
       /* Borders */
       --border-subtle:  #292420;  /* 隐式分隔 */
       --border-default: #3a332c;  /* 卡片边框 */
-      --border-table:   #4a3f35;  /* 表格边框 — 比 default 稍暖，在深色背景上可见 */
+      --border-table:   #5c4a3b;  /* 表格边框 — 暖棕色，在深色背景上清晰可见 */
       --border-focus:   #b08968;  /* 聚焦 / 强调边框 */
 
       /* Text */
@@ -106,7 +106,7 @@
     }
 
     ::-webkit-scrollbar-thumb {
-      background: var(--border-default);
+      background: var(--border-table);
       border-radius: 3px;
     }
 
@@ -121,6 +121,21 @@
     ::selection {
       background: var(--accent-soft);
       color: var(--accent-hover);
+    }
+
+    /* ═══════════════════════════════════════════════
+       Focus visible (accessibility)
+       ═══════════════════════════════════════════════ */
+
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 2px;
+    }
+
+    /* 隐藏鼠标点击时的 focus 环，仅键盘导航时显示 */
+    :focus:not(:focus-visible) {
+      outline: none;
     }
   </style>
 </head>

@@ -31,6 +31,7 @@ describe('dispatch', () => {
   const makeMessage = (overrides?: Partial<Message>): Message => ({
     id: 'msg-1',
     sessionId: 'session-1',
+    agentId: null,
     role: 'user',
     content: '你好',
     mentions: [],

@@ -214,11 +214,11 @@ export async function* parseCodexOutput(
 
 // ─── Child Process Helpers ────────────────────────────────
 
-/** CLI 空闲超时：10 分钟无 stdout/stderr 输出视为挂死。
- *  参照 clowder-ai 的 CLI 进程超时（30min），CatStudy 任务更轻量，
- *  使用 10min + 按输出重置 timer 的设计。
+/** CLI 空闲超时：20 分钟无 stdout/stderr 输出视为挂死。
+ *  CatStudy 以 CLI 子进程为主力，按输出重置 timer，
+ *  持续产出内容的进程不会被误杀，只有真正无输出的进程才会超时终止。
  *  环境变量 CLI_IDLE_TIMEOUT_MS 可覆盖（设为 0 禁用）。 */
-const CLI_IDLE_TIMEOUT_MS = parseInt(process.env.CLI_IDLE_TIMEOUT_MS || '') || 10 * 60 * 1000
+const CLI_IDLE_TIMEOUT_MS = parseInt(process.env.CLI_IDLE_TIMEOUT_MS || '') || 20 * 60 * 1000
 /** SIGTERM → SIGKILL 的等待间隔 */
 const GRACE_MS = 5000
 

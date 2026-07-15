@@ -48,7 +48,7 @@ export class DeepSeekAdapter implements LLMAdapter {
     }
 
     const controller = new AbortController()
-    const timeoutMs = options.timeoutMs || 120_000
+    const timeoutMs = options.timeoutMs || 300_000 // 5 分钟，兼容推理模型思考时间
 
     // 外部信号：转发 abort 事件到内部 controller
     const onExternalAbort = () => controller.abort()
