@@ -454,6 +454,11 @@ async function executeAgentsSerial(
     const mentionedNames = parseMentionsFromReply(reply.content, sessionAgentNames)
       .filter((name) => name !== agent.name) // 排除自己 @ 自己
     if (mentionedNames.length > 0) {
+      // 将解析出的 mentions 写回 DB，确保后续 Agent 构建上下文时
+      // 能通过 mentions.includes(agent.name) 过滤规则看到本消息
+      db.prepare('UPDATE messages SET mentions = ? WHERE id = ?')
+        .run(JSON.stringify(mentionedNames), reply.msgId)
+
       log.info('agent-to-agent dispatch', {
         traceId,
         fromAgent: agent.name,
