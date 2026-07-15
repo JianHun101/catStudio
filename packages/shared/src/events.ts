@@ -31,6 +31,9 @@ export const Events = {
 
   // Agent 执行状态（每条消息对应的 Agent 状态）
   MESSAGE_AGENT_STATUS: 'message-agent-status',
+
+  // 服务器 → 客户端：消息元数据更新（如 mentions 在后解析后补发）
+  MESSAGE_UPDATED:   'message-updated',
 } as const
 
 // ─── Redis Channel Patterns ─────────────────────────

@@ -41,8 +41,8 @@ for (const port of PORTS) {
       if (pid && !killed.has(pid)) {
         killed.add(pid)
         try {
-          execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' })
-          console.log(`  port ${port}: killed PID ${pid}`)
+          execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' })
+          console.log(`  port ${port}: killed PID ${pid} (tree)`)
         } catch {
           console.log(`  port ${port}: PID ${pid} 无法终止`)
         }

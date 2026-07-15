@@ -11,6 +11,7 @@ import { spawn, execSync, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import path from 'node:path'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import type { Chunk, LLMMessage } from '@cat-study/shared'
 import { createLogger } from '../logger.js'
 
@@ -270,16 +271,70 @@ export function attachIdleTimeout(child: ChildProcess): () => void {
  * 在子进程退出时报错。
  */
 export function attachExitError(child: ChildProcess, label: string): void {
-  child.on('close', (code) => {
+  child.on('close', (code, signal) => {
     if (code !== 0 && code !== null) {
-      log.error(`${label} 退出`, { exitCode: code })
+      log.error(`${label} 退出`, { exitCode: code, signal })
+    } else {
+      log.info(`${label} 正常退出`, { exitCode: code, signal })
     }
   })
 
   child.stderr?.on('data', (data: Buffer) => {
-    const text = data.toString()
+    const text = data.toString().trim()
+    if (!text) return
+    log.debug(`${label} stderr`, { text: text.slice(0, 500) })
     if (!text.includes('Warning') && !text.includes('info')) {
-      log.error(`${label} stderr`, { text: text.trim() })
+      log.error(`${label} stderr`, { text: text.slice(0, 500) })
     }
   })
+}
+
+// ─── Supervised Spawn ─────────────────────────────────────
+
+/** Supervisor 脚本路径（.mjs，与 cli-utils.ts 同目录） */
+const SUPERVISOR_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'cli-supervisor.mjs',
+)
+
+/**
+ * 用 CLI Supervisor 包装 spawn，防止父进程被强杀时 CLI 子进程变孤儿。
+ *
+ * 包装方式: server → supervisor.mjs → CLI (Claude Code / Codex)
+ * Supervisor 每 1 秒检查父进程是否存活：
+ *   父进程死了 → 立即 SIGTERM → 3s → SIGKILL
+ *
+ * @returns supervisor 的 ChildProcess 引用（用于 kill / 监控）
+ */
+export function spawnSupervised(
+  bin: string,
+  args: string[],
+  opts: { env?: Record<string, string>; label: string },
+): ChildProcess {
+  if (!fs.existsSync(SUPERVISOR_PATH)) {
+    log.warn(`${opts.label} supervisor 脚本缺失，回退到直接 spawn`, { path: SUPERVISOR_PATH })
+    return spawn(bin, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: opts.env,
+    })
+  }
+
+  const child = spawn(process.execPath, [SUPERVISOR_PATH, '--', bin, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: false,
+    env: {
+      ...opts.env,
+      ...process.env,
+      CATSTUDY_SUPERVISOR_PARENT_PID: String(process.pid),
+    },
+  })
+
+  log.info(`${opts.label} supervisor 启动`, {
+    supervisorPid: child.pid,
+    bin,
+    parentPid: process.pid,
+  })
+
+  return child
 }

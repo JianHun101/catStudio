@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import type { Chunk, ChatOptions, LLMMessage } from '@cat-study/shared'
 import type { LLMAdapter } from './adapter.js'
 import {
@@ -6,6 +5,7 @@ import {
   messagesToPrompt,
   parseClaudeCodeOutput,
   attachIdleTimeout,
+  spawnSupervised,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
 
@@ -68,15 +68,14 @@ export class ClaudeAdapter implements LLMAdapter {
 
     log.info('启动 Claude Code CLI', { model: this.model })
 
-    const child = spawn(CLAUDE_BIN, [
+    const child = spawnSupervised(CLAUDE_BIN, [
       '-p', prompt,
       '--output-format', 'stream-json',
       '--verbose',
       '--permission-mode', 'bypassPermissions',
     ], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
       env,
+      label: 'claude',
     })
 
     // ─── Abort 处理：收到取消信号时 kill 子进程 ───

@@ -4,6 +4,9 @@
  * 直接启动 server + web 进程，不依赖 pnpm --parallel（避免 Windows shell 问题）。
  * 通过 node 直接执行 tsx / vite 的 JS 入口，无需 .cmd 文件。
  *
+ * Server 使用 tsx watch 模式：TypeScript 源文件变更时自动重启。
+ * Agent 修改代码 → tsx 检测变更 → 自动重启 → 加载新代码。
+ *
  * 用法: node scripts/dev.js  或  pnpm dev
  */
 
@@ -63,11 +66,11 @@ function killAll() {
   children.clear()
 }
 
-// ─── 启动 Server ─────────────────────────────────
+// ─── 启动 Server（tsx watch 模式） ─────────────────
 
 const serverChild = spawn(
   process.execPath,
-  [TSX_CLI, 'packages/server/src/index.ts'],
+  [TSX_CLI, 'watch', 'packages/server/src/index.ts'],
   {
     cwd: ROOT,
     stdio: 'inherit',

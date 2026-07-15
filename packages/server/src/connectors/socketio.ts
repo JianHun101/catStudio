@@ -459,6 +459,13 @@ async function executeAgentsSerial(
       db.prepare('UPDATE messages SET mentions = ? WHERE id = ?')
         .run(JSON.stringify(mentionedNames), reply.msgId)
 
+      // 通知前端更新该消息的 mentions（因为在 runAgentReply 发送
+      // NEW_MESSAGE 时 mentions 尚未解析，前端拿到的 mentions 为空）
+      io.to(`session:${sessionId}`).emit(Events.MESSAGE_UPDATED, {
+        messageId: reply.msgId,
+        mentions: mentionedNames,
+      })
+
       log.info('agent-to-agent dispatch', {
         traceId,
         fromAgent: agent.name,

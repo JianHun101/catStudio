@@ -30,6 +30,26 @@ async function main(): Promise<void> {
   initDb()
   log.info('database ready')
 
+  // 1.5 启动时修复：将上一次异常退出遗留的 running 状态标记为 failed
+  //     （参照 clowder-ai StartupReconciler）
+  const db0 = getDb()
+  const stuckLogs = db0.prepare(
+    "SELECT id, agent_id FROM execution_logs WHERE status = 'running'",
+  ).all() as any[]
+  if (stuckLogs.length > 0) {
+    db0.prepare(`
+      UPDATE execution_logs
+      SET status = 'failed',
+          ended_at = datetime('now'),
+          error_message = 'server_restart'
+      WHERE status = 'running'
+    `).run()
+    log.warn('启动时修复 stuck execution_logs', {
+      count: stuckLogs.length,
+      ids: stuckLogs.map((r: any) => r.id),
+    })
+  }
+
   // 2. 首次启动自动初始化种子数据（Agents 表为空时）
   const db = getDb()
   const agentCount = (db.prepare('SELECT COUNT(*) as cnt FROM agents').get() as any).cnt

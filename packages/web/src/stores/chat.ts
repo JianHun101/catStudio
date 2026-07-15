@@ -268,6 +268,14 @@ export const useChatStore = defineStore('chat', () => {
       }
     })
 
+    // Agent 回复中的 @mentions 在消息发送后才解析，通过此事件补发
+    socket.on(Events.MESSAGE_UPDATED, (data: { messageId: string; mentions: string[] }) => {
+      const msg = messages.value.find((m) => m.id === data.messageId)
+      if (msg) {
+        msg.mentions = data.mentions
+      }
+    })
+
     socket.on(Events.AGENT_TYPING, (data: { agentId: string; messageId: string; content: string }) => {
       typingStates.value.set(data.agentId, data)
     })

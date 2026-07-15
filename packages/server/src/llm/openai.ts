@@ -8,6 +8,8 @@ import {
   ensureProxy,
   attachIdleTimeout,
   attachExitError,
+  // Codex 通过 stdin 传 prompt，supervisor 暂不支持 stdin 转发
+  // spawnSupervised 用于 Claude 适配器（-p 参数传 prompt）
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
 
