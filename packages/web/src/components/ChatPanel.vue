@@ -173,6 +173,38 @@ function statusLabelZh(status: string): string {
     default: return status
   }
 }
+
+// ─── 思考块解析 ────────────────────────────
+
+interface ThinkingSegment {
+  kind: 'text' | 'thinking'
+  content: string
+}
+
+/** 把含 [思考] 标记的流式内容拆成文本段和思考段 */
+function parseThinkingBlocks(content: string): ThinkingSegment[] {
+  if (!content) return []
+  const segments: ThinkingSegment[] = []
+  const regex = /(\[思考\] [\s\S]*?)(?=\[思考\] |$)/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = regex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      const textBefore = content.slice(lastIndex, match.index).trim()
+      if (textBefore) segments.push({ kind: 'text', content: textBefore })
+    }
+    segments.push({ kind: 'thinking', content: match[1].replace(/^\[思考\] /, '') })
+    lastIndex = match.index + match[0].length
+  }
+
+  if (lastIndex < content.length) {
+    const remaining = content.slice(lastIndex).trim()
+    if (remaining) segments.push({ kind: 'text', content: remaining })
+  }
+
+  return segments
+}
 </script>
 
 <template>
@@ -268,13 +300,36 @@ function statusLabelZh(status: string): string {
             </button>
           </div>
 
-          <!-- Typing cursor -->
-          <span
-            v-if="store.typingStates.get(msg.agentId || '')"
-            class="typing-cursor"
-          >|</span>
         </div>
       </TransitionGroup>
+
+      <!-- Streaming agent reply (live preview while agent is typing) -->
+      <div
+        v-for="[agentId, typing] in store.typingStates"
+        :key="'streaming-' + agentId"
+        class="message agent streaming"
+      >
+        <div class="msg-avatar">{{ avatarFor('agent', agentId) }}</div>
+        <div class="msg-body">
+          <div class="msg-sender">{{ senderName(agentId) }}</div>
+          <div class="msg-bubble">
+            <!-- 文本段：正常渲染 markdown -->
+            <template v-for="(seg, si) in parseThinkingBlocks(typing.content)" :key="si">
+              <div v-if="seg.kind === 'text'" class="msg-text" v-html="renderMarkdown(seg.content)"></div>
+              <!-- 思考段：折叠展示 -->
+              <details v-else class="thinking-block" :open="false">
+                <summary class="thinking-summary">
+                  <span class="thinking-icon">💭</span>
+                  <span class="thinking-label">思考过程</span>
+                  <span class="thinking-chevron">▶</span>
+                </summary>
+                <div class="thinking-content" v-html="renderMarkdown(seg.content)"></div>
+              </details>
+            </template>
+            <span class="typing-cursor inline">|</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Input -->
@@ -675,9 +730,77 @@ function statusLabelZh(status: string): string {
   animation: blink 1s step-end infinite;
   margin-top: 12px;
 }
+.typing-cursor.inline {
+  margin-top: 4px;
+  display: inline-block;
+}
 
 @keyframes blink {
   50% { opacity: 0; }
+}
+
+/* ─── Streaming Message ──────────────────── */
+
+.message.streaming .msg-bubble {
+  border-style: dashed;
+  opacity: 0.92;
+}
+
+/* ─── Thinking Block (collapsible) ────────── */
+
+.thinking-block {
+  margin: 6px 0;
+  border: 1px solid rgba(180, 160, 140, 0.25);
+  border-radius: var(--radius-sm);
+  background: rgba(180, 160, 140, 0.06);
+  overflow: hidden;
+}
+
+.thinking-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: background var(--ease-in);
+  list-style: none; /* hide default <details> marker */
+}
+.thinking-summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-summary:hover {
+  background: rgba(180, 160, 140, 0.1);
+}
+
+.thinking-icon {
+  font-size: 14px;
+}
+
+.thinking-label {
+  flex: 1;
+  font-weight: 500;
+}
+
+.thinking-chevron {
+  font-size: 10px;
+  transition: transform var(--ease-out);
+  opacity: 0.6;
+}
+
+.thinking-block[open] .thinking-chevron {
+  transform: rotate(90deg);
+}
+
+.thinking-content {
+  padding: 6px 10px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  border-top: 1px solid rgba(180, 160, 140, 0.15);
 }
 
 /* ─── Input Area ────────────────────────── */

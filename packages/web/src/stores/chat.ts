@@ -286,7 +286,7 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(Events.AGENT_STATUS, (state: AgentRuntimeState) => {
       agentStates.value.set(state.agentId, state)
       // Agent 空闲时清除打字状态（处理超时/中止等未发 NEW_MESSAGE 的情况）
-      if (state.slotState === 'idle') {
+      if (state.status === 'idle') {
         typingStates.value.delete(state.agentId)
       }
     })

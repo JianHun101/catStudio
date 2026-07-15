@@ -112,4 +112,6 @@ export interface ChatOptions {
 export interface Chunk {
   content: string
   done: boolean
+  /** 区分文本内容和思考过程，思考内容只用于前端流式展示，不存入 DB */
+  kind?: 'text' | 'thinking'
 }

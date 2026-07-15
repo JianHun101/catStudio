@@ -180,11 +180,11 @@ export async function* parseClaudeCodeOutput(
       if (event.type === 'assistant' && event.message?.content) {
         for (const block of event.message.content) {
           if (block.type === 'text' && typeof block.text === 'string') {
-            yield { content: block.text, done: false }
+            yield { content: block.text, done: false, kind: 'text' }
           }
-          // 产出思考过程，让前端看到实时进度
+          // 产出思考过程，让前端看到实时进度（但不存入 DB，不参与上下文）
           if (block.type === 'thinking' && typeof block.thinking === 'string') {
-            yield { content: `[思考] ${block.thinking}`, done: false }
+            yield { content: `[思考] ${block.thinking}`, done: false, kind: 'thinking' }
           }
         }
       }

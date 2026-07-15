@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { JSDOM } from 'jsdom'
 import createDOMPurify from 'dompurify'
+import type { WindowLike } from 'dompurify'
 
 /**
  * Tests for renderMarkdown's DOMPurify config.
@@ -29,7 +30,7 @@ const ALLOWED_TAGS = [
 const ALLOWED_ATTR = ['href', 'title', 'target', 'rel', 'class', 'align']
 
 function makePurifier() {
-  const window = new JSDOM('').window as unknown as Window
+  const window = new JSDOM('').window as unknown as WindowLike
   return createDOMPurify(window)
 }
 

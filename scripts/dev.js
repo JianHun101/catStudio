@@ -84,8 +84,23 @@ serverChild.on('error', (err) => {
 
 children.add(serverChild)
 
-// 给 server 一点时间初始化，再启动 web
-await new Promise((r) => setTimeout(r, 500))
+// 轮询等待 server 就绪，再启动 web（固定 500ms 不够，尤其是冷启动）
+const PORT = parseInt(process.env.PORT || '3200', 10)
+const HEALTH_URL = `http://127.0.0.1:${PORT}/api/health`
+
+for (let i = 0; i < 60; i++) {
+  try {
+    const res = await fetch(HEALTH_URL)
+    if (res.ok) {
+      console.log(`[dev] server ready after ${i}s`)
+      break
+    }
+  } catch {
+    // 还没就绪，继续等
+  }
+  if (i === 0) console.log('[dev] waiting for server...')
+  await new Promise((r) => setTimeout(r, 1000))
+}
 
 // ─── 启动 Web (Vite) ─────────────────────────────
 // Vite 需要在 web 包目录下运行（index.html 和 vite.config.ts 都在那里）

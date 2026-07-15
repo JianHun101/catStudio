@@ -1,22 +1,16 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'fs'
-import { resolve } from 'path'
+import source from './ChatPanel.vue?raw'
 
 /**
  * Verify ChatPanel.vue's TransitionGroup animation setup.
  *
- * These are static verification tests — they read the SFC source to confirm
- * the expected patterns exist. This provides regression protection against
- * accidental removal of TransitionGroup or transition CSS classes.
+ * These are static verification tests — they read the SFC source via Vite's
+ * `?raw` import to confirm the expected patterns exist. This provides
+ * regression protection against accidental removal of TransitionGroup or
+ * transition CSS classes.
  */
 
-function readComponentSource(): string {
-  return readFileSync(resolve(__dirname, 'ChatPanel.vue'), 'utf-8')
-}
-
 describe('ChatPanel animation setup', () => {
-  const source = readComponentSource()
-
   it('uses TransitionGroup with name="msg" in template', () => {
     expect(source).toMatch(/TransitionGroup\s+name="msg"/)
   })

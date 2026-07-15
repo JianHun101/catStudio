@@ -707,7 +707,8 @@ async function runAgentReply(
   }
 
   // 流式生成回复
-  let fullContent = ''
+  let fullContent = ''        // 仅文本内容 — 存入 DB，参与 agent-to-agent 上下文
+  let displayContent = ''     // 文本 + 思考 — 流式推送给前端
   const msgId = uuid()
 
   // 记录执行前的包依赖快照
@@ -741,11 +742,15 @@ async function runAgentReply(
       return { content: fullContent, msgId }
     }
     if (chunk.content) {
-      fullContent += chunk.content
+      displayContent += chunk.content
+      // 思考内容只流式展示，不进入存储和上下文
+      if (chunk.kind !== 'thinking') {
+        fullContent += chunk.content
+      }
       io.to(`session:${sessionId}`).emit(Events.AGENT_TYPING, {
         agentId: agent.id,
         messageId: msgId,
-        content: fullContent,
+        content: displayContent,
       })
     }
   }
