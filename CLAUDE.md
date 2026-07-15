@@ -43,7 +43,7 @@ scripts/           →  dev.js (process launcher), seed.js (seed wrapper), stop.
 .claude/           →  settings.local.json (permissions) + custom skills (session-summary)
 .agents/           →  Third-party skills from mattpocock/skills (locked via skills-lock.json)
 docs/adr/          →  Architecture Decision Records (6 files)
-docs/sessions/     →  Session summaries (cat-study-*-summary.md, 8 files)
+docs/sessions/     →  Session summaries (cat-study-*-summary.md, 17 files)
 ```
 
 `pnpm-workspace.yaml` allows native builds for `better-sqlite3`, `sqlite-vec`, `esbuild`, `vue-demi`, `protobufjs`, `sharp`, `onnxruntime-node`.
@@ -71,7 +71,7 @@ User types "@店长 你好" in web UI
   → connector writes message to SQLite
   → broadcast to session room
   → dispatch() checks each mentioned agent's slot
-    → idle → executeAgent() → slot becomes 'thinking' (LLM reasoning) → 'busy' (generating reply)
+    → idle → executeAgent() → slot becomes 'busy'（前端显示 'thinking' 推理状态后切换为 'busy'）
     → not idle → FIFO queue (waiting for slot to release)
   → runAgentReply():
     1. Build context: filter messages relevant to THIS agent
@@ -95,7 +95,7 @@ This is more reliable than telling the LLM "don't speak for others."
 
 ### Dispatch: single-slot FIFO
 
-Each agent has exactly one execution slot (`agentSlots` Map, in-memory). @mention multiple agents → they execute serially in order, so later agents see earlier agents' replies (like real group chat). Max execution time is 180s per agent (via `Promise.race` timeout). Slot state is published to Redis `agent:{name}:status` channel when available.
+Each agent has exactly one execution slot (`agentSlots` Map, in-memory). @mention multiple agents → they execute serially in order, so later agents see earlier agents' replies (like real group chat). Max execution time is 30 minutes per agent via two-layer timeout: CLI idle timeout (20 min, in `cli-utils.ts`) + dispatch hard timeout via `AbortController` (configurable via `AGENT_HARD_TIMEOUT_MS`, default 30 min). Slot state is published to Redis `agent:{name}:status` channel when available.
 
 ### LLM adapter pattern
 

@@ -1,6 +1,6 @@
 # CatStudy — 猫咖多 Agent 对话系统
 
-面向终端用户的本地多 Agent 对话平台。用户创建 Session（会话），与一组具有持久身份和长期记忆的拟人化 AI Agent（猫咪角色）进行群聊。支持 Web 界面和 QQ Bot 等多渠道接入。
+面向终端用户的本地多 Agent 对话平台。用户创建 Session（会话），与一组具有持久身份和长期记忆的拟人化 AI Agent（猫咪角色）进行群聊。
 
 ## 前置依赖
 
@@ -8,7 +8,7 @@
 |------|----------|------|--------|
 | [Node.js](https://nodejs.org/) | >= 20 | 运行时 | ✅ |
 | [pnpm](https://pnpm.io/) | >= 8 | 包管理 + monorepo | ✅ |
-| [Redis](https://redis.io/) | >= 7.0 | 消息总线 Pub/Sub | ⚠️ 可选（单机 Web 场景可降级为内存总线） |
+| [Redis](https://redis.io/) | >= 7.0 | Agent 状态跨进程同步 | ⚠️ 可选（单机 Web 场景可降级为内存模式） |
 | Claude Code CLI | 最新 | `claude` provider 适配器 | ❌ 仅使用该 provider 时需要 |
 | Codex CLI + codex-proxy | 最新 | `openai` provider 适配器 | ❌ 仅使用该 provider 时需要 |
 
@@ -94,7 +94,8 @@ catStudy/
 │   │       │   ├── index.ts    # 记忆存储 + 检索 + 去重
 │   │       │   └── embedding.ts# HuggingFace 本地嵌入模型加载
 │   │       ├── connectors/
-│   │       │   └── socketio.ts # Socket.IO 消息收发 + 上下文过滤
+│   │       │   ├── socketio.ts    # Socket.IO 消息收发 + 上下文过滤
+│   │       │   └── a2a-mentions.ts# Agent 间 @mention 解析（行首匹配 + 代码块剥离）
 │   │       ├── routes/
 │   │       │   ├── agents.ts   # Agent CRUD REST API
 │   │       │   └── sessions.ts # Session CRUD + 广播切换 + 消息清空
@@ -140,7 +141,7 @@ npx tsx packages/server/src/seed.ts           # upsert 模式：已存在则更�
 npx tsx packages/server/src/seed.ts --reset   # 重置模式：清空所有数据后重建
 
 # ─── 测试 ──────────────────────────────────
-pnpm test             # 运行所有测试 (当前 168 条)
+pnpm test             # 运行所有测试 (当前 208 条)
 pnpm test:watch       # watch 模式，文件变更自动运行
 pnpm test:coverage    # 运行 + 覆盖率报告
 pnpm test:server      # 仅 server 包测试
@@ -216,7 +217,7 @@ curl -X DELETE http://localhost:3200/api/sessions/<session-id>/messages
 ### 运行测试
 
 ```bash
-pnpm test             # 全量：168 条（shared 28 + server 76 + web 64）
+pnpm test             # 全量：208 条（shared 29 + server 118 + web 61）
 pnpm test:server      # 仅服务端
 pnpm test -- --reporter=verbose  # 逐条显示
 ```
@@ -230,7 +231,7 @@ pnpm test -- --reporter=verbose  # 逐条显示
 | 后端框架 | Fastify 5 |
 | 实时通信 | Socket.IO 4 |
 | 数据库 | SQLite (better-sqlite3 + WAL + sqlite-vec 向量扩展) |
-| 消息中间件 | Redis 7 (ioredis) |
+| 消息中间件 | Redis 7 (ioredis，可选) |
 | LLM 推理 | DeepSeek HTTP API / Claude Code CLI / Codex CLI |
 | 嵌入模型 | HuggingFace Transformers (Xenova/bge-small-zh-v1.5, 512 维) |
 | 前端框架 | Vue 3 + Vite + Pinia |

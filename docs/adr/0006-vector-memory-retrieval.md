@@ -1,6 +1,8 @@
 # ADR 0006: 向量检索记忆系统
 
-Agent 记忆采用 embedding 向量检索而非全文搜索（FTS5）或纯摘要方案。用户每次发言后触发检索：消息 → embedding 向量 → 余弦相似度搜索 `memories` 表 → top-K 相关记忆注入推理 prompt。
+> **实现现状**：Embedding 实际使用本地 Transformers.js 模型（`Xenova/bge-small-zh-v1.5`，512 维），非外部 API。模型可通过 `MEMORY_EMBEDDING_MODEL` 环境变量更换，通过 `HF_ENDPOINT` 切换下载镜像。检索时机为 Agent 被调度回复时（`buildMemoryContext()`），非用户发言后立即触发。
+
+Agent 记忆采用 embedding 向量检索而非全文搜索（FTS5）或纯摘要方案。Agent 被调度回复时触发检索：消息 → embedding 向量 → 余弦相似度搜索 `memories` 表 → top-K 相关记忆注入推理 prompt。
 
 ## Considered Options
 
@@ -11,4 +13,4 @@ Agent 记忆采用 embedding 向量检索而非全文搜索（FTS5）或纯摘�
 ## Consequences
 
 - 引入 sqlite-vec 原生扩展——需要在安装时编译 Node.js 原生模块。
-- Embedding 供应商全局独立配置，与 LLM 供应商解耦。确保所有记忆向量维度一致，跨 Agent 记忆可检索。
+- Embedding 由本地模型在进程内生成（Transformers.js），与 LLM 供应商解耦。确保所有记忆向量维度一致（512 维），跨 Agent 记忆可检索。

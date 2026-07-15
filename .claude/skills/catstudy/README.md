@@ -38,7 +38,7 @@ catstudy/
 | 猫数量 | 3 只真正的 Claude Code agent | 1 只（店长），2 只 app 角色 |
 | 审查方式 | 跨猫互审（Ragdoll ↔ Maine Coon ↔ Siamese） | 不同 Claude 模型的 sub-agent 模拟跨模型审查 |
 | 技能位置 | `cat-cafe-skills/` → `~/.claude/skills/`（符号链接） | `.claude/skills/catstudy/`（项目内） |
-| manifest | `manifest.yaml`（1324 行路由配置） | 无（规模不需要） |
+| manifest | `manifest.yaml`（1324 行路由配置） | 轻量 manifest（~92 行，仅 4 技能 + pipeline + 铁律） |
 | SOP 定义 | `sop-definitions/development.yaml` | 无（规模不需要） |
 | merge-gate | 完整 PR 流程 + remote review | 简单合入（单猫开发无 PR 冲突） |
 

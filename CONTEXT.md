@@ -1,6 +1,6 @@
 # CatStudy — 猫咖多 Agent 对话系统
 
-面向终端用户的本地多 Agent 对话平台。用户创建会话，与一组具有持久身份和长期记忆的拟人化 Agent 进行群聊。支持 Web 界面和 QQ Bot 等多渠道接入。
+面向终端用户的本地多 Agent 对话平台。用户创建会话，与一组具有持久身份和长期记忆的拟人化 Agent 进行群聊。支持 Web 界面接入。
 
 ## Language
 
@@ -16,7 +16,7 @@ _Avoid_: 聊天室, 房间, 线程
 
 ### Slot（槽位）
 
-Agent 的执行能力单元。每个 Agent 只有一个 Slot，同一时刻最多处理一件事。Slot 状态：`idle`（可接任务）、`thinking`（推理中）、`busy`（生成回复中）。忙时新请求进入 FIFO 队列。
+Agent 的执行能力单元。每个 Agent 只有一个 Slot，同一时刻最多处理一件事。Slot 状态：`idle`（可接任务）、`busy`（执行中）。忙时新请求进入 FIFO 队列。Agent 开始推理时，前端会先显示 `thinking` 状态（连接器层发送的展示事件，非槽位状态）。
 _Avoid_: 通道, 并发数
 
 ### Message（消息）
@@ -26,7 +26,7 @@ _Avoid_: 记录, 日志, 发言
 
 ### Memory（记忆）
 
-Agent 对过往对话的一条持久化记录，以嵌入向量的形式存储，支持语义相似度检索。每次用户发言后触发检索，匹配的记忆注入 Agent 的推理上下文。
+Agent 对过往对话的一条持久化记录，以嵌入向量的形式存储，支持语义相似度检索。每次 Agent 被调度回复时触发检索，匹配的记忆注入 Agent 的推理上下文。
 _Avoid_: 历史, 缓存, 上下文片段
 
 ### Embedding（嵌入向量）
@@ -46,12 +46,12 @@ _Avoid_: 待处理列表, 任务队列
 
 ### Connector（渠道适配器）
 
-连接外部消息平台和 CatStudy 消息总线的适配器。Web Connector 通过 Socket.IO 连接浏览器，QQ Connector 通过 Redis Pub/Sub 桥接 QQ 消息。Connector 只做消息格式转换和路由，不包含业务逻辑。
+连接外部消息平台和 CatStudy 消息总线的适配器。Web Connector 通过 Socket.IO 连接浏览器。Connector 只做消息格式转换和路由，不包含业务逻辑。未来可扩展 QQ 等渠道。
 _Avoid_: 插件, 桥接, 前端
 
 ### Message Bus（消息总线）
 
-以 Redis Pub/Sub 为中心的消息分发机制。三条频道：`session:{id}:messages`（消息流）、`session:{id}:agent:{name}`（调度指令）、`agent:{name}:status`（状态变更）。Connector 和 Agent 调度器订阅相关频道。
+消息分发机制。核心通过 Socket.IO 房间广播实现实时消息推送。Redis Pub/Sub 作为可选补充（`agent:{name}:status` 频道用于跨进程 Agent 状态同步），Redis 不可用时系统自动降级为内存模式。频道设计预留 `session:{id}:messages` 和 `session:{id}:agent:{name}` 用于未来多进程扩展。
 _Avoid_: 事件总线, 队列
 
 ### Execution Log（执行日志）

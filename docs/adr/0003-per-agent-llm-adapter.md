@@ -1,5 +1,7 @@
 # ADR 0003: 每 Agent 独立 LLM 适配器
 
+> **实现现状**：适配器接口实际为 `chatStream(messages: LLMMessage[], options: ChatOptions): AsyncIterable<Chunk>`（非 `chat` / `Message[]`），增加了 `readonly provider` 属性。`custom` provider 类型在 TypeScript 中定义但注册表未实现，运行时抛出 `Unsupported LLM provider`。Embedding 实际为本地 Transformers.js 模型（非外部 API），详见 ADR 0006。
+
 每个 Agent 独立配置 LLM 供应商（DeepSeek / Claude / GPT）和 API key。同一 Session 内不同 Agent 可用不同供应商——店长用 DeepSeek，吐槽猫用 Claude。采用适配器接口统一抽象：
 
 ```ts

@@ -1,5 +1,7 @@
 # ADR 0002: SQLite + Redis 双存储
 
+> **实现现状**：Redis 实际为可选——连接失败时静默降级（`getRedis()` 返回 `null`，各调用方静默跳过），未实现内存 Pub/Sub 兜底。系统核心消息分发通过 Socket.IO 房间广播完成。
+
 **Status**: accepted
 
 SQLite（better-sqlite3）做主持久化——Agent 配置、对话历史、记忆向量（sqlite-vec 扩展）。Redis（ioredis）做消息总线——Agent 间实时 Pub/Sub 通信和状态广播。

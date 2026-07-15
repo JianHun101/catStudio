@@ -1,5 +1,7 @@
 # ADR 0005: Redis Pub/Sub 消息总线
 
+> **实现现状**：Redis 实际为可选依赖（连接失败静默降级，见 `packages/server/src/db/redis.ts`）。三频道中仅 `agent:{name}:status` 被实际发布；`session:{id}:messages` 和 `session:{id}:agent:{name}` 频道已在 `shared/src/events.ts` 定义但未投产，预留未来多进程扩展。QQ Bot 适配器尚未实现。核心消息分发实际通过 Socket.IO 房间广播完成。
+
 多 Agent 实时通信使用 Redis Pub/Sub 而非纯 WebSocket 应用层广播。采用方案 A 的三频道设计：
 
 ```
@@ -18,5 +20,5 @@ Agent 数量少（~5-10 个），独立的 `agent:{name}:status` 频道方便后
 
 ## Consequences
 
-- Redis 成为系统运行的必要依赖（非可选）。
+- Redis 当前为可选依赖——连接失败时系统自动降级为纯 Socket.IO 模式。
 - Socket.IO 负责 Server ↔ Web 前端的实时通道，Redis Pub/Sub 负责 Server 内部和跨进程通道。两者分工明确不重叠。
