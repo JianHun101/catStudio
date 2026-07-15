@@ -11,6 +11,7 @@ export const AgentConfigSchema = z.object({
   llmModel: z.string(),
   llmApiKey: z.string(),
   llmBaseUrl: z.string().optional(),
+  effortLevel: z.enum(['low', 'medium', 'high', 'max']).optional(),
 })
 
 export const AgentCreateSchema = AgentConfigSchema.omit({ id: true })

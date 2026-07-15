@@ -15,6 +15,7 @@ interface ClaudeConfig {
   apiKey: string
   model: string
   baseUrl?: string
+  effortLevel?: string
 }
 
 /** Claude Code CLI 二进制路径（模块加载时解析） */
@@ -38,10 +39,12 @@ export class ClaudeAdapter implements LLMAdapter {
   readonly provider = 'claude'
   private apiKey: string
   private model: string
+  private effortLevel?: string
 
   constructor(config: ClaudeConfig) {
     this.apiKey = config.apiKey
     this.model = config.model
+    this.effortLevel = config.effortLevel
   }
 
   async *chatStream(
@@ -168,7 +171,7 @@ export class ClaudeAdapter implements LLMAdapter {
       ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'deepseek-v4-flash',
       CLAUDE_CODE_SUBAGENT_MODEL: process.env.CLAUDE_CODE_SUBAGENT_MODEL || 'deepseek-v4-flash',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-      CLAUDE_CODE_EFFORT_LEVEL: 'max',
+      CLAUDE_CODE_EFFORT_LEVEL: this.effortLevel || process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high',
     } as Record<string, string>
   }
 }

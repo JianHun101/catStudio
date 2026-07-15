@@ -142,6 +142,10 @@ export function initDb(): void {
       name: 'packages_installed on execution_logs',
       sql: `ALTER TABLE execution_logs ADD COLUMN packages_installed TEXT`,
     },
+    {
+      name: 'effort_level on agents',
+      sql: `ALTER TABLE agents ADD COLUMN effort_level TEXT`,
+    },
   ]
 
   for (const m of migrations) {

@@ -59,8 +59,8 @@ async function main(): Promise<void> {
     const agents = buildDemoAgents()
 
     const upsert = db.prepare(`
-      INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET
         avatar = excluded.avatar,
         system_prompt = excluded.system_prompt,
@@ -68,11 +68,12 @@ async function main(): Promise<void> {
         llm_model = excluded.llm_model,
         llm_api_key = excluded.llm_api_key,
         llm_base_url = excluded.llm_base_url,
+        effort_level = excluded.effort_level,
         updated_at = datetime('now')
     `)
 
     for (const a of agents) {
-      upsert.run(a.id, a.name, a.avatar, a.systemPrompt, a.llmProvider, a.llmModel, a.llmApiKey, a.llmBaseUrl)
+      upsert.run(a.id, a.name, a.avatar, a.systemPrompt, a.llmProvider, a.llmModel, a.llmApiKey, a.llmBaseUrl, a.effortLevel || null)
       console.log(`  ✅ ${a.avatar} ${a.name}`)
     }
 

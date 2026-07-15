@@ -21,6 +21,7 @@ export interface AgentConfig {
   llmModel: string                 // 'deepseek-v4-pro' | 'claude-sonnet-4-6' | ...
   llmApiKey: string
   llmBaseUrl?: string              // for custom providers
+  effortLevel?: 'low' | 'medium' | 'high' | 'max'  // Claude Code 推理深度
 }
 
 /** Agent 运行时状态（广播到前端） */

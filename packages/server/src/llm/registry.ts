@@ -11,7 +11,9 @@ const adapters = new Map<string, LLMAdapter>()
  * 按 apiKey 缓存，同一 key 复用同一适配器。
  */
 export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
-  const cacheKey = `${agent.llmProvider}:${agent.llmApiKey}`
+  const cacheKey = agent.llmProvider === 'claude'
+    ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}`
+    : `${agent.llmProvider}:${agent.llmApiKey}`
 
   if (adapters.has(cacheKey)) {
     return adapters.get(cacheKey)!
@@ -31,6 +33,7 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       adapter = new ClaudeAdapter({
         apiKey: agent.llmApiKey,
         model: agent.llmModel,
+        effortLevel: agent.effortLevel,
       })
       break
     case 'openai':

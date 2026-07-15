@@ -27,8 +27,8 @@ function seed(): void {
   // ── Upsert agents ────────────────────────────────────
 
   const upsert = db.prepare(`
-    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET
       avatar = excluded.avatar,
       system_prompt = excluded.system_prompt,
@@ -36,6 +36,7 @@ function seed(): void {
       llm_model = excluded.llm_model,
       llm_api_key = excluded.llm_api_key,
       llm_base_url = excluded.llm_base_url,
+      effort_level = excluded.effort_level,
       updated_at = datetime('now')
   `)
 
@@ -45,6 +46,7 @@ function seed(): void {
     const result = upsert.run(
       a.id, a.name, a.avatar, a.systemPrompt,
       a.llmProvider, a.llmModel, a.llmApiKey, a.llmBaseUrl,
+      a.effortLevel || null,
     )
     const verb = result.changes === 1 ? '✅' : '🔄'
     console.log(`  ${verb} ${a.avatar} ${a.name} (${a.id})`)

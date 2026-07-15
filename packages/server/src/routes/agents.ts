@@ -21,8 +21,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       db.prepare(`
-        INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         agent.name,
@@ -32,6 +32,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         agent.llmModel,
         agent.llmApiKey,
         agent.llmBaseUrl || null,
+        agent.effortLevel || null,
       )
 
       const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
@@ -82,6 +83,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       llmModel: 'llm_model',
       llmApiKey: 'llm_api_key',
       llmBaseUrl: 'llm_base_url',
+      effortLevel: 'effort_level',
     })) {
       if (body[key] !== undefined) {
         fields.push(`${col} = ?`)
@@ -124,5 +126,6 @@ function toAgentConfig(row: any) {
     llmModel: row.llm_model,
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
+    effortLevel: row.effort_level || undefined,
   }
 }

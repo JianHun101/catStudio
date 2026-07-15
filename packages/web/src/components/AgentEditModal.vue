@@ -15,6 +15,7 @@ const llmProvider = ref('claude')
 const llmModel = ref('deepseek-v4-pro')
 const llmApiKey = ref('')
 const llmBaseUrl = ref('')
+const llmEffortLevel = ref('high')
 const saving = ref(false)
 const deleting = ref(false)
 const deleteConfirm = ref(false)
@@ -29,6 +30,7 @@ watch(() => props.agent, (a) => {
     llmModel.value = a.llmModel
     llmApiKey.value = a.llmApiKey
     llmBaseUrl.value = a.llmBaseUrl || ''
+    llmEffortLevel.value = a.effortLevel || 'high'
     error.value = ''
     deleteConfirm.value = false
   }
@@ -56,6 +58,13 @@ const providerHint = computed(() => {
 
 const avatarOptions = ['🐱', '😺', '😼', '😻', '😾', '😿', '🙀', '🐈', '🦁', '🐯', '🐶', '🐰', '🐼', '🦊', '🐮']
 
+const effortOptions = [
+  { value: 'low', label: 'Low (最低推理深度)' },
+  { value: 'medium', label: 'Medium (中等)' },
+  { value: 'high', label: 'High (较高推理深度)' },
+  { value: 'max', label: 'Max (最高推理深度)' },
+]
+
 async function handleSave(): Promise<void> {
   if (!props.agent) return
   saving.value = true
@@ -69,6 +78,7 @@ async function handleSave(): Promise<void> {
       llmModel: llmModel.value,
       llmApiKey: llmApiKey.value,
       llmBaseUrl: llmBaseUrl.value || undefined,
+      effortLevel: llmEffortLevel.value,
     })
     emit('close')
   } catch (err: any) {
@@ -150,6 +160,16 @@ async function handleDelete(): Promise<void> {
             <label>模型</label>
             <input v-model="llmModel" type="text" class="input" placeholder="deepseek-v4-pro" />
           </div>
+        </div>
+
+        <div v-if="llmProvider === 'claude'" class="form-group">
+          <label>推理深度 (Effort)</label>
+          <select v-model="llmEffortLevel" class="input">
+            <option v-for="opt in effortOptions" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
+          </select>
+          <p class="provider-hint">控制 Claude Code 的推理 token 预算。High 适用于大多数场景，Max 推理最深入但耗时最长。</p>
         </div>
 
         <div class="form-group">

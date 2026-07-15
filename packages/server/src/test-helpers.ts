@@ -18,6 +18,7 @@ const SCHEMA_SQL = `
     llm_model TEXT NOT NULL DEFAULT 'deepseek-v4-pro',
     llm_api_key TEXT NOT NULL,
     llm_base_url TEXT,
+    effort_level TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );

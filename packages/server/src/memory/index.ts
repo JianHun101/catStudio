@@ -128,7 +128,7 @@ export async function saveMessageMemory(
 
   const insertMany = db.transaction((ids: string[]) => {
     for (const agentId of ids) {
-      insert.run(uuid(), agentId, content, blob, sourceMessageId, now)
+      insert.run(uuid(), agentId, cleanContent, blob, sourceMessageId, now)
     }
   })
 
@@ -137,7 +137,7 @@ export async function saveMessageMemory(
     log.debug('记忆已存储', {
       agentCount: agentsToStore.length,
       skippedCount: agentIds.length - agentsToStore.length,
-      contentLen: content.length,
+      contentLen: cleanContent.length,
       dim: embedding.length,
     })
   } catch (err: any) {
@@ -222,8 +222,13 @@ export async function buildMemoryContext(
   agentId: string,
   triggerContent: string,
 ): Promise<string> {
+  // 剥离 @mention 再检索，与 saveMessageMemory 存储时保持一致，
+  // 避免查询向量与存储向量处于不同语义空间导致召回质量下降。
+  const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
+  if (!cleanContent) return ''
+
   const topK = parseInt(process.env.MEMORY_TOP_K || '3', 10)
-  const memories = await searchMemories(agentId, triggerContent, topK)
+  const memories = await searchMemories(agentId, cleanContent, topK)
 
   if (memories.length === 0) return ''
 

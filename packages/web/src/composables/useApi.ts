@@ -52,6 +52,7 @@ export const api = {
     llmModel: string
     llmApiKey: string
     llmBaseUrl?: string
+    effortLevel?: string
   }) => request<any>('/agents', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -65,6 +66,7 @@ export const api = {
     llmModel: string
     llmApiKey: string
     llmBaseUrl: string
+    effortLevel: string
   }>) => request<any>(`/agents/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(data),

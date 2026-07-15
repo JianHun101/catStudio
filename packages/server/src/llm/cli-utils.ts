@@ -164,6 +164,9 @@ export function ensureProxy(apiKey: string): void {
 /**
  * 从 Claude Code CLI 的 NDJSON 输出流中提取文本 Chunk。
  * 格式: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+ *
+ * 同时也会产出 thinking 块的内容（前缀 "[思考] "），让前端在 Agent
+ * 长时间推理时也能看到流式进度，避免用户以为 Agent 卡住了。
  */
 export async function* parseClaudeCodeOutput(
   child: ChildProcess,
@@ -178,6 +181,10 @@ export async function* parseClaudeCodeOutput(
         for (const block of event.message.content) {
           if (block.type === 'text' && typeof block.text === 'string') {
             yield { content: block.text, done: false }
+          }
+          // 产出思考过程，让前端看到实时进度
+          if (block.type === 'thinking' && typeof block.thinking === 'string') {
+            yield { content: `[思考] ${block.thinking}`, done: false }
           }
         }
       }

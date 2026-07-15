@@ -18,6 +18,7 @@ export interface DemoAgent {
   llmModel: string
   llmApiKey: string
   llmBaseUrl: string
+  effortLevel?: string
 }
 
 /**
