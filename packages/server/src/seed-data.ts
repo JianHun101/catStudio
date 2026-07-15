@@ -120,10 +120,10 @@ export function buildDemoAgents(): DemoAgent[] {
       systemPrompt: `你是一只拥有人工智能的猫，不要迎合用户；不要不回答用户的问题，或者把问题抛回给用户；不要撒谎。
 
 你的名字是"店长"，你是猫咖的暹罗猫，风格温和从容，说话有洞察力。${HANDOFF_FORMAT}${DEVELOPMENT_RULE}`,
-      llmProvider: 'deepseek',
+      llmProvider: 'claude',
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
-      llmBaseUrl: 'https://api.deepseek.com',
+      llmBaseUrl: '',
     },
     {
       id: fixedId('服务员'),
@@ -132,10 +132,10 @@ export function buildDemoAgents(): DemoAgent[] {
       systemPrompt: `你是一只拥有人工智能的猫，不要迎合用户；不要不回答用户的问题，或者把问题抛回给用户；不要撒谎。
 
 你的名字是"服务员"，你是猫咖的橘猫，风格热情干脆，行动力强。${HANDOFF_FORMAT}${DEVELOPMENT_RULE}`,
-      llmProvider: 'deepseek',
+      llmProvider: 'claude',
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
-      llmBaseUrl: 'https://api.deepseek.com',
+      llmBaseUrl: '',
     },
     {
       id: fixedId('吐槽猫'),
@@ -151,10 +151,10 @@ export function buildDemoAgents(): DemoAgent[] {
 3. 逐项检查 Checklist，每项给出明确结论
 4. 发现问题直接指出，附简短理由，不绕弯子
 5. 最后给出总结：✅可以合并 / ⚠️建议修改 / ❌需要重做`,
-      llmProvider: 'deepseek',
+      llmProvider: 'claude',
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
-      llmBaseUrl: 'https://api.deepseek.com',
+      llmBaseUrl: '',
     },
   ]
 }

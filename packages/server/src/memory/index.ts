@@ -49,9 +49,18 @@ export async function saveMessageMemory(
   if (!isMemoryEnabled()) return
   if (!agentIds.length) return
 
+  // 剥离 @mention 再嵌入，避免路由元数据污染语义向量。
+  // @mention 是分发信息而非用户意图，混入会降低去重精度，
+  // 尤其在短消息场景下，@前缀占比过高会导致误判重复。
+  const cleanContent = content.replace(/@\S+\s*/g, '').trim()
+  if (!cleanContent) {
+    log.debug('消息仅含 @mention，跳过记忆存储', { content })
+    return
+  }
+
   let embedding: number[]
   try {
-    embedding = await embedText(content)
+    embedding = await embedText(cleanContent)
   } catch (err: any) {
     log.warn('嵌入生成失败，跳过记忆存储', { error: err.message })
     return

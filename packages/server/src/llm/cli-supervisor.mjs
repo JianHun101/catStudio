@@ -40,7 +40,7 @@ if (!command) {
 }
 
 // ─── 检查父进程是否存活 ──────────────────────────
-function isParentAlive(): boolean {
+function isParentAlive() {
   try {
     // signal 0 = 只检查权限，不发送实际信号
     process.kill(PARENT_PID, 0)

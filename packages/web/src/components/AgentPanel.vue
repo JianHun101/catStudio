@@ -39,7 +39,7 @@ const newAgentForm = ref({
   name: '',
   avatar: '🐱',
   systemPrompt: '',
-  llmProvider: 'deepseek',
+  llmProvider: 'claude',
   llmModel: 'deepseek-v4-pro',
   llmApiKey: '',
   llmBaseUrl: '',
@@ -63,7 +63,7 @@ async function handleCreate(): Promise<void> {
       llmBaseUrl: newAgentForm.value.llmBaseUrl || undefined,
     })
     showCreate.value = false
-    newAgentForm.value = { name: '', avatar: '🐱', systemPrompt: '', llmProvider: 'deepseek', llmModel: 'deepseek-v4-pro', llmApiKey: '', llmBaseUrl: '' }
+    newAgentForm.value = { name: '', avatar: '🐱', systemPrompt: '', llmProvider: 'claude', llmModel: 'deepseek-v4-pro', llmApiKey: '', llmBaseUrl: '' }
     await store.fetchData()
   } catch (err: any) {
     console.error('[AgentPanel] create agent failed:', err)

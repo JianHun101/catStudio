@@ -248,7 +248,7 @@ export const useChatStore = defineStore('chat', () => {
     // 跟踪连接状态
     socket.on('connect', () => {
       serverOnline.value = true
-      // 重连后刷新数据
+      // 重连后重新加入 Session，获取最新消息
       if (activeSessionId.value) {
         socket.emit(Events.JOIN_SESSION, activeSessionId.value)
         socket.emit('get-agent-states')
@@ -261,6 +261,9 @@ export const useChatStore = defineStore('chat', () => {
     serverOnline.value = socket.connected
 
     socket.on(Events.NEW_MESSAGE, (msg: Message) => {
+      // 防止重复消息（Socket 重连时服务器会重发历史消息，或首次连接
+      // 时 joinSession 与 connect 事件可能先后触发 JOIN_SESSION）
+      if (messages.value.some((m) => m.id === msg.id)) return
       messages.value.push(msg)
       // Agent 完成回复后清除打字状态，停止闪烁光标
       if (msg.role === 'agent' && msg.agentId) {
