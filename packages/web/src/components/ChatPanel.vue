@@ -227,52 +227,54 @@ function statusLabelZh(status: string): string {
         <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>
       </div>
 
-      <div
-        v-for="msg in store.activeMessages"
-        :key="msg.id"
-        class="message"
-        :class="msg.role"
-      >
-        <div class="msg-avatar">{{ avatarFor(msg.role, msg.agentId) }}</div>
-        <div class="msg-body">
-          <div v-if="msg.role === 'agent'" class="msg-sender">{{ senderName(msg.agentId) }}</div>
-          <div class="msg-bubble">
-            <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
-          </div>
-        </div>
-
-        <!-- Agent status indicators (on user messages) -->
+      <TransitionGroup name="msg">
         <div
-          v-if="msg.role === 'user' && statusForMessage(msg.id).length > 0"
-          class="msg-agent-status"
+          v-for="msg in store.activeMessages"
+          :key="msg.id"
+          class="message"
+          :class="msg.role"
         >
-          <div
-            v-for="s in statusForMessage(msg.id)"
-            :key="s.agentId"
-            class="agent-status-row"
-          >
-            <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
-            <span class="status-avatar">{{ s.agentAvatar }}</span>
-            <span class="status-name">{{ s.agentName }}</span>
-            <span class="status-label">{{ statusLabelZh(s.status) }}</span>
+          <div class="msg-avatar">{{ avatarFor(msg.role, msg.agentId) }}</div>
+          <div class="msg-body">
+            <div v-if="msg.role === 'agent'" class="msg-sender">{{ senderName(msg.agentId) }}</div>
+            <div class="msg-bubble">
+              <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
+            </div>
           </div>
-          <!-- Retract button (only on latest user message) -->
-          <button
-            v-if="isLatestUserMessage(msg)"
-            class="btn-retract"
-            :class="{ 'btn-retract-confirm': retractConfirm === msg.id }"
-            @click="handleRetract(msg.id)"
-          >
-            {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
-          </button>
-        </div>
 
-        <!-- Typing cursor -->
-        <span
-          v-if="store.typingStates.get(msg.agentId || '')"
-          class="typing-cursor"
-        >|</span>
-      </div>
+          <!-- Agent status indicators (on user messages) -->
+          <div
+            v-if="msg.role === 'user' && statusForMessage(msg.id).length > 0"
+            class="msg-agent-status"
+          >
+            <div
+              v-for="s in statusForMessage(msg.id)"
+              :key="s.agentId"
+              class="agent-status-row"
+            >
+              <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
+              <span class="status-avatar">{{ s.agentAvatar }}</span>
+              <span class="status-name">{{ s.agentName }}</span>
+              <span class="status-label">{{ statusLabelZh(s.status) }}</span>
+            </div>
+            <!-- Retract button (only on latest user message) -->
+            <button
+              v-if="isLatestUserMessage(msg)"
+              class="btn-retract"
+              :class="{ 'btn-retract-confirm': retractConfirm === msg.id }"
+              @click="handleRetract(msg.id)"
+            >
+              {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
+            </button>
+          </div>
+
+          <!-- Typing cursor -->
+          <span
+            v-if="store.typingStates.get(msg.agentId || '')"
+            class="typing-cursor"
+          >|</span>
+        </div>
+      </TransitionGroup>
     </div>
 
     <!-- Input -->
@@ -584,18 +586,16 @@ function statusLabelZh(status: string): string {
   gap: 10px;
   padding: 4px 0;
   align-items: flex-start;
-  animation: msg-in 0.25s ease-out;
 }
 
-@keyframes msg-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+/* Vue TransitionGroup: new messages fade in + slide up */
+.msg-enter-active {
+  transition: opacity 0.25s ease-out, transform 0.25s ease-out;
+}
+
+.msg-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
 }
 
 .message.user {
@@ -648,6 +648,7 @@ function statusLabelZh(status: string): string {
 .message.system .msg-bubble {
   background: transparent;
   border: none;
+  box-shadow: none;
   font-size: 12px;
   color: var(--text-muted);
   font-style: italic;

@@ -29,6 +29,6 @@ export function renderMarkdown(raw: string): string {
       'abbr',
       'span', 'div',
     ],
-    ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'class'],
+    ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'class', 'align'],
   })
 }
