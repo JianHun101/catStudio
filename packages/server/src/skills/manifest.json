@@ -2,28 +2,23 @@
   "skills": {
     "handoff": {
       "description": "工作交接文档模板",
-      "triggers": ["交接", "handoff"],
+      "triggers": ["交接", "handoff", "review", "审查"],
       "file": "handoff.md"
     },
     "dependency-request": {
-      "description": "安装请求格式",
-      "triggers": ["安装", "install", "npm", "pip"],
+      "description": "安装请求声明格式",
+      "triggers": ["安装", "install", "npm", "pip", "apt"],
       "file": "dependency-request.md"
     },
     "code-review": {
       "description": "代码审查流程",
-      "triggers": ["review", "审查", "看看代码", "复查"],
+      "triggers": ["review", "审查", "看看代码", "检查代码"],
       "file": "code-review.md"
     },
     "dependency-review": {
       "description": "依赖审查流程",
-      "triggers": ["安装", "install", "npm", "pip"],
+      "triggers": ["安装", "install", "npm", "pip", "apt"],
       "file": "dependency-review.md"
     }
-  },
-  "agents": {
-    "店长": ["handoff", "dependency-request"],
-    "服务员": ["handoff", "dependency-request"],
-    "吐槽猫": ["handoff", "code-review", "dependency-review"]
   }
 }

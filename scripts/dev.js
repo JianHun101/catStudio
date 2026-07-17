@@ -4,13 +4,20 @@
  * 直接启动 server + web 进程，不依赖 pnpm --parallel（避免 Windows shell 问题）。
  * 通过 node 直接执行 tsx / vite 的 JS 入口，无需 .cmd 文件。
  *
- * Server 使用 tsx watch 模式：TypeScript 源文件变更时自动重启。
- * Agent 修改代码 → tsx 检测变更 → 自动重启 → 加载新代码。
+ * Server 使用 tsx 运行 + fs.watch 自定义文件监听，
+ * 替代 tsx watch 以避免 Agent（Claude Code CLI）编辑 src/ 下的文件时
+ * 触发立即重启 → 杀死正在执行的 Agent。
+ *
+ * 机制：
+ *   fs.watch 检测到 .ts 文件变更 → 检查 .agent-busy 锁文件
+ *     → 锁存在 → 进入"推迟模式"，每秒轮询等待锁释放
+ *     → 锁不存在 → 立即重启 server
  *
  * 用法: node scripts/dev.js  或  pnpm dev
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, execSync } from 'node:child_process'
+import { watch, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -30,6 +37,9 @@ const PKG_DIRS = {
 const TSX_CLI = path.join(PKG_DIRS.server, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 // Vite CLI 入口
 const VITE_CLI = path.join(PKG_DIRS.web, 'node_modules', 'vite', 'bin', 'vite.js')
+
+// Agent 执行锁文件（与 socketio.ts 中 LOCK_FILE 路径一致）
+const LOCK_FILE = path.join(ROOT, '.agent-busy')
 
 if (!fs.existsSync(TSX_CLI)) {
   console.error('[dev] 找不到 tsx，请确认已执行 pnpm install')
@@ -66,45 +76,81 @@ function killAll() {
   children.clear()
 }
 
-// ─── 启动 Server（tsx watch 模式） ─────────────────
+// ─── Server 进程管理 ─────────────────────────
 
-const serverChild = spawn(
-  process.execPath,
-  [TSX_CLI, 'watch', 'packages/server/src/index.ts'],
-  {
-    cwd: ROOT,
-    stdio: 'inherit',
-    env: { ...process.env, FORCE_COLOR: '1' },
-  },
-)
+let serverChild = null
+/** 推迟重启标志：有文件变更但锁文件存在时为 true */
+let pendingRestart = false
 
-serverChild.on('error', (err) => {
-  console.error('[dev] server 进程启动失败:', err.message)
-})
-
-children.add(serverChild)
-
-// 轮询等待 server 就绪，再启动 web（固定 500ms 不够，尤其是冷启动）
-const PORT = parseInt(process.env.PORT || '3200', 10)
-const HEALTH_URL = `http://127.0.0.1:${PORT}/api/health`
-
-for (let i = 0; i < 60; i++) {
-  try {
-    const res = await fetch(HEALTH_URL)
-    if (res.ok) {
-      console.log(`[dev] server ready after ${i}s`)
-      break
-    }
-  } catch {
-    // 还没就绪，继续等
+function startServer() {
+  // 杀掉旧 server 进程
+  if (serverChild && serverChild.exitCode === null) {
+    console.log('[dev] 终止旧 server 进程 (pid=' + serverChild.pid + ')')
+    killTree(serverChild.pid)
+    children.delete(serverChild)
   }
-  if (i === 0) console.log('[dev] waiting for server...')
-  await new Promise((r) => setTimeout(r, 1000))
+
+  serverChild = spawn(
+    process.execPath,
+    [TSX_CLI, 'packages/server/src/index.ts'],
+    {
+      cwd: ROOT,
+      stdio: 'inherit',
+      env: { ...process.env, FORCE_COLOR: '1' },
+    },
+  )
+
+  serverChild.on('error', (err) => {
+    console.error('[dev] server 进程启动失败:', err.message)
+  })
+
+  serverChild.on('exit', (code) => {
+    children.delete(serverChild)
+    // 推迟重启期间 server 退出是预期的（我们在主动杀进程），不退出 dev
+    if (pendingRestart) return
+    if (children.size === 0) {
+      console.log(`[dev] 全部退出 (code=${code ?? '?'})`)
+      killAll()
+      process.exit(code || 0)
+    }
+  })
+
+  children.add(serverChild)
+  return serverChild
 }
 
-// ─── 启动 Web (Vite) ─────────────────────────────
-// Vite 需要在 web 包目录下运行（index.html 和 vite.config.ts 都在那里）
+async function waitForServer() {
+  const PORT = parseInt(process.env.PORT || '3200', 10)
+  const HEALTH_URL = `http://127.0.0.1:${PORT}/api/health`
 
+  for (let i = 0; i < 60; i++) {
+    try {
+      const res = await fetch(HEALTH_URL)
+      if (res.ok) {
+        console.log(`[dev] server ready after ${i}s`)
+        return true
+      }
+    } catch {
+      // 还没就绪，继续等
+    }
+    if (i === 0) console.log('[dev] waiting for server...')
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  console.error('[dev] server 启动超时 (60s)')
+  return false
+}
+
+// ─── 启动流程 ─────────────────────────────────
+
+// 1. 启动 Server
+startServer()
+const ready = await waitForServer()
+if (!ready) {
+  killAll()
+  process.exit(1)
+}
+
+// 2. 启动 Web (Vite)
 const webChild = spawn(
   process.execPath,
   [VITE_CLI, '--host', '0.0.0.0'],
@@ -119,31 +165,6 @@ webChild.on('error', (err) => {
   console.error('[dev] web 进程启动失败:', err.message)
 })
 
-children.add(webChild)
-
-// ─── 退出处理 ─────────────────────────────────────
-
-const EXIT_TIMEOUT = 2000
-
-function shutdown(signal) {
-  console.log(`\n[dev] 收到 ${signal}，关闭所有子进程...`)
-  killAll()
-  setTimeout(() => {
-    console.log('[dev] 退出')
-    process.exit(0)
-  }, EXIT_TIMEOUT)
-}
-
-// 子进程退出时清理
-serverChild.on('exit', (code) => {
-  children.delete(serverChild)
-  if (children.size === 0) {
-    console.log(`[dev] 全部退出 (code=${code ?? '?'})`)
-    killAll()
-    process.exit(code || 0)
-  }
-})
-
 webChild.on('exit', (code) => {
   children.delete(webChild)
   if (children.size === 0) {
@@ -152,6 +173,63 @@ webChild.on('exit', (code) => {
     process.exit(code || 0)
   }
 })
+
+children.add(webChild)
+
+// ─── 文件监听 + 推迟重启 ─────────────────────
+
+let restartTimer = null
+
+// 监听 packages/server/src 下的 .ts 文件变更
+// fs.watch 在 Windows 上 recursive: true 是原生支持的（ReadDirectoryChangesW），
+// 但极少数情况下可能丢事件或 filename 为 null——
+// 此场景下只需要"有变更"信号即可，不要求精确文件名。
+// 如果 Windows 上丢事件严重，可换 chokidar：npm install chokidar
+const srcDir = path.join(ROOT, 'packages', 'server', 'src')
+const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
+  // 只关注 .ts 文件变更
+  if (filename && !filename.endsWith('.ts')) return
+
+  // 防抖：500ms 内的多次变更合并为一次重启
+  clearTimeout(restartTimer)
+
+  restartTimer = setTimeout(async () => {
+    if (existsSync(LOCK_FILE)) {
+      if (!pendingRestart) {
+        console.log('[dev] Agent 执行中，推迟重启...')
+        pendingRestart = true
+      }
+    } else {
+      console.log('[dev] 文件变更，重启 server...')
+      startServer()
+      await waitForServer()
+    }
+  }, 500)
+})
+
+// 推迟模式下的轮询：每秒检查锁文件是否已释放
+setInterval(async () => {
+  if (pendingRestart && !existsSync(LOCK_FILE)) {
+    console.log('[dev] Agent 完成，执行延迟重启')
+    pendingRestart = false
+    startServer()
+    await waitForServer()
+  }
+}, 1000)
+
+// ─── 退出处理 ─────────────────────────────────
+
+const EXIT_TIMEOUT = 2000
+
+function shutdown(signal) {
+  console.log(`\n[dev] 收到 ${signal}，关闭所有子进程...`)
+  watcher.close()
+  killAll()
+  setTimeout(() => {
+    console.log('[dev] 退出')
+    process.exit(0)
+  }, EXIT_TIMEOUT)
+}
 
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))

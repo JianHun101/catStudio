@@ -12,7 +12,11 @@ import { createSocketIO } from './connectors/socketio.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
 import { createLogger, setLogLevel } from './logger.js'
+import { existsSync, unlinkSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
+import { SkillLoader } from './skills/skill-loader.js'
 
 const log = createLogger('server')
 
@@ -49,6 +53,23 @@ async function main(): Promise<void> {
       ids: stuckLogs.map((r: any) => r.id),
     })
   }
+
+  // 1.6 启动时清理残留的 Agent 执行锁文件
+  //     上次服务器异常退出（如 tsx watch 触发重启）时可能未删除
+  const lockFile = resolve(process.cwd(), '.agent-busy')
+  if (existsSync(lockFile)) {
+    unlinkSync(lockFile)
+    log.warn('启动时清理残留锁文件')
+  }
+
+  // 1.7 初始化技能加载器（启动时一次性将所有 skill 文件读入内存）
+  const __filename = fileURLToPath(import.meta.url)
+  const __dirname = dirname(__filename)
+  const skillsDir = resolve(__dirname, 'skills')
+  SkillLoader.initialize(skillsDir)
+  log.info('skill loader initialized', {
+    loadedSkills: SkillLoader.getInstance().getLoadedSkillNames(),
+  })
 
   // 2. 首次启动自动初始化种子数据（Agents 表为空时）
   const db = getDb()

@@ -1,145 +1,161 @@
 /**
- * Skill Loader — 按需动态加载 Agent prompt 片段。
+ * 技能加载器 — 启动时一次性将 manifest + 所有 .md skill 文件读入内存。
  *
- * 设计决策（ADHERE）:
- * - 启动时一次性把所有 skill 文件读进内存，运行时只做内存查表
- * - 意图检测用关键词匹配（不引入额外的 LLM 调用）
- * - manifest.json 为后端独立的单一事实源，不与 .claude/skills/manifest.yaml 合并
- *   （后者管理 Claude Code CLI 子进程，前者管理 Web Agent 的 prompt 片段路由）
- * - 注入方式: 弱依赖模块级单例，socketio.ts 直接 import，测试通过 vi.mock 替换
+ * 设计原则:
+ * - 热路径（matchAndBuild）只做内存查表 + 字符串拼接，零 I/O
+ * - 模块级单例（弱依赖 import），socketio.ts 直接 import 即可
+ * - manifest 解析失败阻止启动（错误的行为比不启动更危险）
+ * - 单个 .md 文件缺失只 warn，其他 skill 继续工作
  */
+import { readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { createLogger } from '../logger.js'
 
-import { readFileSync, existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createLogger } from "../logger.js";
+const log = createLogger('skill-loader')
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+// ═══ 类型定义 ═══
 
-const log = createLogger("skill-loader");
-
-// ── 类型 ──────────────────────────────────────────────
-
-interface SkillEntry {
-  description: string;
-  triggers: string[];
-  file: string;
+export interface SkillEntry {
+  description: string
+  triggers: string[]
+  file: string
 }
 
-interface Manifest {
-  skills: Record<string, SkillEntry>;
-  agents: Record<string, string[]>;
+export interface ManifestConfig {
+  skills: Record<string, SkillEntry>
 }
 
-// ── 模块级单例状态 ────────────────────────────────────
+export interface MatchResult {
+  /** 最终组装好的 system prompt */
+  prompt: string
+  /** 命中的 skill 名称列表（调试用） */
+  matchedSkills: string[]
+}
 
-let initialized = false;
-const skillContents = new Map<string, string>();   // skillName → content
-const agentSkills = new Map<string, string[]>();   // agentName → allowed skillNames
-const skillTriggers: Array<{ name: string; triggers: string[] }> = [];
+// ═══ SkillLoader ═══
 
-// ── 内部 ──────────────────────────────────────────────
+export class SkillLoader {
+  private static instance: SkillLoader | null = null
 
-function loadManifest(): Manifest {
-  const manifestPath = resolve(__dirname, "manifest.json");
-  if (!existsSync(manifestPath)) {
-    throw new Error(`Skill manifest not found: ${manifestPath}`);
+  /** 启动时初始化单例。重复调用会重新加载（用于测试/热重载）。 */
+  static initialize(skillsDir: string): SkillLoader {
+    SkillLoader.instance = new SkillLoader(skillsDir)
+    return SkillLoader.instance
   }
-  const raw = readFileSync(manifestPath, "utf-8");
-  try {
-    return JSON.parse(raw) as Manifest;
-  } catch {
-    throw new Error(`Failed to parse skill manifest: ${manifestPath}`);
-  }
-}
 
-function loadSkillFiles(manifest: Manifest): void {
-  for (const [name, entry] of Object.entries(manifest.skills)) {
-    const filePath = resolve(__dirname, entry.file);
-    if (!existsSync(filePath)) {
-      log.warn("skill file not found — skipped", { skill: name, path: filePath });
-      continue;
+  /** 获取已初始化的单例。未初始化时抛异常。 */
+  static getInstance(): SkillLoader {
+    if (!SkillLoader.instance) {
+      throw new Error('SkillLoader not initialized — call SkillLoader.initialize() during startup')
     }
-    skillContents.set(name, readFileSync(filePath, "utf-8"));
-    skillTriggers.push({ name, triggers: entry.triggers });
-  }
-}
-
-function loadAgentMappings(manifest: Manifest): void {
-  for (const [agentName, skills] of Object.entries(manifest.agents)) {
-    agentSkills.set(agentName, skills);
-  }
-}
-
-// ── 公开 API ──────────────────────────────────────────
-
-/** 启动时调用一次。失败抛异常，阻止服务启动。 */
-export function initSkillLoader(): void {
-  if (initialized) return;
-
-  const manifest = loadManifest();
-  loadSkillFiles(manifest);
-  loadAgentMappings(manifest);
-
-  log.info("skill loader initialized", {
-    skills: skillContents.size,
-    agents: agentSkills.size,
-  });
-  initialized = true;
-}
-
-/**
- * 根据 Agent 名、基础 prompt 和触发消息，动态组装完整 system prompt。
- *
- * 匹配规则:
- * 1. agentSkills[name] → 该 Agent 允许加载的 skill 列表（能力上限）
- * 2. 在允许的 skill 中，检查 triggerText 是否命中 trigger 关键词
- * 3. 命中 → 追加对应 skill 内容到 basePrompt 之后
- * 4. 未命中 → 只返回 basePrompt
- * 5. agentSkills 中无此 Agent → 只返回 basePrompt
- *
- * @param agentName   Agent 名称（如 "店长"）
- * @param basePrompt  Agent 的基础 system prompt（铁律已在其中）
- * @param triggerText 触发消息的文本内容（用户输入或 @mention 消息）
- * @returns 组装后的完整 system prompt
- */
-export function matchAndBuild(
-  agentName: string,
-  basePrompt: string,
-  triggerText: string,
-): string {
-  if (!initialized) {
-    log.warn("skill loader not initialized — using base prompt only", { agentName });
-    return basePrompt;
+    return SkillLoader.instance
   }
 
-  const allowedSkills = agentSkills.get(agentName) || [];
-  if (allowedSkills.length === 0) {
-    return basePrompt;
+  /** 重置单例（测试用） */
+  static reset(): void {
+    SkillLoader.instance = null
   }
 
-  let result = basePrompt;
+  // ═══ 实例 ═══
 
-  for (const skillName of allowedSkills) {
-    const triggers = skillTriggers.find((s) => s.name === skillName)?.triggers || [];
-    const triggered = triggers.some((t) => triggerText.includes(t));
+  private manifest: ManifestConfig
+  private rules: Map<string, string> = new Map()
+  private initialized = false
 
-    if (triggered) {
-      const content = skillContents.get(skillName);
-      if (content) {
-        result += "\n\n" + content;
+  private constructor(private skillsDir: string) {
+    this.manifest = { skills: {} }
+    this.loadAll()
+  }
+
+  // ── 加载逻辑 ──
+
+  private loadAll(): void {
+    // 1. 解析 manifest
+    const manifestPath = join(this.skillsDir, 'manifest.json')
+    try {
+      const raw = readFileSync(manifestPath, 'utf-8')
+      this.manifest = JSON.parse(raw) as ManifestConfig
+      if (!this.manifest.skills || typeof this.manifest.skills !== 'object') {
+        throw new Error('manifest.json 缺少 "skills" 字段或格式错误')
+      }
+      log.info('manifest loaded', { skillCount: Object.keys(this.manifest.skills).length })
+    } catch (err: any) {
+      throw new Error(`Failed to load manifest at ${manifestPath}: ${err.message}`)
+    }
+
+    // 2. 加载所有 .md 文件
+    for (const [skillName, skill] of Object.entries(this.manifest.skills)) {
+      const filePath = join(this.skillsDir, skill.file)
+      if (!existsSync(filePath)) {
+        log.warn('skill file not found — skipping', { skillName, file: skill.file })
+        continue
+      }
+      try {
+        const content = readFileSync(filePath, 'utf-8')
+        this.rules.set(skillName, content)
+      } catch (err: any) {
+        log.error('failed to read skill file — skipping', { skillName, file: skill.file, error: err.message })
       }
     }
+
+    this.initialized = true
+    log.info('skills loaded', { loadedCount: this.rules.size, totalCount: Object.keys(this.manifest.skills).length })
   }
 
-  return result;
-}
+  // ── 匹配逻辑 ──
 
-/** 仅测试用 — 重置内部状态。生产代码不应调用。 */
-export function __test_reset(): void {
-  initialized = false;
-  skillContents.clear();
-  agentSkills.clear();
-  skillTriggers.length = 0;
+  /**
+   * 根据触发文本匹配技能，返回组装好的 system prompt。
+   *
+   * @param basePrompt  Agent 的基础 prompt（铁律已在其中）
+   * @param skillModules Agent 声明拥有的技能列表（能力上限约束）
+   * @param triggerText 触发消息文本（用于关键词匹配）
+   * @returns 组装后的完整 prompt + 调试信息
+   */
+  matchAndBuild(basePrompt: string, skillModules: string[], triggerText: string): MatchResult {
+    const matchedSkills: string[] = []
+
+    for (const skillName of skillModules) {
+      const skill = this.manifest.skills[skillName]
+      if (!skill) {
+        log.warn('skill not in manifest', { skillName, agentSkills: skillModules })
+        continue
+      }
+
+      // 关键词匹配
+      const hit = skill.triggers.some((trigger) => triggerText.includes(trigger))
+      if (hit && this.rules.has(skillName)) {
+        matchedSkills.push(skillName)
+      }
+    }
+
+    // 拼接: basePrompt + 各命中 skill 的内容
+    let prompt = basePrompt
+    for (const skillName of matchedSkills) {
+      const content = this.rules.get(skillName)
+      if (content) {
+        prompt += content
+      }
+    }
+
+    if (matchedSkills.length > 0) {
+      log.debug('skills matched', { matchedSkills, triggerLen: triggerText.length })
+    }
+
+    return { prompt, matchedSkills }
+  }
+
+  // ── 查询接口（调试/测试用） ──
+
+  getLoadedSkillNames(): string[] {
+    return Array.from(this.rules.keys())
+  }
+
+  getManifest(): ManifestConfig {
+    return this.manifest
+  }
+
+  isInitialized(): boolean {
+    return this.initialized
+  }
 }

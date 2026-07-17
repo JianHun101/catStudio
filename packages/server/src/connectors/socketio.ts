@@ -9,6 +9,9 @@
 
 import { Server as HttpServer } from "node:http";
 import { Server as SocketServer } from "socket.io";
+import { existsSync, writeFileSync, unlinkSync } from "node:fs";
+import { resolve } from "node:path";
+import { execSync } from "node:child_process";
 import { Events } from "@cat-study/shared";
 import { getDb } from "../db/index.js";
 import { v4 as uuid } from "uuid";
@@ -33,8 +36,16 @@ import {
 } from "../llm/git-utils.js";
 import type { AgentConfig, LLMMessage, Message } from "@cat-study/shared";
 import { parseMentionsFromReply } from "./a2a-mentions.js";
+import { SkillLoader } from "../skills/skill-loader.js";
 
 const log = createLogger("socketio");
+
+/** Agent 技能模块映射（种子 Agent 的 skillModules 定义，后续可迁移到 DB 列） */
+const AGENT_SKILL_MODULES: Record<string, string[]> = {
+  "店长": ["handoff", "dependency-request"],
+  "服务员": ["handoff", "dependency-request"],
+  "吐槽猫": ["handoff", "code-review", "dependency-review"],
+};
 
 /** 模块级 io 实例引用，供路由等模块获取 */
 let _io: SocketServer | null = null;
@@ -412,6 +423,29 @@ const MAX_AGENT_DISPATCH_DEPTH = 10;
 /** 单个 Agent 在同一 traceId 下被 @ 的最大次数 */
 const MAX_MENTIONS_PER_AGENT = 3;
 
+// ─── Agent Busy Lock ────────────────────────────────
+
+/** Agent 执行锁文件路径 — 项目根目录下的 .agent-busy。
+ *  存在此文件时，dev.js 文件监听器会推迟 tsx 重启，
+ *  确保 Agent（Claude Code CLI）完成文件编辑后才允许重启。 */
+const LOCK_FILE = resolve(process.cwd(), ".agent-busy");
+
+/** 获取 Agent 执行锁（幂等 — 已存在则跳过）。
+ *  TODO: 未来多 Agent 并发时改为引用计数 */
+function acquireLock(): boolean {
+  if (existsSync(LOCK_FILE)) return false;
+  writeFileSync(LOCK_FILE, String(process.pid));
+  log.info("agent busy lock acquired", { pid: process.pid });
+  return true;
+}
+
+/** 释放 Agent 执行锁 */
+function releaseLock(): void {
+  if (!existsSync(LOCK_FILE)) return;
+  unlinkSync(LOCK_FILE);
+  log.info("agent busy lock released");
+}
+
 // ─── Serial Agent Execution ─────────────────────────
 
 /** 追踪每个 Agent 在同一 traceId 下被 @ 的次数（防止无限循环） */
@@ -457,6 +491,8 @@ async function executeAgentsSerial(
     })
     .filter(Boolean);
 
+  let lockAcquired = false;
+
   for (const agent of agents) {
     // 单个 Agent 被 @ 次数限制
     const mentionKey = getMentionKey(traceId, agent.id);
@@ -493,6 +529,11 @@ async function executeAgentsSerial(
       });
       await completeExecution(agent.id, true, { traceId });
       continue;
+    }
+
+    // 获取 Agent 执行锁（仅 Claude 适配器需要——它会编辑源文件）
+    if (agent.llmProvider === "claude" && !lockAcquired) {
+      lockAcquired = acquireLock();
     }
 
     try {
@@ -675,13 +716,36 @@ async function executeAgentsSerial(
         mentionCounts.delete(key);
       }
     }
-    // 自动 git commit（忽略非 git 仓库或无改动的情况）
-    const commitHash = gitCommit(`catstudy [${triggerMsg.id}]`);
-    if (commitHash) {
-      // 将 commit hash 写回 execution_logs（本轮所有相关日志）
-      db.prepare(
-        "UPDATE execution_logs SET commit_hash = ? WHERE triggered_by_message_id = ?",
-      ).run(commitHash, triggerMsg.id);
+    try {
+      // 自动 git commit（忽略非 git 仓库或无改动的情况）
+      const commitHash = gitCommit(`catstudy [${triggerMsg.id}]`);
+      if (commitHash) {
+        // 将 commit hash 写回 execution_logs（本轮所有相关日志）
+        db.prepare(
+          "UPDATE execution_logs SET commit_hash = ? WHERE triggered_by_message_id = ?",
+        ).run(commitHash, triggerMsg.id);
+      }
+    } finally {
+      if (lockAcquired) {
+        // 清理 Agent 执行遗留的脏文件（编辑中断、未追踪的新文件等）
+        // 成功路径 git commit 后工作区应为干净状态，此检查为无操作
+        try {
+          const status = execSync("git status --porcelain", {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+          }).trim();
+          if (status) {
+            log.warn("dirty workspace after agent execution, resetting", {
+              traceId,
+            });
+            execSync("git checkout -- .", { stdio: "ignore" });
+            execSync("git clean -fd", { stdio: "ignore" });
+          }
+        } catch {
+          // 非 git 仓库，忽略
+        }
+        releaseLock();
+      }
     }
   }
 }
@@ -804,8 +868,23 @@ async function runAgentReply(
     }
   }
 
+  // 动态组装 system prompt: 铁律（basePrompt）+ 按需加载的操作规则
+  const skillModules = AGENT_SKILL_MODULES[agent.name] || [];
+  const { prompt: dynamicSystemPrompt, matchedSkills } = SkillLoader.getInstance().matchAndBuild(
+    agent.systemPrompt,
+    skillModules,
+    triggerMsg.content,
+  );
+  if (matchedSkills.length > 0) {
+    log.debug("skills loaded for agent", {
+      traceId,
+      agentName: agent.name,
+      matchedSkills,
+    });
+  }
+
   const llmMessages: LLMMessage[] = [
-    { role: "system", content: agent.systemPrompt },
+    { role: "system", content: dynamicSystemPrompt },
     ...relevantMessages.map((m: any, idx: number) => {
       const isLast = idx === relevantMessages.length - 1;
 
