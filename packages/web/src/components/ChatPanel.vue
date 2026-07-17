@@ -4,6 +4,7 @@ import type { Message } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { renderMarkdown } from '@/utils/markdown'
+import { parseThinkingBlocks } from '@/utils/thinking'
 
 const store = useChatStore()
 const input = ref('')
@@ -174,37 +175,6 @@ function statusLabelZh(status: string): string {
   }
 }
 
-// ─── 思考块解析 ────────────────────────────
-
-interface ThinkingSegment {
-  kind: 'text' | 'thinking'
-  content: string
-}
-
-/** 把含 [思考] 标记的流式内容拆成文本段和思考段 */
-function parseThinkingBlocks(content: string): ThinkingSegment[] {
-  if (!content) return []
-  const segments: ThinkingSegment[] = []
-  const regex = /(\[思考\] [\s\S]*?)(?=\[思考\] |$)/g
-  let lastIndex = 0
-  let match: RegExpExecArray | null
-
-  while ((match = regex.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      const textBefore = content.slice(lastIndex, match.index).trim()
-      if (textBefore) segments.push({ kind: 'text', content: textBefore })
-    }
-    segments.push({ kind: 'thinking', content: match[1].replace(/^\[思考\] /, '') })
-    lastIndex = match.index + match[0].length
-  }
-
-  if (lastIndex < content.length) {
-    const remaining = content.slice(lastIndex).trim()
-    if (remaining) segments.push({ kind: 'text', content: remaining })
-  }
-
-  return segments
-}
 </script>
 
 <template>
