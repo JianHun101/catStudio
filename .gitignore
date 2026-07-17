@@ -23,5 +23,8 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Agent 工作区（Agent 文件操作隔离目录）
+workspace/
+
 # 日志
 *.log

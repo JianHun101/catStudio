@@ -15,6 +15,24 @@ import { fileURLToPath } from 'node:url'
 import type { Chunk, LLMMessage } from '@cat-study/shared'
 import { createLogger } from '../logger.js'
 
+// ─── Workspace Directory ────────────────────────────────
+
+/**
+ * Agent 工作区目录（项目根级的 workspace/）。
+ *
+ * 将 Claude Code CLI 的 cwd 限制在此目录，防止 Agent 写入
+ * packages/server/src/ 触发 tsx watch 重启 → 杀死正在执行的 Agent。
+ *
+ * dev.js 将 server 进程的 cwd 设为项目根，因此 process.cwd() 就是项目根。
+ */
+export function getWorkspaceDir(): string {
+  const dir = path.join(process.cwd(), 'workspace')
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+  return dir
+}
+
 const log = createLogger('cli-utils')
 
 // ─── Binary Resolution ───────────────────────────────────
@@ -316,20 +334,22 @@ const SUPERVISOR_PATH = path.join(
 export function spawnSupervised(
   bin: string,
   args: string[],
-  opts: { env?: Record<string, string>; label: string },
+  opts: { env?: Record<string, string>; label: string; cwd?: string },
 ): ChildProcess {
+  const spawnOpts = {
+    stdio: ['ignore', 'pipe', 'pipe'] as const,
+    shell: false,
+    env: opts.env,
+    cwd: opts.cwd,
+  }
+
   if (!fs.existsSync(SUPERVISOR_PATH)) {
     log.warn(`${opts.label} supervisor 脚本缺失，回退到直接 spawn`, { path: SUPERVISOR_PATH })
-    return spawn(bin, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-      env: opts.env,
-    })
+    return spawn(bin, args, spawnOpts)
   }
 
   const child = spawn(process.execPath, [SUPERVISOR_PATH, '--', bin, ...args], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: false,
+    ...spawnOpts,
     env: {
       ...opts.env,
       ...process.env,
