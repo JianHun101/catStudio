@@ -105,6 +105,7 @@ export function buildDemoAgents(): DemoAgent[] {
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
       llmBaseUrl: '',
+      effortLevel: '',
     },
     {
       id: fixedId('服务员'),
@@ -118,6 +119,7 @@ export function buildDemoAgents(): DemoAgent[] {
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
       llmBaseUrl: '',
+      effortLevel: '',
     },
     {
       id: fixedId('吐槽猫'),
@@ -138,6 +140,7 @@ export function buildDemoAgents(): DemoAgent[] {
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
       llmBaseUrl: '',
+      effortLevel: '',
     },
   ]
 }

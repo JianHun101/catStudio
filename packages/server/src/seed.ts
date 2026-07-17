@@ -46,7 +46,7 @@ function seed(): void {
     const result = upsert.run(
       a.id, a.name, a.avatar, a.systemPrompt,
       a.llmProvider, a.llmModel, a.llmApiKey, a.llmBaseUrl,
-      a.effortLevel || null,
+      a.effortLevel ?? '',
     )
     const verb = result.changes === 1 ? '✅' : '🔄'
     console.log(`  ${verb} ${a.avatar} ${a.name} (${a.id})`)

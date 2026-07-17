@@ -94,7 +94,7 @@ async function main(): Promise<void> {
     `)
 
     for (const a of agents) {
-      upsert.run(a.id, a.name, a.avatar, a.systemPrompt, a.llmProvider, a.llmModel, a.llmApiKey, a.llmBaseUrl, a.effortLevel || null)
+      upsert.run(a.id, a.name, a.avatar, a.systemPrompt, a.llmProvider, a.llmModel, a.llmApiKey, a.llmBaseUrl, a.effortLevel ?? '')
       console.log(`  ✅ ${a.avatar} ${a.name}`)
     }
 
