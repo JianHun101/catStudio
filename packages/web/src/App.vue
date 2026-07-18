@@ -55,10 +55,20 @@ onUnmounted(() => {
 
 <template>
   <div class="app-layout" :class="{ 'left-closed': !leftOpen, 'right-closed': !rightOpen }">
-    <!-- Left sidebar: collapse-tab always visible as a handle, content hidden when closed -->
     <aside class="panel-left" :class="{ closed: !leftOpen }">
+      <div class="panel-inner">
+        <SessionList />
+      </div>
+    </aside>
+
+    <!--
+      Toggle buttons live in the center panel as thin edge strips.
+      This avoids position:absolute overlap with sidebar content (delete buttons)
+      and ensures the restore handle is always findable — no 6px invisible strips.
+    -->
+    <main class="panel-center">
       <button
-        class="collapse-tab"
+        class="edge-toggle edge-toggle-left"
         @click="toggleLeft"
         :title="leftOpen ? '收起会话列表' : '展开会话列表'"
       >
@@ -81,19 +91,13 @@ onUnmounted(() => {
           />
         </svg>
       </button>
-      <div class="panel-inner">
-        <SessionList />
+
+      <div class="center-content">
+        <ChatPanel />
       </div>
-    </aside>
 
-    <main class="panel-center">
-      <ChatPanel />
-    </main>
-
-    <!-- Right sidebar: same pattern -->
-    <aside class="panel-right" :class="{ closed: !rightOpen }">
       <button
-        class="collapse-tab"
+        class="edge-toggle edge-toggle-right"
         @click="toggleRight"
         :title="rightOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
       >
@@ -116,6 +120,9 @@ onUnmounted(() => {
           />
         </svg>
       </button>
+    </main>
+
+    <aside class="panel-right" :class="{ closed: !rightOpen }">
       <div class="panel-inner">
         <AgentPanel />
       </div>
@@ -136,33 +143,25 @@ onUnmounted(() => {
 }
 
 .app-layout.left-closed {
-  grid-template-columns: 6px 1fr 300px;
+  grid-template-columns: 0px 1fr 300px;
 }
 
 .app-layout.right-closed {
-  grid-template-columns: 260px 1fr 6px;
+  grid-template-columns: 260px 1fr 0px;
 }
 
 .app-layout.left-closed.right-closed {
-  grid-template-columns: 6px 1fr 6px;
+  grid-template-columns: 0px 1fr 0px;
 }
 
 /* ─── Panels ─────────────────────────────── */
 
 .panel-left,
 .panel-right {
-  position: relative;
   background: var(--bg-base);
   display: flex;
   flex-direction: column;
-  overflow: hidden; /* clip content when column shrinks */
-}
-
-/* When closed: allow collapse-tab to overflow the 6px column + stack above center */
-.panel-left.closed,
-.panel-right.closed {
-  overflow: visible;
-  z-index: 10;
+  overflow: hidden;
 }
 
 .panel-left {
@@ -175,12 +174,20 @@ onUnmounted(() => {
 
 .panel-center {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   overflow: hidden;
   background: var(--bg-deep);
 }
 
-/* Panel inner — content wrapper, hidden when closed */
+.center-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* Panel inner — hidden when closed */
 .panel-inner {
   flex: 1;
   display: flex;
@@ -188,124 +195,91 @@ onUnmounted(() => {
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  opacity: 1;
-  transition: opacity 0.15s ease;
 }
 
 .panel-left.closed .panel-inner,
 .panel-right.closed .panel-inner {
-  opacity: 0;
-  pointer-events: none;
-  overflow: hidden;
+  display: none;
 }
 
-/* ─── Collapse Tab (edge handle) ─────────── */
+/* ─── Edge Toggle Buttons ────────────────── */
+/*
+ * Thin strips at the left/right edges of the center panel.
+ * Default 6px — barely visible, like a divider line.
+ * Hover expands to 24px showing the chevron.
+ * These live in the center panel so they NEVER overlap sidebar content
+ * (delete buttons, session list, agent cards) and are ALWAYS findable
+ * when a sidebar is collapsed.
+ */
 
-.collapse-tab {
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 40;
-  width: 16px; /* wider invisible hit-area when panel is open */
-  height: 56px;
+.edge-toggle {
+  flex-shrink: 0;
+  width: 6px;
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: transparent;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  opacity: 0; /* hidden by default when panel is open */
-  pointer-events: none;
   transition:
-    opacity 0.2s ease,
-    width 0.18s ease,
-    background 0.18s ease,
-    color 0.18s ease;
+    width 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
 }
 
-/* Left panel: tab on the right edge */
-.panel-left .collapse-tab {
-  right: 0;
-  border-radius: 4px 0 0 4px;
-}
-
-/* Right panel: tab on the left edge */
-.panel-right .collapse-tab {
-  left: 0;
-  border-radius: 0 4px 4px 0;
-}
-
-.collapse-tab svg {
-  opacity: 0;
-  transition: opacity 0.15s ease;
+.edge-toggle svg {
   flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
 
-/* ─── Open panel: tab appears only on hover of the panel edge ─── */
-/* Use parent :hover (not .collapse-tab:hover) because .collapse-tab has
-   pointer-events:none by default to avoid blocking content underneath. */
+/* ─── Left toggle: between left panel and center content ─── */
 
-.panel-left:not(.closed):hover .collapse-tab,
-.panel-right:not(.closed):hover .collapse-tab {
-  opacity: 1;
-  pointer-events: auto;
-  width: 24px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  color: var(--text-secondary);
+.edge-toggle-left {
+  border-right: 1px solid transparent;
 }
 
-.panel-left:not(.closed):hover .collapse-tab svg,
-.panel-right:not(.closed):hover .collapse-tab svg {
-  opacity: 1;
-}
-
-/* ─── Closed panel: tab always visible as a restore handle ─── */
-/* Extend INTO center panel, not outside viewport where overflow:hidden clips it */
-
-.panel-left.closed .collapse-tab {
-  /* Extend rightward into the center area (left edge → 24px into center) */
-  right: auto;
-  left: 0;
-  border-radius: 0 4px 4px 0;
-}
-
-.panel-right.closed .collapse-tab {
-  /* Extend leftward into the center area */
-  left: auto;
-  right: 0;
-  border-radius: 4px 0 0 4px;
-}
-
-/* Closed panel: thin 6px strip (matches column width), invisible at rest */
-.panel-left.closed .collapse-tab,
-.panel-right.closed .collapse-tab {
-  opacity: 1;
-  pointer-events: auto;
-  width: 6px; /* same as collapsed column — no content overlap */
-  background: transparent;
-  color: var(--border-subtle); /* blends into the panel edge */
-  border: none;
-}
-
-.panel-left.closed .collapse-tab svg,
-.panel-right.closed .collapse-tab svg {
-  opacity: 0; /* icon hidden in thin-strip state */
-}
-
-/* Hover: expand to 24px so the chevron is visible and clickable */
-.panel-left.closed .collapse-tab:hover,
-.panel-right.closed .collapse-tab:hover {
+.edge-toggle-left:hover {
   width: 24px;
   background: var(--bg-surface);
   color: var(--accent);
-  border: 1px solid var(--border-default);
+  border-right-color: var(--border-default);
 }
 
-.panel-left.closed .collapse-tab:hover svg,
-.panel-right.closed .collapse-tab:hover svg {
+.edge-toggle-left:hover svg {
   opacity: 1;
+}
+
+/* ─── Right toggle: between center content and right panel ─── */
+
+.edge-toggle-right {
+  border-left: 1px solid transparent;
+}
+
+.edge-toggle-right:hover {
+  width: 24px;
+  background: var(--bg-surface);
+  color: var(--accent);
+  border-left-color: var(--border-default);
+}
+
+.edge-toggle-right:hover svg {
+  opacity: 1;
+}
+
+/* ─── Chevron direction hint when collapsed ─── */
+/* When sidebar is closed, show a faint chevron so the user knows it's there */
+
+.app-layout.left-closed .edge-toggle-left svg,
+.app-layout.right-closed .edge-toggle-right svg {
+  opacity: 0.45;
+}
+
+.app-layout.left-closed .edge-toggle-left,
+.app-layout.right-closed .edge-toggle-right {
+  color: var(--text-muted);
 }
 </style>
