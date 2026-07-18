@@ -743,6 +743,7 @@ function statusLabelZh(status: string): string {
 .message {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 4px 0;
   align-items: flex-start;
@@ -853,11 +854,8 @@ function statusLabelZh(status: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px 0 8px;
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
+  width: 100%;
+  padding: 12px 0 4px;
 }
 
 .date-separator span {
@@ -869,9 +867,7 @@ function statusLabelZh(status: string): string {
   border-radius: 10px;
 }
 
-/* System messages don't need date separator positioning */
 .message.system .date-separator {
-  position: static;
   padding: 0 0 4px;
 }
 
