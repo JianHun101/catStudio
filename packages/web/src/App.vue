@@ -63,8 +63,22 @@ onUnmounted(() => {
         :title="leftOpen ? '收起会话列表' : '展开会话列表'"
       >
         <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
-          <path v-if="leftOpen" d="M9 3L5 7l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-          <path v-else d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <path
+            v-if="leftOpen"
+            d="M9 3L5 7l4 4"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            v-else
+            d="M5 3l4 4-4 4"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
       </button>
       <div class="panel-inner">
@@ -84,8 +98,22 @@ onUnmounted(() => {
         :title="rightOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
       >
         <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
-          <path v-if="rightOpen" d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-          <path v-else d="M9 3L5 7l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <path
+            v-if="rightOpen"
+            d="M5 3l4 4-4 4"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            v-else
+            d="M9 3L5 7l4 4"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
       </button>
       <div class="panel-inner">
@@ -178,7 +206,7 @@ onUnmounted(() => {
   top: 50%;
   transform: translateY(-50%);
   z-index: 40;
-  width: 16px;       /* wider invisible hit-area when panel is open */
+  width: 16px; /* wider invisible hit-area when panel is open */
   height: 56px;
   border: none;
   background: transparent;
@@ -188,7 +216,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: 0;
-  opacity: 0;         /* hidden by default when panel is open */
+  opacity: 0; /* hidden by default when panel is open */
   pointer-events: none;
   transition:
     opacity 0.2s ease,
@@ -251,25 +279,33 @@ onUnmounted(() => {
   border-radius: 4px 0 0 4px;
 }
 
+/* Closed panel: thin 6px strip (matches column width), invisible at rest */
 .panel-left.closed .collapse-tab,
 .panel-right.closed .collapse-tab {
   opacity: 1;
   pointer-events: auto;
-  width: 24px;
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-default);
+  width: 6px; /* same as collapsed column — no content overlap */
+  background: transparent;
+  color: var(--border-subtle); /* blends into the panel edge */
+  border: none;
 }
 
 .panel-left.closed .collapse-tab svg,
 .panel-right.closed .collapse-tab svg {
-  opacity: 1;
+  opacity: 0; /* icon hidden in thin-strip state */
 }
 
+/* Hover: expand to 24px so the chevron is visible and clickable */
 .panel-left.closed .collapse-tab:hover,
 .panel-right.closed .collapse-tab:hover {
+  width: 24px;
+  background: var(--bg-surface);
   color: var(--accent);
-  border-color: var(--accent);
-  background: var(--bg-hover);
+  border: 1px solid var(--border-default);
+}
+
+.panel-left.closed .collapse-tab:hover svg,
+.panel-right.closed .collapse-tab:hover svg {
+  opacity: 1;
 }
 </style>
