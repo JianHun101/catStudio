@@ -134,10 +134,14 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  overflow: hidden;
+}
+
+/* 两侧都收起时约束最大宽度，保持文字可读（避免行长过长） */
+.app-layout.left-closed.right-closed .center-content {
   max-width: 860px;
   margin: 0 auto;
   width: 100%;
-  overflow: hidden;
 }
 
 /* Panel inner — hidden when closed */
