@@ -130,10 +130,11 @@ onUnmounted(() => {
   overflow: hidden; /* clip content when column shrinks */
 }
 
-/* When closed: allow collapse-tab to overflow the 6px column so it's clickable */
+/* When closed: allow collapse-tab to overflow the 6px column + stack above center */
 .panel-left.closed,
 .panel-right.closed {
   overflow: visible;
+  z-index: 10;
 }
 
 .panel-left {
@@ -214,10 +215,12 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* ─── Open panel: tab appears only on hover of the edge ─── */
+/* ─── Open panel: tab appears only on hover of the panel edge ─── */
+/* Use parent :hover (not .collapse-tab:hover) because .collapse-tab has
+   pointer-events:none by default to avoid blocking content underneath. */
 
-.panel-left:not(.closed) .collapse-tab:hover,
-.panel-right:not(.closed) .collapse-tab:hover {
+.panel-left:not(.closed):hover .collapse-tab,
+.panel-right:not(.closed):hover .collapse-tab {
   opacity: 1;
   pointer-events: auto;
   width: 24px;
@@ -226,12 +229,27 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-.panel-left:not(.closed) .collapse-tab:hover svg,
-.panel-right:not(.closed) .collapse-tab:hover svg {
+.panel-left:not(.closed):hover .collapse-tab svg,
+.panel-right:not(.closed):hover .collapse-tab svg {
   opacity: 1;
 }
 
 /* ─── Closed panel: tab always visible as a restore handle ─── */
+/* Extend INTO center panel, not outside viewport where overflow:hidden clips it */
+
+.panel-left.closed .collapse-tab {
+  /* Extend rightward into the center area (left edge → 24px into center) */
+  right: auto;
+  left: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+.panel-right.closed .collapse-tab {
+  /* Extend leftward into the center area */
+  left: auto;
+  right: 0;
+  border-radius: 4px 0 0 4px;
+}
 
 .panel-left.closed .collapse-tab,
 .panel-right.closed .collapse-tab {
