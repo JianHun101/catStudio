@@ -14,6 +14,11 @@ const emit = defineEmits<{
 const store = useChatStore()
 const showCreate = ref(false)
 
+function closeCreate(): void {
+  showCreate.value = false
+  store.fetchData()
+}
+
 onMounted(() => {
   store.fetchData()
 })
@@ -70,13 +75,7 @@ async function handleDelete(id: string): Promise<void> {
       </svg>
     </button>
 
-    <SessionCreateModal
-      v-if="showCreate"
-      @close="
-        showCreate = false
-        store.fetchData()
-      "
-    />
+    <SessionCreateModal v-if="showCreate" @close="closeCreate" />
   </div>
 
   <!-- Expanded: full session list -->
@@ -173,13 +172,7 @@ async function handleDelete(id: string): Promise<void> {
       </button>
     </div>
 
-    <SessionCreateModal
-      v-if="showCreate"
-      @close="
-        showCreate = false
-        store.fetchData()
-      "
-    />
+    <SessionCreateModal v-if="showCreate" @close="closeCreate" />
   </div>
 </template>
 
