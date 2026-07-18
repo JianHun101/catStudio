@@ -137,8 +137,14 @@ export const useChatStore = defineStore('chat', () => {
   function joinSession(sessionId: string): void {
     const { socket } = useSocket()
     const switching = activeSessionId.value !== null && activeSessionId.value !== sessionId
+    // 离开旧会话的 Socket.IO room，停止接收旧会话的实时事件
+    if (activeSessionId.value && switching) {
+      socket.emit(Events.LEAVE_SESSION, activeSessionId.value)
+    }
     activeSessionId.value = sessionId
     messages.value = []
+    // 清除旧会话的打字气泡（切换会话时状态应完全重置）
+    typingStates.value.clear()
     // 标记已读（清除未读计数 + 通知服务端）
     unreadCounts.value.delete(sessionId)
     api.markSessionRead(sessionId).catch(() => { /* fire-and-forget */ })

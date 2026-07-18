@@ -63,6 +63,16 @@ const dateSepIndices = computed(() => {
   return indices
 })
 
+/** 仅显示活跃会话中 Agent 的打字气泡（防止跨会话残留） */
+const activeTypingStates = computed(() => {
+  const filtered = new Map<string, { messageId: string; content: string }>()
+  const activeAgentIds = new Set(store.activeSession?.agentIds ?? [])
+  store.typingStates.forEach((v, agentId) => {
+    if (activeAgentIds.has(agentId)) filtered.set(agentId, v)
+  })
+  return filtered
+})
+
 // ─── Message Grouping ──────────────────────
 
 const GROUP_WINDOW_MS = 2 * 60 * 1000 // 2 minutes
@@ -119,7 +129,7 @@ watch(
 watch(
   () => {
     const contents: string[] = []
-    store.typingStates.forEach((v) => contents.push(v.content))
+    activeTypingStates.forEach((v) => contents.push(v.content))
     return contents.join('|')
   },
   async () => {
@@ -410,7 +420,7 @@ function statusLabelZh(status: string): string {
 
       <!-- Streaming agent reply (live preview while agent is typing) -->
       <div
-        v-for="[agentId, typing] in store.typingStates"
+        v-for="[agentId, typing] in activeTypingStates"
         :key="'streaming-' + agentId"
         class="message agent streaming"
       >
