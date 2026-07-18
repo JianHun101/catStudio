@@ -6,6 +6,16 @@ import { useMention } from '@/composables/useMention'
 import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
 
+const props = defineProps<{
+  leftSidebarOpen: boolean
+  rightSidebarOpen: boolean
+}>()
+
+const emit = defineEmits<{
+  toggleLeftSidebar: []
+  toggleRightSidebar: []
+}>()
+
 const store = useChatStore()
 const input = ref('')
 const chatContainer = ref<HTMLDivElement>()
@@ -14,8 +24,9 @@ const clearingMessages = ref(false)
 const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次执行
 const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 
-const { mentionActive, mentionSuggestions, mentionIndex, detect, select, navigate } =
-  useMention(() => store.agents)
+const { mentionActive, mentionSuggestions, mentionIndex, detect, select, navigate } = useMention(
+  () => store.agents
+)
 
 // ─── Time Formatting ───────────────────────
 
@@ -58,7 +69,9 @@ const dateSepIndices = computed(() => {
       const prevDate = new Date(msgs[i - 1].createdAt).toDateString()
       const currDate = new Date(msgs[i].createdAt).toDateString()
       if (prevDate !== currDate) indices.add(i)
-    } catch { /* ignore invalid dates */ }
+    } catch {
+      /* ignore invalid dates */
+    }
   }
   return indices
 })
@@ -122,7 +135,7 @@ watch(
   async () => {
     await nextTick()
     if (isAtBottom.value) scrollToBottom()
-  },
+  }
 )
 
 // Streaming content grows → follow if at bottom
@@ -135,7 +148,7 @@ watch(
   async () => {
     await nextTick()
     if (isAtBottom.value) scrollToBottom()
-  },
+  }
 )
 
 // Active session changes → reset to bottom
@@ -143,7 +156,7 @@ watch(
   () => store.activeSessionId,
   () => {
     setTimeout(() => scrollToBottom(), 50)
-  },
+  }
 )
 
 onMounted(() => {
@@ -160,7 +173,9 @@ async function handleClearMessages(): Promise<void> {
   if (!store.activeSessionId) return
   if (!clearConfirm.value) {
     clearConfirm.value = true
-    setTimeout(() => { clearConfirm.value = false }, 3000)
+    setTimeout(() => {
+      clearConfirm.value = false
+    }, 3000)
     return
   }
   clearingMessages.value = true
@@ -205,7 +220,8 @@ function onKeydown(e: KeyboardEvent): void {
       if (result !== null) {
         input.value = result
         nextTick(() => {
-          ta.selectionStart = ta.selectionEnd = mentionStartIdx() + result.length - input.value.length + ta.value.length
+          ta.selectionStart = ta.selectionEnd =
+            mentionStartIdx() + result.length - input.value.length + ta.value.length
         })
       }
       return
@@ -272,7 +288,9 @@ async function handleRetract(msgId: string): Promise<void> {
   if (!store.activeSessionId) return
   if (retractConfirm.value !== msgId) {
     retractConfirm.value = msgId
-    setTimeout(() => { retractConfirm.value = null }, 3000)
+    setTimeout(() => {
+      retractConfirm.value = null
+    }, 3000)
     return
   }
   retractConfirm.value = null
@@ -281,24 +299,33 @@ async function handleRetract(msgId: string): Promise<void> {
 
 function statusEmoji(status: string): string {
   switch (status) {
-    case 'queued': return '📨'
-    case 'thinking': return '🤔'
-    case 'replying': return '⌨️'
-    case 'done': return '✅'
-    default: return '⏳'
+    case 'queued':
+      return '📨'
+    case 'thinking':
+      return '🤔'
+    case 'replying':
+      return '⌨️'
+    case 'done':
+      return '✅'
+    default:
+      return '⏳'
   }
 }
 
 function statusLabelZh(status: string): string {
   switch (status) {
-    case 'queued': return '已收到'
-    case 'thinking': return '思考中'
-    case 'replying': return '回复中'
-    case 'done': return '完成'
-    default: return status
+    case 'queued':
+      return '已收到'
+    case 'thinking':
+      return '思考中'
+    case 'replying':
+      return '回复中'
+    case 'done':
+      return '完成'
+    default:
+      return status
   }
 }
-
 </script>
 
 <template>
@@ -306,9 +333,29 @@ function statusLabelZh(status: string): string {
     <!-- Header -->
     <div class="chat-header">
       <div class="chat-header-left">
+        <!-- 左侧栏折叠按钮（Claude/OpenAI 风格：始终可见的汉堡菜单） -->
+        <button
+          class="btn-sidebar-toggle"
+          :title="props.leftSidebarOpen ? '收起会话列表' : '展开会话列表'"
+          @click="emit('toggleLeftSidebar')"
+        >
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path
+              d="M3 4.5h12M3 9h12M3 13.5h8"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+
         <h2 v-if="store.activeSession">{{ store.activeSession.title }}</h2>
         <span v-else class="placeholder">选择会话开始聊天</span>
-        <span class="connection-dot" :class="{ online: store.serverOnline }" :title="store.serverOnline ? '已连接' : '连接断开'"></span>
+        <span
+          class="connection-dot"
+          :class="{ online: store.serverOnline }"
+          :title="store.serverOnline ? '已连接' : '连接断开'"
+        ></span>
       </div>
 
       <div v-if="store.activeSessionId" class="chat-header-actions">
@@ -320,7 +367,13 @@ function statusLabelZh(status: string): string {
           @click="handleClearMessages"
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M2 4h12M5.5 4V2.5h5V4M6.5 7v5M9.5 7v5M3.5 4l.7 9.1a1 1 0 001 .9h5.6a1 1 0 001-.9l.7-9.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path
+              d="M2 4h12M5.5 4V2.5h5V4M6.5 7v5M9.5 7v5M3.5 4l.7 9.1a1 1 0 001 .9h5.6a1 1 0 001-.9l.7-9.1"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
           </svg>
           {{ clearingMessages ? '…' : clearConfirm ? '确认清空？' : '清空' }}
         </button>
@@ -339,6 +392,39 @@ function statusLabelZh(status: string): string {
             </button>
           </label>
         </div>
+
+        <!-- 右侧栏折叠按钮 -->
+        <button
+          class="btn-sidebar-toggle"
+          :title="props.rightSidebarOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
+          @click="emit('toggleRightSidebar')"
+        >
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <template v-if="props.rightSidebarOpen">
+              <rect
+                x="2"
+                y="3"
+                width="14"
+                height="12"
+                rx="1.5"
+                stroke="currentColor"
+                stroke-width="1.4"
+              />
+              <path d="M11 3v12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </template>
+            <template v-else>
+              <rect
+                x="2"
+                y="3"
+                width="14"
+                height="12"
+                rx="1.5"
+                stroke="currentColor"
+                stroke-width="1.4"
+              />
+            </template>
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -361,7 +447,13 @@ function statusLabelZh(status: string): string {
           title="回到底部"
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path
+              d="M4 6l4 4 4-4"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
           </svg>
           <span>新消息</span>
         </button>
@@ -380,13 +472,19 @@ function statusLabelZh(status: string): string {
           </div>
 
           <div v-if="!isGrouped(i)" class="msg-avatar">{{ avatarFor(msg.role, msg.agentId) }}</div>
-          <div v-else class="msg-avatar msg-avatar-hidden">{{ avatarFor(msg.role, msg.agentId) }}</div>
+          <div v-else class="msg-avatar msg-avatar-hidden">
+            {{ avatarFor(msg.role, msg.agentId) }}
+          </div>
 
           <div class="msg-body">
-            <div v-if="msg.role === 'agent' && !isGrouped(i)" class="msg-sender">{{ senderName(msg.agentId) }}</div>
+            <div v-if="msg.role === 'agent' && !isGrouped(i)" class="msg-sender">
+              {{ senderName(msg.agentId) }}
+            </div>
             <div class="msg-bubble">
               <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
-              <time class="msg-time" :datetime="msg.createdAt">{{ formatTime(msg.createdAt) }}</time>
+              <time class="msg-time" :datetime="msg.createdAt">{{
+                formatTime(msg.createdAt)
+              }}</time>
             </div>
           </div>
 
@@ -395,11 +493,7 @@ function statusLabelZh(status: string): string {
             v-if="msg.role === 'user' && statusForMessage(msg.id).length > 0"
             class="msg-agent-status"
           >
-            <div
-              v-for="s in statusForMessage(msg.id)"
-              :key="s.agentId"
-              class="agent-status-row"
-            >
+            <div v-for="s in statusForMessage(msg.id)" :key="s.agentId" class="agent-status-row">
               <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
               <span class="status-avatar">{{ s.agentAvatar }}</span>
               <span class="status-name">{{ s.agentName }}</span>
@@ -414,7 +508,6 @@ function statusLabelZh(status: string): string {
               {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
             </button>
           </div>
-
         </div>
       </TransitionGroup>
 
@@ -429,7 +522,11 @@ function statusLabelZh(status: string): string {
           <div class="msg-sender">{{ senderName(agentId) }}</div>
           <div class="msg-bubble">
             <template v-for="(seg, si) in parseThinkingBlocks(typing.content)" :key="si">
-              <div v-if="seg.kind === 'text'" class="msg-text" v-html="renderMarkdown(seg.content)"></div>
+              <div
+                v-if="seg.kind === 'text'"
+                class="msg-text"
+                v-html="renderMarkdown(seg.content)"
+              ></div>
               <details v-else class="thinking-block" :open="false">
                 <summary class="thinking-summary">
                   <span class="thinking-icon">🐾</span>
@@ -474,7 +571,10 @@ function statusLabelZh(status: string): string {
             <span class="mention-hint">tab</span>
           </div>
         </div>
-        <div v-if="mentionActive && mentionSuggestions.length === 0" class="mention-dropdown mention-empty">
+        <div
+          v-if="mentionActive && mentionSuggestions.length === 0"
+          class="mention-dropdown mention-empty"
+        >
           <span>未找到匹配的猫咪</span>
         </div>
       </div>
@@ -519,6 +619,28 @@ function statusLabelZh(status: string): string {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* ─── Sidebar Toggle Buttons (header) ───── */
+
+.btn-sidebar-toggle {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ease-out);
+}
+
+.btn-sidebar-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 /* Connection dot */
@@ -695,7 +817,7 @@ function statusLabelZh(status: string): string {
   top: 3px;
   left: 3px;
   transition: transform var(--ease-out);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .toggle-switch.on .toggle-knob {
@@ -761,7 +883,9 @@ function statusLabelZh(status: string): string {
 
 /* Vue TransitionGroup: new messages fade in + slide up */
 .msg-enter-active {
-  transition: opacity 0.25s ease-out, transform 0.25s ease-out;
+  transition:
+    opacity 0.25s ease-out,
+    transform 0.25s ease-out;
 }
 
 .msg-enter-from {
@@ -930,10 +1054,14 @@ function statusLabelZh(status: string): string {
 
 /* scroll-btn transition */
 .scroll-btn-enter-active {
-  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+  transition:
+    opacity 0.2s ease-out,
+    transform 0.2s ease-out;
 }
 .scroll-btn-leave-active {
-  transition: opacity 0.15s ease-in, transform 0.15s ease-in;
+  transition:
+    opacity 0.15s ease-in,
+    transform 0.15s ease-in;
 }
 .scroll-btn-enter-from {
   opacity: 0;
@@ -957,7 +1085,9 @@ function statusLabelZh(status: string): string {
 }
 
 @keyframes blink {
-  50% { opacity: 0; }
+  50% {
+    opacity: 0;
+  }
 }
 
 /* ─── Streaming Message ──────────────────── */
@@ -975,7 +1105,9 @@ function statusLabelZh(status: string): string {
   border-radius: var(--radius-sm);
   background: rgba(180, 160, 140, 0.06);
   overflow: hidden;
-  transition: border-color var(--ease-out), background var(--ease-out);
+  transition:
+    border-color var(--ease-out),
+    background var(--ease-out);
 }
 
 .thinking-block[open] {
@@ -992,7 +1124,9 @@ function statusLabelZh(status: string): string {
   user-select: none;
   font-size: 12px;
   color: var(--text-muted);
-  transition: background var(--ease-in), color var(--ease-out);
+  transition:
+    background var(--ease-in),
+    color var(--ease-out);
   list-style: none; /* hide default <details> marker */
 }
 .thinking-summary::-webkit-details-marker {
@@ -1031,12 +1165,24 @@ function statusLabelZh(status: string): string {
   opacity: 0.5;
   animation: dotPulse 1.4s ease-in-out infinite;
 }
-.thinking-dots i:nth-child(2) { animation-delay: 0.2s; }
-.thinking-dots i:nth-child(3) { animation-delay: 0.4s; }
+.thinking-dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.thinking-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
 
 @keyframes dotPulse {
-  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-  40% { opacity: 1; transform: scale(1.2); }
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
 }
 
 .thinking-chevron {
@@ -1253,22 +1399,55 @@ function statusLabelZh(status: string): string {
 
 /* ─── hljs classes (highlight.js injected by marked) ─── */
 
-.chat-panel .msg-text pre code .hljs-keyword { color: #cba6f7; }
-.chat-panel .msg-text pre code .hljs-string  { color: #a6e3a1; }
-.chat-panel .msg-text pre code .hljs-number  { color: #fab387; }
-.chat-panel .msg-text pre code .hljs-comment { color: #6c7086; font-style: italic; }
-.chat-panel .msg-text pre code .hljs-function { color: #89b4fa; }
-.chat-panel .msg-text pre code .hljs-title   { color: #89b4fa; }
-.chat-panel .msg-text pre code .hljs-type    { color: #f9e2af; }
-.chat-panel .msg-text pre code .hljs-attr    { color: #89dceb; }
-.chat-panel .msg-text pre code .hljs-built_in { color: #f38ba8; }
-.chat-panel .msg-text pre code .hljs-literal  { color: #fab387; }
-.chat-panel .msg-text pre code .hljs-params   { color: #f2cdcd; }
-.chat-panel .msg-text pre code .hljs-property { color: #89dceb; }
-.chat-panel .msg-text pre code .hljs-punctuation { color: #bac2de; }
-.chat-panel .msg-text pre code .hljs-regexp  { color: #f38ba8; }
-.chat-panel .msg-text pre code .hljs-meta    { color: #f9e2af; }
-.chat-panel .msg-text pre code .hljs-selector-class { color: #a6e3a1; }
+.chat-panel .msg-text pre code .hljs-keyword {
+  color: #cba6f7;
+}
+.chat-panel .msg-text pre code .hljs-string {
+  color: #a6e3a1;
+}
+.chat-panel .msg-text pre code .hljs-number {
+  color: #fab387;
+}
+.chat-panel .msg-text pre code .hljs-comment {
+  color: #6c7086;
+  font-style: italic;
+}
+.chat-panel .msg-text pre code .hljs-function {
+  color: #89b4fa;
+}
+.chat-panel .msg-text pre code .hljs-title {
+  color: #89b4fa;
+}
+.chat-panel .msg-text pre code .hljs-type {
+  color: #f9e2af;
+}
+.chat-panel .msg-text pre code .hljs-attr {
+  color: #89dceb;
+}
+.chat-panel .msg-text pre code .hljs-built_in {
+  color: #f38ba8;
+}
+.chat-panel .msg-text pre code .hljs-literal {
+  color: #fab387;
+}
+.chat-panel .msg-text pre code .hljs-params {
+  color: #f2cdcd;
+}
+.chat-panel .msg-text pre code .hljs-property {
+  color: #89dceb;
+}
+.chat-panel .msg-text pre code .hljs-punctuation {
+  color: #bac2de;
+}
+.chat-panel .msg-text pre code .hljs-regexp {
+  color: #f38ba8;
+}
+.chat-panel .msg-text pre code .hljs-meta {
+  color: #f9e2af;
+}
+.chat-panel .msg-text pre code .hljs-selector-class {
+  color: #a6e3a1;
+}
 
 /* ─── Headings ──────────────────────────── */
 
@@ -1290,9 +1469,15 @@ function statusLabelZh(status: string): string {
   margin-top: 0;
 }
 
-.chat-panel .msg-text h1 { font-size: 1.3em; }
-.chat-panel .msg-text h2 { font-size: 1.15em; }
-.chat-panel .msg-text h3 { font-size: 1.05em; }
+.chat-panel .msg-text h1 {
+  font-size: 1.3em;
+}
+.chat-panel .msg-text h2 {
+  font-size: 1.15em;
+}
+.chat-panel .msg-text h3 {
+  font-size: 1.05em;
+}
 
 /* ─── Lists ─────────────────────────────── */
 
@@ -1337,8 +1522,8 @@ function statusLabelZh(status: string): string {
 
 /* ─── Task list (GFM) ──────────────────── */
 
-.chat-panel .msg-text ul input[type="checkbox"],
-.chat-panel .msg-text ol input[type="checkbox"] {
+.chat-panel .msg-text ul input[type='checkbox'],
+.chat-panel .msg-text ol input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;
   width: 15px;
@@ -1354,14 +1539,14 @@ function statusLabelZh(status: string): string {
   transition: all var(--ease-out);
 }
 
-.chat-panel .msg-text ul input[type="checkbox"]:checked,
-.chat-panel .msg-text ol input[type="checkbox"]:checked {
+.chat-panel .msg-text ul input[type='checkbox']:checked,
+.chat-panel .msg-text ol input[type='checkbox']:checked {
   background: var(--accent);
   border-color: var(--accent);
 }
 
-.chat-panel .msg-text ul input[type="checkbox"]:checked::after,
-.chat-panel .msg-text ol input[type="checkbox"]:checked::after {
+.chat-panel .msg-text ul input[type='checkbox']:checked::after,
+.chat-panel .msg-text ol input[type='checkbox']:checked::after {
   content: '';
   position: absolute;
   left: 3.5px;
@@ -1373,14 +1558,14 @@ function statusLabelZh(status: string): string {
   transform: rotate(45deg);
 }
 
-.chat-panel .msg-text li:has(input[type="checkbox"]:checked) {
+.chat-panel .msg-text li:has(input[type='checkbox']:checked) {
   text-decoration: line-through;
   opacity: 0.6;
 }
 
 /* Fix list items containing checkboxes */
-.chat-panel .msg-text ul:has(input[type="checkbox"]),
-.chat-panel .msg-text ol:has(input[type="checkbox"]) {
+.chat-panel .msg-text ul:has(input[type='checkbox']),
+.chat-panel .msg-text ol:has(input[type='checkbox']) {
   list-style: none;
   padding-left: 0.4em;
 }
@@ -1482,13 +1667,13 @@ function statusLabelZh(status: string): string {
   border-bottom: none;
 }
 
-.chat-panel .msg-text th[align="center"],
-.chat-panel .msg-text td[align="center"] {
+.chat-panel .msg-text th[align='center'],
+.chat-panel .msg-text td[align='center'] {
   text-align: center;
 }
 
-.chat-panel .msg-text th[align="right"],
-.chat-panel .msg-text td[align="right"] {
+.chat-panel .msg-text th[align='right'],
+.chat-panel .msg-text td[align='right'] {
   text-align: right;
 }
 

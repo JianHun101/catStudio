@@ -37,17 +37,21 @@ async function main(): Promise<void> {
   // 1.5 启动时修复：将上一次异常退出遗留的 running 状态标记为 failed
   //     （参照 clowder-ai StartupReconciler）
   const db0 = getDb()
-  const stuckLogs = db0.prepare(
-    "SELECT id, agent_id FROM execution_logs WHERE status = 'running'",
-  ).all() as any[]
+  const stuckLogs = db0
+    .prepare("SELECT id, agent_id FROM execution_logs WHERE status = 'running'")
+    .all() as any[]
   if (stuckLogs.length > 0) {
-    db0.prepare(`
+    db0
+      .prepare(
+        `
       UPDATE execution_logs
       SET status = 'failed',
           ended_at = datetime('now'),
           error_message = 'server_restart'
       WHERE status = 'running'
-    `).run()
+    `
+      )
+      .run()
     log.warn('启动时修复 stuck execution_logs', {
       count: stuckLogs.length,
       ids: stuckLogs.map((r: any) => r.id),
@@ -62,7 +66,15 @@ async function main(): Promise<void> {
     log.warn('启动时清理残留锁文件')
   }
 
-  // 1.7 初始化技能加载器（启动时一次性将所有 skill 文件读入内存）
+  // 1.7 启动时清理幽灵 execution_logs（agent 已被删除但日志残留）
+  const ghostResult = db0
+    .prepare('DELETE FROM execution_logs WHERE agent_id NOT IN (SELECT id FROM agents)')
+    .run()
+  if (ghostResult.changes > 0) {
+    log.warn('启动时清理幽灵 execution_logs', { deleted: ghostResult.changes })
+  }
+
+  // 1.8 初始化技能加载器（启动时一次性将所有 skill 文件读入内存）
   const __filename = fileURLToPath(import.meta.url)
   const __dirname = dirname(__filename)
   const skillsDir = resolve(__dirname, 'skills')
@@ -94,15 +106,26 @@ async function main(): Promise<void> {
     `)
 
     for (const a of agents) {
-      upsert.run(a.id, a.name, a.avatar, a.systemPrompt, a.llmProvider, a.llmModel, a.llmApiKey, a.llmBaseUrl, a.effortLevel ?? '')
+      upsert.run(
+        a.id,
+        a.name,
+        a.avatar,
+        a.systemPrompt,
+        a.llmProvider,
+        a.llmModel,
+        a.llmApiKey,
+        a.llmBaseUrl,
+        a.effortLevel ?? ''
+      )
       console.log(`  ✅ ${a.avatar} ${a.name}`)
     }
 
     // 创建演示会话
     const agentIds = JSON.stringify(agents.map((a) => a.id))
-    db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET agent_ids = excluded.agent_ids, updated_at = datetime('now')`)
-      .run(DEMO_SESSION_ID, DEMO_SESSION_TITLE, agentIds)
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids) VALUES (?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET agent_ids = excluded.agent_ids, updated_at = datetime('now')`
+    ).run(DEMO_SESSION_ID, DEMO_SESSION_TITLE, agentIds)
     console.log(`  ✅ Session: ${DEMO_SESSION_TITLE}`)
 
     log.info('种子数据初始化完成', { agents: agents.length })

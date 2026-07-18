@@ -47,10 +47,7 @@ export class ClaudeAdapter implements LLMAdapter {
     this.effortLevel = config.effortLevel
   }
 
-  async *chatStream(
-    messages: LLMMessage[],
-    options: ChatOptions,
-  ): AsyncIterable<Chunk> {
+  async *chatStream(messages: LLMMessage[], options: ChatOptions): AsyncIterable<Chunk> {
     const signal = options.signal
 
     if (signal?.aborted) {
@@ -73,16 +70,23 @@ export class ClaudeAdapter implements LLMAdapter {
 
     // 将 prompt 通过 stdin 传入，避免 Windows 命令行 32K 限制。
     // -p - 告诉 Claude CLI 从 stdin 读取提示词。
-    const child = spawnSupervised(CLAUDE_BIN, [
-      '-p', '-',
-      '--output-format', 'stream-json',
-      '--verbose',
-      '--permission-mode', 'bypassPermissions',
-    ], {
-      env,
-      label: 'claude',
-      input: prompt,
-    })
+    const child = spawnSupervised(
+      CLAUDE_BIN,
+      [
+        '-p',
+        '-',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--permission-mode',
+        'bypassPermissions',
+      ],
+      {
+        env,
+        label: 'claude',
+        input: prompt,
+      }
+    )
 
     // ─── Abort 处理：收到取消信号时 kill 子进程 ───
     const GRACE_MS = 5000
@@ -119,6 +123,9 @@ export class ClaudeAdapter implements LLMAdapter {
     child.on('close', (code) => {
       if (code !== 0 && code !== null) {
         log.error('claude 退出', { exitCode: code, stderr: stderr.slice(0, 500) })
+      } else if (stderr.trim()) {
+        // exit 0 但 stderr 非空 → 可能包含诊断信息（API 警告、速率限制等）
+        log.warn('claude stderr (exit 0)', { stderr: stderr.slice(0, 500) })
       }
     })
 
@@ -171,7 +178,8 @@ export class ClaudeAdapter implements LLMAdapter {
       ANTHROPIC_MODEL: this.model,
       ANTHROPIC_DEFAULT_OPUS_MODEL: this.model,
       ANTHROPIC_DEFAULT_SONNET_MODEL: this.model,
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'deepseek-v4-flash',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL:
+        process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'deepseek-v4-flash',
       CLAUDE_CODE_SUBAGENT_MODEL: process.env.CLAUDE_CODE_SUBAGENT_MODEL || 'deepseek-v4-flash',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_EFFORT_LEVEL: this.effortLevel || process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high',

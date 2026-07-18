@@ -32,11 +32,11 @@ export const useChatStore = defineStore('chat', () => {
   const typingStates = ref<Map<string, { messageId: string; content: string }>>(new Map())
   const unreadCounts = ref<Map<string, number>>(new Map()) // sessionId → unread count
   const loading = ref(false)
-  const waitingForServer = ref(false)   // 等待服务器启动（health check 轮询中）
-  const dataReady = ref(false)          // 首次数据加载完成后为 true
-  const dataError = ref('')             // 加载失败时的错误信息
+  const waitingForServer = ref(false) // 等待服务器启动（health check 轮询中）
+  const dataReady = ref(false) // 首次数据加载完成后为 true
+  const dataError = ref('') // 加载失败时的错误信息
   const broadcastMode = ref(false)
-  const serverOnline = ref(false)       // Socket.IO 是否已连接
+  const serverOnline = ref(false) // Socket.IO 是否已连接
 
   /** 每条消息对应的 Agent 执行状态 */
   type AgentStatusEntry = {
@@ -49,8 +49,8 @@ export const useChatStore = defineStore('chat', () => {
 
   // ─── Computed ──────────────────────────────
 
-  const activeSession = computed(() =>
-    sessions.value.find((s) => s.id === activeSessionId.value) ?? null
+  const activeSession = computed(
+    () => sessions.value.find((s) => s.id === activeSessionId.value) ?? null
   )
 
   const activeMessages = computed(() =>
@@ -102,10 +102,7 @@ export const useChatStore = defineStore('chat', () => {
 
     // 阶段 2：加载数据
     try {
-      const [agentList, sessionList] = await Promise.all([
-        api.getAgents(),
-        api.getSessions(),
-      ])
+      const [agentList, sessionList] = await Promise.all([api.getAgents(), api.getSessions()])
       agents.value = agentList
       sessions.value = sessionList
       // Populate unread counts from server response
@@ -147,32 +144,17 @@ export const useChatStore = defineStore('chat', () => {
     typingStates.value.clear()
     // 标记已读（清除未读计数 + 通知服务端）
     unreadCounts.value.delete(sessionId)
-    api.markSessionRead(sessionId).catch(() => { /* fire-and-forget */ })
+    api.markSessionRead(sessionId).catch(() => {
+      /* fire-and-forget */
+    })
     // 同步广播模式
     const session = sessions.value.find((s) => s.id === sessionId)
     broadcastMode.value = session?.broadcastMode ?? false
     socket.emit(Events.JOIN_SESSION, sessionId)
     socket.emit('get-agent-states')
 
-    // 首次加入或切换会话时，显示引导消息
-    if (!switching && session) {
-      const catNames = session.agentIds
-        .map((id) => agents.value.find((a) => a.id === id))
-        .filter(Boolean)
-        .map((a) => `@${a!.name}`)
-        .join('、')
-      messages.value.push({
-        id: `welcome-${sessionId}`,
-        sessionId,
-        role: 'system',
-        content: catNames
-          ? `👋 欢迎！在消息中使用 ${catNames} 来指定谁来回复。也可以直接发送消息广播给所有猫咪。`
-          : '👋 欢迎！在消息中使用 @猫咪名字 来指定谁来回复。',
-        agentId: null,
-        mentions: [],
-        createdAt: Date.now(),
-      } as any)
-    }
+    // 欢迎消息由服务端通过 SESSION_HISTORY 事件统一发送（含历史消息批量加载）
+    // 不再在客户端生成，避免与历史消息渲染不同步
   }
 
   /** 发送用户消息 */
@@ -187,7 +169,10 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /** 更新 Agent 配置 */
-  async function updateAgent(id: string, data: Parameters<typeof api.updateAgent>[1]): Promise<void> {
+  async function updateAgent(
+    id: string,
+    data: Parameters<typeof api.updateAgent>[1]
+  ): Promise<void> {
     const updated = await api.updateAgent(id, data)
     const idx = agents.value.findIndex((a) => a.id === id)
     if (idx >= 0) agents.value[idx] = updated
@@ -293,6 +278,17 @@ export const useChatStore = defineStore('chat', () => {
       }
     })
 
+    // 批量历史消息加载（服务端 JOIN_SESSION 响应）
+    // 一次性替换 messages 数组，避免逐条 NEW_MESSAGE 导致的多次渲染和闪烁
+    socket.on(Events.SESSION_HISTORY, (data: { messages: Message[]; welcome: Message }) => {
+      const all: Message[] = []
+      if (data.welcome) {
+        all.push(data.welcome)
+      }
+      all.push(...data.messages)
+      messages.value = all
+    })
+
     // Agent 回复中的 @mentions 在消息发送后才解析，通过此事件补发
     socket.on(Events.MESSAGE_UPDATED, (data: { messageId: string; mentions: string[] }) => {
       const msg = messages.value.find((m) => m.id === data.messageId)
@@ -301,9 +297,12 @@ export const useChatStore = defineStore('chat', () => {
       }
     })
 
-    socket.on(Events.AGENT_TYPING, (data: { agentId: string; messageId: string; content: string }) => {
-      typingStates.value.set(data.agentId, data)
-    })
+    socket.on(
+      Events.AGENT_TYPING,
+      (data: { agentId: string; messageId: string; content: string }) => {
+        typingStates.value.set(data.agentId, data)
+      }
+    )
 
     socket.on(Events.AGENT_STATUS, (state: AgentRuntimeState) => {
       agentStates.value.set(state.agentId, state)
@@ -328,21 +327,24 @@ export const useChatStore = defineStore('chat', () => {
       }
     })
 
-    socket.on(Events.BROADCAST_MODE_CHANGED, (data: { sessionId: string; broadcastMode: boolean }) => {
-      broadcastMode.value = data.broadcastMode
-      // 系统消息提示广播模式变更
-      messages.value.push({
-        id: `broadcast-${Date.now()}`,
-        sessionId: data.sessionId,
-        role: 'system',
-        content: data.broadcastMode
-          ? '📢 广播模式已开启 — Agent 可以看到其他 Agent 的回复'
-          : '🔇 广播模式已关闭 — Agent 只能看到自己的回复和被 @ 的消息',
-        agentId: null,
-        mentions: [],
-        createdAt: Date.now(),
-      } as any)
-    })
+    socket.on(
+      Events.BROADCAST_MODE_CHANGED,
+      (data: { sessionId: string; broadcastMode: boolean }) => {
+        broadcastMode.value = data.broadcastMode
+        // 系统消息提示广播模式变更
+        messages.value.push({
+          id: `broadcast-${Date.now()}`,
+          sessionId: data.sessionId,
+          role: 'system',
+          content: data.broadcastMode
+            ? '📢 广播模式已开启 — Agent 可以看到其他 Agent 的回复'
+            : '🔇 广播模式已关闭 — Agent 只能看到自己的回复和被 @ 的消息',
+          agentId: null,
+          mentions: [],
+          createdAt: Date.now(),
+        } as any)
+      }
+    )
 
     socket.on(Events.SESSION_DELETED, (data: { sessionId: string }) => {
       sessions.value = sessions.value.filter((s) => s.id !== data.sessionId)
@@ -363,29 +365,35 @@ export const useChatStore = defineStore('chat', () => {
       }
     })
 
-    socket.on(Events.MESSAGE_AGENT_STATUS, (data: {
-      messageId: string
-      agentId: string
-      agentName: string
-      agentAvatar: string
-      status: 'queued' | 'thinking' | 'replying' | 'done'
-    }) => {
-      const current = messageStatus.value.get(data.messageId) || []
-      const idx = current.findIndex((e) => e.agentId === data.agentId)
-      if (idx >= 0) {
-        current[idx] = data
-      } else {
-        current.push(data)
+    socket.on(
+      Events.MESSAGE_AGENT_STATUS,
+      (data: {
+        messageId: string
+        agentId: string
+        agentName: string
+        agentAvatar: string
+        status: 'queued' | 'thinking' | 'replying' | 'done'
+      }) => {
+        const current = messageStatus.value.get(data.messageId) || []
+        const idx = current.findIndex((e) => e.agentId === data.agentId)
+        if (idx >= 0) {
+          current[idx] = data
+        } else {
+          current.push(data)
+        }
+        messageStatus.value = new Map(messageStatus.value.set(data.messageId, current))
       }
-      messageStatus.value = new Map(messageStatus.value.set(data.messageId, current))
-    })
+    )
 
-    socket.on(Events.MESSAGE_RETRACTED, (data: { sessionId: string; messageId: string; agentReplyIds: string[] }) => {
-      // 从本地消息列表移除被撤回的消息和所有关联的 agent 回复
-      const idsToRemove = new Set([data.messageId, ...data.agentReplyIds])
-      messages.value = messages.value.filter((m) => !idsToRemove.has(m.id))
-      messageStatus.value.delete(data.messageId)
-    })
+    socket.on(
+      Events.MESSAGE_RETRACTED,
+      (data: { sessionId: string; messageId: string; agentReplyIds: string[] }) => {
+        // 从本地消息列表移除被撤回的消息和所有关联的 agent 回复
+        const idsToRemove = new Set([data.messageId, ...data.agentReplyIds])
+        messages.value = messages.value.filter((m) => !idsToRemove.has(m.id))
+        messageStatus.value.delete(data.messageId)
+      }
+    )
 
     socket.on(Events.QUEUE_UPDATE, (data: { agentId: string; queueLength: number }) => {
       const state = agentStates.value.get(data.agentId)

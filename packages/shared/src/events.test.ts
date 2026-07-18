@@ -31,8 +31,8 @@ describe('Events', () => {
     expect(Events.MESSAGE_RETRACT).toBe('message-retract')
   })
 
-  it('has exactly 19 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(19)
+  it('has exactly 20 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(20)
   })
 })
 
@@ -52,8 +52,7 @@ describe('Channels', () => {
 
   describe('sessionAgent', () => {
     it('generates correct channel name', () => {
-      expect(Channels.sessionAgent('abc-123', '店长阿暹'))
-        .toBe('session:abc-123:agent:店长阿暹')
+      expect(Channels.sessionAgent('abc-123', '店长阿暹')).toBe('session:abc-123:agent:店长阿暹')
     })
   })
 

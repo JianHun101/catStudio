@@ -93,7 +93,12 @@ onUnmounted(() => {
       </button>
 
       <div class="center-content">
-        <ChatPanel />
+        <ChatPanel
+          :left-sidebar-open="leftOpen"
+          :right-sidebar-open="rightOpen"
+          @toggle-left-sidebar="toggleLeft"
+          @toggle-right-sidebar="toggleRight"
+        />
       </div>
 
       <button
@@ -205,8 +210,8 @@ onUnmounted(() => {
 /* ─── Edge Toggle Buttons ────────────────── */
 /*
  * Thin strips at the left/right edges of the center panel.
- * Default 6px — barely visible, like a divider line.
- * Hover expands to 24px showing the chevron.
+ * Default 10px with faint chevron — always visible as a subtle divider.
+ * Hover expands to 24px showing the full chevron.
  * These live in the center panel so they NEVER overlap sidebar content
  * (delete buttons, session list, agent cards) and are ALWAYS findable
  * when a sidebar is collapsed.
@@ -214,10 +219,10 @@ onUnmounted(() => {
 
 .edge-toggle {
   flex-shrink: 0;
-  width: 6px;
+  width: 10px;
   border: none;
   background: transparent;
-  color: transparent;
+  color: var(--text-muted);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -232,7 +237,7 @@ onUnmounted(() => {
 
 .edge-toggle svg {
   flex-shrink: 0;
-  opacity: 0;
+  opacity: 0.5;
   transition: opacity 0.12s ease;
 }
 
@@ -275,11 +280,11 @@ onUnmounted(() => {
 
 .app-layout.left-closed .edge-toggle-left svg,
 .app-layout.right-closed .edge-toggle-right svg {
-  opacity: 0.45;
+  opacity: 0.7;
 }
 
 .app-layout.left-closed .edge-toggle-left,
 .app-layout.right-closed .edge-toggle-right {
-  color: var(--text-muted);
+  color: var(--accent);
 }
 </style>

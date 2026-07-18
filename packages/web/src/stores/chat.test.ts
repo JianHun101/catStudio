@@ -125,14 +125,12 @@ describe('chatStore', () => {
   })
 
   describe('joinSession', () => {
-    it('sets activeSessionId and emits join event', () => {
+    it('sets activeSessionId, clears messages, and emits join event', () => {
       store.sessions = [mockSession]
       store.joinSession('s1')
       expect(store.activeSessionId).toBe('s1')
-      // 欢迎消息被添加到 messages（因 agents 为空，显示通用指引）
-      expect(store.messages).toHaveLength(1)
-      expect(store.messages[0].role).toBe('system')
-      expect(store.messages[0].id).toBe('welcome-s1')
+      // 欢迎消息已移至服务端（通过 SESSION_HISTORY 事件发送），客户端 joinSession 不再生成
+      expect(store.messages).toHaveLength(0)
       expect(mockEmit).toHaveBeenCalledWith(Events.JOIN_SESSION, 's1')
       expect(mockEmit).toHaveBeenCalledWith('get-agent-states')
     })
@@ -141,6 +139,16 @@ describe('chatStore', () => {
       store.sessions = [{ ...mockSession, broadcastMode: true }]
       store.joinSession('s1')
       expect(store.broadcastMode).toBe(true)
+    })
+
+    it('emits LEAVE_SESSION when switching sessions', () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2', title: 'S2' }]
+      store.activeSessionId = 's1'
+      store.joinSession('s2')
+      expect(mockEmit).toHaveBeenCalledWith(Events.LEAVE_SESSION, 's1')
+      expect(store.activeSessionId).toBe('s2')
+      // 切换会话清空旧消息 + 打字状态
+      expect(store.messages).toHaveLength(0)
     })
   })
 
@@ -284,9 +292,8 @@ describe('chatStore', () => {
 
     it('NEW_MESSAGE increments unread for non-active sessions', () => {
       store.activeSessionId = null // no active session → all new messages are unread
-      const handler = mockOn.mock.calls.find(
-        (call) => call[0] === Events.NEW_MESSAGE,
-      )?.[1] as ((msg: Message) => void) | undefined
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.NEW_MESSAGE)?.[1] as
+        ((msg: Message) => void) | undefined
       expect(handler).toBeDefined()
 
       handler!({ ...mockMessage, sessionId: 's1', id: 'm1' })
@@ -302,9 +309,8 @@ describe('chatStore', () => {
 
     it('NEW_MESSAGE does not increment unread for active session', () => {
       store.activeSessionId = 's1'
-      const handler = mockOn.mock.calls.find(
-        (call) => call[0] === Events.NEW_MESSAGE,
-      )?.[1] as ((msg: Message) => void) | undefined
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.NEW_MESSAGE)?.[1] as
+        ((msg: Message) => void) | undefined
       expect(handler).toBeDefined()
 
       handler!({ ...mockMessage, sessionId: 's1', id: 'm1' })
@@ -328,7 +334,7 @@ describe('chatStore', () => {
     it('NEW_MESSAGE appends to messages', () => {
       // Find the NEW_MESSAGE handler from bindEvents
       const newMsgHandler = mockOn.mock.calls.find(
-        (call) => call[0] === Events.NEW_MESSAGE,
+        (call) => call[0] === Events.NEW_MESSAGE
       )?.[1] as ((msg: Message) => void) | undefined
 
       expect(newMsgHandler).toBeDefined()
@@ -336,10 +342,45 @@ describe('chatStore', () => {
       expect(store.messages).toEqual([mockMessage])
     })
 
+    it('SESSION_HISTORY replaces messages in one batch', () => {
+      // Pre-populate with some stale messages
+      store.messages = [
+        { ...mockMessage, id: 'old-1', sessionId: 'old-session' },
+        { ...mockMessage, id: 'old-2', sessionId: 'old-session' },
+      ]
+
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.SESSION_HISTORY)?.[1] as
+        ((data: { messages: Message[]; welcome: Message }) => void) | undefined
+
+      expect(handler).toBeDefined()
+
+      const welcomeMsg: Message = {
+        id: 'welcome-s1',
+        sessionId: 's1',
+        agentId: null,
+        role: 'system',
+        content: '👋 欢迎！',
+        mentions: [],
+        createdAt: '2024-01-01',
+      }
+
+      const historyMsgs: Message[] = [
+        { ...mockMessage, id: 'm1', sessionId: 's1' },
+        { ...mockMessage, id: 'm2', sessionId: 's1', role: 'agent', agentId: 'a1' },
+      ]
+
+      handler!({ messages: historyMsgs, welcome: welcomeMsg })
+
+      // Should replace the entire messages array (not append)
+      expect(store.messages).toHaveLength(3)
+      expect(store.messages[0].id).toBe('welcome-s1')
+      expect(store.messages[1].id).toBe('m1')
+      expect(store.messages[2].id).toBe('m2')
+    })
+
     it('AGENT_TYPING sets typing state', () => {
-      const handler = mockOn.mock.calls.find(
-        (call) => call[0] === Events.AGENT_TYPING,
-      )?.[1] as ((data: any) => void) | undefined
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.AGENT_TYPING)?.[1] as
+        ((data: any) => void) | undefined
 
       handler!({ agentId: 'a1', messageId: 'm1', content: 'hello...' })
       expect(store.typingStates.get('a1')).toEqual({
@@ -350,9 +391,8 @@ describe('chatStore', () => {
     })
 
     it('AGENT_STATUS updates agent state map', () => {
-      const handler = mockOn.mock.calls.find(
-        (call) => call[0] === Events.AGENT_STATUS,
-      )?.[1] as ((data: any) => void) | undefined
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.AGENT_STATUS)?.[1] as
+        ((data: any) => void) | undefined
 
       handler!({ agentId: 'a1', status: 'busy', sessionId: 's1', queueLength: 0 })
       expect(store.agentStates.get('a1')?.status).toBe('busy')
@@ -362,9 +402,8 @@ describe('chatStore', () => {
       store.sessions = [mockSession, { ...mockSession, id: 's2' }]
       store.activeSessionId = 's1'
 
-      const handler = mockOn.mock.calls.find(
-        (call) => call[0] === Events.SESSION_DELETED,
-      )?.[1] as ((data: any) => void) | undefined
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.SESSION_DELETED)?.[1] as
+        ((data: any) => void) | undefined
 
       handler!({ sessionId: 's1' })
       expect(store.sessions).toHaveLength(1)

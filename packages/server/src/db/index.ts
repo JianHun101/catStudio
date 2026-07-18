@@ -152,6 +152,14 @@ export function initDb(): void {
       name: 'effort_level on agents',
       sql: `ALTER TABLE agents ADD COLUMN effort_level TEXT`,
     },
+    {
+      name: 'prompt_chars on execution_logs',
+      sql: `ALTER TABLE execution_logs ADD COLUMN prompt_chars INTEGER`,
+    },
+    {
+      name: 'reply_chars on execution_logs',
+      sql: `ALTER TABLE execution_logs ADD COLUMN reply_chars INTEGER`,
+    },
   ]
 
   for (const m of migrations) {

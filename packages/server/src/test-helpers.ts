@@ -71,6 +71,8 @@ const SCHEMA_SQL = `
     message_id TEXT,
     commit_hash TEXT,
     packages_installed TEXT,
+    prompt_chars INTEGER,
+    reply_chars INTEGER,
     FOREIGN KEY (session_id) REFERENCES sessions(id),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
   );
