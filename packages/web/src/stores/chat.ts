@@ -30,6 +30,7 @@ export const useChatStore = defineStore('chat', () => {
   const agentStates = ref<Map<string, AgentRuntimeState>>(new Map())
   const agents = ref<AgentConfig[]>([])
   const typingStates = ref<Map<string, { messageId: string; content: string }>>(new Map())
+  const unreadCounts = ref<Map<string, number>>(new Map()) // sessionId → unread count
   const loading = ref(false)
   const waitingForServer = ref(false)   // 等待服务器启动（health check 轮询中）
   const dataReady = ref(false)          // 首次数据加载完成后为 true
@@ -107,6 +108,14 @@ export const useChatStore = defineStore('chat', () => {
       ])
       agents.value = agentList
       sessions.value = sessionList
+      // Populate unread counts from server response
+      const counts = new Map<string, number>()
+      for (const s of sessionList) {
+        if (s.unreadCount && s.unreadCount > 0) {
+          counts.set(s.id, s.unreadCount)
+        }
+      }
+      unreadCounts.value = counts
       dataReady.value = true
       dataError.value = ''
 
@@ -130,6 +139,9 @@ export const useChatStore = defineStore('chat', () => {
     const switching = activeSessionId.value !== null && activeSessionId.value !== sessionId
     activeSessionId.value = sessionId
     messages.value = []
+    // 标记已读（清除未读计数 + 通知服务端）
+    unreadCounts.value.delete(sessionId)
+    api.markSessionRead(sessionId).catch(() => { /* fire-and-forget */ })
     // 同步广播模式
     const session = sessions.value.find((s) => s.id === sessionId)
     broadcastMode.value = session?.broadcastMode ?? false
@@ -261,13 +273,17 @@ export const useChatStore = defineStore('chat', () => {
     serverOnline.value = socket.connected
 
     socket.on(Events.NEW_MESSAGE, (msg: Message) => {
-      // 防止重复消息（Socket 重连时服务器会重发历史消息，或首次连接
-      // 时 joinSession 与 connect 事件可能先后触发 JOIN_SESSION）
+      // 防止重复消息
       if (messages.value.some((m) => m.id === msg.id)) return
       messages.value.push(msg)
-      // Agent 完成回复后清除打字状态，停止闪烁光标
+      // Agent 完成回复后清除打字状态
       if (msg.role === 'agent' && msg.agentId) {
         typingStates.value.delete(msg.agentId)
+      }
+      // 非活跃会话：递增未读计数
+      if (msg.sessionId !== activeSessionId.value) {
+        const current = unreadCounts.value.get(msg.sessionId) || 0
+        unreadCounts.value.set(msg.sessionId, current + 1)
       }
     })
 
@@ -383,6 +399,7 @@ export const useChatStore = defineStore('chat', () => {
     agentStates,
     agents,
     typingStates,
+    unreadCounts,
     loading,
     waitingForServer,
     dataReady,

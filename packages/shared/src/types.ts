@@ -41,6 +41,7 @@ export interface SessionConfig {
   broadcastMode: boolean           // true = Agent 可以看到其他 Agent 的回复
   createdAt: string                // ISO 8601
   updatedAt: string
+  unreadCount?: number             // 未读消息数（仅 GET /api/sessions 返回）
 }
 
 // ─── Message ────────────────────────────────────────

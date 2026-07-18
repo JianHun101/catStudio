@@ -1,4 +1,5 @@
 import { marked } from 'marked'
+import hljs from 'highlight.js'
 import DOMPurify from 'dompurify'
 
 /** Configure marked for safe, chat-friendly rendering */
@@ -7,12 +8,29 @@ marked.setOptions({
   gfm: true,          // GitHub Flavored Markdown
 })
 
+// Inject syntax highlighting via marked's extension system
+marked.use({
+  renderer: {
+    code({ text, lang }: { text: string; lang?: string }): string {
+      try {
+        if (lang && hljs.getLanguage(lang)) {
+          const result = hljs.highlight(text, { language: lang })
+          return `<pre><code class="hljs language-${lang}">${result.value}</code></pre>`
+        }
+        const result = hljs.highlightAuto(text)
+        return `<pre><code class="hljs">${result.value}</code></pre>`
+      } catch {
+        return `<pre><code>${text}</code></pre>`
+      }
+    },
+  },
+})
+
 /**
- * Render a raw markdown string to safe HTML.
+ * Render a raw markdown string to safe HTML with syntax highlighting.
  * The output is sanitized via DOMPurify to prevent XSS.
  */
 export function renderMarkdown(raw: string): string {
-  // Use the synchronous parse which returns a string in marked v5+
   const html = marked.parse(raw, { async: false }) as string
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [

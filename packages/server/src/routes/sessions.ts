@@ -46,7 +46,19 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/sessions', async () => {
     const db = getDb()
     const rows = db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as any[]
-    return rows.map(toSessionConfig)
+    return rows.map((row) => {
+      const session = toSessionConfig(row)
+      // Compute unread count: messages created after last_read_at
+      const readRow = db.prepare(
+        'SELECT last_read_at FROM session_read_state WHERE session_id = ?'
+      ).get(row.id) as any
+      const lastRead = readRow?.last_read_at || row.created_at
+      const countRow = db.prepare(
+        'SELECT COUNT(*) as cnt FROM messages WHERE session_id = ? AND created_at > ?'
+      ).get(row.id, lastRead) as any
+      session.unreadCount = countRow?.cnt || 0
+      return session
+    })
   })
 
   // ─── GET /api/sessions/:id — 获取会话详情 ───────────
@@ -126,6 +138,24 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       messagesRemoved: msgResult.changes,
       executionLogsRemoved: elogResult.changes,
     }
+  })
+
+  // ─── POST /api/sessions/:id/read — 标记已读 ──────────
+
+  app.post('/api/sessions/:id/read', async (req, reply) => {
+    const db = getDb()
+    const id = (req.params as any).id
+
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id)
+    if (!session) return reply.status(404).send({ error: 'Session not found' })
+
+    db.prepare(`
+      INSERT INTO session_read_state (session_id, last_read_at)
+      VALUES (?, datetime('now'))
+      ON CONFLICT(session_id) DO UPDATE SET last_read_at = datetime('now')
+    `).run(id)
+
+    return { ok: true }
   })
 
   // ─── DELETE /api/sessions/:id — 删除会话 ────────────

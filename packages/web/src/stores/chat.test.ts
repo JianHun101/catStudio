@@ -25,6 +25,7 @@ const mockCreateSession = vi.fn()
 const mockDeleteSession = vi.fn()
 const mockDeleteAgent = vi.fn()
 const mockUpdateAgent = vi.fn()
+const mockMarkSessionRead = vi.fn().mockResolvedValue({ ok: true })
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -34,6 +35,7 @@ vi.mock('@/composables/useApi', () => ({
     deleteSession: mockDeleteSession,
     deleteAgent: mockDeleteAgent,
     updateAgent: mockUpdateAgent,
+    markSessionRead: mockMarkSessionRead,
   },
 }))
 
@@ -261,6 +263,64 @@ describe('chatStore', () => {
       await store.updateAgent('a1', { name: '新名字' })
 
       expect(store.agents[0].name).toBe('新名字')
+    })
+  })
+
+  describe('unread counts', () => {
+    it('fetchData populates unreadCounts, then joinSession clears own', async () => {
+      // s1 is first → auto-joined → unread cleared; s2 keeps its count
+      const s1 = { ...mockSession, id: 's1', unreadCount: 3 }
+      const s2 = { ...mockSession, id: 's2', unreadCount: 7 }
+      mockGetAgents.mockResolvedValue([mockAgent])
+      mockGetSessions.mockResolvedValue([s1, s2])
+
+      await store.fetchData()
+
+      // s1 was auto-joined → unread cleared by joinSession
+      expect(store.unreadCounts.has('s1')).toBe(false)
+      // s2 was NOT joined → unread persists from server response
+      expect(store.unreadCounts.get('s2')).toBe(7)
+    })
+
+    it('NEW_MESSAGE increments unread for non-active sessions', () => {
+      store.activeSessionId = null // no active session → all new messages are unread
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.NEW_MESSAGE,
+      )?.[1] as ((msg: Message) => void) | undefined
+      expect(handler).toBeDefined()
+
+      handler!({ ...mockMessage, sessionId: 's1', id: 'm1' })
+      expect(store.unreadCounts.get('s1')).toBe(1)
+
+      handler!({ ...mockMessage, sessionId: 's1', id: 'm2' })
+      expect(store.unreadCounts.get('s1')).toBe(2)
+
+      handler!({ ...mockMessage, sessionId: 's2', id: 'm3' })
+      expect(store.unreadCounts.get('s2')).toBe(1)
+      expect(store.unreadCounts.get('s1')).toBe(2) // unchanged
+    })
+
+    it('NEW_MESSAGE does not increment unread for active session', () => {
+      store.activeSessionId = 's1'
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.NEW_MESSAGE,
+      )?.[1] as ((msg: Message) => void) | undefined
+      expect(handler).toBeDefined()
+
+      handler!({ ...mockMessage, sessionId: 's1', id: 'm1' })
+      // Active session → no unread increment
+      expect(store.unreadCounts.has('s1')).toBe(false)
+    })
+
+    it('joinSession clears unread count and calls markSessionRead', () => {
+      store.unreadCounts.set('s1', 5)
+      store.sessions = [mockSession]
+      store.agents = [mockAgent]
+
+      store.joinSession('s1')
+
+      expect(store.unreadCounts.has('s1')).toBe(false)
+      expect(mockMarkSessionRead).toHaveBeenCalledWith('s1')
     })
   })
 

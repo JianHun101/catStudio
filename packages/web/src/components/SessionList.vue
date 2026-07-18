@@ -77,6 +77,10 @@ async function handleDelete(id: string): Promise<void> {
               <span class="session-title">{{ s.title }}</span>
               <span class="session-meta">{{ s.agentIds.length }} 只猫咪</span>
             </div>
+            <span
+              v-if="store.unreadCounts.get(s.id) && store.activeSessionId !== s.id"
+              class="unread-badge"
+            >{{ store.unreadCounts.get(s.id)! > 99 ? '99+' : store.unreadCounts.get(s.id) }}</span>
           </button>
           <button
             class="session-delete"
@@ -263,6 +267,23 @@ async function handleDelete(id: string): Promise<void> {
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 1px;
+}
+
+/* ─── Unread Badge ──────────────────────── */
+
+.unread-badge {
+  flex-shrink: 0;
+  min-width: 20px;
+  height: 18px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--accent-red);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  white-space: nowrap;
 }
 
 /* ─── Delete Button ─────────────────────── */

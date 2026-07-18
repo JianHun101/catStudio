@@ -105,6 +105,12 @@ export function initDb(): void {
       FOREIGN KEY (session_id) REFERENCES sessions(id),
       FOREIGN KEY (agent_id) REFERENCES agents(id)
     );
+
+    CREATE TABLE IF NOT EXISTS session_read_state (
+      session_id TEXT PRIMARY KEY,
+      last_read_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
   `)
 
   // ─── 迁移 ─────────────────────────────────────────

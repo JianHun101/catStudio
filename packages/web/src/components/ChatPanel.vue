@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import type { Message } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
@@ -17,12 +17,139 @@ const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 const { mentionActive, mentionSuggestions, mentionIndex, detect, select, navigate } =
   useMention(() => store.agents)
 
+// ─── Time Formatting ───────────────────────
+
+function formatTime(isoString: string): string {
+  try {
+    const d = new Date(isoString)
+    if (isNaN(d.getTime())) return ''
+    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return ''
+  }
+}
+
+function formatDate(isoString: string): string {
+  try {
+    const d = new Date(isoString)
+    if (isNaN(d.getTime())) return ''
+    const now = new Date()
+    const isToday = d.toDateString() === now.toDateString()
+    if (isToday) return '今天'
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    if (d.toDateString() === yesterday.toDateString()) return '昨天'
+    return `${d.getMonth() + 1}月${d.getDate()}日`
+  } catch {
+    return ''
+  }
+}
+
+/** 哪些下标需要显示日期分隔线 */
+const dateSepIndices = computed(() => {
+  const indices = new Set<number>()
+  const msgs = store.activeMessages
+  for (let i = 0; i < msgs.length; i++) {
+    if (i === 0) {
+      indices.add(i)
+      continue
+    }
+    try {
+      const prevDate = new Date(msgs[i - 1].createdAt).toDateString()
+      const currDate = new Date(msgs[i].createdAt).toDateString()
+      if (prevDate !== currDate) indices.add(i)
+    } catch { /* ignore invalid dates */ }
+  }
+  return indices
+})
+
+// ─── Message Grouping ──────────────────────
+
+const GROUP_WINDOW_MS = 2 * 60 * 1000 // 2 minutes
+
+/** 当前消息是否与前一条消息合并显示（同发送者 + 2 分钟内） */
+function isGrouped(index: number): boolean {
+  if (index === 0) return false
+  const msgs = store.activeMessages
+  const prev = msgs[index - 1]
+  const curr = msgs[index]
+  if (curr.role === 'system' || prev.role === 'system') return false
+  if (curr.role !== prev.role) return false
+  if (curr.role === 'agent' && curr.agentId !== prev.agentId) return false
+  try {
+    const gap = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime()
+    return gap >= 0 && gap < GROUP_WINDOW_MS
+  } catch {
+    return false
+  }
+}
+
+// ─── Smart Scroll (stick-to-bottom) ─────────
+
+const SCROLL_TOLERANCE = 40
+const isAtBottom = ref(true)
+const showScrollDown = ref(false)
+
+function checkScrollPosition(): void {
+  const el = chatContainer.value
+  if (!el) return
+  const distToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  isAtBottom.value = distToBottom < SCROLL_TOLERANCE
+  showScrollDown.value = !isAtBottom.value && store.activeMessages.length > 0
+}
+
+function scrollToBottom(smooth = false): void {
+  const el = chatContainer.value
+  if (!el) return
+  el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+  isAtBottom.value = true
+  showScrollDown.value = false
+}
+
+// New messages arrive → scroll if at bottom
+watch(
+  () => store.activeMessages.length,
+  async () => {
+    await nextTick()
+    if (isAtBottom.value) scrollToBottom()
+  },
+)
+
+// Streaming content grows → follow if at bottom
+watch(
+  () => {
+    const contents: string[] = []
+    store.typingStates.forEach((v) => contents.push(v.content))
+    return contents.join('|')
+  },
+  async () => {
+    await nextTick()
+    if (isAtBottom.value) scrollToBottom()
+  },
+)
+
+// Active session changes → reset to bottom
+watch(
+  () => store.activeSessionId,
+  () => {
+    setTimeout(() => scrollToBottom(), 50)
+  },
+)
+
+onMounted(() => {
+  chatContainer.value?.addEventListener('scroll', checkScrollPosition, { passive: true })
+})
+
+onUnmounted(() => {
+  chatContainer.value?.removeEventListener('scroll', checkScrollPosition)
+})
+
+// ─── Existing helpers ──────────────────────
+
 async function handleClearMessages(): Promise<void> {
   if (!store.activeSessionId) return
-  // 两步确认
   if (!clearConfirm.value) {
     clearConfirm.value = true
-    // 3 秒后自动重置
     setTimeout(() => { clearConfirm.value = false }, 3000)
     return
   }
@@ -36,17 +163,6 @@ async function handleClearMessages(): Promise<void> {
     clearingMessages.value = false
   }
 }
-
-// Auto-scroll on new messages
-watch(
-  () => store.activeMessages.length,
-  async () => {
-    await nextTick()
-    if (chatContainer.value) {
-      chatContainer.value.scrollTop = chatContainer.value.scrollHeight
-    }
-  },
-)
 
 function onInput(e: Event): void {
   const ta = e.target as HTMLTextAreaElement
@@ -131,12 +247,10 @@ function senderName(agentId: string | null): string {
   return info?.name || agentId
 }
 
-/** 获取某条消息的 Agent 执行状态列表 */
 function statusForMessage(msgId: string) {
   return store.messageStatus.get(msgId) || []
 }
 
-/** 是否是当前 session 中最新一条用户消息 */
 function isLatestUserMessage(msg: Message): boolean {
   if (msg.role !== 'user') return false
   const userMsgs = store.activeMessages.filter((m) => m.role === 'user')
@@ -184,7 +298,6 @@ function statusLabelZh(status: string): string {
       <div class="chat-header-left">
         <h2 v-if="store.activeSession">{{ store.activeSession.title }}</h2>
         <span v-else class="placeholder">选择会话开始聊天</span>
-        <!-- 连接状态指示器 -->
         <span class="connection-dot" :class="{ online: store.serverOnline }" :title="store.serverOnline ? '已连接' : '连接断开'"></span>
       </div>
 
@@ -220,7 +333,7 @@ function statusLabelZh(status: string): string {
     </div>
 
     <!-- Messages -->
-    <div ref="chatContainer" class="chat-messages">
+    <div ref="chatContainer" class="chat-messages" @scroll.passive="checkScrollPosition">
       <div v-if="!store.activeSessionId" class="empty-state">
         <div class="empty-icon">🐱</div>
         <h3>欢迎来到 CatStudy</h3>
@@ -229,18 +342,41 @@ function statusLabelZh(status: string): string {
         <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>
       </div>
 
+      <!-- Scroll-to-bottom button -->
+      <Transition name="scroll-btn">
+        <button
+          v-if="showScrollDown"
+          class="scroll-down-btn"
+          @click="scrollToBottom(true)"
+          title="回到底部"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>新消息</span>
+        </button>
+      </Transition>
+
       <TransitionGroup name="msg">
         <div
-          v-for="msg in store.activeMessages"
+          v-for="(msg, i) in store.activeMessages"
           :key="msg.id"
           class="message"
-          :class="msg.role"
+          :class="[msg.role, { grouped: isGrouped(i) }]"
         >
-          <div class="msg-avatar">{{ avatarFor(msg.role, msg.agentId) }}</div>
+          <!-- Date separator -->
+          <div v-if="dateSepIndices.has(i)" class="date-separator">
+            <span>{{ formatDate(msg.createdAt) }}</span>
+          </div>
+
+          <div v-if="!isGrouped(i)" class="msg-avatar">{{ avatarFor(msg.role, msg.agentId) }}</div>
+          <div v-else class="msg-avatar msg-avatar-hidden">{{ avatarFor(msg.role, msg.agentId) }}</div>
+
           <div class="msg-body">
-            <div v-if="msg.role === 'agent'" class="msg-sender">{{ senderName(msg.agentId) }}</div>
+            <div v-if="msg.role === 'agent' && !isGrouped(i)" class="msg-sender">{{ senderName(msg.agentId) }}</div>
             <div class="msg-bubble">
               <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
+              <time class="msg-time" :datetime="msg.createdAt">{{ formatTime(msg.createdAt) }}</time>
             </div>
           </div>
 
@@ -259,7 +395,6 @@ function statusLabelZh(status: string): string {
               <span class="status-name">{{ s.agentName }}</span>
               <span class="status-label">{{ statusLabelZh(s.status) }}</span>
             </div>
-            <!-- Retract button (only on latest user message) -->
             <button
               v-if="isLatestUserMessage(msg)"
               class="btn-retract"
@@ -283,14 +418,13 @@ function statusLabelZh(status: string): string {
         <div class="msg-body">
           <div class="msg-sender">{{ senderName(agentId) }}</div>
           <div class="msg-bubble">
-            <!-- 文本段：正常渲染 markdown -->
             <template v-for="(seg, si) in parseThinkingBlocks(typing.content)" :key="si">
               <div v-if="seg.kind === 'text'" class="msg-text" v-html="renderMarkdown(seg.content)"></div>
-              <!-- 思考段：折叠展示 -->
               <details v-else class="thinking-block" :open="false">
                 <summary class="thinking-summary">
-                  <span class="thinking-icon">💭</span>
+                  <span class="thinking-icon">🐾</span>
                   <span class="thinking-label">思考过程</span>
+                  <span class="thinking-dots"><i></i><i></i><i></i></span>
                   <span class="thinking-chevron">▶</span>
                 </summary>
                 <div class="thinking-content" v-html="renderMarkdown(seg.content)"></div>
@@ -316,7 +450,6 @@ function statusLabelZh(status: string): string {
           @keydown="onKeydown"
         ></textarea>
 
-        <!-- Mention dropdown -->
         <div v-if="mentionActive && mentionSuggestions.length > 0" class="mention-dropdown">
           <div
             v-for="(agent, idx) in mentionSuggestions"
@@ -568,6 +701,7 @@ function statusLabelZh(status: string): string {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  position: relative;
 }
 
 /* Empty State */
@@ -607,6 +741,7 @@ function statusLabelZh(status: string): string {
 
 /* Message */
 .message {
+  position: relative;
   display: flex;
   gap: 10px;
   padding: 4px 0;
@@ -632,11 +767,27 @@ function statusLabelZh(status: string): string {
   padding: 8px 0;
 }
 
+/* ─── Message Grouping ──────────────────── */
+
+.message.grouped {
+  padding-top: 0;
+}
+
+.message.grouped .msg-bubble {
+  margin-top: 0;
+}
+
 .msg-avatar {
   font-size: 28px;
   flex-shrink: 0;
   line-height: 1;
   margin-top: 2px;
+  width: 28px;
+  text-align: center;
+}
+
+.msg-avatar-hidden {
+  visibility: hidden;
 }
 
 .msg-body {
@@ -658,6 +809,7 @@ function statusLabelZh(status: string): string {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  position: relative;
 }
 
 .message.user .msg-bubble {
@@ -679,6 +831,54 @@ function statusLabelZh(status: string): string {
   font-style: italic;
 }
 
+/* ─── Message Time ──────────────────────── */
+
+.msg-time {
+  display: block;
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  margin-top: 4px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.message.system .msg-time {
+  text-align: center;
+}
+
+/* ─── Date Separator ────────────────────── */
+
+.date-separator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 0 8px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+}
+
+.date-separator span {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.65;
+  background: var(--bg-deep);
+  padding: 2px 16px;
+  border-radius: 10px;
+}
+
+/* System messages don't need date separator positioning */
+.message.system .date-separator {
+  position: static;
+  padding: 0 0 4px;
+}
+
+.message.system .date-separator span {
+  background: transparent;
+}
+
 .msg-text {
   font-size: 14px;
   line-height: 1.65;
@@ -691,6 +891,51 @@ function statusLabelZh(status: string): string {
 }
 .msg-text :deep(p:last-child) {
   margin-bottom: 0;
+}
+
+/* ─── Scroll-to-bottom Button ───────────── */
+
+.scroll-down-btn {
+  position: sticky;
+  bottom: 12px;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border: 1px solid var(--border-default);
+  border-radius: 20px;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+  transition: all var(--ease-out);
+}
+
+.scroll-down-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+/* scroll-btn transition */
+.scroll-btn-enter-active {
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+}
+.scroll-btn-leave-active {
+  transition: opacity 0.15s ease-in, transform 0.15s ease-in;
+}
+.scroll-btn-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.scroll-btn-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
 }
 
 /* Typing */
@@ -720,22 +965,28 @@ function statusLabelZh(status: string): string {
 
 .thinking-block {
   margin: 6px 0;
-  border: 1px solid rgba(180, 160, 140, 0.25);
+  border: 1px solid rgba(180, 160, 140, 0.3);
   border-radius: var(--radius-sm);
   background: rgba(180, 160, 140, 0.06);
   overflow: hidden;
+  transition: border-color var(--ease-out), background var(--ease-out);
+}
+
+.thinking-block[open] {
+  border-color: rgba(180, 160, 140, 0.45);
+  background: rgba(180, 160, 140, 0.1);
 }
 
 .thinking-summary {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 7px 12px;
   cursor: pointer;
   user-select: none;
   font-size: 12px;
   color: var(--text-muted);
-  transition: background var(--ease-in);
+  transition: background var(--ease-in), color var(--ease-out);
   list-style: none; /* hide default <details> marker */
 }
 .thinking-summary::-webkit-details-marker {
@@ -744,15 +995,42 @@ function statusLabelZh(status: string): string {
 
 .thinking-summary:hover {
   background: rgba(180, 160, 140, 0.1);
+  color: var(--text-secondary);
 }
 
 .thinking-icon {
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1;
 }
 
 .thinking-label {
   flex: 1;
   font-weight: 500;
+}
+
+/* Animated dots while streaming */
+.thinking-dots {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  padding-bottom: 2px;
+  margin-right: 6px;
+}
+.thinking-dots i {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.5;
+  animation: dotPulse 1.4s ease-in-out infinite;
+}
+.thinking-dots i:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots i:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes dotPulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.2); }
 }
 
 .thinking-chevron {
@@ -766,11 +1044,11 @@ function statusLabelZh(status: string): string {
 }
 
 .thinking-content {
-  padding: 6px 10px 10px;
+  padding: 8px 12px 12px;
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-secondary);
-  border-top: 1px solid rgba(180, 160, 140, 0.15);
+  border-top: 1px solid rgba(180, 160, 140, 0.18);
 }
 
 /* ─── Input Area ────────────────────────── */
@@ -948,7 +1226,7 @@ function statusLabelZh(status: string): string {
 /* ─── Code blocks ───────────────────────── */
 
 .chat-panel .msg-text pre {
-  background: #1e1e2e;
+  background: #1a1714;
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
   padding: 12px 14px;
@@ -966,6 +1244,25 @@ function statusLabelZh(status: string): string {
   word-break: normal;
   white-space: pre;
 }
+
+/* ─── hljs classes (highlight.js injected by marked) ─── */
+
+.chat-panel .msg-text pre code .hljs-keyword { color: #cba6f7; }
+.chat-panel .msg-text pre code .hljs-string  { color: #a6e3a1; }
+.chat-panel .msg-text pre code .hljs-number  { color: #fab387; }
+.chat-panel .msg-text pre code .hljs-comment { color: #6c7086; font-style: italic; }
+.chat-panel .msg-text pre code .hljs-function { color: #89b4fa; }
+.chat-panel .msg-text pre code .hljs-title   { color: #89b4fa; }
+.chat-panel .msg-text pre code .hljs-type    { color: #f9e2af; }
+.chat-panel .msg-text pre code .hljs-attr    { color: #89dceb; }
+.chat-panel .msg-text pre code .hljs-built_in { color: #f38ba8; }
+.chat-panel .msg-text pre code .hljs-literal  { color: #fab387; }
+.chat-panel .msg-text pre code .hljs-params   { color: #f2cdcd; }
+.chat-panel .msg-text pre code .hljs-property { color: #89dceb; }
+.chat-panel .msg-text pre code .hljs-punctuation { color: #bac2de; }
+.chat-panel .msg-text pre code .hljs-regexp  { color: #f38ba8; }
+.chat-panel .msg-text pre code .hljs-meta    { color: #f9e2af; }
+.chat-panel .msg-text pre code .hljs-selector-class { color: #a6e3a1; }
 
 /* ─── Headings ──────────────────────────── */
 
@@ -1179,7 +1476,6 @@ function statusLabelZh(status: string): string {
   border-bottom: none;
 }
 
-/* 列对齐（GFM table 对齐语法 :--- :---: ---:） */
 .chat-panel .msg-text th[align="center"],
 .chat-panel .msg-text td[align="center"] {
   text-align: center;
@@ -1190,7 +1486,6 @@ function statusLabelZh(status: string): string {
   text-align: right;
 }
 
-/* 表头 */
 .chat-panel .msg-text thead th {
   background: var(--bg-hover);
   font-weight: 600;
@@ -1199,17 +1494,14 @@ function statusLabelZh(status: string): string {
   border-bottom: 2px solid var(--border-focus);
 }
 
-/* 斑马纹 */
 .chat-panel .msg-text tbody tr:nth-child(even) {
   background: rgba(127, 127, 127, 0.08);
 }
 
-/* 行悬停 */
 .chat-panel .msg-text tbody tr:hover {
   background: rgba(212, 165, 116, 0.12);
 }
 
-/* 表体行无额外背景时保持透明 */
 .chat-panel .msg-text tbody tr:first-child td {
   padding-top: 10px;
 }

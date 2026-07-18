@@ -90,4 +90,7 @@ export const api = {
 
   clearSessionMessages: (id: string) =>
     request<any>(`/sessions/${id}/messages`, { method: 'DELETE' }),
+
+  markSessionRead: (id: string) =>
+    request<{ ok: boolean }>(`/sessions/${id}/read`, { method: 'POST' }),
 }
