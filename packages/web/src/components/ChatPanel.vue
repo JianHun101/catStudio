@@ -129,7 +129,7 @@ watch(
 watch(
   () => {
     const contents: string[] = []
-    activeTypingStates.forEach((v) => contents.push(v.content))
+    activeTypingStates.value.forEach((v) => contents.push(v.content))
     return contents.join('|')
   },
   async () => {
