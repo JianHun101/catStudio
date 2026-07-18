@@ -55,9 +55,9 @@ onUnmounted(() => {
 
 <template>
   <div class="app-layout" :class="{ 'left-closed': !leftOpen, 'right-closed': !rightOpen }">
-    <aside class="panel-left" :class="{ closed: !leftOpen }">
+    <aside class="panel-left">
       <div class="panel-inner">
-        <SessionList />
+        <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />
       </div>
     </aside>
 
@@ -72,9 +72,9 @@ onUnmounted(() => {
       </div>
     </main>
 
-    <aside class="panel-right" :class="{ closed: !rightOpen }">
+    <aside class="panel-right">
       <div class="panel-inner">
-        <AgentPanel />
+        <AgentPanel :collapsed="!rightOpen" @expand="rightOpen = true" />
       </div>
     </aside>
   </div>
@@ -83,13 +83,24 @@ onUnmounted(() => {
 <style scoped>
 /* ─── Layout Grid ────────────────────────── */
 
-/* Grid 列宽永远不变，侧边栏折叠不推动中央窗口 */
 .app-layout {
   display: grid;
   grid-template-columns: 260px 1fr 300px;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+  transition: grid-template-columns 0.2s ease;
+}
+
+/* Collapsed: 56px icon column（参考 Claude Desktop 图标条） */
+.app-layout.left-closed {
+  grid-template-columns: 56px 1fr 300px;
+}
+.app-layout.right-closed {
+  grid-template-columns: 260px 1fr 56px;
+}
+.app-layout.left-closed.right-closed {
+  grid-template-columns: 56px 1fr 56px;
 }
 
 /* ─── Panels ─────────────────────────────── */
@@ -125,7 +136,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* Panel inner — hidden when closed */
+/* Panel inner — always flex, collapsed mode handled by child component */
 .panel-inner {
   flex: 1;
   display: flex;
@@ -133,10 +144,5 @@ onUnmounted(() => {
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
-}
-
-.panel-left.closed .panel-inner,
-.panel-right.closed .panel-inner {
-  display: none;
 }
 </style>

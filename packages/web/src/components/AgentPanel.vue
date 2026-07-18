@@ -4,6 +4,14 @@ import type { AgentConfig } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import AgentEditModal from './AgentEditModal.vue'
 
+defineProps<{
+  collapsed?: boolean
+}>()
+
+const emit = defineEmits<{
+  expand: []
+}>()
+
 const store = useChatStore()
 const editingAgent = ref<AgentConfig | null>(null)
 const showCreate = ref(false)
@@ -20,10 +28,14 @@ function agentQueue(agentId: string): number {
 
 function statusLabel(status: string): string {
   switch (status) {
-    case 'idle': return '空闲'
-    case 'thinking': return '思考中…'
-    case 'busy': return '回复中…'
-    default: return status
+    case 'idle':
+      return '空闲'
+    case 'thinking':
+      return '思考中…'
+    case 'busy':
+      return '回复中…'
+    default:
+      return status
   }
 }
 
@@ -33,6 +45,7 @@ function statusDot(status: string): string {
 
 function openCreate(): void {
   showCreate.value = true
+  emit('expand')
 }
 
 const newAgentForm = ref({
@@ -63,7 +76,15 @@ async function handleCreate(): Promise<void> {
       llmBaseUrl: newAgentForm.value.llmBaseUrl || undefined,
     })
     showCreate.value = false
-    newAgentForm.value = { name: '', avatar: '🐱', systemPrompt: '', llmProvider: 'claude', llmModel: 'deepseek-v4-pro', llmApiKey: '', llmBaseUrl: '' }
+    newAgentForm.value = {
+      name: '',
+      avatar: '🐱',
+      systemPrompt: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: '',
+      llmBaseUrl: '',
+    }
     await store.fetchData()
   } catch (err: any) {
     console.error('[AgentPanel] create agent failed:', err)
@@ -84,7 +105,42 @@ async function handleCreate(): Promise<void> {
 </script>
 
 <template>
-  <div class="agent-panel">
+  <!-- Collapsed: icon column -->
+  <div v-if="collapsed" class="agent-panel-collapsed">
+    <button class="collapsed-icon collapsed-add-agent" title="添加 Agent" @click="openCreate">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      </svg>
+    </button>
+
+    <div class="collapsed-agents">
+      <button
+        v-for="agent in store.agents"
+        :key="agent.id"
+        class="collapsed-agent-btn"
+        :title="agent.name"
+        @click="editingAgent = agent"
+      >
+        <span class="collapsed-agent-avatar">{{ agent.avatar }}</span>
+        <span class="collapsed-agent-dot" :class="statusDot(agentStatus(agent.id))"></span>
+      </button>
+    </div>
+
+    <button class="collapsed-icon collapsed-expand" title="展开 Agent 面板" @click="emit('expand')">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+        <path
+          d="M9 3l-5 4 5 4"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </button>
+  </div>
+
+  <!-- Expanded: full agent panel -->
+  <div v-else class="agent-panel">
     <!-- Header -->
     <div class="panel-header">
       <div class="header-left">
@@ -93,7 +149,12 @@ async function handleCreate(): Promise<void> {
       </div>
       <button class="btn-add" title="添加 Agent" @click="openCreate">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          <path
+            d="M8 3v10M3 8h10"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+          />
         </svg>
       </button>
     </div>
@@ -123,7 +184,12 @@ async function handleCreate(): Promise<void> {
 
         <div v-if="agentQueue(agent.id) > 0" class="card-queue">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <path d="M2 3.5h5M2 6h8M2 8.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            <path
+              d="M2 3.5h5M2 6h8M2 8.5h3"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+            />
           </svg>
           <span>队列 {{ agentQueue(agent.id) }} 条</span>
         </div>
@@ -163,14 +229,29 @@ async function handleCreate(): Promise<void> {
         <h4>新建 Agent</h4>
         <button class="btn-close-sm" @click="showCreate = false">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            <path
+              d="M3 3l8 8M11 3l-8 8"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
           </svg>
         </button>
       </div>
       <div class="create-body">
         <input v-model="newAgentForm.name" class="input" placeholder="猫咪名字" />
-        <input v-model="newAgentForm.llmApiKey" class="input input-mono" type="password" placeholder="API Key (sk-…)" />
-        <textarea v-model="newAgentForm.systemPrompt" class="input" rows="3" placeholder="角色设定…"></textarea>
+        <input
+          v-model="newAgentForm.llmApiKey"
+          class="input input-mono"
+          type="password"
+          placeholder="API Key (sk-…)"
+        />
+        <textarea
+          v-model="newAgentForm.systemPrompt"
+          class="input"
+          rows="3"
+          placeholder="角色设定…"
+        ></textarea>
       </div>
       <div class="create-footer">
         <span v-if="createError" class="error-text">{{ createError }}</span>
@@ -185,16 +266,21 @@ async function handleCreate(): Promise<void> {
     <div class="queue-section">
       <h4>
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-          <path d="M2 4.5h6M2 7h10M2 9.5h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <path
+            d="M2 4.5h6M2 7h10M2 9.5h4"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+          />
         </svg>
         调度队列
       </h4>
-      <div v-if="store.agentStateList.every(a => a.queueLength === 0)" class="queue-empty">
+      <div v-if="store.agentStateList.every((a) => a.queueLength === 0)" class="queue-empty">
         暂无排队任务
       </div>
       <div v-else class="queue-items">
         <div
-          v-for="s in store.agentStateList.filter(a => a.queueLength > 0)"
+          v-for="s in store.agentStateList.filter((a) => a.queueLength > 0)"
           :key="s.agentId"
           class="queue-item"
         >
@@ -209,7 +295,10 @@ async function handleCreate(): Promise<void> {
   <!-- Edit Modal -->
   <AgentEditModal
     :agent="editingAgent"
-    @close="editingAgent = null; store.fetchData()"
+    @close="
+      editingAgent = null
+      store.fetchData()
+    "
   />
 </template>
 
@@ -366,8 +455,13 @@ async function handleCreate(): Promise<void> {
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .status-label {
@@ -409,7 +503,9 @@ async function handleCreate(): Promise<void> {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .agent-status .status-icon {
@@ -653,5 +749,98 @@ async function handleCreate(): Promise<void> {
 .queue-count {
   color: var(--accent-yellow);
   font-weight: 500;
+}
+
+/* ─── Collapsed Icon Column ──────────────── */
+
+.agent-panel-collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  padding: 8px 0;
+  gap: 4px;
+}
+
+.agent-panel-collapsed .collapsed-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ease-out);
+}
+
+.agent-panel-collapsed .collapsed-icon:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.collapsed-add-agent {
+  margin-bottom: 8px;
+}
+
+.collapsed-agents {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 0 4px;
+}
+
+.collapsed-agent-btn {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ease-out);
+}
+
+.collapsed-agent-btn:hover {
+  background: var(--bg-hover);
+}
+
+.collapsed-agent-avatar {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.collapsed-agent-dot {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.collapsed-agent-dot.dot-idle {
+  background: var(--text-muted);
+}
+
+.collapsed-agent-dot.dot-busy {
+  background: var(--accent-yellow);
+  animation: pulse 2s infinite;
+}
+
+.agent-panel-collapsed .collapsed-expand {
+  margin-top: auto;
+  margin-bottom: 4px;
 }
 </style>

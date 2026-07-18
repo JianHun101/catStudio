@@ -3,6 +3,14 @@ import { ref, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import SessionCreateModal from './SessionCreateModal.vue'
 
+defineProps<{
+  collapsed?: boolean
+}>()
+
+const emit = defineEmits<{
+  expand: []
+}>()
+
 const store = useChatStore()
 const showCreate = ref(false)
 
@@ -21,7 +29,58 @@ async function handleDelete(id: string): Promise<void> {
 </script>
 
 <template>
-  <div class="session-list">
+  <!-- Collapsed: icon column（参考 Claude Desktop） -->
+  <div v-if="collapsed" class="session-list-collapsed">
+    <button class="collapsed-icon collapsed-brand" title="展开会话列表" @click="emit('expand')">
+      🐾
+    </button>
+
+    <div class="collapsed-sessions">
+      <button
+        v-for="s in store.sessions"
+        :key="s.id"
+        class="collapsed-session-btn"
+        :class="{ active: store.activeSessionId === s.id }"
+        :title="s.title"
+        @click="store.joinSession(s.id)"
+      >
+        <span class="collapsed-session-icon">💬</span>
+        <span
+          v-if="store.unreadCounts.get(s.id) && store.activeSessionId !== s.id"
+          class="collapsed-unread"
+        ></span>
+      </button>
+    </div>
+
+    <button class="collapsed-icon collapsed-add" title="新建会话" @click="showCreate = true">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      </svg>
+    </button>
+
+    <button class="collapsed-icon collapsed-expand" title="展开会话列表" @click="emit('expand')">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+        <path
+          d="M5 3l5 4-5 4"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </button>
+
+    <SessionCreateModal
+      v-if="showCreate"
+      @close="
+        showCreate = false
+        store.fetchData()
+      "
+    />
+  </div>
+
+  <!-- Expanded: full session list -->
+  <div v-else class="session-list">
     <!-- Brand -->
     <div class="brand">
       <span class="brand-icon">🐾</span>
@@ -62,11 +121,7 @@ async function handleDelete(id: string): Promise<void> {
 
       <!-- 正常会话列表 -->
       <div v-else class="session-items">
-        <div
-          v-for="s in store.sessions"
-          :key="s.id"
-          class="session-row"
-        >
+        <div v-for="s in store.sessions" :key="s.id" class="session-row">
           <button
             class="session-item"
             :class="{ active: store.activeSessionId === s.id }"
@@ -80,15 +135,18 @@ async function handleDelete(id: string): Promise<void> {
             <span
               v-if="store.unreadCounts.get(s.id) && store.activeSessionId !== s.id"
               class="unread-badge"
-            >{{ store.unreadCounts.get(s.id)! > 99 ? '99+' : store.unreadCounts.get(s.id) }}</span>
+              >{{ store.unreadCounts.get(s.id)! > 99 ? '99+' : store.unreadCounts.get(s.id) }}</span
+            >
           </button>
-          <button
-            class="session-delete"
-            title="删除会话"
-            @click="handleDelete(s.id)"
-          >
+          <button class="session-delete" title="删除会话" @click="handleDelete(s.id)">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M2 4h10M5 4V3a1 1 0 011-1h2a1 1 0 011 1v1M11 4v7a1 1 0 01-1 1H4a1 1 0 01-1-1V4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+              <path
+                d="M2 4h10M5 4V3a1 1 0 011-1h2a1 1 0 011 1v1M11 4v7a1 1 0 01-1 1H4a1 1 0 01-1-1V4"
+                stroke="currentColor"
+                stroke-width="1.3"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
             </svg>
           </button>
         </div>
@@ -104,13 +162,24 @@ async function handleDelete(id: string): Promise<void> {
     <div class="panel-footer">
       <button class="btn-new-session" @click="showCreate = true">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          <path
+            d="M8 3v10M3 8h10"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+          />
         </svg>
         <span>新建会话</span>
       </button>
     </div>
 
-    <SessionCreateModal v-if="showCreate" @close="showCreate = false; store.fetchData()" />
+    <SessionCreateModal
+      v-if="showCreate"
+      @close="
+        showCreate = false
+        store.fetchData()
+      "
+    />
   </div>
 </template>
 
@@ -380,7 +449,9 @@ async function handleDelete(id: string): Promise<void> {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .status-icon {
@@ -422,5 +493,111 @@ async function handleDelete(id: string): Promise<void> {
   padding: 24px;
   color: var(--text-muted);
   font-size: 12px;
+}
+
+/* ─── Collapsed Icon Column ──────────────── */
+
+.session-list-collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  padding: 8px 0;
+  gap: 4px;
+}
+
+.collapsed-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ease-out);
+}
+
+.collapsed-icon:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.collapsed-brand {
+  font-size: 22px;
+  margin-bottom: 8px;
+}
+
+.collapsed-sessions {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 0 4px;
+}
+
+.collapsed-session-btn {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ease-out);
+}
+
+.collapsed-session-btn:hover {
+  background: var(--bg-hover);
+}
+
+.collapsed-session-btn.active {
+  background: var(--bg-surface);
+}
+
+.collapsed-session-btn.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+
+.collapsed-session-icon {
+  font-size: 16px;
+  opacity: 0.7;
+}
+
+.collapsed-unread {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-red);
+}
+
+.collapsed-add {
+  margin-top: auto;
+  margin-bottom: 0;
+}
+
+.collapsed-expand {
+  margin-bottom: 4px;
+  color: var(--text-muted);
 }
 </style>
