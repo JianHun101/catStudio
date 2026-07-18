@@ -30,9 +30,26 @@ const { mentionActive, mentionSuggestions, mentionIndex, detect, select, navigat
 
 // ─── Time Formatting ───────────────────────
 
+/**
+ * 将各种来源的时间戳统一转为浏览器可正确解析的 UTC 字符串。
+ * - SQLite datetime('now') 格式 "YYYY-MM-DD HH:MM:SS"（无时区）→ 附加 Z
+ * - 已含 Z / +HH:MM 时区的 ISO 字符串 → 原样返回
+ * - 数字时间戳 → 转为 ISO 8601 UTC 字符串
+ */
+function normalizeDateTime(raw: string | number): string {
+  if (typeof raw === 'number') return new Date(raw).toISOString()
+  // 已有时区标记则原样返回
+  if (/[Z+\-]\d{2}:\d{2}$/.test(raw) || raw.endsWith('Z')) return raw
+  // SQLite 格式 "YYYY-MM-DD HH:MM:SS" → ISO 8601 UTC
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)) {
+    return raw.replace(' ', 'T') + 'Z'
+  }
+  return raw
+}
+
 function formatTime(isoString: string): string {
   try {
-    const d = new Date(isoString)
+    const d = new Date(normalizeDateTime(isoString))
     if (isNaN(d.getTime())) return ''
     return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
   } catch {
@@ -42,7 +59,7 @@ function formatTime(isoString: string): string {
 
 function formatDate(isoString: string): string {
   try {
-    const d = new Date(isoString)
+    const d = new Date(normalizeDateTime(isoString))
     if (isNaN(d.getTime())) return ''
     const now = new Date()
     const isToday = d.toDateString() === now.toDateString()
@@ -66,8 +83,8 @@ const dateSepIndices = computed(() => {
       continue
     }
     try {
-      const prevDate = new Date(msgs[i - 1].createdAt).toDateString()
-      const currDate = new Date(msgs[i].createdAt).toDateString()
+      const prevDate = new Date(normalizeDateTime(msgs[i - 1].createdAt)).toDateString()
+      const currDate = new Date(normalizeDateTime(msgs[i].createdAt)).toDateString()
       if (prevDate !== currDate) indices.add(i)
     } catch {
       /* ignore invalid dates */
@@ -100,7 +117,9 @@ function isGrouped(index: number): boolean {
   if (curr.role !== prev.role) return false
   if (curr.role === 'agent' && curr.agentId !== prev.agentId) return false
   try {
-    const gap = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime()
+    const gap =
+      new Date(normalizeDateTime(curr.createdAt)).getTime() -
+      new Date(normalizeDateTime(prev.createdAt)).getTime()
     return gap >= 0 && gap < GROUP_WINDOW_MS
   } catch {
     return false

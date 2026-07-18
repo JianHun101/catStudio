@@ -195,7 +195,7 @@ function toSessionConfig(row: any): SessionConfig {
     title: row.title,
     agentIds: JSON.parse(row.agent_ids || '[]'),
     broadcastMode: !!row.broadcast_mode,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: row.created_at.replace(' ', 'T') + 'Z',
+    updatedAt: row.updated_at.replace(' ', 'T') + 'Z',
   }
 }

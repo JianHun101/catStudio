@@ -341,7 +341,7 @@ export const useChatStore = defineStore('chat', () => {
             : '🔇 广播模式已关闭 — Agent 只能看到自己的回复和被 @ 的消息',
           agentId: null,
           mentions: [],
-          createdAt: Date.now(),
+          createdAt: new Date().toISOString(),
         } as any)
       }
     )

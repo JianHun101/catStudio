@@ -113,7 +113,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         content: row.content,
         mentions: JSON.parse(row.mentions || '[]'),
         taskId: row.task_id || undefined,
-        createdAt: row.created_at,
+        createdAt: row.created_at.replace(' ', 'T') + 'Z',
       }))
 
       // 生成欢迎消息（会话中猫咪列表提示）
