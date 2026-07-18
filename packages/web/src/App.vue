@@ -83,25 +83,13 @@ onUnmounted(() => {
 <style scoped>
 /* ─── Layout Grid ────────────────────────── */
 
+/* Grid 列宽永远不变，侧边栏折叠不推动中央窗口 */
 .app-layout {
   display: grid;
   grid-template-columns: 260px 1fr 300px;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  transition: grid-template-columns 0.25s ease;
-}
-
-.app-layout.left-closed {
-  grid-template-columns: 0px 1fr 300px;
-}
-
-.app-layout.right-closed {
-  grid-template-columns: 260px 1fr 0px;
-}
-
-.app-layout.left-closed.right-closed {
-  grid-template-columns: 0px 1fr 0px;
 }
 
 /* ─── Panels ─────────────────────────────── */
@@ -135,13 +123,6 @@ onUnmounted(() => {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-}
-
-/* 两侧都收起时约束最大宽度，保持文字可读（避免行长过长） */
-.app-layout.left-closed.right-closed .center-content {
-  max-width: 860px;
-  margin: 0 auto;
-  width: 100%;
 }
 
 /* Panel inner — hidden when closed */
