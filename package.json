@@ -15,10 +15,14 @@
     "test:coverage": "vitest run --coverage",
     "test:server": "pnpm --filter @cat-study/server test",
     "test:web": "pnpm --filter @cat-study/web test",
-    "test:shared": "pnpm --filter @cat-study/shared test"
+    "test:shared": "pnpm --filter @cat-study/shared test",
+    "prepare": "husky"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.1.9",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.8",
+    "prettier": "^3.9.5",
     "vitest": "^4.1.9"
   }
 }

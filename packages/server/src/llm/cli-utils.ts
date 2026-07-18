@@ -160,15 +160,15 @@ export function ensureProxy(apiKey: string): void {
     )
   }
 
-  const child = spawn('python', [
-    proxyScript,
-    '--upstream', 'https://api.deepseek.com',
-    '--port', String(PROXY_PORT),
-  ], {
-    stdio: 'ignore',
-    detached: true,
-    env: { ...process.env, DEEPSEEK_API_KEY: apiKey },
-  })
+  const child = spawn(
+    'python',
+    [proxyScript, '--upstream', 'https://api.deepseek.com', '--port', String(PROXY_PORT)],
+    {
+      stdio: 'ignore',
+      detached: true,
+      env: { ...process.env, DEEPSEEK_API_KEY: apiKey },
+    }
+  )
 
   child.unref()
 
@@ -186,9 +186,7 @@ export function ensureProxy(apiKey: string): void {
  * 同时也会产出 thinking 块的内容（前缀 "[思考] "），让前端在 Agent
  * 长时间推理时也能看到流式进度，避免用户以为 Agent 卡住了。
  */
-export async function* parseClaudeCodeOutput(
-  child: ChildProcess,
-): AsyncIterable<Chunk> {
+export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
 
   for await (const line of rl) {
@@ -216,9 +214,7 @@ export async function* parseClaudeCodeOutput(
  * 从 Codex CLI 的 NDJSON 输出流中提取文本 Chunk。
  * 格式: {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
  */
-export async function* parseCodexOutput(
-  child: ChildProcess,
-): AsyncIterable<Chunk> {
+export async function* parseCodexOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
 
   for await (const line of rl) {
@@ -319,7 +315,7 @@ export function attachExitError(child: ChildProcess, label: string): void {
 /** Supervisor 脚本路径（.mjs，与 cli-utils.ts 同目录） */
 const SUPERVISOR_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
-  'cli-supervisor.mjs',
+  'cli-supervisor.mjs'
 )
 
 /**
@@ -334,10 +330,10 @@ const SUPERVISOR_PATH = path.join(
 export function spawnSupervised(
   bin: string,
   args: string[],
-  opts: { env?: Record<string, string>; label: string; cwd?: string; input?: string },
+  opts: { env?: Record<string, string>; label: string; cwd?: string; input?: string }
 ): ChildProcess {
   const spawnOpts = {
-    stdio: ['pipe', 'pipe', 'pipe'] as const,
+    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
     shell: false,
     env: opts.env,
     cwd: opts.cwd,
@@ -368,11 +364,11 @@ export function spawnSupervised(
   // 将 input 通过 stdin 传入（避免 Windows 命令行 32K 限制）。
   // supervisor 会将 stdin 转发给 CLI 子进程；直接 spawn 时 CLI 直接读取。
   if (opts.input) {
-    child.stdin.write(opts.input)
-    child.stdin.end()
+    child.stdin!.write(opts.input)
+    child.stdin!.end()
   } else {
     // 没有 input 时也要关闭 stdin，避免 CLI 挂起等待输入。
-    child.stdin.end()
+    child.stdin!.end()
   }
 
   return child

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { v4 as uuid } from 'uuid'
-import { SessionCreateSchema, Events } from '@cat-study/shared'
+import { SessionCreateSchema, Events, type SessionConfig } from '@cat-study/shared'
 import { getDb } from '../db/index.js'
 import { getIO } from '../connectors/socketio.js'
 import { createLogger } from '../logger.js'
@@ -21,9 +21,9 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
     // 验证 Agent 是否存在
     const placeholders = agentIds.map(() => '?').join(',')
-    const existing = db.prepare(
-      `SELECT id FROM agents WHERE id IN (${placeholders})`
-    ).all(...agentIds) as any[]
+    const existing = db
+      .prepare(`SELECT id FROM agents WHERE id IN (${placeholders})`)
+      .all(...agentIds) as any[]
 
     if (existing.length !== agentIds.length) {
       return reply.status(400).send({
@@ -32,10 +32,12 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const id = uuid()
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO sessions (id, title, agent_ids)
       VALUES (?, ?, ?)
-    `).run(id, title, JSON.stringify(agentIds))
+    `
+    ).run(id, title, JSON.stringify(agentIds))
 
     const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any
     return reply.status(201).send(toSessionConfig(row))
@@ -49,13 +51,13 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     return rows.map((row) => {
       const session = toSessionConfig(row)
       // Compute unread count: messages created after last_read_at
-      const readRow = db.prepare(
-        'SELECT last_read_at FROM session_read_state WHERE session_id = ?'
-      ).get(row.id) as any
+      const readRow = db
+        .prepare('SELECT last_read_at FROM session_read_state WHERE session_id = ?')
+        .get(row.id) as any
       const lastRead = readRow?.last_read_at || row.created_at
-      const countRow = db.prepare(
-        'SELECT COUNT(*) as cnt FROM messages WHERE session_id = ? AND created_at > ?'
-      ).get(row.id, lastRead) as any
+      const countRow = db
+        .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ? AND created_at > ?')
+        .get(row.id, lastRead) as any
       session.unreadCount = countRow?.cnt || 0
       return session
     })
@@ -70,11 +72,12 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
     // 附带 Agent 详情
     const agentIds: string[] = JSON.parse(row.agent_ids || '[]')
-    const agents = agentIds.length > 0
-      ? db.prepare(
-          `SELECT * FROM agents WHERE id IN (${agentIds.map(() => '?').join(',')})`
-        ).all(...agentIds)
-      : []
+    const agents =
+      agentIds.length > 0
+        ? db
+            .prepare(`SELECT * FROM agents WHERE id IN (${agentIds.map(() => '?').join(',')})`)
+            .all(...agentIds)
+        : []
 
     return {
       ...toSessionConfig(row),
@@ -97,9 +100,11 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const body = req.body as any
     const newMode = body.broadcastMode ? 1 : 0
 
-    db.prepare(`
+    db.prepare(
+      `
       UPDATE sessions SET broadcast_mode = ?, updated_at = datetime('now') WHERE id = ?
-    `).run(newMode, id)
+    `
+    ).run(newMode, id)
 
     const updated = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any
     return toSessionConfig(updated)
@@ -149,11 +154,13 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id)
     if (!session) return reply.status(404).send({ error: 'Session not found' })
 
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO session_read_state (session_id, last_read_at)
       VALUES (?, datetime('now'))
       ON CONFLICT(session_id) DO UPDATE SET last_read_at = datetime('now')
-    `).run(id)
+    `
+    ).run(id)
 
     return { ok: true }
   })
@@ -182,7 +189,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   })
 }
 
-function toSessionConfig(row: any) {
+function toSessionConfig(row: any): SessionConfig {
   return {
     id: row.id,
     title: row.title,
