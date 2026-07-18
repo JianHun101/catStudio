@@ -51,9 +51,18 @@ function isParentAlive() {
 }
 
 // ─── 启动 CLI 子进程 ─────────────────────────────
+// stdin 使用 pipe（提示词可能超过 Windows 命令行 32K 限制，通过 stdin 传入），
+// stdout/stderr 使用 inherit 透传给父进程。
 const child = spawn(command, args, {
-  stdio: 'inherit',
+  stdio: ['pipe', 'inherit', 'inherit'],
   shell: false,
+})
+
+// 转发父进程（server）写入的 stdin 数据到 CLI 子进程。
+// pipe() 会在源流结束时自动结束目标流。
+process.stdin.pipe(child.stdin)
+process.stdin.on('error', () => {
+  child.stdin.end()
 })
 
 // 记录启动信息（写入父进程的 stderr，和 CLI 输出混在一起）

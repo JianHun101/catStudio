@@ -334,34 +334,46 @@ const SUPERVISOR_PATH = path.join(
 export function spawnSupervised(
   bin: string,
   args: string[],
-  opts: { env?: Record<string, string>; label: string; cwd?: string },
+  opts: { env?: Record<string, string>; label: string; cwd?: string; input?: string },
 ): ChildProcess {
   const spawnOpts = {
-    stdio: ['ignore', 'pipe', 'pipe'] as const,
+    stdio: ['pipe', 'pipe', 'pipe'] as const,
     shell: false,
     env: opts.env,
     cwd: opts.cwd,
   }
 
+  // 选择通过 supervisor 或直接 spawn
+  let child: ChildProcess
   if (!fs.existsSync(SUPERVISOR_PATH)) {
     log.warn(`${opts.label} supervisor 脚本缺失，回退到直接 spawn`, { path: SUPERVISOR_PATH })
-    return spawn(bin, args, spawnOpts)
+    child = spawn(bin, args, spawnOpts)
+  } else {
+    child = spawn(process.execPath, [SUPERVISOR_PATH, '--', bin, ...args], {
+      ...spawnOpts,
+      env: {
+        ...opts.env,
+        ...process.env,
+        CATSTUDY_SUPERVISOR_PARENT_PID: String(process.pid),
+      },
+    })
+
+    log.info(`${opts.label} supervisor 启动`, {
+      supervisorPid: child.pid,
+      bin,
+      parentPid: process.pid,
+    })
   }
 
-  const child = spawn(process.execPath, [SUPERVISOR_PATH, '--', bin, ...args], {
-    ...spawnOpts,
-    env: {
-      ...opts.env,
-      ...process.env,
-      CATSTUDY_SUPERVISOR_PARENT_PID: String(process.pid),
-    },
-  })
-
-  log.info(`${opts.label} supervisor 启动`, {
-    supervisorPid: child.pid,
-    bin,
-    parentPid: process.pid,
-  })
+  // 将 input 通过 stdin 传入（避免 Windows 命令行 32K 限制）。
+  // supervisor 会将 stdin 转发给 CLI 子进程；直接 spawn 时 CLI 直接读取。
+  if (opts.input) {
+    child.stdin.write(opts.input)
+    child.stdin.end()
+  } else {
+    // 没有 input 时也要关闭 stdin，避免 CLI 挂起等待输入。
+    child.stdin.end()
+  }
 
   return child
 }

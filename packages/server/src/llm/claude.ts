@@ -69,16 +69,19 @@ export class ClaudeAdapter implements LLMAdapter {
     const prompt = messagesToPrompt(messages)
     const env = this.buildEnv()
 
-    log.info('启动 Claude Code CLI', { model: this.model })
+    log.info('启动 Claude Code CLI', { model: this.model, promptLen: prompt.length })
 
+    // 将 prompt 通过 stdin 传入，避免 Windows 命令行 32K 限制。
+    // -p - 告诉 Claude CLI 从 stdin 读取提示词。
     const child = spawnSupervised(CLAUDE_BIN, [
-      '-p', prompt,
+      '-p', '-',
       '--output-format', 'stream-json',
       '--verbose',
       '--permission-mode', 'bypassPermissions',
     ], {
       env,
       label: 'claude',
+      input: prompt,
     })
 
     // ─── Abort 处理：收到取消信号时 kill 子进程 ───
