@@ -61,37 +61,7 @@ onUnmounted(() => {
       </div>
     </aside>
 
-    <!--
-      Toggle buttons live in the center panel as thin edge strips.
-      This avoids position:absolute overlap with sidebar content (delete buttons)
-      and ensures the restore handle is always findable — no 6px invisible strips.
-    -->
     <main class="panel-center">
-      <button
-        class="edge-toggle edge-toggle-left"
-        @click="toggleLeft"
-        :title="leftOpen ? '收起会话列表' : '展开会话列表'"
-      >
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
-          <path
-            v-if="leftOpen"
-            d="M9 3L5 7l4 4"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-          <path
-            v-else
-            d="M5 3l4 4-4 4"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-      </button>
-
       <div class="center-content">
         <ChatPanel
           :left-sidebar-open="leftOpen"
@@ -100,31 +70,6 @@ onUnmounted(() => {
           @toggle-right-sidebar="toggleRight"
         />
       </div>
-
-      <button
-        class="edge-toggle edge-toggle-right"
-        @click="toggleRight"
-        :title="rightOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
-      >
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
-          <path
-            v-if="rightOpen"
-            d="M5 3l4 4-4 4"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-          <path
-            v-else
-            d="M9 3L5 7l4 4"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-      </button>
     </main>
 
     <aside class="panel-right" :class="{ closed: !rightOpen }">
@@ -179,7 +124,7 @@ onUnmounted(() => {
 
 .panel-center {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   overflow: hidden;
   background: var(--bg-deep);
 }
@@ -205,86 +150,5 @@ onUnmounted(() => {
 .panel-left.closed .panel-inner,
 .panel-right.closed .panel-inner {
   display: none;
-}
-
-/* ─── Edge Toggle Buttons ────────────────── */
-/*
- * Thin strips at the left/right edges of the center panel.
- * Default 10px with faint chevron — always visible as a subtle divider.
- * Hover expands to 24px showing the full chevron.
- * These live in the center panel so they NEVER overlap sidebar content
- * (delete buttons, session list, agent cards) and are ALWAYS findable
- * when a sidebar is collapsed.
- */
-
-.edge-toggle {
-  flex-shrink: 0;
-  width: 10px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  transition:
-    width 0.15s ease,
-    background 0.15s ease,
-    color 0.15s ease,
-    border-color 0.15s ease;
-}
-
-.edge-toggle svg {
-  flex-shrink: 0;
-  opacity: 0.5;
-  transition: opacity 0.12s ease;
-}
-
-/* ─── Left toggle: between left panel and center content ─── */
-
-.edge-toggle-left {
-  border-right: 1px solid transparent;
-}
-
-.edge-toggle-left:hover {
-  width: 24px;
-  background: var(--bg-surface);
-  color: var(--accent);
-  border-right-color: var(--border-default);
-}
-
-.edge-toggle-left:hover svg {
-  opacity: 1;
-}
-
-/* ─── Right toggle: between center content and right panel ─── */
-
-.edge-toggle-right {
-  border-left: 1px solid transparent;
-}
-
-.edge-toggle-right:hover {
-  width: 24px;
-  background: var(--bg-surface);
-  color: var(--accent);
-  border-left-color: var(--border-default);
-}
-
-.edge-toggle-right:hover svg {
-  opacity: 1;
-}
-
-/* ─── Chevron direction hint when collapsed ─── */
-/* When sidebar is closed, show a faint chevron so the user knows it's there */
-
-.app-layout.left-closed .edge-toggle-left svg,
-.app-layout.right-closed .edge-toggle-right svg {
-  opacity: 0.7;
-}
-
-.app-layout.left-closed .edge-toggle-left,
-.app-layout.right-closed .edge-toggle-right {
-  color: var(--accent);
 }
 </style>
