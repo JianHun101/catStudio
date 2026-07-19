@@ -38,10 +38,11 @@ async function generateFullSummary(sessionId: string, db: Database.Database): Pr
        FROM messages m
        LEFT JOIN agents a ON m.agent_id = a.id
        WHERE m.session_id = ? AND m.role != 'system'
-       ORDER BY m.created_at ASC
-       LIMIT 200`
+       ORDER BY m.created_at DESC
+       LIMIT 500`
     )
     .all(sessionId) as any[]
+  allMessages.reverse() // 恢复时间正序
 
   const conversationText = allMessages
     .map((m: any) => {
@@ -178,7 +179,7 @@ export function shouldHandoff(currentTokens: number): boolean {
   const enabled = process.env.HANDOFF_ENABLED !== 'false'
   if (!enabled) return false
 
-  const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '64000', 10)
+  const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
   const threshold = parseFloat(process.env.HANDOFF_THRESHOLD || '0.9')
   return currentTokens >= maxTokens * threshold
 }

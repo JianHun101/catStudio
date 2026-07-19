@@ -764,18 +764,21 @@ async function runAgentReply(
   })
 
   // 构建对话上下文：只包含与该 Agent 相关的消息
+  // 按时间倒序取最近消息（generous safety limit），后续用 token 预算做软截断
   const allMessages = db
     .prepare(
       `
     SELECT * FROM messages
     WHERE session_id = ? AND role != 'system'
-    ORDER BY created_at ASC
-    LIMIT 100
+    ORDER BY created_at DESC
+    LIMIT 500
   `
     )
     .all(sessionId) as any[]
+  // 反转为时间正序，后续过滤和截断都按时间顺序处理
+  allMessages.reverse()
 
-  // 加载同一 taskId 的完整历史（跨越 LIMIT 100 的限制）
+  // 加载同一 taskId 的完整历史（跨越消息加载限制，按 token 预算合并）
   const taskHistory: any[] = []
   if (triggerMsg.taskId) {
     const loadedIds = new Set(allMessages.map((m: any) => m.id))
@@ -784,11 +787,12 @@ async function runAgentReply(
         `
       SELECT * FROM messages
       WHERE task_id = ? AND session_id = ?
-      ORDER BY created_at ASC
-      LIMIT 200
+      ORDER BY created_at DESC
+      LIMIT 500
     `
       )
       .all(triggerMsg.taskId, sessionId) as any[]
+    taskMsgs.reverse() // 恢复时间正序
     for (const m of taskMsgs) {
       if (!loadedIds.has(m.id)) {
         taskHistory.push(m)
@@ -846,7 +850,36 @@ async function runAgentReply(
     }
   }
 
+  // ── Token 感知软截断 ──────────────────────────────────
+  // 从最新到最旧累加 token，超出预算的消息丢弃（不再用硬编码 LIMIT 100）
+  const MAX_CONTEXT = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
+  // 70% 预算给消息原文，30% 留给 system prompt / 摘要 / 记忆
+  const MESSAGE_BUDGET = Math.floor(MAX_CONTEXT * 0.7)
+  let tokenAccum = 0
+  const truncatedMessages: typeof relevantMessages = []
+  for (let i = relevantMessages.length - 1; i >= 0; i--) {
+    const msgTokens = estimateTokens(relevantMessages[i].content) + 50 // role 前缀开销
+    if (tokenAccum + msgTokens > MESSAGE_BUDGET) break
+    tokenAccum += msgTokens
+    truncatedMessages.push(relevantMessages[i])
+  }
+  truncatedMessages.reverse() // 恢复时间正序
+
+  log.info('token-aware truncation applied', {
+    traceId,
+    agentId: agent.id,
+    beforeTruncation: relevantMessages.length,
+    afterTruncation: truncatedMessages.length,
+    messageTokensUsed: tokenAccum,
+    messageBudget: MESSAGE_BUDGET,
+    maxContext: MAX_CONTEXT,
+  })
+
   // 动态组装 system prompt: 铁律（basePrompt）+ 按需加载的操作规则
+
+  // 注意：下方 llmMessages 构建使用 truncatedMessages 替代原来的 relevantMessages
+  //       将 relevantMessages 替换为 truncatedMessages
+  const _truncated = truncatedMessages
   const skillModules = AGENT_SKILL_MODULES[agent.name] || []
   const { prompt: dynamicSystemPrompt, matchedSkills } = SkillLoader.getInstance().matchAndBuild(
     agent.systemPrompt,
@@ -863,8 +896,8 @@ async function runAgentReply(
 
   const llmMessages: LLMMessage[] = [
     { role: 'system', content: dynamicSystemPrompt },
-    ...relevantMessages.map((m: any, idx: number) => {
-      const isLast = idx === relevantMessages.length - 1
+    ..._truncated.map((m: any, idx: number) => {
+      const isLast = idx === _truncated.length - 1
 
       if (m.role === 'agent') {
         if (m.agent_id === agent.id) {
@@ -904,7 +937,9 @@ async function runAgentReply(
     traceId,
     agentId: agent.id,
     totalMessages: combinedMessages.length,
-    relevantMessages: relevantMessages.length,
+    relevantBeforeTruncation: relevantMessages.length,
+    relevantAfterTruncation: _truncated.length,
+    truncationMsgTokens: tokenAccum,
     contextChars: llmMessages.reduce((sum, m) => sum + m.content.length, 0),
     contextTokens: contextTokenStats.total,
     systemTokens: contextTokenStats.systemTokens,
@@ -919,7 +954,7 @@ async function runAgentReply(
       traceId,
       agentId: agent.id,
       contextTokens: contextTokenStats.total,
-      maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS || '64000', 10),
+      maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10),
     })
     // 异步触发交接，不 await — 当前回复在旧会话中继续
     performHandoff(sessionId, io, db).catch((err) => {
@@ -1073,7 +1108,7 @@ async function runAgentReply(
     promptLen: estimatedPromptLen,
     promptTokens,
     replyTokens: estimateTokens(fullContent),
-    contextMessages: relevantMessages.length,
+    contextMessages: _truncated.length,
   })
 
   // 短回复检测：上下文较大但回复极短 → CLI 可能静默失败
@@ -1084,7 +1119,7 @@ async function runAgentReply(
       agentName: agent.name,
       replyLen: fullContent.length,
       promptLen: estimatedPromptLen,
-      contextMessages: relevantMessages.length,
+      contextMessages: _truncated.length,
       latencyMs,
       replyPreview: fullContent.slice(0, 200),
     })

@@ -62,9 +62,10 @@ function loadEnvFile(): void {
 
 // ─── Token 预算配置 ──────────────────────────────
 // MAX_CONTEXT_TOKENS — 单次 LLM 调用的上下文 token 预算上限
-//   默认 64000（DeepSeek V4 1M 上下文窗口的保守值，仅占 6.4%）
+//   默认 128000（DeepSeek V4 1M 上下文窗口的保守值，仅占 12.8%）
+//   控制：交接触发阈值（90%）、前端进度条、token 感知软截断预算
 //   Claude Code CLI 适配器会在内部被限制为字符估算（不使用 tiktoken）
-process.env.MAX_CONTEXT_TOKENS ??= '64000'
+process.env.MAX_CONTEXT_TOKENS ??= '128000'
 
 // TOKEN_COUNT_METHOD — token 计数方式
 //   'estimate' (默认) — 字符估算，零依赖，所有适配器通用
