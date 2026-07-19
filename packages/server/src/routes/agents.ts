@@ -115,7 +115,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
     if (!agent) return reply.status(404).send({ error: 'Agent not found' })
 
-    const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '6000', 10)
+    const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '64000', 10)
 
     // 累计统计（所有调用）
     const totals = db

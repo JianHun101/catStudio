@@ -178,7 +178,7 @@ export function shouldHandoff(currentTokens: number): boolean {
   const enabled = process.env.HANDOFF_ENABLED !== 'false'
   if (!enabled) return false
 
-  const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '6000', 10)
+  const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '64000', 10)
   const threshold = parseFloat(process.env.HANDOFF_THRESHOLD || '0.9')
   return currentTokens >= maxTokens * threshold
 }

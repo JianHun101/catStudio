@@ -919,7 +919,7 @@ async function runAgentReply(
       traceId,
       agentId: agent.id,
       contextTokens: contextTokenStats.total,
-      maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS || '6000', 10),
+      maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS || '64000', 10),
     })
     // 异步触发交接，不 await — 当前回复在旧会话中继续
     performHandoff(sessionId, io, db).catch((err) => {
