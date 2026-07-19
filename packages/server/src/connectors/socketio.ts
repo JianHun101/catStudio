@@ -877,9 +877,6 @@ async function runAgentReply(
 
   // 动态组装 system prompt: 铁律（basePrompt）+ 按需加载的操作规则
 
-  // 注意：下方 llmMessages 构建使用 truncatedMessages 替代原来的 relevantMessages
-  //       将 relevantMessages 替换为 truncatedMessages
-  const _truncated = truncatedMessages
   const skillModules = AGENT_SKILL_MODULES[agent.name] || []
   const { prompt: dynamicSystemPrompt, matchedSkills } = SkillLoader.getInstance().matchAndBuild(
     agent.systemPrompt,
@@ -896,8 +893,8 @@ async function runAgentReply(
 
   const llmMessages: LLMMessage[] = [
     { role: 'system', content: dynamicSystemPrompt },
-    ..._truncated.map((m: any, idx: number) => {
-      const isLast = idx === _truncated.length - 1
+    ...truncatedMessages.map((m: any, idx: number) => {
+      const isLast = idx === truncatedMessages.length - 1
 
       if (m.role === 'agent') {
         if (m.agent_id === agent.id) {
@@ -938,7 +935,7 @@ async function runAgentReply(
     agentId: agent.id,
     totalMessages: combinedMessages.length,
     relevantBeforeTruncation: relevantMessages.length,
-    relevantAfterTruncation: _truncated.length,
+    relevantAfterTruncation: truncatedMessages.length,
     truncationMsgTokens: tokenAccum,
     contextChars: llmMessages.reduce((sum, m) => sum + m.content.length, 0),
     contextTokens: contextTokenStats.total,
@@ -1108,7 +1105,7 @@ async function runAgentReply(
     promptLen: estimatedPromptLen,
     promptTokens,
     replyTokens: estimateTokens(fullContent),
-    contextMessages: _truncated.length,
+    contextMessages: truncatedMessages.length,
   })
 
   // 短回复检测：上下文较大但回复极短 → CLI 可能静默失败
@@ -1119,7 +1116,7 @@ async function runAgentReply(
       agentName: agent.name,
       replyLen: fullContent.length,
       promptLen: estimatedPromptLen,
-      contextMessages: _truncated.length,
+      contextMessages: truncatedMessages.length,
       latencyMs,
       replyPreview: fullContent.slice(0, 200),
     })
