@@ -48,6 +48,11 @@ function openCreate(): void {
   emit('expand')
 }
 
+function closeEdit(): void {
+  editingAgent.value = null
+  store.fetchData()
+}
+
 const newAgentForm = ref({
   name: '',
   avatar: '🐱',
@@ -293,13 +298,7 @@ async function handleCreate(): Promise<void> {
   </div>
 
   <!-- Edit Modal -->
-  <AgentEditModal
-    :agent="editingAgent"
-    @close="
-      editingAgent = null
-      store.fetchData()
-    "
-  />
+  <AgentEditModal :agent="editingAgent" @close="closeEdit" />
 </template>
 
 <style scoped>
