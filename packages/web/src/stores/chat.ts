@@ -433,6 +433,41 @@ export const useChatStore = defineStore('chat', () => {
         state.queueLength = data.queueLength
       }
     })
+
+    // 会话交接：前端收到后无缝切换到新会话
+    socket.on(
+      Events.SESSION_HANDOFF,
+      (data: { oldSessionId: string; newSessionId: string; summary: string }) => {
+        // 异步拉取新会话的完整信息并加入列表
+        api
+          .getSession(data.newSessionId)
+          .then((newSession) => {
+            // 添加到会话列表
+            const exists = sessions.value.some((s) => s.id === newSession.id)
+            if (!exists) {
+              sessions.value.unshift(newSession)
+            }
+            // 自动切换到新会话
+            if (activeSessionId.value === data.oldSessionId) {
+              joinSession(newSession.id)
+              // 插入系统消息提示交接
+              const handoffMsg: Message = {
+                id: `handoff-${Date.now()}`,
+                sessionId: newSession.id,
+                role: 'system',
+                content: `📋 对话已续接。以下是此前的对话摘要：\n\n${data.summary}`,
+                agentId: null,
+                mentions: [],
+                createdAt: new Date().toISOString(),
+              }
+              messages.value.push(handoffMsg)
+            }
+          })
+          .catch((err) => {
+            console.warn('[store] failed to load handoff session', err)
+          })
+      }
+    )
   }
 
   // 初始化时绑定

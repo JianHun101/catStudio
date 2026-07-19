@@ -37,6 +37,8 @@ import {
 import type { AgentConfig, LLMMessage, Message } from '@cat-study/shared'
 import { parseMentionsFromReply } from './a2a-mentions.js'
 import { SkillLoader } from '../skills/skill-loader.js'
+import { updateRunningSummary } from '../summarizer/index.js'
+import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
 
 const log = createLogger('socketio')
 
@@ -715,6 +717,15 @@ async function executeAgentsSerial(
         releaseLock()
       }
     }
+
+    // 增量摘要：异步更新运行中的会话摘要（fire-and-forget，不阻塞后续对话）
+    updateRunningSummary(sessionId, db).catch((err) => {
+      log.warn('incremental summary failed (non-blocking)', {
+        traceId,
+        sessionId,
+        error: err.message,
+      })
+    })
   }
 }
 
@@ -900,6 +911,52 @@ async function runAgentReply(
     userTokens: contextTokenStats.userTokens,
     assistantTokens: contextTokenStats.assistantTokens,
   })
+
+  // ── 会话交接检查 ──────────────────────────────────
+  // 当上下文 token 达到 90% 阈值时，异步触发交接（不阻塞当前回复）
+  if (shouldHandoff(contextTokenStats.total)) {
+    log.info('handoff threshold reached, triggering handoff', {
+      traceId,
+      agentId: agent.id,
+      contextTokens: contextTokenStats.total,
+      maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS || '6000', 10),
+    })
+    // 异步触发交接，不 await — 当前回复在旧会话中继续
+    performHandoff(sessionId, io, db).catch((err) => {
+      log.warn('handoff failed (non-blocking)', {
+        traceId,
+        sessionId,
+        error: err.message,
+      })
+    })
+  }
+
+  // ── 注入增量摘要到 system prompt ──────────────────
+  // 从当前会话读取运行中的摘要，注入到 system prompt 顶部
+  const sessionMeta = db
+    .prepare('SELECT running_summary FROM sessions WHERE id = ?')
+    .get(sessionId) as any
+  if (sessionMeta?.running_summary) {
+    const enhancedPrompt = injectSummaryIntoSystem(
+      llmMessages[0].content,
+      sessionMeta.running_summary
+    )
+    if (enhancedPrompt !== llmMessages[0].content) {
+      llmMessages[0] = { ...llmMessages[0], content: enhancedPrompt }
+      const summaryLen = (() => {
+        try {
+          return JSON.parse(sessionMeta.running_summary)?.text?.length || 0
+        } catch {
+          return 0
+        }
+      })()
+      log.info('running summary injected', {
+        traceId,
+        agentId: agent.id,
+        summaryChars: summaryLen,
+      })
+    }
+  }
 
   // 检索相关记忆并注入 system prompt（带超时，不阻塞 LLM 调用）
   const MEMORY_TIMEOUT_MS = 10_000

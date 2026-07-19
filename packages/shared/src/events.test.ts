@@ -31,8 +31,8 @@ describe('Events', () => {
     expect(Events.MESSAGE_RETRACT).toBe('message-retract')
   })
 
-  it('has exactly 20 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(20)
+  it('has exactly 21 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(21)
   })
 })
 

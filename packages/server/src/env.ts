@@ -71,4 +71,29 @@ process.env.MAX_CONTEXT_TOKENS ??= '6000'
 //   'tiktoken' — 精确计数，需安装 tiktoken 包，仅用于 DeepSeek HTTP 适配器
 process.env.TOKEN_COUNT_METHOD ??= 'estimate'
 
+// ─── 上下文压缩配置 ──────────────────────────────
+// SUMMARY_ENABLED — 是否启用增量摘要
+//   每轮对话后异步更新运行中的会话摘要，减少旧消息 token 消耗
+process.env.SUMMARY_ENABLED ??= 'true'
+
+// SUMMARY_MODEL — 摘要使用的模型（应使用便宜模型以降低成本）
+//   deepseek-chat: $0.14/1M input tokens
+process.env.SUMMARY_MODEL ??= 'deepseek-chat'
+
+// SUMMARY_API_KEY — 摘要模型的 API Key（默认复用 DS_KEY）
+process.env.SUMMARY_API_KEY ??= process.env.DS_KEY || ''
+
+// SUMMARY_BASE_URL — 摘要 API 地址
+process.env.SUMMARY_BASE_URL ??= 'https://api.deepseek.com'
+
+// SUMMARY_INTERVAL — 每 N 轮对话触发一次增量摘要（默认 3）
+process.env.SUMMARY_INTERVAL ??= '3'
+
+// ─── 会话交接配置 ──────────────────────────────
+// HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
+process.env.HANDOFF_ENABLED ??= 'true'
+
+// HANDOFF_THRESHOLD — 触发交接的上下文 token 占比（默认 0.9 = 90%）
+process.env.HANDOFF_THRESHOLD ??= '0.9'
+
 loadEnvFile()

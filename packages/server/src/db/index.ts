@@ -168,6 +168,18 @@ export function initDb(): void {
       name: 'completion_tokens on execution_logs',
       sql: `ALTER TABLE execution_logs ADD COLUMN completion_tokens INTEGER`,
     },
+    {
+      name: 'running_summary on sessions',
+      sql: `ALTER TABLE sessions ADD COLUMN running_summary TEXT`,
+    },
+    {
+      name: 'handoff_from on sessions',
+      sql: `ALTER TABLE sessions ADD COLUMN handoff_from TEXT`,
+    },
+    {
+      name: 'summary_msg_id on sessions',
+      sql: `ALTER TABLE sessions ADD COLUMN summary_msg_id TEXT`,
+    },
   ]
 
   for (const m of migrations) {

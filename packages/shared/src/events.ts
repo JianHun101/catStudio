@@ -37,6 +37,9 @@ export const Events = {
 
   // 服务器 → 客户端：会话历史消息批量加载（替换逐条 NEW_MESSAGE）
   SESSION_HISTORY: 'session-history',
+
+  // 服务器 → 客户端：会话交接通知（前端切换 session）
+  SESSION_HANDOFF: 'session-handoff',
 } as const
 
 // ─── Redis Channel Patterns ─────────────────────────

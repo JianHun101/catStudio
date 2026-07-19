@@ -42,6 +42,10 @@ export interface SessionConfig {
   createdAt: string // ISO 8601
   updatedAt: string
   unreadCount?: number // 未读消息数（仅 GET /api/sessions 返回）
+  /** 交接来源会话 ID（会话由 handoff 创建时非空） */
+  handoffFrom?: string | null
+  /** 运行中的增量摘要（JSON 字符串，SessionSummary） */
+  runningSummary?: string | null
 }
 
 // ─── Message ────────────────────────────────────────
@@ -132,4 +136,26 @@ export interface Chunk {
   done: boolean
   /** 区分文本内容和思考过程，思考内容只用于前端流式展示，不存入 DB */
   kind?: 'text' | 'thinking'
+}
+
+// ─── Summary & Handoff ──────────────────────────────
+
+/** 会话摘要（存在 sessions.running_summary 列） */
+export interface SessionSummary {
+  /** 摘要文本 */
+  text: string
+  /** 摘要覆盖到的最后一条消息 ID */
+  lastMessageId: string
+  /** 摘要本身的 token 数 */
+  tokenCount: number
+  /** 生成时间 */
+  createdAt: string
+}
+
+/** 会话交接事件（推送到前端） */
+export interface HandoffEvent {
+  oldSessionId: string
+  newSessionId: string
+  /** 交接摘要（全量总结） */
+  summary: string
 }
