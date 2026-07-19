@@ -125,7 +125,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
            COALESCE(SUM(completion_tokens), 0) AS total_completion,
            COUNT(*) AS total_calls
          FROM execution_logs
-         WHERE agent_id = ? AND status IN ('completed', 'running')`
+         WHERE agent_id = ? AND status = 'completed'`
       )
       .get(id) as any
 
@@ -140,7 +140,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
              COALESCE(SUM(prompt_tokens), 0) AS session_prompt,
              COALESCE(SUM(completion_tokens), 0) AS session_completion
            FROM execution_logs
-           WHERE agent_id = ? AND session_id = ? AND status IN ('completed', 'running')`
+           WHERE agent_id = ? AND session_id = ? AND status = 'completed'`
         )
         .get(id, sessionId) as any
       sessionPrompt = sessionStats?.session_prompt || 0

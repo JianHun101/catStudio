@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import type { AgentConfig } from '@cat-study/shared'
+import { ref, computed } from 'vue'
+import type { AgentConfig, AgentTokenStats } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import AgentEditModal from './AgentEditModal.vue'
 
@@ -15,6 +15,26 @@ const emit = defineEmits<{
 const store = useChatStore()
 const editingAgent = ref<AgentConfig | null>(null)
 const showCreate = ref(false)
+
+/** 获取 Agent 的 token 统计，保证不为 undefined */
+function getTokenStats(agentId: string): AgentTokenStats | null {
+  return store.agentTokenStats.get(agentId) ?? null
+}
+
+/** 安全的 token 使用比例（处理除零） */
+function tokenRatio(agentId: string): number {
+  const stats = getTokenStats(agentId)
+  if (!stats || stats.maxContextTokens <= 0) return 0
+  return stats.sessionPromptTokens / stats.maxContextTokens
+}
+
+/** token 条颜色状态 */
+function tokenBarClass(agentId: string): string {
+  const r = tokenRatio(agentId)
+  if (r >= 0.9) return 'token-critical'
+  if (r >= 0.7) return 'token-warning'
+  return ''
+}
 
 function agentStatus(agentId: string): string {
   const state = store.agentStates.get(agentId)
@@ -188,46 +208,27 @@ async function handleCreate(): Promise<void> {
         </div>
 
         <!-- Token 用量条 -->
-        <div v-if="store.agentTokenStats.get(agent.id)" class="card-tokens">
+        <div v-if="getTokenStats(agent.id)" class="card-tokens">
           <div class="token-header">
             <span class="token-label">上下文用量</span>
             <span class="token-ratio">
-              {{ store.agentTokenStats.get(agent.id).sessionPromptTokens }}
+              {{ getTokenStats(agent.id)!.sessionPromptTokens }}
               /
-              {{ store.agentTokenStats.get(agent.id).maxContextTokens }}
+              {{ getTokenStats(agent.id)!.maxContextTokens }}
               tokens
             </span>
           </div>
           <div class="token-bar-bg">
             <div
               class="token-bar-fill"
-              :class="{
-                'token-warning':
-                  store.agentTokenStats.get(agent.id).sessionPromptTokens /
-                    store.agentTokenStats.get(agent.id).maxContextTokens >=
-                  0.7,
-                'token-critical':
-                  store.agentTokenStats.get(agent.id).sessionPromptTokens /
-                    store.agentTokenStats.get(agent.id).maxContextTokens >=
-                  0.9,
-              }"
+              :class="tokenBarClass(agent.id)"
               :style="{
-                width:
-                  Math.min(
-                    (store.agentTokenStats.get(agent.id).sessionPromptTokens /
-                      store.agentTokenStats.get(agent.id).maxContextTokens) *
-                      100,
-                    100
-                  ) + '%',
+                width: Math.min(tokenRatio(agent.id) * 100, 100) + '%',
               }"
             ></div>
           </div>
-          <div
-            class="token-footer"
-            v-if="store.agentTokenStats.get(agent.id).totalPromptTokens > 0"
-          >
-            累计 {{ (store.agentTokenStats.get(agent.id).totalPromptTokens / 1000).toFixed(1) }}k
-            tokens
+          <div class="token-footer" v-if="getTokenStats(agent.id)!.totalPromptTokens > 0">
+            累计 {{ (getTokenStats(agent.id)!.totalPromptTokens / 1000).toFixed(1) }}k tokens
           </div>
         </div>
 

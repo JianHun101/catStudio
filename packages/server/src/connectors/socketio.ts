@@ -166,6 +166,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           sessionId: data.sessionId,
           mentions: data.mentions,
           contentLen: data.content.length,
+          contentTokens: estimateTokens(data.content),
         })
 
         // 1. 写入消息

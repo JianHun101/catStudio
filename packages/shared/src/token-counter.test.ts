@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { estimateTokens, estimateMessageTokens, checkTokenBudget } from './token-counter.js'
+import {
+  estimateTokens,
+  estimateMessageTokens,
+  checkTokenBudget,
+  countTokens,
+} from './token-counter.js'
 
 describe('estimateTokens', () => {
   it('returns 0 for empty string', () => {
@@ -94,5 +99,13 @@ describe('checkTokenBudget', () => {
     expect(result.ratio).toBe(0)
     expect(result.isWarning).toBe(false)
     expect(result.isCritical).toBe(false)
+  })
+})
+
+describe('countTokens', () => {
+  it('defaults to estimate when method is not tiktoken', async () => {
+    const result = await countTokens('你好世界')
+    // 4 CJK × 0.75 = 3
+    expect(result).toBe(3)
   })
 })

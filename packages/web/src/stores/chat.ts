@@ -1,7 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { Events } from '@cat-study/shared'
-import type { Message, AgentRuntimeState, SessionConfig, AgentConfig } from '@cat-study/shared'
+import type {
+  Message,
+  AgentRuntimeState,
+  SessionConfig,
+  AgentConfig,
+  AgentTokenStats,
+} from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
 import { api } from '@/composables/useApi'
 
@@ -48,7 +54,7 @@ export const useChatStore = defineStore('chat', () => {
   const messageStatus = ref<Map<string, AgentStatusEntry[]>>(new Map())
 
   /** Agent token 消耗统计: agentId → AgentTokenStats */
-  const agentTokenStats = ref<Map<string, any>>(new Map())
+  const agentTokenStats = ref<Map<string, AgentTokenStats>>(new Map())
 
   // ─── Computed ──────────────────────────────
 
@@ -245,7 +251,7 @@ export const useChatStore = defineStore('chat', () => {
   async function fetchAgentStats(): Promise<void> {
     if (agents.value.length === 0) return
     const sessionId = activeSessionId.value
-    const map = new Map<string, any>()
+    const map = new Map<string, AgentTokenStats>()
     await Promise.all(
       agents.value.map(async (a) => {
         try {
