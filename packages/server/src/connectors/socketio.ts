@@ -12,7 +12,7 @@ import { Server as SocketServer } from 'socket.io'
 import { existsSync, writeFileSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { execSync } from 'node:child_process'
-import { Events } from '@cat-study/shared'
+import { Events, estimateTokens, estimateMessageTokens } from '@cat-study/shared'
 import { getDb } from '../db/index.js'
 import { v4 as uuid } from 'uuid'
 import {
@@ -887,12 +887,17 @@ async function runAgentReply(
     }),
   ]
 
+  const contextTokenStats = estimateMessageTokens(llmMessages)
   log.info('context built', {
     traceId,
     agentId: agent.id,
     totalMessages: combinedMessages.length,
     relevantMessages: relevantMessages.length,
     contextChars: llmMessages.reduce((sum, m) => sum + m.content.length, 0),
+    contextTokens: contextTokenStats.total,
+    systemTokens: contextTokenStats.systemTokens,
+    userTokens: contextTokenStats.userTokens,
+    assistantTokens: contextTokenStats.assistantTokens,
   })
 
   // 检索相关记忆并注入 system prompt（带超时，不阻塞 LLM 调用）
@@ -911,11 +916,14 @@ async function runAgentReply(
       ...llmMessages[0],
       content: llmMessages[0].content + memoryContext,
     }
+    const memoryTokens = estimateTokens(memoryContext)
     log.info('记忆上下文已注入', {
       traceId,
       agentId: agent.id,
       memoryChars: memoryContext.length,
+      memoryTokens,
       totalContextChars: llmMessages.reduce((sum, m) => sum + m.content.length, 0),
+      totalContextTokens: contextTokenStats.total + memoryTokens,
     })
   }
 
@@ -996,6 +1004,7 @@ async function runAgentReply(
   ).run(msgId, sessionId, agent.id, fullContent, triggerMsg.taskId || null)
 
   const estimatedPromptLen = llmMessages.reduce((sum, m) => sum + m.content.length, 0)
+  const promptTokens = contextTokenStats.total
 
   log.info('agent reply done', {
     traceId,
@@ -1004,6 +1013,8 @@ async function runAgentReply(
     latencyMs,
     replyLen: fullContent.length,
     promptLen: estimatedPromptLen,
+    promptTokens,
+    replyTokens: estimateTokens(fullContent),
     contextMessages: relevantMessages.length,
   })
 
@@ -1054,18 +1065,28 @@ async function runAgentReply(
     })
   }
 
-  // 将延迟 + 包信息 + 诊断数据写回 execution_logs
+  // 将延迟 + 包信息 + 诊断数据 + token 统计写回 execution_logs
   db.prepare(
     `
     UPDATE execution_logs
     SET latency_ms = ?,
         packages_installed = ?,
         prompt_chars = ?,
-        reply_chars = ?
+        reply_chars = ?,
+        prompt_tokens = ?,
+        completion_tokens = ?
     WHERE agent_id = ? AND status = 'running'
     ORDER BY started_at DESC LIMIT 1
   `
-  ).run(latencyMs, JSON.stringify(newPkgs), estimatedPromptLen, fullContent.length, agent.id)
+  ).run(
+    latencyMs,
+    JSON.stringify(newPkgs),
+    estimatedPromptLen,
+    fullContent.length,
+    promptTokens,
+    estimateTokens(fullContent),
+    agent.id
+  )
 
   // P2: 清理 retractionRequests，防止内存泄漏
   retractionRequests.delete(triggerMsg.id)

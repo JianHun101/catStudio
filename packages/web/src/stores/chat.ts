@@ -47,6 +47,9 @@ export const useChatStore = defineStore('chat', () => {
   }
   const messageStatus = ref<Map<string, AgentStatusEntry[]>>(new Map())
 
+  /** Agent token 消耗统计: agentId → AgentTokenStats */
+  const agentTokenStats = ref<Map<string, any>>(new Map())
+
   // ─── Computed ──────────────────────────────
 
   const activeSession = computed(
@@ -105,6 +108,8 @@ export const useChatStore = defineStore('chat', () => {
       const [agentList, sessionList] = await Promise.all([api.getAgents(), api.getSessions()])
       agents.value = agentList
       sessions.value = sessionList
+      // 拉取各 Agent 的 token 统计
+      fetchAgentStats()
       // Populate unread counts from server response
       const counts = new Map<string, number>()
       for (const s of sessionList) {
@@ -236,6 +241,26 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
+  /** 拉取所有 Agent 的 token 统计 */
+  async function fetchAgentStats(): Promise<void> {
+    if (agents.value.length === 0) return
+    const sessionId = activeSessionId.value
+    const map = new Map<string, any>()
+    await Promise.all(
+      agents.value.map(async (a) => {
+        try {
+          const stats = await api.getAgentStats(a.id, sessionId || undefined)
+          map.set(a.id, stats)
+        } catch {
+          // 静默失败，token 统计不影响核心功能
+        }
+      })
+    )
+    if (map.size > 0) {
+      agentTokenStats.value = map
+    }
+  }
+
   /** 创建新会话（通过 REST API） */
   async function createSession(title: string, agentIds: string[]): Promise<void> {
     const session = await api.createSession({ title, agentIds })
@@ -267,9 +292,10 @@ export const useChatStore = defineStore('chat', () => {
       // 防止重复消息
       if (messages.value.some((m) => m.id === msg.id)) return
       messages.value.push(msg)
-      // Agent 完成回复后清除打字状态
+      // Agent 完成回复后清除打字状态 + 刷新 token 统计
       if (msg.role === 'agent' && msg.agentId) {
         typingStates.value.delete(msg.agentId)
+        fetchAgentStats()
       }
       // 非活跃会话：递增未读计数
       if (msg.sessionId !== activeSessionId.value) {
@@ -434,6 +460,8 @@ export const useChatStore = defineStore('chat', () => {
     deleteSession,
     clearSessionMessages,
     retractMessage,
+    fetchAgentStats,
+    agentTokenStats,
     messageStatus,
   }
 })

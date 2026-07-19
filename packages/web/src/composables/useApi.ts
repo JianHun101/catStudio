@@ -41,8 +41,7 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
 
 export const api = {
   // Agents
-  getAgents: () =>
-    request<any[]>('/agents'),
+  getAgents: () => request<any[]>('/agents'),
 
   createAgent: (data: {
     name: string
@@ -53,31 +52,39 @@ export const api = {
     llmApiKey: string
     llmBaseUrl?: string
     effortLevel?: string
-  }) => request<any>('/agents', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  }),
+  }) =>
+    request<any>('/agents', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
-  updateAgent: (id: string, data: Partial<{
-    name: string
-    avatar: string
-    systemPrompt: string
-    llmProvider: string
-    llmModel: string
-    llmApiKey: string
-    llmBaseUrl: string
-    effortLevel: string
-  }>) => request<any>(`/agents/${id}`, {
-    method: 'PATCH',
-    body: JSON.stringify(data),
-  }),
+  updateAgent: (
+    id: string,
+    data: Partial<{
+      name: string
+      avatar: string
+      systemPrompt: string
+      llmProvider: string
+      llmModel: string
+      llmApiKey: string
+      llmBaseUrl: string
+      effortLevel: string
+    }>
+  ) =>
+    request<any>(`/agents/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
 
-  deleteAgent: (id: string) =>
-    request<any>(`/agents/${id}`, { method: 'DELETE' }),
+  deleteAgent: (id: string) => request<any>(`/agents/${id}`, { method: 'DELETE' }),
+
+  getAgentStats: (id: string, sessionId?: string) => {
+    const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
+    return request<any>(`/agents/${id}/stats${query}`)
+  },
 
   // Sessions
-  getSessions: () =>
-    request<any[]>('/sessions'),
+  getSessions: () => request<any[]>('/sessions'),
 
   createSession: (data: { title: string; agentIds: string[] }) =>
     request<any>('/sessions', {
@@ -85,8 +92,7 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  deleteSession: (id: string) =>
-    request<any>(`/sessions/${id}`, { method: 'DELETE' }),
+  deleteSession: (id: string) => request<any>(`/sessions/${id}`, { method: 'DELETE' }),
 
   clearSessionMessages: (id: string) =>
     request<any>(`/sessions/${id}/messages`, { method: 'DELETE' }),

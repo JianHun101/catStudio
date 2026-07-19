@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { v4 as uuid } from 'uuid'
 import { AgentCreateSchema, AgentConfigSchema } from '@cat-study/shared'
+import type { AgentTokenStats } from '@cat-study/shared'
 import { getDb } from '../db/index.js'
 import { createLogger } from '../logger.js'
 
@@ -20,10 +21,12 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb()
 
     try {
-      db.prepare(`
+      db.prepare(
+        `
         INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+      `
+      ).run(
         id,
         agent.name,
         agent.avatar,
@@ -32,7 +35,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         agent.llmModel,
         agent.llmApiKey,
         agent.llmBaseUrl || null,
-        agent.effortLevel || null,
+        agent.effortLevel || null
       )
 
       const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
@@ -102,6 +105,59 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
 
     const updated = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
     return toAgentConfig(updated)
+  })
+
+  // ─── GET /api/agents/:id/stats — Agent Token 统计 ───
+
+  app.get('/api/agents/:id/stats', async (req, reply) => {
+    const db = getDb()
+    const id = (req.params as any).id
+    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
+    if (!agent) return reply.status(404).send({ error: 'Agent not found' })
+
+    const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '6000', 10)
+
+    // 累计统计（所有调用）
+    const totals = db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(prompt_tokens), 0) AS total_prompt,
+           COALESCE(SUM(completion_tokens), 0) AS total_completion,
+           COUNT(*) AS total_calls
+         FROM execution_logs
+         WHERE agent_id = ? AND status IN ('completed', 'running')`
+      )
+      .get(id) as any
+
+    // 当前活跃会话统计（按 triggered_by_message_id 关联到的 session）
+    const sessionId = (req.query as any)?.sessionId
+    let sessionPrompt = 0
+    let sessionCompletion = 0
+    if (sessionId) {
+      const sessionStats = db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(prompt_tokens), 0) AS session_prompt,
+             COALESCE(SUM(completion_tokens), 0) AS session_completion
+           FROM execution_logs
+           WHERE agent_id = ? AND session_id = ? AND status IN ('completed', 'running')`
+        )
+        .get(id, sessionId) as any
+      sessionPrompt = sessionStats?.session_prompt || 0
+      sessionCompletion = sessionStats?.session_completion || 0
+    }
+
+    const stats: AgentTokenStats = {
+      agentId: id,
+      agentName: agent.name,
+      totalPromptTokens: totals?.total_prompt || 0,
+      totalCompletionTokens: totals?.total_completion || 0,
+      sessionPromptTokens: sessionPrompt,
+      sessionCompletionTokens: sessionCompletion,
+      maxContextTokens: maxTokens,
+    }
+
+    return stats
   })
 
   // ─── DELETE /api/agents/:id — 删除 Agent ────────────

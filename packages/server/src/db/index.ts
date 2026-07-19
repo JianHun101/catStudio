@@ -160,6 +160,14 @@ export function initDb(): void {
       name: 'reply_chars on execution_logs',
       sql: `ALTER TABLE execution_logs ADD COLUMN reply_chars INTEGER`,
     },
+    {
+      name: 'prompt_tokens on execution_logs',
+      sql: `ALTER TABLE execution_logs ADD COLUMN prompt_tokens INTEGER`,
+    },
+    {
+      name: 'completion_tokens on execution_logs',
+      sql: `ALTER TABLE execution_logs ADD COLUMN completion_tokens INTEGER`,
+    },
   ]
 
   for (const m of migrations) {

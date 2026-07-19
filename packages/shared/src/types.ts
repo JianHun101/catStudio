@@ -15,19 +15,19 @@ export type ChannelType = 'web' | 'qq'
 export interface AgentConfig {
   id: string
   name: string
-  avatar: string                   // emoji or URL
+  avatar: string // emoji or URL
   systemPrompt: string
-  llmProvider: string              // 'deepseek' | 'claude' | 'openai' | 'custom'
-  llmModel: string                 // 'deepseek-v4-pro' | 'claude-sonnet-4-6' | ...
+  llmProvider: string // 'deepseek' | 'claude' | 'openai' | 'custom'
+  llmModel: string // 'deepseek-v4-pro' | 'claude-sonnet-4-6' | ...
   llmApiKey: string
-  llmBaseUrl?: string              // for custom providers
-  effortLevel?: 'low' | 'medium' | 'high' | 'max'  // Claude Code 推理深度
+  llmBaseUrl?: string // for custom providers
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' // Claude Code 推理深度
 }
 
 /** Agent 运行时状态（广播到前端） */
 export interface AgentRuntimeState {
   agentId: string
-  sessionId: string | null         // 当前在哪个 Session 里忙
+  sessionId: string | null // 当前在哪个 Session 里忙
   status: SlotStatus
   queueLength: number
 }
@@ -38,10 +38,10 @@ export interface SessionConfig {
   id: string
   title: string
   agentIds: string[]
-  broadcastMode: boolean           // true = Agent 可以看到其他 Agent 的回复
-  createdAt: string                // ISO 8601
+  broadcastMode: boolean // true = Agent 可以看到其他 Agent 的回复
+  createdAt: string // ISO 8601
   updatedAt: string
-  unreadCount?: number             // 未读消息数（仅 GET /api/sessions 返回）
+  unreadCount?: number // 未读消息数（仅 GET /api/sessions 返回）
 }
 
 // ─── Message ────────────────────────────────────────
@@ -49,11 +49,11 @@ export interface SessionConfig {
 export interface Message {
   id: string
   sessionId: string
-  agentId: string | null           // null = user or system
+  agentId: string | null // null = user or system
   role: MessageRole
   content: string
-  mentions: string[]               // agent names mentioned with @
-  taskId?: string                  // 任务 ID，串联同一任务的多轮 agent 交互
+  mentions: string[] // agent names mentioned with @
+  taskId?: string // 任务 ID，串联同一任务的多轮 agent 交互
   createdAt: string
 }
 
@@ -62,8 +62,8 @@ export interface Message {
 export interface MemoryEntry {
   id: string
   agentId: string
-  content: string                  // human-readable summary
-  embedding: number[]              // vector (dim depends on embedding provider)
+  content: string // human-readable summary
+  embedding: number[] // vector (dim depends on embedding provider)
   sourceMessageId: string
   createdAt: string
 }
@@ -76,11 +76,11 @@ export interface ExecutionLog {
   agentId: string
   triggeredByMessageId: string
   status: ExecutionStatus
-  traceId: string                    // 请求追踪 ID，串联 dispatch → LLM → reply
+  traceId: string // 请求追踪 ID，串联 dispatch → LLM → reply
   startedAt: string | null
   endedAt: string | null
-  latencyMs: number | null           // 实际 LLM 调用耗时（毫秒）
-  errorMessage: string | null        // 失败时的错误信息
+  latencyMs: number | null // 实际 LLM 调用耗时（毫秒）
+  errorMessage: string | null // 失败时的错误信息
 }
 
 // ─── Dispatch ───────────────────────────────────────
@@ -92,7 +92,24 @@ export interface DispatchCommand {
   triggerMessageId: string
   triggerContent: string
   mentions: string[]
-  taskId?: string                  // 任务 ID，Agent 间交互继承同一个 taskId
+  taskId?: string // 任务 ID，Agent 间交互继承同一个 taskId
+}
+
+// ─── Token Stats ────────────────────────────────────
+
+export interface AgentTokenStats {
+  agentId: string
+  agentName: string
+  /** 累计 prompt token 消耗（所有调用） */
+  totalPromptTokens: number
+  /** 累计 completion token 消耗 */
+  totalCompletionTokens: number
+  /** 当前会话 prompt token 消耗 */
+  sessionPromptTokens: number
+  /** 当前会话 completion token 消耗 */
+  sessionCompletionTokens: number
+  /** 上下文 token 预算上限 */
+  maxContextTokens: number
 }
 
 // ─── LLM ────────────────────────────────────────────
@@ -106,7 +123,7 @@ export interface ChatOptions {
   model: string
   maxTokens?: number
   temperature?: number
-  timeoutMs?: number   // fetch + stream 总超时（毫秒），默认 300000
+  timeoutMs?: number // fetch + stream 总超时（毫秒），默认 300000
   signal?: AbortSignal // 外部取消信号，用于中断正在进行的 LLM 调用
 }
 

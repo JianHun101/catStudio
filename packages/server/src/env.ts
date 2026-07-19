@@ -38,8 +38,10 @@ function loadEnvFile(): void {
       let value = trimmed.slice(eqIdx + 1).trim()
 
       // 去掉引号
-      if ((value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))) {
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
         value = value.slice(1, -1)
       }
 
@@ -57,5 +59,16 @@ function loadEnvFile(): void {
     // .env 文件不存在是正常情况
   }
 }
+
+// ─── Token 预算配置 ──────────────────────────────
+// MAX_CONTEXT_TOKENS — 单次 LLM 调用的上下文 token 预算上限
+//   默认 6000（DeepSeek 32K 上下文窗口的保守值，配合 70% 安全余量）
+//   Claude Code CLI 适配器会在内部被限制为字符估算（不使用 tiktoken）
+process.env.MAX_CONTEXT_TOKENS ??= '6000'
+
+// TOKEN_COUNT_METHOD — token 计数方式
+//   'estimate' (默认) — 字符估算，零依赖，所有适配器通用
+//   'tiktoken' — 精确计数，需安装 tiktoken 包，仅用于 DeepSeek HTTP 适配器
+process.env.TOKEN_COUNT_METHOD ??= 'estimate'
 
 loadEnvFile()

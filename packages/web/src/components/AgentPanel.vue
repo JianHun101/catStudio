@@ -187,6 +187,50 @@ async function handleCreate(): Promise<void> {
           </div>
         </div>
 
+        <!-- Token 用量条 -->
+        <div v-if="store.agentTokenStats.get(agent.id)" class="card-tokens">
+          <div class="token-header">
+            <span class="token-label">上下文用量</span>
+            <span class="token-ratio">
+              {{ store.agentTokenStats.get(agent.id).sessionPromptTokens }}
+              /
+              {{ store.agentTokenStats.get(agent.id).maxContextTokens }}
+              tokens
+            </span>
+          </div>
+          <div class="token-bar-bg">
+            <div
+              class="token-bar-fill"
+              :class="{
+                'token-warning':
+                  store.agentTokenStats.get(agent.id).sessionPromptTokens /
+                    store.agentTokenStats.get(agent.id).maxContextTokens >=
+                  0.7,
+                'token-critical':
+                  store.agentTokenStats.get(agent.id).sessionPromptTokens /
+                    store.agentTokenStats.get(agent.id).maxContextTokens >=
+                  0.9,
+              }"
+              :style="{
+                width:
+                  Math.min(
+                    (store.agentTokenStats.get(agent.id).sessionPromptTokens /
+                      store.agentTokenStats.get(agent.id).maxContextTokens) *
+                      100,
+                    100
+                  ) + '%',
+              }"
+            ></div>
+          </div>
+          <div
+            class="token-footer"
+            v-if="store.agentTokenStats.get(agent.id).totalPromptTokens > 0"
+          >
+            累计 {{ (store.agentTokenStats.get(agent.id).totalPromptTokens / 1000).toFixed(1) }}k
+            tokens
+          </div>
+        </div>
+
         <div v-if="agentQueue(agent.id) > 0" class="card-queue">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
             <path
@@ -466,6 +510,65 @@ async function handleCreate(): Promise<void> {
 .status-label {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+/* Token usage bar on card */
+.card-tokens {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+}
+
+.token-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.token-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.token-ratio {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.token-bar-bg {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-subtle);
+  overflow: hidden;
+}
+
+.token-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition:
+    width 0.5s var(--ease-out),
+    background 0.5s var(--ease-out);
+}
+
+.token-bar-fill.token-warning {
+  background: var(--accent-yellow);
+}
+
+.token-bar-fill.token-critical {
+  background: var(--accent-red);
+}
+
+.token-footer {
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-family: var(--font-mono);
 }
 
 /* Queue badge on card */
