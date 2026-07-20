@@ -321,18 +321,28 @@ describe('socketio connector', () => {
       )
     })
 
-    it('throws when session does not exist (FK constraint before session check)', async () => {
+    it('emits ERROR when session does not exist (checked before INSERT)', async () => {
       const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      mockSocketEmit.mockClear()
 
-      // SEND_MESSAGE handler 先 INSERT 再检查 session 存在。
-      // 因此不存在的 session 会导致 FK 约束错误，而非 ERROR 事件。
-      await expect(
-        handlers![0]({
-          sessionId: 'nonexistent',
-          content: 'hello',
-          mentions: [],
-        })
-      ).rejects.toThrow()
+      // 不存在的 session → 先检查后拒绝，emit ERROR 而非抛 FK 异常
+      await handlers![0]({
+        sessionId: 'nonexistent',
+        content: 'hello',
+        mentions: [],
+      })
+
+      // 验证 emit ERROR 事件
+      expect(mockSocketEmit).toHaveBeenCalledWith(Events.ERROR, {
+        message: 'Session not found',
+      })
+
+      // 验证消息未写入（检查前就拦截了）
+      const db = getDb()
+      const row = db
+        .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?')
+        .get('nonexistent') as any
+      expect(row.cnt).toBe(0)
     })
 
     it('broadcasts MESSAGE_AGENT_STATUS: queued for mentioned agents', async () => {

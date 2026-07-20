@@ -171,7 +171,17 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           contentTokens: estimateTokens(data.content),
         })
 
-        // 1. 写入消息
+        // 1. 先检查 session 是否存在（在 INSERT 前，避免 FK 约束抛异常）
+        const sessionRow = db
+          .prepare('SELECT * FROM sessions WHERE id = ?')
+          .get(data.sessionId) as any
+        if (!sessionRow) {
+          log.warn('session not found', { sessionId: data.sessionId })
+          socket.emit(Events.ERROR, { message: 'Session not found' })
+          return
+        }
+
+        // 2. 写入消息
         const mentionsJson = JSON.stringify(data.mentions || [])
         db.prepare(
           `
@@ -191,18 +201,10 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           createdAt: new Date().toISOString(),
         }
 
-        // 2. 广播到 Session 房间
+        // 3. 广播到 Session 房间
         io.to(`session:${data.sessionId}`).emit(Events.NEW_MESSAGE, msg)
 
-        // 3. 触发调度
-        const sessionRow = db
-          .prepare('SELECT * FROM sessions WHERE id = ?')
-          .get(data.sessionId) as any
-        if (!sessionRow) {
-          log.warn('session not found', { sessionId: data.sessionId })
-          socket.emit(Events.ERROR, { message: 'Session not found' })
-          return
-        }
+        // 4. 触发调度
 
         const agentIds: string[] = JSON.parse(sessionRow.agent_ids || '[]')
         const agents = agentIds

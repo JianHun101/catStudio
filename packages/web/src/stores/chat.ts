@@ -46,6 +46,7 @@ export const useChatStore = defineStore('chat', () => {
   const errorMessage = ref<string | null>(null) // 服务端 ERROR 事件的 toast 消息
   let errorTimer: ReturnType<typeof setTimeout> | null = null
   const loadingMessages = ref(false) // session 切换时等待历史消息加载
+  const pendingHandoffSummary = ref<string | null>(null) // handoff 摘要，等待 SESSION_HISTORY 到达后注入
 
   /** 显示错误 toast，5 秒后自动消失 */
   function showError(message: string): void {
@@ -344,6 +345,19 @@ export const useChatStore = defineStore('chat', () => {
       if (data.welcome) {
         all.push(data.welcome)
       }
+      // 如果是 handoff 续接的会话，在历史消息前插入摘要
+      if (pendingHandoffSummary.value) {
+        all.push({
+          id: `handoff-${Date.now()}`,
+          sessionId: activeSessionId.value!,
+          role: 'system',
+          content: `📋 对话已续接。以下是此前的对话摘要：\n\n${pendingHandoffSummary.value}`,
+          agentId: null,
+          mentions: [],
+          createdAt: new Date().toISOString(),
+        })
+        pendingHandoffSummary.value = null
+      }
       all.push(...data.messages)
       messages.value = all
       loadingMessages.value = false
@@ -466,6 +480,9 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(
       Events.SESSION_HANDOFF,
       (data: { oldSessionId: string; newSessionId: string; summary: string }) => {
+        // 在异步操作前保存摘要——SESSION_HISTORY 到达时会自动注入
+        pendingHandoffSummary.value = data.summary
+
         // 异步拉取新会话的完整信息并加入列表
         api
           .getSession(data.newSessionId)
@@ -475,20 +492,9 @@ export const useChatStore = defineStore('chat', () => {
             if (!exists) {
               sessions.value.unshift(newSession)
             }
-            // 自动切换到新会话
+            // 自动切换到新会话（joinSession emit JOIN_SESSION → SESSION_HISTORY 注入摘要）
             if (activeSessionId.value === data.oldSessionId) {
               joinSession(newSession.id)
-              // 插入系统消息提示交接
-              const handoffMsg: Message = {
-                id: `handoff-${Date.now()}`,
-                sessionId: newSession.id,
-                role: 'system',
-                content: `📋 对话已续接。以下是此前的对话摘要：\n\n${data.summary}`,
-                agentId: null,
-                mentions: [],
-                createdAt: new Date().toISOString(),
-              }
-              messages.value.push(handoffMsg)
             }
           })
           .catch((err) => {
