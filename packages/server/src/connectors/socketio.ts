@@ -119,7 +119,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
       // 生成欢迎消息（会话中猫咪列表提示）
       const sessionRow = db
-        .prepare('SELECT agent_ids FROM sessions WHERE id = ?')
+        .prepare('SELECT agent_ids, broadcast_mode FROM sessions WHERE id = ?')
         .get(sessionId) as any
       const agentIds: string[] = sessionRow ? JSON.parse(sessionRow.agent_ids || '[]') : []
       const catNames = agentIds
@@ -147,6 +147,29 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         messages: historyMessages,
         welcome: welcomeMsg,
       })
+
+      // 推送每个 Agent 在当前会话的上下文 token 估算值。
+      // 前端切换会话时 contextTokens 被清空，需要服务端主动推送初始值，
+      // 否则在 Agent 首次回复前一直显示"等待首次回复…"。
+      const broadcastMode = !!sessionRow?.broadcast_mode
+      const maxContext = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
+      for (const agentId of agentIds) {
+        const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any
+        if (!agent) continue
+
+        const relevant = getRelevantMessages(rows, agentId, agent.name, broadcastMode)
+        let estimatedTokens = estimateTokens(agent.system_prompt || '')
+        for (const m of relevant) {
+          estimatedTokens += estimateTokens(m.content) + 50 // role 前缀开销
+        }
+
+        socket.emit(Events.CONTEXT_WINDOW_STATS, {
+          sessionId,
+          agentId,
+          contextTokens: estimatedTokens,
+          maxContextTokens: maxContext,
+        })
+      }
     })
 
     socket.on(Events.LEAVE_SESSION, (sessionId: string) => {
@@ -758,6 +781,58 @@ async function executeAgentsSerial(
   }
 }
 
+/**
+ * 上下文过滤：返回 Agent 在当前会话中能"看到"的消息。
+ *
+ * 过滤规则（与 runAgentReply 内联逻辑完全一致）：
+ * - Agent 自己发的消息 → 保留
+ * - 其他 Agent 的回复中 @mention 了当前 Agent → 保留（review 链关键）
+ * - 用户消息 @ 了该 Agent → 保留
+ * - 用户消息没有 @ 任何人（广播）→ 保留
+ * - 用户消息 @ 了其他 Agent → 丢弃
+ * - 广播模式下：保留所有 Agent 的回复
+ * - 非广播模式下：丢弃本次执行无关的 Agent 回复
+ *
+ * @param messages  DB rows（需含 role, agent_id, mentions）
+ * @param agentId   当前 Agent ID
+ * @param agentName 当前 Agent 名称（用于 @mention 名称匹配）
+ * @param broadcastMode 是否广播模式
+ */
+function getRelevantMessages(
+  messages: any[],
+  agentId: string,
+  agentName: string,
+  broadcastMode: boolean
+): any[] {
+  const relevant: any[] = []
+
+  for (const m of messages) {
+    const mentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
+
+    if (m.role === 'agent') {
+      if (broadcastMode) {
+        relevant.push(m)
+      } else if (m.agent_id === agentId) {
+        relevant.push(m)
+      } else if (mentions.includes(agentName)) {
+        // 其他 Agent 的回复中 @mention 了当前 Agent → 可见
+        // 这是 agent-to-agent review 链的核心：coder 的交接文档
+        // 中 @reviewer → reviewer 必须能看到该文档
+        relevant.push(m)
+      }
+      continue
+    }
+
+    // 用户消息：无 @ 指定（广播）或 @ 了当前 Agent → 可见
+    const targetsThisAgent = mentions.length === 0 || mentions.includes(agentName)
+    if (targetsThisAgent) {
+      relevant.push(m)
+    }
+  }
+
+  return relevant
+}
+
 async function runAgentReply(
   io: SocketServer,
   sessionId: string,
@@ -840,44 +915,19 @@ async function runAgentReply(
   // 合并：task 历史在前，当前消息在后
   const combinedMessages = [...taskHistory, ...allMessages]
 
-  // 过滤规则：
-  // - Agent 自己发的消息 → 保留
-  // - 其他 Agent 的回复中 @mention 了当前 Agent → 保留（review 链关键）
-  // - 用户消息 @ 了该 Agent → 保留
-  // - 用户消息没有 @ 任何人（广播）→ 保留
-  // - 用户消息 @ 了其他 Agent → 丢弃
-  // - 广播模式下：保留所有 Agent 的回复
-  // - 非广播模式下：丢弃本次执行无关的 Agent 回复
-  const relevantMessages: any[] = []
-
   // 读取 Session 的广播模式
   const sessionRow = db
     .prepare('SELECT broadcast_mode FROM sessions WHERE id = ?')
     .get(sessionId) as any
   const isBroadcastMode = !!sessionRow?.broadcast_mode
 
-  for (const m of combinedMessages) {
-    const mentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
-
-    if (m.role === 'agent') {
-      if (isBroadcastMode) {
-        relevantMessages.push(m)
-      } else if (m.agent_id === agent.id) {
-        relevantMessages.push(m)
-      } else if (mentions.includes(agent.name)) {
-        // 其他 Agent 的回复中 @mention 了当前 Agent → 可见
-        // 这是 agent-to-agent review 链的核心：coder 的交接文档
-        // 中 @reviewer → reviewer 必须能看到该文档
-        relevantMessages.push(m)
-      }
-      continue
-    }
-
-    const targetsThisAgent = mentions.length === 0 || mentions.includes(agent.name)
-    if (targetsThisAgent) {
-      relevantMessages.push(m)
-    }
-  }
+  // 上下文过滤：只保留该 Agent 能"看到"的消息
+  const relevantMessages = getRelevantMessages(
+    combinedMessages,
+    agent.id,
+    agent.name,
+    isBroadcastMode
+  )
 
   // ── 会话交接预检（截断前） ──────────────────────────
   // 必须在截断前计算消息总 token——handoff 在 90% 阈值触发，
