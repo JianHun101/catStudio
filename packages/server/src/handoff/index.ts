@@ -105,8 +105,7 @@ export async function performHandoff(
     const oldSession = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) as any
     if (!oldSession) return null
 
-    // 2. 检查是否已被交接（handoff_to 非空则已交接）
-    // 通过检查是否有以"（续）"结尾且 handoff_from = sessionId 的会话
+    // 2. 检查是否已被交接：通过 handoff_from 列查是否有会话从此会话分叉
     const existingHandoff = db
       .prepare('SELECT id FROM sessions WHERE handoff_from = ?')
       .get(sessionId) as any
@@ -148,12 +147,22 @@ export async function performHandoff(
       summaryTokens: estimateTokens(summary),
     })
 
-    // 5. 通知前端
-    io.emit(Events.SESSION_HANDOFF, {
-      oldSessionId: sessionId,
-      newSessionId,
-      summary,
-    })
+    // 5. 通知前端（emit 失败时回滚新会话，避免孤儿会话）
+    try {
+      io.emit(Events.SESSION_HANDOFF, {
+        oldSessionId: sessionId,
+        newSessionId,
+        summary,
+      })
+    } catch (emitErr: any) {
+      log.error('handoff emit failed — rolling back new session', {
+        oldSessionId: sessionId,
+        newSessionId,
+        error: emitErr.message,
+      })
+      db.prepare('DELETE FROM sessions WHERE id = ?').run(newSessionId)
+      return null
+    }
 
     return { oldSessionId: sessionId, newSessionId, summary }
   } catch (err: any) {

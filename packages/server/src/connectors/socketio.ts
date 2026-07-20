@@ -26,7 +26,6 @@ import { getAdapterForAgent } from '../llm/registry.js'
 import { saveMessageMemory, buildMemoryContext } from '../memory/index.js'
 import { createLogger } from '../logger.js'
 import {
-  getHeadCommit,
   gitCommit,
   gitResetHard,
   gitCleanWorkingTree,
@@ -267,7 +266,27 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         }
 
         // 按 FIFO 串行执行（不 await，让多个消息的 Agent 执行可以交错）
-        executeAgentsSerial(io, data.sessionId, targets as AgentConfig[], msg, db, traceId)
+        executeAgentsSerial(io, data.sessionId, targets as AgentConfig[], msg, db, traceId).catch(
+          (err) => {
+            // S2 修复：executeAgentsSerial 内部 try/catch 只覆盖 for 循环体。
+            // 若在进入循环前崩溃（session 查询、agent 名解析等），异常会成为
+            // 未处理 Promise 拒绝，且 dispatch() 已将 agent 设为 busy →
+            // 槽位永久卡死。这里做最后一道防线：释放所有仍为 busy 的槽位。
+            log.error('executeAgentsSerial crashed — releasing stuck slots', {
+              traceId,
+              error: err.message,
+            })
+            for (const a of targets) {
+              const state = getAgentState(a.id)
+              if (state && state.status === 'busy') {
+                completeExecution(a.id, false, {
+                  errorMessage: `executeAgentsSerial crash: ${err.message}`,
+                  traceId,
+                }).catch(() => {})
+              }
+            }
+          }
+        )
       }
     )
 

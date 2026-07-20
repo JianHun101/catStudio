@@ -338,6 +338,8 @@ describe('chatStore', () => {
       )?.[1] as ((msg: Message) => void) | undefined
 
       expect(newMsgHandler).toBeDefined()
+      // S6: NEW_MESSAGE 只在 msg.sessionId === activeSessionId 时存储
+      store.activeSessionId = 's1'
       newMsgHandler!(mockMessage)
       expect(store.messages).toEqual([mockMessage])
     })

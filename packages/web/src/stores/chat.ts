@@ -47,6 +47,7 @@ export const useChatStore = defineStore('chat', () => {
   let errorTimer: ReturnType<typeof setTimeout> | null = null
   const loadingMessages = ref(false) // session 切换时等待历史消息加载
   const pendingHandoffSummary = ref<string | null>(null) // handoff 摘要，等待 SESSION_HISTORY 到达后注入
+  let handoffJoining = false // S8: 防止 handoff 重入（两次 SESSION_HANDOFF 先后到达时相互覆盖）
 
   /** 显示错误 toast，5 秒后自动消失 */
   function showError(message: string): void {
@@ -328,16 +329,22 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(Events.NEW_MESSAGE, (msg: Message) => {
       // 防止重复消息
       if (messages.value.some((m) => m.id === msg.id)) return
+      // S6: 非活跃会话的消息不存入数组（避免内存泄漏）——
+      // 仅递增未读计数。用户切回该会话时 SESSION_HISTORY 会重新加载。
+      if (msg.sessionId !== activeSessionId.value) {
+        const current = unreadCounts.value.get(msg.sessionId) || 0
+        unreadCounts.value.set(msg.sessionId, current + 1)
+        // Agent 完成回复后也刷新 token 统计（影响会话列表的 token 用量显示）
+        if (msg.role === 'agent' && msg.agentId) {
+          fetchAgentStats()
+        }
+        return
+      }
       messages.value.push(msg)
       // Agent 完成回复后清除打字状态 + 刷新 token 统计
       if (msg.role === 'agent' && msg.agentId) {
         typingStates.value.delete(msg.agentId)
         fetchAgentStats()
-      }
-      // 非活跃会话：递增未读计数
-      if (msg.sessionId !== activeSessionId.value) {
-        const current = unreadCounts.value.get(msg.sessionId) || 0
-        unreadCounts.value.set(msg.sessionId, current + 1)
       }
     })
 
@@ -438,6 +445,8 @@ export const useChatStore = defineStore('chat', () => {
 
     socket.on(Events.SESSION_DELETED, (data: { sessionId: string }) => {
       sessions.value = sessions.value.filter((s) => s.id !== data.sessionId)
+      // S9: 清理已删除会话的未读计数，避免 Map 内存泄漏
+      unreadCounts.value.delete(data.sessionId)
       if (activeSessionId.value === data.sessionId) {
         const next = sessions.value[0]
         if (next) {
@@ -496,6 +505,13 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(
       Events.SESSION_HANDOFF,
       (data: { oldSessionId: string; newSessionId: string; summary: string }) => {
+        // S8: 防止重入——两次 SESSION_HANDOFF 先后到达会相互覆盖
+        if (handoffJoining) {
+          console.warn('[store] handoff already in progress, skipping duplicate')
+          return
+        }
+        handoffJoining = true
+
         // 在异步操作前保存摘要——SESSION_HISTORY 到达时会自动注入
         pendingHandoffSummary.value = data.summary
 
@@ -515,6 +531,9 @@ export const useChatStore = defineStore('chat', () => {
           })
           .catch((err) => {
             console.warn('[store] failed to load handoff session', err)
+          })
+          .finally(() => {
+            handoffJoining = false
           })
       }
     )

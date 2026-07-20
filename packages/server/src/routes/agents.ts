@@ -165,8 +165,15 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
   app.delete('/api/agents/:id', async (req, reply) => {
     const db = getDb()
     const id = (req.params as any).id
-    const result = db.prepare('DELETE FROM agents WHERE id = ?').run(id)
-    if (result.changes === 0) return reply.status(404).send({ error: 'Agent not found' })
+
+    // 先检查是否存在
+    const agent = db.prepare('SELECT id FROM agents WHERE id = ?').get(id)
+    if (!agent) return reply.status(404).send({ error: 'Agent not found' })
+
+    // 清理关联数据（FK 约束无 ON DELETE CASCADE，需手动删除）
+    db.prepare('DELETE FROM execution_logs WHERE agent_id = ?').run(id)
+    db.prepare('DELETE FROM memories WHERE agent_id = ?').run(id)
+    db.prepare('DELETE FROM agents WHERE id = ?').run(id)
     return { ok: true }
   })
 }

@@ -42,7 +42,6 @@ vi.mock('../handoff/index.js', () => ({
 }))
 
 vi.mock('../llm/git-utils.js', () => ({
-  getHeadCommit: vi.fn(() => 'abc1234'),
   gitCommit: vi.fn(),
   gitResetHard: vi.fn(),
   gitCleanWorkingTree: vi.fn(),
