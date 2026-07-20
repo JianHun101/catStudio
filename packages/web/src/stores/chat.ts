@@ -77,6 +77,9 @@ export const useChatStore = defineStore('chat', () => {
   /** Agent token 消耗统计: agentId → AgentTokenStats */
   const agentTokenStats = ref<Map<string, AgentTokenStats>>(new Map())
 
+  /** 上下文窗口 token 用量（驱动 handoff 的真实数字）: agentId → contextTokens */
+  const contextTokens = ref<Map<string, number>>(new Map())
+
   // ─── Computed ──────────────────────────────
 
   const activeSession = computed(
@@ -392,6 +395,19 @@ export const useChatStore = defineStore('chat', () => {
       agentStates.value = map
     })
 
+    // 上下文窗口 token 用量（每次 Agent 回复后推送，驱动 handoff 的真实数字）
+    socket.on(
+      Events.CONTEXT_WINDOW_STATS,
+      (data: { agentId: string; contextTokens: number; maxContextTokens: number }) => {
+        contextTokens.value.set(data.agentId, data.contextTokens)
+        // 同步更新 token 统计里的 maxContextTokens（该值一般不变，但首次拿到时可能未设置）
+        const existing = agentTokenStats.value.get(data.agentId)
+        if (existing) {
+          existing.maxContextTokens = data.maxContextTokens
+        }
+      }
+    )
+
     socket.on(Events.SESSION_UPDATE, (session: SessionConfig) => {
       const idx = sessions.value.findIndex((s) => s.id === session.id)
       if (idx >= 0) {
@@ -541,6 +557,7 @@ export const useChatStore = defineStore('chat', () => {
     retractMessage,
     fetchAgentStats,
     agentTokenStats,
+    contextTokens,
     messageStatus,
   }
 })

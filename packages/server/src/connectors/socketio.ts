@@ -853,8 +853,8 @@ async function runAgentReply(
   }
 
   // ── 会话交接预检（截断前） ──────────────────────────
-  // 必须在截断前计算消息总 token——截断将消息锁死在 70% 预算内，
-  // 截断后再检查 90% 阈值永远达不到（70% < 90%）。
+  // 必须在截断前计算消息总 token——handoff 在 90% 阈值触发，
+  // 在此之前消息应尽量保留，截断只作最终保底（handoff 未拦住时出手）。
   let preTruncationTokens = 0
   for (const m of relevantMessages) {
     preTruncationTokens += estimateTokens(m.content) + 50 // role 前缀开销
@@ -863,8 +863,9 @@ async function runAgentReply(
   // ── Token 感知软截断 ──────────────────────────────────
   // 从最新到最旧累加 token，超出预算的消息丢弃（不再用硬编码 LIMIT 100）
   const MAX_CONTEXT = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
-  // 70% 预算给消息原文，30% 留给 system prompt / 摘要 / 记忆
-  const MESSAGE_BUDGET = Math.floor(MAX_CONTEXT * 0.7)
+  // 98% 预算给消息原文，2% 留给 system prompt（~2500 tokens 基础开销）。
+  // Handoff 在 90% 已开新会话，截断只作保底——极少触发。
+  const MESSAGE_BUDGET = Math.floor(MAX_CONTEXT * 0.98)
   let tokenAccum = 0
   const truncatedMessages: typeof relevantMessages = []
   for (let i = relevantMessages.length - 1; i >= 0; i--) {
@@ -956,7 +957,6 @@ async function runAgentReply(
 
   // ── 会话交接检查 ──────────────────────────────────
   // 使用截断**前**的消息 token + system prompt token 判断。
-  // 截断已将消息锁死在 70% 预算内，截断后检查永远达不到 90% 阈值。
   // preTruncationTokens 在上方截断前已计算。
   const estimatedTotalTokens = preTruncationTokens + contextTokenStats.systemTokens
   if (shouldHandoff(estimatedTotalTokens)) {
@@ -1214,6 +1214,14 @@ async function runAgentReply(
     estimateTokens(fullContent),
     agent.id
   )
+
+  // 推送上下文窗口 token 用量给前端（驱动 handoff 的真实数字）
+  io.to(`session:${sessionId}`).emit(Events.CONTEXT_WINDOW_STATS, {
+    sessionId,
+    agentId: agent.id,
+    contextTokens: estimatedTotalTokens,
+    maxContextTokens: MAX_CONTEXT,
+  })
 
   // P2: 清理 retractionRequests，防止内存泄漏
   retractionRequests.delete(triggerMsg.id)

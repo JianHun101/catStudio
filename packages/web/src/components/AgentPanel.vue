@@ -21,11 +21,21 @@ function getTokenStats(agentId: string): AgentTokenStats | null {
   return store.agentTokenStats.get(agentId) ?? null
 }
 
-/** 安全的 token 使用比例（处理除零） */
+/** 获取当前上下文窗口 token 用量（驱动 handoff 的真实数字） */
+function contextTokensFor(agentId: string): number {
+  return store.contextTokens.get(agentId) ?? 0
+}
+
+/** 安全的 token 使用比例（处理除零）。
+ *  优先用 contextTokens（实时推送），fallback 到 API 的 sessionPromptTokens */
 function tokenRatio(agentId: string): number {
+  const ctx = contextTokensFor(agentId)
   const stats = getTokenStats(agentId)
-  if (!stats || stats.maxContextTokens <= 0) return 0
-  return stats.sessionPromptTokens / stats.maxContextTokens
+  const max = stats?.maxContextTokens ?? 128000
+  if (max <= 0) return 0
+  // 用 contextTokens 如果有值，否则用 API 累计值
+  const numerator = ctx > 0 ? ctx : (stats?.sessionPromptTokens ?? 0)
+  return numerator / max
 }
 
 /** token 条颜色状态 */
@@ -210,15 +220,25 @@ async function handleCreate(): Promise<void> {
         <!-- Token 用量条 -->
         <div v-if="getTokenStats(agent.id)" class="card-tokens">
           <div class="token-header">
-            <span class="token-label">上下文用量</span>
+            <span class="token-label">
+              上下文用量
+              <span
+                v-if="contextTokensFor(agent.id) > 0"
+                class="token-live-dot"
+                title="实时数据"
+              ></span>
+            </span>
             <span class="token-ratio">
-              {{ getTokenStats(agent.id)!.sessionPromptTokens }}
-              /
-              {{ getTokenStats(agent.id)!.maxContextTokens }}
-              tokens
+              {{
+                tokenRatio(agent.id) >= 0.01
+                  ? (tokenRatio(agent.id) * 100).toFixed(0) + '%'
+                  : '&lt;1%'
+              }}
             </span>
           </div>
           <div class="token-bar-bg">
+            <!-- handoff 90% 触发线 -->
+            <div class="token-bar-threshold" title="90% — 会话交接触发线"></div>
             <div
               class="token-bar-fill"
               :class="tokenBarClass(agent.id)"
@@ -227,8 +247,17 @@ async function handleCreate(): Promise<void> {
               }"
             ></div>
           </div>
-          <div class="token-footer" v-if="getTokenStats(agent.id)!.totalPromptTokens > 0">
-            累计 {{ (getTokenStats(agent.id)!.totalPromptTokens / 1000).toFixed(1) }}k tokens
+          <div class="token-footer">
+            <span v-if="contextTokensFor(agent.id) > 0">
+              窗口 {{ (contextTokensFor(agent.id) / 1000).toFixed(1) }}k /
+              {{ (getTokenStats(agent.id)!.maxContextTokens / 1000).toFixed(0) }}k
+            </span>
+            <span v-else>
+              累计 {{ (getTokenStats(agent.id)!.sessionPromptTokens / 1000).toFixed(1) }}k tokens
+            </span>
+            <span v-if="getTokenStats(agent.id)!.totalPromptTokens > 0" class="token-total">
+              · 总计 {{ (getTokenStats(agent.id)!.totalPromptTokens / 1000).toFixed(1) }}k
+            </span>
           </div>
         </div>
 
@@ -545,7 +574,20 @@ async function handleCreate(): Promise<void> {
   height: 4px;
   border-radius: 2px;
   background: var(--border-subtle);
-  overflow: hidden;
+  overflow: visible;
+  position: relative;
+}
+
+/* 90% 交接触发线 */
+.token-bar-threshold {
+  position: absolute;
+  left: 90%;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--accent-yellow);
+  opacity: 0.6;
+  z-index: 2;
 }
 
 .token-bar-fill {
@@ -570,6 +612,35 @@ async function handleCreate(): Promise<void> {
   color: var(--text-muted);
   margin-top: 4px;
   font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.token-total {
+  opacity: 0.6;
+}
+
+/* 实时数据指示点 */
+.token-live-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-green, #4caf50);
+  margin-left: 2px;
+  vertical-align: middle;
+  animation: live-pulse 2s infinite;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
 }
 
 /* Queue badge on card */

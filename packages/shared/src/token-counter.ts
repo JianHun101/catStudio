@@ -10,7 +10,7 @@
  *   tokenCount = ceil(chineseChars × 0.75 + nonChinese × 0.25)
  *   中文 1 字 ≈ 0.6-0.8 token，取 0.75
  *   英文/代码 ~4 字符/token，取 0.25
- *   实测精度 ±15%，配合 70% 安全余量足够
+ *   实测精度 ±15%，配合 handoff 90% 保底足够
  */
 
 import type { LLMMessage } from './types.js'

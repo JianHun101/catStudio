@@ -159,3 +159,13 @@ export interface HandoffEvent {
   /** 交接摘要（全量总结） */
   summary: string
 }
+
+/** 上下文窗口 token 统计（每次 Agent 回复后推送） */
+export interface ContextWindowStats {
+  sessionId: string
+  agentId: string
+  /** 当前上下文窗口的 token 用量（截断前消息 + system prompt，驱动 handoff 的值） */
+  contextTokens: number
+  /** 上下文 token 预算上限 */
+  maxContextTokens: number
+}

@@ -44,7 +44,7 @@ describe('handoff', () => {
     it('triggers at 90% with realistic 128K context (regression test)', () => {
       // 验证：128K 模型，截断前消息总 token 数 ≥115200 时应触发交接。
       // 这是对 bug #handoff-deadlock 的回归测试：
-      //   截断将消息锁死在 70%（~89600），截断后检查永远达不到 90%（115200）。
+      //   截断将消息锁死在预算内，截断后检查永远达不到 90%（115200）。
       //   修复后 socketio.ts 在截断前计算消息总 token 并传给 shouldHandoff。
       process.env.HANDOFF_ENABLED = 'true'
       process.env.MAX_CONTEXT_TOKENS = '128000'
