@@ -83,16 +83,14 @@ export async function updateRunningSummary(
         )
         .all(sessionId, lastId) as any[]
     } else {
-      // 首次摘要：取最近 20 条消息
+      // 首次摘要：取全部消息（每个会话只运行一次，成本可忽略）
       newMessages = db
         .prepare(
           `SELECT * FROM messages
            WHERE session_id = ? AND role != 'system'
-           ORDER BY created_at DESC
-           LIMIT 20`
+           ORDER BY created_at ASC`
         )
         .all(sessionId) as any[]
-      newMessages.reverse()
     }
 
     if (newMessages.length === 0) return null

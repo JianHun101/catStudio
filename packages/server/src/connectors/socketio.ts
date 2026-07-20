@@ -1017,6 +1017,30 @@ async function runAgentReply(
     })
   }
 
+  // ── 最终 token 预算复核 ──────────────────────────
+  // summary + memory 注入后重新估算总 token。
+  // 超预算时不丢弃任何上下文，直接触发会话交接（fire-and-forget）——
+  // 当前回复正常发送，下一条消息在新会话中带着完整摘要继续。
+  {
+    const finalStats = estimateMessageTokens(llmMessages)
+    const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
+    if (finalStats.total > maxTokens) {
+      log.warn('token budget exceeded after summary/memory injection, triggering handoff', {
+        traceId,
+        agentId: agent.id,
+        finalTokens: finalStats.total,
+        maxTokens,
+      })
+      performHandoff(sessionId, io, db).catch((err) => {
+        log.warn('handoff failed (non-blocking)', {
+          traceId,
+          sessionId,
+          error: err.message,
+        })
+      })
+    }
+  }
+
   // 流式生成回复
   let fullContent = '' // 仅文本内容 — 存入 DB，参与 agent-to-agent 上下文
   let displayContent = '' // 文本 + 思考 — 流式推送给前端

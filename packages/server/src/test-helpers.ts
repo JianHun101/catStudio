@@ -28,6 +28,9 @@ const SCHEMA_SQL = `
     title TEXT NOT NULL,
     agent_ids TEXT NOT NULL DEFAULT '[]',
     broadcast_mode INTEGER NOT NULL DEFAULT 0,
+    running_summary TEXT,
+    handoff_from TEXT,
+    summary_msg_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -73,6 +76,8 @@ const SCHEMA_SQL = `
     packages_installed TEXT,
     prompt_chars INTEGER,
     reply_chars INTEGER,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
     FOREIGN KEY (session_id) REFERENCES sessions(id),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
   );
