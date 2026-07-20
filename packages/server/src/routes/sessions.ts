@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify'
 import { v4 as uuid } from 'uuid'
-import { SessionCreateSchema, Events, type SessionConfig } from '@cat-study/shared'
+import {
+  SessionCreateSchema,
+  SessionUpdateSchema,
+  Events,
+  type SessionConfig,
+} from '@cat-study/shared'
 import { getDb } from '../db/index.js'
 import { getIO } from '../connectors/socketio.js'
 import { createLogger } from '../logger.js'
@@ -89,7 +94,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     }
   })
 
-  // ─── PATCH /api/sessions/:id — 切换广播模式 ──────────
+  // ─── PATCH /api/sessions/:id — 更新会话 ──────────────
 
   app.patch('/api/sessions/:id', async (req, reply) => {
     const db = getDb()
@@ -97,17 +102,69 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any
     if (!row) return reply.status(404).send({ error: 'Session not found' })
 
-    const body = req.body as any
-    const newMode = body.broadcastMode ? 1 : 0
+    const parsed = SessionUpdateSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() })
+    }
 
-    db.prepare(
-      `
-      UPDATE sessions SET broadcast_mode = ?, updated_at = datetime('now') WHERE id = ?
-    `
-    ).run(newMode, id)
+    const { title, addAgentIds, removeAgentIds, broadcastMode } = parsed.data
 
+    // 支持重命名
+    if (title !== undefined) {
+      db.prepare(`UPDATE sessions SET title = ?, updated_at = datetime('now') WHERE id = ?`).run(
+        title,
+        id
+      )
+    }
+
+    // 支持切换广播模式
+    if (broadcastMode !== undefined) {
+      const newMode = broadcastMode ? 1 : 0
+      db.prepare(
+        `UPDATE sessions SET broadcast_mode = ?, updated_at = datetime('now') WHERE id = ?`
+      ).run(newMode, id)
+    }
+
+    // 支持增加/移除 Agent
+    if (addAgentIds?.length || removeAgentIds?.length) {
+      const currentIds: string[] = JSON.parse(row.agent_ids || '[]')
+
+      // 验证要添加的 Agent 是否存在
+      if (addAgentIds?.length) {
+        const placeholders = addAgentIds.map(() => '?').join(',')
+        const existing = db
+          .prepare(`SELECT id FROM agents WHERE id IN (${placeholders})`)
+          .all(...addAgentIds) as any[]
+        if (existing.length !== addAgentIds.length) {
+          return reply.status(400).send({ error: 'Some agent IDs are invalid' })
+        }
+      }
+
+      const removeSet = new Set(removeAgentIds || [])
+      const newIds = currentIds
+        .filter((aid) => !removeSet.has(aid))
+        .concat(addAgentIds || [])
+        // 去重
+        .filter((aid, i, arr) => arr.indexOf(aid) === i)
+
+      if (newIds.length === 0) {
+        return reply.status(400).send({ error: '会话至少需要一只猫咪' })
+      }
+
+      db.prepare(
+        `UPDATE sessions SET agent_ids = ?, updated_at = datetime('now') WHERE id = ?`
+      ).run(JSON.stringify(newIds), id)
+    }
+
+    // emit 通知前端
     const updated = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any
-    return toSessionConfig(updated)
+    const config = toSessionConfig(updated)
+    try {
+      getIO()?.to(id).emit(Events.SESSION_UPDATE, config)
+    } catch {
+      /* emit 失败不影响响应 */
+    }
+    return config
   })
 
   // ─── DELETE /api/sessions/:id/messages — 清空消息 ────

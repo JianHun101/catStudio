@@ -50,11 +50,13 @@ export class OpenAIAdapter implements LLMAdapter {
     this.model = config.model
   }
 
-  async *chatStream(
-    messages: LLMMessage[],
-    options: ChatOptions,
-  ): AsyncIterable<Chunk> {
+  async *chatStream(messages: LLMMessage[], options: ChatOptions): AsyncIterable<Chunk> {
     const signal = options.signal
+
+    // Codex CLI 通过模型内部配置控制 maxTokens/temperature，ChatOptions 中的对应字段会被忽略
+    if (options.maxTokens !== undefined || options.temperature !== undefined) {
+      log.warn('ChatOptions.maxTokens/temperature 被 Codex CLI 适配器忽略')
+    }
 
     if (signal?.aborted) {
       yield { content: '', done: true }

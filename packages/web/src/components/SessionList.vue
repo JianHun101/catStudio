@@ -2,6 +2,9 @@
 import { ref, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import SessionCreateModal from './SessionCreateModal.vue'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('SessionList')
 
 defineProps<{
   collapsed?: boolean
@@ -28,7 +31,7 @@ async function handleDelete(id: string): Promise<void> {
   try {
     await store.deleteSession(id)
   } catch (err) {
-    console.error('[SessionList] 删除失败:', err)
+    log.error('删除失败', { error: String(err) })
   }
 }
 </script>
@@ -125,7 +128,7 @@ async function handleDelete(id: string): Promise<void> {
               >{{ store.unreadCounts.get(s.id)! > 99 ? '99+' : store.unreadCounts.get(s.id) }}</span
             >
           </button>
-          <button class="session-delete" title="删除会话" @click="handleDelete(s.id)">
+          <button class="session-delete" title="删除会话" tabindex="-1" @click="handleDelete(s.id)">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path
                 d="M2 4h10M5 4V3a1 1 0 011-1h2a1 1 0 011 1v1M11 4v7a1 1 0 01-1 1H4a1 1 0 01-1-1V4"

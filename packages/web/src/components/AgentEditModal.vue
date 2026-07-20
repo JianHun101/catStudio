@@ -21,20 +21,24 @@ const deleting = ref(false)
 const deleteConfirm = ref(false)
 const error = ref('')
 
-watch(() => props.agent, (a) => {
-  if (a) {
-    name.value = a.name
-    avatar.value = a.avatar
-    systemPrompt.value = a.systemPrompt
-    llmProvider.value = a.llmProvider
-    llmModel.value = a.llmModel
-    llmApiKey.value = a.llmApiKey
-    llmBaseUrl.value = a.llmBaseUrl || ''
-    llmEffortLevel.value = a.effortLevel || 'high'
-    error.value = ''
-    deleteConfirm.value = false
-  }
-}, { immediate: true })
+watch(
+  () => props.agent,
+  (a) => {
+    if (a) {
+      name.value = a.name
+      avatar.value = a.avatar
+      systemPrompt.value = a.systemPrompt
+      llmProvider.value = a.llmProvider
+      llmModel.value = a.llmModel
+      llmApiKey.value = a.llmApiKey
+      llmBaseUrl.value = a.llmBaseUrl || ''
+      llmEffortLevel.value = a.effortLevel || 'high'
+      error.value = ''
+      deleteConfirm.value = false
+    }
+  },
+  { immediate: true }
+)
 
 const providerOptions = [
   { value: 'deepseek', label: 'DeepSeek (HTTP API)' },
@@ -56,7 +60,23 @@ const providerHint = computed(() => {
   }
 })
 
-const avatarOptions = ['🐱', '😺', '😼', '😻', '😾', '😿', '🙀', '🐈', '🦁', '🐯', '🐶', '🐰', '🐼', '🦊', '🐮']
+const avatarOptions = [
+  '🐱',
+  '😺',
+  '😼',
+  '😻',
+  '😾',
+  '😿',
+  '🙀',
+  '🐈',
+  '🦁',
+  '🐯',
+  '🐶',
+  '🐰',
+  '🐼',
+  '🦊',
+  '🐮',
+]
 
 const effortOptions = [
   { value: 'low', label: 'Low (最低推理深度)' },
@@ -110,7 +130,7 @@ async function handleDelete(): Promise<void> {
 
 <template>
   <div v-if="agent" class="modal-overlay" @click.self="emit('close')">
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="编辑猫咪">
       <div class="modal-header">
         <div class="modal-title">
           <span class="modal-avatar">{{ agent.avatar }}</span>
@@ -118,7 +138,12 @@ async function handleDelete(): Promise<void> {
         </div>
         <button class="btn-close" @click="emit('close')">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <path d="M4 4l10 10M14 4l-10 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            <path
+              d="M4 4l10 10M14 4l-10 10"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
           </svg>
         </button>
       </div>
@@ -130,7 +155,7 @@ async function handleDelete(): Promise<void> {
             <label>名字</label>
             <input v-model="name" type="text" class="input" />
           </div>
-          <div class="form-group" style="width:140px">
+          <div class="form-group" style="width: 140px">
             <label>头像</label>
             <div class="avatar-picker">
               <button
@@ -139,7 +164,9 @@ async function handleDelete(): Promise<void> {
                 class="avatar-option"
                 :class="{ selected: avatar === a }"
                 @click="avatar = a"
-              >{{ a }}</button>
+              >
+                {{ a }}
+              </button>
             </div>
             <input v-model="avatar" type="text" class="input input-sm" />
           </div>
@@ -152,7 +179,9 @@ async function handleDelete(): Promise<void> {
           <div class="form-group flex-1">
             <label>供应商</label>
             <select v-model="llmProvider" class="input">
-              <option v-for="p in providerOptions" :key="p.value" :value="p.value">{{ p.label }}</option>
+              <option v-for="p in providerOptions" :key="p.value" :value="p.value">
+                {{ p.label }}
+              </option>
             </select>
             <p v-if="providerHint" class="provider-hint">{{ providerHint }}</p>
           </div>
@@ -169,7 +198,9 @@ async function handleDelete(): Promise<void> {
               {{ opt.label }}
             </option>
           </select>
-          <p class="provider-hint">控制 Claude Code 的推理 token 预算。High 适用于大多数场景，Max 推理最深入但耗时最长。</p>
+          <p class="provider-hint">
+            控制 Claude Code 的推理 token 预算。High 适用于大多数场景，Max 推理最深入但耗时最长。
+          </p>
         </div>
 
         <div class="form-group">
@@ -179,7 +210,12 @@ async function handleDelete(): Promise<void> {
 
         <div v-if="llmProvider === 'custom'" class="form-group">
           <label>Base URL</label>
-          <input v-model="llmBaseUrl" type="text" class="input input-mono" placeholder="https://api.example.com" />
+          <input
+            v-model="llmBaseUrl"
+            type="text"
+            class="input input-mono"
+            placeholder="https://api.example.com"
+          />
         </div>
 
         <!-- System Prompt -->
@@ -316,7 +352,9 @@ async function handleDelete(): Promise<void> {
   margin-bottom: 5px;
 }
 
-.flex-1 { flex: 1; }
+.flex-1 {
+  flex: 1;
+}
 
 .input {
   width: 100%;

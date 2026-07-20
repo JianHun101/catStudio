@@ -39,6 +39,17 @@ vi.mock('@/composables/useApi', () => ({
   },
 }))
 
+// ── Mock logger ────────────────────────────────────
+
+vi.mock('@/utils/logger', () => ({
+  createLogger: () => ({
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+  }),
+}))
+
 // ── Test data ────────────────────────────────────
 
 const mockAgent: AgentConfig = {

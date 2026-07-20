@@ -23,6 +23,13 @@ export const SessionCreateSchema = z.object({
   agentIds: z.array(z.string()).min(1),
 })
 
+export const SessionUpdateSchema = z.object({
+  title: z.string().min(1).max(100).optional(),
+  addAgentIds: z.array(z.string()).optional(),
+  removeAgentIds: z.array(z.string()).optional(),
+  broadcastMode: z.boolean().optional(),
+})
+
 // ─── Message ────────────────────────────────────────
 
 export const MessageSendSchema = z.object({

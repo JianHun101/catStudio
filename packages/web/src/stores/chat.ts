@@ -10,6 +10,9 @@ import type {
 } from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
 import { api } from '@/composables/useApi'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('chatStore')
 
 /** 将技术错误信息转为用户可读的中文提示 */
 function friendlyError(err: any): string {
@@ -157,7 +160,7 @@ export const useChatStore = defineStore('chat', () => {
         joinSession(sessionList[0].id)
       }
     } catch (err: any) {
-      console.error('[store] fetchData failed:', err)
+      log.error('fetchData failed', { error: friendlyError(err) })
       dataError.value = friendlyError(err)
     } finally {
       loading.value = false
@@ -226,7 +229,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       await api.clearSessionMessages(id)
     } catch (err) {
-      console.error('[store] clearSessionMessages API failed:', err)
+      log.error('clearSessionMessages API failed', { error: String(err) })
       throw err
     }
     // 如果清空的是当前活跃会话，清空本地消息
@@ -240,7 +243,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       await api.deleteSession(id)
     } catch (err) {
-      console.error('[store] deleteSession API failed:', err)
+      log.error('deleteSession API failed', { error: String(err) })
       throw err
     }
     sessions.value = sessions.value.filter((s) => s.id !== id)

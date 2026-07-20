@@ -41,12 +41,17 @@ async function handleCreate(): Promise<void> {
 
 <template>
   <div class="modal-overlay" @click.self="emit('close')">
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="新建会话">
       <div class="modal-header">
         <h3>新建会话</h3>
         <button class="btn-close" @click="emit('close')">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <path d="M4 4l10 10M14 4l-10 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            <path
+              d="M4 4l10 10M14 4l-10 10"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
           </svg>
         </button>
       </div>
@@ -75,12 +80,31 @@ async function handleCreate(): Promise<void> {
               @click="toggleAgent(agent.id)"
             >
               <div class="select-check">
-                <svg v-if="selectedAgents.has(agent.id)" width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <circle cx="8" cy="8" r="7" fill="var(--accent)" stroke="var(--accent)" stroke-width="1"/>
-                  <path d="M5 8l2 2 4-4" stroke="var(--bg-deep)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                <svg
+                  v-if="selectedAgents.has(agent.id)"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                >
+                  <circle
+                    cx="8"
+                    cy="8"
+                    r="7"
+                    fill="var(--accent)"
+                    stroke="var(--accent)"
+                    stroke-width="1"
+                  />
+                  <path
+                    d="M5 8l2 2 4-4"
+                    stroke="var(--bg-deep)"
+                    stroke-width="1.6"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
                 </svg>
                 <svg v-else width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <circle cx="8" cy="8" r="7" stroke="var(--text-muted)" stroke-width="1.2"/>
+                  <circle cx="8" cy="8" r="7" stroke="var(--text-muted)" stroke-width="1.2" />
                 </svg>
               </div>
               <span class="agent-avatar">{{ agent.avatar }}</span>
@@ -90,9 +114,7 @@ async function handleCreate(): Promise<void> {
               </div>
             </div>
           </div>
-          <p v-if="store.agents.length === 0" class="no-agents">
-            还没有 Agent，请先在右侧面板创建
-          </p>
+          <p v-if="store.agents.length === 0" class="no-agents">还没有 Agent，请先在右侧面板创建</p>
         </div>
 
         <div v-if="error" class="error-msg">{{ error }}</div>

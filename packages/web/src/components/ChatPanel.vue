@@ -5,6 +5,9 @@ import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('ChatPanel')
 
 const props = defineProps<{
   leftSidebarOpen: boolean
@@ -208,7 +211,7 @@ async function handleClearMessages(): Promise<void> {
     await store.clearSessionMessages(store.activeSessionId)
     clearConfirm.value = false
   } catch (err) {
-    console.error('[ChatPanel] clear messages failed:', err)
+    log.error('clear messages failed', { error: String(err) })
   } finally {
     clearingMessages.value = false
   }

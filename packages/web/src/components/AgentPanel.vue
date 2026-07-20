@@ -3,6 +3,9 @@ import { ref, computed } from 'vue'
 import type { AgentConfig, AgentTokenStats } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import AgentEditModal from './AgentEditModal.vue'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('AgentPanel')
 
 defineProps<{
   collapsed?: boolean
@@ -122,7 +125,7 @@ async function handleCreate(): Promise<void> {
     }
     await store.fetchData()
   } catch (err: any) {
-    console.error('[AgentPanel] create agent failed:', err)
+    log.error('create agent failed', { error: String(err) })
     // 解析后端返回的友好错误信息，否则用通用中文提示
     let msg = err?.body?.message || err?.body?.error || err.message || ''
     if (msg.includes('UNIQUE constraint') || msg.includes('已存在')) {
