@@ -432,19 +432,27 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(
       Events.BROADCAST_MODE_CHANGED,
       (data: { sessionId: string; broadcastMode: boolean }) => {
-        broadcastMode.value = data.broadcastMode
-        // 系统消息提示广播模式变更
-        messages.value.push({
-          id: `broadcast-${Date.now()}`,
-          sessionId: data.sessionId,
-          role: 'system',
-          content: data.broadcastMode
-            ? '📢 广播模式已开启 — Agent 可以看到其他 Agent 的回复'
-            : '🔇 广播模式已关闭 — Agent 只能看到自己的回复和被 @ 的消息',
-          agentId: null,
-          mentions: [],
-          createdAt: new Date().toISOString(),
-        } as any)
+        // 同步 sessions 数组中的广播模式（joinSession 会从这里读取）
+        const idx = sessions.value.findIndex((s) => s.id === data.sessionId)
+        if (idx >= 0) {
+          sessions.value[idx] = { ...sessions.value[idx], broadcastMode: data.broadcastMode }
+        }
+        // 只有当前活跃会话才更新 UI 状态
+        if (data.sessionId === activeSessionId.value) {
+          broadcastMode.value = data.broadcastMode
+          // 系统消息提示广播模式变更
+          messages.value.push({
+            id: `broadcast-${Date.now()}`,
+            sessionId: data.sessionId,
+            role: 'system',
+            content: data.broadcastMode
+              ? '📢 广播模式已开启 — Agent 可以看到其他 Agent 的回复'
+              : '🔇 广播模式已关闭 — Agent 只能看到自己的回复和被 @ 的消息',
+            agentId: null,
+            mentions: [],
+            createdAt: new Date().toISOString(),
+          } as any)
+        }
       }
     )
 
