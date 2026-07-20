@@ -8,7 +8,7 @@ import type { AgentConfig } from '@cat-study/shared'
 export function useMention(agents: () => AgentConfig[]) {
   const mentionActive = ref(false)
   const mentionQuery = ref('')
-  const mentionStartIdx = ref(-1)  // @ 在 text 中的位置（用于替换）
+  const mentionStartIdx = ref(-1) // @ 在 text 中的位置（用于替换）
 
   const mentionSuggestions = computed(() => {
     if (!mentionActive.value) return []
@@ -26,7 +26,7 @@ export function useMention(agents: () => AgentConfig[]) {
     })
   })
 
-  const mentionIndex = ref(0)  // keyboard nav
+  const mentionIndex = ref(0) // keyboard nav
 
   /** 每次输入时调用 */
   function detect(text: string, cursorPos: number): void {
@@ -100,6 +100,7 @@ export function useMention(agents: () => AgentConfig[]) {
     mentionQuery,
     mentionSuggestions,
     mentionIndex,
+    mentionStartIdx,
     detect,
     select,
     close,

@@ -24,9 +24,15 @@ const clearingMessages = ref(false)
 const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次执行
 const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 
-const { mentionActive, mentionSuggestions, mentionIndex, detect, select, navigate } = useMention(
-  () => store.agents
-)
+const {
+  mentionActive,
+  mentionSuggestions,
+  mentionIndex,
+  mentionStartIdx,
+  detect,
+  select,
+  navigate,
+} = useMention(() => store.agents)
 
 // ─── Time Formatting ───────────────────────
 
@@ -235,12 +241,13 @@ function onKeydown(e: KeyboardEvent): void {
       e.preventDefault()
       const ta = textareaRef.value
       if (!ta) return
+      const agent = mentionSuggestions.value[mentionIndex.value]
       const result = navigate(e.key, ta.value, ta.selectionStart)
-      if (result !== null) {
+      if (result !== null && agent) {
         input.value = result
         nextTick(() => {
-          ta.selectionStart = ta.selectionEnd =
-            mentionStartIdx() + result.length - input.value.length + ta.value.length
+          // 光标放在 @agentName 后面的空格之后
+          ta.selectionStart = ta.selectionEnd = mentionStartIdx.value + agent.name.length + 2
         })
       }
       return
@@ -251,18 +258,6 @@ function onKeydown(e: KeyboardEvent): void {
     e.preventDefault()
     handleSend()
   }
-}
-
-function mentionStartIdx(): number {
-  const text = input.value
-  const cursor = textareaRef.value?.selectionStart || text.length
-  for (let i = cursor - 1; i >= 0; i--) {
-    if (text[i] === '@' && (i === 0 || /\s/.test(text[i - 1]))) {
-      return i
-    }
-    if (/\s/.test(text[i])) break
-  }
-  return -1
 }
 
 function selectMention(idx: number): void {
