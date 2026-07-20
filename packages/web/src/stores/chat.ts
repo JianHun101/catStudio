@@ -43,6 +43,26 @@ export const useChatStore = defineStore('chat', () => {
   const dataError = ref('') // 加载失败时的错误信息
   const broadcastMode = ref(false)
   const serverOnline = ref(false) // Socket.IO 是否已连接
+  const errorMessage = ref<string | null>(null) // 服务端 ERROR 事件的 toast 消息
+  let errorTimer: ReturnType<typeof setTimeout> | null = null
+  const loadingMessages = ref(false) // session 切换时等待历史消息加载
+
+  /** 显示错误 toast，5 秒后自动消失 */
+  function showError(message: string): void {
+    if (errorTimer) clearTimeout(errorTimer)
+    errorMessage.value = message
+    errorTimer = setTimeout(() => {
+      errorMessage.value = null
+      errorTimer = null
+    }, 5000)
+  }
+
+  /** 关闭错误 toast */
+  function dismissError(): void {
+    if (errorTimer) clearTimeout(errorTimer)
+    errorMessage.value = null
+    errorTimer = null
+  }
 
   /** 每条消息对应的 Agent 执行状态 */
   type AgentStatusEntry = {
@@ -151,6 +171,7 @@ export const useChatStore = defineStore('chat', () => {
     }
     activeSessionId.value = sessionId
     messages.value = []
+    loadingMessages.value = true // 等待 SESSION_HISTORY 到达
     // 清除旧会话的打字气泡（切换会话时状态应完全重置）
     typingStates.value.clear()
     // 标记已读（清除未读计数 + 通知服务端）
@@ -291,6 +312,12 @@ export const useChatStore = defineStore('chat', () => {
     socket.on('disconnect', () => {
       serverOnline.value = false
     })
+
+    // 服务端错误通知 → toast 提示
+    socket.on(Events.ERROR, (data: { message: string }) => {
+      showError(data.message)
+    })
+
     // 初始状态
     serverOnline.value = socket.connected
 
@@ -319,6 +346,7 @@ export const useChatStore = defineStore('chat', () => {
       }
       all.push(...data.messages)
       messages.value = all
+      loadingMessages.value = false
     })
 
     // Agent 回复中的 @mentions 在消息发送后才解析，通过此事件补发
@@ -486,6 +514,10 @@ export const useChatStore = defineStore('chat', () => {
     dataReady,
     dataError,
     serverOnline,
+    errorMessage,
+    showError,
+    dismissError,
+    loadingMessages,
     broadcastMode,
     activeSession,
     activeMessages,

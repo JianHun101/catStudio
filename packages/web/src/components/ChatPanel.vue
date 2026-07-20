@@ -449,6 +449,28 @@ function statusLabelZh(status: string): string {
 
     <!-- Messages -->
     <div ref="chatContainer" class="chat-messages" @scroll.passive="checkScrollPosition">
+      <!-- Session 切换加载中 -->
+      <div
+        v-if="store.activeSessionId && store.loadingMessages && store.activeMessages.length === 0"
+        class="loading-messages"
+      >
+        <div class="loading-skeleton">
+          <div class="skeleton-msg" v-for="i in 3" :key="i">
+            <div class="skeleton-avatar"></div>
+            <div class="skeleton-body">
+              <div class="skeleton-line skeleton-line-sm"></div>
+              <div class="skeleton-line skeleton-line-lg"></div>
+              <div class="skeleton-line skeleton-line-md"></div>
+            </div>
+          </div>
+          <div class="loading-spinner">
+            <span class="spinner-dot"></span>
+            <span class="spinner-dot"></span>
+            <span class="spinner-dot"></span>
+          </div>
+        </div>
+      </div>
+
       <div v-if="!store.activeSessionId" class="empty-state">
         <div class="empty-icon">🐱</div>
         <h3>欢迎来到 CatStudy</h3>
@@ -888,6 +910,121 @@ function statusLabelZh(status: string): string {
   margin-top: 8px;
   font-size: 12px !important;
   opacity: 0.7;
+}
+
+/* ─── Loading Messages Skeleton ────────────── */
+
+.loading-messages {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+}
+
+.loading-skeleton {
+  width: 100%;
+  max-width: 520px;
+}
+
+.skeleton-msg {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+  opacity: 0.55;
+  animation: skeletonPulse 1.8s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * 0.15s);
+}
+.skeleton-msg:nth-child(1) {
+  --i: 0;
+}
+.skeleton-msg:nth-child(2) {
+  --i: 1;
+}
+.skeleton-msg:nth-child(3) {
+  --i: 2;
+}
+
+.skeleton-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  flex-shrink: 0;
+}
+
+.skeleton-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+}
+
+.skeleton-line-sm {
+  width: 40%;
+}
+
+.skeleton-line-lg {
+  width: 92%;
+}
+
+.skeleton-line-md {
+  width: 65%;
+}
+
+@keyframes skeletonPulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.75;
+  }
+}
+
+.loading-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.spinner-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.5;
+  animation: spinnerBounce 1.2s ease-in-out infinite;
+}
+.spinner-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.spinner-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes spinnerBounce {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
 }
 
 /* Message */
