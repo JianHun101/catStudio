@@ -84,8 +84,8 @@ process.env.TOKEN_COUNT_METHOD ??= 'estimate'
 process.env.SUMMARY_ENABLED ??= 'true'
 
 // SUMMARY_MODEL — 摘要使用的模型（应使用便宜模型以降低成本）
-//   deepseek-chat: $0.14/1M input tokens
-process.env.SUMMARY_MODEL ??= 'deepseek-chat'
+//   deepseek-v4-flash: $0.14/1M input tokens, 1M 上下文
+process.env.SUMMARY_MODEL ??= 'deepseek-v4-flash'
 
 // SUMMARY_API_KEY — 摘要模型的 API Key（默认复用 DS_KEY）
 process.env.SUMMARY_API_KEY ??= process.env.DS_KEY || ''

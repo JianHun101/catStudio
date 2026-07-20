@@ -32,22 +32,24 @@ const HANDOFF_SYSTEM_PROMPT = `你是一个会话交接助手。你需要对整�
  * 生成全量会话总结。
  */
 async function generateFullSummary(sessionId: string, db: Database.Database): Promise<string> {
+  // 取最新 N 条消息，不截断每条内容（deepseek-v4-flash 有 1M 上下文）
   const allMessages = db
     .prepare(
       `SELECT m.*, a.name as agent_name
        FROM messages m
        LEFT JOIN agents a ON m.agent_id = a.id
        WHERE m.session_id = ? AND m.role != 'system'
-       ORDER BY m.created_at ASC
-       LIMIT 500`
+       ORDER BY m.created_at DESC
+       LIMIT 300`
     )
     .all(sessionId) as any[]
+  allMessages.reverse() // 恢复时间正序
 
   const conversationText = allMessages
     .map((m: any) => {
-      if (m.role === 'user') return `用户：${m.content.slice(0, 500)}`
+      if (m.role === 'user') return `用户：${m.content}`
       const name = m.agent_name || '助手'
-      return `${name}：${m.content.slice(0, 500)}`
+      return `${name}：${m.content}`
     })
     .join('\n')
 
@@ -59,7 +61,7 @@ async function generateFullSummary(sessionId: string, db: Database.Database): Pr
 
   const summary = await chatComplete(HANDOFF_SYSTEM_PROMPT, conversationText, {
     apiKey,
-    model: process.env.SUMMARY_MODEL || 'deepseek-chat',
+    model: process.env.SUMMARY_MODEL || 'deepseek-v4-flash',
     baseUrl: process.env.SUMMARY_BASE_URL || 'https://api.deepseek.com',
     maxTokens: 1500,
     temperature: 0.3,

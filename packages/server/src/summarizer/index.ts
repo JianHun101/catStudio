@@ -117,7 +117,7 @@ export async function updateRunningSummary(
     const newMessagesText = newMessages
       .map((m: any) => {
         const role = m.role === 'user' ? '用户' : m.agent_id ? getAgentName(db, m.agent_id) : '系统'
-        return `[${role}]: ${m.content.slice(0, 500)}`
+        return `[${role}]: ${m.content}`
       })
       .join('\n')
 
@@ -127,7 +127,7 @@ export async function updateRunningSummary(
 
     const summaryText = await chatComplete(SUMMARY_SYSTEM_PROMPT, userPrompt, {
       apiKey,
-      model: process.env.SUMMARY_MODEL || 'deepseek-chat',
+      model: process.env.SUMMARY_MODEL || 'deepseek-v4-flash',
       baseUrl: process.env.SUMMARY_BASE_URL || 'https://api.deepseek.com',
       maxTokens: 800,
       temperature: 0.3,
