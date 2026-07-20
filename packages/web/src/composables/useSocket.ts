@@ -2,25 +2,28 @@ import { io, Socket } from 'socket.io-client'
 import { ref, onUnmounted } from 'vue'
 import { Events } from '@cat-study/shared'
 import type { Message, AgentRuntimeState } from '@cat-study/shared'
+import { createLogger } from '@/utils/logger'
 
+const log = createLogger('socket')
 const socket = ref<Socket | null>(null)
 const connected = ref(false)
 
 export function useSocket() {
   if (!socket.value) {
-    socket.value = io('http://127.0.0.1:3200', {
+    // 使用相对路径：开发时走 Vite proxy，生产时同源部署
+    socket.value = io({
       autoConnect: false,
       transports: ['websocket', 'polling'],
     })
 
     socket.value.on('connect', () => {
       connected.value = true
-      console.log('[socket] connected:', socket.value!.id)
+      log.info('connected', { id: socket.value!.id })
     })
 
     socket.value.on('disconnect', () => {
       connected.value = false
-      console.log('[socket] disconnected')
+      log.info('disconnected')
     })
 
     socket.value.connect()

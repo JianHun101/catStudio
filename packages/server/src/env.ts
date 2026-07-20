@@ -53,6 +53,8 @@ function loadEnvFile(): void {
     }
 
     if (count > 0) {
+      // console.log 是故意的：env.ts 必须最先 import（在 logger 模块之前），
+      // 不能使用 createLogger，否则会违反导入顺序约束。
       console.log(`[env] 从 .env 加载了 ${count} 个变量`)
     }
   } catch {

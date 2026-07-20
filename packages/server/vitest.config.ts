@@ -9,5 +9,13 @@ export default defineConfig({
       MEMORY_ENABLED: 'false',
       LOG_LEVEL: 'error',
     },
+    coverage: {
+      thresholds: {
+        statements: 50,
+        branches: 40,
+        functions: 58,
+        lines: 50,
+      },
+    },
   },
 })
