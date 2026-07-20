@@ -1,147 +1,71 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project overview
-
-CatStudy is a multi-agent chat platform where users chat with AI cat characters in sessions. Each cat agent has persistent identity, independent LLM configuration, and long-term vector memory. The system runs as a local monorepo with a Fastify + Socket.IO backend and a Vue 3 frontend.
-
 ## Commands
 
 ```bash
-pnpm install              # Install all dependencies
-pnpm dev                  # Start server (3200) + web (5173) via scripts/dev.js
-pnpm dev:server           # Server only
-pnpm dev:web              # Web only
-pnpm stop                 # Force-kill processes on ports 3200/5173-5175 (scripts/stop.js)
-pnpm build                # Build all packages (pnpm -r build)
-
-# Seeding
-pnpm seed                 # Upsert demo cats (idempotent) — runs scripts/seed.js
-npx tsx packages/server/src/seed.ts --reset    # Wipe and rebuild
-
-# Testing (vitest workspace: shared → server → web)
-pnpm test                 # All tests across the 3 packages
-pnpm test:shared          # Shared package only (Zod schemas + events)
-pnpm test:server          # Server package only
-pnpm test:web             # Web package only
-pnpm test:watch           # Watch mode
-pnpm test:coverage        # With coverage report
-pnpm test -- --reporter=verbose  # Per-test output
-
-# Type checking
+pnpm dev                  # server (:3200) + web (:5173) via scripts/dev.js
+pnpm dev:server / dev:web # single package
+pnpm stop                 # kill ports 3200, 5173-5175
+pnpm test                 # vitest workspace (shared → server → web)
+pnpm test:shared / :server / :web / :watch / :coverage
 pnpm lint                 # tsc --noEmit across all packages
+pnpm seed                 # upsert demo cats (idempotent)
+npx tsx packages/server/src/seed.ts --reset  # wipe + rebuild
+pnpm build                # pnpm -r build
 ```
 
-## Monorepo structure
+## Structure
 
 ```
-packages/shared/   →  Types, Zod schemas, Socket.IO event constants
-packages/server/   →  Fastify + Socket.IO + SQLite + LLM adapters + dispatch + memory
-packages/web/      →  Vue 3 + Vite + Pinia + Socket.IO client
-scripts/           →  dev.js (process launcher), seed.js (seed wrapper), stop.js (port cleanup)
-.claude/           →  settings.local.json (permissions) + custom skills (session-summary)
-.agents/           →  Third-party skills from mattpocock/skills (locked via skills-lock.json)
-docs/adr/          →  Architecture Decision Records (6 files)
-docs/sessions/     →  Session summaries (cat-study-*-summary.md, 17 files)
+packages/shared/  →  Types, Zod schemas, Socket.IO event constants
+packages/server/  →  Fastify + Socket.IO + SQLite + LLM adapters + dispatch + memory
+packages/web/     →  Vue 3 + Vite + Pinia + Socket.IO client
+scripts/          →  dev.js, seed.js, stop.js
+.claude/          →  settings + custom skills
+docs/adr/         →  6 architecture decision records
 ```
 
-`pnpm-workspace.yaml` allows native builds for `better-sqlite3`, `sqlite-vec`, `esbuild`, `vue-demi`, `protobufjs`, `sharp`, `onnxruntime-node`.
+## Architecture
 
-## Architecture (the big picture)
+**Startup**: `.env` (manual parse, no dotenv) → `initDb()` (SQLite WAL + sqlite-vec + migrations) → auto-seed empty agents table → Redis (optional, failure non-blocking) → Fastify + Socket.IO → SIGINT/SIGTERM graceful shutdown.
 
-### Startup sequence
+**Message flow**: `SEND_MESSAGE` → write to SQLite → broadcast to session room → `dispatch()`:
 
-```
-.env loading (packages/server/src/env.ts, must be first import)
-  → initDb() (SQLite WAL + sqlite-vec + migrations)
-  → auto-seed if agents table is empty (buildDemoAgents())
-  → Redis connect (optional, failure is non-blocking)
-  → Fastify listen → attach Socket.IO
-  → graceful shutdown (SIGINT/SIGTERM)
-```
+- Each mentioned agent: idle slot → `executeAgent()`; busy → FIFO queue
+- `runAgentReply()`: filter context → retrieve vector memories → `chatStream()` → `AGENT_TYPING` streaming → write reply to SQLite → `NEW_MESSAGE`
+- `completeExecution()` → release slot → dequeue next
 
-`scripts/dev.js` spawns server and web as separate `node` processes (not `pnpm --parallel`) to avoid Windows shell output-buffering issues. Server starts first with a 500ms head start. All addresses use `127.0.0.1` (not `localhost`) to avoid Windows IPv4/IPv6 ambiguity. The Vite dev server proxies `/api` and `/socket.io` requests to `http://127.0.0.1:3200` so the web frontend sees a single origin.
+**Context filtering** (each agent only sees relevant messages):
 
-### Message flow
+- Own replies ✓
+- User messages @mentioning this agent ✓
+- User messages with no @mentions (broadcast) ✓
+- User messages @mentioning OTHER agents ✗
+- Other agents' replies → only if broadcast mode on
 
-```
-User types "@店长 你好" in web UI
-  → Socket.IO Events.SEND_MESSAGE
-  → connector writes message to SQLite
-  → broadcast to session room
-  → dispatch() checks each mentioned agent's slot
-    → idle → executeAgent() → slot becomes 'busy'（前端显示 'thinking' 推理状态后切换为 'busy'）
-    → not idle → FIFO queue (waiting for slot to release)
-  → runAgentReply():
-    1. Build context: filter messages relevant to THIS agent
-       (own replies, user messages @mentioning them, broadcast messages)
-    2. Retrieve vector memories → inject into system prompt
-    3. Call LLM adapter chatStream() → stream chunks via AGENT_TYPING events
-    4. Write final reply to SQLite → emit NEW_MESSAGE
-  → completeExecution() → release slot → dequeue next
-```
+**Dispatch**: single-slot FIFO per agent (`agentSlots` Map, in-memory). Serial execution in @mention order. Hard timeout via `AGENT_HARD_TIMEOUT_MS` (30min); CLI idle timeout 20min (`cli-utils.ts`).
 
-### Context filtering (not prompt engineering)
+**LLM adapters**: `chatStream(messages, options) → AsyncIterable<Chunk>`. DeepSeek (HTTP SSE), Claude (CLI child process), OpenAI (Codex CLI). Cached per `provider:apiKey` in `registry.ts`.
 
-Each agent only sees messages relevant to itself — not all messages in the session. Rules:
-- Agent's own replies → visible
-- User messages that @mention this agent → visible
-- User messages with no @mentions (broadcast) → visible
-- User messages @mentioning OTHER agents → discarded
-- Other agents' replies → visible only if broadcast mode is on
+**Memory**: local embeddings via Xenova/bge-small-zh-v1.5 (512-dim). Pipeline: embed → dedup check (cosine < `MEMORY_DEDUP_THRESHOLD`, default 0.20) → store. Retrieval: embed trigger → `vec_distance_cosine()` → top-K → system prompt. Fire-and-forget (failures don't block).
 
-This is more reliable than telling the LLM "don't speak for others."
+**Database**: SQLite `packages/server/data/cat-study.db`. Tables: `agents`, `sessions`, `messages`, `memories`, `execution_logs`. snake_case↔camelCase at API boundary. Migrations: additive ALTER TABLE in try/catch. `agent_ids`/`mentions` as JSON strings.
 
-### Dispatch: single-slot FIFO
+## Conventions
 
-Each agent has exactly one execution slot (`agentSlots` Map, in-memory). @mention multiple agents → they execute serially in order, so later agents see earlier agents' replies (like real group chat). Max execution time is 30 minutes per agent via two-layer timeout: CLI idle timeout (20 min, in `cli-utils.ts`) + dispatch hard timeout via `AbortController` (configurable via `AGENT_HARD_TIMEOUT_MS`, default 30 min). Slot state is published to Redis `agent:{name}:status` channel when available.
+**Testing**:
 
-### LLM adapter pattern
+- `:memory:` SQLite via `setDb()/resetDb()` hooks — no disk, FK constraints work
+- Mock only at boundaries — only `ioredis`; Zod, pure functions, SQLite, Fastify all real
+- Helpers: `packages/server/src/test-helpers.ts` (`createTestDb`, `buildTestApp`)
+- Dispatch: `__test_reset()` between cases (clears `agentSlots`/`agentQueues`)
 
-`LLMAdapter` interface: `chatStream(messages, options) → AsyncIterable<Chunk>`. Three implementations:
-- **DeepSeek** (`deepseek.ts`): HTTP Chat Completions API, streaming SSE
-- **Claude** (`claude.ts`): Spawns Claude Code CLI as child process
-- **OpenAI** (`openai.ts`): Spawns Codex CLI as child process
+**Domain glossary**: see `CONTEXT.md`. Key terms: Agent (cat character), Session (chat thread), Slot (execution unit), Memory (vector recall), Connector (platform adapter).
 
-`registry.ts` caches adapters by `provider:apiKey` key. Each agent independently chooses its provider/model/apiKey.
+**Env**: `.env.example` for full list. Loader at `packages/server/src/env.ts`. Key: `DS_KEY`, `HF_ENDPOINT`, `MEMORY_ENABLED` (set `false` in server tests).
 
-### Memory system
+**Windows**:
 
-Local embeddings via `@huggingface/transformers` (Xenova/bge-small-zh-v1.5, 512-dim). Pipeline:
-1. User message → `embedText()` → `saveMessageMemory()` stores one row per agent (same embedding BLOB)
-2. Before LLM call → `buildMemoryContext()` embeds trigger text → `searchMemories()` via `vec_distance_cosine()` in sqlite-vec → top-K results formatted and appended to system prompt
-3. Dedup on write: skip if cosine distance to any existing memory < `MEMORY_DEDUP_THRESHOLD` (default 0.20)
-
-Memory is fire-and-forget — failures are logged but never block the message flow.
-
-### Database
-
-SQLite at `packages/server/data/cat-study.db`. Five tables: `agents`, `sessions`, `messages`, `memories`, `execution_logs`. Column naming is `snake_case` in DB, `camelCase` in TypeScript — conversion happens at API boundary. Migrations are additive `ALTER TABLE` statements wrapped in try/catch (skip if column exists). `agent_ids` and `mentions` are stored as JSON strings.
-
-## Key conventions
-
-### Domain terminology
-
-See `CONTEXT.md` for the full glossary. Critical terms: **Agent** (cat character, not bot), **Session** (chat thread), **Slot** (execution capacity, one per agent), **Mention** (@agent-name), **Memory** (vector-stored semantic recall), **Connector** (platform adapter, not plugin).
-
-### Testing patterns
-
-- **`:memory:` SQLite** for integration tests — no disk I/O, auto-cleanup, FK constraints work. Inject via `setDb()/resetDb()` hooks (8 lines of test-only code in production).
-- **Mock only at module boundaries**: Zod schemas, pure functions, SQLite behavior, and Fastify `app.inject()` all run REAL code. Only `ioredis` is mocked.
-- **Test helpers** in `packages/server/src/test-helpers.ts`: `createTestDb()` (in-memory with full schema, no sqlite-vec) and `buildTestApp()` (minimal Fastify).
-- **Dispatch tests** call `__test_reset()` between cases to clear the module-level `agentSlots`/`agentQueues` Maps.
-
-### Session summary format
-
-After each development session, generate a summary using the `session-summary` skill (defined at `.claude/skills/session-summary/SKILL.md`). Output goes to `docs/sessions/cat-study-<slug>-summary.md`. Required sections: What (file change table, ordered shared→server→web→scripts→root), Why (design reasoning with ASCII diagrams), Tradeoff (rejected alternatives table), Open Questions (real uncertainties, not bugs), Next Action (checkbox-style, completed items struck through).
-
-### Environment variables
-
-See `.env.example`. Key ones: `DS_KEY` (DeepSeek API key, used by demo cats), `HF_ENDPOINT` (set to `https://hf-mirror.com` for mainland China), `MEMORY_*` family for memory tuning, `MEMORY_ENABLED` (set to `false` in server tests to skip embedding model loading). The `.env` loader (`packages/server/src/env.ts`) does NOT use the `dotenv` package — it reads the file manually and only sets variables not already in `process.env`.
-
-### Windows considerations
-
-- All addresses use `127.0.0.1` instead of `localhost` (avoids IPv4/IPv6 resolution ambiguity)
-- Process spawning avoids `.cmd` wrappers and `shell: true` — use `node path/to/cli.mjs` directly
-- `scripts/stop.js` uses `netstat -ano | findstr` + `taskkill /F /T /PID` for cleanup
+- Use `127.0.0.1` not `localhost` (IPv4/IPv6 ambiguity)
+- Spawn: `node path/to/cli.mjs` — avoid `.cmd` wrappers and `shell: true`
+- Dev proxy: Vite proxies `/api` + `/socket.io` → `http://127.0.0.1:3200`
