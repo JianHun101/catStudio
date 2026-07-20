@@ -62,6 +62,10 @@ function loadEnvFile(): void {
   }
 }
 
+// ⚠️ 必须先加载 .env，再设置默认值——否则 ??= 在 .env 加载前执行，
+// 会导致 SUMMARY_API_KEY 等依赖 DS_KEY 的变量拿到空值（DS_KEY 尚未加载）。
+loadEnvFile()
+
 // ─── Token 预算配置 ──────────────────────────────
 // MAX_CONTEXT_TOKENS — 单次 LLM 调用的上下文 token 预算上限
 //   默认 128000（DeepSeek V4 1M 上下文窗口的保守值，仅占 12.8%）
@@ -98,5 +102,3 @@ process.env.HANDOFF_ENABLED ??= 'true'
 
 // HANDOFF_THRESHOLD — 触发交接的上下文 token 占比（默认 0.9 = 90%）
 process.env.HANDOFF_THRESHOLD ??= '0.9'
-
-loadEnvFile()
