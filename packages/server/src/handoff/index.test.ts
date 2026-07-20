@@ -40,6 +40,27 @@ describe('handoff', () => {
       expect(shouldHandoff(6400)).toBe(true)
       expect(shouldHandoff(6399)).toBe(false)
     })
+
+    it('triggers at 90% with realistic 128K context (regression test)', () => {
+      // 验证：128K 模型，截断前消息总 token 数 ≥115200 时应触发交接。
+      // 这是对 bug #handoff-deadlock 的回归测试：
+      //   截断将消息锁死在 70%（~89600），截断后检查永远达不到 90%（115200）。
+      //   修复后 socketio.ts 在截断前计算消息总 token 并传给 shouldHandoff。
+      process.env.HANDOFF_ENABLED = 'true'
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      process.env.HANDOFF_THRESHOLD = '0.9'
+
+      // 截断后典型值（~75000）不应触发
+      expect(shouldHandoff(75000)).toBe(false)
+
+      // 截断前典型值（~120000）应触发
+      expect(shouldHandoff(120000)).toBe(true)
+
+      // 正好 90%（115200）应触发
+      expect(shouldHandoff(115200)).toBe(true)
+      // 差 1 token 不应触发
+      expect(shouldHandoff(115199)).toBe(false)
+    })
   })
 
   describe('injectSummaryIntoSystem', () => {

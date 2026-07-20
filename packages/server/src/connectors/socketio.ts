@@ -850,6 +850,14 @@ async function runAgentReply(
     }
   }
 
+  // ── 会话交接预检（截断前） ──────────────────────────
+  // 必须在截断前计算消息总 token——截断将消息锁死在 70% 预算内，
+  // 截断后再检查 90% 阈值永远达不到（70% < 90%）。
+  let preTruncationTokens = 0
+  for (const m of relevantMessages) {
+    preTruncationTokens += estimateTokens(m.content) + 50 // role 前缀开销
+  }
+
   // ── Token 感知软截断 ──────────────────────────────────
   // 从最新到最旧累加 token，超出预算的消息丢弃（不再用硬编码 LIMIT 100）
   const MAX_CONTEXT = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
@@ -945,12 +953,15 @@ async function runAgentReply(
   })
 
   // ── 会话交接检查 ──────────────────────────────────
-  // 当上下文 token 达到 90% 阈值时，异步触发交接（不阻塞当前回复）
-  if (shouldHandoff(contextTokenStats.total)) {
+  // 使用截断**前**的消息 token + system prompt token 判断。
+  // 截断已将消息锁死在 70% 预算内，截断后检查永远达不到 90% 阈值。
+  // preTruncationTokens 在上方截断前已计算。
+  const estimatedTotalTokens = preTruncationTokens + contextTokenStats.systemTokens
+  if (shouldHandoff(estimatedTotalTokens)) {
     log.info('handoff threshold reached, triggering handoff', {
       traceId,
       agentId: agent.id,
-      contextTokens: contextTokenStats.total,
+      contextTokens: estimatedTotalTokens,
       maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10),
     })
     // 异步触发交接，不 await — 当前回复在旧会话中继续
