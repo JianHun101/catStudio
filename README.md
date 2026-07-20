@@ -4,13 +4,13 @@
 
 ## 前置依赖
 
-| 依赖 | 版本要求 | 用途 | 必需？ |
-|------|----------|------|--------|
-| [Node.js](https://nodejs.org/) | >= 20 | 运行时 | ✅ |
-| [pnpm](https://pnpm.io/) | >= 8 | 包管理 + monorepo | ✅ |
-| [Redis](https://redis.io/) | >= 7.0 | Agent 状态跨进程同步 | ⚠️ 可选（单机 Web 场景可降级为内存模式） |
-| Claude Code CLI | 最新 | `claude` provider 适配器 | ❌ 仅使用该 provider 时需要 |
-| Codex CLI + codex-proxy | 最新 | `openai` provider 适配器 | ❌ 仅使用该 provider 时需要 |
+| 依赖                           | 版本要求 | 用途                     | 必需？                                   |
+| ------------------------------ | -------- | ------------------------ | ---------------------------------------- |
+| [Node.js](https://nodejs.org/) | >= 20    | 运行时                   | ✅                                       |
+| [pnpm](https://pnpm.io/)       | >= 8     | 包管理 + monorepo        | ✅                                       |
+| [Redis](https://redis.io/)     | >= 7.0   | Agent 状态跨进程同步     | ⚠️ 可选（单机 Web 场景可降级为内存模式） |
+| Claude Code CLI                | 最新     | `claude` provider 适配器 | ❌ 仅使用该 provider 时需要              |
+| Codex CLI + codex-proxy        | 最新     | `openai` provider 适配器 | ❌ 仅使用该 provider 时需要              |
 
 ### 安装前置依赖
 
@@ -58,10 +58,10 @@ pnpm dev
 
 ## 端口分配
 
-| 端口 | 进程 | 说明 |
-|------|------|------|
-| 3200 | server (Fastify + Socket.IO) | REST API + WebSocket |
-| 5173 | web (Vite dev server) | Vue 3 前端，API/socket 反向代理到 3200 |
+| 端口 | 进程                         | 说明                                   |
+| ---- | ---------------------------- | -------------------------------------- |
+| 3200 | server (Fastify + Socket.IO) | REST API + WebSocket                   |
+| 5173 | web (Vite dev server)        | Vue 3 前端，API/socket 反向代理到 3200 |
 
 Vite 端口冲突时自动切换到 5174、5175……CORS 已配置为 `localhost` 正则匹配，任意端口均可连接。
 
@@ -74,7 +74,8 @@ catStudy/
 │   │   └── src/
 │   │       ├── types.ts        # AgentConfig, SessionConfig, Message, Memory…
 │   │       ├── schemas.ts      # Zod 校验 (AgentCreate, SessionCreate…)
-│   │       └── events.ts       # Socket.IO 事件名 + Redis 频道模式
+│   │       ├── events.ts       # Socket.IO 事件名 + Redis 频道模式
+│   │       └── token-counter.ts# Token 计数工具（字符估算 + tiktoken）
 │   ├── server/          # 后端 (Fastify + Socket.IO + SQLite)
 │   │   └── src/
 │   │       ├── index.ts        # 服务入口：Fastify → Socket.IO → 优雅关闭
@@ -86,10 +87,17 @@ catStudy/
 │   │       │   ├── deepseek.ts # DeepSeek HTTP Chat Completions 适配器
 │   │       │   ├── claude.ts   # Claude Code CLI spawn 适配器
 │   │       │   ├── openai.ts   # Codex CLI spawn 适配器
-│   │       │   ├── cli-utils.ts# CLI 适配器共享工具
+│   │       │   ├── cli-utils.ts# CLI 适配器共享工具（resolveBin, parseOutput）
+│   │       │   ├── git-utils.ts# CLI 适配器 Git workspace 隔离
 │   │       │   └── registry.ts # 按 provider + apiKey 路由适配器
 │   │       ├── dispatch/
 │   │       │   └── index.ts    # 单槽位 FIFO 调度引擎
+│   │       ├── summarizer/
+│   │       │   └── index.ts    # 增量摘要引擎（fire-and-forget）
+│   │       ├── handoff/
+│   │       │   └── index.ts    # 会话交接（90% token 阈值自动创建新会话）
+│   │       ├── skills/
+│   │       │   └── skill-loader.ts # 按需技能加载器
 │   │       ├── memory/
 │   │       │   ├── index.ts    # 记忆存储 + 检索 + 去重
 │   │       │   └── embedding.ts# HuggingFace 本地嵌入模型加载
@@ -113,10 +121,12 @@ catStudy/
 │           │   └── SessionCreateModal.vue # 新建会话弹窗
 │           ├── stores/
 │           │   └── chat.ts     # Pinia 状态管理 + Socket.IO 事件绑定
-│           └── composables/
-│               ├── useApi.ts       # REST API 封装
-│               ├── useSocket.ts    # Socket.IO 单例
-│               └── useMention.ts   # @提及自动补全逻辑
+│           ├── composables/
+│           │   ├── useApi.ts       # REST API 封装
+│           │   ├── useSocket.ts    # Socket.IO 单例
+│           │   └── useMention.ts   # @提及自动补全逻辑
+│           └── utils/
+│               └── logger.ts       # 浏览器端轻量日志（dev 输出，prod 静默）
 ├── scripts/
 │   ├── dev.js            # 统一开发启动器（进程树清理）
 │   └── stop.js           # 端口强制清理（netstat → taskkill）
@@ -141,7 +151,7 @@ npx tsx packages/server/src/seed.ts           # upsert 模式：已存在则更�
 npx tsx packages/server/src/seed.ts --reset   # 重置模式：清空所有数据后重建
 
 # ─── 测试 ──────────────────────────────────
-pnpm test             # 运行所有测试 (当前 208 条)
+pnpm test             # 运行所有测试 (当前 314 条)
 pnpm test:watch       # watch 模式，文件变更自动运行
 pnpm test:coverage    # 运行 + 覆盖率报告
 pnpm test:server      # 仅 server 包测试
@@ -154,17 +164,31 @@ pnpm lint             # 全项目 TypeScript 类型检查
 
 ## 环境变量
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `DS_KEY` | — | DeepSeek API Key（种子数据使用，3 只演示猫共用） |
-| `PORT` | `3200` | Server 监听端口 |
-| `HOST` | `0.0.0.0` | Server 监听地址 |
-| `REDIS_URL` | `redis://localhost:6379` | Redis 连接地址 |
-| `HF_ENDPOINT` | `https://huggingface.co` | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`） |
-| `LOG_LEVEL` | `info` | 日志级别：`debug` / `info` / `warn` / `error` |
-| `MEMORY_DEDUP_ENABLED` | `1` | 是否启用记忆去重（`0` 关闭） |
-| `MEMORY_DEDUP_THRESHOLD` | `0.20` | 记忆去重余弦距离阈值（越小越严格） |
-| `MEMORY_TOP_K` | `3` | 检索时返回的相关记忆条数 |
+| 变量                       | 默认值                     | 说明                                                               |
+| -------------------------- | -------------------------- | ------------------------------------------------------------------ |
+| `DS_KEY`                   | —                          | DeepSeek API Key（种子数据使用，3 只演示猫共用）                   |
+| `PORT`                     | `3200`                     | Server 监听端口                                                    |
+| `HOST`                     | `0.0.0.0`                  | Server 监听地址                                                    |
+| `REDIS_URL`                | `redis://localhost:6379`   | Redis 连接地址                                                     |
+| `HF_ENDPOINT`              | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`） |
+| `LOG_LEVEL`                | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                      |
+| `MEMORY_DEDUP_ENABLED`     | `1`                        | 是否启用记忆去重（`0` 关闭）                                       |
+| `MEMORY_DEDUP_THRESHOLD`   | `0.20`                     | 记忆去重余弦距离阈值（越小越严格）                                 |
+| `MEMORY_TOP_K`             | `3`                        | 检索时返回的相关记忆条数                                           |
+| `MEMORY_ENABLED`           | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                 |
+| `MEMORY_EMBEDDING_MODEL`   | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                   |
+| `SUMMARY_ENABLED`          | `true`                     | 是否启用增量摘要                                                   |
+| `SUMMARY_MODEL`            | `deepseek-chat`            | 摘要使用的模型                                                     |
+| `SUMMARY_API_KEY`          | 同 `DS_KEY`                | 摘要模型的 API Key                                                 |
+| `SUMMARY_BASE_URL`         | `https://api.deepseek.com` | 摘要 API 地址                                                      |
+| `SUMMARY_INTERVAL`         | `3`                        | 每 N 轮对话触发一次增量摘要                                        |
+| `HANDOFF_ENABLED`          | `true`                     | 是否启用 90% 阈值会话交接                                          |
+| `HANDOFF_THRESHOLD`        | `0.9`                      | 触交接的上下文 token 占比                                          |
+| `MAX_CONTEXT_TOKENS`       | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                               |
+| `TOKEN_COUNT_METHOD`       | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）    |
+| `CLI_IDLE_TIMEOUT_MS`      | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                |
+| `AGENT_HARD_TIMEOUT_MS`    | `1800000`                  | Agent 执行硬超时（毫秒，30 分钟）                                  |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `high`                     | Claude Code CLI 推理深度：`low` / `medium` / `high` / `max`        |
 
 ## 核心概念
 
@@ -176,19 +200,22 @@ pnpm lint             # 全项目 TypeScript 类型检查
 - **Mention** — 用户通过 `@猫咪名` 指定回复者，调度系统据此路由
 - **Memory** — Agent 对过往对话的向量化持久记录，用户发言后自动检索注入上下文
 - **Broadcast Mode** — 开启后所有 Agent 互相感知对方发言；默认关闭（各 Agent 只看见和自己相关的消息）
+- **Token Budget** — 单次 LLM 调用的上下文 token 预算上限（默认 128K），配合 token 感知软截断和 90% 交接阈值控制上下文膨胀
+- **Summary** — 每 N 轮对话触发的增量摘要，异步更新运行中的会话摘要，减少旧消息 token 消耗
+- **Handoff** — 当上下文使用率达到 90% 阈值时，自动创建新会话并生成全量总结，前端无缝切换
 
 ## 架构决策
 
 6 篇 ADR 记录在 [`docs/adr/`](./docs/adr/)：
 
-| ADR | 决策 |
-|-----|------|
+| ADR  | 决策                                                 |
+| ---- | ---------------------------------------------------- |
 | 0001 | pnpm monorepo (`packages/server` / `web` / `shared`) |
-| 0002 | SQLite 持久化 + Redis 消息总线双存储 |
-| 0003 | 每 Agent 独立 LLM 适配器（provider + API key） |
-| 0004 | 单槽位 + FIFO 串行调度 |
-| 0005 | Redis Pub/Sub 三频道消息总线 |
-| 0006 | sqlite-vec 向量检索记忆系统 |
+| 0002 | SQLite 持久化 + Redis 消息总线双存储                 |
+| 0003 | 每 Agent 独立 LLM 适配器（provider + API key）       |
+| 0004 | 单槽位 + FIFO 串行调度                               |
+| 0005 | Redis Pub/Sub 三频道消息总线                         |
+| 0006 | sqlite-vec 向量检索记忆系统                          |
 
 ## 开发工作流
 
@@ -217,22 +244,22 @@ curl -X DELETE http://localhost:3200/api/sessions/<session-id>/messages
 ### 运行测试
 
 ```bash
-pnpm test             # 全量：208 条（shared 29 + server 118 + web 61）
+pnpm test             # 全量：314 条（shared 43 + server 192 + web 79）
 pnpm test:server      # 仅服务端
 pnpm test -- --reporter=verbose  # 逐条显示
 ```
 
 ## 技术栈
 
-| 层 | 技术 |
-|----|------|
-| 运行时 | Node.js 20+ / TypeScript 5.5 |
-| 包管理 | pnpm workspace (monorepo) |
-| 后端框架 | Fastify 5 |
-| 实时通信 | Socket.IO 4 |
-| 数据库 | SQLite (better-sqlite3 + WAL + sqlite-vec 向量扩展) |
-| 消息中间件 | Redis 7 (ioredis，可选) |
-| LLM 推理 | DeepSeek HTTP API / Claude Code CLI / Codex CLI |
-| 嵌入模型 | HuggingFace Transformers (Xenova/bge-small-zh-v1.5, 512 维) |
-| 前端框架 | Vue 3 + Vite + Pinia |
-| 测试 | Vitest 4 |
+| 层         | 技术                                                        |
+| ---------- | ----------------------------------------------------------- |
+| 运行时     | Node.js 20+ / TypeScript 5.5                                |
+| 包管理     | pnpm workspace (monorepo)                                   |
+| 后端框架   | Fastify 5                                                   |
+| 实时通信   | Socket.IO 4                                                 |
+| 数据库     | SQLite (better-sqlite3 + WAL + sqlite-vec 向量扩展)         |
+| 消息中间件 | Redis 7 (ioredis，可选)                                     |
+| LLM 推理   | DeepSeek HTTP API / Claude Code CLI / Codex CLI             |
+| 嵌入模型   | HuggingFace Transformers (Xenova/bge-small-zh-v1.5, 512 维) |
+| 前端框架   | Vue 3 + Vite + Pinia                                        |
+| 测试       | Vitest 4                                                    |
