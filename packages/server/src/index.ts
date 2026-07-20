@@ -11,7 +11,7 @@ import { connectRedis, closeRedis } from './db/redis.js'
 import { createSocketIO } from './connectors/socketio.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
-import { createLogger, setLogLevel } from './logger.js'
+import { createLogger, setLogLevel, type LogLevel } from './logger.js'
 import { existsSync, unlinkSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,7 +26,7 @@ const HOST = process.env.HOST || '127.0.0.1'
 async function main(): Promise<void> {
   // 调试模式下输出 DEBUG 日志
   if (process.env.LOG_LEVEL) {
-    setLogLevel(process.env.LOG_LEVEL as any)
+    setLogLevel(process.env.LOG_LEVEL as LogLevel)
     log.info('log level set', { level: process.env.LOG_LEVEL })
   }
 

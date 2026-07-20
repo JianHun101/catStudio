@@ -244,8 +244,12 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           }
         }
 
-        // 4. 调度 + 执行
-        await dispatch(data.sessionId, msg, validAgents, traceId)
+        // 4. 调度 + 执行（捕获内部异常防止 SEND_MESSAGE 崩溃）
+        try {
+          await dispatch(data.sessionId, msg, validAgents, traceId)
+        } catch (err: any) {
+          log.error('dispatch failed', { sessionId: data.sessionId, traceId, error: err.message })
+        }
 
         // 获取需要立即执行的 Agent（被 @ 的，或广播下的所有 Agent）
         const mentions = data.mentions || []
@@ -317,72 +321,76 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 2. 标记撤回（让正在执行的 runAgentReply 提前终止）
       retractionRequests.set(data.messageId, true)
 
-      // 3. 查 execution_logs 找关联的 commit + packages
-      const execLogs = db
-        .prepare('SELECT * FROM execution_logs WHERE triggered_by_message_id = ?')
-        .all(data.messageId) as any[]
+      try {
+        // 3. 查 execution_logs 找关联的 commit + packages
+        const execLogs = db
+          .prepare('SELECT * FROM execution_logs WHERE triggered_by_message_id = ?')
+          .all(data.messageId) as any[]
 
-      let hasCommit = false
-      for (const ex of execLogs) {
-        if (ex.commit_hash) {
-          hasCommit = true
-          break
-        }
-      }
-
-      // 4. 回滚文件改动
-      if (hasCommit) {
-        gitResetHard()
-      } else {
-        gitCleanWorkingTree()
-      }
-
-      // 5. 卸载安装的包
-      const pkgSet = new Set<string>()
-      for (const ex of execLogs) {
-        if (ex.packages_installed) {
-          try {
-            for (const pkg of JSON.parse(ex.packages_installed)) {
-              pkgSet.add(pkg)
-            }
-          } catch {
-            /* ignore */
+        let hasCommit = false
+        for (const ex of execLogs) {
+          if (ex.commit_hash) {
+            hasCommit = true
+            break
           }
         }
+
+        // 4. 回滚文件改动
+        if (hasCommit) {
+          gitResetHard()
+        } else {
+          gitCleanWorkingTree()
+        }
+
+        // 5. 卸载安装的包
+        const pkgSet = new Set<string>()
+        for (const ex of execLogs) {
+          if (ex.packages_installed) {
+            try {
+              for (const pkg of JSON.parse(ex.packages_installed)) {
+                pkgSet.add(pkg)
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        if (pkgSet.size > 0) {
+          npmUninstall(Array.from(pkgSet))
+        }
+
+        // 6. 删除该消息触发的所有 agent 回复和该消息本身
+        // 先删 execution_logs (外键)
+        db.prepare('DELETE FROM execution_logs WHERE triggered_by_message_id = ?').run(
+          data.messageId
+        )
+        // 找 agent 回复消息的 id
+        const agentReplies = db
+          .prepare('SELECT id FROM messages WHERE session_id = ? AND role = ? AND created_at > ?')
+          .all(data.sessionId, 'agent', msg.created_at) as any[]
+        for (const reply of agentReplies) {
+          db.prepare('DELETE FROM messages WHERE id = ?').run(reply.id)
+        }
+        // 删原消息
+        db.prepare('DELETE FROM messages WHERE id = ?').run(data.messageId)
+
+        // 7. 广播给所有客户端
+        io.emit(Events.MESSAGE_RETRACTED, {
+          sessionId: data.sessionId,
+          messageId: data.messageId,
+          agentReplyIds: agentReplies.map((r: any) => r.id),
+        })
+
+        log.info('message retracted', {
+          sessionId: data.sessionId,
+          messageId: data.messageId,
+          hadCommit: hasCommit,
+          packagesRemoved: pkgSet.size,
+        })
+      } finally {
+        // 确保无论成功或失败都清理撤回标记
+        retractionRequests.delete(data.messageId)
       }
-      if (pkgSet.size > 0) {
-        npmUninstall(Array.from(pkgSet))
-      }
-
-      // 6. 删除该消息触发的所有 agent 回复和该消息本身
-      // 先删 execution_logs (外键)
-      db.prepare('DELETE FROM execution_logs WHERE triggered_by_message_id = ?').run(data.messageId)
-      // 找 agent 回复消息的 id
-      const agentReplies = db
-        .prepare('SELECT id FROM messages WHERE session_id = ? AND role = ? AND created_at > ?')
-        .all(data.sessionId, 'agent', msg.created_at) as any[]
-      for (const reply of agentReplies) {
-        db.prepare('DELETE FROM messages WHERE id = ?').run(reply.id)
-      }
-      // 删原消息
-      db.prepare('DELETE FROM messages WHERE id = ?').run(data.messageId)
-
-      // 7. 清理
-      retractionRequests.delete(data.messageId)
-
-      // 8. 广播给所有客户端
-      io.emit(Events.MESSAGE_RETRACTED, {
-        sessionId: data.sessionId,
-        messageId: data.messageId,
-        agentReplyIds: agentReplies.map((r: any) => r.id),
-      })
-
-      log.info('message retracted', {
-        sessionId: data.sessionId,
-        messageId: data.messageId,
-        hadCommit: hasCommit,
-        packagesRemoved: pkgSet.size,
-      })
     })
 
     // ─── Broadcast mode toggle ────────────────────

@@ -1,146 +1,159 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CatStudy — 猫咖多Agent对话</title>
-  <style>
-    /* ═══════════════════════════════════════════════
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="CatStudy — 猫咖风格的多Agent AI对话平台，多只猫咪角色协作完成任务"
+    />
+    <meta name="theme-color" content="#1b1815" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐱</text></svg>"
+    />
+    <title>CatStudy — 猫咖多Agent对话</title>
+    <style>
+      /* ═══════════════════════════════════════════════
        CatStudy Design Tokens — Warm Cat Cafe Theme
        ═══════════════════════════════════════════════ */
 
-    :root {
-      /* Surfaces — 从深到浅的四层 */
-      --bg-deep:      #14110e;   /* 最深底 — 聊天主区 */
-      --bg-base:      #1b1815;   /* 基础 — 侧边栏 */
-      --bg-surface:   #231f1b;   /* 表面 — 卡片/气泡 */
-      --bg-hover:     #2c2722;   /* 悬停 */
-      --bg-raised:    #312b25;   /* 浮起 — 弹窗背景 */
+      :root {
+        /* Surfaces — 从深到浅的四层 */
+        --bg-deep: #14110e; /* 最深底 — 聊天主区 */
+        --bg-base: #1b1815; /* 基础 — 侧边栏 */
+        --bg-surface: #231f1b; /* 表面 — 卡片/气泡 */
+        --bg-hover: #2c2722; /* 悬停 */
+        --bg-raised: #312b25; /* 浮起 — 弹窗背景 */
 
-      /* Borders */
-      --border-subtle:  #292420;  /* 隐式分隔 */
-      --border-default: #3a332c;  /* 卡片边框 */
-      --border-table:   #5c4a3b;  /* 表格边框 — 暖棕色，在深色背景上清晰可见 */
-      --border-focus:   #b08968;  /* 聚焦 / 强调边框 */
+        /* Borders */
+        --border-subtle: #292420; /* 隐式分隔 */
+        --border-default: #3a332c; /* 卡片边框 */
+        --border-table: #5c4a3b; /* 表格边框 — 暖棕色，在深色背景上清晰可见 */
+        --border-focus: #b08968; /* 聚焦 / 强调边框 */
 
-      /* Text */
-      --text-primary:   #e6ddd0;  /* 主文字 — 暖白 */
-      --text-secondary: #a0988e;  /* 副文字 */
-      --text-muted:     #6b655c;  /* 占位符/禁用 */
+        /* Text */
+        --text-primary: #e6ddd0; /* 主文字 — 暖白 */
+        --text-secondary: #a0988e; /* 副文字 */
+        --text-muted: #6b655c; /* 占位符/禁用 */
 
-      /* Accent — 暖焦糖色系 */
-      --accent:         #d4a574;  /* 主强调色 */
-      --accent-soft:    rgba(212, 165, 116, 0.15); /* 背景强调 */
-      --accent-hover:   #e0b98c;  /* 悬停 */
-      --accent-pink:    #d4849a;  /* 次强调 — 柔和玫瑰 */
-      --accent-red:     #e0556a;  /* 危险操作 */
-      --accent-green:   #7eb899;  /* 成功/空闲 */
-      --accent-yellow:  #d4a854;  /* 忙碌/警告 */
+        /* Accent — 暖焦糖色系 */
+        --accent: #d4a574; /* 主强调色 */
+        --accent-soft: rgba(212, 165, 116, 0.15); /* 背景强调 */
+        --accent-hover: #e0b98c; /* 悬停 */
+        --accent-pink: #d4849a; /* 次强调 — 柔和玫瑰 */
+        --accent-red: #e0556a; /* 危险操作 */
+        --accent-green: #7eb899; /* 成功/空闲 */
+        --accent-yellow: #d4a854; /* 忙碌/警告 */
 
-      /* Status */
-      --status-idle:    #5c5852;
-      --status-busy:    #d4a854;
+        /* Status */
+        --status-idle: #5c5852;
+        --status-busy: #d4a854;
 
-      /* Sizing */
-      --radius-sm: 6px;
-      --radius-md: 10px;
-      --radius-lg: 14px;
-      --radius-xl: 18px;
+        /* Sizing */
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
+        --radius-xl: 18px;
 
-      /* Typography */
-      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
-      --font-mono: 'JetBrains Mono', 'Consolas', 'Cascadia Code', monospace;
+        /* Typography */
+        --font-sans:
+          'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+        --font-mono: 'JetBrains Mono', 'Consolas', 'Cascadia Code', monospace;
 
-      /* Shadows */
-      --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
-      --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
-      --shadow-lg: 0 8px 30px rgba(0,0,0,0.5);
+        /* Shadows */
+        --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+        --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+        --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.5);
 
-      /* Transitions */
-      --ease-out: 0.15s ease-out;
-      --ease-in: 0.12s ease-in;
-    }
+        /* Transitions */
+        --ease-out: 0.15s ease-out;
+        --ease-in: 0.12s ease-in;
+      }
 
-    /* ═══════════════════════════════════════════════
+      /* ═══════════════════════════════════════════════
        Global Reset
        ═══════════════════════════════════════════════ */
 
-    *, *::before, *::after {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+      *,
+      *::before,
+      *::after {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
 
-    html, body {
-      height: 100%;
-      overflow: hidden;
-    }
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
 
-    body {
-      font-family: var(--font-sans);
-      font-size: 14px;
-      line-height: 1.5;
-      color: var(--text-primary);
-      background: var(--bg-deep);
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-    }
+      body {
+        font-family: var(--font-sans);
+        font-size: 14px;
+        line-height: 1.5;
+        color: var(--text-primary);
+        background: var(--bg-deep);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
 
-    #app {
-      width: 100vw;
-      height: 100vh;
-      overflow: hidden;
-    }
+      #app {
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+      }
 
-    /* ═══════════════════════════════════════════════
+      /* ═══════════════════════════════════════════════
        Scrollbar
        ═══════════════════════════════════════════════ */
 
-    ::-webkit-scrollbar {
-      width: 6px;
-      height: 6px;
-    }
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
 
-    ::-webkit-scrollbar-track {
-      background: transparent;
-    }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
 
-    ::-webkit-scrollbar-thumb {
-      background: var(--border-table);
-      border-radius: 3px;
-    }
+      ::-webkit-scrollbar-thumb {
+        background: var(--border-table);
+        border-radius: 3px;
+      }
 
-    ::-webkit-scrollbar-thumb:hover {
-      background: var(--text-muted);
-    }
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--text-muted);
+      }
 
-    /* ═══════════════════════════════════════════════
+      /* ═══════════════════════════════════════════════
        Selection
        ═══════════════════════════════════════════════ */
 
-    ::selection {
-      background: var(--accent-soft);
-      color: var(--accent-hover);
-    }
+      ::selection {
+        background: var(--accent-soft);
+        color: var(--accent-hover);
+      }
 
-    /* ═══════════════════════════════════════════════
+      /* ═══════════════════════════════════════════════
        Focus visible (accessibility)
        ═══════════════════════════════════════════════ */
 
-    :focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
-      border-radius: 2px;
-    }
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+        border-radius: 2px;
+      }
 
-    /* 隐藏鼠标点击时的 focus 环，仅键盘导航时显示 */
-    :focus:not(:focus-visible) {
-      outline: none;
-    }
-  </style>
-</head>
-<body>
-  <div id="app"></div>
-  <script type="module" src="/src/main.ts"></script>
-</body>
+      /* 隐藏鼠标点击时的 focus 环，仅键盘导航时显示 */
+      :focus:not(:focus-visible) {
+        outline: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
 </html>

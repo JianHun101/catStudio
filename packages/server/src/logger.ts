@@ -24,7 +24,7 @@ const MAX_SIZE = 10 * 1024 * 1024 // 10MB
 
 // ─── Log levels ─────────────────────────────────────
 
-type LogLevel = 'debug' | 'info' | 'warn' | 'error'
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
   debug: 0,

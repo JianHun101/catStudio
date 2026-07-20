@@ -67,13 +67,13 @@ export async function chatComplete(
 
     if (!response.ok) {
       const errText = await response.text().catch(() => 'unknown')
-      throw new Error(`DeepSeek API error ${response.status}: ${errText}`)
+      throw new Error(`Chat completion API error ${response.status}: ${errText}`)
     }
 
     const data = (await response.json()) as any
     const content = data.choices?.[0]?.message?.content
     if (!content) {
-      throw new Error('DeepSeek API returned empty response')
+      throw new Error('Chat completion API returned empty response')
     }
 
     const usage = data.usage

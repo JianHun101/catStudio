@@ -38,11 +38,10 @@ async function generateFullSummary(sessionId: string, db: Database.Database): Pr
        FROM messages m
        LEFT JOIN agents a ON m.agent_id = a.id
        WHERE m.session_id = ? AND m.role != 'system'
-       ORDER BY m.created_at DESC
+       ORDER BY m.created_at ASC
        LIMIT 500`
     )
     .all(sessionId) as any[]
-  allMessages.reverse() // 恢复时间正序
 
   const conversationText = allMessages
     .map((m: any) => {

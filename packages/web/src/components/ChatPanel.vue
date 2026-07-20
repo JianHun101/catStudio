@@ -26,6 +26,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
 const clearingMessages = ref(false)
 const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次执行
 const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
+const sending = ref(false)
 
 const {
   mentionActive,
@@ -222,9 +223,9 @@ function onInput(e: Event): void {
   detect(ta.value, ta.selectionStart)
 }
 
-function handleSend(): void {
+async function handleSend(): Promise<void> {
   const text = input.value.trim()
-  if (!text) return
+  if (!text || sending.value) return
 
   const mentionRegex = /@(\S+)/g
   const mentions: string[] = []
@@ -233,9 +234,14 @@ function handleSend(): void {
     mentions.push(match[1])
   }
 
-  store.sendMessage(text, mentions)
-  input.value = ''
-  mentionActive.value = false
+  sending.value = true
+  try {
+    await store.sendMessage(text, mentions)
+    input.value = ''
+    mentionActive.value = false
+  } finally {
+    sending.value = false
+  }
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -354,6 +360,7 @@ function statusLabelZh(status: string): string {
         <button
           class="btn-sidebar-toggle"
           :title="props.leftSidebarOpen ? '收起会话列表' : '展开会话列表'"
+          :aria-label="props.leftSidebarOpen ? '收起会话列表' : '展开会话列表'"
           @click="emit('toggleLeftSidebar')"
         >
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -379,7 +386,8 @@ function statusLabelZh(status: string): string {
         <button
           class="btn-clear"
           :class="{ 'btn-clear-confirm': clearConfirm }"
-          title="清空所有消息"
+          :title="clearConfirm ? '确认清空所有消息' : '清空所有消息'"
+          :aria-label="clearConfirm ? '确认清空所有消息' : '清空所有消息'"
           :disabled="clearingMessages"
           @click="handleClearMessages"
         >
@@ -414,6 +422,7 @@ function statusLabelZh(status: string): string {
         <button
           class="btn-sidebar-toggle"
           :title="props.rightSidebarOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
+          :aria-label="props.rightSidebarOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
           @click="emit('toggleRightSidebar')"
         >
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -446,7 +455,12 @@ function statusLabelZh(status: string): string {
     </div>
 
     <!-- Messages -->
-    <div ref="chatContainer" class="chat-messages" @scroll.passive="checkScrollPosition">
+    <div
+      ref="chatContainer"
+      class="chat-messages"
+      aria-live="polite"
+      @scroll.passive="checkScrollPosition"
+    >
       <!-- Session 切换加载中 -->
       <div
         v-if="store.activeSessionId && store.loadingMessages && store.activeMessages.length === 0"
@@ -482,6 +496,7 @@ function statusLabelZh(status: string): string {
         <button
           v-if="showScrollDown"
           class="scroll-down-btn"
+          aria-label="滚动到底部"
           @click="scrollToBottom(true)"
           title="回到底部"
         >
@@ -542,6 +557,7 @@ function statusLabelZh(status: string): string {
               v-if="isLatestUserMessage(msg)"
               class="btn-retract"
               :class="{ 'btn-retract-confirm': retractConfirm === msg.id }"
+              :aria-label="retractConfirm === msg.id ? '确认撤回消息' : '撤回消息'"
               @click="handleRetract(msg.id)"
             >
               {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
@@ -620,10 +636,11 @@ function statusLabelZh(status: string): string {
 
       <button
         class="btn-send"
-        :disabled="!input.trim() || !store.activeSessionId"
+        :disabled="!input.trim() || !store.activeSessionId || sending"
+        aria-label="发送消息"
         @click="handleSend"
       >
-        发送
+        {{ sending ? '…' : '发送' }}
       </button>
     </div>
   </div>
