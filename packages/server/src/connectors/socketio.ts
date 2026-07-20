@@ -54,6 +54,10 @@ let _io: SocketServer | null = null
 /** 正在执行的消息 ID → 是否被撤回（runAgentReply 检查此标志以提前终止） */
 const retractionRequests = new Map<string, boolean>()
 
+/** 正在流式输出的 Agent 状态 → { sessionId, messageId, content }
+ *  JOIN_SESSION 时用于恢复打字气泡（客户端切会话会清空 typingStates） */
+const activeStreams = new Map<string, { sessionId: string; messageId: string; content: string }>()
+
 /** 获取 Socket.IO Server 实例（需在 createSocketIO() 之后调用） */
 export function getIO(): SocketServer | null {
   return _io
@@ -169,6 +173,19 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           contextTokens: estimatedTokens,
           maxContextTokens: maxContext,
         })
+      }
+
+      // 恢复正在流式输出的 Agent 的打字气泡。
+      // 客户端切换会话时 typingStates 被清空，服务端补推当前状态以避免气泡消失。
+      for (const [agentId, stream] of activeStreams) {
+        if (stream.sessionId === sessionId && agentIds.includes(agentId)) {
+          socket.emit(Events.AGENT_TYPING, {
+            sessionId,
+            agentId,
+            messageId: stream.messageId,
+            content: stream.content,
+          })
+        }
       }
     })
 
@@ -596,7 +613,8 @@ async function executeAgentsSerial(
           ),
         ])
       } catch (err: any) {
-        abortController.abort() // 确保任何异常都 kill 子进程
+        abortController.abort()
+        activeStreams.delete(agent.id) // 确保任何异常都 kill 子进程
         log.error('agent execution failed', {
           agentId: agent.id,
           agentName: agent.name,
@@ -1145,6 +1163,7 @@ async function runAgentReply(
     messageId: msgId,
     content: '',
   })
+  activeStreams.set(agent.id, { sessionId, messageId: msgId, content: '' })
 
   // 状态：回复中
   io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
@@ -1167,10 +1186,12 @@ async function runAgentReply(
         traceId,
         agentId: agent.id,
       })
+      activeStreams.delete(agent.id)
       return { content: fullContent || '[消息已撤回]', msgId }
     }
     if (signal?.aborted) {
       log.info('agent reply aborted (timeout)', { traceId, agentId: agent.id })
+      activeStreams.delete(agent.id)
       return { content: fullContent, msgId }
     }
     if (chunk.content) {
@@ -1185,6 +1206,7 @@ async function runAgentReply(
         messageId: msgId,
         content: displayContent,
       })
+      activeStreams.set(agent.id, { sessionId, messageId: msgId, content: displayContent })
     }
   }
 
@@ -1194,6 +1216,7 @@ async function runAgentReply(
       traceId,
       agentId: agent.id,
     })
+    activeStreams.delete(agent.id)
     return { content: fullContent, msgId }
   }
 
@@ -1300,8 +1323,9 @@ async function runAgentReply(
     maxContextTokens: MAX_CONTEXT,
   })
 
-  // P2: 清理 retractionRequests，防止内存泄漏
+  // P2: 清理 retractionRequests + activeStreams，防止内存泄漏
   retractionRequests.delete(triggerMsg.id)
+  activeStreams.delete(agent.id)
 
   return { content: fullContent, msgId }
 }
