@@ -182,6 +182,8 @@ export const useChatStore = defineStore('chat', () => {
     loadingMessages.value = true // 等待 SESSION_HISTORY 到达
     // 清除旧会话的打字气泡（切换会话时状态应完全重置）
     typingStates.value.clear()
+    // 清除旧会话的上下文窗口 token 数据（不同会话的 Agent 上下文不同）
+    contextTokens.value.clear()
     // 标记已读（清除未读计数 + 通知服务端）
     unreadCounts.value.delete(sessionId)
     api.markSessionRead(sessionId).catch(() => {

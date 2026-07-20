@@ -7,10 +7,10 @@
  * - Claude CLI 适配器**禁止**使用 tiktoken（Anthropic tokenizer ≠ OpenAI tokenizer）
  *
  * 估算公式（中英混合）：
- *   tokenCount = ceil(chineseChars × 0.75 + nonChinese × 0.25)
- *   中文 1 字 ≈ 0.6-0.8 token，取 0.75
+ *   tokenCount = ceil(chineseChars × 1.5 + nonChinese × 0.25)
+ *   CJK 1 字 ≈ 1.5 token（DeepSeek/OpenAI BPE tokenizer 实测 1.0-2.0，取保守值）
  *   英文/代码 ~4 字符/token，取 0.25
- *   实测精度 ±15%，配合 handoff 90% 保底足够
+ *   对纯中文偏保守（略高估），确保 handoff 在真实溢出前触发
  */
 
 import type { LLMMessage } from './types.js'
@@ -36,13 +36,13 @@ async function getTiktoken(): Promise<any> {
 
 /**
  * 字符估算 token 数。
- * 中文 1 字 ≈ 0.75 token，非中文 ~4 字符/token → 0.25/字符
+ * 中文 1 字 ≈ 1.5 token，非中文 ~4 字符/token → 0.25/字符
  */
 export function estimateTokens(text: string): number {
   if (!text) return 0
   const chineseChars = (text.match(CJK_RE) || []).length
   const nonChinese = text.length - chineseChars
-  return Math.ceil(chineseChars * 0.75 + nonChinese * 0.25)
+  return Math.ceil(chineseChars * 1.5 + nonChinese * 0.25)
 }
 
 /**

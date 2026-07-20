@@ -30,15 +30,16 @@ function contextTokensFor(agentId: string): number {
 }
 
 /** 安全的 token 使用比例（处理除零）。
- *  优先用 contextTokens（实时推送），fallback 到 API 的 sessionPromptTokens */
+ *  只用 contextTokens（实时推送的当前窗口估算值）。
+ *  不再 fallback 到 sessionPromptTokens（累计值）——累计值不反映当前上下文窗口大小，
+ *  用它做 fallback 会给用户虚假的"已满"信号。 */
 function tokenRatio(agentId: string): number {
   const ctx = contextTokensFor(agentId)
+  if (ctx <= 0) return 0 // 尚无实时数据，不显示虚假进度
   const stats = getTokenStats(agentId)
   const max = stats?.maxContextTokens ?? 128000
   if (max <= 0) return 0
-  // 用 contextTokens 如果有值，否则用 API 累计值
-  const numerator = ctx > 0 ? ctx : (stats?.sessionPromptTokens ?? 0)
-  return numerator / max
+  return ctx / max
 }
 
 /** token 条颜色状态 */
@@ -243,9 +244,7 @@ async function handleCreate(): Promise<void> {
               窗口 {{ (contextTokensFor(agent.id) / 1000).toFixed(1) }}k /
               {{ (getTokenStats(agent.id)!.maxContextTokens / 1000).toFixed(0) }}k
             </span>
-            <span v-else>
-              累计 {{ (getTokenStats(agent.id)!.sessionPromptTokens / 1000).toFixed(1) }}k tokens
-            </span>
+            <span v-else class="token-waiting"> 等待首次回复… </span>
             <span v-if="getTokenStats(agent.id)!.totalPromptTokens > 0" class="token-total">
               · 总计 {{ (getTokenStats(agent.id)!.totalPromptTokens / 1000).toFixed(1) }}k
             </span>
@@ -610,6 +609,11 @@ async function handleCreate(): Promise<void> {
 
 .token-total {
   opacity: 0.6;
+}
+
+.token-waiting {
+  opacity: 0.5;
+  font-style: italic;
 }
 
 /* 实时数据指示点 */
