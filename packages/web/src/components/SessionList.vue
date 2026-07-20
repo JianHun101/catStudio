@@ -63,18 +63,6 @@ async function handleDelete(id: string): Promise<void> {
       </svg>
     </button>
 
-    <button class="collapsed-icon collapsed-expand" title="展开会话列表" @click="emit('expand')">
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-        <path
-          d="M5 3l5 4-5 4"
-          stroke="currentColor"
-          stroke-width="1.4"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
-    </button>
-
     <SessionCreateModal v-if="showCreate" @close="closeCreate" />
   </div>
 
@@ -587,10 +575,5 @@ async function handleDelete(id: string): Promise<void> {
 .collapsed-add {
   margin-top: auto;
   margin-bottom: 0;
-}
-
-.collapsed-expand {
-  margin-bottom: 4px;
-  color: var(--text-muted);
 }
 </style>
