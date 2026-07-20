@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1784514788602" clover="3.2.0">
+  <project timestamp="1784514788602" name="All files">
+    <metrics statements="46" coveredstatements="35" conditionals="15" coveredconditionals="11" methods="9" coveredmethods="7" elements="70" coveredelements="53" complexity="0" loc="46" ncloc="46" packages="1" files="3" classes="3"/>
+    <file name="events.ts" path="D:\Game\ai\catStudy\packages\shared\src\events.ts">
+      <metrics statements="5" coveredstatements="5" conditionals="0" coveredconditionals="0" methods="3" coveredmethods="3"/>
+      <line num="6" count="1" type="stmt"/>
+      <line num="47" count="1" type="stmt"/>
+      <line num="49" count="2" type="stmt"/>
+      <line num="52" count="1" type="stmt"/>
+      <line num="55" count="1" type="stmt"/>
+    </file>
+    <file name="schemas.ts" path="D:\Game\ai\catStudy\packages\shared\src\schemas.ts">
+      <metrics statements="5" coveredstatements="5" conditionals="0" coveredconditionals="0" methods="0" coveredmethods="0"/>
+      <line num="5" count="1" type="stmt"/>
+      <line num="17" count="1" type="stmt"/>
+      <line num="21" count="1" type="stmt"/>
+      <line num="28" count="1" type="stmt"/>
+      <line num="37" count="1" type="stmt"/>
+    </file>
+    <file name="token-counter.ts" path="D:\Game\ai\catStudy\packages\shared\src\token-counter.ts">
+      <metrics statements="36" coveredstatements="25" conditionals="15" coveredconditionals="11" methods="6" coveredmethods="4"/>
+      <line num="19" count="1" type="stmt"/>
+      <line num="22" count="1" type="stmt"/>
+      <line num="25" count="0" type="cond" truecount="0" falsecount="2"/>
+      <line num="26" count="0" type="stmt"/>
+      <line num="28" count="0" type="stmt"/>
+      <line num="30" count="0" type="stmt"/>
+      <line num="34" count="0" type="stmt"/>
+      <line num="42" count="11" type="cond" truecount="2" falsecount="0"/>
+      <line num="43" count="10" type="cond" truecount="2" falsecount="0"/>
+      <line num="44" count="11" type="stmt"/>
+      <line num="45" count="11" type="stmt"/>
+      <line num="54" count="0" type="stmt"/>
+      <line num="55" count="0" type="stmt"/>
+      <line num="59" count="0" type="stmt"/>
+      <line num="60" count="0" type="stmt"/>
+      <line num="61" count="0" type="stmt"/>
+      <line num="73" count="1" type="cond" truecount="1" falsecount="1"/>
+      <line num="74" count="0" type="stmt"/>
+      <line num="76" count="1" type="stmt"/>
+      <line num="90" count="2" type="stmt"/>
+      <line num="91" count="2" type="stmt"/>
+      <line num="92" count="2" type="stmt"/>
+      <line num="93" count="2" type="stmt"/>
+      <line num="95" count="2" type="stmt"/>
+      <line num="96" count="3" type="stmt"/>
+      <line num="97" count="3" type="stmt"/>
+      <line num="99" count="3" type="cond" truecount="3" falsecount="0"/>
+      <line num="101" count="1" type="stmt"/>
+      <line num="102" count="1" type="stmt"/>
+      <line num="104" count="1" type="stmt"/>
+      <line num="105" count="1" type="stmt"/>
+      <line num="107" count="1" type="stmt"/>
+      <line num="108" count="1" type="stmt"/>
+      <line num="112" count="2" type="stmt"/>
+      <line num="131" count="4" type="cond" truecount="2" falsecount="0"/>
+      <line num="132" count="4" type="stmt"/>
+    </file>
+  </project>
+</coverage>
