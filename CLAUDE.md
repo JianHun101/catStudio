@@ -62,7 +62,7 @@ docs/adr/         →  6 architecture decision records
 
 **Domain glossary**: see `CONTEXT.md`. Key terms: Agent (cat character), Session (chat thread), Slot (execution unit), Memory (vector recall), Connector (platform adapter).
 
-**Env**: `.env.example` for full list. Loader at `packages/server/src/env.ts`. Key: `DS_KEY`, `HF_ENDPOINT`, `MEMORY_ENABLED` (set `false` in server tests).
+**Env**: `.env.example` for full list. Loader at `packages/server/src/env.ts` (manual parse, NO `dotenv` — must be first import). Key: `DS_KEY`, `HF_ENDPOINT`, `MEMORY_ENABLED` (set `false` in server tests).
 
 **Windows**:
 
