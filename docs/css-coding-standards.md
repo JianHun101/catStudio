@@ -232,6 +232,28 @@ socket.on(
 
 **原因**：Vue 3 `computed()` 返回 `ComputedRef<T>`，script 中访问需要 `.value`，模板中自动解包。
 
+```typescript
+// ❌ 错误：computed 内部忘了 .value
+const activeTypingStates = computed(() => {
+  const filtered = new Map()
+  store.typingStates.forEach((v, agentId) => {
+    // ComputedRef，没有 .forEach → 运行时错误
+    // ...
+  })
+  return filtered
+})
+
+// ✅ 正确：加 .value 访问底层 Map
+const activeTypingStates = computed(() => {
+  const filtered = new Map()
+  store.typingStates.value.forEach((v, agentId) => {
+    // 实际 Map，有 .forEach ✅
+    // ...
+  })
+  return filtered
+})
+```
+
 ---
 
 ## 八、检查清单
