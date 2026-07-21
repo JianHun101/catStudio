@@ -8,3 +8,6 @@ allowBuilds:
   protobufjs: true
   sharp: true
   onnxruntime-node: true
+  # pi-coding-agent 传递依赖 Google GenAI provider。
+  # CatStudy 仅使用 DeepSeek provider，禁用原生模块构建。
+  '@google/genai': false

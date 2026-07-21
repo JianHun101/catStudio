@@ -44,6 +44,7 @@ const providerOptions = [
   { value: 'deepseek', label: 'DeepSeek (HTTP API)' },
   { value: 'claude', label: 'Claude Code (CLI)' },
   { value: 'openai', label: 'Codex (CLI)' },
+  { value: 'pi', label: 'Pi (SDK)' },
   { value: 'custom', label: '自定义' },
 ]
 
@@ -53,6 +54,8 @@ const providerHint = computed(() => {
       return '需要安装 Claude Code CLI: npm i -g @anthropic-ai/claude-code'
     case 'openai':
       return '需要安装 Codex CLI (npm i -g @openai/codex) 和 codex-proxy'
+    case 'pi':
+      return '需要安装 pi-coding-agent: npm i @earendil-works/pi-coding-agent'
     case 'custom':
       return '自定义 API 端点，需兼容 OpenAI Chat Completions 格式'
     default:

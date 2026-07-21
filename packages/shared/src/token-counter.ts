@@ -9,14 +9,17 @@
  * 估算公式（中英混合）：
  *   tokenCount = ceil(chineseChars × 1.5 + nonChinese × 0.25)
  *   CJK 1 字 ≈ 1.5 token（DeepSeek/OpenAI BPE tokenizer 实测 1.0-2.0，取保守值）
+ *   中文标点 ≈ 1.5 token（实际 ~1.0 token/字符，偏保守确保早触发 handoff）
  *   英文/代码 ~4 字符/token，取 0.25
- *   对纯中文偏保守（略高估），确保 handoff 在真实溢出前触发
+ *   覆盖范围：基本汉字 + 扩展 A + 兼容汉字 + CJK 标点（U+3000-303F）+ 全角字符（U+FF00-FFEF）
  */
 
 import type { LLMMessage } from './types.js'
 
 /** Unicode 中日韩统一表意文字范围 */
-const CJK_RE = /[一-鿿㐀-䶿豈-﫿]/g
+// U+3000-U+303F: CJK 标点（。、〈〉《》「」『』【】…— 等）
+// U+FF00-U+FFEF: 全角字符（，！？：；（）～ 等），含全角拉丁/数字但中文对话中极少出现
+const CJK_RE = /[一-鿿㐀-䶿豈-﫿　-〿＀-￯]/g
 
 /** tiktoken 懒引用（避免硬依赖，通过 Function 构造绕过编译期模块解析） */
 let tiktokenModule: any = null

@@ -2,6 +2,7 @@ import type { LLMAdapter } from './adapter.js'
 import { DeepSeekAdapter } from './deepseek.js'
 import { ClaudeAdapter } from './claude.js'
 import { OpenAIAdapter } from './openai.js'
+import { PiAdapter } from './pi.js'
 import type { AgentConfig } from '@cat-study/shared'
 
 const adapters = new Map<string, LLMAdapter>()
@@ -11,9 +12,10 @@ const adapters = new Map<string, LLMAdapter>()
  * 按 apiKey 缓存，同一 key 复用同一适配器。
  */
 export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
-  const cacheKey = agent.llmProvider === 'claude'
-    ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}`
-    : `${agent.llmProvider}:${agent.llmApiKey}`
+  const cacheKey =
+    agent.llmProvider === 'claude'
+      ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}`
+      : `${agent.llmProvider}:${agent.llmApiKey}`
 
   if (adapters.has(cacheKey)) {
     return adapters.get(cacheKey)!
@@ -38,6 +40,12 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       break
     case 'openai':
       adapter = new OpenAIAdapter({
+        apiKey: agent.llmApiKey,
+        model: agent.llmModel,
+      })
+      break
+    case 'pi':
+      adapter = new PiAdapter({
         apiKey: agent.llmApiKey,
         model: agent.llmModel,
       })
