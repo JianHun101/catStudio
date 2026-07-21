@@ -1101,7 +1101,7 @@ function statusLabelZh(status: string): string {
 }
 
 .msg-body {
-  max-width: 72%;
+  max-width: 65ch;
   min-width: 0;
 }
 
@@ -1185,7 +1185,7 @@ function statusLabelZh(status: string): string {
 }
 
 .msg-text {
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1.65;
   color: var(--text-primary);
 }
@@ -1400,7 +1400,6 @@ function statusLabelZh(status: string): string {
   border-radius: var(--radius-md);
   background: var(--bg-surface);
   color: var(--text-primary);
-  font-size: 14px;
   font-family: inherit;
   line-height: 1.5;
   resize: none;
