@@ -173,7 +173,12 @@ onUnmounted(() => {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  transition: grid-template-columns 0.2s ease;
+  /* grid-template-columns animation disabled —
+ * browsers step integer track sizes, causing layout recalc on every frame
+ * which produces vertical jitter in contained content.
+ * If smooth animation is desired later, use the View Transitions API
+ * (document.startViewTransition) which interpolates snapshots on the
+ * compositor without triggering layout. */
 }
 
 /* Collapsed: 56px icon column（参考 Claude Desktop 图标条） */

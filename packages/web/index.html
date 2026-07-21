@@ -106,12 +106,32 @@
       }
 
       /* ═══════════════════════════════════════════════
-       Scrollbar
+       Scrollbar — Plan D: border technique + Firefox
+
+       WebKit: constant 10px track, ~4px visual thumb
+       (10px - 3px*2 border), expands to 10px on hover.
+       Firefox: thin (~8px) with theme-matching color.
        ═══════════════════════════════════════════════ */
 
+      /* Firefox — scrollbar-width is NOT inherited, must be on
+         the actual scrolling element. scrollbar-color IS
+         inherited, so it stays on html as a global default. */
+      .chat-messages,
+      .session-items,
+      .agent-cards,
+      .collapsed-sessions,
+      .collapsed-agents,
+      .modal,
+      .panel-inner,
+      .mention-dropdown {
+        scrollbar-width: thin;
+        scrollbar-color: var(--border-table) transparent;
+      }
+
+      /* WebKit */
       ::-webkit-scrollbar {
-        width: 6px;
-        height: 6px;
+        width: 10px;
+        height: 10px;
       }
 
       ::-webkit-scrollbar-track {
@@ -120,11 +140,20 @@
 
       ::-webkit-scrollbar-thumb {
         background: var(--border-table);
-        border-radius: 3px;
+        background-clip: padding-box;
+        border-left: 3px solid transparent;
+        border-right: 3px solid transparent;
+        border-radius: 5px;
+        transition: border 0.15s ease;
       }
 
       ::-webkit-scrollbar-thumb:hover {
+        border: 0;
         background: var(--text-muted);
+      }
+
+      ::-webkit-scrollbar-corner {
+        background: transparent;
       }
 
       /* ═══════════════════════════════════════════════
