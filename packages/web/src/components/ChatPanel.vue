@@ -103,11 +103,12 @@ const dateSepIndices = computed(() => {
   return indices
 })
 
-/** 仅显示活跃会话中 Agent 的打字气泡（防止跨会话残留） */
+/** 仅显示活跃会话中 Agent 的打字气泡（双重校验：sessionId + agentId） */
 const activeTypingStates = computed(() => {
-  const filtered = new Map<string, { messageId: string; content: string }>()
+  const filtered = new Map<string, { messageId: string; content: string; sessionId: string }>()
   const activeAgentIds = new Set(store.activeSession?.agentIds ?? [])
   store.typingStates.forEach((v, agentId) => {
+    if (v.sessionId !== store.activeSessionId) return
     if (activeAgentIds.has(agentId)) filtered.set(agentId, v)
   })
   return filtered
@@ -518,56 +519,60 @@ function statusLabelZh(status: string): string {
       </Transition>
 
       <TransitionGroup name="msg">
-        <div
-          v-for="(msg, i) in store.activeMessages"
-          :key="msg.id"
-          class="message"
-          :class="[msg.role, { grouped: isGrouped(i) }]"
-        >
-          <!-- Date separator -->
-          <div v-if="dateSepIndices.has(i)" class="date-separator">
+        <template v-for="(msg, i) in store.activeMessages" :key="msg.id">
+          <!-- Date separator (独立块级元素，不受 .message flex 影响) -->
+          <div
+            v-if="dateSepIndices.has(i)"
+            class="date-separator"
+            :key="`sep-${msg.id}`"
+            :class="{ 'date-sep-system': msg.role === 'system' }"
+          >
             <span>{{ formatDate(msg.createdAt) }}</span>
           </div>
 
-          <div v-if="!isGrouped(i)" class="msg-avatar">{{ avatarFor(msg.role, msg.agentId) }}</div>
-          <div v-else class="msg-avatar msg-avatar-hidden">
-            {{ avatarFor(msg.role, msg.agentId) }}
-          </div>
+          <div class="message" :class="[msg.role, { grouped: isGrouped(i) }]">
+            <div v-if="!isGrouped(i)" class="msg-avatar">
+              {{ avatarFor(msg.role, msg.agentId) }}
+            </div>
+            <div v-else class="msg-avatar msg-avatar-hidden">
+              {{ avatarFor(msg.role, msg.agentId) }}
+            </div>
 
-          <div class="msg-body">
-            <div v-if="msg.role === 'agent' && !isGrouped(i)" class="msg-sender">
-              {{ senderName(msg.agentId) }}
+            <div class="msg-body">
+              <div v-if="msg.role === 'agent' && !isGrouped(i)" class="msg-sender">
+                {{ senderName(msg.agentId) }}
+              </div>
+              <div class="msg-bubble">
+                <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
+                <time class="msg-time" :datetime="msg.createdAt">{{
+                  formatTime(msg.createdAt)
+                }}</time>
+              </div>
             </div>
-            <div class="msg-bubble">
-              <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
-              <time class="msg-time" :datetime="msg.createdAt">{{
-                formatTime(msg.createdAt)
-              }}</time>
-            </div>
-          </div>
 
-          <!-- Agent status indicators (on user messages) -->
-          <div
-            v-if="msg.role === 'user' && statusForMessage(msg.id).length > 0"
-            class="msg-agent-status"
-          >
-            <div v-for="s in statusForMessage(msg.id)" :key="s.agentId" class="agent-status-row">
-              <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
-              <span class="status-avatar">{{ s.agentAvatar }}</span>
-              <span class="status-name">{{ s.agentName }}</span>
-              <span class="status-label">{{ statusLabelZh(s.status) }}</span>
-            </div>
-            <button
-              v-if="isLatestUserMessage(msg)"
-              class="btn-retract"
-              :class="{ 'btn-retract-confirm': retractConfirm === msg.id }"
-              :aria-label="retractConfirm === msg.id ? '确认撤回消息' : '撤回消息'"
-              @click="handleRetract(msg.id)"
+            <!-- Agent status indicators (on user messages) -->
+            <div
+              v-if="msg.role === 'user' && statusForMessage(msg.id).length > 0"
+              class="msg-agent-status"
             >
-              {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
-            </button>
+              <div v-for="s in statusForMessage(msg.id)" :key="s.agentId" class="agent-status-row">
+                <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
+                <span class="status-avatar">{{ s.agentAvatar }}</span>
+                <span class="status-name">{{ s.agentName }}</span>
+                <span class="status-label">{{ statusLabelZh(s.status) }}</span>
+              </div>
+              <button
+                v-if="isLatestUserMessage(msg)"
+                class="btn-retract"
+                :class="{ 'btn-retract-confirm': retractConfirm === msg.id }"
+                :aria-label="retractConfirm === msg.id ? '确认撤回消息' : '撤回消息'"
+                @click="handleRetract(msg.id)"
+              >
+                {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
+              </button>
+            </div>
           </div>
-        </div>
+        </template>
       </TransitionGroup>
 
       <!-- Streaming agent reply (live preview while agent is typing) -->
@@ -894,6 +899,9 @@ function statusLabelZh(status: string): string {
   flex-direction: column;
   gap: 6px;
   position: relative;
+  max-width: 800px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 /* Empty State */
@@ -1163,7 +1171,6 @@ function statusLabelZh(status: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
   padding: 12px 0 4px;
 }
 
@@ -1176,11 +1183,11 @@ function statusLabelZh(status: string): string {
   border-radius: 10px;
 }
 
-.message.system .date-separator {
+.date-sep-system {
   padding: 0 0 4px;
 }
 
-.message.system .date-separator span {
+.date-sep-system span {
   background: transparent;
 }
 

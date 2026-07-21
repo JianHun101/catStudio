@@ -395,11 +395,13 @@ describe('chatStore', () => {
       const handler = mockOn.mock.calls.find((call) => call[0] === Events.AGENT_TYPING)?.[1] as
         ((data: any) => void) | undefined
 
-      handler!({ agentId: 'a1', messageId: 'm1', content: 'hello...' })
+      store.activeSessionId = 's1'
+      handler!({ agentId: 'a1', messageId: 'm1', content: 'hello...', sessionId: 's1' })
       expect(store.typingStates.get('a1')).toEqual({
         agentId: 'a1',
         messageId: 'm1',
         content: 'hello...',
+        sessionId: 's1',
       })
     })
 
@@ -407,6 +409,7 @@ describe('chatStore', () => {
       const handler = mockOn.mock.calls.find((call) => call[0] === Events.AGENT_STATUS)?.[1] as
         ((data: any) => void) | undefined
 
+      store.activeSessionId = 's1'
       handler!({ agentId: 'a1', status: 'busy', sessionId: 's1', queueLength: 0 })
       expect(store.agentStates.get('a1')?.status).toBe('busy')
     })

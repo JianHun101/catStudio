@@ -38,7 +38,9 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<Message[]>([])
   const agentStates = ref<Map<string, AgentRuntimeState>>(new Map())
   const agents = ref<AgentConfig[]>([])
-  const typingStates = ref<Map<string, { messageId: string; content: string }>>(new Map())
+  const typingStates = ref<Map<string, { messageId: string; content: string; sessionId: string }>>(
+    new Map()
+  )
   const unreadCounts = ref<Map<string, number>>(new Map()) // sessionId → unread count
   const loading = ref(false)
   const waitingForServer = ref(false) // 等待服务器启动（health check 轮询中）
@@ -388,12 +390,14 @@ export const useChatStore = defineStore('chat', () => {
 
     socket.on(
       Events.AGENT_TYPING,
-      (data: { agentId: string; messageId: string; content: string }) => {
+      (data: { agentId: string; messageId: string; content: string; sessionId: string }) => {
+        if (data.sessionId !== activeSessionId.value) return
         typingStates.value.set(data.agentId, data)
       }
     )
 
     socket.on(Events.AGENT_STATUS, (state: AgentRuntimeState) => {
+      if (state.sessionId && state.sessionId !== activeSessionId.value) return
       agentStates.value.set(state.agentId, state)
       // Agent 空闲时清除打字状态（处理超时/中止等未发 NEW_MESSAGE 的情况）
       if (state.status === 'idle') {
@@ -410,7 +414,13 @@ export const useChatStore = defineStore('chat', () => {
     // 上下文窗口 token 用量（每次 Agent 回复后推送，驱动 handoff 的真实数字）
     socket.on(
       Events.CONTEXT_WINDOW_STATS,
-      (data: { agentId: string; contextTokens: number; maxContextTokens: number }) => {
+      (data: {
+        agentId: string
+        contextTokens: number
+        maxContextTokens: number
+        sessionId: string
+      }) => {
+        if (data.sessionId !== activeSessionId.value) return
         contextTokens.value.set(data.agentId, data.contextTokens)
         // 同步更新 token 统计里的 maxContextTokens（该值一般不变，但首次拿到时可能未设置）
         const existing = agentTokenStats.value.get(data.agentId)
