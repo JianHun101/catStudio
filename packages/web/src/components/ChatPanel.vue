@@ -227,8 +227,8 @@ async function handleSend(): Promise<void> {
   const text = input.value.trim()
   if (!text || sending.value) return
 
-  // 匹配 @后跟字母/数字/中文/下划线/连字符，在标点处自然截断，避免 "吐槽猫," 之类被吞
-  const mentionRegex = /@([\w一-鿿-]+)/g
+  // 只匹配行首 @后跟字母/数字/中文/下划线/连字符，避免句中引用 @name 被误路由
+  const mentionRegex = /^@([\w一-鿿-]+)/gm
   const rawMentions: string[] = []
   let match: RegExpExecArray | null
   while ((match = mentionRegex.exec(text)) !== null) {
