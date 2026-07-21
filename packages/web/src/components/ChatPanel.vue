@@ -227,12 +227,16 @@ async function handleSend(): Promise<void> {
   const text = input.value.trim()
   if (!text || sending.value) return
 
-  const mentionRegex = /@(\S+)/g
-  const mentions: string[] = []
+  // 匹配 @后跟字母/数字/中文/下划线/连字符，在标点处自然截断，避免 "吐槽猫," 之类被吞
+  const mentionRegex = /@([\w一-鿿-]+)/g
+  const rawMentions: string[] = []
   let match: RegExpExecArray | null
   while ((match = mentionRegex.exec(text)) !== null) {
-    mentions.push(match[1])
+    rawMentions.push(match[1])
   }
+  // 白名单过滤：只保留真正的 Agent 名称，防止 @whatever 被误存
+  const agentNames = store.agents.map((a) => a.name)
+  const mentions = [...new Set(rawMentions)].filter((m) => agentNames.includes(m))
 
   sending.value = true
   try {
