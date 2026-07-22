@@ -301,6 +301,7 @@ function onKeydown(e: KeyboardEvent): void {
   }
 
   if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.isComposing) return
     e.preventDefault()
     handleSend()
   }
