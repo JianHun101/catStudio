@@ -156,7 +156,7 @@ async function handleDelete(): Promise<void> {
         <div class="form-row">
           <div class="form-group flex-1">
             <label>名字</label>
-            <input v-model="name" type="text" class="input" />
+            <input v-model="name" type="text" class="input" v-focus />
           </div>
           <div class="form-group" style="width: 140px">
             <label>头像</label>

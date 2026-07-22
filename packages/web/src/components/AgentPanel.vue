@@ -308,7 +308,7 @@ async function handleCreate(): Promise<void> {
         </button>
       </div>
       <div class="create-body">
-        <input v-model="newAgentForm.name" class="input" placeholder="猫咪名字" />
+        <input v-model="newAgentForm.name" class="input" placeholder="猫咪名字" v-focus />
         <input
           v-model="newAgentForm.llmApiKey"
           class="input input-mono"

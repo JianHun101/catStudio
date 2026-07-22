@@ -462,148 +462,149 @@ function statusLabelZh(status: string): string {
     </div>
 
     <!-- Messages -->
-    <div
-      ref="chatContainer"
-      class="chat-messages"
-      aria-live="polite"
-      @scroll.passive="checkScrollPosition"
-    >
-      <!-- Session 切换加载中 -->
-      <div
-        v-if="store.activeSessionId && store.loadingMessages && store.activeMessages.length === 0"
-        class="loading-messages"
-      >
-        <div class="loading-skeleton">
-          <div class="skeleton-msg" v-for="i in 3" :key="i">
-            <div class="skeleton-avatar"></div>
-            <div class="skeleton-body">
-              <div class="skeleton-line skeleton-line-sm"></div>
-              <div class="skeleton-line skeleton-line-lg"></div>
-              <div class="skeleton-line skeleton-line-md"></div>
+    <div ref="chatContainer" class="chat-messages-wrapper" @scroll.passive="checkScrollPosition">
+      <div class="chat-messages-inner" aria-live="polite">
+        <!-- Session 切换加载中 -->
+        <div
+          v-if="store.activeSessionId && store.loadingMessages && store.activeMessages.length === 0"
+          class="loading-messages"
+        >
+          <div class="loading-skeleton">
+            <div class="skeleton-msg" v-for="i in 3" :key="i">
+              <div class="skeleton-avatar"></div>
+              <div class="skeleton-body">
+                <div class="skeleton-line skeleton-line-sm"></div>
+                <div class="skeleton-line skeleton-line-lg"></div>
+                <div class="skeleton-line skeleton-line-md"></div>
+              </div>
             </div>
-          </div>
-          <div class="loading-spinner">
-            <span class="spinner-dot"></span>
-            <span class="spinner-dot"></span>
-            <span class="spinner-dot"></span>
+            <div class="loading-spinner">
+              <span class="spinner-dot"></span>
+              <span class="spinner-dot"></span>
+              <span class="spinner-dot"></span>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div v-if="!store.activeSessionId" class="empty-state">
-        <div class="empty-icon">🐱</div>
-        <h3>欢迎来到 CatStudy</h3>
-        <p v-if="store.sessions.length > 0">从左侧选择一个会话开始聊天</p>
-        <p v-else>点击左下角按钮创建一个新会话</p>
-        <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>
-      </div>
+        <div v-if="!store.activeSessionId" class="empty-state">
+          <div class="empty-icon">🐱</div>
+          <h3>欢迎来到 CatStudy</h3>
+          <p v-if="store.sessions.length > 0">从左侧选择一个会话开始聊天</p>
+          <p v-else>点击左下角按钮创建一个新会话</p>
+          <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>
+        </div>
 
-      <!-- Scroll-to-bottom button -->
-      <Transition name="scroll-btn">
-        <button
-          v-if="showScrollDown"
-          class="scroll-down-btn"
-          aria-label="滚动到底部"
-          @click="scrollToBottom(true)"
-          title="回到底部"
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M4 6l4 4 4-4"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-          <span>新消息</span>
-        </button>
-      </Transition>
-
-      <TransitionGroup name="msg">
-        <template v-for="(msg, i) in store.activeMessages" :key="msg.id">
-          <!-- Date separator (独立块级元素，不受 .message flex 影响) -->
-          <div
-            v-if="dateSepIndices.has(i)"
-            class="date-separator"
-            :key="`sep-${msg.id}`"
-            :class="{ 'date-sep-system': msg.role === 'system' }"
+        <!-- Scroll-to-bottom button -->
+        <Transition name="scroll-btn">
+          <button
+            v-if="showScrollDown"
+            class="scroll-down-btn"
+            aria-label="滚动到底部"
+            @click="scrollToBottom(true)"
+            title="回到底部"
           >
-            <span>{{ formatDate(msg.createdAt) }}</span>
-          </div>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M4 6l4 4 4-4"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span>新消息</span>
+          </button>
+        </Transition>
 
-          <div class="message" :class="[msg.role, { grouped: isGrouped(i) }]">
-            <div v-if="!isGrouped(i)" class="msg-avatar">
-              {{ avatarFor(msg.role, msg.agentId) }}
-            </div>
-            <div v-else class="msg-avatar msg-avatar-hidden">
-              {{ avatarFor(msg.role, msg.agentId) }}
-            </div>
-
-            <div class="msg-body">
-              <div v-if="msg.role === 'agent' && !isGrouped(i)" class="msg-sender">
-                {{ senderName(msg.agentId) }}
-              </div>
-              <div class="msg-bubble">
-                <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
-                <time class="msg-time" :datetime="msg.createdAt">{{
-                  formatTime(msg.createdAt)
-                }}</time>
-              </div>
-            </div>
-
-            <!-- Agent status indicators (on user messages) -->
+        <TransitionGroup name="msg">
+          <template v-for="(msg, i) in store.activeMessages" :key="msg.id">
+            <!-- Date separator (独立块级元素，不受 .message flex 影响) -->
             <div
-              v-if="msg.role === 'user' && statusForMessage(msg.id).length > 0"
-              class="msg-agent-status"
+              v-if="dateSepIndices.has(i)"
+              class="date-separator"
+              :key="`sep-${msg.id}`"
+              :class="{ 'date-sep-system': msg.role === 'system' }"
             >
-              <div v-for="s in statusForMessage(msg.id)" :key="s.agentId" class="agent-status-row">
-                <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
-                <span class="status-avatar">{{ s.agentAvatar }}</span>
-                <span class="status-name">{{ s.agentName }}</span>
-                <span class="status-label">{{ statusLabelZh(s.status) }}</span>
-              </div>
-              <button
-                v-if="isLatestUserMessage(msg)"
-                class="btn-retract"
-                :class="{ 'btn-retract-confirm': retractConfirm === msg.id }"
-                :aria-label="retractConfirm === msg.id ? '确认撤回消息' : '撤回消息'"
-                @click="handleRetract(msg.id)"
-              >
-                {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
-              </button>
+              <span>{{ formatDate(msg.createdAt) }}</span>
             </div>
-          </div>
-        </template>
-      </TransitionGroup>
 
-      <!-- Streaming agent reply (live preview while agent is typing) -->
-      <div
-        v-for="[agentId, typing] in activeTypingStates"
-        :key="'streaming-' + agentId"
-        class="message agent streaming"
-      >
-        <div class="msg-avatar">{{ avatarFor('agent', agentId) }}</div>
-        <div class="msg-body">
-          <div class="msg-sender">{{ senderName(agentId) }}</div>
-          <div class="msg-bubble">
-            <template v-for="(seg, si) in parseThinkingBlocks(typing.content)" :key="si">
+            <div class="message" :class="[msg.role, { grouped: isGrouped(i) }]">
+              <div v-if="!isGrouped(i)" class="msg-avatar">
+                {{ avatarFor(msg.role, msg.agentId) }}
+              </div>
+              <div v-else class="msg-avatar msg-avatar-hidden">
+                {{ avatarFor(msg.role, msg.agentId) }}
+              </div>
+
+              <div class="msg-body">
+                <div v-if="msg.role === 'agent' && !isGrouped(i)" class="msg-sender">
+                  {{ senderName(msg.agentId) }}
+                </div>
+                <div class="msg-bubble">
+                  <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
+                  <time class="msg-time" :datetime="msg.createdAt">{{
+                    formatTime(msg.createdAt)
+                  }}</time>
+                </div>
+              </div>
+
+              <!-- Agent status indicators (on user messages) -->
               <div
-                v-if="seg.kind === 'text'"
-                class="msg-text"
-                v-html="renderMarkdown(seg.content)"
-              ></div>
-              <details v-else class="thinking-block" :open="false">
-                <summary class="thinking-summary">
-                  <span class="thinking-icon">🐾</span>
-                  <span class="thinking-label">思考过程</span>
-                  <span class="thinking-dots"><i></i><i></i><i></i></span>
-                  <span class="thinking-chevron">▶</span>
-                </summary>
-                <div class="thinking-content" v-html="renderMarkdown(seg.content)"></div>
-              </details>
-            </template>
-            <span class="typing-cursor inline">|</span>
+                v-if="msg.role === 'user' && statusForMessage(msg.id).length > 0"
+                class="msg-agent-status"
+              >
+                <div
+                  v-for="s in statusForMessage(msg.id)"
+                  :key="s.agentId"
+                  class="agent-status-row"
+                >
+                  <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
+                  <span class="status-avatar">{{ s.agentAvatar }}</span>
+                  <span class="status-name">{{ s.agentName }}</span>
+                  <span class="status-label">{{ statusLabelZh(s.status) }}</span>
+                </div>
+                <button
+                  v-if="isLatestUserMessage(msg)"
+                  class="btn-retract"
+                  :class="{ 'btn-retract-confirm': retractConfirm === msg.id }"
+                  :aria-label="retractConfirm === msg.id ? '确认撤回消息' : '撤回消息'"
+                  @click="handleRetract(msg.id)"
+                >
+                  {{ retractConfirm === msg.id ? '确认撤回？' : '撤回' }}
+                </button>
+              </div>
+            </div>
+          </template>
+        </TransitionGroup>
+
+        <!-- Streaming agent reply (live preview while agent is typing) -->
+        <div
+          v-for="[agentId, typing] in activeTypingStates"
+          :key="'streaming-' + agentId"
+          class="message agent streaming"
+        >
+          <div class="msg-avatar">{{ avatarFor('agent', agentId) }}</div>
+          <div class="msg-body">
+            <div class="msg-sender">{{ senderName(agentId) }}</div>
+            <div class="msg-bubble">
+              <template v-for="(seg, si) in parseThinkingBlocks(typing.content)" :key="si">
+                <div
+                  v-if="seg.kind === 'text'"
+                  class="msg-text"
+                  v-html="renderMarkdown(seg.content)"
+                ></div>
+                <details v-else class="thinking-block" :open="false">
+                  <summary class="thinking-summary">
+                    <span class="thinking-icon">🐾</span>
+                    <span class="thinking-label">思考过程</span>
+                    <span class="thinking-dots"><i></i><i></i><i></i></span>
+                    <span class="thinking-chevron">▶</span>
+                  </summary>
+                  <div class="thinking-content" v-html="renderMarkdown(seg.content)"></div>
+                </details>
+              </template>
+              <span class="typing-cursor inline">|</span>
+            </div>
           </div>
         </div>
       </div>

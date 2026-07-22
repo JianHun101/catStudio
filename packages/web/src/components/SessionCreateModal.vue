@@ -64,7 +64,7 @@ async function handleCreate(): Promise<void> {
             type="text"
             class="input"
             placeholder="深夜话题、日常闲聊…"
-            autofocus
+            v-focus
             @keydown.enter="handleCreate"
           />
         </div>
