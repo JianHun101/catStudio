@@ -244,6 +244,8 @@ async function handleSend(): Promise<void> {
     await store.sendMessage(text, mentions)
     input.value = ''
     mentionActive.value = false
+    await nextTick()
+    scrollToBottom()
   } finally {
     sending.value = false
   }
