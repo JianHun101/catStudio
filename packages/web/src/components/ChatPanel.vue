@@ -249,11 +249,6 @@ async function handleClearMessages(): Promise<void> {
 function onInput(e: Event): void {
   const ta = e.target as HTMLTextAreaElement
   detect(ta.value, ta.selectionStart)
-  // JS fallback: auto-resize for browsers without field-sizing: content support
-  if (!CSS.supports('field-sizing', 'content')) {
-    ta.style.height = ''
-    ta.style.height = Math.min(ta.scrollHeight, 120) + 'px'
-  }
 }
 
 async function handleSend(): Promise<void> {
@@ -275,7 +270,6 @@ async function handleSend(): Promise<void> {
   try {
     await store.sendMessage(text, mentions)
     input.value = ''
-    if (textareaRef.value) textareaRef.value.style.height = ''
     mentionActive.value = false
     await nextTick()
     scrollToBottom()
@@ -689,7 +683,7 @@ function statusLabelZh(status: string): string {
         aria-label="发送消息"
         @click="handleSend"
       >
-        {{ sending ? '…' : '发送 →' }}
+        {{ sending ? '…' : '发送' }}
       </button>
     </div>
   </div>
@@ -1428,10 +1422,11 @@ function statusLabelZh(status: string): string {
 .chat-input-area {
   display: flex;
   gap: 10px;
-  padding: 16px 24px;
+  padding: 14px 20px;
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
+  border-top: 1px solid var(--border-subtle);
   background: var(--bg-base);
 }
 
@@ -1442,30 +1437,20 @@ function statusLabelZh(status: string): string {
 
 .chat-input {
   width: 100%;
-  min-height: 44px;
-  max-height: 120px;
-  padding: 12px 18px;
+  padding: 10px 14px;
   border: 1px solid var(--border-default);
-  border-radius: 24px;
+  border-radius: var(--radius-md);
   background: var(--bg-surface);
-  box-shadow: var(--shadow-sm);
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 14px;
   line-height: 1.5;
   resize: none;
   outline: none;
-  field-sizing: content;
-  transition:
-    border-color var(--ease-out),
-    box-shadow var(--ease-out);
+  transition: border-color var(--ease-out);
 }
 
 .chat-input:focus {
   border-color: var(--accent);
-  box-shadow:
-    0 0 0 3px rgba(212, 165, 116, 0.25),
-    var(--shadow-sm);
 }
 
 .chat-input:disabled {
@@ -1541,9 +1526,9 @@ function statusLabelZh(status: string): string {
 
 /* Send Button */
 .btn-send {
-  padding: 8px 20px;
+  padding: 8px 22px;
   border: none;
-  border-radius: 24px;
+  border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--bg-deep);
   font-size: 13px;
@@ -1556,13 +1541,11 @@ function statusLabelZh(status: string): string {
 
 .btn-send:hover:not(:disabled) {
   background: var(--accent-hover);
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
 
 .btn-send:disabled {
-  opacity: 0.35;
-  filter: saturate(0);
+  opacity: 0.3;
   cursor: default;
 }
 </style>
