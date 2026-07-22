@@ -44,3 +44,61 @@ describe('ChatPanel animation setup', () => {
     }
   })
 })
+
+describe('ChatPanel input area redesign', () => {
+  it('has no border-top on .chat-input-area', () => {
+    const areaBlock = source.match(/\.chat-input-area\s*\{[^}]*\}/s)
+    expect(areaBlock).toBeTruthy()
+    expect(areaBlock![0]).not.toContain('border-top')
+  })
+
+  it('has pill-shaped input with border-radius: 24px', () => {
+    const inputBlock = source.match(/\.chat-input\s*\{[^}]*\}/s)
+    expect(inputBlock).toBeTruthy()
+    expect(inputBlock![0]).toContain('border-radius: 24px')
+  })
+
+  it('has input box-shadow for floating feel', () => {
+    const inputBlock = source.match(/\.chat-input\s*\{[^}]*\}/s)
+    expect(inputBlock).toBeTruthy()
+    expect(inputBlock![0]).toContain('box-shadow')
+  })
+
+  it('has warm glow on input focus', () => {
+    const focusBlock = source.match(/\.chat-input:focus\s*\{[^}]*\}/s)
+    expect(focusBlock).toBeTruthy()
+    expect(focusBlock![0]).toMatch(/rgba\(212,\s*165,\s*116/)
+  })
+
+  it('has pill-shaped send button with border-radius: 24px', () => {
+    const btnBlock = source.match(/\.btn-send\s*\{[^}]*\}/s)
+    expect(btnBlock).toBeTruthy()
+    expect(btnBlock![0]).toContain('border-radius: 24px')
+  })
+
+  it('has send button with arrow text', () => {
+    expect(source).toContain("'发送 →'")
+  })
+
+  it('has hover lift on send button', () => {
+    const hoverBlock = source.match(/\.btn-send:hover:not\(:disabled\)\s*\{[^}]*\}/s)
+    expect(hoverBlock).toBeTruthy()
+    expect(hoverBlock![0]).toContain('translateY')
+  })
+
+  it('has min-height and field-sizing for auto-resize', () => {
+    const inputBlock = source.match(/\.chat-input\s*\{[^}]*\}/s)
+    expect(inputBlock).toBeTruthy()
+    expect(inputBlock![0]).toContain('min-height: 44px')
+    expect(inputBlock![0]).toContain('field-sizing: content')
+  })
+
+  it('has JS fallback for field-sizing auto-resize', () => {
+    expect(source).toContain("CSS.supports('field-sizing', 'content')")
+    expect(source).toContain("ta.style.height = ''")
+  })
+
+  it('resets textarea height after send', () => {
+    expect(source).toContain("textareaRef.value.style.height = ''")
+  })
+})
