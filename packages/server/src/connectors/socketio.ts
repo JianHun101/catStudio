@@ -535,6 +535,8 @@ async function executeAgentsSerial(
 
     const state = getAgentState(agent.id)
     if (!state || state.status !== 'busy') continue
+    // 跨会话忙碌：agent 正在其他 session 执行，已入队，不在此执行
+    if (state.sessionId !== sessionId) continue
 
     // 检查 API Key
     if (!agent.llmApiKey || agent.llmApiKey === 'sk-your-api-key-here') {
@@ -689,7 +691,7 @@ async function executeAgentsSerial(
           mentions: queuedCmd.mentions,
           taskId: triggerMsg.taskId,
         }
-        await executeAgentsSerial(io, sessionId, [agent], queuedTrigger, traceId, depth)
+        await executeAgentsSerial(io, queuedCmd.sessionId, [agent], queuedTrigger, traceId, depth)
       }
     } catch (err: any) {
       // P0-1 修复：外层 try/catch 防止 completeExecution 或 agent-to-agent
