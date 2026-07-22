@@ -1423,6 +1423,9 @@ function statusLabelZh(status: string): string {
   display: flex;
   gap: 10px;
   padding: 14px 20px;
+  max-width: 800px;
+  margin: 0 auto;
+  width: 100%;
   border-top: 1px solid var(--border-subtle);
   background: var(--bg-base);
 }
