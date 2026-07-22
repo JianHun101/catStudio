@@ -268,6 +268,7 @@ async function handleClearMessages(): Promise<void> {
 }
 
 function onInput(e: Event): void {
+  if ((e as InputEvent).isComposing) return
   const ta = e.target as HTMLTextAreaElement
   detect(ta.value, ta.selectionStart)
   detectSkill(ta.value, ta.selectionStart)
@@ -355,7 +356,7 @@ function selectMention(idx: number): void {
   input.value = newText
   nextTick(() => {
     if (textareaRef.value) {
-      const pos = input.value.indexOf(`@${agent.name} `) + agent.name.length + 2
+      const pos = mentionStartIdx.value + agent.name.length + 2
       textareaRef.value.selectionStart = textareaRef.value.selectionEnd = pos
       textareaRef.value.focus()
     }
@@ -369,7 +370,7 @@ function selectSkillCmd(idx: number): void {
   input.value = newText
   nextTick(() => {
     if (textareaRef.value) {
-      const pos = input.value.indexOf(`/${skill.name} `) + skill.name.length + 2
+      const pos = skillStartIdx.value + skill.name.length + 2
       textareaRef.value.selectionStart = textareaRef.value.selectionEnd = pos
       textareaRef.value.focus()
     }
@@ -713,7 +714,10 @@ function statusLabelZh(status: string): string {
           @keydown="onKeydown"
         ></textarea>
 
-        <div v-if="mentionActive && mentionSuggestions.length > 0" class="mention-dropdown">
+        <div
+          v-if="mentionActive && !skillActive && mentionSuggestions.length > 0"
+          class="mention-dropdown"
+        >
           <div
             v-for="(agent, idx) in mentionSuggestions"
             :key="agent.id"
@@ -728,7 +732,7 @@ function statusLabelZh(status: string): string {
           </div>
         </div>
         <div
-          v-if="mentionActive && mentionSuggestions.length === 0"
+          v-if="mentionActive && !skillActive && mentionSuggestions.length === 0"
           class="mention-dropdown mention-empty"
         >
           <span>未找到匹配的猫咪</span>
