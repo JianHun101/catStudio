@@ -2,7 +2,7 @@
   "skills": {
     "handoff": {
       "description": "工作交接文档模板",
-      "triggers": ["交接", "handoff", "review", "审查"],
+      "triggers": ["交接", "handoff"],
       "file": "handoff.md"
     },
     "dependency-request": {
