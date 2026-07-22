@@ -12,7 +12,7 @@
  */
 
 import { v4 as uuid } from 'uuid'
-import { getDb } from '../db/index.js'
+import { memories as memoriesRepo } from '../db/repository/index.js'
 import { embedText, isMemoryEnabled } from './embedding.js'
 import { createLogger } from '../logger.js'
 
@@ -27,9 +27,7 @@ export function vectorToBlob(vec: number[]): Buffer {
 
 /** Buffer → Float32Array → number[]（从 BLOB 读取） */
 export function blobToVector(blob: Buffer): number[] {
-  return Array.from(
-    new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4),
-  )
+  return Array.from(new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4))
 }
 
 // ─── 存储 ────────────────────────────────────────────
@@ -44,7 +42,7 @@ export async function saveMessageMemory(
   _sessionId: string,
   content: string,
   sourceMessageId: string,
-  agentIds: string[],
+  agentIds: string[]
 ): Promise<void> {
   if (!isMemoryEnabled()) return
   if (!agentIds.length) return
@@ -68,32 +66,19 @@ export async function saveMessageMemory(
 
   if (!embedding || embedding.length === 0) return
 
-  const db = getDb()
   const blob = vectorToBlob(embedding)
   const now = new Date().toISOString()
 
   // ── 去重检测 ────────────────────────────────────────
   const dedupEnabled = (process.env.MEMORY_DEDUP_ENABLED || '1') !== '0'
-  const dedupThreshold = parseFloat(
-    process.env.MEMORY_DEDUP_THRESHOLD || '0.20',
-  )
+  const dedupThreshold = parseFloat(process.env.MEMORY_DEDUP_THRESHOLD || '0.20')
 
   const agentsToStore: string[] = []
 
   if (dedupEnabled) {
-    const checkStmt = db.prepare(`
-      SELECT vec_distance_cosine(embedding, ?) AS distance
-      FROM memories
-      WHERE agent_id = ? AND embedding IS NOT NULL
-      ORDER BY distance
-      LIMIT 1
-    `)
-
     for (const agentId of agentIds) {
       try {
-        const row = checkStmt.get(blob, agentId) as
-          | { distance: number }
-          | undefined
+        const row = memoriesRepo.findNearestMemory(blob, agentId)
         if (row && row.distance < dedupThreshold) {
           log.debug('记忆去重：跳过重复记忆', {
             agentId,
@@ -121,19 +106,17 @@ export async function saveMessageMemory(
 
   // ── 写入 ─────────────────────────────────────────────
 
-  const insert = db.prepare(`
-    INSERT INTO memories (id, agent_id, content, embedding, source_message_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `)
-
-  const insertMany = db.transaction((ids: string[]) => {
-    for (const agentId of ids) {
-      insert.run(uuid(), agentId, cleanContent, blob, sourceMessageId, now)
-    }
-  })
-
   try {
-    insertMany(agentsToStore)
+    memoriesRepo.insertMemoryBatch(
+      agentsToStore.map((agentId) => ({
+        id: uuid(),
+        agentId,
+        content: cleanContent,
+        embeddingBlob: blob,
+        sourceMessageId,
+        createdAt: now,
+      }))
+    )
     log.debug('记忆已存储', {
       agentCount: agentsToStore.length,
       skippedCount: agentIds.length - agentsToStore.length,
@@ -162,7 +145,7 @@ export interface RetrievedMemory {
 export async function searchMemories(
   agentId: string,
   queryText: string,
-  topK: number = 3,
+  topK: number = 3
 ): Promise<RetrievedMemory[]> {
   if (!isMemoryEnabled()) return []
 
@@ -176,28 +159,10 @@ export async function searchMemories(
 
   if (!queryEmbedding || queryEmbedding.length === 0) return []
 
-  const db = getDb()
   const queryBlob = vectorToBlob(queryEmbedding)
 
   try {
-    const rows = db
-      .prepare(
-        `
-      SELECT id, content, source_message_id, created_at,
-             vec_distance_cosine(embedding, ?) AS distance
-      FROM memories
-      WHERE agent_id = ? AND embedding IS NOT NULL
-      ORDER BY distance
-      LIMIT ?
-    `,
-      )
-      .all(queryBlob, agentId, topK) as Array<{
-      id: string
-      content: string
-      source_message_id: string
-      created_at: string
-      distance: number
-    }>
+    const rows = memoriesRepo.searchMemoriesByVector(queryBlob, agentId, topK)
 
     return rows.map((r) => ({
       id: r.id,
@@ -218,10 +183,7 @@ export async function searchMemories(
  * 检索相关记忆并格式化为 system prompt 可拼接的文本块。
  * 无匹配时返回空字符串。
  */
-export async function buildMemoryContext(
-  agentId: string,
-  triggerContent: string,
-): Promise<string> {
+export async function buildMemoryContext(agentId: string, triggerContent: string): Promise<string> {
   // 剥离 @mention 再检索，与 saveMessageMemory 存储时保持一致，
   // 避免查询向量与存储向量处于不同语义空间导致召回质量下降。
   const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
@@ -232,8 +194,6 @@ export async function buildMemoryContext(
 
   if (memories.length === 0) return ''
 
-  const lines = memories.map(
-    (m, i) => `${i + 1}. ${m.content}`,
-  )
+  const lines = memories.map((m, i) => `${i + 1}. ${m.content}`)
   return `\n\n【相关记忆】\n${lines.join('\n')}`
 }

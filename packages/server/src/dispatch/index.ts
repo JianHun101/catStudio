@@ -11,7 +11,7 @@
 import type { AgentConfig, AgentRuntimeState, DispatchCommand, Message } from '@cat-study/shared'
 import { Channels } from '@cat-study/shared'
 import { getRedis } from '../db/redis.js'
-import { getDb } from '../db/index.js'
+import { agents as agentsRepo, executionLogs as execLogsRepo } from '../db/repository/index.js'
 import { v4 as uuid } from 'uuid'
 import { createLogger } from '../logger.js'
 
@@ -50,15 +50,13 @@ export async function dispatch(
   sessionId: string,
   userMessage: Message,
   agents: AgentConfig[],
-  traceId?: string,
+  traceId?: string
 ): Promise<string> {
   const tid = traceId || uuid()
   const mentions = userMessage.mentions
 
   // 确定目标 Agent：有 @ 就只调度被 @ 的，广播则调度 Session 内所有 Agent
-  const targets = mentions.length > 0
-    ? agents.filter((a) => mentions.includes(a.name))
-    : agents
+  const targets = mentions.length > 0 ? agents.filter((a) => mentions.includes(a.name)) : agents
 
   if (targets.length === 0) {
     return tid
@@ -102,7 +100,7 @@ export async function dispatch(
 async function executeAgent(
   agent: AgentConfig,
   cmd: DispatchCommand,
-  traceId: string,
+  traceId: string
 ): Promise<void> {
   const slot = agentSlots.get(agent.id)!
   slot.status = 'busy'
@@ -110,11 +108,7 @@ async function executeAgent(
   setSlotSession(agent.id, cmd.sessionId)
 
   const logId = uuid()
-  const db = getDb()
-  db.prepare(`
-    INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
-    VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))
-  `).run(logId, cmd.sessionId, agent.id, cmd.triggerMessageId, traceId)
+  execLogsRepo.insertExecutionLog(logId, cmd.sessionId, agent.id, cmd.triggerMessageId, traceId)
 
   log.info('agent executing', {
     traceId,
@@ -136,24 +130,17 @@ async function executeAgent(
 export async function completeExecution(
   agentId: string,
   success: boolean,
-  opts?: { latencyMs?: number; errorMessage?: string; traceId?: string },
+  opts?: { latencyMs?: number; errorMessage?: string; traceId?: string }
 ): Promise<DispatchCommand | undefined> {
   const slot = agentSlots.get(agentId)
   if (!slot) return
 
   // 更新执行日志
-  const db = getDb()
-  db.prepare(`
-    UPDATE execution_logs
-    SET status = ?, ended_at = datetime('now'),
-        latency_ms = ?, error_message = ?
-    WHERE agent_id = ? AND status = 'running'
-    ORDER BY started_at DESC LIMIT 1
-  `).run(
+  execLogsRepo.finalizeExecutionLog(
+    agentId,
     success ? 'completed' : 'failed',
     opts?.latencyMs ?? null,
-    opts?.errorMessage ?? null,
-    agentId,
+    opts?.errorMessage ?? null
   )
 
   if (opts?.latencyMs !== undefined) {
@@ -197,21 +184,23 @@ async function publishAgentStatus(agent: AgentConfig, status: string): Promise<v
   try {
     const redis = getRedis()
     if (!redis) return
-    await redis.publish(Channels.agentStatus(agent.name), JSON.stringify({
-      agentId: agent.id,
-      name: agent.name,
-      status,
-    }))
+    await redis.publish(
+      Channels.agentStatus(agent.name),
+      JSON.stringify({
+        agentId: agent.id,
+        name: agent.name,
+        status,
+      })
+    )
   } catch {
     // Redis 不可用时静默失败
   }
 }
 
 async function publishAgentStatusById(agentId: string, status: string): Promise<void> {
-  const db = getDb()
-  const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any
+  const agent = agentsRepo.getAgentById(agentId)
   if (agent) {
-    await publishAgentStatus(agent as AgentConfig, status)
+    await publishAgentStatus(agent as unknown as AgentConfig, status)
   }
 }
 
@@ -235,12 +224,17 @@ function updateQueueState(agentId: string, queueLength: number): void {
     try {
       const redis = getRedis()
       if (!redis) return
-      redis.publish(Channels.agentStatus(agentId), JSON.stringify({
-        agentId,
-        status: slot.status,
-        sessionId: slot.sessionId,
-        queueLength,
-      }))
-    } catch { /* silent */ }
+      redis.publish(
+        Channels.agentStatus(agentId),
+        JSON.stringify({
+          agentId,
+          status: slot.status,
+          sessionId: slot.sessionId,
+          queueLength,
+        })
+      )
+    } catch {
+      /* silent */
+    }
   }
 }

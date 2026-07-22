@@ -13,7 +13,13 @@ import { existsSync, writeFileSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { execSync } from 'node:child_process'
 import { Events, estimateTokens, estimateMessageTokens } from '@cat-study/shared'
-import { getDb } from '../db/index.js'
+import {
+  sessions as sessionsRepo,
+  agents as agentsRepo,
+  messages as messagesRepo,
+  executionLogs as execLogsRepo,
+} from '../db/repository/index.js'
+import type { MessageRow, SessionRow, AgentRow } from '../db/repository/index.js'
 import { v4 as uuid } from 'uuid'
 import {
   dispatch,
@@ -64,7 +70,7 @@ export function getIO(): SocketServer | null {
 }
 
 /** DB row (snake_case) → AgentConfig (camelCase) */
-function rowToAgent(row: any): AgentConfig {
+function rowToAgent(row: AgentRow): AgentConfig {
   return {
     id: row.id,
     name: row.name,
@@ -74,7 +80,7 @@ function rowToAgent(row: any): AgentConfig {
     llmModel: row.llm_model,
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
-    effortLevel: row.effort_level || undefined,
+    effortLevel: (row.effort_level || undefined) as AgentConfig['effortLevel'],
   }
 }
 
@@ -98,19 +104,9 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       log.info('joined session', { socketId: socket.id, sessionId })
 
       // 推送该 Session 的历史消息（转为 camelCase）— 批量发送，避免逐条渲染闪烁
-      const db = getDb()
-      const rows = db
-        .prepare(
-          `
-        SELECT * FROM messages
-        WHERE session_id = ? AND role != 'system'
-        ORDER BY created_at ASC
-        LIMIT 200
-      `
-        )
-        .all(sessionId) as any[]
+      const rows = messagesRepo.getSessionHistory(sessionId)
 
-      const historyMessages = rows.map((row: any) => ({
+      const historyMessages = rows.map((row: MessageRow) => ({
         id: row.id,
         sessionId: row.session_id,
         agentId: row.agent_id,
@@ -122,14 +118,12 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       }))
 
       // 生成欢迎消息（会话中猫咪列表提示）
-      const sessionRow = db
-        .prepare('SELECT agent_ids, broadcast_mode FROM sessions WHERE id = ?')
-        .get(sessionId) as any
-      const agentIds: string[] = sessionRow ? JSON.parse(sessionRow.agent_ids || '[]') : []
+      const sessionMeta = sessionsRepo.getSessionMeta(sessionId)
+      const agentIds: string[] = sessionMeta ? JSON.parse(sessionMeta.agent_ids || '[]') : []
       const catNames = agentIds
         .map((id: string) => {
-          const agent = db.prepare('SELECT name FROM agents WHERE id = ?').get(id) as any
-          return agent ? `@${agent.name}` : null
+          const name = agentsRepo.getAgentNameById(id)
+          return name ? `@${name}` : null
         })
         .filter(Boolean)
         .join('、')
@@ -155,10 +149,10 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 推送每个 Agent 在当前会话的上下文 token 估算值。
       // 前端切换会话时 contextTokens 被清空，需要服务端主动推送初始值，
       // 否则在 Agent 首次回复前一直显示"等待首次回复…"。
-      const broadcastMode = !!sessionRow?.broadcast_mode
+      const broadcastMode = !!sessionMeta?.broadcast_mode
       const maxContext = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
       for (const agentId of agentIds) {
-        const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any
+        const agent = agentsRepo.getAgentById(agentId)
         if (!agent) continue
 
         const relevant = getRelevantMessages(rows, agentId, agent.name, broadcastMode)
@@ -198,7 +192,6 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     socket.on(
       Events.SEND_MESSAGE,
       async (data: { sessionId: string; content: string; mentions: string[]; taskId?: string }) => {
-        const db = getDb()
         const msgId = uuid()
         const traceId = uuid() // 贯穿全链路的请求追踪 ID
 
@@ -211,9 +204,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         })
 
         // 1. 先检查 session 是否存在（在 INSERT 前，避免 FK 约束抛异常）
-        const sessionRow = db
-          .prepare('SELECT * FROM sessions WHERE id = ?')
-          .get(data.sessionId) as any
+        const sessionRow = sessionsRepo.getSessionById(data.sessionId)
         if (!sessionRow) {
           log.warn('session not found', { sessionId: data.sessionId })
           socket.emit(Events.ERROR, { message: 'Session not found' })
@@ -222,12 +213,13 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
         // 2. 写入消息
         const mentionsJson = JSON.stringify(data.mentions || [])
-        db.prepare(
-          `
-        INSERT INTO messages (id, session_id, role, content, mentions, task_id)
-        VALUES (?, ?, 'user', ?, ?, ?)
-      `
-        ).run(msgId, data.sessionId, data.content, mentionsJson, data.taskId || null)
+        messagesRepo.insertUserMessage(
+          msgId,
+          data.sessionId,
+          data.content,
+          mentionsJson,
+          data.taskId || null
+        )
 
         const msg = {
           id: msgId,
@@ -248,15 +240,14 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         const agentIds: string[] = JSON.parse(sessionRow.agent_ids || '[]')
         const agents = agentIds
           .map((id: string) => {
-            const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
+            const row = agentsRepo.getAgentById(id)
             return row ? rowToAgent(row) : null
           })
           .filter(Boolean) as AgentConfig[]
 
         // P0-2 防护：过滤掉不存在于 agents 表或缺少 API key 的无效 Agent
         const validAgents = agents.filter((a) => {
-          const exists = db.prepare('SELECT id FROM agents WHERE id = ?').get(a.id)
-          if (!exists) {
+          if (!agentsRepo.agentExists(a.id)) {
             log.warn('agent not in DB, skipping dispatch', {
               agentId: a.id,
               agentName: a.name,
@@ -310,7 +301,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         }
 
         // 按 FIFO 串行执行（不 await，让多个消息的 Agent 执行可以交错）
-        executeAgentsSerial(io, data.sessionId, targets as AgentConfig[], msg, db, traceId).catch(
+        executeAgentsSerial(io, data.sessionId, targets as AgentConfig[], msg, traceId).catch(
           (err) => {
             // S2 修复：executeAgentsSerial 内部 try/catch 只覆盖 for 循环体。
             // 若在进入循环前崩溃（session 查询、agent 名解析等），异常会成为
@@ -337,23 +328,15 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     // ─── Message retraction ───────────────────────
 
     socket.on(Events.MESSAGE_RETRACT, (data: { sessionId: string; messageId: string }) => {
-      const db = getDb()
-
       // 1. 验证该消息是最新一条用户消息
-      const msg = db
-        .prepare('SELECT * FROM messages WHERE id = ? AND session_id = ? AND role = ?')
-        .get(data.messageId, data.sessionId, 'user') as any
+      const msg = messagesRepo.getMessageById(data.messageId, data.sessionId, 'user')
       if (!msg) {
         socket.emit(Events.ERROR, { message: '消息不存在或不是用户消息' })
         return
       }
 
-      const latestUser = db
-        .prepare(
-          'SELECT id FROM messages WHERE session_id = ? AND role = ? ORDER BY created_at DESC LIMIT 1'
-        )
-        .get(data.sessionId, 'user') as any
-      if (!latestUser || latestUser.id !== data.messageId) {
+      const latestUserId = messagesRepo.getLatestUserMessageId(data.sessionId)
+      if (!latestUserId || latestUserId !== data.messageId) {
         socket.emit(Events.ERROR, { message: '只能撤回最新一条消息' })
         return
       }
@@ -363,9 +346,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
       try {
         // 3. 查 execution_logs 找关联的 commit + packages
-        const execLogs = db
-          .prepare('SELECT * FROM execution_logs WHERE triggered_by_message_id = ?')
-          .all(data.messageId) as any[]
+        const execLogs = execLogsRepo.getLogsByTriggerMessage(data.messageId)
 
         let hasCommit = false
         for (const ex of execLogs) {
@@ -401,24 +382,20 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
         // 6. 删除该消息触发的所有 agent 回复和该消息本身
         // 先删 execution_logs (外键)
-        db.prepare('DELETE FROM execution_logs WHERE triggered_by_message_id = ?').run(
-          data.messageId
-        )
+        execLogsRepo.deleteExecutionLogsByTriggerMessage(data.messageId)
         // 找 agent 回复消息的 id
-        const agentReplies = db
-          .prepare('SELECT id FROM messages WHERE session_id = ? AND role = ? AND created_at > ?')
-          .all(data.sessionId, 'agent', msg.created_at) as any[]
+        const agentReplies = messagesRepo.getAgentRepliesAfter(data.sessionId, msg.created_at)
         for (const reply of agentReplies) {
-          db.prepare('DELETE FROM messages WHERE id = ?').run(reply.id)
+          messagesRepo.deleteMessageById(reply.id)
         }
         // 删原消息
-        db.prepare('DELETE FROM messages WHERE id = ?').run(data.messageId)
+        messagesRepo.deleteMessageById(data.messageId)
 
         // 7. 广播给所有客户端
         io.emit(Events.MESSAGE_RETRACTED, {
           sessionId: data.sessionId,
           messageId: data.messageId,
-          agentReplyIds: agentReplies.map((r: any) => r.id),
+          agentReplyIds: agentReplies.map((r: MessageRow) => r.id),
         })
 
         log.info('message retracted', {
@@ -436,12 +413,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     // ─── Broadcast mode toggle ────────────────────
 
     socket.on(Events.TOGGLE_BROADCAST, (data: { sessionId: string; broadcastMode: boolean }) => {
-      const db = getDb()
-      db.prepare(
-        `
-        UPDATE sessions SET broadcast_mode = ?, updated_at = datetime('now') WHERE id = ?
-      `
-      ).run(data.broadcastMode ? 1 : 0, data.sessionId)
+      sessionsRepo.updateSessionBroadcastMode(data.sessionId, data.broadcastMode)
 
       io.to(`session:${data.sessionId}`).emit(Events.BROADCAST_MODE_CHANGED, {
         sessionId: data.sessionId,
@@ -529,7 +501,6 @@ async function executeAgentsSerial(
     mentions: string[]
     taskId?: string
   },
-  db: ReturnType<typeof getDb>,
   traceId: string,
   depth: number = 0
 ): Promise<void> {
@@ -540,14 +511,10 @@ async function executeAgentsSerial(
   }
 
   // 获取 session 中所有 Agent 名称（用于 mention 解析）
-  const sessionRow = db.prepare('SELECT agent_ids FROM sessions WHERE id = ?').get(sessionId) as any
-  const sessionAgentIds: string[] = sessionRow ? JSON.parse(sessionRow.agent_ids || '[]') : []
+  const sessionAgentIds = sessionsRepo.getSessionAgentIds(sessionId)
   const sessionAgentNames: string[] = sessionAgentIds
-    .map((id: string) => {
-      const row = db.prepare('SELECT name FROM agents WHERE id = ?').get(id) as any
-      return row?.name || null
-    })
-    .filter(Boolean)
+    .map((id: string) => agentsRepo.getAgentNameById(id))
+    .filter((n): n is string => n !== undefined)
 
   let lockAcquired = false
 
@@ -604,7 +571,7 @@ async function executeAgentsSerial(
         // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
         // AbortController 确保超时后子进程被 kill（P0-1 修复）
         reply = await Promise.race([
-          runAgentReply(io, sessionId, agent, triggerMsg, db, traceId, abortController.signal),
+          runAgentReply(io, sessionId, agent, triggerMsg, traceId, abortController.signal),
           new Promise<never>((_, reject) =>
             setTimeout(() => {
               abortController.abort()
@@ -647,10 +614,7 @@ async function executeAgentsSerial(
       if (mentionedNames.length > 0) {
         // 将解析出的 mentions 写回 DB，确保后续 Agent 构建上下文时
         // 能通过 mentions.includes(agent.name) 过滤规则看到本消息
-        db.prepare('UPDATE messages SET mentions = ? WHERE id = ?').run(
-          JSON.stringify(mentionedNames),
-          reply.msgId
-        )
+        messagesRepo.updateMessageMentions(reply.msgId, JSON.stringify(mentionedNames))
 
         // 通知前端更新该消息的 mentions（因为在 runAgentReply 发送
         // NEW_MESSAGE 时 mentions 尚未解析，前端拿到的 mentions 为空）
@@ -669,7 +633,7 @@ async function executeAgentsSerial(
         // 找到被 @ 的 Agent 配置
         const mentionedAgents = sessionAgentIds
           .map((id: string) => {
-            const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
+            const row = agentsRepo.getAgentById(id)
             return row ? rowToAgent(row) : null
           })
           .filter(
@@ -705,7 +669,6 @@ async function executeAgentsSerial(
             sessionId,
             mentionedAgents,
             agentTrigger,
-            db,
             traceId,
             depth + 1
           )
@@ -726,7 +689,7 @@ async function executeAgentsSerial(
           mentions: queuedCmd.mentions,
           taskId: triggerMsg.taskId,
         }
-        await executeAgentsSerial(io, sessionId, [agent], queuedTrigger, db, traceId, depth)
+        await executeAgentsSerial(io, sessionId, [agent], queuedTrigger, traceId, depth)
       }
     } catch (err: any) {
       // P0-1 修复：外层 try/catch 防止 completeExecution 或 agent-to-agent
@@ -761,9 +724,7 @@ async function executeAgentsSerial(
       const commitHash = gitCommit(`catstudy [${triggerMsg.id}]`)
       if (commitHash) {
         // 将 commit hash 写回 execution_logs（本轮所有相关日志）
-        db.prepare(
-          'UPDATE execution_logs SET commit_hash = ? WHERE triggered_by_message_id = ?'
-        ).run(commitHash, triggerMsg.id)
+        execLogsRepo.updateExecutionLogCommitHash(triggerMsg.id, commitHash)
       }
     } finally {
       if (lockAcquired) {
@@ -789,7 +750,7 @@ async function executeAgentsSerial(
     }
 
     // 增量摘要：异步更新运行中的会话摘要（fire-and-forget，不阻塞后续对话）
-    updateRunningSummary(sessionId, db).catch((err) => {
+    updateRunningSummary(sessionId).catch((err) => {
       log.warn('incremental summary failed (non-blocking)', {
         traceId,
         sessionId,
@@ -861,7 +822,6 @@ async function runAgentReply(
     mentions: string[]
     taskId?: string
   },
-  db: ReturnType<typeof getDb>,
   traceId: string,
   signal?: AbortSignal
 ): Promise<{ content: string; msgId: string }> {
@@ -887,33 +847,15 @@ async function runAgentReply(
 
   // 构建对话上下文：只包含与该 Agent 相关的消息
   // 按时间倒序取最近消息（generous safety limit），后续用 token 预算做软截断
-  const allMessages = db
-    .prepare(
-      `
-    SELECT * FROM messages
-    WHERE session_id = ? AND role != 'system'
-    ORDER BY created_at DESC
-    LIMIT 500
-  `
-    )
-    .all(sessionId) as any[]
+  const allMessages = messagesRepo.getRecentMessages(sessionId)
   // 反转为时间正序，后续过滤和截断都按时间顺序处理
   allMessages.reverse()
 
   // 加载同一 taskId 的完整历史（跨越消息加载限制，按 token 预算合并）
-  const taskHistory: any[] = []
+  const taskHistory: MessageRow[] = []
   if (triggerMsg.taskId) {
-    const loadedIds = new Set(allMessages.map((m: any) => m.id))
-    const taskMsgs = db
-      .prepare(
-        `
-      SELECT * FROM messages
-      WHERE task_id = ? AND session_id = ?
-      ORDER BY created_at DESC
-      LIMIT 500
-    `
-      )
-      .all(triggerMsg.taskId, sessionId) as any[]
+    const loadedIds = new Set(allMessages.map((m: MessageRow) => m.id))
+    const taskMsgs = messagesRepo.getTaskHistory(triggerMsg.taskId, sessionId)
     taskMsgs.reverse() // 恢复时间正序
     for (const m of taskMsgs) {
       if (!loadedIds.has(m.id)) {
@@ -934,10 +876,7 @@ async function runAgentReply(
   const combinedMessages = [...taskHistory, ...allMessages]
 
   // 读取 Session 的广播模式
-  const sessionRow = db
-    .prepare('SELECT broadcast_mode FROM sessions WHERE id = ?')
-    .get(sessionId) as any
-  const isBroadcastMode = !!sessionRow?.broadcast_mode
+  const isBroadcastMode = sessionsRepo.getSessionBroadcastMode(sessionId)
 
   // 上下文过滤：只保留该 Agent 能"看到"的消息
   const relevantMessages = getRelevantMessages(
@@ -1009,8 +948,7 @@ async function runAgentReply(
             content: m.content,
           }
         }
-        const otherAgent = db.prepare('SELECT name FROM agents WHERE id = ?').get(m.agent_id) as any
-        const otherName = otherAgent?.name || '未知猫咪'
+        const otherName = agentsRepo.getAgentNameById(m.agent_id) || '未知猫咪'
         return {
           role: 'user' as const,
           content: `【${otherName}】说：${m.content}`,
@@ -1062,7 +1000,7 @@ async function runAgentReply(
       maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10),
     })
     // 异步触发交接，不 await — 当前回复在旧会话中继续
-    performHandoff(sessionId, io, db).catch((err) => {
+    performHandoff(sessionId, io).catch((err) => {
       log.warn('handoff failed (non-blocking)', {
         traceId,
         sessionId,
@@ -1073,19 +1011,14 @@ async function runAgentReply(
 
   // ── 注入增量摘要到 system prompt ──────────────────
   // 从当前会话读取运行中的摘要，注入到 system prompt 顶部
-  const sessionMeta = db
-    .prepare('SELECT running_summary FROM sessions WHERE id = ?')
-    .get(sessionId) as any
-  if (sessionMeta?.running_summary) {
-    const enhancedPrompt = injectSummaryIntoSystem(
-      llmMessages[0].content,
-      sessionMeta.running_summary
-    )
+  const runningSummary = sessionsRepo.getSessionRunningSummary(sessionId)
+  if (runningSummary) {
+    const enhancedPrompt = injectSummaryIntoSystem(llmMessages[0].content, runningSummary)
     if (enhancedPrompt !== llmMessages[0].content) {
       llmMessages[0] = { ...llmMessages[0], content: enhancedPrompt }
       const summaryLen = (() => {
         try {
-          return JSON.parse(sessionMeta.running_summary)?.text?.length || 0
+          return JSON.parse(runningSummary)?.text?.length || 0
         } catch {
           return 0
         }
@@ -1139,7 +1072,7 @@ async function runAgentReply(
         finalTokens: finalStats.total,
         maxTokens,
       })
-      performHandoff(sessionId, io, db).catch((err) => {
+      performHandoff(sessionId, io).catch((err) => {
         log.warn('handoff failed (non-blocking)', {
           traceId,
           sessionId,
@@ -1223,12 +1156,13 @@ async function runAgentReply(
   const latencyMs = Date.now() - t0
 
   // 写入完整消息
-  db.prepare(
-    `
-    INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id)
-    VALUES (?, ?, ?, 'agent', ?, '[]', ?)
-  `
-  ).run(msgId, sessionId, agent.id, fullContent, triggerMsg.taskId || null)
+  messagesRepo.insertAgentMessage(
+    msgId,
+    sessionId,
+    agent.id,
+    fullContent,
+    triggerMsg.taskId || null
+  )
 
   const estimatedPromptLen = llmMessages.reduce((sum, m) => sum + m.content.length, 0)
   const promptTokens = contextTokenStats.total
@@ -1293,27 +1227,14 @@ async function runAgentReply(
   }
 
   // 将延迟 + 包信息 + 诊断数据 + token 统计写回 execution_logs
-  db.prepare(
-    `
-    UPDATE execution_logs
-    SET latency_ms = ?,
-        packages_installed = ?,
-        prompt_chars = ?,
-        reply_chars = ?,
-        prompt_tokens = ?,
-        completion_tokens = ?
-    WHERE agent_id = ? AND status = 'running'
-    ORDER BY started_at DESC LIMIT 1
-  `
-  ).run(
+  execLogsRepo.updateExecutionLogDiagnostics(agent.id, {
     latencyMs,
-    JSON.stringify(newPkgs),
-    estimatedPromptLen,
-    fullContent.length,
+    packagesInstalled: JSON.stringify(newPkgs),
+    promptChars: estimatedPromptLen,
+    replyChars: fullContent.length,
     promptTokens,
-    estimateTokens(fullContent),
-    agent.id
-  )
+    completionTokens: estimateTokens(fullContent),
+  })
 
   // 推送上下文窗口 token 用量给前端（驱动 handoff 的真实数字）
   io.to(`session:${sessionId}`).emit(Events.CONTEXT_WINDOW_STATS, {

@@ -2,7 +2,12 @@ import type { FastifyInstance } from 'fastify'
 import { v4 as uuid } from 'uuid'
 import { AgentCreateSchema, AgentConfigSchema } from '@cat-study/shared'
 import type { AgentTokenStats } from '@cat-study/shared'
-import { getDb } from '../db/index.js'
+import {
+  agents as agentsRepo,
+  executionLogs as execLogsRepo,
+  memories as memoriesRepo,
+} from '../db/repository/index.js'
+import type { AgentRow } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('agents')
@@ -18,15 +23,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
 
     const agent = parsed.data
     const id = uuid()
-    const db = getDb()
 
     try {
-      db.prepare(
-        `
-        INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `
-      ).run(
+      agentsRepo.insertAgent(
         id,
         agent.name,
         agent.avatar,
@@ -38,8 +37,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         agent.effortLevel || null
       )
 
-      const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
-      return reply.status(201).send(toAgentConfig(row))
+      const row = agentsRepo.getAgentById(id)
+      return reply.status(201).send(toAgentConfig(row!))
     } catch (err: any) {
       if (err.message?.includes('UNIQUE')) {
         return reply.status(409).send({ error: `Agent "${agent.name}" already exists` })
@@ -52,16 +51,14 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
   // ─── GET /api/agents — 列出所有 Agent ───────────────
 
   app.get('/api/agents', async () => {
-    const db = getDb()
-    const rows = db.prepare('SELECT * FROM agents ORDER BY created_at ASC').all() as any[]
+    const rows = agentsRepo.listAllAgents()
     return rows.map(toAgentConfig)
   })
 
   // ─── GET /api/agents/:id — 获取单个 Agent ───────────
 
   app.get('/api/agents/:id', async (req, reply) => {
-    const db = getDb()
-    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get((req.params as any).id) as any
+    const row = agentsRepo.getAgentById((req.params as any).id)
     if (!row) return reply.status(404).send({ error: 'Agent not found' })
     return toAgentConfig(row)
   })
@@ -69,9 +66,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
   // ─── PATCH /api/agents/:id — 更新 Agent ─────────────
 
   app.patch('/api/agents/:id', async (req, reply) => {
-    const db = getDb()
     const id = (req.params as any).id
-    const existing = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
+    const existing = agentsRepo.getAgentById(id)
     if (!existing) return reply.status(404).send({ error: 'Agent not found' })
 
     const body = req.body as any
@@ -98,51 +94,30 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'No fields to update' })
     }
 
-    fields.push("updated_at = datetime('now')")
-    values.push(id)
+    agentsRepo.updateAgent(id, fields.join(', '), values)
 
-    db.prepare(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`).run(...values)
-
-    const updated = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
-    return toAgentConfig(updated)
+    const updated = agentsRepo.getAgentById(id)
+    return toAgentConfig(updated!)
   })
 
   // ─── GET /api/agents/:id/stats — Agent Token 统计 ───
 
   app.get('/api/agents/:id/stats', async (req, reply) => {
-    const db = getDb()
     const id = (req.params as any).id
-    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as any
+    const agent = agentsRepo.getAgentById(id)
     if (!agent) return reply.status(404).send({ error: 'Agent not found' })
 
     const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
 
     // 累计统计（所有调用）
-    const totals = db
-      .prepare(
-        `SELECT
-           COALESCE(SUM(prompt_tokens), 0) AS total_prompt,
-           COALESCE(SUM(completion_tokens), 0) AS total_completion,
-           COUNT(*) AS total_calls
-         FROM execution_logs
-         WHERE agent_id = ? AND status = 'completed'`
-      )
-      .get(id) as any
+    const totals = execLogsRepo.getAgentStats(id)
 
-    // 当前活跃会话统计（按 triggered_by_message_id 关联到的 session）
+    // 当前活跃会话统计
     const sessionId = (req.query as any)?.sessionId
     let sessionPrompt = 0
     let sessionCompletion = 0
     if (sessionId) {
-      const sessionStats = db
-        .prepare(
-          `SELECT
-             COALESCE(SUM(prompt_tokens), 0) AS session_prompt,
-             COALESCE(SUM(completion_tokens), 0) AS session_completion
-           FROM execution_logs
-           WHERE agent_id = ? AND session_id = ? AND status = 'completed'`
-        )
-        .get(id, sessionId) as any
+      const sessionStats = execLogsRepo.getAgentSessionStats(id, sessionId)
       sessionPrompt = sessionStats?.session_prompt || 0
       sessionCompletion = sessionStats?.session_completion || 0
     }
@@ -163,23 +138,23 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
   // ─── DELETE /api/agents/:id — 删除 Agent ────────────
 
   app.delete('/api/agents/:id', async (req, reply) => {
-    const db = getDb()
     const id = (req.params as any).id
 
     // 先检查是否存在
-    const agent = db.prepare('SELECT id FROM agents WHERE id = ?').get(id)
-    if (!agent) return reply.status(404).send({ error: 'Agent not found' })
+    if (!agentsRepo.agentExists(id)) {
+      return reply.status(404).send({ error: 'Agent not found' })
+    }
 
     // 清理关联数据（FK 约束无 ON DELETE CASCADE，需手动删除）
-    db.prepare('DELETE FROM execution_logs WHERE agent_id = ?').run(id)
-    db.prepare('DELETE FROM memories WHERE agent_id = ?').run(id)
-    db.prepare('DELETE FROM agents WHERE id = ?').run(id)
+    execLogsRepo.deleteExecutionLogsByAgent(id)
+    memoriesRepo.deleteMemoriesByAgent(id)
+    agentsRepo.deleteAgentById(id)
     return { ok: true }
   })
 }
 
 /** DB row → AgentConfig */
-function toAgentConfig(row: any) {
+function toAgentConfig(row: AgentRow) {
   return {
     id: row.id,
     name: row.name,

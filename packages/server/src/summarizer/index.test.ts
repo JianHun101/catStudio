@@ -7,7 +7,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest'
 import Database from 'better-sqlite3'
 import { createTestDb } from '../test-helpers.js'
-import { setDb, resetDb } from '../db/index.js'
+import { setDb, resetDb, getDb } from '../db/index.js'
+import { initRepository } from '../db/repository/index.js'
 
 const mockChatComplete = vi.fn()
 
@@ -29,6 +30,7 @@ describe('summarizer', () => {
     process.env = { ...originalEnv }
     db = createTestDb()
     setDb(db)
+    initRepository(getDb())
     vi.clearAllMocks()
   })
 
@@ -75,7 +77,7 @@ describe('summarizer', () => {
     insertSession('s1')
     insertMsg('m1', 's1', 'user', 'hello')
 
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBeNull()
   })
 
@@ -85,7 +87,7 @@ describe('summarizer', () => {
     insertSession('s1')
     insertMsg('m1', 's1', 'user', 'hello')
 
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBeNull()
   })
 
@@ -94,7 +96,7 @@ describe('summarizer', () => {
     process.env.SUMMARY_API_KEY = 'sk-test'
     insertSession('s1')
 
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBeNull()
   })
 
@@ -107,7 +109,7 @@ describe('summarizer', () => {
     insertMsg('m1', 's1', 'user', 'hello', { secondsAgo: 10 })
     insertMsg('m2', 's1', 'user', 'world', { secondsAgo: 5 })
 
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBe('first summary text')
     expect(mockChatComplete).toHaveBeenCalledTimes(1)
 
@@ -137,7 +139,7 @@ describe('summarizer', () => {
     insertMsg('m1', 's1', 'user', 'hello', { secondsAgo: 5 })
     insertMsg('m2', 's1', 'agent', '喵~你好', { agentId: 'a1', secondsAgo: 2 })
 
-    await summarizer.updateRunningSummary('s1', db)
+    await summarizer.updateRunningSummary('s1')
 
     const userPrompt = mockChatComplete.mock.calls[0][1] as string
     expect(userPrompt).toContain('[店长]')
@@ -153,13 +155,13 @@ describe('summarizer', () => {
     insertMsg('m1', 's1', 'user', 'round one', { secondsAgo: 20 })
 
     // 第一轮：无旧摘要 → 全量生成
-    await summarizer.updateRunningSummary('s1', db)
+    await summarizer.updateRunningSummary('s1')
 
     // 第二轮：有旧摘要 → 增量合并
     insertMsg('m2', 's1', 'user', 'round two', { secondsAgo: 5 })
     mockChatComplete.mockResolvedValue('incrementally merged')
 
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBe('incrementally merged')
 
     // prompt 中应包含旧摘要文本和新消息
@@ -180,13 +182,13 @@ describe('summarizer', () => {
     insertMsg('m1', 's1', 'user', 'msg 1', { secondsAgo: 20 })
 
     // 第 1 轮：无旧摘要 → 总是触发
-    await summarizer.updateRunningSummary('s1', db)
+    await summarizer.updateRunningSummary('s1')
     expect(mockChatComplete).toHaveBeenCalledTimes(1)
 
     insertMsg('m2', 's1', 'user', 'msg 2', { secondsAgo: 5 })
 
     // 第 2 轮：roundCount=2，2%3≠0 → 跳过 LLM
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBeNull()
     expect(mockChatComplete).toHaveBeenCalledTimes(1) // 未再次调用
 
@@ -206,7 +208,7 @@ describe('summarizer', () => {
     db.prepare('UPDATE sessions SET running_summary = ? WHERE id = ?').run('{bad json!!!', 's1')
     insertMsg('m1', 's1', 'user', 'hello', { secondsAgo: 5 })
 
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBe('fresh from corruption')
 
     // prompt 中不应有旧摘要，而是初始占位文本
@@ -222,7 +224,7 @@ describe('summarizer', () => {
     insertSession('s1')
     insertMsg('m1', 's1', 'user', 'hello', { secondsAgo: 5 })
 
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBeNull()
   })
 
@@ -234,7 +236,7 @@ describe('summarizer', () => {
     insertSession('s1')
     insertMsg('m1', 's1', 'user', 'hello', { secondsAgo: 5 })
 
-    const result = await summarizer.updateRunningSummary('s1', db)
+    const result = await summarizer.updateRunningSummary('s1')
     expect(result).toBeNull()
   })
 })

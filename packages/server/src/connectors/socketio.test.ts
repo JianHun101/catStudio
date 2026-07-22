@@ -11,6 +11,7 @@ import { createServer } from 'node:http'
 import { Events } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
+import { initRepository } from '../db/repository/index.js'
 
 // ═══ Mock all external dependencies ═══
 
@@ -131,6 +132,7 @@ describe('socketio connector', () => {
     // 设置测试 DB 并填入基础数据
     const db = createTestDb()
     setDb(db)
+    initRepository(db)
 
     // Seed: 一个 agent
     db.prepare(

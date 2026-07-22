@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
-import { setDb, resetDb } from '../db/index.js'
+import { setDb, resetDb, getDb } from '../db/index.js'
+import { initRepository } from '../db/repository/index.js'
 import { agentRoutes } from './agents.js'
 import type { FastifyInstance } from 'fastify'
 
@@ -9,6 +10,7 @@ describe('Agent Routes', () => {
 
   beforeEach(async () => {
     setDb(createTestDb())
+    initRepository(getDb())
     app = await buildTestApp()
     await app.register(agentRoutes)
   })

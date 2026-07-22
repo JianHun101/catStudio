@@ -7,6 +7,12 @@ import './env.js'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import { initDb, getDb } from './db/index.js'
+import {
+  initRepository,
+  agents as agentsRepo,
+  sessions as sessionsRepo,
+  executionLogs as execLogsRepo,
+} from './db/repository/index.js'
 import { connectRedis, closeRedis } from './db/redis.js'
 import { createSocketIO } from './connectors/socketio.js'
 import { agentRoutes } from './routes/agents.js'
@@ -32,30 +38,14 @@ async function main(): Promise<void> {
 
   // 1. 初始化数据库
   initDb()
+  initRepository(getDb())
   log.info('database ready')
 
   // 1.5 启动时修复：将上一次异常退出遗留的 running 状态标记为 failed
   //     （参照 clowder-ai StartupReconciler）
-  const db0 = getDb()
-  const stuckLogs = db0
-    .prepare("SELECT id, agent_id FROM execution_logs WHERE status = 'running'")
-    .all() as any[]
-  if (stuckLogs.length > 0) {
-    db0
-      .prepare(
-        `
-      UPDATE execution_logs
-      SET status = 'failed',
-          ended_at = datetime('now'),
-          error_message = 'server_restart'
-      WHERE status = 'running'
-    `
-      )
-      .run()
-    log.warn('启动时修复 stuck execution_logs', {
-      count: stuckLogs.length,
-      ids: stuckLogs.map((r: any) => r.id),
-    })
+  const stuckResult = execLogsRepo.fixStuckExecutionLogs()
+  if (stuckResult.changes > 0) {
+    log.warn('启动时修复 stuck execution_logs', { count: stuckResult.changes })
   }
 
   // 1.6 启动时清理残留的 Agent 执行锁文件
@@ -67,9 +57,7 @@ async function main(): Promise<void> {
   }
 
   // 1.7 启动时清理幽灵 execution_logs（agent 已被删除但日志残留）
-  const ghostResult = db0
-    .prepare('DELETE FROM execution_logs WHERE agent_id NOT IN (SELECT id FROM agents)')
-    .run()
+  const ghostResult = execLogsRepo.deleteGhostExecutionLogs()
   if (ghostResult.changes > 0) {
     log.warn('启动时清理幽灵 execution_logs', { deleted: ghostResult.changes })
   }
@@ -84,29 +72,14 @@ async function main(): Promise<void> {
   })
 
   // 2. 首次启动自动初始化种子数据（Agents 表为空时）
-  const db = getDb()
-  const agentCount = (db.prepare('SELECT COUNT(*) as cnt FROM agents').get() as any).cnt
+  const agentCount = agentsRepo.countAgents()
   if (agentCount === 0) {
     log.info('首次启动 — 自动创建默认猫咪…')
 
     const agents = buildDemoAgents()
 
-    const upsert = db.prepare(`
-      INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(name) DO UPDATE SET
-        avatar = excluded.avatar,
-        system_prompt = excluded.system_prompt,
-        llm_provider = excluded.llm_provider,
-        llm_model = excluded.llm_model,
-        llm_api_key = excluded.llm_api_key,
-        llm_base_url = excluded.llm_base_url,
-        effort_level = excluded.effort_level,
-        updated_at = datetime('now')
-    `)
-
     for (const a of agents) {
-      upsert.run(
+      agentsRepo.upsertAgent(
         a.id,
         a.name,
         a.avatar,
@@ -121,11 +94,8 @@ async function main(): Promise<void> {
     }
 
     // 创建演示会话
-    const agentIds = JSON.stringify(agents.map((a) => a.id))
-    db.prepare(
-      `INSERT INTO sessions (id, title, agent_ids) VALUES (?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET agent_ids = excluded.agent_ids, updated_at = datetime('now')`
-    ).run(DEMO_SESSION_ID, DEMO_SESSION_TITLE, agentIds)
+    const agentIdsJson = JSON.stringify(agents.map((a) => a.id))
+    sessionsRepo.upsertDemoSession(DEMO_SESSION_ID, DEMO_SESSION_TITLE, agentIdsJson)
     console.log(`  ✅ Session: ${DEMO_SESSION_TITLE}`)
 
     log.info('种子数据初始化完成', { agents: agents.length })

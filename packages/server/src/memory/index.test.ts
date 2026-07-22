@@ -4,7 +4,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest'
 import { createTestDb } from '../test-helpers.js'
-import { setDb, resetDb } from '../db/index.js'
+import { setDb, resetDb, getDb } from '../db/index.js'
+import { initRepository } from '../db/repository/index.js'
 
 // 禁用去重（避免 sqlite-vec vec_distance_cosine 不可用）
 process.env.MEMORY_DEDUP_ENABLED = '0'
@@ -30,6 +31,7 @@ describe('memory', () => {
 
   beforeEach(async () => {
     setDb(createTestDb())
+    initRepository(getDb())
     vi.clearAllMocks()
     mockIsMemoryEnabled.mockReturnValue(true)
   })
@@ -85,16 +87,18 @@ describe('memory', () => {
       mockEmbedText.mockRejectedValueOnce(new Error('model not loaded'))
       // Should not throw
       await expect(
-        memoryModule.saveMessageMemory('s1', 'hello', 'msg-1', ['agent-1']),
+        memoryModule.saveMessageMemory('s1', 'hello', 'msg-1', ['agent-1'])
       ).resolves.toBeUndefined()
     })
 
     it('stores memory for each agent', async () => {
       const db = (await import('../db/index.js')).getDb()
-      db.prepare(`
+      db.prepare(
+        `
         INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
         VALUES ('agent-1', '店长', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
-      `).run()
+      `
+      ).run()
 
       await memoryModule.saveMessageMemory('s1', '我喜欢日料', 'msg-1', ['agent-1'])
 
@@ -104,14 +108,18 @@ describe('memory', () => {
 
     it('strips @mentions before storing content', async () => {
       const db = (await import('../db/index.js')).getDb()
-      db.prepare(`
+      db.prepare(
+        `
         INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
         VALUES ('agent-1', '店长', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
-      `).run()
+      `
+      ).run()
 
       await memoryModule.saveMessageMemory('s1', '@店长 我喜欢日料', 'msg-1', ['agent-1'])
 
-      const row = db.prepare('SELECT content FROM memories WHERE agent_id = ?').get('agent-1') as { content: string }
+      const row = db.prepare('SELECT content FROM memories WHERE agent_id = ?').get('agent-1') as {
+        content: string
+      }
       // @mention 应从存储内容中剥离
       expect(row.content).toBe('我喜欢日料')
       // embedding 应基于清洗后文本生成
@@ -126,14 +134,18 @@ describe('memory', () => {
 
     it('stores same content for multiple agents', async () => {
       const db = (await import('../db/index.js')).getDb()
-      db.prepare(`
+      db.prepare(
+        `
         INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
         VALUES ('agent-1', '店长', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
-      `).run()
-      db.prepare(`
+      `
+      ).run()
+      db.prepare(
+        `
         INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
         VALUES ('agent-2', '服务员', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
-      `).run()
+      `
+      ).run()
 
       await memoryModule.saveMessageMemory('s1', 'common memory', 'msg-1', ['agent-1', 'agent-2'])
 

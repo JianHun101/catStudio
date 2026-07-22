@@ -8,10 +8,10 @@
  * - 失败降级：交接失败时在旧会话中继续，不阻塞对话
  */
 
-import type Database from 'better-sqlite3'
 import { v4 as uuid } from 'uuid'
 import { estimateTokens, Events } from '@cat-study/shared'
 import { chatComplete } from '../llm/complete.js'
+import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
 import type { Server as SocketServer } from 'socket.io'
 
@@ -31,22 +31,13 @@ const HANDOFF_SYSTEM_PROMPT = `你是一个会话交接助手。你需要对整�
 /**
  * 生成全量会话总结。
  */
-async function generateFullSummary(sessionId: string, db: Database.Database): Promise<string> {
+async function generateFullSummary(sessionId: string): Promise<string> {
   // 取最新 N 条消息，不截断每条内容（deepseek-v4-flash 有 1M 上下文）
-  const allMessages = db
-    .prepare(
-      `SELECT m.*, a.name as agent_name
-       FROM messages m
-       LEFT JOIN agents a ON m.agent_id = a.id
-       WHERE m.session_id = ? AND m.role != 'system'
-       ORDER BY m.created_at DESC
-       LIMIT 300`
-    )
-    .all(sessionId) as any[]
+  const allMessages = messagesRepo.getMessagesWithAgentName(sessionId)
   allMessages.reverse() // 恢复时间正序
 
   const conversationText = allMessages
-    .map((m: any) => {
+    .map((m) => {
       if (m.role === 'user') return `用户：${m.content}`
       const name = m.agent_name || '助手'
       return `${name}：${m.content}`
@@ -88,8 +79,7 @@ export interface HandoffResult {
  */
 export async function performHandoff(
   sessionId: string,
-  io: SocketServer,
-  db: Database.Database
+  io: SocketServer
 ): Promise<HandoffResult | null> {
   const enabled = process.env.HANDOFF_ENABLED !== 'false'
   if (!enabled) return null
@@ -103,13 +93,11 @@ export async function performHandoff(
 
   try {
     // 1. 读取原会话信息
-    const oldSession = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) as any
+    const oldSession = sessionsRepo.getSessionById(sessionId)
     if (!oldSession) return null
 
     // 2. 检查是否已被交接：通过 handoff_from 列查是否有会话从此会话分叉
-    const existingHandoff = db
-      .prepare('SELECT id FROM sessions WHERE handoff_from = ?')
-      .get(sessionId) as any
+    const existingHandoff = sessionsRepo.getHandoffChild(sessionId)
     if (existingHandoff) {
       log.debug('session already handed off', { sessionId, handoffTo: existingHandoff.id })
       return null
@@ -117,20 +105,18 @@ export async function performHandoff(
 
     // 3. 生成全量总结
     log.info('generating full summary for handoff', { sessionId })
-    const summary = await generateFullSummary(sessionId, db)
+    const summary = await generateFullSummary(sessionId)
     if (!summary) return null // API key 未配置或 LLM 调用失败
 
     // 4. 创建新会话
     const newSessionId = uuid()
     const newTitle = `${oldSession.title}（续）`
+    const oldAgentIds = JSON.parse(oldSession.agent_ids || '[]') as string[]
 
-    db.prepare(
-      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode, handoff_from, running_summary)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(
+    sessionsRepo.insertSession(
       newSessionId,
       newTitle,
-      oldSession.agent_ids,
+      oldAgentIds,
       oldSession.broadcast_mode,
       sessionId,
       JSON.stringify({
@@ -161,7 +147,7 @@ export async function performHandoff(
         newSessionId,
         error: emitErr.message,
       })
-      db.prepare('DELETE FROM sessions WHERE id = ?').run(newSessionId)
+      sessionsRepo.deleteSession(newSessionId)
       return null
     }
 

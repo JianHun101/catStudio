@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { AgentConfig, Message } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
-import { setDb, resetDb } from '../db/index.js'
+import { setDb, resetDb, getDb } from '../db/index.js'
+import { initRepository } from '../db/repository/index.js'
 
 // Mock redis to avoid real connections
 vi.mock('../db/redis.js', () => ({
@@ -42,21 +43,32 @@ describe('dispatch', () => {
   async function seedTestData() {
     const { getDb } = await import('../db/index.js')
     const ddb = getDb()
-    ddb.prepare(`
+    ddb
+      .prepare(
+        `
       INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
       VALUES (?, ?, '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
-    `).run('agent-1', '店长')
-    ddb.prepare(`
+    `
+      )
+      .run('agent-1', '店长')
+    ddb
+      .prepare(
+        `
       INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
       VALUES (?, ?, '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
-    `).run('agent-2', '服务员')
-    ddb.prepare("INSERT INTO sessions (id, title, agent_ids) VALUES ('session-1', 'test', '[]')").run()
+    `
+      )
+      .run('agent-2', '服务员')
+    ddb
+      .prepare("INSERT INTO sessions (id, title, agent_ids) VALUES ('session-1', 'test', '[]')")
+      .run()
   }
 
   beforeEach(async () => {
     // ⚠ setDb MUST come before import, because the imported dispatch module
     // chains through db/index.ts which will call getDb() on import
     setDb(createTestDb())
+    initRepository(getDb())
     dispatchModule = await import('./index.js')
     await seedTestData()
   })

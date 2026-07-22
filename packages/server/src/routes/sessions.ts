@@ -6,7 +6,14 @@ import {
   Events,
   type SessionConfig,
 } from '@cat-study/shared'
-import { getDb } from '../db/index.js'
+import {
+  sessions as sessionsRepo,
+  agents as agentsRepo,
+  messages as messagesRepo,
+  executionLogs as execLogsRepo,
+  sessionReadState as readStateRepo,
+} from '../db/repository/index.js'
+import type { SessionRow } from '../db/repository/index.js'
 import { getIO } from '../connectors/socketio.js'
 import { createLogger } from '../logger.js'
 
@@ -22,48 +29,31 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const { title, agentIds } = parsed.data
-    const db = getDb()
 
     // 验证 Agent 是否存在
-    const placeholders = agentIds.map(() => '?').join(',')
-    const existing = db
-      .prepare(`SELECT id FROM agents WHERE id IN (${placeholders})`)
-      .all(...agentIds) as any[]
-
-    if (existing.length !== agentIds.length) {
+    const existingIds = agentsRepo.checkAgentIdsExist(agentIds)
+    if (existingIds.length !== agentIds.length) {
       return reply.status(400).send({
         error: 'Some agent IDs are invalid',
       })
     }
 
     const id = uuid()
-    db.prepare(
-      `
-      INSERT INTO sessions (id, title, agent_ids)
-      VALUES (?, ?, ?)
-    `
-    ).run(id, title, JSON.stringify(agentIds))
+    sessionsRepo.insertSession(id, title, agentIds)
 
-    const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any
-    return reply.status(201).send(toSessionConfig(row))
+    const row = sessionsRepo.getSessionById(id)
+    return reply.status(201).send(toSessionConfig(row!))
   })
 
   // ─── GET /api/sessions — 列出所有会话 ───────────────
 
   app.get('/api/sessions', async () => {
-    const db = getDb()
-    const rows = db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as any[]
+    const rows = sessionsRepo.listAllSessions()
     return rows.map((row) => {
       const session = toSessionConfig(row)
       // Compute unread count: messages created after last_read_at
-      const readRow = db
-        .prepare('SELECT last_read_at FROM session_read_state WHERE session_id = ?')
-        .get(row.id) as any
-      const lastRead = readRow?.last_read_at || row.created_at
-      const countRow = db
-        .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ? AND created_at > ?')
-        .get(row.id, lastRead) as any
-      session.unreadCount = countRow?.cnt || 0
+      const lastRead = readStateRepo.getLastReadAt(row.id) || row.created_at
+      session.unreadCount = messagesRepo.countMessagesAfter(row.id, lastRead)
       return session
     })
   })
@@ -71,22 +61,16 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   // ─── GET /api/sessions/:id — 获取会话详情 ───────────
 
   app.get('/api/sessions/:id', async (req, reply) => {
-    const db = getDb()
-    const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get((req.params as any).id) as any
+    const row = sessionsRepo.getSessionById((req.params as any).id)
     if (!row) return reply.status(404).send({ error: 'Session not found' })
 
     // 附带 Agent 详情
     const agentIds: string[] = JSON.parse(row.agent_ids || '[]')
-    const agents =
-      agentIds.length > 0
-        ? db
-            .prepare(`SELECT * FROM agents WHERE id IN (${agentIds.map(() => '?').join(',')})`)
-            .all(...agentIds)
-        : []
+    const agents = agentIds.length > 0 ? agentsRepo.listAgentsByIds(agentIds) : []
 
     return {
       ...toSessionConfig(row),
-      agents: (agents as any[]).map((a) => ({
+      agents: agents.map((a) => ({
         id: a.id,
         name: a.name,
         avatar: a.avatar,
@@ -97,9 +81,8 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   // ─── PATCH /api/sessions/:id — 更新会话 ──────────────
 
   app.patch('/api/sessions/:id', async (req, reply) => {
-    const db = getDb()
     const id = (req.params as any).id
-    const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any
+    const row = sessionsRepo.getSessionById(id)
     if (!row) return reply.status(404).send({ error: 'Session not found' })
 
     const parsed = SessionUpdateSchema.safeParse(req.body)
@@ -111,18 +94,12 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
     // 支持重命名
     if (title !== undefined) {
-      db.prepare(`UPDATE sessions SET title = ?, updated_at = datetime('now') WHERE id = ?`).run(
-        title,
-        id
-      )
+      sessionsRepo.updateSessionTitle(id, title)
     }
 
     // 支持切换广播模式
     if (broadcastMode !== undefined) {
-      const newMode = broadcastMode ? 1 : 0
-      db.prepare(
-        `UPDATE sessions SET broadcast_mode = ?, updated_at = datetime('now') WHERE id = ?`
-      ).run(newMode, id)
+      sessionsRepo.updateSessionBroadcastMode(id, broadcastMode)
     }
 
     // 支持增加/移除 Agent
@@ -131,10 +108,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
       // 验证要添加的 Agent 是否存在
       if (addAgentIds?.length) {
-        const placeholders = addAgentIds.map(() => '?').join(',')
-        const existing = db
-          .prepare(`SELECT id FROM agents WHERE id IN (${placeholders})`)
-          .all(...addAgentIds) as any[]
+        const existing = agentsRepo.checkAgentIdsExist(addAgentIds)
         if (existing.length !== addAgentIds.length) {
           return reply.status(400).send({ error: 'Some agent IDs are invalid' })
         }
@@ -151,14 +125,12 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: '会话至少需要一只猫咪' })
       }
 
-      db.prepare(
-        `UPDATE sessions SET agent_ids = ?, updated_at = datetime('now') WHERE id = ?`
-      ).run(JSON.stringify(newIds), id)
+      sessionsRepo.updateSessionAgentIds(id, JSON.stringify(newIds))
     }
 
     // emit 通知前端
-    const updated = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any
-    const config = toSessionConfig(updated)
+    const updated = sessionsRepo.getSessionById(id)
+    const config = toSessionConfig(updated!)
     try {
       getIO()?.to(id).emit(Events.SESSION_UPDATE, config)
     } catch {
@@ -170,18 +142,18 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   // ─── DELETE /api/sessions/:id/messages — 清空消息 ────
 
   app.delete('/api/sessions/:id/messages', async (req, reply) => {
-    const db = getDb()
     const id = (req.params as any).id
 
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id)
-    if (!session) return reply.status(404).send({ error: 'Session not found' })
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
 
     // 按外键依赖顺序删除
-    const elogResult = db.prepare('DELETE FROM execution_logs WHERE session_id = ?').run(id)
-    const msgResult = db.prepare('DELETE FROM messages WHERE session_id = ?').run(id)
+    const elogResult = execLogsRepo.deleteExecutionLogsBySession(id)
+    const msgResult = messagesRepo.deleteMessagesBySession(id)
 
     // 更新会话时间戳
-    db.prepare(`UPDATE sessions SET updated_at = datetime('now') WHERE id = ?`).run(id)
+    sessionsRepo.updateSessionTimestamp(id)
 
     // 通知所有已连接的客户端（支持多 tab 同步）
     const io = getIO()
@@ -205,19 +177,13 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   // ─── POST /api/sessions/:id/read — 标记已读 ──────────
 
   app.post('/api/sessions/:id/read', async (req, reply) => {
-    const db = getDb()
     const id = (req.params as any).id
 
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id)
-    if (!session) return reply.status(404).send({ error: 'Session not found' })
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
 
-    db.prepare(
-      `
-      INSERT INTO session_read_state (session_id, last_read_at)
-      VALUES (?, datetime('now'))
-      ON CONFLICT(session_id) DO UPDATE SET last_read_at = datetime('now')
-    `
-    ).run(id)
+    readStateRepo.upsertLastReadAt(id)
 
     return { ok: true }
   })
@@ -225,16 +191,16 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   // ─── DELETE /api/sessions/:id — 删除会话 ────────────
 
   app.delete('/api/sessions/:id', async (req, reply) => {
-    const db = getDb()
     const id = (req.params as any).id
 
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id)
-    if (!session) return reply.status(404).send({ error: 'Session not found' })
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
 
     // 删除关联数据（按外键依赖顺序）
-    db.prepare('DELETE FROM execution_logs WHERE session_id = ?').run(id)
-    db.prepare('DELETE FROM messages WHERE session_id = ?').run(id)
-    db.prepare('DELETE FROM sessions WHERE id = ?').run(id)
+    execLogsRepo.deleteExecutionLogsBySession(id)
+    messagesRepo.deleteMessagesBySession(id)
+    sessionsRepo.deleteSession(id)
 
     // 通知所有已连接的客户端（支持多 tab 同步）
     const io = getIO()
@@ -246,7 +212,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   })
 }
 
-function toSessionConfig(row: any): SessionConfig {
+function toSessionConfig(row: SessionRow): SessionConfig {
   return {
     id: row.id,
     title: row.title,

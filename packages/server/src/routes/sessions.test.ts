@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
-import { setDb, resetDb } from '../db/index.js'
+import { setDb, resetDb, getDb } from '../db/index.js'
+import { initRepository } from '../db/repository/index.js'
 import type { FastifyInstance } from 'fastify'
 
 // Mock getIO from socketio connector (used by session DELETE)
@@ -19,18 +20,23 @@ describe('Session Routes', () => {
 
   beforeEach(async () => {
     setDb(createTestDb())
+    initRepository(getDb())
     app = await buildTestApp()
 
     // 创建两个测试 Agent
     const db = (await import('../db/index.js')).getDb()
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
       VALUES (?, ?, '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk-test')
-    `).run(agentId1, '店长阿暹')
-    db.prepare(`
+    `
+    ).run(agentId1, '店长阿暹')
+    db.prepare(
+      `
       INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
       VALUES (?, ?, '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk-test')
-    `).run(agentId2, '服务员橘子')
+    `
+    ).run(agentId2, '服务员橘子')
 
     // Import and register routes (must be after mock is set up)
     const { sessionRoutes } = await import('./sessions.js')
@@ -191,12 +197,14 @@ describe('Session Routes', () => {
       // 手动插入消息和执行日志
       const db = (await import('../db/index.js')).getDb()
       db.prepare(
-        "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', ?, 'user', 'hello')",
+        "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', ?, 'user', 'hello')"
       ).run(id)
-      db.prepare(`
+      db.prepare(
+        `
         INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status)
         VALUES ('log1', ?, ?, 'm1', 'completed')
-      `).run(id, agentId1)
+      `
+      ).run(id, agentId1)
 
       // 删除
       const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
@@ -226,15 +234,17 @@ describe('Session Routes', () => {
 
       const db = (await import('../db/index.js')).getDb()
       db.prepare(
-        "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', ?, 'user', 'hello')",
+        "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', ?, 'user', 'hello')"
       ).run(id)
       db.prepare(
-        "INSERT INTO messages (id, session_id, role, content) VALUES ('m2', ?, 'agent', 'hi')",
+        "INSERT INTO messages (id, session_id, role, content) VALUES ('m2', ?, 'agent', 'hi')"
       ).run(id)
-      db.prepare(`
+      db.prepare(
+        `
         INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status)
         VALUES ('log1', ?, ?, 'm1', 'completed')
-      `).run(id, agentId1)
+      `
+      ).run(id, agentId1)
 
       const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}/messages` })
       expect(res.statusCode).toBe(200)

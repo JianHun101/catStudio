@@ -7,9 +7,13 @@
  * - 便宜模型：使用 deepseek-chat ($0.14/1M tokens)，成本可忽略
  */
 
-import type Database from 'better-sqlite3'
 import { estimateTokens } from '@cat-study/shared'
 import { chatComplete } from '../llm/complete.js'
+import {
+  sessions as sessionsRepo,
+  messages as messagesRepo,
+  agents as agentsRepo,
+} from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('summarizer')
@@ -41,10 +45,7 @@ const SUMMARY_SYSTEM_PROMPT = `你是一个对话摘要助手。你的任务是�
  * @param db - 数据库实例
  * @returns 更新后的摘要文本，如果跳过或失败则返回 null
  */
-export async function updateRunningSummary(
-  sessionId: string,
-  db: Database.Database
-): Promise<string | null> {
+export async function updateRunningSummary(sessionId: string): Promise<string | null> {
   const enabled = process.env.SUMMARY_ENABLED !== 'false'
   if (!enabled) return null
 
@@ -56,9 +57,7 @@ export async function updateRunningSummary(
 
   try {
     // 1. 读取当前摘要
-    const sessionRow = db
-      .prepare('SELECT running_summary, summary_msg_id FROM sessions WHERE id = ?')
-      .get(sessionId) as any
+    const sessionRow = sessionsRepo.getSessionSummaryState(sessionId)
 
     let oldSummary: RunningSummary | null = null
     if (sessionRow?.running_summary) {
@@ -71,26 +70,12 @@ export async function updateRunningSummary(
 
     // 2. 获取上次摘要之后的新消息
     const lastId = oldSummary?.lastMessageId || ''
-    let newMessages: any[]
+    let newMessages
     if (lastId) {
-      newMessages = db
-        .prepare(
-          `SELECT * FROM messages
-           WHERE session_id = ? AND role != 'system' AND created_at > (
-             SELECT created_at FROM messages WHERE id = ?
-           )
-           ORDER BY created_at ASC`
-        )
-        .all(sessionId, lastId) as any[]
+      newMessages = messagesRepo.getMessagesAfterSummary(sessionId, lastId)
     } else {
       // 首次摘要：取全部消息（每个会话只运行一次，成本可忽略）
-      newMessages = db
-        .prepare(
-          `SELECT * FROM messages
-           WHERE session_id = ? AND role != 'system'
-           ORDER BY created_at ASC`
-        )
-        .all(sessionId) as any[]
+      newMessages = messagesRepo.getAllSessionMessages(sessionId)
     }
 
     if (newMessages.length === 0) return null
@@ -104,10 +89,10 @@ export async function updateRunningSummary(
     if (roundCount % interval !== 0 && oldSummary) {
       const updatedSummary = { ...oldSummary, roundCount }
       if (lastMsg) {
-        db.prepare('UPDATE sessions SET running_summary = ?, summary_msg_id = ? WHERE id = ?').run(
+        sessionsRepo.updateSessionRunningSummary(
+          sessionId,
           JSON.stringify(updatedSummary),
-          lastMsg.id,
-          sessionId
+          lastMsg.id
         )
       }
       return null
@@ -115,8 +100,13 @@ export async function updateRunningSummary(
 
     // 4. 格式化新消息
     const newMessagesText = newMessages
-      .map((m: any) => {
-        const role = m.role === 'user' ? '用户' : m.agent_id ? getAgentName(db, m.agent_id) : '系统'
+      .map((m) => {
+        const role =
+          m.role === 'user'
+            ? '用户'
+            : m.agent_id
+              ? agentsRepo.getAgentNameById(m.agent_id) || '系统'
+              : '系统'
         return `[${role}]: ${m.content}`
       })
       .join('\n')
@@ -145,9 +135,7 @@ export async function updateRunningSummary(
       createdAt: new Date().toISOString(),
     }
 
-    db.prepare(
-      `UPDATE sessions SET running_summary = ?, summary_msg_id = ?, updated_at = datetime('now') WHERE id = ?`
-    ).run(JSON.stringify(newSummary), lastMsg.id, sessionId)
+    sessionsRepo.updateSessionRunningSummary(sessionId, JSON.stringify(newSummary), lastMsg.id)
 
     log.info('running summary updated', {
       sessionId,
@@ -164,18 +152,5 @@ export async function updateRunningSummary(
       error: err.message,
     })
     return null
-  }
-}
-
-/**
- * 获取 Agent 名称（带缓存）。
- */
-function getAgentName(db: Database.Database, agentId: string): string {
-  if (!agentId) return '未知'
-  try {
-    const row = db.prepare('SELECT name FROM agents WHERE id = ?').get(agentId) as any
-    return row?.name || agentId
-  } catch {
-    return agentId
   }
 }
