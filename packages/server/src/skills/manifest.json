@@ -17,7 +17,7 @@
     },
     "dependency-review": {
       "description": "依赖审查流程",
-      "triggers": ["安装", "install", "npm", "pip", "apt"],
+      "triggers": ["审核安装", "review-install"],
       "file": "dependency-review.md"
     }
   }
