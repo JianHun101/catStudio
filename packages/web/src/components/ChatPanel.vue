@@ -159,12 +159,13 @@ function scrollToBottom(smooth = false): void {
   showScrollDown.value = false
 }
 
-// New messages arrive → scroll if at bottom
+// New messages arrive → scroll if at bottom, re-enable send button
 watch(
   () => store.activeMessages.length,
   async () => {
     await nextTick()
     if (isAtBottom.value) scrollToBottom()
+    sending.value = false
   }
 )
 
@@ -186,6 +187,15 @@ watch(
   () => store.activeSessionId,
   () => {
     setTimeout(() => scrollToBottom(), 50)
+  }
+)
+
+// Agent status bubbles appear after scroll → re-scroll if at bottom
+watch(
+  () => store.messageStatus,
+  async () => {
+    await nextTick()
+    if (isAtBottom.value) scrollToBottom()
   }
 )
 
@@ -247,7 +257,10 @@ async function handleSend(): Promise<void> {
     await nextTick()
     scrollToBottom()
   } finally {
-    sending.value = false
+    // Safety net: re-enable button after 10s if NEW_MESSAGE never arrives
+    setTimeout(() => {
+      if (sending.value) sending.value = false
+    }, 10000)
   }
 }
 
@@ -494,28 +507,6 @@ function statusLabelZh(status: string): string {
           <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>
         </div>
 
-        <!-- Scroll-to-bottom button -->
-        <Transition name="scroll-btn">
-          <button
-            v-if="showScrollDown"
-            class="scroll-down-btn"
-            aria-label="滚动到底部"
-            @click="scrollToBottom(true)"
-            title="回到底部"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M4 6l4 4 4-4"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <span>新消息</span>
-          </button>
-        </Transition>
-
         <TransitionGroup name="msg">
           <template v-for="(msg, i) in store.activeMessages" :key="msg.id">
             <!-- Date separator (独立块级元素，不受 .message flex 影响) -->
@@ -607,6 +598,28 @@ function statusLabelZh(status: string): string {
             </div>
           </div>
         </div>
+
+        <!-- Scroll-to-bottom button (after messages so sticky bottom works) -->
+        <Transition name="scroll-btn">
+          <button
+            v-if="showScrollDown"
+            class="scroll-down-btn"
+            aria-label="滚动到底部"
+            @click="scrollToBottom(true)"
+            title="回到底部"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M4 6l4 4 4-4"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span>新消息</span>
+          </button>
+        </Transition>
       </div>
     </div>
 
