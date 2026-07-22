@@ -142,52 +142,46 @@ function isGrouped(index: number): boolean {
 const SCROLL_TOLERANCE = 40
 const isAtBottom = ref(true)
 const showScrollDown = ref(false)
-let scrollLock = false
+// Count of new messages that arrived while user was scrolled up.
+// Resets to 0 when user returns to the bottom (via click or manual scroll).
+const newMessageCount = ref(0)
 
 function checkScrollPosition(): void {
   const el = chatContainer.value
   if (!el) return
   const distToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  const wasAtBottom = isAtBottom.value
   isAtBottom.value = distToBottom < SCROLL_TOLERANCE
-  // During a smooth scroll-to-bottom, suppress showScrollDown toggling
-  // so the button doesn't flicker as the animation crosses the tolerance.
-  if (!scrollLock) {
-    showScrollDown.value = !isAtBottom.value && store.activeMessages.length > 0
-  }
-  // Release the lock once the animation has reached the bottom
-  if (scrollLock && distToBottom < SCROLL_TOLERANCE) {
-    scrollLock = false
+  // User scrolled back to bottom manually → dismiss new message indicator
+  if (!wasAtBottom && isAtBottom.value) {
+    newMessageCount.value = 0
+    showScrollDown.value = false
   }
 }
 
 function scrollToBottom(smooth = false): void {
   const el = chatContainer.value
   if (!el) return
-  if (smooth) {
-    // Hide button immediately and lock showScrollDown so
-    // checkScrollPosition doesn't resurrect it mid-animation.
-    showScrollDown.value = false
-    scrollLock = true
-    // Safety valve: smooth scroll takes ~300ms; force-release
-    // the lock after 500ms so a mid-animation manual scroll-away
-    // won't permanently suppress the button.
-    setTimeout(() => {
-      scrollLock = false
-    }, 500)
-  }
+  // Dismiss the new message indicator — user is heading to the bottom.
+  newMessageCount.value = 0
+  showScrollDown.value = false
   el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
   if (!smooth) {
     isAtBottom.value = true
-    showScrollDown.value = false
   }
 }
 
-// New messages arrive → scroll if at bottom, re-enable send button
+// New messages arrive → scroll if at bottom; otherwise show indicator
 watch(
   () => store.activeMessages.length,
   async () => {
     await nextTick()
-    if (isAtBottom.value) scrollToBottom()
+    if (isAtBottom.value) {
+      scrollToBottom()
+    } else {
+      newMessageCount.value++
+      showScrollDown.value = true
+    }
     sending.value = false
   }
 )
@@ -622,16 +616,16 @@ function statusLabelZh(status: string): string {
           </div>
         </div>
 
-        <!-- Scroll-to-bottom button.
-             Always in DOM (no v-if) — hidden via CSS class instead of DOM removal.
-             Removing the button from the flex flow changes scrollHeight, which causes
-             a visible layout jump when a smooth scroll animation is in progress. -->
+        <!-- New-message indicator.
+             Only shown when messages arrive while the user is scrolled up.
+             Always in DOM (no v-if) — hidden via CSS class instead of DOM removal,
+             so scrollHeight stays stable during the hide animation. -->
         <button
           class="scroll-down-btn"
           :class="{ 'scroll-down-btn--hidden': !showScrollDown }"
-          aria-label="滚动到底部"
+          aria-label="滚动到新消息"
           @click="scrollToBottom(true)"
-          title="回到底部"
+          title="回到新消息"
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <path
@@ -642,7 +636,7 @@ function statusLabelZh(status: string): string {
               stroke-linejoin="round"
             />
           </svg>
-          <span>新消息</span>
+          <span>{{ newMessageCount }} 条新消息</span>
         </button>
       </div>
     </div>
