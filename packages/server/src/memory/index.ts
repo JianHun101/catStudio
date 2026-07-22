@@ -1,14 +1,20 @@
 /**
  * 记忆服务 — 向量记忆的存储、检索与上下文构建。
  *
- * 存储: 用户消息 → 嵌入 → memories 表（每 Agent 一行，共享 embedding BLOB）
- * 检索: 触发消息 → 嵌入 → sqlite-vec cosine 相似度 → top-K 记忆
+ * 存储: 用户消息 → 嵌入 → memories 表（单行，所有 Agent 共享）
+ * 检索: 触发消息 → 嵌入 → sqlite-vec cosine 相似度 → 全局 top-K 记忆
  * 注入: 格式化记忆文本 → 拼接到 system prompt
  *
  * 环境变量:
- *   MEMORY_TOP_K            — 检索记忆数量（默认 3）
- *   MEMORY_DEDUP_THRESHOLD  — 去重余弦距离阈值（默认 0.20），新记忆与已有记忆距离小于此值时跳过存储
- *   MEMORY_DEDUP_ENABLED    — 是否开启去重（默认 "1"），设为 "0" 关闭
+ *   MEMORY_TOP_K             — 检索记忆数量（默认 3）
+ *   MEMORY_DEDUP_THRESHOLD   — 去重余弦距离阈值（默认 0.20），小于此值时跳过存储
+ *   MEMORY_UPDATE_THRESHOLD  — 更新余弦距离阈值（默认 0.35），去重与更新之间的记忆会被 UPDATE 而非 INSERT
+ *   MEMORY_DEDUP_ENABLED     — 是否开启去重/更新（默认 "1"），设为 "0" 关闭
+ *
+ * 三段式逻辑:
+ *   距离 < DEDUP_THRESHOLD      → 跳过（几乎相同，无需存储）
+ *   DEDUP ≤ 距离 < UPDATE       → UPDATE（话题相关但内容不同，修正旧记忆）
+ *   距离 ≥ UPDATE               → INSERT（全新话题）
  */
 
 import { v4 as uuid } from 'uuid'
@@ -34,7 +40,9 @@ export function blobToVector(blob: Buffer): number[] {
 
 /**
  * 将用户消息存为向量记忆。
- * 对 session 中每个 Agent 各写一行，embedding 相同。
+ *
+ * 共享记忆模式：同一条消息只存一行，不再为每个 Agent 复制一份。
+ * agentIds[0] 作为来源元数据记录在 agent_id 列。
  *
  * 这是"即发即弃"的——失败只记日志，不抛异常、不阻塞消息流。
  */
@@ -69,57 +77,49 @@ export async function saveMessageMemory(
   const blob = vectorToBlob(embedding)
   const now = new Date().toISOString()
 
-  // ── 去重检测 ────────────────────────────────────────
+  // ── 去重 / 更新检测（全局，不再按 agent 隔离） ──────
   const dedupEnabled = (process.env.MEMORY_DEDUP_ENABLED || '1') !== '0'
   const dedupThreshold = parseFloat(process.env.MEMORY_DEDUP_THRESHOLD || '0.20')
-
-  const agentsToStore: string[] = []
+  const updateThreshold = parseFloat(process.env.MEMORY_UPDATE_THRESHOLD || '0.35')
 
   if (dedupEnabled) {
-    for (const agentId of agentIds) {
-      try {
-        const row = memoriesRepo.findNearestMemory(blob, agentId)
-        if (row && row.distance < dedupThreshold) {
-          log.debug('记忆去重：跳过重复记忆', {
-            agentId,
-            distance: row.distance.toFixed(4),
-            threshold: dedupThreshold,
-          })
-          continue
-        }
-        agentsToStore.push(agentId)
-      } catch {
-        // 去重查询失败不阻塞存储
-        agentsToStore.push(agentId)
-      }
-    }
+    try {
+      const nearest = memoriesRepo.findNearestMemory(blob)
 
-    if (agentsToStore.length === 0) {
-      log.debug('记忆去重：所有 Agent 均已存在相似记忆，跳过存储', {
-        totalAgents: agentIds.length,
-      })
-      return
+      if (nearest && nearest.distance < dedupThreshold) {
+        // 几乎相同的记忆 → 跳过
+        log.debug('记忆去重：跳过重复记忆', {
+          distance: nearest.distance.toFixed(4),
+          threshold: dedupThreshold,
+        })
+        return
+      }
+
+      if (nearest && nearest.distance < updateThreshold) {
+        // 话题相关但内容不同 → 更新旧记忆（修正）
+        memoriesRepo.updateMemory(nearest.id, cleanContent, blob, sourceMessageId, now)
+        log.debug('记忆修正：更新已有记忆', {
+          memoryId: nearest.id,
+          distance: nearest.distance.toFixed(4),
+          updateThreshold: updateThreshold.toFixed(2),
+          contentLen: cleanContent.length,
+        })
+        return
+      }
+
+      // else: 全新话题 → 继续执行 INSERT
+    } catch {
+      // 去重查询失败不阻塞存储
     }
-  } else {
-    agentsToStore.push(...agentIds)
   }
 
-  // ── 写入 ─────────────────────────────────────────────
+  // ── 写入：共享模式只存一行，用第一个 agent 作为来源 ──
 
   try {
-    memoriesRepo.insertMemoryBatch(
-      agentsToStore.map((agentId) => ({
-        id: uuid(),
-        agentId,
-        content: cleanContent,
-        embeddingBlob: blob,
-        sourceMessageId,
-        createdAt: now,
-      }))
-    )
+    const provenanceAgentId = agentIds[0]
+    memoriesRepo.insertMemory(uuid(), provenanceAgentId, cleanContent, blob, sourceMessageId, now)
     log.debug('记忆已存储', {
-      agentCount: agentsToStore.length,
-      skippedCount: agentIds.length - agentsToStore.length,
+      provenanceAgentId,
       contentLen: cleanContent.length,
       dim: embedding.length,
     })
@@ -139,11 +139,11 @@ export interface RetrievedMemory {
 }
 
 /**
- * 按余弦相似度搜索与 queryText 最相关的 top-K 记忆。
+ * 按余弦相似度从全局记忆空间中搜索与 queryText 最相关的 top-K 记忆。
  * 使用 sqlite-vec 内置的 vec_distance_cosine()。
+ * 不再按 agent_id 过滤——所有记忆对所有猫可见。
  */
 export async function searchMemories(
-  agentId: string,
   queryText: string,
   topK: number = 3
 ): Promise<RetrievedMemory[]> {
@@ -162,7 +162,7 @@ export async function searchMemories(
   const queryBlob = vectorToBlob(queryEmbedding)
 
   try {
-    const rows = memoriesRepo.searchMemoriesByVector(queryBlob, agentId, topK)
+    const rows = memoriesRepo.searchMemoriesByVector(queryBlob, topK)
 
     return rows.map((r) => ({
       id: r.id,
@@ -183,14 +183,14 @@ export async function searchMemories(
  * 检索相关记忆并格式化为 system prompt 可拼接的文本块。
  * 无匹配时返回空字符串。
  */
-export async function buildMemoryContext(agentId: string, triggerContent: string): Promise<string> {
+export async function buildMemoryContext(triggerContent: string): Promise<string> {
   // 剥离 @mention 再检索，与 saveMessageMemory 存储时保持一致，
   // 避免查询向量与存储向量处于不同语义空间导致召回质量下降。
   const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
   if (!cleanContent) return ''
 
   const topK = parseInt(process.env.MEMORY_TOP_K || '3', 10)
-  const memories = await searchMemories(agentId, cleanContent, topK)
+  const memories = await searchMemories(cleanContent, topK)
 
   if (memories.length === 0) return ''
 

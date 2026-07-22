@@ -1036,7 +1036,7 @@ async function runAgentReply(
   let memoryContext = ''
   try {
     memoryContext = await Promise.race([
-      buildMemoryContext(agent.id, triggerMsg.content),
+      buildMemoryContext(triggerMsg.content),
       new Promise<string>((resolve) => setTimeout(() => resolve(''), MEMORY_TIMEOUT_MS)),
     ])
   } catch {

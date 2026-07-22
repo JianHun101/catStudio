@@ -1,13 +1,15 @@
 /**
  * Memory tests — 注意: 测试环境不加载 sqlite-vec 原生扩展，
- * 因此涉及 vec_distance_cosine() 的去重逻辑需要禁用。
+ * 因此涉及 vec_distance_cosine() 的去重/更新逻辑需要禁用。
+ *
+ * 共享记忆模式: 检索不再按 agent_id 过滤，存储只写一行。
  */
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 
-// 禁用去重（避免 sqlite-vec vec_distance_cosine 不可用）
+// 禁用去重/更新（避免 sqlite-vec vec_distance_cosine 不可用）
 process.env.MEMORY_DEDUP_ENABLED = '0'
 
 // Mock embedding — return fake 4-dim vectors
@@ -91,7 +93,7 @@ describe('memory', () => {
       ).resolves.toBeUndefined()
     })
 
-    it('stores memory for each agent', async () => {
+    it('stores only one row regardless of agent count (shared memory)', async () => {
       const db = (await import('../db/index.js')).getDb()
       db.prepare(
         `
@@ -100,10 +102,30 @@ describe('memory', () => {
       `
       ).run()
 
-      await memoryModule.saveMessageMemory('s1', '我喜欢日料', 'msg-1', ['agent-1'])
+      await memoryModule.saveMessageMemory('s1', '我喜欢日料', 'msg-1', [
+        'agent-1',
+        'agent-2',
+        'agent-3',
+      ])
 
-      const rows = db.prepare('SELECT * FROM memories WHERE agent_id = ?').all('agent-1')
+      const rows = db.prepare('SELECT * FROM memories').all()
+      // 共享模式：只存一行
       expect(rows).toHaveLength(1)
+    })
+
+    it('uses first agentId as provenance', async () => {
+      const db = (await import('../db/index.js')).getDb()
+      db.prepare(
+        `
+        INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+        VALUES ('agent-1', '店长', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
+      `
+      ).run()
+
+      await memoryModule.saveMessageMemory('s1', 'test content', 'msg-1', ['agent-1', 'agent-2'])
+
+      const row = db.prepare('SELECT agent_id FROM memories').get() as { agent_id: string }
+      expect(row.agent_id).toBe('agent-1')
     })
 
     it('strips @mentions before storing content', async () => {
@@ -117,7 +139,7 @@ describe('memory', () => {
 
       await memoryModule.saveMessageMemory('s1', '@店长 我喜欢日料', 'msg-1', ['agent-1'])
 
-      const row = db.prepare('SELECT content FROM memories WHERE agent_id = ?').get('agent-1') as {
+      const row = db.prepare('SELECT content FROM memories').get() as {
         content: string
       }
       // @mention 应从存储内容中剥离
@@ -131,9 +153,24 @@ describe('memory', () => {
       // 纯 @mention 消息应在嵌入前就跳过
       expect(mockEmbedText).not.toHaveBeenCalled()
     })
+  })
 
-    it('stores same content for multiple agents', async () => {
+  describe('searchMemories', () => {
+    it('returns empty array when memory is disabled', async () => {
+      mockIsMemoryEnabled.mockReturnValue(false)
+      const results = await memoryModule.searchMemories('query')
+      expect(results).toEqual([])
+    })
+
+    it('returns empty array when embedding fails', async () => {
+      mockEmbedText.mockRejectedValueOnce(new Error('model error'))
+      const results = await memoryModule.searchMemories('query')
+      expect(results).toEqual([])
+    })
+
+    it('searches globally (no agent_id filter)', async () => {
       const db = (await import('../db/index.js')).getDb()
+      // 插入两条不同来源（不同 agent_id）的记忆
       db.prepare(
         `
         INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
@@ -147,43 +184,33 @@ describe('memory', () => {
       `
       ).run()
 
-      await memoryModule.saveMessageMemory('s1', 'common memory', 'msg-1', ['agent-1', 'agent-2'])
+      await memoryModule.saveMessageMemory('s1', '来自店长的记忆', 'msg-1', ['agent-1'])
+      await memoryModule.saveMessageMemory('s1', '来自服务员的记忆', 'msg-2', ['agent-2'])
 
-      expect(db.prepare('SELECT * FROM memories WHERE agent_id = ?').all('agent-1')).toHaveLength(1)
-      expect(db.prepare('SELECT * FROM memories WHERE agent_id = ?').all('agent-2')).toHaveLength(1)
-    })
-  })
-
-  describe('searchMemories', () => {
-    it('returns empty array when memory is disabled', async () => {
-      mockIsMemoryEnabled.mockReturnValue(false)
-      const results = await memoryModule.searchMemories('agent-1', 'query')
-      expect(results).toEqual([])
-    })
-
-    it('returns empty array when embedding fails', async () => {
-      mockEmbedText.mockRejectedValueOnce(new Error('model error'))
-      const results = await memoryModule.searchMemories('agent-1', 'query')
-      expect(results).toEqual([])
+      // 全局搜索应该能找到两条（不考虑 distance 排序，只要 count 够）
+      const db2 = getDb()
+      const count = (db2.prepare('SELECT COUNT(*) as cnt FROM memories').get() as { cnt: number })
+        .cnt
+      expect(count).toBe(2)
     })
   })
 
   describe('buildMemoryContext', () => {
     it('returns empty string when no memories found', async () => {
-      const ctx = await memoryModule.buildMemoryContext('agent-1', 'query')
+      const ctx = await memoryModule.buildMemoryContext('query')
       expect(ctx).toBe('')
     })
 
     it('strips @mentions before search', async () => {
       mockEmbedText.mockClear()
-      await memoryModule.buildMemoryContext('agent-1', '@店长 你好啊')
+      await memoryModule.buildMemoryContext('@店长 你好啊')
       // 应使用清洗后的文本做检索，而非原始含 @mention 文本
       expect(mockEmbedText).toHaveBeenCalledWith('你好啊')
     })
 
     it('returns empty string when trigger is only @mentions', async () => {
       mockEmbedText.mockClear()
-      const ctx = await memoryModule.buildMemoryContext('agent-1', '@店长 @服务员')
+      const ctx = await memoryModule.buildMemoryContext('@店长 @服务员')
       expect(ctx).toBe('')
       // 纯 @mention 不应该触发嵌入
       expect(mockEmbedText).not.toHaveBeenCalled()
