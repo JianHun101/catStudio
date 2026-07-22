@@ -894,7 +894,7 @@ function statusLabelZh(status: string): string {
 
 /* ─── Messages ──────────────────────────── */
 
-.chat-messages {
+.chat-messages-wrapper {
   flex: 1;
   overflow-y: auto;
   padding: 20px 24px;
