@@ -1437,8 +1437,8 @@ function statusLabelZh(status: string): string {
 .chat-input {
   width: 100%;
   padding: 10px 14px;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
   background: var(--bg-surface);
   color: var(--text-primary);
   font-family: inherit;
