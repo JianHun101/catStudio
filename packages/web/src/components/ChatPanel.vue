@@ -3,6 +3,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import type { Message } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
+import { useSkillCommand, type SkillSuggestion } from '@/composables/useSkillCommand'
 import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
 import { createLogger } from '@/utils/logger'
@@ -37,6 +38,17 @@ const {
   select,
   navigate,
 } = useMention(() => store.agents)
+
+const skills = ref<SkillSuggestion[]>([])
+const {
+  skillActive,
+  skillSuggestions,
+  skillIndex,
+  skillStartIdx,
+  detect: detectSkill,
+  select: selectSkill,
+  navigate: navigateSkill,
+} = useSkillCommand(() => skills.value)
 
 // ─── Time Formatting ───────────────────────
 
@@ -218,6 +230,15 @@ watch(
 
 onMounted(() => {
   chatContainer.value?.addEventListener('scroll', checkScrollPosition, { passive: true })
+  // 拉取可用技能列表供 / 下拉框使用
+  fetch('/api/skills')
+    .then((r) => r.json())
+    .then((data) => {
+      skills.value = data.skills ?? []
+    })
+    .catch(() => {
+      /* 静默降级——下拉框为空 */
+    })
 })
 
 onUnmounted(() => {
@@ -249,6 +270,7 @@ async function handleClearMessages(): Promise<void> {
 function onInput(e: Event): void {
   const ta = e.target as HTMLTextAreaElement
   detect(ta.value, ta.selectionStart)
+  detectSkill(ta.value, ta.selectionStart)
 }
 
 async function handleSend(): Promise<void> {
@@ -282,6 +304,25 @@ async function handleSend(): Promise<void> {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  // / 技能下拉框键盘导航（优先级高于 @mention）
+  if (skillActive.value) {
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+      e.preventDefault()
+      const ta = textareaRef.value
+      if (!ta) return
+      const skill = skillSuggestions.value[skillIndex.value]
+      const result = navigateSkill(e.key, ta.value, ta.selectionStart)
+      if (result !== null && skill) {
+        input.value = result
+        nextTick(() => {
+          // 光标放在 /skillName 后面的空格之后
+          ta.selectionStart = ta.selectionEnd = skillStartIdx.value + skill.name.length + 2
+        })
+      }
+      return
+    }
+  }
+
   if (mentionActive.value) {
     if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
       e.preventDefault()
@@ -315,6 +356,20 @@ function selectMention(idx: number): void {
   nextTick(() => {
     if (textareaRef.value) {
       const pos = input.value.indexOf(`@${agent.name} `) + agent.name.length + 2
+      textareaRef.value.selectionStart = textareaRef.value.selectionEnd = pos
+      textareaRef.value.focus()
+    }
+  })
+}
+
+function selectSkillCmd(idx: number): void {
+  const skill = skillSuggestions.value[idx]
+  if (!skill || !textareaRef.value) return
+  const newText = selectSkill(skill, input.value, textareaRef.value.selectionStart)
+  input.value = newText
+  nextTick(() => {
+    if (textareaRef.value) {
+      const pos = input.value.indexOf(`/${skill.name} `) + skill.name.length + 2
       textareaRef.value.selectionStart = textareaRef.value.selectionEnd = pos
       textareaRef.value.focus()
     }
@@ -649,7 +704,9 @@ function statusLabelZh(status: string): string {
           ref="textareaRef"
           v-model="input"
           class="chat-input"
-          :placeholder="store.activeSessionId ? '输入消息… @猫咪名 来提及' : '请先选择会话'"
+          :placeholder="
+            store.activeSessionId ? '输入消息… @猫咪名 提及  /技能名 触发' : '请先选择会话'
+          "
           :disabled="!store.activeSessionId"
           rows="2"
           @input="onInput"
@@ -675,6 +732,25 @@ function statusLabelZh(status: string): string {
           class="mention-dropdown mention-empty"
         >
           <span>未找到匹配的猫咪</span>
+        </div>
+
+        <!-- / 技能下拉框 -->
+        <div v-if="skillActive && skillSuggestions.length > 0" class="skill-dropdown">
+          <div
+            v-for="(skill, idx) in skillSuggestions"
+            :key="skill.name"
+            class="skill-item"
+            :class="{ active: idx === skillIndex }"
+            @mousedown.prevent="selectSkillCmd(idx)"
+            @mouseenter="skillIndex = idx"
+          >
+            <span class="skill-trigger">/{{ skill.name }}</span>
+            <span class="skill-desc">{{ skill.description }}</span>
+            <span class="skill-hint">tab</span>
+          </div>
+        </div>
+        <div v-if="skillActive && skillSuggestions.length === 0" class="skill-dropdown skill-empty">
+          <span>未找到匹配的技能</span>
         </div>
       </div>
 
@@ -1520,6 +1596,75 @@ function statusLabelZh(status: string): string {
 }
 
 .mention-empty {
+  padding: 12px 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Skill Dropdown — 复用 mention-dropdown 布局，微调内容 */
+.skill-dropdown {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  min-width: 260px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 100;
+}
+
+.skill-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  cursor: pointer;
+  transition: background var(--ease-in);
+}
+
+.skill-item:first-child {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.skill-item:last-child {
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+.skill-item:hover,
+.skill-item.active {
+  background: var(--bg-hover);
+}
+
+.skill-trigger {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+  min-width: fit-content;
+}
+
+.skill-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.skill-empty {
   padding: 12px 14px;
   font-size: 13px;
   color: var(--text-muted);

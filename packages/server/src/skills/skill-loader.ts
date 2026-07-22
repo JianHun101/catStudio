@@ -94,12 +94,19 @@ export class SkillLoader {
         const content = readFileSync(filePath, 'utf-8')
         this.rules.set(skillName, content)
       } catch (err: any) {
-        log.error('failed to read skill file — skipping', { skillName, file: skill.file, error: err.message })
+        log.error('failed to read skill file — skipping', {
+          skillName,
+          file: skill.file,
+          error: err.message,
+        })
       }
     }
 
     this.initialized = true
-    log.info('skills loaded', { loadedCount: this.rules.size, totalCount: Object.keys(this.manifest.skills).length })
+    log.info('skills loaded', {
+      loadedCount: this.rules.size,
+      totalCount: Object.keys(this.manifest.skills).length,
+    })
   }
 
   // ── 匹配逻辑 ──
@@ -122,9 +129,12 @@ export class SkillLoader {
         continue
       }
 
-      // 关键词匹配
-      const hit = skill.triggers.some((trigger) => triggerText.includes(trigger))
-      if (hit && this.rules.has(skillName)) {
+      // 两层触发匹配：
+      //   1. 显式指令 /skillName（确定性触发，如 /handoff）
+      //   2. 关键词匹配（模糊触发，如消息含"交接"）
+      const slashHit = triggerText.includes(`/${skillName}`)
+      const keywordHit = skill.triggers.some((trigger) => triggerText.includes(trigger))
+      if ((slashHit || keywordHit) && this.rules.has(skillName)) {
         matchedSkills.push(skillName)
       }
     }

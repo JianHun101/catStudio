@@ -17,6 +17,7 @@ import { connectRedis, closeRedis } from './db/redis.js'
 import { createSocketIO } from './connectors/socketio.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
+import { skillRoutes } from './routes/skills.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
 import { existsSync, unlinkSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
@@ -136,6 +137,7 @@ async function main(): Promise<void> {
   // REST API 路由
   await app.register(agentRoutes)
   await app.register(sessionRoutes)
+  await app.register(skillRoutes)
 
   // 5. 启动 Fastify → 拿到 HTTP Server → attach Socket.IO
   await app.listen({ port: PORT, host: HOST })
