@@ -155,8 +155,14 @@ function scrollToBottom(smooth = false): void {
   const el = chatContainer.value
   if (!el) return
   el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
-  isAtBottom.value = true
-  showScrollDown.value = false
+  // For instant scroll, update state immediately — no animation window to race with.
+  // For smooth scroll, let the scroll events naturally set isAtBottom/showScrollDown
+  // as the animation reaches the bottom. Setting them prematurely causes jitter:
+  // checkScrollPosition fires mid-animation and overrides with the real position.
+  if (!smooth) {
+    isAtBottom.value = true
+    showScrollDown.value = false
+  }
 }
 
 // New messages arrive → scroll if at bottom, re-enable send button
