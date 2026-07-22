@@ -142,23 +142,40 @@ function isGrouped(index: number): boolean {
 const SCROLL_TOLERANCE = 40
 const isAtBottom = ref(true)
 const showScrollDown = ref(false)
+let scrollLock = false
 
 function checkScrollPosition(): void {
   const el = chatContainer.value
   if (!el) return
   const distToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
   isAtBottom.value = distToBottom < SCROLL_TOLERANCE
-  showScrollDown.value = !isAtBottom.value && store.activeMessages.length > 0
+  // During a smooth scroll-to-bottom, suppress showScrollDown toggling
+  // so the button doesn't flicker as the animation crosses the tolerance.
+  if (!scrollLock) {
+    showScrollDown.value = !isAtBottom.value && store.activeMessages.length > 0
+  }
+  // Release the lock once the animation has reached the bottom
+  if (scrollLock && distToBottom < SCROLL_TOLERANCE) {
+    scrollLock = false
+  }
 }
 
 function scrollToBottom(smooth = false): void {
   const el = chatContainer.value
   if (!el) return
+  if (smooth) {
+    // Hide button immediately and lock showScrollDown so
+    // checkScrollPosition doesn't resurrect it mid-animation.
+    showScrollDown.value = false
+    scrollLock = true
+    // Safety valve: smooth scroll takes ~300ms; force-release
+    // the lock after 500ms so a mid-animation manual scroll-away
+    // won't permanently suppress the button.
+    setTimeout(() => {
+      scrollLock = false
+    }, 500)
+  }
   el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
-  // For instant scroll, update state immediately — no animation window to race with.
-  // For smooth scroll, let the scroll events naturally set isAtBottom/showScrollDown
-  // as the animation reaches the bottom. Setting them prematurely causes jitter:
-  // checkScrollPosition fires mid-animation and overrides with the real position.
   if (!smooth) {
     isAtBottom.value = true
     showScrollDown.value = false
@@ -605,27 +622,28 @@ function statusLabelZh(status: string): string {
           </div>
         </div>
 
-        <!-- Scroll-to-bottom button (after messages so sticky bottom works) -->
-        <Transition name="scroll-btn">
-          <button
-            v-if="showScrollDown"
-            class="scroll-down-btn"
-            aria-label="滚动到底部"
-            @click="scrollToBottom(true)"
-            title="回到底部"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M4 6l4 4 4-4"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <span>新消息</span>
-          </button>
-        </Transition>
+        <!-- Scroll-to-bottom button.
+             Always in DOM (no v-if) — hidden via CSS class instead of DOM removal.
+             Removing the button from the flex flow changes scrollHeight, which causes
+             a visible layout jump when a smooth scroll animation is in progress. -->
+        <button
+          class="scroll-down-btn"
+          :class="{ 'scroll-down-btn--hidden': !showScrollDown }"
+          aria-label="滚动到底部"
+          @click="scrollToBottom(true)"
+          title="回到底部"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M4 6l4 4 4-4"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <span>新消息</span>
+        </button>
       </div>
     </div>
 
@@ -1250,7 +1268,21 @@ function statusLabelZh(status: string): string {
   cursor: pointer;
   box-shadow: var(--shadow-md);
   z-index: 20;
-  transition: all var(--ease-out);
+  /* Button is always in DOM — visibility controlled via opacity/transform,
+     never by DOM removal, so scrollHeight stays stable. */
+  transition:
+    opacity 0.2s ease-out,
+    transform 0.2s ease-out,
+    border-color var(--ease-out),
+    color var(--ease-out),
+    background var(--ease-out),
+    box-shadow var(--ease-out);
+}
+
+.scroll-down-btn--hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
 }
 
 .scroll-down-btn:hover {
@@ -1258,26 +1290,6 @@ function statusLabelZh(status: string): string {
   border-color: var(--accent);
   background: var(--bg-surface);
   box-shadow: var(--shadow-lg);
-}
-
-/* scroll-btn transition */
-.scroll-btn-enter-active {
-  transition:
-    opacity 0.2s ease-out,
-    transform 0.2s ease-out;
-}
-.scroll-btn-leave-active {
-  transition:
-    opacity 0.15s ease-in,
-    transform 0.15s ease-in;
-}
-.scroll-btn-enter-from {
-  opacity: 0;
-  transform: translateY(8px);
-}
-.scroll-btn-leave-to {
-  opacity: 0;
-  transform: translateY(8px);
 }
 
 /* Typing */
