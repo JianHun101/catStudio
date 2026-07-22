@@ -140,11 +140,14 @@
 
       ::-webkit-scrollbar-thumb {
         background: var(--border-table);
+        border: 3px solid transparent;
+        background-clip: content-box;
         border-radius: 5px;
       }
 
       ::-webkit-scrollbar-thumb:hover {
         background: var(--text-muted);
+        border-width: 1px;
       }
 
       ::-webkit-scrollbar-corner {

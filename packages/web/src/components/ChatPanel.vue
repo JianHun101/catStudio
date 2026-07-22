@@ -897,14 +897,18 @@ function statusLabelZh(status: string): string {
 .chat-messages-wrapper {
   flex: 1;
   overflow-y: auto;
+  position: relative;
+  width: 100%;
+}
+
+.chat-messages-inner {
+  max-width: 800px;
+  margin: 0 auto;
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  position: relative;
-  max-width: 800px;
-  margin: 0 auto;
-  width: 100%;
+  min-height: 100%;
 }
 
 /* Empty State */
