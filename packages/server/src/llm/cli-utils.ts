@@ -183,25 +183,40 @@ export function ensureProxy(apiKey: string): void {
  * 从 Claude Code CLI 的 NDJSON 输出流中提取文本 Chunk。
  * 格式: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
  *
- * 同时也会产出 thinking 块的内容（前缀 "[思考] "），让前端在 Agent
- * 长时间推理时也能看到流式进度，避免用户以为 Agent 卡住了。
+ * 过滤策略：text 块暂存到 buffer，遇到 tool_use 则清空（因为前面的 text
+ * 是工具调用前导描述如"让我审查..."，不是给下游 Agent 看的回复内容）；
+ * 到 result 事件时 buffer 中剩余的 text 才是真正的回复，统一产出。
+ *
+ * thinking 块始终实时产出（前缀 "[思考] "），让前端看到流式进度。
  */
 export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
+  const textBuffer: string[] = []
 
   for await (const line of rl) {
     if (!line.trim()) continue
     try {
       const event = JSON.parse(line)
+
       if (event.type === 'assistant' && event.message?.content) {
         for (const block of event.message.content) {
           if (block.type === 'text' && typeof block.text === 'string') {
-            yield { content: block.text, done: false, kind: 'text' }
+            textBuffer.push(block.text)
+          }
+          if (block.type === 'tool_use') {
+            // 同一个 assistant 事件中出现 tool_use → 前面的 text 是工具描述 → 丢弃
+            textBuffer.length = 0
           }
           // 产出思考过程，让前端看到实时进度（但不存入 DB，不参与上下文）
           if (block.type === 'thinking' && typeof block.thinking === 'string') {
             yield { content: `[思考] ${block.thinking}`, done: false, kind: 'thinking' }
           }
+        }
+      }
+
+      if (event.type === 'result') {
+        for (const text of textBuffer) {
+          yield { content: text, done: false, kind: 'text' }
         }
       }
     } catch {

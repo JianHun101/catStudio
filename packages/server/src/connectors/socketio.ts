@@ -814,14 +814,27 @@ export function formatAudienceTag(mentions: string[], agentName: string): string
 /**
  * 格式化其他 agent 的消息为 LLM 上下文字符串。
  *
+ * 使用强信号格式，让 LLM 明确知道这是来自另一个 Agent 的直接消息，
+ * 而非用户在引用或转述。灵感来源：clowder-ai 的 D2 消息模板。
+ *
  * 纯函数，无副作用。
  *
- * @param name 消息发送者的 agent 名称
+ * @param name    消息发送者的 agent 名称
  * @param content 消息内容
- * @returns 格式为 "name：content"
+ * @param mentions 该消息中 @mention 的 agent 名列表（即接收方应回复给谁）
+ * @param model   发送者使用的 LLM 模型（可选，提供上下文透明度）
+ * @returns 格式为 "Direct message from name [model]; reply to mentions\n\ncontent"
  */
-export function formatAgentMessage(name: string, content: string): string {
-  return `${name}：${content}`
+export function formatAgentMessage(
+  name: string,
+  content: string,
+  mentions: string[] = [],
+  model?: string
+): string {
+  const headerParts = [`Direct message from ${name}`]
+  if (model) headerParts.push(` [${model}]`)
+  if (mentions.length > 0) headerParts.push(`; reply to ${mentions.join(', ')}`)
+  return `${headerParts.join('')}\n\n${content}`
 }
 
 /**
@@ -1036,9 +1049,12 @@ async function runAgentReply(
           }
         }
         const otherName = agentsRepo.getAgentNameById(m.agent_id) || '未知猫咪'
+        const otherMentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
+        const otherRow = agentsRepo.getAgentById(m.agent_id)
+        const otherModel = otherRow?.llm_model || undefined
         return {
           role: 'user' as const,
-          content: formatAgentMessage(otherName, m.content),
+          content: formatAgentMessage(otherName, m.content, otherMentions, otherModel),
         }
       }
 

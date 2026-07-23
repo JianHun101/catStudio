@@ -173,16 +173,30 @@ describe('getRelevantMessages', () => {
     // ═══ formatAgentMessage — agent 消息格式化 ═══
 
     describe('formatAgentMessage', () => {
-      it('去掉【】和说，保留 name：content 格式', () => {
-        expect(formatAgentMessage('店长', '好的')).toBe('店长：好的')
+      it('基本格式：Direct message from + 换行 + 内容', () => {
+        expect(formatAgentMessage('店长', '好的')).toBe('Direct message from 店长\n\n好的')
       })
 
-      it('吐槽猫的消息格式一致', () => {
-        expect(formatAgentMessage('吐槽猫', '不行，重做')).toBe('吐槽猫：不行，重做')
+      it('携带 mentions 时显示 reply to', () => {
+        expect(formatAgentMessage('吐槽猫', '不行，重做', ['店长'])).toBe(
+          'Direct message from 吐槽猫; reply to 店长\n\n不行，重做'
+        )
+      })
+
+      it('携带 model 时显示模型名', () => {
+        expect(formatAgentMessage('店长', '喵', [], 'deepseek-v4-pro')).toBe(
+          'Direct message from 店长 [deepseek-v4-pro]\n\n喵'
+        )
+      })
+
+      it('完整格式：mentions + model', () => {
+        expect(formatAgentMessage('吐槽猫', '通过', ['店长', '服务员'], 'deepseek-v4-pro')).toBe(
+          'Direct message from 吐槽猫 [deepseek-v4-pro]; reply to 店长, 服务员\n\n通过'
+        )
       })
 
       it('未知猫咪回退名也正常格式化', () => {
-        expect(formatAgentMessage('未知猫咪', '喵~')).toBe('未知猫咪：喵~')
+        expect(formatAgentMessage('未知猫咪', '喵~')).toBe('Direct message from 未知猫咪\n\n喵~')
       })
     })
 
