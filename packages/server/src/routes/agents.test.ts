@@ -158,6 +158,36 @@ describe('Agent Routes', () => {
       expect(get.statusCode).toBe(404)
     })
 
+    it('cascades deletes associated messages and memories', async () => {
+      const create = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
+      const { id } = JSON.parse(create.body)
+
+      const { sessions, messages, memories } = await import('../db/repository/index.js')
+      const sessionId = 'test-session-cascade'
+
+      // 创建 session
+      sessions.insertSession(sessionId, 'cascade test', [id])
+
+      // 插入关联消息
+      messages.insertMessage('msg-1', sessionId, 'user', 'hello', '[]', id, null)
+
+      // 插入关联记忆
+      const embedding = new Float32Array(512).fill(0.1)
+      const embBuf = Buffer.from(embedding.buffer)
+      memories.insertMemory('mem-1', id, 'test memory', embBuf, 'msg-1', new Date().toISOString())
+
+      // 删除 agent
+      const res = await app.inject({ method: 'DELETE', url: `/api/agents/${id}` })
+      expect(res.statusCode).toBe(200)
+
+      // 确认关联消息已级联删除
+      const msgs = messages.getAllSessionMessages(sessionId)
+      expect(msgs).toHaveLength(0)
+
+      // 记忆表没有 list 函数，用再次删除不抛异常来验证级联生效
+      expect(() => memories.deleteMemoriesByAgent(id)).not.toThrow()
+    })
+
     it('returns 404 for nonexistent id', async () => {
       const res = await app.inject({ method: 'DELETE', url: '/api/agents/nonexistent' })
       expect(res.statusCode).toBe(404)

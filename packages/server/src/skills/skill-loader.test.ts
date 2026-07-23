@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SkillLoader } from './skill-loader.js'
+import { SkillLoader, escapeRegex } from './skill-loader.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -20,26 +20,30 @@ const TEST_SKILLS_DIR = join(__dirname, '__test_skills__')
 function createTestManifest(): void {
   const manifest = {
     skills: {
-      "handoff": {
-        description: "工作交接文档模板",
-        triggers: ["交接", "handoff"],
-        file: "handoff.md",
+      handoff: {
+        description: '工作交接文档模板',
+        triggers: ['交接', 'handoff'],
+        file: 'handoff.md',
       },
-      "code-review": {
-        description: "代码审查流程",
-        triggers: ["review", "审查"],
-        file: "code-review.md",
+      'code-review': {
+        description: '代码审查流程',
+        triggers: ['review', '审查'],
+        file: 'code-review.md',
       },
-      "dep-review": {
-        description: "依赖审查流程",
-        triggers: ["安装", "install"],
-        file: "dep-review.md",
+      'dep-review': {
+        description: '依赖审查流程',
+        triggers: ['安装', 'install'],
+        file: 'dep-review.md',
       },
     },
   }
   writeFileSync(join(TEST_SKILLS_DIR, 'manifest.json'), JSON.stringify(manifest), 'utf-8')
   writeFileSync(join(TEST_SKILLS_DIR, 'handoff.md'), '\n## 工作交接规范\n交接模板内容\n', 'utf-8')
-  writeFileSync(join(TEST_SKILLS_DIR, 'code-review.md'), '\n## 代码审查流程\n审查流程内容\n', 'utf-8')
+  writeFileSync(
+    join(TEST_SKILLS_DIR, 'code-review.md'),
+    '\n## 代码审查流程\n审查流程内容\n',
+    'utf-8'
+  )
   // dep-review.md 不创建，测试缺失文件场景
 }
 
@@ -85,7 +89,11 @@ describe('SkillLoader', () => {
     })
 
     it('throws when manifest is missing "skills" field', () => {
-      writeFileSync(join(TEST_SKILLS_DIR, 'manifest.json'), JSON.stringify({ other: true }), 'utf-8')
+      writeFileSync(
+        join(TEST_SKILLS_DIR, 'manifest.json'),
+        JSON.stringify({ other: true }),
+        'utf-8'
+      )
       expect(() => SkillLoader.initialize(TEST_SKILLS_DIR)).toThrow(/缺少 "skills"/)
     })
 
@@ -158,7 +166,11 @@ describe('SkillLoader', () => {
 
     it('matches single skill by keyword', () => {
       const loader = SkillLoader.getInstance()
-      const result = loader.matchAndBuild(BASE_PROMPT, ['handoff', 'code-review'], '请帮我做一个交接')
+      const result = loader.matchAndBuild(
+        BASE_PROMPT,
+        ['handoff', 'code-review'],
+        '请帮我做一个交接'
+      )
 
       expect(result.matchedSkills).toContain('handoff')
       expect(result.matchedSkills).not.toContain('code-review')
@@ -172,7 +184,7 @@ describe('SkillLoader', () => {
       const result = loader.matchAndBuild(
         BASE_PROMPT,
         ['handoff', 'code-review'],
-        '请 review 这个交接文档',
+        '请 review 这个交接文档'
       )
 
       expect(result.matchedSkills).toContain('handoff')
@@ -192,14 +204,63 @@ describe('SkillLoader', () => {
 
     it('skips skills whose file failed to load', () => {
       const loader = SkillLoader.getInstance()
-      const result = loader.matchAndBuild(
-        BASE_PROMPT,
-        ['dep-review'],
-        '请帮我安装 react',
-      )
+      const result = loader.matchAndBuild(BASE_PROMPT, ['dep-review'], '请帮我安装 react')
 
       expect(result.matchedSkills).toEqual([])
       expect(result.prompt).toBe(BASE_PROMPT)
+    })
+
+    // ─── 显式 /skillName 指令匹配 ───
+
+    it('matches by slash command /skillName', () => {
+      const loader = SkillLoader.getInstance()
+      const result = loader.matchAndBuild(BASE_PROMPT, ['handoff'], '/handoff 请帮我做交接')
+
+      expect(result.matchedSkills).toContain('handoff')
+      expect(result.prompt).toContain('工作交接规范')
+    })
+
+    it('matches slash command at start of line', () => {
+      const loader = SkillLoader.getInstance()
+      const result = loader.matchAndBuild(BASE_PROMPT, ['code-review'], '/code-review 这段代码')
+
+      expect(result.matchedSkills).toContain('code-review')
+      expect(result.prompt).toContain('代码审查流程')
+    })
+
+    it('matches slash command mid-message after whitespace', () => {
+      const loader = SkillLoader.getInstance()
+      const result = loader.matchAndBuild(BASE_PROMPT, ['handoff'], '我已经写完了 /handoff 请审查')
+
+      expect(result.matchedSkills).toContain('handoff')
+    })
+
+    it('slash regex does NOT match URLs (file:/// — no space before /)', () => {
+      // 直接测正则：keyword 触发层会意外命中（handoff 是 trigger），
+      // 这里验证正则本身不受 file:/// 干扰
+      const re = new RegExp(`(?:^|\\s)/${escapeRegex('handoff')}(?=$|[\\s,，。！？、!?：:()（）])`)
+      expect(re.test('file:///handoff')).toBe(false)
+      expect(re.test('参考 file:///handoff/docs')).toBe(false)
+    })
+
+    it('slash regex does NOT match URLs (https:// — no space before /)', () => {
+      const re = new RegExp(`(?:^|\\s)/${escapeRegex('handoff')}(?=$|[\\s,，。！？、!?：:()（）])`)
+      expect(re.test('https://example.com/handoff')).toBe(false)
+    })
+
+    it('matches CJK skill name by slash command', () => {
+      // \b 对 CJK 不生效 → 用显式标点边界
+      const loader = SkillLoader.getInstance()
+      const result = loader.matchAndBuild(BASE_PROMPT, ['handoff'], '/交接 代码')
+
+      expect(result.matchedSkills).toContain('handoff')
+    })
+
+    it('slash command followed by CJK punctuation still matches', () => {
+      const loader = SkillLoader.getInstance()
+      const result = loader.matchAndBuild(BASE_PROMPT, ['handoff'], '/交接，代码写好了')
+
+      expect(result.matchedSkills).toContain('handoff')
     })
 
     it('prompt starts with basePrompt', () => {

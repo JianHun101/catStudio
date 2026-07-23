@@ -14,7 +14,7 @@ import { createLogger } from '../logger.js'
 const log = createLogger('skill-loader')
 
 /** 转义正则特殊字符，用于动态构建 skill 名的匹配模式 */
-function escapeRegex(s: string): string {
+export function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
@@ -137,8 +137,9 @@ export class SkillLoader {
       // 两层触发匹配：
       //   1. 显式指令 /skillName（确定性触发，如 /handoff）
       //   2. 关键词匹配（模糊触发，如消息含"交接"）
+      // (?:^|\s) — 仅行首或空白前缀，不含 /，避免 file:///handoff 误匹配
       const slashHit = new RegExp(
-        `(?:^|[\\s/])/${escapeRegex(skillName)}(?=$|[\\s,，。！？、!?：:()（）])`
+        `(?:^|\\s)/${escapeRegex(skillName)}(?=$|[\\s,，。！？、!?：:()（）])`
       ).test(triggerText)
       const keywordHit = skill.triggers.some((trigger) => triggerText.includes(trigger))
       if ((slashHit || keywordHit) && this.rules.has(skillName)) {
