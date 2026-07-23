@@ -779,7 +779,27 @@ async function executeAgentsSerial(
  * @param agentName 当前 Agent 名称（用于 @mention 名称匹配）
  * @param broadcastMode 是否广播模式
  */
-function getRelevantMessages(
+
+/**
+ * 计算用户消息的受众标签。
+ *
+ * 纯函数，无副作用。
+ *
+ * @param mentions 消息中 @mention 的 agent 名列表
+ * @param agentName 当前 agent 名称
+ * @returns '对你' 当 agent 在 mentions 中，否则 '对大家'
+ */
+export function formatAudienceTag(mentions: string[], agentName: string): string {
+  return mentions.includes(agentName) ? '对你' : '对大家'
+}
+
+/**
+ * 从消息列表中筛选当前 Agent 能"看到"的消息。
+ *
+ * 规则：
+ *
+ */
+export function getRelevantMessages(
   messages: any[],
   agentId: string,
   agentName: string,
@@ -959,8 +979,10 @@ async function runAgentReply(
 
       const mentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
       const tagged = mentions.length > 0 ? `（@了${mentions.join('、')}）` : ''
-      // 广播模式下，未 @ 特定 Agent 时用"对大家说"，让 Agent 意识到这是群聊
-      const audience = isBroadcastMode && mentions.length === 0 ? '对大家' : '对你'
+      // 只有当前 agent 被 @mention 时才用"对你"，否则用"对大家"。
+      // 之前的逻辑用 broadcastMode 判断：非广播模式下无人被 @ 时，
+      // 所有 agent 看到的都是"对你说"——这是错误的，会让 LLM 误以为是 1:1 私聊。
+      const audience = formatAudienceTag(mentions, agent.name)
 
       if (isLast) {
         return {
