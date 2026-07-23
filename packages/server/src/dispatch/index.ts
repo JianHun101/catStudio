@@ -28,6 +28,7 @@ export function initAgentSlot(agentId: string): void {
     sessionId: null,
     status: 'idle',
     queueLength: 0,
+    currentTriggerMessageId: null,
   })
   agentQueues.set(agentId, [])
 }
@@ -105,6 +106,7 @@ async function executeAgent(
   const slot = agentSlots.get(agent.id)!
   slot.status = 'busy'
   slot.sessionId = cmd.sessionId
+  slot.currentTriggerMessageId = cmd.triggerMessageId
   setSlotSession(agent.id, cmd.sessionId)
 
   const logId = uuid()
@@ -172,6 +174,7 @@ export async function completeExecution(
   if (next) {
     slot.status = 'busy'
     slot.sessionId = next.sessionId
+    slot.currentTriggerMessageId = next.triggerMessageId
     updateQueueState(agentId, q.length)
     await publishAgentStatusById(agentId, 'busy')
     log.info('queue → next', { agentId, queueRemaining: q.length })
@@ -179,15 +182,39 @@ export async function completeExecution(
   } else {
     slot.status = 'idle'
     slot.sessionId = null
+    slot.currentTriggerMessageId = null
     updateQueueState(agentId, 0)
     await publishAgentStatusById(agentId, 'idle')
     return undefined
   }
 }
 
+// ─── Socket.IO bridge ──────────────────────────────
+
+type AgentStateEmit = (event: 'agent-status', data: AgentRuntimeState) => void
+let stateBridge: AgentStateEmit | null = null
+
+/** 注册 Socket.IO 桥接函数（由 connector 在启动时调用）。 */
+export function setAgentStateBridge(fn: AgentStateEmit): void {
+  stateBridge = fn
+}
+
+function emitViaBridge(slot: AgentRuntimeState): void {
+  if (stateBridge) {
+    try {
+      stateBridge('agent-status', { ...slot })
+    } catch {
+      // 桥接失败不阻塞 dispatch
+    }
+  }
+}
+
 // ─── Redis publish helpers ──────────────────────────
 
 async function publishAgentStatus(agent: AgentConfig, status: string): Promise<void> {
+  // Socket.IO bridge — 即使 Redis 不可用，前端也能收到
+  const slot = agentSlots.get(agent.id)
+  if (slot) emitViaBridge(slot)
   try {
     const redis = getRedis()
     if (!redis) return
@@ -240,6 +267,19 @@ export function cancelQueuedCommand(triggerMessageId: string): number {
   return removed
 }
 
+/**
+ * 撤回时用：检查是否有 Agent 正在执行（而非仅仅排队）给定的 trigger 消息。
+ * 用于判断 retractionRequests 标记是否可以安全清理。
+ */
+export function isAnyAgentExecutingMessage(triggerMessageId: string): boolean {
+  for (const slot of agentSlots.values()) {
+    if (slot.currentTriggerMessageId === triggerMessageId) {
+      return true
+    }
+  }
+  return false
+}
+
 /** 仅在测试中使用：重置所有槽位和队列状态 */
 export function __test_reset(): void {
   agentSlots.clear()
@@ -250,6 +290,8 @@ function updateQueueState(agentId: string, queueLength: number): void {
   const slot = agentSlots.get(agentId)
   if (slot) {
     slot.queueLength = queueLength
+    // Socket.IO bridge — 确保前端即使 Redis 不可用也能收到状态更新
+    emitViaBridge(slot)
     try {
       const redis = getRedis()
       if (!redis) return

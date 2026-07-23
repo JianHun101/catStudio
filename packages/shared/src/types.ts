@@ -30,6 +30,8 @@ export interface AgentRuntimeState {
   sessionId: string | null // 当前在哪个 Session 里忙
   status: SlotStatus
   queueLength: number
+  /** 当前正在处理的消息 ID（撤回时用来判断该消息是否还有 Agent 在执行） */
+  currentTriggerMessageId?: string | null
 }
 
 // ─── Session ────────────────────────────────────────

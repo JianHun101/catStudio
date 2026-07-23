@@ -22,6 +22,8 @@ vi.mock('../dispatch/index.js', () => ({
   getAllAgentStates: vi.fn(() => []),
   getAgentState: vi.fn(() => null),
   cancelQueuedCommand: vi.fn(() => 0),
+  isAnyAgentExecutingMessage: vi.fn(() => false),
+  setAgentStateBridge: vi.fn(),
 }))
 
 vi.mock('../llm/registry.js', () => ({

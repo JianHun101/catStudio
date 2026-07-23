@@ -14,6 +14,7 @@ import {
   sessions as sessionsRepo,
   messages as messagesRepo,
   executionLogs as execLogsRepo,
+  memories as memoriesRepo,
 } from './db/repository/index.js'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
 
@@ -28,6 +29,7 @@ function seed(): void {
     messagesRepo.deleteAllMessages()
     execLogsRepo.deleteAllExecutionLogs()
     sessionsRepo.deleteAllSessions()
+    memoriesRepo.deleteAllMemories() // FK 依赖 agents，必须在 deleteAllAgents 之前
     agentsRepo.deleteAllAgents()
   }
 

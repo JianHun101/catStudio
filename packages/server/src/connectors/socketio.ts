@@ -28,6 +28,8 @@ import {
   getAllAgentStates,
   getAgentState,
   cancelQueuedCommand,
+  isAnyAgentExecutingMessage,
+  setAgentStateBridge,
 } from '../dispatch/index.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import { saveMessageMemory, buildMemoryContext } from '../memory/index.js'
@@ -423,8 +425,13 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           error: err.message,
         })
       }
-      // 注意：正常路径不在此处清理 retractionRequests
-      // 标记由 runAgentReply 的出口清理（line ~1317），确保 Agent 执行周期内一致可见
+
+      // 撤回成功后：如果该消息没有 Agent 正在执行（全部在排队中被 cancel）
+      // → 没有 runAgentReply 会清理标记 → 在此处清理，防止内存泄漏
+      if (!isAnyAgentExecutingMessage(data.messageId)) {
+        retractionRequests.delete(data.messageId)
+      }
+      // 如果有 Agent 正在执行，标记由 runAgentReply 出口清理
     })
 
     // ─── Broadcast mode toggle ────────────────────
@@ -451,6 +458,14 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     })
   })
 
+  // 桥接 dispatch 状态变化 → Socket.IO（Redis 不可用时前端仍能收到更新）
+  setAgentStateBridge((_event, state) => {
+    if (state.sessionId) {
+      io.to(`session:${state.sessionId}`).emit(Events.AGENT_STATUS, state)
+    }
+    io.emit('all-agent-states', getAllAgentStates())
+  })
+
   return io
 }
 
@@ -468,7 +483,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
  *   比例: hard = 1.5x idle，idle 先触发，hard 是最终防线。
  *
  * 可通过 AGENT_HARD_TIMEOUT_MS 环境变量覆盖（设为 0 禁用）。 */
-const AGENT_HARD_TIMEOUT_MS = parseInt(process.env.AGENT_HARD_TIMEOUT_MS || '') || 30 * 60 * 1000 // 30 分钟
+const _HARD_TIMEOUT = parseInt(process.env.AGENT_HARD_TIMEOUT_MS || '')
+const AGENT_HARD_TIMEOUT_MS = isNaN(_HARD_TIMEOUT) ? 30 * 60 * 1000 : _HARD_TIMEOUT // 30 分钟
 
 /** Agent 间调度的最大递归深度（防止无限循环） */
 const MAX_AGENT_DISPATCH_DEPTH = 10

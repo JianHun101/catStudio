@@ -255,7 +255,8 @@ export async function* parseCodexOutput(child: ChildProcess): AsyncIterable<Chun
  *  CatStudy 以 CLI 子进程为主力，按输出重置 timer，
  *  持续产出内容的进程不会被误杀，只有真正无输出的进程才会超时终止。
  *  环境变量 CLI_IDLE_TIMEOUT_MS 可覆盖（设为 0 禁用）。 */
-const CLI_IDLE_TIMEOUT_MS = parseInt(process.env.CLI_IDLE_TIMEOUT_MS || '') || 20 * 60 * 1000
+const _IDLE_TIMEOUT = parseInt(process.env.CLI_IDLE_TIMEOUT_MS || '')
+const CLI_IDLE_TIMEOUT_MS = isNaN(_IDLE_TIMEOUT) ? 20 * 60 * 1000 : _IDLE_TIMEOUT
 /** SIGTERM → SIGKILL 的等待间隔 */
 const GRACE_MS = 5000
 

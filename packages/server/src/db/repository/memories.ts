@@ -137,3 +137,8 @@ export function insertMemoryBatch(
 export function deleteMemoriesByAgent(agentId: string): void {
   db.prepare('DELETE FROM memories WHERE agent_id = ?').run(agentId)
 }
+
+/** 清空全部记忆（用于 --reset 流程，必须在删 agents 之前调用，否则 FK violation）。 */
+export function deleteAllMemories(): void {
+  db.prepare('DELETE FROM memories').run()
+}
