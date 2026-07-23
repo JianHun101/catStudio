@@ -834,7 +834,10 @@ export function formatUserMessage(
  * 从消息列表中筛选当前 Agent 能"看到"的消息。
  *
  * 规则：
- *
+ * - Agent 自己的回复 → 始终可见
+ * - 其他 Agent 的回复 → 广播模式下可见；非广播模式下仅当 @mention 了此 Agent 时可见
+ * - 用户消息 → 没有 @mention（全员广播）或 @mention 了此 Agent 时可见
+ * - 用户消息中 @mention 了其他 Agent → 对此 Agent 不可见（定向消息）
  */
 export function getRelevantMessages(
   messages: any[],
