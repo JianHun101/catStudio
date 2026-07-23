@@ -218,6 +218,28 @@ function setSlotSession(agentId: string, sessionId: string | null): void {
   }
 }
 
+/**
+ * 撤回消息时调用：遍历所有 Agent 的 FIFO 队列，移除匹配 triggerMessageId 的命令。
+ * 解决 "消息已撤回但 Agent 在排队中，轮到执行时标记已清理" 的时窗问题（Window ①）。
+ * @returns 实际移除的命令数
+ */
+export function cancelQueuedCommand(triggerMessageId: string): number {
+  let removed = 0
+  for (const [agentId, q] of agentQueues) {
+    const before = q.length
+    const filtered = q.filter((cmd) => cmd.triggerMessageId !== triggerMessageId)
+    if (filtered.length !== before) {
+      agentQueues.set(agentId, filtered)
+      removed += before - filtered.length
+      updateQueueState(agentId, filtered.length)
+    }
+  }
+  if (removed > 0) {
+    log.info('queued commands cancelled', { triggerMessageId, removed })
+  }
+  return removed
+}
+
 /** 仅在测试中使用：重置所有槽位和队列状态 */
 export function __test_reset(): void {
   agentSlots.clear()

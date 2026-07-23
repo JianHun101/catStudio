@@ -27,6 +27,7 @@ import {
   initAgentSlot,
   getAllAgentStates,
   getAgentState,
+  cancelQueuedCommand,
 } from '../dispatch/index.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import { saveMessageMemory, buildMemoryContext } from '../memory/index.js'
@@ -342,7 +343,16 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       }
 
       // 2. 标记撤回（让正在执行的 runAgentReply 提前终止）
+      //    同时清理所有排队命令（Window ①：Agent 在 FIFO 队列中等待）
       retractionRequests.set(data.messageId, true)
+      const cancelledCount = cancelQueuedCommand(data.messageId)
+      if (cancelledCount > 0) {
+        log.info('retraction cancelled queued commands', {
+          sessionId: data.sessionId,
+          messageId: data.messageId,
+          cancelledCount,
+        })
+      }
 
       try {
         // 3. 查 execution_logs 找关联的 commit + packages
@@ -404,10 +414,17 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           hadCommit: hasCommit,
           packagesRemoved: pkgSet.size,
         })
-      } finally {
-        // 确保无论成功或失败都清理撤回标记
+      } catch (err: any) {
+        // 撤回失败时清理标记，避免永久残留
         retractionRequests.delete(data.messageId)
+        log.error('message retraction failed', {
+          sessionId: data.sessionId,
+          messageId: data.messageId,
+          error: err.message,
+        })
       }
+      // 注意：正常路径不在此处清理 retractionRequests
+      // 标记由 runAgentReply 的出口清理（line ~1317），确保 Agent 执行周期内一致可见
     })
 
     // ─── Broadcast mode toggle ────────────────────
@@ -1169,12 +1186,26 @@ async function runAgentReply(
     status: 'replying',
   })
 
+  // ── 撤回时窗保护（Window ②）──────────────────────
+  // 在 LLM 调用前检查触发消息是否仍存在于 DB。
+  // 用户在 Agent 构建上下文期间撤回 → DB 已删 → 阻止 LLM 调用。
+  if (!messagesRepo.getMessageById(triggerMsg.id, sessionId, 'user')) {
+    log.info('trigger message retracted before LLM call', {
+      traceId,
+      agentId: agent.id,
+    })
+    activeStreams.delete(agent.id)
+    return { content: '[消息已撤回]', msgId }
+  }
+
   const stream = adapter.chatStream(llmMessages, {
     model: agent.llmModel,
     signal,
   })
 
   for await (const chunk of stream) {
+    // ── 撤回时窗保护（Window ③）──────────────────────
+    // 流式输出中途撤回 → 提前终止
     // 检查是否被撤回或超时取消
     if (retractionRequests.get(triggerMsg.id)) {
       log.info('agent reply aborted (retracted)', {
