@@ -297,4 +297,69 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).not.toMatch(/\d\.\s+(必要性|安全性|影响)/)
     }
   })
+
+  // ═══ @作者 占位符验证 ═══
+  // @作者 在 seed-data 中是字面占位符，运行时由 runAgentReply 替换为实际触发者名字
+
+  it('吐槽猫的 systemPrompt 包含 @作者 占位符', () => {
+    const tucao = agents.find((a) => a.name === '吐槽猫')!
+    expect(tucao.systemPrompt).toContain('@作者')
+    // 应该有 2 处：出口检查 + 代码审查
+    const matches = tucao.systemPrompt.match(/@作者/g)
+    expect(matches).not.toBeNull()
+    expect(matches!.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('店长和服务员的 systemPrompt 不含 @作者（只有吐槽猫有）', () => {
+    for (const name of ['店长', '服务员']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).not.toContain('@作者')
+    }
+  })
+
+  it('@作者 替换正则能正确替换为实际 agent 名', () => {
+    const tucao = agents.find((a) => a.name === '吐槽猫')!
+    const replaced = tucao.systemPrompt.replace(/@作者/g, '@店长')
+    // 替换后不应再有 @作者
+    expect(replaced).not.toContain('@作者')
+    // 应该有 @店长 出现（原来 @作者 的位置）
+    expect(replaced).toContain('@店长')
+    // 原来的 @引用 规则不应受影响
+    expect(replaced).toContain('@猫名 必须行首独占一行')
+  })
+
+  // ═══ 精简后 prompt 关键规则完整性 ═══
+
+  it('精简后的 IRON_LAWS_CODER 仍包含所有出口检查+审查+依赖+引用规则', () => {
+    for (const name of ['店长', '服务员']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).toContain('出口检查')
+      expect(agent.systemPrompt).toContain('自问')
+      expect(agent.systemPrompt).toContain('行首@对方')
+      expect(agent.systemPrompt).toContain('代码审查')
+      expect(agent.systemPrompt).toContain('交接文档')
+      expect(agent.systemPrompt).toContain('@吐槽猫')
+      expect(agent.systemPrompt).toContain('禁止自审')
+      expect(agent.systemPrompt).toContain('依赖安装')
+      expect(agent.systemPrompt).toContain('禁止直接安装')
+      expect(agent.systemPrompt).toContain('行首独占一行')
+    }
+  })
+
+  it('精简后的 IRON_LAWS_REVIEWER 仍包含所有审查铁律', () => {
+    const tucao = agents.find((a) => a.name === '吐槽猫')!
+    expect(tucao.systemPrompt).toContain('出口检查')
+    expect(tucao.systemPrompt).toContain('作者需要看到')
+    expect(tucao.systemPrompt).toContain('代码审查')
+    expect(tucao.systemPrompt).toContain('Checklist')
+    expect(tucao.systemPrompt).toContain('可合并')
+    expect(tucao.systemPrompt).toContain('建议修改')
+    expect(tucao.systemPrompt).toContain('需重做')
+    expect(tucao.systemPrompt).toContain('依赖审查')
+    expect(tucao.systemPrompt).toContain('必要性')
+    expect(tucao.systemPrompt).toContain('安全性')
+    expect(tucao.systemPrompt).toContain('影响')
+    expect(tucao.systemPrompt).toContain('批准安装')
+    expect(tucao.systemPrompt).toContain('不建议安装')
+  })
 })

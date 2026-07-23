@@ -500,6 +500,7 @@ async function executeAgentsSerial(
     content: string
     mentions: string[]
     taskId?: string
+    authorName?: string
   },
   traceId: string,
   depth: number = 0
@@ -670,7 +671,7 @@ async function executeAgentsSerial(
             io,
             sessionId,
             mentionedAgents,
-            agentTrigger,
+            { ...agentTrigger, authorName: agent.name },
             traceId,
             depth + 1
           )
@@ -883,6 +884,7 @@ async function runAgentReply(
     content: string
     mentions: string[]
     taskId?: string
+    authorName?: string
   },
   traceId: string,
   signal?: AbortSignal
@@ -998,8 +1000,14 @@ async function runAgentReply(
     })
   }
 
+  // 将 system prompt 中的 @作者 占位符替换为实际触发者名字
+  // 使 LLM 能正确输出 @店长 等实际 agent 名，而非 @作者
+  const finalSystemPrompt = triggerMsg.authorName
+    ? dynamicSystemPrompt.replace(/@作者/g, `@${triggerMsg.authorName}`)
+    : dynamicSystemPrompt
+
   const llmMessages: LLMMessage[] = [
-    { role: 'system', content: dynamicSystemPrompt },
+    { role: 'system', content: finalSystemPrompt },
     ...truncatedMessages.map((m: any, idx: number) => {
       const isLast = idx === truncatedMessages.length - 1
 
