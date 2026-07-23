@@ -137,7 +137,9 @@ export class SkillLoader {
       // 两层触发匹配：
       //   1. 显式指令 /skillName（确定性触发，如 /handoff）
       //   2. 关键词匹配（模糊触发，如消息含"交接"）
-      const slashHit = new RegExp(`(?:^|\\s)/${escapeRegex(skillName)}\\b`).test(triggerText)
+      const slashHit = new RegExp(
+        `(?:^|[\\s/])/${escapeRegex(skillName)}(?=$|[\\s,，。！？、!?：:()（）])`
+      ).test(triggerText)
       const keywordHit = skill.triggers.some((trigger) => triggerText.includes(trigger))
       if ((slashHit || keywordHit) && this.rules.has(skillName)) {
         matchedSkills.push(skillName)

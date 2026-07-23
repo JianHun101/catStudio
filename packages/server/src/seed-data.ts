@@ -80,7 +80,6 @@ export function buildDemoAgents(): DemoAgent[] {
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
       llmBaseUrl: '',
-      effortLevel: '',
     },
     {
       id: fixedId('服务员'),
@@ -94,7 +93,6 @@ export function buildDemoAgents(): DemoAgent[] {
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
       llmBaseUrl: '',
-      effortLevel: '',
     },
     {
       id: fixedId('吐槽猫'),
@@ -110,7 +108,6 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
       llmModel: 'deepseek-v4-pro',
       llmApiKey: apiKey,
       llmBaseUrl: '',
-      effortLevel: '',
     },
   ]
 }

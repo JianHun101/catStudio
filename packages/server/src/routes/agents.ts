@@ -6,6 +6,7 @@ import {
   agents as agentsRepo,
   executionLogs as execLogsRepo,
   memories as memoriesRepo,
+  messages as messagesRepo,
 } from '../db/repository/index.js'
 import type { AgentRow } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
@@ -148,6 +149,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     // 清理关联数据（FK 约束无 ON DELETE CASCADE，需手动删除）
     execLogsRepo.deleteExecutionLogsByAgent(id)
     memoriesRepo.deleteMemoriesByAgent(id)
+    messagesRepo.deleteMessagesByAgent(id)
     agentsRepo.deleteAgentById(id)
     return { ok: true }
   })

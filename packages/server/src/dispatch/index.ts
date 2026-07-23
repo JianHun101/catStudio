@@ -135,13 +135,20 @@ export async function completeExecution(
   const slot = agentSlots.get(agentId)
   if (!slot) return
 
-  // 更新执行日志
-  execLogsRepo.finalizeExecutionLog(
-    agentId,
-    success ? 'completed' : 'failed',
-    opts?.latencyMs ?? null,
-    opts?.errorMessage ?? null
-  )
+  // 更新执行日志（DB 失败不阻塞槽位释放）
+  try {
+    execLogsRepo.finalizeExecutionLog(
+      agentId,
+      success ? 'completed' : 'failed',
+      opts?.latencyMs ?? null,
+      opts?.errorMessage ?? null
+    )
+  } catch (err: any) {
+    log.error('finalizeExecutionLog failed — releasing slot anyway', {
+      agentId,
+      error: err.message,
+    })
+  }
 
   if (opts?.latencyMs !== undefined) {
     log.info('execution completed', {

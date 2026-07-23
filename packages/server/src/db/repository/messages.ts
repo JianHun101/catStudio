@@ -183,6 +183,10 @@ export function deleteMessagesBySession(sessionId: string): { changes: number } 
   return db.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId)
 }
 
+export function deleteMessagesByAgent(agentId: string): { changes: number } {
+  return db.prepare('DELETE FROM messages WHERE agent_id = ?').run(agentId)
+}
+
 export function deleteAllMessages(): void {
   db.exec('DELETE FROM messages')
 }

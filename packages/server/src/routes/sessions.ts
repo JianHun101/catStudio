@@ -132,7 +132,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const updated = sessionsRepo.getSessionById(id)
     const config = toSessionConfig(updated!)
     try {
-      getIO()?.to(id).emit(Events.SESSION_UPDATE, config)
+      getIO()?.to(`session:${id}`).emit(Events.SESSION_UPDATE, config)
     } catch {
       /* emit 失败不影响响应 */
     }

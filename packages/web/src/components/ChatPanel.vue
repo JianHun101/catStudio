@@ -228,10 +228,10 @@ watch(
   }
 )
 
-onMounted(() => {
-  chatContainer.value?.addEventListener('scroll', checkScrollPosition, { passive: true })
-  // 拉取可用技能列表供 / 下拉框使用
-  fetch('/api/skills')
+function fetchSkills(): void {
+  const agentIds = store.activeSession?.agentIds
+  const url = agentIds?.length ? `/api/skills?agentIds=${agentIds.join(',')}` : '/api/skills'
+  fetch(url)
     .then((r) => r.json())
     .then((data) => {
       skills.value = data.skills ?? []
@@ -239,7 +239,20 @@ onMounted(() => {
     .catch(() => {
       /* 静默降级——下拉框为空 */
     })
+}
+
+onMounted(() => {
+  chatContainer.value?.addEventListener('scroll', checkScrollPosition, { passive: true })
+  fetchSkills()
 })
+
+// 切换会话时重新拉取技能列表（不同会话的 Agent 组合不同）
+watch(
+  () => store.activeSession?.id,
+  () => {
+    fetchSkills()
+  }
+)
 
 onUnmounted(() => {
   chatContainer.value?.removeEventListener('scroll', checkScrollPosition)
