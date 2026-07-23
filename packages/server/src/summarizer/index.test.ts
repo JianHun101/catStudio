@@ -142,7 +142,7 @@ describe('summarizer', () => {
     await summarizer.updateRunningSummary('s1')
 
     const userPrompt = mockChatComplete.mock.calls[0][1] as string
-    expect(userPrompt).toContain('[店长]')
+    expect(userPrompt).toContain('店长：')
   })
 
   it('merges new messages with existing summary incrementally', async () => {

@@ -794,6 +794,43 @@ export function formatAudienceTag(mentions: string[], agentName: string): string
 }
 
 /**
+ * 格式化其他 agent 的消息为 LLM 上下文字符串。
+ *
+ * 纯函数，无副作用。
+ *
+ * @param name 消息发送者的 agent 名称
+ * @param content 消息内容
+ * @returns 格式为 "name：content"
+ */
+export function formatAgentMessage(name: string, content: string): string {
+  return `${name}：${content}`
+}
+
+/**
+ * 格式化用户消息为 LLM 上下文字符串。
+ *
+ * 纯函数，无副作用。
+ *
+ * @param content 消息内容
+ * @param mentions @mention 的 agent 名列表
+ * @param audience 受众标签（'对你' / '对大家'）
+ * @param isLast 是否为最后一条消息（决定是否携带受众标签）
+ * @returns 格式化后的用户消息字符串
+ */
+export function formatUserMessage(
+  content: string,
+  mentions: string[],
+  audience: string,
+  isLast: boolean
+): string {
+  const tagged = mentions.length > 0 ? `（@了${mentions.join('、')}）` : ''
+  if (isLast) {
+    return `用户${tagged}${audience}：${content}`
+  }
+  return `用户${tagged}：${content}`
+}
+
+/**
  * 从消息列表中筛选当前 Agent 能"看到"的消息。
  *
  * 规则：
@@ -973,26 +1010,16 @@ async function runAgentReply(
         const otherName = agentsRepo.getAgentNameById(m.agent_id) || '未知猫咪'
         return {
           role: 'user' as const,
-          content: `【${otherName}】说：${m.content}`,
+          content: formatAgentMessage(otherName, m.content),
         }
       }
 
       const mentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
-      const tagged = mentions.length > 0 ? `（@了${mentions.join('、')}）` : ''
-      // 只有当前 agent 被 @mention 时才用"对你"，否则用"对大家"。
-      // 之前的逻辑用 broadcastMode 判断：非广播模式下无人被 @ 时，
-      // 所有 agent 看到的都是"对你说"——这是错误的，会让 LLM 误以为是 1:1 私聊。
       const audience = formatAudienceTag(mentions, agent.name)
 
-      if (isLast) {
-        return {
-          role: 'user' as const,
-          content: `用户${tagged}${audience}说：${m.content}`,
-        }
-      }
       return {
         role: 'user' as const,
-        content: `用户${tagged}说：${m.content}`,
+        content: formatUserMessage(m.content, mentions, audience, isLast),
       }
     }),
   ]

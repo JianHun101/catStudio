@@ -6,7 +6,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { formatAudienceTag, getRelevantMessages } from './socketio.js'
+import {
+  formatAudienceTag,
+  formatAgentMessage,
+  formatUserMessage,
+  getRelevantMessages,
+} from './socketio.js'
 
 // ═══ 辅助：构造测试消息 ═══
 
@@ -165,11 +170,131 @@ describe('getRelevantMessages', () => {
       expect(result.map((m: any) => m.content)).toEqual(['早上好', '好的', '收到'])
     })
 
+    // ═══ formatAgentMessage — agent 消息格式化 ═══
+
+    describe('formatAgentMessage', () => {
+      it('去掉【】和说，保留 name：content 格式', () => {
+        expect(formatAgentMessage('店长', '好的')).toBe('店长：好的')
+      })
+
+      it('吐槽猫的消息格式一致', () => {
+        expect(formatAgentMessage('吐槽猫', '不行，重做')).toBe('吐槽猫：不行，重做')
+      })
+
+      it('未知猫咪回退名也正常格式化', () => {
+        expect(formatAgentMessage('未知猫咪', '喵~')).toBe('未知猫咪：喵~')
+      })
+    })
+
+    // ═══ formatUserMessage — 用户消息格式化 ═══
+
+    describe('formatUserMessage', () => {
+      it('最后一条消息 @mention 了当前 agent → 携带 audience 标签', () => {
+        expect(formatUserMessage('hello', ['店长'], '对你', true)).toBe(
+          '用户（@了店长）对你：hello'
+        )
+      })
+
+      it('非最后一条消息 → 不携带 audience 标签', () => {
+        expect(formatUserMessage('hello', ['店长'], '对你', false)).toBe('用户（@了店长）：hello')
+      })
+
+      it('无 @mention 非最后一条 → 纯用户', () => {
+        expect(formatUserMessage('hi', [], '', false)).toBe('用户：hi')
+      })
+
+      it('无 @mention 最后一条 → 携带 audience', () => {
+        expect(formatUserMessage('hi', [], '对大家', true)).toBe('用户对大家：hi')
+      })
+
+      it('多人 @mention', () => {
+        expect(formatUserMessage('看看', ['店长', '服务员'], '对大家', false)).toBe(
+          '用户（@了店长、服务员）：看看'
+        )
+      })
+
+      it('audience 不会出现在非最后一条消息中', () => {
+        // 即使传了 audience，非最后一条也应该忽略
+        expect(formatUserMessage('test', [], '对你', false)).toBe('用户：test')
+      })
+    })
+
+    // ═══ 原 getRelevantMessages 混合消息测试（接上） ═══
+
     it('非广播模式下定向其他 agent 的用户消息被丢弃', () => {
       const msgs = [userMsg('店长过来', ['店长']), userMsg('吐槽猫过来', ['吐槽猫'])]
       const result = getRelevantMessages(msgs, AGENT_ID, AGENT_NAME, false)
       expect(result).toHaveLength(1)
       expect(result[0].content).toBe('吐槽猫过来')
     })
+  })
+})
+
+// ═══ Agent System Prompt 内容验证 ═══
+
+import { buildDemoAgents } from '../seed-data.js'
+
+describe('agent system prompts', () => {
+  const agents = buildDemoAgents()
+
+  it('所有 agent 的 systemPrompt 都包含反镜像规则', () => {
+    for (const agent of agents) {
+      expect(agent.systemPrompt).toContain('禁止重复或模仿')
+    }
+  })
+
+  it('所有 agent 的 systemPrompt 以共享前置声明开头', () => {
+    for (const agent of agents) {
+      expect(agent.systemPrompt).toMatch(/^你是一只拥有人工智能的猫/)
+    }
+  })
+
+  it('所有 agent 的 systemPrompt 包含反镜像+其他猫的规则', () => {
+    for (const agent of agents) {
+      expect(agent.systemPrompt).toContain('其他猫')
+    }
+  })
+
+  it('店长和客服的 systemPrompt 包含开发铁律关键词', () => {
+    for (const name of ['店长', '服务员']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).toContain('出口检查')
+      expect(agent.systemPrompt).toContain('代码审查')
+      expect(agent.systemPrompt).toContain('依赖安装')
+    }
+  })
+
+  it('店长的 systemPrompt 包含角色标识', () => {
+    const agent = agents.find((a) => a.name === '店长')!
+    expect(agent.systemPrompt).toContain('暹罗猫')
+    expect(agent.systemPrompt).toContain('温和从容')
+  })
+
+  it('吐槽猫的 systemPrompt 包含审查铁律关键词', () => {
+    const tucao = agents.find((a) => a.name === '吐槽猫')!
+    expect(tucao.systemPrompt).toContain('依赖审查')
+    expect(tucao.systemPrompt).toContain('Review指南')
+  })
+
+  it('吐槽猫的 systemPrompt 包含审查员角色', () => {
+    const tucao = agents.find((a) => a.name === '吐槽猫')!
+    expect(tucao.systemPrompt).toContain('英短蓝猫')
+    expect(tucao.systemPrompt).toContain('Code Reviewer')
+  })
+
+  it('精简后的 prompt 不应包含冗余 markdown 格式符', () => {
+    for (const agent of agents) {
+      expect(agent.systemPrompt).not.toContain('**出口检查**')
+      expect(agent.systemPrompt).not.toContain('**代码审查**')
+      expect(agent.systemPrompt).not.toContain('**依赖安装**')
+      expect(agent.systemPrompt).not.toContain('## 开发铁律')
+      expect(agent.systemPrompt).not.toContain('## 审查铁律')
+    }
+  })
+
+  it('精简后的 prompt 不应包含 markdown 列表序号', () => {
+    for (const agent of agents) {
+      expect(agent.systemPrompt).not.toMatch(/\d\.\s+(必要性|安全性|影响)/)
+    }
   })
 })

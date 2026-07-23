@@ -107,7 +107,7 @@ export async function updateRunningSummary(sessionId: string): Promise<string | 
             : m.agent_id
               ? agentsRepo.getAgentNameById(m.agent_id) || '系统'
               : '系统'
-        return `[${role}]: ${m.content}`
+        return `${role}：${m.content}`
       })
       .join('\n')
 
