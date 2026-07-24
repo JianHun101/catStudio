@@ -47,7 +47,8 @@ function seed(): void {
       a.llmModel,
       a.llmApiKey,
       a.llmBaseUrl,
-      a.effortLevel ?? ''
+      a.effortLevel ?? '',
+      JSON.stringify(a.skillModules)
     )
     const verb = result.changes === 1 ? '✅' : '🔄'
     console.log(`  ${verb} ${a.avatar} ${a.name} (${a.id})`)

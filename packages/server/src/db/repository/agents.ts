@@ -64,14 +64,26 @@ export function insertAgent(
   llmModel: string,
   llmApiKey: string,
   llmBaseUrl: string | null,
-  effortLevel: string | null
+  effortLevel: string | null,
+  skillModules: string | null = null
 ): void {
   db.prepare(
     `
-    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `
-  ).run(id, name, avatar, systemPrompt, llmProvider, llmModel, llmApiKey, llmBaseUrl, effortLevel)
+  ).run(
+    id,
+    name,
+    avatar,
+    systemPrompt,
+    llmProvider,
+    llmModel,
+    llmApiKey,
+    llmBaseUrl,
+    effortLevel,
+    skillModules ?? '[]'
+  )
 }
 
 export function upsertAgent(
@@ -83,13 +95,14 @@ export function upsertAgent(
   llmModel: string,
   llmApiKey: string,
   llmBaseUrl: string,
-  effortLevel: string
+  effortLevel: string,
+  skillModules: string | null = null
 ): { changes: number } {
   return db
     .prepare(
       `
-    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET
       avatar = excluded.avatar,
       system_prompt = excluded.system_prompt,
@@ -98,6 +111,7 @@ export function upsertAgent(
       llm_api_key = excluded.llm_api_key,
       llm_base_url = excluded.llm_base_url,
       effort_level = excluded.effort_level,
+      skill_modules = excluded.skill_modules,
       updated_at = datetime('now')
   `
     )
@@ -110,7 +124,8 @@ export function upsertAgent(
       llmModel,
       llmApiKey,
       llmBaseUrl,
-      effortLevel
+      effortLevel,
+      skillModules ?? '[]'
     ) as { changes: number }
 }
 

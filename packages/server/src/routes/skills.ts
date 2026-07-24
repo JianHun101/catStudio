@@ -8,13 +8,6 @@ import { createLogger } from '../logger.js'
 
 const log = createLogger('skills')
 
-/** Agent 技能模块映射（临时硬编码，待 DB 列 migration 后移除） */
-const AGENT_SKILL_MODULES: Record<string, string[]> = {
-  店长: ['handoff', 'dependency-request'],
-  服务员: ['handoff', 'dependency-request'],
-  吐槽猫: ['handoff', 'code-review', 'dependency-review'],
-}
-
 export async function skillRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/skills', async (req, reply) => {
     const manifest = SkillLoader.getInstance().getManifest()
@@ -27,8 +20,16 @@ export async function skillRoutes(app: FastifyInstance): Promise<void> {
     if (agentIdsParam) {
       const agentIds: string[] = String(agentIdsParam).split(',').filter(Boolean)
       const agentRows = agentIds.length > 0 ? agentsRepo.listAgentsByIds(agentIds) : []
-      const agentNames = agentRows.map((a) => a.name)
-      allowedSkills = new Set(agentNames.flatMap((name) => AGENT_SKILL_MODULES[name] || []))
+      allowedSkills = new Set(
+        agentRows.flatMap((a) => {
+          try {
+            const arr = JSON.parse(a.skill_modules)
+            return Array.isArray(arr) ? arr : []
+          } catch {
+            return []
+          }
+        })
+      )
     }
 
     const skills = Object.entries(manifest.skills)

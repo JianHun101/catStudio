@@ -50,11 +50,14 @@ import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../hando
 
 const log = createLogger('socketio')
 
-/** Agent 技能模块映射（种子 Agent 的 skillModules 定义，后续可迁移到 DB 列） */
-const AGENT_SKILL_MODULES: Record<string, string[]> = {
-  店长: ['handoff', 'dependency-request'],
-  服务员: ['handoff', 'dependency-request'],
-  吐槽猫: ['handoff', 'code-review', 'dependency-review'],
+/** 从 agent.skill_modules JSON 字符串解析技能列表 */
+function parseSkillModules(raw: string): string[] {
+  try {
+    const arr = JSON.parse(raw)
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
 }
 
 /** 模块级 io 实例引用，供路由等模块获取 */
@@ -84,6 +87,7 @@ function rowToAgent(row: AgentRow): AgentConfig {
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: (row.effort_level || undefined) as AgentConfig['effortLevel'],
+    skillModules: parseSkillModules(row.skill_modules),
   }
 }
 
@@ -1032,7 +1036,7 @@ async function runAgentReply(
 
   // 动态组装 system prompt: 铁律（basePrompt）+ 按需加载的操作规则
 
-  const skillModules = AGENT_SKILL_MODULES[agent.name] || []
+  const skillModules = agent.skillModules
   const { prompt: dynamicSystemPrompt, matchedSkills } = SkillLoader.getInstance().matchAndBuild(
     agent.systemPrompt,
     skillModules,

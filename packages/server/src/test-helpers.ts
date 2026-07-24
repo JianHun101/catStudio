@@ -19,6 +19,7 @@ const SCHEMA_SQL = `
     llm_api_key TEXT NOT NULL,
     llm_base_url TEXT,
     effort_level TEXT,
+    skill_modules TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );

@@ -11,6 +11,7 @@ const mockAgents: AgentConfig[] = [
     llmProvider: 'deepseek',
     llmModel: 'deepseek-v4-pro',
     llmApiKey: 'sk-test',
+    skillModules: [],
   },
   {
     id: 'a2',
@@ -20,6 +21,7 @@ const mockAgents: AgentConfig[] = [
     llmProvider: 'deepseek',
     llmModel: 'deepseek-v4-pro',
     llmApiKey: 'sk-test',
+    skillModules: [],
   },
   {
     id: 'a3',
@@ -29,6 +31,7 @@ const mockAgents: AgentConfig[] = [
     llmProvider: 'deepseek',
     llmModel: 'deepseek-v4-pro',
     llmApiKey: 'sk-test',
+    skillModules: [],
   },
 ]
 

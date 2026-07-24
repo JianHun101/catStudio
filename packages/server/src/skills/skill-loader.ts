@@ -9,6 +9,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { z } from 'zod'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('skill-loader')
@@ -17,6 +18,18 @@ const log = createLogger('skill-loader')
 export function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
+
+// ═══ Zod 校验 ═══
+
+const SkillEntrySchema = z.object({
+  description: z.string(),
+  triggers: z.array(z.string()).min(1, '每个 skill 至少需要一个触发词'),
+  file: z.string().min(1, 'file 字段不能为空'),
+})
+
+const ManifestSchema = z.object({
+  skills: z.record(z.string(), SkillEntrySchema),
+})
 
 // ═══ 类型定义 ═══
 
@@ -79,12 +92,16 @@ export class SkillLoader {
     const manifestPath = join(this.skillsDir, 'manifest.json')
     try {
       const raw = readFileSync(manifestPath, 'utf-8')
-      this.manifest = JSON.parse(raw) as ManifestConfig
-      if (!this.manifest.skills || typeof this.manifest.skills !== 'object') {
-        throw new Error('manifest.json 缺少 "skills" 字段或格式错误')
-      }
+      const parsed = ManifestSchema.parse(JSON.parse(raw))
+      this.manifest = parsed as ManifestConfig
       log.info('manifest loaded', { skillCount: Object.keys(this.manifest.skills).length })
     } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        const issues = err.issues
+          .map((i) => `  - skills${i.path.length ? '.' + i.path.join('.') : ''}: ${i.message}`)
+          .join('\n')
+        throw new Error(`manifest.json 校验失败:\n${issues}`)
+      }
       throw new Error(`Failed to load manifest at ${manifestPath}: ${err.message}`)
     }
 

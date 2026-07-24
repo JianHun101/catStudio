@@ -35,7 +35,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         agent.llmModel,
         agent.llmApiKey,
         agent.llmBaseUrl || null,
-        agent.effortLevel || null
+        agent.effortLevel || null,
+        JSON.stringify(agent.skillModules ?? [])
       )
 
       const row = agentsRepo.getAgentById(id)
@@ -84,10 +85,11 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       llmApiKey: 'llm_api_key',
       llmBaseUrl: 'llm_base_url',
       effortLevel: 'effort_level',
+      skillModules: 'skill_modules',
     })) {
       if (body[key] !== undefined) {
         fields.push(`${col} = ?`)
-        values.push(body[key])
+        values.push(key === 'skillModules' ? JSON.stringify(body[key]) : body[key])
       }
     }
 
@@ -167,5 +169,15 @@ function toAgentConfig(row: AgentRow) {
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: row.effort_level || undefined,
+    skillModules: parseJsonArray(row.skill_modules),
+  }
+}
+
+function parseJsonArray(raw: string): string[] {
+  try {
+    const arr = JSON.parse(raw)
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
   }
 }

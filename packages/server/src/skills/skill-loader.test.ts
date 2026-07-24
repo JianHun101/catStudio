@@ -94,7 +94,23 @@ describe('SkillLoader', () => {
         JSON.stringify({ other: true }),
         'utf-8'
       )
-      expect(() => SkillLoader.initialize(TEST_SKILLS_DIR)).toThrow(/缺少 "skills"/)
+      expect(() => SkillLoader.initialize(TEST_SKILLS_DIR)).toThrow(/校验失败/)
+    })
+
+    it('throws when a skill entry is missing required fields (e.g. triggers)', () => {
+      writeFileSync(
+        join(TEST_SKILLS_DIR, 'manifest.json'),
+        JSON.stringify({
+          skills: {
+            broken: {
+              description: 'no triggers field',
+              file: 'broken.md',
+            },
+          },
+        }),
+        'utf-8'
+      )
+      expect(() => SkillLoader.initialize(TEST_SKILLS_DIR)).toThrow(/校验失败/)
     })
 
     it('skips skill files that do not exist (graceful degradation)', () => {

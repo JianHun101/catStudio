@@ -22,6 +22,7 @@ describe('dispatch', () => {
     llmProvider: 'deepseek',
     llmModel: 'deepseek-v4-pro',
     llmApiKey: 'sk-test',
+    skillModules: [],
   }
   const mockAgent2: AgentConfig = {
     ...mockAgent,

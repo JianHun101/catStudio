@@ -52,6 +52,7 @@ export function initDb(): void {
       llm_model TEXT NOT NULL DEFAULT 'deepseek-v4-pro',
       llm_api_key TEXT NOT NULL,
       llm_base_url TEXT,
+      skill_modules TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -179,6 +180,10 @@ export function initDb(): void {
     {
       name: 'summary_msg_id on sessions',
       sql: `ALTER TABLE sessions ADD COLUMN summary_msg_id TEXT`,
+    },
+    {
+      name: 'skill_modules on agents',
+      sql: `ALTER TABLE agents ADD COLUMN skill_modules TEXT NOT NULL DEFAULT '[]'`,
     },
   ]
 

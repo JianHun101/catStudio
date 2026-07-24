@@ -19,6 +19,7 @@ export interface AgentRow {
   llm_api_key: string
   llm_base_url: string | null
   effort_level: string
+  skill_modules: string
   created_at: string
   updated_at: string
 }

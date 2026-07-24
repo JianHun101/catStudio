@@ -22,6 +22,7 @@ export interface AgentConfig {
   llmApiKey: string
   llmBaseUrl?: string // for custom providers
   effortLevel?: 'low' | 'medium' | 'high' | 'max' // Claude Code 推理深度
+  skillModules: string[] // 可用技能列表
 }
 
 /** Agent 运行时状态（广播到前端） */
