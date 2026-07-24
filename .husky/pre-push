@@ -2,8 +2,76 @@
 # pre-push 审查门禁：检查 HEAD 是否已经过 @吐槽猫 review
 # 审查通过后运行: git rev-parse HEAD > .push-gate
 # 紧急绕过: git push --no-verify
+#
+# 自动投递：如果 .handoff-draft.md 存在，自动 POST 到 cat-study 触发 @吐槽猫 审查
 
 GATE_FILE=".push-gate"
+HANDOFF_FILE=".handoff-draft.md"
+CATSTUDY_URL="${CATSTUDY_API_URL:-http://127.0.0.1:3200}"
+
+# ─── 辅助：获取或创建 session ──────────────────────────
+
+get_session_id() {
+  # 优先级：环境变量 → API 查询 → 回退
+  if [ -n "$CATSTUDY_SESSION_ID" ]; then
+    echo "$CATSTUDY_SESSION_ID"
+    return 0
+  fi
+
+  # 尝试从 API 获取第一个 session
+  SESSION_ID=$(curl -s "${CATSTUDY_URL}/api/sessions" 2>/dev/null | \
+    grep -o '"id":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4)
+
+  if [ -n "$SESSION_ID" ]; then
+    echo "$SESSION_ID"
+    return 0
+  fi
+
+  return 1
+}
+
+# ─── 辅助：投递交接文档到 cat-study ─────────────────────
+
+submit_handoff() {
+  SESSION_ID=$(get_session_id)
+  if [ -z "$SESSION_ID" ]; then
+    echo ""
+    echo "⚠️  无法获取 cat-study session ID（API 不可达或 CATSTUDY_SESSION_ID 未设）"
+    echo "   跳过自动投递。请手动在 cat-study 会话中发送交接文档。"
+    echo ""
+    return 1
+  fi
+
+  CONTENT=$(cat "$HANDOFF_FILE")
+  if [ -z "$CONTENT" ]; then
+    echo ""
+    echo "⚠️  .handoff-draft.md 为空，跳过自动投递"
+    echo ""
+    return 1
+  fi
+
+  echo ""
+  echo "📤 正在投递交接文档到 cat-study..."
+
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "${CATSTUDY_URL}/api/messages" \
+    -H "Content-Type: application/json" \
+    -d "{\"sessionId\":\"${SESSION_ID}\",\"content\":$(echo "$CONTENT" | python3 -c "import sys,json;print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "$CONTENT" | node -e "const c=require('fs').readFileSync(0,'utf8');console.log(JSON.stringify(c))" 2>/dev/null || echo '""'),\"mentions\":[\"吐槽猫\"]}" \
+    2>/dev/null)
+
+  if [ "$HTTP_CODE" = "201" ]; then
+    echo "✅ 审查请求已投递。在 cat-study 会话页面查看吐槽猫的回复。"
+    echo ""
+    # 清理草稿（投递成功）
+    rm -f "$HANDOFF_FILE"
+  else
+    echo "⚠️  投递失败（HTTP ${HTTP_CODE:-连接失败}）。请确认 cat-study server 在 ${CATSTUDY_URL} 运行。"
+    echo "   手动投递：在 cat-study 会话中粘贴 .handoff-draft.md 的内容"
+    echo ""
+  fi
+}
+
+# ─── 门禁检查 ──────────────────────────────────────────
 
 if [ ! -f "$GATE_FILE" ]; then
   echo ""
@@ -16,6 +84,12 @@ if [ ! -f "$GATE_FILE" ]; then
   echo ""
   echo "   紧急绕过: git push --no-verify"
   echo ""
+
+  # 自动投递交接文档（如果存在）
+  if [ -f "$HANDOFF_FILE" ]; then
+    submit_handoff
+  fi
+
   exit 1
 fi
 
@@ -48,6 +122,12 @@ if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
   echo "   审查通过后运行: git rev-parse HEAD > .push-gate"
   echo "   紧急绕过: git push --no-verify"
   echo ""
+
+  # 自动投递交接文档（如果存在）
+  if [ -f "$HANDOFF_FILE" ]; then
+    submit_handoff
+  fi
+
   exit 1
 fi
 

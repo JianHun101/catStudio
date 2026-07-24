@@ -1,0 +1,149 @@
+/**
+ * 消息 REST API — 供外部工具（pre-push hook 等）向 cat-study 管道注入消息。
+ *
+ * POST /api/messages → 写入 DB → 广播 → 调度 Agent 执行
+ * 等价于 Web 前端通过 Socket.IO 发送 SEND_MESSAGE 事件，但不需要 WebSocket 连接。
+ */
+import type { FastifyInstance } from 'fastify'
+import { v4 as uuid } from 'uuid'
+import { Events, estimateTokens } from '@cat-study/shared'
+import {
+  sessions as sessionsRepo,
+  agents as agentsRepo,
+  messages as messagesRepo,
+} from '../db/repository/index.js'
+import type { AgentConfig } from '@cat-study/shared'
+import { getIO, rowToAgent, executeAgentsSerial } from '../connectors/socketio.js'
+import { dispatch, initAgentSlot, getAgentState, completeExecution } from '../dispatch/index.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('messages-api')
+
+export async function messageRoutes(app: FastifyInstance): Promise<void> {
+  app.post('/api/messages', async (req, reply) => {
+    const body = req.body as any
+
+    // 基本参数校验
+    if (!body || typeof body !== 'object') {
+      return reply.status(400).send({ error: 'Request body is required' })
+    }
+    if (!body.sessionId || typeof body.sessionId !== 'string') {
+      return reply.status(400).send({ error: 'sessionId is required (string)' })
+    }
+    if (!body.content || typeof body.content !== 'string') {
+      return reply.status(400).send({ error: 'content is required (string)' })
+    }
+
+    const sessionId = body.sessionId
+    const content = body.content
+    const mentions: string[] = Array.isArray(body.mentions) ? body.mentions : []
+    const taskId: string | undefined = body.taskId || undefined
+    const msgId = uuid()
+    const traceId = uuid()
+
+    log.info('REST message received', {
+      traceId,
+      sessionId,
+      mentions,
+      contentLen: content.length,
+      contentTokens: estimateTokens(content),
+    })
+
+    // 1. 验证 session 存在
+    const sessionRow = sessionsRepo.getSessionById(sessionId)
+    if (!sessionRow) {
+      log.warn('session not found', { sessionId })
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    // 2. 写入消息
+    const mentionsJson = JSON.stringify(mentions)
+    messagesRepo.insertUserMessage(msgId, sessionId, content, mentionsJson, taskId || null)
+
+    const msg = {
+      id: msgId,
+      sessionId,
+      agentId: null,
+      role: 'user' as const,
+      content,
+      mentions,
+      taskId: taskId || undefined,
+      createdAt: new Date().toISOString(),
+    }
+
+    // 3. 广播到 Session 房间
+    const io = getIO()
+    if (io) {
+      io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, msg)
+    }
+
+    // 4. 获取 Session 内的 Agent
+    const agentIds: string[] = JSON.parse(sessionRow.agent_ids || '[]')
+    const agents = agentIds
+      .map((id: string) => {
+        const row = agentsRepo.getAgentById(id)
+        return row ? rowToAgent(row) : null
+      })
+      .filter(Boolean) as AgentConfig[]
+
+    // 过滤无效 Agent
+    const validAgents = agents.filter((a) => {
+      if (!agentsRepo.agentExists(a.id)) {
+        log.warn('agent not in DB, skipping dispatch', { agentId: a.id, traceId })
+        return false
+      }
+      return true
+    })
+
+    // 5. 初始化槽位并调度
+    for (const a of validAgents) {
+      if (!getAgentState(a.id)) {
+        initAgentSlot(a.id)
+      }
+    }
+
+    try {
+      await dispatch(sessionId, msg, validAgents, traceId)
+    } catch (err: any) {
+      log.error('dispatch failed', { sessionId, traceId, error: err.message })
+    }
+
+    // 确定目标（被 @ 的 Agent，或广播模式下的全部）
+    const targets =
+      mentions.length > 0 ? validAgents.filter((a) => mentions.includes(a.name)) : validAgents
+
+    // 发送 queued 状态
+    if (io) {
+      for (const a of targets) {
+        io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+          messageId: msgId,
+          agentId: a.id,
+          agentName: a.name,
+          agentAvatar: a.avatar,
+          status: 'queued',
+        })
+      }
+    }
+
+    // 6. 串行执行 Agent（不 await，让多个消息交错执行）
+    if (io && targets.length > 0) {
+      executeAgentsSerial(io, sessionId, targets, msg, traceId).catch((err) => {
+        log.error('executeAgentsSerial crashed — releasing stuck slots', {
+          traceId,
+          error: err.message,
+        })
+        for (const a of targets) {
+          const state = getAgentState(a.id)
+          if (state && state.status === 'busy') {
+            completeExecution(a.id, false, {
+              errorMessage: `executeAgentsSerial crash: ${err.message}`,
+              traceId,
+            }).catch(() => {})
+          }
+        }
+      })
+    }
+
+    return reply.status(201).send({ ok: true, messageId: msgId })
+  })
+}

@@ -51,7 +51,7 @@ import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../hando
 const log = createLogger('socketio')
 
 /** 从 agent.skill_modules JSON 字符串解析技能列表 */
-function parseSkillModules(raw: string): string[] {
+export function parseSkillModules(raw: string): string[] {
   try {
     const arr = JSON.parse(raw)
     return Array.isArray(arr) ? arr : []
@@ -76,7 +76,7 @@ export function getIO(): SocketServer | null {
 }
 
 /** DB row (snake_case) → AgentConfig (camelCase) */
-function rowToAgent(row: AgentRow): AgentConfig {
+export function rowToAgent(row: AgentRow): AgentConfig {
   return {
     id: row.id,
     name: row.name,
@@ -528,7 +528,7 @@ function getMentionKey(traceId: string, agentId: string): string {
   return `${traceId}:${agentId}`
 }
 
-async function executeAgentsSerial(
+export async function executeAgentsSerial(
   io: SocketServer,
   sessionId: string,
   agents: AgentConfig[],

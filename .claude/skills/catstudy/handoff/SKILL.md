@@ -65,6 +65,10 @@ Step 4: WHY / TRADEOFF / OPEN QUESTIONS — 你填写
 Step 5: OUTPUT — 组合输出
   用下方输出格式，将所有部分组合成完整交接文档
   末尾行首独占一行 @吐槽猫 请审查以上改动
+
+  将完整文档内容写入 `.handoff-draft.md`（项目根目录）。
+  pre-push hook 会在 git push 阻断时自动读取此文件并 POST 到 cat-study。
+  写入后终端显示："📤 交接文档已写入 .handoff-draft.md — git push 时将自动投递到 cat-study"
 ```
 
 ## 输出格式
