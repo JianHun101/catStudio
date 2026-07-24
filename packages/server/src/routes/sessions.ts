@@ -174,6 +174,33 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     }
   })
 
+  // ─── GET /api/sessions/:id/messages — 获取消息列表 ──
+
+  app.get('/api/sessions/:id/messages', async (req, reply) => {
+    const id = (req.params as any).id
+
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    const limit = Math.min(
+      Math.max(parseInt((req.query as any)?.limit || '200', 10) || 200, 1),
+      1000
+    )
+    const rows = messagesRepo.getSessionHistory(id, limit)
+
+    return rows.map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      agentId: r.agent_id || null,
+      role: r.role,
+      content: r.content,
+      mentions: JSON.parse(r.mentions || '[]'),
+      taskId: r.task_id || null,
+      createdAt: r.created_at.replace(' ', 'T') + 'Z',
+    }))
+  })
+
   // ─── POST /api/sessions/:id/read — 标记已读 ──────────
 
   app.post('/api/sessions/:id/read', async (req, reply) => {
