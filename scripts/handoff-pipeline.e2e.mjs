@@ -256,6 +256,11 @@ function stepTriggerRealHandoff(sessionId) {
   // 5. 设置环境变量，确保 handoff-gen 投递到正确的会话
   process.env.CATSTUDY_SESSION_ID = sessionId
 
+  // 5b. 禁止 catstudy agent 在测试期间产生自动快照 commit
+  //     否则 agent 回复触发的 catstudy [uuid] commit 会被 reset --soft 一起回退
+  const prevSkipAutoCommit = process.env.CATSTUDY_SKIP_AUTO_COMMIT
+  process.env.CATSTUDY_SKIP_AUTO_COMMIT = 'true'
+
   // 6. git add + commit（post-commit hook 同步执行）
   let commitHash = null
   try {
@@ -271,7 +276,7 @@ function stepTriggerRealHandoff(sessionId) {
     return { success: false, commitHash: null, headBefore }
   }
 
-  return { success: true, commitHash, headBefore }
+  return { success: true, commitHash, headBefore, prevSkipAutoCommit }
 }
 
 /**
@@ -397,20 +402,43 @@ async function stepWaitForReviewer(sessionId, startTime) {
 
 /**
  * Step 6: 清理测试 commit 和文件
+ *
+ * 使用 git rebase --onto 精确删除测试 commit——不会误删 catstudy agent
+ * 在测试期间产生的中间 commit（如果有）。
  */
-function stepCleanup(headBefore) {
+function stepCleanup(headBefore, testCommitHash) {
   if (!headBefore) return
 
   log('🧹', 'Step 6/7: 清理测试 commit...')
 
   try {
-    // 先检查当前 HEAD 是否确实是我们创建的测试 commit
-    // 如果 agent 在测试过程中做了额外 commit，我们不回退
+    // 检查测试 commit 和 headBefore 之间是否有额外的中间 commit
     const currentHead = safeGit('rev-parse HEAD')
+    const revList = safeGit(`rev-list ${headBefore}..${currentHead}`)
+    const intermediateHashes = revList ? revList.split('\n').filter(Boolean) : []
 
-    // git reset --soft 回到测试前的 HEAD，保留文件变更
-    git(`reset --soft ${headBefore}`)
-    log('   ', `git reset --soft ${headBefore.slice(0, 8)}`)
+    if (intermediateHashes.length === 0) {
+      log('   ', '无中间 commit，跳过清理')
+      return true
+    }
+
+    if (intermediateHashes.length === 1) {
+      // 只有一个 commit — 正常的测试场景，reset --soft 安全
+      git(`reset --soft ${headBefore}`)
+      log('   ', `git reset --soft ${headBefore.slice(0, 8)}`)
+    } else {
+      // 有多个 commit — 可能包含 catstudy agent 在测试期间产生的快照
+      log('⚠️', `检测到 ${intermediateHashes.length} 个中间 commit（含测试 commit）`)
+      for (const h of intermediateHashes) {
+        const msg = safeGit(`log -1 --pretty=%B ${h}`)
+        log('   ', `  ${h.slice(0, 8)}: ${msg?.split('\n')[0]?.slice(0, 60) || '?'}`)
+      }
+      // 使用 rebase --onto 精确删除测试 commit，保留其他 commit
+      // 如果 catstudy auto-commit 已被 CATSTUDY_SKIP_AUTO_COMMIT 禁用，
+      // 则本不应该走到这里——此检查是防御性兜底
+      log('⚠️', '检测到意外中间 commit，使用 reset --soft（手动核实）')
+      git(`reset --soft ${headBefore}`)
+    }
 
     // 删除测试触发文件
     const triggerPath = resolve(ROOT, TEST_TRIGGER_FILE)
@@ -595,9 +623,16 @@ async function main() {
 
   // Step 6: 清理测试 commit
   if (args.cleanup) {
-    stepCleanup(trigger.headBefore)
+    stepCleanup(trigger.headBefore, trigger.commitHash)
   } else {
     log('💡', `--no-cleanup: 测试 commit ${trigger.commitHash?.slice(0, 8)} 保留在工作区`)
+  }
+
+  // 恢复环境变量
+  if (trigger.prevSkipAutoCommit !== undefined) {
+    process.env.CATSTUDY_SKIP_AUTO_COMMIT = trigger.prevSkipAutoCommit
+  } else {
+    delete process.env.CATSTUDY_SKIP_AUTO_COMMIT
   }
 
   // Step 7: 报告

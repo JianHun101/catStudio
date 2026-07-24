@@ -30,7 +30,11 @@ function isGitRepo(): boolean {
 export function getHeadCommit(): string | null {
   if (!isGitRepo()) return null
   try {
-    return execSync('git rev-parse HEAD', { cwd: CWD, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return execSync('git rev-parse HEAD', {
+      cwd: CWD,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
   } catch {
     return null
   }
@@ -39,6 +43,12 @@ export function getHeadCommit(): string | null {
 /** git add -A && git commit */
 export function gitCommit(message: string): string | null {
   if (!isGitRepo()) return null
+  // e2e 测试期间禁用自动快照，防止测试 commit 和 agent auto-commit 在同一时间轴竞态
+  // → git reset --soft 会把测试 commit 和 catstudy 快照 commit 一起回退掉
+  if (process.env.CATSTUDY_SKIP_AUTO_COMMIT === 'true') {
+    log.info('auto commit skipped (CATSTUDY_SKIP_AUTO_COMMIT=true)', { message })
+    return null
+  }
   try {
     execSync('git add -A', { cwd: CWD, stdio: 'ignore' })
     execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, { cwd: CWD, stdio: 'ignore' })
@@ -92,7 +102,9 @@ function readPkgDeps(): Set<string> {
         }
       }
     }
-  } catch { /* 读不到就算了 */ }
+  } catch {
+    /* 读不到就算了 */
+  }
   return pkgs
 }
 
