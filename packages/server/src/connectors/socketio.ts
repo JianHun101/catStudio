@@ -1245,6 +1245,7 @@ async function runAgentReply(
         agentId: agent.id,
       })
       activeStreams.delete(agent.id)
+      retractionRequests.delete(triggerMsg.id)
       return { content: fullContent || '[消息已撤回]', msgId }
     }
     if (signal?.aborted) {
