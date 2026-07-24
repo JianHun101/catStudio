@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# post-commit 交接文档自动生成
+# 每次 commit 后自动调用 handoff-gen.mjs 生成 .handoff-draft.md
+# 不阻断 commit——失败只告警，不影响工作流
+node scripts/handoff-gen.mjs
