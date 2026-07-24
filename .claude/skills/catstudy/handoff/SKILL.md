@@ -69,36 +69,7 @@ Step 5: OUTPUT — 组合输出
 
 ## 输出格式
 
-严格按 `packages/server/src/skills/handoff.md` 定义的格式（**handoff.md 是格式的正规定义，以下为参考副本——如有冲突以 handoff.md 为准**）：
-
-```markdown
-【工作交接】
-
-### 1. What — 改了什么
-
-| 文件            | 改动           |
-| --------------- | -------------- |
-| path/to/file.ts | 一句话描述改动 |
-
-### 2. Why — 关键决策
-
-{设计决策和上下文。每个关键决策一个 ### 小标题。不要复述 What——要回答"为什么这样做是对的"。}
-
-### 3. Tradeoff — 放弃了什么
-
-| 放弃的方案 | 原因         |
-| ---------- | ------------ |
-| {方案A}    | {为什么没选} |
-
-### 4. Open Questions — 不确定的点
-
-- **{主题}**：{具体不确定什么，当前怎么处理的，可能的风险}
-
-### 5. Reviewer Checklist
-
-- [ ] {检查点1}
-- [ ] {检查点2}
-```
+严格按 `packages/server/src/skills/handoff.md` 定义的格式输出——读取该文件获取完整格式定义，此处不维护副本，避免两份内容漂移。
 
 ## Checklist 自动生成规则
 
@@ -166,7 +137,7 @@ Step 5: OUTPUT — 组合输出
 
 ### Shell 脚本（.husky/、scripts/）
 
-- [ ] Windows Git Bash 兼容性？（`findstr` vs `grep`、`xargs` 参数差异）
+- [ ] Windows Git Bash 兼容性？（CRLF 行尾、`findstr` vs `grep`、`xargs` 参数差异）
 - [ ] 空输入 / 无效输入是否正确处理？（如 `.push-gate` 空文件绕过）
 - [ ] `trap` / 信号处理是否清理了临时文件和子进程？
 
@@ -174,6 +145,7 @@ Step 5: OUTPUT — 组合输出
 
 - [ ] 方法签名和调用方参数类型是否一致？
 - [ ] `SELECT *` 返回类型是否和 `MessageRow` / `AgentRow` 匹配？
+- [ ] 新增方法是否在 `db/repository/index.ts` 中 re-export？（忘了 export → 调用方 import 不到）
 - [ ] 是否有对应测试覆盖？返回空集 / 不存在记录的行为是否明确？
 
 ### cat-study 项目特有检查点
