@@ -187,7 +187,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       Math.max(parseInt((req.query as any)?.limit || '200', 10) || 200, 1),
       1000
     )
-    const rows = messagesRepo.getSessionHistory(id, limit)
+    const rows = messagesRepo.getRecentMessages(id, limit)
 
     return rows.map((r) => ({
       id: r.id,

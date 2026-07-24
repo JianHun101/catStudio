@@ -65,9 +65,24 @@ export function generateHandoff(opts = {}) {
     return null
   }
 
+  const commitMsg = safeGit(cwd, 'log -1 --pretty=%B') || ''
+
+  // 跳过 cat-study 自动快照 commit 和 merge/revert commit
+  // 防止 post-commit → agent 回复 → auto-commit → post-commit 无限反馈环
+  if (commitMsg) {
+    const firstLine = commitMsg.split('\n')[0]
+    if (/^catstudy\s+\[[\w-]+\]/.test(firstLine)) {
+      console.log('[handoff-gen] cat-study 自动快照，跳过')
+      return null
+    }
+    if (/^(Merge|Revert)/.test(firstLine)) {
+      console.log('[handoff-gen] merge/revert commit，跳过')
+      return null
+    }
+  }
+
   const diffStat = safeGit(cwd, `diff ${range} --stat`) || safeGit(cwd, 'show HEAD --stat') || ''
   const diffBody = safeGit(cwd, `diff ${range}`) || safeGit(cwd, 'show HEAD') || ''
-  const commitMsg = safeGit(cwd, 'log -1 --pretty=%B') || ''
   const shortHash = safeGit(cwd, 'log -1 --pretty=%h') || 'HEAD'
 
   // 解析文件列表
@@ -128,6 +143,8 @@ function parseArgs(argv) {
       opts.range = argv[++i]
     } else if (argv[i] === '--cwd' && i + 1 < argv.length) {
       opts.cwd = argv[++i]
+    } else if (argv[i] === '--no-post') {
+      opts.noPost = true
     }
   }
   return opts
@@ -160,7 +177,12 @@ function parseChangedFiles(raw) {
     .filter(Boolean)
     .map((line) => {
       const parts = line.split('\t')
-      return { status: parts[0] || 'M', path: parts[1] || parts[0] }
+      const status = parts[0] || 'M'
+      // Rename: "R100\told/path.js\tnew/path.js" → parts[2] 是新路径
+      if (status.startsWith('R')) {
+        return { status, path: parts[2] || parts[1] }
+      }
+      return { status, path: parts[1] || parts[0] }
     })
 }
 
@@ -633,7 +655,7 @@ if (isMain) {
       console.log('📋 .handoff-draft.md 已生成')
 
       // 自动投递到 cat-study（除非指定 --no-post）
-      if (!process.argv.includes('--no-post')) {
+      if (!args.noPost) {
         const posted = await tryPostToCatstudy(result, cwd)
         if (posted) {
           // 投递成功 → 清理本地草稿（内容已在 cat-study 消息管道中）

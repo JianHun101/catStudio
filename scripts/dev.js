@@ -59,7 +59,9 @@ const children = new Set()
 /** 强制杀进程（Windows: taskkill /T 杀整棵进程树） */
 function killTree(pid) {
   if (!isWindows) {
-    try { process.kill(pid, 'SIGKILL') } catch {}
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {}
     return
   }
   try {
@@ -82,7 +84,45 @@ let serverChild = null
 /** 推迟重启标志：有文件变更但锁文件存在时为 true */
 let pendingRestart = false
 
+/** 检查 server 进程是否还活着。
+ *  先用 spawn 引用判断，再读锁文件里的 PID 做兜底。 */
+function isServerAlive() {
+  // A：spawn 子进程引用还活着
+  if (serverChild && serverChild.exitCode === null) return true
+
+  // B：读锁文件中的 PID 验证
+  if (existsSync(LOCK_FILE)) {
+    try {
+      const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf-8').trim(), 10)
+      if (!isNaN(pid)) {
+        process.kill(pid, 0) // ESRCH = PID 不存在
+        return true
+      }
+    } catch (e) {
+      if (e.code !== 'ESRCH') throw e
+    }
+  }
+
+  return false
+}
+
+/** 清理孤儿锁：server 已死但 .agent-busy 还在 → 删除 */
+function cleanupDeadLock() {
+  if (!existsSync(LOCK_FILE)) return
+  if (isServerAlive()) return
+
+  let pidHint = '?'
+  try {
+    pidHint = fs.readFileSync(LOCK_FILE, 'utf-8').trim()
+  } catch {}
+
+  console.log(`[dev] 检测到孤儿锁 (pid=${pidHint})，清理后重启`)
+  fs.unlinkSync(LOCK_FILE)
+}
+
 function startServer() {
+  cleanupDeadLock()
+
   // 杀掉旧 server 进程
   if (serverChild && serverChild.exitCode === null) {
     console.log('[dev] 终止旧 server 进程 (pid=' + serverChild.pid + ')')
@@ -90,15 +130,11 @@ function startServer() {
     children.delete(serverChild)
   }
 
-  serverChild = spawn(
-    process.execPath,
-    [TSX_CLI, 'packages/server/src/index.ts'],
-    {
-      cwd: ROOT,
-      stdio: 'inherit',
-      env: { ...process.env, FORCE_COLOR: '1' },
-    },
-  )
+  serverChild = spawn(process.execPath, [TSX_CLI, 'packages/server/src/index.ts'], {
+    cwd: ROOT,
+    stdio: 'inherit',
+    env: { ...process.env, FORCE_COLOR: '1' },
+  })
 
   serverChild.on('error', (err) => {
     console.error('[dev] server 进程启动失败:', err.message)
@@ -151,15 +187,11 @@ if (!ready) {
 }
 
 // 2. 启动 Web (Vite)
-const webChild = spawn(
-  process.execPath,
-  [VITE_CLI, '--host', '0.0.0.0'],
-  {
-    cwd: PKG_DIRS.web,
-    stdio: 'inherit',
-    env: { ...process.env, FORCE_COLOR: '1' },
-  },
-)
+const webChild = spawn(process.execPath, [VITE_CLI, '--host', '0.0.0.0'], {
+  cwd: PKG_DIRS.web,
+  stdio: 'inherit',
+  env: { ...process.env, FORCE_COLOR: '1' },
+})
 
 webChild.on('error', (err) => {
   console.error('[dev] web 进程启动失败:', err.message)
@@ -195,9 +227,16 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
 
   restartTimer = setTimeout(async () => {
     if (existsSync(LOCK_FILE)) {
-      if (!pendingRestart) {
-        console.log('[dev] Agent 执行中，推迟重启...')
-        pendingRestart = true
+      if (!isServerAlive()) {
+        // 锁文件还在但进程已死 → 孤儿锁，强制重启
+        console.log('[dev] 孤儿锁检测到，强制重启 server...')
+        startServer()
+        await waitForServer()
+      } else {
+        if (!pendingRestart) {
+          console.log('[dev] Agent 执行中，推迟重启...')
+          pendingRestart = true
+        }
       }
     } else {
       console.log('[dev] 文件变更，重启 server...')
@@ -209,7 +248,7 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
 
 // 推迟模式下的轮询：每秒检查锁文件是否已释放
 setInterval(async () => {
-  if (pendingRestart && !existsSync(LOCK_FILE)) {
+  if (pendingRestart && (!existsSync(LOCK_FILE) || !isServerAlive())) {
     console.log('[dev] Agent 完成，执行延迟重启')
     pendingRestart = false
     startServer()
