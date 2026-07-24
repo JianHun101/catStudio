@@ -120,6 +120,48 @@ function cleanupDeadLock() {
   fs.unlinkSync(LOCK_FILE)
 }
 
+/**
+ * 带重试的 server 重启。
+ * 首次 waitForServer 失败后，等 2s / 4s / 8s 再试（最多 3 次重试）。
+ * 全部失败后继续周期性重试（每 30s），而不是静默放弃。
+ */
+async function restartWithRetry(reason) {
+  console.log(`[dev] ${reason}`)
+
+  const maxRetries = 3
+  let baseDelay = 2000
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      console.log(`[dev] 重试第 ${attempt} 次 (${baseDelay / 1000}s 后)...`)
+      await new Promise((r) => setTimeout(r, baseDelay))
+      baseDelay *= 2
+    }
+
+    startServer()
+    const ok = await waitForServer()
+    if (ok) return true
+
+    // 启动失败 → 确保旧进程彻底死掉，释放端口
+    if (serverChild && serverChild.exitCode === null) {
+      killTree(serverChild.pid)
+    }
+  }
+
+  // 全部重试失败 → 不放弃，设定一个长间隔定时器持续尝试
+  console.error('[dev] server 重启失败（已重试 3 次），每 30s 继续尝试...')
+  const keepTrying = setInterval(async () => {
+    console.log('[dev] 再次尝试重启 server...')
+    startServer()
+    const ok = await waitForServer()
+    if (ok) {
+      console.log('[dev] server 恢复!')
+      clearInterval(keepTrying)
+    }
+  }, 30_000)
+  return false
+}
+
 function startServer() {
   cleanupDeadLock()
 
@@ -229,9 +271,7 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
     if (existsSync(LOCK_FILE)) {
       if (!isServerAlive()) {
         // 锁文件还在但进程已死 → 孤儿锁，强制重启
-        console.log('[dev] 孤儿锁检测到，强制重启 server...')
-        startServer()
-        await waitForServer()
+        await restartWithRetry('孤儿锁检测到，强制重启 server...')
       } else {
         if (!pendingRestart) {
           console.log('[dev] Agent 执行中，推迟重启...')
@@ -239,9 +279,7 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
         }
       }
     } else {
-      console.log('[dev] 文件变更，重启 server...')
-      startServer()
-      await waitForServer()
+      await restartWithRetry('文件变更，重启 server...')
     }
   }, 500)
 })
@@ -249,10 +287,8 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
 // 推迟模式下的轮询：每秒检查锁文件是否已释放
 setInterval(async () => {
   if (pendingRestart && (!existsSync(LOCK_FILE) || !isServerAlive())) {
-    console.log('[dev] Agent 完成，执行延迟重启')
     pendingRestart = false
-    startServer()
-    await waitForServer()
+    await restartWithRetry('Agent 完成，执行延迟重启')
   }
 }, 1000)
 

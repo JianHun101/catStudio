@@ -423,10 +423,50 @@ try {
   console.error(`  边界测试异常: ${err.message}`)
 }
 
-// 6b: 无文件改动的 commit（amend 或空提交场景 — 不太可能但防御性处理）
-// 这个场景在生成 handoff 时 diff 为空 → 应返回 null
+// 6b: catstudy 自动快照 commit → 应跳过
+const SNAPSHOT_TMP = join(ROOT, '.handoff-test-snapshot')
+if (existsSync(SNAPSHOT_TMP)) rmSync(SNAPSHOT_TMP, { recursive: true, force: true })
+mkdirSync(SNAPSHOT_TMP, { recursive: true })
+execSync('git init', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
+execSync('git config user.email "test@catstudy.local"', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
+execSync('git config user.name "Test Cat"', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
 
-// 清理
+// 先建一个正常 commit 作为基准
+const snapFile = join(SNAPSHOT_TMP, 'test.txt')
+writeFileSync(snapFile, 'initial', 'utf-8')
+execSync('git add -A', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
+execSync('git commit -m "feat: initial"', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
+
+// 修改文件
+writeFileSync(snapFile, 'updated', 'utf-8')
+execSync('git add -A', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
+
+// 模拟 catstudy 自动快照 commit
+execSync('git commit -m "catstudy [6cfecca8-ba78-4039-a12c-71313afd29cd]"', {
+  cwd: SNAPSHOT_TMP,
+  stdio: 'pipe',
+})
+
+// verify: generateHandoff 应返回 null（过滤 catstudy 快照）
+{
+  const snapResult = generateHandoff({ cwd: SNAPSHOT_TMP })
+  assert(snapResult === null, 'catstudy [uuid] 格式的 commit 应被过滤（返回 null）')
+}
+
+// 6c: 普通 commit message 含 "catstudy" 但不是快照格式 → 不应被过滤
+writeFileSync(snapFile, 'updated2', 'utf-8')
+execSync('git add -A', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
+execSync('git commit -m "fix: handle catstudy edge case in retraction logic"', {
+  cwd: SNAPSHOT_TMP,
+  stdio: 'pipe',
+})
+
+{
+  const normalResult = generateHandoff({ cwd: SNAPSHOT_TMP })
+  assert(normalResult !== null, '普通 commit message 含 catstudy 但不匹配快照格式时，不应被过滤')
+}
+
+rmSync(SNAPSHOT_TMP, { recursive: true, force: true })
 rmSync(EMPTY_TMP, { recursive: true, force: true })
 
 console.log('')

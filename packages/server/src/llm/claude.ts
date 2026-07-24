@@ -6,6 +6,7 @@ import {
   parseClaudeCodeOutput,
   attachIdleTimeout,
   spawnSupervised,
+  getWorkspaceDir,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
 
@@ -92,6 +93,7 @@ export class ClaudeAdapter implements LLMAdapter {
         env,
         label: 'claude',
         input: prompt,
+        cwd: getWorkspaceDir(),
       }
     )
 

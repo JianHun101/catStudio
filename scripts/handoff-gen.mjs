@@ -17,7 +17,7 @@
  */
 
 import { execSync } from 'node:child_process'
-import { writeFileSync, existsSync } from 'node:fs'
+import { writeFileSync, existsSync, unlinkSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -497,7 +497,7 @@ function detectCatStudyChecks(files, diff) {
   }
 
   // env var 解析
-  if (diff.includes('parseInt') || (diff.includes('||') && diff.includes('default'))) {
+  if (diff.includes('parseInt') && diff.includes('||')) {
     checks.push(
       "`parseInt('0') || default` 零值被吞？含 `parseInt` / `parseFloat` 的 env var 解析是否用 `isNaN` 校验？"
     )
@@ -660,7 +660,6 @@ if (isMain) {
         if (posted) {
           // 投递成功 → 清理本地草稿（内容已在 cat-study 消息管道中）
           try {
-            const { unlinkSync } = await import('node:fs')
             unlinkSync(join(cwd, '.handoff-draft.md'))
             console.log('  (本地 .handoff-draft.md 已清理——内容在 cat-study 管道中)')
           } catch {

@@ -34,6 +34,34 @@ const POLL_INTERVAL_MS = 2000 // 轮询间隔
 const DEFAULT_TIMEOUT_S = 180 // 默认超时（3 分钟）
 const AGENT_REPLY_TIMEOUT_S = 120 // 单个 Agent 回复超时
 
+// ─── Claude Code CLI 子进程检测 ─────────────────────────────────
+
+/**
+ * 检测当前进程是否在 CatStudy server 的 Claude Code CLI 子进程中运行。
+ *
+ * CatStudy 的 ClaudeAdapter 通过 spawnSupervised() 启动 Claude Code CLI，
+ * supervisor 进程会设置 CATSTUDY_SUPERVISOR_PARENT_PID 指向 server 的 PID。
+ * 该环境变量不会出现在其他 Claude Code 会话中，是精确的检测标记。
+ *
+ * 在此类子进程中运行 e2e 测试会导致：
+ *   1. 循环调度（测试 POST 消息 → 触发同一 Agent 的 dispatch → 死锁）
+ *   2. dev.js 检测到文件变更 → 重启 server → 测试中断
+ */
+function isRunningInsideClaudeCode() {
+  // CatStudy ClaudeAdapter 独有的环境变量标记
+  if (process.env.CATSTUDY_SUPERVISOR_PARENT_PID) {
+    return true
+  }
+  return false
+}
+
+if (isRunningInsideClaudeCode()) {
+  console.log('⚠️  检测到当前环境为 Claude Code CLI 子进程，跳过 e2e 测试。')
+  console.log('   原因: 在 Agent 内部运行 e2e 测试会导致循环调度和 server 重启。')
+  console.log('   请在终端中直接运行: node scripts/handoff-pipeline.e2e.mjs')
+  process.exit(0)
+}
+
 // ─── 工具函数 ────────────────────────────────────────────────────
 
 function parseArgs(argv) {
