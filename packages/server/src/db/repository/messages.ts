@@ -12,6 +12,15 @@ export function setRepoDb(dbInst: Database.Database): void {
 
 // ─── 查询 ──────────────────────────────────────────────
 
+/** 检查消息是否存在（不限 role），用于撤回时窗保护。
+ *  区别于 getMessageById，不按 role 过滤 —— A2A 场景下触发消息可能是 agent 角色。 */
+export function messageExists(id: string, sessionId: string): boolean {
+  const row = db
+    .prepare('SELECT 1 FROM messages WHERE id = ? AND session_id = ?')
+    .get(id, sessionId)
+  return row !== undefined
+}
+
 export function getMessageById(
   id: string,
   sessionId: string,

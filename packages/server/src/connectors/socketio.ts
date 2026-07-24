@@ -1221,7 +1221,7 @@ async function runAgentReply(
   // ── 撤回时窗保护（Window ②）──────────────────────
   // 在 LLM 调用前检查触发消息是否仍存在于 DB。
   // 用户在 Agent 构建上下文期间撤回 → DB 已删 → 阻止 LLM 调用。
-  if (!messagesRepo.getMessageById(triggerMsg.id, sessionId, 'user')) {
+  if (!messagesRepo.messageExists(triggerMsg.id, sessionId)) {
     log.info('trigger message retracted before LLM call', {
       traceId,
       agentId: agent.id,
