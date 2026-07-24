@@ -31,3 +31,6 @@ workspace/
 
 # Agent 执行锁（防止 tsx watch 在 Agent 执行期间重启）
 .agent-busy
+
+# 审查门禁（本地工作流状态，不提交）
+.push-gate
