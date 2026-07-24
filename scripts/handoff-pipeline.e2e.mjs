@@ -336,12 +336,11 @@ async function stepWaitForStoreManager(sessionId, startTime) {
 /**
  * Step 5: 等待吐槽猫审查回复
  */
-async function stepWaitForReviewer(sessionId, startTime) {
+async function stepWaitForReviewer(sessionId, startTime, dmReplyId) {
   log('⏳', 'Step 5/7: 等待吐槽猫审查回复...')
   log('   ', '吐槽猫正在读取交接文档 + 代码 diff → 逐项检查...')
 
   const deadline = Date.now() + AGENT_REPLY_TIMEOUT_S * 1000
-  let lastMsgCount = 0
 
   while (Date.now() < deadline) {
     await sleep(POLL_INTERVAL_MS)
@@ -349,47 +348,33 @@ async function stepWaitForReviewer(sessionId, startTime) {
     try {
       const messages = await fetchJson(`${SERVER_URL}/api/sessions/${sessionId}/messages?limit=30`)
 
+      // 排除店长的回复（通过 ID），只找吐槽猫的新消息
       const agentMsgs = messages.filter(
-        (m) => m.role === 'agent' && new Date(m.createdAt) > startTime
+        (m) => m.role === 'agent' && new Date(m.createdAt) > startTime && m.id !== dmReplyId
       )
 
-      if (agentMsgs.length > lastMsgCount) {
-        lastMsgCount = agentMsgs.length
-      }
+      if (agentMsgs.length === 0) continue
 
-      // 找吐槽猫的审查回复（非店长的 agent 消息，且包含审查关键词）
+      // 找吐槽猫的审查回复
       const reviewReply = agentMsgs.find(
         (m) =>
-          (m.content.includes('审查') ||
-            m.content.includes('Review') ||
-            m.content.includes('Checklist')) &&
-          (m.content.includes('通过') ||
-            m.content.includes('需修改') ||
-            m.content.includes('建议改进') ||
-            m.content.includes('❌') ||
-            m.content.includes('✅') ||
-            m.content.includes('阻塞'))
+          m.content.includes('审查') ||
+          m.content.includes('Review') ||
+          m.content.includes('Checklist') ||
+          m.content.includes('阻塞')
       )
 
-      if (reviewReply) {
+      if (reviewReply && reviewReply.content.length > 500) {
         log('✅', `吐槽猫已完成审查回复 (${reviewReply.id})`)
         log('   ', `内容长度: ${reviewReply.content.length} 字符`)
         return reviewReply
       }
 
-      // 兜底：如果有 2 条以上 agent 消息，最新的非店长消息可能是吐槽猫的
-      if (agentMsgs.length >= 2) {
-        for (let i = agentMsgs.length - 1; i >= 0; i--) {
-          const m = agentMsgs[i]
-          const isStoreManager =
-            m.content.includes('Why') ||
-            m.content.includes('What — 改了什么') ||
-            m.content.includes('补填完成')
-          if (!isStoreManager && m.content.length > 500) {
-            log('✅', `检测到疑似吐槽猫回复 (${m.id}), 内容长度: ${m.content.length} 字符`)
-            return m
-          }
-        }
+      // 兜底：排除店长后任何足够长的 agent 消息
+      const fallback = agentMsgs.find((m) => m.content.length > 500)
+      if (fallback) {
+        log('✅', `吐槽猫已回复 (${fallback.id}), 内容长度: ${fallback.content.length} 字符`)
+        return fallback
       }
     } catch (err) {
       log('⚠️', `轮询出错: ${err.message}`)
@@ -616,7 +601,7 @@ async function main() {
   let reviewReply = null
   if (dmReply && dmReply.content.includes('@吐槽猫')) {
     await sleep(2000)
-    reviewReply = await stepWaitForReviewer(sessionId, startTime)
+    reviewReply = await stepWaitForReviewer(sessionId, startTime, dmReply.id)
   } else if (dmReply) {
     log('⚠️', '店长回复中未包含 @吐槽猫 — 跳过审查等待')
   }
