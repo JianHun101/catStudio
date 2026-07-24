@@ -364,6 +364,8 @@ async function stepWaitForReviewer(sessionId, startTime, dmReplyId) {
           m.content.includes('阻塞')
       )
 
+      // NOTE: 500 字符阈值依赖吐槽猫当前 prompt 产生的回复长度（通常 800-5000 字符）。
+      // 如果 prompt 修改导致回复风格变短，此阈值需同步调整，否则检测将静默失效。
       if (reviewReply && reviewReply.content.length > 500) {
         log('✅', `吐槽猫已完成审查回复 (${reviewReply.id})`)
         log('   ', `内容长度: ${reviewReply.content.length} 字符`)
@@ -599,7 +601,7 @@ async function main() {
 
   // Step 5: 等吐槽猫
   let reviewReply = null
-  if (dmReply && dmReply.content.includes('@吐槽猫')) {
+  if (dmReply && dmReply.id && dmReply.content.includes('@吐槽猫')) {
     await sleep(2000)
     reviewReply = await stepWaitForReviewer(sessionId, startTime, dmReply.id)
   } else if (dmReply) {
