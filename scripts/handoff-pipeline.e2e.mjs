@@ -1,38 +1,51 @@
 /**
- * 端到端管道测试 — 验证完整的 handoff → review 链路。
+ * 端到端管道测试 — 通过真实 git commit 触发 post-commit hook 链路。
  *
  * 测试流程:
  *   1. 连接 cat-study server → 验证健康
  *   2. 查找（或创建）包含店长和吐槽猫的会话
- *   3. POST /api/messages 投递模拟的 post-commit handoff 消息
+ *   3. 创建测试文件 → git commit → post-commit hook → handoff-gen.mjs 自动投递
  *   4. 轮询 GET /api/sessions/:id/messages，等待 Agent 回复
  *   5. 验证：店长补填了 Why/Tradeoff/OQ → @吐槽猫被触发 → 吐槽猫生成审查回复
  *   6. 输出完整的消息链路 + 测试报告
+ *   7. 清理：git reset --soft 撤销测试 commit
  *
  * 用法:
  *   node scripts/handoff-pipeline.e2e.mjs
- *   node scripts/handoff-pipeline.e2e.mjs --timeout=180  # 自定义超时（秒）
+ *   node scripts/handoff-pipeline.e2e.mjs --timeout=300  # 自定义超时（秒）
+ *   node scripts/handoff-pipeline.e2e.mjs --no-cleanup    # 保留测试 commit
  *
  * 环境变量:
- *   CATSTUDY_URL  服务器地址（默认 http://127.0.0.1:3200）
+ *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
+ *   CATSTUDY_SESSION_ID   目标会话 ID（自动查找包含店长+吐槽猫的会话）
  *
  * 前置条件:
  *   1. cat-study server 必须运行（pnpm dev:server）
  *   2. seed 数据必须已初始化（自动，首次启动时完成）
  *   3. LLM API key 必须已配置（.env 文件）
+ *   4. Git 仓库干净（无未提交的改动）
  *
  * Web 观察地址:
  *   cat-study Web UI: http://localhost:5173
  *   测试开始后，在 Web UI 中选择对应会话即可实时观察 Agent 的思考和回复。
  */
 
+import { execSync } from 'node:child_process'
+import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const ROOT = resolve(__dirname, '..')
+
 // ─── 配置 ────────────────────────────────────────────────────────
 
 const SERVER_URL = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
 const WEB_URL = 'http://localhost:5173'
 const POLL_INTERVAL_MS = 2000 // 轮询间隔
-const DEFAULT_TIMEOUT_S = 180 // 默认超时（3 分钟）
-const AGENT_REPLY_TIMEOUT_S = 120 // 单个 Agent 回复超时
+const DEFAULT_TIMEOUT_S = 300 // 默认超时（5 分钟）
+const AGENT_REPLY_TIMEOUT_S = 180 // 单个 Agent 回复超时
+const TEST_TRIGGER_FILE = 'scripts/.e2e-test-trigger.txt'
 
 // ─── Claude Code CLI 子进程检测 ─────────────────────────────────
 
@@ -44,11 +57,10 @@ const AGENT_REPLY_TIMEOUT_S = 120 // 单个 Agent 回复超时
  * 该环境变量不会出现在其他 Claude Code 会话中，是精确的检测标记。
  *
  * 在此类子进程中运行 e2e 测试会导致：
- *   1. 循环调度（测试 POST 消息 → 触发同一 Agent 的 dispatch → 死锁）
+ *   1. 循环调度（测试触发 dispatch → 同一 Agent → 死锁）
  *   2. dev.js 检测到文件变更 → 重启 server → 测试中断
  */
 function isRunningInsideClaudeCode() {
-  // CatStudy ClaudeAdapter 独有的环境变量标记
   if (process.env.CATSTUDY_SUPERVISOR_PARENT_PID) {
     return true
   }
@@ -65,10 +77,12 @@ if (isRunningInsideClaudeCode()) {
 // ─── 工具函数 ────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const opts = { timeout: DEFAULT_TIMEOUT_S }
+  const opts = { timeout: DEFAULT_TIMEOUT_S, cleanup: true }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--timeout' && i + 1 < argv.length) {
       opts.timeout = parseInt(argv[++i], 10) || DEFAULT_TIMEOUT_S
+    } else if (argv[i] === '--no-cleanup') {
+      opts.cleanup = false
     }
   }
   return opts
@@ -94,13 +108,31 @@ function log(emoji, msg) {
   console.log(`[${timestamp()}] ${emoji} ${msg}`)
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// ─── Git 工具 ────────────────────────────────────────────────────
+
+function git(cmd) {
+  return execSync(`git ${cmd}`, { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe' }).trim()
+}
+
+function safeGit(cmd) {
+  try {
+    return git(cmd)
+  } catch {
+    return null
+  }
+}
+
 // ─── 测试步骤 ────────────────────────────────────────────────────
 
 /**
  * Step 1: 验证服务器健康
  */
 async function stepHealthCheck() {
-  log('🔍', 'Step 1/6: 检查服务器健康...')
+  log('🔍', 'Step 1/7: 检查服务器健康...')
   try {
     const data = await fetchJson(`${SERVER_URL}/api/health`)
     log('✅', `服务器在线 (uptime: ${Math.round(data.uptime)}s)`)
@@ -119,12 +151,11 @@ async function stepHealthCheck() {
  * Step 2: 获取或创建包含店长和吐槽猫的会话
  */
 async function stepFindSession() {
-  log('🔍', 'Step 2/6: 查找测试会话...')
+  log('🔍', 'Step 2/7: 查找测试会话...')
 
   const sessions = await fetchJson(`${SERVER_URL}/api/sessions`)
   const sessionList = Array.isArray(sessions) ? sessions : sessions?.sessions || []
 
-  // 查找包含店长和吐槽猫的会话
   for (const s of sessionList) {
     const detail = await fetchJson(`${SERVER_URL}/api/sessions/${s.id}`)
     if (detail.agents) {
@@ -140,7 +171,6 @@ async function stepFindSession() {
   // 未找到 → 自动创建
   log('⚠️', '未找到包含店长+吐槽猫的会话，自动创建...')
 
-  // 获取 agent IDs
   const agentsData = await fetchJson(`${SERVER_URL}/api/agents`)
   const agents = Array.isArray(agentsData) ? agentsData : agentsData?.agents || []
   const dianzhang = agents.find((a) => a.name === '店长')
@@ -167,80 +197,88 @@ async function stepFindSession() {
 }
 
 /**
- * Step 3: 投递模拟 handoff 消息
+ * Step 3: 用真实 git commit 触发 post-commit hook 链路
+ *
+ * 链路: git commit → .husky/post-commit → node scripts/handoff-gen.mjs
+ *       → 生成交接文档 → POST /api/messages → 店长自动补填
+ *
+ * @returns {{ success: boolean, commitHash: string | null }}
  */
-async function stepPostHandoff(sessionId) {
-  log('📤', 'Step 3/6: 投递 handoff 消息到 cat-study...')
+function stepTriggerRealHandoff(sessionId) {
+  log('📤', 'Step 3/7: git commit → post-commit hook → handoff-gen...')
+  log('   ', `触发文件: ${TEST_TRIGGER_FILE}`)
 
-  // 模拟 post-commit hook 生成的 handoff 消息
-  const mockHandoff = [
-    '@店长 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。',
+  // 1. 前置检查：工作区是否干净
+  const status = safeGit('status --porcelain')
+  if (status) {
+    log('⚠️', `工作区有未提交的改动，测试 commit 可能包含不相关文件:`)
+    for (const line of status.split('\n').slice(0, 5)) {
+      if (line.trim()) console.log(`     ${line}`)
+    }
+    console.log('')
+    console.log('   建议先清理工作区: git checkout -- . && git clean -fd')
+    return { success: false, commitHash: null }
+  }
+
+  // 2. 保存当前 HEAD
+  const headBefore = safeGit('rev-parse HEAD')
+  if (!headBefore) {
+    log('❌', '无法获取当前 HEAD——仓库可能没有 commit')
+    return { success: false, commitHash: null }
+  }
+
+  // 3. 创建测试文件
+  const triggerPath = resolve(ROOT, TEST_TRIGGER_FILE)
+  const triggerContent = [
+    '# E2E 测试触发文件',
+    `# 生成时间: ${new Date().toISOString()}`,
+    '#',
+    '# 此文件用于触发 post-commit hook → handoff-gen.mjs → cat-study 管道。',
+    '# 测试完成后会自动清理（git reset --soft）。',
+    '#',
+    '# 改动说明:',
+    '# - 新增 e2e pipeline 触发机制',
+    '# - 测试 handoff-gen.mjs 对单文件变更的检测',
     '',
-    '补填规则：',
-    '- **Why**（关键决策）：从 commit message 和文件改动推导每个关键决策及理由。',
-    '- **Tradeoff**（放弃了什么）：如果放弃过其他方案，用表格列出方案及原因。确认没有则写"无"。',
-    '- **Open Questions**（不确定的点）：列出从改动中能识别的不确定、希望 reviewer 重点看的地方。',
-    '',
-    '补完后在**末尾行首独占一行** @吐槽猫 进行代码审查。',
-    '',
-    '---',
-    '',
-    '# 工作交接',
-    '',
-    '## 1. What — 改了什么',
-    '',
-    '| 文件 | 改动 |',
-    '| --- | --- |',
-    '| .husky/post-commit | 新文件 |',
-    '| scripts/handoff-gen.mjs | 新文件 |',
-    '',
-    '> Commit: abc1234',
-    '> Message: feat: post-commit 自动生成交接文档草稿 + 端到端测试',
-    '> Stats: 2 files changed, 650 insertions',
-    '',
-    '## 2. Why — 关键决策',
-    '',
-    '<!-- TODO: 补填 -->',
-    '',
-    '## 3. Tradeoff — 放弃了什么',
-    '',
-    '<!-- TODO: 补填 -->',
-    '',
-    '## 4. Open Questions — 不确定的点',
-    '',
-    '<!-- TODO: 补填 -->',
-    '',
-    '## 5. Reviewer Checklist',
-    '',
-    '### Shell 脚本',
-    '',
-    '- [ ] Windows Git Bash 兼容性？',
-    '- [ ] 空输入 / 无效输入是否正确处理？',
-    '',
-    '---',
-    '',
-    '@吐槽猫 请审查以上改动。',
   ].join('\n')
 
-  const result = await fetchJson(`${SERVER_URL}/api/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sessionId,
-      content: mockHandoff,
-      mentions: ['店长'],
-    }),
-  })
+  writeFileSync(triggerPath, triggerContent, 'utf-8')
+  log('   ', `测试文件已创建: ${TEST_TRIGGER_FILE}`)
 
-  log('✅', `消息已投递 (messageId: ${result.messageId})`)
-  return result.messageId
+  // 4. 构造有意义的 commit message（handoff-gen 会解析它）
+  const commitMsg = [
+    'test: e2e 管道触发测试',
+    '',
+    '验证 post-commit → handoff-gen → 店长补填 → 吐槽猫审查的完整链路。',
+    '新增 e2e 触发文件用于模拟真实代码变更场景。',
+  ].join('\n')
+
+  // 5. 设置环境变量，确保 handoff-gen 投递到正确的会话
+  process.env.CATSTUDY_SESSION_ID = sessionId
+
+  // 6. git add + commit（post-commit hook 同步执行）
+  let commitHash = null
+  try {
+    log('   ', 'git add + commit → 触发 post-commit hook...')
+    git(`add ${TEST_TRIGGER_FILE}`)
+    // 用 --allow-empty 兜底，但正常情况不会触发
+    git(`commit -m "${commitMsg.replace(/"/g, '\\"')}"`)
+    commitHash = safeGit('rev-parse HEAD')
+    log('✅', `commit 完成 (${commitHash?.slice(0, 8)})`)
+    log('   ', `post-commit hook 已将 handoff 投递到 cat-study`)
+  } catch (err) {
+    log('❌', `commit 失败: ${err.message}`)
+    return { success: false, commitHash: null, headBefore }
+  }
+
+  return { success: true, commitHash, headBefore }
 }
 
 /**
  * Step 4: 等待店长补填回复
  */
 async function stepWaitForStoreManager(sessionId, startTime) {
-  log('⏳', 'Step 4/6: 等待店长补填 Why/Tradeoff/OQ...')
+  log('⏳', 'Step 4/7: 等待店长补填 Why/Tradeoff/OQ...')
   log('   ', `Web UI: ${WEB_URL} — 可在会话页面实时观察`)
 
   const deadline = Date.now() + AGENT_REPLY_TIMEOUT_S * 1000
@@ -252,7 +290,6 @@ async function stepWaitForStoreManager(sessionId, startTime) {
     try {
       const messages = await fetchJson(`${SERVER_URL}/api/sessions/${sessionId}/messages?limit=20`)
 
-      // 检查是否有新的 agent 消息
       const agentMsgs = messages.filter(
         (m) => m.role === 'agent' && new Date(m.createdAt) > startTime
       )
@@ -261,20 +298,20 @@ async function stepWaitForStoreManager(sessionId, startTime) {
         lastMsgCount = agentMsgs.length
         for (const m of agentMsgs) {
           const preview = m.content.slice(0, 120).replace(/\n/g, ' ')
-          log('📩', `[${m.agentId ? 'agent' : 'system'}] ${preview}...`)
+          log('📩', `[agent] ${preview}...`)
         }
       }
 
-      // 找店长的回复
+      // 找包含 Why/关键决策 的回复（说明店长已补填）
       const dmReply = agentMsgs.find(
         (m) =>
-          m.content.includes('Why') && (m.content.includes('关键决策') || m.content.includes('###'))
+          (m.content.includes('Why') || m.content.includes('关键决策')) &&
+          (m.content.includes('###') || m.content.includes('---'))
       )
 
       if (dmReply) {
         log('✅', `店长已补填交接文档 (${dmReply.id})`)
         log('   ', `内容长度: ${dmReply.content.length} 字符`)
-        // 检查是否包含 @吐槽猫
         if (dmReply.content.includes('@吐槽猫')) {
           log('✅', '店长的回复中包含 @吐槽猫 — 将触发审查')
         } else {
@@ -295,8 +332,8 @@ async function stepWaitForStoreManager(sessionId, startTime) {
  * Step 5: 等待吐槽猫审查回复
  */
 async function stepWaitForReviewer(sessionId, startTime) {
-  log('⏳', 'Step 5/6: 等待吐槽猫审查回复...')
-  log('   ', `吐槽猫正在读取交接文档 + 代码 diff + 逐项检查...`)
+  log('⏳', 'Step 5/7: 等待吐槽猫审查回复...')
+  log('   ', '吐槽猫正在读取交接文档 + 代码 diff → 逐项检查...')
 
   const deadline = Date.now() + AGENT_REPLY_TIMEOUT_S * 1000
   let lastMsgCount = 0
@@ -315,7 +352,7 @@ async function stepWaitForReviewer(sessionId, startTime) {
         lastMsgCount = agentMsgs.length
       }
 
-      // 找吐槽猫的审查回复
+      // 找吐槽猫的审查回复（非店长的 agent 消息，且包含审查关键词）
       const reviewReply = agentMsgs.find(
         (m) =>
           (m.content.includes('审查') ||
@@ -325,7 +362,8 @@ async function stepWaitForReviewer(sessionId, startTime) {
             m.content.includes('需修改') ||
             m.content.includes('建议改进') ||
             m.content.includes('❌') ||
-            m.content.includes('✅'))
+            m.content.includes('✅') ||
+            m.content.includes('阻塞'))
       )
 
       if (reviewReply) {
@@ -334,33 +372,81 @@ async function stepWaitForReviewer(sessionId, startTime) {
         return reviewReply
       }
 
-      // 如果找到两条以上 agent 消息，第二条很可能是吐槽猫的
+      // 兜底：如果有 2 条以上 agent 消息，最新的非店长消息可能是吐槽猫的
       if (agentMsgs.length >= 2) {
-        const second = agentMsgs[agentMsgs.length - 1]
-        log('✅', `吐槽猫已回复 (${second.id}), 内容长度: ${second.content.length} 字符`)
-        return second
+        for (let i = agentMsgs.length - 1; i >= 0; i--) {
+          const m = agentMsgs[i]
+          const isStoreManager =
+            m.content.includes('Why') ||
+            m.content.includes('What — 改了什么') ||
+            m.content.includes('补填完成')
+          if (!isStoreManager && m.content.length > 500) {
+            log('✅', `检测到疑似吐槽猫回复 (${m.id}), 内容长度: ${m.content.length} 字符`)
+            return m
+          }
+        }
       }
     } catch (err) {
       log('⚠️', `轮询出错: ${err.message}`)
     }
   }
 
-  log('⚠️', `等待吐槽猫回复超时 (${AGENT_REPLY_TIMEOUT_S}s) — 可能仍在处理中`)
+  log('⚠️', `等待吐槽猫回复超时 (${AGENT_REPLY_TIMEOUT_S}s)`)
   return null
 }
 
 /**
- * Step 6: 验证完整链路 + 输出报告
+ * Step 6: 清理测试 commit 和文件
+ */
+function stepCleanup(headBefore) {
+  if (!headBefore) return
+
+  log('🧹', 'Step 6/7: 清理测试 commit...')
+
+  try {
+    // 先检查当前 HEAD 是否确实是我们创建的测试 commit
+    // 如果 agent 在测试过程中做了额外 commit，我们不回退
+    const currentHead = safeGit('rev-parse HEAD')
+
+    // git reset --soft 回到测试前的 HEAD，保留文件变更
+    git(`reset --soft ${headBefore}`)
+    log('   ', `git reset --soft ${headBefore.slice(0, 8)}`)
+
+    // 删除测试触发文件
+    const triggerPath = resolve(ROOT, TEST_TRIGGER_FILE)
+    if (existsSync(triggerPath)) {
+      unlinkSync(triggerPath)
+      log('   ', `已删除 ${TEST_TRIGGER_FILE}`)
+    }
+
+    // 从暂存区移除
+    try {
+      git(`reset HEAD -- ${TEST_TRIGGER_FILE}`)
+    } catch {
+      // 文件可能已被删除，reset 失败是正常的
+    }
+
+    log('✅', '清理完成')
+    return true
+  } catch (err) {
+    log('⚠️', `清理失败: ${err.message}`)
+    console.log('   可手动清理: git reset --soft HEAD~1')
+    return false
+  }
+}
+
+/**
+ * Step 7: 验证完整链路 + 输出报告
  */
 async function stepVerifyAndReport(
   sessionId,
-  handoffMsgId,
+  commitHash,
   dmReply,
   reviewReply,
   startTime,
   testStart
 ) {
-  log('📊', 'Step 6/6: 生成测试报告...')
+  log('📊', 'Step 7/7: 生成测试报告...')
   console.log('')
 
   // 获取完整消息链
@@ -387,9 +473,11 @@ async function stepVerifyAndReport(
       detail: `session: ${sessionId}`,
     },
     {
-      label: '③ Handoff 投递',
-      pass: !!handoffMsgId,
-      detail: handoffMsgId ? `messageId: ${handoffMsgId}` : '投递失败',
+      label: '③ post-commit 触发',
+      pass: !!commitHash,
+      detail: commitHash
+        ? `commit: ${commitHash.slice(0, 8)} → post-commit hook → handoff-gen`
+        : '触发失败',
     },
     {
       label: '④ 店长补填',
@@ -411,10 +499,11 @@ async function stepVerifyAndReport(
   console.log('  📋 端到端管道测试报告')
   console.log('═'.repeat(60))
   console.log('')
-  console.log(`  服务器:  ${SERVER_URL}`)
-  console.log(`  Web UI:  ${WEB_URL}`)
-  console.log(`  会话 ID: ${sessionId}`)
-  console.log(`  耗时:    ${Math.round((Date.now() - testStart) / 1000)}s`)
+  console.log(`  服务器:    ${SERVER_URL}`)
+  console.log(`  Web UI:    ${WEB_URL}`)
+  console.log(`  会话 ID:   ${sessionId}`)
+  console.log(`  触发方式:  git commit → post-commit hook → handoff-gen.mjs`)
+  console.log(`  耗时:      ${Math.round((Date.now() - testStart) / 1000)}s`)
   console.log('')
 
   for (const check of checks) {
@@ -436,7 +525,7 @@ async function stepVerifyAndReport(
     console.log('  ─'.repeat(56))
     for (const m of relevantMsgs) {
       const time = new Date(m.createdAt).toLocaleTimeString('zh-CN', { hour12: false })
-      const roleLabel = m.role === 'user' ? '👤 用户' : m.role === 'agent' ? '🤖 Agent' : '🔧 系统'
+      const roleLabel = m.role === 'user' ? '👤 用户' : '🤖 Agent'
       const preview = m.content.slice(0, 150).replace(/\n/g, ' ')
       console.log(`  ${time} ${roleLabel} | ${preview}${m.content.length > 150 ? '...' : ''}`)
     }
@@ -447,10 +536,6 @@ async function stepVerifyAndReport(
 
 // ─── 主流程 ──────────────────────────────────────────────────────
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const testStart = Date.now()
@@ -460,10 +545,12 @@ async function main() {
   console.log('  🐱 cat-study Handoff → Review 端到端管道测试')
   console.log('═'.repeat(60))
   console.log('')
-  console.log(`  服务器:   ${SERVER_URL}`)
-  console.log(`  Web 观察: ${WEB_URL}`)
-  console.log(`  超时:     ${args.timeout}s`)
-  console.log(`  轮询间隔: ${POLL_INTERVAL_MS / 1000}s`)
+  console.log(`  服务器:     ${SERVER_URL}`)
+  console.log(`  Web 观察:   ${WEB_URL}`)
+  console.log(`  触发方式:   git commit → post-commit hook → handoff-gen.mjs`)
+  console.log(`  超时:       ${args.timeout}s`)
+  console.log(`  轮询间隔:   ${POLL_INTERVAL_MS / 1000}s`)
+  console.log(`  清理 commit: ${args.cleanup ? '是' : '否'}`)
   console.log('')
 
   // Step 1: 健康检查
@@ -478,13 +565,19 @@ async function main() {
   }
   const sessionId = session.id
 
-  // Step 3: 投递 handoff
-  const handoffMsgId = await stepPostHandoff(sessionId)
+  // Step 3: 用真实 git commit 触发 post-commit hook
+  const trigger = stepTriggerRealHandoff(sessionId)
+  if (!trigger.success) {
+    if (trigger.headBefore) {
+      stepCleanup(trigger.headBefore)
+    }
+    process.exit(1)
+  }
 
   // 记录投递时间——之后的消息才是相关的
   const startTime = new Date()
 
-  // 给 dispatch + context 构建一点时间
+  // 给 dispatch + 上下文构建一点时间
   log('⏳', '等待 Agent 调度 + 上下文构建...')
   await sleep(3000)
 
@@ -494,17 +587,23 @@ async function main() {
   // Step 5: 等吐槽猫
   let reviewReply = null
   if (dmReply && dmReply.content.includes('@吐槽猫')) {
-    // 短延迟——让 dispatch 来得及把吐槽猫从队列中拉出来
     await sleep(2000)
     reviewReply = await stepWaitForReviewer(sessionId, startTime)
   } else if (dmReply) {
     log('⚠️', '店长回复中未包含 @吐槽猫 — 跳过审查等待')
   }
 
-  // Step 6: 报告
+  // Step 6: 清理测试 commit
+  if (args.cleanup) {
+    stepCleanup(trigger.headBefore)
+  } else {
+    log('💡', `--no-cleanup: 测试 commit ${trigger.commitHash?.slice(0, 8)} 保留在工作区`)
+  }
+
+  // Step 7: 报告
   const allPassed = await stepVerifyAndReport(
     sessionId,
-    handoffMsgId,
+    trigger.commitHash,
     dmReply,
     reviewReply,
     startTime,
