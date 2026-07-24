@@ -22,6 +22,17 @@ fi
 LAST_REVIEWED=$(cat "$GATE_FILE" | tr -d '[:space:]')
 HEAD_SHA=$(git rev-parse HEAD)
 
+# 防止空文件或无效内容绕过门禁
+if ! echo "$LAST_REVIEWED" | grep -qE '^[0-9a-f]{40}$'; then
+  echo ""
+  echo "❌ .push-gate 内容无效（需要完整的 40 位 SHA）"
+  echo ""
+  echo "   当前内容: '${LAST_REVIEWED}'"
+  echo "   审查通过后运行: git rev-parse HEAD > .push-gate"
+  echo ""
+  exit 1
+fi
+
 if [ "$LAST_REVIEWED" = "$HEAD_SHA" ]; then
   exit 0
 fi
