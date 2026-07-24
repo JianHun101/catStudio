@@ -34,3 +34,5 @@ workspace/
 
 # 审查门禁（本地工作流状态，不提交）
 .push-gate
+.handoff-draft.md
+.handoff-draft.sent

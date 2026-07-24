@@ -88,6 +88,10 @@ if [ ! -f "$GATE_FILE" ]; then
   # 自动投递交接文档（如果存在）
   if [ -f "$HANDOFF_FILE" ]; then
     submit_handoff
+  else
+    echo "💡 提示：如果 post-commit hook 已自动投递到 cat-study，审查可能正在进行中。"
+    echo "   在 cat-study 会话页面查看实时进度。"
+    echo ""
   fi
 
   exit 1
@@ -126,6 +130,10 @@ if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
   # 自动投递交接文档（如果存在）
   if [ -f "$HANDOFF_FILE" ]; then
     submit_handoff
+  else
+    echo "💡 提示：如果 post-commit hook 已自动投递到 cat-study，审查可能正在进行中。"
+    echo "   在 cat-study 会话页面查看实时进度。"
+    echo ""
   fi
 
   exit 1

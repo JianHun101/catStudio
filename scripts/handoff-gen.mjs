@@ -2,12 +2,18 @@
  * Handoff 交接文档生成器 — post-commit hook 自动调用。
  *
  * 从 git diff 提取机械部分（文件清单 + Reviewer Checklist），
- * Why / Tradeoff / Open Questions 留占位符由开发者补填。
+ * 然后自动投递到 cat-study，由店长 agent 补填 Why / Tradeoff / Open Questions，
+ * 补完后转发给 @吐槽猫 审查——全程不需要用户手动干预。
  *
  * 用法:
- *   node scripts/handoff-gen.mjs              # 分析 HEAD~1..HEAD
+ *   node scripts/handoff-gen.mjs              # 分析 HEAD~1..HEAD，自动投递到 cat-study
+ *   node scripts/handoff-gen.mjs --no-post    # 只生成 .handoff-draft.md，不投递
  *   node scripts/handoff-gen.mjs --range=X..Y # 分析指定范围
  *   node scripts/handoff-gen.mjs --cwd=/path  # 指定仓库路径
+ *
+ * 环境变量:
+ *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
+ *   CATSTUDY_SESSION_ID   目标会话 ID（未设则自动从 /api/sessions 获取第一个）
  */
 
 import { execSync } from 'node:child_process'
@@ -523,6 +529,95 @@ function buildChecklistSection(changeTypes) {
   return lines.join('\n')
 }
 
+// ─── cat-study 自动投递 ──────────────────────────────────────
+
+/**
+ * 将交接文档投递到 cat-study，让店长 agent 自动补填 TODO 部分。
+ *
+ * 消息格式：@店长 补填 Why/Tradeoff/OQ → 补完后 @吐槽猫 审查。
+ * 整个链路不需要用户手动操作。
+ *
+ * @param {string} content — 完整的交接文档 markdown
+ * @param {string} [cwd] — 工作目录（用于定位 .handoff-draft.md 以清理）
+ * @returns {Promise<boolean>} 投递成功返回 true
+ */
+async function tryPostToCatstudy(content, cwd) {
+  const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
+
+  // 获取 session ID（优先级：环境变量 → API 自动获取 → 跳过）
+  let sessionId = process.env.CATSTUDY_SESSION_ID
+  if (!sessionId) {
+    try {
+      const res = await fetch(`${serverUrl}/api/sessions`, {
+        signal: AbortSignal.timeout(3000),
+      })
+      if (res.ok) {
+        const body = await res.json()
+        const sessions = Array.isArray(body) ? body : body?.sessions || []
+        if (sessions.length > 0) {
+          sessionId = sessions[0].id
+        }
+      }
+    } catch {
+      // server 不可达，继续走文件生成路径
+    }
+  }
+
+  if (!sessionId) {
+    console.log(
+      '[handoff-gen] ⚠️  无法获取 cat-study session（CATSTUDY_SESSION_ID 未设且 API 不可达）'
+    )
+    console.log('  .handoff-draft.md 已生成，下次 push 时 pre-push hook 会重试投递')
+    return false
+  }
+
+  // 构造消息：@店长 补填 TODO → 补完后 @吐槽猫
+  const message = [
+    '@店长 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。',
+    '',
+    '补填规则：',
+    '- **Why**（关键决策）：从 commit message 和文件改动推导每个关键决策及理由。不要复述 What——要回答"为什么这样做是对的"。',
+    '- **Tradeoff**（放弃了什么）：如果放弃过其他方案，用表格列出方案及原因。确认没有则写"无"——空段会让 reviewer 不确定你是忘了还是真没有。',
+    '- **Open Questions**（不确定的点）：列出从改动中能识别的不确定、希望 reviewer 重点看的地方。真实的不确定性，不是 bug 列表。',
+    '',
+    '补完后在**末尾行首独占一行** @吐槽猫 进行代码审查。',
+    '',
+    '---',
+    '',
+    content,
+  ].join('\n')
+
+  try {
+    const res = await fetch(`${serverUrl}/api/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        content: message,
+        mentions: ['店长'],
+      }),
+      signal: AbortSignal.timeout(5000),
+    })
+
+    if (res.ok) {
+      console.log(`[handoff-gen] ✅ 交接文档已投递到 cat-study (session: ${sessionId})`)
+      console.log('  店长将自动补填 Why/Tradeoff/OQ → @吐槽猫 审查')
+      console.log('  在 cat-study 会话页面可实时查看审查进度')
+      return true
+    } else {
+      const errText = await res.text().catch(() => '')
+      console.log(
+        `[handoff-gen] ⚠️  投递失败 (HTTP ${res.status}${errText ? ': ' + errText.slice(0, 120) : ''})`
+      )
+      return false
+    }
+  } catch (err) {
+    console.log(`[handoff-gen] ⚠️  cat-study server 不可达 (${serverUrl})`)
+    console.log('  .handoff-draft.md 已生成，下次 push 时 pre-push hook 会重试投递')
+    return false
+  }
+}
+
 // ─── CLI entry ──────────────────────────────────
 // 放在文件末尾，确保所有 const 已初始化（ESM TDZ）
 
@@ -533,8 +628,24 @@ if (isMain) {
   try {
     const result = generateHandoff(args)
     if (result) {
-      writeFileSync(join(args.cwd || process.cwd(), '.handoff-draft.md'), result, 'utf-8')
-      console.log('📋 .handoff-draft.md 已生成 — 请补填 Why / Tradeoff / Open Questions 后再 push')
+      const cwd = args.cwd || process.cwd()
+      writeFileSync(join(cwd, '.handoff-draft.md'), result, 'utf-8')
+      console.log('📋 .handoff-draft.md 已生成')
+
+      // 自动投递到 cat-study（除非指定 --no-post）
+      if (!process.argv.includes('--no-post')) {
+        const posted = await tryPostToCatstudy(result, cwd)
+        if (posted) {
+          // 投递成功 → 清理本地草稿（内容已在 cat-study 消息管道中）
+          try {
+            const { unlinkSync } = await import('node:fs')
+            unlinkSync(join(cwd, '.handoff-draft.md'))
+            console.log('  (本地 .handoff-draft.md 已清理——内容在 cat-study 管道中)')
+          } catch {
+            // 清理失败不影响主流程
+          }
+        }
+      }
     }
   } catch (err) {
     // post-commit hook 不应阻断 commit，失败时只告警

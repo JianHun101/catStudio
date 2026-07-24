@@ -380,7 +380,7 @@ console.log('')
 console.log('📦 测试组 5: CLI 入口')
 
 try {
-  execSync(`node ${HANDOFF_SCRIPT} --cwd "${TMP}"`, {
+  execSync(`node ${HANDOFF_SCRIPT} --cwd "${TMP}" --no-post`, {
     cwd: ROOT,
     encoding: 'utf-8',
     stdio: 'pipe',
@@ -445,6 +445,55 @@ assertContains(result, '- [ ]', 'Checklist 应为 markdown checkbox 格式')
 // 不应包含未替换的模板变量
 assertNotContains(result, '{{', '不应有未替换的模板变量')
 assertNotContains(result, '${', '不应有未替换的模板变量')
+
+console.log('')
+
+// ═══ 测试组 8: --no-post 标志 ═══════════════════════════════════
+
+console.log('📦 测试组 8: --no-post 标志')
+
+// 8a: --no-post 时不尝试连接服务器，文件留在磁盘
+const NO_POST_TMP = join(ROOT, '.handoff-test-nopost')
+if (existsSync(NO_POST_TMP)) rmSync(NO_POST_TMP, { recursive: true, force: true })
+mkdirSync(NO_POST_TMP, { recursive: true })
+
+// 创建一个简单的 git 仓库
+execSync('git init', { cwd: NO_POST_TMP, stdio: 'pipe' })
+execSync('git config user.email "test@catstudy.local"', { cwd: NO_POST_TMP, stdio: 'pipe' })
+execSync('git config user.name "Test Cat"', { cwd: NO_POST_TMP, stdio: 'pipe' })
+
+// 创建文件并提交
+const noPostFile = join(NO_POST_TMP, 'test.ts')
+mkdirSync(dirname(noPostFile), { recursive: true })
+writeFileSync(noPostFile, 'export const x = 1', 'utf-8')
+execSync('git add -A', { cwd: NO_POST_TMP, stdio: 'pipe' })
+execSync('git commit -m "test: no-post flag"', { cwd: NO_POST_TMP, stdio: 'pipe' })
+
+// 修改文件并第二次提交（让 diff 非空）
+writeFileSync(noPostFile, 'export const x = 2', 'utf-8')
+execSync('git add -A', { cwd: NO_POST_TMP, stdio: 'pipe' })
+execSync('git commit -m "test: second commit for diff"', { cwd: NO_POST_TMP, stdio: 'pipe' })
+
+try {
+  const output = execSync(`node ${HANDOFF_SCRIPT} --cwd "${NO_POST_TMP}" --no-post`, {
+    cwd: ROOT,
+    encoding: 'utf-8',
+    stdio: 'pipe',
+    timeout: 10000,
+  })
+
+  // 验证文件留在磁盘
+  const draftPath = join(NO_POST_TMP, '.handoff-draft.md')
+  assert(existsSync(draftPath), '--no-post: .handoff-draft.md 应保留在磁盘')
+  assertNotContains(output, 'cat-study', '--no-post 时不应尝试连接 cat-study')
+  console.log('  8a: --no-post 文件保留 ✅')
+} catch (err) {
+  console.error(`  ❌ --no-post 测试失败: ${err.message}`)
+  failed++
+}
+
+// 清理
+rmSync(NO_POST_TMP, { recursive: true, force: true })
 
 console.log('')
 
