@@ -40,7 +40,8 @@ const SHARED_PREAMBLE = `你是一只拥有人工智能的猫。只扮演自己�
 
 /**
  * 开发铁律 — 注入店长和服务员的 base prompt。
- * 出口检查 + 禁止自审 + 依赖安装声明 + @mention 格式。
+ * 出口检查 + 依赖安装声明 + @mention 格式。
+ * 注意：代码审查由 post-commit hook（handoff-gen）触发，不在此重复。
  */
 const IRON_LAWS_CODER = `
 ---
@@ -58,7 +59,6 @@ const IRON_LAWS_CODER = `
 ---
 提交流程
 ---
-代码审查：写完代码必须生成交接文档，末尾行首@吐槽猫 review。禁止自审。
 依赖安装：禁止直接安装第三方包。先声明意图 → 行首@吐槽猫 请求批准 → 获批后下一轮执行。声明和安装禁止同轮。
 `
 

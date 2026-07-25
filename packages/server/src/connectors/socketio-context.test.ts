@@ -275,7 +275,6 @@ describe('agent system prompts', () => {
     for (const name of ['店长', '服务员']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).toContain('出口检查')
-      expect(agent.systemPrompt).toContain('代码审查')
       expect(agent.systemPrompt).toContain('依赖安装')
     }
   })
@@ -352,10 +351,7 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).toContain('出口检查')
       expect(agent.systemPrompt).toContain('自问')
       expect(agent.systemPrompt).toContain('行首@对方')
-      expect(agent.systemPrompt).toContain('代码审查')
-      expect(agent.systemPrompt).toContain('交接文档')
       expect(agent.systemPrompt).toContain('@吐槽猫')
-      expect(agent.systemPrompt).toContain('禁止自审')
       expect(agent.systemPrompt).toContain('依赖安装')
       expect(agent.systemPrompt).toContain('禁止直接安装')
       expect(agent.systemPrompt).toContain('行首独占一行')
