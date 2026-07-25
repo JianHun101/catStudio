@@ -251,9 +251,10 @@ import { buildDemoAgents } from '../seed-data.js'
 describe('agent system prompts', () => {
   const agents = buildDemoAgents()
 
-  it('所有 agent 的 systemPrompt 都包含反镜像规则', () => {
+  it('所有 agent 的 systemPrompt 包含共享角色边界', () => {
     for (const agent of agents) {
-      expect(agent.systemPrompt).toContain('禁止重复或模仿')
+      expect(agent.systemPrompt).toContain('只扮演自己的角色')
+      expect(agent.systemPrompt).toContain('禁止代写或预判其他 Agent')
     }
   })
 
@@ -263,9 +264,10 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('所有 agent 的 systemPrompt 包含反镜像+其他猫的规则', () => {
-    for (const agent of agents) {
-      expect(agent.systemPrompt).toContain('其他猫')
+  it('店长和服务员的 systemPrompt 包含反镜像规则', () => {
+    for (const name of ['店长', '服务员']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).toContain('用自己的话表达')
     }
   })
 
@@ -363,7 +365,7 @@ describe('agent system prompts', () => {
   it('精简后的 IRON_LAWS_REVIEWER 仍包含所有审查铁律', () => {
     const tucao = agents.find((a) => a.name === '吐槽猫')!
     expect(tucao.systemPrompt).toContain('出口检查')
-    expect(tucao.systemPrompt).toContain('作者需要看到')
+    expect(tucao.systemPrompt).toContain('结论清晰吗')
     expect(tucao.systemPrompt).toContain('代码审查')
     expect(tucao.systemPrompt).toContain('Checklist')
     expect(tucao.systemPrompt).toContain('可合并')
@@ -373,7 +375,7 @@ describe('agent system prompts', () => {
     expect(tucao.systemPrompt).toContain('必要性')
     expect(tucao.systemPrompt).toContain('安全性')
     expect(tucao.systemPrompt).toContain('影响')
-    expect(tucao.systemPrompt).toContain('批准安装')
-    expect(tucao.systemPrompt).toContain('不建议安装')
+    expect(tucao.systemPrompt).toContain('审查维度')
+    expect(tucao.systemPrompt).toContain('边界与安全')
   })
 })
