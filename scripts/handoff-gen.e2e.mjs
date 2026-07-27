@@ -208,7 +208,7 @@ function selectSkill(s: any) {
 writeFileSync(
   join(TMP, 'packages/server/src/seed-data.ts'),
   `
-export const IRON_LAWS_CODER = "代码审查：写完代码后必须生成交接文档并 @吐槽猫 review。不论改动大小。"
+export const IRON_LAWS_CODER = "代码审查由 post-commit hook 自动触发——写完代码后结束回复即可。"
 export const IRON_LAWS_REVIEWER = "审查铁律：逐项检查 Checklist，行首独占一行 @作者 告知结果。"
 `.trim()
 )
@@ -423,7 +423,8 @@ try {
   console.error(`  边界测试异常: ${err.message}`)
 }
 
-// 6b: catstudy 自动快照 commit → 应跳过
+// 6b: catstudy 自动快照 commit → 有代码改动时不应跳过，应正常生成 handoff
+// （死循环已由 git-utils.ts gitCommit() 自然阻断——无改动时 commit 失败不触发 hook）
 const SNAPSHOT_TMP = join(ROOT, '.handoff-test-snapshot')
 if (existsSync(SNAPSHOT_TMP)) rmSync(SNAPSHOT_TMP, { recursive: true, force: true })
 mkdirSync(SNAPSHOT_TMP, { recursive: true })
@@ -437,20 +438,21 @@ writeFileSync(snapFile, 'initial', 'utf-8')
 execSync('git add -A', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
 execSync('git commit -m "feat: initial"', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
 
-// 修改文件
+// 修改文件（模拟 agent 代码改动）
 writeFileSync(snapFile, 'updated', 'utf-8')
 execSync('git add -A', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
 
-// 模拟 catstudy 自动快照 commit
+// 模拟 catstudy 自动快照 commit（agent 有实质代码改动）
 execSync('git commit -m "catstudy [6cfecca8-ba78-4039-a12c-71313afd29cd]"', {
   cwd: SNAPSHOT_TMP,
   stdio: 'pipe',
 })
 
-// verify: generateHandoff 应返回 null（过滤 catstudy 快照）
+// verify: 有代码改动的 catstudy commit 应正常生成 handoff（不再跳过）
 {
   const snapResult = generateHandoff({ cwd: SNAPSHOT_TMP })
-  assert(snapResult === null, 'catstudy [uuid] 格式的 commit 应被过滤（返回 null）')
+  assert(snapResult !== null, 'catstudy [uuid] 有代码改动时应生成 handoff')
+  assert(snapResult.includes('工作交接'), 'handoff 应包含标题')
 }
 
 // 6c: 普通 commit message 含 "catstudy" 但不是快照格式 → 不应被过滤

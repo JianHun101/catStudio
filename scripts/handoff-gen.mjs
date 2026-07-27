@@ -67,14 +67,13 @@ export function generateHandoff(opts = {}) {
 
   const commitMsg = safeGit(cwd, 'log -1 --pretty=%B') || ''
 
-  // 跳过 cat-study 自动快照 commit 和 merge/revert commit
-  // 防止 post-commit → agent 回复 → auto-commit → post-commit 无限反馈环
+  // 跳过 merge/revert commit
+  // 注意：不再跳过 catstudy [uuid] 自动快照。
+  // 死循环已由 git-utils.ts 的 gitCommit() 自然阻断——agent 纯文本回复无文件改动时
+  // git commit 非零退出返回 null，post-commit hook 不会触发，循环自限。
+  // agent 有实质代码改动的 commit 理应进入 handoff → 审查流程。
   if (commitMsg) {
     const firstLine = commitMsg.split('\n')[0]
-    if (/^catstudy\s+\[[\w-]+\]/.test(firstLine)) {
-      console.log('[handoff-gen] cat-study 自动快照，跳过')
-      return null
-    }
     if (/^(Merge|Revert)/.test(firstLine)) {
       console.log('[handoff-gen] merge/revert commit，跳过')
       return null
