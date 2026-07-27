@@ -292,8 +292,8 @@ assertContains(result, '## 5. Reviewer Checklist', '应包含 Checklist 段')
 // 验证 Why/Tradeoff/OQ 有占位符
 assertContains(result, 'TODO: 补填', 'Why 段应有 TODO 占位符')
 
-// 验证末尾有 @吐槽猫
-assertContains(result, '@吐槽猫 请审查以上改动。', '末尾应有 @吐槽猫')
+// 验证末尾不包含硬编码的 @吐槽猫（路由由 POST wrapper 指令控制，不嵌入文档）
+assertNotContains(result, '@吐槽猫 请审查以上改动。', '文档不应包含硬编码的 @吐槽猫')
 
 console.log('')
 

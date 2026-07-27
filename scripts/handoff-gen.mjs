@@ -126,10 +126,6 @@ export function generateHandoff(opts = {}) {
     '',
     checklistSection,
     '',
-    '---',
-    '',
-    '@吐槽猫 请审查以上改动。',
-    '',
   ].join('\n')
 }
 
