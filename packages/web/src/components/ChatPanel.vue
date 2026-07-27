@@ -4,6 +4,7 @@ import type { Message } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { useSkillCommand, type SkillSuggestion } from '@/composables/useSkillCommand'
+import { useTheme } from '@/composables/useTheme'
 import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
 import { createLogger } from '@/utils/logger'
@@ -21,6 +22,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useChatStore()
+const { isDark, toggle: toggleTheme } = useTheme()
 const input = ref('')
 const chatContainer = ref<HTMLDivElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
@@ -487,6 +489,34 @@ function statusLabelZh(status: string): string {
           :class="{ online: store.serverOnline }"
           :title="store.serverOnline ? '已连接' : '连接断开'"
         ></span>
+
+        <!-- 日间/夜间模式切换 — 始终可见，不依赖活跃会话 -->
+        <button
+          class="btn-theme-toggle"
+          :title="isDark ? '切换日间模式' : '切换夜间模式'"
+          :aria-label="isDark ? '切换日间模式' : '切换夜间模式'"
+          @click="toggleTheme()"
+        >
+          <!-- 太阳图标（夜间模式显示，点击切换到日间） -->
+          <svg v-if="isDark" width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="3.5" stroke="currentColor" stroke-width="1.3" />
+            <path
+              d="M8 1.5v1.2M8 13.3v1.2M2.5 8H1.3M14.7 8h-1.2M3.8 3.8l-.8-.8M12.9 12.9l-.8-.8M12.2 3.8l.8-.8M3.1 12.9l.8-.8"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+            />
+          </svg>
+          <!-- 月亮图标（日间模式显示，点击切换到夜间） -->
+          <svg v-else width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M13.5 10.2a5.6 5.6 0 0 1-2.2.5A5.5 5.5 0 0 1 6.8 2.5a5.5 5.5 0 1 0 6.7 7.7Z"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
       </div>
 
       <div v-if="store.activeSessionId" class="chat-header-actions">
@@ -834,6 +864,28 @@ function statusLabelZh(status: string): string {
 .btn-sidebar-toggle:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* ─── Theme Toggle ──────────────────────── */
+
+.btn-theme-toggle {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ease-out);
+}
+
+.btn-theme-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
 }
 
 /* Connection dot */
@@ -1716,6 +1768,12 @@ function statusLabelZh(status: string): string {
 
 <!-- Non-scoped: markdown content rendered via v-html -->
 <style>
+/* ─── Send button — light theme contrast fix ── */
+
+[data-theme='light'] .chat-panel .btn-send {
+  color: #3c3028;
+}
+
 /* ─── Inline formatting ────────────────── */
 
 .chat-panel .msg-text strong,
@@ -1827,6 +1885,64 @@ function statusLabelZh(status: string): string {
 }
 .chat-panel .msg-text pre code .hljs-selector-class {
   color: #a6e3a1;
+}
+
+/* ─── Code blocks — light theme overrides ─── */
+
+[data-theme='light'] .chat-panel .msg-text pre {
+  background: #f4efe6;
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='light'] .chat-panel .msg-text pre code {
+  color: #4a3f35;
+}
+
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-keyword {
+  color: #8b5c9e;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-string {
+  color: #4a8b5c;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-number {
+  color: #c07040;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-comment {
+  color: #a09888;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-function,
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-title {
+  color: #5c7db8;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-type {
+  color: #c89840;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-attr {
+  color: #3d8a8a;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-built_in {
+  color: #c47088;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-literal {
+  color: #c07040;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-params {
+  color: #6b5c4a;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-property {
+  color: #3d8a8a;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-punctuation {
+  color: #8a7d6e;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-regexp {
+  color: #c47088;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-meta {
+  color: #c89840;
+}
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-selector-class {
+  color: #4a8b5c;
 }
 
 /* ─── Headings ──────────────────────────── */
