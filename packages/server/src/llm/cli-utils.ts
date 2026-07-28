@@ -187,6 +187,11 @@ export function ensureProxy(apiKey: string): void {
  * 是工具调用前导描述如"让我审查..."，不是给下游 Agent 看的回复内容）；
  * 到 result 事件时 buffer 中剩余的 text 才是真正的回复，统一产出。
  *
+ * 🔧 修复 (2026-07-28): textBuffer 跨事件共享时，tool_use 清空操作错误地丢弃了
+ * **之前事件** 中已积累的纯文本（非工具前导），导致 agent 回复主体内容丢失。
+ * 改为事件级局部 buffer：只丢弃 tool_use **同一事件内** 的前导文本，
+ * 保留此前事件中已产出的纯文本。
+ *
  * thinking 块始终实时产出（前缀 "[思考] "），让前端看到流式进度。
  */
 export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
@@ -199,18 +204,28 @@ export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable
       const event = JSON.parse(line)
 
       if (event.type === 'assistant' && event.message?.content) {
+        const eventTexts: string[] = []
+        let eventHasToolUse = false
+
         for (const block of event.message.content) {
           if (block.type === 'text' && typeof block.text === 'string') {
-            textBuffer.push(block.text)
+            eventTexts.push(block.text)
           }
           if (block.type === 'tool_use') {
-            // 同一个 assistant 事件中出现 tool_use → 前面的 text 是工具描述 → 丢弃
-            textBuffer.length = 0
+            // 当前事件中有 tool_use → 该事件内的 text 是工具前导描述 → 丢弃
+            eventHasToolUse = true
           }
           // 产出思考过程，让前端看到实时进度（但不存入 DB，不参与上下文）
           if (block.type === 'thinking' && typeof block.thinking === 'string') {
             yield { content: `[思考] ${block.thinking}`, done: false, kind: 'thinking' }
           }
+        }
+
+        // 仅当当前事件不含 tool_use 时，才将文本合并到全局 buffer。
+        // 含 tool_use 的事件中的 text 是工具前导描述（如"让我审查..."),
+        // 不应进入最终回复内容。
+        if (!eventHasToolUse) {
+          textBuffer.push(...eventTexts)
         }
       }
 
