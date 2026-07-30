@@ -172,12 +172,13 @@ export function insertAgentMessage(
   sessionId: string,
   agentId: string,
   content: string,
-  taskId: string | null
+  taskId: string | null,
+  thinkingContent?: string
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id)
-     VALUES (?, ?, ?, 'agent', ?, '[]', ?)`
-  ).run(id, sessionId, agentId, content, taskId)
+    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content)
+     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?)`
+  ).run(id, sessionId, agentId, content, taskId, thinkingContent ?? null)
 }
 
 export function updateMessageMentions(messageId: string, mentionsJson: string): void {

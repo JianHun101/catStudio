@@ -185,6 +185,10 @@ export function initDb(): void {
       name: 'skill_modules on agents',
       sql: `ALTER TABLE agents ADD COLUMN skill_modules TEXT NOT NULL DEFAULT '[]'`,
     },
+    {
+      name: 'thinking_content on messages',
+      sql: `ALTER TABLE messages ADD COLUMN thinking_content TEXT`,
+    },
   ]
 
   for (const m of migrations) {

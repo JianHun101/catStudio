@@ -44,6 +44,7 @@ export interface MessageRow {
   content: string
   mentions: string // JSON 字符串数组
   task_id: string | null
+  thinking_content: string | null
   created_at: string
 }
 

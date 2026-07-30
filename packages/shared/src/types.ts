@@ -61,6 +61,7 @@ export interface Message {
   content: string
   mentions: string[] // agent names mentioned with @
   taskId?: string // 任务 ID，串联同一任务的多轮 agent 交互
+  thinkingContent?: string // 思考过程内容（仅前端展示，不参与 Agent 间上下文）
   createdAt: string
 }
 

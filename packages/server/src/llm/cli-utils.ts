@@ -196,7 +196,6 @@ export function ensureProxy(apiKey: string): void {
  */
 export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
-  const textBuffer: string[] = []
 
   for await (const line of rl) {
     if (!line.trim()) continue
@@ -204,34 +203,24 @@ export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable
       const event = JSON.parse(line)
 
       if (event.type === 'assistant' && event.message?.content) {
-        const eventTexts: string[] = []
+        // 预扫描：检测当前事件是否含 tool_use
         let eventHasToolUse = false
+        for (const block of event.message.content) {
+          if (block.type === 'tool_use') {
+            eventHasToolUse = true
+            break
+          }
+        }
 
         for (const block of event.message.content) {
-          if (block.type === 'text' && typeof block.text === 'string') {
-            eventTexts.push(block.text)
-          }
-          if (block.type === 'tool_use') {
-            // 当前事件中有 tool_use → 该事件内的 text 是工具前导描述 → 丢弃
-            eventHasToolUse = true
+          // 实时产出 text block（true streaming），含 tool_use 的前导文本跳过
+          if (block.type === 'text' && typeof block.text === 'string' && !eventHasToolUse) {
+            yield { content: block.text, done: false, kind: 'text' }
           }
           // 产出思考过程，让前端看到实时进度（但不存入 DB，不参与上下文）
           if (block.type === 'thinking' && typeof block.thinking === 'string') {
             yield { content: `[思考] ${block.thinking}`, done: false, kind: 'thinking' }
           }
-        }
-
-        // 仅当当前事件不含 tool_use 时，才将文本合并到全局 buffer。
-        // 含 tool_use 的事件中的 text 是工具前导描述（如"让我审查..."),
-        // 不应进入最终回复内容。
-        if (!eventHasToolUse) {
-          textBuffer.push(...eventTexts)
-        }
-      }
-
-      if (event.type === 'result') {
-        for (const text of textBuffer) {
-          yield { content: text, done: false, kind: 'text' }
         }
       }
     } catch {

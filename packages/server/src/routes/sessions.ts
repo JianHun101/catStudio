@@ -197,6 +197,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       content: r.content,
       mentions: JSON.parse(r.mentions || '[]'),
       taskId: r.task_id || null,
+      thinkingContent: r.thinking_content || undefined,
       createdAt: r.created_at.replace(' ', 'T') + 'Z',
     }))
   })

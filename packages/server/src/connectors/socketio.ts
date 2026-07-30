@@ -122,6 +122,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         content: row.content,
         mentions: JSON.parse(row.mentions || '[]'),
         taskId: row.task_id || undefined,
+        thinkingContent: row.thinking_content || undefined,
         createdAt: row.created_at.replace(' ', 'T') + 'Z',
       }))
 
@@ -1314,6 +1315,7 @@ async function runAgentReply(
   // 流式生成回复
   let fullContent = '' // 仅文本内容 — 存入 DB，参与 agent-to-agent 上下文
   let displayContent = '' // 文本 + 思考 — 流式推送给前端
+  let thinkingContent = '' // 仅思考过程 — 存入 DB 的 thinking_content 列，回复后仍可查看
   const msgId = uuid()
 
   // 记录执行前的包依赖快照
@@ -1376,6 +1378,8 @@ async function runAgentReply(
       // 思考内容只流式展示，不进入存储和上下文
       if (chunk.kind !== 'thinking') {
         fullContent += chunk.content
+      } else {
+        thinkingContent += chunk.content
       }
       io.to(`session:${sessionId}`).emit(Events.AGENT_TYPING, {
         sessionId,
@@ -1405,7 +1409,8 @@ async function runAgentReply(
     sessionId,
     agent.id,
     fullContent,
-    triggerMsg.taskId || null
+    triggerMsg.taskId || null,
+    thinkingContent || undefined
   )
 
   const estimatedPromptLen = llmMessages.reduce((sum, m) => sum + m.content.length, 0)
@@ -1445,6 +1450,7 @@ async function runAgentReply(
     content: fullContent,
     mentions: [] as string[],
     taskId: triggerMsg.taskId || undefined,
+    thinkingContent: thinkingContent || undefined,
     createdAt: new Date().toISOString(),
   }
 

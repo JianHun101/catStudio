@@ -650,6 +650,21 @@ function statusLabelZh(status: string): string {
                 </div>
                 <div class="msg-bubble">
                   <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
+                  <details
+                    v-if="msg.thinkingContent"
+                    class="thinking-block stored-thinking"
+                    :open="false"
+                  >
+                    <summary class="thinking-summary">
+                      <span class="thinking-icon">🐾</span>
+                      <span class="thinking-label">思考过程</span>
+                      <span class="thinking-chevron">▶</span>
+                    </summary>
+                    <div
+                      class="thinking-content"
+                      v-html="renderMarkdown(msg.thinkingContent.replace(/^\[思考\]\s*/gm, ''))"
+                    ></div>
+                  </details>
                   <time class="msg-time" :datetime="msg.createdAt">{{
                     formatTime(msg.createdAt)
                   }}</time>
@@ -1561,6 +1576,13 @@ function statusLabelZh(status: string): string {
   line-height: 1.6;
   color: var(--text-secondary);
   border-top: 1px solid rgba(180, 160, 140, 0.18);
+}
+
+/* 修复列表序号被 overflow:hidden 裁剪的问题 */
+.thinking-content :deep(ol),
+.thinking-content :deep(ul) {
+  list-style-position: inside;
+  padding-left: 0.4em;
 }
 
 /* ─── Input Area ────────────────────────── */
