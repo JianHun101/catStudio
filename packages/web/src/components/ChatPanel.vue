@@ -649,7 +649,6 @@ function statusLabelZh(status: string): string {
                   {{ senderName(msg.agentId) }}
                 </div>
                 <div class="msg-bubble">
-                  <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
                   <details
                     v-if="msg.thinkingContent"
                     class="thinking-block stored-thinking"
@@ -665,6 +664,7 @@ function statusLabelZh(status: string): string {
                       v-html="renderMarkdown(msg.thinkingContent.replace(/^\[思考\]\s*/gm, ''))"
                     ></div>
                   </details>
+                  <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
                   <time class="msg-time" :datetime="msg.createdAt">{{
                     formatTime(msg.createdAt)
                   }}</time>
