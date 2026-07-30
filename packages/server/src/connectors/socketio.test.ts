@@ -559,3 +559,110 @@ describe('socketio connector', () => {
     })
   })
 })
+
+// ═══ Pure utility functions (no DB/mock dependencies) ═══
+
+import {
+  formatAudienceTag,
+  formatAgentMessage,
+  formatUserMessage,
+  parseSkillModules,
+} from './socketio.js'
+
+describe('parseSkillModules', () => {
+  it('returns empty array for null', () => {
+    expect(parseSkillModules(null)).toEqual([])
+  })
+
+  it('returns empty array for empty string', () => {
+    expect(parseSkillModules('')).toEqual([])
+  })
+
+  it('parses JSON array of skills', () => {
+    expect(parseSkillModules('["code-review","testing","docs"]')).toEqual([
+      'code-review',
+      'testing',
+      'docs',
+    ])
+  })
+
+  it('returns empty array for invalid JSON', () => {
+    expect(parseSkillModules('not-json')).toEqual([])
+  })
+
+  it('returns empty array for JSON that is not an array', () => {
+    expect(parseSkillModules('{"key":"value"}')).toEqual([])
+  })
+
+  it('returns empty array for empty JSON array', () => {
+    expect(parseSkillModules('[]')).toEqual([])
+  })
+})
+
+describe('formatAudienceTag', () => {
+  it('returns "对你" when agent is mentioned', () => {
+    expect(formatAudienceTag(['店长', '服务员'], '店长')).toBe('对你')
+  })
+
+  it('returns "对大家" when agent is not mentioned', () => {
+    expect(formatAudienceTag(['服务员'], '店长')).toBe('对大家')
+  })
+
+  it('returns "对大家" for empty mentions', () => {
+    expect(formatAudienceTag([], '店长')).toBe('对大家')
+  })
+})
+
+describe('formatAgentMessage', () => {
+  it('formats basic agent message without mentions or model', () => {
+    const result = formatAgentMessage('店长', '你好，我是店长。')
+    expect(result).toBe('Direct message from 店长\n\n你好，我是店长。')
+  })
+
+  it('includes reply-to mentions', () => {
+    const result = formatAgentMessage('服务员', '我来处理。', ['店长'])
+    expect(result).toBe('Direct message from 服务员; reply to 店长\n\n我来处理。')
+  })
+
+  it('includes multiple mention targets', () => {
+    const result = formatAgentMessage('吐槽猫', '代码已审查。', ['店长', '服务员'])
+    expect(result).toBe('Direct message from 吐槽猫; reply to 店长, 服务员\n\n代码已审查。')
+  })
+
+  it('includes model when provided', () => {
+    const result = formatAgentMessage('店长', '分析完成。', [], 'deepseek-v4-pro')
+    expect(result).toBe('Direct message from 店长 [deepseek-v4-pro]\n\n分析完成。')
+  })
+
+  it('includes both model and mentions', () => {
+    const result = formatAgentMessage('店长', '修正完毕。', ['吐槽猫'], 'claude-opus-4-8')
+    expect(result).toBe('Direct message from 店长 [claude-opus-4-8]; reply to 吐槽猫\n\n修正完毕。')
+  })
+})
+
+describe('formatUserMessage', () => {
+  it('formats last user message with mentions and audience', () => {
+    const result = formatUserMessage('你好', ['店长'], '对你', true)
+    expect(result).toBe('用户（@了店长）对你：你好')
+  })
+
+  it('formats last user message without mentions', () => {
+    const result = formatUserMessage('大家好啊', [], '对大家', true)
+    expect(result).toBe('用户对大家：大家好啊')
+  })
+
+  it('formats non-last user message', () => {
+    const result = formatUserMessage('上一句话', ['店长'], '对你', false)
+    expect(result).toBe('用户（@了店长）：上一句话')
+  })
+
+  it('formats non-last message without mentions', () => {
+    const result = formatUserMessage('普通消息', [], '对大家', false)
+    expect(result).toBe('用户：普通消息')
+  })
+
+  it('joins multiple mention names', () => {
+    const result = formatUserMessage('帮我看看', ['店长', '服务员', '吐槽猫'], '对大家', false)
+    expect(result).toBe('用户（@了店长、服务员、吐槽猫）：帮我看看')
+  })
+})

@@ -661,7 +661,7 @@ function statusLabelZh(status: string): string {
                     </summary>
                     <div
                       class="thinking-content"
-                      v-html="renderMarkdown(msg.thinkingContent.replace(/^\[思考\]\s*/gm, ''))"
+                      v-html="renderMarkdown(msg.thinkingContent.replace(/\[思考\]\s*/g, ''))"
                     ></div>
                   </details>
                   <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
@@ -1793,7 +1793,7 @@ function statusLabelZh(status: string): string {
 /* ─── Send button — light theme contrast fix ── */
 
 [data-theme='light'] .chat-panel .btn-send {
-  color: #3c3028;
+  color: var(--text-primary);
 }
 
 /* ─── Inline formatting ────────────────── */
@@ -1838,7 +1838,7 @@ function statusLabelZh(status: string): string {
 /* ─── Code blocks ───────────────────────── */
 
 .chat-panel .msg-text pre {
-  background: #1a1714;
+  background: var(--syntax-bg);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
   padding: 12px 14px;
@@ -1850,7 +1850,7 @@ function statusLabelZh(status: string): string {
   background: none;
   padding: 0;
   font-size: 0.85em;
-  color: #cdd6f4;
+  color: var(--syntax-text);
   line-height: 1.55;
   border-radius: 0;
   word-break: normal;
@@ -1860,111 +1860,111 @@ function statusLabelZh(status: string): string {
 /* ─── hljs classes (highlight.js injected by marked) ─── */
 
 .chat-panel .msg-text pre code .hljs-keyword {
-  color: #cba6f7;
+  color: var(--syntax-keyword);
 }
 .chat-panel .msg-text pre code .hljs-string {
-  color: #a6e3a1;
+  color: var(--syntax-string);
 }
 .chat-panel .msg-text pre code .hljs-number {
-  color: #fab387;
+  color: var(--syntax-number);
 }
 .chat-panel .msg-text pre code .hljs-comment {
-  color: #6c7086;
+  color: var(--syntax-comment);
   font-style: italic;
 }
 .chat-panel .msg-text pre code .hljs-function {
-  color: #89b4fa;
+  color: var(--syntax-function);
 }
 .chat-panel .msg-text pre code .hljs-title {
-  color: #89b4fa;
+  color: var(--syntax-function);
 }
 .chat-panel .msg-text pre code .hljs-type {
-  color: #f9e2af;
+  color: var(--syntax-type);
 }
 .chat-panel .msg-text pre code .hljs-attr {
-  color: #89dceb;
+  color: var(--syntax-attr);
 }
 .chat-panel .msg-text pre code .hljs-built_in {
-  color: #f38ba8;
+  color: var(--syntax-builtin);
 }
 .chat-panel .msg-text pre code .hljs-literal {
-  color: #fab387;
+  color: var(--syntax-number);
 }
 .chat-panel .msg-text pre code .hljs-params {
-  color: #f2cdcd;
+  color: var(--syntax-params);
 }
 .chat-panel .msg-text pre code .hljs-property {
-  color: #89dceb;
+  color: var(--syntax-attr);
 }
 .chat-panel .msg-text pre code .hljs-punctuation {
-  color: #bac2de;
+  color: var(--syntax-punctuation);
 }
 .chat-panel .msg-text pre code .hljs-regexp {
-  color: #f38ba8;
+  color: var(--syntax-builtin);
 }
 .chat-panel .msg-text pre code .hljs-meta {
-  color: #f9e2af;
+  color: var(--syntax-type);
 }
 .chat-panel .msg-text pre code .hljs-selector-class {
-  color: #a6e3a1;
+  color: var(--syntax-string);
 }
 
 /* ─── Code blocks — light theme overrides ─── */
 
 [data-theme='light'] .chat-panel .msg-text pre {
-  background: #f4efe6;
+  background: var(--syntax-bg);
   border-color: rgba(0, 0, 0, 0.08);
 }
 
 [data-theme='light'] .chat-panel .msg-text pre code {
-  color: #4a3f35;
+  color: var(--syntax-text);
 }
 
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-keyword {
-  color: #8b5c9e;
+  color: var(--syntax-keyword);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-string {
-  color: #4a8b5c;
+  color: var(--syntax-string);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-number {
-  color: #c07040;
+  color: var(--syntax-number);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-comment {
-  color: #a09888;
+  color: var(--syntax-comment);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-function,
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-title {
-  color: #5c7db8;
+  color: var(--syntax-function);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-type {
-  color: #c89840;
+  color: var(--syntax-type);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-attr {
-  color: #3d8a8a;
+  color: var(--syntax-attr);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-built_in {
-  color: #c47088;
+  color: var(--syntax-builtin);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-literal {
-  color: #c07040;
+  color: var(--syntax-number);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-params {
-  color: #6b5c4a;
+  color: var(--syntax-params);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-property {
-  color: #3d8a8a;
+  color: var(--syntax-attr);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-punctuation {
-  color: #8a7d6e;
+  color: var(--syntax-punctuation);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-regexp {
-  color: #c47088;
+  color: var(--syntax-builtin);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-meta {
-  color: #c89840;
+  color: var(--syntax-type);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-selector-class {
-  color: #4a8b5c;
+  color: var(--syntax-string);
 }
 
 /* ─── Headings ──────────────────────────── */
