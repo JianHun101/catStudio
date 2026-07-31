@@ -163,6 +163,31 @@ describe('memory', () => {
       // 纯 @mention 消息应在嵌入前就跳过
       expect(mockEmbedText).not.toHaveBeenCalled()
     })
+
+    it('filters out one-time task instructions before embedding', async () => {
+      await memoryModule.saveMessageMemory('s1', '帮我修一下登录bug', 'msg-1', ['agent-1'])
+      // 一次性指令在嵌入前就被筛选拦截
+      expect(mockEmbedText).not.toHaveBeenCalled()
+      const db = (await import('../db/index.js')).getDb()
+      const count = (db.prepare('SELECT COUNT(*) as cnt FROM memories').get() as { cnt: number })
+        .cnt
+      expect(count).toBe(0)
+    })
+
+    it('stores standing preferences (filter allows)', async () => {
+      const db = (await import('../db/index.js')).getDb()
+      db.prepare(
+        `
+        INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+        VALUES ('agent-1', '店长', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
+      `
+      ).run()
+
+      await memoryModule.saveMessageMemory('s1', '以后都用中文回复', 'msg-1', ['agent-1'])
+      expect(mockEmbedText).toHaveBeenCalledWith('以后都用中文回复')
+      const row = db.prepare('SELECT content FROM memories').get() as { content: string }
+      expect(row.content).toBe('以后都用中文回复')
+    })
   })
 
   describe('searchMemories', () => {

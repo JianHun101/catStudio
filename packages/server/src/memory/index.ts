@@ -12,6 +12,8 @@
  *   MEMORY_UPDATE_THRESHOLD     — 更新余弦距离阈值（默认 0.35），去重与更新之间的记忆会被 UPDATE 而非 INSERT
  *   MEMORY_DEDUP_ENABLED        — 是否开启去重/更新（默认 "1"），设为 "0" 关闭
  *   MEMORY_QUERY_REWRITE_ENABLED— 查询改写开关（默认 "1"），见 query-rewrite.ts
+ *   MEMORY_FILTER_ENABLED       — 入库筛选开关（默认 "1"），见 filter.ts
+ *   MEMORY_MIN_CONTENT_LENGTH   — 最小入库内容长度（默认 4），短于该值的消息不入库
  *
  * 三段式逻辑:
  *   距离 < DEDUP_THRESHOLD      → 跳过（几乎相同，无需存储）
@@ -23,6 +25,7 @@ import { v4 as uuid } from 'uuid'
 import { memories as memoriesRepo } from '../db/repository/index.js'
 import { embedText, isMemoryEnabled } from './embedding.js'
 import { rewriteRetrievalQueries } from './query-rewrite.js'
+import { evaluateMemoryContent, isMemoryFilterEnabled } from './filter.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('memory')
@@ -65,6 +68,16 @@ export async function saveMessageMemory(
   if (!cleanContent) {
     log.debug('消息仅含 @mention，跳过记忆存储', { content })
     return
+  }
+
+  // 入库筛选：deny-list，只过滤高置信度垃圾（应答词/纯填充/一次性指令）。
+  // 长期/偏好标记命中时无条件存储——约定的优先级高于指令特征。
+  if (isMemoryFilterEnabled()) {
+    const verdict = evaluateMemoryContent(cleanContent)
+    if (!verdict.store) {
+      log.debug('记忆筛选：跳过', { reason: verdict.reason, content: cleanContent })
+      return
+    }
   }
 
   let embedding: number[]
