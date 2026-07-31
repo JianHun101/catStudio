@@ -129,6 +129,12 @@ if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
 
   # 自动投递交接文档（如果存在）
   if [ -f "$HANDOFF_FILE" ]; then
+    # 重新生成覆盖全部未审查 commit 的交接文档（合并多 commit 一轮审）
+    # 失败时保留旧草稿（handoff-gen 失败不删文件），继续投递
+    if command -v node >/dev/null 2>&1; then
+      node scripts/handoff-gen.mjs --no-post --range="$LAST_REVIEWED..$HEAD_SHA" >/dev/null 2>&1 \
+        && echo "   ✅ 交接文档已按未审查范围 ($(git rev-parse --short "$LAST_REVIEWED")..$(git rev-parse --short "$HEAD_SHA")) 重新生成"
+    fi
     submit_handoff
   else
     echo "💡 提示：如果 post-commit hook 已自动投递到 cat-study，审查可能正在进行中。"
