@@ -371,6 +371,77 @@ describe('socketio connector', () => {
     })
   })
 
+  // ─── executeAgentsSerial 双执行防护 ──────────
+  // 回归测试：08:43:15 双补填事故 — 同一条消息被 executeAgentsSerial
+  // 立即执行一次、队列排空又执行一次，产生两条重复回复。
+
+  describe('executeAgentsSerial — 双执行防护', () => {
+    const agentCfg = {
+      id: 'agent-1',
+      name: '店长',
+      avatar: '🐱',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: 'sk-test',
+    }
+
+    it('agent 正在处理消息 A 时，消息 B 不应立即执行（留在队列等排空）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+
+      // 模拟：dispatch 已把 A 标记到槽位（busy + currentTrigger=A），B 在 FIFO 队列
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 1,
+        currentTriggerMessageId: 'msg-A',
+      })
+      mockRoomEmit.mockClear()
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [agentCfg as any],
+        { id: 'msg-B', content: '@店长 补填文档', mentions: ['店长'] },
+        'trace-double-exec'
+      )
+
+      // B 未执行：无 thinking/replying 状态事件，也无任何 NEW_MESSAGE
+      const emitted = mockRoomEmit.mock.calls.map((c: any[]) => c[0])
+      expect(emitted).not.toContain(Events.MESSAGE_AGENT_STATUS)
+      expect(emitted).not.toContain(Events.NEW_MESSAGE)
+    })
+
+    it('completeExecution 弹出队列后（currentTrigger 已更新为 B），B 正常执行', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+
+      // 模拟：A 已完成，completeExecution 弹出 B 并更新 currentTrigger=B
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-B',
+      })
+      mockRoomEmit.mockClear()
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [agentCfg as any],
+        { id: 'msg-B', content: '@店长 补填文档', mentions: ['店长'] },
+        'trace-double-exec-2'
+      )
+
+      // B 被执行：至少出现 thinking 状态（registry mock 返回 null adapter，
+      // runAgentReply 会在 chatStream 处失败并 emit 错误 NEW_MESSAGE）
+      const emitted = mockRoomEmit.mock.calls.map((c: any[]) => c[0])
+      expect(emitted).toContain(Events.MESSAGE_AGENT_STATUS)
+    })
+  })
+
   // ─── MESSAGE_RETRACT ──────────────────────
 
   describe('MESSAGE_RETRACT', () => {

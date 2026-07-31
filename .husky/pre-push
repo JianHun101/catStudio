@@ -9,6 +9,10 @@ GATE_FILE=".push-gate"
 HANDOFF_FILE=".handoff-draft.md"
 CATSTUDY_URL="${CATSTUDY_API_URL:-http://127.0.0.1:3200}"
 
+# 投递目标会话（店长工作会话）。必须显式指定——API 按 updated_at 排序，
+# 不指定会投到"最新活跃会话"（曾打到 UI优化）。会话重建后更新此值。
+export CATSTUDY_SESSION_ID=46fbcdc0-5ab4-4d92-8808-68322bdfb91c
+
 # ─── 辅助：获取或创建 session ──────────────────────────
 
 get_session_id() {
@@ -132,8 +136,14 @@ if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
     # 重新生成覆盖全部未审查 commit 的交接文档（合并多 commit 一轮审）
     # 失败时保留旧草稿（handoff-gen 失败不删文件），继续投递
     if command -v node >/dev/null 2>&1; then
-      node scripts/handoff-gen.mjs --no-post --range="$LAST_REVIEWED..$HEAD_SHA" >/dev/null 2>&1 \
-        && echo "   ✅ 交接文档已按未审查范围 ($(git rev-parse --short "$LAST_REVIEWED")..$(git rev-parse --short "$HEAD_SHA")) 重新生成"
+      # 成功与否以草稿是否真的包含目标范围为准——handoff-gen 失败也 exit 0，
+      # 只靠退出码判断会输出假成功提示（曾因 parseArgs 只认空格形式静默丢失 = 形式）
+      if node scripts/handoff-gen.mjs --no-post --range="$LAST_REVIEWED..$HEAD_SHA" >/dev/null 2>&1 \
+        && grep -qF "$LAST_REVIEWED..$HEAD_SHA" "$HANDOFF_FILE" 2>/dev/null; then
+        echo "   ✅ 交接文档已按未审查范围 ($(git rev-parse --short "$LAST_REVIEWED")..$(git rev-parse --short "$HEAD_SHA")) 重新生成"
+      else
+        echo "   ⚠️ 交接文档按未审查范围重新生成失败，沿用旧草稿投递（可能只覆盖最后一个 commit）"
+      fi
     fi
     submit_handoff
   else

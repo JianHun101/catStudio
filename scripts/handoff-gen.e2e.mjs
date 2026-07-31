@@ -539,6 +539,66 @@ rmSync(NO_POST_TMP, { recursive: true, force: true })
 
 console.log('')
 
+// ═══ 测试组 9: --range 等号形式（pre-push 传 --range=X..Y） ═══════════════
+
+console.log('📦 测试组 9: --range 等号形式')
+
+// 构建: 3 个 commit（基线 → 改 a.ts → 新增 b.ts），范围 HEAD~2..HEAD 应覆盖 2 个文件
+const RANGE_TMP = join(ROOT, '.handoff-test-range')
+if (existsSync(RANGE_TMP)) rmSync(RANGE_TMP, { recursive: true, force: true })
+mkdirSync(RANGE_TMP, { recursive: true })
+execSync('git init', { cwd: RANGE_TMP, stdio: 'pipe' })
+execSync('git config user.email "test@catstudy.local"', { cwd: RANGE_TMP, stdio: 'pipe' })
+execSync('git config user.name "Test Cat"', { cwd: RANGE_TMP, stdio: 'pipe' })
+
+const rangeFile = join(RANGE_TMP, 'a.ts')
+writeFileSync(rangeFile, 'export const a = 1', 'utf-8')
+execSync('git add -A', { cwd: RANGE_TMP, stdio: 'pipe' })
+execSync('git commit -m "feat: baseline"', { cwd: RANGE_TMP, stdio: 'pipe' })
+
+writeFileSync(rangeFile, 'export const a = 2', 'utf-8')
+execSync('git add -A', { cwd: RANGE_TMP, stdio: 'pipe' })
+execSync('git commit -m "feat: change a"', { cwd: RANGE_TMP, stdio: 'pipe' })
+
+writeFileSync(join(RANGE_TMP, 'b.ts'), 'export const b = 1', 'utf-8')
+execSync('git add -A', { cwd: RANGE_TMP, stdio: 'pipe' })
+execSync('git commit -m "feat: add b"', { cwd: RANGE_TMP, stdio: 'pipe' })
+
+function rangeGit(cmd) {
+  return execSync(`git ${cmd}`, { cwd: RANGE_TMP, encoding: 'utf-8', stdio: 'pipe' }).trim()
+}
+const rangeBase = rangeGit('rev-parse HEAD~2')
+const rangeHead = rangeGit('rev-parse HEAD')
+
+// 9a: = 形式 --range=...（pre-push 真实用法，完整 SHA）应被解析生效
+execSync(
+  `node ${HANDOFF_SCRIPT} --cwd "${RANGE_TMP}" --no-post --range="${rangeBase}..${rangeHead}"`,
+  { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe', timeout: 10000 }
+)
+const rangeDraft = readFileSync(join(RANGE_TMP, '.handoff-draft.md'), 'utf-8')
+assertContains(
+  rangeDraft,
+  `${rangeBase}..${rangeHead}`,
+  '= 形式 range 应生效（审查须知含完整范围）'
+)
+assertContains(rangeDraft, 'a.ts', '范围应覆盖 commit 2 的改动（a.ts）')
+assertContains(rangeDraft, 'b.ts', '范围应覆盖 commit 3 的改动（b.ts）')
+assertNotContains(rangeDraft, 'git diff HEAD~1..HEAD', '不应回退默认范围 HEAD~1..HEAD')
+console.log('  9a: = 形式 range 生效 ✅')
+
+// 9b: 空格形式 --range X..Y 向后兼容
+execSync(
+  `node ${HANDOFF_SCRIPT} --cwd "${RANGE_TMP}" --no-post --range ${rangeBase}..${rangeHead}`,
+  { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe', timeout: 10000 }
+)
+const spaceDraft = readFileSync(join(RANGE_TMP, '.handoff-draft.md'), 'utf-8')
+assertContains(spaceDraft, `${rangeBase}..${rangeHead}`, '空格形式 range 仍应生效')
+console.log('  9b: 空格形式 range 向后兼容 ✅')
+
+rmSync(RANGE_TMP, { recursive: true, force: true })
+
+console.log('')
+
 // ─── Cleanup ────────────────────────────────────────────────
 
 rmSync(TMP, { recursive: true, force: true })

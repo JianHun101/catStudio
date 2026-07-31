@@ -6,10 +6,11 @@
  * 补完后转发给 @吐槽猫 审查——全程不需要用户手动干预。
  *
  * 用法:
- *   node scripts/handoff-gen.mjs              # 分析 HEAD~1..HEAD，自动投递到 cat-study
- *   node scripts/handoff-gen.mjs --no-post    # 只生成 .handoff-draft.md，不投递
- *   node scripts/handoff-gen.mjs --range=X..Y # 分析指定范围
- *   node scripts/handoff-gen.mjs --cwd=/path  # 指定仓库路径
+ *   node scripts/handoff-gen.mjs                    # 分析 HEAD~1..HEAD，自动投递到 cat-study
+ *   node scripts/handoff-gen.mjs --no-post          # 只生成 .handoff-draft.md，不投递
+ *   node scripts/handoff-gen.mjs --range=X..Y       # 分析指定范围（= 或空格形式均可；
+ *                                                   #   pre-push 门禁用 = 形式传完整 SHA）
+ *   node scripts/handoff-gen.mjs --cwd=/path        # 指定仓库路径
  *
  * 环境变量:
  *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
@@ -142,11 +143,22 @@ export function generateHandoff(opts = {}) {
 function parseArgs(argv) {
   const opts = {}
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--range' && i + 1 < argv.length) {
+    const arg = argv[i]
+    // 等号形式 --range=X..Y / --cwd=/path（pre-push hook 传 --range=X..Y）
+    // 只认空格形式时参数会静默丢失、回退默认 HEAD~1..HEAD——pre-push 合并审功能曾因此从未生效
+    const eqMatch = /^--([a-z-]+)=(.*)$/.exec(arg)
+    if (eqMatch) {
+      const [, key, value] = eqMatch
+      if (key === 'range') opts.range = value
+      else if (key === 'cwd') opts.cwd = value
+      else if (key === 'no-post') opts.noPost = true
+      continue
+    }
+    if (arg === '--range' && i + 1 < argv.length) {
       opts.range = argv[++i]
-    } else if (argv[i] === '--cwd' && i + 1 < argv.length) {
+    } else if (arg === '--cwd' && i + 1 < argv.length) {
       opts.cwd = argv[++i]
-    } else if (argv[i] === '--no-post') {
+    } else if (arg === '--no-post') {
       opts.noPost = true
     }
   }
@@ -614,7 +626,8 @@ async function tryPostToCatstudy(content, cwd) {
         )
       }
     } catch {
-      // server 不可达，继续走文件生成路径
+      // server 不可达，继续走文件生成路径（下方无 sessionId 分支会打印告警）
+      console.log('[handoff-gen] ⚠️  cat-study API 不可达，跳过会话自动选择')
     }
   }
 
@@ -664,6 +677,10 @@ async function tryPostToCatstudy(content, cwd) {
       console.log(
         `[handoff-gen] ⚠️  投递失败 (HTTP ${res.status}${errText ? ': ' + errText.slice(0, 120) : ''})`
       )
+      if (res.status >= 400 && res.status < 500 && process.env.CATSTUDY_SESSION_ID) {
+        console.log('  🔍 目标会话 ID 来自环境变量/hook 硬编码——4xx 通常意味着会话已删除或重建')
+        console.log('    请更新 .husky/post-commit 和 .husky/pre-push 中的 CATSTUDY_SESSION_ID')
+      }
       return false
     }
   } catch (err) {

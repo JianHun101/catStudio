@@ -2,4 +2,9 @@
 # post-commit 交接文档自动生成
 # 每次 commit 后自动调用 handoff-gen.mjs 生成 .handoff-draft.md
 # 不阻断 commit——失败只告警，不影响工作流
+
+# 投递目标会话（店长工作会话）。必须显式指定——/api/sessions 按 updated_at
+# 排序，不指定会投到"最新活跃会话"（曾打到 UI优化）。会话重建后更新此值。
+export CATSTUDY_SESSION_ID=46fbcdc0-5ab4-4d92-8808-68322bdfb91c
+
 node scripts/handoff-gen.mjs
