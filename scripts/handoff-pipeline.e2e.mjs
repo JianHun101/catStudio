@@ -19,6 +19,9 @@
  *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
  *   CATSTUDY_SESSION_ID   目标会话 ID（自动查找包含店长+吐槽猫的会话）
  *
+ * 测试期间会在 git 根下创建 scripts/.e2e-testing 标记文件，
+ * 通知 server 跳过 agent 自动快照 commit（环境变量不跨进程，必须用文件）。
+ *
  * 前置条件:
  *   1. cat-study server 必须运行（pnpm dev:server）
  *   2. seed 数据必须已初始化（自动，首次启动时完成）
@@ -46,6 +49,7 @@ const POLL_INTERVAL_MS = 2000 // 轮询间隔
 const DEFAULT_TIMEOUT_S = 300 // 默认超时（5 分钟）
 const AGENT_REPLY_TIMEOUT_S = 180 // 单个 Agent 回复超时
 const TEST_TRIGGER_FILE = 'scripts/.e2e-test-trigger.txt'
+const E2E_MARKER_FILE = 'scripts/.e2e-testing'
 
 // ─── Claude Code CLI 子进程检测 ─────────────────────────────────
 
@@ -73,6 +77,43 @@ if (isRunningInsideClaudeCode()) {
   console.log('   请在终端中直接运行: node scripts/handoff-pipeline.e2e.mjs')
   process.exit(0)
 }
+
+// ─── e2e 标记文件 ────────────────────────────────────────────────
+//
+// server 与 e2e 是独立进程，环境变量不跨进程传递。
+// 用标记文件（git 根下 scripts/.e2e-testing）让 server 的 gitCommit()
+// 感知测试状态：文件存在 → 跳过 agent 自动快照 commit。
+// 否则 agent 回复触发的 catstudy [uuid] commit 会被 stepCleanup 的
+// git reset --soft 一起回退，破坏 execution_logs.commit_hash 指向的历史。
+
+function e2eMarkerPath() {
+  return resolve(ROOT, E2E_MARKER_FILE)
+}
+
+function createE2eMarker() {
+  writeFileSync(
+    e2eMarkerPath(),
+    `# e2e 测试进行中 — server 应跳过 auto-commit\n# 由 handoff-pipeline.e2e.mjs 创建/清理\n`,
+    'utf-8'
+  )
+}
+
+function removeE2eMarker() {
+  try {
+    if (existsSync(e2eMarkerPath())) {
+      unlinkSync(e2eMarkerPath())
+      log('   ', `已删除 ${E2E_MARKER_FILE}`)
+    }
+  } catch {
+    // 删除失败不阻塞主流程
+  }
+}
+
+// Ctrl+C 时也要清理标记文件，否则残留标记会永久禁用 server 的 auto-commit
+process.on('SIGINT', () => {
+  removeE2eMarker()
+  process.exit(130)
+})
 
 // ─── 工具函数 ────────────────────────────────────────────────────
 
@@ -256,10 +297,10 @@ function stepTriggerRealHandoff(sessionId) {
   // 5. 设置环境变量，确保 handoff-gen 投递到正确的会话
   process.env.CATSTUDY_SESSION_ID = sessionId
 
-  // 5b. 禁止 catstudy agent 在测试期间产生自动快照 commit
-  //     否则 agent 回复触发的 catstudy [uuid] commit 会被 reset --soft 一起回退
-  const prevSkipAutoCommit = process.env.CATSTUDY_SKIP_AUTO_COMMIT
-  process.env.CATSTUDY_SKIP_AUTO_COMMIT = 'true'
+  // 5b. 创建 e2e 标记文件，禁止 catstudy agent 在测试期间产生自动快照 commit
+  //     注意：server 是独立进程，环境变量传不过去——必须用标记文件（跨进程可见）
+  createE2eMarker()
+  log('   ', `e2e 标记文件已创建: ${E2E_MARKER_FILE}`)
 
   // 6. git add + commit（post-commit hook 同步执行）
   let commitHash = null
@@ -276,7 +317,7 @@ function stepTriggerRealHandoff(sessionId) {
     return { success: false, commitHash: null, headBefore }
   }
 
-  return { success: true, commitHash, headBefore, prevSkipAutoCommit }
+  return { success: true, commitHash, headBefore }
 }
 
 /**
@@ -390,14 +431,16 @@ async function stepWaitForReviewer(sessionId, startTime, dmReplyId) {
 /**
  * Step 6: 清理测试 commit 和文件
  *
- * 使用 git rebase --onto 精确删除测试 commit——不会误删 catstudy agent
- * 在测试期间产生的中间 commit（如果有）。
+ * 单 commit 场景：git reset --soft 回退测试 commit（无副作用）。
+ * 多 commit 场景（可能包含 catstudy 快照 commit）：中止清理并提示手动处理——
+ * 绝不 reset，否则会连快照 commit 一起回退，破坏 execution_logs.commit_hash 指向的历史。
  */
 function stepCleanup(headBefore, testCommitHash) {
   if (!headBefore) return
 
   log('🧹', 'Step 6/7: 清理测试 commit...')
 
+  let ok = true
   try {
     // 检查测试 commit 和 headBefore 之间是否有额外的中间 commit
     const currentHead = safeGit('rev-parse HEAD')
@@ -406,46 +449,54 @@ function stepCleanup(headBefore, testCommitHash) {
 
     if (intermediateHashes.length === 0) {
       log('   ', '无中间 commit，跳过清理')
-      return true
-    }
-
-    if (intermediateHashes.length === 1) {
+    } else if (intermediateHashes.length === 1) {
       // 只有一个 commit — 正常的测试场景，reset --soft 安全
       git(`reset --soft ${headBefore}`)
       log('   ', `git reset --soft ${headBefore.slice(0, 8)}`)
+
+      // 删除测试触发文件
+      const triggerPath = resolve(ROOT, TEST_TRIGGER_FILE)
+      if (existsSync(triggerPath)) {
+        unlinkSync(triggerPath)
+        log('   ', `已删除 ${TEST_TRIGGER_FILE}`)
+      }
+      // 从暂存区移除
+      try {
+        git(`reset HEAD -- ${TEST_TRIGGER_FILE}`)
+      } catch {
+        // 文件可能已被删除，reset 失败是正常的
+      }
     } else {
-      // 有多个 commit — 可能包含 catstudy agent 在测试期间产生的快照
-      log('⚠️', `检测到 ${intermediateHashes.length} 个中间 commit（含测试 commit）`)
+      // 多个中间 commit — 可能包含 catstudy agent 在测试期间产生的快照 commit
+      // 绝不 reset：会连带回退快照 commit。中止清理，由开发者手动核实。
+      ok = false
+      log('❌', `检测到 ${intermediateHashes.length} 个中间 commit（含测试 commit）`)
       for (const h of intermediateHashes) {
         const msg = safeGit(`log -1 --pretty=%B ${h}`)
         log('   ', `  ${h.slice(0, 8)}: ${msg?.split('\n')[0]?.slice(0, 60) || '?'}`)
       }
-      // 使用 rebase --onto 精确删除测试 commit，保留其他 commit
-      // 如果 catstudy auto-commit 已被 CATSTUDY_SKIP_AUTO_COMMIT 禁用，
-      // 则本不应该走到这里——此检查是防御性兜底
-      log('⚠️', '检测到意外中间 commit，使用 reset --soft（手动核实）')
-      git(`reset --soft ${headBefore}`)
+      console.log('')
+      console.log('   ⚠️ 中止自动清理 — 防止误删 catstudy 快照 commit。')
+      console.log(
+        `   仅回退测试 commit（保留快照）: git rebase --onto ${headBefore.slice(0, 8)} ${testCommitHash ? testCommitHash.slice(0, 8) : '<test-commit>'} <HEAD>`
+      )
+      console.log(`   全部回退（快照将丢失，不推荐）: git reset --soft ${headBefore.slice(0, 8)}`)
+      console.log('')
     }
 
-    // 删除测试触发文件
-    const triggerPath = resolve(ROOT, TEST_TRIGGER_FILE)
-    if (existsSync(triggerPath)) {
-      unlinkSync(triggerPath)
-      log('   ', `已删除 ${TEST_TRIGGER_FILE}`)
-    }
+    // 无论结果如何都清理标记文件，恢复 server 的 auto-commit（含 Ctrl+C 残留防御）
+    removeE2eMarker()
 
-    // 从暂存区移除
-    try {
-      git(`reset HEAD -- ${TEST_TRIGGER_FILE}`)
-    } catch {
-      // 文件可能已被删除，reset 失败是正常的
+    if (ok) {
+      log('✅', '清理完成')
+    } else {
+      log('❌', '清理中止 — 请按上方提示手动处理')
     }
-
-    log('✅', '清理完成')
-    return true
+    return ok
   } catch (err) {
     log('⚠️', `清理失败: ${err.message}`)
     console.log('   可手动清理: git reset --soft HEAD~1')
+    removeE2eMarker()
     return false
   }
 }
@@ -610,16 +661,14 @@ async function main() {
 
   // Step 6: 清理测试 commit
   if (args.cleanup) {
-    stepCleanup(trigger.headBefore, trigger.commitHash)
+    if (!stepCleanup(trigger.headBefore, trigger.commitHash)) {
+      log('❌', '测试清理未完成 — 请手动处理后重试，避免污染仓库历史')
+      process.exit(2)
+    }
   } else {
     log('💡', `--no-cleanup: 测试 commit ${trigger.commitHash?.slice(0, 8)} 保留在工作区`)
-  }
-
-  // 恢复环境变量
-  if (trigger.prevSkipAutoCommit !== undefined) {
-    process.env.CATSTUDY_SKIP_AUTO_COMMIT = trigger.prevSkipAutoCommit
-  } else {
-    delete process.env.CATSTUDY_SKIP_AUTO_COMMIT
+    log('💡', `   e2e 标记文件 ${E2E_MARKER_FILE} 也保留 — server auto-commit 将继续被禁用`)
+    log('💡', `   手动恢复: 删除该文件`)
   }
 
   // Step 7: 报告

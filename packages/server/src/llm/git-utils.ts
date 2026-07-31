@@ -8,7 +8,7 @@
  */
 
 import { execSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 
@@ -24,6 +24,35 @@ function isGitRepo(): boolean {
   } catch {
     return false
   }
+}
+
+/** 获取 git 工作树根目录 */
+function getGitRoot(): string | null {
+  try {
+    return execSync('git rev-parse --show-toplevel', {
+      cwd: CWD,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * e2e 测试标记文件（相对 git 根）— 存在即跳过 auto-commit。
+ *
+ * 为什么用文件而不是环境变量：e2e 测试进程和 server 进程是两个独立进程，
+ * 环境变量不跨进程传递，server 读不到 e2e 设置的 CATSTUDY_SKIP_AUTO_COMMIT。
+ * 标记文件在共享文件系统上，双方都能看到。
+ */
+const E2E_MARKER_REL = 'scripts/.e2e-testing'
+
+/** 检查 e2e 测试标记文件是否存在 */
+function isE2ETesting(): boolean {
+  const root = getGitRoot()
+  if (!root) return false
+  return existsSync(resolve(root, E2E_MARKER_REL))
 }
 
 /** 获取当前 HEAD commit hash */
@@ -45,8 +74,9 @@ export function gitCommit(message: string): string | null {
   if (!isGitRepo()) return null
   // e2e 测试期间禁用自动快照，防止测试 commit 和 agent auto-commit 在同一时间轴竞态
   // → git reset --soft 会把测试 commit 和 catstudy 快照 commit 一起回退掉
-  if (process.env.CATSTUDY_SKIP_AUTO_COMMIT === 'true') {
-    log.info('auto commit skipped (CATSTUDY_SKIP_AUTO_COMMIT=true)', { message })
+  // 用标记文件（跨进程可见）而非环境变量——server 与 e2e 是不同进程
+  if (isE2ETesting()) {
+    log.info('auto commit skipped (e2e marker)', { message })
     return null
   }
   try {
