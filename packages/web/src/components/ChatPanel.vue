@@ -1017,6 +1017,8 @@ function statusLabelZh(status: string): string {
         aria-modal="true"
         :aria-label="`图片预览 ${previewIndex + 1} / ${previewImages.length}`"
         @click.self="closePreview"
+        @wheel.prevent
+        @touchmove.prevent
       >
         <button class="lightbox-close" aria-label="关闭大图" @click="closePreview">✕</button>
         <button
