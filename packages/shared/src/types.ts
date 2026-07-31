@@ -17,7 +17,7 @@ export interface AgentConfig {
   name: string
   avatar: string // emoji or URL
   systemPrompt: string
-  llmProvider: string // 'deepseek' | 'claude' | 'openai' | 'pi' | 'custom'
+  llmProvider: string // 'deepseek' | 'claude' | 'openai' | 'pi' | 'ollama' | 'custom'
   llmModel: string // 'deepseek-v4-pro' | 'claude-sonnet-4-6' | ...
   llmApiKey: string
   llmBaseUrl?: string // for custom providers

@@ -3,6 +3,7 @@ import { DeepSeekAdapter } from './deepseek.js'
 import { ClaudeAdapter } from './claude.js'
 import { OpenAIAdapter } from './openai.js'
 import { PiAdapter } from './pi.js'
+import { OllamaAdapter } from './ollama.js'
 import type { AgentConfig } from '@cat-study/shared'
 
 const adapters = new Map<string, LLMAdapter>()
@@ -48,6 +49,12 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       adapter = new PiAdapter({
         apiKey: agent.llmApiKey,
         model: agent.llmModel,
+      })
+      break
+    case 'ollama':
+      adapter = new OllamaAdapter({
+        model: agent.llmModel,
+        baseUrl: agent.llmBaseUrl,
       })
       break
     default:
