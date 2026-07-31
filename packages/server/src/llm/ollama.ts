@@ -11,9 +11,16 @@ interface OllamaConfig {
  * 使用原生 /api/chat 端点（stream: true 时每行一个 JSON，无 `data:` 前缀，
  * 与 OpenAI 兼容的 SSE 格式不同——这是和 deepseek.ts 解析逻辑的关键差异）。
  *
- * 视觉支持：LLMMessage.images（base64 dataURL 数组）直接透传给 /api/chat 的
- * images 字段（qwen3.5:9b 等多模态模型可用），无 images 时按纯文本发送。
+ * 视觉支持：LLMMessage.images（base64 dataURL 数组，如 data:image/png;base64,...）
+ * 会在发送前剥掉 `;base64,` 前缀再透传给 /api/chat 的 images 字段
+ * （qwen3.5:9b 等多模态模型可用）——Ollama 要求裸 base64，带前缀会报
+ * "illegal base64 data" 400。无 images 时按纯文本发送。
  */
+const toOllamaImage = (img: string): string => {
+  const marker = ';base64,'
+  const idx = img.indexOf(marker)
+  return idx >= 0 ? img.slice(idx + marker.length) : img
+}
 export class OllamaAdapter implements LLMAdapter {
   readonly provider = 'ollama'
   private model: string
@@ -35,8 +42,9 @@ export class OllamaAdapter implements LLMAdapter {
     const chatMessages = messages.map((m) => ({
       role: m.role,
       content: m.content,
-      // 视觉图片：多模态模型（qwen3.5:9b 等）识别，纯文本模型忽略此字段
-      ...(m.images && m.images.length > 0 ? { images: m.images } : {}),
+      // 视觉图片：剥掉 dataURL 前缀（Ollama 只要裸 base64），多模态模型
+      // （qwen3.5:9b 等）识别，纯文本模型忽略此字段
+      ...(m.images && m.images.length > 0 ? { images: m.images.map(toOllamaImage) } : {}),
     }))
 
     const body: any = {
