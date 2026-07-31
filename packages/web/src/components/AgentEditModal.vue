@@ -402,8 +402,8 @@ select.input {
   color: var(--accent);
   margin-top: 6px;
   padding: 6px 10px;
-  background: rgba(212, 165, 116, 0.06);
-  border: 1px solid rgba(212, 165, 116, 0.12);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-hint-border);
   border-radius: var(--radius-sm);
   line-height: 1.5;
 }

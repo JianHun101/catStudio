@@ -41,6 +41,11 @@
         --accent: #d4a574; /* 主强调色 */
         --accent-soft: rgba(212, 165, 116, 0.15); /* 背景强调 */
         --accent-glow: rgba(212, 165, 116, 0.25); /* focus 光晕 — 由 accent 派生 */
+        --accent-tint: rgba(212, 165, 116, 0.06); /* 最淡强调 — 提示框背景 */
+        --accent-msg-bg: rgba(212, 165, 116, 0.08); /* 浅强调 — 用户消息气泡背景 */
+        --accent-msg-border: rgba(212, 165, 116, 0.15); /* 浅强调 — 用户消息气泡边框 */
+        --accent-row-hover: rgba(212, 165, 116, 0.12); /* 悬停强调 — 表格行背景 */
+        --accent-hint-border: rgba(212, 165, 116, 0.12); /* 强调边框 — 提示框 */
         --accent-hover: #e0b98c; /* 悬停 */
         --accent-pink: #d4849a; /* 次强调 — 柔和玫瑰 */
         --accent-red: #e0556a; /* 危险操作 */
@@ -113,6 +118,16 @@
         --accent: #c89060;
         --accent-soft: rgba(180, 130, 80, 0.12);
         --accent-glow: rgba(200, 144, 96, 0.25); /* focus 光晕 — 对应用亮色 accent #c89060 */
+        --accent-tint: rgba(
+          180,
+          130,
+          80,
+          0.06
+        ); /* 最淡强调 — 提示框背景（沿用 --accent-soft 亮色加深 RGB 先例） */
+        --accent-msg-bg: rgba(180, 130, 80, 0.08); /* 浅强调 — 用户消息气泡背景 */
+        --accent-msg-border: rgba(180, 130, 80, 0.15); /* 浅强调 — 用户消息气泡边框 */
+        --accent-row-hover: rgba(180, 130, 80, 0.12); /* 悬停强调 — 表格行背景 */
+        --accent-hint-border: rgba(180, 130, 80, 0.12); /* 强调边框 — 提示框 */
         --accent-hover: #b07840;
         --accent-pink: #c47088;
         --accent-red: #d04458;

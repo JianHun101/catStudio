@@ -1552,8 +1552,8 @@ function statusLabelZh(status: string): string {
 }
 
 .message.user .msg-bubble {
-  background: rgba(212, 165, 116, 0.08);
-  border-color: rgba(212, 165, 116, 0.15);
+  background: var(--accent-msg-bg);
+  border-color: var(--accent-msg-border);
   border-top-right-radius: 4px;
 }
 
@@ -2608,7 +2608,7 @@ function statusLabelZh(status: string): string {
 }
 
 .chat-panel .msg-text tbody tr:hover {
-  background: rgba(212, 165, 116, 0.12);
+  background: var(--accent-row-hover);
 }
 
 .chat-panel .msg-text tbody tr:first-child td {
