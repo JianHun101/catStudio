@@ -623,26 +623,29 @@ export async function resolveCommitSessionId(cwd, serverUrl) {
     }
     console.log(`[handoff-gen] ⚠️  反查响应缺少 sessionId（消息 ${uuid}）——不投递`)
   } catch {
-    console.log(
-      `[handoff-gen] ⚠️  cat-study server 不可达 (${serverUrl})，无法反查投递目标——不投递`
-    )
+    console.log(`[handoff-gen] ⚠️  cat-study server 不可达 (${serverUrl})，无法反查投递目标`)
+    // 瞬态故障（典型场景：post-commit 撞上 dev.js 重启窗口，实测停机 ~1.4s）：
+    // 抛带标记错误，由调用方按"瞬态 → 延迟重试"处理；404/无 uuid 等确定性失败
+    // 仍返回 null（报错不投递，禁止降级兜底）。
+    const err = new Error('cat-study server 不可达，反查失败')
+    err.code = 'HANDOFF_TRANSIENT'
+    throw err
   }
   return null
 }
 
 /**
- * 将交接文档投递到 cat-study，让店长 agent 自动补填 TODO 部分。
- *
- * 消息格式：@店长 补填 Why/Tradeoff/OQ → 补完后 @吐槽猫 审查。
- * 整个链路不需要用户手动操作。
+ * 单次投递尝试：确定目标会话 + POST 交接文档。
  *
  * @param {string} content — 完整的交接文档 markdown
- * @param {string} [cwd] — 工作目录（用于定位 .handoff-draft.md 以清理）
- * @returns {Promise<boolean>} 投递成功返回 true
+ * @param {string} cwd — 工作目录
+ * @param {string} serverUrl — cat-study server 地址
+ * @returns {Promise<'ok'|'transient'|'fatal'>}
+ *   ok       — 投递成功
+ *   transient— 瞬态故障（连接失败 / 5xx），调用方可延迟重试
+ *   fatal    — 确定性失败（无 uuid / 404 / 4xx），重试无意义
  */
-async function tryPostToCatstudy(content, cwd) {
-  const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
-
+async function attemptDeliver(content, cwd, serverUrl) {
   // 获取 session ID：CATSTUDY_SESSION_ID（人工显式指定，明确意图优先）
   // → commit uuid 反查（自动，永远指向"用户实际发起这条消息的会话"）。
   // 原则：两者都不可用时**报错不投递**——绝不猜目标。曾因反查失败静默降级到
@@ -652,7 +655,12 @@ async function tryPostToCatstudy(content, cwd) {
   if (sessionId) {
     console.log(`[handoff-gen] 目标会话: ${sessionId}（CATSTUDY_SESSION_ID 人工显式指定）`)
   } else {
-    sessionId = await resolveCommitSessionId(cwd, serverUrl)
+    try {
+      sessionId = await resolveCommitSessionId(cwd, serverUrl)
+    } catch (err) {
+      if (err?.code === 'HANDOFF_TRANSIENT') return 'transient'
+      throw err
+    }
   }
 
   if (!sessionId) {
@@ -660,7 +668,7 @@ async function tryPostToCatstudy(content, cwd) {
     console.log('  .handoff-draft.md 已生成但**未投递**——草稿滞留，等门禁重试或人工处理')
     console.log('  处置：确认 cat-study server 运行、commit 含 catstudy [uuid]，')
     console.log('        或显式设置 CATSTUDY_SESSION_ID 后重新生成投递')
-    return false
+    return 'fatal'
   }
 
   // 构造消息：@店长 补填 TODO → 补完后 @吐槽猫
@@ -695,25 +703,61 @@ async function tryPostToCatstudy(content, cwd) {
       console.log(`[handoff-gen] ✅ 交接文档已投递到 cat-study (session: ${sessionId})`)
       console.log('  店长将自动补填 Why/Tradeoff/OQ → @吐槽猫 审查')
       console.log('  在 cat-study 会话页面可实时查看审查进度')
-      return true
+      return 'ok'
     } else {
       const errText = await res.text().catch(() => '')
       console.log(
         `[handoff-gen] ⚠️  投递失败 (HTTP ${res.status}${errText ? ': ' + errText.slice(0, 120) : ''})`
       )
-      if (res.status >= 400 && res.status < 500 && process.env.CATSTUDY_SESSION_ID) {
-        console.log(
-          '  🔍 目标会话 ID 由 CATSTUDY_SESSION_ID 人工指定——4xx 通常意味着会话已删除或重建'
-        )
-        console.log('    请将环境变量更新为有效会话 ID 后重试')
+      // 4xx：确定性错误（会话已删 / 请求格式错），重试无意义
+      if (res.status >= 400 && res.status < 500) {
+        if (process.env.CATSTUDY_SESSION_ID) {
+          console.log(
+            '  🔍 目标会话 ID 由 CATSTUDY_SESSION_ID 人工指定——4xx 通常意味着会话已删除或重建'
+          )
+          console.log('    请将环境变量更新为有效会话 ID 后重试')
+        }
+        return 'fatal'
       }
-      return false
+      // 5xx：server 内部错误可能瞬态，交重试
+      return 'transient'
     }
-  } catch (err) {
-    console.log(`[handoff-gen] ⚠️  cat-study server 不可达 (${serverUrl})`)
-    console.log('  .handoff-draft.md 已生成，下次 push 时 pre-push hook 会重试投递')
-    return false
+  } catch {
+    console.log(`[handoff-gen] ⚠️  cat-study server 不可达 (${serverUrl})——瞬态，将重试`)
+    return 'transient'
   }
+}
+
+/**
+ * 将交接文档投递到 cat-study，让店长 agent 自动补填 TODO 部分。
+ *
+ * 消息格式：@店长 补填 Why/Tradeoff/OQ → 补完后 @吐槽猫 审查。
+ * 整个链路不需要用户手动操作。
+ *
+ * 瞬态重试：投递常撞上 dev.js 重启窗口（agent 完成 → 锁释放 → dev.js 延迟重启，
+ * 实测停机 ~1.4s）。连接失败 / 5xx 等瞬态故障延迟 2s 重试（最多 2 次）即覆盖；
+ * 确定性失败（无 uuid / 404 / 4xx）不重试，报错后草稿滞留。
+ *
+ * @param {string} content — 完整的交接文档 markdown
+ * @param {string} [cwd] — 工作目录（用于定位 .handoff-draft.md 以清理）
+ * @returns {Promise<boolean>} 投递成功返回 true
+ */
+export async function tryPostToCatstudy(content, cwd) {
+  const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
+  const maxAttempts = 3 // 首次 + 2 次重试
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) {
+      console.log(
+        `[handoff-gen] 投递重试 ${attempt - 1}/${maxAttempts - 1}（2s 后，覆盖 dev.js 重启窗口 ~1.4s）...`
+      )
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+    const result = await attemptDeliver(content, cwd, serverUrl)
+    if (result !== 'transient') return result === 'ok'
+  }
+  console.log('[handoff-gen] ❌ 投递重试耗尽——.handoff-draft.md 草稿滞留，请人工处理')
+  console.log('  处置：确认 cat-study server 运行后手动重跑 node scripts/handoff-gen.mjs')
+  return false
 }
 
 // ─── CLI entry ──────────────────────────────────

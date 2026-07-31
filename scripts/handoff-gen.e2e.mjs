@@ -12,7 +12,12 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node
 import { createServer } from 'node:http'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { generateHandoff, extractCommitUuid, resolveCommitSessionId } from './handoff-gen.mjs'
+import {
+  generateHandoff,
+  extractCommitUuid,
+  resolveCommitSessionId,
+  tryPostToCatstudy,
+} from './handoff-gen.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -685,6 +690,95 @@ console.log('📦 测试组 10: commit uuid 反查会话')
 
   rmSync(LOOKUP_TMP, { recursive: true, force: true })
   server.close()
+}
+
+console.log('')
+
+// ═══ 测试组 11: 投递瞬态重试（连接失败 → 延迟重试 → 成功） ═════════
+
+console.log('📦 测试组 11: 投递瞬态重试')
+
+{
+  const uuid = '77c0e5b4-3d14-4f66-bc8e-11ab22cd33dd'
+
+  // git 仓库：commit 带 catstudy [uuid] → 反查可命中
+  const RETRY_TMP = join(ROOT, '.handoff-test-retry')
+  if (existsSync(RETRY_TMP)) rmSync(RETRY_TMP, { recursive: true, force: true })
+  mkdirSync(RETRY_TMP, { recursive: true })
+  execSync('git init', { cwd: RETRY_TMP, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: RETRY_TMP, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: RETRY_TMP, stdio: 'pipe' })
+  writeFileSync(join(RETRY_TMP, 'a.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: RETRY_TMP, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: RETRY_TMP, stdio: 'pipe' })
+
+  // 11a: 瞬态失败（socket destroy）→ 2s 重试 → 第三次成功
+  let postHits = 0
+  let destroyed = 0
+  const { server, port } = await startStubServer((req, res) => {
+    if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid, sessionId: 'session-debug-1', role: 'user' }))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits++
+      // 前两次模拟瞬态连接失败（连接被 reset → fetch 抛错 → transient）
+      if (postHits <= 2) {
+        destroyed++
+        req.socket.destroy()
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: 'm1', sessionId: 'session-debug-1' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  const serverUrl = `http://127.0.0.1:${port}`
+
+  const prevUrl = process.env.CATSTUDY_URL
+  const prevSid = process.env.CATSTUDY_SESSION_ID
+  process.env.CATSTUDY_URL = serverUrl
+  delete process.env.CATSTUDY_SESSION_ID
+  const ok = await tryPostToCatstudy('# 测试交接文档\n内容', RETRY_TMP)
+  if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrl
+  if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
+
+  assert(ok === true, '瞬态失败重试后应投递成功')
+  assert(postHits === 3, `应共发起 3 次 POST（首次+2 次重试，实际 ${postHits}）`)
+  assert(destroyed === 2, '前两次应为瞬态失败')
+  console.log('  11a: 瞬态失败自动重试（2 次后成功）✅')
+
+  // 11b: 4xx 确定性失败不重试（CATSTUDY_SESSION_ID 显式指定，跳过反查）
+  let postHits400 = 0
+  const { server: server400, port: port400 } = await startStubServer((req, res) => {
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits400++
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'bad request' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+
+  process.env.CATSTUDY_URL = `http://127.0.0.1:${port400}`
+  process.env.CATSTUDY_SESSION_ID = 'session-debug-1'
+  const ok400 = await tryPostToCatstudy('# 测试', RETRY_TMP)
+  if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrl
+  if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
+
+  assert(ok400 === false, '4xx 确定性失败应返回 false')
+  assert(postHits400 === 1, `4xx 不应重试（实际 ${postHits400} 次）`)
+  console.log('  11b: 4xx 确定性失败不重试 ✅')
+
+  rmSync(RETRY_TMP, { recursive: true, force: true })
+  server.close()
+  server400.close()
 }
 
 console.log('')

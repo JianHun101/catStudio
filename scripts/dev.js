@@ -254,6 +254,35 @@ children.add(webChild)
 
 let restartTimer = null
 
+/**
+ * 递归扫描 src 目录，返回最新 .ts 文件的 mtime（毫秒）。
+ * 用于区分 fs.watch 真实变更与 Windows 误报事件。
+ */
+function scanSrcMaxMtime(dir) {
+  let max = 0
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return max
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
+      max = Math.max(max, scanSrcMaxMtime(full))
+    } else if (entry.name.endsWith('.ts')) {
+      try {
+        const st = fs.statSync(full)
+        if (st.mtimeMs > max) max = st.mtimeMs
+      } catch {
+        // 文件可能在 stat 瞬间被删除，忽略
+      }
+    }
+  }
+  return max
+}
+
 // 监听 packages/server/src 下的 .ts 文件变更
 // fs.watch 在 Windows 上 recursive: true 是原生支持的（ReadDirectoryChangesW），
 // 但极少数情况下可能丢事件或 filename 为 null——
@@ -267,7 +296,19 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
   // 防抖：500ms 内的多次变更合并为一次重启
   clearTimeout(restartTimer)
 
+  const eventAt = Date.now()
   restartTimer = setTimeout(async () => {
+    // 误报过滤：Windows 的 ReadDirectoryChangesW 会产出 null 文件名事件
+    // （典型场景：git add -A 全树 stat / pre-commit 重 I/O 期间），且 dev.js
+    // 把 null 文件名一律当 .ts 变更。若防抖窗口内 src/ 无真实 .ts 写入
+    // （mtime 早于事件前 1s），则忽略该事件——否则无变更也挂起重启，
+    // 会撞上 post-commit 的 handoff 投递窗口（a9a9cba 事故根因之一）。
+    const latestMtime = scanSrcMaxMtime(srcDir)
+    if (latestMtime < eventAt - 1000) {
+      console.log('[dev] 忽略可疑 fs.watch 事件（src/ 无真实 .ts 变更）')
+      return
+    }
+
     if (existsSync(LOCK_FILE)) {
       if (!isServerAlive()) {
         // 锁文件还在但进程已死 → 孤儿锁，强制重启
@@ -288,6 +329,11 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
 setInterval(async () => {
   if (pendingRestart && (!existsSync(LOCK_FILE) || !isServerAlive())) {
     pendingRestart = false
+    // 锁释放后延迟 2s 再重启：给 post-commit 的 handoff 投递（反查 + POST）
+    // 让出窗口——实测 dev.js 停机 ~1.4s，2s 延迟让投递先完成，避免
+    // a9a9cba 事故复现（投递撞上重启窗口 → 连接拒绝 → 草稿滞留）。
+    console.log('[dev] Agent 完成，2s 后执行延迟重启（给 handoff 投递让出窗口）...')
+    await new Promise((r) => setTimeout(r, 2000))
     await restartWithRetry('Agent 完成，执行延迟重启')
   }
 }, 1000)
