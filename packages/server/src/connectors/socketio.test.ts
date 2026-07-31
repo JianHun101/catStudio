@@ -24,6 +24,7 @@ vi.mock('../dispatch/index.js', () => ({
   cancelQueuedCommand: vi.fn(() => 0),
   isAnyAgentExecutingMessage: vi.fn(() => false),
   setAgentStateBridge: vi.fn(),
+  executeAgentCommand: vi.fn(),
 }))
 
 vi.mock('../llm/registry.js', () => ({
@@ -439,6 +440,100 @@ describe('socketio connector', () => {
       // runAgentReply 会在 chatStream 处失败并 emit 错误 NEW_MESSAGE）
       const emitted = mockRoomEmit.mock.calls.map((c: any[]) => c[0])
       expect(emitted).toContain(Events.MESSAGE_AGENT_STATUS)
+    })
+  })
+
+  // ─── recoverInterruptedExecutions 重启恢复队列 ──────────
+  // 回归测试：server 重启时 dispatch 的 in-memory 队列被清空，正在执行的 agent
+  // 被 fixStuckExecutionLogs 标记为 failed/server_restart，其触发消息永远不会
+  // 再被处理（"投递到了但接收端从未处理"事故根因）。启动时应重新 dispatch 这些执行。
+
+  describe('recoverInterruptedExecutions — 重启恢复队列', () => {
+    // 前置测试（双执行防护）用 mockReturnValue 设置了 getAgentState 的返回值，
+    // vi.clearAllMocks 不清除 mockReturnValue——这里显式重置为 null
+    // （槽位未初始化 = 需要 initAgentSlot 的状态）。
+    beforeEach(async () => {
+      const { getAgentState } = await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockReturnValue(undefined)
+    })
+
+    /** 造数据：被中断的执行日志 + 可选触发消息/回复 */
+    function seedInterruptedExecution(
+      db: any,
+      opts: { triggerExists?: boolean; agentReplied?: boolean } = {}
+    ) {
+      if (opts.triggerExists !== false) {
+        db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, ?, 'user', ?, '["店长"]', datetime('now', '-2 minutes'))`
+        ).run('msg-trigger', 'session-1', '@店长 请补填交接文档')
+      }
+      if (opts.agentReplied) {
+        db.prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+           VALUES (?, ?, ?, 'agent', ?, '[]', datetime('now', '-1 minute'))`
+        ).run('msg-reply', 'session-1', 'agent-1', '已补填')
+      }
+      db.prepare(
+        `INSERT INTO execution_logs
+           (id, session_id, agent_id, triggered_by_message_id, status, error_message, started_at)
+         VALUES (?, ?, ?, ?, 'failed', 'server_restart', datetime('now', '-1 minute'))`
+      ).run('exec-1', 'session-1', 'agent-1', 'msg-trigger')
+    }
+
+    it('server_restart 记录 + 触发消息存在 + 未回复 → 重新执行该 agent', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand, initAgentSlot } = await import('../dispatch/index.js')
+      seedInterruptedExecution(getDb())
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
+      expect(executeAgentCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'agent-1', name: '店长' }),
+        expect.objectContaining({
+          sessionId: 'session-1',
+          agentId: 'agent-1',
+          triggerMessageId: 'msg-trigger',
+          triggerContent: '@店长 请补填交接文档',
+          mentions: ['店长'],
+        }),
+        expect.any(String)
+      )
+      expect(initAgentSlot).toHaveBeenCalledWith('agent-1')
+    })
+
+    it('触发消息已删（会话/消息被清理）→ 跳过恢复', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand } = await import('../dispatch/index.js')
+      seedInterruptedExecution(getDb(), { triggerExists: false })
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      expect(executeAgentCommand).not.toHaveBeenCalled()
+    })
+
+    it('agent 已回复（重启发生在回复写库后、finalize 前）→ 跳过，防重复执行', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand } = await import('../dispatch/index.js')
+      seedInterruptedExecution(getDb(), { agentReplied: true })
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      expect(executeAgentCommand).not.toHaveBeenCalled()
+    })
+
+    it('无 API key 的 agent → 跳过（无法执行）', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand } = await import('../dispatch/index.js')
+      getDb()
+        .prepare('UPDATE agents SET llm_api_key = ? WHERE id = ?')
+        .run('sk-your-api-key-here', 'agent-1')
+      seedInterruptedExecution(getDb())
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      expect(executeAgentCommand).not.toHaveBeenCalled()
     })
   })
 

@@ -635,6 +635,40 @@ export async function resolveCommitSessionId(cwd, serverUrl) {
 }
 
 /**
+ * 投递去重：同一份交接文档（内容逐字节相同）是否已投过。
+ *
+ * 背景：post-commit 每 commit 必投递，commit 由自动化流程产生、频率不可控，
+ * 同一份文档曾被投 8+ 次（5253e8c 的补填请求反复进队列）。去重检查在 POST 前
+ * 拉取目标会话最近消息，若存在内容完全相同的消息则跳过。
+ *
+ * 内容比较而非 uuid 标记：范围版本（pre-push --range=LAST..HEAD 合并审）生成的
+ * 文档审查须知/What 段与单 commit 版不同，内容不同 → 不会被误挡；同内容手动
+ * 重投（无意义）会被挡，符合"同一份文档只投一次"。
+ *
+ * 检查失败（server 不可达/列表 404）不阻塞投递——宁可多投一次也不漏投。
+ *
+ * @param {string} serverUrl
+ * @param {string} sessionId
+ * @param {string} content — 完整交接文档 markdown
+ * @returns {Promise<boolean>} 已投递过返回 true
+ */
+async function alreadyDelivered(serverUrl, sessionId, content) {
+  try {
+    const res = await fetch(`${serverUrl}/api/sessions/${sessionId}/messages?limit=100`, {
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!res.ok) return false
+    const msgs = await res.json()
+    return (msgs || []).some(
+      (m) => m?.role === 'user' && m?.content && m.content.trim() === content.trim()
+    )
+  } catch {
+    console.log('[handoff-gen] ⚠️  去重检查失败（消息列表不可达）——继续投递，宁可多投不可漏投')
+    return false
+  }
+}
+
+/**
  * 单次投递尝试：确定目标会话 + POST 交接文档。
  *
  * @param {string} content — 完整的交接文档 markdown
@@ -669,6 +703,14 @@ async function attemptDeliver(content, cwd, serverUrl) {
     console.log('  处置：确认 cat-study server 运行、commit 含 catstudy [uuid]，')
     console.log('        或显式设置 CATSTUDY_SESSION_ID 后重新生成投递')
     return 'fatal'
+  }
+
+  // 投递去重：同一份文档已投过则跳过（内容逐字节比较）
+  if (await alreadyDelivered(serverUrl, sessionId, content)) {
+    console.log(
+      `[handoff-gen] ⏭️  该交接文档已在此会话中投递过，跳过重复投递 (session: ${sessionId})`
+    )
+    return 'ok'
   }
 
   // 构造消息：@店长 补填 TODO → 补完后 @吐槽猫

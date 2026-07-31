@@ -98,7 +98,12 @@ export async function dispatch(
 
 // ─── Execution ──────────────────────────────────────
 
-async function executeAgent(
+/**
+ * 为单个命令设置槽位（busy + currentTrigger）+ 写执行日志 + 发布状态。
+ * 正常路径由 dispatch() 内部调用；重启恢复路径（connector 的
+ * recoverInterruptedExecutions）复用同一逻辑，保证槽位语义一致。
+ */
+export async function executeAgentCommand(
   agent: AgentConfig,
   cmd: DispatchCommand,
   traceId: string
@@ -124,6 +129,14 @@ async function executeAgent(
   // ⚠ Agent 的实际 LLM 推理由 dispatch 调用方（connector）触发
   // 这里只做槽位管理和状态变更
   // connector 拿到 agent 配置后，调 LLM → 流式输出 → 写消息 → 标记完成
+}
+
+async function executeAgent(
+  agent: AgentConfig,
+  cmd: DispatchCommand,
+  traceId: string
+): Promise<void> {
+  await executeAgentCommand(agent, cmd, traceId)
 }
 
 /**

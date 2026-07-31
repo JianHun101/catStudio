@@ -783,6 +783,125 @@ console.log('📦 测试组 11: 投递瞬态重试')
 
 console.log('')
 
+// ═══ 测试组 12: 投递去重（同一份文档只投一次） ═══════════════
+
+console.log('📦 测试组 12: 投递去重')
+
+{
+  const uuid = 'aabbccdd-1122-3344-5566-778899aabbcc'
+  const DEDUP_TMP = join(ROOT, '.handoff-test-dedup')
+  if (existsSync(DEDUP_TMP)) rmSync(DEDUP_TMP, { recursive: true, force: true })
+  mkdirSync(DEDUP_TMP, { recursive: true })
+  execSync('git init', { cwd: DEDUP_TMP, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: DEDUP_TMP, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: DEDUP_TMP, stdio: 'pipe' })
+  writeFileSync(join(DEDUP_TMP, 'a.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: DEDUP_TMP, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: DEDUP_TMP, stdio: 'pipe' })
+
+  // 12a: 目标会话已有相同内容的文档 → 跳过 POST（返回成功，草稿可清理）
+  let postHitsDup = 0
+  let listHitsDup = 0
+  const { server: serverDup, port: portDup } = await startStubServer((req, res) => {
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      listHitsDup++
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      // 会话里已有一条内容完全相同的补填请求
+      res.end(JSON.stringify([{ id: 'm-old', role: 'user', content: '# 测试交接文档\n内容' }]))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHitsDup++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+
+  const prevUrlDup = process.env.CATSTUDY_URL
+  const prevSidDup = process.env.CATSTUDY_SESSION_ID
+  process.env.CATSTUDY_URL = `http://127.0.0.1:${portDup}`
+  process.env.CATSTUDY_SESSION_ID = 'session-debug-1'
+  const okDup = await tryPostToCatstudy('# 测试交接文档\n内容', DEDUP_TMP)
+  if (prevUrlDup === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrlDup
+  if (prevSidDup !== undefined) process.env.CATSTUDY_SESSION_ID = prevSidDup
+
+  assert(okDup === true, '去重命中时应视为投递成功（返回 true，草稿可清理）')
+  assert(postHitsDup === 0, `内容相同的文档不应重复 POST（实际 ${postHitsDup} 次）`)
+  assert(listHitsDup >= 1, '去重检查应拉取会话消息列表')
+  console.log('  12a: 会话已有相同内容 → 跳过 POST ✅')
+
+  serverDup.close()
+
+  // 12b: 会话中无相同内容 → 正常 POST 一次
+  let postHitsFresh = 0
+  const { server: serverFresh, port: portFresh } = await startStubServer((req, res) => {
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([])) // 空会话
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHitsFresh++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+
+  process.env.CATSTUDY_URL = `http://127.0.0.1:${portFresh}`
+  process.env.CATSTUDY_SESSION_ID = 'session-debug-1'
+  const okFresh = await tryPostToCatstudy('# 测试交接文档\n内容', DEDUP_TMP)
+  if (prevUrlDup === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrlDup
+  if (prevSidDup !== undefined) process.env.CATSTUDY_SESSION_ID = prevSidDup
+
+  assert(okFresh === true, '无相同内容时应投递成功')
+  assert(postHitsFresh === 1, `应恰好 POST 1 次（实际 ${postHitsFresh} 次）`)
+  console.log('  12b: 会话无相同内容 → 正常 POST ✅')
+
+  serverFresh.close()
+
+  // 12c: 内容不同的文档（如 pre-push 范围版）不被误挡 → 正常 POST
+  let postHitsRange = 0
+  const { server: serverRange, port: portRange } = await startStubServer((req, res) => {
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([{ id: 'm-old', role: 'user', content: '# 单 commit 版文档' }]))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHitsRange++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+
+  process.env.CATSTUDY_URL = `http://127.0.0.1:${portRange}`
+  process.env.CATSTUDY_SESSION_ID = 'session-debug-1'
+  const okRange = await tryPostToCatstudy('# 合并审版文档（范围不同）', DEDUP_TMP)
+  if (prevUrlDup === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrlDup
+  if (prevSidDup !== undefined) process.env.CATSTUDY_SESSION_ID = prevSidDup
+
+  assert(okRange === true, '内容不同的文档应正常投递')
+  assert(postHitsRange === 1, `范围版内容不同不应被误挡（实际 ${postHitsRange} 次）`)
+  console.log('  12c: 内容不同（范围版）不被误挡 ✅')
+
+  serverRange.close()
+  rmSync(DEDUP_TMP, { recursive: true, force: true })
+}
+
+console.log('')
+
 // ─── Cleanup ────────────────────────────────────────────────
 
 rmSync(TMP, { recursive: true, force: true })

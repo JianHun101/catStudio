@@ -51,6 +51,23 @@ export function getLatestUserMessageId(sessionId: string): string | undefined {
   return row?.id
 }
 
+/** 指定 Agent 在某个时间点之后是否已有回复。
+ *  用 `>=` 而非 `>`：SQLite datetime 是秒级精度，同秒内完成的回复
+ *  用 `>` 会漏判 → 重启恢复时误判"未回复" → 重复执行。 */
+export function hasAgentRepliedAfter(
+  agentId: string,
+  sessionId: string,
+  afterCreatedAt: string
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM messages
+       WHERE session_id = ? AND role = 'agent' AND agent_id = ? AND created_at >= ?`
+    )
+    .get(sessionId, agentId, afterCreatedAt) as { cnt: number }
+  return (row?.cnt || 0) > 0
+}
+
 /** 获取会话中某条消息之后的所有 Agent 回复 */
 export function getAgentRepliesAfter(sessionId: string, afterCreatedAt: string): MessageRow[] {
   return db

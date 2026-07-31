@@ -30,7 +30,9 @@ import {
   cancelQueuedCommand,
   isAnyAgentExecutingMessage,
   setAgentStateBridge,
+  executeAgentCommand,
 } from '../dispatch/index.js'
+import type { DispatchCommand } from '@cat-study/shared'
 import { getAdapterForAgent } from '../llm/registry.js'
 import { saveMessageMemory, buildMemoryContext } from '../memory/index.js'
 import { createLogger } from '../logger.js'
@@ -482,6 +484,11 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     io.emit('all-agent-states', getAllAgentStates())
   })
 
+  // 启动恢复：重新 dispatch 被 server 重启打断的执行（fire-and-forget，不阻塞启动）
+  recoverInterruptedExecutions(io).catch((err) => {
+    log.error('recoverInterruptedExecutions crashed', { error: (err as Error).message })
+  })
+
   return io
 }
 
@@ -815,6 +822,103 @@ export async function executeAgentsSerial(
         error: err.message,
       })
     })
+  }
+}
+
+// ─── 启动恢复：重新 dispatch 被 server 重启打断的执行 ───
+
+/**
+ * 重启恢复队列：server 重启时 dispatch 的 in-memory 队列（agentQueues/agentSlots）
+ * 被清空，正在执行的 agent 被 fixStuckExecutionLogs 标记为 failed/server_restart，
+ * 其触发消息永远不会再被处理——"投递到了但接收端从未处理"事故的根因。
+ *
+ * 启动时扫描这些记录逐条恢复：
+ * 1. 触发消息必须还在（会话/消息已删则跳过）
+ * 2. 该 agent 必须尚未回复（回复已写库、finalize 前被杀的场景跳过，防重复执行）
+ * 3. 按 execution_logs 记录的 agent 逐个恢复——不整条消息重新 dispatch，
+ *    避免同消息下已完成的 agent 被再次调度（@多个 agent 时只有被打断的重跑）
+ */
+export async function recoverInterruptedExecutions(io: SocketServer): Promise<void> {
+  try {
+    const interrupted = execLogsRepo.getInterruptedExecutions()
+    if (interrupted.length === 0) return
+
+    log.warn('启动恢复：重新 dispatch 被 server 重启打断的执行', { count: interrupted.length })
+
+    for (const rec of interrupted) {
+      try {
+        const triggerMeta = messagesRepo.getMessageByIdOnly(rec.triggered_by_message_id)
+        if (!triggerMeta || triggerMeta.session_id !== rec.session_id) continue
+
+        const triggerRow = messagesRepo.getMessageById(
+          triggerMeta.id,
+          triggerMeta.session_id,
+          triggerMeta.role
+        )
+        if (!triggerRow) continue
+
+        // 已回复则跳过（防重复执行——重启可能发生在回复写库之后、finalize 之前）
+        if (
+          messagesRepo.hasAgentRepliedAfter(rec.agent_id, rec.session_id, triggerRow.created_at)
+        ) {
+          log.info('跳过恢复：agent 已回复', {
+            agentId: rec.agent_id,
+            triggerId: rec.triggered_by_message_id,
+          })
+          continue
+        }
+
+        const agentRow = agentsRepo.getAgentById(rec.agent_id)
+        if (!agentRow) continue
+        const agent = rowToAgent(agentRow)
+        // 无 API key 无法执行（与 executeAgentsSerial 的检查一致）
+        if (!agent.llmApiKey || agent.llmApiKey === 'sk-your-api-key-here') continue
+
+        if (!getAgentState(agent.id)) initAgentSlot(agent.id)
+
+        const mentions = JSON.parse(triggerRow.mentions || '[]') as string[]
+        const cmd: DispatchCommand = {
+          sessionId: rec.session_id,
+          agentId: agent.id,
+          triggerMessageId: triggerRow.id,
+          triggerContent: triggerRow.content,
+          mentions,
+        }
+        const traceId = uuid()
+
+        // 设置槽位（与 dispatch 内部 executeAgent 等效：busy + currentTrigger + 新执行日志）
+        await executeAgentCommand(agent, cmd, traceId)
+
+        const triggerMsg = {
+          id: triggerRow.id,
+          content: triggerRow.content,
+          mentions,
+          taskId: triggerRow.task_id || undefined,
+          authorName:
+            triggerRow.role === 'agent' && triggerRow.agent_id
+              ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
+              : undefined,
+        }
+
+        log.warn('恢复执行', {
+          agentId: agent.id,
+          agentName: agent.name,
+          triggerId: triggerRow.id,
+          sessionId: rec.session_id,
+          traceId,
+        })
+
+        await executeAgentsSerial(io, rec.session_id, [agent], triggerMsg, traceId, 0)
+      } catch (err: any) {
+        log.error('恢复单个执行失败', {
+          agentId: rec.agent_id,
+          triggerId: rec.triggered_by_message_id,
+          error: err.message,
+        })
+      }
+    }
+  } catch (err: any) {
+    log.error('recoverInterruptedExecutions failed', { error: err.message })
   }
 }
 

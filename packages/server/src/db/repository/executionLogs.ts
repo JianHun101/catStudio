@@ -18,6 +18,31 @@ export function getRunningLogs(): Array<{ id: string; agent_id: string }> {
     .all() as Array<{ id: string; agent_id: string }>
 }
 
+/** 启动时获取被 server 重启打断的执行（fixStuckExecutionLogs 标记后）。
+ *  供重启恢复队列使用——重新 dispatch 这些未完成的执行。 */
+export function getInterruptedExecutions(): Array<{
+  id: string
+  session_id: string
+  agent_id: string
+  triggered_by_message_id: string
+  started_at: string
+}> {
+  return db
+    .prepare(
+      `SELECT id, session_id, agent_id, triggered_by_message_id, started_at
+       FROM execution_logs
+       WHERE status = 'failed' AND error_message = 'server_restart'
+       ORDER BY started_at ASC`
+    )
+    .all() as Array<{
+    id: string
+    session_id: string
+    agent_id: string
+    triggered_by_message_id: string
+    started_at: string
+  }>
+}
+
 export function getLogsByTriggerMessage(triggeredByMessageId: string): ExecutionLogRow[] {
   return db
     .prepare('SELECT * FROM execution_logs WHERE triggered_by_message_id = ?')
