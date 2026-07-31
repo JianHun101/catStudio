@@ -1846,7 +1846,7 @@ function statusLabelZh(status: string): string {
 
 .chat-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(212, 165, 116, 0.25);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .chat-input:disabled {

@@ -97,7 +97,9 @@ describe('Message Routes', () => {
     })
 
     it('drops oversized images (>3MB) (server guard)', async () => {
-      // Fastify 默认 bodyLimit 1MB 会先于路由 413 拒绝（双层防线），
+      // 双层防线：生产 Fastify 默认 bodyLimit 1MB 会先于路由 413 拒绝整个请求体，
+      // 路由的 3MB 单图守卫（与 socket 侧同构）是兜底——生产 REST 实际单图上限是 1MB，
+      // 严于 socket 的 3MB；若 REST 真要传大图，需同步调 bodyLimit 才够
       // 这里放大 bodyLimit 以触达路由自身的 3MB 单图守卫
       const bigApp = Fastify({ logger: false, bodyLimit: 4 * 1024 * 1024 })
       const { messageRoutes } = await import('./messages.js')
