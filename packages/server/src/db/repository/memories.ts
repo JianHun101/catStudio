@@ -69,18 +69,29 @@ export interface MemorySearchResult {
 /**
  * 按余弦距离搜索最相关的 top-K 记忆。
  * 全局搜索，不再按 agent_id 过滤。
+ *
+ * maxDistance 为距离下限：余弦距离超过此值的记忆不召回。
+ * 子查询包裹使 vec_distance_cosine 每行只求值一次（WHERE 中不能引用同层 SELECT 别名）。
  */
-export function searchMemoriesByVector(queryBlob: Buffer, topK: number): MemorySearchResult[] {
+export function searchMemoriesByVector(
+  queryBlob: Buffer,
+  topK: number,
+  maxDistance: number
+): MemorySearchResult[] {
   return db
     .prepare(
-      `SELECT id, content, source_message_id, created_at,
-              vec_distance_cosine(embedding, ?) AS distance
-       FROM memories
-       WHERE embedding IS NOT NULL
+      `SELECT id, content, source_message_id, created_at, distance
+       FROM (
+         SELECT id, content, source_message_id, created_at,
+                vec_distance_cosine(embedding, ?) AS distance
+         FROM memories
+         WHERE embedding IS NOT NULL
+       )
+       WHERE distance < ?
        ORDER BY distance
        LIMIT ?`
     )
-    .all(queryBlob, topK) as MemorySearchResult[]
+    .all(queryBlob, maxDistance, topK) as MemorySearchResult[]
 }
 
 // ─── 写入 ──────────────────────────────────────────────

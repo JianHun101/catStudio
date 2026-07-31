@@ -5,6 +5,7 @@
  * - Fastify 测试应用构建
  */
 import Database from 'better-sqlite3'
+import * as sqliteVec from 'sqlite-vec'
 import type { FastifyInstance } from 'fastify'
 import Fastify from 'fastify'
 
@@ -92,12 +93,18 @@ const SCHEMA_SQL = `
 
 /**
  * 创建带完整 schema 的内存 SQLite 数据库。
- * 不加载 sqlite-vec 扩展（测试环境可能无法加载原生模块）。
+ * 尝试加载 sqlite-vec 扩展（向量检索类测试依赖；个别环境加载失败时降级，
+ * 存储类测试不受影响）。
  */
 export function createTestDb(): Database.Database {
   const db = new Database(':memory:')
   db.pragma('foreign_keys = ON')
   db.exec(SCHEMA_SQL)
+  try {
+    sqliteVec.load(db)
+  } catch {
+    // sqlite-vec 原生扩展加载失败 → 仅检索类测试受影响
+  }
   return db
 }
 

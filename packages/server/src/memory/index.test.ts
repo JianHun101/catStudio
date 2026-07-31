@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vite
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
+import { memories as memoriesRepo } from '../db/repository/index.js'
 
 // 禁用去重/更新（避免 sqlite-vec vec_distance_cosine 不可用）
 process.env.MEMORY_DEDUP_ENABLED = '0'
@@ -24,6 +25,13 @@ vi.mock('./embedding.js', () => ({
   isMemoryEnabled: mockIsMemoryEnabled,
 }))
 
+// Mock 查询改写 — 默认不提供额外查询（降级为仅原话检索）
+const mockRewriteRetrievalQueries = vi.fn(async (): Promise<string[]> => [])
+
+vi.mock('./query-rewrite.js', () => ({
+  rewriteRetrievalQueries: mockRewriteRetrievalQueries,
+}))
+
 describe('memory', () => {
   let memoryModule: typeof import('./index.js')
 
@@ -36,10 +44,12 @@ describe('memory', () => {
     initRepository(getDb())
     vi.clearAllMocks()
     mockIsMemoryEnabled.mockReturnValue(true)
+    mockRewriteRetrievalQueries.mockResolvedValue([])
   })
 
   afterEach(() => {
     resetDb()
+    delete process.env.MEMORY_MAX_DISTANCE
   })
 
   describe('vectorToBlob / blobToVector', () => {
@@ -214,6 +224,62 @@ describe('memory', () => {
       expect(ctx).toBe('')
       // 纯 @mention 不应该触发嵌入
       expect(mockEmbedText).not.toHaveBeenCalled()
+    })
+
+    it('uses rewritten queries as additional retrieval channels', async () => {
+      mockEmbedText.mockClear()
+      mockRewriteRetrievalQueries.mockResolvedValue(['指代消解后的查询'])
+      await memoryModule.buildMemoryContext('@店长 你好啊')
+      // 双通道: 原话 + 改写查询都要嵌入
+      expect(mockEmbedText).toHaveBeenCalledWith('你好啊')
+      expect(mockEmbedText).toHaveBeenCalledWith('指代消解后的查询')
+      expect(mockRewriteRetrievalQueries).toHaveBeenCalledWith('你好啊')
+    })
+
+    it('dedupes rewritten queries identical to the original', async () => {
+      mockEmbedText.mockClear()
+      mockRewriteRetrievalQueries.mockResolvedValue(['你好啊'])
+      await memoryModule.buildMemoryContext('@店长 你好啊')
+      // 与原话重复的改写不产生第二次嵌入
+      expect(mockEmbedText).toHaveBeenCalledTimes(1)
+      expect(mockEmbedText).toHaveBeenCalledWith('你好啊')
+    })
+
+    it('filters out memories beyond distance lower bound', async () => {
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+        VALUES ('agent-1', '店长', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
+      `
+      ).run()
+
+      // 手工构造向量直接入库: 一条与 mock 嵌入('x' → [1,120,1,0.5])完全同向(距离 0)，
+      // 一条在查询向量无贡献的维度上(距离 ≈ 0.99)
+      const { vectorToBlob } = memoryModule
+      const now = new Date().toISOString()
+      memoriesRepo.insertMemory(
+        'mem-near',
+        'agent-1',
+        '同向的记忆',
+        vectorToBlob([1, 120, 1, 0.5]), // == mock embedText('x')
+        'msg-1',
+        now
+      )
+      memoriesRepo.insertMemory(
+        'mem-far',
+        'agent-1',
+        '正交的记忆',
+        vectorToBlob([0, 0, 1, 0]),
+        'msg-2',
+        now
+      )
+
+      // 严格下限(0.05): 同向记忆被召回，正交记忆被过滤
+      process.env.MEMORY_MAX_DISTANCE = '0.05'
+      const ctx = await memoryModule.buildMemoryContext('x')
+      expect(ctx).toContain('同向的记忆')
+      expect(ctx).not.toContain('正交的记忆')
     })
   })
 })

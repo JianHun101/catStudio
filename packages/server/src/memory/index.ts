@@ -2,14 +2,16 @@
  * 记忆服务 — 向量记忆的存储、检索与上下文构建。
  *
  * 存储: 用户消息 → 嵌入 → memories 表（单行，所有 Agent 共享）
- * 检索: 触发消息 → 嵌入 → sqlite-vec cosine 相似度 → 全局 top-K 记忆
- * 注入: 格式化记忆文本 → 拼接到 system prompt
+ * 检索: 原话 + 改写查询双通道 → 嵌入 → sqlite-vec cosine 相似度 → 距离下限过滤 → 合并去重 → top-K
+ * 注入: 格式化记忆文本 → 拼接到 system prompt（始终是存储原文，改写不参与注入）
  *
  * 环境变量:
- *   MEMORY_TOP_K             — 检索记忆数量（默认 3）
- *   MEMORY_DEDUP_THRESHOLD   — 去重余弦距离阈值（默认 0.20），小于此值时跳过存储
- *   MEMORY_UPDATE_THRESHOLD  — 更新余弦距离阈值（默认 0.35），去重与更新之间的记忆会被 UPDATE 而非 INSERT
- *   MEMORY_DEDUP_ENABLED     — 是否开启去重/更新（默认 "1"），设为 "0" 关闭
+ *   MEMORY_TOP_K                — 检索记忆数量（默认 3）
+ *   MEMORY_MAX_DISTANCE         — 检索距离下限（默认 0.6），余弦距离超过此值的记忆不召回
+ *   MEMORY_DEDUP_THRESHOLD      — 去重余弦距离阈值（默认 0.20），小于此值时跳过存储
+ *   MEMORY_UPDATE_THRESHOLD     — 更新余弦距离阈值（默认 0.35），去重与更新之间的记忆会被 UPDATE 而非 INSERT
+ *   MEMORY_DEDUP_ENABLED        — 是否开启去重/更新（默认 "1"），设为 "0" 关闭
+ *   MEMORY_QUERY_REWRITE_ENABLED— 查询改写开关（默认 "1"），见 query-rewrite.ts
  *
  * 三段式逻辑:
  *   距离 < DEDUP_THRESHOLD      → 跳过（几乎相同，无需存储）
@@ -20,6 +22,7 @@
 import { v4 as uuid } from 'uuid'
 import { memories as memoriesRepo } from '../db/repository/index.js'
 import { embedText, isMemoryEnabled } from './embedding.js'
+import { rewriteRetrievalQueries } from './query-rewrite.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('memory')
@@ -140,41 +143,70 @@ export interface RetrievedMemory {
 
 /**
  * 按余弦相似度从全局记忆空间中搜索与 queryText 最相关的 top-K 记忆。
- * 使用 sqlite-vec 内置的 vec_distance_cosine()。
- * 不再按 agent_id 过滤——所有记忆对所有猫可见。
+ * 单通道便捷入口（= searchMemoriesMulti([queryText], topK)）。
  */
 export async function searchMemories(
   queryText: string,
   topK: number = 3
 ): Promise<RetrievedMemory[]> {
-  if (!isMemoryEnabled()) return []
+  return searchMemoriesMulti([queryText], topK)
+}
 
-  let queryEmbedding: number[]
-  try {
-    queryEmbedding = await embedText(queryText)
-  } catch (err: any) {
-    log.warn('查询嵌入生成失败，跳过记忆检索', { error: err.message })
-    return []
+/**
+ * 多查询检索：对每个查询（原话 + 改写）分别嵌入并检索，再按记忆 id 合并
+ * （同一记忆保留最小距离），按距离重排后返回 top-K。
+ *
+ * 特征:
+ * - 距离下限: 余弦距离 ≥ MEMORY_MAX_DISTANCE 的记忆不召回（过滤最大噪音源）
+ * - 查询去重: 与原话重复的改写查询不会重复嵌入
+ * - 通道容错: 单条查询嵌入失败/单通道检索失败不影响其他通道
+ */
+export async function searchMemoriesMulti(
+  queries: string[],
+  topK: number = 3
+): Promise<RetrievedMemory[]> {
+  if (!isMemoryEnabled() || queries.length === 0) return []
+
+  const maxDistance = parseFloat(process.env.MEMORY_MAX_DISTANCE || '0.6')
+  const uniqueQueries = [...new Set(queries.map((q) => q.trim()).filter(Boolean))]
+
+  // 并行嵌入所有查询；单条失败降级为跳过该通道
+  const vectors = await Promise.all(
+    uniqueQueries.map(async (q) => {
+      try {
+        return await embedText(q)
+      } catch (err: any) {
+        log.warn('查询嵌入生成失败，跳过该通道', { error: err.message })
+        return []
+      }
+    })
+  )
+  const blobs = vectors.filter((v) => v && v.length > 0).map(vectorToBlob)
+  if (blobs.length === 0) return []
+
+  // 各通道结果按 id 合并，保留最小距离
+  const merged = new Map<string, RetrievedMemory>()
+  for (const blob of blobs) {
+    try {
+      const rows = memoriesRepo.searchMemoriesByVector(blob, topK, maxDistance)
+      for (const r of rows) {
+        const existing = merged.get(r.id)
+        if (!existing || r.distance < existing.distance) {
+          merged.set(r.id, {
+            id: r.id,
+            content: r.content,
+            distance: r.distance,
+            sourceMessageId: r.source_message_id,
+            createdAt: r.created_at,
+          })
+        }
+      }
+    } catch (err: any) {
+      log.warn('单通道记忆检索失败', { error: err.message })
+    }
   }
 
-  if (!queryEmbedding || queryEmbedding.length === 0) return []
-
-  const queryBlob = vectorToBlob(queryEmbedding)
-
-  try {
-    const rows = memoriesRepo.searchMemoriesByVector(queryBlob, topK)
-
-    return rows.map((r) => ({
-      id: r.id,
-      content: r.content,
-      distance: r.distance,
-      sourceMessageId: r.source_message_id,
-      createdAt: r.created_at,
-    }))
-  } catch (err: any) {
-    log.error('记忆检索失败', { error: err.message })
-    return []
-  }
+  return [...merged.values()].sort((a, b) => a.distance - b.distance).slice(0, topK)
 }
 
 // ─── 上下文构建 ───────────────────────────────────────
@@ -182,6 +214,10 @@ export async function searchMemories(
 /**
  * 检索相关记忆并格式化为 system prompt 可拼接的文本块。
  * 无匹配时返回空字符串。
+ *
+ * 双通道检索：原话始终是第一通道；查询改写（指代消解/意图展开）
+ * 只生成额外的检索查询，注入内容始终是存储原文，猫读到的是一手信息。
+ * 改写失败/关闭时自动降级为仅原话检索。
  */
 export async function buildMemoryContext(triggerContent: string): Promise<string> {
   // 剥离 @mention 再检索，与 saveMessageMemory 存储时保持一致，
@@ -190,7 +226,10 @@ export async function buildMemoryContext(triggerContent: string): Promise<string
   if (!cleanContent) return ''
 
   const topK = parseInt(process.env.MEMORY_TOP_K || '3', 10)
-  const memories = await searchMemories(cleanContent, topK)
+  const rewrites = await rewriteRetrievalQueries(cleanContent)
+  const queries = [cleanContent, ...rewrites]
+
+  const memories = await searchMemoriesMulti(queries, topK)
 
   if (memories.length === 0) return ''
 
