@@ -20,6 +20,23 @@ import { createLogger } from '../logger.js'
 const log = createLogger('messages-api')
 
 export async function messageRoutes(app: FastifyInstance): Promise<void> {
+  /**
+   * GET /api/messages/:id → 按消息 id 反查所属会话
+   * 供 handoff-gen 从 commit message 的 catstudy [uuid]（uuid 即触发消息 id）
+   * 反查投递目标会话——永远指向"用户实际发起这条消息的会话"，比硬编码更准。
+   */
+  app.get('/api/messages/:id', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!id || typeof id !== 'string') {
+      return reply.status(400).send({ error: 'id is required' })
+    }
+    const row = messagesRepo.getMessageByIdOnly(id)
+    if (!row) {
+      return reply.status(404).send({ error: 'Message not found' })
+    }
+    return reply.send({ id: row.id, sessionId: row.session_id, role: row.role })
+  })
+
   app.post('/api/messages', async (req, reply) => {
     const body = req.body as any
 

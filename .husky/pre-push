@@ -9,14 +9,30 @@ GATE_FILE=".push-gate"
 HANDOFF_FILE=".handoff-draft.md"
 CATSTUDY_URL="${CATSTUDY_API_URL:-http://127.0.0.1:3200}"
 
-# 投递目标会话（店长工作会话）。必须显式指定——API 按 updated_at 排序，
-# 不指定会投到"最新活跃会话"（曾打到 UI优化）。会话重建后更新此值。
+# 投递目标会话（兜底 fallback）——handoff-gen 会先从 commit message 的
+# catstudy [uuid] 反查触发消息所在会话（更精确），反查失败才用此值。
+# API 按 updated_at 排序，不指定会投到"最新活跃会话"（曾打到 UI优化）。
+# 会话重建后更新此值。
 export CATSTUDY_SESSION_ID=46fbcdc0-5ab4-4d92-8808-68322bdfb91c
 
 # ─── 辅助：获取或创建 session ──────────────────────────
 
 get_session_id() {
-  # 优先级：环境变量 → API 查询 → 回退
+  # 优先级：commit uuid 反查 → 环境变量 → API 查询 → 回退
+  # commit message 格式 "catstudy [uuid]"（uuid 即触发消息 id），
+  # 反查消息所在会话——永远指向"用户实际发起这条消息的会话"，比硬编码更准
+  COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null)
+  UUID=$(echo "$COMMIT_MSG" | grep -oE 'catstudy \[[0-9a-f-]{36}\]' 2>/dev/null | head -1 | cut -d'[' -f2 | cut -d']' -f1)
+  if [ -n "$UUID" ]; then
+    SESSION_ID=$(curl -s "${CATSTUDY_URL}/api/messages/${UUID}" 2>/dev/null | \
+      grep -o '"sessionId":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4)
+    if [ -n "$SESSION_ID" ]; then
+      echo "$SESSION_ID"
+      return 0
+    fi
+  fi
+
+  # 环境变量（hook 硬编码兜底）
   if [ -n "$CATSTUDY_SESSION_ID" ]; then
     echo "$CATSTUDY_SESSION_ID"
     return 0

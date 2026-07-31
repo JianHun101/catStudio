@@ -14,7 +14,10 @@
  *
  * 环境变量:
  *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
- *   CATSTUDY_SESSION_ID   目标会话 ID（未设则自动从 /api/sessions 获取第一个）
+ *   CATSTUDY_SESSION_ID   目标会话 ID（兜底用）。投递目标优先级：
+ *                         1. commit message 的 catstudy [uuid] 反查消息所在会话（最准）
+ *                         2. CATSTUDY_SESSION_ID 环境变量（hook 硬编码，反查失败才用）
+ *                         3. 含店长的会话 → 标题含"店长" → /api/sessions 第一个（+警告）
  */
 
 import { execSync } from 'node:child_process'
@@ -569,6 +572,50 @@ function buildChecklistSection(changeTypes) {
 // ─── cat-study 自动投递 ──────────────────────────────────────
 
 /**
+ * 从 commit message 提取 catstudy [uuid] 中的消息 id。
+ * uuid 即触发消息 id（socketio.ts gitCommit 用 `catstudy [${triggerMsg.id}]` 生成）。
+ * 非自动快照 commit（手动提交）返回 null——这类 commit 走 fallback 链。
+ * @param {string} commitMsg — git log -1 --pretty=%B 输出
+ * @returns {string|null}
+ */
+export function extractCommitUuid(commitMsg) {
+  const m = /catstudy\s+\[([0-9a-f-]{36})\]/.exec(commitMsg || '')
+  return m ? m[1] : null
+}
+
+/**
+ * 从最近 commit message 的 uuid 反查触发消息所在会话。
+ * GET /api/messages/:id → { sessionId }——永远指向"用户实际发起这条消息的会话"，
+ * 比环境变量硬编码（会话重建即失效）和 API 猜第一个（按 updated_at 排序）都准。
+ * 反查失败（手动 commit 无 uuid / 消息已删 404 / server 不可达）返回 null，走 fallback 链。
+ * @param {string} cwd — 仓库路径
+ * @param {string} serverUrl — cat-study server 地址
+ * @returns {Promise<string|null>}
+ */
+export async function resolveCommitSessionId(cwd, serverUrl) {
+  const commitMsg = safeGit(cwd, 'log -1 --pretty=%B')
+  const uuid = extractCommitUuid(commitMsg)
+  if (!uuid) return null
+  try {
+    const res = await fetch(`${serverUrl}/api/messages/${uuid}`, {
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!res.ok) {
+      console.log(`[handoff-gen] ⚠️  commit uuid 反查失败 (HTTP ${res.status})，走 fallback 链`)
+      return null
+    }
+    const body = await res.json()
+    if (body?.sessionId) {
+      console.log(`[handoff-gen] 目标会话: ${body.sessionId}（commit uuid ${uuid} 反查）`)
+      return body.sessionId
+    }
+  } catch {
+    // server 不可达——fallback 链的统一告警会兜底
+  }
+  return null
+}
+
+/**
  * 将交接文档投递到 cat-study，让店长 agent 自动补填 TODO 部分。
  *
  * 消息格式：@店长 补填 Why/Tradeoff/OQ → 补完后 @吐槽猫 审查。
@@ -581,10 +628,19 @@ function buildChecklistSection(changeTypes) {
 async function tryPostToCatstudy(content, cwd) {
   const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
 
-  // 获取 session ID（优先级：环境变量 → 含店长的会话 → 标题匹配 → API 第一个）
+  // 获取 session ID（优先级：commit uuid 反查 → 环境变量 → 含店长的会话 → 标题匹配 → API 第一个）
+  // 反查最准：commit message 的 uuid 即触发消息 id，永远指向"用户实际发起这条消息的会话"。
   // 不能无脑取 sessions[0]：/api/sessions 按 updated_at DESC 排序，最新活跃的
   // 会话恒排第一，投递会打到错误会话（用户实测打到"UI优化"）
-  let sessionId = process.env.CATSTUDY_SESSION_ID
+  let sessionId = await resolveCommitSessionId(cwd, serverUrl)
+  if (!sessionId) {
+    sessionId = process.env.CATSTUDY_SESSION_ID
+    if (sessionId) {
+      console.log(
+        `[handoff-gen] 目标会话: ${sessionId}（CATSTUDY_SESSION_ID 环境变量，反查不可用）`
+      )
+    }
+  }
   if (!sessionId) {
     try {
       const [sessionsRes, agentsRes] = await Promise.all([

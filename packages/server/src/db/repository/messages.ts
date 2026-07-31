@@ -31,6 +31,16 @@ export function getMessageById(
     .get(id, sessionId, role) as MessageRow | undefined
 }
 
+/** 仅按消息 id 查询所属会话（不限定 session/role）。
+ *  供 handoff 从 commit message 的 catstudy [uuid] 反查投递目标会话——
+ *  getMessageById 必须带 session_id 才能查（鸡生蛋），故拆出此函数。 */
+export function getMessageByIdOnly(
+  id: string
+): { id: string; session_id: string; role: string } | undefined {
+  return db.prepare('SELECT id, session_id, role FROM messages WHERE id = ?').get(id) as
+    { id: string; session_id: string; role: string } | undefined
+}
+
 /** 获取会话中最近的用户消息 ID */
 export function getLatestUserMessageId(sessionId: string): string | undefined {
   const row = db

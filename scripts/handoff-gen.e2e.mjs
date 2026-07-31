@@ -9,9 +9,10 @@
 
 import { execSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { generateHandoff } from './handoff-gen.mjs'
+import { generateHandoff, extractCommitUuid, resolveCommitSessionId } from './handoff-gen.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -47,6 +48,16 @@ function assertNotContains(haystack, needle, msg) {
     console.error(`  ❌ FAIL: ${msg}`)
     console.error(`     Should NOT contain: ${JSON.stringify(needle)}`)
   }
+}
+
+/** 启动一个临时 HTTP stub server（127.0.0.1 随机端口），用于测试反查投递目标 */
+function startStubServer(handler) {
+  return new Promise((resolve) => {
+    const server = createServer(handler)
+    server.listen(0, '127.0.0.1', () => {
+      resolve({ server, port: server.address().port })
+    })
+  })
 }
 
 // ─── Setup: 创建临时 git 仓库 ───────────────────────────────
@@ -596,6 +607,85 @@ assertContains(spaceDraft, `${rangeBase}..${rangeHead}`, '空格形式 range 仍
 console.log('  9b: 空格形式 range 向后兼容 ✅')
 
 rmSync(RANGE_TMP, { recursive: true, force: true })
+
+console.log('')
+
+// ═══ 测试组 10: commit uuid 反查会话（handoff 投递目标） ═════════════
+
+console.log('📦 测试组 10: commit uuid 反查会话')
+
+// 10a: extractCommitUuid 纯函数
+{
+  const uuid = '6cfecca8-ba78-4039-a12c-71313afd29cd'
+  assert(extractCommitUuid(`catstudy [${uuid}]`) === uuid, 'catstudy [uuid] 应提取 uuid')
+  assert(
+    extractCommitUuid(`catstudy [${uuid}]\nmore lines`) === uuid,
+    '多行 commit message 应提取第一行 uuid'
+  )
+  assert(extractCommitUuid('fix: handle catstudy edge case') === null, '普通 commit 应返回 null')
+  assert(extractCommitUuid('catstudy [not-a-uuid]') === null, '非 uuid 格式应返回 null')
+  assert(extractCommitUuid(null) === null, 'null 输入应返回 null')
+  console.log('  10a: extractCommitUuid 纯函数 ✅')
+}
+
+// 10b/10c/10d: resolveCommitSessionId 反查（stub server）
+{
+  const uuid = '6cfecca8-ba78-4039-a12c-71313afd29cd'
+  let hits = []
+  const { server, port } = await startStubServer((req, res) => {
+    hits.push(req.url)
+    if (req.url === `/api/messages/${uuid}`) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid, sessionId: 'session-debug-1', role: 'user' }))
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'not found' }))
+    }
+  })
+  const serverUrl = `http://127.0.0.1:${port}`
+
+  const LOOKUP_TMP = join(ROOT, '.handoff-test-lookup')
+  if (existsSync(LOOKUP_TMP)) rmSync(LOOKUP_TMP, { recursive: true, force: true })
+  mkdirSync(LOOKUP_TMP, { recursive: true })
+  execSync('git init', { cwd: LOOKUP_TMP, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: LOOKUP_TMP, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: LOOKUP_TMP, stdio: 'pipe' })
+  const lookupFile = join(LOOKUP_TMP, 'a.txt')
+  writeFileSync(lookupFile, '1', 'utf-8')
+  execSync('git add -A', { cwd: LOOKUP_TMP, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: LOOKUP_TMP, stdio: 'pipe' })
+
+  // 10b: 命中 → 返回消息所在会话
+  hits = []
+  const sid = await resolveCommitSessionId(LOOKUP_TMP, serverUrl)
+  assert(sid === 'session-debug-1', 'uuid 反查应返回消息所在会话')
+  assert(hits.includes(`/api/messages/${uuid}`), '应请求反查 API')
+  console.log('  10b: uuid 反查命中 ✅')
+
+  // 10c: 消息已删（404）→ null，走 fallback 链
+  writeFileSync(lookupFile, '2', 'utf-8')
+  execSync('git add -A', { cwd: LOOKUP_TMP, stdio: 'pipe' })
+  execSync('git commit -m "catstudy [aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee]"', {
+    cwd: LOOKUP_TMP,
+    stdio: 'pipe',
+  })
+  const sid404 = await resolveCommitSessionId(LOOKUP_TMP, serverUrl)
+  assert(sid404 === null, '404 时应返回 null（走 fallback 链）')
+  console.log('  10c: 404 降级 ✅')
+
+  // 10d: 手动 commit（无 uuid）→ null 且不发请求
+  writeFileSync(lookupFile, '3', 'utf-8')
+  execSync('git add -A', { cwd: LOOKUP_TMP, stdio: 'pipe' })
+  execSync('git commit -m "fix: manual commit"', { cwd: LOOKUP_TMP, stdio: 'pipe' })
+  hits = []
+  const sidManual = await resolveCommitSessionId(LOOKUP_TMP, serverUrl)
+  assert(sidManual === null, '手动 commit（无 uuid）应返回 null')
+  assert(hits.length === 0, '无 uuid 时不应发起反查请求')
+  console.log('  10d: 手动 commit 不发请求 ✅')
+
+  rmSync(LOOKUP_TMP, { recursive: true, force: true })
+  server.close()
+}
 
 console.log('')
 
