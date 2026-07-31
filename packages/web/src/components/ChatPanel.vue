@@ -245,6 +245,7 @@ function fetchSkills(): void {
 
 onMounted(() => {
   chatContainer.value?.addEventListener('scroll', checkScrollPosition, { passive: true })
+  window.addEventListener('keydown', onPreviewKeydown)
   fetchSkills()
 })
 
@@ -258,7 +259,38 @@ watch(
 
 onUnmounted(() => {
   chatContainer.value?.removeEventListener('scroll', checkScrollPosition)
+  window.removeEventListener('keydown', onPreviewKeydown)
 })
+
+// ─── Image preview (lightbox) ─────────────
+
+const previewImages = ref<string[]>([])
+const previewIndex = ref(0)
+const previewVisible = computed(() => previewImages.value.length > 0)
+
+function openPreview(images: string[], index: number): void {
+  previewImages.value = images
+  previewIndex.value = index
+}
+
+function closePreview(): void {
+  previewImages.value = []
+  previewIndex.value = 0
+}
+
+function previewStep(dir: 1 | -1): void {
+  const len = previewImages.value.length
+  if (len <= 1) return
+  previewIndex.value = (previewIndex.value + dir + len) % len
+}
+
+/** 预览打开时：Esc 关闭、←/→ 切换（多图） */
+function onPreviewKeydown(e: KeyboardEvent): void {
+  if (!previewVisible.value) return
+  if (e.key === 'Escape') closePreview()
+  else if (e.key === 'ArrowLeft') previewStep(-1)
+  else if (e.key === 'ArrowRight') previewStep(1)
+}
 
 // ─── Existing helpers ──────────────────────
 
@@ -755,6 +787,8 @@ function statusLabelZh(status: string): string {
                       :src="src"
                       class="msg-image"
                       :alt="`图片${i + 1}`"
+                      :title="`点击查看大图${msg.images.length > 1 ? `（${i + 1}/${msg.images.length}）` : ''}`"
+                      @click="openPreview(msg.images, i)"
                     />
                   </div>
                   <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
@@ -973,6 +1007,44 @@ function statusLabelZh(status: string): string {
         {{ sending ? '…' : '发送' }}
       </button>
     </div>
+
+    <!-- 图片大图预览（lightbox） -->
+    <Teleport to="body">
+      <div
+        v-if="previewVisible"
+        class="image-lightbox"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="`图片预览 ${previewIndex + 1} / ${previewImages.length}`"
+        @click.self="closePreview"
+      >
+        <button class="lightbox-close" aria-label="关闭大图" @click="closePreview">✕</button>
+        <button
+          v-if="previewImages.length > 1"
+          class="lightbox-nav lightbox-prev"
+          aria-label="上一张"
+          @click="previewStep(-1)"
+        >
+          ‹
+        </button>
+        <img
+          :src="previewImages[previewIndex]"
+          class="lightbox-img"
+          :alt="`大图 ${previewIndex + 1}`"
+        />
+        <button
+          v-if="previewImages.length > 1"
+          class="lightbox-nav lightbox-next"
+          aria-label="下一张"
+          @click="previewStep(1)"
+        >
+          ›
+        </button>
+        <div v-if="previewImages.length > 1" class="lightbox-counter">
+          {{ previewIndex + 1 }} / {{ previewImages.length }}
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1845,6 +1917,88 @@ function statusLabelZh(status: string): string {
   max-height: 240px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: box-shadow var(--ease-out);
+}
+
+.msg-image:hover {
+  box-shadow: var(--shadow-sm);
+}
+
+/* Image preview lightbox */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+
+.lightbox-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  cursor: default;
+}
+
+.lightbox-close,
+.lightbox-nav {
+  position: absolute;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--ease-out);
+}
+
+.lightbox-close {
+  top: 16px;
+  right: 16px;
+  width: 40px;
+  height: 40px;
+  font-size: 18px;
+}
+
+.lightbox-nav {
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 44px;
+  font-size: 26px;
+  line-height: 1;
+}
+
+.lightbox-prev {
+  left: 16px;
+}
+
+.lightbox-next {
+  right: 16px;
+}
+
+.lightbox-close:hover,
+.lightbox-nav:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.lightbox-counter {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
 }
 
 .btn-image {
