@@ -28,6 +28,8 @@ npx tsx packages/server/src/ui-review.ts <图片路径> ["任意指令"]
 2. **截图产物**：`scripts/shots/`（`scripts/ui-screenshot.mjs` 用 Playwright 截）
 3. **手动截图**：用户给的文件路径
 
+**选源规则（图在 DB → 取 DB，别重截页面）**：DB 里存的 dataURL 就是用户上传时的原始字节（sha256 可验证），解码直接喂模型**零额外损失**；重截页面反而丢精度——截图拿到的是"气泡里缩放渲染后的图"，二次编码 + 分辨率缩水。截图只留给"页面现状不在任何库里"的 UI 评审场景（UI 只存在于渲染后的屏幕上，DB 里没有它的图）。
+
 ## 关键事实（踩过的雷，别再踩）
 
 - **Ollama 只收裸 base64**，带 `data:image/` 前缀报 `400 illegal base64 data at input byte 4`（byte 4 是冒号）。`ollama.ts` 的 `toOllamaImage()` 已处理，但直接手调 API 时要自己剥
