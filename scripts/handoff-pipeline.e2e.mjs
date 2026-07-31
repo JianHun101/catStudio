@@ -249,8 +249,14 @@ function stepTriggerRealHandoff(sessionId) {
   log('📤', 'Step 3/7: git commit → post-commit hook → handoff-gen...')
   log('   ', `触发文件: ${TEST_TRIGGER_FILE}`)
 
-  // 1. 前置检查：工作区是否干净
-  const status = safeGit('status --porcelain')
+  // 1. 前置检查：工作区是否干净（忽略数据库 WAL 文件——server 运行中会持续写入）
+  const statusRaw = safeGit('status --porcelain')
+  const status = statusRaw
+    ? statusRaw
+        .split('\n')
+        .filter((l) => l.trim() && !/\.db(-journal|-wal|-shm)?$/.test(l.trim()))
+        .join('\n')
+    : ''
   if (status) {
     log('⚠️', `工作区有未提交的改动，测试 commit 可能包含不相关文件:`)
     for (const line of status.split('\n').slice(0, 5)) {
