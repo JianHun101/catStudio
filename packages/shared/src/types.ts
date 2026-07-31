@@ -59,6 +59,8 @@ export interface Message {
   agentId: string | null // null = user or system
   role: MessageRole
   content: string
+  /** 用户消息附带的图片（base64 dataURL 数组，仅 ollama 视觉模型可见真图） */
+  images?: string[]
   mentions: string[] // agent names mentioned with @
   taskId?: string // 任务 ID，串联同一任务的多轮 agent 交互
   thinkingContent?: string // 思考过程内容（仅前端展示，不参与 Agent 间上下文）
@@ -125,6 +127,8 @@ export interface AgentTokenStats {
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant'
   content: string
+  /** 视觉图片（base64 dataURL）。仅 Ollama 适配器使用，其他适配器忽略（但仍会收到文字占位提示） */
+  images?: string[]
 }
 
 export interface ChatOptions {

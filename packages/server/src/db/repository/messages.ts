@@ -169,12 +169,13 @@ export function insertUserMessage(
   sessionId: string,
   content: string,
   mentionsJson: string,
-  taskId: string | null
+  taskId: string | null,
+  imagesJson?: string
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
-     VALUES (?, ?, 'user', ?, ?, ?)`
-  ).run(id, sessionId, content, mentionsJson, taskId)
+    `INSERT INTO messages (id, session_id, role, content, mentions, task_id, images)
+     VALUES (?, ?, 'user', ?, ?, ?, ?)`
+  ).run(id, sessionId, content, mentionsJson, taskId, imagesJson || '[]')
 }
 
 export function insertAgentMessage(

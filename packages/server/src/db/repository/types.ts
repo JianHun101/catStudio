@@ -43,6 +43,7 @@ export interface MessageRow {
   role: 'user' | 'agent' | 'system'
   content: string
   mentions: string // JSON 字符串数组
+  images: string | null // JSON 字符串数组（base64 dataURL）
   task_id: string | null
   thinking_content: string | null
   created_at: string

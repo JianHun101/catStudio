@@ -138,6 +138,10 @@ export function initDb(): void {
       sql: `ALTER TABLE messages ADD COLUMN task_id TEXT`,
     },
     {
+      name: 'images on messages',
+      sql: `ALTER TABLE messages ADD COLUMN images TEXT`,
+    },
+    {
       name: 'message_id on execution_logs',
       sql: `ALTER TABLE execution_logs ADD COLUMN message_id TEXT`,
     },

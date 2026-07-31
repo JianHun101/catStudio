@@ -201,14 +201,15 @@ export const useChatStore = defineStore('chat', () => {
     // 不再在客户端生成，避免与历史消息渲染不同步
   }
 
-  /** 发送用户消息 */
-  function sendMessage(content: string, mentions: string[] = []): void {
+  /** 发送用户消息（images: base64 dataURL 数组，用于视觉模型识别） */
+  function sendMessage(content: string, mentions: string[] = [], images: string[] = []): void {
     if (!activeSessionId.value) return
     const { socket } = useSocket()
     socket.emit(Events.SEND_MESSAGE, {
       sessionId: activeSessionId.value,
       content,
       mentions,
+      ...(images.length > 0 ? { images } : {}),
     })
   }
 

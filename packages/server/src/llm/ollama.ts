@@ -11,8 +11,8 @@ interface OllamaConfig {
  * 使用原生 /api/chat 端点（stream: true 时每行一个 JSON，无 `data:` 前缀，
  * 与 OpenAI 兼容的 SSE 格式不同——这是和 deepseek.ts 解析逻辑的关键差异）。
  *
- * 视觉消息请走 `ui-review.ts` 脚本（原生 images 字段 + base64），
- * 本适配器面向 Agent 运行时纯文本流式对话。
+ * 视觉支持：LLMMessage.images（base64 dataURL 数组）直接透传给 /api/chat 的
+ * images 字段（qwen3.5:9b 等多模态模型可用），无 images 时按纯文本发送。
  */
 export class OllamaAdapter implements LLMAdapter {
   readonly provider = 'ollama'
@@ -35,6 +35,8 @@ export class OllamaAdapter implements LLMAdapter {
     const chatMessages = messages.map((m) => ({
       role: m.role,
       content: m.content,
+      // 视觉图片：多模态模型（qwen3.5:9b 等）识别，纯文本模型忽略此字段
+      ...(m.images && m.images.length > 0 ? { images: m.images } : {}),
     }))
 
     const body: any = {

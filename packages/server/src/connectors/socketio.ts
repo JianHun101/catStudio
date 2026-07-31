@@ -200,7 +200,13 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
     socket.on(
       Events.SEND_MESSAGE,
-      async (data: { sessionId: string; content: string; mentions: string[]; taskId?: string }) => {
+      async (data: {
+        sessionId: string
+        content: string
+        mentions: string[]
+        taskId?: string
+        images?: string[]
+      }) => {
         const msgId = uuid()
         const traceId = uuid() // 贯穿全链路的请求追踪 ID
 
@@ -210,6 +216,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           mentions: data.mentions,
           contentLen: data.content.length,
           contentTokens: estimateTokens(data.content),
+          imageCount: data.images?.length || 0,
         })
 
         // 1. 先检查 session 是否存在（在 INSERT 前，避免 FK 约束抛异常）
@@ -222,12 +229,14 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
         // 2. 写入消息
         const mentionsJson = JSON.stringify(data.mentions || [])
+        const images = data.images || []
         messagesRepo.insertUserMessage(
           msgId,
           data.sessionId,
           data.content,
           mentionsJson,
-          data.taskId || null
+          data.taskId || null,
+          JSON.stringify(images)
         )
 
         const msg = {
@@ -236,6 +245,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           agentId: null,
           role: 'user' as const,
           content: data.content,
+          images: images.length > 0 ? images : undefined,
           mentions: data.mentions || [],
           taskId: data.taskId || undefined,
           createdAt: new Date().toISOString(),
@@ -1202,9 +1212,17 @@ async function runAgentReply(
       const mentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
       const audience = formatAudienceTag(mentions, agent.name)
 
+      // 用户消息附带图片：真图（base64）走 images 字段供 ollama 视觉模型使用，
+      // 同时加文字占位，让 deepseek/claude 等非视觉模型也能感知"用户发了图"
+      const msgImages: string[] = m.images ? JSON.parse(m.images) : []
+      const formatted = formatUserMessage(m.content, mentions, audience, isLast)
+      const content =
+        msgImages.length > 0 ? `${formatted}\n[用户附带了 ${msgImages.length} 张图片]` : formatted
+
       return {
         role: 'user' as const,
-        content: formatUserMessage(m.content, mentions, audience, isLast),
+        content,
+        ...(msgImages.length > 0 ? { images: msgImages } : {}),
       }
     }),
   ]

@@ -75,7 +75,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
 
     // 2. 写入消息
     const mentionsJson = JSON.stringify(mentions)
-    messagesRepo.insertUserMessage(msgId, sessionId, content, mentionsJson, taskId || null)
+    messagesRepo.insertUserMessage(msgId, sessionId, content, mentionsJson, taskId || null, '[]')
 
     const msg = {
       id: msgId,

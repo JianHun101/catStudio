@@ -45,6 +45,7 @@ const SCHEMA_SQL = `
     content TEXT NOT NULL,
     mentions TEXT NOT NULL DEFAULT '[]',
     task_id TEXT,
+    images TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (session_id) REFERENCES sessions(id)
   );

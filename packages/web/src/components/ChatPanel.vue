@@ -289,9 +289,92 @@ function onInput(e: Event): void {
   detectSkill(ta.value, ta.selectionStart)
 }
 
+// ─── Image Attachments ──────────────────────
+
+const MAX_IMAGES = 4
+const pastedImages = ref<string[]>([])
+const fileInputRef = ref<HTMLInputElement>()
+
+/**
+ * 读取 File → canvas 压缩 → base64 dataURL。
+ * 最长边压到 1280（与 server ui-review.ts 的 sharp 压缩一致），
+ * 避免超大 base64 撑爆 socket 消息和 SQLite。
+ */
+function fileToDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const img = new Image()
+      img.onload = () => {
+        const MAX_EDGE = 1280
+        const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height))
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(img.width * scale))
+        canvas.height = Math.max(1, Math.round(img.height * scale))
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          resolve(reader.result as string)
+          return
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        resolve(canvas.toDataURL('image/jpeg', 0.85))
+      }
+      img.onerror = () => reject(new Error('图片解码失败'))
+      img.src = reader.result as string
+    }
+    reader.onerror = () => reject(new Error('文件读取失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+/** 批量加入图片（过滤非图片类型，截断超限部分） */
+function addImages(files: FileList | File[]): void {
+  const list = Array.from(files).filter((f) => f.type.startsWith('image/'))
+  const remaining = MAX_IMAGES - pastedImages.value.length
+  if (list.length > remaining) {
+    log.error('图片数量超限', { max: MAX_IMAGES, received: list.length, remaining })
+  }
+  list.slice(0, Math.max(0, remaining)).forEach((f) => {
+    fileToDataURL(f)
+      .then((dataUrl) => {
+        pastedImages.value.push(dataUrl)
+      })
+      .catch((err) => log.error('图片处理失败', { error: String(err) }))
+  })
+}
+
+/** 剪贴板粘贴图片（阻止二进制粘进 textarea） */
+function onPaste(e: ClipboardEvent): void {
+  const items = e.clipboardData?.items
+  if (!items) return
+  const files: File[] = []
+  for (const item of items) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (file) files.push(file)
+    }
+  }
+  if (files.length > 0) {
+    e.preventDefault()
+    addImages(files)
+  }
+}
+
+/** 文件选择框回调 */
+function onFileSelect(e: Event): void {
+  const input = e.target as HTMLInputElement
+  if (input.files) addImages(input.files)
+  input.value = '' // 清空以便重复选择同一文件
+}
+
+function removeImage(idx: number): void {
+  pastedImages.value.splice(idx, 1)
+}
+
 async function handleSend(): Promise<void> {
   const text = input.value.trim()
-  if (!text || sending.value) return
+  const images = pastedImages.value
+  if ((!text && images.length === 0) || sending.value) return
 
   // 只匹配行首 @后跟字母/数字/中文/下划线/连字符，避免句中引用 @name 被误路由
   const mentionRegex = /^@([\w一-鿿-]+)/gm
@@ -306,8 +389,9 @@ async function handleSend(): Promise<void> {
 
   sending.value = true
   try {
-    await store.sendMessage(text, mentions)
+    await store.sendMessage(text, mentions, images)
     input.value = ''
+    pastedImages.value = []
     mentionActive.value = false
     await nextTick()
     scrollToBottom()
@@ -664,6 +748,15 @@ function statusLabelZh(status: string): string {
                       v-html="renderMarkdown(msg.thinkingContent.replace(/\[思考\]\s*/g, ''))"
                     ></div>
                   </details>
+                  <div v-if="msg.images && msg.images.length" class="msg-images">
+                    <img
+                      v-for="(src, i) in msg.images"
+                      :key="i"
+                      :src="src"
+                      class="msg-image"
+                      :alt="`图片${i + 1}`"
+                    />
+                  </div>
                   <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
                   <time class="msg-time" :datetime="msg.createdAt">{{
                     formatTime(msg.createdAt)
@@ -759,17 +852,34 @@ function statusLabelZh(status: string): string {
     <!-- Input -->
     <div class="chat-input-area">
       <div class="input-wrapper">
+        <!-- 待发送图片预览 -->
+        <div v-if="pastedImages.length" class="image-preview-row">
+          <div v-for="(src, idx) in pastedImages" :key="idx" class="image-preview-item">
+            <img :src="src" :alt="`待发送图片${idx + 1}`" />
+            <button
+              class="image-preview-remove"
+              :aria-label="`移除图片${idx + 1}`"
+              @click="removeImage(idx)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
         <textarea
           ref="textareaRef"
           v-model="input"
           class="chat-input"
           :placeholder="
-            store.activeSessionId ? '输入消息… @猫咪名 提及  /技能名 触发' : '请先选择会话'
+            store.activeSessionId
+              ? '输入消息… @猫咪名 提及  /技能名 触发  （可直接粘贴图片）'
+              : '请先选择会话'
           "
           :disabled="!store.activeSessionId"
           rows="2"
           @input="onInput"
           @keydown="onKeydown"
+          @paste="onPaste"
         ></textarea>
 
         <div
@@ -817,8 +927,46 @@ function statusLabelZh(status: string): string {
       </div>
 
       <button
+        class="btn-image"
+        :disabled="!store.activeSessionId || sending || pastedImages.length >= MAX_IMAGES"
+        aria-label="添加图片"
+        title="添加图片（或直接 Ctrl+V 粘贴，最多 4 张）"
+        @click="fileInputRef?.click()"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <rect
+            x="1.5"
+            y="2.5"
+            width="13"
+            height="11"
+            rx="1.5"
+            stroke="currentColor"
+            stroke-width="1.3"
+          />
+          <circle cx="5.5" cy="6" r="1.3" stroke="currentColor" stroke-width="1.2" />
+          <path
+            d="M2.5 12.5l3.5-3.5 2.5 2.5 2-2 3 3"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+      <input
+        ref="fileInputRef"
+        type="file"
+        accept="image/*"
+        multiple
+        class="hidden-file-input"
+        @change="onFileSelect"
+      />
+
+      <button
         class="btn-send"
-        :disabled="!input.trim() || !store.activeSessionId || sending"
+        :disabled="
+          (!input.trim() && pastedImages.length === 0) || !store.activeSessionId || sending
+        "
         aria-label="发送消息"
         @click="handleSend"
       >
@@ -1628,6 +1776,96 @@ function statusLabelZh(status: string): string {
 
 .chat-input::placeholder {
   color: var(--text-muted);
+}
+
+/* ─── Image Attachments ──────────────────── */
+
+.image-preview-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 2px 8px;
+}
+
+.image-preview-item {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+}
+
+.image-preview-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.image-preview-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent-red);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+/* 消息气泡内渲染的图片 */
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.msg-image {
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.btn-image {
+  flex-shrink: 0;
+  width: 36px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  padding: 8px 0;
+  transition: all var(--ease-out);
+}
+
+.btn-image:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-image:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* Mention Dropdown */
