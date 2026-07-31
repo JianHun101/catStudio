@@ -577,6 +577,12 @@ export async function executeAgentsSerial(
     if (!state || state.status !== 'busy') continue
     // 跨会话忙碌：agent 正在其他 session 执行，已入队，不在此执行
     if (state.sessionId !== sessionId) continue
+    // 只执行"本次 dispatch 标记的执行"：agent 正在处理其他消息时（本消息在
+    // FIFO 队列中等待排空），必须跳过——否则同一条消息会被立即执行一次、
+    // 队列排空再执行一次，产生重复回复（08:43:15 双补填事故根因）。
+    // completeExecution 弹出队列时会更新 currentTriggerMessageId，
+    // 排空路径自然通过此检查。
+    if (state.currentTriggerMessageId !== triggerMsg.id) continue
 
     // 检查 API Key
     if (!agent.llmApiKey || agent.llmApiKey === 'sk-your-api-key-here') {

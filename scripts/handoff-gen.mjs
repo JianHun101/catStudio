@@ -569,19 +569,49 @@ function buildChecklistSection(changeTypes) {
 async function tryPostToCatstudy(content, cwd) {
   const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
 
-  // 获取 session ID（优先级：环境变量 → API 自动获取 → 跳过）
+  // 获取 session ID（优先级：环境变量 → 含店长的会话 → 标题匹配 → API 第一个）
+  // 不能无脑取 sessions[0]：/api/sessions 按 updated_at DESC 排序，最新活跃的
+  // 会话恒排第一，投递会打到错误会话（用户实测打到"UI优化"）
   let sessionId = process.env.CATSTUDY_SESSION_ID
   if (!sessionId) {
     try {
-      const res = await fetch(`${serverUrl}/api/sessions`, {
-        signal: AbortSignal.timeout(3000),
-      })
-      if (res.ok) {
-        const body = await res.json()
-        const sessions = Array.isArray(body) ? body : body?.sessions || []
-        if (sessions.length > 0) {
-          sessionId = sessions[0].id
+      const [sessionsRes, agentsRes] = await Promise.all([
+        fetch(`${serverUrl}/api/sessions`, { signal: AbortSignal.timeout(3000) }),
+        fetch(`${serverUrl}/api/agents`, { signal: AbortSignal.timeout(3000) }),
+      ])
+      const sessionsBody = sessionsRes.ok ? await sessionsRes.json() : []
+      const sessions = Array.isArray(sessionsBody) ? sessionsBody : sessionsBody?.sessions || []
+      const agents = agentsRes.ok ? await agentsRes.json() : []
+
+      // 1) 优先：会话成员包含"店长"的最近活跃会话（按 API 返回序 = updated_at DESC）
+      const managerId = agents.find((a) => a?.name === '店长')?.id
+      if (managerId) {
+        const managerSession = sessions.find(
+          (s) => Array.isArray(s?.agentIds) && s.agentIds.includes(managerId)
+        )
+        if (managerSession) {
+          sessionId = managerSession.id
+          console.log(
+            `[handoff-gen] 目标会话: "${managerSession.title || managerSession.id}"（含店长）`
+          )
         }
+      }
+
+      // 2) 次优：标题含"店长"的会话
+      if (!sessionId) {
+        const titled = sessions.find((s) => String(s?.title || '').includes('店长'))
+        if (titled) {
+          sessionId = titled.id
+          console.log(`[handoff-gen] 目标会话: "${titled.title}"（标题匹配）`)
+        }
+      }
+
+      // 3) 兜底：列表第一个（最新活跃），打印警告——可能打错目标
+      if (!sessionId && sessions.length > 0) {
+        sessionId = sessions[0].id
+        console.log(
+          `[handoff-gen] ⚠️  未找到含店长的会话，fallback 到 "${sessions[0].title || sessions[0].id}"（sessions[0]，可能打错目标）`
+        )
       }
     } catch {
       // server 不可达，继续走文件生成路径
