@@ -692,5 +692,6 @@ async function main() {
 
 main().catch((err) => {
   console.error('测试异常:', err)
+  removeE2eMarker() // 意外异常逃逸 main() 时也清理标记，防止 server auto-commit 被永久禁用
   process.exit(1)
 })
