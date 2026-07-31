@@ -279,6 +279,36 @@ describe('socketio connector', () => {
       const roles = call[1].messages.map((m: any) => m.role)
       expect(roles).not.toContain('system')
     })
+
+    it('includes images in history messages (refresh roundtrip)', () => {
+      // 插入一条带图片的用户消息 + 一条纯文本消息（模拟前端粘贴图片后发送）
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions, images)
+        VALUES (?, 'session-1', 'user', '带图消息', '[]', ?)
+      `
+      ).run('img-msg-1', JSON.stringify(['data:image/png;base64,CCCC']))
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions)
+        VALUES (?, 'session-1', 'user', '纯文本消息', '[]')
+      `
+      ).run('plain-msg-1')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      // 图片已随历史消息返回（camelCase images 数组）
+      const imgMsg = call[1].messages.find((m: any) => m.id === 'img-msg-1')
+      expect(imgMsg).toBeDefined()
+      expect(imgMsg.images).toEqual(['data:image/png;base64,CCCC'])
+      // 无图片的消息不携带 images 字段（与 NEW_MESSAGE 广播行为一致）
+      const plainMsg = call[1].messages.find((m: any) => m.id === 'plain-msg-1')
+      expect(plainMsg.images).toBeUndefined()
+    })
   })
 
   // ─── LEAVE_SESSION ─────────────────────────
@@ -369,6 +399,65 @@ describe('socketio connector', () => {
         agentName: '店长',
         status: 'queued',
       })
+    })
+
+    it('persists images to DB and broadcasts them with NEW_MESSAGE', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      mockRoomEmit.mockClear()
+
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '看看这张图',
+        mentions: [],
+        images: ['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB'],
+      })
+
+      // 图片已写入 DB（JSON 数组）
+      const db = getDb()
+      const row = db
+        .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get('session-1') as any
+      expect(JSON.parse(row.images)).toEqual([
+        'data:image/png;base64,AAAA',
+        'data:image/png;base64,BBBB',
+      ])
+
+      // NEW_MESSAGE 广播携带 images
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({
+          images: ['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB'],
+        })
+      )
+    })
+
+    it('truncates images to 4 and drops oversized ones (server guard)', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      mockRoomEmit.mockClear()
+
+      const oversized = `data:image/png;base64,${'x'.repeat(4 * 1024 * 1024)}`
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '防滥用',
+        mentions: [],
+        images: [
+          'data:image/png;base64,1',
+          'data:image/png;base64,2',
+          'data:image/png;base64,3',
+          'data:image/png;base64,4',
+          'data:image/png;base64,5', // 第 5 张被截断
+          oversized, // 超 3MB 被过滤
+        ],
+      })
+
+      const db = getDb()
+      const row = db
+        .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get('session-1') as any
+      const stored: string[] = JSON.parse(row.images)
+      expect(stored).toHaveLength(4)
+      expect(stored).not.toContain('data:image/png;base64,5')
+      expect(stored).not.toContain(oversized)
     })
   })
 

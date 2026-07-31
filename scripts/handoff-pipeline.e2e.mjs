@@ -12,7 +12,7 @@
  *
  * 用法:
  *   node scripts/handoff-pipeline.e2e.mjs
- *   node scripts/handoff-pipeline.e2e.mjs --timeout=300  # 自定义超时（秒）
+ *   node scripts/handoff-pipeline.e2e.mjs --timeout=600  # 覆盖每个 Step 的等待预算（秒，默认 360）
  *   node scripts/handoff-pipeline.e2e.mjs --no-cleanup    # 保留测试 commit
  *
  * 环境变量:
@@ -46,8 +46,10 @@ const ROOT = resolve(__dirname, '..')
 const SERVER_URL = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
 const WEB_URL = 'http://localhost:5173'
 const POLL_INTERVAL_MS = 2000 // 轮询间隔
-const DEFAULT_TIMEOUT_S = 300 // 默认超时（5 分钟）
-const AGENT_REPLY_TIMEOUT_S = 180 // 单个 Agent 回复超时
+// 单个 Agent 回复的默认等待预算。真实链路实测：店长补填一次完整交接文档耗时 229s，
+// 吐槽猫审查需通读完整 diff 更久——180s 曾导致测试在补填到达前 49s 就超时退出。
+// 可用 --timeout=N 覆盖（作用于每个 Step 的等待预算）。
+const DEFAULT_STEP_TIMEOUT_S = 360
 const TEST_TRIGGER_FILE = 'scripts/.e2e-test-trigger.txt'
 const E2E_MARKER_FILE = 'scripts/.e2e-testing'
 
@@ -118,10 +120,11 @@ process.on('SIGINT', () => {
 // ─── 工具函数 ────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const opts = { timeout: DEFAULT_TIMEOUT_S, cleanup: true }
+  const opts = { timeout: DEFAULT_STEP_TIMEOUT_S, cleanup: true }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--timeout' && i + 1 < argv.length) {
-      opts.timeout = parseInt(argv[++i], 10) || DEFAULT_TIMEOUT_S
+      const parsed = parseInt(argv[++i], 10)
+      opts.timeout = isNaN(parsed) ? DEFAULT_STEP_TIMEOUT_S : parsed
     } else if (argv[i] === '--no-cleanup') {
       opts.cleanup = false
     }
@@ -249,12 +252,19 @@ function stepTriggerRealHandoff(sessionId) {
   log('📤', 'Step 3/7: git commit → post-commit hook → handoff-gen...')
   log('   ', `触发文件: ${TEST_TRIGGER_FILE}`)
 
-  // 1. 前置检查：工作区是否干净（忽略数据库 WAL 文件——server 运行中会持续写入）
+  // 1. 前置检查：工作区是否干净。
+  //    忽略: 数据库 WAL 文件（server 运行中会持续写入）+ trigger 文件
+  //    （上次强杀可能残留 tracked 状态显示 D——本脚本 stepCleanup 会自愈恢复）
   const statusRaw = safeGit('status --porcelain')
   const status = statusRaw
     ? statusRaw
         .split('\n')
-        .filter((l) => l.trim() && !/\.db(-journal|-wal|-shm)?$/.test(l.trim()))
+        .filter(
+          (l) =>
+            l.trim() &&
+            !/\.db(-journal|-wal|-shm)?$/.test(l.trim()) &&
+            !l.trim().endsWith(TEST_TRIGGER_FILE)
+        )
         .join('\n')
     : ''
   if (status) {
@@ -312,7 +322,9 @@ function stepTriggerRealHandoff(sessionId) {
   let commitHash = null
   try {
     log('   ', 'git add + commit → 触发 post-commit hook...')
-    git(`add ${TEST_TRIGGER_FILE}`)
+    // -f: trigger 文件已被 .gitignore 忽略（防 server auto-commit 的 git add -A 误扫），
+    //     必须强制添加才能提交
+    git(`add -f ${TEST_TRIGGER_FILE}`)
     // 用 --allow-empty 兜底，但正常情况不会触发
     git(`commit -m "${commitMsg.replace(/"/g, '\\"')}"`)
     commitHash = safeGit('rev-parse HEAD')
@@ -329,11 +341,11 @@ function stepTriggerRealHandoff(sessionId) {
 /**
  * Step 4: 等待店长补填回复
  */
-async function stepWaitForStoreManager(sessionId, startTime) {
+async function stepWaitForStoreManager(sessionId, startTime, timeoutS) {
   log('⏳', 'Step 4/7: 等待店长补填 Why/Tradeoff/OQ...')
   log('   ', `Web UI: ${WEB_URL} — 可在会话页面实时观察`)
 
-  const deadline = Date.now() + AGENT_REPLY_TIMEOUT_S * 1000
+  const deadline = Date.now() + timeoutS * 1000
   let lastMsgCount = 0
 
   while (Date.now() < deadline) {
@@ -376,18 +388,18 @@ async function stepWaitForStoreManager(sessionId, startTime) {
     }
   }
 
-  log('❌', `等待店长回复超时 (${AGENT_REPLY_TIMEOUT_S}s)`)
+  log('❌', `等待店长回复超时 (${timeoutS}s)`)
   return null
 }
 
 /**
  * Step 5: 等待吐槽猫审查回复
  */
-async function stepWaitForReviewer(sessionId, startTime, dmReplyId) {
+async function stepWaitForReviewer(sessionId, startTime, dmReplyId, timeoutS) {
   log('⏳', 'Step 5/7: 等待吐槽猫审查回复...')
   log('   ', '吐槽猫正在读取交接文档 + 代码 diff → 逐项检查...')
 
-  const deadline = Date.now() + AGENT_REPLY_TIMEOUT_S * 1000
+  const deadline = Date.now() + timeoutS * 1000
 
   while (Date.now() < deadline) {
     await sleep(POLL_INTERVAL_MS)
@@ -430,7 +442,7 @@ async function stepWaitForReviewer(sessionId, startTime, dmReplyId) {
     }
   }
 
-  log('⚠️', `等待吐槽猫回复超时 (${AGENT_REPLY_TIMEOUT_S}s)`)
+  log('⚠️', `等待吐槽猫回复超时 (${timeoutS}s)`)
   return null
 }
 
@@ -471,6 +483,17 @@ function stepCleanup(headBefore, testCommitHash) {
         git(`reset HEAD -- ${TEST_TRIGGER_FILE}`)
       } catch {
         // 文件可能已被删除，reset 失败是正常的
+      }
+
+      // 自愈：headBefore 已跟踪 trigger 文件（上次强杀残留）时，reset --soft 回退后
+      // 文件仍是 tracked，unlink 会让工作区显示 "D"——后续运行被前置检查永久拦死。
+      // 恢复文件保持工作区干净；解除跟踪留给开发者手动处理（gitignore 对已跟踪文件无效）。
+      const afterStatus = safeGit('status --porcelain') || ''
+      if (afterStatus.trim() && afterStatus.includes(TEST_TRIGGER_FILE)) {
+        git(`checkout HEAD -- ${TEST_TRIGGER_FILE}`)
+        log('⚠️', `${TEST_TRIGGER_FILE} 在 headBefore 中已被跟踪（上次强杀残留）`)
+        log('   ', '已恢复文件保持工作区干净。建议手动解除跟踪:')
+        log('   ', `  git rm --cached ${TEST_TRIGGER_FILE}`)
       }
     } else {
       // 多个中间 commit — 可能包含 catstudy agent 在测试期间产生的快照 commit
@@ -620,7 +643,7 @@ async function main() {
   console.log(`  服务器:     ${SERVER_URL}`)
   console.log(`  Web 观察:   ${WEB_URL}`)
   console.log(`  触发方式:   git commit → post-commit hook → handoff-gen.mjs`)
-  console.log(`  超时:       ${args.timeout}s`)
+  console.log(`  每步超时:   ${args.timeout}s`)
   console.log(`  轮询间隔:   ${POLL_INTERVAL_MS / 1000}s`)
   console.log(`  清理 commit: ${args.cleanup ? '是' : '否'}`)
   console.log('')
@@ -654,13 +677,13 @@ async function main() {
   await sleep(3000)
 
   // Step 4: 等店长
-  const dmReply = await stepWaitForStoreManager(sessionId, startTime)
+  const dmReply = await stepWaitForStoreManager(sessionId, startTime, args.timeout)
 
   // Step 5: 等吐槽猫
   let reviewReply = null
   if (dmReply && dmReply.id && dmReply.content.includes('@吐槽猫')) {
     await sleep(2000)
-    reviewReply = await stepWaitForReviewer(sessionId, startTime, dmReply.id)
+    reviewReply = await stepWaitForReviewer(sessionId, startTime, dmReply.id, args.timeout)
   } else if (dmReply) {
     log('⚠️', '店长回复中未包含 @吐槽猫 — 跳过审查等待')
   }

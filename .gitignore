@@ -39,3 +39,5 @@ workspace/
 
 # e2e 测试标记（存在时 server 跳过 auto-commit，绝不能提交）
 scripts/.e2e-testing
+# e2e 触发文件（post-commit 触发道具——防 server auto-commit 的 git add -A 误扫；脚本用 git add -f 强制提交）
+scripts/.e2e-test-trigger.txt

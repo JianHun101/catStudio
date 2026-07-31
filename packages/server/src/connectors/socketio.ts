@@ -116,17 +116,21 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 推送该 Session 的历史消息（转为 camelCase）— 批量发送，避免逐条渲染闪烁
       const rows = messagesRepo.getSessionHistory(sessionId)
 
-      const historyMessages = rows.map((row: MessageRow) => ({
-        id: row.id,
-        sessionId: row.session_id,
-        agentId: row.agent_id,
-        role: row.role,
-        content: row.content,
-        mentions: JSON.parse(row.mentions || '[]'),
-        taskId: row.task_id || undefined,
-        thinkingContent: row.thinking_content || undefined,
-        createdAt: row.created_at.replace(' ', 'T') + 'Z',
-      }))
+      const historyMessages = rows.map((row: MessageRow) => {
+        const msgImages: string[] = row.images ? JSON.parse(row.images) : []
+        return {
+          id: row.id,
+          sessionId: row.session_id,
+          agentId: row.agent_id,
+          role: row.role,
+          content: row.content,
+          images: msgImages.length > 0 ? msgImages : undefined,
+          mentions: JSON.parse(row.mentions || '[]'),
+          taskId: row.task_id || undefined,
+          thinkingContent: row.thinking_content || undefined,
+          createdAt: row.created_at.replace(' ', 'T') + 'Z',
+        }
+      })
 
       // 生成欢迎消息（会话中猫咪列表提示）
       const sessionMeta = sessionsRepo.getSessionMeta(sessionId)
@@ -231,7 +235,10 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
         // 2. 写入消息
         const mentionsJson = JSON.stringify(data.mentions || [])
-        const images = data.images || []
+        // 图片上限：最多 4 张、单张 base64 ≤ 3MB（前端已压缩到最长边 1280，此处仅防滥用）
+        const images = (data.images || [])
+          .filter((s) => typeof s === 'string' && s.length <= 3 * 1024 * 1024)
+          .slice(0, 4)
         messagesRepo.insertUserMessage(
           msgId,
           data.sessionId,

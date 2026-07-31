@@ -163,6 +163,24 @@ describe('MessageSendSchema', () => {
     })
     expect(result.success).toBe(false)
   })
+
+  it('accepts images (base64 dataURL array)', () => {
+    const result = MessageSendSchema.safeParse({
+      sessionId: 'session-1',
+      content: '看看这张图',
+      images: ['data:image/png;base64,xxx'],
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects more than 4 images', () => {
+    const result = MessageSendSchema.safeParse({
+      sessionId: 'session-1',
+      content: '图',
+      images: Array(5).fill('data:image/png;base64,xxx'),
+    })
+    expect(result.success).toBe(false)
+  })
 })
 
 // ─── EmbeddingConfigSchema ─────────────────────────

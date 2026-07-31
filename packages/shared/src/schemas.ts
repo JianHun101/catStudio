@@ -37,6 +37,8 @@ export const MessageSendSchema = z.object({
   sessionId: z.string(),
   content: z.string().min(1),
   mentions: z.array(z.string()).default([]),
+  /** 用户消息附带的图片（base64 dataURL），最多 4 张，与前端输入框上限一致 */
+  images: z.array(z.string()).max(4).optional(),
   taskId: z.string().optional(),
 })
 

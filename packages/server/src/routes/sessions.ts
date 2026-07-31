@@ -189,17 +189,21 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     )
     const rows = messagesRepo.getRecentMessages(id, limit)
 
-    return rows.map((r) => ({
-      id: r.id,
-      sessionId: r.session_id,
-      agentId: r.agent_id || null,
-      role: r.role,
-      content: r.content,
-      mentions: JSON.parse(r.mentions || '[]'),
-      taskId: r.task_id || null,
-      thinkingContent: r.thinking_content || undefined,
-      createdAt: r.created_at.replace(' ', 'T') + 'Z',
-    }))
+    return rows.map((r) => {
+      const msgImages: string[] = r.images ? JSON.parse(r.images) : []
+      return {
+        id: r.id,
+        sessionId: r.session_id,
+        agentId: r.agent_id || null,
+        role: r.role,
+        content: r.content,
+        images: msgImages.length > 0 ? msgImages : undefined,
+        mentions: JSON.parse(r.mentions || '[]'),
+        taskId: r.task_id || null,
+        thinkingContent: r.thinking_content || undefined,
+        createdAt: r.created_at.replace(' ', 'T') + 'Z',
+      }
+    })
   })
 
   // ─── POST /api/sessions/:id/read — 标记已读 ──────────

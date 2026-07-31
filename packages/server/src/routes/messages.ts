@@ -55,6 +55,12 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const content = body.content
     const mentions: string[] = Array.isArray(body.mentions) ? body.mentions : []
     const taskId: string | undefined = body.taskId || undefined
+    // 图片（base64 dataURL）：最多 4 张、单张 ≤ 3MB（前端已压缩到最长边 1280，此处防滥用）
+    const images: string[] = Array.isArray(body.images)
+      ? body.images
+          .filter((s: unknown) => typeof s === 'string' && s.length <= 3 * 1024 * 1024)
+          .slice(0, 4)
+      : []
     const msgId = uuid()
     const traceId = uuid()
 
@@ -64,6 +70,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       mentions,
       contentLen: content.length,
       contentTokens: estimateTokens(content),
+      imageCount: images.length,
     })
 
     // 1. 验证 session 存在
@@ -75,7 +82,14 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
 
     // 2. 写入消息
     const mentionsJson = JSON.stringify(mentions)
-    messagesRepo.insertUserMessage(msgId, sessionId, content, mentionsJson, taskId || null, '[]')
+    messagesRepo.insertUserMessage(
+      msgId,
+      sessionId,
+      content,
+      mentionsJson,
+      taskId || null,
+      JSON.stringify(images)
+    )
 
     const msg = {
       id: msgId,
@@ -83,6 +97,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       agentId: null,
       role: 'user' as const,
       content,
+      images: images.length > 0 ? images : undefined,
       mentions,
       taskId: taskId || undefined,
       createdAt: new Date().toISOString(),
