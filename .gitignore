@@ -41,3 +41,6 @@ workspace/
 scripts/.e2e-testing
 # e2e 触发文件（post-commit 触发道具——防 server auto-commit 的 git add -A 误扫；脚本用 git add -f 强制提交）
 scripts/.e2e-test-trigger.txt
+
+# UI 截图脚本产物（生成物，不入库）
+scripts/shots/

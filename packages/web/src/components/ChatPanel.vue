@@ -1742,7 +1742,7 @@ function statusLabelZh(status: string): string {
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
-  background: var(--bg-base);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .input-wrapper {
@@ -1753,7 +1753,7 @@ function statusLabelZh(status: string): string {
 .chat-input {
   width: 100%;
   padding: 10px 14px;
-  border: 1px solid transparent;
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
   color: var(--text-primary);
@@ -1761,7 +1761,13 @@ function statusLabelZh(status: string): string {
   line-height: 1.5;
   resize: none;
   outline: none;
-  transition: border-color var(--ease-out);
+  transition:
+    border-color var(--ease-out),
+    box-shadow var(--ease-out);
+}
+
+.chat-input:hover:not(:disabled) {
+  border-color: var(--border-focus);
 }
 
 .chat-input:focus {
