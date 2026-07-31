@@ -459,6 +459,24 @@ describe('socketio connector', () => {
       expect(stored).not.toContain('data:image/png;base64,5')
       expect(stored).not.toContain(oversized)
     })
+
+    it('filters out strings without data:image/ prefix', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      mockRoomEmit.mockClear()
+
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '防垃圾',
+        mentions: [],
+        images: ['data:image/png;base64,OK', 'not-an-image', 'javascript:alert(1)'],
+      })
+
+      const db = getDb()
+      const row = db
+        .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get('session-1') as any
+      expect(JSON.parse(row.images)).toEqual(['data:image/png;base64,OK'])
+    })
   })
 
   // ─── executeAgentsSerial 双执行防护 ──────────

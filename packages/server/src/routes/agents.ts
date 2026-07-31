@@ -10,6 +10,7 @@ import {
 } from '../db/repository/index.js'
 import type { AgentRow } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import { parseJsonArray } from '../utils.js'
 
 const log = createLogger('agents')
 
@@ -170,14 +171,5 @@ function toAgentConfig(row: AgentRow) {
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: row.effort_level || undefined,
     skillModules: parseJsonArray(row.skill_modules),
-  }
-}
-
-function parseJsonArray(raw: string): string[] {
-  try {
-    const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr : []
-  } catch {
-    return []
   }
 }

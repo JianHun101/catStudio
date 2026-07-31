@@ -16,6 +16,7 @@ import {
 import type { SessionRow } from '../db/repository/index.js'
 import { getIO } from '../connectors/socketio.js'
 import { createLogger } from '../logger.js'
+import { parseJsonArray } from '../utils.js'
 
 const log = createLogger('sessions')
 
@@ -190,7 +191,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const rows = messagesRepo.getRecentMessages(id, limit)
 
     return rows.map((r) => {
-      const msgImages: string[] = r.images ? JSON.parse(r.images) : []
+      const msgImages: string[] = parseJsonArray(r.images)
       return {
         id: r.id,
         sessionId: r.session_id,

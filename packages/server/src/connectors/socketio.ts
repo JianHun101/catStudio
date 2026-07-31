@@ -46,6 +46,7 @@ import {
 } from '../llm/git-utils.js'
 import type { AgentConfig, LLMMessage, Message } from '@cat-study/shared'
 import { parseMentionsFromReply } from './a2a-mentions.js'
+import { parseJsonArray } from '../utils.js'
 import { SkillLoader } from '../skills/skill-loader.js'
 import { updateRunningSummary } from '../summarizer/index.js'
 import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
@@ -117,7 +118,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       const rows = messagesRepo.getSessionHistory(sessionId)
 
       const historyMessages = rows.map((row: MessageRow) => {
-        const msgImages: string[] = row.images ? JSON.parse(row.images) : []
+        const msgImages: string[] = parseJsonArray(row.images)
         return {
           id: row.id,
           sessionId: row.session_id,
@@ -235,9 +236,13 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
         // 2. 写入消息
         const mentionsJson = JSON.stringify(data.mentions || [])
-        // 图片上限：最多 4 张、单张 base64 ≤ 3MB（前端已压缩到最长边 1280，此处仅防滥用）
+        // 图片守卫：必须 data:image/ 前缀、单张 base64 ≤ 3MB、最多 4 张
+        // （前端已压缩到最长边 1280，此处仅防滥用）
         const images = (data.images || [])
-          .filter((s) => typeof s === 'string' && s.length <= 3 * 1024 * 1024)
+          .filter(
+            (s) =>
+              typeof s === 'string' && s.startsWith('data:image/') && s.length <= 3 * 1024 * 1024
+          )
           .slice(0, 4)
         messagesRepo.insertUserMessage(
           msgId,
@@ -1325,7 +1330,7 @@ async function runAgentReply(
 
       // 用户消息附带图片：真图（base64）走 images 字段供 ollama 视觉模型使用，
       // 同时加文字占位，让 deepseek/claude 等非视觉模型也能感知"用户发了图"
-      const msgImages: string[] = m.images ? JSON.parse(m.images) : []
+      const msgImages: string[] = parseJsonArray(m.images)
       const formatted = formatUserMessage(m.content, mentions, audience, isLast)
       const content =
         msgImages.length > 0 ? `${formatted}\n[用户附带了 ${msgImages.length} 张图片]` : formatted

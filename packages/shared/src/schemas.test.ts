@@ -173,13 +173,13 @@ describe('MessageSendSchema', () => {
     expect(result.success).toBe(true)
   })
 
-  it('rejects more than 4 images', () => {
+  it('accepts any number of images (4-image cap enforced by server runtime guard)', () => {
     const result = MessageSendSchema.safeParse({
       sessionId: 'session-1',
       content: '图',
       images: Array(5).fill('data:image/png;base64,xxx'),
     })
-    expect(result.success).toBe(false)
+    expect(result.success).toBe(true)
   })
 })
 

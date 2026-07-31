@@ -55,10 +55,14 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const content = body.content
     const mentions: string[] = Array.isArray(body.mentions) ? body.mentions : []
     const taskId: string | undefined = body.taskId || undefined
-    // 图片（base64 dataURL）：最多 4 张、单张 ≤ 3MB（前端已压缩到最长边 1280，此处防滥用）
+    // 图片守卫：必须 data:image/ 前缀、单张 base64 ≤ 3MB、最多 4 张
+    // （与 socketio.ts 的 SEND_MESSAGE 守卫同构；前端已压缩到最长边 1280，此处防滥用）
     const images: string[] = Array.isArray(body.images)
       ? body.images
-          .filter((s: unknown) => typeof s === 'string' && s.length <= 3 * 1024 * 1024)
+          .filter(
+            (s: unknown) =>
+              typeof s === 'string' && s.startsWith('data:image/') && s.length <= 3 * 1024 * 1024
+          )
           .slice(0, 4)
       : []
     const msgId = uuid()
