@@ -14,10 +14,13 @@
  *
  * 环境变量:
  *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
- *   CATSTUDY_SESSION_ID   目标会话 ID（兜底用）。投递目标优先级：
- *                         1. commit message 的 catstudy [uuid] 反查消息所在会话（最准）
- *                         2. CATSTUDY_SESSION_ID 环境变量（hook 硬编码，反查失败才用）
- *                         3. 含店长的会话 → 标题含"店长" → /api/sessions 第一个（+警告）
+ *   CATSTUDY_SESSION_ID   目标会话 ID（人工显式指定，明确意图优先）。
+ *                         投递目标选择：
+ *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定）
+ *                         2. commit message 的 catstudy [uuid] 反查消息所在会话（自动）
+ *                         两者都不可用时**报错不投递**——绝不猜目标。
+ *                         曾因反查失败静默降级到环境变量/API 第一个会话，
+ *                         把审查文档投到错误会话（"UI优化"打偏、b8b0a6d 跨会话）。
  */
 
 import { execSync } from 'node:child_process'
@@ -587,7 +590,9 @@ export function extractCommitUuid(commitMsg) {
  * 从最近 commit message 的 uuid 反查触发消息所在会话。
  * GET /api/messages/:id → { sessionId }——永远指向"用户实际发起这条消息的会话"，
  * 比环境变量硬编码（会话重建即失效）和 API 猜第一个（按 updated_at 排序）都准。
- * 反查失败（手动 commit 无 uuid / 消息已删 404 / server 不可达）返回 null，走 fallback 链。
+ * 反查失败（手动 commit 无 uuid / 消息已删 404 / server 不可达）返回 null 并输出
+ * 明确原因——调用方必须**报错不投递**，禁止降级兜底（曾因 404 后静默降级到
+ * 环境变量，把审查文档投到错误会话）。
  * @param {string} cwd — 仓库路径
  * @param {string} serverUrl — cat-study server 地址
  * @returns {Promise<string|null>}
@@ -595,13 +600,20 @@ export function extractCommitUuid(commitMsg) {
 export async function resolveCommitSessionId(cwd, serverUrl) {
   const commitMsg = safeGit(cwd, 'log -1 --pretty=%B')
   const uuid = extractCommitUuid(commitMsg)
-  if (!uuid) return null
+  if (!uuid) {
+    console.log(
+      '[handoff-gen] ⚠️  commit message 无 catstudy [uuid]（手动提交）——无法反查投递目标，不投递'
+    )
+    return null
+  }
   try {
     const res = await fetch(`${serverUrl}/api/messages/${uuid}`, {
       signal: AbortSignal.timeout(3000),
     })
     if (!res.ok) {
-      console.log(`[handoff-gen] ⚠️  commit uuid 反查失败 (HTTP ${res.status})，走 fallback 链`)
+      console.log(
+        `[handoff-gen] ⚠️  commit uuid 反查失败 (HTTP ${res.status})：消息 ${uuid} 不存在或已删除——不投递`
+      )
       return null
     }
     const body = await res.json()
@@ -609,8 +621,11 @@ export async function resolveCommitSessionId(cwd, serverUrl) {
       console.log(`[handoff-gen] 目标会话: ${body.sessionId}（commit uuid ${uuid} 反查）`)
       return body.sessionId
     }
+    console.log(`[handoff-gen] ⚠️  反查响应缺少 sessionId（消息 ${uuid}）——不投递`)
   } catch {
-    // server 不可达——fallback 链的统一告警会兜底
+    console.log(
+      `[handoff-gen] ⚠️  cat-study server 不可达 (${serverUrl})，无法反查投递目标——不投递`
+    )
   }
   return null
 }
@@ -628,70 +643,23 @@ export async function resolveCommitSessionId(cwd, serverUrl) {
 async function tryPostToCatstudy(content, cwd) {
   const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
 
-  // 获取 session ID（优先级：commit uuid 反查 → 环境变量 → 含店长的会话 → 标题匹配 → API 第一个）
-  // 反查最准：commit message 的 uuid 即触发消息 id，永远指向"用户实际发起这条消息的会话"。
-  // 不能无脑取 sessions[0]：/api/sessions 按 updated_at DESC 排序，最新活跃的
-  // 会话恒排第一，投递会打到错误会话（用户实测打到"UI优化"）
-  let sessionId = await resolveCommitSessionId(cwd, serverUrl)
-  if (!sessionId) {
-    sessionId = process.env.CATSTUDY_SESSION_ID
-    if (sessionId) {
-      console.log(
-        `[handoff-gen] 目标会话: ${sessionId}（CATSTUDY_SESSION_ID 环境变量，反查不可用）`
-      )
-    }
-  }
-  if (!sessionId) {
-    try {
-      const [sessionsRes, agentsRes] = await Promise.all([
-        fetch(`${serverUrl}/api/sessions`, { signal: AbortSignal.timeout(3000) }),
-        fetch(`${serverUrl}/api/agents`, { signal: AbortSignal.timeout(3000) }),
-      ])
-      const sessionsBody = sessionsRes.ok ? await sessionsRes.json() : []
-      const sessions = Array.isArray(sessionsBody) ? sessionsBody : sessionsBody?.sessions || []
-      const agents = agentsRes.ok ? await agentsRes.json() : []
-
-      // 1) 优先：会话成员包含"店长"的最近活跃会话（按 API 返回序 = updated_at DESC）
-      const managerId = agents.find((a) => a?.name === '店长')?.id
-      if (managerId) {
-        const managerSession = sessions.find(
-          (s) => Array.isArray(s?.agentIds) && s.agentIds.includes(managerId)
-        )
-        if (managerSession) {
-          sessionId = managerSession.id
-          console.log(
-            `[handoff-gen] 目标会话: "${managerSession.title || managerSession.id}"（含店长）`
-          )
-        }
-      }
-
-      // 2) 次优：标题含"店长"的会话
-      if (!sessionId) {
-        const titled = sessions.find((s) => String(s?.title || '').includes('店长'))
-        if (titled) {
-          sessionId = titled.id
-          console.log(`[handoff-gen] 目标会话: "${titled.title}"（标题匹配）`)
-        }
-      }
-
-      // 3) 兜底：列表第一个（最新活跃），打印警告——可能打错目标
-      if (!sessionId && sessions.length > 0) {
-        sessionId = sessions[0].id
-        console.log(
-          `[handoff-gen] ⚠️  未找到含店长的会话，fallback 到 "${sessions[0].title || sessions[0].id}"（sessions[0]，可能打错目标）`
-        )
-      }
-    } catch {
-      // server 不可达，继续走文件生成路径（下方无 sessionId 分支会打印告警）
-      console.log('[handoff-gen] ⚠️  cat-study API 不可达，跳过会话自动选择')
-    }
+  // 获取 session ID：CATSTUDY_SESSION_ID（人工显式指定，明确意图优先）
+  // → commit uuid 反查（自动，永远指向"用户实际发起这条消息的会话"）。
+  // 原则：两者都不可用时**报错不投递**——绝不猜目标。曾因反查失败静默降级到
+  // 环境变量/含店长会话/API 第一个，把审查文档投到错误会话（"UI优化"打偏、
+  // b8b0a6d 跨会话事故），错误的投递比不投递更糟。
+  let sessionId = process.env.CATSTUDY_SESSION_ID
+  if (sessionId) {
+    console.log(`[handoff-gen] 目标会话: ${sessionId}（CATSTUDY_SESSION_ID 人工显式指定）`)
+  } else {
+    sessionId = await resolveCommitSessionId(cwd, serverUrl)
   }
 
   if (!sessionId) {
-    console.log(
-      '[handoff-gen] ⚠️  无法获取 cat-study session（CATSTUDY_SESSION_ID 未设且 API 不可达）'
-    )
-    console.log('  .handoff-draft.md 已生成，下次 push 时 pre-push hook 会重试投递')
+    console.log('[handoff-gen] ❌ 无法确定投递目标会话（反查失败且未人工指定 CATSTUDY_SESSION_ID）')
+    console.log('  .handoff-draft.md 已生成但**未投递**——草稿滞留，等门禁重试或人工处理')
+    console.log('  处置：确认 cat-study server 运行、commit 含 catstudy [uuid]，')
+    console.log('        或显式设置 CATSTUDY_SESSION_ID 后重新生成投递')
     return false
   }
 
@@ -734,8 +702,10 @@ async function tryPostToCatstudy(content, cwd) {
         `[handoff-gen] ⚠️  投递失败 (HTTP ${res.status}${errText ? ': ' + errText.slice(0, 120) : ''})`
       )
       if (res.status >= 400 && res.status < 500 && process.env.CATSTUDY_SESSION_ID) {
-        console.log('  🔍 目标会话 ID 来自环境变量/hook 硬编码——4xx 通常意味着会话已删除或重建')
-        console.log('    请更新 .husky/post-commit 和 .husky/pre-push 中的 CATSTUDY_SESSION_ID')
+        console.log(
+          '  🔍 目标会话 ID 由 CATSTUDY_SESSION_ID 人工指定——4xx 通常意味着会话已删除或重建'
+        )
+        console.log('    请将环境变量更新为有效会话 ID 后重试')
       }
       return false
     }

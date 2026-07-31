@@ -9,44 +9,42 @@ GATE_FILE=".push-gate"
 HANDOFF_FILE=".handoff-draft.md"
 CATSTUDY_URL="${CATSTUDY_API_URL:-http://127.0.0.1:3200}"
 
-# 投递目标会话（兜底 fallback）——handoff-gen 会先从 commit message 的
-# catstudy [uuid] 反查触发消息所在会话（更精确），反查失败才用此值。
-# API 按 updated_at 排序，不指定会投到"最新活跃会话"（曾打到 UI优化）。
-# 会话重建后更新此值。
-export CATSTUDY_SESSION_ID=46fbcdc0-5ab4-4d92-8808-68322bdfb91c
+# 投递目标由 get_session_id 决定：CATSTUDY_SESSION_ID（人工显式指定）
+# → commit uuid 反查（自动）。两者都不可用时**报错不投递**——绝不猜目标
+# （曾静默降级到 API 第一个会话，把审查文档投到错误会话）。
+# 如确需人工指定目标：export CATSTUDY_SESSION_ID=<会话ID>
 
-# ─── 辅助：获取或创建 session ──────────────────────────
+# ─── 辅助：获取投递目标会话 ──────────────────────────
 
 get_session_id() {
-  # 优先级：commit uuid 反查 → 环境变量 → API 查询 → 回退
-  # commit message 格式 "catstudy [uuid]"（uuid 即触发消息 id），
-  # 反查消息所在会话——永远指向"用户实际发起这条消息的会话"，比硬编码更准
-  COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null)
-  UUID=$(echo "$COMMIT_MSG" | grep -oE 'catstudy \[[0-9a-f-]{36}\]' 2>/dev/null | head -1 | cut -d'[' -f2 | cut -d']' -f1)
-  if [ -n "$UUID" ]; then
-    SESSION_ID=$(curl -s "${CATSTUDY_URL}/api/messages/${UUID}" 2>/dev/null | \
-      grep -o '"sessionId":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4)
-    if [ -n "$SESSION_ID" ]; then
-      echo "$SESSION_ID"
-      return 0
-    fi
-  fi
-
-  # 环境变量（hook 硬编码兜底）
+  # 1) 环境变量（人工显式指定，明确意图优先）
   if [ -n "$CATSTUDY_SESSION_ID" ]; then
     echo "$CATSTUDY_SESSION_ID"
     return 0
   fi
 
-  # 尝试从 API 获取第一个 session
-  SESSION_ID=$(curl -s "${CATSTUDY_URL}/api/sessions" 2>/dev/null | \
-    grep -o '"id":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4)
-
-  if [ -n "$SESSION_ID" ]; then
-    echo "$SESSION_ID"
-    return 0
+  # 2) commit uuid 反查（自动）——commit message 格式 "catstudy [uuid]"，
+  #    uuid 即触发消息 id，反查消息所在会话——永远指向"用户实际发起这条
+  #    消息的会话"。失败报错返回空，绝不降级猜目标。
+  COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null)
+  UUID=$(echo "$COMMIT_MSG" | grep -oE 'catstudy \[[0-9a-f-]{36}\]' 2>/dev/null | head -1 | cut -d'[' -f2 | cut -d']' -f1)
+  if [ -n "$UUID" ]; then
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${CATSTUDY_URL}/api/messages/${UUID}" 2>/dev/null)
+    if [ "$HTTP_CODE" = "200" ]; then
+      SESSION_ID=$(curl -s "${CATSTUDY_URL}/api/messages/${UUID}" 2>/dev/null | \
+        grep -o '"sessionId":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4)
+      if [ -n "$SESSION_ID" ]; then
+        echo "$SESSION_ID"
+        return 0
+      fi
+      echo "⚠️  反查成功但响应缺少 sessionId（uuid=${UUID}）——不投递" >&2
+    else
+      echo "⚠️  commit uuid 反查失败（HTTP ${HTTP_CODE:-连接失败}，uuid=${UUID}）——不投递，草稿滞留" >&2
+    fi
+    return 1
   fi
 
+  echo "⚠️  commit message 无 catstudy [uuid]（手动提交）——无法反查投递目标，不投递" >&2
   return 1
 }
 
@@ -56,8 +54,10 @@ submit_handoff() {
   SESSION_ID=$(get_session_id)
   if [ -z "$SESSION_ID" ]; then
     echo ""
-    echo "⚠️  无法获取 cat-study session ID（API 不可达或 CATSTUDY_SESSION_ID 未设）"
-    echo "   跳过自动投递。请手动在 cat-study 会话中发送交接文档。"
+    echo "❌ 无法确定投递目标会话（反查失败且未人工指定 CATSTUDY_SESSION_ID）"
+    echo "   交接文档未投递，草稿滞留 .handoff-draft.md"
+    echo "   处置：确认 cat-study server 运行、commit 含 catstudy [uuid]，"
+    echo "        或显式设置 CATSTUDY_SESSION_ID 后重试 push"
     echo ""
     return 1
   fi

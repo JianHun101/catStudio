@@ -662,7 +662,7 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   assert(hits.includes(`/api/messages/${uuid}`), '应请求反查 API')
   console.log('  10b: uuid 反查命中 ✅')
 
-  // 10c: 消息已删（404）→ null，走 fallback 链
+  // 10c: 消息已删（404）→ null + 明确报错，调用方不投递（不做降级兜底）
   writeFileSync(lookupFile, '2', 'utf-8')
   execSync('git add -A', { cwd: LOOKUP_TMP, stdio: 'pipe' })
   execSync('git commit -m "catstudy [aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee]"', {
@@ -670,10 +670,10 @@ console.log('📦 测试组 10: commit uuid 反查会话')
     stdio: 'pipe',
   })
   const sid404 = await resolveCommitSessionId(LOOKUP_TMP, serverUrl)
-  assert(sid404 === null, '404 时应返回 null（走 fallback 链）')
-  console.log('  10c: 404 降级 ✅')
+  assert(sid404 === null, '404 时应返回 null（报错不投递，禁止降级兜底）')
+  console.log('  10c: 404 报错不投递 ✅')
 
-  // 10d: 手动 commit（无 uuid）→ null 且不发请求
+  // 10d: 手动 commit（无 uuid）→ null 且不发请求（报错不投递）
   writeFileSync(lookupFile, '3', 'utf-8')
   execSync('git add -A', { cwd: LOOKUP_TMP, stdio: 'pipe' })
   execSync('git commit -m "fix: manual commit"', { cwd: LOOKUP_TMP, stdio: 'pipe' })
@@ -681,7 +681,7 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   const sidManual = await resolveCommitSessionId(LOOKUP_TMP, serverUrl)
   assert(sidManual === null, '手动 commit（无 uuid）应返回 null')
   assert(hits.length === 0, '无 uuid 时不应发起反查请求')
-  console.log('  10d: 手动 commit 不发请求 ✅')
+  console.log('  10d: 手动 commit 报错不投递 ✅')
 
   rmSync(LOOKUP_TMP, { recursive: true, force: true })
   server.close()

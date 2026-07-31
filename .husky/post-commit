@@ -3,10 +3,11 @@
 # 每次 commit 后自动调用 handoff-gen.mjs 生成 .handoff-draft.md
 # 不阻断 commit——失败只告警，不影响工作流
 
-# 投递目标会话（兜底 fallback）——handoff-gen 会先从 commit message 的
-# catstudy [uuid] 反查触发消息所在会话（更精确），反查失败才用此值。
-# /api/sessions 按 updated_at 排序，不指定会投到"最新活跃会话"（曾打到 UI优化）。
-# 会话重建后更新此值。
-export CATSTUDY_SESSION_ID=46fbcdc0-5ab4-4d92-8808-68322bdfb91c
-
+# 投递目标由 handoff-gen 自动选择：
+#   1. 环境变量 CATSTUDY_SESSION_ID（人工显式指定）
+#   2. commit message 的 catstudy [uuid] 反查触发消息所在会话（自动）
+# 两者都不可用时**报错不投递**（草稿滞留）——绝不猜目标。
+# 曾因反查失败静默降级到硬编码会话，把审查文档投到错误会话（b8b0a6d 跨会话）。
+# 如确需人工指定目标：export CATSTUDY_SESSION_ID=<会话ID> 后重跑
+#   node scripts/handoff-gen.mjs
 node scripts/handoff-gen.mjs
