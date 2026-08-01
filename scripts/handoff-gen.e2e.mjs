@@ -19,6 +19,8 @@ import {
   tryPostToCatstudy,
   buildHandoffMessage,
   runHandoff,
+  readState,
+  writeState,
 } from './handoff-gen.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -1336,6 +1338,43 @@ function gitIn(tmp, cmd) {
   server.close()
   rmSync(TMP13F, { recursive: true, force: true })
   console.log('  13f: pending fatal 移除死条目 ✅')
+}
+
+// 13g: writeState 并发合并语义（基线合并 + 删除权威——2026-08-01 实测并发事故的回归防护）
+{
+  const TMP13G = join(ROOT, '.handoff-test-merge')
+  if (existsSync(TMP13G)) rmSync(TMP13G, { recursive: true, force: true })
+  mkdirSync(TMP13G, { recursive: true })
+  const shaA = 'a'.repeat(40)
+  const shaB = 'b'.repeat(40)
+  const shaX = 'c'.repeat(40)
+
+  // 场景 1：进程 A 基线为空，进程 B 并发写入 pending=[shaB]，A 用旧基线写回自己的
+  // 结果（delivered[shaA]）→ B 的新增条目不得丢失（丢 pending 即该 commit 文档永不补投）
+  const baselineA = readState(TMP13G) // 空基线
+  writeState(TMP13G, { delivered: {}, pending: [shaB], raw: baselineA.raw }) // B 写入
+  writeState(TMP13G, { delivered: { [shaA]: 't' }, pending: [], raw: baselineA.raw }) // A 写回
+  const after1 = readState(TMP13G)
+  assert(after1.delivered[shaA] !== undefined, '合并后 A 的 delivered 保留')
+  assert(
+    after1.pending.includes(shaB),
+    '并发 B 新增的 pending 不应被 A 的写回覆盖（丢 pending 即丢文档）'
+  )
+  assert(!after1.pending.includes(shaA), '已 delivered 的 sha 不应留在 pending')
+
+  // 场景 2：删除权威——A 基线读到 pending=[shaX]，A 移除 shaX（fatal）后写回，
+  // 盘上旧条目不得把它"复活"
+  const baseline2 = readState(TMP13G)
+  writeState(TMP13G, { delivered: {}, pending: [shaX], raw: baseline2.raw }) // 初始含 shaX
+  const baseline3 = readState(TMP13G)
+  assert(baseline3.pending.includes(shaX), '前置：shaX 已在 pending 中')
+  writeState(TMP13G, { delivered: {}, pending: [shaB], raw: baseline3.raw }) // A 只移除 shaX
+  const after2 = readState(TMP13G)
+  assert(!after2.pending.includes(shaX), 'A 删除的 pending 条目不应被盘上旧文件复活')
+  assert(after2.pending.includes(shaB), 'A 未触及的条目保留')
+
+  rmSync(TMP13G, { recursive: true, force: true })
+  console.log('  13g: writeState 并发合并（基线合并 + 删除权威）✅')
 }
 
 console.log('')

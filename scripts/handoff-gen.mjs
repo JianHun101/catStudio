@@ -933,24 +933,63 @@ function statePath(cwd) {
   return join(cwd, STATE_FILE)
 }
 
-/** 读取状态文件；缺失/损坏一律视作空状态（退化"首次投递"，宁可多投不可漏投） */
-function readState(cwd) {
+/**
+ * 读取状态文件；缺失/损坏一律视作空状态（退化"首次投递"，宁可多投不可漏投）。
+ * raw 字段 = 盘上原文，作为 writeState 合并的基线（判断是否有并发进程改动过）。
+ * 导出供 e2e 直接测合并语义（并发写场景确定性断言）。
+ */
+export function readState(cwd) {
+  let raw = ''
   try {
-    const parsed = JSON.parse(readFileSync(statePath(cwd), 'utf-8'))
+    raw = readFileSync(statePath(cwd), 'utf-8')
+    const parsed = JSON.parse(raw)
     return {
       delivered: parsed?.delivered && typeof parsed.delivered === 'object' ? parsed.delivered : {},
       pending: Array.isArray(parsed?.pending) ? parsed.pending : [],
+      raw,
     }
   } catch {
-    return { delivered: {}, pending: [] }
+    return { delivered: {}, pending: [], raw }
   }
 }
 
-/** 写状态文件：tmp + rename 原子替换，半写不可见 */
-function writeState(cwd, state) {
+/**
+ * 写状态文件：tmp + rename 原子替换（半写不可见）。
+ *
+ * 写前重读盘上内容，与 state.raw（本进程的读取基线）对比合并——post-commit 与
+ * 自动快照的 post-commit 会并发运行（实测事故 2026-08-01：一个进程的 3 次重试
+ * 窗口 ~15s，期间下一个 commit 的 hook 已启动，直接覆盖会丢掉并发进程刚写入的
+ * pending 条目 → 该 commit 文档永不补投）。
+ *
+ * 合并规则（以基线为准，不是无脑并集）：
+ * - 盘上相对基线无变化 → 本进程的删除语义权威（prune 移除非祖先、fatal 移除
+ *   死 pending 不会被盘上旧条目"复活"）
+ * - 盘上相对基线有变化 → 只并入"基线里没有、对方新增"的条目（delivered 保留
+ *   对方已投成功的记录；pending 保留对方新增的待补投——丢 pending 即丢文档）；
+ *   对方删除的条目（基线有、盘上无）尊重，不恢复
+ * 残留竞态窗口极小（两进程在对方写入后、rename 前同时读盘，毫秒级），git hooks
+ * 由 index.lock 串行化提交，实际不达；最坏退化路径有内容级去重兜底。
+ */
+export function writeState(cwd, state) {
   const p = statePath(cwd)
+  const onDisk = readState(cwd)
+  const delivered = { ...state.delivered }
+  const pending = [...new Set(state.pending)]
+  if (onDisk.raw !== state.raw) {
+    // 并发修改：只并入基线里没有的新条目
+    const base = JSON.parse(state.raw || '{}') || {}
+    const baseDelivered = base.delivered && typeof base.delivered === 'object' ? base.delivered : {}
+    const basePending = Array.isArray(base.pending) ? base.pending : []
+    for (const sha of Object.keys(onDisk.delivered)) {
+      if (!baseDelivered[sha]) delivered[sha] = onDisk.delivered[sha]
+    }
+    for (const sha of onDisk.pending) {
+      if (!basePending.includes(sha) && !delivered[sha]) pending.push(sha)
+    }
+  }
+  const finalPending = pending.filter((sha) => !delivered[sha])
   const tmp = `${p}.tmp`
-  writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf-8')
+  writeFileSync(tmp, JSON.stringify({ delivered, pending: finalPending }, null, 2) + '\n', 'utf-8')
   renameSync(tmp, p)
 }
 
