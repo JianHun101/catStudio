@@ -194,6 +194,10 @@ export function initDb(): void {
       name: 'thinking_content on messages',
       sql: `ALTER TABLE messages ADD COLUMN thinking_content TEXT`,
     },
+    {
+      name: 'dispatch_state on messages',
+      sql: `ALTER TABLE messages ADD COLUMN dispatch_state TEXT DEFAULT NULL`,
+    },
   ]
 
   for (const m of migrations) {

@@ -46,6 +46,7 @@ export interface MessageRow {
   images: string | null // JSON 字符串数组（base64 dataURL）
   task_id: string | null
   thinking_content: string | null
+  dispatch_state: string | null
   created_at: string
 }
 

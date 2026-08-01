@@ -228,3 +228,42 @@ export function deleteMessagesByAgent(agentId: string): { changes: number } {
 export function deleteAllMessages(): void {
   db.exec('DELETE FROM messages')
 }
+
+// ─── 队列持久化（P0）────────────────────────────────────
+
+/** 更新消息的 dispatch_state。
+ *  fire-and-forget：DB 写入失败时静默吞错，不阻塞 dispatch 流程。 */
+export function setDispatchState(messageId: string, state: 'queued' | 'running' | 'done'): void {
+  try {
+    db.prepare('UPDATE messages SET dispatch_state = ? WHERE id = ?').run(state, messageId)
+  } catch {
+    // fire-and-forget: DB 挂了也不影响消息入队/执行
+  }
+}
+
+/** 查询所有待处理消息（queued 或 running），按创建时间升序。
+ *  返回 dispatch 所需的最小字段集。 */
+export function getPendingMessages(): Array<{
+  id: string
+  session_id: string
+  content: string
+  mentions: string
+  agent_id: string | null
+  role: string
+}> {
+  return db
+    .prepare(
+      `SELECT id, session_id, content, mentions, agent_id, role
+       FROM messages
+       WHERE dispatch_state IN ('queued', 'running')
+       ORDER BY created_at ASC`
+    )
+    .all() as Array<{
+    id: string
+    session_id: string
+    content: string
+    mentions: string
+    agent_id: string | null
+    role: string
+  }>
+}
