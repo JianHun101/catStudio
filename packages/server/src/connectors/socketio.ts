@@ -559,6 +559,21 @@ function getMentionKey(traceId: string, agentId: string): string {
   return `${traceId}:${agentId}`
 }
 
+/** 测试钩子：读取 mention 计数（仅测试用，生产路径不调用） */
+export function __getMentionCount(traceId: string, agentId: string): number {
+  return mentionCounts.get(getMentionKey(traceId, agentId)) || 0
+}
+
+/** 测试钩子：预置 mention 计数（仅测试用，生产路径不调用） */
+export function __setMentionCount(traceId: string, agentId: string, count: number): void {
+  mentionCounts.set(getMentionKey(traceId, agentId), count)
+}
+
+/** 测试钩子：重置 mention 计数（仅测试用，生产路径不调用） */
+export function __test_resetMentionCounts(): void {
+  mentionCounts.clear()
+}
+
 export async function executeAgentsSerial(
   io: SocketServer,
   sessionId: string,
@@ -670,9 +685,10 @@ export async function executeAgentsSerial(
       // 释放槽位并检查队列（P0-2 修复：不再丢弃 completeExecution 返回值）
       const queuedCmd = await completeExecution(agent.id, true, { traceId })
 
-      // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环，
-      // 但允许 agent 执行自己的排队任务和接收审查闭环——计数的是
-      // 实际执行次数而非进入执行循环的次数）
+      // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
+      // 同一 trace 内某 agent 真实完成 ≥MAX 次执行后，不再被 A2A 重新调度。
+      // 计数的是实际执行次数而非进入执行循环的次数，因此未执行的
+      // 排队任务/审查闭环 mention 不消耗配额（阈值内不受限））
       const mentionKey = getMentionKey(traceId, agent.id)
       mentionCounts.set(mentionKey, (mentionCounts.get(mentionKey) || 0) + 1)
 

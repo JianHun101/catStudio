@@ -46,6 +46,7 @@ const SCHEMA_SQL = `
     mentions TEXT NOT NULL DEFAULT '[]',
     task_id TEXT,
     images TEXT,
+    thinking_content TEXT,
     dispatch_state TEXT DEFAULT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (session_id) REFERENCES sessions(id)
