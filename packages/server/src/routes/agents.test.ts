@@ -43,6 +43,19 @@ describe('Agent Routes', () => {
       expect(body.id).toBeDefined()
     })
 
+    it('defaults effortLevel to high when omitted (regression: NOT NULL constraint)', async () => {
+      // 回归：agents.effort_level 列 NOT NULL DEFAULT 'high'，省略该字段时不得报
+      // "NOT NULL constraint failed" —— repository 层兜底落库 'high'
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/agents',
+        payload: validAgent,
+      })
+      expect(res.statusCode).toBe(201)
+      const body = JSON.parse(res.body)
+      expect(body.effortLevel).toBe('high')
+    })
+
     it('returns 409 for duplicate name', async () => {
       await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
       const res = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })

@@ -155,7 +155,8 @@ export function initDb(): void {
     },
     {
       name: 'effort_level on agents',
-      sql: `ALTER TABLE agents ADD COLUMN effort_level TEXT`,
+      // 注意：NOT NULL 必须带 DEFAULT（历史老库已是 NOT NULL DEFAULT 'high'，此迁移对老库静默跳过、对新库建出同构）
+      sql: `ALTER TABLE agents ADD COLUMN effort_level TEXT NOT NULL DEFAULT 'high'`,
     },
     {
       name: 'prompt_chars on execution_logs',

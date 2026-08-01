@@ -81,7 +81,7 @@ export function insertAgent(
     llmModel,
     llmApiKey,
     llmBaseUrl,
-    effortLevel,
+    effortLevel ?? 'high', // 与 DB 列 DEFAULT 'high' 对齐；INSERT 显式含该列时 SQLite 不会触发 DEFAULT，null 会直接违反 NOT NULL
     skillModules ?? '[]'
   )
 }
