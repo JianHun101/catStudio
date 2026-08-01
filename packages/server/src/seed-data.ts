@@ -138,9 +138,10 @@ export function buildDemoAgents(): DemoAgent[] {
 审查 ✅ 后由你合并收口（merge --ff-only / cherry-pick），冲突由你仲裁；出问题的分支由你清理（删分支即恢复）。${IRON_LAWS_CODER}`,
       skillModules: ['handoff', 'dependency-request'],
       llmProvider: 'claude',
-      llmModel: 'deepseek-v4-pro',
+      llmModel: 'deepseek-v4-flash',
       llmApiKey: apiKey,
       llmBaseUrl: '',
+      effortLevel: 'max',
     },
     {
       id: fixedId('ds猫'),
@@ -161,9 +162,10 @@ export function buildDemoAgents(): DemoAgent[] {
 - 提交后不自行合并回 main，合并收口由店长负责${IRON_LAWS_CODER}`,
       skillModules: ['handoff', 'dependency-request'],
       llmProvider: 'claude',
-      llmModel: 'deepseek-v4-pro',
+      llmModel: 'deepseek-v4-flash',
       llmApiKey: apiKey,
       llmBaseUrl: '',
+      effortLevel: 'max',
     },
     {
       id: fixedId('flash猫'),
@@ -187,6 +189,7 @@ export function buildDemoAgents(): DemoAgent[] {
       llmModel: 'deepseek-v4-flash',
       llmApiKey: apiKey,
       llmBaseUrl: '',
+      effortLevel: 'max',
     },
     {
       id: fixedId('吐槽猫'),
@@ -199,9 +202,10 @@ export function buildDemoAgents(): DemoAgent[] {
 Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist给结论，发现问题直接指出，最后总结（✅合并/⚠️建议修改/❌重做）。`,
       skillModules: ['handoff', 'code-review', 'dependency-review'],
       llmProvider: 'claude',
-      llmModel: 'deepseek-v4-pro',
+      llmModel: 'deepseek-v4-flash',
       llmApiKey: apiKey,
       llmBaseUrl: '',
+      effortLevel: 'max',
     },
   ]
 }
