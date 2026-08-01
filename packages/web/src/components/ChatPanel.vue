@@ -1936,11 +1936,13 @@ function statusLabelZh(status: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: clamp(10px, 2vw, 28px);
   cursor: zoom-out;
 }
 
 .lightbox-img {
-  max-width: 92vw;
+  /* 92vw 基础上让出两侧切换按钮空间（44px×2 + gap），保证按钮能贴图居中 */
+  max-width: calc(100vw - 150px);
   max-height: 92vh;
   object-fit: contain;
   border-radius: var(--radius-md);
@@ -1949,7 +1951,6 @@ function statusLabelZh(status: string): string {
 
 .lightbox-close,
 .lightbox-nav {
-  position: absolute;
   border: none;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.15);
@@ -1962,6 +1963,7 @@ function statusLabelZh(status: string): string {
 }
 
 .lightbox-close {
+  position: absolute;
   top: 16px;
   right: 16px;
   width: 40px;
@@ -1970,20 +1972,12 @@ function statusLabelZh(status: string): string {
 }
 
 .lightbox-nav {
-  top: 50%;
-  transform: translateY(-50%);
+  /* 不绝对定位贴视口边缘——作为 flex 子项紧贴图片两侧，图片多大按钮就贴多近 */
+  flex-shrink: 0;
   width: 44px;
   height: 44px;
   font-size: 26px;
   line-height: 1;
-}
-
-.lightbox-prev {
-  left: 16px;
-}
-
-.lightbox-next {
-  right: 16px;
 }
 
 .lightbox-close:hover,
