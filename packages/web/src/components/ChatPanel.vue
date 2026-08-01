@@ -1023,7 +1023,7 @@ function statusLabelZh(status: string): string {
         <button class="lightbox-close" aria-label="关闭大图" @click="closePreview">✕</button>
         <button
           v-if="previewImages.length > 1"
-          class="lightbox-nav lightbox-prev"
+          class="lightbox-nav"
           aria-label="上一张"
           @click="previewStep(-1)"
         >
@@ -1036,7 +1036,7 @@ function statusLabelZh(status: string): string {
         />
         <button
           v-if="previewImages.length > 1"
-          class="lightbox-nav lightbox-next"
+          class="lightbox-nav"
           aria-label="下一张"
           @click="previewStep(1)"
         >
@@ -1941,12 +1941,19 @@ function statusLabelZh(status: string): string {
 }
 
 .lightbox-img {
-  /* 92vw 基础上让出两侧切换按钮空间（44px×2 + gap），保证按钮能贴图居中 */
-  max-width: calc(100vw - 150px);
+  /* 单图默认 92vw 全幅；多图时才让出两侧按钮空间（见下方 :has 规则） */
+  max-width: 92vw;
   max-height: 92vh;
   object-fit: contain;
   border-radius: var(--radius-md);
   cursor: default;
+}
+
+/* 多图：flex 行含 nav 按钮时图片让位（44px×2 + gap 上限 28px×2 ≈ 150px），
+   保证按钮贴图且整行不溢出。让位仅在 <1875px 视口下确实缩小图片，
+   更宽的屏上 calc(100vw - 150px) 反而大于 92vw——但那一档本来就用不满 */
+.image-lightbox:has(.lightbox-nav) .lightbox-img {
+  max-width: calc(100vw - 150px);
 }
 
 .lightbox-close,
