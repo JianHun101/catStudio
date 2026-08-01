@@ -8,25 +8,51 @@
  * 用法:
  *   node scripts/handoff-gen.mjs                    # 分析 HEAD~1..HEAD，自动投递到 cat-study
  *   node scripts/handoff-gen.mjs --no-post          # 只生成 .handoff-draft.md，不投递
- *   node scripts/handoff-gen.mjs --range=X..Y       # 分析指定范围（= 或空格形式均可；
- *                                                   #   pre-push 门禁用 = 形式传完整 SHA）
+ *   node scripts/handoff-gen.mjs --gate-deliver     # pre-push 门禁入口：补投 pending 队列
+ *                                                   # + 兜底投递 HEAD（若尚未投递）
  *   node scripts/handoff-gen.mjs --cwd=/path        # 指定仓库路径
+ *
+ * 投递幂等（修复重复投递，见重复投递根治计划 A+B+C+D）：
+ *   .handoff-delivered.json 状态文件按 commit SHA 记录投递结果，锚点取代"内容字节"：
+ *     { "delivered": { "<full-sha>": "<iso-time>" }, "pending": ["<sha>", ...] }
+ *   - 同一 SHA 投递成功一次后，后续任何投递机会（post-commit / --gate-deliver）
+ *     查状态直接跳过，不再重复投递
+ *   - 投递失败（瞬态重试耗尽）的 SHA 记入 pending，每次投递机会先补投 pending：
+ *     文档从 git 按 SHA 重新生成（确定性的，不依赖草稿文件）→ 投递 → 成功移入 delivered
+ *   - 状态文件丢失/历史改写（reset）自动退化为"首次投递"——宁可多投不可漏投
+ *
+ * 成功判定（修复 B）：POST 超时/5xx 后不再立即判失败，改为轮询目标会话最近消息
+ * 验证"消息是否客观落库"（write→broadcast→dispatch 顺序，落库先于 dispatch 同步等待）。
+ * 4xx 是确定性失败，不走落库验证直接 fatal。
  *
  * 环境变量:
  *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
  *   CATSTUDY_SESSION_ID   目标会话 ID（人工显式指定，明确意图优先）。
  *                         投递目标选择：
- *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定）
+ *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定；同时旁路
+ *                            delivered 状态跳过——显式指定即明确意图，如会话重建后重投）
  *                         2. commit message 的 catstudy [uuid] 反查消息所在会话（自动）
  *                         两者都不可用时**报错不投递**——绝不猜目标。
  *                         曾因反查失败静默降级到环境变量/API 第一个会话，
  *                         把审查文档投到错误会话（"UI优化"打偏、b8b0a6d 跨会话）。
+ *   HANDOFF_VERIFY_MS    落库验证轮询预算（默认 10000ms，测试可调小）
  */
 
 import { execSync } from 'node:child_process'
-import { writeFileSync, existsSync, unlinkSync } from 'node:fs'
+import { writeFileSync, readFileSync, existsSync, unlinkSync, renameSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+// ─── 投递状态文件 ─────────────────────────────────────────
+// 按 commit SHA 幂等记录投递结果，取代"内容字节"去重锚点（重复投递根治计划 A+D）。
+// 与 .push-gate / .handoff-draft.md 并列在仓库根，已加入 .gitignore。
+
+const STATE_FILE = '.handoff-delivered.json'
+
+/** 落库验证轮询预算（ms）。调用时惰性读取 env——测试可在 import 之后调小 */
+function verifyBudgetMs() {
+  return Number(process.env.HANDOFF_VERIFY_MS) || 10000
+}
 
 // ─── Public API ─────────────────────────────────────────────
 
@@ -34,37 +60,43 @@ import { fileURLToPath } from 'node:url'
  * @param {Object} opts
  * @param {string} [opts.cwd]      仓库路径，默认 process.cwd()
  * @param {string} [opts.range]    git diff 范围，默认 'HEAD~1..HEAD'
+ * @param {string} [opts.sha]      指定目标 commit（pending 补投用——文档从 git 按 SHA
+ *                                 确定性重新生成，commitMsg/stat/shortHash 都指向该
+ *                                 commit 而非 HEAD）。与 range 同传时两者一致（sha~1..sha）。
  * @returns {string|null} 生成的 markdown 内容，无改动时返回 null
  */
 export function generateHandoff(opts = {}) {
   const cwd = opts.cwd || process.cwd()
   const range = opts.range || 'HEAD~1..HEAD'
+  const target = opts.sha || 'HEAD'
+  // pending 补投：range 跟随 target（sha~1..sha），保证审查须知行指向正确 commit
+  const effectiveRange = opts.sha ? `${opts.sha}~1..${opts.sha}` : range
 
   // 验证仓库
   if (!existsSync(join(cwd, '.git'))) {
     throw new Error(`不是 git 仓库: ${cwd}`)
   }
 
-  // 验证 range 有效
-  let headExists = true
+  // 验证 target 有效
+  let targetExists = true
   try {
-    execSync('git rev-parse HEAD', { cwd, stdio: 'pipe' })
+    execSync(`git rev-parse ${target}`, { cwd, stdio: 'pipe' })
   } catch {
-    headExists = false
+    targetExists = false
   }
-  if (!headExists) {
-    console.log('[handoff-gen] 仓库尚无 commit，跳过')
+  if (!targetExists) {
+    console.log('[handoff-gen] 仓库尚无目标 commit，跳过')
     return null
   }
 
-  // 处理初始 commit（无 HEAD~1）
+  // 处理初始 commit（无 ~1 父提交）
   let diffFiles
   try {
-    diffFiles = git(cwd, `diff --name-status ${range}`)
+    diffFiles = git(cwd, `diff --name-status ${effectiveRange}`)
   } catch {
     // 回退：用 git show 获取第一个 commit 的 diff
-    console.log('[handoff-gen] 检测到初始 commit，使用 git show HEAD')
-    diffFiles = git(cwd, 'show --name-status --format="" HEAD')
+    console.log('[handoff-gen] 检测到初始 commit，使用 git show')
+    diffFiles = git(cwd, `show --name-status --format="" ${target}`)
   }
 
   if (!diffFiles.trim()) {
@@ -72,7 +104,7 @@ export function generateHandoff(opts = {}) {
     return null
   }
 
-  const commitMsg = safeGit(cwd, 'log -1 --pretty=%B') || ''
+  const commitMsg = safeGit(cwd, `log -1 --pretty=%B ${target}`) || ''
 
   // 跳过 merge/revert commit
   // 注意：不再跳过 catstudy [uuid] 自动快照。
@@ -87,9 +119,10 @@ export function generateHandoff(opts = {}) {
     }
   }
 
-  const diffStat = safeGit(cwd, `diff ${range} --stat`) || safeGit(cwd, 'show HEAD --stat') || ''
-  const diffBody = safeGit(cwd, `diff ${range}`) || safeGit(cwd, 'show HEAD') || ''
-  const shortHash = safeGit(cwd, 'log -1 --pretty=%h') || 'HEAD'
+  const diffStat =
+    safeGit(cwd, `diff ${effectiveRange} --stat`) || safeGit(cwd, `show ${target} --stat`) || ''
+  const diffBody = safeGit(cwd, `diff ${effectiveRange}`) || safeGit(cwd, `show ${target}`) || ''
+  const shortHash = safeGit(cwd, `log -1 --pretty=%h ${target}`) || 'HEAD'
 
   // 解析文件列表
   const files = parseChangedFiles(diffFiles)
@@ -113,7 +146,7 @@ export function generateHandoff(opts = {}) {
     '> ⚠️ 审查须知：先通读改动对应的完整 diff（`git show ' +
       shortHash +
       '` 或 `git diff ' +
-      (opts.range || 'HEAD~1..HEAD') +
+      effectiveRange +
       '`），再核对本文档——本文档是作者的声明清单，不是事实本身，不要只验证文档声称的点。',
     '',
     '## 1. What — 改了什么',
@@ -150,22 +183,28 @@ function parseArgs(argv) {
   const opts = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    // 等号形式 --range=X..Y / --cwd=/path（pre-push hook 传 --range=X..Y）
-    // 只认空格形式时参数会静默丢失、回退默认 HEAD~1..HEAD——pre-push 合并审功能曾因此从未生效
+    // 等号形式 --cwd=/path（pre-push 曾用 --range=X..Y，已移除——见下）
     const eqMatch = /^--([a-z-]+)=(.*)$/.exec(arg)
     if (eqMatch) {
       const [, key, value] = eqMatch
-      if (key === 'range') opts.range = value
-      else if (key === 'cwd') opts.cwd = value
+      if (key === 'cwd') opts.cwd = value
       else if (key === 'no-post') opts.noPost = true
+      else if (key === 'gate-deliver') opts.gateDeliver = true
+      else if (key === 'range') {
+        // 重复投递根治计划 Fix C：pre-push 不再生成范围版合并审文档。
+        // 遇到旧调用必须报错而非静默忽略——静默回退默认 HEAD~1..HEAD 会投出错误文档
+        throw new Error('--range 已移除（Fix C：投递按 commit SHA 幂等，不再生成范围版合并审文档）')
+      }
       continue
     }
-    if (arg === '--range' && i + 1 < argv.length) {
-      opts.range = argv[++i]
-    } else if (arg === '--cwd' && i + 1 < argv.length) {
+    if (arg === '--cwd' && i + 1 < argv.length) {
       opts.cwd = argv[++i]
     } else if (arg === '--no-post') {
       opts.noPost = true
+    } else if (arg === '--gate-deliver') {
+      opts.gateDeliver = true
+    } else if (arg === '--range' && i + 1 < argv.length) {
+      throw new Error('--range 已移除（Fix C：投递按 commit SHA 幂等，不再生成范围版合并审文档）')
     }
   }
   return opts
@@ -595,10 +634,12 @@ export function extractCommitUuid(commitMsg) {
  * 环境变量，把审查文档投到错误会话）。
  * @param {string} cwd — 仓库路径
  * @param {string} serverUrl — cat-study server 地址
+ * @param {string} [sha] — 指定 commit（pending 补投：旧 commit 的 uuid 反查各自会话；
+ *                         缺省为 HEAD）
  * @returns {Promise<string|null>}
  */
-export async function resolveCommitSessionId(cwd, serverUrl) {
-  const commitMsg = safeGit(cwd, 'log -1 --pretty=%B')
+export async function resolveCommitSessionId(cwd, serverUrl, sha) {
+  const commitMsg = safeGit(cwd, sha ? `log -1 --pretty=%B ${sha}` : 'log -1 --pretty=%B')
   const uuid = extractCommitUuid(commitMsg)
   if (!uuid) {
     console.log(
@@ -635,24 +676,25 @@ export async function resolveCommitSessionId(cwd, serverUrl) {
 }
 
 /**
- * 投递去重：同一份交接文档（内容逐字节相同）是否已投过。
+ * 投递去重：这份交接文档（实际投递的完整消息内容）是否已在此会话投过。
  *
  * 背景：post-commit 每 commit 必投递，commit 由自动化流程产生、频率不可控，
  * 同一份文档曾被投 8+ 次（5253e8c 的补填请求反复进队列）。去重检查在 POST 前
  * 拉取目标会话最近消息，若存在内容完全相同的消息则跳过。
  *
- * 内容比较而非 uuid 标记：范围版本（pre-push --range=LAST..HEAD 合并审）生成的
- * 文档审查须知/What 段与单 commit 版不同，内容不同 → 不会被误挡；同内容手动
- * 重投（无意义）会被挡，符合"同一份文档只投一次"。
+ * 锚点必须是**实际投递的包裹消息**（buildHandoffMessage 产物）而非原始 markdown——
+ * 会话里存的是包裹后的完整消息，旧实现拿原始 markdown 比包裹消息，逐字节永不相等，
+ * 去重实为死代码（"投 8+ 次"的放大器之一）。状态文件（delivered）是主防线，
+ * 这里是状态文件丢失后的内容级兜底。
  *
  * 检查失败（server 不可达/列表 404）不阻塞投递——宁可多投一次也不漏投。
  *
  * @param {string} serverUrl
  * @param {string} sessionId
- * @param {string} content — 完整交接文档 markdown
+ * @param {string} message — 实际投递的完整消息内容（buildHandoffMessage 产物）
  * @returns {Promise<boolean>} 已投递过返回 true
  */
-async function alreadyDelivered(serverUrl, sessionId, content) {
+async function alreadyDelivered(serverUrl, sessionId, message) {
   try {
     const res = await fetch(`${serverUrl}/api/sessions/${sessionId}/messages?limit=100`, {
       signal: AbortSignal.timeout(3000),
@@ -660,11 +702,101 @@ async function alreadyDelivered(serverUrl, sessionId, content) {
     if (!res.ok) return false
     const msgs = await res.json()
     return (msgs || []).some(
-      (m) => m?.role === 'user' && m?.content && m.content.trim() === content.trim()
+      (m) => m?.role === 'user' && m?.content && m.content.trim() === message.trim()
     )
   } catch {
     console.log('[handoff-gen] ⚠️  去重检查失败（消息列表不可达）——继续投递，宁可多投不可漏投')
     return false
+  }
+}
+
+/**
+ * 构造投递消息：@店长 补填 TODO → 补完后 @吐槽猫 审查。
+ * 与 pre-push 曾投的"裸草稿 + mentions:["吐槽猫"]"不同——统一为补填请求形状，
+ * 全部投递路径共用这一个形状。
+ * @param {string} content — 完整交接文档 markdown
+ */
+export function buildHandoffMessage(content) {
+  return [
+    '@店长 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。',
+    '',
+    '补填规则：',
+    '- **Why**（关键决策）：从 commit message 和文件改动推导每个关键决策及理由。不要复述 What——要回答"为什么这样做是对的"。',
+    '- **Tradeoff**（放弃了什么）：如果放弃过其他方案，用表格列出方案及原因。确认没有则写"无"——空段会让 reviewer 不确定你是忘了还是真没有。',
+    '- **Open Questions**（不确定的点）：每条必须点名具体文件/符号——"我动了 X 的语义，请重点查 Y"。把吐槽猫的搜索空间从整个 diff 缩到点名的位置。真实的不确定性，不是 bug 列表；确认没有则写"无"。',
+    '',
+    '补完后在**末尾行首独占一行** @吐槽猫 进行代码审查，并在审查请求中附上审查须知：**先通读完整 diff 再核对本文档**——本文档是声明清单不是事实本身，不要只验证文档声称的点。',
+    '',
+    '---',
+    '',
+    content,
+  ].join('\n')
+}
+
+/**
+ * 落库验证（重复投递根治计划 Fix B 的核心）：POST 超时/5xx 后轮询目标会话最近消息，
+ * 以"消息是否客观落库"判定投递是否成功。
+ *
+ * 为什么轮询而不是立即判失败：消息写入顺序是 write → broadcast → dispatch，
+ * dispatch 在 slot idle 时同步等待 agent 完整回复（分钟级），POST 的 5s 超时必然
+ * abort——但消息其实早已落库。验证把成功判定从"网络往返及时返回"改成"客观落库"，
+ * 误判失败→草稿滞留→重投的循环被结构性切断。
+ *
+ * 与 alreadyDelivered 的区别：不吞错——server 持续不可达要抛出来转瞬态重试，
+ * 而不是视为"没投过"。
+ *
+ * @param {string} serverUrl
+ * @param {string} sessionId
+ * @param {string} message — 实际 POST 的消息内容（buildHandoffMessage 产物）
+ * @returns {Promise<boolean>} 消息已落库 → true；轮询耗尽仍未落库 → false
+ * @throws 首次请求即连接失败（server 不可达）或轮询期间持续不可达——调用方转 transient
+ */
+async function verifyDelivered(serverUrl, sessionId, message) {
+  const budget = verifyBudgetMs()
+  const deadline = Date.now() + budget
+  let lastErr = null
+  let first = true
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${serverUrl}/api/sessions/${sessionId}/messages?limit=100`, {
+        signal: AbortSignal.timeout(3000),
+      })
+      if (res.ok) {
+        const msgs = await res.json()
+        if (
+          (msgs || []).some(
+            (m) => m?.role === 'user' && m?.content && m.content.trim() === message.trim()
+          )
+        ) {
+          console.log('[handoff-gen] ✅ 落库验证命中——消息已投递到目标会话')
+          return true
+        }
+        lastErr = null // 服务器可达但消息未落库 → 继续等
+      } else {
+        lastErr = new Error(`HTTP ${res.status}`)
+      }
+    } catch (err) {
+      if (first) throw err // 首次请求就连接失败 → server 不可达，不空等轮询预算
+      lastErr = err
+    }
+    first = false
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  if (lastErr) throw lastErr
+  console.log(`[handoff-gen] ⚠️  落库验证超时（${budget}ms）——消息未出现在目标会话，判定投递失败`)
+  return false
+}
+
+/**
+ * POST 后的不确定结果（超时/连接失败/5xx）统一走落库验证。
+ * @returns {Promise<'ok'|'transient'>}
+ */
+async function verifyOrTransient(serverUrl, sessionId, message) {
+  try {
+    const ok = await verifyDelivered(serverUrl, sessionId, message)
+    return ok ? 'ok' : 'transient'
+  } catch {
+    return 'transient'
   }
 }
 
@@ -674,12 +806,15 @@ async function alreadyDelivered(serverUrl, sessionId, content) {
  * @param {string} content — 完整的交接文档 markdown
  * @param {string} cwd — 工作目录
  * @param {string} serverUrl — cat-study server 地址
+ * @param {Object} [opts]
+ * @param {string} [opts.sha] — 目标 commit（pending 补投时传旧 commit SHA，
+ *                              反查该 commit 自己的 uuid 所在会话；缺省为 HEAD）
  * @returns {Promise<'ok'|'transient'|'fatal'>}
- *   ok       — 投递成功
- *   transient— 瞬态故障（连接失败 / 5xx），调用方可延迟重试
+ *   ok       — 投递成功（POST 2xx，或超时/5xx 后落库验证命中）
+ *   transient— 瞬态故障（连接失败 / 5xx / 落库验证未命中），调用方可延迟重试
  *   fatal    — 确定性失败（无 uuid / 404 / 4xx），重试无意义
  */
-async function attemptDeliver(content, cwd, serverUrl) {
+async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   // 获取 session ID：CATSTUDY_SESSION_ID（人工显式指定，明确意图优先）
   // → commit uuid 反查（自动，永远指向"用户实际发起这条消息的会话"）。
   // 原则：两者都不可用时**报错不投递**——绝不猜目标。曾因反查失败静默降级到
@@ -690,7 +825,7 @@ async function attemptDeliver(content, cwd, serverUrl) {
     console.log(`[handoff-gen] 目标会话: ${sessionId}（CATSTUDY_SESSION_ID 人工显式指定）`)
   } else {
     try {
-      sessionId = await resolveCommitSessionId(cwd, serverUrl)
+      sessionId = await resolveCommitSessionId(cwd, serverUrl, opts.sha)
     } catch (err) {
       if (err?.code === 'HANDOFF_TRANSIENT') return 'transient'
       throw err
@@ -705,29 +840,16 @@ async function attemptDeliver(content, cwd, serverUrl) {
     return 'fatal'
   }
 
-  // 投递去重：同一份文档已投过则跳过（内容逐字节比较）
-  if (await alreadyDelivered(serverUrl, sessionId, content)) {
+  // 构造消息：@店长 补填 TODO → 补完后 @吐槽猫（所有投递路径共用这一形状）
+  const message = buildHandoffMessage(content)
+
+  // 投递去重：同一份文档已投过则跳过（锚点：实际投递的完整消息）
+  if (await alreadyDelivered(serverUrl, sessionId, message)) {
     console.log(
       `[handoff-gen] ⏭️  该交接文档已在此会话中投递过，跳过重复投递 (session: ${sessionId})`
     )
     return 'ok'
   }
-
-  // 构造消息：@店长 补填 TODO → 补完后 @吐槽猫
-  const message = [
-    '@店长 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。',
-    '',
-    '补填规则：',
-    '- **Why**（关键决策）：从 commit message 和文件改动推导每个关键决策及理由。不要复述 What——要回答"为什么这样做是对的"。',
-    '- **Tradeoff**（放弃了什么）：如果放弃过其他方案，用表格列出方案及原因。确认没有则写"无"——空段会让 reviewer 不确定你是忘了还是真没有。',
-    '- **Open Questions**（不确定的点）：每条必须点名具体文件/符号——"我动了 X 的语义，请重点查 Y"。把吐槽猫的搜索空间从整个 diff 缩到点名的位置。真实的不确定性，不是 bug 列表；确认没有则写"无"。',
-    '',
-    '补完后在**末尾行首独占一行** @吐槽猫 进行代码审查，并在审查请求中附上审查须知：**先通读完整 diff 再核对本文档**——本文档是声明清单不是事实本身，不要只验证文档声称的点。',
-    '',
-    '---',
-    '',
-    content,
-  ].join('\n')
 
   try {
     const res = await fetch(`${serverUrl}/api/messages`, {
@@ -746,27 +868,28 @@ async function attemptDeliver(content, cwd, serverUrl) {
       console.log('  店长将自动补填 Why/Tradeoff/OQ → @吐槽猫 审查')
       console.log('  在 cat-study 会话页面可实时查看审查进度')
       return 'ok'
-    } else {
-      const errText = await res.text().catch(() => '')
-      console.log(
-        `[handoff-gen] ⚠️  投递失败 (HTTP ${res.status}${errText ? ': ' + errText.slice(0, 120) : ''})`
-      )
-      // 4xx：确定性错误（会话已删 / 请求格式错），重试无意义
-      if (res.status >= 400 && res.status < 500) {
-        if (process.env.CATSTUDY_SESSION_ID) {
-          console.log(
-            '  🔍 目标会话 ID 由 CATSTUDY_SESSION_ID 人工指定——4xx 通常意味着会话已删除或重建'
-          )
-          console.log('    请将环境变量更新为有效会话 ID 后重试')
-        }
-        return 'fatal'
-      }
-      // 5xx：server 内部错误可能瞬态，交重试
-      return 'transient'
     }
+    const errText = await res.text().catch(() => '')
+    console.log(
+      `[handoff-gen] ⚠️  投递失败 (HTTP ${res.status}${errText ? ': ' + errText.slice(0, 120) : ''})`
+    )
+    // 4xx：确定性错误（会话已删 / 请求格式错），重试无意义，不做落库验证
+    if (res.status >= 400 && res.status < 500) {
+      if (process.env.CATSTUDY_SESSION_ID) {
+        console.log(
+          '  🔍 目标会话 ID 由 CATSTUDY_SESSION_ID 人工指定——4xx 通常意味着会话已删除或重建'
+        )
+        console.log('    请将环境变量更新为有效会话 ID 后重试')
+      }
+      return 'fatal'
+    }
+    // 5xx：消息可能已落库（write→broadcast→dispatch 顺序，落库先于 dispatch）——
+    // 落库验证，命中即视为成功
+    return await verifyOrTransient(serverUrl, sessionId, message)
   } catch {
-    console.log(`[handoff-gen] ⚠️  cat-study server 不可达 (${serverUrl})——瞬态，将重试`)
-    return 'transient'
+    // 超时/连接失败：POST 可能已到达并落库（dispatch 同步等待拖超时）——落库验证
+    console.log(`[handoff-gen] ⚠️  cat-study server 响应超时/不可达 (${serverUrl})——落库验证`)
+    return await verifyOrTransient(serverUrl, sessionId, message)
   }
 }
 
@@ -777,14 +900,15 @@ async function attemptDeliver(content, cwd, serverUrl) {
  * 整个链路不需要用户手动操作。
  *
  * 瞬态重试：投递常撞上 dev.js 重启窗口（agent 完成 → 锁释放 → dev.js 延迟重启，
- * 实测停机 ~1.4s）。连接失败 / 5xx 等瞬态故障延迟 2s 重试（最多 2 次）即覆盖；
- * 确定性失败（无 uuid / 404 / 4xx）不重试，报错后草稿滞留。
+ * 实测停机 ~1.4s）。连接失败 / 5xx / 落库验证未命中等瞬态故障延迟 2s 重试
+ * （最多 2 次）即覆盖；确定性失败（无 uuid / 404 / 4xx）不重试，报错后草稿滞留。
  *
  * @param {string} content — 完整的交接文档 markdown
- * @param {string} [cwd] — 工作目录（用于定位 .handoff-draft.md 以清理）
- * @returns {Promise<boolean>} 投递成功返回 true
+ * @param {string} [cwd] — 工作目录
+ * @param {Object} [opts] — 透传 attemptDeliver（如 { sha }）
+ * @returns {Promise<'ok'|'transient'|'fatal'>} 最后一次尝试的结果
  */
-export async function tryPostToCatstudy(content, cwd) {
+export async function tryPostToCatstudy(content, cwd, opts = {}) {
   const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
   const maxAttempts = 3 // 首次 + 2 次重试
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -794,42 +918,226 @@ export async function tryPostToCatstudy(content, cwd) {
       )
       await new Promise((r) => setTimeout(r, 2000))
     }
-    const result = await attemptDeliver(content, cwd, serverUrl)
-    if (result !== 'transient') return result === 'ok'
+    const result = await attemptDeliver(content, cwd, serverUrl, opts)
+    if (result !== 'transient') return result
   }
-  console.log('[handoff-gen] ❌ 投递重试耗尽——.handoff-draft.md 草稿滞留，请人工处理')
-  console.log('  处置：确认 cat-study server 运行后手动重跑 node scripts/handoff-gen.mjs')
-  return false
+  console.log('[handoff-gen] ❌ 投递重试耗尽——.handoff-draft.md 草稿滞留')
+  console.log('  处置：确认 cat-study server 运行后手动重跑 node scripts/handoff-gen.mjs，')
+  console.log('        或等待下次投递机会自动补投（pending 队列）')
+  return 'transient'
+}
+
+// ─── 投递状态文件（Fix A+D：按 commit SHA 幂等） ─────────────
+
+function statePath(cwd) {
+  return join(cwd, STATE_FILE)
+}
+
+/** 读取状态文件；缺失/损坏一律视作空状态（退化"首次投递"，宁可多投不可漏投） */
+function readState(cwd) {
+  try {
+    const parsed = JSON.parse(readFileSync(statePath(cwd), 'utf-8'))
+    return {
+      delivered: parsed?.delivered && typeof parsed.delivered === 'object' ? parsed.delivered : {},
+      pending: Array.isArray(parsed?.pending) ? parsed.pending : [],
+    }
+  } catch {
+    return { delivered: {}, pending: [] }
+  }
+}
+
+/** 写状态文件：tmp + rename 原子替换，半写不可见 */
+function writeState(cwd, state) {
+  const p = statePath(cwd)
+  const tmp = `${p}.tmp`
+  writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf-8')
+  renameSync(tmp, p)
+}
+
+/** @param {string} sha — 完整 SHA */
+function isAncestorOfHead(cwd, sha) {
+  try {
+    execSync(`git merge-base --is-ancestor ${sha} HEAD`, { cwd, stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 历史改写自愈：delivered/pending 中不是当前 HEAD 祖先的 SHA 全部移除。
+ * e2e 管道会 reset --hard 改写历史——旧 SHA 已不存在，留着会让状态"超前"、
+ * 误跳过新历史中的同内容 commit；清除后按首次投递重新幂等恢复。
+ */
+function pruneState(cwd) {
+  const state = readState(cwd)
+  const headSha = safeGit(cwd, 'rev-parse HEAD')
+  if (!headSha) return // 仓库无 commit，不动状态
+  let changed = false
+  for (const sha of Object.keys(state.delivered)) {
+    if (!isAncestorOfHead(cwd, sha)) {
+      delete state.delivered[sha]
+      changed = true
+    }
+  }
+  const kept = state.pending.filter((sha) => isAncestorOfHead(cwd, sha))
+  if (kept.length !== state.pending.length) {
+    state.pending = kept
+    changed = true
+  }
+  if (changed) {
+    writeState(cwd, state)
+    console.log('[handoff-gen] ♻️  状态文件已清理失效条目（历史改写自愈）')
+  }
+}
+
+/** 把 'HEAD' 解析为完整 SHA（pending 条目存的就是完整 SHA） */
+function resolveFullSha(cwd, sha) {
+  if (sha === 'HEAD') return safeGit(cwd, 'rev-parse HEAD')
+  return sha
+}
+
+/**
+ * 投递单个 commit 的文档并更新状态（Fix A+D 的单一状态入口）。
+ *
+ * - delivered 命中 → 跳过（幂等；CATSTUDY_SESSION_ID 显式指定时旁路——明确意图，
+ *   如会话重建后重投）
+ * - ok → 记 delivered、移出 pending
+ * - fatal → 移出 pending（确定性失败重试无意义，死 SHA 不滞留）
+ * - transient（重试已耗尽）→ 记入 pending，下次投递机会自动补投
+ *
+ * @returns {Promise<'ok'|'transient'|'fatal'>}
+ */
+async function deliverSha(cwd, serverUrl, sha, content) {
+  const fullSha = resolveFullSha(cwd, sha)
+  const state = readState(cwd)
+  if (state.delivered[fullSha]) {
+    if (!process.env.CATSTUDY_SESSION_ID) {
+      console.log(`[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 已投递过（状态文件）——跳过，不重复投递`)
+      // 顺带清出 pending：delivered 与 pending 不应同时存在（跳过路径也要移，否则
+      // 该 SHA 每次投递机会都会被 drainPending 重新处理一遍）
+      if (state.pending.includes(fullSha)) {
+        state.pending = state.pending.filter((s) => s !== fullSha)
+        writeState(cwd, state)
+      }
+      return 'ok'
+    }
+    console.log(
+      `[handoff-gen] ℹ️  ${fullSha.slice(0, 7)} 已投递过，但 CATSTUDY_SESSION_ID 显式指定——按明确意图重新投递`
+    )
+  }
+  const result = await tryPostToCatstudy(content, cwd, { sha })
+  if (result === 'ok') {
+    state.delivered[fullSha] = new Date().toISOString()
+  }
+  state.pending = state.pending.filter((s) => s !== fullSha) // ok/fatal 移出；transient 下面重新记入
+  if (result === 'transient') {
+    if (!state.pending.includes(fullSha)) state.pending.push(fullSha)
+  }
+  writeState(cwd, state)
+  return result
+}
+
+/**
+ * 补投 pending 队列（每次投递机会先处理）：
+ * 交接文档是 `git show <sha>` 的确定性生成结果，重新生成必然得到同一文档——
+ * pending 只记 SHA 不存内容，草稿被覆盖不影响补投（Fix D）。
+ */
+async function drainPending(cwd, serverUrl) {
+  const state = readState(cwd)
+  if (!state.pending.length) return
+  for (const sha of [...state.pending]) {
+    if (!isAncestorOfHead(cwd, sha)) {
+      // 历史改写后 SHA 失效（prune 兜底），正常不会走到这里
+      console.log(
+        `[handoff-gen] ⏭️  pending 中 ${sha.slice(0, 7)} 不是当前 HEAD 祖先（历史已改写）——移除`
+      )
+      state.pending = state.pending.filter((s) => s !== sha)
+      writeState(cwd, state)
+      continue
+    }
+    const doc = generateHandoff({ cwd, sha, range: `${sha}~1..${sha}` })
+    if (doc === null) {
+      // 无文件改动/merge commit → 无内容可投，直接记已投
+      state.delivered[sha] = new Date().toISOString()
+      state.pending = state.pending.filter((s) => s !== sha)
+      writeState(cwd, state)
+      continue
+    }
+    console.log(`[handoff-gen] 📤 补投 pending: ${sha.slice(0, 7)}（从 git 重新生成）`)
+    await deliverSha(cwd, serverUrl, sha, doc)
+  }
+}
+
+/** --gate-deliver 兜底：HEAD 若尚未投递则生成并投递（覆盖 post-commit 中途崩溃窗口） */
+async function deliverHeadIfUndelivered(cwd, serverUrl) {
+  const headSha = safeGit(cwd, 'rev-parse HEAD')
+  if (!headSha) return
+  const state = readState(cwd)
+  if (state.delivered[headSha] && !process.env.CATSTUDY_SESSION_ID) return
+  const doc = generateHandoff({ cwd })
+  if (doc) await deliverSha(cwd, serverUrl, 'HEAD', doc)
 }
 
 // ─── CLI entry ──────────────────────────────────
 // 放在文件末尾，确保所有 const 已初始化（ESM TDZ）
 
+/**
+ * CLI 主流程（导出以便 e2e 进程内调用——stub server 与调用方同进程；
+ * 某些沙箱环境会阻断子进程对 127.0.0.1 的 TCP，execSync 起的 CLI 连不上 stub）。
+ * @param {Object} args — parseArgs 产物（{ cwd?, noPost?, gateDeliver? }）
+ */
+export async function runHandoff(args) {
+  const cwd = args.cwd || process.cwd()
+
+  // --no-post：只生成草稿，不投递、不碰状态文件（人工预审用）
+  if (args.noPost) {
+    const result = generateHandoff(args)
+    if (result) {
+      writeFileSync(join(cwd, '.handoff-draft.md'), result, 'utf-8')
+      console.log('📋 .handoff-draft.md 已生成')
+    }
+    return
+  }
+
+  const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
+
+  // 历史改写自愈（幂等）
+  pruneState(cwd)
+
+  // pre-push 门禁入口：补投 pending 队列 + 兜底投递 HEAD（若尚未投递）
+  if (args.gateDeliver) {
+    await drainPending(cwd, serverUrl)
+    await deliverHeadIfUndelivered(cwd, serverUrl)
+    return
+  }
+
+  // post-commit 路径：先补投 pending（每次投递机会先处理），再生成并投递 HEAD
+  await drainPending(cwd, serverUrl)
+  const result = generateHandoff(args)
+  if (result) {
+    writeFileSync(join(cwd, '.handoff-draft.md'), result, 'utf-8')
+    console.log('📋 .handoff-draft.md 已生成')
+
+    // 自动投递到 cat-study
+    const outcome = await deliverSha(cwd, serverUrl, 'HEAD', result)
+    if (outcome === 'ok') {
+      // 投递成功 → 清理本地草稿（内容已在 cat-study 消息管道中）
+      try {
+        unlinkSync(join(cwd, '.handoff-draft.md'))
+        console.log('  (本地 .handoff-draft.md 已清理——内容在 cat-study 管道中)')
+      } catch {
+        // 清理失败不影响主流程
+      }
+    }
+  }
+}
+
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])
 
 if (isMain) {
-  const args = parseArgs(process.argv.slice(2))
   try {
-    const result = generateHandoff(args)
-    if (result) {
-      const cwd = args.cwd || process.cwd()
-      writeFileSync(join(cwd, '.handoff-draft.md'), result, 'utf-8')
-      console.log('📋 .handoff-draft.md 已生成')
-
-      // 自动投递到 cat-study（除非指定 --no-post）
-      if (!args.noPost) {
-        const posted = await tryPostToCatstudy(result, cwd)
-        if (posted) {
-          // 投递成功 → 清理本地草稿（内容已在 cat-study 消息管道中）
-          try {
-            unlinkSync(join(cwd, '.handoff-draft.md'))
-            console.log('  (本地 .handoff-draft.md 已清理——内容在 cat-study 管道中)')
-          } catch {
-            // 清理失败不影响主流程
-          }
-        }
-      }
-    }
+    await runHandoff(parseArgs(process.argv.slice(2)))
   } catch (err) {
     // post-commit hook 不应阻断 commit，失败时只告警
     console.error('[handoff-gen] 生成失败:', err.message)

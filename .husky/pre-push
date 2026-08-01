@@ -3,90 +3,25 @@
 # 审查通过后运行: git rev-parse HEAD > .push-gate
 # 紧急绕过: git push --no-verify
 #
-# 自动投递：如果 .handoff-draft.md 存在，自动 POST 到 cat-study 触发 @吐槽猫 审查
+# 自动补投：调用 handoff-gen.mjs --gate-deliver 补投滞留的交接文档
+# （pending 队列按 SHA 补投 + 兜底投递 HEAD）。
+# 投递逻辑全部在 JS 单源——shell 不再重复实现投递（曾有两套投递实现：
+# shell 投裸草稿 + mentions:["吐槽猫"]，与 JS 的补填包裹形状不一致，且
+# pre-push 会重新生成范围版文档造成双版本重复投递，已随重复投递根治计划
+# Fix C 移除）。
 
 GATE_FILE=".push-gate"
-HANDOFF_FILE=".handoff-draft.md"
-CATSTUDY_URL="${CATSTUDY_API_URL:-http://127.0.0.1:3200}"
 
-# 投递目标由 get_session_id 决定：CATSTUDY_SESSION_ID（人工显式指定）
-# → commit uuid 反查（自动）。两者都不可用时**报错不投递**——绝不猜目标
-# （曾静默降级到 API 第一个会话，把审查文档投到错误会话）。
-# 如确需人工指定目标：export CATSTUDY_SESSION_ID=<会话ID>
+# ─── 辅助：补投滞留交接文档（委托 handoff-gen.mjs 单源） ───────
 
-# ─── 辅助：获取投递目标会话 ──────────────────────────
-
-get_session_id() {
-  # 1) 环境变量（人工显式指定，明确意图优先）
-  if [ -n "$CATSTUDY_SESSION_ID" ]; then
-    echo "$CATSTUDY_SESSION_ID"
-    return 0
-  fi
-
-  # 2) commit uuid 反查（自动）——commit message 格式 "catstudy [uuid]"，
-  #    uuid 即触发消息 id，反查消息所在会话——永远指向"用户实际发起这条
-  #    消息的会话"。失败报错返回空，绝不降级猜目标。
-  COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null)
-  UUID=$(echo "$COMMIT_MSG" | grep -oE 'catstudy \[[0-9a-f-]{36}\]' 2>/dev/null | head -1 | cut -d'[' -f2 | cut -d']' -f1)
-  if [ -n "$UUID" ]; then
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${CATSTUDY_URL}/api/messages/${UUID}" 2>/dev/null)
-    if [ "$HTTP_CODE" = "200" ]; then
-      SESSION_ID=$(curl -s "${CATSTUDY_URL}/api/messages/${UUID}" 2>/dev/null | \
-        grep -o '"sessionId":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4)
-      if [ -n "$SESSION_ID" ]; then
-        echo "$SESSION_ID"
-        return 0
-      fi
-      echo "⚠️  反查成功但响应缺少 sessionId（uuid=${UUID}）——不投递" >&2
-    else
-      echo "⚠️  commit uuid 反查失败（HTTP ${HTTP_CODE:-连接失败}，uuid=${UUID}）——不投递，草稿滞留" >&2
-    fi
-    return 1
-  fi
-
-  echo "⚠️  commit message 无 catstudy [uuid]（手动提交）——无法反查投递目标，不投递" >&2
-  return 1
-}
-
-# ─── 辅助：投递交接文档到 cat-study ─────────────────────
-
-submit_handoff() {
-  SESSION_ID=$(get_session_id)
-  if [ -z "$SESSION_ID" ]; then
+deliver_pending() {
+  if command -v node >/dev/null 2>&1; then
     echo ""
-    echo "❌ 无法确定投递目标会话（反查失败且未人工指定 CATSTUDY_SESSION_ID）"
-    echo "   交接文档未投递，草稿滞留 .handoff-draft.md"
-    echo "   处置：确认 cat-study server 运行、commit 含 catstudy [uuid]，"
-    echo "        或显式设置 CATSTUDY_SESSION_ID 后重试 push"
+    echo "📤 补投滞留的交接文档（--gate-deliver：pending 队列 + 兜底 HEAD）..."
+    node scripts/handoff-gen.mjs --gate-deliver
     echo ""
-    return 1
-  fi
-
-  CONTENT=$(cat "$HANDOFF_FILE")
-  if [ -z "$CONTENT" ]; then
-    echo ""
-    echo "⚠️  .handoff-draft.md 为空，跳过自动投递"
-    echo ""
-    return 1
-  fi
-
-  echo ""
-  echo "📤 正在投递交接文档到 cat-study..."
-
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "${CATSTUDY_URL}/api/messages" \
-    -H "Content-Type: application/json" \
-    -d "{\"sessionId\":\"${SESSION_ID}\",\"content\":$(echo "$CONTENT" | python3 -c "import sys,json;print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "$CONTENT" | node -e "const c=require('fs').readFileSync(0,'utf8');console.log(JSON.stringify(c))" 2>/dev/null || echo '""'),\"mentions\":[\"吐槽猫\"]}" \
-    2>/dev/null)
-
-  if [ "$HTTP_CODE" = "201" ]; then
-    echo "✅ 审查请求已投递。在 cat-study 会话页面查看吐槽猫的回复。"
-    echo ""
-    # 清理草稿（投递成功）
-    rm -f "$HANDOFF_FILE"
   else
-    echo "⚠️  投递失败（HTTP ${HTTP_CODE:-连接失败}）。请确认 cat-study server 在 ${CATSTUDY_URL} 运行。"
-    echo "   手动投递：在 cat-study 会话中粘贴 .handoff-draft.md 的内容"
+    echo "⚠️  node 不可用，跳过自动补投（草稿滞留 .handoff-draft.md，可人工处理）"
     echo ""
   fi
 }
@@ -105,14 +40,8 @@ if [ ! -f "$GATE_FILE" ]; then
   echo "   紧急绕过: git push --no-verify"
   echo ""
 
-  # 自动投递交接文档（如果存在）
-  if [ -f "$HANDOFF_FILE" ]; then
-    submit_handoff
-  else
-    echo "💡 提示：如果 post-commit hook 已自动投递到 cat-study，审查可能正在进行中。"
-    echo "   在 cat-study 会话页面查看实时进度。"
-    echo ""
-  fi
+  # 自动补投滞留交接文档（pending 队列 / 未投递的 HEAD）
+  deliver_pending
 
   exit 1
 fi
@@ -147,26 +76,8 @@ if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
   echo "   紧急绕过: git push --no-verify"
   echo ""
 
-  # 自动投递交接文档（如果存在）
-  if [ -f "$HANDOFF_FILE" ]; then
-    # 重新生成覆盖全部未审查 commit 的交接文档（合并多 commit 一轮审）
-    # 失败时保留旧草稿（handoff-gen 失败不删文件），继续投递
-    if command -v node >/dev/null 2>&1; then
-      # 成功与否以草稿是否真的包含目标范围为准——handoff-gen 失败也 exit 0，
-      # 只靠退出码判断会输出假成功提示（曾因 parseArgs 只认空格形式静默丢失 = 形式）
-      if node scripts/handoff-gen.mjs --no-post --range="$LAST_REVIEWED..$HEAD_SHA" >/dev/null 2>&1 \
-        && grep -qF "$LAST_REVIEWED..$HEAD_SHA" "$HANDOFF_FILE" 2>/dev/null; then
-        echo "   ✅ 交接文档已按未审查范围 ($(git rev-parse --short "$LAST_REVIEWED")..$(git rev-parse --short "$HEAD_SHA")) 重新生成"
-      else
-        echo "   ⚠️ 交接文档按未审查范围重新生成失败，沿用旧草稿投递（可能只覆盖最后一个 commit）"
-      fi
-    fi
-    submit_handoff
-  else
-    echo "💡 提示：如果 post-commit hook 已自动投递到 cat-study，审查可能正在进行中。"
-    echo "   在 cat-study 会话页面查看实时进度。"
-    echo ""
-  fi
+  # 自动补投滞留交接文档（不重新生成范围版——投递按 commit SHA 幂等）
+  deliver_pending
 
   exit 1
 fi

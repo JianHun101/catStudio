@@ -17,11 +17,16 @@ import {
   extractCommitUuid,
   resolveCommitSessionId,
   tryPostToCatstudy,
+  buildHandoffMessage,
+  runHandoff,
 } from './handoff-gen.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const HANDOFF_SCRIPT = resolve(__dirname, 'handoff-gen.mjs')
+
+// 落库验证轮询预算调小（默认 10s）——测试不需要真实等满预算
+process.env.HANDOFF_VERIFY_MS = '500'
 
 let passed = 0
 let failed = 0
@@ -555,11 +560,11 @@ rmSync(NO_POST_TMP, { recursive: true, force: true })
 
 console.log('')
 
-// ═══ 测试组 9: --range 等号形式（pre-push 传 --range=X..Y） ═══════════════
+// ═══ 测试组 9: --range 已移除（Fix C） ══════════════════════
 
-console.log('📦 测试组 9: --range 等号形式')
+console.log('📦 测试组 9: --range 已移除（Fix C）')
 
-// 构建: 3 个 commit（基线 → 改 a.ts → 新增 b.ts），范围 HEAD~2..HEAD 应覆盖 2 个文件
+// 构建: 3 个 commit（基线 → 改 a.ts → 新增 b.ts）
 const RANGE_TMP = join(ROOT, '.handoff-test-range')
 if (existsSync(RANGE_TMP)) rmSync(RANGE_TMP, { recursive: true, force: true })
 mkdirSync(RANGE_TMP, { recursive: true })
@@ -586,30 +591,40 @@ function rangeGit(cmd) {
 const rangeBase = rangeGit('rev-parse HEAD~2')
 const rangeHead = rangeGit('rev-parse HEAD')
 
-// 9a: = 形式 --range=...（pre-push 真实用法，完整 SHA）应被解析生效
-execSync(
-  `node ${HANDOFF_SCRIPT} --cwd "${RANGE_TMP}" --no-post --range="${rangeBase}..${rangeHead}"`,
-  { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe', timeout: 10000 }
+// 9a: = 形式 --range=X..Y（旧 pre-push 调用方式）→ 报错提示已移除，不产生草稿
+let output9a = ''
+let threw9a = false
+try {
+  output9a = execSync(
+    `node ${HANDOFF_SCRIPT} --cwd "${RANGE_TMP}" --no-post --range="${rangeBase}..${rangeHead}" 2>&1`,
+    { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe', timeout: 10000 }
+  ).toString()
+} catch {
+  // CLI 对参数错误应 exit 0（post-commit hook 不阻断），走 assert 判定
+  threw9a = true
+}
+assert(!threw9a, 'CLI 对 --range 应静默退出 0（hook 不阻断 commit）')
+assertContains(output9a, '已移除', '--range 应提示已移除（Fix C）')
+assert(
+  !existsSync(join(RANGE_TMP, '.handoff-draft.md')),
+  '--range 报错后不应生成草稿（参数错误先于生成）'
 )
-const rangeDraft = readFileSync(join(RANGE_TMP, '.handoff-draft.md'), 'utf-8')
-assertContains(
-  rangeDraft,
-  `${rangeBase}..${rangeHead}`,
-  '= 形式 range 应生效（审查须知含完整范围）'
-)
-assertContains(rangeDraft, 'a.ts', '范围应覆盖 commit 2 的改动（a.ts）')
-assertContains(rangeDraft, 'b.ts', '范围应覆盖 commit 3 的改动（b.ts）')
-assertNotContains(rangeDraft, 'git diff HEAD~1..HEAD', '不应回退默认范围 HEAD~1..HEAD')
-console.log('  9a: = 形式 range 生效 ✅')
+console.log('  9a: = 形式 --range 报错提示已移除 ✅')
 
-// 9b: 空格形式 --range X..Y 向后兼容
-execSync(
-  `node ${HANDOFF_SCRIPT} --cwd "${RANGE_TMP}" --no-post --range ${rangeBase}..${rangeHead}`,
-  { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe', timeout: 10000 }
-)
-const spaceDraft = readFileSync(join(RANGE_TMP, '.handoff-draft.md'), 'utf-8')
-assertContains(spaceDraft, `${rangeBase}..${rangeHead}`, '空格形式 range 仍应生效')
-console.log('  9b: 空格形式 range 向后兼容 ✅')
+// 9b: 空格形式 --range X..Y 同样报错
+let output9b = ''
+let threw9b = false
+try {
+  output9b = execSync(
+    `node ${HANDOFF_SCRIPT} --cwd "${RANGE_TMP}" --no-post --range ${rangeBase}..${rangeHead} 2>&1`,
+    { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe', timeout: 10000 }
+  ).toString()
+} catch {
+  threw9b = true
+}
+assert(!threw9b, 'CLI 对空格形式 --range 应静默退出 0')
+assertContains(output9b, '已移除', '空格形式 --range 也应提示已移除')
+console.log('  9b: 空格形式 --range 报错提示已移除 ✅')
 
 rmSync(RANGE_TMP, { recursive: true, force: true })
 
@@ -747,7 +762,7 @@ console.log('📦 测试组 11: 投递瞬态重试')
   else process.env.CATSTUDY_URL = prevUrl
   if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
 
-  assert(ok === true, '瞬态失败重试后应投递成功')
+  assert(ok === 'ok', '瞬态失败重试后应投递成功')
   assert(postHits === 3, `应共发起 3 次 POST（首次+2 次重试，实际 ${postHits}）`)
   assert(destroyed === 2, '前两次应为瞬态失败')
   console.log('  11a: 瞬态失败自动重试（2 次后成功）✅')
@@ -772,7 +787,7 @@ console.log('📦 测试组 11: 投递瞬态重试')
   else process.env.CATSTUDY_URL = prevUrl
   if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
 
-  assert(ok400 === false, '4xx 确定性失败应返回 false')
+  assert(ok400 === 'fatal', '4xx 确定性失败应返回 fatal')
   assert(postHits400 === 1, `4xx 不应重试（实际 ${postHits400} 次）`)
   console.log('  11b: 4xx 确定性失败不重试 ✅')
 
@@ -799,15 +814,19 @@ console.log('📦 测试组 12: 投递去重')
   execSync('git add -A', { cwd: DEDUP_TMP, stdio: 'pipe' })
   execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: DEDUP_TMP, stdio: 'pipe' })
 
-  // 12a: 目标会话已有相同内容的文档 → 跳过 POST（返回成功，草稿可清理）
+  // 12a: 目标会话已有相同内容（包裹消息）→ 跳过 POST（视为成功，草稿可清理）
   let postHitsDup = 0
   let listHitsDup = 0
   const { server: serverDup, port: portDup } = await startStubServer((req, res) => {
     if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
       listHitsDup++
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      // 会话里已有一条内容完全相同的补填请求
-      res.end(JSON.stringify([{ id: 'm-old', role: 'user', content: '# 测试交接文档\n内容' }]))
+      // 会话里已有一条内容完全相同的补填请求（锚点是实际投递的包裹消息）
+      res.end(
+        JSON.stringify([
+          { id: 'm-old', role: 'user', content: buildHandoffMessage('# 测试交接文档\n内容') },
+        ])
+      )
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
@@ -829,7 +848,7 @@ console.log('📦 测试组 12: 投递去重')
   else process.env.CATSTUDY_URL = prevUrlDup
   if (prevSidDup !== undefined) process.env.CATSTUDY_SESSION_ID = prevSidDup
 
-  assert(okDup === true, '去重命中时应视为投递成功（返回 true，草稿可清理）')
+  assert(okDup === 'ok', '去重命中时应视为投递成功（返回 ok，草稿可清理）')
   assert(postHitsDup === 0, `内容相同的文档不应重复 POST（实际 ${postHitsDup} 次）`)
   assert(listHitsDup >= 1, '去重检查应拉取会话消息列表')
   console.log('  12a: 会话已有相同内容 → 跳过 POST ✅')
@@ -861,18 +880,22 @@ console.log('📦 测试组 12: 投递去重')
   else process.env.CATSTUDY_URL = prevUrlDup
   if (prevSidDup !== undefined) process.env.CATSTUDY_SESSION_ID = prevSidDup
 
-  assert(okFresh === true, '无相同内容时应投递成功')
+  assert(okFresh === 'ok', '无相同内容时应投递成功')
   assert(postHitsFresh === 1, `应恰好 POST 1 次（实际 ${postHitsFresh} 次）`)
   console.log('  12b: 会话无相同内容 → 正常 POST ✅')
 
   serverFresh.close()
 
-  // 12c: 内容不同的文档（如 pre-push 范围版）不被误挡 → 正常 POST
+  // 12c: 内容不同的文档不被误挡 → 正常 POST
   let postHitsRange = 0
   const { server: serverRange, port: portRange } = await startStubServer((req, res) => {
     if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify([{ id: 'm-old', role: 'user', content: '# 单 commit 版文档' }]))
+      res.end(
+        JSON.stringify([
+          { id: 'm-old', role: 'user', content: buildHandoffMessage('# 单 commit 版文档') },
+        ])
+      )
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
@@ -892,12 +915,427 @@ console.log('📦 测试组 12: 投递去重')
   else process.env.CATSTUDY_URL = prevUrlDup
   if (prevSidDup !== undefined) process.env.CATSTUDY_SESSION_ID = prevSidDup
 
-  assert(okRange === true, '内容不同的文档应正常投递')
-  assert(postHitsRange === 1, `范围版内容不同不应被误挡（实际 ${postHitsRange} 次）`)
-  console.log('  12c: 内容不同（范围版）不被误挡 ✅')
+  assert(okRange === 'ok', '内容不同的文档应正常投递')
+  assert(postHitsRange === 1, `内容不同不应被误挡（实际 ${postHitsRange} 次）`)
+  console.log('  12c: 内容不同不被误挡 ✅')
 
   serverRange.close()
   rmSync(DEDUP_TMP, { recursive: true, force: true })
+}
+
+console.log('')
+
+// ═══ 测试组 13: 投递状态文件幂等 + 落库验证 + pending 补投（Fix A+B+D） ═══
+
+console.log('📦 测试组 13: 投递状态文件幂等 + 落库验证 + pending 补投')
+
+const STATE_FILE = '.handoff-delivered.json'
+
+function readStateFile(tmp) {
+  return JSON.parse(readFileSync(join(tmp, STATE_FILE), 'utf-8'))
+}
+
+/**
+ * 进程内跑 CLI 主流程（stub server 与测试同进程——某些沙箱环境阻断子进程
+ * 对 127.0.0.1 的 TCP，execSync 起的 CLI 连不上 stub，必须进程内调用）。
+ * 覆盖 CATSTUDY_URL、清空 CATSTUDY_SESSION_ID 走自动反查，结束后恢复。
+ */
+async function runInProc(cwd, url, opts = {}) {
+  const prevUrl = process.env.CATSTUDY_URL
+  const prevSid = process.env.CATSTUDY_SESSION_ID
+  process.env.CATSTUDY_URL = url
+  delete process.env.CATSTUDY_SESSION_ID
+  try {
+    await runHandoff({ cwd, ...opts })
+  } finally {
+    if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+    else process.env.CATSTUDY_URL = prevUrl
+    if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
+  }
+}
+
+/** 建一个带 catstudy [uuid] commit 的临时仓库 */
+function makeUuidRepo(dirName, uuid, files) {
+  const tmp = join(ROOT, dirName)
+  if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
+  mkdirSync(tmp, { recursive: true })
+  execSync('git init', { cwd: tmp, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: tmp, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: tmp, stdio: 'pipe' })
+  for (const [fp, content] of Object.entries(files)) {
+    writeFileSync(join(tmp, fp), content, 'utf-8')
+  }
+  execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: tmp, stdio: 'pipe' })
+  return tmp
+}
+
+function gitIn(tmp, cmd) {
+  return execSync(`git ${cmd}`, { cwd: tmp, encoding: 'utf-8', stdio: 'pipe' }).trim()
+}
+
+// 13a: 同 SHA 二次运行 → 状态文件幂等跳过，不重复 POST
+{
+  const uuid = '13aa0000-0000-4000-8000-000000000001'
+  const TMP13A = makeUuidRepo('.handoff-test-state', uuid, { 'a.txt': '1' })
+  let postHits = 0
+  const { server, port } = await startStubServer((req, res) => {
+    if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid, sessionId: 'session-13a', role: 'user' }))
+      return
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([]))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  const url13a = `http://127.0.0.1:${port}`
+
+  // 第一次运行（post-commit 路径）：投递成功 → delivered 记录 + 草稿清理
+  await runInProc(TMP13A, url13a)
+  assert(postHits === 1, `首次运行应 POST 1 次（实际 ${postHits}）`)
+  const headSha13a = gitIn(TMP13A, 'rev-parse HEAD')
+  const state13a = readStateFile(TMP13A)
+  assert(state13a.delivered[headSha13a] !== undefined, '状态文件应记录 HEAD 的 delivered')
+  assert(state13a.pending.length === 0, '投递成功后 pending 应为空')
+  assert(!existsSync(join(TMP13A, '.handoff-draft.md')), '投递成功应清理草稿')
+
+  // 第二次运行：delivered 命中 → 跳过，不再 POST
+  await runInProc(TMP13A, url13a)
+  assert(postHits === 1, `幂等：同 SHA 二次运行不应再 POST（实际 ${postHits}）`)
+  const state13a2 = readStateFile(TMP13A)
+  assert(state13a2.delivered[headSha13a] !== undefined, '二次运行后 delivered 记录应保留')
+  assert(state13a2.pending.length === 0, '二次运行后 pending 应为空')
+
+  server.close()
+  rmSync(TMP13A, { recursive: true, force: true })
+  console.log('  13a: 同 SHA 二次运行跳过（状态文件幂等）✅')
+}
+
+// 13b: POST 超时但消息已落库 → 落库验证判定成功，不重投
+{
+  const uuid = '13bb0000-0000-4000-8000-000000000002'
+  const TMP13B = makeUuidRepo('.handoff-test-verify-ok', uuid, { 'a.txt': '1' })
+  let postHits = 0
+  let landed = false // 模拟"消息在 POST 后才落库"（write→broadcast→dispatch 顺序）
+  const { server, port } = await startStubServer((req, res) => {
+    if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid, sessionId: 'session-13b', role: 'user' }))
+      return
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      // POST 前列表为空（去重不短路）；POST 后消息出现（dispatch 同步等待拖超时）
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(
+        JSON.stringify(
+          landed
+            ? [{ id: 'm1', role: 'user', content: buildHandoffMessage('# 测试交接文档\n内容') }]
+            : []
+        )
+      )
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits++
+      landed = true // 消息已落库
+      req.socket.destroy() // POST 永不返回 → fetch 超时 → 走落库验证
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  const url13b = `http://127.0.0.1:${port}`
+  const prevUrl = process.env.CATSTUDY_URL
+  const prevSid = process.env.CATSTUDY_SESSION_ID
+  process.env.CATSTUDY_URL = url13b
+  delete process.env.CATSTUDY_SESSION_ID
+  const result13b = await tryPostToCatstudy('# 测试交接文档\n内容', TMP13B)
+  if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrl
+  if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
+
+  assert(result13b === 'ok', 'POST 超时但消息已落库 → 应判定成功（落库验证命中）')
+  assert(postHits === 1, '判定成功后不应重试 POST')
+  server.close()
+  rmSync(TMP13B, { recursive: true, force: true })
+  console.log('  13b: POST 超时但消息已落库 → 落库验证判定成功 ✅')
+}
+
+// 13c: 落库验证失败（消息未落库）→ transient 重试耗尽 → CLI 层 SHA 记入 pending
+{
+  const uuid = '13cc0000-0000-4000-8000-000000000003'
+  const TMP13C = makeUuidRepo('.handoff-test-verify-miss', uuid, { 'a.txt': '1' })
+  let postHits = 0
+  const { server, port } = await startStubServer((req, res) => {
+    if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid, sessionId: 'session-13c', role: 'user' }))
+      return
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([])) // 消息从未落库
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits++
+      req.socket.destroy()
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  const url13c = `http://127.0.0.1:${port}`
+  const prevUrlC = process.env.CATSTUDY_URL
+  const prevSidC = process.env.CATSTUDY_SESSION_ID
+  process.env.CATSTUDY_URL = url13c
+  delete process.env.CATSTUDY_SESSION_ID
+  const result13c = await tryPostToCatstudy('# 测试交接文档\n内容', TMP13C)
+  if (prevUrlC === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrlC
+  if (prevSidC !== undefined) process.env.CATSTUDY_SESSION_ID = prevSidC
+
+  assert(result13c === 'transient', '消息未落库 → 应判定 transient（重试耗尽）')
+  assert(postHits === 3, `3 次尝试全部落库验证失败（实际 ${postHits}）`)
+
+  // CLI 层：重试耗尽 → SHA 记入 pending（Fix D），草稿保留
+  await runInProc(TMP13C, url13c)
+  const headSha13c = gitIn(TMP13C, 'rev-parse HEAD')
+  const state13c = readStateFile(TMP13C)
+  assert(state13c.pending.includes(headSha13c), '重试耗尽后 SHA 应记入 pending')
+  assert(state13c.delivered[headSha13c] === undefined, '失败 SHA 不应出现在 delivered')
+  assert(existsSync(join(TMP13C, '.handoff-draft.md')), '投递失败应保留草稿')
+
+  server.close()
+  rmSync(TMP13C, { recursive: true, force: true })
+  console.log('  13c: 落库验证失败 → transient + pending 记录 + 草稿滞留 ✅')
+}
+
+// 13d: 历史改写自愈（prune 非祖先条目）+ --gate-deliver 兜底投 HEAD
+{
+  const uuid1 = '13dd0000-0000-4000-8000-000000000001'
+  const uuid2 = '13dd0000-0000-4000-8000-000000000002'
+  const TMP13D = join(ROOT, '.handoff-test-prune')
+  if (existsSync(TMP13D)) rmSync(TMP13D, { recursive: true, force: true })
+  mkdirSync(TMP13D, { recursive: true })
+  execSync('git init', { cwd: TMP13D, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: TMP13D, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: TMP13D, stdio: 'pipe' })
+  writeFileSync(join(TMP13D, 'a.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: TMP13D, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid1}]"`, { cwd: TMP13D, stdio: 'pipe' })
+  writeFileSync(join(TMP13D, 'b.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: TMP13D, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid2}]"`, { cwd: TMP13D, stdio: 'pipe' })
+  const sha1 = gitIn(TMP13D, 'rev-parse HEAD~1')
+  const sha2 = gitIn(TMP13D, 'rev-parse HEAD')
+  const bogus = 'f'.repeat(40)
+
+  // 手工构造脏状态：delivered 含非祖先 bogus + 有效 sha1；pending 含 bogus + sha1
+  writeFileSync(
+    join(TMP13D, STATE_FILE),
+    JSON.stringify(
+      {
+        delivered: { [sha1]: '2026-08-01T00:00:00.000Z', [bogus]: '2026-08-01T00:00:00.000Z' },
+        pending: [sha1, bogus],
+      },
+      null,
+      2
+    )
+  )
+
+  let postHits = 0
+  const { server, port } = await startStubServer((req, res) => {
+    if (req.url === `/api/messages/${uuid1}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid1, sessionId: 'session-13d-1', role: 'user' }))
+      return
+    }
+    if (req.url === `/api/messages/${uuid2}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid2, sessionId: 'session-13d-2', role: 'user' }))
+      return
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([]))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  const url13d = `http://127.0.0.1:${port}`
+
+  await runInProc(TMP13D, url13d, { gateDeliver: true })
+
+  const state13d = readStateFile(TMP13D)
+  assert(state13d.delivered[bogus] === undefined, '非祖先 delivered 条目应被 prune')
+  assert(!state13d.pending.includes(bogus), '非祖先 pending 条目应被 prune')
+  assert(!state13d.pending.includes(sha1), 'pending 中的有效 SHA 处理完应移除')
+  assert(
+    state13d.delivered[sha1] !== undefined,
+    'sha1（已 delivered）补投时状态跳过，仍留 delivered'
+  )
+  assert(state13d.delivered[sha2] !== undefined, '--gate-deliver 应兜底投递 HEAD（sha2）')
+  assert(postHits === 1, `sha1 已 delivered → 不重复 POST；仅 HEAD 投 1 次（实际 ${postHits}）`)
+  server.close()
+  rmSync(TMP13D, { recursive: true, force: true })
+  console.log('  13d: 历史改写自愈（prune 非祖先）+ gate-deliver 兜底 HEAD ✅')
+}
+
+// 13e: pending 补投（per-SHA 重新生成 + 各自会话反查）
+{
+  const uuid2 = '13ee0000-0000-4000-8000-000000000002'
+  const uuid3 = '13ee0000-0000-4000-8000-000000000003'
+  const TMP13E = join(ROOT, '.handoff-test-pending')
+  if (existsSync(TMP13E)) rmSync(TMP13E, { recursive: true, force: true })
+  mkdirSync(TMP13E, { recursive: true })
+  execSync('git init', { cwd: TMP13E, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: TMP13E, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: TMP13E, stdio: 'pipe' })
+  writeFileSync(join(TMP13E, 'a.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: TMP13E, stdio: 'pipe' })
+  execSync('git commit -m "feat: base"', { cwd: TMP13E, stdio: 'pipe' })
+  writeFileSync(join(TMP13E, 'b.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: TMP13E, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid2}]"`, { cwd: TMP13E, stdio: 'pipe' })
+  writeFileSync(join(TMP13E, 'c.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: TMP13E, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid3}]"`, { cwd: TMP13E, stdio: 'pipe' })
+  const sha2 = gitIn(TMP13E, 'rev-parse HEAD~1')
+
+  // 手工构造：commit2 投递失败滞留 pending
+  writeFileSync(join(TMP13E, STATE_FILE), JSON.stringify({ delivered: {}, pending: [sha2] }))
+
+  const postBodies = []
+  const { server, port } = await startStubServer((req, res) => {
+    if (req.url === `/api/messages/${uuid2}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid2, sessionId: 'session-13e-2', role: 'user' }))
+      return
+    }
+    if (req.url === `/api/messages/${uuid3}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid3, sessionId: 'session-13e-3', role: 'user' }))
+      return
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([]))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      let raw = ''
+      req.on('data', (chunk) => (raw += chunk))
+      req.on('end', () => {
+        postBodies.push(JSON.parse(raw))
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  const url13e = `http://127.0.0.1:${port}`
+
+  await runInProc(TMP13E, url13e, { gateDeliver: true })
+
+  assert(postBodies.length === 2, `应投 sha2（补投）+ sha3（兜底 HEAD，实际 ${postBodies.length}）`)
+  const body2 = postBodies.find((b) => b.sessionId === 'session-13e-2')
+  assert(body2 !== undefined, 'sha2 文档应投到 uuid2 反查的会话（per-SHA 反查）')
+  assertContains(body2.content, 'b.txt', 'sha2 文档应含 commit2 的文件（b.txt）')
+  assertNotContains(body2.content, 'c.txt', 'sha2 文档不应含 HEAD 的文件（c.txt）')
+  assertContains(
+    body2.content,
+    `${sha2}~1..${sha2}`,
+    'sha2 文档审查须知应指向 sha2 自身的范围（非 HEAD~1..HEAD）'
+  )
+  const state13e = readStateFile(TMP13E)
+  assert(state13e.pending.length === 0, '补投成功后 pending 应清空')
+  assert(state13e.delivered[sha2] !== undefined, 'sha2 应移入 delivered')
+  server.close()
+  rmSync(TMP13E, { recursive: true, force: true })
+  console.log('  13e: pending 补投（per-SHA 重新生成 + 会话反查）✅')
+}
+
+// 13f: pending 中 fatal（触发消息 404）→ 移除死条目，不永久滞留
+{
+  const uuidBad = '13ff0000-0000-4000-8000-0000000000ff'
+  const uuidOk = '13ff0000-0000-4000-8000-00000000000f'
+  const TMP13F = join(ROOT, '.handoff-test-pending-fatal')
+  if (existsSync(TMP13F)) rmSync(TMP13F, { recursive: true, force: true })
+  mkdirSync(TMP13F, { recursive: true })
+  execSync('git init', { cwd: TMP13F, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: TMP13F, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: TMP13F, stdio: 'pipe' })
+  writeFileSync(join(TMP13F, 'a.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: TMP13F, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuidBad}]"`, { cwd: TMP13F, stdio: 'pipe' })
+  writeFileSync(join(TMP13F, 'b.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: TMP13F, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuidOk}]"`, { cwd: TMP13F, stdio: 'pipe' })
+  const sha1 = gitIn(TMP13F, 'rev-parse HEAD~1')
+  const sha2 = gitIn(TMP13F, 'rev-parse HEAD')
+
+  // 手工构造：commit1（触发消息已删）滞留 pending
+  writeFileSync(join(TMP13F, STATE_FILE), JSON.stringify({ delivered: {}, pending: [sha1] }))
+
+  let postHits = 0
+  const { server, port } = await startStubServer((req, res) => {
+    if (req.url === `/api/messages/${uuidBad}` && req.method === 'GET') {
+      res.writeHead(404, { 'Content-Type': 'application/json' }) // 触发消息已删除
+      res.end(JSON.stringify({ error: 'not found' }))
+      return
+    }
+    if (req.url === `/api/messages/${uuidOk}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuidOk, sessionId: 'session-13f', role: 'user' }))
+      return
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([]))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  const url13f = `http://127.0.0.1:${port}`
+
+  await runInProc(TMP13F, url13f, { gateDeliver: true })
+
+  const state13f = readStateFile(TMP13F)
+  assert(!state13f.pending.includes(sha1), 'pending 中 fatal（反查 404）→ 应移除死条目')
+  assert(state13f.delivered[sha1] === undefined, 'fatal 不应记 delivered')
+  assert(state13f.delivered[sha2] !== undefined, 'HEAD 兜底投递应正常')
+  assert(postHits === 1, `仅 HEAD 投 1 次（fatal 不 POST，实际 ${postHits}）`)
+  server.close()
+  rmSync(TMP13F, { recursive: true, force: true })
+  console.log('  13f: pending fatal 移除死条目 ✅')
 }
 
 console.log('')

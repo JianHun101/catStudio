@@ -36,6 +36,7 @@ workspace/
 .push-gate
 .handoff-draft.md
 .handoff-draft.sent
+.handoff-delivered.json
 
 # e2e 测试标记（存在时 server 跳过 auto-commit，绝不能提交）
 scripts/.e2e-testing
