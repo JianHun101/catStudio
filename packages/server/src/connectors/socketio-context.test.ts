@@ -47,13 +47,13 @@ describe('formatAudienceTag', () => {
   })
 
   it('多人 @mention 中包含当前 agent → 对你', () => {
-    expect(formatAudienceTag(['吐槽猫', '店长', '服务员'], '吐槽猫')).toBe('对你')
+    expect(formatAudienceTag(['吐槽猫', '店长', 'ds猫'], '吐槽猫')).toBe('对你')
     expect(formatAudienceTag(['店长', '吐槽猫'], '吐槽猫')).toBe('对你')
   })
 
   it('当前 agent 不在 @mention 中 → 对大家', () => {
     expect(formatAudienceTag(['店长'], '吐槽猫')).toBe('对大家')
-    expect(formatAudienceTag(['店长', '服务员'], '吐槽猫')).toBe('对大家')
+    expect(formatAudienceTag(['店长', 'ds猫'], '吐槽猫')).toBe('对大家')
   })
 
   it('名称精确匹配，不部分命中', () => {
@@ -97,7 +97,7 @@ describe('getRelevantMessages', () => {
     })
 
     it('@mention 了多个 agent，不包含当前 → 不可见', () => {
-      const msgs = [userMsg('你们两个看看', ['店长', '服务员'])]
+      const msgs = [userMsg('你们两个看看', ['店长', 'ds猫'])]
       const result = getRelevantMessages(msgs, AGENT_ID, AGENT_NAME, false)
       expect(result).toHaveLength(0)
     })
@@ -190,8 +190,8 @@ describe('getRelevantMessages', () => {
       })
 
       it('完整格式：mentions + model', () => {
-        expect(formatAgentMessage('吐槽猫', '通过', ['店长', '服务员'], 'deepseek-v4-pro')).toBe(
-          'Direct message from 吐槽猫 [deepseek-v4-pro]; reply to 店长, 服务员\n\n通过'
+        expect(formatAgentMessage('吐槽猫', '通过', ['店长', 'ds猫'], 'deepseek-v4-pro')).toBe(
+          'Direct message from 吐槽猫 [deepseek-v4-pro]; reply to 店长, ds猫\n\n通过'
         )
       })
 
@@ -222,8 +222,8 @@ describe('getRelevantMessages', () => {
       })
 
       it('多人 @mention', () => {
-        expect(formatUserMessage('看看', ['店长', '服务员'], '对大家', false)).toBe(
-          '用户（@了店长、服务员）：看看'
+        expect(formatUserMessage('看看', ['店长', 'ds猫'], '对大家', false)).toBe(
+          '用户（@了店长、ds猫）：看看'
         )
       })
 
@@ -264,15 +264,15 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('店长和服务员的 systemPrompt 包含反镜像规则', () => {
-    for (const name of ['店长', '服务员']) {
+  it('店长和手下（ds猫/flash猫）的 systemPrompt 包含反镜像规则', () => {
+    for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).toContain('用自己的话表达')
     }
   })
 
-  it('店长和客服的 systemPrompt 包含开发铁律关键词', () => {
-    for (const name of ['店长', '服务员']) {
+  it('店长和手下的 systemPrompt 包含开发铁律关键词', () => {
+    for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).toContain('出口检查')
       expect(agent.systemPrompt).toContain('依赖安装')
@@ -325,8 +325,8 @@ describe('agent system prompts', () => {
     expect(matches!.length).toBeGreaterThanOrEqual(2)
   })
 
-  it('店长和服务员的 systemPrompt 不含 @作者（只有吐槽猫有）', () => {
-    for (const name of ['店长', '服务员']) {
+  it('店长和手下的 systemPrompt 不含 @作者（只有吐槽猫有）', () => {
+    for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).not.toContain('@作者')
     }
@@ -346,7 +346,7 @@ describe('agent system prompts', () => {
   // ═══ 精简后 prompt 关键规则完整性 ═══
 
   it('精简后的 IRON_LAWS_CODER 仍包含所有出口检查+审查+依赖+引用规则', () => {
-    for (const name of ['店长', '服务员']) {
+    for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).toContain('出口检查')
       expect(agent.systemPrompt).toContain('自问')

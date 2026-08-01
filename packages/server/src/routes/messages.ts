@@ -11,6 +11,7 @@ import {
   sessions as sessionsRepo,
   agents as agentsRepo,
   messages as messagesRepo,
+  executionLogs as execLogsRepo,
 } from '../db/repository/index.js'
 import type { AgentConfig } from '@cat-study/shared'
 import { getIO, rowToAgent, executeAgentsSerial } from '../connectors/socketio.js'
@@ -35,6 +36,23 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: 'Message not found' })
     }
     return reply.send({ id: row.id, sessionId: row.session_id, role: row.role })
+  })
+
+  /**
+   * GET /api/messages/:id/executor → 反查"执行这条消息"的 agent（实施者）
+   * 供 handoff-gen 动态决定交接文档补填人——"谁执行了触发消息，谁补填"。
+   * 一条消息可触发多个 agent（多人 @），取最近开始执行的一条；无执行记录 404。
+   */
+  app.get('/api/messages/:id/executor', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!id || typeof id !== 'string') {
+      return reply.status(400).send({ error: 'id is required' })
+    }
+    const executor = execLogsRepo.getExecutorNameByTriggeredBy(id)
+    if (!executor) {
+      return reply.status(404).send({ error: 'No execution log for this message' })
+    }
+    return reply.send({ agentId: executor.agent_id, agentName: executor.name })
   })
 
   app.post('/api/messages', async (req, reply) => {

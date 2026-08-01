@@ -63,6 +63,64 @@ describe('Message Routes', () => {
     })
   })
 
+  describe('GET /api/messages/:id/executor（实施者反查，handoff-gen 动态补填人）', () => {
+    const insertFixture = (triggeredBy: string) => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES (?, ?, '[]', datetime('now'), datetime('now'))`
+      ).run('session-exec-1', 'debug')
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-ds', 'ds猫')
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now'))`
+      ).run('log-1', 'session-exec-1', 'agent-ds', triggeredBy)
+    }
+
+    it('returns executor agentName for a message with execution log', async () => {
+      insertFixture('6cfecca8-ba78-4039-a12c-71313afd29cd')
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/messages/6cfecca8-ba78-4039-a12c-71313afd29cd/executor',
+      })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.agentId).toBe('agent-ds')
+      expect(body.agentName).toBe('ds猫')
+    })
+
+    it('returns 404 when no execution log exists for the message', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/messages/6cfecca8-ba78-4039-a12c-71313afd29cd/executor',
+      })
+      expect(res.statusCode).toBe(404)
+    })
+
+    it('returns the latest execution when multiple agents were triggered', async () => {
+      const db = getDb()
+      insertFixture('6cfecca8-ba78-4039-a12c-71313afd29cd')
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '😼', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-reviewer', '吐槽猫')
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+         VALUES (?, ?, ?, ?, 'failed', datetime('now', '+1 minute'))`
+      ).run('log-2', 'session-exec-1', 'agent-reviewer', '6cfecca8-ba78-4039-a12c-71313afd29cd')
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/messages/6cfecca8-ba78-4039-a12c-71313afd29cd/executor',
+      })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.agentName).toBe('吐槽猫')
+    })
+  })
+
   describe('POST /api/messages（REST 注入通道图片守卫）', () => {
     // 对齐 socketio.test.ts 的 SEND_MESSAGE 守卫覆盖（前缀/大小/数量三重防线）
     const insertSession = (id: string) => {

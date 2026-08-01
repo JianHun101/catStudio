@@ -49,6 +49,23 @@ export function getLogsByTriggerMessage(triggeredByMessageId: string): Execution
     .all(triggeredByMessageId) as ExecutionLogRow[]
 }
 
+/** 反查"执行某条消息"的 agent（handoff-gen 动态补填人用）。
+ *  一条消息可触发多个 agent（多人 @），取最近开始执行的一条；无记录返回 undefined。 */
+export function getExecutorNameByTriggeredBy(
+  triggeredByMessageId: string
+): { agent_id: string; name: string } | undefined {
+  return db
+    .prepare(
+      `SELECT el.agent_id, a.name
+       FROM execution_logs el
+       JOIN agents a ON a.id = el.agent_id
+       WHERE el.triggered_by_message_id = ?
+       ORDER BY el.started_at DESC
+       LIMIT 1`
+    )
+    .get(triggeredByMessageId) as { agent_id: string; name: string } | undefined
+}
+
 export function getAgentStats(agentId: string): {
   total_prompt: number
   total_completion: number

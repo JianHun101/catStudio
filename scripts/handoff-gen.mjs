@@ -711,14 +711,49 @@ async function alreadyDelivered(serverUrl, sessionId, message) {
 }
 
 /**
- * 构造投递消息：@店长 补填 TODO → 补完后 @吐槽猫 审查。
+ * 反查"实施者"——执行触发消息的 agent 名（交接文档补填人）。
+ * GET /api/messages/:uuid/executor → { agentName }（execution_logs 里
+ * triggered_by_message_id = uuid 且最近开始执行的那条，JOIN agents 拿名字）。
+ *
+ * 任何失败都返回 null 而非抛出：补填人反查是增强不是硬依赖——
+ * 目标会话反查（resolveCommitSessionId）才是主链，它失败已由调用方 fatal/transient
+ * 处理；此处失败兜底 @店长 即可，不值得为此阻断投递。
+ *
+ * @param {string} serverUrl
+ * @param {string} uuid — commit message 里的 catstudy [uuid]（触发消息 id）
+ * @returns {Promise<string|null>} agent 名；无执行记录/不可达 → null
+ */
+export async function resolveExecutorName(serverUrl, uuid) {
+  try {
+    const res = await fetch(`${serverUrl}/api/messages/${uuid}/executor`, {
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!res.ok) {
+      console.log(`[handoff-gen] ⚠️  实施者反查失败 (HTTP ${res.status})——兜底 @店长 补填`)
+      return null
+    }
+    const body = await res.json()
+    if (body?.agentName) {
+      console.log(`[handoff-gen] 实施者: ${body.agentName}（execution_logs 反查）`)
+      return body.agentName
+    }
+    console.log(`[handoff-gen] ⚠️  实施者反查响应缺少 agentName——兜底 @店长 补填`)
+  } catch {
+    console.log(`[handoff-gen] ⚠️  cat-study server 不可达，实施者反查失败——兜底 @店长 补填`)
+  }
+  return null
+}
+
+/**
+ * 构造投递消息：@实施者 补填 TODO → 补完后 @吐槽猫 审查。
  * 与 pre-push 曾投的"裸草稿 + mentions:["吐槽猫"]"不同——统一为补填请求形状，
  * 全部投递路径共用这一个形状。
  * @param {string} content — 完整交接文档 markdown
+ * @param {string} [fillerName='店长'] — 补填人（实施者反查未命中时兜底店长）
  */
-export function buildHandoffMessage(content) {
+export function buildHandoffMessage(content, fillerName = '店长') {
   return [
-    '@店长 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。',
+    `@${fillerName} 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。`,
     '',
     '补填规则：',
     '- **Why**（关键决策）：从 commit message 和文件改动推导每个关键决策及理由。不要复述 What——要回答"为什么这样做是对的"。',
@@ -840,8 +875,16 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
     return 'fatal'
   }
 
-  // 构造消息：@店长 补填 TODO → 补完后 @吐槽猫（所有投递路径共用这一形状）
-  const message = buildHandoffMessage(content)
+  // 构造消息：@实施者 补填 TODO → 补完后 @吐槽猫（所有投递路径共用这一形状）。
+  // 实施者 = execution_logs 反查"执行触发消息的 agent"——转派场景下触发消息是
+  // 店长的派活消息，执行者是实施猫；反查 sender 会派错人。未命中（手动提交
+  // 无 uuid / 无执行记录）兜底店长收尾。
+  const commitMsg = safeGit(cwd, opts.sha ? `log -1 --pretty=%B ${opts.sha}` : 'log -1 --pretty=%B')
+  const commitUuid = extractCommitUuid(commitMsg)
+  const fillerName = commitUuid
+    ? (await resolveExecutorName(serverUrl, commitUuid)) || '店长'
+    : '店长'
+  const message = buildHandoffMessage(content, fillerName)
 
   // 投递去重：同一份文档已投过则跳过（锚点：实际投递的完整消息）
   if (await alreadyDelivered(serverUrl, sessionId, message)) {
@@ -858,14 +901,14 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
       body: JSON.stringify({
         sessionId,
         content: message,
-        mentions: ['店长'],
+        mentions: [fillerName],
       }),
       signal: AbortSignal.timeout(5000),
     })
 
     if (res.ok) {
       console.log(`[handoff-gen] ✅ 交接文档已投递到 cat-study (session: ${sessionId})`)
-      console.log('  店长将自动补填 Why/Tradeoff/OQ → @吐槽猫 审查')
+      console.log(`  ${fillerName} 将自动补填 Why/Tradeoff/OQ → @吐槽猫 审查`)
       console.log('  在 cat-study 会话页面可实时查看审查进度')
       return 'ok'
     }

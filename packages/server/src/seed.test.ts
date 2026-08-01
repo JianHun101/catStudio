@@ -26,7 +26,7 @@ describe('seed helpers', () => {
 
     it('produces different IDs for different names', () => {
       const id1 = fixedId('店长')
-      const id2 = fixedId('服务员')
+      const id2 = fixedId('ds猫')
       expect(id1).not.toBe(id2)
     })
 

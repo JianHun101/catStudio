@@ -16,6 +16,7 @@ import {
   generateHandoff,
   extractCommitUuid,
   resolveCommitSessionId,
+  resolveExecutorName,
   tryPostToCatstudy,
   buildHandoffMessage,
   runHandoff,
@@ -659,6 +660,9 @@ console.log('📦 测试组 10: commit uuid 反查会话')
     if (req.url === `/api/messages/${uuid}`) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ id: uuid, sessionId: 'session-debug-1', role: 'user' }))
+    } else if (req.url === `/api/messages/${uuid}/executor`) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ agentId: 'agent-ds', agentName: 'ds猫' }))
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'not found' }))
@@ -704,6 +708,22 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   assert(sidManual === null, '手动 commit（无 uuid）应返回 null')
   assert(hits.length === 0, '无 uuid 时不应发起反查请求')
   console.log('  10d: 手动 commit 报错不投递 ✅')
+
+  // 10e: 实施者反查（execution_logs）→ 命中返回 agent 名，404 兜底 null
+  hits = []
+  const executorHit = await resolveExecutorName(serverUrl, uuid)
+  assert(executorHit === 'ds猫', '实施者反查命中应返回 agent 名')
+  assert(hits.includes(`/api/messages/${uuid}/executor`), '应请求实施者反查 API')
+  const executorMiss = await resolveExecutorName(serverUrl, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+  assert(executorMiss === null, '无执行记录（404）应返回 null，调用方兜底店长')
+  console.log('  10e: 实施者反查命中/404 兜底 ✅')
+
+  // 10f: buildHandoffMessage 动态补填人——命中传实施者名，缺省兜底店长
+  const msgImpl = buildHandoffMessage('# 文档', 'ds猫')
+  assert(msgImpl.startsWith('@ds猫 请补填以下交接文档'), '应 @实施者 补填')
+  const msgDefault = buildHandoffMessage('# 文档')
+  assert(msgDefault.startsWith('@店长 请补填以下交接文档'), '缺省应兜底 @店长 补填')
+  console.log('  10f: buildHandoffMessage 动态补填人 ✅')
 
   rmSync(LOOKUP_TMP, { recursive: true, force: true })
   server.close()
