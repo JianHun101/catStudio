@@ -588,20 +588,6 @@ export async function executeAgentsSerial(
   let lockAcquired = false
 
   for (const agent of agents) {
-    // 单个 Agent 被 @ 次数限制
-    const mentionKey = getMentionKey(traceId, agent.id)
-    const mentionCount = mentionCounts.get(mentionKey) || 0
-    if (mentionCount >= MAX_MENTIONS_PER_AGENT) {
-      log.info('agent mention limit reached, skipping', {
-        traceId,
-        agentId: agent.id,
-        agentName: agent.name,
-        mentionCount,
-      })
-      continue
-    }
-    mentionCounts.set(mentionKey, mentionCount + 1)
-
     const state = getAgentState(agent.id)
     if (!state || state.status !== 'busy') continue
     // 跨会话忙碌：agent 正在其他 session 执行，已入队，不在此执行
@@ -684,6 +670,12 @@ export async function executeAgentsSerial(
       // 释放槽位并检查队列（P0-2 修复：不再丢弃 completeExecution 返回值）
       const queuedCmd = await completeExecution(agent.id, true, { traceId })
 
+      // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环，
+      // 但允许 agent 执行自己的排队任务和接收审查闭环——计数的是
+      // 实际执行次数而非进入执行循环的次数）
+      const mentionKey = getMentionKey(traceId, agent.id)
+      mentionCounts.set(mentionKey, (mentionCounts.get(mentionKey) || 0) + 1)
+
       // Agent-to-agent dispatch: 检测回复中的 @mentions
       const mentionedNames = parseMentionsFromReply(reply.content, sessionAgentNames).filter(
         (name) => name !== agent.name
@@ -718,9 +710,24 @@ export async function executeAgentsSerial(
               a !== null && mentionedNames.includes(a.name)
           )
 
-        if (mentionedAgents.length > 0) {
+        // 单个 Agent 被 @ 次数限制（防止无限 agent-to-agent 循环）
+        // 基于实际执行次数过滤——已执行 ≥MAX 次的 agent 不再被重新调度
+        const limitedAgents = mentionedAgents.filter((a) => {
+          const mk = getMentionKey(traceId, a.id)
+          return (mentionCounts.get(mk) || 0) < MAX_MENTIONS_PER_AGENT
+        })
+        if (limitedAgents.length < mentionedAgents.length) {
+          log.info('agent-to-agent mention limit filtered', {
+            traceId,
+            fromAgent: agent.name,
+            skipped: mentionedAgents.filter((a) => !limitedAgents.includes(a)).map((a) => a.name),
+            remaining: limitedAgents.map((a) => a.name),
+          })
+        }
+
+        if (limitedAgents.length > 0) {
           // 初始化被 @ Agent 的槽位
-          for (const a of mentionedAgents) {
+          for (const a of limitedAgents) {
             if (!getAgentState(a.id)) {
               initAgentSlot(a.id)
             }
@@ -734,17 +741,17 @@ export async function executeAgentsSerial(
             agentId: agent.id,
             role: 'agent',
             content: reply.content,
-            mentions: mentionedNames,
+            mentions: limitedAgents.map((a) => a.name),
             taskId: triggerMsg.taskId || traceId,
             createdAt: new Date().toISOString(),
           }
 
           // 调度并递归执行
-          await dispatch(sessionId, agentTrigger, mentionedAgents, traceId)
+          await dispatch(sessionId, agentTrigger, limitedAgents, traceId)
           await executeAgentsSerial(
             io,
             sessionId,
-            mentionedAgents,
+            limitedAgents,
             { ...agentTrigger, authorName: agent.name },
             traceId,
             depth + 1
