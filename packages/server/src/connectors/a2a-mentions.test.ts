@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { parseMentionsFromReply } from './a2a-mentions.js'
 
-const CATS = ['吐槽猫', '店长', '服务员', '布偶猫']
+const CATS = ['吐槽猫', '店长', 'ds猫', '布偶猫']
 
 describe('parseMentionsFromReply', () => {
   // ─── 行首 @mention ──────────────────────────
@@ -67,8 +67,8 @@ function foo() {}
 @吐槽猫
 @店长
 \`\`\`
-@服务员 你来`
-    expect(parseMentionsFromReply(text, CATS)).toEqual(['服务员'])
+@ds猫 你来`
+    expect(parseMentionsFromReply(text, CATS)).toEqual(['ds猫'])
   })
 
   it('剥离多个代码块中的 @mention', () => {
@@ -78,8 +78,8 @@ function foo() {}
 \`\`\`python
 # @店长
 \`\`\`
-@服务员 帮我看看`
-    expect(parseMentionsFromReply(text, CATS)).toEqual(['服务员'])
+@ds猫 帮我看看`
+    expect(parseMentionsFromReply(text, CATS)).toEqual(['ds猫'])
   })
 
   // ─── 行内代码剥离 ────────────────────────────

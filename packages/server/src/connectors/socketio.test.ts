@@ -874,11 +874,11 @@ describe('parseSkillModules', () => {
 
 describe('formatAudienceTag', () => {
   it('returns "对你" when agent is mentioned', () => {
-    expect(formatAudienceTag(['店长', '服务员'], '店长')).toBe('对你')
+    expect(formatAudienceTag(['店长', 'ds猫'], '店长')).toBe('对你')
   })
 
   it('returns "对大家" when agent is not mentioned', () => {
-    expect(formatAudienceTag(['服务员'], '店长')).toBe('对大家')
+    expect(formatAudienceTag(['ds猫'], '店长')).toBe('对大家')
   })
 
   it('returns "对大家" for empty mentions', () => {
@@ -893,13 +893,13 @@ describe('formatAgentMessage', () => {
   })
 
   it('includes reply-to mentions', () => {
-    const result = formatAgentMessage('服务员', '我来处理。', ['店长'])
-    expect(result).toBe('Direct message from 服务员; reply to 店长\n\n我来处理。')
+    const result = formatAgentMessage('ds猫', '我来处理。', ['店长'])
+    expect(result).toBe('Direct message from ds猫; reply to 店长\n\n我来处理。')
   })
 
   it('includes multiple mention targets', () => {
-    const result = formatAgentMessage('吐槽猫', '代码已审查。', ['店长', '服务员'])
-    expect(result).toBe('Direct message from 吐槽猫; reply to 店长, 服务员\n\n代码已审查。')
+    const result = formatAgentMessage('吐槽猫', '代码已审查。', ['店长', 'ds猫'])
+    expect(result).toBe('Direct message from 吐槽猫; reply to 店长, ds猫\n\n代码已审查。')
   })
 
   it('includes model when provided', () => {
@@ -935,7 +935,7 @@ describe('formatUserMessage', () => {
   })
 
   it('joins multiple mention names', () => {
-    const result = formatUserMessage('帮我看看', ['店长', '服务员', '吐槽猫'], '对大家', false)
-    expect(result).toBe('用户（@了店长、服务员、吐槽猫）：帮我看看')
+    const result = formatUserMessage('帮我看看', ['店长', 'ds猫', '吐槽猫'], '对大家', false)
+    expect(result).toBe('用户（@了店长、ds猫、吐槽猫）：帮我看看')
   })
 })

@@ -36,7 +36,7 @@ describe('Session Routes', () => {
       INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
       VALUES (?, ?, '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk-test')
     `
-    ).run(agentId2, '服务员橘子')
+    ).run(agentId2, '阿橘')
 
     // Import and register routes (must be after mock is set up)
     const { sessionRoutes } = await import('./sessions.js')

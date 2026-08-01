@@ -27,7 +27,7 @@ describe('dispatch', () => {
   const mockAgent2: AgentConfig = {
     ...mockAgent,
     id: 'agent-2',
-    name: '服务员',
+    name: 'ds猫',
   }
 
   const makeMessage = (overrides?: Partial<Message>): Message => ({
@@ -59,7 +59,7 @@ describe('dispatch', () => {
       VALUES (?, ?, '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
     `
       )
-      .run('agent-2', '服务员')
+      .run('agent-2', 'ds猫')
     ddb
       .prepare("INSERT INTO sessions (id, title, agent_ids) VALUES ('session-1', 'test', '[]')")
       .run()

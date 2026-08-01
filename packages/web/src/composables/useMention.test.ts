@@ -15,7 +15,7 @@ const mockAgents: AgentConfig[] = [
   },
   {
     id: 'a2',
-    name: '服务员橘子',
+    name: '阿橘',
     avatar: '😺',
     systemPrompt: 'test',
     llmProvider: 'deepseek',
@@ -72,12 +72,12 @@ describe('useMention', () => {
     })
 
     it('extracts query between @ and cursor', () => {
-      mention.detect('hello @服务员', 8)
-      // cursor at position 8, @ at position 6, query = "服务员"(slice 7,8) = "服务" → actually cursor at 8 means text[0..7]
-      // text = 'hello @服务员' (length 9)
-      // cursorPos = 8 → text[cursorPos-1] = text[7] = '员'
-      // @ at position 6, query = text.slice(7, 8) = "服"
-      expect(mention.mentionQuery.value).toBe('服')
+      mention.detect('hello @ds猫', 8)
+      // cursor at position 8, @ at position 6, query = "ds猫"(slice 7,8) = "ds" → actually cursor at 8 means text[0..7]
+      // text = 'hello @ds猫' (length 9)
+      // cursorPos = 8 → text[cursorPos-1] = text[7] = '猫'
+      // @ at position 6, query = text.slice(7, 8) = "d"
+      expect(mention.mentionQuery.value).toBe('d')
     })
 
     it('resets mentionIndex to 0 on new detection', () => {

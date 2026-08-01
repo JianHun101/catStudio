@@ -95,7 +95,7 @@ describe('Agent Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/agents',
-        payload: { ...validAgent, name: '服务员橘子' },
+        payload: { ...validAgent, name: '阿橘' },
       })
 
       const res = await app.inject({ method: 'GET', url: '/api/agents' })

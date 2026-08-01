@@ -159,7 +159,7 @@ describe('memory', () => {
     })
 
     it('skips when message is only @mentions', async () => {
-      await memoryModule.saveMessageMemory('s1', '@店长 @服务员', 'msg-1', ['agent-1'])
+      await memoryModule.saveMessageMemory('s1', '@店长 @ds猫', 'msg-1', ['agent-1'])
       // 纯 @mention 消息应在嵌入前就跳过
       expect(mockEmbedText).not.toHaveBeenCalled()
     })
@@ -215,12 +215,12 @@ describe('memory', () => {
       db.prepare(
         `
         INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
-        VALUES ('agent-2', '服务员', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
+        VALUES ('agent-2', 'ds猫', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
       `
       ).run()
 
       await memoryModule.saveMessageMemory('s1', '来自店长的记忆', 'msg-1', ['agent-1'])
-      await memoryModule.saveMessageMemory('s1', '来自服务员的记忆', 'msg-2', ['agent-2'])
+      await memoryModule.saveMessageMemory('s1', '来自ds猫的记忆', 'msg-2', ['agent-2'])
 
       // 全局搜索应该能找到两条（不考虑 distance 排序，只要 count 够）
       const db2 = getDb()
@@ -245,7 +245,7 @@ describe('memory', () => {
 
     it('returns empty string when trigger is only @mentions', async () => {
       mockEmbedText.mockClear()
-      const ctx = await memoryModule.buildMemoryContext('@店长 @服务员')
+      const ctx = await memoryModule.buildMemoryContext('@店长 @ds猫')
       expect(ctx).toBe('')
       // 纯 @mention 不应该触发嵌入
       expect(mockEmbedText).not.toHaveBeenCalled()
