@@ -43,6 +43,15 @@ describe('seed agents', () => {
     expect(roleOf('flash猫')).toBe('implementer')
     expect(roleOf('吐槽猫')).toBe('reviewer')
   })
+
+  it('vision 角色条目必须使用视觉指令 prompt（角色↔prompt 语义绑定）', () => {
+    // 按 role 找而非按名字找——绑定「任何 role=vision 的猫都必须是视觉指令 prompt」，
+    // 防未来把 prompt 改成角色扮演模板但漏改 role 的漂移（名字找会绕过此检查）
+    const vision = agents.filter((a) => a.role === 'vision')
+    expect(vision).toHaveLength(1)
+    expect(vision[0].systemPrompt).toContain('视觉测试专用')
+    expect(vision[0].systemPrompt).toContain('发图')
+  })
 })
 
 describe('seed helpers', () => {
