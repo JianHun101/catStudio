@@ -968,6 +968,85 @@ describe('socketio connector', () => {
     })
   })
 
+  // ─── P0 队列持久化恢复：recoverQueuedMessages ──────────
+  // 与 recoverInterruptedExecutions（execution_logs 路径）互补：
+  // 恢复 dispatch_state=queued/running 的消息整条重新 dispatch。
+
+  describe('recoverQueuedMessages — P0 队列持久化恢复', () => {
+    // 前置测试可能 mockReturnValue 了 getAgentState，显式重置为 undefined
+    //（undefined = 槽位未初始化 → 应触发 initAgentSlot）
+    beforeEach(async () => {
+      const { getAgentState } = await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockReturnValue(undefined)
+    })
+
+    /** 造数据：一条 dispatch_state=queued 的用户消息 + 可选 agent 回复 */
+    function seedQueuedMessage(db: any, opts: { agentReplied?: boolean } = {}) {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES (?, ?, 'user', ?, '["店长"]', datetime('now', '-2 minutes'))`
+      ).run('msg-queued', 'session-1', '@店长 请补填交接文档')
+      db.prepare('UPDATE messages SET dispatch_state = ? WHERE id = ?').run('queued', 'msg-queued')
+      if (opts.agentReplied) {
+        db.prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+           VALUES (?, ?, ?, 'agent', ?, '[]', datetime('now', '-1 minute'))`
+        ).run('msg-reply', 'session-1', 'agent-1', '已补填')
+      }
+    }
+
+    it('AC4: pending 消息存在 → 整条重新 dispatch（槽位未初始化则先 init）', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch, initAgentSlot } = await import('../dispatch/index.js')
+      seedQueuedMessage(getDb())
+
+      await mod.recoverQueuedMessages(mockIo as any)
+
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({
+          id: 'msg-queued',
+          content: '@店长 请补填交接文档',
+          mentions: ['店长'],
+        }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-1' })])
+      )
+      expect(initAgentSlot).toHaveBeenCalledWith('agent-1')
+    })
+
+    it('AC5: 目标 agent 已回复（回复写库后、finalize 前被杀）→ 跳过，防重复执行', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seedQueuedMessage(getDb(), { agentReplied: true })
+
+      await mod.recoverQueuedMessages(mockIo as any)
+
+      expect(dispatch).not.toHaveBeenCalled()
+    })
+
+    it('无 API key 的 agent → 跳过（无法执行）', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      getDb()
+        .prepare('UPDATE agents SET llm_api_key = ? WHERE id = ?')
+        .run('sk-your-api-key-here', 'agent-1')
+      seedQueuedMessage(getDb())
+
+      await mod.recoverQueuedMessages(mockIo as any)
+
+      expect(dispatch).not.toHaveBeenCalled()
+    })
+
+    it('无 pending 消息 → 不触发任何 dispatch', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+
+      await mod.recoverQueuedMessages(mockIo as any)
+
+      expect(dispatch).not.toHaveBeenCalled()
+    })
+  })
+
   // ─── MESSAGE_RETRACT ──────────────────────
 
   describe('MESSAGE_RETRACT', () => {

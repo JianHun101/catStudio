@@ -11,7 +11,11 @@
 import type { AgentConfig, AgentRuntimeState, DispatchCommand, Message } from '@cat-study/shared'
 import { Channels } from '@cat-study/shared'
 import { getRedis } from '../db/redis.js'
-import { agents as agentsRepo, executionLogs as execLogsRepo } from '../db/repository/index.js'
+import {
+  agents as agentsRepo,
+  executionLogs as execLogsRepo,
+  messages as messagesRepo,
+} from '../db/repository/index.js'
 import { v4 as uuid } from 'uuid'
 import { createLogger } from '../logger.js'
 
@@ -84,6 +88,8 @@ export async function dispatch(
       const q = agentQueues.get(agent.id)!
       q.push(cmd)
       updateQueueState(agent.id, q.length)
+      // P0 队列持久化：入队即落库 queued，server 重启后可恢复
+      messagesRepo.setDispatchState(cmd.triggerMessageId, 'queued')
       log.info('agent queued', {
         traceId: tid,
         agentId: agent.id,
@@ -113,6 +119,8 @@ export async function executeAgentCommand(
   slot.sessionId = cmd.sessionId
   slot.currentTriggerMessageId = cmd.triggerMessageId
   setSlotSession(agent.id, cmd.sessionId)
+  // P0 队列持久化：执行开始即落库 running（覆盖空闲直跑与重启恢复两条路径）
+  messagesRepo.setDispatchState(cmd.triggerMessageId, 'running')
 
   const logId = uuid()
   execLogsRepo.insertExecutionLog(logId, cmd.sessionId, agent.id, cmd.triggerMessageId, traceId)
@@ -182,13 +190,22 @@ export async function completeExecution(
   }
 
   const q = agentQueues.get(agentId)!
+  // 弹队列前保存当前触发消息——弹完会被 next 覆盖，done 必须标在旧值上
+  const finishedTrigger = slot.currentTriggerMessageId
   const next = q.shift()
+
+  if (finishedTrigger) {
+    // P0 队列持久化：当前执行收尾即落库 done
+    messagesRepo.setDispatchState(finishedTrigger, 'done')
+  }
 
   if (next) {
     slot.status = 'busy'
     slot.sessionId = next.sessionId
     slot.currentTriggerMessageId = next.triggerMessageId
     updateQueueState(agentId, q.length)
+    // P0 队列持久化：队列命令被弹出执行——queued → running（重启恢复不重复调度）
+    messagesRepo.setDispatchState(next.triggerMessageId, 'running')
     await publishAgentStatusById(agentId, 'busy')
     log.info('queue → next', { agentId, queueRemaining: q.length })
     return next

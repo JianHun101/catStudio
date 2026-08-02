@@ -246,4 +246,81 @@ describe('dispatch', () => {
       expect(dispatchModule.getAgentState('agent-1')!.status).toBe('idle')
     })
   })
+
+  // ─── P0 队列持久化：dispatch_state 落库 ──────────
+  // setDispatchState 是 UPDATE 语义——消息必须先存在于 DB 才能断言状态。
+
+  describe('dispatch_state 持久化（P0）', () => {
+    /** 插入一条用户消息（dispatch_state 默认 NULL） */
+    function insertMsg(id: string): void {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', '你好', '[]')`
+        )
+        .run(id, 'session-1')
+    }
+
+    function getDispatchState(msgId: string): string | null {
+      const row = getDb()
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get(msgId) as { dispatch_state: string | null }
+      return row?.dispatch_state ?? null
+    }
+
+    it('AC1+AC2: 空闲直跑 → running；忙时入队 → queued', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg('msg-1')
+      insertMsg('msg-2')
+
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      expect(getDispatchState('msg-1')).toBe('running')
+
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-2', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      expect(getDispatchState('msg-2')).toBe('queued')
+    })
+
+    it('AC3: completeExecution 收尾 → done；弹出队列命令 → running', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg('msg-1')
+      insertMsg('msg-2')
+
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-2', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+
+      const next = await dispatchModule.completeExecution('agent-1', true)
+
+      expect(getDispatchState('msg-1')).toBe('done')
+      expect(getDispatchState('msg-2')).toBe('running')
+      expect(next!.triggerMessageId).toBe('msg-2')
+    })
+
+    it('队列清空后 completeExecution → 全部 done，槽位回 idle', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg('msg-1')
+      insertMsg('msg-2')
+
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-2', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+
+      await dispatchModule.completeExecution('agent-1', true) // 弹 msg-2 → running
+      await dispatchModule.completeExecution('agent-1', true) // 队列空 → idle
+
+      expect(getDispatchState('msg-1')).toBe('done')
+      expect(getDispatchState('msg-2')).toBe('done')
+      expect(dispatchModule.getAgentState('agent-1')!.status).toBe('idle')
+    })
+  })
 })

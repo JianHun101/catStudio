@@ -546,6 +546,11 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     log.error('recoverInterruptedExecutions crashed', { error: (err as Error).message })
   })
 
+  // P0 启动恢复：重新 dispatch 队列中的待处理消息（queued/running，fire-and-forget）
+  recoverQueuedMessages(io).catch((err) => {
+    log.error('recoverQueuedMessages crashed', { error: (err as Error).message })
+  })
+
   return io
 }
 
@@ -999,6 +1004,100 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
     }
   } catch (err: any) {
     log.error('recoverInterruptedExecutions failed', { error: err.message })
+  }
+}
+
+// ─── P0 队列持久化恢复：重新 dispatch 队列中的待处理消息 ───
+
+/**
+ * server 重启时恢复 dispatch_state=queued/running 的消息，重新走 dispatch 调度。
+ *
+ * 与 recoverInterruptedExecutions 互补：
+ * - 前者按 execution_logs 逐 agent 恢复——只覆盖"已开始执行"的 agent，
+ *   入队了但还没轮到执行的队列消息在 execution_logs 里没有记录，恢复不到
+ * - 此处按消息整条恢复——解析 mentions → 重新调度，覆盖队列中的那部分
+ *
+ * 幂等防线（防重启后重复执行）：
+ * 1. 目标 agent 已回复（回复写库后、finalize 前被杀的场景）→ 跳过该 agent
+ * 2. 无 API key 的 agent → 跳过（与 recoverInterruptedExecutions 一致）
+ */
+export async function recoverQueuedMessages(io: SocketServer): Promise<void> {
+  try {
+    const pending = messagesRepo.getPendingMessages()
+    if (pending.length === 0) return
+
+    log.warn('启动恢复：重新 dispatch 队列中的待处理消息', { count: pending.length })
+
+    for (const row of pending) {
+      try {
+        const sessionRow = sessionsRepo.getSessionById(row.session_id)
+        if (!sessionRow) continue
+
+        // 补查完整行（getPendingMessages 只返回最小字段集，幂等判断需要 created_at）
+        const fullRow = messagesRepo.getMessageById(row.id, row.session_id, row.role)
+        if (!fullRow) continue
+
+        const mentions = JSON.parse(row.mentions || '[]') as string[]
+        const agentIds: string[] = JSON.parse(sessionRow.agent_ids || '[]')
+        const agents = agentIds
+          .map((id: string) => {
+            const r = agentsRepo.getAgentById(id)
+            return r ? rowToAgent(r) : null
+          })
+          .filter(Boolean) as AgentConfig[]
+
+        // 目标 agent：有 @ 只恢复被 @ 的，广播恢复会话内全部
+        const targets =
+          mentions.length > 0 ? agents.filter((a) => mentions.includes(a.name)) : agents
+
+        // 无 API key 无法执行（与 recoverInterruptedExecutions 一致）
+        const executable = targets.filter(
+          (a) => a.llmApiKey && a.llmApiKey !== 'sk-your-api-key-here'
+        )
+
+        // 幂等防线：已回复的 agent 不再调度（防重启后重复执行）
+        const toDispatch = executable.filter(
+          (a) => !messagesRepo.hasAgentRepliedAfter(a.id, row.session_id, fullRow.created_at)
+        )
+
+        if (toDispatch.length === 0) {
+          log.info('跳过恢复：目标 agent 均已回复', { messageId: row.id })
+          continue
+        }
+
+        // 槽位初始化（dispatch 对未知 slot 直接跳过，不初始化不调度）
+        for (const a of toDispatch) {
+          if (!getAgentState(a.id)) initAgentSlot(a.id)
+        }
+
+        const msg: Message = {
+          id: row.id,
+          sessionId: row.session_id,
+          agentId: row.agent_id,
+          role: row.role as Message['role'],
+          content: row.content,
+          mentions,
+          taskId: fullRow.task_id || undefined,
+          images: fullRow.images ? (JSON.parse(fullRow.images) as string[]) : undefined,
+          createdAt: fullRow.created_at,
+        }
+
+        log.warn('恢复队列消息', {
+          messageId: row.id,
+          sessionId: row.session_id,
+          agents: toDispatch.map((a) => a.name),
+        })
+
+        await dispatch(row.session_id, msg, toDispatch)
+      } catch (err: any) {
+        log.error('恢复单条队列消息失败', {
+          messageId: row.id,
+          error: err.message,
+        })
+      }
+    }
+  } catch (err: any) {
+    log.error('recoverQueuedMessages failed', { error: err.message })
   }
 }
 
