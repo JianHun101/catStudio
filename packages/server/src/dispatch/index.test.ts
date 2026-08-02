@@ -323,4 +323,147 @@ describe('dispatch', () => {
       expect(dispatchModule.getAgentState('agent-1')!.status).toBe('idle')
     })
   })
+
+  // ─── B 触发合并（A2A 风暴治理）：depth>0 且同 session 已有排队命令 → 并入 pendingTriggers ──
+
+  describe('B 触发合并 — pendingTriggers', () => {
+    it('A2A 触发（depth>0）同 session 已有排队命令 → 不入队，并入 pendingTriggers', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-2', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(1)
+
+      // A2A 链触发（depth=1）→ 并入排队中的 msg-2，不入队
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-3', mentions: ['店长'] }),
+        [mockAgent],
+        'trace-a2a',
+        1
+      )
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(1) // 未新增排队
+
+      // 弹出 msg-2 时 pendingTriggers 完整到达
+      const next = await dispatchModule.completeExecution('agent-1', true)
+      expect(next!.triggerMessageId).toBe('msg-2')
+      expect(next!.pendingTriggers).toEqual(['msg-3'])
+    })
+
+    it('depth=0（用户顶层）→ 不合并，照常排队', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      for (const id of ['msg-2', 'msg-3']) {
+        await dispatchModule.dispatch('session-1', makeMessage({ id, mentions: ['店长'] }), [
+          mockAgent,
+        ])
+      }
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(2)
+    })
+
+    it('不同 sessionId → 不合并，照常入队', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-2', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+
+      // 另一会话的 A2A 触发（depth=1）→ 队列里没有同 session 命令 → 独立入队
+      await dispatchModule.dispatch(
+        'session-2',
+        makeMessage({ id: 'msg-3', mentions: ['店长'] }),
+        [mockAgent],
+        'trace-other-session',
+        1
+      )
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(2)
+    })
+
+    it('并发安全：并入判定与写入同同步块无 await——并入后立即消费，pendingTriggers 完整到达', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-2', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+
+      // 不 await 的 dispatch 调用：A2A 并入路径无 await（slot busy → else 分支
+      // 同步完成判定+并入），函数体在首个 await 前同步执行完并入
+      const p = dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-3', mentions: ['店长'] }),
+        [mockAgent],
+        'trace-race',
+        1
+      )
+      // 立即消费：q.shift 也是同步——若并入先发生，弹出命令必带 pendingTriggers
+      const next = await dispatchModule.completeExecution('agent-1', true)
+      await p
+      expect(next!.triggerMessageId).toBe('msg-2')
+      expect(next!.pendingTriggers).toEqual(['msg-3'])
+    })
+  })
+
+  // ─── 冻结改动补测：队列上限 + 命令自持 traceId/depth ──
+
+  describe('MAX_QUEUE_PER_AGENT — 队列上限（冻结改动补测）', () => {
+    it('队列满 → 拒绝入队并通知（systemMessageBridge），不静默丢弃', async () => {
+      const { setSystemMessageBridge } = dispatchModule
+      const bridge = vi.fn()
+      setSystemMessageBridge(bridge)
+      dispatchModule.initAgentSlot('agent-1')
+
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      for (const id of ['msg-2', 'msg-3', 'msg-4']) {
+        await dispatchModule.dispatch('session-1', makeMessage({ id, mentions: ['店长'] }), [
+          mockAgent,
+        ])
+      }
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(3)
+
+      // 第 5 条被拒：不入队 + 系统消息通知
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-5', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(3)
+      expect(bridge).toHaveBeenCalledTimes(1)
+      expect(bridge.mock.calls[0][0]).toBe('session-1')
+      expect(bridge.mock.calls[0][2]).toContain('队列已满')
+    })
+  })
+
+  describe('命令自持 traceId/depth（冻结改动补测）', () => {
+    it('出队命令用自身 traceId 与 depth，不继承执行者', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-1', mentions: ['店长'] }),
+        [mockAgent],
+        'trace-exec',
+        2
+      )
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-2', mentions: ['店长'] }),
+        [mockAgent],
+        'trace-queued',
+        1
+      )
+
+      const next = await dispatchModule.completeExecution('agent-1', true)
+      expect(next!.traceId).toBe('trace-queued')
+      expect(next!.depth).toBe(1)
+      expect(next!.pendingTriggers).toEqual([])
+    })
+  })
 })

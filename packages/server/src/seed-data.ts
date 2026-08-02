@@ -31,6 +31,8 @@ export interface DemoAgent {
   llmApiKey: string
   llmBaseUrl: string
   effortLevel?: string
+  /** 角色——A2A mention 白名单依据（store/implementer/reviewer/vision） */
+  role?: string
 }
 
 // ═══ 共享前置声明（所有 Agent 的 systemPrompt 以这句话开头） ═══
@@ -142,6 +144,7 @@ export function buildDemoAgents(): DemoAgent[] {
       llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
+      role: 'store',
     },
     {
       id: fixedId('ds猫'),
@@ -166,6 +169,7 @@ export function buildDemoAgents(): DemoAgent[] {
       llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
+      role: 'implementer',
     },
     {
       id: fixedId('flash猫'),
@@ -190,6 +194,7 @@ export function buildDemoAgents(): DemoAgent[] {
       llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
+      role: 'implementer',
     },
     {
       id: fixedId('吐槽猫'),
@@ -206,6 +211,7 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
       llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
+      role: 'reviewer',
     },
   ]
 }

@@ -208,6 +208,11 @@ export function initDb(): void {
       name: 'dispatch_state on messages',
       sql: `ALTER TABLE messages ADD COLUMN dispatch_state TEXT DEFAULT NULL`,
     },
+    {
+      name: 'role on agents',
+      // 默认 'unknown'——老库零回归（白名单对未知角色放行不拦截），seed 后各就其位
+      sql: `ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'unknown'`,
+    },
   ]
 
   for (const m of migrations) {

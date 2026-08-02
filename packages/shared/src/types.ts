@@ -1,6 +1,9 @@
 /** Agent 槽位状态 */
 export type SlotStatus = 'idle' | 'thinking' | 'busy'
 
+/** Agent 角色——A2A mention 白名单的判定依据（店长架构定稿：store/implementer/reviewer/vision） */
+export type AgentRole = 'store' | 'implementer' | 'reviewer' | 'vision'
+
 /** 消息角色 */
 export type MessageRole = 'user' | 'agent' | 'system'
 
@@ -23,6 +26,7 @@ export interface AgentConfig {
   llmBaseUrl?: string // for custom providers
   effortLevel?: 'low' | 'medium' | 'high' | 'max' // Claude Code 推理深度
   skillModules: string[] // 可用技能列表
+  role?: AgentRole // 角色——A2A mention 白名单依据；缺失/未知 → 放行不拦截（老库零回归）
 }
 
 /** Agent 运行时状态（广播到前端） */
@@ -103,6 +107,9 @@ export interface DispatchCommand {
   triggerContent: string
   mentions: string[]
   taskId?: string // 任务 ID，Agent 间交互继承同一个 taskId
+  traceId: string // 请求追踪 ID——队列命令出队时用自身 trace，防多 trace 叠加错配（A2A 配额张冠李戴）
+  depth: number // 触发层深：用户顶层 0、A2A 每层 +1——决定该执行是否消耗 mention 配额
+  pendingTriggers: string[] // 已并入本命令的触发消息 ID（B 触发合并：A2A 同 session 排队期间的后续触发并入，出队执行时点名"还有 N 件事"）
 }
 
 // ─── Token Stats ────────────────────────────────────

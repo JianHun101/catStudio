@@ -26,6 +26,9 @@ const log = createLogger('dispatch')
 const agentSlots = new Map<string, AgentRuntimeState>()
 const agentQueues = new Map<string, DispatchCommand[]>()
 
+/** 每个 Agent FIFO 队列的最大长度——超出拒绝入队（通知前端，不静默丢弃） */
+export const MAX_QUEUE_PER_AGENT = 3
+
 export function initAgentSlot(agentId: string): void {
   agentSlots.set(agentId, {
     agentId,
@@ -49,13 +52,15 @@ export function getAllAgentStates(): AgentRuntimeState[] {
 
 /**
  * 用户发消息后，调度系统决定哪些 Agent 执行、哪些排队。
+ * @param depth 触发层深——用户顶层 0（默认），A2A 递归每层 +1
  * @returns traceId — 贯穿全链路的请求追踪 ID
  */
 export async function dispatch(
   sessionId: string,
   userMessage: Message,
   agents: AgentConfig[],
-  traceId?: string
+  traceId?: string,
+  depth: number = 0
 ): Promise<string> {
   const tid = traceId || uuid()
   const mentions = userMessage.mentions
@@ -74,6 +79,10 @@ export async function dispatch(
       triggerMessageId: userMessage.id,
       triggerContent: userMessage.content,
       mentions,
+      // 命令自持 trace/depth——队列命令出队时用自身的，不继承执行者（防多 trace 叠加错配）
+      traceId: tid,
+      depth,
+      pendingTriggers: [],
     }
 
     const slot = agentSlots.get(agent.id)
@@ -86,6 +95,48 @@ export async function dispatch(
       await executeAgent(agent, cmd, tid)
     } else {
       const q = agentQueues.get(agent.id)!
+      // B 触发合并（A2A 风暴治理）：A2A 链（depth>0）且同 session 已有排队命令 →
+      // 不入队，并入该命令的 pendingTriggers（出队执行时点名"还有 N 件事"）。
+      // 合并判定与并入写入同一同步块、中间无 await——Node 单线程下天然原子，
+      // 队列消费（completeExecution 的 q.shift）不会插在两者之间，并入必先于消费。
+      // 执行中的命令不并入（上下文已拉取，并入无效）；仅合并排队项。
+      if (depth > 0) {
+        const queued = q.find((c) => c.sessionId === cmd.sessionId)
+        if (queued) {
+          queued.pendingTriggers.push(cmd.triggerMessageId)
+          log.info('agent trigger merged into queued command', {
+            traceId: tid,
+            agentId: agent.id,
+            agentName: agent.name,
+            mergedTrigger: cmd.triggerMessageId,
+            totalPending: queued.pendingTriggers.length + 1,
+          })
+          systemMessageBridge?.(
+            cmd.sessionId,
+            agent.id,
+            `🐱 ${agent.name} 收到新触发已合并——当前排队任务将一并处理（共 ${
+              queued.pendingTriggers.length + 1
+            } 件事待办）`
+          )
+          continue
+        }
+      }
+      if (q.length >= MAX_QUEUE_PER_AGENT) {
+        // 队列上限：拒绝入队并通知前端（不静默丢弃——用户消息需知道"没排上"）
+        log.warn('agent queue full, rejecting command', {
+          traceId: tid,
+          agentId: agent.id,
+          agentName: agent.name,
+          queueLength: q.length,
+          max: MAX_QUEUE_PER_AGENT,
+        })
+        systemMessageBridge?.(
+          cmd.sessionId,
+          agent.id,
+          `🐱 ${agent.name} 的队列已满（${MAX_QUEUE_PER_AGENT} 条），本条消息暂未排队，请稍后再试`
+        )
+        continue
+      }
       q.push(cmd)
       updateQueueState(agent.id, q.length)
       // P0 队列持久化：入队即落库 queued，server 重启后可恢复
@@ -227,6 +278,14 @@ let stateBridge: AgentStateEmit | null = null
 /** 注册 Socket.IO 桥接函数（由 connector 在启动时调用）。 */
 export function setAgentStateBridge(fn: AgentStateEmit): void {
   stateBridge = fn
+}
+
+type SystemMessageEmit = (sessionId: string, agentId: string, content: string) => void
+let systemMessageBridge: SystemMessageEmit | null = null
+
+/** 注册系统消息桥接函数（由 connector 在启动时调用）——队列满拒绝入队时通知前端。 */
+export function setSystemMessageBridge(fn: SystemMessageEmit): void {
+  systemMessageBridge = fn
 }
 
 function emitViaBridge(slot: AgentRuntimeState): void {

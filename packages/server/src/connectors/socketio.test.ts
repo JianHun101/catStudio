@@ -24,6 +24,7 @@ vi.mock('../dispatch/index.js', () => ({
   cancelQueuedCommand: vi.fn(() => 0),
   isAnyAgentExecutingMessage: vi.fn(() => false),
   setAgentStateBridge: vi.fn(),
+  setSystemMessageBridge: vi.fn(),
   executeAgentCommand: vi.fn(),
 }))
 
@@ -853,7 +854,8 @@ describe('socketio connector', () => {
         'session-1',
         expect.anything(),
         expect.arrayContaining([expect.objectContaining({ id: 'agent-2' })]),
-        'trace-limit-ok'
+        'trace-limit-ok',
+        1 // A2A 入队命令带 depth+1（冻结改动：命令自持 depth 语义）
       )
 
       // 目标组：吐槽猫计数 5（已达上限）→ 过滤，不调度
@@ -936,6 +938,207 @@ describe('socketio connector', () => {
         1
       )
       expect(mod.__getMentionCount('trace-a2a', 'agent-1')).toBe(1)
+    })
+  })
+
+  // ─── A2A 白名单（mention-policy 接入）──────────────────
+  // A2A 风暴治理：按发送者角色剥除违规 mention（写回 DB 用允许集合，
+  // 被拦猫在上下文过滤里也不可见——语义自洽）。
+
+  describe('A2A mention 白名单 — role policy 接入', () => {
+    /** 在 session-1 中加入吐槽猫（reviewer）与图测猫（vision） */
+    function seedRoleAgents(db: any) {
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-2',
+        '吐槽猫',
+        '🐱',
+        'You are a cat.',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'reviewer'
+      )
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-3',
+        '图测猫',
+        '🐱',
+        'You are a cat.',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'vision'
+      )
+      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+        JSON.stringify(['agent-1', 'agent-2', 'agent-3'])
+      )
+    }
+
+    /** 构造带角色的执行者 AgentConfig */
+    function makeAgentCfg(overrides: Record<string, any> = {}) {
+      return {
+        id: 'agent-1',
+        name: '店长',
+        avatar: '🐱',
+        systemPrompt: 'You are a cat.',
+        llmProvider: 'deepseek',
+        llmModel: 'deepseek-v4-flash',
+        llmApiKey: 'sk-test',
+        skillModules: [],
+        ...overrides,
+      }
+    }
+
+    /** 通用 setup：触发消息入 DB + 状态 mock + adapter mock + mention 解析 mock */
+    async function setupExecution(parseResult: string[], cfg: any) {
+      const { getAgentState } = await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockImplementation((agentId: string) => ({
+        agentId,
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-trigger',
+      }))
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: parseResult.join(' '), kind: 'text' }
+        }),
+      } as any)
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      vi.mocked(parseMentionsFromReply).mockReturnValue(parseResult)
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run('msg-trigger', 'session-1', '派活')
+      return cfg
+    }
+
+    it('implementer @ reviewer+vision → 剥除 vision，只路由 reviewer + 系统提示', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch, getAgentState } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      seedRoleAgents(getDb())
+
+      const dsCatCfg = makeAgentCfg({ id: 'agent-9', name: 'ds猫', role: 'implementer' })
+      await setupExecution(['吐槽猫', '图测猫'], dsCatCfg)
+      vi.mocked(dispatch).mockClear()
+      mockRoomEmit.mockClear()
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [dsCatCfg],
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        'trace-policy',
+        1
+      )
+
+      // ① 只路由合法目标（吐槽猫），不路由图测猫
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.anything(),
+        expect.arrayContaining([expect.objectContaining({ name: '吐槽猫' })]),
+        'trace-policy',
+        2
+      )
+      const dispatchAgents = vi.mocked(dispatch).mock.calls[0][2] as any[]
+      expect(dispatchAgents.map((a) => a.name)).not.toContain('图测猫')
+
+      // ② 系统提示 emit（点名违规与正确规则）
+      const systemMsgs = mockRoomEmit.mock.calls.filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      const policyHint = systemMsgs.find(
+        (c: any[]) =>
+          c[1]?.role === 'system' && String(c[1]?.content).includes('不在你的角色允许范围内')
+      )
+      expect(policyHint).toBeDefined()
+      expect(policyHint![1].content).toContain('图测猫')
+      expect(policyHint![1].content).toContain('店长、吐槽猫')
+
+      // ③ 写回 DB 的 mentions 只含允许集合——被拦猫上下文过滤不可见
+      const row = getDb()
+        .prepare(`SELECT mentions FROM messages WHERE id = ?`)
+        .get(vi.mocked(dispatch).mock.calls[0][1].id) as { mentions: string }
+      expect(JSON.parse(row.mentions)).toEqual(['吐槽猫'])
+    })
+
+    it('store @ 任意角色 → 全放行不拦截', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seedRoleAgents(getDb())
+
+      const storeCfg = makeAgentCfg({ role: 'store' })
+      await setupExecution(['吐槽猫', '图测猫'], storeCfg)
+      vi.mocked(dispatch).mockClear()
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [storeCfg],
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        'trace-store'
+      )
+
+      const dispatchAgents = vi.mocked(dispatch).mock.calls[0][2] as any[]
+      expect(dispatchAgents.map((a) => a.name)).toEqual(
+        expect.arrayContaining(['吐槽猫', '图测猫'])
+      )
+    })
+
+    it('发送者角色缺失（老库）→ 全放行零回归', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seedRoleAgents(getDb())
+
+      const noRoleCfg = makeAgentCfg({ role: undefined })
+      await setupExecution(['吐槽猫', '图测猫'], noRoleCfg)
+      vi.mocked(dispatch).mockClear()
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [noRoleCfg],
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        'trace-no-role'
+      )
+
+      const dispatchAgents = vi.mocked(dispatch).mock.calls[0][2] as any[]
+      expect(dispatchAgents.map((a) => a.name)).toEqual(
+        expect.arrayContaining(['吐槽猫', '图测猫'])
+      )
+    })
+
+    it('用户消息永不拦——用户 @ 任何猫原样进入 dispatch（白名单只挂 A2A 路径）', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      const { dispatch } = await import('../dispatch/index.js')
+      // 显式重置 handoff 重定向 mock（前序 HANDOFF 测试的 mockReturnValue 会残留，
+      // 导致本消息被重定向到不存在的子会话 → INSERT FK 失败 → dispatch 不执行）
+      const { resolveHandoffTarget } = await import('../handoff/index.js')
+      vi.mocked(resolveHandoffTarget).mockReturnValue(null)
+      vi.mocked(dispatch).mockClear()
+
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '你好 @图测猫',
+        mentions: ['图测猫'],
+      })
+
+      // 用户消息的 mentions 原样传给 dispatch——白名单只挂 A2A 路径
+      // （parseMentionsFromReply 之后），用户路径不剥除任何 mention
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ mentions: ['图测猫'] }),
+        expect.anything(), // validAgents 由 session agent_ids 决定，mention 过滤在 dispatch 内部
+        expect.any(String) // traceId
+      )
     })
   })
 

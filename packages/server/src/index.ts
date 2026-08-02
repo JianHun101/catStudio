@@ -92,7 +92,9 @@ async function main(): Promise<void> {
         a.llmModel,
         a.llmApiKey,
         a.llmBaseUrl,
-        a.effortLevel ?? ''
+        a.effortLevel ?? '',
+        undefined,
+        a.role ?? 'unknown'
       )
       console.log(`  ✅ ${a.avatar} ${a.name}`)
     }

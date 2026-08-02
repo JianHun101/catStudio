@@ -1,0 +1,120 @@
+/**
+ * A2A mention 白名单策略 — 角色→允许@的 Agent 角色边表。
+ *
+ * 纯函数模块，无外部依赖，可单独测试。
+ *
+ * 设计背景（A2A 风暴治理，B 方案，店长架构定稿）：
+ * 猫咖的 Agent 通过回复中的行首 @ 相互触发（A2A 路由），但任何猫都能
+ * @ 任何猫会让触发链失去控制（风暴）。白名单按角色约束 @ 的合法范围：
+ * - store（店长）→ 任意：架构裁决者，允许被任何人 @ 也允许 @ 任何人
+ * - implementer（实施猫）→ {store, reviewer}：只对店长（求助/汇报）和
+ *   审查者（审查链）喊话；且每条回复最多 @ 1 个 agent（防多线触发风暴）
+ * - reviewer（审查猫）→ {store} ∪ 本次触发消息作者：审查结论只回请求人
+ *   与店长（C 收口链：吐槽猫结论只回请求人 → 实施猫转达 @店长）
+ * - vision（图测猫）→ {store}：视觉评审专用，只响应店长派活
+ *
+ * 关键语义：角色未知/缺失（老库迁移默认 'unknown'）→ 发送者放行不拦截、
+ * 目标放行——误杀审查链的代价远大于漏拦一条 @（店长边界）。
+ */
+
+import type { AgentRole } from '@cat-study/shared'
+
+/** 实施猫每条回复最多允许的 agent mention 数——超出的剥除（防多线触发） */
+export const IMPLEMENTER_MAX_MENTIONS_PER_REPLY = 1
+
+/** 角色 → 允许@的 Agent 角色列表。'any' = 不限制 */
+const ROLE_ALLOWED_MENTIONS: Record<AgentRole, 'any' | AgentRole[]> = {
+  store: 'any',
+  implementer: ['store', 'reviewer'],
+  reviewer: ['store'],
+  vision: ['store'],
+}
+
+/** 发送者上下文 */
+export interface MentionPolicyFrom {
+  role?: AgentRole
+  /** 本次触发消息的作者名（agent 消息时非空）——reviewer 可 @ 回请求人 */
+  triggerAuthorName?: string
+}
+
+/** 被 @ 的目标（agent） */
+export interface MentionPolicyTarget {
+  name: string
+  role?: AgentRole
+}
+
+/** 被剥除的 mention 及原因 */
+export interface BlockedMention {
+  name: string
+  reason: 'role-not-allowed' | 'count-limit'
+}
+
+/**
+ * 按发送者角色过滤 @ 目标列表。
+ *
+ * 泛型保留完整目标对象类型（如 AgentConfig）——调用方拿到 allowed 后
+ * 可直接继续使用（写回 DB / dispatch），无需二次查找。
+ *
+ * @returns allowed 保留的合法目标；blocked 被剥除的目标及原因（发送者
+ *   需要系统提示说明——点名违规与正确规则）
+ */
+export function filterAllowedMentions<T extends MentionPolicyTarget>(
+  from: MentionPolicyFrom,
+  targets: T[]
+): { allowed: T[]; blocked: BlockedMention[] } {
+  // 发送者角色未知（undefined 或不在边表中，如老库默认 'unknown'）→ 全放行
+  const rule = from.role ? ROLE_ALLOWED_MENTIONS[from.role] : undefined
+  if (!rule) {
+    return { allowed: [...targets], blocked: [] }
+  }
+
+  const allowed: T[] = []
+  const blocked: BlockedMention[] = []
+  for (const t of targets) {
+    if (isRoleAllowed(from, rule, t)) {
+      allowed.push(t)
+    } else {
+      blocked.push({ name: t.name, reason: 'role-not-allowed' })
+    }
+  }
+
+  // 计数限制：仅实施猫生效——合法目标中最多保留 1 个（每条回复 ≤1 个 agent mention）
+  if (from.role === 'implementer' && allowed.length > IMPLEMENTER_MAX_MENTIONS_PER_REPLY) {
+    const keep = allowed.slice(0, IMPLEMENTER_MAX_MENTIONS_PER_REPLY)
+    const extra = allowed.slice(IMPLEMENTER_MAX_MENTIONS_PER_REPLY)
+    blocked.push(...extra.map((t) => ({ name: t.name, reason: 'count-limit' as const })))
+    return { allowed: keep, blocked }
+  }
+
+  return { allowed, blocked }
+}
+
+function isRoleAllowed(
+  from: MentionPolicyFrom,
+  rule: 'any' | AgentRole[],
+  t: MentionPolicyTarget
+): boolean {
+  if (rule === 'any') return true
+  // 目标角色未知（老库未配）→ 放行——无法判定边表时误杀风险大于漏拦
+  if (!t.role) return true
+  if (rule.includes(t.role)) return true
+  // reviewer 特殊边：可 @ 回本次触发消息作者（若为 agent）——审查结论回请求人
+  if (from.role === 'reviewer' && from.triggerAuthorName === t.name) return true
+  return false
+}
+
+/** 生成"当前角色可 @ 谁"的规则描述——违规系统提示里点名正确规则用 */
+export function allowedTargetsDescription(role?: AgentRole): string {
+  switch (role) {
+    case 'store':
+      return '任意猫'
+    case 'implementer':
+      return `店长、吐槽猫（每条回复最多 ${IMPLEMENTER_MAX_MENTIONS_PER_REPLY} 个 @）`
+    case 'reviewer':
+      return '店长或本次请求你的猫'
+    case 'vision':
+      return '店长'
+    default:
+      return '任意猫'
+  }
+}

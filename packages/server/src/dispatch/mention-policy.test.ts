@@ -1,0 +1,168 @@
+import { describe, it, expect } from 'vitest'
+import type { AgentRole } from '@cat-study/shared'
+import {
+  filterAllowedMentions,
+  allowedTargetsDescription,
+  IMPLEMENTER_MAX_MENTIONS_PER_REPLY,
+} from './mention-policy.js'
+
+const target = (name: string, role?: AgentRole) => ({ name, role })
+const names = (ts: { name: string }[]) => ts.map((t) => t.name)
+
+describe('mention-policy — A2A 白名单边矩阵', () => {
+  describe('store（店长）→ 任意', () => {
+    it('可 @ 任何角色', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'store' }, [
+        target('吐槽猫', 'reviewer'),
+        target('ds猫', 'implementer'),
+        target('图测猫', 'vision'),
+        target('flash猫', 'implementer'),
+      ])
+      expect(names(allowed)).toEqual(['吐槽猫', 'ds猫', '图测猫', 'flash猫'])
+      expect(blocked).toEqual([])
+    })
+  })
+
+  describe('implementer（实施猫）→ {store, reviewer}，且每条回复 ≤1 个 @', () => {
+    it('可 @ 店长（store）', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('店长', 'store'),
+      ])
+      expect(names(allowed)).toEqual(['店长'])
+      expect(blocked).toEqual([])
+    })
+
+    it('可 @ 吐槽猫（reviewer）', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('吐槽猫', 'reviewer'),
+      ])
+      expect(names(allowed)).toEqual(['吐槽猫'])
+      expect(blocked).toEqual([])
+    })
+
+    it('不可 @ 其他实施猫（implementer 互 @ 被拦）', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('flash猫', 'implementer'),
+      ])
+      expect(allowed).toEqual([])
+      expect(blocked).toEqual([{ name: 'flash猫', reason: 'role-not-allowed' }])
+    })
+
+    it('不可 @ 图测猫（vision）', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('图测猫', 'vision'),
+      ])
+      expect(allowed).toEqual([])
+      expect(blocked).toEqual([{ name: '图测猫', reason: 'role-not-allowed' }])
+    })
+
+    it(`同 @ 两猫（均合法）→ 第二个被剥（count-limit，上限 ${IMPLEMENTER_MAX_MENTIONS_PER_REPLY}）`, () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('店长', 'store'),
+        target('吐槽猫', 'reviewer'),
+      ])
+      expect(names(allowed)).toEqual(['店长']) // 保留第一个
+      expect(blocked).toEqual([{ name: '吐槽猫', reason: 'count-limit' }])
+    })
+
+    it('目标角色未知（老库未配）→ 放行', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('神秘猫'),
+      ])
+      expect(names(allowed)).toEqual(['神秘猫'])
+      expect(blocked).toEqual([])
+    })
+  })
+
+  describe('reviewer（吐槽猫）→ {store} ∪ 本次触发消息作者', () => {
+    it('可 @ 店长（store）', () => {
+      const { allowed, blocked } = filterAllowedMentions(
+        { role: 'reviewer', triggerAuthorName: 'ds猫' },
+        [target('店长', 'store')]
+      )
+      expect(names(allowed)).toEqual(['店长'])
+      expect(blocked).toEqual([])
+    })
+
+    it('可 @ 回本次触发消息作者（若为 agent）——审查结论回请求人', () => {
+      const { allowed, blocked } = filterAllowedMentions(
+        { role: 'reviewer', triggerAuthorName: 'ds猫' },
+        [target('ds猫', 'implementer')]
+      )
+      expect(names(allowed)).toEqual(['ds猫'])
+      expect(blocked).toEqual([])
+    })
+
+    it('不可 @ 非触发作者的其他猫', () => {
+      const { allowed, blocked } = filterAllowedMentions(
+        { role: 'reviewer', triggerAuthorName: 'ds猫' },
+        [target('flash猫', 'implementer')]
+      )
+      expect(allowed).toEqual([])
+      expect(blocked).toEqual([{ name: 'flash猫', reason: 'role-not-allowed' }])
+    })
+
+    it('用户触发（无触发作者）→ 只可 @ 店长', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'reviewer' }, [
+        target('店长', 'store'),
+        target('ds猫', 'implementer'),
+      ])
+      expect(names(allowed)).toEqual(['店长'])
+      expect(blocked).toEqual([{ name: 'ds猫', reason: 'role-not-allowed' }])
+    })
+  })
+
+  describe('vision（图测猫）→ {store}', () => {
+    it('可 @ 店长', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'vision' }, [
+        target('店长', 'store'),
+      ])
+      expect(names(allowed)).toEqual(['店长'])
+      expect(blocked).toEqual([])
+    })
+
+    it('不可 @ 其他猫', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'vision' }, [
+        target('ds猫', 'implementer'),
+        target('吐槽猫', 'reviewer'),
+      ])
+      expect(allowed).toEqual([])
+      expect(blocked).toEqual([
+        { name: 'ds猫', reason: 'role-not-allowed' },
+        { name: '吐槽猫', reason: 'role-not-allowed' },
+      ])
+    })
+  })
+
+  describe('未知角色 → 放行不拦截（老库零回归）', () => {
+    it('发送者 role 缺失（undefined）→ 全放行', () => {
+      const { allowed, blocked } = filterAllowedMentions({}, [
+        target('ds猫', 'implementer'),
+        target('图测猫', 'vision'),
+      ])
+      expect(names(allowed)).toEqual(['ds猫', '图测猫'])
+      expect(blocked).toEqual([])
+    })
+
+    it('发送者 role 为 DB 默认值 "unknown"（不在边表）→ 全放行', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'unknown' as AgentRole }, [
+        target('ds猫', 'implementer'),
+      ])
+      expect(names(allowed)).toEqual(['ds猫'])
+      expect(blocked).toEqual([])
+    })
+  })
+
+  describe('allowedTargetsDescription', () => {
+    it('各角色返回对应规则描述', () => {
+      expect(allowedTargetsDescription('store')).toBe('任意猫')
+      expect(allowedTargetsDescription('implementer')).toContain('店长')
+      expect(allowedTargetsDescription('implementer')).toContain('吐槽猫')
+      expect(allowedTargetsDescription('reviewer')).toContain('店长')
+      expect(allowedTargetsDescription('reviewer')).toContain('本次请求你的猫')
+      expect(allowedTargetsDescription('vision')).toBe('店长')
+      expect(allowedTargetsDescription(undefined)).toBe('任意猫')
+      expect(allowedTargetsDescription('unknown' as AgentRole)).toBe('任意猫')
+    })
+  })
+})

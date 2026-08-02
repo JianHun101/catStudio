@@ -96,13 +96,14 @@ export function upsertAgent(
   llmApiKey: string,
   llmBaseUrl: string,
   effortLevel: string,
-  skillModules: string | null = null
+  skillModules: string | null = null,
+  role: string = 'unknown'
 ): { changes: number } {
   return db
     .prepare(
       `
-    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules, role)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET
       avatar = excluded.avatar,
       system_prompt = excluded.system_prompt,
@@ -112,6 +113,7 @@ export function upsertAgent(
       llm_base_url = excluded.llm_base_url,
       effort_level = excluded.effort_level,
       skill_modules = excluded.skill_modules,
+      role = excluded.role,
       updated_at = datetime('now')
   `
     )
@@ -125,7 +127,8 @@ export function upsertAgent(
       llmApiKey,
       llmBaseUrl,
       effortLevel,
-      skillModules ?? '[]'
+      skillModules ?? '[]',
+      role
     ) as { changes: number }
 }
 

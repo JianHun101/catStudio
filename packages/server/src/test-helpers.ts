@@ -21,6 +21,7 @@ const SCHEMA_SQL = `
     llm_base_url TEXT,
     effort_level TEXT NOT NULL DEFAULT 'high',
     skill_modules TEXT NOT NULL DEFAULT '[]',
+    role TEXT NOT NULL DEFAULT 'unknown',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
