@@ -11,10 +11,16 @@
  * 环境变量：
  *   OLLAMA_MODELS_HOST  默认 http://127.0.0.1:11434（勿用 localhost，Windows IPv6 歧义）
  *   OLLAMA_MODEL        默认 qwen3.5:9b
+ *
+ * 自动拉起：探测 /api/tags 不可达且 baseUrl 为本地（127.0.0.1:11434）时，
+ *   后台 spawn `ollama serve`（detached + unref，脚本退出不杀它），每 500ms 轮询
+ *   最长 15s；非本地地址不自动拉起（远程宿主是别人的服务）；拉起失败清晰报错
+ *   exit 1 不挂死。
  */
 import { existsSync, mkdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { setTimeout as sleep } from 'node:timers/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
@@ -40,6 +46,74 @@ const prompt =
   instruction ||
   '请评审这张前端 UI 截图中的输入框区域：样式是否突兀、与整体风格是否协调、' +
     '有哪些具体可改进的点（配色/圆角/边框/间距/提示文字等）。请给出简洁、可执行的修改建议。'
+
+// ─── Ollama 就绪保障（未启动则自动拉起） ────────────────────
+
+const OLLAMA_DEFAULT_BASE_URL = 'http://127.0.0.1:11434'
+const OLLAMA_MODELS_DIR = 'D:\\Tools\\ollama\\models'
+
+/** baseUrl 是否为本地地址——仅本地可自动拉起（远程宿主是别人的服务，不擅自启停） */
+function isLocalBaseUrl(url: string): boolean {
+  return url.replace(/\/+$/, '') === OLLAMA_DEFAULT_BASE_URL
+}
+
+/** 探测 Ollama /api/tags 是否就绪（1.5s 超时，失败即视为不可达） */
+async function probeOllama(): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(1500) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 拉起时 env：OLLAMA_MODELS 优先已设值，其次本机模型目录（存在才用），缺省不设走 ollama 默认 */
+function buildOllamaEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  if (!env.OLLAMA_MODELS && existsSync(OLLAMA_MODELS_DIR)) {
+    env.OLLAMA_MODELS = OLLAMA_MODELS_DIR
+  }
+  return env
+}
+
+/** 后台拉起 ollama serve（detached + unref：进程存活，本脚本退出不影响它） */
+function startOllama(): void {
+  console.log('[ui-review] Ollama 未就绪，尝试自动拉起（ollama serve）…')
+  const child = spawn('ollama', ['serve'], {
+    detached: true,
+    stdio: 'ignore',
+    env: buildOllamaEnv(),
+  })
+  child.on('error', (err) => {
+    console.error(
+      `[ui-review] 拉起 Ollama 失败: ${err.message}\n  请手动启动（ollama serve）后重试`
+    )
+    process.exit(1)
+  })
+  child.unref()
+}
+
+/** 调用前确保 Ollama 就绪：探测 → 本地拉起 → 每 500ms 轮询最长 15s；失败清晰退出不挂死 */
+async function ensureOllamaReady(): Promise<void> {
+  if (await probeOllama()) return
+  if (!isLocalBaseUrl(baseUrl)) {
+    console.error(
+      `[ui-review] Ollama 不可达（${baseUrl}）且非本地地址——不自动拉起，请确认远程服务已启动`
+    )
+    process.exit(1)
+  }
+  startOllama()
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    await sleep(500)
+    if (await probeOllama()) {
+      console.log('[ui-review] Ollama 已就绪')
+      return
+    }
+  }
+  console.error('[ui-review] 拉起 Ollama 超时（15s），请手动启动（ollama serve）后重试')
+  process.exit(1)
+}
 
 // ─── 截图（--shot 模式） ──────────────────────────────
 
@@ -77,6 +151,9 @@ function captureScreenshot(url: string, outPath: string): void {
 }
 
 async function main(): Promise<void> {
+  // 0. 先确保 Ollama 就绪（fail fast：不可达先拉起，趁截图/压缩的功夫后台启动）
+  await ensureOllamaReady()
+
   let resolvedImagePath = imagePath
 
   if (isShotMode) {

@@ -33,7 +33,7 @@ npx tsx packages/server/src/ui-review.ts <图片路径> ["任意指令"]
 ## 关键事实（踩过的雷，别再踩）
 
 - **Ollama 只收裸 base64**，带 `data:image/` 前缀报 `400 illegal base64 data at input byte 4`（byte 4 是冒号）。`ollama.ts` 的 `toOllamaImage()` 已处理，但直接手调 API 时要自己剥
-- Ollama 服务由**桌面 App** 管（`127.0.0.1:11434`，勿用 localhost），模型名 `qwen3.5:9b`，调用耗时 10~20s（GPU 推理），不是快操作
+- Ollama 服务由 `ui-review.ts` 自动拉起（探测 `/api/tags` 不可达且地址为本地时后台 `ollama serve` 拉起，轮询最长 15s；非本地地址不自动拉起）。地址 `127.0.0.1:11434`（勿用 localhost），模型名 `qwen3.5:9b`，调用耗时 10~20s（GPU 推理），不是快操作
 - **模型意见要核对代码再采纳**：它可能看错细节（如把 14px 圆角说成偏小）。模型说的"突兀感"要能在 CSS 里找到对应事实，找不到就不盲从
 - 临时文件放 `scripts/shots/`（已 gitignore），不污染仓库
 - 图片格式无所谓（Ollama 直接收原始字节），JPEG/PNG 都行，无需先转格式
