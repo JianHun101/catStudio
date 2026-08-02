@@ -995,13 +995,34 @@ describe('socketio connector', () => {
       }
     }
 
-    it('AC4: pending 消息存在 → 整条重新 dispatch（槽位未初始化则先 init）', async () => {
+    it('AC4: pending 消息 → dispatch 并配对执行——恢复后真实产生回复、执行收尾', async () => {
       const mod = await import('./socketio.js')
-      const { dispatch, initAgentSlot } = await import('../dispatch/index.js')
+      const { dispatch, completeExecution, initAgentSlot } = await import('../dispatch/index.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
       seedQueuedMessage(getDb())
+
+      // dispatch 在测试里被 mock 为 no-op——用调用序列模拟真实路径：
+      // 恢复循环先检查槽位（未初始化 → initAgentSlot），
+      // 随后 executeAgentsSerial 看到 dispatch 标 busy 后的槽位状态
+      //（真实路径：dispatch → executeAgentCommand 标 busy + currentTrigger=msg-queued）
+      vi.mocked(getAgentState).mockReturnValueOnce(undefined).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-queued',
+      })
+      // adapter 返回可流式产出的 chatStream——runAgentReply 真正走 LLM 链路
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '收到', kind: 'text' }
+        }),
+      } as any)
 
       await mod.recoverQueuedMessages(mockIo as any)
 
+      // ① 整条重新 dispatch（4 参：含 traceId）
       expect(dispatch).toHaveBeenCalledWith(
         'session-1',
         expect.objectContaining({
@@ -1009,9 +1030,22 @@ describe('socketio connector', () => {
           content: '@店长 请补填交接文档',
           mentions: ['店长'],
         }),
-        expect.arrayContaining([expect.objectContaining({ id: 'agent-1' })])
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-1' })]),
+        expect.any(String)
       )
+      // ② 槽位初始化
       expect(initAgentSlot).toHaveBeenCalledWith('agent-1')
+      // ③ 真实执行：回复已写入 DB（chatStream 产出 '收到' → runAgentReply 落库）
+      //    ——只断言 dispatch 被调用会与"卡 busy 永不执行"的 bug 同构漏过
+      const reply = getDb()
+        .prepare(`SELECT * FROM messages WHERE role = 'agent' AND agent_id = ? AND session_id = ?`)
+        .get('agent-1', 'session-1') as any
+      expect(reply).toBeDefined()
+      expect(reply.content).toBe('收到')
+      // ④ 执行收尾：completeExecution(成功) 被调用——生产路径释放槽位回 idle
+      expect(completeExecution).toHaveBeenCalledWith('agent-1', true, expect.anything())
+      // ⑤ NEW_MESSAGE 广播（前端能看到恢复的回复）
+      expect(mockRoomEmit).toHaveBeenCalledWith(Events.NEW_MESSAGE, expect.anything())
     })
 
     it('AC5: 目标 agent 已回复（回复写库后、finalize 前被杀）→ 跳过，防重复执行', async () => {
@@ -1022,6 +1056,47 @@ describe('socketio connector', () => {
       await mod.recoverQueuedMessages(mockIo as any)
 
       expect(dispatch).not.toHaveBeenCalled()
+    })
+
+    it('职责切分：有 server_restart execution_log 的 agent 跳过（归 recoverInterruptedExecutions），无日志的 agent 照常恢复', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      // 双 agent 会话：agent-1 有被中断的执行日志（路径 2 的职责域），agent-2 无
+      getDb()
+        .prepare(
+          `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run('agent-2', '吐槽猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test')
+      getDb()
+        .prepare('UPDATE sessions SET agent_ids = ? WHERE id = ?')
+        .run(JSON.stringify(['agent-1', 'agent-2']), 'session-1')
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, ?, 'user', ?, '["店长","吐槽猫"]', datetime('now', '-2 minutes'))`
+        )
+        .run('msg-queued', 'session-1', '@店长 @吐槽猫 请补填')
+      getDb()
+        .prepare('UPDATE messages SET dispatch_state = ? WHERE id = ?')
+        .run('queued', 'msg-queued')
+      getDb()
+        .prepare(
+          `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, error_message, started_at)
+           VALUES (?, ?, ?, ?, 'failed', 'server_restart', datetime('now', '-1 minute'))`
+        )
+        .run('exec-1', 'session-1', 'agent-1', 'msg-queued')
+
+      await mod.recoverQueuedMessages(mockIo as any)
+
+      // 只恢复 agent-2（无执行日志）；agent-1 不在此处调度（防两条路径串行双跑）
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ id: 'msg-queued' }),
+        [expect.objectContaining({ id: 'agent-2' })],
+        expect.any(String)
+      )
     })
 
     it('无 API key 的 agent → 跳过（无法执行）', async () => {
