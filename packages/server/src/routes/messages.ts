@@ -5,21 +5,8 @@
  * 等价于 Web 前端通过 Socket.IO 发送 SEND_MESSAGE 事件，但不需要 WebSocket 连接。
  */
 import type { FastifyInstance } from 'fastify'
-import { v4 as uuid } from 'uuid'
-import { Events, estimateTokens } from '@cat-study/shared'
-import {
-  sessions as sessionsRepo,
-  agents as agentsRepo,
-  messages as messagesRepo,
-  executionLogs as execLogsRepo,
-} from '../db/repository/index.js'
-import type { AgentConfig } from '@cat-study/shared'
-import { getIO, rowToAgent, executeAgentsSerial } from '../connectors/socketio.js'
-import { dispatch, initAgentSlot, getAgentState, completeExecution } from '../dispatch/index.js'
-import { resolveHandoffTarget } from '../handoff/index.js'
-import { createLogger } from '../logger.js'
-
-const log = createLogger('messages-api')
+import { messages as messagesRepo, executionLogs as execLogsRepo } from '../db/repository/index.js'
+import { ingestUserMessage } from '../connectors/ingest.js'
 
 export async function messageRoutes(app: FastifyInstance): Promise<void> {
   /**
@@ -70,158 +57,26 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'content is required (string)' })
     }
 
-    const sessionId = body.sessionId
-    const content = body.content
-    const mentions: string[] = Array.isArray(body.mentions) ? body.mentions : []
-    const taskId: string | undefined = body.taskId || undefined
-    // 图片守卫：必须 data:image/ 前缀、单张 base64 ≤ 3MB、最多 4 张
-    // （与 socketio.ts 的 SEND_MESSAGE 守卫同构；前端已压缩到最长边 1280，此处防滥用）
-    const images: string[] = Array.isArray(body.images)
-      ? body.images
-          .filter(
-            (s: unknown) =>
-              typeof s === 'string' && s.startsWith('data:image/') && s.length <= 3 * 1024 * 1024
-          )
-          .slice(0, 4)
-      : []
-    const msgId = uuid()
-    const traceId = uuid()
-
-    log.info('REST message received', {
-      traceId,
-      sessionId,
-      mentions,
-      contentLen: content.length,
-      contentTokens: estimateTokens(content),
-      imageCount: images.length,
+    // 摄入管线（校验/重定向/落库/广播/调度/执行）已提取为共享核心，
+    // 与 socketio SEND_MESSAGE 同构——两入口共用 ingest.ts。
+    // 不传 saveMemory：外部工具注入的管道消息不进向量记忆库（保持现状）。
+    const result = await ingestUserMessage({
+      sessionId: body.sessionId,
+      content: body.content,
+      mentions: Array.isArray(body.mentions) ? body.mentions : [],
+      images: Array.isArray(body.images) ? body.images : undefined,
+      taskId: typeof body.taskId === 'string' ? body.taskId : undefined,
     })
 
-    // 1. 验证 session 存在
-    const sessionRow = sessionsRepo.getSessionById(sessionId)
-    if (!sessionRow) {
-      log.warn('session not found', { sessionId })
-      return reply.status(404).send({ error: 'Session not found' })
-    }
-
-    // 1.5 已交接会话路由兜底（方案 A）：消息重定向到最新真实子会话
-    const handoffTarget = resolveHandoffTarget(sessionId)
-    const effectiveSessionId = handoffTarget?.newSessionId ?? sessionId
-    if (handoffTarget) {
-      log.info('REST message redirected to handoff child session', {
-        oldSessionId: sessionId,
-        newSessionId: effectiveSessionId,
-      })
-    }
-
-    // 2. 写入消息
-    const mentionsJson = JSON.stringify(mentions)
-    messagesRepo.insertUserMessage(
-      msgId,
-      effectiveSessionId,
-      content,
-      mentionsJson,
-      taskId || null,
-      JSON.stringify(images)
-    )
-
-    const msg = {
-      id: msgId,
-      sessionId: effectiveSessionId,
-      agentId: null,
-      role: 'user' as const,
-      content,
-      images: images.length > 0 ? images : undefined,
-      mentions,
-      taskId: taskId || undefined,
-      createdAt: new Date().toISOString(),
-    }
-
-    // 3. 广播到 Session 房间（重定向时是子会话房间，并向旧房间发 SESSION_HANDOFF）
-    const io = getIO()
-    if (io) {
-      io.to(`session:${effectiveSessionId}`).emit(Events.NEW_MESSAGE, msg)
-      if (handoffTarget) {
-        io.to(`session:${sessionId}`).emit(Events.SESSION_HANDOFF, handoffTarget)
-      }
-    }
-
-    // 4. 获取 Session 内的 Agent（重定向时从子会话取——agent_ids 可能已被
-    //    PATCH 更新；子会话被删时兜底回退旧会话行）
-    const targetRow =
-      effectiveSessionId === sessionId
-        ? sessionRow
-        : (sessionsRepo.getSessionById(effectiveSessionId) ?? sessionRow)
-    const agentIds: string[] = JSON.parse(targetRow.agent_ids || '[]')
-    const agents = agentIds
-      .map((id: string) => {
-        const row = agentsRepo.getAgentById(id)
-        return row ? rowToAgent(row) : null
-      })
-      .filter(Boolean) as AgentConfig[]
-
-    // 过滤无效 Agent
-    const validAgents = agents.filter((a) => {
-      if (!agentsRepo.agentExists(a.id)) {
-        log.warn('agent not in DB, skipping dispatch', { agentId: a.id, traceId })
-        return false
-      }
-      return true
-    })
-
-    // 5. 初始化槽位并调度
-    for (const a of validAgents) {
-      if (!getAgentState(a.id)) {
-        initAgentSlot(a.id)
-      }
-    }
-
-    try {
-      await dispatch(effectiveSessionId, msg, validAgents, traceId)
-    } catch (err: any) {
-      log.error('dispatch failed', { sessionId: effectiveSessionId, traceId, error: err.message })
-    }
-
-    // 确定目标（被 @ 的 Agent，或广播模式下的全部）
-    const targets =
-      mentions.length > 0 ? validAgents.filter((a) => mentions.includes(a.name)) : validAgents
-
-    // 发送 queued 状态（重定向时发子会话房间，与 NEW_MESSAGE 一致）
-    if (io) {
-      for (const a of targets) {
-        io.to(`session:${effectiveSessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
-          messageId: msgId,
-          agentId: a.id,
-          agentName: a.name,
-          agentAvatar: a.avatar,
-          status: 'queued',
-        })
-      }
-    }
-
-    // 6. 串行执行 Agent（不 await，让多个消息交错执行）
-    if (io && targets.length > 0) {
-      executeAgentsSerial(io, effectiveSessionId, targets, msg, traceId).catch((err) => {
-        log.error('executeAgentsSerial crashed — releasing stuck slots', {
-          traceId,
-          error: err.message,
-        })
-        for (const a of targets) {
-          const state = getAgentState(a.id)
-          if (state && state.status === 'busy') {
-            completeExecution(a.id, false, {
-              errorMessage: `executeAgentsSerial crash: ${err.message}`,
-              traceId,
-            }).catch(() => {})
-          }
-        }
-      })
+    if (!result.ok) {
+      return reply.status(result.status).send({ error: result.error })
     }
 
     return reply.status(201).send({
       ok: true,
-      messageId: msgId,
+      messageId: result.messageId,
       // 已交接会话 → 消息被重定向到子会话，调用方据此感知落点
-      ...(handoffTarget ? { redirectedTo: effectiveSessionId } : {}),
+      ...(result.redirectedFrom ? { redirectedTo: result.effectiveSessionId } : {}),
     })
   })
 }

@@ -34,7 +34,7 @@ import {
 } from '../dispatch/index.js'
 import type { DispatchCommand } from '@cat-study/shared'
 import { getAdapterForAgent } from '../llm/registry.js'
-import { saveMessageMemory, buildMemoryContext } from '../memory/index.js'
+import { buildMemoryContext } from '../memory/index.js'
 import { createLogger } from '../logger.js'
 import {
   gitCommit,
@@ -49,12 +49,8 @@ import { parseMentionsFromReply } from './a2a-mentions.js'
 import { parseJsonArray } from '../utils.js'
 import { SkillLoader } from '../skills/skill-loader.js'
 import { updateRunningSummary } from '../summarizer/index.js'
-import {
-  performHandoff,
-  shouldHandoff,
-  injectSummaryIntoSystem,
-  resolveHandoffTarget,
-} from '../handoff/index.js'
+import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
+import { ingestUserMessage } from './ingest.js'
 
 const log = createLogger('socketio')
 
@@ -219,187 +215,19 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         taskId?: string
         images?: string[]
       }) => {
-        const msgId = uuid()
-        const traceId = uuid() // 贯穿全链路的请求追踪 ID
-
-        log.info('message received', {
-          traceId,
+        // 摄入管线（校验/重定向/落库/广播/调度/执行）已提取为共享核心，
+        // 与 REST POST /api/messages 同构——两入口共用 ingest.ts。
+        const result = await ingestUserMessage({
           sessionId: data.sessionId,
-          mentions: data.mentions,
-          contentLen: data.content.length,
-          contentTokens: estimateTokens(data.content),
-          imageCount: data.images?.length || 0,
-        })
-
-        // 1. 先检查 session 是否存在（在 INSERT 前，避免 FK 约束抛异常）
-        const sessionRow = sessionsRepo.getSessionById(data.sessionId)
-        if (!sessionRow) {
-          log.warn('session not found', { sessionId: data.sessionId })
-          socket.emit(Events.ERROR, { message: 'Session not found' })
-          return
-        }
-
-        // 1.5 已交接会话路由兜底（方案 A）：消息重定向到最新真实子会话。
-        //     命中时通知旧房间前端切换（复用现有 SESSION_HANDOFF 机制），
-        //     后续写入/广播/dispatch 全部走子会话，旧会话不再膨胀。
-        const handoffTarget = resolveHandoffTarget(data.sessionId)
-        const effectiveSessionId = handoffTarget?.newSessionId ?? data.sessionId
-
-        // 2. 写入消息（先落库、后通知切换——写入失败时前端不应收到切换信号）
-        const mentionsJson = JSON.stringify(data.mentions || [])
-        // 图片守卫：必须 data:image/ 前缀、单张 base64 ≤ 3MB、最多 4 张
-        // （前端已压缩到最长边 1280，此处仅防滥用）
-        const images = (data.images || [])
-          .filter(
-            (s) =>
-              typeof s === 'string' && s.startsWith('data:image/') && s.length <= 3 * 1024 * 1024
-          )
-          .slice(0, 4)
-        try {
-          messagesRepo.insertUserMessage(
-            msgId,
-            effectiveSessionId,
-            data.content,
-            mentionsJson,
-            data.taskId || null,
-            JSON.stringify(images)
-          )
-        } catch (err: any) {
-          // 审查反馈 #1：resolveHandoffTarget 返回与 INSERT 之间，子会话可能被
-          // 并发 DELETE /api/sessions/:id 删除 → FK 异常。async handler 抛异常
-          // 会成为 unhandledRejection（项目无 handler，Node v15+ 默认崩进程），
-          // 必须就地捕获——与下方 dispatch 的 try/catch 同款防护。
-          log.error('insert user message failed', {
-            sessionId: data.sessionId,
-            effectiveSessionId,
-            traceId,
-            error: err.message,
-          })
-          socket.emit(Events.ERROR, { message: '消息写入失败，请重试' })
-          return
-        }
-
-        if (handoffTarget) {
-          log.info('message redirected to handoff child session', {
-            oldSessionId: data.sessionId,
-            newSessionId: effectiveSessionId,
-          })
-          io.to(`session:${data.sessionId}`).emit(Events.SESSION_HANDOFF, handoffTarget)
-        }
-
-        const msg = {
-          id: msgId,
-          sessionId: effectiveSessionId,
-          agentId: null,
-          role: 'user' as const,
           content: data.content,
-          images: images.length > 0 ? images : undefined,
           mentions: data.mentions || [],
-          taskId: data.taskId || undefined,
-          createdAt: new Date().toISOString(),
-        }
-
-        // 3. 广播到 Session 房间（重定向时是子会话房间）
-        io.to(`session:${effectiveSessionId}`).emit(Events.NEW_MESSAGE, msg)
-
-        // 4. 触发调度（重定向时从子会话取 agents——子会话的 agent_ids
-        //    可能已被 PATCH 更新，与旧会话不再一致）
-
-        // 重定向时子会话行（兜底：子会话被删时回退旧会话行）
-        const targetRow =
-          effectiveSessionId === data.sessionId
-            ? sessionRow
-            : (sessionsRepo.getSessionById(effectiveSessionId) ?? sessionRow)
-        const agentIds: string[] = JSON.parse(targetRow.agent_ids || '[]')
-        const agents = agentIds
-          .map((id: string) => {
-            const row = agentsRepo.getAgentById(id)
-            return row ? rowToAgent(row) : null
-          })
-          .filter(Boolean) as AgentConfig[]
-
-        // P0-2 防护：过滤掉不存在于 agents 表或缺少 API key 的无效 Agent
-        const validAgents = agents.filter((a) => {
-          if (!agentsRepo.agentExists(a.id)) {
-            log.warn('agent not in DB, skipping dispatch', {
-              agentId: a.id,
-              agentName: a.name,
-              traceId,
-            })
-            return false
-          }
-          return true
+          images: data.images,
+          taskId: data.taskId,
+          saveMemory: true,
         })
-
-        // 将用户消息保存为向量记忆（异步不阻塞消息流）
-        saveMessageMemory(
-          effectiveSessionId,
-          data.content,
-          msgId,
-          validAgents.map((a) => a.id)
-        ).catch((err) => {
-          log.warn('记忆存储失败', { error: err.message, traceId })
-        })
-
-        // 初始化 Agent 槽位并存储
-        for (const a of validAgents) {
-          if (!getAgentState(a.id)) {
-            initAgentSlot(a.id)
-          }
+        if (!result.ok) {
+          socket.emit(Events.ERROR, { message: result.error })
         }
-
-        // 4. 调度 + 执行（捕获内部异常防止 SEND_MESSAGE 崩溃）
-        try {
-          await dispatch(effectiveSessionId, msg, validAgents, traceId)
-        } catch (err: any) {
-          log.error('dispatch failed', {
-            sessionId: effectiveSessionId,
-            traceId,
-            error: err.message,
-          })
-        }
-
-        // 获取需要立即执行的 Agent（被 @ 的，或广播下的所有 Agent）
-        const mentions = data.mentions || []
-        const targets =
-          mentions.length > 0
-            ? validAgents.filter((a: any) => mentions.includes(a.name))
-            : validAgents
-
-        // 发送 MESSAGE_AGENT_STATUS: queued — 让前端知道消息已被 Agent 接收
-        // （重定向时发子会话房间，与 NEW_MESSAGE 一致）
-        for (const a of targets) {
-          io.to(`session:${effectiveSessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
-            messageId: msgId,
-            agentId: a.id,
-            agentName: a.name,
-            agentAvatar: a.avatar,
-            status: 'queued',
-          })
-        }
-
-        // 按 FIFO 串行执行（不 await，让多个消息的 Agent 执行可以交错）
-        executeAgentsSerial(io, effectiveSessionId, targets as AgentConfig[], msg, traceId).catch(
-          (err) => {
-            // S2 修复：executeAgentsSerial 内部 try/catch 只覆盖 for 循环体。
-            // 若在进入循环前崩溃（session 查询、agent 名解析等），异常会成为
-            // 未处理 Promise 拒绝，且 dispatch() 已将 agent 设为 busy →
-            // 槽位永久卡死。这里做最后一道防线：释放所有仍为 busy 的槽位。
-            log.error('executeAgentsSerial crashed — releasing stuck slots', {
-              traceId,
-              error: err.message,
-            })
-            for (const a of targets) {
-              const state = getAgentState(a.id)
-              if (state && state.status === 'busy') {
-                completeExecution(a.id, false, {
-                  errorMessage: `executeAgentsSerial crash: ${err.message}`,
-                  traceId,
-                }).catch(() => {})
-              }
-            }
-          }
-        )
       }
     )
 
