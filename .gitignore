@@ -46,3 +46,5 @@ scripts/.e2e-test-trigger.txt
 
 # UI 截图脚本产物（生成物，不入库）
 scripts/shots/
+# 截图脚本路径拼接 bug 产物（cwd 已在 scripts/ 下又拼 scripts/shots/ → 实际落在 scripts/scripts/shots/）
+scripts/scripts/
