@@ -686,12 +686,6 @@ describe('socketio connector', () => {
            VALUES (?, ?, 'user', ?, '[]')`
         )
         .run('msg-trigger', 'session-1', '@店长 派活')
-      getDb()
-        .prepare(
-          `INSERT INTO messages (id, session_id, role, content, mentions)
-           VALUES (?, ?, 'user', ?, '[]')`
-        )
-        .run('msg-trigger-full', 'session-1', '@店长 派活')
 
       // 对照组：吐槽猫计数 2（未达上限）→ 正常调度
       mod.__test_resetMentionCounts()
@@ -712,6 +706,9 @@ describe('socketio connector', () => {
       )
 
       // 目标组：吐槽猫计数 3（已达上限）→ 过滤，不调度
+      // trigger id 必须为 'msg-trigger'（与 mock 的 currentTriggerMessageId 匹配），
+      // 否则 agent 在状态检查（:615）处 continue 跳过，A2A 过滤分支永不执行——
+      // dispatch 不被调用只是"agent 没干活"的必然结果，断言空洞通过
       mod.__test_resetMentionCounts()
       mod.__setMentionCount('trace-limit-full', 'agent-2', 3)
       vi.mocked(dispatch).mockClear()
@@ -719,7 +716,7 @@ describe('socketio connector', () => {
         mockIo as any,
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger-full', content: '@店长 派活', mentions: ['店长'] },
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-limit-full'
       )
       expect(dispatch).not.toHaveBeenCalled()
