@@ -48,3 +48,5 @@ scripts/.e2e-test-trigger.txt
 scripts/shots/
 # 截图脚本路径拼接 bug 产物（cwd 已在 scripts/ 下又拼 scripts/shots/ → 实际落在 scripts/scripts/shots/）
 scripts/scripts/
+# ui-screenshot 产物（落在 packages/server/data/ui-shots/，曾误提交 b43842e 已回滚；旧 shot-1785491233400.png 仍跟踪待批 untrack）
+packages/server/data/ui-shots/
