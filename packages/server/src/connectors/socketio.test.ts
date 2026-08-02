@@ -48,6 +48,16 @@ vi.mock('../handoff/index.js', () => ({
   resolveHandoffTarget: vi.fn(() => null),
 }))
 
+// 包装 insertUserMessage 为可注入失败的 spy——默认走真实实现（现有测试零影响），
+// 审查反馈 #1 的用例里 mockImplementationOnce 模拟 FK 异常
+vi.mock('../db/repository/messages.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../db/repository/messages.js')>()
+  return {
+    ...actual,
+    insertUserMessage: vi.fn(actual.insertUserMessage),
+  }
+})
+
 vi.mock('../llm/git-utils.js', () => ({
   gitCommit: vi.fn(),
   gitResetHard: vi.fn(),
@@ -557,6 +567,74 @@ describe('socketio connector', () => {
       )
       // performHandoff 未被调用——路由兜底只重定向，不重复交接
       expect(performHandoff).not.toHaveBeenCalled()
+    })
+
+    it('审查反馈#1: INSERT 失败 → emit ERROR 且不广播 NEW_MESSAGE（就地捕获，不崩进程）', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      const messagesMod = await import('../db/repository/messages.js')
+      // 模拟 FK 异常（resolveHandoffTarget 返回与 INSERT 之间子会话被并发删除）
+      vi.mocked(messagesMod.insertUserMessage).mockImplementationOnce(() => {
+        throw new Error('FOREIGN KEY constraint failed')
+      })
+      mockSocketEmit.mockClear()
+      mockRoomEmit.mockClear()
+
+      // handler 不抛异常（async 就地捕获）——抛了测试本身就会红
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '写入会失败',
+        mentions: [],
+      })
+
+      // emit ERROR 提示用户
+      expect(mockSocketEmit).toHaveBeenCalledWith(Events.ERROR, {
+        message: '消息写入失败，请重试',
+      })
+      // 消息未落库，不得广播 NEW_MESSAGE
+      const newMsgCalls = mockRoomEmit.mock.calls.filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      expect(newMsgCalls).toHaveLength(0)
+    })
+
+    it('审查反馈#1: 重定向命中但 INSERT 失败 → 不 emit SESSION_HANDOFF（先落库后通知）', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      const messagesMod = await import('../db/repository/messages.js')
+      vi.mocked(messagesMod.insertUserMessage).mockImplementationOnce(() => {
+        throw new Error('FOREIGN KEY constraint failed')
+      })
+      mockSocketEmit.mockClear()
+      mockRoomEmit.mockClear()
+
+      // fixture: 真实子会话挂在 session-1 下
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, handoff_from, running_summary)
+         VALUES (?, 'child', '[]', 'session-1', ?)`
+      ).run('child-session-2', JSON.stringify({ text: '总结2' }))
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', 'hello', '[]')`
+      ).run('m-child-2', 'child-session-2')
+
+      // 路由兜底命中：session-1 → child-session-2
+      const { resolveHandoffTarget } = await import('../handoff/index.js')
+      ;(resolveHandoffTarget as any).mockReturnValue({
+        oldSessionId: 'session-1',
+        newSessionId: 'child-session-2',
+        summary: '总结2',
+      })
+
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '写不进',
+        mentions: [],
+      })
+
+      // 写入失败 → 前端不应收到切换信号（切过去但消息丢了）
+      const roomEmitCalls = mockRoomEmit.mock.calls as Array<[string, any]>
+      expect(roomEmitCalls.find((c) => c[0] === Events.SESSION_HANDOFF)).toBeUndefined()
+      expect(mockSocketEmit).toHaveBeenCalledWith(Events.ERROR, {
+        message: '消息写入失败，请重试',
+      })
     })
   })
 

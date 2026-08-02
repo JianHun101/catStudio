@@ -244,15 +244,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         //     后续写入/广播/dispatch 全部走子会话，旧会话不再膨胀。
         const handoffTarget = resolveHandoffTarget(data.sessionId)
         const effectiveSessionId = handoffTarget?.newSessionId ?? data.sessionId
-        if (handoffTarget) {
-          log.info('message redirected to handoff child session', {
-            oldSessionId: data.sessionId,
-            newSessionId: effectiveSessionId,
-          })
-          io.to(`session:${data.sessionId}`).emit(Events.SESSION_HANDOFF, handoffTarget)
-        }
 
-        // 2. 写入消息
+        // 2. 写入消息（先落库、后通知切换——写入失败时前端不应收到切换信号）
         const mentionsJson = JSON.stringify(data.mentions || [])
         // 图片守卫：必须 data:image/ 前缀、单张 base64 ≤ 3MB、最多 4 张
         // （前端已压缩到最长边 1280，此处仅防滥用）
@@ -262,14 +255,37 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
               typeof s === 'string' && s.startsWith('data:image/') && s.length <= 3 * 1024 * 1024
           )
           .slice(0, 4)
-        messagesRepo.insertUserMessage(
-          msgId,
-          effectiveSessionId,
-          data.content,
-          mentionsJson,
-          data.taskId || null,
-          JSON.stringify(images)
-        )
+        try {
+          messagesRepo.insertUserMessage(
+            msgId,
+            effectiveSessionId,
+            data.content,
+            mentionsJson,
+            data.taskId || null,
+            JSON.stringify(images)
+          )
+        } catch (err: any) {
+          // 审查反馈 #1：resolveHandoffTarget 返回与 INSERT 之间，子会话可能被
+          // 并发 DELETE /api/sessions/:id 删除 → FK 异常。async handler 抛异常
+          // 会成为 unhandledRejection（项目无 handler，Node v15+ 默认崩进程），
+          // 必须就地捕获——与下方 dispatch 的 try/catch 同款防护。
+          log.error('insert user message failed', {
+            sessionId: data.sessionId,
+            effectiveSessionId,
+            traceId,
+            error: err.message,
+          })
+          socket.emit(Events.ERROR, { message: '消息写入失败，请重试' })
+          return
+        }
+
+        if (handoffTarget) {
+          log.info('message redirected to handoff child session', {
+            oldSessionId: data.sessionId,
+            newSessionId: effectiveSessionId,
+          })
+          io.to(`session:${data.sessionId}`).emit(Events.SESSION_HANDOFF, handoffTarget)
+        }
 
         const msg = {
           id: msgId,
