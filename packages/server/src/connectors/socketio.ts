@@ -51,6 +51,7 @@ import { SkillLoader } from '../skills/skill-loader.js'
 import { updateRunningSummary } from '../summarizer/index.js'
 import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
 import { ingestUserMessage } from './ingest.js'
+import { emitAgentReply } from './replyBus.js'
 
 const log = createLogger('socketio')
 
@@ -1624,6 +1625,15 @@ async function runAgentReply(
   }
 
   io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, finalMsg)
+
+  // P3: 回复经 replyBus 转发到外部平台（OneBot 出站订阅后发回 QQ 绑定群/私聊）
+  emitAgentReply({
+    id: msgId,
+    sessionId,
+    agentId: agent.id,
+    agentName: agent.name,
+    content: fullContent,
+  })
 
   // 状态：完成
   io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {

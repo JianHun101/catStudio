@@ -72,6 +72,19 @@ describe('connectorBindings repo', () => {
     expect(bindingsRepo.getConnectorBinding('qq', 'group', '1')).toBeUndefined()
   })
 
+  it('AC3: listBindingsBySession returns all bindings of a session', () => {
+    bindingsRepo.upsertConnectorBinding('qq', 'group', '1', 's1')
+    bindingsRepo.upsertConnectorBinding('qq', 'private', '2', 's1')
+    bindingsRepo.upsertConnectorBinding('qq', 'group', '3', 's2')
+    const rows = bindingsRepo.listBindingsBySession('s1')
+    expect(rows).toHaveLength(2)
+    expect(rows.every((b) => b.session_id === 's1')).toBe(true)
+  })
+
+  it('AC3-2: listBindingsBySession returns empty for session without bindings', () => {
+    expect(bindingsRepo.listBindingsBySession('nope')).toEqual([])
+  })
+
   it('DB unique constraint rejects raw duplicate insert', () => {
     bindingsRepo.upsertConnectorBinding('qq', 'group', '1', 's1')
     expect(() =>

@@ -76,6 +76,7 @@ describe('Connector Routes', () => {
     await app.close()
     resetDb()
     delete process.env.ONEBOT_ENABLED
+    delete process.env.ONEBOT_TOKEN
   })
 
   describe('绑定管理 CRUD', () => {
@@ -302,6 +303,57 @@ describe('Connector Routes', () => {
         url: '/api/connectors/onebot/webhook',
       })
       expect(res.statusCode).toBe(400)
+    })
+  })
+
+  describe('webhook token 鉴权（P3 AC4）', () => {
+    it('未设置 ONEBOT_TOKEN → 不校验，照常 200', async () => {
+      insertBoundFixture()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(1)
+    })
+
+    it('设置 ONEBOT_TOKEN 后无 Authorization header → 401，不落库', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_TOKEN = 'secret'
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+      })
+      expect(res.statusCode).toBe(401)
+      expect(countMessages()).toBe(0)
+    })
+
+    it('错 token → 401，不落库', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_TOKEN = 'secret'
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+        headers: { authorization: 'Bearer wrong' },
+      })
+      expect(res.statusCode).toBe(401)
+      expect(countMessages()).toBe(0)
+    })
+
+    it('正确 Bearer token → 200，正常摄入', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_TOKEN = 'secret'
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+        headers: { authorization: 'Bearer secret' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(1)
     })
   })
 })

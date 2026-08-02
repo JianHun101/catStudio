@@ -76,3 +76,10 @@ export function listConnectorBindings(platform?: string): ConnectorBindingRow[] 
     .prepare('SELECT * FROM connector_bindings ORDER BY created_at DESC')
     .all() as ConnectorBindingRow[]
 }
+
+/** 一个会话的所有绑定（P3 出站转发用：agent 回复投递到会话绑定的每个群/私聊） */
+export function listBindingsBySession(sessionId: string): ConnectorBindingRow[] {
+  return db
+    .prepare('SELECT * FROM connector_bindings WHERE session_id = ? ORDER BY created_at DESC')
+    .all(sessionId) as ConnectorBindingRow[]
+}

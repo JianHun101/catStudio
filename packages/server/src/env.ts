@@ -103,6 +103,10 @@ process.env.ONEBOT_ENABLED ??= 'false'
 // ONEBOT_API_BASE — NapCat HTTP API 服务地址（P3 出站回复用，P2 仅入站不消费）
 process.env.ONEBOT_API_BASE ??= 'http://127.0.0.1:3000'
 
+// ONEBOT_TOKEN — webhook 鉴权 token（设置后 NapCat 上报须带 Authorization: Bearer <token>；
+// 留空不校验——默认内网部署，向后兼容）
+process.env.ONEBOT_TOKEN ??= ''
+
 // ─── 会话交接配置 ──────────────────────────────
 // HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
 process.env.HANDOFF_ENABLED ??= 'true'

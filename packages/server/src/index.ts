@@ -15,6 +15,7 @@ import {
 } from './db/repository/index.js'
 import { connectRedis, closeRedis } from './db/redis.js'
 import { createSocketIO } from './connectors/socketio.js'
+import { startOneBotOutbound } from './connectors/onebotOutbound.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
 import { skillRoutes } from './routes/skills.js'
@@ -146,6 +147,9 @@ async function main(): Promise<void> {
   // 5. 启动 Fastify → 拿到 HTTP Server → attach Socket.IO
   await app.listen({ port: PORT, host: HOST })
   const io = createSocketIO(app.server)
+
+  // P3: OneBot 出站转发（QQ 回复）——ONEBOT_ENABLED=false 时内部不订阅，零开销
+  startOneBotOutbound()
 
   log.info('server started', { host: HOST, port: PORT })
 

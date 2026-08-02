@@ -24,6 +24,11 @@ function onebotEnabled(): boolean {
   return process.env.ONEBOT_ENABLED !== 'false'
 }
 
+/** webhook 鉴权 token——设置后要求 Authorization: Bearer <token>；留空不校验（向后兼容） */
+function onebotToken(): string {
+  return process.env.ONEBOT_TOKEN || ''
+}
+
 export async function connectorRoutes(app: FastifyInstance): Promise<void> {
   // ─── 绑定管理 ──────────────────────────────────
 
@@ -93,6 +98,14 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/connectors/onebot/webhook', async (req, reply) => {
     if (!onebotEnabled()) {
       return reply.status(503).send({ error: 'OneBot connector is disabled' })
+    }
+    // P3 审查观察点 #3：webhook 暴露公网可被伪造注入——设置 ONEBOT_TOKEN 后要求 Bearer 鉴权
+    const token = onebotToken()
+    if (token) {
+      const auth = req.headers.authorization
+      if (typeof auth !== 'string' || auth !== `Bearer ${token}`) {
+        return reply.status(401).send({ error: 'Unauthorized' })
+      }
     }
     const event = req.body as OneBotMessageEvent | undefined
     if (!event || typeof event !== 'object') {
