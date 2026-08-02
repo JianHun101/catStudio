@@ -44,6 +44,8 @@ vi.mock('../handoff/index.js', () => ({
   performHandoff: vi.fn().mockResolvedValue(undefined),
   shouldHandoff: vi.fn(() => false),
   injectSummaryIntoSystem: vi.fn((msgs) => msgs),
+  // 默认不重定向；AC3 测试里 mockReturnValue 命中子会话
+  resolveHandoffTarget: vi.fn(() => null),
 }))
 
 vi.mock('../llm/git-utils.js', () => ({
@@ -484,6 +486,77 @@ describe('socketio connector', () => {
         .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1')
         .get('session-1') as any
       expect(JSON.parse(row.images)).toEqual(['data:image/png;base64,OK'])
+    })
+
+    it('AC3: 发往已交接旧会话 → 消息落子会话，广播子房间 + 旧房间 SESSION_HANDOFF + dispatch 子会话', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      mockRoomEmit.mockClear()
+      ;(mockIo.to as any).mockClear()
+
+      // fixture: 真实子会话 child-session（1 条消息）挂在 session-1 下
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, handoff_from, running_summary)
+         VALUES (?, 'child', '[]', 'session-1', ?)`
+      ).run('child-session', JSON.stringify({ text: '总结' }))
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', 'hello', '[]')`
+      ).run('m-child-1', 'child-session')
+
+      // 路由兜底命中：session-1 → child-session
+      const { resolveHandoffTarget, performHandoff } = await import('../handoff/index.js')
+      ;(resolveHandoffTarget as any).mockReturnValue({
+        oldSessionId: 'session-1',
+        newSessionId: 'child-session',
+        summary: '总结',
+      })
+
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '还在吗 @店长',
+        mentions: ['店长'],
+      })
+
+      // 消息落子会话，旧会话无新消息
+      const row = db
+        .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get('child-session') as any
+      expect(row).toBeDefined()
+      expect(row.content).toBe('还在吗 @店长')
+      const oldCnt = db
+        .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?')
+        .get('session-1') as any
+      expect(oldCnt.cnt).toBe(0)
+
+      // NEW_MESSAGE 广播到子会话房间
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ sessionId: 'child-session', role: 'user' })
+      )
+
+      // SESSION_HANDOFF 发旧房间（session:session-1），payload 完整
+      const roomEmitCalls = mockRoomEmit.mock.calls as Array<[string, any]>
+      const handoffIdx = roomEmitCalls.findIndex((c) => c[0] === Events.SESSION_HANDOFF)
+      expect(handoffIdx).toBeGreaterThanOrEqual(0)
+      const toCalls = (mockIo.to as any).mock.calls.map((c: any[]) => c[0])
+      expect(toCalls[handoffIdx]).toBe('session:session-1')
+      expect(roomEmitCalls[handoffIdx][1]).toEqual({
+        oldSessionId: 'session-1',
+        newSessionId: 'child-session',
+        summary: '总结',
+      })
+
+      // dispatch 用子会话（agents 从子会话取，子会话 agent_ids='[]' → 不触发执行）
+      const { dispatch } = await import('../dispatch/index.js')
+      expect(dispatch).toHaveBeenCalledWith(
+        'child-session',
+        expect.objectContaining({ sessionId: 'child-session' }),
+        expect.any(Array),
+        expect.any(String)
+      )
+      // performHandoff 未被调用——路由兜底只重定向，不重复交接
+      expect(performHandoff).not.toHaveBeenCalled()
     })
   })
 

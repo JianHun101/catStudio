@@ -68,6 +68,57 @@ export interface HandoffResult {
   summary: string
 }
 
+/** 服务端路由兜底的交接目标（与 HandoffResult 同构，供 SESSION_HANDOFF 复用） */
+export type HandoffTarget = HandoffResult
+
+/** 沿 handoff_from 链追真实子会话的最大深度（防循环/无限链） */
+const HANDOFF_CHAIN_LIMIT = 5
+
+/** 解析 running_summary JSON 提取 text 字段；无/解析失败返回 null */
+function parseSummaryText(runningSummary: string | null): string | null {
+  if (!runningSummary) return null
+  try {
+    const parsed = JSON.parse(runningSummary)
+    return typeof parsed?.text === 'string' ? parsed.text : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 解析消息应落地的会话（方案 A 路由兜底）：沿 handoff_from 链追
+ * 最新"真实交接"子会话（有 ≥1 条消息），空壳子会话不算交接、直接跳过。
+ *
+ * 用户向已交接的旧会话发消息时，调用方把消息重定向到返回的 newSessionId，
+ * 并向旧房间 emit SESSION_HANDOFF（复用前端现有切换机制）。
+ *
+ * @returns 命中返回 { oldSessionId（入参会话）, newSessionId, summary }；
+ *          无真实子会话或链超深返回 null（消息留在原会话）
+ */
+export function resolveHandoffTarget(sessionId: string): HandoffTarget | null {
+  let current = sessionId
+  let depth = 0
+  while (depth < HANDOFF_CHAIN_LIMIT) {
+    const child = sessionsRepo.getHandoffChild(current)
+    if (!child) return null
+    const childRow = sessionsRepo.getSessionById(child.id)
+    if (!childRow) return null
+    // 子会话自己也交接了 → 继续追链，用户应去最新子会话
+    if (sessionsRepo.getHandoffChild(child.id)) {
+      current = child.id
+      depth++
+      continue
+    }
+    return {
+      oldSessionId: sessionId,
+      newSessionId: child.id,
+      summary: parseSummaryText(childRow.running_summary) ?? '',
+    }
+  }
+  log.warn('handoff chain too deep, giving up', { sessionId, depth: HANDOFF_CHAIN_LIMIT })
+  return null
+}
+
 /**
  * 执行会话交接。
  *
@@ -96,7 +147,14 @@ export async function performHandoff(
     const oldSession = sessionsRepo.getSessionById(sessionId)
     if (!oldSession) return null
 
-    // 2. 检查是否已被交接：通过 handoff_from 列查是否有会话从此会话分叉
+    // 2. 清理历史空壳子会话（前端切换失败留下的孤儿，0 条消息）——
+    //    不删它们会占住去重守卫，旧会话永不二次交接。删完再查真实交接。
+    const removed = sessionsRepo.deleteEmptyHandoffChildren(sessionId)
+    if (removed > 0) {
+      log.info('removed empty handoff children before re-handoff', { sessionId, removed })
+    }
+
+    // 3. 检查是否已被真实交接（子会话有 ≥1 条消息才算）
     const existingHandoff = sessionsRepo.getHandoffChild(sessionId)
     if (existingHandoff) {
       log.debug('session already handed off', { sessionId, handoffTo: existingHandoff.id })
@@ -187,16 +245,8 @@ export function injectSummaryIntoSystem(
   systemPrompt: string,
   runningSummary: string | null
 ): string {
-  if (!runningSummary) return systemPrompt
+  const summary = parseSummaryText(runningSummary)
+  if (!summary) return systemPrompt
 
-  let summary: { text: string } | null = null
-  try {
-    summary = JSON.parse(runningSummary)
-  } catch {
-    return systemPrompt
-  }
-
-  if (!summary?.text) return systemPrompt
-
-  return `${systemPrompt}\n\n【对话历史摘要】\n${summary.text}\n\n请基于以上摘要理解对话上下文，继续与用户交流。`
+  return `${systemPrompt}\n\n【对话历史摘要】\n${summary}\n\n请基于以上摘要理解对话上下文，继续与用户交流。`
 }

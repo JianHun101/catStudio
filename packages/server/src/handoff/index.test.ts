@@ -1,5 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { shouldHandoff, injectSummaryIntoSystem } from './index.js'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import Database from 'better-sqlite3'
+import { Events } from '@cat-study/shared'
+import {
+  shouldHandoff,
+  injectSummaryIntoSystem,
+  performHandoff,
+  resolveHandoffTarget,
+} from './index.js'
+import { createTestDb } from '../test-helpers.js'
+import { setDb, resetDb } from '../db/index.js'
+import { initRepository } from '../db/repository/index.js'
+
+// performHandoff 的 generateFullSummary 调 chatComplete → mock 掉，避免真实 LLM 调用
+vi.mock('../llm/complete.js', () => ({
+  chatComplete: vi.fn().mockResolvedValue('测试总结内容'),
+}))
 
 describe('handoff', () => {
   describe('shouldHandoff', () => {
@@ -98,6 +113,189 @@ describe('handoff', () => {
       const prompt = 'You are a cat'
       const summary = JSON.stringify({ other: 'data' })
       expect(injectSummaryIntoSystem(prompt, summary)).toBe(prompt)
+    })
+  })
+
+  // ─── resolveHandoffTarget — 服务端路由兜底（方案 A） ──────────
+  describe('resolveHandoffTarget — 路由兜底', () => {
+    let db: Database.Database
+
+    const insertSession = (
+      id: string,
+      opts: { handoffFrom?: string; runningSummary?: string | null } = {}
+    ) => {
+      db.prepare(
+        `INSERT INTO sessions (id, title, handoff_from, running_summary)
+         VALUES (?, 'test', ?, ?)`
+      ).run(id, opts.handoffFrom ?? null, opts.runningSummary ?? null)
+    }
+
+    const insertMessage = (id: string, sessionId: string) => {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', 'hello', '[]')`
+      ).run(id, sessionId)
+    }
+
+    beforeEach(() => {
+      db = createTestDb()
+      setDb(db)
+      initRepository(db)
+    })
+
+    afterEach(() => {
+      resetDb()
+    })
+
+    it('无子会话 → null（消息留在原会话）', () => {
+      insertSession('p1')
+      expect(resolveHandoffTarget('p1')).toBeNull()
+    })
+
+    it('只有空壳子会话（0 条消息）→ null（空壳不算交接）', () => {
+      insertSession('p2')
+      insertSession('c-shell', { handoffFrom: 'p2' })
+      expect(resolveHandoffTarget('p2')).toBeNull()
+    })
+
+    it('真实子会话 → 返回 { oldSessionId, newSessionId, summary }', () => {
+      insertSession('p3')
+      insertSession('c-real', {
+        handoffFrom: 'p3',
+        runningSummary: JSON.stringify({ text: '总结A' }),
+      })
+      insertMessage('m1', 'c-real')
+      expect(resolveHandoffTarget('p3')).toEqual({
+        oldSessionId: 'p3',
+        newSessionId: 'c-real',
+        summary: '总结A',
+      })
+    })
+
+    it('链式交接（p→c1→c2）→ 追到最新真实子会话 c2', () => {
+      insertSession('p4')
+      insertSession('c1', { handoffFrom: 'p4', runningSummary: JSON.stringify({ text: '总结1' }) })
+      insertMessage('m2', 'c1')
+      insertSession('c2', { handoffFrom: 'c1', runningSummary: JSON.stringify({ text: '总结2' }) })
+      insertMessage('m3', 'c2')
+      expect(resolveHandoffTarget('p4')).toEqual({
+        oldSessionId: 'p4',
+        newSessionId: 'c2',
+        summary: '总结2',
+      })
+    })
+
+    it('链中夹空壳子会话 → 空壳不算交接，停在上一真实子会话', () => {
+      insertSession('p5')
+      insertSession('c1', { handoffFrom: 'p5', runningSummary: JSON.stringify({ text: '总结1' }) })
+      insertMessage('m4', 'c1')
+      insertSession('c-shell', { handoffFrom: 'c1' }) // 0 条消息空壳
+      expect(resolveHandoffTarget('p5')).toEqual({
+        oldSessionId: 'p5',
+        newSessionId: 'c1',
+        summary: '总结1',
+      })
+    })
+
+    it('链深超过上限（6 层）→ null，防无限追链', () => {
+      insertSession('p6')
+      let prev = 'p6'
+      for (let i = 1; i <= 6; i++) {
+        const id = `c-chain-${i}`
+        insertSession(id, {
+          handoffFrom: prev,
+          runningSummary: JSON.stringify({ text: `总结${i}` }),
+        })
+        insertMessage(`m-chain-${i}`, id)
+        prev = id
+      }
+      expect(resolveHandoffTarget('p6')).toBeNull()
+    })
+
+    it('running_summary 非法 JSON → summary 为空串，仍返回子会话', () => {
+      insertSession('p7')
+      insertSession('c7', { handoffFrom: 'p7', runningSummary: 'not-json' })
+      insertMessage('m7', 'c7')
+      expect(resolveHandoffTarget('p7')).toEqual({
+        oldSessionId: 'p7',
+        newSessionId: 'c7',
+        summary: '',
+      })
+    })
+  })
+
+  // ─── performHandoff — 空壳清理 + 去重守卫（方案 C） ──────────
+  describe('performHandoff — 去重守卫修复', () => {
+    let db: Database.Database
+    const mockIo = { emit: vi.fn() } as any
+
+    const insertSession = (
+      id: string,
+      opts: { handoffFrom?: string; runningSummary?: string | null } = {}
+    ) => {
+      db.prepare(
+        `INSERT INTO sessions (id, title, handoff_from, running_summary)
+         VALUES (?, 'test', ?, ?)`
+      ).run(id, opts.handoffFrom ?? null, opts.runningSummary ?? null)
+    }
+
+    const insertMessage = (id: string, sessionId: string) => {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', 'hello', '[]')`
+      ).run(id, sessionId)
+    }
+
+    beforeEach(() => {
+      db = createTestDb()
+      setDb(db)
+      initRepository(db)
+      process.env.SUMMARY_API_KEY = 'test-key'
+      process.env.HANDOFF_ENABLED = 'true'
+    })
+
+    afterEach(() => {
+      resetDb()
+      delete process.env.SUMMARY_API_KEY
+      vi.clearAllMocks()
+    })
+
+    it('AC1: 只有空壳子会话 → 再次交接成功，空壳先删，sessions 只剩 1 个子会话', async () => {
+      insertSession('parent-a')
+      insertSession('child-shell', { handoffFrom: 'parent-a' }) // 0 条消息空壳
+
+      const result = await performHandoff('parent-a', mockIo)
+
+      expect(result).not.toBeNull()
+      expect(result!.oldSessionId).toBe('parent-a')
+      // 空壳被删 + 新子会话创建 → 只剩 1 个
+      const children = db
+        .prepare('SELECT id FROM sessions WHERE handoff_from = ?')
+        .all('parent-a') as Array<{ id: string }>
+      expect(children).toHaveLength(1)
+      expect(children[0].id).toBe(result!.newSessionId)
+      // 前端收到切换通知
+      expect(mockIo.emit).toHaveBeenCalledWith(Events.SESSION_HANDOFF, {
+        oldSessionId: 'parent-a',
+        newSessionId: result!.newSessionId,
+        summary: '测试总结内容',
+      })
+    })
+
+    it('AC2: 已有真实子会话（≥1 条消息）→ 去重保护，返回 null，不新建', async () => {
+      insertSession('parent-b')
+      insertSession('child-real', { handoffFrom: 'parent-b' })
+      insertMessage('m-1', 'child-real')
+
+      const result = await performHandoff('parent-b', mockIo)
+
+      expect(result).toBeNull()
+      const children = db
+        .prepare('SELECT id FROM sessions WHERE handoff_from = ?')
+        .all('parent-b') as Array<{ id: string }>
+      expect(children).toHaveLength(1)
+      expect(children[0].id).toBe('child-real')
+      expect(mockIo.emit).not.toHaveBeenCalled()
     })
   })
 })

@@ -16,6 +16,7 @@ import {
 import type { AgentConfig } from '@cat-study/shared'
 import { getIO, rowToAgent, executeAgentsSerial } from '../connectors/socketio.js'
 import { dispatch, initAgentSlot, getAgentState, completeExecution } from '../dispatch/index.js'
+import { resolveHandoffTarget } from '../handoff/index.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('messages-api')
@@ -102,11 +103,21 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: 'Session not found' })
     }
 
+    // 1.5 已交接会话路由兜底（方案 A）：消息重定向到最新真实子会话
+    const handoffTarget = resolveHandoffTarget(sessionId)
+    const effectiveSessionId = handoffTarget?.newSessionId ?? sessionId
+    if (handoffTarget) {
+      log.info('REST message redirected to handoff child session', {
+        oldSessionId: sessionId,
+        newSessionId: effectiveSessionId,
+      })
+    }
+
     // 2. 写入消息
     const mentionsJson = JSON.stringify(mentions)
     messagesRepo.insertUserMessage(
       msgId,
-      sessionId,
+      effectiveSessionId,
       content,
       mentionsJson,
       taskId || null,
@@ -115,7 +126,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
 
     const msg = {
       id: msgId,
-      sessionId,
+      sessionId: effectiveSessionId,
       agentId: null,
       role: 'user' as const,
       content,
@@ -125,14 +136,22 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       createdAt: new Date().toISOString(),
     }
 
-    // 3. 广播到 Session 房间
+    // 3. 广播到 Session 房间（重定向时是子会话房间，并向旧房间发 SESSION_HANDOFF）
     const io = getIO()
     if (io) {
-      io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, msg)
+      io.to(`session:${effectiveSessionId}`).emit(Events.NEW_MESSAGE, msg)
+      if (handoffTarget) {
+        io.to(`session:${sessionId}`).emit(Events.SESSION_HANDOFF, handoffTarget)
+      }
     }
 
-    // 4. 获取 Session 内的 Agent
-    const agentIds: string[] = JSON.parse(sessionRow.agent_ids || '[]')
+    // 4. 获取 Session 内的 Agent（重定向时从子会话取——agent_ids 可能已被
+    //    PATCH 更新；子会话被删时兜底回退旧会话行）
+    const targetRow =
+      effectiveSessionId === sessionId
+        ? sessionRow
+        : (sessionsRepo.getSessionById(effectiveSessionId) ?? sessionRow)
+    const agentIds: string[] = JSON.parse(targetRow.agent_ids || '[]')
     const agents = agentIds
       .map((id: string) => {
         const row = agentsRepo.getAgentById(id)
@@ -157,19 +176,19 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      await dispatch(sessionId, msg, validAgents, traceId)
+      await dispatch(effectiveSessionId, msg, validAgents, traceId)
     } catch (err: any) {
-      log.error('dispatch failed', { sessionId, traceId, error: err.message })
+      log.error('dispatch failed', { sessionId: effectiveSessionId, traceId, error: err.message })
     }
 
     // 确定目标（被 @ 的 Agent，或广播模式下的全部）
     const targets =
       mentions.length > 0 ? validAgents.filter((a) => mentions.includes(a.name)) : validAgents
 
-    // 发送 queued 状态
+    // 发送 queued 状态（重定向时发子会话房间，与 NEW_MESSAGE 一致）
     if (io) {
       for (const a of targets) {
-        io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+        io.to(`session:${effectiveSessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
           messageId: msgId,
           agentId: a.id,
           agentName: a.name,
@@ -181,7 +200,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
 
     // 6. 串行执行 Agent（不 await，让多个消息交错执行）
     if (io && targets.length > 0) {
-      executeAgentsSerial(io, sessionId, targets, msg, traceId).catch((err) => {
+      executeAgentsSerial(io, effectiveSessionId, targets, msg, traceId).catch((err) => {
         log.error('executeAgentsSerial crashed — releasing stuck slots', {
           traceId,
           error: err.message,
@@ -198,6 +217,11 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       })
     }
 
-    return reply.status(201).send({ ok: true, messageId: msgId })
+    return reply.status(201).send({
+      ok: true,
+      messageId: msgId,
+      // 已交接会话 → 消息被重定向到子会话，调用方据此感知落点
+      ...(handoffTarget ? { redirectedTo: effectiveSessionId } : {}),
+    })
   })
 }

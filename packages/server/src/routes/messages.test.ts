@@ -204,4 +204,72 @@ describe('Message Routes', () => {
       expect(stored).not.toContain('data:image/png;base64,5')
     })
   })
+
+  describe('POST /api/messages（已交接会话路由兜底，方案 A）', () => {
+    const insertSession = (
+      id: string,
+      opts: { handoffFrom?: string; runningSummary?: string | null } = {}
+    ) => {
+      getDb()
+        .prepare(
+          `INSERT INTO sessions (id, title, agent_ids, handoff_from, running_summary, created_at, updated_at)
+           VALUES (?, 'test', '[]', ?, ?, datetime('now'), datetime('now'))`
+        )
+        .run(id, opts.handoffFrom ?? null, opts.runningSummary ?? null)
+    }
+
+    const insertMessage = (id: string, sessionId: string) => {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', 'hello', '[]')`
+        )
+        .run(id, sessionId)
+    }
+
+    const postMessage = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: '/api/messages', payload })
+
+    it('AC4: 发往已交接旧会话 → 消息落子会话，响应带 redirectedTo', async () => {
+      insertSession('old-session')
+      insertSession('child-session', {
+        handoffFrom: 'old-session',
+        runningSummary: JSON.stringify({ text: '总结' }),
+      })
+      insertMessage('m-1', 'child-session')
+
+      const res = await postMessage({ sessionId: 'old-session', content: '还在吗', mentions: [] })
+
+      expect(res.statusCode).toBe(201)
+      const body = JSON.parse(res.body)
+      expect(body.redirectedTo).toBe('child-session')
+      // 消息落子会话（1 条 fixture + 1 条新消息）；旧会话无新消息
+      const childCount = getDb()
+        .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?')
+        .get('child-session') as any
+      expect(childCount.cnt).toBe(2)
+      const oldCount = getDb()
+        .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?')
+        .get('old-session') as any
+      expect(oldCount.cnt).toBe(0)
+    })
+
+    it('AC5: 未交接会话 → 消息留在原会话，响应无 redirectedTo', async () => {
+      insertSession('normal-session')
+
+      const res = await postMessage({
+        sessionId: 'normal-session',
+        content: '普通消息',
+        mentions: [],
+      })
+
+      expect(res.statusCode).toBe(201)
+      const body = JSON.parse(res.body)
+      expect(body.redirectedTo).toBeUndefined()
+      const count = getDb()
+        .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?')
+        .get('normal-session') as any
+      expect(count.cnt).toBe(1)
+    })
+  })
 })

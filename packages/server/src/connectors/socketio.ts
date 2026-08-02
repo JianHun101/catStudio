@@ -49,7 +49,12 @@ import { parseMentionsFromReply } from './a2a-mentions.js'
 import { parseJsonArray } from '../utils.js'
 import { SkillLoader } from '../skills/skill-loader.js'
 import { updateRunningSummary } from '../summarizer/index.js'
-import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
+import {
+  performHandoff,
+  shouldHandoff,
+  injectSummaryIntoSystem,
+  resolveHandoffTarget,
+} from '../handoff/index.js'
 
 const log = createLogger('socketio')
 
@@ -234,6 +239,19 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           return
         }
 
+        // 1.5 已交接会话路由兜底（方案 A）：消息重定向到最新真实子会话。
+        //     命中时通知旧房间前端切换（复用现有 SESSION_HANDOFF 机制），
+        //     后续写入/广播/dispatch 全部走子会话，旧会话不再膨胀。
+        const handoffTarget = resolveHandoffTarget(data.sessionId)
+        const effectiveSessionId = handoffTarget?.newSessionId ?? data.sessionId
+        if (handoffTarget) {
+          log.info('message redirected to handoff child session', {
+            oldSessionId: data.sessionId,
+            newSessionId: effectiveSessionId,
+          })
+          io.to(`session:${data.sessionId}`).emit(Events.SESSION_HANDOFF, handoffTarget)
+        }
+
         // 2. 写入消息
         const mentionsJson = JSON.stringify(data.mentions || [])
         // 图片守卫：必须 data:image/ 前缀、单张 base64 ≤ 3MB、最多 4 张
@@ -246,7 +264,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           .slice(0, 4)
         messagesRepo.insertUserMessage(
           msgId,
-          data.sessionId,
+          effectiveSessionId,
           data.content,
           mentionsJson,
           data.taskId || null,
@@ -255,7 +273,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
         const msg = {
           id: msgId,
-          sessionId: data.sessionId,
+          sessionId: effectiveSessionId,
           agentId: null,
           role: 'user' as const,
           content: data.content,
@@ -265,12 +283,18 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           createdAt: new Date().toISOString(),
         }
 
-        // 3. 广播到 Session 房间
-        io.to(`session:${data.sessionId}`).emit(Events.NEW_MESSAGE, msg)
+        // 3. 广播到 Session 房间（重定向时是子会话房间）
+        io.to(`session:${effectiveSessionId}`).emit(Events.NEW_MESSAGE, msg)
 
-        // 4. 触发调度
+        // 4. 触发调度（重定向时从子会话取 agents——子会话的 agent_ids
+        //    可能已被 PATCH 更新，与旧会话不再一致）
 
-        const agentIds: string[] = JSON.parse(sessionRow.agent_ids || '[]')
+        // 重定向时子会话行（兜底：子会话被删时回退旧会话行）
+        const targetRow =
+          effectiveSessionId === data.sessionId
+            ? sessionRow
+            : (sessionsRepo.getSessionById(effectiveSessionId) ?? sessionRow)
+        const agentIds: string[] = JSON.parse(targetRow.agent_ids || '[]')
         const agents = agentIds
           .map((id: string) => {
             const row = agentsRepo.getAgentById(id)
@@ -293,7 +317,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
         // 将用户消息保存为向量记忆（异步不阻塞消息流）
         saveMessageMemory(
-          data.sessionId,
+          effectiveSessionId,
           data.content,
           msgId,
           validAgents.map((a) => a.id)
@@ -310,9 +334,13 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
         // 4. 调度 + 执行（捕获内部异常防止 SEND_MESSAGE 崩溃）
         try {
-          await dispatch(data.sessionId, msg, validAgents, traceId)
+          await dispatch(effectiveSessionId, msg, validAgents, traceId)
         } catch (err: any) {
-          log.error('dispatch failed', { sessionId: data.sessionId, traceId, error: err.message })
+          log.error('dispatch failed', {
+            sessionId: effectiveSessionId,
+            traceId,
+            error: err.message,
+          })
         }
 
         // 获取需要立即执行的 Agent（被 @ 的，或广播下的所有 Agent）
@@ -323,8 +351,9 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
             : validAgents
 
         // 发送 MESSAGE_AGENT_STATUS: queued — 让前端知道消息已被 Agent 接收
+        // （重定向时发子会话房间，与 NEW_MESSAGE 一致）
         for (const a of targets) {
-          io.to(`session:${data.sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+          io.to(`session:${effectiveSessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
             messageId: msgId,
             agentId: a.id,
             agentName: a.name,
@@ -334,7 +363,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         }
 
         // 按 FIFO 串行执行（不 await，让多个消息的 Agent 执行可以交错）
-        executeAgentsSerial(io, data.sessionId, targets as AgentConfig[], msg, traceId).catch(
+        executeAgentsSerial(io, effectiveSessionId, targets as AgentConfig[], msg, traceId).catch(
           (err) => {
             // S2 修复：executeAgentsSerial 内部 try/catch 只覆盖 for 循环体。
             // 若在进入循环前崩溃（session 查询、agent 名解析等），异常会成为
