@@ -13,9 +13,10 @@ const adapters = new Map<string, LLMAdapter>()
  * 按 apiKey 缓存，同一 key 复用同一适配器。
  */
 export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
+  // claude 的 key 含 baseUrl——同一 key 下 DeepSeek 端点与 Kimi 端点必须不同实例，否则缓存串台
   const cacheKey =
     agent.llmProvider === 'claude'
-      ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}`
+      ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}:${agent.llmBaseUrl || ''}`
       : `${agent.llmProvider}:${agent.llmApiKey}`
 
   if (adapters.has(cacheKey)) {
@@ -36,6 +37,7 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       adapter = new ClaudeAdapter({
         apiKey: agent.llmApiKey,
         model: agent.llmModel,
+        baseUrl: agent.llmBaseUrl,
         effortLevel: agent.effortLevel,
       })
       break

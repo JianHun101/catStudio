@@ -51,7 +51,7 @@ const providerOptions = [
 const providerHint = computed(() => {
   switch (llmProvider.value) {
     case 'claude':
-      return '需要安装 Claude Code CLI: npm i -g @anthropic-ai/claude-code'
+      return '需要安装 Claude Code CLI: npm i -g @anthropic-ai/claude-code。Base URL 留空 = DeepSeek，填 https://api.moonshot.ai/anthropic = Kimi K3'
     case 'openai':
       return '需要安装 Codex CLI (npm i -g @openai/codex) 和 codex-proxy'
     case 'pi':
@@ -211,13 +211,17 @@ async function handleDelete(): Promise<void> {
           <input v-model="llmApiKey" type="password" class="input input-mono" placeholder="sk-…" />
         </div>
 
-        <div v-if="llmProvider === 'custom'" class="form-group">
+        <div v-if="llmProvider === 'custom' || llmProvider === 'claude'" class="form-group">
           <label>Base URL</label>
           <input
             v-model="llmBaseUrl"
             type="text"
             class="input input-mono"
-            placeholder="https://api.example.com"
+            :placeholder="
+              llmProvider === 'claude'
+                ? '留空 = DeepSeek；https://api.moonshot.ai/anthropic = Kimi K3'
+                : 'https://api.example.com'
+            "
           />
         </div>
 

@@ -77,4 +77,44 @@ describe('ClaudeAdapter', () => {
     expect(env.CLAUDE_CODE_EFFORT_LEVEL).toBe('high')
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1')
   })
+
+  it('buildEnv keeps DeepSeek tier fallbacks when no baseUrl (regression)', () => {
+    const adapter = new ClaudeAdapter({
+      apiKey: 'sk-test-key',
+      model: 'claude-sonnet-4-6',
+      effortLevel: 'high',
+    })
+
+    const env = (adapter as any).buildEnv() as Record<string, string>
+
+    // DeepSeek 路径逐键保持现状：HAIKU/SUBAGENT 兜底 flash，无 FABLE 覆盖，无 ENABLE_TOOL_SEARCH
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-v4-flash')
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('deepseek-v4-flash')
+    expect(env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBeUndefined()
+    expect(env.ENABLE_TOOL_SEARCH).toBeUndefined()
+  })
+
+  it('buildEnv targets custom endpoint with model tier fallbacks (Kimi K3)', () => {
+    const adapter = new ClaudeAdapter({
+      apiKey: 'sk-kimi-key',
+      model: 'kimi-k3[1m]',
+      baseUrl: 'https://api.moonshot.ai/anthropic',
+      effortLevel: 'max',
+    })
+
+    const env = (adapter as any).buildEnv() as Record<string, string>
+
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://api.moonshot.ai/anthropic')
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-kimi-key')
+    expect(env.ANTHROPIC_MODEL).toBe('kimi-k3[1m]')
+    // 非 DeepSeek 端点：HAIKU/SUBAGENT/FABLE 全量兜底主模型
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('kimi-k3[1m]')
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('kimi-k3[1m]')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('kimi-k3[1m]')
+    expect(env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe('kimi-k3[1m]')
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('kimi-k3[1m]')
+    // Kimi 端点不支持 Tool Search
+    expect(env.ENABLE_TOOL_SEARCH).toBe('false')
+    expect(env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max')
+  })
 })

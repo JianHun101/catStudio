@@ -40,11 +40,13 @@ export class ClaudeAdapter implements LLMAdapter {
   readonly provider = 'claude'
   private apiKey: string
   private model: string
+  private baseUrl?: string
   private effortLevel?: string
 
   constructor(config: ClaudeConfig) {
     this.apiKey = config.apiKey
     this.model = config.model
+    this.baseUrl = config.baseUrl
     this.effortLevel = config.effortLevel
   }
 
@@ -179,17 +181,34 @@ export class ClaudeAdapter implements LLMAdapter {
   }
 
   private buildEnv(): Record<string, string> {
+    // baseUrl 留空默认 DeepSeek Anthropic 兼容端点；填其他端点（如 Kimi: https://api.moonshot.ai/anthropic）走对应服务
+    const baseUrl = this.baseUrl || 'https://api.deepseek.com/anthropic'
+    const isDeepSeek = !this.baseUrl || /deepseek/i.test(this.baseUrl)
+
+    // 非 DeepSeek 端点（Kimi K3 等）无分级模型，HAIKU/SUBAGENT/FABLE 全量兜底主模型；
+    // Kimi 端点不支持 Tool Search，需显式关闭
+    const tierFallbacks = isDeepSeek
+      ? {
+          ANTHROPIC_DEFAULT_HAIKU_MODEL:
+            process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'deepseek-v4-flash',
+          CLAUDE_CODE_SUBAGENT_MODEL: process.env.CLAUDE_CODE_SUBAGENT_MODEL || 'deepseek-v4-flash',
+        }
+      : {
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: this.model,
+          ANTHROPIC_DEFAULT_FABLE_MODEL: this.model,
+          CLAUDE_CODE_SUBAGENT_MODEL: this.model,
+          ENABLE_TOOL_SEARCH: 'false',
+        }
+
     return {
       ...process.env,
       DEEPSEEK_API_KEY: this.apiKey,
-      ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+      ANTHROPIC_BASE_URL: baseUrl,
       ANTHROPIC_AUTH_TOKEN: this.apiKey,
       ANTHROPIC_MODEL: this.model,
       ANTHROPIC_DEFAULT_OPUS_MODEL: this.model,
       ANTHROPIC_DEFAULT_SONNET_MODEL: this.model,
-      ANTHROPIC_DEFAULT_HAIKU_MODEL:
-        process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'deepseek-v4-flash',
-      CLAUDE_CODE_SUBAGENT_MODEL: process.env.CLAUDE_CODE_SUBAGENT_MODEL || 'deepseek-v4-flash',
+      ...tierFallbacks,
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_EFFORT_LEVEL: this.effortLevel || process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high',
     } as Record<string, string>

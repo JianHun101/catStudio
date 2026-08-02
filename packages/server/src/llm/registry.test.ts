@@ -14,7 +14,7 @@ class MockDeepSeekAdapter {
 class MockClaudeAdapter {
   readonly provider = 'claude'
   chatStream = mockChatStream
-  constructor(_opts: unknown) {}
+  constructor(public opts: { baseUrl?: string; effortLevel?: string }) {}
 }
 
 class MockOpenAIAdapter {
@@ -84,6 +84,35 @@ describe('registry', () => {
       const a1 = registryModule.getAdapterForAgent(baseAgent)
       const a2 = registryModule.getAdapterForAgent({ ...baseAgent, llmApiKey: 'sk-key-2' })
       expect(a1).not.toBe(a2)
+    })
+
+    it('returns different instance for different baseUrl (claude, same key+effort)', () => {
+      const deepseek: AgentConfig = {
+        ...baseAgent,
+        llmProvider: 'claude',
+        llmApiKey: 'sk-key-1',
+        effortLevel: 'high',
+      }
+      const kimi: AgentConfig = {
+        ...deepseek,
+        llmBaseUrl: 'https://api.moonshot.ai/anthropic',
+      }
+      const a1 = registryModule.getAdapterForAgent(deepseek)
+      const a2 = registryModule.getAdapterForAgent(kimi)
+      expect(a1).not.toBe(a2)
+    })
+
+    it('passes baseUrl to ClaudeAdapter constructor', () => {
+      const agent: AgentConfig = {
+        ...baseAgent,
+        llmProvider: 'claude',
+        llmApiKey: 'sk-kimi-key',
+        llmBaseUrl: 'https://api.moonshot.ai/anthropic',
+        effortLevel: 'max',
+      }
+      const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockClaudeAdapter
+      expect(adapter.opts.baseUrl).toBe('https://api.moonshot.ai/anthropic')
+      expect(adapter.opts.effortLevel).toBe('max')
     })
 
     it('returns different instance for different provider', () => {
