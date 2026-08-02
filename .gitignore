@@ -28,6 +28,7 @@ workspace/
 
 # 日志
 *.log
+*.log.*
 
 # Agent 执行锁（防止 tsx watch 在 Agent 执行期间重启）
 .agent-busy
