@@ -96,6 +96,13 @@ process.env.SUMMARY_BASE_URL ??= 'https://api.deepseek.com'
 // SUMMARY_INTERVAL — 每 N 轮对话触发一次增量摘要（默认 3）
 process.env.SUMMARY_INTERVAL ??= '3'
 
+// ─── OneBot（QQ 接入）配置 ─────────────────────
+// ONEBOT_ENABLED — 是否启用 OneBot v11 webhook 入站（默认 false，关闭时 webhook 返回 503）
+process.env.ONEBOT_ENABLED ??= 'false'
+
+// ONEBOT_API_BASE — NapCat HTTP API 服务地址（P3 出站回复用，P2 仅入站不消费）
+process.env.ONEBOT_API_BASE ??= 'http://127.0.0.1:3000'
+
 // ─── 会话交接配置 ──────────────────────────────
 // HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
 process.env.HANDOFF_ENABLED ??= 'true'

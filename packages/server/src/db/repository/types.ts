@@ -87,3 +87,12 @@ export interface SessionReadStateRow {
   session_id: string
   last_read_at: string
 }
+
+export interface ConnectorBindingRow {
+  id: string
+  platform: string
+  external_type: 'group' | 'private'
+  external_id: string
+  session_id: string
+  created_at: string
+}

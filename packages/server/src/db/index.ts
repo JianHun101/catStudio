@@ -112,6 +112,16 @@ export function initDb(): void {
       last_read_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS connector_bindings (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      external_type TEXT NOT NULL CHECK (external_type IN ('group', 'private')),
+      external_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (platform, external_type, external_id)
+    );
   `)
 
   // ─── 迁移 ─────────────────────────────────────────
