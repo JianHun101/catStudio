@@ -251,15 +251,17 @@ import { buildDemoAgents } from '../seed-data.js'
 describe('agent system prompts', () => {
   const agents = buildDemoAgents()
 
-  it('所有 agent 的 systemPrompt 包含共享角色边界', () => {
+  it('所有 agent 的 systemPrompt 包含共享角色边界（视觉专用猫豁免）', () => {
     for (const agent of agents) {
+      if (agent.role === 'vision') continue // 图测猫是视觉指令 prompt，非角色扮演
       expect(agent.systemPrompt).toContain('只扮演自己的角色')
       expect(agent.systemPrompt).toContain('禁止代写或预判其他 Agent')
     }
   })
 
-  it('所有 agent 的 systemPrompt 以共享前置声明开头', () => {
+  it('所有 agent 的 systemPrompt 以共享前置声明开头（视觉专用猫豁免）', () => {
     for (const agent of agents) {
+      if (agent.role === 'vision') continue
       expect(agent.systemPrompt).toMatch(/^你是一只拥有人工智能的猫/)
     }
   })

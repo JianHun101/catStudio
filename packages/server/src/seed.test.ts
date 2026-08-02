@@ -9,12 +9,41 @@
  */
 import { describe, it, expect } from 'vitest'
 import { v5 as uuidV5 } from 'uuid'
+import { buildDemoAgents } from './seed-data.js'
 
 const SEED_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 
 function fixedId(name: string): string {
   return uuidV5(`cat-study.agent.${name}`, SEED_NAMESPACE)
 }
+
+describe('seed agents', () => {
+  const agents = buildDemoAgents()
+
+  it('种子包含 5 只猫（店长/ds猫/flash猫/吐槽猫/图测猫）', () => {
+    expect(agents.map((a) => a.name).sort()).toEqual([
+      'ds猫',
+      'flash猫',
+      '吐槽猫',
+      '图测猫',
+      '店长',
+    ])
+  })
+
+  it('图测猫 role=vision 且 id 为 DB 现有 id（幂等命中不重建）', () => {
+    const vision = agents.find((a) => a.name === '图测猫')!
+    expect(vision.role).toBe('vision')
+    expect(vision.id).toBe('0ac78872-80ad-4bfa-84ad-3bc0c0d05a1e')
+  })
+
+  it('四只对话猫的角色与白名单边表对齐', () => {
+    const roleOf = (name: string) => agents.find((a) => a.name === name)!.role
+    expect(roleOf('店长')).toBe('store')
+    expect(roleOf('ds猫')).toBe('implementer')
+    expect(roleOf('flash猫')).toBe('implementer')
+    expect(roleOf('吐槽猫')).toBe('reviewer')
+  })
+})
 
 describe('seed helpers', () => {
   describe('fixedId (uuid.v5)', () => {
