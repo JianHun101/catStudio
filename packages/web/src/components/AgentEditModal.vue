@@ -100,7 +100,7 @@ async function handleSave(): Promise<void> {
       llmProvider: llmProvider.value,
       llmModel: llmModel.value,
       llmApiKey: llmApiKey.value,
-      llmBaseUrl: llmBaseUrl.value || undefined,
+      llmBaseUrl: llmBaseUrl.value,
       effortLevel: llmEffortLevel.value,
     })
     emit('close')
