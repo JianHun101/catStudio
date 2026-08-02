@@ -660,7 +660,8 @@ console.log('📦 测试组 10: commit uuid 反查会话')
     if (req.url === `/api/messages/${uuid}`) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ id: uuid, sessionId: 'session-debug-1', role: 'user' }))
-    } else if (req.url === `/api/messages/${uuid}/executor`) {
+    } else if (req.url.startsWith(`/api/messages/${uuid}/executor`)) {
+      // startsWith：兼容 ?commit=<sha> query（commit_hash 精确匹配反查）
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ agentId: 'agent-ds', agentName: 'ds猫' }))
     } else {
@@ -717,6 +718,24 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   const executorMiss = await resolveExecutorName(serverUrl, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   assert(executorMiss === null, '无执行记录（404）应返回 null，调用方兜底店长')
   console.log('  10e: 实施者反查命中/404 兜底 ✅')
+
+  // 10g: 实施者反查带 commit sha → URL 带 ?commit= query（commit_hash 精确匹配）
+  hits = []
+  const commitSha = 'a'.repeat(40)
+  const executorWithSha = await resolveExecutorName(serverUrl, uuid, commitSha)
+  assert(executorWithSha === 'ds猫', '带 commit sha 反查应命中 agent 名')
+  assert(
+    hits.includes(`/api/messages/${uuid}/executor?commit=${commitSha}`),
+    '应带 ?commit= query 请求实施者反查 API'
+  )
+  // 不带 sha 时 URL 保持无 query（老调用/e2e 兼容）
+  hits = []
+  await resolveExecutorName(serverUrl, uuid)
+  assert(
+    hits.includes(`/api/messages/${uuid}/executor`) && !hits.some((u) => u.includes('?')),
+    '不带 sha 时 URL 应无 query'
+  )
+  console.log('  10g: 实施者反查带 commit sha → ?commit= query ✅')
 
   // 10f: buildHandoffMessage 动态补填人——命中传实施者名，缺省兜底店长
   const msgImpl = buildHandoffMessage('# 文档', 'ds猫')

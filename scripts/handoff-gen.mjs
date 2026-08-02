@@ -712,8 +712,10 @@ async function alreadyDelivered(serverUrl, sessionId, message) {
 
 /**
  * 反查"实施者"——执行触发消息的 agent 名（交接文档补填人）。
- * GET /api/messages/:uuid/executor → { agentName }（execution_logs 里
- * triggered_by_message_id = uuid 且最近开始执行的那条，JOIN agents 拿名字）。
+ * GET /api/messages/:uuid/executor?commit=<sha> → { agentName }。
+ * 带 commitSha 时服务端按 execution_logs.commit_hash 精确匹配——同 uuid 多
+ * 执行者（一封派活消息触发多只猫）各 commit 各命中各的实施者，根治
+ * "取最近开始执行"误指；不带 commitSha（老调用/e2e）退化原 uuid 逻辑。
  *
  * 任何失败都返回 null 而非抛出：补填人反查是增强不是硬依赖——
  * 目标会话反查（resolveCommitSessionId）才是主链，它失败已由调用方 fatal/transient
@@ -721,11 +723,15 @@ async function alreadyDelivered(serverUrl, sessionId, message) {
  *
  * @param {string} serverUrl
  * @param {string} uuid — commit message 里的 catstudy [uuid]（触发消息 id）
+ * @param {string} [commitSha] — 当前 commit 完整 sha（commit_hash 精确匹配用）
  * @returns {Promise<string|null>} agent 名；无执行记录/不可达 → null
  */
-export async function resolveExecutorName(serverUrl, uuid) {
+export async function resolveExecutorName(serverUrl, uuid, commitSha) {
   try {
-    const res = await fetch(`${serverUrl}/api/messages/${uuid}/executor`, {
+    const url = commitSha
+      ? `${serverUrl}/api/messages/${uuid}/executor?commit=${encodeURIComponent(commitSha)}`
+      : `${serverUrl}/api/messages/${uuid}/executor`
+    const res = await fetch(url, {
       signal: AbortSignal.timeout(3000),
     })
     if (!res.ok) {
@@ -734,7 +740,9 @@ export async function resolveExecutorName(serverUrl, uuid) {
     }
     const body = await res.json()
     if (body?.agentName) {
-      console.log(`[handoff-gen] 实施者: ${body.agentName}（execution_logs 反查）`)
+      console.log(
+        `[handoff-gen] 实施者: ${body.agentName}（execution_logs 反查${commitSha ? ', commit_hash 精确匹配' : ''}）`
+      )
       return body.agentName
     }
     console.log(`[handoff-gen] ⚠️  实施者反查响应缺少 agentName——兜底 @店长 补填`)
@@ -881,9 +889,31 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   // 无 uuid / 无执行记录）兜底店长收尾。
   const commitMsg = safeGit(cwd, opts.sha ? `log -1 --pretty=%B ${opts.sha}` : 'log -1 --pretty=%B')
   const commitUuid = extractCommitUuid(commitMsg)
-  const fillerName = commitUuid
-    ? (await resolveExecutorName(serverUrl, commitUuid)) || '店长'
-    : '店长'
+  const commitSha = safeGit(cwd, opts.sha ? `rev-parse ${opts.sha}` : 'rev-parse HEAD')
+  let fillerName = '店长'
+  if (commitUuid) {
+    // 写回 commit_hash（agent 人工提交路径此前从不写，只有 socketio 自动提交
+    // 兜底写）——executor 反查按 commit 精确匹配的前提。失败仅告警不阻断投递：
+    // 老 server 无此端点（404）或 server 不可达时退化 uuid 逻辑 + 兜底店长。
+    try {
+      const res = await fetch(`${serverUrl}/api/messages/${commitUuid}/commit-hash`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ commitHash: commitSha }),
+        signal: AbortSignal.timeout(3000),
+      })
+      if (res.ok) {
+        console.log(
+          `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}）`
+        )
+      }
+    } catch {
+      console.log(
+        `[handoff-gen] ⚠️  commit_hash 写回失败——executor 反查退化 uuid 逻辑（兜底 @店长）`
+      )
+    }
+    fillerName = (await resolveExecutorName(serverUrl, commitUuid, commitSha)) || '店长'
+  }
   const message = buildHandoffMessage(content, fillerName)
 
   // 投递去重：同一份文档已投过则跳过（锚点：实际投递的完整消息）

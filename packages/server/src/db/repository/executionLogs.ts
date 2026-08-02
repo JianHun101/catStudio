@@ -66,6 +66,25 @@ export function getExecutorNameByTriggeredBy(
     .get(triggeredByMessageId) as { agent_id: string; name: string } | undefined
 }
 
+/** 反查"提交某 commit"的 agent（handoff-gen 动态补填人，commit_hash 精确匹配）。
+ *  commit 由实施者提交时经 POST /api/messages/:id/commit-hash 写回
+ *  （updateRunningExecutionCommitHash），同 uuid 多执行者时各 commit 各命中
+ *  各的实施者，不再"取最近开始执行"误指。无记录返回 undefined。 */
+export function getExecutorNameByCommitHash(
+  commitHash: string
+): { agent_id: string; name: string } | undefined {
+  return db
+    .prepare(
+      `SELECT el.agent_id, a.name
+       FROM execution_logs el
+       JOIN agents a ON a.id = el.agent_id
+       WHERE el.commit_hash = ?
+       ORDER BY el.started_at DESC
+       LIMIT 1`
+    )
+    .get(commitHash) as { agent_id: string; name: string } | undefined
+}
+
 export function getAgentStats(agentId: string): {
   total_prompt: number
   total_completion: number
@@ -170,6 +189,22 @@ export function updateExecutionLogCommitHash(
     commitHash,
     triggeredByMessageId
   )
+}
+
+/** post-commit 写回：把本次 commit 的 hash 记到"仍 running 的执行记录"上。
+ *  语义：提交者提交时自己的执行必然未结束（提交 → 补填交接 → 回复才 finalize），
+ *  而先提交的同伴记录此时多已 completed——running 过滤让同 uuid 双执行者
+ *  各 commit 各命中各的执行者，互不覆盖（店长派活定稿语义）。 */
+export function updateRunningExecutionCommitHash(
+  triggeredByMessageId: string,
+  commitHash: string
+): { changes: number } {
+  return db
+    .prepare(
+      `UPDATE execution_logs SET commit_hash = ?
+       WHERE triggered_by_message_id = ? AND status = 'running'`
+    )
+    .run(commitHash, triggeredByMessageId)
 }
 
 /** 启动时修复：将所有 running 状态标记为 failed */

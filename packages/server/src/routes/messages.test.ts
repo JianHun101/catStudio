@@ -119,6 +119,109 @@ describe('Message Routes', () => {
       const body = JSON.parse(res.body)
       expect(body.agentName).toBe('吐槽猫')
     })
+
+    it('?commit= 按 commit_hash 精确命中各自实施者（同 uuid 双执行者各 commit 各命中各）', async () => {
+      const uuid = '6cfecca8-ba78-4039-a12c-71313afd29cd'
+      const hashA = 'a'.repeat(40)
+      const hashB = 'b'.repeat(40)
+      const db = getDb()
+      insertFixture(uuid) // agent-ds + log-1（completed，无 commit_hash）
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '😼', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-flash', 'flash猫')
+      // ds猫 的提交 + flash猫 的提交（同 uuid 双执行者各写各的 hash）
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, commit_hash)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?)`
+      ).run('log-ds', 'session-exec-1', 'agent-ds', uuid, hashA)
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, commit_hash)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?)`
+      ).run('log-flash', 'session-exec-1', 'agent-flash', uuid, hashB)
+
+      const resA = await app.inject({
+        method: 'GET',
+        url: `/api/messages/${uuid}/executor?commit=${hashA}`,
+      })
+      expect(resA.statusCode).toBe(200)
+      expect(JSON.parse(resA.body).agentName).toBe('ds猫')
+
+      const resB = await app.inject({
+        method: 'GET',
+        url: `/api/messages/${uuid}/executor?commit=${hashB}`,
+      })
+      expect(resB.statusCode).toBe(200)
+      expect(JSON.parse(resB.body).agentName).toBe('flash猫')
+    })
+
+    it('?commit= 查不到（老 commit 未写回 hash）时回退 uuid 逻辑', async () => {
+      const uuid = '6cfecca8-ba78-4039-a12c-71313afd29cd'
+      insertFixture(uuid) // log-1：无 commit_hash
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/messages/${uuid}/executor?commit=${'c'.repeat(40)}`,
+      })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.agentId).toBe('agent-ds')
+      expect(body.agentName).toBe('ds猫')
+    })
+  })
+
+  describe('POST /api/messages/:id/commit-hash（post-commit 写回实施者 hash）', () => {
+    it('只写 running 记录——completed 的执行不动（同 uuid 双执行者各 commit 各命中各）', async () => {
+      const uuid = '6cfecca8-ba78-4039-a12c-71313afd29cd'
+      const hash = 'd'.repeat(40)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES (?, ?, '[]', datetime('now'), datetime('now'))`
+      ).run('session-exec-1', 'debug')
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-ds', 'ds猫')
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '😼', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-flash', 'flash猫')
+      // ds猫 已 finalize（completed），flash猫 仍 running——提交者是 flash猫
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now'))`
+      ).run('log-done', 'session-exec-1', 'agent-ds', uuid)
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+         VALUES (?, ?, ?, ?, 'running', datetime('now'))`
+      ).run('log-running', 'session-exec-1', 'agent-flash', uuid)
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/messages/${uuid}/commit-hash`,
+        payload: { commitHash: hash },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({ ok: true, updated: 1 })
+
+      const rowRunning = db
+        .prepare('SELECT commit_hash FROM execution_logs WHERE id = ?')
+        .get('log-running') as { commit_hash: string | null }
+      expect(rowRunning.commit_hash).toBe(hash)
+      const rowDone = db
+        .prepare('SELECT commit_hash FROM execution_logs WHERE id = ?')
+        .get('log-done') as { commit_hash: string | null }
+      expect(rowDone.commit_hash).toBeNull()
+    })
+
+    it('拒绝非 40-hex 的 commitHash', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/messages/6cfecca8-ba78-4039-a12c-71313afd29cd/commit-hash',
+        payload: { commitHash: 'short' },
+      })
+      expect(res.statusCode).toBe(400)
+    })
   })
 
   describe('POST /api/messages（REST 注入通道图片守卫）', () => {

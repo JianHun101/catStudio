@@ -29,18 +29,45 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
   /**
    * GET /api/messages/:id/executor → 反查"执行这条消息"的 agent（实施者）
    * 供 handoff-gen 动态决定交接文档补填人——"谁执行了触发消息，谁补填"。
-   * 一条消息可触发多个 agent（多人 @），取最近开始执行的一条；无执行记录 404。
+   * ?commit=<full-sha> 时 commit_hash 精确匹配优先（同 uuid 多执行者时各 commit
+   * 各命中各的实施者，根治"取最近开始执行"误指）；未传 commit 或按 hash 查不到
+   * （老 commit 未写回 hash）回退 uuid 逻辑；无执行记录 404。
    */
   app.get('/api/messages/:id/executor', async (req, reply) => {
     const { id } = req.params as { id: string }
     if (!id || typeof id !== 'string') {
       return reply.status(400).send({ error: 'id is required' })
     }
-    const executor = execLogsRepo.getExecutorNameByTriggeredBy(id)
+    const { commit } = req.query as { commit?: string }
+    const executor = commit
+      ? (execLogsRepo.getExecutorNameByCommitHash(commit) ??
+        execLogsRepo.getExecutorNameByTriggeredBy(id))
+      : execLogsRepo.getExecutorNameByTriggeredBy(id)
     if (!executor) {
       return reply.status(404).send({ error: 'No execution log for this message' })
     }
     return reply.send({ agentId: executor.agent_id, agentName: executor.name })
+  })
+
+  /**
+   * POST /api/messages/:id/commit-hash → 把 commit sha 写回该消息的执行记录
+   * 供 handoff-gen（post-commit）投递前调用——agent 人工提交路径此前从不写
+   * commit_hash（只有 socketio 自动提交兜底路径写），导致 executor 反查只能
+   * "取最近"误指。写回后同 uuid 双执行者各 commit 各命中各的实施者。
+   * 写回失败不阻断投递（反查增强不是硬依赖，失败退化 uuid 逻辑 + 兜底店长）。
+   */
+  app.post('/api/messages/:id/commit-hash', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!id || typeof id !== 'string') {
+      return reply.status(400).send({ error: 'id is required' })
+    }
+    const body = req.body as { commitHash?: string } | null
+    const commitHash = typeof body?.commitHash === 'string' ? body.commitHash.trim() : ''
+    if (!/^[0-9a-f]{40}$/.test(commitHash)) {
+      return reply.status(400).send({ error: 'commitHash must be a 40-char hex sha' })
+    }
+    const result = execLogsRepo.updateRunningExecutionCommitHash(id, commitHash)
+    return reply.send({ ok: true, updated: result.changes })
   })
 
   app.post('/api/messages', async (req, reply) => {
