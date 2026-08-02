@@ -530,6 +530,11 @@ async function handleCreate(): Promise<void> {
 .status-label {
   font-size: 11px;
   color: var(--text-muted);
+  /* 固定状态文字占位宽度（最长「回复中…」≈ 3 汉字 + 省略号）：
+     状态切换时 label 宽度恒定 → status-area 整体宽度不变，
+     不挤压左侧 agent-info，顶行布局不跳动、灰点锚点不漂移 */
+  min-width: 4.5em;
+  white-space: nowrap;
 }
 
 /* Token usage bar on card */
