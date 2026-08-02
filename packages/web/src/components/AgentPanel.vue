@@ -474,6 +474,7 @@ async function handleCreate(): Promise<void> {
 
 .agent-meta {
   display: flex;
+  align-items: center;
   gap: 6px;
   margin-top: 3px;
 }
@@ -492,6 +493,9 @@ async function handleCreate(): Promise<void> {
 .model-name {
   font-size: 10px;
   color: var(--text-muted);
+  /* 长模型名（如 deepseek-v4-flash）单行不换行：
+     换行会撑高 agent-meta 行 → provider-badge 被 stretch 拉高 → 徽章文字贴顶 */
+  white-space: nowrap;
 }
 
 /* Status */
