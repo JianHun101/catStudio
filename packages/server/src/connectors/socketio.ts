@@ -403,8 +403,8 @@ const AGENT_HARD_TIMEOUT_MS = isNaN(_HARD_TIMEOUT) ? 30 * 60 * 1000 : _HARD_TIME
 /** Agent 间调度的最大递归深度（防止无限循环） */
 const MAX_AGENT_DISPATCH_DEPTH = 10
 
-/** 单个 Agent 在同一 traceId 下被 @ 的最大次数 */
-const MAX_MENTIONS_PER_AGENT = 3
+/** 单个 Agent 在同一 traceId 下被 A2A @ 的最大次数（用户顶层触发不计数） */
+const MAX_MENTIONS_PER_AGENT = 5
 
 // ─── Agent Busy Lock ────────────────────────────────
 
@@ -565,11 +565,15 @@ export async function executeAgentsSerial(
       const queuedCmd = await completeExecution(agent.id, true, { traceId })
 
       // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
-      // 同一 trace 内某 agent 真实完成 ≥MAX 次执行后，不再被 A2A 重新调度。
+      // 同一 trace 内某 agent 真实完成 ≥MAX 次 A2A 执行后，不再被重新调度。
       // 计数的是实际执行次数而非进入执行循环的次数，因此未执行的
-      // 排队任务/审查闭环 mention 不消耗配额（阈值内不受限））
-      const mentionKey = getMentionKey(traceId, agent.id)
-      mentionCounts.set(mentionKey, (mentionCounts.get(mentionKey) || 0) + 1)
+      // 排队任务/审查闭环 mention 不消耗配额（阈值内不受限）。
+      // 仅 depth>0（A2A 链路）计数——用户顶层触发（depth=0）不消耗配额，
+      // 否则用户 @ 触发的执行会把计数推满，后续同 trace 的 A2A @ 被误杀）
+      if (depth > 0) {
+        const mentionKey = getMentionKey(traceId, agent.id)
+        mentionCounts.set(mentionKey, (mentionCounts.get(mentionKey) || 0) + 1)
+      }
 
       // Agent-to-agent dispatch: 检测回复中的 @mentions
       const mentionedNames = parseMentionsFromReply(reply.content, sessionAgentNames).filter(

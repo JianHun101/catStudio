@@ -856,12 +856,12 @@ describe('socketio connector', () => {
         'trace-limit-ok'
       )
 
-      // 目标组：吐槽猫计数 3（已达上限）→ 过滤，不调度
+      // 目标组：吐槽猫计数 5（已达上限）→ 过滤，不调度
       // trigger id 必须为 'msg-trigger'（与 mock 的 currentTriggerMessageId 匹配），
       // 否则 agent 在状态检查（:615）处 continue 跳过，A2A 过滤分支永不执行——
       // dispatch 不被调用只是"agent 没干活"的必然结果，断言空洞通过
       mod.__test_resetMentionCounts()
-      mod.__setMentionCount('trace-limit-full', 'agent-2', 3)
+      mod.__setMentionCount('trace-limit-full', 'agent-2', 5)
       vi.mocked(dispatch).mockClear()
       await mod.executeAgentsSerial(
         mockIo as any,
@@ -871,6 +871,71 @@ describe('socketio connector', () => {
         'trace-limit-full'
       )
       expect(dispatch).not.toHaveBeenCalled()
+    })
+
+    it('用户顶层触发（depth=0）不消耗配额；A2A（depth=1）执行才计数', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+
+      // currentTrigger 匹配 → 正常执行成功
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-user',
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '收到', kind: 'text' }
+        }),
+      } as any)
+      // 触发消息必须存在于 DB，否则 runAgentReply 的 Window ② 撤回保护
+      // （!messageExists → retracted）会在 LLM 调用前提前返回，不走 adapter
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run('msg-user', 'session-1', '收到请处理')
+
+      // depth=0（用户 @ 顶层触发）执行成功 → 不消耗配额。
+      // 注：depth=0 结束后顶层清理会删除本 trace 的全部计数键（:699-704），
+      // 断言 0 是"无残留、未污染后续 trace"的终态检查
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-user', content: '@店长 x', mentions: ['店长'] },
+        'trace-user',
+        0
+      )
+      expect(mod.__getMentionCount('trace-user', 'agent-1')).toBe(0)
+
+      // depth=1（A2A 链路）执行成功 → 计数 +1（防循环防护保留）
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-a2a',
+      })
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run('msg-a2a', 'session-1', '收到请处理')
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-a2a', content: '@店长 x', mentions: ['店长'] },
+        'trace-a2a',
+        1
+      )
+      expect(mod.__getMentionCount('trace-a2a', 'agent-1')).toBe(1)
     })
   })
 
