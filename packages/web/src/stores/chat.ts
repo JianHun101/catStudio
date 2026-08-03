@@ -243,6 +243,12 @@ export const useChatStore = defineStore('chat', () => {
     socket.emit(Events.RESTART_CANCEL, { messageId })
   }
 
+  /** 停止 Agent：中断当前思考 + 清空排队任务（无需等回复，可重新发消息恢复） */
+  function interruptAgent(agentId: string): void {
+    const { socket } = useSocket()
+    socket.emit(Events.AGENT_INTERRUPT, { agentId })
+  }
+
   /** 清空会话消息（保留会话配置） */
   async function clearSessionMessages(id: string): Promise<void> {
     try {
@@ -646,6 +652,7 @@ export const useChatStore = defineStore('chat', () => {
     restartStates,
     confirmRestart,
     cancelRestart,
+    interruptAgent,
     fetchAgentStats,
     agentTokenStats,
     contextTokens,

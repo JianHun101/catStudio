@@ -28,6 +28,7 @@ import {
   getAllAgentStates,
   getAgentState,
   cancelQueuedCommand,
+  clearAgentQueue,
   isAnyAgentExecutingMessage,
   setAgentStateBridge,
   setSystemMessageBridge,
@@ -89,6 +90,12 @@ const retractionRequests = new Map<string, boolean>()
 /** 正在流式输出的 Agent 状态 → { sessionId, messageId, content }
  *  JOIN_SESSION 时用于恢复打字气泡（客户端切会话会清空 typingStates） */
 const activeStreams = new Map<string, { sessionId: string; messageId: string; content: string }>()
+
+/** 正在执行的 Agent → 其 AbortController（停止按钮中断思考用）。
+ *  executeAgentsSerial 创建后注册、Promise.race 结束路径（正常/异常）清理。
+ *  abortController 原本是循环内局部变量外部摸不到——升级为模块级注册表后，
+ *  AGENT_INTERRUPT handler 才能跨会话按 agentId 全局寻址（用户手动改 DB 的场景）。 */
+const activeAborts = new Map<string, AbortController>()
 
 /** 获取 Socket.IO Server 实例（需在 createSocketIO() 之后调用） */
 export function getIO(): SocketServer | null {
@@ -436,6 +443,44 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       }
     })
 
+    // ─── Agent 手动中断（停止按钮：中断思考 + 清空队列）───
+
+    socket.on(Events.AGENT_INTERRUPT, (data: { agentId: string }) => {
+      const { agentId } = data || {}
+      if (!agentId) return
+      const state = getAgentState(agentId)
+      if (!state) return // 未知 agent → 幂等无操作
+
+      // 先清队列再 abort：abort 后执行循环的 completeExecution(false) 收口时
+      // 队列已空不会弹出新命令（中断后 agent 不自动重启执行，新消息才重新触发）
+      const cleared = clearAgentQueue(agentId)
+      // 中断当前执行——executeAgentsSerial 的 abort 检查发现 signal.aborted 后
+      // 跳过 A2A 解析、走失败路径收口（execution_logs 记 failed）
+      const controller = activeAborts.get(agentId)
+      const executing = controller !== undefined
+      controller?.abort()
+
+      if (cleared > 0 || executing) {
+        log.info('agent interrupted by user', { agentId, cleared })
+        // 系统消息进 agent 实际所在的 session 房间——跨会话忙碌同样可中断，
+        // 消息应出现在"正在干活"的那个会话里
+        const sessionId = state.sessionId
+        if (sessionId) {
+          const agentRow = agentsRepo.getAgentById(agentId)
+          const name = agentRow?.name || agentId
+          io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
+            id: uuid(),
+            sessionId,
+            agentId,
+            role: 'system',
+            content: `🐱 ${name} 已停止（用户中断）`,
+            mentions: [],
+            createdAt: new Date().toISOString(),
+          })
+        }
+      }
+    })
+
     // ─── Broadcast mode toggle ────────────────────
 
     socket.on(Events.TOGGLE_BROADCAST, (data: { sessionId: string; broadcastMode: boolean }) => {
@@ -672,6 +717,7 @@ export async function executeAgentsSerial(
         msgId: '',
       }
       const abortController = new AbortController()
+      activeAborts.set(agent.id, abortController)
       try {
         // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
         // AbortController 确保超时后子进程被 kill（P0-1 修复）
@@ -704,6 +750,34 @@ export async function executeAgentsSerial(
         })
         await completeExecution(agent.id, false, {
           errorMessage: err.message || 'unknown error',
+          traceId,
+        })
+        continue
+      } finally {
+        activeAborts.delete(agent.id)
+      }
+
+      // 用户中断检查：AGENT_INTERRUPT handler 对本执行 abort 后，runAgentReply
+      // 在流循环里检测到 signal.aborted 提前返回（内容不落库、无 NEW_MESSAGE 终稿）。
+      // 此处必须拦截——否则部分内容会被当正常回复走 A2A mention 解析，
+      // 触发错误的 agent-to-agent 调度。中断走失败路径收口（execution_logs 记 failed）。
+      if (abortController.signal.aborted) {
+        log.info('agent execution interrupted by user', {
+          agentId: agent.id,
+          agentName: agent.name,
+          traceId,
+        })
+        io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
+          id: uuid(),
+          sessionId,
+          agentId: agent.id,
+          role: 'system',
+          content: `🐱 ${agent.name} 已停止（用户中断）`,
+          mentions: [],
+          createdAt: new Date().toISOString(),
+        })
+        await completeExecution(agent.id, false, {
+          errorMessage: 'interrupted',
           traceId,
         })
         continue

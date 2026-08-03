@@ -324,6 +324,70 @@ describe('dispatch', () => {
     })
   })
 
+  describe('clearAgentQueue — 用户中断清队', () => {
+    /** 插入一条用户消息（dispatch_state 默认 NULL） */
+    function insertMsg(id: string): void {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', '你好', '[]')`
+        )
+        .run(id, 'session-1')
+    }
+
+    function getDispatchState(msgId: string): string | null {
+      const row = getDb()
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get(msgId) as { dispatch_state: string | null }
+      return row?.dispatch_state ?? null
+    }
+
+    it('有排队命令 → 清空队列、queueLength 归零、dispatch_state 全部标 done（重启恢复不复活）', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg('msg-1')
+      insertMsg('msg-2')
+      insertMsg('msg-3')
+
+      // msg-1 空闲直跑 → running；msg-2/msg-3 排队 → queued
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-2', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-3', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(2)
+
+      const cleared = dispatchModule.clearAgentQueue('agent-1')
+
+      expect(cleared).toBe(2)
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(0)
+      // 正在执行的 msg-1 保持 running（由执行循环的 abort 检查收口）；
+      // 被清的排队消息全部 done——recoverQueuedMessages 只按 queued/running 复活，不会重新调度
+      expect(getDispatchState('msg-1')).toBe('running')
+      expect(getDispatchState('msg-2')).toBe('done')
+      expect(getDispatchState('msg-3')).toBe('done')
+    })
+
+    it('无排队命令 → 返回 0，幂等无副作用', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg('msg-1')
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+
+      expect(dispatchModule.clearAgentQueue('agent-1')).toBe(0)
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(0)
+      expect(getDispatchState('msg-1')).toBe('running') // 执行中的命令不受影响
+    })
+
+    it('未知 agent → 返回 0，不报错', () => {
+      expect(dispatchModule.clearAgentQueue('agent-ghost')).toBe(0)
+    })
+  })
+
   // ─── B 触发合并（A2A 风暴治理）：depth>0 且同 session 已有排队命令 → 并入 pendingTriggers ──
 
   describe('B 触发合并 — pendingTriggers', () => {

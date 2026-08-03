@@ -40,8 +40,12 @@ describe('Events', () => {
     expect(Events.RESTART_STATUS).toBe('restart-status')
   })
 
-  it('has exactly 25 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(25)
+  it('has AGENT_INTERRUPT client→server event', () => {
+    expect(Events.AGENT_INTERRUPT).toBe('agent-interrupt')
+  })
+
+  it('has exactly 26 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(26)
   })
 })
 

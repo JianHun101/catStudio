@@ -48,6 +48,9 @@ export const Events = {
   RESTART_CONFIRM: 'restart-confirm', // 用户→服务器：确认重启
   RESTART_CANCEL: 'restart-cancel', // 用户→服务器：取消重启
   RESTART_STATUS: 'restart-status', // 服务器→客户端：请求状态变化（pending/confirmed/none）
+
+  // Agent 手动中断（停止按钮：中断当前思考 + 清空排队任务）
+  AGENT_INTERRUPT: 'agent-interrupt', // 用户→服务器：中断指定 Agent
 } as const
 
 // ─── Redis Channel Patterns ─────────────────────────

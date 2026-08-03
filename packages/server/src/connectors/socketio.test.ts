@@ -24,6 +24,7 @@ vi.mock('../dispatch/index.js', () => ({
   getAllAgentStates: vi.fn(() => []),
   getAgentState: vi.fn(() => null),
   cancelQueuedCommand: vi.fn(() => 0),
+  clearAgentQueue: vi.fn(() => 0),
   isAnyAgentExecutingMessage: vi.fn(() => false),
   setAgentStateBridge: vi.fn(),
   setSystemMessageBridge: vi.fn(),
@@ -1807,6 +1808,151 @@ describe('socketio connector', () => {
       expect(existsSync(RESTART_REQUEST_FILE)).toBe(false)
       const call = mockRoomEmit.mock.calls.find((c: any[]) => c[0] === Events.NEW_MESSAGE)
       expect(call![1].messageType).toBeUndefined()
+    })
+  })
+
+  // ─── AGENT_INTERRUPT — 手动停止按钮 ─────────
+
+  describe('AGENT_INTERRUPT', () => {
+    const execAgentCfg = {
+      id: 'agent-1',
+      name: '店长',
+      avatar: '🐱',
+      systemPrompt: 'You are a cat.',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-flash',
+      llmApiKey: 'sk-test',
+    }
+
+    beforeEach(async () => {
+      const { getAgentState } = await import('../dispatch/index.js')
+      // 默认空闲；busy 用例内覆盖。dispatch 模块整体 mock——getAgentState 返回
+      // 什么就代表什么状态（executeAgentsSerial 靠它决定是否执行）
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'idle',
+        queueLength: 0,
+        currentTriggerMessageId: null,
+      })
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      vi.mocked(getAdapterForAgent).mockImplementation(() => null as any)
+      const mod = await import('./socketio.js')
+      mod.__test_resetMentionCounts()
+      // 触发消息必须存在于 DB，否则 runAgentReply 的 Window ② 撤回保护
+      // （!messageExists → retracted）会在 LLM 调用前提前返回，不走 adapter
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run('msg-trigger', 'session-1', '@店长 请处理')
+    })
+
+    it('busy agent 收到中断 → abort、无回复落库、completeExecution(false)、队列清空', async () => {
+      const mod = await import('./socketio.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { getAgentState, completeExecution, clearAgentQueue } =
+        await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 1,
+        currentTriggerMessageId: 'msg-trigger',
+      })
+
+      // 门控流：首个 chunk 产出后挂起，等中断触发再释放——模拟"思考中"被用户停止。
+      // mock adapter 不感知 signal，abort 后流恢复时由 runAgentReply 流循环的
+      // signal.aborted 检查提前返回（真实 adapter 会在 abort 时 kill 子进程）
+      let releaseGate = () => {}
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve
+      })
+      const chatStream = vi.fn(async function* () {
+        yield { content: '思考中', kind: 'text' }
+        await gate
+        yield { content: '被中断的剩余内容', kind: 'text' }
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+      const execPromise = mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        'trace-interrupt'
+      )
+
+      // 等流式已产出首个 chunk（执行确实在跑，中断才有的放矢）
+      await vi.waitFor(() => {
+        expect(mockRoomEmit).toHaveBeenCalledWith(
+          Events.AGENT_TYPING,
+          expect.objectContaining({ content: '思考中' })
+        )
+      })
+
+      // 用户点停止：中断 handler → 清队 + abort 当前执行
+      const handlers = socketHandlers.get(Events.AGENT_INTERRUPT)
+      expect(handlers).toBeDefined()
+      handlers![0]({ agentId: 'agent-1' })
+      expect(clearAgentQueue).toHaveBeenCalledWith('agent-1')
+
+      releaseGate()
+      await execPromise
+
+      // 无回复落库（runAgentReply 检测到 abort 后提前返回，未 insertAgentMessage）
+      const agentMsgs = getDb()
+        .prepare("SELECT COUNT(*) AS c FROM messages WHERE role = 'agent'")
+        .get() as { c: number }
+      expect(agentMsgs.c).toBe(0)
+
+      // 失败路径收口：completeExecution(false, interrupted)——部分内容不能当正常回复
+      expect(completeExecution).toHaveBeenCalledWith(
+        'agent-1',
+        false,
+        expect.objectContaining({ errorMessage: 'interrupted' })
+      )
+      // 未被当正常成功执行收口（防 A2A 解析误触发）
+      expect(completeExecution).not.toHaveBeenCalledWith('agent-1', true, expect.anything())
+
+      // 「已停止」系统消息广播进 session 房间（handler 或执行循环，内容一致）
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ content: '🐱 店长 已停止（用户中断）' })
+      )
+
+      // 无 A2A mention 触发（MESSAGE_UPDATED 是 A2A 写回 mentions 的信号）
+      expect(mockRoomEmit).not.toHaveBeenCalledWith(Events.MESSAGE_UPDATED, expect.anything())
+    })
+
+    it('idle agent 收到中断 → 幂等无操作（不广播、不报错）', async () => {
+      const { clearAgentQueue } = await import('../dispatch/index.js')
+      const handlers = socketHandlers.get(Events.AGENT_INTERRUPT)
+
+      handlers![0]({ agentId: 'agent-1' })
+
+      // 队列/abort 都无实际对象可操作——clearAgentQueue 幂等返回 0，无系统消息广播
+      expect(clearAgentQueue).toHaveBeenCalledWith('agent-1')
+      expect(mockRoomEmit).not.toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ content: expect.stringContaining('已停止') })
+      )
+      expect(mockSocketEmit).not.toHaveBeenCalledWith(Events.ERROR, expect.anything())
+    })
+
+    it('未知 agentId → 完全无操作（不碰队列）', async () => {
+      const { getAgentState, clearAgentQueue } = await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockReturnValue(undefined)
+      const handlers = socketHandlers.get(Events.AGENT_INTERRUPT)
+
+      handlers![0]({ agentId: 'agent-ghost' })
+
+      expect(clearAgentQueue).not.toHaveBeenCalled()
+      expect(mockRoomEmit).not.toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ content: expect.stringContaining('已停止') })
+      )
     })
   })
 

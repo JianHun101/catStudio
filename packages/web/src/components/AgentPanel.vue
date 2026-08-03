@@ -77,6 +77,16 @@ function statusDot(status: string): string {
   return status === 'idle' ? 'dot-idle' : 'dot-busy'
 }
 
+/** 是否可停止：回复中（busy）或有排队任务——一个按钮覆盖两个场景 */
+function canStop(agentId: string): boolean {
+  return agentStatus(agentId) === 'busy' || agentQueue(agentId) > 0
+}
+
+/** 点击停止：中断当前思考 + 清空排队任务（服务端 AGENT_INTERRUPT handler） */
+function stopAgent(agentId: string): void {
+  store.interruptAgent(agentId)
+}
+
 function openCreate(): void {
   showCreate.value = true
   emit('expand')
@@ -206,6 +216,16 @@ async function handleCreate(): Promise<void> {
           <div class="status-area">
             <span class="status-dot" :class="statusDot(agentStatus(agent.id))"></span>
             <span class="status-label">{{ statusLabel(agentStatus(agent.id)) }}</span>
+            <!-- 停止按钮：隐藏用 visibility 而非 v-if——保持 status-area 宽度恒定，
+                 不回归 6897e8e 修复的顶行布局跳动（灰点锚点不漂移） -->
+            <button
+              class="btn-retry-sm btn-stop"
+              :class="{ 'btn-stop-hidden': !canStop(agent.id) }"
+              title="停止思考并清空队列"
+              @click.stop="stopAgent(agent.id)"
+            >
+              停止
+            </button>
           </div>
         </div>
 
@@ -539,6 +559,16 @@ async function handleCreate(): Promise<void> {
      不挤压左侧 agent-info，顶行布局不跳动、灰点锚点不漂移 */
   min-width: 4.5em;
   white-space: nowrap;
+}
+
+/* 停止按钮：btn-retry-sm 风格的小号版，占位恒定（visibility 切换不改变布局） */
+.btn-stop {
+  padding: 2px 8px;
+  font-size: 10px;
+}
+
+.btn-stop-hidden {
+  visibility: hidden;
 }
 
 /* Token usage bar on card */

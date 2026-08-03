@@ -357,6 +357,34 @@ export function cancelQueuedCommand(triggerMessageId: string): number {
 }
 
 /**
+ * 用户中断（停止按钮）时调用：清空指定 Agent 的 FIFO 队列，并逐条将
+ * dispatch_state 标为 done——否则运行中清掉的队列在 server 重启后会被
+ * recoverQueuedMessages 按 queued 状态复活重新调度（回到手动改 DB 的老路）。
+ * 单条 DB 标记失败不阻塞整体清队（try/catch 逐条兜底）。
+ * @returns 实际清掉的命令数
+ */
+export function clearAgentQueue(agentId: string): number {
+  const q = agentQueues.get(agentId)
+  if (!q || q.length === 0) return 0
+  const cleared = q.length
+  for (const cmd of q) {
+    try {
+      messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
+    } catch (err: any) {
+      log.error('setDispatchState failed during queue clear (non-blocking)', {
+        agentId,
+        triggerMessageId: cmd.triggerMessageId,
+        error: err.message,
+      })
+    }
+  }
+  agentQueues.set(agentId, [])
+  updateQueueState(agentId, 0)
+  log.info('agent queue cleared by user interrupt', { agentId, cleared })
+  return cleared
+}
+
+/**
  * 撤回时用：检查是否有 Agent 正在执行（而非仅仅排队）给定的 trigger 消息。
  * 用于判断 retractionRequests 标记是否可以安全清理。
  */

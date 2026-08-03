@@ -201,6 +201,13 @@ describe('chatStore', () => {
     })
   })
 
+  describe('interruptAgent', () => {
+    it('emits AGENT_INTERRUPT with agentId', () => {
+      store.interruptAgent('a1')
+      expect(mockEmit).toHaveBeenCalledWith(Events.AGENT_INTERRUPT, { agentId: 'a1' })
+    })
+  })
+
   describe('fetchData', () => {
     it('loads agents and sessions, auto-joins first session', async () => {
       mockGetAgents.mockResolvedValue([mockAgent])
