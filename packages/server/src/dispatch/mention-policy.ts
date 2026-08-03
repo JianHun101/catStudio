@@ -78,10 +78,15 @@ export function filterAllowedMentions<T extends MentionPolicyTarget>(
     }
   }
 
-  // 计数限制：仅实施猫生效——合法目标中最多保留 1 个（每条回复 ≤1 个 agent mention）
+  // 计数限制：仅实施猫生效——合法目标中最多保留 1 个（每条回复 ≤1 个 agent mention）。
+  // 保留策略：reviewer 必保（审查链是 A2A 生命线——剥掉审核请求会让流程无声卡死，
+  // 比丢一条汇报代价大得多）；无 reviewer 才保传入顺序第一个（parseMentionsFromReply
+  // 的返回顺序是 session 注册顺序，与回复文本里的 @ 书写顺序无关）。
   if (from.role === 'implementer' && allowed.length > IMPLEMENTER_MAX_MENTIONS_PER_REPLY) {
-    const keep = allowed.slice(0, IMPLEMENTER_MAX_MENTIONS_PER_REPLY)
-    const extra = allowed.slice(IMPLEMENTER_MAX_MENTIONS_PER_REPLY)
+    const reviewerIdx = allowed.findIndex((t) => t.role === 'reviewer')
+    const keepIdx = reviewerIdx >= 0 ? reviewerIdx : 0
+    const keep = [allowed[keepIdx]]
+    const extra = allowed.filter((_, i) => i !== keepIdx)
     blocked.push(...extra.map((t) => ({ name: t.name, reason: 'count-limit' as const })))
     return { allowed: keep, blocked }
   }

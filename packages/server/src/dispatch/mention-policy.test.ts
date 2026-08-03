@@ -56,13 +56,31 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
       expect(blocked).toEqual([{ name: '图测猫', reason: 'role-not-allowed' }])
     })
 
-    it(`同 @ 两猫（均合法）→ 第二个被剥（count-limit，上限 ${IMPLEMENTER_MAX_MENTIONS_PER_REPLY}）`, () => {
+    it(`同 @ 两猫（均合法）→ 保 reviewer，另一被剥（count-limit，上限 ${IMPLEMENTER_MAX_MENTIONS_PER_REPLY}）`, () => {
       const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
         target('店长', 'store'),
         target('吐槽猫', 'reviewer'),
       ])
-      expect(names(allowed)).toEqual(['店长']) // 保留第一个
-      expect(blocked).toEqual([{ name: '吐槽猫', reason: 'count-limit' }])
+      expect(names(allowed)).toEqual(['吐槽猫']) // reviewer 优先——审查链必达
+      expect(blocked).toEqual([{ name: '店长', reason: 'count-limit' }])
+    })
+
+    it('同 @ 两猫逆序（@[吐槽猫,店长]）→ 仍保 reviewer', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('吐槽猫', 'reviewer'),
+        target('店长', 'store'),
+      ])
+      expect(names(allowed)).toEqual(['吐槽猫']) // 与文本/注册顺序无关
+      expect(blocked).toEqual([{ name: '店长', reason: 'count-limit' }])
+    })
+
+    it('同 @ 两合法目标且无 reviewer（如未来多 store）→ 保第一个', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('店长', 'store'),
+        target('副店长', 'store'),
+      ])
+      expect(names(allowed)).toEqual(['店长']) // 无 reviewer 时保传入顺序第一个
+      expect(blocked).toEqual([{ name: '副店长', reason: 'count-limit' }])
     })
 
     it('目标角色未知（老库未配）→ 放行', () => {

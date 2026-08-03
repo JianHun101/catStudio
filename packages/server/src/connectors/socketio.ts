@@ -746,20 +746,34 @@ export async function executeAgentsSerial(
         )
         const allowedNames = policy.allowed.map((a) => a.name)
         if (policy.blocked.length > 0) {
-          const blockedNames = policy.blocked.map((b) => b.name).join('、')
           log.warn('agent-to-agent mention blocked by role policy', {
             traceId,
             fromAgent: agent.name,
             fromRole: agent.role,
             blocked: policy.blocked.map((b) => `${b.name}:${b.reason}`),
           })
-          // 系统提示：点名违规与正确规则（即时反馈，不持久化进 system_prompt）
+          // 系统提示：点名违规与正确规则（即时反馈，不持久化进 system_prompt）。
+          // 文案按 reason 区分——role-not-allowed 是角色白名单违规；
+          // count-limit 是超上限（≤1 个 @），提示拆条发送而非误报违规
+          const hintParts: string[] = []
+          const roleBlocked = policy.blocked.filter((b) => b.reason === 'role-not-allowed')
+          if (roleBlocked.length > 0) {
+            hintParts.push(
+              `你 @ 的 ${roleBlocked.map((b) => b.name).join('、')} 不在你的角色允许范围内（当前可 @：${allowedTargetsDescription(agent.role)}），该 mention 已忽略`
+            )
+          }
+          const countBlocked = policy.blocked.filter((b) => b.reason === 'count-limit')
+          if (countBlocked.length > 0) {
+            hintParts.push(
+              `一条回复最多 @ 1 个 agent，你 @ 的 ${countBlocked.map((b) => b.name).join('、')} 已忽略，请拆条分别 @`
+            )
+          }
           io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
             id: uuid(),
             sessionId,
             agentId: agent.id,
             role: 'system',
-            content: `🐱 ${agent.name} 你 @ 的 ${blockedNames} 不在你的角色允许范围内（当前可 @：${allowedTargetsDescription(agent.role)}），该 mention 已忽略`,
+            content: `🐱 ${agent.name} ${hintParts.join('；')}`,
             mentions: [],
             createdAt: new Date().toISOString(),
           })
