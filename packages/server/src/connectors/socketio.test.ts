@@ -1721,6 +1721,95 @@ describe('socketio connector', () => {
     })
   })
 
+  // ─── 重启请求 agent reply 链路（agent 路径盲区修复）─────
+  // 88d5f82 只覆盖 ingest 用户消息入口；店长是 agent，其消息走 runAgentReply 的
+  // finalMsg 广播路径——此前无识别 → 按钮对店长从未生效。以下两例守护该路径
+  //（行首触发写入+广播带类型；非行首不触发，防"嵌在长汇报中间"事故回归）。
+
+  describe('重启请求 agent reply 链路', () => {
+    const execAgentCfg = {
+      id: 'agent-1',
+      name: '店长',
+      avatar: '🐱',
+      systemPrompt: 'You are a cat.',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-flash',
+      llmApiKey: 'sk-test',
+    }
+
+    beforeEach(async () => {
+      const { getAgentState } = await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-trigger',
+      })
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      vi.mocked(getAdapterForAgent).mockImplementation(() => null as any)
+      const mod = await import('./socketio.js')
+      mod.__test_resetMentionCounts()
+      // 触发消息必须存在于 DB，否则 runAgentReply 的 Window ② 撤回保护
+      // （!messageExists → retracted）会在 LLM 调用前提前返回，不走 adapter
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run('msg-trigger', 'session-1', '@店长 请处理')
+    })
+
+    it('回复以【重启请求】开头 → 写请求文件（pending）+ 广播带 messageType', async () => {
+      const mod = await import('./socketio.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '【重启请求】原因：测试重启', kind: 'text' }
+        }),
+      } as any)
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        'trace-restart-agent'
+      )
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.state).toBe('pending')
+      expect(req.sessionId).toBe('session-1')
+      expect(req.reason).toBe('测试重启')
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ messageType: 'restart_request' })
+      )
+    })
+
+    it('回复不以【重启请求】开头 → 不写请求文件、广播不带 messageType', async () => {
+      const mod = await import('./socketio.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '收到，已完成', kind: 'text' }
+        }),
+      } as any)
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        'trace-restart-agent'
+      )
+
+      expect(existsSync(RESTART_REQUEST_FILE)).toBe(false)
+      const call = mockRoomEmit.mock.calls.find((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      expect(call![1].messageType).toBeUndefined()
+    })
+  })
+
   // ─── JOIN_SESSION 重启状态推送 ─────────────────
 
   describe('JOIN_SESSION 重启状态推送', () => {

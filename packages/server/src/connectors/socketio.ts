@@ -57,6 +57,9 @@ import { emitAgentReply } from './replyBus.js'
 import {
   RESTART_PREFIX,
   RESTART_TTL_MS,
+  isRestartRequestContent,
+  extractRestartReason,
+  createRestartRequest,
   readRestartRequest,
   updateRestartRequest,
   removeRestartRequest,
@@ -1824,6 +1827,13 @@ async function runAgentReply(
     })
   }
 
+  // 重启请求识别：agent 回复以【重启请求】开头 → 广播附加 messageType（前端渲染按钮组），
+  // 并写 .restart-request 文件（state=pending，dev.js 轮询执行重启）。
+  // 与 ingest 用户路径同款——88d5f82 只覆盖了用户入口，店长是 agent 走本路径，
+  // 此前触发链从未生效（agent 路径盲区）。消息本身仍以 agent role 落库（类型不落库）。
+  const isRestartRequest = isRestartRequestContent(fullContent)
+  const restartExpiresAt = new Date(Date.now() + RESTART_TTL_MS).toISOString()
+
   const finalMsg = {
     id: msgId,
     sessionId,
@@ -1834,6 +1844,29 @@ async function runAgentReply(
     taskId: triggerMsg.taskId || undefined,
     thinkingContent: thinkingContent || undefined,
     createdAt: new Date().toISOString(),
+    ...(isRestartRequest ? { messageType: 'restart_request' as const, restartExpiresAt } : {}),
+  }
+
+  // 写请求文件（幂等：已存在跳过——同一时间只保留首个生效请求，防连发覆盖）
+  if (isRestartRequest) {
+    try {
+      createRestartRequest({
+        messageId: msgId,
+        sessionId,
+        reason: extractRestartReason(fullContent),
+        createdAt: new Date().toISOString(),
+        expiresAt: restartExpiresAt,
+        state: 'pending',
+      })
+    } catch (err: any) {
+      // 文件写失败不阻塞消息流（dev.js 轮询读不到时只是不重启，消息与按钮仍在）
+      log.warn('restart request file write failed', {
+        traceId,
+        agentId: agent.id,
+        sessionId,
+        error: err.message,
+      })
+    }
   }
 
   io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, finalMsg)
