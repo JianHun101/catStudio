@@ -1592,12 +1592,13 @@ describe('socketio connector', () => {
   // ─── RESTART_CONFIRM / RESTART_CANCEL — 重启确认机制 ─────
 
   describe('RESTART_CONFIRM', () => {
-    it('pending → state=confirmed 写回文件 + 推 RESTART_STATUS confirmed', () => {
+    it('pending → state=confirmed 写回文件 + 推 RESTART_STATUS confirmed + ack ok', () => {
       writeRestartRequest()
       const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
       expect(handlers).toBeDefined()
 
-      handlers![0]({ messageId: 'msg-restart' })
+      const ack = vi.fn()
+      handlers![0]({ messageId: 'msg-restart' }, ack)
 
       const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
       expect(req.state).toBe('confirmed')
@@ -1605,26 +1606,30 @@ describe('socketio connector', () => {
         Events.RESTART_STATUS,
         expect.objectContaining({ messageId: 'msg-restart', state: 'confirmed' })
       )
+      expect(ack).toHaveBeenCalledWith({ ok: true })
     })
 
-    it('confirmed 幂等：重复确认不报错、仍推 confirmed', () => {
+    it('confirmed 幂等：重复确认不报错、仍推 confirmed + ack ok', () => {
       writeRestartRequest({ state: 'confirmed' })
       const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
 
-      handlers![0]({ messageId: 'msg-restart' })
+      const ack = vi.fn()
+      handlers![0]({ messageId: 'msg-restart' }, ack)
 
       expect(mockSocketEmit).not.toHaveBeenCalledWith(Events.ERROR, expect.anything())
       expect(mockSocketEmit).toHaveBeenCalledWith(
         Events.RESTART_STATUS,
         expect.objectContaining({ state: 'confirmed' })
       )
+      expect(ack).toHaveBeenCalledWith({ ok: true })
     })
 
-    it('已过期 → 删文件 + ERROR + 推 expired（dev.js 不会执行）', () => {
+    it('已过期 → 删文件 + ERROR + 推 expired + ack expired（dev.js 不会执行）', () => {
       writeRestartRequest({ expiresAt: new Date(Date.now() - 1000).toISOString() })
       const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
 
-      handlers![0]({ messageId: 'msg-restart' })
+      const ack = vi.fn()
+      handlers![0]({ messageId: 'msg-restart' }, ack)
 
       expect(existsSync(RESTART_REQUEST_FILE)).toBe(false)
       expect(mockSocketEmit).toHaveBeenCalledWith(
@@ -1635,16 +1640,30 @@ describe('socketio connector', () => {
         Events.RESTART_STATUS,
         expect.objectContaining({ state: 'expired' })
       )
+      expect(ack).toHaveBeenCalledWith({ ok: false, reason: 'expired' })
     })
 
-    it('文件不存在 → ERROR 请求已失效', () => {
+    it('文件不存在 → ERROR 请求已失效 + ack missing', () => {
       const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
 
-      handlers![0]({ messageId: 'msg-restart' })
+      const ack = vi.fn()
+      handlers![0]({ messageId: 'msg-restart' }, ack)
 
       expect(mockSocketEmit).toHaveBeenCalledWith(
         Events.ERROR,
         expect.objectContaining({ message: expect.stringContaining('已失效') })
+      )
+      expect(ack).toHaveBeenCalledWith({ ok: false, reason: 'missing' })
+    })
+
+    it('ack 可选：不带 ack 回调调用不报错（旧前端兼容）', () => {
+      writeRestartRequest()
+      const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
+
+      expect(() => handlers![0]({ messageId: 'msg-restart' })).not.toThrow()
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'confirmed' })
       )
     })
   })

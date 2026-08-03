@@ -208,6 +208,61 @@ describe('chatStore', () => {
     })
   })
 
+  describe('confirmRestart', () => {
+    it('emits RESTART_CONFIRM with messageId + ack callback, sets confirming state on click', () => {
+      store.confirmRestart('m-restart')
+
+      // 点击瞬间乐观置位（按钮变「已确认，等待重启…」，无需等服务端）
+      expect(store.confirmingRestartMessageId).toBe('m-restart')
+      // emit 携带 ack 回调（第三个参数）
+      expect(mockEmit).toHaveBeenCalledWith(
+        Events.RESTART_CONFIRM,
+        { messageId: 'm-restart' },
+        expect.any(Function)
+      )
+    })
+
+    it('ack ok → 清除 confirming 状态、不弹 toast（由 RESTART_STATUS 驱动「重启中…」）', () => {
+      store.confirmRestart('m-restart')
+      const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean; reason?: string }) => void
+
+      ack({ ok: true })
+
+      expect(store.confirmingRestartMessageId).toBeNull()
+      expect(store.errorMessage).toBeNull()
+    })
+
+    it('ack 过期 → 清除 confirming 状态 + toast 已过期', () => {
+      store.confirmRestart('m-restart')
+      const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean; reason?: string }) => void
+
+      ack({ ok: false, reason: 'expired' })
+
+      expect(store.confirmingRestartMessageId).toBeNull()
+      expect(store.errorMessage).toContain('已过期')
+    })
+
+    it('ack 失效（missing）→ 清除 confirming 状态 + toast 已失效', () => {
+      store.confirmRestart('m-restart')
+      const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean; reason?: string }) => void
+
+      ack({ ok: false, reason: 'missing' })
+
+      expect(store.confirmingRestartMessageId).toBeNull()
+      expect(store.errorMessage).toContain('已失效')
+    })
+
+    it('ack 缺失（旧 server 无回调）→ 清除 confirming 状态、不弹 toast（既有事件流兜底）', () => {
+      store.confirmRestart('m-restart')
+      const ack = mockEmit.mock.calls[0][2] as (ack: undefined) => void
+
+      ack(undefined)
+
+      expect(store.confirmingRestartMessageId).toBeNull()
+      expect(store.errorMessage).toBeNull()
+    })
+  })
+
   describe('fetchData', () => {
     it('loads agents and sessions, auto-joins first session', async () => {
       mockGetAgents.mockResolvedValue([mockAgent])

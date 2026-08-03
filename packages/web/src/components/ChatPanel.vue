@@ -806,18 +806,26 @@ function statusLabelZh(status: string): string {
                     />
                   </div>
                   <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
-                  <!-- 重启确认按钮组：pending 显示 [确认重启][取消]；confirmed 显示「重启中…」；取消/过期/none 隐藏 -->
+                  <!-- 重启确认按钮组：pending 显示 [确认重启][取消]（点击后 confirming 中显示「已确认，等待重启…」）；confirmed 显示「重启中…」；取消/过期/none 隐藏 -->
                   <div v-if="msg.messageType === 'restart_request'" class="restart-actions">
                     <template v-if="restartStateFor(msg) === 'pending'">
-                      <button class="btn-restart" @click="store.confirmRestart(msg.id)">
-                        确认重启
-                      </button>
-                      <button
-                        class="btn-restart btn-restart-cancel"
-                        @click="store.cancelRestart(msg.id)"
+                      <span
+                        v-if="store.confirmingRestartMessageId === msg.id"
+                        class="restart-label"
                       >
-                        取消
-                      </button>
+                        已确认，等待重启…
+                      </span>
+                      <template v-else>
+                        <button class="btn-restart" @click="store.confirmRestart(msg.id)">
+                          确认重启
+                        </button>
+                        <button
+                          class="btn-restart btn-restart-cancel"
+                          @click="store.cancelRestart(msg.id)"
+                        >
+                          取消
+                        </button>
+                      </template>
                     </template>
                     <span v-else-if="restartStateFor(msg) === 'confirmed'" class="restart-label">
                       重启中…

@@ -389,40 +389,52 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
     // ─── Restart confirm / cancel ─────────────────
 
-    socket.on(Events.RESTART_CONFIRM, (data: { messageId: string }) => {
-      const req = readRestartRequest()
-      if (!req) {
-        socket.emit(Events.ERROR, { message: '重启请求已失效，请店长重新发起' })
-        return
-      }
-      if (Date.now() > new Date(req.expiresAt).getTime()) {
-        // 过期：清理文件 + 通知前端隐藏按钮
-        removeRestartRequest()
-        log.info('restart request expired', { messageId: req.messageId, sessionId: req.sessionId })
-        socket.emit(Events.ERROR, { message: '重启请求已过期（10 分钟有效），请店长重新发起' })
+    socket.on(
+      Events.RESTART_CONFIRM,
+      (
+        data: { messageId: string },
+        ack?: (res: { ok: boolean; reason?: 'missing' | 'expired' }) => void
+      ) => {
+        const req = readRestartRequest()
+        if (!req) {
+          socket.emit(Events.ERROR, { message: '重启请求已失效，请店长重新发起' })
+          ack?.({ ok: false, reason: 'missing' })
+          return
+        }
+        if (Date.now() > new Date(req.expiresAt).getTime()) {
+          // 过期：清理文件 + 通知前端隐藏按钮
+          removeRestartRequest()
+          log.info('restart request expired', {
+            messageId: req.messageId,
+            sessionId: req.sessionId,
+          })
+          socket.emit(Events.ERROR, { message: '重启请求已过期（10 分钟有效），请店长重新发起' })
+          socket.emit(Events.RESTART_STATUS, {
+            sessionId: req.sessionId,
+            messageId: req.messageId,
+            state: 'expired',
+          })
+          ack?.({ ok: false, reason: 'expired' })
+          return
+        }
+        if (req.state === 'pending') {
+          // pending → confirmed：dev.js 轮询到 confirmed 且新鲜即执行重启
+          updateRestartRequest({ ...req, state: 'confirmed' })
+          log.info('restart request confirmed', {
+            messageId: req.messageId,
+            sessionId: req.sessionId,
+          })
+        }
+        // 已 confirmed → 幂等重推（重复点击不报错）
         socket.emit(Events.RESTART_STATUS, {
           sessionId: req.sessionId,
           messageId: req.messageId,
-          state: 'expired',
+          state: 'confirmed',
+          expiresAt: req.expiresAt,
         })
-        return
+        ack?.({ ok: true })
       }
-      if (req.state === 'pending') {
-        // pending → confirmed：dev.js 轮询到 confirmed 且新鲜即执行重启
-        updateRestartRequest({ ...req, state: 'confirmed' })
-        log.info('restart request confirmed', {
-          messageId: req.messageId,
-          sessionId: req.sessionId,
-        })
-      }
-      // 已 confirmed → 幂等重推（重复点击不报错）
-      socket.emit(Events.RESTART_STATUS, {
-        sessionId: req.sessionId,
-        messageId: req.messageId,
-        state: 'confirmed',
-        expiresAt: req.expiresAt,
-      })
-    })
+    )
 
     socket.on(Events.RESTART_CANCEL, () => {
       const req = readRestartRequest()

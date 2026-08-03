@@ -53,6 +53,8 @@ export const useChatStore = defineStore('chat', () => {
   const loadingMessages = ref(false) // session 切换时等待历史消息加载
   /** 重启请求按钮状态（messageId → pending/confirmed/none；none=隐藏按钮） */
   const restartStates = ref<Map<string, 'pending' | 'confirmed' | 'none'>>(new Map())
+  /** 确认重启进行中（点击瞬间置位，ack / RESTART_STATUS / ERROR 到达后清除） */
+  const confirmingRestartMessageId = ref<string | null>(null)
   const pendingHandoffSummary = ref<string | null>(null) // handoff 摘要，等待 SESSION_HISTORY 到达后注入
   let handoffJoining = false // S8: 防止 handoff 重入（两次 SESSION_HANDOFF 先后到达时相互覆盖）
 
@@ -231,10 +233,28 @@ export const useChatStore = defineStore('chat', () => {
     socket.emit(Events.MESSAGE_RETRACT, { sessionId, messageId })
   }
 
-  /** 确认重启（dev.js 轮询 .restart-request 执行） */
+  /**
+   * 确认重启（dev.js 轮询 .restart-request 执行）。
+   * 点击瞬间置位 confirming 状态（按钮变「已确认，等待重启…」，无需等服务端即有反馈）；
+   * 服务端 ack 回传结果：成功由既有 RESTART_STATUS confirmed 驱动「重启中…」，
+   * 失效/过期 → toast 明示 + 恢复可点。ack 缺失（旧 server）时由 RESTART_STATUS/ERROR 既有事件流兜底。
+   */
   function confirmRestart(messageId: string): void {
     const { socket } = useSocket()
-    socket.emit(Events.RESTART_CONFIRM, { messageId })
+    confirmingRestartMessageId.value = messageId
+    socket.emit(
+      Events.RESTART_CONFIRM,
+      { messageId },
+      (ack: { ok: boolean; reason?: string } | undefined) => {
+        if (confirmingRestartMessageId.value === messageId) confirmingRestartMessageId.value = null
+        if (!ack || ack.ok) return // 成功（或旧 server 无 ack 回调）→ 既有事件流驱动
+        showError(
+          ack.reason === 'expired'
+            ? '重启请求已过期（10 分钟有效），请店长重新发起'
+            : '重启请求已失效，请店长重新发起'
+        )
+      }
+    )
   }
 
   /** 取消重启 */
@@ -346,8 +366,9 @@ export const useChatStore = defineStore('chat', () => {
       serverOnline.value = false
     })
 
-    // 服务端错误通知 → toast 提示
+    // 服务端错误通知 → toast 提示（同时解除确认中状态——ack 丢失时 ERROR 是兜底信号）
     socket.on(Events.ERROR, (data: { message: string }) => {
+      confirmingRestartMessageId.value = null
       showError(data.message)
     })
 
@@ -552,6 +573,8 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(
       Events.RESTART_STATUS,
       (data: { sessionId: string; messageId: string | null; state: string }) => {
+        // 状态到达即解除确认中（服务端权威状态接管按钮显示）
+        confirmingRestartMessageId.value = null
         if (data.state === 'confirmed' && data.messageId) {
           restartStates.value.set(data.messageId, 'confirmed')
           return
@@ -650,6 +673,7 @@ export const useChatStore = defineStore('chat', () => {
     clearSessionMessages,
     retractMessage,
     restartStates,
+    confirmingRestartMessageId,
     confirmRestart,
     cancelRestart,
     interruptAgent,

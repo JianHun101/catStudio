@@ -44,3 +44,22 @@ describe('ChatPanel animation setup', () => {
     }
   })
 })
+
+describe('ChatPanel restart confirm feedback', () => {
+  it('pending 态显示 [确认重启][取消] 按钮，点击走 store.confirmRestart', () => {
+    expect(source).toContain('store.confirmRestart(msg.id)')
+    expect(source).toContain('store.cancelRestart(msg.id)')
+  })
+
+  it('confirming 中（store.confirmingRestartMessageId === msg.id）显示「已确认，等待重启…」脉冲样式', () => {
+    expect(source).toContain('store.confirmingRestartMessageId === msg.id')
+    expect(source).toContain('已确认，等待重启…')
+    // 复用 restart-label 脉冲样式（点击即有反馈，无需等服务端）
+    expect(source).toMatch(/已确认，等待重启…/)
+  })
+
+  it('confirmed 态仍显示「重启中…」restart-label', () => {
+    expect(source).toContain('重启中…')
+    expect(source).toContain('restart-label')
+  })
+})
