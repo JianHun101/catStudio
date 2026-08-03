@@ -4,6 +4,9 @@ node_modules/
 # 环境变量（包含 API Key，绝对不能提交）
 .env
 
+# Claude Code 本地设置（本机许可配置，曾 auto-commit 卷回 bcbf5c5 已 rebase 摘除——本地文件不入库）
+.claude/settings.local.json
+
 # 构建产物
 dist/
 .vite/
