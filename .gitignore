@@ -50,3 +50,5 @@ scripts/shots/
 scripts/scripts/
 # ui-screenshot 产物（落在 packages/server/data/ui-shots/，曾误提交 b43842e 已回滚；旧 shot-1785491233400.png 仍跟踪待批 untrack）
 packages/server/data/ui-shots/
+# 会话调试快照（tmp_msgs*/tmp_sessions，untrack 后防 server auto-commit 的 git add -A 卷回——3cb2823 后 5 个 json 无规则被卷回 8331cd6，已回滚补规则根治）
+packages/server/data/tmp_*.json
