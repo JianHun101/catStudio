@@ -43,20 +43,25 @@ export interface RestartDoneFile {
   completedAt: string // ISO 8601
 }
 
-/** 检测消息内容是否为重启请求（前缀精确匹配，行首语义） */
+/**
+ * 检测消息内容是否为重启请求——行首【重启请求】或任意位置「【重启请求】原因：」即命中。
+ * 行首精确匹配兼容历史消息；嵌中命中覆盖「叙述 + 请求合并」的真实 agent 产出模式
+ * （agent 回复天然带叙述前文，行首 startsWith 与产出模式不匹配——第六次行首事故根因）。
+ * 误触发面：仅复盘文字也写「【重启请求】原因：」才会误触发，幂等 + 过期兜底。
+ */
 export function isRestartRequestContent(content: string): boolean {
-  return content.startsWith(RESTART_PREFIX)
+  return content.startsWith(RESTART_PREFIX) || content.includes(`${RESTART_PREFIX}原因：`)
 }
 
-/** 从「【重启请求】原因：xxx」提取原因（去掉前缀与「原因：」壳，缺省兜底） */
+/** 从「…【重启请求】原因：xxx」提取原因（从标记后提取至段落行尾，嵌中/行首通用，缺省兜底） */
 export function extractRestartReason(content: string): string {
-  return (
-    content
-      .replace(RESTART_PREFIX, '')
-      .trim()
-      .replace(/^原因[:：]\s*/, '')
-      .trim() || '用户请求'
-  )
+  const idx = content.indexOf(RESTART_PREFIX)
+  if (idx === -1) return '用户请求'
+  const after = content.slice(idx + RESTART_PREFIX.length).trim()
+  // m 标志：$ 匹配行尾——reason 只取到段落结束（下个换行）
+  const reasonMatch = after.match(/^原因[:：]\s*(.*)$/m)
+  if (reasonMatch) return reasonMatch[1].trim() || '用户请求'
+  return after || '用户请求'
 }
 
 /** 读请求文件并解析（文件不存在/JSON 损坏 → null） */

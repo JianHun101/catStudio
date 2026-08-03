@@ -1800,6 +1800,24 @@ describe('socketio connector', () => {
       expect(call![1].messageType).toBeUndefined()
     })
 
+    it('嵌中命中：叙述 + 「：【重启请求】原因：」合并消息 → 写文件 + 广播带类型（第六次行首事故根治）', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '收到。先自查一遍：【重启请求】原因：验证嵌中识别',
+        mentions: [],
+      })
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.state).toBe('pending')
+      expect(req.reason).toBe('验证嵌中识别')
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ messageType: 'restart_request' })
+      )
+    })
+
     it('请求文件已存在 → 第二条不覆盖（保留首个生效请求）', async () => {
       writeRestartRequest({ messageId: 'first-request' })
       const handlers = socketHandlers.get(Events.SEND_MESSAGE)
@@ -1901,6 +1919,32 @@ describe('socketio connector', () => {
       expect(existsSync(RESTART_REQUEST_FILE)).toBe(false)
       const call = mockRoomEmit.mock.calls.find((c: any[]) => c[0] === Events.NEW_MESSAGE)
       expect(call![1].messageType).toBeUndefined()
+    })
+
+    it('嵌中命中：叙述 + 请求合并的回复 → 写请求文件 + 广播带类型（agent 真实产出模式）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '收到。链路核实完毕：【重启请求】原因：服务器需要重启', kind: 'text' }
+        }),
+      } as any)
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        'trace-restart-agent'
+      )
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.state).toBe('pending')
+      expect(req.reason).toBe('服务器需要重启')
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ messageType: 'restart_request' })
+      )
     })
   })
 

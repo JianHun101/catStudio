@@ -56,7 +56,6 @@ import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../hando
 import { ingestUserMessage } from './ingest.js'
 import { emitAgentReply } from './replyBus.js'
 import {
-  RESTART_PREFIX,
   RESTART_TTL_MS,
   isRestartRequestContent,
   extractRestartReason,
@@ -149,7 +148,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 其他以【重启请求】开头的历史消息不附加（幽灵按钮：点它必报「已失效」）
       const isActiveRestart = (row: MessageRow): boolean => {
         if (!restartReq) return false
-        if (row.content.startsWith(RESTART_PREFIX) === false) return false
+        if (!isRestartRequestContent(row.content)) return false
         return restartReq.sessionId === row.session_id && restartReq.messageId === row.id
       }
 
