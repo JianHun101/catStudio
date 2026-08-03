@@ -107,11 +107,8 @@ export function upsertAgent(
     ON CONFLICT(name) DO UPDATE SET
       avatar = excluded.avatar,
       system_prompt = excluded.system_prompt,
-      llm_provider = excluded.llm_provider,
-      llm_model = excluded.llm_model,
-      llm_api_key = excluded.llm_api_key,
-      llm_base_url = excluded.llm_base_url,
-      effort_level = excluded.effort_level,
+      -- 运行配置（llm_*/effort_level）仅首次初始化写入，UPDATE 不覆盖：
+      -- DB 是运行配置的权威（用户直改库永久有效），seed 重跑不得把 5 猫 key 覆盖回 seed 默认值
       skill_modules = excluded.skill_modules,
       role = excluded.role,
       updated_at = datetime('now')

@@ -26,6 +26,9 @@ function seed(): void {
 
   if (isReset) {
     console.log('🔄 --reset: 清空所有数据…')
+    console.log(
+      '   ⚠️ 清库重建将恢复 seed 默认运行配置（llm_provider/model/api_key/base_url/effort）——运行中直改 DB 的配置会被 seed 默认值覆盖'
+    )
     messagesRepo.deleteAllMessages()
     execLogsRepo.deleteAllExecutionLogs()
     sessionsRepo.deleteAllSessions()
