@@ -107,6 +107,10 @@ process.env.ONEBOT_API_BASE ??= 'http://127.0.0.1:3000'
 // 留空不校验——默认内网部署，向后兼容）
 process.env.ONEBOT_TOKEN ??= ''
 
+// ONEBOT_FETCH_TIMEOUT_MS — OneBot 出站 fetch 超时毫秒（P4 #2：NapCat 假死防悬挂；
+// 超时走 log.warn 不重试，与出站失败语义一致）
+process.env.ONEBOT_FETCH_TIMEOUT_MS ??= '10000'
+
 // ─── 会话交接配置 ──────────────────────────────
 // HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
 process.env.HANDOFF_ENABLED ??= 'true'

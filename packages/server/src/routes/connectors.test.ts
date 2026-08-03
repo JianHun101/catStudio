@@ -10,12 +10,28 @@ import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository, connectorBindings as bindingsRepo } from '../db/repository/index.js'
 import type { FastifyInstance } from 'fastify'
 import { saveMessageMemory } from '../memory/index.js'
+import { __test_resetOneBotDedup } from './connectors.js'
 
-// Mock socketio connector（ingest 顶层 import 需要可解析；getIO null → 广播/执行跳过）
+// Mock socketio connector（ingest 顶层 import 需要可解析；getIO null → 广播/执行跳过）。
+// P4 顺带（AC2-1 mock 退化值修正）：rowToAgent 补真实字段映射——此前 vi.fn() 返回
+// undefined → validAgents=[] → saveMessageMemory 断言第 4 参收到退化值 []（真实环境
+// 应为 ['agent-ds']）。与 socketio.ts rowToAgent 同构，删 mock 时断言不用改。
 vi.mock('../connectors/socketio.js', () => ({
   getIO: vi.fn(() => null),
   createSocketIO: vi.fn(),
-  rowToAgent: vi.fn(),
+  rowToAgent: vi.fn((row: any) => ({
+    id: row.id,
+    name: row.name,
+    avatar: row.avatar,
+    systemPrompt: row.system_prompt,
+    llmProvider: row.llm_provider,
+    llmModel: row.llm_model,
+    llmApiKey: row.llm_api_key,
+    llmBaseUrl: row.llm_base_url || undefined,
+    effortLevel: row.effort_level || undefined,
+    skillModules: JSON.parse(row.skill_modules || '[]'),
+    role: row.role || undefined,
+  })),
   executeAgentsSerial: vi.fn(() => Promise.resolve()),
 }))
 
@@ -65,6 +81,11 @@ describe('Connector Routes', () => {
   beforeEach(async () => {
     process.env.ONEBOT_ENABLED = 'true'
     vi.clearAllMocks()
+    // AC2-1 mock 修正后 validAgents 非空 → dispatch 真实执行会占用槽位，
+    // 用例间必须复位（CLAUDE.md 约定：Dispatch __test_reset() between cases）
+    const { __test_reset } = await import('../dispatch/index.js')
+    __test_reset()
+    __test_resetOneBotDedup() // P4 #5: 去重表是模块级单例，用例间清空
     setDb(createTestDb())
     initRepository(getDb())
     app = await buildTestApp()
@@ -164,6 +185,53 @@ describe('Connector Routes', () => {
       })
       expect(res2.statusCode).toBe(404)
     })
+
+    it('P4 #4-1: 数字 externalId（QQ 群号/QQ 号天然是数字）→ 201 且落库仍 string', async () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES ('session-n', 'n', '[]', datetime('now'), datetime('now'))`
+      ).run()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/bindings',
+        payload: { platform: 'qq', externalType: 'group', externalId: 555, sessionId: 'session-n' },
+      })
+      expect(res.statusCode).toBe(201)
+      const body = JSON.parse(res.body)
+      expect(body.binding.external_id).toBe('555') // 存储仍 string——与入站查询对称
+      expect(typeof body.binding.external_id).toBe('string')
+      // 数字 externalId 的 DELETE 同样归一化命中
+      const resDel = await app.inject({
+        method: 'DELETE',
+        url: '/api/connectors/bindings',
+        payload: { platform: 'qq', externalType: 'group', externalId: 555 },
+      })
+      expect(resDel.statusCode).toBe(200)
+      expect(bindingsRepo.getConnectorBinding('qq', 'group', '555')).toBeUndefined()
+    })
+
+    it('P4 #4-2: 非数字 externalId → 400（POST 与 DELETE 两处校验）', async () => {
+      insertBoundFixture()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/bindings',
+        payload: {
+          platform: 'qq',
+          externalType: 'group',
+          externalId: 'abc',
+          sessionId: 'session-qq-1',
+        },
+      })
+      expect(res.statusCode).toBe(400)
+
+      const resDel = await app.inject({
+        method: 'DELETE',
+        url: '/api/connectors/bindings',
+        payload: { platform: 'qq', externalType: 'group', externalId: 'abc' },
+      })
+      expect(resDel.statusCode).toBe(400)
+    })
   })
 
   describe('OneBot webhook', () => {
@@ -194,12 +262,14 @@ describe('Connector Routes', () => {
       expect(JSON.parse(rows[0].mentions)).toEqual(['ds猫'])
       expect(rows[0].content).toBe('[小明]: @ds猫 帮我看看')
 
-      // 吐槽猫观察点 #1 护栏：OneBot 真实对话必须进向量记忆库
+      // 吐槽猫观察点 #1 护栏：OneBot 真实对话必须进向量记忆库。
+      // P4 顺带（AC2-1 mock 退化值修正）：第 4 参不再是退化值 []——
+      // rowToAgent mock 补真实映射后 validAgents=['agent-ds']（真实环境一致）
       expect(saveMessageMemory).toHaveBeenCalledWith(
         'session-qq-1',
         '[小明]: @ds猫 帮我看看',
         expect.any(String),
-        []
+        ['agent-ds']
       )
     })
 
@@ -303,6 +373,70 @@ describe('Connector Routes', () => {
         url: '/api/connectors/onebot/webhook',
       })
       expect(res.statusCode).toBe(400)
+    })
+
+    // ─── P4 #5: message_id 去重 ──────────────────
+    // NapCat 网络层重投（200 未达超时重投）→ 同一条消息处理两次 → 重复摄入。
+    // 进程内 LRU（TTL 10 分钟 + 容量 1000），check+insert 在入口同步段完成。
+
+    it('P4 #5-1: number 型 message_id 命中（OneBot v11 标准类型不跳过）', async () => {
+      insertBoundFixture()
+      const ev = groupEvent({ message_id: 30001000 }) // NapCat 上报标准 number 型
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: ev,
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(1)
+    })
+
+    it('P4 #5-2: 同 id 二次投递（重投窗口并发）→ 去重命中仅处理一次', async () => {
+      insertBoundFixture()
+      const ev = groupEvent({ message_id: '30001001' }) // string 型实现同样归一化命中
+      const res1 = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: ev,
+      })
+      expect(res1.statusCode).toBe(200)
+      expect(countMessages()).toBe(1)
+      const res2 = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: ev,
+      })
+      expect(res2.statusCode).toBe(200)
+      expect(countMessages()).toBe(1) // 未重复摄入
+    })
+
+    it('P4 #5-3: undefined message_id → 跳过查重，正常处理', async () => {
+      insertBoundFixture()
+      const ev = groupEvent() // 不带 message_id
+      await app.inject({ method: 'POST', url: '/api/connectors/onebot/webhook', payload: ev })
+      await app.inject({ method: 'POST', url: '/api/connectors/onebot/webhook', payload: ev })
+      expect(countMessages()).toBe(2) // 无 id 不误杀，两条都处理
+    })
+
+    it('P4 #5-4: 过期后可再次处理（Date.now 时间戳 + check/insert 顺带清过期）', async () => {
+      insertBoundFixture()
+      // 只 fake Date（toFake: ['Date']）——app.inject 依赖真实定时器，
+      // 全量 fake 会让注入管线挂起；Date 被 fake 后 setSystemTime 可拨动时钟
+      vi.useFakeTimers({ toFake: ['Date'] })
+      try {
+        const ev = groupEvent({ message_id: 30001002 })
+        await app.inject({ method: 'POST', url: '/api/connectors/onebot/webhook', payload: ev })
+        expect(countMessages()).toBe(1)
+        // 未过期 → 命中
+        await app.inject({ method: 'POST', url: '/api/connectors/onebot/webhook', payload: ev })
+        expect(countMessages()).toBe(1)
+        // 快进 10 分钟 → 过期项被 check/insert 的清过期扫掉 → 可再次处理
+        vi.setSystemTime(Date.now() + 10 * 60 * 1000)
+        await app.inject({ method: 'POST', url: '/api/connectors/onebot/webhook', payload: ev })
+        expect(countMessages()).toBe(2)
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 

@@ -1964,7 +1964,10 @@ async function runAgentReply(
 
   io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, finalMsg)
 
-  // P3: 回复经 replyBus 转发到外部平台（OneBot 出站订阅后发回 QQ 绑定群/私聊）
+  // P3: 回复经 replyBus 转发到外部平台（OneBot 出站订阅后发回 QQ 绑定群/私聊）。
+  // P4 #3（契约钉死）：此处无条件触发——A2A 互 @ 产生的回复同样走 runAgentReply、
+  // 同样全量转发 QQ。语义：猫咖工作过程公开可见（公开营业）；将来若要区分
+  // 「直接响应群友」的回复需要链路追踪（哪个回复对应哪条群友消息），复杂度远超收益，不做。
   emitAgentReply({
     id: msgId,
     sessionId,

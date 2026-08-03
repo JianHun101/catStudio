@@ -14,6 +14,7 @@ import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 import { RESTART_REQUEST_FILE, RESTART_DONE_FILE } from '../restart-request.js'
+import type { AgentReplyMessage } from './replyBus.js'
 
 // ═══ Mock all external dependencies ═══
 
@@ -1046,6 +1047,71 @@ describe('socketio connector', () => {
         1
       )
       expect(mod.__getMentionCount('trace-a2a', 'agent-1')).toBe(1)
+    })
+
+    it('P4 #3: A2A 链回复（depth=1）同样触发 replyBus 转发（契约钉死）', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch, getAgentState } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const { onAgentReply } = await import('./replyBus.js')
+
+      seedSecondAgent(getDb())
+
+      // currentTrigger 匹配 → agent-1 正常执行
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-a2a-fwd',
+      })
+      // agent-1 的回复 @吐槽猫（A2A 上下文），继续触发 A2A 调度
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '@吐槽猫 请审查', kind: 'text' }
+        }),
+      } as any)
+      vi.mocked(parseMentionsFromReply).mockImplementation(() => ['吐槽猫'])
+      // 触发消息必须存在于 DB（Window ② 撤回保护）
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run('msg-a2a-fwd', 'session-1', '@店长 派活')
+
+      // 订阅 replyBus——捕获 A2A 回复触发的转发事件
+      const forwarded: AgentReplyMessage[] = []
+      const unsub = onAgentReply((m) => forwarded.push(m))
+      try {
+        await mod.executeAgentsSerial(
+          mockIo as any,
+          'session-1',
+          [execAgentCfg as any],
+          { id: 'msg-a2a-fwd', content: '@店长 派活', mentions: ['店长'] },
+          'trace-a2a-fwd',
+          1 // depth=1：A2A 链上下文
+        )
+      } finally {
+        unsub()
+        vi.mocked(parseMentionsFromReply).mockImplementation(() => []) // 恢复默认，防污染后续用例
+      }
+
+      // ① 该回复继续触发了 A2A 调度（吐槽猫，depth+1=2）——确认是 A2A 链回复
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.anything(),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-2' })]),
+        'trace-a2a-fwd',
+        2
+      )
+      // ② 契约钉死：A2A 回复同样无条件触发 replyBus（emitAgentReply 无过滤，
+      //    全量转发 QQ——猫咖工作过程公开可见）
+      expect(forwarded).toHaveLength(1)
+      expect(forwarded[0].content).toBe('@吐槽猫 请审查')
+      expect(forwarded[0].sessionId).toBe('session-1')
+      expect(forwarded[0].agentName).toBe('店长')
     })
   })
 

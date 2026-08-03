@@ -150,14 +150,18 @@ async function main(): Promise<void> {
   await app.listen({ port: PORT, host: HOST })
   const io = createSocketIO(app.server)
 
-  // P3: OneBot 出站转发（QQ 回复）——ONEBOT_ENABLED=false 时内部不订阅，零开销
-  startOneBotOutbound()
+  // P3: OneBot 出站转发（QQ 回复）——ONEBOT_ENABLED=false 时内部不订阅，零开销。
+  // P4 #1: 接收返回的取消订阅函数——shutdown 时调用，防 replyBus 订阅泄漏
+  // （EventEmitter 随进程销毁，但显式解绑防热启动/测试进程内多实例的重复触发）
+  const stopOneBotOutbound = startOneBotOutbound()
 
   log.info('server started', { host: HOST, port: PORT })
 
   // 6. 优雅关闭
   const shutdown = async () => {
     log.info('shutting down...')
+    // P4 #1: 先取消 OneBot 出站订阅，停止 replyBus 投递（关停后不应再发 QQ）
+    stopOneBotOutbound?.()
     io.close()
     await app.close()
     await closeRedis()

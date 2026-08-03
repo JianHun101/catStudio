@@ -26,6 +26,16 @@ function onebotEnabled(): boolean {
 }
 
 /**
+ * OneBot 出站 fetch 超时（毫秒）——P4 #2：NapCat 假死（accept 不响应）时防止
+ * fetch 悬挂卡住该会话后续绑定（发送是 for 循环逐条 await，悬挂即慢泄漏）。
+ * 默认 10s，ONEBOT_FETCH_TIMEOUT_MS env 可覆盖。
+ */
+function onebotFetchTimeoutMs(): number {
+  const v = parseInt(process.env.ONEBOT_FETCH_TIMEOUT_MS || '10000', 10)
+  return Number.isFinite(v) && v > 0 ? v : 10000
+}
+
+/**
  * 启动出站转发：订阅 replyBus。
  * @returns 取消订阅函数（测试与优雅关闭用）；未启用时返回 null
  */
@@ -68,6 +78,9 @@ export async function deliverAgentReply(msg: AgentReplyMessage): Promise<number>
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        // P4 #2: AbortSignal.timeout 超时拒绝（name === 'TimeoutError'）自然进下方
+        // catch 走 log.warn 不重试——与出站失败语义一致
+        signal: AbortSignal.timeout(onebotFetchTimeoutMs()),
       })
       if (!res.ok) {
         log.warn('onebot send failed', {

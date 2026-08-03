@@ -52,6 +52,7 @@ describe('onebotOutbound', () => {
     vi.unstubAllGlobals()
     delete process.env.ONEBOT_API_BASE
     delete process.env.ONEBOT_ENABLED
+    delete process.env.ONEBOT_FETCH_TIMEOUT_MS
     resetDb()
   })
 
@@ -139,5 +140,33 @@ describe('onebotOutbound', () => {
     emitAgentReply(msg())
     await new Promise((r) => setTimeout(r, 10))
     expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('P4 #2: fetch 悬挂（NapCat 假死）→ AbortSignal.timeout 超时进 catch，不卡住投递', async () => {
+    insertBindings()
+    process.env.ONEBOT_FETCH_TIMEOUT_MS = '30' // env 可覆盖——测试设小值，不真等 10s
+    // 模拟 NapCat 假死：fetch 悬挂——仅当 signal abort 时以 TimeoutError 拒绝
+    //（与真实 fetch 行为一致；若 signal 未接线，竞速守卫 2s 后失败，测试必红）
+    vi.mocked(fetch).mockImplementation(
+      (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+          )
+        })
+    )
+    const delivered = await Promise.race([
+      deliverAgentReply(msg()),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('deliverAgentReply 未超时返回——signal 未接线')), 2000)
+      ),
+    ])
+    // 超时自然进现有 catch（TimeoutError 走 log.warn 不重试）→ 无投递
+    expect(delivered).toBe(0)
+    // 断言 AbortSignal 已接线到 fetch
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      'http://napcat:3000/send_group_msg',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
   })
 })

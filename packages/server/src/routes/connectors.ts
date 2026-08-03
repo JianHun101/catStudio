@@ -20,6 +20,60 @@ const log = createLogger('connectors')
 /** 当前接入的外部平台标识（绑定表 platform 字段）——OneBot 承载的即 QQ */
 const PLATFORM_QQ = 'qq'
 
+/**
+ * P4 #4: externalId 归一化——QQ 群号/QQ 号天然是数字（调用方传 JSON number 直接 400 是
+ * 不对称缺口：入站侧统一 String() 归一化查询）。接受 string | number，String() 归一化 +
+ * 纯数字校验（/^\d+$/）。存储仍 string——与入站查询（handleOneBotEvent 同款归一化）对称。
+ * @returns 合法时返回归一化 string；缺失/类型非法/含非数字 返回 null
+ */
+function normalizeExternalId(externalId: unknown): string | null {
+  if (typeof externalId !== 'string' && typeof externalId !== 'number') return null
+  const s = String(externalId)
+  return /^\d+$/.test(s) ? s : null
+}
+
+// ─── P4 #5: webhook 消息去重 ────────────────────────
+// NapCat 网络层重投（200 未达超时重投）会让同一条消息处理两次 → 重复摄入 +
+// agent 重复回复 + 重复记忆。进程内 LRU 去重与进程生命周期匹配（重启后重投窗口早过，
+// 无需落 DB）。边界：message_id 缺失/undefined/null → 跳过查重不误杀。
+// 已知残余（非回归）：200 丢失 + 重启恰好落在 NapCat 重投窗口（秒级~10s）内双瞬态
+// 叠加时可能双处理——修复前就存在的行为（原来压根无去重），内存方案不做持久化。
+const DEDUP_TTL_MS = 10 * 60 * 1000 // 10 分钟
+const DEDUP_MAX_SIZE = 1000 // 容量上限，驱逐最旧
+/** message_id → 首次处理时间戳（Date.now() 逐条记，check/insert 时顺带清过期项） */
+const dedupSeen = new Map<string, number>()
+
+/**
+ * 去重检查 + 标记。必须在 handleOneBotEvent 入口第一个 await 之前同步完成——
+ * 重投窗口内两条请求并发到达（200 未达超时重投是秒级窗口），JS 单线程下
+ * 同步段 check+insert 天然原子，无竞态。
+ */
+function isDuplicateMessage(event: OneBotMessageEvent): boolean {
+  const raw = event.message_id
+  // 缺失/非 string|number → 跳过查重不误杀（notice 等事件无 message_id 自然跳过）
+  if (raw === undefined || raw === null) return false
+  const key = String(raw) // OneBot v11 标准 message_id 为 number——归一化后键稳定
+  const now = Date.now()
+  // 顺带清过期项（不能只有容量驱逐——否则「过期后可再次处理」无法验证/发生）
+  for (const [k, ts] of dedupSeen) {
+    if (now - ts >= DEDUP_TTL_MS) dedupSeen.delete(k)
+  }
+  if (dedupSeen.has(key)) return true
+  dedupSeen.set(key, now)
+  // 容量上限：驱逐最旧（Map 迭代序 = 插入序）。极端高频（>100 条/分）下驱逐
+  // 会早于 TTL 到期——但重投窗口是秒级，驱逐最旧条目，影响趋零
+  if (dedupSeen.size > DEDUP_MAX_SIZE) {
+    const oldest = dedupSeen.keys().next().value
+    if (oldest !== undefined) dedupSeen.delete(oldest)
+  }
+  return false
+}
+
+/** 测试钩子：清空去重表（仅测试用，生产路径不调用） */
+export function __test_resetOneBotDedup(): void {
+  dedupSeen.clear()
+}
+
 function onebotEnabled(): boolean {
   return process.env.ONEBOT_ENABLED !== 'false'
 }
@@ -37,15 +91,17 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
     if (!body || typeof body !== 'object') {
       return reply.status(400).send({ error: 'Request body is required' })
     }
-    const { platform, externalType, externalId, sessionId } = body
+    const { platform, externalType, sessionId } = body
     if (typeof platform !== 'string' || !platform) {
       return reply.status(400).send({ error: 'platform is required (string)' })
     }
     if (externalType !== 'group' && externalType !== 'private') {
       return reply.status(400).send({ error: "externalType must be 'group' or 'private'" })
     }
-    if (typeof externalId !== 'string' || !externalId) {
-      return reply.status(400).send({ error: 'externalId is required (string)' })
+    // P4 #4: externalId 接受 string | number（QQ 群号/QQ 号天然是数字），归一化 + 纯数字校验
+    const externalId = normalizeExternalId(body.externalId)
+    if (!externalId) {
+      return reply.status(400).send({ error: 'externalId is required (numeric string or number)' })
     }
     if (typeof sessionId !== 'string' || !sessionId) {
       return reply.status(400).send({ error: 'sessionId is required (string)' })
@@ -76,15 +132,17 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
     if (!body || typeof body !== 'object') {
       return reply.status(400).send({ error: 'Request body is required' })
     }
-    const { platform, externalType, externalId } = body
+    const { platform, externalType } = body
     if (typeof platform !== 'string' || !platform) {
       return reply.status(400).send({ error: 'platform is required (string)' })
     }
     if (externalType !== 'group' && externalType !== 'private') {
       return reply.status(400).send({ error: "externalType must be 'group' or 'private'" })
     }
-    if (typeof externalId !== 'string' || !externalId) {
-      return reply.status(400).send({ error: 'externalId is required (string)' })
+    // P4 #4: externalId 接受 string | number（与 POST 同款归一化 + 纯数字校验）
+    const externalId = normalizeExternalId(body.externalId)
+    if (!externalId) {
+      return reply.status(400).send({ error: 'externalId is required (numeric string or number)' })
     }
     const removed = bindingsRepo.deleteConnectorBinding(platform, externalType, externalId)
     if (!removed) {
@@ -130,6 +188,13 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
  * 群聊未 @机器人）——webhook 仍已 200，NapCat 不会重投。
  */
 async function handleOneBotEvent(event: OneBotMessageEvent): Promise<void> {
+  // P4 #5: 去重放最入口（过滤之前）——notice 事件无 message_id 自然跳过。
+  // 同步段 check+insert 在第一个 await 前完成（入口到 ingestUserMessage 之间
+  // 零 await），重投窗口内并发到达的两条请求无竞态
+  if (isDuplicateMessage(event)) {
+    log.info('duplicate onebot event skipped', { messageId: String(event.message_id) })
+    return
+  }
   // 1. 只处理 message 事件（notice/request 等忽略）
   if (event.post_type !== 'message') return
   // 2. 防自循环：机器人自己发的消息忽略
