@@ -36,6 +36,10 @@ workspace/
 # Agent 执行锁（防止 tsx watch 在 Agent 执行期间重启）
 .agent-busy
 
+# 重启确认机制（店长发【重启请求】→ 前端确认 → dev.js 重启；工作流状态文件不入库）
+.restart-request
+.restart-done
+
 # 审查门禁（本地工作流状态，不提交）
 .push-gate
 .handoff-draft.md

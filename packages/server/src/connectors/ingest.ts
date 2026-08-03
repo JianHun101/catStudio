@@ -22,6 +22,12 @@ import { dispatch, initAgentSlot, getAgentState, completeExecution } from '../di
 import { resolveHandoffTarget } from '../handoff/index.js'
 import { saveMessageMemory } from '../memory/index.js'
 import { createLogger } from '../logger.js'
+import {
+  RESTART_TTL_MS,
+  createRestartRequest,
+  extractRestartReason,
+  isRestartRequestContent,
+} from '../restart-request.js'
 
 const log = createLogger('ingest')
 
@@ -113,6 +119,12 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     })
   }
 
+  // 重启请求识别：店长消息以【重启请求】开头 → 广播附加 messageType（前端渲染按钮组），
+  // 并写 .restart-request 文件（state=pending，dev.js 轮询执行重启）。
+  // 消息本身仍以 user role 落库（DB role 有 CHECK 约束，类型不落库）。
+  const isRestartRequest = isRestartRequestContent(content)
+  const restartExpiresAt = new Date(Date.now() + RESTART_TTL_MS).toISOString()
+
   const msg = {
     id: msgId,
     sessionId: effectiveSessionId,
@@ -123,6 +135,28 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     mentions,
     taskId,
     createdAt: new Date().toISOString(),
+    ...(isRestartRequest ? { messageType: 'restart_request' as const, restartExpiresAt } : {}),
+  }
+
+  // 写请求文件（幂等：已存在跳过——同一时间只保留首个生效请求，防店长连发覆盖）
+  if (isRestartRequest) {
+    try {
+      createRestartRequest({
+        messageId: msgId,
+        sessionId: effectiveSessionId,
+        reason: extractRestartReason(content),
+        createdAt: new Date().toISOString(),
+        expiresAt: restartExpiresAt,
+        state: 'pending',
+      })
+    } catch (err: any) {
+      // 文件写失败不阻塞消息流（dev.js 轮询读不到时只是不重启，消息与按钮仍在）
+      log.warn('restart request file write failed', {
+        sessionId: effectiveSessionId,
+        traceId,
+        error: err.message,
+      })
+    }
   }
 
   // 3. 广播到 Session 房间（重定向时是子会话房间，并向旧房间发 SESSION_HANDOFF）

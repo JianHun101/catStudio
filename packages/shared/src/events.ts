@@ -43,6 +43,11 @@ export const Events = {
 
   // 服务器 → 客户端：上下文窗口 token 用量（驱动 handoff 的真实数字）
   CONTEXT_WINDOW_STATS: 'context-window-stats',
+
+  // 重启确认机制（店长发「【重启请求】」消息 → 前端气泡按钮 → dev.js 执行重启）
+  RESTART_CONFIRM: 'restart-confirm', // 用户→服务器：确认重启
+  RESTART_CANCEL: 'restart-cancel', // 用户→服务器：取消重启
+  RESTART_STATUS: 'restart-status', // 服务器→客户端：请求状态变化（pending/confirmed/none）
 } as const
 
 // ─── Redis Channel Patterns ─────────────────────────

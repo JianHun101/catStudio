@@ -54,6 +54,15 @@ import { updateRunningSummary } from '../summarizer/index.js'
 import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
 import { ingestUserMessage } from './ingest.js'
 import { emitAgentReply } from './replyBus.js'
+import {
+  RESTART_PREFIX,
+  RESTART_TTL_MS,
+  readRestartRequest,
+  updateRestartRequest,
+  removeRestartRequest,
+  readRestartDone,
+  removeRestartDone,
+} from '../restart-request.js'
 
 const log = createLogger('socketio')
 
@@ -123,8 +132,12 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 推送该 Session 的历史消息（转为 camelCase）— 批量发送，避免逐条渲染闪烁
       const rows = messagesRepo.getSessionHistory(sessionId)
 
+      // 重启请求文件（存在时其 expiresAt 是历史消息按钮过期的权威值——刷新后按钮状态正确）
+      const restartReq = readRestartRequest()
+
       const historyMessages = rows.map((row: MessageRow) => {
         const msgImages: string[] = parseJsonArray(row.images)
+        const isRestart = row.content.startsWith(RESTART_PREFIX)
         return {
           id: row.id,
           sessionId: row.session_id,
@@ -136,6 +149,14 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           taskId: row.task_id || undefined,
           thinkingContent: row.thinking_content || undefined,
           createdAt: row.created_at.replace(' ', 'T') + 'Z',
+          // 历史恢复同样携带重启类型（前端按钮渲染依据；DB 不存类型，内容前缀是唯一事实源）
+          ...(isRestart
+            ? {
+                messageType: 'restart_request' as const,
+                restartExpiresAt:
+                  restartReq?.expiresAt ?? new Date(Date.now() + RESTART_TTL_MS).toISOString(),
+              }
+            : {}),
         }
       })
 
@@ -202,6 +223,20 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
             content: stream.content,
           })
         }
+      }
+
+      // 重启请求状态推送：刷新/重连后前端按钮状态以服务端为权威恢复。
+      // 请求存在且属于本会话 → 推当前状态；否则推 none 复位（历史消息按钮隐藏）。
+      const joinRestartReq = readRestartRequest()
+      if (joinRestartReq && joinRestartReq.sessionId === sessionId) {
+        socket.emit(Events.RESTART_STATUS, {
+          sessionId,
+          messageId: joinRestartReq.messageId,
+          state: joinRestartReq.state,
+          expiresAt: joinRestartReq.expiresAt,
+        })
+      } else {
+        socket.emit(Events.RESTART_STATUS, { sessionId, messageId: null, state: 'none' })
       }
     })
 
@@ -342,6 +377,62 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 如果有 Agent 正在执行，标记由 runAgentReply 出口清理
     })
 
+    // ─── Restart confirm / cancel ─────────────────
+
+    socket.on(Events.RESTART_CONFIRM, (data: { messageId: string }) => {
+      const req = readRestartRequest()
+      if (!req) {
+        socket.emit(Events.ERROR, { message: '重启请求已失效，请店长重新发起' })
+        return
+      }
+      if (Date.now() > new Date(req.expiresAt).getTime()) {
+        // 过期：清理文件 + 通知前端隐藏按钮
+        removeRestartRequest()
+        log.info('restart request expired', { messageId: req.messageId, sessionId: req.sessionId })
+        socket.emit(Events.ERROR, { message: '重启请求已过期（10 分钟有效），请店长重新发起' })
+        socket.emit(Events.RESTART_STATUS, {
+          sessionId: req.sessionId,
+          messageId: req.messageId,
+          state: 'expired',
+        })
+        return
+      }
+      if (req.state === 'pending') {
+        // pending → confirmed：dev.js 轮询到 confirmed 且新鲜即执行重启
+        updateRestartRequest({ ...req, state: 'confirmed' })
+        log.info('restart request confirmed', {
+          messageId: req.messageId,
+          sessionId: req.sessionId,
+        })
+      }
+      // 已 confirmed → 幂等重推（重复点击不报错）
+      socket.emit(Events.RESTART_STATUS, {
+        sessionId: req.sessionId,
+        messageId: req.messageId,
+        state: 'confirmed',
+        expiresAt: req.expiresAt,
+      })
+    })
+
+    socket.on(Events.RESTART_CANCEL, () => {
+      const req = readRestartRequest()
+      if (req) {
+        removeRestartRequest()
+        log.info('restart request cancelled', {
+          messageId: req.messageId,
+          sessionId: req.sessionId,
+        })
+        socket.emit(Events.RESTART_STATUS, {
+          sessionId: req.sessionId,
+          messageId: req.messageId,
+          state: 'cancelled',
+        })
+      } else {
+        // 文件已不存在（过期/已执行/重复取消）→ 幂等复位
+        socket.emit(Events.RESTART_STATUS, { sessionId: '', messageId: null, state: 'none' })
+      }
+    })
+
     // ─── Broadcast mode toggle ────────────────────
 
     socket.on(Events.TOGGLE_BROADCAST, (data: { sessionId: string; broadcastMode: boolean }) => {
@@ -397,7 +488,44 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     log.error('recoverQueuedMessages crashed', { error: (err as Error).message })
   })
 
+  // 重启完成通知：dev.js 重启成功后写 .restart-done，此处广播「重启完成」并清理
+  broadcastRestartDone(io).catch((err) => {
+    log.error('broadcastRestartDone crashed', { error: (err as Error).message })
+  })
+
   return io
+}
+
+/**
+ * 广播重启完成通知。
+ * dev.js 执行用户确认的重启后写 .restart-done（含 sessionId/reason）；
+ * 新 server 启动时读取 → 以 system 消息落库 + 广播到该会话 → 删除 done 标记。
+ * 会话已删除（FK 失败）→ 静默清理标记，不阻塞启动。
+ */
+async function broadcastRestartDone(io: SocketServer): Promise<void> {
+  const done = readRestartDone()
+  if (!done) return
+  try {
+    if (done.sessionId && sessionsRepo.getSessionById(done.sessionId)) {
+      const msgId = uuid()
+      const content = `🔄 重启完成（原因：${done.reason}）`
+      messagesRepo.insertMessage(msgId, done.sessionId, 'system', content, '[]', null, null)
+      io.to(`session:${done.sessionId}`).emit(Events.NEW_MESSAGE, {
+        id: msgId,
+        sessionId: done.sessionId,
+        agentId: null,
+        role: 'system',
+        content,
+        mentions: [],
+        createdAt: new Date().toISOString(),
+      })
+      log.info('restart done broadcast', { sessionId: done.sessionId, reason: done.reason })
+    }
+  } catch (err) {
+    log.warn('restart done broadcast failed', { error: (err as Error).message })
+  } finally {
+    removeRestartDone()
+  }
 }
 
 /**

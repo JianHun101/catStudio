@@ -292,6 +292,20 @@ function onPreviewKeydown(e: KeyboardEvent): void {
   else if (e.key === 'ArrowRight') previewStep(1)
 }
 
+// ─── Restart request helpers ───────────────
+
+/**
+ * 重启按钮状态解析：默认 pending；服务端 confirmed → 「重启中…」；none/已过期 → 隐藏。
+ * 过期以消息携带的 restartExpiresAt 为准（服务端权威状态由 RESTART_STATUS 事件驱动）。
+ */
+function restartStateFor(msg: Message): 'pending' | 'confirmed' | 'none' {
+  if (msg.messageType !== 'restart_request') return 'none'
+  const st = store.restartStates.get(msg.id)
+  if (st === 'confirmed' || st === 'none') return st
+  if (msg.restartExpiresAt && Date.now() > new Date(msg.restartExpiresAt).getTime()) return 'none'
+  return 'pending'
+}
+
 // ─── Existing helpers ──────────────────────
 
 async function handleClearMessages(): Promise<void> {
@@ -792,6 +806,23 @@ function statusLabelZh(status: string): string {
                     />
                   </div>
                   <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
+                  <!-- 重启确认按钮组：pending 显示 [确认重启][取消]；confirmed 显示「重启中…」；取消/过期/none 隐藏 -->
+                  <div v-if="msg.messageType === 'restart_request'" class="restart-actions">
+                    <template v-if="restartStateFor(msg) === 'pending'">
+                      <button class="btn-restart" @click="store.confirmRestart(msg.id)">
+                        确认重启
+                      </button>
+                      <button
+                        class="btn-restart btn-restart-cancel"
+                        @click="store.cancelRestart(msg.id)"
+                      >
+                        取消
+                      </button>
+                    </template>
+                    <span v-else-if="restartStateFor(msg) === 'confirmed'" class="restart-label">
+                      重启中…
+                    </span>
+                  </div>
                   <time class="msg-time" :datetime="msg.createdAt">{{
                     formatTime(msg.createdAt)
                   }}</time>
@@ -1243,6 +1274,62 @@ function statusLabelZh(status: string): string {
   border-color: var(--accent-red) !important;
   background: rgba(224, 85, 106, 0.1) !important;
   font-weight: 600;
+}
+
+/* ─── Restart Confirm Buttons ────────────── */
+
+.restart-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.btn-restart {
+  padding: 3px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: rgba(92, 124, 250, 0.12);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.btn-restart:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-restart-cancel {
+  border-color: var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.btn-restart-cancel:hover {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+  background: rgba(224, 85, 106, 0.1);
+}
+
+.restart-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  animation: restart-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes restart-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .btn-clear:disabled {

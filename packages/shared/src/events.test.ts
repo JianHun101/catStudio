@@ -31,8 +31,17 @@ describe('Events', () => {
     expect(Events.MESSAGE_RETRACT).toBe('message-retract')
   })
 
-  it('has exactly 22 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(22)
+  it('has RESTART_CONFIRM/CANCEL client→server events', () => {
+    expect(Events.RESTART_CONFIRM).toBe('restart-confirm')
+    expect(Events.RESTART_CANCEL).toBe('restart-cancel')
+  })
+
+  it('has RESTART_STATUS server→client event', () => {
+    expect(Events.RESTART_STATUS).toBe('restart-status')
+  })
+
+  it('has exactly 25 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(25)
   })
 })
 

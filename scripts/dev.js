@@ -21,6 +21,7 @@ import { watch, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
+import { decideRestartAction } from './restart-gate.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -40,6 +41,12 @@ const VITE_CLI = path.join(PKG_DIRS.web, 'node_modules', 'vite', 'bin', 'vite.js
 
 // Agent 执行锁文件（与 socketio.ts 中 LOCK_FILE 路径一致）
 const LOCK_FILE = path.join(ROOT, '.agent-busy')
+
+// 重启确认机制文件（与 server 侧 restart-request.ts 路径一致）：
+// server 写 .restart-request（pending → 用户确认 → confirmed），dev.js 轮询执行重启；
+// 重启成功后写 .restart-done 供新 server 广播「重启完成」。
+const RESTART_REQUEST_FILE = path.join(ROOT, '.restart-request')
+const RESTART_DONE_FILE = path.join(ROOT, '.restart-done')
 
 if (!fs.existsSync(TSX_CLI)) {
   console.error('[dev] 找不到 tsx，请确认已执行 pnpm install')
@@ -337,6 +344,70 @@ setInterval(async () => {
     await restartWithRetry('Agent 完成，执行延迟重启')
   }
 }, 1000)
+
+// ─── 重启确认轮询 ──────────────────────────
+// 店长发「【重启请求】原因：xxx」消息 → 用户点前端 [确认重启] → server 写
+// .restart-request（state=confirmed）→ 此处每 500ms 轮询：confirmed 且新鲜 →
+// 等 Agent 执行锁释放 → 既有 restartWithRetry 重启 → 写 .restart-done（新 server
+// 启动时广播「重启完成」）→ 删请求文件。过期请求忽略并清理；pending 忽略。
+let restartInProgress = false
+
+setInterval(async () => {
+  if (restartInProgress) return
+  if (!existsSync(RESTART_REQUEST_FILE)) return
+
+  let raw = ''
+  try {
+    raw = fs.readFileSync(RESTART_REQUEST_FILE, 'utf-8')
+  } catch {
+    return // 读取竞态（文件刚被删除），下轮再试
+  }
+
+  const action = decideRestartAction(raw)
+  if (action === 'expired') {
+    console.log('[dev] 重启请求已过期（10 分钟有效），忽略并清理')
+    try {
+      fs.unlinkSync(RESTART_REQUEST_FILE)
+    } catch {}
+    return
+  }
+  if (action !== 'restart') return // pending 或内容无效 → 忽略
+
+  // Agent 执行中（.agent-busy 锁存在）→ 等待锁释放（与文件变更推迟重启同款语义，不抢占 Agent）
+  if (existsSync(LOCK_FILE) && isServerAlive()) {
+    if (!pendingRestart) console.log('[dev] Agent 执行中，等待锁释放后执行用户确认的重启...')
+    return
+  }
+
+  restartInProgress = true
+  try {
+    let req = null
+    try {
+      req = JSON.parse(raw)
+    } catch {}
+    const reason = (req && req.reason) || '用户请求'
+    const sessionId = (req && req.sessionId) || ''
+    pendingRestart = false // 与文件变更推迟重启互斥：本次是权威动作
+
+    console.log(`[dev] 收到用户确认的重启请求（原因：${reason}）`)
+    await restartWithRetry(`用户确认重启（原因：${reason}）`)
+
+    // 等健康再写完成标记（restartWithRetry 失败时进入 30s 周期重试，此处兜底等待）
+    const healthy = await waitForServer()
+    if (healthy) {
+      fs.writeFileSync(
+        RESTART_DONE_FILE,
+        JSON.stringify({ sessionId, reason, completedAt: new Date().toISOString() }, null, 2)
+      )
+      try {
+        fs.unlinkSync(RESTART_REQUEST_FILE)
+      } catch {}
+      console.log('[dev] 重启完成，已写 .restart-done 通知 server 广播「重启完成」')
+    }
+  } finally {
+    restartInProgress = false
+  }
+}, 500)
 
 // ─── 退出处理 ─────────────────────────────────
 

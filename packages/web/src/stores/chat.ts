@@ -51,6 +51,8 @@ export const useChatStore = defineStore('chat', () => {
   const errorMessage = ref<string | null>(null) // 服务端 ERROR 事件的 toast 消息
   let errorTimer: ReturnType<typeof setTimeout> | null = null
   const loadingMessages = ref(false) // session 切换时等待历史消息加载
+  /** 重启请求按钮状态（messageId → pending/confirmed/none；none=隐藏按钮） */
+  const restartStates = ref<Map<string, 'pending' | 'confirmed' | 'none'>>(new Map())
   const pendingHandoffSummary = ref<string | null>(null) // handoff 摘要，等待 SESSION_HISTORY 到达后注入
   let handoffJoining = false // S8: 防止 handoff 重入（两次 SESSION_HANDOFF 先后到达时相互覆盖）
 
@@ -229,6 +231,18 @@ export const useChatStore = defineStore('chat', () => {
     socket.emit(Events.MESSAGE_RETRACT, { sessionId, messageId })
   }
 
+  /** 确认重启（dev.js 轮询 .restart-request 执行） */
+  function confirmRestart(messageId: string): void {
+    const { socket } = useSocket()
+    socket.emit(Events.RESTART_CONFIRM, { messageId })
+  }
+
+  /** 取消重启 */
+  function cancelRestart(messageId: string): void {
+    const { socket } = useSocket()
+    socket.emit(Events.RESTART_CANCEL, { messageId })
+  }
+
   /** 清空会话消息（保留会话配置） */
   async function clearSessionMessages(id: string): Promise<void> {
     try {
@@ -349,6 +363,10 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
       messages.value.push(msg)
+      // 重启请求消息：初始按钮状态 pending（服务端 RESTART_STATUS 后续校正）
+      if (msg.messageType === 'restart_request') {
+        restartStates.value.set(msg.id, 'pending')
+      }
       // Agent 完成回复后清除打字状态 + 刷新 token 统计
       if (msg.role === 'agent' && msg.agentId) {
         typingStates.value.delete(msg.agentId)
@@ -378,6 +396,12 @@ export const useChatStore = defineStore('chat', () => {
       }
       all.push(...data.messages)
       messages.value = all
+      // 重启请求消息：历史恢复初始 pending（JOIN 后服务端 RESTART_STATUS 校正）
+      for (const m of data.messages) {
+        if (m.messageType === 'restart_request') {
+          restartStates.value.set(m.id, 'pending')
+        }
+      }
       loadingMessages.value = false
     })
 
@@ -518,6 +542,27 @@ export const useChatStore = defineStore('chat', () => {
       }
     )
 
+    // 重启请求状态变化：confirmed → 「重启中…」；none/cancelled/expired → 隐藏按钮
+    socket.on(
+      Events.RESTART_STATUS,
+      (data: { sessionId: string; messageId: string | null; state: string }) => {
+        if (data.state === 'confirmed' && data.messageId) {
+          restartStates.value.set(data.messageId, 'confirmed')
+          return
+        }
+        // none/cancelled/expired → 隐藏按钮；messageId 为空时按会话复位所有重启消息
+        if (data.messageId) {
+          restartStates.value.set(data.messageId, 'none')
+        } else {
+          for (const m of messages.value) {
+            if (m.sessionId === data.sessionId && m.messageType === 'restart_request') {
+              restartStates.value.set(m.id, 'none')
+            }
+          }
+        }
+      }
+    )
+
     socket.on(Events.QUEUE_UPDATE, (data: { agentId: string; queueLength: number }) => {
       const state = agentStates.value.get(data.agentId)
       if (state) {
@@ -598,6 +643,9 @@ export const useChatStore = defineStore('chat', () => {
     deleteSession,
     clearSessionMessages,
     retractMessage,
+    restartStates,
+    confirmRestart,
+    cancelRestart,
     fetchAgentStats,
     agentTokenStats,
     contextTokens,

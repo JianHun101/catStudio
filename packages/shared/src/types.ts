@@ -57,6 +57,13 @@ export interface SessionConfig {
 
 // ─── Message ────────────────────────────────────────
 
+/**
+ * 消息类型——驱动前端渲染分支（如重启确认按钮组）。
+ * DB 的 messages.role 有 CHECK 约束（仅 user/agent/system），类型不落库，
+ * 由服务端检测消息内容前缀后作为附加字段随广播（NEW_MESSAGE/SESSION_HISTORY）携带。
+ */
+export type MessageType = 'normal' | 'restart_request'
+
 export interface Message {
   id: string
   sessionId: string
@@ -69,6 +76,10 @@ export interface Message {
   taskId?: string // 任务 ID，串联同一任务的多轮 agent 交互
   thinkingContent?: string // 思考过程内容（仅前端展示，不参与 Agent 间上下文）
   createdAt: string
+  /** 消息类型（服务端检测附加，默认 normal 不携带该字段） */
+  messageType?: MessageType
+  /** restart_request 消息的请求过期时间（ISO 8601，默认 10 分钟）——前端据此隐藏过期按钮 */
+  restartExpiresAt?: string
 }
 
 // ─── Memory ─────────────────────────────────────────

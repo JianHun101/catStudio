@@ -8,10 +8,12 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createServer } from 'node:http'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { Events } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
+import { RESTART_REQUEST_FILE, RESTART_DONE_FILE } from '../restart-request.js'
 
 // ═══ Mock all external dependencies ═══
 
@@ -187,7 +189,28 @@ describe('socketio connector', () => {
 
   afterEach(() => {
     resetDb()
+    // 清理重启机制文件（正常用例不产生；重启用例防残留污染下个用例的启动广播/状态推送断言）
+    try {
+      if (existsSync(RESTART_REQUEST_FILE)) unlinkSync(RESTART_REQUEST_FILE)
+      if (existsSync(RESTART_DONE_FILE)) unlinkSync(RESTART_DONE_FILE)
+    } catch {}
   })
+
+  /** 写一个重启请求文件（模拟店长消息触发 ingest 写入） */
+  function writeRestartRequest(overrides: Record<string, unknown> = {}): void {
+    writeFileSync(
+      RESTART_REQUEST_FILE,
+      JSON.stringify({
+        messageId: 'msg-restart',
+        sessionId: 'session-1',
+        reason: '测试重启',
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        state: 'pending',
+        ...overrides,
+      })
+    )
+  }
 
   // ─── JOIN_SESSION ──────────────────────────
 
@@ -1562,6 +1585,236 @@ describe('socketio connector', () => {
         sessionId: 'session-1',
         broadcastMode: true,
       })
+    })
+  })
+
+  // ─── RESTART_CONFIRM / RESTART_CANCEL — 重启确认机制 ─────
+
+  describe('RESTART_CONFIRM', () => {
+    it('pending → state=confirmed 写回文件 + 推 RESTART_STATUS confirmed', () => {
+      writeRestartRequest()
+      const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
+      expect(handlers).toBeDefined()
+
+      handlers![0]({ messageId: 'msg-restart' })
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.state).toBe('confirmed')
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ messageId: 'msg-restart', state: 'confirmed' })
+      )
+    })
+
+    it('confirmed 幂等：重复确认不报错、仍推 confirmed', () => {
+      writeRestartRequest({ state: 'confirmed' })
+      const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
+
+      handlers![0]({ messageId: 'msg-restart' })
+
+      expect(mockSocketEmit).not.toHaveBeenCalledWith(Events.ERROR, expect.anything())
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'confirmed' })
+      )
+    })
+
+    it('已过期 → 删文件 + ERROR + 推 expired（dev.js 不会执行）', () => {
+      writeRestartRequest({ expiresAt: new Date(Date.now() - 1000).toISOString() })
+      const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
+
+      handlers![0]({ messageId: 'msg-restart' })
+
+      expect(existsSync(RESTART_REQUEST_FILE)).toBe(false)
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.ERROR,
+        expect.objectContaining({ message: expect.stringContaining('已过期') })
+      )
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'expired' })
+      )
+    })
+
+    it('文件不存在 → ERROR 请求已失效', () => {
+      const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
+
+      handlers![0]({ messageId: 'msg-restart' })
+
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.ERROR,
+        expect.objectContaining({ message: expect.stringContaining('已失效') })
+      )
+    })
+  })
+
+  describe('RESTART_CANCEL', () => {
+    it('存在请求 → 删文件 + 推 cancelled', () => {
+      writeRestartRequest()
+      const handlers = socketHandlers.get(Events.RESTART_CANCEL)
+
+      handlers![0]()
+
+      expect(existsSync(RESTART_REQUEST_FILE)).toBe(false)
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'cancelled' })
+      )
+    })
+
+    it('无请求 → 幂等推 none（前端按钮隐藏）', () => {
+      const handlers = socketHandlers.get(Events.RESTART_CANCEL)
+
+      handlers![0]()
+
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'none' })
+      )
+    })
+  })
+
+  // ─── 重启请求 ingest 链路（前缀检测 → 文件生成 → 广播类型）─────
+
+  describe('重启请求 ingest 链路', () => {
+    it('【重启请求】前缀消息 → 写请求文件（pending）+ 广播带 messageType', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '【重启请求】原因：测试重启',
+        mentions: [],
+      })
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.state).toBe('pending')
+      expect(req.sessionId).toBe('session-1')
+      expect(req.reason).toBe('测试重启')
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ messageType: 'restart_request' })
+      )
+    })
+
+    it('普通消息 → 不写请求文件、广播不带 messageType', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+
+      await handlers![0]({ sessionId: 'session-1', content: '你好', mentions: [] })
+
+      expect(existsSync(RESTART_REQUEST_FILE)).toBe(false)
+      const call = mockRoomEmit.mock.calls.find((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      expect(call![1].messageType).toBeUndefined()
+    })
+
+    it('请求文件已存在 → 第二条不覆盖（保留首个生效请求）', async () => {
+      writeRestartRequest({ messageId: 'first-request' })
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+
+      await handlers![0]({
+        sessionId: 'session-1',
+        content: '【重启请求】原因：第二条',
+        mentions: [],
+      })
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.messageId).toBe('first-request')
+    })
+  })
+
+  // ─── JOIN_SESSION 重启状态推送 ─────────────────
+
+  describe('JOIN_SESSION 重启状态推送', () => {
+    it('请求存在且属于本会话 → 推当前状态（刷新后按钮恢复）', () => {
+      writeRestartRequest()
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+
+      handlers![0]('session-1')
+
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({
+          sessionId: 'session-1',
+          messageId: 'msg-restart',
+          state: 'pending',
+        })
+      )
+    })
+
+    it('请求属于其他会话 → 推 none（不串台）', () => {
+      writeRestartRequest({ sessionId: 'session-other' })
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+
+      handlers![0]('session-1')
+
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'none' })
+      )
+    })
+
+    it('无请求 → 推 none 复位', () => {
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+
+      handlers![0]('session-1')
+
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'none' })
+      )
+    })
+  })
+
+  // ─── broadcastRestartDone — 启动广播重启完成 ─────────
+
+  describe('broadcastRestartDone', () => {
+    it('启动时存在 .restart-done → system 消息落库 + 广播 + 删文件', async () => {
+      writeFileSync(
+        RESTART_DONE_FILE,
+        JSON.stringify({
+          sessionId: 'session-1',
+          reason: '测试重启',
+          completedAt: new Date().toISOString(),
+        })
+      )
+
+      const httpServer = createServer()
+      const mod = await import('./socketio.js')
+      mod.createSocketIO(httpServer)
+
+      // broadcastRestartDone 是 fire-and-forget，等微任务完成
+      await vi.waitFor(() => expect(existsSync(RESTART_DONE_FILE)).toBe(false))
+
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ role: 'system', content: expect.stringContaining('重启完成') })
+      )
+      const row = getDb()
+        .prepare("SELECT * FROM messages WHERE role = 'system' ORDER BY created_at DESC LIMIT 1")
+        .get() as any
+      expect(row).toBeDefined()
+      expect(row.content).toContain('重启完成（原因：测试重启）')
+    })
+
+    it('done 的会话已删除 → 静默清理标记不抛错', async () => {
+      writeFileSync(
+        RESTART_DONE_FILE,
+        JSON.stringify({
+          sessionId: 'ghost-session',
+          reason: 'x',
+          completedAt: new Date().toISOString(),
+        })
+      )
+
+      const httpServer = createServer()
+      const mod = await import('./socketio.js')
+      mod.createSocketIO(httpServer)
+
+      await vi.waitFor(() => expect(existsSync(RESTART_DONE_FILE)).toBe(false))
+      // 未广播（会话不存在，FK 失败被捕获）
+      expect(mockRoomEmit).not.toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ role: 'system' })
+      )
     })
   })
 
