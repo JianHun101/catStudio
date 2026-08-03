@@ -62,6 +62,13 @@ docs/adr/         →  6 architecture decision records
 
 **Domain glossary**: see `CONTEXT.md`. Key terms: Agent (cat character), Session (chat thread), Slot (execution unit), Memory (vector recall), Connector (platform adapter).
 
+**收口链**（A2A 风暴治理，3d5e6cf 起机制层生效）：
+
+- 审查结论只回请求人——吐槽猫的结论 @ 本次审查请求者，不主动 @ 其他猫
+- 实施猫收到「✅可合并」→ 行首@店长 请收口（不自行合并，收口决策归店长）
+- 店长收口动作序列：确认审查结论 → ff-only 合并 → 更新 `.push-gate` → 推送 main/dev → 切回 dev
+- 实施猫完成不单独@店长汇报（店长从审查结论自动获知），遇问题/卡住才@店长
+
 **Env**: `.env.example` for full list. Loader at `packages/server/src/env.ts` (manual parse, NO `dotenv` — must be first import). Key: `DS_KEY`, `HF_ENDPOINT`, `MEMORY_ENABLED` (set `false` in server tests).
 
 **Windows**:
