@@ -60,6 +60,15 @@ docs/adr/         →  6 architecture decision records
 - Helpers: `packages/server/src/test-helpers.ts` (`createTestDb`, `buildTestApp`)
 - Dispatch: `__test_reset()` between cases (clears `agentSlots`/`agentQueues`)
 
+**测试摆放约定**（测试不零散）：
+
+- 测试跟随被测主模块，同目录同名前缀（co-located）——`xxx.ts` 的测试就是 `xxx.test.ts`，不设集中目录；一个测试文件只测一个被测模块
+- 跨模块测试挂主模块旁（`connectors/socketio.test.ts` 范式：真实 SQLite + 捕获 socket handler，只 mock 最外层）
+- 测试性质四类：纯单元（无 I/O）/ 模块测试（只 mock 边界）/ 组装式模块（真实 DB + handler）/ 静态源断言（web `?raw` 读 SFC）
+- 辅助文件白名单（原地保留）：`server/src/test-helpers.ts`、`web/src/test-setup.ts`——仅供测试的辅助，非测试文件
+- e2e 两级：CLI 级（自包含、可进 CI）与系统级（真实 server + LLM，手动跑），命名 `.e2e.mjs` 跟随被测脚本同目录，**不纳入** vitest include
+- vitest include：server/shared/web 统一 `src/**/*.test.ts`；scripts 无 src 用 `**/*.test.js`（`.e2e.mjs` 天然隔离）
+
 **Domain glossary**: see `CONTEXT.md`. Key terms: Agent (cat character), Session (chat thread), Slot (execution unit), Memory (vector recall), Connector (platform adapter).
 
 **收口链**（A2A 风暴治理，3d5e6cf 起机制层生效）：

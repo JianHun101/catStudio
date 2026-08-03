@@ -36,6 +36,9 @@ npx tsx packages/server/src/ui-review.ts <图片路径> ["任意指令"]
 - Ollama 服务由 `ui-review.ts` 自动拉起（探测 `/api/tags` 不可达且地址为本地时后台 `ollama serve` 拉起，轮询最长 15s；非本地地址不自动拉起）。地址 `127.0.0.1:11434`（勿用 localhost），模型名 `qwen3.5:9b`，调用耗时 10~20s（GPU 推理），不是快操作
 - **模型意见要核对代码再采纳**：它可能看错细节（如把 14px 圆角说成偏小）。模型说的"突兀感"要能在 CSS 里找到对应事实，找不到就不盲从
 - 临时文件放 `scripts/shots/`（已 gitignore），不污染仓库
+- **路径推导硬规则**：截图/临时脚本的输出路径必须用 `import.meta.url` 从文件位置推导，禁止 `process.cwd()` 拼接——cwd 拼接曾造成 `scripts/scripts/shots/` 重复路径 bug（2345598）
+- **「用完即删」是硬规则**：一次性验证脚本（`_tmp_*`、`agent-panel-*`、`lightbox-*` 等）验证完必须删除，不留在 `scripts/shots/` 里
+- **`scripts/shots/fixtures/` 是回归测试图专用**（用户上传样例，视觉回归用），只增不删；其余目录内容均为一次性产物
 - 图片格式无所谓（Ollama 直接收原始字节），JPEG/PNG 都行，无需先转格式
 
 ## 相关文件

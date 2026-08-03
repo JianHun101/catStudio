@@ -4,7 +4,7 @@
  * 模拟完整 git 工作流 → 验证生成的 .handoff-draft.md 的结构和内容。
  *
  * 用法:
- *   node scripts/handoff-gen.test.mjs
+ *   node scripts/handoff-gen.e2e.mjs
  */
 
 import { execSync } from 'node:child_process'

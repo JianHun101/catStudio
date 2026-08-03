@@ -7,7 +7,8 @@
  *   --full   额外截一张整页全图（默认只截输入框区域 + textarea 特写）
  *   url      默认 http://127.0.0.1:5173
  *
- * 输出：scripts/shots/ 下两张图，打印路径后供 ui-review.ts 评审。
+ * 输出：scripts/shots/ 下两张图，打印路径供人查看（需要视觉评审时，
+ *       手动把路径传给 ui-review.ts——该脚本接受任意图片路径）。
  * 依赖：playwright（已批准安装）+ 本机 dev 服务器（:5173）。
  */
 import { chromium } from 'playwright'
