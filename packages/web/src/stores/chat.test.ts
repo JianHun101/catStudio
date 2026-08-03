@@ -488,5 +488,41 @@ describe('chatStore', () => {
       expect(store.sessions).toHaveLength(1)
       expect(store.sessions[0].id).toBe('s2')
     })
+
+    it('RESTART_STATUS pending → 按钮保持 pending（join 广播的当前状态不被当 none 打掉）', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.RESTART_STATUS)?.[1] as
+        ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      // 先置 confirmed（模拟按钮已「重启中…」），再收到 join 的 pending 广播 → 应回到 pending 可点
+      handler!({ sessionId: 's1', messageId: 'm-restart', state: 'confirmed' })
+      expect(store.restartStates.get('m-restart')).toBe('confirmed')
+
+      handler!({ sessionId: 's1', messageId: 'm-restart', state: 'pending' })
+      expect(store.restartStates.get('m-restart')).toBe('pending')
+    })
+
+    it('RESTART_STATUS confirmed → 置 confirmed；none → 复位 none（既有语义不回归）', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.RESTART_STATUS)?.[1] as
+        ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      store.restartStates.set('m-restart', 'pending')
+      handler!({ sessionId: 's1', messageId: 'm-restart', state: 'confirmed' })
+      expect(store.restartStates.get('m-restart')).toBe('confirmed')
+
+      handler!({ sessionId: 's1', messageId: 'm-restart', state: 'none' })
+      expect(store.restartStates.get('m-restart')).toBe('none')
+    })
+
+    it('RESTART_STATUS pending 到达也解除 confirming（join 后确认中状态不悬挂）', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.RESTART_STATUS)?.[1] as
+        ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      store.confirmingRestartMessageId = 'm-restart'
+      handler!({ sessionId: 's1', messageId: 'm-restart', state: 'pending' })
+      expect(store.confirmingRestartMessageId).toBeNull()
+    })
   })
 })

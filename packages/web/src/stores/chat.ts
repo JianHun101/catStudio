@@ -569,7 +569,8 @@ export const useChatStore = defineStore('chat', () => {
       }
     )
 
-    // 重启请求状态变化：confirmed → 「重启中…」；none/cancelled/expired → 隐藏按钮
+    // 重启请求状态变化：confirmed → 「重启中…」；pending → 按钮保留（join 恢复的权威状态）；
+    // none/cancelled/expired → 隐藏按钮
     socket.on(
       Events.RESTART_STATUS,
       (data: { sessionId: string; messageId: string | null; state: string }) => {
@@ -577,6 +578,11 @@ export const useChatStore = defineStore('chat', () => {
         confirmingRestartMessageId.value = null
         if (data.state === 'confirmed' && data.messageId) {
           restartStates.value.set(data.messageId, 'confirmed')
+          return
+        }
+        // pending → 请求存在但未确认，按钮保持可点（join 广播的当前状态，不能当 none 打掉）
+        if (data.state === 'pending' && data.messageId) {
+          restartStates.value.set(data.messageId, 'pending')
           return
         }
         // none/cancelled/expired → 隐藏按钮；messageId 为空时按会话复位所有重启消息

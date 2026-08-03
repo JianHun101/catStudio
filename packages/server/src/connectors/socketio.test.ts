@@ -354,6 +354,80 @@ describe('socketio connector', () => {
       const plainMsg = call[1].messages.find((m: any) => m.id === 'plain-msg-1')
       expect(plainMsg.images).toBeUndefined()
     })
+
+    it('历史恢复只给当前生效请求的消息附加 restart 类型（其他 restart 消息不带 → 无幽灵按钮）', () => {
+      // 当前生效请求：文件 messageId=msg-restart 与历史消息 id 匹配
+      writeRestartRequest()
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions)
+        VALUES (?, 'session-1', 'user', '【重启请求】原因：当前请求', '[]')
+      `
+      ).run('msg-restart')
+      // 非当前请求：更早的历史 restart 消息（文件 messageId 不匹配）
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions)
+        VALUES (?, 'session-1', 'user', '【重启请求】原因：历史请求', '[]')
+      `
+      ).run('msg-restart-old')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const current = call[1].messages.find((m: any) => m.id === 'msg-restart')
+      const old = call[1].messages.find((m: any) => m.id === 'msg-restart-old')
+      // 当前请求 → 带类型 + 文件 expiresAt
+      expect(current.messageType).toBe('restart_request')
+      expect(current.restartExpiresAt).toBe(
+        JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8')).expiresAt
+      )
+      // 历史非当前请求 → 不带类型（幽灵按钮消失）
+      expect(old.messageType).toBeUndefined()
+      expect(old.restartExpiresAt).toBeUndefined()
+    })
+
+    it('请求文件属于其他会话 → 本会话 restart 历史消息不带类型', () => {
+      writeRestartRequest({ sessionId: 'session-other' })
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions)
+        VALUES (?, 'session-1', 'user', '【重启请求】原因：本会话请求', '[]')
+      `
+      ).run('msg-restart')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-restart')
+      expect(m.messageType).toBeUndefined()
+      expect(m.restartExpiresAt).toBeUndefined()
+    })
+
+    it('无请求文件 → restart 前缀历史消息全不带类型', () => {
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions)
+        VALUES (?, 'session-1', 'user', '【重启请求】原因：无文件请求', '[]')
+      `
+      ).run('msg-restart')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-restart')
+      expect(m.messageType).toBeUndefined()
+      expect(m.restartExpiresAt).toBeUndefined()
+    })
   })
 
   // ─── LEAVE_SESSION ─────────────────────────

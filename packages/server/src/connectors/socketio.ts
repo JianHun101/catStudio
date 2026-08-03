@@ -145,9 +145,17 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 重启请求文件（存在时其 expiresAt 是历史消息按钮过期的权威值——刷新后按钮状态正确）
       const restartReq = readRestartRequest()
 
+      // 历史恢复只给「当前生效请求」的消息附加重启类型——按钮只属于当前请求，
+      // 其他以【重启请求】开头的历史消息不附加（幽灵按钮：点它必报「已失效」）
+      const isActiveRestart = (row: MessageRow): boolean => {
+        if (!restartReq) return false
+        if (row.content.startsWith(RESTART_PREFIX) === false) return false
+        return restartReq.sessionId === row.session_id && restartReq.messageId === row.id
+      }
+
       const historyMessages = rows.map((row: MessageRow) => {
         const msgImages: string[] = parseJsonArray(row.images)
-        const isRestart = row.content.startsWith(RESTART_PREFIX)
+        const isRestart = isActiveRestart(row)
         return {
           id: row.id,
           sessionId: row.session_id,
@@ -163,8 +171,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           ...(isRestart
             ? {
                 messageType: 'restart_request' as const,
-                restartExpiresAt:
-                  restartReq?.expiresAt ?? new Date(Date.now() + RESTART_TTL_MS).toISOString(),
+                // isRestart 为真时 restartReq 必非 null（isActiveRestart 前置条件）——文件 expiresAt 是权威
+                restartExpiresAt: restartReq!.expiresAt,
               }
             : {}),
         }
