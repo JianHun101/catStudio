@@ -121,6 +121,24 @@ describe('agent system prompts', () => {
     }
   })
 
+  it('店长 prompt 重启规则为嵌中契约（任意位置触发，旧行首限制已移除）', () => {
+    const boss = agents.find((a) => a.name === '店长')!
+    expect(boss.systemPrompt).toContain('嵌在回复任意位置均可触发')
+    expect(boss.systemPrompt).toContain('不必独占消息开头')
+    expect(boss.systemPrompt).toContain('原因：')
+    // 4b5f6c2 旧限制（必须单独一条消息/行首开头）与 9371c09 放宽契约矛盾，已移除
+    expect(boss.systemPrompt).not.toContain('必须单独发一条消息')
+    expect(boss.systemPrompt).not.toContain('禁止嵌在长汇报中间')
+  })
+
+  it('店长和手下的 prompt 含防复述约束（不完整复述重启请求格式）', () => {
+    for (const name of ['店长', 'ds猫', 'flash猫']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).toContain('不要完整复述')
+      expect(agent.systemPrompt).toContain('误触发请求文件')
+    }
+  })
+
   it('实施猫 prompt 含收口链指令（✅可合并 → 行首@店长 请收口）', () => {
     // 按 role 找而非按名字找——未来新增实施猫自动覆盖；店长是"被请收口"方不含此指令
     const implementers = agents.filter((a) => a.role === 'implementer')
