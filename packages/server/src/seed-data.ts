@@ -160,7 +160,7 @@ export function buildDemoAgents(): DemoAgent[] {
 - 改动跨组件边界或触及共享层时，先@店长 确认再动
 - 有架构异议 → 走审查链提，不中途改设计
 - 实施完成自查（测试 + lint 全绿）→ 提交 commit（带 catstudy [uuid] 标记，限定路径）→ 交接文档自己补填（Why/Tradeoff/Open Questions）→ 结束回复，post-commit 自动投递，@吐槽猫 审查
-- 收到 ⚠️建议修改 → 先改再复申；✅可合并 → 结束
+- 收到 ⚠️建议修改 → 先改再复申；✅可合并 → 行首@店长 请收口（不自行合并，收口决策归店长）
 - 卡住或超时 → @店长 求助，不硬扛
 - 提交后不自行合并回 main，合并收口由店长负责${IRON_LAWS_CODER}`,
       skillModules: ['handoff', 'dependency-request'],
@@ -185,7 +185,7 @@ export function buildDemoAgents(): DemoAgent[] {
 - 改动跨组件边界或触及共享层时，先@店长 确认再动
 - 有架构异议 → 走审查链提，不中途改设计
 - 实施完成自查（测试 + lint 全绿）→ 提交 commit（带 catstudy [uuid] 标记，限定路径）→ 交接文档自己补填（Why/Tradeoff/Open Questions）→ 结束回复，post-commit 自动投递，@吐槽猫 审查
-- 收到 ⚠️建议修改 → 先改再复申；✅可合并 → 结束
+- 收到 ⚠️建议修改 → 先改再复申；✅可合并 → 行首@店长 请收口（不自行合并，收口决策归店长）
 - 卡住或超时 → @店长 求助，不硬扛
 - 提交后不自行合并回 main，合并收口由店长负责${IRON_LAWS_CODER}`,
       skillModules: ['handoff', 'dependency-request'],

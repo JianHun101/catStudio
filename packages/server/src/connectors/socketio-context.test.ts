@@ -360,6 +360,17 @@ describe('agent system prompts', () => {
     }
   })
 
+  it('实施猫 prompt 含收口链指令（✅可合并 → 行首@店长 请收口）', () => {
+    // 按 role 找而非按名字找——未来新增实施猫自动覆盖；店长是"被请收口"方不含此指令
+    const implementers = agents.filter((a) => a.role === 'implementer')
+    expect(implementers.length).toBeGreaterThanOrEqual(1)
+    for (const agent of implementers) {
+      expect(agent.systemPrompt).toContain('请收口')
+      expect(agent.systemPrompt).toContain('行首')
+      expect(agent.systemPrompt).toContain('不自行合并')
+    }
+  })
+
   it('精简后的 IRON_LAWS_REVIEWER 仍包含所有审查铁律', () => {
     const tucao = agents.find((a) => a.name === '吐槽猫')!
     expect(tucao.systemPrompt).toContain('出口检查')
