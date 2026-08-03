@@ -317,7 +317,7 @@ describe('socketio connector', () => {
       expect(call[1].messages.length).toBeLessThanOrEqual(200)
     })
 
-    it('excludes system messages from history', () => {
+    it('includes system messages in history (重启完成需刷新后可见)', () => {
       const db = getDb()
       db.prepare(
         `
@@ -332,7 +332,7 @@ describe('socketio connector', () => {
 
       const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
       const roles = call[1].messages.map((m: any) => m.role)
-      expect(roles).not.toContain('system')
+      expect(roles).toContain('system')
     })
 
     it('includes images in history messages (refresh roundtrip)', () => {
@@ -2175,6 +2175,34 @@ describe('socketio connector', () => {
         .get() as any
       expect(row).toBeDefined()
       expect(row.content).toContain('重启完成（原因：测试重启）')
+    })
+
+    it('done 广播落库后 join 会话 → 历史含「🔄 重启完成」消息（刷新后可见）', async () => {
+      writeFileSync(
+        RESTART_DONE_FILE,
+        JSON.stringify({
+          sessionId: 'session-1',
+          reason: '测试重启',
+          completedAt: new Date().toISOString(),
+        })
+      )
+
+      const httpServer = createServer()
+      const mod = await import('./socketio.js')
+      mod.createSocketIO(httpServer)
+
+      // broadcastRestartDone 是 fire-and-forget，等落库完成（删文件即广播已完成）
+      await vi.waitFor(() => expect(existsSync(RESTART_DONE_FILE)).toBe(false))
+
+      // join 会话 → SESSION_HISTORY 应包含「重启完成」system 消息
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const sys = call[1].messages.find((m: any) => m.role === 'system')
+      expect(sys).toBeDefined()
+      expect(sys.content).toContain('重启完成（原因：测试重启）')
     })
 
     it('done 的会话已删除 → 静默清理标记不抛错', async () => {

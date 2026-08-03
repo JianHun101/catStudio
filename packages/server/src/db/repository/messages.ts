@@ -75,12 +75,12 @@ export function getAgentRepliesAfter(sessionId: string, afterCreatedAt: string):
     .all(sessionId, 'agent', afterCreatedAt) as MessageRow[]
 }
 
-/** 获取会话的历史消息（用于前端加载，排除 system 角色，限制条数） */
+/** 获取会话的历史消息（用于前端加载，含 system 消息如「重启完成」等需用户可见，限制条数） */
 export function getSessionHistory(sessionId: string, limit: number = 200): MessageRow[] {
   return db
     .prepare(
       `SELECT * FROM messages
-       WHERE session_id = ? AND role != 'system'
+       WHERE session_id = ?
        ORDER BY created_at ASC
        LIMIT ?`
     )
