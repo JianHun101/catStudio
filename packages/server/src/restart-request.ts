@@ -6,11 +6,13 @@
  * state=confirmed → dev.js（scripts/dev.js，轮询同一路径）执行重启 →
  * 写 .restart-done → 新 server 启动广播「重启完成」→ 删 done。
  *
- * 文件位置与 .agent-busy 锁同款：resolve(process.cwd(), ...)——
- * pnpm dev 时 dev.js 以仓库根 spawn server（cwd=ROOT），两侧路径一致。
+ * 文件位置与 .agent-busy 锁同款：resolve(dir, ...)，dir = RESTART_FILES_DIR ?? process.cwd()——
+ * pnpm dev 时 dev.js 以仓库根 spawn server（cwd=ROOT），两侧路径一致；
+ * 测试环境经 vitest env 设 RESTART_FILES_DIR 指向 node_modules/.cache 隔离目录，
+ * 防测试跑批的 afterEach 清理误删运行时真实请求文件（17:38 事故根因，实验 100% 复现）。
  */
 
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 /** 重启请求消息前缀（店长消息以此开头触发机制） */
@@ -19,11 +21,16 @@ export const RESTART_PREFIX = '【重启请求】'
 /** 请求有效期：10 分钟（过期后 dev.js 忽略、前端隐藏按钮） */
 export const RESTART_TTL_MS = 10 * 60 * 1000
 
+/** 文件基础目录——生产不设 env → 项目根（与 dev.js 轮询路径一致）；测试经 vitest env 隔离 */
+const RESTART_FILES_DIR = process.env.RESTART_FILES_DIR ?? process.cwd()
+// 隔离目录（测试）可能不存在——模块加载时确保可写（生产 = cwd 已存在 → no-op）
+mkdirSync(RESTART_FILES_DIR, { recursive: true })
+
 /** 请求文件路径（dev.js 轮询同一路径） */
-export const RESTART_REQUEST_FILE = resolve(process.cwd(), '.restart-request')
+export const RESTART_REQUEST_FILE = resolve(RESTART_FILES_DIR, '.restart-request')
 
 /** 重启完成标记路径（dev.js 重启成功后写，新 server 启动时读并广播） */
-export const RESTART_DONE_FILE = resolve(process.cwd(), '.restart-done')
+export const RESTART_DONE_FILE = resolve(RESTART_FILES_DIR, '.restart-done')
 
 export interface RestartRequestFile {
   /** 触发消息 ID（前端按消息关联按钮状态） */
