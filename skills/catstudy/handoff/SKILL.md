@@ -53,7 +53,7 @@ Step 2: WHAT — 生成文件清单 + 改动描述
 Step 3: CHECKLIST — 从代码模式匹配检查点
   扫描 diff 内容，识别改动类型 → 匹配下方"检查点模板"中的通用检查项
   生成初版 Checklist，然后你补充 cat-study 项目特有的检查点
-  （如 room 前缀一致性、AGENT_SKILL_MODULES 硬编码残留、parseSkillModules 两处实现一致性等）
+  （如 room 前缀一致性、hint 角色判定 role==='reviewer' 一致性、@角色占位符是否替换为实际角色名等）
 
 Step 4: WHY / TRADEOFF / OPEN QUESTIONS — 你填写
   这三段必须你写。格式要求：
@@ -64,7 +64,7 @@ Step 4: WHY / TRADEOFF / OPEN QUESTIONS — 你填写
 
 Step 5: OUTPUT — 组合输出
   用下方输出格式，将所有部分组合成完整交接文档
-  末尾行首独占一行 @吐槽猫 请审查以上改动
+  末尾行首独占一行 @审查者 请审查以上改动
 
   将完整文档内容写入 `.handoff-draft.md`（项目根目录）。
   pre-push hook 会在 git push 阻断时自动读取此文件并 POST 到 cat-study。
@@ -73,7 +73,7 @@ Step 5: OUTPUT — 组合输出
 
 ## 输出格式
 
-严格按 `packages/server/src/skills/handoff.md` 定义的格式输出——读取该文件获取完整格式定义，此处不维护副本，避免两份内容漂移。
+严格按 `../../refs/review-request-template.md` 模板定义的格式输出——读取该模板获取完整格式定义，此处不维护副本，避免两份内容漂移。
 
 ## Checklist 自动生成规则
 
@@ -156,8 +156,8 @@ Step 5: OUTPUT — 组合输出
 
 以下检查点只在 cat-study 项目中适用，生成 Checklist 时根据改动范围选择性加入：
 
-- [ ] `AGENT_SKILL_MODULES` 硬编码是否已清除？（改用 DB `skill_modules` 列）
-- [ ] `parseSkillModules` / `parseJsonArray` 是否有重复实现？
+- [ ] 角色化规则语境是否残留写死猫名？（应只按角色表述，真名仅存于 agents 表 role 字段）
+- [ ] `skill_modules` 是否保持清空？（操作层已拆除，机制保留空跑，勿重新登记）
 - [ ] `retractionRequests` Map 在所有退出路径是否正确清理？（Window ② 提前 return、Window ③ abort return、超时路径）
 - [ ] `activeStreams` Map 的 delete 是否和 `retractionRequests.delete` 配对？
 - [ ] `agentSlots` 的 `currentTriggerMessageId` 是否在所有状态变更点更新？

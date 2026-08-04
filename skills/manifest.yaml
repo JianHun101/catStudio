@@ -65,7 +65,7 @@ skills:
       - '处理审查'
       - 'receive review'
       - '审查反馈'
-      - '@吐槽猫 的审查结果'
+      - '@审查者 的审查结果'
     not_for:
       - '审查结论是 ✅ 可以合并'
       - '自己是审查者'
@@ -90,6 +90,7 @@ skills:
   vision-assist:
     source: self
     category: '视觉'
+    requires_mcp: 'ollama:qwen3.5:9b (127.0.0.1:11434)'
     description: |
       自研技能：用项目 qwen3.5:9b（Ollama）视觉管线当眼睛。
       模型无法原生看图时路由到本技能。
@@ -213,14 +214,19 @@ skills:
 # 当前 manifest 路由顶级通用版；定制版转正评估列二期。
 # catstudy/ 内部条目不参与顶级计数（40/40），由 check-manifest 单独校验前缀。
 catstudy:
+  # merged_from：合并来源登记（catstudy 定制层随迁保留，转正评估列二期）
   catstudy-quality-gate:
     source: self
+    merged_from: 'quality-gate（顶级通用版 + 猫咖定制）'
   catstudy-handoff:
     source: self
+    merged_from: 'handoff（顶级 mattpocock 版 + 猫咖定制）'
   catstudy-request-review:
     source: self
+    merged_from: 'request-review（顶级通用版 + 猫咖定制）'
   catstudy-receive-review:
     source: self
+    merged_from: 'receive-review（顶级通用版 + 猫咖定制）'
 
 # 审查流程链
 # quality-gate → request-review → receive-review → (loop until ✅)
@@ -234,4 +240,4 @@ pipeline:
 iron_laws:
   - '审查自动化：post-commit hook 触发 handoff-gen，Agent 只补填不自行发起'
   - '禁止冒充：每只猫有固定身份和角色'
-  - '依赖声明优先：安装任何包前必须声明并获得吐槽猫批准'
+  - '依赖声明优先：安装任何包前必须声明并获得审查者批准'

@@ -1,6 +1,6 @@
 # CatStudy Skills
 
-店长（暹罗猫）的开发工作流技能。参照 clowder-ai 的 `cat-cafe-skills/` 架构设计。
+架构师角色的开发工作流技能。参照 clowder-ai 的 `cat-cafe-skills/` 架构设计。
 
 ## 目录结构
 
@@ -16,38 +16,38 @@ catstudy/
 ├── receive-review/              # 接收审查 — 处理审查者的反馈
 │   └── SKILL.md
 └── refs/                        # 共享参考文件
-    ├── shared-rules.md          # 开发协作规则（单一真相源）
-    ├── cat-roles.md             # 猫角色定义 + 审查配对规则
-    ├── review-standards.md      # P1/P2/P3 严重度标准
-    └── review-request-template.md # Review 请求信模板
+    └── cat-roles.md             # 猫角色定义 + 审查配对规则（角色词典）
+    # shared-rules / review-standards / review-request-template 已随 refs 双套合并
+    # 迁至顶级 skills/refs/（单源，此处不维护副本）
 ```
 
 ## 工作流
 
 ```
 用户需求
-  → 店长设计 + 写代码
+  → 架构师设计 + 派活
+  → 实施猫落地
   → /catstudy-quality-gate    （自检：需求对照 + 测试 + lint + build）
   → /catstudy-handoff          （交接：自动生成文件清单 + Checklist，填写 Why/Tradeoff/OQ）
   → /catstudy-request-review   （发起审查：调用 /review、/code-review、/security-review）
   → /catstudy-receive-review   （处理反馈：Red→Green 修复）
-  → 合入
+  → 审查者审查 ✅ → 架构师收口（ff-only 合并 + 推送）
 ```
 
 ## 与 clowder-ai 的差异
 
-| 维度       | clowder-ai                                           | catStudy                                             |
-| ---------- | ---------------------------------------------------- | ---------------------------------------------------- |
-| 猫数量     | 3 只真正的 Claude Code agent                         | 1 只（店长），2 只 app 角色                          |
-| 审查方式   | 跨猫互审（Ragdoll ↔ Maine Coon ↔ Siamese）           | 不同 Claude 模型的 sub-agent 模拟跨模型审查          |
-| 技能位置   | `cat-cafe-skills/` → `~/.claude/skills/`（符号链接） | `.claude/skills/catstudy/`（项目内）                 |
-| manifest   | `manifest.yaml`（1324 行路由配置）                   | 轻量 manifest（~92 行，仅 5 技能 + pipeline + 铁律） |
-| SOP 定义   | `sop-definitions/development.yaml`                   | 无（规模不需要）                                     |
-| merge-gate | 完整 PR 流程 + remote review                         | 简单合入（单猫开发无 PR 冲突）                       |
+| 维度       | clowder-ai                                           | catStudy                                                            |
+| ---------- | ---------------------------------------------------- | ------------------------------------------------------------------- |
+| 猫数量     | 3 只真正的 Claude Code agent                         | 4 只真正的 Claude Code agent（1 架构师 + 2 实施 + 1 审查者）        |
+| 审查方式   | 跨猫互审（Ragdoll ↔ Maine Coon ↔ Siamese）           | 真实跨猫审查链（提交 → post-commit 投递 → 审查者审查 → 架构师收口） |
+| 技能位置   | `cat-cafe-skills/` → `~/.claude/skills/`（符号链接） | `skills/` 单源 + `.claude/skills` junction 挂载                     |
+| manifest   | `manifest.yaml`（1324 行路由配置）                   | `skills/manifest.yaml`（40/40 全覆盖 + pipeline + 铁律）            |
+| SOP 定义   | `sop-definitions/development.yaml`                   | 无（规模不需要）                                                    |
+| merge-gate | 完整 PR 流程 + remote review                         | 无 PR 流程：审查 ✅ 后由架构师 ff-only 收口                         |
 
-## 为什么没有 merge-gate
+## 为什么没有 PR 流程
 
-catStudy 只有店长一只猫在开发，没有 PR 冲突场景，没有 cloud review 需求。quality-gate → handoff → request-review → receive-review 四步已经覆盖了从自检、生成交接文档、发起审查到修复的完整循环。
+catStudy 没有 PR 冲突场景：提交后由 post-commit 自动投递交接文档，quality-gate → handoff → request-review → receive-review 四步覆盖从自检、生成交接文档、发起审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 推送）。
 
 ## 技能命名
 

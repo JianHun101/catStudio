@@ -51,7 +51,7 @@ catstudy-quality-gate · catstudy-handoff · catstudy-request-review · catstudy
 
 参照 clowder-ai 的 `cat-cafe-skills/` 架构设计的先行试验（README 为设计文档）。
 随迁保留但**一期不切路由**（manifest 仍路由顶级通用版），转正评估列二期。
-内容已同步为当前 4 猫团队结构（审查链：实施 → post-commit 投递 → 吐槽猫审查 → 店长收口）。
+内容已同步为当前角色化团队结构（审查链：实施猫 → post-commit 投递 → 审查者审查 → 架构师收口；真名映射由 agents 表 role 字段动态确定）。
 
 ## 同步溯源
 

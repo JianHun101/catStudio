@@ -1,6 +1,6 @@
 # 审查请求模板
 
-发送审查请求时，使用以下格式。这是 `.claude/skills/refs/shared-rules.md` 中"工作交接铁律"的标准模板。
+发送审查请求时，使用以下格式。这是 `skills/refs/shared-rules.md` 中"工作交接铁律"的标准模板。
 
 ---
 
@@ -54,4 +54,4 @@
 
 ---
 
-@吐槽猫 review
+行首 @审查者 发起审查（审查者按 shared-rules 审查配对规则动态确定，不写死真名）
