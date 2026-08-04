@@ -1,0 +1,237 @@
+# CatStudy 技能路由清单
+# 定义 catStudy 自定义技能的分类、触发条件、输出和衔接关系
+#
+# 来源标记（source，三方一致校验强制）：
+#   self       — 猫咖自研（本项目维护）
+#   mattpocock — 来自 mattpocock/skills 系（特征：disable-model-invocation 字段）
+#   external   — 其他第三方来源（无版本溯源，需登记 provenance）
+# 判定口径说明：disable-model-invocation 是 mattpocock 技能集的标志性 frontmatter；
+# 无该字段的第三方技能统一标 external（来源待核，列入 .sync-provenance.json 追踪）。
+
+skills:
+  # ── 自研（猫咖定制，参与审查流程链）──
+  quality-gate:
+    source: self
+    category: '审查流程'
+    description: |
+      代码变更提交审查前的自查门。
+      检查编码规范、测试覆盖、架构边界、安全性和未完成项。
+    triggers:
+      - '自查'
+      - 'quality gate'
+      - '提交前检查'
+      - '检查一下代码'
+    not_for:
+      - '纯对话无代码变更'
+      - '已在审查循环中'
+    output: 'Quality Gate Report（通过/未通过 + 逐项结果）'
+    next: 'request-review'
+    refs:
+      - 'CODING_STANDARDS.md'
+      - 'refs/review-standards.md'
+
+  request-review:
+    source: self
+    category: '审查流程'
+    description: |
+      打包完成的工作并发送审查请求。
+      按照审查配对规则选择审查者，使用标准模板格式。
+    triggers:
+      - '发起审查'
+      - 'request review'
+      - '让人看看'
+      - 'review 一下'
+    not_for:
+      - 'quality-gate 未通过'
+      - '无代码变更'
+      - '自己审查自己'
+    output: '审查请求文档（按模板格式 + @审查者）'
+    next: 'receive-review'
+    refs:
+      - 'refs/review-request-template.md'
+      - 'refs/shared-rules.md'
+    preconditions:
+      - 'quality-gate PASS'
+      - 'pnpm test 全过'
+      - 'pnpm lint 无新增错误'
+
+  receive-review:
+    source: self
+    category: '审查流程'
+    description: |
+      接收并处理审查反馈。
+      逐项核实审查发现，按 P1/P2/P3 分类处理，拒绝表演性同意。
+    triggers:
+      - '处理审查'
+      - 'receive review'
+      - '审查反馈'
+      - '@吐槽猫 的审查结果'
+    not_for:
+      - '审查结论是 ✅ 可以合并'
+      - '自己是审查者'
+    output: '修复确认表（逐项状态 + 测试结果）'
+    next: 'request-review (如需重新审查)'
+    refs:
+      - 'refs/review-standards.md'
+      - 'refs/shared-rules.md'
+
+  session-summary:
+    source: mattpocock
+    category: '文档'
+    description: |
+      已有技能（来自 mattpocock/skills）。
+      生成 CatStudy 格式的结构化会议总结。
+    triggers:
+      - '总结'
+      - 'session summary'
+      - '会议总结'
+    output: 'docs/sessions/cat-study-{slug}-summary.md'
+
+  vision-assist:
+    source: self
+    category: '视觉'
+    description: |
+      自研技能：用项目 qwen3.5:9b（Ollama）视觉管线当眼睛。
+      模型无法原生看图时路由到本技能。
+    triggers:
+      - '看图'
+      - 'vision'
+      - '截图'
+    output: '图片内容描述'
+
+  # ── mattpocock 系（disable-model-invocation 特征）──
+  ask-matt:
+    source: mattpocock
+    category: '外部技能'
+  decision-mapping:
+    source: mattpocock
+    category: '外部技能'
+  edit-article:
+    source: mattpocock
+    category: '外部技能'
+  grill-me:
+    source: mattpocock
+    category: '外部技能'
+  grill-with-docs:
+    source: mattpocock
+    category: '外部技能'
+  handoff:
+    source: mattpocock
+    category: '外部技能'
+  implement:
+    source: mattpocock
+    category: '外部技能'
+  improve-codebase-architecture:
+    source: mattpocock
+    category: '外部技能'
+  loop-me:
+    source: mattpocock
+    category: '外部技能'
+  prototype:
+    source: mattpocock
+    category: '外部技能'
+  setup-matt-pocock-skills:
+    source: mattpocock
+    category: '外部技能'
+  teach:
+    source: mattpocock
+    category: '外部技能'
+  to-issues:
+    source: mattpocock
+    category: '外部技能'
+  to-prd:
+    source: mattpocock
+    category: '外部技能'
+  triage:
+    source: mattpocock
+    category: '外部技能'
+  ubiquitous-language:
+    source: mattpocock
+    category: '外部技能'
+  writing-beats:
+    source: mattpocock
+    category: '外部技能'
+  writing-fragments:
+    source: mattpocock
+    category: '外部技能'
+  writing-great-skills:
+    source: mattpocock
+    category: '外部技能'
+  writing-shape:
+    source: mattpocock
+    category: '外部技能'
+
+  # ── 其他第三方（无来源特征，列入 provenance 追踪）──
+  codebase-design:
+    source: external
+    category: '外部技能'
+  design-an-interface:
+    source: external
+    category: '外部技能'
+  diagnosing-bugs:
+    source: external
+    category: '外部技能'
+  domain-modeling:
+    source: external
+    category: '外部技能'
+  git-guardrails-claude-code:
+    source: external
+    category: '外部技能'
+  grilling:
+    source: external
+    category: '外部技能'
+  migrate-to-shoehorn:
+    source: external
+    category: '外部技能'
+  obsidian-vault:
+    source: external
+    category: '外部技能'
+  qa:
+    source: external
+    category: '外部技能'
+  request-refactor-plan:
+    source: external
+    category: '外部技能'
+  resolving-merge-conflicts:
+    source: external
+    category: '外部技能'
+  review:
+    source: external
+    category: '外部技能'
+  scaffold-exercises:
+    source: external
+    category: '外部技能'
+  setup-pre-commit:
+    source: external
+    category: '外部技能'
+  tdd:
+    source: external
+    category: '外部技能'
+
+# ── 项目定制层（catstudy/，随迁保留，一期不切路由）──
+# 4 个 catstudy-* 定制 skill 与顶级同名 skill 是两套不同定义：
+# 当前 manifest 路由顶级通用版；定制版转正评估列二期。
+# catstudy/ 内部条目不参与顶级计数（40/40），由 check-manifest 单独校验前缀。
+catstudy:
+  catstudy-quality-gate:
+    source: self
+  catstudy-handoff:
+    source: self
+  catstudy-request-review:
+    source: self
+  catstudy-receive-review:
+    source: self
+
+# 审查流程链
+# quality-gate → request-review → receive-review → (loop until ✅)
+pipeline:
+  review:
+    - quality-gate
+    - request-review
+    - receive-review
+
+# 三条铁律
+iron_laws:
+  - '审查自动化：post-commit hook 触发 handoff-gen，Agent 只补填不自行发起'
+  - '禁止冒充：每只猫有固定身份和角色'
+  - '依赖声明优先：安装任何包前必须声明并获得吐槽猫批准'

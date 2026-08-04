@@ -7,6 +7,11 @@ node_modules/
 # Claude Code 本地设置（本机许可配置，曾 auto-commit 卷回 bcbf5c5 已 rebase 摘除——本地文件不入库）
 .claude/settings.local.json
 
+# skill 单源挂载位（skills/ 是唯一真相源；挂载位由 scripts/skills-bootstrap.mjs 重建，不入库）
+.claude/skills
+# skill 同步溯源文件（机器生成：source_commit/secret_scan 结果，不入库）
+skills/.sync-provenance.json
+
 # 构建产物
 dist/
 .vite/
