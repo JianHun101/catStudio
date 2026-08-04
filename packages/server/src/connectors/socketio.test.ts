@@ -1316,6 +1316,125 @@ describe('socketio connector', () => {
     })
   })
 
+  // ─── hint 角色判定 — agents 表 role 字段接入 ──────────
+  // 原 skillModules（含 code-review）判定拆除，切 role === 'reviewer'（一对一已实锤）。
+  // buildReviewLoopHint / buildHandoffTriggerHint 内部用 agentsRepo 查真实 DB。
+
+  describe('hint 角色判定 — role 字段接入（skillModules 判定拆除）', () => {
+    /** 插入 reviewer（吐槽猫）与 implementer（ds猫） */
+    function seedHintAgents(db: any) {
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-2',
+        '吐槽猫',
+        '😼',
+        'You are a cat.',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'reviewer'
+      )
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-3',
+        'ds猫',
+        '🐯',
+        'You are a cat.',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'implementer'
+      )
+    }
+
+    it('buildReviewLoopHint：reviewer（role）发 ⚠️建议修改 且 @实施猫 → 注入循环指令（真名动态装配）', async () => {
+      const { buildReviewLoopHint } = await import('./socketio.js')
+      seedHintAgents(getDb())
+      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
+        {
+          role: 'agent',
+          agent_id: 'agent-2',
+          content: '⚠️建议修改 需要改 X',
+          mentions: JSON.stringify(['ds猫']),
+        },
+      ])
+      expect(hint).not.toBeNull()
+      expect(hint!).toContain('吐槽猫') // 真名由运行时动态装配（规则说角色，运行时给名字）
+      expect(hint!).toContain('继续审查循环')
+      expect(hint!).toContain('✅可合并')
+    })
+
+    it('buildReviewLoopHint：发送者非 reviewer（implementer 消息）→ 不注入（role 判定等价旧 skillModules 判据）', async () => {
+      const { buildReviewLoopHint } = await import('./socketio.js')
+      seedHintAgents(getDb())
+      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
+        {
+          role: 'agent',
+          agent_id: 'agent-3',
+          content: '⚠️建议修改 需要改 X',
+          mentions: JSON.stringify(['ds猫']),
+        },
+      ])
+      // 发送者 agent-3 是 implementer 不是 reviewer → 走发送者检查 continue → 不注入
+      expect(hint).toBeNull()
+    })
+
+    it('buildReviewLoopHint：reviewer 自己 → 不注入（审查者不需要循环指令）', async () => {
+      const { buildReviewLoopHint } = await import('./socketio.js')
+      seedHintAgents(getDb())
+      const hint = buildReviewLoopHint({ name: '吐槽猫', role: 'reviewer' }, [
+        {
+          role: 'agent',
+          agent_id: 'agent-3',
+          content: '⚠️建议修改 需要改 X',
+          mentions: JSON.stringify(['吐槽猫']),
+        },
+      ])
+      expect(hint).toBeNull()
+    })
+
+    it('buildReviewLoopHint：✅可合并 → 不注入（审查通过循环结束）', async () => {
+      const { buildReviewLoopHint } = await import('./socketio.js')
+      seedHintAgents(getDb())
+      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
+        {
+          role: 'agent',
+          agent_id: 'agent-2',
+          content: '✅可合并 通过',
+          mentions: JSON.stringify(['ds猫']),
+        },
+      ])
+      expect(hint).toBeNull()
+    })
+
+    it('buildHandoffTriggerHint：DB 有 reviewer → 注入 @吐槽猫 发起代码审查（真名动态装配）', async () => {
+      const { buildHandoffTriggerHint } = await import('./socketio.js')
+      seedHintAgents(getDb())
+      const hint = buildHandoffTriggerHint('@店长 请补填以下交接文档')
+      expect(hint).not.toBeNull()
+      expect(hint!).toContain('吐槽猫')
+      expect(hint!).toContain('发起代码审查')
+    })
+
+    it('buildHandoffTriggerHint：DB 无 reviewer → 不注入', async () => {
+      const { buildHandoffTriggerHint } = await import('./socketio.js')
+      // beforeEach 只插入 agent-1（店长，role 默认 unknown）——无 reviewer
+      const hint = buildHandoffTriggerHint('@店长 请补填以下交接文档')
+      expect(hint).toBeNull()
+    })
+
+    it('buildHandoffTriggerHint：非补填请求消息 → 不注入', async () => {
+      const { buildHandoffTriggerHint } = await import('./socketio.js')
+      seedHintAgents(getDb())
+      const hint = buildHandoffTriggerHint('普通派活消息')
+      expect(hint).toBeNull()
+    })
+  })
+
   // ─── recoverInterruptedExecutions 重启恢复队列 ──────────
   // 回归测试：server 重启时 dispatch 的 in-memory 队列被清空，正在执行的 agent
   // 被 fixStuckExecutionLogs 标记为 failed/server_restart，其触发消息永远不会

@@ -114,11 +114,41 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).toContain('出口检查')
       expect(agent.systemPrompt).toContain('自问')
       expect(agent.systemPrompt).toContain('行首@对方')
-      expect(agent.systemPrompt).toContain('@吐槽猫')
+      expect(agent.systemPrompt).toContain('@审查者')
       expect(agent.systemPrompt).toContain('依赖安装')
       expect(agent.systemPrompt).toContain('禁止直接安装')
       expect(agent.systemPrompt).toContain('行首独占一行')
     }
+  })
+
+  it('依赖审批【安装请求】块格式已并入铁律（操作层 md 拆除后行为规则进铁律）', () => {
+    for (const name of ['店长', 'ds猫', 'flash猫']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).toContain('【安装请求】')
+      expect(agent.systemPrompt).toContain('包名: <package-name>')
+      expect(agent.systemPrompt).toContain('用途: <为什么需要这个包>')
+      expect(agent.systemPrompt).toContain('替代: <有没有可以不装的方案>')
+      expect(agent.systemPrompt).toContain('严禁声明和安装出现在同一轮回复中')
+    }
+  })
+
+  it('规则语境写死猫名零残留——三猫 prompt 不含 @ 形态的写死名（@审查者/@架构师 角色化）', () => {
+    // 身份语境（裸名自我介绍/手下名单）保留；@ 前缀是 mention 形态，属规则语境必须角色化
+    for (const name of ['店长', 'ds猫', 'flash猫']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).not.toContain('@吐槽猫')
+      expect(agent.systemPrompt).not.toContain('@店长')
+      expect(agent.systemPrompt).not.toContain('@ds猫')
+      expect(agent.systemPrompt).not.toContain('@flash猫')
+    }
+  })
+
+  it('吐槽猫 prompt 规则语境无 @店长 写死（示例已改 @作者 占位符）', () => {
+    const tucao = agents.find((a) => a.name === '吐槽猫')!
+    expect(tucao.systemPrompt).not.toContain('@店长')
+    expect(tucao.systemPrompt).not.toContain('@吐槽猫')
+    expect(tucao.systemPrompt).not.toContain('@ds猫')
+    expect(tucao.systemPrompt).not.toContain('@flash猫')
   })
 
   it('店长 prompt 重启规则为嵌中契约（任意位置触发，旧行首限制已移除）', () => {
@@ -139,14 +169,16 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('实施猫 prompt 含收口链指令（✅可合并 → 行首@店长 请收口）', () => {
-    // 按 role 找而非按名字找——未来新增实施猫自动覆盖；店长是"被请收口"方不含此指令
+  it('实施猫 prompt 含收口链指令（✅可合并 → 行首@架构师 请收口）', () => {
+    // 按 role 找而非按名字找——未来新增实施猫自动覆盖；架构师是"被请收口"方不含此指令
     const implementers = agents.filter((a) => a.role === 'implementer')
     expect(implementers.length).toBeGreaterThanOrEqual(1)
     for (const agent of implementers) {
       expect(agent.systemPrompt).toContain('请收口')
       expect(agent.systemPrompt).toContain('行首')
       expect(agent.systemPrompt).toContain('不自行合并')
+      expect(agent.systemPrompt).toContain('@架构师')
+      expect(agent.systemPrompt).toContain('@审查者')
     }
   })
 

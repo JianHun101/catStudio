@@ -1333,9 +1333,9 @@ export function formatAgentMessage(
  * 审查循环检测：当审查者给出非通过结论时，向被审查的 agent 注入系统指令，
  * 确保修正后 @审查者 继续循环。
  *
- * 角色判断基于 skillModules（而非硬编码名称/ID）：
- *   - 有 code-review skill → 审查者
- *   - 无 code-review skill → coder（需要被审查）
+ * 角色判断基于 agents 表 role 字段（而非硬编码名称/ID/skillModules）：
+ *   - role === 'reviewer' → 审查者
+ *   - 其他 role（store/implementer/vision/unknown）→ coder（需要被审查）
  *
  * 结论判断基于 IRON_LAWS_REVIEWER 强制输出的结构化标记：
  *   - ✅可合并 → 通过，循环结束
@@ -1343,8 +1343,8 @@ export function formatAgentMessage(
  *
  * @returns 系统指令字符串，不需要时返回 null
  */
-function buildReviewLoopHint(
-  agent: { name: string; skillModules?: string[] },
+export function buildReviewLoopHint(
+  agent: { name: string; role?: string },
   relevantMessages: Array<{
     role: string
     agent_id: string | null
@@ -1352,18 +1352,18 @@ function buildReviewLoopHint(
     mentions: string | null
   }>
 ): string | null {
-  // 审查者自己不需要被注入（有 code-review skill 的 agent 是审查者）
-  if (agent.skillModules?.includes('code-review')) return null
+  // 审查者自己不需要被注入（role === 'reviewer' 的 agent 是审查者）
+  if (agent.role === 'reviewer') return null
 
   // 找最近一条来自审查者且 @mention 当前 agent 的消息
   for (let i = relevantMessages.length - 1; i >= 0; i--) {
     const m = relevantMessages[i]
     if (m.role !== 'agent' || !m.agent_id) continue
 
-    // 检查发送者是否是审查者（基于 skillModules）
+    // 检查发送者是否是审查者（基于 role 字段）
     const senderRow = agentsRepo.getAgentById(m.agent_id)
     if (!senderRow) continue
-    if (!parseSkillModules(senderRow.skill_modules).includes('code-review')) continue
+    if (senderRow.role !== 'reviewer') continue
 
     const mentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
     if (!mentions.includes(agent.name)) continue
@@ -1403,11 +1403,11 @@ function buildReviewLoopHint(
  *
  * 一次 LLM 调用只产生一条回复，agent 在回复中同时完成补填和 @mention。
  */
-function buildHandoffTriggerHint(triggerContent: string): string | null {
+export function buildHandoffTriggerHint(triggerContent: string): string | null {
   if (!triggerContent.startsWith('@店长 请补填以下交接文档')) return null
 
   const allAgents = agentsRepo.listAllAgents()
-  const reviewer = allAgents.find((a) => parseSkillModules(a.skill_modules).includes('code-review'))
+  const reviewer = allAgents.find((a) => a.role === 'reviewer')
   if (!reviewer) return null
 
   return [
@@ -1423,7 +1423,7 @@ function buildHandoffTriggerHint(triggerContent: string): string | null {
  * 新场景只需加一行调用，无需改动 runAgentReply 主流程。
  */
 function buildDynamicHints(
-  agent: { name: string; skillModules?: string[] },
+  agent: { name: string; role?: string },
   triggerContent: string,
   relevantMessages: Array<{
     role: string

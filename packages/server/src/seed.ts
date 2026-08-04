@@ -51,7 +51,7 @@ function seed(): void {
       a.llmApiKey,
       a.llmBaseUrl,
       a.effortLevel ?? '',
-      JSON.stringify(a.skillModules),
+      JSON.stringify(a.skillModules ?? []),
       a.role ?? 'unknown'
     )
     const verb = result.changes === 1 ? '✅' : '🔄'
