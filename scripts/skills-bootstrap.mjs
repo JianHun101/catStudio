@@ -16,7 +16,7 @@
  * Windows 用 junction（mklink /J 语义，无需管理员权限），POSIX 用目录 symlink。
  * 挂载位本身被 .gitignore 排除，不提交；新 clone 环境由本脚本重建。
  */
-import { existsSync, lstatSync, readlinkSync, symlinkSync, mkdirSync } from 'node:fs'
+import { existsSync, lstatSync, readlinkSync, symlinkSync, mkdirSync, rmSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -75,6 +75,9 @@ function createMount(mount) {
     process.exit(1)
   }
   mkdirSync(dirname(path), { recursive: true })
+  // 先清理旧挂载位再重建：stale（链接指向失效目标）/ not-link（普通目录/文件）状态下
+  // symlinkSync 会抛 EEXIST，必须 rmSync 兜底（missing 场景 force 无副作用）
+  rmSync(path, { recursive: true, force: true })
   try {
     const type = process.platform === 'win32' ? 'junction' : 'dir'
     symlinkSync(SOURCE, path, type)

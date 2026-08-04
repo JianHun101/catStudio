@@ -62,7 +62,7 @@ BEFORE 发 review 请求:
 1. 确认 quality-gate 已通过（有本轮 gate report）
 2. 确认测试全绿（附这次真实运行的输出）
 3. 找到用户原始需求 + 摘录关键诉求
-4. 用 ../refs/review-request-template.md 模板写 review 请求
+4. 用 ../../refs/review-request-template.md 模板写 review 请求
 5. 确定审查维度（代码质量 / 安全 / 综合）
 6. 选择审查方式：
    - 首选：调用 /review、/code-review、/security-review 等现有技能
@@ -72,7 +72,7 @@ BEFORE 发 review 请求:
 
 ## Review 请求
 
-**使用 `../refs/review-request-template.md` 模板**。
+**使用 `../../refs/review-request-template.md` 模板**。
 
 关键字段提醒：
 
