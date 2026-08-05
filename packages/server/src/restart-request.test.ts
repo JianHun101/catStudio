@@ -43,6 +43,34 @@ describe('isRestartRequestContent', () => {
   it('reason 只取到段落行尾（下个换行为止）', () => {
     expect(extractRestartReason('【重启请求】原因：卡住了\n继续汇报其他事')).toBe('卡住了')
   })
+
+  // ─── 契约归一化（『重启请求』≡【重启请求】）──────
+  // 6231ec9 防复述抢占把 seed-data prompt 的重启格式改成『』（直角引号），识别层仍是【】
+  // （方括号）——契约漂移导致 LLM 照 prompt 输出『』时按钮不出现（运行时断链事故）。
+  // 归一化后两写法等价；防复述语义（复盘文字不误触发）经下面用例钉死。
+
+  it('嵌中『重启请求』（prompt 教的写法）命中 + reason 提取（归一化后与【】等价）', () => {
+    expect(isRestartRequestContent('收到。先自查链路：『重启请求』原因：服务器卡了')).toBe(true)
+    expect(extractRestartReason('收到。先自查链路：『重启请求』原因：服务器卡了')).toBe(
+      '服务器卡了'
+    )
+  })
+
+  it('行首『重启请求』命中（含不带原因壳，行首兼容语义对齐）', () => {
+    expect(isRestartRequestContent('『重启请求』原因：测试重启')).toBe(true)
+    expect(extractRestartReason('『重启请求』原因：测试重启')).toBe('测试重启')
+    expect(isRestartRequestContent('『重启请求』重启')).toBe(true)
+    expect(extractRestartReason('『重启请求』重启')).toBe('重启')
+  })
+
+  it('防复述语义钉死：复盘文字「用『重启请求』四字即可」不误触发（无原因：连续串）', () => {
+    expect(isRestartRequestContent('讨论重启机制时用『重启请求』四字即可')).toBe(false)
+    // 『原因：』壳拆开叙述（「四字 + 」间隔，仿 seed-data prompt 句式、『』在句中）
+    // 同样不构成「【重启请求】原因：」连续串 → 不误触发
+    expect(isRestartRequestContent('重启请求格式为『重启请求』四字 + 『原因：』壳')).toBe(false)
+    // 无原因壳时 after 原样返回是既有语义（与「【重启请求】重启 → 重启」等价，『』不例外）
+    expect(extractRestartReason('讨论重启机制时用『重启请求』四字即可')).toBe('四字即可')
+  })
 })
 
 // ─── createRestartRequest 覆盖判定（TTL 覆盖语义）──────
