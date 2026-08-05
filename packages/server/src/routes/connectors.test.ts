@@ -4,6 +4,7 @@
  * 覆盖：绑定管理 CRUD + 校验；webhook 四类 payload（@机器人+@猫名 / 纯@机器人 /
  * 无绑定群 / 自己发的消息）+ 非 message 事件 + 私聊 + saveMemory 断言 + 503 开关。
  */
+import { createHash } from 'node:crypto'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
@@ -488,6 +489,40 @@ describe('Connector Routes', () => {
       })
       expect(res.statusCode).toBe(200)
       expect(countMessages()).toBe(1)
+    })
+
+    // ─── x-signature 兼容（NapCat HTTP 上报真实形态）──────────
+    // 根因：NapCat HTTP 上报发 x-signature: sha1=<body摘要>（OneBot v11 标准），
+    // 从不发 Authorization: Bearer——P3 只测 Bearer 路径致真实环境 401 必现。
+    // 测试用收到的 body JSON.stringify 后算 sha1（V8 解析保持键序，两端一致）。
+
+    it('x-signature（NapCat HTTP 上报真实形态）→ 200，正常摄入', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_TOKEN = 'secret'
+      // 真实形态：NapCat 对上报 body 算 sha1 摘要发 x-signature，不带 Bearer 头
+      const payload = groupEvent({ message_id: 30002000 })
+      const digest = createHash('sha1').update(JSON.stringify(payload)).digest('hex')
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload,
+        headers: { 'x-signature': `sha1=${digest}` },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(1) // 进正常处理路径——删 x-signature 分支必红
+    })
+
+    it('错误 x-signature → 401，不落库', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_TOKEN = 'secret'
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+        headers: { 'x-signature': `sha1=${'deadbeef'.repeat(5)}` },
+      })
+      expect(res.statusCode).toBe(401)
+      expect(countMessages()).toBe(0)
     })
   })
 })
