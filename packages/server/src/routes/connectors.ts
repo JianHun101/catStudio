@@ -161,7 +161,7 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
     // P3 审查观察点 #3：webhook 暴露公网可被伪造注入——设置 ONEBOT_TOKEN 后要求鉴权。
     // 双路径（任一合法即过）：
     // 1. Authorization: Bearer <token>——既有路径（P3 测试钉死的契约）
-    // 2. x-signature: sha1=<sha1(JSON.stringify(body))>——NapCat HTTP 上报实际发送的头
+    // 2. x-signature: sha1=<HMAC-SHA1(token, body)>——NapCat HTTP 上报实际发送的头
     //    （OneBot v11 标准上报签名；napcat.mjs 实锤 httpClient 只用 x-signature、
     //    WebSocket Client 才用 Bearer——P3 只测了 Bearer 路径，真实环境 401 必现，
     //    「测试输入源与真实环境不一致」第三次变体：出站 mock 无鉴权→403、入站 mock 带 Bearer→401）
