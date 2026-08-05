@@ -625,23 +625,56 @@ const MAX_MENTIONS_PER_AGENT = 5
  *  确保 Agent（Claude Code CLI）完成文件编辑后才允许重启。 */
 const LOCK_FILE = resolve(process.cwd(), '.agent-busy')
 
-/** 获取 Agent 执行锁（幂等 — 已存在则跳过）。
- *  TODO: 未来多 Agent 并发时改为引用计数 */
-function acquireLock(): boolean {
-  if (existsSync(LOCK_FILE)) return false
-  writeFileSync(LOCK_FILE, String(process.pid))
-  log.info('agent busy lock acquired', { pid: process.pid })
-  return true
+/** Agent 执行锁引用计数——每个 Claude 执行体 acquire/release 严格配对，
+ *  归零才删 .agent-busy。改造前 lockAcquired 是 executeAgentsSerial 的循环外
+ *  变量：同消息 @ 多 Claude agent 时 A 完成后即删锁、B 执行期间无锁 →
+ *  dev.js 误判空闲触发重启打断 B（派活单审查发现，实施必做项顺带根治） */
+let lockRefCount = 0
+
+/** 获取 Agent 执行锁（引用计数 +1；首次创建文件——文件已存在则不覆盖，
+ *  可能是异常残留或并发实例持有，保留内容只计引用） */
+function acquireLock(): void {
+  lockRefCount++
+  if (lockRefCount === 1 && !existsSync(LOCK_FILE)) {
+    writeFileSync(LOCK_FILE, String(process.pid))
+    log.info('agent busy lock acquired', { pid: process.pid })
+  }
 }
 
-/** 释放 Agent 执行锁 */
+/** 释放 Agent 执行锁（引用计数 -1；归零才删除文件） */
 function releaseLock(): void {
-  if (!existsSync(LOCK_FILE)) return
-  unlinkSync(LOCK_FILE)
-  log.info('agent busy lock released')
+  if (lockRefCount <= 0) {
+    log.warn('agent busy lock released with no holders', { lockRefCount })
+    return
+  }
+  lockRefCount--
+  if (lockRefCount === 0 && existsSync(LOCK_FILE)) {
+    unlinkSync(LOCK_FILE)
+    log.info('agent busy lock released')
+  }
 }
 
-// ─── Serial Agent Execution ─────────────────────────
+/** 测试钩子：重置锁引用计数并清理锁文件（仅测试用，生产路径不调用） */
+export function __test_resetLockState(): void {
+  lockRefCount = 0
+  if (existsSync(LOCK_FILE)) unlinkSync(LOCK_FILE)
+}
+
+// ─── Agent Execution（同消息并发调度） ────────────
+
+/** 同消息并发执行的 agent 数上限——批内 Promise.allSettled 并发启动，批间串行。
+ *  语义变化（方案级决策已过审）：广播模式下并行 agent 互不见彼此回复
+ *  （A2A 接力不受影响——触发前提是回复已落库）；前端显示顺序 = 完成顺序 */
+const CONCURRENT_AGENTS_PER_MESSAGE = 3
+
+/** 触发消息的静态形状（executeAgentsSerial / executeOneAgent 共用） */
+type AgentTriggerMsg = {
+  id: string
+  content: string
+  mentions: string[]
+  taskId?: string
+  authorName?: string
+}
 
 /** 追踪每个 Agent 在同一 traceId 下被 @ 的次数（防止无限循环） */
 const mentionCounts = new Map<string, number>()
@@ -665,49 +698,124 @@ export function __test_resetMentionCounts(): void {
   mentionCounts.clear()
 }
 
-export async function executeAgentsSerial(
+/**
+ * 单 agent 执行体（原 executeAgentsSerial for 循环体抽出）。
+ * 纯 per-agent 自包含，无共享可变状态——并发批内多个执行体可同时运行。
+ * 返回 true = 本执行体（或其 A2A 子链 / 队列 drain）执行过 Claude 适配器
+ * （Claude 会编辑源文件——顶层收尾据此决定是否需要脏文件清理）。
+ *
+ * 约束（派活单钉死）：
+ * - 状态检查必须留在第一个 await 之前——批启动瞬间所有执行体同步完成
+ *   检查，无中间态（若检查在 await 后，批内执行体可能交错看到彼此刚
+ *   标 busy 的中间状态，双执行防护失效）
+ * - 锁引用计数配对：needsLock（Claude）→ acquire，finally release——
+ *   并发批内多个 Claude 执行体同时持有（计数 1→2→…），归零才删
+ *   .agent-busy（dev.js 重启保护全程有效）
+ * - A2A 递归（触发前提是回复已落库）与队列 drain 保持原语义，天然串行
+ */
+async function executeOneAgent(
   io: SocketServer,
   sessionId: string,
-  agents: AgentConfig[],
-  triggerMsg: {
-    id: string
-    content: string
-    mentions: string[]
-    taskId?: string
-    authorName?: string
-  },
+  agent: AgentConfig,
+  triggerMsg: AgentTriggerMsg,
   traceId: string,
-  depth: number = 0
-): Promise<void> {
-  // 深度限制：防止 Agent 间无限循环
-  if (depth >= MAX_AGENT_DISPATCH_DEPTH) {
-    log.warn('agent dispatch depth limit reached', { traceId, depth })
-    return
+  depth: number,
+  /** 会话成员 id 与名（A2A mention 解析用——原 for 循环体的闭包变量，抽函数后显式传入） */
+  sessionAgentIds: string[],
+  sessionAgentNames: string[]
+): Promise<boolean> {
+  // 状态检查（同步——必须留在第一个 await 之前，见上方约束）
+  const state = getAgentState(agent.id)
+  if (!state || state.status !== 'busy') return false
+  // 跨会话忙碌：agent 正在其他 session 执行，已入队，不在此执行
+  if (state.sessionId !== sessionId) return false
+  // 只执行"本次 dispatch 标记的执行"：agent 正在处理其他消息时（本消息在
+  // FIFO 队列中等待排空），必须跳过——否则同一条消息会被立即执行一次、
+  // 队列排空再执行一次，产生重复回复（08:43:15 双补填事故根因）。
+  // completeExecution 弹出队列时会更新 currentTriggerMessageId，
+  // 排空路径自然通过此检查。
+  if (state.currentTriggerMessageId !== triggerMsg.id) return false
+
+  // 检查 API Key
+  if (!agent.llmApiKey || agent.llmApiKey === 'sk-your-api-key-here') {
+    log.warn('no API key', {
+      agentId: agent.id,
+      agentName: agent.name,
+      traceId,
+    })
+    io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
+      id: uuid(),
+      sessionId,
+      agentId: agent.id,
+      role: 'system',
+      content: `🐱 ${agent.name} 还没有配置 API Key，请在右侧面板点击它进行配置`,
+      mentions: [],
+      createdAt: new Date().toISOString(),
+    })
+    await completeExecution(agent.id, true, { traceId })
+    return false
   }
 
-  // 获取 session 中所有 Agent 名称（用于 mention 解析）
-  const sessionAgentIds = sessionsRepo.getSessionAgentIds(sessionId)
-  const sessionAgentNames: string[] = sessionAgentIds
-    .map((id: string) => agentsRepo.getAgentNameById(id))
-    .filter((n): n is string => n !== undefined)
+  // 获取 Agent 执行锁（仅 Claude 适配器需要——它会编辑源文件）。
+  // 引用计数配对：acquire 后所有出口走 finally release——并发批内多个
+  // Claude 执行体同时持有（计数 1→2→…），归零才删文件（派活单必改点 2；
+  // 改造前 lockAcquired 是循环外变量——A 完成即删锁、B 执行期间无锁的
+  // dev.js 误重启隐患顺带根治）
+  const needsLock = agent.llmProvider === 'claude'
+  if (needsLock) acquireLock()
+  try {
+    let claudeRan = needsLock
+    let reply: { content: string; msgId: string } = {
+      content: '',
+      msgId: '',
+    }
+    const abortController = new AbortController()
+    activeAborts.set(agent.id, abortController)
+    try {
+      // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
+      // AbortController 确保超时后子进程被 kill（P0-1 修复）
+      reply = await Promise.race([
+        runAgentReply(io, sessionId, agent, triggerMsg, traceId, abortController.signal),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => {
+            abortController.abort()
+            reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
+          }, AGENT_HARD_TIMEOUT_MS)
+        ),
+      ])
+    } catch (err: any) {
+      abortController.abort()
+      activeStreams.delete(agent.id) // 确保任何异常都 kill 子进程
+      log.error('agent execution failed', {
+        agentId: agent.id,
+        agentName: agent.name,
+        error: err.message,
+        traceId,
+      })
+      io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
+        id: uuid(),
+        sessionId,
+        agentId: agent.id,
+        role: 'system',
+        content: `🐱 ${agent.name} 暂时无法回复: ${err.message || '系统错误'}`,
+        mentions: [],
+        createdAt: new Date().toISOString(),
+      })
+      await completeExecution(agent.id, false, {
+        errorMessage: err.message || 'unknown error',
+        traceId,
+      })
+      return claudeRan
+    } finally {
+      activeAborts.delete(agent.id)
+    }
 
-  let lockAcquired = false
-
-  for (const agent of agents) {
-    const state = getAgentState(agent.id)
-    if (!state || state.status !== 'busy') continue
-    // 跨会话忙碌：agent 正在其他 session 执行，已入队，不在此执行
-    if (state.sessionId !== sessionId) continue
-    // 只执行"本次 dispatch 标记的执行"：agent 正在处理其他消息时（本消息在
-    // FIFO 队列中等待排空），必须跳过——否则同一条消息会被立即执行一次、
-    // 队列排空再执行一次，产生重复回复（08:43:15 双补填事故根因）。
-    // completeExecution 弹出队列时会更新 currentTriggerMessageId，
-    // 排空路径自然通过此检查。
-    if (state.currentTriggerMessageId !== triggerMsg.id) continue
-
-    // 检查 API Key
-    if (!agent.llmApiKey || agent.llmApiKey === 'sk-your-api-key-here') {
-      log.warn('no API key', {
+    // 用户中断检查：AGENT_INTERRUPT handler 对本执行 abort 后，runAgentReply
+    // 在流循环里检测到 signal.aborted 提前返回（内容不落库、无 NEW_MESSAGE 终稿）。
+    // 此处必须拦截——否则部分内容会被当正常回复走 A2A mention 解析，
+    // 触发错误的 agent-to-agent 调度。中断走失败路径收口（execution_logs 记 failed）。
+    if (abortController.signal.aborted) {
+      log.info('agent execution interrupted by user', {
         agentId: agent.id,
         agentName: agent.name,
         traceId,
@@ -717,311 +825,304 @@ export async function executeAgentsSerial(
         sessionId,
         agentId: agent.id,
         role: 'system',
-        content: `🐱 ${agent.name} 还没有配置 API Key，请在右侧面板点击它进行配置`,
+        content: `🐱 ${agent.name} 已停止（用户中断）`,
         mentions: [],
         createdAt: new Date().toISOString(),
       })
-      await completeExecution(agent.id, true, { traceId })
-      continue
+      await completeExecution(agent.id, false, {
+        errorMessage: 'interrupted',
+        traceId,
+      })
+      return claudeRan
     }
 
-    // 获取 Agent 执行锁（仅 Claude 适配器需要——它会编辑源文件）
-    if (agent.llmProvider === 'claude' && !lockAcquired) {
-      lockAcquired = acquireLock()
+    // 释放槽位并检查队列（P0-2 修复：不再丢弃 completeExecution 返回值）
+    const queuedCmd = await completeExecution(agent.id, true, { traceId })
+
+    // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
+    // 同一 trace 内某 agent 真实完成 ≥MAX 次 A2A 执行后，不再被重新调度。
+    // 计数的是实际执行次数而非进入执行循环的次数，因此未执行的
+    // 排队任务/审查闭环 mention 不消耗配额（阈值内不受限）。
+    // 仅 depth>0（A2A 链路）计数——用户顶层触发（depth=0）不消耗配额，
+    // 否则用户 @ 触发的执行会把计数推满，后续同 trace 的 A2A @ 被误杀）
+    // 并发化后注：A2A 调度点的「检查+预留」（下方原子段）与本处实际执行
+    // 双计——预留是并发互斥机制（防双双放行），本处计真实执行（配额确认）
+    if (depth > 0) {
+      const mentionKey = getMentionKey(traceId, agent.id)
+      mentionCounts.set(mentionKey, (mentionCounts.get(mentionKey) || 0) + 1)
     }
 
-    try {
-      let reply: { content: string; msgId: string } = {
-        content: '',
-        msgId: '',
-      }
-      const abortController = new AbortController()
-      activeAborts.set(agent.id, abortController)
-      try {
-        // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
-        // AbortController 确保超时后子进程被 kill（P0-1 修复）
-        reply = await Promise.race([
-          runAgentReply(io, sessionId, agent, triggerMsg, traceId, abortController.signal),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => {
-              abortController.abort()
-              reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
-            }, AGENT_HARD_TIMEOUT_MS)
-          ),
-        ])
-      } catch (err: any) {
-        abortController.abort()
-        activeStreams.delete(agent.id) // 确保任何异常都 kill 子进程
-        log.error('agent execution failed', {
-          agentId: agent.id,
-          agentName: agent.name,
-          error: err.message,
-          traceId,
+    // Agent-to-agent dispatch: 检测回复中的 @mentions
+    // 解析前归一化（解析层兜底）：prompt 层注入（resolveRolePlaceholders）只保证
+    // system prompt 已替换，不保证 LLM 必然照做——LLM 只要照抄 prompt 的占位符
+    // 字面输出，解析层严格精确匹配就会落空、收口信号静默丢失（a2c7f73 后事故链
+    // 第三次变体：mock 泄漏盲区——端到端测试 mock 了解析层假结果，真实链路仍裸奔）。
+    // 此处对回复正文再调一次同一函数，把 @架构师/@审查者/@作者 归一为真名后才解析，
+    // 普通文本叙述（"是项目架构师"无 @ 前缀）零影响。解析层本身保持精确匹配不动。
+    const mentionedNames = parseMentionsFromReply(
+      resolveRolePlaceholders(reply.content, triggerMsg.authorName),
+      sessionAgentNames
+    ).filter((name) => name !== agent.name) // 排除自己 @ 自己
+    if (mentionedNames.length > 0) {
+      // 找到被 @ 的 Agent 配置（提前——白名单判定需要目标角色）
+      const allMentionedAgents = sessionAgentIds
+        .map((id: string) => {
+          const row = agentsRepo.getAgentById(id)
+          return row ? rowToAgent(row) : null
         })
-        io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
-          id: uuid(),
-          sessionId,
-          agentId: agent.id,
-          role: 'system',
-          content: `🐱 ${agent.name} 暂时无法回复: ${err.message || '系统错误'}`,
-          mentions: [],
-          createdAt: new Date().toISOString(),
-        })
-        await completeExecution(agent.id, false, {
-          errorMessage: err.message || 'unknown error',
-          traceId,
-        })
-        continue
-      } finally {
-        activeAborts.delete(agent.id)
-      }
-
-      // 用户中断检查：AGENT_INTERRUPT handler 对本执行 abort 后，runAgentReply
-      // 在流循环里检测到 signal.aborted 提前返回（内容不落库、无 NEW_MESSAGE 终稿）。
-      // 此处必须拦截——否则部分内容会被当正常回复走 A2A mention 解析，
-      // 触发错误的 agent-to-agent 调度。中断走失败路径收口（execution_logs 记 failed）。
-      if (abortController.signal.aborted) {
-        log.info('agent execution interrupted by user', {
-          agentId: agent.id,
-          agentName: agent.name,
-          traceId,
-        })
-        io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
-          id: uuid(),
-          sessionId,
-          agentId: agent.id,
-          role: 'system',
-          content: `🐱 ${agent.name} 已停止（用户中断）`,
-          mentions: [],
-          createdAt: new Date().toISOString(),
-        })
-        await completeExecution(agent.id, false, {
-          errorMessage: 'interrupted',
-          traceId,
-        })
-        continue
-      }
-
-      // 释放槽位并检查队列（P0-2 修复：不再丢弃 completeExecution 返回值）
-      const queuedCmd = await completeExecution(agent.id, true, { traceId })
-
-      // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
-      // 同一 trace 内某 agent 真实完成 ≥MAX 次 A2A 执行后，不再被重新调度。
-      // 计数的是实际执行次数而非进入执行循环的次数，因此未执行的
-      // 排队任务/审查闭环 mention 不消耗配额（阈值内不受限）。
-      // 仅 depth>0（A2A 链路）计数——用户顶层触发（depth=0）不消耗配额，
-      // 否则用户 @ 触发的执行会把计数推满，后续同 trace 的 A2A @ 被误杀）
-      if (depth > 0) {
-        const mentionKey = getMentionKey(traceId, agent.id)
-        mentionCounts.set(mentionKey, (mentionCounts.get(mentionKey) || 0) + 1)
-      }
-
-      // Agent-to-agent dispatch: 检测回复中的 @mentions
-      // 解析前归一化（解析层兜底）：prompt 层注入（resolveRolePlaceholders）只保证
-      // system prompt 已替换，不保证 LLM 必然照做——LLM 只要照抄 prompt 的占位符
-      // 字面输出，解析层严格精确匹配就会落空、收口信号静默丢失（a2c7f73 后事故链
-      // 第三次变体：mock 泄漏盲区——端到端测试 mock 了解析层假结果，真实链路仍裸奔）。
-      // 此处对回复正文再调一次同一函数，把 @架构师/@审查者/@作者 归一为真名后才解析，
-      // 普通文本叙述（"是项目架构师"无 @ 前缀）零影响。解析层本身保持精确匹配不动。
-      const mentionedNames = parseMentionsFromReply(
-        resolveRolePlaceholders(reply.content, triggerMsg.authorName),
-        sessionAgentNames
-      ).filter((name) => name !== agent.name) // 排除自己 @ 自己
-      if (mentionedNames.length > 0) {
-        // 找到被 @ 的 Agent 配置（提前——白名单判定需要目标角色）
-        const allMentionedAgents = sessionAgentIds
-          .map((id: string) => {
-            const row = agentsRepo.getAgentById(id)
-            return row ? rowToAgent(row) : null
-          })
-          .filter(
-            (a: AgentConfig | null): a is AgentConfig =>
-              a !== null && mentionedNames.includes(a.name)
-          )
-
-        // A2A 风暴治理白名单：按发送者角色剥除违规 mention（执行顺序：白名单→配额→dispatch）。
-        // 写回 DB 用允许集合——被拦猫在上下文过滤（getRelevantMessages 基于
-        // mentions.includes 判定可见性）里也不可见，语义自洽。
-        // 未知/缺失角色 → 放行不拦截（老库零回归，误杀审查链代价远大于漏拦一条 @）
-        const policy = filterAllowedMentions(
-          { role: agent.role, triggerAuthorName: triggerMsg.authorName },
-          allMentionedAgents
+        .filter(
+          (a: AgentConfig | null): a is AgentConfig => a !== null && mentionedNames.includes(a.name)
         )
-        const allowedNames = policy.allowed.map((a) => a.name)
-        if (policy.blocked.length > 0) {
-          log.warn('agent-to-agent mention blocked by role policy', {
+
+      // A2A 风暴治理白名单：按发送者角色剥除违规 mention（执行顺序：白名单→配额→dispatch）。
+      // 写回 DB 用允许集合——被拦猫在上下文过滤（getRelevantMessages 基于
+      // mentions.includes 判定可见性）里也不可见，语义自洽。
+      // 未知/缺失角色 → 放行不拦截（老库零回归，误杀审查链代价远大于漏拦一条 @）
+      const policy = filterAllowedMentions(
+        { role: agent.role, triggerAuthorName: triggerMsg.authorName },
+        allMentionedAgents
+      )
+      const allowedNames = policy.allowed.map((a) => a.name)
+      if (policy.blocked.length > 0) {
+        log.warn('agent-to-agent mention blocked by role policy', {
+          traceId,
+          fromAgent: agent.name,
+          fromRole: agent.role,
+          blocked: policy.blocked.map((b) => `${b.name}:${b.reason}`),
+        })
+        // 系统提示：点名违规与正确规则（即时反馈，不持久化进 system_prompt）。
+        // 文案按 reason 区分——role-not-allowed 是角色白名单违规；
+        // count-limit 是超上限（≤1 个 @），提示拆条发送而非误报违规
+        const hintParts: string[] = []
+        const roleBlocked = policy.blocked.filter((b) => b.reason === 'role-not-allowed')
+        if (roleBlocked.length > 0) {
+          hintParts.push(
+            `你 @ 的 ${roleBlocked.map((b) => b.name).join('、')} 不在你的角色允许范围内（当前可 @：${allowedTargetsDescription(agent.role)}），该 mention 已忽略`
+          )
+        }
+        const countBlocked = policy.blocked.filter((b) => b.reason === 'count-limit')
+        if (countBlocked.length > 0) {
+          hintParts.push(
+            `一条回复最多 @ 1 个 agent，你 @ 的 ${countBlocked.map((b) => b.name).join('、')} 已忽略，请拆条分别 @`
+          )
+        }
+        io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
+          id: uuid(),
+          sessionId,
+          agentId: agent.id,
+          role: 'system',
+          content: `🐱 ${agent.name} ${hintParts.join('；')}`,
+          mentions: [],
+          createdAt: new Date().toISOString(),
+        })
+      }
+
+      if (allowedNames.length > 0) {
+        // 将解析出的 mentions 写回 DB，确保后续 Agent 构建上下文时
+        // 能通过 mentions.includes(agent.name) 过滤规则看到本消息
+        messagesRepo.updateMessageMentions(reply.msgId, JSON.stringify(allowedNames))
+
+        // 通知前端更新该消息的 mentions（因为在 runAgentReply 发送
+        // NEW_MESSAGE 时 mentions 尚未解析，前端拿到的 mentions 为空）
+        io.to(`session:${sessionId}`).emit(Events.MESSAGE_UPDATED, {
+          messageId: reply.msgId,
+          mentions: allowedNames,
+        })
+
+        log.info('agent-to-agent dispatch', {
+          traceId,
+          fromAgent: agent.name,
+          mentionedNames: allowedNames,
+          depth,
+        })
+
+        // 单个 Agent 被 @ 次数限制（防止无限 agent-to-agent 循环）
+        // 配额原子段（同步，中间无 await——Node 单线程天然原子）：
+        // 目标「检查 + 预留」同段完成。并发化后若检查与计数分离（原
+        // filter 只读不改），批内 A、B 执行体同时检查到 count=4 会双双
+        // 放行、目标 C 实际被调度超限 1（派活单必改点 1）——先到者的
+        // 预留写先落，后到者读到已预留值被拦截。
+        // 预留 = 调度即计数：目标执行成功的递增（上方 completeExecution
+        // 后，depth>0）仍在——双计让防护阈值更早触达，正常审查链深度
+        // （2-3）远在阈值（MAX_MENTIONS_PER_AGENT=5）内不受影响；预留后
+        // 未执行（跳过/失败）的配额不扣回——阈值 5 下影响边际，防循环优先
+        const limitedAgents: AgentConfig[] = []
+        for (const a of policy.allowed) {
+          const mk = getMentionKey(traceId, a.id)
+          const count = mentionCounts.get(mk) || 0
+          if (count >= MAX_MENTIONS_PER_AGENT) continue
+          mentionCounts.set(mk, count + 1) // 预留配额
+          limitedAgents.push(a)
+        }
+        if (limitedAgents.length < policy.allowed.length) {
+          log.info('agent-to-agent mention limit filtered', {
             traceId,
             fromAgent: agent.name,
-            fromRole: agent.role,
-            blocked: policy.blocked.map((b) => `${b.name}:${b.reason}`),
-          })
-          // 系统提示：点名违规与正确规则（即时反馈，不持久化进 system_prompt）。
-          // 文案按 reason 区分——role-not-allowed 是角色白名单违规；
-          // count-limit 是超上限（≤1 个 @），提示拆条发送而非误报违规
-          const hintParts: string[] = []
-          const roleBlocked = policy.blocked.filter((b) => b.reason === 'role-not-allowed')
-          if (roleBlocked.length > 0) {
-            hintParts.push(
-              `你 @ 的 ${roleBlocked.map((b) => b.name).join('、')} 不在你的角色允许范围内（当前可 @：${allowedTargetsDescription(agent.role)}），该 mention 已忽略`
-            )
-          }
-          const countBlocked = policy.blocked.filter((b) => b.reason === 'count-limit')
-          if (countBlocked.length > 0) {
-            hintParts.push(
-              `一条回复最多 @ 1 个 agent，你 @ 的 ${countBlocked.map((b) => b.name).join('、')} 已忽略，请拆条分别 @`
-            )
-          }
-          io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
-            id: uuid(),
-            sessionId,
-            agentId: agent.id,
-            role: 'system',
-            content: `🐱 ${agent.name} ${hintParts.join('；')}`,
-            mentions: [],
-            createdAt: new Date().toISOString(),
+            skipped: policy.allowed.filter((a) => !limitedAgents.includes(a)).map((a) => a.name),
+            remaining: limitedAgents.map((a) => a.name),
           })
         }
 
-        if (allowedNames.length > 0) {
-          // 将解析出的 mentions 写回 DB，确保后续 Agent 构建上下文时
-          // 能通过 mentions.includes(agent.name) 过滤规则看到本消息
-          messagesRepo.updateMessageMentions(reply.msgId, JSON.stringify(allowedNames))
-
-          // 通知前端更新该消息的 mentions（因为在 runAgentReply 发送
-          // NEW_MESSAGE 时 mentions 尚未解析，前端拿到的 mentions 为空）
-          io.to(`session:${sessionId}`).emit(Events.MESSAGE_UPDATED, {
-            messageId: reply.msgId,
-            mentions: allowedNames,
-          })
-
-          log.info('agent-to-agent dispatch', {
-            traceId,
-            fromAgent: agent.name,
-            mentionedNames: allowedNames,
-            depth,
-          })
-
-          // 单个 Agent 被 @ 次数限制（防止无限 agent-to-agent 循环）
-          // 基于实际执行次数过滤——已执行 ≥MAX 次的 agent 不再被重新调度
-          const limitedAgents = policy.allowed.filter((a) => {
-            const mk = getMentionKey(traceId, a.id)
-            return (mentionCounts.get(mk) || 0) < MAX_MENTIONS_PER_AGENT
-          })
-          if (limitedAgents.length < policy.allowed.length) {
-            log.info('agent-to-agent mention limit filtered', {
-              traceId,
-              fromAgent: agent.name,
-              skipped: policy.allowed.filter((a) => !limitedAgents.includes(a)).map((a) => a.name),
-              remaining: limitedAgents.map((a) => a.name),
-            })
+        if (limitedAgents.length > 0) {
+          // 初始化被 @ Agent 的槽位
+          for (const a of limitedAgents) {
+            if (!getAgentState(a.id)) {
+              initAgentSlot(a.id)
+            }
           }
 
-          if (limitedAgents.length > 0) {
-            // 初始化被 @ Agent 的槽位
-            for (const a of limitedAgents) {
-              if (!getAgentState(a.id)) {
-                initAgentSlot(a.id)
-              }
-            }
+          // 构造触发消息，使用 runAgentReply 写入的真实 msgId
+          // taskId 继承原有的，确保整个 review 链共享同一 task
+          const agentTrigger: Message = {
+            id: reply.msgId,
+            sessionId,
+            agentId: agent.id,
+            role: 'agent',
+            content: reply.content,
+            mentions: limitedAgents.map((a) => a.name),
+            taskId: triggerMsg.taskId || traceId,
+            createdAt: new Date().toISOString(),
+          }
 
-            // 构造触发消息，使用 runAgentReply 写入的真实 msgId
-            // taskId 继承原有的，确保整个 review 链共享同一 task
-            const agentTrigger: Message = {
-              id: reply.msgId,
-              sessionId,
-              agentId: agent.id,
-              role: 'agent',
-              content: reply.content,
-              mentions: limitedAgents.map((a) => a.name),
-              taskId: triggerMsg.taskId || traceId,
-              createdAt: new Date().toISOString(),
-            }
-
-            // 调度并递归执行——A2A 入队命令带 depth+1（>0 才会消耗 mention 配额）
-            await dispatch(sessionId, agentTrigger, limitedAgents, traceId, depth + 1)
-            await executeAgentsSerial(
+          // 调度并递归执行——A2A 入队命令带 depth+1（>0 才会消耗 mention 配额）。
+          // 子链返回值冒泡：子链若有 Claude 执行，顶层收尾同样需要脏文件清理
+          await dispatch(sessionId, agentTrigger, limitedAgents, traceId, depth + 1)
+          claudeRan =
+            (await executeAgentsSerial(
               io,
               sessionId,
               limitedAgents,
               { ...agentTrigger, authorName: agent.name },
               traceId,
               depth + 1
-            )
-          }
+            )) || claudeRan
         }
       }
+    }
 
-      // P0-2 修复：处理队列中等待的命令
-      // completeExecution 弹出队列后会返回下一个命令，不再丢弃。
-      // 递归用 queuedCmd 自持的 traceId/depth（命令入队时记录的），不继承执行者的——
-      // 否则另一条用户消息的命令会带着错误的 trace 执行（A2A 配额张冠李戴）
-      if (queuedCmd) {
-        log.info('draining queued command', {
-          traceId: queuedCmd.traceId,
-          agentId: agent.id,
-          agentName: agent.name,
-          depth: queuedCmd.depth,
-        })
-        // 补执行审计（恢复路径 recoverInterruptedExecutions 同款）：completeExecution
-        // 已弹出队列命令并更新槽位（busy + currentTrigger），此处补 executeAgentCommand
-        // 写 execution_log——否则排队命令的执行零审计（审查结论 151 秒执行无记录的根因）
-        await executeAgentCommand(agent, queuedCmd, queuedCmd.traceId)
-        // 出队反查触发作者（恢复路径 recoverInterruptedExecutions:1119-1122 同款）：
-        // A2A 审查结论 @回请求人依赖 triggerAuthorName 例外判定（mention-policy），
-        // 缺失则 undefined 与写死名比对失败 → 白名单误拦（10:38 事故根因）；
-        // 反查失败（消息已删/非 agent）→ undefined，与现状等价不拦截
-        const triggerMeta = messagesRepo.getMessageByIdOnly(queuedCmd.triggerMessageId)
-        const triggerRow = triggerMeta
-          ? messagesRepo.getMessageById(
-              queuedCmd.triggerMessageId,
-              queuedCmd.sessionId,
-              triggerMeta.role
-            )
-          : undefined
-        // B 触发合并点名：并入的触发在出队执行时告知（内存注入触发消息，
-        // 不落库）——"还有 N 件事"让 Agent 上下文知道本次任务合并了多次触发
-        const queuedTrigger = {
-          id: queuedCmd.triggerMessageId,
-          content:
-            queuedCmd.pendingTriggers.length > 0
-              ? `${queuedCmd.triggerContent}\n\n[系统提示] 你本次执行期间，另有 ${queuedCmd.pendingTriggers.length} 件事已并入本任务（触发消息：${queuedCmd.pendingTriggers.join('、')}），请一并处理。`
-              : queuedCmd.triggerContent,
-          mentions: queuedCmd.mentions,
-          // taskId 用命令自持的（入队时抄 userMessage.taskId），不继承执行者——
-          // 否则 A2A 审查链的 task 关联张冠李戴（与 traceId/depth 同语义）
-          taskId: queuedCmd.taskId,
-          authorName:
-            triggerRow?.role === 'agent' && triggerRow.agent_id
-              ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
-              : undefined,
-        }
-        await executeAgentsSerial(
+    // P0-2 修复：处理队列中等待的命令
+    // completeExecution 弹出队列后会返回下一个命令，不再丢弃。
+    // 递归用 queuedCmd 自持的 traceId/depth（命令入队时记录的），不继承执行者的——
+    // 否则另一条用户消息的命令会带着错误的 trace 执行（A2A 配额张冠李戴）
+    if (queuedCmd) {
+      log.info('draining queued command', {
+        traceId: queuedCmd.traceId,
+        agentId: agent.id,
+        agentName: agent.name,
+        depth: queuedCmd.depth,
+      })
+      // 补执行审计（恢复路径 recoverInterruptedExecutions 同款）：completeExecution
+      // 已弹出队列命令并更新槽位（busy + currentTrigger），此处补 executeAgentCommand
+      // 写 execution_log——否则排队命令的执行零审计（审查结论 151 秒执行无记录的根因）
+      await executeAgentCommand(agent, queuedCmd, queuedCmd.traceId)
+      // 出队反查触发作者（恢复路径 recoverInterruptedExecutions:1119-1122 同款）：
+      // A2A 审查结论 @回请求人依赖 triggerAuthorName 例外判定（mention-policy），
+      // 缺失则 undefined 与写死名比对失败 → 白名单误拦（10:38 事故根因）；
+      // 反查失败（消息已删/非 agent）→ undefined，与现状等价不拦截
+      const triggerMeta = messagesRepo.getMessageByIdOnly(queuedCmd.triggerMessageId)
+      const triggerRow = triggerMeta
+        ? messagesRepo.getMessageById(
+            queuedCmd.triggerMessageId,
+            queuedCmd.sessionId,
+            triggerMeta.role
+          )
+        : undefined
+      // B 触发合并点名：并入的触发在出队执行时告知（内存注入触发消息，
+      // 不落库）——"还有 N 件事"让 Agent 上下文知道本次任务合并了多次触发
+      const queuedTrigger = {
+        id: queuedCmd.triggerMessageId,
+        content:
+          queuedCmd.pendingTriggers.length > 0
+            ? `${queuedCmd.triggerContent}\n\n[系统提示] 你本次执行期间，另有 ${queuedCmd.pendingTriggers.length} 件事已并入本任务（触发消息：${queuedCmd.pendingTriggers.join('、')}），请一并处理。`
+            : queuedCmd.triggerContent,
+        mentions: queuedCmd.mentions,
+        // taskId 用命令自持的（入队时抄 userMessage.taskId），不继承执行者——
+        // 否则 A2A 审查链的 task 关联张冠李戴（与 traceId/depth 同语义）
+        taskId: queuedCmd.taskId,
+        authorName:
+          triggerRow?.role === 'agent' && triggerRow.agent_id
+            ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
+            : undefined,
+      }
+      claudeRan =
+        (await executeAgentsSerial(
           io,
           queuedCmd.sessionId,
           [agent],
           queuedTrigger,
           queuedCmd.traceId,
           queuedCmd.depth
-        )
-      }
-    } catch (err: any) {
-      // P0-1 修复：外层 try/catch 防止 completeExecution 或 agent-to-agent
-      // dispatch 中的任何异常导致 for 循环崩溃、槽位永久卡死
-      log.error('post-execution error — releasing slot', {
+        )) || claudeRan
+    }
+
+    return claudeRan
+  } catch (err: any) {
+    // P0-1 修复：外层 try/catch 防止 completeExecution 或 agent-to-agent
+    // dispatch 中的任何异常导致执行体崩溃、槽位永久卡死
+    log.error('post-execution error — releasing slot', {
+      agentId: agent.id,
+      agentName: agent.name,
+      error: err.message,
+      traceId,
+    })
+    await completeExecution(agent.id, false, {
+      errorMessage: err.message || 'post-execution error',
+      traceId,
+    }).catch(() => {
+      log.error('critical: completeExecution itself failed', {
         agentId: agent.id,
-        agentName: agent.name,
-        error: err.message,
         traceId,
       })
-      await completeExecution(agent.id, false, {
-        errorMessage: err.message || 'post-execution error',
-        traceId,
-      }).catch(() => {
-        log.error('critical: completeExecution itself failed', {
-          agentId: agent.id,
+    })
+    return needsLock
+  } finally {
+    if (needsLock) releaseLock()
+  }
+}
+
+export async function executeAgentsSerial(
+  io: SocketServer,
+  sessionId: string,
+  agents: AgentConfig[],
+  triggerMsg: AgentTriggerMsg,
+  traceId: string,
+  depth: number = 0
+): Promise<boolean> {
+  // 深度限制：防止 Agent 间无限循环
+  if (depth >= MAX_AGENT_DISPATCH_DEPTH) {
+    log.warn('agent dispatch depth limit reached', { traceId, depth })
+    return false
+  }
+
+  // 获取 session 中所有 Agent 名称（用于 mention 解析）
+  const sessionAgentIds = sessionsRepo.getSessionAgentIds(sessionId)
+  const sessionAgentNames: string[] = sessionAgentIds
+    .map((id: string) => agentsRepo.getAgentNameById(id))
+    .filter((n): n is string => n !== undefined)
+
+  // 分批并发：批内 CONCURRENT_AGENTS_PER_MESSAGE 个执行体同时启动（状态检查
+  // 在各自第一个 await 前同步完成，批启动瞬间无中间态），批间串行。
+  // allSettled 只兜未预期 throw——执行体异常已自收口（completeExecution(false)），
+  // 单个执行体崩溃不中断整批其余执行（原 for 循环中一个 throw 会中断后续）
+  let anyClaude = false
+  for (let i = 0; i < agents.length; i += CONCURRENT_AGENTS_PER_MESSAGE) {
+    const batch = agents.slice(i, i + CONCURRENT_AGENTS_PER_MESSAGE)
+    const results = await Promise.allSettled(
+      batch.map((agent) =>
+        executeOneAgent(
+          io,
+          sessionId,
+          agent,
+          triggerMsg,
           traceId,
-        })
-      })
+          depth,
+          sessionAgentIds,
+          sessionAgentNames
+        )
+      )
+    )
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) anyClaude = true
     }
   }
 
@@ -1040,9 +1141,13 @@ export async function executeAgentsSerial(
         execLogsRepo.updateExecutionLogCommitHash(triggerMsg.id, commitHash)
       }
     } finally {
-      if (lockAcquired) {
-        // 清理 Agent 执行遗留的脏文件（编辑中断、未追踪的新文件等）
-        // 成功路径 git commit 后工作区应为干净状态，此检查为无操作
+      if (anyClaude) {
+        // 清理 Agent 执行遗留的脏文件（编辑中断、未追踪的新文件等）——
+        // 仅当本次调度树有 Claude 执行过（只有它会编辑源文件；A2A 子链 /
+        // 队列 drain 的 Claude 执行经返回值冒泡计入）。成功路径 git commit
+        // 后工作区应为干净状态，此检查为无操作。
+        // 锁文件已由各执行体 finally 配对释放（引用计数归零时删除）——
+        // 此处不再操作锁（派活单必改点 2：保留会让引用计数变负）
         try {
           const status = execSync('git status --porcelain', {
             encoding: 'utf8',
@@ -1058,7 +1163,6 @@ export async function executeAgentsSerial(
         } catch {
           // 非 git 仓库，忽略
         }
-        releaseLock()
       }
     }
 
@@ -1071,6 +1175,8 @@ export async function executeAgentsSerial(
       })
     })
   }
+
+  return anyClaude
 }
 
 // ─── 启动恢复：重新 dispatch 被 server 重启打断的执行 ───
