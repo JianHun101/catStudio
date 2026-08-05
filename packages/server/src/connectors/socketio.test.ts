@@ -798,7 +798,7 @@ describe('socketio connector', () => {
       vi.mocked(getAgentState).mockReturnValue({
         agentId: 'agent-1',
         sessionId: 'session-1',
-        status: 'busy',
+        status: 'busy' as const,
         queueLength: 0,
         currentTriggerMessageId: 'msg-B',
       })
