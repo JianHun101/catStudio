@@ -1686,11 +1686,17 @@ describe('socketio connector', () => {
         'task-review'
       )
 
-      // LLM 照抄 prompt 输出字面占位符（真实事故形态）：prompt 教「行首@架构师 请收口」，
-      // LLM 格式照做、名字照抄占位符——行首是解析层（a2a-mentions 严格行首匹配）的命中
-      // 前提，嵌中 @ 在真实解析下永远落空（a2c7f73 的 mock 假结果曾掩盖这一点）
+      // LLM 照抄 prompt 输出字面占位符（真实事故形态逐字复刻）：prompt 教「行首@架构师
+      // 请收口」，LLM 格式照做、名字照抄占位符——行首是解析层（a2a-mentions 严格行首
+      // 匹配）的命中前提，嵌中 @ 在真实解析下永远落空（a2c7f73 的 mock 假结果曾掩盖
+      // 这一点）。尾缀「附一句给后续：…」复刻 09:02 审查 cff6bda 实况——mention 后跟
+      // 空格即命中，同行尾缀不影响解析（真实 LLM 输出不会只有孤零零一句 @）
       const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
-        yield { content: '✅可合并 审查通过。\n@架构师 请收口。', kind: 'text' }
+        yield {
+          content:
+            '✅可合并 审查通过。\n@架构师 请收口。附一句给后续：本单无遗留项，事故链三变体已全部根治。',
+          kind: 'text',
+        }
       })
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
       // executeAgentsSerial 只执行「busy 且 currentTriggerMessageId === triggerMsg.id」
@@ -1768,6 +1774,19 @@ describe('socketio connector', () => {
         .filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
         .map((c: any[]) => JSON.stringify(c[1]))
       expect(news.some((s) => s.includes('不在你的角色允许范围内'))).toBe(false)
+
+      // 断言④ 落库契约（「原文落库 + 真名调度」双轨）：content 保持 LLM 原文
+      // （@架构师 字面——归一化只作用于解析输入，不污染落库，防后人"顺手"改写
+      // 落库原文制造虚假记录）；mentions 列已由 updateMessageMentions 写回解析后
+      // 真名 ['店长']（:888 真实执行）——上下文过滤与前端 mentions 可见性拿到的
+      // 是解析后真名。这正是「动态替换」在数据层的最终形态
+      const replyMsgId = vi.mocked(dispatch).mock.calls[0][1].id as string
+      const replyRow = db
+        .prepare(`SELECT content, mentions FROM messages WHERE id = ?`)
+        .get(replyMsgId) as any
+      expect(replyRow).toBeDefined()
+      expect(replyRow.content).toContain('@架构师') // 原文落库契约
+      expect(JSON.parse(replyRow.mentions)).toEqual(['店长']) // 真名写回
 
       // 恢复文件级默认 mock（() => []），防真实实现泄漏到后续用例
       vi.mocked(parseMentionsFromReply).mockReset()
