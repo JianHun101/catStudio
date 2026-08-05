@@ -73,10 +73,16 @@ export async function deliverAgentReply(msg: AgentReplyMessage): Promise<number>
       binding.external_type === 'group'
         ? { group_id: Number(binding.external_id), message: text }
         : { user_id: Number(binding.external_id), message: text }
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    // NapCat HTTP API 默认配置带 token（鉴权 401/403）——token 存在时才带
+    // Authorization 头；未配置的环境不带头，保持与无鉴权 NapCat 兼容（P3 测试
+    // 无 token 断言不受影响）
+    const token = process.env.ONEBOT_TOKEN
+    if (token) headers['Authorization'] = `Bearer ${token}`
     try {
       const res = await fetch(`${base}${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(body),
         // P4 #2: AbortSignal.timeout 超时拒绝（name === 'TimeoutError'）自然进下方
         // catch 走 log.warn 不重试——与出站失败语义一致

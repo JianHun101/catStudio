@@ -53,6 +53,7 @@ describe('onebotOutbound', () => {
     delete process.env.ONEBOT_API_BASE
     delete process.env.ONEBOT_ENABLED
     delete process.env.ONEBOT_FETCH_TIMEOUT_MS
+    delete process.env.ONEBOT_TOKEN
     resetDb()
   })
 
@@ -167,6 +168,37 @@ describe('onebotOutbound', () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       'http://napcat:3000/send_group_msg',
       expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+  })
+
+  it('P4-补: ONEBOT_TOKEN 配置时 → fetch 带 Authorization: Bearer <token> 头', async () => {
+    insertBindings()
+    process.env.ONEBOT_TOKEN = 'napcat-token-123'
+    await deliverAgentReply(msg())
+    const fetchMock = vi.mocked(fetch)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://napcat:3000/send_group_msg',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer napcat-token-123',
+        }),
+      })
+    )
+  })
+
+  it('P4-补: ONEBOT_TOKEN 未配置时 → fetch 不带 Authorization 头（兼容无鉴权 NapCat）', async () => {
+    insertBindings()
+    delete process.env.ONEBOT_TOKEN
+    await deliverAgentReply(msg())
+    const fetchMock = vi.mocked(fetch)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://napcat:3000/send_group_msg',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
     )
   })
 })
