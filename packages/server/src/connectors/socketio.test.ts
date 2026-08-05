@@ -1624,6 +1624,214 @@ describe('socketio connector', () => {
     })
   })
 
+  // ─── 角色占位符运行时注入 — @架构师/@审查者 端到端形态 ──────────
+  // 回归测试：b542d24 审查结论分流断链——吐槽猫 prompt 写角色占位符 @架构师，
+  // 但运行时只实现了 @作者 替换，LLM 照抄输出字面 @架构师 → mention 解析
+  // 精确匹配落空 → 收口信号静默丢失（店长从未收到 ✅）。修复 = 三占位符统一
+  // 运行时注入（store/reviewer 角色查真名）。本测试钉死事故教训要求的端到端
+  // 形态：LLM 输出字面占位符 → system prompt 已替换 → 解析命中 → dispatch
+  // 触发 → 白名单放行（seed-data 静态断言拦不住运行时断链，正是那次教训）。
+
+  describe('角色占位符运行时注入 — @架构师/@审查者 端到端', () => {
+    it('吐槽猫输出字面 @架构师 → system prompt 已替换 @店长、mention 命中、dispatch 触发店长、白名单无拦截', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch, getAgentState } = await import('../dispatch/index.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const db = getDb()
+
+      // 会话成员全角色：店长（store）+ 吐槽猫（reviewer）+ ds猫（implementer）
+      // beforeEach 的 agent-1 店长 role 默认 'unknown'——补为 store（白名单判定需要真实角色）
+      db.prepare(`UPDATE agents SET role = 'store' WHERE id = 'agent-1'`).run()
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-2',
+        '吐槽猫',
+        '😼',
+        '你是审查者。审查结论分流：✅可合并 → 行首@架构师 请收口；⚠️建议修改/❌需重做 → 行首@作者。',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'reviewer'
+      )
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-3',
+        'ds猫',
+        '🐯',
+        'You are a cat.',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'implementer'
+      )
+      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+        JSON.stringify(['agent-1', 'agent-2', 'agent-3'])
+      )
+
+      // 审查请求消息（触发者 = ds猫 → @作者 注入 @ds猫）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id)
+         VALUES (?, ?, ?, 'agent', ?, ?, ?)`
+      ).run(
+        'msg-review',
+        'session-1',
+        'agent-3',
+        '@吐槽猫 请审查 6846bb4（重启确认机制升级）',
+        JSON.stringify(['吐槽猫']),
+        'task-review'
+      )
+
+      // LLM 照抄 prompt 输出字面占位符（真实事故形态）
+      const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
+        yield { content: '✅可合并 审查通过。@架构师 请收口。', kind: 'text' }
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+      // executeAgentsSerial 只执行「busy 且 currentTriggerMessageId === triggerMsg.id」
+      // 的 agent（:696-706）——mock busy 状态放行吐槽猫执行；A2A 递归店长时
+      // currentTrigger 不匹配 reply.msgId → 自然跳过（dispatch 触发即链路通，
+      // 店长是否真实执行非本测试目标，与 queue drain 测试同模式）
+      vi.mocked(getAgentState)
+        .mockReset()
+        .mockReturnValue({
+          agentId: 'agent-2',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-review',
+        } as any)
+      // 解析层 mock 返回店长真名——精确匹配正确性由 a2a-mentions 自身测试钉死，
+      // 此处钉死「替换后的名字能被解析 → 被调度」端到端形态
+      vi.mocked(parseMentionsFromReply).mockReset().mockReturnValue(['店长'])
+      vi.mocked(dispatch).mockReset()
+      mod.__test_resetMentionCounts()
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-2',
+            name: '吐槽猫',
+            avatar: '😼',
+            systemPrompt:
+              '你是审查者。审查结论分流：✅可合并 → 行首@架构师 请收口；⚠️建议修改/❌需重做 → 行首@作者。',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+            role: 'reviewer',
+          } as any,
+        ],
+        {
+          id: 'msg-review',
+          content: '@吐槽猫 请审查 6846bb4（重启确认机制升级）',
+          mentions: ['吐槽猫'],
+          taskId: 'task-review',
+          authorName: 'ds猫',
+        },
+        'trace-review'
+      )
+
+      // 断言① 三占位符替换：@架构师→@店长、@作者→@ds猫（system prompt 无字面残留）
+      const msgs = chatStream.mock.calls[0][0] as any[]
+      expect(msgs[0].content).toContain('@店长 请收口')
+      expect(msgs[0].content).toContain('@ds猫')
+      expect(msgs[0].content).not.toContain('@架构师')
+      expect(msgs[0].content).not.toContain('@作者')
+
+      // 断言② mention 解析命中 → 店长被调度（修复前解析落空 → 零调度）
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ mentions: ['店长'] }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-1', name: '店长' })]),
+        'trace-review',
+        1 // 顶层执行 depth=0 → A2A 第一跳 +1
+      )
+      // 断言③ 白名单无 blocked（reviewer→store 直通；修复前是解析层静默落空，
+      // 不产生 blocked emit——此处断言修复后放行且不产生误导性违规提示）
+      const news = mockRoomEmit.mock.calls
+        .filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+        .map((c: any[]) => JSON.stringify(c[1]))
+      expect(news.some((s) => s.includes('不在你的角色允许范围内'))).toBe(false)
+    })
+  })
+
+  // ─── resolveRolePlaceholders — 纯函数单测 ──────────
+  // 三占位符替换语义钉死：@作者→触发者（authorName 存在才替换）、
+  // @架构师→store 角色名、@审查者→reviewer 角色名（角色缺失保留字面零回归）。
+
+  describe('resolveRolePlaceholders — 纯函数单测', () => {
+    it('三占位符同时替换：@作者→触发者、@架构师→store 名、@审查者→reviewer 名', async () => {
+      const db = getDb()
+      db.prepare(`UPDATE agents SET role = 'store' WHERE id = 'agent-1'`).run()
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-2',
+        '吐槽猫',
+        '😼',
+        'You are a cat.',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'reviewer'
+      )
+
+      const { resolveRolePlaceholders } = await import('./socketio.js')
+      const out = resolveRolePlaceholders(
+        '请审核只 @审查者。✅可合并 → 行首@架构师 请收口；⚠️/❌ → 行首@作者。',
+        'ds猫'
+      )
+      expect(out).toContain('@吐槽猫')
+      expect(out).toContain('@店长')
+      expect(out).toContain('@ds猫')
+      expect(out).not.toContain('@架构师')
+      expect(out).not.toContain('@审查者')
+      expect(out).not.toContain('@作者')
+    })
+
+    it('角色缺失 → 保留字面（零回归：老库无 store/reviewer 角色时不替换）', async () => {
+      // beforeEach 的 agent-1 店长 role 默认 'unknown'——无任何 store/reviewer 角色
+      const { resolveRolePlaceholders } = await import('./socketio.js')
+      const out = resolveRolePlaceholders(
+        '请审核只 @审查者。✅可合并 → 行首@架构师 请收口；结论归 @作者。',
+        'ds猫'
+      )
+      expect(out).toContain('@架构师')
+      expect(out).toContain('@审查者')
+      expect(out).toContain('@ds猫') // @作者 有 authorName 仍替换
+    })
+
+    it('authorName 缺失 → @作者 保留字面（用户消息触发场景）', async () => {
+      const db = getDb()
+      db.prepare(`UPDATE agents SET role = 'store' WHERE id = 'agent-1'`).run()
+      const { resolveRolePlaceholders } = await import('./socketio.js')
+      const out = resolveRolePlaceholders('你是审查者，结论 @作者 通知。')
+      expect(out).toContain('@作者') // authorName undefined → 不替换
+      expect(out).not.toContain('@店长') // 但 @架构师 占位符不在 prompt 中
+    })
+
+    it('无 @ 前缀的叙述不受影响（"是项目架构师"不误替换）', async () => {
+      const db = getDb()
+      db.prepare(`UPDATE agents SET role = 'store' WHERE id = 'agent-1'`).run()
+      const { resolveRolePlaceholders } = await import('./socketio.js')
+      const out = resolveRolePlaceholders('你是项目架构师，负责整体设计。')
+      expect(out).toBe('你是项目架构师，负责整体设计。')
+    })
+
+    it('无占位符 → 原样返回', async () => {
+      const { resolveRolePlaceholders } = await import('./socketio.js')
+      const prompt = '你是审查者，逐项核对。'
+      expect(resolveRolePlaceholders(prompt)).toBe(prompt)
+    })
+  })
+
   // ─── recoverInterruptedExecutions 重启恢复队列 ──────────
   // 回归测试：server 重启时 dispatch 的 in-memory 队列被清空，正在执行的 agent
   // 被 fixStuckExecutionLogs 标记为 failed/server_restart，其触发消息永远不会

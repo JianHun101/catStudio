@@ -1439,6 +1439,41 @@ export function buildHandoffTriggerHint(triggerContent: string): string | null {
 }
 
 /**
+ * 将 system prompt 中的角色占位符解析为实际 agent 名。
+ *
+ * 纯函数，无副作用（listAllAgents 为 DB 查询——调用点在 runAgentReply，
+ * 该处执行栈内数据库始终就绪）。
+ *
+ * 占位符语义（全链路角色化设计——prompt 不写死猫名，运行时注入真名）：
+ * - @作者 → 本次触发者名（triggerAuthorName 存在才替换，保留旧语义；
+ *   用户消息触发时无作者，字面保留与历史行为一致）
+ * - @架构师 → store 角色 agent 名；@审查者 → reviewer 角色 agent 名
+ *   （角色存在才替换，缺失保留字面——与现状等价，零回归）
+ *
+ * 注入只发生在 prompt 层：mention 解析（a2a-mentions.ts）保持严格精确匹配，
+ * LLM 输出真名后解析自然命中——占位符不替换 = 解析落空 = 静默不触发
+ * （b542d24 审查结论分流断链事故根因：吐槽猫输出字面 @架构师，匹配不到
+ * 任何会话 agent 名，收口信号从未投递）。正则只匹配 @ 前缀，prompt 中
+ * "是项目架构师" 这类无 @ 的叙述不受影响。
+ */
+export function resolveRolePlaceholders(prompt: string, triggerAuthorName?: string): string {
+  let result = prompt
+  if (triggerAuthorName) {
+    result = result.replace(/@作者/g, `@${triggerAuthorName}`)
+  }
+  const allAgents = agentsRepo.listAllAgents()
+  const architect = allAgents.find((a) => a.role === 'store')
+  if (architect) {
+    result = result.replace(/@架构师/g, `@${architect.name}`)
+  }
+  const reviewer = allAgents.find((a) => a.role === 'reviewer')
+  if (reviewer) {
+    result = result.replace(/@审查者/g, `@${reviewer.name}`)
+  }
+  return result
+}
+
+/**
  * 聚合所有动态上下文指令。
  *
  * 每个 hint 检查一个场景，返回要注入的 system 指令或 null。
@@ -1653,11 +1688,10 @@ async function runAgentReply(
     })
   }
 
-  // 将 system prompt 中的 @作者 占位符替换为实际触发者名字
-  // 使 LLM 能正确输出 @店长 等实际 agent 名，而非 @作者
-  const finalSystemPrompt = triggerMsg.authorName
-    ? dynamicSystemPrompt.replace(/@作者/g, `@${triggerMsg.authorName}`)
-    : dynamicSystemPrompt
+  // 将 system prompt 中的角色占位符（@作者/@架构师/@审查者）替换为实际 agent 名
+  // 使 LLM 能正确输出 @店长 等实际 agent 名——mention 解析是严格精确匹配，
+  // 占位符不替换 = 解析落空 = 静默不触发（b542d24 分流断链事故根因）
+  const finalSystemPrompt = resolveRolePlaceholders(dynamicSystemPrompt, triggerMsg.authorName)
 
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
   const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages)
