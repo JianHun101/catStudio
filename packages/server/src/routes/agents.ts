@@ -171,5 +171,6 @@ function toAgentConfig(row: AgentRow) {
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: row.effort_level || undefined,
     skillModules: parseJsonArray(row.skill_modules),
+    role: row.role, // 前端占位符解析（@架构师→store 角色真名）依赖此字段；漏序列化 → 前端永远拿不到角色
   }
 }

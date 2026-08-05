@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
-import { initRepository } from '../db/repository/index.js'
+import { initRepository, agents as agentsRepo } from '../db/repository/index.js'
 import { agentRoutes } from './agents.js'
 import type { FastifyInstance } from 'fastify'
 
@@ -41,6 +41,8 @@ describe('Agent Routes', () => {
       expect(body.name).toBe('店长阿暹')
       expect(body.llmProvider).toBe('deepseek')
       expect(body.id).toBeDefined()
+      // POST 响应同样走 toAgentConfig 序列化——role 为 DB 默认 'unknown'（schema 无 role 字段，创建时不落值）
+      expect(body.role).toBe('unknown')
     })
 
     it('defaults effortLevel to high when omitted (regression: NOT NULL constraint)', async () => {
@@ -102,6 +104,32 @@ describe('Agent Routes', () => {
       expect(res.statusCode).toBe(200)
       const agents = JSON.parse(res.body)
       expect(agents).toHaveLength(2)
+    })
+
+    it('serializes role field equal to DB value (frontend placeholder resolution contract)', async () => {
+      // 序列化契约钉死：API 返回的 role 必须等于 DB 值——前端 resolveDisplayPlaceholders
+      // 靠 `agents.find(a => a.role === 'store')` 找架构师真名；toAgentConfig 漏序列化 role
+      // 时此断言必红（事故链第四次变体：序列化遗漏盲区）
+      // 真实数据形态用 seed 同款 upsertAgent 写入（POST 不含 role——schema 无此字段，zod strip）
+      agentsRepo.upsertAgent(
+        'agent-role',
+        '店长',
+        '🐱',
+        'prompt',
+        'deepseek',
+        'deepseek-v4-pro',
+        'sk-test',
+        '',
+        'high',
+        '[]',
+        'store'
+      )
+
+      const res = await app.inject({ method: 'GET', url: '/api/agents' })
+      expect(res.statusCode).toBe(200)
+      const agents = JSON.parse(res.body)
+      expect(agents).toHaveLength(1)
+      expect(agents[0].role).toBe('store')
     })
   })
 
