@@ -151,6 +151,17 @@ describe('agent system prompts', () => {
     expect(tucao.systemPrompt).not.toContain('@flash猫')
   })
 
+  it('吐槽猫 prompt 含审查结论分流规则（✅→@架构师 / ⚠️❌→@作者）', () => {
+    const tucao = agents.find((a) => a.name === '吐槽猫')!
+    // 分流核心：✅可合并 收口信号直接到位（不@实施猫）；⚠️/❌ 才回作者（要改的才回）
+    expect(tucao.systemPrompt).toContain('按结论分流')
+    expect(tucao.systemPrompt).toContain('✅可合并 → 行首@架构师')
+    expect(tucao.systemPrompt).toContain('⚠️建议修改/❌需重做 → 行首@作者')
+    // 分流只改@投递目标，结论内容仍归请求人（细节在消息正文完整给出）
+    expect(tucao.systemPrompt).toContain('内容仍归请求人')
+    expect(tucao.systemPrompt).toContain('收口信号直接到位')
+  })
+
   it('店长 prompt 重启规则为嵌中契约（任意位置触发，旧行首限制已移除）', () => {
     const boss = agents.find((a) => a.name === '店长')!
     expect(boss.systemPrompt).toContain('嵌在回复任意位置均可触发')
@@ -179,6 +190,21 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).toContain('不自行合并')
       expect(agent.systemPrompt).toContain('@架构师')
       expect(agent.systemPrompt).toContain('@审查者')
+    }
+  })
+
+  it('实施猫 prompt 含审查链条件化措辞（无需主动跟进 + 收到✅兜底请收口）', () => {
+    // 分流后实施猫不再被 ✅ 通知——条件化防「分流后永不触发的指令」认知悬置
+    const implementers = agents.filter((a) => a.role === 'implementer')
+    expect(implementers.length).toBeGreaterThanOrEqual(1)
+    for (const agent of implementers) {
+      // 主路径：提交后等待审查链自动收口、无需主动跟进
+      expect(agent.systemPrompt).toContain('无需主动跟进')
+      expect(agent.systemPrompt).toContain('先改再复申')
+      expect(agent.systemPrompt).toContain('❌需重做')
+      // 兜底路径：若收到 ✅（分流失败时原链仍通）→ 请收口指令保留
+      expect(agent.systemPrompt).toContain('兜底路径')
+      expect(agent.systemPrompt).toContain('✅可合并 → 行首@架构师 请收口')
     }
   })
 
