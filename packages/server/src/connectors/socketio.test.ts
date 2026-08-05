@@ -1686,9 +1686,11 @@ describe('socketio connector', () => {
         'task-review'
       )
 
-      // LLM 照抄 prompt 输出字面占位符（真实事故形态）
+      // LLM 照抄 prompt 输出字面占位符（真实事故形态）：prompt 教「行首@架构师 请收口」，
+      // LLM 格式照做、名字照抄占位符——行首是解析层（a2a-mentions 严格行首匹配）的命中
+      // 前提，嵌中 @ 在真实解析下永远落空（a2c7f73 的 mock 假结果曾掩盖这一点）
       const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
-        yield { content: '✅可合并 审查通过。@架构师 请收口。', kind: 'text' }
+        yield { content: '✅可合并 审查通过。\n@架构师 请收口。', kind: 'text' }
       })
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
       // executeAgentsSerial 只执行「busy 且 currentTriggerMessageId === triggerMsg.id」
@@ -1704,9 +1706,17 @@ describe('socketio connector', () => {
           queueLength: 0,
           currentTriggerMessageId: 'msg-review',
         } as any)
-      // 解析层 mock 返回店长真名——精确匹配正确性由 a2a-mentions 自身测试钉死，
-      // 此处钉死「替换后的名字能被解析 → 被调度」端到端形态
-      vi.mocked(parseMentionsFromReply).mockReset().mockReturnValue(['店长'])
+      // 解析层真实链路（mock 泄漏盲区修复）：a2c7f73 曾在此 mock 返回 ['店长']——
+      // 断言②的「解析命中」是假结果，真实链路「LLM 照抄字面 @架构师 → 解析落空」
+      // 从未被测试覆盖。文件级 vi.mock 仍 shadow 掉模块（socketio.ts 内部 import
+      // 拿到的就是 mock 实例），故 vi.importActual 取真实实现注入 mock——
+      // 归一化后的 content（\n@店长 请收口。）走真实精确行首匹配命中店长，
+      // 断言②从 mock 假结果变为真实解析结果；精确匹配本身由 a2a-mentions.test.ts 钉死
+      const realParse = (await vi.importActual('./a2a-mentions.js')) as {
+        parseMentionsFromReply: (content: string, agentNames: string[]) => string[]
+      }
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockImplementation(realParse.parseMentionsFromReply)
       vi.mocked(dispatch).mockReset()
       mod.__test_resetMentionCounts()
 
@@ -1758,6 +1768,9 @@ describe('socketio connector', () => {
         .filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
         .map((c: any[]) => JSON.stringify(c[1]))
       expect(news.some((s) => s.includes('不在你的角色允许范围内'))).toBe(false)
+
+      // 恢复文件级默认 mock（() => []），防真实实现泄漏到后续用例
+      vi.mocked(parseMentionsFromReply).mockReset()
     })
   })
 

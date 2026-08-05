@@ -817,9 +817,16 @@ export async function executeAgentsSerial(
       }
 
       // Agent-to-agent dispatch: 检测回复中的 @mentions
-      const mentionedNames = parseMentionsFromReply(reply.content, sessionAgentNames).filter(
-        (name) => name !== agent.name
-      ) // 排除自己 @ 自己
+      // 解析前归一化（解析层兜底）：prompt 层注入（resolveRolePlaceholders）只保证
+      // system prompt 已替换，不保证 LLM 必然照做——LLM 只要照抄 prompt 的占位符
+      // 字面输出，解析层严格精确匹配就会落空、收口信号静默丢失（a2c7f73 后事故链
+      // 第三次变体：mock 泄漏盲区——端到端测试 mock 了解析层假结果，真实链路仍裸奔）。
+      // 此处对回复正文再调一次同一函数，把 @架构师/@审查者/@作者 归一为真名后才解析，
+      // 普通文本叙述（"是项目架构师"无 @ 前缀）零影响。解析层本身保持精确匹配不动。
+      const mentionedNames = parseMentionsFromReply(
+        resolveRolePlaceholders(reply.content, triggerMsg.authorName),
+        sessionAgentNames
+      ).filter((name) => name !== agent.name) // 排除自己 @ 自己
       if (mentionedNames.length > 0) {
         // 找到被 @ 的 Agent 配置（提前——白名单判定需要目标角色）
         const allMentionedAgents = sessionAgentIds
