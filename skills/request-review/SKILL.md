@@ -1,6 +1,6 @@
 ---
 name: request-review
-description: 打包完成的工作并发送审查请求。使用 refs/review-request-template.md 模板，按照审查配对规则选择审查者。
+description: 打包完成的工作并发送审查请求。使用 refs/review-request-template.md 模板，按照审查配对规则选择审查者。Use when work is complete and verified, quality-gate passed, and a review is needed. Not for reviewing code yourself (use review), receiving feedback (use receive-review), or requesting before quality-gate passes. Output a review request document in template format, @mentioning the paired reviewer.
 ---
 
 # request-review
@@ -77,3 +77,21 @@ description: 打包完成的工作并发送审查请求。使用 refs/review-req
 
 - 发送后 → 等待审查者 `/receive-review`
 - 被拒绝 → 修复后从 quality-gate 重新开始
+
+## Common Mistakes
+
+| 错误                                            | 正确做法                                                                                             |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Why/Tradeoff/Open Questions 留 TODO 空段就发    | 全字段补填；Tradeoff 没有就写「无」，Open Questions 没有也写「无」——空段让审查者分不清忘了还是真没有 |
+| 一条消息里 @审查者 又 @架构师                   | 一条回复只 @ 一个 agent，两个动作拆两条消息                                                          |
+| 自查没过就发审查请求                            | quality-gate PASS + 测试/lint 全绿是硬前置条件                                                       |
+| Open Questions 不点名文件，丢给审查者全 diff 找 | 每条 OQ 点名具体文件/符号，把搜索空间缩到点名的位置                                                  |
+
+## 与其他 skill 区别
+
+| skill          | 区别                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------- |
+| handoff        | 审查请求是完成工作的质量闸门；handoff 是跨会话/跨 agent 的上下文交接文档，与审查流程无关 |
+| review         | request-review 是发起审查（打包工作+选择审查者）；review 是执行双轴代码审查              |
+| receive-review | 互为对端：request-review 发出请求，receive-review 处理返回的反馈                         |
+| quality-gate   | request-review 的前置条件，PASS 后才能发起                                               |

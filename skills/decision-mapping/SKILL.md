@@ -1,6 +1,6 @@
 ---
 name: decision-mapping
-description: Turn a loose idea into a sequenced map of investigation tickets, then drive them to resolution one at a time.
+description: Turn a loose idea into a sequenced map of investigation tickets, then drive them to resolution one at a time. Use when the idea is too fuzzy to build directly and questions need runnable answers. Not for ideas already concrete enough to implement. Output a decision map of investigation tickets plus their resolutions.
 disable-model-invocation: true
 ---
 
@@ -82,3 +82,10 @@ Many times, the initial grilling will result in no fog of war. No unresolved tic
 In those situations, you should offer the user the chance to skip the decision map - since the decision map is only needed if multi-session decisions need to be made.
 
 If they skip it, you should recommend either implementing directly or using `/to-prd` to schedule a multi-session implementation.
+
+## 与其他 skill 区别
+
+| skill     | 区别                                                                                   |
+| --------- | -------------------------------------------------------------------------------------- |
+| to-prd    | decision-mapping 把模糊想法拆成调查票据逐个验证；to-prd 直接把已讨论清楚的内容合成 PRD |
+| to-issues | decision-mapping 拆的是「待调查问题」；to-issues 拆的是「可独立执行的垂直切片任务」    |

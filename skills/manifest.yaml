@@ -12,6 +12,10 @@ skills:
   # ── 自研（猫咖定制，参与审查流程链）──
   quality-gate:
     source: self
+    use_when: |
+      a code change is finished and needs a self-check before review.
+    not_for: |
+      pure conversation without code changes, exploration, or when already inside the review loop.
     category: '审查流程'
     description: |
       代码变更提交审查前的自查门。
@@ -21,9 +25,6 @@ skills:
       - 'quality gate'
       - '提交前检查'
       - '检查一下代码'
-    not_for:
-      - '纯对话无代码变更'
-      - '已在审查循环中'
     output: 'Quality Gate Report（通过/未通过 + 逐项结果）'
     next: 'request-review'
     refs:
@@ -32,6 +33,10 @@ skills:
 
   request-review:
     source: self
+    use_when: |
+      work is complete and verified, quality-gate passed, and a review is needed.
+    not_for: |
+      reviewing code yourself (use review), receiving feedback (use receive-review), or requesting before quality-gate passes.
     category: '审查流程'
     description: |
       打包完成的工作并发送审查请求。
@@ -41,10 +46,6 @@ skills:
       - 'request review'
       - '让人看看'
       - 'review 一下'
-    not_for:
-      - 'quality-gate 未通过'
-      - '无代码变更'
-      - '自己审查自己'
     output: '审查请求文档（按模板格式 + @审查者）'
     next: 'receive-review'
     refs:
@@ -57,6 +58,10 @@ skills:
 
   receive-review:
     source: self
+    use_when: |
+      another agent's review feedback arrives after a /request-review.
+    not_for: |
+      review conclusions that are mergeable (nothing to fix), or when you are the reviewer.
     category: '审查流程'
     description: |
       接收并处理审查反馈。
@@ -66,9 +71,6 @@ skills:
       - 'receive review'
       - '审查反馈'
       - '@审查者 的审查结果'
-    not_for:
-      - '审查结论是 ✅ 可以合并'
-      - '自己是审查者'
     output: '修复确认表（逐项状态 + 测试结果）'
     next: 'request-review (如需重新审查)'
     refs:
@@ -77,6 +79,10 @@ skills:
 
   session-summary:
     source: mattpocock
+    use_when: |
+      the session's work is finished and the user wants a summary document.
+    not_for: |
+      handing work to another agent across sessions (use handoff), or a recap without the strict five-section format.
     category: '文档'
     description: |
       已有技能（来自 mattpocock/skills）。
@@ -89,6 +95,10 @@ skills:
 
   vision-assist:
     source: self
+    use_when: |
+      the task requires SEEING an image — the user attaches an image and asks what it shows, asks to describe a picture, wants visual review of a UI screenshot, or needs image-link functionality verified. Your own model cannot render images natively (Read returns "[Unsupported Image]"), so route any image-seeing task through this pipeline instead of trying to read pixels yourself.
+    not_for: |
+      text-only questions where no pixel content exists.
     category: '视觉'
     requires_mcp: 'ollama:qwen3.5:9b (127.0.0.1:11434)'
     description: |
@@ -103,110 +113,250 @@ skills:
   # ── mattpocock 系（disable-model-invocation 特征）──
   ask-matt:
     source: mattpocock
+    use_when: |
+      you are unsure which skill or flow applies to the current request, or want a guided path through the available skills.
+    not_for: |
+      executing a specific skill directly.
     category: '外部技能'
   decision-mapping:
     source: mattpocock
+    use_when: |
+      the idea is too fuzzy to build directly and questions need runnable answers.
+    not_for: |
+      ideas already concrete enough to implement.
     category: '外部技能'
   edit-article:
     source: mattpocock
+    use_when: |
+      user wants to edit, revise, or improve an article draft.
+    not_for: |
+      shaping raw material into an article from scratch (use writing-shape), or writing new sections without a draft.
     category: '外部技能'
   grill-me:
     source: mattpocock
+    use_when: |
+      the user has a rough plan and wants it stress-tested through questioning, without creating docs.
+    not_for: |
+      interviews that should also record ADRs and glossary (use grill-with-docs).
     category: '外部技能'
   grill-with-docs:
     source: mattpocock
+    use_when: |
+      the user has a codebase and wants the interview's conclusions persisted.
+    not_for: |
+      quick interviews with no doc output (use grill-me).
     category: '外部技能'
   handoff:
     source: mattpocock
+    use_when: |
+      work crosses sessions, another agent needs your context, or you are handing a task to a fresh session.
+    not_for: |
+      sending a review request for finished work (use request-review), or for project-internal summaries (use session-summary).
     category: '外部技能'
   implement:
     source: mattpocock
+    use_when: |
+      the requirements are settled and the work is ready to build, ideally with a PRD and one issue in a fresh session.
+    not_for: |
+      fuzzy ideas that still need investigation (use decision-mapping) or prototype exploration (use prototype).
     category: '外部技能'
   improve-codebase-architecture:
     source: mattpocock
+    use_when: |
+      the user wants to improve architecture, find deep-module candidates, or review design debt.
+    not_for: |
+      designing one specific module's interface (use design-an-interface).
     category: '外部技能'
   loop-me:
     source: mattpocock
+    use_when: |
+      the user wants to iterate on workflow or automation specs in this workspace until the definition of done is clear.
+    not_for: |
+      general plan interviews outside this workspace.
     category: '外部技能'
   prototype:
     source: mattpocock
+    use_when: |
+      a question needs a runnable answer before committing to a design.
+    not_for: |
+      production work — prototypes are throwaway by design (use implement).
     category: '外部技能'
   setup-matt-pocock-skills:
     source: mattpocock
+    use_when: |
+      the engineering skills are installed and this repo is not yet configured for them.
+    not_for: |
+      a per-feature setup, or repos that already have an issue tracker configured.
     category: '外部技能'
   teach:
     source: mattpocock
+    use_when: |
+      the user wants to learn something and practice it in this workspace.
+    not_for: |
+      answering a one-off question without a lesson structure.
     category: '外部技能'
   to-issues:
     source: mattpocock
+    use_when: |
+      a PRD is settled and the work needs to be split for parallel execution.
+    not_for: |
+      planning refactors (use request-refactor-plan), or writing the PRD itself (use to-prd).
     category: '外部技能'
   to-prd:
     source: mattpocock
+    use_when: |
+      a design conversation has reached enough clarity to write down.
+    not_for: |
+      ideas still fuzzy (use decision-mapping or grilling first), or splitting into issues (use to-issues).
     category: '外部技能'
   triage:
     source: mattpocock
+    use_when: |
+      issues or PRs need routing, verification, or agent-ready briefs.
+    not_for: |
+      conversationally filing new bugs (use qa), or skipping the triage state machine.
     category: '外部技能'
   ubiquitous-language:
     source: mattpocock
+    use_when: |
+      user wants to define domain terms, build a glossary, harden terminology, create a ubiquitous language, or mentions "domain model" or "DDD".
+    not_for: |
+      maintaining the project's domain model (use domain-modeling).
     category: '外部技能'
   writing-beats:
     source: mattpocock
+    use_when: |
+      raw material exists and needs structuring into a narrative journey.
+    not_for: |
+      raw mining with no structure yet (use writing-fragments), or shaping into final prose (use writing-shape).
     category: '外部技能'
   writing-fragments:
     source: mattpocock
+    use_when: |
+      ideas are scattered and need capturing before any structure.
+    not_for: |
+      structuring existing material (use writing-beats), or editing a draft (use edit-article).
     category: '外部技能'
   writing-great-skills:
     source: mattpocock
+    use_when: |
+      writing or editing a SKILL.md and want to apply proven skill-design principles.
+    not_for: |
+      invoking other skills, or one-off style advice without a skill to write.
     category: '外部技能'
   writing-shape:
     source: mattpocock
+    use_when: |
+      beats are settled and the article needs final prose.
+    not_for: |
+      assembling beats from fragments (use writing-beats), or editing an existing draft (use edit-article).
     category: '外部技能'
 
   # ── 其他第三方（无来源特征，列入 provenance 追踪）──
   codebase-design:
     source: external
+    use_when: |
+      the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary.
+    not_for: |
+      implementing code or reviewing a finished diff.
     category: '外部技能'
   design-an-interface:
     source: external
+    use_when: |
+      user wants to design an API, explore interface options, compare module shapes, or mentions "design it twice".
+    not_for: |
+      settling on a single design up front, or designing without requirements.
     category: '外部技能'
   diagnosing-bugs:
     source: external
+    use_when: |
+      the user says "diagnose"/"debug this", or reports something broken/throwing/failing/slow.
+    not_for: |
+      trivial bugs fixable in one pass without a feedback loop.
     category: '外部技能'
   domain-modeling:
     source: external
+    use_when: |
+      the user wants to pin down domain terminology or a ubiquitous language, record an architectural decision, or when another skill needs to maintain the domain model.
+    not_for: |
+      extracting a one-off glossary without touching the model.
     category: '外部技能'
   git-guardrails-claude-code:
     source: external
+    use_when: |
+      user wants to prevent destructive git operations, add git safety hooks, or block git push/reset in Claude Code.
+    not_for: |
+      general pre-commit formatting hooks (use setup-pre-commit).
     category: '外部技能'
   grilling:
     source: external
+    use_when: |
+      the user wants to stress-test a plan before building, or uses any 'grill' trigger phrases.
+    not_for: |
+      plans already settled, or interviews that must also produce docs (use grill-with-docs).
     category: '外部技能'
   migrate-to-shoehorn:
     source: external
+    use_when: |
+      user mentions shoehorn, wants to replace `as` in tests, or needs partial test data.
+    not_for: |
+      production code assertions, or test code already using fromPartial/fromAny.
     category: '外部技能'
   obsidian-vault:
     source: external
+    use_when: |
+      user wants to find, create, or organize notes in Obsidian.
+    not_for: |
+      note-taking outside the vault, or general file management.
     category: '外部技能'
   qa:
     source: external
+    use_when: |
+      user wants to report bugs, do QA, file issues conversationally, or mentions "QA session".
+    not_for: |
+      triaging already-filed issues (use triage), or bug diagnosis (use diagnosing-bugs).
     category: '外部技能'
   request-refactor-plan:
     source: external
+    use_when: |
+      user wants to plan a refactor, create a refactoring RFC, or break a refactor into safe incremental steps.
+    not_for: |
+      implementing the refactor itself (use implement), or one-shot rewrites.
     category: '外部技能'
   resolving-merge-conflicts:
     source: external
+    use_when: |
+      you need to resolve an in-progress git merge/rebase conflict.
+    not_for: |
+      preventing destructive git operations (use git-guardrails-claude-code), or general git questions.
     category: '外部技能'
   review:
     source: external
+    use_when: |
+      the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
+    not_for: |
+      sending your own work for review (use request-review), or reviewing without a fixed point.
     category: '外部技能'
   scaffold-exercises:
     source: external
+    use_when: |
+      user wants to scaffold exercises, create exercise stubs, or set up a new course section.
+    not_for: |
+      writing course content beyond the scaffold.
     category: '外部技能'
   setup-pre-commit:
     source: external
+    use_when: |
+      user wants to add pre-commit hooks, set up Husky, configure lint-staged, or add commit-time formatting/typechecking/testing.
+    not_for: |
+      blocking dangerous git commands (use git-guardrails-claude-code).
     category: '外部技能'
   tdd:
     source: external
+    use_when: |
+      the user wants to build features or fix bugs test-first, mentions "red-green-refactor", or wants integration tests.
+    not_for: |
+      debugging existing failures (use diagnosing-bugs), or adding tests after the fact.
     category: '外部技能'
 
 # ── 项目定制层（catstudy/，随迁保留，一期不切路由）──

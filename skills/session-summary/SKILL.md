@@ -1,6 +1,6 @@
 ---
 name: session-summary
-description: Generate a structured summary of the current session's changes in the CatStudy project format (What/Why/Tradeoff/Open Questions/Next Action).
+description: Generate a structured summary of the current session's changes in the CatStudy project format (What/Why/Tradeoff/Open Questions/Next Action). Use when the session's work is finished and the user wants a summary document. Not for handing work to another agent across sessions (use handoff), or a recap without the strict five-section format. Output a docs/sessions/cat-study-<slug>-summary.md file with exactly the five sections.
 ---
 
 When the user asks to summarize the current session, generate a session work, or create a summary document, produce a markdown file following the strict format established by `cat-study-multi-agent-summary.md`.
@@ -69,3 +69,19 @@ Before writing, review:
 ## Post-generation
 
 After writing the summary file, tell the user the file path (relative to project root, e.g. `docs/sessions/cat-study-xxx-summary.md`) and line count.
+
+## Common Mistakes
+
+| 错误                                  | 正确做法                                          |
+| ------------------------------------- | ------------------------------------------------- |
+| What 里复述 Why 的内容                | What 列文件改动，Why 讲设计推理链，互不重复       |
+| Tradeoff 只写「选了 A」不写放弃的方案 | 表格列出放弃方案+原因；确认没有写「无」           |
+| Open Questions 写成 bug 清单          | 真实的不确定性 + 点名文件/符号，不是 TODO 列表    |
+| Next Action 不排依赖顺序              | 有依赖关系的先排前面；已完成项标 ✅ strikethrough |
+
+## 与其他 skill 区别
+
+| skill          | 区别                                                                                                        |
+| -------------- | ----------------------------------------------------------------------------------------------------------- |
+| handoff        | session-summary 产项目内结构化总结（docs/sessions/）；handoff 产跨会话交接文档（OS 临时目录，给新会话接手） |
+| request-review | session-summary 总结「做了什么」；request-review 请求「审查做得对不对」，两者文档用途不同                   |

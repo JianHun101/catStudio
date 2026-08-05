@@ -1,6 +1,6 @@
 ---
 name: migrate-to-shoehorn
-description: Migrate test files from `as` type assertions to @total-typescript/shoehorn. Use when user mentions shoehorn, wants to replace `as` in tests, or needs partial test data.
+description: Migrate test files from `as` type assertions to @total-typescript/shoehorn. Use when user mentions shoehorn, wants to replace `as` in tests, or needs partial test data. Not for production code assertions, or test code already using fromPartial/fromAny. Output migrated test files with shoehorn factories.
 ---
 
 # Migrate to Shoehorn
@@ -116,3 +116,7 @@ getUser(fromAny({ body: { id: 123 } }))
    - [ ] Replace `as unknown as Type` with `fromAny()`
    - [ ] Add imports from `@total-typescript/shoehorn`
    - [ ] Run type check to verify
+
+## 与其他 skill 区别
+
+无近似 skill——测试断言迁移工具，职责唯一，不与其他 skill 存在同名或近似关系。

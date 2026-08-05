@@ -1,6 +1,6 @@
 ---
 name: writing-beats
-description: Writing, exploit — assemble raw material into a journey of beats, grounding each term before a beat leans on it.
+description: Writing, exploit — assemble raw material into a journey of beats, grounding each term before a beat leans on it. Use when raw material exists and needs structuring into a narrative journey. Not for raw mining with no structure yet (use writing-fragments), or shaping into final prose (use writing-shape). Output a beat-structured outline grounded in the material.
 disable-model-invocation: true
 ---
 
@@ -65,3 +65,9 @@ The article ends when the journey is complete — not when the pile is empty. Mo
 - If the user says "rewrite that beat" or "go back and try a different beat 3", do it — edit in place, leave the rest alone.
 
 </supporting-info>
+## 与其他 skill 区别
+
+| skill             | 区别                                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| writing-fragments | writing-beats 把已有素材组装成 beat 旅程（探索后）；writing-fragments 是探索期采集无结构素材 |
+| writing-shape     | writing-beats 产出结构化 outline；writing-shape 把 outline 逐段塑形成文章（下游）            |

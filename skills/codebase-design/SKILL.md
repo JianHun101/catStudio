@@ -1,6 +1,6 @@
 ---
 name: codebase-design
-description: Shared vocabulary for designing deep modules. Use when the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary.
+description: Shared vocabulary for designing deep modules. Use when the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary. Not for implementing code or reviewing a finished diff. Output shared vocabulary and design guidance for the module.
 ---
 
 # Codebase Design
@@ -112,3 +112,10 @@ Good interfaces make testing natural:
 
 - **Deepening a cluster given its dependencies** — see [DEEPENING.md](DEEPENING.md): dependency categories, seam discipline, and replace-don't-layer testing.
 - **Exploring alternative interfaces** — see [DESIGN-IT-TWICE.md](DESIGN-IT-TWICE.md): spin up parallel sub-agents to design the interface several radically different ways, then compare on depth, locality, and seam placement.
+
+## 与其他 skill 区别
+
+| skill                         | 区别                                                                                                       |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| design-an-interface           | codebase-design 提供深层模块设计的共享词汇；design-an-interface 用并行 sub-agent 生成多个接口设计          |
+| improve-codebase-architecture | codebase-design 是词汇/原则参考；improve-codebase-architecture 是扫描全库产出 HTML 报告并 grill 选中的机会 |

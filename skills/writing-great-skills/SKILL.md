@@ -1,6 +1,6 @@
 ---
 name: writing-great-skills
-description: Reference for writing and editing skills well — the vocabulary and principles that make a skill predictable.
+description: Reference for writing and editing skills well — the vocabulary and principles that make a skill predictable. Use when writing or editing a SKILL.md and want to apply proven skill-design principles. Not for invoking other skills, or one-off style advice without a skill to write. Output improved SKILL.md content following the reference principles.
 disable-model-invocation: true
 ---
 
@@ -80,3 +80,7 @@ Use these to diagnose issues the user may be having with the skill.
 - **Sediment** — stale layers that settle because adding feels safe and removing feels risky. The default fate of any skill without a pruning discipline.
 - **Sprawl** — a skill simply too long, even when every line is live and unique. Hurts readability and maintainability and wastes tokens. The cure is the ladder: disclose **reference** behind pointers, and split by **branch** or sequence so each path carries only what it needs.
 - **No-op** — a line the model already obeys by default, so you pay load to say nothing. The test: does it change behaviour versus the default? A weak leading word (_be thorough_ when the agent is already thorough-ish) is a no-op; the fix is a stronger word (_relentless_), not a different technique.
+
+## 与其他 skill 区别
+
+无近似 skill——本 skill 是「写 skill」的参考文档（元技能），不与其他技能竞争触发场景。

@@ -1,6 +1,6 @@
 ---
 name: git-guardrails-claude-code
-description: Set up Claude Code hooks to block dangerous git commands (push, reset --hard, clean, branch -D, etc.) before they execute. Use when user wants to prevent destructive git operations, add git safety hooks, or block git push/reset in Claude Code.
+description: Set up Claude Code hooks to block dangerous git commands (push, reset --hard, clean, branch -D, etc.) before they execute. Use when user wants to prevent destructive git operations, add git safety hooks, or block git push/reset in Claude Code. Not for general pre-commit formatting hooks (use setup-pre-commit). Output hook scripts wired into Claude Code settings.
 ---
 
 # Setup Git Guardrails
@@ -93,3 +93,10 @@ echo '{"tool_input":{"command":"git push origin main"}}' | <path-to-script>
 ```
 
 Should exit with code 2 and print a BLOCKED message to stderr.
+
+## 与其他 skill 区别
+
+| skill                     | 区别                                                                                                                                |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| setup-pre-commit          | git-guardrails 装「阻止危险 git 命令」的安全钩子（push/reset --hard 等）；setup-pre-commit 装「提交前自动格式化/测试」的 Husky 钩子 |
+| resolving-merge-conflicts | git-guardrails 是预防层（命令执行前拦截）；resolving-merge-conflicts 是事后处置层（冲突已发生）                                     |

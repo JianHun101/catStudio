@@ -1,6 +1,6 @@
 ---
 name: ask-matt
-description: Ask which skill or flow fits your situation. A router over the user-invoked skills in this repo.
+description: Ask which skill or flow fits your situation. A router over the user-invoked skills in this repo. Use when you are unsure which skill or flow applies to the current request, or want a guided path through the available skills. Not for executing a specific skill directly. Output a recommendation of the matching skill or flow.
 disable-model-invocation: true
 ---
 
@@ -59,3 +59,7 @@ Off the main flow entirely.
 ## Precondition
 
 **`/setup-matt-pocock-skills`** — run before your first engineering flow to configure the issue tracker, triage labels, and doc layout the other skills assume. Custom issue trackers also work.
+
+## 与其他 skill 区别
+
+无近似 skill——本 skill 是所有 user-invoked skill 的路由器，职责唯一。

@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions "red-green-refactor", or wants integration tests.
+description: Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions "red-green-refactor", or wants integration tests. Not for debugging existing failures (use diagnosing-bugs), or adding tests after the fact. Output code built test-first through a red-green-refactor loop.
 ---
 
 # Test-Driven Development
@@ -106,3 +106,10 @@ After all tests pass, look for [refactor candidates](refactoring.md):
 [ ] Code is minimal for this test
 [ ] No speculative features added
 ```
+
+## 与其他 skill 区别
+
+| skill           | 区别                                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| diagnosing-bugs | tdd 以 test-first 构建新功能/修 bug；diagnosing-bugs 面向已经存在的疑难 bug 建立反馈循环排查 |
+| quality-gate    | tdd 是开发方法论；quality-gate 是提交前的自查门                                              |

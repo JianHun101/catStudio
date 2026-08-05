@@ -1,6 +1,6 @@
 ---
 name: request-refactor-plan
-description: Create a detailed refactor plan with tiny commits via user interview, then file it as a GitHub issue. Use when user wants to plan a refactor, create a refactoring RFC, or break a refactor into safe incremental steps.
+description: Create a detailed refactor plan with tiny commits via user interview, then file it as a GitHub issue. Use when user wants to plan a refactor, create a refactoring RFC, or break a refactor into safe incremental steps. Not for implementing the refactor itself (use implement), or one-shot rewrites. Output a GitHub issue with problem statement, solution, and commit plan.
 ---
 
 This skill will be invoked when the user wants to create a refactor request. You should go through the steps below. You may skip steps if you don't consider them necessary.
@@ -66,3 +66,9 @@ A description of the things that are out of scope for this refactor.
 Any further notes about the refactor.
 
 </refactor-plan-template>
+## 与其他 skill 区别
+
+| skill     | 区别                                                                                             |
+| --------- | ------------------------------------------------------------------------------------------------ |
+| implement | request-refactor-plan 产计划（问题陈述/提交拆分）后归档为 issue；implement 按 PRD/issue 实际执行 |
+| to-issues | request-refactor-plan 特化重构场景的原子化提交拆分；to-issues 面向新功能 PRD 的垂直切片拆分      |

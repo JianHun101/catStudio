@@ -1,6 +1,6 @@
 ---
 name: ubiquitous-language
-description: Extract a DDD-style ubiquitous language glossary from the current conversation, flagging ambiguities and proposing canonical terms. Saves to UBIQUITOUS_LANGUAGE.md. Use when user wants to define domain terms, build a glossary, harden terminology, create a ubiquitous language, or mentions "domain model" or "DDD".
+description: Extract a DDD-style ubiquitous language glossary from the current conversation, flagging ambiguities and proposing canonical terms. Saves to UBIQUITOUS_LANGUAGE.md. Use when user wants to define domain terms, build a glossary, harden terminology, create a ubiquitous language, or mentions "domain model" or "DDD". Not for maintaining the project's domain model (use domain-modeling). Output UBIQUITOUS_LANGUAGE.md with canonical terms and flagged ambiguities.
 disable-model-invocation: true
 ---
 
@@ -91,3 +91,9 @@ When invoked again in the same conversation:
 3. Update definitions if understanding has evolved
 4. Re-flag any new ambiguities
 5. Rewrite the example dialogue to incorporate new terms
+
+## 与其他 skill 区别
+
+| skill           | 区别                                                                                                                           |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| domain-modeling | ubiquitous-language 从对话提取术语表（UBIQUITOUS_LANGUAGE.md，一次性）；domain-modeling 持续维护项目领域模型（CONTEXT.md/ADR） |

@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model. Use when the user wants to pin down domain terminology or a ubiquitous language, record an architectural decision, or when another skill needs to maintain the domain model.
+description: Build and sharpen a project's domain model. Use when the user wants to pin down domain terminology or a ubiquitous language, record an architectural decision, or when another skill needs to maintain the domain model. Not for extracting a one-off glossary without touching the model. Output updates to CONTEXT.md and ADRs that keep the domain model sharp.
 ---
 
 # Domain Modeling
@@ -72,3 +72,9 @@ Only offer to create an ADR when all three are true:
 3. **The result of a real trade-off** — there were genuine alternatives and you picked one for specific reasons
 
 If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).
+
+## 与其他 skill 区别
+
+| skill               | 区别                                                                                                                    |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| ubiquitous-language | domain-modeling 维护项目领域模型（CONTEXT.md/ADR）；ubiquitous-language 从对话提取一次性术语表存 UBIQUITOUS_LANGUAGE.md |

@@ -1,6 +1,6 @@
 ---
 name: qa
-description: Interactive QA session where user reports bugs or issues conversationally, and the agent files GitHub issues. Explores the codebase in the background for context and domain language. Use when user wants to report bugs, do QA, file issues conversationally, or mentions "QA session".
+description: Interactive QA session where user reports bugs or issues conversationally, and the agent files GitHub issues. Explores the codebase in the background for context and domain language. Use when user wants to report bugs, do QA, file issues conversationally, or mentions "QA session". Not for triaging already-filed issues (use triage), or bug diagnosis (use diagnosing-bugs). Output filed GitHub issues with repro steps and acceptance criteria.
 ---
 
 # QA Session
@@ -128,3 +128,10 @@ After filing, print all issue URLs (with blocking relationships summarized) and 
 ### 5. Continue the session
 
 Keep going until the user says they're done. Each issue is independent — don't batch them.
+
+## 与其他 skill 区别
+
+| skill           | 区别                                                                                       |
+| --------------- | ------------------------------------------------------------------------------------------ |
+| triage          | qa 面向「用户口头报 bug → 代提 GitHub issue」；triage 面向已存在的 issue/PR 状态流转与分诊 |
+| diagnosing-bugs | qa 止于把问题转化为 issue；diagnosing-bugs 深入定位根因并修复                              |

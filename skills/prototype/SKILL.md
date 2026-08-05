@@ -1,6 +1,6 @@
 ---
 name: prototype
-description: Build a throwaway prototype to flesh out a design — a runnable terminal app for state/business-logic questions, or several radically different UI variations toggleable from one route.
+description: Build a throwaway prototype to flesh out a design — a runnable terminal app for state/business-logic questions, or several radically different UI variations toggleable from one route. Use when a question needs a runnable answer before committing to a design. Not for production work — prototypes are throwaway by design (use implement). Output throwaway runnable code that answers the design question.
 disable-model-invocation: true
 ---
 
@@ -29,3 +29,10 @@ The two branches produce very different artifacts — getting this wrong wastes 
 ## When done
 
 The _answer_ is the only thing worth keeping from a prototype. Capture it somewhere durable (commit message, ADR, issue, or a `NOTES.md` next to the prototype) along with the question it was answering. If the user is around, that capture is a quick conversation; if not, leave the placeholder so they (or you, on the next pass) can fill in the verdict before deleting the prototype.
+
+## 与其他 skill 区别
+
+| skill               | 区别                                                                              |
+| ------------------- | --------------------------------------------------------------------------------- |
+| implement           | prototype 是一次性代码、回答设计问题后即弃；implement 是满足 PRD/issue 的生产实现 |
+| design-an-interface | prototype 用可运行代码验证设计；design-an-interface 用并行 sub-agent 生成设计对比 |

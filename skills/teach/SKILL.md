@@ -1,6 +1,6 @@
 ---
 name: teach
-description: Teach the user a new skill or concept, within this workspace.
+description: Teach the user a new skill or concept, within this workspace. Use when the user wants to learn something and practice it in this workspace. Not for answering a one-off question without a lesson structure. Output a lesson with practice materials in this workspace.
 disable-model-invocation: true
 argument-hint: 'What would you like to learn about?'
 ---
@@ -138,3 +138,7 @@ Glossaries, in particular, are an essential reference. Once one is created, it s
 ## `NOTES.md`
 
 The user will sometimes express preferences of how they want to be taught, or things you should keep in mind. This is the place to record those preferences, so you can refer back to them when designing lessons or working with the user.
+
+## 与其他 skill 区别
+
+无近似 skill——教学类 skill，职责唯一，不与其他 skill 存在同名或近似关系。

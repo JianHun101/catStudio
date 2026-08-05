@@ -1,6 +1,6 @@
 ---
 name: setup-matt-pocock-skills
-description: Configure this repo for the engineering skills — set up its issue tracker, triage label vocabulary, and domain doc layout. Run once before first use of the other engineering skills.
+description: Configure this repo for the engineering skills — set up its issue tracker, triage label vocabulary, and domain doc layout. Run once before first use of the other engineering skills. Use when the engineering skills are installed and this repo is not yet configured for them. Not for a per-feature setup, or repos that already have an issue tracker configured. Output issue tracker, triage labels, and domain doc layout.
 disable-model-invocation: true
 ---
 
@@ -125,3 +125,7 @@ For "other" issue trackers, write `docs/agents/issue-tracker.md` from scratch us
 ### 5. Done
 
 Tell the user the setup is complete and which engineering skills will now read from these files. Mention they can edit `docs/agents/*.md` directly later — re-running this skill is only necessary if they want to switch issue trackers or restart from scratch.
+
+## 与其他 skill 区别
+
+无近似 skill——工程技能集的一次性初始化配置，职责唯一。

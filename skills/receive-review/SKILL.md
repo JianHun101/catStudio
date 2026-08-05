@@ -1,6 +1,6 @@
 ---
 name: receive-review
-description: 接收并处理审查反馈。逐项核实审查发现，按严重度分类处理，拒绝表演性同意。
+description: 接收并处理审查反馈。逐项核实审查发现，按严重度分类处理，拒绝表演性同意。Use when another agent's review feedback arrives after a /request-review. Not for review conclusions that are mergeable (nothing to fix), or when you are the reviewer. Output a fix confirmation table with per-item status and test results.
 ---
 
 # receive-review
@@ -95,3 +95,20 @@ description: 接收并处理审查反馈。逐项核实审查发现，按严重�
 - 审查者确认 ✅ → 可以合并
 - 审查者仍不满意 → 回到步骤 1（新一轮）
 - 3 轮未收敛 → 升级到设计重新评估
+
+## Common Mistakes
+
+| 错误                                 | 正确做法                                                                     |
+| ------------------------------------ | ---------------------------------------------------------------------------- |
+| 回「你说得对！好主意！」             | 直接用代码修改证明收到了反馈——表演性同意是禁区                               |
+| 盲信审查结论不核实                   | 每条发现过 VERIFY 三道门（Spec / Mechanism / Feature），不通过就标记「讨论」 |
+| 只修审查者点名的第一条，同类问题漏掉 | 2+ 条同类发现 → failure-mode sweep，扫描全 diff 一次修完                     |
+| P3 写进 BACKLOG 攒着                 | P3 现场修或明确放弃，理由写进结论                                            |
+
+## 与其他 skill 区别
+
+| skill          | 区别                                                                         |
+| -------------- | ---------------------------------------------------------------------------- |
+| request-review | 互为对端：request-review 发出审查请求，receive-review 接收并处理反馈         |
+| quality-gate   | quality-gate 是作者自查（提交前）；receive-review 是收到他人审查后的处理流程 |
+| review         | review 是执行双轴审查产出结论；receive-review 是结论的接收方                 |

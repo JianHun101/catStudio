@@ -1,6 +1,6 @@
 ---
 name: writing-shape
-description: Writing, exploit — shape raw material into an article, paragraph by paragraph.
+description: Writing, exploit — shape raw material into an article, paragraph by paragraph. Use when beats are settled and the article needs final prose. Not for assembling beats from fragments (use writing-beats), or editing an existing draft (use edit-article). Output a finished article built paragraph by paragraph.
 disable-model-invocation: true
 ---
 
@@ -77,3 +77,9 @@ Append to the article file as each block is agreed. Re-read the file from disk b
 - Publishing, formatting for a specific platform, or adding frontmatter the user didn't ask for.
 
 </supporting-info>
+## 与其他 skill 区别
+
+| skill         | 区别                                                                             |
+| ------------- | -------------------------------------------------------------------------------- |
+| writing-beats | writing-shape 把 beat outline 塑形成最终文章（下游）；writing-beats 产出 outline |
+| edit-article  | writing-shape 从素材塑形新文章；edit-article 改写已有草稿                        |

@@ -1,6 +1,6 @@
 ---
 name: loop-me
-description: Grill me about specs for the workflows I want to build, within this workspace.
+description: Grill me about specs for the workflows I want to build, within this workspace. Use when the user wants to iterate on workflow or automation specs in this workspace until the definition of done is clear. Not for general plan interviews outside this workspace. Output a spec the workflows can be built from.
 disable-model-invocation: true
 argument-hint: 'A workflow to design, or nothing to go find one'
 ---
@@ -30,3 +30,9 @@ A workflow spec is done when an implementer agent could build it without asking 
 
 - `workflows/*.md` — one spec per workflow.
 - `NOTES.md` — raw notes on the user's world: the tools they use, the channels they process, and their own terminology for both. When it is empty or thin, interview them about their world before specifying anything. Sharpen fuzzy terms into canonical ones as they surface, and record them here.
+
+## 与其他 skill 区别
+
+| skill    | 区别                                                                                     |
+| -------- | ---------------------------------------------------------------------------------------- |
+| grilling | loop-me 特化于本工作区待构建 workflow 的规格访谈；grilling 是面向任意计划/设计的通用访谈 |

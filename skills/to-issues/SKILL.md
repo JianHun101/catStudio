@@ -1,6 +1,6 @@
 ---
 name: to-issues
-description: Break a plan, spec, or PRD into independently-grabbable issues on the project issue tracker using tracer-bullet vertical slices.
+description: Break a plan, spec, or PRD into independently-grabbable issues on the project issue tracker using tracer-bullet vertical slices. Use when a PRD is settled and the work needs to be split for parallel execution. Not for planning refactors (use request-refactor-plan), or writing the PRD itself (use to-prd). Output filed issues with acceptance criteria and dependencies.
 disable-model-invocation: true
 ---
 
@@ -82,3 +82,10 @@ Or "None - can start immediately" if no blockers.
 </issue-template>
 
 Do NOT close or modify any parent issue.
+
+## 与其他 skill 区别
+
+| skill                 | 区别                                                                         |
+| --------------------- | ---------------------------------------------------------------------------- |
+| to-prd                | to-issues 把已定的 PRD 拆成可独立领取的 issue；to-prd 把对话合成 PRD（上游） |
+| request-refactor-plan | to-issues 面向功能垂直切片；request-refactor-plan 面向重构的原子化提交拆分   |

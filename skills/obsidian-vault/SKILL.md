@@ -1,6 +1,6 @@
 ---
 name: obsidian-vault
-description: Search, create, and manage notes in the Obsidian vault with wikilinks and index notes. Use when user wants to find, create, or organize notes in Obsidian.
+description: Search, create, and manage notes in the Obsidian vault with wikilinks and index notes. Use when user wants to find, create, or organize notes in Obsidian. Not for note-taking outside the vault, or general file management. Output created or found notes with wikilinks and updated index notes.
 ---
 
 # Obsidian Vault
@@ -57,3 +57,7 @@ grep -rl "\\[\\[Note Title\\]\\]" "/mnt/d/Obsidian Vault/AI Research/"
 ```bash
 find "/mnt/d/Obsidian Vault/AI Research/" -name "*Index*"
 ```
+
+## 与其他 skill 区别
+
+无近似 skill——Obsidian 笔记管理，职责唯一，不与其他 skill 存在同名或近似关系。

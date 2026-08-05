@@ -9,7 +9,9 @@
  *   3. 每个登记的 skill 有 source 标记（self / mattpocock / external），取值合法
  *   4. catstudy/ 定制层不参与顶级计数（随迁保留，另行校验其 4 个 skill 的 frontmatter）
  *   5. merged_from（catstudy 定制层合并来源登记）/ requires_mcp（运行时依赖声明）格式入 schema
- *   6. requires_mcp 运行时健康检查：声明但运行时缺失 → 红示 advisory 不阻塞
+ *   6. use_when / not_for 与 SKILL.md description 三件套（Use when / Not for 段）逐字一致
+ *      （从三件套提取，机器校验；未声明的 skill 跳过不阻塞——新 skill 准入语义）
+ *   7. requires_mcp 运行时健康检查：声明但运行时缺失 → 红示 advisory 不阻塞
  *      （MCP 是可选运行时——如 vision-assist 依赖 Ollama，服务未起时技能文档仍可读可用）
  *
  * 任一校验失败 → exit 1（阻塞提交/合并）。健康检查缺失 → 仅红示提示，exit 0。
@@ -30,13 +32,14 @@ const VALID_SOURCES = new Set(['self', 'mattpocock', 'external'])
 const NON_SKILL_DIRS = new Set(['catstudy', 'refs']) // 单源内非顶级 skill 的目录
 const MCP_TIMEOUT_MS = 1500 // 运行时探测超时（Ollama 未起时连接拒绝很快，防挂起 CI）
 
-/** 从 manifest.yaml 提取顶级 skills 登记：{ name: { source?, requires_mcp? } }（手写解析，避免 YAML 依赖） */
+/** 从 manifest.yaml 提取顶级 skills 登记：{ name: { source?, requires_mcp?, use_when?, not_for? } }（手写解析，避免 YAML 依赖） */
 function parseManifestSkills() {
   const text = readFileSync(MANIFEST, 'utf8')
   const lines = text.split(/\r?\n/)
   const skills = {}
   let inSkills = false
   let current = null
+  let blockField = null // 正在收集的 block 值字段（use_when/not_for 等以 | 结尾的字段）
   for (const line of lines) {
     if (/^skills:$/.test(line)) {
       inSkills = true
@@ -48,10 +51,28 @@ function parseManifestSkills() {
     if (m) {
       current = m[1]
       skills[current] = {}
+      blockField = null
       continue
     }
-    const kv = line.match(/^ {4}(source|requires_mcp):\s*(.+)$/)
-    if (kv && current) skills[current][kv[1]] = unquote(kv[2].trim())
+    // block 值行（缩进 6）——追加到正在收集的字段
+    const valLine = line.match(/^ {6}(.+)$/)
+    if (blockField && current && valLine) {
+      const prev = skills[current][blockField] || ''
+      skills[current][blockField] = (prev ? prev + ' ' : '') + valLine[1]
+      continue
+    }
+    // 到这里：非 block 内容行（字段行/空行/缩进 0）——前一个 block 结束
+    blockField = null
+    const kv = line.match(/^ {4}(source|requires_mcp|use_when|not_for):\s*(.*)$/)
+    if (kv && current) {
+      const raw = kv[2].trim()
+      if (raw === '|') {
+        blockField = kv[1] // 后续缩进 6 行是 block 内容
+        skills[current][kv[1]] = ''
+      } else {
+        skills[current][kv[1]] = unquote(raw)
+      }
+    }
   }
   return skills
 }
@@ -104,6 +125,19 @@ function parseFrontmatter(file) {
   const name = fm.match(/^name:\s*(\S+)/m)?.[1]
   const description = fm.match(/^description:\s*(.+)$/m)?.[1]?.trim()
   return { name, description }
+}
+
+/** 从 description 提取 Use when / Not for 段内容（三件套）；缺段返回 null */
+function extractUseNotFor(desc) {
+  return {
+    uw: desc.match(/Use when (.+?) Not for /)?.[1] ?? null,
+    nf: desc.match(/Not for (.+?) Output /)?.[1] ?? null,
+  }
+}
+
+/** 空白归一化（block 拼接与单行描述对比时折叠空白） */
+function normalize(value) {
+  return value.replace(/\s+/g, ' ').trim()
 }
 
 /** 解析 requires_mcp 声明：'provider:model (endpoint)' → { provider, model, endpoint }；不匹配返回 null */
@@ -207,7 +241,27 @@ async function main() {
     }
   }
 
-  // ── 7. requires_mcp 运行时健康检查（advisory 不阻塞）──
+  // ── 7. use_when / not_for 与 description 三件套一致性 ──
+  // manifest 声明了 use_when/not_for 的 skill，值必须与 SKILL.md description 的
+  // Use when / Not for 段逐字一致（从三件套提取）；未声明的跳过不阻塞（新 skill 准入语义）。
+  for (const s of manifestSkills) {
+    const m = manifest[s]
+    const fm = parseFrontmatter(resolve(SOURCE, s, 'SKILL.md'))
+    if (!fm.description) continue
+    const { uw, nf } = extractUseNotFor(fm.description)
+    if (m.use_when !== undefined) {
+      if (uw === null || normalize(m.use_when) !== normalize(uw)) {
+        errors.push(`${s}: manifest use_when 与 description 的 Use when 段不一致`)
+      }
+    }
+    if (m.not_for !== undefined) {
+      if (nf === null || normalize(m.not_for) !== normalize(nf)) {
+        errors.push(`${s}: manifest not_for 与 description 的 Not for 段不一致`)
+      }
+    }
+  }
+
+  // ── 8. requires_mcp 运行时健康检查（advisory 不阻塞）──
   const mcpDecls = Object.entries(manifest).filter(([, v]) => v.requires_mcp !== undefined)
   for (const [skill, v] of mcpDecls) {
     const decl = parseMcpDecl(v.requires_mcp)
@@ -242,8 +296,10 @@ async function main() {
     console.error(`   登记 ${manifestSkills.length}/${total}（期望 40/40）`)
     process.exit(1)
   }
+  const uwDeclared = manifestSkills.filter((s) => manifest[s].use_when !== undefined).length
+  const nfDeclared = manifestSkills.filter((s) => manifest[s].not_for !== undefined).length
   console.log(
-    `✅ manifest 三方一致：${manifestSkills.length}/${total} 全覆盖，frontmatter 全部合法，source 标记全部有效，merged_from/requires_mcp 格式校验通过`
+    `✅ manifest 三方一致：${manifestSkills.length}/${total} 全覆盖，frontmatter 全部合法，source 标记全部有效，merged_from/requires_mcp 格式校验通过，use_when/not_for 一致性 ${uwDeclared}/${nfDeclared} 校验通过`
   )
   process.exit(0)
 }

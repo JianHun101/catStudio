@@ -1,6 +1,6 @@
 ---
 name: diagnosing-bugs
-description: Diagnosis loop for hard bugs and performance regressions. Use when the user says "diagnose"/"debug this", or reports something broken/throwing/failing/slow.
+description: Diagnosis loop for hard bugs and performance regressions. Use when the user says "diagnose"/"debug this", or reports something broken/throwing/failing/slow. Not for trivial bugs fixable in one pass without a feedback loop. Output root cause, a reproducing feedback loop, and a regression test.
 ---
 
 # Diagnosing Bugs
@@ -132,3 +132,11 @@ Required before declaring done:
 - [ ] The hypothesis that turned out correct is stated in the commit / PR message — so the next debugger learns
 
 **Then ask: what would have prevented this bug?** If the answer involves architectural change (no good test seam, tangled callers, hidden coupling) hand off to the `/improve-codebase-architecture` skill with the specifics. Make the recommendation **after** the fix is in, not before — you have more information now than when you started.
+
+## 与其他 skill 区别
+
+| skill  | 区别                                                                                    |
+| ------ | --------------------------------------------------------------------------------------- |
+| tdd    | diagnosing-bugs 面向已有 bug 的反馈循环排查；tdd 是从零以 test-first 构建功能           |
+| qa     | qa 是用户口头报 bug、agent 代提 GitHub issue；diagnosing-bugs 是拿到 bug 后实际定位根因 |
+| review | review 审查 diff 是否符合标准/规格；diagnosing-bugs 修的是运行时行为错误                |

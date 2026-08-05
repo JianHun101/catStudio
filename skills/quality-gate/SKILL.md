@@ -1,6 +1,6 @@
 ---
 name: quality-gate
-description: 代码变更提交审查前的自查门。检查编码规范、测试覆盖、架构边界、安全性和未完成项。通过后才能发起 /request-review。
+description: 代码变更提交审查前的自查门。检查编码规范、测试覆盖、架构边界、安全性和未完成项。通过后才能发起 /request-review。Use when a code change is finished and needs a self-check before review. Not for pure conversation without code changes, exploration, or when already inside the review loop. Output a Quality Gate Report (PASS/FAIL with per-item results).
 ---
 
 # quality-gate
@@ -118,3 +118,20 @@ pnpm lint → 通过 / M errors
 
 - 通过 → 自动提示执行 `/request-review`
 - 未通过 → 修复后重新运行 quality-gate
+
+## Common Mistakes
+
+| 错误                                     | 正确做法                                            |
+| ---------------------------------------- | --------------------------------------------------- |
+| 测试全绿就直接发起审查，跳过自查         | 先跑完 quality-gate 全部检查步骤，PASS 后才允许发起 |
+| 只检查测试是否通过，不看需求是否全部实现 | VISION CHECK 回到原始需求逐条对齐，防范围蔓延       |
+| 自查报告只写「✅ 通过」不列证据          | 每项附实际证据（测试数、lint 结果、涉及文件）       |
+| 带着已知问题提交自查（「这个先这样」）   | 有未完成项 → FAIL，修复后再重新过门                 |
+
+## 与其他 skill 区别
+
+| skill          | 区别                                                                      |
+| -------------- | ------------------------------------------------------------------------- |
+| receive-review | quality-gate 是作者提交前自查；receive-review 是收到审查反馈后处理        |
+| request-review | quality-gate 是前置门，PASS 后才能发起审查；request-review 是发起动作本身 |
+| review         | quality-gate 是自查（自己过门）；review 是双轴代码审查（他人/工具视角）   |

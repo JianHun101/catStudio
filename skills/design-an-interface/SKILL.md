@@ -1,6 +1,6 @@
 ---
 name: design-an-interface
-description: Generate multiple radically different interface designs for a module using parallel sub-agents. Use when user wants to design an API, explore interface options, compare module shapes, or mentions "design it twice".
+description: Generate multiple radically different interface designs for a module using parallel sub-agents. Use when user wants to design an API, explore interface options, compare module shapes, or mentions "design it twice". Not for settling on a single design up front, or designing without requirements. Output several distinct interface designs with a comparison and synthesis.
 ---
 
 # Design an Interface
@@ -92,3 +92,11 @@ From "A Philosophy of Software Design":
 - Don't skip comparison - the value is in contrast
 - Don't implement - this is purely about interface shape
 - Don't evaluate based on implementation effort
+
+## 与其他 skill 区别
+
+| skill                         | 区别                                                                                           |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| codebase-design               | design-an-interface 产出多个候选设计并对比；codebase-design 提供判断「深层/浅层」的共享词汇    |
+| improve-codebase-architecture | design-an-interface 针对单个模块的接口；improve-codebase-architecture 扫描整个代码库找深化机会 |
+| prototype                     | design-an-interface 产出设计对比供决策；prototype 用可运行代码回答设计问题                     |

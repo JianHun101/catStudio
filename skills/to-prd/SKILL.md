@@ -1,6 +1,6 @@
 ---
 name: to-prd
-description: Turn the current conversation into a PRD and publish it to the project issue tracker — no interview, just synthesis of what you've already discussed.
+description: Turn the current conversation into a PRD and publish it to the project issue tracker — no interview, just synthesis of what you've already discussed. Use when a design conversation has reached enough clarity to write down. Not for ideas still fuzzy (use decision-mapping or grilling first), or splitting into issues (use to-issues). Output a published PRD on the issue tracker.
 disable-model-invocation: true
 ---
 
@@ -73,3 +73,9 @@ A description of the things that are out of scope for this PRD.
 Any further notes about the feature.
 
 </prd-template>
+## 与其他 skill 区别
+
+| skill            | 区别                                                                                   |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| to-issues        | to-prd 合成并发布 PRD（上游）；to-issues 把 PRD 拆成 issue（下游）                     |
+| decision-mapping | to-prd 假设想法已讨论清楚、零访谈；decision-mapping 面向仍模糊、需要调查票据验证的想法 |

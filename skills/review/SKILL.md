@@ -1,6 +1,6 @@
 ---
 name: review
-description: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/PRD asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
+description: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/PRD asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X". Not for sending your own work for review (use request-review), or reviewing without a fixed point. Output a side-by-side Standards/Spec report with per-axis findings.
 ---
 
 Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
@@ -67,3 +67,10 @@ A change can pass one axis and fail the other:
 - Code that does exactly what the issue asked but breaks the project's conventions → **Spec pass, Standards fail.**
 
 Reporting them separately stops one axis from masking the other.
+
+## 与其他 skill 区别
+
+| skill          | 区别                                                                                      |
+| -------------- | ----------------------------------------------------------------------------------------- |
+| request-review | review 是执行双轴审查（Standards/Spec 并行 sub-agent）；request-review 是作者发起审查请求 |
+| quality-gate   | review 从他人/工具视角审 diff；quality-gate 是作者提交前自查                              |

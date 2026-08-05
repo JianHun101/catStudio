@@ -1,6 +1,6 @@
 ---
 name: vision-assist
-description: Use the project's qwen3.5:9b (Ollama) vision pipeline as your eyes. Use whenever the task requires SEEING an image — the user attaches an image and asks what it shows, asks to describe a picture, wants visual review of a UI screenshot, or needs image-link functionality verified. Your own model cannot render images natively (Read returns "[Unsupported Image]"), so route any image-seeing task through this pipeline instead of trying to read pixels yourself.
+description: Use the project's qwen3.5:9b (Ollama) vision pipeline as your eyes. Use when the task requires SEEING an image — the user attaches an image and asks what it shows, asks to describe a picture, wants visual review of a UI screenshot, or needs image-link functionality verified. Your own model cannot render images natively (Read returns "[Unsupported Image]"), so route any image-seeing task through this pipeline instead of trying to read pixels yourself. Not for text-only questions where no pixel content exists. Output the image content description via the qwen3.5:9b pipeline.
 ---
 
 # Vision Assist — 用 qwen3.5:9b 当眼睛
@@ -47,3 +47,7 @@ npx tsx packages/server/src/ui-review.ts <图片路径> ["任意指令"]
 - `packages/server/src/llm/ollama.ts` — Ollama 适配器，`toOllamaImage()` 剥前缀
 - `scripts/ui-screenshot.mjs` — Playwright 自动截图（需 :5173 起着）
 - `packages/web/src/components/ChatPanel.vue` — 前端输入框图片能力
+
+## 与其他 skill 区别
+
+无近似 skill——项目视觉管线专用通道，职责唯一，不与其他 skill 存在同名或近似关系。

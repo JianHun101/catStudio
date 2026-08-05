@@ -1,6 +1,6 @@
 ---
 name: writing-fragments
-description: Writing, explore — mine raw fragments, no structure yet.
+description: Writing, explore — mine raw fragments, no structure yet. Use when ideas are scattered and need capturing before any structure. Not for structuring existing material (use writing-beats), or editing a draft (use edit-article). Output raw fragments captured in fragment files.
 disable-model-invocation: true
 ---
 
@@ -77,3 +77,9 @@ Before every write: re-read the file from disk. The user may have edited, reorde
 The user can say "cut the last one", "rewrite that one sharper", "merge those two" at any time. Treat those as first-class instructions.
 
 </supporting-info>
+## 与其他 skill 区别
+
+| skill         | 区别                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------ |
+| writing-beats | writing-fragments 是采集期（无结构）；writing-beats 把素材组装成 beat 旅程（结构期） |
+| edit-article  | writing-fragments 面向零散想法；edit-article 面向已有草稿的改写                      |
