@@ -7,6 +7,7 @@ import { useSkillCommand, type SkillSuggestion } from '@/composables/useSkillCom
 import { useTheme } from '@/composables/useTheme'
 import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
+import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('ChatPanel')
@@ -805,7 +806,10 @@ function statusLabelZh(status: string): string {
                       @click="openPreview(msg.images, i)"
                     />
                   </div>
-                  <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
+                  <div
+                    class="msg-text"
+                    v-html="renderMarkdown(resolveDisplayPlaceholders(msg.content, store.agents))"
+                  ></div>
                   <!-- 重启确认按钮组：pending 显示 [确认重启][取消]（点击后 confirming 中显示「已确认，等待重启…」）；confirmed 显示「重启中…」；取消/过期/none 隐藏 -->
                   <div v-if="msg.messageType === 'restart_request'" class="restart-actions">
                     <template v-if="restartStateFor(msg) === 'pending'">
@@ -880,7 +884,7 @@ function statusLabelZh(status: string): string {
                 <div
                   v-if="seg.kind === 'text'"
                   class="msg-text"
-                  v-html="renderMarkdown(seg.content)"
+                  v-html="renderMarkdown(resolveDisplayPlaceholders(seg.content, store.agents))"
                 ></div>
                 <details v-else class="thinking-block" :open="false">
                   <summary class="thinking-summary">
