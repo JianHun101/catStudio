@@ -85,9 +85,14 @@ export function readRestartRequest(): RestartRequestFile | null {
   }
 }
 
-/** 新建请求文件——已存在则跳过（同一时间只有一个生效请求，保留首个防覆盖） */
+/**
+ * 新建请求文件——覆盖判定 = 「不存在（含损坏）或已过期 → 覆盖」；未过期才保留跳过
+ * （含未过期 pending——同一时间一个生效请求是设计：正在等用户确认的请求不应被新
+ * 请求顶掉，注释写明防后人当 bug 改）。
+ */
 export function createRestartRequest(req: RestartRequestFile): boolean {
-  if (existsSync(RESTART_REQUEST_FILE)) return false
+  const existing = readRestartRequest()
+  if (existing && new Date(existing.expiresAt).getTime() > Date.now()) return false
   writeFileSync(RESTART_REQUEST_FILE, JSON.stringify(req, null, 2))
   return true
 }

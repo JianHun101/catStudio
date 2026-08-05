@@ -345,14 +345,16 @@ setInterval(async () => {
   }
 }, 1000)
 
-// ─── 重启确认轮询 ──────────────────────────
+// ─── 重启确认机制（fs.watch 事件 + 5s 兜底轮询双路径） ──────────────────
 // 店长发「【重启请求】原因：xxx」消息 → 用户点前端 [确认重启] → server 写
-// .restart-request（state=confirmed）→ 此处每 500ms 轮询：confirmed 且新鲜 →
-// 等 Agent 执行锁释放 → 既有 restartWithRetry 重启 → 写 .restart-done（新 server
-// 启动时广播「重启完成」）→ 删请求文件。过期请求忽略并清理；pending 忽略。
+// .restart-request（state=confirmed）→ 消费端双保险：fs.watch 事件路径（即时）
+// + 5s 兜底轮询路径（可靠，事件双丢失最坏 5s 内仍执行），共用 pollRestart()，
+// restartInProgress 天然去重双路径。处理语义：confirmed 且新鲜 → 等 Agent 执行
+// 锁释放 → 既有 restartWithRetry 重启 → 写 .restart-done（新 server 启动时广播
+// 「重启完成」）→ 删请求文件。过期请求忽略并清理；pending 忽略。
 let restartInProgress = false
 
-setInterval(async () => {
+async function pollRestart() {
   if (restartInProgress) return
   if (!existsSync(RESTART_REQUEST_FILE)) return
 
@@ -407,7 +409,27 @@ setInterval(async () => {
   } finally {
     restartInProgress = false
   }
-}, 500)
+}
+
+// 路径 A：fs.watch 事件驱动（即时）。监听 ROOT 非递归——现有 srcDir watcher 是
+// recursive 且只管 src/，.restart-request 在 ROOT 必须新建。回调过滤
+// basename === '.restart-request'（大小写归一：Windows 事件文件名大小写可能与
+// 写入不一致）；writeFileSync → 'change'、unlinkSync → 'rename' 都处理；
+// filename 为 null → 保守重读（误触发无害：重读发现非 confirmed → 忽略）。
+// 不抄 src watcher 的 mtime 误报过滤（那正是丢真事件的代码级先例），不设防抖
+// 窗口（重启确认即时性就是收益，重复事件由 restartInProgress + state 检查
+// 天然去重）。
+const restartWatcher = watch(ROOT, (_event, filename) => {
+  if (filename && path.basename(filename).toLowerCase() !== '.restart-request') return
+  pollRestart()
+})
+
+// 路径 B：5s 兜底轮询（可靠）。钉死「文件存在即进 pollRestart()」不做存在性
+// diff——.restart-request 有原地重写流（updateRestartRequest pending→confirmed
+// 写同一条路径），事件双丢失场景下 diff 永不触发、兜底在其存在目的场景里失效；
+// 照抄现有 !existsSync return 范式，pollRestart 内部状态判定自然忽略 pending/
+// 过期（每 5s 读一个微型 JSON，成本≈零）。
+setInterval(pollRestart, 5000)
 
 // ─── 退出处理 ─────────────────────────────────
 
@@ -416,6 +438,7 @@ const EXIT_TIMEOUT = 2000
 function shutdown(signal) {
   console.log(`\n[dev] 收到 ${signal}，关闭所有子进程...`)
   watcher.close()
+  restartWatcher.close()
   killAll()
   setTimeout(() => {
     console.log('[dev] 退出')
