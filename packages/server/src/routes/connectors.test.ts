@@ -4,7 +4,7 @@
  * 覆盖：绑定管理 CRUD + 校验；webhook 四类 payload（@机器人+@猫名 / 纯@机器人 /
  * 无绑定群 / 自己发的消息）+ 非 message 事件 + 私聊 + saveMemory 断言 + 503 开关。
  */
-import { createHash } from 'node:crypto'
+import { createHmac } from 'node:crypto'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
@@ -492,16 +492,17 @@ describe('Connector Routes', () => {
     })
 
     // ─── x-signature 兼容（NapCat HTTP 上报真实形态）──────────
-    // 根因：NapCat HTTP 上报发 x-signature: sha1=<body摘要>（OneBot v11 标准），
+    // 根因：NapCat HTTP 上报发 x-signature: sha1=<HMAC-SHA1(token, body)>（OneBot v11 标准），
     // 从不发 Authorization: Bearer——P3 只测 Bearer 路径致真实环境 401 必现。
-    // 测试用收到的 body JSON.stringify 后算 sha1（V8 解析保持键序，两端一致）。
+    // 实现与测试同步用 createHmac（napcat.mjs 源码实锤 _L = createHmac，token 参与计算）。
+    // 测试用收到的 body JSON.stringify 后算 HMAC（V8 解析保持键序，两端一致）。
 
     it('x-signature（NapCat HTTP 上报真实形态）→ 200，正常摄入', async () => {
       insertBoundFixture()
       process.env.ONEBOT_TOKEN = 'secret'
-      // 真实形态：NapCat 对上报 body 算 sha1 摘要发 x-signature，不带 Bearer 头
+      // 真实形态：NapCat 对上报 body 算 HMAC-SHA1(token, body) 发 x-signature，不带 Bearer 头
       const payload = groupEvent({ message_id: 30002000 })
-      const digest = createHash('sha1').update(JSON.stringify(payload)).digest('hex')
+      const digest = createHmac('sha1', 'secret').update(JSON.stringify(payload)).digest('hex')
       const res = await app.inject({
         method: 'POST',
         url: '/api/connectors/onebot/webhook',
@@ -520,6 +521,22 @@ describe('Connector Routes', () => {
         url: '/api/connectors/onebot/webhook',
         payload: groupEvent(),
         headers: { 'x-signature': `sha1=${'deadbeef'.repeat(5)}` },
+      })
+      expect(res.statusCode).toBe(401)
+      expect(countMessages()).toBe(0)
+    })
+
+    it('错误 HMAC key 签名 → 401，不落库（钉死 key 必须等于 token——删 key 必红）', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_TOKEN = 'secret'
+      // 与实现逐字同形态（HMAC-SHA1 + body JSON.stringify），但 key 用错的 'wrong'：
+      // 若实现退化回 createHash 纯摘要（key 不参与）或误用其他 key，本用例必红
+      const digest = createHmac('sha1', 'wrong').update(JSON.stringify(groupEvent())).digest('hex')
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+        headers: { 'x-signature': `sha1=${digest}` },
       })
       expect(res.statusCode).toBe(401)
       expect(countMessages()).toBe(0)

@@ -5,7 +5,7 @@
  * - POST /api/connectors/onebot/webhook — 收 OneBot v11 HTTP 上报
  *   （立即 200 防 NapCat 超时重投，事件过滤与摄入放异步处理）
  */
-import { createHash } from 'node:crypto'
+import { createHmac } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import {
   connectorBindings as bindingsRepo,
@@ -165,8 +165,9 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
     //    （OneBot v11 标准上报签名；napcat.mjs 实锤 httpClient 只用 x-signature、
     //    WebSocket Client 才用 Bearer——P3 只测了 Bearer 路径，真实环境 401 必现，
     //    「测试输入源与真实环境不一致」第三次变体：出站 mock 无鉴权→403、入站 mock 带 Bearer→401）
-    // 注：sha1 是纯 body 摘要（token 不参与）——完整性校验而非强认证，伪造者可自算；
-    //     但 OneBot 标准如此（go-cqhttp 同款），与 Bearer 并存是 NapCat 兼容的必要妥协
+    // 注：x-signature 是 HMAC-SHA1(key=token, body)——token 参与计算，是真实认证；
+    //     OneBot v11 标准如此（napcat.mjs 源码实锤 _L = createHmac，go-cqhttp 同款）。
+    //     历史教训：eff72eb 曾误判为 createHash 纯摘要（token 不参与）致 401 必现——源码解读必须追 import 定义
     const token = onebotToken()
     if (token) {
       const auth = req.headers.authorization
@@ -174,7 +175,7 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
       if (!authOk) {
         const signature = req.headers['x-signature']
         const bodyJson = JSON.stringify(req.body) ?? ''
-        const digest = createHash('sha1').update(bodyJson).digest('hex')
+        const digest = createHmac('sha1', token).update(bodyJson).digest('hex')
         // 前缀大小写不敏感（OneBot 标准 NapCat 发小写 sha1=）——归一化前缀后再比摘要
         const sigOk =
           typeof signature === 'string' &&
