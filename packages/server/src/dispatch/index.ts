@@ -82,6 +82,9 @@ export async function dispatch(
       // 命令自持 trace/depth——队列命令出队时用自身的，不继承执行者（防多 trace 叠加错配）
       traceId: tid,
       depth,
+      // 命令自持 taskId——队列命令出队时重建触发消息继承同一 task（drain 段消费，
+      // 与 traceId/depth 同语义；无 taskId 时 undefined 与现状等价）
+      taskId: userMessage.taskId,
       pendingTriggers: [],
     }
 

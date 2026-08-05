@@ -1435,6 +1435,195 @@ describe('socketio connector', () => {
     })
   })
 
+  // ─── queue drain — 出队反查 authorName + 审计 + taskId 自持 ──────────
+  // 回归测试：10:38 事故——吐槽猫审查结论 @实施猫 被 role policy 拦截。
+  // 根因：drain 段构造 queuedTrigger 漏 authorName → 触发作者例外判定
+  // undefined === 目标名 → false → 拦截。同轮实锤伴生缺陷一并钉死：
+  // ①无 executeAgentCommand → 排队命令执行零审计；②taskId 取执行者的。
+
+  describe('queue drain — 出队反查 authorName + 审计 + taskId 自持', () => {
+    it('reviewer busy 排队 → 出队回复 @实施猫 → 放行不拦截（mention 写回/调度/审计/占位符替换）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution, dispatch, executeAgentCommand } =
+        await import('../dispatch/index.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const db = getDb()
+
+      // 会话成员：吐槽猫（reviewer，排队执行者）+ ds猫（implementer，审查请求人）
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-2',
+        '吐槽猫',
+        '😼',
+        '你是审查者。审查结论必须 @作者 通知提交者。',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'reviewer'
+      )
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'agent-3',
+        'ds猫',
+        '🐯',
+        'You are a cat.',
+        'deepseek',
+        'deepseek-v4-flash',
+        'sk-test',
+        'implementer'
+      )
+      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+        JSON.stringify(['agent-1', 'agent-2', 'agent-3'])
+      )
+
+      // 触发消息（审查请求，作者=ds猫）与主执行消息落库（runAgentReply Window ②
+      // 撤回保护要求触发消息存在于 DB）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id)
+         VALUES (?, ?, ?, 'agent', ?, ?, ?)`
+      ).run(
+        'msg-queued',
+        'session-1',
+        'agent-3',
+        '@吐槽猫 请审查（P3 遗留点收尾）',
+        JSON.stringify(['吐槽猫']),
+        'task-review'
+      )
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, '[]')`
+      ).run('msg-main', 'session-1', '@吐槽猫 处理消息')
+
+      // 队列命令：吐槽猫排队的审查任务（命令自持 trace/depth/taskId）
+      const queuedCmd = {
+        sessionId: 'session-1',
+        agentId: 'agent-2',
+        triggerMessageId: 'msg-queued',
+        triggerContent: '@吐槽猫 请审查（P3 遗留点收尾）',
+        mentions: ['吐槽猫'],
+        traceId: 'trace-queued',
+        depth: 1,
+        taskId: 'task-review',
+        pendingTriggers: [],
+      }
+      // 主执行（msg-main）槽位匹配；completeExecution 弹出 queuedCmd 后
+      // 槽位 currentTrigger 更新为 msg-queued（drain 内层执行匹配）
+      vi.mocked(getAgentState)
+        .mockReset()
+        .mockReturnValueOnce({
+          agentId: 'agent-2',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-main',
+        })
+        .mockReturnValue({
+          agentId: 'agent-2',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-queued',
+        })
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValueOnce(queuedCmd as any)
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      vi.mocked(dispatch).mockReset()
+      // 审计落库：模拟 executeAgentCommand 的核心副作用（dispatch 模块整体
+      // mock，其内部 insertExecutionLog 由 dispatch 单测覆盖——此处钉死
+      // "drain 段调用它"这一调用点 + DB 层验证排队命令有执行日志）
+      vi.mocked(executeAgentCommand).mockReset()
+      vi.mocked(executeAgentCommand).mockImplementation(
+        async (agent: any, cmd: any, traceId: string) => {
+          db.prepare(
+            `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
+             VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))`
+          ).run('exec-log-queued', cmd.sessionId, cmd.agentId, cmd.triggerMessageId, traceId)
+        }
+      )
+      // 主回复无 mention；drain 审查结论 @实施猫
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockReturnValueOnce([])
+      vi.mocked(parseMentionsFromReply).mockReturnValue(['ds猫'])
+      // LLM 流：第一次=主执行回复，第二次=drain 审查结论（参数捕获断言 @作者 替换）
+      // 显式参数签名——否则 mock.calls[0] 推断为空元组，取 [0] 报 TS2493
+      let streamCall = 0
+      const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
+        streamCall++
+        yield {
+          content: streamCall === 1 ? '收到，主消息已处理' : '✅可合并 审查通过',
+          kind: 'text',
+        }
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+      mod.__test_resetMentionCounts()
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-2',
+            name: '吐槽猫',
+            avatar: '😼',
+            systemPrompt: '你是审查者。审查结论必须 @作者 通知提交者。',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+            role: 'reviewer',
+          } as any,
+        ],
+        { id: 'msg-main', content: '@吐槽猫 处理消息', mentions: ['吐槽猫'] },
+        'trace-main'
+      )
+
+      // 断言① 放行不拦截：被 @ 的实施猫被调度执行（修复前白名单拦截 → 不调度）
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ mentions: ['ds猫'], taskId: 'task-review' }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-3', name: 'ds猫' })]),
+        'trace-queued',
+        2
+      )
+      // 白名单 blocked 会 emit 系统提示点名违规——放行则无
+      const news = mockRoomEmit.mock.calls
+        .filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+        .map((c: any[]) => JSON.stringify(c[1]))
+      expect(news.some((s) => s.includes('不在你的角色允许范围内'))).toBe(false)
+      // mention 写回（updateMessageMentions 真实执行）：drain 回复消息 mentions 含实施猫
+      const replyRow = db
+        .prepare(`SELECT * FROM messages WHERE role = 'agent' AND content LIKE '%审查通过%'`)
+        .get() as any
+      expect(replyRow).toBeDefined()
+      expect(JSON.parse(replyRow.mentions)).toContain('ds猫')
+
+      // 断言② 审计：drain 段补 executeAgentCommand（排队命令执行有 execution_log）
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
+      expect(executeAgentCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'agent-2', name: '吐槽猫' }),
+        expect.objectContaining({ triggerMessageId: 'msg-queued', taskId: 'task-review' }),
+        'trace-queued'
+      )
+      const execLog = db
+        .prepare(`SELECT * FROM execution_logs WHERE id = 'exec-log-queued'`)
+        .get() as any
+      expect(execLog).toBeDefined()
+      expect(execLog.triggered_by_message_id).toBe('msg-queued')
+
+      // 断言③ @作者 占位符：主执行无 authorName → 保留；drain 出队反查成功 → 替换
+      const firstMsgs = chatStream.mock.calls[0][0] as any[]
+      expect(firstMsgs[0].content).toContain('@作者')
+      const secondMsgs = chatStream.mock.calls[1][0] as any[]
+      expect(secondMsgs[0].content).toContain('@ds猫')
+      expect(secondMsgs[0].content).not.toContain('@作者')
+    })
+  })
+
   // ─── recoverInterruptedExecutions 重启恢复队列 ──────────
   // 回归测试：server 重启时 dispatch 的 in-memory 队列被清空，正在执行的 agent
   // 被 fixStuckExecutionLogs 标记为 failed/server_restart，其触发消息永远不会

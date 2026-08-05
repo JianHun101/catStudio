@@ -955,6 +955,22 @@ export async function executeAgentsSerial(
           agentName: agent.name,
           depth: queuedCmd.depth,
         })
+        // 补执行审计（恢复路径 recoverInterruptedExecutions 同款）：completeExecution
+        // 已弹出队列命令并更新槽位（busy + currentTrigger），此处补 executeAgentCommand
+        // 写 execution_log——否则排队命令的执行零审计（审查结论 151 秒执行无记录的根因）
+        await executeAgentCommand(agent, queuedCmd, queuedCmd.traceId)
+        // 出队反查触发作者（恢复路径 recoverInterruptedExecutions:1119-1122 同款）：
+        // A2A 审查结论 @回请求人依赖 triggerAuthorName 例外判定（mention-policy），
+        // 缺失则 undefined 与写死名比对失败 → 白名单误拦（10:38 事故根因）；
+        // 反查失败（消息已删/非 agent）→ undefined，与现状等价不拦截
+        const triggerMeta = messagesRepo.getMessageByIdOnly(queuedCmd.triggerMessageId)
+        const triggerRow = triggerMeta
+          ? messagesRepo.getMessageById(
+              queuedCmd.triggerMessageId,
+              queuedCmd.sessionId,
+              triggerMeta.role
+            )
+          : undefined
         // B 触发合并点名：并入的触发在出队执行时告知（内存注入触发消息，
         // 不落库）——"还有 N 件事"让 Agent 上下文知道本次任务合并了多次触发
         const queuedTrigger = {
@@ -964,7 +980,13 @@ export async function executeAgentsSerial(
               ? `${queuedCmd.triggerContent}\n\n[系统提示] 你本次执行期间，另有 ${queuedCmd.pendingTriggers.length} 件事已并入本任务（触发消息：${queuedCmd.pendingTriggers.join('、')}），请一并处理。`
               : queuedCmd.triggerContent,
           mentions: queuedCmd.mentions,
-          taskId: triggerMsg.taskId,
+          // taskId 用命令自持的（入队时抄 userMessage.taskId），不继承执行者——
+          // 否则 A2A 审查链的 task 关联张冠李戴（与 traceId/depth 同语义）
+          taskId: queuedCmd.taskId,
+          authorName:
+            triggerRow?.role === 'agent' && triggerRow.agent_id
+              ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
+              : undefined,
         }
         await executeAgentsSerial(
           io,
