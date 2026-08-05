@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createServer } from 'node:http'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { Events } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
@@ -71,6 +72,19 @@ vi.mock('../llm/git-utils.js', () => ({
   diffNewPackages: vi.fn(() => []),
   npmUninstall: vi.fn(),
 }))
+
+// 顶层收尾的脏文件清理（socketio.ts:1152-1161）用真实 execSync 跑 git status/checkout/clean
+// ——测试跑批时工作区含未提交改动（如正在写的测试文件），任何 Claude agent 用例
+// （anyClaude=true）触发清理会真实执行 `git checkout -- .` 抹掉未提交工作。
+// 边界 mock：execSync 恒返回空串（工作区"干净"→ 清理跳过），其余 child_process 能力
+// （spawn/exec 等）保持真实，不影响其他模块。
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...actual,
+    execSync: vi.fn(() => ''),
+  }
+})
 
 vi.mock('./a2a-mentions.js', () => ({
   parseMentionsFromReply: vi.fn(() => []),
@@ -1621,6 +1635,516 @@ describe('socketio connector', () => {
       const secondMsgs = chatStream.mock.calls[1][0] as any[]
       expect(secondMsgs[0].content).toContain('@ds猫')
       expect(secondMsgs[0].content).not.toContain('@作者')
+    })
+  })
+
+  // ─── executeAgentsSerial 并发（同消息 @ 多猫） ──────────
+  // 7749500 分批并发重构的验证面（派活单测试计划 4 组：并行性重叠 / 锁引用计数 /
+  // 并发度上限 / A2A 目标 busy 入队-排空——方案审查必改点 3 原文带入）。
+  // 既有 120 例只证明串行语义保持；本 describe 钉并发不变量的直接断言。
+
+  describe('executeAgentsSerial — 并发（同消息 @ 多猫）', () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+    /** 等待条件成立（gate 类测试避免挂死；超时报错） */
+    async function waitFor(cond: () => boolean, what: string, timeoutMs = 3000): Promise<void> {
+      const t0 = Date.now()
+      while (!cond()) {
+        if (Date.now() - t0 > timeoutMs) throw new Error(`waitFor 超时: ${what}`)
+        await sleep(10)
+      }
+    }
+
+    /** 在 session-1 追加 agent 并纳入会话成员（并发用例需要多成员） */
+    function seedAgent(
+      db: any,
+      id: string,
+      name: string,
+      role?: string,
+      llmProvider: string = 'deepseek'
+    ) {
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        name,
+        '🐱',
+        'You are a cat.',
+        llmProvider,
+        'deepseek-v4-flash',
+        'sk-test',
+        role ?? 'unknown'
+      )
+      const row = db.prepare(`SELECT agent_ids FROM sessions WHERE id = 'session-1'`).get() as any
+      const ids = JSON.parse(row.agent_ids)
+      if (!ids.includes(id)) ids.push(id)
+      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+        JSON.stringify(ids)
+      )
+    }
+
+    beforeEach(async () => {
+      const mod = await import('./socketio.js')
+      mod.__test_resetLockState()
+      mod.__test_resetMentionCounts()
+    })
+
+    afterEach(async () => {
+      const mod = await import('./socketio.js')
+      mod.__test_resetLockState()
+    })
+
+    it('并行性：同消息 @2 猫 → 第二个 agent 的流在第一个完成前开始（重叠证据）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const db = getDb()
+
+      seedAgent(db, 'agent-2', '吐槽猫')
+      seedAgent(db, 'agent-3', 'ds猫')
+      // 触发消息落库（runAgentReply Window ② 撤回保护要求触发消息存在于 DB）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, ?)`
+      ).run('msg-batch', 'session-1', '@吐槽猫 @ds猫 处理消息', JSON.stringify(['吐槽猫', 'ds猫']))
+
+      // 两执行体都命中（批启动瞬间同步完成状态检查，无中间态）
+      vi.mocked(getAgentState).mockReset()
+      vi.mocked(getAgentState).mockImplementation((agentId: string) => ({
+        agentId,
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-batch',
+      }))
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
+
+      // 事件序钉死并发形态：a2 的流卡在 gate 上 → a3 的流全程在 a2 流结束前
+      // 运行（若回归串行：a3 永远等不到 a2 结束，gate 不释放 → waitFor 超时红）
+      const events: string[] = []
+      let releaseA: () => void = () => {}
+      const gateA = new Promise<void>((r) => (releaseA = r))
+      vi.mocked(getAdapterForAgent).mockImplementation(
+        (agent: any) =>
+          ({
+            chatStream: vi.fn(async function* () {
+              const tag = agent.id === 'agent-2' ? 'a2' : 'a3'
+              events.push(`${tag}-start`)
+              if (tag === 'a2') await gateA
+              yield { content: '收到', kind: 'text' }
+              events.push(`${tag}-end`)
+            }),
+          }) as any
+      )
+
+      const p = mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-2',
+            name: '吐槽猫',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+          } as any,
+          {
+            id: 'agent-3',
+            name: 'ds猫',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+          } as any,
+        ],
+        { id: 'msg-batch', content: '@吐槽猫 @ds猫 处理消息', mentions: ['吐槽猫', 'ds猫'] },
+        'trace-parallel'
+      )
+      try {
+        // a3 完整跑完时 a2 仍在执行中（a2-end 未出现）→ 并发重叠的证据
+        await waitFor(
+          () => events.includes('a3-start') && events.includes('a3-end'),
+          '第二个 agent 未在第一个 agent 执行期间完成（串行回归？）'
+        )
+        expect(events).toEqual(['a2-start', 'a3-start', 'a3-end'])
+      } finally {
+        releaseA()
+      }
+      await p
+      expect(events).toEqual(['a2-start', 'a3-start', 'a3-end', 'a2-end'])
+    })
+
+    it('锁引用计数：2 个 Claude agent 并行 → 第一个完成后 .agent-busy 仍在、最后一个完成后删除', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const db = getDb()
+
+      seedAgent(db, 'agent-2', '吐槽猫', undefined, 'claude')
+      seedAgent(db, 'agent-3', 'ds猫', undefined, 'claude')
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, '[]')`
+      ).run('msg-trigger', 'session-1', '@吐槽猫 @ds猫 处理消息')
+
+      vi.mocked(getAgentState).mockReset()
+      vi.mocked(getAgentState).mockImplementation((agentId: string) => ({
+        agentId,
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-trigger',
+      }))
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
+
+      // A（agent-2）的流卡在 gate → B（agent-3）先行完成。锁引用计数配对：
+      // B 完成时 A 仍持有（计数 2→1），.agent-busy 必须还在；A 完成归零才删
+      const events: string[] = []
+      let releaseA: () => void = () => {}
+      const gateA = new Promise<void>((r) => (releaseA = r))
+      vi.mocked(getAdapterForAgent).mockImplementation(
+        (agent: any) =>
+          ({
+            chatStream: vi.fn(async function* () {
+              const tag = agent.id === 'agent-2' ? 'a2' : 'a3'
+              events.push(`${tag}-start`)
+              if (tag === 'a2') await gateA
+              yield { content: '收到', kind: 'text' }
+              events.push(`${tag}-end`)
+            }),
+          }) as any
+      )
+
+      // 与生产代码同式（socketio.ts LOCK_FILE = resolve(process.cwd(), '.agent-busy')）
+      const lockFile = resolve(process.cwd(), '.agent-busy')
+      const p = mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-2',
+            name: '吐槽猫',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'claude',
+            llmModel: 'claude-opus-4-8',
+            llmApiKey: 'sk-test',
+          } as any,
+          {
+            id: 'agent-3',
+            name: 'ds猫',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'claude',
+            llmModel: 'claude-opus-4-8',
+            llmApiKey: 'sk-test',
+          } as any,
+        ],
+        { id: 'msg-trigger', content: '@吐槽猫 @ds猫 处理消息', mentions: ['吐槽猫', 'ds猫'] },
+        'trace-lock'
+      )
+      try {
+        // B 完整跑完（其 releaseLock 已执行或即将执行，计数 2→1）——A 仍持有锁
+        await waitFor(() => events.includes('a3-end'), '第二个 Claude agent 未完成')
+        expect(existsSync(lockFile)).toBe(true)
+      } finally {
+        releaseA()
+      }
+      await p
+      // 两个执行体都完成 → 引用计数归零 → 锁文件删除
+      expect(events).toEqual(['a2-start', 'a3-start', 'a3-end', 'a2-end'])
+      expect(existsSync(lockFile)).toBe(false)
+    })
+
+    it('并发度上限：同消息 @4 猫 → 同时执行 ≤3（第 4 个等批间串行）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const db = getDb()
+
+      for (const [id, name] of [
+        ['agent-2', '吐槽猫'],
+        ['agent-3', 'ds猫'],
+        ['agent-4', 'flash猫'],
+      ] as const) {
+        seedAgent(db, id, name)
+      }
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, ?)`
+      ).run(
+        'msg-4',
+        'session-1',
+        '@店长 @吐槽猫 @ds猫 @flash猫 处理消息',
+        JSON.stringify(['店长', '吐槽猫', 'ds猫', 'flash猫'])
+      )
+
+      vi.mocked(getAgentState).mockReset()
+      vi.mocked(getAgentState).mockImplementation((agentId: string) => ({
+        agentId,
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-4',
+      }))
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
+
+      // 并发计数：流开始 +1、流结束 -1；gate 卡住所有流 → 只有首批（≤3）能启动，
+      // 第 4 个必须等批间串行（batch2 在 batch1 allSettled 后才启动，而 gate 未
+      // 放行时 batch1 不可能完成——同时执行数超 3 或等不到 3 都会红）
+      let active = 0
+      let maxActive = 0
+      let releaseGate: () => void = () => {}
+      const gate = new Promise<void>((r) => (releaseGate = r))
+      const chatStream = vi.fn(async function* () {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await gate
+        yield { content: '收到', kind: 'text' }
+        active--
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+      const cfg = (id: string, name: string) =>
+        ({
+          id,
+          name,
+          avatar: '🐱',
+          systemPrompt: 'You are a cat.',
+          llmProvider: 'deepseek',
+          llmModel: 'deepseek-v4-flash',
+          llmApiKey: 'sk-test',
+        }) as any
+      const p = mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          cfg('agent-1', '店长'),
+          cfg('agent-2', '吐槽猫'),
+          cfg('agent-3', 'ds猫'),
+          cfg('agent-4', 'flash猫'),
+        ],
+        {
+          id: 'msg-4',
+          content: '@店长 @吐槽猫 @ds猫 @flash猫 处理消息',
+          mentions: ['店长', '吐槽猫', 'ds猫', 'flash猫'],
+        },
+        'trace-limit'
+      )
+      try {
+        await waitFor(() => active === 3, '首批 3 个执行体未全部启动')
+        expect(active).toBe(3)
+        expect(maxActive).toBe(3)
+      } finally {
+        releaseGate()
+      }
+      await p
+      // 全程峰值 ≤3，且 4 个 agent 都执行完成
+      expect(maxActive).toBe(3)
+      expect(chatStream).toHaveBeenCalledTimes(4)
+    })
+
+    it('A2A 目标 busy 入队-排空：批内 A 的 A2A 命令进 B 队列 → B 完成后 drain 执行（必改点 3）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution, dispatch, executeAgentCommand } =
+        await import('../dispatch/index.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const db = getDb()
+
+      // A = 吐槽猫（reviewer），B = 店长（store）——✅可合并 收口链标准路径
+      // （mention-policy：reviewer 只可 @ store 或本次触发作者，@implementer 会被
+      // 真实白名单拦截——首版用例即因此 dispatch 0 次，必须用合法 A2A 形态）
+      db.prepare(`UPDATE agents SET role = 'store' WHERE id = 'agent-1'`).run()
+      seedAgent(db, 'agent-2', '吐槽猫', 'reviewer')
+      // 触发消息（同消息 @2 猫 → 同一批并发执行）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, ?)`
+      ).run('msg-batch', 'session-1', '@吐槽猫 @店长 处理消息', JSON.stringify(['吐槽猫', '店长']))
+      // A2A 排队命令的触发消息（吐槽猫的 A2A 回复形态——drain 出队反查 authorName 用）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id)
+         VALUES (?, ?, ?, 'agent', ?, ?, ?)`
+      ).run(
+        'msg-queued-a2a',
+        'session-1',
+        'agent-2',
+        '@店长 请收口',
+        JSON.stringify(['店长']),
+        'task-a2a'
+      )
+
+      // 状态检查序列（mockReturnValueOnce 按调用序）：
+      // 1. 批启动 agent-2（吐槽猫）→ msg-batch 命中
+      // 2. 批启动 agent-1（店长）→ msg-batch 命中
+      // 3. 吐槽猫 A2A 的 initAgentSlot 检查（socketio.ts:969 getAgentState(店长)）
+      // 4. 吐槽猫 A2A 递归店长 → 仍 busy（msg-batch）→ 跳过入队（双执行防护）
+      // 5. 之后（drain 递归）→ msg-queued-a2a 命中
+      vi.mocked(getAgentState)
+        .mockReset()
+        .mockReturnValueOnce({
+          agentId: 'agent-2',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-batch',
+        })
+        .mockReturnValueOnce({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-batch',
+        })
+        .mockReturnValueOnce({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-batch',
+        })
+        .mockReturnValueOnce({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-batch',
+        })
+        .mockReturnValue({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-queued-a2a',
+        })
+      // completeExecution：吐槽猫（无队列）→ undefined；店长 main 完成 → 弹出排队
+      // 命令；drain 收尾 → undefined
+      const queuedCmd = {
+        sessionId: 'session-1',
+        agentId: 'agent-1',
+        triggerMessageId: 'msg-queued-a2a',
+        triggerContent: '@店长 请收口',
+        mentions: ['店长'],
+        traceId: 'trace-batch',
+        depth: 1,
+        taskId: 'task-a2a',
+        pendingTriggers: [],
+      }
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValueOnce(undefined)
+      vi.mocked(completeExecution).mockResolvedValueOnce(queuedCmd as any)
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      vi.mocked(dispatch).mockReset()
+      vi.mocked(executeAgentCommand).mockReset()
+      // mention 解析：吐槽猫 main → ['店长']（A2A）；店长 main / drain → 无
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockReturnValueOnce(['店长'])
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
+
+      // LLM 流：1=吐槽猫 main（A2A 触发），2=店长 main（延迟 200ms——保证 A2A
+      // 递归发生时店长仍在执行中 → busy 入队），3=店长 drain（排队命令执行）
+      let streamCall = 0
+      const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
+        streamCall++
+        if (streamCall === 2) await sleep(200)
+        yield {
+          content: streamCall === 1 ? '@店长 请收口' : streamCall === 2 ? '收到' : '已收口',
+          kind: 'text',
+        }
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-2',
+            name: '吐槽猫',
+            avatar: '😼',
+            systemPrompt: '你是审查者。审查结论必须 @作者 通知提交者。',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+            role: 'reviewer',
+          } as any,
+          {
+            id: 'agent-1',
+            name: '店长',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+            role: 'store',
+          } as any,
+        ],
+        { id: 'msg-batch', content: '@吐槽猫 @店长 处理消息', mentions: ['吐槽猫', '店长'] },
+        'trace-batch'
+      )
+
+      // 断言① A2A 调度：吐槽猫回复 @店长 → dispatch 入队命令（目标 busy 时排队）
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ mentions: ['店长'] }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-1', name: '店长' })]),
+        'trace-batch',
+        1 // A2A 入队命令带 depth+1
+      )
+      // 白名单放行：reviewer @ store 不拦（无违规系统提示）
+      const news = mockRoomEmit.mock.calls
+        .filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+        .map((c: any[]) => JSON.stringify(c[1]))
+      expect(news.some((s) => s.includes('不在你的角色允许范围内'))).toBe(false)
+
+      // 断言② 双执行防护（并发形态）：A2A 递归时店长 busy → 跳过，不重复执行
+      // main——LLM 流恰好 3 次（吐槽猫 main + 店长 main + 店长 drain）；防护失效
+      // 会多 1 次（A2A 立即执行）→ 4 次
+      expect(chatStream).toHaveBeenCalledTimes(3)
+
+      // 断言③ drain 在店长 main 完成之后执行：顺序 = 收到 → 已收口（独立消息非重复回复）
+      const replies = db
+        .prepare(
+          `SELECT content FROM messages WHERE agent_id = 'agent-1' AND role = 'agent' ORDER BY rowid`
+        )
+        .all() as any[]
+      expect(replies.map((r: any) => r.content)).toEqual(['收到', '已收口'])
+
+      // 断言④ drain 审计：排队命令执行补 executeAgentCommand（execution_logs 有记录）
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
+      expect(executeAgentCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'agent-1', name: '店长' }),
+        expect.objectContaining({ triggerMessageId: 'msg-queued-a2a', taskId: 'task-a2a' }),
+        'trace-batch'
+      )
+
+      // 断言⑤ mention 写回：吐槽猫 A2A 回复（dispatch 入队命令引用的 msgId）的
+      // mentions 列含店长（updateMessageMentions 真实执行——974159e 断言④ 同款取 id 范式）
+      const a2aReplyId = (vi.mocked(dispatch).mock.calls[0][1] as any).id
+      const a2aRow = db
+        .prepare(`SELECT content, mentions FROM messages WHERE id = ?`)
+        .get(a2aReplyId) as any
+      expect(a2aRow).toBeDefined()
+      expect(a2aRow.content).toBe('@店长 请收口')
+      expect(JSON.parse(a2aRow.mentions)).toContain('店长')
     })
   })
 
