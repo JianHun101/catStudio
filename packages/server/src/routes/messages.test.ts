@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import Fastify from 'fastify'
+import { existsSync, readFileSync } from 'node:fs'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
+import { RESTART_REQUEST_FILE, removeRestartRequest } from '../restart-request.js'
 import type { FastifyInstance } from 'fastify'
 
 // Mock socketio connector（GET 路由不调用，但 messages.ts 顶层 import 需要可解析）
@@ -373,6 +375,63 @@ describe('Message Routes', () => {
         .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?')
         .get('normal-session') as any
       expect(count.cnt).toBe(1)
+    })
+  })
+
+  describe('POST /api/messages（x-test-call 头重启请求隔离）', () => {
+    // 实施猫测试调用（真实链路 POST 含重启请求格式）会写 .restart-request pending
+    // 文件——顶掉店长真实请求 10 分钟（createRestartRequest 未过期保留跳过）。
+    // x-test-call: 1 → 跳过识别与文件写入，消息本身照常摄入。
+    beforeEach(() => {
+      removeRestartRequest() // 防用例间残留影响存在性断言
+      getDb()
+        .prepare(
+          `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+           VALUES (?, 'rest-test', '[]', datetime('now'), datetime('now'))`
+        )
+        .run('session-restart-isolate')
+    })
+    afterEach(() => {
+      removeRestartRequest()
+    })
+
+    it('带 x-test-call: 1 头 + 重启请求格式 → 201 + 不写请求文件 + 消息照常落库', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        headers: { 'x-test-call': '1' },
+        payload: {
+          sessionId: 'session-restart-isolate',
+          content: '【重启请求】原因：测试重启',
+          mentions: [],
+        },
+      })
+
+      expect(res.statusCode).toBe(201)
+      expect(existsSync(RESTART_REQUEST_FILE)).toBe(false)
+      const row = getDb()
+        .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get('session-restart-isolate') as any
+      expect(row).toBeDefined()
+      expect(row.content).toBe('【重启请求】原因：测试重启')
+    })
+
+    it('不带 x-test-call 头 + 重启请求格式 → 请求文件照常写入（现状行为保持）', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: {
+          sessionId: 'session-restart-isolate',
+          content: '【重启请求】原因：测试重启',
+          mentions: [],
+        },
+      })
+
+      expect(res.statusCode).toBe(201)
+      expect(existsSync(RESTART_REQUEST_FILE)).toBe(true)
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8')) as any
+      expect(req.state).toBe('pending')
+      expect(req.sessionId).toBe('session-restart-isolate')
     })
   })
 })

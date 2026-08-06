@@ -21,6 +21,7 @@ import { watch, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { decideRestartAction } from './restart-gate.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -111,6 +112,35 @@ function isServerAlive() {
   }
 
   return false
+}
+
+// ─── 执行保护窗：.agent-busy 锁 或 execution_logs 有 running 执行 ─────────
+// 事故背景：店长执行被 server 文件变更热重启连掐 5 次、flash猫 2 次——锁文件
+// 只覆盖 Claude agent（needsLock），且存在「锁释放→重启」收尾窗口；被打断的
+// 执行在 execution_logs 里仍为 running。判据扩展：锁在 或 running>0 → 推迟。
+// 用 node:sqlite（Node v24 内置 DatabaseSync，零依赖）只读打开 server 的
+// SQLite（WAL 只读查询可行），覆盖所有 provider 所有执行（比锁更全），
+// finalizeExecutionLog 执行结束后立即更新 → 判据实时。
+const DB_FILE = path.join(ROOT, 'packages', 'server', 'data', 'cat-study.db')
+let runningDb = null
+let runningDbFailed = false
+
+/** 是否有正在执行的 agent（execution_logs.status='running' 计数 > 0） */
+function hasRunningExecutions() {
+  if (runningDbFailed) return false
+  try {
+    if (!runningDb) runningDb = new DatabaseSync(DB_FILE, { readOnly: true })
+    const row = runningDb
+      .prepare("SELECT COUNT(*) AS cnt FROM execution_logs WHERE status = 'running'")
+      .get()
+    return row.cnt > 0
+  } catch (e) {
+    // DB 打开失败（首次启动 DB 未初始化 / WAL 恢复不可读等）→ 退化仅锁判据，
+    // 不引入新故障面；标记失败避免每轮都重试打开
+    runningDbFailed = true
+    console.warn(`[dev] execution_logs 读取失败，退化仅锁文件判据（${e.message}）`)
+    return false
+  }
 }
 
 /** 清理孤儿锁：server 已死但 .agent-busy 还在 → 删除 */
@@ -316,9 +346,11 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
       return
     }
 
-    if (existsSync(LOCK_FILE)) {
+    // 执行保护窗：锁文件 或 execution_logs 有 running 执行 → 推迟重启
+    //（server 已死不挡：孤儿路径强制重启，不被保护窗拦住）
+    if (existsSync(LOCK_FILE) || hasRunningExecutions()) {
       if (!isServerAlive()) {
-        // 锁文件还在但进程已死 → 孤儿锁，强制重启
+        // 锁/执行日志还在但进程已死 → 孤儿，强制重启
         await restartWithRetry('孤儿锁检测到，强制重启 server...')
       } else {
         if (!pendingRestart) {
@@ -332,9 +364,9 @@ const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
   }, 500)
 })
 
-// 推迟模式下的轮询：每秒检查锁文件是否已释放
+// 推迟模式下的轮询：每秒检查锁文件与 running 执行是否已释放
 setInterval(async () => {
-  if (pendingRestart && (!existsSync(LOCK_FILE) || !isServerAlive())) {
+  if (pendingRestart && ((!existsSync(LOCK_FILE) && !hasRunningExecutions()) || !isServerAlive())) {
     pendingRestart = false
     // 锁释放后延迟 2s 再重启：给 post-commit 的 handoff 投递（反查 + POST）
     // 让出窗口——实测 dev.js 停机 ~1.4s，2s 延迟让投递先完成，避免
@@ -375,9 +407,10 @@ async function pollRestart() {
   }
   if (action !== 'restart') return // pending 或内容无效 → 忽略
 
-  // Agent 执行中（.agent-busy 锁存在）→ 等待锁释放（与文件变更推迟重启同款语义，不抢占 Agent）
-  if (existsSync(LOCK_FILE) && isServerAlive()) {
-    if (!pendingRestart) console.log('[dev] Agent 执行中，等待锁释放后执行用户确认的重启...')
+  // Agent 执行中（.agent-busy 锁存在或 execution_logs 有 running）→ 等待释放
+  //（与文件变更推迟重启同款保护窗语义，不抢占 Agent）
+  if ((existsSync(LOCK_FILE) || hasRunningExecutions()) && isServerAlive()) {
+    if (!pendingRestart) console.log('[dev] Agent 执行中，等待执行结束后执行用户确认的重启...')
     return
   }
 

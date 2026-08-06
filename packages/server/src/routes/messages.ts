@@ -87,12 +87,15 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     // 摄入管线（校验/重定向/落库/广播/调度/执行）已提取为共享核心，
     // 与 socketio SEND_MESSAGE 同构——两入口共用 ingest.ts。
     // 不传 saveMemory：外部工具注入的管道消息不进向量记忆库（保持现状）。
+    // x-test-call: 1（实施猫测试调用）→ 跳过重启请求识别与文件写入：
+    // 测试消息含重启请求格式会写 pending 请求文件，顶掉店长真实请求 10 分钟。
     const result = await ingestUserMessage({
       sessionId: body.sessionId,
       content: body.content,
       mentions: Array.isArray(body.mentions) ? body.mentions : [],
       images: Array.isArray(body.images) ? body.images : undefined,
       taskId: typeof body.taskId === 'string' ? body.taskId : undefined,
+      skipRestartRequest: req.headers['x-test-call'] === '1',
     })
 
     if (!result.ok) {

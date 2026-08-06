@@ -40,6 +40,10 @@ export interface IngestInput {
   /** 是否将消息写入向量记忆库。socketio 入口传 true（保持现有行为），
    *  REST 入口不传（外部工具注入的管道消息不进记忆库，保持现状）。 */
   saveMemory?: boolean
+  /** 跳过重启请求识别与请求文件写入（消息本身照常摄入）。REST 测试调用
+   *  （x-test-call: 1 头）传 true——测试消息含重启请求格式不应写
+   *  .restart-request（会顶掉店长真实请求 10 分钟）。socketio 入口不传。 */
+  skipRestartRequest?: boolean
 }
 
 export type IngestResult =
@@ -122,7 +126,9 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
   // 重启请求识别：店长消息以【重启请求】开头 → 广播附加 messageType（前端渲染按钮组），
   // 并写 .restart-request 文件（state=pending，dev.js 轮询执行重启）。
   // 消息本身仍以 user role 落库（DB role 有 CHECK 约束，类型不落库）。
-  const isRestartRequest = isRestartRequestContent(content)
+  // skipRestartRequest（REST x-test-call 测试调用）→ 跳过识别，消息照常摄入
+  // 但不带 messageType、不写请求文件（防测试消息顶掉店长真实请求）。
+  const isRestartRequest = !input.skipRestartRequest && isRestartRequestContent(content)
   const restartExpiresAt = new Date(Date.now() + RESTART_TTL_MS).toISOString()
 
   const msg = {

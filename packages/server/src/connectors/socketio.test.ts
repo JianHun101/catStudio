@@ -2480,6 +2480,50 @@ describe('socketio connector', () => {
 
       expect(executeAgentCommand).not.toHaveBeenCalled()
     })
+
+    it('恢复执行 → 会话收到 system 打断告警（含猫名与『已自动恢复重跑』）', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand } = await import('../dispatch/index.js')
+      seedInterruptedExecution(getDb())
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      // 广播告警（按会话聚合，消息含 agent 名与恢复语义）
+      const call = mockRoomEmit.mock.calls.find((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      expect(call).toBeDefined()
+      expect(call![1].role).toBe('system')
+      expect(call![1].content).toContain('店长')
+      expect(call![1].content).toContain('已自动恢复重跑')
+      // 告警以 system 消息落库（刷新会话历史可见）
+      const row = getDb()
+        .prepare("SELECT * FROM messages WHERE role = 'system' ORDER BY created_at DESC LIMIT 1")
+        .get() as any
+      expect(row).toBeDefined()
+      expect(row.session_id).toBe('session-1')
+      expect(row.content).toContain('已自动恢复重跑')
+      // 恢复本身照常执行
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
+    })
+
+    it('agent 已回复跳过恢复 → 广播计入『未重复执行』（跳过场景同样可见）', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand } = await import('../dispatch/index.js')
+      seedInterruptedExecution(getDb(), { agentReplied: true })
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      const call = mockRoomEmit.mock.calls.find((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      expect(call).toBeDefined()
+      expect(call![1].role).toBe('system')
+      expect(call![1].content).toContain('店长')
+      expect(call![1].content).toContain('未重复执行')
+      const row = getDb()
+        .prepare("SELECT * FROM messages WHERE role = 'system' ORDER BY created_at DESC LIMIT 1")
+        .get() as any
+      expect(row).toBeDefined()
+      expect(row.content).toContain('未重复执行')
+      expect(executeAgentCommand).not.toHaveBeenCalled()
+    })
   })
 
   // ─── P0 队列持久化恢复：recoverQueuedMessages ──────────

@@ -1199,6 +1199,11 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
 
     log.warn('启动恢复：重新 dispatch 被 server 重启打断的执行', { count: interrupted.length })
 
+    // 按会话聚合恢复结果（避免同会话多 agent 刷屏）：恢复重跑 vs 已回复跳过
+    // 分开列出，循环结束后统一广播 system 告警（照抄 broadcastRestartDone 范式）
+    const recoveredBySession = new Map<string, string[]>()
+    const skippedBySession = new Map<string, string[]>()
+
     for (const rec of interrupted) {
       try {
         const triggerMeta = messagesRepo.getMessageByIdOnly(rec.triggered_by_message_id)
@@ -1215,10 +1220,15 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
         if (
           messagesRepo.hasAgentRepliedAfter(rec.agent_id, rec.session_id, triggerRow.created_at)
         ) {
+          const name = agentsRepo.getAgentNameById(rec.agent_id) ?? rec.agent_id
           log.info('跳过恢复：agent 已回复', {
             agentId: rec.agent_id,
             triggerId: rec.triggered_by_message_id,
           })
+          skippedBySession.set(rec.session_id, [
+            ...(skippedBySession.get(rec.session_id) ?? []),
+            name,
+          ])
           continue
         }
 
@@ -1265,6 +1275,11 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
           traceId,
         })
 
+        recoveredBySession.set(rec.session_id, [
+          ...(recoveredBySession.get(rec.session_id) ?? []),
+          agent.name,
+        ])
+
         await executeAgentsSerial(io, rec.session_id, [agent], triggerMsg, traceId, 0)
       } catch (err: any) {
         log.error('恢复单个执行失败', {
@@ -1273,6 +1288,37 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
           error: err.message,
         })
       }
+    }
+
+    // 按会话聚合广播打断告警（system 消息，照抄 broadcastRestartDone 范式）：
+    // 用户只看到「气泡消失」，此前恢复全程静默——广播让被打断事实可见
+    //（两个 Map 的 key 都可能是会话来源：纯跳过场景 recovered 为空）
+    const interruptedSessions = new Set([...recoveredBySession.keys(), ...skippedBySession.keys()])
+    for (const sessionId of interruptedSessions) {
+      const recovered = recoveredBySession.get(sessionId) ?? []
+      const skipped = skippedBySession.get(sessionId) ?? []
+      if (recovered.length === 0 && skipped.length === 0) continue
+      if (!sessionsRepo.getSessionById(sessionId)) continue // 会话已删 → 静默
+      const parts: string[] = []
+      if (recovered.length > 0) {
+        parts.push(`${recovered.join('、')} 的执行在 server 重启时被打断，已自动恢复重跑`)
+      }
+      if (skipped.length > 0) {
+        parts.push(`${skipped.join('、')} 的执行被打断但回复已落库，未重复执行`)
+      }
+      const content = `⚠️ ${parts.join('；')}`
+      const msgId = uuid()
+      messagesRepo.insertMessage(msgId, sessionId, 'system', content, '[]', null, null)
+      io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
+        id: msgId,
+        sessionId,
+        agentId: null,
+        role: 'system',
+        content,
+        mentions: [],
+        createdAt: new Date().toISOString(),
+      })
+      log.warn('打断恢复广播', { sessionId, content })
     }
   } catch (err: any) {
     log.error('recoverInterruptedExecutions failed', { error: err.message })
