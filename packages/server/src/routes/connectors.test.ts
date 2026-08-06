@@ -6,6 +6,9 @@
  * 白名单模式 5 例（命中 / 白名单外@ / 白名单外私聊 / 未配置兼容 / 格式宽容）。
  */
 import { createHmac } from 'node:crypto'
+import { createServer, type AddressInfo } from 'node:net'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
+import path from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
@@ -100,6 +103,7 @@ describe('Connector Routes', () => {
   })
 
   afterEach(async () => {
+    vi.unstubAllEnvs() // 薄桥用例 stubEnv 的 env 恢复（先恢复再 delete，顺序无关——beforeEach 已清）
     await app.close()
     resetDb()
     delete process.env.ONEBOT_ENABLED
@@ -623,6 +627,101 @@ describe('Connector Routes', () => {
       })
       expect(res.statusCode).toBe(200)
       expect(countMessages()).toBe(1)
+    })
+  })
+
+  describe('NapCat 生命周期薄桥（零 spawn：只读探测 + 写请求文件）', () => {
+    // 请求文件隔离目录（与 messages.test.ts 的 restart-test-messages 同款范式）：
+    // 全量并行时避免写真实 ROOT/.napcat-request 干扰 dev.js
+    const napcatTmpDir = 'node_modules/.cache/restart-test-napcat'
+    const napcatTmpFile = path.join(napcatTmpDir, '.napcat-request')
+
+    afterEach(() => {
+      rmSync(napcatTmpDir, { recursive: true, force: true })
+    })
+
+    it('GET status: 字段齐全 + enabled 随 env（与 webhook 503 开关同源）', async () => {
+      process.env.ONEBOT_ENABLED = 'true'
+      const res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.enabled).toBe(true)
+      expect(typeof body.apiBase).toBe('string')
+      expect(typeof body.running).toBe('boolean')
+      expect(body.launchCmdConfigured).toBe(false)
+      expect(body.tokenConfigured).toBe(false)
+      expect(body.tokenMasked).toBe('')
+
+      process.env.ONEBOT_ENABLED = 'false'
+      const res2 = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      expect(JSON.parse(res2.body).enabled).toBe(false)
+    })
+
+    it('GET status: running 探测真实（不可达端口 → false；真实 TCP 监听 → true）', async () => {
+      // 端口 1 基本必无监听——不依赖测试机 3000 空闲（跑着 dev 时 3000 可能被 NapCat 占）
+      vi.stubEnv('ONEBOT_API_BASE', 'http://127.0.0.1:1')
+      let res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      expect(JSON.parse(res.body).running).toBe(false)
+
+      // 真实 TCP server 监听随机端口 → running true（探测走真 socket，非 mock）
+      const server = createServer()
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+      try {
+        const port = (server.address() as AddressInfo).port
+        vi.stubEnv('ONEBOT_API_BASE', `http://127.0.0.1:${port}`)
+        res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+        const body = JSON.parse(res.body)
+        expect(body.running).toBe(true)
+        expect(body.apiBase).toBe(`http://127.0.0.1:${port}`)
+      } finally {
+        await new Promise<void>((r) => server.close(() => r()))
+      }
+    })
+
+    it('GET status: launchCmdConfigured / token 脱敏随 env（完整 token 不出 server）', async () => {
+      vi.stubEnv('NAPCAT_LAUNCH_CMD', 'napcat --config x')
+      vi.stubEnv('ONEBOT_TOKEN', 'secret-token-abc')
+      const res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      const body = JSON.parse(res.body)
+      expect(body.launchCmdConfigured).toBe(true)
+      expect(body.tokenConfigured).toBe(true)
+      expect(body.tokenMasked).toBe('secr****') // 前 4 位 + 4 星
+      expect(body.tokenMasked).not.toContain('secret-token')
+    })
+
+    it('POST control: start → 202 + 写 .napcat-request（隔离目录）', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', napcatTmpDir)
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/control',
+        payload: { action: 'start' },
+      })
+      expect(res.statusCode).toBe(202)
+      expect(JSON.parse(res.body).ok).toBe(true)
+      expect(existsSync(napcatTmpFile)).toBe(true)
+      const req = JSON.parse(readFileSync(napcatTmpFile, 'utf-8'))
+      expect(req.action).toBe('start')
+      expect(typeof req.createdAt).toBe('string')
+    })
+
+    it('POST control: stop → 202 写文件；非法 action → 400 不写文件', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', napcatTmpDir)
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/control',
+        payload: { action: 'stop' },
+      })
+      expect(res.statusCode).toBe(202)
+      expect(existsSync(napcatTmpFile)).toBe(true)
+      expect(JSON.parse(readFileSync(napcatTmpFile, 'utf-8')).action).toBe('stop')
+
+      const bad = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/control',
+        payload: { action: 'restart' },
+      })
+      expect(bad.statusCode).toBe(400)
     })
   })
 })

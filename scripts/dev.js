@@ -14,10 +14,15 @@
  *   .restart-request（state=confirmed）→ dev.js 执行重启（Agent 执行中则
  *   等待执行结束，保护窗）→ 写 .restart-done 供新 server 广播「重启完成」。
  *
+ * NapCat 生命周期管理（2026-08 架构决策）：NapCat 是独立程序，server 永不 spawn 它
+ * （连接器进程生命周期 = 部署脚本层职责——开发环境 dev.js 做，生产环境守护进程做）。
+ * dev.js 负责：启动时自动拉起（幂等）+ .napcat-request 请求文件轮询（start/stop）。
+ *
  * 用法: node scripts/dev.js  或  pnpm dev
  */
 
 import { spawn, execSync } from 'node:child_process'
+import { connect } from 'node:net'
 import { watch, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -254,6 +259,159 @@ async function waitForServer() {
   return false
 }
 
+// ─── .env 最小解析 ───────────────────────────────
+// dev.js 需要自己判断是否拉起 NapCat（server 的 env.ts 会全量解析 .env，但那是
+// server 进程内部；dev.js 在 spawn server 之前就要知道三个 NapCat 相关变量）。
+// 规则仿 server env.ts：KEY=VALUE、跳过空行/注释、引号剥离、不覆盖已存在的环境变量
+// （shell 里显式 export 的优先）。只解析本脚本关心的 key，其余留给 server 处理。
+const NAPCAT_ENV_KEYS = new Set(['ONEBOT_ENABLED', 'NAPCAT_LAUNCH_CMD', 'ONEBOT_API_BASE'])
+
+function loadDevEnv() {
+  const envFile = path.join(ROOT, '.env')
+  if (!existsSync(envFile)) return
+  let content = ''
+  try {
+    content = fs.readFileSync(envFile, 'utf-8')
+  } catch {
+    return
+  }
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const eqIdx = trimmed.indexOf('=')
+    if (eqIdx === -1) continue
+    const key = trimmed.slice(0, eqIdx).trim()
+    if (!NAPCAT_ENV_KEYS.has(key) || key in process.env) continue
+    let value = trimmed.slice(eqIdx + 1).trim()
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+    process.env[key] = value
+  }
+}
+
+loadDevEnv()
+
+// ─── NapCat 生命周期管理 ─────────────────────────
+// 架构决策（2026-08）：NapCat 是独立程序，server 永不 spawn——连接器进程生命周期归
+// 部署脚本层（开发 dev.js / 生产守护进程）。dev.js 做两件事：启动时自动拉起（幂等：
+// 端口已监听不重复拉）+ .napcat-request 请求文件轮询（server 薄桥接口写文件，start/
+// stop 两动作）。启动命令参数化：.env 的 NAPCAT_LAUNCH_CMD（完整命令行字符串，
+// Windows 走 cmd /c + detached，规避项目 shell:true 约定）。所有权：只杀
+// .napcat-pid 记录的实例（dev.js 自己拉起的），手动起的 NapCat 不受影响。
+const NAPCAT_PID_FILE = path.join(ROOT, '.napcat-pid')
+const NAPCAT_REQUEST_FILE = path.join(ROOT, '.napcat-request')
+const NAPCAT_PROBE_TIMEOUT_MS = 2000
+
+/** 解析 ONEBOT_API_BASE 为 host/port（容错：非法 URL 回退默认 127.0.0.1:3000） */
+function parseNapcatApiBase() {
+  const apiBase = process.env.ONEBOT_API_BASE || 'http://127.0.0.1:3000'
+  try {
+    const u = new URL(apiBase)
+    return { host: u.hostname, port: parseInt(u.port, 10) || 80 }
+  } catch {
+    return { host: '127.0.0.1', port: 3000 }
+  }
+}
+
+/** TCP 端口探测——「端口已监听」即视为 NapCat 可连（幂等判定，不依赖 HTTP 协议） */
+function isPortOpen(host, port, timeoutMs = NAPCAT_PROBE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const socket = connect({ host, port })
+    const done = (ok) => {
+      socket.destroy()
+      resolve(ok)
+    }
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => done(true))
+    socket.once('timeout', () => done(false))
+    socket.once('error', () => done(false))
+  })
+}
+
+/**
+ * 确保 NapCat 在运行（幂等）。入口：启动流程 + .napcat-request start 请求。
+ * 判定链：ENABLED != true → 零动作；LAUNCH_CMD 空 → 仅提示不拉起；端口已监听 → 跳过。
+ * 拉起：Windows 用 cmd /c 包装完整命令行（detached 防 dev.js 强杀时陪葬），写
+ * .napcat-pid 记录所有权（stop 只杀该实例）。
+ */
+async function ensureNapcat() {
+  if (process.env.ONEBOT_ENABLED !== 'true') return
+  const cmd = process.env.NAPCAT_LAUNCH_CMD
+  if (!cmd) {
+    console.log(
+      '[dev] ONEBOT_ENABLED=true 但 NAPCAT_LAUNCH_CMD 未配置——跳过自动拉起（请在 .env 配置启动命令）'
+    )
+    return
+  }
+  const { host, port } = parseNapcatApiBase()
+  if (await isPortOpen(host, port)) {
+    console.log(`[dev] NapCat 已在运行（${host}:${port} 已监听），跳过拉起`)
+    return
+  }
+  const child = isWindows
+    ? spawn('cmd.exe', ['/c', cmd], {
+        cwd: ROOT,
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+    : spawn(cmd, { cwd: ROOT, detached: true, stdio: 'ignore', shell: true })
+  fs.writeFileSync(NAPCAT_PID_FILE, String(child.pid))
+  console.log(`[dev] NapCat 已拉起 (pid=${child.pid})，命令: ${cmd}`)
+  child.on('error', (err) => {
+    console.error(`[dev] NapCat 启动失败: ${err.message}`)
+    try {
+      fs.unlinkSync(NAPCAT_PID_FILE)
+    } catch {}
+  })
+}
+
+/** 停止 dev.js 拉起的 NapCat——只杀 .napcat-pid 记录的实例，手动起的实例不受影响 */
+function stopNapcat() {
+  if (!existsSync(NAPCAT_PID_FILE)) return
+  const pid = parseInt(fs.readFileSync(NAPCAT_PID_FILE, 'utf-8').trim(), 10)
+  try {
+    fs.unlinkSync(NAPCAT_PID_FILE)
+  } catch {}
+  if (isNaN(pid)) return
+  console.log(`[dev] 停止 NapCat (pid=${pid})`)
+  killTree(pid)
+}
+
+/**
+ * .napcat-request 请求文件轮询（server 薄桥接口写文件）。start → ensureNapcat（幂等）；
+ * stop → stopNapcat（无 pid 文件 = 手动实例 → 不动作）。执行后删除请求文件——动作本身
+ * 幂等（start 有端口探测、stop 无 pid 文件即 no-op），失败只需日志留痕。
+ */
+async function pollNapcatRequest() {
+  if (!existsSync(NAPCAT_REQUEST_FILE)) return
+  let raw = ''
+  try {
+    raw = fs.readFileSync(NAPCAT_REQUEST_FILE, 'utf-8')
+  } catch {
+    return // 读取竞态（文件刚被删除），下轮再试
+  }
+  try {
+    fs.unlinkSync(NAPCAT_REQUEST_FILE)
+  } catch {}
+  let req = null
+  try {
+    req = JSON.parse(raw)
+  } catch {}
+  if (!req || typeof req !== 'object') return
+  if (req.action === 'start') {
+    console.log('[dev] 收到 start 请求——拉起 NapCat')
+    await ensureNapcat()
+  } else if (req.action === 'stop') {
+    console.log('[dev] 收到 stop 请求——停止 NapCat')
+    stopNapcat()
+  }
+}
+
 // ─── 启动流程 ─────────────────────────────────
 
 // 1. 启动 Server
@@ -285,6 +443,9 @@ webChild.on('exit', (code) => {
 })
 
 children.add(webChild)
+
+// 3. 拉起 NapCat（ONEBOT_ENABLED=true 且未在运行且配置了启动命令时才动作）
+await ensureNapcat()
 
 // ─── 文件监听（仅提示，不重启） ─────────────────
 // 2026-08 架构决策：文件变更热重启退役——Agent 编辑 src/ 下的文件触发立即
@@ -389,6 +550,11 @@ async function pollRestart() {
 // 曾因此误忽略真变更），不设防抖窗口（重启确认即时性就是收益，重复事件由
 // restartInProgress + state 检查天然去重）。
 const restartWatcher = watch(ROOT, (_event, filename) => {
+  // .napcat-request：NapCat 启停请求（server 薄桥写），独立分发
+  if (filename && path.basename(filename).toLowerCase() === '.napcat-request') {
+    pollNapcatRequest()
+    return
+  }
   if (filename && path.basename(filename).toLowerCase() !== '.restart-request') return
   pollRestart()
 })
@@ -399,6 +565,7 @@ const restartWatcher = watch(ROOT, (_event, filename) => {
 // 照抄现有 !existsSync return 范式，pollRestart 内部状态判定自然忽略 pending/
 // 过期（每 5s 读一个微型 JSON，成本≈零）。
 setInterval(pollRestart, 5000)
+setInterval(pollNapcatRequest, 5000)
 
 // ─── 退出处理 ─────────────────────────────────
 
@@ -409,6 +576,7 @@ function shutdown(signal) {
   watcher.close()
   restartWatcher.close()
   killAll()
+  stopNapcat() // dev.js 是 NapCat 的进程管理器——退出时停掉自己拉起的实例（手动实例不受影响）
   setTimeout(() => {
     console.log('[dev] 退出')
     process.exit(0)
@@ -417,4 +585,7 @@ function shutdown(signal) {
 
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
-process.on('exit', () => killAll())
+process.on('exit', () => {
+  killAll()
+  stopNapcat()
+})

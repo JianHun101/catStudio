@@ -71,3 +71,24 @@ describe('ConnectorBindingsModal list rendering', () => {
     expect(source).toContain('await loadBindings() // DELETE 成功后刷新列表')
   })
 })
+
+describe('ConnectorBindingsModal 双 tab（QQ 绑定 / NapCat 配置）', () => {
+  it('tab 状态与切换按钮：activeTab 默认 bindings，两 tab 文案齐全', () => {
+    expect(source).toContain("const activeTab = ref<'bindings' | 'napcat'>('bindings')")
+    expect(source).toContain('QQ 绑定')
+    expect(source).toContain('NapCat 配置')
+    expect(source).toContain("activeTab === 'bindings'")
+    expect(source).toContain("activeTab === 'napcat'")
+  })
+
+  it('Tab1 内容 v-show 保持挂载（QQ 绑定行为零改动）；Tab2 面板 v-if 进入才挂载', () => {
+    expect(source).toContain(`v-show="activeTab === 'bindings'"`)
+    expect(source).toContain(`<ConnectorNapCatPanel v-if="activeTab === 'napcat'" />`)
+    expect(source).toContain("import ConnectorNapCatPanel from './ConnectorNapCatPanel.vue'")
+  })
+
+  it('footer 添加绑定按钮仅 Tab1 显示', () => {
+    expect(source).toContain(`v-show="activeTab === 'bindings'"`)
+    expect(source).toContain(':disabled="saving"')
+  })
+})

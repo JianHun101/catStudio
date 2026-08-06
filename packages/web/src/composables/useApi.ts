@@ -49,6 +49,17 @@ export interface ConnectorBinding {
   created_at: string
 }
 
+/** OneBot/NapCat 生命周期状态——server 只读探测（TOKEN 服务端脱敏，只给掩码） */
+export interface OneBotStatus {
+  ok: boolean
+  enabled: boolean
+  apiBase: string
+  running: boolean
+  launchCmdConfigured: boolean
+  tokenConfigured: boolean
+  tokenMasked: string
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -137,5 +148,14 @@ export const api = {
     request<{ ok: boolean }>('/connectors/bindings', {
       method: 'DELETE',
       body: JSON.stringify(data),
+    }),
+
+  // NapCat / OneBot 生命周期薄桥（server 零 spawn，只读探测 + 写请求文件）
+  getOneBotStatus: () => request<OneBotStatus>('/connectors/onebot/status'),
+
+  napcatControl: (action: 'start' | 'stop') =>
+    request<{ ok: boolean }>('/connectors/napcat/control', {
+      method: 'POST',
+      body: JSON.stringify({ action }),
     }),
 }

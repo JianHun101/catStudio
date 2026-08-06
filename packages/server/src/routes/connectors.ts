@@ -6,6 +6,9 @@
  *   （立即 200 防 NapCat 超时重投，事件过滤与摄入放异步处理）
  */
 import { createHmac } from 'node:crypto'
+import { connect } from 'node:net'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import {
   connectorBindings as bindingsRepo,
@@ -99,6 +102,38 @@ function onebotAllowlist(): Set<string> {
   return ids
 }
 
+// ─── NapCat 生命周期薄桥 ─────────────────────────
+// 架构决策（2026-08）：NapCat 是独立程序，server 永不 spawn——连接器进程生命周期归
+// 部署脚本层（开发 dev.js / 生产守护进程）。本文件只做两件薄事：GET status（只读
+// 探测，零副作用）+ POST control（写 .napcat-request 请求文件，dev.js 轮询执行启停）。
+// 请求文件定位与 restart-request.ts 同款：RESTART_FILES_DIR ?? cwd（pnpm dev 时
+// cwd=ROOT 与 dev.js 轮询路径一致；测试经 vitest env 隔离）。函数内动态求值而非
+// 模块顶层常量——测试可 vi.stubEnv 即时隔离，生产路径行为一致。
+const NAPCAT_PROBE_TIMEOUT_MS = 1500
+
+function napcatRequestFile(): string {
+  return resolve(process.env.RESTART_FILES_DIR ?? process.cwd(), '.napcat-request')
+}
+
+/** TCP 端口探测（status 的 running 字段）——短超时，适配前端 3s 轮询节奏 */
+function probePort(
+  host: string,
+  port: number,
+  timeoutMs = NAPCAT_PROBE_TIMEOUT_MS
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host, port })
+    const done = (ok: boolean) => {
+      socket.destroy()
+      resolve(ok)
+    }
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => done(true))
+    socket.once('timeout', () => done(false))
+    socket.once('error', () => done(false))
+  })
+}
+
 export async function connectorRoutes(app: FastifyInstance): Promise<void> {
   // ─── 绑定管理 ──────────────────────────────────
 
@@ -165,6 +200,50 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: 'Binding not found' })
     }
     return reply.send({ ok: true })
+  })
+
+  // ─── NapCat 生命周期薄桥（零 spawn） ─────────────
+
+  // 只读状态：env 值 + apiBase 端口可达性探测。TOKEN 只返回服务端脱敏的掩码，
+  // 完整 token 永不出 server。running 是瞬时探测（1.5s 超时），前端启停后 3s×10
+  // 轮询本接口等状态翻转。
+  app.get('/api/connectors/onebot/status', async (req, reply) => {
+    const apiBase = process.env.ONEBOT_API_BASE || 'http://127.0.0.1:3000'
+    let host = '127.0.0.1'
+    let port = 3000
+    try {
+      const u = new URL(apiBase)
+      host = u.hostname
+      port = parseInt(u.port, 10) || 80
+    } catch {}
+    const token = process.env.ONEBOT_TOKEN || ''
+    const running = await probePort(host, port)
+    return reply.send({
+      ok: true,
+      enabled: onebotEnabled(),
+      apiBase,
+      running,
+      launchCmdConfigured: !!(process.env.NAPCAT_LAUNCH_CMD || '').trim(),
+      tokenConfigured: !!token,
+      tokenMasked: token ? `${token.slice(0, 4)}****` : '',
+    })
+  })
+
+  // 启停控制：校验 action 后写 .napcat-request 请求文件（dev.js fs.watch + 5s 兜底
+  // 轮询消费，执行后删除）。动作本身在 dev.js 侧幂等（start 有端口探测、stop 无 pid
+  // 文件即 no-op）——重复写文件无害，202 即「已受理」。
+  app.post('/api/connectors/napcat/control', async (req, reply) => {
+    const body = req.body as any
+    if (!body || typeof body !== 'object' || (body.action !== 'start' && body.action !== 'stop')) {
+      return reply.status(400).send({ error: "action must be 'start' or 'stop'" })
+    }
+    const file = napcatRequestFile()
+    mkdirSync(dirname(file), { recursive: true }) // 测试隔离目录可能不存在（生产 cwd 已存在 no-op）
+    writeFileSync(
+      file,
+      JSON.stringify({ action: body.action, createdAt: new Date().toISOString() }, null, 2)
+    )
+    return reply.status(202).send({ ok: true })
   })
 
   // ─── OneBot v11 webhook ────────────────────────

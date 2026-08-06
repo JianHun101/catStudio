@@ -2,9 +2,13 @@
 import { ref, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import { api, type ConnectorBinding } from '@/composables/useApi'
+import ConnectorNapCatPanel from './ConnectorNapCatPanel.vue'
 
 const emit = defineEmits(['close'])
 const store = useChatStore()
+
+// ─── 双 tab：QQ 绑定（现有内容平移零行为改动）/ NapCat 配置 ──
+const activeTab = ref<'bindings' | 'napcat'>('bindings')
 
 // ─── 绑定列表 ─────────────────────────────
 const bindings = ref<ConnectorBinding[]>([])
@@ -123,84 +127,112 @@ onMounted(loadBindings)
         </button>
       </div>
 
+      <div class="modal-tabs">
+        <button
+          class="tab-btn"
+          :class="{ active: activeTab === 'bindings' }"
+          @click="activeTab = 'bindings'"
+        >
+          QQ 绑定
+        </button>
+        <button
+          class="tab-btn"
+          :class="{ active: activeTab === 'napcat' }"
+          @click="activeTab = 'napcat'"
+        >
+          NapCat 配置
+        </button>
+      </div>
+
       <div class="modal-body">
-        <div class="section-title">已有绑定</div>
-        <div v-if="loading" class="list-hint">加载中…</div>
-        <div v-else-if="listError" class="error-msg">{{ listError }}</div>
-        <div v-else-if="bindings.length === 0" class="list-hint">
-          暂无绑定——添加后对应 QQ 群/私聊的消息才会接入猫咖
-        </div>
-        <div v-else class="binding-list">
-          <div
-            v-for="b in bindings"
-            :key="`${b.platform}-${b.external_type}-${b.external_id}`"
-            class="binding-row"
-            :class="{ confirming: confirmDeleteId === b.id }"
-          >
-            <div class="binding-info">
-              <span class="binding-type">{{ typeLabel(b.external_type) }}</span>
-              <span class="binding-id">{{ b.external_id }}</span>
-              <span class="binding-session" :title="sessionTitle(b.session_id)">
-                {{ sessionTitle(b.session_id) }}
-              </span>
-            </div>
-            <button
-              class="btn-delete"
-              :class="{ 'btn-delete-confirm': confirmDeleteId === b.id }"
-              @click="handleDelete(b)"
-            >
-              {{ confirmDeleteId === b.id ? '确认删除？' : '删除' }}
-            </button>
+        <!-- Tab1：QQ 绑定（v-show 保持挂载，onMounted(loadBindings) 行为零改动） -->
+        <div v-show="activeTab === 'bindings'">
+          <div class="section-title">已有绑定</div>
+          <div v-if="loading" class="list-hint">加载中…</div>
+          <div v-else-if="listError" class="error-msg">{{ listError }}</div>
+          <div v-else-if="bindings.length === 0" class="list-hint">
+            暂无绑定——添加后对应 QQ 群/私聊的消息才会接入猫咖
           </div>
-        </div>
+          <div v-else class="binding-list">
+            <div
+              v-for="b in bindings"
+              :key="`${b.platform}-${b.external_type}-${b.external_id}`"
+              class="binding-row"
+              :class="{ confirming: confirmDeleteId === b.id }"
+            >
+              <div class="binding-info">
+                <span class="binding-type">{{ typeLabel(b.external_type) }}</span>
+                <span class="binding-id">{{ b.external_id }}</span>
+                <span class="binding-session" :title="sessionTitle(b.session_id)">
+                  {{ sessionTitle(b.session_id) }}
+                </span>
+              </div>
+              <button
+                class="btn-delete"
+                :class="{ 'btn-delete-confirm': confirmDeleteId === b.id }"
+                @click="handleDelete(b)"
+              >
+                {{ confirmDeleteId === b.id ? '确认删除？' : '删除' }}
+              </button>
+            </div>
+          </div>
 
-        <div class="section-title">添加绑定</div>
-        <div class="form-group">
-          <label>平台</label>
-          <select v-model="platform" class="input">
-            <option v-for="p in platformOptions" :key="p.value" :value="p.value">
-              {{ p.label }}
-            </option>
-          </select>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label>类型</label>
-            <select v-model="externalType" class="input">
-              <option v-for="t in typeOptions" :key="t.value" :value="t.value">
-                {{ t.label }}
+          <div class="section-title">添加绑定</div>
+          <div class="form-group">
+            <label>平台</label>
+            <select v-model="platform" class="input">
+              <option v-for="p in platformOptions" :key="p.value" :value="p.value">
+                {{ p.label }}
               </option>
             </select>
           </div>
-          <div class="form-group flex-1">
-            <label>QQ 号/群号</label>
-            <input
-              v-model="externalId"
-              type="text"
-              inputmode="numeric"
-              class="input input-mono"
-              placeholder="纯数字"
-              v-focus
-              @keydown.enter="handleAdd"
-            />
+
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label>类型</label>
+              <select v-model="externalType" class="input">
+                <option v-for="t in typeOptions" :key="t.value" :value="t.value">
+                  {{ t.label }}
+                </option>
+              </select>
+            </div>
+            <div class="form-group flex-1">
+              <label>QQ 号/群号</label>
+              <input
+                v-model="externalId"
+                type="text"
+                inputmode="numeric"
+                class="input input-mono"
+                placeholder="纯数字"
+                v-focus
+                @keydown.enter="handleAdd"
+              />
+            </div>
           </div>
+
+          <div class="form-group">
+            <label>绑定会话</label>
+            <select v-model="sessionId" class="input">
+              <option value="" disabled>选择会话…</option>
+              <option v-for="s in store.sessions" :key="s.id" :value="s.id">{{ s.title }}</option>
+            </select>
+          </div>
+
+          <div v-if="error" class="error-msg">{{ error }}</div>
         </div>
 
-        <div class="form-group">
-          <label>绑定会话</label>
-          <select v-model="sessionId" class="input">
-            <option value="" disabled>选择会话…</option>
-            <option v-for="s in store.sessions" :key="s.id" :value="s.id">{{ s.title }}</option>
-          </select>
-        </div>
-
-        <div v-if="error" class="error-msg">{{ error }}</div>
+        <!-- Tab2：NapCat 配置（v-if 进入才拉取状态，每次进入刷新） -->
+        <ConnectorNapCatPanel v-if="activeTab === 'napcat'" />
       </div>
 
       <div class="modal-footer">
         <button class="btn btn-cancel" @click="emit('close')">关闭</button>
-        <button class="btn btn-create" :disabled="saving" @click="handleAdd">
+        <button
+          class="btn btn-create"
+          v-show="activeTab === 'bindings'"
+          :disabled="saving"
+          @click="handleAdd"
+        >
           {{ saving ? '添加中…' : '添加绑定' }}
         </button>
       </div>
@@ -260,6 +292,38 @@ onMounted(loadBindings)
 
 .modal-body {
   padding: 20px 22px;
+}
+
+/* ─── Tabs ─────────────────────────────── */
+
+.modal-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 22px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.tab-btn:hover {
+  color: var(--text-primary);
+}
+
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
 }
 
 .section-title {
