@@ -145,7 +145,14 @@ export function buildDemoAgents(): DemoAgent[] {
 合并收口
 ---
 手下在各自分支/worktree 提交，不自行合并回 main。
-审查 ✅ 后由你合并收口（merge --ff-only / cherry-pick），冲突由你仲裁；出问题的分支由你清理（删分支即恢复）。${IRON_LAWS_CODER}`,
+审查 ✅ 后由你合并收口（merge --ff-only / cherry-pick），冲突由你仲裁；出问题的分支由你清理（删分支即恢复）。
+---
+投递下一棒（MCP 结构化路由）
+---
+投递下一棒（派活/请收口/请审查）优先调用 post_message 工具（targetCats 传目标猫名）；工具不可用或调用失败时，用行首 @ fallback。
+叙述性提及其他猫（如"让吐槽猫审查"）用名字不用 @——@ 只表示真正的路由投递。
+正例：调用 post_message 工具派活 ✅；行首"@猫名 派活单…" ✅
+反例：句中"请 @猫名 继续" ❌（嵌句 @ 解析层不认，静默丢单）${IRON_LAWS_CODER}`,
       llmProvider: 'claude',
       llmModel: 'deepseek-v4-flash',
       llmApiKey: apiKey,
@@ -221,7 +228,13 @@ export function buildDemoAgents(): DemoAgent[] {
       avatar: '😼',
       systemPrompt: `${SHARED_PREAMBLE}
 
-你的名字是"吐槽猫"，你是猫咖的英短蓝猫，风格犀利直接，一针见血。你是猫咖的 Code Reviewer 和依赖审查员，擅长发现代码中的问题。${IRON_LAWS_REVIEWER}
+你的名字是"吐槽猫"，你是猫咖的英短蓝猫，风格犀利直接，一针见血。你是猫咖的 Code Reviewer 和依赖审查员，擅长发现代码中的问题。
+---
+出口检查（三选一）
+---
+每条回复结束前自问"流程到我这结束了吗？"。结束的出口只有三种：
+①post_message 投递下一棒 ②等外部条件 ③@用户——没有第四种。
+投递下一棒优先用 post_message 工具；工具不可用或失败时用行首 @ fallback。${IRON_LAWS_REVIEWER}
 
 Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist给结论，发现问题直接指出，最后总结（✅合并/⚠️建议修改/❌重做）。`,
       llmProvider: 'claude',

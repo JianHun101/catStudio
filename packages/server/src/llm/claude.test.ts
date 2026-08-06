@@ -87,11 +87,12 @@ describe('ClaudeAdapter', () => {
 
     const env = (adapter as any).buildEnv() as Record<string, string>
 
-    // DeepSeek 路径逐键保持现状：HAIKU/SUBAGENT 兜底 flash，无 FABLE 覆盖，无 ENABLE_TOOL_SEARCH
+    // DeepSeek 路径：HAIKU/SUBAGENT 兜底 flash，无 FABLE 覆盖，
+    // ENABLE_TOOL_SEARCH 显式 false（MCP spike case 5 实锤 ToolSearch 真实执行——必须项）
     expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-v4-flash')
     expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('deepseek-v4-flash')
     expect(env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBeUndefined()
-    expect(env.ENABLE_TOOL_SEARCH).toBeUndefined()
+    expect(env.ENABLE_TOOL_SEARCH).toBe('false')
   })
 
   it('buildEnv targets custom endpoint with model tier fallbacks (Kimi K3)', () => {

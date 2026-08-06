@@ -192,6 +192,10 @@ export class ClaudeAdapter implements LLMAdapter {
           ANTHROPIC_DEFAULT_HAIKU_MODEL:
             process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'deepseek-v4-flash',
           CLAUDE_CODE_SUBAGENT_MODEL: process.env.CLAUDE_CODE_SUBAGENT_MODEL || 'deepseek-v4-flash',
+          // MCP spike case 5 实锤：ENABLE_TOOL_SEARCH=true 时 ToolSearch 混入调用链
+          // 且真实执行（tool_reference 指向 echo）——DeepSeek 端点显式关闭，
+          // 与 Kimi 端点一致，消除 ToolSearch 路径（店长裁决：必须项）
+          ENABLE_TOOL_SEARCH: 'false',
         }
       : {
           ANTHROPIC_DEFAULT_HAIKU_MODEL: this.model,

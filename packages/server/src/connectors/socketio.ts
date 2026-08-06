@@ -47,8 +47,13 @@ import {
   npmUninstall,
 } from '../llm/git-utils.js'
 import type { AgentConfig, LLMMessage, Message } from '@cat-study/shared'
-import { parseMentionsFromReply } from './a2a-mentions.js'
+import {
+  parseMentionsFromReply,
+  detectUnknownHandle,
+  detectInlineMentions,
+} from './a2a-mentions.js'
 import { filterAllowedMentions, allowedTargetsDescription } from '../dispatch/mention-policy.js'
+import { consumeRouteSignals } from '../llm/route-signals.js'
 import { parseJsonArray } from '../utils.js'
 import { SkillLoader } from '../skills/skill-loader.js'
 import { updateRunningSummary } from '../summarizer/index.js'
@@ -95,6 +100,9 @@ const activeStreams = new Map<string, { sessionId: string; messageId: string; co
  *  abortController 原本是循环内局部变量外部摸不到——升级为模块级注册表后，
  *  AGENT_INTERRUPT handler 才能跨会话按 agentId 全局寻址（用户手动改 DB 的场景）。 */
 const activeAborts = new Map<string, AbortController>()
+/** M1 防线频控：agentId → 上次告警时间戳（5 分钟内同猫不重复告警） */
+const m1WarnedAt = new Map<string, number>()
+const M1_WARN_INTERVAL_MS = 5 * 60 * 1000
 
 /** 获取 Socket.IO Server 实例（需在 createSocketIO() 之后调用） */
 export function getIO(): SocketServer | null {
@@ -680,6 +688,20 @@ type AgentTriggerMsg = {
 /** 追踪每个 Agent 在同一 traceId 下被 @ 的次数（防止无限循环） */
 const mentionCounts = new Map<string, number>()
 
+/** M1 频控：同猫 5 分钟内只告警一次（返回是否应告警） */
+function maybeWarnM1(agentId: string): boolean {
+  const now = Date.now()
+  const last = m1WarnedAt.get(agentId) || 0
+  if (now - last < M1_WARN_INTERVAL_MS) return false
+  m1WarnedAt.set(agentId, now)
+  return true
+}
+
+/** 测试钩子：清空 M1 频控时间戳（测试用例间隔离） */
+export function __test_resetM1Warned(): void {
+  m1WarnedAt.clear()
+}
+
 function getMentionKey(traceId: string, agentId: string): string {
   return `${traceId}:${agentId}`
 }
@@ -871,7 +893,27 @@ async function executeOneAgent(
       resolveRolePlaceholders(reply.content, triggerMsg.authorName),
       sessionAgentNames
     ).filter((name) => name !== agent.name) // 排除自己 @ 自己
-    if (mentionedNames.length > 0) {
+
+    // M3 防线：文本行首 @ 了会话外未知名 → warn 不路由（MCP 信号侧的
+    // 未知名由 internal.ts 预校验 4xx 拦截回模型，此处只覆盖文本通道）
+    const unknownHandle = detectUnknownHandle(reply.content, sessionAgentNames)
+    if (unknownHandle) {
+      log.warn('agent-to-agent mention: unknown handle', {
+        traceId,
+        fromAgent: agent.name,
+        handle: unknownHandle,
+      })
+    }
+
+    // MCP 结构化路由信号（汇入式合并，契约 5）：流中途 post_message 声明的
+    // 目标与文本行首 @ 取并集（Set 去重）——一次 dispatch、配额单计数。
+    // messageId 标签：只消费本流 msgId 的信号——abort 残留（旧流 msgId）
+    // 天然失效，无需清理逻辑
+    const signalNames = consumeRouteSignals(sessionId, agent.id, reply.msgId)
+      .flatMap((s) => s.targetCats)
+      .filter((name) => name !== agent.name)
+    const routeNames = [...new Set([...mentionedNames, ...signalNames])]
+    if (routeNames.length > 0) {
       // 找到被 @ 的 Agent 配置（提前——白名单判定需要目标角色）
       const allMentionedAgents = sessionAgentIds
         .map((id: string) => {
@@ -879,7 +921,7 @@ async function executeOneAgent(
           return row ? rowToAgent(row) : null
         })
         .filter(
-          (a: AgentConfig | null): a is AgentConfig => a !== null && mentionedNames.includes(a.name)
+          (a: AgentConfig | null): a is AgentConfig => a !== null && routeNames.includes(a.name)
         )
 
       // A2A 风暴治理白名单：按发送者角色剥除违规 mention（执行顺序：白名单→配额→dispatch）。
@@ -1005,6 +1047,27 @@ async function executeOneAgent(
               depth + 1
             )) || claudeRan
         }
+      }
+    } else {
+      // M1 防线：回复末段含行内 @已知猫名但最终无路由 → 静默变可见。
+      // 嵌句 @ 是路由静默丢失的实锤形态（ds@「位置：@店长 请收口」mentions=[]）；
+      // 本防线只在全链路（post_message + 文本行首 @）都失败时响应，正常路由零打扰
+      const inlineMentions = detectInlineMentions(reply.content, sessionAgentNames)
+      if (inlineMentions.length > 0 && maybeWarnM1(agent.id)) {
+        log.warn('agent reply has inline mention but no route', {
+          traceId,
+          fromAgent: agent.name,
+          inlineMentions,
+        })
+        io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
+          id: uuid(),
+          sessionId,
+          agentId: agent.id,
+          role: 'system',
+          content: `🐱 ${agent.name} 回复中检测到嵌句 @（${inlineMentions.join('、')}）但未形成路由——@猫名 必须行首独占一行，或调用 post_message 工具投递下一棒。`,
+          mentions: [],
+          createdAt: new Date().toISOString(),
+        })
       }
     }
 

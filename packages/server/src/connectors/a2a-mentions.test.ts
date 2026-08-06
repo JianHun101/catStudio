@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { parseMentionsFromReply } from './a2a-mentions.js'
+import {
+  parseMentionsFromReply,
+  detectUnknownHandle,
+  detectInlineMentions,
+} from './a2a-mentions.js'
 
 const CATS = ['吐槽猫', '店长', 'ds猫', '布偶猫']
 
@@ -181,5 +185,56 @@ if (m.role === 'agent') {
     // 「未闭合的行内代码不隐藏提及」比「跨行错位误吞 @」更安全
     const text = '@ds猫 请查 `x\n尾部'
     expect(parseMentionsFromReply(text, CATS)).toEqual(['ds猫'])
+  })
+})
+
+describe('detectUnknownHandle（M3）', () => {
+  it('行首 @ 会话外未知名 → 返回该句柄', () => {
+    expect(detectUnknownHandle('@布偶猫 帮我看看\n@张三 是谁', CATS)).toBe('张三')
+  })
+
+  it('行首 @ 全部已知名 → null', () => {
+    expect(detectUnknownHandle('@店长 请收口\n@吐槽猫 请审查', CATS)).toBeNull()
+  })
+
+  it('代码块中的 @ 未知名不检测（剥代码块）', () => {
+    const text = '```\n@张三 这是代码示例\n```\n@店长 继续'
+    expect(detectUnknownHandle(text, CATS)).toBeNull()
+  })
+
+  it('嵌句 @ 不检测（那是 M1 的管辖面）', () => {
+    expect(detectUnknownHandle('位置：@店长 请收口', CATS)).toBeNull()
+  })
+
+  it('行首 @ 后跟中文标点截断（@店长，继续）', () => {
+    expect(detectUnknownHandle('@店长，请收口', CATS)).toBeNull()
+  })
+})
+
+describe('detectInlineMentions（M1）', () => {
+  it('末段嵌句 @ 已知名 → 命中', () => {
+    // ds猫 历史失败形态：「位置：@店长 请收口」——嵌句 @ 解析层不认
+    expect(detectInlineMentions('已完成实施。\n\n位置：@店长 请收口', CATS)).toEqual(['店长'])
+  })
+
+  it('行首独占 @（合法路由）→ 不命中', () => {
+    expect(detectInlineMentions('@吐槽猫 请审查', CATS)).toEqual([])
+  })
+
+  it('叙述性提及（无 @ 符号）→ 不命中', () => {
+    expect(detectInlineMentions('让店长来收口吧，他已经看过了', CATS)).toEqual([])
+  })
+
+  it('嵌句 @ 在开头段（非末段）→ 不命中（只查末段）', () => {
+    const text = '位置：@店长 请收口\n' + 'A'.repeat(400) + '\n正文结尾'
+    expect(detectInlineMentions(text, CATS)).toEqual([])
+  })
+
+  it('代码块中的嵌句 @ 不命中（剥代码块）', () => {
+    expect(detectInlineMentions('```\n位置：@店长 请收口\n```', CATS)).toEqual([])
+  })
+
+  it('行内含 @ 但该行以 @ 开头（@店长 … @吐槽猫）→ 只命中文内嵌的', () => {
+    expect(detectInlineMentions('@店长 请收口，顺便 @吐槽猫 也看下', CATS)).toEqual(['吐槽猫'])
   })
 })

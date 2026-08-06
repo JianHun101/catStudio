@@ -61,3 +61,45 @@ export function parseMentionsFromReply(content: string, agentNames: string[]): s
     return new RegExp(`^\\s*@${escaped}(?=\\s|$)`, 'mi').test(noInlineCode)
   })
 }
+
+/** 剥代码块 + 行内代码后的纯文本（parseMentionsFromReply 同款剥离逻辑） */
+function stripCode(content: string): string {
+  const noCodeBlocks = content.replace(/```[\s\S]*?```/g, '')
+  return noCodeBlocks
+    .split('\n')
+    .map((line) => line.replace(/`[^`]*`/g, ''))
+    .join('\n')
+}
+
+/**
+ * M3: 检测文本行首 @ 了会话外的未知名（MCP 结构化路由 v4 防线）。
+ * 返回第一个未知名句柄（无则 null）。只做行首 @ 检测——嵌句 @ 是 M1 的管辖面。
+ */
+export function detectUnknownHandle(content: string, agentNames: string[]): string | null {
+  const text = stripCode(content)
+  for (const m of text.matchAll(/^\s*@([^\s@，。；：、]+)/gm)) {
+    if (!agentNames.includes(m[1])) return m[1]
+  }
+  return null
+}
+
+/**
+ * M1: 检测回复末段（剥代码块后后 1/3 字符，clowder-ai final-routing-slot 借鉴）中
+ * 的「行内 @已知猫名」——出现在非行首位置（该行不以 @ 开头）。嵌句 @ 是
+ * 路由静默丢失的实锤形态（ds@「位置：@店长 请收口」mentions=[]），
+ * 与行首独占（合法路由）区分。
+ */
+export function detectInlineMentions(content: string, agentNames: string[]): string[] {
+  const tailLen = Math.max(200, Math.floor(content.length / 3))
+  const tail = stripCode(content.slice(-tailLen))
+  return agentNames.filter((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const inline = new RegExp(`@${escaped}(?=\\s|$)`, 'm')
+    return tail.split('\n').some((line) => {
+      // 剥掉行首的合法 @mention（行首独占是合法路由，不告警）——
+      // 剩余部分仍含 @name 才是嵌句（如「@店长 …顺便 @吐槽猫 也看下」）
+      const rest = line.replace(/^\s*@[^\s@，。；：、]+/, '')
+      return inline.test(rest)
+    })
+  })
+}

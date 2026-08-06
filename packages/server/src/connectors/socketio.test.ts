@@ -88,6 +88,16 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 vi.mock('./a2a-mentions.js', () => ({
   parseMentionsFromReply: vi.fn(() => []),
+  // M1/M3 防线：默认不响（检测函数本体在 a2a-mentions.test.ts 单独测），
+  // 防线的接线（告警 + 频控）用专门用例覆盖
+  detectUnknownHandle: vi.fn(() => null),
+  detectInlineMentions: vi.fn(() => []),
+}))
+
+// MCP 路由信号：默认无信号（标签匹配/消费语义在 route-signals.test.ts 单独测），
+// 合并点用例按测试预置 mock 返回
+vi.mock('../llm/route-signals.js', () => ({
+  consumeRouteSignals: vi.fn(() => []),
 }))
 
 vi.mock('../skills/skill-loader.js', () => ({
@@ -3480,6 +3490,252 @@ describe('socketio connector', () => {
       handlers![0]()
 
       expect(mockSocketEmit).toHaveBeenCalledWith('all-agent-states', expect.any(Array))
+    })
+  })
+
+  // ─── MCP 结构化路由 — 合并点 + M1 防线（Phase 1 契约 5） ──────
+
+  describe('MCP 结构化路由 — 合并点 + M1 防线', () => {
+    const execAgentCfg = {
+      id: 'agent-1',
+      name: '店长',
+      avatar: '🐱',
+      systemPrompt: 'You are a cat.',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-flash',
+      llmApiKey: 'sk-test',
+    }
+
+    /** 在 session-1 中加入第二个 agent（吐槽猫），供路由目标使用 */
+    function seedSecondAgent(db: any) {
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run('agent-2', '吐槽猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-flash', 'sk-test')
+      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+        JSON.stringify(['agent-1', 'agent-2'])
+      )
+    }
+
+    beforeEach(async () => {
+      // agent 状态必须 busy 且 currentTriggerMessageId 与触发消息匹配，
+      // executeOneAgent 才会真正执行 runAgentReply（否则跳过、合并点不跑）
+      const { getAgentState } = await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockImplementation((agentId: string) => ({
+        agentId,
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-trigger',
+      }))
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      vi.mocked(getAdapterForAgent).mockImplementation(() => null as any)
+      const mod = await import('./socketio.js')
+      mod.__test_resetMentionCounts()
+      mod.__test_resetM1Warned()
+      // 防线默认不响；信号默认无（各用例按需定制）
+      const { parseMentionsFromReply, detectUnknownHandle, detectInlineMentions } =
+        await import('./a2a-mentions.js')
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
+      vi.mocked(detectUnknownHandle).mockReset()
+      vi.mocked(detectUnknownHandle).mockReturnValue(null)
+      vi.mocked(detectInlineMentions).mockReset()
+      vi.mocked(detectInlineMentions).mockReturnValue([])
+      const { consumeRouteSignals } = await import('../llm/route-signals.js')
+      vi.mocked(consumeRouteSignals).mockReset()
+      vi.mocked(consumeRouteSignals).mockReturnValue([])
+    })
+
+    /** 插入一条触发消息（Window ② 撤回保护要求触发消息存在于 DB） */
+    function seedTrigger(content = '@店长 派活'): void {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run('msg-trigger', 'session-1', content)
+    }
+
+    it('验收2-汇入式：流中信号（无文本 @）→ mentions 写回含目标 + dispatch 一次 + 配额计 1', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { consumeRouteSignals } = await import('../llm/route-signals.js')
+      seedSecondAgent(getDb())
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '已处理，无需 @', kind: 'text' }
+        }),
+      } as any)
+      vi.mocked(consumeRouteSignals).mockReturnValue([
+        { sessionId: 'session-1', agentId: 'agent-1', msgId: 'msg-x', targetCats: ['吐槽猫'] },
+      ])
+      seedTrigger()
+
+      vi.mocked(dispatch).mockClear()
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        'trace-signal',
+        1
+      )
+
+      // dispatch 恰好一次，目标吐槽猫（agent-2）
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ mentions: ['吐槽猫'] }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-2' })]),
+        'trace-signal',
+        2 // 入参 depth=1 → 递归调度 +1 = 2
+      )
+      // mentions 写回 DB（:931 updateMessageMentions）
+      const replyRow = getDb()
+        .prepare(`SELECT * FROM messages WHERE role = 'agent' AND content LIKE '%已处理%'`)
+        .get() as any
+      expect(replyRow).toBeDefined()
+      expect(JSON.parse(replyRow.mentions)).toEqual(['吐槽猫'])
+      // 配额计 1（A2A 链 depth>0 计数执行者 agent-1）
+      expect(mod.__getMentionCount('trace-signal', 'agent-1')).toBe(1)
+    })
+
+    it('验收3-双通道同目标：信号 + 文本行首 @ 同目标 → mentions 一次、dispatch 一次、配额计 1', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const { consumeRouteSignals } = await import('../llm/route-signals.js')
+      seedSecondAgent(getDb())
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '@吐槽猫 请审查', kind: 'text' }
+        }),
+      } as any)
+      // 双通道同目标：文本行首 @ + 信号
+      vi.mocked(parseMentionsFromReply).mockReturnValue(['吐槽猫'])
+      vi.mocked(consumeRouteSignals).mockReturnValue([
+        { sessionId: 'session-1', agentId: 'agent-1', msgId: 'msg-x', targetCats: ['吐槽猫'] },
+      ])
+      seedTrigger()
+
+      vi.mocked(dispatch).mockClear()
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        'trace-dual',
+        1
+      )
+
+      // Set 去重：dispatch 一次、mentions 一次
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ mentions: ['吐槽猫'] }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-2' })]),
+        'trace-dual',
+        2 // 入参 depth=1 → 递归调度 +1 = 2
+      )
+      const replyRow = getDb()
+        .prepare(`SELECT * FROM messages WHERE role = 'agent' AND content LIKE '%请审查%'`)
+        .get() as any
+      expect(JSON.parse(replyRow.mentions)).toEqual(['吐槽猫']) // 一次，非重复
+      expect(mod.__getMentionCount('trace-dual', 'agent-1')).toBe(1) // 配额单计数（执行者）
+    })
+
+    it('验收4-工具成功 + 末段嵌句 @ → M1 零告警（防线只在全链路失败时响）', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { detectInlineMentions } = await import('./a2a-mentions.js')
+      const { consumeRouteSignals } = await import('../llm/route-signals.js')
+      seedSecondAgent(getDb())
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '已处理，位置：@吐槽猫 请审查', kind: 'text' }
+        }),
+      } as any)
+      // 工具成功（信号路由）+ 文本嵌句存在（防线检测会命中）——
+      // 但路由已成功 → M1 不响
+      vi.mocked(consumeRouteSignals).mockReturnValue([
+        { sessionId: 'session-1', agentId: 'agent-1', msgId: 'msg-x', targetCats: ['吐槽猫'] },
+      ])
+      vi.mocked(detectInlineMentions).mockReturnValue(['吐槽猫'])
+      seedTrigger()
+
+      vi.mocked(dispatch).mockClear()
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        'trace-ok'
+      )
+
+      expect(dispatch).toHaveBeenCalledTimes(1) // 路由正常
+      // M1 零告警：无「嵌句」系统消息
+      const news = mockRoomEmit.mock.calls
+        .filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+        .map((c: any[]) => JSON.stringify(c[1]))
+      expect(news.some((s) => s.includes('嵌句'))).toBe(false)
+    })
+
+    it('验收5-M1 重放：ds猫 历史失败形态（全链路失败 + 末段嵌句）→ 点名 + 频控', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { detectInlineMentions } = await import('./a2a-mentions.js')
+      const { consumeRouteSignals } = await import('../llm/route-signals.js')
+      seedSecondAgent(getDb())
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '实施完成。\n\n位置：@店长 请收口', kind: 'text' }
+        }),
+      } as any)
+      // 全链路失败：无信号、无文本行首 @
+      vi.mocked(consumeRouteSignals).mockReturnValue([])
+      vi.mocked(detectInlineMentions).mockReturnValue(['店长'])
+      seedTrigger()
+
+      vi.mocked(dispatch).mockClear()
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        'trace-m1'
+      )
+
+      // 无路由（dispatch 零调用）
+      expect(dispatch).not.toHaveBeenCalled()
+      // M1 点名：系统消息含「嵌句」+ 正确规则提示
+      const news = mockRoomEmit.mock.calls
+        .filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+        .map((c: any[]) => c[1] as any)
+      const m1Msg = news.find((n) => n.role === 'system' && String(n.content).includes('嵌句'))
+      expect(m1Msg).toBeDefined()
+      expect(String(m1Msg.content)).toContain('店长')
+      expect(String(m1Msg.content)).toContain('行首独占一行')
+
+      // 频控：同 agent 二次触发（5 分钟内）→ 不再告警
+      mockRoomEmit.mockClear()
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        'trace-m1-again'
+      )
+      const news2 = mockRoomEmit.mock.calls
+        .filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+        .map((c: any[]) => c[1] as any)
+      expect(news2.some((n) => n.role === 'system' && String(n.content).includes('嵌句'))).toBe(
+        false
+      )
     })
   })
 })
