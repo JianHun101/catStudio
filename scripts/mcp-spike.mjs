@@ -7,6 +7,8 @@
  *      stream-json 是否出 tool_use 块、CLI 是否执行工具、tool_result 后是否续流
  *   2. --allowedTools 白名单语法是否被接受（被拒则试 --disallowedTools 黑名单兜底）
  *   3. ENABLE_TOOL_SEARCH 与 MCP 工具面交互（有干扰则 DeepSeek 端点也设 false）
+ *   4. 白名单拦截检查：白名单在场时非列名工具（如内置 Bash）是否被拒——bypassPermissions
+ *      模式下工具调用可能免审，若非列名工具仍可调则如实记录「白名单收窄失效」
  *
  * 用法: node scripts/mcp-spike.mjs [--dump <dir>]
  *   --dump <dir>  把每次运行的完整 NDJSON 事件流存文件（留档）
@@ -160,7 +162,16 @@ function analyze(events) {
       for (const block of ev.message.content) {
         if (block.type === 'tool_result') {
           sawToolResult = true
-          toolResults.push(String(block.content).slice(0, 200))
+          // tool_result.content 是对象数组形态（[{type:'text',text:...}]），
+          // String() 会显示 [object Object]——按数组逐元素取 text（OQ3 实锤）
+          const content = Array.isArray(block.content)
+            ? block.content
+                .map((c) =>
+                  typeof c === 'object' && c !== null ? (c.text ?? JSON.stringify(c)) : c
+                )
+                .join(' ')
+            : String(block.content)
+          toolResults.push(content.slice(0, 200))
         }
       }
     }
@@ -229,7 +240,7 @@ async function main() {
     '--mcp-config',
     cfg,
     '--allowedTools',
-    'mcp__catstudy__echo',
+    'mcp__catstudy-echo__echo',
   ])
   const a3 = analyze(r3.events)
   report('3-allowedTools白名单', r3, a3, '')
@@ -239,7 +250,7 @@ async function main() {
     '--mcp-config',
     cfg,
     '--disallowedTools',
-    'mcp__catstudy__echo',
+    'mcp__catstudy-echo__echo',
   ])
   const a4 = analyze(r4.events)
   report('4-disallowedTools黑名单', r4, a4, '')
@@ -248,24 +259,42 @@ async function main() {
   const r5 = await runClaude(
     'ENABLE_TOOL_SEARCH=true',
     ECHO_PROMPT,
-    ['--mcp-config', cfg, '--allowedTools', 'mcp__catstudy__echo'],
+    ['--mcp-config', cfg, '--allowedTools', 'mcp__catstudy-echo__echo'],
     { ENABLE_TOOL_SEARCH: 'true' }
   )
   const a5 = analyze(r5.events)
   report('5-ENABLE_TOOL_SEARCH交互', r5, a5, '')
 
-  // ─── 汇总判定 ───
+  // ─── 用例 6: 白名单拦截检查（非列名工具应被拒）───
+  const BLOCK_PROMPT =
+    '这是一次 MCP 白名单拦截 spike 验证。你有一个名为 echo 的 MCP 工具可用（参数 text）。' +
+    '请先调用 echo 工具，text 传「拦截检查」。' +
+    '然后调用内置 Bash 工具执行 echo blocked-check（不要用 echo 工具代替）。'
+  const r6 = await runClaude('白名单拦截检查', BLOCK_PROMPT, [
+    '--mcp-config',
+    cfg,
+    '--allowedTools',
+    'mcp__catstudy-echo__echo',
+  ])
+  const a6 = analyze(r6.events)
+  report('6-白名单拦截检查', r6, a6, '')
+
+  // ─── 汇总判定（证据驱动：exit 码仅表示进程正常结束，不构成通过判据）───
   console.log(`\n${'='.repeat(64)}`)
   console.log('SPIKE 汇总')
   console.log(`${'='.repeat(64)}`)
+  const echoCalled = (a) => a.toolUses.some((t) => t.name === 'mcp__catstudy-echo__echo')
+  const bashCalled = (a) => a.toolUses.some((t) => t.name === 'Bash')
   const verdicts = {
-    '1-基线':
+    '1-基线（无工具调用）':
       a1.sawToolUse === false &&
       r1.events.some((e) => e.type === 'result' || e.type === 'assistant'),
-    '2-MCP主链路': a2.sawToolUse && a2.sawToolResult,
-    '3-allowedTools': a3.sawToolUse && a3.sawToolResult,
-    '4-disallowedTools黑名单': true, // 无论结果，语法被接受与否都要记录
-    '5-ENABLE_TOOL_SEARCH': true,
+    '2-MCP主链路（tool_use+tool_result+续流）':
+      echoCalled(a2) && a2.sawToolResult && a2.textAfterToolUse.length > 0,
+    '3-allowedTools白名单（echo 可用）': echoCalled(a3) && a3.sawToolResult,
+    '4-disallowedTools黑名单（指定工具应被拒）': !echoCalled(a4),
+    '5-ENABLE_TOOL_SEARCH（ToolSearch 混入观察）': a5.sawToolUse,
+    '6-白名单拦截（非列名 Bash 应被拒）': !bashCalled(a6),
   }
   for (const [k, v] of Object.entries(verdicts)) {
     console.log(`  ${v ? '✅' : '❌'} ${k}`)
