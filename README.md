@@ -164,35 +164,35 @@ pnpm lint             # 全项目 TypeScript 类型检查
 
 ## 环境变量
 
-| 变量                       | 默认值                     | 说明                                                                                        |
-| -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------- |
-| `DS_KEY`                   | —                          | DeepSeek API Key（种子数据使用，3 只演示猫共用）                                            |
-| `PORT`                     | `3200`                     | Server 监听端口                                                                             |
-| `HOST`                     | `0.0.0.0`                  | Server 监听地址                                                                             |
-| `REDIS_URL`                | `redis://localhost:6379`   | Redis 连接地址                                                                              |
-| `HF_ENDPOINT`              | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`）                          |
-| `LOG_LEVEL`                | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                                               |
-| `MEMORY_DEDUP_ENABLED`     | `1`                        | 是否启用记忆去重（`0` 关闭）                                                                |
-| `MEMORY_DEDUP_THRESHOLD`   | `0.20`                     | 记忆去重余弦距离阈值（越小越严格）                                                          |
-| `MEMORY_TOP_K`             | `3`                        | 检索时返回的相关记忆条数                                                                    |
-| `MEMORY_ENABLED`           | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                                          |
-| `MEMORY_EMBEDDING_MODEL`   | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                                            |
-| `SUMMARY_ENABLED`          | `true`                     | 是否启用增量摘要                                                                            |
-| `SUMMARY_MODEL`            | `deepseek-chat`            | 摘要使用的模型                                                                              |
-| `SUMMARY_API_KEY`          | 同 `DS_KEY`                | 摘要模型的 API Key                                                                          |
-| `SUMMARY_BASE_URL`         | `https://api.deepseek.com` | 摘要 API 地址                                                                               |
-| `SUMMARY_INTERVAL`         | `3`                        | 每 N 轮对话触发一次增量摘要                                                                 |
-| `HANDOFF_ENABLED`          | `true`                     | 是否启用 90% 阈值会话交接                                                                   |
-| `HANDOFF_THRESHOLD`        | `0.9`                      | 触交接的上下文 token 占比                                                                   |
-| `MAX_CONTEXT_TOKENS`       | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                                                        |
-| `TOKEN_COUNT_METHOD`       | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）                             |
-| `CLI_IDLE_TIMEOUT_MS`      | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                                         |
-| `AGENT_HARD_TIMEOUT_MS`    | `1800000`                  | Agent 执行硬超时（毫秒，30 分钟）                                                           |
-| `CLAUDE_CODE_EFFORT_LEVEL` | `high`                     | Claude Code CLI 推理深度：`low` / `medium` / `high` / `max`                                 |
-| `ONEBOT_ENABLED`           | `false`                    | 是否启用 OneBot webhook（默认 false，关闭时 webhook 返回 503）                              |
-| `ONEBOT_API_BASE`          | `http://127.0.0.1:3000`    | NapCat HTTP API 地址（出站回复用）                                                          |
-| `ONEBOT_TOKEN`             | —                          | webhook 鉴权 token（设置后上报须带 `Authorization: Bearer <token>`；留空不校验）            |
-| `NAPCAT_LAUNCH_CMD`        | —                          | dev.js 拉起 NapCat 的启动命令：完整命令行或 `{NAPCAT_PATH}` 模板（详见下文「QQ 接入」章节） |
+| 变量                       | 默认值                     | 说明                                                                                             |
+| -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `DS_KEY`                   | —                          | DeepSeek API Key（种子数据使用，3 只演示猫共用）                                                 |
+| `PORT`                     | `3200`                     | Server 监听端口                                                                                  |
+| `HOST`                     | `0.0.0.0`                  | Server 监听地址                                                                                  |
+| `REDIS_URL`                | `redis://localhost:6379`   | Redis 连接地址                                                                                   |
+| `HF_ENDPOINT`              | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`）                               |
+| `LOG_LEVEL`                | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                                                    |
+| `MEMORY_DEDUP_ENABLED`     | `1`                        | 是否启用记忆去重（`0` 关闭）                                                                     |
+| `MEMORY_DEDUP_THRESHOLD`   | `0.20`                     | 记忆去重余弦距离阈值（越小越严格）                                                               |
+| `MEMORY_TOP_K`             | `3`                        | 检索时返回的相关记忆条数                                                                         |
+| `MEMORY_ENABLED`           | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                                               |
+| `MEMORY_EMBEDDING_MODEL`   | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                                                 |
+| `SUMMARY_ENABLED`          | `true`                     | 是否启用增量摘要                                                                                 |
+| `SUMMARY_MODEL`            | `deepseek-chat`            | 摘要使用的模型                                                                                   |
+| `SUMMARY_API_KEY`          | 同 `DS_KEY`                | 摘要模型的 API Key                                                                               |
+| `SUMMARY_BASE_URL`         | `https://api.deepseek.com` | 摘要 API 地址                                                                                    |
+| `SUMMARY_INTERVAL`         | `3`                        | 每 N 轮对话触发一次增量摘要                                                                      |
+| `HANDOFF_ENABLED`          | `true`                     | 是否启用 90% 阈值会话交接                                                                        |
+| `HANDOFF_THRESHOLD`        | `0.9`                      | 触交接的上下文 token 占比                                                                        |
+| `MAX_CONTEXT_TOKENS`       | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                                                             |
+| `TOKEN_COUNT_METHOD`       | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）                                  |
+| `CLI_IDLE_TIMEOUT_MS`      | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                                              |
+| `AGENT_HARD_TIMEOUT_MS`    | `1800000`                  | Agent 执行硬超时（毫秒，30 分钟）                                                                |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `high`                     | Claude Code CLI 推理深度：`low` / `medium` / `high` / `max`                                      |
+| `ONEBOT_ENABLED`           | `false`                    | 是否启用 OneBot webhook（默认 false，关闭时 webhook 返回 503）                                   |
+| `ONEBOT_API_BASE`          | `http://127.0.0.1:3000`    | NapCat HTTP API 地址（出站回复用）                                                               |
+| `ONEBOT_TOKEN`             | —                          | webhook 鉴权 token（设置后上报须鉴权：Bearer 或 `x-signature`，详见「QQ 接入」章节；留空不校验） |
+| `NAPCAT_LAUNCH_CMD`        | —                          | dev.js 拉起 NapCat 的启动命令：完整命令行或 `{NAPCAT_PATH}` 模板（详见下文「QQ 接入」章节）      |
 
 ## QQ 接入（OneBot / NapCat）
 
