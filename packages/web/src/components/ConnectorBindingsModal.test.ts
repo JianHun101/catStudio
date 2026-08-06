@@ -53,10 +53,16 @@ describe('ConnectorBindingsModal list rendering', () => {
     expect(source).toMatch(/store\.sessions\.find\(\(s\) => s\.id === id\)\?\.title \|\| id/)
   })
 
-  it('delete uses two-step confirm (first click arms, second executes)', () => {
-    expect(source).toMatch(/confirmDeleteId\.value !== binding\.external_id/)
-    expect(source).toContain('confirmDeleteId.value = binding.external_id')
+  it('delete uses two-step confirm keyed by binding.id (uuid PK, not external_id)', () => {
+    // 行键必须用 binding.id：后端唯一约束是 (platform, external_type, external_id)，
+    // 同平台同号不同 external_type 可共存——external_id 作行键会让双行共享确认态，
+    // 未 arm 的行被「第一步」手势单次点击即删（两步确认失效）。
+    expect(source).toMatch(/confirmDeleteId\.value !== binding\.id/)
+    expect(source).toContain('confirmDeleteId.value = binding.id')
     expect(source).toContain('确认删除？')
+    // 模板判定（:class + 文案）也必须全部切到 b.id——external_id 残留即共享确认态回归
+    expect(source).toContain('confirmDeleteId === b.id')
+    expect(source).not.toContain('confirmDeleteId === b.external_id')
   })
 
   it('loads bindings on mount and refreshes after add/delete', () => {

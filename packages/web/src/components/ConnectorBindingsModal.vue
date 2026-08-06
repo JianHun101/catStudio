@@ -10,7 +10,7 @@ const store = useChatStore()
 const bindings = ref<ConnectorBinding[]>([])
 const loading = ref(false)
 const listError = ref('')
-/** 删除两步确认：存 external_id（唯一键 (platform, external_type, external_id) 全局唯一） */
+/** 删除两步确认：存 binding.id（uuid PK 行级唯一——external_id 在 (platform, external_type, external_id) 复合键下可共存，作行键会让同号双行共享确认态） */
 const confirmDeleteId = ref<string | null>(null)
 
 // ─── 添加表单 ─────────────────────────────
@@ -85,8 +85,8 @@ async function handleAdd(): Promise<void> {
 
 /** 删除两步确认：第一次点变红，第二次执行（AgentEditModal 同款范式） */
 async function handleDelete(binding: ConnectorBinding): Promise<void> {
-  if (confirmDeleteId.value !== binding.external_id) {
-    confirmDeleteId.value = binding.external_id
+  if (confirmDeleteId.value !== binding.id) {
+    confirmDeleteId.value = binding.id
     return
   }
   error.value = ''
@@ -135,7 +135,7 @@ onMounted(loadBindings)
             v-for="b in bindings"
             :key="`${b.platform}-${b.external_type}-${b.external_id}`"
             class="binding-row"
-            :class="{ confirming: confirmDeleteId === b.external_id }"
+            :class="{ confirming: confirmDeleteId === b.id }"
           >
             <div class="binding-info">
               <span class="binding-type">{{ typeLabel(b.external_type) }}</span>
@@ -146,10 +146,10 @@ onMounted(loadBindings)
             </div>
             <button
               class="btn-delete"
-              :class="{ 'btn-delete-confirm': confirmDeleteId === b.external_id }"
+              :class="{ 'btn-delete-confirm': confirmDeleteId === b.id }"
               @click="handleDelete(b)"
             >
-              {{ confirmDeleteId === b.external_id ? '确认删除？' : '删除' }}
+              {{ confirmDeleteId === b.id ? '确认删除？' : '删除' }}
             </button>
           </div>
         </div>
