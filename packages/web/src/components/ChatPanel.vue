@@ -9,6 +9,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
 import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { createLogger } from '@/utils/logger'
+import ConnectorBindingsModal from './ConnectorBindingsModal.vue'
 
 const log = createLogger('ChatPanel')
 
@@ -31,6 +32,7 @@ const clearingMessages = ref(false)
 const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次执行
 const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 const sending = ref(false)
+const showBindings = ref(false) // QQ 绑定设置弹窗
 
 const {
   mentionActive,
@@ -652,6 +654,24 @@ function statusLabelZh(status: string): string {
 
       <div v-if="store.activeSessionId" class="chat-header-actions">
         <button
+          class="btn-bindings"
+          title="QQ 绑定设置"
+          aria-label="QQ 绑定设置"
+          @click="showBindings = true"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M6.5 2.5a1 1 0 011-1h1a1 1 0 011 1v.6c.4.14.77.34 1.1.58l.5-.3a1 1 0 011.37.36l.5.87a1 1 0 01-.37 1.37l-.5.3c.05.2.08.4.08.62s-.03.43-.08.62l.5.3a1 1 0 01.37 1.37l-.5.87a1 1 0 01-1.37.37l-.5-.3c-.33.24-.7.44-1.1.58v.6a1 1 0 01-1 1h-1a1 1 0 01-1-1v-.6a4 4 0 01-1.1-.58l-.5.3a1 1 0 01-1.37-.37l-.5-.87a1 1 0 01.37-1.37l.5-.3a4 4 0 010-1.24l-.5-.3a1 1 0 01-.37-1.37l.5-.87a1 1 0 011.37-.36l.5.3c.33-.24.7-.44 1.1-.58v-.6z"
+              stroke="currentColor"
+              stroke-width="1.1"
+              stroke-linejoin="round"
+            />
+            <circle cx="8" cy="8" r="1.7" stroke="currentColor" stroke-width="1.1" />
+          </svg>
+          绑定
+        </button>
+
+        <button
           class="btn-clear"
           :class="{ 'btn-clear-confirm': clearConfirm }"
           :title="clearConfirm ? '确认清空所有消息' : '清空所有消息'"
@@ -1051,6 +1071,9 @@ function statusLabelZh(status: string): string {
       </button>
     </div>
 
+    <!-- QQ 绑定设置弹窗 -->
+    <ConnectorBindingsModal v-if="showBindings" @close="showBindings = false" />
+
     <!-- 图片大图预览（lightbox） -->
     <Teleport to="body">
       <div
@@ -1194,6 +1217,27 @@ function statusLabelZh(status: string): string {
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
+}
+
+.btn-bindings {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.btn-bindings:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .btn-clear {

@@ -39,6 +39,16 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
   }
 }
 
+/** 连接器绑定行——后端 snake_case 原样返回（routes/connectors.ts，无 camelCase 转换） */
+export interface ConnectorBinding {
+  id: string
+  platform: string
+  external_type: 'group' | 'private'
+  external_id: string
+  session_id: string
+  created_at: string
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -101,4 +111,31 @@ export const api = {
 
   markSessionRead: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}/read`, { method: 'POST' }),
+
+  // Connector bindings (QQ / OneBot)
+  getConnectorBindings: (platform?: string) => {
+    const query = platform ? `?platform=${encodeURIComponent(platform)}` : ''
+    return request<{ ok: boolean; bindings: ConnectorBinding[] }>(`/connectors/bindings${query}`)
+  },
+
+  createConnectorBinding: (data: {
+    platform: string
+    externalType: 'group' | 'private'
+    externalId: string
+    sessionId: string
+  }) =>
+    request<{ ok: boolean; binding: ConnectorBinding }>('/connectors/bindings', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  deleteConnectorBinding: (data: {
+    platform: string
+    externalType: 'group' | 'private'
+    externalId: string
+  }) =>
+    request<{ ok: boolean }>('/connectors/bindings', {
+      method: 'DELETE',
+      body: JSON.stringify(data),
+    }),
 }

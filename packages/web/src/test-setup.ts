@@ -4,4 +4,5 @@ import { config } from '@vue/test-utils'
 config.global.stubs = {
   SessionCreateModal: true,
   AgentEditModal: true,
+  ConnectorBindingsModal: true,
 }
