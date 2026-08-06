@@ -361,6 +361,22 @@ function resolveNapcatSpawn(cmd, napcatPath) {
   }
 }
 
+/**
+ * 检测「含空格路径 + 占位符外附加内容」组合（Windows cmd /c 下不可解析）：
+ * Node 给含空格 arg 自动加引号 → cmd /S 去引号规则对「非纯可执行名」不保留
+ * 引号（恰好两引号 + 中间纯可执行名才保留）→ 剥引号后按第一个空格截断，把
+ * 路径前半当命令 → exit=1。且 spawn stdio:'ignore' 吞掉错误——静默失败，
+ * 症状复刻「操作中」永等翻转（审查实测钉死：{NAPCAT_PATH} --flag + 空格路径
+ * 失败；纯占位符空格路径由 Node 加引号 + cmd /S 去引号正常执行，不在此列）。
+ * 纯函数：返回 true = 该组合存在、启动将失败，调用方须打可见警告。
+ */
+function hasCmdSpaceConflict(cmd, napcatPath) {
+  if (!cmd.includes(NAPCAT_PATH_PLACEHOLDER)) return false
+  const p = (napcatPath || '').trim()
+  if (!p.includes(' ')) return false
+  return cmd.replaceAll(NAPCAT_PATH_PLACEHOLDER, p) !== p
+}
+
 /** 解析 ONEBOT_API_BASE 为 host/port（容错：非法 URL 回退默认 127.0.0.1:3000） */
 function parseNapcatApiBase() {
   const apiBase = process.env.ONEBOT_API_BASE || 'http://127.0.0.1:3000'
@@ -403,7 +419,8 @@ async function ensureNapcat() {
     )
     return
   }
-  const spec = resolveNapcatSpawn(cmd, loadNapcatConfig().napcatPath)
+  const config = loadNapcatConfig()
+  const spec = resolveNapcatSpawn(cmd, config.napcatPath)
   if (spec === null) {
     console.log(
       `[dev] NAPCAT_LAUNCH_CMD 含 ${NAPCAT_PATH_PLACEHOLDER} 但未配置路径——跳过拉起（请在配置页面「NapCat 启动路径」填写本机路径）`
@@ -414,6 +431,13 @@ async function ensureNapcat() {
   if (await isPortOpen(host, port)) {
     console.log(`[dev] NapCat 已在运行（${host}:${port} 已监听），跳过拉起`)
     return
+  }
+  // 含空格路径 + 附加内容组合在 cmd /c 下不可解析（hasCmdSpaceConflict 见上）——
+  // spawn 会静默失败（stdio:'ignore' 吞错误），把失败预判成可见引导而非等「操作中」
+  if (isWindows && hasCmdSpaceConflict(cmd, config.napcatPath)) {
+    console.warn(
+      `[dev] 警告：NapCat 路径含空格（${config.napcatPath.trim()}）且 NAPCAT_LAUNCH_CMD 含占位符外附加内容——cmd /c 下该组合不可解析，启动将失败。请改用无空格目录，或将命令改为完整命令行形态（不含 ${NAPCAT_PATH_PLACEHOLDER} 占位符）`
+    )
   }
   const child = isWindows
     ? spawn('cmd.exe', spec.args, {
