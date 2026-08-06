@@ -642,6 +642,9 @@ describe('Connector Routes', () => {
 
     it('GET status: 字段齐全 + enabled 随 env（与 webhook 503 开关同源）', async () => {
       process.env.ONEBOT_ENABLED = 'true'
+      // 环境隔离：本用例断言「未配置启动命令」态——本机 .env 模板（NAPCAT_LAUNCH_CMD={NAPCAT_PATH}）
+      // 经外部 export 进进程环境时该断言会失效（launchCmdConfigured 读 env 实时求值），先清掉再测
+      delete process.env.NAPCAT_LAUNCH_CMD
       const res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
       expect(res.statusCode).toBe(200)
       const body = JSON.parse(res.body)

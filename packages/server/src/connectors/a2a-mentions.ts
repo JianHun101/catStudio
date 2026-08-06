@@ -13,7 +13,7 @@
  * 中的 @mention 需要服务端解析。采用**严格行首匹配**策略：
  *
  * 1. 先剥离代码块（```...```），防止代码注释/文档示例里的 @mention 误触发
- * 2. 剥离行内代码（`...`）
+ * 2. 剥离行内代码（`...`）——逐行剥离，反引号配对不跨行
  * 3. 对剩余文本做行首匹配：只有出现在行首的 @name 才视为路由意图
  *
  * 理由：用户消息可能在任何位置写 @，但 Agent 的输出经常在代码注释、
@@ -44,8 +44,14 @@ export function parseMentionsFromReply(content: string, agentNames: string[]): s
   // 1. 剥离代码块（```...```），包括有语言标记的
   const noCodeBlocks = content.replace(/```[\s\S]*?```/g, '')
 
-  // 2. 剥离行内代码（`...`）
-  const noInlineCode = noCodeBlocks.replace(/`[^`]*`/g, '')
+  // 2. 剥离行内代码（`...`）——逐行剥离：反引号配对不跨行。
+  //    全文成对匹配在反引号总数为奇数时配对错位，会吞掉配对之间的所有文本
+  //    （含行首 @mention，造成 A2A 派活静默丢单）；逐行剥离后奇数反引号
+  //    只影响本行，行首 @mention 天然安全
+  const noInlineCode = noCodeBlocks
+    .split('\n')
+    .map((line) => line.replace(/`[^`]*`/g, ''))
+    .join('\n')
 
   // 3. 行首匹配：只匹配出现在行首（允许前导空白）的 @name
   return agentNames.filter((name) => {
