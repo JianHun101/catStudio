@@ -9,8 +9,73 @@ import {
   getWorkspaceDir,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
+import { randomBytes } from 'node:crypto'
+import { writeFileSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 const log = createLogger('claude')
+
+/** MCP server 脚本路径（workspace 上级 = 项目根 → scripts/mcp-server.mjs；
+ *  与 cli-utils getWorkspaceDir 同款 cwd 假设） */
+const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.mjs')
+
+/**
+ * 内置工具黑名单（spike case 7 实证 --disallowedTools 对内置工具生效：
+ * tool_use 被请求但执行被拒、命令未真实执行——「能否真正关掉 shell」= 能）。
+ * 店长裁决：用例 7 生效 → claude.ts 顺带加内置工具黑名单（内置清单有限、
+ * 可列全，净改善）。注：--allowedTools 白名单管不到内置工具（case 6：
+ * bypassPermissions 下 Bash 照调），必须显式黑名单才能收窄内置工具面。
+ * 聊天回复场景模型只需 post_message 路由 + 文本；读文件/改代码等执行能力
+ * 若未来需要，走独立立项（裁决一：本单不换权限模式）。
+ */
+const BUILTIN_TOOLS_DISALLOWED = [
+  'Bash',
+  'Read',
+  'Write',
+  'Edit',
+  'Glob',
+  'Grep',
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'Agent',
+  'Workflow',
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'SendMessage',
+  'AskUserQuestion',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'EnterWorktree',
+  'ExitWorktree',
+  'ScheduleWakeup',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'Skill',
+].join(',')
+
+/** 生成 .mcp.json 到 OS temp（每 spawn 一次；调用方负责 finally 清理）。
+ *  文件名带 pid + 随机后缀——同一进程并发多个 spawn 不冲突 */
+function writeMcpConfig(): string {
+  const cfg = {
+    mcpServers: {
+      // server 名 catstudy → 工具面 mcp__catstudy__post_message（spike 验证形态）
+      catstudy: {
+        command: process.execPath,
+        args: [MCP_SERVER_PATH],
+      },
+    },
+  }
+  const p = join(tmpdir(), `catstudy-mcp-${process.pid}-${randomBytes(4).toString('hex')}.json`)
+  writeFileSync(p, JSON.stringify(cfg, null, 2))
+  return p
+}
 
 interface ClaudeConfig {
   apiKey: string
@@ -74,30 +139,46 @@ export class ClaudeAdapter implements LLMAdapter {
     }
 
     const prompt = messagesToPrompt(messages)
-    const env = this.buildEnv()
+    const env = this.buildEnv(options.context)
 
     log.info('启动 Claude Code CLI', { model: this.model, promptLen: prompt.length })
 
+    // MCP 结构化路由（契约 4——店长裁决）：context 存在时挂 post_message 工具面。
+    // .mcp.json 每 spawn 生成到 OS temp，流结束/异常路径 finally 删除；
+    // env 五变量由 buildEnv 透传（MCP server 子进程继承）。
+    // context 不存在（测试/非路由调用）→ 不加任何参数，行为与现状逐字节一致。
+    let mcpConfigPath: string | null = null
+    const args = [
+      '-p',
+      '-',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--permission-mode',
+      'bypassPermissions',
+    ]
+    if (options.context) {
+      mcpConfigPath = writeMcpConfig()
+      args.push(
+        '--mcp-config',
+        mcpConfigPath,
+        // 白名单只留 post_message（spike case 3/4 双证实效：MCP 工具面收窄）
+        '--allowedTools',
+        'mcp__catstudy__post_message',
+        // 内置工具黑名单（spike case 7 实证生效——店长裁决：列全净改善）
+        '--disallowedTools',
+        BUILTIN_TOOLS_DISALLOWED
+      )
+    }
+
     // 将 prompt 通过 stdin 传入，避免 Windows 命令行 32K 限制。
     // -p - 告诉 Claude CLI 从 stdin 读取提示词。
-    const child = spawnSupervised(
-      CLAUDE_BIN,
-      [
-        '-p',
-        '-',
-        '--output-format',
-        'stream-json',
-        '--verbose',
-        '--permission-mode',
-        'bypassPermissions',
-      ],
-      {
-        env,
-        label: 'claude',
-        input: prompt,
-        cwd: getWorkspaceDir(),
-      }
-    )
+    const child = spawnSupervised(CLAUDE_BIN, args, {
+      env,
+      label: 'claude',
+      input: prompt,
+      cwd: getWorkspaceDir(),
+    })
 
     // ─── Abort 处理：收到取消信号时 kill 子进程 ───
     const GRACE_MS = 5000
@@ -149,6 +230,14 @@ export class ClaudeAdapter implements LLMAdapter {
     } finally {
       signal?.removeEventListener('abort', onAbort)
       cleanupIdle()
+      // 清理临时 .mcp.json（正常/异常/abort 路径都走 finally）
+      if (mcpConfigPath) {
+        try {
+          unlinkSync(mcpConfigPath)
+        } catch {
+          /* 已被外部清理则忽略 */
+        }
+      }
     }
 
     // 被取消时不产出后续错误信息
@@ -180,7 +269,7 @@ export class ClaudeAdapter implements LLMAdapter {
     yield { content: '', done: true }
   }
 
-  private buildEnv(): Record<string, string> {
+  private buildEnv(context?: ChatOptions['context']): Record<string, string> {
     // baseUrl 留空默认 DeepSeek Anthropic 兼容端点；填其他端点（如 Kimi: https://api.moonshot.ai/anthropic）走对应服务
     const baseUrl = this.baseUrl || 'https://api.deepseek.com/anthropic'
     const isDeepSeek = !this.baseUrl || /deepseek/i.test(this.baseUrl)
@@ -204,7 +293,7 @@ export class ClaudeAdapter implements LLMAdapter {
           ENABLE_TOOL_SEARCH: 'false',
         }
 
-    return {
+    const env = {
       ...process.env,
       DEEPSEEK_API_KEY: this.apiKey,
       ANTHROPIC_BASE_URL: baseUrl,
@@ -216,5 +305,18 @@ export class ClaudeAdapter implements LLMAdapter {
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_EFFORT_LEVEL: this.effortLevel || process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high',
     } as Record<string, string>
+
+    // MCP 结构化路由五变量（契约 4——店长裁决）：context 透传给 MCP server
+    // （子进程继承 env）。CATSTUDY_SERVER_URL 用 server 监听口径（index.ts 同款
+    // PORT 默认 3200）——MCP server 在本机访问，127.0.0.1 而非 localhost
+    // （Windows IPv4/IPv6 歧义，项目惯例）。
+    if (context) {
+      env.CATSTUDY_SERVER_URL = `http://127.0.0.1:${process.env.PORT || '3200'}`
+      env.CATSTUDY_SIGNAL_TOKEN = context.token
+      env.CATSTUDY_SESSION_ID = context.sessionId
+      env.CATSTUDY_AGENT_ID = context.agentId
+      env.CATSTUDY_MSG_ID = context.msgId
+    }
+    return env
   }
 }

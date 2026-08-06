@@ -11,6 +11,7 @@ import { Server as HttpServer } from 'node:http'
 import { Server as SocketServer } from 'socket.io'
 import { existsSync, writeFileSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { Events, estimateTokens, estimateMessageTokens } from '@cat-study/shared'
 import {
@@ -91,9 +92,24 @@ let _io: SocketServer | null = null
 /** 正在执行的消息 ID → 是否被撤回（runAgentReply 检查此标志以提前终止） */
 const retractionRequests = new Map<string, boolean>()
 
-/** 正在流式输出的 Agent 状态 → { sessionId, messageId, content }
- *  JOIN_SESSION 时用于恢复打字气泡（客户端切会话会清空 typingStates） */
-const activeStreams = new Map<string, { sessionId: string; messageId: string; content: string }>()
+/** 正在流式输出的 Agent 状态 → { sessionId, messageId, content, token }
+ *  JOIN_SESSION 时用于恢复打字气泡（客户端切会话会清空 typingStates）；
+ *  token 为本次 spawn 的随机信号 token（internal.ts 精确校验 x-signal-token） */
+const activeStreams = new Map<
+  string,
+  { sessionId: string; messageId: string; content: string; token: string }
+>()
+
+/**
+ * 只读 getter：internal.ts 校验信号用（不迁移 Map 本体——6 处 set/delete
+ * 不动，回归面最小）。依赖方向 internal.ts → socketio.ts 无环（socketio.ts
+ * 只 import route-signals.ts，internal.ts 不 import socketio.ts 的模块状态）。
+ */
+export function getActiveStream(
+  agentId: string
+): { sessionId: string; messageId: string; content: string; token: string } | undefined {
+  return activeStreams.get(agentId)
+}
 
 /** 正在执行的 Agent → 其 AbortController（停止按钮中断思考用）。
  *  executeAgentsSerial 创建后注册、Promise.race 结束路径（正常/异常）清理。
@@ -2135,6 +2151,10 @@ async function runAgentReply(
   let displayContent = '' // 文本 + 思考 — 流式推送给前端
   let thinkingContent = '' // 仅思考过程 — 存入 DB 的 thinking_content 列，回复后仍可查看
   const msgId = uuid()
+  // 每 spawn 随机的信号 token（一次流一次 spawn——「每 spawn 随机」语义保持）。
+  // 随 context 进 buildEnv → .mcp.json env → MCP server 的 x-signal-token 头；
+  // internal.ts 精确匹配 activeStreams 存值（契约裁决：方案 A）
+  const signalToken = randomBytes(16).toString('hex')
 
   // 记录执行前的包依赖快照
   const depsBefore = snapshotPackageDeps()
@@ -2145,7 +2165,7 @@ async function runAgentReply(
     messageId: msgId,
     content: '',
   })
-  activeStreams.set(agent.id, { sessionId, messageId: msgId, content: '' })
+  activeStreams.set(agent.id, { sessionId, messageId: msgId, content: '', token: signalToken })
 
   // 状态：回复中
   io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
@@ -2171,6 +2191,15 @@ async function runAgentReply(
   const stream = adapter.chatStream(llmMessages, {
     model: agent.llmModel,
     signal,
+    // MCP 结构化路由上下文（契约 3 修订——店长裁决）：claude.ts 透传
+    // 五变量到 MCP server env；其他适配器忽略 context 零影响
+    context: {
+      sessionId,
+      agentId: agent.id,
+      msgId,
+      token: signalToken,
+      traceId,
+    },
   })
 
   for await (const chunk of stream) {
@@ -2205,7 +2234,12 @@ async function runAgentReply(
         messageId: msgId,
         content: displayContent,
       })
-      activeStreams.set(agent.id, { sessionId, messageId: msgId, content: displayContent })
+      activeStreams.set(agent.id, {
+        sessionId,
+        messageId: msgId,
+        content: displayContent,
+        token: signalToken,
+      })
     }
   }
 

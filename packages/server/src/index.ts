@@ -21,6 +21,7 @@ import { sessionRoutes } from './routes/sessions.js'
 import { skillRoutes } from './routes/skills.js'
 import { messageRoutes } from './routes/messages.js'
 import { connectorRoutes } from './routes/connectors.js'
+import { internalRoutes } from './routes/internal.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
 import { existsSync, unlinkSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
@@ -145,6 +146,7 @@ async function main(): Promise<void> {
   await app.register(skillRoutes)
   await app.register(messageRoutes)
   await app.register(connectorRoutes)
+  await app.register(internalRoutes)
 
   // 5. 启动 Fastify → 拿到 HTTP Server → attach Socket.IO
   await app.listen({ port: PORT, host: HOST })

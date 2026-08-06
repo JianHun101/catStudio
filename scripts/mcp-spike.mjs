@@ -279,6 +279,16 @@ async function main() {
   const a6 = analyze(r6.events)
   report('6-白名单拦截检查', r6, a6, '')
 
+  // ─── 用例 7: --disallowedTools 对内置工具（Bash）是否生效 ───
+  // 店长追加一问（018311f 门禁裁决）：验证「能否真正关掉 shell」——生效则
+  // claude.ts 顺带加内置工具黑名单（内置清单有限、可列全）；不生效则边界钉死
+  const CASE7_PROMPT =
+    '这是一次 disallowedTools 内置工具拦截 spike 验证。' +
+    '请调用内置 Bash 工具执行命令 echo case7-check（不要用其他任何工具代替）。'
+  const r7 = await runClaude('disallowedTools内置Bash', CASE7_PROMPT, ['--disallowedTools', 'Bash'])
+  const a7 = analyze(r7.events)
+  report('7-disallowedTools内置Bash', r7, a7, '')
+
   // ─── 汇总判定（证据驱动：exit 码仅表示进程正常结束，不构成通过判据）───
   console.log(`\n${'='.repeat(64)}`)
   console.log('SPIKE 汇总')
@@ -295,6 +305,10 @@ async function main() {
     '4-disallowedTools黑名单（指定工具应被拒）': !echoCalled(a4),
     '5-ENABLE_TOOL_SEARCH（ToolSearch 混入观察）': a5.sawToolUse,
     '6-白名单拦截（非列名 Bash 应被拒）': !bashCalled(a6),
+    // 用例 7 生效形态：模型仍会尝试调 Bash（tool_use 出现）但 CLI 执行被拒
+    // （tool_result 含 tool_use_error）——「被请求但执行被拒」= 黑名单生效直接证据
+    '7-disallowedTools内置Bash（Bash 执行应被拒）':
+      bashCalled(a7) && a7.toolResults.some((t) => t.includes('tool_use_error')),
   }
   for (const [k, v] of Object.entries(verdicts)) {
     console.log(`  ${v ? '✅' : '❌'} ${k}`)

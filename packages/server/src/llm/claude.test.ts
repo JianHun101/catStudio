@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { existsSync } from 'node:fs'
+import { parseClaudeCodeOutput, spawnSupervised } from './cli-utils.js'
 
 // Mock cli-utils 以阻止模块加载时的 resolveBin() 调用
 vi.mock('./cli-utils.js', () => ({
@@ -7,6 +9,8 @@ vi.mock('./cli-utils.js', () => ({
   parseClaudeCodeOutput: vi.fn(),
   attachIdleTimeout: vi.fn(() => () => {}),
   spawnSupervised: vi.fn(),
+  // MCP_SERVER_PATH 模块级常量依赖（真实路径在测试中不触达——spawn 被 mock）
+  getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
 }))
 
 // Mock logger
@@ -117,5 +121,79 @@ describe('ClaudeAdapter', () => {
     // Kimi 端点不支持 Tool Search
     expect(env.ENABLE_TOOL_SEARCH).toBe('false')
     expect(env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max')
+  })
+
+  // ─── buildEnv context 透传（MCP 结构化路由五变量，契约 4——店长裁决）───
+
+  it('buildEnv with context passes five MCP variables', () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const env = (adapter as any).buildEnv({
+      sessionId: 'session-1',
+      agentId: 'agent-impl',
+      msgId: 'msg-1',
+      token: 'tok-1',
+      traceId: 'trace-1',
+    }) as Record<string, string>
+
+    expect(env.CATSTUDY_SERVER_URL).toBe('http://127.0.0.1:3200')
+    expect(env.CATSTUDY_SIGNAL_TOKEN).toBe('tok-1')
+    expect(env.CATSTUDY_SESSION_ID).toBe('session-1')
+    expect(env.CATSTUDY_AGENT_ID).toBe('agent-impl')
+    expect(env.CATSTUDY_MSG_ID).toBe('msg-1')
+  })
+
+  it('buildEnv without context omits MCP variables (regression baseline)', () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const env = (adapter as any).buildEnv() as Record<string, string>
+    expect(env.CATSTUDY_SIGNAL_TOKEN).toBeUndefined()
+    expect(env.CATSTUDY_SESSION_ID).toBeUndefined()
+    expect(env.CATSTUDY_MSG_ID).toBeUndefined()
+  })
+
+  // ─── chatStream MCP 挂载（--mcp-config / --allowedTools / --disallowedTools）───
+
+  it('chatStream with context mounts MCP config and cleans up temp file', async () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: null, killed: false }
+    vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
+    vi.mocked(parseClaudeCodeOutput).mockImplementation(async function* () {
+      yield { content: 'hi', done: false }
+      yield { content: '', done: true }
+    })
+
+    const chunks = await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'claude-sonnet-4-6',
+        context: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1', token: 'tok-1' },
+      })
+    )
+    expect(chunks.at(-1)?.done).toBe(true)
+
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    expect(args).toContain('--mcp-config')
+    expect(args).toContain('--allowedTools')
+    expect(args).toContain('mcp__catstudy__post_message')
+    expect(args).toContain('--disallowedTools')
+    // .mcp.json 生成后由 finally 清理——断言临时文件已删
+    const cfgIdx = args.indexOf('--mcp-config')
+    expect(cfgIdx).toBeGreaterThan(-1)
+    expect(existsSync(args[cfgIdx + 1])).toBe(false)
+  })
+
+  it('chatStream without context keeps baseline args (no MCP flags)', async () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: 0, killed: false }
+    vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
+    vi.mocked(parseClaudeCodeOutput).mockImplementation(async function* () {
+      yield { content: '', done: true }
+    })
+
+    await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'claude-sonnet-4-6' })
+    )
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    expect(args).not.toContain('--mcp-config')
+    expect(args).not.toContain('--allowedTools')
+    expect(args).not.toContain('--disallowedTools')
   })
 })
