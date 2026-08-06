@@ -45,9 +45,10 @@ workspace/
 .restart-request
 .restart-done
 
-# NapCat 生命周期（.napcat-pid 记录 dev.js 拉起的实例所有权；.napcat-request 是 server 薄桥→dev.js 的启停请求文件；工作流状态文件不入库）
+# NapCat 生命周期（.napcat-pid 记录 dev.js 拉起的实例所有权；.napcat-request 是 server 薄桥→dev.js 的启停请求文件；.napcat-config.json 是配置页面保存的启动路径——本机环境数据，换机器不同；工作流状态文件不入库）
 .napcat-pid
 .napcat-request
+.napcat-config.json
 
 # 审查门禁（本地工作流状态，不提交）
 .push-gate

@@ -17,6 +17,9 @@
  * NapCat 生命周期管理（2026-08 架构决策）：NapCat 是独立程序，server 永不 spawn 它
  * （连接器进程生命周期 = 部署脚本层职责——开发环境 dev.js 做，生产环境守护进程做）。
  * dev.js 负责：启动时自动拉起（幂等）+ .napcat-request 请求文件轮询（start/stop）。
+ * 启动命令两种形态：①NAPCAT_LAUNCH_CMD 完整命令行；②含 {NAPCAT_PATH} 占位符的模板
+ * ——启动时用 .napcat-config.json（配置页面「NapCat 启动路径」保存）替换占位符，换机器/
+ * 换安装位置只改页面不碰 .env。
  *
  * 用法: node scripts/dev.js  或  pnpm dev
  */
@@ -304,7 +307,37 @@ loadDevEnv()
 // .napcat-pid 记录的实例（dev.js 自己拉起的），手动起的 NapCat 不受影响。
 const NAPCAT_PID_FILE = path.join(ROOT, '.napcat-pid')
 const NAPCAT_REQUEST_FILE = path.join(ROOT, '.napcat-request')
+const NAPCAT_CONFIG_FILE = path.join(ROOT, '.napcat-config.json')
+const NAPCAT_PATH_PLACEHOLDER = '{NAPCAT_PATH}'
 const NAPCAT_PROBE_TIMEOUT_MS = 2000
+
+/**
+ * 读 .napcat-config.json（页面「NapCat 启动路径」保存的配置）。容错：无文件/坏
+ * JSON/字段缺失 → { napcatPath: '' }——配置缺失降级为「未就绪」，绝不抛错
+ * （配置是辅助数据，读失败不能拖垮 dev.js 启动）。
+ */
+function loadNapcatConfig() {
+  try {
+    if (!existsSync(NAPCAT_CONFIG_FILE)) return { napcatPath: '' }
+    const parsed = JSON.parse(fs.readFileSync(NAPCAT_CONFIG_FILE, 'utf-8'))
+    return { napcatPath: typeof parsed.napcatPath === 'string' ? parsed.napcatPath : '' }
+  } catch {
+    return { napcatPath: '' }
+  }
+}
+
+/**
+ * 解析 NAPCAT_LAUNCH_CMD：含 {NAPCAT_PATH} 占位符 → 用配置路径纯字符串替换（不含
+ * 引号——含空格路径由 Node spawn 数组参数组装自动加引号，cmd /S 去引号执行，机制
+ * 自洽；loadDevEnv 会剥离 .env 里的首尾引号，模板写引号必坏）；路径未配置 → null
+ * （未就绪）。无占位符 → 原样返回（f184c71 完整命令行语义，向后兼容）。
+ */
+function resolveNapcatCmd(cmd, napcatPath) {
+  if (!cmd.includes(NAPCAT_PATH_PLACEHOLDER)) return cmd
+  const p = (napcatPath || '').trim()
+  if (!p) return null
+  return cmd.replaceAll(NAPCAT_PATH_PLACEHOLDER, p)
+}
 
 /** 解析 ONEBOT_API_BASE 为 host/port（容错：非法 URL 回退默认 127.0.0.1:3000） */
 function parseNapcatApiBase() {
@@ -334,19 +367,28 @@ function isPortOpen(host, port, timeoutMs = NAPCAT_PROBE_TIMEOUT_MS) {
 
 /**
  * 确保 NapCat 在运行（幂等）。入口：启动流程 + .napcat-request start 请求。
- * 判定链：ENABLED != true → 零动作；LAUNCH_CMD 空 → 仅提示不拉起；端口已监听 → 跳过。
+ * 判定链：ENABLED != true → 零动作；LAUNCH_CMD 空 → 仅提示不拉起；
+ * 模板含 {NAPCAT_PATH} 但路径未配置 → 提示「请到配置页面填写」不拉起；端口已监听 → 跳过。
  * 拉起：Windows 用 cmd /c 包装完整命令行（detached 防 dev.js 强杀时陪葬），写
  * .napcat-pid 记录所有权（stop 只杀该实例）。
  */
 async function ensureNapcat() {
   if (process.env.ONEBOT_ENABLED !== 'true') return
-  const cmd = process.env.NAPCAT_LAUNCH_CMD
+  let cmd = process.env.NAPCAT_LAUNCH_CMD
   if (!cmd) {
     console.log(
       '[dev] ONEBOT_ENABLED=true 但 NAPCAT_LAUNCH_CMD 未配置——跳过自动拉起（请在 .env 配置启动命令）'
     )
     return
   }
+  const resolved = resolveNapcatCmd(cmd, loadNapcatConfig().napcatPath)
+  if (resolved === null) {
+    console.log(
+      `[dev] NAPCAT_LAUNCH_CMD 含 ${NAPCAT_PATH_PLACEHOLDER} 但未配置路径——跳过拉起（请在配置页面「NapCat 启动路径」填写本机路径）`
+    )
+    return
+  }
+  cmd = resolved
   const { host, port } = parseNapcatApiBase()
   if (await isPortOpen(host, port)) {
     console.log(`[dev] NapCat 已在运行（${host}:${port} 已监听），跳过拉起`)

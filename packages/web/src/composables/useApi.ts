@@ -56,8 +56,17 @@ export interface OneBotStatus {
   apiBase: string
   running: boolean
   launchCmdConfigured: boolean
+  /** 启动命令就绪：模板非空且（无 {NAPCAT_PATH} 占位符 || 页面路径已配置）——start 按钮以此为准 */
+  launchReady: boolean
   tokenConfigured: boolean
   tokenMasked: string
+}
+
+/** NapCat 启动路径配置（.napcat-config.json）——pathExists 在路径未配置时为 null */
+export interface NapcatConfig {
+  ok: boolean
+  napcatPath: string
+  pathExists: boolean | null
 }
 
 export const api = {
@@ -157,5 +166,14 @@ export const api = {
     request<{ ok: boolean }>('/connectors/napcat/control', {
       method: 'POST',
       body: JSON.stringify({ action }),
+    }),
+
+  // NapCat 启动路径配置（.napcat-config.json——页面保存路径，dev.js 拉起时读）
+  getNapcatConfig: () => request<NapcatConfig>('/connectors/napcat/config'),
+
+  saveNapcatConfig: (data: { napcatPath: string }) =>
+    request<{ ok: boolean; napcatPath: string }>('/connectors/napcat/config', {
+      method: 'POST',
+      body: JSON.stringify(data),
     }),
 }

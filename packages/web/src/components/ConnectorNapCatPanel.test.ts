@@ -11,8 +11,8 @@ import source from './ConnectorNapCatPanel.vue?raw'
  */
 
 describe('ConnectorNapCatPanel 状态渲染', () => {
-  it('进入面板 → onMounted 拉取 GET status 渲染状态卡片', () => {
-    expect(source).toContain('onMounted(refresh)')
+  it('进入面板 → onMounted 拉取 GET status + GET config 渲染', () => {
+    expect(source).toContain('onMounted(() => {')
     expect(source).toContain('api.getOneBotStatus()')
     expect(source).toContain('运行中')
     expect(source).toContain('已停止')
@@ -33,11 +33,11 @@ describe('ConnectorNapCatPanel 状态渲染', () => {
     expect(source).toContain(`status?.tokenConfigured ? status?.tokenMasked : '未配置'`)
   })
 
-  it('未配置启动命令 → 引导文案 + start 按钮禁用', () => {
+  it('未配置启动命令 → 引导文案；start 按钮禁用条件含 launchReady', () => {
     expect(source).toContain('launchCmdConfigured')
     expect(source).toContain('NAPCAT_LAUNCH_CMD')
     expect(source).toContain('未配置启动命令')
-    expect(source).toContain('!status?.launchCmdConfigured')
+    expect(source).toContain('!status?.launchReady') // 按钮禁用以「命令就绪」为准（含占位符未配路径也禁用）
   })
 
   it('组件卸载后停止轮询（disposed 标志防写已卸载组件的 ref）', () => {
@@ -45,5 +45,35 @@ describe('ConnectorNapCatPanel 状态渲染', () => {
     expect(source).toContain('onUnmounted')
     expect(source).toContain('if (disposed) return false')
     expect(source).toContain('if (!disposed) acting.value = false')
+  })
+})
+
+describe('ConnectorNapCatPanel 启动路径配置', () => {
+  it('进入面板 → GET config 回填路径输入框', () => {
+    expect(source).toContain('api.getNapcatConfig()')
+    expect(source).toContain('napcatPath.value = cfg.napcatPath')
+    expect(source).toContain('loadConfig()')
+  })
+
+  it('保存按钮 → POST config；成功提示立即生效 + 刷新状态', () => {
+    expect(source).toContain('api.saveNapcatConfig')
+    expect(source).toContain('已保存，点「启动 NapCat」立即生效')
+    expect(source).toContain('await refresh()')
+  })
+
+  it('保存失败（400 路径不存在）→ 错误显示', () => {
+    expect(source).toContain('pathError')
+    expect(source).toContain("err.message || '保存失败'")
+  })
+
+  it('手动填写说明——浏览器无法选择本地文件路径（安全沙箱）', () => {
+    expect(source).toContain('浏览器无法直接选择本地文件路径')
+    expect(source).toContain('.exe / .bat')
+  })
+
+  it('占位符未配路径 → 引导「请在下方填写路径」', () => {
+    expect(source).toContain('{NAPCAT_PATH}')
+    expect(source).toContain('请在下方')
+    expect(source).toContain('!status.launchReady')
   })
 })

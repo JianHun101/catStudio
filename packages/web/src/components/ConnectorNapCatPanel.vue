@@ -17,6 +17,41 @@ const actionError = ref('')
 /** 组件卸载（弹窗关闭）后停止轮询——防写已卸载组件的 ref */
 let disposed = false
 
+// ─── 启动路径配置（.napcat-config.json）─────────────────
+// 浏览器 file input 拿不到本地绝对路径（安全沙箱，只能拿 C:\fakepath\…），故页面是
+// 路径输入框 + server stat 存在性校验，不是文件选择器。保存后 dev.js 拉起时动态读，
+// 无需重启任何进程即生效。
+const napcatPath = ref('')
+const saving = ref(false)
+const pathError = ref('')
+const pathSaved = ref('')
+
+async function loadConfig(): Promise<void> {
+  try {
+    const cfg = await api.getNapcatConfig()
+    if (disposed) return
+    napcatPath.value = cfg.napcatPath || ''
+  } catch {
+    // 配置读取失败不阻塞面板主体渲染（状态卡/启停照常）——输入框留空即可
+  }
+}
+
+async function savePath(): Promise<void> {
+  pathError.value = ''
+  pathSaved.value = ''
+  saving.value = true
+  try {
+    const res = await api.saveNapcatConfig({ napcatPath: napcatPath.value })
+    napcatPath.value = res.napcatPath
+    pathSaved.value = '已保存，点「启动 NapCat」立即生效'
+    await refresh() // 路径就绪可能翻转 launchReady → 刷新启停按钮态
+  } catch (err: any) {
+    pathError.value = err.message || '保存失败'
+  } finally {
+    if (!disposed) saving.value = false
+  }
+}
+
 async function refresh(): Promise<void> {
   try {
     status.value = await api.getOneBotStatus()
@@ -64,7 +99,10 @@ async function handleAction(action: 'start' | 'stop'): Promise<void> {
   }
 }
 
-onMounted(refresh)
+onMounted(() => {
+  refresh()
+  loadConfig()
+})
 onUnmounted(() => {
   disposed = true
 })
@@ -103,13 +141,44 @@ onUnmounted(() => {
 
     <div v-else-if="status && !status.launchCmdConfigured" class="launch-hint">
       未配置启动命令——请在 <code>.env</code> 中设置
-      <code>NAPCAT_LAUNCH_CMD</code>（完整启动命令行）并重启 dev 服务，才能通过此面板启动 NapCat
+      <code>NAPCAT_LAUNCH_CMD</code>（完整启动命令行，或含
+      <code>{NAPCAT_PATH}</code> 占位符的模板）并重启 dev 服务，才能通过此面板启动 NapCat
+    </div>
+
+    <div
+      v-else-if="status && status.launchCmdConfigured && !status.launchReady"
+      class="launch-hint"
+    >
+      启动命令使用 <code>{NAPCAT_PATH}</code> 占位符——请在下方「NapCat 启动路径」填写本机 NapCat
+      可执行文件完整路径并保存
+    </div>
+
+    <div class="path-card">
+      <div class="path-title">NapCat 启动路径</div>
+      <div class="path-row">
+        <input
+          v-model="napcatPath"
+          class="path-input mono"
+          placeholder="C:\NapCat\napcat.exe"
+          :disabled="saving"
+          spellcheck="false"
+        />
+        <button class="btn-save" :disabled="saving" @click="savePath">
+          {{ saving ? '保存中…' : '保存' }}
+        </button>
+      </div>
+      <div class="path-hint">
+        浏览器无法直接选择本地文件路径，请手动填写完整路径（.exe / .bat）；保存后点「启动
+        NapCat」立即生效，无需重启
+      </div>
+      <div v-if="pathError" class="error-msg">{{ pathError }}</div>
+      <div v-if="pathSaved" class="ok-msg">{{ pathSaved }}</div>
     </div>
 
     <div class="actions">
       <button
         class="btn btn-start"
-        :disabled="acting || !status?.launchCmdConfigured || status?.running"
+        :disabled="acting || !status?.launchReady || status?.running"
         @click="handleAction('start')"
       >
         {{ acting ? '操作中…' : '启动 NapCat' }}
@@ -219,6 +288,88 @@ onUnmounted(() => {
 .mono {
   font-family: var(--font-mono);
   font-size: 11px;
+}
+
+/* ─── 启动路径配置卡 ────────────────────── */
+
+.path-card {
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.path-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.path-row {
+  display: flex;
+  gap: 8px;
+}
+
+.path-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+}
+
+.path-input:focus {
+  border-color: var(--accent);
+}
+
+.path-input:disabled {
+  opacity: 0.6;
+}
+
+.btn-save {
+  padding: 8px 18px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--ease-out);
+  flex-shrink: 0;
+}
+
+.btn-save:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.btn-save:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.path-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.ok-msg {
+  background: rgba(62, 207, 142, 0.08);
+  color: #3ecf8e;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  border: 1px solid rgba(62, 207, 142, 0.25);
 }
 
 /* ─── Hints & actions ──────────────────── */

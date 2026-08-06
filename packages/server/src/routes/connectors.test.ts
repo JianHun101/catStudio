@@ -7,7 +7,7 @@
  */
 import { createHmac } from 'node:crypto'
 import { createServer, type AddressInfo } from 'node:net'
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
@@ -722,6 +722,107 @@ describe('Connector Routes', () => {
         payload: { action: 'restart' },
       })
       expect(bad.statusCode).toBe(400)
+    })
+  })
+
+  describe('NapCat 启动路径配置（.napcat-config.json 读写 + 存在性校验）', () => {
+    // 独立隔离目录（与 control 的 restart-test-napcat 分开——两 describe 并行用例交错
+    // 会互删对方文件；路径配置读的是 .napcat-config.json，control 读写 .napcat-request）
+    const cfgTmpDir = 'node_modules/.cache/restart-test-napcat-config'
+    const cfgTmpFile = path.join(cfgTmpDir, '.napcat-config.json')
+    /** 真实存在的文件——「路径存在」断言用（stat 走真 fs，非 mock） */
+    const realExe = path.join(cfgTmpDir, 'NapCat Studio.exe') // 含空格名，顺带验证路径存储不做引号处理
+
+    afterEach(() => {
+      rmSync(cfgTmpDir, { recursive: true, force: true })
+    })
+
+    it('GET config: 未保存 → napcatPath 空串 + pathExists null', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      const res = await app.inject({ method: 'GET', url: '/api/connectors/napcat/config' })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.napcatPath).toBe('')
+      expect(body.pathExists).toBeNull()
+    })
+
+    it('POST config: 存在的路径（含空格）→ 200 落盘原样存储；GET 回读一致 + pathExists true', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      mkdirSync(cfgTmpDir, { recursive: true })
+      writeFileSync(realExe, '') // 真实存在的文件
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { napcatPath: realExe },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body).napcatPath).toBe(realExe)
+      // 落盘内容原样（含空格无引号——dev.js 侧由 Node 数组参数组装加引号）
+      expect(JSON.parse(readFileSync(cfgTmpFile, 'utf-8')).napcatPath).toBe(realExe)
+
+      const get = await app.inject({ method: 'GET', url: '/api/connectors/napcat/config' })
+      const body = JSON.parse(get.body)
+      expect(body.napcatPath).toBe(realExe)
+      expect(body.pathExists).toBe(true)
+    })
+
+    it('POST config: 不存在路径 → 400「路径不存在」且不落盘', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { napcatPath: path.join(cfgTmpDir, 'no-such.exe') },
+      })
+      expect(res.statusCode).toBe(400)
+      expect(JSON.parse(res.body).error).toBe('路径不存在')
+      expect(existsSync(cfgTmpFile)).toBe(false)
+    })
+
+    it('POST config: 空值 / 缺失字段 / 非字符串 → 400', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      const blank = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { napcatPath: '   ' },
+      })
+      expect(blank.statusCode).toBe(400)
+      const missing = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { other: 1 },
+      })
+      expect(missing.statusCode).toBe(400)
+      const noBody = await app.inject({ method: 'POST', url: '/api/connectors/napcat/config' })
+      expect(noBody.statusCode).toBe(400)
+    })
+
+    it('GET status: launchReady 随模板形态与路径配置（占位符未配 → false；配了 → true）', async () => {
+      vi.stubEnv('NAPCAT_LAUNCH_CMD', 'napcat --path {NAPCAT_PATH}')
+      // 含占位符且未配路径 → launchReady false（launchCmdConfigured 仍 true——模板非空）
+      let res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      let body = JSON.parse(res.body)
+      expect(body.launchCmdConfigured).toBe(true)
+      expect(body.launchReady).toBe(false)
+
+      // 配置存在路径 → launchReady true
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      mkdirSync(cfgTmpDir, { recursive: true })
+      writeFileSync(realExe, '')
+      await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { napcatPath: realExe },
+      })
+      res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      body = JSON.parse(res.body)
+      expect(body.launchReady).toBe(true)
+
+      // 无占位符的完整命令行 → 不依赖路径配置，直接就绪（f184c71 语义向后兼容）。
+      // 此处 config 目录里已有保存的路径——若实现错误地等路径就绪必红
+      vi.stubEnv('NAPCAT_LAUNCH_CMD', 'napcat.exe --config x')
+      res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      expect(JSON.parse(res.body).launchReady).toBe(true)
     })
   })
 })

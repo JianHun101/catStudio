@@ -7,7 +7,7 @@
  */
 import { createHmac } from 'node:crypto'
 import { connect } from 'node:net'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import {
@@ -115,6 +115,27 @@ function napcatRequestFile(): string {
   return resolve(process.env.RESTART_FILES_DIR ?? process.cwd(), '.napcat-request')
 }
 
+/** .napcat-config.json 定位——与 napcatRequestFile 同款 RESTART_FILES_DIR ?? cwd（测试隔离现成） */
+function napcatConfigFile(): string {
+  return resolve(process.env.RESTART_FILES_DIR ?? process.cwd(), '.napcat-config.json')
+}
+
+/**
+ * 读 .napcat-config.json（页面「NapCat 启动路径」保存的配置，dev.js loadNapcatConfig 同契约）。
+ * 容错：无文件/坏 JSON/字段缺失 → { napcatPath: '' }——配置缺失不是错误态，launchReady
+ * 判定与 GET config 都依赖「读失败 = 未配置」的降级语义。
+ */
+function readNapcatConfig(): { napcatPath: string } {
+  try {
+    const file = napcatConfigFile()
+    if (!existsSync(file)) return { napcatPath: '' }
+    const parsed = JSON.parse(readFileSync(file, 'utf-8'))
+    return { napcatPath: typeof parsed.napcatPath === 'string' ? parsed.napcatPath : '' }
+  } catch {
+    return { napcatPath: '' }
+  }
+}
+
 /** TCP 端口探测（status 的 running 字段）——短超时，适配前端 3s 轮询节奏 */
 function probePort(
   host: string,
@@ -217,13 +238,21 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
       port = parseInt(u.port, 10) || 80
     } catch {}
     const token = process.env.ONEBOT_TOKEN || ''
+    const launchCmd = (process.env.NAPCAT_LAUNCH_CMD || '').trim()
+    // launchReady = 启动命令就绪：模板非空且（无 {NAPCAT_PATH} 占位符 → 完整命令行直接
+    // 就绪；含占位符 → 页面保存的路径已配置）。前端 start 按钮禁用态与引导文案以此为准。
+    let launchReady = false
+    if (launchCmd) {
+      launchReady = !launchCmd.includes('{NAPCAT_PATH}') || !!readNapcatConfig().napcatPath.trim()
+    }
     const running = await probePort(host, port)
     return reply.send({
       ok: true,
       enabled: onebotEnabled(),
       apiBase,
       running,
-      launchCmdConfigured: !!(process.env.NAPCAT_LAUNCH_CMD || '').trim(),
+      launchCmdConfigured: !!launchCmd,
+      launchReady,
       tokenConfigured: !!token,
       tokenMasked: token ? `${token.slice(0, 4)}****` : '',
     })
@@ -244,6 +273,48 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
       JSON.stringify({ action: body.action, createdAt: new Date().toISOString() }, null, 2)
     )
     return reply.status(202).send({ ok: true })
+  })
+
+  // ─── NapCat 启动路径配置（.napcat-config.json，dev.js 启动时读） ────────
+  // 路径存配置文件而非 .env：.env 启动时读取、改需重启；配置文件每次拉起时动态读，
+  // 页面保存后点「启动」立即生效。浏览器 file input 拿不到本地绝对路径（安全沙箱），
+  // 故页面是路径输入框 + server stat 存在性校验，不是文件选择器。server 只读写 JSON
+  // 零 spawn（与写 .napcat-request 同族）。
+
+  app.get('/api/connectors/napcat/config', async (req, reply) => {
+    const { napcatPath } = readNapcatConfig()
+    let pathExists: boolean | null = null
+    if (napcatPath.trim()) {
+      try {
+        pathExists = statSync(napcatPath.trim()).isFile()
+      } catch {
+        pathExists = false // stat 失败 = 路径不存在（文件被删/盘未挂载）
+      }
+    }
+    return reply.send({ ok: true, napcatPath, pathExists })
+  })
+
+  app.post('/api/connectors/napcat/config', async (req, reply) => {
+    const body = req.body as any
+    if (!body || typeof body !== 'object' || typeof body.napcatPath !== 'string') {
+      return reply.status(400).send({ error: 'napcatPath is required (string)' })
+    }
+    const napcatPath = body.napcatPath.trim()
+    if (!napcatPath) {
+      return reply.status(400).send({ error: 'napcatPath is required' })
+    }
+    try {
+      statSync(napcatPath) // 存在性校验（stat 抛错 = 不存在）——不校验可执行性，那属启动时
+    } catch {
+      return reply.status(400).send({ error: '路径不存在' })
+    }
+    const file = napcatConfigFile()
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(
+      file,
+      JSON.stringify({ napcatPath, updatedAt: new Date().toISOString() }, null, 2)
+    )
+    return reply.send({ ok: true, napcatPath })
   })
 
   // ─── OneBot v11 webhook ────────────────────────
