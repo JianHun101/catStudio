@@ -108,7 +108,7 @@ catStudy/
 │   │       │   ├── agents.ts   # Agent CRUD REST API
 │   │       │   └── sessions.ts # Session CRUD + 广播切换 + 消息清空
 │   │       ├── seed.ts         # 种子数据（upsert 模式，幂等运行）
-│   │       └── logger.ts       # 结构化 JSON 日志
+│   │       └── logger.ts       # 双格式日志：stdout 彩色人读 / 文件 JSON Lines
 │   └── web/             # 前端 (Vue 3 + Pinia + Socket.IO Client)
 │       └── src/
 │           ├── App.vue         # 三面板网格布局

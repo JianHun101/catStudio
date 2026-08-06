@@ -1,8 +1,9 @@
 /**
  * 结构化日志工具。
  *
- * - JSON Lines 格式，每行一条日志
- * - 同时输出到 stdout 和文件（packages/server/data/cat-study.log）
+ * - 双格式输出：stdout 人读格式（`LEVEL ts module msg {meta}`，TTY 下 ANSI 彩色；
+ *   管道/重定向/测试捕获为同式样无色纯文本，零转义码）+
+ *   文件 JSON Lines（packages/server/data/cat-study.log，机器/检索用，逐字节兼容）
  * - 文件超过 10MB 自动轮转（保留 1 个旧文件）
  * - 支持 traceId 请求追踪
  *
@@ -85,6 +86,65 @@ function toLocalIso(date: Date): string {
   )
 }
 
+// ─── stdout 人读格式（彩色） ──────────────────────
+
+const ANSI = {
+  reset: '\x1b[0m',
+  dim: '\x1b[2m',
+  cyan: '\x1b[36m',
+  yellow: '\x1b[33m',
+  red: '\x1b[31m',
+} as const
+
+/** 级别 → 四字母标签 + 着色码（INFO 默认白，无码） */
+const LEVEL_STYLE: Record<LogLevel, { label: string; code: string }> = {
+  debug: { label: 'DEBUG', code: ANSI.dim },
+  info: { label: 'INFO', code: '' },
+  warn: { label: 'WARN', code: ANSI.yellow },
+  error: { label: 'ERROR', code: ANSI.red },
+}
+
+/** stdout 是否启用 ANSI 颜色：仅 TTY 且未设 NO_COLOR 时着色；
+ *  管道/重定向/vitest 捕获走无色纯文本，零转义码（契约） */
+function useColor(): boolean {
+  return !!(process.stdout.isTTY && !process.env.NO_COLOR)
+}
+
+/** 过滤 undefined/null 字段——stdout 与文件两格式共用同一过滤语义 */
+function sanitizeMeta(meta: LogMeta): Record<string, unknown> {
+  const entry: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(meta)) {
+    if (v !== undefined && v !== null) {
+      entry[k] = v
+    }
+  }
+  return entry
+}
+
+function formatStdout(level: LogLevel, module: string, msg: string, meta?: LogMeta): string {
+  const style = LEVEL_STYLE[level]
+  const ts = toLocalIso(new Date())
+  const sanitized = meta ? sanitizeMeta(meta) : undefined
+  const metaJson = sanitized && Object.keys(sanitized).length > 0 ? JSON.stringify(sanitized) : ''
+
+  if (!useColor()) {
+    // 无色路径：与彩色路径同式样纯文本（ts 与文件同格式可对齐 grep）
+    return [style.label, ts, module, msg, metaJson].filter(Boolean).join(' ')
+  }
+
+  // 彩色路径：LEVEL 标签与 msg 按级别着色，ts dim、module 青、meta 默认色
+  const paint = (s: string, code: string): string => (code ? `${code}${s}${ANSI.reset}` : s)
+  return [
+    paint(style.label, style.code),
+    paint(ts, ANSI.dim),
+    paint(module, ANSI.cyan),
+    paint(msg, style.code),
+    metaJson,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
 function formatLine(level: LogLevel, module: string, msg: string, meta?: LogMeta): string {
   const entry: Record<string, unknown> = {
     ts: toLocalIso(new Date()),
@@ -93,24 +153,20 @@ function formatLine(level: LogLevel, module: string, msg: string, meta?: LogMeta
     msg,
   }
   if (meta) {
-    for (const [k, v] of Object.entries(meta)) {
-      if (v !== undefined && v !== null) {
-        entry[k] = v
-      }
-    }
+    Object.assign(entry, sanitizeMeta(meta))
   }
   return JSON.stringify(entry)
 }
 
-function writeLine(line: string): void {
-  // stdout
-  process.stdout.write(line + '\n')
+function writeLine(level: LogLevel, module: string, msg: string, meta?: LogMeta): void {
+  // stdout：人读格式（TTY 彩色 / 管道无色）
+  process.stdout.write(formatStdout(level, module, msg, meta) + '\n')
 
-  // file (best-effort)
+  // file (best-effort)：JSON Lines 原格式（检索/排查用，逐字节兼容）
   try {
     ensureLogDir()
     rotateLog()
-    fs.appendFileSync(LOG_FILE, line + '\n')
+    fs.appendFileSync(LOG_FILE, formatLine(level, module, msg, meta) + '\n')
   } catch {
     // 写文件失败不阻塞
   }
@@ -118,8 +174,7 @@ function writeLine(line: string): void {
 
 function logLine(level: LogLevel, module: string, msg: string, meta?: LogMeta): void {
   if (LEVEL_ORDER[level] < LEVEL_ORDER[minLevel]) return
-  const line = formatLine(level, module, msg, meta)
-  writeLine(line)
+  writeLine(level, module, msg, meta)
 }
 
 // ─── Public API ─────────────────────────────────────
