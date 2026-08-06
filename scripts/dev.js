@@ -4,14 +4,15 @@
  * 直接启动 server + web 进程，不依赖 pnpm --parallel（避免 Windows shell 问题）。
  * 通过 node 直接执行 tsx / vite 的 JS 入口，无需 .cmd 文件。
  *
- * Server 使用 tsx 运行 + fs.watch 自定义文件监听，
- * 替代 tsx watch 以避免 Agent（Claude Code CLI）编辑 src/ 下的文件时
- * 触发立即重启 → 杀死正在执行的 Agent。
+ * Server 使用 tsx 运行，不监听文件变更自动重启——文件变更热重启已退役
+ * （Agent 编辑 src/ 下的文件触发立即重启 → 杀死正在执行的 Agent；
+ * 7f69535 的保护窗也只能推迟、不能阻止）。保存代码仅打提示日志，
+ * 重启全面收归用户确认制。
  *
- * 机制：
- *   fs.watch 检测到 .ts 文件变更 → 检查 .agent-busy 锁文件
- *     → 锁存在 → 进入"推迟模式"，每秒轮询等待锁释放
- *     → 锁不存在 → 立即重启 server
+ * 机制（重启只发生在用户确认之后）：
+ *   店长发「【重启请求】原因：xxx」→ 用户点前端 [确认重启] → server 写
+ *   .restart-request（state=confirmed）→ dev.js 执行重启（Agent 执行中则
+ *   等待执行结束，保护窗）→ 写 .restart-done 供新 server 广播「重启完成」。
  *
  * 用法: node scripts/dev.js  或  pnpm dev
  */
@@ -89,8 +90,6 @@ function killAll() {
 // ─── Server 进程管理 ─────────────────────────
 
 let serverChild = null
-/** 推迟重启标志：有文件变更但锁文件存在时为 true */
-let pendingRestart = false
 
 /** 检查 server 进程是否还活着。
  *  先用 spawn 引用判断，再读锁文件里的 PID 做兜底。 */
@@ -115,12 +114,14 @@ function isServerAlive() {
 }
 
 // ─── 执行保护窗：.agent-busy 锁 或 execution_logs 有 running 执行 ─────────
-// 事故背景：店长执行被 server 文件变更热重启连掐 5 次、flash猫 2 次——锁文件
-// 只覆盖 Claude agent（needsLock），且存在「锁释放→重启」收尾窗口；被打断的
-// 执行在 execution_logs 里仍为 running。判据扩展：锁在 或 running>0 → 推迟。
-// 用 node:sqlite（Node v24 内置 DatabaseSync，零依赖）只读打开 server 的
-// SQLite（WAL 只读查询可行），覆盖所有 provider 所有执行（比锁更全），
-// finalizeExecutionLog 执行结束后立即更新 → 判据实时。
+// 只服务用户确认重启（文件变更热重启已退役，见「文件监听」区块）：用户点
+// 「确认重启」的瞬间若有 agent 在执行，等它跑完才动手。判据：锁文件 或
+// execution_logs 有 running 执行 → 推迟。锁文件只覆盖 Claude agent
+// （needsLock），且存在「锁释放→重启」收尾窗口；被打断的执行在
+// execution_logs 里仍为 running——故用 node:sqlite（Node v24 内置
+// DatabaseSync，零依赖）只读打开 server 的 SQLite（WAL 只读查询可行），
+// 覆盖所有 provider 所有执行（比锁更全），finalizeExecutionLog 执行结束后
+// 立即更新 → 判据实时。
 const DB_FILE = path.join(ROOT, 'packages', 'server', 'data', 'cat-study.db')
 let runningDb = null
 let runningDbFailed = false
@@ -221,8 +222,6 @@ function startServer() {
 
   serverChild.on('exit', (code) => {
     children.delete(serverChild)
-    // 推迟重启期间 server 退出是预期的（我们在主动杀进程），不退出 dev
-    if (pendingRestart) return
     if (children.size === 0) {
       console.log(`[dev] 全部退出 (code=${code ?? '?'})`)
       killAll()
@@ -287,95 +286,27 @@ webChild.on('exit', (code) => {
 
 children.add(webChild)
 
-// ─── 文件监听 + 推迟重启 ─────────────────────
-
-let restartTimer = null
-
-/**
- * 递归扫描 src 目录，返回最新 .ts 文件的 mtime（毫秒）。
- * 用于区分 fs.watch 真实变更与 Windows 误报事件。
- */
-function scanSrcMaxMtime(dir) {
-  let max = 0
-  let entries
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return max
-  }
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name)
-    if (entry.isDirectory()) {
-      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
-      max = Math.max(max, scanSrcMaxMtime(full))
-    } else if (entry.name.endsWith('.ts')) {
-      try {
-        const st = fs.statSync(full)
-        if (st.mtimeMs > max) max = st.mtimeMs
-      } catch {
-        // 文件可能在 stat 瞬间被删除，忽略
-      }
-    }
-  }
-  return max
-}
-
-// 监听 packages/server/src 下的 .ts 文件变更
-// fs.watch 在 Windows 上 recursive: true 是原生支持的（ReadDirectoryChangesW），
-// 但极少数情况下可能丢事件或 filename 为 null——
-// 此场景下只需要"有变更"信号即可，不要求精确文件名。
-// 如果 Windows 上丢事件严重，可换 chokidar：npm install chokidar
+// ─── 文件监听（仅提示，不重启） ─────────────────
+// 2026-08 架构决策：文件变更热重启退役——Agent 编辑 src/ 下的文件触发立即
+// 重启会杀死正在执行的 Agent（店长 5 次、flash猫 2 次事故），保护窗也只能
+// 推迟、不能阻止。现在保存代码仅打提示日志（「变更未生效」可见性，不重启、
+// 不打断），重启只发生在用户确认之后（下方「重启确认机制」区块）。
+// fs.watch 的 Windows 误报（null 文件名事件，典型：git add -A 全树 stat）
+// 最多多打一条提示，不产生任何重启动作——无 a9a9cba 类事故面。
 const srcDir = path.join(ROOT, 'packages', 'server', 'src')
+let changeNotifyTimer = null
 const watcher = watch(srcDir, { recursive: true }, (_event, filename) => {
   // 只关注 .ts 文件变更
   if (filename && !filename.endsWith('.ts')) return
 
-  // 防抖：500ms 内的多次变更合并为一次重启
-  clearTimeout(restartTimer)
-
-  const eventAt = Date.now()
-  restartTimer = setTimeout(async () => {
-    // 误报过滤：Windows 的 ReadDirectoryChangesW 会产出 null 文件名事件
-    // （典型场景：git add -A 全树 stat / pre-commit 重 I/O 期间），且 dev.js
-    // 把 null 文件名一律当 .ts 变更。若防抖窗口内 src/ 无真实 .ts 写入
-    // （mtime 早于事件前 1s），则忽略该事件——否则无变更也挂起重启，
-    // 会撞上 post-commit 的 handoff 投递窗口（a9a9cba 事故根因之一）。
-    const latestMtime = scanSrcMaxMtime(srcDir)
-    if (latestMtime < eventAt - 1000) {
-      console.log('[dev] 忽略可疑 fs.watch 事件（src/ 无真实 .ts 变更）')
-      return
-    }
-
-    // 执行保护窗：锁文件 或 execution_logs 有 running 执行 → 推迟重启
-    //（server 已死不挡：孤儿路径强制重启，不被保护窗拦住）
-    if (existsSync(LOCK_FILE) || hasRunningExecutions()) {
-      if (!isServerAlive()) {
-        // 锁/执行日志还在但进程已死 → 孤儿，强制重启
-        await restartWithRetry('孤儿锁检测到，强制重启 server...')
-      } else {
-        if (!pendingRestart) {
-          console.log('[dev] Agent 执行中，推迟重启...')
-          pendingRestart = true
-        }
-      }
-    } else {
-      await restartWithRetry('文件变更，重启 server...')
-    }
+  // 防抖：500ms 内的多次变更合并为一次提示
+  clearTimeout(changeNotifyTimer)
+  changeNotifyTimer = setTimeout(() => {
+    console.log(
+      '[dev] 检测到 server 代码变更——未生效，需重启才能生效（重启走「重启请求」确认制，不会自动重启）'
+    )
   }, 500)
 })
-
-// 推迟模式下的轮询：每秒检查锁文件与 running 执行是否已释放
-setInterval(async () => {
-  if (pendingRestart && ((!existsSync(LOCK_FILE) && !hasRunningExecutions()) || !isServerAlive())) {
-    pendingRestart = false
-    // 锁释放后延迟 2s 再重启：给 post-commit 的 handoff 投递（反查 + POST）
-    // 让出窗口——实测 dev.js 停机 ~1.4s，2s 延迟让投递先完成，避免
-    // a9a9cba 事故复现（投递撞上重启窗口 → 连接拒绝 → 草稿滞留）。
-    console.log('[dev] Agent 完成，2s 后执行延迟重启（给 handoff 投递让出窗口）...')
-    await new Promise((r) => setTimeout(r, 2000))
-    await restartWithRetry('Agent 完成，执行延迟重启')
-  }
-}, 1000)
 
 // ─── 重启确认机制（fs.watch 事件 + 5s 兜底轮询双路径） ──────────────────
 // 店长发「【重启请求】原因：xxx」消息 → 用户点前端 [确认重启] → server 写
@@ -385,6 +316,8 @@ setInterval(async () => {
 // 锁释放 → 既有 restartWithRetry 重启 → 写 .restart-done（新 server 启动时广播
 // 「重启完成」）→ 删请求文件。过期请求忽略并清理；pending 忽略。
 let restartInProgress = false
+/** 等待提示已打标志：Agent 执行中等待释放时只提示一次（防 5s 轮询刷屏） */
+let restartWaitNotified = false
 
 async function pollRestart() {
   if (restartInProgress) return
@@ -408,9 +341,12 @@ async function pollRestart() {
   if (action !== 'restart') return // pending 或内容无效 → 忽略
 
   // Agent 执行中（.agent-busy 锁存在或 execution_logs 有 running）→ 等待释放
-  //（与文件变更推迟重启同款保护窗语义，不抢占 Agent）
+  //（保护窗语义：不抢占 Agent）
   if ((existsSync(LOCK_FILE) || hasRunningExecutions()) && isServerAlive()) {
-    if (!pendingRestart) console.log('[dev] Agent 执行中，等待执行结束后执行用户确认的重启...')
+    if (!restartWaitNotified) {
+      console.log('[dev] Agent 执行中，等待执行结束后执行用户确认的重启...')
+      restartWaitNotified = true
+    }
     return
   }
 
@@ -422,7 +358,7 @@ async function pollRestart() {
     } catch {}
     const reason = (req && req.reason) || '用户请求'
     const sessionId = (req && req.sessionId) || ''
-    pendingRestart = false // 与文件变更推迟重启互斥：本次是权威动作
+    restartWaitNotified = false // 下个等待周期重新提示
 
     console.log(`[dev] 收到用户确认的重启请求（原因：${reason}）`)
     await restartWithRetry(`用户确认重启（原因：${reason}）`)
@@ -449,9 +385,9 @@ async function pollRestart() {
 // basename === '.restart-request'（大小写归一：Windows 事件文件名大小写可能与
 // 写入不一致）；writeFileSync → 'change'、unlinkSync → 'rename' 都处理；
 // filename 为 null → 保守重读（误触发无害：重读发现非 confirmed → 忽略）。
-// 不抄 src watcher 的 mtime 误报过滤（那正是丢真事件的代码级先例），不设防抖
-// 窗口（重启确认即时性就是收益，重复事件由 restartInProgress + state 检查
-// 天然去重）。
+// 不做 mtime 误报过滤（历史教训：那正是丢真事件的代码级先例，src watcher
+// 曾因此误忽略真变更），不设防抖窗口（重启确认即时性就是收益，重复事件由
+// restartInProgress + state 检查天然去重）。
 const restartWatcher = watch(ROOT, (_event, filename) => {
   if (filename && path.basename(filename).toLowerCase() !== '.restart-request') return
   pollRestart()
