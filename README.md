@@ -164,31 +164,75 @@ pnpm lint             # 全项目 TypeScript 类型检查
 
 ## 环境变量
 
-| 变量                       | 默认值                     | 说明                                                               |
-| -------------------------- | -------------------------- | ------------------------------------------------------------------ |
-| `DS_KEY`                   | —                          | DeepSeek API Key（种子数据使用，3 只演示猫共用）                   |
-| `PORT`                     | `3200`                     | Server 监听端口                                                    |
-| `HOST`                     | `0.0.0.0`                  | Server 监听地址                                                    |
-| `REDIS_URL`                | `redis://localhost:6379`   | Redis 连接地址                                                     |
-| `HF_ENDPOINT`              | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`） |
-| `LOG_LEVEL`                | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                      |
-| `MEMORY_DEDUP_ENABLED`     | `1`                        | 是否启用记忆去重（`0` 关闭）                                       |
-| `MEMORY_DEDUP_THRESHOLD`   | `0.20`                     | 记忆去重余弦距离阈值（越小越严格）                                 |
-| `MEMORY_TOP_K`             | `3`                        | 检索时返回的相关记忆条数                                           |
-| `MEMORY_ENABLED`           | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                 |
-| `MEMORY_EMBEDDING_MODEL`   | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                   |
-| `SUMMARY_ENABLED`          | `true`                     | 是否启用增量摘要                                                   |
-| `SUMMARY_MODEL`            | `deepseek-chat`            | 摘要使用的模型                                                     |
-| `SUMMARY_API_KEY`          | 同 `DS_KEY`                | 摘要模型的 API Key                                                 |
-| `SUMMARY_BASE_URL`         | `https://api.deepseek.com` | 摘要 API 地址                                                      |
-| `SUMMARY_INTERVAL`         | `3`                        | 每 N 轮对话触发一次增量摘要                                        |
-| `HANDOFF_ENABLED`          | `true`                     | 是否启用 90% 阈值会话交接                                          |
-| `HANDOFF_THRESHOLD`        | `0.9`                      | 触交接的上下文 token 占比                                          |
-| `MAX_CONTEXT_TOKENS`       | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                               |
-| `TOKEN_COUNT_METHOD`       | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）    |
-| `CLI_IDLE_TIMEOUT_MS`      | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                |
-| `AGENT_HARD_TIMEOUT_MS`    | `1800000`                  | Agent 执行硬超时（毫秒，30 分钟）                                  |
-| `CLAUDE_CODE_EFFORT_LEVEL` | `high`                     | Claude Code CLI 推理深度：`low` / `medium` / `high` / `max`        |
+| 变量                       | 默认值                     | 说明                                                                                        |
+| -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------- |
+| `DS_KEY`                   | —                          | DeepSeek API Key（种子数据使用，3 只演示猫共用）                                            |
+| `PORT`                     | `3200`                     | Server 监听端口                                                                             |
+| `HOST`                     | `0.0.0.0`                  | Server 监听地址                                                                             |
+| `REDIS_URL`                | `redis://localhost:6379`   | Redis 连接地址                                                                              |
+| `HF_ENDPOINT`              | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`）                          |
+| `LOG_LEVEL`                | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                                               |
+| `MEMORY_DEDUP_ENABLED`     | `1`                        | 是否启用记忆去重（`0` 关闭）                                                                |
+| `MEMORY_DEDUP_THRESHOLD`   | `0.20`                     | 记忆去重余弦距离阈值（越小越严格）                                                          |
+| `MEMORY_TOP_K`             | `3`                        | 检索时返回的相关记忆条数                                                                    |
+| `MEMORY_ENABLED`           | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                                          |
+| `MEMORY_EMBEDDING_MODEL`   | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                                            |
+| `SUMMARY_ENABLED`          | `true`                     | 是否启用增量摘要                                                                            |
+| `SUMMARY_MODEL`            | `deepseek-chat`            | 摘要使用的模型                                                                              |
+| `SUMMARY_API_KEY`          | 同 `DS_KEY`                | 摘要模型的 API Key                                                                          |
+| `SUMMARY_BASE_URL`         | `https://api.deepseek.com` | 摘要 API 地址                                                                               |
+| `SUMMARY_INTERVAL`         | `3`                        | 每 N 轮对话触发一次增量摘要                                                                 |
+| `HANDOFF_ENABLED`          | `true`                     | 是否启用 90% 阈值会话交接                                                                   |
+| `HANDOFF_THRESHOLD`        | `0.9`                      | 触交接的上下文 token 占比                                                                   |
+| `MAX_CONTEXT_TOKENS`       | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                                                        |
+| `TOKEN_COUNT_METHOD`       | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）                             |
+| `CLI_IDLE_TIMEOUT_MS`      | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                                         |
+| `AGENT_HARD_TIMEOUT_MS`    | `1800000`                  | Agent 执行硬超时（毫秒，30 分钟）                                                           |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `high`                     | Claude Code CLI 推理深度：`low` / `medium` / `high` / `max`                                 |
+| `ONEBOT_ENABLED`           | `false`                    | 是否启用 OneBot webhook（默认 false，关闭时 webhook 返回 503）                              |
+| `ONEBOT_API_BASE`          | `http://127.0.0.1:3000`    | NapCat HTTP API 地址（出站回复用）                                                          |
+| `ONEBOT_TOKEN`             | —                          | webhook 鉴权 token（设置后上报须带 `Authorization: Bearer <token>`；留空不校验）            |
+| `NAPCAT_LAUNCH_CMD`        | —                          | dev.js 拉起 NapCat 的启动命令：完整命令行或 `{NAPCAT_PATH}` 模板（详见下文「QQ 接入」章节） |
+
+## QQ 接入（OneBot / NapCat）
+
+猫咖通过 OneBot v11 协议接入 QQ：NapCat 等实现通过 HTTP 上报消息，猫咖零新增依赖（webhook 入站 + fetch 出站）。环境变量见上表 `ONEBOT_*` 与 `NAPCAT_LAUNCH_CMD`。
+
+### 接入前提
+
+1. 安装 NapCat（如 `D:\Software\NapCat\shell\napcat.bat`）
+2. `.env` 设置 `ONEBOT_ENABLED=true`
+
+### 启动命令
+
+`NAPCAT_LAUNCH_CMD` 两种形态，任选其一：
+
+- **完整命令行**：直接写完整命令（如 napcat.exe 路径），含空格路径直接写不用引号——Node 自动组装加引号
+- **`{NAPCAT_PATH}` 纯占位符模板**：配合配置页面「NapCat 启动路径」——页面保存的路径在启动时替换进命令，换机器/换安装位置只改页面不碰 `.env`，保存后立即生效无需重启
+
+### 首次使用必须登录 QQ
+
+NapCat 核心进程起来 ≠ OneBot 可用：QQ 未登录时 HTTP（默认 3000）不监听、仅 WebUI（6099）在跑。
+
+1. 浏览器打开 `http://127.0.0.1:6099`
+2. token 在 NapCat 安装目录 `shell\napcat\config\webui.json` 的 `webuiToken`
+
+登录一次不用每次扫码：WebUI「快速登录QQ」成功后自动写 `autoLoginAccount` 到 webui.json，之后重启自动登录。
+
+### 凭证与数据目录
+
+登录态与消息数据在 `Tencent Files\<QQ号>\nt_qq\`（`nt_db` / `nt_data` / `nt_temp`），**不是** `NapCat\data`——该目录为空 ≠ 凭证缺失。
+
+### 排查「操作中」永等翻转
+
+点击启动后面板一直「操作中」时按序排查：
+
+1. 看 `ONEBOT_API_BASE` 端口是否监听——不监听先查 WebUI 登录态（见上）
+2. 再看 dev.js 启动日志警告（见下「已知边界」）
+
+### 已知边界
+
+`{NAPCAT_PATH}` 占位符外不能再带附加内容（如 `{NAPCAT_PATH} --flag`）——路径含空格时 cmd /c 下该组合不可解析，dev.js 启动会打警告。规避：改用无空格目录，或完整命令行形态（不含占位符）。
 
 ## 核心概念
 
