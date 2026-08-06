@@ -1295,30 +1295,38 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
     //（两个 Map 的 key 都可能是会话来源：纯跳过场景 recovered 为空）
     const interruptedSessions = new Set([...recoveredBySession.keys(), ...skippedBySession.keys()])
     for (const sessionId of interruptedSessions) {
-      const recovered = recoveredBySession.get(sessionId) ?? []
-      const skipped = skippedBySession.get(sessionId) ?? []
-      if (recovered.length === 0 && skipped.length === 0) continue
-      if (!sessionsRepo.getSessionById(sessionId)) continue // 会话已删 → 静默
-      const parts: string[] = []
-      if (recovered.length > 0) {
-        parts.push(`${recovered.join('、')} 的执行在 server 重启时被打断，已自动恢复重跑`)
+      // per-session 防御（照抄 broadcastRestartDone per-call try/catch，本函数 per-rec
+      // 模式同款）：单会话 insertMessage 抛错（如 getSessionById → insertMessage 的
+      // TOCTOU FK 违例）不 abort 其余会话告警——此前靠外层 catch 兜底，一红丢全部
+      try {
+        const recovered = recoveredBySession.get(sessionId) ?? []
+        const skipped = skippedBySession.get(sessionId) ?? []
+        if (recovered.length === 0 && skipped.length === 0) continue
+        if (!sessionsRepo.getSessionById(sessionId)) continue // 会话已删 → 静默
+        const parts: string[] = []
+        if (recovered.length > 0) {
+          parts.push(`${recovered.join('、')} 的执行在 server 重启时被打断，已自动恢复重跑`)
+        }
+        if (skipped.length > 0) {
+          parts.push(`${skipped.join('、')} 的执行被打断但回复已落库，未重复执行`)
+        }
+        const content = `⚠️ ${parts.join('；')}`
+        const msgId = uuid()
+        messagesRepo.insertMessage(msgId, sessionId, 'system', content, '[]', null, null)
+        io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
+          id: msgId,
+          sessionId,
+          agentId: null,
+          role: 'system',
+          content,
+          mentions: [],
+          createdAt: new Date().toISOString(),
+        })
+        log.warn('打断恢复广播', { sessionId, content })
+      } catch (err: any) {
+        // 单会话告警失败只留痕（外层 catch 仍兜底整体崩溃）
+        log.warn('打断恢复广播失败', { sessionId, error: err.message })
       }
-      if (skipped.length > 0) {
-        parts.push(`${skipped.join('、')} 的执行被打断但回复已落库，未重复执行`)
-      }
-      const content = `⚠️ ${parts.join('；')}`
-      const msgId = uuid()
-      messagesRepo.insertMessage(msgId, sessionId, 'system', content, '[]', null, null)
-      io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
-        id: msgId,
-        sessionId,
-        agentId: null,
-        role: 'system',
-        content,
-        mentions: [],
-        createdAt: new Date().toISOString(),
-      })
-      log.warn('打断恢复广播', { sessionId, content })
     }
   } catch (err: any) {
     log.error('recoverInterruptedExecutions failed', { error: err.message })
