@@ -202,7 +202,7 @@ pnpm lint             # 全项目 TypeScript 类型检查
 
 1. 安装 NapCat（如 `D:\Software\NapCat\shell\napcat.bat`）
 2. `.env` 设置 `ONEBOT_ENABLED=true`
-3. NapCat HTTP 上报配置指向 `POST http://127.0.0.1:3200/api/connectors/onebot/webhook`（若设置了 `ONEBOT_TOKEN`，上报须带 `Authorization: Bearer <token>` 头）
+3. NapCat HTTP 上报配置指向 `POST http://127.0.0.1:3200/api/connectors/onebot/webhook`（若设置了 `ONEBOT_TOKEN`，需在 NapCat 上报配置中填一致的**上报签名密钥**——NapCat 自动带 `x-signature` 头；直接用 HTTP 客户端 POST 才用 `Authorization: Bearer <token>` 头）
 
 ### 启动命令
 
