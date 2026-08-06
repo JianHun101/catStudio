@@ -111,6 +111,11 @@ process.env.ONEBOT_TOKEN ??= ''
 // 超时走 log.warn 不重试，与出站失败语义一致）
 process.env.ONEBOT_FETCH_TIMEOUT_MS ??= '10000'
 
+// ONEBOT_ALLOWLIST — 白名单模式（配置且非空时开启）：逗号分隔 QQ 号，
+// 只有白名单内的发送者能触发猫（群聊 + 私聊统一，白名单外静默忽略 + log.info 留痕）；
+// 未配置/空串 → 关闭（现状兼容）。与 ONEBOT_TOKEN 同语义：配置即启用，少一个开关少一份误配面
+process.env.ONEBOT_ALLOWLIST ??= ''
+
 // ─── 会话交接配置 ──────────────────────────────
 // HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
 process.env.HANDOFF_ENABLED ??= 'true'

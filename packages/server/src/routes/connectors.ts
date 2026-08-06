@@ -84,6 +84,21 @@ function onebotToken(): string {
   return process.env.ONEBOT_TOKEN || ''
 }
 
+/**
+ * 白名单模式——ONEBOT_ALLOWLIST 配置且非空时，发送者 QQ 号必须在白名单内才处理
+ * （群聊 + 私聊统一；配置即启用，未配置/空串 → 关闭，现状兼容）。
+ * 解析：逗号分隔 QQ 号，trim + 过滤空段 + 去重；每次调用现解析（消息频率低，不缓存）
+ */
+function onebotAllowlist(): Set<string> {
+  const raw = process.env.ONEBOT_ALLOWLIST || ''
+  const ids = new Set<string>()
+  for (const part of raw.split(',')) {
+    const trimmed = part.trim()
+    if (trimmed) ids.add(trimmed)
+  }
+  return ids
+}
+
 export async function connectorRoutes(app: FastifyInstance): Promise<void> {
   // ─── 绑定管理 ──────────────────────────────────
 
@@ -224,12 +239,20 @@ async function handleOneBotEvent(event: OneBotMessageEvent): Promise<void> {
   const messageType = event.message_type
   if (messageType !== 'group' && messageType !== 'private') return
 
-  // 3. 绑定查找：群用 group_id，私聊用 user_id
+  // 3. 白名单模式（配置且非空时开启）：发送者 QQ 号必须在白名单内——群聊 + 私聊统一
+  // （授权检查独立于绑定，放绑定查找前更早短路；白名单外静默忽略 + log.info 留痕供排查）
+  const allowlist = onebotAllowlist()
+  if (allowlist.size > 0 && !allowlist.has(String(event.user_id))) {
+    log.info('sender not in allowlist, skipped', { userId: String(event.user_id) })
+    return
+  }
+
+  // 4. 绑定查找：群用 group_id，私聊用 user_id
   const externalId = String(messageType === 'group' ? event.group_id : event.user_id)
   const binding = bindingsRepo.getConnectorBinding(PLATFORM_QQ, messageType, externalId)
   if (!binding) return // 无绑定的群/私聊静默忽略
 
-  // 4. roster：绑定会话的 agent 名单（文本 @猫名 匹配用）
+  // 5. roster：绑定会话的 agent 名单（文本 @猫名 匹配用）
   const session = sessionsRepo.getSessionById(binding.session_id)
   if (!session) {
     // 绑定指向的会话已被删除（绑定无 FK，成为孤儿）——静默忽略
@@ -247,7 +270,7 @@ async function handleOneBotEvent(event: OneBotMessageEvent): Promise<void> {
   const parsed = parseOneBotMessage(event, { roster, selfId: event.self_id, messageType })
   if (!parsed) return
 
-  // 5. 摄入（QQ 群友消息是真实对话 → 进向量记忆库，与前端消息同等对待）
+  // 6. 摄入（QQ 群友消息是真实对话 → 进向量记忆库，与前端消息同等对待）
   const result = await ingestUserMessage({
     sessionId: binding.session_id,
     content: parsed.content,

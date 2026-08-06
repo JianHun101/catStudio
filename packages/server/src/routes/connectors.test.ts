@@ -2,7 +2,8 @@
  * connectors 路由测试（P2 AC2/AC3）。
  *
  * 覆盖：绑定管理 CRUD + 校验；webhook 四类 payload（@机器人+@猫名 / 纯@机器人 /
- * 无绑定群 / 自己发的消息）+ 非 message 事件 + 私聊 + saveMemory 断言 + 503 开关。
+ * 无绑定群 / 自己发的消息）+ 非 message 事件 + 私聊 + saveMemory 断言 + 503 开关 +
+ * 白名单模式 5 例（命中 / 白名单外@ / 白名单外私聊 / 未配置兼容 / 格式宽容）。
  */
 import { createHmac } from 'node:crypto'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -81,6 +82,10 @@ describe('Connector Routes', () => {
 
   beforeEach(async () => {
     process.env.ONEBOT_ENABLED = 'true'
+    // shell/env 可能带真实 ONEBOT_TOKEN（本机实测存在）——每个用例前清干净，
+    // 保证「token 未配置不校验」前提成立（P5-1 曾因首个用例继承 shell token 而 401；
+    // 460-533 的鉴权用例在用例体内自设 token，不受影响）
+    delete process.env.ONEBOT_TOKEN
     vi.clearAllMocks()
     // AC2-1 mock 修正后 validAgents 非空 → dispatch 真实执行会占用槽位，
     // 用例间必须复位（CLAUDE.md 约定：Dispatch __test_reset() between cases）
@@ -99,6 +104,7 @@ describe('Connector Routes', () => {
     resetDb()
     delete process.env.ONEBOT_ENABLED
     delete process.env.ONEBOT_TOKEN
+    delete process.env.ONEBOT_ALLOWLIST
   })
 
   describe('绑定管理 CRUD', () => {
@@ -540,6 +546,83 @@ describe('Connector Routes', () => {
       })
       expect(res.statusCode).toBe(401)
       expect(countMessages()).toBe(0)
+    })
+  })
+
+  describe('OneBot 白名单（ONEBOT_ALLOWLIST）', () => {
+    // groupEvent 默认发送者 user_id=999；白名单检查在绑定查找之前（群绑定 555 已由
+    // insertBoundFixture 插入）——用例 2/3 删白名单检查行必红（绑定命中即摄入）
+
+    it('P5-1: 发送者在白名单 → 200 正常摄入', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_ALLOWLIST = '999'
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(1)
+    })
+
+    it('P5-2: 白名单外的 @ 群消息 → 200 静默忽略，不落库', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_ALLOWLIST = '123' // 不含发送者 999
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(0) // 删白名单检查行必红（绑定 555 命中即摄入）
+    })
+
+    it('P5-3: 白名单外的私聊 → 200 静默忽略，不落库（群聊+私聊统一管）', async () => {
+      // 私聊绑定存在（删白名单行后摄入路径畅通）——钉死拦截发生在绑定查找之前
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES ('session-qq-w', 'w', '[]', datetime('now'), datetime('now'))`
+      ).run()
+      bindingsRepo.upsertConnectorBinding('qq', 'private', '999', 'session-qq-w')
+      process.env.ONEBOT_ALLOWLIST = '123' // 不含发送者 999
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: {
+          post_type: 'message',
+          message_type: 'private',
+          self_id: 10000,
+          user_id: 999,
+          message: [{ type: 'text', data: { text: '你好' } }],
+          sender: { user_id: 999, nickname: '小红' },
+        },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(0) // 删白名单检查行必红（私聊绑定 999 命中即摄入）
+    })
+
+    it('P5-4: 未配置 ONEBOT_ALLOWLIST → 白名单模式关闭，非白名单发送者照常摄入（现状回归）', async () => {
+      insertBoundFixture()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(1)
+    })
+
+    it('P5-5: 格式宽容——白名单含空格/空段（trim + 去空段）仍命中', async () => {
+      insertBoundFixture()
+      process.env.ONEBOT_ALLOWLIST = ' 3598764614 , , 999 ' // 空格 + 空段混排
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/onebot/webhook',
+        payload: groupEvent(),
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countMessages()).toBe(1)
     })
   })
 })
