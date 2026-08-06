@@ -2468,6 +2468,41 @@ describe('socketio connector', () => {
       expect(executeAgentCommand).not.toHaveBeenCalled()
     })
 
+    it('洞 A：message_id 非空（执行完成时已写回回复 id）→ 精确跳过，不再依赖时间窗', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand } = await import('../dispatch/index.js')
+      // 造数据：server_restart 记录带 message_id，但 messages 表无任何回复
+      //（message_id 本身即"已回复"的精确证据——不靠时间窗猜）
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, ?, 'user', ?, '["店长"]', datetime('now', '-2 minutes'))`
+        )
+        .run('msg-trigger', 'session-1', '@店长 请补填交接文档')
+      getDb()
+        .prepare(
+          `INSERT INTO execution_logs
+             (id, session_id, agent_id, triggered_by_message_id, status, error_message, message_id, started_at)
+           VALUES (?, ?, ?, ?, 'failed', 'server_restart', ?, datetime('now', '-1 minute'))`
+        )
+        .run('exec-1', 'session-1', 'agent-1', 'msg-trigger', 'msg-reply')
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      expect(executeAgentCommand).not.toHaveBeenCalled()
+    })
+
+    it('洞 A：message_id NULL（历史记录/被打断未回复）→ 回退时间窗判据，未回复即恢复', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand } = await import('../dispatch/index.js')
+      // 无 message_id + 无任何回复 → 时间窗判据放行 → 恢复重跑（老数据兼容路径）
+      seedInterruptedExecution(getDb())
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
+    })
+
     it('无 API key 的 agent → 跳过（无法执行）', async () => {
       const mod = await import('./socketio.js')
       const { executeAgentCommand } = await import('../dispatch/index.js')
@@ -2606,7 +2641,7 @@ describe('socketio connector', () => {
       expect(mockRoomEmit).toHaveBeenCalledWith(Events.NEW_MESSAGE, expect.anything())
     })
 
-    it('AC5: 目标 agent 已回复（回复写库后、finalize 前被杀）→ 跳过，防重复执行', async () => {
+    it('AC5: 目标 agent 已回复（回复写库后、finalize 前被杀）→ 跳过，防重复执行；全目标已回复 → dispatch_state 归一 done', async () => {
       const mod = await import('./socketio.js')
       const { dispatch } = await import('../dispatch/index.js')
       seedQueuedMessage(getDb(), { agentReplied: true })
@@ -2614,9 +2649,14 @@ describe('socketio connector', () => {
       await mod.recoverQueuedMessages(mockIo as any)
 
       expect(dispatch).not.toHaveBeenCalled()
+      // 洞 B：跳过 ≠ 撒手不管——处理已终结，消息不再永久 queued/running 搁浅
+      const row = getDb()
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get('msg-queued') as any
+      expect(row.dispatch_state).toBe('done')
     })
 
-    it('职责切分：有 server_restart execution_log 的 agent 跳过（归 recoverInterruptedExecutions），无日志的 agent 照常恢复', async () => {
+    it('洞 B 兜底：有 server_restart 日志且未回复的 agent（interrupted 漏恢复）兜底重调度，无日志的 agent 照常恢复——一条消息一次 dispatch', async () => {
       const mod = await import('./socketio.js')
       const { dispatch } = await import('../dispatch/index.js')
       // 双 agent 会话：agent-1 有被中断的执行日志（路径 2 的职责域），agent-2 无
@@ -2647,14 +2687,34 @@ describe('socketio connector', () => {
 
       await mod.recoverQueuedMessages(mockIo as any)
 
-      // 只恢复 agent-2（无执行日志）；agent-1 不在此处调度（防两条路径串行双跑）
+      // 一条消息一次 dispatch：agent-1（server_restart + 未回复 = 漏恢复，兜底补位）
+      // 与 agent-2（无日志，常规恢复）合并调度——串行化后路径 2 已跑完，不再有
+      // 确定性串行双跑风险
       expect(dispatch).toHaveBeenCalledTimes(1)
       expect(dispatch).toHaveBeenCalledWith(
         'session-1',
         expect.objectContaining({ id: 'msg-queued' }),
-        [expect.objectContaining({ id: 'agent-2' })],
+        [expect.objectContaining({ id: 'agent-1' }), expect.objectContaining({ id: 'agent-2' })],
         expect.any(String)
       )
+    })
+
+    it('洞 B 边界：running execution_log（启动期间实时执行）不兜底重调度，防双跑', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seedQueuedMessage(getDb())
+      // 把 server_restart 换成 running——模拟启动期间实时执行（串行化后路径 2
+      // 不会残留 running 恢复记录，running 只可能是实时执行）
+      getDb()
+        .prepare(
+          `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+           VALUES (?, ?, ?, ?, 'running', datetime('now', '-1 minute'))`
+        )
+        .run('exec-1', 'session-1', 'agent-1', 'msg-queued')
+
+      await mod.recoverQueuedMessages(mockIo as any)
+
+      expect(dispatch).not.toHaveBeenCalled()
     })
 
     it('无 API key 的 agent → 跳过（无法执行）', async () => {

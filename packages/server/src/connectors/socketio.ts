@@ -545,14 +545,15 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     })
   })
 
-  // 启动恢复：重新 dispatch 被 server 重启打断的执行（fire-and-forget，不阻塞启动）
-  recoverInterruptedExecutions(io).catch((err) => {
-    log.error('recoverInterruptedExecutions crashed', { error: (err as Error).message })
-  })
-
-  // P0 启动恢复：重新 dispatch 队列中的待处理消息（queued/running，fire-and-forget）
-  recoverQueuedMessages(io).catch((err) => {
-    log.error('recoverQueuedMessages crashed', { error: (err as Error).message })
+  // 启动恢复（fire-and-forget，不阻塞启动）：先恢复被打断的执行，再恢复队列
+  // 消息——串行化防双跑竞态（此前两条并行：interrupted 未插 running 日志时队列
+  // 兜底先调度 → 同一条消息被两条路径各执行一遍）。串行后 interrupted 完整跑完，
+  // 漏恢复的 agent 由 recoverQueuedMessages 的洞 B 兜底重调度接住
+  void (async () => {
+    await recoverInterruptedExecutions(io)
+    await recoverQueuedMessages(io)
+  })().catch((err) => {
+    log.error('startup recovery crashed', { error: (err as Error).message })
   })
 
   // 重启完成通知：dev.js 重启成功后写 .restart-done，此处广播「重启完成」并清理
@@ -836,8 +837,15 @@ async function executeOneAgent(
       return claudeRan
     }
 
-    // 释放槽位并检查队列（P0-2 修复：不再丢弃 completeExecution 返回值）
-    const queuedCmd = await completeExecution(agent.id, true, { traceId })
+    // 释放槽位并检查队列（P0-2 修复：不再丢弃 completeExecution 返回值）。
+    // 成功路径写回回复 id（洞 A 判据：execution_logs.message_id 非空即已回复，
+    // 重启恢复精确跳过，不再被后续其他回复的时间窗误判）。撤回窗（Window ②/③）
+    // 提前返回的 ghost id 不可达——撤回必删触发消息与 execution_logs（MESSAGE_RETRACT
+    // handler），恢复入口 getMessageByIdOnly 直接 continue
+    const queuedCmd = await completeExecution(agent.id, true, {
+      traceId,
+      replyMessageId: reply.msgId,
+    })
 
     // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
     // 同一 trace 内某 agent 真实完成 ≥MAX 次 A2A 执行后，不再被重新调度。
@@ -1216,10 +1224,14 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
         )
         if (!triggerRow) continue
 
-        // 已回复则跳过（防重复执行——重启可能发生在回复写库之后、finalize 之前）
-        if (
+        // 已回复则跳过（防重复执行——重启可能发生在回复写库之后、finalize 之前）。
+        // 洞 A 双轨判据：message_id 非空 = 该执行完成时已写回回复 id，精确跳过，
+        // 不再把后续其他回复（消息 B）误判成本次回复；NULL（历史记录/被打断未
+        // 回复）→ 回退时间窗判据（hasAgentRepliedAfter），兼容老数据防全量重跑
+        const alreadyReplied =
+          rec.message_id !== null ||
           messagesRepo.hasAgentRepliedAfter(rec.agent_id, rec.session_id, triggerRow.created_at)
-        ) {
+        if (alreadyReplied) {
           const name = agentsRepo.getAgentNameById(rec.agent_id) ?? rec.agent_id
           log.info('跳过恢复：agent 已回复', {
             agentId: rec.agent_id,
@@ -1344,11 +1356,13 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
  * - 此处按消息整条恢复——解析 mentions → 重新调度，覆盖队列中的那部分
  *
  * 幂等防线（防重启后重复执行）：
- * 1. 目标 agent 有被中断/进行中的 execution_log（同一触发消息）→ 跳过该 agent。
- *    这是与 recoverInterruptedExecutions 的职责切分：有执行日志的 agent 由
- *    路径 2 按日志逐 agent 恢复，此处再调度会造成确定性串行双跑
- *    （路径 2 执行中槽位 busy → dispatch 入队 → completeExecution 弹队列再执行一遍）
- * 2. 目标 agent 已回复（回复写库后、finalize 前被杀的场景）→ 跳过该 agent
+ * 1. 目标 agent 有被中断（server_restart）/进行中（running，串行化后只可能是
+ *    启动期间实时执行）的 execution_log（同一触发消息）→ 该 agent 不参与常规
+ *    调度（归 recoverInterruptedExecutions 或实时执行）。但仅 server_restart 且
+ *    未回复的 agent 会被洞 B 兜底重调度——interrupted 已串行跑完仍挂
+ *    server_restart = 漏恢复，不兜底则永久搁浅；running 不兜底（防双跑实时执行）
+ * 2. 目标 agent 已回复（回复写库后、finalize 前被杀的场景）→ 跳过该 agent；
+ *    全目标已回复 → dispatch_state 归一 done（处理已终结）
  * 3. 无 API key 的 agent → 跳过（与 recoverInterruptedExecutions 一致）
  *
  * 执行配对：dispatch 只标 busy（槽位管理，见 executeAgentCommand 注释——实际
@@ -1389,14 +1403,15 @@ export async function recoverQueuedMessages(io: SocketServer): Promise<void> {
           (a) => a.llmApiKey && a.llmApiKey !== 'sk-your-api-key-here'
         )
 
+        const logsByTrigger = execLogsRepo.getLogsByTriggerMessage(row.id)
+
         // 幂等防线①（职责切分）：同一触发消息下该 agent 有被中断（server_restart）
-        // 或进行中（本启动内路径 2 恢复已插入）的 execution_log → 归
-        // recoverInterruptedExecutions 逐 agent 恢复，此处跳过。否则两条恢复路径
-        // 都调度同一条消息：路径 2 已把槽位标 busy，此处 dispatch 会把命令入队，
-        // 路径 2 completeExecution 弹队列再执行一遍——确定性串行双跑。
+        // 或进行中（running——串行化后此处只可能是启动期间实时执行）的
+        // execution_log → 归对应路径，此处不调度。否则两条恢复路径都调度同一条
+        // 消息：路径 2 已把槽位标 busy，此处 dispatch 会把命令入队，路径 2
+        // completeExecution 弹队列再执行一遍——确定性串行双跑。
         const interruptedLogs = new Set(
-          execLogsRepo
-            .getLogsByTriggerMessage(row.id)
+          logsByTrigger
             .filter(
               (l) =>
                 l.status === 'running' ||
@@ -1404,21 +1419,60 @@ export async function recoverQueuedMessages(io: SocketServer): Promise<void> {
             )
             .map((l) => l.agent_id)
         )
-
-        // 幂等防线②：已回复的 agent 不再调度（防重启后重复执行）
-        const toDispatch = executable.filter(
-          (a) =>
-            !interruptedLogs.has(a.id) &&
-            !messagesRepo.hasAgentRepliedAfter(a.id, row.session_id, fullRow.created_at)
+        // 洞 B 漏恢复判据：仅 server_restart 记录——running 可能是实时执行，
+        // 兜底重调度若含 running 会把实时执行双跑（串行化后路径 2 已完整跑完，
+        // 不会残留 running 恢复记录）
+        const serverRestartLogs = new Set(
+          logsByTrigger
+            .filter((l) => l.status === 'failed' && l.error_message === 'server_restart')
+            .map((l) => l.agent_id)
         )
 
-        if (toDispatch.length === 0) {
-          log.info('跳过恢复：目标 agent 均已回复或已有执行日志', { messageId: row.id })
+        // 幂等防线②：已回复的 agent 不再调度（防重启后重复执行）
+        const repliedSet = new Set(
+          executable
+            .filter((a) =>
+              messagesRepo.hasAgentRepliedAfter(a.id, row.session_id, fullRow.created_at)
+            )
+            .map((a) => a.id)
+        )
+        const toDispatch = executable.filter(
+          (a) => !interruptedLogs.has(a.id) && !repliedSet.has(a.id)
+        )
+        // 洞 B 兜底：interrupted 恢复漏掉的 agent（server_restart 日志 + 未回复）
+        // 补位重调度。串行化后语义：interrupted 已完整跑完，仍挂 server_restart
+        // 且未回复 = 漏恢复（误判已回复/恢复失败），不兜底则永久搁浅
+        const stranded = executable.filter(
+          (a) => serverRestartLogs.has(a.id) && !repliedSet.has(a.id)
+        )
+        const dispatchTargets = [...stranded, ...toDispatch]
+
+        if (dispatchTargets.length === 0) {
+          // 洞 B：跳过 ≠ 撒手不管——此前跳过分支不归一 dispatch_state，消息
+          // 永久 queued/running 搁浅，每次启动都被 getPendingMessages 捞出来空转。
+          // 全目标已回复 = 处理已终结 → 归一 done
+          if (executable.length > 0 && repliedSet.size === executable.length) {
+            messagesRepo.setDispatchState(row.id, 'done')
+            log.info('跳过恢复：目标 agent 均已回复，dispatch_state 归一 done', {
+              messageId: row.id,
+              sessionId: row.session_id,
+            })
+          } else {
+            log.info('跳过恢复：目标 agent 均已回复或已有执行日志', { messageId: row.id })
+          }
           continue
         }
 
+        if (stranded.length > 0) {
+          log.warn('恢复队列消息：interrupted 漏恢复的 agent 兜底重调度', {
+            messageId: row.id,
+            sessionId: row.session_id,
+            agents: stranded.map((a) => a.name),
+          })
+        }
+
         // 槽位初始化（dispatch 对未知 slot 直接跳过，不初始化不调度）
-        for (const a of toDispatch) {
+        for (const a of dispatchTargets) {
           if (!getAgentState(a.id)) initAgentSlot(a.id)
         }
 
@@ -1439,16 +1493,16 @@ export async function recoverQueuedMessages(io: SocketServer): Promise<void> {
         log.warn('恢复队列消息', {
           messageId: row.id,
           sessionId: row.session_id,
-          agents: toDispatch.map((a) => a.name),
+          agents: dispatchTargets.map((a) => a.name),
           traceId,
         })
 
-        await dispatch(row.session_id, msg, toDispatch, traceId)
+        await dispatch(row.session_id, msg, dispatchTargets, traceId)
         // 配对执行：dispatch 只标 busy（槽位管理），实际 LLM 推理由 connector 触发
         // （executeAgentCommand 注释）。不配对则恢复的消息永久卡 busy 不回复、队列
         // 永不排空——与 SEND_MESSAGE（dispatch + executeAgentsSerial）及
         // recoverInterruptedExecutions（executeAgentCommand + executeAgentsSerial）同款
-        await executeAgentsSerial(io, row.session_id, toDispatch, msg, traceId, 0)
+        await executeAgentsSerial(io, row.session_id, dispatchTargets, msg, traceId, 0)
       } catch (err: any) {
         log.error('恢复单条队列消息失败', {
           messageId: row.id,

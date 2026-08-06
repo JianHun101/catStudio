@@ -19,17 +19,20 @@ export function getRunningLogs(): Array<{ id: string; agent_id: string }> {
 }
 
 /** 启动时获取被 server 重启打断的执行（fixStuckExecutionLogs 标记后）。
- *  供重启恢复队列使用——重新 dispatch 这些未完成的执行。 */
+ *  供重启恢复队列使用——重新 dispatch 这些未完成的执行。
+ *  message_id：洞 A 精确判据——非空即该执行已完成并写回回复 id，恢复跳过；
+ *  NULL（历史记录/被打断未回复）→ 恢复回退时间窗判据。 */
 export function getInterruptedExecutions(): Array<{
   id: string
   session_id: string
   agent_id: string
   triggered_by_message_id: string
   started_at: string
+  message_id: string | null
 }> {
   return db
     .prepare(
-      `SELECT id, session_id, agent_id, triggered_by_message_id, started_at
+      `SELECT id, session_id, agent_id, triggered_by_message_id, started_at, message_id
        FROM execution_logs
        WHERE status = 'failed' AND error_message = 'server_restart'
        ORDER BY started_at ASC`
@@ -40,6 +43,7 @@ export function getInterruptedExecutions(): Array<{
     agent_id: string
     triggered_by_message_id: string
     started_at: string
+    message_id: string | null
   }>
 }
 
@@ -132,20 +136,24 @@ export function insertExecutionLog(
   ).run(id, sessionId, agentId, triggeredByMessageId, traceId)
 }
 
-/** 标记执行完成/失败 */
+/** 标记执行完成/失败。
+ *  replyMessageId：成功路径写回本次回复的消息 id（洞 A 精确判据——重启恢复时
+ *  message_id 非空即已回复，不再用时间窗把后续其他回复误判成本次回复）；
+ *  失败/中断路径不传保持 NULL，恢复回退时间窗判据。 */
 export function finalizeExecutionLog(
   agentId: string,
   status: 'completed' | 'failed',
   latencyMs: number | null,
-  errorMessage: string | null
+  errorMessage: string | null,
+  replyMessageId: string | null = null
 ): void {
   db.prepare(
     `UPDATE execution_logs
      SET status = ?, ended_at = datetime('now'),
-         latency_ms = ?, error_message = ?
+         latency_ms = ?, error_message = ?, message_id = ?
      WHERE agent_id = ? AND status = 'running'
      ORDER BY started_at DESC LIMIT 1`
-  ).run(status, latencyMs, errorMessage, agentId)
+  ).run(status, latencyMs, errorMessage, replyMessageId, agentId)
 }
 
 /** 写回诊断数据（延迟、安装包、token 统计等） */

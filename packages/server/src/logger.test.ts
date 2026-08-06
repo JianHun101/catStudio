@@ -79,4 +79,26 @@ describe('logger', () => {
       }).not.toThrow()
     })
   })
+
+  describe('ts 本地时区格式', () => {
+    it('日志时间带本地时区偏移（如 +08:00），可解析且绝对时间不变', async () => {
+      const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      try {
+        loggerModule.createLogger('tz-test').info('timezone check')
+        const line = writeSpy.mock.calls.map((c: any[]) => c[0]).join('')
+        const entry = JSON.parse(line)
+        expect(entry.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/)
+        // 偏移与机器本地时区一致
+        const offsetMin = -new Date().getTimezoneOffset()
+        const sign = offsetMin >= 0 ? '+' : '-'
+        const abs = Math.abs(offsetMin)
+        const expectedSuffix = `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
+        expect(entry.ts.endsWith(expectedSuffix)).toBe(true)
+        // 本地化不改变绝对时间点（±500ms 内）
+        expect(new Date(entry.ts).getTime()).toBeCloseTo(Date.now(), -3)
+      } finally {
+        writeSpy.mockRestore()
+      }
+    })
+  })
 })

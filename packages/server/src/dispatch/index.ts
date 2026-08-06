@@ -207,7 +207,13 @@ async function executeAgent(
 export async function completeExecution(
   agentId: string,
   success: boolean,
-  opts?: { latencyMs?: number; errorMessage?: string; traceId?: string }
+  opts?: {
+    latencyMs?: number
+    errorMessage?: string
+    traceId?: string
+    /** 成功路径写回的回复消息 id（洞 A 判据，经 finalize 落 execution_logs.message_id） */
+    replyMessageId?: string
+  }
 ): Promise<DispatchCommand | undefined> {
   const slot = agentSlots.get(agentId)
   if (!slot) return
@@ -218,7 +224,8 @@ export async function completeExecution(
       agentId,
       success ? 'completed' : 'failed',
       opts?.latencyMs ?? null,
-      opts?.errorMessage ?? null
+      opts?.errorMessage ?? null,
+      opts?.replyMessageId ?? null
     )
   } catch (err: any) {
     log.error('finalizeExecutionLog failed — releasing slot anyway', {

@@ -70,9 +70,24 @@ interface LogMeta {
   [key: string]: unknown
 }
 
+/** 本地时区 ISO 时间（带偏移，如 2026-08-06T15:04:49.123+08:00）。
+ *  JSON 可解析、可排序；DB 层 datetime('now') 保持 UTC 存储不动（数据层契约，
+ *  前端已本地化显示），日志层本地化便于人眼观察（用户需求：日志时间与时区匹配）。 */
+function toLocalIso(date: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const offsetMin = -date.getTimezoneOffset()
+  const sign = offsetMin >= 0 ? '+' : '-'
+  const abs = Math.abs(offsetMin)
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.` +
+    `${String(date.getMilliseconds()).padStart(3, '0')}${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+  )
+}
+
 function formatLine(level: LogLevel, module: string, msg: string, meta?: LogMeta): string {
   const entry: Record<string, unknown> = {
-    ts: new Date().toISOString(),
+    ts: toLocalIso(new Date()),
     level,
     module,
     msg,
