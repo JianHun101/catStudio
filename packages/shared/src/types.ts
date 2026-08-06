@@ -156,13 +156,22 @@ export interface ChatOptions {
   timeoutMs?: number // fetch + stream 总超时（毫秒），默认 300000
   signal?: AbortSignal // 外部取消信号，用于中断正在进行的 LLM 调用
   /**
-   * 猫咖内部路由上下文（MCP 结构化路由 v4，契约 3 修订——店长裁决）。
-   * 仅 claude.ts 适配器消费（挂 MCP 工具面 + buildEnv 透传五变量），
+   * 猫咖内部路由上下文（MCP 结构化路由 v4，契约 3 二次修订——店长裁决）。
+   * 仅 claude.ts 适配器消费（挂 MCP 工具面 + buildEnv 透传），
    * 其他适配器忽略，零影响。
    *  sessionId/agentId/msgId — 信号三要素（MCP server 读 CATSTUDY_* env）
    *  token — 每 spawn 随机信号 token（activeStreams 存值 → internal.ts 精确匹配）
+   *  triggerAuthorName — 本次触发消息作者名（可选；internal.ts 预校验传给
+   *    filterAllowedMentions，reviewer 可 @ 回请求人的特殊边，OQ③ 补丁）
    */
-  context?: { sessionId: string; agentId: string; msgId: string; token: string; traceId?: string }
+  context?: {
+    sessionId: string
+    agentId: string
+    msgId: string
+    token: string
+    traceId?: string
+    triggerAuthorName?: string
+  }
 }
 
 export interface Chunk {

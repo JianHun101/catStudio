@@ -306,16 +306,18 @@ export class ClaudeAdapter implements LLMAdapter {
       CLAUDE_CODE_EFFORT_LEVEL: this.effortLevel || process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high',
     } as Record<string, string>
 
-    // MCP 结构化路由五变量（契约 4——店长裁决）：context 透传给 MCP server
+    // MCP 结构化路由变量（契约 4——店长裁决）：context 透传给 MCP server
     // （子进程继承 env）。CATSTUDY_SERVER_URL 用 server 监听口径（index.ts 同款
     // PORT 默认 3200）——MCP server 在本机访问，127.0.0.1 而非 localhost
-    // （Windows IPv4/IPv6 歧义，项目惯例）。
+    // （Windows IPv4/IPv6 歧义，项目惯例）。triggerAuthorName 可选（OQ③ 补丁）：
+    // 有值才设 env，避免空串噪音（MCP server 侧只读值非空才带 body 字段）。
     if (context) {
       env.CATSTUDY_SERVER_URL = `http://127.0.0.1:${process.env.PORT || '3200'}`
       env.CATSTUDY_SIGNAL_TOKEN = context.token
       env.CATSTUDY_SESSION_ID = context.sessionId
       env.CATSTUDY_AGENT_ID = context.agentId
       env.CATSTUDY_MSG_ID = context.msgId
+      if (context.triggerAuthorName) env.CATSTUDY_TRIGGER_AUTHOR_NAME = context.triggerAuthorName
     }
     return env
   }

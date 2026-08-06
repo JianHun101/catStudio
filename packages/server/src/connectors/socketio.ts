@@ -2191,14 +2191,17 @@ async function runAgentReply(
   const stream = adapter.chatStream(llmMessages, {
     model: agent.llmModel,
     signal,
-    // MCP 结构化路由上下文（契约 3 修订——店长裁决）：claude.ts 透传
-    // 五变量到 MCP server env；其他适配器忽略 context 零影响
+    // MCP 结构化路由上下文（契约 3 二次修订——店长裁决）：claude.ts 透传
+    // 到 MCP server env；其他适配器忽略 context 零影响。
+    // triggerAuthorName 与 :947 合并点同款来源（triggerMsg.authorName）——
+    // internal.ts 预校验 filterAllowedMentions 支持 reviewer @ 回请求人（OQ③）
     context: {
       sessionId,
       agentId: agent.id,
       msgId,
       token: signalToken,
       traceId,
+      triggerAuthorName: triggerMsg.authorName,
     },
   })
 

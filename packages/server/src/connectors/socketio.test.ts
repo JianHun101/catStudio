@@ -3737,6 +3737,67 @@ describe('socketio connector', () => {
         false
       )
     })
+
+    it('验收-装配链（审查知会②）：signalToken 每 spawn 随机 + context 与 activeStreams 存值一致 + triggerAuthorName 透传', async () => {
+      const mod = await import('./socketio.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+
+      // 第一次执行：gate 挂起流——流存活期间断言 context 与 activeStreams 存值
+      // 一致（:2396 完成时 delete，完成后再查只剩 undefined）
+      let release: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
+        yield { content: '已处理，无需 @', kind: 'text' }
+        await gate
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+      seedTrigger('@店长 派活一')
+
+      const run1 = mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 派活一', mentions: ['店长'], authorName: '实施猫' },
+        'trace-asmb1',
+        1
+      )
+      await vi.waitFor(() => expect(chatStream).toHaveBeenCalledTimes(1))
+
+      // context 与 activeStreams 存值同源（token/msgId 一致），triggerAuthorName 透传
+      const ctx = chatStream.mock.calls[0][1].context
+      const stream = mod.getActiveStream('agent-1')
+      expect(stream).toBeDefined()
+      expect(stream!.sessionId).toBe('session-1')
+      expect(ctx).toMatchObject({
+        sessionId: 'session-1',
+        agentId: 'agent-1',
+        msgId: stream!.messageId,
+        token: stream!.token,
+        traceId: 'trace-asmb1',
+        triggerAuthorName: '实施猫',
+      })
+
+      // 放行完成第一次执行
+      release!()
+      await run1
+
+      // 第二次执行：新 spawn 新 token（每 spawn 随机——activeStreams 存值随之更新）
+      const chatStream2 = vi.fn(async function* (_messages: any[], _opts: any) {
+        yield { content: '已处理二', kind: 'text' }
+      })
+      // 注意属性名必须叫 chatStream（runAgentReply 访问 adapter.chatStream）
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream: chatStream2 } as any)
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 派活二', mentions: ['店长'] },
+        'trace-asmb2',
+        1
+      )
+      const ctx2 = chatStream2.mock.calls[0][1].context
+      expect(ctx2.token).not.toBe(ctx.token)
+    })
   })
 })
 

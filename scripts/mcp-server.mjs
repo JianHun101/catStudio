@@ -17,6 +17,8 @@
  *   CATSTUDY_SESSION_ID / CATSTUDY_AGENT_ID / CATSTUDY_MSG_ID — 信号三要素
  *   CATSTUDY_SERVER_URL — 内部端点基址（如 http://127.0.0.1:3200）
  *   CATSTUDY_SIGNAL_TOKEN — 每 spawn 随机生成的信号 token（x-signal-token 头）
+ *   CATSTUDY_TRIGGER_AUTHOR_NAME — 可选：本次触发消息作者名（OQ③ 补丁——
+ *     内部端点预校验支持 reviewer @ 回请求人；缺失则 body 不带该字段）
  *
  * 用法：node scripts/mcp-server.mjs（由 Claude Code CLI 作为 MCP server 拉起）
  */
@@ -77,6 +79,7 @@ async function postRouteSignal(targetCats, clientMessageId) {
   const sessionId = env('CATSTUDY_SESSION_ID')
   const agentId = env('CATSTUDY_AGENT_ID')
   const msgId = env('CATSTUDY_MSG_ID')
+  const triggerAuthorNameValue = env('CATSTUDY_TRIGGER_AUTHOR_NAME')
 
   if (!baseUrl || !token || !sessionId || !agentId || !msgId) {
     const missing = [
@@ -91,6 +94,11 @@ async function postRouteSignal(targetCats, clientMessageId) {
     return { ok: false, reason: `MCP 环境缺失（${missing.join('/')}），路由信号未投递` }
   }
 
+  // triggerAuthorName 可选（OQ③ 补丁）：有值才带 body 字段——内部端点
+  // 预校验 filterAllowedMentions 用它支持 reviewer @ 回请求人
+  const payload = { sessionId, agentId, msgId, targetCats, clientMessageId }
+  if (triggerAuthorNameValue) payload.triggerAuthorName = triggerAuthorNameValue
+
   let res
   try {
     res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/internal/route-signals`, {
@@ -99,7 +107,7 @@ async function postRouteSignal(targetCats, clientMessageId) {
         'content-type': 'application/json',
         'x-signal-token': token,
       },
-      body: JSON.stringify({ sessionId, agentId, msgId, targetCats, clientMessageId }),
+      body: JSON.stringify(payload),
     })
   } catch (err) {
     return { ok: false, reason: `内部端点不可达: ${err.message}` }

@@ -10,7 +10,8 @@
  *       context 透传进 .mcp.json env——「每 spawn 随机」语义保持）
  *   4. 复合键 sessionId 匹配（409）——流存在但在别的会话
  *   5. 目标预校验（422）——会话成员 + 角色白名单（filterAllowedMentions
- *      与 socketio.ts 合并点同源），失败 422 + reason 回模型（消灭半成功 ACK）
+ *      与 socketio.ts 合并点同源，body 可选字段 triggerAuthorName 支持 reviewer
+ *      @ 回请求人的特殊边——OQ③ 补丁），失败 422 + reason 回模型（消灭半成功 ACK）
  *   6. storeRouteSignal 入 Map（200）——合并点按 messageId 标签消费
  *
  * 失败一律 4xx + reason 字段——mcp-server.mjs 把 reason 拼进工具错误文本
@@ -33,6 +34,7 @@ interface RouteSignalBody {
   msgId?: unknown
   targetCats?: unknown
   clientMessageId?: unknown
+  triggerAuthorName?: unknown
 }
 
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
@@ -62,6 +64,11 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
     const clientMessageId = body.clientMessageId
     if (clientMessageId !== undefined && typeof clientMessageId !== 'string') {
       return reply.status(400).send({ ok: false, reason: 'clientMessageId 必须是字符串' })
+    }
+    // triggerAuthorName 可选（OQ③ 补丁）：非字符串拒 400；缺失则按 undefined 处理
+    const triggerAuthorName = body.triggerAuthorName
+    if (triggerAuthorName !== undefined && typeof triggerAuthorName !== 'string') {
+      return reply.status(400).send({ ok: false, reason: 'triggerAuthorName 必须是字符串' })
     }
 
     // ── 2. lookup activeStreams（404）──
@@ -106,8 +113,13 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
     const targets = memberRows
       .filter((r) => uniqueTargets.includes(r.name))
       .map((r) => ({ name: r.name, role: r.role as AgentRole }))
+    // triggerAuthorName 与 socketio.ts 合并点 :947 同款语义——reviewer 可 @ 回
+    // 本次触发消息作者（OQ③ 补丁：缺失则仅按角色边表判定，既有行为零回归）
     const policy = filterAllowedMentions(
-      { role: (fromRow?.role as AgentRole | undefined) ?? undefined },
+      {
+        role: (fromRow?.role as AgentRole | undefined) ?? undefined,
+        triggerAuthorName: (triggerAuthorName as string | undefined) ?? undefined,
+      },
       targets
     )
     if (policy.blocked.length > 0) {

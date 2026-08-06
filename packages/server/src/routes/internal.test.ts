@@ -18,7 +18,7 @@ vi.mock('../connectors/socketio.js', () => ({
   getActiveStream: vi.fn(),
 }))
 
-/** 插入会话 fixture：store 店长 + implementer 实施猫（角色白名单判定用） */
+/** 插入会话 fixture：store 店长 + implementer 实施猫 + reviewer 吐槽猫（角色白名单判定用） */
 const insertFixture = () => {
   const db = getDb()
   db.prepare(
@@ -30,9 +30,13 @@ const insertFixture = () => {
      VALUES (?, ?, '🐱', 'prompt', 'deepseek', 'model', 'key', '', 'high', '[]', ?)`
   ).run('agent-impl', '实施猫', 'implementer')
   db.prepare(
+    `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules, role)
+     VALUES (?, ?, '🐱', 'prompt', 'deepseek', 'model', 'key', '', 'high', '[]', ?)`
+  ).run('agent-reviewer', '吐槽猫', 'reviewer')
+  db.prepare(
     `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
      VALUES (?, ?, ?, datetime('now'), datetime('now'))`
-  ).run('session-1', '测试会话', JSON.stringify(['agent-store', 'agent-impl']))
+  ).run('session-1', '测试会话', JSON.stringify(['agent-store', 'agent-impl', 'agent-reviewer']))
 }
 
 const VALID_TOKEN = 'token-abc-123'
@@ -249,6 +253,64 @@ describe('internal route-signals', () => {
       const signals = consumeRouteSignals('session-1', 'agent-impl', 'msg-1')
       expect(signals).toHaveLength(1)
       expect(signals[0].targetCats).toEqual(['店长'])
+    })
+  })
+
+  describe('triggerAuthorName（OQ③ 补丁）', () => {
+    /** reviewer 投递 body：target 实施猫（implementer）——正常会被角色白名单拦 */
+    const reviewerBody = (over: Record<string, unknown> = {}) => ({
+      sessionId: 'session-1',
+      agentId: 'agent-reviewer',
+      msgId: 'msg-r1',
+      targetCats: ['实施猫'],
+      ...over,
+    })
+    const mockActive = async () =>
+      vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue({
+        sessionId: 'session-1',
+        messageId: 'reply-1',
+        content: '',
+        token: VALID_TOKEN,
+      })
+
+    it('验收1a：reviewer 带 triggerAuthorName（= 请求人）→ 200 入 Map（特殊边放行）', async () => {
+      await mockActive()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/internal/route-signals',
+        payload: reviewerBody({ triggerAuthorName: '实施猫' }),
+        headers: { 'x-signal-token': VALID_TOKEN },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body).ok).toBe(true)
+      const signals = consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')
+      expect(signals).toHaveLength(1)
+      expect(signals[0].targetCats).toEqual(['实施猫'])
+    })
+
+    it('验收1b：对照——不带 triggerAuthorName → 仍 422（既有行为零回归）', async () => {
+      await mockActive()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/internal/route-signals',
+        payload: reviewerBody(),
+        headers: { 'x-signal-token': VALID_TOKEN },
+      })
+      expect(res.statusCode).toBe(422)
+      expect(JSON.parse(res.body).reason).toContain('role-not-allowed')
+      // 未入 Map
+      expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')).toHaveLength(0)
+    })
+
+    it('triggerAuthorName 非字符串 → 400', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/internal/route-signals',
+        payload: reviewerBody({ triggerAuthorName: 123 }),
+        headers: { 'x-signal-token': VALID_TOKEN },
+      })
+      expect(res.statusCode).toBe(400)
+      expect(JSON.parse(res.body).reason).toContain('triggerAuthorName')
     })
   })
 })
