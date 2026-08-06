@@ -20,8 +20,11 @@
  * 启动命令两种形态：①NAPCAT_LAUNCH_CMD 完整命令行（cwd 固定 ROOT）；②含
  * {NAPCAT_PATH} 占位符的模板——启动时用 .napcat-config.json（配置页面「NapCat 启动
  * 路径」保存）替换占位符，且以路径所在目录为 cwd（bat 内相对路径依赖 cwd；cwd 固定
- * ROOT 会让 napcat.bat 的 `node ./index.js` 找不到模块秒退；args 传完整路径——cmd
- * /c 对纯文件名查找不可靠，实测）。换机器/换安装位置只改页面不碰 .env。
+ * ROOT 会让 napcat.bat 的 `node ./index.js` 找不到模块秒退）；args 传完整命令串——
+ * cmd /c 对纯文件名查找不可靠（本机 NoDefaultCurrentDirectoryInExePath 禁裸名查
+ * cwd，basename 形态失败、.\ 前缀显式相对路径可行、完整路径最稳健），且传完整命令
+ * 串让模板占位符外的附加内容（如 {NAPCAT_PATH} --flag）不被 args 丢弃。换机器/换
+ * 安装位置只改页面不碰 .env。
  *
  * 用法: node scripts/dev.js  或  pnpm dev
  */
@@ -330,13 +333,15 @@ function loadNapcatConfig() {
 
 /**
  * 解析 NAPCAT_LAUNCH_CMD 为 spawn 参数 {args, cwd, cmd}。
- * 占位符形态：cwd 取路径所在目录、args 传完整路径——bat 内相对路径依赖 cwd
- * （实锤根因：cwd 固定 ROOT 时 napcat.bat 的 `node.exe ./index.js` 从项目根找
- * 模块失败秒退，3000 端口从不监听 → 面板「操作中」永等不到翻转）；路径未配置
- * → null（未就绪）。
- * 注意：args 必须传完整路径而非 basename——实测 cmd /c 在 Node spawn 下对纯
- * 文件名（含 .\ 前缀）查找不可靠（「不是内部或外部命令」），完整路径 + cwd 才
- * 是可靠形态（本单行为验证脚本两个方向实测钉死）。
+ * 占位符形态：cwd 取路径所在目录（bat 内相对路径依赖 cwd——实锤根因：cwd 固定
+ * ROOT 时 napcat.bat 的 `node.exe ./index.js` 从项目根找模块失败秒退，3000 端口
+ * 从不监听 → 面板「操作中」永等不到翻转）；路径未配置 → null（未就绪）。
+ * args 传完整命令串（替换后的 cmd）而非 basename 或纯路径：①cmd /c 在 Node
+ * spawn 下对纯文件名查找不可靠（本机 NoDefaultCurrentDirectoryInExePath=1 禁
+ * 裸名查 cwd，basename 形态「不是内部或外部命令」；.\ 前缀显式相对路径实测可
+ * 行，但完整路径最稳健无歧义，选它）；②完整命令串让模板占位符外的附加内容
+ * （如 {NAPCAT_PATH} --flag）不被丢弃——args 只传路径会静默吞 flag 而日志展示
+ * 的 cmd 还留着，展示与实际 spawn 分裂（审查实测钉死）。
  * 无占位符：完整命令行 + cwd: ROOT（f184c71 语义，向后兼容）。
  * 路径/命令不含引号——含空格路径由 Node spawn 数组参数组装自动加引号、cmd /S
  * 去引号执行（loadDevEnv 剥离 .env 首尾引号，模板写引号必坏）。cmd 字段 = 替换
@@ -348,10 +353,11 @@ function resolveNapcatSpawn(cmd, napcatPath) {
   }
   const p = (napcatPath || '').trim()
   if (!p) return null
+  const resolved = cmd.replaceAll(NAPCAT_PATH_PLACEHOLDER, p)
   return {
-    args: ['/c', p],
+    args: ['/c', resolved],
     cwd: path.dirname(p),
-    cmd: cmd.replaceAll(NAPCAT_PATH_PLACEHOLDER, p),
+    cmd: resolved,
   }
 }
 
