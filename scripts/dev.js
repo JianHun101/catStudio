@@ -17,9 +17,11 @@
  * NapCat 生命周期管理（2026-08 架构决策）：NapCat 是独立程序，server 永不 spawn 它
  * （连接器进程生命周期 = 部署脚本层职责——开发环境 dev.js 做，生产环境守护进程做）。
  * dev.js 负责：启动时自动拉起（幂等）+ .napcat-request 请求文件轮询（start/stop）。
- * 启动命令两种形态：①NAPCAT_LAUNCH_CMD 完整命令行；②含 {NAPCAT_PATH} 占位符的模板
- * ——启动时用 .napcat-config.json（配置页面「NapCat 启动路径」保存）替换占位符，换机器/
- * 换安装位置只改页面不碰 .env。
+ * 启动命令两种形态：①NAPCAT_LAUNCH_CMD 完整命令行（cwd 固定 ROOT）；②含
+ * {NAPCAT_PATH} 占位符的模板——启动时用 .napcat-config.json（配置页面「NapCat 启动
+ * 路径」保存）替换占位符，且以路径所在目录为 cwd（bat 内相对路径依赖 cwd；cwd 固定
+ * ROOT 会让 napcat.bat 的 `node ./index.js` 找不到模块秒退；args 传完整路径——cmd
+ * /c 对纯文件名查找不可靠，实测）。换机器/换安装位置只改页面不碰 .env。
  *
  * 用法: node scripts/dev.js  或  pnpm dev
  */
@@ -327,16 +329,30 @@ function loadNapcatConfig() {
 }
 
 /**
- * 解析 NAPCAT_LAUNCH_CMD：含 {NAPCAT_PATH} 占位符 → 用配置路径纯字符串替换（不含
- * 引号——含空格路径由 Node spawn 数组参数组装自动加引号，cmd /S 去引号执行，机制
- * 自洽；loadDevEnv 会剥离 .env 里的首尾引号，模板写引号必坏）；路径未配置 → null
- * （未就绪）。无占位符 → 原样返回（f184c71 完整命令行语义，向后兼容）。
+ * 解析 NAPCAT_LAUNCH_CMD 为 spawn 参数 {args, cwd, cmd}。
+ * 占位符形态：cwd 取路径所在目录、args 传完整路径——bat 内相对路径依赖 cwd
+ * （实锤根因：cwd 固定 ROOT 时 napcat.bat 的 `node.exe ./index.js` 从项目根找
+ * 模块失败秒退，3000 端口从不监听 → 面板「操作中」永等不到翻转）；路径未配置
+ * → null（未就绪）。
+ * 注意：args 必须传完整路径而非 basename——实测 cmd /c 在 Node spawn 下对纯
+ * 文件名（含 .\ 前缀）查找不可靠（「不是内部或外部命令」），完整路径 + cwd 才
+ * 是可靠形态（本单行为验证脚本两个方向实测钉死）。
+ * 无占位符：完整命令行 + cwd: ROOT（f184c71 语义，向后兼容）。
+ * 路径/命令不含引号——含空格路径由 Node spawn 数组参数组装自动加引号、cmd /S
+ * 去引号执行（loadDevEnv 剥离 .env 首尾引号，模板写引号必坏）。cmd 字段 = 替换
+ * 后的最终命令（日志展示用 + 非 Windows 分支 spawn 用）。
  */
-function resolveNapcatCmd(cmd, napcatPath) {
-  if (!cmd.includes(NAPCAT_PATH_PLACEHOLDER)) return cmd
+function resolveNapcatSpawn(cmd, napcatPath) {
+  if (!cmd.includes(NAPCAT_PATH_PLACEHOLDER)) {
+    return { args: ['/c', cmd], cwd: ROOT, cmd }
+  }
   const p = (napcatPath || '').trim()
   if (!p) return null
-  return cmd.replaceAll(NAPCAT_PATH_PLACEHOLDER, p)
+  return {
+    args: ['/c', p],
+    cwd: path.dirname(p),
+    cmd: cmd.replaceAll(NAPCAT_PATH_PLACEHOLDER, p),
+  }
 }
 
 /** 解析 ONEBOT_API_BASE 为 host/port（容错：非法 URL 回退默认 127.0.0.1:3000） */
@@ -381,29 +397,32 @@ async function ensureNapcat() {
     )
     return
   }
-  const resolved = resolveNapcatCmd(cmd, loadNapcatConfig().napcatPath)
-  if (resolved === null) {
+  const spec = resolveNapcatSpawn(cmd, loadNapcatConfig().napcatPath)
+  if (spec === null) {
     console.log(
       `[dev] NAPCAT_LAUNCH_CMD 含 ${NAPCAT_PATH_PLACEHOLDER} 但未配置路径——跳过拉起（请在配置页面「NapCat 启动路径」填写本机路径）`
     )
     return
   }
-  cmd = resolved
   const { host, port } = parseNapcatApiBase()
   if (await isPortOpen(host, port)) {
     console.log(`[dev] NapCat 已在运行（${host}:${port} 已监听），跳过拉起`)
     return
   }
   const child = isWindows
-    ? spawn('cmd.exe', ['/c', cmd], {
-        cwd: ROOT,
+    ? spawn('cmd.exe', spec.args, {
+        cwd: spec.cwd,
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
       })
-    : spawn(cmd, { cwd: ROOT, detached: true, stdio: 'ignore', shell: true })
+    : spawn(spec.cmd, { cwd: spec.cwd, detached: true, stdio: 'ignore', shell: true })
   fs.writeFileSync(NAPCAT_PID_FILE, String(child.pid))
-  console.log(`[dev] NapCat 已拉起 (pid=${child.pid})，命令: ${cmd}`)
+  console.log(
+    `[dev] NapCat 已拉起 (pid=${child.pid})，命令: ${spec.cmd}${
+      spec.cwd !== ROOT ? `（cwd: ${spec.cwd}）` : ''
+    }`
+  )
   child.on('error', (err) => {
     console.error(`[dev] NapCat 启动失败: ${err.message}`)
     try {

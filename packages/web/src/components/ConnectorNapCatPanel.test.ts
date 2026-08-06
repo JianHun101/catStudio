@@ -68,12 +68,26 @@ describe('ConnectorNapCatPanel 启动路径配置', () => {
 
   it('手动填写说明——浏览器无法选择本地文件路径（安全沙箱）', () => {
     expect(source).toContain('浏览器无法直接选择本地文件路径')
-    expect(source).toContain('.exe / .bat')
+    expect(source).toContain('.exe /') // 换行拆开（.exe / .bat），断言前缀即可
   })
 
   it('占位符未配路径 → 引导「请在下方填写路径」', () => {
     expect(source).toContain('{NAPCAT_PATH}')
     expect(source).toContain('请在下方')
     expect(source).toContain('!status.launchReady')
+  })
+
+  it('「浏览…」按钮 → 打开 NapcatPathPicker 选择器弹窗', () => {
+    expect(source).toContain('浏览…')
+    expect(source).toContain('pickerOpen = true')
+    expect(source).toContain("import NapcatPathPicker from './NapcatPathPicker.vue'")
+    expect(source).toContain('<NapcatPathPicker')
+  })
+
+  it('选择器回填 → onPathPicked 写入路径输入框并关闭弹窗', () => {
+    expect(source).toContain('function onPathPicked(picked: string): void')
+    expect(source).toContain('napcatPath.value = picked')
+    expect(source).toContain('pickerOpen.value = false')
+    expect(source).toContain('@select="onPathPicked"')
   })
 })

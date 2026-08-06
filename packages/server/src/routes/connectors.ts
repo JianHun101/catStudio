@@ -7,7 +7,7 @@
  */
 import { createHmac } from 'node:crypto'
 import { connect } from 'node:net'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import {
@@ -315,6 +315,63 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
       JSON.stringify({ napcatPath, updatedAt: new Date().toISOString() }, null, 2)
     )
     return reply.send({ ok: true, napcatPath })
+  })
+
+  // ─── NapCat 路径浏览（只读目录导航，零 spawn） ──────────────────
+  // 浏览器 file input 拿不到本地绝对路径（安全沙箱，只能拿 C:\fakepath\…）→ 页面用
+  // 「路径输入框 + 浏览选择器」：本接口做只读导航——dir 空 → 盘符列表（A:-Z: 枚举）；
+  // dir 存在 → 目录条目（executable = .exe/.bat/.cmd 后缀，前端高亮可选中项）。
+  // 不存在/非目录/读失败 → 400。零 spawn，与「server 永不 spawn」架构一致。
+  app.get('/api/connectors/napcat/browse', async (req, reply) => {
+    const { dir } = req.query as { dir?: string }
+    const requested = typeof dir === 'string' ? dir.trim() : ''
+    if (!requested) {
+      const drives: string[] = []
+      for (let code = 65; code <= 90; code++) {
+        const drive = `${String.fromCharCode(code)}:\\`
+        try {
+          if (existsSync(drive)) drives.push(drive)
+        } catch {}
+      }
+      return reply.send({
+        ok: true,
+        dir: null,
+        parent: null,
+        entries: drives.map((d) => ({ name: d, type: 'dir', executable: false })),
+      })
+    }
+    let st
+    try {
+      st = statSync(requested)
+    } catch {
+      return reply.status(400).send({ error: '路径不存在' })
+    }
+    if (!st.isDirectory()) {
+      return reply.status(400).send({ error: '不是目录' })
+    }
+    let entries: { name: string; type: string; executable: boolean }[] = []
+    try {
+      entries = readdirSync(requested, { withFileTypes: true })
+        .filter((e) => e.isDirectory() || e.isFile())
+        .sort((a, b) => {
+          if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1
+          return a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+        })
+        .map((e) => ({
+          name: e.name,
+          type: e.isDirectory() ? 'dir' : 'file',
+          executable: !e.isDirectory() && /\.(exe|bat|cmd)$/i.test(e.name),
+        }))
+    } catch {
+      return reply.status(400).send({ error: '目录读取失败' })
+    }
+    const parent = dirname(requested)
+    return reply.send({
+      ok: true,
+      dir: requested,
+      parent: parent === requested ? null : parent, // 盘符根（D:\）dirname 是自身 → null
+      entries,
+    })
   })
 
   // ─── OneBot v11 webhook ────────────────────────

@@ -9,7 +9,7 @@ import { createHmac } from 'node:crypto'
 import { createServer, type AddressInfo } from 'node:net'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository, connectorBindings as bindingsRepo } from '../db/repository/index.js'
@@ -827,5 +827,96 @@ describe('Connector Routes', () => {
       res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
       expect(JSON.parse(res.body).launchReady).toBe(true)
     })
+  })
+})
+
+describe('NapCat 路径浏览（只读目录导航，零 spawn）', () => {
+  // 真实文件系统目录（browse 读真实路径；node_modules/.cache 下天然被 gitignore 覆盖）
+  const browseTmpDir = path.join('node_modules', '.cache', 'restart-test-browse')
+  let browseApp: FastifyInstance
+
+  beforeAll(async () => {
+    rmSync(browseTmpDir, { recursive: true, force: true })
+    mkdirSync(path.join(browseTmpDir, 'shell'), { recursive: true })
+    writeFileSync(path.join(browseTmpDir, 'napcat.bat'), 'node ./index.js\n')
+    writeFileSync(path.join(browseTmpDir, 'shell', 'index.js'), 'console.log("ok")\n')
+    writeFileSync(path.join(browseTmpDir, 'notes.txt'), 'plain file\n')
+    const testDb = createTestDb()
+    setDb(testDb)
+    initRepository(testDb)
+    browseApp = await buildTestApp()
+    const { connectorRoutes } = await import('./connectors.js')
+    await browseApp.register(connectorRoutes)
+  })
+
+  afterAll(async () => {
+    rmSync(browseTmpDir, { recursive: true, force: true })
+    resetDb()
+  })
+
+  it('dir 空 → 盘符列表（A:-Z: 枚举，全部 dir 类型）', async () => {
+    const res = await browseApp.inject({ method: 'GET', url: '/api/connectors/napcat/browse' })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.dir).toBeNull()
+    expect(body.parent).toBeNull()
+    expect(body.entries.length).toBeGreaterThan(0)
+    for (const e of body.entries) {
+      expect(e.type).toBe('dir')
+      expect(e.executable).toBe(false)
+      expect(e.name).toMatch(/^[A-Z]:\\$/) // 盘符形态 C:\（反斜杠结尾）
+    }
+  })
+
+  it('dir 存在 → 目录优先排序 + executable 标记（.bat 命中、.txt 不命中）', async () => {
+    const res = await browseApp.inject({
+      method: 'GET',
+      url: `/api/connectors/napcat/browse?dir=${encodeURIComponent(browseTmpDir)}`,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.dir).toBe(browseTmpDir)
+    expect(body.parent).not.toBeNull()
+    // 目录优先：shell（dir）在 notes.txt（file）之前
+    expect(body.entries[0].name).toBe('shell')
+    expect(body.entries[0].type).toBe('dir')
+    const shell = body.entries.find((e: any) => e.name === 'shell')
+    const bat = body.entries.find((e: any) => e.name === 'napcat.bat')
+    const txt = body.entries.find((e: any) => e.name === 'notes.txt')
+    expect(shell.type).toBe('dir')
+    expect(bat.executable).toBe(true)
+    expect(txt.executable).toBe(false)
+    expect(txt.type).toBe('file')
+  })
+
+  it('盘符根目录 → parent null（dirname 自身不上溯）', async () => {
+    // Windows 盘符根（如 C:\）的 dirname 是自身 → parent 必须为 null
+    const driveRoot = path.parse(process.cwd()).root
+    const res = await browseApp.inject({
+      method: 'GET',
+      url: `/api/connectors/napcat/browse?dir=${encodeURIComponent(driveRoot)}`,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.parent).toBeNull()
+  })
+
+  it('dir 不存在 → 400 路径不存在；dir 是文件 → 400 不是目录', async () => {
+    const missing = await browseApp.inject({
+      method: 'GET',
+      url:
+        '/api/connectors/napcat/browse?dir=' + encodeURIComponent(path.join(browseTmpDir, 'nope')),
+    })
+    expect(missing.statusCode).toBe(400)
+    expect(JSON.parse(missing.body).error).toBe('路径不存在')
+
+    const file = await browseApp.inject({
+      method: 'GET',
+      url:
+        '/api/connectors/napcat/browse?dir=' +
+        encodeURIComponent(path.join(browseTmpDir, 'notes.txt')),
+    })
+    expect(file.statusCode).toBe(400)
+    expect(JSON.parse(file.body).error).toBe('不是目录')
   })
 })

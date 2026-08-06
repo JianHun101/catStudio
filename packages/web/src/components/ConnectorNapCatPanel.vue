@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { api, type OneBotStatus } from '@/composables/useApi'
+import NapcatPathPicker from './NapcatPathPicker.vue'
 
 /**
  * NapCat 生命周期面板（连接器配置弹窗 Tab2）。
@@ -25,6 +26,14 @@ const napcatPath = ref('')
 const saving = ref(false)
 const pathError = ref('')
 const pathSaved = ref('')
+/** 路径浏览选择器（NapcatPathPicker）——浏览器拿不到本地路径，选择器走 server 只读导航 */
+const pickerOpen = ref(false)
+
+function onPathPicked(picked: string): void {
+  napcatPath.value = picked
+  pathSaved.value = ''
+  pickerOpen.value = false
+}
 
 async function loadConfig(): Promise<void> {
   try {
@@ -163,13 +172,14 @@ onUnmounted(() => {
           :disabled="saving"
           spellcheck="false"
         />
+        <button class="btn-save" :disabled="saving" @click="pickerOpen = true">浏览…</button>
         <button class="btn-save" :disabled="saving" @click="savePath">
           {{ saving ? '保存中…' : '保存' }}
         </button>
       </div>
       <div class="path-hint">
-        浏览器无法直接选择本地文件路径，请手动填写完整路径（.exe / .bat）；保存后点「启动
-        NapCat」立即生效，无需重启
+        浏览器无法直接选择本地文件路径——点「浏览…」逐层选择，或手动填写完整路径（.exe /
+        .bat）；保存后点「启动 NapCat」立即生效，无需重启
       </div>
       <div v-if="pathError" class="error-msg">{{ pathError }}</div>
       <div v-if="pathSaved" class="ok-msg">{{ pathSaved }}</div>
@@ -193,6 +203,8 @@ onUnmounted(() => {
     </div>
 
     <div v-if="actionError" class="error-msg">{{ actionError }}</div>
+
+    <NapcatPathPicker v-if="pickerOpen" @select="onPathPicked" @close="pickerOpen = false" />
   </div>
 </template>
 

@@ -69,6 +69,20 @@ export interface NapcatConfig {
   pathExists: boolean | null
 }
 
+/** NapCat 路径浏览条目（只读目录导航——浏览器拿不到本地路径，选择器走 server 列目录） */
+export interface NapcatBrowseEntry {
+  name: string
+  type: 'dir' | 'file'
+  executable: boolean
+}
+
+export interface NapcatBrowseResult {
+  ok: boolean
+  dir: string | null
+  parent: string | null
+  entries: NapcatBrowseEntry[]
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -176,4 +190,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  // NapCat 路径浏览（只读目录导航：dir 空 → 盘符列表；dir 存在 → 目录条目）
+  browseNapcatDir: (dir?: string) => {
+    const query = dir ? `?dir=${encodeURIComponent(dir)}` : ''
+    return request<NapcatBrowseResult>(`/connectors/napcat/browse${query}`)
+  },
 }
