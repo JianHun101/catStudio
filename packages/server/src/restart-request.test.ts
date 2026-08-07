@@ -71,6 +71,38 @@ describe('isRestartRequestContent', () => {
     // 无原因壳时 after 原样返回是既有语义（与「【重启请求】重启 → 重启」等价，『』不例外）
     expect(extractRestartReason('讨论重启机制时用『重启请求』四字即可')).toBe('四字即可')
   })
+
+  // ─── 容错三件套（2026-08-07 店长触发失败根治）──────
+  // 事故：店长发「重启请求 原因：xxx」——裸四字（无『』）+ 空格，识别完全不命中。
+  // 识别层对 LLM 产出方差放宽容忍（标记无括号 / 空格 / 半角冒号），防下次再漏。
+
+  it('容错①：标记与原因壳之间有空格 → 命中（自然行文会加空格）', () => {
+    expect(isRestartRequestContent('收到。先自查链路：【重启请求】 原因：服务器卡了')).toBe(true)
+    expect(extractRestartReason('收到。先自查链路：【重启请求】 原因：服务器卡了')).toBe(
+      '服务器卡了'
+    )
+  })
+
+  it('容错②：裸四字「重启请求」无括号 → 命中（prompt「四字」表述诱导省略括号的真实失败模式）', () => {
+    expect(isRestartRequestContent('收到。先自查链路：重启请求 原因：服务器卡了')).toBe(true)
+    expect(extractRestartReason('收到。先自查链路：重启请求 原因：服务器卡了')).toBe('服务器卡了')
+    expect(isRestartRequestContent('重启请求原因：测试')).toBe(true)
+    expect(extractRestartReason('重启请求原因：测试')).toBe('测试')
+  })
+
+  it('容错③：半角冒号「原因:」→ 命中（与 extractRestartReason 的 [:：] 对齐，消除识别/提取双契约）', () => {
+    expect(isRestartRequestContent('【重启请求】原因: 测试')).toBe(true)
+    expect(extractRestartReason('【重启请求】原因: 测试')).toBe('测试')
+  })
+
+  it('防复述扩展：间隔词打断「重启请求…原因：」连续串 → 不误触发', () => {
+    expect(isRestartRequestContent('上次说了重启请求格式为【重启请求】四字 + 原因：壳')).toBe(false)
+  })
+
+  it('复述抢占残余面（已知限制，prompt 缓解）：完整叙述「重启请求 原因：」会命中——代价不对称接受', () => {
+    // 误触发 = 气泡按钮可见可取消 + TTL 10 分钟；漏触发 = 用户手动重启（本次事故代价更高）
+    expect(isRestartRequestContent('上次重启请求 原因：服务器卡了，批准后重启完成')).toBe(true)
+  })
 })
 
 // ─── createRestartRequest 覆盖判定（TTL 覆盖语义）──────

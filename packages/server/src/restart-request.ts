@@ -67,20 +67,28 @@ function normalizeRestartPrefix(content: string): string {
  * 检测消息内容是否为重启请求——行首【重启请求】或任意位置「【重启请求】原因：」即命中。
  * 行首精确匹配兼容历史消息；嵌中命中覆盖「叙述 + 请求合并」的真实 agent 产出模式
  * （agent 回复天然带叙述前文，行首 startsWith 与产出模式不匹配——第六次行首事故根因）。
- * 误触发面：仅复盘文字也写「【重启请求】原因：」才会误触发，幂等 + 过期兜底。
+ * 容错三件套（2026-08-07 店长触发失败根治——「重启请求 原因：」裸四字 + 空格完全不命中）：
+ *   ① 裸四字「重启请求」无括号也命中——prompt「『重启请求』四字」表述诱导 LLM 省略括号；
+ *   ② 标记与原因壳之间允许空白（自然行文会加空格）；
+ *   ③ 冒号兼容全/半角（与 extractRestartReason 的 [:：] 对齐，避免识别与提取两套契约）。
+ * 误触发面：复盘文字需构成「重启请求 + 原因：」连续串才命中（防复述用例钉死）；残余的
+ * 完整叙述复述（如「上次重启请求 原因：卡了」）会命中——已知限制（复述抢占），代价不对称：
+ * 误触发 = 气泡按钮可见可取消 + TTL 10 分钟；漏触发 = 用户手动重启（本次事故），故放宽容忍。
  * 『重启请求』（seed-data prompt 教的写法）先归一化为【重启请求】再判定，两写法等价（见上）。
  */
 export function isRestartRequestContent(content: string): boolean {
   const normalized = normalizeRestartPrefix(content)
-  return normalized.startsWith(RESTART_PREFIX) || normalized.includes(`${RESTART_PREFIX}原因：`)
+  if (normalized.startsWith(RESTART_PREFIX)) return true
+  return /(?:【重启请求】|重启请求)\s*原因[:：]/.test(normalized)
 }
 
-/** 从「…【重启请求】原因：xxx」提取原因（从标记后提取至段落行尾，嵌中/行首通用，缺省兜底；『』同义） */
+/** 从「…【重启请求】原因：xxx」提取原因（从标记后提取至段落行尾，嵌中/行首通用，缺省兜底；『』同义、裸四字兼容） */
 export function extractRestartReason(content: string): string {
   const normalized = normalizeRestartPrefix(content)
-  const idx = normalized.indexOf(RESTART_PREFIX)
-  if (idx === -1) return '用户请求'
-  const after = normalized.slice(idx + RESTART_PREFIX.length).trim()
+  // 标记兼容【】/『』/裸四字——与 isRestartRequestContent 同一容错面，防「识别命中但提取失配」
+  const markerMatch = normalized.match(/(【重启请求】|重启请求)/)
+  if (!markerMatch) return '用户请求'
+  const after = normalized.slice((markerMatch.index ?? 0) + markerMatch[0].length).trim()
   // m 标志：$ 匹配行尾——reason 只取到段落结束（下个换行）
   const reasonMatch = after.match(/^原因[:：]\s*(.*)$/m)
   if (reasonMatch) return reasonMatch[1].trim() || '用户请求'
