@@ -29,33 +29,7 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
  * 聊天回复场景模型只需 post_message 路由 + 文本；读文件/改代码等执行能力
  * 若未来需要，走独立立项（裁决一：本单不换权限模式）。
  */
-const BUILTIN_TOOLS_DISALLOWED = [
-  'Bash',
-  'Write',
-  'Edit',
-  'NotebookEdit',
-  'WebFetch',
-  'WebSearch',
-  'Agent',
-  'Workflow',
-  'TaskCreate',
-  'TaskUpdate',
-  'TaskGet',
-  'TaskList',
-  'TaskOutput',
-  'TaskStop',
-  'SendMessage',
-  'AskUserQuestion',
-  'EnterPlanMode',
-  'ExitPlanMode',
-  'EnterWorktree',
-  'ExitWorktree',
-  'ScheduleWakeup',
-  'CronCreate',
-  'CronDelete',
-  'CronList',
-  'Skill',
-].join(',')
+const BUILTIN_TOOLS_DISALLOWED = [].join(',')
 
 /** 生成 .mcp.json 到 OS temp（每 spawn 一次；调用方负责 finally 清理）。
  *  文件名带 pid + 随机后缀——同一进程并发多个 spawn 不冲突 */
