@@ -51,6 +51,9 @@ describe('ChatPanel markdown table overflow', () => {
     // 修复为 display:block + max-width + overflow-x 滚动（与 pre 代码块同构逃生通道）
     const tableBlock = source.match(/\.chat-panel \.msg-text table\s*\{[^}]*\}/s)
     expect(tableBlock).toBeTruthy()
+    // 根因锁：display:block 使 width:100% 从建议值变硬约束、overflow-x 才能创建滚动容器——
+    // 只锁 overflow-x/max-width 表征拦不住删 display:block 后的复发（同 10070d1 黑名单断言教训）
+    expect(tableBlock![0]).toContain('display: block')
     expect(tableBlock![0]).toContain('overflow-x: auto')
     expect(tableBlock![0]).toContain('max-width: 100%')
   })
