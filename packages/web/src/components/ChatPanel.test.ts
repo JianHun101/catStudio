@@ -56,6 +56,26 @@ describe('ChatPanel markdown table overflow', () => {
     expect(tableBlock![0]).toContain('display: block')
     expect(tableBlock![0]).toContain('overflow-x: auto')
     expect(tableBlock![0]).toContain('max-width: 100%')
+    // 漂移锁：box-sizing:border-box 防 content-box 下 width:100% + border 1px 溢出 2px，
+    // 触发自身 overflow-x:auto → 右缘漂移 + 滚动区空白（13:21 实证根因）
+    expect(tableBlock![0]).toContain('box-sizing: border-box')
+  })
+
+  it('文本溢出逃生：msg-text 规则含 overflow-wrap: anywhere，pre 覆盖回 normal，td/th 断行', () => {
+    // 回归保护：长无断点串（URL/工具名/hash/路径）在普通段落文本中会撑破气泡——
+    // code 已有 word-break:break-all 但裸文本无处理（13:21 实证：40+ 字符工具名串溢出）。
+    // anywhere 允许任意字符间断行；pre 必须覆盖回 normal（代码块走 overflow-x 滚动不换行）。
+    const msgTextBlock = source.match(/\.msg-text\s*\{[^}]*\}/s)
+    expect(msgTextBlock).toBeTruthy()
+    expect(msgTextBlock![0]).toContain('overflow-wrap: anywhere')
+    const preBlock = source.match(/\.chat-panel \.msg-text pre\s*\{[^}]*\}/s)
+    expect(preBlock).toBeTruthy()
+    expect(preBlock![0]).toContain('overflow-wrap: normal')
+    const tdBlock = source.match(
+      /\.chat-panel \.msg-text th,\s*\n\s*\.chat-panel \.msg-text td\s*\{[^}]*\}/s
+    )
+    expect(tdBlock).toBeTruthy()
+    expect(tdBlock![0]).toContain('overflow-wrap: anywhere')
   })
 })
 

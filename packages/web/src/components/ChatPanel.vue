@@ -1759,6 +1759,11 @@ function statusLabelZh(status: string): string {
   font-size: 16px;
   line-height: 1.65;
   color: var(--text-primary);
+  /* 文本溢出逃生：长无断点串（URL/工具名/hash/路径）在普通段落中会撑破气泡——
+     code 已有 word-break:break-all，但裸文本无任何断行处理（13:21 实证：40+ 字符
+     工具名串溢出）。anywhere 允许在任意字符间断行（长串无自然断点）；pre 下显式
+     覆盖回 normal（代码块走 overflow-x 滚动，不换行）。 */
+  overflow-wrap: anywhere;
 }
 
 /* first/last paragraph margins */
@@ -2388,6 +2393,8 @@ function statusLabelZh(status: string): string {
   padding: 12px 14px;
   overflow-x: auto;
   margin: 8px 0;
+  /* 覆盖 .msg-text 的 overflow-wrap:anywhere——代码块保持原样换行语义，长行走横向滚动 */
+  overflow-wrap: normal;
 }
 
 .chat-panel .msg-text pre code {
@@ -2704,8 +2711,11 @@ function statusLabelZh(status: string): string {
   /* 表格溢出逃生通道：display:block 使 width:100% 成为硬约束（table 布局下只是建议值，
      长单元格 min-content 会撑破气泡）；max-width 双保险，溢出横向滚动（与 pre 同构）。
      overflow-y:hidden 防浏览器把 visible 强制计算为 auto 引入纵向滚动条；
-     圆角裁剪仍由 non-visible overflow 提供。 */
+     圆角裁剪仍由 non-visible overflow 提供。
+     box-sizing:border-box 防 content-box 下 width:100% + border 1px 溢出 2px，
+     触发自身 overflow-x:auto 产生右缘漂移 + 滚动区空白（13:21 实证）。 */
   display: block;
+  box-sizing: border-box;
   border-collapse: separate;
   border-spacing: 0;
   width: 100%;
@@ -2725,6 +2735,8 @@ function statusLabelZh(status: string): string {
   padding: 8px 12px;
   text-align: left;
   vertical-align: top;
+  /* 单元格内长串（hash/路径/工具名）断行，减少对横向滚动的依赖 */
+  overflow-wrap: anywhere;
 }
 
 .chat-panel .msg-text th:last-child,
