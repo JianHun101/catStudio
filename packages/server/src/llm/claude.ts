@@ -31,11 +31,8 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
  */
 const BUILTIN_TOOLS_DISALLOWED = [
   'Bash',
-  'Read',
   'Write',
   'Edit',
-  'Glob',
-  'Grep',
   'NotebookEdit',
   'WebFetch',
   'WebSearch',
