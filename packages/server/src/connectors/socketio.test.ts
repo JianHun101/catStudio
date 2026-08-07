@@ -40,6 +40,7 @@ vi.mock('../llm/registry.js', () => ({
 vi.mock('../memory/index.js', () => ({
   saveMessageMemory: vi.fn().mockResolvedValue(undefined),
   buildMemoryContext: vi.fn().mockResolvedValue(''),
+  buildKnowledgeContext: vi.fn().mockResolvedValue(''),
 }))
 
 vi.mock('../summarizer/index.js', () => ({

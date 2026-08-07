@@ -20,10 +20,16 @@
 
 import type { FastifyInstance } from 'fastify'
 import { createLogger } from '../logger.js'
-import { sessions as sessionsRepo, agents as agentsRepo } from '../db/repository/index.js'
+import {
+  sessions as sessionsRepo,
+  agents as agentsRepo,
+  knowledge as knowledgeRepo,
+} from '../db/repository/index.js'
 import { getActiveStream } from '../connectors/socketio.js'
 import { storeRouteSignal } from '../llm/route-signals.js'
 import { filterAllowedMentions } from '../dispatch/mention-policy.js'
+import { embedText } from '../memory/embedding.js'
+import { vectorToBlob } from '../memory/index.js'
 import type { AgentRole } from '@cat-study/shared'
 
 const log = createLogger('internal')
@@ -35,6 +41,14 @@ interface RouteSignalBody {
   targetCats?: unknown
   clientMessageId?: unknown
   triggerAuthorName?: unknown
+}
+
+interface KnowledgeSearchBody {
+  sessionId?: unknown
+  agentId?: unknown
+  msgId?: unknown
+  query?: unknown
+  topK?: unknown
 }
 
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
@@ -145,5 +159,93 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       targets: policy.allowed.map((a) => a.name),
     })
     return reply.send({ ok: true, reason: '信号已入队' })
+  })
+
+  app.post('/api/internal/knowledge-search', async (req, reply) => {
+    const body = (req.body ?? {}) as KnowledgeSearchBody
+
+    // ── 1. body 基本校验（400）── 与 route-signals 同款：防御纵深（mcp-server.mjs 已做参数校验）
+    const { sessionId, agentId, msgId, query } = body
+    if (
+      typeof sessionId !== 'string' ||
+      !sessionId ||
+      typeof agentId !== 'string' ||
+      !agentId ||
+      typeof msgId !== 'string' ||
+      !msgId
+    ) {
+      return reply.status(400).send({ ok: false, reason: 'sessionId/agentId/msgId 必填非空字符串' })
+    }
+    if (typeof query !== 'string' || !query.trim()) {
+      return reply.status(400).send({ ok: false, reason: 'query 必须是非空字符串' })
+    }
+    const topK = body.topK ?? 3
+    if (typeof topK !== 'number' || !Number.isInteger(topK) || topK < 1 || topK > 10) {
+      return reply.status(400).send({ ok: false, reason: 'topK 必须是 1-10 整数' })
+    }
+
+    // ── 2. lookup activeStreams（404）──
+    const stream = getActiveStream(agentId)
+    if (!stream) {
+      return reply
+        .status(404)
+        .send({ ok: false, reason: `agent ${agentId} 当前无活跃流，知识库检索被拒` })
+    }
+
+    // ── 3. token 精确匹配（401）──
+    const token = req.headers['x-signal-token']
+    if (typeof token !== 'string' || token !== stream.token) {
+      return reply.status(401).send({ ok: false, reason: 'x-signal-token 不匹配' })
+    }
+
+    // ── 4. 复合键 sessionId 匹配（409）──
+    if (stream.sessionId !== sessionId) {
+      return reply.status(409).send({
+        ok: false,
+        reason: `agent ${agentId} 正在会话 ${stream.sessionId} 执行，本请求会话 ${sessionId} 不匹配`,
+      })
+    }
+
+    // ── 5. 知识库检索（200）——无「目标猫」语义，跳过目标预校验 ──
+    // 单向量通道：query 原样嵌入（结构化 query 无口语歧义，不改写双通道）；
+    // 嵌入失败降级空结果（与 buildKnowledgeContext 同款，不阻塞）
+    let vector: number[]
+    try {
+      vector = await embedText(query.trim())
+    } catch (err: any) {
+      log.warn('knowledge search embedding failed', {
+        error: err.message,
+        sessionId,
+        agentId,
+        msgId,
+      })
+      return reply.send({ ok: true, results: [] })
+    }
+    if (vector.length === 0) {
+      log.warn('knowledge search embedding empty', { sessionId, agentId, msgId })
+      return reply.send({ ok: true, results: [] })
+    }
+    let rows
+    try {
+      rows = knowledgeRepo.searchKnowledgeByVector(vectorToBlob(vector), topK)
+    } catch (err: any) {
+      log.error('knowledge search failed', { error: err.message, sessionId, agentId, msgId })
+      return reply.status(500).send({ ok: false, reason: `知识库检索异常: ${err.message}` })
+    }
+    const results = rows.map((r) => ({
+      id: r.id,
+      content: r.content,
+      source: r.source,
+      distance: r.distance,
+    }))
+    log.info('knowledge search', {
+      sessionId,
+      agentId,
+      msgId,
+      query: query.trim(),
+      topK,
+      hits: results.length,
+    })
+    return reply.send({ ok: true, results })
   })
 }

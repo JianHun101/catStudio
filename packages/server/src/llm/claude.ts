@@ -26,10 +26,46 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
  * 店长裁决：用例 7 生效 → claude.ts 顺带加内置工具黑名单（内置清单有限、
  * 可列全，净改善）。注：--allowedTools 白名单管不到内置工具（case 6：
  * bypassPermissions 下 Bash 照调），必须显式黑名单才能收窄内置工具面。
- * 聊天回复场景模型只需 post_message 路由 + 文本；读文件/改代码等执行能力
- * 若未来需要，走独立立项（裁决一：本单不换权限模式）。
+ * 聊天回复场景模型只需 post_message + search_knowledge 路由 + 文本；
+ * 读文件/改代码等执行能力若未来需要，走独立立项（裁决一：本单不换权限模式）。
+ *
+ * 知识库 Phase 1 关键裁决：恢复 e5aa54d 的 28 工具全列——10070d1（删
+ * Read/Glob/Grep）/00a9a95（删完剩余全部）两个裸提交无 rationale 逐步
+ * 清空，「含 Bash 且非空」判据拦不住删减，claude.test.ts 的
+ * EXPECTED_DISALLOWED 全列精确比对（数量 + 顺序双锁）与下方常量同源钉死。
+ * 仅 context 分支加（--disallowedTools 只在 context 存在时拼入 args，
+ * 无 context 路径零参数变化——claude.test.ts:196-197 基线断言参数不在）。
  */
-const BUILTIN_TOOLS_DISALLOWED = [].join(',')
+const BUILTIN_TOOLS_DISALLOWED = [
+  'Bash',
+  'Read',
+  'Write',
+  'Edit',
+  'Glob',
+  'Grep',
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'Agent',
+  'Workflow',
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'SendMessage',
+  'AskUserQuestion',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'EnterWorktree',
+  'ExitWorktree',
+  'ScheduleWakeup',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'Skill',
+].join(',')
 
 /** 生成 .mcp.json 到 OS temp（每 spawn 一次；调用方负责 finally 清理）。
  *  文件名带 pid + 随机后缀——同一进程并发多个 spawn 不冲突 */
@@ -133,9 +169,10 @@ export class ClaudeAdapter implements LLMAdapter {
       args.push(
         '--mcp-config',
         mcpConfigPath,
-        // 白名单只留 post_message（spike case 3/4 双证实效：MCP 工具面收窄）
+        // 白名单双工具（spike case 3/4 双证实效：MCP 工具面收窄；
+        // 知识库 Phase 1 加 search_knowledge——语义检索工具面）
         '--allowedTools',
-        'mcp__catstudy__post_message',
+        'mcp__catstudy__post_message,mcp__catstudy__search_knowledge',
         // 内置工具黑名单（spike case 7 实证生效——店长裁决：列全净改善）
         '--disallowedTools',
         BUILTIN_TOOLS_DISALLOWED

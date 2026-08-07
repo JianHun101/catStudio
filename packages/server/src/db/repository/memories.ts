@@ -72,19 +72,36 @@ export interface MemorySearchResult {
  *
  * maxDistance 为距离下限：余弦距离超过此值的记忆不召回。
  * 子查询包裹使 vec_distance_cosine 每行只求值一次（WHERE 中不能引用同层 SELECT 别名）。
+ *
+ * table 参数（知识库 Phase 1）：可选 'memories'（默认）/ 'knowledge'——
+ * knowledge.ts 复用同一查询体。安全边界：入口白名单校验（非二者抛
+ * TypeError），参数来源永不放宽到外部输入。knowledge 表无
+ * source_message_id 列，其 source 列经 `source AS source_message_id`
+ * 统一映射为「来源标注」载体（memories=消息 id，knowledge=文档来源）。
  */
+const SEARCHABLE_TABLES = new Set(['memories', 'knowledge'])
+
 export function searchMemoriesByVector(
   queryBlob: Buffer,
   topK: number,
-  maxDistance: number
+  maxDistance: number,
+  table: 'memories' | 'knowledge' = 'memories'
 ): MemorySearchResult[] {
+  if (!SEARCHABLE_TABLES.has(table)) {
+    throw new TypeError(`searchMemoriesByVector: 不支持的检索表 ${table}（仅 memories/knowledge）`)
+  }
+  // 列集合按表字面量取（与表名同源白名单）——memories 取 source_message_id，
+  // knowledge 无该列，内层把 source 映射为 source_message_id 输出列名（外层
+  // 只能引用子查询输出列名，若外层再写 source 会 no such column）
+  const innerSourceColumn =
+    table === 'knowledge' ? 'source AS source_message_id' : 'source_message_id'
   return db
     .prepare(
       `SELECT id, content, source_message_id, created_at, distance
        FROM (
-         SELECT id, content, source_message_id, created_at,
+         SELECT id, content, ${innerSourceColumn}, created_at,
                 vec_distance_cosine(embedding, ?) AS distance
-         FROM memories
+         FROM ${table}
          WHERE embedding IS NOT NULL
        )
        WHERE distance < ?

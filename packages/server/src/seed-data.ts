@@ -19,6 +19,11 @@ export function fixedId(name: string): string {
   return uuidV5(`cat-study.agent.${name}`, SEED_NAMESPACE)
 }
 
+/** 知识文档 id（同命名空间、不同前缀——与 agent id 空间隔离） */
+export function knowledgeId(name: string): string {
+  return uuidV5(`cat-study.knowledge.${name}`, SEED_NAMESPACE)
+}
+
 export interface DemoAgent {
   id: string
   name: string
@@ -243,6 +248,52 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'reviewer',
+    },
+  ]
+}
+
+// ═══ 知识库初始文档（知识库 Phase 1） ═══
+
+/**
+ * 知识文档条目 — 运营方维护的标准数据（非对话记忆，不可被对话 UPDATE 修正）。
+ * id 固定（uuid.v5，knowledgeId）→ seed 重跑 ON CONFLICT 幂等。
+ * 首期 2-3 条：项目接入/工作规范类，模型经 search_knowledge 工具检索。
+ */
+export interface DemoKnowledgeDoc {
+  id: string
+  content: string
+  source: string
+  tags: string[]
+}
+
+export function buildDemoKnowledge(): DemoKnowledgeDoc[] {
+  return [
+    {
+      id: knowledgeId('提交规范'),
+      content:
+        '猫咖项目提交规范：每次代码提交必须带 "catstudy [uuid]" 标记（uuid = 触发消息 id，' +
+        'post-commit hook 据此自动投递审查链）；提交限定路径（git add 只加本次改动文件，' +
+        '禁止 git add -A）；提交信息中的代码行号必须 grep 实际核对后再落 commit。',
+      source: 'docs/CONTEXT.md · 猫咖约定',
+      tags: ['git', '提交规范', 'commit'],
+    },
+    {
+      id: knowledgeId('MCP 结构化路由'),
+      content:
+        '猫咖 MCP 结构化路由契约：投递下一棒优先调用 post_message 工具（targetCats 传目标猫' +
+        '完整名字，一次可投多个）；工具不可用或调用失败时降级为文本行首 @（必须独占一行）；' +
+        '叙述性提及其他猫用名字不用 @——@ 只表示真正的路由投递；嵌句 @ 解析层不认会静默丢单。',
+      source: 'docs/adr · MCP v4 契约',
+      tags: ['MCP', '路由', 'post_message', 'A2A'],
+    },
+    {
+      id: knowledgeId('上下文注入机制'),
+      content:
+        '猫咖上下文注入机制：system prompt 尾部按序拼接【相关记忆】与【知识库】两个独立区块' +
+        '——【相关记忆】来自对话向量记忆（去重三段式维护，可被对话修正），【知识库】来自运营方' +
+        '标准数据（语义密度高，检索阈值 0.35 更严，不可被对话覆盖）；两区块来源权威性不同，检索语义不可混淆。',
+      source: 'docs/plans/knowledge-base-v1.md',
+      tags: ['上下文', '记忆', '知识库', 'system prompt'],
     },
   ]
 }

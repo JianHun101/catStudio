@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { v5 as uuidV5 } from 'uuid'
-import { buildDemoAgents } from './seed-data.js'
+import { buildDemoAgents, buildDemoKnowledge, knowledgeId } from './seed-data.js'
 
 const SEED_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 
@@ -79,6 +79,36 @@ describe('seed helpers', () => {
     it('is derived from the same namespace', () => {
       const sessionId = fixedId('demo-session')
       expect(sessionId).toBe(uuidV5('cat-study.agent.demo-session', SEED_NAMESPACE))
+    })
+  })
+
+  describe('buildDemoKnowledge（知识库 Phase 1）', () => {
+    const docs = buildDemoKnowledge()
+
+    it('首期 2-3 条知识文档', () => {
+      expect(docs.length).toBeGreaterThanOrEqual(2)
+      expect(docs.length).toBeLessThanOrEqual(3)
+    })
+
+    it('每条：确定性 id / 非空 content / source / tags 数组', () => {
+      for (const d of docs) {
+        expect(d.id).toMatch(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+        )
+        expect(d.content.length).toBeGreaterThan(0)
+        expect(d.source.length).toBeGreaterThan(0)
+        expect(Array.isArray(d.tags)).toBe(true)
+        expect(d.tags.length).toBeGreaterThan(0)
+      }
+    })
+
+    it('id 幂等固定（knowledgeId 同命名空间、不同前缀——与 agent id 空间隔离）', () => {
+      const first = docs[0]
+      const again = buildDemoKnowledge().find((d) => d.id === first.id)!
+      expect(again.id).toBe(first.id)
+      expect(again.content).toBe(first.content)
+      // 前缀隔离：knowledgeId('提交规范') 与 fixedId('提交规范') 不同
+      expect(knowledgeId('提交规范')).not.toBe(fixedId('提交规范'))
     })
   })
 })

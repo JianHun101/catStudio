@@ -66,6 +66,15 @@ const SCHEMA_SQL = `
     FOREIGN KEY (agent_id) REFERENCES agents(id)
   );
 
+  CREATE TABLE IF NOT EXISTS knowledge (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    embedding BLOB,
+    source TEXT,
+    tags TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS execution_logs (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,

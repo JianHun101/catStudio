@@ -33,6 +33,44 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
   return results
 }
 
+/**
+ * 内置工具黑名单期望全列（验收 #8 关键裁决——知识库 Phase 1）。
+ * 与 claude.ts BUILTIN_TOOLS_DISALLOWED 同源钉死：e5aa54d 原 28 工具全列。
+ * 「含 Bash 且非空」判据拦不住删减（10070d1 删到剩 25 个时同样含 Bash 且
+ * 非空，历史实证）——全列精确比对（数量 + 顺序双锁）才是防静默清空/删减
+ * 再犯的完整闭环。修改黑名单必须同步更新本数组与 claude.ts 常量。
+ */
+const EXPECTED_DISALLOWED = [
+  'Bash',
+  'Read',
+  'Write',
+  'Edit',
+  'Glob',
+  'Grep',
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'Agent',
+  'Workflow',
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'SendMessage',
+  'AskUserQuestion',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'EnterWorktree',
+  'ExitWorktree',
+  'ScheduleWakeup',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'Skill',
+]
+
 describe('ClaudeAdapter', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -143,11 +181,27 @@ describe('ClaudeAdapter', () => {
   })
 
   it('buildEnv without context omits MCP variables (regression baseline)', () => {
-    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
-    const env = (adapter as any).buildEnv() as Record<string, string>
-    expect(env.CATSTUDY_SIGNAL_TOKEN).toBeUndefined()
-    expect(env.CATSTUDY_SESSION_ID).toBeUndefined()
-    expect(env.CATSTUDY_MSG_ID).toBeUndefined()
+    // 测试隔离：本测试可能在 MCP server 子进程环境下运行（spawn 时注入
+    // CATSTUDY_* 变量，buildEnv 的 ...process.env 会原样透传）——清理后再断言
+    const saved = {
+      token: process.env.CATSTUDY_SIGNAL_TOKEN,
+      sessionId: process.env.CATSTUDY_SESSION_ID,
+      msgId: process.env.CATSTUDY_MSG_ID,
+    }
+    delete process.env.CATSTUDY_SIGNAL_TOKEN
+    delete process.env.CATSTUDY_SESSION_ID
+    delete process.env.CATSTUDY_MSG_ID
+    try {
+      const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+      const env = (adapter as any).buildEnv() as Record<string, string>
+      expect(env.CATSTUDY_SIGNAL_TOKEN).toBeUndefined()
+      expect(env.CATSTUDY_SESSION_ID).toBeUndefined()
+      expect(env.CATSTUDY_MSG_ID).toBeUndefined()
+    } finally {
+      if (saved.token !== undefined) process.env.CATSTUDY_SIGNAL_TOKEN = saved.token
+      if (saved.sessionId !== undefined) process.env.CATSTUDY_SESSION_ID = saved.sessionId
+      if (saved.msgId !== undefined) process.env.CATSTUDY_MSG_ID = saved.msgId
+    }
   })
 
   // ─── chatStream MCP 挂载（--mcp-config / --allowedTools / --disallowedTools）───
@@ -172,12 +226,61 @@ describe('ClaudeAdapter', () => {
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
     expect(args).toContain('--mcp-config')
     expect(args).toContain('--allowedTools')
-    expect(args).toContain('mcp__catstudy__post_message')
     expect(args).toContain('--disallowedTools')
+    // 白名单双工具并存（逗号串单值——知识库 Phase 1 扩面）
+    const allowedIdx = args.indexOf('--allowedTools')
+    expect(args[allowedIdx + 1]).toContain('mcp__catstudy__post_message')
+    expect(args[allowedIdx + 1]).toContain('mcp__catstudy__search_knowledge')
     // .mcp.json 生成后由 finally 清理——断言临时文件已删
     const cfgIdx = args.indexOf('--mcp-config')
     expect(cfgIdx).toBeGreaterThan(-1)
     expect(existsSync(args[cfgIdx + 1])).toBe(false)
+  })
+
+  // ─── 验收 #8（知识库 Phase 1 关键裁决）：黑名单 28 工具全列精确比对 ───
+
+  it('chatStream with context disallows full 28 builtin tools (exact list, order-locked)', async () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: 0, killed: false }
+    vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
+    vi.mocked(parseClaudeCodeOutput).mockImplementation(async function* () {
+      yield { content: '', done: true }
+    })
+
+    await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'claude-sonnet-4-6',
+        context: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1', token: 'tok-1' },
+      })
+    )
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    const idx = args.indexOf('--disallowedTools')
+    expect(idx).toBeGreaterThan(-1)
+    // 全列精确比对（数量 + 顺序双锁）——防静默清空/删减再犯
+    expect(args[idx + 1]).toBe(EXPECTED_DISALLOWED.join(','))
+    expect(EXPECTED_DISALLOWED).toHaveLength(28)
+  })
+
+  // ─── 验收 #5/#6（知识库 Phase 1）：白名单双工具并存 ───
+
+  it('chatStream with context allows both MCP tools (post_message + search_knowledge)', async () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: 0, killed: false }
+    vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
+    vi.mocked(parseClaudeCodeOutput).mockImplementation(async function* () {
+      yield { content: '', done: true }
+    })
+
+    await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'claude-sonnet-4-6',
+        context: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1', token: 'tok-1' },
+      })
+    )
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    const idx = args.indexOf('--allowedTools')
+    expect(idx).toBeGreaterThan(-1)
+    expect(args[idx + 1]).toBe('mcp__catstudy__post_message,mcp__catstudy__search_knowledge')
   })
 
   it('chatStream without context keeps baseline args (no MCP flags)', async () => {

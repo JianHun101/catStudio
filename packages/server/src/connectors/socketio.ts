@@ -37,7 +37,7 @@ import {
 } from '../dispatch/index.js'
 import type { DispatchCommand } from '@cat-study/shared'
 import { getAdapterForAgent } from '../llm/registry.js'
-import { buildMemoryContext } from '../memory/index.js'
+import { buildMemoryContext, buildKnowledgeContext } from '../memory/index.js'
 import { createLogger } from '../logger.js'
 import {
   gitCommit,
@@ -2119,6 +2119,34 @@ async function runAgentReply(
       memoryTokens,
       totalContextChars: llmMessages.reduce((sum, m) => sum + m.content.length, 0),
       totalContextTokens: contextTokenStats.total + memoryTokens,
+    })
+  }
+
+  // 检索知识库并注入 system prompt（知识库 Phase 1）——buildMemoryContext
+  // 同款位置 + 同款 Promise.race 超时降级防护：知识库是读增强，不阻塞 LLM 调用。
+  // 独立【知识库】区块，零污染【相关记忆】
+  let knowledgeContext = ''
+  try {
+    knowledgeContext = await Promise.race([
+      buildKnowledgeContext(triggerMsg.content),
+      new Promise<string>((resolve) => setTimeout(() => resolve(''), MEMORY_TIMEOUT_MS)),
+    ])
+  } catch {
+    knowledgeContext = ''
+  }
+  if (knowledgeContext) {
+    llmMessages[0] = {
+      ...llmMessages[0],
+      content: llmMessages[0].content + knowledgeContext,
+    }
+    const knowledgeTokens = estimateTokens(knowledgeContext)
+    log.info('知识库上下文已注入', {
+      traceId,
+      agentId: agent.id,
+      knowledgeChars: knowledgeContext.length,
+      knowledgeTokens,
+      totalContextChars: llmMessages.reduce((sum, m) => sum + m.content.length, 0),
+      totalContextTokens: contextTokenStats.total + knowledgeTokens,
     })
   }
 

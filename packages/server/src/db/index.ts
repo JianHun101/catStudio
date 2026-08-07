@@ -92,6 +92,18 @@ export function initDb(): void {
       FOREIGN KEY (agent_id) REFERENCES agents(id)
     );
 
+    -- 知识库表（知识库 Phase 1）：运营方维护的标准数据，独立表不加 type 列
+    -- 混进 memories——对话记忆可被 UPDATE 修正（去重三段式），知识库不可被
+    -- 对话覆盖，复用表会让去重/更新语义硬分叉（roadmap 已定，保持）
+    CREATE TABLE IF NOT EXISTS knowledge (
+      id         TEXT PRIMARY KEY,
+      content    TEXT NOT NULL,
+      embedding  BLOB,              -- 512-dim f32，同 memories.embedding 格式
+      source     TEXT,              -- 来源标注（文档名/URL）
+      tags       TEXT,              -- JSON 字符串数组，检索过滤预留
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS execution_logs (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,

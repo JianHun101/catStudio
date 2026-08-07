@@ -17,6 +17,7 @@ import { setRepoDb as setAgentsDb } from './agents.js'
 import { setRepoDb as setSessionsDb } from './sessions.js'
 import { setRepoDb as setMessagesDb } from './messages.js'
 import { setRepoDb as setMemoriesDb } from './memories.js'
+import { setRepoDb as setKnowledgeDb } from './knowledge.js'
 import { setRepoDb as setExecutionLogsDb } from './executionLogs.js'
 import { setRepoDb as setSessionReadStateDb } from './sessionReadState.js'
 import { setRepoDb as setConnectorBindingsDb } from './connectorBindings.js'
@@ -27,6 +28,7 @@ export function initRepository(db: Database.Database): void {
   setSessionsDb(db)
   setMessagesDb(db)
   setMemoriesDb(db)
+  setKnowledgeDb(db)
   setExecutionLogsDb(db)
   setSessionReadStateDb(db)
   setConnectorBindingsDb(db)
@@ -37,6 +39,7 @@ export * as agents from './agents.js'
 export * as sessions from './sessions.js'
 export * as messages from './messages.js'
 export * as memories from './memories.js'
+export * as knowledge from './knowledge.js'
 export * as executionLogs from './executionLogs.js'
 export * as sessionReadState from './sessionReadState.js'
 export * as connectorBindings from './connectorBindings.js'

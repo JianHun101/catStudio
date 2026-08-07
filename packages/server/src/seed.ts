@@ -15,10 +15,21 @@ import {
   messages as messagesRepo,
   executionLogs as execLogsRepo,
   memories as memoriesRepo,
+  knowledge as knowledgeRepo,
 } from './db/repository/index.js'
-import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
+import {
+  buildDemoAgents,
+  buildDemoKnowledge,
+  DEMO_SESSION_ID,
+  DEMO_SESSION_TITLE,
+} from './seed-data.js'
+import { embedText } from './memory/embedding.js'
+import { vectorToBlob } from './memory/index.js'
+import { createLogger } from './logger.js'
 
-function seed(): void {
+const log = createLogger('seed')
+
+async function seed(): Promise<void> {
   const isReset = process.argv.includes('--reset')
 
   initDb()
@@ -66,7 +77,37 @@ function seed(): void {
   const sVerb = sResult.changes === 1 ? '✅' : '🔄'
   console.log(`  ${sVerb} Session: ${DEMO_SESSION_TITLE} (${DEMO_SESSION_ID})`)
 
+  // ── Upsert 知识文档（知识库 Phase 1）──────────────────
+  // 嵌入走 await embedText（首次触发 ~100MB 模型下载）；嵌入失败（抛错或
+  // 返回空向量）→ embedding 存 NULL + warn，不阻塞 seed 主流程（重跑幂等补齐）
+  const knowledgeDocs = buildDemoKnowledge()
+
+  for (const doc of knowledgeDocs) {
+    let embedding: Buffer | null = null
+    try {
+      const vec = await embedText(doc.content)
+      if (vec.length > 0) embedding = vectorToBlob(vec)
+    } catch (err: any) {
+      log.warn('知识文档嵌入失败，embedding 存 NULL', { docId: doc.id, error: err.message })
+    }
+    if (!embedding) {
+      console.log(`  ⚠️ ${doc.id} 嵌入失败，embedding 存 NULL（重跑幂等补齐）`)
+    }
+    const kResult = knowledgeRepo.upsertKnowledge(
+      doc.id,
+      doc.content,
+      embedding,
+      doc.source,
+      doc.tags
+    )
+    const kVerb = kResult.changes === 1 ? '✅' : '🔄'
+    console.log(`  ${kVerb} Knowledge: ${doc.id} (${doc.source})${embedding ? '' : ' [无嵌入]'}`)
+  }
+
   console.log('\n🌱 Seed complete!')
 }
 
-seed()
+seed().catch((err) => {
+  console.error('🌱 Seed failed:', err)
+  process.exit(1)
+})

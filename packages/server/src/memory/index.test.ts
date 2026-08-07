@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vite
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
-import { memories as memoriesRepo } from '../db/repository/index.js'
+import { memories as memoriesRepo, knowledge as knowledgeRepo } from '../db/repository/index.js'
 
 // 禁用去重/更新（避免 sqlite-vec vec_distance_cosine 不可用）
 process.env.MEMORY_DEDUP_ENABLED = '0'
@@ -305,6 +305,83 @@ describe('memory', () => {
       const ctx = await memoryModule.buildMemoryContext('x')
       expect(ctx).toContain('同向的记忆')
       expect(ctx).not.toContain('正交的记忆')
+    })
+  })
+
+  describe('buildKnowledgeContext', () => {
+    afterEach(() => {
+      delete process.env.KNOWLEDGE_TOP_K
+    })
+
+    /** 插入两条知识条目：同向（距离 0）+ 正交（距离 ≈0.99，0.35 阈值过滤） */
+    const insertKnowledgeFixture = () => {
+      const { vectorToBlob: toBlob } = memoryModule
+      knowledgeRepo.upsertKnowledge(
+        'k-near',
+        '提交规范：commit 必须带 catstudy [uuid] 标记',
+        toBlob([1, 120, 1, 0.5]), // == mock embedText('x')
+        'docs/CONTEXT.md',
+        ['git']
+      )
+      knowledgeRepo.upsertKnowledge(
+        'k-far',
+        '完全无关的知识条目',
+        toBlob([0, 0, 1, 0]),
+        'docs/roadmap.md',
+        ['other']
+      )
+    }
+
+    it('无命中返回空串（空表）', async () => {
+      const ctx = await memoryModule.buildKnowledgeContext('x')
+      expect(ctx).toBe('')
+    })
+
+    it('纯 @mention 不触发嵌入，返回空串', async () => {
+      mockEmbedText.mockClear()
+      const ctx = await memoryModule.buildKnowledgeContext('@店长 @ds猫')
+      expect(ctx).toBe('')
+      expect(mockEmbedText).not.toHaveBeenCalled()
+    })
+
+    it('命中输出独立【知识库】区块（与【相关记忆】并列格式）', async () => {
+      insertKnowledgeFixture()
+      const ctx = await memoryModule.buildKnowledgeContext('x')
+      expect(ctx).toContain('【知识库】')
+      expect(ctx).toContain('1. 提交规范：commit 必须带 catstudy [uuid] 标记')
+      // 区块前缀格式与 buildMemoryContext 同款
+      expect(ctx.startsWith('\n\n【知识库】\n')).toBe(true)
+      // 独立区块：知识条目不进【相关记忆】
+      expect(ctx).not.toContain('【相关记忆】')
+    })
+
+    it('剥离 @mention 后检索', async () => {
+      insertKnowledgeFixture()
+      mockEmbedText.mockClear()
+      await memoryModule.buildKnowledgeContext('@店长 提交规范')
+      expect(mockEmbedText).toHaveBeenCalledWith('提交规范')
+    })
+
+    it('0.35 检索阈值：同向召回、正交过滤（比对话记忆检索更严）', async () => {
+      insertKnowledgeFixture()
+      const ctx = await memoryModule.buildKnowledgeContext('x')
+      expect(ctx).toContain('提交规范')
+      expect(ctx).not.toContain('完全无关的知识条目')
+    })
+
+    it('嵌入失败降级空串（不抛）', async () => {
+      mockEmbedText.mockRejectedValueOnce(new Error('model not loaded'))
+      await expect(memoryModule.buildKnowledgeContext('x')).resolves.toBe('')
+    })
+
+    it('KNOWLEDGE_TOP_K 控制返回条数', async () => {
+      const { vectorToBlob: toBlob } = memoryModule
+      knowledgeRepo.upsertKnowledge('k-a', '条目甲', toBlob([1, 120, 1, 0.5]), 's', ['a'])
+      knowledgeRepo.upsertKnowledge('k-b', '条目乙', toBlob([1, 120, 1, 0.5]), 's', ['b'])
+      process.env.KNOWLEDGE_TOP_K = '1'
+      const ctx = await memoryModule.buildKnowledgeContext('x')
+      // topK=1 → 只输出一条
+      expect(ctx.match(/^\d+\./gm)).toHaveLength(1)
     })
   })
 })

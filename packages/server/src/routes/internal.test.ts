@@ -9,13 +9,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
-import { initRepository } from '../db/repository/index.js'
+import { initRepository, knowledge as knowledgeRepo } from '../db/repository/index.js'
+import { vectorToBlob } from '../memory/index.js'
 import type { FastifyInstance } from 'fastify'
 import { consumeRouteSignals, __test_resetRouteSignals } from '../llm/route-signals.js'
 
 // Mock socketio connector：getActiveStream 受控返回活跃流（token 精确匹配用）
 vi.mock('../connectors/socketio.js', () => ({
   getActiveStream: vi.fn(),
+}))
+
+// Mock embedding：knowledge-search 端点检索依赖 embedText（真实实现会触发
+// ~100MB 模型下载）——测试返回固定 4-dim 向量（同向于 k-near fixture），
+// 配合知识表 fixture 命中。vi.hoisted：internal.ts 的 import 链会立即触发
+// factory（internal.ts → memory/index.ts → embedding.js），普通 const 声明
+// 会 ReferenceError（hoisting 时未初始化）
+const { mockEmbedText } = vi.hoisted(() => ({
+  mockEmbedText: vi.fn(async () => [1, 0, 0, 0]),
+}))
+vi.mock('../memory/embedding.js', () => ({
+  embedText: mockEmbedText,
 }))
 
 /** 插入会话 fixture：store 店长 + implementer 实施猫 + reviewer 吐槽猫（角色白名单判定用） */
@@ -311,6 +324,189 @@ describe('internal route-signals', () => {
       })
       expect(res.statusCode).toBe(400)
       expect(JSON.parse(res.body).reason).toContain('triggerAuthorName')
+    })
+  })
+
+  describe('knowledge-search 端点', () => {
+    const insertKnowledgeFixture = () => {
+      knowledgeRepo.upsertKnowledge(
+        'k-near',
+        '提交规范：commit 必须带 catstudy [uuid] 标记',
+        vectorToBlob([1, 0, 0, 0]),
+        'docs/CONTEXT.md',
+        ['git']
+      )
+      knowledgeRepo.upsertKnowledge(
+        'k-far',
+        '完全无关的知识条目',
+        vectorToBlob([0, 1, 0, 0]),
+        'docs/roadmap.md',
+        ['other']
+      )
+    }
+    const mockActive = async () =>
+      vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue({
+        sessionId: 'session-1',
+        messageId: 'reply-1',
+        content: '',
+        token: VALID_TOKEN,
+      })
+
+    describe('body 基本校验（400）', () => {
+      it('缺 query 拒', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1' },
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).reason).toContain('query')
+      })
+
+      it('query 非字符串拒', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1', query: 123 },
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+      })
+
+      it('topK 越界（0 / 11 / 非整数）拒', async () => {
+        for (const bad of [0, 11, 2.5]) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/knowledge-search',
+            payload: {
+              sessionId: 'session-1',
+              agentId: 'agent-impl',
+              msgId: 'msg-1',
+              query: 'x',
+              topK: bad,
+            },
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+        }
+      })
+    })
+
+    describe('鉴权链（404/401/409 与 route-signals 同款）', () => {
+      it('无活跃流 → 404 + reason', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1', query: 'x' },
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(404)
+        expect(JSON.parse(res.body).reason).toContain('无活跃流')
+      })
+
+      it('token 不匹配 → 401', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1', query: 'x' },
+          headers: { 'x-signal-token': 'wrong-token' },
+        })
+        expect(res.statusCode).toBe(401)
+      })
+
+      it('sessionId 不匹配 → 409', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: {
+            sessionId: 'session-other',
+            agentId: 'agent-impl',
+            msgId: 'msg-1',
+            query: 'x',
+          },
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(409)
+      })
+    })
+
+    describe('检索成功路径（200）', () => {
+      it('命中 → 200 + results 含 content/source/distance', async () => {
+        await mockActive()
+        insertKnowledgeFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: {
+            sessionId: 'session-1',
+            agentId: 'agent-impl',
+            msgId: 'msg-1',
+            query: '提交规范',
+          },
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.ok).toBe(true)
+        expect(body.results).toHaveLength(1)
+        expect(body.results[0]).toMatchObject({
+          id: 'k-near',
+          content: expect.stringContaining('catstudy [uuid]'),
+          source: 'docs/CONTEXT.md',
+          distance: 0,
+        })
+      })
+
+      it('topK 透传生效（默认 3 → 显式 1 截断）', async () => {
+        await mockActive()
+        insertKnowledgeFixture()
+        // 两条同向条目 + topK=1 → 只返回 1 条
+        knowledgeRepo.upsertKnowledge('k-near2', '第二条同向', vectorToBlob([1, 0, 0, 0]), 's2', [
+          'a',
+        ])
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: {
+            sessionId: 'session-1',
+            agentId: 'agent-impl',
+            msgId: 'msg-1',
+            query: 'x',
+            topK: 1,
+          },
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body).results).toHaveLength(1)
+      })
+
+      it('嵌入失败（空向量）→ 200 + 空结果（降级不阻塞）', async () => {
+        await mockActive()
+        mockEmbedText.mockResolvedValueOnce([])
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1', query: 'x' },
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body)).toEqual({ ok: true, results: [] })
+      })
+
+      it('空命中 → 200 + 空结果', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/knowledge-search',
+          payload: { sessionId: 'session-1', agentId: 'agent-impl', msgId: 'msg-1', query: 'x' },
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body)).toEqual({ ok: true, results: [] })
+      })
     })
   })
 })

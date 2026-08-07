@@ -7,6 +7,7 @@
  *
  * 环境变量:
  *   MEMORY_TOP_K                — 检索记忆数量（默认 3）
+ *   KNOWLEDGE_TOP_K             — 知识库检索数量（默认 3），见 buildKnowledgeContext
  *   MEMORY_MAX_DISTANCE         — 检索距离下限（默认 0.6），余弦距离超过此值的记忆不召回
  *   MEMORY_DEDUP_THRESHOLD      — 去重余弦距离阈值（默认 0.20），小于此值时跳过存储
  *   MEMORY_UPDATE_THRESHOLD     — 更新余弦距离阈值（默认 0.35），去重与更新之间的记忆会被 UPDATE 而非 INSERT
@@ -22,7 +23,7 @@
  */
 
 import { v4 as uuid } from 'uuid'
-import { memories as memoriesRepo } from '../db/repository/index.js'
+import { memories as memoriesRepo, knowledge as knowledgeRepo } from '../db/repository/index.js'
 import { embedText, isMemoryEnabled } from './embedding.js'
 import { rewriteRetrievalQueries } from './query-rewrite.js'
 import { evaluateMemoryContent, isMemoryFilterEnabled } from './filter.js'
@@ -248,4 +249,40 @@ export async function buildMemoryContext(triggerContent: string): Promise<string
 
   const lines = memories.map((m, i) => `${i + 1}. ${m.content}`)
   return `\n\n【相关记忆】\n${lines.join('\n')}`
+}
+
+/**
+ * 检索知识库并格式化为 system prompt 的独立【知识库】区块。
+ * 无匹配返回空字符串（同 buildMemoryContext 约定）。
+ *
+ * 与【相关记忆】并列独立区块——来源权威性不同（运营方标准数据 vs 对话
+ * 记忆），检索语义不可混淆。
+ *
+ * 单向量通道（不改写双通道）：改写通道服务于用户口语化 query（对话记忆
+ * 检索场景），知识库查询由模型生成的结构化 query 发起，无口语歧义需求；
+ * 命中为空 → 返回空串不注入，不降级模糊匹配。检索阈值 0.35 在
+ * searchKnowledgeByVector 默认参数（知识文档语义密度高、宁缺毋滥）。
+ *
+ * 环境变量: KNOWLEDGE_TOP_K — 检索条目数（默认 3）
+ */
+export async function buildKnowledgeContext(triggerContent: string): Promise<string> {
+  // 与 buildMemoryContext 同款：剥离 @mention 再检索，查询向量与存储向量同语义空间
+  const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
+  if (!cleanContent) return ''
+
+  const topK = parseInt(process.env.KNOWLEDGE_TOP_K || '3', 10)
+  let vector: number[]
+  try {
+    vector = await embedText(cleanContent)
+  } catch (err: any) {
+    log.warn('知识库查询嵌入失败，跳过检索', { error: err.message })
+    return ''
+  }
+  if (!vector || vector.length === 0) return ''
+
+  const rows = knowledgeRepo.searchKnowledgeByVector(vectorToBlob(vector), topK)
+  if (rows.length === 0) return ''
+
+  const lines = rows.map((r, i) => `${i + 1}. ${r.content}`)
+  return `\n\n【知识库】\n${lines.join('\n')}`
 }
