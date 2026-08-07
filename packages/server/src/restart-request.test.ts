@@ -103,6 +103,25 @@ describe('isRestartRequestContent', () => {
     // 误触发 = 气泡按钮可见可取消 + TTL 10 分钟；漏触发 = 用户手动重启（本次事故代价更高）
     expect(isRestartRequestContent('上次重启请求 原因：服务器卡了，批准后重启完成')).toBe(true)
   })
+
+  it('回归面防回退：叙述前置裸四字 + 后接带括号真实请求 → reason 提取正确（提取优先带括号标记）', () => {
+    // 41ea42c 审查实测回归：match(/(【重启请求】|重启请求)/) 左起扫描命中叙述里先出现的
+    // 裸四字 → after 被污染 → 返回整段错位文本；indexOf 优先带括号标记后锁定正确标记
+    expect(isRestartRequestContent('上次说的重启请求格式是【重启请求】原因：服务器卡了')).toBe(true)
+    expect(extractRestartReason('上次说的重启请求格式是【重启请求】原因：服务器卡了')).toBe(
+      '服务器卡了'
+    )
+  })
+
+  it('回归面 + 半角冒号组合：叙述前置裸四字 + 半角原因壳 → 提取正确（OQ1 场景闭环）', () => {
+    expect(extractRestartReason('上次说的重启请求格式是【重启请求】原因: 服务器卡了')).toBe(
+      '服务器卡了'
+    )
+  })
+
+  it('跨行「重启请求\\n原因：」→ 不命中（[ \\t]* 不含换行，收窄 41ea42c 未声明的跨行放宽面）', () => {
+    expect(isRestartRequestContent('服务器重启请求\n原因：卡了')).toBe(false)
+  })
 })
 
 // ─── createRestartRequest 覆盖判定（TTL 覆盖语义）──────

@@ -69,7 +69,8 @@ function normalizeRestartPrefix(content: string): string {
  * （agent 回复天然带叙述前文，行首 startsWith 与产出模式不匹配——第六次行首事故根因）。
  * 容错三件套（2026-08-07 店长触发失败根治——「重启请求 原因：」裸四字 + 空格完全不命中）：
  *   ① 裸四字「重启请求」无括号也命中——prompt「『重启请求』四字」表述诱导 LLM 省略括号；
- *   ② 标记与原因壳之间允许空白（自然行文会加空格）；
+ *   ② 标记与原因壳之间允许空白（自然行文会加空格；限定 [ \t]* 不含换行——跨行
+ *      「重启请求\n原因：」不命中，41ea42c 审查发现 \s* 引入未声明的跨行放宽面，已收窄）；
  *   ③ 冒号兼容全/半角（与 extractRestartReason 的 [:：] 对齐，避免识别与提取两套契约）。
  * 误触发面：复盘文字需构成「重启请求 + 原因：」连续串才命中（防复述用例钉死）；残余的
  * 完整叙述复述（如「上次重启请求 原因：卡了」）会命中——已知限制（复述抢占），代价不对称：
@@ -79,16 +80,24 @@ function normalizeRestartPrefix(content: string): string {
 export function isRestartRequestContent(content: string): boolean {
   const normalized = normalizeRestartPrefix(content)
   if (normalized.startsWith(RESTART_PREFIX)) return true
-  return /(?:【重启请求】|重启请求)\s*原因[:：]/.test(normalized)
+  return /(?:【重启请求】|重启请求)[ \t]*原因[:：]/.test(normalized)
 }
 
 /** 从「…【重启请求】原因：xxx」提取原因（从标记后提取至段落行尾，嵌中/行首通用，缺省兜底；『』同义、裸四字兼容） */
 export function extractRestartReason(content: string): string {
   const normalized = normalizeRestartPrefix(content)
-  // 标记兼容【】/『』/裸四字——与 isRestartRequestContent 同一容错面，防「识别命中但提取失配」
-  const markerMatch = normalized.match(/(【重启请求】|重启请求)/)
-  if (!markerMatch) return '用户请求'
-  const after = normalized.slice((markerMatch.index ?? 0) + markerMatch[0].length).trim()
+  // 标记定位：优先带括号标记（保持改动前 indexOf(RESTART_PREFIX) 语义）——41ea42c 审查实测
+  // 发现 match(/(【重启请求】|重启请求)/) 左起扫描在「叙述前置裸四字 + 后接带括号请求」时
+  // 命中叙述中的裸四字 → after 被污染 → 返回整段错位文本（改动前正确 → 改动后错误的回归面）。
+  // 裸四字仅作无括号兜底（容错②场景「重启请求 原因：xxx」）；『』已归一化为【】。
+  let markerIdx = normalized.indexOf(RESTART_PREFIX)
+  let markerLen = RESTART_PREFIX.length
+  if (markerIdx === -1) {
+    markerIdx = normalized.indexOf('重启请求')
+    markerLen = '重启请求'.length
+  }
+  if (markerIdx === -1) return '用户请求'
+  const after = normalized.slice(markerIdx + markerLen).trim()
   // m 标志：$ 匹配行尾——reason 只取到段落结束（下个换行）
   const reasonMatch = after.match(/^原因[:：]\s*(.*)$/m)
   if (reasonMatch) return reasonMatch[1].trim() || '用户请求'
