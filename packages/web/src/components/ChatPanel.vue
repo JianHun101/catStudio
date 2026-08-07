@@ -2701,13 +2701,20 @@ function statusLabelZh(status: string): string {
 /* ─── Tables ────────────────────────────── */
 
 .chat-panel .msg-text table {
+  /* 表格溢出逃生通道：display:block 使 width:100% 成为硬约束（table 布局下只是建议值，
+     长单元格 min-content 会撑破气泡）；max-width 双保险，溢出横向滚动（与 pre 同构）。
+     overflow-y:hidden 防浏览器把 visible 强制计算为 auto 引入纵向滚动条；
+     圆角裁剪仍由 non-visible overflow 提供。 */
+  display: block;
   border-collapse: separate;
   border-spacing: 0;
   width: 100%;
+  max-width: 100%;
   margin: 10px 0;
   font-size: 0.9em;
   border-radius: var(--radius-sm);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid var(--border-table);
 }
 

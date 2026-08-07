@@ -45,6 +45,17 @@ describe('ChatPanel animation setup', () => {
   })
 })
 
+describe('ChatPanel markdown table overflow', () => {
+  it('table 溢出逃生通道：msg-text table 规则含 overflow-x: auto + max-width: 100%', () => {
+    // 回归保护：table 曾因 width:100% 是建议值（长单元格 min-content 撑破气泡）溢出聊天气泡，
+    // 修复为 display:block + max-width + overflow-x 滚动（与 pre 代码块同构逃生通道）
+    const tableBlock = source.match(/\.chat-panel \.msg-text table\s*\{[^}]*\}/s)
+    expect(tableBlock).toBeTruthy()
+    expect(tableBlock![0]).toContain('overflow-x: auto')
+    expect(tableBlock![0]).toContain('max-width: 100%')
+  })
+})
+
 describe('ChatPanel restart confirm feedback', () => {
   it('pending 态显示 [确认重启][取消] 按钮，点击走 store.confirmRestart', () => {
     expect(source).toContain('store.confirmRestart(msg.id)')
