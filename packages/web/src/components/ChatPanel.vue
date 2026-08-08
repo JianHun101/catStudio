@@ -2708,13 +2708,15 @@ function statusLabelZh(status: string): string {
 /* ─── Tables ────────────────────────────── */
 
 .chat-panel .msg-text table {
-  /* 表格溢出逃生通道：display:block 使 width:100% 成为硬约束（table 布局下只是建议值，
+  /* 表格溢出逃生通道：table-layout:fixed 使 width:100% 成为硬约束（table 布局下只是建议值，
      长单元格 min-content 会撑破气泡）；max-width 双保险，溢出横向滚动（与 pre 同构）。
+     不用 display:block——它把 table 降级为块级元素，td 失去表格布局语义按内容收缩、
+     不拉伸填满，行分隔线右侧断裂出空白带（08-08 实测：表格右缘 x=868、行线只到 x=761）。
      overflow-y:hidden 防浏览器把 visible 强制计算为 auto 引入纵向滚动条；
      圆角裁剪仍由 non-visible overflow 提供。
      box-sizing:border-box 防 content-box 下 width:100% + border 1px 溢出 2px，
      触发自身 overflow-x:auto 产生右缘漂移 + 滚动区空白（13:21 实证）。 */
-  display: block;
+  table-layout: fixed;
   box-sizing: border-box;
   border-collapse: separate;
   border-spacing: 0;
