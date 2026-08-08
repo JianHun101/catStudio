@@ -4,7 +4,7 @@
  *
  * 原生 JSON-RPC 2.0 stdio 实现 MCP 最小子集（零依赖，Phase 0 spike 已验证协议层）：
  *   - initialize        → 协议握手
- *   - tools/list        → 暴露 post_message + search_knowledge 两个工具
+ *   - tools/list        → 暴露 post_message + search_knowledge + query_db 三个工具
  *   - tools/call        → 参数校验 → POST 内部端点 → ACK / 错误文本（含 reason）
  *   - ping / 其他       → 空 result / method not found
  *   - notifications（无 id 消息）→ 不回复
@@ -25,6 +25,10 @@
  * 暴露给模型，越权面过大），服务端只拼参数化 embedding 检索 SQL，
  * 模型不可注入。
  *
+ * query_db 是白名单表查询通道（query_db Phase 1）：排障取证的窄通道——
+ * 表名/列名双白名单（服务端 QUERY_TABLE_SCHEMAS 权威校验）+ value 参数化，
+ * 敏感列（agents.llm_api_key 等、embedding BLOB）硬剔除，模型不可注入。
+ *
  * 用法：node scripts/mcp-server.mjs（由 Claude Code CLI 作为 MCP server 拉起）。
  * 参数校验纯函数在 mcp-server-utils.mjs（无 shebang，供 vitest 直接 import——
  * 本文件带 shebang，vitest 模块执行器把 shebang 当非法 token）；stdio server
@@ -34,12 +38,13 @@
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
-import { validateSearchParams } from './mcp-server-utils.mjs'
+import { validateSearchParams, validateQueryDbParams } from './mcp-server-utils.mjs'
 
 const SERVER_INFO = { name: 'catstudy', version: '0.1.0' }
 const PROTOCOL_VERSION = '2025-06-18'
 const TOOL_NAME = 'post_message'
 const SEARCH_TOOL_NAME = 'search_knowledge'
+const QUERY_DB_TOOL_NAME = 'query_db'
 
 /** 工具定义——inputSchema 钉死契约：targetCats 必填数组、clientMessageId 可选 */
 const POST_MESSAGE_TOOL = {
@@ -63,6 +68,47 @@ const POST_MESSAGE_TOOL = {
       },
     },
     required: ['targetCats'],
+  },
+}
+
+/** 工具定义——inputSchema 钉死契约：table 必填、conditions 可选、limit 可选 1-100 默认 50 */
+const QUERY_DB_TOOL = {
+  name: QUERY_DB_TOOL_NAME,
+  description:
+    '查询猫咖数据库表（排障取证通道，替代 raw SQL——表/列白名单服务端强制）。' +
+    'table 传白名单表（messages/memories/execution_logs/sessions/agents/knowledge）；' +
+    'conditions 为结构化过滤条件（多条件 AND 连接，op 支持 =/>/</LIKE，LIKE 的 % 请自己写在 value 里）；' +
+    'limit 1-100 默认 50。安全边界：仅可查白名单列（agents 不含密钥列，memories/knowledge 不含 embedding），' +
+    '返回 snake_case 原样。查最近消息直接 {table:"messages"} 即可（created_at DESC）。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      table: {
+        type: 'string',
+        enum: ['messages', 'memories', 'execution_logs', 'sessions', 'agents', 'knowledge'],
+        description: '白名单表名',
+      },
+      conditions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            column: { type: 'string', description: '该表可查列名（服务端白名单校验）' },
+            op: { type: 'string', enum: ['=', '>', '<', 'LIKE'] },
+            value: { type: 'string' },
+          },
+          required: ['column', 'op', 'value'],
+        },
+        description: '可选：结构化过滤条件（AND 连接）',
+      },
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+        description: '返回条数 1-100，默认 50',
+      },
+    },
+    required: ['table'],
   },
 }
 
@@ -227,6 +273,71 @@ async function searchKnowledge(query, topK) {
   }
 }
 
+/**
+ * 调用猫咖内部端点 POST /api/internal/db-query。
+ * 成功（2xx）→ { ok: true, text }（rows JSON + total 概览）；
+ * 失败 → { ok: false, reason }（含 HTTP 状态/响应 reason）。
+ * 环境变量缺失检查与 searchKnowledge 同款（同一内部端点鉴权链）。
+ */
+async function queryDb(table, conditions, limit) {
+  const baseUrl = env('CATSTUDY_SERVER_URL')
+  const token = env('CATSTUDY_SIGNAL_TOKEN')
+  const sessionId = env('CATSTUDY_SESSION_ID')
+  const agentId = env('CATSTUDY_AGENT_ID')
+  const msgId = env('CATSTUDY_MSG_ID')
+
+  if (!baseUrl || !token || !sessionId || !agentId || !msgId) {
+    const missing = [
+      ['CATSTUDY_SERVER_URL', baseUrl],
+      ['CATSTUDY_SIGNAL_TOKEN', token],
+      ['CATSTUDY_SESSION_ID', sessionId],
+      ['CATSTUDY_AGENT_ID', agentId],
+      ['CATSTUDY_MSG_ID', msgId],
+    ]
+      .filter(([, v]) => !v)
+      .map(([n]) => n)
+    return { ok: false, reason: `MCP 环境缺失（${missing.join('/')}），数据库查询不可用` }
+  }
+
+  let res
+  try {
+    res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/internal/db-query`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-signal-token': token,
+      },
+      body: JSON.stringify({ sessionId, agentId, msgId, table, conditions, limit }),
+    })
+  } catch (err) {
+    return { ok: false, reason: `内部端点不可达: ${err.message}` }
+  }
+
+  let body = null
+  try {
+    body = await res.json()
+  } catch {
+    /* 非 JSON 响应体 */
+  }
+
+  if (res.ok) {
+    const rows = body?.rows ?? []
+    const total = body?.total ?? 0
+    return {
+      ok: true,
+      text:
+        rows.length > 0
+          ? `table「${table}」共 ${total} 条匹配（返回前 ${rows.length} 条）：\n` +
+            JSON.stringify(rows, null, 2)
+          : `（无命中）table「${table}」无匹配行`,
+    }
+  }
+  return {
+    ok: false,
+    reason: body?.reason || `内部端点 HTTP ${res.status}`,
+  }
+}
+
 // 直接运行时才启动 stdio server——vitest import 本模块（validateSearchParams
 // 单测）不挂 stdin listener（resolve 兼容相对路径调用 node scripts/mcp-server.mjs）
 const isDirectRun =
@@ -272,7 +383,11 @@ if (isDirectRun) {
 
     // ─── 工具面 ───
     if (method === 'tools/list') {
-      send({ jsonrpc: '2.0', id, result: { tools: [POST_MESSAGE_TOOL, SEARCH_KNOWLEDGE_TOOL] } })
+      send({
+        jsonrpc: '2.0',
+        id,
+        result: { tools: [POST_MESSAGE_TOOL, SEARCH_KNOWLEDGE_TOOL, QUERY_DB_TOOL] },
+      })
       return
     }
 
@@ -362,11 +477,34 @@ if (isDirectRun) {
         })
         return
       }
+      if (name === QUERY_DB_TOOL_NAME) {
+        const args = params?.arguments ?? {}
+        const parsed = validateQueryDbParams(args)
+        if (!parsed.ok) {
+          send(rpcError(id, -32602, parsed.reason))
+          return
+        }
+        const result = await queryDb(parsed.table, parsed.conditions, parsed.limit)
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: result.ok ? result.text : `❌ 数据库查询失败：${result.reason}`,
+              },
+            ],
+            isError: !result.ok,
+          },
+        })
+        return
+      }
       send(
         rpcError(
           id,
           -32602,
-          `unknown tool: ${name}（本 server 仅有 post_message 和 search_knowledge 两个工具）`
+          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge 和 query_db 三个工具）`
         )
       )
       return

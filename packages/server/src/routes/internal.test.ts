@@ -509,4 +509,358 @@ describe('internal route-signals', () => {
       })
     })
   })
+
+  describe('db-query 端点', () => {
+    /** 查库 fixture：messages 显式 created_at 控序（DESC 断言）；memories/execution_logs 各两条 */
+    const insertDbQueryFixture = () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'msg-old',
+        'session-1',
+        'agent-impl',
+        'user',
+        '最早的旧消息',
+        '[]',
+        '2026-08-01 10:00:00'
+      )
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run('msg-mid', 'session-1', 'agent-store', 'agent', '回复内容', '[]', '2026-08-05 10:00:00')
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'msg-recent',
+        'session-1',
+        'agent-impl',
+        'user',
+        '请求重启服务',
+        '[]',
+        '2026-08-08 10:00:00'
+      )
+      db.prepare(
+        `INSERT INTO memories (id, agent_id, content, embedding, source_message_id, created_at)
+         VALUES (?, ?, ?, NULL, ?, datetime('now'))`
+      ).run('mem-1', 'agent-impl', '一条记忆', 'msg-old')
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'log-old',
+        'session-1',
+        'agent-impl',
+        'msg-old',
+        'completed',
+        't1',
+        '2026-08-01 09:00:00'
+      )
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'log-new',
+        'session-1',
+        'agent-impl',
+        'msg-recent',
+        'running',
+        't2',
+        '2026-08-08 09:00:00'
+      )
+    }
+    const mockActive = async () =>
+      vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue({
+        sessionId: 'session-1',
+        messageId: 'reply-1',
+        content: '',
+        token: VALID_TOKEN,
+      })
+    const qBody = (over: Record<string, unknown> = {}) => ({
+      sessionId: 'session-1',
+      agentId: 'agent-impl',
+      msgId: 'msg-1',
+      table: 'messages',
+      ...over,
+    })
+
+    describe('body 基本校验（400）', () => {
+      it('缺 sessionId 拒', async () => {
+        const body = qBody() as Record<string, unknown>
+        delete body.sessionId
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: body,
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).reason).toContain('sessionId')
+      })
+
+      it('table 非白名单（sqlite_master/不存在的表）拒', async () => {
+        for (const bad of ['sqlite_master', 'users']) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/db-query',
+            payload: qBody({ table: bad }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('table')
+        }
+      })
+
+      it('conditions 非数组拒', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ conditions: { column: 'role' } }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+      })
+
+      it('conditions column 不在表白名单（agents.llm_api_key）拒', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({
+            table: 'agents',
+            conditions: [{ column: 'llm_api_key', op: '=', value: 'x' }],
+          }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).reason).toContain('column')
+      })
+
+      it('conditions op 非法 / value 非字符串拒', async () => {
+        const badOp = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ conditions: [{ column: 'role', op: 'CONTAINS', value: 'x' }] }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(badOp.statusCode).toBe(400)
+        const badVal = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ conditions: [{ column: 'role', op: '=', value: 123 }] }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(badVal.statusCode).toBe(400)
+      })
+
+      it('limit 越界（0 / 101 / 小数）拒', async () => {
+        for (const bad of [0, 101, 2.5]) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/db-query',
+            payload: qBody({ limit: bad }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('limit')
+        }
+      })
+    })
+
+    describe('鉴权链（404/401/409 与 knowledge-search 同款）', () => {
+      it('无活跃流 → 404 + reason', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(404)
+        expect(JSON.parse(res.body).reason).toContain('无活跃流')
+      })
+
+      it('token 不匹配 → 401', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody(),
+          headers: { 'x-signal-token': 'wrong-token' },
+        })
+        expect(res.statusCode).toBe(401)
+      })
+
+      it('sessionId 不匹配 → 409', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ sessionId: 'session-other' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(409)
+      })
+    })
+
+    describe('查询成功路径（200）', () => {
+      it('无条件查 messages → 最近在前（created_at DESC）+ total 全量计数', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.ok).toBe(true)
+        expect(body.total).toBe(3)
+        expect(body.rows.map((r: { id: string }) => r.id)).toEqual([
+          'msg-recent',
+          'msg-mid',
+          'msg-old',
+        ])
+      })
+
+      it('条件 AND 过滤 + LIKE 模糊匹配正确', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({
+            conditions: [
+              { column: 'role', op: '=', value: 'user' },
+              { column: 'content', op: 'LIKE', value: '%重启%' },
+            ],
+          }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.total).toBe(1)
+        expect(body.rows[0].id).toBe('msg-recent')
+      })
+
+      it('agents 返回列不含敏感三列（llm_api_key/llm_base_url/system_prompt）', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'agents' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.rows.length).toBe(3)
+        for (const row of body.rows) {
+          expect(row).not.toHaveProperty('llm_api_key')
+          expect(row).not.toHaveProperty('llm_base_url')
+          expect(row).not.toHaveProperty('system_prompt')
+        }
+      })
+
+      it('memories 返回列不含 embedding BLOB', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'memories' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.rows.length).toBe(1)
+        expect(body.rows[0]).not.toHaveProperty('embedding')
+        expect(body.rows[0]).toMatchObject({ id: 'mem-1', content: '一条记忆' })
+      })
+
+      it('limit 截断 + total 仍为全量', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ limit: 1 }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.rows).toHaveLength(1)
+        expect(body.rows[0].id).toBe('msg-recent')
+        expect(body.total).toBe(3)
+      })
+
+      it('execution_logs 用 started_at DESC 排序（无 created_at 列）', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'execution_logs' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.rows.map((r: { id: string }) => r.id)).toEqual(['log-new', 'log-old'])
+      })
+
+      it('注入字符串 value → 参数化后无效果（不命中也不报错）', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({
+            conditions: [{ column: 'content', op: '=', value: `' OR 1=1 --` }],
+          }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body)).toEqual({ ok: true, rows: [], total: 0 })
+      })
+
+      it('注入字符串 value（DROP 语句）→ 不执行，表仍可查', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({
+            conditions: [{ column: 'content', op: '=', value: 'x; DROP TABLE messages' }],
+          }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body).total).toBe(0)
+        // 表未被 DROP——再查一次仍 200
+        const res2 = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res2.statusCode).toBe(200)
+        expect(JSON.parse(res2.body).total).toBe(3)
+      })
+
+      it('无命中 → 200 + rows: [] + total: 0（不报错）', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({
+            conditions: [{ column: 'content', op: '=', value: '不存在的内容' }],
+          }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body)).toEqual({ ok: true, rows: [], total: 0 })
+      })
+    })
+  })
 })

@@ -28,3 +28,62 @@ export function validateSearchParams(args) {
   }
   return { ok: true, query: query.trim(), topK }
 }
+
+/**
+ * query_db 参数校验（纯函数，供单测——scripts/mcp-server.test.js）。
+ * 契约：table ∈ 白名单、conditions 可选数组（每项 { column: 非空字符串,
+ * op: =/>/</LIKE, value: 字符串 }）、limit 可选 1-100 整数（默认 50）。
+ * 列名白名单由服务端 QUERY_TABLE_SCHEMAS 权威校验（400 层）——本层只校形状，
+ * 避免 JS/TS 两侧白名单双份漂移。
+ * 返回 { ok: true, table, conditions, limit } 或 { ok: false, reason }。
+ */
+export const QUERY_DB_TABLES = [
+  'messages',
+  'memories',
+  'execution_logs',
+  'sessions',
+  'agents',
+  'knowledge',
+]
+const QUERY_DB_OPS = ['=', '>', '<', 'LIKE']
+
+export function validateQueryDbParams(args) {
+  const table = args?.table
+  if (typeof table !== 'string' || !QUERY_DB_TABLES.includes(table)) {
+    return {
+      ok: false,
+      reason: `query_db 参数无效: table 必须是白名单表之一（${QUERY_DB_TABLES.join('/')}；当前: ${JSON.stringify(table)}）`,
+    }
+  }
+  const limit = args?.limit ?? 50
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    return {
+      ok: false,
+      reason: `query_db 参数无效: limit 必须是 1-100 整数（当前: ${JSON.stringify(limit)}）`,
+    }
+  }
+  const conditions = args?.conditions ?? []
+  if (!Array.isArray(conditions)) {
+    return {
+      ok: false,
+      reason: `query_db 参数无效: conditions 必须是数组（当前: ${JSON.stringify(conditions)}）`,
+    }
+  }
+  for (const c of conditions) {
+    if (
+      typeof c !== 'object' ||
+      c === null ||
+      typeof c.column !== 'string' ||
+      !c.column.trim() ||
+      typeof c.op !== 'string' ||
+      !QUERY_DB_OPS.includes(c.op) ||
+      typeof c.value !== 'string'
+    ) {
+      return {
+        ok: false,
+        reason: `query_db 参数无效: conditions 每项须 { column: 非空字符串, op: ${QUERY_DB_OPS.join('/')}, value: 字符串 }（当前: ${JSON.stringify(c)}）`,
+      }
+    }
+  }
+  return { ok: true, table, conditions, limit }
+}

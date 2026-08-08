@@ -24,7 +24,9 @@ import {
   sessions as sessionsRepo,
   agents as agentsRepo,
   knowledge as knowledgeRepo,
+  query as queryRepo,
 } from '../db/repository/index.js'
+import { QUERY_TABLE_SCHEMAS, type QueryOp } from '../db/repository/query.js'
 import { getActiveStream } from '../connectors/socketio.js'
 import { storeRouteSignal } from '../llm/route-signals.js'
 import { filterAllowedMentions } from '../dispatch/mention-policy.js'
@@ -50,6 +52,17 @@ interface KnowledgeSearchBody {
   query?: unknown
   topK?: unknown
 }
+
+interface DbQueryBody {
+  sessionId?: unknown
+  agentId?: unknown
+  msgId?: unknown
+  table?: unknown
+  conditions?: unknown
+  limit?: unknown
+}
+
+const QUERY_OPS = new Set<QueryOp>(['=', '>', '<', 'LIKE'])
 
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/internal/route-signals', async (req, reply) => {
@@ -247,5 +260,106 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       hits: results.length,
     })
     return reply.send({ ok: true, results })
+  })
+
+  app.post('/api/internal/db-query', async (req, reply) => {
+    const body = (req.body ?? {}) as DbQueryBody
+
+    // ── 1. body 基本校验（400）── 与 knowledge-search 同款：防御纵深
+    //（mcp-server.mjs 已做参数校验）；表/列白名单以服务端 QUERY_TABLE_SCHEMAS 为权威
+    const { sessionId, agentId, msgId, table } = body
+    if (
+      typeof sessionId !== 'string' ||
+      !sessionId ||
+      typeof agentId !== 'string' ||
+      !agentId ||
+      typeof msgId !== 'string' ||
+      !msgId
+    ) {
+      return reply.status(400).send({ ok: false, reason: 'sessionId/agentId/msgId 必填非空字符串' })
+    }
+    if (typeof table !== 'string' || !(table in QUERY_TABLE_SCHEMAS)) {
+      return reply.status(400).send({
+        ok: false,
+        reason: `table 必须是白名单表（${Object.keys(QUERY_TABLE_SCHEMAS).join('/')}）`,
+      })
+    }
+    const schema = QUERY_TABLE_SCHEMAS[table as keyof typeof QUERY_TABLE_SCHEMAS]
+    const conditions = body.conditions ?? []
+    if (!Array.isArray(conditions)) {
+      return reply.status(400).send({ ok: false, reason: 'conditions 必须是数组' })
+    }
+    for (const c of conditions) {
+      if (
+        typeof c !== 'object' ||
+        c === null ||
+        typeof c.column !== 'string' ||
+        !c.column ||
+        !schema.columns.includes(c.column)
+      ) {
+        return reply.status(400).send({
+          ok: false,
+          reason: `conditions 每项 column 必须 ∈ 该表可查列（${schema.columns.join('/')}）`,
+        })
+      }
+      if (typeof c.op !== 'string' || !QUERY_OPS.has(c.op as QueryOp)) {
+        return reply.status(400).send({ ok: false, reason: 'conditions 每项 op 必须是 =/>/</LIKE' })
+      }
+      if (typeof c.value !== 'string') {
+        return reply.status(400).send({ ok: false, reason: 'conditions 每项 value 必须是字符串' })
+      }
+    }
+    const limit = body.limit ?? 50
+    if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return reply.status(400).send({ ok: false, reason: 'limit 必须是 1-100 整数' })
+    }
+
+    // ── 2. lookup activeStreams（404）──
+    const stream = getActiveStream(agentId)
+    if (!stream) {
+      return reply
+        .status(404)
+        .send({ ok: false, reason: `agent ${agentId} 当前无活跃流，数据库查询被拒` })
+    }
+
+    // ── 3. token 精确匹配（401）──
+    const token = req.headers['x-signal-token']
+    if (typeof token !== 'string' || token !== stream.token) {
+      return reply.status(401).send({ ok: false, reason: 'x-signal-token 不匹配' })
+    }
+
+    // ── 4. 复合键 sessionId 匹配（409）──
+    if (stream.sessionId !== sessionId) {
+      return reply.status(409).send({
+        ok: false,
+        reason: `agent ${agentId} 正在会话 ${stream.sessionId} 执行，本请求会话 ${sessionId} 不匹配`,
+      })
+    }
+
+    // ── 5. 白名单参数化查询（200）——queryTable 内部仍是安全执行点 ──
+    let result
+    try {
+      // table 已过 `in QUERY_TABLE_SCHEMAS` 校验——窄化回字面量联合类型
+      result = queryRepo.queryTable({
+        table: table as keyof typeof QUERY_TABLE_SCHEMAS,
+        conditions,
+        limit,
+      })
+    } catch (err: any) {
+      // 端点已校验过白名单——此处只兜绕过校验的直调（不应发生）
+      log.error('db query failed', { error: err.message, sessionId, agentId, msgId, table })
+      return reply.status(500).send({ ok: false, reason: `数据库查询异常: ${err.message}` })
+    }
+    log.info('db query', {
+      sessionId,
+      agentId,
+      msgId,
+      table,
+      conditions: conditions.length,
+      limit,
+      hits: result.rows.length,
+      total: result.total,
+    })
+    return reply.send({ ok: true, rows: result.rows, total: result.total })
   })
 }

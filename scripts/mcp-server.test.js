@@ -7,7 +7,11 @@
  * 端点侧由 internal.test.ts 覆盖。
  */
 import { describe, it, expect } from 'vitest'
-import { validateSearchParams } from './mcp-server-utils.mjs'
+import {
+  validateSearchParams,
+  validateQueryDbParams,
+  QUERY_DB_TABLES,
+} from './mcp-server-utils.mjs'
 
 describe('validateSearchParams (search_knowledge)', () => {
   it('合法入参：仅 query → ok，topK 默认 3', () => {
@@ -57,5 +61,85 @@ describe('validateSearchParams (search_knowledge)', () => {
     expect(validateSearchParams({ query: 'x', topK: 2.5 }).ok).toBe(false)
     expect(validateSearchParams({ query: 'x', topK: '3' }).ok).toBe(false)
     expect(validateSearchParams({ query: 'x', topK: true }).ok).toBe(false)
+  })
+})
+
+describe('validateQueryDbParams (query_db)', () => {
+  it('合法入参：仅 table → ok，limit 默认 50、conditions 默认 []', () => {
+    const r = validateQueryDbParams({ table: 'messages' })
+    expect(r).toEqual({ ok: true, table: 'messages', conditions: [], limit: 50 })
+  })
+
+  it('合法入参：table + conditions + limit 边界 1 和 100 → ok', () => {
+    const conds = [{ column: 'role', op: '=', value: 'user' }]
+    expect(validateQueryDbParams({ table: 'messages', conditions: conds, limit: 1 }).ok).toBe(true)
+    expect(validateQueryDbParams({ table: 'messages', conditions: conds, limit: 100 }).ok).toBe(
+      true
+    )
+    const r = validateQueryDbParams({ table: 'agents', conditions: conds, limit: 5 })
+    expect(r).toEqual({ ok: true, table: 'agents', conditions: conds, limit: 5 })
+  })
+
+  it('六张白名单表全部放行', () => {
+    for (const t of QUERY_DB_TABLES) {
+      expect(validateQueryDbParams({ table: t }).ok).toBe(true)
+    }
+  })
+
+  it('表名非白名单（sqlite_master/不存在表/非字符串/缺省）→ 错误文本', () => {
+    for (const bad of ['sqlite_master', 'users', 123, undefined]) {
+      const r = validateQueryDbParams({ table: bad })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('table')
+    }
+  })
+
+  it('limit 越界：0 / 101 / 负数 → 错误文本', () => {
+    for (const bad of [0, 101, -1]) {
+      const r = validateQueryDbParams({ table: 'messages', limit: bad })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('1-100')
+    }
+  })
+
+  it('limit 非整数（小数/字符串/布尔）→ 错误文本', () => {
+    expect(validateQueryDbParams({ table: 'messages', limit: 2.5 }).ok).toBe(false)
+    expect(validateQueryDbParams({ table: 'messages', limit: '50' }).ok).toBe(false)
+    expect(validateQueryDbParams({ table: 'messages', limit: true }).ok).toBe(false)
+  })
+
+  it('conditions 非数组 → 错误文本', () => {
+    const r = validateQueryDbParams({ table: 'messages', conditions: { column: 'x' } })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain('conditions')
+  })
+
+  it('condition 缺 column / op 非 =/>/</LIKE / value 非字符串 → 错误文本', () => {
+    expect(
+      validateQueryDbParams({
+        table: 'messages',
+        conditions: [{ op: '=', value: 'x' }],
+      }).ok
+    ).toBe(false)
+    expect(
+      validateQueryDbParams({
+        table: 'messages',
+        conditions: [{ column: 'role', op: 'CONTAINS', value: 'x' }],
+      }).ok
+    ).toBe(false)
+    expect(
+      validateQueryDbParams({
+        table: 'messages',
+        conditions: [{ column: 'role', op: '=', value: 123 }],
+      }).ok
+    ).toBe(false)
+  })
+
+  it('注入字符串 value 通过形状校验（参数化在服务端兜底，本层不拦）', () => {
+    const r = validateQueryDbParams({
+      table: 'messages',
+      conditions: [{ column: 'content', op: '=', value: `' OR 1=1 --` }],
+    })
+    expect(r.ok).toBe(true)
   })
 })
