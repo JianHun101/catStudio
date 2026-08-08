@@ -50,12 +50,15 @@ describe('ChatPanel markdown table overflow', () => {
     // 回归保护：table 曾因 width:100% 是建议值（长单元格 min-content 撑破气泡）溢出聊天气泡，
     // 历史经 display:block 逃生（97eee3b），08-08 实测其把 table 降级为块级元素致 td 按内容收缩、
     // 行分隔线右侧断裂空白带（表格右缘 x=868、行线只到 x=761）——改 table-layout:fixed
-    // （width:100% 硬约束的正规实现）+ max-width + overflow-x 滚动（与 pre 代码块同构逃生通道）
+    // （width:100% 硬约束的正规实现）+ max-width；超宽内容由 overflow-wrap:anywhere 断行吸收，
+    // 不可断内容（nowrap 内联块/pre）刺出容器，滚动需外层包裹容器（table 自身 overflow-x 不建滚动容器）
     const tableBlock = source.match(/\.chat-panel \.msg-text table\s*\{[^}]*\}/s)
     expect(tableBlock).toBeTruthy()
-    // 根因锁：table-layout:fixed 使 width:100% 从建议值变硬约束、overflow-x 才能创建滚动容器——
-    // 只锁 overflow-x/max-width 表征拦不住删 table-layout:fixed 后的复发（同 10070d1 黑名单断言教训）
+    // 根因双锁：正向锁 table-layout:fixed（width:100% 从建议值变硬约束）、
+    // 反向锁 display:block 不复辟（重加 display:block 会复发空白带而正向锁全绿）——
+    // 只锁正向表征拦不住删 fixed 后回退 display:block（同 10070d1 黑名单断言教训）
     expect(tableBlock![0]).toContain('table-layout: fixed')
+    expect(tableBlock![0]).not.toContain('display: block')
     expect(tableBlock![0]).toContain('overflow-x: auto')
     expect(tableBlock![0]).toContain('max-width: 100%')
     // 漂移锁：box-sizing:border-box 防 content-box 下 width:100% + border 1px 溢出 2px，
