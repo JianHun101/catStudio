@@ -3,7 +3,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import type { Message } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
-import { useSkillCommand, type SkillSuggestion } from '@/composables/useSkillCommand'
+import { useSkillCommand } from '@/composables/useSkillCommand'
 import { useTheme } from '@/composables/useTheme'
 import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
@@ -44,16 +44,7 @@ const {
   navigate,
 } = useMention(() => store.agents)
 
-const skills = ref<SkillSuggestion[]>([])
-const {
-  skillActive,
-  skillSuggestions,
-  skillIndex,
-  skillStartIdx,
-  detect: detectSkill,
-  select: selectSkill,
-  navigate: navigateSkill,
-} = useSkillCommand(() => skills.value)
+const { skillActive, detect: detectSkill } = useSkillCommand()
 
 // ─── Time Formatting ───────────────────────
 
@@ -233,32 +224,10 @@ watch(
   }
 )
 
-function fetchSkills(): void {
-  const agentIds = store.activeSession?.agentIds
-  const url = agentIds?.length ? `/api/skills?agentIds=${agentIds.join(',')}` : '/api/skills'
-  fetch(url)
-    .then((r) => r.json())
-    .then((data) => {
-      skills.value = data.skills ?? []
-    })
-    .catch(() => {
-      /* 静默降级——下拉框为空 */
-    })
-}
-
 onMounted(() => {
   chatContainer.value?.addEventListener('scroll', checkScrollPosition, { passive: true })
   window.addEventListener('keydown', onPreviewKeydown)
-  fetchSkills()
 })
-
-// 切换会话时重新拉取技能列表（不同会话的 Agent 组合不同）
-watch(
-  () => store.activeSession?.id,
-  () => {
-    fetchSkills()
-  }
-)
 
 onUnmounted(() => {
   chatContainer.value?.removeEventListener('scroll', checkScrollPosition)
@@ -442,6 +411,7 @@ async function handleSend(): Promise<void> {
     input.value = ''
     pastedImages.value = []
     mentionActive.value = false
+    skillActive.value = false
     await nextTick()
     scrollToBottom()
   } finally {
@@ -453,25 +423,6 @@ async function handleSend(): Promise<void> {
 }
 
 function onKeydown(e: KeyboardEvent): void {
-  // / 技能下拉框键盘导航（优先级高于 @mention）
-  if (skillActive.value) {
-    if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
-      e.preventDefault()
-      const ta = textareaRef.value
-      if (!ta) return
-      const skill = skillSuggestions.value[skillIndex.value]
-      const result = navigateSkill(e.key, ta.value, ta.selectionStart)
-      if (result !== null && skill) {
-        input.value = result
-        nextTick(() => {
-          // 光标放在 /skillName 后面的空格之后
-          ta.selectionStart = ta.selectionEnd = skillStartIdx.value + skill.name.length + 2
-        })
-      }
-      return
-    }
-  }
-
   if (mentionActive.value) {
     if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
       e.preventDefault()
@@ -505,20 +456,6 @@ function selectMention(idx: number): void {
   nextTick(() => {
     if (textareaRef.value) {
       const pos = mentionStartIdx.value + agent.name.length + 2
-      textareaRef.value.selectionStart = textareaRef.value.selectionEnd = pos
-      textareaRef.value.focus()
-    }
-  })
-}
-
-function selectSkillCmd(idx: number): void {
-  const skill = skillSuggestions.value[idx]
-  if (!skill || !textareaRef.value) return
-  const newText = selectSkill(skill, input.value, textareaRef.value.selectionStart)
-  input.value = newText
-  nextTick(() => {
-    if (textareaRef.value) {
-      const pos = skillStartIdx.value + skill.name.length + 2
       textareaRef.value.selectionStart = textareaRef.value.selectionEnd = pos
       textareaRef.value.focus()
     }
@@ -1003,23 +940,9 @@ function statusLabelZh(status: string): string {
           <span>未找到匹配的猫咪</span>
         </div>
 
-        <!-- / 技能下拉框 -->
-        <div v-if="skillActive && skillSuggestions.length > 0" class="skill-dropdown">
-          <div
-            v-for="(skill, idx) in skillSuggestions"
-            :key="skill.name"
-            class="skill-item"
-            :class="{ active: idx === skillIndex }"
-            @mousedown.prevent="selectSkillCmd(idx)"
-            @mouseenter="skillIndex = idx"
-          >
-            <span class="skill-trigger">/{{ skill.name }}</span>
-            <span class="skill-desc">{{ skill.description }}</span>
-            <span class="skill-hint">tab</span>
-          </div>
-        </div>
-        <div v-if="skillActive && skillSuggestions.length === 0" class="skill-dropdown skill-empty">
-          <span>未找到匹配的技能</span>
+        <!-- / 技能提示（SkillLoader 拆除后：skill 由 CLI 原生触发，服务端不再注入） -->
+        <div v-if="skillActive" class="skill-tip">
+          <span>skill 由 CLI 原生触发：输入 /skill-name 或由 agent 自主调用，服务端不再注入</span>
         </div>
       </div>
 
@@ -2241,73 +2164,20 @@ function statusLabelZh(status: string): string {
   color: var(--text-muted);
 }
 
-/* Skill Dropdown — 复用 mention-dropdown 布局，微调内容 */
-.skill-dropdown {
+/* Skill 提示框（CLI 原生触发说明，不再有补全列表） */
+.skill-tip {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
   min-width: 260px;
-  max-height: 240px;
-  overflow-y: auto;
+  padding: 12px 14px;
+  font-size: 13px;
+  color: var(--text-muted);
   background: var(--bg-raised);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
   z-index: 100;
-}
-
-.skill-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 14px;
-  cursor: pointer;
-  transition: background var(--ease-in);
-}
-
-.skill-item:first-child {
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-}
-
-.skill-item:last-child {
-  border-radius: 0 0 var(--radius-md) var(--radius-md);
-}
-
-.skill-item:hover,
-.skill-item.active {
-  background: var(--bg-hover);
-}
-
-.skill-trigger {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--accent);
-  white-space: nowrap;
-  min-width: fit-content;
-}
-
-.skill-desc {
-  font-size: 13px;
-  color: var(--text-muted);
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.skill-hint {
-  font-size: 10px;
-  color: var(--text-muted);
-  background: var(--bg-surface);
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-weight: 500;
-}
-
-.skill-empty {
-  padding: 12px 14px;
-  font-size: 13px;
-  color: var(--text-muted);
 }
 
 /* Send Button */

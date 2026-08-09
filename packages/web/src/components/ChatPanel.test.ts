@@ -102,3 +102,26 @@ describe('ChatPanel restart confirm feedback', () => {
     expect(source).toContain('restart-label')
   })
 })
+
+describe('ChatPanel skill 提示（SkillLoader 拆除后）', () => {
+  it('提示框展示 CLI 原生触发说明（不再是「未找到匹配的技能」空壳）', () => {
+    // bf5aab5 拆除 SkillLoader：/api/skills 数据源已删，skill 由 CLI 原生消费
+    // （斜杠透传 + 模型自主调用），服务端不再注入——空壳文案改为正确说明
+    expect(source).toContain('skill 由 CLI 原生触发')
+    expect(source).toContain('服务端不再注入')
+    expect(source).toContain('skill-tip')
+    expect(source).not.toContain('未找到匹配的技能')
+  })
+
+  it('fetchSkills 死调用已清除（端点已删，恒 404 降级空列表）', () => {
+    expect(source).not.toContain('fetchSkills')
+    expect(source).not.toContain('/api/skills')
+  })
+
+  it('补全机制已剥离：无 skillSuggestions 下拉与键盘拦截分支（斜杠消息 Enter 可直发）', () => {
+    // 数据源恒空时下拉不可达；keydown 拦截分支曾吞掉斜杠消息的 Enter（preventDefault 后
+    // 直达 :493 发送逻辑被短路）——剥离后 Enter 直通 handleSend，CLI 斜杠触发通道保留
+    expect(source).not.toContain('skillSuggestions')
+    expect(source).not.toContain('skill-dropdown')
+  })
+})
