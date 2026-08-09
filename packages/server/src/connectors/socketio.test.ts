@@ -101,6 +101,12 @@ vi.mock('../llm/route-signals.js', () => ({
   consumeRouteSignals: vi.fn(() => []),
 }))
 
+// MCP 用户请求信号（request_user_action）：默认无信号（标签匹配/消费语义在
+// user-request-signals.test.ts 单独测），重启合并点用例按测试预置 mock 返回
+vi.mock('../llm/user-request-signals.js', () => ({
+  consumeUserRequestSignals: vi.fn(() => []),
+}))
+
 vi.mock('../skills/skill-loader.js', () => ({
   SkillLoader: class {
     static getInstance() {
@@ -3204,6 +3210,79 @@ describe('socketio connector', () => {
       const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
       expect(req.state).toBe('pending')
       expect(req.reason).toBe('服务器需要重启')
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ messageType: 'restart_request' })
+      )
+    })
+
+    it('MCP 信号路径：回复无文本格式但存在 restart 信号 → 写请求文件（reason 取信号）+ 广播带 messageType', async () => {
+      const mod = await import('./socketio.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { consumeUserRequestSignals } = await import('../llm/user-request-signals.js')
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '收到，已申请重启，请用户批准。', kind: 'text' }
+        }),
+      } as any)
+      // 结构化信号是主路径：无文本格式也能触发（msgId 标签匹配语义在
+      // user-request-signals.test.ts 单独测，此处 mock 返回值直测合并点并集）
+      vi.mocked(consumeUserRequestSignals).mockReturnValueOnce([
+        {
+          sessionId: 'session-1',
+          agentId: 'agent-1',
+          msgId: 'msg-x',
+          type: 'restart',
+          reason: '服务器需要重启',
+        },
+      ])
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        'trace-restart-signal'
+      )
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.state).toBe('pending')
+      expect(req.reason).toBe('服务器需要重启')
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.NEW_MESSAGE,
+        expect.objectContaining({ messageType: 'restart_request' })
+      )
+    })
+
+    it('信号与文本并存 → reason 优先取信号（结构化参数是权威，文本提取为 fallback）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { consumeUserRequestSignals } = await import('../llm/user-request-signals.js')
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '【重启请求】原因：文本里的原因', kind: 'text' }
+        }),
+      } as any)
+      vi.mocked(consumeUserRequestSignals).mockReturnValueOnce([
+        {
+          sessionId: 'session-1',
+          agentId: 'agent-1',
+          msgId: 'msg-x',
+          type: 'restart',
+          reason: '信号里的原因',
+        },
+      ])
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        'trace-restart-dual'
+      )
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.reason).toBe('信号里的原因')
       expect(mockRoomEmit).toHaveBeenCalledWith(
         Events.NEW_MESSAGE,
         expect.objectContaining({ messageType: 'restart_request' })

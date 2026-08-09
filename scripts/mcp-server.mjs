@@ -4,7 +4,7 @@
  *
  * 原生 JSON-RPC 2.0 stdio 实现 MCP 最小子集（零依赖，Phase 0 spike 已验证协议层）：
  *   - initialize        → 协议握手
- *   - tools/list        → 暴露 post_message + search_knowledge + query_db 三个工具
+ *   - tools/list        → 暴露 post_message + search_knowledge + query_db + request_user_action
  *   - tools/call        → 参数校验 → POST 内部端点 → ACK / 错误文本（含 reason）
  *   - ping / 其他       → 空 result / method not found
  *   - notifications（无 id 消息）→ 不回复
@@ -38,13 +38,18 @@
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
-import { validateSearchParams, validateQueryDbParams } from './mcp-server-utils.mjs'
+import {
+  validateSearchParams,
+  validateQueryDbParams,
+  validateUserRequestParams,
+} from './mcp-server-utils.mjs'
 
 const SERVER_INFO = { name: 'catstudy', version: '0.1.0' }
 const PROTOCOL_VERSION = '2025-06-18'
 const TOOL_NAME = 'post_message'
 const SEARCH_TOOL_NAME = 'search_knowledge'
 const QUERY_DB_TOOL_NAME = 'query_db'
+const REQUEST_USER_ACTION_TOOL_NAME = 'request_user_action'
 
 /** 工具定义——inputSchema 钉死契约：targetCats 必填数组、clientMessageId 可选 */
 const POST_MESSAGE_TOOL = {
@@ -109,6 +114,48 @@ const QUERY_DB_TOOL = {
       },
     },
     required: ['table'],
+  },
+}
+
+/**
+ * 工具定义——inputSchema 钉死契约：type 枚举（restart/choice）、reason 必填、
+ * options 可选（choice 用选项组，restart 忽略）。
+ */
+const REQUEST_USER_ACTION_TOOL = {
+  name: REQUEST_USER_ACTION_TOOL_NAME,
+  description:
+    '把「需要用户介入」的请求结构化投递给用户（稳定触发通道，替代文本格式匹配——' +
+    '文本格式依赖 LLM 精确输出、格式漂移导致按钮不出现的历史事故已堆四层容错）。' +
+    'type 传请求类型：restart（申请重启 server——仅店长角色可发，需用户批准后执行）；' +
+    'choice（选项选择，渲染待后续版本，服务端当前返回暂不支持）。' +
+    'reason 必填，写明请求原因（写请求文件/前端按钮展示用）。' +
+    '注意：仅用于「真的需要用户操作」时；叙述性提及重启不要用本工具。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      type: {
+        type: 'string',
+        enum: ['restart', 'choice'],
+        description: '请求类型（restart 已落地；choice 渲染待后续版本，服务端当前暂不支持）',
+      },
+      reason: {
+        type: 'string',
+        description: '请求原因（必填，非空）',
+      },
+      options: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: '选项 id（回灌用）' },
+            label: { type: 'string', description: '选项展示文本' },
+          },
+          required: ['id', 'label'],
+        },
+        description: '可选：选项组（choice 用，restart 忽略）',
+      },
+    },
+    required: ['type', 'reason'],
   },
 }
 
@@ -338,6 +385,61 @@ async function queryDb(table, conditions, limit) {
   }
 }
 
+/**
+ * 调用猫咖内部端点 POST /api/internal/user-request。
+ * 成功（2xx）→ { ok: true, reason? }（reason 为服务端回执说明）；
+ * 失败 → { ok: false, reason }（含 HTTP 状态/响应 reason——403 角色白名单/
+ * 400 类型不支持等错误文本直接回模型可诊断）。
+ * 环境变量缺失检查与 queryDb 同款（同一内部端点鉴权链）。
+ */
+async function callUserRequest(type, reason, options) {
+  const baseUrl = env('CATSTUDY_SERVER_URL')
+  const token = env('CATSTUDY_SIGNAL_TOKEN')
+  const sessionId = env('CATSTUDY_SESSION_ID')
+  const agentId = env('CATSTUDY_AGENT_ID')
+  const msgId = env('CATSTUDY_MSG_ID')
+
+  if (!baseUrl || !token || !sessionId || !agentId || !msgId) {
+    const missing = [
+      ['CATSTUDY_SERVER_URL', baseUrl],
+      ['CATSTUDY_SIGNAL_TOKEN', token],
+      ['CATSTUDY_SESSION_ID', sessionId],
+      ['CATSTUDY_AGENT_ID', agentId],
+      ['CATSTUDY_MSG_ID', msgId],
+    ]
+      .filter(([, v]) => !v)
+      .map(([n]) => n)
+    return { ok: false, reason: `MCP 环境缺失（${missing.join('/')}），用户请求未投递` }
+  }
+
+  let res
+  try {
+    res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/internal/user-request`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-signal-token': token,
+      },
+      body: JSON.stringify({ sessionId, agentId, msgId, type, reason, options }),
+    })
+  } catch (err) {
+    return { ok: false, reason: `内部端点不可达: ${err.message}` }
+  }
+
+  let body = null
+  try {
+    body = await res.json()
+  } catch {
+    /* 非 JSON 响应体 */
+  }
+
+  if (res.ok) return { ok: true, reason: body?.reason }
+  return {
+    ok: false,
+    reason: body?.reason || `内部端点 HTTP ${res.status}`,
+  }
+}
+
 // 直接运行时才启动 stdio server——vitest import 本模块（validateSearchParams
 // 单测）不挂 stdin listener（resolve 兼容相对路径调用 node scripts/mcp-server.mjs）
 const isDirectRun =
@@ -386,7 +488,14 @@ if (isDirectRun) {
       send({
         jsonrpc: '2.0',
         id,
-        result: { tools: [POST_MESSAGE_TOOL, SEARCH_KNOWLEDGE_TOOL, QUERY_DB_TOOL] },
+        result: {
+          tools: [
+            POST_MESSAGE_TOOL,
+            SEARCH_KNOWLEDGE_TOOL,
+            QUERY_DB_TOOL,
+            REQUEST_USER_ACTION_TOOL,
+          ],
+        },
       })
       return
     }
@@ -500,11 +609,36 @@ if (isDirectRun) {
         })
         return
       }
+      if (name === REQUEST_USER_ACTION_TOOL_NAME) {
+        const args = params?.arguments ?? {}
+        const parsed = validateUserRequestParams(args)
+        if (!parsed.ok) {
+          send(rpcError(id, -32602, parsed.reason))
+          return
+        }
+        const result = await callUserRequest(parsed.type, parsed.reason, parsed.options)
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: result.ok
+                  ? `✅ 用户请求已投递：${parsed.type}（${result.reason ?? '已入队'}）`
+                  : `❌ 用户请求投递失败：${result.reason}`,
+              },
+            ],
+            isError: !result.ok,
+          },
+        })
+        return
+      }
       send(
         rpcError(
           id,
           -32602,
-          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge 和 query_db 三个工具）`
+          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge、query_db 和 request_user_action 四个工具）`
         )
       )
       return

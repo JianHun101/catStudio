@@ -14,6 +14,11 @@
  *      @ 回请求人的特殊边——OQ③ 补丁），失败 422 + reason 回模型（消灭半成功 ACK）
  *   6. storeRouteSignal 入 Map（200）——合并点按 messageId 标签消费
  *
+ * POST /api/internal/user-request（request_user_action 工具，重启请求稳定触发
+ * Phase 1）：同款五步鉴权链（400→404→401→409）+ 角色白名单（仅 store 角色
+ * 可发，403）→ storeUserRequestSignal 入 Map——socketio.ts runAgentReply 完成
+ * 点消费，与 isRestartRequestContent 文本检测取并集（结构化主路径 + 文本 fallback）。
+ *
  * 失败一律 4xx + reason 字段——mcp-server.mjs 把 reason 拼进工具错误文本
  * 回模型（提示改行首 @ fallback）。
  */
@@ -29,6 +34,7 @@ import {
 import { QUERY_TABLE_SCHEMAS, type QueryOp } from '../db/repository/query.js'
 import { getActiveStream } from '../connectors/socketio.js'
 import { storeRouteSignal } from '../llm/route-signals.js'
+import { storeUserRequestSignal } from '../llm/user-request-signals.js'
 import { filterAllowedMentions } from '../dispatch/mention-policy.js'
 import { embedText } from '../memory/embedding.js'
 import { vectorToBlob } from '../memory/index.js'
@@ -62,7 +68,19 @@ interface DbQueryBody {
   limit?: unknown
 }
 
+interface UserRequestBody {
+  sessionId?: unknown
+  agentId?: unknown
+  msgId?: unknown
+  type?: unknown
+  reason?: unknown
+  options?: unknown
+}
+
 const QUERY_OPS = new Set<QueryOp>(['=', '>', '<', 'LIKE'])
+
+/** request_user_action 类型枚举——choice 枚举就绪但渲染未落地（诚实拒绝，避免半吊子功能误导模型） */
+const USER_REQUEST_TYPES = new Set(['restart', 'choice'] as const)
 
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/internal/route-signals', async (req, reply) => {
@@ -361,5 +379,107 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       total: result.total,
     })
     return reply.send({ ok: true, rows: result.rows, total: result.total })
+  })
+
+  app.post('/api/internal/user-request', async (req, reply) => {
+    const body = (req.body ?? {}) as UserRequestBody
+
+    // ── 1. body 基本校验（400）── 与 route-signals 同款：防御纵深（mcp-server.mjs 已做参数校验）
+    const { sessionId, agentId, msgId, type } = body
+    if (
+      typeof sessionId !== 'string' ||
+      !sessionId ||
+      typeof agentId !== 'string' ||
+      !agentId ||
+      typeof msgId !== 'string' ||
+      !msgId
+    ) {
+      return reply.status(400).send({ ok: false, reason: 'sessionId/agentId/msgId 必填非空字符串' })
+    }
+    if (typeof type !== 'string' || !USER_REQUEST_TYPES.has(type as 'restart' | 'choice')) {
+      return reply
+        .status(400)
+        .send({ ok: false, reason: `type 必须是 ${[...USER_REQUEST_TYPES].join('/')} 之一` })
+    }
+    // choice 枚举就绪但渲染/回灌未落地——诚实拒绝（管道结构已就绪，加渲染即通）
+    if (type === 'choice') {
+      return reply
+        .status(400)
+        .send({ ok: false, reason: '该类型暂不支持（choice 渲染待后续版本）' })
+    }
+    const reason = body.reason
+    if (typeof reason !== 'string' || !reason.trim()) {
+      return reply.status(400).send({ ok: false, reason: 'reason 必须是非空字符串' })
+    }
+    // options 仅 choice 用（restart 忽略）——形状校验保留，防非法结构入信号
+    const options = body.options ?? []
+    if (!Array.isArray(options)) {
+      return reply.status(400).send({ ok: false, reason: 'options 必须是数组' })
+    }
+    for (const o of options) {
+      if (
+        typeof o !== 'object' ||
+        o === null ||
+        typeof o.id !== 'string' ||
+        !o.id ||
+        typeof o.label !== 'string' ||
+        !o.label
+      ) {
+        return reply
+          .status(400)
+          .send({ ok: false, reason: 'options 每项须 { id, label } 非空字符串' })
+      }
+    }
+
+    // ── 2. lookup activeStreams（404）──
+    const stream = getActiveStream(agentId)
+    if (!stream) {
+      return reply
+        .status(404)
+        .send({ ok: false, reason: `agent ${agentId} 当前无活跃流，用户请求被拒` })
+    }
+
+    // ── 3. token 精确匹配（401）──
+    const token = req.headers['x-signal-token']
+    if (typeof token !== 'string' || token !== stream.token) {
+      return reply.status(401).send({ ok: false, reason: 'x-signal-token 不匹配' })
+    }
+
+    // ── 4. 复合键 sessionId 匹配（409）──
+    if (stream.sessionId !== sessionId) {
+      return reply.status(409).send({
+        ok: false,
+        reason: `agent ${agentId} 正在会话 ${stream.sessionId} 执行，本请求会话 ${sessionId} 不匹配`,
+      })
+    }
+
+    // ── 5. 角色白名单（403）——重启请求是店长权限，防实施猫误发按钮噪音 ──
+    // 注意：AgentRole 类型无 'architect'——架构师角色在库中即 'store'（seed-data.ts
+    // 店长 role: 'store'）；未知/缺失角色 fail-closed（误发噪音代价小、漏拦代价大，
+    // 与 mention-policy 的 fail-open 取向相反——那是 A2A 生命线，这里是用户交互噪音）
+    const fromRow = agentsRepo.getAgentById(agentId)
+    if (fromRow?.role !== 'store') {
+      return reply.status(403).send({
+        ok: false,
+        reason: `仅店长（role=store）可发起用户请求（当前 agent ${agentId} role=${fromRow?.role ?? 'unknown'}）`,
+      })
+    }
+
+    // ── 6. 入 Map（200）──
+    storeUserRequestSignal({
+      sessionId,
+      agentId,
+      msgId,
+      type: 'restart',
+      reason: reason.trim(),
+    })
+    log.info('user request signal stored', {
+      sessionId,
+      agentId,
+      msgId,
+      type: 'restart',
+      reason: reason.trim(),
+    })
+    return reply.send({ ok: true, reason: '用户请求已入队' })
   })
 }

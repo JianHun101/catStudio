@@ -13,6 +13,10 @@ import { initRepository, knowledge as knowledgeRepo } from '../db/repository/ind
 import { vectorToBlob } from '../memory/index.js'
 import type { FastifyInstance } from 'fastify'
 import { consumeRouteSignals, __test_resetRouteSignals } from '../llm/route-signals.js'
+import {
+  consumeUserRequestSignals,
+  __test_resetUserRequestSignals,
+} from '../llm/user-request-signals.js'
 
 // Mock socketio connector：getActiveStream 受控返回活跃流（token 精确匹配用）
 vi.mock('../connectors/socketio.js', () => ({
@@ -68,6 +72,7 @@ describe('internal route-signals', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     __test_resetRouteSignals()
+    __test_resetUserRequestSignals()
     setDb(createTestDb())
     initRepository(getDb())
     insertFixture()
@@ -860,6 +865,180 @@ describe('internal route-signals', () => {
         })
         expect(res.statusCode).toBe(200)
         expect(JSON.parse(res.body)).toEqual({ ok: true, rows: [], total: 0 })
+      })
+    })
+  })
+
+  describe('user-request 端点（request_user_action 结构化用户请求）', () => {
+    /** 发送者 = 店长（store 角色——角色白名单通过态） */
+    const urBody = (over: Record<string, unknown> = {}) => ({
+      sessionId: 'session-1',
+      agentId: 'agent-store',
+      msgId: 'msg-1',
+      type: 'restart',
+      reason: '服务器卡死',
+      ...over,
+    })
+    const mockActive = async () =>
+      vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue({
+        sessionId: 'session-1',
+        messageId: 'reply-1',
+        content: '',
+        token: VALID_TOKEN,
+      })
+
+    describe('body 基本校验（400）', () => {
+      it('缺 type / type 非枚举（foo）→ 400 + reason 点名 type', async () => {
+        for (const payload of [urBody({ type: undefined }), urBody({ type: 'foo' })]) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/user-request',
+            payload,
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('type')
+        }
+      })
+
+      it('type=choice → 400（该类型暂不支持——渲染留第二步，诚实拒绝）', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody({ type: 'choice' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).reason).toContain('该类型暂不支持')
+      })
+
+      it('缺 reason / reason 空串 → 400 + reason 点名', async () => {
+        for (const reason of [undefined, '', '   ']) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/user-request',
+            payload: urBody({ reason }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('reason')
+        }
+      })
+
+      it('options 非数组 / 每项结构错 → 400', async () => {
+        for (const options of [{ id: 'a' }, [{ label: 'x' }], 'not-array']) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/user-request',
+            payload: urBody({ options }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('options')
+        }
+      })
+    })
+
+    describe('鉴权链（404/401/409 与 route-signals 同款）', () => {
+      it('无活跃流 → 404 + reason', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(404)
+        expect(JSON.parse(res.body).reason).toContain('无活跃流')
+      })
+
+      it('token 不匹配 → 401', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody(),
+          headers: { 'x-signal-token': 'wrong-token' },
+        })
+        expect(res.statusCode).toBe(401)
+      })
+
+      it('sessionId 不匹配 → 409', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody({ sessionId: 'session-other' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(409)
+      })
+    })
+
+    describe('角色白名单（403）', () => {
+      it('implementer 角色调用 → 403 + 可诊断错误文本', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody({ agentId: 'agent-impl' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(403)
+        expect(JSON.parse(res.body).reason).toContain('role=store')
+      })
+
+      it('未知 agent（不在 agents 表）→ 403（fail-closed：角色缺失不放行）', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody({ agentId: 'agent-ghost' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(403)
+        expect(JSON.parse(res.body).reason).toContain('unknown')
+      })
+
+      it('reviewer 角色调用 → 403', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody({ agentId: 'agent-reviewer' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(403)
+      })
+    })
+
+    describe('成功路径（200 入 Map）', () => {
+      it('store 角色全过 → 200 + 信号可被同 msgId 消费（type/reason 原样）', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody({ reason: '  服务器卡死  ' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body).ok).toBe(true)
+
+        const signals = consumeUserRequestSignals('session-1', 'agent-store', 'msg-1')
+        expect(signals).toHaveLength(1)
+        expect(signals[0]).toMatchObject({ type: 'restart', reason: '服务器卡死', msgId: 'msg-1' })
+      })
+
+      it('restart 携带 options → 忽略不入信号（restart 无选项语义）', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/user-request',
+          payload: urBody({ options: [{ id: 'a', label: '重启' }] }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const signals = consumeUserRequestSignals('session-1', 'agent-store', 'msg-1')
+        expect(signals[0].options).toBeUndefined()
       })
     })
   })

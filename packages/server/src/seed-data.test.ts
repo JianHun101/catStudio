@@ -162,21 +162,27 @@ describe('agent system prompts', () => {
     expect(tucao.systemPrompt).toContain('收口信号直接到位')
   })
 
-  it('店长 prompt 重启规则为嵌中契约（任意位置触发，旧行首限制已移除）', () => {
+  it('店长 prompt 重启规则为工具教法（request_user_action，文本格式不再教学）', () => {
     const boss = agents.find((a) => a.name === '店长')!
-    expect(boss.systemPrompt).toContain('嵌在回复任意位置均可触发')
-    expect(boss.systemPrompt).toContain('不必独占消息开头')
-    expect(boss.systemPrompt).toContain('原因：')
-    // 4b5f6c2 旧限制（必须单独一条消息/行首开头）与 9371c09 放宽契约矛盾，已移除
-    expect(boss.systemPrompt).not.toContain('必须单独发一条消息')
-    expect(boss.systemPrompt).not.toContain('禁止嵌在长汇报中间')
+    // 结构化触发是主路径：教工具不教格式（格式漂移事故链 6231ec9/9371c09/2026-08-07 根治）
+    expect(boss.systemPrompt).toContain('request_user_action')
+    expect(boss.systemPrompt).toContain("type:'restart'")
+    expect(boss.systemPrompt).toContain('等待用户批准')
+    // 文本格式字样不再出现——复述抢占从源头根除（模型不再被教格式）
+    expect(boss.systemPrompt).not.toContain('重启请求格式为')
+    expect(boss.systemPrompt).not.toContain('『重启请求』')
+    expect(boss.systemPrompt).not.toContain('嵌在回复任意位置均可触发')
   })
 
-  it('店长和手下的 prompt 含防复述约束（不完整复述重启请求格式）', () => {
+  it('店长和手下的 prompt 教工具而非文本格式（不教『重启请求』格式字样）', () => {
     for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
-      expect(agent.systemPrompt).toContain('不要完整复述')
-      expect(agent.systemPrompt).toContain('误触发请求文件')
+      expect(agent.systemPrompt).toContain('request_user_action')
+      expect(agent.systemPrompt).toContain('禁止自行 kill 或重启 server')
+      // 旧格式教学字样（含防复述句）全部移除
+      expect(agent.systemPrompt).not.toContain('重启请求格式为')
+      expect(agent.systemPrompt).not.toContain('不要完整复述')
+      expect(agent.systemPrompt).not.toContain('误触发请求文件')
     }
   })
 

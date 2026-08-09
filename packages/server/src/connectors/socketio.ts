@@ -55,6 +55,7 @@ import {
 } from './a2a-mentions.js'
 import { filterAllowedMentions, allowedTargetsDescription } from '../dispatch/mention-policy.js'
 import { consumeRouteSignals } from '../llm/route-signals.js'
+import { consumeUserRequestSignals } from '../llm/user-request-signals.js'
 import { parseJsonArray } from '../utils.js'
 import { SkillLoader } from '../skills/skill-loader.js'
 import { updateRunningSummary } from '../summarizer/index.js'
@@ -2329,7 +2330,13 @@ async function runAgentReply(
   // 并写 .restart-request 文件（state=pending，dev.js 轮询执行重启）。
   // 与 ingest 用户路径同款——88d5f82 只覆盖了用户入口，店长是 agent 走本路径，
   // 此前触发链从未生效（agent 路径盲区）。消息本身仍以 agent role 落库（类型不落库）。
-  const isRestartRequest = isRestartRequestContent(fullContent)
+  // 结构化通道（request_user_action 工具信号，msgId 标签消费）与文本检测取并集——
+  // 信号是主路径（稳定触发，reason 直接来自结构化参数），文本检测保留为兼容
+  // fallback（历史消息 + 用户聊天直说"重启"仍可触发，但 seed prompt 不再教格式）。
+  const userRequestSignals = consumeUserRequestSignals(sessionId, agent.id, msgId)
+  const signalRestart = userRequestSignals.find((s) => s.type === 'restart')
+  const isRestartRequest = isRestartRequestContent(fullContent) || !!signalRestart
+  const restartReason = signalRestart?.reason || extractRestartReason(fullContent)
   const restartExpiresAt = new Date(Date.now() + RESTART_TTL_MS).toISOString()
 
   const finalMsg = {
@@ -2351,7 +2358,7 @@ async function runAgentReply(
       createRestartRequest({
         messageId: msgId,
         sessionId,
-        reason: extractRestartReason(fullContent),
+        reason: restartReason,
         createdAt: new Date().toISOString(),
         expiresAt: restartExpiresAt,
         state: 'pending',

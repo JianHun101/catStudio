@@ -10,7 +10,9 @@ import { describe, it, expect } from 'vitest'
 import {
   validateSearchParams,
   validateQueryDbParams,
+  validateUserRequestParams,
   QUERY_DB_TABLES,
+  USER_REQUEST_TYPES,
 } from './mcp-server-utils.mjs'
 
 describe('validateSearchParams (search_knowledge)', () => {
@@ -141,5 +143,75 @@ describe('validateQueryDbParams (query_db)', () => {
       conditions: [{ column: 'content', op: '=', value: `' OR 1=1 --` }],
     })
     expect(r.ok).toBe(true)
+  })
+})
+
+describe('validateUserRequestParams (request_user_action)', () => {
+  it('合法入参：type + reason → ok，options 默认 []', () => {
+    const r = validateUserRequestParams({ type: 'restart', reason: '服务器卡死' })
+    expect(r).toEqual({ ok: true, type: 'restart', reason: '服务器卡死', options: [] })
+  })
+
+  it('合法入参：choice 枚举过形状校验（服务端 400 兜底"暂不支持"，本层不拦）', () => {
+    const r = validateUserRequestParams({ type: 'choice', reason: '选择方案' })
+    expect(r.ok).toBe(true)
+    expect(r.type).toBe('choice')
+  })
+
+  it('合法入参：options 结构正确透传', () => {
+    const options = [
+      { id: 'a', label: '重启' },
+      { id: 'b', label: '等待' },
+    ]
+    const r = validateUserRequestParams({ type: 'restart', reason: 'x', options })
+    expect(r).toEqual({ ok: true, type: 'restart', reason: 'x', options })
+  })
+
+  it('reason 前后空白裁剪', () => {
+    const r = validateUserRequestParams({ type: 'restart', reason: '  服务器卡死  ' })
+    expect(r.reason).toBe('服务器卡死')
+  })
+
+  it('type 缺省 / 非枚举（foo/123/undefined）→ 错误文本', () => {
+    for (const bad of ['foo', 123, undefined]) {
+      const r = validateUserRequestParams({ type: bad, reason: 'x' })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('type')
+    }
+    expect(validateUserRequestParams({ reason: 'x' }).ok).toBe(false)
+  })
+
+  it('reason 缺省 / 空串 / 纯空白 → 错误文本', () => {
+    for (const bad of [undefined, '', '   ']) {
+      const r = validateUserRequestParams({ type: 'restart', reason: bad })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('reason')
+    }
+    expect(validateUserRequestParams({ type: 'restart' }).ok).toBe(false)
+  })
+
+  it('options 非数组 → 错误文本', () => {
+    const r = validateUserRequestParams({ type: 'restart', reason: 'x', options: { id: 'a' } })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain('options')
+  })
+
+  it('options 每项缺 id/label 或空串 → 错误文本', () => {
+    const badCases = [
+      [{ label: 'x' }],
+      [{ id: 'a' }],
+      [{ id: '', label: 'x' }],
+      [{ id: 'a', label: '' }],
+      ['not-object'],
+    ]
+    for (const options of badCases) {
+      const r = validateUserRequestParams({ type: 'restart', reason: 'x', options })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('options')
+    }
+  })
+
+  it('枚举常量只含 restart/choice（契约钉死，防误扩）', () => {
+    expect(USER_REQUEST_TYPES).toEqual(['restart', 'choice'])
   })
 })

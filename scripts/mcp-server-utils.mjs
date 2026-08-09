@@ -87,3 +87,54 @@ export function validateQueryDbParams(args) {
   }
   return { ok: true, table, conditions, limit }
 }
+
+/**
+ * request_user_action 参数校验（纯函数，供单测——scripts/mcp-server.test.js）。
+ * 契约：type ∈ {restart, choice}（枚举就绪——choice 服务端当前 400「暂不支持」，
+ * 渲染留第二步，管道先通）、reason 必填非空字符串、options 可选数组
+ * （每项 { id: 非空字符串, label: 非空字符串 }，choice 用，restart 忽略）。
+ * 服务端角色白名单与 type 支持面由 internal.ts 权威校验（400/403 层）——
+ * 本层只校形状，与 validateQueryDbParams 同款分层。
+ * 返回 { ok: true, type, reason, options } 或 { ok: false, reason }。
+ */
+export const USER_REQUEST_TYPES = ['restart', 'choice']
+
+export function validateUserRequestParams(args) {
+  const type = args?.type
+  if (typeof type !== 'string' || !USER_REQUEST_TYPES.includes(type)) {
+    return {
+      ok: false,
+      reason: `request_user_action 参数无效: type 必须是 ${USER_REQUEST_TYPES.join('/')} 之一（当前: ${JSON.stringify(type)}）`,
+    }
+  }
+  const reason = args?.reason
+  if (typeof reason !== 'string' || !reason.trim()) {
+    return {
+      ok: false,
+      reason: `request_user_action 参数无效: reason 必须是非空字符串（当前: ${JSON.stringify(reason)}）`,
+    }
+  }
+  const options = args?.options ?? []
+  if (!Array.isArray(options)) {
+    return {
+      ok: false,
+      reason: `request_user_action 参数无效: options 必须是数组（当前: ${JSON.stringify(options)}）`,
+    }
+  }
+  for (const o of options) {
+    if (
+      typeof o !== 'object' ||
+      o === null ||
+      typeof o.id !== 'string' ||
+      !o.id.trim() ||
+      typeof o.label !== 'string' ||
+      !o.label.trim()
+    ) {
+      return {
+        ok: false,
+        reason: `request_user_action 参数无效: options 每项须 { id: 非空字符串, label: 非空字符串 }（当前: ${JSON.stringify(o)}）`,
+      }
+    }
+  }
+  return { ok: true, type, reason: reason.trim(), options }
+}
