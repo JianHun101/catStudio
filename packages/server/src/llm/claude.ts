@@ -39,8 +39,9 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
  * 实测真实执行搜索（2026-08-09 活体实证：CLI 自动发起 2 次 WebSearch 返回真实
  * 链接，exit 0）。「语义检索有 MCP 知识库兜底」理由不成立——实时网络信息
  * 知识库兜不了，放行以实测为准。
- * 禁用工具面：WebFetch（域名安全校验依赖 claude.ai 服务，实测不可用——
- * Unable to verify if domain...is safe to fetch，放行是死工具）、
+ * 禁用工具面：WebFetch（域名安全校验依赖 claude.ai 服务，2026-08-09
+ * 网络策略下实测不可用——Unable to verify if domain...is safe to fetch，
+ * 放行是死工具）、
  * 子 agent/任务编排（Agent/Workflow/Task 系/Schedule/Cron，A2A 风暴治理面）、
  * 双通道防重（SendMessage 已由 MCP post_message 替代）、UI 阻断
  * （AskUserQuestion/PlanMode/Worktree）与 Skill（聊天回复场景无需要）。

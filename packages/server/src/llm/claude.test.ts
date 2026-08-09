@@ -38,7 +38,8 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
  * 与 claude.ts BUILTIN_TOOLS_DISALLOWED 同源钉死：「含 Bash 且非空」判据拦不住
  * 删减（10070d1/00a9a95 历史实证）——全列精确比对（数量 + 顺序双锁）才是防
  * 静默清空/删减再犯的完整闭环。修改黑名单必须同步更新本数组与 claude.ts 常量。
- * 第二步收权限（店长裁决）：从 28 工具全列收窄为工程面最小集 24 项——
+ * 第二步收权限（店长裁决）：从 28 工具全列收窄为工程面最小集 24 项，
+ * WebSearch 放行后为 23 项（2026-08-09 实测实证，见下）——
  * 保留 Bash（危险命令面 Bash(rm:*)/Bash(curl:*) 命令级禁，spike 实证生效）、
  * Read/Write/Edit/Glob/Grep；其余工具面全禁（业务外联/子 agent 风暴面/双通道
  * 防重/UI 阻断/Skill）。路径 B 全局单一配置；per-agent 分档（含收口动作
