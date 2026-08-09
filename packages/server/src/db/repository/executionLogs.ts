@@ -200,13 +200,25 @@ export function updateExecutionLogCommitHash(
 }
 
 /** post-commit 写回：把本次 commit 的 hash 记到"仍 running 的执行记录"上。
- *  语义：提交者提交时自己的执行必然未结束（提交 → 补填交接 → 回复才 finalize），
- *  而先提交的同伴记录此时多已 completed——running 过滤让同 uuid 双执行者
- *  各 commit 各命中各的执行者，互不覆盖（店长派活定稿语义）。 */
+ *  agentId：post-commit → handoff-gen 继承 claude.ts spawn env 注入的
+ *  CATSTUDY_AGENT_ID（dispatch 派发子进程自带），按 agent_id 精确命中自己的
+ *  执行行——同 uuid 双 running（双猫同时执行，店长一条消息派两单）时
+ *  两个 commit 各刷各的行，互不覆盖（eae5a5e 错投 ds猫 竞态根治，双 running
+ *  写回互覆实害化后裁决）；无 agentId（开发者终端手动提交，env 不存在）走
+ *  fallback：running 过滤 + 全刷，行为与修复前一致。 */
 export function updateRunningExecutionCommitHash(
   triggeredByMessageId: string,
-  commitHash: string
+  commitHash: string,
+  agentId?: string
 ): { changes: number } {
+  if (agentId) {
+    return db
+      .prepare(
+        `UPDATE execution_logs SET commit_hash = ?
+         WHERE triggered_by_message_id = ? AND status = 'running' AND agent_id = ?`
+      )
+      .run(commitHash, triggeredByMessageId, agentId)
+  }
   return db
     .prepare(
       `UPDATE execution_logs SET commit_hash = ?

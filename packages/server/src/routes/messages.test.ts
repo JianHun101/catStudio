@@ -231,6 +231,77 @@ describe('Message Routes', () => {
       expect(rowDone.commit_hash).toBeNull()
     })
 
+    it('带 agentId 精确命中自己的 running 行——双 running 各 commit 各刷各，无覆盖无错投（eae5a5e 竞态根治）', async () => {
+      const uuid = '553bbc08-3819-4d75-9499-f23c6eb1282f'
+      const hashA = 'a'.repeat(40)
+      const hashB = 'b'.repeat(40)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES (?, ?, '[]', datetime('now'), datetime('now'))`
+      ).run('session-exec-2', 'debug')
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-ds', 'ds猫')
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '😼', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-flash', 'flash猫')
+      // 同 uuid 双 running（双猫同时执行——店长一条消息派两单的常态，eae5a5e 错投场景）
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+         VALUES (?, ?, ?, ?, 'running', datetime('now'))`
+      ).run('log-ds', 'session-exec-2', 'agent-ds', uuid)
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+         VALUES (?, ?, ?, ?, 'running', datetime('now'))`
+      ).run('log-flash', 'session-exec-2', 'agent-flash', uuid)
+
+      // 各自带 agentId 写回各自 commit——agentId 过滤命中自己的行
+      const resA = await app.inject({
+        method: 'POST',
+        url: `/api/messages/${uuid}/commit-hash`,
+        payload: { commitHash: hashA, agentId: 'agent-ds' },
+      })
+      expect(resA.statusCode).toBe(200)
+      expect(JSON.parse(resA.body)).toEqual({ ok: true, updated: 1 })
+      // 中间态：ds猫 写回后 flash猫 的行未被触碰（无覆盖）
+      const rowFlashMid = db
+        .prepare('SELECT commit_hash FROM execution_logs WHERE id = ?')
+        .get('log-flash') as { commit_hash: string | null }
+      expect(rowFlashMid.commit_hash).toBeNull()
+      const resB = await app.inject({
+        method: 'POST',
+        url: `/api/messages/${uuid}/commit-hash`,
+        payload: { commitHash: hashB, agentId: 'agent-flash' },
+      })
+      expect(resB.statusCode).toBe(200)
+      expect(JSON.parse(resB.body)).toEqual({ ok: true, updated: 1 })
+
+      // 各 commit 各命中各的行
+      const rowDs = db
+        .prepare('SELECT commit_hash FROM execution_logs WHERE id = ?')
+        .get('log-ds') as { commit_hash: string | null }
+      expect(rowDs.commit_hash).toBe(hashA)
+      const rowFlash = db
+        .prepare('SELECT commit_hash FROM execution_logs WHERE id = ?')
+        .get('log-flash') as { commit_hash: string | null }
+      expect(rowFlash.commit_hash).toBe(hashB)
+
+      // executor 反查闭环：?commit= 各精确命中各的实施者（无错投）
+      const execA = await app.inject({
+        method: 'GET',
+        url: `/api/messages/${uuid}/executor?commit=${hashA}`,
+      })
+      expect(JSON.parse(execA.body)).toEqual({ agentId: 'agent-ds', agentName: 'ds猫' })
+      const execB = await app.inject({
+        method: 'GET',
+        url: `/api/messages/${uuid}/executor?commit=${hashB}`,
+      })
+      expect(JSON.parse(execB.body)).toEqual({ agentId: 'agent-flash', agentName: 'flash猫' })
+    })
+
     it('拒绝非 40-hex 的 commitHash', async () => {
       const res = await app.inject({
         method: 'POST',

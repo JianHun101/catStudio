@@ -896,11 +896,15 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
     // 写回 commit_hash（agent 人工提交路径此前从不写，只有 socketio 自动提交
     // 兜底写）——executor 反查按 commit 精确匹配的前提。失败仅告警不阻断投递：
     // 老 server 无此端点（404）或 server 不可达时退化 uuid 逻辑 + 兜底店长。
+    // 携带 CATSTUDY_AGENT_ID（claude.ts spawn env 注入、post-commit 父进程链
+    // 继承）——同 uuid 双 running 行按 agent_id 精确命中自己的行，根治双 running
+    // 写回互覆错投（eae5a5e 实害化）；无 env（终端手动提交）不带，服务端 fallback。
+    const agentId = process.env.CATSTUDY_AGENT_ID
     try {
       const res = await fetch(`${serverUrl}/api/messages/${commitUuid}/commit-hash`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ commitHash: commitSha }),
+        body: JSON.stringify({ commitHash: commitSha, ...(agentId ? { agentId } : {}) }),
         signal: AbortSignal.timeout(3000),
       })
       if (res.ok) {

@@ -54,6 +54,9 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
    * 供 handoff-gen（post-commit）投递前调用——agent 人工提交路径此前从不写
    * commit_hash（只有 socketio 自动提交兜底路径写），导致 executor 反查只能
    * "取最近"误指。写回后同 uuid 双执行者各 commit 各命中各的实施者。
+   * 可选 body.agentId：handoff-gen 从 CATSTUDY_AGENT_ID（claude.ts spawn env
+   * 注入，post-commit 父进程链继承）透传——双 running 行按 agent_id 精确命中
+   * 自己的行，根治 eae5a5e 错投竞态；不带则 fallback 全刷 running（手动提交）。
    * 写回失败不阻断投递（反查增强不是硬依赖，失败退化 uuid 逻辑 + 兜底店长）。
    */
   app.post('/api/messages/:id/commit-hash', async (req, reply) => {
@@ -61,12 +64,15 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (!id || typeof id !== 'string') {
       return reply.status(400).send({ error: 'id is required' })
     }
-    const body = req.body as { commitHash?: string } | null
+    const body = req.body as { commitHash?: string; agentId?: string } | null
     const commitHash = typeof body?.commitHash === 'string' ? body.commitHash.trim() : ''
     if (!/^[0-9a-f]{40}$/.test(commitHash)) {
       return reply.status(400).send({ error: 'commitHash must be a 40-char hex sha' })
     }
-    const result = execLogsRepo.updateRunningExecutionCommitHash(id, commitHash)
+    const agentId = typeof body?.agentId === 'string' && body.agentId ? body.agentId : undefined
+    const result = agentId
+      ? execLogsRepo.updateRunningExecutionCommitHash(id, commitHash, agentId)
+      : execLogsRepo.updateRunningExecutionCommitHash(id, commitHash)
     return reply.send({ ok: true, updated: result.changes })
   })
 
