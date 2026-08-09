@@ -55,6 +55,8 @@ export interface OneBotStatus {
   enabled: boolean
   apiBase: string
   running: boolean
+  /** dev 启动时自动拉起 NapCat（.napcat-config.json autoStart，缺省 true）——与 config 契约同源 */
+  autoStart: boolean
   launchCmdConfigured: boolean
   /** 启动命令就绪：模板非空且（无 {NAPCAT_PATH} 占位符 || 页面路径已配置）——start 按钮以此为准 */
   launchReady: boolean
@@ -62,11 +64,13 @@ export interface OneBotStatus {
   tokenMasked: string
 }
 
-/** NapCat 启动路径配置（.napcat-config.json）——pathExists 在路径未配置时为 null */
+/** NapCat 启动路径配置（.napcat-config.json）——pathExists 在路径未配置时为 null；
+ *  autoStart 缺省 true：旧配置无该字段 = 自动拉起（用户决策，行为不变） */
 export interface NapcatConfig {
   ok: boolean
   napcatPath: string
   pathExists: boolean | null
+  autoStart: boolean
 }
 
 /** NapCat 路径浏览条目（只读目录导航——浏览器拿不到本地路径，选择器走 server 列目录） */
@@ -182,10 +186,10 @@ export const api = {
       body: JSON.stringify({ action }),
     }),
 
-  // NapCat 启动路径配置（.napcat-config.json——页面保存路径，dev.js 拉起时读）
+  // NapCat 启动路径配置（.napcat-config.json——页面保存路径 + autoStart 开关，dev.js 拉起时读）
   getNapcatConfig: () => request<NapcatConfig>('/connectors/napcat/config'),
 
-  saveNapcatConfig: (data: { napcatPath: string }) =>
+  saveNapcatConfig: (data: { napcatPath: string; autoStart?: boolean }) =>
     request<{ ok: boolean; napcatPath: string }>('/connectors/napcat/config', {
       method: 'POST',
       body: JSON.stringify(data),
