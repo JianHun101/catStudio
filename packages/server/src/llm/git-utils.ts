@@ -27,10 +27,36 @@ function getCwd(): string {
   return resolve(process.cwd())
 }
 
+/**
+ * 清理 git 环境变量，恢复「按 cwd 探测」语义。
+ *
+ * git 在 worktree 内 commit 时会向 hook 注入 GIT_DIR（绝对路径，指向
+ * .git/worktrees/<name>——worktree 的 .git 是文件指针，git 需显式指定
+ * 仓库位置）与 GIT_INDEX_FILE（绝对路径）。hook 内跑全量 vitest 时，
+ * 测试的 execSync 虽有 `cwd: tmp`，但 GIT_DIR 环境变量优先级高于 cwd
+ * 探测——全部 git 操作（init/config/add/commit）被劫持到 worktree gitdir
+ * 与主仓库共享 config（user.name=test、core.bare=true 污染，worktree 分支
+ * 被 fake 提交篡改）。主工作区 commit 不注入 GIT_DIR（仅相对 GIT_INDEX_FILE，
+ * cwd=tmp 时相对 tmp 解析无害）——店长实测实锤（2026-08-09，hook env dump）。
+ * 与 getCwd() 动态化互补：前者防模块缓存锁死 cwd，本函数防 env 劫持 cwd。
+ */
+function cleanGitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  delete env.GIT_DIR
+  delete env.GIT_INDEX_FILE
+  delete env.GIT_WORK_TREE
+  delete env.GIT_PREFIX
+  return env
+}
+
 /** 检查是否在 git 仓库内 */
 function isGitRepo(): boolean {
   try {
-    execSync('git rev-parse --is-inside-work-tree', { cwd: getCwd(), stdio: 'ignore' })
+    execSync('git rev-parse --is-inside-work-tree', {
+      cwd: getCwd(),
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
     return true
   } catch {
     return false
@@ -42,6 +68,7 @@ function getGitRoot(): string | null {
   try {
     return execSync('git rev-parse --show-toplevel', {
       cwd: getCwd(),
+      env: cleanGitEnv(),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
@@ -72,6 +99,7 @@ export function getHeadCommit(): string | null {
   try {
     return execSync('git rev-parse HEAD', {
       cwd: getCwd(),
+      env: cleanGitEnv(),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
@@ -91,8 +119,12 @@ export function gitCommit(message: string): string | null {
     return null
   }
   try {
-    execSync('git add -A', { cwd: getCwd(), stdio: 'ignore' })
-    execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, { cwd: getCwd(), stdio: 'ignore' })
+    execSync('git add -A', { cwd: getCwd(), env: cleanGitEnv(), stdio: 'ignore' })
+    execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
+      cwd: getCwd(),
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
     const hash = getHeadCommit()
     log.info('auto commit', { message, hash })
     return hash
@@ -107,7 +139,7 @@ export function gitCommit(message: string): string | null {
 export function gitResetHard(): boolean {
   if (!isGitRepo()) return false
   try {
-    execSync('git reset --hard HEAD~1', { cwd: getCwd(), stdio: 'ignore' })
+    execSync('git reset --hard HEAD~1', { cwd: getCwd(), env: cleanGitEnv(), stdio: 'ignore' })
     log.info('git reset --hard HEAD~1')
     return true
   } catch (err: any) {
@@ -120,8 +152,8 @@ export function gitResetHard(): boolean {
 export function gitCleanWorkingTree(): boolean {
   if (!isGitRepo()) return false
   try {
-    execSync('git checkout -- .', { cwd: getCwd(), stdio: 'ignore' })
-    execSync('git clean -fd', { cwd: getCwd(), stdio: 'ignore' })
+    execSync('git checkout -- .', { cwd: getCwd(), env: cleanGitEnv(), stdio: 'ignore' })
+    execSync('git clean -fd', { cwd: getCwd(), env: cleanGitEnv(), stdio: 'ignore' })
     log.info('git checkout -- . + git clean -fd')
     return true
   } catch (err: any) {
@@ -165,7 +197,7 @@ export function npmUninstall(packages: string[]): void {
   if (packages.length === 0) return
   for (const pkg of packages) {
     try {
-      execSync(`npm uninstall ${pkg}`, { cwd: getCwd(), stdio: 'ignore' })
+      execSync(`npm uninstall ${pkg}`, { cwd: getCwd(), env: cleanGitEnv(), stdio: 'ignore' })
       log.info('npm uninstall', { package: pkg })
     } catch {
       log.warn('npm uninstall failed', { package: pkg })

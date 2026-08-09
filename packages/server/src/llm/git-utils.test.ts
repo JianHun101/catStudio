@@ -6,6 +6,12 @@
  * 不依赖「先 chdir 再 import」的加载顺序（模块缓存下也安全）。
  * 保留 chdir + 动态 import 仅为让测试与模块加载路径清晰。
  *
+ * git-utils 所有 execSync 统一带 env: cleanGitEnv()（剔除 GIT_DIR/
+ * GIT_INDEX_FILE/GIT_WORK_TREE/GIT_PREFIX）——worktree 内 commit 时 git
+ * 会向 hook 注入绝对 GIT_DIR（.git 是文件指针需显式指定仓库位置），
+ * env 劫持优先级高于 cwd 探测，不清理则测试的 cwd: tmp 被劫持、
+ * fake 提交落真实仓库（店长 2026-08-09 实测实锤）。
+ *
  * 覆盖场景：无标记文件 → auto-commit 正常；标记文件存在 → 跳过；
  * 删除标记 → 恢复。验证"文件跨进程"方案，防止回归到环境变量（不跨进程）。
  */
