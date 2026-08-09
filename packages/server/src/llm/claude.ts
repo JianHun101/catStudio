@@ -34,7 +34,13 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
  * exit 0 全流程正常）——危险 shell 面用 Bash(pattern) 单列禁，其余命令放行：
  *   Bash(rm:*)   危险删除面（rm 全禁，文件生命周期由 git 管理）
  *   Bash(curl:*) 外联面（数据外泄通道）
- * 禁用工具面：业务面外联（WebSearch/WebFetch，语义检索有 MCP 知识库兜底）、
+ * WebSearch 已放行——DeepSeek Anthropic 兼容端点原生支持 web_search 工具
+ * （name+type 双字段：web_search + web_search_20250305/20260209），CLI 端到端
+ * 实测真实执行搜索（2026-08-09 活体实证：CLI 自动发起 2 次 WebSearch 返回真实
+ * 链接，exit 0）。「语义检索有 MCP 知识库兜底」理由不成立——实时网络信息
+ * 知识库兜不了，放行以实测为准。
+ * 禁用工具面：WebFetch（域名安全校验依赖 claude.ai 服务，实测不可用——
+ * Unable to verify if domain...is safe to fetch，放行是死工具）、
  * 子 agent/任务编排（Agent/Workflow/Task 系/Schedule/Cron，A2A 风暴治理面）、
  * 双通道防重（SendMessage 已由 MCP post_message 替代）、UI 阻断
  * （AskUserQuestion/PlanMode/Worktree）与 Skill（聊天回复场景无需要）。
@@ -48,7 +54,6 @@ const BUILTIN_TOOLS_DISALLOWED = [
   'Bash(curl:*)',
   'NotebookEdit',
   'WebFetch',
-  'WebSearch',
   'Agent',
   'Workflow',
   'TaskCreate',

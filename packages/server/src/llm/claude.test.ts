@@ -43,13 +43,14 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
  * Read/Write/Edit/Glob/Grep；其余工具面全禁（业务外联/子 agent 风暴面/双通道
  * 防重/UI 阻断/Skill）。路径 B 全局单一配置；per-agent 分档（含收口动作
  * merge/push 按角色区分）记为收口链待办。
+ * WebSearch 放行（2026-08-09 实测实证）：DeepSeek 端点原生支持 web_search 工具
+ * 且 CLI 端到端真实执行搜索——旧「语义检索有 MCP 知识库兜底」理由不成立。
  */
 const EXPECTED_DISALLOWED = [
   'Bash(rm:*)',
   'Bash(curl:*)',
   'NotebookEdit',
   'WebFetch',
-  'WebSearch',
   'Agent',
   'Workflow',
   'TaskCreate',
@@ -237,7 +238,7 @@ describe('ClaudeAdapter', () => {
     expect(existsSync(args[cfgIdx + 1])).toBe(false)
   })
 
-  // ─── 验收 #8（知识库 Phase 1 沿用）：黑名单全列精确比对（第二步收权限后 24 项）───
+  // ─── 验收 #8（知识库 Phase 1 沿用）：黑名单全列精确比对（第二步收权限后 23 项）───
 
   it('chatStream with context disallows engineering-minimal tool list (exact, order-locked)', async () => {
     const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
@@ -258,7 +259,7 @@ describe('ClaudeAdapter', () => {
     expect(idx).toBeGreaterThan(-1)
     // 全列精确比对（数量 + 顺序双锁）——防静默清空/删减再犯
     expect(args[idx + 1]).toBe(EXPECTED_DISALLOWED.join(','))
-    expect(EXPECTED_DISALLOWED).toHaveLength(24)
+    expect(EXPECTED_DISALLOWED).toHaveLength(23)
   })
 
   // ─── 验收 #5/#6（知识库 Phase 1）：白名单双工具并存 ───
