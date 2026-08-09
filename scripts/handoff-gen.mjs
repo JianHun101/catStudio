@@ -143,10 +143,11 @@ export function generateHandoff(opts = {}) {
   return [
     '# 工作交接',
     '',
+    // 审查须知只给 `git show <sha>` 绝对引用——相对范围（git diff <range>）在
+    // HEAD 前进后指向漂移（吐槽猫两次审查点名，391d89a 补填单 + f161728），删掉唯一化。
+    // effectiveRange 仍用于上方 diff 提取，仅展示层不再暴露相对引用。
     '> ⚠️ 审查须知：先通读改动对应的完整 diff（`git show ' +
       shortHash +
-      '` 或 `git diff ' +
-      effectiveRange +
       '`），再核对本文档——本文档是作者的声明清单，不是事实本身，不要只验证文档声称的点。',
     '',
     '## 1. What — 改了什么',

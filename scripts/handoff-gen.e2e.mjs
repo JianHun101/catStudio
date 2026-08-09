@@ -1304,10 +1304,16 @@ function gitIn(tmp, cmd) {
   assert(body2 !== undefined, 'sha2 文档应投到 uuid2 反查的会话（per-SHA 反查）')
   assertContains(body2.content, 'b.txt', 'sha2 文档应含 commit2 的文件（b.txt）')
   assertNotContains(body2.content, 'c.txt', 'sha2 文档不应含 HEAD 的文件（c.txt）')
+  const sha2short = gitIn(TMP13E, `log -1 --pretty=%h ${sha2}`)
   assertContains(
     body2.content,
+    `git show ${sha2short}`,
+    'sha2 文档审查须知应指向 sha2 自身的绝对引用（git show <sha>，非相对范围）'
+  )
+  assertNotContains(
+    body2.content,
     `${sha2}~1..${sha2}`,
-    'sha2 文档审查须知应指向 sha2 自身的范围（非 HEAD~1..HEAD）'
+    '审查须知不再含相对范围引用（git diff <range> 已唯一化为 git show <sha>）'
   )
   const state13e = readStateFile(TMP13E)
   assert(state13e.pending.length === 0, '补投成功后 pending 应清空')
