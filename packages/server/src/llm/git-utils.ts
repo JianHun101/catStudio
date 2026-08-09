@@ -14,12 +14,23 @@ import { createLogger } from '../logger.js'
 
 const log = createLogger('git-utils')
 
-const CWD = resolve(process.cwd())
+/**
+ * 动态获取当前工作目录。
+ *
+ * 为什么不用模块级 `const CWD = resolve(process.cwd())`：
+ * 模块级捕获在 vitest worker 中会被模块缓存锁死为「首次加载时」的 cwd——
+ * 全量测试时若本模块被其他路径先 import，CWD 会指向真实仓库（主工作区或 worktree 根），
+ * 破坏性 git 操作（reset --hard / add -A / config）会污染真实仓库。
+ * 每次调用动态取，测试在 chdir(tmp) 后调用即落在临时仓库，不依赖加载顺序。
+ */
+function getCwd(): string {
+  return resolve(process.cwd())
+}
 
 /** 检查是否在 git 仓库内 */
 function isGitRepo(): boolean {
   try {
-    execSync('git rev-parse --is-inside-work-tree', { cwd: CWD, stdio: 'ignore' })
+    execSync('git rev-parse --is-inside-work-tree', { cwd: getCwd(), stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -30,7 +41,7 @@ function isGitRepo(): boolean {
 function getGitRoot(): string | null {
   try {
     return execSync('git rev-parse --show-toplevel', {
-      cwd: CWD,
+      cwd: getCwd(),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
@@ -60,7 +71,7 @@ export function getHeadCommit(): string | null {
   if (!isGitRepo()) return null
   try {
     return execSync('git rev-parse HEAD', {
-      cwd: CWD,
+      cwd: getCwd(),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
@@ -80,8 +91,8 @@ export function gitCommit(message: string): string | null {
     return null
   }
   try {
-    execSync('git add -A', { cwd: CWD, stdio: 'ignore' })
-    execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, { cwd: CWD, stdio: 'ignore' })
+    execSync('git add -A', { cwd: getCwd(), stdio: 'ignore' })
+    execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, { cwd: getCwd(), stdio: 'ignore' })
     const hash = getHeadCommit()
     log.info('auto commit', { message, hash })
     return hash
@@ -96,7 +107,7 @@ export function gitCommit(message: string): string | null {
 export function gitResetHard(): boolean {
   if (!isGitRepo()) return false
   try {
-    execSync('git reset --hard HEAD~1', { cwd: CWD, stdio: 'ignore' })
+    execSync('git reset --hard HEAD~1', { cwd: getCwd(), stdio: 'ignore' })
     log.info('git reset --hard HEAD~1')
     return true
   } catch (err: any) {
@@ -109,8 +120,8 @@ export function gitResetHard(): boolean {
 export function gitCleanWorkingTree(): boolean {
   if (!isGitRepo()) return false
   try {
-    execSync('git checkout -- .', { cwd: CWD, stdio: 'ignore' })
-    execSync('git clean -fd', { cwd: CWD, stdio: 'ignore' })
+    execSync('git checkout -- .', { cwd: getCwd(), stdio: 'ignore' })
+    execSync('git clean -fd', { cwd: getCwd(), stdio: 'ignore' })
     log.info('git checkout -- . + git clean -fd')
     return true
   } catch (err: any) {
@@ -123,7 +134,7 @@ export function gitCleanWorkingTree(): boolean {
 function readPkgDeps(): Set<string> {
   const pkgs = new Set<string>()
   try {
-    const raw = readFileSync(resolve(CWD, 'package.json'), 'utf-8')
+    const raw = readFileSync(resolve(getCwd(), 'package.json'), 'utf-8')
     const json = JSON.parse(raw)
     for (const key of ['dependencies', 'devDependencies'] as const) {
       if (json[key] && typeof json[key] === 'object') {
@@ -154,7 +165,7 @@ export function npmUninstall(packages: string[]): void {
   if (packages.length === 0) return
   for (const pkg of packages) {
     try {
-      execSync(`npm uninstall ${pkg}`, { cwd: CWD, stdio: 'ignore' })
+      execSync(`npm uninstall ${pkg}`, { cwd: getCwd(), stdio: 'ignore' })
       log.info('npm uninstall', { package: pkg })
     } catch {
       log.warn('npm uninstall failed', { package: pkg })

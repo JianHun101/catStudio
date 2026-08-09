@@ -1,8 +1,10 @@
 /**
  * git-utils e2e 标记文件守卫测试。
  *
- * gitCommit() 的模块级 CWD 在 import 时捕获 → 测试先 chdir 到临时 git 仓库，
- * 再动态 import 模块，让守卫逻辑在受控的临时仓库上运行。
+ * gitCommit() 的 CWD 是函数内动态取（getCwd()），不随 import 冻结——
+ * 测试 chdir 到临时 git 仓库后调用，所有 git 操作自然落在临时仓库，
+ * 不依赖「先 chdir 再 import」的加载顺序（模块缓存下也安全）。
+ * 保留 chdir + 动态 import 仅为让测试与模块加载路径清晰。
  *
  * 覆盖场景：无标记文件 → auto-commit 正常；标记文件存在 → 跳过；
  * 删除标记 → 恢复。验证"文件跨进程"方案，防止回归到环境变量（不跨进程）。
@@ -35,7 +37,8 @@ beforeAll(async () => {
   git('add -A')
   git('commit -m init')
 
-  // CWD 在模块加载时捕获 → 先 chdir 再 import
+  // CWD 动态取（getCwd() 每次调用时 resolve）→ chdir 后调用即落在 tmp；
+  // chdir 只是让测试上下文与临时仓库一致，不再有加载顺序依赖
   process.chdir(tmp)
   gitUtils = await import('./git-utils.js')
 })
