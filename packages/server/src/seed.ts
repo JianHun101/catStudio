@@ -62,7 +62,8 @@ async function seed(): Promise<void> {
       a.llmApiKey,
       a.llmBaseUrl,
       a.effortLevel ?? '',
-      JSON.stringify(a.skillModules ?? []),
+      // skill_modules 列保留兼容（历史数据），种子数据不再声明技能——注入链已拆除
+      '[]',
       a.role ?? 'unknown'
     )
     const verb = result.changes === 1 ? '✅' : '🔄'

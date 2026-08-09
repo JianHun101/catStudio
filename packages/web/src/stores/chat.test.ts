@@ -60,7 +60,6 @@ const mockAgent: AgentConfig = {
   llmProvider: 'deepseek',
   llmModel: 'deepseek-v4-pro',
   llmApiKey: 'sk-test',
-  skillModules: [],
 }
 
 const mockSession: SessionConfig = {

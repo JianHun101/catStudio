@@ -18,16 +18,13 @@ import { createSocketIO } from './connectors/socketio.js'
 import { startOneBotOutbound } from './connectors/onebotOutbound.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
-import { skillRoutes } from './routes/skills.js'
 import { messageRoutes } from './routes/messages.js'
 import { connectorRoutes } from './routes/connectors.js'
 import { internalRoutes } from './routes/internal.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
 import { existsSync, unlinkSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
-import { SkillLoader } from './skills/skill-loader.js'
 
 const log = createLogger('server')
 
@@ -66,15 +63,6 @@ async function main(): Promise<void> {
   if (ghostResult.changes > 0) {
     log.warn('启动时清理幽灵 execution_logs', { deleted: ghostResult.changes })
   }
-
-  // 1.8 初始化技能加载器（启动时一次性将所有 skill 文件读入内存）
-  const __filename = fileURLToPath(import.meta.url)
-  const __dirname = dirname(__filename)
-  const skillsDir = resolve(__dirname, 'skills')
-  SkillLoader.initialize(skillsDir)
-  log.info('skill loader initialized', {
-    loadedSkills: SkillLoader.getInstance().getLoadedSkillNames(),
-  })
 
   // 2. 首次启动自动初始化种子数据（Agents 表为空时）
   const agentCount = agentsRepo.countAgents()
@@ -143,7 +131,6 @@ async function main(): Promise<void> {
   // REST API 路由
   await app.register(agentRoutes)
   await app.register(sessionRoutes)
-  await app.register(skillRoutes)
   await app.register(messageRoutes)
   await app.register(connectorRoutes)
   await app.register(internalRoutes)

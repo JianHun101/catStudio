@@ -107,25 +107,6 @@ vi.mock('../llm/user-request-signals.js', () => ({
   consumeUserRequestSignals: vi.fn(() => []),
 }))
 
-vi.mock('../skills/skill-loader.js', () => ({
-  SkillLoader: class {
-    static getInstance() {
-      return new this()
-    }
-    async loadSkillModule() {
-      return ''
-    }
-    async getCombinedSkillPrompt() {
-      return ''
-    }
-    // 注意：matchAndBuild 是同步方法（skill-loader.ts:144），
-    // 若 mock 成 async 会返回 Promise，解构得到 undefined
-    matchAndBuild(prompt: string) {
-      return { prompt, matchedSkills: [] }
-    }
-  },
-}))
-
 // ═══ Test helpers ═══
 
 /** 所有 socket.on 注册的 handler 收集于此 */
@@ -1194,7 +1175,6 @@ describe('socketio connector', () => {
         llmProvider: 'deepseek',
         llmModel: 'deepseek-v4-flash',
         llmApiKey: 'sk-test',
-        skillModules: [],
         ...overrides,
       }
     }
@@ -3888,7 +3868,6 @@ import {
   formatAgentMessage,
   formatUserMessage,
   getRelevantMessages,
-  parseSkillModules,
 } from './socketio.js'
 
 // ═══ getRelevantMessages — 消息可见性过滤（纯函数） ═══
@@ -4025,36 +4004,6 @@ describe('getRelevantMessages', () => {
       expect(result).toHaveLength(1)
       expect(result[0].content).toBe('吐槽猫过来')
     })
-  })
-})
-
-describe('parseSkillModules', () => {
-  it('returns empty array for null', () => {
-    expect(parseSkillModules(null)).toEqual([])
-  })
-
-  it('returns empty array for empty string', () => {
-    expect(parseSkillModules('')).toEqual([])
-  })
-
-  it('parses JSON array of skills', () => {
-    expect(parseSkillModules('["code-review","testing","docs"]')).toEqual([
-      'code-review',
-      'testing',
-      'docs',
-    ])
-  })
-
-  it('returns empty array for invalid JSON', () => {
-    expect(parseSkillModules('not-json')).toEqual([])
-  })
-
-  it('returns empty array for JSON that is not an array', () => {
-    expect(parseSkillModules('{"key":"value"}')).toEqual([])
-  })
-
-  it('returns empty array for empty JSON array', () => {
-    expect(parseSkillModules('[]')).toEqual([])
   })
 })
 

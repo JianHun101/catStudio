@@ -3,11 +3,8 @@
  *
  * 规则分层架构（对标 Clowder trigger-keyword 按需加载）:
  *   铁律层 → 直接写入 systemPrompt（base prompt），永不按需
- *   操作层 → 按需加载，由 manifest.json + skill-loader.ts 管理触发词匹配
- *
- * 操作层已拆除（服务端技能体系治理一期）：
- *   handoff/code-review/dependency-request/dependency-review 4 个 md 已删除，
- *   manifest.json 清空登记——skill-loader 机制保留（matchAndBuild 空跑幂等）。
+ *   操作层 → 已拆除（服务端技能体系治理）：skill-loader 注入链整链移除，
+ *   技能由 CLI 原生消费（斜杠 /skill-name 触发或模型自主调用），server 零注入。
  *   行为规则（依赖审批【安装请求】块、重启请求契约等）已并入铁律层，
  *   文档模板（交接文档等）单源到 skills/refs/。
  */
@@ -29,8 +26,6 @@ export interface DemoAgent {
   name: string
   avatar: string
   systemPrompt: string
-  /** 技能模块声明——操作层拆除后不再声明（manifest 空登记，机制保留空跑） */
-  skillModules?: string[]
   llmProvider: string
   llmModel: string
   llmApiKey: string

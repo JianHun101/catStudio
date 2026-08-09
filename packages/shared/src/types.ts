@@ -25,7 +25,6 @@ export interface AgentConfig {
   llmApiKey: string
   llmBaseUrl?: string // for custom providers
   effortLevel?: 'low' | 'medium' | 'high' | 'max' // Claude Code 推理深度
-  skillModules: string[] // 可用技能列表
   role?: AgentRole // 角色——A2A mention 白名单依据；缺失/未知 → 放行不拦截（老库零回归）
 }
 

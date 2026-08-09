@@ -12,7 +12,6 @@ function makeAgent(overrides: Partial<AgentConfig>): AgentConfig {
     llmProvider: 'deepseek',
     llmModel: 'deepseek-v4-pro',
     llmApiKey: 'test',
-    skillModules: [],
     ...overrides,
   }
 }

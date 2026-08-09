@@ -38,7 +38,6 @@ describe('registry', () => {
     llmProvider: 'deepseek',
     llmModel: 'deepseek-v4-pro',
     llmApiKey: 'sk-key-1',
-    skillModules: [],
   }
 
   beforeEach(async () => {

@@ -10,7 +10,6 @@ import {
 } from '../db/repository/index.js'
 import type { AgentRow } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
-import { parseJsonArray } from '../utils.js'
 
 const log = createLogger('agents')
 
@@ -37,7 +36,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         agent.llmApiKey,
         agent.llmBaseUrl || null,
         agent.effortLevel || null,
-        JSON.stringify(agent.skillModules ?? [])
+        // skill_modules 列保留兼容（历史数据），新建 Agent 不再声明技能——注入链已拆除
+        '[]'
       )
 
       const row = agentsRepo.getAgentById(id)
@@ -86,11 +86,10 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       llmApiKey: 'llm_api_key',
       llmBaseUrl: 'llm_base_url',
       effortLevel: 'effort_level',
-      skillModules: 'skill_modules',
     })) {
       if (body[key] !== undefined) {
         fields.push(`${col} = ?`)
-        values.push(key === 'skillModules' ? JSON.stringify(body[key]) : body[key])
+        values.push(body[key])
       }
     }
 
@@ -170,7 +169,6 @@ function toAgentConfig(row: AgentRow) {
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: row.effort_level || undefined,
-    skillModules: parseJsonArray(row.skill_modules),
     role: row.role, // 前端占位符解析（@架构师→store 角色真名）依赖此字段；漏序列化 → 前端永远拿不到角色
   }
 }

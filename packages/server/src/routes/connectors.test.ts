@@ -34,7 +34,6 @@ vi.mock('../connectors/socketio.js', () => ({
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: row.effort_level || undefined,
-    skillModules: JSON.parse(row.skill_modules || '[]'),
     role: row.role || undefined,
   })),
   executeAgentsSerial: vi.fn(() => Promise.resolve()),

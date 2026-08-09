@@ -57,7 +57,6 @@ import { filterAllowedMentions, allowedTargetsDescription } from '../dispatch/me
 import { consumeRouteSignals } from '../llm/route-signals.js'
 import { consumeUserRequestSignals } from '../llm/user-request-signals.js'
 import { parseJsonArray } from '../utils.js'
-import { SkillLoader } from '../skills/skill-loader.js'
 import { updateRunningSummary } from '../summarizer/index.js'
 import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
 import { ingestUserMessage } from './ingest.js'
@@ -75,17 +74,6 @@ import {
 } from '../restart-request.js'
 
 const log = createLogger('socketio')
-
-/** 从 agent.skill_modules JSON 字符串解析技能列表 */
-export function parseSkillModules(raw: string | null): string[] {
-  if (!raw) return []
-  try {
-    const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr : []
-  } catch {
-    return []
-  }
-}
 
 /** 模块级 io 实例引用，供路由等模块获取 */
 let _io: SocketServer | null = null
@@ -138,7 +126,6 @@ export function rowToAgent(row: AgentRow): AgentConfig {
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: (row.effort_level || undefined) as AgentConfig['effortLevel'],
-    skillModules: parseSkillModules(row.skill_modules),
     // 老库迁移默认 'unknown'（不在 AgentRole 里）——白名单对未知角色放行
     role: (row.role || undefined) as AgentConfig['role'],
   }
@@ -1973,26 +1960,13 @@ async function runAgentReply(
     maxContext: MAX_CONTEXT,
   })
 
-  // 动态组装 system prompt: 铁律（basePrompt）+ 按需加载的操作规则
-
-  const skillModules = agent.skillModules
-  const { prompt: dynamicSystemPrompt, matchedSkills } = SkillLoader.getInstance().matchAndBuild(
-    agent.systemPrompt,
-    skillModules,
-    triggerMsg.content
-  )
-  if (matchedSkills.length > 0) {
-    log.debug('skills loaded for agent', {
-      traceId,
-      agentName: agent.name,
-      matchedSkills,
-    })
-  }
+  // system prompt 直接使用 agent.systemPrompt——skill 注入链已拆除，
+  // 技能由 CLI 原生消费（斜杠触发 / 模型自主调用），server 不做拼装（实测驱动）
 
   // 将 system prompt 中的角色占位符（@作者/@架构师/@审查者）替换为实际 agent 名
   // 使 LLM 能正确输出 @店长 等实际 agent 名——mention 解析是严格精确匹配，
   // 占位符不替换 = 解析落空 = 静默不触发（b542d24 分流断链事故根因）
-  const finalSystemPrompt = resolveRolePlaceholders(dynamicSystemPrompt, triggerMsg.authorName)
+  const finalSystemPrompt = resolveRolePlaceholders(agent.systemPrompt, triggerMsg.authorName)
 
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
   const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages)
