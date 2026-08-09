@@ -3,9 +3,13 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import SessionList from './components/SessionList.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import AgentPanel from './components/AgentPanel.vue'
+import SettingsView from './views/SettingsView.vue'
 import { useChatStore } from '@/stores/chat'
 
 const store = useChatStore()
+
+/** 全屏设置页 view 切换（无 vue-router，App 级布尔状态）——入口在左侧栏底部齿轮 */
+const showSettings = ref(false)
 
 /** User manually toggled sidebars — once set, auto-hide on narrow windows respects
  *  explicit choice and won't auto-show when the window widens again. */
@@ -66,10 +70,34 @@ onUnmounted(() => {
     </div>
   </Transition>
 
-  <div class="app-layout" :class="{ 'left-closed': !leftOpen, 'right-closed': !rightOpen }">
+  <SettingsView v-if="showSettings" @close="showSettings = false" />
+
+  <div v-else class="app-layout" :class="{ 'left-closed': !leftOpen, 'right-closed': !rightOpen }">
     <aside class="panel-left">
       <div class="panel-inner">
         <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />
+      </div>
+      <!-- 全局设置入口：左侧栏底部齿轮（Claude Desktop 图标条模式）——设置页为全局视图，
+           严禁放会话区（ChatPanel）——会话区入口会被误解为单会话配置 -->
+      <div class="left-sidebar-footer">
+        <button
+          class="settings-entry"
+          :class="{ 'settings-entry-collapsed': !leftOpen }"
+          title="设置"
+          aria-label="设置"
+          @click="showSettings = true"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.3" />
+            <path
+              d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span v-if="leftOpen" class="settings-entry-text">设置</span>
+        </button>
       </div>
     </aside>
 
@@ -233,5 +261,43 @@ onUnmounted(() => {
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* ─── 左侧栏底部设置入口 ─────────────────── */
+
+.left-sidebar-footer {
+  flex-shrink: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.settings-entry {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.settings-entry:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 折叠态（56px 图标条）：仅图标居中（Claude Desktop 模式） */
+.settings-entry-collapsed {
+  width: 40px;
+  margin: 0 auto;
+  justify-content: center;
+  padding: 8px 0;
 }
 </style>
