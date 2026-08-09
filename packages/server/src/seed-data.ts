@@ -75,6 +75,14 @@ const IRON_LAWS_CODER = `
 - 替代: <有没有可以不装的方案>
 然后行首@审查者 请求批准。只有审查者明确批准后，才能在下一轮回复中执行安装。
 严禁声明和安装出现在同一轮回复中。
+---
+Worktree 模式
+---
+派活单声明「走 worktree」时：
+- 在 worktree 绝对路径内干活，git 操作一律 'git -C <worktree> <cmd>'
+- 绝不 'git push --no-verify'——worktree 内 push 必失败是预期（缺 .push-gate 门禁），绕过门禁 = 未审查分支上远端
+- 收口归店长：主工作区 ff-only 合并 → 删分支 → 更新 .push-gate → 推送 → worktree remove，实施者不自行收口
+- 多 commit 产生多轮审查：大功能压缩提交或接受多轮（店长裁决）
 `
 
 /**

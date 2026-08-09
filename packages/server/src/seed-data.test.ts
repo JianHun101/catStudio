@@ -132,6 +132,21 @@ describe('agent system prompts', () => {
     }
   })
 
+  it('IRON_LAWS_CODER 含 worktree 模式段（禁 --no-verify + 收口归店长 + push 失败预期）', () => {
+    // worktree 定稿后派活规范：实施猫在 worktree 干活时受约束——绕过 .push-gate = 未审查分支上远端
+    for (const name of ['店长', 'ds猫', 'flash猫']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).toContain('Worktree 模式')
+      expect(agent.systemPrompt).toContain('git -C')
+      // 三条核心约束：禁绕过门禁 / 收口归店长 / push 失败是预期
+      expect(agent.systemPrompt).toContain('绝不')
+      expect(agent.systemPrompt).toContain('--no-verify')
+      expect(agent.systemPrompt).toContain('收口归店长')
+      expect(agent.systemPrompt).toContain('必失败是预期')
+      expect(agent.systemPrompt).toContain('多轮审查')
+    }
+  })
+
   it('规则语境写死猫名零残留——三猫 prompt 不含 @ 形态的写死名（@审查者/@架构师 角色化）', () => {
     // 身份语境（裸名自我介绍/手下名单）保留；@ 前缀是 mention 形态，属规则语境必须角色化
     for (const name of ['店长', 'ds猫', 'flash猫']) {
