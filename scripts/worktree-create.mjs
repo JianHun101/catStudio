@@ -8,7 +8,7 @@
  * lint-staged / pnpm lint / pnpm test 全依赖依赖面；.push-gate 本地不跟踪
  * （.gitignore:54），worktree 内 push 必被阻断——这是防御正确的预期行为。
  *
- * 本脚本做四件事：门禁校验（主工作区干净 + dev == origin/dev）→ 创建 worktree
+ * 本脚本做四件事：门禁校验（主工作区干净 + origin/dev 是 dev 祖先）→ 创建 worktree
  * （目录在仓库外）→ hook 引导（复制 .husky/ 整目录，含 _ shim）→ 依赖引导
  * （worktree 内 pnpm install）。复制在前、install 在后：install 的
  * prepare:husky 会再生 shim（cwd=worktree），复制是 install 失败时的兜底。
@@ -79,18 +79,20 @@ if (statusOut) {
 git(['fetch'])
 console.log('[worktree] fetch 完成')
 
-// 3. 门禁: dev == origin/dev（分叉/落后/领先一律拒绝——worktree 从 dev 拉基线，
-// 必须先同步；同步动作归收口链，本脚本不代做）
+// 3. 门禁: origin/dev 必须是 dev 的祖先（分叉/落后 → 拒绝；dev 领先 → 放行——
+// 日常提交落 dev 不推送、收口时统一 push 是项目常态，领先 ≠ 分叉；祖先判断
+// 表达门禁原意「worktree 基线包含远端全部内容」，收口时 ff-only 才能成功。
+// 门禁失败提示不指「先同步」——同步动作归收口链，实施猫无权限执行）
 const devSha = git(['rev-parse', 'dev']).stdout.trim()
 const originRes = git(['rev-parse', 'origin/dev'], { allowFail: true })
 if (originRes.status !== 0) {
   fail('origin/dev 不存在——请先推送 dev 或确认远端配置')
 }
-const originSha = originRes.stdout.trim()
-if (devSha !== originSha) {
+const ancestorRes = git(['merge-base', '--is-ancestor', 'origin/dev', 'dev'], { allowFail: true })
+if (ancestorRes.status !== 0) {
   fail(
-    `门禁未通过: dev(${devSha.slice(0, 7)}) != origin/dev(${originSha.slice(0, 7)})` +
-      '——先同步（git pull / 收口链推送）再创建'
+    `门禁未通过: origin/dev(${originRes.stdout.trim().slice(0, 7)}) 不是 dev(${devSha.slice(0, 7)}) 的祖先` +
+      '——dev 落后或分叉，需店长先收口同步，或报告店长处理'
   )
 }
 
