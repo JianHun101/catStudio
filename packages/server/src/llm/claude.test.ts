@@ -34,19 +34,19 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
 }
 
 /**
- * 内置工具黑名单期望全列（验收 #8 关键裁决——知识库 Phase 1）。
- * 与 claude.ts BUILTIN_TOOLS_DISALLOWED 同源钉死：e5aa54d 原 28 工具全列。
- * 「含 Bash 且非空」判据拦不住删减（10070d1 删到剩 25 个时同样含 Bash 且
- * 非空，历史实证）——全列精确比对（数量 + 顺序双锁）才是防静默清空/删减
- * 再犯的完整闭环。修改黑名单必须同步更新本数组与 claude.ts 常量。
+ * 内置工具黑名单期望全列（验收 #8 关键裁决——知识库 Phase 1 沿用）。
+ * 与 claude.ts BUILTIN_TOOLS_DISALLOWED 同源钉死：「含 Bash 且非空」判据拦不住
+ * 删减（10070d1/00a9a95 历史实证）——全列精确比对（数量 + 顺序双锁）才是防
+ * 静默清空/删减再犯的完整闭环。修改黑名单必须同步更新本数组与 claude.ts 常量。
+ * 第二步收权限（店长裁决）：从 28 工具全列收窄为工程面最小集 24 项——
+ * 保留 Bash（危险命令面 Bash(rm:*)/Bash(curl:*) 命令级禁，spike 实证生效）、
+ * Read/Write/Edit/Glob/Grep；其余工具面全禁（业务外联/子 agent 风暴面/双通道
+ * 防重/UI 阻断/Skill）。路径 B 全局单一配置；per-agent 分档（含收口动作
+ * merge/push 按角色区分）记为收口链待办。
  */
 const EXPECTED_DISALLOWED = [
-  'Bash',
-  'Read',
-  'Write',
-  'Edit',
-  'Glob',
-  'Grep',
+  'Bash(rm:*)',
+  'Bash(curl:*)',
   'NotebookEdit',
   'WebFetch',
   'WebSearch',
@@ -237,9 +237,9 @@ describe('ClaudeAdapter', () => {
     expect(existsSync(args[cfgIdx + 1])).toBe(false)
   })
 
-  // ─── 验收 #8（知识库 Phase 1 关键裁决）：黑名单 28 工具全列精确比对 ───
+  // ─── 验收 #8（知识库 Phase 1 沿用）：黑名单全列精确比对（第二步收权限后 23 项）───
 
-  it('chatStream with context disallows full 28 builtin tools (exact list, order-locked)', async () => {
+  it('chatStream with context disallows engineering-minimal tool list (exact, order-locked)', async () => {
     const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
     const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: 0, killed: false }
     vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
@@ -258,7 +258,7 @@ describe('ClaudeAdapter', () => {
     expect(idx).toBeGreaterThan(-1)
     // 全列精确比对（数量 + 顺序双锁）——防静默清空/删减再犯
     expect(args[idx + 1]).toBe(EXPECTED_DISALLOWED.join(','))
-    expect(EXPECTED_DISALLOWED).toHaveLength(28)
+    expect(EXPECTED_DISALLOWED).toHaveLength(24)
   })
 
   // ─── 验收 #5/#6（知识库 Phase 1）：白名单双工具并存 ───

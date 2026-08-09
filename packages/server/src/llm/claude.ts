@@ -23,26 +23,29 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
 /**
  * 内置工具黑名单（spike case 7 实证 --disallowedTools 对内置工具生效：
  * tool_use 被请求但执行被拒、命令未真实执行——「能否真正关掉 shell」= 能）。
- * 店长裁决：用例 7 生效 → claude.ts 顺带加内置工具黑名单（内置清单有限、
- * 可列全，净改善）。注：--allowedTools 白名单管不到内置工具（case 6：
- * bypassPermissions 下 Bash 照调），必须显式黑名单才能收窄内置工具面。
- * 聊天回复场景模型只需 post_message + search_knowledge 路由 + 文本；
- * 读文件/改代码等执行能力若未来需要，走独立立项（裁决一：本单不换权限模式）。
+ * 注：--allowedTools 白名单管不到内置工具（case 6：bypassPermissions 下
+ * Bash 照调），必须显式黑名单才能收窄内置工具面。
  *
- * 知识库 Phase 1 关键裁决：恢复 e5aa54d 的 28 工具全列——10070d1（删
- * Read/Glob/Grep）/00a9a95（删完剩余全部）两个裸提交无 rationale 逐步
- * 清空，「含 Bash 且非空」判据拦不住删减，claude.test.ts 的
- * EXPECTED_DISALLOWED 全列精确比对（数量 + 顺序双锁）与下方常量同源钉死。
- * 仅 context 分支加（--disallowedTools 只在 context 存在时拼入 args，
- * 无 context 路径零参数变化——claude.test.ts:196-197 基线断言参数不在）。
+ * 第二步收权限（店长裁决，2026-08-09）：7c1a466 收口后从全开对照态收窄为
+ * 工程面最小集——路径 B 全局单一配置（路径 A per-agent 分档需改 registry
+ * 缓存键/shared context，越「只动 claude.ts」边界，按裁决兜底分支走 B）。
+ * 保留集：Read/Glob/Grep/Write/Edit + Bash（实施刚需：pnpm test/lint + git）。
+ * 命令级模式 spike 实证（2026-08-09 活体：echo 放行、rm -rf 拒绝 is_error，
+ * exit 0 全流程正常）——危险 shell 面用 Bash(pattern) 单列禁，其余命令放行：
+ *   Bash(rm:*)   危险删除面（rm 全禁，文件生命周期由 git 管理）
+ *   Bash(curl:*) 外联面（数据外泄通道）
+ * 禁用工具面：业务面外联（WebSearch/WebFetch，语义检索有 MCP 知识库兜底）、
+ * 子 agent/任务编排（Agent/Workflow/Task 系/Schedule/Cron，A2A 风暴治理面）、
+ * 双通道防重（SendMessage 已由 MCP post_message 替代）、UI 阻断
+ * （AskUserQuestion/PlanMode/Worktree）与 Skill（聊天回复场景无需要）。
+ * 收口动作（git merge/push）按角色区分需 per-agent 分档——本单全局配置
+ * 无法区分（禁掉会连店长收口一起禁），标注为收口链待办，不阻塞本单。
+ * claude.test.ts 的 EXPECTED_DISALLOWED 与下方常量同源钉死（数量 + 顺序双锁），
+ * 修改必须同步更新。
  */
 const BUILTIN_TOOLS_DISALLOWED = [
-  'Bash',
-  'Read',
-  'Write',
-  'Edit',
-  'Glob',
-  'Grep',
+  'Bash(rm:*)',
+  'Bash(curl:*)',
   'NotebookEdit',
   'WebFetch',
   'WebSearch',
