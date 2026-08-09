@@ -26,9 +26,25 @@ const origCwd = process.cwd()
 let tmp: string
 let gitUtils: typeof import('./git-utils.js')
 
+/**
+ * 清理 git 环境变量（与 git-utils.ts 的 cleanGitEnv 同款）。
+ * pre-commit hook 内 git 注入 GIT_DIR（worktree 场景为绝对路径），
+ * 测试自身的 execSync 若不清理，git init/config/add/commit 会被劫持
+ * 到真实仓库（reinit 写 core.bare、config 写共享 config、提交落真实分支）。
+ */
+function cleanGitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  delete env.GIT_DIR
+  delete env.GIT_INDEX_FILE
+  delete env.GIT_WORK_TREE
+  delete env.GIT_PREFIX
+  return env
+}
+
 function git(cmd: string): string {
   return execSync(`git ${cmd}`, {
     cwd: tmp,
+    env: cleanGitEnv(),
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'ignore'],
   }).trim()
@@ -36,9 +52,13 @@ function git(cmd: string): string {
 
 beforeAll(async () => {
   tmp = mkdtempSync(join(tmpdir(), 'git-utils-test-'))
-  execSync('git init', { cwd: tmp, stdio: 'ignore' })
-  execSync('git config user.name test', { cwd: tmp, stdio: 'ignore' })
-  execSync('git config user.email test@test.local', { cwd: tmp, stdio: 'ignore' })
+  execSync('git init', { cwd: tmp, env: cleanGitEnv(), stdio: 'ignore' })
+  execSync('git config user.name test', { cwd: tmp, env: cleanGitEnv(), stdio: 'ignore' })
+  execSync('git config user.email test@test.local', {
+    cwd: tmp,
+    env: cleanGitEnv(),
+    stdio: 'ignore',
+  })
   writeFileSync(resolve(tmp, 'a.txt'), 'init', 'utf-8')
   git('add -A')
   git('commit -m init')
