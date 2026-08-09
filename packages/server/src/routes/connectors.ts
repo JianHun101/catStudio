@@ -122,17 +122,22 @@ function napcatConfigFile(): string {
 
 /**
  * 读 .napcat-config.json（页面「NapCat 启动路径」保存的配置，dev.js loadNapcatConfig 同契约）。
- * 容错：无文件/坏 JSON/字段缺失 → { napcatPath: '' }——配置缺失不是错误态，launchReady
- * 判定与 GET config 都依赖「读失败 = 未配置」的降级语义。
+ * 容错：无文件/坏 JSON/字段缺失 → { napcatPath: '', autoStart: true }——配置缺失不是错误态，
+ * launchReady 判定与 GET config 都依赖「读失败 = 未配置」的降级语义。
+ * autoStart 缺省 true：旧配置无该字段 → 自动拉起（行为不变，用户决策：默认开启、配了开关可关）；
+ * 显式 boolean 才采纳，其余（string "false" 等历史脏数据）一律按 true 容错。
  */
-function readNapcatConfig(): { napcatPath: string } {
+function readNapcatConfig(): { napcatPath: string; autoStart: boolean } {
   try {
     const file = napcatConfigFile()
-    if (!existsSync(file)) return { napcatPath: '' }
+    if (!existsSync(file)) return { napcatPath: '', autoStart: true }
     const parsed = JSON.parse(readFileSync(file, 'utf-8'))
-    return { napcatPath: typeof parsed.napcatPath === 'string' ? parsed.napcatPath : '' }
+    return {
+      napcatPath: typeof parsed.napcatPath === 'string' ? parsed.napcatPath : '',
+      autoStart: typeof parsed.autoStart === 'boolean' ? parsed.autoStart : true,
+    }
   } catch {
-    return { napcatPath: '' }
+    return { napcatPath: '', autoStart: true }
   }
 }
 
@@ -239,11 +244,12 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
     } catch {}
     const token = process.env.ONEBOT_TOKEN || ''
     const launchCmd = (process.env.NAPCAT_LAUNCH_CMD || '').trim()
+    const napcatConfig = readNapcatConfig()
     // launchReady = 启动命令就绪：模板非空且（无 {NAPCAT_PATH} 占位符 → 完整命令行直接
     // 就绪；含占位符 → 页面保存的路径已配置）。前端 start 按钮禁用态与引导文案以此为准。
     let launchReady = false
     if (launchCmd) {
-      launchReady = !launchCmd.includes('{NAPCAT_PATH}') || !!readNapcatConfig().napcatPath.trim()
+      launchReady = !launchCmd.includes('{NAPCAT_PATH}') || !!napcatConfig.napcatPath.trim()
     }
     const running = await probePort(host, port)
     return reply.send({
@@ -255,6 +261,9 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
       launchReady,
       tokenConfigured: !!token,
       tokenMasked: token ? `${token.slice(0, 4)}****` : '',
+      // autoStart 回显（契约：dev.js 启动时是否自动拉起 NapCat；缺省 true——旧配置无字段
+      // = 自动拉起，行为不变；前端设置页开关初始态跟随此值）
+      autoStart: napcatConfig.autoStart,
     })
   })
 
@@ -282,7 +291,7 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
   // 零 spawn（与写 .napcat-request 同族）。
 
   app.get('/api/connectors/napcat/config', async (req, reply) => {
-    const { napcatPath } = readNapcatConfig()
+    const { napcatPath, autoStart } = readNapcatConfig()
     let pathExists: boolean | null = null
     if (napcatPath.trim()) {
       try {
@@ -291,7 +300,7 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
         pathExists = false // stat 失败 = 路径不存在（文件被删/盘未挂载）
       }
     }
-    return reply.send({ ok: true, napcatPath, pathExists })
+    return reply.send({ ok: true, napcatPath, autoStart, pathExists })
   })
 
   app.post('/api/connectors/napcat/config', async (req, reply) => {
@@ -303,6 +312,13 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
     if (!napcatPath) {
       return reply.status(400).send({ error: 'napcatPath is required' })
     }
+    // autoStart 可选：未传 → true（旧前端/第三方不传字段时保持默认自动拉起）；
+    // 显式传非 boolean（string "false" 等）→ 400 钉死契约类型，不静默吞
+    const rawAutoStart = body.autoStart
+    if (rawAutoStart !== undefined && typeof rawAutoStart !== 'boolean') {
+      return reply.status(400).send({ error: 'autoStart must be a boolean' })
+    }
+    const autoStart = rawAutoStart === undefined ? true : rawAutoStart
     try {
       statSync(napcatPath) // 存在性校验（stat 抛错 = 不存在）——不校验可执行性，那属启动时
     } catch {
@@ -312,9 +328,9 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
     mkdirSync(dirname(file), { recursive: true })
     writeFileSync(
       file,
-      JSON.stringify({ napcatPath, updatedAt: new Date().toISOString() }, null, 2)
+      JSON.stringify({ napcatPath, autoStart, updatedAt: new Date().toISOString() }, null, 2)
     )
-    return reply.send({ ok: true, napcatPath })
+    return reply.send({ ok: true, napcatPath, autoStart })
   })
 
   // ─── NapCat 路径浏览（只读目录导航，零 spawn） ──────────────────

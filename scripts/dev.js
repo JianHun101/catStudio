@@ -318,16 +318,21 @@ const NAPCAT_PROBE_TIMEOUT_MS = 2000
 
 /**
  * 读 .napcat-config.json（页面「NapCat 启动路径」保存的配置）。容错：无文件/坏
- * JSON/字段缺失 → { napcatPath: '' }——配置缺失降级为「未就绪」，绝不抛错
- * （配置是辅助数据，读失败不能拖垮 dev.js 启动）。
+ * JSON/字段缺失 → { napcatPath: '', autoStart: true }——配置缺失降级为「未就绪」，
+ * 绝不抛错（配置是辅助数据，读失败不能拖垮 dev.js 启动）。
+ * autoStart 缺省 true：旧配置无该字段 → 自动拉起（用户决策：默认开启、配了开关可关，
+ * 现有用户升级后行为零变化）；显式 boolean 才采纳，其余按 true 容错。
  */
 function loadNapcatConfig() {
   try {
-    if (!existsSync(NAPCAT_CONFIG_FILE)) return { napcatPath: '' }
+    if (!existsSync(NAPCAT_CONFIG_FILE)) return { napcatPath: '', autoStart: true }
     const parsed = JSON.parse(fs.readFileSync(NAPCAT_CONFIG_FILE, 'utf-8'))
-    return { napcatPath: typeof parsed.napcatPath === 'string' ? parsed.napcatPath : '' }
+    return {
+      napcatPath: typeof parsed.napcatPath === 'string' ? parsed.napcatPath : '',
+      autoStart: typeof parsed.autoStart === 'boolean' ? parsed.autoStart : true,
+    }
   } catch {
-    return { napcatPath: '' }
+    return { napcatPath: '', autoStart: true }
   }
 }
 
@@ -404,13 +409,16 @@ function isPortOpen(host, port, timeoutMs = NAPCAT_PROBE_TIMEOUT_MS) {
 }
 
 /**
- * 确保 NapCat 在运行（幂等）。入口：启动流程 + .napcat-request start 请求。
- * 判定链：ENABLED != true → 零动作；LAUNCH_CMD 空 → 仅提示不拉起；
+ * 确保 NapCat 在运行（幂等）。入口：启动流程（autoStartOnly: true——只拉起不拦手动）
+ * + .napcat-request start 请求（autoStartOnly 缺省 false——手动启停不受开关影响）。
+ * 判定链：ENABLED != true → 零动作；LAUNCH_CMD 空 → 仅提示不拉起；autoStartOnly 且
+ * .napcat-config.json 的 autoStart !== true → 跳过自动拉起（引导日志提示去设置页可关）；
  * 模板含 {NAPCAT_PATH} 但路径未配置 → 提示「请到配置页面填写」不拉起；端口已监听 → 跳过。
  * 拉起：Windows 用 cmd /c 包装完整命令行（detached 防 dev.js 强杀时陪葬），写
  * .napcat-pid 记录所有权（stop 只杀该实例）。
  */
-async function ensureNapcat() {
+async function ensureNapcat(opts = {}) {
+  const { autoStartOnly = false } = opts
   if (process.env.ONEBOT_ENABLED !== 'true') return
   let cmd = process.env.NAPCAT_LAUNCH_CMD
   if (!cmd) {
@@ -420,6 +428,12 @@ async function ensureNapcat() {
     return
   }
   const config = loadNapcatConfig()
+  if (autoStartOnly && config.autoStart !== true) {
+    console.log(
+      '[dev] 自动拉起未开启（autoStart=false）——跳过自动拉起。如需自动拉起，请在设置页「NapCat」勾选「dev 启动时自动拉起」；手动「启动 NapCat」不受影响'
+    )
+    return
+  }
   const spec = resolveNapcatSpawn(cmd, config.napcatPath)
   if (spec === null) {
     console.log(
@@ -535,8 +549,9 @@ webChild.on('exit', (code) => {
 
 children.add(webChild)
 
-// 3. 拉起 NapCat（ONEBOT_ENABLED=true 且未在运行且配置了启动命令时才动作）
-await ensureNapcat()
+// 3. 拉起 NapCat（ONEBOT_ENABLED=true 且未在运行且配置了启动命令且 autoStart 开启时才动作；
+//    autoStartOnly 限定自动拉起——手动「启动 NapCat」（.napcat-request start）不受开关影响）
+await ensureNapcat({ autoStartOnly: true })
 
 // ─── 文件监听（仅提示，不重启） ─────────────────
 // 2026-08 架构决策：文件变更热重启退役——Agent 编辑 src/ 下的文件触发立即

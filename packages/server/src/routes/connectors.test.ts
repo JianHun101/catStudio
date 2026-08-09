@@ -799,6 +799,80 @@ describe('Connector Routes', () => {
       expect(noBody.statusCode).toBe(400)
     })
 
+    // ─── autoStart 开关（用户决策：默认 true，旧配置无字段 = 自动拉起，行为零变化）──
+
+    it('autoStart: 缺省 true——未保存/旧文件无字段 → GET true；POST 未传 → 落盘 true', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      // 未保存（无文件）→ 缺省 true
+      let res = await app.inject({ method: 'GET', url: '/api/connectors/napcat/config' })
+      expect(JSON.parse(res.body).autoStart).toBe(true)
+      // 旧文件（无 autoStart 字段——升级前形态）→ 缺省 true，行为不变（删缺省行必红）
+      mkdirSync(cfgTmpDir, { recursive: true })
+      writeFileSync(
+        cfgTmpFile,
+        JSON.stringify({ napcatPath: '', updatedAt: '2026-01-01T00:00:00.000Z' })
+      )
+      res = await app.inject({ method: 'GET', url: '/api/connectors/napcat/config' })
+      expect(JSON.parse(res.body).autoStart).toBe(true)
+      // POST 未传 autoStart → 落盘 true + 回读 true（前端总全量带，但旧前端不传也不失守）
+      mkdirSync(cfgTmpDir, { recursive: true })
+      writeFileSync(realExe, '')
+      res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { napcatPath: realExe },
+      })
+      const body = JSON.parse(res.body)
+      expect(body.autoStart).toBe(true)
+      expect(JSON.parse(readFileSync(cfgTmpFile, 'utf-8')).autoStart).toBe(true)
+    })
+
+    it('autoStart: 显式 false → 落盘 false + GET 回读 false（删 autoStart 写盘行必红）', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      mkdirSync(cfgTmpDir, { recursive: true })
+      writeFileSync(realExe, '')
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { napcatPath: realExe, autoStart: false },
+      })
+      expect(JSON.parse(res.body).autoStart).toBe(false)
+      expect(JSON.parse(readFileSync(cfgTmpFile, 'utf-8')).autoStart).toBe(false)
+      const get = await app.inject({ method: 'GET', url: '/api/connectors/napcat/config' })
+      expect(JSON.parse(get.body).autoStart).toBe(false)
+    })
+
+    it('autoStart: 显式非 boolean（string "false" 等）→ 400 不落盘（钉死契约类型）', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      mkdirSync(cfgTmpDir, { recursive: true })
+      writeFileSync(realExe, '')
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { napcatPath: realExe, autoStart: 'false' },
+      })
+      expect(res.statusCode).toBe(400)
+      expect(JSON.parse(res.body).error).toBe('autoStart must be a boolean')
+      expect(existsSync(cfgTmpFile)).toBe(false)
+    })
+
+    it('GET status: 回显 autoStart（随配置文件——缺省 true；显式 false 写盘后回显 false）', async () => {
+      vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
+      // 未配置 → 缺省 true（契约表第 3 行：status 回显 autoStart）
+      let res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      expect(JSON.parse(res.body).autoStart).toBe(true)
+      // 显式 false 落盘 → 回显 false（删 status 回显行必红）
+      mkdirSync(cfgTmpDir, { recursive: true })
+      writeFileSync(realExe, '')
+      await app.inject({
+        method: 'POST',
+        url: '/api/connectors/napcat/config',
+        payload: { napcatPath: realExe, autoStart: false },
+      })
+      res = await app.inject({ method: 'GET', url: '/api/connectors/onebot/status' })
+      expect(JSON.parse(res.body).autoStart).toBe(false)
+    })
+
     it('GET status: launchReady 随模板形态与路径配置（占位符未配 → false；配了 → true）', async () => {
       vi.stubEnv('NAPCAT_LAUNCH_CMD', 'napcat --path {NAPCAT_PATH}')
       // 含占位符且未配路径 → launchReady false（launchCmdConfigured 仍 true——模板非空）
