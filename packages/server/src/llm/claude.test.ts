@@ -237,7 +237,7 @@ describe('ClaudeAdapter', () => {
     expect(existsSync(args[cfgIdx + 1])).toBe(false)
   })
 
-  // ─── 验收 #8（知识库 Phase 1 沿用）：黑名单全列精确比对（第二步收权限后 23 项）───
+  // ─── 验收 #8（知识库 Phase 1 沿用）：黑名单全列精确比对（第二步收权限后 24 项）───
 
   it('chatStream with context disallows engineering-minimal tool list (exact, order-locked)', async () => {
     const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
