@@ -39,12 +39,19 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
  * 实测真实执行搜索（2026-08-09 活体实证：CLI 自动发起 2 次 WebSearch 返回真实
  * 链接，exit 0）。「语义检索有 MCP 知识库兜底」理由不成立——实时网络信息
  * 知识库兜不了，放行以实测为准。
- * 禁用工具面：WebFetch（域名安全校验依赖 claude.ai 服务，2026-08-09
+ * 二次放行（2026-08-09 实测实证驱动，用户裁决「除 skill 外放行」）：移除 14 项——
+ * 子 agent/任务编排（Agent/Workflow/Task 系/Schedule/Cron）CLI 本地执行、
+ * 端点不拦（probe-cli-tools 实测 TaskCreate 创建成功、subagent 算出 17×23=391），
+ * 且 A2A 治理面不覆盖 subagent（不产生猫咖消息、不占 slot）；NotebookEdit 与
+ * Write/Edit 同权限面零新增风险；ScheduleWakeup/Cron 系「便宜时段跑活」是真实
+ * 需求（一次性 CLI 子进程无持久宿主、定时不可靠记应用层后续项，不阻塞放行）；
+ * Skill 由 CLI 原生消费（实测 /grill-me 斜杠触发 grilling 会话、未禁时模型
+ * 自主调用 Skill 工具）——server 端零注入，SkillLoader 注入链拆除见配套单。
+ * 维持禁 9 项：WebFetch（域名安全校验依赖 claude.ai 服务，2026-08-09
  * 网络策略下实测不可用——Unable to verify if domain...is safe to fetch，
- * 放行是死工具）、
- * 子 agent/任务编排（Agent/Workflow/Task 系/Schedule/Cron，A2A 风暴治理面）、
- * 双通道防重（SendMessage 已由 MCP post_message 替代）、UI 阻断
- * （AskUserQuestion/PlanMode/Worktree）与 Skill（聊天回复场景无需要）。
+ * 放行是死工具）、SendMessage/AskUserQuestion（已被 MCP post_message /
+ * request_user_action 替代）、EnterPlanMode/ExitPlanMode（方案决策写成
+ * skill，工具不需要）、EnterWorktree/ExitWorktree（git 命令完全等效）。
  * 收口动作（git merge/push）按角色区分需 per-agent 分档——本单全局配置
  * 无法区分（禁掉会连店长收口一起禁），标注为收口链待办，不阻塞本单。
  * claude.test.ts 的 EXPECTED_DISALLOWED 与下方常量同源钉死（数量 + 顺序双锁），
@@ -53,27 +60,13 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
 const BUILTIN_TOOLS_DISALLOWED = [
   'Bash(rm:*)',
   'Bash(curl:*)',
-  'NotebookEdit',
   'WebFetch',
-  'Agent',
-  'Workflow',
-  'TaskCreate',
-  'TaskUpdate',
-  'TaskGet',
-  'TaskList',
-  'TaskOutput',
-  'TaskStop',
   'SendMessage',
   'AskUserQuestion',
   'EnterPlanMode',
   'ExitPlanMode',
   'EnterWorktree',
   'ExitWorktree',
-  'ScheduleWakeup',
-  'CronCreate',
-  'CronDelete',
-  'CronList',
-  'Skill',
 ].join(',')
 
 /** 生成 .mcp.json 到 OS temp（每 spawn 一次；调用方负责 finally 清理）。
