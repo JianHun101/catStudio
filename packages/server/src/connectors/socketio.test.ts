@@ -4093,3 +4093,90 @@ describe('formatUserMessage', () => {
     expect(result).toBe('用户（@了店长、ds猫、吐槽猫）：帮我看看')
   })
 })
+
+// ─── per-agent 静态运行配置透传（单A：llm_max_tokens/llm_temperature） ──────
+
+describe('runAgentReply — per-agent 静态运行配置透传', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  async function runWithAgent(agent: any) {
+    const mod = await import('./socketio.js')
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const chatStream = vi.fn(async function* (_m: any[], _o: any) {
+      yield { content: '透传测试', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    // executeOneAgent 只执行"本次 dispatch 标记的执行"：状态必须 busy 且
+    // currentTriggerMessageId 匹配触发消息，否则提前 return 不走 adapter
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: agent.id,
+      sessionId: 'session-tf',
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: 'msg-tf',
+    })
+
+    getDb()
+      .prepare(
+        `INSERT INTO sessions (id, title, agent_ids) VALUES ('session-tf', 'tf', '["agent-tf"]')`
+      )
+      .run()
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES ('msg-tf', 'session-tf', 'user', '@ds猫 透传', '["ds猫"]')`
+      )
+      .run()
+
+    await mod.executeAgentsSerial(
+      mockIo as any,
+      'session-tf',
+      [agent],
+      { id: 'msg-tf', content: '@ds猫 透传', mentions: ['ds猫'] },
+      'trace-tf'
+    )
+    return chatStream
+  }
+
+  it('agent 配置 llmMaxTokens/llmTemperature → chatStream options 透传', async () => {
+    const chatStream = await runWithAgent({
+      id: 'agent-tf',
+      name: 'ds猫',
+      avatar: '🐱',
+      systemPrompt: 'prompt',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: 'sk-test',
+      llmMaxTokens: 4096,
+      llmTemperature: 1.2,
+    })
+
+    const opts = chatStream.mock.calls[0][1] as any
+    expect(opts.maxTokens).toBe(4096)
+    expect(opts.temperature).toBe(1.2)
+  })
+
+  it('agent 无配置 → options 不传 maxTokens/temperature（适配器兜底 2048/0.7）', async () => {
+    const chatStream = await runWithAgent({
+      id: 'agent-tf',
+      name: 'ds猫',
+      avatar: '🐱',
+      systemPrompt: 'prompt',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: 'sk-test',
+    })
+
+    const opts = chatStream.mock.calls[0][1] as any
+    expect('maxTokens' in opts).toBe(false)
+    expect('temperature' in opts).toBe(false)
+  })
+})

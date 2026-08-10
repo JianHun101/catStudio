@@ -12,6 +12,9 @@ export const AgentConfigSchema = z.object({
   llmApiKey: z.string(),
   llmBaseUrl: z.string().optional(),
   effortLevel: z.enum(['low', 'medium', 'high', 'max']).optional(),
+  // per-agent 静态运行配置：用户显式配置，严格校验（与 .env 容错哲学不同——非法值直接 400 暴露前端 bug）
+  llmMaxTokens: z.number().int().min(1).max(131072).optional(),
+  llmTemperature: z.number().min(0).max(2).optional(),
 })
 
 export const AgentCreateSchema = AgentConfigSchema.omit({ id: true })

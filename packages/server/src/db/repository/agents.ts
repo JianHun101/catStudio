@@ -65,12 +65,14 @@ export function insertAgent(
   llmApiKey: string,
   llmBaseUrl: string | null,
   effortLevel: string | null,
-  skillModules: string | null = null
+  skillModules: string | null = null,
+  llmMaxTokens: number | null = null,
+  llmTemperature: number | null = null
 ): void {
   db.prepare(
     `
-    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules, llm_max_tokens, llm_temperature)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `
   ).run(
     id,
@@ -82,7 +84,9 @@ export function insertAgent(
     llmApiKey,
     llmBaseUrl,
     effortLevel ?? 'high', // 与 DB 列 DEFAULT 'high' 对齐；INSERT 显式含该列时 SQLite 不会触发 DEFAULT，null 会直接违反 NOT NULL
-    skillModules ?? '[]'
+    skillModules ?? '[]',
+    llmMaxTokens ?? 2048, // 与 DB 列 DEFAULT 2048 对齐（同上：显式含列不触发 DEFAULT）
+    llmTemperature ?? 0.7 // 与 DB 列 DEFAULT 0.7 对齐
   )
 }
 

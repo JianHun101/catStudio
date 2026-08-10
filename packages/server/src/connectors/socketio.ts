@@ -126,6 +126,8 @@ export function rowToAgent(row: AgentRow): AgentConfig {
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: (row.effort_level || undefined) as AgentConfig['effortLevel'],
+    llmMaxTokens: row.llm_max_tokens, // 迁移 DEFAULT 2048 回填存量行；透传点据此决定是否传 ChatOptions.maxTokens
+    llmTemperature: row.llm_temperature,
     // 老库迁移默认 'unknown'（不在 AgentRole 里）——白名单对未知角色放行
     role: (row.role || undefined) as AgentConfig['role'],
   }
@@ -2194,6 +2196,10 @@ async function runAgentReply(
   const stream = adapter.chatStream(llmMessages, {
     model: agent.llmModel,
     signal,
+    // per-agent 静态运行配置透传：缺省不传让适配器兜底（deepseek 2048/0.7、ollama 同）
+    // llmMaxTokens 是单次输出上限，与 MAX_CONTEXT_TOKENS（上下文窗口）是两套数字体系
+    ...(agent.llmMaxTokens != null ? { maxTokens: agent.llmMaxTokens } : {}),
+    ...(agent.llmTemperature != null ? { temperature: agent.llmTemperature } : {}),
     // MCP 结构化路由上下文（契约 3 二次修订——店长裁决）：claude.ts 透传
     // 到 MCP server env；其他适配器忽略 context 零影响。
     // triggerAuthorName 与 :947 合并点同款来源（triggerMsg.authorName）——

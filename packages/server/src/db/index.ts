@@ -225,6 +225,16 @@ export function initDb(): void {
       // 默认 'unknown'——老库零回归（白名单对未知角色放行不拦截），seed 后各就其位
       sql: `ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'unknown'`,
     },
+    {
+      name: 'llm_max_tokens on agents',
+      // 静态运行配置（per-agent）：NOT NULL 必须带 DEFAULT（effort_level 同款注释）——
+      // 加列带 DEFAULT 自动回填存量行，旧 agent 升级零行为变化，读侧零 COALESCE
+      sql: `ALTER TABLE agents ADD COLUMN llm_max_tokens INTEGER NOT NULL DEFAULT 2048`,
+    },
+    {
+      name: 'llm_temperature on agents',
+      sql: `ALTER TABLE agents ADD COLUMN llm_temperature REAL NOT NULL DEFAULT 0.7`,
+    },
   ]
 
   for (const m of migrations) {

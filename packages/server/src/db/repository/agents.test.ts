@@ -142,3 +142,65 @@ describe('upsertAgent 运行配置覆盖语义', () => {
     expect(row.llm_api_key).toBe(SEED_ARGS.llmApiKey) // 运行配置保持
   })
 })
+
+describe('llm_max_tokens / llm_temperature 列默认回填', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  it('迁移前存量行（INSERT 不带两列）→ 读回 2048/0.7（DEFAULT 回填，读侧零 COALESCE）', () => {
+    // 模拟迁移前创建的 agent：SQL 直接 INSERT 不含 llm_max_tokens/llm_temperature
+    getDb()
+      .prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run('agent-legacy', '老猫', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk-old')
+
+    const row = agentsRepo.getAgentById('agent-legacy')!
+    expect(row.llm_max_tokens).toBe(2048)
+    expect(row.llm_temperature).toBe(0.7)
+  })
+
+  it('insertAgent 不带新参数 → 落库 2048/0.7（repository 兜底，与 DB DEFAULT 对齐）', () => {
+    agentsRepo.insertAgent(
+      'agent-new',
+      '新猫',
+      '🐱',
+      'prompt',
+      'deepseek',
+      'deepseek-v4-pro',
+      'sk-test',
+      null,
+      'high'
+    )
+    const row = agentsRepo.getAgentById('agent-new')!
+    expect(row.llm_max_tokens).toBe(2048)
+    expect(row.llm_temperature).toBe(0.7)
+  })
+
+  it('insertAgent 带显式配置 → 落库一致', () => {
+    agentsRepo.insertAgent(
+      'agent-cfg',
+      '配置猫',
+      '🐱',
+      'prompt',
+      'deepseek',
+      'deepseek-v4-pro',
+      'sk-test',
+      null,
+      'high',
+      null,
+      4096,
+      1.2
+    )
+    const row = agentsRepo.getAgentById('agent-cfg')!
+    expect(row.llm_max_tokens).toBe(4096)
+    expect(row.llm_temperature).toBe(1.2)
+  })
+})

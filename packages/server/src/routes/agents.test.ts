@@ -85,6 +85,42 @@ describe('Agent Routes', () => {
     })
   })
 
+  describe('POST /api/agents — 静态运行配置（llmMaxTokens/llmTemperature）', () => {
+    it('带新字段 → 201 回读一致', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/agents',
+        payload: { ...validAgent, llmMaxTokens: 4096, llmTemperature: 1.2 },
+      })
+      expect(res.statusCode).toBe(201)
+      const body = JSON.parse(res.body)
+      expect(body.llmMaxTokens).toBe(4096)
+      expect(body.llmTemperature).toBe(1.2)
+    })
+
+    it('不带新字段 → 默认 2048/0.7（列 DEFAULT 回填，存量 agent 升级零行为变化）', async () => {
+      const res = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
+      expect(res.statusCode).toBe(201)
+      const body = JSON.parse(res.body)
+      expect(body.llmMaxTokens).toBe(2048)
+      expect(body.llmTemperature).toBe(0.7)
+    })
+
+    it.each([
+      ['llmMaxTokens 为 0', { ...validAgent, llmMaxTokens: 0 }],
+      ['llmMaxTokens 为负数', { ...validAgent, llmMaxTokens: -1 }],
+      ['llmMaxTokens 超上限', { ...validAgent, llmMaxTokens: 131073 }],
+      ['llmMaxTokens 为小数', { ...validAgent, llmMaxTokens: 1.5 }],
+      ['llmMaxTokens 为字符串', { ...validAgent, llmMaxTokens: '4096' }],
+      ['llmTemperature 超上限', { ...validAgent, llmTemperature: 2.5 }],
+      ['llmTemperature 为负数', { ...validAgent, llmTemperature: -0.1 }],
+      ['llmTemperature 为字符串', { ...validAgent, llmTemperature: '0.5' }],
+    ])('非法值 → 400（%s）', async (_name, payload) => {
+      const res = await app.inject({ method: 'POST', url: '/api/agents', payload })
+      expect(res.statusCode).toBe(400)
+    })
+  })
+
   describe('GET /api/agents', () => {
     it('returns empty array when no agents', async () => {
       const res = await app.inject({ method: 'GET', url: '/api/agents' })
@@ -182,6 +218,49 @@ describe('Agent Routes', () => {
         payload: {},
       })
       expect(res.statusCode).toBe(400)
+    })
+
+    it('updates static run config (llmMaxTokens/llmTemperature)', async () => {
+      const create = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
+      const { id } = JSON.parse(create.body)
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/agents/${id}`,
+        payload: { llmMaxTokens: 8192, llmTemperature: 0.3 },
+      })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.llmMaxTokens).toBe(8192)
+      expect(body.llmTemperature).toBe(0.3)
+
+      // GET 回读一致
+      const get = await app.inject({ method: 'GET', url: `/api/agents/${id}` })
+      expect(JSON.parse(get.body).llmMaxTokens).toBe(8192)
+    })
+
+    it.each([
+      ['llmMaxTokens 为 0', { llmMaxTokens: 0 }],
+      ['llmMaxTokens 为小数', { llmMaxTokens: 2.5 }],
+      ['llmMaxTokens 为字符串', { llmMaxTokens: '4096' }],
+      ['llmTemperature 超上限', { llmTemperature: 3 }],
+      ['llmTemperature 为字符串', { llmTemperature: '0.5' }],
+    ])('非法值 → 400 不落盘（%s）', async (_name, payload) => {
+      const create = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
+      const { id } = JSON.parse(create.body)
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/agents/${id}`,
+        payload,
+      })
+      expect(res.statusCode).toBe(400)
+
+      // 不落盘：回读仍是默认值
+      const get = await app.inject({ method: 'GET', url: `/api/agents/${id}` })
+      const body = JSON.parse(get.body)
+      expect(body.llmMaxTokens).toBe(2048)
+      expect(body.llmTemperature).toBe(0.7)
     })
   })
 

@@ -37,7 +37,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         agent.llmBaseUrl || null,
         agent.effortLevel || null,
         // skill_modules 列保留兼容（历史数据），新建 Agent 不再声明技能——注入链已拆除
-        '[]'
+        '[]',
+        agent.llmMaxTokens ?? null, // 静态运行配置：null → repository 兜底 2048
+        agent.llmTemperature ?? null // null → repository 兜底 0.7
       )
 
       const row = agentsRepo.getAgentById(id)
@@ -74,6 +76,29 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     if (!existing) return reply.status(404).send({ error: 'Agent not found' })
 
     const body = req.body as any
+
+    // per-agent 静态运行配置：严格校验（用户显式配置，非法值 400 显式暴露前端 bug）
+    if (
+      body.llmMaxTokens !== undefined &&
+      !(
+        Number.isInteger(body.llmMaxTokens) &&
+        body.llmMaxTokens >= 1 &&
+        body.llmMaxTokens <= 131072
+      )
+    ) {
+      return reply.status(400).send({ error: 'llmMaxTokens must be an integer in [1, 131072]' })
+    }
+    if (
+      body.llmTemperature !== undefined &&
+      !(
+        typeof body.llmTemperature === 'number' &&
+        body.llmTemperature >= 0 &&
+        body.llmTemperature <= 2
+      )
+    ) {
+      return reply.status(400).send({ error: 'llmTemperature must be a number in [0, 2]' })
+    }
+
     const fields: string[] = []
     const values: any[] = []
 
@@ -86,6 +111,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       llmApiKey: 'llm_api_key',
       llmBaseUrl: 'llm_base_url',
       effortLevel: 'effort_level',
+      llmMaxTokens: 'llm_max_tokens',
+      llmTemperature: 'llm_temperature',
     })) {
       if (body[key] !== undefined) {
         fields.push(`${col} = ?`)
@@ -169,6 +196,8 @@ function toAgentConfig(row: AgentRow) {
     llmApiKey: row.llm_api_key,
     llmBaseUrl: row.llm_base_url || undefined,
     effortLevel: row.effort_level || undefined,
+    llmMaxTokens: row.llm_max_tokens, // 迁移 DEFAULT 2048 回填存量行，读侧零 COALESCE
+    llmTemperature: row.llm_temperature, // 迁移 DEFAULT 0.7 回填存量行
     role: row.role, // 前端占位符解析（@架构师→store 角色真名）依赖此字段；漏序列化 → 前端永远拿不到角色
   }
 }

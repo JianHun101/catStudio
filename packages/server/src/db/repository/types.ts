@@ -19,6 +19,10 @@ export interface AgentRow {
   llm_api_key: string
   llm_base_url: string | null
   effort_level: string
+  /** 单次输出 token 上限（per-agent 静态运行配置；迁移 DEFAULT 2048 回填存量行） */
+  llm_max_tokens: number
+  /** 采样温度（per-agent 静态运行配置；迁移 DEFAULT 0.7 回填存量行） */
+  llm_temperature: number
   skill_modules: string
   role: string
   created_at: string

@@ -20,6 +20,8 @@ const SCHEMA_SQL = `
     llm_api_key TEXT NOT NULL,
     llm_base_url TEXT,
     effort_level TEXT NOT NULL DEFAULT 'high',
+    llm_max_tokens INTEGER NOT NULL DEFAULT 2048,
+    llm_temperature REAL NOT NULL DEFAULT 0.7,
     skill_modules TEXT NOT NULL DEFAULT '[]',
     role TEXT NOT NULL DEFAULT 'unknown',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

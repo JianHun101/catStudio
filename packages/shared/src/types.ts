@@ -25,6 +25,10 @@ export interface AgentConfig {
   llmApiKey: string
   llmBaseUrl?: string // for custom providers
   effortLevel?: 'low' | 'medium' | 'high' | 'max' // Claude Code 推理深度
+  /** 单次输出 token 上限（per-agent 静态运行配置；缺省 → 适配器兜底 2048） */
+  llmMaxTokens?: number
+  /** 采样温度（per-agent 静态运行配置；缺省 → 适配器兜底 0.7） */
+  llmTemperature?: number
   role?: AgentRole // 角色——A2A mention 白名单依据；缺失/未知 → 放行不拦截（老库零回归）
 }
 
