@@ -95,6 +95,16 @@ export interface ContextConfig {
   maxContextTokens: number
 }
 
+/** 摘要配置（SUMMARY_MODEL/SUMMARY_API_KEY——写 .env 行级 patch，重启生效；key 不出 server 只给掩码） */
+export interface SummaryConfig {
+  summaryModel: string
+  summaryBaseUrl: string
+  summaryApiKeyMasked: string
+  hasKey: boolean
+  /** POST 后为 true——.env 写回需重启 server 才生效 */
+  needsRestart: boolean
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -227,6 +237,16 @@ export const api = {
 
   saveContextConfig: (data: { warnThreshold?: number; handoffThreshold?: number }) =>
     request<ContextConfig>('/config/context', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // 摘要配置（SUMMARY_MODEL/SUMMARY_API_KEY——写 .env 行级 patch，needsRestart 驱动「重启后生效」提示；
+  // POST 可选字段：summaryApiKey 未传=保持现状、空串=清空回退 DS_KEY，前端留空不传避免误清空）
+  getSummaryConfig: () => request<SummaryConfig>('/config/summary'),
+
+  saveSummaryConfig: (data: { summaryModel?: string; summaryApiKey?: string }) =>
+    request<SummaryConfig>('/config/summary', {
       method: 'POST',
       body: JSON.stringify(data),
     }),

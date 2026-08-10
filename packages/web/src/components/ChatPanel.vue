@@ -692,6 +692,14 @@ const warnedAgentsText = computed(() => {
           ⚠️ {{ warnedAgentsText }}
         </div>
 
+        <!-- 交接失败横幅：server 端摘要生成失败时 emit HANDOFF_FAILED（仅当前会话），收到新消息/手动关闭清除 -->
+        <div v-if="store.handoffFailed" class="handoff-failed-banner" role="alert">
+          <span>⚠️ 交接失败：{{ store.handoffFailed.reason }}</span>
+          <button class="banner-dismiss" title="关闭" @click="store.dismissHandoffFailed()">
+            ✕
+          </button>
+        </div>
+
         <!-- Session 切换加载中 -->
         <div
           v-if="store.activeSessionId && store.loadingMessages && store.activeMessages.length === 0"
@@ -1735,6 +1743,45 @@ const warnedAgentsText = computed(() => {
   line-height: 1.5;
   text-align: center;
   flex-shrink: 0;
+}
+
+/* ─── Handoff Failed Banner（交接失败可见化）────── */
+
+/* 与 80% 告警横幅同位置/样式族（sticky 贴顶、实底防透），红色系区分；
+   两者同时出现时失败横幅在告警横幅下方（文档流占位天然错开，不叠加） */
+.handoff-failed-banner {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(rgba(224, 90, 70, 0.14), rgba(224, 90, 70, 0.14)), var(--bg-deep);
+  border: 1px solid rgba(224, 90, 70, 0.4);
+  color: var(--accent-red);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.handoff-failed-banner .banner-dismiss {
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.handoff-failed-banner .banner-dismiss:hover {
+  opacity: 1;
 }
 
 /* ─── Date Separator ────────────────────── */

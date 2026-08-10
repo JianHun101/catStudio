@@ -57,6 +57,8 @@ export const useChatStore = defineStore('chat', () => {
   const confirmingRestartMessageId = ref<string | null>(null)
   const pendingHandoffSummary = ref<string | null>(null) // handoff 摘要，等待 SESSION_HISTORY 到达后注入
   let handoffJoining = false // S8: 防止 handoff 重入（两次 SESSION_HANDOFF 先后到达时相互覆盖）
+  /** 交接失败横幅数据（HANDOFF_FAILED 事件——摘要生成失败可见化；仅当前会话生效，收到新消息/切会话/手动关闭清除） */
+  const handoffFailed = ref<{ sessionId: string; reason: string } | null>(null)
 
   /** 显示错误 toast，5 秒后自动消失 */
   function showError(message: string): void {
@@ -73,6 +75,11 @@ export const useChatStore = defineStore('chat', () => {
     if (errorTimer) clearTimeout(errorTimer)
     errorMessage.value = null
     errorTimer = null
+  }
+
+  /** 手动关闭交接失败横幅 */
+  function dismissHandoffFailed(): void {
+    handoffFailed.value = null
   }
 
   /** 每条消息对应的 Agent 执行状态 */
@@ -192,6 +199,7 @@ export const useChatStore = defineStore('chat', () => {
       socket.emit(Events.LEAVE_SESSION, activeSessionId.value)
     }
     activeSessionId.value = sessionId
+    handoffFailed.value = null // 切会话清除旧会话的交接失败横幅
     messages.value = []
     loadingMessages.value = true // 等待 SESSION_HISTORY 到达
     // 清除旧会话的打字气泡（切换会话时状态应完全重置）
@@ -407,6 +415,8 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
       messages.value.push(msg)
+      // 交接失败横幅：收到新消息即清除（失败提示不常驻，与告警横幅一致的不脱流处理）
+      handoffFailed.value = null
       // 重启请求消息：初始按钮状态 pending（服务端 RESTART_STATUS 后续校正）
       if (msg.messageType === 'restart_request') {
         restartStates.value.set(msg.id, 'pending')
@@ -622,6 +632,13 @@ export const useChatStore = defineStore('chat', () => {
       }
     })
 
+    // 交接失败：server 端摘要生成失败时 emit（payload { sessionId, reason }）——仅当前会话生效
+    // 事件名字面量对齐单 A 契约（shared Events.HANDOFF_FAILED 由单 A 添加，落地后可换常量）
+    socket.on('handoff-failed', (data: { sessionId: string; reason: string }) => {
+      if (data.sessionId !== activeSessionId.value) return
+      handoffFailed.value = { sessionId: data.sessionId, reason: data.reason }
+    })
+
     // 会话交接：前端收到后无缝切换到新会话
     socket.on(
       Events.SESSION_HANDOFF,
@@ -706,5 +723,7 @@ export const useChatStore = defineStore('chat', () => {
     contextTokens,
     contextConfig,
     messageStatus,
+    handoffFailed,
+    dismissHandoffFailed,
   }
 })

@@ -225,3 +225,30 @@ describe('ChatPanel 80% 告警横幅（阈值来自配置）', () => {
     expect(source).not.toMatch(/r >= 0\.9/)
   })
 })
+
+describe('ChatPanel 交接失败横幅（HANDOFF_FAILED 可见化——单 A server 契约）', () => {
+  it('横幅渲染：store.handoffFailed 驱动 + reason 展示 + 手动关闭按钮', () => {
+    expect(source).toContain('class="handoff-failed-banner"')
+    expect(source).toContain('v-if="store.handoffFailed"')
+    expect(source).toContain('⚠️ 交接失败：{{ store.handoffFailed.reason }}')
+    expect(source).toContain('@click="store.dismissHandoffFailed()"')
+    expect(source).toContain('class="banner-dismiss"')
+  })
+
+  it('横幅样式族与告警横幅同构：sticky 贴顶 + 实底背景 + 红色系区分（accent-red）', () => {
+    const bannerBlock = source.match(/\.handoff-failed-banner\s*\{[\s\S]*?\}/)
+    expect(bannerBlock).toBeTruthy()
+    expect(bannerBlock![0]).toContain('position: sticky')
+    expect(bannerBlock![0]).toContain('top: 0')
+    expect(bannerBlock![0]).toContain('z-index: 10')
+    expect(bannerBlock![0]).toContain('var(--bg-deep)')
+    expect(bannerBlock![0]).toContain('var(--accent-red)')
+  })
+
+  it('失败横幅在告警横幅之后（同时出现时文档流占位错开，不叠加）', () => {
+    const warnIdx = source.indexOf('context-warning-banner')
+    const failIdx = source.indexOf('handoff-failed-banner')
+    expect(warnIdx).toBeGreaterThan(-1)
+    expect(failIdx).toBeGreaterThan(warnIdx)
+  })
+})

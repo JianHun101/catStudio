@@ -48,12 +48,13 @@ describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配
     expect(source).toContain(`v-if="activeTab === 'napcat'"`)
   })
 
-  it('挂载即拉齐数据：绑定列表 + OneBot 状态 + NapCat 配置 + context 阈值', () => {
+  it('挂载即拉齐数据：绑定列表 + OneBot 状态 + NapCat 配置 + context 阈值 + 摘要配置', () => {
     expect(source).toContain('onMounted(() => {')
     expect(source).toContain('loadBindings()')
     expect(source).toContain('refresh()')
     expect(source).toContain('loadConfig()')
     expect(source).toContain('loadContextConfig()')
+    expect(source).toContain('loadSummaryConfig()')
   })
 })
 
@@ -350,5 +351,49 @@ describe('SettingsView 系统配置（context 阈值——单 A 契约 GET/POST 
     expect(source).toContain('res.maxContextTokens')
     expect(source).toContain('ctxSaved')
     expect(source).toContain('已保存——新阈值立即生效')
+  })
+})
+
+describe('SettingsView 系统配置（摘要配置——单 A 契约 GET/POST /api/config/summary）', () => {
+  it('摘要模型/API Key 渲染：默认模型 + 掩码占位符（key 不出 server）', () => {
+    expect(source).toContain("const summaryModel = ref('deepseek-v4-flash')")
+    expect(source).toContain('summaryApiKeyMasked')
+    expect(source).toContain('summaryKeyPlaceholder')
+    expect(source).toContain('未配置（默认复用 DS_KEY')
+    expect(source).toContain('当前：')
+    expect(source).toContain('type="password"')
+    expect(source).toContain('摘要模型')
+    expect(source).toContain('摘要 API Key')
+  })
+
+  it('GET 失败 → 默认值 + 禁用态提示，不白屏（API 未就绪兜底）', () => {
+    expect(source).toContain('api.getSummaryConfig()')
+    expect(source).toMatch(/sumError[\s\S]*已使用默认值（deepseek-v4-flash）/)
+    expect(source).toContain('sumDisabled.value = true')
+    expect(source).toContain(':disabled="sumDisabled || sumSaving"')
+  })
+
+  it('保存 → POST：模型必填校验；key 留空不传字段（保持现状），填写新值才覆盖', () => {
+    expect(source).toContain('await api.saveSummaryConfig(payload)')
+    expect(source).toContain('const payload: { summaryModel?: string; summaryApiKey?: string }')
+    expect(source).toContain('if (summaryApiKey.value.trim()) {')
+    expect(source).toContain('payload.summaryApiKey = summaryApiKey.value.trim()')
+    expect(source).toContain('摘要模型不能为空')
+  })
+
+  it('保存成功 → 提示重启后生效（needsRestart 语义）；回写掩码并清空输入框', () => {
+    expect(source).toContain('已保存——重启后生效')
+    expect(source).toContain('summaryHasKey.value = res.hasKey')
+    expect(source).toContain('summaryMasked.value = res.summaryApiKeyMasked')
+    expect(source).toContain("summaryApiKey.value = ''")
+  })
+
+  it('config-item 居中显示：justify-content: center（QQ 接入与系统配置区同一 class 一处生效）', () => {
+    // 用户需求：配置页详情居中显示，替代 space-between 两端撑满的割裂观感；
+    // 块内负向断言——space-between 在 SettingsView 其他选择器仍存在（6 处），不能全文件断言
+    const configItemBlock = source.match(/\.config-item\s*\{[\s\S]*?\}/)
+    expect(configItemBlock).toBeTruthy()
+    expect(configItemBlock![0]).toContain('justify-content: center')
+    expect(configItemBlock![0]).not.toContain('space-between')
   })
 })

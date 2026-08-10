@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { AgentConfig } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import {
@@ -498,12 +498,86 @@ async function saveCtxConfig(): Promise<void> {
   }
 }
 
+// ─── 系统配置：摘要配置（SUMMARY_MODEL/SUMMARY_API_KEY——写 .env 行级 patch，重启生效）────────
+// 契约（单 A 钉死）：GET /api/config/summary 返回 { summaryModel, summaryBaseUrl,
+// summaryApiKeyMasked, hasKey, needsRestart:false }；POST 收 { summaryModel?, summaryApiKey? }
+// （未传保持现状；空串=清空回退 DS_KEY）→ 返回 { ..., needsRestart:true }。
+// key 只回显服务端掩码（sk***last4，完整 key 不出 server）；GET 失败 → 默认值 + 禁用态不崩。
+const summaryModel = ref('deepseek-v4-flash')
+const summaryApiKey = ref('')
+const summaryBaseUrl = ref('')
+const summaryHasKey = ref(false)
+const summaryMasked = ref('')
+const sumLoading = ref(true)
+const sumError = ref('')
+const sumDisabled = ref(false)
+const sumSaving = ref(false)
+const sumSaved = ref('')
+
+/** key 输入框占位符：回显当前掩码/未配置提示（留空=保持现状，不传字段避免误清空） */
+const summaryKeyPlaceholder = computed(() =>
+  summaryHasKey.value
+    ? `当前：${summaryMasked.value}（留空保持现状）`
+    : '未配置（默认复用 DS_KEY，留空保持现状）'
+)
+
+async function loadSummaryConfig(): Promise<void> {
+  sumLoading.value = true
+  try {
+    const cfg = await api.getSummaryConfig()
+    if (disposed) return
+    summaryModel.value = cfg.summaryModel
+    summaryBaseUrl.value = cfg.summaryBaseUrl
+    summaryHasKey.value = cfg.hasKey
+    summaryMasked.value = cfg.summaryApiKeyMasked
+  } catch {
+    if (!disposed) {
+      // API 未就绪（单 A 未落地/网络失败）→ 默认值 + 禁用态提示，不白屏
+      sumError.value =
+        '摘要配置读取失败——服务端接口未就绪，已使用默认值（deepseek-v4-flash），保存已禁用'
+      sumDisabled.value = true
+    }
+  } finally {
+    sumLoading.value = false
+  }
+}
+
+async function saveSummaryConfig(): Promise<void> {
+  sumError.value = ''
+  sumSaved.value = ''
+  const model = summaryModel.value.trim()
+  if (!model) {
+    sumError.value = '摘要模型不能为空'
+    return
+  }
+  sumSaving.value = true
+  try {
+    // 密钥留空不传字段（保持现状）；填写新值才覆盖——避免误清空导致摘要不可用
+    const payload: { summaryModel?: string; summaryApiKey?: string } = { summaryModel: model }
+    if (summaryApiKey.value.trim()) {
+      payload.summaryApiKey = summaryApiKey.value.trim()
+    }
+    const res = await api.saveSummaryConfig(payload)
+    summaryModel.value = res.summaryModel
+    summaryBaseUrl.value = res.summaryBaseUrl
+    summaryHasKey.value = res.hasKey
+    summaryMasked.value = res.summaryApiKeyMasked
+    summaryApiKey.value = ''
+    sumSaved.value = '已保存——重启后生效（.env 已写入，需重启 server 加载）'
+  } catch (err: any) {
+    sumError.value = err.message || '保存失败'
+  } finally {
+    sumSaving.value = false
+  }
+}
+
 onMounted(() => {
-  // 设置页为常驻视图（v-show 切类保持挂载）——一次拉齐四份数据
+  // 设置页为常驻视图（v-show 切类保持挂载）——一次拉齐五份数据
   loadBindings()
   refresh()
   loadConfig()
   loadContextConfig()
+  loadSummaryConfig()
 })
 onUnmounted(() => {
   disposed = true
@@ -987,6 +1061,57 @@ onUnmounted(() => {
               </div>
             </template>
           </div>
+
+          <!-- 摘要配置：交接摘要/记忆改写模型（SUMMARY_MODEL/SUMMARY_API_KEY 写 .env，重启生效） -->
+          <div class="ctx-card">
+            <div class="ctx-info">
+              交接摘要与记忆查询改写使用独立模型配置（写 .env 的 SUMMARY_MODEL / SUMMARY_API_KEY）。
+              密钥留空 = 保持现状（未配置时默认复用 DS_KEY）；填写新值 = 覆盖。保存后重启生效。
+            </div>
+
+            <div v-if="sumLoading" class="list-hint">加载中…</div>
+
+            <template v-else>
+              <div class="config-item">
+                <span class="label">摘要模型</span>
+                <input
+                  v-model="summaryModel"
+                  type="text"
+                  class="input input-ctx"
+                  :disabled="sumDisabled || sumSaving"
+                />
+              </div>
+              <div class="config-item">
+                <span class="label">摘要 API Key</span>
+                <input
+                  v-model="summaryApiKey"
+                  type="password"
+                  class="input input-ctx"
+                  :disabled="sumDisabled || sumSaving"
+                  :placeholder="summaryKeyPlaceholder"
+                />
+              </div>
+
+              <div class="ctx-hint">
+                密钥只在此回显掩码（{{
+                  summaryMasked || '—'
+                }}），完整密钥不出服务器。模型变更重启后生效。
+              </div>
+
+              <div v-if="sumError" class="error-msg">{{ sumError }}</div>
+              <div v-if="sumSaved" class="ok-msg">{{ sumSaved }}</div>
+
+              <div class="form-actions">
+                <button
+                  class="btn btn-create"
+                  :disabled="sumDisabled || sumSaving"
+                  @click="saveSummaryConfig"
+                >
+                  {{ sumSaving ? '保存中…' : '保存摘要配置' }}
+                </button>
+              </div>
+            </template>
+          </div>
         </div>
       </div>
     </div>
@@ -1444,7 +1569,8 @@ select.input {
 .config-item {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  /* 居中显示（用户需求）：label 与值/输入框整体居中对齐，替代两端撑满的割裂观感 */
+  justify-content: center;
   gap: 12px;
 }
 

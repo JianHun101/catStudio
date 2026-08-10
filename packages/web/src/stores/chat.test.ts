@@ -559,5 +559,44 @@ describe('chatStore', () => {
       handler!({ sessionId: 's1', messageId: 'm-restart', state: 'pending' })
       expect(store.confirmingRestartMessageId).toBeNull()
     })
+
+    it('HANDOFF_FAILED 仅当前会话生效：非当前会话不显示，当前会话设置 handoffFailed', () => {
+      // 事件名字面量对齐单 A 契约（shared Events.HANDOFF_FAILED 由单 A 添加，落地后可换常量）
+      const handler = mockOn.mock.calls.find((call) => call[0] === 'handoff-failed')?.[1] as
+        ((data: { sessionId: string; reason: string }) => void) | undefined
+      expect(handler).toBeDefined()
+
+      store.activeSessionId = 's1'
+      handler!({ sessionId: 'other-session', reason: 'boom' })
+      expect(store.handoffFailed).toBeNull()
+      handler!({ sessionId: 's1', reason: 'empty response' })
+      expect(store.handoffFailed).toEqual({ sessionId: 's1', reason: 'empty response' })
+    })
+
+    it('交接失败横幅清除链：收到新消息 / dismissHandoffFailed / 切会话', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === 'handoff-failed')?.[1] as
+        ((data: { sessionId: string; reason: string }) => void) | undefined
+      const newMsgHandler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.NEW_MESSAGE
+      )?.[1] as ((msg: Message) => void) | undefined
+
+      store.activeSessionId = 's1'
+      handler!({ sessionId: 's1', reason: 'empty response' })
+      expect(store.handoffFailed).not.toBeNull()
+
+      // 收到新消息清除（失败提示不常驻）
+      newMsgHandler!(mockMessage)
+      expect(store.handoffFailed).toBeNull()
+
+      // 手动关闭清除
+      handler!({ sessionId: 's1', reason: 'empty response' })
+      store.dismissHandoffFailed()
+      expect(store.handoffFailed).toBeNull()
+
+      // 切会话清除（joinSession 重置横幅，防旧会话失败提示串台）
+      handler!({ sessionId: 's1', reason: 'empty response' })
+      store.joinSession('s2')
+      expect(store.handoffFailed).toBeNull()
+    })
   })
 })
