@@ -57,6 +57,7 @@ import { filterAllowedMentions, allowedTargetsDescription } from '../dispatch/me
 import { consumeRouteSignals } from '../llm/route-signals.js'
 import { consumeUserRequestSignals } from '../llm/user-request-signals.js'
 import { parseJsonArray } from '../utils.js'
+import { recordReviewVerdict } from '../eval/verdict-parser.js'
 import { updateRunningSummary } from '../summarizer/index.js'
 import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
 import { ingestUserMessage } from './ingest.js'
@@ -977,6 +978,21 @@ async function executeOneAgent(
         // 将解析出的 mentions 写回 DB，确保后续 Agent 构建上下文时
         // 能通过 mentions.includes(agent.name) 过滤规则看到本消息
         messagesRepo.updateMessageMentions(reply.msgId, JSON.stringify(allowedNames))
+
+        // W3 L3 审查结论解析钩子（reviewer 角色门 + 锚定行首标记）。
+        // subject 从作用域 allowedNames 直取——不读 DB mentions 列（此刻落库的是
+        // '[]'，上一行才刚写回）；routeNames/allowedNames 为空（全剥除）时不进入
+        // 本块，钩子天然不触发。recordReviewVerdict 内部写操作独立 try/catch，
+        // DB 异常静默丢弃——审查链主流程零阻塞（契约边界）
+        if (agent.role === 'reviewer') {
+          recordReviewVerdict({
+            messageId: reply.msgId,
+            sessionId,
+            reviewerAgentId: agent.id,
+            content: reply.content,
+            targets: policy.allowed.map((a) => ({ name: a.name, isStore: a.role === 'store' })),
+          })
+        }
 
         // 通知前端更新该消息的 mentions（因为在 runAgentReply 发送
         // NEW_MESSAGE 时 mentions 尚未解析，前端拿到的 mentions 为空）
