@@ -14,12 +14,10 @@ const log = createLogger('ChatPanel')
 
 const props = defineProps<{
   leftSidebarOpen: boolean
-  rightSidebarOpen: boolean
 }>()
 
 const emit = defineEmits<{
   toggleLeftSidebar: []
-  toggleRightSidebar: []
 }>()
 
 const store = useChatStore()
@@ -526,6 +524,70 @@ function statusLabelZh(status: string): string {
       return status
   }
 }
+
+// ─── Bubble Footer (模型 + 窗口用量 + 停止按钮) ───────
+
+/** Agent 模型名（agents 表 llm_model，缺失返回空串隐藏） */
+function modelNameFor(agentId: string): string {
+  return store.agents.find((a) => a.id === agentId)?.llmModel || ''
+}
+
+/** 窗口上限：优先 token 统计里推送的 maxContextTokens，回退配置值（缺省 128000） */
+function maxTokensFor(agentId: string): number {
+  return (
+    store.agentTokenStats.get(agentId)?.maxContextTokens ?? store.contextConfig.maxContextTokens
+  )
+}
+
+/** 上下文窗口用量百分比（contextTokens / max，与 token 条/交接线同一数字体系） */
+function contextPctFor(agentId: string): number {
+  const max = maxTokensFor(agentId)
+  if (!max) return 0
+  return Math.round(((store.contextTokens.get(agentId) ?? 0) / max) * 100)
+}
+
+/** 是否可停止：回复中（busy）或有排队任务——与 AgentPanel 同判定（AGENT_INTERRUPT 一个按钮覆盖两场景） */
+function canStopAgent(agentId: string): boolean {
+  const state = store.agentStates.get(agentId)
+  return state?.status === 'busy' || (state?.queueLength ?? 0) > 0
+}
+
+function stopAgent(agentId: string): void {
+  store.interruptAgent(agentId)
+}
+
+/** 窗口用量色阶：>= 交接线红、>= 告警线黄、否则弱化（阈值来自 /api/config/context，失败回退 0.8/0.9） */
+function contextLevelFor(agentId: string): 'critical' | 'warn' | '' {
+  const pct = contextPctFor(agentId)
+  if (pct >= Math.round(store.contextConfig.handoffThreshold * 100)) return 'critical'
+  if (pct >= Math.round(store.contextConfig.warnThreshold * 100)) return 'warn'
+  return ''
+}
+
+/** 超过告警线的 agent（实时数据驱动，横幅数据源） */
+const warnedAgents = computed(() => {
+  const list: { name: string; pct: number }[] = []
+  store.contextTokens.forEach((ctx, agentId) => {
+    const max = maxTokensFor(agentId)
+    if (!max || ctx <= 0) return
+    const pct = Math.round((ctx / max) * 100)
+    if (pct >= Math.round(store.contextConfig.warnThreshold * 100)) {
+      list.push({ name: store.agentInfo(agentId)?.name || agentId, pct })
+    }
+  })
+  return list
+})
+
+/** 横幅文案：⚠️ {猫名} 上下文已达 {n}%（超过 {告警线}% 告警线，接近 {交接线}% 交接触发线） */
+const warnedAgentsText = computed(() => {
+  const cfg = store.contextConfig
+  return warnedAgents.value
+    .map(
+      (a) =>
+        `${a.name} 上下文已达 ${a.pct}%（超过 ${Math.round(cfg.warnThreshold * 100)}% 告警线，接近 ${Math.round(cfg.handoffThreshold * 100)}% 交接触发线）`
+    )
+    .join('、')
+})
 </script>
 
 <template>
@@ -622,46 +684,17 @@ function statusLabelZh(status: string): string {
             </button>
           </label>
         </div>
-
-        <!-- 右侧栏折叠按钮 -->
-        <button
-          class="btn-sidebar-toggle"
-          :title="props.rightSidebarOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
-          :aria-label="props.rightSidebarOpen ? '收起 Agent 面板' : '展开 Agent 面板'"
-          @click="emit('toggleRightSidebar')"
-        >
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <template v-if="props.rightSidebarOpen">
-              <rect
-                x="2"
-                y="3"
-                width="14"
-                height="12"
-                rx="1.5"
-                stroke="currentColor"
-                stroke-width="1.4"
-              />
-              <path d="M11 3v12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-            </template>
-            <template v-else>
-              <rect
-                x="2"
-                y="3"
-                width="14"
-                height="12"
-                rx="1.5"
-                stroke="currentColor"
-                stroke-width="1.4"
-              />
-            </template>
-          </svg>
-        </button>
       </div>
     </div>
 
     <!-- Messages -->
     <div ref="chatContainer" class="chat-messages-wrapper" @scroll.passive="checkScrollPosition">
       <div class="chat-messages-inner" aria-live="polite">
+        <!-- 80% 告警横幅：任一 agent 上下文超过告警线（实时数据驱动，阈值来自配置） -->
+        <div v-if="warnedAgents.length" class="context-warning-banner" role="alert">
+          ⚠️ {{ warnedAgentsText }}
+        </div>
+
         <!-- Session 切换加载中 -->
         <div
           v-if="store.activeSessionId && store.loadingMessages && store.activeMessages.length === 0"
@@ -772,7 +805,32 @@ function statusLabelZh(status: string): string {
                       重启中…
                     </span>
                   </div>
-                  <time class="msg-time" :datetime="msg.createdAt">{{
+                  <!-- 气泡 footer：agent 消息非分组首条带 {模型} · 窗口 {pct}% + 停止按钮；
+                       分组消息不重复渲染（同 agent 连续消息只首条带 footer，测试锚定） -->
+                  <div v-if="msg.role !== 'system'" class="msg-footer">
+                    <span
+                      v-if="msg.role === 'agent' && msg.agentId && !isGrouped(i)"
+                      class="msg-footer-info"
+                      :class="contextLevelFor(msg.agentId)"
+                    >
+                      {{ modelNameFor(msg.agentId) }} · 窗口 {{ contextPctFor(msg.agentId) }}%
+                    </span>
+                    <span class="msg-footer-right">
+                      <button
+                        v-if="msg.role === 'agent' && msg.agentId && canStopAgent(msg.agentId)"
+                        class="btn-stop-agent"
+                        title="停止思考并清空队列"
+                        aria-label="停止"
+                        @click.stop="stopAgent(msg.agentId)"
+                      >
+                        停止
+                      </button>
+                      <time class="msg-time" :datetime="msg.createdAt">{{
+                        formatTime(msg.createdAt)
+                      }}</time>
+                    </span>
+                  </div>
+                  <time v-else class="msg-time" :datetime="msg.createdAt">{{
                     formatTime(msg.createdAt)
                   }}</time>
                 </div>
@@ -1606,6 +1664,87 @@ function statusLabelZh(status: string): string {
 
 .message.system .msg-time {
   text-align: center;
+}
+
+/* ─── Bubble Footer（模型 + 窗口用量 + 停止按钮）──── */
+
+.msg-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.msg-footer .msg-time {
+  margin-top: 0;
+}
+
+.msg-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* 窗口用量：默认弱化色；超过告警线黄、超过交接线红（阈值来自配置） */
+.msg-footer-info {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.msg-footer-info.warn {
+  color: var(--accent-yellow);
+  opacity: 1;
+}
+
+.msg-footer-info.critical {
+  color: var(--accent-red);
+  opacity: 1;
+}
+
+/* 停止按钮：小号（AgentPanel btn-stop 同款），visibility 切换不改变布局 */
+.btn-stop-agent {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.btn-stop-agent:hover {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+  background: rgba(224, 85, 106, 0.1);
+}
+
+/* ─── Context Warning Banner（80% 告警）────── */
+
+.context-warning-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  background: rgba(224, 158, 70, 0.12);
+  border: 1px solid rgba(224, 158, 70, 0.35);
+  color: var(--accent-yellow);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  flex-shrink: 0;
 }
 
 /* ─── Date Separator ────────────────────── */

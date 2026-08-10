@@ -125,3 +125,65 @@ describe('ChatPanel skill 提示（SkillLoader 拆除后）', () => {
     expect(source).not.toContain('skill-dropdown')
   })
 })
+
+describe('ChatPanel 右栏 props 清理（B2 删右栏）', () => {
+  it('rightSidebarOpen / toggleRightSidebar 已从 props/emits 与模板移除', () => {
+    expect(source).not.toContain('rightSidebarOpen')
+    expect(source).not.toContain('toggleRightSidebar')
+    expect(source).not.toContain('收起 Agent 面板')
+  })
+})
+
+describe('ChatPanel 气泡 footer（模型 + 窗口用量 + 停止按钮）', () => {
+  it('agent 消息非分组首条显示 {模型} · 窗口 {pct}%（!isGrouped 条件 + msg-footer-info）', () => {
+    expect(source).toContain('class="msg-footer"')
+    expect(source).toContain('!isGrouped(i)')
+    // 模板插值：{{ modelNameFor(msg.agentId) }} · 窗口 {{ contextPctFor(msg.agentId) }}%
+    expect(source).toContain('modelNameFor(msg.agentId) }} · 窗口 {{ contextPctFor(msg.agentId) }}')
+  })
+
+  it('停止按钮：canStopAgent 时显示，点击走 interruptAgent 且事件不冒泡（@click.stop）', () => {
+    expect(source).toContain('class="btn-stop-agent"')
+    expect(source).toContain('canStopAgent(msg.agentId)')
+    expect(source).toContain('@click.stop="stopAgent(msg.agentId)"')
+    expect(source).toContain('store.interruptAgent(agentId)')
+  })
+
+  it('canStop 判定与 AgentPanel 同源：busy 或有排队任务', () => {
+    expect(source).toContain("state?.status === 'busy'")
+    expect(source).toContain('state?.queueLength ?? 0) > 0')
+  })
+
+  it('system 消息保持原 msg-time 结构（无 footer 行）', () => {
+    expect(source).toMatch(/v-else class="msg-time"/)
+  })
+})
+
+describe('ChatPanel 80% 告警横幅（阈值来自配置）', () => {
+  it('横幅渲染条件：warnedAgents.length > 0，role=alert', () => {
+    expect(source).toContain('class="context-warning-banner"')
+    expect(source).toContain('v-if="warnedAgents.length"')
+    expect(source).toContain('role="alert"')
+  })
+
+  it('横幅文案含告警线/交接线占位（warnThreshold/handoffThreshold 来自 store.contextConfig）', () => {
+    expect(source).toContain('store.contextConfig.warnThreshold')
+    expect(source).toContain('store.contextConfig.handoffThreshold')
+    expect(source).toContain('告警线')
+    expect(source).toContain('交接触发线')
+  })
+
+  it('色阶：>= 交接线红、>= 告警线黄（contextLevelFor 返回值驱动 class）', () => {
+    expect(source).toContain("return 'critical'")
+    expect(source).toContain("return 'warn'")
+    expect(source).toContain(':class="contextLevelFor(msg.agentId)"')
+    expect(source).toContain('.msg-footer-info.warn')
+    expect(source).toContain('.msg-footer-info.critical')
+  })
+
+  it('横幅/色阶阈值不写死 0.7/0.9（配置失败才回退默认 0.8/0.9）', () => {
+    // 旧的 0.7/0.9 写死色阶已随 AgentPanel 删除；新判定走 store.contextConfig
+    expect(source).not.toMatch(/r >= 0\.7/)
+    expect(source).not.toMatch(/r >= 0\.9/)
+  })
+})

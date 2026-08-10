@@ -26,6 +26,7 @@ const mockDeleteSession = vi.fn()
 const mockDeleteAgent = vi.fn()
 const mockUpdateAgent = vi.fn()
 const mockMarkSessionRead = vi.fn().mockResolvedValue({ ok: true })
+const mockGetContextConfig = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -36,6 +37,7 @@ vi.mock('@/composables/useApi', () => ({
     deleteAgent: mockDeleteAgent,
     updateAgent: mockUpdateAgent,
     markSessionRead: mockMarkSessionRead,
+    getContextConfig: mockGetContextConfig,
   },
 }))
 
@@ -103,6 +105,40 @@ describe('chatStore', () => {
       expect(store.agents).toEqual([])
       expect(store.loading).toBe(false)
       expect(store.broadcastMode).toBe(false)
+    })
+
+    it('contextConfig 默认回退 0.8 / 0.9（API 未拉取前 UI 不崩）', () => {
+      expect(store.contextConfig).toEqual({
+        warnThreshold: 0.8,
+        handoffThreshold: 0.9,
+        maxContextTokens: 128000,
+      })
+    })
+  })
+
+  describe('fetchContextConfig', () => {
+    it('成功 → contextConfig 更新为服务端值', async () => {
+      mockGetContextConfig.mockResolvedValue({
+        warnThreshold: 0.5,
+        handoffThreshold: 0.6,
+        maxContextTokens: 64000,
+      })
+      await store.fetchContextConfig()
+      expect(store.contextConfig).toEqual({
+        warnThreshold: 0.5,
+        handoffThreshold: 0.6,
+        maxContextTokens: 64000,
+      })
+    })
+
+    it('失败 → 静默回退默认 0.8 / 0.9，不抛错', async () => {
+      mockGetContextConfig.mockRejectedValue(new Error('network'))
+      await expect(store.fetchContextConfig()).resolves.toBeUndefined()
+      expect(store.contextConfig).toEqual({
+        warnThreshold: 0.8,
+        handoffThreshold: 0.9,
+        maxContextTokens: 128000,
+      })
     })
   })
 

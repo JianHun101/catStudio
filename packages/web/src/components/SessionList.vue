@@ -84,7 +84,28 @@ async function handleDelete(id: string): Promise<void> {
     <div class="section">
       <div class="section-header">
         <span>会话</span>
-        <span class="section-count" v-if="store.sessions.length">{{ store.sessions.length }}</span>
+        <span class="section-header-right">
+          <span class="section-count" v-if="store.sessions.length">{{
+            store.sessions.length
+          }}</span>
+          <!-- 新建会话：标题行右侧（图1「添加成员」范式），不再占底部 footer -->
+          <button
+            class="btn-new-session-header"
+            title="新建会话"
+            aria-label="新建会话"
+            @click="showCreate = true"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M8 3v10M3 8h10"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span>新建</span>
+          </button>
+        </span>
       </div>
 
       <!-- 等待服务器启动（health check 轮询中） -->
@@ -117,7 +138,6 @@ async function handleDelete(id: string): Promise<void> {
             :class="{ active: store.activeSessionId === s.id }"
             @click="store.joinSession(s.id)"
           >
-            <span class="session-icon">💬</span>
             <div class="session-body">
               <span class="session-title">{{ s.title }}</span>
               <span class="session-meta">{{ s.agentIds.length }} 只猫咪</span>
@@ -143,24 +163,9 @@ async function handleDelete(id: string): Promise<void> {
 
         <div v-if="store.sessions.length === 0" class="empty-sessions">
           <p>还没有会话</p>
-          <p class="hint">点击下方按钮创建</p>
+          <p class="hint">点击上方按钮创建</p>
         </div>
       </div>
-    </div>
-
-    <!-- Footer -->
-    <div class="panel-footer">
-      <button class="btn-new-session" @click="showCreate = true">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path
-            d="M8 3v10M3 8h10"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-          />
-        </svg>
-        <span>新建会话</span>
-      </button>
     </div>
 
     <SessionCreateModal v-if="showCreate" @close="closeCreate" />
@@ -233,6 +238,35 @@ async function handleDelete(id: string): Promise<void> {
   font-weight: 500;
 }
 
+.section-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 新建会话按钮：标题行右侧小号（图1「添加成员」范式），hover 时 accent 高亮 */
+.btn-new-session-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.btn-new-session-header:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .session-items {
   flex: 1;
   overflow-y: auto;
@@ -295,12 +329,6 @@ async function handleDelete(id: string): Promise<void> {
   width: 3px;
   background: var(--accent);
   border-radius: 0 2px 2px 0;
-}
-
-.session-icon {
-  font-size: 18px;
-  flex-shrink: 0;
-  opacity: 0.7;
 }
 
 .session-body {
@@ -374,36 +402,6 @@ async function handleDelete(id: string): Promise<void> {
   font-size: 11px;
   margin-top: 4px;
   opacity: 0.7;
-}
-
-/* ─── Footer ────────────────────────────── */
-
-.panel-footer {
-  padding: 12px 14px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.btn-new-session {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 9px;
-  border: 1px dashed var(--border-default);
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all var(--ease-out);
-}
-
-.btn-new-session:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-soft);
 }
 
 /* ─── Status Box ─────────────────────────── */

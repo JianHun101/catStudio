@@ -90,6 +90,13 @@ export const useChatStore = defineStore('chat', () => {
   /** 上下文窗口 token 用量（驱动 handoff 的真实数字）: agentId → contextTokens */
   const contextTokens = ref<Map<string, number>>(new Map())
 
+  /** context 阈值配置（80% 告警 / 90% 交接——服务端权威 context-config.json，失败回退默认 0.8/0.9） */
+  const contextConfig = ref({
+    warnThreshold: 0.8,
+    handoffThreshold: 0.9,
+    maxContextTokens: 128000,
+  })
+
   // ─── Computed ──────────────────────────────
 
   const activeSession = computed(
@@ -148,8 +155,9 @@ export const useChatStore = defineStore('chat', () => {
       const [agentList, sessionList] = await Promise.all([api.getAgents(), api.getSessions()])
       agents.value = agentList
       sessions.value = sessionList
-      // 拉取各 Agent 的 token 统计
+      // 拉取各 Agent 的 token 统计 + context 阈值配置
       fetchAgentStats()
+      fetchContextConfig()
       // Populate unread counts from server response
       const counts = new Map<string, number>()
       for (const s of sessionList) {
@@ -338,6 +346,15 @@ export const useChatStore = defineStore('chat', () => {
     )
     if (map.size > 0) {
       agentTokenStats.value = map
+    }
+  }
+
+  /** 拉取 context 阈值配置（GET /api/config/context，失败静默回退默认 0.8/0.9——UI 不崩） */
+  async function fetchContextConfig(): Promise<void> {
+    try {
+      contextConfig.value = await api.getContextConfig()
+    } catch {
+      // 静默失败：横幅/色阶回退默认阈值
     }
   }
 
@@ -684,8 +701,10 @@ export const useChatStore = defineStore('chat', () => {
     cancelRestart,
     interruptAgent,
     fetchAgentStats,
+    fetchContextConfig,
     agentTokenStats,
     contextTokens,
+    contextConfig,
     messageStatus,
   }
 })

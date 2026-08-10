@@ -37,6 +37,30 @@ describe('App.vue 设置入口（全局位置）', () => {
   })
 })
 
+describe('App.vue 两栏布局（B2 删右栏）', () => {
+  it('grid 两栏 260px 1fr，折叠态 56px 1fr——无右栏列', () => {
+    expect(appSource).toContain('grid-template-columns: 260px 1fr;')
+    expect(appSource).toContain('grid-template-columns: 56px 1fr;')
+    expect(appSource).not.toContain('300px')
+    expect(appSource).not.toContain('right-closed')
+  })
+
+  it('panel-right / AgentPanel 已删除（内容迁入设置页猫咪管理），ChatPanel 不再收 right props', () => {
+    expect(appSource).not.toContain('panel-right')
+    expect(appSource).not.toContain('AgentPanel')
+    expect(appSource).not.toContain('right-sidebar-open')
+    expect(appSource).not.toContain('toggle-right-sidebar')
+  })
+
+  it('左折叠状态/媒体查询保留（仅剩左侧折叠逻辑）', () => {
+    expect(appSource).toContain('const leftOpen = ref(true)')
+    expect(appSource).toContain('left-closed')
+    expect(appSource).toContain('max-width: 650px')
+    // 右栏专属的 narrow 查询（1000px）已随右栏删除
+    expect(appSource).not.toContain('1000px')
+  })
+})
+
 describe('ChatPanel 会话区无设置入口残留', () => {
   it('旧 QQ 绑定弹窗入口已移除（无 btn-bindings / showBindings / ConnectorBindingsModal 引用）', () => {
     expect(chatPanelSource).not.toContain('btn-bindings')

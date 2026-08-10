@@ -2,7 +2,6 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import SessionList from './components/SessionList.vue'
 import ChatPanel from './components/ChatPanel.vue'
-import AgentPanel from './components/AgentPanel.vue'
 import SettingsView from './views/SettingsView.vue'
 import { useChatStore } from '@/stores/chat'
 
@@ -11,32 +10,19 @@ const store = useChatStore()
 /** 全屏设置页 view 切换（无 vue-router，App 级布尔状态）——入口在左侧栏底部齿轮 */
 const showSettings = ref(false)
 
-/** User manually toggled sidebars — once set, auto-hide on narrow windows respects
- *  explicit choice and won't auto-show when the window widens again. */
+/** User manually toggled the left sidebar — once set, auto-hide on narrow windows
+ *  respects explicit choice and won't auto-show when the window widens again. */
 const leftOpen = ref(true)
-const rightOpen = ref(true)
 const userToggledLeft = ref(false)
-const userToggledRight = ref(false)
 
 function toggleLeft(): void {
   leftOpen.value = !leftOpen.value
   userToggledLeft.value = true
 }
 
-function toggleRight(): void {
-  rightOpen.value = !rightOpen.value
-  userToggledRight.value = true
-}
-
-// Media queries for responsive auto-collapse
-let narrowMq: MediaQueryList | undefined
+// Media query for responsive auto-collapse (右栏已随 B2 移除，仅剩左侧)
 let mobileMq: MediaQueryList | undefined
 
-function onNarrow(e: MediaQueryListEvent | MediaQueryList): void {
-  if (!userToggledRight.value) {
-    rightOpen.value = !e.matches
-  }
-}
 function onMobile(e: MediaQueryListEvent | MediaQueryList): void {
   if (!userToggledLeft.value) {
     leftOpen.value = !e.matches
@@ -44,18 +30,14 @@ function onMobile(e: MediaQueryListEvent | MediaQueryList): void {
 }
 
 onMounted(() => {
-  narrowMq = window.matchMedia('(max-width: 1000px)')
   mobileMq = window.matchMedia('(max-width: 650px)')
 
-  onNarrow(narrowMq)
   onMobile(mobileMq)
 
-  narrowMq.addEventListener('change', onNarrow)
   mobileMq.addEventListener('change', onMobile)
 })
 
 onUnmounted(() => {
-  narrowMq?.removeEventListener('change', onNarrow)
   mobileMq?.removeEventListener('change', onMobile)
 })
 </script>
@@ -72,7 +54,7 @@ onUnmounted(() => {
 
   <SettingsView v-if="showSettings" @close="showSettings = false" />
 
-  <div v-else class="app-layout" :class="{ 'left-closed': !leftOpen, 'right-closed': !rightOpen }">
+  <div v-else class="app-layout" :class="{ 'left-closed': !leftOpen }">
     <aside class="panel-left">
       <div class="panel-inner">
         <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />
@@ -103,20 +85,9 @@ onUnmounted(() => {
 
     <main class="panel-center">
       <div class="center-content">
-        <ChatPanel
-          :left-sidebar-open="leftOpen"
-          :right-sidebar-open="rightOpen"
-          @toggle-left-sidebar="toggleLeft"
-          @toggle-right-sidebar="toggleRight"
-        />
+        <ChatPanel :left-sidebar-open="leftOpen" @toggle-left-sidebar="toggleLeft" />
       </div>
     </main>
-
-    <aside class="panel-right">
-      <div class="panel-inner">
-        <AgentPanel :collapsed="!rightOpen" @expand="rightOpen = true" />
-      </div>
-    </aside>
   </div>
 </template>
 
@@ -197,7 +168,7 @@ onUnmounted(() => {
 
 .app-layout {
   display: grid;
-  grid-template-columns: 260px 1fr 300px;
+  grid-template-columns: 260px 1fr;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
@@ -211,31 +182,17 @@ onUnmounted(() => {
 
 /* Collapsed: 56px icon column（参考 Claude Desktop 图标条） */
 .app-layout.left-closed {
-  grid-template-columns: 56px 1fr 300px;
-}
-.app-layout.right-closed {
-  grid-template-columns: 260px 1fr 56px;
-}
-.app-layout.left-closed.right-closed {
-  grid-template-columns: 56px 1fr 56px;
+  grid-template-columns: 56px 1fr;
 }
 
 /* ─── Panels ─────────────────────────────── */
 
-.panel-left,
-.panel-right {
+.panel-left {
   background: var(--bg-base);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.panel-left {
   border-right: 1px solid var(--border-subtle);
-}
-
-.panel-right {
-  border-left: 1px solid var(--border-subtle);
 }
 
 .panel-center {
