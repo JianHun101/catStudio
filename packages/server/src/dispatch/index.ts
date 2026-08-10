@@ -18,6 +18,7 @@ import {
 } from '../db/repository/index.js'
 import { v4 as uuid } from 'uuid'
 import { createLogger } from '../logger.js'
+import { classifyError } from '../eval/classify-error.js'
 
 const log = createLogger('dispatch')
 
@@ -218,14 +219,18 @@ export async function completeExecution(
   const slot = agentSlots.get(agentId)
   if (!slot) return
 
-  // 更新执行日志（DB 失败不阻塞槽位释放）
+  // 更新执行日志（DB 失败不阻塞槽位释放）。
+  // errorType 在此集中分类（L1 契约）：调用点（connector）零改动——dispatch
+  // 主链语义不动，只补分类透传。同 UPDATE 契约：error_type 与 status/error_message
+  // 一条 UPDATE 带走（finalize 按 running 定位无 id，二次更新会错配）
   try {
     execLogsRepo.finalizeExecutionLog(
       agentId,
       success ? 'completed' : 'failed',
       opts?.latencyMs ?? null,
       opts?.errorMessage ?? null,
-      opts?.replyMessageId ?? null
+      opts?.replyMessageId ?? null,
+      opts?.errorMessage ? classifyError(opts.errorMessage) : null
     )
   } catch (err: any) {
     log.error('finalizeExecutionLog failed — releasing slot anyway', {

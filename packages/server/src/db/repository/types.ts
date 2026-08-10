@@ -86,6 +86,8 @@ export interface ExecutionLogRow {
   reply_chars: number | null
   prompt_tokens: number | null
   completion_tokens: number | null
+  /** L1 错误分类桶（classifyError 七桶 + 'server_restart'；存量行 NULL → 聚合 COALESCE('unknown')） */
+  error_type: string | null
 }
 
 export interface SessionReadStateRow {

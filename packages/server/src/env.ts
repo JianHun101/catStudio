@@ -125,6 +125,13 @@ process.env.KIMI_API_KEY ??= ''
 // （llmProvider='deepseek'）的回复采样评分，ollama 图测猫不进入评估
 process.env.EVAL_SAMPLE_RATE ??= '0.02'
 
+// ─── L1 聚合告警阈值（W1，滞回状态机破线判定）──────
+// 破线方向：success_rate 低于阈值 / timeout_rate、rework_rate 高于阈值。
+// 30 天窗口聚合，未来切 p95 只改配置不改代码
+process.env.EVAL_ALERT_SUCCESS_RATE ??= '0.8'
+process.env.EVAL_ALERT_TIMEOUT_RATE ??= '0.1'
+process.env.EVAL_ALERT_REWORK_RATE ??= '0.3'
+
 // ─── 会话交接配置 ──────────────────────────────
 // HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
 process.env.HANDOFF_ENABLED ??= 'true'

@@ -23,6 +23,7 @@ import { connectorRoutes } from './routes/connectors.js'
 import { configRoutes } from './routes/config.js'
 import { internalRoutes } from './routes/internal.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
+import { runL1Aggregation } from './eval/l1-aggregator.js'
 import { existsSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
@@ -146,6 +147,25 @@ async function main(): Promise<void> {
   // （EventEmitter 随进程销毁，但显式解绑防热启动/测试进程内多实例的重复触发）
   const stopOneBotOutbound = startOneBotOutbound()
 
+  // W1 L1 聚合定时器：每小时跑一轮八口径聚合 + 滞回告警判定（同步函数，
+  // 失败不阻塞主流程——聚合器内部已 per-session 防御，外层再兜一层防崩溃）
+  const l1Timer = setInterval(
+    () => {
+      try {
+        runL1Aggregation(io)
+      } catch (err: any) {
+        log.error('L1 aggregation crashed (non-blocking)', { error: err.message })
+      }
+    },
+    60 * 60 * 1000
+  )
+  // 启动后立即跑一轮（不等首个整点，重启后状态机已清空、首轮即恢复判定基线）
+  try {
+    runL1Aggregation(io)
+  } catch (err: any) {
+    log.error('L1 initial aggregation failed (non-blocking)', { error: err.message })
+  }
+
   log.info('server started', { host: HOST, port: PORT })
 
   // 6. 优雅关闭
@@ -153,6 +173,8 @@ async function main(): Promise<void> {
     log.info('shutting down...')
     // P4 #1: 先取消 OneBot 出站订阅，停止 replyBus 投递（关停后不应再发 QQ）
     stopOneBotOutbound?.()
+    // W1: 清理 L1 聚合定时器（shutdown 链完整——防热启动/测试进程内重复定时器）
+    clearInterval(l1Timer)
     io.close()
     await app.close()
     await closeRedis()

@@ -275,6 +275,11 @@ export function initDb(): void {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`,
     },
+    {
+      name: 'error_type on execution_logs',
+      // W1 L1 错误分类桶列（additive ALTER；存量行 NULL，聚合 COALESCE('unknown') 兜底）
+      sql: `ALTER TABLE execution_logs ADD COLUMN error_type TEXT`,
+    },
   ]
 
   for (const m of migrations) {

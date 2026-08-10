@@ -139,21 +139,25 @@ export function insertExecutionLog(
 /** 标记执行完成/失败。
  *  replyMessageId：成功路径写回本次回复的消息 id（洞 A 精确判据——重启恢复时
  *  message_id 非空即已回复，不再用时间窗把后续其他回复误判成本次回复）；
- *  失败/中断路径不传保持 NULL，恢复回退时间窗判据。 */
+ *  失败/中断路径不传保持 NULL，恢复回退时间窗判据。
+ *  errorType：L1 错误分类桶（W1 契约）——必须与 status/error_message **同一条
+ *  UPDATE** 带走（finalize 按 agent 最新 running 定位、无 id，二次更新在重启
+ *  恢复时会把恢复后新执行的错误错配到旧行）。 */
 export function finalizeExecutionLog(
   agentId: string,
   status: 'completed' | 'failed',
   latencyMs: number | null,
   errorMessage: string | null,
-  replyMessageId: string | null = null
+  replyMessageId: string | null = null,
+  errorType: string | null = null
 ): void {
   db.prepare(
     `UPDATE execution_logs
      SET status = ?, ended_at = datetime('now'),
-         latency_ms = ?, error_message = ?, message_id = ?
+         latency_ms = ?, error_message = ?, message_id = ?, error_type = ?
      WHERE agent_id = ? AND status = 'running'
      ORDER BY started_at DESC LIMIT 1`
-  ).run(status, latencyMs, errorMessage, replyMessageId, agentId)
+  ).run(status, latencyMs, errorMessage, replyMessageId, errorType, agentId)
 }
 
 /** 写回诊断数据（延迟、安装包、token 统计等） */
@@ -227,14 +231,17 @@ export function updateRunningExecutionCommitHash(
     .run(commitHash, triggeredByMessageId)
 }
 
-/** 启动时修复：将所有 running 状态标记为 failed */
+/** 启动时修复：将所有 running 状态标记为 failed。
+ *  error_type 同 UPDATE 落 'server_restart'（W1 契约：infra 桶单独统计，
+ *  不进成功率不进告警；同 UPDATE 契约与 finalizeExecutionLog 一致）。 */
 export function fixStuckExecutionLogs(): { changes: number } {
   return db
     .prepare(
       `UPDATE execution_logs
        SET status = 'failed',
            ended_at = datetime('now'),
-           error_message = 'server_restart'
+           error_message = 'server_restart',
+           error_type = 'server_restart'
        WHERE status = 'running'`
     )
     .run()
