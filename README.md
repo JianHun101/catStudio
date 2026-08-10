@@ -183,7 +183,7 @@ pnpm lint             # 全项目 TypeScript 类型检查
 | `SUMMARY_BASE_URL`         | `https://api.deepseek.com` | 摘要 API 地址                                                                                    |
 | `SUMMARY_INTERVAL`         | `3`                        | 每 N 轮对话触发一次增量摘要                                                                      |
 | `HANDOFF_ENABLED`          | `true`                     | 是否启用 90% 阈值会话交接                                                                        |
-| `HANDOFF_THRESHOLD`        | `0.9`                      | 触交接的上下文 token 占比                                                                        |
+| `HANDOFF_THRESHOLD`        | `0.9`                      | 触交接的上下文 token 占比（可经设置页「系统配置」修改，配置文件优先于 env）                      |
 | `MAX_CONTEXT_TOKENS`       | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                                                             |
 | `TOKEN_COUNT_METHOD`       | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）                                  |
 | `CLI_IDLE_TIMEOUT_MS`      | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                                              |

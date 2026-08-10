@@ -13,6 +13,7 @@ import { estimateTokens, Events } from '@cat-study/shared'
 import { chatComplete } from '../llm/complete.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import { readRawContextConfig } from '../config/context-config.js'
 import type { Server as SocketServer } from 'socket.io'
 
 const log = createLogger('handoff')
@@ -234,7 +235,15 @@ export function shouldHandoff(currentTokens: number): boolean {
   if (!enabled) return false
 
   const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
-  const threshold = parseFloat(process.env.HANDOFF_THRESHOLD || '0.9')
+  // 阈值：配置文件优先（设置页保存即生效——每次现读盘，几字节文件开销微秒级；
+  // 模块级缓存会引入「改完需重启」语义，恰是设置页要避免的），env HANDOFF_THRESHOLD 兜底
+  // （旧用户无配置文件行为不变）。readRawContextConfig 返回 null = 无文件 → env；
+  // 返回对象但缺 handoffThreshold = 文件无该字段/坏值 → env 同样兜底。
+  const fileThreshold = readRawContextConfig()?.handoffThreshold
+  const threshold =
+    typeof fileThreshold === 'number'
+      ? fileThreshold
+      : parseFloat(process.env.HANDOFF_THRESHOLD || '0.9')
   return currentTokens >= maxTokens * threshold
 }
 
