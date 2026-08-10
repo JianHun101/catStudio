@@ -96,7 +96,6 @@ const SCHEMA_SQL = `
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     error_type TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (session_id) REFERENCES sessions(id),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
   );

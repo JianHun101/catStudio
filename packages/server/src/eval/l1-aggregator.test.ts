@@ -26,15 +26,21 @@ function seedBase() {
     .run()
 }
 
+/** SQLite datetime 格式（UTC 'YYYY-MM-DD HH:MM:SS'）——与 datetime('now') 字符串比较一致 */
+function sqliteNow(offsetDays = 0): string {
+  return new Date(Date.now() - offsetDays * 86400000).toISOString().replace('T', ' ').slice(0, 19)
+}
+
 function insertExecution(overrides: Record<string, unknown> = {}): void {
   getDb()
     .prepare(
-      `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, error_message, error_type, latency_ms, prompt_tokens, completion_tokens)
-       VALUES (?, 's1', 'agent-1', 't1', ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, error_message, error_type, latency_ms, prompt_tokens, completion_tokens)
+       VALUES (?, 's1', 'agent-1', 't1', ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       overrides.id ?? `log-${Math.random()}`,
       overrides.status ?? 'completed',
+      overrides.started_at ?? sqliteNow(),
       overrides.error_message ?? null,
       overrides.error_type ?? null,
       overrides.latency_ms ?? 100,
@@ -109,16 +115,29 @@ describe('aggregateMetrics — 八口径', () => {
     expect(m.sampleTotal).toBe(0)
   })
 
-  it('30 天窗口：窗口外记录不计数', () => {
+  it('30 天窗口：窗口外记录不计数（execution_logs 用 started_at 判窗）', () => {
     getDb()
       .prepare(
-        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, created_at)
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
          VALUES ('old', 's1', 'agent-1', 't1', 'failed', datetime('now', '-31 days'))`
       )
       .run()
     insertExecution({ status: 'completed' })
     const m = aggregateMetrics()
     expect(m.sampleTotal).toBe(1)
+  })
+
+  it('回归：execution_logs 无 created_at 列（生产 schema 形态）聚合不炸', () => {
+    // 事故防线：生产建表（db/index.ts）execution_logs 无 created_at 列，只有
+    // started_at/ended_at。测试夹具已对齐删列——若聚合 SQL 再引用 created_at，
+    // 此测试必抛 "no such column: created_at"（原 bug 形态）。
+    const cols = getDb().pragma('table_info(execution_logs)') as Array<{ name: string }>
+    expect(cols.map((c) => c.name)).not.toContain('created_at')
+    insertExecution({ status: 'completed' })
+    insertExecution({ status: 'failed', error_message: 'x', error_type: 'timeout' })
+    const m = aggregateMetrics()
+    expect(m.sampleTotal).toBe(2)
+    expect(m.successRate).toBeCloseTo(0.5, 5)
   })
 
   it('suggest/reject/解析失败率：verdicts 与 failures 口径', () => {

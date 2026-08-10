@@ -65,7 +65,10 @@ export interface L1Metrics {
  */
 export function aggregateMetrics(): L1Metrics {
   const db = getDb()
-  const windowCond = `WHERE created_at >= datetime('now', '-${WINDOW_DAYS} days')`
+  // execution_logs 无 created_at 列（建表只有 started_at/ended_at，insert 时已写 started_at）
+  // ——时间窗用 started_at；review 两表有 created_at，保持不动（8d33bfa 事故根因拆分）
+  const execWindowCond = `WHERE started_at >= datetime('now', '-${WINDOW_DAYS} days')`
+  const verdictWindowCond = `WHERE created_at >= datetime('now', '-${WINDOW_DAYS} days')`
 
   const execRow = db
     .prepare(
@@ -78,7 +81,7 @@ export function aggregateMetrics(): L1Metrics {
          AVG(CASE WHEN status = 'completed' THEN latency_ms END) AS avg_latency_ms,
          COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
          COALESCE(SUM(completion_tokens), 0) AS completion_tokens
-       FROM execution_logs ${windowCond}`
+       FROM execution_logs ${execWindowCond}`
     )
     .get() as {
     total: number
@@ -97,12 +100,12 @@ export function aggregateMetrics(): L1Metrics {
          COUNT(*) AS verdicts,
          SUM(CASE WHEN verdict = 'suggest' THEN 1 ELSE 0 END) AS suggests,
          SUM(CASE WHEN verdict = 'reject' THEN 1 ELSE 0 END) AS rejects
-       FROM review_verdicts ${windowCond}`
+       FROM review_verdicts ${verdictWindowCond}`
     )
     .get() as { verdicts: number; suggests: number; rejects: number }
 
   const failureRow = db
-    .prepare(`SELECT COUNT(*) AS failures FROM review_parse_failures ${windowCond}`)
+    .prepare(`SELECT COUNT(*) AS failures FROM review_parse_failures ${verdictWindowCond}`)
     .get() as { failures: number }
 
   // 分母：completed + failed[≠server_restart]（infra 桶排除在成功率/超时率外）
