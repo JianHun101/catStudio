@@ -135,9 +135,11 @@ describe('ChatPanel 右栏 props 清理（B2 删右栏）', () => {
 })
 
 describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）', () => {
-  it('agent 消息非分组首条显示 {模型} · {n}k/{m}k tokens（!isGrouped 条件 + msg-footer-info）', () => {
+  it('agent 消息每条显示 {模型} · {n}k/{m}k tokens（分组消息同样渲染，守卫仅限 role/agentId）', () => {
     expect(source).toContain('class="msg-footer"')
-    expect(source).toContain('!isGrouped(i)')
+    // 守卫已去掉 !isGrouped(i)：同 agent 连续回复（分组气泡）每条都带 footer
+    expect(source).toMatch(/v-if="msg\.role === 'agent' && msg\.agentId"/)
+    expect(source).not.toMatch(/agentId && !isGrouped\(i\)/)
     // 模板插值：{{ modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}
     expect(source).toContain('modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}')
   })
@@ -180,10 +182,11 @@ describe('ChatPanel 停止按钮重定位（B2——正在思考的气泡 / busy
     expect(source).toContain('class="agent-status-row"')
   })
 
-  it('streaming 气泡每 agent 唯一（v-for activeTypingStates）——无分组问题，!isGrouped 守卫语义保留给 footer info', () => {
+  it('streaming 气泡每 agent 唯一（v-for activeTypingStates）——无分组问题；footer info 守卫已移除（分组消息同样渲染 footer）', () => {
     expect(source).toContain('v-for="[agentId, typing] in activeTypingStates"')
     expect(source).toContain('key="\'streaming-\' + agentId"')
-    expect(source).toContain('!isGrouped(i)') // footer info span 的分组守卫保留
+    // 守卫已移除：旧形式 `agentId && !isGrouped(i)` 不再出现（防回归锚定）
+    expect(source).not.toMatch(/agentId && !isGrouped\(i\)/)
   })
 })
 
@@ -192,6 +195,13 @@ describe('ChatPanel 80% 告警横幅（阈值来自配置）', () => {
     expect(source).toContain('class="context-warning-banner"')
     expect(source).toContain('v-if="warnedAgents.length"')
     expect(source).toContain('role="alert"')
+  })
+
+  it('横幅 sticky 固定可见：position: sticky + top: 0 + z-index + 实底背景（滚动后贴顶，不滚动仍在消息流最顶）', () => {
+    // 静态源断言锚定 sticky 实现（同文件既有 ?raw 范式）；背景实底防滚动文字透出
+    expect(source).toMatch(/\.context-warning-banner[\s\S]{0,160}position: sticky/)
+    expect(source).toMatch(/position: sticky;\s*top: 0;\s*z-index: 10/)
+    expect(source).toMatch(/\.context-warning-banner[\s\S]{0,300}var\(--bg-deep\)/)
   })
 
   it('横幅文案含告警线/交接线占位（warnThreshold/handoffThreshold 来自 store.contextConfig）', () => {

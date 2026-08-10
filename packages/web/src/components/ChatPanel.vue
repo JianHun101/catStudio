@@ -817,12 +817,12 @@ const warnedAgentsText = computed(() => {
                       重启中…
                     </span>
                   </div>
-                  <!-- 气泡 footer：agent 消息非分组首条带 {模型} · {n}k/{m}k tokens；
-                       分组消息不重复渲染（同 agent 连续消息只首条带 footer，测试锚定）。
+                  <!-- 气泡 footer：agent 消息每条带 {模型} · {n}k/{m}k tokens——
+                       分组消息同样渲染（用户要求同 agent 连续回复每条都有模型与用量）；
                        停止按钮不在此处（B2 重定位：streaming 气泡 / 用户消息状态行） -->
                   <div v-if="msg.role !== 'system'" class="msg-footer">
                     <span
-                      v-if="msg.role === 'agent' && msg.agentId && !isGrouped(i)"
+                      v-if="msg.role === 'agent' && msg.agentId"
                       class="msg-footer-info"
                       :class="contextLevelFor(msg.agentId)"
                     >
@@ -1785,7 +1785,13 @@ const warnedAgentsText = computed(() => {
 
 /* ─── Context Warning Banner（80% 告警）────── */
 
+/* 横幅 sticky 贴顶：相对 .chat-messages-wrapper 滚动容器粘住——不滚动时仍在消息流最顶，
+   滚动后贴顶始终可见（position: sticky 对 flex item 生效）。背景补实底（半透明黄 + bg-deep），
+   防止滚动经过的消息文字从横幅下方透出；z-index 保证覆盖层序 */
 .context-warning-banner {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1793,7 +1799,7 @@ const warnedAgentsText = computed(() => {
   padding: 8px 14px;
   margin-bottom: 8px;
   border-radius: var(--radius-md);
-  background: rgba(224, 158, 70, 0.12);
+  background: linear-gradient(rgba(224, 158, 70, 0.12), rgba(224, 158, 70, 0.12)), var(--bg-deep);
   border: 1px solid rgba(224, 158, 70, 0.35);
   color: var(--accent-yellow);
   font-size: 12px;
