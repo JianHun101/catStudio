@@ -16,6 +16,9 @@ const llmModel = ref('deepseek-v4-pro')
 const llmApiKey = ref('')
 const llmBaseUrl = ref('')
 const llmEffortLevel = ref('high')
+/** 静态运行配置（单 A 契约：maxTokens 正整数 1..131072、temperature 0..2——DB 列默认 2048/0.7） */
+const llmMaxTokens = ref(2048)
+const llmTemperature = ref(0.7)
 const saving = ref(false)
 const deleting = ref(false)
 const deleteConfirm = ref(false)
@@ -33,6 +36,9 @@ watch(
       llmApiKey.value = a.llmApiKey
       llmBaseUrl.value = a.llmBaseUrl || ''
       llmEffortLevel.value = a.effortLevel || 'high'
+      // 新字段（单 A 落地前类型无定义——as any 过渡，落地后自动对齐）
+      llmMaxTokens.value = (a as any).llmMaxTokens ?? 2048
+      llmTemperature.value = (a as any).llmTemperature ?? 0.7
       error.value = ''
       deleteConfirm.value = false
     }
@@ -88,8 +94,24 @@ const effortOptions = [
   { value: 'max', label: 'Max (最高推理深度)' },
 ]
 
+/** 前端校验对齐单 A 契约（maxTokens 正整数 1..131072、temperature 0..2）——不通过不发请求，后端 400 兜底 */
+function validateRuntimeConfig(): boolean {
+  const maxTokens = Number(llmMaxTokens.value)
+  if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 131072) {
+    error.value = 'Max Tokens 必须是 1~131072 的整数（如 2048）'
+    return false
+  }
+  const temp = Number(llmTemperature.value)
+  if (!Number.isFinite(temp) || temp < 0 || temp > 2) {
+    error.value = '温度必须是 0~2 之间的小数（如 0.7）'
+    return false
+  }
+  return true
+}
+
 async function handleSave(): Promise<void> {
   if (!props.agent) return
+  if (!validateRuntimeConfig()) return
   saving.value = true
   error.value = ''
   try {
@@ -102,6 +124,8 @@ async function handleSave(): Promise<void> {
       llmApiKey: llmApiKey.value,
       llmBaseUrl: llmBaseUrl.value,
       effortLevel: llmEffortLevel.value,
+      llmMaxTokens: Number(llmMaxTokens.value),
+      llmTemperature: Number(llmTemperature.value),
     })
     emit('close')
   } catch (err: any) {
@@ -204,6 +228,36 @@ async function handleDelete(): Promise<void> {
           <p class="provider-hint">
             控制 Claude Code 的推理 token 预算。High 适用于大多数场景，Max 推理最深入但耗时最长。
           </p>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>Max Tokens（单次输出上限）</label>
+            <input
+              v-model.number="llmMaxTokens"
+              type="number"
+              min="1"
+              max="131072"
+              step="1"
+              class="input input-mono"
+            />
+            <p class="provider-hint">
+              每次调用的最大输出 token 数（1~131072 整数）。与上下文窗口上限 （系统配置页
+              maxContextTokens）是两个数字体系——这是单次回复上限。
+            </p>
+          </div>
+          <div class="form-group flex-1">
+            <label>温度 (Temperature)</label>
+            <input
+              v-model.number="llmTemperature"
+              type="number"
+              min="0"
+              max="2"
+              step="0.1"
+              class="input input-mono"
+            />
+            <p class="provider-hint">采样温度（0~2）。越低越确定，越高越发散；默认 0.7。</p>
+          </div>
         </div>
 
         <div class="form-group">

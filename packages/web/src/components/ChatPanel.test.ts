@@ -134,34 +134,56 @@ describe('ChatPanel 右栏 props 清理（B2 删右栏）', () => {
   })
 })
 
-describe('ChatPanel 气泡 footer（模型 + 窗口用量 + 停止按钮）', () => {
-  it('agent 消息非分组首条显示 {模型} · 窗口 {pct}%（!isGrouped 条件 + msg-footer-info）', () => {
+describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）', () => {
+  it('agent 消息非分组首条显示 {模型} · {n}k/{m}k tokens（!isGrouped 条件 + msg-footer-info）', () => {
     expect(source).toContain('class="msg-footer"')
     expect(source).toContain('!isGrouped(i)')
-    // 模板插值：{{ modelNameFor(msg.agentId) }} · 窗口 {{ contextPctFor(msg.agentId) }}%
-    expect(source).toContain('modelNameFor(msg.agentId) }} · 窗口 {{ contextPctFor(msg.agentId) }}')
+    // 模板插值：{{ modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}
+    expect(source).toContain('modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}')
   })
 
-  it('停止按钮：canStopAgent 时显示，点击走 interruptAgent 且事件不冒泡（@click.stop）', () => {
-    expect(source).toContain('class="btn-stop-agent"')
-    expect(source).toContain('@click.stop="stopAgent(msg.agentId)"')
-    expect(source).toContain('store.interruptAgent(agentId)')
+  it('tokens 文案：m = maxContextTokens（上下文窗口数，非 llm_max_tokens 单次输出上限）', () => {
+    expect(source).toContain('function tokensTextFor(agentId: string): string')
+    expect(source).toContain('store.contextTokens.get(agentId) ?? 0')
+    expect(source).toContain('maxTokensFor(agentId)')
+    expect(source).toContain('tokens')
+    expect(source).toContain('不是 llm_max_tokens（单次输出上限 2048）')
+    // 旧措辞「窗口 {pct}%」已移除
+    expect(source).not.toContain('窗口 {{ contextPctFor(msg.agentId) }}%')
   })
 
-  it('停止按钮与 info span 同守卫：v-if 含 !isGrouped(i)（分组消息只首条渲染，防多按钮刷屏回归）', () => {
-    // 锚定停止按钮自身 v-if 块（info span 的 !isGrouped(i) 在其 v-if 之前，不满足此正则）
-    expect(source).toMatch(
-      /v-if="[\s\S]{0,200}!isGrouped\(i\)[\s\S]{0,200}canStopAgent\(msg\.agentId\)[\s\S]{0,100}class="btn-stop-agent"/
-    )
+  it('旧版停止按钮已从历史气泡 footer 移除（B2 重定位到 streaming/状态行）', () => {
+    expect(source).not.toContain('stopAgent(msg.agentId)')
   })
 
-  it('canStop 判定与 AgentPanel 同源：busy 或有排队任务', () => {
+  it('canStop 判定：busy 或有排队任务', () => {
     expect(source).toContain("state?.status === 'busy'")
     expect(source).toContain('state?.queueLength ?? 0) > 0')
   })
 
   it('system 消息保持原 msg-time 结构（无 footer 行）', () => {
     expect(source).toMatch(/v-else class="msg-time"/)
+  })
+})
+
+describe('ChatPanel 停止按钮重定位（B2——正在思考的气泡 / busy 无流式时的用户消息状态行）', () => {
+  it('streaming 气泡 footer 有停止按钮：@click.stop + canStopAgent 守卫（正在思考时）', () => {
+    expect(source).toMatch(
+      /v-if="canStopAgent\(agentId\)"[\s\S]{0,120}class="btn-stop-agent"[\s\S]{0,140}@click\.stop="stopAgent\(agentId\)"/
+    )
+    expect(source).toContain('store.interruptAgent(agentId)')
+  })
+
+  it('用户消息状态行（per-agent）承载：无流式内容（!typingStates.has）且可停止时挂按钮', () => {
+    expect(source).toContain('!store.typingStates.has(s.agentId) && canStopAgent(s.agentId)')
+    expect(source).toContain('@click.stop="stopAgent(s.agentId)"')
+    expect(source).toContain('class="agent-status-row"')
+  })
+
+  it('streaming 气泡每 agent 唯一（v-for activeTypingStates）——无分组问题，!isGrouped 守卫语义保留给 footer info', () => {
+    expect(source).toContain('v-for="[agentId, typing] in activeTypingStates"')
+    expect(source).toContain('key="\'streaming-\' + agentId"')
+    expect(source).toContain('!isGrouped(i)') // footer info span 的分组守卫保留
   })
 })
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import type { AgentConfig, AgentTokenStats } from '@cat-study/shared'
+import type { AgentConfig } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import {
   api,
@@ -326,77 +326,37 @@ function confirmPick(): void {
   closePicker()
 }
 
-// ─── 猫咪管理（AgentPanel.vue 展开态内容复制迁入）──────────────
-// 右栏 AgentPanel 即将被 B2 删除——本区为迁入后的唯一实现；store 引用原样可用。
+// ─── 猫咪管理（B2 改静态配置——会话动态信息已迁右侧边栏 SessionAgentsPanel）──
+// 契约（店长钉死）：猫咪管理只显示 agent 静态运行配置（模型/provider/effort/maxTokens/
+// 温度/apiKey 掩码/baseUrl/系统提示摘要）；token 用量条/调度队列/停止按钮迁出至
+// 右侧边栏（B1 SessionAgentsPanel 承接），迁走不复制。
 const editingAgent = ref<AgentConfig | null>(null)
 const showCreate = ref(false)
 
-/** 获取 Agent 的 token 统计，保证不为 undefined */
-function getTokenStats(agentId: string): AgentTokenStats | null {
-  return store.agentTokenStats.get(agentId) ?? null
+/** 单 A 契约新增字段（shared AgentConfig 类型由单 A 扩展——B2 交叉类型先行消费，
+ *  单 A 落地后类型自动对齐，无冲突） */
+type StaticAgent = AgentConfig & { llmMaxTokens?: number; llmTemperature?: number }
+
+/** 静态配置字段缺省与 DB 列默认一致（llm_max_tokens DEFAULT 2048 / llm_temperature DEFAULT 0.7） */
+function staticMaxTokens(agent: AgentConfig): number {
+  return (agent as StaticAgent).llmMaxTokens ?? 2048
 }
 
-/** 获取当前上下文窗口 token 用量（驱动 handoff 的真实数字） */
-function contextTokensFor(agentId: string): number {
-  return store.contextTokens.get(agentId) ?? 0
+function staticTemperature(agent: AgentConfig): number {
+  return (agent as StaticAgent).llmTemperature ?? 0.7
 }
 
-/** 安全的 token 使用比例（处理除零）。
- *  只用 contextTokens（实时推送的当前窗口估算值）。
- *  不再 fallback 到 sessionPromptTokens（累计值）——累计值不反映当前上下文窗口大小，
- *  用它做 fallback 会给用户虚假的"已满"信号。 */
-function tokenRatio(agentId: string): number {
-  const ctx = contextTokensFor(agentId)
-  if (ctx <= 0) return 0 // 尚无实时数据，不显示虚假进度
-  const stats = getTokenStats(agentId)
-  const max = stats?.maxContextTokens ?? 128000
-  if (max <= 0) return 0
-  return ctx / max
+/** apiKey 掩码展示（完整密钥不出页面；sk-***last4 格式） */
+function maskApiKey(key: string): string {
+  if (!key) return '未配置'
+  if (key.length <= 8) return '***'
+  return `${key.slice(0, 3)}***${key.slice(-4)}`
 }
 
-/** token 条颜色状态 */
-function tokenBarClass(agentId: string): string {
-  const r = tokenRatio(agentId)
-  if (r >= 0.9) return 'token-critical'
-  if (r >= 0.7) return 'token-warning'
-  return ''
-}
-
-function agentStatus(agentId: string): string {
-  const state = store.agentStates.get(agentId)
-  return state?.status || 'idle'
-}
-
-function agentQueue(agentId: string): number {
-  const state = store.agentStates.get(agentId)
-  return state?.queueLength || 0
-}
-
-function statusLabel(status: string): string {
-  switch (status) {
-    case 'idle':
-      return '空闲'
-    case 'thinking':
-      return '思考中…'
-    case 'busy':
-      return '回复中…'
-    default:
-      return status
-  }
-}
-
-function statusDot(status: string): string {
-  return status === 'idle' ? 'dot-idle' : 'dot-busy'
-}
-
-/** 是否可停止：回复中（busy）或有排队任务——一个按钮覆盖两个场景 */
-function canStop(agentId: string): boolean {
-  return agentStatus(agentId) === 'busy' || agentQueue(agentId) > 0
-}
-
-/** 点击停止：中断当前思考 + 清空排队任务（服务端 AGENT_INTERRUPT handler） */
-function stopAgent(agentId: string): void {
-  store.interruptAgent(agentId)
+/** 系统提示摘要（长文截断，评估一眼可读） */
+function promptSummary(p: string): string {
+  if (!p) return '未设置'
+  return p.length > 60 ? `${p.slice(0, 60)}…` : p
 }
 
 function openCreate(): void {
@@ -616,7 +576,7 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <!-- Agent Cards -->
+          <!-- Agent Cards（静态运行配置——会话动态信息已迁右侧边栏） -->
           <div class="agent-cards">
             <div
               v-for="agent in store.agents"
@@ -633,74 +593,34 @@ onUnmounted(() => {
                     <span class="model-name">{{ agent.llmModel }}</span>
                   </div>
                 </div>
-                <div class="status-area">
-                  <span class="status-dot" :class="statusDot(agentStatus(agent.id))"></span>
-                  <span class="status-label">{{ statusLabel(agentStatus(agent.id)) }}</span>
-                  <!-- 停止按钮：隐藏用 visibility 而非 v-if——保持 status-area 宽度恒定，
-                       不回归 6897e8e 修复的顶行布局跳动（灰点锚点不漂移） -->
-                  <button
-                    class="btn-retry-sm btn-stop"
-                    :class="{ 'btn-stop-hidden': !canStop(agent.id) }"
-                    title="停止思考并清空队列"
-                    @click.stop="stopAgent(agent.id)"
-                  >
-                    停止
-                  </button>
-                </div>
               </div>
 
-              <!-- Token 用量条 -->
-              <div v-if="getTokenStats(agent.id)" class="card-tokens">
-                <div class="token-header">
-                  <span class="token-label">
-                    上下文用量
-                    <span
-                      v-if="contextTokensFor(agent.id) > 0"
-                      class="token-live-dot"
-                      title="实时数据"
-                    ></span>
-                  </span>
-                  <span class="token-ratio">
-                    {{
-                      tokenRatio(agent.id) >= 0.01
-                        ? (tokenRatio(agent.id) * 100).toFixed(0) + '%'
-                        : '&lt;1%'
-                    }}
-                  </span>
+              <!-- 静态配置网格（运行参数——maxTokens/温度契约见单 A，缺省 2048/0.7） -->
+              <div class="static-grid">
+                <div class="static-item">
+                  <span class="static-label">Effort</span>
+                  <span class="static-value">{{ agent.effortLevel || '—' }}</span>
                 </div>
-                <div class="token-bar-bg">
-                  <!-- handoff 90% 触发线 -->
-                  <div class="token-bar-threshold" title="90% — 会话交接触发线"></div>
-                  <div
-                    class="token-bar-fill"
-                    :class="tokenBarClass(agent.id)"
-                    :style="{
-                      width: Math.min(tokenRatio(agent.id) * 100, 100) + '%',
-                    }"
-                  ></div>
+                <div class="static-item">
+                  <span class="static-label">Max Tokens</span>
+                  <span class="static-value mono">{{ staticMaxTokens(agent) }}</span>
                 </div>
-                <div class="token-footer">
-                  <span v-if="contextTokensFor(agent.id) > 0">
-                    窗口 {{ (contextTokensFor(agent.id) / 1000).toFixed(1) }}k /
-                    {{ (getTokenStats(agent.id)!.maxContextTokens / 1000).toFixed(0) }}k
-                  </span>
-                  <span v-else class="token-waiting"> 等待首次回复… </span>
-                  <span v-if="getTokenStats(agent.id)!.totalPromptTokens > 0" class="token-total">
-                    · 总计 {{ (getTokenStats(agent.id)!.totalPromptTokens / 1000).toFixed(1) }}k
-                  </span>
+                <div class="static-item">
+                  <span class="static-label">温度</span>
+                  <span class="static-value mono">{{ staticTemperature(agent) }}</span>
                 </div>
-              </div>
-
-              <div v-if="agentQueue(agent.id) > 0" class="card-queue">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                  <path
-                    d="M2 3.5h5M2 6h8M2 8.5h3"
-                    stroke="currentColor"
-                    stroke-width="1.2"
-                    stroke-linecap="round"
-                  />
-                </svg>
-                <span>队列 {{ agentQueue(agent.id) }} 条</span>
+                <div class="static-item">
+                  <span class="static-label">API Key</span>
+                  <span class="static-value mono">{{ maskApiKey(agent.llmApiKey) }}</span>
+                </div>
+                <div v-if="agent.llmBaseUrl" class="static-item static-item-wide">
+                  <span class="static-label">Base URL</span>
+                  <span class="static-value mono">{{ agent.llmBaseUrl }}</span>
+                </div>
+                <div class="static-item static-item-wide">
+                  <span class="static-label">系统提示</span>
+                  <span class="static-value">{{ promptSummary(agent.systemPrompt) }}</span>
+                </div>
               </div>
             </div>
 
@@ -768,35 +688,6 @@ onUnmounted(() => {
               <button class="btn btn-confirm" :disabled="creating" @click="handleCreate">
                 {{ creating ? '…' : '创建' }}
               </button>
-            </div>
-          </div>
-
-          <!-- Queue Section -->
-          <div class="queue-section">
-            <h4>
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path
-                  d="M2 4.5h6M2 7h10M2 9.5h4"
-                  stroke="currentColor"
-                  stroke-width="1.2"
-                  stroke-linecap="round"
-                />
-              </svg>
-              调度队列
-            </h4>
-            <div v-if="store.agentStateList.every((a) => a.queueLength === 0)" class="queue-empty">
-              暂无排队任务
-            </div>
-            <div v-else class="queue-items">
-              <div
-                v-for="s in store.agentStateList.filter((a) => a.queueLength > 0)"
-                :key="s.agentId"
-                class="queue-item"
-              >
-                <span class="queue-dot"></span>
-                <span class="queue-agent">{{ s.agentId }}</span>
-                <span class="queue-count">{{ s.queueLength }} 条</span>
-              </div>
             </div>
           </div>
 
@@ -2177,176 +2068,48 @@ select.input {
   white-space: nowrap;
 }
 
-/* Status */
-.agent-panel .status-area {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-}
+/* ─── 静态配置网格（B2：运行参数展示——动态信息已迁侧边栏） ── */
 
-.agent-panel .status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-
-.agent-panel .dot-idle {
-  background: var(--text-muted);
-}
-
-.agent-panel .dot-busy {
-  background: var(--accent-yellow);
-  animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-}
-
-.agent-panel .status-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  /* 固定状态文字占位宽度（最长「回复中…」≈ 3 汉字 + 省略号）：
-     状态切换时 label 宽度恒定 → status-area 整体宽度不变，
-     不挤压左侧 agent-info，顶行布局不跳动、灰点锚点不漂移 */
-  min-width: 4.5em;
-  white-space: nowrap;
-}
-
-/* 停止按钮：btn-retry-sm 风格的小号版，占位恒定（visibility 切换不改变布局） */
-.agent-panel .btn-stop {
-  padding: 2px 8px;
-  font-size: 10px;
-}
-
-.agent-panel .btn-stop-hidden {
-  visibility: hidden;
-}
-
-/* Token usage bar on card */
-.agent-panel .card-tokens {
+.agent-panel .static-grid {
   margin-top: 8px;
-  padding: 6px 10px;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-base);
   border: 1px solid var(--border-subtle);
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 14px;
 }
 
-.agent-panel .token-header {
+.agent-panel .static-item {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 4px;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
 }
 
-.agent-panel .token-label {
+.agent-panel .static-item-wide {
+  grid-column: 1 / -1;
+}
+
+.agent-panel .static-label {
   font-size: 10px;
   color: var(--text-muted);
-  font-weight: 500;
+  font-weight: 600;
+  flex-shrink: 0;
 }
 
-.agent-panel .token-ratio {
-  font-size: 10px;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-
-.agent-panel .token-bar-bg {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--border-subtle);
-  overflow: visible;
-  position: relative;
-}
-
-/* 90% 交接触发线 */
-.agent-panel .token-bar-threshold {
-  position: absolute;
-  left: 90%;
-  top: -2px;
-  bottom: -2px;
-  width: 1px;
-  background: var(--accent-yellow);
-  opacity: 0.6;
-  z-index: 2;
-}
-
-.agent-panel .token-bar-fill {
-  height: 100%;
-  border-radius: 2px;
-  background: var(--accent);
-  transition:
-    width 0.5s var(--ease-out),
-    background 0.5s var(--ease-out);
-}
-
-.agent-panel .token-bar-fill.token-warning {
-  background: var(--accent-yellow);
-}
-
-.agent-panel .token-bar-fill.token-critical {
-  background: var(--accent-red);
-}
-
-.agent-panel .token-footer {
-  font-size: 9px;
-  color: var(--text-muted);
-  margin-top: 4px;
-  font-family: var(--font-mono);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.agent-panel .token-total {
-  opacity: 0.6;
-}
-
-.agent-panel .token-waiting {
-  opacity: 0.5;
-  font-style: italic;
-}
-
-/* 实时数据指示点 */
-.agent-panel .token-live-dot {
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent-green, #4caf50);
-  margin-left: 2px;
-  vertical-align: middle;
-  animation: live-pulse 2s infinite;
-}
-
-@keyframes live-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.3;
-  }
-}
-
-/* Queue badge on card */
-.agent-panel .card-queue {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 8px;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: rgba(212, 168, 84, 0.08);
-  color: var(--accent-yellow);
+.agent-panel .static-value {
   font-size: 11px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-panel .static-value.mono {
+  font-family: var(--font-mono);
+  font-size: 10px;
 }
 
 /* ─── Agent Status (loading/error) ───────── */
@@ -2559,62 +2322,5 @@ select.input {
 .agent-panel .btn-confirm:disabled {
   opacity: 0.4;
   cursor: default;
-}
-
-/* ─── Queue Section ─────────────────────── */
-
-.agent-panel .queue-section {
-  padding: 12px 16px 16px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.agent-panel .queue-section h4 {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  margin-bottom: 10px;
-}
-
-.agent-panel .queue-empty {
-  font-size: 12px;
-  color: var(--text-muted);
-  text-align: center;
-  padding: 16px 0;
-}
-
-.agent-panel .queue-items {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.agent-panel .queue-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-surface);
-}
-
-.agent-panel .queue-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent-yellow);
-}
-
-.agent-panel .queue-agent {
-  flex: 1;
-  color: var(--text-secondary);
-}
-
-.agent-panel .queue-count {
-  color: var(--accent-yellow);
-  font-weight: 500;
 }
 </style>

@@ -125,6 +125,9 @@ export const api = {
       llmApiKey: string
       llmBaseUrl: string
       effortLevel: string
+      /** 静态运行配置（单 A 契约：maxTokens 正整数 1..131072、temperature 0..2） */
+      llmMaxTokens: number
+      llmTemperature: number
     }>
   ) =>
     request<any>(`/agents/${id}`, {

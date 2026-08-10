@@ -539,14 +539,26 @@ function maxTokensFor(agentId: string): number {
   )
 }
 
-/** 上下文窗口用量百分比（contextTokens / max，与 token 条/交接线同一数字体系） */
+/** 上下文窗口用量百分比（contextTokens / max，与交接线/横幅同一数字体系） */
 function contextPctFor(agentId: string): number {
   const max = maxTokensFor(agentId)
   if (!max) return 0
   return Math.round(((store.contextTokens.get(agentId) ?? 0) / max) * 100)
 }
 
-/** 是否可停止：回复中（busy）或有排队任务——与 AgentPanel 同判定（AGENT_INTERRUPT 一个按钮覆盖两场景） */
+/** 数字格式化：12400 → 12.4k、128000 → 128k（k 后去掉末尾 .0，与侧边栏同格式） */
+function fmtTokens(n: number): string {
+  if (n < 1000) return String(n)
+  return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+}
+
+/** 气泡 footer tokens 文案：{用量}k/{上限}k tokens——m = maxContextTokens（上下文窗口数），
+ *  不是 llm_max_tokens（单次输出上限 2048）——两个数字体系严防混淆 */
+function tokensTextFor(agentId: string): string {
+  return `${fmtTokens(store.contextTokens.get(agentId) ?? 0)}/${fmtTokens(maxTokensFor(agentId))} tokens`
+}
+
+/** 是否可停止：回复中（busy）或有排队任务（AGENT_INTERRUPT 一个按钮覆盖两场景） */
 function canStopAgent(agentId: string): boolean {
   const state = store.agentStates.get(agentId)
   return state?.status === 'busy' || (state?.queueLength ?? 0) > 0
@@ -805,31 +817,18 @@ const warnedAgentsText = computed(() => {
                       重启中…
                     </span>
                   </div>
-                  <!-- 气泡 footer：agent 消息非分组首条带 {模型} · 窗口 {pct}% + 停止按钮；
-                       分组消息不重复渲染（同 agent 连续消息只首条带 footer，测试锚定） -->
+                  <!-- 气泡 footer：agent 消息非分组首条带 {模型} · {n}k/{m}k tokens；
+                       分组消息不重复渲染（同 agent 连续消息只首条带 footer，测试锚定）。
+                       停止按钮不在此处（B2 重定位：streaming 气泡 / 用户消息状态行） -->
                   <div v-if="msg.role !== 'system'" class="msg-footer">
                     <span
                       v-if="msg.role === 'agent' && msg.agentId && !isGrouped(i)"
                       class="msg-footer-info"
                       :class="contextLevelFor(msg.agentId)"
                     >
-                      {{ modelNameFor(msg.agentId) }} · 窗口 {{ contextPctFor(msg.agentId) }}%
+                      {{ modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}
                     </span>
                     <span class="msg-footer-right">
-                      <button
-                        v-if="
-                          msg.role === 'agent' &&
-                          msg.agentId &&
-                          !isGrouped(i) &&
-                          canStopAgent(msg.agentId)
-                        "
-                        class="btn-stop-agent"
-                        title="停止思考并清空队列"
-                        aria-label="停止"
-                        @click.stop="stopAgent(msg.agentId)"
-                      >
-                        停止
-                      </button>
                       <time class="msg-time" :datetime="msg.createdAt">{{
                         formatTime(msg.createdAt)
                       }}</time>
@@ -855,6 +854,19 @@ const warnedAgentsText = computed(() => {
                   <span class="status-avatar">{{ s.agentAvatar }}</span>
                   <span class="status-name">{{ s.agentName }}</span>
                   <span class="status-label">{{ statusLabelZh(s.status) }}</span>
+                  <!-- 停止按钮（B2 重定位）：busy 但无流式内容时挂用户消息状态行承载——
+                       streaming 中（typingStates 有该 agent）按钮在 streaming 气泡上；
+                       边界明示：agent 被 agent 回复触发（broadcast）无用户消息状态行，
+                       仅 streaming 气泡覆盖——窗口期短，不追求全覆盖 -->
+                  <button
+                    v-if="!store.typingStates.has(s.agentId) && canStopAgent(s.agentId)"
+                    class="btn-stop-agent"
+                    title="停止思考并清空队列"
+                    aria-label="停止"
+                    @click.stop="stopAgent(s.agentId)"
+                  >
+                    停止
+                  </button>
                 </div>
                 <button
                   v-if="isLatestUserMessage(msg)"
@@ -870,7 +882,7 @@ const warnedAgentsText = computed(() => {
           </template>
         </TransitionGroup>
 
-        <!-- Streaming agent reply (live preview while agent is typing) -->
+        <!-- Streaming agent reply (live preview while agent is thinking) -->
         <div
           v-for="[agentId, typing] in activeTypingStates"
           :key="'streaming-' + agentId"
@@ -897,6 +909,25 @@ const warnedAgentsText = computed(() => {
                 </details>
               </template>
               <span class="typing-cursor inline">|</span>
+              <!-- streaming 气泡 footer：正在思考时的停止按钮落点（B2 重定位——
+                   每 agent 唯一气泡，无分组问题；canStopAgent 保守覆盖排队场景） -->
+              <div class="msg-footer">
+                <span class="msg-footer-info" :class="contextLevelFor(agentId)">
+                  {{ modelNameFor(agentId) }} · {{ tokensTextFor(agentId) }}
+                </span>
+                <span class="msg-footer-right">
+                  <button
+                    v-if="canStopAgent(agentId)"
+                    class="btn-stop-agent"
+                    title="停止思考并清空队列"
+                    aria-label="停止"
+                    @click.stop="stopAgent(agentId)"
+                  >
+                    停止
+                  </button>
+                  <span class="streaming-indicator">回复中…</span>
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -1731,6 +1762,25 @@ const warnedAgentsText = computed(() => {
   border-color: var(--accent-red);
   color: var(--accent-red);
   background: rgba(224, 85, 106, 0.1);
+}
+
+/* streaming 气泡正在输出指示（弱化脉冲，与停止按钮同排） */
+.streaming-indicator {
+  font-size: 10px;
+  color: var(--accent);
+  opacity: 0.8;
+  animation: streaming-blink 1.2s ease-in-out infinite;
+  white-space: nowrap;
+}
+
+@keyframes streaming-blink {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 /* ─── Context Warning Banner（80% 告警）────── */

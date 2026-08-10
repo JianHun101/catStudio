@@ -264,50 +264,44 @@ describe('SettingsView 路径浏览选择器（NapcatPathPicker 内联迁移）'
   })
 })
 
-describe('SettingsView 猫咪管理（AgentPanel 展开态内容复制迁入）', () => {
-  it('agent 卡片渲染：头像/名字/模型徽章/状态点/状态文字', () => {
+describe('SettingsView 猫咪管理（B2 改静态配置——会话动态信息迁右侧边栏）', () => {
+  it('agent 卡片渲染：头像/名字/模型徽章', () => {
     expect(source).toContain('v-for="agent in store.agents"')
     expect(source).toContain('agent.avatar')
     expect(source).toContain('agent.llmProvider')
     expect(source).toContain('agent.llmModel')
-    expect(source).toContain('statusDot(agentStatus(agent.id))')
-    expect(source).toContain('statusLabel(agentStatus(agent.id))')
   })
 
-  it('停止按钮：click.stop + store.interruptAgent；busy/queue>0 时显示', () => {
-    expect(source).toMatch(/@click\.stop="stopAgent\(agent\.id\)"/)
-    expect(source).toMatch(
-      /function stopAgent\(agentId: string\): void \{[\s\S]*store\.interruptAgent\(agentId\)/
-    )
-    expect(source).toMatch(/agentStatus\(agentId\) === 'busy' \|\| agentQueue\(agentId\) > 0/)
-    expect(source).toMatch(/'btn-stop-hidden': !canStop\(agent\.id\)/)
+  it('静态配置网格：Effort / Max Tokens / 温度 / API Key 掩码 / Base URL / 系统提示摘要', () => {
+    expect(source).toContain('static-grid')
+    expect(source).toContain('staticMaxTokens(agent)')
+    expect(source).toContain('staticTemperature(agent)')
+    expect(source).toContain('maskApiKey(agent.llmApiKey)')
+    expect(source).toContain('promptSummary(agent.systemPrompt)')
+    expect(source).toContain('agent.effortLevel')
+    expect(source).toContain('agent.llmBaseUrl')
   })
 
-  it('隐藏用 visibility（非 v-if）——布局稳定（6897e8e 修复不回归）', () => {
-    // 迁入样式前缀 .agent-panel（防与设置页同名类冲突），visibility 语义保留
-    expect(source).toMatch(/\.agent-panel \.btn-stop-hidden \{[\s\S]*visibility: hidden;/)
-    expect(source).not.toMatch(/v-if="canStop/)
+  it('静态字段缺省与 DB 列默认一致（2048/0.7）；apiKey 掩码与提示摘要截断', () => {
+    expect(source).toContain('(agent as StaticAgent).llmMaxTokens ?? 2048')
+    expect(source).toContain('(agent as StaticAgent).llmTemperature ?? 0.7')
+    expect(source).toContain('key.slice(0, 3)}***${key.slice(-4)}')
+    expect(source).toContain('p.length > 60')
+    expect(source).toContain('未配置')
   })
 
-  it('token 用量条：90% 交接触发线 + 实时窗口比例 + 色阶函数', () => {
-    expect(source).toContain('token-bar-threshold')
-    expect(source).toContain('90% — 会话交接触发线')
-    expect(source).toContain('tokenRatio(agent.id)')
-    expect(source).toMatch(/r >= 0\.9.*token-critical/s)
-    expect(source).toMatch(/r >= 0\.7.*token-warning/s)
-  })
-
-  it('token 数据链路：store.agentTokenStats + store.contextTokens 原样可用', () => {
-    expect(source).toContain('store.agentTokenStats.get(agentId)')
-    expect(source).toContain('store.contextTokens.get(agentId)')
-    expect(source).toContain('maxContextTokens')
-  })
-
-  it('队列徽标 + 调度队列区（store.agentStateList）', () => {
-    expect(source).toContain('agentQueue(agent.id)')
-    expect(source).toContain('store.agentStateList')
-    expect(source).toContain('调度队列')
-    expect(source).toContain('暂无排队任务')
+  it('会话动态信息已迁出：无 token 条 / 调度队列 / 停止按钮 / 状态点', () => {
+    // B2 契约：动态信息迁右侧边栏（SessionAgentsPanel 承接），迁走不复制——
+    // 断言锚定实现符号（注释措辞不算）
+    expect(source).not.toContain('token-bar')
+    expect(source).not.toContain('tokenRatio')
+    expect(source).not.toContain('agentQueue')
+    expect(source).not.toContain('queue-section')
+    expect(source).not.toContain('interruptAgent')
+    expect(source).not.toContain('btn-stop-agent')
+    expect(source).not.toContain('statusDot(')
+    expect(source).not.toContain('agentStateList')
+    expect(source).not.toContain('contextTokensFor(')
   })
 
   it('新建表单 + 编辑弹窗（AgentEditModal 复用不迁）', () => {
