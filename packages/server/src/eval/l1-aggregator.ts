@@ -66,7 +66,9 @@ export interface L1Metrics {
 export function aggregateMetrics(): L1Metrics {
   const db = getDb()
   // execution_logs 无 created_at 列（建表只有 started_at/ended_at，insert 时已写 started_at）
-  // ——时间窗用 started_at；review 两表有 created_at，保持不动（8d33bfa 事故根因拆分）
+  // ——时间窗用 started_at（含 infra 桶：按执行开始时间判窗——重启杀死的残留 running 行
+  //    started_at 超窗则不计，infra 为信息性指标不进告警，接受此语义）；review 两表有 created_at，保持不动
+  // （e82ff69 事故根因拆分：W1 一手引入夹具 created_at + windowCond 三表共用，致启动聚合必炸）
   const execWindowCond = `WHERE started_at >= datetime('now', '-${WINDOW_DAYS} days')`
   const verdictWindowCond = `WHERE created_at >= datetime('now', '-${WINDOW_DAYS} days')`
 
