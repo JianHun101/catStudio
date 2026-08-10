@@ -144,9 +144,15 @@ describe('ChatPanel 气泡 footer（模型 + 窗口用量 + 停止按钮）', ()
 
   it('停止按钮：canStopAgent 时显示，点击走 interruptAgent 且事件不冒泡（@click.stop）', () => {
     expect(source).toContain('class="btn-stop-agent"')
-    expect(source).toContain('canStopAgent(msg.agentId)')
     expect(source).toContain('@click.stop="stopAgent(msg.agentId)"')
     expect(source).toContain('store.interruptAgent(agentId)')
+  })
+
+  it('停止按钮与 info span 同守卫：v-if 含 !isGrouped(i)（分组消息只首条渲染，防多按钮刷屏回归）', () => {
+    // 锚定停止按钮自身 v-if 块（info span 的 !isGrouped(i) 在其 v-if 之前，不满足此正则）
+    expect(source).toMatch(
+      /v-if="[\s\S]{0,200}!isGrouped\(i\)[\s\S]{0,200}canStopAgent\(msg\.agentId\)[\s\S]{0,100}class="btn-stop-agent"/
+    )
   })
 
   it('canStop 判定与 AgentPanel 同源：busy 或有排队任务', () => {

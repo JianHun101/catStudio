@@ -817,7 +817,12 @@ const warnedAgentsText = computed(() => {
                     </span>
                     <span class="msg-footer-right">
                       <button
-                        v-if="msg.role === 'agent' && msg.agentId && canStopAgent(msg.agentId)"
+                        v-if="
+                          msg.role === 'agent' &&
+                          msg.agentId &&
+                          !isGrouped(i) &&
+                          canStopAgent(msg.agentId)
+                        "
                         class="btn-stop-agent"
                         title="停止思考并清空队列"
                         aria-label="停止"
