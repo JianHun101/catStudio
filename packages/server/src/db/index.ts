@@ -273,7 +273,10 @@ export function initDb(): void {
         judge_model TEXT NOT NULL,
         sample_reason TEXT NOT NULL CHECK (sample_reason IN ('random', 'low_score', 'user_feedback')),
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      )`,
+      );
+      -- 同一条回复只评一次：UNIQUE 索引兜底（调用方仍先查后写省 judge 调用）。
+      -- 独立语句幂等，已建表的存量库同样生效
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_scores_message_id ON eval_scores(message_id)`,
     },
     {
       name: 'error_type on execution_logs',

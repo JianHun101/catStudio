@@ -3,7 +3,8 @@
  *
  * 语义：judge 模型对采样回复的评分落库，与执行日志独立——评估是旁路
  * （fire-and-forget，不占 agent slot、不进 dispatch 主链）。同一条回复
- * 只评一次：message_id 唯一约束由调用方保证（sampler 先查后写，防重复评分）。
+ * 只评一次：DB 层 message_id UNIQUE 索引兜底（迁移里建），调用方仍先查
+ * 后写（hasScore）避免浪费一次 judge 调用。
  */
 import type Database from 'better-sqlite3'
 import type { SampleReason } from '../../eval/sampler.js'
@@ -57,11 +58,6 @@ export function insertScore(data: {
     data.judgeModel,
     data.sampleReason
   )
-}
-
-/** 评分后回写 sample_reason（score ≤ 2 → 'low_score'，契约：同一条记录原地 UPDATE） */
-export function updateSampleReason(messageId: string, reason: SampleReason): void {
-  db.prepare('UPDATE eval_scores SET sample_reason = ? WHERE message_id = ?').run(reason, messageId)
 }
 
 /** 按 message_id 查评分（Phase 0 与低分回写复核用） */

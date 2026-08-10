@@ -20,8 +20,16 @@ const DS_AGENT = {
   llmApiKey: 'sk-test',
 }
 
-const OLLAMA_AGENT = { ...DS_AGENT, id: 'agent-ollama', llmProvider: 'ollama' }
-const CLAUDE_AGENT = { ...DS_AGENT, id: 'agent-claude', llmProvider: 'claude' }
+// 生产主猫形态：llmProvider='claude'，deepseek-v4-flash 经 claude 适配器运行。
+// 这是线上 DB 的真实配置——采样门按模型名过滤，此形态必须采样（M1 回归测试）
+const PROD_AGENT = { ...DS_AGENT, id: 'agent-prod', llmProvider: 'claude' }
+const OLLAMA_AGENT = {
+  ...DS_AGENT,
+  id: 'agent-ollama',
+  llmProvider: 'ollama',
+  llmModel: 'qwen3.5:9b',
+}
+const EXTERNAL_AGENT = { ...DS_AGENT, id: 'agent-ext', llmProvider: 'openai', llmModel: 'gpt-4o' }
 
 beforeEach(() => {
   process.env.EVAL_SAMPLE_RATE = '0.02'
@@ -48,6 +56,11 @@ describe('getSampleRate', () => {
     expect(getSampleRate()).toBe(0.05)
   })
 
+  it('低于 1% 抬到下限 0.01（契约 1-5% 区间）', () => {
+    process.env.EVAL_SAMPLE_RATE = '0.005'
+    expect(getSampleRate()).toBe(0.01)
+  })
+
   it('非正数/NaN 返回 0（不采样）', () => {
     process.env.EVAL_SAMPLE_RATE = '0'
     expect(getSampleRate()).toBe(0)
@@ -57,12 +70,24 @@ describe('getSampleRate', () => {
 })
 
 describe('maybeScoreSample', () => {
-  it('非 DS 族（ollama/claude）不采样，random 不被调用', () => {
+  it('ollama 图测猫不采样，random 不被调用', () => {
     const random = vi.fn(() => 0)
     maybeScoreSample(OLLAMA_AGENT, 's-1', 'm-1', random)
-    maybeScoreSample(CLAUDE_AGENT, 's-1', 'm-1', random)
     expect(random).not.toHaveBeenCalled()
     expect(scoreReply).not.toHaveBeenCalled()
+  })
+
+  it('外部族模型（gpt-4o）不采样', () => {
+    const random = vi.fn(() => 0)
+    maybeScoreSample(EXTERNAL_AGENT, 's-1', 'm-1', random)
+    expect(random).not.toHaveBeenCalled()
+    expect(scoreReply).not.toHaveBeenCalled()
+  })
+
+  it('生产主猫形态（claude provider + deepseek 模型）→ 采样（M1 回归）', () => {
+    const random = vi.fn(() => 0.001)
+    maybeScoreSample(PROD_AGENT, 's-1', 'm-1', random)
+    expect(scoreReply).toHaveBeenCalledWith(PROD_AGENT, 's-1', 'm-1')
   })
 
   it('采样率 0 时跳过', () => {

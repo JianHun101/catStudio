@@ -10,6 +10,7 @@ import {
   gateVerdict,
   pickWinner,
   selectCandidates,
+  extractPrecedingContext,
   buildExternalSamples,
 } from './phase0.js'
 import type { Phase0Metrics } from './phase0.js'
@@ -133,7 +134,7 @@ describe('selectCandidates', () => {
     {
       id: 'm1',
       session_id: 's',
-      agent_id: 'ds-1',
+      agent_id: 'prod-1',
       role: 'agent',
       content: 'a',
       created_at: '2026-08-01 00:01:00',
@@ -149,7 +150,7 @@ describe('selectCandidates', () => {
     {
       id: 'm3',
       session_id: 's',
-      agent_id: 'ds-2',
+      agent_id: 'ds-1',
       role: 'agent',
       content: 'c',
       created_at: '2026-08-01 00:03:00',
@@ -162,21 +163,69 @@ describe('selectCandidates', () => {
       content: 'd',
       created_at: '2026-08-01 00:04:00',
     },
+    {
+      id: 'm5',
+      session_id: 's',
+      agent_id: 'gpt-1',
+      role: 'agent',
+      content: 'e',
+      created_at: '2026-08-01 00:05:00',
+    },
   ]
-  const providerById = new Map([
-    ['ds-1', 'deepseek'],
-    ['ds-2', 'deepseek'],
-    ['oll-1', 'ollama'],
+  const agentById = new Map([
+    // 生产主猫形态：provider='claude' + deepseek 模型 → 选中（M1 回归）
+    ['prod-1', { provider: 'claude', model: 'deepseek-v4-flash' }],
+    ['ds-1', { provider: 'deepseek', model: 'deepseek-v4-flash' }],
+    ['oll-1', { provider: 'ollama', model: 'qwen3.5:9b' }],
+    ['gpt-1', { provider: 'openai', model: 'gpt-4o' }],
   ])
 
-  it('只选 DS 族 agent 回复（排除 ollama 图测猫与非 agent 消息）', () => {
-    const picked = selectCandidates(rows, providerById, 10)
+  it('只选 DS 族 agent 回复（生产主猫 claude provider 也算；排除 ollama/外部族与非 agent 消息）', () => {
+    const picked = selectCandidates(rows, agentById, 10)
     expect(picked.map((p) => p.messageId)).toEqual(['m1', 'm3']) // 保持倒序输入顺序
     expect(picked.every((p) => p.content)).toBe(true)
   })
 
   it('count 上限生效', () => {
-    expect(selectCandidates(rows, providerById, 1)).toHaveLength(1)
+    expect(selectCandidates(rows, agentById, 1)).toHaveLength(1)
+  })
+
+  it('agent 不在映射中 → 排除', () => {
+    const picked = selectCandidates(rows, new Map(), 10)
+    expect(picked).toHaveLength(0)
+  })
+})
+
+describe('extractPrecedingContext', () => {
+  // DESC 序（最新在前）：m5 最新，m1 最早
+  const rows = [
+    { id: 'm5', role: 'agent' as const, agent_id: 'ds-1', content: 'e' },
+    { id: 'm4', role: 'user' as const, agent_id: null, content: 'd' },
+    { id: 'm3', role: 'agent' as const, agent_id: 'ds-1', content: 'c' },
+    { id: 'm2', role: 'user' as const, agent_id: null, content: 'b' },
+    { id: 'm1', role: 'agent' as const, agent_id: 'ds-1', content: 'a' },
+  ]
+
+  it('取目标之后（更早）消息、不含目标自身、时间正序（OQ① 回归）', () => {
+    const ctx = extractPrecedingContext(rows, 'm3')
+    // m3 之后（更早）= m2, m1；反转 = [m1, m2]（最早在前）
+    expect(ctx.map((r) => r.content)).toEqual(['a', 'b'])
+    expect(ctx.some((r) => r.content === 'c')).toBe(false) // 目标自身不进上下文
+  })
+
+  it('maxCount 上限生效（最多取更早 9 条）', () => {
+    const ctx = extractPrecedingContext(rows, 'm5', 9)
+    expect(ctx.map((r) => r.content)).toEqual(['a', 'b', 'c', 'd'])
+    const limited = extractPrecedingContext(rows, 'm5', 2)
+    expect(limited.map((r) => r.content)).toEqual(['c', 'd'])
+  })
+
+  it('目标是最早消息 → 空上下文', () => {
+    expect(extractPrecedingContext(rows, 'm1')).toEqual([])
+  })
+
+  it('目标不存在 → 空上下文', () => {
+    expect(extractPrecedingContext(rows, 'nope')).toEqual([])
   })
 })
 

@@ -224,7 +224,9 @@ export function buildCandidates(): JudgeCandidate[] {
 
 /**
  * 从消息表挑 DS 族猫回复（排除 ollama 图测猫），取最新 count 条。
- * 纯函数（测试用注入数据）；providerById 为 agent_id → llm_provider 映射。
+ * 纯函数（测试用注入数据）；agentById 为 agent_id → {provider, model} 映射。
+ * DS 族判定按模型名前缀（生产主猫 llmProvider='claude'、llmModel 以
+ * 'deepseek' 开头——按 provider 过滤会把全猫误杀，M1 教训）。
  */
 export function selectCandidates(
   rows: Array<{
@@ -235,14 +237,17 @@ export function selectCandidates(
     content: string
     created_at: string
   }>,
-  providerById: Map<string, string>,
+  agentById: Map<string, { provider: string; model: string }>,
   count: number
 ): Array<{ messageId: string; sessionId: string; agentId: string; content: string }> {
   return rows
-    .filter(
-      (r) =>
-        r.role === 'agent' && r.agent_id !== null && providerById.get(r.agent_id) === 'deepseek'
-    )
+    .filter((r) => {
+      if (r.role !== 'agent' || r.agent_id === null) return false
+      const meta = agentById.get(r.agent_id)
+      if (!meta) return false
+      if (meta.provider === 'ollama') return false
+      return meta.model.startsWith('deepseek')
+    })
     .slice(0, count)
     .map((r) => ({
       messageId: r.id,
@@ -252,29 +257,38 @@ export function selectCandidates(
     }))
 }
 
+/**
+ * 被评回复的前置上下文提取（OQ① 修复版）：rows 为倒序（created_at DESC，
+ * 最新在前），目标之后即更早消息。取目标之后最多 maxCount 条（不含目标自身
+ * ——reply 字段单独承载被评回复），反转为时间正序。与 scorer.collectContextRows
+ * 同一坐标系（DESC 序 + 目标后移窗口），差异仅在是否含目标。
+ */
+export function extractPrecedingContext(
+  rows: Array<{ id: string; role: string; agent_id: string | null; content: string }>,
+  targetMessageId: string,
+  maxCount: number = 9
+): Array<{ role: string; agent_id: string | null; content: string }> {
+  const idx = rows.findIndex((r) => r.id === targetMessageId)
+  if (idx === -1) return []
+  const window = rows.slice(idx + 1, Math.min(rows.length, idx + 1 + maxCount))
+  return window.reverse() // 时间正序，最早在前
+}
+
 /** 收集 30 条真实回复候选样本（来源限定 DS 族猫）→ 写标注文件（human_score 待填） */
 export function collectCandidatesFromDb(count: number = 30): Phase0Sample[] {
   const recent = messagesRepo.getLatestAgentMessages(2000)
-  const providerById = new Map<string, string>()
+  const agentById = new Map<string, { provider: string; model: string }>()
   for (const row of agentsRepo.listAllAgents()) {
-    providerById.set(row.id, row.llm_provider)
+    agentById.set(row.id, { provider: row.llm_provider, model: row.llm_model })
   }
-  const picked = selectCandidates(recent, providerById, count)
+  const picked = selectCandidates(recent, agentById, count)
 
   const samples: Phase0Sample[] = picked.map((p, i) => {
-    // 每条回复的前置最近 9 条（G-Eval 上下文，时间正序）
+    // 每条回复的前置最近 9 条（G-Eval 上下文，时间正序，不含目标自身）
     const all = messagesRepo.getRecentMessages(p.sessionId, 100)
-    const idx = all.findIndex((m) => m.id === p.messageId)
-    const ctx =
-      idx === -1
-        ? []
-        : all
-            .slice(Math.max(0, idx - 9), idx + 1)
-            .reverse()
-            .slice(0, 9)
-            .map(
-              (m) => `${m.role === 'user' ? '用户' : '其他猫'}: ${truncateForJudge(m.content, 800)}`
-            )
+    const ctx = extractPrecedingContext(all, p.messageId).map(
+      (m) => `${m.role === 'user' ? '用户' : '其他猫'}: ${truncateForJudge(m.content, 800)}`
+    )
     return {
       id: `real-${String(i + 1).padStart(2, '0')}`,
       source: 'real',
@@ -481,7 +495,7 @@ async function cliRun(): Promise<void> {
     samples: Phase0Sample[]
   }
   const labeledReal = realSamples.filter((s) => s.humanScore !== null)
-  if (labeledReal.length < 10) {
+  if (labeledReal.length < 30) {
     console.error(`❌ 真实样本标注不足（${labeledReal.length}/30），请先完成标注`)
     process.exit(1)
   }
