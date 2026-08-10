@@ -87,6 +87,14 @@ export interface NapcatBrowseResult {
   entries: NapcatBrowseEntry[]
 }
 
+/** context 阈值配置（context-config.json——80% 告警 / 90% 交接，服务端权威，缺文件返回默认值） */
+export interface ContextConfig {
+  warnThreshold: number
+  handoffThreshold: number
+  /** 上下文窗口上限（env MAX_CONTEXT_TOKENS 读，只读回显不回写） */
+  maxContextTokens: number
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -200,4 +208,13 @@ export const api = {
     const query = dir ? `?dir=${encodeURIComponent(dir)}` : ''
     return request<NapcatBrowseResult>(`/connectors/napcat/browse${query}`)
   },
+
+  // context 阈值配置（80% 告警 / 90% 交接——单 A 契约：GET 缺文件返回默认；POST 未传字段 → 默认）
+  getContextConfig: () => request<ContextConfig>('/config/context'),
+
+  saveContextConfig: (data: { warnThreshold?: number; handoffThreshold?: number }) =>
+    request<ContextConfig>('/config/context', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 }
