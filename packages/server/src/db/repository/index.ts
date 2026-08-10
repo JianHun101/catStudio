@@ -22,6 +22,7 @@ import { setRepoDb as setExecutionLogsDb } from './executionLogs.js'
 import { setRepoDb as setSessionReadStateDb } from './sessionReadState.js'
 import { setRepoDb as setConnectorBindingsDb } from './connectorBindings.js'
 import { setRepoDb as setQueryDb } from './query.js'
+import { setRepoDb as setVerdictsDb } from './verdicts.js'
 
 /** 初始化所有 repository 模块的 db 实例（在 initDb() 之后调用） */
 export function initRepository(db: Database.Database): void {
@@ -34,6 +35,7 @@ export function initRepository(db: Database.Database): void {
   setSessionReadStateDb(db)
   setConnectorBindingsDb(db)
   setQueryDb(db)
+  setVerdictsDb(db)
 }
 
 // 按实体分组导出，调用方用 repo.agents.xxx / repo.sessions.xxx 等
@@ -46,6 +48,7 @@ export * as executionLogs from './executionLogs.js'
 export * as sessionReadState from './sessionReadState.js'
 export * as connectorBindings from './connectorBindings.js'
 export * as query from './query.js'
+export * as verdicts from './verdicts.js'
 
 // Row 类型也一并导出
 export type {

@@ -114,6 +114,22 @@ const SCHEMA_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (platform, external_type, external_id)
   );
+
+  CREATE TABLE IF NOT EXISTS review_verdicts (
+    message_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    reviewer_agent_id TEXT NOT NULL,
+    subject_agent_id TEXT,
+    verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'suggest', 'reject')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS review_parse_failures (
+    message_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL CHECK (reason IN ('no_subject', 'bad_verdict')),
+    raw TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `
 
 /**

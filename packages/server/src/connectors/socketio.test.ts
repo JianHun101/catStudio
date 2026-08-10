@@ -1131,54 +1131,55 @@ describe('socketio connector', () => {
   // A2A 风暴治理：按发送者角色剥除违规 mention（写回 DB 用允许集合，
   // 被拦猫在上下文过滤里也不可见——语义自洽）。
 
+  /** 在 session-1 中加入吐槽猫（reviewer）与图测猫（vision）。
+   *  模块级共享：A2A 白名单块 + W3 审查结论钩子块共用同一角色种子 */
+  function seedRoleAgents(db: any) {
+    db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'agent-2',
+      '吐槽猫',
+      '🐱',
+      'You are a cat.',
+      'deepseek',
+      'deepseek-v4-flash',
+      'sk-test',
+      'reviewer'
+    )
+    db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'agent-3',
+      '图测猫',
+      '🐱',
+      'You are a cat.',
+      'deepseek',
+      'deepseek-v4-flash',
+      'sk-test',
+      'vision'
+    )
+    db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+      JSON.stringify(['agent-1', 'agent-2', 'agent-3'])
+    )
+  }
+
+  /** 构造带角色的执行者 AgentConfig（模块级共享：白名单块 + W3 钩子块共用） */
+  function makeAgentCfg(overrides: Record<string, any> = {}) {
+    return {
+      id: 'agent-1',
+      name: '店长',
+      avatar: '🐱',
+      systemPrompt: 'You are a cat.',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-flash',
+      llmApiKey: 'sk-test',
+      ...overrides,
+    }
+  }
+
   describe('A2A mention 白名单 — role policy 接入', () => {
-    /** 在 session-1 中加入吐槽猫（reviewer）与图测猫（vision） */
-    function seedRoleAgents(db: any) {
-      db.prepare(
-        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        'agent-2',
-        '吐槽猫',
-        '🐱',
-        'You are a cat.',
-        'deepseek',
-        'deepseek-v4-flash',
-        'sk-test',
-        'reviewer'
-      )
-      db.prepare(
-        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        'agent-3',
-        '图测猫',
-        '🐱',
-        'You are a cat.',
-        'deepseek',
-        'deepseek-v4-flash',
-        'sk-test',
-        'vision'
-      )
-      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
-        JSON.stringify(['agent-1', 'agent-2', 'agent-3'])
-      )
-    }
-
-    /** 构造带角色的执行者 AgentConfig */
-    function makeAgentCfg(overrides: Record<string, any> = {}) {
-      return {
-        id: 'agent-1',
-        name: '店长',
-        avatar: '🐱',
-        systemPrompt: 'You are a cat.',
-        llmProvider: 'deepseek',
-        llmModel: 'deepseek-v4-flash',
-        llmApiKey: 'sk-test',
-        ...overrides,
-      }
-    }
-
     /** 通用 setup：触发消息入 DB + 状态 mock + adapter mock + mention 解析 mock */
     async function setupExecution(parseResult: string[], cfg: any) {
       const { getAgentState } = await import('../dispatch/index.js')
@@ -1324,6 +1325,190 @@ describe('socketio connector', () => {
         expect.anything(), // validAgents 由 session agent_ids 决定，mention 过滤在 dispatch 内部
         expect.any(String) // traceId
       )
+    })
+  })
+
+  describe('W3 L3 审查结论解析钩子 — review_verdicts 落库', () => {
+    /** 复用白名单块的角色种子（agent-2 吐槽猫 reviewer / agent-1 店长 store） */
+    const seed = seedRoleAgents
+
+    /** 定制版 setup：adapter 输出回复正文，parseMentionsFromReply 单独 mock 路由 */
+    async function setupVerdictExecution(content: string, mentions: string[]) {
+      const { getAgentState } = await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockImplementation((agentId: string) => ({
+        agentId,
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-trigger',
+      }))
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content, kind: 'text' }
+        }),
+      } as any)
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      vi.mocked(parseMentionsFromReply).mockReturnValue(mentions)
+      // seed 的店长 agent-1 未设 role（默认 'unknown'）——钩子 isStore 判定依赖
+      // role==='store'，补为 store 才符合真实会话（store 白名单角色）
+      getDb().prepare(`UPDATE agents SET role = 'store' WHERE id = 'agent-1'`).run()
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run('msg-trigger', 'session-1', '派活')
+    }
+
+    const lastVerdict = () =>
+      getDb()
+        .prepare('SELECT * FROM review_verdicts ORDER BY created_at DESC, message_id DESC LIMIT 1')
+        .get() as Record<string, unknown> | undefined
+
+    const lastFailure = () =>
+      getDb()
+        .prepare(
+          'SELECT * FROM review_parse_failures ORDER BY created_at DESC, message_id DESC LIMIT 1'
+        )
+        .get() as Record<string, unknown> | undefined
+
+    it('reviewer 输出行首 ✅可合并 + @店长 → review_verdicts 落库 approve/subject=null', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seed(getDb())
+      await setupVerdictExecution('全部通过，无问题\n✅可合并', ['店长'])
+      vi.mocked(dispatch).mockClear()
+
+      const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [reviewerCfg],
+        { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
+        'trace-verdict-approve',
+        1
+      )
+
+      const row = lastVerdict()
+      expect(row).toBeDefined()
+      expect(row!.verdict).toBe('approve')
+      expect(row!.subject_agent_id).toBeNull()
+      expect(row!.session_id).toBe('session-1')
+      expect(row!.reviewer_agent_id).toBe('agent-2')
+      // 回复消息 id 与 execution_logs.message_id 一致（遥测锚点契约）
+      expect(lastFailure()).toBeUndefined()
+    })
+
+    it('reviewer 输出 ⚠️建议修改 + @店长+作者 → subject=作者（触发者 ds猫 放行）', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seed(getDb())
+      // 补 ds猫（implementer）进 DB 与会话成员——reviewer 白名单对触发作者放行，
+      // subject 取首个非 store 目标
+      getDb()
+        .prepare(
+          `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          'agent-9',
+          'ds猫',
+          '🐱',
+          'You are a cat.',
+          'deepseek',
+          'deepseek-v4-flash',
+          'sk-test',
+          'implementer'
+        )
+      getDb()
+        .prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`)
+        .run(JSON.stringify(['agent-1', 'agent-2', 'agent-3', 'agent-9']))
+      await setupVerdictExecution('⚠️建议修改 有几处要返工。', ['店长', 'ds猫'])
+      vi.mocked(dispatch).mockClear()
+
+      const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [reviewerCfg],
+        { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'], authorName: 'ds猫' },
+        'trace-verdict-suggest',
+        1
+      )
+
+      const row = lastVerdict()
+      expect(row!.verdict).toBe('suggest')
+      // subject 从作用域 allowedNames 直取（名字数组，不读 DB mentions 列）——存名字
+      expect(row!.subject_agent_id).toBe('ds猫')
+      expect(lastFailure()).toBeUndefined()
+    })
+
+    it('reviewer 输出 ❌需重做 + 只@店长 → subject=null + failure no_subject 双写', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seed(getDb())
+      await setupVerdictExecution('❌需重做 推倒重来。', ['店长'])
+      vi.mocked(dispatch).mockClear()
+
+      const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [reviewerCfg],
+        { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
+        'trace-verdict-reject',
+        1
+      )
+
+      const row = lastVerdict()
+      expect(row!.verdict).toBe('reject')
+      expect(row!.subject_agent_id).toBeNull()
+      const fail = lastFailure()
+      expect(fail).toBeDefined()
+      expect(fail!.reason).toBe('no_subject')
+    })
+
+    it('非 reviewer（implementer）输出含标记 → 不落库（角色门）', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seed(getDb())
+      await setupVerdictExecution('完成，自评 ✅可合并', ['店长'])
+      vi.mocked(dispatch).mockClear()
+
+      const implCfg = makeAgentCfg({ id: 'agent-9', name: 'ds猫', role: 'implementer' })
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [implCfg],
+        { id: 'msg-trigger', content: '派活', mentions: ['店长'] },
+        'trace-verdict-nonreviewer',
+        1
+      )
+
+      expect(lastVerdict()).toBeUndefined()
+      expect(lastFailure()).toBeUndefined()
+    })
+
+    it('reviewer 回复无 @（routeNames=0）→ 钩子不触发不落库', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      seed(getDb())
+      await setupVerdictExecution('✅可合并', [])
+      vi.mocked(dispatch).mockClear()
+
+      const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [reviewerCfg],
+        { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
+        'trace-verdict-noroute',
+        1
+      )
+
+      expect(lastVerdict()).toBeUndefined()
+      expect(lastFailure()).toBeUndefined()
     })
   })
 

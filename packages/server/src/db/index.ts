@@ -235,6 +235,28 @@ export function initDb(): void {
       name: 'llm_temperature on agents',
       sql: `ALTER TABLE agents ADD COLUMN llm_temperature REAL NOT NULL DEFAULT 0.7`,
     },
+    // W3 L3 审查结论契约表（additive：CREATE TABLE IF NOT EXISTS 幂等，
+    // 老库重跑零副作用；新表不依赖老列，无 ALTER 依赖）
+    {
+      name: 'review_verdicts table',
+      sql: `CREATE TABLE IF NOT EXISTS review_verdicts (
+        message_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        reviewer_agent_id TEXT NOT NULL,
+        subject_agent_id TEXT,
+        verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'suggest', 'reject')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    },
+    {
+      name: 'review_parse_failures table',
+      sql: `CREATE TABLE IF NOT EXISTS review_parse_failures (
+        message_id TEXT PRIMARY KEY,
+        reason TEXT NOT NULL CHECK (reason IN ('no_subject', 'bad_verdict')),
+        raw TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    },
   ]
 
   for (const m of migrations) {
