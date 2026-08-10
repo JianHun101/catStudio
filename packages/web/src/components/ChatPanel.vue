@@ -681,21 +681,6 @@ const warnedAgentsText = computed(() => {
           </svg>
           {{ clearingMessages ? '…' : clearConfirm ? '确认清空？' : '清空' }}
         </button>
-
-        <div class="broadcast-toggle" title="开启后 Agent 可以看到其他 Agent 的回复">
-          <label class="toggle-label">
-            <span class="toggle-text" :class="{ on: store.broadcastMode }">广播</span>
-            <button
-              class="toggle-switch"
-              :class="{ on: store.broadcastMode }"
-              @click="store.toggleBroadcast()"
-              :aria-checked="store.broadcastMode"
-              role="switch"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </label>
-        </div>
       </div>
     </div>
 
@@ -856,7 +841,7 @@ const warnedAgentsText = computed(() => {
                   <span class="status-label">{{ statusLabelZh(s.status) }}</span>
                   <!-- 停止按钮（B2 重定位）：busy 但无流式内容时挂用户消息状态行承载——
                        streaming 中（typingStates 有该 agent）按钮在 streaming 气泡上；
-                       边界明示：agent 被 agent 回复触发（broadcast）无用户消息状态行，
+                       边界明示：agent 被 agent 回复触发（广播模式）无用户消息状态行，
                        仅 streaming 气泡覆盖——窗口期短，不追求全覆盖 -->
                   <button
                     v-if="!store.typingStates.has(s.agentId) && canStopAgent(s.agentId)"
@@ -1364,62 +1349,6 @@ const warnedAgentsText = computed(() => {
 .btn-clear:disabled {
   opacity: 0.4;
   cursor: default;
-}
-
-/* ─── Broadcast Toggle ──────────────────── */
-
-.broadcast-toggle {
-  flex-shrink: 0;
-}
-
-.toggle-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.toggle-text {
-  font-size: 12px;
-  color: var(--text-muted);
-  font-weight: 500;
-  user-select: none;
-  transition: color var(--ease-out);
-}
-.toggle-text.on {
-  color: var(--accent);
-}
-
-.toggle-switch {
-  width: 34px;
-  height: 20px;
-  border-radius: 10px;
-  border: none;
-  background: var(--bg-hover);
-  position: relative;
-  cursor: pointer;
-  transition: background var(--ease-out);
-  padding: 0;
-}
-
-.toggle-switch.on {
-  background: var(--accent);
-}
-
-.toggle-knob {
-  display: block;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  transition: transform var(--ease-out);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.toggle-switch.on .toggle-knob {
-  transform: translateX(14px);
 }
 
 /* ─── Messages ──────────────────────────── */

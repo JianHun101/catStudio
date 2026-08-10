@@ -213,7 +213,10 @@ async function removeAgent(agentId: string): Promise<void> {
           <div class="config-row">
             <div class="config-info">
               <span class="config-title">广播模式</span>
-              <span class="config-hint">开启后 Agent 可看到其他 Agent 的回复</span>
+              <span class="config-hint"
+                >关闭时仅被 @ 的 Agent 可见（agent 间 @ 始终生效）；开启后所有 Agent
+                的回复互相可见，无需 @ 即可相互响应</span
+              >
             </div>
             <button
               class="toggle-switch"
