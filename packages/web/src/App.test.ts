@@ -37,27 +37,31 @@ describe('App.vue 设置入口（全局位置）', () => {
   })
 })
 
-describe('App.vue 两栏布局（B2 删右栏）', () => {
-  it('grid 两栏 260px 1fr，折叠态 56px 1fr——无右栏列', () => {
-    expect(appSource).toContain('grid-template-columns: 260px 1fr;')
-    expect(appSource).toContain('grid-template-columns: 56px 1fr;')
-    expect(appSource).not.toContain('300px')
-    expect(appSource).not.toContain('right-closed')
+describe('App.vue 三栏布局（B1 恢复右栏——clowder-ai 精简评估面板）', () => {
+  it('grid 三栏 260px 1fr 300px，左折叠态 56px 1fr 300px（右栏保持）', () => {
+    expect(appSource).toContain('grid-template-columns: 260px 1fr 300px;')
+    expect(appSource).toContain('grid-template-columns: 56px 1fr 300px;')
   })
 
-  it('panel-right / AgentPanel 已删除（内容迁入设置页猫咪管理），ChatPanel 不再收 right props', () => {
-    expect(appSource).not.toContain('panel-right')
-    expect(appSource).not.toContain('AgentPanel')
+  it('panel-right 挂 SessionAgentsPanel（评估面板非旧运行控制台），ChatPanel 不接收 right props', () => {
+    expect(appSource).toContain('class="panel-right"')
+    expect(appSource).toContain('import SessionAgentsPanel')
+    expect(appSource).toContain('<SessionAgentsPanel />')
+    // ChatPanel 保持纯左 props（停止按钮归气泡，无右栏联动）
     expect(appSource).not.toContain('right-sidebar-open')
     expect(appSource).not.toContain('toggle-right-sidebar')
   })
 
-  it('左折叠状态/媒体查询保留（仅剩左侧折叠逻辑）', () => {
+  it('右栏窄窗（<1000px）媒体查询隐藏——rightOpen 驱动 right-closed（与左侧折叠同构）', () => {
+    expect(appSource).toContain('const rightOpen = ref(true)')
+    expect(appSource).toContain("window.matchMedia('(max-width: 1000px)')")
+    expect(appSource).toContain('right-closed')
+  })
+
+  it('左折叠状态/媒体查询保留', () => {
     expect(appSource).toContain('const leftOpen = ref(true)')
     expect(appSource).toContain('left-closed')
     expect(appSource).toContain('max-width: 650px')
-    // 右栏专属的 narrow 查询（1000px）已随右栏删除
-    expect(appSource).not.toContain('1000px')
   })
 })
 

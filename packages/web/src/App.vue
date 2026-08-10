@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import SessionList from './components/SessionList.vue'
 import ChatPanel from './components/ChatPanel.vue'
+import SessionAgentsPanel from './components/SessionAgentsPanel.vue'
 import SettingsView from './views/SettingsView.vue'
 import { useChatStore } from '@/stores/chat'
 
@@ -20,8 +21,13 @@ function toggleLeft(): void {
   userToggledLeft.value = true
 }
 
-// Media query for responsive auto-collapse (右栏已随 B2 移除，仅剩左侧)
+// Media queries: 左侧折叠（650px）+ 右栏窄窗隐藏（1000px）
 let mobileMq: MediaQueryList | undefined
+let narrowMq: MediaQueryList | undefined
+
+/** 窄窗（<1000px）自动隐藏右栏（评估面板在窄屏无空间，媒体查询模式与左折叠同构） */
+const rightOpen = ref(true)
+const userToggledRight = ref(false)
 
 function onMobile(e: MediaQueryListEvent | MediaQueryList): void {
   if (!userToggledLeft.value) {
@@ -29,16 +35,26 @@ function onMobile(e: MediaQueryListEvent | MediaQueryList): void {
   }
 }
 
+function onNarrow(e: MediaQueryListEvent | MediaQueryList): void {
+  if (!userToggledRight.value) {
+    rightOpen.value = !e.matches
+  }
+}
+
 onMounted(() => {
   mobileMq = window.matchMedia('(max-width: 650px)')
+  narrowMq = window.matchMedia('(max-width: 1000px)')
 
   onMobile(mobileMq)
+  onNarrow(narrowMq)
 
   mobileMq.addEventListener('change', onMobile)
+  narrowMq.addEventListener('change', onNarrow)
 })
 
 onUnmounted(() => {
   mobileMq?.removeEventListener('change', onMobile)
+  narrowMq?.removeEventListener('change', onNarrow)
 })
 </script>
 
@@ -88,6 +104,11 @@ onUnmounted(() => {
         <ChatPanel :left-sidebar-open="leftOpen" @toggle-left-sidebar="toggleLeft" />
       </div>
     </main>
+
+    <!-- 右侧评估面板（clowder-ai 精简模式——会话成员/tokens/统计/队列/配置，非旧版运行控制台） -->
+    <aside class="panel-right" :class="{ 'right-closed': !rightOpen }">
+      <SessionAgentsPanel />
+    </aside>
   </div>
 </template>
 
@@ -168,7 +189,7 @@ onUnmounted(() => {
 
 .app-layout {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 260px 1fr 300px;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
@@ -180,9 +201,9 @@ onUnmounted(() => {
  * compositor without triggering layout. */
 }
 
-/* Collapsed: 56px icon column（参考 Claude Desktop 图标条） */
+/* Collapsed: 56px icon column（参考 Claude Desktop 图标条）——右栏保持 */
 .app-layout.left-closed {
-  grid-template-columns: 56px 1fr;
+  grid-template-columns: 56px 1fr 300px;
 }
 
 /* ─── Panels ─────────────────────────────── */
@@ -208,6 +229,19 @@ onUnmounted(() => {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+}
+
+/* 右侧评估面板（300px 低密度分区——clowder-ai 精简模式） */
+.panel-right {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-base);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.panel-right.right-closed {
+  display: none;
 }
 
 /* Panel inner — always flex, collapsed mode handled by child component */

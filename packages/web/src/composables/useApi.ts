@@ -150,6 +150,16 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  /** 更新会话成员（PATCH /api/sessions/:id——server 契约：addAgentIds/removeAgentIds 均可选，删除后空列表 400 由后端兜底） */
+  updateSessionAgents: (
+    sessionId: string,
+    data: { addAgentIds?: string[]; removeAgentIds?: string[] }
+  ) =>
+    request<any>(`/sessions/${sessionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
   deleteSession: (id: string) => request<any>(`/sessions/${id}`, { method: 'DELETE' }),
 
   clearSessionMessages: (id: string) =>
