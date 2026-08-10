@@ -157,6 +157,7 @@ export interface ChatOptions {
   maxTokens?: number
   temperature?: number
   timeoutMs?: number // fetch + stream 总超时（毫秒），默认 300000
+  chunkTimeoutMs?: number // 流式 chunk 间停顿超时（毫秒），默认 30000（deepseek.ts 消费；推理模型深度思考可超 30s）
   signal?: AbortSignal // 外部取消信号，用于中断正在进行的 LLM 调用
   /**
    * 猫咖内部路由上下文（MCP 结构化路由 v4，契约 3 二次修订——店长裁决）。

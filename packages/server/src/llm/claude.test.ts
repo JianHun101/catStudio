@@ -126,6 +126,9 @@ describe('ClaudeAdapter', () => {
     expect(env.ENABLE_TOOL_SEARCH).toBe('false')
   })
 
+  // K5 后为能力保留测试——生产 judge 接线已改走 deepseek adapter（OpenAI 兼容 HTTP，
+  // https://api.moonshot.cn），本测试不再反映生产 judge 接线形态，仅验证 claude 适配器
+  // 对自定义端点的 buildEnv 能力（模型层兜底/禁用 Tool Search）
   it('buildEnv targets custom endpoint with model tier fallbacks (Kimi K3)', () => {
     const adapter = new ClaudeAdapter({
       apiKey: 'sk-kimi-key',

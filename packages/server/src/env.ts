@@ -117,8 +117,9 @@ process.env.ONEBOT_FETCH_TIMEOUT_MS ??= '10000'
 process.env.ONEBOT_ALLOWLIST ??= ''
 
 // ─── 评估子系统配置（W2 L2）────────────────────
-// KIMI_API_KEY — Kimi K3 judge 候选模型的 API Key（Moonshot 官方 key；
-// 经 Claude 适配器访问 https://api.moonshot.ai/anthropic，Phase 0 实测确认前为空串不启用）
+// KIMI_API_KEY — Kimi K3 judge 模型的 API Key（Moonshot 官方 key；
+// 经 deepseek 适配器（OpenAI 兼容 HTTP）访问 https://api.moonshot.cn——K5 接线形态；
+// 未配置时 judge 回落 deepseek-v4-flash，不影响主链路）
 process.env.KIMI_API_KEY ??= ''
 
 // EVAL_SAMPLE_RATE — 回复采样率（随机 1-5%，默认 2%）。只对 DS 族猫

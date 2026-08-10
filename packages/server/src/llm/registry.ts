@@ -13,11 +13,14 @@ const adapters = new Map<string, LLMAdapter>()
  * 按 apiKey 缓存，同一 key 复用同一适配器。
  */
 export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
-  // claude 的 key 含 baseUrl——同一 key 下 DeepSeek 端点与 Kimi 端点必须不同实例，否则缓存串台
+  // claude/deepseek 的 key 可指向不同端点（DeepSeek 官方 vs Moonshot）——同一 key 下
+  // 不同 baseUrl 必须不同实例，否则缓存串台（K5 变更单：kimi judge 改走 deepseek provider）
   const cacheKey =
     agent.llmProvider === 'claude'
       ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}:${agent.llmBaseUrl || ''}`
-      : `${agent.llmProvider}:${agent.llmApiKey}`
+      : agent.llmProvider === 'deepseek'
+        ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmBaseUrl || ''}`
+        : `${agent.llmProvider}:${agent.llmApiKey}`
 
   if (adapters.has(cacheKey)) {
     return adapters.get(cacheKey)!

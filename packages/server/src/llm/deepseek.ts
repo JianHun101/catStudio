@@ -23,10 +23,7 @@ export class DeepSeekAdapter implements LLMAdapter {
     this.baseUrl = config.baseUrl || 'https://api.deepseek.com'
   }
 
-  async *chatStream(
-    messages: LLMMessage[],
-    options: ChatOptions,
-  ): AsyncIterable<Chunk> {
+  async *chatStream(messages: LLMMessage[], options: ChatOptions): AsyncIterable<Chunk> {
     const externalSignal = options.signal
 
     if (externalSignal?.aborted) {
@@ -62,7 +59,7 @@ export class DeepSeekAdapter implements LLMAdapter {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -86,8 +83,8 @@ export class DeepSeekAdapter implements LLMAdapter {
       throw new Error(`DeepSeek API error ${response.status}: ${err}`)
     }
 
-    // 流读取超时：每个 chunk 之间最长等 30 秒
-    const streamTimeoutMs = 30_000
+    // 流读取超时：每个 chunk 之间最长等 30 秒（可经 chunkTimeoutMs 覆盖——推理模型深度思考停顿可超 30s）
+    const streamTimeoutMs = options.chunkTimeoutMs || 30_000
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ''

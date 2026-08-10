@@ -101,6 +101,20 @@ describe('registry', () => {
       expect(a1).not.toBe(a2)
     })
 
+    it('returns different instance for different baseUrl (deepseek, same key)', () => {
+      const official: AgentConfig = {
+        ...baseAgent,
+        llmApiKey: 'sk-key-1',
+      }
+      const moonshot: AgentConfig = {
+        ...official,
+        llmBaseUrl: 'https://api.moonshot.cn',
+      }
+      const a1 = registryModule.getAdapterForAgent(official)
+      const a2 = registryModule.getAdapterForAgent(moonshot)
+      expect(a1).not.toBe(a2)
+    })
+
     it('passes baseUrl to ClaudeAdapter constructor', () => {
       const agent: AgentConfig = {
         ...baseAgent,

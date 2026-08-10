@@ -7,11 +7,12 @@
  * - 准则分解：相关性 / 忠实度 / 完整性 三维度
  * - CoT 推理最后一步给分 + 概率加权 1-5（score_distribution 加权期望分）
  * - 长度偏见治理：准则显式"不因长度加分" + 被评回复与上下文同上限截断
- * - judge 复用 llm/registry 的 getAdapterForAgent（Kimi K3 经 claude 适配器，
- *   非 DeepSeek 分支 Tool Search 自动关闭，零额外动作）
+ * - judge 复用 llm/registry 的 getAdapterForAgent（Kimi K3 经 deepseek 适配器走
+ *   Moonshot OpenAI 兼容 HTTP 端点——K5 变更单裁定：claude adapter CLI 通道评测期
+ *   连崩 2 次且不消费超时参数，换 HTTP 通道与评测稳定通道同构）
  * - 纯旁路：调用方 fire-and-forget，失败只记日志不抛
  */
-import type { AgentConfig } from '@cat-study/shared'
+import type { AgentConfig, ChatOptions } from '@cat-study/shared'
 import { v4 as uuid } from 'uuid'
 import { getAdapterForAgent } from '../llm/registry.js'
 import { messages as messagesRepo, evalScores as evalScoresRepo } from '../db/repository/index.js'
@@ -27,6 +28,28 @@ export const JUDGE_TRUNCATE_CHARS = 1200
 
 /** 评分旁路超时（毫秒）：评分不阻塞主链，超时就放弃本次评分 */
 const JUDGE_TIMEOUT_MS = 120_000
+
+/**
+ * Kimi K3 判官专用参数（Phase 0 实测钉死，K5 变更单契约）：
+ * - temperature=1：端点强制，默认 0.7 被拒（400）
+ * - maxTokens=65536：max_tokens = 思考+回答总预算，长思考吃光 2048/16384 致空响应
+ * - chunkTimeoutMs=120s：深度思考停顿可超 deepseek 默认 30s（abort 致空响应的元凶）
+ * - timeoutMs=240s：总超时相应放宽
+ */
+export const KIMI_JUDGE_OPTIONS = {
+  temperature: 1,
+  maxTokens: 65536,
+  chunkTimeoutMs: 120_000,
+  timeoutMs: 240_000,
+} as const
+
+/** 按 judge 模型分支构造 chatStream 参数：kimi 走专用参数；DS 兜底只传 model+timeoutMs 保持默认 */
+export function judgeChatOptions(model: string, fallbackTimeoutMs: number): ChatOptions {
+  if (model.startsWith('kimi')) {
+    return { model, ...KIMI_JUDGE_OPTIONS }
+  }
+  return { model, timeoutMs: fallbackTimeoutMs }
+}
 
 export interface JudgeOutput {
   score: number
@@ -47,11 +70,7 @@ export function parseJudgeOutput(text: string): JudgeOutput | null {
   let parsed: any = null
   const jsonMatch = raw.match(/\{[\s\S]*\}/)
   if (jsonMatch) {
-    try {
-      parsed = JSON.parse(jsonMatch[0])
-    } catch {
-      parsed = null
-    }
+    parsed = parseJsonWithFenceTolerance(jsonMatch[0])
   }
 
   const distribution = normalizeDistribution(parsed?.score_distribution)
@@ -76,6 +95,35 @@ export function parseJudgeOutput(text: string): JudgeOutput | null {
     dimensions,
     raw,
   }
+}
+
+/**
+ * JSON 候选容错解析（围栏/尾注）：模型常把 JSON 包在 ```json 围栏里或尾部补说明，
+ * 贪婪匹配 \{[\s\S]*\} 会把尾部围栏（```）/含 } 的尾注吞进候选 → JSON.parse 失败。
+ * 三级容错：剥尾部围栏再 parse → 逐 } 回溯（错位 } 候选失败后回退到真正收尾）。
+ */
+function parseJsonWithFenceTolerance(candidate: string): any | null {
+  const tryParse = (s: string): any | null => {
+    try {
+      return JSON.parse(s)
+    } catch {
+      return null
+    }
+  }
+
+  // 剥尾部围栏（```json / ``` / 反引号）——贪婪匹配吞围栏的常见形态
+  const cleaned = candidate.replace(/\s*```{1,3}[a-z]*\s*$/i, '').trim()
+  let parsed = tryParse(cleaned)
+  if (parsed) return parsed
+
+  // 逐 } 回溯：字符串值内 }/尾注 } 被贪婪吞进时，错位 } 候选 parse 失败，回退到真正的 JSON 收尾
+  let idx = cleaned.lastIndexOf('}')
+  while (idx > 0) {
+    parsed = tryParse(cleaned.slice(0, idx + 1))
+    if (parsed) return parsed
+    idx = cleaned.lastIndexOf('}', idx - 1)
+  }
+  return null
 }
 
 /** 概率分布 → 加权期望分（Σ p_i × i），分布和为 0 时返回 null */
@@ -186,7 +234,8 @@ ${criteria}
 }
 
 /** 构造 judge Agent 配置（复用 getAdapterForAgent 的缓存实例）。
- *  配置了 KIMI_API_KEY → Kimi K3（Phase 0 候选，经 claude 适配器）；
+ *  配置了 KIMI_API_KEY → Kimi K3（Phase 0 当选 judge，经 deepseek 适配器走
+ *  Moonshot OpenAI 兼容 HTTP 端点——K5 变更单接线形态）；
  *  未配置 → deepseek-v4-flash 便宜档兜底 */
 export function resolveJudgeAgent(): AgentConfig {
   const kimiKey = process.env.KIMI_API_KEY || ''
@@ -196,10 +245,10 @@ export function resolveJudgeAgent(): AgentConfig {
       name: '评估裁判',
       avatar: '⚖️',
       systemPrompt: '',
-      llmProvider: 'claude',
-      llmModel: 'kimi-k3[1m]',
+      llmProvider: 'deepseek',
+      llmModel: 'kimi-k3',
       llmApiKey: kimiKey,
-      llmBaseUrl: 'https://api.moonshot.ai/anthropic',
+      llmBaseUrl: 'https://api.moonshot.cn',
     }
   }
   return {
@@ -241,10 +290,10 @@ export async function scoreReply(
   const adapter = getAdapterForAgent(judge)
 
   let fullText = ''
-  for await (const chunk of adapter.chatStream([{ role: 'user', content: prompt }], {
-    model: judge.llmModel,
-    timeoutMs: JUDGE_TIMEOUT_MS,
-  })) {
+  for await (const chunk of adapter.chatStream(
+    [{ role: 'user', content: prompt }],
+    judgeChatOptions(judge.llmModel, JUDGE_TIMEOUT_MS)
+  )) {
     fullText += chunk.content
   }
 

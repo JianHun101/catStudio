@@ -20,7 +20,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { AgentConfig } from '@cat-study/shared'
 import { getAdapterForAgent } from '../llm/registry.js'
-import { buildGEvalPrompt, parseJudgeOutput, truncateForJudge } from './scorer.js'
+import { buildGEvalPrompt, judgeChatOptions, parseJudgeOutput, truncateForJudge } from './scorer.js'
 import { initDb, getDb } from '../db/index.js'
 import {
   initRepository,
@@ -204,16 +204,18 @@ export function buildCandidates(): JudgeCandidate[] {
   ]
   if (kimiKey) {
     candidates.push({
-      name: 'kimi-k3[1m]',
+      name: 'kimi-k3',
       agent: {
         id: 'judge-kimi-k3',
         name: '评估裁判',
         avatar: '⚖️',
         systemPrompt: '',
-        llmProvider: 'claude',
-        llmModel: 'kimi-k3[1m]',
+        // K5 变更单接线形态：deepseek provider 走 Moonshot OpenAI 兼容 HTTP 端点
+        // （评测稳定通道同构；claude adapter CLI 通道评测期连崩 2 次已弃用）
+        llmProvider: 'deepseek',
+        llmModel: 'kimi-k3',
         llmApiKey: kimiKey,
-        llmBaseUrl: 'https://api.moonshot.ai/anthropic',
+        llmBaseUrl: 'https://api.moonshot.cn',
       },
     })
   }
@@ -425,10 +427,10 @@ export async function judgeSample(
     sample.agentName || '被评猫'
   )
   let fullText = ''
-  for await (const chunk of adapter.chatStream([{ role: 'user', content: prompt }], {
-    model: judge.llmModel,
-    timeoutMs: 120_000,
-  })) {
+  for await (const chunk of adapter.chatStream(
+    [{ role: 'user', content: prompt }],
+    judgeChatOptions(judge.llmModel, 120_000)
+  )) {
     fullText += chunk.content
   }
   const output = parseJudgeOutput(fullText)

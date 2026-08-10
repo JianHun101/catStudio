@@ -10,6 +10,7 @@ import {
   collectContextRows,
   buildGEvalPrompt,
   scoreReply,
+  judgeChatOptions,
   CONTEXT_WINDOW,
 } from './scorer.js'
 import { createTestDb } from '../test-helpers.js'
@@ -108,6 +109,21 @@ describe('parseJudgeOutput', () => {
     const out2 = parseJudgeOutput('{"score": 0}')
     expect(out2!.score).toBe(1)
   })
+
+  it('围栏容错：JSON 字符串含 } + 尾部 ``` 围栏被贪婪吞进时剥围栏恢复', () => {
+    const messy = '```json\n{"score": 4, "reasoning": "含 } 的引文"}\n```'
+    expect(parseJudgeOutput(messy)!.score).toBe(4)
+  })
+
+  it('围栏容错：尾注含 } 被贪婪吞进时逐 } 回溯到真正收尾', () => {
+    const withNote = '{"score": 4, "reasoning": "ok"}\n说明：详见{文档}'
+    expect(parseJudgeOutput(withNote)!.score).toBe(4)
+  })
+
+  it('围栏容错：尾注把 JSON 淹没（回溯无纯 JSON 候选且正则不命中）时返回 null 不抛', () => {
+    expect(parseJudgeOutput('```json\n{"reasoning": "x"}\n```\n后续说明 {y}')).toBeNull()
+    expect(parseJudgeOutput('{"broken"')).toBeNull()
+  })
 })
 
 describe('weightedScore', () => {
@@ -120,6 +136,21 @@ describe('weightedScore', () => {
     expect(weightedScore({})).toBeNull()
     expect(weightedScore({ '1': 0, '2': 0 })).toBeNull()
     expect(weightedScore({ '9': 1 })).toBeNull()
+  })
+})
+
+describe('judgeChatOptions', () => {
+  it('kimi 模型走专用参数（temperature=1/配额 65536/停顿 120s/总超时 240s）', () => {
+    const opts = judgeChatOptions('kimi-k3', 120_000)
+    expect(opts.temperature).toBe(1)
+    expect(opts.maxTokens).toBe(65536)
+    expect(opts.chunkTimeoutMs).toBe(120_000)
+    expect(opts.timeoutMs).toBe(240_000)
+  })
+
+  it('DS 兜底只传 model+timeoutMs，保持适配器默认', () => {
+    const opts = judgeChatOptions('deepseek-v4-flash', 120_000)
+    expect(opts).toEqual({ model: 'deepseek-v4-flash', timeoutMs: 120_000 })
   })
 })
 
