@@ -206,6 +206,17 @@ onUnmounted(() => {
   grid-template-columns: 56px 1fr 300px;
 }
 
+/* 窄窗（<1000px）右栏自动隐藏时同步收窄列——display:none 的 item 不参与布局，
+ * 但显式 300px track 仍占位，若不收窄则聊天区被无形压缩（与 narrowMq 同断点） */
+@media (max-width: 1000px) {
+  .app-layout {
+    grid-template-columns: 260px 1fr;
+  }
+  .app-layout.left-closed {
+    grid-template-columns: 56px 1fr;
+  }
+}
+
 /* ─── Panels ─────────────────────────────── */
 
 .panel-left {

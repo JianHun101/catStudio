@@ -58,6 +58,12 @@ describe('App.vue 三栏布局（B1 恢复右栏——clowder-ai 精简评估面
     expect(appSource).toContain('right-closed')
   })
 
+  it('窄窗媒体查询同步收窄 grid 列——300px 空轨道不占位（display:none 的 item 不参与布局但显式 track 仍占位）', () => {
+    expect(appSource).toContain('@media (max-width: 1000px)')
+    expect(appSource).toContain('grid-template-columns: 260px 1fr;')
+    expect(appSource).toContain('grid-template-columns: 56px 1fr;')
+  })
+
   it('左折叠状态/媒体查询保留', () => {
     expect(appSource).toContain('const leftOpen = ref(true)')
     expect(appSource).toContain('left-closed')
