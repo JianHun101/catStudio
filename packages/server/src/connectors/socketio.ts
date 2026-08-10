@@ -58,6 +58,7 @@ import { consumeRouteSignals } from '../llm/route-signals.js'
 import { consumeUserRequestSignals } from '../llm/user-request-signals.js'
 import { parseJsonArray } from '../utils.js'
 import { recordReviewVerdict } from '../eval/verdict-parser.js'
+import { maybeScoreSample } from '../eval/sampler.js'
 import { updateRunningSummary } from '../summarizer/index.js'
 import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
 import { ingestUserMessage } from './ingest.js'
@@ -875,6 +876,10 @@ async function executeOneAgent(
       traceId,
       replyMessageId: reply.msgId,
     })
+
+    // W2 L2 评估采样：fire-and-forget——不 await、不占 slot、不进 dispatch 主链，
+    // 失败静默（内部 catch）。只对 DS 族猫回复采样（ollama 图测猫不评估）
+    maybeScoreSample(agent, sessionId, reply.msgId)
 
     // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
     // 同一 trace 内某 agent 真实完成 ≥MAX 次 A2A 执行后，不再被重新调度。

@@ -257,6 +257,24 @@ export function initDb(): void {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`,
     },
+    // W2 L2 评估评分表（additive：CREATE TABLE IF NOT EXISTS 幂等）。
+    // judge 模型对采样回复的评分，独立于执行日志——评估是旁路，不占
+    // agent slot、不进 dispatch 主链。sample_reason CHECK 三值：
+    // 'user_feedback' 为 W4 预留值（无结构化信号时不实现，仅契约占位）
+    {
+      name: 'eval_scores table (W2 L2 评估子系统)',
+      sql: `CREATE TABLE IF NOT EXISTS eval_scores (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        agent_id TEXT,
+        score REAL NOT NULL,
+        dimensions TEXT,
+        judge_model TEXT NOT NULL,
+        sample_reason TEXT NOT NULL CHECK (sample_reason IN ('random', 'low_score', 'user_feedback')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    },
   ]
 
   for (const m of migrations) {

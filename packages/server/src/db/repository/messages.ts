@@ -87,6 +87,18 @@ export function getSessionHistory(sessionId: string, limit: number = 200): Messa
     .all(sessionId, limit) as MessageRow[]
 }
 
+/** 跨会话最新 agent 消息（倒序，Phase 0 候选样本收集用——不限会话挑 DS 族回复） */
+export function getLatestAgentMessages(limit: number = 2000): MessageRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM messages
+       WHERE role = 'agent'
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .all(limit) as MessageRow[]
+}
+
 /** 获取会话的最近消息（倒序，用于构建 Agent 上下文） */
 export function getRecentMessages(sessionId: string, limit: number = 500): MessageRow[] {
   return db

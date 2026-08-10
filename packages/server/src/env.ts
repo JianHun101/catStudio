@@ -116,6 +116,15 @@ process.env.ONEBOT_FETCH_TIMEOUT_MS ??= '10000'
 // 未配置/空串 → 关闭（现状兼容）。与 ONEBOT_TOKEN 同语义：配置即启用，少一个开关少一份误配面
 process.env.ONEBOT_ALLOWLIST ??= ''
 
+// ─── 评估子系统配置（W2 L2）────────────────────
+// KIMI_API_KEY — Kimi K3 judge 候选模型的 API Key（Moonshot 官方 key；
+// 经 Claude 适配器访问 https://api.moonshot.ai/anthropic，Phase 0 实测确认前为空串不启用）
+process.env.KIMI_API_KEY ??= ''
+
+// EVAL_SAMPLE_RATE — 回复采样率（随机 1-5%，默认 2%）。只对 DS 族猫
+// （llmProvider='deepseek'）的回复采样评分，ollama 图测猫不进入评估
+process.env.EVAL_SAMPLE_RATE ??= '0.02'
+
 // ─── 会话交接配置 ──────────────────────────────
 // HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
 process.env.HANDOFF_ENABLED ??= 'true'

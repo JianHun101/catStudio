@@ -115,6 +115,18 @@ const SCHEMA_SQL = `
     UNIQUE (platform, external_type, external_id)
   );
 
+  CREATE TABLE IF NOT EXISTS eval_scores (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    agent_id TEXT,
+    score REAL NOT NULL,
+    dimensions TEXT,
+    judge_model TEXT NOT NULL,
+    sample_reason TEXT NOT NULL CHECK (sample_reason IN ('random', 'low_score', 'user_feedback')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS review_verdicts (
     message_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
