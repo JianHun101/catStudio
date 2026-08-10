@@ -10,6 +10,7 @@ import {
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
+import { chatComplete } from '../llm/complete.js'
 
 // performHandoff 的 generateFullSummary 调 chatComplete → mock 掉，避免真实 LLM 调用
 vi.mock('../llm/complete.js', () => ({
@@ -295,6 +296,72 @@ describe('handoff', () => {
         .all('parent-b') as Array<{ id: string }>
       expect(children).toHaveLength(1)
       expect(children[0].id).toBe('child-real')
+      expect(mockIo.emit).not.toHaveBeenCalled()
+    })
+  })
+
+  // ─── performHandoff — HANDOFF_FAILED 失败可见化（单A：交接失败必须对前端可见） ──────────
+  describe('performHandoff — HANDOFF_FAILED 失败可见化', () => {
+    let db: Database.Database
+    const roomEmit = vi.fn()
+    const mockIo = { emit: vi.fn(), to: vi.fn().mockReturnValue({ emit: roomEmit }) } as any
+
+    const insertSession = (id: string) => {
+      db.prepare(
+        `INSERT INTO sessions (id, title, handoff_from, running_summary)
+         VALUES (?, 'test', NULL, NULL)`
+      ).run(id)
+    }
+
+    beforeEach(() => {
+      db = createTestDb()
+      setDb(db)
+      initRepository(db)
+      process.env.HANDOFF_ENABLED = 'true'
+      process.env.SUMMARY_API_KEY = 'test-key'
+    })
+
+    afterEach(() => {
+      resetDb()
+      delete process.env.SUMMARY_API_KEY
+      vi.clearAllMocks()
+    })
+
+    it('无 API key → emit HANDOFF_FAILED 到会话房间，reason 明示配置缺失，不新建会话', async () => {
+      process.env.SUMMARY_API_KEY = ''
+      process.env.DS_KEY = ''
+      insertSession('parent-nokey')
+
+      const result = await performHandoff('parent-nokey', mockIo)
+
+      expect(result).toBeNull()
+      expect(mockIo.to).toHaveBeenCalledWith('session:parent-nokey')
+      expect(roomEmit).toHaveBeenCalledWith(Events.HANDOFF_FAILED, {
+        sessionId: 'parent-nokey',
+        reason: expect.stringContaining('API Key'),
+      })
+      // 失败路径零副作用：不新建子会话
+      const children = db
+        .prepare('SELECT id FROM sessions WHERE handoff_from = ?')
+        .all('parent-nokey') as Array<{ id: string }>
+      expect(children).toHaveLength(0)
+    })
+
+    it('LLM 失败（chatComplete reject）→ emit HANDOFF_FAILED 携带错误原因', async () => {
+      vi.mocked(chatComplete).mockRejectedValueOnce(
+        new Error('Chat completion API returned empty response')
+      )
+      insertSession('parent-llm')
+
+      const result = await performHandoff('parent-llm', mockIo)
+
+      expect(result).toBeNull()
+      expect(mockIo.to).toHaveBeenCalledWith('session:parent-llm')
+      expect(roomEmit).toHaveBeenCalledWith(Events.HANDOFF_FAILED, {
+        sessionId: 'parent-llm',
+        reason: 'Chat completion API returned empty response',
+      })
+      // 成功路径的全局 emit 不被触发（这是失败路径）
       expect(mockIo.emit).not.toHaveBeenCalled()
     })
   })

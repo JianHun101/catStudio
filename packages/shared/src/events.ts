@@ -41,6 +41,9 @@ export const Events = {
   // 服务器 → 客户端：会话交接通知（前端切换 session）
   SESSION_HANDOFF: 'session-handoff',
 
+  // 服务器 → 客户端：会话交接失败通知（前端横幅展示原因——失败必须可见，不再静默）
+  HANDOFF_FAILED: 'handoff-failed',
+
   // 服务器 → 客户端：上下文窗口 token 用量（驱动 handoff 的真实数字）
   CONTEXT_WINDOW_STATS: 'context-window-stats',
 

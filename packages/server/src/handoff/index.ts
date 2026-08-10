@@ -165,7 +165,12 @@ export async function performHandoff(
     // 3. 生成全量总结
     log.info('generating full summary for handoff', { sessionId })
     const summary = await generateFullSummary(sessionId)
-    if (!summary) return null // API key 未配置或 LLM 调用失败
+    if (!summary) {
+      // 无 API key（generateFullSummary 返回 ''）——失败必须对前端可见
+      //（用户报「交接线到了没触发」的根因之一就是静默失败）
+      emitHandoffFailed(sessionId, io, '摘要 API Key 未配置（SUMMARY_API_KEY 与 DS_KEY 均为空）')
+      return null
+    }
 
     // 4. 创建新会话
     const newSessionId = uuid()
@@ -216,6 +221,8 @@ export async function performHandoff(
       sessionId,
       error: err.message,
     })
+    // LLM 失败（含 empty response 修复前）或 DB 异常——失败可见化，前端横幅展示原因
+    emitHandoffFailed(sessionId, io, err.message)
     return null
   } finally {
     handoffInProgress.delete(sessionId)
@@ -224,6 +231,18 @@ export async function performHandoff(
 
 /** 正在交接的会话 ID 集合（防并发重复） */
 const handoffInProgress = new Set<string>()
+
+/**
+ * 交接失败可见化——emit HANDOFF_FAILED 到会话房间（`session:${id}`，仅该会话前端可见）。
+ * emit 自身失败只记录不抛出（失败通知不能把失败路径拖成崩溃路径）。
+ */
+function emitHandoffFailed(sessionId: string, io: SocketServer, reason: string): void {
+  try {
+    io.to(`session:${sessionId}`).emit(Events.HANDOFF_FAILED, { sessionId, reason })
+  } catch (emitErr: any) {
+    log.warn('handoff failed emit error', { sessionId, error: emitErr.message })
+  }
+}
 
 /**
  * 检查是否需要交接。

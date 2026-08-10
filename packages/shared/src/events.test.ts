@@ -44,8 +44,12 @@ describe('Events', () => {
     expect(Events.AGENT_INTERRUPT).toBe('agent-interrupt')
   })
 
-  it('has exactly 26 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(26)
+  it('has HANDOFF_FAILED server→client event', () => {
+    expect(Events.HANDOFF_FAILED).toBe('handoff-failed')
+  })
+
+  it('has exactly 27 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(27)
   })
 })
 
