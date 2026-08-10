@@ -2,18 +2,16 @@ import { describe, it, expect } from 'vitest'
 import source from './SettingsView.vue?raw'
 
 /**
- * Verify SettingsView.vue — 全屏设置中心（左侧栏底部齿轮进入）。
+ * Verify SettingsView.vue — 全屏设置中心（左侧栏底部齿轮进入，左右分栏经典结构）。
  *
  * Static verification tests — they read the SFC source via Vite's `?raw`
- * import to confirm the expected patterns exist. Migration from three
- * components (ConnectorBindingsModal / ConnectorNapCatPanel /
- * NapcatPathPicker) into one settings page — all behavioral assertions
- * carried over, plus new autoStart 开关 / 入站状态只读 assertions.
- * Contract (店长钉死): autoStart 缺省 true（旧配置无字段 = 自动拉起），
- * 开关初始态跟随 GET 响应，保存时 POST 全量带 { napcatPath, autoStart }。
+ * import to confirm the expected patterns exist. 重构（单 B1）：左侧大类导航
+ * （猫咪管理 / IM 接入 / 系统配置）+ 右侧详情区；AgentPanel 卡片内容复制迁入
+ * 「猫咪管理」（原组件等 B2 删除）；系统配置 = context 阈值表单（单 A 契约）。
+ * 既有 IM 接入子 Tab 断言全部保留（内容平移零改动）。
  */
 
-describe('SettingsView 结构（QQ 接入 / NapCat 双 tab）', () => {
+describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配置）', () => {
   it('全屏设置中心：fixed inset 0 + 关闭按钮 → emit close', () => {
     expect(source).toContain('settings-view')
     expect(source).toContain('position: fixed')
@@ -21,28 +19,45 @@ describe('SettingsView 结构（QQ 接入 / NapCat 双 tab）', () => {
     expect(source).toContain('@click="emit(\'close\')"')
   })
 
-  it('tab 状态与切换按钮：activeTab 默认 qq，两 tab 文案齐全', () => {
-    expect(source).toContain("const activeTab = ref<'qq' | 'napcat'>('qq')")
-    expect(source).toContain('QQ 接入')
-    expect(source).toContain('NapCat')
-    expect(source).toContain("activeTab === 'qq'")
-    expect(source).toContain("activeTab === 'napcat'")
+  it('左侧大类导航：三大类文案 + 选中态高亮 + 点击切换', () => {
+    expect(source).toContain("const activeCategory = ref<'cats' | 'im' | 'system'>('im')")
+    expect(source).toContain('settings-nav')
+    expect(source).toContain('猫咪管理')
+    expect(source).toContain('IM 接入')
+    expect(source).toContain('系统配置')
+    expect(source).toContain(':class="{ active: activeCategory === \'cats\' }"')
+    expect(source).toContain(':class="{ active: activeCategory === \'im\' }"')
+    expect(source).toContain(':class="{ active: activeCategory === \'system\' }"')
+    expect(source).toContain("activeCategory = 'cats'")
+    expect(source).toContain("activeCategory = 'im'")
+    expect(source).toContain("activeCategory = 'system'")
   })
 
-  it('Tab1 内容 v-show 保持挂载；Tab2 面板 v-if 进入才挂载', () => {
+  it('默认大类 = IM 接入（子 Tab QQ 接入）——打开设置页行为与迁移前一致', () => {
+    // 迁移前默认展示 QQ 接入 tab；重构后默认大类落在 IM 接入 + 子 Tab QQ 接入，零行为变化
+    expect(source).toContain("const activeCategory = ref<'cats' | 'im' | 'system'>('im')")
+    expect(source).toContain("const activeTab = ref<'qq' | 'napcat'>('qq')")
+  })
+
+  it('大类内容 v-show 保持挂载；IM 接入内 QQ 子 Tab v-show、NapCat 子 Tab v-if', () => {
+    expect(source).toContain(`v-show="activeCategory === 'cats'"`)
+    expect(source).toContain(`v-show="activeCategory === 'im'"`)
+    expect(source).toContain(`v-show="activeCategory === 'system'"`)
+    // 子 Tab 挂载语义与迁移前一致（v-show 常驻 / v-if 进入才挂载）
     expect(source).toContain(`v-show="activeTab === 'qq'"`)
     expect(source).toContain(`v-if="activeTab === 'napcat'"`)
   })
 
-  it('挂载即拉齐三份数据：绑定列表 + OneBot 状态 + NapCat 配置', () => {
+  it('挂载即拉齐数据：绑定列表 + OneBot 状态 + NapCat 配置 + context 阈值', () => {
     expect(source).toContain('onMounted(() => {')
     expect(source).toContain('loadBindings()')
     expect(source).toContain('refresh()')
     expect(source).toContain('loadConfig()')
+    expect(source).toContain('loadContextConfig()')
   })
 })
 
-describe('SettingsView 入站状态只读（QQ 接入 Tab）', () => {
+describe('SettingsView 入站状态只读（IM 接入 · QQ 接入 子 Tab）', () => {
   it('QQ Tab 展示 enabled / apiBase / token 掩码（只读，token 不出 server）', () => {
     expect(source).toContain('inbound-card')
     expect(source).toContain('入站启用')
@@ -246,5 +261,98 @@ describe('SettingsView 路径浏览选择器（NapcatPathPicker 内联迁移）'
     expect(source).toContain('browseError')
     expect(source).toContain('（空目录）')
     expect(source).toContain('加载中…')
+  })
+})
+
+describe('SettingsView 猫咪管理（AgentPanel 展开态内容复制迁入）', () => {
+  it('agent 卡片渲染：头像/名字/模型徽章/状态点/状态文字', () => {
+    expect(source).toContain('v-for="agent in store.agents"')
+    expect(source).toContain('agent.avatar')
+    expect(source).toContain('agent.llmProvider')
+    expect(source).toContain('agent.llmModel')
+    expect(source).toContain('statusDot(agentStatus(agent.id))')
+    expect(source).toContain('statusLabel(agentStatus(agent.id))')
+  })
+
+  it('停止按钮：click.stop + store.interruptAgent；busy/queue>0 时显示', () => {
+    expect(source).toMatch(/@click\.stop="stopAgent\(agent\.id\)"/)
+    expect(source).toMatch(
+      /function stopAgent\(agentId: string\): void \{[\s\S]*store\.interruptAgent\(agentId\)/
+    )
+    expect(source).toMatch(/agentStatus\(agentId\) === 'busy' \|\| agentQueue\(agentId\) > 0/)
+    expect(source).toMatch(/'btn-stop-hidden': !canStop\(agent\.id\)/)
+  })
+
+  it('隐藏用 visibility（非 v-if）——布局稳定（6897e8e 修复不回归）', () => {
+    // 迁入样式前缀 .agent-panel（防与设置页同名类冲突），visibility 语义保留
+    expect(source).toMatch(/\.agent-panel \.btn-stop-hidden \{[\s\S]*visibility: hidden;/)
+    expect(source).not.toMatch(/v-if="canStop/)
+  })
+
+  it('token 用量条：90% 交接触发线 + 实时窗口比例 + 色阶函数', () => {
+    expect(source).toContain('token-bar-threshold')
+    expect(source).toContain('90% — 会话交接触发线')
+    expect(source).toContain('tokenRatio(agent.id)')
+    expect(source).toMatch(/r >= 0\.9.*token-critical/s)
+    expect(source).toMatch(/r >= 0\.7.*token-warning/s)
+  })
+
+  it('token 数据链路：store.agentTokenStats + store.contextTokens 原样可用', () => {
+    expect(source).toContain('store.agentTokenStats.get(agentId)')
+    expect(source).toContain('store.contextTokens.get(agentId)')
+    expect(source).toContain('maxContextTokens')
+  })
+
+  it('队列徽标 + 调度队列区（store.agentStateList）', () => {
+    expect(source).toContain('agentQueue(agent.id)')
+    expect(source).toContain('store.agentStateList')
+    expect(source).toContain('调度队列')
+    expect(source).toContain('暂无排队任务')
+  })
+
+  it('新建表单 + 编辑弹窗（AgentEditModal 复用不迁）', () => {
+    expect(source).toContain("import AgentEditModal from '../components/AgentEditModal.vue'")
+    expect(source).toContain('editingAgent = agent')
+    expect(source).toMatch(/function handleCreate[\s\S]*api\.createAgent/)
+    expect(source).toContain('showCreate')
+    expect(source).toContain('同名猫咪已存在，请换一个名字')
+  })
+
+  it('加载/错误/空状态三态渲染', () => {
+    expect(source).toContain('store.waitingForServer')
+    expect(source).toContain('store.loading')
+    expect(source).toContain('store.dataError')
+    expect(source).toContain('还没有 Agent')
+  })
+})
+
+describe('SettingsView 系统配置（context 阈值——单 A 契约 GET/POST /api/config/context）', () => {
+  it('默认值 0.8/0.9 + 窗口上限只读回显', () => {
+    expect(source).toContain('const warnThreshold = ref(0.8)')
+    expect(source).toContain('const handoffThreshold = ref(0.9)')
+    expect(source).toContain('const maxContextTokens = ref(128000)')
+    expect(source).toContain('ctxMaxDisplay()')
+  })
+
+  it('GET 失败 → 默认值 + 禁用态提示，不白屏（API 未就绪兜底）', () => {
+    expect(source).toContain('api.getContextConfig()')
+    expect(source).toMatch(/ctxError[\s\S]*已使用默认值（告警 80% \/ 交接 90%）/)
+    expect(source).toContain('ctxDisabled.value = true')
+    expect(source).toContain(':disabled="ctxDisabled || ctxSaving"')
+  })
+
+  it('保存 → POST 全量带两阈值；校验 0<t<1 且 warn≤handoff（不通过不发请求）', () => {
+    expect(source).toContain('await api.saveContextConfig({')
+    expect(source).toContain('warnThreshold: warnThreshold.value')
+    expect(source).toContain('handoffThreshold: handoffThreshold.value')
+    expect(source).toMatch(/warnThreshold\.value > 0 && warnThreshold\.value < 1/)
+    expect(source).toMatch(/handoffThreshold\.value > 0 && handoffThreshold\.value < 1/)
+    expect(source).toContain('告警阈值不能高于交接阈值')
+  })
+
+  it('保存成功 → 响应回写最新全量 + 提示', () => {
+    expect(source).toContain('res.maxContextTokens')
+    expect(source).toContain('ctxSaved')
+    expect(source).toContain('已保存——新阈值立即生效')
   })
 })

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import type { AgentConfig, AgentTokenStats } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import {
   api,
@@ -7,20 +8,27 @@ import {
   type NapcatBrowseEntry,
   type OneBotStatus,
 } from '@/composables/useApi'
+import AgentEditModal from '../components/AgentEditModal.vue'
+import { createLogger } from '@/utils/logger'
 
 /**
  * 全屏设置中心（左侧栏底部齿轮进入，无 vue-router 的 App 级 view 切换）。
- * 由三个弹窗组件合并而成（避免双入口双实现）：
- *  - ConnectorBindingsModal Tab1（QQ 绑定管理）
- *  - ConnectorNapCatPanel（NapCat 生命周期 + 启动路径 + autoStart 开关）
- *  - NapcatPathPicker（路径浏览选择器，内联弹窗）
+ * 左右分栏「经典结构」（参考图1：左侧大类导航 + 右侧详情）：
+ *   - 猫咪管理：AgentPanel.vue 展开态内容复制迁入（B2 删除原组件后本区为唯一实现）
+ *   - IM 接入：QQ 接入 / NapCat 子 Tab（原双 tab 内容整体平移）
+ *   - 系统配置：context 阈值（80% 告警 / 90% 交接，GET/POST /api/config/context）
  * 契约（店长钉死）：autoStart 缺省 true——旧配置无字段 = 自动拉起；开关初始态跟随
  * GET 响应，保存时 POST 全量带 { napcatPath, autoStart }。
  */
 const emit = defineEmits<{ close: [] }>()
+const log = createLogger('SettingsView')
 const store = useChatStore()
 
-// ─── 双 tab：QQ 接入 / NapCat ─────────────────
+// ─── 左右分栏：左侧大类 + 右侧详情 ─────────────────
+// 默认大类 = IM 接入（子 Tab QQ 接入）——打开设置页显示 QQ 接入，与迁移前行为一致
+const activeCategory = ref<'cats' | 'im' | 'system'>('im')
+
+// ─── IM 接入子 tab：QQ 接入 / NapCat ─────────────────
 const activeTab = ref<'qq' | 'napcat'>('qq')
 
 // ─── OneBot 入站状态（QQ Tab 只读展示 + NapCat Tab 生命周期卡共用一份）─────
@@ -318,11 +326,224 @@ function confirmPick(): void {
   closePicker()
 }
 
+// ─── 猫咪管理（AgentPanel.vue 展开态内容复制迁入）──────────────
+// 右栏 AgentPanel 即将被 B2 删除——本区为迁入后的唯一实现；store 引用原样可用。
+const editingAgent = ref<AgentConfig | null>(null)
+const showCreate = ref(false)
+
+/** 获取 Agent 的 token 统计，保证不为 undefined */
+function getTokenStats(agentId: string): AgentTokenStats | null {
+  return store.agentTokenStats.get(agentId) ?? null
+}
+
+/** 获取当前上下文窗口 token 用量（驱动 handoff 的真实数字） */
+function contextTokensFor(agentId: string): number {
+  return store.contextTokens.get(agentId) ?? 0
+}
+
+/** 安全的 token 使用比例（处理除零）。
+ *  只用 contextTokens（实时推送的当前窗口估算值）。
+ *  不再 fallback 到 sessionPromptTokens（累计值）——累计值不反映当前上下文窗口大小，
+ *  用它做 fallback 会给用户虚假的"已满"信号。 */
+function tokenRatio(agentId: string): number {
+  const ctx = contextTokensFor(agentId)
+  if (ctx <= 0) return 0 // 尚无实时数据，不显示虚假进度
+  const stats = getTokenStats(agentId)
+  const max = stats?.maxContextTokens ?? 128000
+  if (max <= 0) return 0
+  return ctx / max
+}
+
+/** token 条颜色状态 */
+function tokenBarClass(agentId: string): string {
+  const r = tokenRatio(agentId)
+  if (r >= 0.9) return 'token-critical'
+  if (r >= 0.7) return 'token-warning'
+  return ''
+}
+
+function agentStatus(agentId: string): string {
+  const state = store.agentStates.get(agentId)
+  return state?.status || 'idle'
+}
+
+function agentQueue(agentId: string): number {
+  const state = store.agentStates.get(agentId)
+  return state?.queueLength || 0
+}
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case 'idle':
+      return '空闲'
+    case 'thinking':
+      return '思考中…'
+    case 'busy':
+      return '回复中…'
+    default:
+      return status
+  }
+}
+
+function statusDot(status: string): string {
+  return status === 'idle' ? 'dot-idle' : 'dot-busy'
+}
+
+/** 是否可停止：回复中（busy）或有排队任务——一个按钮覆盖两个场景 */
+function canStop(agentId: string): boolean {
+  return agentStatus(agentId) === 'busy' || agentQueue(agentId) > 0
+}
+
+/** 点击停止：中断当前思考 + 清空排队任务（服务端 AGENT_INTERRUPT handler） */
+function stopAgent(agentId: string): void {
+  store.interruptAgent(agentId)
+}
+
+function openCreate(): void {
+  showCreate.value = true
+}
+
+function closeEdit(): void {
+  editingAgent.value = null
+  store.fetchData()
+}
+
+const newAgentForm = ref({
+  name: '',
+  avatar: '🐱',
+  systemPrompt: '',
+  llmProvider: 'claude',
+  llmModel: 'deepseek-v4-pro',
+  llmApiKey: '',
+  llmBaseUrl: '',
+})
+const createError = ref('')
+const creating = ref(false)
+
+async function handleCreate(): Promise<void> {
+  if (!newAgentForm.value.name.trim()) return
+  creating.value = true
+  createError.value = ''
+  try {
+    await api.createAgent({
+      name: newAgentForm.value.name.trim(),
+      avatar: newAgentForm.value.avatar,
+      systemPrompt: newAgentForm.value.systemPrompt,
+      llmProvider: newAgentForm.value.llmProvider,
+      llmModel: newAgentForm.value.llmModel,
+      llmApiKey: newAgentForm.value.llmApiKey,
+      llmBaseUrl: newAgentForm.value.llmBaseUrl || undefined,
+    })
+    showCreate.value = false
+    newAgentForm.value = {
+      name: '',
+      avatar: '🐱',
+      systemPrompt: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: '',
+      llmBaseUrl: '',
+    }
+    await store.fetchData()
+  } catch (err: any) {
+    log.error('create agent failed', { error: String(err) })
+    // 解析后端返回的友好错误信息，否则用通用中文提示
+    let msg = err?.body?.message || err?.body?.error || err.message || ''
+    if (msg.includes('UNIQUE constraint') || msg.includes('已存在')) {
+      msg = '同名猫咪已存在，请换一个名字'
+    } else if (msg.includes('API key') || msg.includes('apiKey')) {
+      msg = 'API Key 无效或缺失，请检查后重试'
+    } else if (!msg || msg.includes('Internal Server Error')) {
+      msg = '服务器内部错误，请查看后端日志'
+    }
+    createError.value = msg || '创建失败'
+  } finally {
+    creating.value = false
+  }
+}
+
+// ─── 系统配置：context 阈值（80% 告警 / 90% 交接）──────────────
+// 契约（单 A 钉死）：GET /api/config/context 缺文件返回默认 {0.8, 0.9, maxContext}；
+// POST 收 { warnThreshold?, handoffThreshold? }（未传 → 默认），校验 0<t<1 且 warn≤handoff
+// 否则 400；maxContextTokens 从 env 读只读回显。API 未就绪 → 默认值 + 禁用态提示，不崩。
+const warnThreshold = ref(0.8)
+const handoffThreshold = ref(0.9)
+const maxContextTokens = ref(128000)
+const ctxLoading = ref(true)
+const ctxError = ref('')
+const ctxDisabled = ref(false)
+const ctxSaving = ref(false)
+const ctxSaved = ref('')
+const ctxFormError = ref('')
+
+function ctxMaxDisplay(): string {
+  return maxContextTokens.value > 0 ? `${(maxContextTokens.value / 1000).toFixed(0)}k tokens` : '—'
+}
+
+async function loadContextConfig(): Promise<void> {
+  ctxLoading.value = true
+  try {
+    const cfg = await api.getContextConfig()
+    if (disposed) return
+    warnThreshold.value = cfg.warnThreshold
+    handoffThreshold.value = cfg.handoffThreshold
+    maxContextTokens.value = cfg.maxContextTokens
+  } catch {
+    if (!disposed) {
+      // API 未就绪（单 A 未落地/网络失败）→ 默认 0.8/0.9 + 禁用态提示，不白屏
+      ctxError.value =
+        '阈值配置读取失败——服务端接口未就绪，已使用默认值（告警 80% / 交接 90%），保存已禁用'
+      ctxDisabled.value = true
+    }
+  } finally {
+    ctxLoading.value = false
+  }
+}
+
+/** 前端校验对齐后端契约（0<t<1、warn≤handoff）——不通过不发请求 */
+function validateCtxForm(): boolean {
+  if (!(warnThreshold.value > 0 && warnThreshold.value < 1)) {
+    ctxFormError.value = '告警阈值必须是 0~1 之间的小数（如 0.8 = 80%）'
+    return false
+  }
+  if (!(handoffThreshold.value > 0 && handoffThreshold.value < 1)) {
+    ctxFormError.value = '交接阈值必须是 0~1 之间的小数（如 0.9 = 90%）'
+    return false
+  }
+  if (warnThreshold.value > handoffThreshold.value) {
+    ctxFormError.value = '告警阈值不能高于交接阈值'
+    return false
+  }
+  return true
+}
+
+async function saveCtxConfig(): Promise<void> {
+  ctxFormError.value = ''
+  ctxSaved.value = ''
+  if (!validateCtxForm()) return
+  ctxSaving.value = true
+  try {
+    const res = await api.saveContextConfig({
+      warnThreshold: warnThreshold.value,
+      handoffThreshold: handoffThreshold.value,
+    })
+    warnThreshold.value = res.warnThreshold
+    handoffThreshold.value = res.handoffThreshold
+    maxContextTokens.value = res.maxContextTokens
+    ctxSaved.value = '已保存——新阈值立即生效（告警横幅与交接触发线同步刷新）'
+  } catch (err: any) {
+    ctxFormError.value = err.message || '保存失败'
+  } finally {
+    ctxSaving.value = false
+  }
+}
+
 onMounted(() => {
-  // 设置页为常驻视图（v-show 切 tab 保持挂载）——一次拉齐三份数据
+  // 设置页为常驻视图（v-show 切类保持挂载）——一次拉齐四份数据
   loadBindings()
   refresh()
   loadConfig()
+  loadContextConfig()
 })
 onUnmounted(() => {
   disposed = true
@@ -348,226 +569,530 @@ onUnmounted(() => {
       </button>
     </header>
 
-    <div class="settings-tabs">
-      <button class="tab-btn" :class="{ active: activeTab === 'qq' }" @click="activeTab = 'qq'">
-        QQ 接入
-      </button>
-      <button
-        class="tab-btn"
-        :class="{ active: activeTab === 'napcat' }"
-        @click="activeTab = 'napcat'"
-      >
-        NapCat
-      </button>
-    </div>
-
-    <div class="settings-body">
-      <!-- Tab1：QQ 接入（v-show 保持挂载，onMounted 行为零改动） -->
-      <div v-show="activeTab === 'qq'">
-        <div class="section-title">入站状态</div>
-        <div class="inbound-card">
-          <div class="config-item">
-            <span class="label">入站启用</span>
-            <span class="value">{{ status?.enabled ? '是' : '否' }}</span>
-          </div>
-          <div class="config-item">
-            <span class="label">API 地址</span>
-            <span class="value mono">{{ status?.apiBase || '—' }}</span>
-          </div>
-          <div class="config-item">
-            <span class="label">鉴权 Token</span>
-            <span class="value mono">{{
-              status?.tokenConfigured ? status?.tokenMasked : '未配置'
-            }}</span>
-          </div>
-        </div>
-
-        <div class="section-title">QQ 绑定</div>
-        <div v-if="listLoading" class="list-hint">加载中…</div>
-        <div v-else-if="listError" class="error-msg">{{ listError }}</div>
-        <div v-else-if="bindings.length === 0" class="list-hint">
-          暂无绑定——添加后对应 QQ 群/私聊的消息才会接入猫咖
-        </div>
-        <div v-else class="binding-list">
-          <div
-            v-for="b in bindings"
-            :key="`${b.platform}-${b.external_type}-${b.external_id}`"
-            class="binding-row"
-            :class="{ confirming: confirmDeleteId === b.id }"
-          >
-            <div class="binding-info">
-              <span class="binding-type">{{ typeLabel(b.external_type) }}</span>
-              <span class="binding-id">{{ b.external_id }}</span>
-              <span class="binding-session" :title="sessionTitle(b.session_id)">
-                {{ sessionTitle(b.session_id) }}
-              </span>
-            </div>
-            <button
-              class="btn-delete"
-              :class="{ 'btn-delete-confirm': confirmDeleteId === b.id }"
-              @click="handleDelete(b)"
-            >
-              {{ confirmDeleteId === b.id ? '确认删除？' : '删除' }}
-            </button>
-          </div>
-        </div>
-
-        <div class="section-title">添加绑定</div>
-        <div class="form-group">
-          <label>平台</label>
-          <select v-model="platform" class="input">
-            <option v-for="p in platformOptions" :key="p.value" :value="p.value">
-              {{ p.label }}
-            </option>
-          </select>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label>类型</label>
-            <select v-model="externalType" class="input">
-              <option v-for="t in typeOptions" :key="t.value" :value="t.value">
-                {{ t.label }}
-              </option>
-            </select>
-          </div>
-          <div class="form-group flex-1">
-            <label>QQ 号/群号</label>
-            <input
-              v-model="externalId"
-              type="text"
-              inputmode="numeric"
-              class="input input-mono"
-              placeholder="纯数字"
-              v-focus
-              @keydown.enter="handleAdd"
-            />
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label>绑定会话</label>
-          <select v-model="sessionId" class="input">
-            <option value="" disabled>选择会话…</option>
-            <option v-for="s in store.sessions" :key="s.id" :value="s.id">{{ s.title }}</option>
-          </select>
-        </div>
-
-        <div v-if="formError" class="error-msg">{{ formError }}</div>
-
-        <div class="form-actions">
-          <button class="btn btn-create" :disabled="saving" @click="handleAdd">
-            {{ saving ? '添加中…' : '添加绑定' }}
-          </button>
-        </div>
-      </div>
-
-      <!-- Tab2：NapCat（v-if 进入才挂载；设置页挂载时已统一拉取状态） -->
-      <div v-if="activeTab === 'napcat'">
-        <div class="status-card">
-          <div class="status-line">
-            <span class="badge" :class="status?.running ? 'badge-running' : 'badge-stopped'">
-              <span class="dot" />
-              {{ status?.running ? '运行中' : '已停止' }}
-            </span>
-            <span class="status-text">OneBot v11 HTTP 服务（NapCat）</span>
-          </div>
-          <div class="config-grid">
-            <div class="config-item">
-              <span class="label">API 地址</span>
-              <span class="value mono">{{ status?.apiBase || '—' }}</span>
-            </div>
-            <div class="config-item">
-              <span class="label">入站启用</span>
-              <span class="value">{{ status?.enabled ? '是' : '否' }}</span>
-            </div>
-            <div class="config-item">
-              <span class="label">鉴权 Token</span>
-              <span class="value mono">{{
-                status?.tokenConfigured ? status?.tokenMasked : '未配置'
-              }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- autoStart 开关：dev 启动时自动拉起 NapCat（缺省 true——旧配置无字段行为不变） -->
-        <div class="switch-card">
-          <div class="switch-info">
-            <div class="switch-title">dev 启动时自动拉起</div>
-            <div class="switch-hint">
-              开启后 <code>pnpm dev</code> 会自动启动 NapCat；关闭后需手动点「启动 NapCat」。
-              旧配置无该字段 = 默认开启（可在设置页关闭）
-            </div>
-          </div>
-          <label class="switch">
-            <input
-              type="checkbox"
-              v-model="autoStart"
-              :disabled="savingPath"
-              @change="saveAutoStart"
-            />
-            <span class="switch-slider"></span>
-          </label>
-        </div>
-
-        <div v-if="loading" class="list-hint">加载中…</div>
-        <div v-else-if="error" class="error-msg">{{ error }}</div>
-
-        <div v-else-if="status && !status.launchCmdConfigured" class="launch-hint">
-          未配置启动命令——请在 <code>.env</code> 中设置
-          <code>NAPCAT_LAUNCH_CMD</code>（完整启动命令行，或含
-          <code>{NAPCAT_PATH}</code> 占位符的模板）并重启 dev 服务，才能通过此面板启动 NapCat
-        </div>
-
-        <div
-          v-else-if="status && status.launchCmdConfigured && !status.launchReady"
-          class="launch-hint"
+    <div class="settings-layout">
+      <!-- 左侧大类导航（参考图1：窄条 + 选中态高亮浅色块） -->
+      <nav class="settings-nav" aria-label="设置大类">
+        <button
+          class="nav-item"
+          :class="{ active: activeCategory === 'cats' }"
+          @click="activeCategory = 'cats'"
         >
-          启动命令使用 <code>{NAPCAT_PATH}</code> 占位符——请在下方「NapCat 启动路径」填写本机 NapCat
-          可执行文件完整路径并保存
-        </div>
+          <span class="nav-icon">🐱</span> 猫咪管理
+        </button>
+        <button
+          class="nav-item"
+          :class="{ active: activeCategory === 'im' }"
+          @click="activeCategory = 'im'"
+        >
+          <span class="nav-icon">🔌</span> IM 接入
+        </button>
+        <button
+          class="nav-item"
+          :class="{ active: activeCategory === 'system' }"
+          @click="activeCategory = 'system'"
+        >
+          <span class="nav-icon">⚙️</span> 系统配置
+        </button>
+      </nav>
 
-        <div class="path-card">
-          <div class="path-title">NapCat 启动路径</div>
-          <div class="path-row">
-            <input
-              v-model="napcatPath"
-              class="path-input mono"
-              placeholder="C:\NapCat\napcat.exe"
-              :disabled="savingPath"
-              spellcheck="false"
-            />
-            <button class="btn-save" :disabled="savingPath" @click="openPicker">浏览…</button>
-            <button class="btn-save" :disabled="savingPath" @click="savePath">
-              {{ savingPath ? '保存中…' : '保存' }}
+      <!-- 右侧详情区 -->
+      <div class="settings-content">
+        <!-- 猫咪管理：AgentPanel 展开态内容复制迁入 -->
+        <div v-show="activeCategory === 'cats'" class="agent-panel">
+          <div class="panel-header">
+            <div class="header-left">
+              <h3>猫咪 Agent</h3>
+              <span class="header-count" v-if="store.agents.length">{{ store.agents.length }}</span>
+            </div>
+            <button class="btn-add" title="添加 Agent" @click="openCreate">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M8 3v10M3 8h10"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                />
+              </svg>
             </button>
           </div>
-          <div class="path-hint">
-            浏览器无法直接选择本地文件路径——点「浏览…」逐层选择，或手动填写完整路径（.exe /
-            .bat）；保存后点「启动 NapCat」立即生效，无需重启
+
+          <!-- Agent Cards -->
+          <div class="agent-cards">
+            <div
+              v-for="agent in store.agents"
+              :key="agent.id"
+              class="agent-card"
+              @click="editingAgent = agent"
+            >
+              <div class="card-top">
+                <span class="agent-avatar">{{ agent.avatar }}</span>
+                <div class="agent-info">
+                  <span class="agent-name">{{ agent.name }}</span>
+                  <div class="agent-meta">
+                    <span class="provider-badge">{{ agent.llmProvider }}</span>
+                    <span class="model-name">{{ agent.llmModel }}</span>
+                  </div>
+                </div>
+                <div class="status-area">
+                  <span class="status-dot" :class="statusDot(agentStatus(agent.id))"></span>
+                  <span class="status-label">{{ statusLabel(agentStatus(agent.id)) }}</span>
+                  <!-- 停止按钮：隐藏用 visibility 而非 v-if——保持 status-area 宽度恒定，
+                       不回归 6897e8e 修复的顶行布局跳动（灰点锚点不漂移） -->
+                  <button
+                    class="btn-retry-sm btn-stop"
+                    :class="{ 'btn-stop-hidden': !canStop(agent.id) }"
+                    title="停止思考并清空队列"
+                    @click.stop="stopAgent(agent.id)"
+                  >
+                    停止
+                  </button>
+                </div>
+              </div>
+
+              <!-- Token 用量条 -->
+              <div v-if="getTokenStats(agent.id)" class="card-tokens">
+                <div class="token-header">
+                  <span class="token-label">
+                    上下文用量
+                    <span
+                      v-if="contextTokensFor(agent.id) > 0"
+                      class="token-live-dot"
+                      title="实时数据"
+                    ></span>
+                  </span>
+                  <span class="token-ratio">
+                    {{
+                      tokenRatio(agent.id) >= 0.01
+                        ? (tokenRatio(agent.id) * 100).toFixed(0) + '%'
+                        : '&lt;1%'
+                    }}
+                  </span>
+                </div>
+                <div class="token-bar-bg">
+                  <!-- handoff 90% 触发线 -->
+                  <div class="token-bar-threshold" title="90% — 会话交接触发线"></div>
+                  <div
+                    class="token-bar-fill"
+                    :class="tokenBarClass(agent.id)"
+                    :style="{
+                      width: Math.min(tokenRatio(agent.id) * 100, 100) + '%',
+                    }"
+                  ></div>
+                </div>
+                <div class="token-footer">
+                  <span v-if="contextTokensFor(agent.id) > 0">
+                    窗口 {{ (contextTokensFor(agent.id) / 1000).toFixed(1) }}k /
+                    {{ (getTokenStats(agent.id)!.maxContextTokens / 1000).toFixed(0) }}k
+                  </span>
+                  <span v-else class="token-waiting"> 等待首次回复… </span>
+                  <span v-if="getTokenStats(agent.id)!.totalPromptTokens > 0" class="token-total">
+                    · 总计 {{ (getTokenStats(agent.id)!.totalPromptTokens / 1000).toFixed(1) }}k
+                  </span>
+                </div>
+              </div>
+
+              <div v-if="agentQueue(agent.id) > 0" class="card-queue">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <path
+                    d="M2 3.5h5M2 6h8M2 8.5h3"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                    stroke-linecap="round"
+                  />
+                </svg>
+                <span>队列 {{ agentQueue(agent.id) }} 条</span>
+              </div>
+            </div>
+
+            <!-- 等待服务器启动 -->
+            <div v-if="store.waitingForServer" class="agent-status">
+              <span class="status-spinner"></span>
+              <p>等待服务器…</p>
+            </div>
+
+            <!-- 数据加载中 -->
+            <div v-else-if="store.loading" class="agent-status">
+              <span class="status-spinner"></span>
+              <p>加载中…</p>
+            </div>
+
+            <!-- 数据加载失败 -->
+            <div v-else-if="store.dataError" class="agent-status agent-status-error">
+              <span class="status-icon">⚠️</span>
+              <p>数据加载失败</p>
+              <p class="hint">{{ store.dataError }}</p>
+              <button class="btn-retry-sm" @click="store.fetchData()">重试</button>
+            </div>
+
+            <!-- 空状态 -->
+            <div v-else-if="store.agents.length === 0" class="agent-empty">
+              <span class="empty-icon">🐈</span>
+              <p>还没有 Agent</p>
+              <p class="hint">点击右上角 + 创建第一只猫咪</p>
+            </div>
           </div>
-          <div v-if="pathError" class="error-msg">{{ pathError }}</div>
-          <div v-if="pathSaved" class="ok-msg">{{ pathSaved }}</div>
+
+          <!-- Quick Create Form -->
+          <div v-if="showCreate" class="create-section">
+            <div class="create-header">
+              <h4>新建 Agent</h4>
+              <button class="btn-close-sm" @click="showCreate = false">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path
+                    d="M3 3l8 8M11 3l-8 8"
+                    stroke="currentColor"
+                    stroke-width="1.4"
+                    stroke-linecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div class="create-body">
+              <input v-model="newAgentForm.name" class="input" placeholder="猫咪名字" v-focus />
+              <input
+                v-model="newAgentForm.llmApiKey"
+                class="input input-mono"
+                type="password"
+                placeholder="API Key (sk-…)"
+              />
+              <textarea
+                v-model="newAgentForm.systemPrompt"
+                class="input"
+                rows="3"
+                placeholder="角色设定…"
+              ></textarea>
+            </div>
+            <div class="create-footer">
+              <span v-if="createError" class="error-text">{{ createError }}</span>
+              <button class="btn btn-cancel" @click="showCreate = false">取消</button>
+              <button class="btn btn-confirm" :disabled="creating" @click="handleCreate">
+                {{ creating ? '…' : '创建' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Queue Section -->
+          <div class="queue-section">
+            <h4>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path
+                  d="M2 4.5h6M2 7h10M2 9.5h4"
+                  stroke="currentColor"
+                  stroke-width="1.2"
+                  stroke-linecap="round"
+                />
+              </svg>
+              调度队列
+            </h4>
+            <div v-if="store.agentStateList.every((a) => a.queueLength === 0)" class="queue-empty">
+              暂无排队任务
+            </div>
+            <div v-else class="queue-items">
+              <div
+                v-for="s in store.agentStateList.filter((a) => a.queueLength > 0)"
+                :key="s.agentId"
+                class="queue-item"
+              >
+                <span class="queue-dot"></span>
+                <span class="queue-agent">{{ s.agentId }}</span>
+                <span class="queue-count">{{ s.queueLength }} 条</span>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div class="actions">
-          <button
-            class="btn btn-start"
-            :disabled="acting || !status?.launchReady || status?.running"
-            @click="handleAction('start')"
-          >
-            {{ acting ? '操作中…' : '启动 NapCat' }}
-          </button>
-          <button
-            class="btn btn-stop"
-            :disabled="acting || !status?.running"
-            @click="handleAction('stop')"
-          >
-            停止 NapCat
-          </button>
+        <!-- IM 接入：QQ 接入 / NapCat 子 Tab（原双 tab 内容整体平移） -->
+        <div v-show="activeCategory === 'im'" class="im-pane">
+          <div class="settings-subtabs">
+            <button
+              class="tab-btn"
+              :class="{ active: activeTab === 'qq' }"
+              @click="activeTab = 'qq'"
+            >
+              QQ 接入
+            </button>
+            <button
+              class="tab-btn"
+              :class="{ active: activeTab === 'napcat' }"
+              @click="activeTab = 'napcat'"
+            >
+              NapCat
+            </button>
+          </div>
+
+          <!-- Tab1：QQ 接入（v-show 保持挂载，onMounted 行为零改动） -->
+          <div v-show="activeTab === 'qq'">
+            <div class="section-title">入站状态</div>
+            <div class="inbound-card">
+              <div class="config-item">
+                <span class="label">入站启用</span>
+                <span class="value">{{ status?.enabled ? '是' : '否' }}</span>
+              </div>
+              <div class="config-item">
+                <span class="label">API 地址</span>
+                <span class="value mono">{{ status?.apiBase || '—' }}</span>
+              </div>
+              <div class="config-item">
+                <span class="label">鉴权 Token</span>
+                <span class="value mono">{{
+                  status?.tokenConfigured ? status?.tokenMasked : '未配置'
+                }}</span>
+              </div>
+            </div>
+
+            <div class="section-title">QQ 绑定</div>
+            <div v-if="listLoading" class="list-hint">加载中…</div>
+            <div v-else-if="listError" class="error-msg">{{ listError }}</div>
+            <div v-else-if="bindings.length === 0" class="list-hint">
+              暂无绑定——添加后对应 QQ 群/私聊的消息才会接入猫咖
+            </div>
+            <div v-else class="binding-list">
+              <div
+                v-for="b in bindings"
+                :key="`${b.platform}-${b.external_type}-${b.external_id}`"
+                class="binding-row"
+                :class="{ confirming: confirmDeleteId === b.id }"
+              >
+                <div class="binding-info">
+                  <span class="binding-type">{{ typeLabel(b.external_type) }}</span>
+                  <span class="binding-id">{{ b.external_id }}</span>
+                  <span class="binding-session" :title="sessionTitle(b.session_id)">
+                    {{ sessionTitle(b.session_id) }}
+                  </span>
+                </div>
+                <button
+                  class="btn-delete"
+                  :class="{ 'btn-delete-confirm': confirmDeleteId === b.id }"
+                  @click="handleDelete(b)"
+                >
+                  {{ confirmDeleteId === b.id ? '确认删除？' : '删除' }}
+                </button>
+              </div>
+            </div>
+
+            <div class="section-title">添加绑定</div>
+            <div class="form-group">
+              <label>平台</label>
+              <select v-model="platform" class="input">
+                <option v-for="p in platformOptions" :key="p.value" :value="p.value">
+                  {{ p.label }}
+                </option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label>类型</label>
+                <select v-model="externalType" class="input">
+                  <option v-for="t in typeOptions" :key="t.value" :value="t.value">
+                    {{ t.label }}
+                  </option>
+                </select>
+              </div>
+              <div class="form-group flex-1">
+                <label>QQ 号/群号</label>
+                <input
+                  v-model="externalId"
+                  type="text"
+                  inputmode="numeric"
+                  class="input input-mono"
+                  placeholder="纯数字"
+                  v-focus
+                  @keydown.enter="handleAdd"
+                />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>绑定会话</label>
+              <select v-model="sessionId" class="input">
+                <option value="" disabled>选择会话…</option>
+                <option v-for="s in store.sessions" :key="s.id" :value="s.id">
+                  {{ s.title }}
+                </option>
+              </select>
+            </div>
+
+            <div v-if="formError" class="error-msg">{{ formError }}</div>
+
+            <div class="form-actions">
+              <button class="btn btn-create" :disabled="saving" @click="handleAdd">
+                {{ saving ? '添加中…' : '添加绑定' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Tab2：NapCat（v-if 进入才挂载；设置页挂载时已统一拉取状态） -->
+          <div v-if="activeTab === 'napcat'">
+            <div class="status-card">
+              <div class="status-line">
+                <span class="badge" :class="status?.running ? 'badge-running' : 'badge-stopped'">
+                  <span class="dot" />
+                  {{ status?.running ? '运行中' : '已停止' }}
+                </span>
+                <span class="status-text">OneBot v11 HTTP 服务（NapCat）</span>
+              </div>
+              <div class="config-grid">
+                <div class="config-item">
+                  <span class="label">API 地址</span>
+                  <span class="value mono">{{ status?.apiBase || '—' }}</span>
+                </div>
+                <div class="config-item">
+                  <span class="label">入站启用</span>
+                  <span class="value">{{ status?.enabled ? '是' : '否' }}</span>
+                </div>
+                <div class="config-item">
+                  <span class="label">鉴权 Token</span>
+                  <span class="value mono">{{
+                    status?.tokenConfigured ? status?.tokenMasked : '未配置'
+                  }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- autoStart 开关：dev 启动时自动拉起 NapCat（缺省 true——旧配置无字段行为不变） -->
+            <div class="switch-card">
+              <div class="switch-info">
+                <div class="switch-title">dev 启动时自动拉起</div>
+                <div class="switch-hint">
+                  开启后 <code>pnpm dev</code> 会自动启动 NapCat；关闭后需手动点「启动 NapCat」。
+                  旧配置无该字段 = 默认开启（可在设置页关闭）
+                </div>
+              </div>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  v-model="autoStart"
+                  :disabled="savingPath"
+                  @change="saveAutoStart"
+                />
+                <span class="switch-slider"></span>
+              </label>
+            </div>
+
+            <div v-if="loading" class="list-hint">加载中…</div>
+            <div v-else-if="error" class="error-msg">{{ error }}</div>
+
+            <div v-else-if="status && !status.launchCmdConfigured" class="launch-hint">
+              未配置启动命令——请在 <code>.env</code> 中设置
+              <code>NAPCAT_LAUNCH_CMD</code>（完整启动命令行，或含
+              <code>{NAPCAT_PATH}</code> 占位符的模板）并重启 dev 服务，才能通过此面板启动 NapCat
+            </div>
+
+            <div
+              v-else-if="status && status.launchCmdConfigured && !status.launchReady"
+              class="launch-hint"
+            >
+              启动命令使用 <code>{NAPCAT_PATH}</code> 占位符——请在下方「NapCat 启动路径」填写本机
+              NapCat 可执行文件完整路径并保存
+            </div>
+
+            <div class="path-card">
+              <div class="path-title">NapCat 启动路径</div>
+              <div class="path-row">
+                <input
+                  v-model="napcatPath"
+                  class="path-input mono"
+                  placeholder="C:\NapCat\napcat.exe"
+                  :disabled="savingPath"
+                  spellcheck="false"
+                />
+                <button class="btn-save" :disabled="savingPath" @click="openPicker">浏览…</button>
+                <button class="btn-save" :disabled="savingPath" @click="savePath">
+                  {{ savingPath ? '保存中…' : '保存' }}
+                </button>
+              </div>
+              <div class="path-hint">
+                浏览器无法直接选择本地文件路径——点「浏览…」逐层选择，或手动填写完整路径（.exe /
+                .bat）；保存后点「启动 NapCat」立即生效，无需重启
+              </div>
+              <div v-if="pathError" class="error-msg">{{ pathError }}</div>
+              <div v-if="pathSaved" class="ok-msg">{{ pathSaved }}</div>
+            </div>
+
+            <div class="actions">
+              <button
+                class="btn btn-start"
+                :disabled="acting || !status?.launchReady || status?.running"
+                @click="handleAction('start')"
+              >
+                {{ acting ? '操作中…' : '启动 NapCat' }}
+              </button>
+              <button
+                class="btn btn-stop"
+                :disabled="acting || !status?.running"
+                @click="handleAction('stop')"
+              >
+                停止 NapCat
+              </button>
+            </div>
+
+            <div v-if="actionError" class="error-msg">{{ actionError }}</div>
+          </div>
         </div>
 
-        <div v-if="actionError" class="error-msg">{{ actionError }}</div>
+        <!-- 系统配置：context 阈值（80% 告警 / 90% 交接） -->
+        <div v-show="activeCategory === 'system'" class="system-pane">
+          <div class="section-title">上下文阈值配置</div>
+          <div class="ctx-card">
+            <div class="ctx-info">
+              上下文窗口用量达到「告警阈值」时页面顶部横幅提示；达到「交接阈值」时自动交接到新会话。
+              两个阈值同时作用于 token 用量条色阶（告警起黄色、交接起红色）。
+            </div>
+
+            <div v-if="ctxLoading" class="list-hint">加载中…</div>
+
+            <template v-else>
+              <div class="config-item">
+                <span class="label">告警阈值（warn）</span>
+                <input
+                  v-model.number="warnThreshold"
+                  type="number"
+                  min="0.01"
+                  max="0.99"
+                  step="0.05"
+                  class="input input-ctx"
+                  :disabled="ctxDisabled || ctxSaving"
+                />
+              </div>
+              <div class="config-item">
+                <span class="label">交接阈值（handoff）</span>
+                <input
+                  v-model.number="handoffThreshold"
+                  type="number"
+                  min="0.01"
+                  max="0.99"
+                  step="0.05"
+                  class="input input-ctx"
+                  :disabled="ctxDisabled || ctxSaving"
+                />
+              </div>
+              <div class="config-item">
+                <span class="label">上下文窗口上限</span>
+                <span class="value mono">{{ ctxMaxDisplay() }}</span>
+              </div>
+
+              <div class="ctx-hint">
+                取值 0~1 之间的小数（如 0.8 = 80%），且告警阈值 ≤ 交接阈值。「窗口上限」由服务端 env
+                决定，只读回显；保存后立即生效，重启后仍保持。
+              </div>
+
+              <div v-if="ctxError" class="error-msg">{{ ctxError }}</div>
+              <div v-if="ctxFormError" class="error-msg">{{ ctxFormError }}</div>
+              <div v-if="ctxSaved" class="ok-msg">{{ ctxSaved }}</div>
+
+              <div class="form-actions">
+                <button
+                  class="btn btn-create"
+                  :disabled="ctxDisabled || ctxSaving"
+                  @click="saveCtxConfig"
+                >
+                  {{ ctxSaving ? '保存中…' : '保存阈值' }}
+                </button>
+              </div>
+            </template>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -687,14 +1212,80 @@ onUnmounted(() => {
   background: var(--bg-hover);
 }
 
-/* ─── Tabs ─────────────────────────────── */
+/* ─── 左右分栏布局（参考图1：左侧窄条大类导航 + 右侧宽区详情） ──── */
 
-.settings-tabs {
+.settings-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.settings-nav {
+  width: 168px;
+  flex-shrink: 0;
+  padding: 16px 10px;
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--ease-out);
+}
+
+.nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 选中态高亮：浅色块 + 文字加深（参考图1） */
+.nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.nav-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 20px 28px 32px;
+}
+
+/* IM 接入 / 系统配置详情区限宽（表单行不长，避免贴满整行） */
+.im-pane,
+.system-pane {
+  max-width: 680px;
+}
+
+/* ─── IM 接入子 Tab ─────────────────────── */
+
+.settings-subtabs {
   display: flex;
   gap: 4px;
-  padding: 12px 24px 0;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--border-subtle);
-  flex-shrink: 0;
+  margin-bottom: 20px;
 }
 
 .tab-btn {
@@ -718,17 +1309,6 @@ onUnmounted(() => {
   color: var(--accent);
   border-bottom-color: var(--accent);
   font-weight: 600;
-}
-
-/* ─── Body ─────────────────────────────── */
-
-.settings-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px 24px 32px;
-  max-width: 680px;
-  width: 100%;
-  margin: 0 auto;
 }
 
 .section-title {
@@ -1252,6 +1832,37 @@ select.input {
   border: 1px solid rgba(224, 85, 106, 0.2);
 }
 
+/* ─── 系统配置：context 阈值卡 ────────────── */
+
+.ctx-card {
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ctx-info {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.ctx-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.input-ctx {
+  width: 180px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
 /* ─── 路径浏览选择器（内联弹窗） ──────────── */
 
 .picker-overlay {
@@ -1427,5 +2038,579 @@ select.input {
 
 .btn-ok:hover:not(:disabled) {
   background: var(--accent-hover);
+}
+
+/* ─── 猫咪管理（AgentPanel.vue 展开态样式复制迁入，前缀 .agent-panel 防与设置页同名类冲突） ── */
+
+.agent-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* ─── Header ────────────────────────────── */
+
+.agent-panel .panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 16px 12px;
+}
+
+.agent-panel .header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-panel .panel-header h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: -0.2px;
+}
+
+.agent-panel .header-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+
+.agent-panel .btn-add {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-default);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ease-out);
+}
+
+.agent-panel .btn-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ─── Agent Cards ───────────────────────── */
+
+.agent-panel .agent-cards {
+  flex: 1;
+  padding: 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-panel .agent-card {
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.agent-panel .agent-card:hover {
+  border-color: var(--border-default);
+  box-shadow: var(--shadow-sm);
+  background: var(--bg-hover);
+}
+
+.agent-panel .card-top {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.agent-panel .agent-avatar {
+  font-size: 32px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.agent-panel .agent-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-panel .agent-name {
+  font-size: 14px;
+  font-weight: 600;
+  display: block;
+}
+
+.agent-panel .agent-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.agent-panel .provider-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.agent-panel .model-name {
+  font-size: 10px;
+  color: var(--text-muted);
+  /* 长模型名（如 deepseek-v4-flash）单行不换行：
+     换行会撑高 agent-meta 行 → provider-badge 被 stretch 拉高 → 徽章文字贴顶 */
+  white-space: nowrap;
+}
+
+/* Status */
+.agent-panel .status-area {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.agent-panel .status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.agent-panel .dot-idle {
+  background: var(--text-muted);
+}
+
+.agent-panel .dot-busy {
+  background: var(--accent-yellow);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.agent-panel .status-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  /* 固定状态文字占位宽度（最长「回复中…」≈ 3 汉字 + 省略号）：
+     状态切换时 label 宽度恒定 → status-area 整体宽度不变，
+     不挤压左侧 agent-info，顶行布局不跳动、灰点锚点不漂移 */
+  min-width: 4.5em;
+  white-space: nowrap;
+}
+
+/* 停止按钮：btn-retry-sm 风格的小号版，占位恒定（visibility 切换不改变布局） */
+.agent-panel .btn-stop {
+  padding: 2px 8px;
+  font-size: 10px;
+}
+
+.agent-panel .btn-stop-hidden {
+  visibility: hidden;
+}
+
+/* Token usage bar on card */
+.agent-panel .card-tokens {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+}
+
+.agent-panel .token-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.agent-panel .token-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.agent-panel .token-ratio {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.agent-panel .token-bar-bg {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-subtle);
+  overflow: visible;
+  position: relative;
+}
+
+/* 90% 交接触发线 */
+.agent-panel .token-bar-threshold {
+  position: absolute;
+  left: 90%;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--accent-yellow);
+  opacity: 0.6;
+  z-index: 2;
+}
+
+.agent-panel .token-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition:
+    width 0.5s var(--ease-out),
+    background 0.5s var(--ease-out);
+}
+
+.agent-panel .token-bar-fill.token-warning {
+  background: var(--accent-yellow);
+}
+
+.agent-panel .token-bar-fill.token-critical {
+  background: var(--accent-red);
+}
+
+.agent-panel .token-footer {
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-panel .token-total {
+  opacity: 0.6;
+}
+
+.agent-panel .token-waiting {
+  opacity: 0.5;
+  font-style: italic;
+}
+
+/* 实时数据指示点 */
+.agent-panel .token-live-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-green, #4caf50);
+  margin-left: 2px;
+  vertical-align: middle;
+  animation: live-pulse 2s infinite;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* Queue badge on card */
+.agent-panel .card-queue {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(212, 168, 84, 0.08);
+  color: var(--accent-yellow);
+  font-size: 11px;
+}
+
+/* ─── Agent Status (loading/error) ───────── */
+
+.agent-panel .agent-status {
+  text-align: center;
+  padding: 24px 16px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.agent-panel .agent-status .status-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 8px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.agent-panel .agent-status .status-icon {
+  font-size: 22px;
+  display: block;
+  margin-bottom: 6px;
+}
+
+.agent-panel .agent-status .hint {
+  font-size: 10px;
+  opacity: 0.7;
+  margin-top: 3px;
+}
+
+.agent-panel .agent-status-error {
+  color: var(--accent-red);
+}
+
+.agent-panel .agent-status-error .hint {
+  color: var(--text-muted);
+  max-width: 180px;
+  margin: 2px auto 8px;
+  word-break: break-all;
+}
+
+.agent-panel .btn-retry-sm {
+  padding: 4px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.agent-panel .btn-retry-sm:hover {
+  background: var(--accent);
+  color: var(--bg-deep);
+}
+
+/* Empty */
+.agent-panel .agent-empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--text-muted);
+}
+
+.agent-panel .agent-empty .empty-icon {
+  font-size: 32px;
+  display: block;
+  margin-bottom: 8px;
+  opacity: 0.5;
+}
+
+.agent-panel .agent-empty p {
+  font-size: 13px;
+}
+
+.agent-panel .agent-empty .hint {
+  font-size: 11px;
+  opacity: 0.7;
+  margin-top: 4px;
+}
+
+/* ─── Quick Create ──────────────────────── */
+
+.agent-panel .create-section {
+  margin: 0 12px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.agent-panel .create-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.agent-panel .create-header h4 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.agent-panel .btn-close-sm {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  transition: color var(--ease-out);
+}
+
+.agent-panel .btn-close-sm:hover {
+  color: var(--text-primary);
+}
+
+.agent-panel .create-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-panel .create-body .input {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color var(--ease-out);
+}
+
+.agent-panel .create-body .input:focus {
+  border-color: var(--accent);
+}
+
+.agent-panel .create-body textarea.input {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.agent-panel .input-mono {
+  font-family: var(--font-mono);
+  font-size: 11px !important;
+}
+
+.agent-panel .create-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.agent-panel .error-text {
+  font-size: 11px;
+  color: var(--accent-red);
+  margin-right: auto;
+}
+
+.agent-panel .btn {
+  padding: 6px 16px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.agent-panel .btn-cancel {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.agent-panel .btn-cancel:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.agent-panel .btn-confirm {
+  background: var(--accent);
+  color: var(--bg-deep);
+  font-weight: 600;
+}
+
+.agent-panel .btn-confirm:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.agent-panel .btn-confirm:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ─── Queue Section ─────────────────────── */
+
+.agent-panel .queue-section {
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.agent-panel .queue-section h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.agent-panel .queue-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 16px 0;
+}
+
+.agent-panel .queue-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-panel .queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+
+.agent-panel .queue-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-yellow);
+}
+
+.agent-panel .queue-agent {
+  flex: 1;
+  color: var(--text-secondary);
+}
+
+.agent-panel .queue-count {
+  color: var(--accent-yellow);
+  font-weight: 500;
 }
 </style>
