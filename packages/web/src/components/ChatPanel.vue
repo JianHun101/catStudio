@@ -2047,11 +2047,6 @@ const warnedAgentsText = computed(() => {
   border-color: var(--border-focus);
 }
 
-.chat-input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-glow);
-}
-
 .chat-input:disabled {
   opacity: 0.4;
   cursor: not-allowed;
