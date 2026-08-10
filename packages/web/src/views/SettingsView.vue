@@ -799,6 +799,10 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
+
+          <!-- Edit Modal（与 AgentPanel.vue:385 同款挂载——editingAgent 状态必须有弹窗消费，
+               否则卡片点击静默失效；测试锚定 SettingsView.test.ts 挂载断言） -->
+          <AgentEditModal :agent="editingAgent" @close="closeEdit" />
         </div>
 
         <!-- IM 接入：QQ 接入 / NapCat 子 Tab（原双 tab 内容整体平移） -->

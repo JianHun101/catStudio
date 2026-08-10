@@ -313,6 +313,8 @@ describe('SettingsView 猫咪管理（AgentPanel 展开态内容复制迁入）'
   it('新建表单 + 编辑弹窗（AgentEditModal 复用不迁）', () => {
     expect(source).toContain("import AgentEditModal from '../components/AgentEditModal.vue'")
     expect(source).toContain('editingAgent = agent')
+    // 挂载标签断言：仅 import 不实例化会导致编辑功能静默失效（d74a9e3 遗漏，审查抓回）
+    expect(source).toContain('<AgentEditModal :agent="editingAgent" @close="closeEdit" />')
     expect(source).toMatch(/function handleCreate[\s\S]*api\.createAgent/)
     expect(source).toContain('showCreate')
     expect(source).toContain('同名猫咪已存在，请换一个名字')
