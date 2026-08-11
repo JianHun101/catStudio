@@ -96,6 +96,21 @@ export async function dispatch(
     }
 
     if (slot.status === 'idle') {
+      // 交接请求去重（执行时点检查）：hook 在 commit 时投递「请补填交接文档」
+      // 请求、作者在回复中落库完整文档——请求排队期间文档已补填 → 跳过执行
+      // 不唤醒猫（727ff2e 案例：请求 03:19 入队、文档 03:20 落库、执行 03:23，
+      // 入队时检查看不到还没出生的文档，必须执行时点查）
+      if (isStaleHandoffRequest(cmd)) {
+        log.info('stale handoff request skipped (idle)', {
+          traceId: tid,
+          agentId: agent.id,
+          agentName: agent.name,
+          triggerMessageId: cmd.triggerMessageId,
+        })
+        // 标 done 防重启恢复按 queued 复活（P0 恢复只看 queued/running）
+        messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
+        continue
+      }
       await executeAgent(agent, cmd, tid)
     } else {
       const q = agentQueues.get(agent.id)!
@@ -155,6 +170,42 @@ export async function dispatch(
   }
 
   return tid
+}
+
+// ─── Handoff 交接请求去重 ─────────────────────────────
+
+/** 交接文档补填请求的固定前缀（handoff-gen 生成，N9 钉死的精确前缀） */
+const HANDOFF_FILL_REQUEST_PREFIX = '请补填以下交接文档'
+/** 交接文档模板中的 TODO 占位标记（作者补填后删除） */
+const HANDOFF_TODO_MARKER = 'TODO: 补填'
+const COMMIT_SHA_RE = /Commit: ([0-9a-f]{7,})/
+
+/**
+ * 交接请求是否已 stale：触发消息是「请补填交接文档」请求，且同 session 已有
+ * 该 commit 的完整文档（含 Commit: <sha> 且不含 TODO 占位标记）→ 请求已过时，
+ * 执行只会白叫醒猫（727ff2e 案例：hook 在 commit 时投递请求、作者在回复中
+ * 落库完整文档——请求排队期间文档已补填，执行时点检查可拦截）。
+ * 只做执行时点检查——入队时文档可能还没落库（hook 投递早于同轮回复落库），
+ * 入队时检查会漏判（03:19 入队、03:20 文档落库、03:23 执行的时窗）。
+ *
+ * 契约④ 防自证：请求自身（含 sha + 含 TODO 占位）不得作为"已补填"证据——
+ * TODO 占位标记检查天然排除；同时排除触发消息自身 id，防止请求消息内容
+ * 意外不含占位标记时自证误判。
+ */
+export function isStaleHandoffRequest(cmd: DispatchCommand): boolean {
+  if (!cmd.triggerContent.includes(HANDOFF_FILL_REQUEST_PREFIX)) return false
+  const m = cmd.triggerContent.match(COMMIT_SHA_RE)
+  if (!m) return false
+  const sha = m[1]
+  // 同 session 查已落库消息：存在含「Commit: <sha>」且不含「TODO: 补填」的
+  // 完整文档 → 请求已 stale（文档已补填投递）
+  const rows = messagesRepo.getAllSessionMessages(cmd.sessionId)
+  return rows.some(
+    (r) =>
+      r.id !== cmd.triggerMessageId && // 排除触发消息自身（防自证）
+      r.content.includes(`Commit: ${sha}`) &&
+      !r.content.includes(HANDOFF_TODO_MARKER)
+  )
 }
 
 // ─── Execution ──────────────────────────────────────
@@ -258,7 +309,21 @@ export async function completeExecution(
   const q = agentQueues.get(agentId)!
   // 弹队列前保存当前触发消息——弹完会被 next 覆盖，done 必须标在旧值上
   const finishedTrigger = slot.currentTriggerMessageId
-  const next = q.shift()
+
+  // 交接请求去重（dequeue 后、执行前检查）：请求排队期间作者已落库完整文档
+  // → 跳过执行不唤醒猫（727ff2e 案例：请求 03:19 入队、文档 03:20 落库、
+  // 执行 03:23——只有执行时点（dequeue 后）检查才看得到文档，入队时检查
+  // 会漏掉）。stale 命令标 done 后继续弹下一个，直到队列空或遇到非 stale
+  let next = q.shift()
+  while (next && isStaleHandoffRequest(next)) {
+    log.info('stale handoff request skipped (queued)', {
+      agentId,
+      triggerMessageId: next.triggerMessageId,
+    })
+    // 标 done 防重启恢复按 queued 复活（P0 恢复只看 queued/running）
+    messagesRepo.setDispatchState(next.triggerMessageId, 'done')
+    next = q.shift()
+  }
 
   if (finishedTrigger) {
     // P0 队列持久化：当前执行收尾即落库 done

@@ -529,4 +529,189 @@ describe('dispatch', () => {
       expect(next!.pendingTriggers).toEqual([])
     })
   })
+
+  // ─── 交接请求去重（stale handoff request skip）───
+  // 契约：触发消息含「请补填以下交接文档」+「Commit: sha」时，同 session 已有
+  // 完整文档（含 Commit: <sha> 且不含 TODO 占位）→ 请求 stale → 跳过执行不唤醒猫。
+  // 检查时点必须是执行前（dequeue 后）——请求入队时文档可能还没落库。
+
+  describe('stale handoff request skip', () => {
+    const SHA = 'a0ade7d'
+    /** 请求内容：hook 投递的交接文档补填请求（含 sha + TODO 占位） */
+    const fillRequest = (id: string) =>
+      makeMessage({
+        id,
+        mentions: ['店长'],
+        content: `@ds猫 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。\n\n## 2. Why\n<!-- TODO: 补填 -->\n\n> Commit: ${SHA}`,
+      })
+    /** 完整文档：作者补填后的交接文档（含 Commit: sha，无 TODO） */
+    const fullDoc = (id: string) =>
+      makeMessage({
+        id,
+        role: 'agent',
+        agentId: 'agent-1',
+        mentions: ['吐槽猫'],
+        content: `# 工作交接\n> Commit: ${SHA}\n> Message: catstudy [uuid] feat: ...\n\n## 2. Why — 关键决策\n已补填。`,
+      })
+
+    function insertMsg(msg: Message): void {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, mentions)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          msg.id,
+          msg.sessionId,
+          msg.agentId ?? null,
+          msg.role,
+          msg.content,
+          JSON.stringify(msg.mentions)
+        )
+    }
+
+    function getDispatchState(msgId: string): string | null {
+      const row = getDb()
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get(msgId) as { dispatch_state: string | null }
+      return row?.dispatch_state ?? null
+    }
+
+    it('① 空闲直跑路径：会话已有完整文档 + 新到请求 → 跳过执行（槽位不 busy、无执行、标 done）', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg(fullDoc('doc-1'))
+      insertMsg(fillRequest('req-1'))
+
+      await dispatchModule.dispatch('session-1', fillRequest('req-1'), [mockAgent])
+
+      // 槽位仍 idle（未执行）；请求标 done（防重启恢复复活）
+      expect(dispatchModule.getAgentState('agent-1')!.status).toBe('idle')
+      expect(getDispatchState('req-1')).toBe('done')
+    })
+
+    it('① 队列路径：请求排队期间完整文档落库 → dequeue 后跳过（不返回执行、标 done）', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg(makeMessage({ id: 'busy-1', mentions: ['店长'] }))
+      insertMsg(fillRequest('req-1'))
+      insertMsg(fullDoc('doc-1'))
+
+      // busy-1 直跑 → busy；req-1 排队
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'busy-1', mentions: ['店长'] }),
+        [mockAgent]
+      )
+      await dispatchModule.dispatch('session-1', fillRequest('req-1'), [mockAgent])
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(1)
+
+      // 执行中期间完整文档落库（03:20 场景）→ dequeue 时跳过 req-1
+      const next = await dispatchModule.completeExecution('agent-1', true)
+      expect(next).toBeUndefined() // 不返回执行
+      expect(getDispatchState('req-1')).toBe('done')
+      expect(dispatchModule.getAgentState('agent-1')!.status).toBe('idle')
+    })
+
+    it('① 队列路径：stale 请求后还有正常命令 → 跳过 stale，继续弹正常命令', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg(makeMessage({ id: 'busy-1', mentions: ['店长'] }))
+      insertMsg(fillRequest('req-1'))
+      insertMsg(fullDoc('doc-1'))
+      insertMsg(makeMessage({ id: 'msg-2', mentions: ['店长'] }))
+
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'busy-1', mentions: ['店长'] }),
+        [mockAgent]
+      )
+      await dispatchModule.dispatch('session-1', fillRequest('req-1'), [mockAgent])
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-2', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+
+      const next = await dispatchModule.completeExecution('agent-1', true)
+      expect(next!.triggerMessageId).toBe('msg-2') // 跳过 req-1，弹出 msg-2
+      expect(getDispatchState('req-1')).toBe('done')
+    })
+
+    it('② 无完整文档 → 照常执行（idle 直跑 + 队列弹出）', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg(fillRequest('req-1'))
+      insertMsg(fillRequest('req-2'))
+
+      // 空闲直跑：请求正常执行
+      await dispatchModule.dispatch('session-1', fillRequest('req-1'), [mockAgent])
+      expect(dispatchModule.getAgentState('agent-1')!.status).toBe('busy')
+      expect(getDispatchState('req-1')).toBe('running')
+
+      // 队列路径：req-1 执行期间第二个请求排队 → 弹出执行（无文档不跳过）
+      await dispatchModule.dispatch('session-1', fillRequest('req-2'), [mockAgent])
+      const next = await dispatchModule.completeExecution('agent-1', true)
+      expect(next!.triggerMessageId).toBe('req-2')
+      expect(getDispatchState('req-2')).toBe('running')
+    })
+
+    it('③ 普通 @ 消息不受影响（无「请补填以下交接文档」前缀 → 不过检查）', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg(fullDoc('doc-1'))
+      // 普通消息即使内容里恰好有 Commit: sha 字样也不受影响（无请求前缀）
+      const normal = makeMessage({
+        id: 'msg-normal',
+        mentions: ['店长'],
+        content: `这个 Commit: ${SHA} 的改动请看一下`,
+      })
+      insertMsg(normal)
+      await dispatchModule.dispatch('session-1', normal, [mockAgent])
+      expect(dispatchModule.getAgentState('agent-1')!.status).toBe('busy')
+    })
+
+    it('④ 防自证：会话只有请求自身（含 sha + 含 TODO）→ 不误判已补填，照常执行', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg(fillRequest('req-1'))
+
+      await dispatchModule.dispatch('session-1', fillRequest('req-1'), [mockAgent])
+      expect(dispatchModule.getAgentState('agent-1')!.status).toBe('busy')
+    })
+
+    it('④ 防自证：作者补填后的完整文档（含 Commit sha、无 TODO）不被误判为"请求"', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      // 完整文档自身作为触发消息（作者补填后 @ 吐槽猫 请审查）——不含请求前缀
+      const doc = fullDoc('doc-self')
+      doc.content = `@吐槽猫 请审查 ${SHA}。\n\n# 工作交接\n> Commit: ${SHA}\n已补填。`
+      doc.mentions = ['店长'] // 让 dispatch 命中 mockAgent（agent-1）
+      insertMsg(doc)
+      await dispatchModule.dispatch('session-1', doc, [mockAgent])
+      expect(dispatchModule.getAgentState('agent-1')!.status).toBe('busy')
+    })
+
+    it('同 session 限定：其他会话的完整文档不作证据（N6 session 限定语义）', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      // 另一会话需先存在（FK）
+      getDb()
+        .prepare("INSERT INTO sessions (id, title, agent_ids) VALUES ('session-2', 'test', '[]')")
+        .run()
+      const docOther = fullDoc('doc-other')
+      docOther.sessionId = 'session-2'
+      insertMsg(docOther)
+      insertMsg(fillRequest('req-1'))
+
+      await dispatchModule.dispatch('session-1', fillRequest('req-1'), [mockAgent])
+      expect(dispatchModule.getAgentState('agent-1')!.status).toBe('busy')
+      expect(getDispatchState('req-1')).toBe('running')
+    })
+
+    it('isStaleHandoffRequest 导出契约：非请求消息 / 无 sha → false', () => {
+      const asCmd = (triggerContent: string) =>
+        ({
+          sessionId: 'session-1',
+          triggerMessageId: 'm-any',
+          triggerContent,
+        }) as any
+      expect(dispatchModule.isStaleHandoffRequest(asCmd('你好'))).toBe(false)
+      expect(
+        dispatchModule.isStaleHandoffRequest(
+          asCmd('请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。')
+        )
+      ).toBe(false)
+    })
+  })
 })
