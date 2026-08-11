@@ -14,6 +14,11 @@ describe('DiffViewer', () => {
     expect(source).toContain("b.kind === 'diff' && b.v === 1")
   })
 
+  it('元素形状防御：filePath/diff 非 string 的畸形 block 整体过滤（防 parseUnifiedDiff(undefined) 崩渲染）', () => {
+    expect(source).toContain("typeof b.filePath === 'string'")
+    expect(source).toContain("typeof b.diff === 'string'")
+  })
+
   it('渲染文件标题（filePath）+ 文件图标', () => {
     expect(source).toContain('diff-file-header')
     expect(source).toContain('block.filePath')

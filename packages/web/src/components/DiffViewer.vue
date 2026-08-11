@@ -14,8 +14,18 @@ const props = defineProps<{
   blocks: RichBlock[]
 }>()
 
-/** 版本契约：只渲染 v===1 的 diff 块（v 升级时旧块整体丢弃，前端不猜格式） */
-const validBlocks = computed(() => props.blocks.filter((b) => b.kind === 'diff' && b.v === 1))
+/**
+ * 版本契约：只渲染 v===1 的 diff 块（v 升级时旧块整体丢弃，前端不猜格式）。
+ * 元素形状防御：filePath/diff 缺失（畸形 block）整体过滤——parseUnifiedDiff(undefined)
+ * 会在 .trim() 抛 TypeError 崩掉整个消息列表（Vue 无 errorCaptured 兜底），
+ * 一行类型收窄成本换渲染链路稳定性。
+ */
+const validBlocks = computed(() =>
+  props.blocks.filter(
+    (b) =>
+      b.kind === 'diff' && b.v === 1 && typeof b.filePath === 'string' && typeof b.diff === 'string'
+  )
+)
 
 function lineClass(line: { type: string; text: string }): string {
   if (line.text === DIFF_TRUNCATED_MARKER) return 'diff-line diff-truncated'
