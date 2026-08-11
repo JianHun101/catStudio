@@ -37,6 +37,29 @@ describe('App.vue 设置入口（全局位置）', () => {
   })
 })
 
+describe('App.vue 评估中心入口（E4-B 全局位置）', () => {
+  it('view 切换状态：showEval 默认关闭，EvaluationView v-else-if 挂载（与设置页互斥）', () => {
+    expect(appSource).toContain('const showEval = ref(false)')
+    expect(appSource).toContain(`<EvaluationView v-else-if="showEval" @close="showEval = false" />`)
+    expect(appSource).toContain("import EvaluationView from './views/EvaluationView.vue'")
+  })
+
+  it('评估入口在 panel-left 底部（left-sidebar-footer 设置按钮上方），点击打开评估中心', () => {
+    // 入口锚定左侧栏底部全局导航位（与设置同列，评估在上）
+    expect(appSource).toContain('title="评估中心"')
+    expect(appSource).toContain('aria-label="评估中心"')
+    expect(appSource).toContain('@click="showEval = true"')
+    expect(appSource).toContain('<span v-if="leftOpen" class="settings-entry-text">评估</span>')
+    // 两个入口同属 left-sidebar-footer（纵向排列）
+    const footerStart = appSource.indexOf('left-sidebar-footer')
+    const evalIdx = appSource.indexOf('title="评估中心"')
+    const settingsIdx = appSource.indexOf('title="设置"')
+    expect(footerStart).toBeGreaterThan(-1)
+    expect(evalIdx).toBeGreaterThan(footerStart)
+    expect(settingsIdx).toBeGreaterThan(evalIdx)
+  })
+})
+
 describe('App.vue 三栏布局（B1 恢复右栏——clowder-ai 精简评估面板）', () => {
   it('grid 三栏 260px 1fr 300px，左折叠态 56px 1fr 300px（右栏保持）', () => {
     expect(appSource).toContain('grid-template-columns: 260px 1fr 300px;')

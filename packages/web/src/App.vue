@@ -4,12 +4,16 @@ import SessionList from './components/SessionList.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import SessionAgentsPanel from './components/SessionAgentsPanel.vue'
 import SettingsView from './views/SettingsView.vue'
+import EvaluationView from './views/EvaluationView.vue'
 import { useChatStore } from '@/stores/chat'
 
 const store = useChatStore()
 
 /** 全屏设置页 view 切换（无 vue-router，App 级布尔状态）——入口在左侧栏底部齿轮 */
 const showSettings = ref(false)
+
+/** 全屏评估中心 view 切换（E4-B，照 SettingsView 同款模式）——入口在左侧栏底部（设置上方） */
+const showEval = ref(false)
 
 /** User manually toggled the left sidebar — once set, auto-hide on narrow windows
  *  respects explicit choice and won't auto-show when the window widens again. */
@@ -70,14 +74,33 @@ onUnmounted(() => {
 
   <SettingsView v-if="showSettings" @close="showSettings = false" />
 
+  <EvaluationView v-else-if="showEval" @close="showEval = false" />
+
   <div v-else class="app-layout" :class="{ 'left-closed': !leftOpen }">
     <aside class="panel-left">
       <div class="panel-inner">
         <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />
       </div>
-      <!-- 全局设置入口：左侧栏底部齿轮（Claude Desktop 图标条模式）——设置页为全局视图，
+      <!-- 全局入口（Claude Desktop 图标条模式）：评估中心（E4-B）+ 设置——均为全局视图，
            严禁放会话区（ChatPanel）——会话区入口会被误解为单会话配置 -->
       <div class="left-sidebar-footer">
+        <button
+          class="settings-entry"
+          :class="{ 'settings-entry-collapsed': !leftOpen }"
+          title="评估中心"
+          aria-label="评估中心"
+          @click="showEval = true"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M2.5 13.5V9M6 13.5V6M9.5 13.5v-5M13 13.5V3"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span v-if="leftOpen" class="settings-entry-text">评估</span>
+        </button>
         <button
           class="settings-entry"
           :class="{ 'settings-entry-collapsed': !leftOpen }"
@@ -271,6 +294,10 @@ onUnmounted(() => {
   flex-shrink: 0;
   padding: 10px 12px;
   border-top: 1px solid var(--border-subtle);
+  /* 评估中心 + 设置两个入口纵向排列 */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .settings-entry {

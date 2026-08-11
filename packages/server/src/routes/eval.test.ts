@@ -318,4 +318,41 @@ describe('Eval Routes', () => {
       expect(JSON.parse(res.body).error).toContain('comment')
     })
   })
+
+  describe('GET /api/eval/episode-stats（E4-B 契约缺口裁决补充）', () => {
+    it('空库 → 全零统计', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/eval/episode-stats' })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.stats).toEqual({ versionStale: 0, uRoot: {}, hRoot: {}, open: 0 })
+    })
+
+    it('有数据 → U 根/H 根 outcome 分列计数，open 单列，H 根不计任务结局', async () => {
+      const db = getDb()
+      // 裸 SQL 种 episodes（episodes 表无 FK 依赖，直接插）
+      const seedEpisode = (id: string, triggeredBy: 'U' | 'H', outcome: string | null) => {
+        db.prepare(
+          `INSERT INTO episodes (id, root_trigger_message_id, root_triggered_by, root_message_id,
+                                 task_id, chain_task_id, session_id, outcome, episode_state, classification_ver)
+           VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, 'classified', 'stale-ver')`
+        ).run(id, id, triggeredBy, outcome)
+      }
+      seedEpisode('e1', 'U', 'success')
+      seedEpisode('e2', 'U', 'success')
+      seedEpisode('e3', 'U', 'corrected_success')
+      seedEpisode('e4', 'U', null) // outcome NULL → 计入 open 不计入 uRoot
+      seedEpisode('e5', 'H', 'abandoned')
+      seedEpisode('e6', 'H', 'success') // H 根（审查链）不计任务结局，但单独计数（E3 拍板语义）
+
+      const res = await app.inject({ method: 'GET', url: '/api/eval/episode-stats' })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.stats.uRoot).toEqual({ success: 2, corrected_success: 1 })
+      expect(body.stats.hRoot).toEqual({ abandoned: 1, success: 1 })
+      expect(body.stats.open).toBe(1)
+      expect(body.stats.versionStale).toBe(6) // 6 行全部 stale 版本
+    })
+  })
 })

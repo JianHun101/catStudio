@@ -105,6 +105,52 @@ export interface SummaryConfig {
   needsRestart: boolean
 }
 
+// ─── Eval 评估中心（E4-A 后端契约，snake_case 原样返回）─────────
+
+/** 评分行（EvalScoreRow + join agents 的猫名；agent 已删除时 agent_name 为 null） */
+export interface EvalScoreRow {
+  id: string
+  message_id: string
+  session_id: string
+  agent_id: string | null
+  score: number
+  dimensions: string | null
+  judge_model: string
+  sample_reason: string
+  created_at: string
+  agent_name: string | null
+}
+
+/** 按猫聚合（count / avg_score / low_score_rate≤2 占比，服务端 ROUND 2 位） */
+export interface ScoreAggregate {
+  agent_id: string | null
+  agent_name: string | null
+  count: number
+  avg_score: number
+  low_score_rate: number
+}
+
+/** 待回标样本（low_score 且无 user_feedback，附回复全文 + 前置上下文数组） */
+export interface PendingReviewScore extends EvalScoreRow {
+  reply_content: string
+  reply_created_at: string
+  context: Array<{
+    id: string
+    role: string
+    agent_id: string | null
+    content: string
+    created_at: string
+  }>
+}
+
+/** 任务结局分布（E4-B 契约缺口裁决补充的路由）：U 根/H 根 outcome 计数 + open + 版本偏差 */
+export interface EpisodeStats {
+  versionStale: number
+  uRoot: Record<string, number>
+  hRoot: Record<string, number>
+  open: number
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -250,4 +296,28 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  // Eval 评估中心（E4-A 后端四接口 + E4-B 契约缺口裁决补充的 episode-stats；纯展示 + 回标写入零 LLM）
+  getEvalScores: (limit?: number, agentId?: string) => {
+    const params = new URLSearchParams()
+    if (limit) params.set('limit', String(limit))
+    if (agentId) params.set('agent_id', agentId)
+    const qs = params.toString()
+    return request<{ ok: boolean; scores: EvalScoreRow[] }>(`/eval/scores${qs ? `?${qs}` : ''}`)
+  },
+
+  getEvalAggregates: () =>
+    request<{ ok: boolean; aggregates: ScoreAggregate[] }>('/eval/aggregates'),
+
+  getEvalPending: () =>
+    request<{ ok: boolean; pending: PendingReviewScore[] }>('/eval/review/pending'),
+
+  /** 提交回标（重复提交同一 eval_score_id → 后端覆盖 + log 留痕，covered=true） */
+  submitEvalReview: (evalScoreId: string, data: { score: number; comment?: string }) =>
+    request<{ ok: boolean; covered: boolean }>(`/eval/review/${evalScoreId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getEvalEpisodeStats: () => request<{ ok: boolean; stats: EpisodeStats }>('/eval/episode-stats'),
 }

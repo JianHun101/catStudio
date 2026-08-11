@@ -6,6 +6,8 @@
  * - GET /api/eval/review/pending            待回标样本（low_score 且无回标，附回复全文 + 前置 10 条上下文）
  * - POST /api/eval/review/:evalScoreId      { score: 1-5, comment? } 写回标 + 翻转 sample_reason；
  *                                           重复提交同一 eval_score_id → 覆盖 + log 留痕（契约钉死分支）
+ * - GET /api/eval/episode-stats             任务结局分布（U 根/H 根 outcome 计数 + open + 版本偏差，
+ *                                           挂现成 episodeStats()，办成率前端算）
  *
  * 返回 snake_case 原样出（前端直接消费 DB 行），错误 { error } + 4xx 钉死契约类型。
  * 纯展示 + 回标写入，零 LLM 调用。
@@ -16,6 +18,7 @@ import {
   evalScores as evalScoresRepo,
   userFeedback as userFeedbackRepo,
 } from '../db/repository/index.js'
+import { episodeStats } from '../eval/episodes.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('eval-routes')
@@ -43,6 +46,15 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
   /** 按猫聚合：count / avg_score / low_score_rate（≤2 占比） */
   app.get('/api/eval/aggregates', async (_req, reply) => {
     return reply.send({ ok: true, aggregates: evalScoresRepo.getAggregates() })
+  })
+
+  /**
+   * 任务结局分布（E4-B 观察 tab 数据源，契约缺口裁决补充的唯二后端改动之一）。
+   * 挂现成 episodeStats()：U 根/H 根 outcome 计数 + open + 版本偏差；
+   * 办成率口径钉死前端算：(success + corrected_success) / Σ(uRoot 各 outcome 计数)，open 不计入分母。
+   */
+  app.get('/api/eval/episode-stats', async (_req, reply) => {
+    return reply.send({ ok: true, stats: episodeStats() })
   })
 
   /** 待回标样本：low_score 且无 user_feedback，每条附回复全文 + 前置最近 10 条上下文 */
