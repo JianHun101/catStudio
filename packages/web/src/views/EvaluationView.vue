@@ -450,6 +450,8 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  box-sizing: border-box;
+  width: 100%;
   padding: 20px 28px 32px;
   max-width: 860px;
   margin: 0 auto;
