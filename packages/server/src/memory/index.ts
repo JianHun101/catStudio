@@ -184,6 +184,12 @@ export async function searchMemoriesMulti(
   const maxDistance = parseFloat(process.env.MEMORY_MAX_DISTANCE || '0.6')
   const uniqueQueries = [...new Set(queries.map((q) => q.trim()).filter(Boolean))]
 
+  // 混合检索开关（MEMORY_HYBRID_ENABLED='1'）：向量 + FTS5 关键词双通道 RRF 融合。
+  // 开关关（默认）→ 以下现有纯向量路径一行不动，行为与现网逐字节一致
+  if (isHybridRetrievalEnabled()) {
+    return searchMemoriesHybridPath(uniqueQueries, topK, maxDistance)
+  }
+
   // 并行嵌入所有查询；单条失败降级为跳过该通道
   const vectors = await Promise.all(
     uniqueQueries.map(async (q) => {
@@ -221,6 +227,83 @@ export async function searchMemoriesMulti(
   }
 
   return [...merged.values()].sort((a, b) => a.distance - b.distance).slice(0, topK)
+}
+
+// ─── 混合检索路径（开关开时替代纯向量路径）──────────────
+
+/** 混合检索开关（MEMORY_HYBRID_ENABLED='1'；默认关，检索行为与现网逐字节一致） */
+export function isHybridRetrievalEnabled(): boolean {
+  return (process.env.MEMORY_HYBRID_ENABLED || '0') === '1'
+}
+
+/**
+ * 混合检索路径：每个查询独立跑 向量+FTS5 关键词 RRF 融合（repo 层），
+ * 多查询结果按最优排名（bestIndex）合并去重，返回 top-K。
+ *
+ * 容错：
+ * - 单查询嵌入失败 → 该查询降级为仅关键词通道（关键词通道正是为短词召回设计）
+ * - 关键词通道失败（FTS 表缺失等）→ repo 层已降级返回空，结果等价纯向量
+ * - 纯关键词命中无向量距离 → distance 填 maxDistance 边界值（与 repo 层哨兵语义一致）
+ */
+
+/** 类型守卫：向量通道行带 distance 真值，关键词通道行无该字段（显式谓词，绕开 in 收窄歧义） */
+function isVectorHitRow(
+  r: memoriesRepo.MemorySearchResult | memoriesRepo.KeywordSearchResult
+): r is memoriesRepo.MemorySearchResult {
+  return 'distance' in r
+}
+
+async function searchMemoriesHybridPath(
+  queries: string[],
+  topK: number,
+  maxDistance: number
+): Promise<RetrievedMemory[]> {
+  type Scored = { row: RetrievedMemory; bestIndex: number }
+  const merged = new Map<string, Scored>()
+
+  for (const q of queries) {
+    let blob: Buffer | null = null
+    try {
+      const v = await embedText(q)
+      if (v && v.length > 0) blob = vectorToBlob(v)
+    } catch (err: any) {
+      log.warn('混合检索：查询嵌入失败，降级仅关键词通道', { error: err.message })
+    }
+
+    let rows: memoriesRepo.MemorySearchResult[] | memoriesRepo.KeywordSearchResult[]
+    if (blob) {
+      rows = memoriesRepo.searchMemoriesHybrid(blob, q, topK, maxDistance)
+    } else {
+      rows = memoriesRepo.searchMemoriesByKeyword(q, topK)
+    }
+
+    rows.forEach((r, i) => {
+      const candidate: RetrievedMemory = isVectorHitRow(r)
+        ? {
+            id: r.id,
+            content: r.content,
+            distance: r.distance,
+            sourceMessageId: r.source_message_id,
+            createdAt: r.created_at,
+          }
+        : {
+            id: r.id,
+            content: r.content,
+            distance: maxDistance,
+            sourceMessageId: r.source_message_id,
+            createdAt: r.created_at,
+          }
+      const existing = merged.get(r.id)
+      if (!existing || i < existing.bestIndex) {
+        merged.set(r.id, { row: candidate, bestIndex: i })
+      }
+    })
+  }
+
+  return [...merged.values()]
+    .sort((a, b) => a.bestIndex - b.bestIndex)
+    .slice(0, topK)
+    .map((s) => s.row)
 }
 
 // ─── 上下文构建 ───────────────────────────────────────

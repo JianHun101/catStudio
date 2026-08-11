@@ -134,6 +134,12 @@ process.env.EVAL_ALERT_SUCCESS_RATE ??= '0.8'
 process.env.EVAL_ALERT_TIMEOUT_RATE ??= '0.1'
 process.env.EVAL_ALERT_REWORK_RATE ??= '0.3'
 
+// ─── 混合检索配置 ──────────────────────────────
+// MEMORY_HYBRID_ENABLED — 混合检索开关（'1' 开 / 默认 '0' 关）：
+//   向量通道 + FTS5 关键词通道（bigram + RRF 融合）。默认关——保守策略：
+//   检索行为与现网逐字节一致，防评估数据突变，上线观察后再开
+process.env.MEMORY_HYBRID_ENABLED ??= '0'
+
 // ─── 会话交接配置 ──────────────────────────────
 // HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
 process.env.HANDOFF_ENABLED ??= 'true'

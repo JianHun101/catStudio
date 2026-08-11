@@ -50,6 +50,7 @@ describe('memory', () => {
   afterEach(() => {
     resetDb()
     delete process.env.MEMORY_MAX_DISTANCE
+    delete process.env.MEMORY_HYBRID_ENABLED
   })
 
   describe('vectorToBlob / blobToVector', () => {
@@ -382,6 +383,67 @@ describe('memory', () => {
       const ctx = await memoryModule.buildKnowledgeContext('x')
       // topK=1 → 只输出一条
       expect(ctx.match(/^\d+\./gm)).toHaveLength(1)
+    })
+  })
+
+  describe('hybrid 检索开关', () => {
+    /**
+     * 夹具：两条记忆（需 FTS 表，beforeEach 自建）：
+     * - mem-a "重放机制说明" 向量 [0,0,1,0] → 与 mock embedText('重放') 距离 ≈ 0.99，
+     *   纯向量路径被 MEMORY_MAX_DISTANCE(0.6) 过滤；但含关键词"重放" → FTS 通道命中
+     * - mem-b "完全无关的其他话题" 向量 [1,120,1,0.5] == mock embedText 同向 → 距离 ≈ 0
+     */
+    const insertHybridFixture = () => {
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+        VALUES ('agent-1', '店长', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')
+      `
+      ).run()
+      db.exec(
+        `CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, tokenize='unicode61')`
+      )
+      const { vectorToBlob: toBlob } = memoryModule
+      const now = new Date().toISOString()
+      memoriesRepo.insertMemory('mem-a', 'agent-1', '重放机制说明', toBlob([0, 0, 1, 0]), 'm1', now)
+      memoriesRepo.insertMemory(
+        'mem-b',
+        'agent-1',
+        '完全无关的其他话题',
+        toBlob([1, 120, 1, 0.5]),
+        'm2',
+        now
+      )
+    }
+
+    it('开关默认关（isHybridRetrievalEnabled=false），设 1 开启', () => {
+      expect(memoryModule.isHybridRetrievalEnabled()).toBe(false)
+      process.env.MEMORY_HYBRID_ENABLED = '1'
+      expect(memoryModule.isHybridRetrievalEnabled()).toBe(true)
+    })
+
+    it('开关关（默认）：行为与现网一致——向量距离过滤依旧生效，关键词救回不出现', async () => {
+      insertHybridFixture()
+      const ctx = await memoryModule.buildMemoryContext('重放')
+      // mem-a 向量距离超限被过滤（与纯向量路径逐字节一致）
+      expect(ctx).not.toContain('重放机制说明')
+      expect(ctx).toContain('完全无关的其他话题')
+    })
+
+    it('开关开：FTS 关键词通道救回向量距离超限的记忆（RRF 融合生效）', async () => {
+      insertHybridFixture()
+      process.env.MEMORY_HYBRID_ENABLED = '1'
+      const ctx = await memoryModule.buildMemoryContext('重放')
+      expect(ctx).toContain('重放机制说明')
+      expect(ctx).toContain('完全无关的其他话题')
+    })
+
+    it('开关开但 FTS 表缺失：降级纯向量不抛', async () => {
+      insertHybridFixture()
+      getDb().exec('DROP TABLE IF EXISTS memories_fts')
+      process.env.MEMORY_HYBRID_ENABLED = '1'
+      await expect(memoryModule.buildMemoryContext('重放')).resolves.toContain('完全无关的其他话题')
     })
   })
 })
