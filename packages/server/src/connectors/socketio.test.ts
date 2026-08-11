@@ -3147,6 +3147,49 @@ describe('socketio connector', () => {
       expect(dispatch).not.toHaveBeenCalled()
     })
 
+    it('OQ1: 部分完成消息恢复——有 completed 执行行的目标跳过不重派（防双执行）、无行目标正常调度', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      // 双 agent 会话：agent-1（店长）已为该消息完整执行过（OQ1 完成路径守卫
+      // 保持 dispatch_state=queued 的场景），agent-2（ds猫）排队未执行
+      getDb()
+        .prepare(
+          `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run('agent-2', 'ds猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test')
+      getDb()
+        .prepare('UPDATE sessions SET agent_ids = ? WHERE id = ?')
+        .run(JSON.stringify(['agent-1', 'agent-2']), 'session-1')
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, ?, 'user', ?, '["店长","ds猫"]', datetime('now', '-2 minutes'))`
+        )
+        .run('msg-queued', 'session-1', '@店长 @ds猫 多目标')
+      getDb()
+        .prepare('UPDATE messages SET dispatch_state = ? WHERE id = ?')
+        .run('queued', 'msg-queued')
+      getDb()
+        .prepare(
+          `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, ended_at)
+           VALUES (?, ?, ?, ?, 'completed', datetime('now', '-1 minute'), datetime('now'))`
+        )
+        .run('exec-1', 'session-1', 'agent-1', 'msg-queued')
+
+      await mod.recoverQueuedMessages(mockIo as any)
+
+      // 只有 agent-2 被调度：agent-1 有 completed 行 → 跳过不重派（否则重启后
+      // 已完成目标双执行）；agent-2 无执行行 → 正常补派
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ id: 'msg-queued' }),
+        [expect.objectContaining({ id: 'agent-2' })],
+        expect.any(String)
+      )
+    })
+
     it('无 API key 的 agent → 跳过（无法执行）', async () => {
       const mod = await import('./socketio.js')
       const { dispatch } = await import('../dispatch/index.js')

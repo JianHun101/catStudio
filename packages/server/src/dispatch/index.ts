@@ -341,7 +341,21 @@ export async function completeExecution(
 
   if (finishedTrigger) {
     // P0 队列持久化：当前执行收尾即落库 done
-    messagesRepo.setDispatchState(finishedTrigger, 'done')
+    // OQ1 完成路径守卫（多目标部分完成）：done 是消息级 terminal 状态——多目标
+    // @[A,B] 下 A idle 直跑（executeAgent 不等 LLM）、B busy 排队写 queued，A 的
+    // LLM 完成后无条件写 done 会把 B 的 queued 覆盖 → 重启时 recoverQueuedMessages
+    // （只捞 queued/running）丢 B 排队执行。当前状态 = queued（兄弟目标排队中）
+    // → 不写 done 保持 queued（恢复路径可捞，B 的排队命令不丢）；running/done/NULL
+    // → 照旧写 done（单目标直跑时是 running，无兄弟覆盖）。queued 保持后由
+    // recoverQueuedMessages 按 execution_logs 跳过已完成目标防重派双执行。
+    if (messagesRepo.getDispatchState(finishedTrigger) !== 'queued') {
+      messagesRepo.setDispatchState(finishedTrigger, 'done')
+    } else {
+      log.info('多目标部分完成：保持 queued（兄弟目标排队中，不写 done）', {
+        agentId,
+        triggerMessageId: finishedTrigger,
+      })
+    }
   }
 
   if (next) {

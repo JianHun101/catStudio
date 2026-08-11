@@ -570,6 +570,65 @@ describe('dispatch', () => {
     })
   })
 
+  describe('OQ1 完成路径守卫 — 多目标部分完成不覆盖排队', () => {
+    /** 插入一条用户消息（dispatch_state 默认 NULL） */
+    function insertMsg(id: string, mentions: string): void {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', '多目标', ?)`
+        )
+        .run(id, 'session-1', mentions)
+    }
+
+    function getDispatchState(msgId: string): string | null {
+      const row = getDb()
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get(msgId) as { dispatch_state: string | null }
+      return row?.dispatch_state ?? null
+    }
+
+    it('① 多目标 @[店长,ds猫]：店长直跑完成时 ds猫 已排队 → 保持 queued 不写 done（重启恢复可捞）', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      dispatchModule.initAgentSlot('agent-2')
+
+      // ds猫（agent-2）busy（msg-b1 直跑）→ 多目标消息到达：店长（agent-1）
+      // idle 直跑、ds猫 busy 排队写 queued
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-b1', mentions: ['ds猫'] }),
+        [mockAgent2]
+      )
+      insertMsg('msg-multi', '["店长","ds猫"]')
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-multi', mentions: ['店长', 'ds猫'] }),
+        [mockAgent, mockAgent2]
+      )
+      expect(getDispatchState('msg-multi')).toBe('queued')
+
+      // 店长 LLM 完成 → completeExecution：当前状态 queued（ds猫 排队中）
+      // → 守卫不写 done，保持 queued（否则重启时 recoverQueuedMessages 只捞
+      // queued/running，ds猫 的排队命令静默丢失）
+      await dispatchModule.completeExecution('agent-1', true)
+      expect(getDispatchState('msg-multi')).toBe('queued')
+      expect(dispatchModule.getAgentState('agent-2')!.queueLength).toBe(1)
+    })
+
+    it('② 对照：单目标直跑完成 → 照旧写 done（无兄弟覆盖）', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg('msg-1', '[]')
+      await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-1', mentions: ['店长'] }), [
+        mockAgent,
+      ])
+      expect(getDispatchState('msg-1')).toBe('running')
+
+      await dispatchModule.completeExecution('agent-1', true)
+
+      expect(getDispatchState('msg-1')).toBe('done')
+    })
+  })
+
   describe('命令自持 traceId/depth（冻结改动补测）', () => {
     it('出队命令用自身 traceId 与 depth，不继承执行者', async () => {
       dispatchModule.initAgentSlot('agent-1')

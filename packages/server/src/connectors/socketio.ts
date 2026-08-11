@@ -1519,12 +1519,32 @@ export async function recoverQueuedMessages(io: SocketServer): Promise<void> {
         const targets =
           mentions.length > 0 ? agents.filter((a) => mentions.includes(a.name)) : agents
 
-        // 无 API key 无法执行（与 recoverInterruptedExecutions 一致）
-        const executable = targets.filter(
-          (a) => a.llmApiKey && a.llmApiKey !== 'sk-your-api-key-here'
+        const logsByTrigger = execLogsRepo.getLogsByTriggerMessage(row.id)
+
+        // OQ1 幂等防线④（完成路径守卫的配套）：多目标消息 A 直跑完成、B 排队时，
+        // completeExecution 保持 dispatch_state=queued（守卫见 dispatch/index.ts
+        // completeExecution）——重启恢复此处捞到该消息，若把已完成目标也重派会
+        // 双执行。execution_logs 上 status='completed' 的目标 = 该目标已为此消息
+        // 完整执行过 → 跳过不重派；无 completed 行的目标（B）正常调度。
+        // （logsByTrigger 已在 :1527 取全量，completed 集从既有数据派生，零新增 SQL）
+        const completedSet = new Set(
+          logsByTrigger.filter((l) => l.status === 'completed').map((l) => l.agent_id)
         )
 
-        const logsByTrigger = execLogsRepo.getLogsByTriggerMessage(row.id)
+        // 无 API key 无法执行（与 recoverInterruptedExecutions 一致）
+        const executable = targets.filter(
+          (a) => a.llmApiKey && a.llmApiKey !== 'sk-your-api-key-here' && !completedSet.has(a.id)
+        )
+
+        if (completedSet.size > 0) {
+          log.info('恢复跳过已完成目标（OQ1 部分完成消息：保持 queued 的兄弟已跑完）', {
+            messageId: row.id,
+            sessionId: row.session_id,
+            completedAgents: [...completedSet].map(
+              (id) => agents.find((a) => a.id === id)?.name ?? id
+            ),
+          })
+        }
 
         // 幂等防线①（职责切分）：同一触发消息下该 agent 有被中断（server_restart）
         // 或进行中（running——串行化后此处只可能是启动期间实时执行）的
