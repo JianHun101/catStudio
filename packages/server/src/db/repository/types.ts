@@ -52,6 +52,8 @@ export interface MessageRow {
   task_id: string | null
   thinking_content: string | null
   dispatch_state: string | null
+  /** 附加富内容 JSON（diff 块等；独立列，永不进 LLM 上下文） */
+  extra: string | null
   created_at: string
 }
 

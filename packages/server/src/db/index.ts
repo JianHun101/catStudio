@@ -221,6 +221,12 @@ export function initDb(): void {
       sql: `ALTER TABLE messages ADD COLUMN dispatch_state TEXT DEFAULT NULL`,
     },
     {
+      name: 'extra on messages',
+      // 消息附加富内容（diff 块等，JSON 字符串）——对话内 diff 展示通道。
+      // 独立列 = 永不进 LLM 上下文（上下文构建只消费 content 列）。
+      sql: `ALTER TABLE messages ADD COLUMN extra TEXT DEFAULT NULL`,
+    },
+    {
       name: 'role on agents',
       // 默认 'unknown'——老库零回归（白名单对未知角色放行不拦截），seed 后各就其位
       sql: `ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'unknown'`,
@@ -304,6 +310,20 @@ export function initDb(): void {
         classification_ver TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    },
+    // 混合检索 FTS5 关键词通道表（additive：CREATE VIRTUAL TABLE IF NOT EXISTS 幂等，
+    // 老库重跑零副作用）。独立表（非 external content）——内容为 bigram 预分词串
+    // （空格 join，memories.ts bigramTokenize 应用层切分），unicode61 按字母/数字切
+    // token：每个 bigram 独立成 token，FTS 侧零中文分词依赖；rowid 映射
+    // memories.rowid，检索 JOIN 取原文。同步走应用层双写（memories.ts 各写函数
+    // 配套），测试 :memory: 无此表时双写容错降级（no such table 静默跳过），
+    // 检索侧 hybrid 开关下同样降级纯向量
+    {
+      name: 'memories_fts table (FTS5 混合检索)',
+      sql: `CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+        content,
+        tokenize='unicode61'
       )`,
     },
   ]

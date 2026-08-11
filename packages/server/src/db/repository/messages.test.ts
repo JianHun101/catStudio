@@ -156,4 +156,58 @@ describe('messages repo — 队列持久化', () => {
       expect(pending).toEqual([])
     })
   })
+
+  // ─── extra 列（对话内 diff 富文本块通道）──────────────
+  describe('extra 列', () => {
+    it('updateMessageExtra 补写 extra（diff 采集在回复落库后进行）', () => {
+      const id = uuid()
+      messagesRepo.insertMessage(id, 's1', 'user', 'hello', '[]', null, null)
+      const extra = JSON.stringify({
+        rich: { v: 1, blocks: [{ id: 'diff-1', kind: 'diff', v: 1, filePath: 'a.ts', diff: 'x' }] },
+      })
+
+      messagesRepo.updateMessageExtra(id, extra)
+
+      const row = db.prepare('SELECT extra FROM messages WHERE id = ?').get(id) as {
+        extra: string | null
+      }
+      expect(JSON.parse(row.extra!)).toEqual({
+        rich: { v: 1, blocks: [{ id: 'diff-1', kind: 'diff', v: 1, filePath: 'a.ts', diff: 'x' }] },
+      })
+    })
+
+    it('updateMessageExtra 对不存在消息不抛（fire-and-forget）', () => {
+      expect(() =>
+        messagesRepo.updateMessageExtra('nonexistent-id', '{"rich":{"v":1,"blocks":[]}}')
+      ).not.toThrow()
+    })
+
+    it('insertAgentMessage 可直接带 extra 落库', () => {
+      const id = uuid()
+      messagesRepo.insertAgentMessage(
+        id,
+        's1',
+        'agent-1',
+        '摘要',
+        null,
+        undefined,
+        '{"rich":{"v":1,"blocks":[]}}'
+      )
+
+      const row = db.prepare('SELECT extra FROM messages WHERE id = ?').get(id) as {
+        extra: string | null
+      }
+      expect(row.extra).toBe('{"rich":{"v":1,"blocks":[]}}')
+    })
+
+    it('insertAgentMessage 不带 extra → extra 列为 NULL（旧消息零回归）', () => {
+      const id = uuid()
+      messagesRepo.insertAgentMessage(id, 's1', 'agent-1', '摘要', null)
+
+      const row = db.prepare('SELECT extra FROM messages WHERE id = ?').get(id) as {
+        extra: string | null
+      }
+      expect(row.extra).toBeNull()
+    })
+  })
 })

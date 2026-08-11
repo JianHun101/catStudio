@@ -72,6 +72,13 @@ describe('db', () => {
       expect(colNames).toContain('content')
       expect(colNames).toContain('mentions')
     })
+
+    it('has extra column（对话内 diff 富文本块通道，additive 迁移）', () => {
+      const db = getDb()
+      const cols = db.pragma('table_info(messages)') as Array<{ name: string }>
+      const colNames = cols.map((c) => c.name)
+      expect(colNames).toContain('extra')
+    })
   })
 
   describe('schema - memories table', () => {
@@ -100,7 +107,7 @@ describe('db', () => {
       const db = getDb()
       expect(() => {
         db.prepare(
-          "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', 'nonexistent', 'user', 'test')",
+          "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', 'nonexistent', 'user', 'test')"
         ).run()
       }).toThrow()
     })
@@ -112,7 +119,7 @@ describe('db', () => {
       db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
       expect(() => {
         db.prepare(
-          "INSERT INTO messages (id, session_id, agent_id, role, content) VALUES ('m1', 's1', null, 'user', 'test')",
+          "INSERT INTO messages (id, session_id, agent_id, role, content) VALUES ('m1', 's1', null, 'user', 'test')"
         ).run()
       }).not.toThrow()
     })

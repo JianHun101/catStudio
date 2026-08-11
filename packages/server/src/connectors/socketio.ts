@@ -59,6 +59,7 @@ import { consumeUserRequestSignals } from '../llm/user-request-signals.js'
 import { parseJsonArray } from '../utils.js'
 import { recordReviewVerdict } from '../eval/verdict-parser.js'
 import { maybeScoreSample } from '../eval/sampler.js'
+import { collectCommitDiffs, parseMessageExtra } from '../git/diff-collector.js'
 import { updateRunningSummary } from '../summarizer/index.js'
 import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
 import { ingestUserMessage } from './ingest.js'
@@ -181,6 +182,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           mentions: JSON.parse(row.mentions || '[]'),
           taskId: row.task_id || undefined,
           thinkingContent: row.thinking_content || undefined,
+          extra: parseMessageExtra(row.extra), // 富文本块（diff 等）；版本不符/损坏 → undefined 纯文本回退
           createdAt: row.created_at.replace(' ', 'T') + 'Z',
           // 历史恢复同样携带重启类型（前端按钮渲染依据；DB 不存类型，内容前缀是唯一事实源）
           ...(isRestart
@@ -2500,17 +2502,38 @@ async function runAgentReply(
   const restartReason = signalRestart?.reason || extractRestartReason(fullContent)
   const restartExpiresAt = new Date(Date.now() + RESTART_TTL_MS).toISOString()
 
-  const finalMsg = {
+  const finalMsg: Message = {
     id: msgId,
     sessionId,
     agentId: agent.id,
-    role: 'agent' as const,
+    role: 'agent',
     content: fullContent,
     mentions: [] as string[],
     taskId: triggerMsg.taskId || undefined,
     thinkingContent: thinkingContent || undefined,
     createdAt: new Date().toISOString(),
     ...(isRestartRequest ? { messageType: 'restart_request' as const, restartExpiresAt } : {}),
+  }
+
+  // 对话内 diff 采集（富文本块通道）：猫的 content 只写摘要，diff 正文由
+  // server 自动从 git 反查 commit 采集——extra 独立列，永不进 LLM 上下文。
+  // 失败静默跳过（collectCommitDiffs 内部 5s 超时 + 查不到即 null），不阻塞回复；
+  // 外层 try/catch 双保险（保险丝：任何意外都不让回复 emit 延迟/失败）。
+  if (triggerMsg.id) {
+    try {
+      const blocks = await collectCommitDiffs(triggerMsg.id)
+      if (blocks && blocks.length > 0) {
+        finalMsg.extra = { rich: { v: 1, blocks } }
+        // 回复已落库（insertAgentMessage 先于采集），成功后补写 extra 列
+        messagesRepo.updateMessageExtra(msgId, JSON.stringify(finalMsg.extra))
+      }
+    } catch (err: any) {
+      log.warn('diff collect failed (silent)', {
+        traceId,
+        agentId: agent.id,
+        error: err?.message,
+      })
+    }
   }
 
   // 写请求文件（幂等：已存在跳过——同一时间只保留首个生效请求，防连发覆盖）

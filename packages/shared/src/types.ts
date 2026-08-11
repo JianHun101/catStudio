@@ -67,6 +67,31 @@ export interface SessionConfig {
  */
 export type MessageType = 'normal' | 'restart_request'
 
+/**
+ * 富文本块——结构化展示内容（当前仅 diff）。
+ * 服务端从 git 反查 commit 采集，随消息 extra 列持久化 + 广播，
+ * 永不进 LLM 上下文（上下文构建只消费 content）。
+ */
+export interface RichBlock {
+  id: string
+  kind: 'diff'
+  v: 1
+  filePath: string
+  /** 文件级 unified diff 文本（不含 diff --git 头；服务端已做 200/500 行截断） */
+  diff: string
+}
+
+/**
+ * 消息附加富内容（extra 列 JSON 序列化；服务端采集附加，前端按需渲染，
+ * 无 extra 的消息前端纯文本回退——与现网行为一致）。
+ */
+export interface MessageExtra {
+  rich?: {
+    v: 1
+    blocks: RichBlock[]
+  }
+}
+
 export interface Message {
   id: string
   sessionId: string
@@ -83,6 +108,8 @@ export interface Message {
   messageType?: MessageType
   /** restart_request 消息的请求过期时间（ISO 8601，默认 10 分钟）——前端据此隐藏过期按钮 */
   restartExpiresAt?: string
+  /** 消息附加富内容（diff 块等；服务端采集附加，永不进 LLM 上下文） */
+  extra?: MessageExtra
 }
 
 // ─── Memory ─────────────────────────────────────────

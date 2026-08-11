@@ -74,6 +74,17 @@ vi.mock('../llm/git-utils.js', () => ({
   npmUninstall: vi.fn(),
 }))
 
+// 对话内 diff 采集：默认返回 null（无 diff，与现网纯讨论/A2A 一致）——
+// 真实 git 调用在测试 cwd 下会命中真实仓库 commit，必须 mock。
+// parseMessageExtra 走真实实现（SESSION_HISTORY 恢复路径用真解析）
+vi.mock('../git/diff-collector.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../git/diff-collector.js')>()
+  return {
+    ...actual,
+    collectCommitDiffs: vi.fn().mockResolvedValue(null),
+  }
+})
+
 // 顶层收尾的脏文件清理（socketio.ts:1152-1161）用真实 execSync 跑 git status/checkout/clean
 // ——测试跑批时工作区含未提交改动（如正在写的测试文件），任何 Claude agent 用例
 // （anyClaude=true）触发清理会真实执行 `git checkout -- .` 抹掉未提交工作。
@@ -4883,5 +4894,240 @@ describe('runAgentReply — per-agent 静态运行配置透传', () => {
     const opts = chatStream.mock.calls[0][1] as any
     expect('maxTokens' in opts).toBe(false)
     expect('temperature' in opts).toBe(false)
+  })
+})
+
+// ─── 对话内 diff 展示 — 富文本块通道 ────────────────────
+// 猫的 content 只写摘要，diff 正文由 server 自动从 git 采集附加 extra
+// （永不进 LLM 上下文——验收 3 隔离断言见下）。
+
+describe('对话内 diff 展示 — 富文本块通道', () => {
+  const execAgentCfg = {
+    id: 'agent-1',
+    name: '店长',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-flash',
+    llmApiKey: 'sk-test',
+  }
+
+  // 顶层 describe 自包含初始化（主 describe 的 beforeEach 不覆盖顶层块——
+  // 本块补齐 createSocketIO + connection 注册，验收4 的 JOIN_SESSION 需要）
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    socketHandlers.clear()
+    connectionCallback = null
+    mockSocketEmit.mockClear()
+    mockRoomEmit.mockClear()
+    mockIoEmit.mockClear()
+    mockSocketJoin.mockClear()
+
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    db.prepare(
+      `
+      INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `
+    ).run('agent-1', '店长', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test')
+    db.prepare(
+      `
+      INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+      VALUES (?, ?, ?, ?)
+    `
+    ).run('session-1', '测试会话', JSON.stringify(['agent-1']), 0)
+
+    const httpServer = createServer()
+    const mod = await import('./socketio.js')
+    mod.createSocketIO(httpServer)
+    connectionCallback!(mockSocket)
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  const DIFF_BLOCKS = [
+    {
+      id: 'diff-1',
+      kind: 'diff' as const,
+      v: 1 as const,
+      filePath: 'packages/server/src/x.ts',
+      diff: '@@ -1,2 +1,2 @@\n-old\n+new',
+    },
+  ]
+
+  it('验收1: 回复完成 → NEW_MESSAGE 带 extra 富文本块（diff 采集成功）', async () => {
+    const mod = await import('./socketio.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const { collectCommitDiffs } = await import('../git/diff-collector.js')
+
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: 'agent-1',
+      sessionId: 'session-1',
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: 'msg-diff-1',
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({
+      chatStream: vi.fn(async function* () {
+        yield { content: '改完了，看 diff', kind: 'text' }
+      }),
+    } as any)
+    vi.mocked(collectCommitDiffs).mockResolvedValue(DIFF_BLOCKS)
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 'session-1', 'user', ?, '[]')`
+      )
+      .run('msg-diff-1', '改一下 x.ts')
+
+    mockRoomEmit.mockClear()
+    await mod.executeAgentsSerial(
+      mockIo as any,
+      'session-1',
+      [execAgentCfg as any],
+      { id: 'msg-diff-1', content: '改一下 x.ts', mentions: ['店长'] },
+      'trace-diff-1',
+      0
+    )
+
+    // ① NEW_MESSAGE 广播带 extra.rich.blocks（content 只含猫写的摘要）
+    const newMsg = mockRoomEmit.mock.calls.find(
+      (c: any[]) => c[0] === Events.NEW_MESSAGE
+    )![1] as any
+    expect(newMsg.content).toBe('改完了，看 diff')
+    expect(newMsg.extra).toEqual({ rich: { v: 1, blocks: DIFF_BLOCKS } })
+
+    // ② extra 已补写落库（采集在 insertAgentMessage 之后进行）
+    const row = getDb().prepare('SELECT extra FROM messages WHERE id = ?').get(newMsg.id) as any
+    expect(JSON.parse(row.extra)).toEqual({ rich: { v: 1, blocks: DIFF_BLOCKS } })
+  })
+
+  it('验收2: 采集无结果（null）→ NEW_MESSAGE 不带 extra（纯讨论/A2A 与现网一致）', async () => {
+    const mod = await import('./socketio.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const { collectCommitDiffs } = await import('../git/diff-collector.js')
+
+    // 显式重置实现：clearAllMocks 不清 mockResolvedValue，验收1 的
+    // DIFF_BLOCKS 实现会残留到本用例（同 mock 实例跨用例共享）
+    vi.mocked(collectCommitDiffs).mockResolvedValue(null)
+
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: 'agent-1',
+      sessionId: 'session-1',
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: 'msg-nodiff',
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({
+      chatStream: vi.fn(async function* () {
+        yield { content: '纯讨论', kind: 'text' }
+      }),
+    } as any)
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 'session-1', 'user', ?, '[]')`
+      )
+      .run('msg-nodiff', '讨论一下方案')
+
+    mockRoomEmit.mockClear()
+    await mod.executeAgentsSerial(
+      mockIo as any,
+      'session-1',
+      [execAgentCfg as any],
+      { id: 'msg-nodiff', content: '讨论一下方案', mentions: ['店长'] },
+      'trace-nodiff',
+      0
+    )
+
+    const newMsg = mockRoomEmit.mock.calls.find(
+      (c: any[]) => c[0] === Events.NEW_MESSAGE
+    )![1] as any
+    expect(newMsg.extra).toBeUndefined()
+  })
+
+  it('验收3（重点）: 注入层隔离——历史消息带 extra → LLM prompt 不含 diff 正文', async () => {
+    const mod = await import('./socketio.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+
+    // 预置一条带 extra 的历史 agent 消息（diff 已展示过的回复）——
+    // extra 独立列，上下文构建只消费 content，diff 正文必须不泄漏进 prompt
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, extra)
+       VALUES (?, 'session-1', 'agent-1', 'agent', ?, '[]', ?)`
+    ).run(
+      'hist-extra',
+      '历史摘要：改了 x.ts',
+      JSON.stringify({ rich: { v: 1, blocks: DIFF_BLOCKS } })
+    )
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, 'session-1', 'user', ?, '[]')`
+    ).run('msg-iso', '继续')
+
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: 'agent-1',
+      sessionId: 'session-1',
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: 'msg-iso',
+    })
+    let llmMessages: any[] = []
+    vi.mocked(getAdapterForAgent).mockReturnValue({
+      chatStream: vi.fn(async function* (messages: any[]) {
+        llmMessages = messages
+        yield { content: '收到', kind: 'text' }
+      }),
+    } as any)
+
+    await mod.executeAgentsSerial(
+      mockIo as any,
+      'session-1',
+      [execAgentCfg as any],
+      { id: 'msg-iso', content: '继续', mentions: ['店长'] },
+      'trace-iso',
+      0
+    )
+
+    const serialized = JSON.stringify(llmMessages)
+    // content 正常进入上下文（历史摘要可见）
+    expect(serialized).toContain('历史摘要：改了 x.ts')
+    // diff 正文（含文件路径与 diff 内容）永不进 LLM prompt
+    expect(serialized).not.toContain('packages/server/src/x.ts')
+    expect(serialized).not.toContain('-old\n+new')
+  })
+
+  it('验收4: SESSION_HISTORY 恢复带 extra；损坏 extra → undefined 纯文本回退', async () => {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, extra)
+       VALUES (?, 'session-1', 'agent-1', 'agent', '摘要', '[]', ?)`
+    ).run('msg-extra-hist', JSON.stringify({ rich: { v: 1, blocks: DIFF_BLOCKS } }))
+    // 损坏 JSON → 版本校验丢弃（前端纯文本回退）
+    db.prepare(
+      `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, extra)
+       VALUES (?, 'session-1', 'agent-1', 'agent', '坏数据', '[]', ?)`
+    ).run('msg-extra-bad', 'not-json')
+
+    const handlers = socketHandlers.get(Events.JOIN_SESSION)
+    mockSocketEmit.mockClear()
+    handlers![0]('session-1')
+
+    const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+    const good = call[1].messages.find((m: any) => m.id === 'msg-extra-hist')
+    expect(good.extra).toEqual({ rich: { v: 1, blocks: DIFF_BLOCKS } })
+    const bad = call[1].messages.find((m: any) => m.id === 'msg-extra-bad')
+    expect(bad.extra).toBeUndefined()
+    // 无 extra 的历史消息不带该字段（与现网一致）
+    const plain = call[1].messages.find((m: any) => m.id === 'plain-msg-none')
+    expect(plain).toBeUndefined()
   })
 })

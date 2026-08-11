@@ -213,12 +213,25 @@ export function insertAgentMessage(
   agentId: string,
   content: string,
   taskId: string | null,
-  thinkingContent?: string
+  thinkingContent?: string,
+  extraJson?: string
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content)
-     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?)`
-  ).run(id, sessionId, agentId, content, taskId, thinkingContent ?? null)
+    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content, extra)
+     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?, ?)`
+  ).run(id, sessionId, agentId, content, taskId, thinkingContent ?? null, extraJson ?? null)
+}
+
+/** 补写消息的附加富内容（extra 列）。
+ *  diff 采集在回复落库之后进行（异步 git 调用），成功后再补写——
+ *  采集失败静默跳过，消息保持无 extra（前端纯文本回退，行为与现网一致）。
+ *  fire-and-forget：DB 写入失败静默吞错，不阻塞回复广播。 */
+export function updateMessageExtra(messageId: string, extraJson: string): void {
+  try {
+    db.prepare('UPDATE messages SET extra = ? WHERE id = ?').run(extraJson, messageId)
+  } catch {
+    // fire-and-forget：DB 挂了也不影响消息广播（extra 随 NEW_MESSAGE 已带上）
+  }
 }
 
 export function updateMessageMentions(messageId: string, mentionsJson: string): void {

@@ -9,6 +9,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
 import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { createLogger } from '@/utils/logger'
+import DiffViewer from './DiffViewer.vue'
 
 const log = createLogger('ChatPanel')
 
@@ -785,6 +786,12 @@ const warnedAgentsText = computed(() => {
                     class="msg-text"
                     v-html="renderMarkdown(resolveDisplayPlaceholders(msg.content, store.agents))"
                   ></div>
+                  <!-- 对话内 diff 展示：extra.rich.blocks 存在才渲染（服务端采集附加，
+                       永不进 LLM 上下文）；旧消息/无 extra → 纯文本回退与现网一致 -->
+                  <DiffViewer
+                    v-if="msg.extra?.rich?.blocks?.length"
+                    :blocks="msg.extra.rich.blocks"
+                  />
                   <!-- 重启确认按钮组：pending 显示 [确认重启][取消]（点击后 confirming 中显示「已确认，等待重启…」）；confirmed 显示「重启中…」；取消/过期/none 隐藏 -->
                   <div v-if="msg.messageType === 'restart_request'" class="restart-actions">
                     <template v-if="restartStateFor(msg) === 'pending'">

@@ -51,6 +51,7 @@ const SCHEMA_SQL = `
     images TEXT,
     thinking_content TEXT,
     dispatch_state TEXT DEFAULT NULL,
+    extra TEXT DEFAULT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (session_id) REFERENCES sessions(id)
   );

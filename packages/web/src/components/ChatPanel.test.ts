@@ -103,6 +103,17 @@ describe('ChatPanel restart confirm feedback', () => {
   })
 })
 
+describe('ChatPanel 对话内 diff 展示接入（富文本块通道）', () => {
+  it('import DiffViewer 组件', () => {
+    expect(source).toContain("import DiffViewer from './DiffViewer.vue'")
+  })
+
+  it('extra.rich.blocks 存在才渲染 DiffViewer（无 extra 纯文本回退与现网一致）', () => {
+    expect(source).toContain('v-if="msg.extra?.rich?.blocks?.length"')
+    expect(source).toContain(':blocks="msg.extra.rich.blocks"')
+  })
+})
+
 describe('ChatPanel skill 提示（SkillLoader 拆除后）', () => {
   it('提示框展示 CLI 原生触发说明（不再是「未找到匹配的技能」空壳）', () => {
     // bf5aab5 拆除 SkillLoader：/api/skills 数据源已删，skill 由 CLI 原生消费
