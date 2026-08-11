@@ -154,6 +154,10 @@ export async function dispatch(
           agent.id,
           `🐱 ${agent.name} 的队列已满（${MAX_QUEUE_PER_AGENT} 条），本条消息暂未排队，请稍后再试`
         )
+        // 标 done（terminal，与「无有效目标→done」同款）：用户已被明确告知
+        // "没排上、请重试"——消息不得留在 NULL 面被重放扫描 30min 后静默补派
+        // （与「请稍后再试」矛盾，且用户手动重发会同一意图执行两次）
+        messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
         continue
       }
       q.push(cmd)

@@ -1187,10 +1187,14 @@ async function executeOneAgent(
     })
     // 异常路径也不丢弃弹出的队列命令：completeExecution 弹出后命令已出队，
     // 不补执行则 'running' 状态永久搁浅（只能等下次重启恢复）。try/catch 隔离——
-    // drain 自身失败不掩盖原异常，槽位释放不受影响
+    // drain 自身失败不掩盖原异常，槽位释放不受影响。
+    // F2：drain 返回值并入返回——drain 子链若执行过 Claude 适配器（编辑源文件），
+    // 顶层 anyClaude 判定必须看到（修复前返回值被丢弃 + return needsLock →
+    // 非 claude 主执行下脏文件清理被跳过）
+    let drainClaudeRan = needsLock
     if (nextCmd) {
       try {
-        await drainQueuedCommand(io, agent, nextCmd, needsLock)
+        drainClaudeRan = await drainQueuedCommand(io, agent, nextCmd, needsLock)
       } catch (e: any) {
         log.error('drain failed after post-execution error (queue item stuck)', {
           agentId: agent.id,
@@ -1199,7 +1203,7 @@ async function executeOneAgent(
         })
       }
     }
-    return needsLock
+    return drainClaudeRan
   } finally {
     if (needsLock) releaseLock()
   }

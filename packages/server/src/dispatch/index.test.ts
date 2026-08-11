@@ -495,6 +495,12 @@ describe('dispatch', () => {
       expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(3)
 
       // 第 5 条被拒：不入队 + 系统消息通知
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', '你好', '[]')`
+        )
+        .run('msg-5', 'session-1')
       await dispatchModule.dispatch('session-1', makeMessage({ id: 'msg-5', mentions: ['店长'] }), [
         mockAgent,
       ])
@@ -502,6 +508,12 @@ describe('dispatch', () => {
       expect(bridge).toHaveBeenCalledTimes(1)
       expect(bridge.mock.calls[0][0]).toBe('session-1')
       expect(bridge.mock.calls[0][2]).toContain('队列已满')
+      // 拒绝 = terminal：消息标 done，不得留在 NULL 面——否则 30min 后被重放
+      // 静默补派（与「请稍后再试」矛盾）+ 用户手动重发会同一意图执行两次
+      const rejected = getDb()
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get('msg-5') as { dispatch_state: string | null }
+      expect(rejected.dispatch_state).toBe('done')
     })
   })
 

@@ -1933,6 +1933,139 @@ describe('socketio connector', () => {
       expect(execLog).toBeDefined()
       expect(execLog.triggered_by_message_id).toBe('msg-queued2')
     })
+
+    it('catch 路径 drain 子链执行 Claude → 返回值并入 anyClaude（F2：修复前被丢弃致脏文件清理跳过）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution, executeAgentCommand, dispatch } =
+        await import('../dispatch/index.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const db = getDb()
+
+      // claude 适配器目标（吐槽猫，claude provider）：drain 子链 A2A 路由到它
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+         VALUES (?, ?, '😼', 'You are a cat.', 'claude', 'claude-opus-4-8', 'sk-test')`
+      ).run('agent-2', '吐槽猫')
+      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+        JSON.stringify(['agent-1', 'agent-2'])
+      )
+
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, '[]')`
+      ).run('msg-main', 'session-1', '处理消息')
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions)
+         VALUES (?, ?, ?, 'agent', ?, '[]')`
+      ).run('msg-queued2', 'session-1', 'agent-1', '@店长 排队任务')
+      const queuedCmd = {
+        sessionId: 'session-1',
+        agentId: 'agent-1',
+        triggerMessageId: 'msg-queued2',
+        triggerContent: '@店长 排队任务',
+        mentions: ['店长'],
+        traceId: 'trace-queued2',
+        depth: 0,
+        taskId: undefined,
+        pendingTriggers: [],
+      }
+      // 槽位状态：主执行（msg-main）→ drain 内层（msg-queued2）→ 子链 claude。
+      // 子链触发 id 是 drain 回复落库后的随机 msgId——dispatch（在 executeAgentsSerial
+      // 之前被 await）被调用时捕获进闭包，executeOneAgent 的状态检查随后读它
+      let subTriggerId = ''
+      let agent1StateCalls = 0
+      vi.mocked(getAgentState).mockReset()
+      vi.mocked(getAgentState).mockImplementation((agentId: string) => {
+        if (agentId === 'agent-1') {
+          agent1StateCalls++
+          return {
+            agentId: 'agent-1',
+            sessionId: 'session-1',
+            status: 'busy',
+            queueLength: 0,
+            currentTriggerMessageId: agent1StateCalls === 1 ? 'msg-main' : 'msg-queued2',
+          }
+        }
+        if (agentId === 'agent-2') {
+          return {
+            agentId: 'agent-2',
+            sessionId: 'session-1',
+            status: 'busy',
+            queueLength: 0,
+            currentTriggerMessageId: subTriggerId,
+          }
+        }
+        return undefined
+      })
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValueOnce(undefined)
+      vi.mocked(completeExecution).mockResolvedValueOnce(queuedCmd as any)
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      // A2A 子链触发 id 捕获（dispatch 在 executeAgentsSerial 前被 await，捕获必先于状态检查）
+      vi.mocked(dispatch).mockReset()
+      vi.mocked(dispatch).mockImplementation(async (_sessionId: any, trigger: any) => {
+        subTriggerId = trigger.id
+        return 'trace-queued2'
+      })
+      vi.mocked(executeAgentCommand).mockReset()
+      vi.mocked(executeAgentCommand).mockImplementation(
+        async (agent: any, cmd: any, traceId: string) => {
+          db.prepare(
+            `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
+             VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))`
+          ).run('exec-log-catch', cmd.sessionId, cmd.agentId, cmd.triggerMessageId, traceId)
+        }
+      )
+      // 主回复的 mention 解析抛错 → catch；drain 内层回复 @吐槽猫 → 子链路由到 claude
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockImplementationOnce(() => {
+        throw new Error('parse boom')
+      })
+      vi.mocked(parseMentionsFromReply).mockReturnValueOnce(['吐槽猫'])
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
+      let streamCall = 0
+      const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
+        streamCall++
+        yield {
+          content: streamCall === 2 ? '@吐槽猫 处理合并任务' : '收到',
+          kind: 'text',
+        }
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+      mod.__test_resetMentionCounts()
+
+      const result = await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-1',
+            name: '店长',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+            role: 'store',
+          } as any,
+        ],
+        { id: 'msg-main', content: '处理消息', mentions: [] },
+        'trace-main'
+      )
+
+      // F2：catch-drain 的子链真实执行了 claude 适配器 → 顶层 anyClaude=true
+      // （修复前 catch 丢返回值 + return needsLock=false → 顶层跳过脏文件清理）
+      expect(result).toBe(true)
+      // 场景非空转：A2A 子链确实路由到 claude 猫（dispatch 被调用、目标带 claude provider）
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ mentions: ['吐槽猫'] }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-2', llmProvider: 'claude' })]),
+        'trace-queued2',
+        1
+      )
+    })
   })
 
   // ─── executeAgentsSerial 并发（同消息 @ 多猫） ──────────
