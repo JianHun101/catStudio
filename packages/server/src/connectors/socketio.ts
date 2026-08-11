@@ -2098,11 +2098,15 @@ const SUMMARY_PRE_COMPRESS_RATIO = 0.6 // 预压缩阈值（异步生成，下�
 const SUMMARY_FORCE_COMPRESS_RATIO = 0.75 // 强制阈值（同步生成，本轮生效）
 const SUMMARY_PREFIX = '[历史摘要（压缩）]'
 
-/** 压缩摘要条目形状（与 sessions.compressed_summaries 存储一致） */
+/** 压缩摘要条目形状（与 sessions.compressed_summaries 存储一致）。
+ * content 空串 = 异步生成中的 pending；coveredThrough = 生成时点会话消息总数
+ * （消费侧判定覆盖边界，见 runAgentReply 的 coverageGap） */
 interface CompressedSummaryEntry {
+  id: string
   createdAt: string
   tokenCount: number
   content: string
+  coveredThrough: number
 }
 
 /** 从 JSON 数组解析压缩摘要条目；损坏返回空数组（读取侧容错） */
@@ -2141,7 +2145,14 @@ function applySummaryReplace(messages: any[], summary: string): { kept: any[] } 
   let acc = 0
   for (let i = messages.length - 1; i >= 0 && kept.length < SUMMARY_KEEP_RECENT; i--) {
     const t = estimateTokens(messages[i].content) + 50
-    if (acc + t > SUMMARY_KEEP_TOKENS) break
+    if (acc + t > SUMMARY_KEEP_TOKENS) {
+      // 单条超限：至少保留最近这条——双保险是启发式，宁超预算不丢最新消息
+      if (kept.length === 0) {
+        acc += t
+        kept.push(messages[i])
+      }
+      break
+    }
     acc += t
     kept.push(messages[i])
   }
@@ -2247,9 +2258,16 @@ async function runAgentReply(
     const entries = parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
     const readyCount = countReadySummaries(entries)
     const ready = lastReadySummary(entries)
+    // 覆盖间隙：块覆盖边界（生成时点消息数）之后新增消息超出保留窗口容量（10 条）
+    // → 中间段（块覆盖点之后、保留窗口之前）会丢——ready 永真时块不更新，间隙持续扩大
+    // （消费复用缺陷实证修复：有间隙必须重新生成新块把中间段并入，不能只消费旧块）
+    const coverageGap =
+      ready != null &&
+      (typeof ready.coveredThrough !== 'number' ||
+        messagesRepo.countBySession(sessionId) - ready.coveredThrough > SUMMARY_KEEP_RECENT - 1)
     if (readyCount < compressLimit && ratio >= SUMMARY_PRE_COMPRESS_RATIO) {
-      if (ready) {
-        // 消费既有就绪块（上一轮异步生成的产物）——本轮零 LLM 调用
+      if (ready && !coverageGap) {
+        // 消费既有就绪块——块覆盖到生成时点全部消息、保留窗口容得下新增 → 零 LLM 调用
         messagesForTruncation = applySummaryReplace(relevantMessages, ready.content).kept
         summaryBlockMsg = buildSummaryBlockMessage(ready.content)
         log.info('summary replace: consumed ready block', {
@@ -2259,17 +2277,21 @@ async function runAgentReply(
           readyTokenCount: ready.tokenCount,
           totalCompressed: readyCount,
         })
-      } else if (ratio >= SUMMARY_FORCE_COMPRESS_RATIO) {
-        // 强制阈值：同步生成，本轮生效；先落 pending 再回填（与异步路径同形）
+      } else if (ratio >= SUMMARY_FORCE_COMPRESS_RATIO || coverageGap) {
+        // 强制阈值 或 消费发现覆盖间隙：同步生成新块（本轮生效，块覆盖到最新）
+        // 先落 pending（带唯一 id + 覆盖边界）再按 id 回填（与异步路径同形）
+        const entryId = uuid()
         sessionsRepo.appendCompressedSummary(sessionId, {
+          id: entryId,
           createdAt: new Date().toISOString(),
           tokenCount: 0,
           content: '',
+          coveredThrough: messagesRepo.countBySession(sessionId),
         })
         try {
           const summary = await generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
           if (summary) {
-            sessionsRepo.updateLastCompressedSummary(sessionId, {
+            sessionsRepo.updateCompressedSummary(sessionId, entryId, {
               tokenCount: estimateTokens(summary),
               content: summary,
             })
@@ -2300,10 +2322,13 @@ async function runAgentReply(
         }
       } else {
         // 预压缩阈值：异步生成（fire-and-forget），落 pending 下一轮消费生效
+        const entryId = uuid()
         sessionsRepo.appendCompressedSummary(sessionId, {
+          id: entryId,
           createdAt: new Date().toISOString(),
           tokenCount: 0,
           content: '',
+          coveredThrough: messagesRepo.countBySession(sessionId),
         })
         generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
           .then((summary) => {
@@ -2315,7 +2340,7 @@ async function runAgentReply(
               })
               return
             }
-            sessionsRepo.updateLastCompressedSummary(sessionId, {
+            sessionsRepo.updateCompressedSummary(sessionId, entryId, {
               tokenCount: estimateTokens(summary),
               content: summary,
             })

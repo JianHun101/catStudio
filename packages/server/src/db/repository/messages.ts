@@ -159,6 +159,17 @@ export function countMessagesAfter(sessionId: string, afterTime: string): number
   return row?.cnt || 0
 }
 
+/** 获取会话非 system 消息总数（摘要块覆盖边界判定用；与 getRecentMessages 口径一致） */
+export function countBySession(sessionId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM messages
+       WHERE session_id = ? AND role != 'system'`
+    )
+    .get(sessionId) as { cnt: number }
+  return row?.cnt || 0
+}
+
 /** 获取带 Agent 名称的消息（用于交接总结） */
 export function getMessagesWithAgentName(
   sessionId: string,

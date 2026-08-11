@@ -58,9 +58,20 @@ export function getSessionSummaryState(id: string):
 
 // ─── 摘要替代压缩（compressed_summaries）──────────────────
 
+/** 压缩摘要条目形状（与 sessions.compressed_summaries 存储一致）。
+ * content 空串 = 异步生成中的 pending；coveredThrough = 生成时点会话消息总数
+ * （消费侧判定覆盖边界：其后的新增消息超出保留窗口容量 → 重新生成）。
+ */
+export interface CompressedSummaryEntry {
+  id: string
+  createdAt: string
+  tokenCount: number
+  content: string
+  coveredThrough: number
+}
+
 /**
  * 读取会话的压缩摘要数组（JSON 字符串原样返回；无压缩历史返回 null）。
- * 条目形状 { createdAt, tokenCount, content }，content 空串 = 异步生成中的 pending。
  */
 export function getCompressedSummaries(id: string): string | null {
   const row = db.prepare('SELECT compressed_summaries FROM sessions WHERE id = ?').get(id) as
@@ -70,13 +81,10 @@ export function getCompressedSummaries(id: string): string | null {
 
 /**
  * append 一条压缩摘要条目（读-改-写 JSON，单进程 better-sqlite3 同步执行无并发写）。
- * 异步路径先落 pending（content 空串），生成完成后回填（updateLastCompressedSummary）。
+ * 异步路径先落 pending（content 空串），生成完成后按 entryId 回填（updateCompressedSummary）。
  */
-export function appendCompressedSummary(
-  id: string,
-  entry: { createdAt: string; tokenCount: number; content: string }
-): void {
-  let arr: Array<{ createdAt: string; tokenCount: number; content: string }> = []
+export function appendCompressedSummary(id: string, entry: CompressedSummaryEntry): void {
+  let arr: CompressedSummaryEntry[] = []
   const current = getCompressedSummaries(id)
   if (current) {
     try {
@@ -92,24 +100,23 @@ export function appendCompressedSummary(
 }
 
 /**
- * 回填最后一条 pending 条目（异步生成完成后的落库点）。
- * 只更新数组末条——append 与回填在同一事件循环同步段内成对出现，末条必是自家 pending。
+ * 按 entryId 回填一条 pending 条目（异步生成完成后的落库点）。
+ * 按 id 定位而非"末条"——多条 pending 并存（生成慢 + 消息增长快）时
+ * 各生成各回填自家条目，不错位覆盖（竞态根治）。
  */
-export function updateLastCompressedSummary(
+export function updateCompressedSummary(
   id: string,
+  entryId: string,
   patch: { tokenCount: number; content: string }
 ): void {
   const current = getCompressedSummaries(id)
   if (!current) return
   try {
-    const arr = JSON.parse(current) as Array<{
-      createdAt: string
-      tokenCount: number
-      content: string
-    }>
+    const arr = JSON.parse(current) as CompressedSummaryEntry[]
     if (!Array.isArray(arr) || arr.length === 0) return
-    const last = { ...arr[arr.length - 1], ...patch }
-    arr[arr.length - 1] = last
+    const idx = arr.findIndex((e) => e.id === entryId)
+    if (idx === -1) return // 条目已被清理/不存在 → 静默跳过
+    arr[idx] = { ...arr[idx], ...patch }
     db.prepare(
       `UPDATE sessions SET compressed_summaries = ?, updated_at = datetime('now') WHERE id = ?`
     ).run(JSON.stringify(arr), id)
