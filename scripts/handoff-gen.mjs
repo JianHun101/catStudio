@@ -722,10 +722,15 @@ async function alreadyDelivered(serverUrl, sessionId, message) {
  * 目标会话反查（resolveCommitSessionId）才是主链，它失败已由调用方 fatal/transient
  * 处理；此处失败兜底 @店长 即可，不值得为此阻断投递。
  *
+ * 返回对象含 taskId（= 命中执行行的 trace_id）：E3 接线——投递 payload 携带源链
+ * task_id（与 chain_task_id 同源反查 commit_hash → execution_logs → trace_id），
+ * 审查回复落库 task_id = 源链 trace_id，verdict JOIN m.task_id = chain_task_id 才匹配。
+ * taskId 缺失（反查失败/无执行记录）→ undefined，调用方不带（老行为，噪声记录在案）。
+ *
  * @param {string} serverUrl
  * @param {string} uuid — commit message 里的 catstudy [uuid]（触发消息 id）
  * @param {string} [commitSha] — 当前 commit 完整 sha（commit_hash 精确匹配用）
- * @returns {Promise<string|null>} agent 名；无执行记录/不可达 → null
+ * @returns {Promise<{agentName: string, taskId?: string}|null>} 无执行记录/不可达 → null
  */
 export async function resolveExecutorName(serverUrl, uuid, commitSha) {
   try {
@@ -744,7 +749,15 @@ export async function resolveExecutorName(serverUrl, uuid, commitSha) {
       console.log(
         `[handoff-gen] 实施者: ${body.agentName}（execution_logs 反查${commitSha ? ', commit_hash 精确匹配' : ''}）`
       )
-      return body.agentName
+      const taskId = typeof body.taskId === 'string' && body.taskId ? body.taskId : undefined
+      if (taskId) {
+        console.log(
+          `[handoff-gen] 源链 taskId: ${taskId.slice(0, 8)}…（投递 payload 携带，E3 接线）`
+        )
+      } else {
+        console.log(`[handoff-gen] ⚠️  反查响应缺 taskId——投递不携带（老行为，噪声记录在案）`)
+      }
+      return { agentName: body.agentName, taskId }
     }
     console.log(`[handoff-gen] ⚠️  实施者反查响应缺少 agentName——兜底 @店长 补填`)
   } catch {
@@ -892,6 +905,8 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   const commitUuid = extractCommitUuid(commitMsg)
   const commitSha = safeGit(cwd, opts.sha ? `rev-parse ${opts.sha}` : 'rev-parse HEAD')
   let fillerName = '店长'
+  /** E3 接线：源链 task_id（executor 反查同源，commit_hash → execution_logs → trace_id） */
+  let taskId
   if (commitUuid) {
     // 写回 commit_hash（agent 人工提交路径此前从不写，只有 socketio 自动提交
     // 兜底写）——executor 反查按 commit 精确匹配的前提。失败仅告警不阻断投递：
@@ -917,7 +932,11 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
         `[handoff-gen] ⚠️  commit_hash 写回失败——executor 反查退化 uuid 逻辑（兜底 @店长）`
       )
     }
-    fillerName = (await resolveExecutorName(serverUrl, commitUuid, commitSha)) || '店长'
+    const executorInfo = (await resolveExecutorName(serverUrl, commitUuid, commitSha)) || null
+    fillerName = executorInfo?.agentName || '店长'
+    // E3 接线：源链 task_id 随投递携带（ingest.ts:39 已支持 taskId 字段）——审查链
+    // verdict 消息与任务链共享 task_id，JOIN 匹配成立。缺失不带（老行为，噪声在案）。
+    taskId = executorInfo?.taskId
   }
   const message = buildHandoffMessage(content, fillerName)
 
@@ -937,6 +956,7 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
         sessionId,
         content: message,
         mentions: [fillerName],
+        ...(taskId ? { taskId } : {}),
       }),
       signal: AbortSignal.timeout(5000),
     })

@@ -662,8 +662,9 @@ console.log('📦 测试组 10: commit uuid 反查会话')
       res.end(JSON.stringify({ id: uuid, sessionId: 'session-debug-1', role: 'user' }))
     } else if (req.url.startsWith(`/api/messages/${uuid}/executor`)) {
       // startsWith：兼容 ?commit=<sha> query（commit_hash 精确匹配反查）
+      // taskId = 命中执行行的 trace_id（E3 接线：投递 payload 携带源链 task_id）
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ agentId: 'agent-ds', agentName: 'ds猫' }))
+      res.end(JSON.stringify({ agentId: 'agent-ds', agentName: 'ds猫', taskId: 'trace-10e' }))
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'not found' }))
@@ -710,10 +711,11 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   assert(hits.length === 0, '无 uuid 时不应发起反查请求')
   console.log('  10d: 手动 commit 报错不投递 ✅')
 
-  // 10e: 实施者反查（execution_logs）→ 命中返回 agent 名，404 兜底 null
+  // 10e: 实施者反查（execution_logs）→ 命中返回 { agentName, taskId }，404 兜底 null
   hits = []
   const executorHit = await resolveExecutorName(serverUrl, uuid)
-  assert(executorHit === 'ds猫', '实施者反查命中应返回 agent 名')
+  assert(executorHit?.agentName === 'ds猫', '实施者反查命中应返回 agent 名')
+  assert(executorHit?.taskId === 'trace-10e', 'E3 接线：taskId = 命中执行行的 trace_id')
   assert(hits.includes(`/api/messages/${uuid}/executor`), '应请求实施者反查 API')
   const executorMiss = await resolveExecutorName(serverUrl, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   assert(executorMiss === null, '无执行记录（404）应返回 null，调用方兜底店长')
@@ -723,7 +725,7 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   hits = []
   const commitSha = 'a'.repeat(40)
   const executorWithSha = await resolveExecutorName(serverUrl, uuid, commitSha)
-  assert(executorWithSha === 'ds猫', '带 commit sha 反查应命中 agent 名')
+  assert(executorWithSha?.agentName === 'ds猫', '带 commit sha 反查应命中 agent 名')
   assert(
     hits.includes(`/api/messages/${uuid}/executor?commit=${commitSha}`),
     '应带 ?commit= query 请求实施者反查 API'
@@ -771,14 +773,26 @@ console.log('📦 测试组 11: 投递瞬态重试')
   // 11a: 瞬态失败（socket destroy）→ 2s 重试 → 第三次成功
   let postHits = 0
   let destroyed = 0
+  let lastPostBody = null
   const { server, port } = await startStubServer((req, res) => {
     if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ id: uuid, sessionId: 'session-debug-1', role: 'user' }))
       return
     }
+    // E3 接线：executor 反查返回 taskId（= 命中执行行的 trace_id），投递 body 应携带
+    if (req.url.startsWith(`/api/messages/${uuid}/executor`) && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ agentId: 'agent-ds', agentName: 'ds猫', taskId: 'trace-11a' }))
+      return
+    }
     if (req.url === '/api/messages' && req.method === 'POST') {
       postHits++
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        lastPostBody = body
+      })
       // 前两次模拟瞬态连接失败（连接被 reset → fetch 抛错 → transient）
       if (postHits <= 2) {
         destroyed++
@@ -806,6 +820,11 @@ console.log('📦 测试组 11: 投递瞬态重试')
   assert(ok === 'ok', '瞬态失败重试后应投递成功')
   assert(postHits === 3, `应共发起 3 次 POST（首次+2 次重试，实际 ${postHits}）`)
   assert(destroyed === 2, '前两次应为瞬态失败')
+  const deliveredBody = lastPostBody ? JSON.parse(lastPostBody) : null
+  assert(
+    deliveredBody?.taskId === 'trace-11a',
+    'E3 接线：投递 body 应携带源链 taskId（executor 反查同源）'
+  )
   console.log('  11a: 瞬态失败自动重试（2 次后成功）✅')
 
   // 11b: 4xx 确定性失败不重试（CATSTUDY_SESSION_ID 显式指定，跳过反查）

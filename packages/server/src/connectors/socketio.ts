@@ -2456,7 +2456,10 @@ async function runAgentReply(
     sessionId,
     agent.id,
     fullContent,
-    triggerMsg.taskId || null,
+    // E3 接线（规格 G2-残留 B）：`|| traceId` 与瞬态层（agentTrigger taskId = triggerMsg.taskId || traceId）
+    // 同构——审查链投递带 taskId 后，审查回复落库 = 源链 trace_id，verdict JOIN m.task_id = chain_task_id 匹配；
+    // 投递缺失（老版本已知噪声）→ 落库 = 本链 trace_id，仍关联不到任务链，噪声记录在案
+    triggerMsg.taskId || traceId,
     thinkingContent || undefined
   )
 

@@ -57,36 +57,39 @@ export function getLogsByTriggerMessage(triggeredByMessageId: string): Execution
  *  一条消息可触发多个 agent（多人 @），取最近开始执行的一条；无记录返回 undefined。 */
 export function getExecutorNameByTriggeredBy(
   triggeredByMessageId: string
-): { agent_id: string; name: string } | undefined {
+): { agent_id: string; name: string; trace_id: string } | undefined {
   return db
     .prepare(
-      `SELECT el.agent_id, a.name
+      `SELECT el.agent_id, a.name, el.trace_id
        FROM execution_logs el
        JOIN agents a ON a.id = el.agent_id
        WHERE el.triggered_by_message_id = ?
        ORDER BY el.started_at DESC
        LIMIT 1`
     )
-    .get(triggeredByMessageId) as { agent_id: string; name: string } | undefined
+    .get(triggeredByMessageId) as { agent_id: string; name: string; trace_id: string } | undefined
 }
 
 /** 反查"提交某 commit"的 agent（handoff-gen 动态补填人，commit_hash 精确匹配）。
  *  commit 由实施者提交时经 POST /api/messages/:id/commit-hash 写回
  *  （updateRunningExecutionCommitHash），同 uuid 多执行者时各 commit 各命中
- *  各的实施者，不再"取最近开始执行"误指。无记录返回 undefined。 */
+ *  各的实施者，不再"取最近开始执行"误指。无记录返回 undefined。
+ *  trace_id 一并返回——E3 接线：审查链投递 payload 的 taskId 与 chain_task_id
+ *  同源反查（commit_hash → execution_logs → trace_id），verdict 消息才能与
+ *  任务链 JOIN 匹配。 */
 export function getExecutorNameByCommitHash(
   commitHash: string
-): { agent_id: string; name: string } | undefined {
+): { agent_id: string; name: string; trace_id: string } | undefined {
   return db
     .prepare(
-      `SELECT el.agent_id, a.name
+      `SELECT el.agent_id, a.name, el.trace_id
        FROM execution_logs el
        JOIN agents a ON a.id = el.agent_id
        WHERE el.commit_hash = ?
        ORDER BY el.started_at DESC
        LIMIT 1`
     )
-    .get(commitHash) as { agent_id: string; name: string } | undefined
+    .get(commitHash) as { agent_id: string; name: string; trace_id: string } | undefined
 }
 
 export function getAgentStats(agentId: string): {

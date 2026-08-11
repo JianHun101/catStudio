@@ -46,7 +46,14 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (!executor) {
       return reply.status(404).send({ error: 'No execution log for this message' })
     }
-    return reply.send({ agentId: executor.agent_id, agentName: executor.name })
+    // taskId = 命中执行行的 trace_id——E3 接线：审查链投递 payload 带 taskId，与
+    // chain_task_id 同源反查（commit_hash → execution_logs → trace_id）。反查路径
+    // （uuid 退化 / commit_hash 精确匹配）与 executor 同源，taskId 随之精确。
+    return reply.send({
+      agentId: executor.agent_id,
+      agentName: executor.name,
+      taskId: executor.trace_id || null,
+    })
   })
 
   /**

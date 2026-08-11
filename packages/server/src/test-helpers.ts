@@ -129,6 +129,16 @@ const SCHEMA_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS user_feedback (
+    id TEXT PRIMARY KEY,
+    eval_score_id TEXT NOT NULL UNIQUE,
+    message_id TEXT,
+    session_id TEXT,
+    user_score REAL NOT NULL,
+    comment TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS review_verdicts (
     message_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,

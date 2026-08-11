@@ -92,9 +92,9 @@ describe('Message Routes', () => {
          VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
       ).run('agent-ds', 'ds猫')
       db.prepare(
-        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
-         VALUES (?, ?, ?, ?, 'completed', datetime('now'))`
-      ).run('log-1', 'session-exec-1', 'agent-ds', triggeredBy)
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, trace_id)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?)`
+      ).run('log-1', 'session-exec-1', 'agent-ds', triggeredBy, 'trace-exec-1')
     }
 
     it('returns executor agentName for a message with execution log', async () => {
@@ -107,6 +107,8 @@ describe('Message Routes', () => {
       const body = JSON.parse(res.body)
       expect(body.agentId).toBe('agent-ds')
       expect(body.agentName).toBe('ds猫')
+      // E3 接线：taskId = 命中执行行的 trace_id（审查链投递 payload 同源反查）
+      expect(body.taskId).toBe('trace-exec-1')
     })
 
     it('returns 404 when no execution log exists for the message', async () => {
@@ -149,13 +151,13 @@ describe('Message Routes', () => {
       ).run('agent-flash', 'flash猫')
       // ds猫 的提交 + flash猫 的提交（同 uuid 双执行者各写各的 hash）
       db.prepare(
-        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, commit_hash)
-         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?)`
-      ).run('log-ds', 'session-exec-1', 'agent-ds', uuid, hashA)
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, commit_hash, trace_id)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?, ?)`
+      ).run('log-ds', 'session-exec-1', 'agent-ds', uuid, hashA, 'trace-ds')
       db.prepare(
-        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, commit_hash)
-         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?)`
-      ).run('log-flash', 'session-exec-1', 'agent-flash', uuid, hashB)
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, commit_hash, trace_id)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?, ?)`
+      ).run('log-flash', 'session-exec-1', 'agent-flash', uuid, hashB, 'trace-flash')
 
       const resA = await app.inject({
         method: 'GET',
@@ -163,6 +165,8 @@ describe('Message Routes', () => {
       })
       expect(resA.statusCode).toBe(200)
       expect(JSON.parse(resA.body).agentName).toBe('ds猫')
+      // E3 接线：taskId 随 commit 精确匹配各自执行行的 trace_id（与 executor 同源）
+      expect(JSON.parse(resA.body).taskId).toBe('trace-ds')
 
       const resB = await app.inject({
         method: 'GET',
@@ -170,6 +174,7 @@ describe('Message Routes', () => {
       })
       expect(resB.statusCode).toBe(200)
       expect(JSON.parse(resB.body).agentName).toBe('flash猫')
+      expect(JSON.parse(resB.body).taskId).toBe('trace-flash')
     })
 
     it('?commit= 查不到（老 commit 未写回 hash）时回退 uuid 逻辑', async () => {
@@ -183,6 +188,8 @@ describe('Message Routes', () => {
       const body = JSON.parse(res.body)
       expect(body.agentId).toBe('agent-ds')
       expect(body.agentName).toBe('ds猫')
+      // 回退 uuid 逻辑时 taskId 同步取 uuid 路径命中行的 trace_id
+      expect(body.taskId).toBe('trace-exec-1')
     })
   })
 
@@ -289,17 +296,26 @@ describe('Message Routes', () => {
         .get('log-flash') as { commit_hash: string | null }
       expect(rowFlash.commit_hash).toBe(hashB)
 
-      // executor 反查闭环：?commit= 各精确命中各的实施者（无错投）
+      // executor 反查闭环：?commit= 各精确命中各的实施者（无错投）+ taskId 随行
       const execA = await app.inject({
         method: 'GET',
         url: `/api/messages/${uuid}/executor?commit=${hashA}`,
       })
-      expect(JSON.parse(execA.body)).toEqual({ agentId: 'agent-ds', agentName: 'ds猫' })
+      // 该 fixture 未写 trace_id（存量行 DEFAULT ''）→ taskId 归 null（已知噪声契约）
+      expect(JSON.parse(execA.body)).toEqual({
+        agentId: 'agent-ds',
+        agentName: 'ds猫',
+        taskId: null,
+      })
       const execB = await app.inject({
         method: 'GET',
         url: `/api/messages/${uuid}/executor?commit=${hashB}`,
       })
-      expect(JSON.parse(execB.body)).toEqual({ agentId: 'agent-flash', agentName: 'flash猫' })
+      expect(JSON.parse(execB.body)).toEqual({
+        agentId: 'agent-flash',
+        agentName: 'flash猫',
+        taskId: null,
+      })
     })
 
     it('拒绝非 40-hex 的 commitHash', async () => {
