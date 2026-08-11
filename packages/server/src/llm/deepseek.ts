@@ -45,7 +45,8 @@ export class DeepSeekAdapter implements LLMAdapter {
     }
 
     const controller = new AbortController()
-    const timeoutMs = options.timeoutMs || 300_000 // 5 分钟，兼容推理模型思考时间
+    // 总超时：覆盖请求建立 + 流式读取全程（推理模型深度思考/长输出也受此预算约束，超时即 abort）
+    const timeoutMs = options.timeoutMs || 300_000 // 5 分钟默认
 
     // 外部信号：转发 abort 事件到内部 controller
     const onExternalAbort = () => controller.abort()
@@ -75,9 +76,8 @@ export class DeepSeekAdapter implements LLMAdapter {
       }
       throw err
     }
-    clearTimeout(timer)
-
     if (!response.ok) {
+      clearTimeout(timer)
       externalSignal?.removeEventListener('abort', onExternalAbort)
       const err = await response.text()
       throw new Error(`DeepSeek API error ${response.status}: ${err}`)
@@ -89,61 +89,66 @@ export class DeepSeekAdapter implements LLMAdapter {
     const decoder = new TextDecoder()
     let buffer = ''
 
-    while (true) {
-      if (externalSignal?.aborted) {
-        externalSignal?.removeEventListener('abort', onExternalAbort)
-        yield { content: '', done: true }
-        return
-      }
-
-      let readResult: ReadableStreamReadResult<Uint8Array>
-      try {
-        const chunkTimer = setTimeout(() => controller.abort(), streamTimeoutMs)
-        readResult = await reader.read()
-        clearTimeout(chunkTimer)
-      } catch (err: any) {
-        externalSignal?.removeEventListener('abort', onExternalAbort)
-        if (err.name === 'AbortError') {
-          if (externalSignal?.aborted) {
-            yield { content: '', done: true }
-            return
-          }
-          throw new Error('DeepSeek API 流读取超时')
-        }
-        throw err
-      }
-
-      const { done, value } = readResult
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed || !trimmed.startsWith('data: ')) continue
-
-        const data = trimmed.slice(6)
-        if (data === '[DONE]') {
-          externalSignal?.removeEventListener('abort', onExternalAbort)
+    try {
+      while (true) {
+        if (externalSignal?.aborted) {
           yield { content: '', done: true }
           return
         }
 
+        let readResult: ReadableStreamReadResult<Uint8Array>
         try {
-          const parsed = JSON.parse(data)
-          const delta = parsed.choices?.[0]?.delta
-          if (delta?.content) {
-            yield { content: delta.content, done: false }
+          const chunkTimer = setTimeout(() => controller.abort(), streamTimeoutMs)
+          try {
+            readResult = await reader.read()
+          } finally {
+            clearTimeout(chunkTimer)
           }
-        } catch {
-          // skip unparseable
+        } catch (err: any) {
+          if (err.name === 'AbortError') {
+            if (externalSignal?.aborted) {
+              yield { content: '', done: true }
+              return
+            }
+            throw new Error('DeepSeek API 流读取超时')
+          }
+          throw err
+        }
+
+        const { done, value } = readResult
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || !trimmed.startsWith('data: ')) continue
+
+          const data = trimmed.slice(6)
+          if (data === '[DONE]') {
+            yield { content: '', done: true }
+            return
+          }
+
+          try {
+            const parsed = JSON.parse(data)
+            const delta = parsed.choices?.[0]?.delta
+            if (delta?.content) {
+              yield { content: delta.content, done: false }
+            }
+          } catch {
+            // skip unparseable
+          }
         }
       }
+    } finally {
+      // 总超时与外部信号监听统一在流结束时清理（总超时覆盖流式全程，不只请求建立）
+      clearTimeout(timer)
+      externalSignal?.removeEventListener('abort', onExternalAbort)
     }
 
-    externalSignal?.removeEventListener('abort', onExternalAbort)
     yield { content: '', done: true }
   }
 }

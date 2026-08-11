@@ -7,7 +7,7 @@ import { DeepSeekAdapter } from './deepseek.js'
  */
 function mockFetchSSE(
   chunks: string[],
-  options?: { status?: number; delayPerChunk?: number }
+  options?: { status?: number; delayPerChunk?: number; signal?: AbortSignal }
 ): Response {
   const status = options?.status ?? 200
   const encoder = new TextEncoder()
@@ -17,17 +17,34 @@ function mockFetchSSE(
     start(controller) {
       let i = 0
       async function enqueue() {
-        for (const chunk of chunks) {
-          if (closed) return
-          if (options?.delayPerChunk) {
-            await new Promise((r) => setTimeout(r, options.delayPerChunk))
+        try {
+          for (const chunk of chunks) {
+            if (closed) return
+            if (options?.delayPerChunk) {
+              await new Promise((r) => setTimeout(r, options.delayPerChunk))
+            }
+            if (options?.signal?.aborted) {
+              controller.error(new DOMException('aborted', 'AbortError'))
+              return
+            }
+            controller.enqueue(encoder.encode(chunk))
+            i++
           }
-          controller.enqueue(encoder.encode(chunk))
-          i++
+          controller.close()
+        } catch (err) {
+          controller.error(err)
         }
-        controller.close()
       }
       enqueue()
+      // 模拟真实 fetch body 流：signal abort 时中止挂起的读取（reader.read() reject AbortError）
+      options?.signal?.addEventListener(
+        'abort',
+        () => {
+          closed = true
+          controller.error(new DOMException('aborted', 'AbortError'))
+        },
+        { once: true }
+      )
     },
     cancel() {
       closed = true
@@ -135,6 +152,53 @@ describe('DeepSeekAdapter', () => {
     )
 
     expect(chunks).toEqual([{ content: '', done: true }])
+  })
+
+  // ─── 流超时 ───────────────────────────────────
+
+  it('aborts stream when chunk pause exceeds chunkTimeoutMs', async () => {
+    // 首 chunk 前停顿 200ms > chunkTimeoutMs=50ms → abort 传导到 body 流 → 流读取超时
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      const response = mockFetchSSE(sseChunks(['first']), {
+        delayPerChunk: 200,
+        signal: init?.signal as AbortSignal,
+      })
+      return Promise.resolve(response as any)
+    })
+
+    await expect(
+      collect(
+        adapter.chatStream([{ role: 'user', content: 'hi' }], {
+          model: 'deepseek-chat',
+          chunkTimeoutMs: 50,
+        })
+      )
+    ).rejects.toThrow(/流读取超时/)
+  })
+
+  it('total timeout covers streaming phase, not just request establishment', async () => {
+    // chunk 停顿 30ms < chunkTimeoutMs=500ms（不触发停顿超时），
+    // 但 10 个 chunk 总时长 300ms > timeoutMs=100ms → 总超时须在流式阶段触发
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      const response = mockFetchSSE(
+        Array.from({ length: 10 }, () => sseChunks(['x'])[0]),
+        {
+          delayPerChunk: 30,
+          signal: init?.signal as AbortSignal,
+        }
+      )
+      return Promise.resolve(response as any)
+    })
+
+    await expect(
+      collect(
+        adapter.chatStream([{ role: 'user', content: 'hi' }], {
+          model: 'deepseek-chat',
+          chunkTimeoutMs: 500,
+          timeoutMs: 100,
+        })
+      )
+    ).rejects.toThrow(/流读取超时/)
   })
 
   // ─── HTTP 错误 ───────────────────────────────
