@@ -253,6 +253,21 @@ export function setDispatchState(messageId: string, state: 'queued' | 'running' 
   }
 }
 
+/** 读取消息当前 dispatch_state。
+ *  多目标消息 per-target 循环守卫用：兄弟目标已写 queued/running 时，
+ *  terminal 写（done）不得覆盖——否则重启恢复（recoverQueuedMessages 只捞
+ *  queued/running）丢失兄弟目标的排队执行。DB 异常返回 null（守卫放行 done，
+ *  此时 setDispatchState 同样会静默失败，语义自洽）。 */
+export function getDispatchState(messageId: string): string | null {
+  try {
+    const row = db.prepare('SELECT dispatch_state FROM messages WHERE id = ?').get(messageId) as
+      { dispatch_state: string | null } | undefined
+    return row?.dispatch_state ?? null
+  } catch {
+    return null
+  }
+}
+
 /** 查询所有待处理消息（queued 或 running），按创建时间升序。
  *  返回 dispatch 所需的最小字段集。 */
 export function getPendingMessages(): Array<{

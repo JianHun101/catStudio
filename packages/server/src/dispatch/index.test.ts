@@ -515,6 +515,59 @@ describe('dispatch', () => {
         .get('msg-5') as { dispatch_state: string | null }
       expect(rejected.dispatch_state).toBe('done')
     })
+
+    it('多目标消息：满目标不覆盖兄弟目标已写的 queued（重启恢复不丢排队执行）', async () => {
+      const { setSystemMessageBridge } = dispatchModule
+      setSystemMessageBridge(() => {})
+      dispatchModule.initAgentSlot('agent-1') // 店长：busy + 队列有空间
+      dispatchModule.initAgentSlot('agent-2') // ds猫：busy + 队列满
+
+      // agent-1：msg-a1 直跑 busy、msg-a2 排队 → queueLength 1（有空间）
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-a1', mentions: ['店长'] }),
+        [mockAgent]
+      )
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-a2', mentions: ['店长'] }),
+        [mockAgent]
+      )
+      // agent-2：msg-b1 直跑 busy、msg-b2/b3/b4 排队 → queueLength 3（满）
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-b1', mentions: ['ds猫'] }),
+        [mockAgent2]
+      )
+      for (const id of ['msg-b2', 'msg-b3', 'msg-b4']) {
+        await dispatchModule.dispatch('session-1', makeMessage({ id, mentions: ['ds猫'] }), [
+          mockAgent2,
+        ])
+      }
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(1)
+      expect(dispatchModule.getAgentState('agent-2')!.queueLength).toBe(3)
+
+      // 多目标消息 @[店长, ds猫]：店长先迭代（queued）→ ds猫后迭代（满拒绝）
+      // ——done 不得覆盖 queued（否则重启时 recoverQueuedMessages 捞不到店长
+      // 的排队命令，排队执行静默丢失；02d3165 引入的回归）
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', '多目标', '["店长","ds猫"]')`
+        )
+        .run('msg-multi', 'session-1')
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'msg-multi', mentions: ['店长', 'ds猫'] }),
+        [mockAgent, mockAgent2]
+      )
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(2)
+      expect(dispatchModule.getAgentState('agent-2')!.queueLength).toBe(3)
+      const multi = getDb()
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get('msg-multi') as { dispatch_state: string | null }
+      expect(multi.dispatch_state).toBe('queued')
+    })
   })
 
   describe('命令自持 traceId/depth（冻结改动补测）', () => {

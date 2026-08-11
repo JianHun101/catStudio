@@ -157,7 +157,13 @@ export async function dispatch(
         // 标 done（terminal，与「无有效目标→done」同款）：用户已被明确告知
         // "没排上、请重试"——消息不得留在 NULL 面被重放扫描 30min 后静默补派
         // （与「请稍后再试」矛盾，且用户手动重发会同一意图执行两次）
-        messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
+        // 多目标守卫：for 循环按目标逐次写同一 triggerMessageId 的 dispatch_state，
+        // 兄弟目标若已写 queued/running，此处覆盖成 done 会让重启恢复
+        // （recoverQueuedMessages 只捞 queued/running）丢失兄弟的排队执行
+        // ——非 NULL 不覆盖（02d3165 引入的回归，吐槽猫复审发现）
+        if (!messagesRepo.getDispatchState(cmd.triggerMessageId)) {
+          messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
+        }
         continue
       }
       q.push(cmd)
