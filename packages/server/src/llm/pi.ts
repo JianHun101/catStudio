@@ -97,9 +97,9 @@ export class PiAdapter implements LLMAdapter {
         })
       }
 
-      // 7. 创建 AgentSession
+      // 7. 创建 AgentSession（cwd 透传会话 worktree 路径——缺省默认 workspace）
       const { session: piSession } = await piModule.createAgentSession({
-        cwd: getWorkspaceDir(),
+        cwd: options.cwd ?? getWorkspaceDir(),
         agentDir,
         modelRuntime,
         model: model ?? undefined,

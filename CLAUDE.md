@@ -76,6 +76,7 @@ docs/adr/         →  6 architecture decision records
 - 审查结论分流：✅可合并 → 行首@架构师（收口信号直接到位）；⚠️建议修改 / ❌需重做 → 行首@作者（要改的才回作者）——结论内容仍归请求人，细节在消息正文完整给出，只改投递目标
 - 实施猫提交后无需主动跟进（审查链自动收口）；若收到 ✅（兜底路径，分流失败时原链仍通）→ 行首@架构师 请收口，不自行合并，收口决策归店长
 - 店长收口动作序列：确认审查结论 → ff-only 合并 → 更新 `.push-gate` → 推送 main/dev → 切回 dev
+- 会话 worktree 收口（会话隔离单的提交在 `session/<8位id>` 分支）：ff-only 前先 `git merge session/<8位id>` 回 dev → `git worktree remove --force ../catStudy-sessions/<8位id>`（或 `removeSessionWorktree(<sessionId>)`）→ 删除 `session/<8位id>` 分支 → 再走标准收口序列
 - 实施猫完成不单独@店长汇报（店长从审查结论自动获知），遇问题/卡住才@店长
 
 **Env**: `.env.example` for full list. Loader at `packages/server/src/env.ts` (manual parse, NO `dotenv` — must be first import). Key: `DS_KEY`, `HF_ENDPOINT`, `MEMORY_ENABLED` (set `false` in server tests).

@@ -72,6 +72,11 @@ vi.mock('../llm/git-utils.js', () => ({
   snapshotPackageDeps: vi.fn(() => ({})),
   diffNewPackages: vi.fn(() => []),
   npmUninstall: vi.fn(),
+  // 会话 worktree：默认降级（null = 主工作区，存量行为零变化）。
+  // worktree 用例里 mockReturnValue 覆盖——ensureSessionWorktree 若走真实
+  // 实现会在测试 cwd 下命中真实仓库建 worktree，必须 mock。
+  ensureSessionWorktree: vi.fn(() => null),
+  getSessionWorktreePath: vi.fn(() => null),
 }))
 
 // 对话内 diff 采集：默认返回 null（无 diff，与现网纯讨论/A2A 一致）——
@@ -5129,5 +5134,101 @@ describe('对话内 diff 展示 — 富文本块通道', () => {
     // 无 extra 的历史消息不带该字段（与现网一致）
     const plain = call[1].messages.find((m: any) => m.id === 'plain-msg-none')
     expect(plain).toBeUndefined()
+  })
+})
+
+// ─── 会话 worktree 隔离接线（验收 1/4：cwd 透传 + auto-commit 落会话分支） ──────
+
+describe('会话 worktree 接线', () => {
+  const wtAgentCfg = {
+    id: 'agent-1',
+    name: '店长',
+    avatar: '🐱',
+    llmProvider: 'deepseek',
+    llmApiKey: 'sk-test-key',
+    llmModel: 'deepseek-chat',
+    systemPrompt: '你是店长，负责架构设计。',
+  }
+
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+
+  afterEach(async () => {
+    resetDb()
+    // mock 残留清理：reset 后返回 undefined（falsy）→ 语义等同降级，
+    // 不影响文件内其他 describe 的默认行为
+    const { getSessionWorktreePath, ensureSessionWorktree, gitCommit } =
+      await import('../llm/git-utils.js')
+    vi.mocked(getSessionWorktreePath).mockReset()
+    vi.mocked(ensureSessionWorktree).mockReset()
+    vi.mocked(gitCommit).mockClear()
+  })
+
+  async function runReply() {
+    const mod = await import('./socketio.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const chatStream = vi.fn(async function* (_m: any[], _o: any) {
+      yield { content: 'worktree 回复', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: 'agent-1',
+      sessionId: 'session-wt',
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: 'msg-wt',
+    })
+    getDb()
+      .prepare(
+        `INSERT INTO sessions (id, title, agent_ids) VALUES ('session-wt', 'wt', '["agent-1"]')`
+      )
+      .run()
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES ('msg-wt', 'session-wt', 'user', '@店长 干活', '["店长"]')`
+      )
+      .run()
+    await mod.executeAgentsSerial(
+      mockIo as any,
+      'session-wt',
+      [wtAgentCfg as any],
+      { id: 'msg-wt', content: '@店长 干活', mentions: ['店长'] },
+      'trace-wt',
+      0
+    )
+    return chatStream
+  }
+
+  it('验收1: worktree 存在 → chatStream 收到 cwd（猫在会话独立目录执行）', async () => {
+    const { ensureSessionWorktree } = await import('../llm/git-utils.js')
+    vi.mocked(ensureSessionWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-1')
+    const chatStream = await runReply()
+    const options = chatStream.mock.calls.at(-1)![1] as any
+    expect(options.cwd).toBe('/tmp/catStudy-sessions/wt-1')
+  })
+
+  it('验收4: 无 worktree（降级）→ chatStream 无 cwd，适配器取默认 workspace', async () => {
+    const chatStream = await runReply()
+    const options = chatStream.mock.calls.at(-1)![1] as any
+    expect(options.cwd).toBeUndefined()
+  })
+
+  it('auto-commit 落会话 worktree：gitCommit 带 cwd（提交到会话分支）', async () => {
+    const { gitCommit, getSessionWorktreePath } = await import('../llm/git-utils.js')
+    vi.mocked(getSessionWorktreePath).mockReturnValue('/tmp/catStudy-sessions/wt-2')
+    await runReply()
+    expect(vi.mocked(gitCommit)).toHaveBeenCalledWith('catstudy [msg-wt]', {
+      cwd: '/tmp/catStudy-sessions/wt-2',
+    })
+  })
+
+  it('降级: 无 worktree → gitCommit 单参数（提交主工作区 dev，行为与现网一致）', async () => {
+    const { gitCommit } = await import('../llm/git-utils.js')
+    await runReply()
+    expect(vi.mocked(gitCommit)).toHaveBeenCalledWith('catstudy [msg-wt]')
   })
 })

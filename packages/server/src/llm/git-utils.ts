@@ -7,9 +7,9 @@
  * - npm 精确卸载：记录消息执行前后 package.json 的依赖差异
  */
 
-import { execSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { execFileSync, execSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('git-utils')
@@ -78,6 +78,30 @@ function getGitRoot(): string | null {
 }
 
 /**
+ * 获取主仓库根目录（worktree 场景与 getGitRoot 区分）。
+ *
+ * worktree 内 getGitRoot() 返回 worktree 自身根（指向会话分支的快照），
+ * 但主仓库（server 运行时、db、e2e 标记文件）在 git-common-dir 的父目录——
+ * `git rev-parse --git-common-dir` 返回共享 .git 目录（主工作区 `.git`、
+ * worktree `.git/worktrees/<name>`），dirname 即主仓库根。
+ * 主工作区下与 getGitRoot() 结果一致（行为零变化）。
+ */
+export function getMainRepoRoot(): string | null {
+  try {
+    const commonDir = execSync('git rev-parse --git-common-dir', {
+      cwd: getCwd(),
+      env: cleanGitEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (!commonDir) return null
+    return dirname(resolve(getCwd(), commonDir))
+  } catch {
+    return null
+  }
+}
+
+/**
  * e2e 测试标记文件（相对 git 根）— 存在即跳过 auto-commit。
  *
  * 为什么用文件而不是环境变量：e2e 测试进程和 server 进程是两个独立进程，
@@ -86,9 +110,16 @@ function getGitRoot(): string | null {
  */
 const E2E_MARKER_REL = 'scripts/.e2e-testing'
 
-/** 检查 e2e 测试标记文件是否存在 */
+/**
+ * 检查 e2e 测试标记文件是否存在。
+ *
+ * 读主仓库根（getMainRepoRoot）而非 getGitRoot：worktree 内 getGitRoot 指向
+ * worktree 快照，而标记文件由 e2e 在 server 主工作区创建（worktree 快照不含
+ * 未跟踪的新文件）——不反推主仓库则 worktree 场景 e2e 标记失效、auto-commit
+ * 不禁用，e2e 竞态重现。主工作区下两者一致，行为零变化。
+ */
 function isE2ETesting(): boolean {
-  const root = getGitRoot()
+  const root = getMainRepoRoot() ?? getGitRoot()
   if (!root) return false
   return existsSync(resolve(root, E2E_MARKER_REL))
 }
@@ -108,9 +139,15 @@ export function getHeadCommit(): string | null {
   }
 }
 
-/** git add -A && git commit */
-export function gitCommit(message: string): string | null {
+/**
+ * git add -A && git commit。
+ *
+ * opts.cwd 指定提交仓库（会话 worktree 场景——auto-commit 落会话分支）；
+ * 缺省提交当前 cwd 的仓库（主工作区，存量会话行为零变化）。
+ */
+export function gitCommit(message: string, opts?: { cwd?: string }): string | null {
   if (!isGitRepo()) return null
+  const base = opts?.cwd ?? getCwd()
   // e2e 测试期间禁用自动快照，防止测试 commit 和 agent auto-commit 在同一时间轴竞态
   // → git reset --soft 会把测试 commit 和 catstudy 快照 commit 一起回退掉
   // 用标记文件（跨进程可见）而非环境变量——server 与 e2e 是不同进程
@@ -119,18 +156,23 @@ export function gitCommit(message: string): string | null {
     return null
   }
   try {
-    execSync('git add -A', { cwd: getCwd(), env: cleanGitEnv(), stdio: 'ignore' })
+    execSync('git add -A', { cwd: base, env: cleanGitEnv(), stdio: 'ignore' })
     execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
-      cwd: getCwd(),
+      cwd: base,
       env: cleanGitEnv(),
       stdio: 'ignore',
     })
-    const hash = getHeadCommit()
-    log.info('auto commit', { message, hash })
+    const hash = execSync('git rev-parse HEAD', {
+      cwd: base,
+      env: cleanGitEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    log.info('auto commit', { message, hash, cwd: base })
     return hash
   } catch (err: any) {
     // 没有改动时 git commit 会非零退出，这是正常的
-    log.info('auto commit skipped (no changes)', { message })
+    log.info('auto commit skipped (no changes)', { message, cwd: base })
     return null
   }
 }
@@ -202,5 +244,182 @@ export function npmUninstall(packages: string[]): void {
     } catch {
       log.warn('npm uninstall failed', { package: pkg })
     }
+  }
+}
+
+// ─── Session Worktree（会话隔离）─────────────────────
+
+/** 会话 worktree 目录前缀（相对主仓库根的兄弟目录，仓库外防 junction 穿透） */
+const SESSION_WORKTREE_PREFIX = 'catStudy-sessions'
+
+/** 会话 short id（分支/目录名用，8 位，去非法字符） */
+function sessionShortId(sessionId: string): string {
+  return sessionId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 8)
+}
+
+/** 会话分支名 */
+function sessionBranch(shortId: string): string {
+  return `session/${shortId}`
+}
+
+/** 会话 worktree 路径（主仓库兄弟目录） */
+function sessionWorktreePath(mainRoot: string, shortId: string): string {
+  return resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX, shortId)
+}
+
+/**
+ * node_modules junction（Windows）：worktree 复用主仓库依赖。
+ * 失败降级（worktree 无依赖时测试/lint 不可跑，但文件操作/提交不受影响），
+ * 不阻塞主链——依赖是增强不是主链路（同 memory 嵌入失败语义）。
+ */
+function linkNodeModules(mainRoot: string, wtPath: string): void {
+  const src = resolve(mainRoot, 'node_modules')
+  const dest = resolve(wtPath, 'node_modules')
+  if (!existsSync(src) || existsSync(dest)) return
+  try {
+    if (process.platform === 'win32') {
+      // mklink 是 cmd 内建命令，必须 cmd /c 包装；junction（/J）不需要管理员权限
+      execFileSync('cmd', ['/c', 'mklink', '/J', dest, src], { stdio: 'ignore' })
+    } else {
+      execFileSync('ln', ['-s', src, dest], { stdio: 'ignore' })
+    }
+    log.info('node_modules link created', { wtPath })
+  } catch (err: any) {
+    log.warn('node_modules link failed — worktree 无依赖（测试/lint 不可跑，提交不受影响）', {
+      error: err.message,
+    })
+  }
+}
+
+/**
+ * 确保会话 worktree 存在（幂等）。
+ *
+ * 会话隔离核心：每个会话一个独立目录 + 独立分支（session/<8位id>），
+ * 猫的 CLI 在 worktree 里执行——文件系统级隔离，A 会话的 auto-commit
+ * 快照不会收走 B 会话正在改的文件（360608d 抢收、uuid 错挂全是共享
+ * 工作区导致的）。
+ *
+ * - 分支从主仓库当前 HEAD 分叉（收口时店长 merge 回 dev）
+ * - worktree 目录 = 主仓库兄弟目录 catStudy-sessions/<8位id>
+ * - node_modules junction 复用主仓库依赖（失败降级）
+ * - 任意失败 → 返回 null（降级回主工作区，行为与现网一致）
+ * - 已存在（重启恢复/重复触发）→ 直接复用返回路径
+ */
+export function ensureSessionWorktree(sessionId: string): string | null {
+  if (!isGitRepo()) return null
+  const mainRoot = getMainRepoRoot()
+  if (!mainRoot) return null
+  const shortId = sessionShortId(sessionId)
+  if (!shortId) return null
+  const branch = sessionBranch(shortId)
+  const wtPath = sessionWorktreePath(mainRoot, shortId)
+
+  // 已存在 → 复用（重启恢复路径：目录与分支 ref 均持久）。
+  // worktree 标记（.git 文件）存在才算有效；无标记的残留目录删除重建。
+  if (existsSync(wtPath)) {
+    if (existsSync(resolve(wtPath, '.git'))) return wtPath
+    try {
+      rmSync(wtPath, { recursive: true, force: true })
+    } catch {
+      return null
+    }
+  }
+
+  // 分支不存在才建（从主仓库当前 HEAD 分叉）
+  let branchExists = false
+  try {
+    execFileSync('git', ['rev-parse', '--verify', `refs/heads/${branch}`], {
+      cwd: mainRoot,
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
+    branchExists = true
+  } catch {
+    /* 分支不存在 */
+  }
+  if (!branchExists) {
+    try {
+      execFileSync('git', ['branch', branch], {
+        cwd: mainRoot,
+        env: cleanGitEnv(),
+        stdio: 'ignore',
+      })
+    } catch (err: any) {
+      log.warn('session branch create failed — fallback to main workspace', {
+        branch,
+        error: err.message,
+      })
+      return null
+    }
+  }
+
+  try {
+    mkdirSync(resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX), { recursive: true })
+    execFileSync('git', ['worktree', 'add', wtPath, branch], {
+      cwd: mainRoot,
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
+  } catch (err: any) {
+    log.warn('worktree add failed — fallback to main workspace', {
+      branch,
+      wtPath,
+      error: err.message,
+    })
+    return null
+  }
+
+  linkNodeModules(mainRoot, wtPath)
+  log.info('session worktree ready', { sessionId, branch, wtPath })
+  return wtPath
+}
+
+/** 查询会话 worktree 路径（目录存在才返回，无则 null——调用方走降级路径） */
+export function getSessionWorktreePath(sessionId: string): string | null {
+  const mainRoot = getMainRepoRoot()
+  if (!mainRoot) return null
+  const shortId = sessionShortId(sessionId)
+  if (!shortId) return null
+  const wtPath = sessionWorktreePath(mainRoot, shortId)
+  return existsSync(wtPath) ? wtPath : null
+}
+
+/**
+ * 销毁会话 worktree（店长收口后调用）：git worktree remove + 删分支。
+ * 失败静默（残留目录不阻塞主链，收口流程兜底）。
+ */
+export function removeSessionWorktree(sessionId: string): void {
+  const mainRoot = getMainRepoRoot()
+  if (!mainRoot) return
+  const shortId = sessionShortId(sessionId)
+  if (!shortId) return
+  const branch = sessionBranch(shortId)
+  const wtPath = sessionWorktreePath(mainRoot, shortId)
+  if (existsSync(wtPath)) {
+    try {
+      execFileSync('git', ['worktree', 'remove', '--force', wtPath], {
+        cwd: mainRoot,
+        env: cleanGitEnv(),
+        stdio: 'ignore',
+      })
+      log.info('session worktree removed', { sessionId, wtPath })
+    } catch (err: any) {
+      log.warn('worktree remove failed — force removing dir', { error: err.message })
+      try {
+        rmSync(wtPath, { recursive: true, force: true })
+      } catch {
+        /* 忽略 */
+      }
+    }
+  }
+  try {
+    execFileSync('git', ['branch', '-D', branch], {
+      cwd: mainRoot,
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
+    log.info('session branch deleted', { branch })
+  } catch {
+    /* 分支可能已删/不存在 */
   }
 }

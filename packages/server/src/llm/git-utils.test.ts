@@ -18,7 +18,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -98,5 +98,138 @@ describe('gitCommit e2e marker guard', () => {
     const hash = gitUtils.gitCommit('resume commit')
     expect(hash).toBeTruthy()
     expect(git('log -1 --pretty=%B')).toContain('resume commit')
+  })
+})
+
+// ─── 会话 worktree（隔离实证）──────────────────────
+// 临时仓库 chdir 语义：git-utils 的 getCwd() = process.cwd() = tmp（beforeAll
+// 已 chdir）。worktree 目录 = tmp 的兄弟目录 catStudy-sessions/<8位id>——
+// os tmpdir 下可写，测试结束由 removeSessionWorktree + afterAll 兜底清理。
+// Windows junction 实测项：mklink /J 不需要管理员权限，CI/本机可跑。
+
+describe('session worktree', () => {
+  const WT_DIR_PREFIX = 'catStudy-sessions'
+  const wtDirs: string[] = []
+
+  function wtPath(shortId: string): string {
+    return resolve(tmp, '..', WT_DIR_PREFIX, shortId)
+  }
+
+  afterAll(() => {
+    // 兜底清理（removeSessionWorktree 已尽力，残余目录 force 删）
+    for (const dir of wtDirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        /* 忽略 */
+      }
+    }
+  })
+
+  it('ensureSessionWorktree: 建分支 + worktree + node_modules 链接，返回路径', () => {
+    const path = gitUtils.ensureSessionWorktree('11111111-aaaa')
+    expect(path).toBeTruthy()
+    expect(path).toBe(wtPath('11111111')) // 8 位 short id
+    expect(existsSync(path!)).toBe(true)
+    wtDirs.push(path!)
+    // 分支存在（共享 refs 可见）
+    const branch = git('branch --list session/11111111')
+    expect(branch).toContain('session/11111111')
+  })
+
+  it('幂等：目录已存在 → 复用同路径，不重复建', () => {
+    const path1 = gitUtils.ensureSessionWorktree('11111111-aaaa')
+    const path2 = gitUtils.ensureSessionWorktree('11111111-aaaa')
+    expect(path2).toBe(path1)
+  })
+
+  it('node_modules junction 实测：worktree 内可见主仓库依赖（junction 透传）', () => {
+    // 主仓库建 node_modules + 标记文件
+    const nmSrc = resolve(tmp, 'node_modules')
+    mkdirSync(nmSrc, { recursive: true })
+    writeFileSync(resolve(nmSrc, 'marker.txt'), 'linked', 'utf-8')
+
+    const path = gitUtils.ensureSessionWorktree('22222222-bbbb')
+    wtDirs.push(path!)
+    const nmDest = resolve(path!, 'node_modules')
+    // junction/symlink 成功 → 目录存在且内容透传（直接读链接目标）
+    expect(existsSync(nmDest)).toBe(true)
+    const marker = readFileSync(resolve(nmDest, 'marker.txt'), 'utf-8')
+    expect(marker).toBe('linked')
+  })
+
+  it('getSessionWorktreePath: 无 worktree → null；有 → 路径', () => {
+    expect(gitUtils.getSessionWorktreePath('99999999-zzzz')).toBeNull()
+    const path = gitUtils.ensureSessionWorktree('33333333-cccc')
+    wtDirs.push(path!)
+    expect(gitUtils.getSessionWorktreePath('33333333-cccc')).toBe(path)
+  })
+
+  it('非 git 仓库 → ensureSessionWorktree 返回 null（降级）', () => {
+    const notRepo = mkdtempSync(join(tmpdir(), 'git-utils-notrepo-'))
+    const orig = process.cwd()
+    try {
+      process.chdir(notRepo)
+      expect(gitUtils.ensureSessionWorktree('wt-session-0004')).toBeNull()
+    } finally {
+      process.chdir(orig)
+      rmSync(notRepo, { recursive: true, force: true })
+    }
+  })
+
+  it('验收1 核心：双会话 worktree 改同一文件 → 各自 commit 只含各自改动', () => {
+    // 双会话各建 worktree（同仓库、同源 HEAD，改同一文件）
+    const wtA = gitUtils.ensureSessionWorktree('wt-iso-a-0001')!
+    const wtB = gitUtils.ensureSessionWorktree('wt-iso-b-0002')!
+    wtDirs.push(wtA, wtB)
+
+    const shared = resolve(tmp, 'shared.txt')
+    writeFileSync(shared, 'base\n', 'utf-8')
+    git('add -A')
+    git('commit -m base-shared')
+
+    // A 会话在 A worktree 改 shared.txt
+    writeFileSync(resolve(wtA, 'shared.txt'), 'base\nA change\n', 'utf-8')
+    gitUtils.gitCommit('catstudy [wt-iso-a]', { cwd: wtA })
+    // B 会话在 B worktree 改同一文件（从各自快照改，互不可见对方改动）
+    writeFileSync(resolve(wtB, 'shared.txt'), 'base\nB change\n', 'utf-8')
+    gitUtils.gitCommit('catstudy [wt-iso-b]', { cwd: wtB })
+
+    // A 分支的 commit 只含 A 改动（diff 不含 B change）
+    const aDiff = execSync('git show --unified=0 HEAD -- shared.txt', {
+      cwd: wtA,
+      env: cleanGitEnv(),
+      encoding: 'utf-8',
+    })
+    expect(aDiff).toContain('A change')
+    expect(aDiff).not.toContain('B change')
+    // B 分支同理
+    const bDiff = execSync('git show --unified=0 HEAD -- shared.txt', {
+      cwd: wtB,
+      env: cleanGitEnv(),
+      encoding: 'utf-8',
+    })
+    expect(bDiff).toContain('B change')
+    expect(bDiff).not.toContain('A change')
+    // 主工作区 dev 分支不受影响（无会话提交内容）
+    const devLog = git('log --oneline --all --grep="wt-iso-a"')
+    expect(devLog).toContain('catstudy [wt-iso-a]')
+    const devDiff = execSync('git show --unified=0 HEAD -- shared.txt', {
+      cwd: tmp,
+      env: cleanGitEnv(),
+      encoding: 'utf-8',
+    })
+    expect(devDiff).not.toContain('A change')
+    expect(devDiff).not.toContain('B change')
+  })
+
+  it('removeSessionWorktree: 删目录 + 删分支', () => {
+    const path = gitUtils.ensureSessionWorktree('wt-rm-000001')!
+    wtDirs.push(path)
+    expect(existsSync(path)).toBe(true)
+    gitUtils.removeSessionWorktree('wt-rm-000001')
+    expect(existsSync(path)).toBe(false)
+    const branch = git('branch --list session/wt-rm-00')
+    expect(branch).not.toContain('session/wt-rm-00')
   })
 })

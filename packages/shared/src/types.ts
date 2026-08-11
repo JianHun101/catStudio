@@ -203,6 +203,12 @@ export interface ChatOptions {
     traceId?: string
     triggerAuthorName?: string
   }
+  /**
+   * CLI 子进程工作目录（会话 worktree 隔离用——猫在独立目录执行，
+   * auto-commit 落会话分支）。缺省由适配器取默认 workspace。
+   * 仅 claude/pi 等 spawn CLI 的适配器消费；HTTP 适配器忽略。
+   */
+  cwd?: string
 }
 
 export interface Chunk {

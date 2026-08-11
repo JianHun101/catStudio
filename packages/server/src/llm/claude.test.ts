@@ -291,4 +291,40 @@ describe('ClaudeAdapter', () => {
     expect(args).not.toContain('--allowedTools')
     expect(args).not.toContain('--disallowedTools')
   })
+
+  // ─── 会话 worktree 隔离：options.cwd 透传到 spawnSupervised ───
+
+  it('chatStream with cwd passes it through to spawnSupervised (session worktree)', async () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: 0, killed: false }
+    vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
+    vi.mocked(parseClaudeCodeOutput).mockImplementation(async function* () {
+      yield { content: '', done: true }
+    })
+
+    await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'claude-sonnet-4-6',
+        cwd: 'D:/catStudy-sessions/wt-abc',
+      })
+    )
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as { cwd?: string }
+    expect(opts.cwd).toBe('D:/catStudy-sessions/wt-abc')
+  })
+
+  it('chatStream without cwd keeps default workspace dir (backward compatible)', async () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: 0, killed: false }
+    vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
+    vi.mocked(parseClaudeCodeOutput).mockImplementation(async function* () {
+      yield { content: '', done: true }
+    })
+
+    await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'claude-sonnet-4-6' })
+    )
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as { cwd?: string }
+    // 缺省取默认 workspace（mock 的 getWorkspaceDir 返回值）
+    expect(opts.cwd).toBe('/tmp/workspace')
+  })
 })

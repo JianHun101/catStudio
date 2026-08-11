@@ -46,6 +46,8 @@ import {
   snapshotPackageDeps,
   diffNewPackages,
   npmUninstall,
+  ensureSessionWorktree,
+  getSessionWorktreePath,
 } from '../llm/git-utils.js'
 import type { AgentConfig, LLMMessage, Message } from '@cat-study/shared'
 import {
@@ -882,6 +884,7 @@ async function executeOneAgent(
         agentId: agent.id,
         agentName: agent.name,
         error: err.message,
+        stack: err.stack,
         traceId,
       })
       io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
@@ -1265,8 +1268,13 @@ export async function executeAgentsSerial(
       }
     }
     try {
-      // 自动 git commit（忽略非 git 仓库或无改动的情况）
-      const commitHash = gitCommit(`catstudy [${triggerMsg.id}]`)
+      // 自动 git commit（忽略非 git 仓库或无改动的情况）。
+      // 会话 worktree 存在时提交到 worktree（落会话分支，提交隔离）；
+      // 无 worktree（存量会话/降级）→ 提交主工作区 dev，行为与现网一致
+      const worktreeCwd = getSessionWorktreePath(sessionId)
+      const commitHash = worktreeCwd
+        ? gitCommit(`catstudy [${triggerMsg.id}]`, { cwd: worktreeCwd })
+        : gitCommit(`catstudy [${triggerMsg.id}]`)
       if (commitHash) {
         // 将 commit hash 写回 execution_logs（本轮所有相关日志）
         execLogsRepo.updateExecutionLogCommitHash(triggerMsg.id, commitHash)
@@ -1280,16 +1288,21 @@ export async function executeAgentsSerial(
         // 锁文件已由各执行体 finally 配对释放（引用计数归零时删除）——
         // 此处不再操作锁（派活单必改点 2：保留会让引用计数变负）
         try {
+          // 脏文件检查/清理作用到会话 worktree（存在时）——猫的执行环境在
+          // worktree，脏文件只在 worktree 里产生；主工作区不受猫影响无需清理
+          const cleanCwd = getSessionWorktreePath(sessionId) ?? process.cwd()
           const status = execSync('git status --porcelain', {
+            cwd: cleanCwd,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
           }).trim()
           if (status) {
             log.warn('dirty workspace after agent execution, resetting', {
               traceId,
+              cwd: cleanCwd,
             })
-            execSync('git checkout -- .', { stdio: 'ignore' })
-            execSync('git clean -fd', { stdio: 'ignore' })
+            execSync('git checkout -- .', { cwd: cleanCwd, stdio: 'ignore' })
+            execSync('git clean -fd', { cwd: cleanCwd, stdio: 'ignore' })
           }
         } catch {
           // 非 git 仓库，忽略
@@ -2383,6 +2396,10 @@ async function runAgentReply(
     // llmMaxTokens 是单次输出上限，与 MAX_CONTEXT_TOKENS（上下文窗口）是两套数字体系
     ...(agent.llmMaxTokens != null ? { maxTokens: agent.llmMaxTokens } : {}),
     ...(agent.llmTemperature != null ? { temperature: agent.llmTemperature } : {}),
+    // 会话隔离：确保会话 worktree 存在（幂等）并把路径传给 CLI 适配器——
+    // 猫在独立目录执行，auto-commit 落会话分支；worktree 不可用（非 git 仓库/
+    // 创建失败）返回 null → 不传 cwd，适配器取默认 workspace（存量行为零变化）
+    cwd: ensureSessionWorktree(sessionId) ?? undefined,
     // MCP 结构化路由上下文（契约 3 二次修订——店长裁决）：claude.ts 透传
     // 到 MCP server env；其他适配器忽略 context 零影响。
     // triggerAuthorName 与 :947 合并点同款来源（triggerMsg.authorName）——

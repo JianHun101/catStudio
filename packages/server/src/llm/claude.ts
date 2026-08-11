@@ -187,7 +187,8 @@ export class ClaudeAdapter implements LLMAdapter {
       env,
       label: 'claude',
       input: prompt,
-      cwd: getWorkspaceDir(),
+      // cwd 透传会话 worktree 路径（会话隔离）——缺省默认 workspace（存量行为零变化）
+      cwd: options.cwd ?? getWorkspaceDir(),
     })
 
     // ─── Abort 处理：收到取消信号时 kill 子进程 ───
