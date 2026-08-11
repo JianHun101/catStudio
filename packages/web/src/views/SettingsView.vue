@@ -1238,6 +1238,9 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: flex;
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .settings-nav {
@@ -1292,10 +1295,12 @@ onUnmounted(() => {
   padding: 20px 28px 32px;
 }
 
-/* IM 接入 / 系统配置详情区限宽（表单行不长，避免贴满整行） */
+/* IM 接入 / 系统配置详情区限宽居中（表单行不长，避免贴满整行） */
 .im-pane,
 .system-pane {
   max-width: 680px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 /* ─── IM 接入子 Tab ─────────────────────── */
