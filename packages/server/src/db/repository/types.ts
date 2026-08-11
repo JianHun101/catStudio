@@ -95,6 +95,31 @@ export interface SessionReadStateRow {
   last_read_at: string
 }
 
+/** v2 episode 评估表行（docs/plans/episode-evaluation-v2.md §3） */
+export interface EpisodeRow {
+  id: string
+  /** 锚定主键：根触发消息 id（UNIQUE，upsert 冲突键） */
+  root_trigger_message_id: string
+  /** 双根语义：'U'（用户任务）/ 'H'（交接审查链根） */
+  root_triggered_by: 'U' | 'H'
+  /** 实际锚定消息 id（零执行场景 = 根消息自身） */
+  root_message_id: string | null
+  /** 归组辅助键（U 根自身值，可 NULL，不承重） */
+  task_id: string | null
+  /** 结局判定关联键（= 链末 execution_log.trace_id 抄录；NULL 仅零执行场景，G2-N5） */
+  chain_task_id: string | null
+  /** 根消息所在会话（N6：verdict JOIN 的 session 限定键） */
+  session_id: string | null
+  /** 7 类结局之一，未定（在途 open）= NULL */
+  outcome: string | null
+  /** closure 状态机：open → classified → closed */
+  episode_state: 'open' | 'classified' | 'closed'
+  /** 判定规则版本号（P5 全量重评承重） */
+  classification_ver: string
+  created_at: string
+  updated_at: string
+}
+
 export interface ConnectorBindingRow {
   id: string
   platform: string

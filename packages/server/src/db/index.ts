@@ -283,6 +283,29 @@ export function initDb(): void {
       // W1 L1 错误分类桶列（additive ALTER；存量行 NULL，聚合 COALESCE('unknown') 兜底）
       sql: `ALTER TABLE execution_logs ADD COLUMN error_type TEXT`,
     },
+    // v2 episode 评估表（additive：CREATE TABLE IF NOT EXISTS 幂等，老库重跑零副作用）。
+    // 结构按 docs/plans/episode-evaluation-v2.md §3（九轮审查定稿 5b45a38）：
+    // - root_trigger_message_id UNIQUE = 锚定主键（upsert 冲突键，五处先例）
+    // - chain_task_id 允许 NULL（G2-N5：仅零执行场景可达；有执行行必有 trace_id 抄录）
+    // - outcome 允许 NULL（未定 = 在途 open）；episode_state open→classified→closed（closure 状态机）
+    // - classification_ver 承重 P5 全量重评（规则升级带新版本号全量 upsert 覆盖）
+    {
+      name: 'episodes table (v2 episode 评估)',
+      sql: `CREATE TABLE IF NOT EXISTS episodes (
+        id TEXT PRIMARY KEY,
+        root_trigger_message_id TEXT NOT NULL UNIQUE,
+        root_triggered_by TEXT NOT NULL CHECK (root_triggered_by IN ('U', 'H')),
+        root_message_id TEXT,
+        task_id TEXT,
+        chain_task_id TEXT,
+        session_id TEXT,
+        outcome TEXT CHECK (outcome IN ('success', 'corrected_success', 'needs_investigation', 'harness_fix_needed', 'routing_failure', 'abandoned', 'unclassified')),
+        episode_state TEXT NOT NULL CHECK (episode_state IN ('open', 'classified', 'closed')),
+        classification_ver TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    },
   ]
 
   for (const m of migrations) {

@@ -143,6 +143,21 @@ const SCHEMA_SQL = `
     raw TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS episodes (
+    id TEXT PRIMARY KEY,
+    root_trigger_message_id TEXT NOT NULL UNIQUE,
+    root_triggered_by TEXT NOT NULL CHECK (root_triggered_by IN ('U', 'H')),
+    root_message_id TEXT,
+    task_id TEXT,
+    chain_task_id TEXT,
+    session_id TEXT,
+    outcome TEXT CHECK (outcome IN ('success', 'corrected_success', 'needs_investigation', 'harness_fix_needed', 'routing_failure', 'abandoned', 'unclassified')),
+    episode_state TEXT NOT NULL CHECK (episode_state IN ('open', 'classified', 'closed')),
+    classification_ver TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `
 
 /**

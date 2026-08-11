@@ -63,4 +63,5 @@ export type {
   ExecutionLogRow,
   SessionReadStateRow,
   ConnectorBindingRow,
+  EpisodeRow,
 } from './types.js'

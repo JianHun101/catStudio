@@ -25,6 +25,7 @@ import { summaryConfigRoutes } from './routes/config-summary.js'
 import { internalRoutes } from './routes/internal.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
 import { runL1Aggregation } from './eval/l1-aggregator.js'
+import { classifyEpisodes, ZERO_EXECUTION_WINDOW_MINUTES } from './eval/episodes.js'
 import { existsSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
@@ -168,6 +169,28 @@ async function main(): Promise<void> {
     log.error('L1 initial aggregation failed (non-blocking)', { error: err.message })
   }
 
+  // v2 episode 判定定时器：周期跑一轮全量判定（执行链路径 + 零执行扫描，同步函数，
+  // 失败不阻塞主流程——与 L1 同款外层兜底）
+  const episodeTimer = setInterval(
+    () => {
+      try {
+        const { upserted, open } = classifyEpisodes()
+        if (upserted > 0 || open > 0) {
+          log.info('episode 判定一轮完成', { upserted, open })
+        }
+      } catch (err: any) {
+        log.error('episode classification crashed (non-blocking)', { error: err.message })
+      }
+    },
+    ZERO_EXECUTION_WINDOW_MINUTES * 60 * 1000
+  )
+  // 启动后立即跑一轮（与 L1 同款：不等首个周期，重启后尽快建立判定基线）
+  try {
+    classifyEpisodes()
+  } catch (err: any) {
+    log.error('episode initial classification failed (non-blocking)', { error: err.message })
+  }
+
   log.info('server started', { host: HOST, port: PORT })
 
   // 6. 优雅关闭
@@ -177,6 +200,8 @@ async function main(): Promise<void> {
     stopOneBotOutbound?.()
     // W1: 清理 L1 聚合定时器（shutdown 链完整——防热启动/测试进程内重复定时器）
     clearInterval(l1Timer)
+    // v2: 清理 episode 判定定时器（同款防重复定时器）
+    clearInterval(episodeTimer)
     io.close()
     await app.close()
     await closeRedis()
