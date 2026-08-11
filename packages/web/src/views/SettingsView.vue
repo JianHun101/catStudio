@@ -1239,7 +1239,6 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   max-width: 1100px;
-  width: 100%;
   margin: 0 auto;
 }
 
@@ -1300,7 +1299,6 @@ onUnmounted(() => {
 .system-pane {
   max-width: 680px;
   margin: 0 auto;
-  width: 100%;
 }
 
 /* ─── IM 接入子 Tab ─────────────────────── */

@@ -453,7 +453,6 @@ onUnmounted(() => {
   padding: 20px 28px 32px;
   max-width: 860px;
   margin: 0 auto;
-  width: 100%;
 }
 
 /* ─── 通用区块 ──────────────────────────── */
