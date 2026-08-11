@@ -313,9 +313,13 @@ export async function completeExecution(
   // 交接请求去重（dequeue 后、执行前检查）：请求排队期间作者已落库完整文档
   // → 跳过执行不唤醒猫（727ff2e 案例：请求 03:19 入队、文档 03:20 落库、
   // 执行 03:23——只有执行时点（dequeue 后）检查才看得到文档，入队时检查
-  // 会漏掉）。stale 命令标 done 后继续弹下一个，直到队列空或遇到非 stale
+  // 会漏掉）。stale 命令标 done 后继续弹下一个，直到队列空或遇到非 stale。
+  // 守卫：带 pendingTriggers 的 stale 命令不跳过——B 合并（dispatch 的
+  // depth>0 触发并入）已在合并时通过 systemMessageBridge 告知用户「将一并
+  // 处理 N 件事」，跳过会让合并进来的 A2A 触发静默蒸发（用户看到"已合并"
+  // 却永远不执行）。带合并触发时执行不是白叫醒——有真实的跟进待办，照常弹出。
   let next = q.shift()
-  while (next && isStaleHandoffRequest(next)) {
+  while (next && isStaleHandoffRequest(next) && next.pendingTriggers.length === 0) {
     log.info('stale handoff request skipped (queued)', {
       agentId,
       triggerMessageId: next.triggerMessageId,

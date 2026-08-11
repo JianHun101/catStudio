@@ -699,6 +699,74 @@ describe('dispatch', () => {
       expect(getDispatchState('req-1')).toBe('running')
     })
 
+    it('F1 守卫：stale 请求带 pendingTriggers（B 合并的 A2A 触发）→ 不跳过，照常弹出执行', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg(makeMessage({ id: 'busy-1', mentions: ['店长'] }))
+      insertMsg(fillRequest('req-1'))
+      insertMsg(fullDoc('doc-1'))
+
+      // busy-1 直跑 → busy；req-1 排队（请求期间完整文档已落库 → 已是 stale）
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'busy-1', mentions: ['店长'] }),
+        [mockAgent]
+      )
+      await dispatchModule.dispatch('session-1', fillRequest('req-1'), [mockAgent])
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(1)
+
+      // A2A 触发（depth=1，同 session）→ B 合并并入 req-1.pendingTriggers（不入队）
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'a2a-1', mentions: ['店长'] }),
+        [mockAgent],
+        'trace-a2a',
+        1
+      )
+      expect(dispatchModule.getAgentState('agent-1')!.queueLength).toBe(1) // 未新增排队
+
+      // dequeue 时 req-1 虽 stale（文档已补填）但带合并触发 → 不跳过，照常弹出执行
+      // （合并时已告知用户「将一并处理」，跳过会让 A2A 触发静默蒸发）
+      const next = await dispatchModule.completeExecution('agent-1', true)
+      expect(next!.triggerMessageId).toBe('req-1')
+      expect(next!.pendingTriggers).toEqual(['a2a-1']) // 合并触发完整到达（不蒸发）
+      expect(getDispatchState('req-1')).toBe('running') // 未被标 done（正常执行）
+    })
+
+    it('F1 混合队列：带 pendingTriggers 的 stale 照常弹出，其后纯 stale 仍跳过', async () => {
+      dispatchModule.initAgentSlot('agent-1')
+      insertMsg(makeMessage({ id: 'busy-1', mentions: ['店长'] }))
+      insertMsg(fillRequest('req-1'))
+      insertMsg(fillRequest('req-2'))
+      insertMsg(fullDoc('doc-1'))
+
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'busy-1', mentions: ['店长'] }),
+        [mockAgent]
+      )
+      await dispatchModule.dispatch('session-1', fillRequest('req-1'), [mockAgent])
+      await dispatchModule.dispatch('session-1', fillRequest('req-2'), [mockAgent])
+
+      // A2A 触发并入排队中的第一个命令（req-1）
+      await dispatchModule.dispatch(
+        'session-1',
+        makeMessage({ id: 'a2a-1', mentions: ['店长'] }),
+        [mockAgent],
+        'trace-a2a',
+        1
+      )
+
+      // 第一次弹出：req-1 带 pendingTriggers → 不跳过
+      const next1 = await dispatchModule.completeExecution('agent-1', true)
+      expect(next1!.triggerMessageId).toBe('req-1')
+      expect(next1!.pendingTriggers).toEqual(['a2a-1'])
+
+      // 第二次弹出：req-2 纯 stale（无合并触发）→ 跳过标 done；队列空 → undefined
+      const next2 = await dispatchModule.completeExecution('agent-1', true)
+      expect(next2).toBeUndefined()
+      expect(getDispatchState('req-2')).toBe('done')
+    })
+
     it('isStaleHandoffRequest 导出契约：非请求消息 / 无 sha → false', () => {
       const asCmd = (triggerContent: string) =>
         ({
