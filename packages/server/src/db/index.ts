@@ -284,6 +284,23 @@ export function initDb(): void {
       -- 独立语句幂等，已建表的存量库同样生效
       CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_scores_message_id ON eval_scores(message_id)`,
     },
+    // W4 用户回标表（additive：CREATE TABLE IF NOT EXISTS 幂等）。
+    // 用户对低分样本的人工复核：eval_score_id UNIQUE = 一评一标，
+    // 重复回标走覆盖（路由层先查后写 + log 留痕）。与 eval_scores
+    // 通过 eval_score_id 关联，sample_reason 翻转为 'user_feedback'
+    // 由路由层在写入成功后更新（表间不建外键，照 eval_scores 同款松耦合）
+    {
+      name: 'user_feedback table (W4 用户回标)',
+      sql: `CREATE TABLE IF NOT EXISTS user_feedback (
+        id TEXT PRIMARY KEY,
+        eval_score_id TEXT NOT NULL UNIQUE,
+        message_id TEXT,
+        session_id TEXT,
+        user_score REAL NOT NULL,
+        comment TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    },
     {
       name: 'error_type on execution_logs',
       // W1 L1 错误分类桶列（additive ALTER；存量行 NULL，聚合 COALESCE('unknown') 兜底）

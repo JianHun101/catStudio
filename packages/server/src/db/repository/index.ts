@@ -24,6 +24,7 @@ import { setRepoDb as setConnectorBindingsDb } from './connectorBindings.js'
 import { setRepoDb as setQueryDb } from './query.js'
 import { setRepoDb as setVerdictsDb } from './verdicts.js'
 import { setRepoDb as setEvalScoresDb } from './evalScores.js'
+import { setRepoDb as setUserFeedbackDb } from './userFeedback.js'
 
 /** 初始化所有 repository 模块的 db 实例（在 initDb() 之后调用） */
 export function initRepository(db: Database.Database): void {
@@ -38,6 +39,7 @@ export function initRepository(db: Database.Database): void {
   setQueryDb(db)
   setVerdictsDb(db)
   setEvalScoresDb(db)
+  setUserFeedbackDb(db)
 }
 
 // 按实体分组导出，调用方用 repo.agents.xxx / repo.sessions.xxx 等
@@ -52,6 +54,7 @@ export * as connectorBindings from './connectorBindings.js'
 export * as query from './query.js'
 export * as verdicts from './verdicts.js'
 export * as evalScores from './evalScores.js'
+export * as userFeedback from './userFeedback.js'
 
 // Row 类型也一并导出
 export type {
