@@ -13,6 +13,7 @@ import {
   scanZeroExecutionEpisodes,
   upsertEpisode,
   determineRootTriggeredBy,
+  episodeStats,
   EPISODE_CLASSIFICATION_VER,
 } from './episodes.js'
 import type { EpisodeRow } from '../db/repository/types.js'
@@ -530,5 +531,83 @@ describe('upsert 幂等（⑥）与重判覆盖', () => {
     expect(scanZeroExecutionEpisodes()).toBe(1)
     expect(scanZeroExecutionEpisodes()).toBe(0)
     expect(countEpisodes()).toBe(1)
+  })
+})
+
+describe('P5 全量重评（classification_ver 驱动，规格 §3 承重假设）', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    seedBase()
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  it('规则升级后重跑全量判定：旧版本结局被覆盖为新版本结局（幂等覆盖）', () => {
+    const rootId = insertRootMessage({ id: 'msg-root', created_at: sqliteNow(60) })
+    insertExecution({
+      triggered_by: rootId,
+      status: 'completed',
+      trace_id: 'trace-1',
+      started_at: sqliteNow(50),
+      ended_at: sqliteNow(45),
+    })
+    // 模拟旧规则（v2.0）已判 abandoned 的存量行——schema 无变化，直接覆盖重评
+    getDb()
+      .prepare(
+        `INSERT INTO episodes (id, root_trigger_message_id, root_triggered_by, root_message_id, task_id, chain_task_id, session_id, outcome, episode_state, classification_ver)
+         VALUES ('ep-old', 'msg-root', 'U', 'msg-root', NULL, 'trace-1', 's1', 'abandoned', 'classified', 'v2.0')`
+      )
+      .run()
+
+    expect(episodeStats().versionStale).toBe(1)
+    classifyEpisodes()
+    const ep = getEpisode(rootId)!
+    // 覆盖更新：同根不产生重复行（UNIQUE 冲突键）
+    expect(countEpisodes()).toBe(1)
+    // 旧结局被当前规则重判覆盖（abandoned → success），版本号随当前常量更新
+    expect(ep.outcome).toBe('success')
+    expect(ep.classification_ver).toBe(EPISODE_CLASSIFICATION_VER)
+    expect(episodeStats().versionStale).toBe(0)
+  })
+
+  it('episodeStats：U 根任务结局计数 / H 根不计任务结局 / open 与版本偏差分行', () => {
+    // U 根 success（执行链完成）
+    const uOk = insertRootMessage({ id: 'msg-u-ok', created_at: sqliteNow(60) })
+    insertExecution({
+      triggered_by: uOk,
+      status: 'completed',
+      trace_id: 'trace-u',
+      started_at: sqliteNow(50),
+      ended_at: sqliteNow(45),
+    })
+    // U 根 abandoned（零执行超窗——无 @ 闲聊暴露语义）
+    insertRootMessage({ id: 'msg-u-drop', created_at: sqliteNow(60) })
+    // H 根（交接消息被静默丢）→ 内容特征判定 H，不计任务结局
+    insertRootMessage({
+      id: 'msg-h-drop',
+      created_at: sqliteNow(60),
+      content: '@ds猫 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。',
+    })
+    // open 行（running 在途，outcome NULL）
+    const uRunning = insertRootMessage({ id: 'msg-u-run', created_at: sqliteNow(60) })
+    insertExecution({
+      triggered_by: uRunning,
+      status: 'running',
+      trace_id: 'trace-run',
+      started_at: sqliteNow(50),
+    })
+
+    classifyEpisodes()
+    const stats = episodeStats()
+    expect(stats.uRoot.success).toBe(1)
+    expect(stats.uRoot.abandoned).toBe(1)
+    expect(stats.uRoot.needs_investigation).toBeUndefined()
+    // H 根计入 hRoot（不双计到 uRoot）
+    expect(stats.hRoot.abandoned).toBe(1)
+    expect(stats.uRoot.abandoned).toBe(1) // U 根的 abandoned 与 H 根互不干扰
+    expect(stats.open).toBe(1)
+    expect(stats.versionStale).toBe(0)
   })
 })

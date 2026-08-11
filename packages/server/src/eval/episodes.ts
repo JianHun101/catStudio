@@ -83,8 +83,9 @@ function hasEpisodeWithChainTaskId(taskId: string): boolean {
 /**
  * 收集根消息的直接/间接执行链（A2A 递归：agent 回复若再触发执行，经
  * message_id 续查）。深度上限防异常循环。链末 = started_at 最晚的执行行。
+ * 导出供 E2 归因分流器复用（closure 复验重跑判定需独立收集执行链）。
  */
-function collectChain(rootMsgId: string): ExecutionLogRow[] {
+export function collectChain(rootMsgId: string): ExecutionLogRow[] {
   const db = getDb()
   const chain: ExecutionLogRow[] = []
   const frontier = new Set<string>([rootMsgId])
@@ -208,7 +209,12 @@ export function classifyChain(
 
 // ─── upsert（验收 ⑥ 幂等）─────────────────────────────
 
-/** upsert 一条 episode。root_trigger_message_id 为冲突键，重复归因覆盖更新不产生重复行。 */
+/**
+ * upsert 一条 episode。root_trigger_message_id 为冲突键，重复归因覆盖更新不产生重复行。
+ * closed 终态守卫（E2）：episode_state='closed' 的行不被定时器重判覆盖——closure
+ * 复验确认结局翻转后关闭即终态（规格 §4 状态机 open → classified → closed），
+ * 否则每轮 classifyEpisodes 会把 closed 覆盖回 classified，闭环永不落定。
+ */
 export function upsertEpisode(data: {
   rootTriggerMessageId: string
   rootTriggeredBy: RootTriggeredBy
@@ -232,7 +238,8 @@ export function upsertEpisode(data: {
          outcome = excluded.outcome,
          episode_state = excluded.episode_state,
          classification_ver = excluded.classification_ver,
-         updated_at = datetime('now')`
+         updated_at = datetime('now')
+       WHERE episodes.episode_state != 'closed'`
     )
     .run(
       uuid(),
@@ -288,6 +295,55 @@ export function scanZeroExecutionEpisodes(): number {
     n++
   }
   return n
+}
+
+// ─── P5 重评统计（classification_ver 驱动）─────────────
+
+/**
+ * 重评统计：按 root_triggered_by × outcome 分组计数 + 版本偏差行数。
+ * P5 全量重评承重：规则升级（EPISODE_CLASSIFICATION_VER 变更）后重跑
+ * classifyEpisodes() 全量 upsert 覆盖历史结局——versionStale 是「将被覆盖」
+ * 的存量行数（信息性输出，重评本身幂等不依赖它）。
+ * 任务结局只统计在 U 根 episode 上；H 根（审查链）不参与任务结局计数（G2 拍板）。
+ */
+export function episodeStats(): {
+  versionStale: number
+  uRoot: Record<string, number>
+  hRoot: Record<string, number>
+  open: number
+} {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT root_triggered_by, outcome, COUNT(*) AS cnt
+       FROM episodes
+       GROUP BY root_triggered_by, outcome
+       ORDER BY root_triggered_by, outcome`
+    )
+    .all() as Array<{
+    root_triggered_by: RootTriggeredBy
+    outcome: EpisodeOutcome | null
+    cnt: number
+  }>
+  const staleRow = db
+    .prepare('SELECT COUNT(*) AS cnt FROM episodes WHERE classification_ver != ?')
+    .get(EPISODE_CLASSIFICATION_VER) as { cnt: number }
+
+  const stats: ReturnType<typeof episodeStats> = {
+    versionStale: staleRow.cnt,
+    uRoot: {},
+    hRoot: {},
+    open: 0,
+  }
+  for (const r of rows) {
+    if (r.outcome === null) {
+      stats.open += r.cnt
+      continue
+    }
+    if (r.root_triggered_by === 'U') stats.uRoot[r.outcome] = r.cnt
+    else stats.hRoot[r.outcome] = r.cnt
+  }
+  return stats
 }
 
 // ─── 主入口 ───────────────────────────────────────────

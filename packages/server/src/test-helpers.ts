@@ -169,6 +169,19 @@ const SCHEMA_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS episode_attributions (
+    id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL UNIQUE,
+    outcome TEXT NOT NULL,
+    root_cause TEXT,
+    action_type TEXT NOT NULL CHECK (action_type IN ('investigation', 'harness_fix', 'replay', 'improvement')),
+    action_detail TEXT,
+    status TEXT NOT NULL DEFAULT 'dispatched' CHECK (status IN ('dispatched', 'resolved')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (episode_id) REFERENCES episodes(id)
+  );
 `
 
 /**

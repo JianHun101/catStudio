@@ -329,6 +329,25 @@ export function initDb(): void {
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`,
     },
+    // E2 归因记录表（additive：CREATE TABLE IF NOT EXISTS 幂等）。
+    // 非 success 结局的 episode 归因 → 分流到既有动作通道（调查单/拆活单/重放/改进素材），
+    // 一个 episode 一条记录（UNIQUE 幂等键，防定时器每轮重复投递）；
+    // status 流转 dispatched → resolved（closure 复验确认结局翻转后）。
+    {
+      name: 'episode_attributions table (E2 归因分流)',
+      sql: `CREATE TABLE IF NOT EXISTS episode_attributions (
+        id TEXT PRIMARY KEY,
+        episode_id TEXT NOT NULL UNIQUE,
+        outcome TEXT NOT NULL,
+        root_cause TEXT,
+        action_type TEXT NOT NULL CHECK (action_type IN ('investigation', 'harness_fix', 'replay', 'improvement')),
+        action_detail TEXT,
+        status TEXT NOT NULL DEFAULT 'dispatched' CHECK (status IN ('dispatched', 'resolved')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (episode_id) REFERENCES episodes(id)
+      )`,
+    },
     // 混合检索 FTS5 关键词通道表（additive：CREATE VIRTUAL TABLE IF NOT EXISTS 幂等，
     // 老库重跑零副作用）。独立表（非 external content）——内容为 bigram 预分词串
     // （空格 join，memories.ts bigramTokenize 应用层切分），unicode61 按字母/数字切

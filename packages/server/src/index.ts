@@ -31,6 +31,7 @@ import { evalRoutes } from './routes/eval.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
 import { runL1Aggregation } from './eval/l1-aggregator.js'
 import { classifyEpisodes, ZERO_EXECUTION_WINDOW_MINUTES } from './eval/episodes.js'
+import { runEpisodeAttribution } from './eval/attribution.js'
 import { existsSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
@@ -176,7 +177,8 @@ async function main(): Promise<void> {
   }
 
   // v2 episode 判定定时器：周期跑一轮全量判定（执行链路径 + 零执行扫描，同步函数，
-  // 失败不阻塞主流程——与 L1 同款外层兜底）
+  // 失败不阻塞主流程——与 L1 同款外层兜底）+ E2 归因分流与 closure 复验
+  // （判定之后跑：归因读到的是本轮最新结局；复验读到的是已翻转结局）
   const episodeTimer = setInterval(
     () => {
       try {
@@ -187,6 +189,14 @@ async function main(): Promise<void> {
       } catch (err: any) {
         log.error('episode classification crashed (non-blocking)', { error: err.message })
       }
+      try {
+        const { dispatched, resolved } = runEpisodeAttribution(io)
+        if (dispatched > 0 || resolved > 0) {
+          log.info('episode 归因分流一轮完成', { dispatched, resolved })
+        }
+      } catch (err: any) {
+        log.error('episode attribution crashed (non-blocking)', { error: err.message })
+      }
     },
     ZERO_EXECUTION_WINDOW_MINUTES * 60 * 1000
   )
@@ -195,6 +205,11 @@ async function main(): Promise<void> {
     classifyEpisodes()
   } catch (err: any) {
     log.error('episode initial classification failed (non-blocking)', { error: err.message })
+  }
+  try {
+    runEpisodeAttribution(io)
+  } catch (err: any) {
+    log.error('episode initial attribution failed (non-blocking)', { error: err.message })
   }
 
   // 静默丢重放定时器：周期补派"落库但从未被调度"的用户消息（16:09/02:24 案例：
