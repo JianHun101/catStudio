@@ -846,7 +846,22 @@ async function executeOneAgent(
       mentions: [],
       createdAt: new Date().toISOString(),
     })
-    await completeExecution(agent.id, true, { traceId })
+    // P0-2 同款守卫补全：completeExecution 弹出队列命令后不丢弃——无 key 的
+    // 排队命令同样会落入 running+无执行日志的幽灵态（slot 卡 busy，恢复机制
+    // 全盲）。弹出后补 drain：子链在 no-key 检查处逐个 completeExecution 弹
+    // 下一个，直到队列空（每条发一次配置提示，执行日志逐条落库）
+    const nextCmd = await completeExecution(agent.id, true, { traceId })
+    if (nextCmd) {
+      try {
+        await drainQueuedCommand(io, agent, nextCmd, false)
+      } catch (e: any) {
+        log.error('drain failed after no-api-key completion (queue item stuck)', {
+          agentId: agent.id,
+          triggerMessageId: nextCmd.triggerMessageId,
+          error: e.message,
+        })
+      }
+    }
     return false
   }
 
@@ -896,10 +911,28 @@ async function executeOneAgent(
         mentions: [],
         createdAt: new Date().toISOString(),
       })
-      await completeExecution(agent.id, false, {
+      // 异常路径也不丢弃弹出的队列命令（4eb3143 只补了外层 catch，此处同款补全）：
+      // completeExecution 弹出后命令已出队，返回值若丢弃 → 弹出的命令永久
+      // running + 无执行日志（幽灵 slot：dispatch_state=running 但 execution_logs
+      // 无记录、槽位卡 busy，recoverQueuedMessages 仅启动时跑，三恢复机制全盲）——
+      // LLM 失败/超时 + 有排队命令时必现（2026-08-11 26 分钟假 running 实锤同族
+      // 机制：弹出后延迟/丢弃执行，用户侧"店长一直阻塞"）。try/catch 隔离——
+      // drain 自身失败不掩盖原异常
+      const nextCmd = await completeExecution(agent.id, false, {
         errorMessage: err.message || 'unknown error',
         traceId,
       })
+      if (nextCmd) {
+        try {
+          claudeRan = await drainQueuedCommand(io, agent, nextCmd, claudeRan)
+        } catch (e: any) {
+          log.error('drain failed after execution error (queue item stuck)', {
+            agentId: agent.id,
+            triggerMessageId: nextCmd.triggerMessageId,
+            error: e.message,
+          })
+        }
+      }
       return claudeRan
     } finally {
       activeAborts.delete(agent.id)

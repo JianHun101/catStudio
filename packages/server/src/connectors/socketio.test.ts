@@ -1950,6 +1950,196 @@ describe('socketio connector', () => {
       expect(execLog.triggered_by_message_id).toBe('msg-queued2')
     })
 
+    it('LLM 失败路径（inner catch）：completeExecution 弹出的命令不丢弃（drain 执行）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution, executeAgentCommand } =
+        await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const db = getDb()
+
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, '[]')`
+      ).run('msg-main', 'session-1', '处理消息')
+      // 队列命令的触发消息（drain 出队反查 authorName 需要存在于 DB）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions)
+         VALUES (?, ?, ?, 'agent', ?, '[]')`
+      ).run('msg-queued3', 'session-1', 'agent-1', '@店长 排队任务')
+      const queuedCmd = {
+        sessionId: 'session-1',
+        agentId: 'agent-1',
+        triggerMessageId: 'msg-queued3',
+        triggerContent: '@店长 排队任务',
+        mentions: ['店长'],
+        traceId: 'trace-queued3',
+        depth: 0,
+        taskId: undefined,
+        pendingTriggers: [],
+      }
+      // 状态：main 执行中 →（inner catch drain 时）队列命令命中
+      vi.mocked(getAgentState)
+        .mockReset()
+        .mockReturnValueOnce({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-main',
+        })
+        .mockReturnValue({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-queued3',
+        })
+      // completeExecution：主执行失败收口 → 弹出 queuedCmd → drain；drain 子链收口 → undefined
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValueOnce(queuedCmd as any)
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      // 审计落库：mock executeAgentCommand 的核心副作用（真实 insertExecutionLog 在
+      // dispatch 单测覆盖——此处钉死"inner catch 路径也调用它"这一调用点）
+      vi.mocked(executeAgentCommand).mockReset()
+      vi.mocked(executeAgentCommand).mockImplementation(
+        async (agent: any, cmd: any, traceId: string) => {
+          db.prepare(
+            `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
+             VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))`
+          ).run('exec-log-llm-fail', cmd.sessionId, cmd.agentId, cmd.triggerMessageId, traceId)
+        }
+      )
+      // LLM 流直接抛错 → runAgentReply 的 for-await 无内部 try/catch → inner catch
+      // （agent execution failed 路径——修复前此路径丢弃 completeExecution 返回值）
+      const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
+        throw new Error('LLM boom')
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-1',
+            name: '店长',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+            role: 'store',
+          } as any,
+        ],
+        { id: 'msg-main', content: '处理消息', mentions: [] },
+        'trace-main'
+      )
+
+      // inner catch 弹出的命令仍被执行（修复前返回值被丢弃 → 'running' 永久搁浅）：
+      // executeAgentCommand 被调用 + 执行日志落库
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
+      expect(executeAgentCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'agent-1' }),
+        expect.objectContaining({ triggerMessageId: 'msg-queued3' }),
+        'trace-queued3'
+      )
+      const execLog = db
+        .prepare(`SELECT * FROM execution_logs WHERE id = 'exec-log-llm-fail'`)
+        .get() as any
+      expect(execLog).toBeDefined()
+      expect(execLog.triggered_by_message_id).toBe('msg-queued3')
+    })
+
+    it('no-API-key 路径：completeExecution 弹出的命令不丢弃（drain 执行）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution, executeAgentCommand } =
+        await import('../dispatch/index.js')
+      const db = getDb()
+
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, '[]')`
+      ).run('msg-main', 'session-1', '处理消息')
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions)
+         VALUES (?, ?, ?, 'agent', ?, '[]')`
+      ).run('msg-queued4', 'session-1', 'agent-1', '@店长 排队任务')
+      const queuedCmd = {
+        sessionId: 'session-1',
+        agentId: 'agent-1',
+        triggerMessageId: 'msg-queued4',
+        triggerContent: '@店长 排队任务',
+        mentions: ['店长'],
+        traceId: 'trace-queued4',
+        depth: 0,
+        taskId: undefined,
+        pendingTriggers: [],
+      }
+      // 状态：main 执行中 →（no-key drain 时）队列命令命中
+      vi.mocked(getAgentState)
+        .mockReset()
+        .mockReturnValueOnce({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-main',
+        })
+        .mockReturnValue({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-queued4',
+        })
+      // completeExecution：no-key 收口 → 弹出 queuedCmd → drain；drain 子链 no-key 收口 → undefined
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValueOnce(queuedCmd as any)
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      vi.mocked(executeAgentCommand).mockReset()
+      vi.mocked(executeAgentCommand).mockImplementation(
+        async (agent: any, cmd: any, traceId: string) => {
+          db.prepare(
+            `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
+             VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))`
+          ).run('exec-log-nokey', cmd.sessionId, cmd.agentId, cmd.triggerMessageId, traceId)
+        }
+      )
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-1',
+            name: '店长',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: '',
+            role: 'store',
+          } as any,
+        ],
+        { id: 'msg-main', content: '处理消息', mentions: [] },
+        'trace-main'
+      )
+
+      // no-key 收口弹出的命令仍被执行（修复前返回值被丢弃 → 'running' 永久搁浅）：
+      // executeAgentCommand 被调用 + 执行日志落库 + LLM 零调用（无 key 不发流）
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
+      expect(executeAgentCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'agent-1' }),
+        expect.objectContaining({ triggerMessageId: 'msg-queued4' }),
+        'trace-queued4'
+      )
+      const execLog = db
+        .prepare(`SELECT * FROM execution_logs WHERE id = 'exec-log-nokey'`)
+        .get() as any
+      expect(execLog).toBeDefined()
+      expect(execLog.triggered_by_message_id).toBe('msg-queued4')
+    })
+
     it('catch 路径 drain 子链执行 Claude → 返回值并入 anyClaude（F2：修复前被丢弃致脏文件清理跳过）', async () => {
       const mod = await import('./socketio.js')
       const { getAgentState, completeExecution, executeAgentCommand, dispatch } =
