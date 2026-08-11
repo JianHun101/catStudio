@@ -43,3 +43,22 @@ export function insertReviewParseFailure(data: {
      VALUES (?, ?, ?)`
   ).run(data.messageId, data.reason, data.raw)
 }
+
+/**
+ * 按任务链反查"是否已有 ✅ approve 审查结论"（补填请求风暴根治方向 1）。
+ * 判定链（与 executor 反查同源）：task_id = 链末 execution_log.trace_id（E3 接线
+ * 锚定源）→ JOIN messages 找该任务链上审查结论消息 → 只认 verdict='approve'。
+ * 语义：有修改（suggest/reject）就有新审查，仍须补填——只有 approve 才 true。
+ * task_id 为空/无匹配 → false（无执行记录、老数据、无结论一律按未批准处理）。
+ */
+export function hasApproveVerdictByTaskId(taskId: string | null | undefined): boolean {
+  if (!taskId) return false
+  return !!db
+    .prepare(
+      `SELECT 1 FROM review_verdicts v
+       JOIN messages m ON v.message_id = m.id
+       WHERE m.task_id = ? AND v.verdict = 'approve'
+       LIMIT 1`
+    )
+    .get(taskId)
+}

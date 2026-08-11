@@ -3483,13 +3483,14 @@ describe('socketio connector', () => {
     /** 造数据：一条从未被调度的用户消息（dispatch_state NULL + 无执行行 + 超窗） */
     function seedStuckMessage(db: any, overrides: any = {}) {
       db.prepare(
-        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
-         VALUES (?, ?, 'user', ?, ?, ?)`
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id, created_at)
+         VALUES (?, ?, 'user', ?, ?, ?, ?)`
       ).run(
         overrides.id || 'msg-stuck',
         'session-1',
         overrides.content || '@店长 请处理',
         overrides.mentions || JSON.stringify(['店长']),
+        overrides.taskId ?? null,
         overrides.createdAt || sqliteDatetime(40)
       )
     }
@@ -3647,6 +3648,48 @@ describe('socketio connector', () => {
       await mod.replayStuckUserMessages(mockIo as any)
 
       expect(dispatch).not.toHaveBeenCalled()
+    })
+
+    it('⑦ 同 task_id 已有 agent 回复 → 归一 done 不补派（补填风暴根治方向 2）', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const db = getDb()
+      seedStuckMessage(db, { id: 'msg-stuck-replied', taskId: 'task-batch' })
+      // 批量答复场景：兄弟消息无独立 execution_log（NULL 面扫描会误判静默丢），
+      // 但同 task_id 的 agent 回复已证明"事实上被执行过"→ 归一 done 防每轮空转
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, task_id, created_at)
+         VALUES (?, ?, 'agent-1', 'agent', '批量答复', ?, ?)`
+      ).run('msg-replied', 'session-1', 'task-batch', sqliteDatetime(20))
+
+      await mod.replayStuckUserMessages(mockIo as any)
+
+      expect(dispatch).not.toHaveBeenCalled()
+      const row = db
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get('msg-stuck-replied') as any
+      expect(row.dispatch_state).toBe('done')
+    })
+
+    it('⑧ 同 task_id 无 agent 回复（task_id 不匹配）→ 照常补派', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const db = getDb()
+      seedStuckMessage(db, { id: 'msg-stuck-unreplied', taskId: 'task-a' })
+      // 其他任务的 agent 回复（task_id 不同）不应挡住本消息
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, task_id, created_at)
+         VALUES (?, ?, 'agent-1', 'agent', '其他任务回复', ?, ?)`
+      ).run('msg-replied-other', 'session-1', 'task-b', sqliteDatetime(20))
+
+      await mod.replayStuckUserMessages(mockIo as any)
+
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ id: 'msg-stuck-unreplied', taskId: 'task-a' }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-1' })]),
+        expect.any(String)
+      )
     })
   })
 

@@ -272,7 +272,13 @@ export function scanZeroExecutionEpisodes(): number {
        WHERE role = 'user'
          AND created_at < datetime('now', '-${ZERO_EXECUTION_WINDOW_MINUTES} minutes')
          AND NOT EXISTS (SELECT 1 FROM execution_logs el WHERE el.triggered_by_message_id = messages.id)
-         AND NOT EXISTS (SELECT 1 FROM episodes e WHERE e.root_trigger_message_id = messages.id)`
+         AND NOT EXISTS (SELECT 1 FROM episodes e WHERE e.root_trigger_message_id = messages.id)
+         AND NOT EXISTS (
+           SELECT 1 FROM messages r
+           WHERE r.session_id = messages.session_id
+             AND r.task_id = messages.task_id
+             AND r.role = 'agent'
+         )`
     )
     .all() as RootMessageRow[]
 

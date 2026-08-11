@@ -904,6 +904,36 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   const commitMsg = safeGit(cwd, opts.sha ? `log -1 --pretty=%B ${opts.sha}` : 'log -1 --pretty=%B')
   const commitUuid = extractCommitUuid(commitMsg)
   const commitSha = safeGit(cwd, opts.sha ? `rev-parse ${opts.sha}` : 'rev-parse HEAD')
+
+  // 补填风暴根治方向 1：该 commit 已审 ✅ → 跳过补填投递。hook 每 commit 必投、
+  // 去重键只防同 SHA、hook 不查审查结论——已闭环提交照样被反复补填（收口批次
+  // 扎堆 8 个 SHA 各投一次 + 补填请求反复进队列的第四层因果）。
+  // 失败语义钉死：端点不可达/超时/HTTP 错误 → 静默降级照常投递——verdict 查询是
+  // 纯优化，宁多投不丢补填（补填是审查链必需环节，多投只是噪音、少投丢审查）。
+  if (commitSha) {
+    try {
+      const res = await fetch(`${serverUrl}/api/handoff/verdict?sha=${commitSha}`, {
+        signal: AbortSignal.timeout(3000),
+      })
+      if (res.ok) {
+        const body = await res.json()
+        if (body?.approved) {
+          console.log(
+            `[handoff-gen] ⏭️  该 commit 已审 ✅（${commitSha.slice(0, 7)}）——跳过补填投递（verdict 反查命中 approve）`
+          )
+          return 'ok'
+        }
+      } else {
+        console.log(
+          `[handoff-gen] ⚠️  verdict 反查异常 (HTTP ${res.status})——照常投递（verdict 是纯优化，宁多投不丢补填）`
+        )
+      }
+    } catch {
+      console.log(
+        `[handoff-gen] ⚠️  verdict 反查失败（server 不可达/超时）——照常投递（verdict 是纯优化，宁多投不丢补填）`
+      )
+    }
+  }
   let fillerName = '店长'
   /** E3 接线：源链 task_id（executor 反查同源，commit_hash → execution_logs → trace_id） */
   let taskId

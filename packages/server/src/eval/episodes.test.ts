@@ -492,6 +492,36 @@ describe('scanZeroExecutionEpisodes — 零执行路径（G2-N5 + G3 + G5 + N9�
     expect(ep!.root_triggered_by).toBe('H')
     expect(ep!.outcome).toBe('abandoned')
   })
+
+  it("②''''''''' 同 session 同 task_id 已有 agent 回复 → 不判 abandoned（补填风暴根治方向 2）", () => {
+    // 批量答复场景：根消息无独立 execution_log，但同 task_id 的 agent 回复
+    // 已证明"这条消息事实上被执行过"——NOT EXISTS 子查询命中，不再生成 episode
+    insertRootMessage({ id: 'msg-root', task_id: 'task-batch', created_at: sqliteNow(31) })
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, task_id, created_at)
+         VALUES (?, 's1', 'agent-1', 'agent', '批量答复', ?, ?)`
+      )
+      .run('msg-reply', 'task-batch', sqliteNow(20))
+
+    expect(scanZeroExecutionEpisodes()).toBe(0)
+    expect(countEpisodes()).toBe(0)
+  })
+
+  it("②'''''''''' 同 session 同 task_id 的 agent 回复不存在 → 仍判 abandoned（task_id NULL/不匹配不受影响）", () => {
+    // 对照：agent 回复的 task_id 与根消息不同 → 子查询不命中 → 行为不变
+    insertRootMessage({ id: 'msg-root', task_id: 'task-a', created_at: sqliteNow(31) })
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, task_id, created_at)
+         VALUES (?, 's1', 'agent-1', 'agent', '其他任务回复', ?, ?)`
+      )
+      .run('msg-reply-other', 'task-b', sqliteNow(20))
+
+    expect(scanZeroExecutionEpisodes()).toBe(1)
+    const ep = getEpisode('msg-root')
+    expect(ep!.outcome).toBe('abandoned')
+  })
 })
 
 describe('upsert 幂等（⑥）与重判覆盖', () => {

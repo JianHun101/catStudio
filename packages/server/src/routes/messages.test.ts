@@ -328,6 +328,93 @@ describe('Message Routes', () => {
     })
   })
 
+  describe('GET /api/handoff/verdict（补填风暴根治方向 1：投递前查已审 ✅）', () => {
+    // fixture：commit → execution_log（commit_hash + trace_id）→ task_id 消息链
+    // → review_verdicts（message_id 指向链上审查结论消息）
+    const insertVerdictChain = (opts: { sha: string; taskId: string; verdict?: string }) => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES (?, ?, '[]', datetime('now'), datetime('now'))`
+      ).run('session-verdict', 'debug')
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-v', 'v猫')
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, commit_hash, trace_id)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?, ?)`
+      ).run('vlog', 'session-verdict', 'agent-v', 'vm-1', opts.sha, opts.taskId)
+      // 任务链上的审查结论消息（user role：吐槽猫的审查回复经 ingest 落库带 task_id）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES (?, ?, 'user', '审查结论', '[]', ?)`
+      ).run('vmsg-review', 'session-verdict', opts.taskId)
+      if (opts.verdict) {
+        db.prepare(
+          `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict)
+           VALUES (?, ?, ?, ?)`
+        ).run('vmsg-review', 'session-verdict', 'agent-v', opts.verdict)
+      }
+    }
+
+    it('approve 命中 → approved: true', async () => {
+      insertVerdictChain({ sha: 'a'.repeat(40), taskId: 'trace-v1', verdict: 'approve' })
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/handoff/verdict?sha=${'a'.repeat(40)}`,
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({ ok: true, approved: true })
+    })
+
+    it('suggest → approved: false（有修改就有新审查，仍须补填）', async () => {
+      insertVerdictChain({ sha: 'b'.repeat(40), taskId: 'trace-v2', verdict: 'suggest' })
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/handoff/verdict?sha=${'b'.repeat(40)}`,
+      })
+      expect(JSON.parse(res.body)).toEqual({ ok: true, approved: false })
+    })
+
+    it('reject → approved: false', async () => {
+      insertVerdictChain({ sha: 'c'.repeat(40), taskId: 'trace-v3', verdict: 'reject' })
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/handoff/verdict?sha=${'c'.repeat(40)}`,
+      })
+      expect(JSON.parse(res.body)).toEqual({ ok: true, approved: false })
+    })
+
+    it('无 verdict 记录 → approved: false', async () => {
+      insertVerdictChain({ sha: 'd'.repeat(40), taskId: 'trace-v4' })
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/handoff/verdict?sha=${'d'.repeat(40)}`,
+      })
+      expect(JSON.parse(res.body)).toEqual({ ok: true, approved: false })
+    })
+
+    it('无执行记录（SHA 查不到）→ approved: false', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/handoff/verdict?sha=${'e'.repeat(40)}`,
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({ ok: true, approved: false })
+    })
+
+    it('sha 缺失/非法 → 400', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/handoff/verdict' })
+      expect(res.statusCode).toBe(400)
+      const res2 = await app.inject({
+        method: 'GET',
+        url: `/api/handoff/verdict?sha=${'short'}`,
+      })
+      expect(res2.statusCode).toBe(400)
+    })
+  })
+
   describe('POST /api/messages（REST 注入通道图片守卫）', () => {
     // 对齐 socketio.test.ts 的 SEND_MESSAGE 守卫覆盖（前缀/大小/数量三重防线）
     const insertSession = (id: string) => {

@@ -111,6 +111,20 @@ export function getRecentMessages(sessionId: string, limit: number = 500): Messa
     .all(sessionId, limit) as MessageRow[]
 }
 
+/** 同会话同 task_id 是否已有 agent 回复（补填风暴根治方向 2：重放/零执行扫描前查）。
+ *  批量答复场景下兄弟消息无独立 execution_log，但同 task_id 的 agent 回复
+ *  已证明"这条消息事实上被执行过"——不再反复补派。task_id NULL → false
+ *  （SQL NULL 比较不命中，行为天然退化，绝不误伤真静默丢）。 */
+export function hasAgentReplyByTaskId(sessionId: string, taskId: string): boolean {
+  return !!db
+    .prepare(
+      `SELECT 1 FROM messages
+       WHERE session_id = ? AND task_id = ? AND role = 'agent' AND agent_id IS NOT NULL
+       LIMIT 1`
+    )
+    .get(sessionId, taskId)
+}
+
 /** 获取同一 taskId 的完整消息历史 */
 export function getTaskHistory(
   taskId: string,

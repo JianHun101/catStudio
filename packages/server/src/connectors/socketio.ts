@@ -1755,6 +1755,20 @@ export async function replayStuckUserMessages(io: SocketServer): Promise<void> {
           continue
         }
 
+        // 补填风暴根治方向 2：同 task_id 已有 agent 回复 → 消息事实上已被执行
+        // （批量答复场景兄弟消息无独立 execution_log，NULL 面扫描会误判静默丢）→
+        // 归一 done 不补派，防每轮空转（recoverQueuedMessages 同款 terminal 语义）。
+        // task_id NULL → 退化现状（宁可不挡也不误伤真静默丢）。
+        if (row.task_id && messagesRepo.hasAgentReplyByTaskId(row.session_id, row.task_id)) {
+          messagesRepo.setDispatchState(row.id, 'done')
+          log.warn('重放跳过：同 task_id 已有 agent 回复', {
+            messageId: row.id,
+            sessionId: row.session_id,
+            taskId: row.task_id,
+          })
+          continue
+        }
+
         const mentions = JSON.parse(row.mentions || '[]') as string[]
         const agentIds: string[] = JSON.parse(sessionRow.agent_ids || '[]')
         const agents = agentIds

@@ -851,9 +851,104 @@ console.log('📦 测试组 11: 投递瞬态重试')
   assert(postHits400 === 1, `4xx 不应重试（实际 ${postHits400} 次）`)
   console.log('  11b: 4xx 确定性失败不重试 ✅')
 
+  // 11c: verdict 已审 ✅（approved=true）→ 跳过补填投递（风暴根治方向 1）
+  const headSha = execSync('git rev-parse HEAD', { cwd: RETRY_TMP, stdio: 'pipe' })
+    .toString()
+    .trim()
+  let postHitsApproved = 0
+  let verdictHitsApproved = 0
+  const { server: serverApproved, port: portApproved } = await startStubServer((req, res) => {
+    if (req.url === `/api/handoff/verdict?sha=${headSha}`) {
+      verdictHitsApproved++
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, approved: true }))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHitsApproved++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  process.env.CATSTUDY_URL = `http://127.0.0.1:${portApproved}`
+  process.env.CATSTUDY_SESSION_ID = 'session-debug-1'
+  const okApproved = await tryPostToCatstudy('# 测试交接文档\n内容', RETRY_TMP)
+  if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrl
+  if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
+
+  assert(okApproved === 'ok', 'verdict 命中 approve 应视为投递成功（返回 ok）')
+  assert(postHitsApproved === 0, `已审 ✅ 的 commit 不应投递补填（实际 ${postHitsApproved} 次 POST）`)
+  assert(verdictHitsApproved >= 1, '应请求 verdict 反查 API')
+  console.log('  11c: verdict approved=true → 跳过补填投递 ✅')
+
+  // 11d: verdict approved=false（未审/suggest/reject）→ 照常投递
+  let postHitsNotApproved = 0
+  const { server: serverNotApproved, port: portNotApproved } = await startStubServer((req, res) => {
+    if (req.url === `/api/handoff/verdict?sha=${headSha}`) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, approved: false }))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHitsNotApproved++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  process.env.CATSTUDY_URL = `http://127.0.0.1:${portNotApproved}`
+  process.env.CATSTUDY_SESSION_ID = 'session-debug-1'
+  const okNotApproved = await tryPostToCatstudy('# 测试交接文档\n内容', RETRY_TMP)
+  if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrl
+  if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
+
+  assert(okNotApproved === 'ok', 'approved=false 应照常投递成功')
+  assert(postHitsNotApproved === 1, `approved=false 应投递 1 次（实际 ${postHitsNotApproved} 次）`)
+  console.log('  11d: verdict approved=false → 照常投递 ✅')
+
+  // 11e: verdict 端点连接中断（fetch 抛错）→ 静默降级照常投递（宁多投不丢补填）
+  let postHitsDown = 0
+  let verdictDestroyed = 0
+  const { server: serverDown, port: portDown } = await startStubServer((req, res) => {
+    if (req.url.startsWith('/api/handoff/verdict')) {
+      verdictDestroyed++
+      req.socket.destroy()
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHitsDown++
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  process.env.CATSTUDY_URL = `http://127.0.0.1:${portDown}`
+  process.env.CATSTUDY_SESSION_ID = 'session-debug-1'
+  const okDown = await tryPostToCatstudy('# 测试交接文档\n内容', RETRY_TMP)
+  if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+  else process.env.CATSTUDY_URL = prevUrl
+  if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
+
+  assert(okDown === 'ok', 'verdict 端点不可达应降级照常投递')
+  assert(verdictDestroyed >= 1, '应尝试请求 verdict 反查 API')
+  assert(postHitsDown === 1, `verdict 失败不应阻塞投递（实际 ${postHitsDown} 次 POST）`)
+  console.log('  11e: verdict 端点不可达 → 降级照常投递 ✅')
+
   rmSync(RETRY_TMP, { recursive: true, force: true })
   server.close()
   server400.close()
+  serverApproved.close()
+  serverNotApproved.close()
+  serverDown.close()
 }
 
 console.log('')

@@ -5,7 +5,11 @@
  * 等价于 Web 前端通过 Socket.IO 发送 SEND_MESSAGE 事件，但不需要 WebSocket 连接。
  */
 import type { FastifyInstance } from 'fastify'
-import { messages as messagesRepo, executionLogs as execLogsRepo } from '../db/repository/index.js'
+import {
+  messages as messagesRepo,
+  executionLogs as execLogsRepo,
+  verdicts as verdictsRepo,
+} from '../db/repository/index.js'
 import { ingestUserMessage } from '../connectors/ingest.js'
 
 export async function messageRoutes(app: FastifyInstance): Promise<void> {
@@ -81,6 +85,29 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       ? execLogsRepo.updateRunningExecutionCommitHash(id, commitHash, agentId)
       : execLogsRepo.updateRunningExecutionCommitHash(id, commitHash)
     return reply.send({ ok: true, updated: result.changes })
+  })
+
+  /**
+   * GET /api/handoff/verdict?sha=<commit_sha> → { ok, approved }
+   * 供 handoff-gen（post-commit）投递补填请求前查询"该 commit 是否已审 ✅"——
+   * 补填请求风暴根治方向 1：已审 ✅ 的提交不再发补填请求（hook 每 commit 必投、
+   * 去重键只防同 SHA，已闭环提交照样被反复补填的因果链第四层）。
+   * 判定链：commit_hash → execution_logs（getExecutorNameByCommitHash，:80）→
+   * trace_id（与 executor 反查同源）→ review_verdicts JOIN messages 查 approve。
+   * 语义：只认 verdict='approve'；suggest/reject/无 verdict/无执行记录 → false
+   * （有修改就有新审查，仍须补填）。sha 缺失/非 40 位十六进制 → 400。
+   */
+  app.get('/api/handoff/verdict', async (req, reply) => {
+    const { sha } = req.query as { sha?: string }
+    if (!sha || typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) {
+      return reply.status(400).send({ error: 'sha must be a 40-char hex sha' })
+    }
+    const executor = execLogsRepo.getExecutorNameByCommitHash(sha)
+    if (!executor) {
+      return reply.send({ ok: true, approved: false })
+    }
+    const approved = verdictsRepo.hasApproveVerdictByTaskId(executor.trace_id)
+    return reply.send({ ok: true, approved })
   })
 
   app.post('/api/messages', async (req, reply) => {
