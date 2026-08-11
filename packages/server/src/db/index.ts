@@ -362,6 +362,13 @@ export function initDb(): void {
         tokenize='unicode61'
       )`,
     },
+    // 摘要替代压缩列（additive ALTER；存量行 NULL = 无压缩历史，兼容）。
+    // JSON 数组，每次压缩 append 一条 {createdAt, tokenCount, content}；
+    // content 空串 = 异步生成中的 pending 占位（生成完成回填，消费侧跳过空条目）
+    {
+      name: 'compressed_summaries on sessions',
+      sql: `ALTER TABLE sessions ADD COLUMN compressed_summaries TEXT`,
+    },
   ]
 
   for (const m of migrations) {

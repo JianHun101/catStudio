@@ -31,8 +31,12 @@ const HANDOFF_SYSTEM_PROMPT = `你是一个会话交接助手。你需要对整�
 
 /**
  * 生成全量会话总结。
+ * @param maxTokens - 输出 token 上限（默认 1500 = handoff 交接用；摘要替代传 2000）
  */
-async function generateFullSummary(sessionId: string): Promise<string> {
+export async function generateFullSummary(
+  sessionId: string,
+  maxTokens: number = 1500
+): Promise<string> {
   // 取最新 N 条消息，不截断每条内容（deepseek-v4-flash 有 1M 上下文）
   const allMessages = messagesRepo.getMessagesWithAgentName(sessionId)
   allMessages.reverse() // 恢复时间正序
@@ -55,7 +59,7 @@ async function generateFullSummary(sessionId: string): Promise<string> {
     apiKey,
     model: process.env.SUMMARY_MODEL || 'deepseek-v4-flash',
     baseUrl: process.env.SUMMARY_BASE_URL || 'https://api.deepseek.com',
-    maxTokens: 1500,
+    maxTokens,
     temperature: 0.3,
     timeoutMs: 30_000,
   })

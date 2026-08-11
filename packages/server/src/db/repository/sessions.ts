@@ -56,6 +56,68 @@ export function getSessionSummaryState(id: string):
     { running_summary: string | null; summary_msg_id: string | null } | undefined
 }
 
+// ─── 摘要替代压缩（compressed_summaries）──────────────────
+
+/**
+ * 读取会话的压缩摘要数组（JSON 字符串原样返回；无压缩历史返回 null）。
+ * 条目形状 { createdAt, tokenCount, content }，content 空串 = 异步生成中的 pending。
+ */
+export function getCompressedSummaries(id: string): string | null {
+  const row = db.prepare('SELECT compressed_summaries FROM sessions WHERE id = ?').get(id) as
+    { compressed_summaries: string | null } | undefined
+  return row?.compressed_summaries ?? null
+}
+
+/**
+ * append 一条压缩摘要条目（读-改-写 JSON，单进程 better-sqlite3 同步执行无并发写）。
+ * 异步路径先落 pending（content 空串），生成完成后回填（updateLastCompressedSummary）。
+ */
+export function appendCompressedSummary(
+  id: string,
+  entry: { createdAt: string; tokenCount: number; content: string }
+): void {
+  let arr: Array<{ createdAt: string; tokenCount: number; content: string }> = []
+  const current = getCompressedSummaries(id)
+  if (current) {
+    try {
+      arr = JSON.parse(current)
+    } catch {
+      arr = []
+    }
+  }
+  arr.push(entry)
+  db.prepare(
+    `UPDATE sessions SET compressed_summaries = ?, updated_at = datetime('now') WHERE id = ?`
+  ).run(JSON.stringify(arr), id)
+}
+
+/**
+ * 回填最后一条 pending 条目（异步生成完成后的落库点）。
+ * 只更新数组末条——append 与回填在同一事件循环同步段内成对出现，末条必是自家 pending。
+ */
+export function updateLastCompressedSummary(
+  id: string,
+  patch: { tokenCount: number; content: string }
+): void {
+  const current = getCompressedSummaries(id)
+  if (!current) return
+  try {
+    const arr = JSON.parse(current) as Array<{
+      createdAt: string
+      tokenCount: number
+      content: string
+    }>
+    if (!Array.isArray(arr) || arr.length === 0) return
+    const last = { ...arr[arr.length - 1], ...patch }
+    arr[arr.length - 1] = last
+    db.prepare(
+      `UPDATE sessions SET compressed_summaries = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(JSON.stringify(arr), id)
+  } catch {
+    // JSON 损坏视为无历史，静默跳过（读取侧同样容错）
+  }
+}
+
 export function listAllSessions(): SessionRow[] {
   return db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as SessionRow[]
 }

@@ -36,6 +36,7 @@ const SCHEMA_SQL = `
     running_summary TEXT,
     handoff_from TEXT,
     summary_msg_id TEXT,
+    compressed_summaries TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );

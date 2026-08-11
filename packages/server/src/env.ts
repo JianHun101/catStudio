@@ -140,6 +140,18 @@ process.env.EVAL_ALERT_REWORK_RATE ??= '0.3'
 //   检索行为与现网逐字节一致，防评估数据突变，上线观察后再开
 process.env.MEMORY_HYBRID_ENABLED ??= '0'
 
+// ─── 摘要替代压缩配置 ──────────────────────────────
+// SUMMARY_REPLACE_HISTORY — 会话内 token 压缩开关（'1' 开 / '0' 关，默认开）：
+//   长会话消息超 0.60 阈值异步生成摘要块（下一轮生效，本轮零阻塞）、
+//   超 0.75 阈值同步生成（本轮生效）；旧消息压成摘要块保留信息，
+//   替代「超预算直接丢消息」的截断。上下文 <8k token 不压缩。
+process.env.SUMMARY_REPLACE_HISTORY ??= '1'
+
+// SUMMARY_COMPRESS_LIMIT — 累计压缩次数上限（默认 3，只计生成成功的块）：
+//   达上限后不再生成新摘要块，超阈值走既有 handoff/截断路径——
+//   压缩只是延迟交接，不是取消交接（防无限压缩饿死 handoff）
+process.env.SUMMARY_COMPRESS_LIMIT ??= '3'
+
 // ─── 会话交接配置 ──────────────────────────────
 // HANDOFF_ENABLED — 是否启用 90% 阈值会话交接
 process.env.HANDOFF_ENABLED ??= 'true'

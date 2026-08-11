@@ -63,7 +63,12 @@ import { recordReviewVerdict } from '../eval/verdict-parser.js'
 import { maybeScoreSample } from '../eval/sampler.js'
 import { collectCommitDiffs, parseMessageExtra } from '../git/diff-collector.js'
 import { updateRunningSummary } from '../summarizer/index.js'
-import { performHandoff, shouldHandoff, injectSummaryIntoSystem } from '../handoff/index.js'
+import {
+  performHandoff,
+  shouldHandoff,
+  injectSummaryIntoSystem,
+  generateFullSummary,
+} from '../handoff/index.js'
 import { ingestUserMessage } from './ingest.js'
 import { emitAgentReply } from './replyBus.js'
 import {
@@ -2082,6 +2087,68 @@ export function getRelevantMessages(
   return relevant
 }
 
+// ── 摘要替代压缩（SUMMARY_REPLACE_HISTORY）─────────────────
+// 长会话 token 压缩：旧消息压成摘要块保留信息（省 token 不丢历史），
+// 替代「超预算直接丢消息」的截断。压缩优先于截断——替换后仍超预算才走截断。
+const SUMMARY_KEEP_RECENT = 10 // 保留最近 N 条原文
+const SUMMARY_KEEP_TOKENS = 30_000 // 保留原文 token 双保险（超出从旧往新收紧）
+const SUMMARY_BLOCK_TOKENS = 2000 // 摘要块生成 token 上限
+const SUMMARY_MIN_TOKENS = 8_000 // 上下文低于此 token 不压缩
+const SUMMARY_PRE_COMPRESS_RATIO = 0.6 // 预压缩阈值（异步生成，下一轮生效）
+const SUMMARY_FORCE_COMPRESS_RATIO = 0.75 // 强制阈值（同步生成，本轮生效）
+const SUMMARY_PREFIX = '[历史摘要（压缩）]'
+
+/** 压缩摘要条目形状（与 sessions.compressed_summaries 存储一致） */
+interface CompressedSummaryEntry {
+  createdAt: string
+  tokenCount: number
+  content: string
+}
+
+/** 从 JSON 数组解析压缩摘要条目；损坏返回空数组（读取侧容错） */
+function parseCompressedSummaries(raw: string | null): CompressedSummaryEntry[] {
+  if (!raw) return []
+  try {
+    const arr = JSON.parse(raw)
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+}
+
+/** 压缩计数 = 生成成功的块数（content 非空的条目；pending/失败残留不计，不消耗上限） */
+function countReadySummaries(entries: CompressedSummaryEntry[]): number {
+  return entries.filter((e) => e.content.trim() !== '').length
+}
+
+/** 取最后一个就绪（content 非空）的摘要块；无返回 null */
+function lastReadySummary(entries: CompressedSummaryEntry[]): CompressedSummaryEntry | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].content.trim() !== '') return entries[i]
+  }
+  return null
+}
+
+/** 构建摘要块 user 消息（放消息数组最前 user 段，前缀防模型误当新输入） */
+function buildSummaryBlockMessage(summary: string): LLMMessage {
+  return { role: 'user', content: `${SUMMARY_PREFIX}\n${summary}` }
+}
+
+/** 压缩消息集：保留最近 SUMMARY_KEEP_RECENT 条（≤SUMMARY_KEEP_TOKENS 双保险，
+ * 超出从旧往新收紧），其余旧消息由摘要块替代 */
+function applySummaryReplace(messages: any[], summary: string): { kept: any[] } {
+  const kept: any[] = []
+  let acc = 0
+  for (let i = messages.length - 1; i >= 0 && kept.length < SUMMARY_KEEP_RECENT; i--) {
+    const t = estimateTokens(messages[i].content) + 50
+    if (acc + t > SUMMARY_KEEP_TOKENS) break
+    acc += t
+    kept.push(messages[i])
+  }
+  kept.reverse()
+  return { kept }
+}
+
 async function runAgentReply(
   io: SocketServer,
   sessionId: string,
@@ -2165,6 +2232,126 @@ async function runAgentReply(
     preTruncationTokens += estimateTokens(m.content) + 50 // role 前缀开销
   }
 
+  // ── 摘要替代压缩（截断前，顺序钉死：先压缩后截断） ──────
+  // 长会话消息超阈值时把旧消息压成摘要块（保留最近 10 条/30k 双保险），
+  // 替代「超预算直接丢消息」的截断——压缩优先于截断，替换后仍超预算才走截断。
+  // 0.60 预压缩异步生成（本轮零阻塞，下一轮构建消费）；0.75 强制同步生成（本轮生效）。
+  // 压缩只是延迟交接不是取消交接：达 SUMMARY_COMPRESS_LIMIT 上限后走既有 handoff/截断。
+  const summaryReplaceEnabled = process.env.SUMMARY_REPLACE_HISTORY !== '0'
+  let messagesForTruncation: typeof relevantMessages = relevantMessages
+  let summaryBlockMsg: LLMMessage | null = null
+  if (summaryReplaceEnabled && preTruncationTokens >= SUMMARY_MIN_TOKENS) {
+    const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
+    const ratio = preTruncationTokens / maxTokens
+    const compressLimit = parseInt(process.env.SUMMARY_COMPRESS_LIMIT || '3', 10)
+    const entries = parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
+    const readyCount = countReadySummaries(entries)
+    const ready = lastReadySummary(entries)
+    if (readyCount < compressLimit && ratio >= SUMMARY_PRE_COMPRESS_RATIO) {
+      if (ready) {
+        // 消费既有就绪块（上一轮异步生成的产物）——本轮零 LLM 调用
+        messagesForTruncation = applySummaryReplace(relevantMessages, ready.content).kept
+        summaryBlockMsg = buildSummaryBlockMessage(ready.content)
+        log.info('summary replace: consumed ready block', {
+          traceId,
+          agentId: agent.id,
+          sessionId,
+          readyTokenCount: ready.tokenCount,
+          totalCompressed: readyCount,
+        })
+      } else if (ratio >= SUMMARY_FORCE_COMPRESS_RATIO) {
+        // 强制阈值：同步生成，本轮生效；先落 pending 再回填（与异步路径同形）
+        sessionsRepo.appendCompressedSummary(sessionId, {
+          createdAt: new Date().toISOString(),
+          tokenCount: 0,
+          content: '',
+        })
+        try {
+          const summary = await generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
+          if (summary) {
+            sessionsRepo.updateLastCompressedSummary(sessionId, {
+              tokenCount: estimateTokens(summary),
+              content: summary,
+            })
+            messagesForTruncation = applySummaryReplace(relevantMessages, summary).kept
+            summaryBlockMsg = buildSummaryBlockMessage(summary)
+            log.info('summary replace: sync generated', {
+              traceId,
+              agentId: agent.id,
+              sessionId,
+              summaryTokens: estimateTokens(summary),
+              totalCompressed: readyCount + 1,
+            })
+          } else {
+            // 无 key / 空摘要：降级普通截断 + 留痕（不阻塞主流程）
+            log.warn('summary replace skipped (no summary generated), fallback to truncation', {
+              traceId,
+              agentId: agent.id,
+              sessionId,
+            })
+          }
+        } catch (err: any) {
+          log.warn('summary replace sync failed, fallback to truncation', {
+            traceId,
+            agentId: agent.id,
+            sessionId,
+            error: err.message,
+          })
+        }
+      } else {
+        // 预压缩阈值：异步生成（fire-and-forget），落 pending 下一轮消费生效
+        sessionsRepo.appendCompressedSummary(sessionId, {
+          createdAt: new Date().toISOString(),
+          tokenCount: 0,
+          content: '',
+        })
+        generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
+          .then((summary) => {
+            if (!summary) {
+              log.warn('summary replace async skipped (no summary generated)', {
+                traceId,
+                agentId: agent.id,
+                sessionId,
+              })
+              return
+            }
+            sessionsRepo.updateLastCompressedSummary(sessionId, {
+              tokenCount: estimateTokens(summary),
+              content: summary,
+            })
+            log.info('summary replace async completed', {
+              traceId,
+              agentId: agent.id,
+              sessionId,
+              summaryTokens: estimateTokens(summary),
+            })
+          })
+          .catch((err: any) => {
+            log.warn('summary replace async failed (pending entry left, skipped on read)', {
+              traceId,
+              agentId: agent.id,
+              sessionId,
+              error: err.message,
+            })
+          })
+        log.info('summary replace async triggered (pending, next round effective)', {
+          traceId,
+          agentId: agent.id,
+          sessionId,
+          ratio: ratio.toFixed(3),
+        })
+      }
+    }
+  }
+
+  // 压缩替换后重算消息 token（handoff 检查用压缩后的真实值——压缩成功不该再 handoff）
+  if (summaryBlockMsg) {
+    preTruncationTokens = 0
+    for (const m of messagesForTruncation) {
+      preTruncationTokens += estimateTokens(m.content) + 50
+    }
+  }
+
   // ── Token 感知软截断 ──────────────────────────────────
   // 从最新到最旧累加 token，超出预算的消息丢弃（不再用硬编码 LIMIT 100）
   const MAX_CONTEXT = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
@@ -2173,11 +2360,11 @@ async function runAgentReply(
   const MESSAGE_BUDGET = Math.floor(MAX_CONTEXT * 0.98)
   let tokenAccum = 0
   const truncatedMessages: typeof relevantMessages = []
-  for (let i = relevantMessages.length - 1; i >= 0; i--) {
-    const msgTokens = estimateTokens(relevantMessages[i].content) + 50 // role 前缀开销
+  for (let i = messagesForTruncation.length - 1; i >= 0; i--) {
+    const msgTokens = estimateTokens(messagesForTruncation[i].content) + 50 // role 前缀开销
     if (tokenAccum + msgTokens > MESSAGE_BUDGET) break
     tokenAccum += msgTokens
-    truncatedMessages.push(relevantMessages[i])
+    truncatedMessages.push(messagesForTruncation[i])
   }
   truncatedMessages.reverse() // 恢复时间正序
 
@@ -2205,6 +2392,9 @@ async function runAgentReply(
   const llmMessages: LLMMessage[] = [
     { role: 'system', content: finalSystemPrompt },
     ...dynamicHints.map((h) => ({ role: 'system' as const, content: h })),
+    // 摘要块放消息数组最前（user 段第一，system 段之后）——独立于 runningSummary
+    // （system 段注入 :2286），两段不共享状态（分层互不耦合钉死）
+    ...(summaryBlockMsg ? [summaryBlockMsg] : []),
     ...truncatedMessages.map((m: any, idx: number) => {
       const isLast = idx === truncatedMessages.length - 1
 

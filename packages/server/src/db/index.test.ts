@@ -59,6 +59,13 @@ describe('db', () => {
       const colNames = cols.map((c) => c.name)
       expect(colNames).toContain('broadcast_mode')
     })
+
+    it('has compressed_summaries column（摘要替代压缩，additive 迁移）', () => {
+      const db = getDb()
+      const cols = db.pragma('table_info(sessions)') as Array<{ name: string }>
+      const colNames = cols.map((c) => c.name)
+      expect(colNames).toContain('compressed_summaries')
+    })
   })
 
   describe('schema - messages table', () => {
@@ -137,6 +144,16 @@ describe('db', () => {
           );
         `)
       }).not.toThrow()
+    })
+
+    it('additive migrations 幂等：initDb 重复执行不炸（列已存在则 ALTER 静默跳过）', async () => {
+      const { initDb } = await import('./index.js')
+      const db = getDb()
+      // 模拟旧库升级：先建好全部新列（含 compressed_summaries），再跑 initDb 迁移数组
+      // → 所有 ALTER/CREATE 在 try/catch 中静默跳过，重复启动零副作用
+      expect(() => initDb()).not.toThrow()
+      const cols = db.pragma('table_info(sessions)') as Array<{ name: string }>
+      expect(cols.map((c) => c.name)).toContain('compressed_summaries')
     })
   })
 })
