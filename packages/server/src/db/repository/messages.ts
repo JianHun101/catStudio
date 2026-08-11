@@ -279,3 +279,46 @@ export function getPendingMessages(): Array<{
     role: string
   }>
 }
+
+/**
+ * 静默丢重放扫描：从未被 dispatch 调度过的用户消息（dispatch_state IS NULL 且无任何
+ * execution_log 引用）且超时窗 → 补派候选（16:09/02:24 案例：@ 消息落库但 ingest
+ * 在 insert 与 dispatch 之间崩溃，调度从未发生）。
+ *
+ * 只扫 NULL 不扫 queued/running：queued = 内存队列存活（正在等待执行，补派会双跑）；
+ * running = 执行中或已被 completeExecution 弹出（弹出后由 drain 段立即执行——
+ * 队列延迟修复后不存在长窗）。NULL = 从未调度——调度永远不发生的真实静默丢面。
+ *
+ * @param minutes 超时窗（分钟）——created_at 早于 now - minutes 才补派
+ */
+export function getUndispatchedUserMessagesOlderThan(minutes: number): Array<{
+  id: string
+  session_id: string
+  content: string
+  mentions: string
+  task_id: string | null
+  images: string | null
+  created_at: string
+}> {
+  return db
+    .prepare(
+      `SELECT id, session_id, content, mentions, task_id, images, created_at
+       FROM messages
+       WHERE role = 'user'
+         AND dispatch_state IS NULL
+         AND created_at <= datetime('now', ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM execution_logs el WHERE el.triggered_by_message_id = messages.id
+         )
+       ORDER BY created_at ASC`
+    )
+    .all(`-${minutes} minutes`) as Array<{
+    id: string
+    session_id: string
+    content: string
+    mentions: string
+    task_id: string | null
+    images: string | null
+    created_at: string
+  }>
+}

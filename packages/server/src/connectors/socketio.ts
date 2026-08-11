@@ -730,6 +730,65 @@ export function __test_resetMentionCounts(): void {
 }
 
 /**
+ * 队列 drain：执行 completeExecution 弹出的下一命令（补审计 + 出队反查作者 +
+ * B 合并点名 + 递归执行）。抽取为共享函数——成功路径（completeExecution 后立即
+ * 调用）与 catch 路径（异常后弹出的命令不丢弃）两处复用。
+ * @returns 传入的 claudeRan OR 本次 drain 是否执行过 Claude 适配器
+ */
+async function drainQueuedCommand(
+  io: SocketServer,
+  agent: AgentConfig,
+  queuedCmd: DispatchCommand,
+  claudeRan: boolean
+): Promise<boolean> {
+  log.info('draining queued command', {
+    traceId: queuedCmd.traceId,
+    agentId: agent.id,
+    agentName: agent.name,
+    depth: queuedCmd.depth,
+  })
+  // 补执行审计（恢复路径 recoverInterruptedExecutions 同款）：completeExecution
+  // 已弹出队列命令并更新槽位（busy + currentTrigger），此处补 executeAgentCommand
+  // 写 execution_log——否则排队命令的执行零审计（审查结论 151 秒执行无记录的根因）
+  await executeAgentCommand(agent, queuedCmd, queuedCmd.traceId)
+  // 出队反查触发作者（恢复路径 recoverInterruptedExecutions 同款）：
+  // A2A 审查结论 @回请求人依赖 triggerAuthorName 例外判定（mention-policy），
+  // 缺失则 undefined 与写死名比对失败 → 白名单误拦（10:38 事故根因）；
+  // 反查失败（消息已删/非 agent）→ undefined，与现状等价不拦截
+  const triggerMeta = messagesRepo.getMessageByIdOnly(queuedCmd.triggerMessageId)
+  const triggerRow = triggerMeta
+    ? messagesRepo.getMessageById(queuedCmd.triggerMessageId, queuedCmd.sessionId, triggerMeta.role)
+    : undefined
+  // B 触发合并点名：并入的触发在出队执行时告知（内存注入触发消息，
+  // 不落库）——"还有 N 件事"让 Agent 上下文知道本次任务合并了多次触发
+  const queuedTrigger = {
+    id: queuedCmd.triggerMessageId,
+    content:
+      queuedCmd.pendingTriggers.length > 0
+        ? `${queuedCmd.triggerContent}\n\n[系统提示] 你本次执行期间，另有 ${queuedCmd.pendingTriggers.length} 件事已并入本任务（触发消息：${queuedCmd.pendingTriggers.join('、')}），请一并处理。`
+        : queuedCmd.triggerContent,
+    mentions: queuedCmd.mentions,
+    // taskId 用命令自持的（入队时抄 userMessage.taskId），不继承执行者——
+    // 否则 A2A 审查链的 task 关联张冠李戴（与 traceId/depth 同语义）
+    taskId: queuedCmd.taskId,
+    authorName:
+      triggerRow?.role === 'agent' && triggerRow.agent_id
+        ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
+        : undefined,
+  }
+  return (
+    (await executeAgentsSerial(
+      io,
+      queuedCmd.sessionId,
+      [agent],
+      queuedTrigger,
+      queuedCmd.traceId,
+      queuedCmd.depth
+    )) || claudeRan
+  )
+}
+
+/**
  * 单 agent 执行体（原 executeAgentsSerial for 循环体抽出）。
  * 纯 per-agent 自包含，无共享可变状态——并发批内多个执行体可同时运行。
  * 返回 true = 本执行体（或其 A2A 子链 / 队列 drain）执行过 Claude 适配器
@@ -880,6 +939,14 @@ async function executeOneAgent(
     // W2 L2 评估采样：fire-and-forget——不 await、不占 slot、不进 dispatch 主链，
     // 失败静默（内部 catch）。只对 DS 族猫回复采样（ollama 图测猫不评估）
     maybeScoreSample(agent, sessionId, reply.msgId)
+
+    // 队列命令优先执行（FIFO）：completeExecution 已弹出下一命令并标 busy/running，
+    // 此处立即补执行（drain）——先于下方 A2A 派发，否则弹出命令会干等当前回复的
+    // A2A 嵌套链跑完（d448413a 案例：07:00:02 弹出、07:05:54 才执行——被两层
+    // A2A await 拖 5.9 分钟，'running' 状态干挂 + 槽位"忙碌"假象）
+    if (queuedCmd) {
+      claudeRan = await drainQueuedCommand(io, agent, queuedCmd, claudeRan)
+    }
 
     // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
     // 同一 trace 内某 agent 真实完成 ≥MAX 次 A2A 执行后，不再被重新调度。
@@ -1098,61 +1165,6 @@ async function executeOneAgent(
       }
     }
 
-    // P0-2 修复：处理队列中等待的命令
-    // completeExecution 弹出队列后会返回下一个命令，不再丢弃。
-    // 递归用 queuedCmd 自持的 traceId/depth（命令入队时记录的），不继承执行者的——
-    // 否则另一条用户消息的命令会带着错误的 trace 执行（A2A 配额张冠李戴）
-    if (queuedCmd) {
-      log.info('draining queued command', {
-        traceId: queuedCmd.traceId,
-        agentId: agent.id,
-        agentName: agent.name,
-        depth: queuedCmd.depth,
-      })
-      // 补执行审计（恢复路径 recoverInterruptedExecutions 同款）：completeExecution
-      // 已弹出队列命令并更新槽位（busy + currentTrigger），此处补 executeAgentCommand
-      // 写 execution_log——否则排队命令的执行零审计（审查结论 151 秒执行无记录的根因）
-      await executeAgentCommand(agent, queuedCmd, queuedCmd.traceId)
-      // 出队反查触发作者（恢复路径 recoverInterruptedExecutions:1119-1122 同款）：
-      // A2A 审查结论 @回请求人依赖 triggerAuthorName 例外判定（mention-policy），
-      // 缺失则 undefined 与写死名比对失败 → 白名单误拦（10:38 事故根因）；
-      // 反查失败（消息已删/非 agent）→ undefined，与现状等价不拦截
-      const triggerMeta = messagesRepo.getMessageByIdOnly(queuedCmd.triggerMessageId)
-      const triggerRow = triggerMeta
-        ? messagesRepo.getMessageById(
-            queuedCmd.triggerMessageId,
-            queuedCmd.sessionId,
-            triggerMeta.role
-          )
-        : undefined
-      // B 触发合并点名：并入的触发在出队执行时告知（内存注入触发消息，
-      // 不落库）——"还有 N 件事"让 Agent 上下文知道本次任务合并了多次触发
-      const queuedTrigger = {
-        id: queuedCmd.triggerMessageId,
-        content:
-          queuedCmd.pendingTriggers.length > 0
-            ? `${queuedCmd.triggerContent}\n\n[系统提示] 你本次执行期间，另有 ${queuedCmd.pendingTriggers.length} 件事已并入本任务（触发消息：${queuedCmd.pendingTriggers.join('、')}），请一并处理。`
-            : queuedCmd.triggerContent,
-        mentions: queuedCmd.mentions,
-        // taskId 用命令自持的（入队时抄 userMessage.taskId），不继承执行者——
-        // 否则 A2A 审查链的 task 关联张冠李戴（与 traceId/depth 同语义）
-        taskId: queuedCmd.taskId,
-        authorName:
-          triggerRow?.role === 'agent' && triggerRow.agent_id
-            ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
-            : undefined,
-      }
-      claudeRan =
-        (await executeAgentsSerial(
-          io,
-          queuedCmd.sessionId,
-          [agent],
-          queuedTrigger,
-          queuedCmd.traceId,
-          queuedCmd.depth
-        )) || claudeRan
-    }
-
     return claudeRan
   } catch (err: any) {
     // P0-1 修复：外层 try/catch 防止 completeExecution 或 agent-to-agent
@@ -1163,7 +1175,7 @@ async function executeOneAgent(
       error: err.message,
       traceId,
     })
-    await completeExecution(agent.id, false, {
+    const nextCmd = await completeExecution(agent.id, false, {
       errorMessage: err.message || 'post-execution error',
       traceId,
     }).catch(() => {
@@ -1171,7 +1183,22 @@ async function executeOneAgent(
         agentId: agent.id,
         traceId,
       })
+      return undefined
     })
+    // 异常路径也不丢弃弹出的队列命令：completeExecution 弹出后命令已出队，
+    // 不补执行则 'running' 状态永久搁浅（只能等下次重启恢复）。try/catch 隔离——
+    // drain 自身失败不掩盖原异常，槽位释放不受影响
+    if (nextCmd) {
+      try {
+        await drainQueuedCommand(io, agent, nextCmd, needsLock)
+      } catch (e: any) {
+        log.error('drain failed after post-execution error (queue item stuck)', {
+          agentId: agent.id,
+          triggerMessageId: nextCmd.triggerMessageId,
+          error: e.message,
+        })
+      }
+    }
     return needsLock
   } finally {
     if (needsLock) releaseLock()
@@ -1586,6 +1613,15 @@ export async function recoverQueuedMessages(io: SocketServer): Promise<void> {
           agents: dispatchTargets.map((a) => a.name),
           traceId,
         })
+        // 合并触发持久化（明写丢失为已知噪声）：B 合并的 pendingTriggers 是内存态
+        // （dispatch 模块 agentQueues），重启后不可恢复——重建的命令恒为空。从
+        // messages 反查"同 session 未处理 @ 触发"无法区分合并触发与白名单拦截
+        // （两者 dispatch_state 均为 NULL），误恢复会把被拦 mention 复活执行——
+        // 故不恢复，依赖用户消息重放（replayStuckUserMessages）与 A2A 重新触发兜底
+        log.info('恢复的命令 pendingTriggers 为空（B 合并为内存态，重启后丢失——已知噪声）', {
+          messageId: row.id,
+          sessionId: row.session_id,
+        })
 
         await dispatch(row.session_id, msg, dispatchTargets, traceId)
         // 配对执行：dispatch 只标 busy（槽位管理），实际 LLM 推理由 connector 触发
@@ -1602,6 +1638,106 @@ export async function recoverQueuedMessages(io: SocketServer): Promise<void> {
     }
   } catch (err: any) {
     log.error('recoverQueuedMessages failed', { error: err.message })
+  }
+}
+
+// ─── 静默丢重放：从未被调度的用户消息补派 ─────────────
+
+/** 重放时窗（分钟）：落库超过该时长仍无任何调度痕迹的用户消息 → 补派候选 */
+export const REPLAY_STUCK_WINDOW_MINUTES = 30
+
+/**
+ * 静默丢重放扫描：周期补派"落库但从未被调度"的用户消息。
+ * 16:09/02:24 案例：@ 消息 INSERT 成功但 ingest 在 dispatch 之前崩溃/异常退出——
+ * dispatch_state 保持 NULL、无任何 execution_log 引用，消息永久搁浅（恢复路径
+ * recoverQueuedMessages 只捞 queued/running，NULL 不在其列）。
+ *
+ * 判据（只扫 NULL，不扫 queued/running——语义详见
+ * messages.getUndispatchedUserMessagesOlderThan 注释）：role='user' +
+ * dispatch_state IS NULL + 无 execution_log 引用 + 超 REPLAY_STUCK_WINDOW_MINUTES。
+ * 有执行行存在性检查（NOT EXISTS）防重复补派——补派后必产生 execution_log，
+ * 下轮扫描天然排除。
+ *
+ * 无有效目标（会话已删/成员无 API key/mentions 命中非成员）→ dispatch_state 归一
+ * done（terminal：处理已终结，防每轮空转重复补派——recoverQueuedMessages 同款）。
+ */
+export async function replayStuckUserMessages(io: SocketServer): Promise<void> {
+  try {
+    const stuck = messagesRepo.getUndispatchedUserMessagesOlderThan(REPLAY_STUCK_WINDOW_MINUTES)
+    if (stuck.length === 0) return
+
+    log.warn('静默丢重放：发现从未被调度的用户消息', { count: stuck.length })
+
+    for (const row of stuck) {
+      try {
+        const sessionRow = sessionsRepo.getSessionById(row.session_id)
+        if (!sessionRow) {
+          // 会话已删——消息成孤儿，归一 done 防每轮空转
+          messagesRepo.setDispatchState(row.id, 'done')
+          log.info('重放跳过：会话已删', { messageId: row.id, sessionId: row.session_id })
+          continue
+        }
+
+        const mentions = JSON.parse(row.mentions || '[]') as string[]
+        const agentIds: string[] = JSON.parse(sessionRow.agent_ids || '[]')
+        const agents = agentIds
+          .map((id: string) => {
+            const r = agentsRepo.getAgentById(id)
+            return r ? rowToAgent(r) : null
+          })
+          .filter(Boolean) as AgentConfig[]
+
+        const targets =
+          mentions.length > 0 ? agents.filter((a) => mentions.includes(a.name)) : agents
+        const executable = targets.filter(
+          (a) => a.llmApiKey && a.llmApiKey !== 'sk-your-api-key-here'
+        )
+
+        if (executable.length === 0) {
+          // 无有效目标（@ 了非成员/成员无 API key/空会话）→ 归一 done（terminal）
+          messagesRepo.setDispatchState(row.id, 'done')
+          log.info('重放跳过：无有效执行目标，dispatch_state 归一 done', {
+            messageId: row.id,
+            sessionId: row.session_id,
+            mentioned: mentions,
+          })
+          continue
+        }
+
+        for (const a of executable) {
+          if (!getAgentState(a.id)) initAgentSlot(a.id)
+        }
+
+        const msg: Message = {
+          id: row.id,
+          sessionId: row.session_id,
+          agentId: null,
+          role: 'user',
+          content: row.content,
+          mentions,
+          taskId: row.task_id || undefined,
+          images: row.images ? (JSON.parse(row.images) as string[]) : undefined,
+          createdAt: row.created_at,
+        }
+
+        const traceId = uuid()
+        log.warn('静默丢重放：补派执行', {
+          messageId: row.id,
+          sessionId: row.session_id,
+          agents: executable.map((a) => a.name),
+          traceId,
+        })
+
+        await dispatch(row.session_id, msg, executable, traceId)
+        // 配对执行（dispatch 只标 busy——槽位管理，实际 LLM 推理由 connector 触发；
+        // 不配对则补派消息卡 busy 不回复——recoverQueuedMessages 同款契约）
+        await executeAgentsSerial(io, row.session_id, executable, msg, traceId, 0)
+      } catch (err: any) {
+        log.error('重放单条消息失败', { messageId: row.id, error: err.message })
+      }
+    }
+  } catch (err: any) {
+    log.error('replayStuckUserMessages failed', { error: err.message })
   }
 }
 

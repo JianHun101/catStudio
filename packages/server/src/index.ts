@@ -14,7 +14,11 @@ import {
   executionLogs as execLogsRepo,
 } from './db/repository/index.js'
 import { connectRedis, closeRedis } from './db/redis.js'
-import { createSocketIO } from './connectors/socketio.js'
+import {
+  createSocketIO,
+  replayStuckUserMessages,
+  REPLAY_STUCK_WINDOW_MINUTES,
+} from './connectors/socketio.js'
 import { startOneBotOutbound } from './connectors/onebotOutbound.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
@@ -191,6 +195,26 @@ async function main(): Promise<void> {
     log.error('episode initial classification failed (non-blocking)', { error: err.message })
   }
 
+  // 静默丢重放定时器：周期补派"落库但从未被调度"的用户消息（16:09/02:24 案例：
+  // ingest 在 insert 与 dispatch 之间崩溃导致调度从未发生）。同步封装，失败不阻塞
+  // 主流程（与 L1/episode 同款外层兜底）
+  const replayTimer = setInterval(
+    () => {
+      try {
+        replayStuckUserMessages(io)
+      } catch (err: any) {
+        log.error('replay scan crashed (non-blocking)', { error: err.message })
+      }
+    },
+    REPLAY_STUCK_WINDOW_MINUTES * 60 * 1000
+  )
+  // 启动后立即跑一轮（不等首个周期，尽快补派重启前遗留的静默丢消息）
+  try {
+    replayStuckUserMessages(io)
+  } catch (err: any) {
+    log.error('replay initial scan failed (non-blocking)', { error: err.message })
+  }
+
   log.info('server started', { host: HOST, port: PORT })
 
   // 6. 优雅关闭
@@ -202,6 +226,8 @@ async function main(): Promise<void> {
     clearInterval(l1Timer)
     // v2: 清理 episode 判定定时器（同款防重复定时器）
     clearInterval(episodeTimer)
+    // 静默丢重放定时器（同款防重复定时器）
+    clearInterval(replayTimer)
     io.close()
     await app.close()
     await closeRedis()

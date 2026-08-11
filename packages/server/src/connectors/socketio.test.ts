@@ -1741,10 +1741,12 @@ describe('socketio connector', () => {
           ).run('exec-log-queued', cmd.sessionId, cmd.agentId, cmd.triggerMessageId, traceId)
         }
       )
-      // 主回复无 mention；drain 审查结论 @实施猫
+      // 主回复无 mention；drain 审查结论 @实施猫。顺序注意：drain 段现位于
+      // A2A 派发之前（FIFO 修复——弹出命令立即执行，不干等 A2A 链），
+      // 故第一次 parse 调用是 drain 的回复（@ds猫），第二次是主回复（无 mention）
       vi.mocked(parseMentionsFromReply).mockReset()
-      vi.mocked(parseMentionsFromReply).mockReturnValueOnce([])
-      vi.mocked(parseMentionsFromReply).mockReturnValue(['ds猫'])
+      vi.mocked(parseMentionsFromReply).mockReturnValueOnce(['ds猫'])
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
       // LLM 流：第一次=主执行回复，第二次=drain 审查结论（参数捕获断言 @作者 替换）
       // 显式参数签名——否则 mock.calls[0] 推断为空元组，取 [0] 报 TS2493
       let streamCall = 0
@@ -1811,12 +1813,125 @@ describe('socketio connector', () => {
       expect(execLog).toBeDefined()
       expect(execLog.triggered_by_message_id).toBe('msg-queued')
 
+      // 断言②' FIFO 顺序：drain（弹出命令执行）先于当前回复的 A2A 派发——修复前
+      // drain 排在 A2A 之后，弹出命令以 'running' 干等整条 A2A 嵌套链
+      // （d448413a 案例：07:00:02 弹出、07:05:54 才执行，被两层 A2A await 拖 5.9 分钟）
+      expect(vi.mocked(executeAgentCommand).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(dispatch).mock.invocationCallOrder[0]
+      )
+
       // 断言③ @作者 占位符：主执行无 authorName → 保留；drain 出队反查成功 → 替换
       const firstMsgs = chatStream.mock.calls[0][0] as any[]
       expect(firstMsgs[0].content).toContain('@作者')
       const secondMsgs = chatStream.mock.calls[1][0] as any[]
       expect(secondMsgs[0].content).toContain('@ds猫')
       expect(secondMsgs[0].content).not.toContain('@作者')
+    })
+
+    it('post-execution 异常路径：completeExecution 弹出的命令不丢弃（catch 路径 drain）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState, completeExecution, executeAgentCommand } =
+        await import('../dispatch/index.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const db = getDb()
+
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, ?, 'user', ?, '[]')`
+      ).run('msg-main', 'session-1', '处理消息')
+      // 队列命令的触发消息（drain 出队反查 authorName 需要存在于 DB）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions)
+         VALUES (?, ?, ?, 'agent', ?, '[]')`
+      ).run('msg-queued2', 'session-1', 'agent-1', '@店长 排队任务')
+      const queuedCmd = {
+        sessionId: 'session-1',
+        agentId: 'agent-1',
+        triggerMessageId: 'msg-queued2',
+        triggerContent: '@店长 排队任务',
+        mentions: ['店长'],
+        traceId: 'trace-queued2',
+        depth: 0,
+        taskId: undefined,
+        pendingTriggers: [],
+      }
+      // 状态：main 执行中 →（catch 路径 drain 时）队列命令命中
+      vi.mocked(getAgentState)
+        .mockReset()
+        .mockReturnValueOnce({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-main',
+        })
+        .mockReturnValue({
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'msg-queued2',
+        })
+      // completeExecution：成功路径无队列 → undefined；异常路径弹出 queuedCmd → drain
+      vi.mocked(completeExecution).mockReset()
+      vi.mocked(completeExecution).mockResolvedValueOnce(undefined)
+      vi.mocked(completeExecution).mockResolvedValueOnce(queuedCmd as any)
+      vi.mocked(completeExecution).mockResolvedValue(undefined)
+      // 审计落库：mock executeAgentCommand 的核心副作用（真实 insertExecutionLog 在
+      // dispatch 单测覆盖——此处钉死"catch 路径也调用它"这一调用点）
+      vi.mocked(executeAgentCommand).mockReset()
+      vi.mocked(executeAgentCommand).mockImplementation(
+        async (agent: any, cmd: any, traceId: string) => {
+          db.prepare(
+            `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
+             VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))`
+          ).run('exec-log-catch', cmd.sessionId, cmd.agentId, cmd.triggerMessageId, traceId)
+        }
+      )
+      // 主回复的 mention 解析抛错 → 进入外层 catch（post-execution error 路径）
+      vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockImplementationOnce(() => {
+        throw new Error('parse boom')
+      })
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
+      const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
+        yield { content: '已处理', kind: 'text' }
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [
+          {
+            id: 'agent-1',
+            name: '店长',
+            avatar: '🐱',
+            systemPrompt: 'You are a cat.',
+            llmProvider: 'deepseek',
+            llmModel: 'deepseek-v4-flash',
+            llmApiKey: 'sk-test',
+            role: 'store',
+          } as any,
+        ],
+        { id: 'msg-main', content: '处理消息', mentions: [] },
+        'trace-main'
+      )
+
+      // catch 路径弹出的命令仍被执行（修复前返回值被丢弃 → 'running' 永久搁浅）：
+      // executeAgentCommand 被调用 + 执行日志落库
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
+      expect(executeAgentCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'agent-1' }),
+        expect.objectContaining({ triggerMessageId: 'msg-queued2' }),
+        'trace-queued2'
+      )
+      const execLog = db
+        .prepare(`SELECT * FROM execution_logs WHERE id = 'exec-log-catch'`)
+        .get() as any
+      expect(execLog).toBeDefined()
+      expect(execLog.triggered_by_message_id).toBe('msg-queued2')
     })
   })
 
@@ -2917,6 +3032,235 @@ describe('socketio connector', () => {
       const { dispatch } = await import('../dispatch/index.js')
 
       await mod.recoverQueuedMessages(mockIo as any)
+
+      expect(dispatch).not.toHaveBeenCalled()
+    })
+
+    it('合并触发持久化：恢复的命令不恢复 pendingTriggers（B 合并为内存态——明写已知噪声）', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch, getAgentState } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      seedQueuedMessage(getDb())
+      // 同 session 一条"曾被合并"的触发消息（role agent + dispatch_state NULL——
+      // B 合并从不 setDispatchState，重启后无从反查"谁合并了谁"；且无法与白名单
+      // 拦截区分（拦截同样 NULL），误恢复会把被拦 mention 复活——明写丢失为已知噪声。
+      // created_at 设在 queued 之前（-5min）：agent 消息若在触发之后会被洞 A
+      // 判为"已回复"跳过恢复，测不到"不恢复 pendingTriggers"的本意
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+           VALUES (?, ?, ?, 'agent', ?, '["店长"]', datetime('now', '-5 minutes'))`
+        )
+        .run('msg-merged', 'session-1', 'agent-1', '@店长 跟进（曾并入排队任务）')
+
+      vi.mocked(getAgentState).mockReturnValueOnce(undefined).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-queued',
+      })
+      const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
+        yield { content: '已补填', kind: 'text' }
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+      await mod.recoverQueuedMessages(mockIo as any)
+
+      // 恢复的命令 pendingTriggers 为空——LLM 上下文不得出现合并点名（"已并入本任务"）
+      const llmMessages = chatStream.mock.calls[0][0] as any[]
+      expect(llmMessages.some((m) => String(m.content).includes('已并入本任务'))).toBe(false)
+      // 合并触发消息保持原样（NULL）——不复活不误判
+      const mergedRow = getDb()
+        .prepare(`SELECT dispatch_state FROM messages WHERE id = 'msg-merged'`)
+        .get() as any
+      expect(mergedRow.dispatch_state).toBeNull()
+      // 恢复照常执行（主消息不受影响）
+      expect(dispatch).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('replayStuckUserMessages — 静默丢重放（从未被调度的用户消息补派）', () => {
+    beforeEach(async () => {
+      const { getAgentState } = await import('../dispatch/index.js')
+      vi.mocked(getAgentState).mockReturnValue(undefined)
+    })
+
+    /** SQLite datetime 格式（YYYY-MM-DD HH:MM:SS，UTC）——bound 参数传
+     *  datetime('now',...) 函数表达式会被存成字面量字符串（不执行），
+     *  created_at 过滤类测试必须用 JS 预先算好真实时间戳 */
+    function sqliteDatetime(minutesAgo: number): string {
+      return new Date(Date.now() - minutesAgo * 60 * 1000)
+        .toISOString()
+        .replace('T', ' ')
+        .slice(0, 19)
+    }
+
+    /** 造数据：一条从未被调度的用户消息（dispatch_state NULL + 无执行行 + 超窗） */
+    function seedStuckMessage(db: any, overrides: any = {}) {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES (?, ?, 'user', ?, ?, ?)`
+      ).run(
+        overrides.id || 'msg-stuck',
+        'session-1',
+        overrides.content || '@店长 请处理',
+        overrides.mentions || JSON.stringify(['店长']),
+        overrides.createdAt || sqliteDatetime(40)
+      )
+    }
+
+    it('① 落库无执行行的 @ 消息 → 补派执行 + log 留痕 + 真实回复落库', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch, completeExecution, executeAgentCommand } =
+        await import('../dispatch/index.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      const db = getDb()
+      seedStuckMessage(db)
+
+      // dispatch 在测试里被 mock 为 no-op——用调用序列模拟真实路径（AC4 同款）：
+      // 扫描循环先检查槽位（未初始化 → initAgentSlot），随后 executeAgentsSerial
+      // 看到 dispatch 标 busy 后的槽位状态
+      vi.mocked(getAgentState).mockReturnValueOnce(undefined).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-stuck',
+      })
+      vi.mocked(executeAgentCommand).mockImplementation(
+        async (agent: any, cmd: any, traceId: string) => {
+          db.prepare(
+            `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
+             VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))`
+          ).run('exec-replay', cmd.sessionId, cmd.agentId, cmd.triggerMessageId, traceId)
+        }
+      )
+      vi.mocked(getAdapterForAgent).mockReturnValue({
+        chatStream: vi.fn(async function* () {
+          yield { content: '收到补派', kind: 'text' }
+        }),
+      } as any)
+
+      await mod.replayStuckUserMessages(mockIo as any)
+
+      // 补派：dispatch 4 参（含 traceId）
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ id: 'msg-stuck', content: '@店长 请处理', mentions: ['店长'] }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-1' })]),
+        expect.any(String)
+      )
+      // 配对执行：真实回复落库 + completeExecution 收尾（不配对则补派消息卡 busy）
+      const reply = db
+        .prepare(`SELECT * FROM messages WHERE role = 'agent' AND agent_id = ? AND session_id = ?`)
+        .get('agent-1', 'session-1') as any
+      expect(reply).toBeDefined()
+      expect(reply.content).toBe('收到补派')
+      expect(completeExecution).toHaveBeenCalledWith('agent-1', true, expect.anything())
+    })
+
+    it('② 不重复补派：已补派（有执行行）的消息二轮扫描跳过', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+      const db = getDb()
+      seedStuckMessage(db)
+      // 槽位 mock：一轮补派真实走到 executeAgentsSerial 的执行体
+      vi.mocked(getAgentState).mockReturnValueOnce(undefined).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-stuck',
+      })
+      // dispatch 在测试里被 mock 为 no-op——用 mockImplementation 模拟真实
+      // dispatch 的核心副作用（idle 直跑 executeAgentCommand → 执行行落库）：
+      // 补派后必产生 execution_log，二轮 NOT EXISTS 才能天然排除
+      vi.mocked(dispatch).mockImplementation(
+        async (_sessionId: string, msg: any, agents: any[], traceId?: string): Promise<string> => {
+          const agent = agents[0]
+          db.prepare(
+            `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
+             VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))`
+          ).run('exec-replay', _sessionId, agent.id, msg.id, traceId ?? '')
+          return traceId ?? ''
+        }
+      )
+
+      await mod.replayStuckUserMessages(mockIo as any)
+      await mod.replayStuckUserMessages(mockIo as any)
+
+      // 一轮补派 + 执行行落库 → 二轮 NOT EXISTS 天然排除——全程只 dispatch 一次
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      const execRow = db
+        .prepare(`SELECT * FROM execution_logs WHERE triggered_by_message_id = 'msg-stuck'`)
+        .get() as any
+      expect(execRow).toBeDefined()
+    })
+
+    it('③ 跳过面：近期消息 / 已有执行行 / dispatch_state=done 均不补派', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const db = getDb()
+      // 近期（-10min，未超时窗）
+      seedStuckMessage(db, { id: 'msg-recent', createdAt: sqliteDatetime(10) })
+      // 已有执行行（NOT EXISTS 排除）
+      seedStuckMessage(db, { id: 'msg-has-exec' })
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+         VALUES (?, ?, ?, ?, 'completed', datetime('now', '-30 minutes'))`
+      ).run('exec-exists', 'session-1', 'agent-1', 'msg-has-exec')
+      // 已终结（done）
+      seedStuckMessage(db, { id: 'msg-done' })
+      db.prepare(`UPDATE messages SET dispatch_state = 'done' WHERE id = 'msg-done'`).run()
+
+      await mod.replayStuckUserMessages(mockIo as any)
+
+      expect(dispatch).not.toHaveBeenCalled()
+    })
+
+    it('④ 无有效目标（成员无 API key）→ 归一 done，防每轮空转', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const db = getDb()
+      db.prepare('UPDATE agents SET llm_api_key = ? WHERE id = ?').run(
+        'sk-your-api-key-here',
+        'agent-1'
+      )
+      seedStuckMessage(db)
+
+      await mod.replayStuckUserMessages(mockIo as any)
+
+      expect(dispatch).not.toHaveBeenCalled()
+      const row = db
+        .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
+        .get('msg-stuck') as any
+      expect(row.dispatch_state).toBe('done')
+    })
+
+    it('⑤ 广播消息（mentions=[]）→ 补派全部会话 agent', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+      const db = getDb()
+      seedStuckMessage(db, { id: 'msg-bcast', content: '大家好', mentions: '[]' })
+
+      await mod.replayStuckUserMessages(mockIo as any)
+
+      expect(dispatch).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({ id: 'msg-bcast' }),
+        expect.arrayContaining([expect.objectContaining({ id: 'agent-1' })]),
+        expect.any(String)
+      )
+    })
+
+    it('⑥ 无待补派消息 → 零 dispatch 零日志', async () => {
+      const mod = await import('./socketio.js')
+      const { dispatch } = await import('../dispatch/index.js')
+
+      await mod.replayStuckUserMessages(mockIo as any)
 
       expect(dispatch).not.toHaveBeenCalled()
     })
