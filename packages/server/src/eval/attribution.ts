@@ -10,6 +10,9 @@
  * - closure 复验：对已分流记录重跑判定（classifyChain），结局翻转为
  *   success/corrected_success → episode_state='closed' + 记录 status='resolved'；
  *   翻转以判定为准，不依赖口头确认（规格 §4 钉死）
+ * - 消息层闭环：投递成功时把消息 id 写回 episode_attributions.delivery_message_id，
+ *   markResolved 关闭时对原消息原地追加「✅已关闭」标记（方案 A——用户同一
+ *   位置看到完整状态，不撤回、不另起新消息；投递失败/会话缺失则不记录）
  * - 在途（open）不归因（classifyEpisodes 判定 1 已 skip，此处防御性跳过）
  * - 投递走 L1 同款消息通道（system 落库 + 房间广播 + mentions 写回店长），
  *   不触发 dispatch（role='system' 非执行入口）
@@ -147,9 +150,9 @@ function dispatchAction(
   io: SocketServer,
   action: AttributionAction,
   ep: { sessionId: string; rootTriggerMessageId: string; outcome: string; rootCause: string }
-): void {
+): string | null {
   const s = sessionsRepo.getSessionById(ep.sessionId)
-  if (!s) return // 会话已删——投递无目标，归因记录仍在案
+  if (!s) return null // 会话已删——投递无目标，归因记录仍在案
   const content = [
     `@店长 ${ACTION_TITLES[action]}（episode 归因分流）：`,
     `- 根消息: ${ep.rootTriggerMessageId}`,
@@ -170,8 +173,10 @@ function dispatchAction(
       createdAt: new Date().toISOString(),
     })
     log.warn('episode 归因分流已投递', { sessionId: s.id, action, outcome: ep.outcome })
+    return msgId // 投递成功——供写回 delivery_message_id（消息层闭环）
   } catch (err: any) {
     log.warn('episode 归因分流投递失败（跳过该会话）', { sessionId: s.id, error: err.message })
+    return null
   }
 }
 
@@ -224,12 +229,18 @@ export function runEpisodeAttribution(io: SocketServer): {
     ).run(uuid(), ep.id, ep.outcome, rootCause, action, ACTION_HINTS[action])
 
     if (ep.session_id) {
-      dispatchAction(io, action, {
+      const msgId = dispatchAction(io, action, {
         sessionId: ep.session_id,
         rootTriggerMessageId: ep.root_trigger_message_id,
         outcome: ep.outcome,
         rootCause,
       })
+      // 投递成功 → 写回消息 id（消息层闭环：closure 复验关闭时原地追加标记）
+      if (msgId) {
+        db.prepare(
+          `UPDATE episode_attributions SET delivery_message_id = ? WHERE episode_id = ?`
+        ).run(msgId, ep.id)
+      }
     } else {
       log.warn('episode 归因分流跳过投递（episode 无 session_id）', { episodeId: ep.id })
     }
@@ -288,12 +299,30 @@ export function runEpisodeAttribution(io: SocketServer): {
 /** 关闭 episode + 归因记录 resolved（closure 终态） */
 function markResolved(episodeId: string): void {
   const db = getDb()
+  const outcome = db.prepare(`SELECT outcome FROM episodes WHERE id = ?`).get(episodeId) as
+    { outcome: string } | undefined
   db.prepare(
     `UPDATE episode_attributions SET status = 'resolved', updated_at = datetime('now') WHERE episode_id = ?`
   ).run(episodeId)
   db.prepare(
     `UPDATE episodes SET episode_state = 'closed', updated_at = datetime('now') WHERE id = ?`
   ).run(episodeId)
+  // 消息层闭环：投递过的归因消息原地追加「已关闭」标记（不撤回、不另起
+  // 新消息——用户同一位置看到完整状态）。投递消息已删则跳过（关闭本身
+  // 已落库，标记属终态归档的尽力而为）
+  if (!outcome) return
+  const attr = db
+    .prepare(`SELECT delivery_message_id FROM episode_attributions WHERE episode_id = ?`)
+    .get(episodeId) as { delivery_message_id: string | null } | undefined
+  if (!attr?.delivery_message_id) return // 旧库/投递失败：无投递消息可标记
+  const msg = db
+    .prepare(`SELECT content FROM messages WHERE id = ?`)
+    .get(attr.delivery_message_id) as { content: string } | undefined
+  if (!msg) return
+  messagesRepo.updateMessageContent(
+    attr.delivery_message_id,
+    `${msg.content}\n\n✅已关闭（结局翻转 ${outcome.outcome}）`
+  )
 }
 
 /** replay 动作的执行体：触发 dispatch 重放检查（既有机制，失败不阻塞归因主流程） */

@@ -263,6 +263,14 @@ export function updateMessageMentions(messageId: string, mentionsJson: string): 
   db.prepare('UPDATE messages SET mentions = ? WHERE id = ?').run(mentionsJson, messageId)
 }
 
+/** 原地改写消息正文（内容 UPDATE 通道）。
+ *  E2 归因消息层闭环专用：closure 复验关闭时对已投递的调查单原地追加
+ *  「✅已关闭」标记（方案 A——用户同一位置看到完整状态，不另起新消息）。
+ *  只改 content 列，不动 mentions/task_id/created_at（消息身份不变）。 */
+export function updateMessageContent(messageId: string, content: string): void {
+  db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, messageId)
+}
+
 export function deleteMessageById(id: string): void {
   db.prepare('DELETE FROM messages WHERE id = ?').run(id)
 }

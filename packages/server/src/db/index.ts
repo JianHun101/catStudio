@@ -369,6 +369,15 @@ export function initDb(): void {
       name: 'compressed_summaries on sessions',
       sql: `ALTER TABLE sessions ADD COLUMN compressed_summaries TEXT`,
     },
+    // E2 归因投递消息 id（additive ALTER；存量行 NULL = 旧库已投递无记录，
+    // 追加标记对存量调查单不生效——观察项，新投递全量记录）。
+    // 消息层闭环：dispatchAction 投递成功时写回，closure 复验 markResolved
+    // 关闭时对原消息原地追加「✅已关闭」标记（方案 A，店长契约——用户
+    // 同一位置看到完整状态，不撤回、不另起新消息）
+    {
+      name: 'delivery_message_id on episode_attributions',
+      sql: `ALTER TABLE episode_attributions ADD COLUMN delivery_message_id TEXT`,
+    },
   ]
 
   for (const m of migrations) {

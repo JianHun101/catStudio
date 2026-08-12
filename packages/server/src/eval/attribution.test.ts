@@ -99,8 +99,9 @@ function getEpisode(rootTriggerMessageId: string) {
     .get(rootTriggerMessageId) as any
 }
 
-function getSystemMessages(): Array<{ content: string }> {
-  return getDb().prepare(`SELECT content FROM messages WHERE role = 'system'`).all() as Array<{
+function getSystemMessages(): Array<{ id: string; content: string }> {
+  return getDb().prepare(`SELECT id, content FROM messages WHERE role = 'system'`).all() as Array<{
+    id: string
     content: string
   }>
 }
@@ -317,6 +318,63 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
     expect(getAttribution(epId).status).toBe('dispatched')
     expect(getEpisode(rootId).episode_state).toBe('classified')
     expect(getSystemMessages()).toHaveLength(1) // 未重复投递
+    // 消息层闭环：未翻转不追加「已关闭」标记（原地不动）
+    expect(getSystemMessages()[0].content).not.toContain('✅已关闭')
+  })
+
+  it('closure 复验翻转 → 已投递调查单消息原地追加「已关闭」标记（消息层闭环）', () => {
+    const rootId = insertRootMessage({ id: 'msg-root', created_at: sqliteNow(60) })
+    insertExecution({
+      triggered_by: rootId,
+      status: 'failed',
+      error_type: 'timeout',
+      error_message: '执行超时',
+      started_at: sqliteNow(50),
+    })
+    classifyEpisodes()
+    expect(getEpisode(rootId).outcome).toBe('needs_investigation')
+
+    const { dispatched } = runEpisodeAttribution(io)
+    expect(dispatched).toBe(1)
+    const epId = getEpisode(rootId).id
+    const before = getSystemMessages()[0]
+    expect(before.content).toContain('@店长 📋调查单')
+    expect(before.content).not.toContain('✅已关闭')
+    // 投递消息 id 已写回归因记录（消息层闭环的前提）
+    expect(getAttribution(epId).delivery_message_id).toBe(before.id)
+
+    // 打回后重做完成 → 判定翻转 corrected_success
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, task_id, created_at)
+         VALUES ('vmsg-1', 's1', 'agent', '审查回复', 'trace-1', ?)`
+      )
+      .run(sqliteNow(30))
+    getDb()
+      .prepare(
+        `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
+         VALUES ('vmsg-1', 's1', 'reviewer-1', NULL, 'reject', ?)`
+      )
+      .run(sqliteNow(30))
+    insertExecution({
+      id: 'log-redo',
+      triggered_by: rootId,
+      status: 'completed',
+      trace_id: 'trace-1',
+      started_at: sqliteNow(20),
+      ended_at: sqliteNow(15),
+    })
+    classifyEpisodes()
+    expect(getEpisode(rootId).outcome).toBe('corrected_success')
+
+    const { resolved } = runEpisodeAttribution(io)
+    expect(resolved).toBe(1)
+    expect(getAttribution(epId).status).toBe('resolved')
+    expect(getEpisode(rootId).episode_state).toBe('closed')
+    // 同一消息原地追加标记（id 不变，内容追加）——用户同一位置看到完整状态
+    const after = getSystemMessages()[0]
+    expect(after.id).toBe(before.id)
+    expect(after.content).toContain('✅已关闭（结局翻转 corrected_success）')
   })
 
   it('routing_failure → replay 归因（root_cause 路由整体失败）', () => {
