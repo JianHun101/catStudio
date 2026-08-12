@@ -50,6 +50,7 @@ export interface AttributionRow {
   action_type: AttributionAction
   action_detail: string | null
   status: 'dispatched' | 'resolved'
+  delivery_message_id: string | null
   created_at: string
   updated_at: string
 }
@@ -265,8 +266,10 @@ export function runEpisodeAttribution(io: SocketServer): {
 
   for (const p of pending) {
     if (p.action_type === 'improvement') {
-      // 改进素材无动作通道可复验——直接关闭（记录在案，不动作不等待）
-      markResolved(p.episode_id)
+      // 改进素材无动作通道可复验——直接关闭（记录在案，不动作不等待）。
+      // 不标注消息：improvement 同轮投递同轮关闭（投递即终态，用户从未见过
+      // 打开态），「✅已关闭」标记对打开态票据才有意义（店长裁决，OQ1）
+      markResolved(p.episode_id, false)
       resolved++
       continue
     }
@@ -296,8 +299,13 @@ export function runEpisodeAttribution(io: SocketServer): {
   return { dispatched, resolved }
 }
 
-/** 关闭 episode + 归因记录 resolved（closure 终态） */
-function markResolved(episodeId: string): void {
+/**
+ * 关闭 episode + 归因记录 resolved（closure 终态）。
+ * annotate=false（improvement 分支）：跳过消息层标注——投递即终态的消息
+ * 不需要「已关闭」标记（用户从未见过打开态，标记反而形成「刚投递即关闭」
+ * 的困惑展示；店长裁决 OQ1）。落库两表 UPDATE 照常。
+ */
+function markResolved(episodeId: string, annotate = true): void {
   const db = getDb()
   const outcome = db.prepare(`SELECT outcome FROM episodes WHERE id = ?`).get(episodeId) as
     { outcome: string } | undefined
@@ -307,6 +315,7 @@ function markResolved(episodeId: string): void {
   db.prepare(
     `UPDATE episodes SET episode_state = 'closed', updated_at = datetime('now') WHERE id = ?`
   ).run(episodeId)
+  if (!annotate) return
   // 消息层闭环：投递过的归因消息原地追加「已关闭」标记（不撤回、不另起
   // 新消息——用户同一位置看到完整状态）。投递消息已删则跳过（关闭本身
   // 已落库，标记属终态归档的尽力而为）

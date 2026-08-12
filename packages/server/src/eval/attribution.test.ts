@@ -224,7 +224,14 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
     expect(attr.status).toBe('resolved')
     expect(getEpisode(rootId).episode_state).toBe('closed')
     // 改进素材也投递到店长可见（上下文过滤）
-    expect(getSystemMessages()[0].content).toContain('@店长 💡改进素材')
+    const msgs = getSystemMessages()
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].content).toContain('@店长 💡改进素材')
+    // 投递消息 id 已写回归因记录（消息层闭环锚点）
+    expect(attr.delivery_message_id).toBe(msgs[0].id)
+    // 店长裁决（OQ1）：improvement 投递即终态（用户从未见过打开态），
+    // 不追加「已关闭」标记——标记只对打开态票据有意义
+    expect(msgs[0].content).not.toContain('✅已关闭')
   })
 
   it('open（在途）与 unclassified 不动作', () => {
