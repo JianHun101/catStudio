@@ -725,7 +725,7 @@ const warnedAgentsText = computed(() => {
 
         <div v-if="!store.activeSessionId" class="empty-state">
           <div class="empty-icon">🐱</div>
-          <h3>欢迎来到 CatStudy</h3>
+          <h3>欢迎来到 CatStudio</h3>
           <p v-if="store.sessions.length > 0">从左侧选择一个会话开始聊天</p>
           <p v-else>点击左下角按钮创建一个新会话</p>
           <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>

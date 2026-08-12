@@ -813,7 +813,7 @@ onUnmounted(() => {
             <div v-if="listLoading" class="list-hint">加载中…</div>
             <div v-else-if="listError" class="error-msg">{{ listError }}</div>
             <div v-else-if="bindings.length === 0" class="list-hint">
-              暂无绑定——添加后对应 QQ 群/私聊的消息才会接入猫咖
+              暂无绑定——添加后对应 QQ 群/私聊的消息才会接入 CatStudio
             </div>
             <div v-else class="binding-list">
               <div

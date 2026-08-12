@@ -75,8 +75,8 @@ async function handleDelete(id: string): Promise<void> {
     <div class="brand">
       <span class="brand-icon">🐾</span>
       <div class="brand-text">
-        <h1>CatStudy</h1>
-        <p>猫咖多 Agent 对话</p>
+        <h1>CatStudio</h1>
+        <p>CatStudio 多 Agent 对话</p>
       </div>
     </div>
 
