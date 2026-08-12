@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { Readable } from 'node:stream'
+import { dirname } from 'node:path'
+import { existsSync } from 'node:fs'
 import type { Chunk } from '@cat-study/shared'
 
 // Mock cli-utils 以阻止模块加载时的 resolveBin() 调用
@@ -132,7 +134,7 @@ describe('OpencodeAdapter', () => {
     ])
   })
 
-  it('spawns with run --format json -m and passes prompt as positional message (no stdin, no -q)', async () => {
+  it('spawns with run --format json --thinking -m and passes prompt as positional message (no stdin, no -q)', async () => {
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
     const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -145,11 +147,14 @@ describe('OpencodeAdapter', () => {
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
     // prompt 作为 positional message 尾部追加——opencode run 不读 stdin（1.18.16
-    // help 无任何 stdin 选项，stdin 传参实测空转 exit 0 无输出，luna 猫「无法启动」根因）
+    // help 无任何 stdin 选项，stdin 传参实测空转 exit 0 无输出，luna 猫「无法启动」根因）；
+    // --thinking 实测必需——无它时推理模型的 reasoning 事件被过滤（tokens.reasoning>0
+    // 但事件流只有 step_start/text/step_finish 三行，鸡兔同笼对照实测）
     expect(args).toEqual([
       'run',
       '--format',
       'json',
+      '--thinking',
       '-m',
       'anthropic/claude-sonnet-4-5',
       'User: hello\n\nAssistant: hi',
@@ -183,6 +188,7 @@ describe('OpencodeAdapter', () => {
       'run',
       '--format',
       'json',
+      '--thinking',
       '-m',
       'openai/gpt-5',
       'User: hello\n\nAssistant: hi',
@@ -310,6 +316,114 @@ describe('OpencodeAdapter', () => {
     ])
   })
 
+  // ─── reasoning 事件（--thinking 开启后输出，1.18.16 实测结构）──────────
+
+  it('yields [思考] thinking chunk on reasoning event (part.text — 1.18.16 实测结构)', async () => {
+    // 实测结构：reasoning 与 text 事件同构——文本在 part.text（顶层无 text）：
+    // {"type":"reasoning","part":{"type":"reasoning","text":"..."}}；
+    // 转 [思考] 前缀 chunk 对齐 claude.ts:222 / pi.ts:155 契约
+    // （kind:'thinking' 前端折叠展示，socketio.ts:2706 不落库不参与上下文）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(
+      JSON.stringify({
+        type: 'reasoning',
+        part: { id: 'r1', type: 'reasoning', text: 'Let me solve step by step' },
+      }) + '\n'
+    )
+    child.stdout.push(JSON.stringify({ type: 'text', part: { id: 'p1', text: 'answer' } }) + '\n')
+    child.stdout.push(null)
+
+    const chunks = await collect(gen)
+    expect(chunks).toEqual([
+      { content: '[思考] Let me solve step by step', done: false, kind: 'thinking' },
+      { content: 'answer', done: false, kind: 'text' },
+      { content: '', done: true },
+    ])
+  })
+
+  it('reasoning falls back to top-level text when part.text is absent (兼容)', async () => {
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(JSON.stringify({ type: 'reasoning', text: 'legacy thinking' }) + '\n')
+    child.stdout.push(null)
+
+    const chunks = await collect(gen)
+    expect(chunks).toEqual([
+      { content: '[思考] legacy thinking', done: false, kind: 'thinking' },
+      { content: '', done: true },
+    ])
+  })
+
+  // ─── images 透传（base64 dataURL 落盘 → -f 传参，实测视觉模型支持）────
+
+  it('materializes last user images to temp files and passes -f args (视觉模型实测支持)', async () => {
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    const { readFileSync } = await import('node:fs')
+    // 在 spawn 回调里断言落盘内容——此时 materializeImages 已 await 完成（文件在）；
+    // collect 后 finally 已 rm，测试侧再读必然 ENOENT（清理断言见下一用例）
+    vi.mocked(spawnSupervised).mockImplementation((...callArgs) => {
+      const spawnArgs = callArgs[1] as string[]
+      const fIdx = spawnArgs.indexOf('-f')
+      expect(fIdx).toBeGreaterThan(-1)
+      // 每张图一对 -f <path>；扩展名按 MIME 映射（png / jpeg→jpg）
+      expect(spawnArgs[fIdx + 1]).toMatch(/opencode-img-.*\.png$/)
+      expect(spawnArgs[fIdx + 2]).toBe('-f')
+      expect(spawnArgs[fIdx + 3]).toMatch(/opencode-img-.*\.jpg$/)
+      // prompt 仍为尾部 positional（-f 只插在 -m 之后）
+      expect(spawnArgs.at(-1)).toBe('User: hello\n\nAssistant: hi')
+      // 落盘内容 = base64 解码后的字节（dataURL 前缀已剥离）
+      expect(readFileSync(spawnArgs[fIdx + 1]).toString()).toBe('hello')
+      expect(readFileSync(spawnArgs[fIdx + 3]).toString()).toBe('world')
+      return child as any
+    })
+
+    // 两条 user 消息：最后一条带图（只取最后一条的图——opencode run 单 message 形态）
+    const gen = adapter.chatStream(
+      [
+        { role: 'user', content: '历史消息' },
+        {
+          role: 'user',
+          content: '看这张图',
+          images: ['data:image/png;base64,aGVsbG8=', 'data:image/jpeg;base64,d29ybGQ='],
+        },
+      ],
+      { model: 'anthropic/claude-sonnet-4-5' }
+    )
+    child.stdout.push(null)
+    await collect(gen)
+  })
+
+  it('cleans up image temp dir after stream (finally rm)', async () => {
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream(
+      [{ role: 'user', content: '图', images: ['data:image/png;base64,aGVsbG8='] }],
+      { model: 'anthropic/claude-sonnet-4-5' }
+    )
+    child.stdout.push(null)
+    await collect(gen)
+
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    const fIdx = args.indexOf('-f')
+    const dir = dirname(args[fIdx + 1])
+    // finally 已 await rm——临时目录不残留
+    expect(existsSync(dir)).toBe(false)
+  })
+
   // ─── abort 转发链（8a64187 教训：断言「abort 确实触发 kill」而非挂起后超时）───
 
   it('abort during streaming kills child with SIGTERM (abort forwarding chain)', async () => {
@@ -387,13 +501,19 @@ describe('OpencodeAdapter', () => {
       model: 'anthropic/claude-sonnet-4-5',
     })
     const chunksPromise = collect(gen)
-    child.stdout.push(null)
-    // 等主代码的 error 监听挂上（spawn 后同步段）再派发 error——generator 惰性，
-    // 提前 emitError 会漏掉监听（无监听者 → spawnFailed 标记丢失 → 误入 wait close）
+    // 等 generator 推进到 spawn + error 监听注册——materializeImages 的 await
+    // 让 spawn 延后到 microtask（generator 惰性，第一次 next 才执行）；提前
+    // emitError 会漏掉监听（无监听者 → spawnFailed 标记丢失 → 误入 wait close）
+    await vi.waitFor(() => {
+      expect(vi.mocked(spawnSupervised)).toHaveBeenCalled()
+    })
     await vi.waitFor(() => {
       expect(vi.mocked(child.on)).toHaveBeenCalledWith('error', expect.any(Function))
     })
+    // spawn error 先派发（spawnFailed=true）再 EOF——与真实时序一致（error 事件
+    // 在 spawn 阶段），且避免 generator 误入 wait close 5s race 拖垮测试
     child.emitError(new Error('spawn ENOENT'))
+    child.stdout.push(null)
 
     const chunks = await chunksPromise
     expect(chunks[0].content).toContain('opencode CLI 无法启动')

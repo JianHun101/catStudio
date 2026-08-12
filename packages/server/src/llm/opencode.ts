@@ -10,6 +10,10 @@ import {
 import { createLogger } from '../logger.js'
 import { createInterface } from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
+import { v4 as uuid } from 'uuid'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const log = createLogger('opencode')
 
@@ -37,6 +41,44 @@ const PROMPT_ARG_MAX = 30000
 
 /** 竞态修复：stdout EOF 后等 close 派发的兜底窗口（防进程永挂） */
 const WAIT_CLOSE_MS = 5000
+
+/**
+ * 把最后一条 user 消息的 base64 dataURL 图片落盘为临时文件。
+ *
+ * opencode run 的 -f 只认文件路径（不认 base64）——实测 `-f <path>` 传图成功，
+ * gpt-5.6-luna 正确识别图片内容（视觉模型）。仅取最后一条 user 消息的图片：
+ * opencode run 是单 message 形态（positional），历史消息的图无法与消息建立
+ * 关联，传了模型也看不到上下文（与 messagesToPrompt 的平铺模型对齐）。
+ *
+ * 返回 { dir, fileArgs }；落盘失败返回 null（降级：prompt 里仍有 socketio.ts
+ * 注入的「用户附带了 N 张图片」文字占位，模型仍可感知"用户发了图"）。
+ */
+async function materializeImages(
+  messages: LLMMessage[]
+): Promise<{ dir: string; fileArgs: string[] } | null> {
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.images?.length)
+  if (!lastUser?.images?.length) return null
+
+  const dir = await mkdtemp(join(tmpdir(), 'opencode-img-'))
+  const fileArgs: string[] = []
+  try {
+    for (const dataUrl of lastUser.images) {
+      // data:image/png;base64,XXXX → 去前缀取 base64；无前缀的裸 base64 直接用
+      const comma = dataUrl.indexOf(',')
+      const mimeMatch = /^data:image\/([\w+-]+)/.exec(dataUrl)
+      const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+      const ext = mimeMatch ? (mimeMatch[1] === 'jpeg' ? 'jpg' : mimeMatch[1]) : 'png'
+      const file = join(dir, `${uuid()}.${ext}`)
+      await writeFile(file, Buffer.from(b64, 'base64'))
+      fileArgs.push('-f', file)
+    }
+    return { dir, fileArgs }
+  } catch (err: any) {
+    log.warn('图片落盘失败，降级为仅文字占位', { error: err.message })
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
+    return null
+  }
+}
 
 /**
  * opencode CLI 适配器。
@@ -83,6 +125,10 @@ export class OpencodeAdapter implements LLMAdapter {
     }
 
     const prompt = messagesToPrompt(messages)
+    // images（base64 dataURL）落盘为临时文件，-f 透传（实测支持视觉输入）；
+    // 落盘失败降级：不传图，prompt 仍含「用户附带了 N 张图片」占位
+    const materialized = await materializeImages(messages)
+    const fileArgs = materialized?.fileArgs ?? []
 
     log.info('启动 opencode CLI', { model: options.model || this.model, promptLen: prompt.length })
 
@@ -91,6 +137,10 @@ export class OpencodeAdapter implements LLMAdapter {
     // 选项会打印帮助并 exit 1（luna 猫「无法启动」实测根因）；--format json 本身
     // 已是 raw JSON 事件，无需要抑制的噪音。
     // -m <model> 用 provider/model 格式（如 anthropic/claude-sonnet-4-5）。
+    // --thinking：实测必需——无它时推理模型的 reasoning 事件被过滤
+    // （tokens.reasoning>0 但事件流只有 step_start/text/step_finish 三行，
+    // gpt-5.6-luna 鸡兔同笼问题对照实测）；加了才输出 reasoning 事件。
+    // -f <file> 图片透传（每张一个 -f）：实测视觉模型正确识别图片内容。
     // prompt 以 positional message 尾部追加（run [message..]）——opencode 1.18.16
     // 的 help 没有任何 stdin 选项，stdin 方式实测空转 exit 0 无输出（luna 猫
     // 「无法启动」三层证据链根因；claude.ts 的 -p - 思维惯性不适用于 opencode）。
@@ -107,7 +157,16 @@ export class OpencodeAdapter implements LLMAdapter {
       OPENCODE_BIN,
       // options.model 优先（调用方每轮传当轮 agent 的 llmModel，socketio.ts 契约），
       // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（deepseek.ts/ollama.ts 同款惯例）
-      ['run', '--format', 'json', '-m', options.model || this.model, promptArg],
+      [
+        'run',
+        '--format',
+        'json',
+        '--thinking',
+        '-m',
+        options.model || this.model,
+        ...fileArgs,
+        promptArg,
+      ],
       {
         label: 'opencode',
         // 不再传 input：opencode run 不消费 stdin（positional 传参）；spawnSupervised
@@ -179,6 +238,10 @@ export class OpencodeAdapter implements LLMAdapter {
     } finally {
       signal?.removeEventListener('abort', onAbort)
       cleanupIdle()
+      // 清理图片临时文件（成功/失败/中止都执行；rm 失败静默——os 临时目录兜底）
+      if (materialized) {
+        await rm(materialized.dir, { recursive: true, force: true }).catch(() => {})
+      }
     }
 
     // 被取消时不产出后续错误信息
@@ -231,14 +294,17 @@ export class OpencodeAdapter implements LLMAdapter {
 
 /**
  * 从 opencode CLI 的 NDJSON 输出流中提取文本 Chunk。
- * 格式（run --format json，1.18.16 实测——文本在 part 嵌套，非顶层）:
- *   text:  {"type":"text","timestamp":...,"part":{"id":...,"messageID":...,"text":"..."}}
- *   error: {"type":"error","error":{"data":{"message":"Upstream request failed: [403]..."}}}
+ * 格式（run --format json --thinking，1.18.16 实测——文本在 part 嵌套，非顶层）:
+ *   text:      {"type":"text","timestamp":...,"part":{"id":...,"messageID":...,"text":"..."}}
+ *   reasoning: {"type":"reasoning","timestamp":...,"part":{"type":"reasoning","text":"..."}}
+ *   error:     {"type":"error","error":{"data":{"message":"Upstream request failed: [403]..."}}}
  *   —— 顶层 text 仅存在于其他版本输出（兜底兼容）；error 详情在 error.data.message
- *   （嵌套两层），非 error.message
+ *   （嵌套两层），非 error.message；reasoning 与 text 事件同构（文本同样在
+ *   part.text），仅在有 --thinking 时输出（无它时推理模型的思考被过滤）
  *
- * type === 'text' → 实时产出内容 chunk；type === 'error' → 产出错误 chunk 并终止
- * （错误是终止性事件，后续不再有有效内容）。无法解析的行跳过。
+ * type === 'text' → 实时产出内容 chunk；type === 'reasoning' → 产出 [思考] 前缀
+ * chunk（对齐 claude.ts/pi.ts 契约，前端折叠展示、不入库）；type === 'error' →
+ * 产出错误 chunk 并终止（错误是终止性事件，后续不再有有效内容）。无法解析的行跳过。
  */
 async function* parseOpencodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
@@ -254,6 +320,15 @@ async function* parseOpencodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
         const text = event.part?.text ?? event.text
         if (typeof text === 'string' && text) {
           yield { content: text, done: false, kind: 'text' }
+        }
+      } else if (event.type === 'reasoning') {
+        // 推理模型思考事件（--thinking 开启时输出，鸡兔同笼实测 tokens.reasoning=43
+        // 且有 reasoning 事件；简单算术无思考 → 无该事件）。转 [思考] 前缀 chunk
+        // 对齐 claude.ts:222 / pi.ts:155 契约（kind:'thinking' 前端折叠展示、
+        // socketio.ts:2706 不落库不参与上下文）。结构同 text 事件，同样 part.text 主
+        const text = event.part?.text ?? event.text
+        if (typeof text === 'string' && text) {
+          yield { content: `[思考] ${text}`, done: false, kind: 'thinking' }
         }
       } else if (event.type === 'error') {
         // error 详情按实测结构层级取（error.data.message 最优先，嵌套两层）：
