@@ -38,19 +38,37 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
 /**
  * 构造 fake CLI 子进程：stdout/stderr 为手工 Readable（时序可控，不自动 end），
  * 解析逻辑真实跑在流上（不 mock 内部解析）；kill/on 为 vi.fn 记录调用。
+ * on/once 同时真实注册事件回调；emitClose/emitError 为测试辅助——手动派发
+ * close/error 事件，模拟「close 晚于 stdout EOF」等真实时序（竞态用例依赖）。
  */
 function fakeChild(overrides: Partial<{ exitCode: number | null; killed: boolean }> = {}) {
   const stdout = new Readable({ read() {} })
   const stderr = new Readable({ read() {} })
-  return {
+  const listeners = new Map<string, Set<(...args: any[]) => void>>()
+  const register = (event: string, cb: (...args: any[]) => void) => {
+    if (!listeners.has(event)) listeners.set(event, new Set())
+    listeners.get(event)!.add(cb)
+  }
+  const emitClose = (code: number | null) => {
+    child.exitCode = code
+    for (const cb of listeners.get('close') ?? []) cb(code)
+  }
+  const emitError = (err: Error) => {
+    for (const cb of listeners.get('error') ?? []) cb(err)
+  }
+  const child = {
     stdout,
     stderr,
     kill: vi.fn(),
-    on: vi.fn(),
+    on: vi.fn(register),
+    once: vi.fn(register),
+    emitClose,
+    emitError,
     exitCode: null,
     killed: false,
     ...overrides,
   }
+  return child
 }
 
 describe('OpencodeAdapter', () => {
@@ -112,9 +130,9 @@ describe('OpencodeAdapter', () => {
     ])
   })
 
-  it('spawns with run --format json -m and passes prompt via stdin (no -q: removed in 1.18.16)', async () => {
+  it('spawns with run --format json -m and passes prompt as positional message (no stdin, no -q)', async () => {
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
-    const child = fakeChild()
+    const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
     const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
@@ -124,12 +142,23 @@ describe('OpencodeAdapter', () => {
     await collect(gen)
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
-    expect(args).toEqual(['run', '--format', 'json', '-m', 'anthropic/claude-sonnet-4-5'])
+    // prompt 作为 positional message 尾部追加——opencode run 不读 stdin（1.18.16
+    // help 无任何 stdin 选项，stdin 传参实测空转 exit 0 无输出，luna 猫「无法启动」根因）
+    expect(args).toEqual([
+      'run',
+      '--format',
+      'json',
+      '-m',
+      'anthropic/claude-sonnet-4-5',
+      'User: hello\n\nAssistant: hi',
+    ])
     const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
       input?: string
       cwd?: string
     }
-    expect(opts.input).toBe(messagesToPrompt([{ role: 'user', content: 'hi' }]))
+    // 不再走 stdin——opencode run 不消费 stdin（positional 传参）；spawnSupervised
+    // 无 input 时自动 end stdin 不挂起
+    expect(opts.input).toBeUndefined()
     expect(opts.cwd).toBe('/tmp/workspace')
   })
 
@@ -138,7 +167,7 @@ describe('OpencodeAdapter', () => {
     // 优先（socketio.ts 每轮传当轮 agent.llmModel）——双保险：即使缓存键未来被误改，
     // 同一实例服务不同 model 的猫时 spawn 参数仍取当轮 model（deepseek.ts/ollama.ts 同款惯例）
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
-    const child = fakeChild()
+    const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
     const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
@@ -148,14 +177,21 @@ describe('OpencodeAdapter', () => {
     await collect(gen)
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
-    expect(args).toEqual(['run', '--format', 'json', '-m', 'openai/gpt-5'])
+    expect(args).toEqual([
+      'run',
+      '--format',
+      'json',
+      '-m',
+      'openai/gpt-5',
+      'User: hello\n\nAssistant: hi',
+    ])
   })
 
   it('logs effective model (options.model || this.model) when options override constructor', async () => {
     // 店长观察项①：启动日志与 abort 日志记生效 model（与 spawn 参数同值），
     // 排查时日志不再误导为构造 model（缓存键按 model 隔离后实例与 model 一一对应）
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
-    const child = fakeChild()
+    const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
     const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
@@ -172,7 +208,7 @@ describe('OpencodeAdapter', () => {
 
   it('passes cwd through to spawnSupervised (session worktree)', async () => {
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
-    const child = fakeChild()
+    const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
     const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
@@ -193,7 +229,7 @@ describe('OpencodeAdapter', () => {
       model: 'anthropic/claude-sonnet-4-5',
       envExtra: { HTTPS_PROXY: 'http://127.0.0.1:7897', NO_PROXY: 'localhost,127.0.0.1' },
     })
-    const child = fakeChild()
+    const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
     const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
@@ -215,7 +251,7 @@ describe('OpencodeAdapter', () => {
     const gen2 = plain.chatStream([{ role: 'user', content: 'hi' }], {
       model: 'anthropic/claude-sonnet-4-5',
     })
-    const child2 = fakeChild()
+    const child2 = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child2 as any)
     child2.stdout.push(null)
     await collect(gen2)
@@ -311,18 +347,28 @@ describe('OpencodeAdapter', () => {
 
   // ─── spawn 失败 / 无输出路径 ────────────────
 
-  it('yields friendly error when child fails to spawn (ENOENT-like, exitCode null)', async () => {
+  it('yields cannot-start error with reason on spawn error event (ENOENT-like)', async () => {
+    // 文案归位：exitCode null 不再自动判「无法启动」（成功退出无输出也会撞 null
+    // 竞态窗口）——只有 spawn 'error' 事件（进程从未启动，ENOENT 类）才报该文案
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
-    const child = fakeChild() // exitCode null = 进程未能启动
+    const child = fakeChild() // exitCode null + spawn error
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
     const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
       model: 'anthropic/claude-sonnet-4-5',
     })
+    const chunksPromise = collect(gen)
     child.stdout.push(null)
+    // 等主代码的 error 监听挂上（spawn 后同步段）再派发 error——generator 惰性，
+    // 提前 emitError 会漏掉监听（无监听者 → spawnFailed 标记丢失 → 误入 wait close）
+    await vi.waitFor(() => {
+      expect(vi.mocked(child.on)).toHaveBeenCalledWith('error', expect.any(Function))
+    })
+    child.emitError(new Error('spawn ENOENT'))
 
-    const chunks = await collect(gen)
+    const chunks = await chunksPromise
     expect(chunks[0].content).toContain('opencode CLI 无法启动')
+    expect(chunks[0].content).toContain('spawn ENOENT')
     expect(chunks.at(-1)?.done).toBe(true)
   })
 
@@ -343,6 +389,69 @@ describe('OpencodeAdapter', () => {
     expect(chunks[0].content).toContain('opencode CLI 启动失败 (exit code 1)')
     expect(chunks[0].content).toContain('opencode: unknown model')
     expect(chunks.at(-1)?.done).toBe(true)
+  })
+
+  it('yields empty done on exit 0 without output (no false cannot-start)', async () => {
+    // 文案归位覆盖点：exit 0 无输出 = 空响应，不报错（旧代码 exitCode null 竞态
+    // 把成功退出误报「无法启动」；exitCode 已定 0 时直接走空 done，不进入 wait）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(null)
+
+    const chunks = await collect(gen)
+    expect(chunks).toEqual([{ content: '', done: true }])
+  })
+
+  it('waits for close before judging exitCode (close later than stdout EOF)', async () => {
+    // 竞态修复核心用例：stdout EOF（流循环退出）时 close 未派发、exitCode 仍
+    // null——旧代码在此误读 null 报「无法启动」（server 日志 19:46:05 实证）；
+    // 新代码先等 close 再判定，exit 0 走空 done
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild() // exitCode null + 无 spawn error → 进入 wait close
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    const chunksPromise = collect(gen)
+    child.stdout.push(null)
+    // 轮询等 wait close 的 once('close') 挂上（流循环退出后），再派发 close——
+    // 模拟真实时序：close 晚于 stdout EOF；若直接 emitClose 会漏掉 wait 注册
+    await vi.waitFor(() => {
+      expect(vi.mocked(child.once)).toHaveBeenCalledWith('close', expect.any(Function))
+    })
+    child.emitClose(0) // 模拟 close 晚到：exit 0
+
+    const chunks = await chunksPromise
+    expect(chunks).toEqual([{ content: '', done: true }])
+  })
+
+  it('truncates prompt beyond Windows command-line limit with warning', async () => {
+    // Windows 32K 命令行限制防御：positional prompt 超阈值截断 + warn——
+    // 旧代码 stdin 传参无此限制，本用例为新增路径的静态防护断言
+    vi.mocked(messagesToPrompt).mockReturnValue('x'.repeat(40000))
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    const promptArg = args.at(-1) as string
+    expect(promptArg.length).toBeLessThanOrEqual(30000)
+    expect(logMocks.warn).toHaveBeenCalledWith(
+      'prompt 超过命令行长度阈值，已截断',
+      expect.objectContaining({ promptLen: 40000, max: 30000 })
+    )
   })
 
   // ─── maxTokens/temperature 忽略（不阻塞流式）──

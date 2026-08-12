@@ -29,6 +29,16 @@ try {
 }
 
 /**
+ * Windows 命令行长度限制防御阈值。prompt 以 positional message 传入
+ * （opencode run 不读 stdin，见 spawn 注释），命令行总长受 CreateProcess
+ * 32K 限制——超阈值截断兜底，防止 spawn ENOENT（claude.ts 走 stdin 无此限制）。
+ */
+const PROMPT_ARG_MAX = 30000
+
+/** 竞态修复：stdout EOF 后等 close 派发的兜底窗口（防进程永挂） */
+const WAIT_CLOSE_MS = 5000
+
+/**
  * opencode CLI 适配器。
  *
  * 通过 spawn opencode 子进程（`run --format json` 非交互流式）→ 解析 NDJSON
@@ -81,15 +91,27 @@ export class OpencodeAdapter implements LLMAdapter {
     // 选项会打印帮助并 exit 1（luna 猫「无法启动」实测根因）；--format json 本身
     // 已是 raw JSON 事件，无需要抑制的噪音。
     // -m <model> 用 provider/model 格式（如 anthropic/claude-sonnet-4-5）。
-    // prompt 通过 stdin 传入，避免 Windows 命令行 32K 限制（claude.ts -p - 同款思路）。
+    // prompt 以 positional message 尾部追加（run [message..]）——opencode 1.18.16
+    // 的 help 没有任何 stdin 选项，stdin 方式实测空转 exit 0 无输出（luna 猫
+    // 「无法启动」三层证据链根因；claude.ts 的 -p - 思维惯性不适用于 opencode）。
+    // 代价：positional 受 Windows 命令行 32K 限制，prompt 超阈值截断兜底（见上）。
+    const promptArg = prompt.length > PROMPT_ARG_MAX ? prompt.slice(0, PROMPT_ARG_MAX) : prompt
+    if (prompt.length > PROMPT_ARG_MAX) {
+      log.warn('prompt 超过命令行长度阈值，已截断', {
+        promptLen: prompt.length,
+        max: PROMPT_ARG_MAX,
+      })
+    }
+
     const child = spawnSupervised(
       OPENCODE_BIN,
       // options.model 优先（调用方每轮传当轮 agent 的 llmModel，socketio.ts 契约），
       // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（deepseek.ts/ollama.ts 同款惯例）
-      ['run', '--format', 'json', '-m', options.model || this.model],
+      ['run', '--format', 'json', '-m', options.model || this.model, promptArg],
       {
         label: 'opencode',
-        input: prompt,
+        // 不再传 input：opencode run 不消费 stdin（positional 传参）；spawnSupervised
+        // 无 input 时自动 end stdin，不会挂起
         // cwd 透传会话 worktree 路径（会话隔离）——缺省默认 workspace（存量行为零变化）
         cwd: options.cwd ?? getWorkspaceDir(),
         // per-agent 额外环境变量（如 HTTPS_PROXY）：显式完整合并传入——
@@ -126,8 +148,16 @@ export class OpencodeAdapter implements LLMAdapter {
     // 标记是否有输出，用于判断是否为静默失败
     let hasOutput = false
 
-    // spawn 失败 → 立即产出错误 chunk，避免 generator 静默挂起
+    // spawn 失败标记（ENOENT 等：进程从未启动——resolveBin 验证过路径存在但
+    // spawn 仍可能失败，如 .cmd 包装、路径被删；'error' 事件在 spawn 阶段派发）。
+    // 与「正常退出无输出」区分：exitCode null 可能是成功退出的竞态窗口（见下），
+    // 只有 spawn error 才是真正的「无法启动」。
+    let spawnFailed = false
+    let spawnError = ''
+
     child.on('error', (err) => {
+      spawnFailed = true
+      spawnError = err.message
       log.error('spawn 失败', { error: err.message })
     })
 
@@ -159,18 +189,36 @@ export class OpencodeAdapter implements LLMAdapter {
 
     // 进程非零退出或无输出 → 产出错误信息（不静默挂起）
     if (!hasOutput) {
-      if (child.exitCode !== null && child.exitCode !== 0) {
-        const detail = stderr.trim() ? `: ${stderr.trim().slice(0, 300)}` : ''
+      // 竞态修复：stdout EOF（流循环退出）时 close 事件可能尚未派发，exitCode
+      // 仍是 null——真实场景成功退出（exit 0 无输出）也撞上该竞态，旧代码误报
+      // 「无法启动」（server 日志 19:46:05 实证：stderr 报错先于 close 派发）。
+      // 先等 close（带超时兜底防进程永挂），再读 exitCode 判定。
+      if (child.exitCode === null && !spawnFailed) {
+        await Promise.race([
+          new Promise<void>((resolve) => child.once('close', () => resolve())),
+          new Promise<void>((resolve) => setTimeout(resolve, WAIT_CLOSE_MS)),
+        ])
+        if (child.exitCode === null && !spawnFailed) {
+          // 超时仍未 close：进程僵死（异常态）——记录日志，走空 done 不误报
+          log.warn('opencode 进程未在等待窗口内退出', { waitMs: WAIT_CLOSE_MS })
+        }
+      }
+
+      // 文案归位（与进程真实状态一一对应）：
+      // 「无法启动」仅指 spawn 失败（进程从未启动，ENOENT 类）；
+      // 「启动失败 (exit code N)」指进程启动但非零退出；
+      // exit 0 无输出 = 空响应，不报错（走空 done）。
+      if (spawnFailed) {
         yield {
-          content: `opencode CLI 启动失败 (exit code ${child.exitCode})${detail}`,
+          content: `opencode CLI 无法启动: ${spawnError}`,
           done: true,
         }
         return
       }
-      // exitCode 为 null = 进程未能启动（如 ENOENT）
-      if (child.exitCode === null) {
+      if (child.exitCode !== null && child.exitCode !== 0) {
+        const detail = stderr.trim() ? `: ${stderr.trim().slice(0, 300)}` : ''
         yield {
-          content: 'opencode CLI 无法启动。请检查是否已安装: npm i -g opencode-ai',
+          content: `opencode CLI 启动失败 (exit code ${child.exitCode})${detail}`,
           done: true,
         }
         return
