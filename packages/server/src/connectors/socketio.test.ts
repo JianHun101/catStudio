@@ -847,6 +847,70 @@ describe('socketio connector', () => {
       const emitted = mockRoomEmit.mock.calls.map((c: any[]) => c[0])
       expect(emitted).toContain(Events.MESSAGE_AGENT_STATUS)
     })
+
+    it('opencode + key 留空 → 不被 no-key 守卫拦截（本地认证免 key，不产生配置提示）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-B',
+      })
+      mockRoomEmit.mockClear()
+      const opencodeCfg = { ...agentCfg, llmProvider: 'opencode', llmApiKey: '' }
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [opencodeCfg as any],
+        { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
+        'trace-opencode'
+      )
+
+      // 不产生「还没有配置 API Key」system 提示消息
+      const newMessages = mockRoomEmit.mock.calls.filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      expect(
+        newMessages.some((c: any[]) => String(c[1].content).includes('还没有配置 API Key'))
+      ).toBe(false)
+      // 正常进入执行：出现 thinking 状态事件
+      const emitted = mockRoomEmit.mock.calls.map((c: any[]) => c[0])
+      expect(emitted).toContain(Events.MESSAGE_AGENT_STATUS)
+    })
+
+    it('deepseek + key 留空 → 仍被 no-key 守卫拦截（发配置提示，不进执行）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-B',
+      })
+      mockRoomEmit.mockClear()
+      const noKeyCfg = { ...agentCfg, llmApiKey: '' }
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [noKeyCfg as any],
+        { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
+        'trace-nokey'
+      )
+
+      // 提示消息照发（回归：非免 key provider 行为不变）
+      const newMessages = mockRoomEmit.mock.calls.filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      expect(
+        newMessages.some((c: any[]) => String(c[1].content).includes('还没有配置 API Key'))
+      ).toBe(true)
+      // 未进入执行：无 thinking 状态事件
+      const emitted = mockRoomEmit.mock.calls.map((c: any[]) => c[0])
+      expect(emitted).not.toContain(Events.MESSAGE_AGENT_STATUS)
+    })
   })
 
   // ─── MAX_MENTIONS_PER_AGENT 限流语义 ──────────
@@ -3152,6 +3216,19 @@ describe('socketio connector', () => {
       await mod.recoverInterruptedExecutions(mockIo as any)
 
       expect(executeAgentCommand).not.toHaveBeenCalled()
+    })
+
+    it('opencode + key 留空 + 被打断执行 → 恢复不跳过（本地认证免 key）', async () => {
+      const mod = await import('./socketio.js')
+      const { executeAgentCommand } = await import('../dispatch/index.js')
+      getDb()
+        .prepare("UPDATE agents SET llm_provider = 'opencode', llm_api_key = '' WHERE id = ?")
+        .run('agent-1')
+      seedInterruptedExecution(getDb())
+
+      await mod.recoverInterruptedExecutions(mockIo as any)
+
+      expect(executeAgentCommand).toHaveBeenCalledTimes(1)
     })
 
     it('恢复执行 → 会话收到 system 打断告警（含猫名与『已自动恢复重跑』）', async () => {
@@ -5610,9 +5687,7 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     const { generateFullSummary } = await import('../handoff/index.js')
     insertHistory(6) // ~8940 token → ratio 0.64 ∈ [0.60, 0.75) → 异步路径
     let resolveGen!: (s: string) => void
-    vi.mocked(generateFullSummary).mockReturnValue(
-      new Promise((r) => (resolveGen = r)) as any
-    )
+    vi.mocked(generateFullSummary).mockReturnValue(new Promise((r) => (resolveGen = r)) as any)
 
     // 第一轮：异步触发，本轮不含摘要块，DB 落 pending（content 空）
     const chatStream1 = await runCompressReply('msg-async-1')
@@ -5651,7 +5726,9 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
       () => new Promise((r) => (resolveGen = r)) as any
     )
     const chatStream1 = await runCompressReply('msg-gap-1')
-    expect(chatStream1.mock.calls[0][0].some((m: any) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
+    expect(
+      chatStream1.mock.calls[0][0].some((m: any) => m.content?.includes('[历史摘要（压缩）]'))
+    ).toBe(false)
     resolveGen('summary-1')
     await vi.waitFor(() => {
       expect(readCompressed()[0].content).toBe('summary-1')
@@ -5741,9 +5818,7 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
       const chatStream = await runCompressReply('msg-huge-trigger')
       const msgs = lastMessages(chatStream)
       // 同步生成路径：块存在
-      expect(
-        msgs.some((m: any) => m.content === '[历史摘要（压缩）]\nhuge summary')
-      ).toBe(true)
+      expect(msgs.some((m: any) => m.content === '[历史摘要（压缩）]\nhuge summary')).toBe(true)
       // 超长最新消息仍保留（kept 非空，不被 break 清空后丢失；user 消息有观众标签包装，用 includes）
       expect(msgs.some((m: any) => typeof m.content === 'string' && m.content.includes(HUGE))).toBe(
         true
@@ -5812,9 +5887,7 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     process.env.SUMMARY_COMPRESS_LIMIT = '2'
     // 预置 2 条 ready 条目（已达上限）
     getDb()
-      .prepare(
-        `UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`
-      )
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
       .run(
         JSON.stringify([
           { createdAt: '2026-08-01T00:00:00Z', tokenCount: 10, content: 's1' },

@@ -85,6 +85,15 @@ import {
 
 const log = createLogger('socketio')
 
+/** 不消费 apiKey 的 provider（本地认证，key 留空合法）——no-key 守卫须按 provider 区分 */
+const NO_API_KEY_PROVIDERS = new Set(['opencode'])
+
+/** agent 是否具备可用的 API key：免 key provider 恒 true；否则要求非空且非占位符 */
+function agentHasUsableApiKey(agent: Pick<AgentConfig, 'llmProvider' | 'llmApiKey'>): boolean {
+  if (NO_API_KEY_PROVIDERS.has(agent.llmProvider)) return true
+  return !!agent.llmApiKey && agent.llmApiKey !== 'sk-your-api-key-here'
+}
+
 /** 模块级 io 实例引用，供路由等模块获取 */
 let _io: SocketServer | null = null
 
@@ -835,8 +844,8 @@ async function executeOneAgent(
   // 排空路径自然通过此检查。
   if (state.currentTriggerMessageId !== triggerMsg.id) return false
 
-  // 检查 API Key
-  if (!agent.llmApiKey || agent.llmApiKey === 'sk-your-api-key-here') {
+  // 检查 API Key（免 key provider 如 opencode 本地认证，不拦）
+  if (!agentHasUsableApiKey(agent)) {
     log.warn('no API key', {
       agentId: agent.id,
       agentName: agent.name,
@@ -1421,8 +1430,8 @@ export async function recoverInterruptedExecutions(io: SocketServer): Promise<vo
         const agentRow = agentsRepo.getAgentById(rec.agent_id)
         if (!agentRow) continue
         const agent = rowToAgent(agentRow)
-        // 无 API key 无法执行（与 executeAgentsSerial 的检查一致）
-        if (!agent.llmApiKey || agent.llmApiKey === 'sk-your-api-key-here') continue
+        // 无 API key 无法执行（与 executeAgentsSerial 的检查一致；免 key provider 不拦）
+        if (!agentHasUsableApiKey(agent)) continue
 
         if (!getAgentState(agent.id)) initAgentSlot(agent.id)
 
@@ -1584,10 +1593,8 @@ export async function recoverQueuedMessages(io: SocketServer): Promise<void> {
           logsByTrigger.filter((l) => l.status === 'completed').map((l) => l.agent_id)
         )
 
-        // 无 API key 无法执行（与 recoverInterruptedExecutions 一致）
-        const executable = targets.filter(
-          (a) => a.llmApiKey && a.llmApiKey !== 'sk-your-api-key-here' && !completedSet.has(a.id)
-        )
+        // 无 API key 无法执行（与 recoverInterruptedExecutions 一致；免 key provider 不拦）
+        const executable = targets.filter((a) => agentHasUsableApiKey(a) && !completedSet.has(a.id))
 
         if (completedSet.size > 0) {
           log.info('恢复跳过已完成目标（OQ1 部分完成消息：保持 queued 的兄弟已跑完）', {
@@ -1780,9 +1787,7 @@ export async function replayStuckUserMessages(io: SocketServer): Promise<void> {
 
         const targets =
           mentions.length > 0 ? agents.filter((a) => mentions.includes(a.name)) : agents
-        const executable = targets.filter(
-          (a) => a.llmApiKey && a.llmApiKey !== 'sk-your-api-key-here'
-        )
+        const executable = targets.filter((a) => agentHasUsableApiKey(a))
 
         if (executable.length === 0) {
           // 无有效目标（@ 了非成员/成员无 API key/空会话）→ 归一 done（terminal）
