@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { messagesToPrompt, spawnSupervised } from './cli-utils.js'
 import type { LLMMessage } from '@cat-study/shared'
 
@@ -11,9 +11,16 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   return { ...actual, spawn: spawnMock }
 })
+// 注意：cli-utils.ts 是 `import fs from 'node:fs'`（default import）——只替换具名
+// 导出 existsSync 时 default 仍是真实 fs，mock 不生效（吐槽猫审查实证：三个用例
+// 实际全跑 supervisor 分支）。必须同时替换 default 对象上的 existsSync。
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
-  return { ...actual, existsSync: existsSyncMock }
+  return {
+    ...actual,
+    default: { ...actual, existsSync: existsSyncMock },
+    existsSync: existsSyncMock,
+  }
 })
 
 function fakeSpawnedChild() {
@@ -28,9 +35,17 @@ function fakeSpawnedChild() {
 }
 
 describe('spawnSupervised env 合并（per-agent 注入正确性前提）', () => {
+  const ORIG_PROXY = process.env.HTTPS_PROXY
+
   beforeEach(() => {
     vi.clearAllMocks()
     spawnMock.mockReturnValue(fakeSpawnedChild())
+  })
+
+  afterEach(() => {
+    // 恢复 process.env（test 2 设置了冲突值）
+    if (ORIG_PROXY === undefined) delete process.env.HTTPS_PROXY
+    else process.env.HTTPS_PROXY = ORIG_PROXY
   })
 
   it('直接 spawn 分支：opts.env 覆盖 process.env，且 process.env 键全保留', () => {
@@ -42,7 +57,9 @@ describe('spawnSupervised env 合并（per-agent 注入正确性前提）', () =
       env: { HTTPS_PROXY: 'http://127.0.0.1:7897' },
     })
 
-    const receivedEnv = spawnMock.mock.calls.at(-1)![2].env as Record<string, string>
+    const call = spawnMock.mock.calls.at(-1)!
+    expect(call[0]).toBe('opencode') // 分支判定：第一参数是 bin 而非 process.execPath
+    const receivedEnv = call[2].env as Record<string, string>
     expect(receivedEnv.HTTPS_PROXY).toBe('http://127.0.0.1:7897') // opts.env 生效
     expect(receivedEnv.PATH).toBe(process.env.PATH) // process.env 键保留（不丢）
   })
@@ -51,14 +68,17 @@ describe('spawnSupervised env 合并（per-agent 注入正确性前提）', () =
     // 旧实现 {...opts.env, ...process.env} 顺序颠倒——opts.env 的注入值会被 process.env
     // 同键覆盖（若 server 恰好也有该键），注入静默失效
     existsSyncMock.mockReturnValue(true) // supervisor 脚本存在 → supervisor 分支
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:wrong' // 冲突值：process.env 也有该键
 
     spawnSupervised('opencode', ['run'], {
       label: 'test',
       env: { HTTPS_PROXY: 'http://127.0.0.1:7897' },
     })
 
-    const receivedEnv = spawnMock.mock.calls.at(-1)![2].env as Record<string, string>
-    expect(receivedEnv.HTTPS_PROXY).toBe('http://127.0.0.1:7897') // opts.env 不被 process.env 覆盖
+    const call = spawnMock.mock.calls.at(-1)!
+    expect(call[0]).toBe(process.execPath) // 分支判定：第一参数是 node 而非 bin
+    const receivedEnv = call[2].env as Record<string, string>
+    expect(receivedEnv.HTTPS_PROXY).toBe('http://127.0.0.1:7897') // opts.env 胜出（不被 process.env 反向覆盖）
     expect(receivedEnv.PATH).toBe(process.env.PATH) // process.env 键保留
     expect(receivedEnv.CATSTUDY_SUPERVISOR_PARENT_PID).toBe(String(process.pid))
   })
@@ -67,7 +87,9 @@ describe('spawnSupervised env 合并（per-agent 注入正确性前提）', () =
     existsSyncMock.mockReturnValue(false)
     spawnSupervised('opencode', ['run'], { label: 'test' })
 
-    const receivedEnv = spawnMock.mock.calls.at(-1)![2].env as Record<string, string>
+    const call = spawnMock.mock.calls.at(-1)!
+    expect(call[0]).toBe('opencode') // 分支判定：直接 spawn
+    const receivedEnv = call[2].env as Record<string, string>
     expect(receivedEnv.PATH).toBe(process.env.PATH)
   })
 })
