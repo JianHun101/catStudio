@@ -19,6 +19,8 @@ const llmEffortLevel = ref('high')
 /** 静态运行配置（单 A 契约：maxTokens 正整数 1..131072、temperature 0..2——DB 列默认 2048/0.7） */
 const llmMaxTokens = ref(2048)
 const llmTemperature = ref(0.7)
+/** 额外环境变量（JSON 字符串直存；仅 opencode 等 spawn CLI 的适配器消费，DB 列默认 '{}'） */
+const llmEnvExtra = ref('{}')
 const saving = ref(false)
 const deleting = ref(false)
 const deleteConfirm = ref(false)
@@ -39,6 +41,7 @@ watch(
       // 新字段（单 A 落地前类型无定义——as any 过渡，落地后自动对齐）
       llmMaxTokens.value = (a as any).llmMaxTokens ?? 2048
       llmTemperature.value = (a as any).llmTemperature ?? 0.7
+      llmEnvExtra.value = (a as any).llmEnvExtra ?? '{}'
       error.value = ''
       deleteConfirm.value = false
     }
@@ -129,6 +132,7 @@ async function handleSave(): Promise<void> {
       effortLevel: llmEffortLevel.value,
       llmMaxTokens: Number(llmMaxTokens.value),
       llmTemperature: Number(llmTemperature.value),
+      llmEnvExtra: llmEnvExtra.value,
     })
     emit('close')
   } catch (err: any) {
@@ -280,6 +284,20 @@ async function handleDelete(): Promise<void> {
                 : 'https://api.example.com'
             "
           />
+        </div>
+
+        <div class="form-group">
+          <label>额外环境变量 (JSON)</label>
+          <textarea
+            v-model="llmEnvExtra"
+            class="input input-mono textarea-env"
+            rows="2"
+            spellcheck="false"
+            placeholder='{"HTTPS_PROXY":"http://127.0.0.1:7897","NO_PROXY":"localhost,127.0.0.1"}'
+          ></textarea>
+          <p class="provider-hint">
+            仅 opencode/CLI 适配器生效（HTTP 适配器不读代理 env），留空 {} 不注入
+          </p>
         </div>
 
         <!-- System Prompt -->
@@ -452,6 +470,13 @@ async function handleDelete(): Promise<void> {
   font-size: 13px;
   line-height: 1.65;
   font-family: inherit;
+}
+
+.textarea-env {
+  resize: vertical;
+  min-height: 42px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 select.input {

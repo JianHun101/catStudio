@@ -75,3 +75,22 @@ describe('AgentEditModal opencode provider（店长追加派活——设置界�
     expect(source).not.toContain('如 opencode/<模型名>')
   })
 })
+
+describe('AgentEditModal 额外环境变量（llmEnvExtra——per-agent 代理配置）', () => {
+  it('ref 默认 {} + watch 从 agent 回填（缺省 {}）', () => {
+    expect(source).toContain("const llmEnvExtra = ref('{}')")
+    expect(source).toContain("llmEnvExtra.value = (a as any).llmEnvExtra ?? '{}'")
+  })
+
+  it('handleSave 传 llmEnvExtra（JSON 字符串原样，camelCase 契约）', () => {
+    expect(source).toContain('llmEnvExtra: llmEnvExtra.value,')
+  })
+
+  it('模板含 textarea 输入项：v-model 绑定 + 代理示例 placeholder + 提示文案', () => {
+    expect(source).toContain('v-model="llmEnvExtra"')
+    expect(source).toContain('HTTPS_PROXY":"http://127.0.0.1:7897')
+    expect(source).toContain('NO_PROXY":"localhost,127.0.0.1')
+    expect(source).toContain('仅 opencode/CLI 适配器生效')
+    expect(source).toContain('留空 {} 不注入')
+  })
+})

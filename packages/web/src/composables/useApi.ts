@@ -184,6 +184,8 @@ export const api = {
       /** 静态运行配置（单 A 契约：maxTokens 正整数 1..131072、temperature 0..2） */
       llmMaxTokens: number
       llmTemperature: number
+      /** 额外环境变量（JSON 字符串原样，如 {"HTTPS_PROXY":"http://127.0.0.1:7897"}） */
+      llmEnvExtra: string
     }>
   ) =>
     request<any>(`/agents/${id}`, {
