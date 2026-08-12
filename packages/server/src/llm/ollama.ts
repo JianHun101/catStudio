@@ -1,3 +1,6 @@
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { setTimeout as sleep } from 'node:timers/promises'
 import type { Chunk, ChatOptions, LLMMessage } from '@cat-study/shared'
 import type { LLMAdapter } from './adapter.js'
 
@@ -20,6 +23,81 @@ const toOllamaImage = (img: string): string => {
   const marker = ';base64,'
   const idx = img.indexOf(marker)
   return idx >= 0 ? img.slice(idx + marker.length) : img
+}
+
+// ─── Ollama 自动拉起（参照 ui-review.ts 探测+拉起模式；行为差异：失败静默降级不退出） ──
+
+const OLLAMA_DEFAULT_BASE_URL = 'http://127.0.0.1:11434'
+const OLLAMA_MODELS_DIR = 'D:\\Tools\\ollama\\models'
+const OLLAMA_PROBE_TIMEOUT_MS = 1500
+const OLLAMA_PROBE_INTERVAL_MS = 500
+const OLLAMA_START_WAIT_MS = 10_000
+
+/** baseUrl 是否为本地默认地址——仅本地可自动拉起（远程宿主是别人的服务，不擅自启停） */
+function isLocalBaseUrl(url: string): boolean {
+  return url.replace(/\/+$/, '') === OLLAMA_DEFAULT_BASE_URL
+}
+
+/** 探测 Ollama /api/tags 是否就绪（1.5s 超时，失败即视为不可达） */
+async function probeOllama(baseUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/api/tags`, {
+      signal: AbortSignal.timeout(OLLAMA_PROBE_TIMEOUT_MS),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 拉起时 env：OLLAMA_MODELS 优先已设值，其次本机模型目录（存在才用），缺省不设走 ollama 默认 */
+function buildOllamaEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  if (!env.OLLAMA_MODELS && existsSync(OLLAMA_MODELS_DIR)) {
+    env.OLLAMA_MODELS = OLLAMA_MODELS_DIR
+  }
+  return env
+}
+
+/** 后台拉起 ollama serve（detached + unref：进程存活，适配器不阻塞；原生 exe 直启，无 shell: true） */
+function startOllama(onError: () => void): void {
+  const child = spawn('ollama', ['serve'], {
+    detached: true,
+    stdio: 'ignore',
+    env: buildOllamaEnv(),
+  })
+  child.on('error', onError)
+  child.unref()
+}
+
+/** 并发去重锁：同一窗口内多个 agent 同时触发时不重复 spawn */
+let ensurePromise: Promise<boolean> | null = null
+
+/**
+ * fetch 失败后的自动拉起保障：探测确认不可达 → 后台拉起 → 每 500ms 轮询最多 10s。
+ * 探测通过（已有实例在跑）→ 直接 true（幂等，不重复 spawn）；命令不存在/拉起失败/超时
+ * → false（调用方抛回原 fetch 错误，静默降级不引入新错误类型）。
+ */
+async function ensureOllamaStarted(baseUrl: string): Promise<boolean> {
+  if (!isLocalBaseUrl(baseUrl)) return false
+  if (ensurePromise) return ensurePromise
+  ensurePromise = (async (): Promise<boolean> => {
+    if (await probeOllama(baseUrl)) return true
+    let spawnFailed = false
+    startOllama(() => {
+      spawnFailed = true
+    })
+    const deadline = Date.now() + OLLAMA_START_WAIT_MS
+    while (Date.now() < deadline && !spawnFailed) {
+      await sleep(OLLAMA_PROBE_INTERVAL_MS)
+      if (spawnFailed) return false
+      if (await probeOllama(baseUrl)) return true
+    }
+    return false
+  })().finally(() => {
+    ensurePromise = null
+  })
+  return ensurePromise
 }
 export class OllamaAdapter implements LLMAdapter {
   readonly provider = 'ollama'
@@ -64,28 +142,54 @@ export class OllamaAdapter implements LLMAdapter {
     const onExternalAbort = () => controller.abort()
     externalSignal?.addEventListener('abort', onExternalAbort)
 
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    /** AbortError → 友好语义（外部取消 vs 内部超时） */
+    const toFriendlyAbortError = (): Error => {
+      if (externalSignal?.aborted) {
+        return new Error('请求被取消')
+      }
+      return new Error(`Ollama API 请求超时 (${timeoutMs / 1000}s)`)
+    }
+
+    /** 发起 /api/chat 请求（超时 timer 由 finally 兜底清理） */
+    const requestChat = async (): Promise<Response> => {
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      try {
+        return await fetch(`${this.baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+      } finally {
+        clearTimeout(timer)
+      }
+    }
 
     let response: Response
     try {
-      response = await fetch(`${this.baseUrl}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      })
+      response = await requestChat()
     } catch (err: any) {
-      clearTimeout(timer)
       externalSignal?.removeEventListener('abort', onExternalAbort)
       if (err.name === 'AbortError') {
-        if (externalSignal?.aborted) {
-          throw new Error('请求被取消')
-        }
-        throw new Error(`Ollama API 请求超时 (${timeoutMs / 1000}s)`)
+        throw toFriendlyAbortError()
       }
-      throw err
+      // 连接层失败（服务未启动）→ 自动拉起 Ollama 后重试一次；拉起失败/非本地地址 → 抛回原错误
+      if (await ensureOllamaStarted(this.baseUrl)) {
+        externalSignal?.addEventListener('abort', onExternalAbort)
+        try {
+          response = await requestChat()
+        } catch (err2: any) {
+          if (err2.name === 'AbortError') {
+            throw toFriendlyAbortError()
+          }
+          throw err2
+        } finally {
+          externalSignal?.removeEventListener('abort', onExternalAbort)
+        }
+      } else {
+        throw err
+      }
     }
-    clearTimeout(timer)
 
     if (!response.ok) {
       externalSignal?.removeEventListener('abort', onExternalAbort)
