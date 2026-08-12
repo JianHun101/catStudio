@@ -264,25 +264,45 @@ describe('OllamaAdapter', () => {
 
   it('forwards external abort to stream phase after auto-start retry', async () => {
     // 重试成功后的流式阶段：外部 abort 必须立即中断（不等 30s chunkTimer）。
-    // 挂起流只在 controller abort 时 reject——若监听器被提前移除（回归），
-    // abort 不转发、read() 永不 resolve，测试会超时失败，能真实捕获回归。
+    // 验证转发链端点：external abort → onExternalAbort → controller.abort()。
+    // 通过 fetch mock 捕获重试请求的内部 signal（retrySignal = chatStream 内部
+    // controller.signal，第二次 /api/chat 的 init.signal），abort 后断言其 abort
+    // 事件已触发——若监听器被提前移除（回归），转发链断裂、controller 不 abort、
+    // retryAborted 保持 false，断言失败。
+    //
+    // 时序设计（三轮回归实验踩坑后的结论，见下）：
+    // 1) Node 的 ReadableStream 在 start 不 enqueue 时，创建后无需 read() 就会
+    //    自动调度 pull——readStarted 信号早于流循环开始，abort 落在重试/轮询阶段、
+    //    被流循环顶部 aborted 检查兜底，测试假绿；
+    // 2) fetch mock 内 resolve 的信号早于 requestChat 的 finally（回归版在此移除
+    //    监听器）——abort 时监听器尚在，转发仍发生，测试假绿。
+    // 因此信号取手工流的 pull（start enqueue 后仅在 read() 调用时调度——实测验证）：
+    // pull 执行时流循环已开始、重试成功后的监听器状态已定，abort 的转发结果真实，
+    // 与微任务顺序/流循环位置解耦，零竞态。
     const externalController = new AbortController()
     const encoder = new TextEncoder()
+    let retrySignal: AbortSignal | null = null
+    let retryAborted = false
     let markReadStarted!: () => void
     const readStarted = new Promise<void>((resolve) => {
       markReadStarted = resolve
     })
 
+    let streamClosed = false
     const stream = new ReadableStream<Uint8Array>({
-      pull(_readCtrl) {
-        markReadStarted() // read() 已进入挂起（流式阶段进行中）
-        return new Promise((_resolve, reject) => {
-          const onAbort = () => {
-            externalController.signal.removeEventListener('abort', onAbort)
-            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
-          }
-          externalController.signal.addEventListener('abort', onAbort)
-        })
+      start(controller) {
+        // 块1：read#1 立即返回（流循环推进）
+        controller.enqueue(encoder.encode('{"message":{"content":"你好"},"done":false}\n'))
+      },
+      pull(controller) {
+        // 仅在 read() 调用时调度（start enqueue 后创建时不会提前调度——实测）：
+        // 流循环已开始、重试成功后监听器状态已定 → readStarted 信号
+        markReadStarted()
+        // 结束流：read#2 返回 done → consumer 有界收尾（不依赖 abort，避免卡测试）
+        if (streamClosed) return
+        streamClosed = true
+        controller.enqueue(encoder.encode('{"done":true}\n'))
+        controller.close()
       },
     })
 
@@ -295,10 +315,14 @@ describe('OllamaAdapter', () => {
 
     let chatCalls = 0
     let tagsCalls = 0
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init: any) => {
       if (String(url).endsWith('/api/chat')) {
         chatCalls++
         if (chatCalls === 1) throw new TypeError('fetch failed')
+        retrySignal = init?.signal ?? null // 第二次 /api/chat 的 signal = 内部 controller.signal
+        retrySignal?.addEventListener('abort', () => {
+          retryAborted = true
+        })
         return retryResponse
       }
       tagsCalls++
@@ -306,21 +330,20 @@ describe('OllamaAdapter', () => {
     })
 
     const adapter = new OllamaAdapter({ model: 'qwen3.5:9b' })
-    const chunks: { content: string; done: boolean }[] = []
     const consumer = (async () => {
       for await (const c of adapter.chatStream([{ role: 'user', content: 'hi' }], {
         model: 'qwen3.5:9b',
         signal: externalController.signal,
       })) {
-        chunks.push(c)
+        void c
       }
     })()
 
-    await readStarted // 确认流式阶段已挂起，再触发外部中断（消除时序竞态）
+    await readStarted // 流循环已开始（重试成功后、监听器状态已定），再触发外部中断
     externalController.abort()
     await consumer
 
-    expect(chunks).toEqual([{ content: '', done: true }])
+    expect(retryAborted).toBe(true) // 外部 abort 已转发到内部 controller（监听器保留到流结束）
     expect(chatCalls).toBe(2) // 失败一次 + 拉起后重试一次
     expect(spawn).toHaveBeenCalledTimes(1)
   })
