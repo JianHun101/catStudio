@@ -59,3 +59,16 @@ describe('AgentEditModal 静态运行配置字段（B2——单 A 契约 llmMaxT
     expect(source).toContain('max="2"')
   })
 })
+
+describe('AgentEditModal opencode provider（店长追加派活——设置界面可直接添加 opencode 猫）', () => {
+  it('providerOptions 含 OpenCode (CLI) 项', () => {
+    expect(source).toContain("{ value: 'opencode', label: 'OpenCode (CLI)' }")
+  })
+
+  it('providerHint 有 opencode case：提示本地认证无需填 key + 模型填 provider/model 格式', () => {
+    expect(source).toContain("case 'opencode':")
+    expect(source).toContain('opencode auth login')
+    expect(source).toContain('本地认证无需填 key')
+    expect(source).toContain('provider/model 格式')
+  })
+})

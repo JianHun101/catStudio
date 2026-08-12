@@ -377,6 +377,15 @@ const newAgentForm = ref({
   llmApiKey: '',
   llmBaseUrl: '',
 })
+/** 创建表单 provider 下拉（与 AgentEditModal.providerOptions 同款六项）——opencode 本地认证 key 可留空 */
+const providerOptions = [
+  { value: 'deepseek', label: 'DeepSeek (HTTP API)' },
+  { value: 'claude', label: 'Claude Code (CLI)' },
+  { value: 'opencode', label: 'OpenCode (CLI)' },
+  { value: 'openai', label: 'Codex (CLI)' },
+  { value: 'pi', label: 'Pi (SDK)' },
+  { value: 'custom', label: '自定义' },
+]
 const createError = ref('')
 const creating = ref(false)
 
@@ -743,11 +752,23 @@ onUnmounted(() => {
             </div>
             <div class="create-body">
               <input v-model="newAgentForm.name" class="input" placeholder="猫咪名字" v-focus />
+              <div class="create-provider-row">
+                <select v-model="newAgentForm.llmProvider" class="input">
+                  <option v-for="p in providerOptions" :key="p.value" :value="p.value">
+                    {{ p.label }}
+                  </option>
+                </select>
+                <input
+                  v-model="newAgentForm.llmModel"
+                  class="input input-mono"
+                  placeholder="模型（如 deepseek-v4-pro）"
+                />
+              </div>
               <input
                 v-model="newAgentForm.llmApiKey"
                 class="input input-mono"
                 type="password"
-                placeholder="API Key (sk-…)"
+                placeholder="API Key (sk-…，OpenCode 本地认证可留空)"
               />
               <textarea
                 v-model="newAgentForm.systemPrompt"
@@ -2397,6 +2418,20 @@ select.input {
 .agent-panel .create-body textarea.input {
   resize: vertical;
   line-height: 1.5;
+}
+
+.agent-panel .create-provider-row {
+  display: flex;
+  gap: 8px;
+}
+
+.agent-panel .create-provider-row select.input {
+  flex: 1;
+  cursor: pointer;
+}
+
+.agent-panel .create-provider-row .input-mono {
+  flex: 1;
 }
 
 .agent-panel .input-mono {

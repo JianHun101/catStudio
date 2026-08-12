@@ -49,6 +49,7 @@ watch(
 const providerOptions = [
   { value: 'deepseek', label: 'DeepSeek (HTTP API)' },
   { value: 'claude', label: 'Claude Code (CLI)' },
+  { value: 'opencode', label: 'OpenCode (CLI)' },
   { value: 'openai', label: 'Codex (CLI)' },
   { value: 'pi', label: 'Pi (SDK)' },
   { value: 'custom', label: '自定义' },
@@ -58,6 +59,8 @@ const providerHint = computed(() => {
   switch (llmProvider.value) {
     case 'claude':
       return '需要安装 Claude Code CLI: npm i -g @anthropic-ai/claude-code。Base URL 留空 = DeepSeek，填 https://api.moonshot.ai/anthropic = Kimi K3'
+    case 'opencode':
+      return '需要安装 opencode CLI 并 opencode auth login；本地认证无需填 key；模型填 provider/model 格式（如 opencode/<模型名>）'
     case 'openai':
       return '需要安装 Codex CLI (npm i -g @openai/codex) 和 codex-proxy'
     case 'pi':

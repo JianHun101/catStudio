@@ -315,6 +315,17 @@ describe('SettingsView 猫咪管理（B2 改静态配置——会话动态信息
     expect(source).toContain('同名猫咪已存在，请换一个名字')
   })
 
+  it('创建表单含 provider 选择器 + 模型输入框（店长追加派活——添加猫一步到位，provider/model 不再写死）', () => {
+    // 创建表单 UI 绑定 newAgentForm.llmProvider/llmModel（提交数据早已有键，只缺 UI）
+    expect(source).toContain('v-model="newAgentForm.llmProvider"')
+    expect(source).toContain('v-model="newAgentForm.llmModel"')
+    expect(source).toContain('v-for="p in providerOptions"')
+    // 下拉含 OpenCode 项（与 AgentEditModal 同款六项）
+    expect(source).toContain("{ value: 'opencode', label: 'OpenCode (CLI)' }")
+    // key 可留空提示（opencode 本地认证）
+    expect(source).toContain('OpenCode 本地认证可留空')
+  })
+
   it('加载/错误/空状态三态渲染', () => {
     expect(source).toContain('store.waitingForServer')
     expect(source).toContain('store.loading')
