@@ -179,12 +179,13 @@ export class OllamaAdapter implements LLMAdapter {
         try {
           response = await requestChat()
         } catch (err2: any) {
+          // 重试也失败 → 移除监听器后抛错；重试成功则监听器保留到流式阶段结束
+          // （与正常路径一致：流式期间外部 abort 立即转发到 controller，不等 30s chunkTimer）
+          externalSignal?.removeEventListener('abort', onExternalAbort)
           if (err2.name === 'AbortError') {
             throw toFriendlyAbortError()
           }
           throw err2
-        } finally {
-          externalSignal?.removeEventListener('abort', onExternalAbort)
         }
       } else {
         throw err

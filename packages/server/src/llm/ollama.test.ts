@@ -236,9 +236,7 @@ describe('OllamaAdapter', () => {
   })
 
   it('does not auto-start for non-local baseUrl', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
-      new TypeError('fetch failed')
-    )
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'))
 
     const adapter = new OllamaAdapter({
       model: 'qwen3.5:9b',
@@ -252,9 +250,9 @@ describe('OllamaAdapter', () => {
   })
 
   it('does not auto-start on timeout abort', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
-      Object.assign(new Error('aborted'), { name: 'AbortError' })
-    )
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(Object.assign(new Error('aborted'), { name: 'AbortError' }))
 
     const adapter = new OllamaAdapter({ model: 'qwen3.5:9b' })
     await expect(
@@ -262,5 +260,68 @@ describe('OllamaAdapter', () => {
     ).rejects.toThrow('Ollama API 请求超时')
     expect(fetchMock).toHaveBeenCalledTimes(1) // abort 不触发拉起
     expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('forwards external abort to stream phase after auto-start retry', async () => {
+    // 重试成功后的流式阶段：外部 abort 必须立即中断（不等 30s chunkTimer）。
+    // 挂起流只在 controller abort 时 reject——若监听器被提前移除（回归），
+    // abort 不转发、read() 永不 resolve，测试会超时失败，能真实捕获回归。
+    const externalController = new AbortController()
+    const encoder = new TextEncoder()
+    let markReadStarted!: () => void
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve
+    })
+
+    const stream = new ReadableStream<Uint8Array>({
+      pull(_readCtrl) {
+        markReadStarted() // read() 已进入挂起（流式阶段进行中）
+        return new Promise((_resolve, reject) => {
+          const onAbort = () => {
+            externalController.signal.removeEventListener('abort', onAbort)
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+          }
+          externalController.signal.addEventListener('abort', onAbort)
+        })
+      },
+    })
+
+    const retryResponse = {
+      ok: true,
+      status: 200,
+      body: stream,
+      headers: new Headers(),
+    } as unknown as Response
+
+    let chatCalls = 0
+    let tagsCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
+      if (String(url).endsWith('/api/chat')) {
+        chatCalls++
+        if (chatCalls === 1) throw new TypeError('fetch failed')
+        return retryResponse
+      }
+      tagsCalls++
+      return { ok: tagsCalls > 1 } as Response // 拉起前探测失败 → 轮询就绪
+    })
+
+    const adapter = new OllamaAdapter({ model: 'qwen3.5:9b' })
+    const chunks: { content: string; done: boolean }[] = []
+    const consumer = (async () => {
+      for await (const c of adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'qwen3.5:9b',
+        signal: externalController.signal,
+      })) {
+        chunks.push(c)
+      }
+    })()
+
+    await readStarted // 确认流式阶段已挂起，再触发外部中断（消除时序竞态）
+    externalController.abort()
+    await consumer
+
+    expect(chunks).toEqual([{ content: '', done: true }])
+    expect(chatCalls).toBe(2) // 失败一次 + 拉起后重试一次
+    expect(spawn).toHaveBeenCalledTimes(1)
   })
 })
