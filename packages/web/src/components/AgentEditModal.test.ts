@@ -70,5 +70,8 @@ describe('AgentEditModal opencode provider（店长追加派活——设置界�
     expect(source).toContain('opencode auth login')
     expect(source).toContain('本地认证无需填 key')
     expect(source).toContain('provider/model 格式')
+    // 示例用真实后端模型名（店长观察项②：opencode/ 前缀不合法，接非 OpenCode Zen 后端会触发 ProviderModelNotFoundError）
+    expect(source).toContain('如 deepseek/deepseek-v4-pro')
+    expect(source).not.toContain('如 opencode/<模型名>')
   })
 })
