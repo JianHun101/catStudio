@@ -880,6 +880,38 @@ describe('socketio connector', () => {
       expect(emitted).toContain(Events.MESSAGE_AGENT_STATUS)
     })
 
+    it('ollama + key 留空 → 不被 no-key 守卫拦截（本地无鉴权，同 opencode 白名单）', async () => {
+      const mod = await import('./socketio.js')
+      const { getAgentState } = await import('../dispatch/index.js')
+
+      vi.mocked(getAgentState).mockReturnValue({
+        agentId: 'agent-1',
+        sessionId: 'session-1',
+        status: 'busy',
+        queueLength: 0,
+        currentTriggerMessageId: 'msg-B',
+      })
+      mockRoomEmit.mockClear()
+      const ollamaCfg = { ...agentCfg, llmProvider: 'ollama', llmApiKey: '' }
+
+      await mod.executeAgentsSerial(
+        mockIo as any,
+        'session-1',
+        [ollamaCfg as any],
+        { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
+        'trace-ollama'
+      )
+
+      // 不产生「还没有配置 API Key」system 提示消息
+      const newMessages = mockRoomEmit.mock.calls.filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
+      expect(
+        newMessages.some((c: any[]) => String(c[1].content).includes('还没有配置 API Key'))
+      ).toBe(false)
+      // 正常进入执行：出现 thinking 状态事件
+      const emitted = mockRoomEmit.mock.calls.map((c: any[]) => c[0])
+      expect(emitted).toContain(Events.MESSAGE_AGENT_STATUS)
+    })
+
     it('deepseek + key 留空 → 仍被 no-key 守卫拦截（发配置提示，不进执行）', async () => {
       const mod = await import('./socketio.js')
       const { getAgentState } = await import('../dispatch/index.js')

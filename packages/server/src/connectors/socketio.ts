@@ -86,7 +86,7 @@ import {
 const log = createLogger('socketio')
 
 /** 不消费 apiKey 的 provider（本地认证，key 留空合法）——no-key 守卫须按 provider 区分 */
-const NO_API_KEY_PROVIDERS = new Set(['opencode'])
+const NO_API_KEY_PROVIDERS = new Set(['opencode', 'ollama'])
 
 /** agent 是否具备可用的 API key：免 key provider 恒 true；否则要求非空且非占位符 */
 function agentHasUsableApiKey(agent: Pick<AgentConfig, 'llmProvider' | 'llmApiKey'>): boolean {
