@@ -231,7 +231,11 @@ export class OpencodeAdapter implements LLMAdapter {
 
 /**
  * 从 opencode CLI 的 NDJSON 输出流中提取文本 Chunk。
- * 格式（run --format json）: {"type":"text","text":"..."} / {"type":"error",...}
+ * 格式（run --format json，1.18.16 实测——文本在 part 嵌套，非顶层）:
+ *   text:  {"type":"text","timestamp":...,"part":{"id":...,"messageID":...,"text":"..."}}
+ *   error: {"type":"error","error":{"data":{"message":"Upstream request failed: [403]..."}}}
+ *   —— 顶层 text 仅存在于其他版本输出（兜底兼容）；error 详情在 error.data.message
+ *   （嵌套两层），非 error.message
  *
  * type === 'text' → 实时产出内容 chunk；type === 'error' → 产出错误 chunk 并终止
  * （错误是终止性事件，后续不再有有效内容）。无法解析的行跳过。
@@ -243,11 +247,20 @@ async function* parseOpencodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
     if (!line.trim()) continue
     try {
       const event = JSON.parse(line)
-      if (event.type === 'text' && typeof event.text === 'string' && event.text) {
-        yield { content: event.text, done: false, kind: 'text' }
+      if (event.type === 'text') {
+        // 1.18.16 实测文本在 event.part.text（顶层无 text 字段）——旧解析直取
+        // event.text 永不命中 → 输出正常但 0 个 yield → hasOutput=false → 空 done
+        // 落库（luna 猫空回复根因，店长四层二分实锤）；顶层 text 兜底兼容其他版本
+        const text = event.part?.text ?? event.text
+        if (typeof text === 'string' && text) {
+          yield { content: text, done: false, kind: 'text' }
+        }
       } else if (event.type === 'error') {
-        // error 事件兼容两种形态：{error:{message}} 嵌套 或 顶层 {message}
-        const msg = event.error?.message || event.message || 'opencode 错误'
+        // error 详情按实测结构层级取（error.data.message 最优先，嵌套两层）：
+        // {error:{data:{message}}}（1.18.16 实测）→ {error:{message}} → 顶层 {message}
+        // 旧解析只取 error.message → 实测结构下取不到 → 永远 fallback「opencode 错误」
+        const msg =
+          event.error?.data?.message ?? event.error?.message ?? event.message ?? 'opencode 错误'
         yield { content: `[错误] ${msg}`, done: false, kind: 'text' }
         return
       }

@@ -117,8 +117,10 @@ describe('OpencodeAdapter', () => {
     const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
       model: 'anthropic/claude-sonnet-4-5',
     })
-    child.stdout.push(JSON.stringify({ type: 'text', text: 'hello ' }) + '\n')
-    child.stdout.push(JSON.stringify({ type: 'text', text: 'world' }) + '\n')
+    // 1.18.16 实测结构：text 事件文本在 part.text（顶层无 text 字段）——
+    // 旧解析直取 event.text 永不命中 → 空 done（luna 猫空回复根因）
+    child.stdout.push(JSON.stringify({ type: 'text', part: { id: 'p1', text: 'hello ' } }) + '\n')
+    child.stdout.push(JSON.stringify({ type: 'text', part: { id: 'p2', text: 'world' } }) + '\n')
     child.stdout.push(JSON.stringify({ type: 'done' }) + '\n')
     child.stdout.push(null)
 
@@ -265,7 +267,9 @@ describe('OpencodeAdapter', () => {
 
   // ─── error 事件 ─────────────────────────────
 
-  it('yields error chunk on error event (nested error.message)', async () => {
+  it('yields error chunk on error event (error.data.message — 1.18.16 实测结构)', async () => {
+    // 实测结构：详情在 error.data.message（嵌套两层）——旧解析只取 error.message
+    // 取不到 → 永远 fallback「opencode 错误」，403 等详情全丢（无代理实测印证）
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -273,12 +277,37 @@ describe('OpencodeAdapter', () => {
     const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
       model: 'anthropic/claude-sonnet-4-5',
     })
-    child.stdout.push(JSON.stringify({ type: 'error', error: { message: 'unknown model' } }) + '\n')
+    child.stdout.push(
+      JSON.stringify({
+        type: 'error',
+        error: { data: { message: 'Upstream request failed: [403] Forbidden' } },
+      }) + '\n'
+    )
     child.stdout.push(null)
 
     const chunks = await collect(gen)
-    expect(chunks[0].content).toContain('unknown model')
+    expect(chunks[0].content).toContain('Upstream request failed: [403] Forbidden')
     expect(chunks.at(-1)?.done).toBe(true)
+  })
+
+  it('falls back to top-level text when part.text is absent (其他版本兼容)', async () => {
+    // 兜底链：part.text 为主（1.18.16 实测），顶层 text 兼容其他版本输出——
+    // 两个字段都缺失时才跳过该行（不 yield 不报错）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(JSON.stringify({ type: 'text', text: 'legacy reply' }) + '\n')
+    child.stdout.push(null)
+
+    const chunks = await collect(gen)
+    expect(chunks).toEqual([
+      { content: 'legacy reply', done: false, kind: 'text' },
+      { content: '', done: true },
+    ])
   })
 
   // ─── abort 转发链（8a64187 教训：断言「abort 确实触发 kill」而非挂起后超时）───
@@ -299,7 +328,7 @@ describe('OpencodeAdapter', () => {
 
       // 第一行 text 事件被消费后 generator 挂起等待下一行——
       // 此时 abort 监听器已挂、流循环已进入，abort 触发 kill 与流时序解耦
-      child.stdout.push(JSON.stringify({ type: 'text', text: 'hi' }) + '\n')
+      child.stdout.push(JSON.stringify({ type: 'text', part: { text: 'hi' } }) + '\n')
       const first = await gen.next()
       expect(first.value).toEqual({ content: 'hi', done: false, kind: 'text' })
 
@@ -466,7 +495,7 @@ describe('OpencodeAdapter', () => {
       maxTokens: 100,
       temperature: 0.5,
     })
-    child.stdout.push(JSON.stringify({ type: 'text', text: 'hi' }) + '\n')
+    child.stdout.push(JSON.stringify({ type: 'text', part: { text: 'hi' } }) + '\n')
     child.stdout.push(null)
 
     const chunks = await collect(gen)
