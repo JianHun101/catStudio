@@ -147,6 +147,7 @@ export function rowToAgent(row: AgentRow): AgentConfig {
     effortLevel: (row.effort_level || undefined) as AgentConfig['effortLevel'],
     llmMaxTokens: row.llm_max_tokens, // 迁移 DEFAULT 2048 回填存量行；透传点据此决定是否传 ChatOptions.maxTokens
     llmTemperature: row.llm_temperature,
+    llmEnvExtra: row.llm_env_extra, // 迁移 DEFAULT '{}' 回填存量行；registry 构造时宽容解析
     // 老库迁移默认 'unknown'（不在 AgentRole 里）——白名单对未知角色放行
     role: (row.role || undefined) as AgentConfig['role'],
   }

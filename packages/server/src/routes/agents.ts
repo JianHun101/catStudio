@@ -113,6 +113,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       effortLevel: 'effort_level',
       llmMaxTokens: 'llm_max_tokens',
       llmTemperature: 'llm_temperature',
+      llmEnvExtra: 'llm_env_extra', // 宽容字符串（JSON 原样落库，registry 消费时解析），无特殊校验
     })) {
       if (body[key] !== undefined) {
         fields.push(`${col} = ?`)
@@ -198,6 +199,7 @@ function toAgentConfig(row: AgentRow) {
     effortLevel: row.effort_level || undefined,
     llmMaxTokens: row.llm_max_tokens, // 迁移 DEFAULT 2048 回填存量行，读侧零 COALESCE
     llmTemperature: row.llm_temperature, // 迁移 DEFAULT 0.7 回填存量行
+    llmEnvExtra: row.llm_env_extra, // 迁移 DEFAULT '{}' 回填存量行；编辑弹窗回填依赖此字段
     role: row.role, // 前端占位符解析（@架构师→store 角色真名）依赖此字段；漏序列化 → 前端永远拿不到角色
   }
 }

@@ -29,6 +29,9 @@ export interface AgentConfig {
   llmMaxTokens?: number
   /** 采样温度（per-agent 静态运行配置；缺省 → 适配器兜底 0.7） */
   llmTemperature?: number
+  /** 额外环境变量（JSON 字符串直存任意 env KV，如 {"HTTPS_PROXY":"http://127.0.0.1:7897"}；
+   *  仅 spawn CLI 的适配器消费，HTTP 适配器忽略——Node fetch 不读代理 env；DB 直存直取零解析） */
+  llmEnvExtra?: string
   role?: AgentRole // 角色——A2A mention 白名单依据；缺失/未知 → 放行不拦截（老库零回归）
 }
 

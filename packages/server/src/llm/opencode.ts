@@ -15,6 +15,8 @@ const log = createLogger('opencode')
 
 interface OpencodeConfig {
   model: string
+  /** 额外环境变量（per-agent 配置，如 HTTPS_PROXY 代理；registry 已宽容解析，此处收对象） */
+  envExtra?: Record<string, string>
 }
 
 /** opencode CLI 二进制路径（模块加载时解析） */
@@ -42,9 +44,11 @@ try {
 export class OpencodeAdapter implements LLMAdapter {
   readonly provider = 'opencode'
   private model: string
+  private envExtra: Record<string, string>
 
   constructor(config: OpencodeConfig) {
     this.model = config.model
+    this.envExtra = config.envExtra ?? {}
   }
 
   async *chatStream(messages: LLMMessage[], options: ChatOptions): AsyncIterable<Chunk> {
@@ -85,6 +89,10 @@ export class OpencodeAdapter implements LLMAdapter {
         input: prompt,
         // cwd 透传会话 worktree 路径（会话隔离）——缺省默认 workspace（存量行为零变化）
         cwd: options.cwd ?? getWorkspaceDir(),
+        // per-agent 额外环境变量（如 HTTPS_PROXY）：显式完整合并传入——
+        // spawnSupervised 内部统一为 {...process.env, ...opts.env}，此处传完整合并
+        // 双保险：即使内部语义未来被误改，注入也不丢 process.env（luna 猫代理场景）
+        env: { ...process.env, ...this.envExtra },
       }
     )
 

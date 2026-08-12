@@ -1,6 +1,76 @@
-import { describe, it, expect } from 'vitest'
-import { messagesToPrompt } from './cli-utils.js'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { messagesToPrompt, spawnSupervised } from './cli-utils.js'
 import type { LLMMessage } from '@cat-study/shared'
+
+// ─── spawnSupervised env 合并测试 ────────────────
+
+const spawnMock = vi.hoisted(() => vi.fn())
+const existsSyncMock = vi.hoisted(() => vi.fn())
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: spawnMock }
+})
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, existsSync: existsSyncMock }
+})
+
+function fakeSpawnedChild() {
+  return {
+    stdin: { end: vi.fn(), write: vi.fn() },
+    stdout: {},
+    stderr: {},
+    on: vi.fn(),
+    kill: vi.fn(),
+    unref: vi.fn(),
+  }
+}
+
+describe('spawnSupervised env 合并（per-agent 注入正确性前提）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    spawnMock.mockReturnValue(fakeSpawnedChild())
+  })
+
+  it('直接 spawn 分支：opts.env 覆盖 process.env，且 process.env 键全保留', () => {
+    // 旧实现 env: opts.env——传部分 env 会整个丢 process.env（PATH 丢失 → CLI 起不来）
+    existsSyncMock.mockReturnValue(false) // supervisor 脚本缺失 → 直接 spawn 分支
+
+    spawnSupervised('opencode', ['run', '--format', 'json'], {
+      label: 'test',
+      env: { HTTPS_PROXY: 'http://127.0.0.1:7897' },
+    })
+
+    const receivedEnv = spawnMock.mock.calls.at(-1)![2].env as Record<string, string>
+    expect(receivedEnv.HTTPS_PROXY).toBe('http://127.0.0.1:7897') // opts.env 生效
+    expect(receivedEnv.PATH).toBe(process.env.PATH) // process.env 键保留（不丢）
+  })
+
+  it('supervisor 分支：opts.env 覆盖 process.env（不被反向覆盖），并带父 PID 标记', () => {
+    // 旧实现 {...opts.env, ...process.env} 顺序颠倒——opts.env 的注入值会被 process.env
+    // 同键覆盖（若 server 恰好也有该键），注入静默失效
+    existsSyncMock.mockReturnValue(true) // supervisor 脚本存在 → supervisor 分支
+
+    spawnSupervised('opencode', ['run'], {
+      label: 'test',
+      env: { HTTPS_PROXY: 'http://127.0.0.1:7897' },
+    })
+
+    const receivedEnv = spawnMock.mock.calls.at(-1)![2].env as Record<string, string>
+    expect(receivedEnv.HTTPS_PROXY).toBe('http://127.0.0.1:7897') // opts.env 不被 process.env 覆盖
+    expect(receivedEnv.PATH).toBe(process.env.PATH) // process.env 键保留
+    expect(receivedEnv.CATSTUDY_SUPERVISOR_PARENT_PID).toBe(String(process.pid))
+  })
+
+  it('不传 env 时等价于 process.env（undefined 展开零副作用）', () => {
+    existsSyncMock.mockReturnValue(false)
+    spawnSupervised('opencode', ['run'], { label: 'test' })
+
+    const receivedEnv = spawnMock.mock.calls.at(-1)![2].env as Record<string, string>
+    expect(receivedEnv.PATH).toBe(process.env.PATH)
+  })
+})
 
 // ─── messagesToPrompt ─────────────────────────────
 
@@ -10,23 +80,17 @@ describe('messagesToPrompt', () => {
   })
 
   it('formats a system message', () => {
-    const messages: LLMMessage[] = [
-      { role: 'system', content: '你是一只暹罗猫' },
-    ]
+    const messages: LLMMessage[] = [{ role: 'system', content: '你是一只暹罗猫' }]
     expect(messagesToPrompt(messages)).toBe('你是一只暹罗猫\n\n---\n')
   })
 
   it('formats a user message', () => {
-    const messages: LLMMessage[] = [
-      { role: 'user', content: '你好' },
-    ]
+    const messages: LLMMessage[] = [{ role: 'user', content: '你好' }]
     expect(messagesToPrompt(messages)).toBe('User: 你好')
   })
 
   it('formats an assistant message', () => {
-    const messages: LLMMessage[] = [
-      { role: 'assistant', content: '你好喵~' },
-    ]
+    const messages: LLMMessage[] = [{ role: 'assistant', content: '你好喵~' }]
     expect(messagesToPrompt(messages)).toBe('Assistant: 你好喵~')
   })
 
@@ -37,22 +101,16 @@ describe('messagesToPrompt', () => {
       { role: 'assistant', content: '阳光很好喵' },
     ]
     const result = messagesToPrompt(messages)
-    expect(result).toBe(
-      '你是一只猫\n\n---\n\n\nUser: 今天天气？\n\nAssistant: 阳光很好喵',
-    )
+    expect(result).toBe('你是一只猫\n\n---\n\n\nUser: 今天天气？\n\nAssistant: 阳光很好喵')
   })
 
   it('handles multi-line content', () => {
-    const messages: LLMMessage[] = [
-      { role: 'user', content: '第一行\n第二行' },
-    ]
+    const messages: LLMMessage[] = [{ role: 'user', content: '第一行\n第二行' }]
     expect(messagesToPrompt(messages)).toBe('User: 第一行\n第二行')
   })
 
   it('handles system message without content', () => {
-    const messages: LLMMessage[] = [
-      { role: 'system', content: '' },
-    ]
+    const messages: LLMMessage[] = [{ role: 'system', content: '' }]
     expect(messagesToPrompt(messages)).toBe('\n\n---\n')
   })
 })

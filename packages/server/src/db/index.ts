@@ -241,6 +241,13 @@ export function initDb(): void {
       name: 'llm_temperature on agents',
       sql: `ALTER TABLE agents ADD COLUMN llm_temperature REAL NOT NULL DEFAULT 0.7`,
     },
+    {
+      name: 'llm_env_extra on agents',
+      // 额外环境变量（per-agent 静态运行配置）：JSON 字符串直存任意 env KV
+      // （skill_modules 同款惯例）；加列带 DEFAULT '{}' 自动回填存量行——旧 agent
+      // 升级零注入（无 envExtra），读侧零 COALESCE。seed upsert 不覆盖（运行配置）
+      sql: `ALTER TABLE agents ADD COLUMN llm_env_extra TEXT NOT NULL DEFAULT '{}'`,
+    },
     // W3 L3 审查结论契约表（additive：CREATE TABLE IF NOT EXISTS 幂等，
     // 老库重跑零副作用；新表不依赖老列，无 ALTER 依赖）
     {

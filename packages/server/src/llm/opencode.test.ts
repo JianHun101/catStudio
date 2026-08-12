@@ -186,6 +186,47 @@ describe('OpencodeAdapter', () => {
     expect(opts.cwd).toBe('D:/catStudy-sessions/wt-abc')
   })
 
+  it('injects envExtra into spawn env and keeps process.env keys (per-agent proxy)', async () => {
+    // luna 猫代理场景：构造 envExtra 后 spawn 收到完整合并 env——注入变量在场 +
+    // process.env 其他键（PATH 等）不被丢弃（spawn 传部分 env 会丢整个 process.env）
+    const adapter = new OpencodeAdapter({
+      model: 'anthropic/claude-sonnet-4-5',
+      envExtra: { HTTPS_PROXY: 'http://127.0.0.1:7897', NO_PROXY: 'localhost,127.0.0.1' },
+    })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+      env?: Record<string, string>
+    }
+    expect(opts.env).toBeDefined()
+    expect(opts.env!.HTTPS_PROXY).toBe('http://127.0.0.1:7897')
+    expect(opts.env!.NO_PROXY).toBe('localhost,127.0.0.1')
+    // process.env 保留（PATH 是 Windows 子进程存活必需品）
+    expect(opts.env!.PATH).toBe(process.env.PATH)
+    // 未配置 envExtra 的构造器 → spawn env 不含注入变量（存量行为）
+    const plain = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const gen2 = plain.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    const child2 = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child2 as any)
+    child2.stdout.push(null)
+    await collect(gen2)
+    const opts2 = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+      env?: Record<string, string>
+    }
+    expect(opts2.env).toBeDefined()
+    expect(opts2.env!.HTTPS_PROXY).toBeUndefined()
+    expect(opts2.env!.PATH).toBe(process.env.PATH)
+  })
+
   // ─── error 事件 ─────────────────────────────
 
   it('yields error chunk on error event (nested error.message)', async () => {

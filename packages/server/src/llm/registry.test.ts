@@ -26,7 +26,7 @@ class MockOpenAIAdapter {
 class MockOpencodeAdapter {
   readonly provider = 'opencode'
   chatStream = mockChatStream
-  constructor(_opts: unknown) {}
+  constructor(public opts: { model?: string; envExtra?: Record<string, string> }) {}
 }
 
 vi.mock('./deepseek.js', () => ({ DeepSeekAdapter: MockDeepSeekAdapter }))
@@ -157,6 +157,59 @@ describe('registry', () => {
       const a1 = registryModule.getAdapterForAgent(m1)
       const a2 = registryModule.getAdapterForAgent(m2)
       expect(a1).toBe(a2)
+    })
+
+    it('returns different instance for different envExtra (opencode, same model)', () => {
+      // 同 model 不同代理 env 必须不同实例——否则共享实例的 envExtra 固定，
+      // 第二只猫跑第一只猫的代理（48a0415 串台教训同族：缓存键必须纳入 envExtra 原串）
+      const proxy1 = {
+        ...baseAgent,
+        llmProvider: 'opencode',
+        llmModel: 'anthropic/claude-sonnet-4-5',
+        llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:7897"}',
+      }
+      const proxy2 = {
+        ...proxy1,
+        llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:8080"}',
+      }
+      const a1 = registryModule.getAdapterForAgent(proxy1)
+      const a2 = registryModule.getAdapterForAgent(proxy2)
+      expect(a1).not.toBe(a2)
+    })
+
+    it('returns same instance for same envExtra (opencode)', () => {
+      const e1 = {
+        ...baseAgent,
+        llmProvider: 'opencode',
+        llmModel: 'anthropic/claude-sonnet-4-5',
+        llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:7897"}',
+      }
+      const e2 = { ...e1 } // 同 model 同 envExtra 原串 → 同实例
+      const a1 = registryModule.getAdapterForAgent(e1)
+      const a2 = registryModule.getAdapterForAgent(e2)
+      expect(a1).toBe(a2)
+    })
+
+    it('passes parsed envExtra to OpencodeAdapter constructor (宽容：非法 JSON → 空对象不炸)', () => {
+      const agent = {
+        ...baseAgent,
+        llmProvider: 'opencode',
+        llmModel: 'anthropic/claude-sonnet-4-5',
+        llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:7897"}',
+      }
+      const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockOpencodeAdapter
+      expect(adapter.opts.envExtra).toEqual({ HTTPS_PROXY: 'http://127.0.0.1:7897' })
+
+      // 非法 JSON → 宽容降级空对象（不抛错），构造正常
+      const bad = {
+        ...baseAgent,
+        llmProvider: 'opencode',
+        llmModel: 'anthropic/claude-sonnet-4-5',
+        llmEnvExtra: 'not-json{{',
+      }
+      expect(() => registryModule.getAdapterForAgent(bad)).not.toThrow()
+      const badAdapter = registryModule.getAdapterForAgent(bad) as unknown as MockOpencodeAdapter
+      expect(badAdapter.opts.envExtra).toEqual({})
     })
 
     it('returns different instance for different provider', () => {

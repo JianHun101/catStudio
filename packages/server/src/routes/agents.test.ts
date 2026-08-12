@@ -239,6 +239,28 @@ describe('Agent Routes', () => {
       expect(JSON.parse(get.body).llmMaxTokens).toBe(8192)
     })
 
+    it('updates llmEnvExtra (JSON 原样落库 + 回读)', async () => {
+      const create = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
+      const { id } = JSON.parse(create.body)
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/agents/${id}`,
+        payload: {
+          llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:7897","NO_PROXY":"localhost,127.0.0.1"}',
+        },
+      })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.llmEnvExtra).toBe(
+        '{"HTTPS_PROXY":"http://127.0.0.1:7897","NO_PROXY":"localhost,127.0.0.1"}'
+      )
+
+      // GET 回读一致（宽容字符串原样，不解析不校验）
+      const get = await app.inject({ method: 'GET', url: `/api/agents/${id}` })
+      expect(JSON.parse(get.body).llmEnvExtra).toContain('HTTPS_PROXY')
+    })
+
     it.each([
       ['llmMaxTokens 为 0', { llmMaxTokens: 0 }],
       ['llmMaxTokens 为小数', { llmMaxTokens: 2.5 }],

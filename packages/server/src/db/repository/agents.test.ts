@@ -204,3 +204,62 @@ describe('llm_max_tokens / llm_temperature 列默认回填', () => {
     expect(row.llm_temperature).toBe(1.2)
   })
 })
+
+describe('llm_env_extra 列默认回填（per-agent 额外环境变量）', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  it('迁移前存量行（INSERT 不带该列）→ 读回 {}（DEFAULT 回填，读侧零 COALESCE）', () => {
+    getDb()
+      .prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run('agent-legacy-env', '老猫', '🐱', 'prompt', 'opencode', 'openai/gpt-5', '')
+
+    const row = agentsRepo.getAgentById('agent-legacy-env')!
+    expect(row.llm_env_extra).toBe('{}')
+  })
+
+  it('insertAgent 不带新参数 → 落库 {}（repository 兜底，与 DB DEFAULT 对齐）', () => {
+    agentsRepo.insertAgent(
+      'agent-new-env',
+      '新猫',
+      '🐱',
+      'prompt',
+      'opencode',
+      'openai/gpt-5',
+      '',
+      null,
+      'high'
+    )
+    const row = agentsRepo.getAgentById('agent-new-env')!
+    expect(row.llm_env_extra).toBe('{}')
+  })
+
+  it('insertAgent 带显式 envExtra → 落库一致', () => {
+    agentsRepo.insertAgent(
+      'agent-cfg-env',
+      '配置猫',
+      '🐱',
+      'prompt',
+      'opencode',
+      'openai/gpt-5',
+      '',
+      null,
+      'high',
+      null,
+      null,
+      null,
+      '{"HTTPS_PROXY":"http://127.0.0.1:7897"}'
+    )
+    const row = agentsRepo.getAgentById('agent-cfg-env')!
+    expect(row.llm_env_extra).toBe('{"HTTPS_PROXY":"http://127.0.0.1:7897"}')
+  })
+})

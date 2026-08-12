@@ -23,6 +23,8 @@ export interface AgentRow {
   llm_max_tokens: number
   /** 采样温度（per-agent 静态运行配置；迁移 DEFAULT 0.7 回填存量行） */
   llm_temperature: number
+  /** 额外环境变量（per-agent 静态运行配置；JSON 字符串，迁移 DEFAULT '{}' 回填存量行） */
+  llm_env_extra: string
   skill_modules: string
   role: string
   created_at: string

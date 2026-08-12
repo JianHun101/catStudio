@@ -22,6 +22,7 @@ const SCHEMA_SQL = `
     effort_level TEXT NOT NULL DEFAULT 'high',
     llm_max_tokens INTEGER NOT NULL DEFAULT 2048,
     llm_temperature REAL NOT NULL DEFAULT 0.7,
+    llm_env_extra TEXT NOT NULL DEFAULT '{}',
     skill_modules TEXT NOT NULL DEFAULT '[]',
     role TEXT NOT NULL DEFAULT 'unknown',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

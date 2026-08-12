@@ -350,12 +350,22 @@ const SUPERVISOR_PATH = path.join(
 export function spawnSupervised(
   bin: string,
   args: string[],
-  opts: { env?: Record<string, string>; label: string; cwd?: string; input?: string }
+  opts: {
+    env?: Record<string, string | undefined>
+    label: string
+    cwd?: string
+    input?: string
+  }
 ): ChildProcess {
   const spawnOpts = {
     stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
     shell: false,
-    env: opts.env,
+    // env 合并语义统一：opts.env 覆盖 process.env（per-agent 注入变量优先）。
+    // 不能只传 opts.env——spawn 的 env 语义是「传了就全用传的」，部分 env 会整个
+    // 丢 process.env（PATH 丢失 → CLI 子进程找不到可执行文件）；supervisor 分支
+    // 旧代码 {...opts.env, ...process.env} 顺序颠倒（opts.env 被 process.env 覆盖，
+    // 注入变量失效）——两分支在此统一（luna 猫 HTTPS_PROXY 注入的正确性前提）
+    env: { ...process.env, ...opts.env },
     cwd: opts.cwd,
   }
 
@@ -368,8 +378,7 @@ export function spawnSupervised(
     child = spawn(process.execPath, [SUPERVISOR_PATH, '--', bin, ...args], {
       ...spawnOpts,
       env: {
-        ...opts.env,
-        ...process.env,
+        ...spawnOpts.env,
         CATSTUDY_SUPERVISOR_PARENT_PID: String(process.pid),
       },
     })

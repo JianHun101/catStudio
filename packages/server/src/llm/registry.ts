@@ -6,8 +6,30 @@ import { PiAdapter } from './pi.js'
 import { OllamaAdapter } from './ollama.js'
 import { OpencodeAdapter } from './opencode.js'
 import type { AgentConfig } from '@cat-study/shared'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('registry')
 
 const adapters = new Map<string, LLMAdapter>()
+
+/**
+ * 宽容解析 agent.llmEnvExtra（JSON 字符串）→ env KV 对象。
+ * 非法 JSON → 空对象 + warn（不炸）：编辑界面存的是合法 JSON，但 DB 直改
+ * 可能非法；宽容降级让该猫走无注入路径，而不是适配器构造直接抛错。
+ */
+function parseEnvExtra(raw: string | undefined): Record<string, string> {
+  if (!raw || raw.trim() === '{}') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, string>
+    }
+    throw new Error('not an object')
+  } catch (err: any) {
+    log.warn('llmEnvExtra 非法 JSON，降级为空对象', { raw: raw.slice(0, 200), error: err.message })
+    return {}
+  }
+}
 
 /**
  * 为 Agent 获取或创建 LLM 适配器实例。
@@ -16,15 +38,16 @@ const adapters = new Map<string, LLMAdapter>()
 export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
   // claude/deepseek 的 key 可指向不同端点（DeepSeek 官方 vs Moonshot）——同一 key 下
   // 不同 baseUrl 必须不同实例，否则缓存串台（K5 变更单：kimi judge 改走 deepseek provider）
-  // opencode 的 apiKey 恒不消费（本地认证）——model 是实例间唯一区分维度，缓存键纳入
-  // model，否则不同 model 的 opencode 猫共享实例（构造 model 固定 → 串台，吐槽猫审查发现）
+  // opencode 的 apiKey 恒不消费（本地认证）——model 与 envExtra 是实例间区分维度，缓存键
+  // 均纳入：不同 model 的猫共享实例会串台（吐槽猫审查发现），同 model 不同代理 env 的猫
+  // 共享实例同样串台（48a0415 同族教训——envExtra 原串比较，天然区分）
   const cacheKey =
     agent.llmProvider === 'claude'
       ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}:${agent.llmBaseUrl || ''}`
       : agent.llmProvider === 'deepseek'
         ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmBaseUrl || ''}`
         : agent.llmProvider === 'opencode'
-          ? `${agent.llmProvider}:${agent.llmModel || ''}`
+          ? `${agent.llmProvider}:${agent.llmModel || ''}:${agent.llmEnvExtra || ''}`
           : `${agent.llmProvider}:${agent.llmApiKey}`
 
   if (adapters.has(cacheKey)) {
@@ -70,6 +93,7 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
     case 'opencode':
       adapter = new OpencodeAdapter({
         model: agent.llmModel,
+        envExtra: parseEnvExtra(agent.llmEnvExtra),
       })
       break
     default:
