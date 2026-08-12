@@ -4,6 +4,7 @@ import { ClaudeAdapter } from './claude.js'
 import { OpenAIAdapter } from './openai.js'
 import { PiAdapter } from './pi.js'
 import { OllamaAdapter } from './ollama.js'
+import { OpencodeAdapter } from './opencode.js'
 import type { AgentConfig } from '@cat-study/shared'
 
 const adapters = new Map<string, LLMAdapter>()
@@ -60,6 +61,11 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       adapter = new OllamaAdapter({
         model: agent.llmModel,
         baseUrl: agent.llmBaseUrl,
+      })
+      break
+    case 'opencode':
+      adapter = new OpencodeAdapter({
+        model: agent.llmModel,
       })
       break
     default:

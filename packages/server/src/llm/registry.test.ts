@@ -23,9 +23,16 @@ class MockOpenAIAdapter {
   constructor(_opts: unknown) {}
 }
 
+class MockOpencodeAdapter {
+  readonly provider = 'opencode'
+  chatStream = mockChatStream
+  constructor(_opts: unknown) {}
+}
+
 vi.mock('./deepseek.js', () => ({ DeepSeekAdapter: MockDeepSeekAdapter }))
 vi.mock('./claude.js', () => ({ ClaudeAdapter: MockClaudeAdapter }))
 vi.mock('./openai.js', () => ({ OpenAIAdapter: MockOpenAIAdapter }))
+vi.mock('./opencode.js', () => ({ OpencodeAdapter: MockOpencodeAdapter }))
 
 describe('registry', () => {
   let registryModule: typeof import('./registry.js')
@@ -64,6 +71,12 @@ describe('registry', () => {
       const agent = { ...baseAgent, llmProvider: 'openai' }
       const adapter = registryModule.getAdapterForAgent(agent)
       expect(adapter.provider).toBe('openai')
+    })
+
+    it('returns Opencode adapter for opencode provider', () => {
+      const agent = { ...baseAgent, llmProvider: 'opencode' }
+      const adapter = registryModule.getAdapterForAgent(agent)
+      expect(adapter.provider).toBe('opencode')
     })
 
     it('throws for unsupported provider', () => {
