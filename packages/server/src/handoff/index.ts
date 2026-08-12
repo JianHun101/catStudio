@@ -125,10 +125,25 @@ export function resolveHandoffTarget(sessionId: string): HandoffTarget | null {
 }
 
 /**
+ * 计算交接后新会话的标题（编号递增，替代旧「（续）」追加——避免标题无限变长被左侧栏省略）。
+ *
+ * - 先剥掉历史遗留的尾部「（续）」链（存量脏标题收敛：xxx（续）（续）→ xxx）
+ * - 结尾是全角编号（N）→ 递增为（N+1）
+ * - 否则追加（1）
+ * - 半角括号 (N) 结尾不递增——那是用户自拟命名，不碰
+ */
+export function nextHandoffTitle(title: string): string {
+  const stripped = title.replace(/(（续）)+$/, '')
+  const numbered = stripped.match(/^(.*)（(\d+)）$/)
+  if (numbered) return `${numbered[1]}（${Number(numbered[2]) + 1}）`
+  return `${stripped}（1）`
+}
+
+/**
  * 执行会话交接。
  *
  * 1. 生成全量总结
- * 2. 创建新会话（标题加"（续）"，继承原会话的 agents 和 broadcast 设置）
+ * 2. 创建新会话（标题按 nextHandoffTitle 编号递增，如（1）（2），继承原会话的 agents 和 broadcast 设置）
  * 3. 通知前端
  *
  * @returns 交接结果，失败返回 null
@@ -178,7 +193,7 @@ export async function performHandoff(
 
     // 4. 创建新会话
     const newSessionId = uuid()
-    const newTitle = `${oldSession.title}（续）`
+    const newTitle = nextHandoffTitle(oldSession.title)
     const oldAgentIds = JSON.parse(oldSession.agent_ids || '[]') as string[]
 
     sessionsRepo.insertSession(

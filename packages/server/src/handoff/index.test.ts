@@ -4,6 +4,7 @@ import { Events } from '@cat-study/shared'
 import {
   shouldHandoff,
   injectSummaryIntoSystem,
+  nextHandoffTitle,
   performHandoff,
   resolveHandoffTarget,
 } from './index.js'
@@ -76,6 +77,35 @@ describe('handoff', () => {
       expect(shouldHandoff(115200)).toBe(true)
       // 差 1 token 不应触发
       expect(shouldHandoff(115199)).toBe(false)
+    })
+  })
+
+  describe('nextHandoffTitle', () => {
+    it('普通标题追加（1）', () => {
+      expect(nextHandoffTitle('猫咖日常')).toBe('猫咖日常（1）')
+    })
+
+    it('结尾全角编号递增', () => {
+      expect(nextHandoffTitle('猫咖日常（1）')).toBe('猫咖日常（2）')
+      expect(nextHandoffTitle('猫咖日常（3）')).toBe('猫咖日常（4）')
+    })
+
+    it('存量「（续）」脏标题收敛为（1）', () => {
+      expect(nextHandoffTitle('猫咖日常（续）')).toBe('猫咖日常（1）')
+      expect(nextHandoffTitle('猫咖日常（续）（续）')).toBe('猫咖日常（1）')
+    })
+
+    it('脏标题 + 编号混合：先剥「（续）」再递增', () => {
+      expect(nextHandoffTitle('猫咖日常（1）（续）')).toBe('猫咖日常（2）')
+    })
+
+    it('半角括号编号不递增（用户自拟命名不碰）', () => {
+      expect(nextHandoffTitle('猫咖日常(1)')).toBe('猫咖日常(1)（1）')
+    })
+
+    it('空标题 / 纯「（续）」不炸、输出可预期', () => {
+      expect(nextHandoffTitle('')).toBe('（1）')
+      expect(nextHandoffTitle('（续）')).toBe('（1）')
     })
   })
 
