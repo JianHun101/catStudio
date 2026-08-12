@@ -70,7 +70,7 @@ export class OpencodeAdapter implements LLMAdapter {
 
     const prompt = messagesToPrompt(messages)
 
-    log.info('启动 opencode CLI', { model: this.model, promptLen: prompt.length })
+    log.info('启动 opencode CLI', { model: options.model || this.model, promptLen: prompt.length })
 
     // run --format json 非交互流式（NDJSON 事件流）；-q 静默（抑制耗时等噪音）；
     // -m <model> 用 provider/model 格式（如 anthropic/claude-sonnet-4-5）。
@@ -92,7 +92,7 @@ export class OpencodeAdapter implements LLMAdapter {
     const GRACE_MS = 5000
     const onAbort = () => {
       if (!child.killed && child.exitCode === null) {
-        log.warn('收到取消信号，发送 SIGTERM', { model: this.model })
+        log.warn('收到取消信号，发送 SIGTERM', { model: options.model || this.model })
         child.kill('SIGTERM')
         setTimeout(() => {
           if (!child.killed && child.exitCode === null) {

@@ -44,6 +44,11 @@ export class PiAdapter implements LLMAdapter {
   async *chatStream(messages: LLMMessage[], options: ChatOptions): AsyncIterable<Chunk> {
     const signal = options.signal
 
+    // pi 通过 ~/.pi 配置控制 maxTokens/temperature，ChatOptions 中的对应字段会被忽略
+    if (options.maxTokens !== undefined || options.temperature !== undefined) {
+      log.warn('ChatOptions.maxTokens/temperature 被 pi 适配器忽略，请通过 ~/.pi 配置调整')
+    }
+
     if (signal?.aborted) {
       yield { content: '', done: true }
       return

@@ -11,13 +11,16 @@ vi.mock('./cli-utils.js', () => ({
   getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
 }))
 
+// Logger mock：log 对象用 vi.hoisted 共享——测试用例需断言 log.info 调用参数（日志口径用例）
+const logMocks = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}))
+
 // Mock logger
 vi.mock('../logger.js', () => ({
-  createLogger: vi.fn(() => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  })),
+  createLogger: () => logMocks,
 }))
 
 import { OpencodeAdapter } from './opencode.js'
@@ -146,6 +149,25 @@ describe('OpencodeAdapter', () => {
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
     expect(args).toEqual(['run', '--format', 'json', '-q', '-m', 'openai/gpt-5'])
+  })
+
+  it('logs effective model (options.model || this.model) when options override constructor', async () => {
+    // 店长观察项①：启动日志与 abort 日志记生效 model（与 spawn 参数同值），
+    // 排查时日志不再误导为构造 model（缓存键按 model 隔离后实例与 model 一一对应）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'openai/gpt-5',
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    expect(logMocks.info).toHaveBeenCalledWith(
+      '启动 opencode CLI',
+      expect.objectContaining({ model: 'openai/gpt-5' })
+    )
   })
 
   it('passes cwd through to spawnSupervised (session worktree)', async () => {

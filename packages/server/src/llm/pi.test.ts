@@ -2,6 +2,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { PiAdapter } from './pi.js'
 import type { LLMMessage } from '@cat-study/shared'
 
+// ─── Mock logger ────────────────────────────────────────────────
+// log 对象用 vi.hoisted 共享——测试用例需断言 log.warn 调用（maxTokens/temperature 忽略提示）
+const logMocks = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}))
+
+vi.mock('../logger.js', () => ({
+  createLogger: () => logMocks,
+}))
+
 // ─── Mock pi SDK ───────────────────────────────────────────────
 
 // 模块级状态：让 mock 函数和测试用例共享引用
@@ -166,6 +178,19 @@ describe('PiAdapter', () => {
     const { session } = (await vi.mocked(piModule.createAgentSession).mock.results[0]!.value) as any
     const promptArg = session.prompt.mock.calls[0][0] as string
     expect(promptArg).toContain('你好世界')
+  })
+
+  // ── maxTokens/temperature 忽略 ───────────────────────────
+
+  it('maxTokens/temperature 被忽略时 log.warn 提示（判据与 claude.ts 同款：实际是否消费）', async () => {
+    await drain(
+      createAdapter().chatStream(makeMessages(), {
+        model: 'deepseek-chat',
+        maxTokens: 100,
+        temperature: 0.5,
+      })
+    )
+    expect(logMocks.warn).toHaveBeenCalledWith(expect.stringContaining('被 pi 适配器忽略'))
   })
 
   // ── 错误处理 ────────────────────────────────────────────
