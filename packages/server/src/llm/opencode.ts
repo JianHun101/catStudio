@@ -141,6 +141,10 @@ export class OpencodeAdapter implements LLMAdapter {
     // （tokens.reasoning>0 但事件流只有 step_start/text/step_finish 三行，
     // gpt-5.6-luna 鸡兔同笼问题对照实测）；加了才输出 reasoning 事件。
     // -f <file> 图片透传（每张一个 -f）：实测视觉模型正确识别图片内容。
+    // 参数序关键：-f 必须排在 prompt 之后——opencode 的 -f 是贪婪选项，
+    // `-f <file> <prompt>` 会把 prompt 也吞成第二个文件路径 → File not found:
+    // <prompt 全文> → exit 1「启动失败」（带图 @luna猫 实测三组对照：-f 在前
+    // exit 1 与 server 日志一字不差、prompt 在前 exit 0 正常流式且视觉识别正确）
     // prompt 以 positional message 尾部追加（run [message..]）——opencode 1.18.16
     // 的 help 没有任何 stdin 选项，stdin 方式实测空转 exit 0 无输出（luna 猫
     // 「无法启动」三层证据链根因；claude.ts 的 -p - 思维惯性不适用于 opencode）。
@@ -164,8 +168,8 @@ export class OpencodeAdapter implements LLMAdapter {
         '--thinking',
         '-m',
         options.model || this.model,
-        ...fileArgs,
         promptArg,
+        ...fileArgs,
       ],
       {
         label: 'opencode',

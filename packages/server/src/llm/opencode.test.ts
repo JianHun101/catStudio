@@ -381,8 +381,9 @@ describe('OpencodeAdapter', () => {
       expect(spawnArgs[fIdx + 1]).toMatch(/opencode-img-.*\.png$/)
       expect(spawnArgs[fIdx + 2]).toBe('-f')
       expect(spawnArgs[fIdx + 3]).toMatch(/opencode-img-.*\.jpg$/)
-      // prompt 仍为尾部 positional（-f 只插在 -m 之后）
-      expect(spawnArgs.at(-1)).toBe('User: hello\n\nAssistant: hi')
+      // prompt 在 -f 之前——opencode 的 -f 是贪婪选项，-f <file> <prompt> 会把
+      // prompt 吞成文件路径 → File not found → exit 1「启动失败」（实测三组对照）
+      expect(spawnArgs[fIdx - 1]).toBe('User: hello\n\nAssistant: hi')
       // 落盘内容 = base64 解码后的字节（dataURL 前缀已剥离）
       expect(readFileSync(spawnArgs[fIdx + 1]).toString()).toBe('hello')
       expect(readFileSync(spawnArgs[fIdx + 3]).toString()).toBe('world')
@@ -403,6 +404,38 @@ describe('OpencodeAdapter', () => {
     )
     child.stdout.push(null)
     await collect(gen)
+  })
+
+  it('places prompt before -f when images present (防 -f 贪婪吞 positional，序列断言)', async () => {
+    // 参数序回归点：prompt 必须在所有 -f 之前——旧序（-f 在 prompt 前）下 opencode
+    // 的 -f 贪婪吞掉后续 positional prompt 当文件路径 → File not found: <prompt>
+    // → exit 1「启动失败」（带图 @luna猫 server 日志 00:37:09 实测根因）；
+    // 本用例按序列断言，还原旧序即快速失败（回归实验的抓手）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream(
+      [
+        { role: 'user', content: '看这张图' },
+        {
+          role: 'user',
+          content: '图里是什么',
+          images: ['data:image/png;base64,aGVsbG8='],
+        },
+      ],
+      { model: 'anthropic/claude-sonnet-4-5' }
+    )
+    child.stdout.push(null)
+    await collect(gen)
+
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    const fIdx = args.indexOf('-f')
+    const promptIdx = args.indexOf('User: hello\n\nAssistant: hi')
+    // 序列断言：prompt 在场且排在 -f 之前（旧序下 promptIdx > fIdx → 断言失败）
+    expect(promptIdx).toBeGreaterThan(-1)
+    expect(fIdx).toBeGreaterThan(-1)
+    expect(promptIdx).toBeLessThan(fIdx)
   })
 
   it('cleans up image temp dir after stream (finally rm)', async () => {
