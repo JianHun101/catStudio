@@ -141,6 +141,24 @@ describe('registry', () => {
       expect(adapter.opts.effortLevel).toBe('max')
     })
 
+    it('returns different instance for different model (opencode, apiKey always empty)', () => {
+      // opencode 的 apiKey 恒不消费（本地认证）→ 缓存键若不含 model，不同 model 的猫
+      // 共享同一实例（构造 model 固定 → 串台）。缓存键 = opencode:<model>，此用例锁住。
+      const m1 = { ...baseAgent, llmProvider: 'opencode', llmModel: 'anthropic/claude-sonnet-4-5' }
+      const m2 = { ...baseAgent, llmProvider: 'opencode', llmModel: 'openai/gpt-5' }
+      const a1 = registryModule.getAdapterForAgent(m1)
+      const a2 = registryModule.getAdapterForAgent(m2)
+      expect(a1).not.toBe(a2)
+    })
+
+    it('returns same instance for same model (opencode)', () => {
+      const m1 = { ...baseAgent, llmProvider: 'opencode', llmModel: 'anthropic/claude-sonnet-4-5' }
+      const m2 = { ...m1, llmApiKey: 'sk-whatever' } // key 不参与缓存键（不消费）
+      const a1 = registryModule.getAdapterForAgent(m1)
+      const a2 = registryModule.getAdapterForAgent(m2)
+      expect(a1).toBe(a2)
+    })
+
     it('returns different instance for different provider', () => {
       const a1 = registryModule.getAdapterForAgent(baseAgent)
       const a2 = registryModule.getAdapterForAgent({ ...baseAgent, llmProvider: 'claude' })

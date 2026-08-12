@@ -77,7 +77,9 @@ export class OpencodeAdapter implements LLMAdapter {
     // prompt 通过 stdin 传入，避免 Windows 命令行 32K 限制（claude.ts -p - 同款思路）。
     const child = spawnSupervised(
       OPENCODE_BIN,
-      ['run', '--format', 'json', '-q', '-m', this.model],
+      // options.model 优先（调用方每轮传当轮 agent 的 llmModel，socketio.ts 契约），
+      // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（deepseek.ts/ollama.ts 同款惯例）
+      ['run', '--format', 'json', '-q', '-m', options.model || this.model],
       {
         label: 'opencode',
         input: prompt,

@@ -130,6 +130,24 @@ describe('OpencodeAdapter', () => {
     expect(opts.cwd).toBe('/tmp/workspace')
   })
 
+  it('uses options.model when provided (overrides constructor model — 多猫不串台)', async () => {
+    // 缓存键按 model 隔离后实例与 model 一一对应，但 chatStream 仍以 options.model
+    // 优先（socketio.ts 每轮传当轮 agent.llmModel）——双保险：即使缓存键未来被误改，
+    // 同一实例服务不同 model 的猫时 spawn 参数仍取当轮 model（deepseek.ts/ollama.ts 同款惯例）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'openai/gpt-5',
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    expect(args).toEqual(['run', '--format', 'json', '-q', '-m', 'openai/gpt-5'])
+  })
+
   it('passes cwd through to spawnSupervised (session worktree)', async () => {
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
     const child = fakeChild()

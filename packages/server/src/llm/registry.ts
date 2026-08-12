@@ -16,12 +16,16 @@ const adapters = new Map<string, LLMAdapter>()
 export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
   // claude/deepseek 的 key 可指向不同端点（DeepSeek 官方 vs Moonshot）——同一 key 下
   // 不同 baseUrl 必须不同实例，否则缓存串台（K5 变更单：kimi judge 改走 deepseek provider）
+  // opencode 的 apiKey 恒不消费（本地认证）——model 是实例间唯一区分维度，缓存键纳入
+  // model，否则不同 model 的 opencode 猫共享实例（构造 model 固定 → 串台，吐槽猫审查发现）
   const cacheKey =
     agent.llmProvider === 'claude'
       ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}:${agent.llmBaseUrl || ''}`
       : agent.llmProvider === 'deepseek'
         ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmBaseUrl || ''}`
-        : `${agent.llmProvider}:${agent.llmApiKey}`
+        : agent.llmProvider === 'opencode'
+          ? `${agent.llmProvider}:${agent.llmModel || ''}`
+          : `${agent.llmProvider}:${agent.llmApiKey}`
 
   if (adapters.has(cacheKey)) {
     return adapters.get(cacheKey)!
