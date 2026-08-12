@@ -112,7 +112,7 @@ describe('OpencodeAdapter', () => {
     ])
   })
 
-  it('spawns with run --format json -q -m and passes prompt via stdin', async () => {
+  it('spawns with run --format json -m and passes prompt via stdin (no -q: removed in 1.18.16)', async () => {
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -124,7 +124,7 @@ describe('OpencodeAdapter', () => {
     await collect(gen)
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
-    expect(args).toEqual(['run', '--format', 'json', '-q', '-m', 'anthropic/claude-sonnet-4-5'])
+    expect(args).toEqual(['run', '--format', 'json', '-m', 'anthropic/claude-sonnet-4-5'])
     const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
       input?: string
       cwd?: string
@@ -148,7 +148,7 @@ describe('OpencodeAdapter', () => {
     await collect(gen)
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
-    expect(args).toEqual(['run', '--format', 'json', '-q', '-m', 'openai/gpt-5'])
+    expect(args).toEqual(['run', '--format', 'json', '-m', 'openai/gpt-5'])
   })
 
   it('logs effective model (options.model || this.model) when options override constructor', async () => {

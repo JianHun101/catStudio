@@ -76,14 +76,17 @@ export class OpencodeAdapter implements LLMAdapter {
 
     log.info('启动 opencode CLI', { model: options.model || this.model, promptLen: prompt.length })
 
-    // run --format json 非交互流式（NDJSON 事件流）；-q 静默（抑制耗时等噪音）；
+    // run --format json 非交互流式（NDJSON 事件流）；
+    // 注意：不带 -q——该静默选项在 opencode 1.18.16 已移除，yargs strict 遇未知
+    // 选项会打印帮助并 exit 1（luna 猫「无法启动」实测根因）；--format json 本身
+    // 已是 raw JSON 事件，无需要抑制的噪音。
     // -m <model> 用 provider/model 格式（如 anthropic/claude-sonnet-4-5）。
     // prompt 通过 stdin 传入，避免 Windows 命令行 32K 限制（claude.ts -p - 同款思路）。
     const child = spawnSupervised(
       OPENCODE_BIN,
       // options.model 优先（调用方每轮传当轮 agent 的 llmModel，socketio.ts 契约），
       // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（deepseek.ts/ollama.ts 同款惯例）
-      ['run', '--format', 'json', '-q', '-m', options.model || this.model],
+      ['run', '--format', 'json', '-m', options.model || this.model],
       {
         label: 'opencode',
         input: prompt,
