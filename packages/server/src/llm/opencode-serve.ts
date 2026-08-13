@@ -3,6 +3,7 @@ import type { LLMAdapter } from './adapter.js'
 import { resolveBin, messagesToPrompt, spawnSupervised, getWorkspaceDir } from './cli-utils.js'
 import { createLogger } from '../logger.js'
 import type { ChildProcess } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
 
 const log = createLogger('opencode-serve')
 
@@ -77,6 +78,63 @@ function buildPermissionRuleset(cwd: string) {
     })),
     { permission: 'bash', pattern: '*', action: 'allow' as const },
   ]
+}
+
+/**
+ * POST JSON 并等待完整响应——node:http 实现，替代 fetch（message 发送专用）。
+ *
+ * 为什么不用 fetch：undici（fetch 底层）默认 headersTimeout=300s，而 serve 的
+ * message API 是「整轮 agent 完成才响应」语义（实测：短任务 3.3s 返回 200、
+ * 长任务 2s 无响应头）——gpt-5.6-luna 长思考 5.1 分钟 > 300s，undici 掐断
+ * 连接 → TypeError: fetch failed → serve 检测客户端断连 cancel 执行（店长四步
+ * 实测实锤，luna猫 验收失败根因）。node:http 默认无客户端超时（socket
+ * timeout 0），天然避开该机制。其余调用点（/session 创建、/event 订阅、
+ * abort、DELETE）都是快响应/事件流场景，保持 fetch 不动。
+ *
+ * signal 语义对齐 fetch：abort → req.destroy(AbortError) → reject——外层取消
+ * =用户取消，serve cancel 执行是预期行为，走 chatStream 现有 AbortError 路径。
+ */
+function postJson(
+  url: string,
+  body: unknown,
+  signal?: AbortSignal
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body)
+    const req = httpRequest(
+      new URL(url),
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': String(Buffer.byteLength(payload)),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (c: Buffer) => chunks.push(c))
+        res.on('end', () => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })
+        })
+      }
+    )
+    const onAbort = () => req.destroy(new DOMException('The operation was aborted', 'AbortError'))
+    req.on('error', (err) => {
+      // node:http 的 error message 自带 connect ECONNREFUSED 详情（比 fetch failed 诊断友好）
+      signal?.removeEventListener('abort', onAbort)
+      reject(err)
+    })
+    if (signal) {
+      if (signal.aborted) {
+        // 已 abort 的 signal：立即中断（对齐 fetch 语义——请求不发出）
+        req.destroy(new DOMException('The operation was aborted', 'AbortError'))
+        return
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+    req.end(payload)
+  })
 }
 
 /**
@@ -240,6 +298,10 @@ export class OpencodeServeAdapter implements LLMAdapter {
     let sessionId: string | null = null
     let serve: ServeHandle | null = null
     let finished = false // idle 正常完成（不 abort）；断连/异常走 abort 兜底
+    // 事件流订阅的 AbortController——函数级声明：message 发送抛错（用户 abort /
+    // 网络错误）走 catch 早退时订阅已发起（先订阅后发消息时序），必须断连，
+    // 否则 SSE 连接泄漏（serve 侧 ~10s heartbeat 保活，挂到 serve 进程死亡）
+    let eventAbort: AbortController | null = null
 
     try {
       serve = await this.ensureServer()
@@ -272,26 +334,28 @@ export class OpencodeServeAdapter implements LLMAdapter {
 
       // 2. 先发起全局事件流订阅（不 await——SSE 长连接响应头到达才 resolve），
       //    再发消息——防事件丢失（消息响应快时事件先于订阅建立到达）。
-      //    AbortController 供早退路径断连：msgResp 失败时若丢弃订阅，连接
-      //    泄漏挂到服务端超时（吐槽猫探针实证），必须显式 abort；no-op catch
-      //    防早退路径下 abort 引起的 rejection 无人消费（unhandled rejection）。
-      const eventAbort = new AbortController()
+      //    eventAbort（函数级声明）供所有早退路径断连：订阅已发起却丢弃会
+      //    连接泄漏挂到服务端超时（吐槽猫探针实证），必须显式 abort；no-op
+      //    catch 防早退路径下 abort 引起的 rejection 无人消费（unhandled rejection）。
+      eventAbort = new AbortController()
       const eventRespPromise = fetch(`${serve.baseUrl}/event`, {
         signal: eventAbort.signal,
       })
       eventRespPromise.catch(() => {})
 
-      // 3. 发送消息（历史平铺成单条 text + 全部图片 file parts）
+      // 3. 发送消息（历史平铺成单条 text + 全部图片 file parts）。
+      //    postJson 而非 fetch：message API 是「整轮 agent 完成才响应」语义，
+      //    undici 默认 headersTimeout=300s 会掐断长思考轮次（见 postJson 注释）
       const prompt = messagesToPrompt(messages)
       const imageParts = collectImageParts(messages)
-      const msgResp = await fetch(`${serve.baseUrl}/session/${sessionId}/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parts: [{ type: 'text', text: prompt }, ...imageParts] }),
-      })
-      if (!msgResp.ok) {
+      const msgResp = await postJson(
+        `${serve.baseUrl}/session/${sessionId}/message`,
+        { parts: [{ type: 'text', text: prompt }, ...imageParts] },
+        signal
+      )
+      if (msgResp.status < 200 || msgResp.status >= 300) {
         eventAbort.abort() // 断开已发起的 SSE 订阅——不 abort 连接泄漏到服务端超时
-        const detail = (await msgResp.text().catch(() => '')).slice(0, 300)
+        const detail = msgResp.text.slice(0, 300)
         yield {
           content: `opencode serve 消息发送失败 (HTTP ${msgResp.status})${detail ? `: ${detail}` : ''}`,
           done: true,
@@ -319,11 +383,18 @@ export class OpencodeServeAdapter implements LLMAdapter {
       // 断连/超时等非 idle 终止：已产出的内容保留，但不产出错误文案
       // （serve 侧执行可能仍在跑，finally 会 abort 兜底）
     } catch (err: any) {
+      // 早退路径断连事件流订阅（订阅已发起；不断则 SSE 连接泄漏——serve 侧
+      // ~10s heartbeat 保活，挂到 serve 进程死亡）
+      eventAbort?.abort()
       if (signal?.aborted || err?.name === 'AbortError') {
         yield { content: '', done: true }
         return
       }
-      yield { content: `opencode serve 调用失败: ${err.message}`, done: true }
+      // cause 附详情：node:http 的 connect ECONNREFUSED / undici 的 fetch failed
+      // 根因都在 cause 链上——旧文案只有瘦「fetch failed」，luna猫 故障排查时
+      // 无详情可读（店长教训）
+      const detail = err?.cause?.message ? `: ${err.cause.message}` : ''
+      yield { content: `opencode serve 调用失败: ${err.message}${detail}`, done: true }
       return
     } finally {
       // 清理：未 idle 完成 → POST abort 中断 serve 侧仍在跑的执行（abort 幂等
