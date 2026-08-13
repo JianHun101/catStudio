@@ -17,8 +17,17 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { execSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, execSync } from 'node:child_process'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -231,5 +240,65 @@ describe('session worktree', () => {
     expect(existsSync(path)).toBe(false)
     const branch = git('branch --list session/wt-rm-00')
     expect(branch).not.toContain('session/wt-rm-00')
+  })
+
+  /** 按 linkNodeModules 同款手法建链接：win32 mklink /J（junction，免管理员），非 win32 symlink */
+  function makeJunction(linkPath: string, targetPath: string): void {
+    if (process.platform === 'win32') {
+      execFileSync('cmd', ['/c', 'mklink', '/J', linkPath, targetPath], { stdio: 'ignore' })
+    } else {
+      symlinkSync(targetPath, linkPath, 'junction')
+    }
+  }
+
+  it('removeSessionWorktree: junction 物理残留清理 + 防跟随（目标 sentinel 完好）', () => {
+    // root junction 目标 = 主仓库 node_modules（linkNodeModules 建，指向 tmp 的 node_modules）
+    const nmSrc = resolve(tmp, 'node_modules')
+    mkdirSync(nmSrc, { recursive: true })
+    writeFileSync(resolve(nmSrc, 'sentinel.txt'), 'alive-root', 'utf-8')
+    // 包级 junction 目标（复刻店长实测的真实残留形态：packages/*/node_modules + packages/node_modules）
+    const pkgTargets = {
+      root: resolve(tmp, 'pkg-nm-root'),
+      server: resolve(tmp, 'pkg-nm-server'),
+      shared: resolve(tmp, 'pkg-nm-shared'),
+      web: resolve(tmp, 'pkg-nm-web'),
+    }
+    for (const [name, dir] of Object.entries(pkgTargets)) {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(resolve(dir, 'sentinel.txt'), `alive-${name}`, 'utf-8')
+    }
+
+    const path = gitUtils.ensureSessionWorktree('wt-rm-junc-1')!
+    wtDirs.push(path)
+    // 注意：本套件 tmp 仓库无 .gitignore，前面用例的 git add -A 把 tmp/node_modules
+    // 提交进了 git → worktree add 会把它以真实目录检出，linkNodeModules 见 dest 已存在
+    // 而跳过。本用例要复刻真实残留形态（链接），先删检出的真实目录再按 linkNodeModules
+    // 同款手法建 root 链接（win32 mklink /J junction）
+    const wtNm = resolve(path, 'node_modules')
+    if (existsSync(wtNm)) rmSync(wtNm, { recursive: true, force: true })
+    makeJunction(wtNm, nmSrc)
+    expect(lstatSync(wtNm).isSymbolicLink()).toBe(true)
+    // 复刻真实残留：包级链接 + 空壳目录
+    mkdirSync(resolve(path, 'packages'), { recursive: true })
+    for (const pkg of ['server', 'shared', 'web']) {
+      mkdirSync(resolve(path, 'packages', pkg), { recursive: true })
+      makeJunction(
+        resolve(path, 'packages', pkg, 'node_modules'),
+        pkgTargets[pkg as keyof typeof pkgTargets]
+      )
+    }
+    makeJunction(resolve(path, 'packages', 'node_modules'), pkgTargets.root)
+
+    gitUtils.removeSessionWorktree('wt-rm-junc-1')
+
+    // 目录清空 + 分支删除
+    expect(existsSync(path)).toBe(false)
+    const branch = git('branch --list session/wt-rm-ju')
+    expect(branch).not.toContain('session/wt-rm-ju')
+    // 防跟随核心断言：所有链接目标 sentinel 完好（跟随 = 全灭 = 灾难）
+    expect(readFileSync(resolve(nmSrc, 'sentinel.txt'), 'utf-8')).toBe('alive-root')
+    for (const [name, dir] of Object.entries(pkgTargets)) {
+      expect(readFileSync(resolve(dir, 'sentinel.txt'), 'utf-8')).toBe(`alive-${name}`)
+    }
   })
 })

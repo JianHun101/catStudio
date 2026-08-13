@@ -8,7 +8,15 @@
  */
 
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  rmdirSync,
+  unlinkSync,
+} from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 
@@ -385,7 +393,101 @@ export function getSessionWorktreePath(sessionId: string): string | null {
 }
 
 /**
- * 销毁会话 worktree（店长收口后调用）：git worktree remove + 删分支。
+ * 会话 worktree 物理残留清理（removeSessionWorktree 专用）。
+ *
+ * 机制（店长 2026-08-13 清理 9 个历史 worktree 实测实证）：
+ * `git worktree remove` 只删 git 跟踪内容；node_modules 是 linkNodeModules
+ * 建的链接（win32 mklink /J junction，gitignored），git 看不见也不碰——
+ * 目录物理残留，每次收口累积。
+ *
+ * 安全硬约束：任何 recursive 删除之前必须先移除链接本身，绝不跟随链接——
+ * 链接目标 = 主仓库 node_modules，跟随 = 灾难。实测实锤：rmSync recursive
+ * 直接作用在链接本身上不跟随，但扫「含链接的目录树」会跟随目标删内容。
+ * 顺序：① 逐个移除已知链接路径（lstat 链接判定，rmdir/unlink 只删链接
+ * 本身）→ ② rmdir 空壳目录（packages/* → packages，自底向上；非空拒绝
+ * 删，自带保险）→ ③ 复核无残留链接后才允许 recursive 总清扫；链接移除
+ * 失败的窄情况跳过总清扫（残留交给收口兜底，安全优先于干净）。
+ * 全程 try/catch 静默 + warn（失败不阻塞主链，与既有语义一致）。
+ */
+const WT_RESIDUE_LINK_PATHS = [
+  'node_modules',
+  'packages/node_modules',
+  'packages/server/node_modules',
+  'packages/shared/node_modules',
+  'packages/web/node_modules',
+] as const
+
+/** 空壳目录，自底向上（packages/* 先于 packages） */
+const WT_RESIDUE_SHELL_DIRS = [
+  'packages/server',
+  'packages/shared',
+  'packages/web',
+  'packages',
+] as const
+
+function isLink(p: string): boolean {
+  try {
+    return lstatSync(p).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+/** 只删链接本身（绝不跟随目标）；非链接路径不碰 */
+function removeLinkOnly(p: string): void {
+  if (!isLink(p)) return
+  try {
+    if (process.platform === 'win32') {
+      // junction 对 rmdirSync = 删除 reparse point 本身、不跟目标（店长实测手法）；
+      // 真 symlink（ln -s）rmdirSync 会失败 → unlinkSync 兜底
+      try {
+        rmdirSync(p)
+      } catch {
+        unlinkSync(p)
+      }
+    } else {
+      unlinkSync(p)
+    }
+  } catch (err: any) {
+    log.warn('residue link removal failed', { path: p, error: err.message })
+  }
+}
+
+/** 空目录才删（rmdirSync 非空抛错即跳过，绝不 recursive） */
+function rmdirEmpty(p: string): void {
+  try {
+    rmdirSync(p)
+  } catch {
+    /* 非空/不存在 → 留给后续步骤 */
+  }
+}
+
+function cleanupWorktreeResidue(wtPath: string): void {
+  try {
+    for (const rel of WT_RESIDUE_LINK_PATHS) {
+      removeLinkOnly(resolve(wtPath, rel))
+    }
+    for (const rel of WT_RESIDUE_SHELL_DIRS) {
+      rmdirEmpty(resolve(wtPath, rel))
+    }
+    // 链接移除失败的窄情况：跳过 recursive 总清扫（跟随 = 灾难），残留交给收口兜底
+    if (WT_RESIDUE_LINK_PATHS.some((rel) => isLink(resolve(wtPath, rel)))) {
+      log.warn('residue cleanup aborted — junction still present, recursive sweep skipped', {
+        wtPath,
+      })
+      return
+    }
+    if (existsSync(wtPath)) {
+      rmSync(wtPath, { recursive: true, force: true })
+    }
+    log.info('session worktree residue cleaned', { wtPath })
+  } catch (err: any) {
+    log.warn('worktree residue cleanup failed', { error: err.message })
+  }
+}
+
+/**
+ * 销毁会话 worktree（店长收口后调用）：git worktree remove + 物理残留清理 + 删分支。
  * 失败静默（残留目录不阻塞主链，收口流程兜底）。
  */
 export function removeSessionWorktree(sessionId: string): void {
@@ -405,12 +507,10 @@ export function removeSessionWorktree(sessionId: string): void {
       log.info('session worktree removed', { sessionId, wtPath })
     } catch (err: any) {
       log.warn('worktree remove failed — force removing dir', { error: err.message })
-      try {
-        rmSync(wtPath, { recursive: true, force: true })
-      } catch {
-        /* 忽略 */
-      }
     }
+    // git remove 成功/失败都走物理残留清理：成功路径留下 junction（gitignored，
+    // git 不删）；失败路径强制清目录（旧 rmSync 兜底语义并入，且不再有跟随风险）
+    cleanupWorktreeResidue(wtPath)
   }
   try {
     execFileSync('git', ['branch', '-D', branch], {
