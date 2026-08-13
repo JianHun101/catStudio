@@ -23,7 +23,7 @@ class MockOpenAIAdapter {
   constructor(_opts: unknown) {}
 }
 
-class MockOpencodeAdapter {
+class MockOpencodeServeAdapter {
   readonly provider = 'opencode'
   chatStream = mockChatStream
   constructor(public opts: { model?: string; envExtra?: Record<string, string> }) {}
@@ -32,7 +32,7 @@ class MockOpencodeAdapter {
 vi.mock('./deepseek.js', () => ({ DeepSeekAdapter: MockDeepSeekAdapter }))
 vi.mock('./claude.js', () => ({ ClaudeAdapter: MockClaudeAdapter }))
 vi.mock('./openai.js', () => ({ OpenAIAdapter: MockOpenAIAdapter }))
-vi.mock('./opencode.js', () => ({ OpencodeAdapter: MockOpencodeAdapter }))
+vi.mock('./opencode-serve.js', () => ({ OpencodeServeAdapter: MockOpencodeServeAdapter }))
 
 describe('registry', () => {
   let registryModule: typeof import('./registry.js')
@@ -73,7 +73,7 @@ describe('registry', () => {
       expect(adapter.provider).toBe('openai')
     })
 
-    it('returns Opencode adapter for opencode provider', () => {
+    it('returns Opencode serve adapter for opencode provider (headless agent mode)', () => {
       const agent = { ...baseAgent, llmProvider: 'opencode' }
       const adapter = registryModule.getAdapterForAgent(agent)
       expect(adapter.provider).toBe('opencode')
@@ -190,14 +190,16 @@ describe('registry', () => {
       expect(a1).toBe(a2)
     })
 
-    it('passes parsed envExtra to OpencodeAdapter constructor (宽容：非法 JSON → 空对象不炸)', () => {
+    it('passes parsed envExtra to OpencodeServeAdapter constructor (宽容：非法 JSON → 空对象不炸)', () => {
       const agent = {
         ...baseAgent,
         llmProvider: 'opencode',
         llmModel: 'anthropic/claude-sonnet-4-5',
         llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:7897"}',
       }
-      const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockOpencodeAdapter
+      const adapter = registryModule.getAdapterForAgent(
+        agent
+      ) as unknown as MockOpencodeServeAdapter
       expect(adapter.opts.envExtra).toEqual({ HTTPS_PROXY: 'http://127.0.0.1:7897' })
 
       // 非法 JSON → 宽容降级空对象（不抛错），构造正常
@@ -208,7 +210,9 @@ describe('registry', () => {
         llmEnvExtra: 'not-json{{',
       }
       expect(() => registryModule.getAdapterForAgent(bad)).not.toThrow()
-      const badAdapter = registryModule.getAdapterForAgent(bad) as unknown as MockOpencodeAdapter
+      const badAdapter = registryModule.getAdapterForAgent(
+        bad
+      ) as unknown as MockOpencodeServeAdapter
       expect(badAdapter.opts.envExtra).toEqual({})
     })
 
