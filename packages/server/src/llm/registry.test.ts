@@ -31,10 +31,24 @@ class MockOpencodeAdapter {
   constructor(public opts: { model?: string; envExtra?: Record<string, string> }) {}
 }
 
+class MockDshAdapter {
+  readonly provider = 'dsh'
+  chatStream = mockChatStream
+  constructor(
+    public opts: {
+      apiKey?: string
+      model?: string
+      baseUrl?: string
+      envExtra?: Record<string, string>
+    }
+  ) {}
+}
+
 vi.mock('./deepseek.js', () => ({ DeepSeekAdapter: MockDeepSeekAdapter }))
 vi.mock('./claude.js', () => ({ ClaudeAdapter: MockClaudeAdapter }))
 vi.mock('./openai.js', () => ({ OpenAIAdapter: MockOpenAIAdapter }))
 vi.mock('./opencode.js', () => ({ OpencodeAdapter: MockOpencodeAdapter }))
+vi.mock('./dsh.js', () => ({ DshAdapter: MockDshAdapter }))
 
 describe('registry', () => {
   let registryModule: typeof import('./registry.js')
@@ -81,6 +95,12 @@ describe('registry', () => {
       expect(adapter.provider).toBe('opencode')
       // 接线锁定：run 形态标识（回归实验双向验证过——还原 serve 构造恰好此断言红）
       expect((adapter as unknown as MockOpencodeAdapter).kind).toBe('run')
+    })
+
+    it('returns Dsh adapter for dsh provider (deepseek-harness pilot)', () => {
+      const agent = { ...baseAgent, llmProvider: 'dsh', llmModel: 'deepseek-chat' }
+      const adapter = registryModule.getAdapterForAgent(agent)
+      expect(adapter.provider).toBe('dsh')
     })
 
     it('throws for unsupported provider', () => {
@@ -214,6 +234,50 @@ describe('registry', () => {
       expect(() => registryModule.getAdapterForAgent(bad)).not.toThrow()
       const badAdapter = registryModule.getAdapterForAgent(bad) as unknown as MockOpencodeAdapter
       expect(badAdapter.opts.envExtra).toEqual({})
+    })
+
+    it('passes apiKey/model/baseUrl/envExtra to DshAdapter constructor (envExtra 宽容解析)', () => {
+      const agent = {
+        ...baseAgent,
+        llmProvider: 'dsh',
+        llmModel: 'deepseek-chat',
+        llmBaseUrl: 'https://api.deepseek.com',
+        llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:7897"}',
+      }
+      const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockDshAdapter
+      expect(adapter.opts.apiKey).toBe('sk-key-1')
+      expect(adapter.opts.model).toBe('deepseek-chat')
+      expect(adapter.opts.baseUrl).toBe('https://api.deepseek.com')
+      expect(adapter.opts.envExtra).toEqual({ HTTPS_PROXY: 'http://127.0.0.1:7897' })
+
+      // 非法 JSON → 宽容降级空对象（不抛错），构造正常
+      const bad = { ...agent, llmEnvExtra: 'not-json{{' }
+      expect(() => registryModule.getAdapterForAgent(bad)).not.toThrow()
+      const badAdapter = registryModule.getAdapterForAgent(bad) as unknown as MockDshAdapter
+      expect(badAdapter.opts.envExtra).toEqual({})
+    })
+
+    it('returns different instance for different envExtra (dsh, same model)', () => {
+      // 同 model 不同 envExtra 必须不同实例（spawn env 注入维度，同 opencode 教训）
+      const e1 = {
+        ...baseAgent,
+        llmProvider: 'dsh',
+        llmModel: 'deepseek-chat',
+        llmEnvExtra: '{"A":"1"}',
+      }
+      const e2 = { ...e1, llmEnvExtra: '{"A":"2"}' }
+      const a1 = registryModule.getAdapterForAgent(e1)
+      const a2 = registryModule.getAdapterForAgent(e2)
+      expect(a1).not.toBe(a2)
+    })
+
+    it('returns different instance for different apiKey (dsh)', () => {
+      // apiKey 参与缓存键（dsh 复用 DS_KEY 但缓存键纳全构造维度——不依赖「恒为 DS_KEY」假设）
+      const d1 = { ...baseAgent, llmProvider: 'dsh', llmModel: 'deepseek-chat' }
+      const d2 = { ...d1, llmApiKey: 'sk-other' }
+      const a1 = registryModule.getAdapterForAgent(d1)
+      const a2 = registryModule.getAdapterForAgent(d2)
+      expect(a1).not.toBe(a2)
     })
 
     it('returns different instance for different provider', () => {

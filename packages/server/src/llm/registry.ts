@@ -5,6 +5,7 @@ import { OpenAIAdapter } from './openai.js'
 import { PiAdapter } from './pi.js'
 import { OllamaAdapter } from './ollama.js'
 import { OpencodeAdapter } from './opencode.js'
+import { DshAdapter } from './dsh.js'
 import type { AgentConfig } from '@cat-study/shared'
 import { createLogger } from '../logger.js'
 
@@ -48,7 +49,9 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
         ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmBaseUrl || ''}`
         : agent.llmProvider === 'opencode'
           ? `${agent.llmProvider}:${agent.llmModel || ''}:${agent.llmEnvExtra || ''}`
-          : `${agent.llmProvider}:${agent.llmApiKey}`
+          : agent.llmProvider === 'dsh'
+            ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmModel || ''}:${agent.llmBaseUrl || ''}:${agent.llmEnvExtra || ''}`
+            : `${agent.llmProvider}:${agent.llmApiKey}`
 
   if (adapters.has(cacheKey)) {
     return adapters.get(cacheKey)!
@@ -96,6 +99,16 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       // 不动作为回滚路径，如需回退改回 OpencodeServeAdapter 构造即可
       adapter = new OpencodeAdapter({
         model: agent.llmModel,
+        envExtra: parseEnvExtra(agent.llmEnvExtra),
+      })
+      break
+    case 'dsh':
+      // deepseek-harness 适配器（dsh pilot）：headless 一次性形态，凭证复用 DS_KEY，
+      // 构造签名与 claude/opencode 同形（model + envExtra）；baseUrl 预留自定义端点
+      adapter = new DshAdapter({
+        apiKey: agent.llmApiKey,
+        model: agent.llmModel,
+        baseUrl: agent.llmBaseUrl,
         envExtra: parseEnvExtra(agent.llmEnvExtra),
       })
       break

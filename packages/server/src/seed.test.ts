@@ -20,8 +20,9 @@ function fixedId(name: string): string {
 describe('seed agents', () => {
   const agents = buildDemoAgents()
 
-  it('种子包含 5 只猫（店长/ds猫/flash猫/吐槽猫/图测猫）', () => {
+  it('种子包含 6 只猫（店长/ds猫/flash猫/吐槽猫/图测猫/dsh猫）', () => {
     expect(agents.map((a) => a.name).sort()).toEqual([
+      'dsh猫',
       'ds猫',
       'flash猫',
       '吐槽猫',
