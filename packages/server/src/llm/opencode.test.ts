@@ -134,7 +134,7 @@ describe('OpencodeAdapter', () => {
     ])
   })
 
-  it('spawns with run --format json --thinking -m and passes prompt as positional message (no stdin, no -q)', async () => {
+  it('spawns with run --agent build --auto --format json --thinking -m and passes prompt as positional message (no stdin, no -q)', async () => {
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
     const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -149,9 +149,15 @@ describe('OpencodeAdapter', () => {
     // prompt 作为 positional message 尾部追加——opencode run 不读 stdin（1.18.16
     // help 无任何 stdin 选项，stdin 传参实测空转 exit 0 无输出，luna 猫「无法启动」根因）；
     // --thinking 实测必需——无它时推理模型的 reasoning 事件被过滤（tokens.reasoning>0
-    // 但事件流只有 step_start/text/step_finish 三行，鸡兔同笼对照实测）
+    // 但事件流只有 step_start/text/step_finish 三行，鸡兔同笼对照实测）；
+    // --agent build --auto：run 形态 agent 循环（店长拍板回退 serve，2026-08-13
+    // 实测 7.7s 完整跑通工具循环——serve 四坑形态性消失，回退到一轮一进程同
+    // claude 形态）；--auto 工具全自动批准（run 无 ruleset 注入）
     expect(args).toEqual([
       'run',
+      '--agent',
+      'build',
+      '--auto',
       '--format',
       'json',
       '--thinking',
@@ -186,6 +192,9 @@ describe('OpencodeAdapter', () => {
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
     expect(args).toEqual([
       'run',
+      '--agent',
+      'build',
+      '--auto',
       '--format',
       'json',
       '--thinking',
@@ -361,6 +370,114 @@ describe('OpencodeAdapter', () => {
     const chunks = await collect(gen)
     expect(chunks).toEqual([
       { content: '[思考] legacy thinking', done: false, kind: 'thinking' },
+      { content: '', done: true },
+    ])
+  })
+
+  // ─── tool_use 事件（--agent build 模式工具循环 → [工具] chunk）────────
+
+  it('maps tool_use events to [工具] chunks (店长实测结构——run --agent build 真实序列)', async () => {
+    // 店长实测 run --agent build --auto 真实工具循环序列（7.7s：apply_patch
+    // 真实写文件 completed 输出 diff → read 真实读回）——tool_use 事件 part 嵌套
+    // （与 text/reasoning 同 envelope），part 结构与 serve 适配器工具事件映射
+    // 同款 schema（opencode.db 落盘样本三源一致）；产出 [工具] 前缀 chunk
+    // （kind:'thinking'：流式可见、socketio.ts:2706 不落库不参与上下文——
+    // 工具过程是观感反馈不进存储内容）
+    const adapter = new OpencodeAdapter({ model: 'openai/gpt-5.6-luna' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: '创建 hello.txt 并读回' }], {
+      model: 'openai/gpt-5.6-luna',
+    })
+    child.stdout.push(
+      JSON.stringify({
+        type: 'tool_use',
+        part: {
+          id: 't1',
+          messageID: 'm1',
+          type: 'tool',
+          tool: 'apply_patch',
+          callID: 'call_1',
+          state: { status: 'running', input: { filePath: 'hello.txt', patch: '+hello' } },
+        },
+      }) + '\n'
+    )
+    child.stdout.push(
+      JSON.stringify({
+        type: 'tool_use',
+        part: {
+          id: 't1',
+          messageID: 'm1',
+          type: 'tool',
+          tool: 'apply_patch',
+          callID: 'call_1',
+          state: {
+            status: 'completed',
+            input: { filePath: 'hello.txt', patch: '+hello' },
+            output: 'diff: +hello',
+            metadata: { bytes: 6 },
+          },
+        },
+      }) + '\n'
+    )
+    child.stdout.push(
+      JSON.stringify({
+        type: 'tool_use',
+        part: {
+          id: 't2',
+          messageID: 'm2',
+          type: 'tool',
+          tool: 'read',
+          callID: 'call_2',
+          state: { status: 'completed', input: { filePath: 'hello.txt' }, output: 'hello' },
+        },
+      }) + '\n'
+    )
+    child.stdout.push(
+      JSON.stringify({ type: 'text', part: { id: 'p1', text: '已读回：hello' } }) + '\n'
+    )
+    child.stdout.push(null)
+
+    const chunks = await collect(gen)
+    expect(chunks).toEqual([
+      { content: '[工具] apply_patch: 运行中', done: false, kind: 'thinking' },
+      { content: '[工具] apply_patch: 完成', done: false, kind: 'thinking' },
+      { content: '[工具] read: 完成', done: false, kind: 'thinking' },
+      { content: '已读回：hello', done: false, kind: 'text' },
+      { content: '', done: true },
+    ])
+    // 审计日志：与 serve 适配器同款 tool/status/input 三字段（input 序列化截断）
+    expect(logMocks.info).toHaveBeenCalledWith(
+      'opencode 工具调用',
+      expect.objectContaining({ tool: 'apply_patch', status: 'completed' })
+    )
+  })
+
+  it('skips malformed tool_use events without crashing (开放 union 防御)', async () => {
+    // part.tool 非字符串 / 无 part / 无 state.status：跳过不 yield 不报错——
+    // part 是开放 union，上游新增变体不应炸解析（text 分支同款防御）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(
+      JSON.stringify({ type: 'tool_use', part: { state: { status: 'completed' } } }) + '\n'
+    )
+    child.stdout.push(JSON.stringify({ type: 'tool_use' }) + '\n')
+    child.stdout.push(
+      JSON.stringify({ type: 'tool_use', part: { tool: 'bash', state: { status: '未知状态' } } }) +
+        '\n'
+    )
+    child.stdout.push(null)
+
+    const chunks = await collect(gen)
+    // 未知状态原样透出（不吞）；缺 tool 字段的两行跳过
+    expect(chunks).toEqual([
+      { content: '[工具] bash: 未知状态', done: false, kind: 'thinking' },
       { content: '', done: true },
     ])
   })

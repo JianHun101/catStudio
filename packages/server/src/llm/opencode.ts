@@ -43,6 +43,18 @@ const PROMPT_ARG_MAX = 30000
 const WAIT_CLOSE_MS = 5000
 
 /**
+ * tool_use 事件 state.status → 中文标签（--agent build 模式工具循环）。
+ * status 是开放 union（pending/running/completed/error 之外上游可能新增）——
+ * 未知状态原样透出（不吞），无状态只产出工具名。
+ */
+const TOOL_STATUS_LABELS: Record<string, string> = {
+  pending: '排队中',
+  running: '运行中',
+  completed: '完成',
+  error: '失败',
+}
+
+/**
  * 把最后一条 user 消息的 base64 dataURL 图片落盘为临时文件。
  *
  * opencode run 的 -f 只认文件路径（不认 base64）——实测 `-f <path>` 传图成功，
@@ -133,6 +145,13 @@ export class OpencodeAdapter implements LLMAdapter {
     log.info('启动 opencode CLI', { model: options.model || this.model, promptLen: prompt.length })
 
     // run --format json 非交互流式（NDJSON 事件流）；
+    // --agent build --auto：run 形态 agent 循环（店长拍板回退 serve——2026-08-13
+    // 实测 7.7s 完整跑通工具循环：reasoning→text→tool_use→step_finish 多轮自动
+    // 推进，tool_use 事件结构与 serve 同款 schema）。--auto = 工具全自动批准
+    // （run 无 permission ruleset 注入，serve 的精细化权限是其独有优势，回退后
+    // --auto 一刀切；luna 沙箱根 workspace 风险可控，后续可补自定义 agent 权限
+    // 配置）。注意：-m/--thinking 与 --agent build 的组合未实测（店长实测命令
+    // 未带 -m/--thinking）——真机验收确认 model 生效（见交接文档 OQ）。
     // 注意：不带 -q——该静默选项在 opencode 1.18.16 已移除，yargs strict 遇未知
     // 选项会打印帮助并 exit 1（luna 猫「无法启动」实测根因）；--format json 本身
     // 已是 raw JSON 事件，无需要抑制的噪音。
@@ -163,6 +182,9 @@ export class OpencodeAdapter implements LLMAdapter {
       // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（deepseek.ts/ollama.ts 同款惯例）
       [
         'run',
+        '--agent',
+        'build',
+        '--auto',
         '--format',
         'json',
         '--thinking',
@@ -301,14 +323,19 @@ export class OpencodeAdapter implements LLMAdapter {
  * 格式（run --format json --thinking，1.18.16 实测——文本在 part 嵌套，非顶层）:
  *   text:      {"type":"text","timestamp":...,"part":{"id":...,"messageID":...,"text":"..."}}
  *   reasoning: {"type":"reasoning","timestamp":...,"part":{"type":"reasoning","text":"..."}}
+ *   tool_use:  {"type":"tool_use","timestamp":...,"part":{"type":"tool","tool":"bash","state":{"status":"completed","input":{...},"output":"..."}}}
  *   error:     {"type":"error","error":{"data":{"message":"Upstream request failed: [403]..."}}}
  *   —— 顶层 text 仅存在于其他版本输出（兜底兼容）；error 详情在 error.data.message
  *   （嵌套两层），非 error.message；reasoning 与 text 事件同构（文本同样在
- *   part.text），仅在有 --thinking 时输出（无它时推理模型的思考被过滤）
+ *   part.text），仅在有 --thinking 时输出（无它时推理模型的思考被过滤）；
+ *   tool_use 仅 --agent 模式输出，part 结构与 serve 适配器工具事件映射同款
+ *   schema（店长实测报告 + opencode.db 落盘样本 + 上游 schema 三源一致）
  *
  * type === 'text' → 实时产出内容 chunk；type === 'reasoning' → 产出 [思考] 前缀
- * chunk（对齐 claude.ts/pi.ts 契约，前端折叠展示、不入库）；type === 'error' →
- * 产出错误 chunk 并终止（错误是终止性事件，后续不再有有效内容）。无法解析的行跳过。
+ * chunk（对齐 claude.ts/pi.ts 契约，前端折叠展示、不入库）；type === 'tool_use' →
+ * 产出 [工具] 前缀 chunk（kind:'thinking' 流式可见、不落库不参与上下文——工具
+ * 过程是观感反馈，不进存储内容；状态标签见 TOOL_STATUS_LABELS）；type === 'error'
+ * → 产出错误 chunk 并终止（错误是终止性事件，后续不再有有效内容）。无法解析的行跳过。
  */
 async function* parseOpencodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
@@ -333,6 +360,28 @@ async function* parseOpencodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
         const text = event.part?.text ?? event.text
         if (typeof text === 'string' && text) {
           yield { content: `[思考] ${text}`, done: false, kind: 'thinking' }
+        }
+      } else if (event.type === 'tool_use') {
+        // 工具调用事件（--agent build 模式）。映射 [工具] 前缀 chunk：实时
+        // 观感反馈（长思考期间用户看到工具推进而非死寂）；kind:'thinking' 与
+        // [思考] 同语义——流式展示、socketio.ts:2706 不落库不参与上下文，工具
+        // 过程不进存储内容。input 落日志审计（与 serve 适配器同款：tool/status/
+        // input 三字段，序列化截断防大对象刷屏）。结构防御：part.tool 非字符串
+        // 直接跳过（开放 union，未来新增 part 变体不炸解析）。
+        const part = event.part
+        if (typeof part?.tool === 'string') {
+          const status = part.state?.status
+          const label = status != null ? (TOOL_STATUS_LABELS[status] ?? String(status)) : ''
+          log.info('opencode 工具调用', {
+            tool: part.tool,
+            status,
+            input: part.state?.input ? JSON.stringify(part.state.input).slice(0, 500) : undefined,
+          })
+          yield {
+            content: `[工具] ${part.tool}${label ? `: ${label}` : ''}`,
+            done: false,
+            kind: 'thinking',
+          }
         }
       } else if (event.type === 'error') {
         // error 详情按实测结构层级取（error.data.message 最优先，嵌套两层）：
