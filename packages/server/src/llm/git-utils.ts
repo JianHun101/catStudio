@@ -299,6 +299,41 @@ function linkNodeModules(mainRoot: string, wtPath: string): void {
   }
 }
 
+/** 重建路径重试参数：EPERM（他进程持目录为 cwd/句柄）多为瞬时占用 */
+const WT_REBUILD_RETRY_COUNT = 3
+const WT_REBUILD_RETRY_DELAY_MS = 500
+
+/** 同步休眠（有界等待用；Atomics.wait 阻塞当前线程，Node 主线程/worker 均可用） */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * 移除「无 .git 标记」的残留目录（ensureSessionWorktree 重建路径专用）。
+ *
+ * 处置链（店长 2026-08-13 真机 dogfood + 本机探针实证）：
+ * ① 复用 cleanupWorktreeResidue——链接先行 + 复核守卫 + 总清扫；残留含
+ *    junction 时跟随风险从代码结构上排除，不依赖 rmSync 版本行为承诺；
+ * ② 有限重试（EPERM 多为瞬时占用——agent CLI 子进程持 cwd，进程退出即自愈）；
+ * ③ 重试耗尽仍存在 → error 级日志显式暴露后返回 false，调用方降级 null
+ *    （行为与旧实现一致，但不静默——会话隔离丢失一眼可见）。
+ * 改名让位（renameSync）曾作为候选被探针否决：Windows 对 cwd 被持有的
+ * 目录 renameSync 报 EBUSY（与 rmSync EPERM 同因——句柄无 FILE_SHARE_DELETE）。
+ */
+function removeStaleWorktreeDir(wtPath: string): boolean {
+  for (let attempt = 0; attempt < WT_REBUILD_RETRY_COUNT; attempt++) {
+    if (!existsSync(wtPath)) return true
+    if (attempt > 0) sleepSync(WT_REBUILD_RETRY_DELAY_MS)
+    cleanupWorktreeResidue(wtPath)
+  }
+  if (!existsSync(wtPath)) return true
+  log.error('stale session dir removal failed — falling back to main workspace (isolation lost)', {
+    wtPath,
+    hint: 'held by another process (cwd/file handle) — cleanable after it exits',
+  })
+  return false
+}
+
 /**
  * 确保会话 worktree 存在（幂等）。
  *
@@ -310,7 +345,9 @@ function linkNodeModules(mainRoot: string, wtPath: string): void {
  * - 分支从主仓库当前 HEAD 分叉（收口时店长 merge 回 dev）
  * - worktree 目录 = 主仓库兄弟目录 catStudy-sessions/<8位id>
  * - node_modules junction 复用主仓库依赖（失败降级）
- * - 任意失败 → 返回 null（降级回主工作区，行为与现网一致）
+ * - 无 .git 标记的残留目录 → removeStaleWorktreeDir（链接先行安全清理 +
+ *   EPERM 有限重试，重试耗尽 error 日志显式暴露后返回 null——降级不静默）
+ * - 分支/目录创建等其余失败 → 返回 null（降级回主工作区，行为与现网一致）
  * - 已存在（重启恢复/重复触发）→ 直接复用返回路径
  */
 export function ensureSessionWorktree(sessionId: string): string | null {
@@ -326,11 +363,10 @@ export function ensureSessionWorktree(sessionId: string): string | null {
   // worktree 标记（.git 文件）存在才算有效；无标记的残留目录删除重建。
   if (existsSync(wtPath)) {
     if (existsSync(resolve(wtPath, '.git'))) return wtPath
-    try {
-      rmSync(wtPath, { recursive: true, force: true })
-    } catch {
-      return null
-    }
+    // 无 .git 标记 = 残留目录（上次收口只清 git 层留下的物理残留 / 崩溃残留）。
+    // 旧实现直接 rmSync 扫树——残留含 junction 时「是否跟随」押在 Node 版本
+    // 行为上，且 EPERM 静默降级；现走链接先行安全清理（removeStaleWorktreeDir）
+    if (!removeStaleWorktreeDir(wtPath)) return null
   }
 
   // 分支不存在才建（从主仓库当前 HEAD 分叉）
@@ -401,8 +437,11 @@ export function getSessionWorktreePath(sessionId: string): string | null {
  * 目录物理残留，每次收口累积。
  *
  * 安全硬约束：任何 recursive 删除之前必须先移除链接本身，绝不跟随链接——
- * 链接目标 = 主仓库 node_modules，跟随 = 灾难。实测实锤：rmSync recursive
- * 直接作用在链接本身上不跟随，但扫「含链接的目录树」会跟随目标删内容。
+ * 链接目标 = 主仓库 node_modules，跟随 = 灾难。事实（2026-08-13 本机实测，
+ * Node 24/win32）：rmSync recursive 把链接当链接删——直接作用在链接上、
+ * 扫含链接的目录树均不跟随目标；但 statSync+readdirSync 朴素递归会穿透
+ * junction。跟随不是「已知 bug」而是「工具/版本行为差异」——链接先行 +
+ * 复核守卫把跟随从代码结构上排除，不依赖任何版本的 rmSync 行为承诺。
  * 顺序：① 逐个移除已知链接路径（lstat 链接判定，rmdir/unlink 只删链接
  * 本身）→ ② rmdir 空壳目录（packages/* → packages，自底向上；非空拒绝
  * 删，自带保险）→ ③ 复核无残留链接后才允许 recursive 总清扫；链接移除

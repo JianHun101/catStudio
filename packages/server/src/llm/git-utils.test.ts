@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { execFileSync, execSync } from 'node:child_process'
+import { execFileSync, execSync, spawn } from 'node:child_process'
 import {
   existsSync,
   lstatSync,
@@ -301,4 +301,125 @@ describe('session worktree', () => {
       expect(readFileSync(resolve(dir, 'sentinel.txt'), 'utf-8')).toBe(`alive-${name}`)
     }
   })
+
+  it('ensureSessionWorktree: 无 .git 残留目录（含 junction）→ 链接先行重建，目标 sentinel 完好', () => {
+    // 复刻真实残留形态：root + 包级共 5 链接（同 wt-rm-junc-1 用例），
+    // 但目录无 .git 标记——上次收口 git 层已清、物理层残留后下次重建的形态
+    const nmSrc = resolve(tmp, 'node_modules')
+    mkdirSync(nmSrc, { recursive: true })
+    writeFileSync(resolve(nmSrc, 'sentinel.txt'), 'alive-root', 'utf-8')
+    const pkgTargets = {
+      root: resolve(tmp, 'pkg-rebuild-root'),
+      server: resolve(tmp, 'pkg-rebuild-server'),
+      shared: resolve(tmp, 'pkg-rebuild-shared'),
+      web: resolve(tmp, 'pkg-rebuild-web'),
+    }
+    for (const [name, dir] of Object.entries(pkgTargets)) {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(resolve(dir, 'sentinel.txt'), `alive-${name}`, 'utf-8')
+    }
+
+    const shortId = 'wt-rebld'
+    const path = wtPath(shortId)
+    mkdirSync(path, { recursive: true })
+    makeJunction(resolve(path, 'node_modules'), nmSrc)
+    mkdirSync(resolve(path, 'packages'), { recursive: true })
+    for (const pkg of ['server', 'shared', 'web']) {
+      mkdirSync(resolve(path, 'packages', pkg), { recursive: true })
+      makeJunction(
+        resolve(path, 'packages', pkg, 'node_modules'),
+        pkgTargets[pkg as keyof typeof pkgTargets]
+      )
+    }
+    makeJunction(resolve(path, 'packages', 'node_modules'), pkgTargets.root)
+
+    // 重建路径：ensureSessionWorktree 应清理残留后重建 worktree
+    const got = gitUtils.ensureSessionWorktree('wt-rebld-0001')
+    expect(got).toBe(path)
+    wtDirs.push(path)
+    expect(existsSync(resolve(path, '.git'))).toBe(true)
+    expect(git('branch --list session/wt-rebld')).toContain('session/wt-rebld')
+    // 防跟随核心断言：所有链接目标 sentinel 完好（链接先行清理，不碰目标）
+    expect(readFileSync(resolve(nmSrc, 'sentinel.txt'), 'utf-8')).toBe('alive-root')
+    for (const [name, dir] of Object.entries(pkgTargets)) {
+      expect(readFileSync(resolve(dir, 'sentinel.txt'), 'utf-8')).toBe(`alive-${name}`)
+    }
+    // 注：tmp 仓库无 .gitignore，node_modules 被前序用例提交进 git——重建时被真实
+    // 检出成目录，linkNodeModules 见 dest 已存在而跳过（本 harness 特有，不影响断言）
+  })
+
+  it.skipIf(process.platform !== 'win32')(
+    'ensureSessionWorktree: EPERM（他进程持深层目录为 cwd）→ 链接仍先清、重试耗尽降级 null',
+    () => {
+      // 残留目录 + 4 个 junction（root/packages/node_modules + shared/web 包级），
+      // 另一进程持 packages/server 为 cwd → 目录整体 rmSync 必 EPERM
+      const nmSrc = resolve(tmp, 'node_modules')
+      mkdirSync(nmSrc, { recursive: true })
+      writeFileSync(resolve(nmSrc, 'sentinel.txt'), 'alive-root', 'utf-8')
+      const pkgTargets = {
+        root: resolve(tmp, 'pkg-eperm-root'),
+        shared: resolve(tmp, 'pkg-eperm-shared'),
+        web: resolve(tmp, 'pkg-eperm-web'),
+      }
+      for (const [name, dir] of Object.entries(pkgTargets)) {
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(resolve(dir, 'sentinel.txt'), `alive-${name}`, 'utf-8')
+      }
+
+      const shortId = 'wt-eperm'
+      const path = wtPath(shortId)
+      mkdirSync(resolve(path, 'packages'), { recursive: true })
+      mkdirSync(resolve(path, 'packages', 'server'), { recursive: true })
+      makeJunction(resolve(path, 'node_modules'), nmSrc)
+      for (const pkg of ['shared', 'web']) {
+        mkdirSync(resolve(path, 'packages', pkg), { recursive: true })
+        makeJunction(
+          resolve(path, 'packages', pkg, 'node_modules'),
+          pkgTargets[pkg as keyof typeof pkgTargets]
+        )
+      }
+      makeJunction(resolve(path, 'packages', 'node_modules'), pkgTargets.root)
+
+      // 持目录为 cwd 的子进程（ready 文件握手确保 chdir 完成）
+      const ready = resolve(tmp, 'wt-eperm-ready')
+      const holder = spawn(
+        process.execPath,
+        [
+          '-e',
+          `process.chdir(${JSON.stringify(resolve(path, 'packages', 'server'))});require('fs').writeFileSync(${JSON.stringify(ready)},'ok');setInterval(()=>{},1000)`,
+        ],
+        { stdio: 'ignore' }
+      )
+      const t0 = Date.now()
+      while (!existsSync(ready) && Date.now() - t0 < 10000) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+      }
+      expect(existsSync(ready)).toBe(true)
+
+      try {
+        // EPERM 持续（holder 不退）→ 有限重试耗尽 → 返回 null（error 日志已显式落）
+        expect(gitUtils.ensureSessionWorktree('wt-eperm-0001')).toBeNull()
+        wtDirs.push(path)
+        // 链接先行核心断言：即便目录删不掉，junction 也必须已全部移除
+        // （旧实现 rmSync 扫树遇 EPERM 中断，残留链接是否清掉取决于遍历序）
+        for (const rel of [
+          'node_modules',
+          'packages/node_modules',
+          'packages/shared/node_modules',
+          'packages/web/node_modules',
+        ]) {
+          expect(existsSync(resolve(path, rel))).toBe(false)
+        }
+        // 防跟随：所有链接目标 sentinel 完好
+        expect(readFileSync(resolve(nmSrc, 'sentinel.txt'), 'utf-8')).toBe('alive-root')
+        for (const [name, dir] of Object.entries(pkgTargets)) {
+          expect(readFileSync(resolve(dir, 'sentinel.txt'), 'utf-8')).toBe(`alive-${name}`)
+        }
+        // 失败路径不产生半成品（未注册 worktree、未建分支）
+        expect(git('branch --list session/wt-eperm')).not.toContain('session/wt-eperm')
+      } finally {
+        holder.kill()
+      }
+    }
+  )
 })
