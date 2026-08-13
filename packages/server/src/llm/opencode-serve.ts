@@ -334,38 +334,63 @@ export class OpencodeServeAdapter implements LLMAdapter {
 
       // 2. 先发起全局事件流订阅（不 await——SSE 长连接响应头到达才 resolve），
       //    再发消息——防事件丢失（消息响应快时事件先于订阅建立到达）。
-      //    eventAbort（函数级声明）供所有早退路径断连：订阅已发起却丢弃会
-      //    连接泄漏挂到服务端超时（吐槽猫探针实证），必须显式 abort；no-op
-      //    catch 防早退路径下 abort 引起的 rejection 无人消费（unhandled rejection）。
+      //    eventAbort（函数级声明）供所有早退路径断连 + 哨兵终止事件流消费
+      //    （见第 3/5 步）：订阅已发起却丢弃会连接泄漏挂到服务端超时（吐槽猫
+      //    探针实证），必须显式 abort。catch 转换防 unhandled rejection，同时
+      //    覆盖哨兵在 /event 响应头前断连的窄竞态（AbortError 但用户未取消 →
+      //    转 null 交第 4 步 msgResult 检查产出「消息发送失败」文案，不误判为
+      //    用户取消静默吞掉）
       eventAbort = new AbortController()
       const eventRespPromise = fetch(`${serve.baseUrl}/event`, {
         signal: eventAbort.signal,
+      }).catch((err) => {
+        if (err?.name === 'AbortError' && !signal?.aborted) return null
+        throw err
       })
-      eventRespPromise.catch(() => {})
 
-      // 3. 发送消息（历史平铺成单条 text + 全部图片 file parts）。
+      // 3. 发送消息（历史平铺成单条 text + 全部图片 file parts）——不 await。
       //    postJson 而非 fetch：message API 是「整轮 agent 完成才响应」语义，
-      //    undici 默认 headersTimeout=300s 会掐断长思考轮次（见 postJson 注释）
+      //    undici 默认 headersTimeout=300s 会掐断长思考轮次（见 postJson 注释）。
+      //    不 await 是实时化核心（店长裁决）：等 message 响应等于等整轮完成，
+      //    事件只能缓冲到轮末一次性刷出（12:33 轮工具日志聚集轮末 14ms 窗口
+      //    铁证，长思考期间用户看到死寂）——发出后立即进入事件流消费，两者
+      //    并发。哨兵包装：响应完成且非 2xx → eventAbort.abort() 提前终止事件
+      //    流消费（否则要等 SSE 断连/流超时才退出，错误文案延迟）；reject 转
+      //    {err} 防 unhandled rejection（早退路径该 Promise 可能无人 await）。
       const prompt = messagesToPrompt(messages)
       const imageParts = collectImageParts(messages)
-      const msgResp = await postJson(
+      const msgResultPromise = postJson(
         `${serve.baseUrl}/session/${sessionId}/message`,
         { parts: [{ type: 'text', text: prompt }, ...imageParts] },
         signal
+      ).then(
+        (resp) => {
+          // 闭包内 TS 无法收窄函数级声明的 eventAbort（执行时必已赋值——第 2
+          // 步先于此处同步执行），?. 仅为类型安全，null 时 no-op 语义等价
+          if (resp.status < 200 || resp.status >= 300) eventAbort?.abort()
+          return { resp }
+        },
+        (err) => ({ err: err as any })
       )
-      if (msgResp.status < 200 || msgResp.status >= 300) {
-        eventAbort.abort() // 断开已发起的 SSE 订阅——不 abort 连接泄漏到服务端超时
-        const detail = msgResp.text.slice(0, 300)
+
+      // 4. 等事件流响应可用，立即开始消费（与 message 响应并发）
+      const eventResp = await eventRespPromise
+      if (eventResp === null) {
+        // 哨兵在 /event 响应头前断连的窄竞态（msgResp 非 2xx 且先到）——
+        // message 结果必已就绪且非 2xx（reject 分支不触发哨兵），产出失败文案
+        const msgResult = await msgResultPromise
+        const detail = 'resp' in msgResult ? msgResult.resp.text.slice(0, 300) : ''
+        const status = 'resp' in msgResult ? msgResult.resp.status : 0
         yield {
-          content: `opencode serve 消息发送失败 (HTTP ${msgResp.status})${detail ? `: ${detail}` : ''}`,
+          content: `opencode serve 消息发送失败 (HTTP ${status})${detail ? `: ${detail}` : ''}`,
           done: true,
         }
         return
       }
-
-      // 4. 消费事件流 → 映射 chunk
-      const eventResp = await eventRespPromise
       if (!eventResp.ok || !eventResp.body) {
+        // 早退注意：message 已在途（第 3 步并发发出，无法收回）——finally 会
+        // POST abort 中断 serve 侧执行，在途 message 随之被响应；msgResult 哨兵
+        // 已包装 rejection，无 unhandled 泄漏。错误文案保持（对外契约不动）。
         yield {
           content: `opencode serve 事件流不可用 (HTTP ${eventResp.status})`,
           done: true,
@@ -373,18 +398,41 @@ export class OpencodeServeAdapter implements LLMAdapter {
         return
       }
 
+      // 5. 消费事件流 → 映射 chunk（实时产出）。msgResp 非 2xx 时哨兵已 abort，
+      //    cancelSignal 让 consumeEvents 读循环提前终止（finished=false）
       finished = yield* this.consumeEvents(
         eventResp.body,
         sessionId,
         signal,
-        options.chunkTimeoutMs
+        options.chunkTimeoutMs,
+        eventAbort.signal
       )
+
+      // 6. 事件流结束后统一检查 message 结果（通常已就绪——idle 与 message
+      //    响应同源产生；挂起/慢响应场景在此等待）。非 2xx → 失败文案（哨兵
+      //    已终止事件流，已产出内容保留）；reject → 抛给外层 catch（用户取消
+      //    静默空 done / 网络错误走「调用失败」文案）
+      const msgResult = await msgResultPromise
+      if ('resp' in msgResult) {
+        if (msgResult.resp.status < 200 || msgResult.resp.status >= 300) {
+          const detail = msgResult.resp.text.slice(0, 300)
+          yield {
+            content: `opencode serve 消息发送失败 (HTTP ${msgResult.resp.status})${detail ? `: ${detail}` : ''}`,
+            done: true,
+          }
+          return
+        }
+      } else {
+        throw msgResult.err
+      }
 
       // 断连/超时等非 idle 终止：已产出的内容保留，但不产出错误文案
       // （serve 侧执行可能仍在跑，finally 会 abort 兜底）
     } catch (err: any) {
       // 早退路径断连事件流订阅（订阅已发起；不断则 SSE 连接泄漏——serve 侧
-      // ~10s heartbeat 保活，挂到 serve 进程死亡）
+      // ~10s heartbeat 保活，挂到 serve 进程死亡）。AbortError 只来自用户取消
+      // （postJson/订阅的 signal 传导——msgResult.err 转抛与订阅 catch rethrow
+      // 两路），signal.aborted 必然已置位，静默空 done 语义不变
       eventAbort?.abort()
       if (signal?.aborted || err?.name === 'AbortError') {
         yield { content: '', done: true }
@@ -420,6 +468,12 @@ export class OpencodeServeAdapter implements LLMAdapter {
   /**
    * 消费 SSE 事件流并产出 Chunk。返回 true = session.idle 正常完成。
    *
+   * 终止源（abort 双源，任一触发 reader.cancel 让挂起的 read 以 done 返回）：
+   * - signal：用户取消 → 外层静默空 done
+   * - cancelSignal：内部断连（msgResp 非 2xx 哨兵 eventAbort）——/event 响应头
+   *   前的窄竞态由 chatStream 订阅 catch 覆盖，此处覆盖消费中窗口；终止后
+   *   finished=false，finally 走 abort 兜底
+   *
    * 过滤三原则（1.18.16 实测结构）：
    * - 全局流按 properties.sessionID 过滤（GET /event 无 session 过滤参数，
    *   多会话共享实例时事件全量广播）
@@ -432,7 +486,8 @@ export class OpencodeServeAdapter implements LLMAdapter {
     body: ReadableStream<Uint8Array>,
     sessionId: string,
     signal: AbortSignal | undefined,
-    chunkTimeoutMs?: number
+    chunkTimeoutMs?: number,
+    cancelSignal?: AbortSignal
   ): AsyncGenerator<Chunk, boolean, unknown> {
     const assistantMsgIds = new Set<string>()
     const reasoningSeen = new Set<string>()
@@ -445,6 +500,7 @@ export class OpencodeServeAdapter implements LLMAdapter {
       reader.cancel().catch(() => {})
     }
     signal?.addEventListener('abort', onAbort)
+    cancelSignal?.addEventListener('abort', onAbort)
 
     // 流读取超时：chunk 间最长停顿（serve 有 ~10s server.heartbeat 周期推送，
     // 默认 30s 不误杀；可经 chunkTimeoutMs 覆盖——推理模型思考停顿场景）
@@ -499,6 +555,7 @@ export class OpencodeServeAdapter implements LLMAdapter {
       log.warn('opencode serve 事件流中断', { sessionId, error: err.message })
     } finally {
       signal?.removeEventListener('abort', onAbort)
+      cancelSignal?.removeEventListener('abort', onAbort)
       reader.cancel().catch(() => {})
     }
     return finished

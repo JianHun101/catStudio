@@ -145,6 +145,10 @@ const messageServerConfig: { status: number; delayMs: number; hang: boolean } = 
   hang: false,
 }
 
+/** message 响应是否已发出（fleet server 在 writeHead 前置位）——时序断言用：
+ *  chunk 产出时 responded 仍为 false 即证明事件消费先于 message 响应 */
+const messageServerState: { responded: boolean } = { responded: false }
+
 /** 真实 server 收到的请求记录（按端口） */
 const messageRequests: { port: number; method: string; url: string; body: string }[] = []
 
@@ -165,6 +169,7 @@ beforeAll(async () => {
           return
         }
         const respond = () => {
+          messageServerState.responded = true
           res.writeHead(messageServerConfig.status, { 'Content-Type': 'application/json' })
           res.end('{}')
         }
@@ -214,6 +219,7 @@ describe('OpencodeServeAdapter', () => {
     messageServerConfig.status = 200
     messageServerConfig.delayMs = 0
     messageServerConfig.hang = false
+    messageServerState.responded = false
     messageRequests.length = 0
   })
 
@@ -344,7 +350,8 @@ describe('OpencodeServeAdapter', () => {
       expect(vi.mocked(spawnSupervised)).toHaveBeenCalled()
     })
 
-    // 消息挂起期间推事件（缓冲在流里，consumeEvents 建立后统一读取）
+    // 消息挂起期间推事件——实时化后并发消费（不等 message 响应，chunk 产出
+    // 顺序不受响应时序影响；旧实现此处事件缓冲到响应后才统一读取）
     stream.push(
       sseEvent('message.updated', {
         sessionID: TEST_SESSION,
@@ -373,6 +380,57 @@ describe('OpencodeServeAdapter', () => {
     ])
     // 真实 server 确已收到 message 请求（node:http 路径发生）
     expect(messageRequests.some((r) => r.url.includes('/message'))).toBe(true)
+  })
+
+  // ─── 事件流实时化（事件消费与 message 响应并发）─────
+
+  it('yields event chunks before pending message response (realtime streaming)', async () => {
+    // 实时化回归（店长裁决，12:33 轮工具日志聚集轮末 14ms 窗口铁证）：旧实现
+    // 先 await message 响应（message API 整轮完成才响应）再消费事件——长思考
+    // 期间事件被缓冲、用户看到死寂。新实现并发：事件消费不等待 message 响应。
+    // 时序断言用确定性标志 messageServerState.responded（fleet server 在
+    // writeHead 前置位）而非计时对比——免 flaky。
+    messageServerConfig.delayMs = 1500
+    const stream = makeEventStream()
+    stubFetch({ eventStream: stream.stream })
+    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'opencode-go/gpt-5.6-luna',
+    }) as AsyncGenerator<Chunk>
+    // 先驱动 generator（惰性：next 才执行到 spawn）
+    const firstNext = gen.next()
+
+    // 等事件流订阅建立（GET /event 被 fetch）再推事件——否则事件先于订阅丢失
+    await vi.waitFor(() => {
+      expect(vi.mocked(spawnSupervised)).toHaveBeenCalled()
+    })
+    stream.push(
+      sseEvent('message.updated', {
+        sessionID: TEST_SESSION,
+        info: { id: 'msg_a1', role: 'assistant' },
+      })
+    )
+    stream.push(
+      sseEvent('message.part.delta', {
+        sessionID: TEST_SESSION,
+        part: { id: 'prt_1', messageID: 'msg_a1', type: 'text', field: 'text', delta: 'live' },
+      })
+    )
+
+    // 核心时序断言：chunk 已产出，而挂起 1.5s 的 message 响应尚未发出
+    const first = await firstNext
+    expect(first.value).toEqual({ content: 'live', done: false, kind: 'text' })
+    expect(messageServerState.responded).toBe(false)
+
+    // 收尾：idle → 等 message 响应 → 正常 done（响应最终发生，链路完整）
+    stream.push(sseEvent('session.idle', { sessionID: TEST_SESSION }))
+    const rest: Chunk[] = []
+    for await (const c of gen) rest.push(c)
+    expect(rest).toEqual([{ content: '', done: true }])
+    expect(messageServerState.responded).toBe(true)
   })
 
   // ─── session 创建契约（model 拆分 + permission ruleset）───
@@ -889,10 +947,11 @@ describe('OpencodeServeAdapter', () => {
   })
 
   it('aborts pending SSE subscription when message send fails (connection leak fix)', async () => {
-    // msgResp 非 200 早退路径：GET /event 订阅已发起（先订阅后发消息的防丢
-    // 事件时序）但 Promise 无人 await——不显式断连则连接泄漏挂到服务端超时
-    // （吐槽猫探针实证）。修复：早退时 abort。断言 /event 请求的 signal 被置为
-    // aborted。
+    // msgResp 非 2xx 哨兵路径：/event 订阅已发起且事件流消费中（实时化并发后
+    // 不再是「早退前未消费」）——哨兵 eventAbort.abort() 双重作用：断开 /event
+    // 订阅（不 abort 连接泄漏挂到服务端超时，吐槽猫探针实证）+ cancelSignal
+    // 终止 consumeEvents 读循环（mock 流无 abort 语义，不 cancel 会挂死）。
+    // 断言 /event 请求的 signal 被置为 aborted + 失败文案照常产出。
     // message 500 由 fleet 真实 server 返回（postJson 走 node:http）
     messageServerConfig.status = 500
     const stream = makeEventStream()
