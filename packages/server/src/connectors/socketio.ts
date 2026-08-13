@@ -2511,10 +2511,16 @@ async function runAgentReply(
 
       if (alreadyReplied) {
         // 已回复过的用户消息：不重附旧图（images 字段与文字占位一并剥离）、
-        // 追加标注——模型不再被旧图牵引重复回答（陈旧上下文重复回答根修）
+        // 追加标注——模型不再被旧图牵引重复回答（陈旧上下文重复回答根修）。
+        // 带图时标注图片数（msgImages 已在 :2509 解析直接取用）并提示可请用户重发——
+        // 方案 v2 升级：图片数字事实不再丢失（吐槽猫审查硬缺口 ②）
+        const replyNote =
+          msgImages.length > 0
+            ? `（含 ${msgImages.length} 张图片；你已回复过这条，无需重复回答，如需重新看图请用户重发）`
+            : `（你已回复过这条，无需再次回复）`
         return {
           role: 'user' as const,
-          content: `${formatted}\n（你已回复过这条，无需再次回复）`,
+          content: `${formatted}\n${replyNote}`,
         }
       }
 

@@ -5246,6 +5246,283 @@ describe('runAgentReply — per-agent 静态运行配置透传', () => {
   })
 })
 
+// ─── 上下文卫生补测 — 已回复剥离/标注（3738c6a 审查 ⚠️ 回修）────────
+// 吐槽猫 ⚠️ 审查两条硬缺口：① socketio.test.ts 零测试覆盖；② 标注升级未实施
+// （方案 v2「含 N 张图片+请用户重发」vs 代码现状「无需再次回复」——图片数字事实丢失）。
+// 本块补测：buildTriggerFocusHint 单测 + 已回复剥离/未回复保留集成断言 + OQ2 边缘互斥钉死。
+
+describe('上下文卫生补测 — buildTriggerFocusHint 纯函数单测', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+  afterEach(() => resetDb())
+
+  it('空输入 → 返回 null', async () => {
+    const { buildTriggerFocusHint } = await import('./socketio.js')
+    expect(buildTriggerFocusHint('')).toBeNull()
+    expect(buildTriggerFocusHint(null as any)).toBeNull()
+  })
+
+  it('≤120 字 → 锚点含全文、无省略号', async () => {
+    const { buildTriggerFocusHint } = await import('./socketio.js')
+    const content = 'A'.repeat(120)
+    const hint = buildTriggerFocusHint(content)
+    expect(hint).not.toBeNull()
+    expect(hint!).toContain('本轮需要你回复的是最后一条消息')
+    expect(hint!).toContain(content)
+    expect(hint!).not.toContain('…')
+  })
+
+  it('>120 字 → 截断 120 字 + 省略号', async () => {
+    const { buildTriggerFocusHint } = await import('./socketio.js')
+    const content = 'B'.repeat(200)
+    const hint = buildTriggerFocusHint(content)
+    expect(hint).not.toBeNull()
+    expect(hint!).toContain('B'.repeat(120))
+    expect(hint!).toContain('…')
+    expect(hint!).not.toContain('B'.repeat(121))
+  })
+
+  it('锚点文案钉死（最后一条消息 + 不重复回答历史）', async () => {
+    const { buildTriggerFocusHint } = await import('./socketio.js')
+    const hint = buildTriggerFocusHint('你好')
+    expect(hint!).toContain('本轮需要你回复的是最后一条消息')
+    expect(hint!).toContain('不要重复回答其中已回复过的问题')
+  })
+})
+
+describe('上下文卫生补测 — 已回复剥离/标注（3738c6a 回修）', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+  afterEach(() => resetDb())
+
+  const agent = {
+    id: 'agent-hy',
+    name: 'ds猫',
+    avatar: '🐯',
+    systemPrompt: 'prompt',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-flash',
+    llmApiKey: 'sk-test',
+  }
+
+  /** 构造多消息上下文并触发 agent 执行，返回捕获 llmMessages 的 chatStream mock */
+  async function runScenario(opts: {
+    messages: Array<{
+      id: string
+      role: 'user' | 'agent'
+      agentId?: string | null
+      content: string
+      mentions?: string[]
+      images?: string[] | null
+      createdAt: string
+    }>
+    trigger: { id: string; content: string; mentions: string[]; images?: string[] | null }
+  }) {
+    const mod = await import('./socketio.js')
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const chatStream = vi.fn(async function* (_m: any[], _o: any) {
+      yield { content: 'ok', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: agent.id,
+      sessionId: 'session-hy',
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: opts.trigger.id,
+    } as any)
+
+    const db = getDb()
+    db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES ('session-hy', 'hy', ?)`).run(
+      JSON.stringify([agent.id])
+    )
+    const insertMsg = db.prepare(
+      `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, images, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    for (const m of opts.messages) {
+      insertMsg.run(
+        m.id,
+        'session-hy',
+        m.agentId ?? null,
+        m.role,
+        m.content,
+        JSON.stringify(m.mentions ?? []),
+        m.images ? JSON.stringify(m.images) : null,
+        m.createdAt
+      )
+    }
+    // 触发消息必须落库（runAgentReply 撤回保护：!messageExists → retracted 提前返回不走 adapter）
+    insertMsg.run(
+      opts.trigger.id,
+      'session-hy',
+      null,
+      'user',
+      opts.trigger.content,
+      JSON.stringify(opts.trigger.mentions),
+      opts.trigger.images ? JSON.stringify(opts.trigger.images) : null,
+      '2026-08-13 12:00:00'
+    )
+
+    await mod.executeAgentsSerial(
+      mockIo as any,
+      'session-hy',
+      [agent],
+      { id: opts.trigger.id, content: opts.trigger.content, mentions: opts.trigger.mentions },
+      'trace-hy'
+    )
+    return chatStream
+  }
+
+  it('已回复带图 user → images 剥离 + 含图标注升级（方案 v2：图片数 + 请用户重发）', async () => {
+    const chatStream = await runScenario({
+      messages: [
+        {
+          id: 'u1',
+          role: 'user',
+          content: '@ds猫 看图1',
+          mentions: ['ds猫'],
+          images: ['data:image/png;base64,AAA'],
+          createdAt: '2026-08-13 10:00:00',
+        },
+        {
+          id: 'r1',
+          role: 'agent',
+          agentId: agent.id,
+          content: '已回复你',
+          createdAt: '2026-08-13 10:01:00',
+        },
+      ],
+      trigger: { id: 'u2', content: '@ds猫 最新派活单', mentions: ['ds猫'] },
+    })
+
+    const msgs = chatStream.mock.calls[0][0] as any[]
+    // 已回复 u1：无 images 字段 + 含图标注升级（图片数事实不丢失）
+    const u1Msg = msgs.find((m) => m.role === 'user' && String(m.content).includes('看图1'))
+    expect(u1Msg).toBeDefined()
+    expect(u1Msg.images).toBeUndefined()
+    expect(String(u1Msg.content)).toContain(
+      '含 1 张图片；你已回复过这条，无需重复回答，如需重新看图请用户重发'
+    )
+    // 已回复 user 不是最后一条 → 无 isLast 受众标签
+    expect(String(u1Msg.content)).not.toContain('对你')
+    // 触发 u2（最新未回复）→ isLast 受众标签
+    const u2Msg = msgs.find((m) => m.role === 'user' && String(m.content).includes('最新派活单'))
+    expect(String(u2Msg.content)).toContain('对你')
+    // buildDynamicHints 注入 focus hint（触发内容非空时）
+    expect(
+      msgs.some(
+        (m) => m.role === 'system' && String(m.content).includes('本轮需要你回复的是最后一条消息')
+      )
+    ).toBe(true)
+  })
+
+  it('未回复 user → images 保留 + 文字占位（回归锚点，行为零回归）', async () => {
+    const chatStream = await runScenario({
+      messages: [
+        {
+          id: 'u1',
+          role: 'user',
+          content: '@ds猫 看图1',
+          mentions: ['ds猫'],
+          images: ['data:image/png;base64,BBB'],
+          createdAt: '2026-08-13 10:00:00',
+        },
+      ],
+      trigger: { id: 'u2', content: '@ds猫 看看', mentions: ['ds猫'] },
+    })
+
+    const msgs = chatStream.mock.calls[0][0] as any[]
+    const u1Msg = msgs.find((m) => m.role === 'user' && String(m.content).includes('看图1'))
+    expect(u1Msg).toBeDefined()
+    expect(u1Msg.images).toEqual(['data:image/png;base64,BBB'])
+    expect(String(u1Msg.content)).toContain('[用户附带了 1 张图片]')
+    expect(String(u1Msg.content)).not.toContain('你已回复过这条')
+  })
+
+  it('重发同图：最新带图 user（触发消息）→ 不标记不剥离', async () => {
+    const chatStream = await runScenario({
+      messages: [
+        {
+          id: 'u1',
+          role: 'user',
+          content: '@ds猫 旧图',
+          mentions: ['ds猫'],
+          images: ['data:image/png;base64,DDD'],
+          createdAt: '2026-08-13 10:00:00',
+        },
+        {
+          id: 'r1',
+          role: 'agent',
+          agentId: agent.id,
+          content: '已回复',
+          createdAt: '2026-08-13 10:01:00',
+        },
+      ],
+      trigger: {
+        id: 'u2',
+        content: '@ds猫 重发同图',
+        mentions: ['ds猫'],
+        images: ['data:image/png;base64,EEE'],
+      },
+    })
+
+    const msgs = chatStream.mock.calls[0][0] as any[]
+    // 旧图 u1：已回复 → 剥离 + 标注
+    const u1Msg = msgs.find((m) => m.role === 'user' && String(m.content).includes('旧图'))
+    expect(u1Msg.images).toBeUndefined()
+    expect(String(u1Msg.content)).toContain('含 1 张图片；你已回复过这条')
+    // 重发 u2（最新触发）：未回复 → images 保留 + isLast
+    const u2Msg = msgs.find((m) => m.role === 'user' && String(m.content).includes('重发同图'))
+    expect(u2Msg.images).toEqual(['data:image/png;base64,EEE'])
+    expect(String(u2Msg.content)).toContain('[用户附带了 1 张图片]')
+    expect(String(u2Msg.content)).toContain('对你')
+  })
+
+  it('OQ2 边缘：旧消息重派 → 已回复 user 带标注 + isLast 受众标签结构性互斥（钉现状行为）', async () => {
+    const chatStream = await runScenario({
+      messages: [
+        {
+          id: 'u1',
+          role: 'user',
+          content: '@ds猫 旧图问题',
+          mentions: ['ds猫'],
+          images: ['data:image/png;base64,FFF'],
+          createdAt: '2026-08-13 10:00:00',
+        },
+        {
+          id: 'r1',
+          role: 'agent',
+          agentId: agent.id,
+          content: '已回复旧图',
+          createdAt: '2026-08-13 10:01:00',
+        },
+      ],
+      trigger: { id: 'u2', content: '@ds猫 重派旧消息', mentions: ['ds猫'] },
+    })
+
+    const msgs = chatStream.mock.calls[0][0] as any[]
+    // 旧图 u1（已回复）：带已回复标注 + 无 images；且永不是最后一条（时间正序 + 反向扫描
+    // 固有属性——已回复的 user 必然在某个 agent 回复之前，ownReplySeen 由其后的回复置位，
+    // 数组最后一条 user 的 ownReplySeen 恒为 false → isLast 与已回复标注结构上互斥）
+    const u1Msg = msgs.find((m) => m.role === 'user' && String(m.content).includes('旧图问题'))
+    expect(u1Msg.images).toBeUndefined()
+    expect(String(u1Msg.content)).toContain('含 1 张图片；你已回复过这条')
+    expect(String(u1Msg.content)).not.toContain('对你')
+    // 触发 u2：最新消息独占 isLast 受众标签
+    const u2Msg = msgs.find((m) => m.role === 'user' && String(m.content).includes('重派旧消息'))
+    expect(String(u2Msg.content)).toContain('对你')
+    expect(String(u2Msg.content)).not.toContain('你已回复过这条')
+  })
+})
+
 // ─── 对话内 diff 展示 — 富文本块通道 ────────────────────
 // 猫的 content 只写摘要，diff 正文由 server 自动从 git 采集附加 extra
 // （永不进 LLM 上下文——验收 3 隔离断言见下）。
