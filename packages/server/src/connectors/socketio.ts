@@ -1983,6 +1983,28 @@ export function buildHandoffTriggerHint(triggerContent: string): string | null {
 }
 
 /**
+ * 触发消息聚焦提示：明确「本轮要回复的是最后一条消息」。
+ *
+ * 陈旧上下文重复回答失败模式（2026-08-13 实证）的对治——luna 重启后首跑
+ * 上下文含 3 条历史派活单 + 旧图消息 + 她自己的旧回复，模型选了最显眼的旧
+ * 图题重复回答而非最新派活单。该 hint 每轮注入：让模型把注意力钉在最后一条
+ * 触发消息上（含前 120 字截取作为锚点），其余历史不重复回答。
+ *
+ * 不 mutate 消息内容，纯注入指令。
+ *
+ * @param triggerContent 触发本轮执行的消息内容
+ * @returns 系统指令字符串，内容为空时返回 null
+ */
+export function buildTriggerFocusHint(triggerContent: string): string | null {
+  if (!triggerContent) return null
+  const preview = triggerContent.length > 120 ? `${triggerContent.slice(0, 120)}…` : triggerContent
+  return [
+    `[系统指令] 本轮需要你回复的是最后一条消息：${preview}`,
+    `其余消息是历史上下文，不要重复回答其中已回复过的问题。`,
+  ].join(' ')
+}
+
+/**
  * 将 system prompt 中的角色占位符解析为实际 agent 名。
  *
  * 纯函数，无副作用（listAllAgents 为 DB 查询——调用点在 runAgentReply，
@@ -2036,6 +2058,7 @@ function buildDynamicHints(
   return [
     buildReviewLoopHint(agent, relevantMessages),
     buildHandoffTriggerHint(triggerContent),
+    buildTriggerFocusHint(triggerContent),
   ].filter((h): h is string => h !== null)
 }
 
@@ -2434,6 +2457,25 @@ async function runAgentReply(
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
   const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages)
 
+  // 已回复用户消息识别（陈旧上下文重复回答失败模式根修，2026-08-13 实证）：
+  // 若某条用户消息在时间序上之后存在该 agent 自己的回复（截断窗口内），则视为
+  // 已回复——剥离旧图不重附、追加标注，防模型重复回答旧问题（luna 重启后首跑
+  // 重复回答 18:47 旧图问题的实证：旧图 @luna 消息一小时后仍在上下文且 images
+  // 原样重附，模型选了最显眼的旧图题而非最新派活单）。反向扫描一次 O(n)，
+  // ownReplySeen 一旦置位即保持——用户消息与回复之间可穿插其他 agent 消息。
+  const repliedUserIndexes = new Set<number>()
+  {
+    let ownReplySeen = false
+    for (let i = truncatedMessages.length - 1; i >= 0; i--) {
+      const m = truncatedMessages[i]
+      if (m.role === 'agent' && m.agent_id === agent.id) {
+        ownReplySeen = true
+      } else if (m.role === 'user' && ownReplySeen) {
+        repliedUserIndexes.add(i)
+      }
+    }
+  }
+
   const llmMessages: LLMMessage[] = [
     { role: 'system', content: finalSystemPrompt },
     ...dynamicHints.map((h) => ({ role: 'system' as const, content: h })),
@@ -2460,13 +2502,24 @@ async function runAgentReply(
         }
       }
 
+      const alreadyReplied = repliedUserIndexes.has(idx)
+
       const mentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
       const audience = formatAudienceTag(mentions, agent.name)
-
-      // 用户消息附带图片：真图（base64）走 images 字段供 ollama 视觉模型使用，
-      // 同时加文字占位，让 deepseek/claude 等非视觉模型也能感知"用户发了图"
       const msgImages: string[] = parseJsonArray(m.images)
       const formatted = formatUserMessage(m.content, mentions, audience, isLast)
+
+      if (alreadyReplied) {
+        // 已回复过的用户消息：不重附旧图（images 字段与文字占位一并剥离）、
+        // 追加标注——模型不再被旧图牵引重复回答（陈旧上下文重复回答根修）
+        return {
+          role: 'user' as const,
+          content: `${formatted}\n（你已回复过这条，无需再次回复）`,
+        }
+      }
+
+      // 未回复用户消息：附带图片走 images 字段供 ollama 视觉模型使用，
+      // 同时加文字占位，让 deepseek/claude 等非视觉模型也能感知"用户发了图"
       const content =
         msgImages.length > 0 ? `${formatted}\n[用户附带了 ${msgImages.length} 张图片]` : formatted
 
