@@ -4,7 +4,7 @@ import { ClaudeAdapter } from './claude.js'
 import { OpenAIAdapter } from './openai.js'
 import { PiAdapter } from './pi.js'
 import { OllamaAdapter } from './ollama.js'
-import { OpencodeServeAdapter } from './opencode-serve.js'
+import { OpencodeAdapter } from './opencode.js'
 import type { AgentConfig } from '@cat-study/shared'
 import { createLogger } from '../logger.js'
 
@@ -91,10 +91,10 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       })
       break
     case 'opencode':
-      // serve 长驻适配器（阶段 2 拍板：opencode provider 走 headless agent 模式，
-      // 工具循环在 opencode 内部自动推进）——run 适配器（opencode.ts）文件与
-      // 测试保留不动，如需回退 run 形态改回 OpencodeAdapter 构造即可
-      adapter = new OpencodeServeAdapter({
+      // run 形态适配器（df2632a 回退拍板：一轮一进程 + --agent build --auto 工具循环，
+      // 与 claude -p 同构）——serve 长驻适配器文件（opencode-serve.ts）与测试保留
+      // 不动作为回滚路径，如需回退改回 OpencodeServeAdapter 构造即可
+      adapter = new OpencodeAdapter({
         model: agent.llmModel,
         envExtra: parseEnvExtra(agent.llmEnvExtra),
       })

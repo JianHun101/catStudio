@@ -23,8 +23,10 @@ class MockOpenAIAdapter {
   constructor(_opts: unknown) {}
 }
 
-class MockOpencodeServeAdapter {
+class MockOpencodeAdapter {
   readonly provider = 'opencode'
+  /** 接线锁定标识：必须是 run 形态——若 registry 构造被改回 serve 适配器，kind 断言即红 */
+  readonly kind = 'run'
   chatStream = mockChatStream
   constructor(public opts: { model?: string; envExtra?: Record<string, string> }) {}
 }
@@ -32,7 +34,7 @@ class MockOpencodeServeAdapter {
 vi.mock('./deepseek.js', () => ({ DeepSeekAdapter: MockDeepSeekAdapter }))
 vi.mock('./claude.js', () => ({ ClaudeAdapter: MockClaudeAdapter }))
 vi.mock('./openai.js', () => ({ OpenAIAdapter: MockOpenAIAdapter }))
-vi.mock('./opencode-serve.js', () => ({ OpencodeServeAdapter: MockOpencodeServeAdapter }))
+vi.mock('./opencode.js', () => ({ OpencodeAdapter: MockOpencodeAdapter }))
 
 describe('registry', () => {
   let registryModule: typeof import('./registry.js')
@@ -73,10 +75,12 @@ describe('registry', () => {
       expect(adapter.provider).toBe('openai')
     })
 
-    it('returns Opencode serve adapter for opencode provider (headless agent mode)', () => {
+    it('returns Opencode run adapter for opencode provider (run mode agent loop)', () => {
       const agent = { ...baseAgent, llmProvider: 'opencode' }
       const adapter = registryModule.getAdapterForAgent(agent)
       expect(adapter.provider).toBe('opencode')
+      // 接线锁定：run 形态标识（回归实验双向验证过——还原 serve 构造恰好此断言红）
+      expect((adapter as unknown as MockOpencodeAdapter).kind).toBe('run')
     })
 
     it('throws for unsupported provider', () => {
@@ -190,16 +194,14 @@ describe('registry', () => {
       expect(a1).toBe(a2)
     })
 
-    it('passes parsed envExtra to OpencodeServeAdapter constructor (宽容：非法 JSON → 空对象不炸)', () => {
+    it('passes parsed envExtra to OpencodeAdapter constructor (宽容：非法 JSON → 空对象不炸)', () => {
       const agent = {
         ...baseAgent,
         llmProvider: 'opencode',
         llmModel: 'anthropic/claude-sonnet-4-5',
         llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:7897"}',
       }
-      const adapter = registryModule.getAdapterForAgent(
-        agent
-      ) as unknown as MockOpencodeServeAdapter
+      const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockOpencodeAdapter
       expect(adapter.opts.envExtra).toEqual({ HTTPS_PROXY: 'http://127.0.0.1:7897' })
 
       // 非法 JSON → 宽容降级空对象（不抛错），构造正常
@@ -210,9 +212,7 @@ describe('registry', () => {
         llmEnvExtra: 'not-json{{',
       }
       expect(() => registryModule.getAdapterForAgent(bad)).not.toThrow()
-      const badAdapter = registryModule.getAdapterForAgent(
-        bad
-      ) as unknown as MockOpencodeServeAdapter
+      const badAdapter = registryModule.getAdapterForAgent(bad) as unknown as MockOpencodeAdapter
       expect(badAdapter.opts.envExtra).toEqual({})
     })
 
