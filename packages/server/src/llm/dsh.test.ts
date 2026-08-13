@@ -343,11 +343,14 @@ describe('DshAdapter', () => {
     expect(content).toContain("CATSTUDY_MSG_ID: 'm1'")
     expect(content).toContain('CATSTUDY_TRIGGER_AUTHOR_NAME')
     expect(content).toContain("'店长'")
-    // 模型与 approval 行（OQ：row schema post-install 以 --dump-config 核对）
+    // 模型与 approval 行（--dump-config + 插件源码双实证：
+    // patch config 整块替换非合并，provider/model 均必填；approval 用 policy key）
     expect(content).toContain('agent-default-model')
+    expect(content).toContain('provider: deepseek-official')
     expect(content).toContain("model: 'deepseek-chat'")
     expect(content).toContain('approval')
-    expect(content).toContain('mode: never')
+    expect(content).toContain('policy: never')
+    expect(content).not.toContain('mode: never')
 
     // 完成 → patch 文件 finally 清理
     child.emitClose(0)

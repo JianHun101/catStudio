@@ -55,10 +55,14 @@ function yamlScalar(value: string): string {
  *     guaranteed 路径：不依赖 dsh 的 !!js env 求值（店长派活单红项，post-install 实测
  *     通过后可简化为静态 patch + !!js process.env.X）。工具面 mcp__catstudy__* 与
  *     claude 链逐字一致（官方文档实证：mcp__<serverName>__<rawName>）。
- *  2. agent-default-model——headless 走 base bundle 的默认模型选择行，覆盖为当轮
- *     llmModel（**row id 未实证，post-install 以 --dump-config 核对，见 OQ**）。
- *  3. approval——headless 无 UI 应答时工具 fail-closed 全拒，需配置放行
- *     （**row id 与取值未实证，post-install 核对，见 OQ**）。
+ *  2. agent-default-model——覆盖当轮 llmModel；patch config 是**整块替换**非合并
+ *     （dsh-base/cordis.patch.yml 注释实证），且 dsh-agent-default-model 的 Config
+ *     schema 中 provider/model 均必填（z.string().required()）——缺 provider 会 Zod
+ *     校验失败，故连 provider: deepseek-official 一起写（deepseek-official 消费
+ *     DEEPSEEK_API_KEY 继承 env，与本适配器凭证注入一致）。
+ *  3. approval——headless 无 UI 应答时工具 fail-closed 全拒；policy: never 全自动放行
+ *     （dsh-user-approval Config schema 实锤：z.object({policy: z.union(['ask','never'])
+ *     .default('ask')})——'never' = 确定性放行非全拒，mode 不是合法 key 会被剥掉）。
  *
  * env 值来自 options.context（CATSTUDY_* 五元组 + 可选 triggerAuthorName），
  * MCP server 子进程继承；文件名带 pid + 随机后缀——同一进程并发多个 spawn 不冲突。
@@ -89,11 +93,12 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
 - insert:
     - id: agent-default-model
       config:
+        provider: deepseek-official
         model: ${yamlScalar(model)}
 - insert:
     - id: approval
       config:
-        mode: never
+        policy: never
 `
   const p = join(
     tmpdir(),
