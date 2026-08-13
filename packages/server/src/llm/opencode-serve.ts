@@ -143,7 +143,18 @@ export class OpencodeServeAdapter implements LLMAdapter {
 
   /** 懒启动长驻 serve 进程（进程存活即复用；死亡下次调用重启） */
   private async ensureServer(): Promise<ServeHandle> {
+    // 存活守卫：进程未退出（exitCode === null）直接复用句柄
     if (this.serve && this.serve.child.exitCode === null) return this.serve
+    // 走到这 = 无句柄或进程已死。清掉死亡引用：serve 句柄 + 已 resolve 的旧
+    // readyPromise——旧 Promise 已指向死亡句柄，不清理则第二守卫命中它直接
+    // 返回死亡句柄，「死亡重启」永不发生（吐槽猫探针实证）。
+    // 并发契约：只清「已 resolve 且进程已死」的状态，不误杀 in-flight 启动——
+    // startServer 就绪前 this.serve 恒为 null（此处先清、就绪后才赋值），
+    // 启动进行中时 readyPromise 为 pending，由下方守卫原样复用。
+    if (this.serve) {
+      this.serve = null
+      this.readyPromise = null
+    }
     if (this.readyPromise) return this.readyPromise
     this.readyPromise = this.startServer().catch((err) => {
       this.readyPromise = null // 启动失败可重试（下次调用重新 spawn）
@@ -260,8 +271,15 @@ export class OpencodeServeAdapter implements LLMAdapter {
       }
 
       // 2. 先发起全局事件流订阅（不 await——SSE 长连接响应头到达才 resolve），
-      //    再发消息——防事件丢失（消息响应快时事件先于订阅建立到达）
-      const eventRespPromise = fetch(`${serve.baseUrl}/event`)
+      //    再发消息——防事件丢失（消息响应快时事件先于订阅建立到达）。
+      //    AbortController 供早退路径断连：msgResp 失败时若丢弃订阅，连接
+      //    泄漏挂到服务端超时（吐槽猫探针实证），必须显式 abort；no-op catch
+      //    防早退路径下 abort 引起的 rejection 无人消费（unhandled rejection）。
+      const eventAbort = new AbortController()
+      const eventRespPromise = fetch(`${serve.baseUrl}/event`, {
+        signal: eventAbort.signal,
+      })
+      eventRespPromise.catch(() => {})
 
       // 3. 发送消息（历史平铺成单条 text + 全部图片 file parts）
       const prompt = messagesToPrompt(messages)
@@ -272,6 +290,7 @@ export class OpencodeServeAdapter implements LLMAdapter {
         body: JSON.stringify({ parts: [{ type: 'text', text: prompt }, ...imageParts] }),
       })
       if (!msgResp.ok) {
+        eventAbort.abort() // 断开已发起的 SSE 订阅——不 abort 连接泄漏到服务端超时
         const detail = (await msgResp.text().catch(() => '')).slice(0, 300)
         yield {
           content: `opencode serve 消息发送失败 (HTTP ${msgResp.status})${detail ? `: ${detail}` : ''}`,

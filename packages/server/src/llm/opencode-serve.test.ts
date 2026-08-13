@@ -85,6 +85,7 @@ const TEST_SESSION = 'ses_test1'
 function stubFetch(
   overrides: {
     sessionStatus?: number
+    messageStatus?: number
     eventStream?: ReadableStream<Uint8Array>
     /** /doc 连接拒绝（真实 spawn ENOENT 场景：进程从未启动，探测必然连不上） */
     docUnreachable?: boolean
@@ -108,7 +109,7 @@ function stubFetch(
       })
     }
     if (method === 'POST' && u.includes('/message')) {
-      return new Response('{}', { status: 200 })
+      return new Response('{}', { status: overrides.messageStatus ?? 200 })
     }
     if (method === 'GET' && u.endsWith('/event')) {
       return new Response(eventStream, { status: 200 })
@@ -649,6 +650,82 @@ describe('OpencodeServeAdapter', () => {
     void fetchMock1
   })
 
+  // ─── 死亡重启（进程退出后下次调用重新 spawn）─────
+
+  it('restarts serve after process death (spawn again on new port, not dead handle reuse)', async () => {
+    // 缺陷回归：ensureServer 旧实现 readyPromise 成功路径从不置 null——进程
+    // 死亡后第二轮调用命中已 resolve 的旧 Promise → 返回死亡句柄 → 重启永不
+    // 发生（吐槽猫探针实证）。修复：清死亡引用后重新 spawn（新端口新进程）。
+    const stream1 = makeEventStream()
+    const { calls: calls1 } = stubFetch({ eventStream: stream1.stream })
+    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const child1 = fakeChild()
+    const child2 = fakeChild()
+    vi.mocked(spawnSupervised)
+      .mockReturnValueOnce(child1 as any)
+      .mockReturnValue(child2 as any)
+
+    // 第一轮：正常完成（spawn 1 次，句柄存活）
+    const gen1 = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'opencode-go/gpt-5.6-luna',
+    })
+    const p1 = collect(gen1)
+    await vi.waitFor(() => {
+      expect(vi.mocked(spawnSupervised)).toHaveBeenCalled()
+    })
+    stream1.push(
+      sseEvent('message.updated', {
+        sessionID: TEST_SESSION,
+        info: { id: 'msg_a1', role: 'assistant' },
+      })
+    )
+    stream1.push(
+      sseEvent('message.part.delta', {
+        sessionID: TEST_SESSION,
+        part: { id: 'prt_1', messageID: 'msg_a1', type: 'text', field: 'text', delta: 'first' },
+      })
+    )
+    stream1.push(sseEvent('session.idle', { sessionID: TEST_SESSION }))
+    await p1
+
+    // 模拟进程死亡：真实语义 = 进程退出后 exitCode 变非 null
+    ;(child1 as any).exitCode = 1
+
+    // 第二轮：死亡 → 重启（第二次 spawn，新 fakeChild 存活）+ 正常回复
+    const stream2 = makeEventStream()
+    vi.unstubAllGlobals()
+    const { calls: calls2 } = stubFetch({ eventStream: stream2.stream })
+    const gen2 = adapter.chatStream([{ role: 'user', content: 'again' }], {
+      model: 'opencode-go/gpt-5.6-luna',
+    })
+    const p2 = collect(gen2)
+    await vi.waitFor(() => {
+      expect(vi.mocked(spawnSupervised)).toHaveBeenCalledTimes(2)
+    })
+    stream2.push(
+      sseEvent('message.updated', {
+        sessionID: TEST_SESSION,
+        info: { id: 'msg_a2', role: 'assistant' },
+      })
+    )
+    stream2.push(
+      sseEvent('message.part.delta', {
+        sessionID: TEST_SESSION,
+        part: { id: 'prt_2', messageID: 'msg_a2', type: 'text', field: 'text', delta: 'second' },
+      })
+    )
+    stream2.push(sseEvent('session.idle', { sessionID: TEST_SESSION }))
+    const chunks2 = await p2
+    expect(chunks2[0]).toEqual({ content: 'second', done: false, kind: 'text' })
+
+    // 核心断言：重启发生（第二次 spawn）且走新进程的新端口——不是复用死亡
+    // 句柄的旧 baseUrl（旧代码下 secondSess.url === firstSess.url 即失败）
+    expect(spawnSupervised).toHaveBeenCalledTimes(2)
+    const firstSess = calls1.find((c) => c.init?.method === 'POST' && c.url.endsWith('/session'))!
+    const secondSess = calls2.find((c) => c.init?.method === 'POST' && c.url.endsWith('/session'))!
+    expect(secondSess.url).not.toBe(firstSess.url)
+  })
+
   // ─── 错误路径 ────────────────────────────────
 
   it('yields error message when session creation fails (HTTP 500)', async () => {
@@ -665,6 +742,31 @@ describe('OpencodeServeAdapter', () => {
 
     expect(chunks[0].content).toContain('opencode serve 会话创建失败')
     expect(chunks.at(-1)?.done).toBe(true)
+  })
+
+  it('aborts pending SSE subscription when message send fails (connection leak fix)', async () => {
+    // msgResp 非 200 早退路径：GET /event 订阅已发起（先订阅后发消息的防丢
+    // 事件时序）但 Promise 无人 await——不显式断连则连接泄漏挂到服务端超时
+    // （吐槽猫探针实证）。修复：早退时 abort。断言 /event 请求的 signal 被置为
+    // aborted。
+    const stream = makeEventStream()
+    const { calls } = stubFetch({ eventStream: stream.stream, messageStatus: 500 })
+    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const chunks = await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'opencode-go/gpt-5.6-luna',
+      })
+    )
+
+    expect(chunks[0].content).toContain('opencode serve 消息发送失败')
+    expect(chunks.at(-1)?.done).toBe(true)
+    // /event 请求未显式传 method（mock 内部默认 GET，记录的原生 init 无 method
+    // 字段）——URL 后缀已足够唯一（/doc、/abort 均不同后缀）
+    const eventCall = calls.find((c) => c.url.endsWith('/event'))!
+    expect(eventCall.init?.signal?.aborted).toBe(true)
   })
 
   it('yields cannot-start error on serve spawn error (fast fail, not 30s timeout)', async () => {
