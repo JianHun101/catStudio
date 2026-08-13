@@ -3,9 +3,14 @@ import { Readable } from 'node:stream'
 import { readFileSync, existsSync } from 'node:fs'
 import type { Chunk } from '@cat-study/shared'
 
-// Mock cli-utils 以阻止模块加载时的 resolveBin() 调用
+// Mock cli-utils 以阻止模块加载时的 resolveJsEntry() 调用
+// vi.hoisted：mock 工厂被提升到 const 声明之前，直接引用 DSH_ENTRY 会 TDZ 抛错
+// → dsh.ts 模块加载时 resolveJsEntry() 抛错被 catch → DSH_ENTRY='' 走「未安装」早退
+const DSH_ENTRY = vi.hoisted(
+  () => 'C:/Users/test/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/lib/bin.js'
+)
 vi.mock('./cli-utils.js', () => ({
-  resolveBin: vi.fn(() => 'C:/Users/test/AppData/Roaming/npm/dsh.cmd'),
+  resolveJsEntry: vi.fn(() => DSH_ENTRY),
   messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
   attachIdleTimeout: vi.fn(() => () => {}),
   spawnSupervised: vi.fn(),
@@ -229,7 +234,7 @@ describe('DshAdapter', () => {
 
   // ─── spawn 参数形态 ───────────────────────────
 
-  it('spawns dsh --profile headless with task as positional (no context)', async () => {
+  it('spawns node <dsh-entry> --profile headless with task as positional (no context)', async () => {
     const adapter = new DshAdapter({ model: 'deepseek-chat', apiKey: 'sk-key' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -242,8 +247,10 @@ describe('DshAdapter', () => {
     const pending = startGen(gen)
 
     const [bin, args, opts] = vi.mocked(spawnSupervised).mock.calls.at(-1)!
-    expect(bin).toBe('C:/Users/test/AppData/Roaming/npm/dsh.cmd')
-    expect(args).toEqual(['--profile', 'headless', 'User: hello\n\nAssistant: hi'])
+    // 纯 JS CLI 用 node.exe spawn（避免 .cmd 包装 EINVAL，CLAUDE.md「node path/to/cli.mjs」）
+    expect(bin).toBe(process.execPath)
+    expect(args[0]).toBe(DSH_ENTRY)
+    expect(args.slice(1)).toEqual(['--profile', 'headless', 'User: hello\n\nAssistant: hi'])
     expect(args).not.toContain('--patch')
     // 凭证注入：apiKey 以 DEEPSEEK_API_KEY 进 spawn env（DS_KEY 复用）
     expect(opts.env!.DEEPSEEK_API_KEY).toBe('sk-key')
@@ -268,6 +275,29 @@ describe('DshAdapter', () => {
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
     expect(args.at(-1)!.length).toBe(30000)
+
+    child.emitClose(0)
+    await pending
+    await gen.next()
+  })
+
+  it('does not override DEEPSEEK_API_KEY when apiKey is empty (credentials 落盘兜底)', async () => {
+    // apiKey 为空时不注入（条件注入）——不写空串覆盖继承 env（process.env 有则保留、
+    // 无则保持 undefined）；空串会覆盖 dsh credentials 落盘兜底（有凭证的安装失效）
+    const adapter = new DshAdapter({ model: 'deepseek-chat' }) // 无 apiKey
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = drive(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'deepseek-chat',
+      })
+    )
+    const pending = startGen(gen)
+
+    const [, , opts] = vi.mocked(spawnSupervised).mock.calls.at(-1)!
+    // 与继承 env 一致（未注入空串覆盖）——测试环境 process.env 可能带真实 DS_KEY
+    expect(opts.env!.DEEPSEEK_API_KEY).toBe(process.env.DEEPSEEK_API_KEY)
 
     child.emitClose(0)
     await pending

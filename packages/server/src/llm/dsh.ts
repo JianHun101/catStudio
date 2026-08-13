@@ -1,7 +1,7 @@
 import type { Chunk, ChatOptions, LLMMessage } from '@cat-study/shared'
 import type { LLMAdapter } from './adapter.js'
 import {
-  resolveBin,
+  resolveJsEntry,
   messagesToPrompt,
   attachIdleTimeout,
   spawnSupervised,
@@ -16,21 +16,20 @@ import { join, resolve } from 'node:path'
 const log = createLogger('dsh')
 
 interface DshConfig {
-  /** DeepSeek API Key（DS_KEY 复用）；可选——缺失时以空串注入，dsh 走 credentials 落盘兜底 */
+  /** DeepSeek API Key（DS_KEY 复用）；可选——缺失时不注入 DEEPSEEK_API_KEY，dsh 走 credentials 落盘兜底 */
   apiKey?: string
   model: string
-  baseUrl?: string
   /** 额外环境变量（per-agent 配置；registry 已宽容解析，此处收对象） */
   envExtra?: Record<string, string>
 }
 
-/** dsh CLI 二进制路径（模块加载时解析） */
-let DSH_BIN: string
+/** dsh CLI JS 入口路径（模块加载时解析；纯 JS 包用 node <entry> 执行，avoid .cmd wrappers） */
+let DSH_ENTRY: string
 try {
-  DSH_BIN = resolveBin('dsh', '@deepseek-ai/dsh')
+  DSH_ENTRY = resolveJsEntry('@deepseek-ai/dsh', 'dsh')
 } catch (err: any) {
   log.warn('dsh CLI 未安装', { error: err.message })
-  DSH_BIN = ''
+  DSH_ENTRY = ''
 }
 
 /** MCP server 脚本路径（workspace 上级 = 项目根 → scripts/mcp-server.mjs；
@@ -107,9 +106,13 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
 /**
  * dsh（deepseek-harness）CLI 适配器。
  *
- * 通过 spawn dsh 子进程（`--profile headless "task"` 一次性形态）→ 收集 stdout →
+ * 通过 spawn node dsh-entry 子进程（`--profile headless "task"` 一次性形态）→ 收集 stdout →
  * 输出最终答案 Chunk。与 claude.ts 同为 CLI 子进程形态，复用 cli-utils 公共设施
- * （resolveBin / messagesToPrompt / attachIdleTimeout / spawnSupervised）。
+ * （resolveJsEntry / messagesToPrompt / attachIdleTimeout / spawnSupervised）。
+ *
+ * 纯 JS CLI 用 `node <entry>` 执行（spawn(process.execPath, [DSH_ENTRY, ...])）——
+ * 避免 .cmd 包装（resolveBin 在 win32 落 .cmd，supervisor spawn('.cmd', shell:false) 在
+ * Node 24 同步 EINVAL，bde908e ❌ 审查阻塞项；node.exe 是原生 exe 无此问题）。
  *
  * 形态差异（headless 无流式）：整轮 agent 循环完成后一次性打印最终答案到 stdout
  * （exit 0 = completed，stderr 保持空；非 0 退出 stderr 带错误码+消息）。所以本适配器
@@ -119,7 +122,8 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
  *
  * 凭证：dsh 解析顺序为 继承 env → $DSH_HOME/.credentials.yaml → 调用目录 .env →
  * $DSH_HOME/.env；本适配器把 apiKey（DS_KEY 复用）以 DEEPSEEK_API_KEY 注入 spawn env
- * （继承 env 优先级最高，覆盖 credentials 落盘——不落盘任何密钥）。
+ * （继承 env 优先级最高，覆盖 credentials 落盘——不落盘任何密钥）。apiKey 为空时**不注入**
+ * （条件注入）——空串会覆盖 dsh credentials 落盘兜底，让有凭证的安装失效。
  *
  * 前置要求: npm i -g @deepseek-ai/dsh
  */
@@ -127,13 +131,11 @@ export class DshAdapter implements LLMAdapter {
   readonly provider = 'dsh'
   private apiKey: string
   private model: string
-  private baseUrl?: string
   private envExtra: Record<string, string>
 
   constructor(config: DshConfig) {
     this.apiKey = config.apiKey ?? ''
     this.model = config.model
-    this.baseUrl = config.baseUrl
     this.envExtra = config.envExtra ?? {}
   }
 
@@ -150,7 +152,7 @@ export class DshAdapter implements LLMAdapter {
       return
     }
 
-    if (!DSH_BIN) {
+    if (!DSH_ENTRY) {
       yield {
         content: 'dsh CLI 未安装。请先运行: npm i -g @deepseek-ai/dsh',
         done: true,
@@ -186,11 +188,16 @@ export class DshAdapter implements LLMAdapter {
     const env = {
       ...process.env,
       ...this.envExtra,
-      // 凭证注入（DS_KEY 复用）：dsh 继承 env 优先级最高，不落盘密钥
-      DEEPSEEK_API_KEY: this.apiKey,
     } as Record<string, string>
+    // 凭证条件注入（DS_KEY 复用）：仅非空才写 DEEPSEEK_API_KEY（dsh 继承 env 优先级最高），
+    // 避免空串覆盖 dsh credentials 落盘兜底（有凭证的安装因空注入失效）
+    if (this.apiKey) {
+      env.DEEPSEEK_API_KEY = this.apiKey
+    }
 
-    const child = spawnSupervised(DSH_BIN, args, {
+    // spawn node <DSH_ENTRY>：纯 JS CLI 用 node.exe 执行（避免 .cmd 包装 EINVAL，
+    // CLAUDE.md「Spawn: node path/to/cli.mjs」约定）——supervisor command=node.exe 原生 exe
+    const child = spawnSupervised(process.execPath, [DSH_ENTRY, ...args], {
       env,
       label: 'dsh',
       // cwd 透传会话 worktree 路径（会话隔离）——缺省默认 workspace（存量行为零变化）

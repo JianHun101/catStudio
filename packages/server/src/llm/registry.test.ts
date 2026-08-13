@@ -38,7 +38,6 @@ class MockDshAdapter {
     public opts: {
       apiKey?: string
       model?: string
-      baseUrl?: string
       envExtra?: Record<string, string>
     }
   ) {}
@@ -236,7 +235,7 @@ describe('registry', () => {
       expect(badAdapter.opts.envExtra).toEqual({})
     })
 
-    it('passes apiKey/model/baseUrl/envExtra to DshAdapter constructor (envExtra 宽容解析)', () => {
+    it('passes apiKey/model/envExtra to DshAdapter constructor (baseUrl 不消费; envExtra 宽容解析)', () => {
       const agent = {
         ...baseAgent,
         llmProvider: 'dsh',
@@ -247,7 +246,9 @@ describe('registry', () => {
       const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockDshAdapter
       expect(adapter.opts.apiKey).toBe('sk-key-1')
       expect(adapter.opts.model).toBe('deepseek-chat')
-      expect(adapter.opts.baseUrl).toBe('https://api.deepseek.com')
+      // baseUrl 死字段已移除（dsh 无自定义端点需求，YAGNI）——不再传入构造
+      // （构造签名已无 baseUrl，TS 层面保证；此处 cast 钉运行时行为防回退）
+      expect((adapter.opts as { baseUrl?: string }).baseUrl).toBeUndefined()
       expect(adapter.opts.envExtra).toEqual({ HTTPS_PROXY: 'http://127.0.0.1:7897' })
 
       // 非法 JSON → 宽容降级空对象（不抛错），构造正常
@@ -255,6 +256,20 @@ describe('registry', () => {
       expect(() => registryModule.getAdapterForAgent(bad)).not.toThrow()
       const badAdapter = registryModule.getAdapterForAgent(bad) as unknown as MockDshAdapter
       expect(badAdapter.opts.envExtra).toEqual({})
+    })
+
+    it('returns same instance for different baseUrl (dsh, baseUrl 不参与实例区分)', () => {
+      // baseUrl 从缓存键摘除——仅 baseUrl 不同 → 同实例（构造不消费 baseUrl，无串台维度）
+      const d1 = {
+        ...baseAgent,
+        llmProvider: 'dsh',
+        llmModel: 'deepseek-chat',
+        llmBaseUrl: 'https://api.deepseek.com',
+      }
+      const d2 = { ...d1, llmBaseUrl: 'https://other.example.com' }
+      const a1 = registryModule.getAdapterForAgent(d1)
+      const a2 = registryModule.getAdapterForAgent(d2)
+      expect(a1).toBe(a2)
     })
 
     it('returns different instance for different envExtra (dsh, same model)', () => {

@@ -1,25 +1,30 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { messagesToPrompt, spawnSupervised } from './cli-utils.js'
+import path from 'node:path'
+import { resolveJsEntry, messagesToPrompt, spawnSupervised } from './cli-utils.js'
 import type { LLMMessage } from '@cat-study/shared'
 
 // ─── spawnSupervised env 合并测试 ────────────────
 
 const spawnMock = vi.hoisted(() => vi.fn())
 const existsSyncMock = vi.hoisted(() => vi.fn())
+const execSyncMock = vi.hoisted(() => vi.fn())
+const readFileSyncMock = vi.hoisted(() => vi.fn())
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
-  return { ...actual, spawn: spawnMock }
+  return { ...actual, spawn: spawnMock, execSync: execSyncMock }
 })
 // 注意：cli-utils.ts 是 `import fs from 'node:fs'`（default import）——只替换具名
 // 导出 existsSync 时 default 仍是真实 fs，mock 不生效（吐槽猫审查实证：三个用例
-// 实际全跑 supervisor 分支）。必须同时替换 default 对象上的 existsSync。
+// 实际全跑 supervisor 分支）。必须同时替换 default 对象上的 existsSync/readFileSync
+//（readFileSync 供 resolveJsEntry 读 package.json）。
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return {
     ...actual,
-    default: { ...actual, existsSync: existsSyncMock },
+    default: { ...actual, existsSync: existsSyncMock, readFileSync: readFileSyncMock },
     existsSync: existsSyncMock,
+    readFileSync: readFileSyncMock,
   }
 })
 
@@ -91,6 +96,47 @@ describe('spawnSupervised env 合并（per-agent 注入正确性前提）', () =
     expect(call[0]).toBe('opencode') // 分支判定：直接 spawn
     const receivedEnv = call[2].env as Record<string, string>
     expect(receivedEnv.PATH).toBe(process.env.PATH)
+  })
+})
+
+// ─── resolveJsEntry ───────────────────────────────
+
+describe('resolveJsEntry', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  // win32 分支（本机平台；非 win32 直接返回 binName，见 cli-utils.ts）
+  const PKG_ROOT = path.join(
+    'C:/Users/test/AppData/Roaming/npm',
+    'node_modules',
+    '@deepseek-ai/dsh'
+  )
+
+  it('resolves JS entry from bin field (object form)', () => {
+    execSyncMock.mockReturnValue('C:/Users/test/AppData/Roaming/npm\n')
+    readFileSyncMock.mockReturnValue(JSON.stringify({ bin: { dsh: 'lib/bin.js' } }))
+    expect(resolveJsEntry('@deepseek-ai/dsh', 'dsh')).toBe(path.join(PKG_ROOT, 'lib/bin.js'))
+  })
+
+  it('resolves JS entry from bin field (string form)', () => {
+    execSyncMock.mockReturnValue('C:/Users/test/AppData/Roaming/npm\n')
+    readFileSyncMock.mockReturnValue(JSON.stringify({ bin: 'lib/bin.js' }))
+    expect(resolveJsEntry('@deepseek-ai/dsh', 'dsh')).toBe(path.join(PKG_ROOT, 'lib/bin.js'))
+  })
+
+  it('throws when package.json cannot be read (CLI 未安装)', () => {
+    execSyncMock.mockReturnValue('C:/Users/test/AppData/Roaming/npm\n')
+    readFileSyncMock.mockImplementation(() => {
+      throw new Error('ENOENT')
+    })
+    expect(() => resolveJsEntry('@deepseek-ai/dsh', 'dsh')).toThrow('无法找到 dsh 的 JS 入口')
+  })
+
+  it('throws when bin field lacks the command name', () => {
+    execSyncMock.mockReturnValue('C:/Users/test/AppData/Roaming/npm\n')
+    readFileSyncMock.mockReturnValue(JSON.stringify({ bin: { other: 'lib/other.js' } }))
+    expect(() => resolveJsEntry('@deepseek-ai/dsh', 'dsh')).toThrow('无法找到 dsh 的 JS 入口')
   })
 })
 

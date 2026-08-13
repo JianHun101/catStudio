@@ -90,6 +90,54 @@ export function resolveBin(name: string, npmPkg: string): string {
   throw new Error(`无法找到 ${name} 可执行文件。请先运行: npm i -g ${npmPkg}`)
 }
 
+/**
+ * 解析 npm 全局安装的纯 JS CLI 的入口文件绝对路径。
+ *
+ * 与 resolveBin 的差异：resolveBin 解析 Windows 可执行包装（.exe/.cmd）。纯 JS 包
+ * （如 @deepseek-ai/dsh）在 Windows 上只有 .cmd 包装——spawnSupervised → supervisor
+ * `spawn('.cmd', {shell:false})` 在 Node 24 win32 同步抛 EINVAL（bde908e ❌ 审查阻塞项）。
+ * 本函数读 `<prefix>/node_modules/<npmPkg>/package.json` 的 bin 字段拿 JS 入口绝对路径，
+ * 配合 `spawn(process.execPath, [entry, ...args])` 执行——正是 CLAUDE.md
+ * 「Spawn: node path/to/cli.mjs，avoid .cmd wrappers」约定（node.exe 是原生 exe，无 EINVAL）。
+ *
+ * @param npmPkg npm 包名（如 '@deepseek-ai/dsh'）
+ * @param binName 命令名（如 'dsh'）——bin 字段为对象时用它取对应条目
+ * @returns win32 下 JS 入口绝对路径；非 win32 直接返回 binName（走 PATH 可执行）
+ */
+export function resolveJsEntry(npmPkg: string, binName: string): string {
+  const isWindows = process.platform === 'win32'
+  if (!isWindows) return binName
+
+  // 1. npm 全局 prefix（与 resolveBin 同款定位，Windows 中文用户名安全）
+  let prefix: string | null = null
+  try {
+    prefix = execSync('npm prefix -g', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    prefix = null
+  }
+
+  if (prefix) {
+    const pkgJsonPath = path.join(prefix, 'node_modules', npmPkg, 'package.json')
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8')) as {
+        bin?: string | Record<string, string>
+      }
+      // bin 字段双形态：字符串（单入口）或对象（{ <binName>: <entry> }）
+      const entry = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.[binName]
+      if (typeof entry === 'string') {
+        return path.resolve(path.dirname(pkgJsonPath), entry)
+      }
+    } catch {
+      // package.json 缺失/损坏 → 落到兜底抛错
+    }
+  }
+
+  throw new Error(`无法找到 ${binName} 的 JS 入口。请先运行: npm i -g ${npmPkg}`)
+}
+
 // ─── Prompt Construction ──────────────────────────────────
 
 /**

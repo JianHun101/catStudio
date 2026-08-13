@@ -50,7 +50,7 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
         : agent.llmProvider === 'opencode'
           ? `${agent.llmProvider}:${agent.llmModel || ''}:${agent.llmEnvExtra || ''}`
           : agent.llmProvider === 'dsh'
-            ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmModel || ''}:${agent.llmBaseUrl || ''}:${agent.llmEnvExtra || ''}`
+            ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmModel || ''}:${agent.llmEnvExtra || ''}`
             : `${agent.llmProvider}:${agent.llmApiKey}`
 
   if (adapters.has(cacheKey)) {
@@ -104,11 +104,11 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       break
     case 'dsh':
       // deepseek-harness 适配器（dsh pilot）：headless 一次性形态，凭证复用 DS_KEY，
-      // 构造签名与 claude/opencode 同形（model + envExtra）；baseUrl 预留自定义端点
+      // 构造签名与 claude/opencode 同形（apiKey + model + envExtra）；baseUrl 不消费
+      // （dsh 官方 CLI 的 base URL 由自身配置管理，无自定义端点需求——YAGNI 移除）
       adapter = new DshAdapter({
         apiKey: agent.llmApiKey,
         model: agent.llmModel,
-        baseUrl: agent.llmBaseUrl,
         envExtra: parseEnvExtra(agent.llmEnvExtra),
       })
       break
