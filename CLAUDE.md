@@ -22,7 +22,7 @@ packages/server/  →  Fastify + Socket.IO + SQLite + LLM adapters + dispatch + 
 packages/web/     →  Vue 3 + Vite + Pinia + Socket.IO client
 scripts/          →  dev.js, seed.js, stop.js
 .claude/          →  settings + custom skills
-docs/adr/         →  6 architecture decision records
+docs/adr/         →  7 architecture decision records
 ```
 
 ## Architecture
@@ -46,6 +46,8 @@ docs/adr/         →  6 architecture decision records
 **Dispatch**: single-slot FIFO per agent (`agentSlots` Map, in-memory). Serial execution in @mention order. Hard timeout via `AGENT_HARD_TIMEOUT_MS` (30min); CLI idle timeout 20min (`cli-utils.ts`).
 
 **LLM adapters**: `chatStream(messages, options) → AsyncIterable<Chunk>`. DeepSeek (HTTP SSE), Claude (CLI child process), OpenAI (Codex CLI). Cached per `provider:apiKey` in `registry.ts`.
+
+**External tool form selection**: any external CLI/tool form decision must pass the ADR 0007 checklist (docs/adr/0007-external-tool-form-selection-checklist.md) — 能力对账前置 / 假设标红+实测对称 / 简单形态默认+复杂举证倒置 / 决策留痕.
 
 **Memory**: local embeddings via Xenova/bge-small-zh-v1.5 (512-dim). Pipeline: embed → dedup check (cosine < `MEMORY_DEDUP_THRESHOLD`, default 0.20) → store. Retrieval: embed trigger → `vec_distance_cosine()` → top-K → system prompt. Fire-and-forget (failures don't block).
 
