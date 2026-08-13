@@ -276,26 +276,52 @@ function sessionWorktreePath(mainRoot: string, shortId: string): string {
 }
 
 /**
+ * pnpm 包级依赖目录（不提升到根 node_modules，如 uuid、vitejs/plugin-vue）。
+ * 与 WT_RESIDUE_LINK_PATHS 覆盖的残留路径一致（建与清对称）。
+ */
+const PACKAGE_LINK_DIRS = ['server', 'shared', 'web'] as const
+
+/**
  * node_modules junction（Windows）：worktree 复用主仓库依赖。
+ * 根链接 + 包级三条（packages/server|shared|web/node_modules）——pnpm 的包级
+ * 依赖不提升到根，只建根链接时 vitest 收集阶段解析不到包级依赖（uuid、
+ * vitejs/plugin-vue），pre-commit 钩子必失败（店长 2026-08-13 提交 ADR 0007
+ * 时实证：三包级链接缺失 → 全量测试收集失败）。
  * 失败降级（worktree 无依赖时测试/lint 不可跑，但文件操作/提交不受影响），
  * 不阻塞主链——依赖是增强不是主链路（同 memory 嵌入失败语义）。
+ * caveat：包级链接指向主仓库 packages 的 node_modules，worktree 内包名
+ * cat-study/shared 解析到主仓库 packages/shared 源码——改 shared 类型后
+ * worktree lint 可能误报「类型不存在」（主仓库 node_modules 里的 shared 是
+ * 陈旧拷贝/坏链接时；worktree 与主仓库同 commit 时同源码无碍）。
  */
 function linkNodeModules(mainRoot: string, wtPath: string): void {
-  const src = resolve(mainRoot, 'node_modules')
-  const dest = resolve(wtPath, 'node_modules')
-  if (!existsSync(src) || existsSync(dest)) return
-  try {
-    if (process.platform === 'win32') {
-      // mklink 是 cmd 内建命令，必须 cmd /c 包装；junction（/J）不需要管理员权限
-      execFileSync('cmd', ['/c', 'mklink', '/J', dest, src], { stdio: 'ignore' })
-    } else {
-      execFileSync('ln', ['-s', src, dest], { stdio: 'ignore' })
+  const makeLink = (src: string, dest: string, label: string): void => {
+    if (!existsSync(src) || existsSync(dest)) return
+    try {
+      if (process.platform === 'win32') {
+        // mklink 是 cmd 内建命令，必须 cmd /c 包装；junction（/J）不需要管理员权限
+        execFileSync('cmd', ['/c', 'mklink', '/J', dest, src], { stdio: 'ignore' })
+      } else {
+        execFileSync('ln', ['-s', src, dest], { stdio: 'ignore' })
+      }
+      log.info('node_modules link created', { label, wtPath })
+    } catch (err: any) {
+      log.warn('node_modules link failed — worktree 无依赖（测试/lint 不可跑，提交不受影响）', {
+        label,
+        error: err.message,
+      })
     }
-    log.info('node_modules link created', { wtPath })
-  } catch (err: any) {
-    log.warn('node_modules link failed — worktree 无依赖（测试/lint 不可跑，提交不受影响）', {
-      error: err.message,
-    })
+  }
+
+  // 根链接：pnpm 提升到根 node_modules 的依赖主体
+  makeLink(resolve(mainRoot, 'node_modules'), resolve(wtPath, 'node_modules'), 'root')
+  // 包级链接：pnpm 的包级依赖不提升到根，缺包级链接时 pre-commit 全量必失败
+  for (const pkg of PACKAGE_LINK_DIRS) {
+    const src = resolve(mainRoot, 'packages', pkg, 'node_modules')
+    if (!existsSync(src)) continue // 主仓库该包未装依赖 → 无可链接
+    const dest = resolve(wtPath, 'packages', pkg, 'node_modules')
+    mkdirSync(dirname(dest), { recursive: true }) // worktree 可能未检出该包目录
+    makeLink(src, dest, `packages/${pkg}`)
   }
 }
 

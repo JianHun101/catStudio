@@ -422,4 +422,81 @@ describe('session worktree', () => {
       }
     }
   )
+
+  it('linkNodeModules: 根 + 包级 3 条链接齐建（worktree 依赖完整，pre-commit 不挂）', () => {
+    // 干净子仓库（.gitignore 排除 node_modules）——主套件 tmp 的根 node_modules
+    // 已被前序用例 git add -A 提交进 git，新 worktree 会真实检出成目录，
+    // linkNodeModules 见 dest 已存在而跳过，根链接无从测。子仓库内 node_modules
+    // 全部 gitignored → worktree add 不检出 → 4 条链接全部由 linkNodeModules 新建
+    const subRepo = mkdtempSync(join(tmpdir(), 'git-utils-linknm-'))
+    const sub = (cmd: string): string =>
+      execSync(`git ${cmd}`, {
+        cwd: subRepo,
+        env: cleanGitEnv(),
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+    const orig = process.cwd()
+    try {
+      execSync('git init', { cwd: subRepo, env: cleanGitEnv(), stdio: 'ignore' })
+      execSync('git config user.name test', { cwd: subRepo, env: cleanGitEnv(), stdio: 'ignore' })
+      execSync('git config user.email test@test.local', {
+        cwd: subRepo,
+        env: cleanGitEnv(),
+        stdio: 'ignore',
+      })
+      writeFileSync(resolve(subRepo, '.gitignore'), 'node_modules/\n', 'utf-8')
+      writeFileSync(resolve(subRepo, 'a.txt'), 'init', 'utf-8')
+      for (const pkg of ['server', 'shared', 'web']) {
+        mkdirSync(resolve(subRepo, 'packages', pkg), { recursive: true })
+        writeFileSync(resolve(subRepo, 'packages', pkg, 'index.txt'), pkg, 'utf-8')
+      }
+      sub('add -A')
+      sub('commit -m init')
+
+      // 依赖目录（gitignored → 不入 git）：根 + 三包级，各带 sentinel
+      const rootNm = resolve(subRepo, 'node_modules')
+      mkdirSync(rootNm, { recursive: true })
+      writeFileSync(resolve(rootNm, 'sentinel.txt'), 'alive-root', 'utf-8')
+      for (const pkg of ['server', 'shared', 'web']) {
+        const dir = resolve(subRepo, 'packages', pkg, 'node_modules')
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(resolve(dir, 'sentinel.txt'), `alive-${pkg}`, 'utf-8')
+      }
+
+      process.chdir(subRepo)
+      const path = gitUtils.ensureSessionWorktree('wt-linknm-0001')
+      expect(path).toBeTruthy()
+      // 4 条链接（根 + 3 包级）全部由 linkNodeModules 建成
+      const rels = [
+        'node_modules',
+        'packages/server/node_modules',
+        'packages/shared/node_modules',
+        'packages/web/node_modules',
+      ]
+      for (const rel of rels) {
+        const link = resolve(path!, rel)
+        expect(existsSync(link)).toBe(true)
+        expect(lstatSync(link).isSymbolicLink()).toBe(true)
+      }
+      // sentinel 透传（读链接目标内容——与 :155 junction 透传用例同语义）
+      expect(readFileSync(resolve(path!, 'node_modules', 'sentinel.txt'), 'utf-8')).toBe(
+        'alive-root'
+      )
+      for (const pkg of ['server', 'shared', 'web']) {
+        expect(
+          readFileSync(resolve(path!, 'packages', pkg, 'node_modules', 'sentinel.txt'), 'utf-8')
+        ).toBe(`alive-${pkg}`)
+      }
+    } finally {
+      // 清理：removeSessionWorktree（git 层 + 物理残留）后 chdir 还原 + 删子仓库
+      try {
+        gitUtils.removeSessionWorktree('wt-linknm-0001')
+      } catch {
+        /* 忽略清理失败 */
+      }
+      process.chdir(orig)
+      rmSync(subRepo, { recursive: true, force: true })
+    }
+  })
 })
