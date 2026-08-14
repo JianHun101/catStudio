@@ -512,6 +512,42 @@ describe('chatStore', () => {
       expect(store.agentStates.get('a1')?.status).toBe('busy')
     })
 
+    it('MESSAGE_AGENT_STATUS replying 心跳 stamp lastBeatAt；done 整对象替换抹 startedAt/lastBeatAt（终态不显示时长）', () => {
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.MESSAGE_AGENT_STATUS
+      )?.[1] as ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(1_700_000_000_000)
+
+        // replying 心跳 → 记录客户端接收时间戳 lastBeatAt（liveness 锚点）
+        handler!({
+          messageId: 'm1',
+          agentId: 'a1',
+          agentName: '店长',
+          agentAvatar: '🐱',
+          status: 'replying',
+          startedAt: 1_700_000_000_000 - 30_000,
+        })
+        expect(store.messageStatus.get('m1')![0].lastBeatAt).toBe(1_700_000_000_000)
+
+        // done → 整对象替换，无 startedAt/lastBeatAt（终态不显示时长，隐式前提钉死）
+        handler!({
+          messageId: 'm1',
+          agentId: 'a1',
+          agentName: '店长',
+          agentAvatar: '🐱',
+          status: 'done',
+        })
+        expect(store.messageStatus.get('m1')![0].lastBeatAt).toBeUndefined()
+        expect(store.messageStatus.get('m1')![0].startedAt).toBeUndefined()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('SESSION_DELETED removes session from list', () => {
       store.sessions = [mockSession, { ...mockSession, id: 's2' }]
       store.activeSessionId = 's1'

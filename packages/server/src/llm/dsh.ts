@@ -50,9 +50,13 @@ function yamlScalar(value: string): string {
  * 生成 per-spawn 临时 cordis.patch.yml（--patch overlay，finally 清理）。
  *
  * ⚠️ 版本 pinned：@deepseek-ai/dsh 锁 0.1.0-rc.6（店长拍板「绑死版本、升大版本再议」）。
- *   本文件以下硬编码契约——patch row id（agent-default-model / mcp-catstudy）、
- *   DSH_PERMISSION_MODE=danger-full-access seam、provider: deepseek-official——均为
- *   针对 rc.6 实证的形态；升大版本前先对账这几处再动，避免 rc.7+ 静默背刺。
+ *   本文件**关键**硬编码契约（**非穷尽**）——patch row id（agent-default-model /
+ *   mcp-catstudy）、DSH_PERMISSION_MODE=danger-full-access seam、provider: deepseek-official
+ *   ——均为针对 rc.6 实证的形态；升大版本前先对账这几处再动，避免 rc.7+ 静默背刺。
+ *   另有散落同文件的 rc.6 契约未在此穷尽：mcp-client 插件名
+ *   `@deepseek-ai/dsh-mcp-client`（writePatchConfig 内）、`--profile headless` profile 名
+ *   （chatStream 内）、bin 名 `resolveJsEntry('@deepseek-ai/dsh', 'dsh')`（模块顶部）——
+ *   升版本时须一并核对，避免「对完此列表就安全」的虚假信心。
  *
  * 内容两行：
  *  1. mcp-catstudy（@deepseek-ai/dsh-mcp-client）——`insert` 新增 loader entry

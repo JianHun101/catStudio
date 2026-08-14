@@ -90,6 +90,8 @@ export const useChatStore = defineStore('chat', () => {
     status: 'queued' | 'thinking' | 'replying' | 'done'
     /** 回复开始时间戳（epoch ms）——服务端心跳注入，前端据此显示「回复中 · 已 N 秒」 */
     startedAt?: number
+    /** 最后一次收到 replying 心跳的客户端接收时间戳（epoch ms）——心跳失联超阈值显示「无响应」 */
+    lastBeatAt?: number
   }
   const messageStatus = ref<Map<string, AgentStatusEntry[]>>(new Map())
 
@@ -580,10 +582,18 @@ export const useChatStore = defineStore('chat', () => {
       }) => {
         const current = messageStatus.value.get(data.messageId) || []
         const idx = current.findIndex((e) => e.agentId === data.agentId)
+        // replying 心跳：记录客户端接收时间戳（liveness 锚点）。心跳 10s 重发、
+        // 本地 1s tick 平滑秒数；超阈值未收到心跳 → ChatPanel 显示「无响应」
+        // （本地时钟不能把死进程显示成「还在跑」）。
+        const entry: AgentStatusEntry =
+          data.status === 'replying' ? { ...data, lastBeatAt: Date.now() } : data
+        // 整对象替换：done/queued/thinking 不带 startedAt/lastBeatAt，会抹掉 entry 已有字段——
+        // 当前无害（done 是终态、不显示时长、服务端心跳已在 finally 停）；将来 thinking/done
+        // 要显示时长时注意此隐式前提（须改字段级合并而非整对象替换）。
         if (idx >= 0) {
-          current[idx] = data
+          current[idx] = entry
         } else {
-          current.push(data)
+          current.push(entry)
         }
         messageStatus.value = new Map(messageStatus.value.set(data.messageId, current))
       }

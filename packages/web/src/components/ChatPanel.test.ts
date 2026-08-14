@@ -265,14 +265,31 @@ describe('ChatPanel 交接失败横幅（HANDOFF_FAILED 可见化——单 A ser
 })
 
 describe('ChatPanel 运行时长心跳（回复中 · 已 N 秒）', () => {
-  it('replying 带 startedAt → 显示「回复中 · 已 N 秒」递增文案 + 时长计算逻辑', () => {
-    // 静态源断言：headless 黑盒适配器整轮不 yield chunk，前端靠服务端心跳 10s
-    // 重发驱动重渲染，statusLabelZh 读 Date.now() 重算累计秒数
+  it('replying 带 startedAt → 显示「回复中 · 已 N 秒」递增文案 + 时长计算逻辑（读 now 而非 Date.now()）', () => {
+    // 静态源断言：headless 黑盒适配器整轮不 yield chunk，前端靠本地 1s tick 的 now
+    // 重算累计秒数（服务端 10s 心跳只刷新 liveness 锚点，不再驱动秒数）
     expect(source).toContain('回复中 · 已 ')
-    expect(source).toContain('Math.floor((Date.now() - entry.startedAt) / 1000)')
+    expect(source).toContain('Math.floor((now.value - entry.startedAt) / 1000)')
+    expect(source).not.toContain('Math.floor((Date.now() - entry.startedAt) / 1000)')
   })
 
-  it('模板传整条 status 对象（statusLabelZh(s)），非 s.status——startedAt 才能透传', () => {
+  it('本地 1s tick：now = ref(Date.now()) + setInterval(1000) 每秒更新，onUnmounted clearInterval', () => {
+    // 反转上单「省一个 timer」决策的硬风险点：timer 生命周期必须正确管理
+    expect(source).toContain('now = ref(Date.now())')
+    expect(source).toMatch(
+      /nowTimer = setInterval\(\(\) => \{\s*now\.value = Date\.now\(\)\s*\}, 1000\)/
+    )
+    expect(source).toMatch(/if \(nowTimer\) \{\s*clearInterval\(nowTimer\)/)
+  })
+
+  it('心跳失联超阈值 → 停止递增、显示「无响应」（liveness：本地时钟不能掩盖 server 已死）', () => {
+    expect(source).toContain('HEARTBEAT_STALE_MS = 25_000')
+    expect(source).toContain('无响应')
+    expect(source).toContain('now.value - entry.lastBeatAt > HEARTBEAT_STALE_MS')
+    expect(source).toContain('lastBeatAt')
+  })
+
+  it('模板传整条 status 对象（statusLabelZh(s)），非 s.status——startedAt/lastBeatAt 才能透传', () => {
     expect(source).toContain('statusLabelZh(s)')
     expect(source).not.toContain('statusLabelZh(s.status)')
   })

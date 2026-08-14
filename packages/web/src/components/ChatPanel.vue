@@ -31,6 +31,17 @@ const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次
 const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 const sending = ref(false)
 
+// ─── 回复中运行时长（平滑 + liveness）────────────────────────
+// 本地 1s tick：now 每秒更新驱动「回复中 · 已 N 秒」重算（服务端心跳 10s 一跳太粗，
+// 用户真机反馈「10 秒动一下」要平滑——反转上单「省一个 timer」取舍，代价是必须正确
+// 管理 timer 生命周期，onUnmounted 必 clear）。now 用 ref 而非 statusLabelZh 里直接
+// Date.now()，tick 更新 now.value 触发响应式重渲染。
+const now = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | null = null
+// 心跳失联阈值：2×10s 服务端间隔 + 5s 余量。超过仍未收到 replying 心跳 → 判定 server
+// 已死，停止递增、显示「无响应」——本地时钟不能掩盖进程死亡（liveness 语义不能丢）。
+const HEARTBEAT_STALE_MS = 25_000
+
 const {
   mentionActive,
   mentionSuggestions,
@@ -224,11 +235,18 @@ watch(
 onMounted(() => {
   chatContainer.value?.addEventListener('scroll', checkScrollPosition, { passive: true })
   window.addEventListener('keydown', onPreviewKeydown)
+  nowTimer = setInterval(() => {
+    now.value = Date.now()
+  }, 1000)
 })
 
 onUnmounted(() => {
   chatContainer.value?.removeEventListener('scroll', checkScrollPosition)
   window.removeEventListener('keydown', onPreviewKeydown)
+  if (nowTimer) {
+    clearInterval(nowTimer)
+    nowTimer = null
+  }
 })
 
 // ─── Image preview (lightbox) ─────────────
@@ -511,19 +529,24 @@ function statusEmoji(status: string): string {
   }
 }
 
-function statusLabelZh(entry: { status: string; startedAt?: number }): string {
+function statusLabelZh(entry: { status: string; startedAt?: number; lastBeatAt?: number }): string {
   switch (entry.status) {
     case 'queued':
       return '已收到'
     case 'thinking':
       return '思考中'
     case 'replying':
-      // headless 黑盒适配器（dsh 等）整轮不 yield chunk，AGENT_TYPING 全程空转、
-      // 标签静止无法判断死活。带 startedAt 时算运行时长：服务端心跳 10s 重发一次
-      // MESSAGE_AGENT_STATUS 驱动重渲染，这里直接读 Date.now() 重算——无需组件级
-      // 1s interval（省一个 timer 的泄漏风险），N 以 10s 一跳递增。
+      // headless 黑盒适配器（dsh 等）整轮不 yield chunk，AGENT_TYPING 全程空转。
+      // 带 startedAt 时算运行时长：服务端 10s 心跳重发 MESSAGE_AGENT_STATUS 只负责
+      // 刷新 lastBeatAt（liveness 锚点），秒数由本地 1s tick 的 now 重算——每秒平滑
+      // 递增（反转上单「10s 一跳」取舍）。
       if (entry.startedAt != null) {
-        const secs = Math.max(0, Math.floor((Date.now() - entry.startedAt) / 1000))
+        // 心跳失联：replying 心跳（10s 间隔）超阈值未到 → server 已死，停止递增、
+        // 显示「无响应」——不能靠本地时钟把死进程显示成「还在跑」。
+        if (entry.lastBeatAt != null && now.value - entry.lastBeatAt > HEARTBEAT_STALE_MS) {
+          return '无响应'
+        }
+        const secs = Math.max(0, Math.floor((now.value - entry.startedAt) / 1000))
         return `回复中 · 已 ${secs} 秒`
       }
       return '回复中'
