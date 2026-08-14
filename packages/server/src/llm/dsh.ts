@@ -49,6 +49,11 @@ function yamlScalar(value: string): string {
 /**
  * 生成 per-spawn 临时 cordis.patch.yml（--patch overlay，finally 清理）。
  *
+ * ⚠️ 版本 pinned：@deepseek-ai/dsh 锁 0.1.0-rc.6（店长拍板「绑死版本、升大版本再议」）。
+ *   本文件以下硬编码契约——patch row id（agent-default-model / mcp-catstudy）、
+ *   DSH_PERMISSION_MODE=danger-full-access seam、provider: deepseek-official——均为
+ *   针对 rc.6 实证的形态；升大版本前先对账这几处再动，避免 rc.7+ 静默背刺。
+ *
  * 内容两行：
  *  1. mcp-catstudy（@deepseek-ai/dsh-mcp-client）——`insert` 新增 loader entry
  *     （不在 headless profile 底座里，insert 语义正确）；serverName catstudy + stdio
@@ -131,7 +136,7 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
  * （继承 env 优先级最高，覆盖 credentials 落盘——不落盘任何密钥）。apiKey 为空时**不注入**
  * （条件注入）——空串会覆盖 dsh credentials 落盘兜底，让有凭证的安装失效。
  *
- * 前置要求: npm i -g @deepseek-ai/dsh
+ * 前置要求: npm i -g @deepseek-ai/dsh@0.1.0-rc.6
  */
 export class DshAdapter implements LLMAdapter {
   readonly provider = 'dsh'
@@ -160,7 +165,7 @@ export class DshAdapter implements LLMAdapter {
 
     if (!DSH_ENTRY) {
       yield {
-        content: 'dsh CLI 未安装。请先运行: npm i -g @deepseek-ai/dsh',
+        content: 'dsh CLI 未安装。请先运行: npm i -g @deepseek-ai/dsh@0.1.0-rc.6',
         done: true,
       }
       return

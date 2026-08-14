@@ -356,6 +356,9 @@ describe('DshAdapter', () => {
     )
     // 不是 insert 形态（insert 会重复 id 炸）
     expect(content).not.toContain('- insert:\n    - id: agent-default-model')
+    // approval row 不得塞回 patch（走 DSH_PERMISSION_MODE seam，单独 policy: never 会
+    // 触发 permission-presets 校验 match no preset）——钉死该不变式
+    expect(content).not.toContain('approval')
 
     // 完成 → patch 文件 finally 清理
     child.emitClose(0)
