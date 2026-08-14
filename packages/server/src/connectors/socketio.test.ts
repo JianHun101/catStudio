@@ -5246,6 +5246,171 @@ describe('runAgentReply — per-agent 静态运行配置透传', () => {
   })
 })
 
+// ─── 运行时长心跳（headless 黑盒可观测性）────────────────
+// dsh 等 headless 适配器整轮不 yield chunk，前端「回复中」标签静止。心跳周期重发
+// MESSAGE_AGENT_STATUS（status 不变、startedAt 相同），前端显示「回复中 · 已 N 秒」。
+// 本块用 fake timer 推进（不真等 10s），钉死三条：流未结束重发且 startedAt 一致 /
+// 流完成不再发 / abort 路径 timer 清无泄漏。
+
+describe('runAgentReply — 运行时长心跳', () => {
+  // 与 socketio.ts 的 HEARTBEAT_INTERVAL_MS 保持同步（店长派活单定 10000）
+  const HEARTBEAT_INTERVAL_MS = 10_000
+
+  const hbAgent = {
+    id: 'agent-hb',
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: 'prompt',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    mockRoomEmit.mockClear()
+    setDb(createTestDb())
+    initRepository(getDb())
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    resetDb()
+  })
+
+  /** 筛出所有 status='replying' 的 MESSAGE_AGENT_STATUS emit（含初始 + 心跳） */
+  function replyingEmits(): any[] {
+    return mockRoomEmit.mock.calls.filter(
+      (c: any[]) => c[0] === Events.MESSAGE_AGENT_STATUS && c[1]?.status === 'replying'
+    )
+  }
+
+  /** 构造会话+触发消息并启动一轮 runAgentReply，返回其执行 promise（不自动 await） */
+  async function runHeartbeat(chatStream: any): Promise<{ exec: Promise<any> }> {
+    const mod = await import('./socketio.js')
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    // executeOneAgent 只执行"本次 dispatch 标记的执行"：status 必须 busy 且
+    // currentTriggerMessageId 匹配触发消息，否则提前 return 不走 adapter
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: hbAgent.id,
+      sessionId: 'session-hb',
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: 'msg-hb',
+    } as any)
+
+    const db = getDb()
+    db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES ('session-hb', 'hb', ?)`).run(
+      JSON.stringify([hbAgent.id])
+    )
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-hb', 'session-hb', 'user', '@ds猫 心跳', '["ds猫"]')`
+    ).run()
+
+    // 用对象包裹返回——async 函数 return promise 会被自动 unwrap（await runHeartbeat
+    // 会阻塞到执行结束），包一层 { exec } 让 executeAgentsSerial 的 promise 原样带出、
+    // 测试侧手动控制 await 时机（流挂在 gate 上时不能等它完成）。
+    const exec = mod.executeAgentsSerial(
+      mockIo as any,
+      'session-hb',
+      [hbAgent as any],
+      { id: 'msg-hb', content: '@ds猫 心跳', mentions: ['ds猫'] },
+      'trace-hb'
+    )
+    return { exec }
+  }
+
+  it('stream 未结束时推进 fake timer → 重发 MESSAGE_AGENT_STATUS、各次 startedAt 一致', async () => {
+    // 门控流：首个 chunk 产出后挂起，推进 timer 期间流保持"未结束"状态
+    let signalHung = () => {}
+    const hung = new Promise<void>((resolve) => {
+      signalHung = resolve
+    })
+    let releaseGate = () => {}
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    const chatStream = vi.fn(async function* () {
+      yield { content: '首段', kind: 'text' }
+      signalHung() // 首段已被消费、即将挂在 gate 上
+      await gate
+      yield { content: '尾段', kind: 'text' }
+    })
+
+    const { exec } = await runHeartbeat(chatStream)
+    await hung // 流已消费首段 chunk、for-await 阻塞在 gate 上
+
+    // 推进两个心跳周期 → 初始 replying 1 次 + 心跳 2 次 = 3 次
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 2)
+
+    const emits = replyingEmits()
+    expect(emits.length).toBeGreaterThanOrEqual(2)
+    // 同一 startedAt：心跳不改 startedAt（前端据此算累计时长）
+    const startedAts = new Set(emits.map((c: any[]) => c[1].startedAt))
+    expect(startedAts.size).toBe(1)
+
+    releaseGate()
+    await exec
+  })
+
+  it('stream 完成后推进 fake timer → 不再 emit（timer 已清）', async () => {
+    const chatStream = vi.fn(async function* () {
+      yield { content: 'ok', kind: 'text' }
+    })
+
+    const { exec } = await runHeartbeat(chatStream)
+    await exec
+
+    // stream 秒完：只有初始那 1 次 replying，无心跳
+    expect(replyingEmits().length).toBe(1)
+
+    // 推进 3 个心跳周期 → 仍只有 1 次（finally 已 clearInterval，无泄漏）
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 3)
+    expect(replyingEmits().length).toBe(1)
+  })
+
+  it('abort 路径（用户中断）→ timer 已清，中断后推进不再 emit', async () => {
+    let signalHung = () => {}
+    const hung = new Promise<void>((resolve) => {
+      signalHung = resolve
+    })
+    let releaseGate = () => {}
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    const chatStream = vi.fn(async function* () {
+      yield { content: '思考中', kind: 'text' }
+      signalHung()
+      await gate
+      yield { content: '被中断的剩余内容', kind: 'text' }
+    })
+
+    const { exec } = await runHeartbeat(chatStream)
+    await hung
+
+    // 中断前推进一个周期：心跳确实发过（证明 timer 曾在跑）
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+    expect(replyingEmits().length).toBeGreaterThanOrEqual(2)
+
+    // 用户点停止 → 中断 handler → abort 当前执行（runAgentReply 流循环 signal.aborted 提前返回）
+    const handlers = socketHandlers.get(Events.AGENT_INTERRUPT)
+    expect(handlers).toBeDefined()
+    handlers![0]({ agentId: hbAgent.id })
+
+    releaseGate()
+    await exec
+
+    const afterAbort = replyingEmits().length
+    // 中断后再推进多个周期 → 不再新增 replying（finally 清 timer，无泄漏）
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 3)
+    expect(replyingEmits().length).toBe(afterAbort)
+  })
+})
+
 // ─── 上下文卫生补测 — 已回复剥离/标注（3738c6a 审查 ⚠️ 回修）────────
 // 吐槽猫 ⚠️ 审查两条硬缺口：① socketio.test.ts 零测试覆盖；② 标注升级未实施
 // （方案 v2「含 N 张图片+请用户重发」vs 代码现状「无需再次回复」——图片数字事实丢失）。

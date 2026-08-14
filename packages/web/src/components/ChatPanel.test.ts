@@ -263,3 +263,21 @@ describe('ChatPanel 交接失败横幅（HANDOFF_FAILED 可见化——单 A ser
     expect(failIdx).toBeGreaterThan(warnIdx)
   })
 })
+
+describe('ChatPanel 运行时长心跳（回复中 · 已 N 秒）', () => {
+  it('replying 带 startedAt → 显示「回复中 · 已 N 秒」递增文案 + 时长计算逻辑', () => {
+    // 静态源断言：headless 黑盒适配器整轮不 yield chunk，前端靠服务端心跳 10s
+    // 重发驱动重渲染，statusLabelZh 读 Date.now() 重算累计秒数
+    expect(source).toContain('回复中 · 已 ')
+    expect(source).toContain('Math.floor((Date.now() - entry.startedAt) / 1000)')
+  })
+
+  it('模板传整条 status 对象（statusLabelZh(s)），非 s.status——startedAt 才能透传', () => {
+    expect(source).toContain('statusLabelZh(s)')
+    expect(source).not.toContain('statusLabelZh(s.status)')
+  })
+
+  it('无 startedAt → 回退静止「回复中」（存量适配器未带 startedAt 不误伤）', () => {
+    expect(source).toContain("return '回复中'")
+  })
+})

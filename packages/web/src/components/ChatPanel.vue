@@ -511,18 +511,26 @@ function statusEmoji(status: string): string {
   }
 }
 
-function statusLabelZh(status: string): string {
-  switch (status) {
+function statusLabelZh(entry: { status: string; startedAt?: number }): string {
+  switch (entry.status) {
     case 'queued':
       return '已收到'
     case 'thinking':
       return '思考中'
     case 'replying':
+      // headless 黑盒适配器（dsh 等）整轮不 yield chunk，AGENT_TYPING 全程空转、
+      // 标签静止无法判断死活。带 startedAt 时算运行时长：服务端心跳 10s 重发一次
+      // MESSAGE_AGENT_STATUS 驱动重渲染，这里直接读 Date.now() 重算——无需组件级
+      // 1s interval（省一个 timer 的泄漏风险），N 以 10s 一跳递增。
+      if (entry.startedAt != null) {
+        const secs = Math.max(0, Math.floor((Date.now() - entry.startedAt) / 1000))
+        return `回复中 · 已 ${secs} 秒`
+      }
       return '回复中'
     case 'done':
       return '完成'
     default:
-      return status
+      return entry.status
   }
 }
 
@@ -853,7 +861,7 @@ const warnedAgentsText = computed(() => {
                   <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
                   <span class="status-avatar">{{ s.agentAvatar }}</span>
                   <span class="status-name">{{ s.agentName }}</span>
-                  <span class="status-label">{{ statusLabelZh(s.status) }}</span>
+                  <span class="status-label">{{ statusLabelZh(s) }}</span>
                   <!-- 停止按钮（B2 重定位）：busy 但无流式内容时挂用户消息状态行承载——
                        streaming 中（typingStates 有该 agent）按钮在 streaming 气泡上；
                        边界明示：agent 被 agent 回复触发（广播模式）无用户消息状态行，

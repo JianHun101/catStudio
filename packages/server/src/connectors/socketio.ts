@@ -703,6 +703,13 @@ export function __test_resetLockState(): void {
  *  （A2A 接力不受影响——触发前提是回复已落库）；前端显示顺序 = 完成顺序 */
 const CONCURRENT_AGENTS_PER_MESSAGE = 3
 
+/** 运行时长心跳间隔——headless 黑盒适配器（dsh 等）在子进程 close 前一个 chunk
+ *  都不 yield，AGENT_TYPING 全程空转、前端「回复中」标签静止；周期重发
+ *  MESSAGE_AGENT_STATUS（status 不变、startedAt 相同）让前端显示「回复中 · 已 N 秒」
+ *  N 递增，判断进程是否还活着。放 runAgentReply 层：所有适配器统一受益，
+ *  零新增 socket 事件、零新增 chunk 契约。 */
+const HEARTBEAT_INTERVAL_MS = 10_000
+
 /** 触发消息的静态形状（executeAgentsSerial / executeOneAgent 共用） */
 type AgentTriggerMsg = {
   id: string
@@ -2695,13 +2702,15 @@ async function runAgentReply(
   })
   activeStreams.set(agent.id, { sessionId, messageId: msgId, content: '', token: signalToken })
 
-  // 状态：回复中
+  // 状态：回复中（带 startedAt——前端据此显示「回复中 · 已 N 秒」递增，替代静止标签）
+  const startedAt = Date.now()
   io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
     messageId: triggerMsg.id,
     agentId: agent.id,
     agentName: agent.name,
     agentAvatar: agent.avatar,
     status: 'replying',
+    startedAt,
   })
 
   // ── 撤回时窗保护（Window ②）──────────────────────
@@ -2741,45 +2750,69 @@ async function runAgentReply(
     },
   })
 
-  for await (const chunk of stream) {
-    // ── 撤回时窗保护（Window ③）──────────────────────
-    // 流式输出中途撤回 → 提前终止
-    // 检查是否被撤回或超时取消
-    if (retractionRequests.get(triggerMsg.id)) {
-      log.info('agent reply aborted (retracted)', {
-        traceId,
-        agentId: agent.id,
-      })
-      activeStreams.delete(agent.id)
-      retractionRequests.delete(triggerMsg.id)
-      return { content: fullContent || '[消息已撤回]', msgId }
-    }
-    if (signal?.aborted) {
-      log.info('agent reply aborted (timeout)', { traceId, agentId: agent.id })
-      activeStreams.delete(agent.id)
-      return { content: fullContent, msgId }
-    }
-    if (chunk.content) {
-      displayContent += chunk.content
-      // 思考内容只流式展示，不进入存储和上下文
-      if (chunk.kind !== 'thinking') {
-        fullContent += chunk.content
-      } else {
-        thinkingContent += chunk.content
+  // ── 运行时长心跳（headless 黑盒可观测性）────────────────
+  // dsh 等 headless 适配器在子进程 close 前一个 chunk 都不 yield，上面那个
+  // 「回复中」状态从第一秒到最后 107 秒一动不动——用户无法判断进程是还在跑
+  // 还是已经死了。周期重发 MESSAGE_AGENT_STATUS（status 不变、startedAt 相同），
+  // 前端据此显示「回复中 · 已 N 秒」N 递增。
+  // 落点放在 runAgentReply 而非适配器层：所有适配器统一受益，零新增 socket 事件、
+  // 零新增 chunk 契约。try/finally 保证正常走完 / abort return / 抛错三条路径都
+  // clearInterval，不留泄漏 timer（对应 activeStreams.delete 的 cleanup 位置，
+  // 并补上 caller catch 触及不到的抛错路径——timer 是本函数局部变量）。
+  const heartbeatTimer = setInterval(() => {
+    io.to(`session:${sessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+      messageId: triggerMsg.id,
+      agentId: agent.id,
+      agentName: agent.name,
+      agentAvatar: agent.avatar,
+      status: 'replying',
+      startedAt,
+    })
+  }, HEARTBEAT_INTERVAL_MS)
+
+  try {
+    for await (const chunk of stream) {
+      // ── 撤回时窗保护（Window ③）──────────────────────
+      // 流式输出中途撤回 → 提前终止
+      // 检查是否被撤回或超时取消
+      if (retractionRequests.get(triggerMsg.id)) {
+        log.info('agent reply aborted (retracted)', {
+          traceId,
+          agentId: agent.id,
+        })
+        activeStreams.delete(agent.id)
+        retractionRequests.delete(triggerMsg.id)
+        return { content: fullContent || '[消息已撤回]', msgId }
       }
-      io.to(`session:${sessionId}`).emit(Events.AGENT_TYPING, {
-        sessionId,
-        agentId: agent.id,
-        messageId: msgId,
-        content: displayContent,
-      })
-      activeStreams.set(agent.id, {
-        sessionId,
-        messageId: msgId,
-        content: displayContent,
-        token: signalToken,
-      })
+      if (signal?.aborted) {
+        log.info('agent reply aborted (timeout)', { traceId, agentId: agent.id })
+        activeStreams.delete(agent.id)
+        return { content: fullContent, msgId }
+      }
+      if (chunk.content) {
+        displayContent += chunk.content
+        // 思考内容只流式展示，不进入存储和上下文
+        if (chunk.kind !== 'thinking') {
+          fullContent += chunk.content
+        } else {
+          thinkingContent += chunk.content
+        }
+        io.to(`session:${sessionId}`).emit(Events.AGENT_TYPING, {
+          sessionId,
+          agentId: agent.id,
+          messageId: msgId,
+          content: displayContent,
+        })
+        activeStreams.set(agent.id, {
+          sessionId,
+          messageId: msgId,
+          content: displayContent,
+          token: signalToken,
+        })
+      }
     }
+  } finally {
+    clearInterval(heartbeatTimer)
   }
 
   // 超时取消时不写入消息也不更新状态（由 catch 块处理）

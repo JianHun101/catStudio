@@ -88,6 +88,8 @@ export const useChatStore = defineStore('chat', () => {
     agentName: string
     agentAvatar: string
     status: 'queued' | 'thinking' | 'replying' | 'done'
+    /** 回复开始时间戳（epoch ms）——服务端心跳注入，前端据此显示「回复中 · 已 N 秒」 */
+    startedAt?: number
   }
   const messageStatus = ref<Map<string, AgentStatusEntry[]>>(new Map())
 
@@ -574,6 +576,7 @@ export const useChatStore = defineStore('chat', () => {
         agentName: string
         agentAvatar: string
         status: 'queued' | 'thinking' | 'replying' | 'done'
+        startedAt?: number
       }) => {
         const current = messageStatus.value.get(data.messageId) || []
         const idx = current.findIndex((e) => e.agentId === data.agentId)
