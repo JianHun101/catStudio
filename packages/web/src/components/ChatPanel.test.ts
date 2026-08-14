@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import source from './ChatPanel.vue?raw'
+import statusLabelSource from './AgentStatusLabel.vue?raw'
 
 /**
  * Verify ChatPanel.vue's TransitionGroup animation setup.
@@ -264,37 +265,83 @@ describe('ChatPanel 交接失败横幅（HANDOFF_FAILED 可见化——单 A ser
   })
 })
 
-describe('ChatPanel 运行时长心跳（回复中 · 已 N 秒）', () => {
+describe('ChatPanel 运行时长心跳隔离（1s tick 下沉 AgentStatusLabel 叶子组件）', () => {
+  it('顶层不再有每秒变化的 now/nowTimer（tick 不再拖全组件重渲）', () => {
+    // 静态源断言验收标准②：ChatPanel.vue 顶层无 now ref / nowTimer，1s tick 已隔离
+    expect(source).not.toContain('now = ref(Date.now())')
+    expect(source).not.toContain('nowTimer')
+    expect(source).not.toContain('now.value = Date.now()')
+  })
+
+  it('statusLabelZh / HEARTBEAT_STALE_MS 已迁出 ChatPanel（liveness 语义随组件走）', () => {
+    expect(source).not.toContain('statusLabelZh')
+    expect(source).not.toContain('HEARTBEAT_STALE_MS')
+  })
+
+  it('模板用 <AgentStatusLabel :entry="s" /> 替换 statusLabelZh(s)（整条 entry 透传）', () => {
+    expect(source).toContain("import AgentStatusLabel from './AgentStatusLabel.vue'")
+    expect(source).toContain('<AgentStatusLabel :entry="s" />')
+    expect(source).not.toContain('statusLabelZh(s.status)')
+  })
+})
+
+describe('AgentStatusLabel 运行时长心跳（回复中 · 已 N 秒——4775ac1 行为零回归）', () => {
   it('replying 带 startedAt → 显示「回复中 · 已 N 秒」递增文案 + 时长计算逻辑（读 now 而非 Date.now()）', () => {
     // 静态源断言：headless 黑盒适配器整轮不 yield chunk，前端靠本地 1s tick 的 now
     // 重算累计秒数（服务端 10s 心跳只刷新 liveness 锚点，不再驱动秒数）
-    expect(source).toContain('回复中 · 已 ')
-    expect(source).toContain('Math.floor((now.value - entry.startedAt) / 1000)')
-    expect(source).not.toContain('Math.floor((Date.now() - entry.startedAt) / 1000)')
+    expect(statusLabelSource).toContain('回复中 · 已 ')
+    expect(statusLabelSource).toContain('Math.floor((now.value - props.entry.startedAt) / 1000)')
+    expect(statusLabelSource).not.toContain(
+      'Math.floor((Date.now() - props.entry.startedAt) / 1000)'
+    )
   })
 
   it('本地 1s tick：now = ref(Date.now()) + setInterval(1000) 每秒更新，onUnmounted clearInterval', () => {
     // 反转上单「省一个 timer」决策的硬风险点：timer 生命周期必须正确管理
-    expect(source).toContain('now = ref(Date.now())')
-    expect(source).toMatch(
+    expect(statusLabelSource).toContain('now = ref(Date.now())')
+    expect(statusLabelSource).toMatch(
       /nowTimer = setInterval\(\(\) => \{\s*now\.value = Date\.now\(\)\s*\}, 1000\)/
     )
-    expect(source).toMatch(/if \(nowTimer\) \{\s*clearInterval\(nowTimer\)/)
+    expect(statusLabelSource).toMatch(/if \(nowTimer\) \{\s*clearInterval\(nowTimer\)/)
   })
 
   it('心跳失联超阈值 → 停止递增、显示「无响应」（liveness：本地时钟不能掩盖 server 已死）', () => {
-    expect(source).toContain('HEARTBEAT_STALE_MS = 25_000')
-    expect(source).toContain('无响应')
-    expect(source).toContain('now.value - entry.lastBeatAt > HEARTBEAT_STALE_MS')
-    expect(source).toContain('lastBeatAt')
+    expect(statusLabelSource).toContain('HEARTBEAT_STALE_MS = 25_000')
+    expect(statusLabelSource).toContain('无响应')
+    expect(statusLabelSource).toContain('now.value - props.entry.lastBeatAt > HEARTBEAT_STALE_MS')
+    expect(statusLabelSource).toContain('lastBeatAt')
   })
 
-  it('模板传整条 status 对象（statusLabelZh(s)），非 s.status——startedAt/lastBeatAt 才能透传', () => {
-    expect(source).toContain('statusLabelZh(s)')
-    expect(source).not.toContain('statusLabelZh(s.status)')
+  it('props entry 带 startedAt/lastBeatAt 可选字段（服务端心跳注入，前端据此显示时长/无响应）', () => {
+    expect(statusLabelSource).toContain(
+      'entry: { status: string; startedAt?: number; lastBeatAt?: number }'
+    )
   })
 
   it('无 startedAt → 回退静止「回复中」（存量适配器未带 startedAt 不误伤）', () => {
-    expect(source).toContain("return '回复中'")
+    expect(statusLabelSource).toContain("return '回复中'")
+  })
+})
+
+describe('ChatPanel renderMarkdown 记忆化（per-message 缓存）', () => {
+  it('定义 markdownCache Map + 记忆化函数（renderMessageMarkdown / renderThinkingMarkdown）', () => {
+    expect(source).toContain('const markdownCache = new Map<string, string>()')
+    expect(source).toContain('function renderMessageMarkdown(msg: Message): string')
+    expect(source).toContain('function renderThinkingMarkdown(msg: Message): string')
+  })
+
+  it('正文缓存键覆盖相关 agent 名（占位符替换依赖 store/reviewer 角色名，改名则键变重算）', () => {
+    expect(source).toContain('function markdownAgentNames(): string')
+    expect(source).toContain('const key = `${msg.id}:${markdownAgentNames()}:${msg.content}`')
+    expect(source).toContain("a.role === 'store'")
+    expect(source).toContain("a.role === 'reviewer'")
+  })
+
+  it('模板正文/思考渲染点已切到记忆化函数（未变消息 markdown 只算一次）', () => {
+    expect(source).toContain('v-html="renderMessageMarkdown(msg)"')
+    expect(source).toContain('v-html="renderThinkingMarkdown(msg)"')
+    // 模板里 v-html 不再直接调 renderMarkdown（记忆化函数体内仍含 renderMarkdown，那是实现细节）
+    expect(source).not.toContain('v-html="renderMarkdown(resolveDisplayPlaceholders(msg.content')
+    expect(source).not.toContain('v-html="renderMarkdown(msg.thinkingContent')
   })
 })

@@ -10,6 +10,7 @@ import { parseThinkingBlocks } from '@/utils/thinking'
 import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { createLogger } from '@/utils/logger'
 import DiffViewer from './DiffViewer.vue'
+import AgentStatusLabel from './AgentStatusLabel.vue'
 
 const log = createLogger('ChatPanel')
 
@@ -30,17 +31,6 @@ const clearingMessages = ref(false)
 const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次执行
 const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 const sending = ref(false)
-
-// ─── 回复中运行时长（平滑 + liveness）────────────────────────
-// 本地 1s tick：now 每秒更新驱动「回复中 · 已 N 秒」重算（服务端心跳 10s 一跳太粗，
-// 用户真机反馈「10 秒动一下」要平滑——反转上单「省一个 timer」取舍，代价是必须正确
-// 管理 timer 生命周期，onUnmounted 必 clear）。now 用 ref 而非 statusLabelZh 里直接
-// Date.now()，tick 更新 now.value 触发响应式重渲染。
-const now = ref(Date.now())
-let nowTimer: ReturnType<typeof setInterval> | null = null
-// 心跳失联阈值：2×10s 服务端间隔 + 5s 余量。超过仍未收到 replying 心跳 → 判定 server
-// 已死，停止递增、显示「无响应」——本地时钟不能掩盖进程死亡（liveness 语义不能丢）。
-const HEARTBEAT_STALE_MS = 25_000
 
 const {
   mentionActive,
@@ -235,18 +225,11 @@ watch(
 onMounted(() => {
   chatContainer.value?.addEventListener('scroll', checkScrollPosition, { passive: true })
   window.addEventListener('keydown', onPreviewKeydown)
-  nowTimer = setInterval(() => {
-    now.value = Date.now()
-  }, 1000)
 })
 
 onUnmounted(() => {
   chatContainer.value?.removeEventListener('scroll', checkScrollPosition)
   window.removeEventListener('keydown', onPreviewKeydown)
-  if (nowTimer) {
-    clearInterval(nowTimer)
-    nowTimer = null
-  }
 })
 
 // ─── Image preview (lightbox) ─────────────
@@ -529,32 +512,41 @@ function statusEmoji(status: string): string {
   }
 }
 
-function statusLabelZh(entry: { status: string; startedAt?: number; lastBeatAt?: number }): string {
-  switch (entry.status) {
-    case 'queued':
-      return '已收到'
-    case 'thinking':
-      return '思考中'
-    case 'replying':
-      // headless 黑盒适配器（dsh 等）整轮不 yield chunk，AGENT_TYPING 全程空转。
-      // 带 startedAt 时算运行时长：服务端 10s 心跳重发 MESSAGE_AGENT_STATUS 只负责
-      // 刷新 lastBeatAt（liveness 锚点），秒数由本地 1s tick 的 now 重算——每秒平滑
-      // 递增（反转上单「10s 一跳」取舍）。
-      if (entry.startedAt != null) {
-        // 心跳失联：replying 心跳（10s 间隔）超阈值未到 → server 已死，停止递增、
-        // 显示「无响应」——不能靠本地时钟把死进程显示成「还在跑」。
-        if (entry.lastBeatAt != null && now.value - entry.lastBeatAt > HEARTBEAT_STALE_MS) {
-          return '无响应'
-        }
-        const secs = Math.max(0, Math.floor((now.value - entry.startedAt) / 1000))
-        return `回复中 · 已 ${secs} 秒`
-      }
-      return '回复中'
-    case 'done':
-      return '完成'
-    default:
-      return entry.status
-  }
+// ─── renderMarkdown 记忆化（per-message）────────────────────────
+// 防御放大器 2：即使还有「缓存命中满列表赋值 + SESSION_HISTORY 权威校正再赋值」两次
+// 全量 render，未变消息的 markdown 也只算一次。renderMarkdown 是 CPU 密集（marked.parse
+// + DOMPurify.sanitize），长会话每条消息几十 ms，秒级重渲里重复算未变消息是纯浪费。
+// 键覆盖影响输出的输入：resolveDisplayPlaceholders(msg.content, store.agents) 依赖
+// store/reviewer 角色的 agent 名（@架构师/@审查者 替换），故键含相关 agent 名——
+// agent 改名会改变占位符替换结果，键变则缓存自然失效重算，不丢正确性。
+const markdownCache = new Map<string, string>()
+
+/** 影响 renderMarkdown 输出的 agent 名签名（占位符替换只读 store/reviewer 角色名） */
+function markdownAgentNames(): string {
+  const architect = store.agents.find((a) => a.role === 'store')?.name ?? ''
+  const reviewer = store.agents.find((a) => a.role === 'reviewer')?.name ?? ''
+  return `${architect}|${reviewer}`
+}
+
+/** 记忆化渲染正文：内容 + 相关 agent 名未变 → 直接返回缓存 html */
+function renderMessageMarkdown(msg: Message): string {
+  const key = `${msg.id}:${markdownAgentNames()}:${msg.content}`
+  const cached = markdownCache.get(key)
+  if (cached !== undefined) return cached
+  const html = renderMarkdown(resolveDisplayPlaceholders(msg.content, store.agents))
+  markdownCache.set(key, html)
+  return html
+}
+
+/** 记忆化渲染思考内容：思考内容未变 → 直接返回缓存 html */
+function renderThinkingMarkdown(msg: Message): string {
+  const raw = msg.thinkingContent?.replace(/\[思考\]\s*/g, '') ?? ''
+  const key = `${msg.id}:thinking:${raw}`
+  const cached = markdownCache.get(key)
+  if (cached !== undefined) return cached
+  const html = renderMarkdown(raw)
+  markdownCache.set(key, html)
+  return html
 }
 
 // ─── Bubble Footer (模型 + 窗口用量 + 停止按钮) ───────
@@ -797,10 +789,7 @@ const warnedAgentsText = computed(() => {
                       <span class="thinking-label">思考过程</span>
                       <span class="thinking-chevron">▶</span>
                     </summary>
-                    <div
-                      class="thinking-content"
-                      v-html="renderMarkdown(msg.thinkingContent.replace(/\[思考\]\s*/g, ''))"
-                    ></div>
+                    <div class="thinking-content" v-html="renderThinkingMarkdown(msg)"></div>
                   </details>
                   <div v-if="msg.images && msg.images.length" class="msg-images">
                     <img
@@ -813,10 +802,7 @@ const warnedAgentsText = computed(() => {
                       @click="openPreview(msg.images, i)"
                     />
                   </div>
-                  <div
-                    class="msg-text"
-                    v-html="renderMarkdown(resolveDisplayPlaceholders(msg.content, store.agents))"
-                  ></div>
+                  <div class="msg-text" v-html="renderMessageMarkdown(msg)"></div>
                   <!-- 对话内 diff 展示：extra.rich.blocks 存在才渲染（服务端采集附加，
                        永不进 LLM 上下文）；旧消息/无 extra → 纯文本回退与现网一致 -->
                   <DiffViewer
@@ -884,7 +870,7 @@ const warnedAgentsText = computed(() => {
                   <span class="status-emoji">{{ statusEmoji(s.status) }}</span>
                   <span class="status-avatar">{{ s.agentAvatar }}</span>
                   <span class="status-name">{{ s.agentName }}</span>
-                  <span class="status-label">{{ statusLabelZh(s) }}</span>
+                  <AgentStatusLabel :entry="s" />
                   <!-- 停止按钮（B2 重定位）：busy 但无流式内容时挂用户消息状态行承载——
                        streaming 中（typingStates 有该 agent）按钮在 streaming 气泡上；
                        边界明示：agent 被 agent 回复触发（广播模式）无用户消息状态行，
