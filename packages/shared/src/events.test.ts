@@ -74,8 +74,8 @@ describe('Channels', () => {
   })
 
   describe('agentStatus', () => {
-    it('generates correct channel name', () => {
-      expect(Channels.agentStatus('店长阿暹')).toBe('agent:店长阿暹:status')
+    it('generates correct channel name (keyed by agentId)', () => {
+      expect(Channels.agentStatus('agent-1')).toBe('agent:agent-1:status')
     })
   })
 

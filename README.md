@@ -174,7 +174,7 @@ catStudy/
 │   ├── skills-bootstrap.mjs / skills-check-*.mjs # 技能挂载检查
 │   ├── worktree-create.mjs # 会话 worktree 创建
 │   └── a2a-test.mjs / handoff-pipeline.e2e.mjs / handoff-gen.e2e.mjs # e2e
-├── docs/adr/             # 架构决策记录 (6 篇)
+├── docs/adr/             # 架构决策记录 (7 篇)
 ├── docs/                 # 规划/研究/会话记录
 ├── CONTEXT.md            # 领域术语表
 ├── pnpm-workspace.yaml   # pnpm monorepo 配置
@@ -196,7 +196,7 @@ npx tsx packages/server/src/seed.ts           # upsert 模式：已存在则更�
 npx tsx packages/server/src/seed.ts --reset   # 重置模式：清空所有数据后重建
 
 # ─── 测试 ──────────────────────────────────
-pnpm test             # 运行所有测试（当前 1304 条 / 71 个文件，全绿）
+pnpm test             # 运行所有测试（以 pnpm test 实测为准）
 pnpm test:watch       # watch 模式，文件变更自动运行
 pnpm test:coverage    # 运行 + 覆盖率报告
 pnpm test:server      # 仅 server 包测试
@@ -209,43 +209,43 @@ pnpm lint             # 全项目 TypeScript 类型检查
 
 ## 环境变量
 
-| 变量                       | 默认值                     | 说明                                                                                             |
-| -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------ |
-| `DS_KEY`                   | —                          | DeepSeek API Key（种子数据使用，演示角色共用）                                                    |
-| `KIMI_API_KEY`             | —                          | Kimi K3 API Key（kimi 推理 provider）                                                            |
-| `PORT`                     | `3200`                     | Server 监听端口                                                                                  |
-| `HOST`                     | `0.0.0.0`                  | Server 监听地址                                                                                  |
-| `REDIS_URL`                | `redis://localhost:6379`   | Redis 连接地址                                                                                   |
-| `HF_ENDPOINT`              | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`）                               |
-| `LOG_LEVEL`                | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                                                    |
-| `MEMORY_ENABLED`           | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                                               |
-| `MEMORY_HYBRID_ENABLED`    | —                          | 是否启用混合检索（向量 + 关键词）                                                                |
-| `MEMORY_DEDUP_ENABLED`     | `1`                        | 是否启用记忆去重（`0` 关闭）                                                                     |
-| `MEMORY_DEDUP_THRESHOLD`   | `0.20`                     | 记忆去重余弦距离阈值（越小越严格）                                                               |
-| `MEMORY_TOP_K`             | `3`                        | 检索时返回的相关记忆条数                                                                         |
-| `MEMORY_EMBEDDING_MODEL`   | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                                                 |
-| `SUMMARY_ENABLED`          | `true`                     | 是否启用增量摘要                                                                                 |
-| `SUMMARY_MODEL`            | `deepseek-chat`            | 摘要使用的模型                                                                                   |
-| `SUMMARY_API_KEY`          | 同 `DS_KEY`                | 摘要模型的 API Key                                                                               |
-| `SUMMARY_BASE_URL`         | `https://api.deepseek.com` | 摘要 API 地址                                                                                    |
-| `SUMMARY_INTERVAL`         | `3`                        | 每 N 轮对话触发一次增量摘要                                                                      |
-| `SUMMARY_COMPRESS_LIMIT`   | —                          | 摘要压缩触发阈值（压缩先于截断，达限走 handoff）                                                 |
-| `SUMMARY_REPLACE_HISTORY`  | —                          | 摘要是否替换历史消息                                                                             |
-| `HANDOFF_ENABLED`          | `true`                     | 是否启用 90% 阈值会话交接                                                                        |
-| `HANDOFF_THRESHOLD`        | `0.9`                      | 触交接的上下文 token 占比（可经设置页「系统配置」修改，配置文件优先于 env）                      |
-| `MAX_CONTEXT_TOKENS`       | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                                                             |
-| `TOKEN_COUNT_METHOD`       | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）                                  |
-| `CLI_IDLE_TIMEOUT_MS`      | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                                              |
-| `AGENT_HARD_TIMEOUT_MS`    | `1800000`                  | Agent 执行硬超时（毫秒，30 分钟）                                                                |
-| `CLAUDE_CODE_EFFORT_LEVEL` | `high`                     | Claude Code CLI 推理深度：`low` / `medium` / `high` / `max`                                      |
-| `EVAL_SAMPLE_RATE`         | —                          | 评估采样率                                                                                       |
-| `EVAL_ALERT_SUCCESS_RATE` / `EVAL_ALERT_TIMEOUT_RATE` / `EVAL_ALERT_REWORK_RATE` | — | 评估告警阈值（成功率/超时率/返工率）            |
-| `ONEBOT_ENABLED`           | `false`                    | 是否启用 OneBot webhook（默认 false，关闭时 webhook 返回 503）                                   |
-| `ONEBOT_API_BASE`          | `http://127.0.0.1:3000`    | NapCat HTTP API 地址（出站回复用）                                                               |
-| `ONEBOT_TOKEN`             | —                          | webhook 鉴权 token（设置后上报须鉴权：Bearer 或 `x-signature`，详见「QQ 接入」章节；留空不校验） |
-| `ONEBOT_ALLOWLIST`         | —                          | QQ 接入白名单（群/私聊）                                                                         |
-| `ONEBOT_FETCH_TIMEOUT_MS`  | —                          | OneBot 出站请求超时（毫秒）                                                                      |
-| `NAPCAT_LAUNCH_CMD`        | —                          | dev.js 拉起 NapCat 的启动命令：完整命令行或 `{NAPCAT_PATH}` 模板（详见下文「QQ 接入」章节）      |
+| 变量                                                                             | 默认值                     | 说明                                                                                             |
+| -------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `DS_KEY`                                                                         | —                          | DeepSeek API Key（种子数据使用，演示角色共用）                                                   |
+| `KIMI_API_KEY`                                                                   | —                          | Kimi K3 API Key（kimi 推理 provider）                                                            |
+| `PORT`                                                                           | `3200`                     | Server 监听端口                                                                                  |
+| `HOST`                                                                           | `127.0.0.1`                | Server 监听地址                                                                                  |
+| `REDIS_URL`                                                                      | `redis://localhost:6379`   | Redis 连接地址                                                                                   |
+| `HF_ENDPOINT`                                                                    | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`）                               |
+| `LOG_LEVEL`                                                                      | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                                                    |
+| `MEMORY_ENABLED`                                                                 | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                                               |
+| `MEMORY_HYBRID_ENABLED`                                                          | —                          | 是否启用混合检索（向量 + 关键词）                                                                |
+| `MEMORY_DEDUP_ENABLED`                                                           | `1`                        | 是否启用记忆去重（`0` 关闭）                                                                     |
+| `MEMORY_DEDUP_THRESHOLD`                                                         | `0.20`                     | 记忆去重余弦距离阈值（越小越严格）                                                               |
+| `MEMORY_TOP_K`                                                                   | `3`                        | 检索时返回的相关记忆条数                                                                         |
+| `MEMORY_EMBEDDING_MODEL`                                                         | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                                                 |
+| `SUMMARY_ENABLED`                                                                | `true`                     | 是否启用增量摘要                                                                                 |
+| `SUMMARY_MODEL`                                                                  | `deepseek-v4-flash`        | 摘要使用的模型                                                                                   |
+| `SUMMARY_API_KEY`                                                                | 同 `DS_KEY`                | 摘要模型的 API Key                                                                               |
+| `SUMMARY_BASE_URL`                                                               | `https://api.deepseek.com` | 摘要 API 地址                                                                                    |
+| `SUMMARY_INTERVAL`                                                               | `3`                        | 每 N 轮对话触发一次增量摘要                                                                      |
+| `SUMMARY_COMPRESS_LIMIT`                                                         | —                          | 摘要压缩触发阈值（压缩先于截断，达限走 handoff）                                                 |
+| `SUMMARY_REPLACE_HISTORY`                                                        | —                          | 摘要是否替换历史消息                                                                             |
+| `HANDOFF_ENABLED`                                                                | `true`                     | 是否启用 90% 阈值会话交接                                                                        |
+| `HANDOFF_THRESHOLD`                                                              | `0.9`                      | 触交接的上下文 token 占比（可经设置页「系统配置」修改，配置文件优先于 env）                      |
+| `MAX_CONTEXT_TOKENS`                                                             | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                                                             |
+| `TOKEN_COUNT_METHOD`                                                             | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）                                  |
+| `CLI_IDLE_TIMEOUT_MS`                                                            | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                                              |
+| `AGENT_HARD_TIMEOUT_MS`                                                          | `1800000`                  | Agent 执行硬超时（毫秒，30 分钟）                                                                |
+| `CLAUDE_CODE_EFFORT_LEVEL`                                                       | `high`                     | Claude Code CLI 推理深度：`low` / `medium` / `high` / `max`                                      |
+| `EVAL_SAMPLE_RATE`                                                               | —                          | 评估采样率                                                                                       |
+| `EVAL_ALERT_SUCCESS_RATE` / `EVAL_ALERT_TIMEOUT_RATE` / `EVAL_ALERT_REWORK_RATE` | —                          | 评估告警阈值（成功率/超时率/返工率）                                                             |
+| `ONEBOT_ENABLED`                                                                 | `false`                    | 是否启用 OneBot webhook（默认 false，关闭时 webhook 返回 503）                                   |
+| `ONEBOT_API_BASE`                                                                | `http://127.0.0.1:3000`    | NapCat HTTP API 地址（出站回复用）                                                               |
+| `ONEBOT_TOKEN`                                                                   | —                          | webhook 鉴权 token（设置后上报须鉴权：Bearer 或 `x-signature`，详见「QQ 接入」章节；留空不校验） |
+| `ONEBOT_ALLOWLIST`                                                               | —                          | QQ 接入白名单（群/私聊）                                                                         |
+| `ONEBOT_FETCH_TIMEOUT_MS`                                                        | —                          | OneBot 出站请求超时（毫秒）                                                                      |
+| `NAPCAT_LAUNCH_CMD`                                                              | —                          | dev.js 拉起 NapCat 的启动命令：完整命令行或 `{NAPCAT_PATH}` 模板（详见下文「QQ 接入」章节）      |
 
 ## QQ 接入（OneBot / NapCat）
 
@@ -296,12 +296,12 @@ NapCat 核心进程起来 ≠ OneBot 可用：QQ 未登录时 HTTP（默认 3000
 
 LLM 侧通过 MCP 工具与系统交互（`packages/server/src/connectors/socketio.ts` + `llm/route-signals.ts` + `llm/user-request-signals.ts` 实现），当前提供：
 
-| 工具                 | 用途                                                       |
-| -------------------- | ---------------------------------------------------------- |
-| `post_message`       | 结构化路由投递：把消息投递给会话内下一棒 Agent（替代文本行首 @） |
-| `query_db`           | 排障取证：按白名单表/列查询数据库（messages/execution_logs…） |
-| `request_user_action`| 用户介入请求：重启 server（需用户批准）等稳定触发通道        |
-| `search_knowledge`   | 检索运营方知识库（项目接入文档/工作规范等标准数据）           |
+| 工具                  | 用途                                                             |
+| --------------------- | ---------------------------------------------------------------- |
+| `post_message`        | 结构化路由投递：把消息投递给会话内下一棒 Agent（替代文本行首 @） |
+| `query_db`            | 排障取证：按白名单表/列查询数据库（messages/execution_logs…）    |
+| `request_user_action` | 用户介入请求：重启 server（需用户批准）等稳定触发通道            |
+| `search_knowledge`    | 检索运营方知识库（项目接入文档/工作规范等标准数据）              |
 
 设计要点：
 
@@ -334,13 +334,13 @@ git post-commit hook 自动触发审查链（提交消息需带 `catstudy [uuid]
 
 seed 数据内置 5 个角色（角色类型：store / implementer / reviewer / vision）：
 
-| 角色   | 类型         | 职责                       |
-| ------ | ------------ | -------------------------- |
-| 店长   | store        | 架构师：组件设计、派活、收口 |
-| ds猫   | implementer  | 实施工程师                 |
-| flash猫| implementer  | 实施工程师                 |
-| 图测猫 | vision       | 视觉/UI 测试               |
-| 吐槽猫 | reviewer     | 审查者：代码审查           |
+| 角色    | 类型        | 职责                         |
+| ------- | ----------- | ---------------------------- |
+| 店长    | store       | 架构师：组件设计、派活、收口 |
+| ds猫    | implementer | 实施工程师                   |
+| flash猫 | implementer | 实施工程师                   |
+| 图测猫  | vision      | 视觉/UI 测试                 |
+| 吐槽猫  | reviewer    | 审查者：代码审查             |
 
 ## 核心概念
 
@@ -359,7 +359,7 @@ seed 数据内置 5 个角色（角色类型：store / implementer / reviewer / 
 
 ## 架构决策
 
-6 篇 ADR 记录在 [`docs/adr/`](./docs/adr/)：
+7 篇 ADR 记录在 [`docs/adr/`](./docs/adr/)：
 
 | ADR  | 决策                                                 |
 | ---- | ---------------------------------------------------- |
@@ -369,6 +369,7 @@ seed 数据内置 5 个角色（角色类型：store / implementer / reviewer / 
 | 0004 | 单槽位 + FIFO 串行调度                               |
 | 0005 | Redis Pub/Sub 三频道消息总线                         |
 | 0006 | sqlite-vec 向量检索记忆系统                          |
+| 0007 | 外部工具形态选型前置检查单                           |
 
 ## 开发工作流
 
@@ -397,7 +398,7 @@ curl -X DELETE http://localhost:3200/api/sessions/<session-id>/messages
 ### 运行测试
 
 ```bash
-pnpm test             # 全量：1304 条 / 71 个文件（shared 49 + server 990 + web 232 + scripts 33）
+pnpm test             # 全量测试（以 pnpm test 实测为准）
 pnpm test:server      # 仅服务端
 pnpm test -- --reporter=verbose  # 逐条显示
 ```
@@ -406,15 +407,15 @@ pnpm test -- --reporter=verbose  # 逐条显示
 
 ## 技术栈
 
-| 层         | 技术                                                        |
-| ---------- | ----------------------------------------------------------- |
-| 运行时     | Node.js 20+ / TypeScript 5.5                                |
-| 包管理     | pnpm workspace (monorepo)                                   |
-| 后端框架   | Fastify 5                                                   |
-| 实时通信   | Socket.IO 4                                                 |
-| 数据库     | SQLite (better-sqlite3 + WAL + sqlite-vec 向量扩展)         |
-| 消息中间件 | Redis 7 (ioredis，可选)                                     |
+| 层         | 技术                                                               |
+| ---------- | ------------------------------------------------------------------ |
+| 运行时     | Node.js 20+ / TypeScript 5.5                                       |
+| 包管理     | pnpm workspace (monorepo)                                          |
+| 后端框架   | Fastify 5                                                          |
+| 实时通信   | Socket.IO 4                                                        |
+| 数据库     | SQLite (better-sqlite3 + WAL + sqlite-vec 向量扩展)                |
+| 消息中间件 | Redis 7 (ioredis，可选)                                            |
 | LLM 推理   | DeepSeek HTTP API / Claude Code CLI / Codex CLI / Ollama / Kimi K3 |
-| 嵌入模型   | HuggingFace Transformers (Xenova/bge-small-zh-v1.5, 512 维) |
-| 前端框架   | Vue 3 + Vite + Pinia                                        |
-| 测试       | Vitest 4                                                    |
+| 嵌入模型   | HuggingFace Transformers (Xenova/bge-small-zh-v1.5, 512 维)        |
+| 前端框架   | Vue 3 + Vite + Pinia                                               |
+| 测试       | Vitest 4                                                           |

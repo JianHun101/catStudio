@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   AgentConfigSchema,
   AgentCreateSchema,
+  AgentUpdateSchema,
   SessionCreateSchema,
   MessageSendSchema,
   EmbeddingConfigSchema,
@@ -72,6 +73,50 @@ describe('AgentCreateSchema', () => {
   it('rejects empty name', () => {
     const result = AgentCreateSchema.safeParse({ ...validCreate, name: '' })
     expect(result.success).toBe(false)
+  })
+})
+
+// ─── AgentUpdateSchema ─────────────────────────────
+
+describe('AgentUpdateSchema', () => {
+  it('accepts partial update (single field)', () => {
+    const result = AgentUpdateSchema.safeParse({ name: '新名字' })
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts empty object (all fields optional；empty-body 400 是路由职责)', () => {
+    const result = AgentUpdateSchema.safeParse({})
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts llmEnvExtra (PATCH 独有字段)', () => {
+    const result = AgentUpdateSchema.safeParse({
+      llmEnvExtra: '{"HTTPS_PROXY":"http://127.0.0.1:7897"}',
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects empty name', () => {
+    const result = AgentUpdateSchema.safeParse({ name: '' })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects llmMaxTokens = 0', () => {
+    const result = AgentUpdateSchema.safeParse({ llmMaxTokens: 0 })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects invalid effortLevel enum', () => {
+    const result = AgentUpdateSchema.safeParse({ effortLevel: 'ultra' })
+    expect(result.success).toBe(false)
+  })
+
+  it('strips unknown fields (对齐 POST 的 strip 语义)', () => {
+    const result = AgentUpdateSchema.safeParse({ name: 'ok', unknownField: 'x' })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect('unknownField' in result.data).toBe(false)
+    }
   })
 })
 

@@ -19,6 +19,13 @@ export const AgentConfigSchema = z.object({
 
 export const AgentCreateSchema = AgentConfigSchema.omit({ id: true })
 
+// PATCH 入参：与 AgentCreate 对齐，但所有字段可缺省（partial）。llmEnvExtra 是 PATCH 独有字段
+// （宽容字符串：JSON 原样落库、registry 消费时解析，无特殊校验），不在 AgentConfigSchema 中——
+// 故在此 extend 而非改 AgentConfigSchema，避免 POST 行为变化。
+export const AgentUpdateSchema = AgentConfigSchema.omit({ id: true }).partial().extend({
+  llmEnvExtra: z.string().optional(),
+})
+
 // ─── Session ────────────────────────────────────────
 
 export const SessionCreateSchema = z.object({

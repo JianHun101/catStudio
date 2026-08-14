@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { v4 as uuid } from 'uuid'
-import { AgentCreateSchema, AgentConfigSchema } from '@cat-study/shared'
+import { AgentCreateSchema, AgentConfigSchema, AgentUpdateSchema } from '@cat-study/shared'
 import type { AgentTokenStats } from '@cat-study/shared'
 import {
   agents as agentsRepo,
@@ -75,29 +75,12 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const existing = agentsRepo.getAgentById(id)
     if (!existing) return reply.status(404).send({ error: 'Agent not found' })
 
-    const body = req.body as any
-
-    // per-agent 静态运行配置：严格校验（用户显式配置，非法值 400 显式暴露前端 bug）
-    if (
-      body.llmMaxTokens !== undefined &&
-      !(
-        Number.isInteger(body.llmMaxTokens) &&
-        body.llmMaxTokens >= 1 &&
-        body.llmMaxTokens <= 131072
-      )
-    ) {
-      return reply.status(400).send({ error: 'llmMaxTokens must be an integer in [1, 131072]' })
+    // 对齐 POST：入参走 Zod 校验（AgentUpdateSchema 继承 AgentConfigSchema 的 llmMaxTokens/llmTemperature 严格约束）
+    const parsed = AgentUpdateSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() })
     }
-    if (
-      body.llmTemperature !== undefined &&
-      !(
-        typeof body.llmTemperature === 'number' &&
-        body.llmTemperature >= 0 &&
-        body.llmTemperature <= 2
-      )
-    ) {
-      return reply.status(400).send({ error: 'llmTemperature must be a number in [0, 2]' })
-    }
+    const body = parsed.data
 
     const fields: string[] = []
     const values: any[] = []
@@ -115,9 +98,10 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       llmTemperature: 'llm_temperature',
       llmEnvExtra: 'llm_env_extra', // 宽容字符串（JSON 原样落库，registry 消费时解析），无特殊校验
     })) {
-      if (body[key] !== undefined) {
+      const value = body[key as keyof typeof body]
+      if (value !== undefined) {
         fields.push(`${col} = ?`)
-        values.push(body[key])
+        values.push(value)
       }
     }
 

@@ -65,6 +65,6 @@ export const Channels = {
   /** 调度指令 — dispatch to a specific agent in a session */
   sessionAgent: (sessionId: string, agentName: string) => `session:${sessionId}:agent:${agentName}`,
 
-  /** Agent 状态 — global status for a specific agent */
-  agentStatus: (agentName: string) => `agent:${agentName}:status`,
+  /** Agent 状态 — global status for a specific agent（按 agentId：id 稳定，name 可改/可撞） */
+  agentStatus: (agentId: string) => `agent:${agentId}:status`,
 } as const

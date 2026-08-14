@@ -220,6 +220,30 @@ describe('Agent Routes', () => {
       expect(res.statusCode).toBe(400)
     })
 
+    it('returns 400 for empty name', async () => {
+      const create = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
+      const { id } = JSON.parse(create.body)
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/agents/${id}`,
+        payload: { name: '' },
+      })
+      expect(res.statusCode).toBe(400)
+    })
+
+    it('returns 400 for invalid effortLevel enum', async () => {
+      const create = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
+      const { id } = JSON.parse(create.body)
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/agents/${id}`,
+        payload: { effortLevel: 'ultra' },
+      })
+      expect(res.statusCode).toBe(400)
+    })
+
     it('updates static run config (llmMaxTokens/llmTemperature)', async () => {
       const create = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
       const { id } = JSON.parse(create.body)

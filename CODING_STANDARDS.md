@@ -11,6 +11,9 @@
 ## 2. TypeScript
 
 - [ ] **类型安全**：不使用 `any`（除非有明确注释说明原因）
+  - **Blanket 豁免 ①（catch 错误处理）**：`catch (err: any)` 统一豁免——catch 变量默认 `unknown`、收窄需样板代码，82 处 call site 不要求逐条注释
+  - **Blanket 豁免 ②（测试 mock）**：测试 mock 的 `as any` / `: any` 统一豁免
+  - **未豁免的裸 `any`**：routes 的 `req.body/params/query` 等仍须逐一收紧；本次不做批量迁移（全仓库约 652 处），PATCH 的 `req.body as any` 已单独收口
 - [ ] **Zod 校验**：所有 API 边界（路由输入/输出、Socket.IO 事件 payload）使用 Zod schema 校验
 - [ ] **蛇形/驼峰转换**：数据库列名为 `snake_case`，TypeScript 为 `camelCase`，转换在 API 边界完成
 - [ ] **非空断言**：`as` 类型断言优先使用 `@total-typescript/shoehorn`，避免裸 `as`

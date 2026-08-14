@@ -416,7 +416,7 @@ async function publishAgentStatus(agent: AgentConfig, status: string): Promise<v
     const redis = getRedis()
     if (!redis) return
     await redis.publish(
-      Channels.agentStatus(agent.name),
+      Channels.agentStatus(agent.id),
       JSON.stringify({
         agentId: agent.id,
         name: agent.name,
