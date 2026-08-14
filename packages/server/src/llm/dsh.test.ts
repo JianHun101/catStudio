@@ -254,6 +254,8 @@ describe('DshAdapter', () => {
     expect(args).not.toContain('--patch')
     // 凭证注入：apiKey 以 DEEPSEEK_API_KEY 进 spawn env（DS_KEY 复用）
     expect(opts.env!.DEEPSEEK_API_KEY).toBe('sk-key')
+    // 官方 seam：headless 确定性放行（unconditional，适配器钉死）
+    expect(opts.env!.DSH_PERMISSION_MODE).toBe('danger-full-access')
 
     child.emitClose(0)
     await pending
@@ -343,14 +345,17 @@ describe('DshAdapter', () => {
     expect(content).toContain("CATSTUDY_MSG_ID: 'm1'")
     expect(content).toContain('CATSTUDY_TRIGGER_AUTHOR_NAME')
     expect(content).toContain("'店长'")
-    // 模型与 approval 行（--dump-config + 插件源码双实证：
-    // patch config 整块替换非合并，provider/model 均必填；approval 用 policy key）
-    expect(content).toContain('agent-default-model')
-    expect(content).toContain('provider: deepseek-official')
-    expect(content).toContain("model: 'deepseek-chat'")
-    expect(content).toContain('approval')
-    expect(content).toContain('policy: never')
-    expect(content).not.toContain('mode: never')
+    // 模型行：裸 `- id:` 行写覆盖（非 insert）——agent-default-model 已在 headless
+    // 底座挂载，insert 会 duplicate loader entry id 炸；patch config 整块替换非合并，
+    // provider/model 均必填
+    expect(content).toContain(
+      `- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: 'deepseek-chat'`
+    )
+    // 不是 insert 形态（insert 会重复 id 炸）
+    expect(content).not.toContain('- insert:\n    - id: agent-default-model')
 
     // 完成 → patch 文件 finally 清理
     child.emitClose(0)

@@ -49,20 +49,26 @@ function yamlScalar(value: string): string {
 /**
  * 生成 per-spawn 临时 cordis.patch.yml（--patch overlay，finally 清理）。
  *
- * 内容三行 insert：
- *  1. mcp-catstudy（@deepseek-ai/dsh-mcp-client）——serverName catstudy + stdio
+ * 内容两行：
+ *  1. mcp-catstudy（@deepseek-ai/dsh-mcp-client）——`insert` 新增 loader entry
+ *     （不在 headless profile 底座里，insert 语义正确）；serverName catstudy + stdio
  *     spawn node scripts/mcp-server.mjs；env 以**字面量内联**（非 !!js 引用）——
  *     guaranteed 路径：不依赖 dsh 的 !!js env 求值（店长派活单红项，post-install 实测
  *     通过后可简化为静态 patch + !!js process.env.X）。工具面 mcp__catstudy__* 与
  *     claude 链逐字一致（官方文档实证：mcp__<serverName>__<rawName>）。
- *  2. agent-default-model——覆盖当轮 llmModel；patch config 是**整块替换**非合并
- *     （dsh-base/cordis.patch.yml 注释实证），且 dsh-agent-default-model 的 Config
- *     schema 中 provider/model 均必填（z.string().required()）——缺 provider 会 Zod
- *     校验失败，故连 provider: deepseek-official 一起写（deepseek-official 消费
- *     DEEPSEEK_API_KEY 继承 env，与本适配器凭证注入一致）。
- *  3. approval——headless 无 UI 应答时工具 fail-closed 全拒；policy: never 全自动放行
- *     （dsh-user-approval Config schema 实锤：z.object({policy: z.union(['ask','never'])
- *     .default('ask')})——'never' = 确定性放行非全拒，mode 不是合法 key 会被剥掉）。
+ *  2. agent-default-model——覆盖当轮 llmModel；裸 `- id:` 行写（**非 insert**）——
+ *     agent-default-model 已在 headless profile 底座挂载（dsh-base/cordis.patch.yml，
+ *     所有 profile 公共底座），insert 会因 duplicate loader entry id 炸（实机复现：
+ *     `duplicate loader entry id: agent-default-model`）；改已有 row 用裸 id 行写、
+ *     按 id 寻址最后写胜（dsh-base 注释实证）。patch config 整块替换非合并，且
+ *     dsh-agent-default-model Config schema 中 provider/model 均必填
+ *     （z.string().required()）——缺 provider 会 Zod 校验失败，故连
+ *     provider: deepseek-official 一起写（消费 DEEPSEEK_API_KEY 继承 env，与凭证注入一致）。
+ *
+ * approval 不再走 patch 行写——由 chatStream 注入 DSH_PERMISSION_MODE=danger-full-access
+ * 官方 seam（base config 同时读它设 sandbox-policy.mode 与 approval.policy，一次到位）；
+ * 单独设 policy: never 会触发 permission-presets 校验（(workspace-write,never) 不匹配
+ * 三预设 → `composed sandbox and approval defaults match no preset`）。
  *
  * env 值来自 options.context（CATSTUDY_* 五元组 + 可选 triggerAuthorName），
  * MCP server 子进程继承；文件名带 pid + 随机后缀——同一进程并发多个 spawn 不冲突。
@@ -90,15 +96,10 @@ function writePatchConfig(context: NonNullable<ChatOptions['context']>, model: s
         args: [${yamlScalar(MCP_SERVER_PATH)}]
         env:
 ${envLines.map((l) => `          ${l}`).join('\n')}
-- insert:
-    - id: agent-default-model
-      config:
-        provider: deepseek-official
-        model: ${yamlScalar(model)}
-- insert:
-    - id: approval
-      config:
-        policy: never
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: ${yamlScalar(model)}
 `
   const p = join(
     tmpdir(),
@@ -199,6 +200,11 @@ export class DshAdapter implements LLMAdapter {
     if (this.apiKey) {
       env.DEEPSEEK_API_KEY = this.apiKey
     }
+    // 官方 seam：headless 形态需要确定性放行（ask 会 fail-closed 全拒工具）。
+    // base config 同时读它设 sandbox-policy.mode 与 approval.policy——一次到位，
+    // 不再在 patch 里写 approval row（单独 policy: never 会触发 permission-presets
+    // 校验）。放在 envExtra spread 之后 = 适配器钉死，不开放 per-agent 覆盖。
+    env.DSH_PERMISSION_MODE = 'danger-full-access'
 
     // spawn node <DSH_ENTRY>：纯 JS CLI 用 node.exe 执行（避免 .cmd 包装 EINVAL，
     // CLAUDE.md「Spawn: node path/to/cli.mjs」约定）——supervisor command=node.exe 原生 exe
