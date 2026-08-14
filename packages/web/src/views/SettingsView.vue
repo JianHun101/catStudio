@@ -365,7 +365,7 @@ function openCreate(): void {
 
 function closeEdit(): void {
   editingAgent.value = null
-  store.fetchData()
+  store.fetchData(true) // 编辑 Agent 后刷新列表（force：dataReady 已就绪，不 force 会静默失效）
 }
 
 const newAgentForm = ref({
@@ -413,7 +413,7 @@ async function handleCreate(): Promise<void> {
       llmApiKey: '',
       llmBaseUrl: '',
     }
-    await store.fetchData()
+    await store.fetchData(true) // 创建 Agent 后刷新列表（force：dataReady 已就绪，不 force 会静默失效）
   } catch (err: any) {
     log.error('create agent failed', { error: String(err) })
     // 解析后端返回的友好错误信息，否则用通用中文提示
@@ -724,7 +724,7 @@ onUnmounted(() => {
               <span class="status-icon">⚠️</span>
               <p>数据加载失败</p>
               <p class="hint">{{ store.dataError }}</p>
-              <button class="btn-retry-sm" @click="store.fetchData()">重试</button>
+              <button class="btn-retry-sm" @click="store.fetchData(true)">重试</button>
             </div>
 
             <!-- 空状态 -->

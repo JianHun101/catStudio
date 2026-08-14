@@ -199,6 +199,55 @@ describe('chatStore', () => {
     })
   })
 
+  describe('消息缓存（切换会话不亮 skeleton）', () => {
+    it('A→B 存缓存，B→A 命中缓存立即渲染、不亮 loading', () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2', title: 'S2' }]
+      store.activeSessionId = 's1'
+      store.messages = [{ ...mockMessage, id: 'm1', sessionId: 's1' }]
+
+      // A → B：切走，缓存 A
+      store.joinSession('s2')
+      expect(store.messages).toHaveLength(0) // B 未命中缓存 → 清空
+      expect(store.loadingMessages).toBe(true) // 等待 SESSION_HISTORY
+
+      // B → A：命中缓存 → 立即渲染，不亮 loading
+      store.joinSession('s1')
+      expect(store.messages).toHaveLength(1)
+      expect(store.messages[0].id).toBe('m1')
+      expect(store.loadingMessages).toBe(false)
+    })
+
+    it('SESSION_HISTORY 权威校正后更新缓存（补切走期间增量，防缓存陈旧）', () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2', title: 'S2' }]
+      store.activeSessionId = 's1'
+      store.messages = [{ ...mockMessage, id: 'stale', sessionId: 's1' }]
+
+      store.joinSession('s2') // 缓存 s1 的 stale
+      store.joinSession('s1') // 命中缓存，先渲染 stale
+      expect(store.messages[0].id).toBe('stale')
+
+      // SESSION_HISTORY 权威校正：替换为最新全量
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.SESSION_HISTORY)?.[1] as
+        ((data: { messages: Message[]; welcome: Message }) => void) | undefined
+      expect(handler).toBeDefined()
+      handler!({
+        messages: [
+          { ...mockMessage, id: 'm1', sessionId: 's1' },
+          { ...mockMessage, id: 'm2', sessionId: 's1' },
+        ],
+        welcome: undefined as any,
+      })
+      expect(store.messages).toHaveLength(2)
+      expect(store.messages[0].id).toBe('m1')
+
+      // 校正后缓存同步更新：再切走切回，拿到的是校正后的数组
+      store.joinSession('s2')
+      store.joinSession('s1')
+      expect(store.messages).toHaveLength(2)
+      expect(store.messages[0].id).toBe('m1')
+    })
+  })
+
   describe('sendMessage', () => {
     it('emits SEND_MESSAGE with payload', () => {
       store.activeSessionId = 's1'
@@ -319,6 +368,24 @@ describe('chatStore', () => {
 
       expect(store.sessions).toEqual([])
       expect(store.activeSessionId).toBeNull()
+    })
+
+    it('dataReady 就绪后默认不重拉，force=true 强制刷新', async () => {
+      mockGetAgents.mockResolvedValue([mockAgent])
+      mockGetSessions.mockResolvedValue([mockSession])
+
+      await store.fetchData() // 首次加载 → dataReady = true
+      expect(store.dataReady).toBe(true)
+      const agentsCalls = mockGetAgents.mock.calls.length
+      const sessionsCalls = mockGetSessions.mock.calls.length
+
+      await store.fetchData() // 无 force → 直接 return，不重拉
+      expect(mockGetAgents.mock.calls.length).toBe(agentsCalls)
+      expect(mockGetSessions.mock.calls.length).toBe(sessionsCalls)
+
+      await store.fetchData(true) // force → 重拉
+      expect(mockGetAgents.mock.calls.length).toBe(agentsCalls + 1)
+      expect(mockGetSessions.mock.calls.length).toBe(sessionsCalls + 1)
     })
   })
 

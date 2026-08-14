@@ -51,6 +51,12 @@ export const useChatStore = defineStore('chat', () => {
   const errorMessage = ref<string | null>(null) // 服务端 ERROR 事件的 toast 消息
   let errorTimer: ReturnType<typeof setTimeout> | null = null
   const loadingMessages = ref(false) // session 切换时等待历史消息加载
+  /**
+   * 消息本地缓存：sessionId → 消息数组。切走时存当前数组引用，切回命中则立即渲染（不亮 skeleton）；
+   * SESSION_HISTORY 到达后做权威全量校正（补切走期间非活跃会话的增量）。引用语义安全：
+   * 切走存的是旧数组引用，之后 messages.value 被重新赋值成新数组，不会原地改旧引用——无需深拷贝。
+   */
+  const sessionMessages = new Map<string, Message[]>()
   /** 重启请求按钮状态（messageId → pending/confirmed/none；none=隐藏按钮） */
   const restartStates = ref<Map<string, 'pending' | 'confirmed' | 'none'>>(new Map())
   /** 确认重启进行中（点击瞬间置位，ack / RESTART_STATUS / ERROR 到达后清除） */
@@ -134,8 +140,9 @@ export const useChatStore = defineStore('chat', () => {
   // ─── API Actions ───────────────────────────
 
   /** 先轮询健康检查，服务器就绪后再拉数据（最长等 30s） */
-  async function fetchData(): Promise<void> {
+  async function fetchData(force = false): Promise<void> {
     if (loading.value) return // 防止重复调用
+    if (dataReady.value && !force) return // 数据已就绪，除非 force 强制刷新（编辑/创建后重拉、手动重试必须 force）
     loading.value = true
     waitingForServer.value = true
     dataError.value = ''
@@ -202,10 +209,21 @@ export const useChatStore = defineStore('chat', () => {
     if (activeSessionId.value && switching) {
       socket.emit(Events.LEAVE_SESSION, activeSessionId.value)
     }
+    // 切走前把当前消息存入缓存（存数组引用，后续 messages.value 重新赋值不会改旧引用）
+    if (switching) {
+      sessionMessages.set(activeSessionId.value!, messages.value)
+    }
     activeSessionId.value = sessionId
     handoffFailed.value = null // 切会话清除旧会话的交接失败横幅
-    messages.value = []
-    loadingMessages.value = true // 等待 SESSION_HISTORY 到达
+    const cached = sessionMessages.get(sessionId)
+    if (cached) {
+      // 命中缓存：立即渲染、不亮 skeleton；SESSION_HISTORY 仍会回来做权威全量校正
+      messages.value = cached
+      loadingMessages.value = false
+    } else {
+      messages.value = []
+      loadingMessages.value = true // 等待 SESSION_HISTORY 到达
+    }
     // 清除旧会话的打字气泡（切换会话时状态应完全重置）
     typingStates.value.clear()
     // 清除旧会话的上下文窗口 token 数据（不同会话的 Agent 上下文不同）
@@ -311,6 +329,7 @@ export const useChatStore = defineStore('chat', () => {
       log.error('deleteSession API failed', { error: String(err) })
       throw err
     }
+    sessionMessages.delete(id) // 防删会话后缓存残留（Map 无界增长）
     sessions.value = sessions.value.filter((s) => s.id !== id)
     // 如果删除的是当前活跃会话，切换到第一个可用会话
     if (activeSessionId.value === id) {
@@ -454,6 +473,8 @@ export const useChatStore = defineStore('chat', () => {
       }
       all.push(...data.messages)
       messages.value = all
+      // 权威全量校正后更新缓存（补切走期间非活跃会话的增量，防缓存陈旧）
+      sessionMessages.set(activeSessionId.value!, all)
       // 重启请求消息：历史恢复初始 pending（JOIN 后服务端 RESTART_STATUS 校正）
       for (const m of data.messages) {
         if (m.messageType === 'restart_request') {

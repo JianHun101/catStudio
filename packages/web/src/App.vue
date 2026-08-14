@@ -76,7 +76,9 @@ onUnmounted(() => {
 
   <EvaluationView v-else-if="showEval" @close="showEval = false" />
 
-  <div v-else class="app-layout" :class="{ 'left-closed': !leftOpen }">
+  <!-- app-layout 用 v-show 保活：切设置/评估页不卸载、切回零重建（SessionList 不重跑 onMounted、ChatPanel 不重建）；
+       设置/评估页仍 v-if/v-else-if 互斥。副作用是设计内收益：设置页打开期间 socket 事件仍进 store（消息实时进缓存）。 -->
+  <div v-show="!showSettings && !showEval" class="app-layout" :class="{ 'left-closed': !leftOpen }">
     <aside class="panel-left">
       <div class="panel-inner">
         <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />

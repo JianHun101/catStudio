@@ -27,8 +27,8 @@ describe('App.vue 设置入口（全局位置）', () => {
     expect(appSource).toContain('@click="showSettings = true"')
     expect(appSource).toContain('title="设置"')
     expect(appSource).toContain('aria-label="设置"')
-    // 设置页与三栏布局互斥（v-else）
-    expect(appSource).toMatch(/<SettingsView v-if="showSettings"[\s\S]*?v-else class="app-layout"/)
+    // 设置页与三栏布局互斥：app-layout 用 v-show 保活（切回零重建），设置/评估页仍 v-if/v-else-if 互斥
+    expect(appSource).toMatch(/<div v-show="!showSettings && !showEval" class="app-layout"/)
   })
 
   it('折叠态（56px 图标条）齿轮照常容纳——图标条模式', () => {

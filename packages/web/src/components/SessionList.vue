@@ -19,7 +19,7 @@ const showCreate = ref(false)
 
 function closeCreate(): void {
   showCreate.value = false
-  store.fetchData()
+  store.fetchData(true) // 创建会话后刷新列表（force：dataReady 已就绪，不 force 会静默失效）
 }
 
 onMounted(() => {
@@ -127,7 +127,7 @@ async function handleDelete(id: string): Promise<void> {
         <span class="status-icon">⚠️</span>
         <p>数据加载失败</p>
         <p class="hint">{{ store.dataError }}</p>
-        <button class="btn-retry" @click="store.fetchData()">重试</button>
+        <button class="btn-retry" @click="store.fetchData(true)">重试</button>
       </div>
 
       <!-- 正常会话列表 -->
