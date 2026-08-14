@@ -329,7 +329,6 @@ export const useChatStore = defineStore('chat', () => {
       log.error('deleteSession API failed', { error: String(err) })
       throw err
     }
-    sessionMessages.delete(id) // 防删会话后缓存残留（Map 无界增长）
     sessions.value = sessions.value.filter((s) => s.id !== id)
     // 如果删除的是当前活跃会话，切换到第一个可用会话
     if (activeSessionId.value === id) {
@@ -341,6 +340,10 @@ export const useChatStore = defineStore('chat', () => {
         messages.value = []
       }
     }
+    // 防删会话后缓存残留（Map 无界增长）——必须在 joinSession 之后删：
+    // 活跃会话删除路径上 joinSession 的切走缓存会把被删会话的数组重新塞回 Map，
+    // 若在 joinSession 之前删会被立即撤销（吐槽猫 review 发现的孤儿条目内存泄漏）
+    sessionMessages.delete(id)
   }
 
   /** 删除 Agent */
