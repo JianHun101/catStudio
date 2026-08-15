@@ -377,11 +377,12 @@ const newAgentForm = ref({
   llmApiKey: '',
   llmBaseUrl: '',
 })
-/** 创建表单 provider 下拉（与 AgentEditModal.providerOptions 同款六项）——opencode 本地认证 key 可留空 */
+/** 创建表单 provider 下拉（与 AgentEditModal.providerOptions 同款七项）——opencode 本地认证 key 可留空 */
 const providerOptions = [
   { value: 'deepseek', label: 'DeepSeek (HTTP API)' },
   { value: 'claude', label: 'Claude Code (CLI)' },
   { value: 'opencode', label: 'OpenCode (CLI)' },
+  { value: 'dsh', label: 'DeepSeek Harness (CLI)' },
   { value: 'openai', label: 'Codex (CLI)' },
   { value: 'pi', label: 'Pi (SDK)' },
   { value: 'custom', label: '自定义' },
