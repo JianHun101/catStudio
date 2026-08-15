@@ -5135,12 +5135,12 @@ describe('formatAgentMessage', () => {
 describe('formatUserMessage', () => {
   it('formats last user message with mentions and audience', () => {
     const result = formatUserMessage('你好', ['店长'], '对你', true)
-    expect(result).toBe('用户（@了店长）对你：你好')
+    expect(result).toBe('【当前待回复】用户（@了店长）对你：你好')
   })
 
   it('formats last user message without mentions', () => {
     const result = formatUserMessage('大家好啊', [], '对大家', true)
-    expect(result).toBe('用户对大家：大家好啊')
+    expect(result).toBe('【当前待回复】用户对大家：大家好啊')
   })
 
   it('formats non-last user message', () => {

@@ -2088,7 +2088,7 @@ export function formatUserMessage(
 ): string {
   const tagged = mentions.length > 0 ? `（@了${mentions.join('、')}）` : ''
   if (isLast) {
-    return `用户${tagged}${audience}：${content}`
+    return `【当前待回复】用户${tagged}${audience}：${content}`
   }
   return `用户${tagged}：${content}`
 }
