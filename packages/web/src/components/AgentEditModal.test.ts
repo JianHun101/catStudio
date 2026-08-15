@@ -81,11 +81,14 @@ describe('AgentEditModal dsh provider（店长派活——前端供应商下拉�
     expect(source).toContain("{ value: 'dsh', label: 'DeepSeek Harness (CLI)' }")
   })
 
-  it('providerHint 有 dsh case：提示安装 CLI + key 可留空复用 DS_KEY + 模型填 deepseek-chat', () => {
+  it('providerHint 有 dsh case：提示安装 CLI + key 两分支语义（填了复用 DS_KEY 注入 / 留空走 credentials 兜底）+ 模型填 deepseek-chat', () => {
     expect(source).toContain("case 'dsh':")
     expect(source).toContain('npm i -g @deepseek-ai/dsh@0.1.0-rc.6')
-    expect(source).toContain('key 可留空')
+    expect(source).toContain('填了则复用 DS_KEY 注入')
+    expect(source).toContain('留空走 dsh 本地 credentials 兜底')
     expect(source).toContain('deepseek-chat')
+    // 回归护栏：禁止塌缩成误导性表述「key 可留空（复用 DS_KEY）」
+    expect(source).not.toContain('key 可留空（复用 DS_KEY）')
   })
 })
 
