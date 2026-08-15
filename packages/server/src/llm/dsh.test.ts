@@ -29,7 +29,7 @@ vi.mock('../logger.js', () => ({
 }))
 
 import { DshAdapter } from './dsh.js'
-import { spawnSupervised, messagesToPrompt } from './cli-utils.js'
+import { spawnSupervised, messagesToPrompt, attachIdleTimeout } from './cli-utils.js'
 
 /** 收集 async generator 的值 */
 async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
@@ -230,6 +230,80 @@ describe('DshAdapter', () => {
 
     const r = await pending
     expect(r.value).toEqual({ content: '', done: true })
+  })
+
+  // ─── 运行时长遥测（P0）+ idle timeout 移除（P1）────
+
+  it('logs periodic "dsh 运行中" progress every 30s and clears the timer on close', async () => {
+    vi.useFakeTimers()
+    try {
+      const adapter = new DshAdapter({ model: 'deepseek-chat' })
+      const child = fakeChild()
+      vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+      const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'deepseek-chat',
+      })
+      const pending = startGen(gen)
+
+      // 30s 后第一条周期日志（elapsedSec 随 fake 时钟推进）
+      await vi.advanceTimersByTimeAsync(30_000)
+      const first = logMocks.info.mock.calls.filter((c) => c[0] === 'dsh 运行中')
+      expect(first).toHaveLength(1)
+      expect(first[0][1]).toMatchObject({ elapsedSec: expect.any(Number) })
+
+      // 再 30s → 第二条且 elapsedSec 递增（遥测语义：运行时长可见）
+      await vi.advanceTimersByTimeAsync(30_000)
+      const second = logMocks.info.mock.calls.filter((c) => c[0] === 'dsh 运行中')
+      expect(second).toHaveLength(2)
+      expect(second[1][1].elapsedSec).toBeGreaterThanOrEqual(second[0][1].elapsedSec)
+
+      child.emitClose(0)
+      const r = await pending
+      expect(r.value).toEqual({ content: '', done: true })
+      // 三路径（正常/abort/spawn-error）都汇到 close 统一清理，不留泄漏 timer
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('logs completion with totalSec and exitCode on close', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = drive(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'deepseek-chat',
+      })
+    )
+    const pending = startGen(gen)
+    child.emitClose(0)
+    await pending
+    await gen.next()
+
+    const completion = logMocks.info.mock.calls.find((c) => c[0] === 'dsh 完成')
+    expect(completion).toBeDefined()
+    expect(completion![1]).toMatchObject({ totalSec: expect.any(Number), exitCode: 0 })
+  })
+
+  it('no longer attaches idle timeout (headless 无输出, idle 语义不适用; wall-clock 由 30min hard timeout 兜底)', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = drive(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'deepseek-chat',
+      })
+    )
+    const pending = startGen(gen)
+    child.emitClose(0)
+    await pending
+    await gen.next()
+
+    expect(attachIdleTimeout).not.toHaveBeenCalled()
   })
 
   // ─── spawn 参数形态 ───────────────────────────

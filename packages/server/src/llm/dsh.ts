@@ -1,12 +1,6 @@
 import type { Chunk, ChatOptions, LLMMessage } from '@cat-study/shared'
 import type { LLMAdapter } from './adapter.js'
-import {
-  resolveJsEntry,
-  messagesToPrompt,
-  attachIdleTimeout,
-  spawnSupervised,
-  getWorkspaceDir,
-} from './cli-utils.js'
+import { resolveJsEntry, messagesToPrompt, spawnSupervised, getWorkspaceDir } from './cli-utils.js'
 import { createLogger } from '../logger.js'
 import { randomBytes } from 'node:crypto'
 import { writeFileSync, unlinkSync } from 'node:fs'
@@ -123,7 +117,8 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
  *
  * 通过 spawn node dsh-entry 子进程（`--profile headless "task"` 一次性形态）→ 收集 stdout →
  * 输出最终答案 Chunk。与 claude.ts 同为 CLI 子进程形态，复用 cli-utils 公共设施
- * （resolveJsEntry / messagesToPrompt / attachIdleTimeout / spawnSupervised）。
+ * （resolveJsEntry / messagesToPrompt / spawnSupervised；不挂 idle timeout——
+ * headless 全程无输出，idle 语义不适用，见 chatStream 内运行时长遥测注释）。
  *
  * 纯 JS CLI 用 `node <entry>` 执行（spawn(process.execPath, [DSH_ENTRY, ...])）——
  * 避免 .cmd 包装（resolveBin 在 win32 落 .cmd，supervisor spawn('.cmd', shell:false) 在
@@ -240,7 +235,20 @@ export class DshAdapter implements LLMAdapter {
     }
     signal?.addEventListener('abort', onAbort)
 
-    const cleanupIdle = attachIdleTimeout(child)
+    // ─── 运行时长遥测（P0）：dsh headless 一次性形态运行期间 stdout/stderr 零输出、
+    // close 前无任何周期信号——30s 周期日志让 server 日志/execution_logs 能看到
+    // 「dsh 跑到第几秒了」（与前端「回复中 · 已 N 秒」互补：一个子进程存活遥测，
+    // 一个回复状态计时）。
+    // ⚠️ 不挂 idle timeout（P1）：dsh 无「idle」概念——headless 全程无输出，
+    // 「按输出重置 timer」的 bump 永不触发 → idle timeout 退化为 wall-clock 强杀
+    // （20min 必杀，曾 SIGTERM 在 commit 前）；wall-clock 上限由 dispatch 层已有
+    // 30min hard timeout（AbortSignal → 上方 onAbort kill 子进程）兜底，不新增超时层。
+    const PROGRESS_INTERVAL_MS = 30_000
+    const startedAt = Date.now()
+    const elapsedSec = () => Math.floor((Date.now() - startedAt) / 1000)
+    const progressTimer = setInterval(() => {
+      log.info('dsh 运行中', { elapsedSec: elapsedSec() })
+    }, PROGRESS_INTERVAL_MS)
 
     // headless 一次性输出：收集全量 stdout（最终答案）与 stderr（错误诊断）
     let stdout = ''
@@ -277,7 +285,9 @@ export class DshAdapter implements LLMAdapter {
     })
 
     signal?.removeEventListener('abort', onAbort)
-    cleanupIdle()
+    // 三路径（正常 close / abort / spawn-error）都汇到此处统一清理，不留泄漏 timer
+    clearInterval(progressTimer)
+    log.info('dsh 完成', { totalSec: elapsedSec(), exitCode })
     // 清理临时 patch（正常/异常/abort 路径都走 finally）
     if (patchPath) {
       try {
