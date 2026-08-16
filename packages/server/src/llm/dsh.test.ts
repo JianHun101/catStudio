@@ -445,6 +445,7 @@ describe('DshAdapter', () => {
     const pending = startGen(gen)
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2]
     const patchIdx = args.indexOf('--patch')
     expect(patchIdx).toBeGreaterThan(-1)
     // launcher flags 在前，task 最后
@@ -462,8 +463,10 @@ describe('DshAdapter', () => {
     expect(content).toContain("CATSTUDY_MSG_ID: 'm1'")
     expect(content).toContain('CATSTUDY_TRIGGER_AUTHOR_NAME')
     expect(content).toContain("'店长'")
-    // triggerMsgId（真实触发消息 id，猫提交 commit 的 uuid 来源）——有值才 push
-    expect(content).toContain("CATSTUDY_TRIGGER_MSG_ID: 'trigger-msg-1'")
+    // triggerMsgId 的消费者是猫自己（提交 commit 的 shell，继承进程 env）——
+    // 走进程 env 注入（对齐 opencode/claude），不进 MCP patch env（OQ1 硬伤修复）
+    expect(content).not.toContain('CATSTUDY_TRIGGER_MSG_ID')
+    expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBe('trigger-msg-1')
     // 模型行：裸 `- id:` 行写覆盖（非 insert）——agent-default-model 已在 headless
     // 底座挂载，insert 会 duplicate loader entry id 炸；patch config 整块替换非合并，
     // provider/model 均必填
@@ -505,13 +508,15 @@ describe('DshAdapter', () => {
     const pending = startGen(gen)
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2]
     const patchIdx = args.indexOf('--patch')
     expect(patchIdx).toBeGreaterThan(-1)
     const patchPath = args[patchIdx + 1]
     const content = readFileSync(patchPath, 'utf8')
-    // 基础五变量仍在，triggerMsgId 缺省不写
+    // 基础五变量仍在，triggerMsgId 缺省不写（patch env 与进程 env 双侧都不注入）
     expect(content).toContain("CATSTUDY_MSG_ID: 'm1'")
     expect(content).not.toContain('CATSTUDY_TRIGGER_MSG_ID')
+    expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
 
     child.emitClose(0)
     await pending

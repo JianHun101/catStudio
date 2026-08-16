@@ -81,6 +81,10 @@ function yamlScalar(value: string): string {
  *
  * env 值来自 options.context（CATSTUDY_* 五元组 + 可选 triggerAuthorName），
  * MCP server 子进程继承；文件名带 pid + 随机后缀——同一进程并发多个 spawn 不冲突。
+ *
+ * ⚠️ 通道边界：triggerMsgId 的消费者是**猫自己**（提交 commit 的 catstudy [uuid]），
+ * 走 dsh CLI 进程 env（chatStream 内注入，见下），**不进** MCP server env——MCP server
+ * 是工具面路由，不消费该变量，写进 patch env 猫的 shell 读不到（根因：OQ1 硬伤修复）。
  */
 function writePatchConfig(context: NonNullable<ChatOptions['context']>, model: string): string {
   const serverUrl = `http://127.0.0.1:${process.env.PORT || '3200'}`
@@ -93,9 +97,6 @@ function writePatchConfig(context: NonNullable<ChatOptions['context']>, model: s
   ]
   if (context.triggerAuthorName) {
     envLines.push(`CATSTUDY_TRIGGER_AUTHOR_NAME: ${yamlScalar(context.triggerAuthorName)}`)
-  }
-  if (context.triggerMsgId) {
-    envLines.push(`CATSTUDY_TRIGGER_MSG_ID: ${yamlScalar(context.triggerMsgId)}`)
   }
 
   const patch = `- insert:
@@ -230,6 +231,12 @@ export class DshAdapter implements LLMAdapter {
     // 不再在 patch 里写 approval row（单独 policy: never 会触发 permission-presets
     // 校验）。放在 envExtra spread 之后 = 适配器钉死，不开放 per-agent 覆盖。
     env.DSH_PERMISSION_MODE = 'danger-full-access'
+    // 边界红线（对齐 opencode/claude）：只读 context.triggerMsgId 单字段注入进程 env
+    // （猫提交 commit 的 catstudy [uuid] 来源）。消费者是猫自己的 shell/sandbox 工具
+    // （继承 dsh CLI 进程 env），**不是** MCP server——不可写回 patch env（OQ1 硬伤修复）
+    if (options.context?.triggerMsgId) {
+      env.CATSTUDY_TRIGGER_MSG_ID = options.context.triggerMsgId
+    }
 
     // spawn node <DSH_ENTRY>：纯 JS CLI 用 node.exe 执行（避免 .cmd 包装 EINVAL，
     // CLAUDE.md「Spawn: node path/to/cli.mjs」约定）——supervisor command=node.exe 原生 exe
