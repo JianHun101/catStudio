@@ -229,6 +229,19 @@ describe('agent system prompts', () => {
     }
   })
 
+  it('实施猫 prompt 明确实施完成回复不 @审查者（补填交接文档是唯一审查触发）', () => {
+    // 病灶：旧文案「结束回复，post-commit 自动投递，@审查者 审查」把 @审查者 挂到结束回复上，
+    // 实施猫读成「实施完成就该 @审查者」，同一 commit 多路审查信号（反复确认根因）
+    const implementers = agents.filter((a) => a.role === 'implementer')
+    expect(implementers.length).toBeGreaterThanOrEqual(1)
+    for (const agent of implementers) {
+      expect(agent.systemPrompt).toContain('实施完成回复不 @审查者')
+      expect(agent.systemPrompt).toContain('唯一审查触发')
+      // 回归护栏：旧歧义表述不再出现
+      expect(agent.systemPrompt).not.toContain('结束回复，post-commit 自动投递，@审查者 审查')
+    }
+  })
+
   it('精简后的 IRON_LAWS_REVIEWER 仍包含所有审查铁律', () => {
     const tucao = agents.find((a) => a.name === '吐槽猫')!
     expect(tucao.systemPrompt).toContain('出口检查')
