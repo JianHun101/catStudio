@@ -185,6 +185,12 @@ const SCHEMA_SQL = `
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (episode_id) REFERENCES episodes(id)
   );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `
 
 /**

@@ -16,6 +16,7 @@ import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 import { RESTART_REQUEST_FILE, RESTART_DONE_FILE } from '../restart-request.js'
 import type { AgentReplyMessage } from './replyBus.js'
+import { IRON_LAWS_CODER, IRON_LAWS_REVIEWER } from '../seed-data.js'
 
 // ═══ Mock all external dependencies ═══
 
@@ -5243,6 +5244,164 @@ describe('runAgentReply — per-agent 静态运行配置透传', () => {
     const opts = chatStream.mock.calls[0][1] as any
     expect('maxTokens' in opts).toBe(false)
     expect('temperature' in opts).toBe(false)
+  })
+})
+
+// ─── 铁律运行期注入（getIronLaws 访问器 → runAgentReply 按 role 注入）────────
+// 验收（店长派活单）：reviewer 猫含审查铁律、store/implementer 含开发铁律、
+// vision/unknown 不含任何铁律，且无重复注入。注入在 resolveRolePlaceholders 之前
+// 拼入 systemPrompt——注入铁律里的占位符（@作者/@架构师/@审查者）同样被替换。
+
+describe('runAgentReply — 铁律运行期注入（ironLawForRole）', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  async function runWithRole(agent: any): Promise<any[]> {
+    const mod = await import('./socketio.js')
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const chatStream = vi.fn(async function* (_m: any[], _o: any) {
+      yield { content: '铁律注入测试', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const sessionId = `session-il-${agent.id}`
+    const msgId = `msg-il-${agent.id}`
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: agent.id,
+      sessionId,
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: msgId,
+    } as any)
+
+    const db = getDb()
+    db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 'il', ?)`).run(
+      sessionId,
+      JSON.stringify([agent.id])
+    )
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', '@猫 铁律', '["猫"]')`
+    ).run(msgId, sessionId)
+
+    await mod.executeAgentsSerial(
+      mockIo as any,
+      sessionId,
+      [agent],
+      { id: msgId, content: '@猫 铁律', mentions: ['猫'] },
+      `trace-il-${agent.id}`
+    )
+    return chatStream.mock.calls[0][0] as any[]
+  }
+
+  function systemPromptOf(msgs: any[]): string {
+    const sys = msgs.find((m) => m.role === 'system')
+    return sys?.content || ''
+  }
+
+  it('reviewer 猫 → systemPrompt 含审查铁律（且含开发铁律关键词的反面不注入）', async () => {
+    const msgs = await runWithRole({
+      id: 'agent-il',
+      name: '吐槽猫',
+      avatar: '😼',
+      systemPrompt: '你是审查者。',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: 'sk-test',
+      role: 'reviewer',
+    })
+    const sys = systemPromptOf(msgs)
+    expect(sys).toContain(IRON_LAWS_REVIEWER)
+    expect(sys).not.toContain(IRON_LAWS_CODER)
+  })
+
+  it('store / implementer 猫 → systemPrompt 含开发铁律', async () => {
+    for (const role of ['store', 'implementer']) {
+      const msgs = await runWithRole({
+        id: `agent-il-${role}`,
+        name: `猫${role}`,
+        avatar: '🐱',
+        systemPrompt: '你是实施者。',
+        llmProvider: 'deepseek',
+        llmModel: 'deepseek-v4-pro',
+        llmApiKey: 'sk-test',
+        role,
+      })
+      const sys = systemPromptOf(msgs)
+      expect(sys).toContain(IRON_LAWS_CODER)
+      expect(sys).not.toContain(IRON_LAWS_REVIEWER)
+    }
+  })
+
+  it('vision / unknown / 无 role → 不注入任何铁律', async () => {
+    for (const role of ['vision', 'unknown', undefined]) {
+      const msgs = await runWithRole({
+        id: `agent-il-${role ?? 'none'}`,
+        name: '普通猫',
+        avatar: '🐱',
+        systemPrompt: '你是普通猫。',
+        llmProvider: 'deepseek',
+        llmModel: 'deepseek-v4-pro',
+        llmApiKey: 'sk-test',
+        role,
+      })
+      const sys = systemPromptOf(msgs)
+      expect(sys).not.toContain(IRON_LAWS_CODER)
+      expect(sys).not.toContain(IRON_LAWS_REVIEWER)
+    }
+  })
+
+  it('无重复注入——老库 systemPrompt 已含铁律全文时不再追加', async () => {
+    const msgs = await runWithRole({
+      id: 'agent-il-baked',
+      name: '吐槽猫',
+      avatar: '😼',
+      systemPrompt: `你是审查者。\n\n${IRON_LAWS_REVIEWER}`,
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: 'sk-test',
+      role: 'reviewer',
+    })
+    const sys = systemPromptOf(msgs)
+    // 只出现一次（不重复追加）
+    expect(sys.split(IRON_LAWS_REVIEWER).length - 1).toBe(1)
+  })
+
+  it('注入铁律里的占位符（@作者/@架构师）被统一替换为实际 agent 名', async () => {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'agent-boss',
+      '店长',
+      '🐱',
+      '你是架构师。',
+      'deepseek',
+      'deepseek-v4-pro',
+      'sk-test',
+      'store'
+    )
+    const msgs = await runWithRole({
+      id: 'agent-il',
+      name: '吐槽猫',
+      avatar: '😼',
+      systemPrompt: '你是审查者。',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: 'sk-test',
+      role: 'reviewer',
+    })
+    const sys = systemPromptOf(msgs)
+    // 审查铁律含「行首@架构师 请收口」——注入后 @架构师 → @店长
+    expect(sys).toContain('@店长')
+    expect(sys).not.toContain('@架构师')
   })
 })
 

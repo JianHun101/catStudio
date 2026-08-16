@@ -581,12 +581,18 @@ async function saveSummaryConfig(): Promise<void> {
   }
 }
 
-// ─── 系统配置：铁律展示（开发铁律 + 审查铁律——只读，GET /api/iron-laws）────────────
-// 契约（店长钉死）：铁律是全局共享的运营规则，唯一权威是 seed-data.ts 常量（注入各猫
-// systemPrompt 末尾），本页只读展示全文、无编辑入口；GET 失败 → 提示 + 不崩。
+// ─── 系统配置：铁律编辑（开发铁律 + 审查铁律——GET/POST /api/iron-laws）────────────
+// 契约（店长派活单）：铁律从「seed 期烘焙」升级为「运行期注入的全局策略」（settings 表
+// 优先、seed-data.ts 常量兜底）；两个 <textarea> + 保存按钮，POST 校验在服务端
+// （必填/非空/≤20000）；保存后下一轮回复即生效（无需重启）。GET 失败 → 提示 + 不崩。
 const ironLaws = ref<{ coder: string; reviewer: string } | null>(null)
 const ironLawsLoading = ref(true)
 const ironLawsError = ref('')
+const ironLawsCoder = ref('')
+const ironLawsReviewer = ref('')
+const ironLawsSaving = ref(false)
+const ironLawsSaved = ref('')
+const ironLawsFormError = ref('')
 
 async function loadIronLaws(): Promise<void> {
   ironLawsLoading.value = true
@@ -594,12 +600,47 @@ async function loadIronLaws(): Promise<void> {
     const res = await api.getIronLaws()
     if (disposed) return
     ironLaws.value = res
+    ironLawsCoder.value = res.coder
+    ironLawsReviewer.value = res.reviewer
   } catch (err: any) {
     if (!disposed) {
       ironLawsError.value = err.message || '铁律读取失败'
     }
   } finally {
     ironLawsLoading.value = false
+  }
+}
+
+/** 前端校验对齐后端契约（trim 非空）——不通过不发请求 */
+function validateIronLawsForm(): boolean {
+  if (!ironLawsCoder.value.trim()) {
+    ironLawsFormError.value = '开发铁律不能为空'
+    return false
+  }
+  if (!ironLawsReviewer.value.trim()) {
+    ironLawsFormError.value = '审查铁律不能为空'
+    return false
+  }
+  return true
+}
+
+async function saveIronLaws(): Promise<void> {
+  ironLawsFormError.value = ''
+  ironLawsSaved.value = ''
+  if (!validateIronLawsForm()) return
+  ironLawsSaving.value = true
+  try {
+    const res = await api.putIronLaws({
+      coder: ironLawsCoder.value.trim(),
+      reviewer: ironLawsReviewer.value.trim(),
+    })
+    ironLawsCoder.value = res.coder
+    ironLawsReviewer.value = res.reviewer
+    ironLawsSaved.value = '已保存——下一轮回复即生效（无需重启）'
+  } catch (err: any) {
+    ironLawsFormError.value = err.message || '保存失败'
+  } finally {
+    ironLawsSaving.value = false
   }
 }
 
@@ -1158,11 +1199,11 @@ onUnmounted(() => {
             </template>
           </div>
 
-          <!-- 铁律展示：开发铁律 + 审查铁律（只读——seed-data.ts 常量经 GET /api/iron-laws 暴露） -->
+          <!-- 铁律编辑：开发铁律 + 审查铁律（运行期注入——settings 表优先、常量兜底） -->
           <div class="ctx-card">
             <div class="ctx-info">
-              铁律是全局共享的运营规则（seed-data.ts 常量注入各猫 systemPrompt
-              末尾），此处只读展示全文， 便于观察；无编辑入口，修改需改源码常量后重跑 seed。
+              铁律是全局共享的运营规则（运行期注入到各猫 systemPrompt，settings 表优先、seed
+              常量兜底）。保存后下一轮回复即生效，无需重启；需填非空内容（空串保存会报错）。
             </div>
 
             <div v-if="ironLawsLoading" class="list-hint">加载中…</div>
@@ -1170,11 +1211,37 @@ onUnmounted(() => {
             <template v-else-if="ironLaws">
               <div class="config-item iron-law-block">
                 <span class="label">开发铁律</span>
-                <pre class="iron-law-pre">{{ ironLaws.coder }}</pre>
+                <textarea
+                  v-model="ironLawsCoder"
+                  class="input iron-law-textarea"
+                  rows="8"
+                  :disabled="ironLawsSaving"
+                  spellcheck="false"
+                ></textarea>
               </div>
               <div class="config-item iron-law-block">
                 <span class="label">审查铁律</span>
-                <pre class="iron-law-pre">{{ ironLaws.reviewer }}</pre>
+                <textarea
+                  v-model="ironLawsReviewer"
+                  class="input iron-law-textarea"
+                  rows="8"
+                  :disabled="ironLawsSaving"
+                  spellcheck="false"
+                ></textarea>
+              </div>
+
+              <div class="iron-law-hint">
+                若需恢复 seed 默认内容，请到 <code>packages/server/src/seed-data.ts</code> 查 看
+                IRON_LAWS_CODER / IRON_LAWS_REVIEWER 常量原文后手动粘贴覆盖。
+              </div>
+
+              <div v-if="ironLawsFormError" class="error-msg">{{ ironLawsFormError }}</div>
+              <div v-if="ironLawsSaved" class="ok-msg">{{ ironLawsSaved }}</div>
+
+              <div class="form-actions">
+                <button class="btn btn-create" :disabled="ironLawsSaving" @click="saveIronLaws">
+                  {{ ironLawsSaving ? '保存中…' : '保存铁律' }}
+                </button>
               </div>
             </template>
           </div>
@@ -1954,10 +2021,10 @@ select.input {
   flex-shrink: 0;
 }
 
-/* ─── 铁律展示块（只读全文——seed-data.ts 常量，无编辑入口） ─── */
+/* ─── 铁律编辑块（textarea 全文——settings 表优先、seed 常量兜底） ─── */
 
 .iron-law-block {
-  /* 覆盖 .config-item 的 baseline 居中 flex——<pre> 全文块不适合行内基线对齐 */
+  /* 覆盖 .config-item 的 baseline 居中 flex——<textarea> 全文块不适合行内基线对齐 */
   display: block;
 }
 
@@ -1966,20 +2033,22 @@ select.input {
   margin-bottom: 6px;
 }
 
-.iron-law-pre {
-  margin: 0;
-  padding: 10px 12px;
-  max-height: 300px;
-  overflow-y: auto;
-  background: var(--bg-base);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+.iron-law-textarea {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.6;
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.iron-law-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 /* ─── 路径浏览选择器（内联弹窗） ──────────── */

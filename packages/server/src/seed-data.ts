@@ -2,7 +2,8 @@
  * 种子数据定义 — 被 seed.ts 和 server 自动初始化共用。
  *
  * 规则分层架构（对标 Clowder trigger-keyword 按需加载）:
- *   铁律层 → 直接写入 systemPrompt（base prompt），永不按需
+ *   铁律层 → 运行期注入（settings 表），常量仅作缺省兜底——seed 不再烘焙进 systemPrompt，
+ *           注入点在 runAgentReply（按 role 取 ironLawForRole），编辑后下一轮回复生效
  *   操作层 → 已拆除（服务端技能体系治理）：skill-loader 注入链整链移除，
  *   技能由 CLI 原生消费（斜杠 /skill-name 触发或模型自主调用），server 零注入。
  *   行为规则（依赖审批【安装请求】块、重启请求契约等）已并入铁律层，
@@ -38,13 +39,14 @@ export interface DemoAgent {
 // ═══ 共享前置声明（所有 Agent 的 systemPrompt 以这句话开头） ═══
 const SHARED_PREAMBLE = `你是一只拥有人工智能的猫。只扮演自己的角色，禁止代写或预判其他 Agent 的回复。`
 
-// ═══ 铁律层（直接写入 systemPrompt，永不按需） ═══
+// ═══ 铁律层（运行期注入，常量仅作缺省兜底） ═══
 
 /**
  * 开发铁律 — 注入店长、ds猫、flash猫的 base prompt。
  * 出口检查 + 依赖安装声明 + @mention 格式 + 重启审批。
  * 注意：代码审查由 post-commit hook（handoff-gen）触发，不在此重复。
- * export 供 GET /api/iron-laws 只读接口暴露（配置页面铁律卡片，seed-data 仍唯一权威）。
+ * 运行期注入：settings 表优先（writeIronLaws 写入），本常量仅作缺省兜底
+ * （getIronLaws 单一权威访问器，见 config/iron-laws.ts）。
  */
 export const IRON_LAWS_CODER = `
 ---
@@ -89,7 +91,8 @@ Worktree 模式
 /**
  * 审查铁律 — 注入吐槽猫的 base prompt。
  * 出口检查 + 代码审查流程 + 依赖审查流程 + @mention 格式。
- * export 供 GET /api/iron-laws 只读接口暴露（配置页面铁律卡片，seed-data 仍唯一权威）。
+ * 运行期注入：settings 表优先（writeIronLaws 写入），本常量仅作缺省兜底
+ * （getIronLaws 单一权威访问器，见 config/iron-laws.ts）。
  */
 export const IRON_LAWS_REVIEWER = `
 ---
@@ -160,7 +163,7 @@ export function buildDemoAgents(): DemoAgent[] {
 投递下一棒（派活/请收口/请审查）优先调用 post_message 工具（targetCats 传目标猫名）；工具不可用或调用失败时，用行首 @ fallback。
 叙述性提及其他猫（如"让吐槽猫审查"）用名字不用 @——@ 只表示真正的路由投递。
 正例：调用 post_message 工具派活 ✅；行首"@猫名 派活单…" ✅
-反例：句中"请 @猫名 继续" ❌（嵌句 @ 解析层不认，静默丢单）${IRON_LAWS_CODER}`,
+反例：句中"请 @猫名 继续" ❌（嵌句 @ 解析层不认，静默丢单）`,
       llmProvider: 'claude',
       llmModel: 'deepseek-v4-flash',
       llmApiKey: apiKey,
@@ -185,7 +188,7 @@ export function buildDemoAgents(): DemoAgent[] {
 - 提交后等待审查链自动收口、无需主动跟进；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
-- 提交后不自行合并回 main，合并收口由架构师负责${IRON_LAWS_CODER}`,
+- 提交后不自行合并回 main，合并收口由架构师负责`,
       llmProvider: 'claude',
       llmModel: 'deepseek-v4-flash',
       llmApiKey: apiKey,
@@ -210,7 +213,7 @@ export function buildDemoAgents(): DemoAgent[] {
 - 提交后等待审查链自动收口、无需主动跟进；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
-- 提交后不自行合并回 main，合并收口由架构师负责${IRON_LAWS_CODER}`,
+- 提交后不自行合并回 main，合并收口由架构师负责`,
       llmProvider: 'claude',
       llmModel: 'deepseek-v4-flash',
       llmApiKey: apiKey,
@@ -242,7 +245,7 @@ export function buildDemoAgents(): DemoAgent[] {
 ---
 每条回复结束前自问"流程到我这结束了吗？"。结束的出口只有三种：
 ①post_message 投递下一棒 ②等外部条件 ③@用户——没有第四种。
-投递下一棒优先用 post_message 工具；工具不可用或失败时用行首 @ fallback。${IRON_LAWS_REVIEWER}
+投递下一棒优先用 post_message 工具；工具不可用或失败时用行首 @ fallback。
 
 Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist给结论，发现问题直接指出，最后总结（✅合并/⚠️建议修改/❌重做）。`,
       llmProvider: 'claude',
@@ -269,7 +272,7 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
 - 提交后等待审查链自动收口、无需主动跟进；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
-- 提交后不自行合并回 main，合并收口由架构师负责${IRON_LAWS_CODER}`,
+- 提交后不自行合并回 main，合并收口由架构师负责`,
       llmProvider: 'dsh',
       llmModel: 'deepseek-chat',
       llmApiKey: apiKey,

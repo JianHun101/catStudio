@@ -411,31 +411,45 @@ describe('SettingsView 系统配置（摘要配置——单 A 契约 GET/POST /a
   })
 })
 
-describe('SettingsView 系统配置（铁律只读展示——GET /api/iron-laws）', () => {
-  it('铁律卡片：开发铁律 / 审查铁律两段 + <pre> 全文展示 + 挂载即拉取', () => {
+describe('SettingsView 系统配置（铁律可编辑——GET/POST /api/iron-laws）', () => {
+  it('铁律卡片：开发铁律 / 审查铁律两个 textarea + 保存按钮 + 挂载即拉取', () => {
     expect(source).toContain('api.getIronLaws()')
     expect(source).toContain('loadIronLaws()')
     expect(source).toContain('ironLawsLoading')
     expect(source).toContain('ironLawsError')
     expect(source).toContain('开发铁律')
     expect(source).toContain('审查铁律')
-    expect(source).toContain('<pre class="iron-law-pre">{{ ironLaws.coder }}</pre>')
-    expect(source).toContain('<pre class="iron-law-pre">{{ ironLaws.reviewer }}</pre>')
+    expect(source).toContain('v-model="ironLawsCoder"')
+    expect(source).toContain('v-model="ironLawsReviewer"')
+    expect(source).toContain('ironLawsSaving')
+    expect(source).toContain('保存铁律')
   })
 
-  it('只读无编辑入口：展示铁律全文变量，无 textarea/input 绑定铁律内容', () => {
-    expect(source).toContain('ironLaws.coder')
-    expect(source).toContain('ironLaws.reviewer')
-    // 铁律块无编辑控件——负向断言：v-model 不绑定 ironLaws
-    expect(source.match(/v-model="ironLaws[^"]*"/)).toBeNull()
-    expect(source).toContain('无编辑入口')
+  it('可编辑可保存：POST 全量带 trim 后内容，保存中禁用，成功提示「下一轮回复即生效」', () => {
+    expect(source).toContain('api.putIronLaws({')
+    expect(source).toContain('coder: ironLawsCoder.value.trim()')
+    expect(source).toContain('reviewer: ironLawsReviewer.value.trim()')
+    expect(source).toContain(':disabled="ironLawsSaving"')
+    expect(source).toContain('已保存——下一轮回复即生效（无需重启）')
   })
 
-  it('铁律全文容器样式：pre-wrap 保留换行 + 限高滚动（不撑爆卡片）', () => {
-    const preBlock = source.match(/\.iron-law-pre\s*\{[\s\S]*?\}/)
-    expect(preBlock).toBeTruthy()
-    expect(preBlock![0]).toContain('white-space: pre-wrap')
-    expect(preBlock![0]).toContain('max-height: 300px')
-    expect(preBlock![0]).toContain('overflow-y: auto')
+  it('前端校验对齐后端契约（trim 非空）——不通过不发请求', () => {
+    expect(source).toMatch(/!ironLawsCoder\.value\.trim\(\)/)
+    expect(source).toMatch(/!ironLawsReviewer\.value\.trim\(\)/)
+    expect(source).toContain('开发铁律不能为空')
+    expect(source).toContain('审查铁律不能为空')
+  })
+
+  it('保存成功 → 响应回写最新全量 + 提示；失败显示错误', () => {
+    expect(source).toContain('res.coder')
+    expect(source).toContain('res.reviewer')
+    expect(source).toContain("err.message || '保存失败'")
+  })
+
+  it('铁律全文容器：textarea 等宽字体 + 垂直可调整（不撑爆卡片）', () => {
+    const taBlock = source.match(/\.iron-law-textarea\s*\{[\s\S]*?\}/)
+    expect(taBlock).toBeTruthy()
+    expect(taBlock![0]).toContain('resize: vertical')
+    expect(taBlock![0]).toContain('font-family: var(--font-mono)')
   })
 })

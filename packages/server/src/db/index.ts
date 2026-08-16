@@ -385,6 +385,17 @@ export function initDb(): void {
       name: 'delivery_message_id on episode_attributions',
       sql: `ALTER TABLE episode_attributions ADD COLUMN delivery_message_id TEXT`,
     },
+    // 全局设置表（additive：CREATE TABLE IF NOT EXISTS 幂等）。
+    // 铁律等运行期全局策略的挂载点——key/value 直存，getSetting/setSetting 访问器
+    // 读写；设置优先、代码常量兜底（getIronLaws 单一权威访问器，见 config/iron-laws.ts）
+    {
+      name: 'settings table (运行期全局设置)',
+      sql: `CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    },
   ]
 
   for (const m of migrations) {

@@ -105,7 +105,7 @@ export interface SummaryConfig {
   needsRestart: boolean
 }
 
-/** 铁律全文（GET /api/iron-laws 只读——seed-data.ts 常量直接 import，逐字一致，无写侧） */
+/** 铁律全文（GET /api/iron-laws——settings 表优先、seed-data.ts 常量兜底，运行期注入的全局策略） */
 export interface IronLaws {
   coder: string
   reviewer: string
@@ -305,8 +305,14 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  // 铁律只读（GET /api/iron-laws——seed-data.ts 常量暴露，配置页面「系统配置」tab 铁律卡片消费）
+  // 铁律读写（GET/POST /api/iron-laws——settings 表优先、常量兜底；编辑后下一轮回复立即生效）
   getIronLaws: () => request<IronLaws>('/iron-laws'),
+
+  putIronLaws: (payload: { coder: string; reviewer: string }) =>
+    request<IronLaws>('/iron-laws', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   // Eval 评估中心（E4-A 后端四接口 + E4-B 契约缺口裁决补充的 episode-stats；纯展示 + 回标写入零 LLM）
   getEvalScores: (limit?: number, agentId?: string) => {

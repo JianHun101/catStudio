@@ -58,6 +58,7 @@ import {
 import { filterAllowedMentions, allowedTargetsDescription } from '../dispatch/mention-policy.js'
 import { consumeRouteSignals } from '../llm/route-signals.js'
 import { consumeUserRequestSignals } from '../llm/user-request-signals.js'
+import { ironLawForRole } from '../config/iron-laws.js'
 import { parseJsonArray } from '../utils.js'
 import { recordReviewVerdict } from '../eval/verdict-parser.js'
 import { maybeScoreSample } from '../eval/sampler.js'
@@ -2456,10 +2457,22 @@ async function runAgentReply(
   // system prompt 直接使用 agent.systemPrompt——skill 注入链已拆除，
   // 技能由 CLI 原生消费（斜杠触发 / 模型自主调用），server 不做拼装（实测驱动）
 
+  // 铁律运行期注入：铁律从「seed 期烘焙」升级为「settings 表全局策略」（getIronLaws
+  // 单一权威访问器）——按 role 取应注入铁律（reviewer→审查铁律；store/implementer→开发
+  // 铁律；vision/unknown→'' 不注入），拼到 system prompt 之后统一走占位符替换。防重复注入：
+  // seed 已解除烘焙，但老库 system_prompt 可能仍带旧铁律（收口后 seed 清洗前）——本 agent
+  // 的 systemPrompt 已包含该铁律全文时不再追加（避免双份）。
+  const ironLaw = ironLawForRole(agent.role)
+  const baseSystemPrompt =
+    ironLaw && !agent.systemPrompt.includes(ironLaw)
+      ? `${agent.systemPrompt}\n\n${ironLaw}`
+      : agent.systemPrompt
+
   // 将 system prompt 中的角色占位符（@作者/@架构师/@审查者）替换为实际 agent 名
   // 使 LLM 能正确输出 @店长 等实际 agent 名——mention 解析是严格精确匹配，
-  // 占位符不替换 = 解析落空 = 静默不触发（b542d24 分流断链事故根因）
-  const finalSystemPrompt = resolveRolePlaceholders(agent.systemPrompt, triggerMsg.authorName)
+  // 占位符不替换 = 解析落空 = 静默不触发（b542d24 分流断链事故根因）。
+  // 注入的铁律全文同样含占位符（@作者/@架构师/@审查者）——必须一起替换
+  const finalSystemPrompt = resolveRolePlaceholders(baseSystemPrompt, triggerMsg.authorName)
 
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
   const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages)
