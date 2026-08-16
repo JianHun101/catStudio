@@ -8,6 +8,7 @@ import type { Chunk } from '@cat-study/shared'
 vi.mock('./cli-utils.js', () => ({
   resolveBin: vi.fn(() => 'C:/Users/test/AppData/Roaming/npm/opencode.cmd'),
   messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
+  messagesToPromptBounded: vi.fn(() => 'User: hello\n\nAssistant: hi'),
   attachIdleTimeout: vi.fn(() => () => {}),
   spawnSupervised: vi.fn(),
   getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
@@ -26,7 +27,7 @@ vi.mock('../logger.js', () => ({
 }))
 
 import { OpencodeAdapter } from './opencode.js'
-import { spawnSupervised, messagesToPrompt } from './cli-utils.js'
+import { spawnSupervised, messagesToPrompt, messagesToPromptBounded } from './cli-utils.js'
 
 /** 收集 async generator 的值 */
 async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
@@ -730,10 +731,12 @@ describe('OpencodeAdapter', () => {
     expect(chunks).toEqual([{ content: '', done: true }])
   })
 
-  it('truncates prompt beyond Windows command-line limit with warning', async () => {
-    // Windows 32K 命令行限制防御：positional prompt 超阈值截断 + warn——
-    // 旧代码 stdin 传参无此限制，本用例为新增路径的静态防护断言
-    vi.mocked(messagesToPrompt).mockReturnValue('x'.repeat(40000))
+  it('truncates prompt via messagesToPromptBounded (保尾砍旧历史)', async () => {
+    // Windows 32K 命令行限制防御：positional prompt 超阈值时改走
+    // messagesToPromptBounded 按消息粒度保尾砍旧历史（不再是 slice 保头砍尾，
+    // 后者会砍掉末尾「【当前待回复】」触发消息）
+    vi.mocked(messagesToPrompt).mockReturnValueOnce('x'.repeat(40000))
+    vi.mocked(messagesToPromptBounded).mockReturnValueOnce('bounded-prompt')
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
     const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -746,9 +749,9 @@ describe('OpencodeAdapter', () => {
 
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
     const promptArg = args.at(-1) as string
-    expect(promptArg.length).toBeLessThanOrEqual(30000)
+    expect(promptArg).toBe('bounded-prompt')
     expect(logMocks.warn).toHaveBeenCalledWith(
-      'prompt 超过命令行长度阈值，已截断',
+      'prompt 超过命令行长度阈值，已按消息粒度截断（保尾砍旧历史）',
       expect.objectContaining({ promptLen: 40000, max: 30000 })
     )
   })

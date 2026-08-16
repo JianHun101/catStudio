@@ -12,6 +12,7 @@ const DSH_ENTRY = vi.hoisted(
 vi.mock('./cli-utils.js', () => ({
   resolveJsEntry: vi.fn(() => DSH_ENTRY),
   messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
+  messagesToPromptBounded: vi.fn(() => 'User: hello\n\nAssistant: hi'),
   attachIdleTimeout: vi.fn(() => () => {}),
   spawnSupervised: vi.fn(),
   getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
@@ -29,7 +30,12 @@ vi.mock('../logger.js', () => ({
 }))
 
 import { DshAdapter } from './dsh.js'
-import { spawnSupervised, messagesToPrompt, attachIdleTimeout } from './cli-utils.js'
+import {
+  spawnSupervised,
+  messagesToPrompt,
+  messagesToPromptBounded,
+  attachIdleTimeout,
+} from './cli-utils.js'
 
 /** 收集 async generator 的值 */
 async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
@@ -336,8 +342,9 @@ describe('DshAdapter', () => {
     await gen.next()
   })
 
-  it('truncates prompt at PROMPT_ARG_MAX (32K 命令行保护)', async () => {
+  it('truncates prompt via messagesToPromptBounded (保尾砍旧历史, 32K 命令行保护)', async () => {
     vi.mocked(messagesToPrompt).mockReturnValueOnce('x'.repeat(40000))
+    vi.mocked(messagesToPromptBounded).mockReturnValueOnce('bounded-prompt')
     const adapter = new DshAdapter({ model: 'deepseek-chat' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -349,8 +356,14 @@ describe('DshAdapter', () => {
     )
     const pending = startGen(gen)
 
+    // 超限时 promptArg 由 messagesToPromptBounded 产出（不再是 slice 保头砍尾）
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
-    expect(args.at(-1)!.length).toBe(30000)
+    expect(args.at(-1)).toBe('bounded-prompt')
+    // warn 记录完整 promptLen（40000）而非截断后长度
+    expect(logMocks.warn).toHaveBeenCalledWith(
+      'prompt 超过命令行长度阈值，已按消息粒度截断（保尾砍旧历史）',
+      expect.objectContaining({ promptLen: 40000, max: 30000 })
+    )
 
     child.emitClose(0)
     await pending

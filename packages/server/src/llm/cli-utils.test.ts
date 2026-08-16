@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import path from 'node:path'
-import { resolveJsEntry, messagesToPrompt, spawnSupervised } from './cli-utils.js'
+import {
+  resolveJsEntry,
+  messagesToPrompt,
+  messagesToPromptBounded,
+  spawnSupervised,
+} from './cli-utils.js'
 import type { LLMMessage } from '@cat-study/shared'
 
 // ─── spawnSupervised env 合并测试 ────────────────
@@ -180,5 +185,56 @@ describe('messagesToPrompt', () => {
   it('handles system message without content', () => {
     const messages: LLMMessage[] = [{ role: 'system', content: '' }]
     expect(messagesToPrompt(messages)).toBe('\n\n---\n')
+  })
+})
+
+// ─── messagesToPromptBounded ──────────────────────
+
+describe('messagesToPromptBounded', () => {
+  it('returns empty string for empty array', () => {
+    expect(messagesToPromptBounded([], 100)).toBe('')
+  })
+
+  it('matches messagesToPrompt byte-for-byte when total ≤ maxLen', () => {
+    const messages: LLMMessage[] = [
+      { role: 'system', content: '你是一只猫' },
+      { role: 'user', content: '今天天气？' },
+      { role: 'assistant', content: '阳光很好喵' },
+      { role: 'user', content: '【当前待回复】再问一次' },
+    ]
+    expect(messagesToPromptBounded(messages, 10000)).toBe(messagesToPrompt(messages))
+  })
+
+  it('keeps system head + last trigger message, drops oldest mid, stays ≤ maxLen', () => {
+    // 超限序列：system + 最旧历史(长) + 较旧历史(短) + 末尾「【当前待回复】」触发消息。
+    // maxLen=200 卡在「保较旧、丢最旧」区间——若旧逻辑 slice(0,max) 保头砍尾，
+    // 会只剩 system 前缀、把末尾触发消息砍掉（本用例正是钉死方向性修复）
+    const messages: LLMMessage[] = [
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: '最旧历史 ' + 'a'.repeat(500) },
+      { role: 'user', content: '较旧历史 ' + 'b'.repeat(50) },
+      { role: 'user', content: '【当前待回复】最新任务' },
+    ]
+    const result = messagesToPromptBounded(messages, 200)
+    expect(result.startsWith('SYS\n\n---\n')).toBe(true)
+    expect(result.endsWith('User: 【当前待回复】最新任务')).toBe(true)
+    expect(result.length).toBeLessThanOrEqual(200)
+    expect(result).toContain('较旧历史')
+    expect(result).not.toContain('最旧历史')
+  })
+
+  it('keeps last trigger message when there is no system message', () => {
+    const messages: LLMMessage[] = [
+      { role: 'user', content: '旧问题 ' + 'a'.repeat(500) },
+      { role: 'user', content: '【当前待回复】当前' },
+    ]
+    // 无 system：中间历史整条丢弃后，只剩末尾触发消息（保尾不保头）
+    expect(messagesToPromptBounded(messages, 100)).toBe('User: 【当前待回复】当前')
+  })
+
+  it('keeps a single oversized message intact (整条消息不切碎)', () => {
+    // 单条消息本身就超 maxLen：head/tail 保底，整条保留（不字符硬切）
+    const messages: LLMMessage[] = [{ role: 'user', content: 'x'.repeat(5000) }]
+    expect(messagesToPromptBounded(messages, 100)).toBe('User: ' + 'x'.repeat(5000))
   })
 })

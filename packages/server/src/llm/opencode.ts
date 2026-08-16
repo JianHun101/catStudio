@@ -3,6 +3,7 @@ import type { LLMAdapter } from './adapter.js'
 import {
   resolveBin,
   messagesToPrompt,
+  messagesToPromptBounded,
   attachIdleTimeout,
   spawnSupervised,
   getWorkspaceDir,
@@ -136,13 +137,16 @@ export class OpencodeAdapter implements LLMAdapter {
       return
     }
 
-    const prompt = messagesToPrompt(messages)
+    const fullPrompt = messagesToPrompt(messages)
     // images（base64 dataURL）落盘为临时文件，-f 透传（实测支持视觉输入）；
     // 落盘失败降级：不传图，prompt 仍含「用户附带了 N 张图片」占位
     const materialized = await materializeImages(messages)
     const fileArgs = materialized?.fileArgs ?? []
 
-    log.info('启动 opencode CLI', { model: options.model || this.model, promptLen: prompt.length })
+    log.info('启动 opencode CLI', {
+      model: options.model || this.model,
+      promptLen: fullPrompt.length,
+    })
 
     // run --format json 非交互流式（NDJSON 事件流）；
     // --agent build --auto：run 形态 agent 循环（店长拍板回退 serve——2026-08-13
@@ -168,10 +172,16 @@ export class OpencodeAdapter implements LLMAdapter {
     // 的 help 没有任何 stdin 选项，stdin 方式实测空转 exit 0 无输出（luna 猫
     // 「无法启动」三层证据链根因；claude.ts 的 -p - 思维惯性不适用于 opencode）。
     // 代价：positional 受 Windows 命令行 32K 限制，prompt 超阈值截断兜底（见上）。
-    const promptArg = prompt.length > PROMPT_ARG_MAX ? prompt.slice(0, PROMPT_ARG_MAX) : prompt
-    if (prompt.length > PROMPT_ARG_MAX) {
-      log.warn('prompt 超过命令行长度阈值，已截断', {
-        promptLen: prompt.length,
+    // 超阈值按消息粒度「保尾砍旧历史」（messagesToPromptBounded：保 system +
+    // 末尾「【当前待回复】」触发消息，从最旧历史整条丢弃），不再 slice 保头砍尾
+    // （会砍掉最该保留的当前任务，抵消 1cdbea9 锚定成果）
+    const promptArg =
+      fullPrompt.length > PROMPT_ARG_MAX
+        ? messagesToPromptBounded(messages, PROMPT_ARG_MAX)
+        : fullPrompt
+    if (fullPrompt.length > PROMPT_ARG_MAX) {
+      log.warn('prompt 超过命令行长度阈值，已按消息粒度截断（保尾砍旧历史）', {
+        promptLen: fullPrompt.length,
         max: PROMPT_ARG_MAX,
       })
     }

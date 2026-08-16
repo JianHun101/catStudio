@@ -1,6 +1,12 @@
 import type { Chunk, ChatOptions, LLMMessage } from '@cat-study/shared'
 import type { LLMAdapter } from './adapter.js'
-import { resolveJsEntry, messagesToPrompt, spawnSupervised, getWorkspaceDir } from './cli-utils.js'
+import {
+  resolveJsEntry,
+  messagesToPrompt,
+  messagesToPromptBounded,
+  spawnSupervised,
+  getWorkspaceDir,
+} from './cli-utils.js'
 import { createLogger } from '../logger.js'
 import { randomBytes } from 'node:crypto'
 import { writeFileSync, unlinkSync } from 'node:fs'
@@ -170,13 +176,19 @@ export class DshAdapter implements LLMAdapter {
       return
     }
 
-    const prompt = messagesToPrompt(messages)
+    const fullPrompt = messagesToPrompt(messages)
     // headless task 以 positional 传入（launcher flags 之后的首个未识别 token 起为
-    // app 参数）——同 opencode 受 32K 限制，超阈值截断兜底
-    const promptArg = prompt.length > PROMPT_ARG_MAX ? prompt.slice(0, PROMPT_ARG_MAX) : prompt
-    if (prompt.length > PROMPT_ARG_MAX) {
-      log.warn('prompt 超过命令行长度阈值，已截断', {
-        promptLen: prompt.length,
+    // app 参数）——同 opencode 受 32K 限制；超阈值按消息粒度「保尾砍旧历史」
+    // （messagesToPromptBounded：保 system + 末尾「【当前待回复】」触发消息，
+    // 从最旧历史整条丢弃），不再 slice 保头砍尾（会砍掉最该保留的当前任务，
+    // 抵消 1cdbea9 锚定成果）
+    const promptArg =
+      fullPrompt.length > PROMPT_ARG_MAX
+        ? messagesToPromptBounded(messages, PROMPT_ARG_MAX)
+        : fullPrompt
+    if (fullPrompt.length > PROMPT_ARG_MAX) {
+      log.warn('prompt 超过命令行长度阈值，已按消息粒度截断（保尾砍旧历史）', {
+        promptLen: fullPrompt.length,
         max: PROMPT_ARG_MAX,
       })
     }
@@ -193,7 +205,7 @@ export class DshAdapter implements LLMAdapter {
     }
     args.push(promptArg)
 
-    log.info('启动 dsh CLI', { model, promptLen: prompt.length })
+    log.info('启动 dsh CLI', { model, promptLen: fullPrompt.length })
 
     const env = {
       ...process.env,

@@ -141,26 +141,64 @@ export function resolveJsEntry(npmPkg: string, binName: string): string {
 // ─── Prompt Construction ──────────────────────────────────
 
 /**
+ * 单条 LLMMessage → 文本片段（messagesToPrompt 与 messagesToPromptBounded
+ * 共用同一份格式化逻辑，保证两者在无截断时逐字符一致）。
+ */
+function messageToPart(m: LLMMessage): string {
+  switch (m.role) {
+    case 'system':
+      return `${m.content}\n\n---\n`
+    case 'user':
+      return `User: ${m.content}`
+    case 'assistant':
+      return `Assistant: ${m.content}`
+  }
+}
+
+/**
  * 将 LLMMessage 数组转为单个文本 prompt，供 CLI 工具使用。
  */
 export function messagesToPrompt(messages: LLMMessage[]): string {
-  const parts: string[] = []
+  return messages.map(messageToPart).join('\n\n')
+}
 
-  for (const m of messages) {
-    switch (m.role) {
-      case 'system':
-        parts.push(`${m.content}\n\n---\n`)
-        break
-      case 'user':
-        parts.push(`User: ${m.content}`)
-        break
-      case 'assistant':
-        parts.push(`Assistant: ${m.content}`)
-        break
-    }
+/**
+ * 有界版本的 messagesToPrompt：按消息粒度从最旧历史整条丢弃，保 system + 保尾。
+ *
+ * 背景：dsh/opencode 的 prompt 以 positional 传入，受 Windows CreateProcess 32K
+ * 命令行限制。旧做法 `prompt.slice(0, maxLen)` 保头砍尾——而 messagesToPrompt
+ * 平铺顺序是 system→历史→「【当前待回复】」最新任务在末尾，超限时被砍掉的
+ * 恰恰是最该保留的当前触发消息（dsh 形态聚焦漂移的截断侧根因）。
+ *
+ * 保序规则（超限时）：
+ *   ① 永远保留 system（仅当 index 0 且 role === 'system'，且它不是唯一一条）
+ *   ② 永远保留末尾最后一条（当前触发消息，含锚定）
+ *   ③ 中间历史从新到旧尽量多保留——贪心从最旧开始整条丢弃，直到总长 ≤ maxLen
+ *
+ * 截断单位是整条消息（按 \n\n 分界），不是字符硬切——不切碎任何一条消息，
+ * 尤其不切碎「【当前待回复】」锚定行。
+ *
+ * 空 messages / 全量 ≤ maxLen 时，输出与 messagesToPrompt 逐字符一致。
+ */
+export function messagesToPromptBounded(messages: LLMMessage[], maxLen: number): string {
+  if (messages.length === 0) return ''
+  const parts = messages.map(messageToPart)
+  const full = parts.join('\n\n')
+  if (full.length <= maxLen) return full
+
+  const tailIdx = parts.length - 1
+  // head = index 0 的 system（当它不等于 tail 时才单独保留，避免单条 system 重复）
+  const hasHead = messages[0].role === 'system' && tailIdx !== 0
+  const mid = parts.slice(hasHead ? 1 : 0, tailIdx)
+
+  const build = (midParts: string[]): string =>
+    (hasHead ? [parts[0], ...midParts, parts[tailIdx]] : [...midParts, parts[tailIdx]]).join('\n\n')
+
+  let kept = mid
+  while (kept.length > 0 && build(kept).length > maxLen) {
+    kept = kept.slice(1)
   }
-
-  return parts.join('\n\n')
+  return build(kept)
 }
 
 // ─── Codex Proxy Management ────────────────────────────────
