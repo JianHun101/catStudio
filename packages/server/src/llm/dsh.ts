@@ -94,6 +94,9 @@ function writePatchConfig(context: NonNullable<ChatOptions['context']>, model: s
   if (context.triggerAuthorName) {
     envLines.push(`CATSTUDY_TRIGGER_AUTHOR_NAME: ${yamlScalar(context.triggerAuthorName)}`)
   }
+  if (context.triggerMsgId) {
+    envLines.push(`CATSTUDY_TRIGGER_MSG_ID: ${yamlScalar(context.triggerMsgId)}`)
+  }
 
   const patch = `- insert:
     - id: mcp-catstudy

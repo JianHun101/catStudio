@@ -184,7 +184,7 @@ export function buildDemoAgents(): DemoAgent[] {
 - 只执行架构师派发的任务，不自由发挥架构设计；组件边界、接口契约、验收标准以架构师给的为准
 - 改动跨组件边界或触及共享层时，先@架构师 确认再动
 - 有架构异议 → 走审查链提，不中途改设计
-- 实施完成自查（测试 + lint 全绿）→ 提交 commit（带 catstudy [uuid] 标记，限定路径）→ 结束回复即可，实施完成回复不 @审查者（post-commit 自动投递审查链）→ 交接文档自己补填（Why/Tradeoff/Open Questions）→ 补填交接文档那条回复才需行首 @审查者 审查（唯一审查触发）
+- 实施完成自查（测试 + lint 全绿）→ 提交 commit（带 catstudy [uuid] 标记——uuid 取环境变量 $CATSTUDY_TRIGGER_MSG_ID（服务端注入的真实触发消息 id），限定路径；变量缺失时禁止编造合法格式 uuid 交差，应报告环境未注入）→ 结束回复即可，实施完成回复不 @审查者（post-commit 自动投递审查链）→ 交接文档自己补填（Why/Tradeoff/Open Questions）→ 补填交接文档那条回复才需行首 @审查者 审查（唯一审查触发）
 - 提交后等待审查链自动收口、无需主动跟进；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
@@ -209,7 +209,7 @@ export function buildDemoAgents(): DemoAgent[] {
 - 只执行架构师派发的任务，不自由发挥架构设计；组件边界、接口契约、验收标准以架构师给的为准
 - 改动跨组件边界或触及共享层时，先@架构师 确认再动
 - 有架构异议 → 走审查链提，不中途改设计
-- 实施完成自查（测试 + lint 全绿）→ 提交 commit（带 catstudy [uuid] 标记，限定路径）→ 结束回复即可，实施完成回复不 @审查者（post-commit 自动投递审查链）→ 交接文档自己补填（Why/Tradeoff/Open Questions）→ 补填交接文档那条回复才需行首 @审查者 审查（唯一审查触发）
+- 实施完成自查（测试 + lint 全绿）→ 提交 commit（带 catstudy [uuid] 标记——uuid 取环境变量 $CATSTUDY_TRIGGER_MSG_ID（服务端注入的真实触发消息 id），限定路径；变量缺失时禁止编造合法格式 uuid 交差，应报告环境未注入）→ 结束回复即可，实施完成回复不 @审查者（post-commit 自动投递审查链）→ 交接文档自己补填（Why/Tradeoff/Open Questions）→ 补填交接文档那条回复才需行首 @审查者 审查（唯一审查触发）
 - 提交后等待审查链自动收口、无需主动跟进；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
@@ -268,7 +268,7 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
 - 只执行架构师派发的任务，不自由发挥架构设计；组件边界、接口契约、验收标准以架构师给的为准
 - 改动跨组件边界或触及共享层时，先@架构师 确认再动
 - 有架构异议 → 走审查链提，不中途改设计
-- 实施完成自查（测试 + lint 全绿）→ 提交 commit（带 catstudy [uuid] 标记，限定路径）→ 结束回复即可，实施完成回复不 @审查者（post-commit 自动投递审查链）→ 交接文档自己补填（Why/Tradeoff/Open Questions）→ 补填交接文档那条回复才需行首 @审查者 审查（唯一审查触发）
+- 实施完成自查（测试 + lint 全绿）→ 提交 commit（带 catstudy [uuid] 标记——uuid 取环境变量 $CATSTUDY_TRIGGER_MSG_ID（服务端注入的真实触发消息 id），限定路径；变量缺失时禁止编造合法格式 uuid 交差，应报告环境未注入）→ 结束回复即可，实施完成回复不 @审查者（post-commit 自动投递审查链）→ 交接文档自己补填（Why/Tradeoff/Open Questions）→ 补填交接文档那条回复才需行首 @审查者 审查（唯一审查触发）
 - 提交后等待审查链自动收口、无需主动跟进；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
@@ -302,9 +302,10 @@ export function buildDemoKnowledge(): DemoKnowledgeDoc[] {
     {
       id: knowledgeId('提交规范'),
       content:
-        '猫咖项目提交规范：每次代码提交必须带 "catstudy [uuid]" 标记（uuid = 触发消息 id，' +
-        'post-commit hook 据此自动投递审查链）；提交限定路径（git add 只加本次改动文件，' +
-        '禁止 git add -A）；提交信息中的代码行号必须 grep 实际核对后再落 commit。',
+        '猫咖项目提交规范：每次代码提交必须带 "catstudy [uuid]" 标记（uuid 取环境变量 ' +
+        '$CATSTUDY_TRIGGER_MSG_ID——服务端注入的真实触发消息 id，变量缺失时禁止编造合法格式 ' +
+        'uuid 交差，应报告环境未注入；post-commit hook 据此自动投递审查链）；提交限定路径 ' +
+        '（git add 只加本次改动文件，禁止 git add -A）；提交信息中的代码行号必须 grep 实际核对后再落 commit。',
       source: 'docs/CONTEXT.md · 猫咖约定',
       tags: ['git', '提交规范', 'commit'],
     },

@@ -7,7 +7,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { buildDemoAgents, IRON_LAWS_CODER, IRON_LAWS_REVIEWER } from './seed-data.js'
+import {
+  buildDemoAgents,
+  buildDemoKnowledge,
+  IRON_LAWS_CODER,
+  IRON_LAWS_REVIEWER,
+} from './seed-data.js'
 
 describe('agent system prompts', () => {
   const agents = buildDemoAgents()
@@ -241,6 +246,27 @@ describe('agent system prompts', () => {
       // 回归护栏：旧歧义表述不再出现
       expect(agent.systemPrompt).not.toContain('结束回复，post-commit 自动投递，@审查者 审查')
     }
+  })
+
+  it('实施猫 prompt 提交 uuid 取环境变量（$CATSTUDY_TRIGGER_MSG_ID）+ 缺失禁止编造（uuid 幻觉根治）', () => {
+    // uuid 幻觉根因：触发消息 id 未注入 CLI 环境 → 猫编造合法格式 uuid 交差 → 反查 404 →
+    // 审查链静默漏投。铁律明确「uuid 取环境变量 + 缺失禁止编造、报告环境未注入」
+    const implementers = agents.filter((a) => a.role === 'implementer')
+    expect(implementers.length).toBeGreaterThanOrEqual(1)
+    for (const agent of implementers) {
+      expect(agent.systemPrompt).toContain('$CATSTUDY_TRIGGER_MSG_ID')
+      expect(agent.systemPrompt).toContain('服务端注入的真实触发消息 id')
+      expect(agent.systemPrompt).toContain('禁止编造合法格式 uuid 交差')
+      expect(agent.systemPrompt).toContain('报告环境未注入')
+    }
+  })
+
+  it('知识条目【提交规范】提交 uuid 取环境变量 + 缺失禁止编造（uuid 幻觉根治）', () => {
+    const doc = buildDemoKnowledge().find((d) => d.tags.includes('提交规范'))!
+    expect(doc.content).toContain('$CATSTUDY_TRIGGER_MSG_ID')
+    expect(doc.content).toContain('服务端注入的真实触发消息 id')
+    expect(doc.content).toContain('禁止编造合法格式 uuid 交差')
+    expect(doc.content).toContain('报告环境未注入')
   })
 
   it('IRON_LAWS_REVIEWER 常量仍包含所有审查铁律（运行期注入源）', () => {

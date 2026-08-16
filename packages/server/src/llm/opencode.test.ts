@@ -384,6 +384,60 @@ describe('OpencodeAdapter', () => {
     expect(opts.env!.DEEPSEEK_API_KEY).toBe(process.env.DEEPSEEK_API_KEY)
   })
 
+  it('context.triggerMsgId 有值 → env 注入 CATSTUDY_TRIGGER_MSG_ID（只读单字段，不挂 MCP 工具面）', async () => {
+    // 边界红线：opencode 只读 context.triggerMsgId 单字段注入 env——工具面零变化，
+    // spawn args 不得出现任何 MCP 标志（既有「不挂 MCP」设计不破坏）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+      context: {
+        sessionId: 's1',
+        agentId: 'a1',
+        msgId: 'm1',
+        token: 'tok1',
+        triggerMsgId: 'trigger-msg-1',
+      },
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+      env?: Record<string, string>
+    }
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
+    expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBe('trigger-msg-1')
+    // 工具面零变化：无任何 MCP 挂载标志
+    expect(args).not.toContain('--mcp-config')
+    expect(args).not.toContain('--allowedTools')
+    expect(args).not.toContain('--disallowedTools')
+  })
+
+  it('context 无 triggerMsgId → env 不含 CATSTUDY_TRIGGER_MSG_ID（有值才注入）', async () => {
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+      context: {
+        sessionId: 's1',
+        agentId: 'a1',
+        msgId: 'm1',
+        token: 'tok1',
+      },
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+      env?: Record<string, string>
+    }
+    expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
+  })
+
   // ─── error 事件 ─────────────────────────────
 
   it('yields error chunk on error event (error.data.message — 1.18.16 实测结构)', async () => {

@@ -153,9 +153,9 @@ describe('ClaudeAdapter', () => {
     expect(env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max')
   })
 
-  // ─── buildEnv context 透传（MCP 结构化路由五变量，契约 4——店长裁决）───
+  // ─── buildEnv context 透传（MCP 结构化路由五变量 + triggerMsgId，契约 4——店长裁决）───
 
-  it('buildEnv with context passes five MCP variables', () => {
+  it('buildEnv with context passes MCP variables and triggerMsgId', () => {
     const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
     const env = (adapter as any).buildEnv({
       sessionId: 'session-1',
@@ -163,6 +163,7 @@ describe('ClaudeAdapter', () => {
       msgId: 'msg-1',
       token: 'tok-1',
       traceId: 'trace-1',
+      triggerMsgId: 'trigger-msg-1',
     }) as Record<string, string>
 
     expect(env.CATSTUDY_SERVER_URL).toBe('http://127.0.0.1:3200')
@@ -170,6 +171,20 @@ describe('ClaudeAdapter', () => {
     expect(env.CATSTUDY_SESSION_ID).toBe('session-1')
     expect(env.CATSTUDY_AGENT_ID).toBe('agent-impl')
     expect(env.CATSTUDY_MSG_ID).toBe('msg-1')
+    expect(env.CATSTUDY_TRIGGER_MSG_ID).toBe('trigger-msg-1')
+  })
+
+  it('buildEnv without triggerMsgId omits CATSTUDY_TRIGGER_MSG_ID (有值才设范式)', () => {
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+    const env = (adapter as any).buildEnv({
+      sessionId: 'session-1',
+      agentId: 'agent-impl',
+      msgId: 'msg-1',
+      token: 'tok-1',
+    }) as Record<string, string>
+
+    expect(env.CATSTUDY_MSG_ID).toBe('msg-1')
+    expect(env.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
   })
 
   it('buildEnv without context omits MCP variables (regression baseline)', () => {
@@ -179,20 +194,24 @@ describe('ClaudeAdapter', () => {
       token: process.env.CATSTUDY_SIGNAL_TOKEN,
       sessionId: process.env.CATSTUDY_SESSION_ID,
       msgId: process.env.CATSTUDY_MSG_ID,
+      triggerMsgId: process.env.CATSTUDY_TRIGGER_MSG_ID,
     }
     delete process.env.CATSTUDY_SIGNAL_TOKEN
     delete process.env.CATSTUDY_SESSION_ID
     delete process.env.CATSTUDY_MSG_ID
+    delete process.env.CATSTUDY_TRIGGER_MSG_ID
     try {
       const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
       const env = (adapter as any).buildEnv() as Record<string, string>
       expect(env.CATSTUDY_SIGNAL_TOKEN).toBeUndefined()
       expect(env.CATSTUDY_SESSION_ID).toBeUndefined()
       expect(env.CATSTUDY_MSG_ID).toBeUndefined()
+      expect(env.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
     } finally {
       if (saved.token !== undefined) process.env.CATSTUDY_SIGNAL_TOKEN = saved.token
       if (saved.sessionId !== undefined) process.env.CATSTUDY_SESSION_ID = saved.sessionId
       if (saved.msgId !== undefined) process.env.CATSTUDY_MSG_ID = saved.msgId
+      if (saved.triggerMsgId !== undefined) process.env.CATSTUDY_TRIGGER_MSG_ID = saved.triggerMsgId
     }
   })
 

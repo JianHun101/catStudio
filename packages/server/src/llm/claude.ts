@@ -329,6 +329,7 @@ export class ClaudeAdapter implements LLMAdapter {
       env.CATSTUDY_AGENT_ID = context.agentId
       env.CATSTUDY_MSG_ID = context.msgId
       if (context.triggerAuthorName) env.CATSTUDY_TRIGGER_AUTHOR_NAME = context.triggerAuthorName
+      if (context.triggerMsgId) env.CATSTUDY_TRIGGER_MSG_ID = context.triggerMsgId
     }
     return env
   }

@@ -438,6 +438,7 @@ describe('DshAdapter', () => {
           msgId: 'm1',
           token: 'tok123',
           triggerAuthorName: '店长',
+          triggerMsgId: 'trigger-msg-1',
         },
       })
     )
@@ -461,6 +462,8 @@ describe('DshAdapter', () => {
     expect(content).toContain("CATSTUDY_MSG_ID: 'm1'")
     expect(content).toContain('CATSTUDY_TRIGGER_AUTHOR_NAME')
     expect(content).toContain("'店长'")
+    // triggerMsgId（真实触发消息 id，猫提交 commit 的 uuid 来源）——有值才 push
+    expect(content).toContain("CATSTUDY_TRIGGER_MSG_ID: 'trigger-msg-1'")
     // 模型行：裸 `- id:` 行写覆盖（非 insert）——agent-default-model 已在 headless
     // 底座挂载，insert 会 duplicate loader entry id 炸；patch config 整块替换非合并，
     // provider/model 均必填
@@ -481,6 +484,38 @@ describe('DshAdapter', () => {
     await pending
     await gen.next()
     expect(existsSync(patchPath)).toBe(false)
+  })
+
+  it('context 无 triggerMsgId 时 patch env 不含 CATSTUDY_TRIGGER_MSG_ID（有值才 push）', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = drive(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'deepseek-chat',
+        context: {
+          sessionId: 's1',
+          agentId: 'a1',
+          msgId: 'm1',
+          token: 'tok123',
+        },
+      })
+    )
+    const pending = startGen(gen)
+
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
+    const patchIdx = args.indexOf('--patch')
+    expect(patchIdx).toBeGreaterThan(-1)
+    const patchPath = args[patchIdx + 1]
+    const content = readFileSync(patchPath, 'utf8')
+    // 基础五变量仍在，triggerMsgId 缺省不写
+    expect(content).toContain("CATSTUDY_MSG_ID: 'm1'")
+    expect(content).not.toContain('CATSTUDY_TRIGGER_MSG_ID')
+
+    child.emitClose(0)
+    await pending
+    await gen.next()
   })
 
   it('does not pass --patch when context is absent', async () => {

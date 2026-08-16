@@ -4901,6 +4901,7 @@ describe('socketio connector', () => {
         token: stream!.token,
         traceId: 'trace-asmb1',
         triggerAuthorName: '实施猫',
+        triggerMsgId: 'msg-trigger',
       })
 
       // 放行完成第一次执行

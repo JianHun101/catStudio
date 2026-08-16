@@ -105,7 +105,8 @@ async function materializeImages(
  * apiKey 非空时条件注入 DEEPSEEK_API_KEY（deepseek provider 复用 DS_KEY）——
  * 绕过手动 `opencode auth login` 的本地认证（历史存了占位符 `local` 导致 auth 失败），
  * 空则不注入（走 opencode 本地 credentials 兜底）。maxTokens/temperature 由 opencode
- * 本地配置控制。不挂 MCP 工具面（options.context 忽略，与 deepseek/pi/ollama 一致）。
+ * 本地配置控制。不挂 MCP 工具面；options.context 仅读 triggerMsgId 单字段注入 env
+ * （不消费其余字段）——与 deepseek/pi/ollama/openai 的工具面形态一致。
  *
  * 前置要求: npm i -g opencode-ai && opencode auth login
  */
@@ -207,6 +208,13 @@ export class OpencodeAdapter implements LLMAdapter {
     }
     if (effectiveKey) {
       env.DEEPSEEK_API_KEY = effectiveKey
+    }
+
+    // 边界红线：只读 context.triggerMsgId 单字段注入 env（猫提交 commit 的 catstudy [uuid]
+    // 来源）——「不挂 MCP 工具面」是既有有意设计（工具面决策），读 context 字段注入 env 是
+    // 环境面决策，两者正交；此处仅注入该单字段，不消费其余 context 字段
+    if (options.context?.triggerMsgId) {
+      env.CATSTUDY_TRIGGER_MSG_ID = options.context.triggerMsgId
     }
 
     const child = spawnSupervised(

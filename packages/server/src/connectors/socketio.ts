@@ -2760,6 +2760,9 @@ async function runAgentReply(
       token: signalToken,
       traceId,
       triggerAuthorName: triggerMsg.authorName,
+      // triggerMsgId = 真实触发消息 id（:2701 的 msgId 是本猫回复 id，两 id 明确区分）——
+      // 猫提交 commit 的 catstudy [uuid] 取自它（git-utils auto-commit 同源，:1332）
+      triggerMsgId: triggerMsg.id,
     },
   })
 
