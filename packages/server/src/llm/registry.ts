@@ -39,16 +39,17 @@ function parseEnvExtra(raw: string | undefined): Record<string, string> {
 export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
   // claude/deepseek 的 key 可指向不同端点（DeepSeek 官方 vs Moonshot）——同一 key 下
   // 不同 baseUrl 必须不同实例，否则缓存串台（K5 变更单：kimi judge 改走 deepseek provider）
-  // opencode 的 apiKey 恒不消费（本地认证）——model 与 envExtra 是实例间区分维度，缓存键
-  // 均纳入：不同 model 的猫共享实例会串台（吐槽猫审查发现），同 model 不同代理 env 的猫
-  // 共享实例同样串台（48a0415 同族教训——envExtra 原串比较，天然区分）
+  // opencode 的 apiKey 现条件注入 DEEPSEEK_API_KEY（复用 DS_KEY，42-44 同款教训）——
+  // 纳入缓存键维度，防同 model 不同 key 串台；model 与 envExtra 也均纳入：不同 model 的
+  // 猫共享实例会串台（吐槽猫审查发现），同 model 不同代理 env 的猫共享实例同样串台
+  // （48a0415 同族教训——envExtra 原串比较，天然区分）
   const cacheKey =
     agent.llmProvider === 'claude'
       ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}:${agent.llmBaseUrl || ''}`
       : agent.llmProvider === 'deepseek'
         ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmBaseUrl || ''}`
         : agent.llmProvider === 'opencode'
-          ? `${agent.llmProvider}:${agent.llmModel || ''}:${agent.llmEnvExtra || ''}`
+          ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmModel || ''}:${agent.llmEnvExtra || ''}`
           : agent.llmProvider === 'dsh'
             ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmModel || ''}:${agent.llmEnvExtra || ''}`
             : `${agent.llmProvider}:${agent.llmApiKey}`
@@ -97,7 +98,10 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
       // run 形态适配器（df2632a 回退拍板：一轮一进程 + --agent build --auto 工具循环，
       // 与 claude -p 同构）——serve 长驻适配器文件（opencode-serve.ts）与测试保留
       // 不动作为回滚路径，如需回退改回 OpencodeServeAdapter 构造即可
+      // apiKey 非空时条件注入 DEEPSEEK_API_KEY（deepseek provider 复用 DS_KEY），
+      // 根治「切 opencode 就 auth 失败」（历史本地 auth 存占位符 local）
       adapter = new OpencodeAdapter({
+        apiKey: agent.llmApiKey,
         model: agent.llmModel,
         envExtra: parseEnvExtra(agent.llmEnvExtra),
       })

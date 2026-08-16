@@ -28,7 +28,9 @@ class MockOpencodeAdapter {
   /** 接线锁定标识：必须是 run 形态——若 registry 构造被改回 serve 适配器，kind 断言即红 */
   readonly kind = 'run'
   chatStream = mockChatStream
-  constructor(public opts: { model?: string; envExtra?: Record<string, string> }) {}
+  constructor(
+    public opts: { apiKey?: string; model?: string; envExtra?: Record<string, string> }
+  ) {}
 }
 
 class MockDshAdapter {
@@ -164,9 +166,8 @@ describe('registry', () => {
       expect(adapter.opts.effortLevel).toBe('max')
     })
 
-    it('returns different instance for different model (opencode, apiKey always empty)', () => {
-      // opencode 的 apiKey 恒不消费（本地认证）→ 缓存键若不含 model，不同 model 的猫
-      // 共享同一实例（构造 model 固定 → 串台）。缓存键 = opencode:<model>，此用例锁住。
+    it('returns different instance for different model (opencode)', () => {
+      // model 参与缓存键——不同 model 的猫共享实例会串台（构造 model 固定）
       const m1 = { ...baseAgent, llmProvider: 'opencode', llmModel: 'anthropic/claude-sonnet-4-5' }
       const m2 = { ...baseAgent, llmProvider: 'opencode', llmModel: 'openai/gpt-5' }
       const a1 = registryModule.getAdapterForAgent(m1)
@@ -174,12 +175,27 @@ describe('registry', () => {
       expect(a1).not.toBe(a2)
     })
 
-    it('returns same instance for same model (opencode)', () => {
+    it('returns same instance for same model + same apiKey (opencode)', () => {
+      // apiKey 现参与缓存键（条件注入 DEEPSEEK_API_KEY，防同 model 不同 key 串台）
       const m1 = { ...baseAgent, llmProvider: 'opencode', llmModel: 'anthropic/claude-sonnet-4-5' }
-      const m2 = { ...m1, llmApiKey: 'sk-whatever' } // key 不参与缓存键（不消费）
+      const m2 = { ...m1 }
       const a1 = registryModule.getAdapterForAgent(m1)
       const a2 = registryModule.getAdapterForAgent(m2)
       expect(a1).toBe(a2)
+    })
+
+    it('returns different instance for different apiKey (opencode)', () => {
+      // apiKey 参与缓存键——同 model 不同 key 必须不同实例（否则第二只猫跑第一只猫的 key）
+      const m1 = {
+        ...baseAgent,
+        llmProvider: 'opencode',
+        llmModel: 'anthropic/claude-sonnet-4-5',
+        llmApiKey: 'sk-key-1',
+      }
+      const m2 = { ...m1, llmApiKey: 'sk-key-2' }
+      const a1 = registryModule.getAdapterForAgent(m1)
+      const a2 = registryModule.getAdapterForAgent(m2)
+      expect(a1).not.toBe(a2)
     })
 
     it('returns different instance for different envExtra (opencode, same model)', () => {
@@ -222,6 +238,8 @@ describe('registry', () => {
       }
       const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockOpencodeAdapter
       expect(adapter.opts.envExtra).toEqual({ HTTPS_PROXY: 'http://127.0.0.1:7897' })
+      // apiKey 现传入构造（条件注入 DEEPSEEK_API_KEY）——不再「不消费」
+      expect(adapter.opts.apiKey).toBe('sk-key-1')
 
       // 非法 JSON → 宽容降级空对象（不抛错），构造正常
       const bad = {

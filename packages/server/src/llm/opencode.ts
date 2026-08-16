@@ -20,6 +20,8 @@ const log = createLogger('opencode')
 
 interface OpencodeConfig {
   model: string
+  /** DeepSeek API Key（DS_KEY 复用）；可选——非空时以 DEEPSEEK_API_KEY 注入子进程 env（deepseek provider 复用 DS_KEY），空则不注入（opencode 本地 credentials 兜底） */
+  apiKey?: string
   /** 额外环境变量（per-agent 配置，如 HTTPS_PROXY 代理；registry 已宽容解析，此处收对象） */
   envExtra?: Record<string, string>
 }
@@ -100,19 +102,22 @@ async function materializeImages(
  * 事件流 → 输出 Chunk。与 claude.ts 同为 CLI 子进程形态，复用 cli-utils
  * 公共设施（resolveBin / messagesToPrompt / attachIdleTimeout / spawnSupervised）。
  *
- * apiKey 不消费（opencode 用本地认证，`opencode auth login` 后凭本地凭据鉴权），
- * maxTokens/temperature 由 opencode 本地配置控制。不挂 MCP 工具面
- * （options.context 忽略，与 deepseek/pi/ollama 一致）。
+ * apiKey 非空时条件注入 DEEPSEEK_API_KEY（deepseek provider 复用 DS_KEY）——
+ * 绕过手动 `opencode auth login` 的本地认证（历史存了占位符 `local` 导致 auth 失败），
+ * 空则不注入（走 opencode 本地 credentials 兜底）。maxTokens/temperature 由 opencode
+ * 本地配置控制。不挂 MCP 工具面（options.context 忽略，与 deepseek/pi/ollama 一致）。
  *
  * 前置要求: npm i -g opencode-ai && opencode auth login
  */
 export class OpencodeAdapter implements LLMAdapter {
   readonly provider = 'opencode'
   private model: string
+  private apiKey: string
   private envExtra: Record<string, string>
 
   constructor(config: OpencodeConfig) {
     this.model = config.model
+    this.apiKey = config.apiKey ?? ''
     this.envExtra = config.envExtra ?? {}
   }
 
@@ -186,6 +191,17 @@ export class OpencodeAdapter implements LLMAdapter {
       })
     }
 
+    // 凭证条件注入（DS_KEY 复用，对齐 dsh.ts:202-205）：仅非空才写 DEEPSEEK_API_KEY，
+    // 空串会覆盖 opencode 本地 credentials 兜底（有凭证的安装失效）。opencode 的
+    // deepseek provider 消费 DEEPSEEK_API_KEY 且 env 优先级高于 auth.json（真机验收点）
+    const env = {
+      ...process.env,
+      ...this.envExtra,
+    } as Record<string, string>
+    if (this.apiKey) {
+      env.DEEPSEEK_API_KEY = this.apiKey
+    }
+
     const child = spawnSupervised(
       OPENCODE_BIN,
       // options.model 优先（调用方每轮传当轮 agent 的 llmModel，socketio.ts 契约），
@@ -209,10 +225,9 @@ export class OpencodeAdapter implements LLMAdapter {
         // 无 input 时自动 end stdin，不会挂起
         // cwd 透传会话 worktree 路径（会话隔离）——缺省默认 workspace（存量行为零变化）
         cwd: options.cwd ?? getWorkspaceDir(),
-        // per-agent 额外环境变量（如 HTTPS_PROXY）：显式完整合并传入——
-        // spawnSupervised 内部统一为 {...process.env, ...opts.env}，此处传完整合并
-        // 双保险：即使内部语义未来被误改，注入也不丢 process.env（luna 猫代理场景）
-        env: { ...process.env, ...this.envExtra },
+        // per-agent 额外环境变量（如 HTTPS_PROXY）已并入上方 env；spawnSupervised
+        // 内部统一为 {...process.env, ...opts.env}，此处传完整合并（含 apiKey 条件注入）
+        env,
       }
     )
 

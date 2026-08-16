@@ -281,6 +281,51 @@ describe('OpencodeAdapter', () => {
     expect(opts2.env!.PATH).toBe(process.env.PATH)
   })
 
+  it('injects DEEPSEEK_API_KEY into spawn env when apiKey is non-empty (对齐 dsh 条件注入)', async () => {
+    // opencode 曾是唯一「apiKey 不消费」的 DeepSeek 适配器（deepseek 认证外包给手动
+    // opencode auth login，历史存占位符 local 导致 auth 失败）——本单对齐 claude/openai/dsh，
+    // apiKey 非空时以 DEEPSEEK_API_KEY 注入子进程 env（deepseek provider 复用 DS_KEY）
+    const adapter = new OpencodeAdapter({
+      model: 'anthropic/claude-sonnet-4-5',
+      apiKey: 'sk-key',
+    })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+      env?: Record<string, string>
+    }
+    expect(opts.env!.DEEPSEEK_API_KEY).toBe('sk-key')
+    // process.env 保留（PATH 是 Windows 子进程存活必需品）
+    expect(opts.env!.PATH).toBe(process.env.PATH)
+  })
+
+  it('does not inject DEEPSEEK_API_KEY when apiKey is empty (opencode 本地 credentials 兜底)', async () => {
+    // apiKey 为空时不注入（条件注入）——不写空串覆盖继承 env（process.env 有则保留、
+    // 无则保持 undefined）；空串会覆盖 opencode 本地 credentials 兜底（有凭证的安装失效）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' }) // 无 apiKey
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+      env?: Record<string, string>
+    }
+    // 与继承 env 一致（未注入空串覆盖）——测试环境 process.env 可能带真实 DS_KEY
+    expect(opts.env!.DEEPSEEK_API_KEY).toBe(process.env.DEEPSEEK_API_KEY)
+  })
+
   // ─── error 事件 ─────────────────────────────
 
   it('yields error chunk on error event (error.data.message — 1.18.16 实测结构)', async () => {
