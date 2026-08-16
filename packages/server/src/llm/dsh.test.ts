@@ -370,6 +370,35 @@ describe('DshAdapter', () => {
     await gen.next()
   })
 
+  it('falls back to DS_KEY when apiKey is placeholder local (72f6e3c 同族回归修复)', async () => {
+    // local 占位符视为「未配置真实 key」——72f6e3c 同族回归：非空就注入会把占位符当真
+    // key 注入（opencode flash猫 local 实锤），dsh 对称修复，占位符 fallback 到 .env DS_KEY
+    const prev = process.env.DS_KEY
+    process.env.DS_KEY = 'sk-real-from-env'
+    try {
+      const adapter = new DshAdapter({ model: 'deepseek-chat', apiKey: 'local' })
+      const child = fakeChild()
+      vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+      const gen = drive(
+        adapter.chatStream([{ role: 'user', content: 'hi' }], {
+          model: 'deepseek-chat',
+        })
+      )
+      const pending = startGen(gen)
+
+      const [, , opts] = vi.mocked(spawnSupervised).mock.calls.at(-1)!
+      expect(opts.env!.DEEPSEEK_API_KEY).toBe('sk-real-from-env')
+
+      child.emitClose(0)
+      await pending
+      await gen.next()
+    } finally {
+      if (prev === undefined) delete process.env.DS_KEY
+      else process.env.DS_KEY = prev
+    }
+  })
+
   it('does not override DEEPSEEK_API_KEY when apiKey is empty (credentials 落盘兜底)', async () => {
     // apiKey 为空时不注入（条件注入）——不写空串覆盖继承 env（process.env 有则保留、
     // 无则保持 undefined）；空串会覆盖 dsh credentials 落盘兜底（有凭证的安装失效）

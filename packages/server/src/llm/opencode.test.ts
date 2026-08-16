@@ -306,6 +306,64 @@ describe('OpencodeAdapter', () => {
     expect(opts.env!.PATH).toBe(process.env.PATH)
   })
 
+  it('falls back to DS_KEY when apiKey is placeholder local (72f6e3c 回归修复)', async () => {
+    // local / sk-your-api-key-here 是「未配置真实 key」占位符——72f6e3c 前 opencode 不消费
+    // apiKey（走本地 auth 兜底），72f6e3c 改「非空就注入」后占位符被当真 key 注入
+    // （flash猫 local → DEEPSEEK_API_KEY=local → auth 失败实锤）。占位符应 fallback 到
+    // .env DS_KEY（真实 key），而非注入占位符本身。
+    const prev = process.env.DS_KEY
+    process.env.DS_KEY = 'sk-real-from-env'
+    try {
+      const adapter = new OpencodeAdapter({
+        model: 'anthropic/claude-sonnet-4-5',
+        apiKey: 'local',
+      })
+      const child = fakeChild({ exitCode: 0 })
+      vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+      const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'anthropic/claude-sonnet-4-5',
+      })
+      child.stdout.push(null)
+      await collect(gen)
+
+      const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+        env?: Record<string, string>
+      }
+      expect(opts.env!.DEEPSEEK_API_KEY).toBe('sk-real-from-env')
+    } finally {
+      if (prev === undefined) delete process.env.DS_KEY
+      else process.env.DS_KEY = prev
+    }
+  })
+
+  it('falls back to DS_KEY when apiKey is placeholder sk-your-api-key-here (seed 无 key 场景)', async () => {
+    const prev = process.env.DS_KEY
+    process.env.DS_KEY = 'sk-real-from-env'
+    try {
+      const adapter = new OpencodeAdapter({
+        model: 'anthropic/claude-sonnet-4-5',
+        apiKey: 'sk-your-api-key-here',
+      })
+      const child = fakeChild({ exitCode: 0 })
+      vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+      const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'anthropic/claude-sonnet-4-5',
+      })
+      child.stdout.push(null)
+      await collect(gen)
+
+      const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+        env?: Record<string, string>
+      }
+      expect(opts.env!.DEEPSEEK_API_KEY).toBe('sk-real-from-env')
+    } finally {
+      if (prev === undefined) delete process.env.DS_KEY
+      else process.env.DS_KEY = prev
+    }
+  })
+
   it('does not inject DEEPSEEK_API_KEY when apiKey is empty (opencode 本地 credentials 兜底)', async () => {
     // apiKey 为空时不注入（条件注入）——不写空串覆盖继承 env（process.env 有则保留、
     // 无则保持 undefined）；空串会覆盖 opencode 本地 credentials 兜底（有凭证的安装失效）

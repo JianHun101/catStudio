@@ -198,8 +198,15 @@ export class OpencodeAdapter implements LLMAdapter {
       ...process.env,
       ...this.envExtra,
     } as Record<string, string>
-    if (this.apiKey) {
-      env.DEEPSEEK_API_KEY = this.apiKey
+    // 占位符守卫（72f6e3c 回归修复）：local / sk-your-api-key-here 视为「未配置真实 key」——
+    // 非空就注入会把占位符当真 key 注入（flash猫 local → DEEPSEEK_API_KEY=local → auth 失败
+    // 实锤）。占位符 fallback 到 .env DS_KEY（真实 key）；空串仍走「本地 credentials 兜底」不注入。
+    let effectiveKey = this.apiKey
+    if (effectiveKey === 'local' || effectiveKey === 'sk-your-api-key-here') {
+      effectiveKey = process.env.DS_KEY || ''
+    }
+    if (effectiveKey) {
+      env.DEEPSEEK_API_KEY = effectiveKey
     }
 
     const child = spawnSupervised(

@@ -212,9 +212,15 @@ export class DshAdapter implements LLMAdapter {
       ...this.envExtra,
     } as Record<string, string>
     // 凭证条件注入（DS_KEY 复用）：仅非空才写 DEEPSEEK_API_KEY（dsh 继承 env 优先级最高），
-    // 避免空串覆盖 dsh credentials 落盘兜底（有凭证的安装因空注入失效）
-    if (this.apiKey) {
-      env.DEEPSEEK_API_KEY = this.apiKey
+    // 避免空串覆盖 dsh credentials 落盘兜底（有凭证的安装因空注入失效）。
+    // 占位符守卫（对齐 opencode，72f6e3c 同族回归）：local / sk-your-api-key-here 视为
+    // 「未配置真实 key」，fallback 到 .env DS_KEY（真实 key）；空串仍走 credentials 兜底不注入。
+    let effectiveKey = this.apiKey
+    if (effectiveKey === 'local' || effectiveKey === 'sk-your-api-key-here') {
+      effectiveKey = process.env.DS_KEY || ''
+    }
+    if (effectiveKey) {
+      env.DEEPSEEK_API_KEY = effectiveKey
     }
     // 官方 seam：headless 形态需要确定性放行（ask 会 fail-closed 全拒工具）。
     // base config 同时读它设 sandbox-policy.mode 与 approval.policy——一次到位，
