@@ -581,6 +581,28 @@ async function saveSummaryConfig(): Promise<void> {
   }
 }
 
+// ─── 系统配置：铁律展示（开发铁律 + 审查铁律——只读，GET /api/iron-laws）────────────
+// 契约（店长钉死）：铁律是全局共享的运营规则，唯一权威是 seed-data.ts 常量（注入各猫
+// systemPrompt 末尾），本页只读展示全文、无编辑入口；GET 失败 → 提示 + 不崩。
+const ironLaws = ref<{ coder: string; reviewer: string } | null>(null)
+const ironLawsLoading = ref(true)
+const ironLawsError = ref('')
+
+async function loadIronLaws(): Promise<void> {
+  ironLawsLoading.value = true
+  try {
+    const res = await api.getIronLaws()
+    if (disposed) return
+    ironLaws.value = res
+  } catch (err: any) {
+    if (!disposed) {
+      ironLawsError.value = err.message || '铁律读取失败'
+    }
+  } finally {
+    ironLawsLoading.value = false
+  }
+}
+
 onMounted(() => {
   // 设置页为常驻视图（v-show 切类保持挂载）——一次拉齐五份数据
   loadBindings()
@@ -588,6 +610,7 @@ onMounted(() => {
   loadConfig()
   loadContextConfig()
   loadSummaryConfig()
+  loadIronLaws()
 })
 onUnmounted(() => {
   disposed = true
@@ -1131,6 +1154,27 @@ onUnmounted(() => {
                 >
                   {{ sumSaving ? '保存中…' : '保存摘要配置' }}
                 </button>
+              </div>
+            </template>
+          </div>
+
+          <!-- 铁律展示：开发铁律 + 审查铁律（只读——seed-data.ts 常量经 GET /api/iron-laws 暴露） -->
+          <div class="ctx-card">
+            <div class="ctx-info">
+              铁律是全局共享的运营规则（seed-data.ts 常量注入各猫 systemPrompt
+              末尾），此处只读展示全文， 便于观察；无编辑入口，修改需改源码常量后重跑 seed。
+            </div>
+
+            <div v-if="ironLawsLoading" class="list-hint">加载中…</div>
+            <div v-else-if="ironLawsError" class="error-msg">{{ ironLawsError }}</div>
+            <template v-else-if="ironLaws">
+              <div class="config-item iron-law-block">
+                <span class="label">开发铁律</span>
+                <pre class="iron-law-pre">{{ ironLaws.coder }}</pre>
+              </div>
+              <div class="config-item iron-law-block">
+                <span class="label">审查铁律</span>
+                <pre class="iron-law-pre">{{ ironLaws.reviewer }}</pre>
               </div>
             </template>
           </div>
@@ -1908,6 +1952,34 @@ select.input {
   font-family: var(--font-mono);
   font-size: 12px;
   flex-shrink: 0;
+}
+
+/* ─── 铁律展示块（只读全文——seed-data.ts 常量，无编辑入口） ─── */
+
+.iron-law-block {
+  /* 覆盖 .config-item 的 baseline 居中 flex——<pre> 全文块不适合行内基线对齐 */
+  display: block;
+}
+
+.iron-law-block .label {
+  display: inline-block;
+  margin-bottom: 6px;
+}
+
+.iron-law-pre {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* ─── 路径浏览选择器（内联弹窗） ──────────── */

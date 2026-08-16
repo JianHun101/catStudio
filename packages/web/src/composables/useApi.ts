@@ -105,6 +105,12 @@ export interface SummaryConfig {
   needsRestart: boolean
 }
 
+/** 铁律全文（GET /api/iron-laws 只读——seed-data.ts 常量直接 import，逐字一致，无写侧） */
+export interface IronLaws {
+  coder: string
+  reviewer: string
+}
+
 // ─── Eval 评估中心（E4-A 后端契约，snake_case 原样返回）─────────
 
 /** 评分行（EvalScoreRow + join agents 的猫名；agent 已删除时 agent_name 为 null） */
@@ -298,6 +304,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  // 铁律只读（GET /api/iron-laws——seed-data.ts 常量暴露，配置页面「系统配置」tab 铁律卡片消费）
+  getIronLaws: () => request<IronLaws>('/iron-laws'),
 
   // Eval 评估中心（E4-A 后端四接口 + E4-B 契约缺口裁决补充的 episode-stats；纯展示 + 回标写入零 LLM）
   getEvalScores: (limit?: number, agentId?: string) => {

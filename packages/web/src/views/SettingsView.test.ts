@@ -410,3 +410,32 @@ describe('SettingsView 系统配置（摘要配置——单 A 契约 GET/POST /a
     expect(configItemBlock![0]).not.toContain('space-between')
   })
 })
+
+describe('SettingsView 系统配置（铁律只读展示——GET /api/iron-laws）', () => {
+  it('铁律卡片：开发铁律 / 审查铁律两段 + <pre> 全文展示 + 挂载即拉取', () => {
+    expect(source).toContain('api.getIronLaws()')
+    expect(source).toContain('loadIronLaws()')
+    expect(source).toContain('ironLawsLoading')
+    expect(source).toContain('ironLawsError')
+    expect(source).toContain('开发铁律')
+    expect(source).toContain('审查铁律')
+    expect(source).toContain('<pre class="iron-law-pre">{{ ironLaws.coder }}</pre>')
+    expect(source).toContain('<pre class="iron-law-pre">{{ ironLaws.reviewer }}</pre>')
+  })
+
+  it('只读无编辑入口：展示铁律全文变量，无 textarea/input 绑定铁律内容', () => {
+    expect(source).toContain('ironLaws.coder')
+    expect(source).toContain('ironLaws.reviewer')
+    // 铁律块无编辑控件——负向断言：v-model 不绑定 ironLaws
+    expect(source.match(/v-model="ironLaws[^"]*"/)).toBeNull()
+    expect(source).toContain('无编辑入口')
+  })
+
+  it('铁律全文容器样式：pre-wrap 保留换行 + 限高滚动（不撑爆卡片）', () => {
+    const preBlock = source.match(/\.iron-law-pre\s*\{[\s\S]*?\}/)
+    expect(preBlock).toBeTruthy()
+    expect(preBlock![0]).toContain('white-space: pre-wrap')
+    expect(preBlock![0]).toContain('max-height: 300px')
+    expect(preBlock![0]).toContain('overflow-y: auto')
+  })
+})

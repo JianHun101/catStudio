@@ -44,8 +44,9 @@ const SHARED_PREAMBLE = `你是一只拥有人工智能的猫。只扮演自己�
  * 开发铁律 — 注入店长、ds猫、flash猫的 base prompt。
  * 出口检查 + 依赖安装声明 + @mention 格式 + 重启审批。
  * 注意：代码审查由 post-commit hook（handoff-gen）触发，不在此重复。
+ * export 供 GET /api/iron-laws 只读接口暴露（配置页面铁律卡片，seed-data 仍唯一权威）。
  */
-const IRON_LAWS_CODER = `
+export const IRON_LAWS_CODER = `
 ---
 角色边界
 ---
@@ -88,8 +89,9 @@ Worktree 模式
 /**
  * 审查铁律 — 注入吐槽猫的 base prompt。
  * 出口检查 + 代码审查流程 + 依赖审查流程 + @mention 格式。
+ * export 供 GET /api/iron-laws 只读接口暴露（配置页面铁律卡片，seed-data 仍唯一权威）。
  */
-const IRON_LAWS_REVIEWER = `
+export const IRON_LAWS_REVIEWER = `
 ---
 角色边界
 ---
