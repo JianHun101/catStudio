@@ -15,7 +15,7 @@
 
 1. **第一步（近期）**：`acp.ts` + opencode 单 backend 试点。工具循环 / fork / resume / close 取消四块均实测（调研 §3）。
 2. **第二步（中期）**：claude 经 `zed-industries/claude-agent-acp` SDK adapter（⚠️ SDK 行为未实测）；deepseek（直连 API 型）经 opencode 挂 deepseek provider 间接接入。
-3. **第三步（后续）**：dsh 折中另议——headless 无 ACP（三源实证，调研 §1.1），要么自起 ACP server 另立项，要么 headless 直连 + ACP 并存。
+3. **第三步（后续）**：dsh 折中另议——dsh CLI 无 acp 子命令（三源实证，调研 §1.1），官方 npm 插件包 `@deepseek-ai/dsh-acp` 为裁剪形态、与四块依赖原语冲突（对称实测，调研 §1.1b），要么自起 ACP server 另立项，要么 headless 直连 + ACP 并存。
 
 ## 契约裁决（店长拍板）
 
@@ -30,7 +30,7 @@
 
 - **维持现状（各 CLI/API 直连）**：零迁移成本，但多供应商各拼一套形态，无统一收敛点，32K / 上下文外置 / 工具面三件事逐供应商重复解决。
 - **MCP 工具面外置统一**：只解「上下文外置」，不解「供应商无关」+「协议化」，是 ACP 的子集，不选。
-- **直接全换 ACP**：一步到位但牵动全部猫，dsh 无 ACP 直接暴露全覆盖缺口，回滚需整体回退——风险高。
+- **直接全换 ACP**：一步到位但牵动全部猫，dsh CLI 无 acp 子命令、官方插件包为裁剪形态（调研 §1.1b 对称实测）直接暴露全覆盖缺口，回滚需整体回退——风险高。
 - **connector 并存 + 分步迁移（选中）**：ACP 是唯一有行业共识的多供应商收敛点（官方 Agents 页 30+ 实现），保留旧适配器回滚路径，增量验证。
 
 ## Consequences

@@ -15,7 +15,9 @@
 
 ## 1. 供应商覆盖表（按 backend 形态分）
 
-### 1.1 必查项：dsh headless 有无 ACP —— **无，实证三源**
+### 1.1 必查项：dsh 有无 ACP —— 结论修正为「CLI 无 acp 子命令，但官方 npm 插件包存在（裁剪形态）」
+
+**三源实证（2026-08-17，原结论成立的部分）**：dsh **CLI 自身**没有 acp 子命令——
 
 | 证据源                                        | 输出                                                                                                          | 结论                             |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------- |
@@ -24,7 +26,20 @@
 | `dsh --profile headless --dump-config` 插件树 | 全树 90+ 插件（dsh-agent-loop / dsh-llm / dsh-mcp-client 等），**grep acp/AgentClient/session/prompt 零命中** | 无 ACP 插件                      |
 | 官方架构文档（deepseek-harness.github.io）    | `dsh-headless` = "一次性运行器，且完全不带服务器"；`dsh-web-app` 才"增加浏览器应用"                           | headless 设计上就无服务器形态    |
 
-**结论**：dsh headless **没有 ACP server**——ACP 是「编辑器 ↔ 长驻 agent 服务」协议，headless 是"跑完即退"的一次性形态，两者设计哲学冲突。若走 ACP 全覆盖路线，dsh 这一路要么自起 ACP server（在 headless 上包一层 acp 服务，开发量大），要么继续用现有 headless 直连形态（ACPI 并存）。
+**⚠️ 事实修正（2026-08-18，对称实测）**：原「三源实证无 ACP」结论**不完整**——只查了 dsh CLI 命令层 + 本地插件树（headless profile 的组合产物），**漏查了 npm 生态独立包这一层**。`@deepseek-ai/dsh-acp@0.1.0-rc.7`（deepseek-harness 仓库 `packages/acp/acp`）是 deepseek-ai 官方发布的 **ACP server 插件包**（2026-08-10 起有 rc.1，rc.7 2026-08-17 发布）。它**不是**给现有 `dsh` 加参数的形态——是 Cordis 插件（`apply(ctx, config)`），需挂 deepseek-harness 宿主组合（npm 打包形态 `@deepseek-ai/dsh-acp-demo`，bin `dsh-acp-demo --config cordis.yml`），peer 依赖一堆 `@deepseek-ai/dsh-*` 包。
+
+### 1.1b 四原语对称实测（2026-08-18，`docs/adr/dsh-acp-probe.e2e.mjs`）
+
+真实起官方 ACP 宿主（`dsh-acp-demo` rc.7）+ 裸 JSON-RPC over stdio 探针（零依赖客户端），对 ADR 0008 四块依赖原语逐一实测——**行为证据，非 README 转述**：
+
+| 原语         | 实跑行为证据                                                                                                                                                                                                     | 与 ADR 0008 依赖的冲突                                                 |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| fork/resume  | `session/fork`/`resume`/`load`/`list`/`delete`/`close` 全部 `-32601 Method not found`（插件只实现 initialize/authenticate/newSession/prompt/cancel 五方法）                                                      | ❌ 冲突：ADR 0008 靠 fork 隔离 + resume 崩溃恢复等价替换「一轮一进程」 |
+| close/cancel | `session/close` 未注册（-32601）；`session/cancel` 是 notification（无 id 无响应），未知/无 in-flight 会话静默 no-op——「标记中止」非等价取消                                                                     | ❌ 冲突：ADR 0008「取消统一走 session/close」无对应能力                |
+| mcpServers   | 非空 `mcpServers` 被拒（`-32602 Invalid params: mcpServers is not supported`）、非空 `additionalDirectories` 被拒、相对 cwd 被拒                                                                                 | ❌ 冲突：`CATSTUDY_*` env 透传 + MCP 工具面无法挂载                    |
+| 流式 chunk   | 真实 LLM 一次（deepseek-v4-flash）：约 100 字多段答案，`agent_message_chunk` **恰好 1 次**（单 block committed 答案），非 chunk 的 `session/update` 0 次，`stopReason=end_turn`，3.1s 后一次性到达（非逐 token） | ❌ 冲突：AGENT_TYPING 打字体验（逐 token）退化                         |
+
+**结论（修正后）**：dsh **CLI 无 acp 子命令**（三源实证仍成立），但官方另发 `@deepseek-ai/dsh-acp` 插件包，其**裁剪形态与 ADR 0008 四块依赖原语全部冲突**。README 自述它是「harness 内部 subagent 桥」（主客户端 `dsh-subagent-acp`），不是给第三方自动化客户端准备的通用 ACP server。因此 dsh 保持 headless 直连即可——ADR 0008 第三步「dsh 折中」结论不变，且被本次实测**印证**（dsh 直连保留 + ACP 并存是对的）。
 
 ### 1.2 claude —— 有 ACP，但非 CLI 原生子命令
 
@@ -46,12 +61,12 @@ deepseek.ts 是 HTTP SSE 直连形态（非 CLI），无 ACP server 可言。ACP
 
 ### 1.5 覆盖表汇总
 
-| backend  | 形态       | ACP server 有无 | 证据               | ACP 化路径                                |
-| -------- | ---------- | --------------- | ------------------ | ----------------------------------------- |
-| opencode | CLI 子进程 | ✅ 原生         | 本地实测（§3）     | `opencode acp` 直连                       |
-| claude   | CLI 子进程 | ⚠️ 经 SDK       | ACP 官方 Agents 页 | claude-agent-acp SDK 包装                 |
-| dsh      | CLI 子进程 | ❌ 无           | §1.1 三源实证      | headless 无 ACP；需自起 server 或保持直连 |
-| deepseek | 直连 API   | ❌ 无           | 形态如此           | 经 ACP agent 的 provider（间接）          |
+| backend  | 形态       | ACP server 有无  | 证据                           | ACP 化路径                                                                          |
+| -------- | ---------- | ---------------- | ------------------------------ | ----------------------------------------------------------------------------------- |
+| opencode | CLI 子进程 | ✅ 原生          | 本地实测（§3）                 | `opencode acp` 直连                                                                 |
+| claude   | CLI 子进程 | ⚠️ 经 SDK        | ACP 官方 Agents 页             | claude-agent-acp SDK 包装                                                           |
+| dsh      | CLI 子进程 | ❌ 无 ACP server | §1.1 三源实证 + §1.1b 对称实测 | CLI 无 acp 子命令；官方插件包为裁剪形态（与 ADR 0008 原语冲突）→ 保持 headless 直连 |
+| deepseek | 直连 API   | ❌ 无            | 形态如此                       | 经 ACP agent 的 provider（间接）                                                    |
 
 ## 2. 协议能力映射表（我们需要的原语 × ACP 能力）
 
@@ -162,7 +177,7 @@ adapter.chatStream(llmMessages, {
 「一轮一进程 > 长驻服务」默认下，上长驻 ACP 必须证伪简单形态：
 
 - run/-f（opencode.ts 现有形态）**为什么不可行**？——绕 32K 已解决（-f 实测），但**多供应商统一**（claude/dsh/deepseek 各自形态）未解决——这是「直接上 ACP」的唯一硬理由：**ACP 是唯一有行业共识的多供应商收敛点**（opencode/claude/Codex/Gemini/Copilot 均声明支持，ACP 官方 Agents 页列 30+ 实现）。
-- 但 dsh 无 ACP（§1.1）→ 全覆盖目标下 dsh 一路仍需折中。
+- 但 dsh CLI 无 acp 子命令，官方插件包为裁剪形态（§1.1 / §1.1b）→ 全覆盖目标下 dsh 一路仍需折中。
 
 ## 6. 迁移两案对照
 
@@ -170,32 +185,38 @@ adapter.chatStream(llmMessages, {
 | ------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | 范围               | claude/opencode/dsh/deepseek 四适配器全换 ACP                              | 新增 acp.ts，registry 按需启用，旧适配器保留                          |
 | 回滚路径           | 需整体回退（serve 适配器 d555732 先例：保留为回滚路径）                    | 每 backend 独立切回（registry 改配置即回滚）                          |
-| 风险               | 一次切换牵动全部猫；dsh 无 ACP 直接暴露全覆盖缺口                          | 增量验证；dsh/deepseek 可暂留现状                                     |
+| 风险               | 一次切换牵动全部猫；dsh CLI 无 ACP、插件包形态裁剪直接暴露全覆盖缺口       | 增量验证；dsh/deepseek 可暂留现状                                     |
 | ACP 协议版本稳定性 | v1 已稳定（session/close/fork/list/resume 等均 stabilized）；v2 draft 在案 | 同左，但并存降低单点依赖                                              |
 | 建议               | —                                                                          | **connector 并存**（与 ADR 0007 serve 先例同款：增量 + 保留回滚路径） |
 
 ## 7. 结论（供店长汇总 ADR）
 
 1. **「直接上 ACP」可行，但分步走**：新增 ACP 适配器（acp.ts）实现既有 `chatStream` 契约，**dispatch 零改动**；按 backend 逐个接入，**connector 并存**而非全换。
-2. **覆盖面不全**：opencode 原生 ✅、claude 需 SDK 包装 ⚠️、**dsh 无 ACP** ❌（§1.1 三源实证）、deepseek 无 CLI。用户「直接上 ACP」要落地全覆盖，dsh 一路必须给出折中方案（headless 保持直连 + ACP 并存的混合形态，或 dsh 侧自起 ACP server 另立项）。
+2. **覆盖面不全**：opencode 原生 ✅、claude 需 SDK 包装 ⚠️、**dsh CLI 无 ACP server** ⚠️（§1.1 三源实证 CLI 无 acp 子命令；§1.1b 对称实测官方插件包为裁剪形态）、deepseek 无 CLI。用户「直接上 ACP」要落地全覆盖，dsh 一路必须给出折中方案（headless 保持直连 + ACP 并存的混合形态——插件包无法承载 fork/resume/close/mcpServers/流式原语，另起 ACP server 开发量大）。
 3. **接口契约成立**：`chatStream → AsyncIterable<Chunk>` 可由 ACP client 实现，六项原语全映射（§4.2），dispatch 层零改动。
 4. **调度等价性成立**：fork（每轮分支隔离）+ resume（崩溃恢复）+ dispatch slot/FIFO 维持 → 「单 agent 单活跃」等价（§5）。
 5. **协议缺口两处**：① `session/cancel` opencode 未实现，取消走 `session/close`（§3.3）；② configOptions model 列表来自 opencode 本地 models，需与注册表 llmModel 取值域对齐（§3.4）。
-6. **建议采纳序**：第一步 acp.ts + opencode 单 backend 试点（工具循环/取消/fork 已实测）→ 第二步 claude 经 SDK adapter + deepseek 经 opencode provider → 第三步 dsh 折中方案（另议，因 headless 无 ACP）。每步 connector 并存，registry 可回滚。
+6. **建议采纳序**：第一步 acp.ts + opencode 单 backend 试点（工具循环/取消/fork 已实测）→ 第二步 claude 经 SDK adapter + deepseek 经 opencode provider → 第三步 dsh 折中方案（另议：CLI 无 ACP、插件包裁剪形态）。每步 connector 并存，registry 可回滚。
 
 ## 8. 假设标红清单
 
-| 假设                             | 状态        | 说明                                                                                  |
-| -------------------------------- | ----------- | ------------------------------------------------------------------------------------- |
-| opencode acp 工具执行循环可用    | ✅ 实测     | tool_call 事件链完整 + env 透传 + end_turn（§3.1）                                    |
-| session/fork 上下文继承          | ✅ 实测     | fork 会话答出原会话秘密标记（§3.2）                                                   |
-| session/resume 跨进程恢复        | ✅ 实测     | 进程2 记住进程1 的指令并遵守（§3.2）                                                  |
-| session/cancel 可用              | 🔴 证伪     | opencode 1.18.18 返回 -32601 Method not found；改用 session/close（§3.3）             |
-| claude 有 ACP                    | ⚠️ 官方声明 | 无 CLI 子命令；走 zed-industries/claude-agent-acp SDK adapter（§1.2），SDK 行为未实测 |
-| dsh headless 有 ACP              | 🔴 证伪     | 三源实证无 ACP 命令/插件/服务器形态（§1.1）                                           |
-| 多 agent 共享 acp 进程的并发安全 | 🔴 待验证   | 单 agent 单活跃下 dispatch 已串行化；多 agent 共享进程时 JSON-RPC id 对齐需实施验证   |
+| 假设                             | 状态         | 说明                                                                                                                                                                                                                                                    |
+| -------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| opencode acp 工具执行循环可用    | ✅ 实测      | tool_call 事件链完整 + env 透传 + end_turn（§3.1）                                                                                                                                                                                                      |
+| session/fork 上下文继承          | ✅ 实测      | fork 会话答出原会话秘密标记（§3.2）                                                                                                                                                                                                                     |
+| session/resume 跨进程恢复        | ✅ 实测      | 进程2 记住进程1 的指令并遵守（§3.2）                                                                                                                                                                                                                    |
+| session/cancel 可用              | 🔴 证伪      | opencode 1.18.18 返回 -32601 Method not found；改用 session/close（§3.3）                                                                                                                                                                               |
+| claude 有 ACP                    | ⚠️ 官方声明  | 无 CLI 子命令；走 zed-industries/claude-agent-acp SDK adapter（§1.2），SDK 行为未实测                                                                                                                                                                   |
+| dsh headless 有 ACP              | 🔴 证伪→修正 | 三源实证确认 CLI 无 acp 子命令（§1.1）；但 npm 官方插件包 `@deepseek-ai/dsh-acp` 存在（rc.7），§1.1b 对称实测确认其为裁剪形态（无 fork/resume/close、拒 mcpServers、仅 committed 答案）——结论修正为「CLI 无 ACP server + 插件包裁剪」，dsh 折中方案不变 |
+| 多 agent 共享 acp 进程的并发安全 | 🔴 待验证    | 单 agent 单活跃下 dispatch 已串行化；多 agent 共享进程时 JSON-RPC id 对齐需实施验证                                                                                                                                                                     |
 
-## 9. 实测产物位置（%TEMP%，不在主仓库）
+## 9. 实测产物位置
+
+**仓库内（可复现）**：
+
+- `docs/adr/dsh-acp-probe.e2e.mjs` —— dsh ACP 四原语对称实测探针（2026-08-18 修订版入库；真实起 `dsh-acp-demo` 宿主 + 裸 JSON-RPC stdio，见 §1.1b）。运行需 `%TEMP%/opencode/dsh-acp-probe/` 已装宿主与 leaf 插件。
+
+**%TEMP%（一次性调研，不在主仓库）**：
 
 - `%TEMP%/opencode/acp-research/acp-tool-loop.mjs`（工具循环实测）
 - `%TEMP%/opencode/acp-research/acp-fork-test.mjs`（fork 实测）
