@@ -227,8 +227,11 @@ export function buildCandidates(): JudgeCandidate[] {
 /**
  * 从消息表挑 DS 族猫回复（排除 ollama 图测猫），取最新 count 条。
  * 纯函数（测试用注入数据）；agentById 为 agent_id → {provider, model} 映射。
- * DS 族判定按模型名前缀（生产主猫 llmProvider='claude'、llmModel 以
- * 'deepseek' 开头——按 provider 过滤会把全猫误杀，M1 教训）。
+ * DS 族判定按模型名包含 'deepseek'（生产主猫 llmProvider='opencode'、
+ * llmModel='opencode-go/deepseek-v4-flash' 经 opencode 适配器跑 Go 订阅；
+ * 旧 claude 直连形态仍命中——按 provider 过滤会把全猫误杀，M1 教训）。
+ * 用 includes('deepseek') 而非 startsWith——切 Go 后模型名前缀变成 'opencode-go/'，
+ * 但模型族仍是 DeepSeek（跑的是 DeepSeek V4 Flash）
  */
 export function selectCandidates(
   rows: Array<{
@@ -248,7 +251,7 @@ export function selectCandidates(
       const meta = agentById.get(r.agent_id)
       if (!meta) return false
       if (meta.provider === 'ollama') return false
-      return meta.model.startsWith('deepseek')
+      return meta.model.includes('deepseek')
     })
     .slice(0, count)
     .map((r) => ({

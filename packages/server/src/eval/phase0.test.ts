@@ -171,18 +171,28 @@ describe('selectCandidates', () => {
       content: 'e',
       created_at: '2026-08-01 00:05:00',
     },
+    {
+      id: 'm6',
+      session_id: 's',
+      agent_id: 'legacy-1',
+      role: 'agent',
+      content: 'f',
+      created_at: '2026-08-01 00:06:00',
+    },
   ]
   const agentById = new Map([
-    // 生产主猫形态：provider='claude' + deepseek 模型 → 选中（M1 回归）
-    ['prod-1', { provider: 'claude', model: 'deepseek-v4-flash' }],
+    // 生产主猫形态：provider='opencode' + opencode-go 模型前缀 → 选中（M1 回归）
+    ['prod-1', { provider: 'opencode', model: 'opencode-go/deepseek-v4-flash' }],
+    // 旧 claude 直连形态（回滚路径）→ includes 判定下仍选中
+    ['legacy-1', { provider: 'claude', model: 'deepseek-v4-flash' }],
     ['ds-1', { provider: 'deepseek', model: 'deepseek-v4-flash' }],
     ['oll-1', { provider: 'ollama', model: 'qwen3.5:9b' }],
     ['gpt-1', { provider: 'openai', model: 'gpt-4o' }],
   ])
 
-  it('只选 DS 族 agent 回复（生产主猫 claude provider 也算；排除 ollama/外部族与非 agent 消息）', () => {
+  it('只选 DS 族 agent 回复（opencode-go 前缀主猫 + 旧 claude 直连都算；排除 ollama/外部族与非 agent 消息）', () => {
     const picked = selectCandidates(rows, agentById, 10)
-    expect(picked.map((p) => p.messageId)).toEqual(['m1', 'm3']) // 保持倒序输入顺序
+    expect(picked.map((p) => p.messageId)).toEqual(['m1', 'm3', 'm6']) // 保持倒序输入顺序
     expect(picked.every((p) => p.content)).toBe(true)
   })
 

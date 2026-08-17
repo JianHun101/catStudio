@@ -20,9 +20,19 @@ const DS_AGENT = {
   llmApiKey: 'sk-test',
 }
 
-// 生产主猫形态：llmProvider='claude'，deepseek-v4-flash 经 claude 适配器运行。
-// 这是线上 DB 的真实配置——采样门按模型名过滤，此形态必须采样（M1 回归测试）
-const PROD_AGENT = { ...DS_AGENT, id: 'agent-prod', llmProvider: 'claude' }
+// 生产主猫形态：llmProvider='opencode'，opencode-go/deepseek-v4-flash 经 opencode
+// 适配器跑 Go 订阅（切 Go 后线上 DB 的真实配置）。采样门按模型名过滤（includes），
+// 此形态必须采样（M1 回归测试）
+const PROD_AGENT = {
+  ...DS_AGENT,
+  id: 'agent-prod',
+  llmProvider: 'opencode',
+  llmModel: 'opencode-go/deepseek-v4-flash',
+  llmApiKey: '',
+}
+// 旧生产主猫形态（切 Go 前：claude 适配器直连 deepseek-v4-flash）——回滚路径仍在，
+// includes 判定下仍须采样（回归护栏：换 provider 前缀不能把 DS 族猫误杀）
+const LEGACY_CLAUDE_AGENT = { ...DS_AGENT, id: 'agent-legacy', llmProvider: 'claude' }
 const OLLAMA_AGENT = {
   ...DS_AGENT,
   id: 'agent-ollama',
@@ -84,10 +94,16 @@ describe('maybeScoreSample', () => {
     expect(scoreReply).not.toHaveBeenCalled()
   })
 
-  it('生产主猫形态（claude provider + deepseek 模型）→ 采样（M1 回归）', () => {
+  it('生产主猫形态（opencode provider + opencode-go 模型前缀）→ 采样（M1 回归）', () => {
     const random = vi.fn(() => 0.001)
     maybeScoreSample(PROD_AGENT, 's-1', 'm-1', random)
     expect(scoreReply).toHaveBeenCalledWith(PROD_AGENT, 's-1', 'm-1')
+  })
+
+  it('旧 claude 直连形态（claude provider + deepseek 模型）→ 仍采样（回滚路径回归）', () => {
+    const random = vi.fn(() => 0.001)
+    maybeScoreSample(LEGACY_CLAUDE_AGENT, 's-1', 'm-1', random)
+    expect(scoreReply).toHaveBeenCalledWith(LEGACY_CLAUDE_AGENT, 's-1', 'm-1')
   })
 
   it('采样率 0 时跳过', () => {

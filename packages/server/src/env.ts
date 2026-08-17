@@ -123,8 +123,8 @@ process.env.ONEBOT_ALLOWLIST ??= ''
 process.env.KIMI_API_KEY ??= ''
 
 // EVAL_SAMPLE_RATE — 回复采样率（随机 1-5%，默认 2%）。只对 DS 族猫
-// （llmModel 以 'deepseek' 开头——生产主猫 provider='claude' 经 claude 适配器
-// 跑 deepseek-v4-flash）的回复采样评分，ollama 图测猫不进入评估
+// （llmModel 包含 'deepseek'——生产主猫 provider='opencode' 经 opencode 适配器
+// 跑 opencode-go/deepseek-v4-flash Go 订阅）的回复采样评分，ollama 图测猫不进入评估
 process.env.EVAL_SAMPLE_RATE ??= '0.02'
 
 // ─── L1 聚合告警阈值（W1，滞回状态机破线判定）──────

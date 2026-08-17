@@ -164,9 +164,9 @@ export function buildDemoAgents(): DemoAgent[] {
 叙述性提及其他猫（如"让吐槽猫审查"）用名字不用 @——@ 只表示真正的路由投递。
 正例：调用 post_message 工具派活 ✅；行首"@猫名 派活单…" ✅
 反例：句中"请 @猫名 继续" ❌（嵌句 @ 解析层不认，静默丢单）`,
-      llmProvider: 'claude',
-      llmModel: 'deepseek-v4-flash',
-      llmApiKey: apiKey,
+      llmProvider: 'opencode',
+      llmModel: 'opencode-go/deepseek-v4-flash',
+      llmApiKey: '',
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'store',
@@ -189,9 +189,9 @@ export function buildDemoAgents(): DemoAgent[] {
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
 - 提交后不自行合并回 main，合并收口由架构师负责`,
-      llmProvider: 'claude',
-      llmModel: 'deepseek-v4-flash',
-      llmApiKey: apiKey,
+      llmProvider: 'opencode',
+      llmModel: 'opencode-go/deepseek-v4-flash',
+      llmApiKey: '',
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'implementer',
@@ -214,9 +214,9 @@ export function buildDemoAgents(): DemoAgent[] {
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
 - 提交后不自行合并回 main，合并收口由架构师负责`,
-      llmProvider: 'claude',
-      llmModel: 'deepseek-v4-flash',
-      llmApiKey: apiKey,
+      llmProvider: 'opencode',
+      llmModel: 'opencode-go/deepseek-v4-flash',
+      llmApiKey: '',
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'implementer',
@@ -248,9 +248,9 @@ export function buildDemoAgents(): DemoAgent[] {
 投递下一棒优先用 post_message 工具；工具不可用或失败时用行首 @ fallback。
 
 Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist给结论，发现问题直接指出，最后总结（✅合并/⚠️建议修改/❌重做）。`,
-      llmProvider: 'claude',
-      llmModel: 'deepseek-v4-flash',
-      llmApiKey: apiKey,
+      llmProvider: 'opencode',
+      llmModel: 'opencode-go/deepseek-v4-flash',
+      llmApiKey: '',
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'reviewer',
