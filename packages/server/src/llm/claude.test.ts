@@ -175,16 +175,24 @@ describe('ClaudeAdapter', () => {
   })
 
   it('buildEnv without triggerMsgId omits CATSTUDY_TRIGGER_MSG_ID (有值才设范式)', () => {
-    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
-    const env = (adapter as any).buildEnv({
-      sessionId: 'session-1',
-      agentId: 'agent-impl',
-      msgId: 'msg-1',
-      token: 'tok-1',
-    }) as Record<string, string>
+    // 测试隔离：注入 shell 的 CATSTUDY_TRIGGER_MSG_ID 会经 ...process.env 透传进
+    // buildEnv 结果——清理后再断言（对齐下方 regression baseline 范式）
+    const saved = process.env.CATSTUDY_TRIGGER_MSG_ID
+    delete process.env.CATSTUDY_TRIGGER_MSG_ID
+    try {
+      const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+      const env = (adapter as any).buildEnv({
+        sessionId: 'session-1',
+        agentId: 'agent-impl',
+        msgId: 'msg-1',
+        token: 'tok-1',
+      }) as Record<string, string>
 
-    expect(env.CATSTUDY_MSG_ID).toBe('msg-1')
-    expect(env.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
+      expect(env.CATSTUDY_MSG_ID).toBe('msg-1')
+      expect(env.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
+    } finally {
+      if (saved !== undefined) process.env.CATSTUDY_TRIGGER_MSG_ID = saved
+    }
   })
 
   it('buildEnv without context omits MCP variables (regression baseline)', () => {

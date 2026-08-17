@@ -416,26 +416,34 @@ describe('OpencodeAdapter', () => {
   })
 
   it('context 无 triggerMsgId → env 不含 CATSTUDY_TRIGGER_MSG_ID（有值才注入）', async () => {
-    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
-    const child = fakeChild({ exitCode: 0 })
-    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+    // 测试隔离：注入 shell 的 CATSTUDY_TRIGGER_MSG_ID 会经 ...process.env 透传进
+    // opts.env——清理后再断言（对齐 claude.test.ts regression baseline 范式）
+    const saved = process.env.CATSTUDY_TRIGGER_MSG_ID
+    delete process.env.CATSTUDY_TRIGGER_MSG_ID
+    try {
+      const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+      const child = fakeChild({ exitCode: 0 })
+      vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
-    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
-      model: 'anthropic/claude-sonnet-4-5',
-      context: {
-        sessionId: 's1',
-        agentId: 'a1',
-        msgId: 'm1',
-        token: 'tok1',
-      },
-    })
-    child.stdout.push(null)
-    await collect(gen)
+      const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'anthropic/claude-sonnet-4-5',
+        context: {
+          sessionId: 's1',
+          agentId: 'a1',
+          msgId: 'm1',
+          token: 'tok1',
+        },
+      })
+      child.stdout.push(null)
+      await collect(gen)
 
-    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
-      env?: Record<string, string>
+      const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+        env?: Record<string, string>
+      }
+      expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
+    } finally {
+      if (saved !== undefined) process.env.CATSTUDY_TRIGGER_MSG_ID = saved
     }
-    expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
   })
 
   // ─── error 事件 ─────────────────────────────

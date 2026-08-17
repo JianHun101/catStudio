@@ -490,37 +490,45 @@ describe('DshAdapter', () => {
   })
 
   it('context 无 triggerMsgId 时 patch env 不含 CATSTUDY_TRIGGER_MSG_ID（有值才 push）', async () => {
-    const adapter = new DshAdapter({ model: 'deepseek-chat' })
-    const child = fakeChild()
-    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+    // 测试隔离：注入 shell 的 CATSTUDY_TRIGGER_MSG_ID 会经 ...process.env 透传进
+    // opts.env——清理后再断言（对齐 claude.test.ts regression baseline 范式）
+    const saved = process.env.CATSTUDY_TRIGGER_MSG_ID
+    delete process.env.CATSTUDY_TRIGGER_MSG_ID
+    try {
+      const adapter = new DshAdapter({ model: 'deepseek-chat' })
+      const child = fakeChild()
+      vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
-    const gen = drive(
-      adapter.chatStream([{ role: 'user', content: 'hi' }], {
-        model: 'deepseek-chat',
-        context: {
-          sessionId: 's1',
-          agentId: 'a1',
-          msgId: 'm1',
-          token: 'tok123',
-        },
-      })
-    )
-    const pending = startGen(gen)
+      const gen = drive(
+        adapter.chatStream([{ role: 'user', content: 'hi' }], {
+          model: 'deepseek-chat',
+          context: {
+            sessionId: 's1',
+            agentId: 'a1',
+            msgId: 'm1',
+            token: 'tok123',
+          },
+        })
+      )
+      const pending = startGen(gen)
 
-    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
-    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2]
-    const patchIdx = args.indexOf('--patch')
-    expect(patchIdx).toBeGreaterThan(-1)
-    const patchPath = args[patchIdx + 1]
-    const content = readFileSync(patchPath, 'utf8')
-    // 基础五变量仍在，triggerMsgId 缺省不写（patch env 与进程 env 双侧都不注入）
-    expect(content).toContain("CATSTUDY_MSG_ID: 'm1'")
-    expect(content).not.toContain('CATSTUDY_TRIGGER_MSG_ID')
-    expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
+      const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
+      const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2]
+      const patchIdx = args.indexOf('--patch')
+      expect(patchIdx).toBeGreaterThan(-1)
+      const patchPath = args[patchIdx + 1]
+      const content = readFileSync(patchPath, 'utf8')
+      // 基础五变量仍在，triggerMsgId 缺省不写（patch env 与进程 env 双侧都不注入）
+      expect(content).toContain("CATSTUDY_MSG_ID: 'm1'")
+      expect(content).not.toContain('CATSTUDY_TRIGGER_MSG_ID')
+      expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
 
-    child.emitClose(0)
-    await pending
-    await gen.next()
+      child.emitClose(0)
+      await pending
+      await gen.next()
+    } finally {
+      if (saved !== undefined) process.env.CATSTUDY_TRIGGER_MSG_ID = saved
+    }
   })
 
   it('does not pass --patch when context is absent', async () => {
