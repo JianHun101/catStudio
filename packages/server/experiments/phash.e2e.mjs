@@ -103,8 +103,8 @@ const variants = {
     .toBuffer(),
   '亮度 -20%': await makeImage(BASE_IMG).modulate({ brightness: 0.8 }).png().toBuffer(),
   '亮度 +20%': await makeImage(BASE_IMG).modulate({ brightness: 1.2 }).png().toBuffer(),
-  '对比度 -20%': await makeImage(BASE_IMG).linear(0.8, 30).png().toBuffer(),
-  '对比度 +20%': await makeImage(BASE_IMG).linear(1.2, -30).png().toBuffer(),
+  '对比度 -20%': await makeImage(BASE_IMG).linear(0.8, 25.6).png().toBuffer(),
+  '对比度 +20%': await makeImage(BASE_IMG).linear(1.2, -25.6).png().toBuffer(),
   '无关图 A (垂直渐变)': await makeImage({
     seed: 7,
     grad: 'v',
@@ -128,7 +128,7 @@ const variants = {
 
 function dct2d(gray, size) {
   const out = new Float64Array(size * size)
-  // 预计算 cos 表（升维到 O(N^3) 实现，N=32 无压力）
+  // 预计算 cos 表（主循环 v×u×y×x 直接二维求和为 O(N^4)，N=32 无压力）
   const cosX = new Float64Array(size * size) // [u][x]
   const cosY = new Float64Array(size * size) // [v][y]
   for (let u = 0; u < size; u++) {
@@ -248,7 +248,6 @@ const withinStd = maxSame <= 10
 note(separable, '同图变体与无关图可分桶', `同图最大 ${maxSame} < 跨图最小 ${minCross}`)
 note(withinStd, '同图变体全部落在 ≤10 分界内', `同图最大 ${maxSame} ≤ 10`)
 
-const thresh = Math.floor((maxSame + minCross) / 2)
 console.log(`\n  推荐阈值（业界参考 ≤5 相同 / >10 不同）:`)
 console.log(
   `    ≤5 判同图: 同图最大 ${maxSame} ≤ 5 → ${maxSame <= 5 ? '全部命中 ✅' : '未命中 ❌'}`
