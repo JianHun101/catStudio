@@ -130,11 +130,12 @@ let bgeSteady = 0
 }
 
 {
-  console.log('  [E3.4] 一次图像嵌入...')
+  console.log('  [E3.4] 一次图像嵌入 (RawImage.fromBlob → siglip, pool:true)...')
   const img = await makeImage(42)
+  const ri = await RawImage.fromBlob(new Blob([img]))
   const w = watchPeak()
   const t0 = Date.now()
-  const out = await siglip(img)
+  const out = await siglip(ri, { pool: true })
   const peakEmbed = w.stop()
   console.log(
     `    耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s | 峰值 ${peakEmbed.toFixed(1)} MB | 输出 dim=${out.data.length}`
@@ -165,30 +166,68 @@ function inspect(tag, out) {
   note(ok, `[E1] ${tag}: dim=${dim} 非零=${nonZero}/${dim} NaN=${nanCount}`, `前 10 值: [${head}]`)
 }
 
-// 主路径 1：raw buffer
+// 主路径 0（诊断）：raw buffer 直接喂 — 4.2.0 RawImage.read 只接受 RawImage/string/URL/Blob/Canvas
 {
-  const out = await siglip(imgBuf)
-  inspect('raw buffer (PNG)', out)
+  let threw = false
+  try {
+    await siglip(imgBuf)
+  } catch (e) {
+    threw = true
+  }
+  note(threw, '[E1] raw buffer 直接喂 → 抛 Unsupported input type (4.2.0 边界确认)')
 }
 
-// 主路径 2：base64 dataURL
+// 主路径 0b（诊断）：base64 dataURL 直接喂 — node fetch 不认 data: URL，fromURL 抛错
 {
-  const out = await siglip(dataURL)
-  inspect('base64 dataURL', out)
+  let threw = false
+  try {
+    await siglip(dataURL)
+  } catch (e) {
+    threw = true
+  }
+  note(threw, '[E1] base64 dataURL 直接喂 → fromURL 抛错 (node fetch 不认 data: URL)')
 }
 
-// 主路径 3：RawImage 对象
+// 主路径 0c（诊断）：默认无 pool — 输出 patch embeddings [1,196,768]，非图像级向量
 {
-  const img = await RawImage.fromBuffer(imgBuf)
-  const out = await siglip(img)
-  inspect('RawImage.fromBuffer', out)
+  const ri = await RawImage.fromBlob(new Blob([imgBuf]))
+  const out = await siglip(ri)
+  const dim = out.data?.length ?? 0
+  note(
+    dim === 150528,
+    `[E1] 默认(无 pool) → dim=${dim} (patch embeddings 196×768，需 pool:true 才收敛到 768)`
+  )
+}
+
+// 主路径 1：raw buffer → RawImage.fromBlob 显式解码 + pool:true
+{
+  const ri = await RawImage.fromBlob(new Blob([imgBuf]))
+  const out = await siglip(ri, { pool: true })
+  inspect('raw buffer → RawImage.fromBlob + pool:true', out)
+}
+
+// 主路径 2：base64 dataURL → 显式解码为 buffer → RawImage.fromBlob + pool:true
+{
+  const b64 = dataURL.split(',')[1]
+  const buf = Buffer.from(b64, 'base64')
+  const ri = await RawImage.fromBlob(new Blob([buf]))
+  const out = await siglip(ri, { pool: true })
+  inspect('base64 → 解码 buffer → RawImage.fromBlob + pool:true', out)
+}
+
+// 主路径 3：RawImage 对象 + pool:true
+{
+  const img = await RawImage.fromBlob(new Blob([imgBuf]))
+  const out = await siglip(img, { pool: true })
+  inspect('RawImage.fromBlob + pool:true', out)
 }
 
 // 对照组：非 224 图（验证 preprocessor 会做 resize，不依赖输入尺寸）
 {
   const small = await sharp(imgBuf).resize(64, 64).png().toBuffer()
-  const out = await siglip(small)
-  inspect('64×64 小图 (preprocessor resize)', out)
+  const ri = await RawImage.fromBlob(new Blob([small]))
+  const out = await siglip(ri, { pool: true })
+  inspect('64×64 小图 (preprocessor resize + pool:true)', out)
 }
 
 console.log(failed ? '\n[E1+E3] 存在 FAIL' : '\n[E1+E3] 全部 PASS')
