@@ -59,3 +59,44 @@ export const EmbeddingConfigSchema = z.object({
   apiKey: z.string(),
   baseUrl: z.string().optional(),
 })
+
+// ─── Document Block（多模态知识库契约，ADR 0009）───────
+// 解析层 → 嵌入层的 ABI：所有来源（文本/图片/表格）归一为文档块。
+// 开放枚举：text/image 一期用，table 槽位预留、结构到二期解析层定义（占位，无生产者产出）。
+// 元数据核心字段钉死，其余 `.passthrough()` 自由扩展、向后兼容。
+
+export const DocumentBlockMetaSchema = z
+  .object({
+    source: z.string(),
+    page: z.number().int().optional(),
+    headingLevel: z.number().int().min(1).optional(),
+    crawledAt: z.string(),
+  })
+  .passthrough()
+
+const DocumentBlockTextSchema = z.object({
+  type: z.literal('text'),
+  content: z.string(),
+  meta: DocumentBlockMetaSchema,
+})
+
+const DocumentBlockImageSchema = z.object({
+  type: z.literal('image'),
+  content: z.string(),
+  meta: DocumentBlockMetaSchema,
+})
+
+// table 为占位成员：结构（内容/阅读顺序/行列）二期解析层定义，一期无生产者产出。
+const DocumentBlockTableSchema = z.object({
+  type: z.literal('table'),
+  meta: DocumentBlockMetaSchema,
+})
+
+export const DocumentBlockSchema = z.discriminatedUnion('type', [
+  DocumentBlockTextSchema,
+  DocumentBlockImageSchema,
+  DocumentBlockTableSchema,
+])
+
+export type DocumentBlock = z.infer<typeof DocumentBlockSchema>
+export type DocumentBlockMeta = z.infer<typeof DocumentBlockMetaSchema>
