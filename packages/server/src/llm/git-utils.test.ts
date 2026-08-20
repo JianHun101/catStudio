@@ -16,7 +16,7 @@
  * 删除标记 → 恢复。验证"文件跨进程"方案，防止回归到环境变量（不跨进程）。
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { execFileSync, execSync, spawn } from 'node:child_process'
 import {
   existsSync,
@@ -30,6 +30,39 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+
+// ─── removeSessionWorktree 自指守卫测试专用 mock ──────────
+// 只包两层、其余全走真实：
+// ① node:fs 的 rmSync → vi.fn 包裹（代理真实实现），用于断言「物理删除是否被触发」；
+// ② node:child_process 的 execFileSync → 开关包裹（mockFailWorktreeRemove=true 时
+//    对 git worktree remove 抛错，模拟「目录被当前进程 cwd 持有 → git 删除失败」的
+//    Windows 真实语义——收口者正住在 worktree 里时 git remove 必然 EPERM），其余调用
+//    全量委托真实实现。两处均为代理而非替换，既有用例行为零变化。
+let mockFailWorktreeRemove = false
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, rmSync: vi.fn(actual.rmSync) }
+})
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...actual,
+    execFileSync: ((...args: any[]) => {
+      if (
+        mockFailWorktreeRemove &&
+        args[0] === 'git' &&
+        Array.isArray(args[1]) &&
+        args[1][0] === 'worktree' &&
+        args[1][1] === 'remove'
+      ) {
+        throw new Error('simulated worktree remove failure (cwd held)')
+      }
+      return (actual.execFileSync as any)(...args)
+    }) as typeof import('node:child_process').execFileSync,
+  }
+})
 
 const origCwd = process.cwd()
 let tmp: string
@@ -497,6 +530,54 @@ describe('session worktree', () => {
       }
       process.chdir(orig)
       rmSync(subRepo, { recursive: true, force: true })
+    }
+  })
+
+  // ─── removeSessionWorktree 自指守卫（店长 2026-08-20 实锤：收口者正住在被收口的
+  // 会话 worktree 里）──────────────────────────────────
+  // 两用例共用「git worktree remove 被模拟为失败」的判定环境（目录必然残留），使
+  // 「残留是否被物理清理」成为区分守卫是否生效的唯一可观测信号：
+  // 守卫生效（cwd 在内）→ 跳过清理、rmSync 不触发、目录保留；
+  // 不生效（cwd 在外）→ 清理照常、rmSync 触发、目录删除。
+
+  it('自指守卫: cwd 位于 worktree 内 → 跳过物理残留清理, rmSync 不触发, 函数不抛错', () => {
+    // cwd 模拟为 worktree 根（会话隔离把 cwd 透传给 agent CLI，收口自己会话时
+    // process.cwd() 正等于被收口的 worktree 根——店长实例 7531d744）
+    const path = gitUtils.ensureSessionWorktree('wt-self-0001')!
+    wtDirs.push(path)
+
+    mockFailWorktreeRemove = true
+    const rmSyncMock = vi.mocked(rmSync)
+    rmSyncMock.mockClear()
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(path)
+    try {
+      expect(() => gitUtils.removeSessionWorktree('wt-self-0001')).not.toThrow()
+      // 自指守卫核心断言：物理残留清理被跳过 → rmSync 一次未触发
+      expect(rmSyncMock).not.toHaveBeenCalled()
+      // 残留保留（当前进程正站着，等进程退出后收口兜底删除）
+      expect(existsSync(path)).toBe(true)
+    } finally {
+      cwdSpy.mockRestore()
+      mockFailWorktreeRemove = false
+    }
+  })
+
+  it('自指守卫: cwd 在 worktree 外 → 物理残留清理照常, rmSync 触发, 目录删除', () => {
+    const path = gitUtils.ensureSessionWorktree('wt-outer-01')!
+    wtDirs.push(path)
+
+    mockFailWorktreeRemove = true
+    const rmSyncMock = vi.mocked(rmSync)
+    rmSyncMock.mockClear()
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tmp) // tmp = 主仓库，不在 worktree 内
+    try {
+      expect(() => gitUtils.removeSessionWorktree('wt-outer-01')).not.toThrow()
+      // 守卫不拦：物理残留清理照常执行 → rmSync 触发、目录被删
+      expect(rmSyncMock).toHaveBeenCalled()
+      expect(existsSync(path)).toBe(false)
+    } finally {
+      cwdSpy.mockRestore()
+      mockFailWorktreeRemove = false
     }
   })
 })

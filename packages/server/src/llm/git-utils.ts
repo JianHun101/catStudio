@@ -17,7 +17,7 @@ import {
   rmdirSync,
   unlinkSync,
 } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('git-utils')
@@ -552,8 +552,30 @@ function cleanupWorktreeResidue(wtPath: string): void {
 }
 
 /**
+ * child 是否等于或位于 parent 目录内（removeSessionWorktree 自指守卫专用）。
+ *
+ * 实现：path.relative 取相对关系——等于 → ''；位于其内 → 不以 '..' 开头且非绝对
+ * 路径（不同盘符的相对结果为绝对形式）；win32 下 Node 的 path.relative 按大小写
+ * 不敏感比较，天然覆盖 D:\ 与 d:\ 的盘符大小写差异。位于其外/兄弟/上级 → 以 '..'
+ * 开头或绝对 → false。
+ */
+function isPathInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+/**
  * 销毁会话 worktree（店长收口后调用）：git worktree remove + 物理残留清理 + 删分支。
  * 失败静默（残留目录不阻塞主链，收口流程兜底）。
+ *
+ * 自指守卫（店长 2026-08-20 实锤）：会话隔离把 cwd 透传给 agent CLI（socketio
+ * → claude/dsh 适配器），收口自己会话时 process.cwd() 正落在被收口的 worktree 内——
+ * 收口者拆自己住的房子。此时物理残留清理（cleanupWorktreeResidue 的 rmSync 递归
+ * 删除）会删掉当前进程正站着的目录树：Windows cwd 句柄无 FILE_SHARE_DELETE，目录
+ * 被删后进程不抛错、后续一切文件 IO（日志/回复落库）悬空 → 僵尸进程占 slot、FIFO
+ * 全排队。cwd 等于或位于 wtPath 内 → 只做 git 层 worktree remove + 删分支，跳过
+ * 物理残留清理（残留留给进程退出后的收口兜底：removeStaleWorktreeDir 重建路径 /
+ * 下次成功收口）；cwd 不在其内 → 行为与守卫前完全一致。
  */
 export function removeSessionWorktree(sessionId: string): void {
   const mainRoot = getMainRepoRoot()
@@ -562,6 +584,7 @@ export function removeSessionWorktree(sessionId: string): void {
   if (!shortId) return
   const branch = sessionBranch(shortId)
   const wtPath = sessionWorktreePath(mainRoot, shortId)
+  const cwdInside = isPathInside(wtPath, resolve(process.cwd()))
   if (existsSync(wtPath)) {
     try {
       execFileSync('git', ['worktree', 'remove', '--force', wtPath], {
@@ -573,9 +596,15 @@ export function removeSessionWorktree(sessionId: string): void {
     } catch (err: any) {
       log.warn('worktree remove failed — force removing dir', { error: err.message })
     }
+    // 自指守卫：cwd 在被收口的 worktree 内 → 物理删除会删掉当前进程正站着的目录树，
+    // 跳过（残留交给进程退出后的收口兜底）；否则走既有清理——
     // git remove 成功/失败都走物理残留清理：成功路径留下 junction（gitignored，
     // git 不删）；失败路径强制清目录（旧 rmSync 兜底语义并入，且不再有跟随风险）
-    cleanupWorktreeResidue(wtPath)
+    if (cwdInside) {
+      log.warn('skip residue cleanup — cwd inside session worktree', { sessionId, wtPath })
+    } else {
+      cleanupWorktreeResidue(wtPath)
+    }
   }
   try {
     execFileSync('git', ['branch', '-D', branch], {
