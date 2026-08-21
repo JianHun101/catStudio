@@ -2,7 +2,8 @@
  * 多模态知识库可行性实验 E1 + E3（ADR 0009 待验证项 🔴#1）
  *
  * E1 — SigLIP 图像管线：`pipeline('image-feature-extraction', 'Xenova/siglip-base-patch16-224')`
- *      对 raw buffer / base64 dataURL / RawImage 三种输入，断言输出 768 维、非全零、无 NaN。
+ *      raw buffer / base64 dataURL 直接喂断言抛错（4.2.0 RawImage.read 输入白名单边界）；
+ *      唯一有效路径为 RawImage.fromBlob(new Blob([buf])) + { pool: true } → 断言 768 维、非全零、无 NaN。
  *      测试图由 sharp 生成（已随依赖，0.33.5）。
  * E3 — 双模型内存：依次加载 bge-small-zh-v1.5（文本塔）与 SigLIP（视觉塔），
  *      测量 稳态 RSS / 加载瞬间峰值 RSS / 单次嵌入峰值 RSS（只看稳态会低估 OOM 压力）。
