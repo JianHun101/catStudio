@@ -158,3 +158,25 @@ process.env.HANDOFF_ENABLED ??= 'true'
 
 // HANDOFF_THRESHOLD — 触发交接的上下文 token 占比（默认 0.9 = 90%）
 process.env.HANDOFF_THRESHOLD ??= '0.9'
+
+// ─── llama-server（llama.cpp）按需自启配置 ──────────────
+// 镜像 ollama.ts 的 ensureOllamaStarted 模式：claude.ts 在 spawn CLI 前对
+// 本地 llama 地址探测 /health → 后台拉起 → 轮询就绪。机器专属路径进 .env，
+// 结构参数走代码默认值（镜像 run-l1.sh 实测可跑调用）。
+// LLAMA_SERVER_BIN — llama-server 可执行文件（默认 'llama-server' 走 PATH，
+//   本机实际路径如 D:/llama/b10549-extracted/llama-server.exe 进 .env）
+process.env.LLAMA_SERVER_BIN ??= 'llama-server'
+// LLAMA_SERVER_MODEL — 模型 blob 路径；空 = 禁用自动拉起（保留 ConnectionRefused
+//   现状快失败，不伪造成功）
+process.env.LLAMA_SERVER_MODEL ??= ''
+// LLAMA_SERVER_PORT — 监听端口（默认 8080，与 run-l1.sh 一致）
+process.env.LLAMA_SERVER_PORT ??= '8080'
+// LLAMA_SERVER_CHAT_TEMPLATE_FILE — 干净 chat-template 文件路径（去掉 GGUF 内嵌
+//   raise_exception 断言）；空 = 不传 --chat-template-file
+process.env.LLAMA_SERVER_CHAT_TEMPLATE_FILE ??= ''
+// LLAMA_SERVER_ARGS — 结构参数（ctx-size / GPU 分层 / cache type），空格分词追加到
+//   spawn argv；不支持带空格的值
+process.env.LLAMA_SERVER_ARGS ??=
+  '--ctx-size 65536 --n-gpu-layers -1 --cache-type-k q8_0 --cache-type-v q8_0'
+// LLAMA_SERVER_READY_TIMEOUT_MS — 就绪等待预算（默认 10min > 实测冷启动 460-665s）
+process.env.LLAMA_SERVER_READY_TIMEOUT_MS ??= '600000'

@@ -9,6 +9,7 @@ import {
   getWorkspaceDir,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
+import { ensureLlamaServerStarted, isLlamaLocalBaseUrl } from './llama-server.js'
 import { randomBytes } from 'node:crypto'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -145,6 +146,23 @@ export class ClaudeAdapter implements LLMAdapter {
         done: true,
       }
       return
+    }
+
+    // 本地 llama-server（llama.cpp）按需自启（店长裁决，llama-server.ts）：
+    // baseUrl 为 loopback + LLAMA_SERVER_PORT 匹配 + LLAMA_SERVER_MODEL 已配置时，
+    // spawn CLI 前先确保 llama-server 就绪（探测 /health → 后台拉起 → 轮询）。
+    // DeepSeek/Kimi 默认路径 host 非 loopback → 守卫短路，行为逐字节不变。
+    if (isLlamaLocalBaseUrl(this.baseUrl)) {
+      if (!(await ensureLlamaServerStarted(this.baseUrl, { alias: this.model }))) {
+        yield {
+          content:
+            'llama-server 自动拉起失败：本地模型服务未就绪。请检查 .env 的 ' +
+            'LLAMA_SERVER_BIN / LLAMA_SERVER_MODEL / LLAMA_SERVER_CHAT_TEMPLATE_FILE ' +
+            '配置，或手动启动 llama-server 后重试。',
+          done: true,
+        }
+        return
+      }
     }
 
     const prompt = messagesToPrompt(messages)
