@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createLogger } from '../logger.js'
 
@@ -107,8 +107,23 @@ function startLlamaServer(alias: string, onError: () => void): void {
     stdio: 'ignore',
     shell: false,
   })
+  spawnedChild = child
   child.on('error', onError)
   child.unref()
+}
+
+/** 只保存自己 spawn 的 llama-server 实例（probe 发现已有实例则不 spawn，保持 null → 不误杀） */
+let spawnedChild: ChildProcess | null = null
+
+/** 清理自己 spawn 的 llama-server（server shutdown 时调用）。未 spawn 过 / 已清理 → no-op */
+export function stopLlamaServerIfSpawned(): void {
+  spawnedChild?.kill()
+  spawnedChild = null
+}
+
+/** 测试专用：重置模块级句柄（并发/隔离用例间不留残留，镜像 dispatch 的 __test_reset 惯例） */
+export function __test_reset(): void {
+  spawnedChild = null
 }
 
 /** 并发去重锁：同一窗口内多个 agent 同时触发时不重复 spawn */

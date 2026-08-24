@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { spawn } from 'node:child_process'
 import { OllamaAdapter } from './ollama.js'
+import { stopOllamaIfSpawned, __test_reset } from './ollama.js'
 
 /**
  * Mock fetch 返回 NDJSON 流（Ollama /api/chat stream 格式：每行一个 JSON，
@@ -64,6 +65,7 @@ interface SpawnChildMock {
   on(ev: string, fn: (err: Error) => void): SpawnChildMock
   emit(ev: string, ...args: unknown[]): void
   unref: ReturnType<typeof vi.fn>
+  kill: ReturnType<typeof vi.fn>
 }
 
 function makeSpawnChild(): SpawnChildMock {
@@ -77,6 +79,7 @@ function makeSpawnChild(): SpawnChildMock {
       if (ev === 'error' && errorHandler) errorHandler(args[0] as Error)
     },
     unref: vi.fn(),
+    kill: vi.fn(),
   }
 }
 
@@ -346,5 +349,81 @@ describe('OllamaAdapter', () => {
     expect(retryAborted).toBe(true) // 外部 abort 已转发到内部 controller（监听器保留到流结束）
     expect(chatCalls).toBe(2) // 失败一次 + 拉起后重试一次
     expect(spawn).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('stopOllamaIfSpawned', () => {
+  beforeEach(() => {
+    __test_reset()
+  })
+
+  it('kills only the child it spawned (via adapter auto-start)', async () => {
+    const { response } = mockFetchNDJSON([JSON.stringify({ done: true }) + '\n'])
+    let chatCalls = 0
+    let tagsCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
+      if (String(url).endsWith('/api/chat')) {
+        chatCalls++
+        if (chatCalls === 1) throw new TypeError('fetch failed')
+        return response as any
+      }
+      tagsCalls++
+      return { ok: tagsCalls > 1 } as Response
+    })
+    const child = makeSpawnChild()
+    vi.mocked(spawn).mockReturnValue(child as any)
+
+    const adapter = new OllamaAdapter({ model: 'qwen3.5:9b' })
+    await collect(adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'qwen3.5:9b' }))
+
+    expect(spawn).toHaveBeenCalledTimes(1)
+    stopOllamaIfSpawned()
+    expect(child.kill).toHaveBeenCalledTimes(1)
+  })
+
+  it('is a no-op when nothing was spawned (probe found existing instance)', async () => {
+    const { response } = mockFetchNDJSON([JSON.stringify({ done: true }) + '\n'])
+    let chatCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
+      if (String(url).endsWith('/api/chat')) {
+        chatCalls++
+        if (chatCalls === 1) throw new TypeError('fetch failed')
+        return response as any
+      }
+      return { ok: true } as Response
+    })
+    const child = makeSpawnChild()
+    vi.mocked(spawn).mockReturnValue(child as any)
+
+    const adapter = new OllamaAdapter({ model: 'qwen3.5:9b' })
+    await collect(adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'qwen3.5:9b' }))
+
+    expect(spawn).not.toHaveBeenCalled()
+    stopOllamaIfSpawned()
+    expect(child.kill).not.toHaveBeenCalled()
+  })
+
+  it('is a no-op on second call (handle already cleared)', async () => {
+    const { response } = mockFetchNDJSON([JSON.stringify({ done: true }) + '\n'])
+    let chatCalls = 0
+    let tagsCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
+      if (String(url).endsWith('/api/chat')) {
+        chatCalls++
+        if (chatCalls === 1) throw new TypeError('fetch failed')
+        return response as any
+      }
+      tagsCalls++
+      return { ok: tagsCalls > 1 } as Response
+    })
+    const child = makeSpawnChild()
+    vi.mocked(spawn).mockReturnValue(child as any)
+
+    const adapter = new OllamaAdapter({ model: 'qwen3.5:9b' })
+    await collect(adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'qwen3.5:9b' }))
+
+    stopOllamaIfSpawned()
+    stopOllamaIfSpawned()
+    expect(child.kill).toHaveBeenCalledTimes(1)
   })
 })

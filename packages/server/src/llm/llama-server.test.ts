@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { spawn } from 'node:child_process'
-import { ensureLlamaServerStarted, isLlamaLocalBaseUrl } from './llama-server.js'
+import {
+  ensureLlamaServerStarted,
+  isLlamaLocalBaseUrl,
+  stopLlamaServerIfSpawned,
+  __test_reset,
+} from './llama-server.js'
 
 /**
  * 迷你 ChildProcess：支持 on('error')/emit('error')/unref，默认不触发 error。
@@ -10,6 +15,7 @@ interface SpawnChildMock {
   on(ev: string, fn: (err: Error) => void): SpawnChildMock
   emit(ev: string, ...args: unknown[]): void
   unref: ReturnType<typeof vi.fn>
+  kill: ReturnType<typeof vi.fn>
 }
 
 function makeSpawnChild(): SpawnChildMock {
@@ -23,6 +29,7 @@ function makeSpawnChild(): SpawnChildMock {
       if (ev === 'error' && errorHandler) errorHandler(args[0] as Error)
     },
     unref: vi.fn(),
+    kill: vi.fn(),
   }
 }
 
@@ -225,5 +232,56 @@ describe('ensureLlamaServerStarted', () => {
       ensureLlamaServerStarted('http://127.0.0.1:8080', { alias: 'qwen3.8:27b' })
     ).resolves.toBe(false)
     expect(spawn).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('stopLlamaServerIfSpawned', () => {
+  beforeEach(() => {
+    __test_reset()
+  })
+
+  it('kills only the child it spawned', async () => {
+    vi.stubEnv('LLAMA_SERVER_READY_TIMEOUT_MS', '100')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'loading' }),
+    } as Response)
+    const child = makeSpawnChild()
+    vi.mocked(spawn).mockReturnValue(child as any)
+
+    await ensureLlamaServerStarted('http://127.0.0.1:8080', { alias: 'qwen3.8:27b' })
+    stopLlamaServerIfSpawned()
+    expect(child.kill).toHaveBeenCalledTimes(1)
+  })
+
+  it('is a no-op when nothing was spawned (probe found existing instance)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'ok' }),
+    } as Response)
+    const child = makeSpawnChild()
+    vi.mocked(spawn).mockReturnValue(child as any)
+
+    await expect(
+      ensureLlamaServerStarted('http://127.0.0.1:8080', { alias: 'qwen3.8:27b' })
+    ).resolves.toBe(true)
+    stopLlamaServerIfSpawned()
+    expect(spawn).not.toHaveBeenCalled()
+    expect(child.kill).not.toHaveBeenCalled()
+  })
+
+  it('is a no-op on second call (handle already cleared)', async () => {
+    vi.stubEnv('LLAMA_SERVER_READY_TIMEOUT_MS', '100')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'loading' }),
+    } as Response)
+    const child = makeSpawnChild()
+    vi.mocked(spawn).mockReturnValue(child as any)
+
+    await ensureLlamaServerStarted('http://127.0.0.1:8080', { alias: 'qwen3.8:27b' })
+    stopLlamaServerIfSpawned()
+    stopLlamaServerIfSpawned()
+    expect(child.kill).toHaveBeenCalledTimes(1)
   })
 })

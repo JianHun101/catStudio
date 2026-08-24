@@ -36,6 +36,9 @@ import { runEpisodeAttribution } from './eval/attribution.js'
 import { existsSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
+import { stopLlamaServerIfSpawned } from './llm/llama-server.js'
+import { stopOllamaIfSpawned } from './llm/ollama.js'
+import { stopProxyIfSpawned } from './llm/cli-utils.js'
 
 const log = createLogger('server')
 
@@ -250,6 +253,11 @@ async function main(): Promise<void> {
     io.close()
     await app.close()
     await closeRedis()
+    // 清理自己 spawn 的常驻子进程（llama-server / ollama serve / codex-proxy）——
+    // 只杀本进程 spawn 的实例（探测发现已有实例则不保存句柄 → 不误杀他人/手动起的）
+    stopLlamaServerIfSpawned()
+    stopOllamaIfSpawned()
+    stopProxyIfSpawned()
     process.exit(0)
   }
 

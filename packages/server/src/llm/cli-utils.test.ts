@@ -5,6 +5,9 @@ import {
   messagesToPrompt,
   messagesToPromptBounded,
   spawnSupervised,
+  ensureProxy,
+  stopProxyIfSpawned,
+  __test_reset,
 } from './cli-utils.js'
 import type { LLMMessage } from '@cat-study/shared'
 
@@ -236,5 +239,56 @@ describe('messagesToPromptBounded', () => {
     // 单条消息本身就超 maxLen：head/tail 保底，整条保留（不字符硬切）
     const messages: LLMMessage[] = [{ role: 'user', content: 'x'.repeat(5000) }]
     expect(messagesToPromptBounded(messages, 100)).toBe('User: ' + 'x'.repeat(5000))
+  })
+})
+
+// ─── stopProxyIfSpawned ─────────────────────────────
+
+describe('stopProxyIfSpawned', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    spawnMock.mockReturnValue(fakeSpawnedChild())
+    existsSyncMock.mockReturnValue(true) // 代理脚本存在（codex_proxy.py 命中）→ 走 spawn 分支
+  })
+
+  /** netstat 探测：无监听（execSync 抛错）→ 视为未运行，触发 spawn */
+  const mockNoProxyRunning = () => {
+    execSyncMock.mockImplementation(() => {
+      throw new Error('no listening')
+    })
+  }
+  /** netstat 探测：有监听（execSync 成功）→ 复用已有代理，不 spawn */
+  const mockProxyRunning = () => {
+    execSyncMock.mockReturnValue('  LISTENING  9090')
+  }
+
+  it('kills only the child it spawned', () => {
+    mockNoProxyRunning()
+    ensureProxy('test-key')
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+
+    const child = spawnMock.mock.results[0].value
+    stopProxyIfSpawned()
+    expect(child.kill).toHaveBeenCalledTimes(1)
+  })
+
+  it('is a no-op when nothing was spawned (probe found existing proxy)', () => {
+    mockProxyRunning()
+    ensureProxy('test-key')
+    expect(spawnMock).not.toHaveBeenCalled()
+
+    stopProxyIfSpawned()
+  })
+
+  it('is a no-op on second call (handle already cleared)', () => {
+    mockNoProxyRunning()
+    ensureProxy('test-key')
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+
+    const child = spawnMock.mock.results[0].value
+    stopProxyIfSpawned()
+    stopProxyIfSpawned()
+    expect(child.kill).toHaveBeenCalledTimes(1)
   })
 })

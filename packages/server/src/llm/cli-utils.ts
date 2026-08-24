@@ -255,12 +255,28 @@ export function ensureProxy(apiKey: string): void {
       env: { ...process.env, DEEPSEEK_API_KEY: apiKey },
     }
   )
-
+  spawnedProxyChild = child
   child.unref()
 
   proxyStarted = true
   proxyApiKey = apiKey
   log.info('codex-proxy 已启动', { pid: child.pid, port: PROXY_PORT })
+}
+
+/** 只保存自己 spawn 的 codex-proxy（探测发现已有实例则不 spawn，保持 null → 不误杀） */
+let spawnedProxyChild: ChildProcess | null = null
+
+/** 清理自己 spawn 的 codex-proxy（server shutdown 时调用）。未 spawn 过 / 已清理 → no-op */
+export function stopProxyIfSpawned(): void {
+  spawnedProxyChild?.kill()
+  spawnedProxyChild = null
+}
+
+/** 测试专用：重置 codex-proxy 模块级状态（proxyStarted 缓存 + 句柄，用例间不留残留） */
+export function __test_reset(): void {
+  proxyStarted = false
+  proxyApiKey = ''
+  spawnedProxyChild = null
 }
 
 // ─── NDJSON Stream Parsing ─────────────────────────────────
