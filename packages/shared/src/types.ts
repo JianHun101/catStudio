@@ -191,8 +191,8 @@ export interface ChatOptions {
   signal?: AbortSignal // 外部取消信号，用于中断正在进行的 LLM 调用
   /**
    * 猫咖内部路由上下文（MCP 结构化路由 v4，契约 3 二次修订——店长裁决）。
-   * claude/dsh 消费（挂 MCP 工具面 + env 透传）；opencode 仅读 triggerMsgId
-   * 单字段注入 env（不消费其余字段）；deepseek/pi/ollama/openai 忽略，零影响。
+   * claude/dsh/opencode 消费（挂 MCP 工具面 + env 透传——opencode 其余字段
+   * 供 MCP server environment）；deepseek/pi/ollama/openai 忽略，零影响。
    *  sessionId/agentId/msgId — 信号三要素（MCP server 读 CATSTUDY_* env）
    *  token — 每 spawn 随机信号 token（activeStreams 存值 → internal.ts 精确匹配）
    *  triggerAuthorName — 本次触发消息作者名（可选；internal.ts 预校验传给
