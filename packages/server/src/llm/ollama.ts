@@ -67,7 +67,12 @@ function startOllama(onError: () => void): void {
     env: buildOllamaEnv(),
   })
   spawnedChild = child
-  child.on('error', onError)
+  child.on('error', () => {
+    // spawn 失败（ENOENT 等）→ 句柄同步清掉，保持「只指向真正存活实例」；
+    // 否则残留已死 child 句柄，后续 stopOllamaIfSpawned 会对死进程误 kill
+    spawnedChild = null
+    onError()
+  })
   child.unref()
 }
 

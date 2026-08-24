@@ -426,4 +426,18 @@ describe('stopOllamaIfSpawned', () => {
     stopOllamaIfSpawned()
     expect(child.kill).toHaveBeenCalledTimes(1)
   })
+
+  it('clears the handle on spawn error, so stop is a no-op (no kill of a dead child)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'))
+    const child = makeSpawnChild()
+    vi.mocked(spawn).mockReturnValue(child as any)
+    process.nextTick(() => child.emit('error', new Error('spawn ollama ENOENT')))
+
+    const adapter = new OllamaAdapter({ model: 'qwen3.5:9b' })
+    await expect(
+      collect(adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'qwen3.5:9b' }))
+    ).rejects.toThrow('fetch failed')
+    stopOllamaIfSpawned()
+    expect(child.kill).not.toHaveBeenCalled()
+  })
 })

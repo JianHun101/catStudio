@@ -284,4 +284,21 @@ describe('stopLlamaServerIfSpawned', () => {
     stopLlamaServerIfSpawned()
     expect(child.kill).toHaveBeenCalledTimes(1)
   })
+
+  it('clears the handle on spawn error, so stop is a no-op (no kill of a dead child)', async () => {
+    vi.stubEnv('LLAMA_SERVER_READY_TIMEOUT_MS', '10000')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'loading' }),
+    } as Response)
+    const child = makeSpawnChild()
+    vi.mocked(spawn).mockReturnValue(child as any)
+    process.nextTick(() => child.emit('error', new Error('spawn llama-server ENOENT')))
+
+    await expect(
+      ensureLlamaServerStarted('http://127.0.0.1:8080', { alias: 'qwen3.8:27b' })
+    ).resolves.toBe(false)
+    stopLlamaServerIfSpawned()
+    expect(child.kill).not.toHaveBeenCalled()
+  })
 })
