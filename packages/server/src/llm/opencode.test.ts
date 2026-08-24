@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { Readable } from 'node:stream'
 import { dirname } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import type { Chunk } from '@cat-study/shared'
 
 // Mock cli-utils 以阻止模块加载时的 resolveBin() 调用
@@ -384,9 +384,12 @@ describe('OpencodeAdapter', () => {
     expect(opts.env!.DEEPSEEK_API_KEY).toBe(process.env.DEEPSEEK_API_KEY)
   })
 
-  it('context.triggerMsgId 有值 → env 注入 CATSTUDY_TRIGGER_MSG_ID（只读单字段，不挂 MCP 工具面）', async () => {
-    // 边界红线：opencode 只读 context.triggerMsgId 单字段注入 env——工具面零变化，
-    // spawn args 不得出现任何 MCP 标志（既有「不挂 MCP」设计不破坏）
+  it('context.triggerMsgId 有值 → 进程 env 注入 CATSTUDY_TRIGGER_MSG_ID（单字段，MCP 工具面走 OPENCODE_CONFIG env）', async () => {
+    // 通道边界（ADR 0008）：triggerMsgId 的消费者是猫自己（提交 commit 的 shell，
+    // 继承 opencode 进程 env）——走进程 env 单字段注入；不进 MCP environment
+    // （对齐 dsh OQ1 硬伤修复：MCP 子进程 env ≠ agent 进程 env）。
+    // 工具面走 per-spawn 临时 opencode.jsonc → OPENCODE_CONFIG env 注入，spawn args
+    // 不出现任何 MCP CLI 标志（既有无 CLI 标志形态不破坏）
     const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
     const child = fakeChild({ exitCode: 0 })
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -409,13 +412,128 @@ describe('OpencodeAdapter', () => {
     }
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
     expect(opts.env!.CATSTUDY_TRIGGER_MSG_ID).toBe('trigger-msg-1')
-    // 工具面零变化：无任何 MCP 挂载标志
+    // 工具面：OPENCODE_CONFIG env 注入（指向临时配置）——无任何 MCP CLI 挂载标志
+    expect(opts.env!.OPENCODE_CONFIG).toBeDefined()
     expect(args).not.toContain('--mcp-config')
     expect(args).not.toContain('--allowedTools')
     expect(args).not.toContain('--disallowedTools')
   })
 
-  it('context 无 triggerMsgId → env 不含 CATSTUDY_TRIGGER_MSG_ID（有值才注入）', async () => {
+  // ─── MCP 工具面（context → per-spawn 临时 opencode.jsonc → OPENCODE_CONFIG env）───
+
+  it('context 存在 → 生成临时 opencode.jsonc：mcp.catstudy local + command 指向 mcp-server.mjs + environment 六变量', async () => {
+    // 对齐 dsh writePatchConfig（同一 scripts/mcp-server.mjs，工具面通用）：
+    // 五固定 + 可选 triggerAuthorName；triggerMsgId 不进 MCP environment（见上用例）
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    // 在 spawn 回调里断言配置内容——此时 writeOpencodeMcpConfig 已 await 完成
+    // （文件在）；collect 后 finally 已 rm，测试侧再读必然 ENOENT（清理断言见下用例）
+    let captured: { env?: Record<string, string>; config: any } | null = null
+    vi.mocked(spawnSupervised).mockImplementation((...callArgs) => {
+      const opts = callArgs[2] as { env?: Record<string, string> }
+      const configPath = opts.env!.OPENCODE_CONFIG
+      expect(configPath).toMatch(/opencode-catstudy-mcp-.*\.jsonc$/)
+      expect(existsSync(configPath)).toBe(true)
+      captured = { env: opts.env, config: JSON.parse(readFileSync(configPath, 'utf8')) }
+      return child as any
+    })
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+      context: {
+        sessionId: 's1',
+        agentId: 'a1',
+        msgId: 'm1',
+        token: 'tok123',
+        triggerAuthorName: '店长',
+        triggerMsgId: 'trigger-msg-1',
+      },
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const mcp = captured!.config.mcp.catstudy
+    expect(mcp.type).toBe('local')
+    expect(mcp.command).toEqual(['node', expect.stringContaining('mcp-server.mjs')])
+    expect(mcp.environment).toEqual({
+      CATSTUDY_SERVER_URL: `http://127.0.0.1:${process.env.PORT || '3200'}`,
+      CATSTUDY_SIGNAL_TOKEN: 'tok123',
+      CATSTUDY_SESSION_ID: 's1',
+      CATSTUDY_AGENT_ID: 'a1',
+      CATSTUDY_MSG_ID: 'm1',
+      CATSTUDY_TRIGGER_AUTHOR_NAME: '店长',
+    })
+    // triggerMsgId 不进 MCP environment（对齐 dsh OQ1 硬伤修复 / ADR 0008 通道准则）
+    expect(mcp.environment.CATSTUDY_TRIGGER_MSG_ID).toBeUndefined()
+    // triggerMsgId 走进程 env 单字段注入（MCP 子进程 env ≠ agent 进程 env）
+    expect(captured!.env!.CATSTUDY_TRIGGER_MSG_ID).toBe('trigger-msg-1')
+  })
+
+  it('context 无 triggerAuthorName → MCP environment 不含 CATSTUDY_TRIGGER_AUTHOR_NAME（有值才写）', async () => {
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    let env: Record<string, string> | undefined
+    vi.mocked(spawnSupervised).mockImplementation((...callArgs) => {
+      const opts = callArgs[2] as { env?: Record<string, string> }
+      env = opts.env
+      const config = JSON.parse(readFileSync(opts.env!.OPENCODE_CONFIG as string, 'utf8'))
+      expect(config.mcp.catstudy.environment.CATSTUDY_TRIGGER_AUTHOR_NAME).toBeUndefined()
+      return child as any
+    })
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+      context: {
+        sessionId: 's1',
+        agentId: 'a1',
+        msgId: 'm1',
+        token: 'tok1',
+      },
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    expect(env!.OPENCODE_CONFIG).toBeDefined()
+  })
+
+  it('context 存在 → 临时 opencode.jsonc 在 finally 清理（成功路径无残留）', async () => {
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+      context: { sessionId: 's1', agentId: 'a1', msgId: 'm1', token: 'tok1' },
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+      env?: Record<string, string>
+    }
+    const configPath = opts.env!.OPENCODE_CONFIG as string
+    // finally 已 await rm——临时配置不残留
+    expect(existsSync(configPath)).toBe(false)
+  })
+
+  it('context 不存在 → 不生成临时配置、env 不含 OPENCODE_CONFIG', async () => {
+    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+    const child = fakeChild({ exitCode: 0 })
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'anthropic/claude-sonnet-4-5',
+    })
+    child.stdout.push(null)
+    await collect(gen)
+
+    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+      env?: Record<string, string>
+    }
+    expect(opts.env!.OPENCODE_CONFIG).toBeUndefined()
+  })
+
+  it('context 无 triggerMsgId → 进程 env 不含 CATSTUDY_TRIGGER_MSG_ID（有值才注入）', async () => {
     // 测试隔离：注入 shell 的 CATSTUDY_TRIGGER_MSG_ID 会经 ...process.env 透传进
     // opts.env——清理后再断言（对齐 claude.test.ts regression baseline 范式）
     const saved = process.env.CATSTUDY_TRIGGER_MSG_ID

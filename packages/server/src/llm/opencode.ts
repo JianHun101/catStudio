@@ -14,9 +14,13 @@ import type { ChildProcess } from 'node:child_process'
 import { v4 as uuid } from 'uuid'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 const log = createLogger('opencode')
+
+/** MCP server 脚本路径（workspace 上级 = 项目根 → scripts/mcp-server.mjs；
+ *  与 dsh.ts MCP_SERVER_PATH 同款 cwd 假设——两边挂同一个 server，工具面通用） */
+const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.mjs')
 
 interface OpencodeConfig {
   model: string
@@ -55,6 +59,55 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   running: '运行中',
   completed: '完成',
   error: '失败',
+}
+
+/**
+ * 生成 per-spawn 临时 opencode.jsonc（本地 MCP 挂载 catstudy，finally 清理）。
+ *
+ * 形态：与 dsh.ts writePatchConfig 完全同构的「每轮动态 env 适配到 opencode 静态
+ * 配置」——dsh 走 --patch overlay 注入 CATSTUDY_*，opencode 走 OPENCODE_CONFIG
+ * env 指向临时配置（research-2026-08-17-opencode-32k-avoidance §4 实测三假设全 ✅）。
+ * 本地 MCP 官方形态：mcp.<name>.type="local" + command:[array] + environment:{}，
+ * 工具命名 mcp__catstudy__*（与 claude/dsh 链一致）。
+ *
+ * environment 六变量（对齐 dsh writePatchConfig envLines，ADR 0008 通道准则）：
+ *   五固定 + 可选 triggerAuthorName——MCP server（工具面路由）消费这些字段。
+ *   ⚠️ triggerMsgId 的消费者是猫自己（提交 commit 的 catstudy [uuid]），走进程 env
+ *   单字段注入（chatStream 内，见下），**不进** MCP environment（对齐 dsh.ts:85-88
+ *   OQ1 硬伤修复——MCP 子进程 env ≠ agent 进程 env）。
+ *
+ * 配置仅走每轮临时文件，不进全局/项目静态 opencode.json（OPENCODE_CONFIG 是
+ * 追加合并，不改用户本地配置）。文件名带 pid + uuid——同一进程并发多个 spawn 不冲突。
+ *
+ * @returns 临时配置绝对路径（调用方 finally 清理）
+ */
+async function writeOpencodeMcpConfig(
+  context: NonNullable<ChatOptions['context']>
+): Promise<string> {
+  const serverUrl = `http://127.0.0.1:${process.env.PORT || '3200'}`
+  const environment: Record<string, string> = {
+    CATSTUDY_SERVER_URL: serverUrl,
+    CATSTUDY_SIGNAL_TOKEN: context.token,
+    CATSTUDY_SESSION_ID: context.sessionId,
+    CATSTUDY_AGENT_ID: context.agentId,
+    CATSTUDY_MSG_ID: context.msgId,
+  }
+  if (context.triggerAuthorName) {
+    environment.CATSTUDY_TRIGGER_AUTHOR_NAME = context.triggerAuthorName
+  }
+
+  const config = {
+    mcp: {
+      catstudy: {
+        type: 'local',
+        command: ['node', MCP_SERVER_PATH],
+        environment,
+      },
+    },
+  }
+  const p = join(tmpdir(), `opencode-catstudy-mcp-${process.pid}-${uuid()}.jsonc`)
+  await writeFile(p, JSON.stringify(config, null, 2))
+  return p
 }
 
 /**
@@ -105,8 +158,11 @@ async function materializeImages(
  * apiKey 非空时条件注入 DEEPSEEK_API_KEY（deepseek provider 复用 DS_KEY）——
  * 绕过手动 `opencode auth login` 的本地认证（历史存了占位符 `local` 导致 auth 失败），
  * 空则不注入（走 opencode 本地 credentials 兜底）。maxTokens/temperature 由 opencode
- * 本地配置控制。不挂 MCP 工具面；options.context 仅读 triggerMsgId 单字段注入 env
- * （不消费其余字段）——与 deepseek/pi/ollama/openai 的工具面形态一致。
+ * 本地配置控制。MCP 工具面：options.context 存在时 per-spawn 临时 opencode.jsonc
+ * 挂 catstudy（对齐 dsh 侧，同一 scripts/mcp-server.mjs）→ OPENCODE_CONFIG env
+ * 注入（工具面通用，取代此前的嵌句 @ 静默丢单风险）；triggerMsgId 仍单字段注入
+ * 进程 env（猫提交 commit 的 catstudy [uuid] 来源）——其余 context 字段仅用于
+ * MCP environment（工具面路由），不重复注入进程 env。
  *
  * 前置要求: npm i -g opencode-ai && opencode auth login
  */
@@ -210,11 +266,23 @@ export class OpencodeAdapter implements LLMAdapter {
       env.DEEPSEEK_API_KEY = effectiveKey
     }
 
-    // 边界红线：只读 context.triggerMsgId 单字段注入 env（猫提交 commit 的 catstudy [uuid]
-    // 来源）——「不挂 MCP 工具面」是既有有意设计（工具面决策），读 context 字段注入 env 是
-    // 环境面决策，两者正交；此处仅注入该单字段，不消费其余 context 字段
+    // 边界红线（对齐 dsh.ts:234-239）：只读 context.triggerMsgId 单字段注入进程 env
+    // （猫提交 commit 的 catstudy [uuid] 来源）——消费者是猫自己的 shell/工具（继承
+    // opencode 进程 env），**不是** MCP server（不可写回 MCP environment，对齐 ADR
+    // 0008 通道准则 / dsh OQ1 硬伤修复：MCP 子进程 env ≠ agent 进程 env）
     if (options.context?.triggerMsgId) {
       env.CATSTUDY_TRIGGER_MSG_ID = options.context.triggerMsgId
+    }
+
+    // MCP 工具面（context 存在时挂 catstudy，对齐 dsh 侧）：per-spawn 临时
+    // opencode.jsonc（mcp.catstudy = local + command node scripts/mcp-server.mjs +
+    // environment 当轮 CATSTUDY_* 六变量）→ OPENCODE_CONFIG env 指向临时文件。
+    // 配置仅走临时文件，不进全局/项目静态 opencode.json；finally 清理（成功/异常/abort）
+    let mcpConfigPath: string | null = null
+    if (options.context) {
+      mcpConfigPath = await writeOpencodeMcpConfig(options.context)
+      env.OPENCODE_CONFIG = mcpConfigPath
+      log.info('挂载 catstudy MCP 工具面', { config: mcpConfigPath })
     }
 
     const child = spawnSupervised(
@@ -307,6 +375,10 @@ export class OpencodeAdapter implements LLMAdapter {
       // 清理图片临时文件（成功/失败/中止都执行；rm 失败静默——os 临时目录兜底）
       if (materialized) {
         await rm(materialized.dir, { recursive: true, force: true }).catch(() => {})
+      }
+      // 清理 MCP 临时配置（成功/异常/abort 三路都执行；对齐 dsh patch finally 清理）
+      if (mcpConfigPath) {
+        await rm(mcpConfigPath, { force: true }).catch(() => {})
       }
     }
 
