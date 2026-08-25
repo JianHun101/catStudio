@@ -14,11 +14,9 @@ import {
   executionLogs as execLogsRepo,
 } from './db/repository/index.js'
 import { connectRedis, closeRedis } from './db/redis.js'
-import {
-  createSocketIO,
-  replayStuckUserMessages,
-  REPLAY_STUCK_WINDOW_MINUTES,
-} from './connectors/socketio.js'
+import { createSocketIO } from './connectors/socketio.js'
+import { replayStuckUserMessages, REPLAY_STUCK_WINDOW_MINUTES } from './execution/recovery.js'
+import { getExecutionBus } from './execution/registry.js'
 import { startOneBotOutbound } from './connectors/onebotOutbound.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
@@ -156,6 +154,9 @@ async function main(): Promise<void> {
   // 5. 启动 Fastify → 拿到 HTTP Server → attach Socket.IO
   await app.listen({ port: PORT, host: HOST })
   const io = createSocketIO(app.server)
+  // 执行 bus 由 createSocketIO 注册（setExecutionBus）——此后恒非 null；
+  // L1/episode/replay 定时器经 bus 输出（定时器在注册之后才创建，顺序保证）
+  const bus = getExecutionBus()!
 
   // P3: OneBot 出站转发（QQ 回复）——ONEBOT_ENABLED=false 时内部不订阅，零开销。
   // P4 #1: 接收返回的取消订阅函数——shutdown 时调用，防 replyBus 订阅泄漏
@@ -167,7 +168,7 @@ async function main(): Promise<void> {
   const l1Timer = setInterval(
     () => {
       try {
-        runL1Aggregation(io)
+        runL1Aggregation(bus)
       } catch (err: any) {
         log.error('L1 aggregation crashed (non-blocking)', { error: err.message })
       }
@@ -176,7 +177,7 @@ async function main(): Promise<void> {
   )
   // 启动后立即跑一轮（不等首个整点，重启后状态机已清空、首轮即恢复判定基线）
   try {
-    runL1Aggregation(io)
+    runL1Aggregation(bus)
   } catch (err: any) {
     log.error('L1 initial aggregation failed (non-blocking)', { error: err.message })
   }
@@ -195,10 +196,13 @@ async function main(): Promise<void> {
         log.error('episode classification crashed (non-blocking)', { error: err.message })
       }
       try {
-        const { dispatched, resolved } = runEpisodeAttribution(io)
+        const { dispatched, resolved, needReplay } = runEpisodeAttribution(bus)
         if (dispatched > 0 || resolved > 0) {
           log.info('episode 归因分流一轮完成', { dispatched, resolved })
         }
+        // replay 分流 → 触发 dispatch 重放检查（abandoned 零执行闭环引擎；
+        // 内部自捕获，fire-and-forget 不阻塞本轮）
+        if (needReplay) void replayStuckUserMessages(bus)
       } catch (err: any) {
         log.error('episode attribution crashed (non-blocking)', { error: err.message })
       }
@@ -212,7 +216,8 @@ async function main(): Promise<void> {
     log.error('episode initial classification failed (non-blocking)', { error: err.message })
   }
   try {
-    runEpisodeAttribution(io)
+    const { needReplay } = runEpisodeAttribution(bus)
+    if (needReplay) void replayStuckUserMessages(bus)
   } catch (err: any) {
     log.error('episode initial attribution failed (non-blocking)', { error: err.message })
   }
@@ -223,7 +228,7 @@ async function main(): Promise<void> {
   const replayTimer = setInterval(
     () => {
       try {
-        replayStuckUserMessages(io)
+        replayStuckUserMessages(bus)
       } catch (err: any) {
         log.error('replay scan crashed (non-blocking)', { error: err.message })
       }
@@ -232,7 +237,7 @@ async function main(): Promise<void> {
   )
   // 启动后立即跑一轮（不等首个周期，尽快补派重启前遗留的静默丢消息）
   try {
-    replayStuckUserMessages(io)
+    replayStuckUserMessages(bus)
   } catch (err: any) {
     log.error('replay initial scan failed (non-blocking)', { error: err.message })
   }

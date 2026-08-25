@@ -4,14 +4,17 @@
  * 八口径聚合（分母排除 server_restart）/ 破线告警 / 滞回去重 / 恢复 / 重启清空。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { Events } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 import { aggregateMetrics, runL1Aggregation, __test_resetAlertState } from './l1-aggregator.js'
 
-/** mock io：to(session).emit 捕获 */
+/** 假 bus：镜像 createSocketBus 的 emitSystemNotice——roomEmit 捕获 NEW_MESSAGE 载荷 */
 const roomEmit = vi.fn()
-const io = { to: vi.fn().mockReturnValue({ emit: roomEmit }) } as any
+const bus = {
+  emitSystemNotice: (n: any) => roomEmit(Events.NEW_MESSAGE, { ...n, role: 'system' }),
+} as any
 
 /** FK 基础数据：session s1 + agent agent-1（execution_logs/verdicts 外键依赖） */
 function seedBase() {
@@ -160,7 +163,6 @@ describe('runL1Aggregation — 滞回告警', () => {
     initRepository(getDb())
     seedBase()
     roomEmit.mockClear()
-    vi.mocked(io.to).mockClear()
     __test_resetAlertState()
   })
 
@@ -179,12 +181,12 @@ describe('runL1Aggregation — 滞回告警', () => {
 
   it('破线 → alert:true + 告警落库 + 房间广播（mentions 写回店长）', () => {
     seedBrokenSuccess()
-    const r = runL1Aggregation(io)
+    const r = runL1Aggregation(bus)
     expect(r.alert).toBe(true)
     expect(r.recovered).toBe(false)
 
     // 广播
-    expect(io.to).toHaveBeenCalledWith('session:s1')
+    expect(roomEmit.mock.calls[0][1].sessionId).toBe('s1')
     expect(roomEmit).toHaveBeenCalledTimes(1)
     const msg = roomEmit.mock.calls[0][1] as any
     expect(msg.role).toBe('system')
@@ -203,22 +205,22 @@ describe('runL1Aggregation — 滞回告警', () => {
   it('滞回去重：alerting 持续破线不重复投递', () => {
     seedBrokenSuccess()
 
-    expect(runL1Aggregation(io).alert).toBe(true)
+    expect(runL1Aggregation(bus).alert).toBe(true)
     expect(roomEmit).toHaveBeenCalledTimes(1)
 
     // 数据未变（仍破线）→ 第二轮不投递
-    const r2 = runL1Aggregation(io)
+    const r2 = runL1Aggregation(bus)
     expect(r2.alert).toBe(false)
     expect(roomEmit).toHaveBeenCalledTimes(1)
   })
 
   it('恢复：alerting → 全部指标正常 → recovered:true 且不投递', () => {
     seedBrokenSuccess()
-    expect(runL1Aggregation(io).alert).toBe(true)
+    expect(runL1Aggregation(bus).alert).toBe(true)
 
     // 修复：清空失败记录 → 全部 completed
     getDb().prepare(`DELETE FROM execution_logs WHERE status = 'failed'`).run()
-    const r = runL1Aggregation(io)
+    const r = runL1Aggregation(bus)
     expect(r.recovered).toBe(true)
     expect(r.alert).toBe(false)
     expect(roomEmit).toHaveBeenCalledTimes(1) // 恢复不投递
@@ -226,11 +228,11 @@ describe('runL1Aggregation — 滞回告警', () => {
 
   it('重启清空状态机：__test_resetAlertState 后破线重新告警', () => {
     seedBrokenSuccess()
-    expect(runL1Aggregation(io).alert).toBe(true)
+    expect(runL1Aggregation(bus).alert).toBe(true)
 
     __test_resetAlertState() // 模拟重启（模块级状态清空）
     roomEmit.mockClear()
-    const r = runL1Aggregation(io)
+    const r = runL1Aggregation(bus)
     expect(r.alert).toBe(true) // 重启后最多多发一条，接受
   })
 
@@ -240,14 +242,14 @@ describe('runL1Aggregation — 滞回告警', () => {
     insertExecution({ status: 'failed', error_message: 'x', error_type: 'unknown' })
 
     // 默认 0.8：成功率 2/3 ≈ 66.7% < 80% → 破线
-    expect(runL1Aggregation(io).alert).toBe(true)
+    expect(runL1Aggregation(bus).alert).toBe(true)
     __test_resetAlertState()
     roomEmit.mockClear()
 
     // 阈值放宽到 0.5 → 66.7% > 50% 不破线
     process.env.EVAL_ALERT_SUCCESS_RATE = '0.5'
     try {
-      expect(runL1Aggregation(io).alert).toBe(false)
+      expect(runL1Aggregation(bus).alert).toBe(false)
     } finally {
       delete process.env.EVAL_ALERT_SUCCESS_RATE
     }
@@ -256,7 +258,7 @@ describe('runL1Aggregation — 滞回告警', () => {
   it('healthy 稳态：normal 且不破线 → 静默无动作', () => {
     insertExecution({ status: 'completed' })
     insertExecution({ status: 'completed' })
-    const r = runL1Aggregation(io)
+    const r = runL1Aggregation(bus)
     expect(r.alert).toBe(false)
     expect(r.recovered).toBe(false)
     expect(roomEmit).not.toHaveBeenCalled()

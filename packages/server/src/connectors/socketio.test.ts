@@ -17,6 +17,12 @@ import { initRepository } from '../db/repository/index.js'
 import { RESTART_REQUEST_FILE, RESTART_DONE_FILE } from '../restart-request.js'
 import type { AgentReplyMessage } from './replyBus.js'
 import { IRON_LAWS_CODER, IRON_LAWS_REVIEWER } from '../seed-data.js'
+import { getExecutionEngine, getExecutionBus } from '../execution/registry.js'
+import {
+  recoverInterruptedExecutions,
+  recoverQueuedMessages,
+  replayStuckUserMessages,
+} from '../execution/recovery.js'
 
 // ═══ Mock all external dependencies ═══
 
@@ -809,8 +815,7 @@ describe('socketio connector', () => {
       })
       mockRoomEmit.mockClear()
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [agentCfg as any],
         { id: 'msg-B', content: '@店长 补填文档', mentions: ['店长'] },
@@ -837,8 +842,7 @@ describe('socketio connector', () => {
       })
       mockRoomEmit.mockClear()
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [agentCfg as any],
         { id: 'msg-B', content: '@店长 补填文档', mentions: ['店长'] },
@@ -865,8 +869,7 @@ describe('socketio connector', () => {
       mockRoomEmit.mockClear()
       const opencodeCfg = { ...agentCfg, llmProvider: 'opencode', llmApiKey: '' }
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [opencodeCfg as any],
         { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
@@ -897,8 +900,7 @@ describe('socketio connector', () => {
       mockRoomEmit.mockClear()
       const ollamaCfg = { ...agentCfg, llmProvider: 'ollama', llmApiKey: '' }
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [ollamaCfg as any],
         { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
@@ -929,8 +931,7 @@ describe('socketio connector', () => {
       mockRoomEmit.mockClear()
       const noKeyCfg = { ...agentCfg, llmApiKey: '' }
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [noKeyCfg as any],
         { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
@@ -1000,8 +1001,7 @@ describe('socketio connector', () => {
       })
       // depth=1 绕过 depth=0 的 trace 清理，才能在调用后断言计数
       for (let i = 0; i < 5; i++) {
-        await mod.executeAgentsSerial(
-          mockIo as any,
+        await getExecutionEngine()!.executeAgentsSerial(
           'session-1',
           [execAgentCfg as any],
           { id: `msg-skip-${i}`, content: '@店长 x', mentions: ['店长'] },
@@ -1033,8 +1033,7 @@ describe('socketio connector', () => {
            VALUES (?, ?, 'user', ?, '[]')`
         )
         .run('msg-run', 'session-1', '收到请处理')
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-run', content: '@店长 x', mentions: ['店长'] },
@@ -1081,8 +1080,7 @@ describe('socketio connector', () => {
       mod.__test_resetMentionCounts()
       mod.__setMentionCount('trace-limit-ok', 'agent-2', 2)
       vi.mocked(dispatch).mockClear()
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -1103,8 +1101,7 @@ describe('socketio connector', () => {
       mod.__test_resetMentionCounts()
       mod.__setMentionCount('trace-limit-full', 'agent-2', 5)
       vi.mocked(dispatch).mockClear()
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -1143,8 +1140,7 @@ describe('socketio connector', () => {
       // depth=0（用户 @ 顶层触发）执行成功 → 不消耗配额。
       // 注：depth=0 结束后顶层清理会删除本 trace 的全部计数键（:699-704），
       // 断言 0 是"无残留、未污染后续 trace"的终态检查
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-user', content: '@店长 x', mentions: ['店长'] },
@@ -1167,8 +1163,7 @@ describe('socketio connector', () => {
            VALUES (?, ?, 'user', ?, '[]')`
         )
         .run('msg-a2a', 'session-1', '收到请处理')
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-a2a', content: '@店长 x', mentions: ['店长'] },
@@ -1214,8 +1209,7 @@ describe('socketio connector', () => {
       const forwarded: AgentReplyMessage[] = []
       const unsub = onAgentReply((m) => forwarded.push(m))
       try {
-        await mod.executeAgentsSerial(
-          mockIo as any,
+        await getExecutionEngine()!.executeAgentsSerial(
           'session-1',
           [execAgentCfg as any],
           { id: 'msg-a2a-fwd', content: '@店长 派活', mentions: ['店长'] },
@@ -1335,8 +1329,7 @@ describe('socketio connector', () => {
       vi.mocked(dispatch).mockClear()
       mockRoomEmit.mockClear()
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [dsCatCfg],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -1382,8 +1375,7 @@ describe('socketio connector', () => {
       await setupExecution(['吐槽猫', '图测猫'], storeCfg)
       vi.mocked(dispatch).mockClear()
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [storeCfg],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -1405,8 +1397,7 @@ describe('socketio connector', () => {
       await setupExecution(['吐槽猫', '图测猫'], noRoleCfg)
       vi.mocked(dispatch).mockClear()
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [noRoleCfg],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -1498,8 +1489,7 @@ describe('socketio connector', () => {
       vi.mocked(dispatch).mockClear()
 
       const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg],
         { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
@@ -1545,8 +1535,7 @@ describe('socketio connector', () => {
       vi.mocked(dispatch).mockClear()
 
       const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg],
         { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'], authorName: 'ds猫' },
@@ -1569,8 +1558,7 @@ describe('socketio connector', () => {
       vi.mocked(dispatch).mockClear()
 
       const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg],
         { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
@@ -1594,8 +1582,7 @@ describe('socketio connector', () => {
       vi.mocked(dispatch).mockClear()
 
       const implCfg = makeAgentCfg({ id: 'agent-9', name: 'ds猫', role: 'implementer' })
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [implCfg],
         { id: 'msg-trigger', content: '派活', mentions: ['店长'] },
@@ -1615,8 +1602,7 @@ describe('socketio connector', () => {
       vi.mocked(dispatch).mockClear()
 
       const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg],
         { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
@@ -1758,8 +1744,7 @@ describe('socketio connector', () => {
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
       mod.__test_resetMentionCounts()
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -1898,8 +1883,7 @@ describe('socketio connector', () => {
       })
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -1998,8 +1982,7 @@ describe('socketio connector', () => {
       })
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -2088,8 +2071,7 @@ describe('socketio connector', () => {
         }
       )
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -2223,8 +2205,7 @@ describe('socketio connector', () => {
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
       mod.__test_resetMentionCounts()
 
-      const result = await mod.executeAgentsSerial(
-        mockIo as any,
+      const result = await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -2360,8 +2341,7 @@ describe('socketio connector', () => {
           }) as any
       )
 
-      const p = mod.executeAgentsSerial(
-        mockIo as any,
+      const p = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -2447,8 +2427,7 @@ describe('socketio connector', () => {
 
       // 与生产代码同式（socketio.ts LOCK_FILE = resolve(process.cwd(), '.agent-busy')）
       const lockFile = resolve(process.cwd(), '.agent-busy')
-      const p = mod.executeAgentsSerial(
-        mockIo as any,
+      const p = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -2549,8 +2528,7 @@ describe('socketio connector', () => {
           llmModel: 'deepseek-v4-flash',
           llmApiKey: 'sk-test',
         }) as any
-      const p = mod.executeAgentsSerial(
-        mockIo as any,
+      const p = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           cfg('agent-1', '店长'),
@@ -2689,8 +2667,7 @@ describe('socketio connector', () => {
       })
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -2868,8 +2845,7 @@ describe('socketio connector', () => {
       vi.mocked(dispatch).mockReset()
       mod.__test_resetMentionCounts()
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [
           {
@@ -2978,7 +2954,7 @@ describe('socketio connector', () => {
       const { executeAgentCommand, initAgentSlot } = await import('../dispatch/index.js')
       seedInterruptedExecution(getDb())
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       expect(executeAgentCommand).toHaveBeenCalledTimes(1)
       expect(executeAgentCommand).toHaveBeenCalledWith(
@@ -3000,7 +2976,7 @@ describe('socketio connector', () => {
       const { executeAgentCommand } = await import('../dispatch/index.js')
       seedInterruptedExecution(getDb(), { triggerExists: false })
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       expect(executeAgentCommand).not.toHaveBeenCalled()
     })
@@ -3010,7 +2986,7 @@ describe('socketio connector', () => {
       const { executeAgentCommand } = await import('../dispatch/index.js')
       seedInterruptedExecution(getDb(), { agentReplied: true })
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       expect(executeAgentCommand).not.toHaveBeenCalled()
     })
@@ -3034,7 +3010,7 @@ describe('socketio connector', () => {
         )
         .run('exec-1', 'session-1', 'agent-1', 'msg-trigger', 'msg-reply')
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       expect(executeAgentCommand).not.toHaveBeenCalled()
     })
@@ -3045,7 +3021,7 @@ describe('socketio connector', () => {
       // 无 message_id + 无任何回复 → 时间窗判据放行 → 恢复重跑（老数据兼容路径）
       seedInterruptedExecution(getDb())
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       expect(executeAgentCommand).toHaveBeenCalledTimes(1)
     })
@@ -3058,7 +3034,7 @@ describe('socketio connector', () => {
         .run('sk-your-api-key-here', 'agent-1')
       seedInterruptedExecution(getDb())
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       expect(executeAgentCommand).not.toHaveBeenCalled()
     })
@@ -3071,7 +3047,7 @@ describe('socketio connector', () => {
         .run('agent-1')
       seedInterruptedExecution(getDb())
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       expect(executeAgentCommand).toHaveBeenCalledTimes(1)
     })
@@ -3081,7 +3057,7 @@ describe('socketio connector', () => {
       const { executeAgentCommand } = await import('../dispatch/index.js')
       seedInterruptedExecution(getDb())
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       // 广播告警（按会话聚合，消息含 agent 名与恢复语义）
       const call = mockRoomEmit.mock.calls.find((c: any[]) => c[0] === Events.NEW_MESSAGE)
@@ -3105,7 +3081,7 @@ describe('socketio connector', () => {
       const { executeAgentCommand } = await import('../dispatch/index.js')
       seedInterruptedExecution(getDb(), { agentReplied: true })
 
-      await mod.recoverInterruptedExecutions(mockIo as any)
+      await recoverInterruptedExecutions(getExecutionBus() as any)
 
       const call = mockRoomEmit.mock.calls.find((c: any[]) => c[0] === Events.NEW_MESSAGE)
       expect(call).toBeDefined()
@@ -3173,7 +3149,7 @@ describe('socketio connector', () => {
         }),
       } as any)
 
-      await mod.recoverQueuedMessages(mockIo as any)
+      await recoverQueuedMessages(getExecutionBus() as any)
 
       // ① 整条重新 dispatch（4 参：含 traceId）
       expect(dispatch).toHaveBeenCalledWith(
@@ -3206,7 +3182,7 @@ describe('socketio connector', () => {
       const { dispatch } = await import('../dispatch/index.js')
       seedQueuedMessage(getDb(), { agentReplied: true })
 
-      await mod.recoverQueuedMessages(mockIo as any)
+      await recoverQueuedMessages(getExecutionBus() as any)
 
       expect(dispatch).not.toHaveBeenCalled()
       // 洞 B：跳过 ≠ 撒手不管——处理已终结，消息不再永久 queued/running 搁浅
@@ -3245,7 +3221,7 @@ describe('socketio connector', () => {
         )
         .run('exec-1', 'session-1', 'agent-1', 'msg-queued')
 
-      await mod.recoverQueuedMessages(mockIo as any)
+      await recoverQueuedMessages(getExecutionBus() as any)
 
       // 一条消息一次 dispatch：agent-1（server_restart + 未回复 = 漏恢复，兜底补位）
       // 与 agent-2（无日志，常规恢复）合并调度——串行化后路径 2 已跑完，不再有
@@ -3272,7 +3248,7 @@ describe('socketio connector', () => {
         )
         .run('exec-1', 'session-1', 'agent-1', 'msg-queued')
 
-      await mod.recoverQueuedMessages(mockIo as any)
+      await recoverQueuedMessages(getExecutionBus() as any)
 
       expect(dispatch).not.toHaveBeenCalled()
     })
@@ -3307,7 +3283,7 @@ describe('socketio connector', () => {
         )
         .run('exec-1', 'session-1', 'agent-1', 'msg-queued')
 
-      await mod.recoverQueuedMessages(mockIo as any)
+      await recoverQueuedMessages(getExecutionBus() as any)
 
       // 只有 agent-2 被调度：agent-1 有 completed 行 → 跳过不重派（否则重启后
       // 已完成目标双执行）；agent-2 无执行行 → 正常补派
@@ -3328,7 +3304,7 @@ describe('socketio connector', () => {
         .run('sk-your-api-key-here', 'agent-1')
       seedQueuedMessage(getDb())
 
-      await mod.recoverQueuedMessages(mockIo as any)
+      await recoverQueuedMessages(getExecutionBus() as any)
 
       expect(dispatch).not.toHaveBeenCalled()
     })
@@ -3337,7 +3313,7 @@ describe('socketio connector', () => {
       const mod = await import('./socketio.js')
       const { dispatch } = await import('../dispatch/index.js')
 
-      await mod.recoverQueuedMessages(mockIo as any)
+      await recoverQueuedMessages(getExecutionBus() as any)
 
       expect(dispatch).not.toHaveBeenCalled()
     })
@@ -3371,7 +3347,7 @@ describe('socketio connector', () => {
       })
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
 
-      await mod.recoverQueuedMessages(mockIo as any)
+      await recoverQueuedMessages(getExecutionBus() as any)
 
       // 恢复的命令 pendingTriggers 为空——LLM 上下文不得出现合并点名（"已并入本任务"）
       const llmMessages = chatStream.mock.calls[0][0] as any[]
@@ -3450,7 +3426,7 @@ describe('socketio connector', () => {
         }),
       } as any)
 
-      await mod.replayStuckUserMessages(mockIo as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
 
       // 补派：dispatch 4 参（含 traceId）
       expect(dispatch).toHaveBeenCalledWith(
@@ -3496,8 +3472,8 @@ describe('socketio connector', () => {
         }
       )
 
-      await mod.replayStuckUserMessages(mockIo as any)
-      await mod.replayStuckUserMessages(mockIo as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
 
       // 一轮补派 + 执行行落库 → 二轮 NOT EXISTS 天然排除——全程只 dispatch 一次
       expect(dispatch).toHaveBeenCalledTimes(1)
@@ -3523,7 +3499,7 @@ describe('socketio connector', () => {
       seedStuckMessage(db, { id: 'msg-done' })
       db.prepare(`UPDATE messages SET dispatch_state = 'done' WHERE id = 'msg-done'`).run()
 
-      await mod.replayStuckUserMessages(mockIo as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
 
       expect(dispatch).not.toHaveBeenCalled()
     })
@@ -3538,7 +3514,7 @@ describe('socketio connector', () => {
       )
       seedStuckMessage(db)
 
-      await mod.replayStuckUserMessages(mockIo as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
 
       expect(dispatch).not.toHaveBeenCalled()
       const row = db
@@ -3553,7 +3529,7 @@ describe('socketio connector', () => {
       const db = getDb()
       seedStuckMessage(db, { id: 'msg-bcast', content: '大家好', mentions: '[]' })
 
-      await mod.replayStuckUserMessages(mockIo as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
 
       expect(dispatch).toHaveBeenCalledWith(
         'session-1',
@@ -3567,7 +3543,7 @@ describe('socketio connector', () => {
       const mod = await import('./socketio.js')
       const { dispatch } = await import('../dispatch/index.js')
 
-      await mod.replayStuckUserMessages(mockIo as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
 
       expect(dispatch).not.toHaveBeenCalled()
     })
@@ -3584,7 +3560,7 @@ describe('socketio connector', () => {
          VALUES (?, ?, 'agent-1', 'agent', '批量答复', ?, ?)`
       ).run('msg-replied', 'session-1', 'task-batch', sqliteDatetime(20))
 
-      await mod.replayStuckUserMessages(mockIo as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
 
       expect(dispatch).not.toHaveBeenCalled()
       const row = db
@@ -3604,7 +3580,7 @@ describe('socketio connector', () => {
          VALUES (?, ?, 'agent-1', 'agent', '其他任务回复', ?, ?)`
       ).run('msg-replied-other', 'session-1', 'task-b', sqliteDatetime(20))
 
-      await mod.replayStuckUserMessages(mockIo as any)
+      await replayStuckUserMessages(getExecutionBus() as any)
 
       expect(dispatch).toHaveBeenCalledWith(
         'session-1',
@@ -4008,8 +3984,7 @@ describe('socketio connector', () => {
         }),
       } as any)
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
@@ -4035,8 +4010,7 @@ describe('socketio connector', () => {
         }),
       } as any)
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
@@ -4057,8 +4031,7 @@ describe('socketio connector', () => {
         }),
       } as any)
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
@@ -4095,8 +4068,7 @@ describe('socketio connector', () => {
         },
       ])
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
@@ -4131,8 +4103,7 @@ describe('socketio connector', () => {
         },
       ])
 
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
@@ -4213,8 +4184,7 @@ describe('socketio connector', () => {
       })
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
 
-      const execPromise = mod.executeAgentsSerial(
-        mockIo as any,
+      const execPromise = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
@@ -4526,8 +4496,7 @@ describe('socketio connector', () => {
       seedTrigger()
 
       vi.mocked(dispatch).mockClear()
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -4574,8 +4543,7 @@ describe('socketio connector', () => {
       seedTrigger()
 
       vi.mocked(dispatch).mockClear()
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -4620,8 +4588,7 @@ describe('socketio connector', () => {
       seedTrigger()
 
       vi.mocked(dispatch).mockClear()
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -4654,8 +4621,7 @@ describe('socketio connector', () => {
       seedTrigger()
 
       vi.mocked(dispatch).mockClear()
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -4675,8 +4641,7 @@ describe('socketio connector', () => {
 
       // 频控：同 agent 二次触发（5 分钟内）→ 不再告警
       mockRoomEmit.mockClear()
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
@@ -4705,8 +4670,7 @@ describe('socketio connector', () => {
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
       seedTrigger('@店长 派活一')
 
-      const run1 = mod.executeAgentsSerial(
-        mockIo as any,
+      const run1 = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活一', mentions: ['店长'], authorName: '实施猫' },
@@ -4740,8 +4704,7 @@ describe('socketio connector', () => {
       })
       // 注意属性名必须叫 chatStream（runAgentReply 访问 adapter.chatStream）
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream: chatStream2 } as any)
-      await mod.executeAgentsSerial(
-        mockIo as any,
+      await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-trigger', content: '@店长 派活二', mentions: ['店长'] },
@@ -4796,8 +4759,7 @@ describe('runAgentReply — per-agent 静态运行配置透传', () => {
       )
       .run()
 
-    await mod.executeAgentsSerial(
-      mockIo as any,
+    await getExecutionEngine()!.executeAgentsSerial(
       'session-tf',
       [agent],
       { id: 'msg-tf', content: '@ds猫 透传', mentions: ['ds猫'] },
@@ -4884,8 +4846,7 @@ describe('runAgentReply — 铁律运行期注入（ironLawForRole）', () => {
        VALUES (?, ?, 'user', '@猫 铁律', '["猫"]')`
     ).run(msgId, sessionId)
 
-    await mod.executeAgentsSerial(
-      mockIo as any,
+    await getExecutionEngine()!.executeAgentsSerial(
       sessionId,
       [agent],
       { id: msgId, content: '@猫 铁律', mentions: ['猫'] },
@@ -5067,8 +5028,7 @@ describe('runAgentReply — 运行时长心跳', () => {
     // 用对象包裹返回——async 函数 return promise 会被自动 unwrap（await runHeartbeat
     // 会阻塞到执行结束），包一层 { exec } 让 executeAgentsSerial 的 promise 原样带出、
     // 测试侧手动控制 await 时机（流挂在 gate 上时不能等它完成）。
-    const exec = mod.executeAgentsSerial(
-      mockIo as any,
+    const exec = getExecutionEngine()!.executeAgentsSerial(
       'session-hb',
       [hbAgent as any],
       { id: 'msg-hb', content: '@ds猫 心跳', mentions: ['ds猫'] },
@@ -5247,8 +5207,7 @@ describe('上下文卫生补测 — 已回复剥离/标注（3738c6a 回修）',
       '2026-08-13 12:00:00'
     )
 
-    await mod.executeAgentsSerial(
-      mockIo as any,
+    await getExecutionEngine()!.executeAgentsSerial(
       'session-hy',
       [agent],
       { id: opts.trigger.id, content: opts.trigger.content, mentions: opts.trigger.mentions },
@@ -5489,8 +5448,7 @@ describe('对话内 diff 展示 — 富文本块通道', () => {
       .run('msg-diff-1', '改一下 x.ts')
 
     mockRoomEmit.mockClear()
-    await mod.executeAgentsSerial(
-      mockIo as any,
+    await getExecutionEngine()!.executeAgentsSerial(
       'session-1',
       [execAgentCfg as any],
       { id: 'msg-diff-1', content: '改一下 x.ts', mentions: ['店长'] },
@@ -5540,8 +5498,7 @@ describe('对话内 diff 展示 — 富文本块通道', () => {
       .run('msg-nodiff', '讨论一下方案')
 
     mockRoomEmit.mockClear()
-    await mod.executeAgentsSerial(
-      mockIo as any,
+    await getExecutionEngine()!.executeAgentsSerial(
       'session-1',
       [execAgentCfg as any],
       { id: 'msg-nodiff', content: '讨论一下方案', mentions: ['店长'] },
@@ -5591,8 +5548,7 @@ describe('对话内 diff 展示 — 富文本块通道', () => {
       }),
     } as any)
 
-    await mod.executeAgentsSerial(
-      mockIo as any,
+    await getExecutionEngine()!.executeAgentsSerial(
       'session-1',
       [execAgentCfg as any],
       { id: 'msg-iso', content: '继续', mentions: ['店长'] },
@@ -5690,8 +5646,7 @@ describe('会话 worktree 接线', () => {
          VALUES ('msg-wt', 'session-wt', 'user', '@店长 干活', '["店长"]')`
       )
       .run()
-    await mod.executeAgentsSerial(
-      mockIo as any,
+    await getExecutionEngine()!.executeAgentsSerial(
       'session-wt',
       [wtAgentCfg as any],
       { id: 'msg-wt', content: '@店长 干活', mentions: ['店长'] },
@@ -5790,8 +5745,7 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
          VALUES (?, ?, 'user', ?, '["店长"]', ?)`
       )
       .run(msgId, 'session-1', '请继续', '2026-08-01 00:00:59')
-    await mod.executeAgentsSerial(
-      mockIo as any,
+    await getExecutionEngine()!.executeAgentsSerial(
       'session-1',
       [compressAgentCfg as any],
       { id: msgId, content: '请继续', mentions: ['店长'] },

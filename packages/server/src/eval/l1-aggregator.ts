@@ -11,11 +11,10 @@
  */
 
 import { v4 as uuid } from 'uuid'
-import { Events } from '@cat-study/shared'
-import type { Server as SocketServer } from 'socket.io'
 import { getDb } from '../db/index.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import type { EngineBus, HandoffBus } from '../execution/bus.js'
 
 const log = createLogger('l1-aggregator')
 
@@ -183,7 +182,7 @@ function formatReportLine(m: L1Metrics): string {
  * 上下文过滤只对店长可见；与 agent 回复的落库后写回不同，系统告警一次落库带全）。
  * per-session 防御：单会话 FK 失败（会话并发删除）不 abort 其余会话。
  */
-function broadcastAlert(io: SocketServer, broken: string[]): void {
+function broadcastAlert(bus: EngineBus & HandoffBus, broken: string[]): void {
   const content = `@店长 📊评估告警（近 ${WINDOW_DAYS} 天）：${broken.join('、')}，请关注猫咖运行状态`
   const sessions = sessionsRepo.listAllSessions()
   for (const s of sessions) {
@@ -198,11 +197,10 @@ function broadcastAlert(io: SocketServer, broken: string[]): void {
         null,
         null
       )
-      io.to(`session:${s.id}`).emit(Events.NEW_MESSAGE, {
+      bus.emitSystemNotice({
         id: msgId,
         sessionId: s.id,
         agentId: null,
-        role: 'system',
         content,
         mentions: ['店长'],
         createdAt: new Date().toISOString(),
@@ -220,7 +218,10 @@ function broadcastAlert(io: SocketServer, broken: string[]): void {
  * 定时器（index.ts 每小时）调用；也可测试直接调用。
  * 返回值供测试断言：本次是否触发告警/恢复。
  */
-export function runL1Aggregation(io: SocketServer): { alert: boolean; recovered: boolean } {
+export function runL1Aggregation(bus: EngineBus & HandoffBus): {
+  alert: boolean
+  recovered: boolean
+} {
   const metrics = aggregateMetrics()
   const thresholds = alertThresholds()
   const broken = evaluateBreaches(metrics, thresholds)
@@ -228,7 +229,7 @@ export function runL1Aggregation(io: SocketServer): { alert: boolean; recovered:
   if (alertState === 'normal' && broken.length > 0) {
     // normal → alerting：转换沿发告警
     alertState = 'alerting'
-    broadcastAlert(io, broken)
+    broadcastAlert(bus, broken)
     log.warn('L1 告警进入 alerting', { broken })
     return { alert: true, recovered: false }
   }

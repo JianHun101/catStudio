@@ -5,19 +5,21 @@
  * 图片守卫 → session 校验 → handoff 重定向 → INSERT → 广播 → agent 解析 → 调度 → 串行执行。
  * 入口只保留通道专属包装：socketio 的 ERROR emit、REST 的 status 映射与响应体。
  *
- * 循环依赖说明：ingest.ts ← socketio.ts（入口调用 ingestUserMessage），
- * ingest.ts → socketio.ts（取 getIO / rowToAgent / executeAgentsSerial）。
- * 所有对 socketio.js 导出的访问都在函数体内（运行时），ESM 循环引用安全。
+ * 断环说明（第 4 刀）：ingest 不再 import connector——广播/执行经执行注册表
+ * 单例寻址（getExecutionBus / getExecutionEngine，getIO 同款服务定位惯例），
+ * rowToAgent 直接取 execution/row.js。bus/engine 未注册（引擎未初始化）时
+ * 返回 null → 守卫跳过（与旧 getIO→null 同语义）。
  */
 import { v4 as uuid } from 'uuid'
-import { Events, estimateTokens } from '@cat-study/shared'
+import { estimateTokens } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
   agents as agentsRepo,
   messages as messagesRepo,
 } from '../db/repository/index.js'
 import type { AgentConfig } from '@cat-study/shared'
-import { getIO, rowToAgent, executeAgentsSerial } from './socketio.js'
+import { rowToAgent } from '../execution/row.js'
+import { getExecutionEngine, getExecutionBus } from '../execution/registry.js'
 import { dispatch, initAgentSlot, getAgentState, completeExecution } from '../dispatch/index.js'
 import { resolveHandoffTarget } from '../handoff/index.js'
 import { saveMessageMemory } from '../memory/index.js'
@@ -166,11 +168,11 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
   }
 
   // 3. 广播到 Session 房间（重定向时是子会话房间，并向旧房间发 SESSION_HANDOFF）
-  const io = getIO()
-  if (io) {
-    io.to(`session:${effectiveSessionId}`).emit(Events.NEW_MESSAGE, msg)
+  const bus = getExecutionBus()
+  if (bus) {
+    bus.emitMessage(msg)
     if (handoffTarget) {
-      io.to(`session:${sessionId}`).emit(Events.SESSION_HANDOFF, handoffTarget)
+      bus.emitSessionHandoffToRoom(sessionId, handoffTarget)
     }
   }
 
@@ -239,9 +241,9 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
 
   // 发送 MESSAGE_AGENT_STATUS: queued — 让前端知道消息已被 Agent 接收
   // （重定向时发子会话房间，与 NEW_MESSAGE 一致）
-  if (io) {
+  if (bus) {
     for (const a of targets) {
-      io.to(`session:${effectiveSessionId}`).emit(Events.MESSAGE_AGENT_STATUS, {
+      bus.emitAgentMessageStatus(effectiveSessionId, {
         messageId: msgId,
         agentId: a.id,
         agentName: a.name,
@@ -252,9 +254,10 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
   }
 
   // 按 FIFO 串行执行（不 await，让多个消息的 Agent 执行可以交错）
-  if (io && targets.length > 0) {
-    executeAgentsSerial(io, effectiveSessionId, targets as AgentConfig[], msg, traceId).catch(
-      (err) => {
+  if (bus && targets.length > 0) {
+    getExecutionEngine()!
+      .executeAgentsSerial(effectiveSessionId, targets as AgentConfig[], msg, traceId)
+      .catch((err) => {
         // S2 修复：executeAgentsSerial 内部 try/catch 只覆盖 for 循环体。
         // 若在进入循环前崩溃（session 查询、agent 名解析等），异常会成为
         // 未处理 Promise 拒绝，且 dispatch() 已将 agent 设为 busy →
@@ -272,8 +275,7 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
             }).catch(() => {})
           }
         }
-      }
-    )
+      })
   }
 
   return {

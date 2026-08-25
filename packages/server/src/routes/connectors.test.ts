@@ -17,26 +17,13 @@ import type { FastifyInstance } from 'fastify'
 import { saveMessageMemory } from '../memory/index.js'
 import { __test_resetOneBotDedup } from './connectors.js'
 
-// Mock socketio connector（ingest 顶层 import 需要可解析；getIO null → 广播/执行跳过）。
-// P4 顺带（AC2-1 mock 退化值修正）：rowToAgent 补真实字段映射——此前 vi.fn() 返回
-// undefined → validAgents=[] → saveMessageMemory 断言第 4 参收到退化值 []（真实环境
-// 应为 ['agent-ds']）。与 socketio.ts rowToAgent 同构，删 mock 时断言不用改。
-vi.mock('../connectors/socketio.js', () => ({
-  getIO: vi.fn(() => null),
-  createSocketIO: vi.fn(),
-  rowToAgent: vi.fn((row: any) => ({
-    id: row.id,
-    name: row.name,
-    avatar: row.avatar,
-    systemPrompt: row.system_prompt,
-    llmProvider: row.llm_provider,
-    llmModel: row.llm_model,
-    llmApiKey: row.llm_api_key,
-    llmBaseUrl: row.llm_base_url || undefined,
-    effortLevel: row.effort_level || undefined,
-    role: row.role || undefined,
-  })),
-  executeAgentsSerial: vi.fn(() => Promise.resolve()),
+// 执行注册表 mock（第 4 刀断环后 connectors → ingest 经 registry 寻址广播/执行）：
+// bus/engine 未注册 → ingest 的广播/执行守卫跳过（旧 getIO→null 同语义）。
+// rowToAgent 改走真实 execution/row.js（AC2-1 断言 ['agent-ds'] 由真实映射保持——
+// 此前 vi.fn() 退化返回 undefined 致 validAgents=[] 的 P4 顺带修正自然归位）。
+vi.mock('../execution/registry.js', () => ({
+  getExecutionBus: vi.fn(() => null),
+  getExecutionEngine: vi.fn(() => null),
 }))
 
 // Mock memory——断言 webhook 摄入显式传 saveMemory: true（吐槽猫审查观察点 #1 的护栏：

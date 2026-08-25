@@ -102,6 +102,7 @@ interface BusCalls {
   messageUpdated: MessageUpdatedPayload[]
   contextStats: ContextWindowStats[]
   handoffs: HandoffEvent[]
+  handoffRooms: Array<{ sessionId: string; e: HandoffEvent }>
   handoffFailed: HandoffFailedPayload[]
 }
 
@@ -115,16 +116,18 @@ function createFakeBus(): { bus: EngineBus & HandoffBus; calls: BusCalls } {
     messageUpdated: [],
     contextStats: [],
     handoffs: [],
+    handoffRooms: [],
     handoffFailed: [],
   }
   const bus: EngineBus & HandoffBus = {
-    emitAgentMessage: (m) => calls.agentMessages.push(m),
+    emitMessage: (m) => calls.agentMessages.push(m),
     emitSystemNotice: (n) => calls.systemNotices.push(n),
     emitTyping: (u) => calls.typing.push(u),
     emitAgentMessageStatus: (_sessionId, s) => calls.statuses.push(s),
     emitMessageUpdated: (_sessionId, u) => calls.messageUpdated.push(u),
     emitContextWindowStats: (s) => calls.contextStats.push(s),
     emitSessionHandoff: (e) => calls.handoffs.push(e),
+    emitSessionHandoffToRoom: (sessionId, e) => calls.handoffRooms.push({ sessionId, e }),
     emitHandoffFailed: (p) => calls.handoffFailed.push(p),
   }
   return { bus, calls }

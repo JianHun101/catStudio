@@ -19,16 +19,15 @@
  * - replay 动作 = 触发一次 dispatch 重放检查（replayStuckUserMessages，既有机制）：
  *   abandoned 零执行场景的根消息在 NULL 面，补派后产生新执行链 → 下一轮判定
  *   success → closure 复验关闭，闭环成立；routing_failure 消息在 done 面不在
- *   重放扫描范围（已知边界，action_detail 记录在案）
+ *   重放扫描范围（已知边界，action_detail 记录在案）。检查触发改为返回
+ *   needReplay 由调用方（index.ts）消费（第 4 刀断 eval→socketio 依赖）
  */
 
 import { v4 as uuid } from 'uuid'
-import { Events } from '@cat-study/shared'
-import type { Server as SocketServer } from 'socket.io'
 import { getDb } from '../db/index.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
-import { replayStuckUserMessages } from '../connectors/socketio.js'
+import type { EngineBus, HandoffBus } from '../execution/bus.js'
 import {
   collectChain,
   classifyChain,
@@ -148,7 +147,7 @@ const ACTION_HINTS: Record<AttributionAction, string> = {
  * 上下文过滤只对店长可见，与 L1 告警同款）。单会话 FK 失败不 abort。
  */
 function dispatchAction(
-  io: SocketServer,
+  bus: EngineBus & HandoffBus,
   action: AttributionAction,
   ep: { sessionId: string; rootTriggerMessageId: string; outcome: string; rootCause: string }
 ): string | null {
@@ -164,11 +163,10 @@ function dispatchAction(
   try {
     const msgId = uuid()
     messagesRepo.insertMessage(msgId, s.id, 'system', content, JSON.stringify(['店长']), null, null)
-    io.to(`session:${s.id}`).emit(Events.NEW_MESSAGE, {
+    bus.emitSystemNotice({
       id: msgId,
       sessionId: s.id,
       agentId: null,
-      role: 'system',
       content,
       mentions: ['店长'],
       createdAt: new Date().toISOString(),
@@ -191,10 +189,13 @@ interface ActionableEpisodeRow {
   chain_task_id: string | null
 }
 
-/** 一轮归因 + 复验。返回统计供日志/测试断言。 */
-export function runEpisodeAttribution(io: SocketServer): {
+/** 一轮归因 + 复验。返回统计供日志/测试断言；needReplay 由调用方
+ *  （index.ts）消费触发 dispatch 重放检查（replayStuckUserMessages）——本模块
+ *  不再 import connector，断 eval→socketio 依赖方向。 */
+export function runEpisodeAttribution(bus: EngineBus & HandoffBus): {
   dispatched: number
   resolved: number
+  needReplay: boolean
 } {
   const db = getDb()
   let dispatched = 0
@@ -230,7 +231,7 @@ export function runEpisodeAttribution(io: SocketServer): {
     ).run(uuid(), ep.id, ep.outcome, rootCause, action, ACTION_HINTS[action])
 
     if (ep.session_id) {
-      const msgId = dispatchAction(io, action, {
+      const msgId = dispatchAction(bus, action, {
         sessionId: ep.session_id,
         rootTriggerMessageId: ep.root_trigger_message_id,
         outcome: ep.outcome,
@@ -247,11 +248,6 @@ export function runEpisodeAttribution(io: SocketServer): {
     }
     if (action === 'replay') needReplayCheck = true
     dispatched++
-  }
-
-  // replay 分流 → 触发一次 dispatch 重放检查（既有机制，abandoned 零执行闭环的引擎）
-  if (needReplayCheck) {
-    void triggerReplayCheck(io)
   }
 
   // ── closure 复验：已分流记录重跑判定，翻转 success 类才关闭 ──
@@ -296,7 +292,7 @@ export function runEpisodeAttribution(io: SocketServer): {
     // 未翻转：保持 dispatched（不重复投递——归因幂等键已挡住），下轮再复验
   }
 
-  return { dispatched, resolved }
+  return { dispatched, resolved, needReplay: needReplayCheck }
 }
 
 /**
@@ -332,13 +328,4 @@ function markResolved(episodeId: string, annotate = true): void {
     attr.delivery_message_id,
     `${msg.content}\n\n✅已关闭（结局翻转 ${outcome.outcome}）`
   )
-}
-
-/** replay 动作的执行体：触发 dispatch 重放检查（既有机制，失败不阻塞归因主流程） */
-export async function triggerReplayCheck(io: SocketServer): Promise<void> {
-  try {
-    await replayStuckUserMessages(io)
-  } catch (err: any) {
-    log.warn('episode replay 检查失败（非阻塞）', { error: err.message })
-  }
 }

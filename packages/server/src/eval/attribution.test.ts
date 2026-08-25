@@ -1,21 +1,24 @@
 /**
  * E2 归因分流 + closure 复验闭环测试 — v2 episode 评估规格 §4。
- * 真实 SQLite :memory:（createTestDb 含 episodes + episode_attributions 表）+ mock io
+ * 真实 SQLite :memory:（createTestDb 含 episodes + episode_attributions 表）+ 假 bus
  * （只 mock 最外层投递——l1-aggregator 同款范式）。覆盖：
  * 归因映射（abandoned→replay / timeout→调查单 / parse_error→拆活单 / corrected_success→改进素材）
  * + 幂等（UNIQUE(episode_id) 不重复投递）+ closure 复验（翻转才关闭 / 未翻转保持 /
  * improvement 同轮关闭）+ open/unclassified 不动作 + replay 触发重放检查（既有机制）。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { Events } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 import { classifyEpisodes, scanZeroExecutionEpisodes } from './episodes.js'
 import { runEpisodeAttribution, locateRootCause } from './attribution.js'
 
-/** mock io：to(session).emit 捕获（l1-aggregator.test.ts 同款） */
+/** 假 bus：镜像 createSocketBus 的 emitSystemNotice（l1-aggregator.test.ts 同款） */
 const roomEmit = vi.fn()
-const io = { to: vi.fn().mockReturnValue({ emit: roomEmit }) } as any
+const bus = {
+  emitSystemNotice: (n: any) => roomEmit(Events.NEW_MESSAGE, { ...n, role: 'system' }),
+} as any
 
 /** SQLite datetime 格式（UTC 'YYYY-MM-DD HH:MM:SS'）——与 datetime('now') 字符串比较一致 */
 function sqliteNow(offsetMinutes = 0): string {
@@ -123,8 +126,10 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
     scanZeroExecutionEpisodes()
     expect(getEpisode(rootId).outcome).toBe('abandoned')
 
-    const first = runEpisodeAttribution(io)
+    const first = runEpisodeAttribution(bus)
     expect(first.dispatched).toBe(1)
+    // replay 分流 → needReplay 交调用方（index.ts）触发重放检查（断 eval→socketio 后契约）
+    expect(first.needReplay).toBe(true)
     const attr = getAttribution(getEpisode(rootId).id)
     expect(attr.action_type).toBe('replay')
     expect(attr.root_cause).toBe('零执行超窗（落库未调度，dispatch 静默丢）')
@@ -135,12 +140,13 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
     expect(msgs[0].content).toContain('@店长 🔄重放检查')
     expect(msgs[0].content).toContain(rootId)
     expect(msgs[0].content).toContain('结局: abandoned')
-    expect(io.to).toHaveBeenCalledWith('session:s1')
+    expect(roomEmit.mock.calls[0][1].sessionId).toBe('s1')
     expect(roomEmit).toHaveBeenCalledTimes(1)
 
     // 幂等：第二轮不再投递（UNIQUE(episode_id)）
-    const second = runEpisodeAttribution(io)
+    const second = runEpisodeAttribution(bus)
     expect(second.dispatched).toBe(0)
+    expect(second.needReplay).toBe(false) // 无新 replay 分流 → 不触发重放检查
     expect(getSystemMessages()).toHaveLength(1)
   })
 
@@ -156,7 +162,7 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('needs_investigation')
 
-    const { dispatched } = runEpisodeAttribution(io)
+    const { dispatched } = runEpisodeAttribution(bus)
     expect(dispatched).toBe(1)
     const attr = getAttribution(getEpisode(rootId).id)
     expect(attr.action_type).toBe('investigation')
@@ -176,7 +182,7 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('harness_fix_needed')
 
-    const { dispatched } = runEpisodeAttribution(io)
+    const { dispatched } = runEpisodeAttribution(bus)
     expect(dispatched).toBe(1)
     expect(getAttribution(getEpisode(rootId).id).action_type).toBe('harness_fix')
     expect(getSystemMessages()[0].content).toContain('@店长 🔧拆活单')
@@ -216,7 +222,7 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('corrected_success')
 
-    const { dispatched, resolved } = runEpisodeAttribution(io)
+    const { dispatched, resolved } = runEpisodeAttribution(bus)
     expect(dispatched).toBe(1)
     expect(resolved).toBe(1) // 改进素材无复验等待，同轮关闭
     const attr = getAttribution(getEpisode(rootId).id)
@@ -254,7 +260,7 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
 
     classifyEpisodes()
     expect(getEpisode(rootRunning).episode_state).toBe('open')
-    const { dispatched } = runEpisodeAttribution(io)
+    const { dispatched } = runEpisodeAttribution(bus)
     expect(dispatched).toBe(0)
     expect(getSystemMessages()).toHaveLength(0)
   })
@@ -275,7 +281,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
   it('abandoned → 修复后重放补派成功 → 判定翻转 success → 关闭（闭环）', () => {
     const rootId = insertRootMessage({ id: 'msg-root', created_at: sqliteNow(60) })
     scanZeroExecutionEpisodes()
-    runEpisodeAttribution(io)
+    runEpisodeAttribution(bus)
     const epId = getEpisode(rootId).id
     expect(getAttribution(epId).status).toBe('dispatched')
     expect(getEpisode(rootId).episode_state).toBe('classified')
@@ -294,7 +300,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
     expect(getEpisode(rootId).outcome).toBe('success')
 
     // 复验：翻转 → 关闭（不依赖口头确认，判定为准）
-    const { resolved } = runEpisodeAttribution(io)
+    const { resolved } = runEpisodeAttribution(bus)
     expect(resolved).toBe(1)
     expect(getAttribution(epId).status).toBe('resolved')
     expect(getEpisode(rootId).episode_state).toBe('closed')
@@ -302,7 +308,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
     // closed 终态守卫：再跑判定 + 归因不覆盖不动作
     classifyEpisodes()
     expect(getEpisode(rootId).episode_state).toBe('closed')
-    expect(runEpisodeAttribution(io).resolved).toBe(0)
+    expect(runEpisodeAttribution(bus).resolved).toBe(0)
     expect(getAttribution(epId).status).toBe('resolved')
   })
 
@@ -316,11 +322,11 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
       started_at: sqliteNow(50),
     })
     classifyEpisodes()
-    runEpisodeAttribution(io)
+    runEpisodeAttribution(bus)
     const epId = getEpisode(rootId).id
 
     // 链无变化：仍 needs_investigation → 复验不关闭
-    const { resolved } = runEpisodeAttribution(io)
+    const { resolved } = runEpisodeAttribution(bus)
     expect(resolved).toBe(0)
     expect(getAttribution(epId).status).toBe('dispatched')
     expect(getEpisode(rootId).episode_state).toBe('classified')
@@ -341,7 +347,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('needs_investigation')
 
-    const { dispatched } = runEpisodeAttribution(io)
+    const { dispatched } = runEpisodeAttribution(bus)
     expect(dispatched).toBe(1)
     const epId = getEpisode(rootId).id
     const before = getSystemMessages()[0]
@@ -374,7 +380,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('corrected_success')
 
-    const { resolved } = runEpisodeAttribution(io)
+    const { resolved } = runEpisodeAttribution(bus)
     expect(resolved).toBe(1)
     expect(getAttribution(epId).status).toBe('resolved')
     expect(getEpisode(rootId).episode_state).toBe('closed')
@@ -396,7 +402,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('routing_failure')
 
-    const { dispatched } = runEpisodeAttribution(io)
+    const { dispatched } = runEpisodeAttribution(bus)
     expect(dispatched).toBe(1)
     expect(getAttribution(getEpisode(rootId).id).action_type).toBe('replay')
     expect(getAttribution(getEpisode(rootId).id).root_cause).toBe(

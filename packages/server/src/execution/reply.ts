@@ -810,7 +810,7 @@ export async function runAgentReply(
     }
   }
 
-  bus.emitAgentMessage(finalMsg)
+  bus.emitMessage(finalMsg)
 
   // P3: 回复经 replyBus 转发到外部平台（OneBot 出站订阅后发回 QQ 绑定群/私聊）。
   // P4 #3（契约钉死）：此处无条件触发——A2A 互 @ 产生的回复同样走 runAgentReply、

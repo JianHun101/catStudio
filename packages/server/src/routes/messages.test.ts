@@ -7,12 +7,12 @@ import { initRepository } from '../db/repository/index.js'
 import { RESTART_REQUEST_FILE, removeRestartRequest } from '../restart-request.js'
 import type { FastifyInstance } from 'fastify'
 
-// Mock socketio connector（GET 路由不调用，但 messages.ts 顶层 import 需要可解析）
-vi.mock('../connectors/socketio.js', () => ({
-  getIO: vi.fn(() => null),
-  createSocketIO: vi.fn(),
-  rowToAgent: vi.fn(),
-  executeAgentsSerial: vi.fn(() => Promise.resolve()),
+// 执行注册表 mock（第 4 刀断环后 messages.ts → ingest 经 registry 寻址广播/执行）：
+// bus/engine 未注册 → ingest 的广播/执行守卫跳过（旧 getIO→null 同语义）；
+// rowToAgent 走真实 execution/row.js（本文件会话 fixture agent_ids='[]'，无行可映射）
+vi.mock('../execution/registry.js', () => ({
+  getExecutionBus: vi.fn(() => null),
+  getExecutionEngine: vi.fn(() => null),
 }))
 
 // 重启请求文件隔离：本文件与 socketio.test.ts 都写/读/删 .restart-request（vitest 全局
