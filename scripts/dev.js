@@ -26,7 +26,9 @@
  * 串让模板占位符外的附加内容（如 {NAPCAT_PATH} --flag）不被 args 丢弃。换机器/换
  * 安装位置只改页面不碰 .env。
  *
- * 用法: node scripts/dev.js  或  pnpm dev
+ * 用法: node scripts/dev.js  或  pnpm dev         （开发：实验库 cat-study-dev.db）
+ *       node scripts/dev.js --mode production      （日常真实使用：主库 cat-study.db）
+ *       pnpm start                                 （同上，package.json 脚本）
  */
 
 import { spawn, execSync } from 'node:child_process'
@@ -42,6 +44,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
 
 const isWindows = process.platform === 'win32'
+
+// DB 分离（ADR 决策 9）：--mode production → NODE_ENV=production → server 用主库
+// cat-study.db（pnpm start，日常真实使用）；缺省（pnpm dev）→ cat-study-dev.db
+// 实验场。NODE_ENV 在 spawn server 时注入（Windows 无内联 env 语法，零新依赖）。
+const modeIdx = process.argv.indexOf('--mode')
+const MODE = modeIdx >= 0 ? (process.argv[modeIdx + 1] ?? '') : ''
+const PRODUCTION_MODE = MODE === 'production'
+if (MODE && !PRODUCTION_MODE) {
+  console.error(`[dev] 未知 --mode ${MODE}（仅支持 production）`)
+  process.exit(1)
+}
+console.log(
+  PRODUCTION_MODE
+    ? '[dev] 生产模式：server 使用主库 data/cat-study.db'
+    : '[dev] 开发模式：server 使用实验库 data/cat-study-dev.db（--mode production 切主库）'
+)
 
 // 映射包名 → node_modules 路径
 const PKG_DIRS = {
@@ -135,7 +153,15 @@ function isServerAlive() {
 // DatabaseSync，零依赖）只读打开 server 的 SQLite（WAL 只读查询可行），
 // 覆盖所有 provider 所有执行（比锁更全），finalizeExecutionLog 执行结束后
 // 立即更新 → 判据实时。
-const DB_FILE = path.join(ROOT, 'packages', 'server', 'data', 'cat-study.db')
+// 与 server 侧 db/index.ts 的 DB 分离同源（ADR 决策 9）——执行保护窗必须查
+// server 实际打开的那个库，否则 pnpm start 下判据读实验库、放行主库的执行
+const DB_FILE = path.join(
+  ROOT,
+  'packages',
+  'server',
+  'data',
+  PRODUCTION_MODE ? 'cat-study.db' : 'cat-study-dev.db'
+)
 let runningDb = null
 let runningDbFailed = false
 
@@ -226,7 +252,13 @@ function startServer() {
   serverChild = spawn(process.execPath, [TSX_CLI, 'packages/server/src/index.ts'], {
     cwd: ROOT,
     stdio: 'inherit',
-    env: { ...process.env, FORCE_COLOR: '1' },
+    // NODE_ENV 条件注入：undefined 不能进 env（Node 会字符串化成 'undefined'），
+    // 开发模式保持 shell 环境原样（用户显式 export 的 NODE_ENV 优先）
+    env: {
+      ...process.env,
+      FORCE_COLOR: '1',
+      ...(PRODUCTION_MODE ? { NODE_ENV: 'production' } : {}),
+    },
   })
 
   serverChild.on('error', (err) => {

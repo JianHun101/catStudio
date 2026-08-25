@@ -5,7 +5,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const DB_PATH = path.join(__dirname, '..', '..', 'data', 'cat-study.db')
+
+// DB 分离（ADR 决策 9，脚本即配置）：NODE_ENV=production（pnpm start，日常真实
+// 使用，记忆延续）→ 主库 cat-study.db；其他（pnpm dev 实验场，空库自举自动
+// seed 同款猫）→ cat-study-dev.db。NODE_ENV 由 dev.js 的 --mode 设定（Windows
+// 无内联 env 语法，零新依赖）；vitest 走 setDb 注入 :memory: 不受影响。
+const DB_FILE_NAME = process.env.NODE_ENV === 'production' ? 'cat-study.db' : 'cat-study-dev.db'
+const DB_PATH = path.join(__dirname, '..', '..', 'data', DB_FILE_NAME)
 
 let db: Database.Database
 

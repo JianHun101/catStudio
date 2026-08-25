@@ -3,7 +3,8 @@
 ## Commands
 
 ```bash
-pnpm dev                  # server (:3200) + web (:5173) via scripts/dev.js
+pnpm dev                  # server (:3200) + web (:5173) via scripts/dev.js → 实验库 cat-study-dev.db
+pnpm start                # dev.js --mode production → 主库 cat-study.db（日常真实使用，记忆延续）
 pnpm dev:server / dev:web # single package
 pnpm stop                 # kill ports 3200, 5173-5175
 pnpm test                 # vitest workspace (shared → server → web)
