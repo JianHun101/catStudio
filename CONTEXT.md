@@ -44,6 +44,11 @@ _Avoid_: 点名, @标记
 当 Agent 槽位忙碌时，新请求按 FIFO 顺序排队等待。队列是按 Agent 独立的——每个 Agent 有自己的等待队列。
 _Avoid_: 待处理列表, 任务队列
 
+### Execution（执行引擎）
+
+把一条被调度的消息变成一条 Agent 回复的完整过程：上下文过滤 → 记忆注入 → LLM 流式 → 落库 → 状态播报，以及启动恢复（从 DB 重新拉起中断的执行）。Connector 只负责把消息交给它，并把它的输出广播出去。
+_Avoid_: 回复引擎, pipeline
+
 ### Connector（渠道适配器）
 
 连接外部消息平台和 CatStudy 消息总线的适配器。Web Connector 通过 Socket.IO 连接浏览器。Connector 只做消息格式转换和路由，不包含业务逻辑。未来可扩展 QQ 等渠道。
@@ -51,7 +56,7 @@ _Avoid_: 插件, 桥接, 前端
 
 ### Message Bus（消息总线）
 
-消息分发机制。核心通过 Socket.IO 房间广播实现实时消息推送。Redis Pub/Sub 作为可选补充（`agent:{name}:status` 频道用于跨进程 Agent 状态同步），Redis 不可用时系统自动降级为内存模式。频道设计预留 `session:{id}:messages` 和 `session:{id}:agent:{name}` 用于未来多进程扩展。
+消息分发机制。核心通过 Socket.IO 房间广播实现实时消息推送。Redis Pub/Sub 作为可选补充（`agent:{name}:status` 频道用于跨进程 Agent 状态同步），Redis 不可用时系统自动降级为内存模式。频道设计预留 `session:{id}:messages` 和 `session:{id}:agent:{name}` 用于未来多进程扩展。执行引擎（Execution）的输出经 Message Bus 发出——引擎只对总线喊话，送达方式由 Connector 决定。
 _Avoid_: 事件总线, 队列
 
 ### Execution Log（执行日志）
