@@ -257,3 +257,49 @@ export interface ContextWindowStats {
   /** 上下文 token 预算上限 */
   maxContextTokens: number
 }
+
+/** MESSAGE_AGENT_STATUS 的 wire 状态联合（与 SlotStatus 两域解耦：
+ *  SlotStatus 是 dispatch 槽位生命周期（idle/thinking/busy），
+ *  此联合是消息执行进度（queued/thinking/replying/done） */
+export type MessageAgentStatus = 'queued' | 'thinking' | 'replying' | 'done'
+
+/** MESSAGE_AGENT_STATUS 事件载荷（各构造点统一形状；'replying' 心跳重发同 startedAt） */
+export interface MessageAgentStatusPayload {
+  messageId: string
+  agentId: string
+  agentName: string
+  agentAvatar: string
+  status: MessageAgentStatus
+  /** 仅 'replying'：开始时间戳（心跳重发同值，前端「回复中 · 已 N 秒」） */
+  startedAt?: number
+}
+
+/** AGENT_TYPING 事件载荷（流式增量；content = 已累积展示全文） */
+export interface TypingUpdatePayload {
+  sessionId: string
+  agentId: string
+  messageId: string
+  content: string
+}
+
+/** system 通知消息形状（role 恒为 'system'，类型隐含不再逐处写） */
+export interface SystemNoticePayload {
+  id: string
+  sessionId: string
+  agentId: string | null
+  content: string
+  mentions: string[]
+  createdAt: string
+}
+
+/** MESSAGE_UPDATED 事件载荷（A2A mentions 写回通知） */
+export interface MessageUpdatedPayload {
+  messageId: string
+  mentions: string[]
+}
+
+/** HANDOFF_FAILED 事件载荷（会话房间） */
+export interface HandoffFailedPayload {
+  sessionId: string
+  reason: string
+}

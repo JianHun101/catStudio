@@ -9,12 +9,12 @@
  */
 
 import { v4 as uuid } from 'uuid'
-import { estimateTokens, Events } from '@cat-study/shared'
+import { estimateTokens } from '@cat-study/shared'
 import { chatComplete } from '../llm/complete.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
 import { readRawContextConfig } from '../config/context-config.js'
-import type { Server as SocketServer } from 'socket.io'
+import type { HandoffBus } from '../execution/bus.js'
 
 const log = createLogger('handoff')
 
@@ -150,7 +150,7 @@ export function nextHandoffTitle(title: string): string {
  */
 export async function performHandoff(
   sessionId: string,
-  io: SocketServer
+  bus: HandoffBus
 ): Promise<HandoffResult | null> {
   const enabled = process.env.HANDOFF_ENABLED !== 'false'
   if (!enabled) return null
@@ -187,7 +187,7 @@ export async function performHandoff(
     if (!summary) {
       // 无 API key（generateFullSummary 返回 ''）——失败必须对前端可见
       //（用户报「交接线到了没触发」的根因之一就是静默失败）
-      emitHandoffFailed(sessionId, io, '摘要 API Key 未配置（SUMMARY_API_KEY 与 DS_KEY 均为空）')
+      emitHandoffFailed(sessionId, bus, '摘要 API Key 未配置（SUMMARY_API_KEY 与 DS_KEY 均为空）')
       return null
     }
 
@@ -219,7 +219,7 @@ export async function performHandoff(
 
     // 5. 通知前端（emit 失败时回滚新会话，避免孤儿会话）
     try {
-      io.emit(Events.SESSION_HANDOFF, {
+      bus.emitSessionHandoff({
         oldSessionId: sessionId,
         newSessionId,
         summary,
@@ -241,7 +241,7 @@ export async function performHandoff(
       error: err.message,
     })
     // LLM 失败（含 empty response 修复前）或 DB 异常——失败可见化，前端横幅展示原因
-    emitHandoffFailed(sessionId, io, err.message)
+    emitHandoffFailed(sessionId, bus, err.message)
     return null
   } finally {
     handoffInProgress.delete(sessionId)
@@ -255,9 +255,9 @@ const handoffInProgress = new Set<string>()
  * 交接失败可见化——emit HANDOFF_FAILED 到会话房间（`session:${id}`，仅该会话前端可见）。
  * emit 自身失败只记录不抛出（失败通知不能把失败路径拖成崩溃路径）。
  */
-function emitHandoffFailed(sessionId: string, io: SocketServer, reason: string): void {
+function emitHandoffFailed(sessionId: string, bus: HandoffBus, reason: string): void {
   try {
-    io.to(`session:${sessionId}`).emit(Events.HANDOFF_FAILED, { sessionId, reason })
+    bus.emitHandoffFailed({ sessionId, reason })
   } catch (emitErr: any) {
     log.warn('handoff failed emit error', { sessionId, error: emitErr.message })
   }

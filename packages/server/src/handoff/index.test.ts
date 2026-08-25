@@ -258,7 +258,8 @@ describe('handoff', () => {
   // ─── performHandoff — 空壳清理 + 去重守卫（方案 C） ──────────
   describe('performHandoff — 去重守卫修复', () => {
     let db: Database.Database
-    const mockIo = { emit: vi.fn() } as any
+    // 假 HandoffBus（第 2 刀：performHandoff 从 io 收窄为 bus）
+    const mockBus = { emitSessionHandoff: vi.fn(), emitHandoffFailed: vi.fn() } as any
 
     const insertSession = (
       id: string,
@@ -295,7 +296,7 @@ describe('handoff', () => {
       insertSession('parent-a')
       insertSession('child-shell', { handoffFrom: 'parent-a' }) // 0 条消息空壳
 
-      const result = await performHandoff('parent-a', mockIo)
+      const result = await performHandoff('parent-a', mockBus)
 
       expect(result).not.toBeNull()
       expect(result!.oldSessionId).toBe('parent-a')
@@ -306,7 +307,7 @@ describe('handoff', () => {
       expect(children).toHaveLength(1)
       expect(children[0].id).toBe(result!.newSessionId)
       // 前端收到切换通知
-      expect(mockIo.emit).toHaveBeenCalledWith(Events.SESSION_HANDOFF, {
+      expect(mockBus.emitSessionHandoff).toHaveBeenCalledWith({
         oldSessionId: 'parent-a',
         newSessionId: result!.newSessionId,
         summary: '测试总结内容',
@@ -318,7 +319,7 @@ describe('handoff', () => {
       insertSession('child-real', { handoffFrom: 'parent-b' })
       insertMessage('m-1', 'child-real')
 
-      const result = await performHandoff('parent-b', mockIo)
+      const result = await performHandoff('parent-b', mockBus)
 
       expect(result).toBeNull()
       const children = db
@@ -326,15 +327,16 @@ describe('handoff', () => {
         .all('parent-b') as Array<{ id: string }>
       expect(children).toHaveLength(1)
       expect(children[0].id).toBe('child-real')
-      expect(mockIo.emit).not.toHaveBeenCalled()
+      expect(mockBus.emitSessionHandoff).not.toHaveBeenCalled()
     })
   })
 
   // ─── performHandoff — HANDOFF_FAILED 失败可见化（单A：交接失败必须对前端可见） ──────────
   describe('performHandoff — HANDOFF_FAILED 失败可见化', () => {
     let db: Database.Database
-    const roomEmit = vi.fn()
-    const mockIo = { emit: vi.fn(), to: vi.fn().mockReturnValue({ emit: roomEmit }) } as any
+    // 假 HandoffBus（第 2 刀：房间路由归 adapter，此处只断言 payload）
+    const handoffFailed = vi.fn()
+    const mockBus = { emitSessionHandoff: vi.fn(), emitHandoffFailed: handoffFailed } as any
 
     const insertSession = (id: string) => {
       db.prepare(
@@ -362,11 +364,10 @@ describe('handoff', () => {
       process.env.DS_KEY = ''
       insertSession('parent-nokey')
 
-      const result = await performHandoff('parent-nokey', mockIo)
+      const result = await performHandoff('parent-nokey', mockBus)
 
       expect(result).toBeNull()
-      expect(mockIo.to).toHaveBeenCalledWith('session:parent-nokey')
-      expect(roomEmit).toHaveBeenCalledWith(Events.HANDOFF_FAILED, {
+      expect(handoffFailed).toHaveBeenCalledWith({
         sessionId: 'parent-nokey',
         reason: expect.stringContaining('API Key'),
       })
@@ -383,16 +384,15 @@ describe('handoff', () => {
       )
       insertSession('parent-llm')
 
-      const result = await performHandoff('parent-llm', mockIo)
+      const result = await performHandoff('parent-llm', mockBus)
 
       expect(result).toBeNull()
-      expect(mockIo.to).toHaveBeenCalledWith('session:parent-llm')
-      expect(roomEmit).toHaveBeenCalledWith(Events.HANDOFF_FAILED, {
+      expect(handoffFailed).toHaveBeenCalledWith({
         sessionId: 'parent-llm',
         reason: 'Chat completion API returned empty response',
       })
-      // 成功路径的全局 emit 不被触发（这是失败路径）
-      expect(mockIo.emit).not.toHaveBeenCalled()
+      // 成功路径的全局通知不被触发（这是失败路径）
+      expect(mockBus.emitSessionHandoff).not.toHaveBeenCalled()
     })
   })
 })
