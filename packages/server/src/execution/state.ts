@@ -1,8 +1,17 @@
 /**
- * Execution — 执行路径模块态（第 2/3 刀从 socketio.ts 迁出，只搬不改）。
+ * Execution — 引擎实例态（3.5 刀：模块态 → 实例态）。
  *
- * 3.5 刀将收编为引擎实例字段（run 注册表合并 + finalizeRun 统一）。
- * 测试钩子（__test_*）照 dispatch 惯例：仅测试用，生产路径不调用。
+ * 第 2/3 刀从 socketio.ts 迁出的 6 个模块级 Map/计数收进 createEngineState()
+ * 工厂产生的实例字段：run 注册表（activeAborts+activeStreams 合并）、撤回标记、
+ * 锁引用计数、M1 频控、mention 配额。生产单实例（connector createSocketIO 持有，
+ * 重复创建 fail-fast——热重启双注册表防护）；测试每用例新造实例天然隔离。
+ *
+ * 依赖方向：reply/serial 经参数消费本实例；connector 经引擎 accessor
+ * （setRetraction/listActiveStreams/abortAgent/getActiveStream）寻址——
+ * internal.ts 经 socketio 委托函数零改动。
+ *
+ * .agent-busy 锁文件本体保留（server↔dev.js 跨进程信号，实例状态替代不了，
+ * ADR 决策 10）——实例化的是引用计数，不是文件。
  */
 
 import { existsSync, writeFileSync, unlinkSync } from 'node:fs'
@@ -11,183 +20,219 @@ import { createLogger } from '../logger.js'
 
 const log = createLogger('socketio')
 
-// ─── 回复路径（第 2 刀迁入） ─────────────────────────────
-
-/** 正在执行的消息 ID → 是否被撤回（runAgentReply 检查此标志以提前终止） */
-const retractionRequests = new Map<string, boolean>()
-
-/** 正在流式输出的 Agent 状态 → { sessionId, messageId, content, token }
- *  JOIN_SESSION 时用于恢复打字气泡（客户端切会话会清空 typingStates）；
- *  token 为本次 spawn 的随机信号 token（internal.ts 精确校验 x-signal-token） */
-const activeStreams = new Map<
-  string,
-  { sessionId: string; messageId: string; content: string; token: string }
->()
+/** 流状态条目（JOIN_SESSION 打字气泡恢复 / internal.ts 信号校验共用形状） */
+export interface StreamState {
+  sessionId: string
+  messageId: string
+  content: string
+  token: string
+}
 
 /**
- * 只读 getter：internal.ts 校验信号用（不迁移 Map 本体——set/delete 不动，
- * 回归面最小）。依赖方向 internal.ts → execution/state.ts 无环。
+ * Run 注册表条目（3.5 刀合并 activeAborts + activeStreams）：
+ * 同一 agent 的 abort 控制器与流状态共享一个 key——finalizeRun 单点 endRun
+ * 同时收口两者（此前两条 Map 各自 delete，失败漏斗漏过 stream 清理）。
+ * 生命周期：registerAbort（执行体启动，先于 runAgentReply）→ setActiveStream
+ * 逐 chunk 更新 → endRun（finalizeRun 统一出口）。deleteActiveStream 只清
+ * stream 字段不动 abort——流退出（撤回/超时提前返回）后执行体仍持有
+ * abort 注册表项，AGENT_INTERRUPT 在收口前仍可寻址。
  */
-export function getActiveStream(
-  agentId: string
-): { sessionId: string; messageId: string; content: string; token: string } | undefined {
-  return activeStreams.get(agentId)
+interface RunEntry {
+  abort?: AbortController
+  stream?: StreamState
 }
 
-/** 撤回标记查询（runAgentReply Window ③ 流中途检查） */
-export function hasRetraction(messageId: string): boolean {
-  return retractionRequests.get(messageId) === true
+/** 引擎实例态——方法形态 accessor（Maps 私有，实例间零共享） */
+export interface EngineState {
+  // ─── Run 注册表 ─────────────────────────────────
+  registerAbort(agentId: string, controller: AbortController): void
+  setActiveStream(agentId: string, stream: StreamState): void
+  getActiveStream(agentId: string): StreamState | undefined
+  listActiveStreams(): Array<[string, StreamState]>
+  /** 注销流状态（runAgentReply 撤回/超时出口）——只清 stream 字段，abort 保留 */
+  deleteActiveStream(agentId: string): void
+  /** 注销整个 run 条目（finalizeRun 统一出口，幂等） */
+  endRun(agentId: string): void
+  /** AGENT_INTERRUPT handler 用：abort 该 agent 当前执行体；有执行中返回 true */
+  abortAgent(agentId: string): boolean
+
+  // ─── 撤回标记 ───────────────────────────────────
+  hasRetraction(messageId: string): boolean
+  setRetraction(messageId: string): void
+  clearRetraction(messageId: string): void
+
+  // ─── Agent 执行锁（引用计数；文件本体归本模块管） ──
+  acquireLock(): void
+  releaseLock(): void
+
+  // ─── M1 频控 ───────────────────────────────────
+  maybeWarnM1(agentId: string): boolean
+
+  // ─── Mention 配额（engine 级字段——跨 run 存活，按 trace 顶层收尾清空） ──
+  getMentionCount(traceId: string, agentId: string): number
+  setMentionCount(traceId: string, agentId: string, count: number): void
+  clearMentionCountsForTrace(traceId: string): void
+
+  // ─── 测试钩子（仅测试用，生产路径不调用） ────────
+  __test_reset(): void
+  __test_resetLockState(): void
+  __test_resetMentionCounts(): void
+  __test_resetM1Warned(): void
+  __test_resetRuns(): void
 }
 
-/** 标记撤回（MESSAGE_RETRACT handler） */
-export function setRetraction(messageId: string): void {
-  retractionRequests.set(messageId, true)
-}
-
-/** 清除撤回标记（runAgentReply 出口 / handler 失败与无执行者清理） */
-export function clearRetraction(messageId: string): void {
-  retractionRequests.delete(messageId)
-}
-
-/** 注册流状态（runAgentReply 流启动 + 逐 chunk 更新） */
-export function setActiveStream(
-  agentId: string,
-  stream: { sessionId: string; messageId: string; content: string; token: string }
-): void {
-  activeStreams.set(agentId, stream)
-}
-
-/** 注销流状态（runAgentReply 三条出口 / executeOneAgent 异常漏斗） */
-export function deleteActiveStream(agentId: string): void {
-  activeStreams.delete(agentId)
-}
-
-/** 流状态条目（JOIN_SESSION 打字气泡恢复遍历） */
-export function listActiveStreams(): Array<
-  [string, { sessionId: string; messageId: string; content: string; token: string }]
-> {
-  return Array.from(activeStreams.entries())
-}
-
-// ─── 执行循环（第 3 刀迁入） ─────────────────────────────
-
-/** 正在执行的 Agent → 其 AbortController（停止按钮中断思考用）。
- *  executeAgentsSerial 创建后注册、Promise.race 结束路径（正常/异常）清理。
- *  abortController 原本是循环内局部变量外部摸不到——升级为模块级注册表后，
- *  AGENT_INTERRUPT handler 才能跨会话按 agentId 全局寻址（用户手动改 DB 的场景）。 */
-const activeAborts = new Map<string, AbortController>()
-
-export function registerAbort(agentId: string, controller: AbortController): void {
-  activeAborts.set(agentId, controller)
-}
-
-export function unregisterAbort(agentId: string): void {
-  activeAborts.delete(agentId)
-}
-
-/** AGENT_INTERRUPT handler 用：abort 该 agent 当前执行体；有执行中返回 true */
-export function abortAgent(agentId: string): boolean {
-  const controller = activeAborts.get(agentId)
-  if (!controller) return false
-  controller.abort()
-  return true
-}
-
-// ─── Agent Busy Lock ────────────────────────────────
-
-/** Agent 执行锁文件路径 — 项目根目录下的 .agent-busy。
- *  存在此文件时，dev.js 文件监听器会推迟 tsx 重启，
- *  确保 Agent（Claude Code CLI）完成文件编辑后才允许重启。 */
+/** Agent 执行锁文件路径 — 项目根目录下的 .agent-busy（见文件头注释） */
 const LOCK_FILE = resolve(process.cwd(), '.agent-busy')
 
-/** Agent 执行锁引用计数——每个 Claude 执行体 acquire/release 严格配对，
- *  归零才删 .agent-busy。改造前 lockAcquired 是 executeAgentsSerial 的循环外
- *  变量：同消息 @ 多 Claude agent 时 A 完成后即删锁、B 执行期间无锁 →
- *  dev.js 误判空闲触发重启打断 B（派活单审查发现，实施必做项顺带根治） */
-let lockRefCount = 0
-
-/** 获取 Agent 执行锁（引用计数 +1；首次创建文件——文件已存在则不覆盖，
- *  可能是异常残留或并发实例持有，保留内容只计引用） */
-export function acquireLock(): void {
-  lockRefCount++
-  if (lockRefCount === 1 && !existsSync(LOCK_FILE)) {
-    writeFileSync(LOCK_FILE, String(process.pid))
-    log.info('agent busy lock acquired', { pid: process.pid })
-  }
-}
-
-/** 释放 Agent 执行锁（引用计数 -1；归零才删除文件） */
-export function releaseLock(): void {
-  if (lockRefCount <= 0) {
-    log.warn('agent busy lock released with no holders', { lockRefCount })
-    return
-  }
-  lockRefCount--
-  if (lockRefCount === 0 && existsSync(LOCK_FILE)) {
-    unlinkSync(LOCK_FILE)
-    log.info('agent busy lock released')
-  }
-}
-
-/** 测试钩子：重置锁引用计数并清理锁文件（仅测试用，生产路径不调用） */
-export function __test_resetLockState(): void {
-  lockRefCount = 0
-  if (existsSync(LOCK_FILE)) unlinkSync(LOCK_FILE)
-}
-
-// ─── M1 频控 ────────────────────────────────────────
-
-/** M1 防线频控：agentId → 上次告警时间戳（5 分钟内同猫不重复告警） */
-const m1WarnedAt = new Map<string, number>()
+/** M1 防线频控窗口（5 分钟内同猫不重复告警） */
 const M1_WARN_INTERVAL_MS = 5 * 60 * 1000
 
-/** M1 频控：同猫 5 分钟内只告警一次（返回是否应告警） */
-export function maybeWarnM1(agentId: string): boolean {
-  const now = Date.now()
-  const last = m1WarnedAt.get(agentId) || 0
-  if (now - last < M1_WARN_INTERVAL_MS) return false
-  m1WarnedAt.set(agentId, now)
-  return true
-}
+export function createEngineState(): EngineState {
+  // ─── 实例字段 ──────────────────────────────────
+  const runs = new Map<string, RunEntry>()
+  const retractions = new Map<string, boolean>()
+  const m1WarnedAt = new Map<string, number>()
+  const mentionCounts = new Map<string, number>()
+  let lockRefCount = 0
 
-/** 测试钩子：清空 M1 频控时间戳（测试用例间隔离） */
-export function __test_resetM1Warned(): void {
-  m1WarnedAt.clear()
-}
+  return {
+    // ─── Run 注册表 ───────────────────────────────
 
-// ─── Mention 配额 ────────────────────────────────────
+    registerAbort(agentId, controller) {
+      const entry = runs.get(agentId) ?? {}
+      entry.abort = controller
+      runs.set(agentId, entry)
+    },
 
-/** 追踪每个 Agent 在同一 traceId 下被 @ 的次数（防止无限循环） */
-const mentionCounts = new Map<string, number>()
+    setActiveStream(agentId, stream) {
+      const entry = runs.get(agentId) ?? {}
+      entry.stream = stream
+      runs.set(agentId, entry)
+    },
 
-function getMentionKey(traceId: string, agentId: string): string {
-  return `${traceId}:${agentId}`
-}
+    getActiveStream(agentId) {
+      return runs.get(agentId)?.stream
+    },
 
-/** 读取 mention 计数（生产：配额原子段；测试钩子同名复用） */
-export function getMentionCount(traceId: string, agentId: string): number {
-  return mentionCounts.get(getMentionKey(traceId, agentId)) || 0
-}
+    listActiveStreams() {
+      const out: Array<[string, StreamState]> = []
+      for (const [agentId, entry] of runs) {
+        if (entry.stream) out.push([agentId, entry.stream])
+      }
+      return out
+    },
 
-/** 写入 mention 计数（生产：预留/递增；测试钩子同名复用） */
-export function setMentionCount(traceId: string, agentId: string, count: number): void {
-  mentionCounts.set(getMentionKey(traceId, agentId), count)
-}
+    deleteActiveStream(agentId) {
+      const entry = runs.get(agentId)
+      if (!entry) return
+      entry.stream = undefined
+    },
 
-/** 顶层收尾：清空该 trace 的全部配额（depth=0 结束时） */
-export function clearMentionCountsForTrace(traceId: string): void {
-  for (const key of mentionCounts.keys()) {
-    if (key.startsWith(`${traceId}:`)) {
-      mentionCounts.delete(key)
-    }
+    endRun(agentId) {
+      runs.delete(agentId)
+    },
+
+    abortAgent(agentId) {
+      const entry = runs.get(agentId)
+      if (!entry?.abort) return false
+      entry.abort.abort()
+      return true
+    },
+
+    // ─── 撤回标记 ─────────────────────────────────
+
+    hasRetraction(messageId) {
+      return retractions.get(messageId) === true
+    },
+
+    setRetraction(messageId) {
+      retractions.set(messageId, true)
+    },
+
+    clearRetraction(messageId) {
+      retractions.delete(messageId)
+    },
+
+    // ─── Agent 执行锁 ─────────────────────────────
+    // 引用计数——每个 Claude 执行体 acquire/release 严格配对，归零才删文件。
+    // 改造前 lockAcquired 是 executeAgentsSerial 的循环外变量：同消息 @ 多
+    // Claude agent 时 A 完成后即删锁、B 执行期间无锁 → dev.js 误判空闲触发
+    // 重启打断 B（派活单审查发现，实施必做项顺带根治）
+
+    acquireLock() {
+      lockRefCount++
+      if (lockRefCount === 1 && !existsSync(LOCK_FILE)) {
+        writeFileSync(LOCK_FILE, String(process.pid))
+        log.info('agent busy lock acquired', { pid: process.pid })
+      }
+    },
+
+    releaseLock() {
+      if (lockRefCount <= 0) {
+        log.warn('agent busy lock released with no holders', { lockRefCount })
+        return
+      }
+      lockRefCount--
+      if (lockRefCount === 0 && existsSync(LOCK_FILE)) {
+        unlinkSync(LOCK_FILE)
+        log.info('agent busy lock released')
+      }
+    },
+
+    // ─── M1 频控 ─────────────────────────────────
+
+    maybeWarnM1(agentId) {
+      const now = Date.now()
+      const last = m1WarnedAt.get(agentId) || 0
+      if (now - last < M1_WARN_INTERVAL_MS) return false
+      m1WarnedAt.set(agentId, now)
+      return true
+    },
+
+    // ─── Mention 配额 ─────────────────────────────
+
+    getMentionCount(traceId, agentId) {
+      return mentionCounts.get(`${traceId}:${agentId}`) || 0
+    },
+
+    setMentionCount(traceId, agentId, count) {
+      mentionCounts.set(`${traceId}:${agentId}`, count)
+    },
+
+    clearMentionCountsForTrace(traceId) {
+      for (const key of mentionCounts.keys()) {
+        if (key.startsWith(`${traceId}:`)) {
+          mentionCounts.delete(key)
+        }
+      }
+    },
+
+    // ─── 测试钩子 ─────────────────────────────────
+
+    __test_reset() {
+      runs.clear()
+      retractions.clear()
+      m1WarnedAt.clear()
+      mentionCounts.clear()
+      lockRefCount = 0
+      if (existsSync(LOCK_FILE)) unlinkSync(LOCK_FILE)
+    },
+
+    __test_resetLockState() {
+      lockRefCount = 0
+      if (existsSync(LOCK_FILE)) unlinkSync(LOCK_FILE)
+    },
+
+    __test_resetMentionCounts() {
+      mentionCounts.clear()
+    },
+
+    __test_resetM1Warned() {
+      m1WarnedAt.clear()
+    },
+
+    __test_resetRuns() {
+      runs.clear()
+    },
   }
-}
-
-/** 测试钩子别名（socketio.test.ts 经 re-export 引用；生产路径不调用） */
-export const __getMentionCount = getMentionCount
-export const __setMentionCount = setMentionCount
-
-/** 测试钩子：重置 mention 计数（仅测试用，生产路径不调用） */
-export function __test_resetMentionCounts(): void {
-  mentionCounts.clear()
 }

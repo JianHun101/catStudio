@@ -213,6 +213,8 @@ describe('socketio connector', () => {
     // 动态导入 socketio（Vitest 已处理 ts→js 映射 + mock 提前生效）
     const httpServer = createServer()
     const mod = await import('./socketio.js')
+    // 引擎单例 fail-fast：用例间复位（上例的 createSocketIO 已初始化引擎）
+    mod.__test_resetEngine()
     mod.createSocketIO(httpServer)
 
     // 模拟客户端连接 → 触发 io.on('connection', ...) 回调
@@ -4349,6 +4351,7 @@ describe('socketio connector', () => {
 
       const httpServer = createServer()
       const mod = await import('./socketio.js')
+      mod.__test_resetEngine()
       mod.createSocketIO(httpServer)
 
       // broadcastRestartDone 是 fire-and-forget，等微任务完成
@@ -4377,6 +4380,7 @@ describe('socketio connector', () => {
 
       const httpServer = createServer()
       const mod = await import('./socketio.js')
+      mod.__test_resetEngine()
       mod.createSocketIO(httpServer)
 
       // broadcastRestartDone 是 fire-and-forget，等落库完成（删文件即广播已完成）
@@ -4405,6 +4409,7 @@ describe('socketio connector', () => {
 
       const httpServer = createServer()
       const mod = await import('./socketio.js')
+      mod.__test_resetEngine()
       mod.createSocketIO(httpServer)
 
       await vi.waitFor(() => expect(existsSync(RESTART_DONE_FILE)).toBe(false))
@@ -4426,6 +4431,17 @@ describe('socketio connector', () => {
       handlers![0]()
 
       expect(mockSocketEmit).toHaveBeenCalledWith('all-agent-states', expect.any(Array))
+    })
+  })
+
+  // ─── 引擎单例 fail-fast（3.5 刀：热重启双注册表防护） ─────
+
+  describe('createSocketIO 单例 fail-fast', () => {
+    it('引擎已初始化时重复 createSocketIO → 抛错（防双注册表双驱动）', async () => {
+      const httpServer = createServer()
+      const mod = await import('./socketio.js')
+      // beforeEach 已 createSocketIO 一次——重复创建必须炸在启动，不静默双跑
+      expect(() => mod.createSocketIO(httpServer)).toThrow(/ExecutionEngine 已初始化/)
     })
   })
 
@@ -5427,6 +5443,7 @@ describe('对话内 diff 展示 — 富文本块通道', () => {
 
     const httpServer = createServer()
     const mod = await import('./socketio.js')
+    mod.__test_resetEngine()
     mod.createSocketIO(httpServer)
     connectionCallback!(mockSocket)
   })

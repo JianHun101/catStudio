@@ -49,29 +49,19 @@ import {
   removeRestartDone,
 } from '../restart-request.js'
 import { getRelevantMessages } from '../execution/context.js'
-import {
-  setRetraction,
-  clearRetraction,
-  listActiveStreams,
-  deleteActiveStream,
-  abortAgent,
-} from '../execution/state.js'
 import { createExecutionEngine, agentHasUsableApiKey } from '../execution/serial.js'
-import type { AgentTriggerMsg, ExecutionEngine } from '../execution/serial.js'
+import type {
+  AgentTriggerMsg,
+  ExecutionEngine,
+  ExecutionEngineTestHooks,
+} from '../execution/serial.js'
+import type { StreamState } from '../execution/state.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
 
 // 兼容 re-export（测试/internal/ingest 零改动；第 4 刀调用点迁移完成后收敛）
 // 恢复路径本地消费 rowToAgent——re-export 语法不引入模块内绑定，双行同源
 import { rowToAgent } from '../execution/row.js'
 export { rowToAgent } from '../execution/row.js'
-export {
-  getActiveStream,
-  __test_resetLockState,
-  __test_resetMentionCounts,
-  __test_resetM1Warned,
-  __getMentionCount,
-  __setMentionCount,
-} from '../execution/state.js'
 
 const log = createLogger('socketio')
 
@@ -82,7 +72,37 @@ let _io: SocketServer | null = null
 let _bus: (EngineBus & HandoffBus) | null = null
 
 /** 模块级引擎实例（createSocketIO 构造注入；兼容包装与恢复路径消费） */
-let _engine: ExecutionEngine | null = null
+let _engine: (ExecutionEngine & ExecutionEngineTestHooks) | null = null
+
+/**
+ * 兼容委托（3.5 刀）：internal.ts / socketio.test.ts 经引擎实例寻址状态——
+ * 引擎由 createSocketIO 初始化（生产路径恒先于任何请求存在），未初始化时
+ * no-op/undefined（模块级导入安全，第 4 刀 internal.ts 直连引擎后收敛）。
+ */
+export function getActiveStream(agentId: string): StreamState | undefined {
+  return _engine?.getActiveStream(agentId)
+}
+export function __test_resetLockState(): void {
+  _engine?.__test_resetLockState()
+}
+export function __test_resetMentionCounts(): void {
+  _engine?.__test_resetMentionCounts()
+}
+export function __test_resetM1Warned(): void {
+  _engine?.__test_resetM1Warned()
+}
+export function __getMentionCount(traceId: string, agentId: string): number {
+  return _engine?.__getMentionCount(traceId, agentId) ?? 0
+}
+export function __setMentionCount(traceId: string, agentId: string, count: number): void {
+  _engine?.__setMentionCount(traceId, agentId, count)
+}
+/** 测试钩子：卸载引擎实例（双注册表 fail-fast 断言后的用例间复位） */
+export function __test_resetEngine(): void {
+  _engine = null
+  _bus = null
+  _io = null
+}
 
 /** 获取 Socket.IO Server 实例（需在 createSocketIO() 之后调用） */
 export function getIO(): SocketServer | null {
@@ -126,6 +146,15 @@ function createSocketBus(io: SocketServer): EngineBus & HandoffBus {
 }
 
 export function createSocketIO(httpServer: HttpServer): SocketServer {
+  // 单例 fail-fast（3.5 刀，热重启双注册表防护）：引擎实例持有全量执行态
+  // （run 注册表/撤回标记/锁计数/配额），进程内重复创建 = 双注册表双驱动——
+  // 仓库没吃过的新失败类，宁可炸在启动也不静默双跑。测试用例间先 __test_resetEngine()
+  if (_engine) {
+    throw new Error(
+      'createSocketIO 重复调用：ExecutionEngine 已初始化（热重启双注册表防护；测试先 __test_resetEngine()）'
+    )
+  }
+
   const io = new SocketServer(httpServer, {
     cors: {
       origin: [/^http:\/\/localhost:\d+$/],
@@ -240,7 +269,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
       // 恢复正在流式输出的 Agent 的打字气泡。
       // 客户端切换会话时 typingStates 被清空，服务端补推当前状态以避免气泡消失。
-      for (const [agentId, stream] of listActiveStreams()) {
+      for (const [agentId, stream] of _engine!.listActiveStreams()) {
         if (stream.sessionId === sessionId && agentIds.includes(agentId)) {
           socket.emit(Events.AGENT_TYPING, {
             sessionId,
@@ -315,7 +344,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
       // 2. 标记撤回（让正在执行的 runAgentReply 提前终止）
       //    同时清理所有排队命令（Window ①：Agent 在 FIFO 队列中等待）
-      setRetraction(data.messageId)
+      _engine!.setRetraction(data.messageId)
       const cancelledCount = cancelQueuedCommand(data.messageId)
       if (cancelledCount > 0) {
         log.info('retraction cancelled queued commands', {
@@ -387,7 +416,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         })
       } catch (err: any) {
         // 撤回失败时清理标记，避免永久残留
-        clearRetraction(data.messageId)
+        _engine!.clearRetraction(data.messageId)
         log.error('message retraction failed', {
           sessionId: data.sessionId,
           messageId: data.messageId,
@@ -398,7 +427,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 撤回成功后：如果该消息没有 Agent 正在执行（全部在排队中被 cancel）
       // → 没有 runAgentReply 会清理标记 → 在此处清理，防止内存泄漏
       if (!isAnyAgentExecutingMessage(data.messageId)) {
-        clearRetraction(data.messageId)
+        _engine!.clearRetraction(data.messageId)
       }
       // 如果有 Agent 正在执行，标记由 runAgentReply 出口清理
     })
@@ -484,7 +513,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       const cleared = clearAgentQueue(agentId)
       // 中断当前执行——executeAgentsSerial 的 abort 检查发现 signal.aborted 后
       // 跳过 A2A 解析、走失败路径收口（execution_logs 记 failed）
-      const executing = abortAgent(agentId)
+      const executing = _engine!.abortAgent(agentId)
 
       if (cleared > 0 || executing) {
         log.info('agent interrupted by user', { agentId, cleared })

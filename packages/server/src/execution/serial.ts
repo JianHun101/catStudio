@@ -1,8 +1,10 @@
 /**
- * Execution — 点单管理组（第 3 刀从 connectors/socketio.ts 迁出，零控制流变化）。
+ * Execution — 点单管理组（第 3 刀从 connectors/socketio.ts 迁出，零控制流变化；
+ * 3.5 刀模块态 → 实例态：状态经注入的 EngineState 参数消费，finalizeRun 统一
+ * 五处 completeExecution 收口点）。
  *
  * executeOneAgent / executeAgentsSerial / drainQueuedCommand + 执行常量与
- * no-key 守卫。输出经注入 bus（EngineBus & HandoffBus），状态经 ./state.js accessor。
+ * no-key 守卫。输出经注入 bus（EngineBus & HandoffBus），状态经注入 state。
  * 日志通道沿用 'socketio'（零可观测行为变化）。
  */
 
@@ -38,18 +40,7 @@ import { resolveRolePlaceholders } from './hints.js'
 import { runAgentReply } from './reply.js'
 import { rowToAgent } from './row.js'
 import type { EngineBus, HandoffBus } from './bus.js'
-import {
-  registerAbort,
-  unregisterAbort,
-  acquireLock,
-  releaseLock,
-  maybeWarnM1,
-  getMentionCount,
-  setMentionCount,
-  clearMentionCountsForTrace,
-  deleteActiveStream,
-  abortAgent,
-} from './state.js'
+import { createEngineState, type EngineState, type StreamState } from './state.js'
 
 const log = createLogger('socketio')
 
@@ -104,12 +95,33 @@ export type AgentTriggerMsg = {
 }
 
 /**
+ * 执行收口统一漏斗（3.5 刀）：run 注册表 endRun + completeExecution 单点合并。
+ * 此前五处 completeExecution 各自管理清理——abort 注销在 finally、stream 清理
+ * 在 inner catch、其余路径不清理，失败漏斗不一致（事故史最密集处）。
+ * endRun 幂等：无注册（no-key 早退）/已清理（reply 撤回出口）路径 no-op。
+ * @returns completeExecution 弹出的下一队列命令（调用点自行 drain）
+ */
+async function finalizeRun(
+  state: EngineState,
+  agentId: string,
+  opts: { success: boolean; errorMessage?: string; replyMessageId?: string; traceId: string }
+): Promise<DispatchCommand | undefined> {
+  state.endRun(agentId)
+  return completeExecution(agentId, opts.success, {
+    ...(opts.errorMessage ? { errorMessage: opts.errorMessage } : {}),
+    ...(opts.replyMessageId ? { replyMessageId: opts.replyMessageId } : {}),
+    traceId: opts.traceId,
+  })
+}
+
+/**
  * 队列 drain：执行 completeExecution 弹出的下一命令（补审计 + 出队反查作者 +
  * B 合并点名 + 递归执行）。抽取为共享函数——成功路径（completeExecution 后立即
  * 调用）与 catch 路径（异常后弹出的命令不丢弃）两处复用。
  * @returns 传入的 claudeRan OR 本次 drain 是否执行过 Claude 适配器
  */
 async function drainQueuedCommand(
+  state: EngineState,
   bus: EngineBus & HandoffBus,
   agent: AgentConfig,
   queuedCmd: DispatchCommand,
@@ -152,6 +164,7 @@ async function drainQueuedCommand(
   }
   return (
     (await executeAgentsSerialImpl(
+      state,
       bus,
       queuedCmd.sessionId,
       [agent],
@@ -178,6 +191,7 @@ async function drainQueuedCommand(
  * - A2A 递归（触发前提是回复已落库）与队列 drain 保持原语义，天然串行
  */
 async function executeOneAgent(
+  state: EngineState,
   bus: EngineBus & HandoffBus,
   sessionId: string,
   agent: AgentConfig,
@@ -189,16 +203,16 @@ async function executeOneAgent(
   sessionAgentNames: string[]
 ): Promise<boolean> {
   // 状态检查（同步——必须留在第一个 await 之前，见上方约束）
-  const state = getAgentState(agent.id)
-  if (!state || state.status !== 'busy') return false
+  const slot = getAgentState(agent.id)
+  if (!slot || slot.status !== 'busy') return false
   // 跨会话忙碌：agent 正在其他 session 执行，已入队，不在此执行
-  if (state.sessionId !== sessionId) return false
+  if (slot.sessionId !== sessionId) return false
   // 只执行"本次 dispatch 标记的执行"：agent 正在处理其他消息时（本消息在
   // FIFO 队列中等待排空），必须跳过——否则同一条消息会被立即执行一次、
   // 队列排空再执行一次，产生重复回复（08:43:15 双补填事故根因）。
   // completeExecution 弹出队列时会更新 currentTriggerMessageId，
   // 排空路径自然通过此检查。
-  if (state.currentTriggerMessageId !== triggerMsg.id) return false
+  if (slot.currentTriggerMessageId !== triggerMsg.id) return false
 
   // 检查 API Key（免 key provider 如 opencode 本地认证，不拦）
   if (!agentHasUsableApiKey(agent)) {
@@ -219,10 +233,10 @@ async function executeOneAgent(
     // 排队命令同样会落入 running+无执行日志的幽灵态（slot 卡 busy，恢复机制
     // 全盲）。弹出后补 drain：子链在 no-key 检查处逐个 completeExecution 弹
     // 下一个，直到队列空（每条发一次配置提示，执行日志逐条落库）
-    const nextCmd = await completeExecution(agent.id, true, { traceId })
+    const nextCmd = await finalizeRun(state, agent.id, { success: true, traceId })
     if (nextCmd) {
       try {
-        await drainQueuedCommand(bus, agent, nextCmd, false)
+        await drainQueuedCommand(state, bus, agent, nextCmd, false)
       } catch (e: any) {
         log.error('drain failed after no-api-key completion (queue item stuck)', {
           agentId: agent.id,
@@ -240,7 +254,7 @@ async function executeOneAgent(
   // 改造前 lockAcquired 是循环外变量——A 完成即删锁、B 执行期间无锁的
   // dev.js 误重启隐患顺带根治）
   const needsLock = agent.llmProvider === 'claude'
-  if (needsLock) acquireLock()
+  if (needsLock) state.acquireLock()
   try {
     let claudeRan = needsLock
     let reply: { content: string; msgId: string } = {
@@ -248,12 +262,12 @@ async function executeOneAgent(
       msgId: '',
     }
     const abortController = new AbortController()
-    registerAbort(agent.id, abortController)
+    state.registerAbort(agent.id, abortController)
     try {
       // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
       // AbortController 确保超时后子进程被 kill（P0-1 修复）
       reply = await Promise.race([
-        runAgentReply(bus, sessionId, agent, triggerMsg, traceId, abortController.signal),
+        runAgentReply(state, bus, sessionId, agent, triggerMsg, traceId, abortController.signal),
         new Promise<never>((_, reject) =>
           setTimeout(() => {
             abortController.abort()
@@ -262,8 +276,9 @@ async function executeOneAgent(
         ),
       ])
     } catch (err: any) {
+      // run 注册表收口由 finalizeRun 的 endRun 统一（此前 abort 注销在 finally、
+      // stream 清理在此处、其余失败漏斗不清理——各管各的正是本刀收编对象）
       abortController.abort()
-      deleteActiveStream(agent.id) // 确保任何异常都 kill 子进程
       log.error('agent execution failed', {
         agentId: agent.id,
         agentName: agent.name,
@@ -286,13 +301,14 @@ async function executeOneAgent(
       // LLM 失败/超时 + 有排队命令时必现（2026-08-11 26 分钟假 running 实锤同族
       // 机制：弹出后延迟/丢弃执行，用户侧"店长一直阻塞"）。try/catch 隔离——
       // drain 自身失败不掩盖原异常
-      const nextCmd = await completeExecution(agent.id, false, {
+      const nextCmd = await finalizeRun(state, agent.id, {
+        success: false,
         errorMessage: err.message || 'unknown error',
         traceId,
       })
       if (nextCmd) {
         try {
-          claudeRan = await drainQueuedCommand(bus, agent, nextCmd, claudeRan)
+          claudeRan = await drainQueuedCommand(state, bus, agent, nextCmd, claudeRan)
         } catch (e: any) {
           log.error('drain failed after execution error (queue item stuck)', {
             agentId: agent.id,
@@ -302,8 +318,6 @@ async function executeOneAgent(
         }
       }
       return claudeRan
-    } finally {
-      unregisterAbort(agent.id)
     }
 
     // 用户中断检查：AGENT_INTERRUPT handler 对本执行 abort 后，runAgentReply
@@ -324,7 +338,8 @@ async function executeOneAgent(
         mentions: [],
         createdAt: new Date().toISOString(),
       })
-      await completeExecution(agent.id, false, {
+      await finalizeRun(state, agent.id, {
+        success: false,
         errorMessage: 'interrupted',
         traceId,
       })
@@ -336,9 +351,10 @@ async function executeOneAgent(
     // 重启恢复精确跳过，不再被后续其他回复的时间窗误判）。撤回窗（Window ②/③）
     // 提前返回的 ghost id 不可达——撤回必删触发消息与 execution_logs（MESSAGE_RETRACT
     // handler），恢复入口 getMessageByIdOnly 直接 continue
-    const queuedCmd = await completeExecution(agent.id, true, {
-      traceId,
+    const queuedCmd = await finalizeRun(state, agent.id, {
+      success: true,
       replyMessageId: reply.msgId,
+      traceId,
     })
 
     // W2 L2 评估采样：fire-and-forget——不 await、不占 slot、不进 dispatch 主链，
@@ -350,7 +366,7 @@ async function executeOneAgent(
     // A2A 嵌套链跑完（d448413a 案例：07:00:02 弹出、07:05:54 才执行——被两层
     // A2A await 拖 5.9 分钟，'running' 状态干挂 + 槽位"忙碌"假象）
     if (queuedCmd) {
-      claudeRan = await drainQueuedCommand(bus, agent, queuedCmd, claudeRan)
+      claudeRan = await drainQueuedCommand(state, bus, agent, queuedCmd, claudeRan)
     }
 
     // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
@@ -362,7 +378,7 @@ async function executeOneAgent(
     // 并发化后注：A2A 调度点的「检查+预留」（下方原子段）与本处实际执行
     // 双计——预留是并发互斥机制（防双双放行），本处计真实执行（配额确认）
     if (depth > 0) {
-      setMentionCount(traceId, agent.id, getMentionCount(traceId, agent.id) + 1)
+      state.setMentionCount(traceId, agent.id, state.getMentionCount(traceId, agent.id) + 1)
     }
 
     // Agent-to-agent dispatch: 检测回复中的 @mentions
@@ -495,9 +511,9 @@ async function executeOneAgent(
         // 未执行（跳过/失败）的配额不扣回——阈值 5 下影响边际，防循环优先
         const limitedAgents: AgentConfig[] = []
         for (const a of policy.allowed) {
-          const count = getMentionCount(traceId, a.id)
+          const count = state.getMentionCount(traceId, a.id)
           if (count >= MAX_MENTIONS_PER_AGENT) continue
-          setMentionCount(traceId, a.id, count + 1) // 预留配额
+          state.setMentionCount(traceId, a.id, count + 1) // 预留配额
           limitedAgents.push(a)
         }
         if (limitedAgents.length < policy.allowed.length) {
@@ -535,6 +551,7 @@ async function executeOneAgent(
           await dispatch(sessionId, agentTrigger, limitedAgents, traceId, depth + 1)
           claudeRan =
             (await executeAgentsSerialImpl(
+              state,
               bus,
               sessionId,
               limitedAgents,
@@ -549,7 +566,7 @@ async function executeOneAgent(
       // 嵌句 @ 是路由静默丢失的实锤形态（ds@「位置：@店长 请收口」mentions=[]）；
       // 本防线只在全链路（post_message + 文本行首 @）都失败时响应，正常路由零打扰
       const inlineMentions = detectInlineMentions(reply.content, sessionAgentNames)
-      if (inlineMentions.length > 0 && maybeWarnM1(agent.id)) {
+      if (inlineMentions.length > 0 && state.maybeWarnM1(agent.id)) {
         log.warn('agent reply has inline mention but no route', {
           traceId,
           fromAgent: agent.name,
@@ -576,7 +593,8 @@ async function executeOneAgent(
       error: err.message,
       traceId,
     })
-    const nextCmd = await completeExecution(agent.id, false, {
+    const nextCmd = await finalizeRun(state, agent.id, {
+      success: false,
       errorMessage: err.message || 'post-execution error',
       traceId,
     }).catch(() => {
@@ -595,7 +613,7 @@ async function executeOneAgent(
     let drainClaudeRan = needsLock
     if (nextCmd) {
       try {
-        drainClaudeRan = await drainQueuedCommand(bus, agent, nextCmd, needsLock)
+        drainClaudeRan = await drainQueuedCommand(state, bus, agent, nextCmd, needsLock)
       } catch (e: any) {
         log.error('drain failed after post-execution error (queue item stuck)', {
           agentId: agent.id,
@@ -606,11 +624,12 @@ async function executeOneAgent(
     }
     return drainClaudeRan
   } finally {
-    if (needsLock) releaseLock()
+    if (needsLock) state.releaseLock()
   }
 }
 
 async function executeAgentsSerialImpl(
+  state: EngineState,
   bus: EngineBus & HandoffBus,
   sessionId: string,
   agents: AgentConfig[],
@@ -640,6 +659,7 @@ async function executeAgentsSerialImpl(
     const results = await Promise.allSettled(
       batch.map((agent) =>
         executeOneAgent(
+          state,
           bus,
           sessionId,
           agent,
@@ -658,7 +678,7 @@ async function executeAgentsSerialImpl(
 
   // 顶层调度完成后清理 + 自动提交
   if (depth === 0) {
-    clearMentionCountsForTrace(traceId)
+    state.clearMentionCountsForTrace(traceId)
     try {
       // 自动 git commit（忽略非 git 仓库或无改动的情况）。
       // 会话 worktree 存在时提交到 worktree（落会话分支，提交隔离）；
@@ -715,7 +735,9 @@ async function executeAgentsSerialImpl(
   return anyClaude
 }
 
-/** 执行引擎公共面（第 3 刀最小形态：执行入口 + 中断控制；恢复入口第 4 刀并入） */
+/** 执行引擎公共面（第 3 刀最小形态：执行入口 + 中断控制；恢复入口第 4 刀并入）。
+ *  3.5 刀补状态 accessor：connector handler（MESSAGE_RETRACT / JOIN_SESSION）与
+ *  internal.ts（经 socketio 委托）经此寻址引擎实例态。 */
 export interface ExecutionEngine {
   /** 顶层串行执行入口（dispatch 配对调用：dispatch 标 busy → 本方法推 LLM） */
   executeAgentsSerial(
@@ -727,13 +749,49 @@ export interface ExecutionEngine {
   ): Promise<boolean>
   /** AGENT_INTERRUPT handler：abort 该 agent 当前执行。返回是否真的在跑 */
   abortAgent(agentId: string): boolean
+  /** MESSAGE_RETRACT handler：标记撤回（runAgentReply Window ②/③ 检查） */
+  setRetraction(messageId: string): void
+  /** 撤回标记清理（handler 失败/无执行者清理；runAgentReply 出口内部走 state） */
+  clearRetraction(messageId: string): void
+  /** JOIN_SESSION 打字气泡恢复遍历 */
+  listActiveStreams(): Array<[string, StreamState]>
+  /** internal.ts 信号校验（只读） */
+  getActiveStream(agentId: string): StreamState | undefined
 }
 
-/** 引擎工厂：bus 构造注入（零 socket 引用）；生产单实例，测试每用例新造 */
-export function createExecutionEngine(bus: EngineBus & HandoffBus): ExecutionEngine {
+/** 测试钩子视图（socketio 兼容 re-export 委托消费；生产路径不调用） */
+export interface ExecutionEngineTestHooks {
+  __test_reset(): void
+  __test_resetLockState(): void
+  __test_resetMentionCounts(): void
+  __test_resetM1Warned(): void
+  __test_resetRuns(): void
+  __getMentionCount(traceId: string, agentId: string): number
+  __setMentionCount(traceId: string, agentId: string, count: number): void
+}
+
+/**
+ * 引擎工厂：bus + state 构造注入（零 socket 引用）——每个实例自带独立状态，
+ * 生产单实例（connector createSocketIO 持有，重复创建 fail-fast），测试每用例新造。
+ */
+export function createExecutionEngine(
+  bus: EngineBus & HandoffBus
+): ExecutionEngine & ExecutionEngineTestHooks {
+  const state = createEngineState()
   return {
     executeAgentsSerial: (sessionId, agents, triggerMsg, traceId, depth = 0) =>
-      executeAgentsSerialImpl(bus, sessionId, agents, triggerMsg, traceId, depth),
-    abortAgent,
+      executeAgentsSerialImpl(state, bus, sessionId, agents, triggerMsg, traceId, depth),
+    abortAgent: (agentId) => state.abortAgent(agentId),
+    setRetraction: (messageId) => state.setRetraction(messageId),
+    clearRetraction: (messageId) => state.clearRetraction(messageId),
+    listActiveStreams: () => state.listActiveStreams(),
+    getActiveStream: (agentId) => state.getActiveStream(agentId),
+    __test_reset: () => state.__test_reset(),
+    __test_resetLockState: () => state.__test_resetLockState(),
+    __test_resetMentionCounts: () => state.__test_resetMentionCounts(),
+    __test_resetM1Warned: () => state.__test_resetM1Warned(),
+    __test_resetRuns: () => state.__test_resetRuns(),
+    __getMentionCount: (traceId, agentId) => state.getMentionCount(traceId, agentId),
+    __setMentionCount: (traceId, agentId, count) => state.setMentionCount(traceId, agentId, count),
   }
 }

@@ -1,8 +1,9 @@
 /**
- * Execution — runAgentReply（第 2 刀从 connectors/socketio.ts 迁出，零控制流变化）。
+ * Execution — runAgentReply（第 2 刀从 connectors/socketio.ts 迁出，零控制流变化；
+ * 3.5 刀模块态 → 实例态：状态经注入的 EngineState 参数消费）。
  *
- * 输出经注入的 MessageBus（bus: EngineBus & HandoffBus）——引擎零 socket.io 引用；
- * 模块态经 ./state.js accessor。日志通道沿用 'socketio'（零可观测行为变化）。
+ * 输出经注入的 MessageBus（bus: EngineBus & HandoffBus）——引擎零 socket.io 引用。
+ * 日志通道沿用 'socketio'（零可观测行为变化）。
  */
 
 import { randomBytes } from 'node:crypto'
@@ -58,7 +59,7 @@ import {
   buildDynamicHints,
 } from './hints.js'
 import type { EngineBus, HandoffBus } from './bus.js'
-import { setActiveStream, deleteActiveStream, hasRetraction, clearRetraction } from './state.js'
+import type { EngineState } from './state.js'
 
 const log = createLogger('socketio')
 
@@ -66,6 +67,7 @@ const log = createLogger('socketio')
 const HEARTBEAT_INTERVAL_MS = 10_000
 
 export async function runAgentReply(
+  state: EngineState,
   bus: EngineBus & HandoffBus,
   sessionId: string,
   agent: AgentConfig,
@@ -567,7 +569,7 @@ export async function runAgentReply(
     messageId: msgId,
     content: '',
   })
-  setActiveStream(agent.id, { sessionId, messageId: msgId, content: '', token: signalToken })
+  state.setActiveStream(agent.id, { sessionId, messageId: msgId, content: '', token: signalToken })
 
   // 状态：回复中（带 startedAt——前端据此显示「回复中 · 已 N 秒」递增，替代静止标签）
   const startedAt = Date.now()
@@ -588,7 +590,7 @@ export async function runAgentReply(
       traceId,
       agentId: agent.id,
     })
-    deleteActiveStream(agent.id)
+    state.deleteActiveStream(agent.id)
     return { content: '[消息已撤回]', msgId }
   }
 
@@ -645,18 +647,18 @@ export async function runAgentReply(
       // ── 撤回时窗保护（Window ③）──────────────────────
       // 流式输出中途撤回 → 提前终止
       // 检查是否被撤回或超时取消
-      if (hasRetraction(triggerMsg.id)) {
+      if (state.hasRetraction(triggerMsg.id)) {
         log.info('agent reply aborted (retracted)', {
           traceId,
           agentId: agent.id,
         })
-        deleteActiveStream(agent.id)
-        clearRetraction(triggerMsg.id)
+        state.deleteActiveStream(agent.id)
+        state.clearRetraction(triggerMsg.id)
         return { content: fullContent || '[消息已撤回]', msgId }
       }
       if (signal?.aborted) {
         log.info('agent reply aborted (timeout)', { traceId, agentId: agent.id })
-        deleteActiveStream(agent.id)
+        state.deleteActiveStream(agent.id)
         return { content: fullContent, msgId }
       }
       if (chunk.content) {
@@ -673,7 +675,7 @@ export async function runAgentReply(
           messageId: msgId,
           content: displayContent,
         })
-        setActiveStream(agent.id, {
+        state.setActiveStream(agent.id, {
           sessionId,
           messageId: msgId,
           content: displayContent,
@@ -691,7 +693,7 @@ export async function runAgentReply(
       traceId,
       agentId: agent.id,
     })
-    deleteActiveStream(agent.id)
+    state.deleteActiveStream(agent.id)
     return { content: fullContent, msgId }
   }
 
@@ -861,8 +863,8 @@ export async function runAgentReply(
   })
 
   // P2: 清理 retractionRequests + activeStreams，防止内存泄漏
-  clearRetraction(triggerMsg.id)
-  deleteActiveStream(agent.id)
+  state.clearRetraction(triggerMsg.id)
+  state.deleteActiveStream(agent.id)
 
   return { content: fullContent, msgId }
 }
