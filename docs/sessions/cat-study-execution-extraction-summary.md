@@ -2,16 +2,17 @@
 
 ## What
 
-候选 1「Connector 成了业务核心」的实施：把 3014 行的 `connectors/socketio.ts` 拆成薄传输层 + `packages/server/src/execution/` 执行引擎。**已完成 1-3 刀**（每刀独立 commit、全绿、可回滚）：
+候选 1「Connector 成了业务核心」的实施：把 3014 行的 `connectors/socketio.ts` 拆成薄传输层 + `packages/server/src/execution/` 执行引擎。**已完成 1-3.5 刀**（每刀独立 commit、全绿、可回滚）：
 
-| 刀       | commit  | 内容                                                                                                                                                                                                                                                                                                                                                                                        |
-| -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 决策留痕 | a188f21 | CONTEXT.md 新增 **Execution（执行引擎）** 词条 + Message Bus 补注；ADR 草稿 `docs/adr/draft-execution-engine-extraction.md`                                                                                                                                                                                                                                                                 |
-| 第 1 刀  | 86341bb | 纯函数组（提示构建/上下文过滤/摘要压缩）→ `execution/hints.ts` + `execution/context.ts`；45 个测试 co-located 迁入                                                                                                                                                                                                                                                                          |
-| 第 2 刀  | 02766c5 | `runAgentReply` → `execution/reply.ts`（8 处 emit 换 bus、performHandoff 收窄、状态 accessor）；`execution/bus.ts`（EngineBus 6 方法 + HandoffBus 2 方法纯类型）+ `execution/state.ts`；shared 新增 MessageAgentStatus 联合 + 5 个载荷类型；`createSocketBus(io)` 适配器落 connector                                                                                                        |
-| 第 3 刀  | e0b202e | 执行循环（executeOneAgent/executeAgentsSerial/drainQueuedCommand）→ `execution/serial.ts`（含执行常量、AgentTriggerMsg、agentHasUsableApiKey、`createExecutionEngine(bus)` 工厂）；`execution/row.ts`（rowToAgent）；state.ts 扩充（activeAborts/锁/mention 配额/M1 频控）；socketio.ts 1110 行（构造注入 `_engine` + **executeAgentsSerial 兼容包装**，55 处测试与 ingest/恢复路径零改动） |
+| 刀       | commit  | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 决策留痕 | a188f21 | CONTEXT.md 新增 **Execution（执行引擎）** 词条 + Message Bus 补注；ADR 草稿 `docs/adr/draft-execution-engine-extraction.md`                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 第 1 刀  | 86341bb | 纯函数组（提示构建/上下文过滤/摘要压缩）→ `execution/hints.ts` + `execution/context.ts`；45 个测试 co-located 迁入                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 第 2 刀  | 02766c5 | `runAgentReply` → `execution/reply.ts`（8 处 emit 换 bus、performHandoff 收窄、状态 accessor）；`execution/bus.ts`（EngineBus 6 方法 + HandoffBus 2 方法纯类型）+ `execution/state.ts`；shared 新增 MessageAgentStatus 联合 + 5 个载荷类型；`createSocketBus(io)` 适配器落 connector                                                                                                                                                                                                                                                                                                |
+| 第 3 刀  | e0b202e | 执行循环（executeOneAgent/executeAgentsSerial/drainQueuedCommand）→ `execution/serial.ts`（含执行常量、AgentTriggerMsg、agentHasUsableApiKey、`createExecutionEngine(bus)` 工厂）；`execution/row.ts`（rowToAgent）；state.ts 扩充（activeAborts/锁/mention 配额/M1 频控）；socketio.ts 1110 行（构造注入 `_engine` + **executeAgentsSerial 兼容包装**，55 处测试与 ingest/恢复路径零改动）                                                                                                                                                                                         |
+| 3.5 刀   | 8d0b405 | **模块态 → 实例态**：state.ts 6 个 Map/计数收进 `createEngineState()` 工厂实例字段（run 注册表合并 activeAborts+activeStreams、撤回标记、锁引用计数、M1 频控、mention 配额跨 run 存活）；`finalizeRun` 统一五处 completeExecution 收口（endRun 单点清理幂等）；reply/serial 经 `state: EngineState` 参数消费；connector 经引擎 accessor 委托（internal.ts 零改动）；createSocketIO **单例 fail-fast**（热重启双注册表防护 + `__test_resetEngine` 测试复位）；**假 bus 形态 a 测试 8 例落地** `execution/serial.test.ts`（真实 SQLite + 真实 dispatch + 假 bus——配对链首次真实测试） |
 
-**当前 socketio.ts 剩余**：传输层（handlers/bridges/restart 广播）+ 三条恢复路径 + 兼容 re-export（第 4 刀迁移后收敛）。
+**当前 socketio.ts 剩余**：传输层（handlers/bridges/restart 广播）+ 三条恢复路径 + 兼容 re-export + executeAgentsSerial 兼容包装（第 4 刀迁移后收敛）。
 
 ## Why
 
@@ -41,16 +42,17 @@
    ```bash
    ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-flash git commit -m "..."
    ```
-   根因：本机 Windows 注册表两个用户环境变量是 `deepseek-v4-flash[1m]`，`npx` 经 `.cmd` 垫片 → cmd.exe 从注册表重注入；`env -u` 拦不住。claude buildEnv 测试断言代码默认 'deepseek-v4-flash'。
-2. **两个间歇性 flake**（已记 ADR 观察项，根修另开单）：摘要压缩组（验收2/9/10/11）+ 并发重叠测试。提交时钩子偶挂，重试即可；单跑稳定绿。
+   根因：本机 Windows 注册表两个用户环境变量是 `deepseek-v4-flash[1m]`，`npx` 经 `.cmd` 垫片 → cmd.exe 从注册表重注入；`env -u` 拦不住。claude buildEnv 测试断言代码默认 'deepseek-v4-flash'。（实测：带上环境覆盖后该测试转绿。）
+2. **两个间歇性 flake**（已记 ADR 观察项，根修另开单）：摘要压缩组（验收3 等）+ 并发重叠测试。提交时钩子偶挂，重试即可；单跑也可能挂一次、再跑即绿——**判定 flake 的方法：重跑一次看是否转绿**。
 3. 测试命令：`cd packages/server && npx vitest run`；lint：仓库根 `pnpm lint`。
+4. **新测试文件**：`execution/serial.test.ts` 已 `git add` 进 3.5 刀 commit；后续新文件记得先 add 再 `commit --only`（untracked 文件不在 --only pathspec 内会报错）。
+5. post-commit hook 未投递 handoff-draft 属正常（无 uuid 标记），`.handoff-draft.md` 已 gitignore，不扫入提交。
 
-### 3.5 刀（模块态 → 实例态，独立刀）
+### 3.5 刀（模块态 → 实例态）✅ 已收口（8d0b405）
 
-- state.ts 的 6 个 Map/计数收进 ExecutionEngine 实例字段：finalizeRun 统一四份失败漏斗、run 注册表合并 activeAborts+activeStreams、mentionCounts 跨 run 存活（engine 级字段）
-- 单例 fail-fast 断言（tsx watch 热重启双注册表防护）
-- 假 bus 形态 a 单元测试在此刀落地（真实 SQLite + 真实 dispatch + 假 bus）
-- 该区域是事故史最密集处——独立 commit + 专门测试，不混入其他刀
+- state.ts 6 个 Map/计数收进 ExecutionEngine 实例字段（createEngineState 工厂）；finalizeRun 统一五处收口；run 注册表合并 activeAborts+activeStreams；mentionCounts 跨 run 存活
+- 单例 fail-fast 断言（createSocketIO 重复调用抛错 + `__test_resetEngine` 测试复位——socketio.test.ts 5 处 createSocketIO 前加复位）
+- 假 bus 形态 a 测试 8 例落地（真实 SQLite + 真实 dispatch + 假 bus）
 
 ### 第 4 刀（恢复路径 + 断环，最后也是最大的一刀）
 
@@ -67,4 +69,4 @@
 ### 工作区状态
 
 - 用户未提交改动勿碰：`packages/web/src/components/AgentEditModal.vue`、`packages/web/src/views/SettingsView.vue`
-- 本文件未提交（新 token 先读它再动手；可自行提交）
+- 本文件随每刀进度更新提交（3.5 刀状态见上；第 4 刀完成后更新 What 表）
