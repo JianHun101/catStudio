@@ -278,4 +278,40 @@ describe('closeoutSession（一键收口）', () => {
       rmSync(notRepo, { recursive: true, force: true })
     }
   })
+
+  it('主仓库不在 dev 分支 → preflight 拒绝（不合并、不删 worktree/分支、不写 gate）', () => {
+    const id = 'co-offdev-01'
+    const path = makeSessionCommit(id)
+    const devHead = git('rev-parse HEAD')
+    git('checkout -b not-dev-branch')
+    try {
+      const r = closeout.closeoutSession(id)
+      expect(r.ok).toBe(false)
+      expect(r.step).toBe('preflight')
+      expect(r.error).toContain('非 dev')
+      // 守卫在 preflight 最前：merge/worktree/gate/checkout 全未触碰
+      expect(git('rev-parse HEAD')).toBe(devHead)
+      const branch = gitUtils.sessionBranch(gitUtils.sessionShortId(id))
+      expect(git(`branch --list ${branch}`)).toContain(branch)
+      expect(existsSync(path)).toBe(true)
+      expect(git('branch --show-current')).toBe('not-dev-branch')
+    } finally {
+      git('checkout dev')
+    }
+  })
+
+  it('detached HEAD → preflight 拒绝（无 checkout 分支，收口目标不定）', () => {
+    const id = 'co-detach-01'
+    makeSessionCommit(id)
+    git('checkout --detach HEAD')
+    try {
+      const r = closeout.closeoutSession(id)
+      expect(r.ok).toBe(false)
+      expect(r.step).toBe('preflight')
+      expect(r.error).toContain('detached')
+      expect(git('rev-parse --abbrev-ref HEAD')).toBe('HEAD')
+    } finally {
+      git('checkout dev')
+    }
+  })
 })

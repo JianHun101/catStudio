@@ -559,7 +559,7 @@ function cleanupWorktreeResidue(wtPath: string): void {
  * 不敏感比较，天然覆盖 D:\ 与 d:\ 的盘符大小写差异。位于其外/兄弟/上级 → 以 '..'
  * 开头或绝对 → false。
  */
-function isPathInside(parent: string, child: string): boolean {
+export function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child)
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }

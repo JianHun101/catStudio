@@ -21,17 +21,20 @@
  * - 幂等 check-then-act：中断重跑 = 续跑，从 git 现状推导已完成的步——
  *   分支不存在 → merge 跳过；worktree 目录不存在 → remove 跳过；gate 值相同
  *   → 不重写；已在 dev → checkout no-op。
+ * - preflight onDev 守卫：主仓库当前 checkout 非 dev（含 detached HEAD）→ 拒绝
+ *   收口，防止 merge 把 session 提交合进错分支、随删分支不可逆丢失。
  * - push 不进收口器：收口器只做本地机械步骤（merge/删/写 gate/切分支），
  *   「本地↔共享」的 push 边界属用户决策，走 push 审批节点。
  */
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 import {
   cleanGitEnv,
   getMainRepoRoot,
+  isPathInside,
   removeSessionWorktree,
   sessionBranch,
   sessionShortId,
@@ -87,12 +90,6 @@ function branchRefExists(mainRoot: string, branch: string): boolean {
   }
 }
 
-/** child 是否等于或位于 parent 目录内（与 git-utils.isPathInside 同款语义） */
-function isPathInside(parent: string, child: string): boolean {
-  const rel = relative(parent, child)
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-}
-
 /**
  * @internal step ① 合并会话分支进当前分支（收口时主工作区在 dev）。
  * mainRoot 由 closeoutSession preflight 探测一次传入（自指场景下后续无法再探测）。
@@ -141,6 +138,8 @@ export function removeWorktree(mainRoot: string, sessionId: string): StepResult 
  * @internal step ③ 写 .push-gate = 主仓库当前 HEAD（merge 后的 dev HEAD）。
  * 幂等：gate 值相同不重写。重定向经 writeFileSync（禁 shell），
  * 内容统一无尾随换行（trim 后比较）。
+ * sessionId 参数为统一 step 签名 (mainRoot, sessionId) 保留——四个 @internal
+ * step 同签名，收口器/测试可统一调用；本步实际用不到该参数。
  */
 export function writeGate(mainRoot: string, sessionId: string): StepResult {
   try {
@@ -251,6 +250,30 @@ export function closeoutSession(sessionId: string): CloseoutResult {
     return { ok: false, step: 'preflight', error: '无法定位主仓库根（git-common-dir 探测失败）' }
   const shortId = sessionShortId(sessionId)
   if (!shortId) return { ok: false, step: 'preflight', error: 'sessionId 无法派生会话 short id' }
+
+  // onDev 守卫（吐槽猫 OQ1）：收口器默认收口到 dev——mergeSession 会把会话分支合进
+  // 「主仓库当前 checkout 的分支」。非 dev 分支误调会把 session 提交合进错分支，
+  // 随后 removeWorktree 删分支 → 合进错分支的提交随分支删除不可逆丢失。守卫放
+  // preflight 最前，任何 step 执行前先确认主工作区在 dev。
+  let currentBranch = ''
+  try {
+    currentBranch = runGit(mainRoot, ['branch', '--show-current'])
+  } catch {
+    return {
+      ok: false,
+      step: 'preflight',
+      error: '无法探测主仓库当前分支（git branch --show-current 失败）',
+    }
+  }
+  if (currentBranch !== 'dev') {
+    return {
+      ok: false,
+      step: 'preflight',
+      error: currentBranch
+        ? `主仓库当前在 ${currentBranch} 分支，非 dev——拒绝收口（防止 session 提交合进错分支）`
+        : '主仓库当前处于 detached HEAD，非 dev——拒绝收口',
+    }
+  }
 
   const m = mergeSession(mainRoot, sessionId)
   if (m && !m.ok) return { ok: false, step: 'merge', error: m.error }
