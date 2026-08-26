@@ -320,10 +320,12 @@ describe('SettingsView 猫咪管理（B2 改静态配置——会话动态信息
     expect(source).toContain('v-model="newAgentForm.llmProvider"')
     expect(source).toContain('v-model="newAgentForm.llmModel"')
     expect(source).toContain('v-for="p in providerOptions"')
-    // 下拉含 OpenCode 项（与 AgentEditModal 同款七项）
+    // 下拉含 OpenCode 项（与 AgentEditModal 同款八项）
     expect(source).toContain("{ value: 'opencode', label: 'OpenCode (CLI)' }")
     // 下拉含 dsh 项（对齐后端 registry 已支持，前端枚举补同步）
     expect(source).toContain("{ value: 'dsh', label: 'DeepSeek Harness (CLI)' }")
+    // 下拉含 ollama 项（对齐后端 registry 已支持 + NO_API_KEY_PROVIDERS 白名单，key 留空）
+    expect(source).toContain("{ value: 'ollama', label: 'ollama' }")
     // key 可留空提示（opencode 本地认证）
     expect(source).toContain('OpenCode 本地认证可留空')
   })

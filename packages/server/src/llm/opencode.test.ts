@@ -517,20 +517,29 @@ describe('OpencodeAdapter', () => {
   })
 
   it('context 不存在 → 不生成临时配置、env 不含 OPENCODE_CONFIG', async () => {
-    const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
-    const child = fakeChild({ exitCode: 0 })
-    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+    // 测试隔离：opencode 运行时注入 shell 的 OPENCODE_CONFIG 会经 ...process.env 透传进
+    // opts.env（同文件 triggerMsgId 用例 / claude.test.ts regression baseline 同款范式）——
+    // 清理后再断言，否则 agent 会话内跑测试稳定误报
+    const saved = process.env.OPENCODE_CONFIG
+    delete process.env.OPENCODE_CONFIG
+    try {
+      const adapter = new OpencodeAdapter({ model: 'anthropic/claude-sonnet-4-5' })
+      const child = fakeChild({ exitCode: 0 })
+      vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
-    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
-      model: 'anthropic/claude-sonnet-4-5',
-    })
-    child.stdout.push(null)
-    await collect(gen)
+      const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'anthropic/claude-sonnet-4-5',
+      })
+      child.stdout.push(null)
+      await collect(gen)
 
-    const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
-      env?: Record<string, string>
+      const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2] as {
+        env?: Record<string, string>
+      }
+      expect(opts.env!.OPENCODE_CONFIG).toBeUndefined()
+    } finally {
+      if (saved !== undefined) process.env.OPENCODE_CONFIG = saved
     }
-    expect(opts.env!.OPENCODE_CONFIG).toBeUndefined()
   })
 
   it('context 无 triggerMsgId → 进程 env 不含 CATSTUDY_TRIGGER_MSG_ID（有值才注入）', async () => {

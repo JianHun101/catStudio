@@ -54,6 +54,7 @@ const providerOptions = [
   { value: 'claude', label: 'Claude Code (CLI)' },
   { value: 'opencode', label: 'OpenCode (CLI)' },
   { value: 'dsh', label: 'DeepSeek Harness (CLI)' },
+  { value: 'ollama', label: 'ollama' },
   { value: 'openai', label: 'Codex (CLI)' },
   { value: 'pi', label: 'Pi (SDK)' },
   { value: 'custom', label: '自定义' },
@@ -67,6 +68,8 @@ const providerHint = computed(() => {
       return '需要安装 opencode CLI 并 opencode auth login；本地认证无需填 key；模型填 provider/model 格式（如 deepseek/deepseek-v4-pro）'
     case 'dsh':
       return '需要安装 dsh CLI: npm i -g @deepseek-ai/dsh@0.1.0-rc.6；本地 credentials 落盘认证，key 可留空（填了则复用 DS_KEY 注入，留空走 dsh 本地 credentials 兜底）；模型填 deepseek-chat'
+    case 'ollama':
+      return '本地 Ollama 服务，key 可留空；模型填已拉取模型名（如 qwen3.5:9b）；Base URL 默认 http://127.0.0.1:11434'
     case 'openai':
       return '需要安装 Codex CLI (npm i -g @openai/codex) 和 codex-proxy'
     case 'pi':

@@ -92,6 +92,19 @@ describe('AgentEditModal dsh provider（店长派活——前端供应商下拉�
   })
 })
 
+describe('AgentEditModal ollama provider（用户改动——前端供应商下拉补 ollama，对齐后端 registry 已支持 + NO_API_KEY_PROVIDERS 白名单）', () => {
+  it('providerOptions 含 ollama 项', () => {
+    expect(source).toContain("{ value: 'ollama', label: 'ollama' }")
+  })
+
+  it('providerHint 有 ollama case：提示本地服务 key 可留空 + 模型名格式 + 默认 Base URL', () => {
+    expect(source).toContain("case 'ollama':")
+    expect(source).toContain('本地 Ollama 服务')
+    expect(source).toContain('key 可留空')
+    expect(source).toContain('http://127.0.0.1:11434')
+  })
+})
+
 describe('AgentEditModal 额外环境变量（llmEnvExtra——per-agent 代理配置）', () => {
   it('ref 默认 {} + watch 从 agent 回填（缺省 {}）', () => {
     expect(source).toContain("const llmEnvExtra = ref('{}')")
