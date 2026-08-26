@@ -335,8 +335,9 @@
       }
       /* 取消：幽灵描边，hover 明显反馈（实心警示红 + 白字 + 上浮阴影） */
       .v2-cancel {
-        flex-shrink: 0;
-        padding: 12px 18px;
+        flex: 0 0 auto;
+        min-width: 92px;
+        padding: 12px 28px;
         border: 1px solid var(--border-default);
         border-radius: var(--radius-md);
         background: transparent;
@@ -345,6 +346,7 @@
         font-weight: 600;
         font-family: inherit;
         cursor: pointer;
+        white-space: nowrap;
         transition: all var(--ease-out);
       }
       .v2-cancel:hover {
