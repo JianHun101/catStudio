@@ -347,6 +347,55 @@ describe('chatStore', () => {
     })
   })
 
+  describe('confirmPush / cancelPush', () => {
+    it('confirmPush emits PUSH_CONFIRM with messageId + ack callback, sets confirming state on click', () => {
+      store.confirmPush('m-push')
+
+      // 点击瞬间乐观置位（按钮变「推送中…」，无需等服务端）
+      expect(store.confirmingPushMessageId).toBe('m-push')
+      expect(mockEmit).toHaveBeenCalledWith(
+        Events.PUSH_CONFIRM,
+        { messageId: 'm-push' },
+        expect.any(Function)
+      )
+    })
+
+    it('ack ok → 清除 confirming 状态、不弹 toast（由 PUSH_STATUS done 驱动「已推送」）', () => {
+      store.confirmPush('m-push')
+      const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean; reason?: string }) => void
+
+      ack({ ok: true })
+
+      expect(store.confirmingPushMessageId).toBeNull()
+      expect(store.errorMessage).toBeNull()
+    })
+
+    it('ack failed → 清除 confirming 状态 + toast push 失败', () => {
+      store.confirmPush('m-push')
+      const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean; reason?: string }) => void
+
+      ack({ ok: false, reason: 'failed' })
+
+      expect(store.confirmingPushMessageId).toBeNull()
+      expect(store.errorMessage).toContain('push 失败')
+    })
+
+    it('ack 缺失（旧 server 无回调）→ 清除 confirming 状态、不弹 toast（既有事件流兜底）', () => {
+      store.confirmPush('m-push')
+      const ack = mockEmit.mock.calls[0][2] as (ack: undefined) => void
+
+      ack(undefined)
+
+      expect(store.confirmingPushMessageId).toBeNull()
+      expect(store.errorMessage).toBeNull()
+    })
+
+    it('cancelPush emits PUSH_CANCEL with messageId', () => {
+      store.cancelPush('m-push')
+      expect(mockEmit).toHaveBeenCalledWith(Events.PUSH_CANCEL, { messageId: 'm-push' })
+    })
+  })
+
   describe('fetchData', () => {
     it('loads agents and sessions, auto-joins first session', async () => {
       mockGetAgents.mockResolvedValue([mockAgent])
@@ -661,6 +710,75 @@ describe('chatStore', () => {
       store.confirmingRestartMessageId = 'm-restart'
       handler!({ sessionId: 's1', messageId: 'm-restart', state: 'pending' })
       expect(store.confirmingRestartMessageId).toBeNull()
+    })
+
+    it('PUSH_STATUS pushing/done/failed/cancelled → 驱动按钮状态', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.PUSH_STATUS)?.[1] as
+        ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      handler!({ messageId: 'm-push', state: 'pushing' })
+      expect(store.pushStates.get('m-push')).toBe('pushing')
+
+      handler!({ messageId: 'm-push', state: 'done' })
+      expect(store.pushStates.get('m-push')).toBe('done')
+
+      handler!({ messageId: 'm-push', state: 'failed' })
+      expect(store.pushStates.get('m-push')).toBe('failed')
+
+      handler!({ messageId: 'm-push', state: 'cancelled' })
+      expect(store.pushStates.get('m-push')).toBe('cancelled')
+    })
+
+    it('PUSH_STATUS 到达也解除 confirming（服务端权威状态接管按钮显示）', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.PUSH_STATUS)?.[1] as
+        ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      store.confirmingPushMessageId = 'm-push'
+      handler!({ messageId: 'm-push', state: 'pushing' })
+      expect(store.confirmingPushMessageId).toBeNull()
+    })
+
+    it('NEW_MESSAGE push_request → pushStates 初始 pending；SESSION_HISTORY 同理', () => {
+      const newMsgHandler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.NEW_MESSAGE
+      )?.[1] as ((msg: Message) => void) | undefined
+      const histHandler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.SESSION_HISTORY
+      )?.[1] as ((data: any) => void) | undefined
+      expect(newMsgHandler).toBeDefined()
+      expect(histHandler).toBeDefined()
+      store.activeSessionId = 's1'
+
+      newMsgHandler!({
+        id: 'm-push-1',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: 'push 请求',
+        mentions: [],
+        createdAt: new Date().toISOString(),
+        messageType: 'push_request',
+      })
+      expect(store.pushStates.get('m-push-1')).toBe('pending')
+
+      histHandler!({
+        messages: [
+          {
+            id: 'm-push-2',
+            sessionId: 's1',
+            agentId: 'a1',
+            role: 'agent',
+            content: 'push 请求',
+            mentions: [],
+            createdAt: new Date().toISOString(),
+            messageType: 'push_request',
+          },
+        ],
+        welcome: null,
+      })
+      expect(store.pushStates.get('m-push-2')).toBe('pending')
     })
 
     it('HANDOFF_FAILED 仅当前会话生效：非当前会话不显示，当前会话设置 handoffFailed', () => {

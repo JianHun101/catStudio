@@ -276,6 +276,30 @@ function restartStateFor(msg: Message): 'pending' | 'confirmed' | 'none' {
   return 'pending'
 }
 
+// ─── Push approval helpers ────────────────
+
+/**
+ * push 审批按钮状态解析：默认 pending；pushing → 「推送中…」；done → 「已推送」；
+ * failed → 恢复可点（服务端已回 toast）；cancelled/none → 隐藏。
+ * 服务端权威状态由 PUSH_STATUS 事件驱动。
+ */
+function pushStateFor(
+  msg: Message
+): 'pending' | 'pushing' | 'done' | 'failed' | 'cancelled' | 'none' {
+  if (msg.messageType !== 'push_request') return 'none'
+  const st = store.pushStates.get(msg.id)
+  if (st === 'pushing' || st === 'done' || st === 'failed' || st === 'cancelled' || st === 'none') {
+    return st
+  }
+  return 'pending'
+}
+
+/** push 审批面板可点（pending/failed 可点；pushing/done/cancelled 不可点） */
+function pushActionableFor(msg: Message): boolean {
+  const st = pushStateFor(msg)
+  return st === 'pending' || st === 'failed'
+}
+
 // ─── Existing helpers ──────────────────────
 
 async function handleClearMessages(): Promise<void> {
@@ -834,6 +858,57 @@ const warnedAgentsText = computed(() => {
                       重启中…
                     </span>
                   </div>
+                  <!-- push 审批面板：push_request 消息渲染（服务端实时采集 commits + diff，无手工塞入路径）——
+                       V2 按钮：确认占主导（卡片大按钮）+ 取消并排；pushing 显示「推送中…」、done 显示「已推送」 -->
+                  <div
+                    v-if="msg.messageType === 'push_request' && pushStateFor(msg) !== 'none'"
+                    class="push-approval"
+                  >
+                    <div class="push-head">收口待推送：<b>dev → origin/dev</b></div>
+                    <div class="push-body">
+                      <div v-if="msg.extra?.push?.commits?.length" class="commit-list">
+                        <div v-for="c in msg.extra.push.commits" :key="c.sha" class="commit-item">
+                          <span class="commit-hash">{{ c.sha.slice(0, 7) }}</span>
+                          <span class="commit-subject">{{ c.subject }}</span>
+                        </div>
+                      </div>
+                      <DiffViewer
+                        v-if="msg.extra?.rich?.blocks?.length"
+                        :blocks="msg.extra.rich.blocks"
+                      />
+                      <div class="push-actions">
+                        <template v-if="pushStateFor(msg) === 'pushing'">
+                          <span class="push-label">推送中…</span>
+                        </template>
+                        <template v-else-if="pushStateFor(msg) === 'done'">
+                          <span class="push-label push-done">已推送</span>
+                        </template>
+                        <template v-else>
+                          <span v-if="store.confirmingPushMessageId === msg.id" class="push-label">
+                            推送中…
+                          </span>
+                          <template v-else>
+                            <button
+                              class="btn-push-confirm"
+                              :disabled="!pushActionableFor(msg)"
+                              @click="store.confirmPush(msg.id)"
+                            >
+                              <span class="push-meta">
+                                <span class="push-target">dev → origin/dev</span>
+                                <span class="push-count"
+                                  >{{ msg.extra?.push?.commits?.length ?? 0 }} commits</span
+                                >
+                              </span>
+                              <span class="push-cta">确认 Push</span>
+                            </button>
+                            <button class="btn-push-cancel" @click="store.cancelPush(msg.id)">
+                              取消
+                            </button>
+                          </template>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
                   <!-- 气泡 footer：agent 消息每条带 {模型} · {n}k/{m}k tokens——
                        分组消息同样渲染（用户要求同 agent 连续回复每条都有模型与用量）；
                        停止按钮不在此处（B2 重定位：streaming 气泡 / 用户消息状态行） -->
@@ -1376,6 +1451,183 @@ const warnedAgentsText = computed(() => {
   50% {
     opacity: 0.45;
   }
+}
+
+/* ─── Push 审批面板（V2：确认卡片大按钮 + 强化取消）─── */
+
+.push-approval {
+  margin: 8px 0 2px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.push-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.push-head b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.push-body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.commit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.commit-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-hash {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.commit-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.push-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.btn-push-confirm {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: rgba(212, 165, 116, 0.12);
+  cursor: pointer;
+  transition: all var(--ease-out);
+  font-family: inherit;
+}
+
+.btn-push-confirm:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 2px 14px rgba(212, 165, 116, 0.35);
+  transform: translateY(-1px);
+}
+
+.btn-push-confirm:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.push-meta {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.push-target {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.push-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.btn-push-confirm:hover:not(:disabled) .push-target,
+.btn-push-confirm:hover:not(:disabled) .push-count,
+.btn-push-confirm:hover:not(:disabled) .push-cta {
+  color: #1b1815;
+}
+
+.push-cta {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.btn-push-cancel {
+  flex: 0 0 auto;
+  min-width: 84px;
+  padding: 10px 22px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--ease-out);
+}
+
+.btn-push-cancel:hover {
+  background: var(--accent-red);
+  border-color: var(--accent-red);
+  color: #fff;
+  box-shadow: 0 2px 14px rgba(224, 85, 106, 0.45);
+  transform: translateY(-1px);
+}
+
+.btn-push-cancel:active,
+.btn-push-confirm:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.push-label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  animation: restart-pulse 1.6s ease-in-out infinite;
+}
+
+.push-label.push-done {
+  color: var(--accent-green);
+  animation: none;
 }
 
 .btn-clear:disabled {
