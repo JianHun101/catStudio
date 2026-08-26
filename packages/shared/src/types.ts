@@ -64,11 +64,11 @@ export interface SessionConfig {
 // ─── Message ────────────────────────────────────────
 
 /**
- * 消息类型——驱动前端渲染分支（如重启确认按钮组）。
+ * 消息类型——驱动前端渲染分支（如重启确认按钮组 / push 审批面板）。
  * DB 的 messages.role 有 CHECK 约束（仅 user/agent/system），类型不落库，
  * 由服务端检测消息内容前缀后作为附加字段随广播（NEW_MESSAGE/SESSION_HISTORY）携带。
  */
-export type MessageType = 'normal' | 'restart_request'
+export type MessageType = 'normal' | 'restart_request' | 'push_request'
 
 /**
  * 富文本块——结构化展示内容（当前仅 diff）。
@@ -85,6 +85,16 @@ export interface RichBlock {
 }
 
 /**
+ * push 审批所需信息——commits 列表（sha + subject）。
+ * diff 正文走 rich.blocks（同 collectCommitDiffs 的富文本块通道）；
+ * 两者均由服务端从 git 实时采集（git log/diff origin/dev..dev），无手工塞入路径。
+ */
+export interface PushCommit {
+  sha: string
+  subject: string
+}
+
+/**
  * 消息附加富内容（extra 列 JSON 序列化；服务端采集附加，前端按需渲染，
  * 无 extra 的消息前端纯文本回退——与现网行为一致）。
  */
@@ -92,6 +102,10 @@ export interface MessageExtra {
   rich?: {
     v: 1
     blocks: RichBlock[]
+  }
+  /** push 审批：commits 列表（push_request 消息携带；diff 正文在 rich.blocks） */
+  push?: {
+    commits: PushCommit[]
   }
 }
 

@@ -84,6 +84,50 @@ function extractFilePath(section: string): string | null {
   return null
 }
 
+/** 块累计器（跨 commit/diff 段共享截断状态——多段拼接时总行数上限全局生效） */
+interface BlockAccumulator {
+  blocks: RichBlock[]
+  totalLines: number
+  totalTruncated: boolean
+}
+
+/**
+ * 把一段 unified diff 文本（含 `diff --git` 头）按文件切块追加到累计器。
+ * 截断逻辑（200/500 行）与 collectCommitDiffs 同款——collectCommitDiffs
+ * 与 collectPushDiffs 共用，避免双份漂移。
+ */
+function appendDiffText(acc: BlockAccumulator, text: string): void {
+  const sections = text.split(/^diff --git /m).slice(1)
+  for (const section of sections) {
+    if (acc.totalTruncated) break
+    const filePath = extractFilePath(section)
+    if (!filePath) continue // 二进制等无路径段 → 跳过
+
+    const lines = section.trimEnd().split('\n')
+    const remaining = MAX_DIFF_LINES_TOTAL - acc.totalLines
+    let kept = lines
+    let blockTruncated = false
+    if (lines.length > remaining) {
+      // 总上限只够当前块一部分 → 截断 + 后续文件不再出现
+      kept = lines.slice(0, Math.max(remaining, 1))
+      blockTruncated = true
+      acc.totalTruncated = true
+    }
+    if (kept.length > MAX_DIFF_LINES_PER_FILE) {
+      kept = kept.slice(0, MAX_DIFF_LINES_PER_FILE)
+      blockTruncated = true
+    }
+    acc.totalLines += kept.length
+    acc.blocks.push({
+      id: `diff-${acc.blocks.length + 1}`,
+      kind: 'diff',
+      v: 1,
+      filePath,
+      diff: kept.join('\n') + (blockTruncated ? `\n${TRUNCATED_MARKER}` : ''),
+    })
+  }
+}
+
 /**
  * 按 `catstudy [uuid]` 反查 commit 并采集文件级 diff，转为富文本块。
  *
@@ -113,11 +157,7 @@ export async function collectCommitDiffs(uuid: string): Promise<RichBlock[] | nu
   }
 
   // ② 多 commit 合并：逐个取文件级 diff，按文件聚合（每文件一块）
-  const blocks: RichBlock[] = []
-  let totalLines = 0
-  // 两个截断标志分离：totalTruncated（总 500 行耗尽 → 后续文件全部跳过）
-  // 与 blockTruncated（当前块超单文件 200 行 → 仅本块截断加标记，不影响后续）
-  let totalTruncated = false
+  const acc: BlockAccumulator = { blocks: [], totalLines: 0, totalTruncated: false }
 
   for (const sha of shas) {
     let text: string
@@ -132,39 +172,72 @@ export async function collectCommitDiffs(uuid: string): Promise<RichBlock[] | nu
       })
       continue
     }
-
-    const sections = text.split(/^diff --git /m).slice(1)
-    for (const section of sections) {
-      if (totalTruncated) break
-      const filePath = extractFilePath(section)
-      if (!filePath) continue // 二进制等无路径段 → 跳过
-
-      const lines = section.trimEnd().split('\n')
-      const remaining = MAX_DIFF_LINES_TOTAL - totalLines
-      let kept = lines
-      let blockTruncated = false
-      if (lines.length > remaining) {
-        // 总上限只够当前块一部分 → 截断 + 后续文件不再出现
-        kept = lines.slice(0, Math.max(remaining, 1))
-        blockTruncated = true
-        totalTruncated = true
-      }
-      if (kept.length > MAX_DIFF_LINES_PER_FILE) {
-        kept = kept.slice(0, MAX_DIFF_LINES_PER_FILE)
-        blockTruncated = true
-      }
-      totalLines += kept.length
-      blocks.push({
-        id: `diff-${blocks.length + 1}`,
-        kind: 'diff',
-        v: 1,
-        filePath,
-        diff: kept.join('\n') + (blockTruncated ? `\n${TRUNCATED_MARKER}` : ''),
-      })
-    }
+    appendDiffText(acc, text)
   }
 
-  return blocks.length > 0 ? blocks : null
+  return acc.blocks.length > 0 ? acc.blocks : null
+}
+
+/** push 审批的 commit 条目（sha + subject，来自 git log origin/dev..dev） */
+export interface PushCommit {
+  sha: string
+  subject: string
+}
+
+/** collectPushDiffs 结果——commits + 合并 diff 富文本块（无可推提交时 blocks 为 null） */
+export interface PushDiffData {
+  commits: PushCommit[]
+  blocks: RichBlock[] | null
+}
+
+/**
+ * 实时采集「待推送」的 commits + 合并 diff（push 审批面板数据源）。
+ *
+ * 语义：git log origin/dev..dev（未推送的提交）+ git diff origin/dev..dev
+ * （合并 diff）——**服务端实时采集，拒绝店长手工塞 diff**（手工塞与真实提交
+ * 无绑定，内容可漂移）。
+ *
+ * 失败语义（git 调用失败/超时/origin/dev 不存在）→ 返回 null，不阻塞回复
+ * （与 collectCommitDiffs 同款 fire-and-forget）。同步时（dev == origin/dev）
+ * → commits 空 + blocks null（前端显示「已同步」）。
+ */
+export async function collectPushDiffs(): Promise<PushDiffData | null> {
+  // ① commits：sha + subject（%x09 分隔，subject 可能含 \t 罕见 → 按首个 tab 拆）
+  let logText: string
+  try {
+    logText = await runGit(['log', 'origin/dev..dev', '--pretty=%H%x09%s'])
+  } catch (err: any) {
+    log.warn('git log origin/dev..dev failed (push diffs skipped)', {
+      error: err?.message,
+    })
+    return null
+  }
+  const commits: PushCommit[] = logText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const tab = l.indexOf('\t')
+      return tab >= 0
+        ? { sha: l.slice(0, tab), subject: l.slice(tab + 1) }
+        : { sha: l, subject: '' }
+    })
+
+  // ② 合并 diff：统一 3 上下文行、无颜色，按文件切块（同 collectCommitDiffs 管线）
+  let diffText: string
+  try {
+    diffText = await runGit(['diff', 'origin/dev..dev', '--unified=3', '--no-color'])
+  } catch (err: any) {
+    log.warn('git diff origin/dev..dev failed (push diffs skipped)', {
+      error: err?.message,
+    })
+    return null
+  }
+  const acc: BlockAccumulator = { blocks: [], totalLines: 0, totalTruncated: false }
+  appendDiffText(acc, diffText)
+
+  log.info('push diffs collected', { commits: commits.length, files: acc.blocks.length })
+  return { commits, blocks: acc.blocks.length > 0 ? acc.blocks : null }
 }
 
 /**

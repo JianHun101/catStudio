@@ -118,8 +118,8 @@ const QUERY_DB_TOOL = {
 }
 
 /**
- * 工具定义——inputSchema 钉死契约：type 枚举（restart/choice）、reason 必填、
- * options 可选（choice 用选项组，restart 忽略）。
+ * 工具定义——inputSchema 钉死契约：type 枚举（restart/push/choice）、reason 必填、
+ * options 可选（choice 用选项组，restart/push 忽略）。
  */
 const REQUEST_USER_ACTION_TOOL = {
   name: REQUEST_USER_ACTION_TOOL_NAME,
@@ -127,16 +127,17 @@ const REQUEST_USER_ACTION_TOOL = {
     '把「需要用户介入」的请求结构化投递给用户（稳定触发通道，替代文本格式匹配——' +
     '文本格式依赖 LLM 精确输出、格式漂移导致按钮不出现的历史事故已堆四层容错）。' +
     'type 传请求类型：restart（申请重启 server——仅店长角色可发，需用户批准后执行）；' +
+    'push（申请 push 审批——仅店长角色可发，收口做完本地步骤后发起，用户批准才 push）；' +
     'choice（选项选择，渲染待后续版本，服务端当前返回暂不支持）。' +
     'reason 必填，写明请求原因（写请求文件/前端按钮展示用）。' +
-    '注意：仅用于「真的需要用户操作」时；叙述性提及重启不要用本工具。',
+    '注意：仅用于「真的需要用户操作」时；叙述性提及重启/推送不要用本工具。',
   inputSchema: {
     type: 'object',
     properties: {
       type: {
         type: 'string',
-        enum: ['restart', 'choice'],
-        description: '请求类型（restart 已落地；choice 渲染待后续版本，服务端当前暂不支持）',
+        enum: ['restart', 'push', 'choice'],
+        description: '请求类型（restart/push 已落地；choice 渲染待后续版本，服务端当前暂不支持）',
       },
       reason: {
         type: 'string',
@@ -152,7 +153,7 @@ const REQUEST_USER_ACTION_TOOL = {
           },
           required: ['id', 'label'],
         },
-        description: '可选：选项组（choice 用，restart 忽略）',
+        description: '可选：选项组（choice 用，restart/push 忽略）',
       },
     },
     required: ['type', 'reason'],

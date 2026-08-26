@@ -86,6 +86,11 @@ vi.mock('../llm/git-utils.js', () => ({
   // 实现会在测试 cwd 下命中真实仓库建 worktree，必须 mock。
   ensureSessionWorktree: vi.fn(() => null),
   getSessionWorktreePath: vi.fn(() => null),
+  // push 审批执行点：默认成功（git push 绝不在测试环境真实执行——cwd 会命中
+  // 真实主仓库，push 到远端 = 灾难）；getMainRepoRoot 默认 null（push handler
+  // 测试里 mockReturnValue 覆盖为 fake 路径）
+  getMainRepoRoot: vi.fn(() => null),
+  gitPushOriginDev: vi.fn(() => ({ ok: true })),
 }))
 
 // 对话内 diff 采集：默认返回 null（无 diff，与现网纯讨论/A2A 一致）——
@@ -3867,6 +3872,82 @@ describe('socketio connector', () => {
       expect(mockSocketEmit).toHaveBeenCalledWith(
         Events.RESTART_STATUS,
         expect.objectContaining({ state: 'none' })
+      )
+    })
+  })
+
+  // ─── PUSH_CONFIRM / PUSH_CANCEL — push 审批（内存化状态 + git push 执行）─────
+
+  describe('PUSH_CONFIRM', () => {
+    it('确认 push → 执行 git push origin dev + 推 pushing→done + ack ok', async () => {
+      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
+      expect(handlers).toBeDefined()
+      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
+      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
+
+      const ack = vi.fn()
+      handlers![0]({ messageId: 'msg-push-1' }, ack)
+
+      // push 执行在 getMainRepoRoot() 定位的主仓库根
+      expect(gitPushOriginDev).toHaveBeenCalledWith('C:\\fake\\main')
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.PUSH_STATUS,
+        expect.objectContaining({ messageId: 'msg-push-1', state: 'pushing' })
+      )
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.PUSH_STATUS,
+        expect.objectContaining({ messageId: 'msg-push-1', state: 'done' })
+      )
+      expect(ack).toHaveBeenCalledWith({ ok: true })
+    })
+
+    it('push 失败 → ERROR + failed 状态 + ack failed（审批态可排查）', async () => {
+      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
+      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
+      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
+      vi.mocked(gitPushOriginDev).mockReturnValueOnce({ ok: false, error: 'remote rejected' })
+
+      const ack = vi.fn()
+      handlers![0]({ messageId: 'msg-push-2' }, ack)
+
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.ERROR,
+        expect.objectContaining({ message: expect.stringContaining('push 失败') })
+      )
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.PUSH_STATUS,
+        expect.objectContaining({ messageId: 'msg-push-2', state: 'failed' })
+      )
+      expect(ack).toHaveBeenCalledWith({ ok: false, reason: 'failed' })
+    })
+
+    it('主仓库根定位失败 → ERROR + ack failed，不执行 push', async () => {
+      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
+      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
+      vi.mocked(getMainRepoRoot).mockReturnValue(null)
+
+      const ack = vi.fn()
+      handlers![0]({ messageId: 'msg-push-3' }, ack)
+
+      expect(gitPushOriginDev).not.toHaveBeenCalled()
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.ERROR,
+        expect.objectContaining({ message: expect.stringContaining('无法定位主仓库根') })
+      )
+      expect(ack).toHaveBeenCalledWith({ ok: false, reason: 'failed' })
+    })
+  })
+
+  describe('PUSH_CANCEL', () => {
+    it('取消 → 推 cancelled（前端清理审批态）', () => {
+      const handlers = socketHandlers.get(Events.PUSH_CANCEL)
+      expect(handlers).toBeDefined()
+
+      handlers![0]({ messageId: 'msg-push-1' })
+
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.PUSH_STATUS,
+        expect.objectContaining({ messageId: 'msg-push-1', state: 'cancelled' })
       )
     })
   })

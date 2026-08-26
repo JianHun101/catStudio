@@ -21,8 +21,8 @@ export interface UserRequestSignal {
   agentId: string
   /** 当前流 msgId——messageId 标签：只被同 msgId 的合并点消费 */
   msgId: string
-  /** 请求类型——枚举就绪：restart 已落地；choice 服务端暂拒（渲染留第二步，管道先通） */
-  type: 'restart' | 'choice'
+  /** 请求类型——枚举就绪：restart/push 已落地；choice 服务端暂拒（渲染留第二步，管道先通） */
+  type: 'restart' | 'push' | 'choice'
   /** 请求原因（写 .restart-request 文件与前端按钮展示用） */
   reason: string
   /** choice 用选项组（restart 忽略；结构就绪，服务端暂不支持 choice） */

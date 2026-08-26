@@ -69,4 +69,19 @@ describe('user-request-signals（MCP 用户请求信号存储）', () => {
     expect(consumeUserRequestSignals('session-1', 'agent-store', 'msg-1')).toHaveLength(0)
     expect(consumeUserRequestSignals('session-1', 'agent-impl', 'msg-1')).toHaveLength(1)
   })
+
+  it('push 类型信号：存储 + 消费原样（type=push 与 restart 并行不互斥）', () => {
+    storeUserRequestSignal(signal({ type: 'push', reason: '收口待推送' }))
+    const consumed = consumeUserRequestSignals('session-1', 'agent-store', 'msg-1')
+    expect(consumed).toHaveLength(1)
+    expect(consumed[0]).toMatchObject({ type: 'push', reason: '收口待推送' })
+  })
+
+  it('同流 restart + push 重复投递 → 合并为一条（最后到达的 type 生效——同流只应发一个请求）', () => {
+    storeUserRequestSignal(signal({ type: 'push', reason: '收口待推送' }))
+    storeUserRequestSignal(signal({ type: 'restart', reason: '服务器卡死' }))
+    const consumed = consumeUserRequestSignals('session-1', 'agent-store', 'msg-1')
+    expect(consumed).toHaveLength(1)
+    expect(consumed[0]).toMatchObject({ type: 'restart', reason: '服务器卡死' })
+  })
 })

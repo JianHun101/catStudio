@@ -52,6 +52,11 @@ export const Events = {
   RESTART_CANCEL: 'restart-cancel', // 用户→服务器：取消重启
   RESTART_STATUS: 'restart-status', // 服务器→客户端：请求状态变化（pending/confirmed/none）
 
+  // push 审批机制（店长发 push 请求消息 → 前端面板按钮 → socket 执行 push）
+  PUSH_CONFIRM: 'push-confirm', // 用户→服务器：确认 push（执行 git push origin dev）
+  PUSH_CANCEL: 'push-cancel', // 用户→服务器：取消 push（清理审批态）
+  PUSH_STATUS: 'push-status', // 服务器→客户端：push 审批状态变化（pushing/done/failed/cancelled/none）
+
   // Agent 手动中断（停止按钮：中断当前思考 + 清空排队任务）
   AGENT_INTERRUPT: 'agent-interrupt', // 用户→服务器：中断指定 Agent
 } as const

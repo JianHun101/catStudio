@@ -19,6 +19,8 @@ import { join, resolve } from 'node:path'
 const origCwd = process.cwd()
 let tmp: string
 let notRepo: string
+/** bare origin 仓库（collectPushDiffs 测试用：origin/dev 落后的比对基线） */
+let originBare: string
 let diffCollector: typeof import('./diff-collector.js')
 
 /** 清理 git 环境变量（与 diff-collector.ts / git-utils.test.ts 同款——
@@ -66,12 +68,24 @@ beforeAll(async () => {
   writeFileSync(resolve(tmp, 'base.txt'), 'base\n', 'utf-8')
   git('add -A')
   git('commit -m init')
+  // 默认分支改名 dev（git init 默认 master——push origin dev 需要 dev ref）
+  git('branch -M dev')
+  // bare origin（collectPushDiffs 用）——初始 push 让 origin/dev = init commit
+  originBare = mkdtempSync(join(tmpdir(), 'diff-collector-origin-'))
+  execSync('git init --bare', { cwd: originBare, env: cleanGitEnv(), stdio: 'ignore' })
+  execSync(`git remote add origin ${originBare.replace(/\\/g, '/')}`, {
+    cwd: tmp,
+    env: cleanGitEnv(),
+    stdio: 'ignore',
+  })
+  execSync('git push origin dev', { cwd: tmp, env: cleanGitEnv(), stdio: 'ignore' })
   process.chdir(tmp)
   diffCollector = await import('./diff-collector.js')
 })
 
 afterAll(() => {
   process.chdir(origCwd)
+  rmSync(originBare, { recursive: true, force: true })
   rmSync(tmp, { recursive: true, force: true })
 })
 
@@ -176,6 +190,39 @@ describe('collectCommitDiffs', () => {
     expect(blocks).not.toBeNull()
     expect(blocks![0].filePath).toBe('a.txt')
     expect(blocks![0].diff).toContain('-new-content')
+  })
+})
+
+describe('collectPushDiffs', () => {
+  it('origin/dev 落后 dev → commits（sha+subject）非空 + blocks 非空', async () => {
+    commitMarked('uuid-push-1', { 'p.txt': 'pushed-content\n' })
+    const data = await diffCollector.collectPushDiffs()
+    expect(data).not.toBeNull()
+    expect(data!.commits.length).toBeGreaterThan(0)
+    // 本测试的 commit 在未推送集合中（subject 带 catstudy [uuid-push-1] 标记）
+    expect(data!.commits.some((c) => c.subject.includes('uuid-push-1'))).toBe(true)
+    // sha 是 40 位 hex
+    expect(data!.commits[0].sha).toMatch(/^[0-9a-f]{40}$/)
+    // 合并 diff 有内容（p.txt 可能被 500 行预算截断——前置大 diff 测试制造，截断是设计内行为）
+    expect(data!.blocks).not.toBeNull()
+    expect(data!.blocks!.length).toBeGreaterThan(0)
+  })
+
+  it('同步（dev == origin/dev）→ commits 空 + blocks null', async () => {
+    git('push origin dev')
+    const data = await diffCollector.collectPushDiffs()
+    expect(data).not.toBeNull()
+    expect(data!.commits).toHaveLength(0)
+    expect(data!.blocks).toBeNull()
+  })
+
+  it('非 git 仓库 / origin 缺失 → null（静默降级）', async () => {
+    process.chdir(notRepo)
+    try {
+      expect(await diffCollector.collectPushDiffs()).toBeNull()
+    } finally {
+      process.chdir(tmp)
+    }
   })
 })
 

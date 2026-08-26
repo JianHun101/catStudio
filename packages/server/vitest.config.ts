@@ -1,6 +1,16 @@
 import { defineConfig } from 'vitest/config'
+import { resolve } from 'path'
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      // worktree 模式：server 的 node_modules/@cat-study/shared 是主仓库安装时的
+      // junction（指向主仓库 shared）——worktree 内改 shared 源码后测试解析到陈旧版。
+      // 显式 alias 到本目录的 shared 源码（与根 vitest.config 同款，双保险：包内单独跑
+      // 与 workspace 全量都覆盖）。
+      '@cat-study/shared': resolve(__dirname, '../shared/src/index.ts'),
+    },
+  },
   test: {
     include: ['src/**/*.test.ts'],
     testTimeout: 10_000,

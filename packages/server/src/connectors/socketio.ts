@@ -28,7 +28,13 @@ import {
   setSystemMessageBridge,
 } from '../dispatch/index.js'
 import { createLogger } from '../logger.js'
-import { gitResetHard, gitCleanWorkingTree, npmUninstall } from '../llm/git-utils.js'
+import {
+  gitResetHard,
+  gitCleanWorkingTree,
+  npmUninstall,
+  getMainRepoRoot,
+  gitPushOriginDev,
+} from '../llm/git-utils.js'
 import { parseJsonArray } from '../utils.js'
 import { parseMessageExtra } from '../git/diff-collector.js'
 import { ingestUserMessage } from './ingest.js'
@@ -57,6 +63,13 @@ import { recoverInterruptedExecutions, recoverQueuedMessages } from '../executio
 export { rowToAgent } from '../execution/row.js'
 
 const log = createLogger('socketio')
+
+/**
+ * push 审批状态（内存化，messageId → 状态）。
+ * 与 restart 落文件不同：重启需 dev.js 轮询（跨进程信号），push 由本进程
+ * socket handler 直接执行、无跨进程消费者 → 进程内 Map 即可，不必落文件。
+ */
+const pushStates = new Map<string, 'pending' | 'pushing' | 'done' | 'failed' | 'cancelled'>()
 
 /** 模块级 io 实例引用，供路由等模块获取 */
 let _io: SocketServer | null = null
@@ -469,6 +482,42 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         // 文件已不存在（过期/已执行/重复取消）→ 幂等复位
         socket.emit(Events.RESTART_STATUS, { sessionId: '', messageId: null, state: 'none' })
       }
+    })
+
+    // ─── Push confirm / cancel（push 审批——用户批准后执行 git push origin dev）───
+
+    socket.on(
+      Events.PUSH_CONFIRM,
+      (data: { messageId: string }, ack?: (res: { ok: boolean; reason?: 'failed' }) => void) => {
+        const mainRoot = getMainRepoRoot()
+        if (!mainRoot) {
+          socket.emit(Events.ERROR, { message: '无法定位主仓库根，push 未执行' })
+          ack?.({ ok: false, reason: 'failed' })
+          return
+        }
+        // pending → pushing：先推状态（前端按钮变「推送中…」），同步执行 push（秒级）
+        pushStates.set(data.messageId, 'pushing')
+        socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'pushing' })
+        const res = gitPushOriginDev(mainRoot)
+        if (res.ok) {
+          pushStates.set(data.messageId, 'done')
+          log.info('push confirmed and executed', { messageId: data.messageId })
+          socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'done' })
+          ack?.({ ok: true })
+        } else {
+          pushStates.set(data.messageId, 'failed')
+          log.error('push failed', { messageId: data.messageId, error: res.error })
+          socket.emit(Events.ERROR, { message: `push 失败: ${res.error}` })
+          socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'failed' })
+          ack?.({ ok: false, reason: 'failed' })
+        }
+      }
+    )
+
+    socket.on(Events.PUSH_CANCEL, (data: { messageId: string }) => {
+      pushStates.delete(data.messageId)
+      log.info('push request cancelled', { messageId: data.messageId })
+      socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'cancelled' })
     })
 
     // ─── Agent 手动中断（停止按钮：中断思考 + 清空队列）───

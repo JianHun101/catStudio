@@ -48,8 +48,17 @@ describe('Events', () => {
     expect(Events.HANDOFF_FAILED).toBe('handoff-failed')
   })
 
-  it('has exactly 27 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(27)
+  it('has PUSH_CONFIRM/CANCEL client→server events', () => {
+    expect(Events.PUSH_CONFIRM).toBe('push-confirm')
+    expect(Events.PUSH_CANCEL).toBe('push-cancel')
+  })
+
+  it('has PUSH_STATUS server→client event', () => {
+    expect(Events.PUSH_STATUS).toBe('push-status')
+  })
+
+  it('has exactly 30 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(30)
   })
 })
 
