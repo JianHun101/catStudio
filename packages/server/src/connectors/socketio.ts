@@ -70,6 +70,8 @@ const log = createLogger('socketio')
  * socket handler 直接执行、无跨进程消费者 → 进程内 Map 即可，不必落文件。
  */
 const pushStates = new Map<string, 'pending' | 'pushing' | 'done' | 'failed' | 'cancelled'>()
+/** push 终态有界保留上限：done/failed 保留供 JOIN 状态恢复（刷新不回归可点 pending），超上限删最旧防 messageId 无界增长 */
+const PUSH_STATES_MAX = 50
 
 /** 模块级 io 实例引用，供路由等模块获取 */
 let _io: SocketServer | null = null
@@ -276,6 +278,19 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         })
       } else {
         socket.emit(Events.RESTART_STATUS, { sessionId, messageId: null, state: 'none' })
+      }
+
+      // push 审批状态恢复：JOIN 后前端把所有 push_request 初始化成可点 pending，
+      // 正在推送/已完成/已失败的消息须由服务端权威状态校正（镜像 restart 的 join 恢复模式）。
+      // 从未被确认的消息不在 pushStates → 不推状态，前端保持 pending（可点）。
+      // cancelled 不入此列——取消即删除，刷新后回归 pending（可重新批准，push 幂等）。
+      for (const row of rows) {
+        const extra = parseMessageExtra(row.extra)
+        if (!extra?.push) continue
+        const st = pushStates.get(row.id)
+        if (st === 'pushing' || st === 'done' || st === 'failed') {
+          socket.emit(Events.PUSH_STATUS, { messageId: row.id, state: st })
+        }
       }
     })
 
@@ -520,8 +535,15 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'failed' })
           ack?.({ ok: false, reason: 'failed' })
         }
-        // 终态清理：done/failed 是终结状态，push 不再继续 → 删态防 messageId 常驻泄漏
-        pushStates.delete(data.messageId)
+        // 终态有界保留：done/failed 保留供 JOIN 状态恢复（刷新后前端不回归可点 pending），
+        // 超上限删最旧（Map 插入序）防 messageId 无界增长——1a6c220 立即删除的泄漏治理
+        // 改为有界保留，二者都达成「不无界泄漏」，后者额外为 join 恢复提供数据源
+        if (pushStates.size > PUSH_STATES_MAX) {
+          for (const key of pushStates.keys()) {
+            if (pushStates.size <= PUSH_STATES_MAX) break
+            if (key !== data.messageId) pushStates.delete(key)
+          }
+        }
       }
     )
 

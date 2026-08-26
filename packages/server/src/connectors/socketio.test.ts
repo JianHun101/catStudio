@@ -483,6 +483,65 @@ describe('socketio connector', () => {
       expect(m.messageType).toBeUndefined()
       expect(m.restartExpiresAt).toBeUndefined()
     })
+
+    it('JOIN 恢复已完成 push 审批状态（done 不回归可点 pending）', async () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, extra)
+         VALUES (?, 'session-1', 'user', 'push 审批', '[]', ?)`
+      ).run(
+        'msg-push-join-done',
+        JSON.stringify({
+          rich: {
+            v: 1,
+            blocks: [{ id: 'b1', kind: 'diff', v: 1, filePath: 'a.txt', diff: '@@ -1 +1 @@' }],
+          },
+          push: { commits: [{ sha: 'abc1234', subject: 'test commit' }] },
+        })
+      )
+
+      // 确认 push → done（终态有界保留在 pushStates）
+      const confirmHandlers = socketHandlers.get(Events.PUSH_CONFIRM)
+      const { getMainRepoRoot } = await import('../llm/git-utils.js')
+      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
+      await confirmHandlers![0]({ messageId: 'msg-push-join-done' }, vi.fn())
+
+      // JOIN → 服务端广播 push 状态恢复（镜像 restart 的 join 恢复模式）
+      const joinHandlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      joinHandlers![0]('session-1')
+
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.PUSH_STATUS,
+        expect.objectContaining({ messageId: 'msg-push-join-done', state: 'done' })
+      )
+    })
+
+    it('JOIN 不为从未确认的 push_request 推状态（前端保持 pending 可点）', () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, extra)
+         VALUES (?, 'session-1', 'user', 'push 审批', '[]', ?)`
+      ).run(
+        'msg-push-join-pending',
+        JSON.stringify({
+          rich: {
+            v: 1,
+            blocks: [{ id: 'b1', kind: 'diff', v: 1, filePath: 'a.txt', diff: '@@ -1 +1 @@' }],
+          },
+          push: { commits: [{ sha: 'abc1234', subject: 'test commit' }] },
+        })
+      )
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const pushStatusCalls = mockSocketEmit.mock.calls.filter(
+        (c: any[]) => c[0] === Events.PUSH_STATUS
+      )
+      expect(pushStatusCalls).toEqual([])
+    })
   })
 
   // ─── LEAVE_SESSION ─────────────────────────
@@ -3963,6 +4022,23 @@ describe('socketio connector', () => {
       resolvePush!()
       await p1
       expect(ack1).toHaveBeenCalledWith({ ok: true })
+    })
+
+    it('已完成 push 再次确认 → 短路 ack ok，不二次执行 git push（终态有界保留）', async () => {
+      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
+      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
+      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
+      vi.mocked(gitPushOriginDev).mockClear()
+
+      const ack1 = vi.fn()
+      await handlers![0]({ messageId: 'msg-push-done-retry' }, ack1)
+      expect(ack1).toHaveBeenCalledWith({ ok: true })
+
+      // done 终态被有界保留（不立即删除）→ 再次确认短路 ack ok，不二次 push
+      const ack2 = vi.fn()
+      await handlers![0]({ messageId: 'msg-push-done-retry' }, ack2)
+      expect(gitPushOriginDev).toHaveBeenCalledTimes(1)
+      expect(ack2).toHaveBeenCalledWith({ ok: true })
     })
   })
 

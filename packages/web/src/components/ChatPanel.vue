@@ -1585,8 +1585,8 @@ const warnedAgentsText = computed(() => {
 
 .btn-push-cancel {
   flex: 0 0 auto;
-  min-width: 84px;
-  padding: 10px 22px;
+  min-width: 92px;
+  padding: 12px 28px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: transparent;
