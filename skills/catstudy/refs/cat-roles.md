@@ -26,4 +26,4 @@
 - **实施猫做完改动** → 跑测试 + lint 全绿自查
 - **提交** → post-commit hook 自动生成交接文档并投递 @审查者
 - **审查者审查** → ✅可合并 或 ⚠️建议修改
-- **架构师收口** → ff-only 合并 → 更新 .push-gate → 推送 main/dev → 切回 dev
+- **架构师收口** → ff-only 合并 → 更新 .push-gate → 发起 push 审批（用户批准才推）→ 切回 dev
