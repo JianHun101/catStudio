@@ -798,7 +798,8 @@ export async function runAgentReply(
   // server 自动从 git 反查 commit 采集——extra 独立列，永不进 LLM 上下文。
   // 失败静默跳过（collectCommitDiffs 内部 5s 超时 + 查不到即 null），不阻塞回复；
   // 外层 try/catch 双保险（保险丝：任何意外都不让回复 emit 延迟/失败）。
-  if (triggerMsg.id) {
+  // push 消息已有实时采集的 push diff（extra.rich）→ 跳过对话 diff 分支，避免覆盖。
+  if (triggerMsg.id && !finalMsg.extra?.push) {
     try {
       const blocks = await collectCommitDiffs(triggerMsg.id)
       if (blocks && blocks.length > 0) {

@@ -202,6 +202,17 @@ export interface PushDiffData {
  * → commits 空 + blocks null（前端显示「已同步」）。
  */
 export async function collectPushDiffs(): Promise<PushDiffData | null> {
+  // ① 前置 fetch：刷新本地 origin/dev ref（不 fetch 则 origin/dev 可能滞后于远端真实状态，
+  // 导致「本地已推送但 diff 仍显示未推」/漏报远端已合并的提交）。best-effort——
+  // fetch 失败不影响后续 log/diff 采集（仍基于本地已有 ref 对比），不阻塞回复。
+  try {
+    await runGit(['fetch', 'origin'])
+  } catch (err: any) {
+    log.warn('git fetch origin failed (push diffs still using local refs)', {
+      error: err?.message,
+    })
+  }
+
   // ① commits：sha + subject（%x09 分隔，subject 可能含 \t 罕见 → 按首个 tab 拆）
   let logText: string
   try {

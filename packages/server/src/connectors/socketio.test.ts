@@ -3886,7 +3886,7 @@ describe('socketio connector', () => {
       vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
 
       const ack = vi.fn()
-      handlers![0]({ messageId: 'msg-push-1' }, ack)
+      await handlers![0]({ messageId: 'msg-push-1' }, ack)
 
       // push 执行在 getMainRepoRoot() 定位的主仓库根
       expect(gitPushOriginDev).toHaveBeenCalledWith('C:\\fake\\main')
@@ -3905,10 +3905,10 @@ describe('socketio connector', () => {
       const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
       const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
       vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
-      vi.mocked(gitPushOriginDev).mockReturnValueOnce({ ok: false, error: 'remote rejected' })
+      vi.mocked(gitPushOriginDev).mockResolvedValueOnce({ ok: false, error: 'remote rejected' })
 
       const ack = vi.fn()
-      handlers![0]({ messageId: 'msg-push-2' }, ack)
+      await handlers![0]({ messageId: 'msg-push-2' }, ack)
 
       expect(mockSocketEmit).toHaveBeenCalledWith(
         Events.ERROR,
@@ -3927,7 +3927,7 @@ describe('socketio connector', () => {
       vi.mocked(getMainRepoRoot).mockReturnValue(null)
 
       const ack = vi.fn()
-      handlers![0]({ messageId: 'msg-push-3' }, ack)
+      await handlers![0]({ messageId: 'msg-push-3' }, ack)
 
       expect(gitPushOriginDev).not.toHaveBeenCalled()
       expect(mockSocketEmit).toHaveBeenCalledWith(
@@ -3935,6 +3935,34 @@ describe('socketio connector', () => {
         expect.objectContaining({ message: expect.stringContaining('无法定位主仓库根') })
       )
       expect(ack).toHaveBeenCalledWith({ ok: false, reason: 'failed' })
+    })
+
+    it('推送中重复确认 → 短路 ack，不二次执行 push', async () => {
+      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
+      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
+      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
+
+      // git push 挂起：第一击进入 pushing 后一直未完成 → 同一 messageId 第二击必须短路
+      let resolvePush: () => void
+      const pending = new Promise<void>((r) => {
+        resolvePush = r
+      })
+      vi.mocked(gitPushOriginDev).mockImplementationOnce(
+        () => pending.then(() => ({ ok: true })) as any
+      )
+      vi.mocked(gitPushOriginDev).mockClear()
+
+      const ack1 = vi.fn()
+      const p1 = handlers![0]({ messageId: 'msg-push-double' }, ack1)
+      // 第一击已进入 pushing（await 挂起中）——重复确认应短路，不二次执行
+      const ack2 = vi.fn()
+      await handlers![0]({ messageId: 'msg-push-double' }, ack2)
+      expect(gitPushOriginDev).toHaveBeenCalledTimes(1) // 未二次 push
+      expect(ack2).toHaveBeenCalledWith({ ok: false })
+
+      resolvePush!()
+      await p1
+      expect(ack1).toHaveBeenCalledWith({ ok: true })
     })
   })
 

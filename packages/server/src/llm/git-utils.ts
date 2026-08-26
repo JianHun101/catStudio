@@ -7,7 +7,8 @@
  * - npm 精确卸载：记录消息执行前后 package.json 的依赖差异
  */
 
-import { execFileSync, execSync } from 'node:child_process'
+import { execFile, execFileSync, execSync } from 'node:child_process'
+import { promisify } from 'node:util'
 import {
   existsSync,
   lstatSync,
@@ -618,17 +619,19 @@ export function removeSessionWorktree(sessionId: string): void {
   }
 }
 
+const execFileAsync = promisify(execFile)
+
 /**
  * push 审批执行点（socketio PUSH_CONFIRM 消费）：git push origin dev。
  * cwd 固定 mainRoot（push 是收口序列的「本地↔共享」边界，执行环境必须确定）。
+ * 异步 execFile（不阻塞事件循环；同步 execFileSync 会让 socket 处理线程卡在 push 秒级）。
  * 失败返回 { ok: false, error }（调用方回前端审批态 + 错误提示），不抛。
  */
-export function gitPushOriginDev(mainRoot: string): { ok: boolean; error?: string } {
+export async function gitPushOriginDev(mainRoot: string): Promise<{ ok: boolean; error?: string }> {
   try {
-    execFileSync('git', ['push', 'origin', 'dev'], {
+    await execFileAsync('git', ['push', 'origin', 'dev'], {
       cwd: mainRoot,
       env: cleanGitEnv(),
-      stdio: 'ignore',
     })
     log.info('pushed dev to origin', { cwd: mainRoot })
     return { ok: true }

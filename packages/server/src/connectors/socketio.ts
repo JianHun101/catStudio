@@ -488,17 +488,26 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
     socket.on(
       Events.PUSH_CONFIRM,
-      (data: { messageId: string }, ack?: (res: { ok: boolean; reason?: 'failed' }) => void) => {
+      async (
+        data: { messageId: string },
+        ack?: (res: { ok: boolean; reason?: 'failed' }) => void
+      ) => {
+        const state = pushStates.get(data.messageId)
+        // 防连点二次 push：已在推送中或已完成 → 短路 ack，不重复执行 git push
+        if (state === 'pushing' || state === 'done') {
+          ack?.({ ok: state === 'done' })
+          return
+        }
         const mainRoot = getMainRepoRoot()
         if (!mainRoot) {
           socket.emit(Events.ERROR, { message: '无法定位主仓库根，push 未执行' })
           ack?.({ ok: false, reason: 'failed' })
           return
         }
-        // pending → pushing：先推状态（前端按钮变「推送中…」），同步执行 push（秒级）
+        // pending → pushing：先推状态（前端按钮变「推送中…」），异步执行 push（不阻塞事件循环）
         pushStates.set(data.messageId, 'pushing')
         socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'pushing' })
-        const res = gitPushOriginDev(mainRoot)
+        const res = await gitPushOriginDev(mainRoot)
         if (res.ok) {
           pushStates.set(data.messageId, 'done')
           log.info('push confirmed and executed', { messageId: data.messageId })
@@ -511,6 +520,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'failed' })
           ack?.({ ok: false, reason: 'failed' })
         }
+        // 终态清理：done/failed 是终结状态，push 不再继续 → 删态防 messageId 常驻泄漏
+        pushStates.delete(data.messageId)
       }
     )
 
