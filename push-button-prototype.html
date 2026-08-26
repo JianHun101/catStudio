@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Push 审批按钮原型 — 挑一个方案</title>
+    <title>Push 审批按钮原型 — V2 组合</title>
     <style>
       /* ═══════════════════════════════════════════════
      THROWAWAY PROTOTYPE — 用完即删，不是生产代码
@@ -23,8 +23,6 @@
         --accent: #d4a574;
         --accent-hover: #e0b98c;
         --accent-soft: rgba(212, 165, 116, 0.15);
-        --accent-red: #55e06a;
-        --accent-red-soft: rgba(224, 85, 106, 0.12);
         --accent-red: #e0556a;
         --accent-red-soft: rgba(224, 85, 106, 0.12);
         --accent-green: #7eb899;
@@ -171,7 +169,17 @@
         color: var(--text-muted);
       }
 
-      /* ── 审批面板（上下文外壳，四个方案共用） ── */
+      /* ── V2 主方案卡片：突出显示 ── */
+      .v2-card {
+        border: 1px solid var(--accent);
+        background: var(--bg-base);
+        box-shadow: 0 0 0 4px var(--accent-soft);
+      }
+      .v2-section {
+        margin-bottom: 36px;
+      }
+
+      /* ── 审批面板（上下文外壳，共用） ── */
       .panel {
         background: var(--bg-surface);
         border: 1px solid var(--border-default);
@@ -219,7 +227,6 @@
         color: var(--accent);
       }
 
-      /* diff 预览（模拟，绿色新增 / 红色删除） */
       .diff {
         font-family: var(--font-mono);
         font-size: 11px;
@@ -251,11 +258,106 @@
         cursor: pointer;
       }
 
-      /* 底部说明 */
       .footnote {
         margin-top: 28px;
         font-size: 12px;
         color: var(--text-muted);
+      }
+
+      .divider-note {
+        margin: 36px 0 20px;
+        font-size: 12px;
+        color: var(--text-muted);
+        text-align: center;
+      }
+
+      /* ═══════════════════════════════════════════════
+     V2 — A 布局 + D 确认按钮 + 强化取消
+     ═══════════════════════════════════════════════ */
+      .v2-actions {
+        display: flex;
+        align-items: stretch;
+        gap: 8px;
+      }
+      /* 确认：D 的卡片大按钮，占满主导位 */
+      .v2-confirm {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 16px;
+        border: 1px solid var(--accent);
+        border-radius: var(--radius-md);
+        background: var(--accent-soft);
+        cursor: pointer;
+        transition: all var(--ease-out);
+        font-family: inherit;
+      }
+      .v2-confirm:hover {
+        background: var(--accent);
+        border-color: var(--accent);
+        box-shadow: 0 2px 14px rgba(212, 165, 116, 0.35);
+        transform: translateY(-1px);
+      }
+      .v2-meta {
+        text-align: left;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .v2-meta .target {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .v2-meta .count {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .v2-confirm:hover .v2-meta .target,
+      .v2-confirm:hover .v2-meta .count {
+        color: #1b1815;
+      }
+      .v2-cta {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--accent);
+        white-space: nowrap;
+      }
+      .v2-confirm:hover .v2-cta {
+        color: #1b1815;
+      }
+      /* 取消：幽灵描边，hover 明显反馈（实心警示红 + 白字 + 上浮阴影） */
+      .v2-cancel {
+        flex-shrink: 0;
+        padding: 12px 18px;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-md);
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 13px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+        transition: all var(--ease-out);
+      }
+      .v2-cancel:hover {
+        background: var(--accent-red);
+        border-color: var(--accent-red);
+        color: #fff;
+        box-shadow: 0 2px 14px rgba(224, 85, 106, 0.45);
+        transform: translateY(-1px);
+      }
+      .v2-cancel:active,
+      .v2-confirm:active {
+        transform: translateY(0);
+        box-shadow: none;
       }
 
       /* ═══════════════════════════════════════════════
@@ -459,9 +561,10 @@
     <div class="page">
       <div class="page-header">
         <div>
-          <h1>Push 审批按钮 — 四个方案</h1>
+          <h1>Push 审批按钮 — V2 组合方案</h1>
           <div class="sub">
-            同一审批面板外壳，只有按钮形态不同。挑一个（或说「A 的头 + C 的脚」）。
+            A 布局（确认占主导 + 取消并排）· D 确认按钮（卡片大按钮）· 强化取消 hover。下方保留
+            A/B/C/D 对照。
           </div>
         </div>
         <button class="theme-btn" onclick="toggleTheme()">切换日/夜模式</button>
@@ -470,6 +573,55 @@
       <div class="proto-banner">
         ⚠️ THROWAWAY PROTOTYPE — 用完即删，非生产代码。设计令牌与 app 一致，仅按钮结构不同。
       </div>
+
+      <!-- ── V2 主方案 ── -->
+      <div class="v2-section">
+        <div class="variant-card v2-card">
+          <div class="variant-head">
+            <span class="variant-key">V2</span>
+            <div>
+              <div class="variant-name">选定组合：A 布局 + D 确认 + 强化取消</div>
+              <div class="variant-desc">
+                确认按钮占主导（D 卡片大按钮，左「dev→origin/dev · N commits」右「确认 Push」，hover
+                整块实心）；取消按钮并排，hover 实心警示红 + 白字 + 上浮阴影，反馈明显。
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">收口待推送：<b>dev → origin/dev</b></div>
+            <div class="panel-body">
+              <div class="reason">改动原因：会话单收口（合并 session/7531d744 + 门禁同步）</div>
+              <div class="commit-list">
+                <div class="commit">
+                  <span class="hash">f140d2c</span> catstudy [b74aba0c…] 会话收口
+                </div>
+                <div class="commit">
+                  <span class="hash">93df14a</span> catstudy [c08d778a…] ADR 0011 房间化收口
+                </div>
+              </div>
+              <div class="diff">
+                <div class="file">CLAUDE.md</div>
+                <div class="ctx">@@ 收口序列 @@</div>
+                <div class="add">+ 收口全程在主仓库根执行，绝不留在被删 worktree 目录内</div>
+                <div class="del">- 旧铁律：删分支 → 写 gate → push</div>
+                <div class="fold">▸ 展开完整 diff（2 files, +37 −12）</div>
+              </div>
+              <div class="v2-actions">
+                <button class="v2-confirm">
+                  <span class="v2-meta">
+                    <span class="target">dev → origin/dev</span>
+                    <span class="count">2 commits · +37 −12</span>
+                  </span>
+                  <span class="v2-cta">确认 Push</span>
+                </button>
+                <button class="v2-cancel">取消</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="divider-note">—— 以下为原始四方案，仅作对照 ——</div>
 
       <div class="grid">
         <!-- A -->
@@ -636,9 +788,10 @@
       </div>
 
       <div class="footnote">
-        说「A」「B」「C」「D」，或「A 的实心 + D 的卡片信息」这类组合都行。
-        选中后：我把胜出形态折叠进正式契约（request_user_action 新增 type:'push' + 实时采集
-        diff），再派 ds猫 薄刀实施。
+        顶部 <b>V2</b> 即你选定的组合：A 布局 + D 确认按钮 + 强化取消。若还需微调（如取消按钮 hover
+        想更柔或更烈、确认按钮要不要保留 hover
+        上浮），说一句即可。选定后：我把胜出形态折叠进正式契约 （request_user_action 新增
+        type:'push' + 实时采集 diff），再派 ds猫 薄刀实施。
       </div>
     </div>
 
