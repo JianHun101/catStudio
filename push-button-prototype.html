@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Push 审批按钮原型 — 挑一个方案</title>
+    <style>
+      /* ═══════════════════════════════════════════════
+     THROWAWAY PROTOTYPE — 用完即删，不是生产代码
+     设计令牌与 packages/web/index.html 完全一致
+     ═══════════════════════════════════════════════ */
+      :root {
+        --bg-deep: #14110e;
+        --bg-base: #1b1815;
+        --bg-surface: #231f1b;
+        --bg-hover: #2c2722;
+        --bg-raised: #312b25;
+        --border-subtle: #292420;
+        --border-default: #3a332c;
+        --text-primary: #e6ddd0;
+        --text-secondary: #a0988e;
+        --text-muted: #6b655c;
+        --accent: #d4a574;
+        --accent-hover: #e0b98c;
+        --accent-soft: rgba(212, 165, 116, 0.15);
+        --accent-red: #55e06a;
+        --accent-red-soft: rgba(224, 85, 106, 0.12);
+        --accent-red: #e0556a;
+        --accent-red-soft: rgba(224, 85, 106, 0.12);
+        --accent-green: #7eb899;
+        --accent-yellow: #d4a854;
+        --accent-pink: #d4849a;
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
+        --radius-xl: 18px;
+        --font-sans:
+          'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+        --font-mono: 'JetBrains Mono', 'Consolas', 'Cascadia Code', monospace;
+        --ease-out: 0.15s ease-out;
+      }
+
+      [data-theme='light'] {
+        --bg-deep: #f8f4ed;
+        --bg-base: #efe8dd;
+        --bg-surface: #ffffff;
+        --bg-hover: #e8dfd2;
+        --bg-raised: #f5efe5;
+        --border-subtle: #e0d6c7;
+        --border-default: #d4c8b2;
+        --text-primary: #3c3028;
+        --text-secondary: #6b5c4a;
+        --text-muted: #a09080;
+        --accent: #c89060;
+        --accent-hover: #b07840;
+        --accent-soft: rgba(180, 130, 80, 0.12);
+        --accent-red: #d04458;
+        --accent-red-soft: rgba(208, 68, 88, 0.12);
+        --accent-green: #5a8f6e;
+        --accent-yellow: #c89840;
+        --accent-pink: #c47088;
+      }
+
+      *,
+      *::before,
+      *::after {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: var(--font-sans);
+        background: var(--bg-deep);
+        color: var(--text-primary);
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .page {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 24px 80px;
+      }
+
+      .page-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+      .page-header h1 {
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.2px;
+      }
+      .page-header .sub {
+        font-size: 13px;
+        color: var(--text-muted);
+        margin-top: 4px;
+      }
+      .theme-btn {
+        padding: 6px 14px;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 13px;
+        cursor: pointer;
+        font-family: inherit;
+        transition: all var(--ease-out);
+      }
+      .theme-btn:hover {
+        background: var(--bg-hover);
+        color: var(--text-primary);
+      }
+
+      .proto-banner {
+        margin: 16px 0 28px;
+        padding: 10px 14px;
+        border: 1px dashed var(--accent);
+        border-radius: var(--radius-md);
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-size: 13px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 24px;
+      }
+      @media (max-width: 800px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .variant-card {
+        background: var(--bg-base);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-lg);
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .variant-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+      }
+      .variant-key {
+        flex-shrink: 0;
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        background: var(--accent-soft);
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 14px;
+      }
+      .variant-name {
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .variant-desc {
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      /* ── 审批面板（上下文外壳，四个方案共用） ── */
+      .panel {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+      }
+      .panel-head {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border-subtle);
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-secondary);
+      }
+      .panel-head b {
+        color: var(--text-primary);
+        font-weight: 600;
+      }
+      .panel-body {
+        padding: 14px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .reason {
+        font-size: 13px;
+        color: var(--text-secondary);
+      }
+      .commit-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .commit {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-muted);
+        padding: 5px 8px;
+        background: var(--bg-base);
+        border-radius: var(--radius-sm);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .commit .hash {
+        color: var(--accent);
+      }
+
+      /* diff 预览（模拟，绿色新增 / 红色删除） */
+      .diff {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        line-height: 1.6;
+        background: var(--bg-base);
+        border-radius: var(--radius-sm);
+        padding: 8px 10px;
+        overflow: hidden;
+      }
+      .diff .file {
+        color: var(--text-muted);
+        margin-bottom: 4px;
+      }
+      .diff .add {
+        color: var(--accent-green);
+      }
+      .diff .del {
+        color: var(--accent-red);
+      }
+      .diff .ctx {
+        color: var(--text-muted);
+      }
+      .diff .fold {
+        display: block;
+        color: var(--text-muted);
+        text-align: center;
+        margin-top: 4px;
+        font-size: 10px;
+        cursor: pointer;
+      }
+
+      /* 底部说明 */
+      .footnote {
+        margin-top: 28px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      /* ═══════════════════════════════════════════════
+     方案 A — 实心主按钮（primary solid）
+     ═══════════════════════════════════════════════ */
+      .a-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .a-confirm {
+        flex: 1;
+        padding: 9px 16px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: var(--accent);
+        color: #1b1815;
+        font-size: 13px;
+        font-weight: 700;
+        font-family: inherit;
+        cursor: pointer;
+        transition: all var(--ease-out);
+      }
+      .a-confirm:hover {
+        background: var(--accent-hover);
+      }
+      .a-cancel {
+        padding: 9px 16px;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: all var(--ease-out);
+      }
+      .a-cancel:hover {
+        border-color: var(--accent-red);
+        color: var(--accent-red);
+        background: var(--accent-red-soft);
+      }
+
+      /* ═══════════════════════════════════════════════
+     方案 B — 危险警示（danger outline）
+     ═══════════════════════════════════════════════ */
+      .b-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .b-confirm {
+        flex: 1;
+        padding: 9px 16px;
+        border: 1px solid var(--accent-red);
+        border-radius: var(--radius-sm);
+        background: var(--accent-red-soft);
+        color: var(--accent-red);
+        font-size: 13px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+        transition: all var(--ease-out);
+      }
+      .b-confirm:hover {
+        background: var(--accent-red);
+        color: #fff;
+      }
+      .b-cancel {
+        padding: 9px 16px;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: all var(--ease-out);
+      }
+      .b-cancel:hover {
+        border-color: var(--text-muted);
+        color: var(--text-primary);
+      }
+
+      /* ═══════════════════════════════════════════════
+     方案 C — 分段胶囊（segmented pill）
+     ═══════════════════════════════════════════════ */
+      .c-actions {
+        display: flex;
+      }
+      .c-pill {
+        display: flex;
+        overflow: hidden;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-md);
+      }
+      .c-confirm {
+        padding: 9px 22px;
+        border: none;
+        background: var(--accent);
+        color: #1b1815;
+        font-size: 13px;
+        font-weight: 700;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background var(--ease-out);
+      }
+      .c-confirm:hover {
+        background: var(--accent-hover);
+      }
+      .c-divider {
+        width: 1px;
+        background: var(--border-default);
+      }
+      .c-cancel {
+        padding: 9px 20px;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: all var(--ease-out);
+      }
+      .c-cancel:hover {
+        background: var(--bg-hover);
+        color: var(--text-primary);
+      }
+
+      /* ═══════════════════════════════════════════════
+     方案 D — 审批卡片大按钮（full-width card CTA）
+     ═══════════════════════════════════════════════ */
+      .d-actions {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .d-confirm {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 16px;
+        border: 1px solid var(--accent);
+        border-radius: var(--radius-md);
+        background: var(--accent-soft);
+        cursor: pointer;
+        transition: all var(--ease-out);
+        font-family: inherit;
+        width: 100%;
+      }
+      .d-confirm:hover {
+        background: var(--accent);
+      }
+      .d-meta {
+        text-align: left;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .d-meta .target {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      .d-meta .count {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .d-confirm:hover .d-meta .target,
+      .d-confirm:hover .d-meta .count {
+        color: #1b1815;
+      }
+      .d-cta {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--accent);
+      }
+      .d-confirm:hover .d-cta {
+        color: #1b1815;
+      }
+      .d-cancel {
+        align-self: center;
+        padding: 4px 12px;
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 12px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: color var(--ease-out);
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+      .d-cancel:hover {
+        color: var(--accent-red);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="page-header">
+        <div>
+          <h1>Push 审批按钮 — 四个方案</h1>
+          <div class="sub">
+            同一审批面板外壳，只有按钮形态不同。挑一个（或说「A 的头 + C 的脚」）。
+          </div>
+        </div>
+        <button class="theme-btn" onclick="toggleTheme()">切换日/夜模式</button>
+      </div>
+
+      <div class="proto-banner">
+        ⚠️ THROWAWAY PROTOTYPE — 用完即删，非生产代码。设计令牌与 app 一致，仅按钮结构不同。
+      </div>
+
+      <div class="grid">
+        <!-- A -->
+        <div class="variant-card">
+          <div class="variant-head">
+            <span class="variant-key">A</span>
+            <div>
+              <div class="variant-name">实心主按钮</div>
+              <div class="variant-desc">
+                实心强调色 + 白字，主行动最醒目；取消用幽灵描边。与现有「确认重启」同族。
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">收口待推送：<b>dev → origin/dev</b></div>
+            <div class="panel-body">
+              <div class="reason">改动原因：会话单收口（合并 session/7531d744 + 门禁同步）</div>
+              <div class="commit-list">
+                <div class="commit">
+                  <span class="hash">f140d2c</span> catstudy [b74aba0c…] 会话收口
+                </div>
+                <div class="commit">
+                  <span class="hash">93df14a</span> catstudy [c08d778a…] ADR 0011 房间化收口
+                </div>
+              </div>
+              <div class="diff">
+                <div class="file">CLAUDE.md</div>
+                <div class="ctx">@@ 收口序列 @@</div>
+                <div class="add">+ 收口全程在主仓库根执行，绝不留在被删 worktree 目录内</div>
+                <div class="del">- 旧铁律：删分支 → 写 gate → push</div>
+                <div class="fold">▸ 展开完整 diff（2 files, +37 −12）</div>
+              </div>
+              <div class="a-actions">
+                <button class="a-confirm">确认 Push</button>
+                <button class="a-cancel">取消</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- B -->
+        <div class="variant-card">
+          <div class="variant-head">
+            <span class="variant-key">B</span>
+            <div>
+              <div class="variant-name">危险警示</div>
+              <div class="variant-desc">
+                跨共享边界 = 不可逆，用警示色而非品牌色；hover 实心。语义最诚实，与重启按钮区分。
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">收口待推送：<b>dev → origin/dev</b></div>
+            <div class="panel-body">
+              <div class="reason">改动原因：会话单收口（合并 session/7531d744 + 门禁同步）</div>
+              <div class="commit-list">
+                <div class="commit">
+                  <span class="hash">f140d2c</span> catstudy [b74aba0c…] 会话收口
+                </div>
+                <div class="commit">
+                  <span class="hash">93df14a</span> catstudy [c08d778a…] ADR 0011 房间化收口
+                </div>
+              </div>
+              <div class="diff">
+                <div class="file">CLAUDE.md</div>
+                <div class="ctx">@@ 收口序列 @@</div>
+                <div class="add">+ 收口全程在主仓库根执行，绝不留在被删 worktree 目录内</div>
+                <div class="del">- 旧铁律：删分支 → 写 gate → push</div>
+                <div class="fold">▸ 展开完整 diff（2 files, +37 −12）</div>
+              </div>
+              <div class="b-actions">
+                <button class="b-confirm">确认 Push</button>
+                <button class="b-cancel">取消</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- C -->
+        <div class="variant-card">
+          <div class="variant-head">
+            <span class="variant-key">C</span>
+            <div>
+              <div class="variant-name">分段胶囊</div>
+              <div class="variant-desc">
+                确认+取消合一个胶囊，左右两段，中间分隔线。省空间、视觉噪音最小。
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">收口待推送：<b>dev → origin/dev</b></div>
+            <div class="panel-body">
+              <div class="reason">改动原因：会话单收口（合并 session/7531d744 + 门禁同步）</div>
+              <div class="commit-list">
+                <div class="commit">
+                  <span class="hash">f140d2c</span> catstudy [b74aba0c…] 会话收口
+                </div>
+                <div class="commit">
+                  <span class="hash">93df14a</span> catstudy [c08d778a…] ADR 0011 房间化收口
+                </div>
+              </div>
+              <div class="diff">
+                <div class="file">CLAUDE.md</div>
+                <div class="ctx">@@ 收口序列 @@</div>
+                <div class="add">+ 收口全程在主仓库根执行，绝不留在被删 worktree 目录内</div>
+                <div class="del">- 旧铁律：删分支 → 写 gate → push</div>
+                <div class="fold">▸ 展开完整 diff（2 files, +37 −12）</div>
+              </div>
+              <div class="c-actions">
+                <div class="c-pill">
+                  <button class="c-confirm">确认 Push</button>
+                  <div class="c-divider"></div>
+                  <button class="c-cancel">取消</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- D -->
+        <div class="variant-card">
+          <div class="variant-head">
+            <span class="variant-key">D</span>
+            <div>
+              <div class="variant-name">审批卡片大按钮</div>
+              <div class="variant-desc">
+                整块底部条可点，左「dev→origin/dev · N commits」右「确认
+                Push」，取消退为文字链接。改动面最大、最彻底。
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">收口待推送：<b>dev → origin/dev</b></div>
+            <div class="panel-body">
+              <div class="reason">改动原因：会话单收口（合并 session/7531d744 + 门禁同步）</div>
+              <div class="commit-list">
+                <div class="commit">
+                  <span class="hash">f140d2c</span> catstudy [b74aba0c…] 会话收口
+                </div>
+                <div class="commit">
+                  <span class="hash">93df14a</span> catstudy [c08d778a…] ADR 0011 房间化收口
+                </div>
+              </div>
+              <div class="diff">
+                <div class="file">CLAUDE.md</div>
+                <div class="ctx">@@ 收口序列 @@</div>
+                <div class="add">+ 收口全程在主仓库根执行，绝不留在被删 worktree 目录内</div>
+                <div class="del">- 旧铁律：删分支 → 写 gate → push</div>
+                <div class="fold">▸ 展开完整 diff（2 files, +37 −12）</div>
+              </div>
+              <div class="d-actions">
+                <button class="d-confirm">
+                  <span class="d-meta">
+                    <span class="target">dev → origin/dev</span>
+                    <span class="count">2 commits · +37 −12</span>
+                  </span>
+                  <span class="d-cta">确认 Push</span>
+                </button>
+                <button class="d-cancel">取消</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="footnote">
+        说「A」「B」「C」「D」，或「A 的实心 + D 的卡片信息」这类组合都行。
+        选中后：我把胜出形态折叠进正式契约（request_user_action 新增 type:'push' + 实时采集
+        diff），再派 ds猫 薄刀实施。
+      </div>
+    </div>
+
+    <script>
+      function toggleTheme() {
+        const root = document.documentElement
+        if (root.dataset.theme === 'light') delete root.dataset.theme
+        else root.dataset.theme = 'light'
+      }
+    </script>
+  </body>
+</html>
