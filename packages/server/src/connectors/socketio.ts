@@ -110,8 +110,7 @@ function createSocketBus(io: SocketServer): EngineBus & HandoffBus {
     emitMessageUpdated: (sessionId, u) => room(sessionId).emit(Events.MESSAGE_UPDATED, u),
     emitContextWindowStats: (stats) =>
       room(stats.sessionId).emit(Events.CONTEXT_WINDOW_STATS, stats),
-    emitSessionHandoff: (e) => io.emit(Events.SESSION_HANDOFF, e),
-    emitSessionHandoffToRoom: (sessionId, e) => room(sessionId).emit(Events.SESSION_HANDOFF, e),
+    emitSessionHandoff: (e) => room(e.oldSessionId).emit(Events.SESSION_HANDOFF, e),
     emitHandoffFailed: (p) => room(p.sessionId).emit(Events.HANDOFF_FAILED, p),
   }
 }

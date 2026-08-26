@@ -172,7 +172,7 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
   if (bus) {
     bus.emitMessage(msg)
     if (handoffTarget) {
-      bus.emitSessionHandoffToRoom(sessionId, handoffTarget)
+      bus.emitSessionHandoff(handoffTarget)
     }
   }
 

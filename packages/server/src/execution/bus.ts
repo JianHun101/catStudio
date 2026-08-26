@@ -1,14 +1,13 @@
 /**
  * Execution — MessageBus 接口（纯类型文件，零运行时依赖，防 handoff/回复路径循环）。
  *
- * 引擎侧窄化视图 EngineBus（6 方法）+ 交接窄化视图 HandoffBus（3 方法）；
+ * 引擎侧窄化视图 EngineBus（6 方法）+ 交接窄化视图 HandoffBus（2 方法）；
  * 生产实现 createSocketBus(io) 在 connector 侧（socketio.ts），测试用假实现。
  * 房间路由规则：载荷带 sessionId 从载荷取房间；不带（agent 状态/消息更新）为显式首参。
  *
  * 第 4 刀：emitAgentMessage → emitMessage（ingest 用户消息广播与 agent 回复
- * 共用完整 Message 通道，role 由载荷决定）；HandoffBus 增房间形态
- * emitSessionHandoffToRoom（ingest 重定向通知旧会话房间——与 handoff 全局形态
- * 并存，SESSION_HANDOFF 房间化裁决 OQ2 独立进行）。
+ * 共用完整 Message 通道，role 由载荷决定）；SESSION_HANDOFF 房间化（ADR 0011）：
+ * 统一单一方法 emitSessionHandoff，路由从 e.oldSessionId 取房间（修全局广播泄漏）。
  */
 
 import type { Message, ContextWindowStats, HandoffEvent } from '@cat-study/shared'
@@ -38,11 +37,9 @@ export interface EngineBus {
 
 /** 交接模块的输出窄化视图（performHandoff / ingest 重定向消费） */
 export interface HandoffBus {
-  /** SESSION_HANDOFF — 全局广播（handoff performHandoff 语义，路由细节归 adapter） */
+  /** SESSION_HANDOFF — 房间广播（performHandoff 与 ingest 重定向统一，
+   *  路由从 e.oldSessionId 取房间；修全局广播泄漏） */
   emitSessionHandoff(e: HandoffEvent): void
-  /** SESSION_HANDOFF — 房间广播（ingest 重定向通知旧会话房间；语义不对称
-   *  观察项 OQ2 的两形态并存，adapter 分流） */
-  emitSessionHandoffToRoom(sessionId: string, e: HandoffEvent): void
   /** HANDOFF_FAILED — 会话房间 */
   emitHandoffFailed(p: HandoffFailedPayload): void
 }

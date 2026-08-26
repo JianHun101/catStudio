@@ -1,7 +1,7 @@
-# ADR（草稿，编号待收口分配）: Execution 执行引擎抽取——Connector 回归传输层
+# ADR 0011: Execution 执行引擎抽取——Connector 回归传输层
 
-> **Status**: draft（2026-08-25 店长终审通过后投审查链；编号在收口时分配）
-> **实施进度**：第 1-3 刀 + 3.5 刀 + 第 4 刀 + DB 分离全部落地（86341bb/02766c5/e0b202e/8d0b405/e9928d2/923725f），socketio.ts 3014 → 609 行；每刀全绿独立 commit。
+> **Status**: accepted（2026-08-25 店长终审；ADR 0011 收口分配）
+> **实施进度**：第 1-3 刀 + 3.5 刀 + 第 4 刀 + DB 分离全部落地（86341bb/02766c5/e0b202e/8d0b405/e9928d2/923725f），socketio.ts 3014 → 609 行；每刀全绿独立 commit。SESSION_HANDOFF 房间化（统一单一方法，修全局广播泄漏）本单落地。
 > **背景链**：`/improve-codebase-architecture` 全库走查 → 候选 1「Connector 成了业务核心」→ grilling 九问定稿 → design-it-twice 四案对比 → 本文档留痕。
 
 ## 背景与摩擦（证据段）
@@ -16,7 +16,7 @@
 ## 决策
 
 1. **目标形态**：独立 `packages/server/src/execution/` 模块；socketio.ts 变薄传输层（预计 3014 → ~1100 行；**实际收口 609 行**）；dispatch 维持 slot/FIFO 不动（37KB 测试零重写）。
-2. **输出 seam**：初始化注入 **MessageBus**（类型化方法，design B 主体）；引擎窄化视图 6 方法（`emitMessage`（第 4 刀由 emitAgentMessage 更名——ingest 用户消息与 agent 回复共用完整 Message 通道）/`emitSystemNotice`/`emitTyping`/`emitAgentMessageStatus`/`emitMessageUpdated`/`emitContextWindowStats`）——引擎物理上发不出未类型化事件（无逃生口）；HandoffBus 第 4 刀增 `emitSessionHandoffToRoom`（ingest 重定向房间广播，与全局形态并存）；`createSocketBus(io)` 内部用判别联合 + exhaustive switch（design A 嫁接，编译器强制每个事件被处理）；引擎目录零 socket.io 引用。
+2. **输出 seam**：初始化注入 **MessageBus**（类型化方法，design B 主体）；引擎窄化视图 6 方法（`emitMessage`（第 4 刀由 emitAgentMessage 更名——ingest 用户消息与 agent 回复共用完整 Message 通道）/`emitSystemNotice`/`emitTyping`/`emitAgentMessageStatus`/`emitMessageUpdated`/`emitContextWindowStats`）——引擎物理上发不出未类型化事件（无逃生口）；HandoffBus 统一单一方法 `emitSessionHandoff`（ADR 0011 房间化，路由从 `e.oldSessionId` 取房间——修全局广播泄漏）；`createSocketBus(io)` 内部用判别联合 + exhaustive switch（design A 嫁接，编译器强制每个事件被处理）；引擎目录零 socket.io 引用。
 3. **payload 类型落 shared**（wire-contract 方向）：新增 `MessageAgentStatus`（'queued'/'thinking'/'replying'/'done'——与 SlotStatus 两域解耦，刻意不复用）、`TypingUpdatePayload`、`SystemNoticePayload`（9+ 处手搭 system 通知收敛）、`MessageUpdatedPayload`、`HandoffFailedPayload`；补 `ALL_AGENT_STATES`/`GET_AGENT_STATES` 常量；死常量 `QUEUE_UPDATE` 清理。
 4. **成员原则**：emit 点逐一对账；不预留没有生产者的口子（设计层兼容靠 seam 本身 + 加成员不破坏调用者；无落点预留会腐烂——QUEUE_UPDATE 标本）。
 5. **搬家清单**：四组全搬——备菜（上下文过滤/压缩/提示构建）→ 炒菜（runAgentReply）→ 点单管理（executeOneAgent/executeAgentsSerial/drainQueuedCommand + 随身状态）→ 善后（三条恢复路径）。
@@ -40,12 +40,12 @@
 - **涟漪清单**：handoff `performHandoff(sessionId, io)` → `performHandoff(sessionId, handoffBus)`（1 文件 2 调用点）；attribution 返回 `needReplay`；ingest 改从 execution/ 导入（顺带解开自认的 ESM 循环，ingest.ts:8-10 注释）；internal.ts 经委托函数零改动；index.ts 恢复/重放定时器改调引擎。
 - **后续挂靠**：候选 2（dispatch 配对结构化 + 实例态深化）、候选 8（schema 派生 + 测试库文件化）、候选池新增 opencode #2（LLM adapter spawn 生命周期）与 #4（行映射收口）。
 - **风险点**：3.5 刀区域（失败漏斗/run 注册表）是事故史最密集处——独立刀 + 专门测试；tsx watch 热重启需引擎单例 fail-fast 断言（双注册表是仓库没吃过的新失败类）。
-- **已知观察项**：SESSION_HANDOFF 全局广播 vs 房间广播不对称（handoff/index.ts:222 `io.emit` vs ingest 房间）——design B 提议房间化（实为修 bug），是否本单修留审查链裁决。
+- **已知观察项**：SESSION_HANDOFF 全局广播 vs 房间广播不对称（handoff/index.ts:222 `io.emit` vs ingest 房间）——✅ 已裁决并落地（ADR 0011）：统一单一方法 `emitSessionHandoff`，房间路由从 `e.oldSessionId` 取，修全局广播泄漏。
 
 ## 待确认
 
-- [ ] ADR 编号（收口时分配；0010 可能已留给知识库二期）
-- [ ] SESSION_HANDOFF 房间化裁决：ingest 重定向路径已房间化（emitSessionHandoffToRoom，第 4 刀）；handoff performHandoff 的全局 emit 未动——是否整体房间化仍待裁决（两形态并存记录在 bus.ts）
+- [x] ADR 编号 = **0011**（0010 留给知识库二期）
+- [x] SESSION_HANDOFF 房间化裁决：**采纳整体房间化，统一单一方法 `emitSessionHandoff`**（ingest 重定向与 performHandoff 共用，路由从 `e.oldSessionId` 取房间，修全局广播泄漏）——ADR 0011 同单落地
 - [x] 四刀 + 3.5 刀的派活单拆分方式 —— **未拆单，由本线连续推进完成**（每刀独立 commit 全绿，等效可独立审查）
 - [ ] 实施观察项（与搬家无关，另开单处置）：
   - 摘要压缩集成测试（验收9/10/11 等）+ 并发重叠测试存在低频时序 flake（waitFor 边界，10s 级超时暴露）；HEAD 与修改后均有观察窗口，单跑稳定复现不了——判定法：重跑一次看是否转绿
