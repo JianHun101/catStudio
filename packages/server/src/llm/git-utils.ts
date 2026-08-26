@@ -48,7 +48,7 @@ function getCwd(): string {
  * cwd=tmp 时相对 tmp 解析无害）——店长实测实锤（2026-08-09，hook env dump）。
  * 与 getCwd() 动态化互补：前者防模块缓存锁死 cwd，本函数防 env 劫持 cwd。
  */
-function cleanGitEnv(): NodeJS.ProcessEnv {
+export function cleanGitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env }
   delete env.GIT_DIR
   delete env.GIT_INDEX_FILE
@@ -261,17 +261,17 @@ export function npmUninstall(packages: string[]): void {
 const SESSION_WORKTREE_PREFIX = 'catStudy-sessions'
 
 /** 会话 short id（分支/目录名用，8 位，去非法字符） */
-function sessionShortId(sessionId: string): string {
+export function sessionShortId(sessionId: string): string {
   return sessionId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 8)
 }
 
 /** 会话分支名 */
-function sessionBranch(shortId: string): string {
+export function sessionBranch(shortId: string): string {
   return `session/${shortId}`
 }
 
 /** 会话 worktree 路径（主仓库兄弟目录） */
-function sessionWorktreePath(mainRoot: string, shortId: string): string {
+export function sessionWorktreePath(mainRoot: string, shortId: string): string {
   return resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX, shortId)
 }
 
