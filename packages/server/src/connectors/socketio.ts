@@ -65,6 +65,34 @@ export { rowToAgent } from '../execution/row.js'
 const log = createLogger('socketio')
 
 /**
+ * onAny 兜底诊断白名单（三层缺陷根治①）：Socket.IO 对无 handler 的 incoming event 静默丢弃
+ * （不报错、不落日志、不 ack）——旧 server 收到前端新事件（如 PUSH_CONFIRM）时问题完全不可见。
+ * 白名单 = 全部已注册 client→server 事件 + Socket.IO 保留/内建事件名；白名单外的自定义事件打 warn。
+ * 注意：只列 client→server 事件——onAny 只截获 incoming packet，server→client 广播不经此路径。
+ */
+const KNOWN_CLIENT_EVENTS = new Set<string>([
+  Events.JOIN_SESSION,
+  Events.LEAVE_SESSION,
+  Events.SEND_MESSAGE,
+  Events.MESSAGE_RETRACT,
+  Events.RESTART_CONFIRM,
+  Events.RESTART_CANCEL,
+  Events.PUSH_CONFIRM,
+  Events.PUSH_CANCEL,
+  Events.AGENT_INTERRUPT,
+  Events.TOGGLE_BROADCAST,
+  'get-agent-states', // 既有 handler 用裸字符串注册（非 Events 常量）
+  // Socket.IO 保留/内建事件：onAny 是否截获随版本而异，白名单双保险防误报
+  'connect',
+  'connect_error',
+  'disconnect',
+  'disconnecting',
+  'newListener',
+  'removeListener',
+  'error',
+])
+
+/**
  * push 审批状态（内存化，messageId → 状态）。
  * 与 restart 落文件不同：重启需 dev.js 轮询（跨进程信号），push 由本进程
  * socket handler 直接执行、无跨进程消费者 → 进程内 Map 即可，不必落文件。
@@ -154,6 +182,18 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
   io.on('connection', (socket) => {
     log.info('client connected', { socketId: socket.id })
+
+    // 未注册事件兜底诊断（三层缺陷根治①）：Socket.IO 对无 handler 的 incoming event 静默丢弃
+    // ——前端 emit 了本 server 未注册的事件（如旧 server 收到 PUSH_CONFIRM）时零日志零 ack。
+    // onAny 把「静默丢弃」变成「可诊断」：白名单（已注册 + 保留事件）之外的自定义事件打 warn。
+    socket.onAny((event: string, ..._args: unknown[]) => {
+      if (!KNOWN_CLIENT_EVENTS.has(event)) {
+        log.warn('unhandled socket event (silently dropped by Socket.IO)', {
+          socketId: socket.id,
+          event,
+        })
+      }
+    })
 
     // ─── Session: join ───────────────────────────
 

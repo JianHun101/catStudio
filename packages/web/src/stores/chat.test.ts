@@ -87,14 +87,16 @@ const mockMessage: Message = {
 
 describe('chatStore', () => {
   let store: ReturnType<typeof import('./chat.js').useChatStore>
+  let pushConfirmTimeoutMs = 8000
 
   beforeEach(async () => {
     vi.clearAllMocks()
     setActivePinia(createPinia())
 
     // Import store dynamically
-    const { useChatStore } = await import('./chat.js')
+    const { useChatStore, PUSH_CONFIRM_TIMEOUT_MS } = await import('./chat.js')
     store = useChatStore()
+    pushConfirmTimeoutMs = PUSH_CONFIRM_TIMEOUT_MS
   })
 
   describe('initial state', () => {
@@ -388,6 +390,58 @@ describe('chatStore', () => {
 
       expect(store.confirmingPushMessageId).toBeNull()
       expect(store.errorMessage).toBeNull()
+    })
+
+    it('超时兜底：ack/PUSH_STATUS/ERROR 三条路都不来（旧 server 静默丢弃）→ 超时后复位 + toast 明示', () => {
+      vi.useFakeTimers()
+      try {
+        store.confirmPush('m-push')
+        expect(store.confirmingPushMessageId).toBe('m-push')
+
+        // 超时阈值内无任何确认信号 → 到点复位 + 明示「可能未加载 push 功能」
+        vi.advanceTimersByTime(pushConfirmTimeoutMs)
+
+        expect(store.confirmingPushMessageId).toBeNull()
+        expect(store.errorMessage).toContain('服务端未确认 push')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('超时竞态：先点 m1 再点 m2，m1 的超时不得复位 m2 的 confirming 态', () => {
+      vi.useFakeTimers()
+      try {
+        store.confirmPush('m-push-1')
+        vi.advanceTimersByTime(3000)
+        store.confirmPush('m-push-2')
+        expect(store.confirmingPushMessageId).toBe('m-push-2')
+
+        // m1 的超时到点——但当前 confirming 目标是 m2，不得误复位
+        vi.advanceTimersByTime(pushConfirmTimeoutMs - 3000)
+        expect(store.confirmingPushMessageId).toBe('m-push-2')
+
+        // m2 自己的超时到点才复位
+        vi.advanceTimersByTime(3000)
+        expect(store.confirmingPushMessageId).toBeNull()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('ack 先于超时到达 → 超时到点不弹 toast（confirming 已清，messageId 校验拦截）', () => {
+      vi.useFakeTimers()
+      try {
+        store.confirmPush('m-push')
+        const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean }) => void
+        ack({ ok: true })
+        expect(store.confirmingPushMessageId).toBeNull()
+
+        vi.advanceTimersByTime(pushConfirmTimeoutMs)
+
+        expect(store.errorMessage).toBeNull()
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('cancelPush emits PUSH_CANCEL with messageId', () => {
@@ -737,6 +791,17 @@ describe('chatStore', () => {
 
       store.confirmingPushMessageId = 'm-push'
       handler!({ messageId: 'm-push', state: 'pushing' })
+      expect(store.confirmingPushMessageId).toBeNull()
+    })
+
+    it('socket connect（重连）→ 清 confirmingPushMessageId（断开期间的确认已不可能被响应）', () => {
+      const connectHandler = mockOn.mock.calls.find((call) => call[0] === 'connect')?.[1] as
+        (() => void) | undefined
+      expect(connectHandler).toBeDefined()
+
+      store.confirmingPushMessageId = 'm-push'
+      connectHandler!()
+
       expect(store.confirmingPushMessageId).toBeNull()
     })
 

@@ -26,6 +26,18 @@ import {
 
 // ═══ Mock all external dependencies ═══
 
+// onAny 兜底诊断测试需要断言 warn 日志——logger 模块级 mock（debug/info/error no-op，
+// 不影响既有用例；socketio.ts 内部 createLogger('socketio') 同样吃到这个 mock）
+const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }))
+vi.mock('../logger.js', () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: logWarn,
+    error: vi.fn(),
+  }),
+}))
+
 vi.mock('../dispatch/index.js', () => ({
   dispatch: vi.fn().mockResolvedValue(undefined),
   completeExecution: vi.fn(),
@@ -160,6 +172,9 @@ const mockSocketJoin = vi.fn()
 /** mock socket.leave */
 const mockSocketLeave = vi.fn()
 
+/** onAny 兜底诊断监听器（三层缺陷根治①）——connection 回调注册后捕获，测试直接调用验证 warn */
+let anyListener: ((event: string, ...args: unknown[]) => void) | null = null
+
 const mockSocket = {
   id: 'test-socket-id',
   join: mockSocketJoin,
@@ -168,6 +183,10 @@ const mockSocket = {
   on: vi.fn((event: string, handler: Function) => {
     if (!socketHandlers.has(event)) socketHandlers.set(event, [])
     socketHandlers.get(event)!.push(handler)
+    return mockSocket
+  }),
+  onAny: vi.fn((listener: (event: string, ...args: unknown[]) => void) => {
+    anyListener = listener
     return mockSocket
   }),
 }
@@ -195,6 +214,7 @@ describe('socketio connector', () => {
     vi.clearAllMocks()
     socketHandlers.clear()
     connectionCallback = null
+    anyListener = null
     mockSocketEmit.mockClear()
     mockRoomEmit.mockClear()
     mockIoEmit.mockClear()
@@ -267,6 +287,45 @@ describe('socketio connector', () => {
       })
     )
   }
+
+  // ─── onAny 兜底诊断（三层缺陷根治①：未注册事件静默丢弃 → 可诊断 warn） ───
+
+  describe('onAny 兜底诊断（未注册事件静默丢弃根治）', () => {
+    it('未注册自定义事件 → warn（带事件名 + socketId，不再静默丢弃）', () => {
+      expect(anyListener).toBeDefined()
+
+      anyListener!('unknown-event-xyz')
+
+      expect(logWarn).toHaveBeenCalledWith(
+        'unhandled socket event (silently dropped by Socket.IO)',
+        expect.objectContaining({ event: 'unknown-event-xyz', socketId: 'test-socket-id' })
+      )
+    })
+
+    it('已注册事件（PUSH_CONFIRM）→ 不 warn', () => {
+      expect(anyListener).toBeDefined()
+
+      anyListener!(Events.PUSH_CONFIRM)
+
+      expect(logWarn).not.toHaveBeenCalled()
+    })
+
+    it('Socket.IO 保留事件（disconnect）→ 不 warn（防误报）', () => {
+      expect(anyListener).toBeDefined()
+
+      anyListener!('disconnect')
+
+      expect(logWarn).not.toHaveBeenCalled()
+    })
+
+    it('裸字符串既有 handler 事件（get-agent-states）→ 不 warn', () => {
+      expect(anyListener).toBeDefined()
+
+      anyListener!('get-agent-states')
+
+      expect(logWarn).not.toHaveBeenCalled()
+    })
+  })
 
   // ─── JOIN_SESSION ──────────────────────────
 

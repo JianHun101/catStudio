@@ -14,6 +14,13 @@ import { createLogger } from '@/utils/logger'
 
 const log = createLogger('chatStore')
 
+/**
+ * 确认 push 超时兜底（三层缺陷根治③）：ack / PUSH_STATUS / ERROR 三条路都不来
+ * （旧 server 无 PUSH_CONFIRM handler、事件被 Socket.IO 静默丢弃）→ 超时复位 + toast 明示，
+ * 避免按钮永久卡「推送中」。导出供测试引用同一真值，防 8s 魔数漂移。
+ */
+export const PUSH_CONFIRM_TIMEOUT_MS = 8000
+
 /** 将技术错误信息转为用户可读的中文提示 */
 function friendlyError(err: any): string {
   if (!err) return '未知错误'
@@ -328,6 +335,15 @@ export const useChatStore = defineStore('chat', () => {
         showError(ack.reason === 'failed' ? 'push 失败，请查看服务端错误后重试' : 'push 未执行')
       }
     )
+    // 超时兜底（三层缺陷根治③）：ack/PUSH_STATUS/ERROR 三条路都不来（旧 server 未加载 push
+    // handler，事件被 Socket.IO 静默丢弃）→ 复位 + 明示，不永久卡「推送中」。
+    // messageId 校验防「连点两条」竞态——只复位仍属于本次点击的 confirming 态，互不干扰。
+    setTimeout(() => {
+      if (confirmingPushMessageId.value === messageId) {
+        confirmingPushMessageId.value = null
+        showError('服务端未确认 push，可能未加载 push 功能，请刷新或重启 server 后重试')
+      }
+    }, PUSH_CONFIRM_TIMEOUT_MS)
   }
 
   /** 取消 push（清理审批态，服务端 PUSH_STATUS cancelled 兜底） */
@@ -442,6 +458,8 @@ export const useChatStore = defineStore('chat', () => {
     // 跟踪连接状态
     socket.on('connect', () => {
       serverOnline.value = true
+      // 重连后旧的 push 确认请求已不可能被响应（断开期间的确认必然丢失）→ 复位防永久卡「推送中」
+      confirmingPushMessageId.value = null
       // 重连后重新加入 Session，获取最新消息
       if (activeSessionId.value) {
         socket.emit(Events.JOIN_SESSION, activeSessionId.value)
