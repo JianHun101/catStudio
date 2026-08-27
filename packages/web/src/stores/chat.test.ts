@@ -27,6 +27,8 @@ const mockDeleteAgent = vi.fn()
 const mockUpdateAgent = vi.fn()
 const mockMarkSessionRead = vi.fn().mockResolvedValue({ ok: true })
 const mockGetContextConfig = vi.fn()
+const mockConfirmPush = vi.fn()
+const mockCancelPush = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -38,6 +40,8 @@ vi.mock('@/composables/useApi', () => ({
     updateAgent: mockUpdateAgent,
     markSessionRead: mockMarkSessionRead,
     getContextConfig: mockGetContextConfig,
+    confirmPush: mockConfirmPush,
+    cancelPush: mockCancelPush,
   },
 }))
 
@@ -87,7 +91,6 @@ const mockMessage: Message = {
 
 describe('chatStore', () => {
   let store: ReturnType<typeof import('./chat.js').useChatStore>
-  let pushConfirmTimeoutMs = 8000
 
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -95,9 +98,8 @@ describe('chatStore', () => {
     setActivePinia(createPinia())
 
     // Import store dynamically
-    const { useChatStore, PUSH_CONFIRM_TIMEOUT_MS } = await import('./chat.js')
+    const { useChatStore } = await import('./chat.js')
     store = useChatStore()
-    pushConfirmTimeoutMs = PUSH_CONFIRM_TIMEOUT_MS
   })
 
   describe('initial state', () => {
@@ -350,104 +352,67 @@ describe('chatStore', () => {
     })
   })
 
-  describe('confirmPush / cancelPush', () => {
-    it('confirmPush emits PUSH_CONFIRM with messageId + ack callback, sets confirming state on click', () => {
-      store.confirmPush('m-push')
+  describe('confirmPush / cancelPush（REST 迁移：HTTP 响应体本身就是 ack）', () => {
+    it('confirmPush 成功 → 乐观置位 pushing → done + 清 confirming（调 REST confirmPush）', async () => {
+      mockConfirmPush.mockResolvedValue({ ok: true, state: 'done' })
+      const p = store.confirmPush('m-push')
 
-      // 点击瞬间乐观置位（按钮变「推送中…」，无需等服务端）
+      // 点击瞬间乐观置位（不等 HTTP 响应按钮即「推送中…」，不依赖 socket）
       expect(store.confirmingPushMessageId).toBe('m-push')
-      expect(mockEmit).toHaveBeenCalledWith(
-        Events.PUSH_CONFIRM,
-        { messageId: 'm-push' },
-        expect.any(Function)
-      )
-    })
+      expect(store.pushStates.get('m-push')).toBe('pushing')
 
-    it('ack ok → 清除 confirming 状态、不弹 toast（由 PUSH_STATUS done 驱动「已推送」）', () => {
-      store.confirmPush('m-push')
-      const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean; reason?: string }) => void
-
-      ack({ ok: true })
-
+      await p
+      expect(mockConfirmPush).toHaveBeenCalledWith('m-push')
+      expect(store.pushStates.get('m-push')).toBe('done')
       expect(store.confirmingPushMessageId).toBeNull()
       expect(store.errorMessage).toBeNull()
     })
 
-    it('ack failed → 清除 confirming 状态 + toast push 失败', () => {
-      store.confirmPush('m-push')
-      const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean; reason?: string }) => void
+    it('confirmPush 失败（reason failed + error）→ failed + toast 带服务端错误', async () => {
+      mockConfirmPush.mockResolvedValue({
+        ok: false,
+        state: 'failed',
+        reason: 'failed',
+        error: 'remote rejected',
+      })
+      await store.confirmPush('m-push')
 
-      ack({ ok: false, reason: 'failed' })
-
+      expect(store.pushStates.get('m-push')).toBe('failed')
       expect(store.confirmingPushMessageId).toBeNull()
       expect(store.errorMessage).toContain('push 失败')
+      expect(store.errorMessage).toContain('remote rejected')
     })
 
-    it('ack 缺失（旧 server 无回调）→ 清除 confirming 状态、不弹 toast（既有事件流兜底）', () => {
-      store.confirmPush('m-push')
-      const ack = mockEmit.mock.calls[0][2] as (ack: undefined) => void
+    it('confirmPush 失败（reason 非 failed，如 no-main-root）→ failed + toast「push 未执行」', async () => {
+      mockConfirmPush.mockResolvedValue({ ok: false, state: 'failed', reason: 'no-main-root' })
+      await store.confirmPush('m-push')
 
-      ack(undefined)
+      expect(store.pushStates.get('m-push')).toBe('failed')
+      expect(store.errorMessage).toContain('push 未执行')
+    })
 
+    it('confirmPush HTTP 异常 → catch 走 friendlyError 兜底 + failed（不悬挂 confirming）', async () => {
+      mockConfirmPush.mockRejectedValue(new Error('Failed to fetch'))
+      await store.confirmPush('m-push')
+
+      expect(store.pushStates.get('m-push')).toBe('failed')
+      expect(store.errorMessage).toContain('无法连接服务器')
       expect(store.confirmingPushMessageId).toBeNull()
-      expect(store.errorMessage).toBeNull()
     })
 
-    it('超时兜底：ack/PUSH_STATUS/ERROR 三条路都不来（旧 server 静默丢弃）→ 超时后复位 + toast 明示', () => {
-      vi.useFakeTimers()
-      try {
-        store.confirmPush('m-push')
-        expect(store.confirmingPushMessageId).toBe('m-push')
+    it('cancelPush → 调 REST cancel + 本地置 cancelled（隐藏按钮，不依赖 socket PUSH_STATUS）', async () => {
+      mockCancelPush.mockResolvedValue({ ok: true })
+      await store.cancelPush('m-push')
 
-        // 超时阈值内无任何确认信号 → 到点复位 + 明示「可能未加载 push 功能」
-        vi.advanceTimersByTime(pushConfirmTimeoutMs)
-
-        expect(store.confirmingPushMessageId).toBeNull()
-        expect(store.errorMessage).toContain('服务端未确认 push')
-      } finally {
-        vi.useRealTimers()
-      }
+      expect(mockCancelPush).toHaveBeenCalledWith('m-push')
+      expect(store.pushStates.get('m-push')).toBe('cancelled')
     })
 
-    it('超时竞态：先点 m1 再点 m2，m1 的超时不得复位 m2 的 confirming 态', () => {
-      vi.useFakeTimers()
-      try {
-        store.confirmPush('m-push-1')
-        vi.advanceTimersByTime(3000)
-        store.confirmPush('m-push-2')
-        expect(store.confirmingPushMessageId).toBe('m-push-2')
+    it('cancelPush API 失败 → 仍置 cancelled（本地清理不阻塞，服务端幂等）', async () => {
+      mockCancelPush.mockRejectedValue(new Error('network down'))
+      await store.cancelPush('m-push')
 
-        // m1 的超时到点——但当前 confirming 目标是 m2，不得误复位
-        vi.advanceTimersByTime(pushConfirmTimeoutMs - 3000)
-        expect(store.confirmingPushMessageId).toBe('m-push-2')
-
-        // m2 自己的超时到点才复位
-        vi.advanceTimersByTime(3000)
-        expect(store.confirmingPushMessageId).toBeNull()
-      } finally {
-        vi.useRealTimers()
-      }
-    })
-
-    it('ack 先于超时到达 → 超时到点不弹 toast（confirming 已清，messageId 校验拦截）', () => {
-      vi.useFakeTimers()
-      try {
-        store.confirmPush('m-push')
-        const ack = mockEmit.mock.calls[0][2] as (ack: { ok: boolean }) => void
-        ack({ ok: true })
-        expect(store.confirmingPushMessageId).toBeNull()
-
-        vi.advanceTimersByTime(pushConfirmTimeoutMs)
-
-        expect(store.errorMessage).toBeNull()
-      } finally {
-        vi.useRealTimers()
-      }
-    })
-
-    it('cancelPush emits PUSH_CANCEL with messageId', () => {
-      store.cancelPush('m-push')
-      expect(mockEmit).toHaveBeenCalledWith(Events.PUSH_CANCEL, { messageId: 'm-push' })
+      expect(store.pushStates.get('m-push')).toBe('cancelled')
     })
   })
 

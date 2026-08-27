@@ -101,6 +101,84 @@ const pushStates = new Map<string, 'pending' | 'pushing' | 'done' | 'failed' | '
 /** push 终态有界保留上限：done/failed 保留供 JOIN 状态恢复（刷新不回归可点 pending），超上限删最旧防 messageId 无界增长 */
 const PUSH_STATES_MAX = 50
 
+/**
+ * push 审批执行结果（REST + Socket 双入口共用契约）。
+ * ok=false 的三种原因：already-pushing（连点短路）、no-main-root（无法定位主仓库根）、
+ * failed（git push 执行失败，error 携带远端错误）。业务失败也在 REST 200 返回（状态在 body）。
+ */
+export type PushConfirmResult = {
+  ok: boolean
+  state: 'pushing' | 'done' | 'failed'
+  reason?: 'already-done' | 'already-pushing' | 'no-main-root' | 'failed'
+  error?: string
+}
+
+/**
+ * push 审批业务核心（REST POST /api/push/confirm 与 socket PUSH_CONFIRM 共用）：
+ * 执行 git push origin dev。纯业务函数——不含任何 socket.emit（emit 是传输适配层的事）。
+ * 镜像原 socket handler 语义：
+ * - 已 pushing → already-pushing 短路（连点不二次 push）
+ * - 已 done → already-done 幂等返回（终态有界保留供 JOIN 恢复）
+ * - getMainRepoRoot() 为 null → no-main-root（不执行 push）
+ * - 否则 set pushing → gitPushOriginDev → set done/failed + log → 终态有界裁剪（PUSH_STATES_MAX）
+ * onState 可选回调：业务推进到「推送中」时通知适配层——socket 薄包装用它同步 emit
+ * PUSH_STATUS pushing（镜像旧 handler「先推状态再 await」的时序）；REST 路由不传
+ * （前端自己乐观置位，无需中间态推送）。
+ */
+export async function executePushConfirm(
+  messageId: string,
+  onState?: (state: 'pushing') => void
+): Promise<PushConfirmResult> {
+  const state = pushStates.get(messageId)
+  if (state === 'pushing') {
+    return { ok: false, state: 'pushing', reason: 'already-pushing' }
+  }
+  if (state === 'done') {
+    return { ok: true, state: 'done', reason: 'already-done' }
+  }
+  const mainRoot = getMainRepoRoot()
+  if (!mainRoot) {
+    return { ok: false, state: 'failed', reason: 'no-main-root' }
+  }
+  pushStates.set(messageId, 'pushing')
+  onState?.('pushing')
+  const res = await gitPushOriginDev(mainRoot)
+  if (res.ok) {
+    pushStates.set(messageId, 'done')
+    log.info('push confirmed and executed', { messageId })
+  } else {
+    pushStates.set(messageId, 'failed')
+    log.error('push failed', { messageId, error: res.error })
+  }
+  // 终态有界保留：done/failed 保留供 JOIN 状态恢复（刷新后前端不回归可点 pending），
+  // 超上限删最旧（Map 插入序）防 messageId 无界增长——1a6c220 立即删除的泄漏治理
+  // 改为有界保留，二者都达成「不无界泄漏」，后者额外为 join 恢复提供数据源
+  if (pushStates.size > PUSH_STATES_MAX) {
+    for (const key of pushStates.keys()) {
+      if (pushStates.size <= PUSH_STATES_MAX) break
+      if (key !== messageId) pushStates.delete(key)
+    }
+  }
+  if (res.ok) {
+    return { ok: true, state: 'done' }
+  }
+  return { ok: false, state: 'failed', reason: 'failed', error: res.error }
+}
+
+/**
+ * push 审批取消（REST POST /api/push/cancel 与 socket PUSH_CANCEL 共用）：
+ * 清除审批态（取消即删除——刷新后回归 pending，可重新批准，push 幂等）。
+ */
+export function cancelPush(messageId: string): void {
+  pushStates.delete(messageId)
+  log.info('push request cancelled', { messageId })
+}
+
+/** 测试钩子：清空 push 审批状态（routes/push.test.ts 用例间隔离；生产路径不调用） */
+export function __test_resetPushStates(): void {
+  pushStates.clear()
+}
+
 /** 模块级 io 实例引用，供路由等模块获取 */
 let _io: SocketServer | null = null
 
@@ -548,6 +626,9 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     })
 
     // ─── Push confirm / cancel（push 审批——用户批准后执行 git push origin dev）───
+    // 薄包装：业务在 executePushConfirm/cancelPush（纯函数，无 socket.emit），
+    // 本层只做传输适配（emit PUSH_STATUS/ERROR + ack）——REST 路由走同款业务函数，
+    // 双入口共用同一套 push 审批语义（REST 迁移根治「点确认 transport close」）。
 
     socket.on(
       Events.PUSH_CONFIRM,
@@ -555,49 +636,36 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         data: { messageId: string },
         ack?: (res: { ok: boolean; reason?: 'failed' }) => void
       ) => {
-        const state = pushStates.get(data.messageId)
-        // 防连点二次 push：已在推送中或已完成 → 短路 ack，不重复执行 git push
-        if (state === 'pushing' || state === 'done') {
-          ack?.({ ok: state === 'done' })
+        const result = await executePushConfirm(data.messageId, (state) => {
+          // 业务进入 pushing 时同步 emit（镜像旧 handler「先推状态再 await」的时序）
+          socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state })
+        })
+        // 已在推送中 → 短路 ack（镜像现状：短路径只 ack 不 emit，防连点二次 push）
+        if (result.state === 'pushing') {
+          ack?.({ ok: false })
           return
         }
-        const mainRoot = getMainRepoRoot()
-        if (!mainRoot) {
+        if (result.state === 'done') {
+          // already-done 幂等重推不重复 emit（状态已在 JOIN 恢复路径推过）；真执行完成才 emit
+          if (result.reason !== 'already-done') {
+            socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'done' })
+          }
+          ack?.({ ok: true })
+          return
+        }
+        if (result.reason === 'no-main-root') {
           socket.emit(Events.ERROR, { message: '无法定位主仓库根，push 未执行' })
           ack?.({ ok: false, reason: 'failed' })
           return
         }
-        // pending → pushing：先推状态（前端按钮变「推送中…」），异步执行 push（不阻塞事件循环）
-        pushStates.set(data.messageId, 'pushing')
-        socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'pushing' })
-        const res = await gitPushOriginDev(mainRoot)
-        if (res.ok) {
-          pushStates.set(data.messageId, 'done')
-          log.info('push confirmed and executed', { messageId: data.messageId })
-          socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'done' })
-          ack?.({ ok: true })
-        } else {
-          pushStates.set(data.messageId, 'failed')
-          log.error('push failed', { messageId: data.messageId, error: res.error })
-          socket.emit(Events.ERROR, { message: `push 失败: ${res.error}` })
-          socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'failed' })
-          ack?.({ ok: false, reason: 'failed' })
-        }
-        // 终态有界保留：done/failed 保留供 JOIN 状态恢复（刷新后前端不回归可点 pending），
-        // 超上限删最旧（Map 插入序）防 messageId 无界增长——1a6c220 立即删除的泄漏治理
-        // 改为有界保留，二者都达成「不无界泄漏」，后者额外为 join 恢复提供数据源
-        if (pushStates.size > PUSH_STATES_MAX) {
-          for (const key of pushStates.keys()) {
-            if (pushStates.size <= PUSH_STATES_MAX) break
-            if (key !== data.messageId) pushStates.delete(key)
-          }
-        }
+        socket.emit(Events.ERROR, { message: `push 失败: ${result.error}` })
+        socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'failed' })
+        ack?.({ ok: false, reason: 'failed' })
       }
     )
 
     socket.on(Events.PUSH_CANCEL, (data: { messageId: string }) => {
-      pushStates.delete(data.messageId)
-      log.info('push request cancelled', { messageId: data.messageId })
+      cancelPush(data.messageId)
       socket.emit(Events.PUSH_STATUS, { messageId: data.messageId, state: 'cancelled' })
     })
 

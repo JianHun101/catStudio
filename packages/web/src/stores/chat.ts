@@ -14,13 +14,6 @@ import { createLogger } from '@/utils/logger'
 
 const log = createLogger('chatStore')
 
-/**
- * 确认 push 超时兜底（三层缺陷根治③）：ack / PUSH_STATUS / ERROR 三条路都不来
- * （旧 server 无 PUSH_CONFIRM handler、事件被 Socket.IO 静默丢弃）→ 超时复位 + toast 明示，
- * 避免按钮永久卡「推送中」。导出供测试引用同一真值，防 8s 魔数漂移。
- */
-export const PUSH_CONFIRM_TIMEOUT_MS = 8000
-
 /** 将技术错误信息转为用户可读的中文提示 */
 function friendlyError(err: any): string {
   if (!err) return '未知错误'
@@ -350,37 +343,39 @@ export const useChatStore = defineStore('chat', () => {
 
   /**
    * 确认 push（执行 git push origin dev，不可逆边界——用户批准后才动作）。
-   * 点击瞬间置位 confirming 状态（按钮变「推送中…」文案前先给即时反馈）；
-   * 服务端 ack 回传结果：成功由既有 PUSH_STATUS done 驱动「已推送」，失败 → toast 明示 + 恢复可点。
-   * ack 缺失（旧 server）时由 PUSH_STATUS / ERROR 既有事件流兜底。
+   * REST 迁移：push 确认是一次性请求/响应，HTTP 响应体本身就是 ack（不再走 socket——
+   * 根治「点确认 transport close」）。点击瞬间乐观置位（按钮「推送中…」，不等服务端即有反馈）；
+   * ok → done（「已推送」）；失败 → failed + toast + 恢复可点；HTTP 异常 → friendlyError 兜底 + failed。
    */
-  function confirmPush(messageId: string): void {
-    const { socket } = useSocket()
+  async function confirmPush(messageId: string): Promise<void> {
     confirmingPushMessageId.value = messageId
-    socket.emit(
-      Events.PUSH_CONFIRM,
-      { messageId },
-      (ack: { ok: boolean; reason?: 'failed' } | undefined) => {
-        if (confirmingPushMessageId.value === messageId) confirmingPushMessageId.value = null
-        if (!ack || ack.ok) return // 成功（或旧 server 无 ack 回调）→ 既有事件流驱动
-        showError(ack.reason === 'failed' ? 'push 失败，请查看服务端错误后重试' : 'push 未执行')
+    pushStates.value.set(messageId, 'pushing') // 乐观置位（按钮「推送中…」，不依赖 socket）
+    try {
+      const result = await api.confirmPush(messageId)
+      if (result.ok) {
+        pushStates.value.set(messageId, 'done')
+      } else {
+        pushStates.value.set(messageId, 'failed')
+        showError(
+          result.reason === 'failed' && result.error ? `push 失败: ${result.error}` : 'push 未执行'
+        )
       }
-    )
-    // 超时兜底（三层缺陷根治③）：ack/PUSH_STATUS/ERROR 三条路都不来（旧 server 未加载 push
-    // handler，事件被 Socket.IO 静默丢弃）→ 复位 + 明示，不永久卡「推送中」。
-    // messageId 校验防「连点两条」竞态——只复位仍属于本次点击的 confirming 态，互不干扰。
-    setTimeout(() => {
-      if (confirmingPushMessageId.value === messageId) {
-        confirmingPushMessageId.value = null
-        showError('服务端未确认 push，可能未加载 push 功能，请刷新或重启 server 后重试')
-      }
-    }, PUSH_CONFIRM_TIMEOUT_MS)
+    } catch (err) {
+      pushStates.value.set(messageId, 'failed')
+      showError(friendlyError(err))
+    } finally {
+      confirmingPushMessageId.value = null
+    }
   }
 
-  /** 取消 push（清理审批态，服务端 PUSH_STATUS cancelled 兜底） */
-  function cancelPush(messageId: string): void {
-    const { socket } = useSocket()
-    socket.emit(Events.PUSH_CANCEL, { messageId })
+  /** 取消 push（REST：服务端幂等删除审批态，本地置 cancelled 隐藏按钮） */
+  async function cancelPush(messageId: string): Promise<void> {
+    try {
+      await api.cancelPush(messageId)
+    } catch (err) {
+      log.error('cancelPush API failed', { error: String(err) })
+    }
+    pushStates.value.set(messageId, 'cancelled')
   }
 
   /** 停止 Agent：中断当前思考 + 清空排队任务（无需等回复，可重新发消息恢复） */
