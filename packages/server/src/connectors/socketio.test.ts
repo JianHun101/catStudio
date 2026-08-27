@@ -484,6 +484,59 @@ describe('socketio connector', () => {
       expect(m.restartExpiresAt).toBeUndefined()
     })
 
+    it('JOIN 历史恢复给 push_request 消息附加类型（extra.push 是唯一事实源）', () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, extra)
+         VALUES (?, 'session-1', 'user', 'push 审批', '[]', ?)`
+      ).run(
+        'msg-push-type-1',
+        JSON.stringify({
+          rich: {
+            v: 1,
+            blocks: [{ id: 'b1', kind: 'diff', v: 1, filePath: 'a.txt', diff: '@@ -1 +1 @@' }],
+          },
+          push: { commits: [{ sha: 'abc1234', subject: 'test commit' }] },
+        })
+      )
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-push-type-1')
+      // DB 不存类型，extra.push 存在 → 历史恢复附加 push_request（前端据此初始化 pending 可点）
+      expect(m.messageType).toBe('push_request')
+    })
+
+    it('JOIN 不给无 push 标记的富文本消息附加类型（普通 diff 消息不带 push_request）', () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, extra)
+         VALUES (?, 'session-1', 'user', '纯 diff 消息', '[]', ?)`
+      ).run(
+        'msg-push-type-none',
+        JSON.stringify({
+          rich: {
+            v: 1,
+            blocks: [{ id: 'b1', kind: 'diff', v: 1, filePath: 'a.txt', diff: '@@ -1 +1 @@' }],
+          },
+        })
+      )
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-push-type-none')
+      // 无 extra.push → 不带类型（避免把普通富文本消息误渲染成 push 审批面板）
+      expect(m.messageType).toBeUndefined()
+      // 富文本块仍正常随 extra 恢复
+      expect(m.extra.rich.blocks).toHaveLength(1)
+    })
+
     it('JOIN 恢复已完成 push 审批状态（done 不回归可点 pending）', async () => {
       const db = getDb()
       db.prepare(

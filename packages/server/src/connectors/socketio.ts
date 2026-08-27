@@ -178,6 +178,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       const historyMessages = rows.map((row: MessageRow) => {
         const msgImages: string[] = parseJsonArray(row.images)
         const isRestart = isActiveRestart(row)
+        const msgExtra = parseMessageExtra(row.extra) // 富文本块（diff 等）；版本不符/损坏 → undefined 纯文本回退
+        const isPush = !!msgExtra?.push
         return {
           id: row.id,
           sessionId: row.session_id,
@@ -188,7 +190,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           mentions: JSON.parse(row.mentions || '[]'),
           taskId: row.task_id || undefined,
           thinkingContent: row.thinking_content || undefined,
-          extra: parseMessageExtra(row.extra), // 富文本块（diff 等）；版本不符/损坏 → undefined 纯文本回退
+          extra: msgExtra,
           createdAt: row.created_at.replace(' ', 'T') + 'Z',
           // 历史恢复同样携带重启类型（前端按钮渲染依据；DB 不存类型，内容前缀是唯一事实源）
           ...(isRestart
@@ -196,6 +198,12 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
                 messageType: 'restart_request' as const,
                 // isRestart 为真时 restartReq 必非 null（isActiveRestart 前置条件）——文件 expiresAt 是权威
                 restartExpiresAt: restartReq!.expiresAt,
+              }
+            : {}),
+          // push 审批消息历史恢复同样附加类型（前端按钮渲染依据；DB 不存类型，extra.push 是唯一事实源）
+          ...(isPush
+            ? {
+                messageType: 'push_request' as const,
               }
             : {}),
         }
