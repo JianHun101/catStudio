@@ -26,6 +26,10 @@
 6. **push 审批契约**（复用 restart 链路，扩一条通道）：`request_user_action` MCP 工具新增 `type: 'push'`（店长收口做完本地机械步骤后发起）→ 服务端实时采集 `git log origin/dev..dev`（commits）+ `git diff origin/dev..dev`（RichBlock[]，复用 diff-collector 采集管线）→ 消息 `messageType: 'push_request'` + extra（commits + rich.blocks）→ 前端面板（reason + commit 列表 + 可折叠 diff + V3 按钮）→ 用户点确认 → socket `PUSH_CONFIRM` 执行 `git push origin dev`（cwd mainRoot）。**全程无「店长手工塞 diff」路径——diff 一律服务端实时采集**。
 7. **push 状态内存化**：push 无跨进程需求（restart 需 dev.js 轮询所以落文件；push 由 socket handler 直接执行）→ 不落文件，进程内状态即可。
 8. **按钮 V3（用户定稿，照 `push-button-prototype.html` 顶部组合方案实现）**：布局 A 一行 flex、确认占主导（`flex:1`）；确认按钮 D 卡片大按钮（左「dev → origin/dev · N commits」右「确认 Push」，hover 整块实心 + 上浮）；取消按钮幽灵描边 + `min-width:92px` + `padding:12px 28px`，hover 实心警示红 + 白字 + 上浮阴影。原型为 throwaway（未进 git），实施照样式令牌落 ChatPanel.vue。
+9. **主工作区契约（push 审批与收口的位置独立性）**——回应用户质疑「worktree 内发起 push 审批，审批通过后 agent 是否还有响应」：
+   - **主工作区定义**：主工作区 = 主仓库根，即 `getMainRepoRoot()`（git-utils.ts，`git-common-dir` 的 dirname，本仓库 `D:/Game/ai/catStudy`）；worktree 内调用同样正确定位——push/收口不依赖调用者 cwd
+   - **push 审批可从任何位置发起（含 worktree）**：`PUSH_CONFIRM`（socketio.ts）先 `getMainRepoRoot()` 定位主仓库根 → `gitPushOriginDev(mainRoot)` cwd 固定主仓库执行 `git push origin dev`；push 执行与 agent 所在位置零关系
+   - **审批通过后 agent 存活边界**：agent 响应通道是 socket + DB，不依赖 worktree 的 git 状态；收口器 `checkoutDev` 已做 cwd 复位（cwd 位于已收口 worktree 内 → chdir 主仓库）锚定主仓库；留在被删 worktree 内做 git 操作会失败（自指场景物理残留可留，但 git 登记已移除）
 
 ## Considered Options（按钮 4 方案 → 用户裁决）
 
