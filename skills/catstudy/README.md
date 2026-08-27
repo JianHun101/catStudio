@@ -31,7 +31,7 @@ catstudy/
   → /catstudy-handoff          （交接：自动生成文件清单 + Checklist，填写 Why/Tradeoff/OQ）
   → /catstudy-request-review   （发起审查：调用 /review、/code-review、/security-review）
   → /catstudy-receive-review   （处理反馈：Red→Green 修复）
-  → 审查者审查 ✅ → 架构师收口（ff-only 合并 + 推送）
+   → 审查者审查 ✅ → 架构师收口（ff-only 合并 → 发起 push 审批，用户批准才推）
 ```
 
 ## 与 clowder-ai 的差异
@@ -47,7 +47,7 @@ catstudy/
 
 ## 为什么没有 PR 流程
 
-catStudy 没有 PR 冲突场景：提交后由 post-commit 自动投递交接文档，quality-gate → handoff → request-review → receive-review 四步覆盖从自检、生成交接文档、发起审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 推送）。
+catStudy 没有 PR 冲突场景：提交后由 post-commit 自动投递交接文档，quality-gate → handoff → request-review → receive-review 四步覆盖从自检、生成交接文档、发起审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 发起 push 审批，用户批准才推）。
 
 ## 技能命名
 
