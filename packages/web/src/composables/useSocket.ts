@@ -10,8 +10,10 @@ const connected = ref(false)
 
 export function useSocket() {
   if (!socket.value) {
-    // 使用相对路径：开发时走 Vite proxy，生产时同源部署
-    socket.value = io({
+    // dev 直连 server 端口，绕过 Vite proxy——proxy 层的 WS 传输跳在浏览器侧会 transport close
+    // （点击 emit 瞬间断连重连、emit 丢失的根因）；生产保持同源部署
+    const url = import.meta.env.DEV ? 'http://127.0.0.1:3200' : undefined
+    socket.value = io(url, {
       autoConnect: false,
       transports: ['websocket', 'polling'],
     })
@@ -21,9 +23,9 @@ export function useSocket() {
       log.info('connected', { id: socket.value!.id })
     })
 
-    socket.value.on('disconnect', () => {
+    socket.value.on('disconnect', (reason) => {
       connected.value = false
-      log.info('disconnected')
+      log.info('disconnected', { reason })
     })
 
     socket.value.connect()

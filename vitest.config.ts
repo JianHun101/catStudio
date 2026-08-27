@@ -6,8 +6,6 @@ import { resolve } from 'path'
 // 唯一确认生效的插件注入点；server/shared/scripts 测试不触碰 .vue 与 @ alias，零影响）
 import vue from './packages/web/node_modules/@vitejs/plugin-vue/dist/index.mjs'
 
-// workspace 模式下各 project 的 vitest.config.ts 不加载（vitest 4.1.9 实测）——
-// 测试隔离 env 放根配置，作为默认值合并到所有 project（server 包内单独跑仍读包内配置）。
 export default defineConfig({
   plugins: [vue()],
   resolve: {
@@ -25,6 +23,10 @@ export default defineConfig({
     },
   },
   test: {
+    // vitest 4 已弃用 vitest.workspace.ts 自动发现与 test.workspace 选项——
+    // 项目定义统一走根配置 test.projects（vitest 4.1.9 实测：目录型 project 会
+    // 经 resolveDirectoryConfig 加载各包 vitest.config.ts，jsdom 等隔离 env 恢复生效）。
+    projects: ['packages/shared', 'packages/server', 'packages/web', 'scripts'],
     env: {
       RESTART_FILES_DIR: 'node_modules/.cache/restart-test',
     },

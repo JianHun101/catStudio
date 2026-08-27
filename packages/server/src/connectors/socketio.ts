@@ -170,7 +170,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
   const io = new SocketServer(httpServer, {
     cors: {
-      origin: [/^http:\/\/localhost:\d+$/],
+      origin: [/^http:\/\/(localhost|127\.0\.0\.1):\d+$/],
       methods: ['GET', 'POST'],
     },
   })

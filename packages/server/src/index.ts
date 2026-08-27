@@ -118,7 +118,7 @@ async function main(): Promise<void> {
   // 4. Fastify HTTP 服务器
   const app = Fastify({ logger: false })
   await app.register(cors, {
-    origin: [/^http:\/\/localhost:\d+$/],
+    origin: [/^http:\/\/(localhost|127\.0\.0\.1):\d+$/],
   })
 
   // 全局错误处理：记录完整错误并返回结构化响应
