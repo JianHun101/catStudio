@@ -37,6 +37,33 @@ function friendlyError(err: any): string {
   return msg
 }
 
+/** localStorage key：记住上次选中的会话（刷新恢复用） */
+const ACTIVE_SESSION_KEY = 'catstudy.activeSessionId'
+
+/** 安全读上次选中会话 id（SSR/test 环境容错，失败返回 null） */
+function readActiveSessionId(): string | null {
+  if (typeof window === 'undefined') return null
+  try {
+    return localStorage.getItem(ACTIVE_SESSION_KEY)
+  } catch {
+    return null
+  }
+}
+
+/** 安全写上次选中会话 id（id=null 时清除，用于删除当前活跃会话后清理） */
+function writeActiveSessionId(id: string | null): void {
+  if (typeof window === 'undefined') return
+  try {
+    if (id === null) {
+      localStorage.removeItem(ACTIVE_SESSION_KEY)
+    } else {
+      localStorage.setItem(ACTIVE_SESSION_KEY, id)
+    }
+  } catch {
+    // 静默失败：localStorage 不可用不影响核心功能
+  }
+}
+
 export const useChatStore = defineStore('chat', () => {
   // ─── State ────────────────────────────────
 
@@ -203,9 +230,12 @@ export const useChatStore = defineStore('chat', () => {
       dataReady.value = true
       dataError.value = ''
 
-      // 自动选中第一个 Session
+      // 自动选中会话：优先恢复上次选中的（localStorage），不在列表则回退第一个
       if (!activeSessionId.value && sessionList.length > 0) {
-        joinSession(sessionList[0].id)
+        const lastActive = readActiveSessionId()
+        const sessionIds = new Set(sessionList.map((s) => s.id))
+        const target = lastActive && sessionIds.has(lastActive) ? lastActive : sessionList[0].id
+        joinSession(target)
       }
     } catch (err: any) {
       log.error('fetchData failed', { error: friendlyError(err) })
@@ -230,6 +260,7 @@ export const useChatStore = defineStore('chat', () => {
       sessionMessages.set(activeSessionId.value!, messages.value)
     }
     activeSessionId.value = sessionId
+    writeActiveSessionId(sessionId) // 记住本次选中会话（刷新恢复用）
     handoffFailed.value = null // 切会话清除旧会话的交接失败横幅
     const cached = sessionMessages.get(sessionId)
     if (cached) {
@@ -389,6 +420,7 @@ export const useChatStore = defineStore('chat', () => {
       } else {
         activeSessionId.value = null
         messages.value = []
+        writeActiveSessionId(null) // 无可用会话 → 清除记忆，防刷新回已删会话
       }
     }
     // 防删会话后缓存残留（Map 无界增长）——必须在 joinSession 之后删：
@@ -647,6 +679,7 @@ export const useChatStore = defineStore('chat', () => {
         } else {
           activeSessionId.value = null
           messages.value = []
+          writeActiveSessionId(null) // 无可用会话 → 清除记忆，防刷新回已删会话
         }
       }
     })

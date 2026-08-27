@@ -91,6 +91,7 @@ describe('chatStore', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks()
+    localStorage.clear() // 会话记忆测试：每个用例从干净的 localStorage 开始
     setActivePinia(createPinia())
 
     // Import store dynamically
@@ -883,6 +884,85 @@ describe('chatStore', () => {
       handler!({ sessionId: 's1', reason: 'empty response' })
       store.joinSession('s2')
       expect(store.handoffFailed).toBeNull()
+    })
+  })
+
+  describe('会话记忆（刷新恢复）', () => {
+    it('joinSession 持久化上次选中会话到 localStorage', () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2', title: 'S2' }]
+      store.joinSession('s2')
+      expect(localStorage.getItem('catstudy.activeSessionId')).toBe('s2')
+    })
+
+    it('fetchData 优先恢复上次选中会话（非列表第一个）', async () => {
+      const s2 = { ...mockSession, id: 's2', title: 'S2' }
+      localStorage.setItem('catstudy.activeSessionId', 's2')
+      mockGetAgents.mockResolvedValue([mockAgent])
+      mockGetSessions.mockResolvedValue([mockSession, s2])
+
+      await store.fetchData()
+
+      expect(store.activeSessionId).toBe('s2') // 恢复存储，而不是无条件列表第一个 s1
+    })
+
+    it('fetchData 存储的会话不存在 → 回退第一个', async () => {
+      localStorage.setItem('catstudy.activeSessionId', 'missing')
+      mockGetAgents.mockResolvedValue([mockAgent])
+      mockGetSessions.mockResolvedValue([mockSession])
+
+      await store.fetchData()
+
+      expect(store.activeSessionId).toBe('s1')
+    })
+
+    it('fetchData 无存储 → 回退列表第一个', async () => {
+      mockGetAgents.mockResolvedValue([mockAgent])
+      mockGetSessions.mockResolvedValue([mockSession])
+
+      await store.fetchData()
+
+      expect(store.activeSessionId).toBe('s1')
+    })
+
+    it('deleteSession 删除当前活跃会话（无后继）→ 清除 localStorage 记忆', async () => {
+      store.sessions = [mockSession]
+      store.activeSessionId = 's1'
+      store.messages = [mockMessage]
+      localStorage.setItem('catstudy.activeSessionId', 's1')
+
+      mockDeleteSession.mockResolvedValue({ ok: true })
+      await store.deleteSession('s1')
+
+      expect(store.activeSessionId).toBeNull()
+      expect(localStorage.getItem('catstudy.activeSessionId')).toBeNull()
+    })
+
+    it('deleteSession 删除当前活跃会话（有后继）→ 记忆更新为新会话', async () => {
+      const s2 = { ...mockSession, id: 's2', title: 'S2' }
+      store.sessions = [mockSession, s2]
+      store.activeSessionId = 's1'
+      localStorage.setItem('catstudy.activeSessionId', 's1')
+
+      mockDeleteSession.mockResolvedValue({ ok: true })
+      await store.deleteSession('s1')
+
+      expect(store.activeSessionId).toBe('s2')
+      expect(localStorage.getItem('catstudy.activeSessionId')).toBe('s2')
+    })
+
+    it('SESSION_DELETED 删除当前活跃会话（无后继）→ 清除 localStorage 记忆', () => {
+      store.sessions = [mockSession]
+      store.activeSessionId = 's1'
+      localStorage.setItem('catstudy.activeSessionId', 's1')
+
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.SESSION_DELETED)?.[1] as
+        ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      handler!({ sessionId: 's1' })
+
+      expect(store.activeSessionId).toBeNull()
+      expect(localStorage.getItem('catstudy.activeSessionId')).toBeNull()
     })
   })
 })
