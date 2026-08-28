@@ -18,7 +18,6 @@ import {
   executionLogs as execLogsRepo,
 } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
-import { dispatch, initAgentSlot, getAgentState, executeAgentCommand } from '../dispatch/index.js'
 import { rowToAgent } from './row.js'
 import { agentHasUsableApiKey } from './serial.js'
 import { getExecutionEngine } from './registry.js'
@@ -89,23 +88,8 @@ export async function recoverInterruptedExecutions(bus: EngineBus & HandoffBus):
         // 无 API key 无法执行（与 executeAgentsSerial 的检查一致；免 key provider 不拦）
         if (!agentHasUsableApiKey(agent)) continue
 
-        if (!getAgentState(agent.id)) initAgentSlot(agent.id)
-
         const mentions = JSON.parse(triggerRow.mentions || '[]') as string[]
-        const cmd: DispatchCommand = {
-          sessionId: rec.session_id,
-          agentId: agent.id,
-          triggerMessageId: triggerRow.id,
-          triggerContent: triggerRow.content,
-          mentions,
-          traceId: uuid(),
-          depth: 0, // 重启恢复按用户顶层语义执行（不消耗 mention 配额）
-          pendingTriggers: [],
-        }
-        const traceId = cmd.traceId
-
-        // 设置槽位（与 dispatch 内部 executeAgent 等效：busy + currentTrigger + 新执行日志）
-        await executeAgentCommand(agent, cmd, traceId)
+        const traceId = uuid()
 
         const triggerMsg = {
           id: triggerRow.id,
@@ -131,6 +115,9 @@ export async function recoverInterruptedExecutions(bus: EngineBus & HandoffBus):
           agent.name,
         ])
 
+        // C1 v3 单入口：executeAgentsSerial 决策(标 busy+写审计)→执行→顶层收尾一次搞定。
+        // 原 executeAgentCommand + executeAgentsSerial 两步合并——槽位由 execute 决策段
+        // 惰性创建（不再需要 initAgentSlot / executeAgentCommand 显式设置）
         await getExecutionEngine()!.executeAgentsSerial(
           rec.session_id,
           [agent],
@@ -333,11 +320,7 @@ export async function recoverQueuedMessages(bus: EngineBus & HandoffBus): Promis
           })
         }
 
-        // 槽位初始化（dispatch 对未知 slot 直接跳过，不初始化不调度）
-        for (const a of dispatchTargets) {
-          if (!getAgentState(a.id)) initAgentSlot(a.id)
-        }
-
+        // 槽位由 execute 决策段惰性创建（不再需要 initAgentSlot——C1 v3）
         const msg: Message = {
           id: row.id,
           sessionId: row.session_id,
@@ -359,20 +342,14 @@ export async function recoverQueuedMessages(bus: EngineBus & HandoffBus): Promis
           traceId,
         })
         // 合并触发持久化（明写丢失为已知噪声）：B 合并的 pendingTriggers 是内存态
-        // （dispatch 模块 agentQueues），重启后不可恢复——重建的命令恒为空。从
-        // messages 反查"同 session 未处理 @ 触发"无法区分合并触发与白名单拦截
-        // （两者 dispatch_state 均为 NULL），误恢复会把被拦 mention 复活执行——
-        // 故不恢复，依赖用户消息重放（replayStuckUserMessages）与 A2A 重新触发兜底
+        // （重启后不可恢复）——重建的命令恒为空，依赖用户消息重放兜底（见注释）
         log.info('恢复的命令 pendingTriggers 为空（B 合并为内存态，重启后丢失——已知噪声）', {
           messageId: row.id,
           sessionId: row.session_id,
         })
 
-        await dispatch(row.session_id, msg, dispatchTargets, traceId)
-        // 配对执行：dispatch 只标 busy（槽位管理），实际 LLM 推理由 connector 触发
-        // （executeAgentCommand 注释）。不配对则恢复的消息永久卡 busy 不回复、队列
-        // 永不排空——与 SEND_MESSAGE（dispatch + executeAgentsSerial）及
-        // recoverInterruptedExecutions（executeAgentCommand + executeAgentsSerial）同款
+        // C1 v3 单入口：executeAgentsSerial 决策(标 busy/入队)+执行一次搞定——原
+        // dispatch + executeAgentsSerial 两步合并（S2 兜底已移入 execute 的 finally）
         await getExecutionEngine()!.executeAgentsSerial(
           row.session_id,
           dispatchTargets,
@@ -467,10 +444,7 @@ export async function replayStuckUserMessages(bus: EngineBus & HandoffBus): Prom
           continue
         }
 
-        for (const a of executable) {
-          if (!getAgentState(a.id)) initAgentSlot(a.id)
-        }
-
+        // 槽位由 execute 决策段惰性创建（不再需要 initAgentSlot——C1 v3）
         const msg: Message = {
           id: row.id,
           sessionId: row.session_id,
@@ -491,9 +465,8 @@ export async function replayStuckUserMessages(bus: EngineBus & HandoffBus): Prom
           traceId,
         })
 
-        await dispatch(row.session_id, msg, executable, traceId)
-        // 配对执行（dispatch 只标 busy——槽位管理，实际 LLM 推理由 connector 触发；
-        // 不配对则补派消息卡 busy 不回复——recoverQueuedMessages 同款契约）
+        // C1 v3 单入口：executeAgentsSerial 决策(标 busy/入队)+执行一次搞定——原
+        // dispatch + executeAgentsSerial 两步合并（S2 兜底已移入 execute 的 finally）
         await getExecutionEngine()!.executeAgentsSerial(row.session_id, executable, msg, traceId, 0)
       } catch (err: any) {
         log.error('重放单条消息失败', { messageId: row.id, error: err.message })

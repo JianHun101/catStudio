@@ -23,7 +23,7 @@ import type {
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
-import { dispatch, initAgentSlot, getAgentState, __test_reset } from '../dispatch/index.js'
+import { __test_reset } from '../dispatch/index.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import { createExecutionEngine } from './serial.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
@@ -181,8 +181,8 @@ async function runPaired(
     `INSERT INTO messages (id, session_id, role, content, mentions)
      VALUES (?, 'session-1', 'user', '你好', '[]')`
   ).run(triggerId)
-  const msg = makeMessage({ id: triggerId })
-  await dispatch('session-1', msg, [DEFAULT_AGENT], traceId, depth)
+  // C1 v3 单入口：executeAgentsSerial 内部走 execute(cmd)——决策(标 busy)+执行一次搞定。
+  // 原 dispatch + executeAgentsSerial 两步合并（execute 决策段惰性创建槽位）
   return engine.executeAgentsSerial(
     'session-1',
     [DEFAULT_AGENT],
@@ -216,7 +216,6 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
       `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
        VALUES ('session-1', '测试会话', '["agent-1"]', 0)`
     ).run()
-    initAgentSlot('agent-1')
   })
 
   afterEach(() => {
@@ -247,7 +246,7 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     // 状态推进：thinking → replying → done
     expect(calls.statuses.map((s) => s.status)).toEqual(['thinking', 'replying', 'done'])
     // 槽位释放回 idle（真实 dispatch completeExecution 跑通）
-    expect(getAgentState('agent-1')).toMatchObject({ status: 'idle' })
+    expect(engine.getSlot('agent-1', 'session-1')).toMatchObject({ status: 'idle' })
     // 审计落库：completed + 洞 A 判据 message_id 写回
     const log = getLog('msg-1')
     expect(log.status).toBe('completed')
@@ -288,7 +287,7 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     expect(log.status).toBe('failed')
     expect(log.error_message).toBe('boom')
     // 槽位释放（异常不卡 slot——卡死槽位事故族回归）
-    expect(getAgentState('agent-1')).toMatchObject({ status: 'idle' })
+    expect(engine.getSlot('agent-1', 'session-1')).toMatchObject({ status: 'idle' })
   })
 
   it('AGENT_INTERRUPT 同款：引擎 abortAgent → 流提前返回 → failed/interrupted 收口，无回复', async () => {
@@ -314,7 +313,7 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     const log = getLog('msg-int')
     expect(log.status).toBe('failed')
     expect(log.error_message).toBe('interrupted')
-    expect(getAgentState('agent-1')).toMatchObject({ status: 'idle' })
+    expect(engine.getSlot('agent-1', 'session-1')).toMatchObject({ status: 'idle' })
   })
 
   it('MESSAGE_RETRACT 同款：引擎 setRetraction → 流中途退出 → 无回复落库、标记自清理', async () => {
@@ -338,22 +337,21 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
       getDb().prepare(`SELECT COUNT(*) AS n FROM messages WHERE role = 'agent'`).get() as any
     ).toMatchObject({ n: 0 })
     // 槽位照常释放（撤回不是失败也不是卡死）
-    expect(getAgentState('agent-1')).toMatchObject({ status: 'idle' })
+    expect(engine.getSlot('agent-1', 'session-1')).toMatchObject({ status: 'idle' })
   })
 
   it('no-key 守卫：deepseek 无 key → 配置提示、不进 LLM、槽位与队列收口', async () => {
     const { bus, calls } = createFakeBus()
     const engine = createExecutionEngine(bus)
-    // 守卫读执行者配置（ingest 从 DB 行构建 AgentConfig 同款）——空 key 走守卫
+    // C1 v3：execute 从 DB 查 agent 配置（生产同款——ingest/recovery 的 agents 本就
+    // 来自 DB）。守卫读执行者配置 → 把 DB 中 agent-1 的 key 置空走 no-key 守卫
     const noKeyAgent: AgentConfig = { ...DEFAULT_AGENT, llmApiKey: '' }
-
     const db = getDb()
+    db.prepare(`UPDATE agents SET llm_api_key = '' WHERE id = 'agent-1'`).run()
     db.prepare(
       `INSERT INTO messages (id, session_id, role, content, mentions)
        VALUES ('msg-nokey', 'session-1', 'user', '你好', '[]')`
     ).run()
-    const msg = makeMessage({ id: 'msg-nokey' })
-    await dispatch('session-1', msg, [noKeyAgent], 'trace-nokey')
     await engine.executeAgentsSerial(
       'session-1',
       [noKeyAgent],
@@ -366,7 +364,7 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     expect(getAdapterForAgent).not.toHaveBeenCalled()
     expect(calls.agentMessages).toHaveLength(0)
     // 收口仍走统一漏斗（无 key 也标 done 释放槽位，排队命令不弃）
-    expect(getAgentState('agent-1')).toMatchObject({ status: 'idle' })
+    expect(engine.getSlot('agent-1', 'session-1')).toMatchObject({ status: 'idle' })
     const log = getLog('msg-nokey')
     expect(log.status).toBe('completed')
   })

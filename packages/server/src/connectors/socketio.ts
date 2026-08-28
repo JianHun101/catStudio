@@ -730,7 +730,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
   })
 
   // 桥接 dispatch 状态变化 → Socket.IO（Redis 不可用时前端仍能收到更新）
-  setAgentStateBridge((_event, state) => {
+  // C1 v3：桥接签名简化为单参 state（原 (_event, state)——事件名恒为 agent-status）
+  setAgentStateBridge((state) => {
     if (state.sessionId) {
       io.to(`session:${state.sessionId}`).emit(Events.AGENT_STATUS, state)
     }

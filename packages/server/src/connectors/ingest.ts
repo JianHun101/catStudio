@@ -20,7 +20,6 @@ import {
 import type { AgentConfig } from '@cat-study/shared'
 import { rowToAgent } from '../execution/row.js'
 import { getExecutionEngine, getExecutionBus } from '../execution/registry.js'
-import { dispatch, initAgentSlot, getAgentState, completeExecution } from '../dispatch/index.js'
 import { resolveHandoffTarget } from '../handoff/index.js'
 import { saveMessageMemory } from '../memory/index.js'
 import { createLogger } from '../logger.js'
@@ -217,25 +216,10 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     })
   }
 
-  // 初始化 Agent 槽位并存储
-  for (const a of validAgents) {
-    if (!getAgentState(a.id)) {
-      initAgentSlot(a.id)
-    }
-  }
-
-  // 5. 调度 + 执行（捕获内部异常防止消息入口崩溃）
-  try {
-    await dispatch(effectiveSessionId, msg, validAgents, traceId)
-  } catch (err: any) {
-    log.error('dispatch failed', {
-      sessionId: effectiveSessionId,
-      traceId,
-      error: err.message,
-    })
-  }
-
-  // 获取需要立即执行的 Agent（被 @ 的，或广播下的所有 Agent）
+  // 5. 调度 + 执行——C1 v3 单入口（executeAgentsSerial 内部走 execute(cmd)：
+  // 决策(直跑/入队)→token→执行→finally{release+收口+排空}）。槽位由 execute 决策段
+  // 惰性创建（不再需要显式 initAgentSlot）。S2 手动兜底已移入 execute 的 finally
+  // ——executeOneAgent 逃逸异常时补收口+排空，此处无需再逐槽位释放。
   const targets =
     mentions.length > 0 ? validAgents.filter((a) => mentions.includes(a.name)) : validAgents
 
@@ -253,28 +237,16 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     }
   }
 
-  // 按 FIFO 串行执行（不 await，让多个消息的 Agent 执行可以交错）
+  // 调度 + 执行（不 await，让多个消息的 Agent 执行可以交错）。异常兜底：
+  // execute 的 finally 已保证槽位收口，此处只记日志防未处理 Promise 拒绝
   if (bus && targets.length > 0) {
     getExecutionEngine()!
       .executeAgentsSerial(effectiveSessionId, targets as AgentConfig[], msg, traceId)
       .catch((err) => {
-        // S2 修复：executeAgentsSerial 内部 try/catch 只覆盖 for 循环体。
-        // 若在进入循环前崩溃（session 查询、agent 名解析等），异常会成为
-        // 未处理 Promise 拒绝，且 dispatch() 已将 agent 设为 busy →
-        // 槽位永久卡死。这里做最后一道防线：释放所有仍为 busy 的槽位。
-        log.error('executeAgentsSerial crashed — releasing stuck slots', {
+        log.error('executeAgentsSerial crashed', {
           traceId,
           error: err.message,
         })
-        for (const a of targets) {
-          const state = getAgentState(a.id)
-          if (state && state.status === 'busy') {
-            completeExecution(a.id, false, {
-              errorMessage: `executeAgentsSerial crash: ${err.message}`,
-              traceId,
-            }).catch(() => {})
-          }
-        }
       })
   }
 

@@ -1,186 +1,25 @@
 /**
- * Agent 调度引擎。
+ * Agent 调度引擎（C1 v3 重构后）。
  *
- * 核心逻辑：
- * 1. 用户消息到达 → 解析 mentions
- * 2. 对每个被 @ 的 Agent，检查槽位
- * 3. 空闲 → 立即执行；忙碌 → 入 FIFO 队列
- * 4. Agent 执行完成 → 检查其私有队列是否有下一项
+ * 模块级槽位状态（agentSlots/agentQueues）已收进 execution/serial.ts 的
+ * createExecutionEngine 闭包——调度键升 agentId+sessionId（跨会话同猫并行、
+ * 同会话同猫 FIFO 保留），决策+执行合并为 engine.execute(cmd) 单接口。
+ *
+ * 本模块保留：
+ * 1. 纯函数：MAX_QUEUE_PER_AGENT（队列上限）、isStaleHandoffRequest（交接去重）
+ * 2. 兼容 shim：socketio 等调用方仍从本模块 import 状态访问函数——委托给注册表
+ *    单例引擎（getExecutionEngine 服务定位，getIO 同款惯例；未注册时 no-op/空，
+ *    与旧模块级空态语义一致）
+ * 3. __test_reset：测试钩子（委托引擎复位）
  */
 
-import type { AgentConfig, AgentRuntimeState, DispatchCommand, Message } from '@cat-study/shared'
-import { Channels } from '@cat-study/shared'
-import { getRedis } from '../db/redis.js'
-import {
-  agents as agentsRepo,
-  executionLogs as execLogsRepo,
-  messages as messagesRepo,
-} from '../db/repository/index.js'
 import { v4 as uuid } from 'uuid'
-import { createLogger } from '../logger.js'
-import { classifyError } from '../eval/classify-error.js'
-
-const log = createLogger('dispatch')
-
-// ─── Slot state (in-memory) ─────────────────────────
-
-const agentSlots = new Map<string, AgentRuntimeState>()
-const agentQueues = new Map<string, DispatchCommand[]>()
+import type { AgentConfig, AgentRuntimeState, DispatchCommand, Message } from '@cat-study/shared'
+import { messages as messagesRepo } from '../db/repository/index.js'
+import { getExecutionEngine } from '../execution/registry.js'
 
 /** 每个 Agent FIFO 队列的最大长度——超出拒绝入队（通知前端，不静默丢弃） */
 export const MAX_QUEUE_PER_AGENT = 3
-
-export function initAgentSlot(agentId: string): void {
-  agentSlots.set(agentId, {
-    agentId,
-    sessionId: null,
-    status: 'idle',
-    queueLength: 0,
-    currentTriggerMessageId: null,
-  })
-  agentQueues.set(agentId, [])
-}
-
-export function getAgentState(agentId: string): AgentRuntimeState | undefined {
-  return agentSlots.get(agentId)
-}
-
-export function getAllAgentStates(): AgentRuntimeState[] {
-  return [...agentSlots.values()]
-}
-
-// ─── Dispatch ───────────────────────────────────────
-
-/**
- * 用户发消息后，调度系统决定哪些 Agent 执行、哪些排队。
- * @param depth 触发层深——用户顶层 0（默认），A2A 递归每层 +1
- * @returns traceId — 贯穿全链路的请求追踪 ID
- */
-export async function dispatch(
-  sessionId: string,
-  userMessage: Message,
-  agents: AgentConfig[],
-  traceId?: string,
-  depth: number = 0
-): Promise<string> {
-  const tid = traceId || uuid()
-  const mentions = userMessage.mentions
-
-  // 确定目标 Agent：有 @ 就只调度被 @ 的，广播则调度 Session 内所有 Agent
-  const targets = mentions.length > 0 ? agents.filter((a) => mentions.includes(a.name)) : agents
-
-  if (targets.length === 0) {
-    return tid
-  }
-
-  for (const agent of targets) {
-    const cmd: DispatchCommand = {
-      sessionId,
-      agentId: agent.id,
-      triggerMessageId: userMessage.id,
-      triggerContent: userMessage.content,
-      mentions,
-      // 命令自持 trace/depth——队列命令出队时用自身的，不继承执行者（防多 trace 叠加错配）
-      traceId: tid,
-      depth,
-      // 命令自持 taskId——队列命令出队时重建触发消息继承同一 task（drain 段消费，
-      // 与 traceId/depth 同语义；无 taskId 时 undefined 与现状等价）
-      taskId: userMessage.taskId,
-      pendingTriggers: [],
-    }
-
-    const slot = agentSlots.get(agent.id)
-    if (!slot) {
-      log.warn('unknown agent in dispatch', { agentId: agent.id, traceId: tid })
-      continue
-    }
-
-    if (slot.status === 'idle') {
-      // 交接请求去重（执行时点检查）：hook 在 commit 时投递「请补填交接文档」
-      // 请求、作者在回复中落库完整文档——请求排队期间文档已补填 → 跳过执行
-      // 不唤醒猫（727ff2e 案例：请求 03:19 入队、文档 03:20 落库、执行 03:23，
-      // 入队时检查看不到还没出生的文档，必须执行时点查）
-      if (isStaleHandoffRequest(cmd)) {
-        log.info('stale handoff request skipped (idle)', {
-          traceId: tid,
-          agentId: agent.id,
-          agentName: agent.name,
-          triggerMessageId: cmd.triggerMessageId,
-        })
-        // 标 done 防重启恢复按 queued 复活（P0 恢复只看 queued/running）
-        messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
-        continue
-      }
-      await executeAgent(agent, cmd, tid)
-    } else {
-      const q = agentQueues.get(agent.id)!
-      // B 触发合并（A2A 风暴治理）：A2A 链（depth>0）且同 session 已有排队命令 →
-      // 不入队，并入该命令的 pendingTriggers（出队执行时点名"还有 N 件事"）。
-      // 合并判定与并入写入同一同步块、中间无 await——Node 单线程下天然原子，
-      // 队列消费（completeExecution 的 q.shift）不会插在两者之间，并入必先于消费。
-      // 执行中的命令不并入（上下文已拉取，并入无效）；仅合并排队项。
-      if (depth > 0) {
-        const queued = q.find((c) => c.sessionId === cmd.sessionId)
-        if (queued) {
-          queued.pendingTriggers.push(cmd.triggerMessageId)
-          log.info('agent trigger merged into queued command', {
-            traceId: tid,
-            agentId: agent.id,
-            agentName: agent.name,
-            mergedTrigger: cmd.triggerMessageId,
-            totalPending: queued.pendingTriggers.length + 1,
-          })
-          systemMessageBridge?.(
-            cmd.sessionId,
-            agent.id,
-            `🐱 ${agent.name} 收到新触发已合并——当前排队任务将一并处理（共 ${
-              queued.pendingTriggers.length + 1
-            } 件事待办）`
-          )
-          continue
-        }
-      }
-      if (q.length >= MAX_QUEUE_PER_AGENT) {
-        // 队列上限：拒绝入队并通知前端（不静默丢弃——用户消息需知道"没排上"）
-        log.warn('agent queue full, rejecting command', {
-          traceId: tid,
-          agentId: agent.id,
-          agentName: agent.name,
-          queueLength: q.length,
-          max: MAX_QUEUE_PER_AGENT,
-        })
-        systemMessageBridge?.(
-          cmd.sessionId,
-          agent.id,
-          `🐱 ${agent.name} 的队列已满（${MAX_QUEUE_PER_AGENT} 条），本条消息暂未排队，请稍后再试`
-        )
-        // 标 done（terminal，与「无有效目标→done」同款）：用户已被明确告知
-        // "没排上、请重试"——消息不得留在 NULL 面被重放扫描 30min 后静默补派
-        // （与「请稍后再试」矛盾，且用户手动重发会同一意图执行两次）
-        // 多目标守卫：for 循环按目标逐次写同一 triggerMessageId 的 dispatch_state，
-        // 兄弟目标若已写 queued/running，此处覆盖成 done 会让重启恢复
-        // （recoverQueuedMessages 只捞 queued/running）丢失兄弟的排队执行
-        // ——非 NULL 不覆盖（02d3165 引入的回归，吐槽猫复审发现）
-        if (!messagesRepo.getDispatchState(cmd.triggerMessageId)) {
-          messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
-        }
-        continue
-      }
-      q.push(cmd)
-      updateQueueState(agent.id, q.length)
-      // P0 队列持久化：入队即落库 queued，server 重启后可恢复
-      messagesRepo.setDispatchState(cmd.triggerMessageId, 'queued')
-      log.info('agent queued', {
-        traceId: tid,
-        agentId: agent.id,
-        agentName: agent.name,
-        queueLength: q.length,
-      })
-    }
-  }
-
-  return tid
-}
 
 // ─── Handoff 交接请求去重 ─────────────────────────────
 
@@ -193,22 +32,16 @@ const COMMIT_SHA_RE = /Commit: ([0-9a-f]{7,})/
 /**
  * 交接请求是否已 stale：触发消息是「请补填交接文档」请求，且同 session 已有
  * 该 commit 的完整文档（含 Commit: <sha> 且不含 TODO 占位标记）→ 请求已过时，
- * 执行只会白叫醒猫（727ff2e 案例：hook 在 commit 时投递请求、作者在回复中
- * 落库完整文档——请求排队期间文档已补填，执行时点检查可拦截）。
- * 只做执行时点检查——入队时文档可能还没落库（hook 投递早于同轮回复落库），
- * 入队时检查会漏判（03:19 入队、03:20 文档落库、03:23 执行的时窗）。
+ * 执行只会白叫醒猫。只做执行时点检查（入队时文档可能还没落库）。
  *
- * 契约④ 防自证：请求自身（含 sha + 含 TODO 占位）不得作为"已补填"证据——
- * TODO 占位标记检查天然排除；同时排除触发消息自身 id，防止请求消息内容
- * 意外不含占位标记时自证误判。
+ * 契约④ 防自证：请求自身不得作为"已补填"证据——TODO 占位标记检查天然排除；
+ * 同时排除触发消息自身 id。
  */
 export function isStaleHandoffRequest(cmd: DispatchCommand): boolean {
   if (!cmd.triggerContent.includes(HANDOFF_FILL_REQUEST_PREFIX)) return false
   const m = cmd.triggerContent.match(COMMIT_SHA_RE)
   if (!m) return false
   const sha = m[1]
-  // 同 session 查已落库消息：存在含「Commit: <sha>」且不含「TODO: 补填」的
-  // 完整文档 → 请求已 stale（文档已补填投递）
   const rows = messagesRepo.getAllSessionMessages(cmd.sessionId)
   return rows.some(
     (r) =>
@@ -218,319 +51,126 @@ export function isStaleHandoffRequest(cmd: DispatchCommand): boolean {
   )
 }
 
-// ─── Execution ──────────────────────────────────────
+// ─── 兼容 shim（委托注册表单例引擎） ─────────────────
 
 /**
- * 为单个命令设置槽位（busy + currentTrigger）+ 写执行日志 + 发布状态。
- * 正常路径由 dispatch() 内部调用；重启恢复路径（connector 的
- * recoverInterruptedExecutions）复用同一逻辑，保证槽位语义一致。
+ * 槽位初始化——C1 v3 后由 engine.execute 决策段 ensureSlot 惰性创建，本函数为
+ * no-op 兼容（旧调用方显式 init 的意图已不需要；保留导出防存量 import 断链）。
+ */
+export function initAgentSlot(_agentId: string): void {
+  // no-op——槽位惰性创建（execute 决策段 ensureSlot）
+}
+
+/**
+ * 兼容 shim（C1 v3 前 dispatch 两步走的决策入口）——现已并入 engine.execute。
+ * 生产调用方（ingest/recovery）已改走 executeAgentsSerial 单入口，本函数仅
+ * 供测试/存量 import 保持类型面：委托 engine.execute 逐目标派发（决策+执行
+ * 一次搞定，fire-and-forget）。返回 traceId（与旧契约一致）。
+ */
+export async function dispatch(
+  sessionId: string,
+  userMessage: Message,
+  agents: AgentConfig[],
+  traceId?: string,
+  depth: number = 0
+): Promise<string> {
+  const tid = traceId || uuid()
+  const mentions = userMessage.mentions
+  const targets = mentions.length > 0 ? agents.filter((a) => mentions.includes(a.name)) : agents
+  const engine = getExecutionEngine()
+  if (!engine) return tid
+  for (const agent of targets) {
+    void engine.execute({
+      sessionId,
+      agentId: agent.id,
+      triggerMessageId: userMessage.id,
+      triggerContent: userMessage.content,
+      mentions,
+      taskId: userMessage.taskId,
+      traceId: tid,
+      depth,
+      pendingTriggers: [],
+    })
+  }
+  return tid
+}
+
+/**
+ * 兼容 shim——标 busy + 写执行日志（原 dispatch 决策段副作用）。C1 v3 后由
+ * engine.execute 决策段内部完成（executeAgentCommand 收进闭包）。本函数 no-op
+ * 兼容（测试 mock 仍可断言调用，生产无调用方）。
  */
 export async function executeAgentCommand(
-  agent: AgentConfig,
-  cmd: DispatchCommand,
-  traceId: string
+  _agent: AgentConfig,
+  _cmd: DispatchCommand,
+  _traceId: string
 ): Promise<void> {
-  const slot = agentSlots.get(agent.id)!
-  slot.status = 'busy'
-  slot.sessionId = cmd.sessionId
-  slot.currentTriggerMessageId = cmd.triggerMessageId
-  setSlotSession(agent.id, cmd.sessionId)
-  // P0 队列持久化：执行开始即落库 running（覆盖空闲直跑与重启恢复两条路径）
-  messagesRepo.setDispatchState(cmd.triggerMessageId, 'running')
-
-  const logId = uuid()
-  execLogsRepo.insertExecutionLog(logId, cmd.sessionId, agent.id, cmd.triggerMessageId, traceId)
-
-  log.info('agent executing', {
-    traceId,
-    agentId: agent.id,
-    agentName: agent.name,
-    executionLogId: logId,
-  })
-
-  await publishAgentStatus(agent, 'busy')
-
-  // ⚠ Agent 的实际 LLM 推理由 dispatch 调用方（connector）触发
-  // 这里只做槽位管理和状态变更
-  // connector 拿到 agent 配置后，调 LLM → 流式输出 → 写消息 → 标记完成
-}
-
-async function executeAgent(
-  agent: AgentConfig,
-  cmd: DispatchCommand,
-  traceId: string
-): Promise<void> {
-  await executeAgentCommand(agent, cmd, traceId)
+  // no-op——引擎决策段内部完成（executeAgentCommand 收进 engine 闭包）
 }
 
 /**
- * Agent 执行完成后调用。释放槽位，处理队列中的下一个命令。
+ * 兼容 shim——执行收口（原 dispatch 模块函数）。C1 v3 后收进 engine 闭包，
+ * 键含 sessionId，接口不暴露该方法（窄接口只留 execute/snapshot/getSlot 等
+ * 读与决策方法）。生产无调用方（ingest/recovery 走 engine.execute 单入口，
+ * socketio 不 import 本函数），测试用 mock 断言调用——no-op 兼容，
+ * 真实收口断言用 engine.getSlot 观察槽位释放。
  */
 export async function completeExecution(
-  agentId: string,
-  success: boolean,
-  opts?: {
+  _agentId: string,
+  _success: boolean,
+  _opts?: {
     latencyMs?: number
     errorMessage?: string
     traceId?: string
-    /** 成功路径写回的回复消息 id（洞 A 判据，经 finalize 落 execution_logs.message_id） */
     replyMessageId?: string
   }
 ): Promise<DispatchCommand | undefined> {
-  const slot = agentSlots.get(agentId)
-  if (!slot) return
-
-  // 更新执行日志（DB 失败不阻塞槽位释放）。
-  // errorType 在此集中分类（L1 契约）：调用点（connector）零改动——dispatch
-  // 主链语义不动，只补分类透传。同 UPDATE 契约：error_type 与 status/error_message
-  // 一条 UPDATE 带走（finalize 按 running 定位无 id，二次更新会错配）
-  try {
-    execLogsRepo.finalizeExecutionLog(
-      agentId,
-      success ? 'completed' : 'failed',
-      opts?.latencyMs ?? null,
-      opts?.errorMessage ?? null,
-      opts?.replyMessageId ?? null,
-      opts?.errorMessage ? classifyError(opts.errorMessage) : null
-    )
-  } catch (err: any) {
-    log.error('finalizeExecutionLog failed — releasing slot anyway', {
-      agentId,
-      error: err.message,
-    })
-  }
-
-  if (opts?.latencyMs !== undefined) {
-    log.info('execution completed', {
-      agentId,
-      latencyMs: opts.latencyMs,
-      success,
-      traceId: opts.traceId,
-    })
-  }
-  if (opts?.errorMessage) {
-    log.error('execution failed', {
-      agentId,
-      error: opts.errorMessage,
-      traceId: opts.traceId,
-    })
-  }
-
-  const q = agentQueues.get(agentId)!
-  // 弹队列前保存当前触发消息——弹完会被 next 覆盖，done 必须标在旧值上
-  const finishedTrigger = slot.currentTriggerMessageId
-
-  // 交接请求去重（dequeue 后、执行前检查）：请求排队期间作者已落库完整文档
-  // → 跳过执行不唤醒猫（727ff2e 案例：请求 03:19 入队、文档 03:20 落库、
-  // 执行 03:23——只有执行时点（dequeue 后）检查才看得到文档，入队时检查
-  // 会漏掉）。stale 命令标 done 后继续弹下一个，直到队列空或遇到非 stale。
-  // 守卫：带 pendingTriggers 的 stale 命令不跳过——B 合并（dispatch 的
-  // depth>0 触发并入）已在合并时通过 systemMessageBridge 告知用户「将一并
-  // 处理 N 件事」，跳过会让合并进来的 A2A 触发静默蒸发（用户看到"已合并"
-  // 却永远不执行）。带合并触发时执行不是白叫醒——有真实的跟进待办，照常弹出。
-  let next = q.shift()
-  while (next && isStaleHandoffRequest(next) && next.pendingTriggers.length === 0) {
-    log.info('stale handoff request skipped (queued)', {
-      agentId,
-      triggerMessageId: next.triggerMessageId,
-    })
-    // 标 done 防重启恢复按 queued 复活（P0 恢复只看 queued/running）
-    messagesRepo.setDispatchState(next.triggerMessageId, 'done')
-    next = q.shift()
-  }
-
-  if (finishedTrigger) {
-    // P0 队列持久化：当前执行收尾即落库 done
-    // OQ1 完成路径守卫（多目标部分完成）：done 是消息级 terminal 状态——多目标
-    // @[A,B] 下 A idle 直跑（executeAgent 不等 LLM）、B busy 排队写 queued，A 的
-    // LLM 完成后无条件写 done 会把 B 的 queued 覆盖 → 重启时 recoverQueuedMessages
-    // （只捞 queued/running）丢 B 排队执行。当前状态 = queued（兄弟目标排队中）
-    // → 不写 done 保持 queued（恢复路径可捞，B 的排队命令不丢）；running/done/NULL
-    // → 照旧写 done（单目标直跑时是 running，无兄弟覆盖）。queued 保持后由
-    // recoverQueuedMessages 按 execution_logs 跳过已完成目标防重派双执行。
-    if (messagesRepo.getDispatchState(finishedTrigger) !== 'queued') {
-      messagesRepo.setDispatchState(finishedTrigger, 'done')
-    } else {
-      log.info('多目标部分完成：保持 queued（兄弟目标排队中，不写 done）', {
-        agentId,
-        triggerMessageId: finishedTrigger,
-      })
-    }
-  }
-
-  if (next) {
-    slot.status = 'busy'
-    slot.sessionId = next.sessionId
-    slot.currentTriggerMessageId = next.triggerMessageId
-    updateQueueState(agentId, q.length)
-    // P0 队列持久化：队列命令被弹出执行——queued → running（重启恢复不重复调度）
-    messagesRepo.setDispatchState(next.triggerMessageId, 'running')
-    await publishAgentStatusById(agentId, 'busy')
-    log.info('queue → next', { agentId, queueRemaining: q.length })
-    return next
-  } else {
-    slot.status = 'idle'
-    slot.sessionId = null
-    slot.currentTriggerMessageId = null
-    updateQueueState(agentId, 0)
-    await publishAgentStatusById(agentId, 'idle')
-    return undefined
-  }
-}
-
-// ─── Socket.IO bridge ──────────────────────────────
-
-type AgentStateEmit = (event: 'agent-status', data: AgentRuntimeState) => void
-let stateBridge: AgentStateEmit | null = null
-
-/** 注册 Socket.IO 桥接函数（由 connector 在启动时调用）。 */
-export function setAgentStateBridge(fn: AgentStateEmit): void {
-  stateBridge = fn
-}
-
-type SystemMessageEmit = (sessionId: string, agentId: string, content: string) => void
-let systemMessageBridge: SystemMessageEmit | null = null
-
-/** 注册系统消息桥接函数（由 connector 在启动时调用）——队列满拒绝入队时通知前端。 */
-export function setSystemMessageBridge(fn: SystemMessageEmit): void {
-  systemMessageBridge = fn
-}
-
-function emitViaBridge(slot: AgentRuntimeState): void {
-  if (stateBridge) {
-    try {
-      stateBridge('agent-status', { ...slot })
-    } catch {
-      // 桥接失败不阻塞 dispatch
-    }
-  }
-}
-
-// ─── Redis publish helpers ──────────────────────────
-
-async function publishAgentStatus(agent: AgentConfig, status: string): Promise<void> {
-  // Socket.IO bridge — 即使 Redis 不可用，前端也能收到
-  const slot = agentSlots.get(agent.id)
-  if (slot) emitViaBridge(slot)
-  try {
-    const redis = getRedis()
-    if (!redis) return
-    await redis.publish(
-      Channels.agentStatus(agent.id),
-      JSON.stringify({
-        agentId: agent.id,
-        name: agent.name,
-        status,
-      })
-    )
-  } catch {
-    // Redis 不可用时静默失败
-  }
-}
-
-async function publishAgentStatusById(agentId: string, status: string): Promise<void> {
-  const agent = agentsRepo.getAgentById(agentId)
-  if (agent) {
-    await publishAgentStatus(agent as unknown as AgentConfig, status)
-  }
-}
-
-function setSlotSession(agentId: string, sessionId: string | null): void {
-  const slot = agentSlots.get(agentId)
-  if (slot) {
-    slot.sessionId = sessionId
-  }
+  // no-op——收口逻辑在 engine 闭包 completeExecution（键含 sessionId）
+  return undefined
 }
 
 /**
- * 撤回消息时调用：遍历所有 Agent 的 FIFO 队列，移除匹配 triggerMessageId 的命令。
- * 解决 "消息已撤回但 Agent 在排队中，轮到执行时标记已清理" 的时窗问题（Window ①）。
- * @returns 实际移除的命令数
+ * 单 agent 状态（旧键 agentId；多会话并行后一 agent 可能多槽——返回第一个
+ * busy/idle 槽位，与旧模块级单槽语义等价）。调用方如需精确寻址用
+ * engine.getSlot(agentId, sessionId)。
  */
+export function getAgentState(agentId: string): AgentRuntimeState | undefined {
+  return getExecutionEngine()?.snapshot().find((s) => s.agentId === agentId)
+}
+
+/** 全量槽位快照（委托 engine.snapshot） */
+export function getAllAgentStates(): AgentRuntimeState[] {
+  return getExecutionEngine()?.snapshot() ?? []
+}
+
+/** 撤回消息时调用：遍历所有槽位 FIFO 队列移除匹配 triggerMessageId 的命令 */
 export function cancelQueuedCommand(triggerMessageId: string): number {
-  let removed = 0
-  for (const [agentId, q] of agentQueues) {
-    const before = q.length
-    const filtered = q.filter((cmd) => cmd.triggerMessageId !== triggerMessageId)
-    if (filtered.length !== before) {
-      agentQueues.set(agentId, filtered)
-      removed += before - filtered.length
-      updateQueueState(agentId, filtered.length)
-    }
-  }
-  if (removed > 0) {
-    log.info('queued commands cancelled', { triggerMessageId, removed })
-  }
-  return removed
+  return getExecutionEngine()?.cancelQueuedCommand(triggerMessageId) ?? 0
 }
 
-/**
- * 用户中断（停止按钮）时调用：清空指定 Agent 的 FIFO 队列，并逐条将
- * dispatch_state 标为 done——否则运行中清掉的队列在 server 重启后会被
- * recoverQueuedMessages 按 queued 状态复活重新调度（回到手动改 DB 的老路）。
- * 单条 DB 标记失败不阻塞整体清队（try/catch 逐条兜底）。
- * @returns 实际清掉的命令数
- */
+/** 用户中断（停止按钮）时调用：清空指定 Agent 全部会话槽位的 FIFO 队列 */
 export function clearAgentQueue(agentId: string): number {
-  const q = agentQueues.get(agentId)
-  if (!q || q.length === 0) return 0
-  const cleared = q.length
-  for (const cmd of q) {
-    try {
-      messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
-    } catch (err: any) {
-      log.error('setDispatchState failed during queue clear (non-blocking)', {
-        agentId,
-        triggerMessageId: cmd.triggerMessageId,
-        error: err.message,
-      })
-    }
-  }
-  agentQueues.set(agentId, [])
-  updateQueueState(agentId, 0)
-  log.info('agent queue cleared by user interrupt', { agentId, cleared })
-  return cleared
+  return getExecutionEngine()?.clearAgentQueue(agentId) ?? 0
 }
 
-/**
- * 撤回时用：检查是否有 Agent 正在执行（而非仅仅排队）给定的 trigger 消息。
- * 用于判断 retractionRequests 标记是否可以安全清理。
- */
+/** 撤回时用：是否有 Agent 正在执行（而非仅排队）给定 trigger 消息 */
 export function isAnyAgentExecutingMessage(triggerMessageId: string): boolean {
-  for (const slot of agentSlots.values()) {
-    if (slot.currentTriggerMessageId === triggerMessageId) {
-      return true
-    }
-  }
-  return false
+  return getExecutionEngine()?.isAnyAgentExecutingMessage(triggerMessageId) ?? false
 }
 
-/** 仅在测试中使用：重置所有槽位和队列状态 */
+/** 注册 Socket.IO 桥接函数（委托 engine） */
+export function setAgentStateBridge(fn: (state: AgentRuntimeState) => void): void {
+  getExecutionEngine()?.setAgentStateBridge(fn)
+}
+
+/** 注册系统消息桥接函数（委托 engine）——队列满拒绝入队时通知前端 */
+export function setSystemMessageBridge(
+  fn: (sessionId: string, agentId: string, content: string) => void
+): void {
+  getExecutionEngine()?.setSystemMessageBridge(fn)
+}
+
+/** 仅在测试中使用：重置引擎槽位/队列/token 池状态 */
 export function __test_reset(): void {
-  agentSlots.clear()
-  agentQueues.clear()
-}
-
-function updateQueueState(agentId: string, queueLength: number): void {
-  const slot = agentSlots.get(agentId)
-  if (slot) {
-    slot.queueLength = queueLength
-    // Socket.IO bridge — 确保前端即使 Redis 不可用也能收到状态更新
-    emitViaBridge(slot)
-    try {
-      const redis = getRedis()
-      if (!redis) return
-      redis.publish(
-        Channels.agentStatus(agentId),
-        JSON.stringify({
-          agentId,
-          status: slot.status,
-          sessionId: slot.sessionId,
-          queueLength,
-        })
-      )
-    } catch {
-      /* silent */
-    }
-  }
+  getExecutionEngine()?.__test_reset()
 }
