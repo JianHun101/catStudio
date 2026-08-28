@@ -749,7 +749,6 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     if (state.sessionId) {
       io.to(`session:${state.sessionId}`).emit(Events.AGENT_STATUS, state)
     }
-    io.emit('all-agent-states', getAllAgentStates())
   })
 
   // 桥接 dispatch 系统消息 → Socket.IO（队列满拒绝入队时通知用户，与 NEW_MESSAGE 同形状）

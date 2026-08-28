@@ -63,7 +63,7 @@ export const useChatStore = defineStore('chat', () => {
   const sessions = ref<SessionConfig[]>([])
   const activeSessionId = ref<string | null>(null)
   const messages = ref<Message[]>([])
-  const agentStates = ref<Map<string, AgentRuntimeState>>(new Map())
+  const agentStates = ref<Map<string, Map<string, AgentRuntimeState>>>(new Map())
   const agents = ref<AgentConfig[]>([])
   const typingStates = ref<Map<string, { messageId: string; content: string; sessionId: string }>>(
     new Map()
@@ -160,9 +160,32 @@ export const useChatStore = defineStore('chat', () => {
     messages.value.filter((m) => m.sessionId === activeSessionId.value)
   )
 
+  /** 纯存：镜像 server slots——agentId → (sessionId ?? '') → AgentRuntimeState。
+   *  哨兵桶用 '' 键存 sessionId 为 null/空 的状态（无 session 维度的全局态）。 */
+  function storeAgentState(state: AgentRuntimeState): void {
+    const key = state.sessionId ?? ''
+    const bySession = agentStates.value.get(state.agentId)
+    if (bySession) {
+      bySession.set(key, state)
+    } else {
+      agentStates.value.set(state.agentId, new Map([[key, state]]))
+    }
+  }
+
+  /** 唯一查询 helper：当前会话状态优先，回退哨兵桶（sessionId 空/无 → ''）。
+   *  把「忙闲」收敛到 (agent, session) 语义单位——A 会话忙 ≠ B 会话忙。 */
+  function currentStateFor(agentId: string): AgentRuntimeState | undefined {
+    const bySession = agentStates.value.get(agentId)
+    if (!bySession) return undefined
+    return bySession.get(activeSessionId.value ?? '') ?? bySession.get('')
+  }
+
   const agentStateList = computed(() => {
     const list: AgentRuntimeState[] = []
-    agentStates.value.forEach((v) => list.push(v))
+    for (const agentId of agentStates.value.keys()) {
+      const state = currentStateFor(agentId)
+      if (state) list.push(state)
+    }
     return list
   })
 
@@ -596,8 +619,7 @@ export const useChatStore = defineStore('chat', () => {
     )
 
     socket.on(Events.AGENT_STATUS, (state: AgentRuntimeState) => {
-      if (state.sessionId && state.sessionId !== activeSessionId.value) return
-      agentStates.value.set(state.agentId, state)
+      storeAgentState(state)
       // Agent 空闲时清除打字状态（处理超时/中止等未发 NEW_MESSAGE 的情况）
       if (state.status === 'idle') {
         typingStates.value.delete(state.agentId)
@@ -605,9 +627,8 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     socket.on('all-agent-states', (states: AgentRuntimeState[]) => {
-      const map = new Map<string, AgentRuntimeState>()
-      states.forEach((s) => map.set(s.agentId, s))
-      agentStates.value = map
+      agentStates.value = new Map()
+      states.forEach(storeAgentState)
     })
 
     // 上下文窗口 token 用量（每次 Agent 回复后推送，驱动 handoff 的真实数字）
@@ -755,13 +776,6 @@ export const useChatStore = defineStore('chat', () => {
       }
     )
 
-    socket.on(Events.QUEUE_UPDATE, (data: { agentId: string; queueLength: number }) => {
-      const state = agentStates.value.get(data.agentId)
-      if (state) {
-        state.queueLength = data.queueLength
-      }
-    })
-
     // push 审批状态：服务端 PUSH_STATUS 事件驱动按钮显示（pushing/done/failed/cancelled/none）
     socket.on(Events.PUSH_STATUS, (data: { messageId: string; state: string }) => {
       // 状态到达即解除确认中（服务端权威状态接管按钮显示）
@@ -854,6 +868,7 @@ export const useChatStore = defineStore('chat', () => {
     activeSession,
     activeMessages,
     agentStateList,
+    currentStateFor,
     agentInfo,
     fetchData,
     joinSession,

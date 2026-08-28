@@ -16,7 +16,6 @@ describe('Events', () => {
   it('has all expected server→client events', () => {
     expect(Events.NEW_MESSAGE).toBe('new-message')
     expect(Events.AGENT_STATUS).toBe('agent-status')
-    expect(Events.QUEUE_UPDATE).toBe('queue-update')
     expect(Events.SESSION_UPDATE).toBe('session-update')
     expect(Events.BROADCAST_MODE_CHANGED).toBe('broadcast-mode-changed')
     expect(Events.SESSION_DELETED).toBe('session-deleted')
@@ -57,8 +56,8 @@ describe('Events', () => {
     expect(Events.PUSH_STATUS).toBe('push-status')
   })
 
-  it('has exactly 30 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(30)
+  it('has exactly 29 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(29)
   })
 })
 

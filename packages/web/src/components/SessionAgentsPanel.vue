@@ -53,11 +53,11 @@ function tokensText(agentId: string): string {
 // ─── 状态点 / 队列（agentStates 实时数据）───
 
 function statusFor(agentId: string): string {
-  return store.agentStates.get(agentId)?.status || 'idle'
+  return store.currentStateFor(agentId)?.status || 'idle'
 }
 
 function queueFor(agentId: string): number {
-  return store.agentStates.get(agentId)?.queueLength || 0
+  return store.currentStateFor(agentId)?.queueLength || 0
 }
 
 function statusLabel(status: string): string {

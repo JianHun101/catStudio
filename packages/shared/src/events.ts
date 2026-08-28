@@ -17,7 +17,6 @@ export const Events = {
   // 服务器 → 客户端
   NEW_MESSAGE: 'new-message',
   AGENT_STATUS: 'agent-status',
-  QUEUE_UPDATE: 'queue-update',
   SESSION_UPDATE: 'session-update',
   BROADCAST_MODE_CHANGED: 'broadcast-mode-changed',
   SESSION_DELETED: 'session-deleted',

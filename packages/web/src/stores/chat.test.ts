@@ -645,7 +645,22 @@ describe('chatStore', () => {
 
       store.activeSessionId = 's1'
       handler!({ agentId: 'a1', status: 'busy', sessionId: 's1', queueLength: 0 })
-      expect(store.agentStates.get('a1')?.status).toBe('busy')
+      expect(store.currentStateFor('a1')?.status).toBe('busy')
+    })
+
+    it('回归：A 会话 X busy、B 会话视图 X idle（复合键隔离会话，实锤用户报的跨会话忙泄露）', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.AGENT_STATUS)?.[1] as
+        ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      // A 会话 @ X → X 在 A 会话 busy（sessionId 维度精确存储）
+      store.activeSessionId = 's1'
+      handler!({ agentId: 'x', status: 'busy', sessionId: 's1', queueLength: 0 })
+      expect(store.currentStateFor('x')?.status).toBe('busy')
+
+      // 切到 B 会话 → X 在 B 会话无状态（哨兵桶也无）→ idle，不泄露 A 的忙
+      store.activeSessionId = 's2'
+      expect(store.currentStateFor('x')?.status).toBeUndefined()
     })
 
     it('MESSAGE_AGENT_STATUS replying 心跳 stamp lastBeatAt；done 整对象替换抹 startedAt/lastBeatAt（终态不显示时长）', () => {

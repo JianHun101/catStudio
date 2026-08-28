@@ -608,7 +608,7 @@ function tokensTextFor(agentId: string): string {
 
 /** 是否可停止：回复中（busy）或有排队任务（AGENT_INTERRUPT 一个按钮覆盖两场景） */
 function canStopAgent(agentId: string): boolean {
-  const state = store.agentStates.get(agentId)
+  const state = store.currentStateFor(agentId)
   return state?.status === 'busy' || (state?.queueLength ?? 0) > 0
 }
 
