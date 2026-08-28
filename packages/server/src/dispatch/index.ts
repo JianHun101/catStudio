@@ -131,11 +131,14 @@ export async function completeExecution(
 
 /**
  * 单 agent 状态（旧键 agentId；多会话并行后一 agent 可能多槽——返回第一个
- * busy/idle 槽位，与旧模块级单槽语义等价）。调用方如需精确寻址用
- * engine.getSlot(agentId, sessionId)。
+ * busy/idle 槽位，与旧模块级单槽语义等价）。带 sessionId → engine.getSlot 精确
+ * 寻址（AGENT_INTERRUPT 双端 session 化后调用方优先带）；无 → 现状取第一个。
  */
-export function getAgentState(agentId: string): AgentRuntimeState | undefined {
-  return getExecutionEngine()?.snapshot().find((s) => s.agentId === agentId)
+export function getAgentState(agentId: string, sessionId?: string): AgentRuntimeState | undefined {
+  const engine = getExecutionEngine()
+  if (!engine) return undefined
+  if (sessionId) return engine.getSlot(agentId, sessionId)
+  return engine.snapshot().find((s) => s.agentId === agentId)
 }
 
 /** 全量槽位快照（委托 engine.snapshot） */
@@ -148,9 +151,10 @@ export function cancelQueuedCommand(triggerMessageId: string): number {
   return getExecutionEngine()?.cancelQueuedCommand(triggerMessageId) ?? 0
 }
 
-/** 用户中断（停止按钮）时调用：清空指定 Agent 全部会话槽位的 FIFO 队列 */
-export function clearAgentQueue(agentId: string): number {
-  return getExecutionEngine()?.clearAgentQueue(agentId) ?? 0
+/** 用户中断（停止按钮）时调用：清空指定 Agent 槽位的 FIFO 队列。
+ *  带 sessionId → 只清该会话（OQ3 双端 session 化）；无 → 全部会话（旧客户端语义） */
+export function clearAgentQueue(agentId: string, sessionId?: string): number {
+  return getExecutionEngine()?.clearAgentQueue(agentId, sessionId) ?? 0
 }
 
 /** 撤回时用：是否有 Agent 正在执行（而非仅排队）给定 trigger 消息 */

@@ -670,38 +670,52 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     })
 
     // ─── Agent 手动中断（停止按钮：中断思考 + 清空队列）───
+    // OQ3 双端 session 化：payload 带 sessionId?（旧客户端只发 agentId → fallback
+    // 现状）。带 sessionId 时按 (agentId, sessionId) 精确寻址——并发双会话只停
+    // 目标会话（目标 run abort + 目标队列清空 + 目标房间收提示），兄弟会话零影响
 
-    socket.on(Events.AGENT_INTERRUPT, (data: { agentId: string }) => {
-      const { agentId } = data || {}
+    socket.on(Events.AGENT_INTERRUPT, (data: { agentId: string; sessionId?: string }) => {
+      const { agentId, sessionId } = data || {}
       if (!agentId) return
-      const state = getAgentState(agentId)
-      if (!state) return // 未知 agent → 幂等无操作
+
+      const engine = getExecutionEngine()!
+      // 目标会话定位：带 sessionId → engine.getSlot 精确寻址（无槽位 = 该 agent
+      // 在该会话无调度状态 → 幂等 no-op）；无（旧客户端）→ fallback 取第一个
+      // 匹配槽位的 sessionId（现状语义）
+      const targetSessionId = sessionId
+        ? (engine.getSlot(agentId, sessionId) ? sessionId : undefined)
+        : getAgentState(agentId)?.sessionId
+      if (!targetSessionId) return // 未知 agent/会话 → 幂等无操作
 
       // 先清队列再 abort：abort 后执行循环的 completeExecution(false) 收口时
-      // 队列已空不会弹出新命令（中断后 agent 不自动重启执行，新消息才重新触发）
-      const cleared = clearAgentQueue(agentId)
+      // 队列已空不会弹出新命令（中断后 agent 不自动重启执行，新消息才重新触发）。
+      // 带 sessionId → 只清目标会话队列；无 → 清全部会话（旧语义）
+      const cleared = sessionId
+        ? engine.clearAgentQueue(agentId, sessionId)
+        : clearAgentQueue(agentId)
       // 中断当前执行——executeAgentsSerial 的 abort 检查发现 signal.aborted 后
-      // 跳过 A2A 解析、走失败路径收口（execution_logs 记 failed）
-      const executing = getExecutionEngine()!.abortAgent(agentId)
+      // 跳过 A2A 解析、走失败路径收口（execution_logs 记 failed）。
+      // 带 sessionId → 精确 abort 目标会话 run；无 → abort 全部 run（旧语义）
+      const executing = engine.abortAgent(agentId, sessionId)
 
       if (cleared > 0 || executing) {
-        log.info('agent interrupted by user', { agentId, cleared })
-        // 系统消息进 agent 实际所在的 session 房间——跨会话忙碌同样可中断，
-        // 消息应出现在"正在干活"的那个会话里
-        const sessionId = state.sessionId
-        if (sessionId) {
-          const agentRow = agentsRepo.getAgentById(agentId)
-          const name = agentRow?.name || agentId
-          io.to(`session:${sessionId}`).emit(Events.NEW_MESSAGE, {
-            id: uuid(),
-            sessionId,
-            agentId,
-            role: 'system',
-            content: `🐱 ${name} 已停止（用户中断）`,
-            mentions: [],
-            createdAt: new Date().toISOString(),
-          })
-        }
+        log.info('agent interrupted by user', {
+          agentId,
+          sessionId: targetSessionId,
+          cleared,
+        })
+        // 系统消息进目标会话房间（带 sessionId 精确；无 → 实际在跑的会话）
+        const agentRow = agentsRepo.getAgentById(agentId)
+        const name = agentRow?.name || agentId
+        io.to(`session:${targetSessionId}`).emit(Events.NEW_MESSAGE, {
+          id: uuid(),
+          sessionId: targetSessionId,
+          agentId,
+          role: 'system',
+          content: `🐱 ${name} 已停止（用户中断）`,
+          mentions: [],
+          createdAt: new Date().toISOString(),
+        })
       }
     })
 

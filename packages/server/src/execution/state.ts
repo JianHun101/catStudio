@@ -36,6 +36,11 @@ export interface StreamState {
  * 逐 chunk 更新 → endRun（finalizeRun 统一出口）。deleteActiveStream 只清
  * stream 字段不动 abort——流退出（撤回/超时提前返回）后执行体仍持有
  * abort 注册表项，AGENT_INTERRUPT 在收口前仍可寻址。
+ *
+ * OQ3 session 化：注册表键升 agentId→sessionId 嵌套 Map（同 agent 跨会话并行
+ * 各自 run）。生产路径（serial/reply）恒带 sessionId 精确寻址；无 sessionId
+ * （旧客户端/信息型查询）兜底遍历。deleteActiveStream/endRun 的 sessionId 为
+ * 可选参——兼容遗留调用（无 sessionId 时清该 agent 全部会话，语义保守）。
  */
 interface RunEntry {
   abort?: AbortController
@@ -44,17 +49,20 @@ interface RunEntry {
 
 /** 引擎实例态——方法形态 accessor（Maps 私有，实例间零共享） */
 export interface EngineState {
-  // ─── Run 注册表 ─────────────────────────────────
-  registerAbort(agentId: string, controller: AbortController): void
-  setActiveStream(agentId: string, stream: StreamState): void
+  // ─── Run 注册表（OQ3：键 agentId→sessionId） ─────────
+  registerAbort(agentId: string, sessionId: string, controller: AbortController): void
+  setActiveStream(agentId: string, sessionId: string, stream: StreamState): void
+  /** 信息型查询（internal.ts 信号校验）：返回该 agent 任一会话的活跃流（latest 兜底） */
   getActiveStream(agentId: string): StreamState | undefined
   listActiveStreams(): Array<[string, StreamState]>
-  /** 注销流状态（runAgentReply 撤回/超时出口）——只清 stream 字段，abort 保留 */
-  deleteActiveStream(agentId: string): void
-  /** 注销整个 run 条目（finalizeRun 统一出口，幂等） */
-  endRun(agentId: string): void
-  /** AGENT_INTERRUPT handler 用：abort 该 agent 当前执行体；有执行中返回 true */
-  abortAgent(agentId: string): boolean
+  /** 注销流状态（runAgentReply 撤回/超时出口）——只清 stream 字段，abort 保留。
+   *  带 sessionId 精确删；无 → 清该 agent 全部会话 stream（保守兜底） */
+  deleteActiveStream(agentId: string, sessionId?: string): void
+  /** 注销整个 run 条目（finalizeRun 统一出口，幂等）。带 sessionId 精确删；无 → 全部 */
+  endRun(agentId: string, sessionId?: string): void
+  /** AGENT_INTERRUPT handler 用：abort 目标会话执行体；有执行中返回 true。
+   *  带 sessionId 精确 abort；无（旧客户端）→ abort 该 agent 全部会话 run */
+  abortAgent(agentId: string, sessionId?: string): boolean
 
   // ─── 撤回标记 ───────────────────────────────────
   hasRetraction(messageId: string): boolean
@@ -89,54 +97,101 @@ const M1_WARN_INTERVAL_MS = 5 * 60 * 1000
 
 export function createEngineState(): EngineState {
   // ─── 实例字段 ──────────────────────────────────
-  const runs = new Map<string, RunEntry>()
+  // OQ3：runs 嵌套 Map（agentId → sessionId → RunEntry）——同 agent 跨会话
+  // 并行各占独立条目，中断/收口可精确到会话
+  const runs = new Map<string, Map<string, RunEntry>>()
   const retractions = new Map<string, boolean>()
   const m1WarnedAt = new Map<string, number>()
   const mentionCounts = new Map<string, number>()
   let lockRefCount = 0
 
-  return {
-    // ─── Run 注册表 ───────────────────────────────
+  /** 取（懒建）agent 的会话级 run 注册子表 */
+  function sessionRuns(agentId: string): Map<string, RunEntry> {
+    let bySession = runs.get(agentId)
+    if (!bySession) {
+      bySession = new Map()
+      runs.set(agentId, bySession)
+    }
+    return bySession
+  }
 
-    registerAbort(agentId, controller) {
-      const entry = runs.get(agentId) ?? {}
+  return {
+    // ─── Run 注册表（OQ3：键 agentId→sessionId） ──
+
+    registerAbort(agentId, sessionId, controller) {
+      const bySession = sessionRuns(agentId)
+      const entry = bySession.get(sessionId) ?? {}
       entry.abort = controller
-      runs.set(agentId, entry)
+      bySession.set(sessionId, entry)
     },
 
-    setActiveStream(agentId, stream) {
-      const entry = runs.get(agentId) ?? {}
+    setActiveStream(agentId, sessionId, stream) {
+      const bySession = sessionRuns(agentId)
+      const entry = bySession.get(sessionId) ?? {}
       entry.stream = stream
-      runs.set(agentId, entry)
+      bySession.set(sessionId, entry)
     },
 
     getActiveStream(agentId) {
-      return runs.get(agentId)?.stream
+      const bySession = runs.get(agentId)
+      if (!bySession) return undefined
+      for (const entry of bySession.values()) {
+        if (entry.stream) return entry.stream
+      }
+      return undefined
     },
 
     listActiveStreams() {
       const out: Array<[string, StreamState]> = []
-      for (const [agentId, entry] of runs) {
-        if (entry.stream) out.push([agentId, entry.stream])
+      for (const [agentId, bySession] of runs) {
+        for (const entry of bySession.values()) {
+          if (entry.stream) out.push([agentId, entry.stream])
+        }
       }
       return out
     },
 
-    deleteActiveStream(agentId) {
-      const entry = runs.get(agentId)
-      if (!entry) return
-      entry.stream = undefined
+    deleteActiveStream(agentId, sessionId?) {
+      const bySession = runs.get(agentId)
+      if (!bySession) return
+      if (sessionId) {
+        const entry = bySession.get(sessionId)
+        if (entry) entry.stream = undefined
+        return
+      }
+      // 无 sessionId（遗留调用）：清该 agent 全部会话 stream，保守兜底
+      for (const entry of bySession.values()) entry.stream = undefined
     },
 
-    endRun(agentId) {
+    endRun(agentId, sessionId?) {
+      const bySession = runs.get(agentId)
+      if (!bySession) return
+      if (sessionId) {
+        bySession.delete(sessionId)
+        if (bySession.size === 0) runs.delete(agentId)
+        return
+      }
       runs.delete(agentId)
     },
 
-    abortAgent(agentId) {
-      const entry = runs.get(agentId)
-      if (!entry?.abort) return false
-      entry.abort.abort()
-      return true
+    abortAgent(agentId, sessionId?) {
+      const bySession = runs.get(agentId)
+      if (!bySession) return false
+      if (sessionId) {
+        const entry = bySession.get(sessionId)
+        if (!entry?.abort) return false
+        entry.abort.abort()
+        return true
+      }
+      // 无 sessionId（旧客户端/信息型）：abort 该 agent 全部会话 run
+      let aborted = false
+      for (const entry of bySession.values()) {
+        if (entry.abort) {
+          entry.abort.abort()
+          aborted = true
+        }
+      }
+      return aborted
     },
 
     // ─── 撤回标记 ─────────────────────────────────

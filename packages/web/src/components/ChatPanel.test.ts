@@ -212,7 +212,8 @@ describe('ChatPanel 停止按钮重定位（B2——正在思考的气泡 / busy
     expect(source).toMatch(
       /v-if="canStopAgent\(agentId\)"[\s\S]{0,120}class="btn-stop-agent"[\s\S]{0,140}@click\.stop="stopAgent\(agentId\)"/
     )
-    expect(source).toContain('store.interruptAgent(agentId)')
+    // OQ3 双端 session 化：stopAgent 传当前会话 sessionId（精确中断目标会话）
+    expect(source).toContain('store.interruptAgent(agentId, store.activeSessionId ?? undefined)')
   })
 
   it('用户消息状态行（per-agent）承载：无流式内容（!typingStates.has）且可停止时挂按钮', () => {

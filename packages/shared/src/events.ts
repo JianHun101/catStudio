@@ -57,8 +57,10 @@ export const Events = {
   PUSH_CANCEL: 'push-cancel', // 用户→服务器：取消 push（清理审批态）
   PUSH_STATUS: 'push-status', // 服务器→客户端：push 审批状态变化（pushing/done/failed/cancelled/none）
 
-  // Agent 手动中断（停止按钮：中断当前思考 + 清空排队任务）
-  AGENT_INTERRUPT: 'agent-interrupt', // 用户→服务器：中断指定 Agent
+  // Agent 手动中断（停止按钮：中断当前思考 + 清空排队任务）。
+  // payload: { agentId: string, sessionId?: string }——sessionId 可选（OQ3 双端
+  // session 化：带则精确中断该会话，无则旧客户端 fallback 中断该 agent 全部）
+  AGENT_INTERRUPT: 'agent-interrupt', // 用户→服务器：中断指定 Agent（可精确到会话）
 } as const
 
 // ─── Redis Channel Patterns ─────────────────────────

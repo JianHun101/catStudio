@@ -378,10 +378,12 @@ export const useChatStore = defineStore('chat', () => {
     pushStates.value.set(messageId, 'cancelled')
   }
 
-  /** 停止 Agent：中断当前思考 + 清空排队任务（无需等回复，可重新发消息恢复） */
-  function interruptAgent(agentId: string): void {
+  /** 停止 Agent：中断当前思考 + 清空排队任务（无需等回复，可重新发消息恢复）。
+   *  OQ3 双端 session 化：带 sessionId 精确中断该会话（并发双会话只停目标）；
+   *  缺省旧客户端兼容（服务端 fallback 中断该 agent 全部） */
+  function interruptAgent(agentId: string, sessionId?: string): void {
     const { socket } = useSocket()
-    socket.emit(Events.AGENT_INTERRUPT, { agentId })
+    socket.emit(Events.AGENT_INTERRUPT, { agentId, sessionId })
   }
 
   /** 清空会话消息（保留会话配置） */

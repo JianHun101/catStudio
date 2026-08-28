@@ -133,7 +133,6 @@ export interface EngineCtx {
   /** 槽位队列长度/状态变更 → 前端 agent-status 广播（socket 桥接 + Redis） */
   updateQueueState(slot: Slot): void
   publishAgentStatus(slot: Slot, status: string): Promise<void>
-  publishAgentStatusById(agentId: string, status: string): Promise<void>
   /** 标 busy + 写执行日志（原 dispatch.executeAgentCommand） */
   executeAgentCommand(agent: AgentConfig, cmd: DispatchCommand, traceId: string): Promise<void>
   /** 收口：finalize 执行日志 + 弹队列 + 槽位复位（原 dispatch.completeExecution） */
@@ -210,7 +209,8 @@ async function finalizeRun(
   sessionId: string,
   opts: { success: boolean; errorMessage?: string; replyMessageId?: string; traceId: string }
 ): Promise<DispatchCommand | undefined> {
-  ctx.state.endRun(agentId)
+  // OQ3：runs 注册表 session 化——精确删本会话 run（跨会话并行的兄弟 run 不受影响）
+  ctx.state.endRun(agentId, sessionId)
   return ctx.completeExecution(agentId, sessionId, opts.success, {
     ...(opts.errorMessage ? { errorMessage: opts.errorMessage } : {}),
     ...(opts.replyMessageId ? { replyMessageId: opts.replyMessageId } : {}),
@@ -373,7 +373,8 @@ async function executeOneAgent(
       msgId: '',
     }
     const abortController = new AbortController()
-    state.registerAbort(agent.id, abortController)
+    // OQ3：registerAbort 带 sessionId——同 agent 跨会话并行各占独立 run 条目
+    state.registerAbort(agent.id, sessionId, abortController)
     try {
       // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
       // AbortController 确保超时后子进程被 kill（P0-1 修复）
@@ -845,8 +846,9 @@ export interface ExecutionEngine {
   ): Promise<boolean>
   /** MESSAGE_RETRACT handler：遍历所有槽位 FIFO 队列移除匹配 triggerMessageId 的命令 */
   cancelQueuedCommand(triggerMessageId: string): number
-  /** AGENT_INTERRUPT handler：清空该 agent 全部会话槽位的 FIFO 队列（逐条标 done） */
-  clearAgentQueue(agentId: string): number
+  /** AGENT_INTERRUPT handler：清空该 agent 槽位的 FIFO 队列（逐条标 done）。
+   *  带 sessionId → 只清该会话；无 → 清全部会话（旧客户端语义） */
+  clearAgentQueue(agentId: string, sessionId?: string): number
   /** 撤回时用：是否有 agent 正在执行（而非排队）给定 trigger 消息 */
   isAnyAgentExecutingMessage(triggerMessageId: string): boolean
   /** 只读槽位访问（agentId+sessionId 键控；替代 getAgentState） */
@@ -859,8 +861,9 @@ export interface ExecutionEngine {
   setAgentStateBridge(fn: (state: AgentRuntimeState) => void): void
   /** 系统消息桥接注册（队列满拒绝入队时通知用户） */
   setSystemMessageBridge(fn: (sessionId: string, agentId: string, content: string) => void): void
-  /** AGENT_INTERRUPT handler：abort 该 agent 当前执行。返回是否真的在跑 */
-  abortAgent(agentId: string): boolean
+  /** AGENT_INTERRUPT handler：abort 目标会话的执行。返回是否真的在跑。
+   *  带 sessionId 精确 abort；无（旧客户端）→ abort 该 agent 全部会话 run */
+  abortAgent(agentId: string, sessionId?: string): boolean
   /** MESSAGE_RETRACT handler：标记撤回（runAgentReply Window ②/③ 检查） */
   setRetraction(messageId: string): void
   /** 撤回标记清理（handler 失败/无执行者清理；runAgentReply 出口内部走 state） */
@@ -1130,16 +1133,6 @@ export function createExecutionEngine(
     slotToRuntimeState,
     updateQueueState,
     publishAgentStatus,
-    publishAgentStatusById: async (agentId: string, status: string) => {
-      for (const bySession of slots.values()) {
-        for (const s of bySession.values()) {
-          if (s.agentId === agentId) {
-            await publishAgentStatus(s, status)
-            return
-          }
-        }
-      }
-    },
     executeAgentCommand,
     completeExecution,
     systemBridge,
@@ -1304,18 +1297,22 @@ export function createExecutionEngine(
       }
       return removed
     },
-    clearAgentQueue: (agentId: string): number => {
+    clearAgentQueue: (agentId: string, sessionId?: string): number => {
       const bySession = slots.get(agentId)
       if (!bySession) return 0
       let cleared = 0
-      for (const slot of bySession.values()) {
-        if (slot.queue.length === 0) continue
+      // OQ3：带 sessionId 只清该会话槽位；无 → 遍历全部会话（旧语义）
+      const targetSessions = sessionId ? [sessionId] : [...bySession.keys()]
+      for (const sid of targetSessions) {
+        const slot = bySession.get(sid)
+        if (!slot || slot.queue.length === 0) continue
         for (const cmd of slot.queue) {
           try {
             messagesRepo.setDispatchState(cmd.triggerMessageId, 'done')
           } catch (err: any) {
             log.error('setDispatchState failed during queue clear (non-blocking)', {
               agentId,
+              sessionId: sid,
               triggerMessageId: cmd.triggerMessageId,
               error: err.message,
             })
@@ -1326,7 +1323,7 @@ export function createExecutionEngine(
         updateQueueState(slot)
       }
       if (cleared > 0) {
-        log.info('agent queue cleared by user interrupt', { agentId, cleared })
+        log.info('agent queue cleared by user interrupt', { agentId, sessionId, cleared })
       }
       return cleared
     },
@@ -1363,7 +1360,7 @@ export function createExecutionEngine(
     setSystemMessageBridge: (fn) => {
       systemBridge = fn
     },
-    abortAgent: (agentId) => state.abortAgent(agentId),
+    abortAgent: (agentId, sessionId) => state.abortAgent(agentId, sessionId),
     setRetraction: (messageId) => state.setRetraction(messageId),
     clearRetraction: (messageId) => state.clearRetraction(messageId),
     listActiveStreams: () => state.listActiveStreams(),

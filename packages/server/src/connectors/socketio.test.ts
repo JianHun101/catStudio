@@ -2568,7 +2568,7 @@ describe('socketio connector', () => {
       expect(existsSync(lockFile)).toBe(false)
     })
 
-    it('并发度上限：同消息 @4 猫 → 同时执行 ≤3（第 4 个等批间串行）', async () => {
+    it('并发度上限：同消息 @4 猫 → 同时执行 ≤2（第 3/4 个等 token，批间串行）', async () => {
       const mod = await import('./socketio.js')
       const { getAgentState, completeExecution } = await import('../dispatch/index.js')
       const { getAdapterForAgent } = await import('../llm/registry.js')
@@ -4379,6 +4379,112 @@ describe('socketio connector', () => {
         Events.NEW_MESSAGE,
         expect.objectContaining({ content: expect.stringContaining('已停止') })
       )
+    })
+
+    it('OQ3 多会话并行：带 sessionId 中断会话 A → A 停 + A 房间收提示，B 完全不受影响', async () => {
+      const db = getDb()
+      // session-2 + 触发消息（beforeEach 已 seed session-1 + msg-trigger）
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, broadcast_mode) VALUES (?, ?, ?, ?)`
+      ).run('session-2', '测试会话2', JSON.stringify(['agent-1']), 0)
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions) VALUES (?, ?, 'user', ?, '[]')`
+      ).run('msg-trigger-b', 'session-2', '@店长 请处理B')
+
+      // 共享 gate：A/B 出首块后都挂起；中断 A 后再释放 → A 检测 abort 提前返回，
+      // B 正常走完落库——"只停目标会话"的行为验证
+      const { getAdapterForAgent } = await import('../llm/registry.js')
+      let releaseGate = () => {}
+      const gate = new Promise<void>((r) => {
+        releaseGate = r
+      })
+      const chatStream = vi.fn(async function* () {
+        yield { content: '思考中', kind: 'text' }
+        await gate
+        yield { content: '完成内容', kind: 'text' }
+      })
+      vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+      const engine = getExecutionEngine()!
+      const execA = engine.executeAgentsSerial(
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        'trace-a'
+      )
+      const execB = engine.executeAgentsSerial(
+        'session-2',
+        [execAgentCfg as any],
+        { id: 'msg-trigger-b', content: '@店长 请处理B', mentions: ['店长'] },
+        'trace-b'
+      )
+
+      // A、B 都出首个 chunk（都在 gate 上挂起 → 双会话并行成立）
+      await vi.waitFor(() => {
+        expect(mockRoomEmit).toHaveBeenCalledWith(
+          Events.AGENT_TYPING,
+          expect.objectContaining({ content: '思考中', sessionId: 'session-1' })
+        )
+      })
+      await vi.waitFor(() => {
+        expect(mockRoomEmit).toHaveBeenCalledWith(
+          Events.AGENT_TYPING,
+          expect.objectContaining({ content: '思考中', sessionId: 'session-2' })
+        )
+      })
+
+      // 中断 A（带 sessionId）→ 精确清 A 队列 + abort A 的 run
+      const handlers = socketHandlers.get(Events.AGENT_INTERRUPT)
+      handlers![0]({ agentId: 'agent-1', sessionId: 'session-1' })
+
+      // A 房间收「已停止」，B 房间不收（精确广播）
+      await vi.waitFor(() => {
+        expect(mockRoomEmit).toHaveBeenCalledWith(
+          Events.NEW_MESSAGE,
+          expect.objectContaining({ content: '🐱 店长 已停止（用户中断）', sessionId: 'session-1' })
+        )
+      })
+      const stopInB = mockRoomEmit.mock.calls.filter(
+        (c: any[]) =>
+          c[0] === Events.NEW_MESSAGE &&
+          c[1]?.sessionId === 'session-2' &&
+          String(c[1]?.content ?? '').includes('已停止')
+      )
+      expect(stopInB).toHaveLength(0)
+
+      // 中断 A 后、释放 gate 前：B 的执行日志仍是 running（A 的收口没碰 B）
+      const logBBefore = db
+        .prepare(`SELECT * FROM execution_logs WHERE triggered_by_message_id = 'msg-trigger-b'`)
+        .get() as any
+      expect(logBBefore).toBeDefined()
+      expect(logBBefore.status).toBe('running')
+
+      // 释放 gate → A 检测 abort 提前返回（不落库）、B 正常完成（落库回复）
+      releaseGate()
+      await Promise.all([execA, execB])
+
+      // A：失败收口 interrupted、无回复落库
+      const logA = db
+        .prepare(`SELECT * FROM execution_logs WHERE triggered_by_message_id = 'msg-trigger'`)
+        .get() as any
+      expect(logA).toBeDefined()
+      expect(logA.status).toBe('failed')
+      expect(logA.error_message).toBe('interrupted')
+      const agentMsgsA = db
+        .prepare("SELECT COUNT(*) AS c FROM messages WHERE role = 'agent' AND session_id = 'session-1'")
+        .get() as { c: number }
+      expect(agentMsgsA.c).toBe(0)
+
+      // B：正常完成 + 回复落库（完全不受影响）
+      const logB = db
+        .prepare(`SELECT * FROM execution_logs WHERE triggered_by_message_id = 'msg-trigger-b'`)
+        .get() as any
+      expect(logB).toBeDefined()
+      expect(logB.status).toBe('completed')
+      const agentMsgsB = db
+        .prepare("SELECT COUNT(*) AS c FROM messages WHERE role = 'agent' AND session_id = 'session-2'")
+        .get() as { c: number }
+      expect(agentMsgsB.c).toBe(1)
     })
   })
 

@@ -569,7 +569,12 @@ export async function runAgentReply(
     messageId: msgId,
     content: '',
   })
-  state.setActiveStream(agent.id, { sessionId, messageId: msgId, content: '', token: signalToken })
+  state.setActiveStream(agent.id, sessionId, {
+    sessionId,
+    messageId: msgId,
+    content: '',
+    token: signalToken,
+  })
 
   // 状态：回复中（带 startedAt——前端据此显示「回复中 · 已 N 秒」递增，替代静止标签）
   const startedAt = Date.now()
@@ -590,7 +595,7 @@ export async function runAgentReply(
       traceId,
       agentId: agent.id,
     })
-    state.deleteActiveStream(agent.id)
+    state.deleteActiveStream(agent.id, sessionId)
     return { content: '[消息已撤回]', msgId }
   }
 
@@ -652,13 +657,13 @@ export async function runAgentReply(
           traceId,
           agentId: agent.id,
         })
-        state.deleteActiveStream(agent.id)
+        state.deleteActiveStream(agent.id, sessionId)
         state.clearRetraction(triggerMsg.id)
         return { content: fullContent || '[消息已撤回]', msgId }
       }
       if (signal?.aborted) {
         log.info('agent reply aborted (timeout)', { traceId, agentId: agent.id })
-        state.deleteActiveStream(agent.id)
+        state.deleteActiveStream(agent.id, sessionId)
         return { content: fullContent, msgId }
       }
       if (chunk.content) {
@@ -675,7 +680,7 @@ export async function runAgentReply(
           messageId: msgId,
           content: displayContent,
         })
-        state.setActiveStream(agent.id, {
+        state.setActiveStream(agent.id, sessionId, {
           sessionId,
           messageId: msgId,
           content: displayContent,
@@ -693,7 +698,7 @@ export async function runAgentReply(
       traceId,
       agentId: agent.id,
     })
-    state.deleteActiveStream(agent.id)
+    state.deleteActiveStream(agent.id, sessionId)
     return { content: fullContent, msgId }
   }
 
@@ -904,7 +909,7 @@ export async function runAgentReply(
 
   // P2: 清理 retractionRequests + activeStreams，防止内存泄漏
   state.clearRetraction(triggerMsg.id)
-  state.deleteActiveStream(agent.id)
+  state.deleteActiveStream(agent.id, sessionId)
 
   return { content: fullContent, msgId }
 }

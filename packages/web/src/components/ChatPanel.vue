@@ -613,7 +613,8 @@ function canStopAgent(agentId: string): boolean {
 }
 
 function stopAgent(agentId: string): void {
-  store.interruptAgent(agentId)
+  // OQ3：组件按会话渲染，传当前会话 sessionId——只停目标会话（并发双会话互不影响）
+  store.interruptAgent(agentId, store.activeSessionId ?? undefined)
 }
 
 /** 窗口用量色阶：>= 交接线红、>= 告警线黄、否则弱化（阈值来自 /api/config/context，失败回退 0.8/0.9） */

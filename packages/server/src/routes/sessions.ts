@@ -15,6 +15,7 @@ import {
 } from '../db/repository/index.js'
 import type { SessionRow } from '../db/repository/index.js'
 import { getIO } from '../connectors/socketio.js'
+import { getExecutionEngine } from '../execution/registry.js'
 import { createLogger } from '../logger.js'
 import { parseJsonArray } from '../utils.js'
 
@@ -234,6 +235,10 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     execLogsRepo.deleteExecutionLogsBySession(id)
     messagesRepo.deleteMessagesBySession(id)
     sessionsRepo.deleteSession(id)
+
+    // C1 dispose：同步清理引擎内该会话全部槽位——否则 (agentId, sessionId)
+    // 槽位只增不减，连续开/关会话 snapshot 膨胀（OQ1 审查缺口）
+    getExecutionEngine()?.disposeSession(id)
 
     // 通知所有已连接的客户端（支持多 tab 同步）
     const io = getIO()
