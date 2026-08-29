@@ -260,6 +260,26 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     expect(anyClaude).toBe(false)
   })
 
+  it('忙→闲收敛：idle 槽位保留 sessionId——socket 桥接收到 idle 也能路由到目标会话房间', async () => {
+    makeAdapter()
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    const bridgeStates: Array<{ status: string; sessionId: string | null }> = []
+    engine.setAgentStateBridge((s) => bridgeStates.push(s))
+
+    await runPaired(engine, 'msg-idle-conv', 'trace-idle-conv')
+
+    // 回归核心：桥接必须收到 idle 且带 sessionId——socketio.ts 的 `if (state.sessionId)`
+    // 门控才放行、路由到 session:<id> 房间；否则忙灯永不收回（删全量推送兜底后 idle
+    // 是唯一收敛通道，此断言防止再次漏网）
+    expect(bridgeStates.some((s) => s.status === 'idle' && s.sessionId === 'session-1')).toBe(true)
+    // snapshot/拉取同形状：idle 槽位保留 sessionId（all-agent-states 兜底也不丢会话维度）
+    expect(engine.getSlot('agent-1', 'session-1')).toMatchObject({
+      status: 'idle',
+      sessionId: 'session-1',
+    })
+  })
+
   it('LLM 抛错 → 失败漏斗：系统提示 + execution_logs failed + 槽位释放（finalizeRun 统一收口）', async () => {
     vi.mocked(getAdapterForAgent).mockReturnValue({
       chatStream: vi.fn(async function* () {

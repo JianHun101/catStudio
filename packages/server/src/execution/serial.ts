@@ -942,11 +942,13 @@ export function createExecutionEngine(
     return slots.get(agentId)?.get(sessionId)
   }
 
-  /** 广播形状：idle 槽位的 sessionId 置 null（前端语义——"在哪忙"而非"键在哪"） */
+  /** 广播形状：恒带 slot.sessionId（busy 与 idle 都路由到目标会话房间——idle 转换
+   *  必须能到达 web 才能把忙灯收回；前端按 (agent, session) 桶收敛，不搞"在哪忙"
+   *  语义丢 sessionId） */
   function slotToRuntimeState(slot: Slot): AgentRuntimeState {
     return {
       agentId: slot.agentId,
-      sessionId: slot.status === 'busy' ? slot.sessionId : null,
+      sessionId: slot.sessionId,
       status: slot.status,
       queueLength: slot.queue.length,
       currentTriggerMessageId: slot.currentTriggerMessageId,
@@ -974,7 +976,7 @@ export function createExecutionEngine(
         JSON.stringify({
           agentId: slot.agentId,
           status: slot.status,
-          sessionId: slot.status === 'busy' ? slot.sessionId : null,
+          sessionId: slot.sessionId,
           queueLength: slot.queue.length,
         })
       )
@@ -993,7 +995,7 @@ export function createExecutionEngine(
         JSON.stringify({
           agentId: slot.agentId,
           status,
-          sessionId: slot.status === 'busy' ? slot.sessionId : null,
+          sessionId: slot.sessionId,
         })
       )
     } catch {

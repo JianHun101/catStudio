@@ -663,6 +663,25 @@ describe('chatStore', () => {
       expect(store.currentStateFor('x')?.status).toBeUndefined()
     })
 
+    it('回归：同会话 busy→idle 收敛——AGENT_STATUS idle（带 sessionId）清掉忙灯', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.AGENT_STATUS)?.[1] as
+        ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      // X 在 A 会话 busy（忙灯亮）
+      store.activeSessionId = 's1'
+      handler!({ agentId: 'x', status: 'busy', sessionId: 's1', queueLength: 0 })
+      expect(store.currentStateFor('x')?.status).toBe('busy')
+
+      // X 完成 → AGENT_STATUS idle（idle 保留 sessionId 形状，服务端不再丢这条收敛）→ 忙灯收回
+      handler!({ agentId: 'x', status: 'idle', sessionId: 's1', queueLength: 0 })
+      expect(store.currentStateFor('x')?.status).toBe('idle')
+
+      // 收敛不破坏跨会话隔离：B 会话视图 X 仍无状态（不泄露 A 的忙/闲）
+      store.activeSessionId = 's2'
+      expect(store.currentStateFor('x')?.status).toBeUndefined()
+    })
+
     it('MESSAGE_AGENT_STATUS replying 心跳 stamp lastBeatAt；done 整对象替换抹 startedAt/lastBeatAt（终态不显示时长）', () => {
       const handler = mockOn.mock.calls.find(
         (call) => call[0] === Events.MESSAGE_AGENT_STATUS
