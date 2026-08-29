@@ -43,11 +43,14 @@ export function getAdapterForAgent(agent: AgentConfig): LLMAdapter {
   // 纳入缓存键维度，防同 model 不同 key 串台；model 与 envExtra 也均纳入：不同 model 的
   // 猫共享实例会串台（吐槽猫审查发现），同 model 不同代理 env 的猫共享实例同样串台
   // （48a0415 同族教训——envExtra 原串比较，天然区分）
+  // claude/deepseek 分支同样纳入 llmModel（同族串台实证：店长配 pro、claude 适配器实跑
+  // flash——四猫同 key 同 effort 同 baseUrl 缓存键相同共享实例，先跑者定模型；claude 适配器
+  // 不消费当轮 options.model 时串台成灾；deepseek 已消费 options.model 但键仍纳维度防御）
   const cacheKey =
     agent.llmProvider === 'claude'
-      ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.effortLevel || ''}:${agent.llmBaseUrl || ''}`
+      ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmModel || ''}:${agent.effortLevel || ''}:${agent.llmBaseUrl || ''}`
       : agent.llmProvider === 'deepseek'
-        ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmBaseUrl || ''}`
+        ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmModel || ''}:${agent.llmBaseUrl || ''}`
         : agent.llmProvider === 'opencode'
           ? `${agent.llmProvider}:${agent.llmApiKey}:${agent.llmModel || ''}:${agent.llmEnvExtra || ''}`
           : agent.llmProvider === 'dsh'

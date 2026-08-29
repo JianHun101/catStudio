@@ -13,13 +13,18 @@ vi.mock('./cli-utils.js', () => ({
   getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
 }))
 
-// Mock logger
-vi.mock('../logger.js', () => ({
-  createLogger: vi.fn(() => ({
+// Mock logger（共享 logMock 实例——claude.ts 模块加载时 createLogger('claude')
+// 捕获同一对象，测试可断言启动日志/告警的参数）
+const { logMock } = vi.hoisted(() => ({
+  logMock: {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-  })),
+  },
+}))
+
+vi.mock('../logger.js', () => ({
+  createLogger: vi.fn(() => logMock),
 }))
 
 import { ClaudeAdapter } from './claude.js'
@@ -151,6 +156,47 @@ describe('ClaudeAdapter', () => {
     // Kimi 端点不支持 Tool Search
     expect(env.ENABLE_TOOL_SEARCH).toBe('false')
     expect(env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max')
+  })
+
+  it('buildEnv uses per-round options.model override (not constructor value)', () => {
+    // 同一缓存实例可服务不同 model 的猫（店长实证：构造 model flash、当轮 options.model
+    // pro——buildEnv 必须跟随当轮 model，否则 ANTHROPIC_MODEL 串台成 flash）
+    const adapter = new ClaudeAdapter({
+      apiKey: 'sk-test-key',
+      model: 'deepseek-v4-flash',
+      effortLevel: 'high',
+    })
+    const env = (adapter as any).buildEnv(undefined, 'deepseek-v4-pro') as Record<string, string>
+
+    expect(env.ANTHROPIC_MODEL).toBe('deepseek-v4-pro')
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('deepseek-v4-pro')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('deepseek-v4-pro')
+    // DeepSeek 路径 HAIKU/SUBAGENT 兜底 flash 不变（既有契约，仅主模型跟随当轮）
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-v4-flash')
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('deepseek-v4-flash')
+  })
+
+  it('buildEnv without options.model falls back to constructor model (backward compatible)', () => {
+    const adapter = new ClaudeAdapter({
+      apiKey: 'sk-test-key',
+      model: 'claude-sonnet-4-6',
+    })
+    const env = (adapter as any).buildEnv() as Record<string, string>
+    expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+  })
+
+  it('buildEnv with custom baseUrl uses options.model in tier fallbacks (non-DeepSeek)', () => {
+    const adapter = new ClaudeAdapter({
+      apiKey: 'sk-kimi-key',
+      model: 'kimi-k3[1m]',
+      baseUrl: 'https://api.moonshot.ai/anthropic',
+    })
+    const env = (adapter as any).buildEnv(undefined, 'kimi-k3[2m]') as Record<string, string>
+
+    expect(env.ANTHROPIC_MODEL).toBe('kimi-k3[2m]')
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('kimi-k3[2m]')
+    expect(env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe('kimi-k3[2m]')
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('kimi-k3[2m]')
   })
 
   // ─── buildEnv context 透传（MCP 结构化路由五变量 + triggerMsgId，契约 4——店长裁决）───
@@ -317,6 +363,26 @@ describe('ClaudeAdapter', () => {
     expect(args).not.toContain('--mcp-config')
     expect(args).not.toContain('--allowedTools')
     expect(args).not.toContain('--disallowedTools')
+  })
+
+  it('chatStream startup log records per-round options.model (not constructor model)', async () => {
+    // 店长实证：构造 model flash、当轮 options.model pro——启动日志必须跟当轮
+    // model，否则排障时「DB 配 pro、日志记 flash」的串台特征被掩盖
+    const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'deepseek-v4-flash' })
+    const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: 0, killed: false }
+    vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
+    vi.mocked(parseClaudeCodeOutput).mockImplementation(async function* () {
+      yield { content: '', done: true }
+    })
+    logMock.info.mockClear()
+
+    await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-v4-pro' })
+    )
+
+    const call = logMock.info.mock.calls.find((c) => c[0] === '启动 Claude Code CLI')
+    expect(call).toBeDefined()
+    expect(call![1]).toMatchObject({ model: 'deepseek-v4-pro' })
   })
 
   // ─── 会话 worktree 隔离：options.cwd 透传到 spawnSupervised ───

@@ -153,7 +153,7 @@ export class ClaudeAdapter implements LLMAdapter {
     // spawn CLI 前先确保 llama-server 就绪（探测 /health → 后台拉起 → 轮询）。
     // DeepSeek/Kimi 默认路径 host 非 loopback → 守卫短路，行为逐字节不变。
     if (isLlamaLocalBaseUrl(this.baseUrl)) {
-      if (!(await ensureLlamaServerStarted(this.baseUrl, { alias: this.model }))) {
+      if (!(await ensureLlamaServerStarted(this.baseUrl, { alias: options.model || this.model }))) {
         yield {
           content:
             'llama-server 自动拉起失败：本地模型服务未就绪。请检查 .env 的 ' +
@@ -166,9 +166,11 @@ export class ClaudeAdapter implements LLMAdapter {
     }
 
     const prompt = messagesToPrompt(messages)
-    const env = this.buildEnv(options.context)
+    // options.model 优先（调用方每轮传当轮 agent 的 llmModel，reply.ts 契约），
+    // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（opencode.ts:301 同款惯例）
+    const env = this.buildEnv(options.context, options.model)
 
-    log.info('启动 Claude Code CLI', { model: this.model, promptLen: prompt.length })
+    log.info('启动 Claude Code CLI', { model: options.model || this.model, promptLen: prompt.length })
 
     // MCP 结构化路由（契约 4——店长裁决）：context 存在时挂 post_message 工具面。
     // .mcp.json 每 spawn 生成到 OS temp，流结束/异常路径 finally 删除；
@@ -213,7 +215,7 @@ export class ClaudeAdapter implements LLMAdapter {
     const GRACE_MS = 5000
     const onAbort = () => {
       if (!child.killed && child.exitCode === null) {
-        log.warn('收到取消信号，发送 SIGTERM', { model: this.model })
+        log.warn('收到取消信号，发送 SIGTERM', { model: options.model || this.model })
         child.kill('SIGTERM')
         setTimeout(() => {
           if (!child.killed && child.exitCode === null) {
@@ -298,8 +300,11 @@ export class ClaudeAdapter implements LLMAdapter {
     yield { content: '', done: true }
   }
 
-  private buildEnv(context?: ChatOptions['context']): Record<string, string> {
-    // baseUrl 留空默认 DeepSeek Anthropic 兼容端点；填其他端点（如 Kimi: https://api.moonshot.ai/anthropic）走对应服务
+  private buildEnv(context?: ChatOptions['context'], model?: string): Record<string, string> {
+    // 每轮 model 优先（chatStream 从 options.model 透传），构造 model 兜底——同一缓存
+    // 实例可服务不同 model 的猫（opencode.ts:301 同款惯例）。baseUrl 留空默认 DeepSeek
+    // Anthropic 兼容端点；填其他端点（如 Kimi: https://api.moonshot.ai/anthropic）走对应服务
+    const effectiveModel = model || this.model
     const baseUrl = this.baseUrl || 'https://api.deepseek.com/anthropic'
     const isDeepSeek = !this.baseUrl || /deepseek/i.test(this.baseUrl)
 
@@ -316,9 +321,9 @@ export class ClaudeAdapter implements LLMAdapter {
           ENABLE_TOOL_SEARCH: 'false',
         }
       : {
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: this.model,
-          ANTHROPIC_DEFAULT_FABLE_MODEL: this.model,
-          CLAUDE_CODE_SUBAGENT_MODEL: this.model,
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: effectiveModel,
+          ANTHROPIC_DEFAULT_FABLE_MODEL: effectiveModel,
+          CLAUDE_CODE_SUBAGENT_MODEL: effectiveModel,
           ENABLE_TOOL_SEARCH: 'false',
         }
 
@@ -327,9 +332,9 @@ export class ClaudeAdapter implements LLMAdapter {
       DEEPSEEK_API_KEY: this.apiKey,
       ANTHROPIC_BASE_URL: baseUrl,
       ANTHROPIC_AUTH_TOKEN: this.apiKey,
-      ANTHROPIC_MODEL: this.model,
-      ANTHROPIC_DEFAULT_OPUS_MODEL: this.model,
-      ANTHROPIC_DEFAULT_SONNET_MODEL: this.model,
+      ANTHROPIC_MODEL: effectiveModel,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: effectiveModel,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: effectiveModel,
       ...tierFallbacks,
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_EFFORT_LEVEL: this.effortLevel || process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high',

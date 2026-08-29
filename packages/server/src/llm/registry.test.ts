@@ -14,7 +14,9 @@ class MockDeepSeekAdapter {
 class MockClaudeAdapter {
   readonly provider = 'claude'
   chatStream = mockChatStream
-  constructor(public opts: { baseUrl?: string; effortLevel?: string }) {}
+  constructor(
+    public opts: { baseUrl?: string; effortLevel?: string; model?: string }
+  ) {}
 }
 
 class MockOpenAIAdapter {
@@ -164,6 +166,48 @@ describe('registry', () => {
       const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockClaudeAdapter
       expect(adapter.opts.baseUrl).toBe('https://api.moonshot.ai/anthropic')
       expect(adapter.opts.effortLevel).toBe('max')
+    })
+
+    it('returns different instance for different model (claude, same key+effort+baseUrl)', () => {
+      // model 参与缓存键——四猫同 key 同 effort 同 baseUrl 但不同 model 时若共享
+      // 实例，先跑者定模型（店长实证：配 pro 实跑 flash）。claude 分支此前漏
+      // llmModel 维度（registry.ts 缓存键），本用例钉死拆分
+      const pro: AgentConfig = {
+        ...baseAgent,
+        llmProvider: 'claude',
+        llmApiKey: 'sk-key-1',
+        effortLevel: 'high',
+        llmModel: 'deepseek-v4-pro',
+      }
+      const flash: AgentConfig = { ...pro, llmModel: 'deepseek-v4-flash' }
+      const a1 = registryModule.getAdapterForAgent(pro)
+      const a2 = registryModule.getAdapterForAgent(flash)
+      expect(a1).not.toBe(a2)
+      // 同 model 再取 → 同实例（键含 model 后稳定复用）
+      const a3 = registryModule.getAdapterForAgent({ ...flash })
+      expect(a3).toBe(a2)
+    })
+
+    it('passes model to ClaudeAdapter constructor', () => {
+      const agent: AgentConfig = {
+        ...baseAgent,
+        llmProvider: 'claude',
+        llmApiKey: 'sk-key-1',
+        llmModel: 'deepseek-v4-pro',
+        effortLevel: 'high',
+      }
+      const adapter = registryModule.getAdapterForAgent(agent) as unknown as MockClaudeAdapter
+      expect(adapter.opts.model).toBe('deepseek-v4-pro')
+    })
+
+    it('returns different instance for different model (deepseek, same key+baseUrl)', () => {
+      // deepseek 分支同族——缓存键此前只含 key+baseUrl，不同 model 共享实例；
+      // 适配器虽消费 options.model 当轮覆盖，但键纳 model 维度防御（对齐 opencode/dsh）
+      const pro: AgentConfig = { ...baseAgent, llmModel: 'deepseek-v4-pro' }
+      const chat: AgentConfig = { ...pro, llmModel: 'deepseek-chat' }
+      const a1 = registryModule.getAdapterForAgent(pro)
+      const a2 = registryModule.getAdapterForAgent(chat)
+      expect(a1).not.toBe(a2)
     })
 
     it('returns different instance for different model (opencode)', () => {
