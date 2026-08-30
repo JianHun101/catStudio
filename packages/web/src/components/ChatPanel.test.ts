@@ -124,10 +124,12 @@ describe('ChatPanel push 审批面板（刀3 V2 按钮）', () => {
     expect(source).toContain("msg.messageType !== 'push_request'")
   })
 
-  it('commit-item 附收起的正文 body（details 默认收起，body 为空不渲染）', () => {
-    expect(source).toContain('v-if="c.body"')
-    expect(source).toContain('commit-body')
-    expect(source).toContain('提交说明')
+  it('commit-item 整条可展开（details 默认收起，点开读完整 subject + body）', () => {
+    expect(source).toContain('class="commit-details"')
+    expect(source).toContain('commit-full')
+    expect(source).not.toContain('v-if="c.body"')
+    expect(source).not.toContain('commit-body')
+    expect(source).not.toContain('提交说明')
   })
 
   it('pushing 态显示「推送中…」、done 态显示「已推送」', () => {

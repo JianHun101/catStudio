@@ -871,14 +871,14 @@ const warnedAgentsText = computed(() => {
                     <div class="push-body">
                       <div v-if="msg.extra?.push?.commits?.length" class="commit-list">
                         <div v-for="c in msg.extra.push.commits" :key="c.sha" class="commit-item">
-                          <div class="commit-line">
-                            <span class="commit-hash">{{ c.sha.slice(0, 7) }}</span>
-                            <span class="commit-subject">{{ c.subject }}</span>
-                          </div>
-                          <!-- commit 正文（「为什么」）默认收起，点开看完整；body 为空不渲染 -->
-                          <details v-if="c.body" class="commit-body">
-                            <summary class="commit-body-summary">提交说明</summary>
-                            <pre class="commit-body-text">{{ c.body }}</pre>
+                          <!-- 整条 commit 可展开：summary 收起是一行 hash + 截断 subject，点开读完整 subject + body（body 可能为空） -->
+                          <details class="commit-details">
+                            <summary class="commit-line">
+                              <span class="commit-hash">{{ c.sha.slice(0, 7) }}</span>
+                              <span class="commit-subject">{{ c.subject }}</span>
+                            </summary>
+                            <pre class="commit-full"
+                              >{{ c.subject }}{{ c.body ? '\n\n' + c.body : '' }}</pre>
                           </details>
                         </div>
                       </div>
@@ -1510,8 +1510,23 @@ const warnedAgentsText = computed(() => {
   border-radius: var(--radius-sm);
 }
 
-/* hash + subject 单行截断（overflow 在此层——commit-item 变 column 后
-   overflow 移到行容器，避免裁掉下方 body 展开块） */
+/* 整条 commit 可展开：summary 收起一行 hash + 截断 subject，展开后下方 .commit-full 读全文 */
+.commit-details {
+  display: block;
+}
+
+/* 隐藏 details 默认展开三角，收起外观与旧单行列表一致 */
+.commit-details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.commit-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* hash + subject 单行截断（overflow 在此层——summary 内固定一行，
+   完整内容在下方的 .commit-full，不再需要裁掉任何下方块） */
 .commit-line {
   display: flex;
   gap: 8px;
@@ -1527,24 +1542,14 @@ const warnedAgentsText = computed(() => {
 }
 
 .commit-subject {
+  min-width: 0; /* flex 子项默认 min-width:auto 不收缩，缺它 ellipsis 失效变硬裁 */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* commit 正文（「为什么」）——details 默认收起，点开看完整 */
-.commit-body {
-  margin-top: 2px;
-}
-
-.commit-body-summary {
-  cursor: pointer;
-  font-size: 10px;
-  color: var(--accent);
-  user-select: none;
-}
-
-.commit-body-text {
+/* 完整 subject + body（点开详情）——pre-wrap 让 1700+ 字符长 subject 可换行阅读 */
+.commit-full {
   margin: 4px 0 0;
   white-space: pre-wrap;
   word-break: break-word;
