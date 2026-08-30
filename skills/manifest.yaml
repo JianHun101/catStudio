@@ -10,6 +10,52 @@
 
 skills:
   # ── 自研（猫咖定制，参与审查流程链）──
+  on-site-project:
+    source: self
+    use_when: |
+      被派到外部/第三方项目做改动（非本仓库）、接手陌生技术栈、需跨长会话持续可信排障、改动会覆盖用户真实数据。
+    not_for: |
+      本仓库内的常规开发（用 implement）、纯讨论、已知原因的简单修复。
+    category: '驻场方法论'
+    description: |
+      驻场外部项目全流程方法论：先了解（目标/影响面/相关模块/术语表/文件位置）
+      → 先确认版本控制再备份（有VCS走分支/无VCS手动备份）→ 工作隔离+临时文件放置
+      → 过程文档（现状/已确认事实链/教训）→ 单变量隔离 → 实测验证。
+    triggers:
+      - '驻场'
+      - '外部项目'
+      - '接手项目'
+      - '陌生代码库'
+    output: '清晰项目认知 + 持续可信过程文档 + 可回退改动'
+    next: 'break-tunnel-vision'
+    refs:
+      - 'break-tunnel-vision'
+      - 'diagnosing-bugs'
+      - 'session-summary'
+      - 'handoff'
+
+  break-tunnel-vision:
+    source: self
+    use_when: |
+      同一个方向反复修复失败（2+ 次）、每次修完还是同样的错、钻在某个自认为的原因里出不来、用户说"你的思路错了/想想别的方向"。
+    not_for: |
+      第一次修复就成功的常见 bug（用 diagnosing-bugs）。
+    category: '排障方法论'
+    description: |
+      跳出牛角尖方法论：停止 → 回头看问题发生的时机/位置 → 从浅到深（先证表层）→
+      前后关系（改动引入的变量）→ 关键卡点 → 找"动它结果就翻转"的关键点。
+    triggers:
+      - '钻牛角尖'
+      - '反复失败'
+      - '还是崩'
+      - '换个方向'
+      - '思路错了'
+    output: '重新锚定——停止 + 新方向 + 一个具体可测的隔离/修复方案'
+    prev: 'on-site-project'
+    refs:
+      - 'on-site-project'
+      - 'diagnosing-bugs'
+
   quality-gate:
     source: self
     use_when: |
