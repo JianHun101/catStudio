@@ -85,13 +85,16 @@ export interface RichBlock {
 }
 
 /**
- * push 审批所需信息——commits 列表（sha + subject）。
+ * push 审批所需信息——commits 列表（sha + subject + body）。
+ * body = commit 正文（subject 之后，可为空——「为什么改」写在 subject 里时为空）；
  * diff 正文走 rich.blocks（同 collectCommitDiffs 的富文本块通道）；
  * 两者均由服务端从 git 实时采集（git log/diff origin/dev..dev），无手工塞入路径。
  */
 export interface PushCommit {
   sha: string
   subject: string
+  /** commit 正文（git %b：subject 之后的完整正文，可为空字符串） */
+  body: string
 }
 
 /**

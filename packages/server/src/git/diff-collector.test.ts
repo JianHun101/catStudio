@@ -203,9 +203,32 @@ describe('collectPushDiffs', () => {
     expect(data!.commits.some((c) => c.subject.includes('uuid-push-1'))).toBe(true)
     // sha 是 40 位 hex
     expect(data!.commits[0].sha).toMatch(/^[0-9a-f]{40}$/)
+    // body 字段存在（commitMarked 单行 subject → body 为空字符串，类型必须是 string）
+    expect(data!.commits.some((c) => typeof c.body === 'string')).toBe(true)
     // 合并 diff 有内容（p.txt 可能被 500 行预算截断——前置大 diff 测试制造，截断是设计内行为）
     expect(data!.blocks).not.toBeNull()
     expect(data!.blocks!.length).toBeGreaterThan(0)
+  })
+
+  it('commits 条目带 body：多行正文保留 + 首尾空白清理', async () => {
+    // 多行 message 用 -F 从文件读（绕过 shell 引号/换行差异）；commit 后删 message 文件
+    writeFileSync(resolve(tmp, 'p2.txt'), 'p2-content\n', 'utf-8')
+    git('add -A')
+    writeFileSync(
+      resolve(tmp, '.commit-msg'),
+      'catstudy [uuid-push-2] fix: 带正文提交\n\n① 第一行\n② 第二行\n',
+      'utf-8'
+    )
+    git('commit -F .commit-msg')
+    unlinkSync(resolve(tmp, '.commit-msg'))
+
+    const data = await diffCollector.collectPushDiffs()
+    expect(data).not.toBeNull()
+    const c = data!.commits.find((x) => x.subject.includes('uuid-push-2'))
+    expect(c).toBeDefined()
+    expect(typeof c!.body).toBe('string')
+    expect(c!.body).toContain('① 第一行')
+    expect(c!.body).toContain('② 第二行')
   })
 
   it('同步（dev == origin/dev）→ commits 空 + blocks null', async () => {

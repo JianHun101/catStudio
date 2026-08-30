@@ -178,10 +178,12 @@ export async function collectCommitDiffs(uuid: string): Promise<RichBlock[] | nu
   return acc.blocks.length > 0 ? acc.blocks : null
 }
 
-/** push 审批的 commit 条目（sha + subject，来自 git log origin/dev..dev） */
+/** push 审批的 commit 条目（sha + subject + body，来自 git log origin/dev..dev） */
 export interface PushCommit {
   sha: string
   subject: string
+  /** commit 正文（git %b：subject 之后的完整正文；无正文时为空字符串） */
+  body: string
 }
 
 /** collectPushDiffs 结果——commits + 合并 diff 富文本块（无可推提交时 blocks 为 null） */
@@ -213,10 +215,12 @@ export async function collectPushDiffs(): Promise<PushDiffData | null> {
     })
   }
 
-  // ① commits：sha + subject（%x09 分隔，subject 可能含 \t 罕见 → 按首个 tab 拆）
+  // ① commits：sha + subject + body（%x1e 记录分隔 + %x09 字段分隔——
+  //    body 含多行换行，若沿用 \n 逐行 split 会把正文切碎；%x1e 是单字节 RS，
+  //    body 内换行不破坏记录边界）
   let logText: string
   try {
-    logText = await runGit(['log', 'origin/dev..dev', '--pretty=%H%x09%s'])
+    logText = await runGit(['log', 'origin/dev..dev', '--format=%H%x09%s%x09%b%x1e'])
   } catch (err: any) {
     log.warn('git log origin/dev..dev failed (push diffs skipped)', {
       error: err?.message,
@@ -224,14 +228,19 @@ export async function collectPushDiffs(): Promise<PushDiffData | null> {
     return null
   }
   const commits: PushCommit[] = logText
-    .split('\n')
-    .map((l) => l.trim())
+    .split('\x1e')
+    .map((r) => r.trim())
     .filter(Boolean)
-    .map((l) => {
-      const tab = l.indexOf('\t')
-      return tab >= 0
-        ? { sha: l.slice(0, tab), subject: l.slice(tab + 1) }
-        : { sha: l, subject: '' }
+    .map((r) => {
+      // 记录形如 `<sha>\t<subject>\t<body>`；subject/body 含 \t 极罕见
+      // （subject 沿用既有「按首个 tab 拆」约定），body 多行换行保留
+      const tab1 = r.indexOf('\t')
+      if (tab1 < 0) return { sha: r, subject: '', body: '' }
+      const sha = r.slice(0, tab1)
+      const rest = r.slice(tab1 + 1)
+      const tab2 = rest.indexOf('\t')
+      if (tab2 < 0) return { sha, subject: rest, body: '' }
+      return { sha, subject: rest.slice(0, tab2), body: rest.slice(tab2 + 1).trim() }
     })
 
   // ② 合并 diff：统一 3 上下文行、无颜色，按文件切块（同 collectCommitDiffs 管线）

@@ -830,8 +830,10 @@ const warnedAgentsText = computed(() => {
                   <div class="msg-text" v-html="renderMessageMarkdown(msg)"></div>
                   <!-- 对话内 diff 展示：extra.rich.blocks 存在才渲染（服务端采集附加，
                        永不进 LLM 上下文）；旧消息/无 extra → 纯文本回退与现网一致 -->
+                  <!-- push_request 排除：diff 只在下方面板（push-approval 内）渲染一次，
+                       通用段不再重复（否则同一份 blocks 上下两份） -->
                   <DiffViewer
-                    v-if="msg.extra?.rich?.blocks?.length"
+                    v-if="msg.extra?.rich?.blocks?.length && msg.messageType !== 'push_request'"
                     :blocks="msg.extra.rich.blocks"
                   />
                   <!-- 重启确认按钮组：pending 显示 [确认重启][取消]（点击后 confirming 中显示「已确认，等待重启…」）；confirmed 显示「重启中…」；取消/过期/none 隐藏 -->
@@ -869,8 +871,15 @@ const warnedAgentsText = computed(() => {
                     <div class="push-body">
                       <div v-if="msg.extra?.push?.commits?.length" class="commit-list">
                         <div v-for="c in msg.extra.push.commits" :key="c.sha" class="commit-item">
-                          <span class="commit-hash">{{ c.sha.slice(0, 7) }}</span>
-                          <span class="commit-subject">{{ c.subject }}</span>
+                          <div class="commit-line">
+                            <span class="commit-hash">{{ c.sha.slice(0, 7) }}</span>
+                            <span class="commit-subject">{{ c.subject }}</span>
+                          </div>
+                          <!-- commit 正文（「为什么」）默认收起，点开看完整；body 为空不渲染 -->
+                          <details v-if="c.body" class="commit-body">
+                            <summary class="commit-body-summary">提交说明</summary>
+                            <pre class="commit-body-text">{{ c.body }}</pre>
+                          </details>
                         </div>
                       </div>
                       <DiffViewer
@@ -1491,14 +1500,22 @@ const warnedAgentsText = computed(() => {
 
 .commit-item {
   display: flex;
-  gap: 8px;
-  align-items: baseline;
+  flex-direction: column;
+  gap: 2px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   color: var(--text-muted);
   padding: 4px 8px;
   background: var(--bg-hover);
   border-radius: var(--radius-sm);
+}
+
+/* hash + subject 单行截断（overflow 在此层——commit-item 变 column 后
+   overflow 移到行容器，避免裁掉下方 body 展开块） */
+.commit-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1513,6 +1530,27 @@ const warnedAgentsText = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* commit 正文（「为什么」）——details 默认收起，点开看完整 */
+.commit-body {
+  margin-top: 2px;
+}
+
+.commit-body-summary {
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--accent);
+  user-select: none;
+}
+
+.commit-body-text {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
 }
 
 .push-actions {

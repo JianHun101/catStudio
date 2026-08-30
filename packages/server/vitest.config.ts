@@ -18,6 +18,11 @@ export default defineConfig({
     env: {
       MEMORY_ENABLED: 'false',
       LOG_LEVEL: 'error',
+      // 固定 token 并发 cap=默认值：socketio.test.ts 并发上限用例断言「同 provider ≤2」
+      // 依赖 ProviderTokenPool 默认 cap=2（token-pool.ts DEFAULT_CAP）。外部 shell 可能
+      // 注入 PROVIDER_TOKEN_CAP（如根 .env=8）→ cap 漂移致 waitFor(active===2) 错过
+      // 中间态超时。此处钉死默认，测试不依赖运行环境偶然状态。
+      PROVIDER_TOKEN_CAP: '2',
       // 重启机制文件隔离——测试跑批的 afterEach 清理（socketio.test.ts unlinkSync）只会碰
       // 该隔离目录，不再删除运行时真实 .restart-request/.restart-done（17:38 事故根因）
       RESTART_FILES_DIR: 'node_modules/.cache/restart-test',

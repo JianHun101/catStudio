@@ -120,6 +120,16 @@ describe('ChatPanel push 审批面板（刀3 V2 按钮）', () => {
     expect(source).toContain('c.sha.slice(0, 7)')
   })
 
+  it('push_request 排除通用 DiffViewer（diff 只在下方面板渲染一次，不重复）', () => {
+    expect(source).toContain("msg.messageType !== 'push_request'")
+  })
+
+  it('commit-item 附收起的正文 body（details 默认收起，body 为空不渲染）', () => {
+    expect(source).toContain('v-if="c.body"')
+    expect(source).toContain('commit-body')
+    expect(source).toContain('提交说明')
+  })
+
   it('pushing 态显示「推送中…」、done 态显示「已推送」', () => {
     expect(source).toContain('推送中…')
     expect(source).toContain('已推送')
