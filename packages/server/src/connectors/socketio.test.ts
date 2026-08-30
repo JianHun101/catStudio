@@ -353,10 +353,10 @@ describe('socketio connector', () => {
       )
     })
 
-    it('已注册事件（PUSH_CONFIRM）→ 不 warn', () => {
+    it('已注册事件（RESTART_CONFIRM）→ 不 warn', () => {
       expect(anyListener).toBeDefined()
 
-      anyListener!(Events.PUSH_CONFIRM)
+      anyListener!(Events.RESTART_CONFIRM)
 
       expect(logWarn).not.toHaveBeenCalled()
     })
@@ -663,11 +663,13 @@ describe('socketio connector', () => {
         })
       )
 
-      // 确认 push → done（终态有界保留在 pushStates）
-      const confirmHandlers = socketHandlers.get(Events.PUSH_CONFIRM)
+      // C7：socket 版 PUSH_CONFIRM handler 已删除（前端全走 REST）——handler 应不存在
+      expect(socketHandlers.get(Events.PUSH_CONFIRM)).toBeUndefined()
+      // 确认 push → done（终态有界保留在 git/push-state 状态机）——直接调业务函数播种
+      const { executePushConfirm } = await import('../git/push-state.js')
       const { getMainRepoRoot } = await import('../llm/git-utils.js')
       vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
-      await confirmHandlers![0]({ messageId: 'msg-push-join-done' }, vi.fn())
+      await executePushConfirm('msg-push-join-done')
 
       // JOIN → 服务端广播 push 状态恢复（镜像 restart 的 join 恢复模式）
       const joinHandlers = socketHandlers.get(Events.JOIN_SESSION)
@@ -1595,7 +1597,16 @@ describe('socketio connector', () => {
           `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run('agent-9', 'ds猫', '🐯', 'You are a cat.', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'implementer')
+        .run(
+          'agent-9',
+          'ds猫',
+          '🐯',
+          'You are a cat.',
+          'deepseek',
+          'deepseek-v4-flash',
+          'sk-test',
+          'implementer'
+        )
       await setupExecution(['吐槽猫', '图测猫'], dsCatCfg)
       vi.mocked(dispatch).mockClear()
       mockRoomEmit.mockClear()
@@ -1612,11 +1623,15 @@ describe('socketio connector', () => {
       // （吐槽猫），不路由被剥除的图测猫。executeAgentCommand 落 execution_log
       // 是子链到达的最可靠信号
       const execTu = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-policy'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-policy'`
+        )
         .get()
       expect(execTu).toBeDefined()
       const execVision = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-policy'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-policy'`
+        )
         .get()
       expect(execVision).toBeUndefined()
 
@@ -1658,11 +1673,15 @@ describe('socketio connector', () => {
 
       // C1 v3：store 白名单放行任意角色——吐槽猫 + 图测猫都被 A2A 子链调度执行
       const execTu = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-store'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-store'`
+        )
         .get()
       expect(execTu).toBeDefined()
       const execVision = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-store'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-store'`
+        )
         .get()
       expect(execVision).toBeDefined()
     })
@@ -1685,11 +1704,15 @@ describe('socketio connector', () => {
 
       // C1 v3：角色缺失 → 白名单放行不拦截——吐槽猫 + 图测猫都被子链调度执行
       const execTu = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-no-role'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-no-role'`
+        )
         .get()
       expect(execTu).toBeDefined()
       const execVision = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-no-role'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-no-role'`
+        )
         .get()
       expect(execVision).toBeDefined()
     })
@@ -1828,7 +1851,9 @@ describe('socketio connector', () => {
       // C1 v3：triggerAuthorName 从 DB 反查（buildTriggerMsg 不再透传 trigger.authorName）
       // ——把触发消息改为 ds猫 的 agent 回复，reviewer @回触发作者 例外判定才成立
       getDb()
-        .prepare(`UPDATE messages SET role = 'agent', agent_id = 'agent-9' WHERE id = 'msg-trigger'`)
+        .prepare(
+          `UPDATE messages SET role = 'agent', agent_id = 'agent-9' WHERE id = 'msg-trigger'`
+        )
         .run()
 
       const reviewerCfg = makeAgentCfg({ id: 'agent-2', name: '吐槽猫', role: 'reviewer' })
@@ -2047,7 +2072,9 @@ describe('socketio connector', () => {
 
       // 断言① 放行不拦截：drain 回复 @实施猫 → A2A 调度 ds猫（execution_log 为子链到达信号）
       const execDs = db
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-queued'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-queued'`
+        )
         .get()
       expect(execDs).toBeDefined()
       // 白名单 blocked 会 emit 系统提示点名违规——放行则无
@@ -2334,7 +2361,9 @@ describe('socketio connector', () => {
       expect(result).toBe(true)
       // 场景非空转：A2A 子链确实路由到 claude 猫（吐槽猫 execution_log 落库）
       const execClaude = db
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-queued2'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-queued2'`
+        )
         .get()
       expect(execClaude).toBeDefined()
     })
@@ -2922,7 +2951,9 @@ describe('socketio connector', () => {
       // C1 v3：A2A 子链真实递归执行（非 dispatch shim）——店长被调度即
       // executeAgentCommand 落 execution_log
       const execStore = db
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-1' AND trace_id = 'trace-review'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-1' AND trace_id = 'trace-review'`
+        )
         .get()
       expect(execStore).toBeDefined()
       // 断言③ 白名单无 blocked（reviewer→store 直通；修复前是解析层静默落空，
@@ -3868,127 +3899,6 @@ describe('socketio connector', () => {
     })
   })
 
-  // ─── PUSH_CONFIRM / PUSH_CANCEL — push 审批（内存化状态 + git push 执行）─────
-
-  describe('PUSH_CONFIRM', () => {
-    it('确认 push → 执行 git push origin dev + 推 pushing→done + ack ok', async () => {
-      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
-      expect(handlers).toBeDefined()
-      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
-      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
-
-      const ack = vi.fn()
-      await handlers![0]({ messageId: 'msg-push-1' }, ack)
-
-      // push 执行在 getMainRepoRoot() 定位的主仓库根
-      expect(gitPushOriginDev).toHaveBeenCalledWith('C:\\fake\\main')
-      expect(mockSocketEmit).toHaveBeenCalledWith(
-        Events.PUSH_STATUS,
-        expect.objectContaining({ messageId: 'msg-push-1', state: 'pushing' })
-      )
-      expect(mockSocketEmit).toHaveBeenCalledWith(
-        Events.PUSH_STATUS,
-        expect.objectContaining({ messageId: 'msg-push-1', state: 'done' })
-      )
-      expect(ack).toHaveBeenCalledWith({ ok: true })
-    })
-
-    it('push 失败 → ERROR + failed 状态 + ack failed（审批态可排查）', async () => {
-      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
-      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
-      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
-      vi.mocked(gitPushOriginDev).mockResolvedValueOnce({ ok: false, error: 'remote rejected' })
-
-      const ack = vi.fn()
-      await handlers![0]({ messageId: 'msg-push-2' }, ack)
-
-      expect(mockSocketEmit).toHaveBeenCalledWith(
-        Events.ERROR,
-        expect.objectContaining({ message: expect.stringContaining('push 失败') })
-      )
-      expect(mockSocketEmit).toHaveBeenCalledWith(
-        Events.PUSH_STATUS,
-        expect.objectContaining({ messageId: 'msg-push-2', state: 'failed' })
-      )
-      expect(ack).toHaveBeenCalledWith({ ok: false, reason: 'failed' })
-    })
-
-    it('主仓库根定位失败 → ERROR + ack failed，不执行 push', async () => {
-      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
-      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
-      vi.mocked(getMainRepoRoot).mockReturnValue(null)
-
-      const ack = vi.fn()
-      await handlers![0]({ messageId: 'msg-push-3' }, ack)
-
-      expect(gitPushOriginDev).not.toHaveBeenCalled()
-      expect(mockSocketEmit).toHaveBeenCalledWith(
-        Events.ERROR,
-        expect.objectContaining({ message: expect.stringContaining('无法定位主仓库根') })
-      )
-      expect(ack).toHaveBeenCalledWith({ ok: false, reason: 'failed' })
-    })
-
-    it('推送中重复确认 → 短路 ack，不二次执行 push', async () => {
-      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
-      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
-      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
-
-      // git push 挂起：第一击进入 pushing 后一直未完成 → 同一 messageId 第二击必须短路
-      let resolvePush: () => void
-      const pending = new Promise<void>((r) => {
-        resolvePush = r
-      })
-      vi.mocked(gitPushOriginDev).mockImplementationOnce(
-        () => pending.then(() => ({ ok: true })) as any
-      )
-      vi.mocked(gitPushOriginDev).mockClear()
-
-      const ack1 = vi.fn()
-      const p1 = handlers![0]({ messageId: 'msg-push-double' }, ack1)
-      // 第一击已进入 pushing（await 挂起中）——重复确认应短路，不二次执行
-      const ack2 = vi.fn()
-      await handlers![0]({ messageId: 'msg-push-double' }, ack2)
-      expect(gitPushOriginDev).toHaveBeenCalledTimes(1) // 未二次 push
-      expect(ack2).toHaveBeenCalledWith({ ok: false })
-
-      resolvePush!()
-      await p1
-      expect(ack1).toHaveBeenCalledWith({ ok: true })
-    })
-
-    it('已完成 push 再次确认 → 短路 ack ok，不二次执行 git push（终态有界保留）', async () => {
-      const handlers = socketHandlers.get(Events.PUSH_CONFIRM)
-      const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
-      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
-      vi.mocked(gitPushOriginDev).mockClear()
-
-      const ack1 = vi.fn()
-      await handlers![0]({ messageId: 'msg-push-done-retry' }, ack1)
-      expect(ack1).toHaveBeenCalledWith({ ok: true })
-
-      // done 终态被有界保留（不立即删除）→ 再次确认短路 ack ok，不二次 push
-      const ack2 = vi.fn()
-      await handlers![0]({ messageId: 'msg-push-done-retry' }, ack2)
-      expect(gitPushOriginDev).toHaveBeenCalledTimes(1)
-      expect(ack2).toHaveBeenCalledWith({ ok: true })
-    })
-  })
-
-  describe('PUSH_CANCEL', () => {
-    it('取消 → 推 cancelled（前端清理审批态）', () => {
-      const handlers = socketHandlers.get(Events.PUSH_CANCEL)
-      expect(handlers).toBeDefined()
-
-      handlers![0]({ messageId: 'msg-push-1' })
-
-      expect(mockSocketEmit).toHaveBeenCalledWith(
-        Events.PUSH_STATUS,
-        expect.objectContaining({ messageId: 'msg-push-1', state: 'cancelled' })
-      )
-    })
-  })
-
   // ─── 重启请求 ingest 链路（前缀检测 → 文件生成 → 广播类型）─────
 
   describe('重启请求 ingest 链路', () => {
@@ -4471,7 +4381,9 @@ describe('socketio connector', () => {
       expect(logA.status).toBe('failed')
       expect(logA.error_message).toBe('interrupted')
       const agentMsgsA = db
-        .prepare("SELECT COUNT(*) AS c FROM messages WHERE role = 'agent' AND session_id = 'session-1'")
+        .prepare(
+          "SELECT COUNT(*) AS c FROM messages WHERE role = 'agent' AND session_id = 'session-1'"
+        )
         .get() as { c: number }
       expect(agentMsgsA.c).toBe(0)
 
@@ -4482,7 +4394,9 @@ describe('socketio connector', () => {
       expect(logB).toBeDefined()
       expect(logB.status).toBe('completed')
       const agentMsgsB = db
-        .prepare("SELECT COUNT(*) AS c FROM messages WHERE role = 'agent' AND session_id = 'session-2'")
+        .prepare(
+          "SELECT COUNT(*) AS c FROM messages WHERE role = 'agent' AND session_id = 'session-2'"
+        )
         .get() as { c: number }
       expect(agentMsgsB.c).toBe(1)
     })
@@ -4732,7 +4646,9 @@ describe('socketio connector', () => {
       // C1 v3：A2A 子链真实递归执行（非 dispatch shim）——目标吐槽猫被调度即落
       // execution_log
       const execTu = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-signal'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-signal'`
+        )
         .get()
       expect(execTu).toBeDefined()
       // mentions 写回 DB（:931 updateMessageMentions）
@@ -4775,7 +4691,9 @@ describe('socketio connector', () => {
 
       // Set 去重：目标吐槽猫调度一次（execution_log 恰一条）
       const execTu = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-dual'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-dual'`
+        )
         .get()
       expect(execTu).toBeDefined()
       const replyRow = getDb()
@@ -4818,7 +4736,9 @@ describe('socketio connector', () => {
 
       // C1 v3：路由正常 → 目标吐槽猫被 A2A 子链调度执行（非 dispatch shim 计数）
       const execTu = getDb()
-        .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-ok'`)
+        .prepare(
+          `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-ok'`
+        )
         .get()
       expect(execTu).toBeDefined()
       // M1 零告警：无「嵌句」系统消息
@@ -4901,9 +4821,20 @@ describe('socketio connector', () => {
           `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run('agent-impl', '实施猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'implementer')
+        .run(
+          'agent-impl',
+          '实施猫',
+          '🐱',
+          'You are a cat.',
+          'deepseek',
+          'deepseek-v4-flash',
+          'sk-test',
+          'implementer'
+        )
       getDb()
-        .prepare(`UPDATE messages SET role = 'agent', agent_id = 'agent-impl' WHERE id = 'msg-trigger'`)
+        .prepare(
+          `UPDATE messages SET role = 'agent', agent_id = 'agent-impl' WHERE id = 'msg-trigger'`
+        )
         .run()
 
       const run1 = getExecutionEngine()!.executeAgentsSerial(

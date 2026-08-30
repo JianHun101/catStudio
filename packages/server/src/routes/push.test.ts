@@ -1,9 +1,9 @@
 /**
  * push 审批 REST 路由测试（POST /api/push/confirm | /api/push/cancel）。
  *
- * 业务核心 executePushConfirm/cancelPush 在 connectors/socketio.ts（REST + Socket 双入口共用）——
+ * 业务核心 executePushConfirm/cancelPush 在 git/push-state.ts（push 审批状态机唯一 owner）——
  * 本测试只 mock 最外层 git 边界（getMainRepoRoot/gitPushOriginDev——真实 git push 绝不在
- * 测试环境执行），其余走真实实现；socketio 模块级 pushStates 经 __test_resetPushStates 用例间隔离。
+ * 测试环境执行），其余走真实实现；push-state 模块级状态经 __test_resetPushStates 用例间隔离。
  * （store 层不在此测——confirmPush/cancelPush 的乐观置位/错误映射在 web chat.test.ts）
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -39,7 +39,7 @@ describe('push routes', () => {
   })
 
   afterEach(async () => {
-    const { __test_resetPushStates } = await import('../connectors/socketio.js')
+    const { __test_resetPushStates } = await import('../git/push-state.js')
     __test_resetPushStates()
     vi.clearAllMocks()
     resetDb()
@@ -112,7 +112,7 @@ describe('push routes', () => {
 
     it('推送中重复确认 → already-pushing，不二次执行 push', async () => {
       const { getMainRepoRoot, gitPushOriginDev } = await import('../llm/git-utils.js')
-      const { executePushConfirm } = await import('../connectors/socketio.js')
+      const { executePushConfirm } = await import('../git/push-state.js')
       vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
       let resolvePush: () => void
       const pending = new Promise<void>((r) => {

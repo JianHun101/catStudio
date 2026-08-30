@@ -6,11 +6,11 @@
  *
  * 迁移动因：PUSH_CONFIRM 是纯「请求 → 结果」交互，本不该走 WebSocket——socket 版继承了
  * WS 传输脆弱性（用户追了 N 轮的「点确认按钮 transport close」）。HTTP 状态码 + 响应体
- * 本身就是 ack，无需 ack 回调 + 超时兜底。业务核心在 connectors/socketio.ts 的
- * executePushConfirm/cancelPush（REST 与 Socket 双入口共用同一语义）。
+ * 本身就是 ack，无需 ack 回调 + 超时兜底。业务核心在 git/push-state.ts 的
+ * executePushConfirm/cancelPush（push 审批状态机唯一 owner，REST 与历史 Socket 双入口共用同一语义）。
  */
 import type { FastifyInstance } from 'fastify'
-import { executePushConfirm, cancelPush } from '../connectors/socketio.js'
+import { executePushConfirm, cancelPush } from '../git/push-state.js'
 
 export async function pushRoutes(app: FastifyInstance): Promise<void> {
   /**
