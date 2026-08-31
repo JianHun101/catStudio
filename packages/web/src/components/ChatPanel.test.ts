@@ -192,7 +192,13 @@ describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）'
     expect(source).toMatch(/v-if="msg\.role === 'agent' && msg\.agentId"/)
     expect(source).not.toMatch(/agentId && !isGrouped\(i\)/)
     // 模板插值：{{ modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}
-    expect(source).toContain('modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}')
+    // 正则而非 toContain——prettier 会把后续 <span> 重排到新行，tokensTextFor(msg.agentId) 后
+    // 可能是换行再 }}；正则匹配到 tokensTextFor(msg.agentId) 前缀即通过（对 prettier 格式鲁棒）
+    expect(source).toMatch(/modelNameFor\(msg\.agentId\) \}\} · \{\{ tokensTextFor\(msg\.agentId\)/)
+    // C5：agent 耗时徽标（durationMs 随广播注入，瞬态不落库）
+    expect(source).toContain('msg.durationMs != null')
+    expect(source).toContain('耗时 {{ formatDuration(msg.durationMs) }}')
+    expect(source).toContain('function formatDuration(ms: number): string')
   })
 
   it('tokens 文案：m = maxContextTokens（上下文窗口数，非 llm_max_tokens 单次输出上限）', () => {

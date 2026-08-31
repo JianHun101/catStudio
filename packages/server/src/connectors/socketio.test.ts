@@ -754,6 +754,43 @@ describe('socketio connector', () => {
       )
     })
 
+    it('C5 ack：成功回传 server 生成的 messageId + effectiveSessionId（与落库 id 一致）', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      const ack = vi.fn()
+
+      await handlers![0]({ sessionId: 'session-1', content: '你好', mentions: [] }, ack)
+
+      expect(ack).toHaveBeenCalledTimes(1)
+      const ackArg = ack.mock.calls[0][0]
+      expect(ackArg.ok).toBe(true)
+      expect(ackArg.effectiveSessionId).toBe('session-1')
+      // messageId = 服务端落库的消息 id（客户端只消费不生成）
+      const db = getDb()
+      const row = db
+        .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get('session-1') as any
+      expect(ackArg.messageId).toBe(row.id)
+    })
+
+    it('C5 ack：失败回传 effectiveSessionId + error（session 不存在）', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      const ack = vi.fn()
+
+      await handlers![0]({ sessionId: 'nonexistent', content: 'hello', mentions: [] }, ack)
+
+      expect(ack).toHaveBeenCalledWith({
+        ok: false,
+        effectiveSessionId: 'nonexistent',
+        error: 'Session not found',
+      })
+    })
+
+    it('C5 ack 可选：不传 ack 回调不报错（旧前端兼容）', async () => {
+      const handlers = socketHandlers.get(Events.SEND_MESSAGE)
+      // 不带 ack 参数调用——不抛即过（上方成功用例已覆盖广播/落库断言）
+      await handlers![0]({ sessionId: 'session-1', content: '兼容', mentions: [] })
+    })
+
     it('emits ERROR when session does not exist (checked before INSERT)', async () => {
       const handlers = socketHandlers.get(Events.SEND_MESSAGE)
       mockSocketEmit.mockClear()

@@ -772,6 +772,10 @@ export async function runAgentReply(
     taskId: triggerMsg.taskId || undefined,
     thinkingContent: thinkingContent || undefined,
     createdAt: new Date().toISOString(),
+    // agent 耗时（C5）：随广播注入，前端气泡展示「耗时 X.X 秒」。瞬态不落库——
+    // 落库在 708 行 insertAgentMessage（独立参数，先于 finalMsg 构造），此处仅广播对象；
+    // 刷新后历史重放无 durationMs，评估权威数据仍在 execution_logs.latency_ms。
+    durationMs: Date.now() - startedAt,
     ...(isRestartRequest ? { messageType: 'restart_request' as const, restartExpiresAt } : {}),
   }
 

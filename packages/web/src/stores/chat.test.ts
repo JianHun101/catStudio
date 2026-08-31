@@ -254,20 +254,115 @@ describe('chatStore', () => {
   })
 
   describe('sendMessage', () => {
-    it('emits SEND_MESSAGE with payload', () => {
+    it('emits SEND_MESSAGE with payload + ack 回调（C5：store 独占生命周期）', () => {
       store.activeSessionId = 's1'
       store.sendMessage('你好', ['店长'])
-      expect(mockEmit).toHaveBeenCalledWith(Events.SEND_MESSAGE, {
-        sessionId: 's1',
-        content: '你好',
-        mentions: ['店长'],
-      })
+      expect(mockEmit).toHaveBeenCalledWith(
+        Events.SEND_MESSAGE,
+        {
+          sessionId: 's1',
+          content: '你好',
+          mentions: ['店长'],
+        },
+        expect.any(Function)
+      )
+      // 发送后 sendStatus=sending（等待 ack/超时）
+      expect(store.sendStatus).toBe('sending')
     })
 
     it('does nothing without active session', () => {
       store.activeSessionId = null
       store.sendMessage('test')
       expect(mockEmit).not.toHaveBeenCalled()
+      expect(store.sendStatus).toBe('idle')
+    })
+  })
+
+  describe('message lifecycle (C5)', () => {
+    /** 捕获最近一次 SEND_MESSAGE 的 ack 回调 */
+    function captureAck(): (res: any) => void {
+      const emitCall = mockEmit.mock.calls.find((c) => c[0] === Events.SEND_MESSAGE)
+      expect(emitCall).toBeDefined()
+      return emitCall![2] as (res: any) => void
+    }
+
+    it('ack ok:true → sendStatus ok + lifecycle received（key=server 生成的 messageId）', () => {
+      store.activeSessionId = 's1'
+      store.sendMessage('你好')
+      const ack = captureAck()
+      ack({ ok: true, messageId: 'm-ack', effectiveSessionId: 's1' })
+      expect(store.sendStatus).toBe('ok')
+      expect(store.getLifecycle('m-ack')).toBe('received')
+    })
+
+    it('ack ok:false → sendStatus failed + error toast；lifecycle 无记录（失败无 messageId 可 key）', () => {
+      store.activeSessionId = 's1'
+      store.sendMessage('你好')
+      const ack = captureAck()
+      ack({ ok: false, effectiveSessionId: 's1', error: 'Session not found' })
+      expect(store.sendStatus).toBe('failed')
+      expect(store.errorMessage).toBe('Session not found')
+      expect(store.getLifecycle('m-none')).toBeUndefined()
+    })
+
+    it('ack 超时（旧 server 不回调 / 连接静默断）→ 10s 后 sendStatus failed + 报错（根治静默失败）', () => {
+      vi.useFakeTimers()
+      try {
+        store.activeSessionId = 's1'
+        store.sendMessage('你好')
+        expect(store.sendStatus).toBe('sending')
+        vi.advanceTimersByTime(10000)
+        expect(store.sendStatus).toBe('failed')
+        expect(store.errorMessage).toContain('服务器无响应')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('MESSAGE_AGENT_STATUS replying → agent-processing；done → replied（仅推进已 ack 的消息）', () => {
+      store.activeSessionId = 's1'
+      store.sendMessage('你好 @店长')
+      captureAck()({ ok: true, messageId: 'm-user', effectiveSessionId: 's1' })
+
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.MESSAGE_AGENT_STATUS
+      )?.[1] as ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      handler!({
+        messageId: 'm-user',
+        agentId: 'a1',
+        agentName: '店长',
+        agentAvatar: '🐱',
+        status: 'replying',
+        startedAt: 1_700_000_000_000,
+      })
+      expect(store.getLifecycle('m-user')).toBe('agent-processing')
+
+      handler!({
+        messageId: 'm-user',
+        agentId: 'a1',
+        agentName: '店长',
+        agentAvatar: '🐱',
+        status: 'done',
+      })
+      expect(store.getLifecycle('m-user')).toBe('replied')
+    })
+
+    it('非本客户端发送的消息：MESSAGE_AGENT_STATUS 不推进（lifecycles 无该 messageId → 跳过）', () => {
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.MESSAGE_AGENT_STATUS
+      )?.[1] as ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      handler!({
+        messageId: 'm-other',
+        agentId: 'a1',
+        agentName: '店长',
+        agentAvatar: '🐱',
+        status: 'replying',
+      })
+      expect(store.getLifecycle('m-other')).toBeUndefined()
     })
   })
 

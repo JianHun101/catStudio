@@ -237,6 +237,8 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
       role: 'agent',
       content: '收到',
     })
+    // C5：agent 耗时随广播注入（durationMs = Date.now() - startedAt，广播对象瞬态）
+    expect(calls.agentMessages[0].durationMs).toEqual(expect.any(Number))
     // 回复已落库（runAgentReply 真实写库）
     const row = getDb()
       .prepare(`SELECT * FROM messages WHERE role = 'agent' AND session_id = 'session-1'`)

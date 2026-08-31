@@ -7,6 +7,7 @@ import type {
   SessionConfig,
   AgentConfig,
   AgentTokenStats,
+  SendMessageAck,
 } from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
 import { api } from '@/composables/useApi'
@@ -136,6 +137,23 @@ export const useChatStore = defineStore('chat', () => {
     lastBeatAt?: number
   }
   const messageStatus = ref<Map<string, AgentStatusEntry[]>>(new Map())
+
+  // ─── Message lifecycle (C5) ─────────────────
+  // 用户消息发送生命周期：store 独占状态机，key=server 生成的 messageId（ack 回传后进入）。
+  // 客户端只消费不生成 id（安全性第一）；瞬态不占 Message。终态保留供只读查询，
+  // 单会话消息量有限无清理压力。
+  type MessageLifecycle = 'sending' | 'received' | 'agent-processing' | 'replied' | 'failed'
+  const lifecycles = new Map<string, MessageLifecycle>()
+  /** 发送管线信号（sending=等待 ack/回显；ok/failed=终态）——ChatPanel 据此复位发送按钮。
+   *   sending/failed 两态无 server messageId 可 key（发送时尚未落库），不进 lifecycles Map */
+  const sendStatus = ref<'idle' | 'sending' | 'ok' | 'failed'>('idle')
+  function setLifecycle(messageId: string, lc: MessageLifecycle): void {
+    lifecycles.set(messageId, lc)
+  }
+  /** 只读访问器：查询消息当前生命周期（非本客户端发送/无 ack 回传 → undefined） */
+  function getLifecycle(messageId: string): MessageLifecycle | undefined {
+    return lifecycles.get(messageId)
+  }
 
   /** Agent token 消耗统计: agentId → AgentTokenStats */
   const agentTokenStats = ref<Map<string, AgentTokenStats>>(new Map())
@@ -310,12 +328,44 @@ export const useChatStore = defineStore('chat', () => {
   function sendMessage(content: string, mentions: string[] = [], images: string[] = []): void {
     if (!activeSessionId.value) return
     const { socket } = useSocket()
-    socket.emit(Events.SEND_MESSAGE, {
-      sessionId: activeSessionId.value,
-      content,
-      mentions,
-      ...(images.length > 0 ? { images } : {}),
-    })
+    sendStatus.value = 'sending'
+    // ack 超时兜底：旧 server 不回调 ack / 连接静默断 → 10s 后置 failed + 报错。根治
+    // fire-and-forget 静默失败（此前靠 ChatPanel 的 activeMessages watch + 10s timeout 兜底，
+    // C5 收进 store 独占——ChatPanel 只消费 sendStatus 复位按钮）。
+    let settled = false
+    const ackTimeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      sendStatus.value = 'failed'
+      showError('服务器无响应，请检查后端是否已启动')
+    }, 10000)
+    socket.emit(
+      Events.SEND_MESSAGE,
+      {
+        sessionId: activeSessionId.value,
+        content,
+        mentions,
+        ...(images.length > 0 ? { images } : {}),
+      },
+      (res: SendMessageAck | undefined) => {
+        if (settled) return
+        settled = true
+        clearTimeout(ackTimeout)
+        if (!res) {
+          // 旧 server 不回调 ack（fire-and-forget）：无法确认结果，按失败处理
+          sendStatus.value = 'failed'
+          return
+        }
+        if (res.ok) {
+          setLifecycle(res.messageId, 'received')
+          sendStatus.value = 'ok'
+        } else {
+          // ok:false 无 messageId（消息未落库）——lifecycle 无 key 可记，仅失败信号 + 报错
+          sendStatus.value = 'failed'
+          showError(res.error)
+        }
+      }
+    )
   }
 
   /** 更新 Agent 配置 */
@@ -718,6 +768,13 @@ export const useChatStore = defineStore('chat', () => {
         status: 'queued' | 'thinking' | 'replying' | 'done'
         startedAt?: number
       }) => {
+        // C5 lifecycle 推进：replying = agent 开始思考（锚点）；done = agent 回复完成（= replied）。
+        // 仅推进本客户端发送的消息（lifecycles 有该 messageId）；非本客户端发送 → undefined 跳过。
+        const lc = lifecycles.get(data.messageId)
+        if (lc === 'received' || lc === 'agent-processing') {
+          if (data.status === 'replying') setLifecycle(data.messageId, 'agent-processing')
+          else if (data.status === 'done') setLifecycle(data.messageId, 'replied')
+        }
         const current = messageStatus.value.get(data.messageId) || []
         const idx = current.findIndex((e) => e.agentId === data.agentId)
         // replying 心跳：记录客户端接收时间戳（liveness 锚点）。心跳 10s 重发、
@@ -897,5 +954,7 @@ export const useChatStore = defineStore('chat', () => {
     messageStatus,
     handoffFailed,
     dismissHandoffFailed,
+    sendStatus,
+    getLifecycle,
   }
 })

@@ -10,6 +10,7 @@
 import { Server as HttpServer } from 'node:http'
 import { Server as SocketServer } from 'socket.io'
 import { Events, estimateTokens } from '@cat-study/shared'
+import type { SendMessageAck } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
   agents as agentsRepo,
@@ -334,13 +335,16 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
     socket.on(
       Events.SEND_MESSAGE,
-      async (data: {
-        sessionId: string
-        content: string
-        mentions: string[]
-        taskId?: string
-        images?: string[]
-      }) => {
+      async (
+        data: {
+          sessionId: string
+          content: string
+          mentions: string[]
+          taskId?: string
+          images?: string[]
+        },
+        ack?: (res: SendMessageAck) => void
+      ) => {
         // 摄入管线（校验/重定向/落库/广播/调度/执行）已提取为共享核心，
         // 与 REST POST /api/messages 同构——两入口共用 ingest.ts。
         const result = await ingestUserMessage({
@@ -351,7 +355,17 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           taskId: data.taskId,
           saveMemory: true,
         })
-        if (!result.ok) {
+        // ack 回传（C5）：成功带服务端生成的 messageId（客户端只消费不生成 id，安全性第一）；
+        // 失败带 effectiveSessionId（用请求的 sessionId）+ error 透传。ack 可选——旧前端不传不报错。
+        if (result.ok) {
+          ack?.({
+            ok: true,
+            messageId: result.messageId,
+            effectiveSessionId: result.effectiveSessionId,
+            ...(result.redirectedFrom ? { redirectedFrom: result.redirectedFrom } : {}),
+          })
+        } else {
+          ack?.({ ok: false, effectiveSessionId: data.sessionId, error: result.error })
           socket.emit(Events.ERROR, { message: result.error })
         }
       }

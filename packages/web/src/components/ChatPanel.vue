@@ -178,17 +178,27 @@ function scrollToBottom(smooth = false): void {
 }
 
 // New messages arrive → scroll if at bottom; otherwise show indicator
+// watch 源用最后一条消息 id（比 length 精确：消息内容更新不改 id 不触发滚动）。
+// C5 移除其中「隐式当成功」的 sending 复位——按钮复位改由 store.sendStatus 独占驱动。
+const lastMessageId = computed(() => {
+  const msgs = store.activeMessages
+  return msgs.length > 0 ? msgs[msgs.length - 1].id : null
+})
+watch(lastMessageId, async () => {
+  await nextTick()
+  if (isAtBottom.value) {
+    scrollToBottom()
+  } else {
+    newMessageCount.value++
+    showScrollDown.value = true
+  }
+})
+
+// C5：发送按钮复位由 store 独占生命周期驱动（ack ok/failed / 10s 超时 → sendStatus 终态）
 watch(
-  () => store.activeMessages.length,
-  async () => {
-    await nextTick()
-    if (isAtBottom.value) {
-      scrollToBottom()
-    } else {
-      newMessageCount.value++
-      showScrollDown.value = true
-    }
-    sending.value = false
+  () => store.sendStatus,
+  (s) => {
+    if (s === 'ok' || s === 'failed') sending.value = false
   }
 )
 
@@ -428,20 +438,15 @@ async function handleSend(): Promise<void> {
   const mentions = [...new Set(rawMentions)].filter((m) => agentNames.includes(m))
 
   sending.value = true
-  try {
-    await store.sendMessage(text, mentions, images)
-    input.value = ''
-    pastedImages.value = []
-    mentionActive.value = false
-    skillActive.value = false
-    await nextTick()
-    scrollToBottom()
-  } finally {
-    // Safety net: re-enable button after 10s if NEW_MESSAGE never arrives
-    setTimeout(() => {
-      if (sending.value) sending.value = false
-    }, 10000)
-  }
+  // 发送按钮复位不再依赖「回显到达 / 10s timeout」双兜底——C5 收进 store：
+  // sendMessage 内部走 ack + 超时，sendStatus 到终态后上方 watch 复位 sending
+  store.sendMessage(text, mentions, images)
+  input.value = ''
+  pastedImages.value = []
+  mentionActive.value = false
+  skillActive.value = false
+  await nextTick()
+  scrollToBottom()
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -604,6 +609,12 @@ function fmtTokens(n: number): string {
  *  不是 llm_max_tokens（单次输出上限 2048）——两个数字体系严防混淆 */
 function tokensTextFor(agentId: string): string {
   return `${fmtTokens(store.contextTokens.get(agentId) ?? 0)}/${fmtTokens(maxTokensFor(agentId))} tokens`
+}
+
+/** agent 回复耗时徽标文案：{秒数} 秒（服务端随广播注入 durationMs，瞬态不落库） */
+function formatDuration(ms: number): string {
+  const s = ms / 1000
+  return `${s >= 10 ? s.toFixed(0) : s.toFixed(1)} 秒`
 }
 
 /** 是否可停止：回复中（busy）或有排队任务（AGENT_INTERRUPT 一个按钮覆盖两场景） */
@@ -928,7 +939,10 @@ const warnedAgentsText = computed(() => {
                       class="msg-footer-info"
                       :class="contextLevelFor(msg.agentId)"
                     >
-                      {{ modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}
+                      {{ modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId)
+                      }}<span v-if="msg.durationMs != null" class="msg-duration">
+                        · 耗时 {{ formatDuration(msg.durationMs) }}</span
+                      >
                     </span>
                     <span class="msg-footer-right">
                       <time class="msg-time" :datetime="msg.createdAt">{{
@@ -1999,6 +2013,11 @@ const warnedAgentsText = computed(() => {
 .msg-footer-info.critical {
   color: var(--accent-red);
   opacity: 1;
+}
+
+/* agent 回复耗时徽标（durationMs 随广播注入，瞬态不落库）——与模型/用量同视觉层级 */
+.msg-duration {
+  font-variant-numeric: tabular-nums;
 }
 
 /* 停止按钮：小号（AgentPanel btn-stop 同款），visibility 切换不改变布局 */

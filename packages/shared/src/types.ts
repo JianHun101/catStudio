@@ -130,6 +130,8 @@ export interface Message {
   restartExpiresAt?: string
   /** 消息附加富内容（diff 块等；服务端采集附加，永不进 LLM 上下文） */
   extra?: MessageExtra
+  /** agent 回复耗时（毫秒，服务端随广播注入；瞬态不落库——刷新后无耗时，评估权威数据在 execution_logs.latency_ms） */
+  durationMs?: number
 }
 
 // ─── Memory ─────────────────────────────────────────
@@ -320,3 +322,9 @@ export interface HandoffFailedPayload {
   sessionId: string
   reason: string
 }
+
+/** SEND_MESSAGE ack（socket.io 回调）：user 消息摄入结果回传，客户端据此推进发送生命周期。
+ *  ok:true → messageId 为服务端生成的落库 id（客户端只消费不生成）；ok:false → error 透传 */
+export type SendMessageAck =
+  | { ok: true; messageId: string; effectiveSessionId: string; redirectedFrom?: string }
+  | { ok: false; effectiveSessionId: string; error: string }
