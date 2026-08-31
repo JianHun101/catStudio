@@ -6,7 +6,6 @@ import { createLogger } from '@/utils/logger'
 
 const log = createLogger('socket')
 const socket = ref<Socket | null>(null)
-const connected = ref(false)
 
 export function useSocket() {
   if (!socket.value) {
@@ -19,12 +18,10 @@ export function useSocket() {
     })
 
     socket.value.on('connect', () => {
-      connected.value = true
       log.info('connected', { id: socket.value!.id })
     })
 
     socket.value.on('disconnect', (reason) => {
-      connected.value = false
       log.info('disconnected', { reason })
     })
 
@@ -37,7 +34,6 @@ export function useSocket() {
 
   return {
     socket: socket.value,
-    connected,
   }
 }
 
@@ -45,5 +41,4 @@ export function useSocket() {
 export function disconnectSocket(): void {
   socket.value?.disconnect()
   socket.value = null
-  connected.value = false
 }
