@@ -83,6 +83,25 @@ pnpm lint
 - [ ] 启动应用（`pnpm dev`）验证功能正常工作
 - [ ] 至少走通一条完整的用户路径
 
+### 步骤 8：TWO-AXIS SELF-CHECK（双轴自查，code-review 方法论）
+
+code-review 把审查拆成两条独立轴，自查同样过两轴——**一条轴过了不代表另一条**：
+
+- **Standards 轴**：代码是否符合项目文档化编码规范（CODING_STANDARDS.md）？
+- **Spec 轴**：代码是否忠实实现发起它的 spec/issue/需求（无缺失、无范围蔓延）？
+
+两轴分开核对，别在「代码很干净」的满足感里跳过 Spec 轴的逐条需求对齐；也别在「需求都对上了」里跳过规范检查。
+
+### 步骤 9：SMELL SWEEP（坏味道扫描，Fowler 基线）
+
+对照 code-review 的 smell baseline 扫自己的 diff（文档化规范优先于基线；每条是判断标签不是硬违规；工具已强制的跳过）：
+
+- Mysterious Name / Duplicated Code / Feature Envy / Data Clumps / Primitive Obsession
+- Repeated Switches / Shotgun Surgery / Divergent Change / Speculative Generality
+- Message Chains / Middle Man / Refused Bequest
+
+命中 → Gate 报告列出，能当场修就修；不能修 → 作为 Open Question 点名具体文件/符号给审查者。
+
 ## 输出
 
 自查通过后，输出以下格式：
@@ -109,6 +128,12 @@ pnpm lint → 通过 / M errors
 ### Unfinished Business
 ✅ 干净 / ⚠️ 以下项目保留：...
 
+### Standards + Spec 双轴自查
+✅ 两轴对齐 / ⚠️ 以下轴有缺口：...
+
+### Smell Sweep
+✅ 无命中 / ⚠️ 以下坏味道：...
+
 ### Gate Result
 ✅ PASS → 可以发起 /request-review
 ❌ FAIL → 以下项目需要先修复：...
@@ -130,8 +155,8 @@ pnpm lint → 通过 / M errors
 
 ## 与其他 skill 区别
 
-| skill          | 区别                                                                      |
-| -------------- | ------------------------------------------------------------------------- |
-| receive-review | quality-gate 是作者提交前自查；receive-review 是收到审查反馈后处理        |
-| request-review | quality-gate 是前置门，PASS 后才能发起审查；request-review 是发起动作本身 |
-| review         | quality-gate 是自查（自己过门）；review 是双轴代码审查（他人/工具视角）   |
+| skill          | 区别                                                                         |
+| -------------- | ---------------------------------------------------------------------------- |
+| receive-review | quality-gate 是作者提交前自查；receive-review 是收到审查反馈后处理           |
+| request-review | quality-gate 是前置门，PASS 后才能发起审查；request-review 是发起动作本身    |
+| code-review    | quality-gate 是自查（自己过门）；code-review 是双轴代码审查（他人/工具视角） |

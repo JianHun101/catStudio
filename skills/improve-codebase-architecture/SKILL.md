@@ -1,6 +1,6 @@
 ---
 name: improve-codebase-architecture
-description: Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick. Use when the user wants to improve architecture, find deep-module candidates, or review design debt. Not for designing one specific module's interface (use design-an-interface). Output an HTML report of candidates and a grilled improvement plan.
+description: Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick. Use when the user wants to improve architecture, find deep-module candidates, or review design debt. Not for designing one specific module's interface (use codebase-design). Output an HTML report of candidates and a grilled improvement plan.
 disable-model-invocation: true
 ---
 
@@ -67,7 +67,6 @@ Side effects happen inline as decisions crystallize — run the `/domain-modelin
 
 ## 与其他 skill 区别
 
-| skill               | 区别                                                                                                  |
-| ------------------- | ----------------------------------------------------------------------------------------------------- |
-| codebase-design     | improve-codebase-architecture 扫描全库找深化机会并 grill；codebase-design 提供深层/浅层判断的共享词汇 |
-| design-an-interface | improve-codebase-architecture 是全库级机会扫描；design-an-interface 是单模块接口的多方案设计          |
+| skill           | 区别                                                                                                  |
+| --------------- | ----------------------------------------------------------------------------------------------------- |
+| codebase-design | improve-codebase-architecture 扫描全库找深化机会并 grill；codebase-design 提供深层/浅层判断的共享词汇 |

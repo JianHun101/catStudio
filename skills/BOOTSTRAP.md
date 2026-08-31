@@ -16,34 +16,34 @@ skills/（唯一真相源）
 - 三方一致校验（阻塞）：`node scripts/skills-check-manifest.mjs`
 - 失效链接清理：`node scripts/skills-clean-stale.mjs`
 
-## 注册表（40 顶级 + 4 定制层）
+## 注册表（27 顶级 + 4 定制层）
 
 来源：`self` = 猫咖自研 / `mattpocock` = mattpocock 系 / `external` = 其他第三方（provenance 追踪）
 
-### 自研（self，4）
+### 自研（self，7）
 
-| skill          | 说明                                               |
-| -------------- | -------------------------------------------------- |
-| quality-gate   | 提交审查前自查门（审查链入口）                     |
-| request-review | 发起审查请求（审查链）                             |
-| receive-review | 处理审查反馈（审查链）                             |
-| vision-assist  | 项目 qwen3.5:9b 视觉管线（模型无法原生看图时路由） |
+| skill               | 说明                                                   |
+| ------------------- | ------------------------------------------------------ |
+| quality-gate        | 提交审查前自查门（审查链入口）                         |
+| request-review      | 发起审查请求（审查链）                                 |
+| receive-review      | 处理审查反馈（审查链，拒绝表演性同意 + P1/P2/P3 分级） |
+| vision-assist       | 项目 qwen3.5:9b 视觉管线（模型无法原生看图时路由）     |
+| on-site-project     | 驻场外部项目全流程方法论（集中+持久工作区）            |
+| break-tunnel-vision | 跳出牛角尖排障方法论                                   |
+| session-summary     | 生成 CatStudy 五段式会话总结（v1.1 起归自研维护）      |
 
-### mattpocock 系（mattpocock，20）
+### mattpocock 系（mattpocock，12）
 
-ask-matt · decision-mapping · edit-article · grill-me · grill-with-docs · handoff ·
-implement · improve-codebase-architecture · loop-me · prototype · setup-matt-pocock-skills ·
-teach · to-issues · to-prd · triage · ubiquitous-language · writing-beats ·
-writing-fragments · writing-great-skills · writing-shape
+grill-me · grill-with-docs · handoff · implement · improve-codebase-architecture ·
+prototype · to-spec · to-tickets · triage · wayfinder · writing-great-skills · code-review
 
-（session-summary 亦来自 mattpocock/skills，见 manifest；disable-model-invocation 为判定特征）
+（v1.1 主线：`grill-with-docs → to-spec → to-tickets → implement → code-review`；
+`to-spec`=旧 `to-prd` 改名、`to-tickets`=旧 `to-issues` 改名+并 `to-plan`、`wayfinder` 全新、`code-review` 取代旧 `review`）
 
-### 其他第三方（external，15）
+### 其他第三方（external，8）
 
-codebase-design · design-an-interface · diagnosing-bugs · domain-modeling ·
-git-guardrails-claude-code · grilling · migrate-to-shoehorn · obsidian-vault · qa ·
-request-refactor-plan · resolving-merge-conflicts · review · scaffold-exercises ·
-setup-pre-commit · tdd
+codebase-design · diagnosing-bugs · domain-modeling · git-guardrails-claude-code ·
+grilling · resolving-merge-conflicts · setup-pre-commit · tdd
 
 ### 项目定制层（catstudy/，4，self）
 
@@ -58,3 +58,8 @@ catstudy-quality-gate · catstudy-handoff · catstudy-request-review · catstudy
 第三方 skill 的同步来源/版本记录在 `skills/.sync-provenance.json`
 （gitignore 不入库，机器生成：source/commit/secret_scan 结果）。
 新增第三方 skill 准入：无来源登记 → `skills-check-manifest.mjs` 红示拦截。
+
+本次 v1.1 对齐：上游 `mattpocock/skills` tag `v1.1.0`；丢弃集 17（ask-matt · decision-mapping ·
+edit-article · obsidian-vault · design-an-interface · qa · request-refactor-plan ·
+ubiquitous-language · loop-me · migrate-to-shoehorn · review · scaffold-exercises ·
+setup-matt-pocock-skills · teach · writing-beats · writing-fragments · writing-shape）已删除。

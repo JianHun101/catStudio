@@ -3,10 +3,13 @@
 #
 # 来源标记（source，三方一致校验强制）：
 #   self       — 猫咖自研（本项目维护）
-#   mattpocock — 来自 mattpocock/skills 系（特征：disable-model-invocation 字段）
+#   mattpocock — 来自 mattpocock/skills 系（v1.1 主线按来源仓库登记）
 #   external   — 其他第三方来源（无版本溯源，需登记 provenance）
 # 判定口径说明：disable-model-invocation 是 mattpocock 技能集的标志性 frontmatter；
-# 无该字段的第三方技能统一标 external（来源待核，列入 .sync-provenance.json 追踪）。
+# v1.1 主线 skill（to-spec/to-tickets/wayfinder/code-review）按来源仓库标 mattpocock——
+# code-review 无 disable-model-invocation 字段仍标 mattpocock（店长裁决，追平 v1.1）；
+# session-summary 已转自研维护（不在 v1.1 树），归 self；
+# 其余无该字段的第三方技能统一标 external（来源待核，列入 .sync-provenance.json 追踪）。
 
 skills:
   # ── 自研（猫咖定制，参与审查流程链）──
@@ -82,7 +85,7 @@ skills:
     use_when: |
       work is complete and verified, quality-gate passed, and a review is needed.
     not_for: |
-      reviewing code yourself (use review), receiving feedback (use receive-review), or requesting before quality-gate passes.
+      reviewing code yourself (use code-review), receiving feedback (use receive-review), or requesting before quality-gate passes.
     category: '审查流程'
     description: |
       打包完成的工作并发送审查请求。
@@ -124,15 +127,15 @@ skills:
       - 'refs/shared-rules.md'
 
   session-summary:
-    source: mattpocock
+    source: self
     use_when: |
       the session's work is finished and the user wants a summary document.
     not_for: |
       handing work to another agent across sessions (use handoff), or a recap without the strict five-section format.
     category: '文档'
     description: |
-      已有技能（来自 mattpocock/skills）。
-      生成 CatStudy 格式的结构化会议总结。
+      自研技能：生成 CatStudy 格式的结构化会议总结
+      （What/Why/Tradeoff/Open Questions/Next Action 五段式，docs/sessions/ 留档）。
     triggers:
       - '总结'
       - 'session summary'
@@ -156,27 +159,9 @@ skills:
       - '截图'
     output: '图片内容描述'
 
-  # ── mattpocock 系（disable-model-invocation 特征）──
-  ask-matt:
+  # ── mattpocock 系（来源仓库 mattpocock/skills，v1.1 主线）──
+  code-review:
     source: mattpocock
-    use_when: |
-      you are unsure which skill or flow applies to the current request, or want a guided path through the available skills.
-    not_for: |
-      executing a specific skill directly.
-    category: '外部技能'
-  decision-mapping:
-    source: mattpocock
-    use_when: |
-      the idea is too fuzzy to build directly and questions need runnable answers.
-    not_for: |
-      ideas already concrete enough to implement.
-    category: '外部技能'
-  edit-article:
-    source: mattpocock
-    use_when: |
-      user wants to edit, revise, or improve an article draft.
-    not_for: |
-      shaping raw material into an article from scratch (use writing-shape), or writing new sections without a draft.
     category: '外部技能'
   grill-me:
     source: mattpocock
@@ -202,23 +187,16 @@ skills:
   implement:
     source: mattpocock
     use_when: |
-      the requirements are settled and the work is ready to build, ideally with a PRD and one issue in a fresh session.
+      the requirements are settled and the work is ready to build, ideally with a spec and one ticket in a fresh session.
     not_for: |
-      fuzzy ideas that still need investigation (use decision-mapping) or prototype exploration (use prototype).
+      fuzzy ideas that still need investigation (use wayfinder) or prototype exploration (use prototype).
     category: '外部技能'
   improve-codebase-architecture:
     source: mattpocock
     use_when: |
       the user wants to improve architecture, find deep-module candidates, or review design debt.
     not_for: |
-      designing one specific module's interface (use design-an-interface).
-    category: '外部技能'
-  loop-me:
-    source: mattpocock
-    use_when: |
-      the user wants to iterate on workflow or automation specs in this workspace until the definition of done is clear.
-    not_for: |
-      general plan interviews outside this workspace.
+      designing one specific module's interface (use codebase-design).
     category: '外部技能'
   prototype:
     source: mattpocock
@@ -227,61 +205,21 @@ skills:
     not_for: |
       production work — prototypes are throwaway by design (use implement).
     category: '外部技能'
-  setup-matt-pocock-skills:
+  to-spec:
     source: mattpocock
-    use_when: |
-      the engineering skills are installed and this repo is not yet configured for them.
-    not_for: |
-      a per-feature setup, or repos that already have an issue tracker configured.
     category: '外部技能'
-  teach:
+  to-tickets:
     source: mattpocock
-    use_when: |
-      the user wants to learn something and practice it in this workspace.
-    not_for: |
-      answering a one-off question without a lesson structure.
-    category: '外部技能'
-  to-issues:
-    source: mattpocock
-    use_when: |
-      a PRD is settled and the work needs to be split for parallel execution.
-    not_for: |
-      planning refactors (use request-refactor-plan), or writing the PRD itself (use to-prd).
-    category: '外部技能'
-  to-prd:
-    source: mattpocock
-    use_when: |
-      a design conversation has reached enough clarity to write down.
-    not_for: |
-      ideas still fuzzy (use decision-mapping or grilling first), or splitting into issues (use to-issues).
     category: '外部技能'
   triage:
     source: mattpocock
     use_when: |
       issues or PRs need routing, verification, or agent-ready briefs.
     not_for: |
-      conversationally filing new bugs (use qa), or skipping the triage state machine.
+      conversationally filing new bugs, or skipping the triage state machine.
     category: '外部技能'
-  ubiquitous-language:
+  wayfinder:
     source: mattpocock
-    use_when: |
-      user wants to define domain terms, build a glossary, harden terminology, create a ubiquitous language, or mentions "domain model" or "DDD".
-    not_for: |
-      maintaining the project's domain model (use domain-modeling).
-    category: '外部技能'
-  writing-beats:
-    source: mattpocock
-    use_when: |
-      raw material exists and needs structuring into a narrative journey.
-    not_for: |
-      raw mining with no structure yet (use writing-fragments), or shaping into final prose (use writing-shape).
-    category: '外部技能'
-  writing-fragments:
-    source: mattpocock
-    use_when: |
-      ideas are scattered and need capturing before any structure.
-    not_for: |
-      structuring existing material (use writing-beats), or editing a draft (use edit-article).
     category: '外部技能'
   writing-great-skills:
     source: mattpocock
@@ -289,13 +227,6 @@ skills:
       writing or editing a SKILL.md and want to apply proven skill-design principles.
     not_for: |
       invoking other skills, or one-off style advice without a skill to write.
-    category: '外部技能'
-  writing-shape:
-    source: mattpocock
-    use_when: |
-      beats are settled and the article needs final prose.
-    not_for: |
-      assembling beats from fragments (use writing-beats), or editing an existing draft (use edit-article).
     category: '外部技能'
 
   # ── 其他第三方（无来源特征，列入 provenance 追踪）──
@@ -305,13 +236,6 @@ skills:
       the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary.
     not_for: |
       implementing code or reviewing a finished diff.
-    category: '外部技能'
-  design-an-interface:
-    source: external
-    use_when: |
-      user wants to design an API, explore interface options, compare module shapes, or mentions "design it twice".
-    not_for: |
-      settling on a single design up front, or designing without requirements.
     category: '外部技能'
   diagnosing-bugs:
     source: external
@@ -341,54 +265,12 @@ skills:
     not_for: |
       plans already settled, or interviews that must also produce docs (use grill-with-docs).
     category: '外部技能'
-  migrate-to-shoehorn:
-    source: external
-    use_when: |
-      user mentions shoehorn, wants to replace `as` in tests, or needs partial test data.
-    not_for: |
-      production code assertions, or test code already using fromPartial/fromAny.
-    category: '外部技能'
-  obsidian-vault:
-    source: external
-    use_when: |
-      user wants to find, create, or organize notes in Obsidian.
-    not_for: |
-      note-taking outside the vault, or general file management.
-    category: '外部技能'
-  qa:
-    source: external
-    use_when: |
-      user wants to report bugs, do QA, file issues conversationally, or mentions "QA session".
-    not_for: |
-      triaging already-filed issues (use triage), or bug diagnosis (use diagnosing-bugs).
-    category: '外部技能'
-  request-refactor-plan:
-    source: external
-    use_when: |
-      user wants to plan a refactor, create a refactoring RFC, or break a refactor into safe incremental steps.
-    not_for: |
-      implementing the refactor itself (use implement), or one-shot rewrites.
-    category: '外部技能'
   resolving-merge-conflicts:
     source: external
     use_when: |
       you need to resolve an in-progress git merge/rebase conflict.
     not_for: |
       preventing destructive git operations (use git-guardrails-claude-code), or general git questions.
-    category: '外部技能'
-  review:
-    source: external
-    use_when: |
-      the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
-    not_for: |
-      sending your own work for review (use request-review), or reviewing without a fixed point.
-    category: '外部技能'
-  scaffold-exercises:
-    source: external
-    use_when: |
-      user wants to scaffold exercises, create exercise stubs, or set up a new course section.
-    not_for: |
-      writing course content beyond the scaffold.
     category: '外部技能'
   setup-pre-commit:
     source: external
@@ -408,7 +290,7 @@ skills:
 # ── 项目定制层（catstudy/，随迁保留，一期不切路由）──
 # 4 个 catstudy-* 定制 skill 与顶级同名 skill 是两套不同定义：
 # 当前 manifest 路由顶级通用版；定制版转正评估列二期。
-# catstudy/ 内部条目不参与顶级计数（40/40），由 check-manifest 单独校验前缀。
+# catstudy/ 内部条目不参与顶级计数（27/27），由 check-manifest 单独校验前缀。
 catstudy:
   # merged_from：合并来源登记（catstudy 定制层随迁保留，转正评估列二期）
   catstudy-quality-gate:

@@ -293,7 +293,7 @@ async function main() {
   if (errors.length > 0) {
     console.error(`❌ manifest 三方一致校验失败（${errors.length} 项）`)
     for (const e of errors) console.error(`   - ${e}`)
-    console.error(`   登记 ${manifestSkills.length}/${total}（期望 40/40）`)
+    console.error(`   登记 ${manifestSkills.length}/${total}（期望 ${total}/${total} 全覆盖）`)
     process.exit(1)
   }
   const uwDeclared = manifestSkills.filter((s) => manifest[s].use_when !== undefined).length

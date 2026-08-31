@@ -14,4 +14,3 @@ If a question can be answered by exploring the codebase, explore the codebase in
 | skill                      | 区别                                                                                                                                          |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | grill-me / grill-with-docs | grilling 是通用版访谈 skill；grill-me/grill-with-docs 是 mattpocock 同名变体（后者附带文档产出）——触发词 'grill' 命中时优先按用户语境选具体版 |
-| loop-me                    | grilling 面向任意计划；loop-me 特化于「本工作区要构建的 workflow 规格」                                                                       |

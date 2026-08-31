@@ -1,6 +1,6 @@
 ---
 name: request-review
-description: 打包完成的工作并发送审查请求。使用 refs/review-request-template.md 模板，按照审查配对规则选择审查者。Use when work is complete and verified, quality-gate passed, and a review is needed. Not for reviewing code yourself (use review), receiving feedback (use receive-review), or requesting before quality-gate passes. Output a review request document in template format, @mentioning the paired reviewer.
+description: 打包完成的工作并发送审查请求。使用 refs/review-request-template.md 模板，按照审查配对规则选择审查者。Use when work is complete and verified, quality-gate passed, and a review is needed. Not for reviewing code yourself (use code-review), receiving feedback (use receive-review), or requesting before quality-gate passes. Output a review request document in template format, @mentioning the paired reviewer.
 ---
 
 # request-review
@@ -48,6 +48,8 @@ description: 打包完成的工作并发送审查请求。使用 refs/review-req
 - **Reviewer Checklist**：需要审查者确认的检查项
 - **Self-Check Evidence**：quality-gate 报告摘要 + 测试结果
 
+Reviewer Checklist 按**双轴审查**（code-review 方法论）设检查项：Standards 轴（是否符合 CODING_STANDARDS，文档规范优先于坏味道基线）+ Spec 轴（是否忠实实现发起它的 spec/issue，无缺失/无范围蔓延）；并提示审查者「硬违规与判断标签分开报、每条附具体文件/行」。
+
 ### 步骤 3：选择审查者
 
 按照 `refs/shared-rules.md` 中的审查配对规则：
@@ -86,12 +88,13 @@ description: 打包完成的工作并发送审查请求。使用 refs/review-req
 | 一条消息里 @审查者 又 @架构师                   | 一条回复只 @ 一个 agent，两个动作拆两条消息                                                          |
 | 自查没过就发审查请求                            | quality-gate PASS + 测试/lint 全绿是硬前置条件                                                       |
 | Open Questions 不点名文件，丢给审查者全 diff 找 | 每条 OQ 点名具体文件/符号，把搜索空间缩到点名的位置                                                  |
+| Reviewer Checklist 只写「看下有没有问题」       | 按双轴设检查项（Standards 规范 + Spec 需求逐条），并附证据要求                                       |
 
 ## 与其他 skill 区别
 
 | skill          | 区别                                                                                     |
 | -------------- | ---------------------------------------------------------------------------------------- |
 | handoff        | 审查请求是完成工作的质量闸门；handoff 是跨会话/跨 agent 的上下文交接文档，与审查流程无关 |
-| review         | request-review 是发起审查（打包工作+选择审查者）；review 是执行双轴代码审查              |
+| code-review    | request-review 是发起审查（打包工作+选择审查者）；code-review 是执行双轴代码审查         |
 | receive-review | 互为对端：request-review 发出请求，receive-review 处理返回的反馈                         |
 | quality-gate   | request-review 的前置条件，PASS 后才能发起                                               |

@@ -42,8 +42,9 @@
 
 ## Reviewer Checklist
 
-- [ ] {检查项1}
-- [ ] {检查项2}
+- [ ] Standards 轴：符合 CODING_STANDARDS.md（文档化规范优先于坏味道基线；工具已强制的跳过）
+- [ ] Spec 轴：忠实实现发起它的 spec/issue（无缺失、无范围蔓延、无错误实现）
+- [ ] 硬违规与判断标签分开报（文档规范违规可硬；坏味道是判断标签）
 - [ ] {检查项3}
 
 ## Self-Check Evidence

@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Move issues and external PRs through a state machine of triage roles — categorise, verify, grill if needed, and write agent-ready briefs. Use when issues or PRs need routing, verification, or agent-ready briefs. Not for conversationally filing new bugs (use qa), or skipping the triage state machine. Output triaged issues/PRs with categories and briefs.
+description: Move issues and external PRs through a state machine of triage roles — categorise, verify, grill if needed, and write agent-ready briefs. Use when issues or PRs need routing, verification, or agent-ready briefs. Not for conversationally filing new bugs, or skipping the triage state machine. Output triaged issues/PRs with categories and briefs.
 disable-model-invocation: true
 ---
 
@@ -40,7 +40,7 @@ For a PR, the same states read against the attached code: `ready-for-agent` mean
 
 Every triaged issue should carry exactly one category role and one state role. If state roles conflict, flag it and ask the maintainer before doing anything else.
 
-These are canonical role names — the actual label strings used in the issue tracker may differ. The mapping should have been provided to you - run `/setup-matt-pocock-skills` if not.
+These are canonical role names — the actual label strings used in the issue tracker may differ. The mapping should have been provided to you as part of the issue-tracker config.
 
 State transitions: an unlabeled issue normally goes to `needs-triage` first; from there it moves to `needs-info`, `ready-for-agent`, `ready-for-human`, or `wontfix`. `needs-info` returns to `needs-triage` once the reporter replies. The maintainer can override at any time — flag transitions that look unusual and ask before proceeding.
 
@@ -113,7 +113,4 @@ If prior triage notes exist on the issue or PR, read them, check whether the rep
 
 ## 与其他 skill 区别
 
-| skill                 | 区别                                                                   |
-| --------------------- | ---------------------------------------------------------------------- |
-| qa                    | triage 对已存在的 issue/PR 做状态机分诊；qa 从口头汇报直接代提新 issue |
-| request-refactor-plan | triage 面向 issue 流转；request-refactor-plan 面向重构计划的产出       |
+无近似 skill——triage 面向 issue/PR 的状态机分诊；一次性的 bug 汇报与代提 issue 不再单独成 skill（v1.1 起 qa 已废弃），口头报 bug 的定位排查走 diagnosing-bugs。

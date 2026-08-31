@@ -92,7 +92,6 @@ This will run through the new pre-commit hooks — a good smoke test that everyt
 
 ## 与其他 skill 区别
 
-| skill                      | 区别                                                                                                            |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| git-guardrails-claude-code | setup-pre-commit 装格式化/测试钩子（Husky + lint-staged）；git-guardrails 装阻止危险 git 命令的防御钩子         |
-| setup-matt-pocock-skills   | setup-pre-commit 只配置提交钩子；setup-matt-pocock-skills 初始化整个工程技能环境（issue tracker/标签/文档布局） |
+| skill                      | 区别                                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------------------- |
+| git-guardrails-claude-code | setup-pre-commit 装格式化/测试钩子（Husky + lint-staged）；git-guardrails 装阻止危险 git 命令的防御钩子 |

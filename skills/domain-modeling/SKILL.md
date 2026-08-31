@@ -75,6 +75,4 @@ If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](
 
 ## 与其他 skill 区别
 
-| skill               | 区别                                                                                                                    |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| ubiquitous-language | domain-modeling 维护项目领域模型（CONTEXT.md/ADR）；ubiquitous-language 从对话提取一次性术语表存 UBIQUITOUS_LANGUAGE.md |
+无近似 skill——domain-modeling 是领域模型的主动维护（术语/ADR）；一次性的术语提取与模型维护统一走本 skill。

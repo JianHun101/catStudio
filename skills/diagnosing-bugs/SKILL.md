@@ -135,8 +135,7 @@ Required before declaring done:
 
 ## 与其他 skill 区别
 
-| skill  | 区别                                                                                    |
-| ------ | --------------------------------------------------------------------------------------- |
-| tdd    | diagnosing-bugs 面向已有 bug 的反馈循环排查；tdd 是从零以 test-first 构建功能           |
-| qa     | qa 是用户口头报 bug、agent 代提 GitHub issue；diagnosing-bugs 是拿到 bug 后实际定位根因 |
-| review | review 审查 diff 是否符合标准/规格；diagnosing-bugs 修的是运行时行为错误                |
+| skill       | 区别                                                                          |
+| ----------- | ----------------------------------------------------------------------------- |
+| tdd         | diagnosing-bugs 面向已有 bug 的反馈循环排查；tdd 是从零以 test-first 构建功能 |
+| code-review | code-review 审查 diff 是否符合标准/规格；diagnosing-bugs 修的是运行时行为错误 |

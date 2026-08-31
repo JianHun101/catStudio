@@ -32,7 +32,6 @@ The _answer_ is the only thing worth keeping from a prototype. Capture it somewh
 
 ## 与其他 skill 区别
 
-| skill               | 区别                                                                              |
-| ------------------- | --------------------------------------------------------------------------------- |
-| implement           | prototype 是一次性代码、回答设计问题后即弃；implement 是满足 PRD/issue 的生产实现 |
-| design-an-interface | prototype 用可运行代码验证设计；design-an-interface 用并行 sub-agent 生成设计对比 |
+| skill     | 区别                                                                                |
+| --------- | ----------------------------------------------------------------------------------- |
+| implement | prototype 是一次性代码、回答设计问题后即弃；implement 是满足 spec/ticket 的生产实现 |

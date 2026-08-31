@@ -117,5 +117,4 @@ Good interfaces make testing natural:
 
 | skill                         | 区别                                                                                                       |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| design-an-interface           | codebase-design 提供深层模块设计的共享词汇；design-an-interface 用并行 sub-agent 生成多个接口设计          |
 | improve-codebase-architecture | codebase-design 是词汇/原则参考；improve-codebase-architecture 是扫描全库产出 HTML 报告并 grill 选中的机会 |
