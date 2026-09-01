@@ -64,8 +64,10 @@ export interface CreatePrInput {
   head: string
   /** PR title */
   title: string
-  /** PR body；可选——缺省不传 --body（不注入任何 AC checklist） */
-  body?: string
+  /** PR body——必填。非交互 gh pr create 要求 --title 与 --body 齐给（或 --fill），
+   *  body 可选契约与真实 gh 冲突（真机实测：缺 --body 直接 exit 1）；
+   *  仍不含任何 AC checklist（用户已裁定新开发流程未定、AC 无根不做）。 */
+  body: string
 }
 
 export type CreatePrResult =
@@ -90,8 +92,11 @@ function extractErr(err: any): string {
  * 创建 PR（核心）。三步：
  * ① gh auth status —— 未授权 → not-authed（前置拦截，不走到 pr create 才报）
  * ② git ls-remote --exit-code origin <head> —— 远端无该分支 → branch-not-pushed
- * ③ gh pr create --base <base> --head <head> --title <title> [--body <body>] --json number,url
- *    → 解析结构化 JSON 得 { number, url }（避免手工正则解析 URL）。
+ * ③ gh pr create --base <base> --head <head> --title <title> --body <body>
+ *    → stdout 为裸 URL（实测 `https://github.com/<org>/<repo>/pull/<num>\n`），
+ *      trim 后解析末段 /pull/<num> 得 number → { number, url }。
+ *    gh pr create 不接受 --json（真机实测——--json 只在 gh pr view 等查询命令有），
+ *    故不做结构化输出，解析裸 URL。
  * gh pr create 对同 head 分支已存在的 PR 会复用并输出已有 PR 的 URL（幂等）。
  */
 export async function createPr(input: CreatePrInput): Promise<CreatePrResult> {
@@ -129,9 +134,7 @@ export async function createPr(input: CreatePrInput): Promise<CreatePrResult> {
     return { ok: false, reason: 'branch-not-pushed', error: extractErr(err) }
   }
 
-  const args = ['pr', 'create', '--base', base, '--head', head, '--title', title]
-  if (body) args.push('--body', body)
-  args.push('--json', 'number,url')
+  const args = ['pr', 'create', '--base', base, '--head', head, '--title', title, '--body', body]
 
   let stdout: string
   try {
@@ -147,18 +150,19 @@ export async function createPr(input: CreatePrInput): Promise<CreatePrResult> {
     return { ok: false, reason: 'create-failed', error: extractErr(err) }
   }
 
-  try {
-    const parsed = JSON.parse(stdout) as { number?: unknown; url?: unknown }
-    if (typeof parsed.number !== 'number' || typeof parsed.url !== 'string') {
-      throw new Error('unexpected shape')
-    }
-    log.info('PR created', { number: parsed.number, url: parsed.url, base, head })
-    return { ok: true, number: parsed.number, url: parsed.url }
-  } catch {
+  // stdout = 裸 URL（实测 `https://github.com/<org>/<repo>/pull/<num>\n`）。
+  // trim 后解析末段 /pull/<num> 得 number；形状不匹配（非 URL / 空输出）→ create-failed 不静默。
+  const url = stdout.trim()
+  const m = url.match(/\/pull\/(\d+)\/?$/)
+  if (!m) {
+    log.error('gh pr create 输出无法解析', { base, head, stdout: url })
     return {
       ok: false,
       reason: 'create-failed',
-      error: `gh 输出无法解析为 { number, url }: ${stdout.trim()}`,
+      error: `gh pr create 输出无法解析 PR URL: ${url || '(空输出)'}`,
     }
   }
+  const number = Number(m[1])
+  log.info('PR created', { number, url, base, head })
+  return { ok: true, number, url }
 }

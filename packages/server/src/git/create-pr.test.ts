@@ -5,6 +5,10 @@
  * 真实 gh/git 绝不在测试环境执行）与 `../llm/git-utils.js`（getMainRepoRoot 返回假主仓库根、
  * cleanGitEnv 空 env）。按 `cmd + args[0]` 分发 mock 响应（gh auth / git ls-remote / gh pr），
  * 断言 createPr 的参数组装与全部错误分支。
+ *
+ * 关键：mock 断言的是「真实 gh 接受的形式」而非「代码自证」——gh pr create 不接受 --json
+ * （真机实测，--json 只在查询命令有）、非交互必须 --title + --body 齐给、成功 stdout 是裸 URL
+ * `https://github.com/<org>/<repo>/pull/<num>\n`。测试据此 mock，不 mock 出不存在的 gh 行为。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { execFile } from 'node:child_process'
@@ -71,12 +75,12 @@ describe('createPr', () => {
       'gh auth': () => ({ stdout: 'logged in to github.com' }),
       'git ls-remote': () => ({ stdout: 'abc123\trefs/heads/feat-x\n' }),
       'gh pr': () => ({
-        stdout: '{"number":123,"url":"https://github.com/org/repo/pull/123"}',
+        stdout: 'https://github.com/org/repo/pull/123\n',
       }),
     })
   })
 
-  it('成功：gh pr create 参数完整（--base dev --head --title --body）+ 返回 { number, url }', async () => {
+  it('成功：gh pr create 参数完整（--base dev --head --title --body，无 --json）+ 裸 URL 解析 { number, url }', async () => {
     const { createPr } = await import('./create-pr.js')
     const res = await createPr({
       head: 'feat-x',
@@ -100,8 +104,6 @@ describe('createPr', () => {
       'feat: 新功能',
       '--body',
       '改动说明',
-      '--json',
-      'number,url',
     ])
     // 所有命令都在主仓库根执行（任意位置调用均安全）
     for (const call of vi.mocked(execFile).mock.calls) {
@@ -109,9 +111,9 @@ describe('createPr', () => {
     }
   })
 
-  it('base 显式传值覆盖默认 dev；body 缺省不传 --body', async () => {
+  it('base 显式传值覆盖默认 dev', async () => {
     const { createPr } = await import('./create-pr.js')
-    const res = await createPr({ base: 'main', head: 'feat-y', title: 'T' })
+    const res = await createPr({ base: 'main', head: 'feat-y', title: 'T', body: 'B' })
 
     expect(res).toEqual({ ok: true, number: 123, url: 'https://github.com/org/repo/pull/123' })
     expect(lastArgs('gh', 'pr')).toEqual([
@@ -123,8 +125,8 @@ describe('createPr', () => {
       'feat-y',
       '--title',
       'T',
-      '--json',
-      'number,url',
+      '--body',
+      'B',
     ])
   })
 
@@ -134,7 +136,7 @@ describe('createPr', () => {
     })
     const { createPr } = await import('./create-pr.js')
 
-    const res = await createPr({ head: 'feat-x', title: 'T' })
+    const res = await createPr({ head: 'feat-x', title: 'T', body: 'B' })
 
     expect(res).toEqual({
       ok: false,
@@ -153,7 +155,7 @@ describe('createPr', () => {
     })
     const { createPr } = await import('./create-pr.js')
 
-    const res = await createPr({ head: 'feat-x', title: 'T' })
+    const res = await createPr({ head: 'feat-x', title: 'T', body: 'B' })
 
     // stderr 空 → 兜底 err.message（ls-remote --exit-code 分支不存在时 exit 2、stderr 常为空）
     expect(res).toEqual({
@@ -175,7 +177,7 @@ describe('createPr', () => {
     })
     const { createPr } = await import('./create-pr.js')
 
-    const res = await createPr({ head: 'feat-x', title: 'T' })
+    const res = await createPr({ head: 'feat-x', title: 'T', body: 'B' })
 
     expect(res).toEqual({
       ok: false,
@@ -184,7 +186,7 @@ describe('createPr', () => {
     })
   })
 
-  it('gh pr create stdout 非合法 JSON → create-failed 报错不静默', async () => {
+  it('gh pr create stdout 非 PR URL → create-failed 报错不静默', async () => {
     stubExec({
       'gh auth': () => ({ stdout: 'ok' }),
       'git ls-remote': () => ({ stdout: 'abc123\trefs/heads/feat-x\n' }),
@@ -192,12 +194,12 @@ describe('createPr', () => {
     })
     const { createPr } = await import('./create-pr.js')
 
-    const res = await createPr({ head: 'feat-x', title: 'T' })
+    const res = await createPr({ head: 'feat-x', title: 'T', body: 'B' })
 
     expect(res.ok).toBe(false)
     if (!res.ok) {
       expect(res.reason).toBe('create-failed')
-      expect(res.error).toContain('gh 输出无法解析')
+      expect(res.error).toContain('无法解析 PR URL')
       expect(res.error).toContain('unexpected output')
     }
   })
@@ -221,7 +223,7 @@ describe('createPr', () => {
     }) as any)
     const { createPr } = await import('./create-pr.js')
 
-    const res = await createPr({ head: 'feat-x', title: 'T' })
+    const res = await createPr({ head: 'feat-x', title: 'T', body: 'B' })
 
     expect(res).toEqual({ ok: false, reason: 'not-authed', error: 'spawn gh ENOENT' })
   })
@@ -231,7 +233,7 @@ describe('createPr', () => {
     vi.mocked(getMainRepoRoot).mockReturnValue(null)
     const { createPr } = await import('./create-pr.js')
 
-    const res = await createPr({ head: 'feat-x', title: 'T' })
+    const res = await createPr({ head: 'feat-x', title: 'T', body: 'B' })
 
     expect(res.ok).toBe(false)
     if (!res.ok) {
