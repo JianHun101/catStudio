@@ -53,7 +53,7 @@ describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配
     expect(source).toContain('loadBindings()')
     expect(source).toContain('refresh()')
     expect(source).toContain('loadConfig()')
-    expect(source).toContain('loadContextConfig()')
+    expect(source).toContain('initCtxConfig()')
     expect(source).toContain('loadSummaryConfig()')
   })
 })
@@ -346,15 +346,21 @@ describe('SettingsView 系统配置（context 阈值——单 A 契约 GET/POST 
     expect(source).toContain('ctxMaxDisplay()')
   })
 
-  it('GET 失败 → 默认值 + 禁用态提示，不白屏（API 未就绪兜底）', () => {
-    expect(source).toContain('api.getContextConfig()')
-    expect(source).toMatch(/ctxError[\s\S]*已使用默认值（告警 80% \/ 交接 90%）/)
-    expect(source).toContain('ctxDisabled.value = true')
-    expect(source).toContain(':disabled="ctxDisabled || ctxSaving"')
+  it('C8 收敛：表单草稿从 store.contextConfig 初始化（store 未就绪经 store.fetchContextConfig 拉取）', () => {
+    // C8 病根修复：SettingsView 不再直接 api.getContextConfig——store 是唯一拉取源，
+    // store.contextConfig 即 ChatPanel 横幅 live 读的那份（保存后同源同步，横幅即刷）。
+    expect(source).toContain('initCtxConfig')
+    expect(source).toContain('!store.dataReady')
+    expect(source).toContain('await store.fetchContextConfig()')
+    expect(source).toContain('store.contextConfig.warnThreshold')
+    expect(source).not.toContain('api.getContextConfig()')
+    expect(source).not.toContain('loadContextConfig()')
+    expect(source).not.toContain('ctxDisabled')
   })
 
-  it('保存 → POST 全量带两阈值；校验 0<t<1 且 warn≤handoff（不通过不发请求）', () => {
-    expect(source).toContain('await api.saveContextConfig({')
+  it('保存 → 经 store.saveContextConfig POST 全量带两阈值；校验 0<t<1 且 warn≤handoff（不通过不发请求）', () => {
+    // C8：保存经 store 单点（POST → 写回 store.contextConfig → 返回更新值回写表单草稿）
+    expect(source).toContain('await store.saveContextConfig({')
     expect(source).toContain('warnThreshold: warnThreshold.value')
     expect(source).toContain('handoffThreshold: handoffThreshold.value')
     expect(source).toMatch(/warnThreshold\.value > 0 && warnThreshold\.value < 1/)
@@ -362,7 +368,7 @@ describe('SettingsView 系统配置（context 阈值——单 A 契约 GET/POST 
     expect(source).toContain('告警阈值不能高于交接阈值')
   })
 
-  it('保存成功 → 响应回写最新全量 + 提示', () => {
+  it('保存成功 → 响应回写最新全量 + 提示（新阈值立即生效）', () => {
     expect(source).toContain('res.maxContextTokens')
     expect(source).toContain('ctxSaved')
     expect(source).toContain('已保存——新阈值立即生效')

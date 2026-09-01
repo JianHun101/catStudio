@@ -27,6 +27,7 @@ const mockDeleteAgent = vi.fn()
 const mockUpdateAgent = vi.fn()
 const mockMarkSessionRead = vi.fn().mockResolvedValue({ ok: true })
 const mockGetContextConfig = vi.fn()
+const mockSaveContextConfig = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -38,6 +39,7 @@ vi.mock('@/composables/useApi', () => ({
     updateAgent: mockUpdateAgent,
     markSessionRead: mockMarkSessionRead,
     getContextConfig: mockGetContextConfig,
+    saveContextConfig: mockSaveContextConfig,
   },
 }))
 
@@ -135,6 +137,46 @@ describe('chatStore', () => {
     it('失败 → 静默回退默认 0.8 / 0.9，不抛错', async () => {
       mockGetContextConfig.mockRejectedValue(new Error('network'))
       await expect(store.fetchContextConfig()).resolves.toBeUndefined()
+      expect(store.contextConfig).toEqual({
+        warnThreshold: 0.8,
+        handoffThreshold: 0.9,
+        maxContextTokens: 128000,
+      })
+    })
+  })
+
+  describe('saveContextConfig', () => {
+    it('成功 → 调 API + 写回 contextConfig（C8：ChatPanel 横幅 live 读它即刷新）+ 返回更新值', async () => {
+      mockSaveContextConfig.mockResolvedValue({
+        warnThreshold: 0.85,
+        handoffThreshold: 0.95,
+        maxContextTokens: 128000,
+      })
+      const res = await store.saveContextConfig({
+        warnThreshold: 0.85,
+        handoffThreshold: 0.95,
+      })
+      expect(mockSaveContextConfig).toHaveBeenCalledWith({
+        warnThreshold: 0.85,
+        handoffThreshold: 0.95,
+      })
+      expect(store.contextConfig).toEqual({
+        warnThreshold: 0.85,
+        handoffThreshold: 0.95,
+        maxContextTokens: 128000,
+      })
+      expect(res).toEqual({
+        warnThreshold: 0.85,
+        handoffThreshold: 0.95,
+        maxContextTokens: 128000,
+      })
+    })
+
+    it('失败 → 抛错不静默，contextConfig 保持原值（保存失败必须让用户知道）', async () => {
+      mockSaveContextConfig.mockRejectedValue(new Error('400 bad'))
+      await expect(
+        store.saveContextConfig({ warnThreshold: 0.85, handoffThreshold: 0.95 })
+      ).rejects.toThrow('400 bad')
       expect(store.contextConfig).toEqual({
         warnThreshold: 0.8,
         handoffThreshold: 0.9,

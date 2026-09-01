@@ -10,7 +10,7 @@ import type {
   SendMessageAck,
 } from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
-import { api } from '@/composables/useApi'
+import { api, type ContextConfig } from '@/composables/useApi'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('chatStore')
@@ -499,6 +499,21 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /**
+   * 保存 context 阈值配置（POST /api/config/context → 写回 store.contextConfig）。
+   * store.contextConfig 是 ChatPanel 横幅色阶 live 读的唯一事实源——保存后写回它，
+   * 横幅立即刷新（C8 修复「设置页保存后横幅不刷新」：此前 SettingsView 只更新本地 ref）。
+   * 失败向上抛（SettingsView 捕获显示错误），不静默——保存失败必须让用户知道。
+   */
+  async function saveContextConfig(data?: {
+    warnThreshold?: number
+    handoffThreshold?: number
+  }): Promise<ContextConfig> {
+    const updated = await api.saveContextConfig(data ?? {})
+    contextConfig.value = updated
+    return updated
+  }
+
   /** 创建新会话（通过 REST API） */
   async function createSession(title: string, agentIds: string[]): Promise<void> {
     const session = await api.createSession({ title, agentIds })
@@ -863,6 +878,7 @@ export const useChatStore = defineStore('chat', () => {
     interruptAgent,
     fetchAgentStats,
     fetchContextConfig,
+    saveContextConfig,
     agentTokenStats,
     contextTokens,
     contextConfig,
