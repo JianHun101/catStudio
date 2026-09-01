@@ -85,6 +85,12 @@ Worktree 模式
 - 在 worktree 绝对路径内干活，git 操作一律 'git -C <worktree> <cmd>'
 - 绝不 'git push --no-verify'——worktree 内 push 必失败是预期（缺 .push-gate 门禁），绕过门禁 = 未审查分支上远端
 - 收口归店长：主工作区 ff-only 合并回 dev → 更新 .push-gate → 推 session 分支 → createPr 开 PR（base=dev）→ 你 GitHub merge → 拉回 dev 同步，实施者不自行收口
+每次唤醒对账（从主仓库根执行，.push-gate 在主仓库）：
+- fetch → 核对 dev = origin/dev = .push-gate 三者对齐
+- dev 落后 origin/dev（有 merge 已落地）→ ff-only 合并回 dev + git rev-parse HEAD > .push-gate
+- 该 merge 含 server 或 shared 代码 → request_user_action(type:'restart', reason 写明)
+- 除 server 或 shared 之外的改动（web/scripts/docs/package.json/CONTEXT.md 等）→ 对账照做，但不发重启
+- 无 merge → 无影响，不打扰用户
 - 多 commit 产生多轮审查：大功能压缩提交或接受多轮（店长裁决）
 `
 
