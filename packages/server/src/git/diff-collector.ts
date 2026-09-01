@@ -93,8 +93,7 @@ interface BlockAccumulator {
 
 /**
  * 把一段 unified diff 文本（含 `diff --git` 头）按文件切块追加到累计器。
- * 截断逻辑（200/500 行）与 collectCommitDiffs 同款——collectCommitDiffs
- * 与 collectPushDiffs 共用，避免双份漂移。
+ * 截断逻辑（200/500 行）——collectCommitDiffs 的唯一 diff 切块管线。
  */
 function appendDiffText(acc: BlockAccumulator, text: string): void {
   const sections = text.split(/^diff --git /m).slice(1)
@@ -176,88 +175,6 @@ export async function collectCommitDiffs(uuid: string): Promise<RichBlock[] | nu
   }
 
   return acc.blocks.length > 0 ? acc.blocks : null
-}
-
-/** push 审批的 commit 条目（sha + subject + body，来自 git log origin/dev..dev） */
-export interface PushCommit {
-  sha: string
-  subject: string
-  /** commit 正文（git %b：subject 之后的完整正文；无正文时为空字符串） */
-  body: string
-}
-
-/** collectPushDiffs 结果——commits + 合并 diff 富文本块（无可推提交时 blocks 为 null） */
-export interface PushDiffData {
-  commits: PushCommit[]
-  blocks: RichBlock[] | null
-}
-
-/**
- * 实时采集「待推送」的 commits + 合并 diff（push 审批面板数据源）。
- *
- * 语义：git log origin/dev..dev（未推送的提交）+ git diff origin/dev..dev
- * （合并 diff）——**服务端实时采集，拒绝店长手工塞 diff**（手工塞与真实提交
- * 无绑定，内容可漂移）。
- *
- * 失败语义（git 调用失败/超时/origin/dev 不存在）→ 返回 null，不阻塞回复
- * （与 collectCommitDiffs 同款 fire-and-forget）。同步时（dev == origin/dev）
- * → commits 空 + blocks null（前端显示「已同步」）。
- */
-export async function collectPushDiffs(): Promise<PushDiffData | null> {
-  // ① 前置 fetch：刷新本地 origin/dev ref（不 fetch 则 origin/dev 可能滞后于远端真实状态，
-  // 导致「本地已推送但 diff 仍显示未推」/漏报远端已合并的提交）。best-effort——
-  // fetch 失败不影响后续 log/diff 采集（仍基于本地已有 ref 对比），不阻塞回复。
-  try {
-    await runGit(['fetch', 'origin'])
-  } catch (err: any) {
-    log.warn('git fetch origin failed (push diffs still using local refs)', {
-      error: err?.message,
-    })
-  }
-
-  // ① commits：sha + subject + body（%x1e 记录分隔 + %x09 字段分隔——
-  //    body 含多行换行，若沿用 \n 逐行 split 会把正文切碎；%x1e 是单字节 RS，
-  //    body 内换行不破坏记录边界）
-  let logText: string
-  try {
-    logText = await runGit(['log', 'origin/dev..dev', '--format=%H%x09%s%x09%b%x1e'])
-  } catch (err: any) {
-    log.warn('git log origin/dev..dev failed (push diffs skipped)', {
-      error: err?.message,
-    })
-    return null
-  }
-  const commits: PushCommit[] = logText
-    .split('\x1e')
-    .map((r) => r.trim())
-    .filter(Boolean)
-    .map((r) => {
-      // 记录形如 `<sha>\t<subject>\t<body>`；subject/body 含 \t 极罕见
-      // （subject 沿用既有「按首个 tab 拆」约定），body 多行换行保留
-      const tab1 = r.indexOf('\t')
-      if (tab1 < 0) return { sha: r, subject: '', body: '' }
-      const sha = r.slice(0, tab1)
-      const rest = r.slice(tab1 + 1)
-      const tab2 = rest.indexOf('\t')
-      if (tab2 < 0) return { sha, subject: rest, body: '' }
-      return { sha, subject: rest.slice(0, tab2), body: rest.slice(tab2 + 1).trim() }
-    })
-
-  // ② 合并 diff：统一 3 上下文行、无颜色，按文件切块（同 collectCommitDiffs 管线）
-  let diffText: string
-  try {
-    diffText = await runGit(['diff', 'origin/dev..dev', '--unified=3', '--no-color'])
-  } catch (err: any) {
-    log.warn('git diff origin/dev..dev failed (push diffs skipped)', {
-      error: err?.message,
-    })
-    return null
-  }
-  const acc: BlockAccumulator = { blocks: [], totalLines: 0, totalTruncated: false }
-  appendDiffText(acc, diffText)
-
-  log.info('push diffs collected', { commits: commits.length, files: acc.blocks.length })
-  return { commits, blocks: acc.blocks.length > 0 ? acc.blocks : null }
 }
 
 /**

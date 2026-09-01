@@ -16,6 +16,9 @@ skills/.sync-provenance.json
 dist/
 .vite/
 
+# 测试覆盖率报告（生成物；曾误跟踪——2026-09-01 起 untrack + 忽略，防 server auto-commit 卷回）
+coverage/
+
 # 数据库（本地数据不提交）
 *.db
 *.db-journal

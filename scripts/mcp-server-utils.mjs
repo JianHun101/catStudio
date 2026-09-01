@@ -90,14 +90,14 @@ export function validateQueryDbParams(args) {
 
 /**
  * request_user_action 参数校验（纯函数，供单测——scripts/mcp-server.test.js）。
- * 契约：type ∈ {restart, push, choice}（枚举就绪——choice 服务端当前 400「暂不支持」，
- * 渲染留第二步，管道先通；push 为 push 审批，仅店长可发）、reason 必填非空字符串、
- * options 可选数组（每项 { id: 非空字符串, label: 非空字符串 }，choice 用，restart/push 忽略）。
+ * 契约：type ∈ {restart, choice}（枚举就绪——choice 服务端当前 400「暂不支持」，
+ * 渲染留第二步，管道先通）、reason 必填非空字符串、
+ * options 可选数组（每项 { id: 非空字符串, label: 非空字符串 }，choice 用，restart 忽略）。
  * 服务端角色白名单与 type 支持面由 internal.ts 权威校验（400/403 层）——
  * 本层只校形状，与 validateQueryDbParams 同款分层。
  * 返回 { ok: true, type, reason, options } 或 { ok: false, reason }。
  */
-export const USER_REQUEST_TYPES = ['restart', 'push', 'choice']
+export const USER_REQUEST_TYPES = ['restart', 'choice']
 
 export function validateUserRequestParams(args) {
   const type = args?.type

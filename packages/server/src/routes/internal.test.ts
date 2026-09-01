@@ -1040,33 +1040,6 @@ describe('internal route-signals', () => {
         const signals = consumeUserRequestSignals('session-1', 'agent-store', 'msg-1')
         expect(signals[0].options).toBeUndefined()
       })
-
-      it('type=push → 200 + 信号 type=push 可消费（push 审批走 store 白名单同款）', async () => {
-        await mockActive()
-        const res = await app.inject({
-          method: 'POST',
-          url: '/api/internal/user-request',
-          payload: urBody({ type: 'push', reason: '收口待推送' }),
-          headers: { 'x-signal-token': VALID_TOKEN },
-        })
-        expect(res.statusCode).toBe(200)
-        expect(JSON.parse(res.body).ok).toBe(true)
-        const signals = consumeUserRequestSignals('session-1', 'agent-store', 'msg-1')
-        expect(signals).toHaveLength(1)
-        expect(signals[0]).toMatchObject({ type: 'push', reason: '收口待推送' })
-      })
-
-      it('type=push 非 store 角色 → 403（push 是本地↔共享不可逆边界，权限归店长）', async () => {
-        await mockActive()
-        const res = await app.inject({
-          method: 'POST',
-          url: '/api/internal/user-request',
-          payload: urBody({ type: 'push', agentId: 'agent-impl' }),
-          headers: { 'x-signal-token': VALID_TOKEN },
-        })
-        expect(res.statusCode).toBe(403)
-        expect(JSON.parse(res.body).reason).toContain('role=store')
-      })
     })
   })
 })

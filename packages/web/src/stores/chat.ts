@@ -89,15 +89,6 @@ export const useChatStore = defineStore('chat', () => {
   const restartStates = ref<Map<string, 'pending' | 'confirmed' | 'none'>>(new Map())
   /** 确认重启进行中（点击瞬间置位，ack / RESTART_STATUS / ERROR 到达后清除） */
   const confirmingRestartMessageId = ref<string | null>(null)
-  /**
-   * push 审批按钮状态（messageId → pending/pushing/done/failed/cancelled/none；none=隐藏按钮）。
-   * pushing/done/failed/cancelled 由服务端 PUSH_STATUS 事件驱动；none 为清除态。
-   */
-  const pushStates = ref<
-    Map<string, 'pending' | 'pushing' | 'done' | 'failed' | 'cancelled' | 'none'>
-  >(new Map())
-  /** 确认 push 进行中（点击瞬间置位，ack / PUSH_STATUS / ERROR 到达后清除） */
-  const confirmingPushMessageId = ref<string | null>(null)
   const pendingHandoffSummary = ref<string | null>(null) // handoff 摘要，等待 SESSION_HISTORY 到达后注入
   let handoffJoining = false // S8: 防止 handoff 重入（两次 SESSION_HANDOFF 先后到达时相互覆盖）
   /** 交接失败横幅数据（HANDOFF_FAILED 事件——摘要生成失败可见化；仅当前会话生效，收到新消息/切会话/手动关闭清除） */
@@ -414,43 +405,6 @@ export const useChatStore = defineStore('chat', () => {
     socket.emit(Events.RESTART_CANCEL, { messageId })
   }
 
-  /**
-   * 确认 push（执行 git push origin dev，不可逆边界——用户批准后才动作）。
-   * REST 迁移：push 确认是一次性请求/响应，HTTP 响应体本身就是 ack（不再走 socket——
-   * 根治「点确认 transport close」）。点击瞬间乐观置位（按钮「推送中…」，不等服务端即有反馈）；
-   * ok → done（「已推送」）；失败 → failed + toast + 恢复可点；HTTP 异常 → friendlyError 兜底 + failed。
-   */
-  async function confirmPush(messageId: string): Promise<void> {
-    confirmingPushMessageId.value = messageId
-    pushStates.value.set(messageId, 'pushing') // 乐观置位（按钮「推送中…」，不依赖 socket）
-    try {
-      const result = await api.confirmPush(messageId)
-      if (result.ok) {
-        pushStates.value.set(messageId, 'done')
-      } else {
-        pushStates.value.set(messageId, 'failed')
-        showError(
-          result.reason === 'failed' && result.error ? `push 失败: ${result.error}` : 'push 未执行'
-        )
-      }
-    } catch (err) {
-      pushStates.value.set(messageId, 'failed')
-      showError(friendlyError(err))
-    } finally {
-      confirmingPushMessageId.value = null
-    }
-  }
-
-  /** 取消 push（REST：服务端幂等删除审批态，本地置 cancelled 隐藏按钮） */
-  async function cancelPush(messageId: string): Promise<void> {
-    try {
-      await api.cancelPush(messageId)
-    } catch (err) {
-      log.error('cancelPush API failed', { error: String(err) })
-    }
-    pushStates.value.set(messageId, 'cancelled')
-  }
-
   /** 停止 Agent：中断当前思考 + 清空排队任务（无需等回复，可重新发消息恢复）。
    *  OQ3 双端 session 化：带 sessionId 精确中断该会话（并发双会话只停目标）；
    *  缺省旧客户端兼容（服务端 fallback 中断该 agent 全部） */
@@ -560,8 +514,6 @@ export const useChatStore = defineStore('chat', () => {
     // 跟踪连接状态
     socket.on('connect', () => {
       serverOnline.value = true
-      // 重连后旧的 push 确认请求已不可能被响应（断开期间的确认必然丢失）→ 复位防永久卡「推送中」
-      confirmingPushMessageId.value = null
       // 重连后重新加入 Session，获取最新消息
       if (activeSessionId.value) {
         socket.emit(Events.JOIN_SESSION, activeSessionId.value)
@@ -602,10 +554,6 @@ export const useChatStore = defineStore('chat', () => {
       if (msg.messageType === 'restart_request') {
         restartStates.value.set(msg.id, 'pending')
       }
-      // push 审批消息：初始按钮状态 pending（服务端 PUSH_STATUS 后续校正）
-      if (msg.messageType === 'push_request') {
-        pushStates.value.set(msg.id, 'pending')
-      }
       // Agent 完成回复后清除打字状态 + 刷新 token 统计
       if (msg.role === 'agent' && msg.agentId) {
         typingStates.value.delete(msg.agentId)
@@ -641,12 +589,6 @@ export const useChatStore = defineStore('chat', () => {
       for (const m of data.messages) {
         if (m.messageType === 'restart_request') {
           restartStates.value.set(m.id, 'pending')
-        }
-      }
-      // push 审批消息：历史恢复初始 pending（JOIN 后服务端 PUSH_STATUS 校正）
-      for (const m of data.messages) {
-        if (m.messageType === 'push_request') {
-          pushStates.value.set(m.id, 'pending')
         }
       }
       loadingMessages.value = false
@@ -833,29 +775,6 @@ export const useChatStore = defineStore('chat', () => {
       }
     )
 
-    // push 审批状态：服务端 PUSH_STATUS 事件驱动按钮显示（pushing/done/failed/cancelled/none）
-    socket.on(Events.PUSH_STATUS, (data: { messageId: string; state: string }) => {
-      // 状态到达即解除确认中（服务端权威状态接管按钮显示）
-      confirmingPushMessageId.value = null
-      const valid: Array<'pending' | 'pushing' | 'done' | 'failed' | 'cancelled' | 'none'> = [
-        'pending',
-        'pushing',
-        'done',
-        'failed',
-        'cancelled',
-        'none',
-      ]
-      if (data.messageId && (valid as string[]).includes(data.state)) {
-        pushStates.value.set(data.messageId, data.state as never)
-        return
-      }
-      if (!data.messageId) {
-        for (const m of messages.value) {
-          if (m.messageType === 'push_request') pushStates.value.set(m.id, 'none')
-        }
-      }
-    })
-
     // 交接失败：server 端摘要生成失败时 emit（payload { sessionId, reason }）——仅当前会话生效
     // 事件名字面量对齐单 A 契约（shared Events.HANDOFF_FAILED 由单 A 添加，落地后可换常量）
     socket.on('handoff-failed', (data: { sessionId: string; reason: string }) => {
@@ -941,10 +860,6 @@ export const useChatStore = defineStore('chat', () => {
     confirmingRestartMessageId,
     confirmRestart,
     cancelRestart,
-    pushStates,
-    confirmingPushMessageId,
-    confirmPush,
-    cancelPush,
     interruptAgent,
     fetchAgentStats,
     fetchContextConfig,

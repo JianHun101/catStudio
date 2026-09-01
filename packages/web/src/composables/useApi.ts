@@ -111,17 +111,6 @@ export interface IronLaws {
   reviewer: string
 }
 
-/**
- * push 审批执行结果（POST /api/push/confirm——REST 迁移：push 确认是一次性请求/响应，
- * 响应体本身就是 ack，不再走 WebSocket 传输）。业务失败也在 200 返回（状态在 body）。
- */
-export interface PushConfirmResult {
-  ok: boolean
-  state: 'pushing' | 'done' | 'failed'
-  reason?: 'already-done' | 'already-pushing' | 'no-main-root' | 'failed'
-  error?: string
-}
-
 // ─── Eval 评估中心（E4-A 后端契约，snake_case 原样返回）─────────
 
 /** 评分行（EvalScoreRow + join agents 的猫名；agent 已删除时 agent_name 为 null） */
@@ -348,20 +337,4 @@ export const api = {
     }),
 
   getEvalEpisodeStats: () => request<{ ok: boolean; stats: EpisodeStats }>('/eval/episode-stats'),
-
-  // Push 审批（REST：push 确认是一次性请求/响应，HTTP 响应体本身就是 ack——
-  // 迁移自 socket PUSH_CONFIRM，根治「点确认 transport close」；confirm 超时 30s——
-  // pre-push 门禁是纯 SHA 比对、瞬时，30s 足够富余）
-  confirmPush: (messageId: string) =>
-    request<PushConfirmResult>('/push/confirm', {
-      method: 'POST',
-      body: JSON.stringify({ messageId }),
-      timeout: 30_000,
-    }),
-
-  cancelPush: (messageId: string) =>
-    request<{ ok: boolean }>('/push/cancel', {
-      method: 'POST',
-      body: JSON.stringify({ messageId }),
-    }),
 }

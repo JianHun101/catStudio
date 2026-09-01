@@ -27,8 +27,6 @@ const mockDeleteAgent = vi.fn()
 const mockUpdateAgent = vi.fn()
 const mockMarkSessionRead = vi.fn().mockResolvedValue({ ok: true })
 const mockGetContextConfig = vi.fn()
-const mockConfirmPush = vi.fn()
-const mockCancelPush = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -40,8 +38,6 @@ vi.mock('@/composables/useApi', () => ({
     updateAgent: mockUpdateAgent,
     markSessionRead: mockMarkSessionRead,
     getContextConfig: mockGetContextConfig,
-    confirmPush: mockConfirmPush,
-    cancelPush: mockCancelPush,
   },
 }))
 
@@ -447,70 +443,6 @@ describe('chatStore', () => {
     })
   })
 
-  describe('confirmPush / cancelPush（REST 迁移：HTTP 响应体本身就是 ack）', () => {
-    it('confirmPush 成功 → 乐观置位 pushing → done + 清 confirming（调 REST confirmPush）', async () => {
-      mockConfirmPush.mockResolvedValue({ ok: true, state: 'done' })
-      const p = store.confirmPush('m-push')
-
-      // 点击瞬间乐观置位（不等 HTTP 响应按钮即「推送中…」，不依赖 socket）
-      expect(store.confirmingPushMessageId).toBe('m-push')
-      expect(store.pushStates.get('m-push')).toBe('pushing')
-
-      await p
-      expect(mockConfirmPush).toHaveBeenCalledWith('m-push')
-      expect(store.pushStates.get('m-push')).toBe('done')
-      expect(store.confirmingPushMessageId).toBeNull()
-      expect(store.errorMessage).toBeNull()
-    })
-
-    it('confirmPush 失败（reason failed + error）→ failed + toast 带服务端错误', async () => {
-      mockConfirmPush.mockResolvedValue({
-        ok: false,
-        state: 'failed',
-        reason: 'failed',
-        error: 'remote rejected',
-      })
-      await store.confirmPush('m-push')
-
-      expect(store.pushStates.get('m-push')).toBe('failed')
-      expect(store.confirmingPushMessageId).toBeNull()
-      expect(store.errorMessage).toContain('push 失败')
-      expect(store.errorMessage).toContain('remote rejected')
-    })
-
-    it('confirmPush 失败（reason 非 failed，如 no-main-root）→ failed + toast「push 未执行」', async () => {
-      mockConfirmPush.mockResolvedValue({ ok: false, state: 'failed', reason: 'no-main-root' })
-      await store.confirmPush('m-push')
-
-      expect(store.pushStates.get('m-push')).toBe('failed')
-      expect(store.errorMessage).toContain('push 未执行')
-    })
-
-    it('confirmPush HTTP 异常 → catch 走 friendlyError 兜底 + failed（不悬挂 confirming）', async () => {
-      mockConfirmPush.mockRejectedValue(new Error('Failed to fetch'))
-      await store.confirmPush('m-push')
-
-      expect(store.pushStates.get('m-push')).toBe('failed')
-      expect(store.errorMessage).toContain('无法连接服务器')
-      expect(store.confirmingPushMessageId).toBeNull()
-    })
-
-    it('cancelPush → 调 REST cancel + 本地置 cancelled（隐藏按钮，不依赖 socket PUSH_STATUS）', async () => {
-      mockCancelPush.mockResolvedValue({ ok: true })
-      await store.cancelPush('m-push')
-
-      expect(mockCancelPush).toHaveBeenCalledWith('m-push')
-      expect(store.pushStates.get('m-push')).toBe('cancelled')
-    })
-
-    it('cancelPush API 失败 → 仍置 cancelled（本地清理不阻塞，服务端幂等）', async () => {
-      mockCancelPush.mockRejectedValue(new Error('network down'))
-      await store.cancelPush('m-push')
-
-      expect(store.pushStates.get('m-push')).toBe('cancelled')
-    })
-  })
-
   describe('fetchData', () => {
     it('loads agents and sessions, auto-joins first session', async () => {
       mockGetAgents.mockResolvedValue([mockAgent])
@@ -859,86 +791,6 @@ describe('chatStore', () => {
       store.confirmingRestartMessageId = 'm-restart'
       handler!({ sessionId: 's1', messageId: 'm-restart', state: 'pending' })
       expect(store.confirmingRestartMessageId).toBeNull()
-    })
-
-    it('PUSH_STATUS pushing/done/failed/cancelled → 驱动按钮状态', () => {
-      const handler = mockOn.mock.calls.find((call) => call[0] === Events.PUSH_STATUS)?.[1] as
-        ((data: any) => void) | undefined
-      expect(handler).toBeDefined()
-
-      handler!({ messageId: 'm-push', state: 'pushing' })
-      expect(store.pushStates.get('m-push')).toBe('pushing')
-
-      handler!({ messageId: 'm-push', state: 'done' })
-      expect(store.pushStates.get('m-push')).toBe('done')
-
-      handler!({ messageId: 'm-push', state: 'failed' })
-      expect(store.pushStates.get('m-push')).toBe('failed')
-
-      handler!({ messageId: 'm-push', state: 'cancelled' })
-      expect(store.pushStates.get('m-push')).toBe('cancelled')
-    })
-
-    it('PUSH_STATUS 到达也解除 confirming（服务端权威状态接管按钮显示）', () => {
-      const handler = mockOn.mock.calls.find((call) => call[0] === Events.PUSH_STATUS)?.[1] as
-        ((data: any) => void) | undefined
-      expect(handler).toBeDefined()
-
-      store.confirmingPushMessageId = 'm-push'
-      handler!({ messageId: 'm-push', state: 'pushing' })
-      expect(store.confirmingPushMessageId).toBeNull()
-    })
-
-    it('socket connect（重连）→ 清 confirmingPushMessageId（断开期间的确认已不可能被响应）', () => {
-      const connectHandler = mockOn.mock.calls.find((call) => call[0] === 'connect')?.[1] as
-        (() => void) | undefined
-      expect(connectHandler).toBeDefined()
-
-      store.confirmingPushMessageId = 'm-push'
-      connectHandler!()
-
-      expect(store.confirmingPushMessageId).toBeNull()
-    })
-
-    it('NEW_MESSAGE push_request → pushStates 初始 pending；SESSION_HISTORY 同理', () => {
-      const newMsgHandler = mockOn.mock.calls.find(
-        (call) => call[0] === Events.NEW_MESSAGE
-      )?.[1] as ((msg: Message) => void) | undefined
-      const histHandler = mockOn.mock.calls.find(
-        (call) => call[0] === Events.SESSION_HISTORY
-      )?.[1] as ((data: any) => void) | undefined
-      expect(newMsgHandler).toBeDefined()
-      expect(histHandler).toBeDefined()
-      store.activeSessionId = 's1'
-
-      newMsgHandler!({
-        id: 'm-push-1',
-        sessionId: 's1',
-        agentId: 'a1',
-        role: 'agent',
-        content: 'push 请求',
-        mentions: [],
-        createdAt: new Date().toISOString(),
-        messageType: 'push_request',
-      })
-      expect(store.pushStates.get('m-push-1')).toBe('pending')
-
-      histHandler!({
-        messages: [
-          {
-            id: 'm-push-2',
-            sessionId: 's1',
-            agentId: 'a1',
-            role: 'agent',
-            content: 'push 请求',
-            mentions: [],
-            createdAt: new Date().toISOString(),
-            messageType: 'push_request',
-          },
-        ],
-        welcome: null,
-      })
-      expect(store.pushStates.get('m-push-2')).toBe('pending')
     })
 
     it('HANDOFF_FAILED 仅当前会话生效：非当前会话不显示，当前会话设置 handoffFailed', () => {

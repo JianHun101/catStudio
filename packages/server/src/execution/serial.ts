@@ -16,14 +16,18 @@
 
 import { execSync } from 'node:child_process'
 import { v4 as uuid } from 'uuid'
-import { Channels, type AgentConfig, type AgentRuntimeState, type DispatchCommand, type Message } from '@cat-study/shared'
+import {
+  type AgentConfig,
+  type AgentRuntimeState,
+  type DispatchCommand,
+  type Message,
+} from '@cat-study/shared'
 import {
   messages as messagesRepo,
   sessions as sessionsRepo,
   agents as agentsRepo,
   executionLogs as execLogsRepo,
 } from '../db/repository/index.js'
-import { getRedis } from '../db/redis.js'
 import { createLogger } from '../logger.js'
 import { MAX_QUEUE_PER_AGENT, isStaleHandoffRequest } from '../dispatch/index.js'
 import { ProviderTokenPool } from './token-pool.js'
@@ -130,7 +134,7 @@ export interface EngineCtx {
   getSlotInternal(agentId: string, sessionId: string): Slot | undefined
   ensureSlot(agentId: string, sessionId: string): Slot
   slotToRuntimeState(slot: Slot): AgentRuntimeState
-  /** 槽位队列长度/状态变更 → 前端 agent-status 广播（socket 桥接 + Redis） */
+  /** 槽位队列长度/状态变更 → 前端 agent-status 广播（socket 桥接） */
   updateQueueState(slot: Slot): void
   publishAgentStatus(slot: Slot, status: string): Promise<void>
   /** 标 busy + 写执行日志（原 dispatch.executeAgentCommand） */
@@ -341,10 +345,10 @@ async function executeOneAgent(
     // 排队命令同样会落入 running+无执行日志的幽灵态（slot 卡 busy，恢复机制
     // 全盲）。弹出后补 drain：子链在 no-key 检查处逐个 completeExecution 弹
     // 下一个，直到队列空（每条发一次配置提示，执行日志逐条落库）
-    const nextCmd = await finalizeRun(ctx, agent.id, sessionId,{ success: true, traceId })
+    const nextCmd = await finalizeRun(ctx, agent.id, sessionId, { success: true, traceId })
     if (nextCmd) {
       try {
-        await drainQueuedCommand(ctx, agent,nextCmd, false)
+        await drainQueuedCommand(ctx, agent, nextCmd, false)
       } catch (e: any) {
         log.error('drain failed after no-api-key completion (queue item stuck)', {
           agentId: agent.id,
@@ -413,14 +417,14 @@ async function executeOneAgent(
       // LLM 失败/超时 + 有排队命令时必现（2026-08-11 26 分钟假 running 实锤同族
       // 机制：弹出后延迟/丢弃执行，用户侧"店长一直阻塞"）。try/catch 隔离——
       // drain 自身失败不掩盖原异常
-      const nextCmd = await finalizeRun(ctx, agent.id, sessionId,{
+      const nextCmd = await finalizeRun(ctx, agent.id, sessionId, {
         success: false,
         errorMessage: err.message || 'unknown error',
         traceId,
       })
       if (nextCmd) {
         try {
-          claudeRan = await drainQueuedCommand(ctx, agent,nextCmd, claudeRan)
+          claudeRan = await drainQueuedCommand(ctx, agent, nextCmd, claudeRan)
         } catch (e: any) {
           log.error('drain failed after execution error (queue item stuck)', {
             agentId: agent.id,
@@ -450,7 +454,7 @@ async function executeOneAgent(
         mentions: [],
         createdAt: new Date().toISOString(),
       })
-      await finalizeRun(ctx, agent.id, sessionId,{
+      await finalizeRun(ctx, agent.id, sessionId, {
         success: false,
         errorMessage: 'interrupted',
         traceId,
@@ -463,7 +467,7 @@ async function executeOneAgent(
     // 重启恢复精确跳过，不再被后续其他回复的时间窗误判）。撤回窗（Window ②/③）
     // 提前返回的 ghost id 不可达——撤回必删触发消息与 execution_logs（MESSAGE_RETRACT
     // handler），恢复入口 getMessageByIdOnly 直接 continue
-    const queuedCmd = await finalizeRun(ctx, agent.id, sessionId,{
+    const queuedCmd = await finalizeRun(ctx, agent.id, sessionId, {
       success: true,
       replyMessageId: reply.msgId,
       traceId,
@@ -478,7 +482,7 @@ async function executeOneAgent(
     // A2A 嵌套链跑完（d448413a 案例：07:00:02 弹出、07:05:54 才执行——被两层
     // A2A await 拖 5.9 分钟，'running' 状态干挂 + 槽位"忙碌"假象）
     if (queuedCmd) {
-      claudeRan = await drainQueuedCommand(ctx, agent,queuedCmd, claudeRan)
+      claudeRan = await drainQueuedCommand(ctx, agent, queuedCmd, claudeRan)
     }
 
     // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
@@ -698,7 +702,7 @@ async function executeOneAgent(
       error: err.message,
       traceId,
     })
-    const nextCmd = await finalizeRun(ctx, agent.id, sessionId,{
+    const nextCmd = await finalizeRun(ctx, agent.id, sessionId, {
       success: false,
       errorMessage: err.message || 'post-execution error',
       traceId,
@@ -718,7 +722,7 @@ async function executeOneAgent(
     let drainClaudeRan = claudeRan
     if (nextCmd) {
       try {
-        drainClaudeRan = await drainQueuedCommand(ctx, agent,nextCmd, needsLock)
+        drainClaudeRan = await drainQueuedCommand(ctx, agent, nextCmd, needsLock)
       } catch (e: any) {
         log.error('drain failed after post-execution error (queue item stuck)', {
           agentId: agent.id,
@@ -756,9 +760,7 @@ async function executeAgentsSerialImpl(
   for (let i = 0; i < agents.length; i += CONCURRENT_AGENTS_PER_MESSAGE) {
     const batch = agents.slice(i, i + CONCURRENT_AGENTS_PER_MESSAGE)
     const results = await Promise.allSettled(
-      batch.map((agent) =>
-        ctx.execute(makeCmd(sessionId, agent, triggerMsg, traceId, depth))
-      )
+      batch.map((agent) => ctx.execute(makeCmd(sessionId, agent, triggerMsg, traceId, depth)))
     )
     for (const r of results) {
       if (r.status === 'fulfilled' && r.value) anyClaude = true
@@ -955,7 +957,7 @@ export function createExecutionEngine(
     }
   }
 
-  /** 槽位状态变更 → 前端 agent-status 广播（socket 桥接 + Redis 双通道） */
+  /** 槽位状态变更 → 前端 agent-status 广播（socket 桥接） */
   function emitSlotState(slot: Slot): void {
     if (stateBridge) {
       try {
@@ -968,39 +970,10 @@ export function createExecutionEngine(
 
   function updateQueueState(slot: Slot): void {
     emitSlotState(slot)
-    try {
-      const redis = getRedis()
-      if (!redis) return
-      redis.publish(
-        Channels.agentStatus(slot.agentId),
-        JSON.stringify({
-          agentId: slot.agentId,
-          status: slot.status,
-          sessionId: slot.sessionId,
-          queueLength: slot.queue.length,
-        })
-      )
-    } catch {
-      /* silent */
-    }
   }
 
   async function publishAgentStatus(slot: Slot, status: string): Promise<void> {
     emitSlotState(slot)
-    try {
-      const redis = getRedis()
-      if (!redis) return
-      await redis.publish(
-        Channels.agentStatus(slot.agentId),
-        JSON.stringify({
-          agentId: slot.agentId,
-          status,
-          sessionId: slot.sessionId,
-        })
-      )
-    } catch {
-      // Redis 不可用时静默失败
-    }
   }
 
   // ─── 命令执行（原 dispatch 模块函数，引擎实例化） ──
@@ -1147,14 +1120,7 @@ export function createExecutionEngine(
     let execError: unknown
     try {
       const triggerMsg = buildTriggerMsg(ctx, cmd)
-      return await executeOneAgent(
-        ctx,
-        cmd.sessionId,
-        agent,
-        triggerMsg,
-        cmd.traceId,
-        cmd.depth
-      )
+      return await executeOneAgent(ctx, cmd.sessionId, agent, triggerMsg, cmd.traceId, cmd.depth)
     } catch (err: any) {
       execError = err
       log.error('execute crashed — releasing slot in finally', {

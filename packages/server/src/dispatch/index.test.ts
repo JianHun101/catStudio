@@ -17,14 +17,7 @@ import type { ExecutionEngine } from '../execution/serial.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 
-// Mock redis + LLM registry（测试只打边界）
-vi.mock('../db/redis.js', () => ({
-  getRedis: vi.fn(() => null),
-  isRedisAvailable: vi.fn(() => false),
-  connectRedis: vi.fn(),
-  closeRedis: vi.fn(),
-}))
-
+// Mock LLM registry（测试只打边界）
 vi.mock('../llm/registry.js', () => ({
   getAdapterForAgent: vi.fn(),
 }))
@@ -125,9 +118,9 @@ function insertUserMsg(id: string, sessionId = 'session-1', mentions = '[]'): vo
 }
 
 function getDispatchState(msgId: string): string | null {
-  const row = getDb()
-    .prepare('SELECT dispatch_state FROM messages WHERE id = ?')
-    .get(msgId) as { dispatch_state: string | null }
+  const row = getDb().prepare('SELECT dispatch_state FROM messages WHERE id = ?').get(msgId) as {
+    dispatch_state: string | null
+  }
   return row?.dispatch_state ?? null
 }
 

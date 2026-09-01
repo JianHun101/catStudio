@@ -158,13 +158,6 @@ describe('validateUserRequestParams (request_user_action)', () => {
     expect(r.type).toBe('choice')
   })
 
-  it('合法入参：push 枚举过形状校验（push 审批——服务端角色白名单兜底，本层只校形状）', () => {
-    const r = validateUserRequestParams({ type: 'push', reason: '收口待推送' })
-    expect(r.ok).toBe(true)
-    expect(r.type).toBe('push')
-    expect(r.reason).toBe('收口待推送')
-  })
-
   it('合法入参：options 结构正确透传', () => {
     const options = [
       { id: 'a', label: '重启' },
@@ -218,7 +211,7 @@ describe('validateUserRequestParams (request_user_action)', () => {
     }
   })
 
-  it('枚举常量只含 restart/push/choice（契约钉死，防误扩）', () => {
-    expect(USER_REQUEST_TYPES).toEqual(['restart', 'push', 'choice'])
+  it('枚举常量只含 restart/choice（契约钉死，防误扩）', () => {
+    expect(USER_REQUEST_TYPES).toEqual(['restart', 'choice'])
   })
 })

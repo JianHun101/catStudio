@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { Events, Channels } from './events.js'
+import { Events } from './events.js'
 
 // ─── Events ────────────────────────────────────────
 
@@ -47,47 +47,7 @@ describe('Events', () => {
     expect(Events.HANDOFF_FAILED).toBe('handoff-failed')
   })
 
-  it('has PUSH_CONFIRM/CANCEL client→server events', () => {
-    expect(Events.PUSH_CONFIRM).toBe('push-confirm')
-    expect(Events.PUSH_CANCEL).toBe('push-cancel')
-  })
-
-  it('has PUSH_STATUS server→client event', () => {
-    expect(Events.PUSH_STATUS).toBe('push-status')
-  })
-
-  it('has exactly 29 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(29)
-  })
-})
-
-// ─── Channels ──────────────────────────────────────
-
-describe('Channels', () => {
-  describe('sessionMessages', () => {
-    it('generates correct channel name', () => {
-      expect(Channels.sessionMessages('abc-123')).toBe('session:abc-123:messages')
-    })
-
-    it('handles UUID session IDs', () => {
-      const uuid = '550e8400-e29b-41d4-a716-446655440000'
-      expect(Channels.sessionMessages(uuid)).toBe(`session:${uuid}:messages`)
-    })
-  })
-
-  describe('sessionAgent', () => {
-    it('generates correct channel name', () => {
-      expect(Channels.sessionAgent('abc-123', '店长阿暹')).toBe('session:abc-123:agent:店长阿暹')
-    })
-  })
-
-  describe('agentStatus', () => {
-    it('generates correct channel name (keyed by agentId)', () => {
-      expect(Channels.agentStatus('agent-1')).toBe('agent:agent-1:status')
-    })
-  })
-
-  it('has exactly 3 channel pattern functions', () => {
-    expect(Object.keys(Channels)).toHaveLength(3)
+  it('has exactly 26 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(26)
   })
 })
