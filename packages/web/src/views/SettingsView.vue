@@ -436,13 +436,13 @@ async function handleCreate(): Promise<void> {
 // ─── 系统配置：context 阈值（80% 告警 / 90% 交接）──────────────
 // 契约（单 A 钉死）：GET /api/config/context 缺文件返回默认 {0.8, 0.9, maxContext}；
 // POST 收 { warnThreshold?, handoffThreshold? }（未传 → 默认），校验 0<t<1 且 warn≤handoff
-// 否则 400；maxContextTokens 从 env 读只读回显。API 未就绪 → 默认值 + 禁用态提示，不崩。
+// 否则 400；maxContextTokens 从 env 读只读回显。C8 收敛：store.contextConfig 是唯一事实源
+// （ChatPanel 横幅 live 读它）——表单草稿从 store 初始化、保存经 store 单点（POST 后写回 store，
+// 横幅即刷）。失败回退默认值，不白屏。
 const warnThreshold = ref(0.8)
 const handoffThreshold = ref(0.9)
 const maxContextTokens = ref(128000)
 const ctxLoading = ref(true)
-const ctxError = ref('')
-const ctxDisabled = ref(false)
 const ctxSaving = ref(false)
 const ctxSaved = ref('')
 const ctxFormError = ref('')
@@ -451,23 +451,21 @@ function ctxMaxDisplay(): string {
   return maxContextTokens.value > 0 ? `${(maxContextTokens.value / 1000).toFixed(0)}k tokens` : '—'
 }
 
-async function loadContextConfig(): Promise<void> {
+/** 表单草稿从 store.contextConfig 初始化——store 是 context 阈值唯一事实源（ChatPanel 横幅 live 读它）。
+ *  store 未就绪（fetchData 未跑/失败）→ 经 store.fetchContextConfig 拉权威值；已就绪直接读 store，
+ *  不重复 GET。编辑草稿态保留：本地 ref 不直接绑 store，保存成功才推 store（避免编辑到一半横幅乱跳）。 */
+async function initCtxConfig(): Promise<void> {
   ctxLoading.value = true
   try {
-    const cfg = await api.getContextConfig()
-    if (disposed) return
-    warnThreshold.value = cfg.warnThreshold
-    handoffThreshold.value = cfg.handoffThreshold
-    maxContextTokens.value = cfg.maxContextTokens
-  } catch {
-    if (!disposed) {
-      // API 未就绪（单 A 未落地/网络失败）→ 默认 0.8/0.9 + 禁用态提示，不白屏
-      ctxError.value =
-        '阈值配置读取失败——服务端接口未就绪，已使用默认值（告警 80% / 交接 90%），保存已禁用'
-      ctxDisabled.value = true
+    if (!store.dataReady) {
+      await store.fetchContextConfig() // store 内部静默回退默认 0.8/0.9——失败不白屏
     }
+    if (disposed) return
+    warnThreshold.value = store.contextConfig.warnThreshold
+    handoffThreshold.value = store.contextConfig.handoffThreshold
+    maxContextTokens.value = store.contextConfig.maxContextTokens
   } finally {
-    ctxLoading.value = false
+    if (!disposed) ctxLoading.value = false
   }
 }
 
@@ -494,7 +492,8 @@ async function saveCtxConfig(): Promise<void> {
   if (!validateCtxForm()) return
   ctxSaving.value = true
   try {
-    const res = await api.saveContextConfig({
+    // 保存经 store 单点：POST → 写回 store.contextConfig（ChatPanel 横幅响应式刷新）→ 返回更新值回写表单草稿
+    const res = await store.saveContextConfig({
       warnThreshold: warnThreshold.value,
       handoffThreshold: handoffThreshold.value,
     })
@@ -650,7 +649,7 @@ onMounted(() => {
   loadBindings()
   refresh()
   loadConfig()
-  loadContextConfig()
+  initCtxConfig()
   loadSummaryConfig()
   loadIronLaws()
 })
@@ -1108,7 +1107,7 @@ onUnmounted(() => {
                   max="0.99"
                   step="0.05"
                   class="input input-ctx"
-                  :disabled="ctxDisabled || ctxSaving"
+                  :disabled="ctxSaving"
                 />
               </div>
               <div class="config-item">
@@ -1120,7 +1119,7 @@ onUnmounted(() => {
                   max="0.99"
                   step="0.05"
                   class="input input-ctx"
-                  :disabled="ctxDisabled || ctxSaving"
+                  :disabled="ctxSaving"
                 />
               </div>
               <div class="config-item">
@@ -1133,16 +1132,11 @@ onUnmounted(() => {
                 决定，只读回显；保存后立即生效，重启后仍保持。
               </div>
 
-              <div v-if="ctxError" class="error-msg">{{ ctxError }}</div>
               <div v-if="ctxFormError" class="error-msg">{{ ctxFormError }}</div>
               <div v-if="ctxSaved" class="ok-msg">{{ ctxSaved }}</div>
 
               <div class="form-actions">
-                <button
-                  class="btn btn-create"
-                  :disabled="ctxDisabled || ctxSaving"
-                  @click="saveCtxConfig"
-                >
+                <button class="btn btn-create" :disabled="ctxSaving" @click="saveCtxConfig">
                   {{ ctxSaving ? '保存中…' : '保存阈值' }}
                 </button>
               </div>
