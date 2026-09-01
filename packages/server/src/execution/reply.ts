@@ -22,7 +22,7 @@ import { buildMemoryContext, buildKnowledgeContext } from '../memory/index.js'
 import { createLogger } from '../logger.js'
 import { snapshotPackageDeps, diffNewPackages, ensureSessionWorktree } from '../llm/git-utils.js'
 import { parseJsonArray } from '../utils.js'
-import { collectCommitDiffs, collectPushDiffs } from '../git/diff-collector.js'
+import { collectCommitDiffs } from '../git/diff-collector.js'
 import {
   shouldHandoff,
   performHandoff,
@@ -758,9 +758,6 @@ export async function runAgentReply(
   const isRestartRequest = isRestartRequestContent(fullContent) || !!signalRestart
   const restartReason = signalRestart?.reason || extractRestartReason(fullContent)
   const restartExpiresAt = new Date(Date.now() + RESTART_TTL_MS).toISOString()
-  // push 审批信号（request_user_action type:'push'）——结构化主路径，无文本 fallback
-  // （push 请求的 diff 必须服务端实时采集，文本格式匹配无意义）
-  const signalPush = userRequestSignals.find((s) => s.type === 'push')
 
   const finalMsg: Message = {
     id: msgId,
@@ -779,36 +776,11 @@ export async function runAgentReply(
     ...(isRestartRequest ? { messageType: 'restart_request' as const, restartExpiresAt } : {}),
   }
 
-  // push 审批采集：实时采集 origin/dev..dev 的 commits + 合并 diff（禁止手工塞 diff）。
-  // 采集失败（origin/dev 不存在/git 异常）→ pushData null → 消息保持 normal（静默降级，
-  // 与 diff 采集同款 fire-and-forget 语义）；成功 → messageType push_request + extra.push
-  // （commits）+ extra.rich（diff 块）。extra 独立列，永不进 LLM 上下文。
-  if (signalPush) {
-    try {
-      const pushData = await collectPushDiffs()
-      if (pushData) {
-        finalMsg.messageType = 'push_request'
-        finalMsg.extra = {
-          ...(finalMsg.extra ?? {}),
-          push: { commits: pushData.commits },
-          ...(pushData.blocks ? { rich: { v: 1, blocks: pushData.blocks } } : {}),
-        }
-      }
-    } catch (err: any) {
-      log.warn('push diffs collect failed (silent)', {
-        traceId,
-        agentId: agent.id,
-        error: err?.message,
-      })
-    }
-  }
-
   // 对话内 diff 采集（富文本块通道）：猫的 content 只写摘要，diff 正文由
   // server 自动从 git 反查 commit 采集——extra 独立列，永不进 LLM 上下文。
   // 失败静默跳过（collectCommitDiffs 内部 5s 超时 + 查不到即 null），不阻塞回复；
   // 外层 try/catch 双保险（保险丝：任何意外都不让回复 emit 延迟/失败）。
-  // push 消息已有实时采集的 push diff（extra.rich）→ 跳过对话 diff 分支，避免覆盖。
-  if (triggerMsg.id && !finalMsg.extra?.push) {
+  if (triggerMsg.id) {
     try {
       const blocks = await collectCommitDiffs(triggerMsg.id)
       if (blocks && blocks.length > 0) {

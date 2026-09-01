@@ -104,45 +104,6 @@ describe('ChatPanel restart confirm feedback', () => {
   })
 })
 
-describe('ChatPanel push 审批面板（刀3 V2 按钮）', () => {
-  it('push_request 消息渲染审批面板：commit 列表 + V2 确认/取消按钮', () => {
-    expect(source).toContain("msg.messageType === 'push_request'")
-    expect(source).toContain('dev → origin/dev')
-    expect(source).toContain('确认 Push')
-    expect(source).toContain('取消')
-    expect(source).toContain('store.confirmPush(msg.id)')
-    expect(source).toContain('store.cancelPush(msg.id)')
-  })
-
-  it('commits 从 msg.extra.push.commits 渲染（服务端实时采集，无手工塞入）', () => {
-    expect(source).toContain('msg.extra?.push?.commits')
-    expect(source).toContain(':key="c.sha"')
-    expect(source).toContain('c.sha.slice(0, 7)')
-  })
-
-  it('push_request 排除通用 DiffViewer（diff 只在下方面板渲染一次，不重复）', () => {
-    expect(source).toContain("msg.messageType !== 'push_request'")
-  })
-
-  it('commit-item 整条可展开（details 默认收起，点开读完整 subject + body）', () => {
-    expect(source).toContain('class="commit-details"')
-    expect(source).toContain('commit-full')
-    expect(source).not.toContain('v-if="c.body"')
-    expect(source).not.toContain('commit-body')
-    expect(source).not.toContain('提交说明')
-  })
-
-  it('pushing 态显示「推送中…」、done 态显示「已推送」', () => {
-    expect(source).toContain('推送中…')
-    expect(source).toContain('已推送')
-    expect(source).toContain('push-done')
-  })
-
-  it('复用 DiffViewer 展示 diff（extra.rich.blocks）', () => {
-    expect(source).toContain(':blocks="msg.extra.rich.blocks"')
-  })
-})
-
 describe('ChatPanel 对话内 diff 展示接入（富文本块通道）', () => {
   it('import DiffViewer 组件', () => {
     expect(source).toContain("import DiffViewer from './DiffViewer.vue'")

@@ -13,7 +13,7 @@ export default defineConfig({
       '@': resolve(__dirname, 'packages/web/src'),
       // worktree 模式：server/web 的 node_modules/@cat-study/shared 是主仓库安装时
       // 的 junction（指向主仓库 packages/shared）——worktree 内改 shared 源码后测试
-      // 仍解析到主仓库陈旧版本（实测：Events.PUSH_* undefined，双 handler 撞 undefined
+      // 仍解析到主仓库陈旧版本（实测：shared 新增事件 undefined，双 handler 撞 undefined
       // key 全串）。显式 alias 到 vitest.config 所在目录的 shared 源码：worktree 与
       // 主仓库下都指向「当前仓库」的 shared 源码，收口后主仓库 alias 仍指向自身。
       '@cat-study/shared': resolve(__dirname, 'packages/shared/src/index.ts'),

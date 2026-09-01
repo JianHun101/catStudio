@@ -13,7 +13,6 @@ import {
   sessions as sessionsRepo,
   executionLogs as execLogsRepo,
 } from './db/repository/index.js'
-import { connectRedis, closeRedis } from './db/redis.js'
 import { createSocketIO } from './connectors/socketio.js'
 import { replayStuckUserMessages, REPLAY_STUCK_WINDOW_MINUTES } from './execution/recovery.js'
 import { getExecutionBus } from './execution/registry.js'
@@ -27,7 +26,6 @@ import { summaryConfigRoutes } from './routes/config-summary.js'
 import { internalRoutes } from './routes/internal.js'
 import { evalRoutes } from './routes/eval.js'
 import { ironLawRoutes } from './routes/iron-laws.js'
-import { pushRoutes } from './routes/push.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
 import { runL1Aggregation } from './eval/l1-aggregator.js'
 import { classifyEpisodes, ZERO_EXECUTION_WINDOW_MINUTES } from './eval/episodes.js'
@@ -109,14 +107,7 @@ async function main(): Promise<void> {
     log.info('种子数据初始化完成', { agents: agents.length })
   }
 
-  // 3. 连接 Redis（可选——失败不阻塞启动）
-  try {
-    await connectRedis()
-  } catch {
-    log.warn('Redis unavailable — running without message bus')
-  }
-
-  // 4. Fastify HTTP 服务器
+  // 3. Fastify HTTP 服务器
   const app = Fastify({ logger: false })
   await app.register(cors, {
     origin: [/^http:\/\/(localhost|127\.0\.0\.1):\d+$/],
@@ -151,9 +142,8 @@ async function main(): Promise<void> {
   await app.register(internalRoutes)
   await app.register(evalRoutes)
   await app.register(ironLawRoutes)
-  await app.register(pushRoutes)
 
-  // 5. 启动 Fastify → 拿到 HTTP Server → attach Socket.IO
+  // 4. 启动 Fastify → 拿到 HTTP Server → attach Socket.IO
   await app.listen({ port: PORT, host: HOST })
   const io = createSocketIO(app.server)
   // 执行 bus 由 createSocketIO 注册（setExecutionBus）——此后恒非 null；
@@ -246,7 +236,7 @@ async function main(): Promise<void> {
 
   log.info('server started', { host: HOST, port: PORT })
 
-  // 6. 优雅关闭
+  // 5. 优雅关闭
   const shutdown = async () => {
     log.info('shutting down...')
     // P4 #1: 先取消 OneBot 出站订阅，停止 replyBus 投递（关停后不应再发 QQ）
@@ -259,7 +249,6 @@ async function main(): Promise<void> {
     clearInterval(replayTimer)
     io.close()
     await app.close()
-    await closeRedis()
     // 清理自己 spawn 的常驻子进程（llama-server / ollama serve / codex-proxy）——
     // 只杀本进程 spawn 的实例（探测发现已有实例则不保存句柄 → 不误杀他人/手动起的）
     stopLlamaServerIfSpawned()

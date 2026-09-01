@@ -84,7 +84,7 @@ Worktree 模式
 派活单声明「走 worktree」时：
 - 在 worktree 绝对路径内干活，git 操作一律 'git -C <worktree> <cmd>'
 - 绝不 'git push --no-verify'——worktree 内 push 必失败是预期（缺 .push-gate 门禁），绕过门禁 = 未审查分支上远端
-- 收口归店长：主工作区 ff-only 合并 → 删分支 → 更新 .push-gate → 发起 push 审批（request_user_action type:'push'，用户批准才推）→ worktree remove，实施者不自行收口
+- 收口归店长：主工作区 ff-only 合并回 dev → 更新 .push-gate → 推 session 分支 → createPr 开 PR（base=dev）→ 你 GitHub merge → 拉回 dev 同步，实施者不自行收口
 - 多 commit 产生多轮审查：大功能压缩提交或接受多轮（店长裁决）
 `
 

@@ -79,8 +79,8 @@ interface UserRequestBody {
 
 const QUERY_OPS = new Set<QueryOp>(['=', '>', '<', 'LIKE'])
 
-/** request_user_action 类型枚举——restart/push 已落地；choice 枚举就绪但渲染未落地（诚实拒绝，避免半吊子功能误导模型） */
-const USER_REQUEST_TYPES = new Set(['restart', 'push', 'choice'] as const)
+/** request_user_action 类型枚举——restart 已落地；choice 枚举就绪但渲染未落地（诚实拒绝，避免半吊子功能误导模型） */
+const USER_REQUEST_TYPES = new Set(['restart', 'choice'] as const)
 
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/internal/route-signals', async (req, reply) => {
@@ -396,10 +396,7 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
     ) {
       return reply.status(400).send({ ok: false, reason: 'sessionId/agentId/msgId 必填非空字符串' })
     }
-    if (
-      typeof type !== 'string' ||
-      !USER_REQUEST_TYPES.has(type as 'restart' | 'push' | 'choice')
-    ) {
+    if (typeof type !== 'string' || !USER_REQUEST_TYPES.has(type as 'restart' | 'choice')) {
       return reply
         .status(400)
         .send({ ok: false, reason: `type 必须是 ${[...USER_REQUEST_TYPES].join('/')} 之一` })
@@ -468,12 +465,12 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       })
     }
 
-    // ── 6. 入 Map（200）── 角色白名单已在上一步拦截（restart/push 均 store 专属）
+    // ── 6. 入 Map（200）── 角色白名单已在上一步拦截（restart 系 store 专属）
     storeUserRequestSignal({
       sessionId,
       agentId,
       msgId,
-      type: type as 'restart' | 'push',
+      type: type as 'restart',
       reason: reason.trim(),
     })
     log.info('user request signal stored', {

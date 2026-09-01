@@ -1,7 +1,7 @@
 /**
  * createPr — 提 git PR 薄封装（gh pr create）。
  *
- * 归宿：git/ 目录（与 push-state.ts / diff-collector.ts 同属「push/PR 工作流」地盘）。
+ * 归宿：git/ 目录（与 diff-collector.ts 同属「push/PR 工作流」地盘）。
  * 只做「提 pr」这一件事：校验前置（gh 已 auth + 分支已 push origin）→ 执行 gh pr create。
  * 不改内部审查链（post-commit 质量关）、不动 .push-gate 核心门禁、不重写收口流程
  * （新开发流程未定——AC 证据化等属于未来流程，本模块不含任何 PR body 的 AC checklist）。
@@ -11,7 +11,7 @@
  * （gh 未授权、分支未 push、gh 非零退出都能据此定位）。
  *
  * execFile 参数数组（禁 shell）——git/gh 参数全部走 argv，无 shell 注入面。
- * cwd 固定主仓库根（getMainRepoRoot——任何位置调用均安全，与 gitPushOriginDev 同款）。
+ * cwd 固定主仓库根（getMainRepoRoot——任何位置调用均安全）。
  */
 
 import {

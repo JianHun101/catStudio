@@ -102,11 +102,7 @@ vi.mock('../llm/git-utils.js', () => ({
   // 实现会在测试 cwd 下命中真实仓库建 worktree，必须 mock。
   ensureSessionWorktree: vi.fn(() => null),
   getSessionWorktreePath: vi.fn(() => null),
-  // push 审批执行点：默认成功（git push 绝不在测试环境真实执行——cwd 会命中
-  // 真实主仓库，push 到远端 = 灾难）；getMainRepoRoot 默认 null（push handler
-  // 测试里 mockReturnValue 覆盖为 fake 路径）
   getMainRepoRoot: vi.fn(() => null),
-  gitPushOriginDev: vi.fn(() => ({ ok: true })),
 }))
 
 // 对话内 diff 采集：默认返回 null（无 diff，与现网纯讨论/A2A 一致）——
@@ -594,33 +590,7 @@ describe('socketio connector', () => {
       expect(m.restartExpiresAt).toBeUndefined()
     })
 
-    it('JOIN 历史恢复给 push_request 消息附加类型（extra.push 是唯一事实源）', () => {
-      const db = getDb()
-      db.prepare(
-        `INSERT INTO messages (id, session_id, role, content, mentions, extra)
-         VALUES (?, 'session-1', 'user', 'push 审批', '[]', ?)`
-      ).run(
-        'msg-push-type-1',
-        JSON.stringify({
-          rich: {
-            v: 1,
-            blocks: [{ id: 'b1', kind: 'diff', v: 1, filePath: 'a.txt', diff: '@@ -1 +1 @@' }],
-          },
-          push: { commits: [{ sha: 'abc1234', subject: 'test commit' }] },
-        })
-      )
-
-      const handlers = socketHandlers.get(Events.JOIN_SESSION)
-      mockSocketEmit.mockClear()
-      handlers![0]('session-1')
-
-      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
-      const m = call[1].messages.find((x: any) => x.id === 'msg-push-type-1')
-      // DB 不存类型，extra.push 存在 → 历史恢复附加 push_request（前端据此初始化 pending 可点）
-      expect(m.messageType).toBe('push_request')
-    })
-
-    it('JOIN 不给无 push 标记的富文本消息附加类型（普通 diff 消息不带 push_request）', () => {
+    it('JOIN 不给纯富文本消息附加类型（普通 diff 消息不带 messageType）', () => {
       const db = getDb()
       db.prepare(
         `INSERT INTO messages (id, session_id, role, content, mentions, extra)
@@ -641,71 +611,10 @@ describe('socketio connector', () => {
 
       const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
       const m = call[1].messages.find((x: any) => x.id === 'msg-push-type-none')
-      // 无 extra.push → 不带类型（避免把普通富文本消息误渲染成 push 审批面板）
+      // 无 messageType 标记 → 不带类型（普通富文本消息不渲染任何面板）
       expect(m.messageType).toBeUndefined()
       // 富文本块仍正常随 extra 恢复
       expect(m.extra.rich.blocks).toHaveLength(1)
-    })
-
-    it('JOIN 恢复已完成 push 审批状态（done 不回归可点 pending）', async () => {
-      const db = getDb()
-      db.prepare(
-        `INSERT INTO messages (id, session_id, role, content, mentions, extra)
-         VALUES (?, 'session-1', 'user', 'push 审批', '[]', ?)`
-      ).run(
-        'msg-push-join-done',
-        JSON.stringify({
-          rich: {
-            v: 1,
-            blocks: [{ id: 'b1', kind: 'diff', v: 1, filePath: 'a.txt', diff: '@@ -1 +1 @@' }],
-          },
-          push: { commits: [{ sha: 'abc1234', subject: 'test commit' }] },
-        })
-      )
-
-      // C7：socket 版 PUSH_CONFIRM handler 已删除（前端全走 REST）——handler 应不存在
-      expect(socketHandlers.get(Events.PUSH_CONFIRM)).toBeUndefined()
-      // 确认 push → done（终态有界保留在 git/push-state 状态机）——直接调业务函数播种
-      const { executePushConfirm } = await import('../git/push-state.js')
-      const { getMainRepoRoot } = await import('../llm/git-utils.js')
-      vi.mocked(getMainRepoRoot).mockReturnValue('C:\\fake\\main')
-      await executePushConfirm('msg-push-join-done')
-
-      // JOIN → 服务端广播 push 状态恢复（镜像 restart 的 join 恢复模式）
-      const joinHandlers = socketHandlers.get(Events.JOIN_SESSION)
-      mockSocketEmit.mockClear()
-      joinHandlers![0]('session-1')
-
-      expect(mockSocketEmit).toHaveBeenCalledWith(
-        Events.PUSH_STATUS,
-        expect.objectContaining({ messageId: 'msg-push-join-done', state: 'done' })
-      )
-    })
-
-    it('JOIN 不为从未确认的 push_request 推状态（前端保持 pending 可点）', () => {
-      const db = getDb()
-      db.prepare(
-        `INSERT INTO messages (id, session_id, role, content, mentions, extra)
-         VALUES (?, 'session-1', 'user', 'push 审批', '[]', ?)`
-      ).run(
-        'msg-push-join-pending',
-        JSON.stringify({
-          rich: {
-            v: 1,
-            blocks: [{ id: 'b1', kind: 'diff', v: 1, filePath: 'a.txt', diff: '@@ -1 +1 @@' }],
-          },
-          push: { commits: [{ sha: 'abc1234', subject: 'test commit' }] },
-        })
-      )
-
-      const handlers = socketHandlers.get(Events.JOIN_SESSION)
-      mockSocketEmit.mockClear()
-      handlers![0]('session-1')
-
-      const pushStatusCalls = mockSocketEmit.mock.calls.filter(
-        (c: any[]) => c[0] === Events.PUSH_STATUS
-      )
-      expect(pushStatusCalls).toEqual([])
     })
   })
 

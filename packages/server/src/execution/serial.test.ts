@@ -31,13 +31,6 @@ import type { EngineBus, HandoffBus } from './bus.js'
 
 // ═══ 边界 mock（真实 dispatch / SQLite / 纯函数保留） ═══
 
-vi.mock('../db/redis.js', () => ({
-  getRedis: vi.fn(() => null),
-  isRedisAvailable: vi.fn(() => false),
-  connectRedis: vi.fn(),
-  closeRedis: vi.fn(),
-}))
-
 vi.mock('../llm/registry.js', () => ({
   getAdapterForAgent: vi.fn(() => null),
 }))

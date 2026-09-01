@@ -153,8 +153,7 @@ describe('agent system prompts', () => {
     expect(IRON_LAWS_CODER).toContain('收口归店长')
     expect(IRON_LAWS_CODER).toContain('必失败是预期')
     expect(IRON_LAWS_CODER).toContain('多轮审查')
-    expect(IRON_LAWS_CODER).toContain('push 审批')
-    expect(IRON_LAWS_CODER).toContain("type:'push'")
+    expect(IRON_LAWS_CODER).toContain('createPr 开 PR')
     // seed prompt 不再烘焙 worktree 约束
     for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!

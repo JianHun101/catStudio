@@ -32,7 +32,6 @@ import { createLogger } from '../logger.js'
 import { gitResetHard, gitCleanWorkingTree, npmUninstall } from '../llm/git-utils.js'
 import { parseJsonArray } from '../utils.js'
 import { parseMessageExtra } from '../git/diff-collector.js'
-import { getPushState } from '../git/push-state.js'
 import { ingestUserMessage } from './ingest.js'
 import {
   isRestartRequestContent,
@@ -62,7 +61,7 @@ const log = createLogger('socketio')
 
 /**
  * onAny 兜底诊断白名单（三层缺陷根治①）：Socket.IO 对无 handler 的 incoming event 静默丢弃
- * （不报错、不落日志、不 ack）——旧 server 收到前端新事件（如 PUSH_CONFIRM）时问题完全不可见。
+ * （不报错、不落日志、不 ack）——旧 server 收到前端新事件（版本错配）时问题完全不可见。
  * 白名单 = 全部已注册 client→server 事件 + Socket.IO 保留/内建事件名；白名单外的自定义事件打 warn。
  * 注意：只列 client→server 事件——onAny 只截获 incoming packet，server→client 广播不经此路径。
  */
@@ -169,7 +168,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     log.info('client connected', { socketId: socket.id })
 
     // 未注册事件兜底诊断（三层缺陷根治①）：Socket.IO 对无 handler 的 incoming event 静默丢弃
-    // ——前端 emit 了本 server 未注册的事件（如旧 server 收到 PUSH_CONFIRM）时零日志零 ack。
+    // ——前端 emit 了本 server 未注册的事件（版本错配）时零日志零 ack。
     // onAny 把「静默丢弃」变成「可诊断」：白名单（已注册 + 保留事件）之外的自定义事件打 warn。
     socket.onAny((event: string, ..._args: unknown[]) => {
       if (!KNOWN_CLIENT_EVENTS.has(event)) {
@@ -204,7 +203,6 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         const msgImages: string[] = parseJsonArray(row.images)
         const isRestart = isActiveRestart(row)
         const msgExtra = parseMessageExtra(row.extra) // 富文本块（diff 等）；版本不符/损坏 → undefined 纯文本回退
-        const isPush = !!msgExtra?.push
         return {
           id: row.id,
           sessionId: row.session_id,
@@ -223,12 +221,6 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
                 messageType: 'restart_request' as const,
                 // isRestart 为真时 restartReq 必非 null（isActiveRestart 前置条件）——文件 expiresAt 是权威
                 restartExpiresAt: restartReq!.expiresAt,
-              }
-            : {}),
-          // push 审批消息历史恢复同样附加类型（前端按钮渲染依据；DB 不存类型，extra.push 是唯一事实源）
-          ...(isPush
-            ? {
-                messageType: 'push_request' as const,
               }
             : {}),
         }
@@ -311,19 +303,6 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         })
       } else {
         socket.emit(Events.RESTART_STATUS, { sessionId, messageId: null, state: 'none' })
-      }
-
-      // push 审批状态恢复：JOIN 后前端把所有 push_request 初始化成可点 pending，
-      // 正在推送/已完成/已失败的消息须由服务端权威状态校正（镜像 restart 的 join 恢复模式）。
-      // 从未被确认的消息不在 push 状态机（git/push-state.ts）→ 不推状态，前端保持 pending（可点）。
-      // cancelled 不入此列——取消即删除，刷新后回归 pending（可重新批准，push 幂等）。
-      for (const row of rows) {
-        const extra = parseMessageExtra(row.extra)
-        if (!extra?.push) continue
-        const st = getPushState(row.id)
-        if (st === 'pushing' || st === 'done' || st === 'failed') {
-          socket.emit(Events.PUSH_STATUS, { messageId: row.id, state: st })
-        }
       }
     })
 
