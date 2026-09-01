@@ -170,7 +170,10 @@ export class ClaudeAdapter implements LLMAdapter {
     // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（opencode.ts:301 同款惯例）
     const env = this.buildEnv(options.context, options.model)
 
-    log.info('启动 Claude Code CLI', { model: options.model || this.model, promptLen: prompt.length })
+    log.info('启动 Claude Code CLI', {
+      model: options.model || this.model,
+      promptLen: prompt.length,
+    })
 
     // MCP 结构化路由（契约 4——店长裁决）：context 存在时挂 post_message 工具面。
     // .mcp.json 每 spawn 生成到 OS temp，流结束/异常路径 finally 删除；
@@ -191,10 +194,13 @@ export class ClaudeAdapter implements LLMAdapter {
       args.push(
         '--mcp-config',
         mcpConfigPath,
-        // 白名单双工具（spike case 3/4 双证实效：MCP 工具面收窄；
-        // 知识库 Phase 1 加 search_knowledge——语义检索工具面）
+        // 白名单四工具（spike case 3/4 双证实效：MCP 工具面收窄；
+        // 知识库 Phase 1 加 search_knowledge——语义检索工具面；
+        // 2026-09-01 放行 query_db（排障只读取证，6 表白名单窄通道）+ request_user_action
+        // （店长 store 猫请求用户介入——push 审批气泡断点根因：白名单漏了它，
+        // claude provider 的店长在服务端回复流里调不到，push 审批信号通道唯一断死）
         '--allowedTools',
-        'mcp__catstudy__post_message,mcp__catstudy__search_knowledge',
+        'mcp__catstudy__post_message,mcp__catstudy__search_knowledge,mcp__catstudy__query_db,mcp__catstudy__request_user_action',
         // 内置工具黑名单（spike case 7 实证生效——店长裁决：列全净改善）
         '--disallowedTools',
         BUILTIN_TOOLS_DISALLOWED

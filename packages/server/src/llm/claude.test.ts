@@ -292,7 +292,7 @@ describe('ClaudeAdapter', () => {
     expect(args).toContain('--mcp-config')
     expect(args).toContain('--allowedTools')
     expect(args).toContain('--disallowedTools')
-    // 白名单双工具并存（逗号串单值——知识库 Phase 1 扩面）
+    // 白名单四工具并存（逗号串单值——知识库 Phase 1 扩面 + 2026-09-01 放行 query_db/request_user_action）
     const allowedIdx = args.indexOf('--allowedTools')
     expect(args[allowedIdx + 1]).toContain('mcp__catstudy__post_message')
     expect(args[allowedIdx + 1]).toContain('mcp__catstudy__search_knowledge')
@@ -345,7 +345,9 @@ describe('ClaudeAdapter', () => {
     const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1] as string[]
     const idx = args.indexOf('--allowedTools')
     expect(idx).toBeGreaterThan(-1)
-    expect(args[idx + 1]).toBe('mcp__catstudy__post_message,mcp__catstudy__search_knowledge')
+    expect(args[idx + 1]).toBe(
+      'mcp__catstudy__post_message,mcp__catstudy__search_knowledge,mcp__catstudy__query_db,mcp__catstudy__request_user_action'
+    )
   })
 
   it('chatStream without context keeps baseline args (no MCP flags)', async () => {
