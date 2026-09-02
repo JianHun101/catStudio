@@ -393,6 +393,16 @@ describe('ChatPanel 工具语义拆分（kind:\'tool\' 独立通道 + 可折叠�
     expect(source).toContain('@keydown.enter.prevent="toggleStreamToolArea(agentId, item.open)"')
   })
 
+  it('流式工具区 header 点击即时生效：toggle bump streamToolVersion + buildStreamItems 读取（fc2fc9e ⚠️ 修复）', () => {
+    // 审查缺陷：toggle 只写 streamToolState，而模板折叠态渲染的是 activeTypingStates
+    // computed 产出的 item.open——computed 不依赖该 ref，点击要等下一次 AGENT_TYPING
+    // 重建才生效；若该 typing 已是流式最后一发则点击永不生效。
+    // 修复：引入 streamToolVersion ref，toggle bump + buildStreamItems 读取建立直接依赖。
+    expect(source).toContain('const streamToolVersion = ref(0)')
+    expect(source).toContain('streamToolVersion.value++')
+    expect(source).toMatch(/function buildStreamItems[\s\S]{0,300}streamToolVersion\.value/s)
+  })
+
   it('历史消息工具日志：msg.toolContent?.length 存在才渲染——默认收起的 tool-area 容器 + 每工具一条 tool-row', () => {
     expect(source).toContain('<details v-if="msg.toolContent?.length" class="tool-area">')
     expect(source).toContain('<template v-for="(t, ti) in msg.toolContent" :key="ti">')

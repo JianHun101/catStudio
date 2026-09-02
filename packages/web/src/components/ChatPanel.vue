@@ -125,6 +125,13 @@ interface ActiveTyping {
 
 /** 用户点过流式工具区 header 后的冻结态（frozen=true 停止自动展开/收起） */
 const streamToolState = ref(new Map<string, { frozen: boolean; open: boolean }>())
+/**
+ * 工具区交互版本号：用户点击 header 时 bump——activeTypingStates 对 toggle 的
+ * 直接响应依赖。item.open 来自 computed 重建的渲染条目，而 toggle 只写
+ * streamToolState Map；fc2fc9e 审查实证 Map key 级追踪覆盖不到「auto-close 后
+ * 点开」的窗口（无后续 typing 则永不重建）——版本号 bump 强制立即重建。
+ */
+const streamToolVersion = ref(0)
 
 /** 工具是否推进中（running/pending）——驱动流式工具区自动展开 */
 function isToolActive(t: { status?: string }): boolean {
@@ -143,6 +150,8 @@ function toolRowFromSeg(seg: StreamSegment): ToolCallInfo {
  * 自动逻辑：有工具推进中即展开，全部结束即收起；用户点过 header 后冻结。
  */
 function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] {
+  // 依赖工具区交互版本号：toggle bump 后强制重建渲染条目，item.open 立即翻转
+  void streamToolVersion.value
   const items: StreamItem[] = []
   let toolArea: StreamToolAreaItem | null = null
   for (const seg of segs) {
@@ -185,6 +194,10 @@ function typingView(
 /** 流式工具区 header 点击：记冻结态（open 取反），此后不再随工具状态自动开合 */
 function toggleStreamToolArea(agentId: string, wasOpen: boolean): void {
   streamToolState.value.set(agentId, { frozen: true, open: !wasOpen })
+  // bump 版本号：buildStreamItems 依赖它，强制 activeTypingStates 立即重建渲染条目。
+  // 否则点击只在「下一次 AGENT_TYPING 触发 rebuild」时生效——若该 typing 已是流式
+  // 最后一发，点击永不生效（fc2fc9e 审查缺陷）。
+  streamToolVersion.value++
 }
 
 const activeTypingStates = computed(() => {
