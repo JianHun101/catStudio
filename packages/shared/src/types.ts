@@ -110,6 +110,10 @@ export interface Message {
    *  独立于正文/思考——永不进 LLM 上下文（上下文构建只消费 content），
    *  历史渲染独立工具日志卡片、clowder get_message 可查「这单跑了哪个工具/结果」 */
   toolContent?: ToolCallInfo[]
+  /** 回复分段（kind+content+tool 按时间序交错）——落库持久化，历史渲染据此还原生成期交错顺序。
+   *  镜像 clowder 有序块数组；老消息无该字段 → 前端退化现行为（thinking_content+tool_content 两块堆叠）。
+   *  tool 段流式轻量（id/name/status，io 不进 typing 段防 socket 膨胀）——历史前端按 id 从 toolContent join io。 */
+  segments?: StreamSegment[]
   createdAt: string
   /** 消息类型（服务端检测附加，默认 normal 不携带该字段） */
   messageType?: MessageType

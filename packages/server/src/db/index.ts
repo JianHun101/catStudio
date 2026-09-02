@@ -230,6 +230,15 @@ export function initDb(): void {
       sql: `ALTER TABLE messages ADD COLUMN tool_content TEXT`,
     },
     {
+      name: 'segments on messages',
+      // 回复分段（kind+content+tool 按时间序交错，JSON 字符串）——历史渲染还原生成期
+      // 交错顺序的权威来源（镜像 clowder 有序块数组）。落库即持久化生成期交错时序——
+      // 此前 insertAgentMessage 只写 content/thinking_content/tool_content 三列、交错序
+      // 落库即丢，历史折叠块只能「思考一块+工具一块」堆叠（最终输出收拢工具根因）。
+      // additive ALTER + 存量行 NULL（老消息无分段 = 前端退化现行为，零回归）
+      sql: `ALTER TABLE messages ADD COLUMN segments TEXT`,
+    },
+    {
       name: 'dispatch_state on messages',
       sql: `ALTER TABLE messages ADD COLUMN dispatch_state TEXT DEFAULT NULL`,
     },

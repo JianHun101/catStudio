@@ -53,6 +53,7 @@ const SCHEMA_SQL = `
     images TEXT,
     thinking_content TEXT,
     tool_content TEXT,
+    segments TEXT,
     dispatch_state TEXT DEFAULT NULL,
     extra TEXT DEFAULT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

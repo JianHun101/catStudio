@@ -449,6 +449,43 @@ describe('socketio connector', () => {
       expect(history[0].sessionId).toBe('session-1')
     })
 
+    it('SESSION_HISTORY 恢复带 segments（新消息时间序交错随历史重放）', () => {
+      const db = getDb()
+      const segs = [
+        { kind: 'thinking', content: '先想一下再调工具' },
+        { kind: 'tool', content: '', tool: { id: 'call_1', name: 'apply_patch', status: 'completed' } },
+        { kind: 'text', content: '正文结论' },
+      ]
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, segments)
+         VALUES (?, 'session-1', 'agent-1', 'agent', '正文结论', '[]', ?)`
+      ).run('msg-seg-1', JSON.stringify(segs))
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-seg-1')
+      expect(m.segments).toEqual(segs)
+    })
+
+    it('SESSION_HISTORY 老消息（segments 列 NULL）不带 segments 字段（前端退化现行为）', () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions)
+         VALUES (?, 'session-1', 'agent-1', 'agent', '旧回复', '[]')`
+      ).run('msg-seg-old')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-seg-old')
+      expect(m.segments).toBeUndefined()
+    })
+
     it('limits history to 200 messages', () => {
       const db = getDb()
       // 插入 250 条消息

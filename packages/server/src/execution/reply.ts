@@ -822,7 +822,12 @@ export async function runAgentReply(
     thinkingContent || undefined,
     // 工具调用记录：结构化 JSON 数组（id/name/status/input/output 截断摘要）——
     // 独立列 tool_content，与正文/思考三通道分离，query_db/get_message 可查
-    tools.length > 0 ? JSON.stringify(tools) : undefined
+    tools.length > 0 ? JSON.stringify(tools) : undefined,
+    undefined, // extra（对话内 diff 等附加富内容：落库先于采集，成功后经 updateMessageExtra 补写，此处不传）
+    // 回复分段（kind+content+tool 时间序交错）JSON——历史渲染还原生成期交错顺序的权威来源。
+    // 镜像 clowder 有序块数组；流式 segments 已按 appendSegment 同类合并 + mergeToolSegment
+    // 按 id 归并成最终形态（生成期前端看到的交错序），落库持久化后历史不再「工具收拢尾部」
+    segments.length > 0 ? JSON.stringify(segments) : undefined
   )
 
   const estimatedPromptLen = llmMessages.reduce((sum, m) => sum + m.content.length, 0)
@@ -877,6 +882,10 @@ export async function runAgentReply(
     taskId: triggerMsg.taskId || undefined,
     thinkingContent: thinkingContent || undefined,
     ...(tools.length > 0 ? { toolContent: tools } : {}),
+    // 分段数组本体随 NEW_MESSAGE 广播（与 toolContent: tools 同款——数组直接携带，
+    // socket.io 序列化时取值，不二次 stringify）；web store 收到后消息即带 segments，
+    // 历史折叠块/后续会话重入（SESSION_HISTORY 走 DB segments 列）两路都拿到交错序
+    ...(segments.length > 0 ? { segments } : {}),
     createdAt: new Date().toISOString(),
     // agent 耗时（C5）：随广播注入，前端气泡展示「耗时 X.X 秒」。瞬态不落库——
     // 落库在 708 行 insertAgentMessage（独立参数，先于 finalMsg 构造），此处仅广播对象；

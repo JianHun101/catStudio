@@ -240,11 +240,12 @@ export function insertAgentMessage(
   taskId: string | null,
   thinkingContent?: string,
   toolContentJson?: string,
-  extraJson?: string
+  extraJson?: string,
+  segmentsJson?: string
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content, tool_content, extra)
-     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?, ?, ?)`
+    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content, tool_content, extra, segments)
+     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?, ?, ?, ?)`
   ).run(
     id,
     sessionId,
@@ -253,7 +254,8 @@ export function insertAgentMessage(
     taskId,
     thinkingContent ?? null,
     toolContentJson ?? null,
-    extraJson ?? null
+    extraJson ?? null,
+    segmentsJson ?? null
   )
 }
 

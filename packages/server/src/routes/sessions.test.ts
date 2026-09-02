@@ -283,4 +283,67 @@ describe('Session Routes', () => {
       expect(res.statusCode).toBe(404)
     })
   })
+
+  describe('GET /api/sessions/:id/messages', () => {
+    it('返回 agent 消息带 segments + toolContent（REST 历史交错序可查）', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '历史交错测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+
+      const db = (await import('../db/index.js')).getDb()
+      const segs = [
+        { kind: 'thinking', content: '先想一下再调工具' },
+        { kind: 'tool', content: '', tool: { id: 'call_1', name: 'apply_patch', status: 'completed' } },
+        { kind: 'text', content: '正文结论' },
+      ]
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, tool_content, segments)
+         VALUES ('m-seg', ?, ?, 'agent', '正文结论', '[]', ?, ?)`
+      ).run(
+        id,
+        agentId1,
+        JSON.stringify([
+          {
+            id: 'call_1',
+            name: 'apply_patch',
+            status: 'completed',
+            input: { filePath: 'a.txt' },
+            output: 'diff',
+          },
+        ]),
+        JSON.stringify(segs)
+      )
+
+      const res = await app.inject({ method: 'GET', url: `/api/sessions/${id}/messages` })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      const m = body.find((x: any) => x.id === 'm-seg')
+      expect(m).toBeDefined()
+      expect(m.segments).toEqual(segs)
+      expect(m.toolContent).toHaveLength(1)
+      expect(m.toolContent[0].name).toBe('apply_patch')
+    })
+
+    it('老消息（segments 列 NULL）不带 segments 字段（前端退化现行为）', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '老消息测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = (await import('../db/index.js')).getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions)
+         VALUES ('m-old', ?, ?, 'agent', '旧回复', '[]')`
+      ).run(id, agentId1)
+
+      const res = await app.inject({ method: 'GET', url: `/api/sessions/${id}/messages` })
+      const body = JSON.parse(res.body)
+      const m = body.find((x: any) => x.id === 'm-old')
+      expect(m.segments).toBeUndefined()
+    })
+  })
 })

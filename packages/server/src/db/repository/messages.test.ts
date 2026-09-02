@@ -230,6 +230,46 @@ describe('messages repo — 队列持久化', () => {
       expect(JSON.parse(row.tool_content!).length).toBe(1)
     })
 
+    it('insertAgentMessage 带 segments 结构化 JSON 落库（回复分段交错列——历史还原交错序权威源）', () => {
+      const id = uuid()
+      const segs = [
+        { kind: 'thinking', content: '先想一下再调工具' },
+        {
+          kind: 'tool',
+          content: '',
+          tool: { id: 'call_1', name: 'apply_patch', status: 'completed' },
+        },
+        { kind: 'text', content: '正文结论' },
+      ]
+      messagesRepo.insertAgentMessage(
+        id,
+        's1',
+        'agent-1',
+        '正文结论',
+        null,
+        '先想一下再调工具',
+        undefined, // tool_content
+        undefined, // extra
+        JSON.stringify(segs)
+      )
+
+      const row = db.prepare('SELECT segments FROM messages WHERE id = ?').get(id) as {
+        segments: string | null
+      }
+      expect(row.segments).toContain('"kind":"tool"')
+      expect(JSON.parse(row.segments!)).toEqual(segs)
+    })
+
+    it('insertAgentMessage 不带 segments → segments 列为 NULL（老消息零回归）', () => {
+      const id = uuid()
+      messagesRepo.insertAgentMessage(id, 's1', 'agent-1', '摘要', null)
+
+      const row = db.prepare('SELECT segments FROM messages WHERE id = ?').get(id) as {
+        segments: string | null
+      }
+      expect(row.segments).toBeNull()
+    })
+
     it('insertAgentMessage 不带 extra → extra 列为 NULL（旧消息零回归）', () => {
       const id = uuid()
       messagesRepo.insertAgentMessage(id, 's1', 'agent-1', '摘要', null)

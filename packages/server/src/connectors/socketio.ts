@@ -10,7 +10,7 @@
 import { Server as HttpServer } from 'node:http'
 import { Server as SocketServer } from 'socket.io'
 import { Events, estimateTokens } from '@cat-study/shared'
-import type { SendMessageAck, ToolCallInfo } from '@cat-study/shared'
+import type { SendMessageAck, ToolCallInfo, StreamSegment } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
   agents as agentsRepo,
@@ -215,6 +215,9 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           thinkingContent: row.thinking_content || undefined,
           // 工具调用记录：tool_content JSON 列反序列化（三通道分离后历史独立工具卡渲染）
           toolContent: parseJsonValue<ToolCallInfo[]>(row.tool_content),
+          // 回复分段（segments JSON 列反序列化）——历史折叠块还原生成期交错顺序的权威来源；
+          // 老消息（无 segments 列数据）→ undefined，前端退化 thinking_content+tool_content 两块
+          segments: parseJsonValue<StreamSegment[]>(row.segments),
           extra: msgExtra,
           createdAt: row.created_at.replace(' ', 'T') + 'Z',
           // 历史恢复同样携带重启类型（前端按钮渲染依据；DB 不存类型，内容前缀是唯一事实源）
