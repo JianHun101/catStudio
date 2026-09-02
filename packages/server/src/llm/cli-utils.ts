@@ -294,7 +294,8 @@ export function __test_reset(): void {
  * 改为事件级局部 buffer：只丢弃 tool_use **同一事件内** 的前导文本，
  * 保留此前事件中已产出的纯文本。
  *
- * thinking 块始终实时产出（前缀 "[思考] "），让前端看到流式进度。
+ * thinking 块始终实时产出（纯思考文本，无前缀——结构分离后由 kind 字段驱动前端折叠），
+ * 让前端看到流式进度。
  */
 export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
@@ -319,9 +320,11 @@ export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable
           if (block.type === 'text' && typeof block.text === 'string' && !eventHasToolUse) {
             yield { content: block.text, done: false, kind: 'text' }
           }
-          // 产出思考过程，让前端看到实时进度（但不存入 DB，不参与上下文）
+          // 产出思考过程，让前端看到实时进度（但不存入 DB，不参与上下文）。
+          // 纯思考文本无 [思考] 前缀——结构分离后 kind 字段即结构信号（store 直接累积分段，
+          // 前端按 kind 渲染折叠块，不再依赖文本标记回推）
           if (block.type === 'thinking' && typeof block.thinking === 'string') {
-            yield { content: `[思考] ${block.thinking}`, done: false, kind: 'thinking' }
+            yield { content: block.thinking, done: false, kind: 'thinking' }
           }
         }
       }

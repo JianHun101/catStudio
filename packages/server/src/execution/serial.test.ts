@@ -423,4 +423,35 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
 
     expect(engine.__getMentionCount('trace-r', 'agent-1')).toBe(0)
   })
+
+  it('思考展示结构分离：typing 推 segments 分段 + thinkingContent 存纯文本（无 [思考] 前缀）', async () => {
+    // 混合流：text → thinking（纯文本）→ text（正文含 [思考] 字面量——不该被当思考吞掉）
+    const chatStream = vi.fn(async function* () {
+      yield { content: '正文开始', done: false, kind: 'text' }
+      yield { content: '这是思考过程', done: false, kind: 'thinking' }
+      yield { content: '正文里说[思考]不是标记', done: false, kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await runPaired(engine, 'msg-thinking', 'trace-thinking')
+
+    // typing 推送：segments 结构分段（kind 驱动，无文本标记）+ content 兼容字段仍在
+    expect(calls.typing.length).toBeGreaterThan(0)
+    const lastTyping = calls.typing[calls.typing.length - 1]
+    expect(lastTyping.segments).toEqual([
+      { kind: 'text', content: '正文开始' },
+      { kind: 'thinking', content: '这是思考过程' },
+      { kind: 'text', content: '正文里说[思考]不是标记' },
+    ])
+    expect(lastTyping.content).toBe('正文开始这是思考过程正文里说[思考]不是标记')
+
+    // 落库：thinking_content 纯思考文本（无 [思考] 前缀）；content 只含文本 chunk（思考不入库）
+    const row = getDb()
+      .prepare(`SELECT * FROM messages WHERE role = 'agent' AND session_id = 'session-1'`)
+      .get() as any
+    expect(row.thinking_content).toBe('这是思考过程')
+    expect(row.content).toBe('正文开始正文里说[思考]不是标记')
+  })
 })

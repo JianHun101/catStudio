@@ -8,6 +8,7 @@ import type {
   AgentConfig,
   AgentTokenStats,
   SendMessageAck,
+  ThinkingSegment,
 } from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
 import { api } from '@/composables/useApi'
@@ -66,9 +67,14 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<Message[]>([])
   const agentStates = ref<Map<string, Map<string, AgentRuntimeState>>>(new Map())
   const agents = ref<AgentConfig[]>([])
-  const typingStates = ref<Map<string, { messageId: string; content: string; sessionId: string }>>(
-    new Map()
-  )
+  const typingStates = ref<
+    Map<string, {
+      messageId: string
+      content: string
+      sessionId: string
+      segments?: ThinkingSegment[]
+    }>
+  >(new Map())
   const unreadCounts = ref<Map<string, number>>(new Map()) // sessionId → unread count
   const loading = ref(false)
   const waitingForServer = ref(false) // 等待服务器启动（health check 轮询中）
@@ -604,7 +610,13 @@ export const useChatStore = defineStore('chat', () => {
 
     socket.on(
       Events.AGENT_TYPING,
-      (data: { agentId: string; messageId: string; content: string; sessionId: string }) => {
+      (data: {
+        agentId: string
+        messageId: string
+        content: string
+        sessionId: string
+        segments?: ThinkingSegment[]
+      }) => {
         if (data.sessionId !== activeSessionId.value) return
         typingStates.value.set(data.agentId, data)
       }

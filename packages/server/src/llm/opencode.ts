@@ -443,8 +443,8 @@ export class OpencodeAdapter implements LLMAdapter {
  *   tool_use 仅 --agent 模式输出，part 结构与 serve 适配器工具事件映射同款
  *   schema（店长实测报告 + opencode.db 落盘样本 + 上游 schema 三源一致）
  *
- * type === 'text' → 实时产出内容 chunk；type === 'reasoning' → 产出 [思考] 前缀
- * chunk（对齐 claude.ts/pi.ts 契约，前端折叠展示、不入库）；type === 'tool_use' →
+ * type === 'text' → 实时产出内容 chunk；type === 'reasoning' → 产出纯思考文本
+ * chunk（kind:'thinking' 前端折叠展示、不入库）；type === 'tool_use' →
  * 产出 [工具] 前缀 chunk（kind:'thinking' 流式可见、不落库不参与上下文——工具
  * 过程是观感反馈，不进存储内容；状态标签见 TOOL_STATUS_LABELS）；type === 'error'
  * → 产出错误 chunk 并终止（错误是终止性事件，后续不再有有效内容）。无法解析的行跳过。
@@ -466,12 +466,12 @@ async function* parseOpencodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
         }
       } else if (event.type === 'reasoning') {
         // 推理模型思考事件（--thinking 开启时输出，鸡兔同笼实测 tokens.reasoning=43
-        // 且有 reasoning 事件；简单算术无思考 → 无该事件）。转 [思考] 前缀 chunk
-        // 对齐 claude.ts:222 / pi.ts:155 契约（kind:'thinking' 前端折叠展示、
-        // socketio.ts:2706 不落库不参与上下文）。结构同 text 事件，同样 part.text 主
+        // 且有 reasoning 事件；简单算术无思考 → 无该事件）。纯思考文本无 [思考] 前缀
+        // ——结构分离后 kind 字段即结构信号（store 直接累积 segments 分段、前端按 kind
+        // 渲染折叠块，不再依赖文本标记回推）。结构同 text 事件，同样 part.text 主
         const text = event.part?.text ?? event.text
         if (typeof text === 'string' && text) {
-          yield { content: `[思考] ${text}`, done: false, kind: 'thinking' }
+          yield { content: text, done: false, kind: 'thinking' }
         }
       } else if (event.type === 'tool_use') {
         // 工具调用事件（--agent build 模式）。映射 [工具] 前缀 chunk：实时

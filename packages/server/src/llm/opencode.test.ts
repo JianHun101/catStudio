@@ -643,7 +643,7 @@ describe('OpencodeAdapter', () => {
 
     const chunks = await collect(gen)
     expect(chunks).toEqual([
-      { content: '[思考] Let me solve step by step', done: false, kind: 'thinking' },
+      { content: 'Let me solve step by step', done: false, kind: 'thinking' },
       { content: 'answer', done: false, kind: 'text' },
       { content: '', done: true },
     ])
@@ -662,7 +662,7 @@ describe('OpencodeAdapter', () => {
 
     const chunks = await collect(gen)
     expect(chunks).toEqual([
-      { content: '[思考] legacy thinking', done: false, kind: 'thinking' },
+      { content: 'legacy thinking', done: false, kind: 'thinking' },
       { content: '', done: true },
     ])
   })

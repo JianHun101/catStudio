@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import type { Message } from '@cat-study/shared'
+import type { Message, ThinkingSegment } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { useSkillCommand } from '@/composables/useSkillCommand'
@@ -111,7 +111,10 @@ const dateSepIndices = computed(() => {
 
 /** 仅显示活跃会话中 Agent 的打字气泡（双重校验：sessionId + agentId） */
 const activeTypingStates = computed(() => {
-  const filtered = new Map<string, { messageId: string; content: string; sessionId: string }>()
+  const filtered = new Map<
+    string,
+    { messageId: string; content: string; sessionId: string; segments?: ThinkingSegment[] }
+  >()
   const activeAgentIds = new Set(store.activeSession?.agentIds ?? [])
   store.typingStates.forEach((v, agentId) => {
     if (v.sessionId !== store.activeSessionId) return
@@ -545,7 +548,11 @@ function renderMessageMarkdown(msg: Message): string {
 
 /** 记忆化渲染思考内容：思考内容未变 → 直接返回缓存 html */
 function renderThinkingMarkdown(msg: Message): string {
-  const raw = msg.thinkingContent?.replace(/\[思考\]\s*/g, '') ?? ''
+  // 新链路 thinking_content 已存纯思考文本（适配器源头去 [思考] 前缀），无需剥；
+  // 兼容旧库：结构分离前落库的历史消息 thinking_content 带 [思考] 前缀（2026-09-02
+  // 前），含前缀才剥——新数据原样返回，旧数据剥前缀后正常折叠展示。
+  const tc = msg.thinkingContent ?? ''
+  const raw = tc.includes('[思考]') ? tc.replace(/\[思考\]\s*/g, '') : tc
   const key = `${msg.id}:thinking:${raw}`
   const cached = markdownCache.get(key)
   if (cached !== undefined) return cached
@@ -924,7 +931,14 @@ const warnedAgentsText = computed(() => {
           <div class="msg-body">
             <div class="msg-sender">{{ senderName(agentId) }}</div>
             <div class="msg-bubble">
-              <template v-for="(seg, si) in parseThinkingBlocks(typing.content)" :key="si">
+              <!-- 结构分离：优先消费 server 推的 typing.segments（kind+content 分段）；
+                    旧 server / 无 segments 时退化 parseThinkingBlocks 从 [思考] 文本标记回推 -->
+              <template
+                v-for="(seg, si) in (typing.segments && typing.segments.length
+                  ? typing.segments
+                  : parseThinkingBlocks(typing.content))"
+                :key="si"
+              >
                 <div
                   v-if="seg.kind === 'text'"
                   class="msg-text"

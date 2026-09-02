@@ -9,7 +9,7 @@
 import { randomBytes } from 'node:crypto'
 import { v4 as uuid } from 'uuid'
 import { estimateTokens, estimateMessageTokens } from '@cat-study/shared'
-import type { AgentConfig, LLMMessage, Message } from '@cat-study/shared'
+import type { AgentConfig, LLMMessage, Message, ThinkingSegment } from '@cat-study/shared'
 import type { MessageRow } from '../db/repository/index.js'
 import {
   messages as messagesRepo,
@@ -65,6 +65,22 @@ const log = createLogger('socketio')
 
 /** 运行时长心跳间隔（从 socketio.ts 随迁；headless 黑盒可观测性） */
 const HEARTBEAT_INTERVAL_MS = 10_000
+
+/** 累积流式分段：同类相邻合并（text 后 text 追加、thinking 后 thinking 追加），
+ *  切换 kind 时 push 新段——前端按 kind 渲染折叠块，结构不依赖 [思考] 文本标记。
+ *  chunk.kind 缺失/undefined 的适配器按 text 处理（与 fullContent 累积语义一致）。 */
+function appendSegment(
+  segments: ThinkingSegment[],
+  kind: 'text' | 'thinking',
+  content: string
+): void {
+  const last = segments[segments.length - 1]
+  if (last && last.kind === kind) {
+    last.content += content
+  } else {
+    segments.push({ kind, content })
+  }
+}
 
 export async function runAgentReply(
   state: EngineState,
@@ -552,8 +568,11 @@ export async function runAgentReply(
 
   // 流式生成回复
   let fullContent = '' // 仅文本内容 — 存入 DB，参与 agent-to-agent 上下文
-  let displayContent = '' // 文本 + 思考 — 流式推送给前端
+  let displayContent = '' // 文本 + 思考 — 流式推送给前端（content 兼容字段，保留完整展示文本）
   let thinkingContent = '' // 仅思考过程 — 存入 DB 的 thinking_content 列，回复后仍可查看
+  // 结构化分段（kind+content）——替代前端从 [思考] 文本标记回推结构；同类相邻合并。
+  // 推 typing 与 setActiveStream 均携带（会话恢复补推复用），前端优先消费，缺失才退化。
+  const segments: ThinkingSegment[] = []
   const msgId = uuid()
   // 每 spawn 随机的信号 token（一次流一次 spawn——「每 spawn 随机」语义保持）。
   // 随 context 进 buildEnv → .mcp.json env → MCP server 的 x-signal-token 头；
@@ -568,11 +587,13 @@ export async function runAgentReply(
     agentId: agent.id,
     messageId: msgId,
     content: '',
+    segments: [],
   })
   state.setActiveStream(agent.id, sessionId, {
     sessionId,
     messageId: msgId,
     content: '',
+    segments: [],
     token: signalToken,
   })
 
@@ -668,22 +689,26 @@ export async function runAgentReply(
       }
       if (chunk.content) {
         displayContent += chunk.content
-        // 思考内容只流式展示，不进入存储和上下文
-        if (chunk.kind !== 'thinking') {
-          fullContent += chunk.content
-        } else {
+        // 思考内容只流式展示，不进入存储和上下文；按 kind 累积结构化分段
+        if (chunk.kind === 'thinking') {
           thinkingContent += chunk.content
+          appendSegment(segments, 'thinking', chunk.content)
+        } else {
+          fullContent += chunk.content
+          appendSegment(segments, 'text', chunk.content)
         }
         bus.emitTyping({
           sessionId,
           agentId: agent.id,
           messageId: msgId,
           content: displayContent,
+          segments,
         })
         state.setActiveStream(agent.id, sessionId, {
           sessionId,
           messageId: msgId,
           content: displayContent,
+          segments,
           token: signalToken,
         })
       }

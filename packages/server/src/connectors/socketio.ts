@@ -287,6 +287,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
             agentId,
             messageId: stream.messageId,
             content: stream.content,
+            // 结构化分段随恢复补推（前端按 kind 渲染）；旧 server 无 segments → 省略，前端退化
+            ...(stream.segments ? { segments: stream.segments } : {}),
           })
         }
       }

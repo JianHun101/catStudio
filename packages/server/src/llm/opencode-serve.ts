@@ -177,8 +177,8 @@ function collectImageParts(messages: LLMMessage[]): { type: 'file'; mime: string
  *
  * 事件映射（店长契约，1.18.16 实测结构）：
  * - message.part.delta（assistant 消息，field=text）→ text chunk 实时产出
- * - message.part.updated（type=reasoning，text 非空）→ [思考] chunk
- *   （kind:'thinking' 前端折叠展示、不入库——对齐 claude.ts:222 / pi.ts:155）
+ * - message.part.updated（type=reasoning，text 非空）→ 纯思考文本 chunk
+ *   （kind:'thinking' 前端折叠展示、不入库——结构分离后 kind 即结构信号，无 [思考] 前缀）
  * - session.idle → 一轮完成 → done
  * - abort → POST /session/{id}/abort（中断 serve 侧执行）+ SSE 断连
  *
@@ -601,10 +601,11 @@ export class OpencodeServeAdapter implements LLMAdapter {
         if (part.type === 'reasoning') {
           // 思考：serve 模式无需 --thinking 默认输出（run 模式才需要开关，实测）；
           // gpt-5.6-luna 部分思考是加密形态（reasoningEncryptedContent、text 空）——
-          // 以 text 非空为条件，空思考跳过；按 part.id 去重（快照可能多次推送）
+          // 以 text 非空为条件，空思考跳过；按 part.id 去重（快照可能多次推送）。
+          // 纯思考文本无 [思考] 前缀——结构分离后 kind 字段即结构信号
           if (typeof part.text === 'string' && part.text && !reasoningSeen.has(part.id)) {
             reasoningSeen.add(part.id)
-            return { content: `[思考] ${part.text}`, done: false, kind: 'thinking' }
+            return { content: part.text, done: false, kind: 'thinking' }
           }
           return null
         }
