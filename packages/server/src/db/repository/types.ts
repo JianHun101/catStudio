@@ -56,6 +56,9 @@ export interface MessageRow {
   /** 工具调用记录 JSON（结构化数组：id/name/status/input/output 截断摘要；
    *  独立列，永不进 LLM 上下文——正文/思考/工具三通道分离） */
   tool_content: string | null
+  /** 回复分段 JSON（与 shared.StreamSegment[] 同形，kind+content+tool 按时间序交错）——
+   *  历史渲染还原交错顺序；老消息 NULL（无分段 → 前端退化 thinking_content+tool_content 两块） */
+  segments: string | null
   dispatch_state: string | null
   /** 附加富内容 JSON（diff 块等；独立列，永不进 LLM 上下文） */
   extra: string | null

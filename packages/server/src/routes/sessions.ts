@@ -6,6 +6,7 @@ import {
   Events,
   type SessionConfig,
   type ToolCallInfo,
+  type StreamSegment,
 } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
@@ -205,6 +206,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         taskId: r.task_id || null,
         thinkingContent: r.thinking_content || undefined,
         toolContent: parseJsonValue<ToolCallInfo[]>(r.tool_content),
+        segments: parseJsonValue<StreamSegment[]>(r.segments),
         createdAt: r.created_at.replace(' ', 'T') + 'Z',
       }
     })

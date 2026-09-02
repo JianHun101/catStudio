@@ -438,3 +438,27 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).toContain('toolIoText(t.output)')
   })
 })
+
+describe('ChatPanel 历史消息 segments 交错还原（segments 落库后时间序优先 + 老消息退化）', () => {
+  it('storedFoldEntries：有 segments 时按时间序产出 thinking/tool 交错条目（tool 按 id join tool_content 补 io、text 段跳过）', () => {
+    expect(source).toContain('function storedFoldEntries(msg: Message): StoredFoldEntry[] | null')
+    expect(source).toContain('if (!msg.segments?.length) return null')
+    expect(source).toContain('const byId = new Map<string, ToolCallInfo>()')
+    expect(source).toContain("if (seg.kind === 'text') continue")
+    expect(source).toContain('full = byId.get(t.id)')
+    expect(source).toContain("entries.push({ kind: 'thinking', content: seg.content })")
+    expect(source).toContain("entries.push({ kind: 'tool', tool: full ?? t })")
+  })
+
+  it('历史折叠块内容体两路径：新消息走 stream-fold-body 时间序交错；老消息走 template v-else 两块退化（零回归）', () => {
+    // 新消息（segments 落库）：折叠块内按时间序交错渲染思考段 + 工具行
+    expect(source).toContain('v-if="storedFoldEntries(msg)" class="stream-fold-body"')
+    expect(source).toContain('<template v-for="(e, ei) in storedFoldEntries(msg)" :key="ei">')
+    expect(source).toContain('class="fold-thinking"')
+    expect(source).toContain('v-html="renderMarkdown(e.content)"')
+    expect(source).toContain('v-else-if="toolHasIo(e.tool)"')
+    // 老消息退化路径仍保留（thinking blob + fold-tool-list 两块）
+    expect(source).toContain('v-html="renderThinkingMarkdown(msg)"')
+    expect(source).toContain('class="fold-tool-list"')
+  })
+})
