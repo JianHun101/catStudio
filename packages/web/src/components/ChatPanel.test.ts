@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import source from './ChatPanel.vue?raw'
 import statusLabelSource from './AgentStatusLabel.vue?raw'
+import toolRowSource from './ToolRow.vue?raw'
 
 /**
  * Verify ChatPanel.vue's TransitionGroup animation setup.
@@ -406,11 +407,12 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).not.toContain('class="tool-area"')
   })
 
-  it('fold 内 entries 交错渲染：thinking 文本（fold-thinking）与工具行（tool-row）按 e.kind 分支同容器', () => {
+  it('fold 内 entries 交错渲染：thinking 文本（fold-thinking）与工具行（ToolRow partial）按 e.kind 分支同容器', () => {
     expect(source).toContain('v-for="(e, ei) in item.entries"')
     expect(source).toContain("e.kind === 'thinking'")
     expect(source).toContain('class="fold-thinking"')
-    expect(source).toContain('class="tool-row stream-tool-row"')
+    // 流式工具行走 ToolRow 共享 partial：class 透传 stream-tool-row + plain 恒纯行（io 只进落库）
+    expect(source).toMatch(/<ToolRow v-else[\s\S]{0,90}stream-tool-row[\s\S]{0,90}plain \/>/)
   })
 
   it('流式折叠块 header 用户点过冻结：toggleStreamFold 记 frozen + open 取反 + 版本号 bump 即时生效（fc2fc9e ⚠️ 修复延续）', () => {
@@ -438,16 +440,19 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).not.toContain('class="tool-area"')
   })
 
-  it('历史折叠块内工具行渲染 name/status/truncated 保留（toolHasIo 门控行级 io 展开）', () => {
+  it('历史折叠块工具行渲染抽 ToolRow 共享 partial：退化路径按 msg.toolContent 驱动（行级 io/status 渲染单源收在 ToolRow.vue）', () => {
     expect(source).toContain('<template v-for="(t, ti) in msg.toolContent" :key="ti">')
-    expect(source).toContain('{{ t.name }}')
-    expect(source).toContain('toolStatusLabel(t.status)')
-    expect(source).toContain(':class="`tool-status-${t.status}`"')
-    expect(source).toContain('v-if="t.truncated"')
-    expect(source).toContain('toolHasIo(t)')
-    expect(source).toContain('class="tool-row-io"')
-    expect(source).toContain('toolIoText(t.input)')
-    expect(source).toContain('toolIoText(t.output)')
+    expect(source).toContain('<ToolRow :tool="t" />')
+    // name/status/io 行级渲染不再在 ChatPanel 内联复制（io 门控/展开逻辑收在 ToolRow.vue）
+    expect(source).not.toContain('toolHasIo(t)')
+    expect(source).not.toContain('toolIoText(t.input)')
+    expect(source).not.toContain('toolStatusLabel(t.status)')
+    expect(toolRowSource).toContain('function toolHasIo(t: ToolCallInfo): boolean')
+    expect(toolRowSource).toContain('toolStatusLabel(tool.status)')
+    expect(toolRowSource).toContain('class="tool-row-io"')
+    expect(toolRowSource).toContain('toolIoText(tool.input)')
+    expect(toolRowSource).toContain('toolIoText(tool.output)')
+    expect(toolRowSource).toContain('v-if="tool.truncated"')
   })
 })
 
@@ -468,9 +473,11 @@ describe('ChatPanel 历史消息 segments 交错还原（segments 落库后时�
     expect(source).toContain('<template v-for="(e, ei) in storedFoldEntries(msg)" :key="ei">')
     expect(source).toContain('class="fold-thinking"')
     expect(source).toContain('v-html="renderMarkdown(e.content)"')
-    expect(source).toContain('v-else-if="toolHasIo(e.tool)"')
-    // 老消息退化路径仍保留（thinking blob + fold-tool-list 两块）
+    // 新消息交错路径工具行走 ToolRow 共享 partial（io 分支由 ToolRow 内部 toolHasIo 决定）
+    expect(source).toMatch(/<ToolRow v-else :tool="e\.tool" \/>/)
+    // 老消息退化路径仍保留（thinking blob + fold-tool-list 两块，工具行同样走 ToolRow）
     expect(source).toContain('v-html="renderThinkingMarkdown(msg)"')
     expect(source).toContain('class="fold-tool-list"')
+    expect(source).toContain('<ToolRow :tool="t" />')
   })
 })
