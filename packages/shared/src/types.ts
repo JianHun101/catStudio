@@ -151,6 +151,22 @@ export interface ExecutionLog {
   errorMessage: string | null // 失败时的错误信息
 }
 
+/** 执行元数据展示投影（GET /api/sessions/:id/executions 返回项）——气泡 footer 的耗时/token 稳定数据源。
+ *  messageId = execution_logs.message_id（finalize 写回 replyMessageId，成功路径精确 1:1；
+ *  失败/中断为 NULL——展示耗时/token 只关心成功回复，够用）。
+ *  ⚠️ 禁用 triggered_by_message_id 作回复消息关联：那是「触发消息」（一条广播/@ 可触发
+ *  多个 agent → N:1），关联回复气泡会混淆。独立于 Message 主接口：塞进 message 会让
+ *  messages 接口膨胀，前端按 messageId 单独 join。 */
+export interface ExecutionMeta {
+  messageId: string | null
+  agentId: string
+  status: string
+  latencyMs: number | null
+  promptTokens: number | null
+  completionTokens: number | null
+  startedAt: string | null // execution_logs.started_at 无 NOT NULL 约束（手动/老行可能 NULL）
+}
+
 // ─── Dispatch ───────────────────────────────────────
 
 /** 调度器发给 Agent 的指令 */

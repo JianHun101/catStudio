@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import type { Message, StreamSegment, ToolCallInfo } from '@cat-study/shared'
+import type { Message, StreamSegment, ToolCallInfo, ExecutionMeta } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { useSkillCommand } from '@/composables/useSkillCommand'
@@ -833,6 +833,27 @@ function formatDuration(ms: number): string {
   return `${s >= 10 ? s.toFixed(0) : s.toFixed(1)} 秒`
 }
 
+/** 执行元数据（execution_logs.message_id 精确关联回复气泡——成功路径 1:1；落库稳定值）。
+ *  无对应 execution（老消息/失败回复/前端尚未拉取）返回 undefined → 气泡不误显。 */
+function execMetaFor(msg: { id: string }): ExecutionMeta | undefined {
+  return store.sessionExecutions.get(msg.id)
+}
+
+/** 气泡 footer 执行元数据文案：{耗时} · in {prompt}k / out {completion}k tok。
+ *  取代 durationMs 瞬态展示（durationMs 保留兜底——execution 拉取未到时新回复短暂可显）。 */
+function execMetaTextFor(msg: { id: string }): string | null {
+  const meta = execMetaFor(msg)
+  if (!meta) return null
+  const parts: string[] = []
+  if (meta.latencyMs != null) parts.push(`耗时 ${formatDuration(meta.latencyMs)}`)
+  const inTok = meta.promptTokens
+  const outTok = meta.completionTokens
+  if (inTok != null || outTok != null) {
+    parts.push(`in ${fmtTokens(inTok ?? 0)} / out ${fmtTokens(outTok ?? 0)} tok`)
+  }
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
 /** 是否可停止：回复中（busy）或有排队任务（AGENT_INTERRUPT 一个按钮覆盖两场景） */
 function canStopAgent(agentId: string): boolean {
   const state = store.currentStateFor(agentId)
@@ -1271,7 +1292,9 @@ const warnedAgentsText = computed(() => {
                       :class="contextLevelFor(msg.agentId)"
                     >
                       {{ modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId)
-                      }}<span v-if="msg.durationMs != null" class="msg-duration">
+                      }}<span v-if="execMetaTextFor(msg)" class="msg-duration">
+                        · {{ execMetaTextFor(msg) }}</span
+                      ><span v-else-if="msg.durationMs != null" class="msg-duration">
                         · 耗时 {{ formatDuration(msg.durationMs) }}</span
                       >
                     </span>

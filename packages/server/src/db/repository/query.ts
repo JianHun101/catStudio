@@ -69,6 +69,7 @@ export const QUERY_TABLE_SCHEMAS = {
       'task_id',
       'thinking_content',
       'tool_content',
+      'segments',
       'dispatch_state',
       'created_at',
     ],

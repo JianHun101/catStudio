@@ -346,4 +346,70 @@ describe('Session Routes', () => {
       expect(m.segments).toBeUndefined()
     })
   })
+
+  describe('GET /api/sessions/:id/executions', () => {
+    it('返回该 session 全部 execution 的展示列投影（camelCase；message_id 关联回复气泡）', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '执行元数据测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+
+      const db = (await import('../db/index.js')).getDb()
+      db.prepare(
+        `INSERT INTO execution_logs
+           (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at, latency_ms, message_id, prompt_tokens, completion_tokens)
+         VALUES ('log-ok', ?, ?, 'trigger-1', 'completed', 'trace-1', '2026-09-01 10:00:00', 12300, 'msg-reply-1', 2100, 800)`
+      ).run(id, agentId1)
+      db.prepare(
+        `INSERT INTO execution_logs
+           (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at, message_id)
+         VALUES ('log-null', ?, ?, 'trigger-2', 'failed', 'trace-2', '2026-09-01 11:00:00', NULL)`
+      ).run(id, agentId2)
+
+      const res = await app.inject({ method: 'GET', url: `/api/sessions/${id}/executions` })
+      expect(res.statusCode).toBe(200)
+      const { executions } = JSON.parse(res.body)
+
+      const ok = executions.find((x: any) => x.messageId === 'msg-reply-1')
+      expect(ok).toBeDefined()
+      expect(ok).toMatchObject({
+        agentId: agentId1,
+        status: 'completed',
+        latencyMs: 12300,
+        promptTokens: 2100,
+        completionTokens: 800,
+        startedAt: '2026-09-01T10:00:00Z',
+      })
+
+      const failed = executions.find((x: any) => x.agentId === agentId2)
+      expect(failed).toMatchObject({
+        messageId: null, // 失败/中断路径 finalize 不写回 replyMessageId → NULL 原样透出
+        status: 'failed',
+        latencyMs: null,
+        promptTokens: null,
+        completionTokens: null,
+        startedAt: '2026-09-01T11:00:00Z',
+      })
+    })
+
+    it('空 session 返回空数组不报错', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '空执行测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+
+      const res = await app.inject({ method: 'GET', url: `/api/sessions/${id}/executions` })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({ executions: [] })
+    })
+
+    it('返回 404 for nonexistent session', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/sessions/nonexistent/executions' })
+      expect(res.statusCode).toBe(404)
+    })
+  })
 })

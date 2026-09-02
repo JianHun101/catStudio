@@ -212,6 +212,30 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
+  // ─── GET /api/sessions/:id/executions — 执行元数据（耗时/token 展示投影）──
+
+  app.get('/api/sessions/:id/executions', async (req, reply) => {
+    const id = (req.params as any).id
+
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    const rows = execLogsRepo.getExecutionsBySession(id)
+
+    return {
+      executions: rows.map((r) => ({
+        messageId: r.message_id,
+        agentId: r.agent_id,
+        status: r.status,
+        latencyMs: r.latency_ms,
+        promptTokens: r.prompt_tokens,
+        completionTokens: r.completion_tokens,
+        startedAt: r.started_at ? r.started_at.replace(' ', 'T') + 'Z' : null,
+      })),
+    }
+  })
+
   // ─── POST /api/sessions/:id/read — 标记已读 ──────────
 
   app.post('/api/sessions/:id/read', async (req, reply) => {

@@ -28,6 +28,7 @@ const mockUpdateAgent = vi.fn()
 const mockMarkSessionRead = vi.fn().mockResolvedValue({ ok: true })
 const mockGetContextConfig = vi.fn()
 const mockSaveContextConfig = vi.fn()
+const mockGetSessionExecutions = vi.fn().mockResolvedValue({ executions: [] })
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -40,6 +41,7 @@ vi.mock('@/composables/useApi', () => ({
     markSessionRead: mockMarkSessionRead,
     getContextConfig: mockGetContextConfig,
     saveContextConfig: mockSaveContextConfig,
+    getSessionExecutions: mockGetSessionExecutions,
   },
 }))
 
@@ -288,6 +290,112 @@ describe('chatStore', () => {
       store.joinSession('s1')
       expect(store.messages).toHaveLength(2)
       expect(store.messages[0].id).toBe('m1')
+    })
+  })
+
+  describe('sessionExecutions（execution meta 耗时/token 落库稳定展示）', () => {
+    it('成功 → 按 messageId 建 Map（message_id NULL 行跳过——失败/中断 execution 无回复气泡可关联）', async () => {
+      store.activeSessionId = 's1'
+      mockGetSessionExecutions.mockResolvedValue({
+        executions: [
+          {
+            messageId: 'msg-1',
+            agentId: 'a1',
+            status: 'completed',
+            latencyMs: 12300,
+            promptTokens: 2100,
+            completionTokens: 800,
+            startedAt: '2026-09-01T10:00:00Z',
+          },
+          {
+            messageId: null,
+            agentId: 'a2',
+            status: 'failed',
+            latencyMs: null,
+            promptTokens: null,
+            completionTokens: null,
+            startedAt: null,
+          },
+        ],
+      })
+      await store.fetchSessionExecutions()
+      expect(mockGetSessionExecutions).toHaveBeenCalledWith('s1')
+      expect(store.sessionExecutions.size).toBe(1)
+      expect(store.sessionExecutions.get('msg-1')).toMatchObject({
+        agentId: 'a1',
+        latencyMs: 12300,
+        promptTokens: 2100,
+        completionTokens: 800,
+      })
+    })
+
+    it('失败静默 log，不清空旧缓存（会话内仍显示已加载部分）', async () => {
+      store.activeSessionId = 's1'
+      const old = new Map([
+        [
+          'old-msg',
+          {
+            messageId: 'old-msg',
+            agentId: 'a1',
+            status: 'completed',
+            latencyMs: 100,
+            promptTokens: 1,
+            completionTokens: 1,
+            startedAt: null,
+          },
+        ],
+      ])
+      store.sessionExecutions = old
+      mockGetSessionExecutions.mockRejectedValue(new Error('network'))
+      await expect(store.fetchSessionExecutions()).resolves.toBeUndefined()
+      expect(store.sessionExecutions.has('old-msg')).toBe(true)
+    })
+
+    it('SESSION_HISTORY 权威校正后重拉执行元数据（补切走/刷新期间增量 execution）', async () => {
+      store.activeSessionId = 's1'
+      mockGetSessionExecutions.mockResolvedValue({
+        executions: [
+          {
+            messageId: 'm-ack',
+            agentId: 'a1',
+            status: 'completed',
+            latencyMs: 500,
+            promptTokens: 10,
+            completionTokens: 5,
+            startedAt: null,
+          },
+        ],
+      })
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.SESSION_HISTORY)?.[1] as
+        ((data: { messages: Message[]; welcome: Message }) => void) | undefined
+      expect(handler).toBeDefined()
+      handler!({
+        messages: [{ ...mockMessage, id: 'm-ack' }],
+        welcome: undefined as any,
+      })
+      // fire-and-forget 拉取：等微任务 flush
+      await new Promise((r) => setTimeout(r, 0))
+      expect(store.sessionExecutions.get('m-ack')).toMatchObject({ latencyMs: 500 })
+    })
+
+    it('joinSession 切换会话时清空旧会话的 sessionExecutions', () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2', title: 'S2' }]
+      store.sessionExecutions = new Map([
+        [
+          's1-msg',
+          {
+            messageId: 's1-msg',
+            agentId: 'a1',
+            status: 'completed',
+            latencyMs: 100,
+            promptTokens: 1,
+            completionTokens: 1,
+            startedAt: null,
+          },
+        ],
+      ])
+      store.joinSession('s2')
+      expect(store.sessionExecutions.size).toBe(0)
     })
   })
 
