@@ -194,13 +194,15 @@ export class ClaudeAdapter implements LLMAdapter {
       args.push(
         '--mcp-config',
         mcpConfigPath,
-        // 白名单四工具（spike case 3/4 双证实效：MCP 工具面收窄；
+        // 白名单五工具（spike case 3/4 双证实效：MCP 工具面收窄；
         // 知识库 Phase 1 加 search_knowledge——语义检索工具面；
         // 2026-09-01 放行 query_db（排障只读取证，6 表白名单窄通道）+ request_user_action
         // （店长 store 猫请求用户介入——push 审批气泡断点根因：白名单漏了它，
         // claude provider 的店长在服务端回复流里调不到，push 审批信号通道唯一断死）
+        // 2026-09-02 放行 create_pr（收口链发布关载体——角色白名单在内部端点 403 守：
+        // 仅 store 可提 PR，实施/审查猫调用被拒，白名单全局放行 + 端点角色拦是双保险）
         '--allowedTools',
-        'mcp__catstudy__post_message,mcp__catstudy__search_knowledge,mcp__catstudy__query_db,mcp__catstudy__request_user_action',
+        'mcp__catstudy__post_message,mcp__catstudy__search_knowledge,mcp__catstudy__query_db,mcp__catstudy__request_user_action,mcp__catstudy__create_pr',
         // 内置工具黑名单（spike case 7 实证生效——店长裁决：列全净改善）
         '--disallowedTools',
         BUILTIN_TOOLS_DISALLOWED

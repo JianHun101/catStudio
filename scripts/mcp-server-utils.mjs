@@ -138,3 +138,49 @@ export function validateUserRequestParams(args) {
   }
   return { ok: true, type, reason: reason.trim(), options }
 }
+
+/**
+ * create_pr 参数校验（纯函数，供单测——scripts/mcp-server.test.js）。
+ * 契约：head 必填非空字符串、title 必填非空字符串、body 必填非空字符串、
+ * base 可选非空字符串（缺失/undefined → 服务端 createPr 默认 'dev'）。
+ * 服务端角色白名单与 createPr 业务失败（not-authed/branch-not-pushed 等）
+ * 由 internal.ts 权威校验（403/422 层）——本层只校形状，与既有工具同款分层。
+ * 返回 { ok: true, base, head, title, body }（字符串 trim）或 { ok: false, reason }。
+ */
+export function validateCreatePrParams(args) {
+  const head = args?.head
+  if (typeof head !== 'string' || !head.trim()) {
+    return {
+      ok: false,
+      reason: `create_pr 参数无效: head 必须是非空字符串（当前: ${JSON.stringify(head)}）`,
+    }
+  }
+  const title = args?.title
+  if (typeof title !== 'string' || !title.trim()) {
+    return {
+      ok: false,
+      reason: `create_pr 参数无效: title 必须是非空字符串（当前: ${JSON.stringify(title)}）`,
+    }
+  }
+  const body = args?.body
+  if (typeof body !== 'string' || !body.trim()) {
+    return {
+      ok: false,
+      reason: `create_pr 参数无效: body 必须是非空字符串（当前: ${JSON.stringify(body)}）`,
+    }
+  }
+  const base = args?.base
+  if (base !== undefined && (typeof base !== 'string' || !base.trim())) {
+    return {
+      ok: false,
+      reason: `create_pr 参数无效: base 必须是非空字符串（当前: ${JSON.stringify(base)}）`,
+    }
+  }
+  return {
+    ok: true,
+    base: base?.trim() || undefined,
+    head: head.trim(),
+    title: title.trim(),
+    body: body.trim(),
+  }
+}

@@ -4,7 +4,7 @@
  *
  * 原生 JSON-RPC 2.0 stdio 实现 MCP 最小子集（零依赖，Phase 0 spike 已验证协议层）：
  *   - initialize        → 协议握手
- *   - tools/list        → 暴露 post_message + search_knowledge + query_db + request_user_action
+ *   - tools/list        → 暴露 post_message + search_knowledge + query_db + request_user_action + create_pr
  *   - tools/call        → 参数校验 → POST 内部端点 → ACK / 错误文本（含 reason）
  *   - ping / 其他       → 空 result / method not found
  *   - notifications（无 id 消息）→ 不回复
@@ -42,6 +42,7 @@ import {
   validateSearchParams,
   validateQueryDbParams,
   validateUserRequestParams,
+  validateCreatePrParams,
 } from './mcp-server-utils.mjs'
 
 const SERVER_INFO = { name: 'catstudy', version: '0.1.0' }
@@ -50,6 +51,7 @@ const TOOL_NAME = 'post_message'
 const SEARCH_TOOL_NAME = 'search_knowledge'
 const QUERY_DB_TOOL_NAME = 'query_db'
 const REQUEST_USER_ACTION_TOOL_NAME = 'request_user_action'
+const CREATE_PR_TOOL_NAME = 'create_pr'
 
 /** 工具定义——inputSchema 钉死契约：targetCats 必填数组、clientMessageId 可选 */
 const POST_MESSAGE_TOOL = {
@@ -181,6 +183,39 @@ const SEARCH_KNOWLEDGE_TOOL = {
       },
     },
     required: ['query'],
+  },
+}
+
+/** 工具定义——inputSchema 钉死契约：head/title/body 必填、base 可选默认 dev */
+const CREATE_PR_TOOL = {
+  name: CREATE_PR_TOOL_NAME,
+  description:
+    '创建 GitHub PR（收口链的发布关载体——替代 push 审批面板）。' +
+    '仅店长角色可用（非 store 角色调用被服务端 403 拒绝）。' +
+    'head 传源分支（feature/session 分支，必须已 git push origin <head>，本工具不代推——前置未满足会报 branch-not-pushed）；' +
+    'base 可选（PR merge 进谁，默认 dev）；title/body 必填非空。' +
+    '成功返回 PR 号 + URL；失败四种原因（no-main-root/not-authed/branch-not-pushed/create-failed）不静默透传错误文本。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      base: {
+        type: 'string',
+        description: '目标分支（PR merge 进谁），默认 dev',
+      },
+      head: {
+        type: 'string',
+        description: '源分支（feature/session 分支），必须已 push origin',
+      },
+      title: {
+        type: 'string',
+        description: 'PR title（非空）',
+      },
+      body: {
+        type: 'string',
+        description: 'PR body（非空）',
+      },
+    },
+    required: ['head', 'title', 'body'],
   },
 }
 
@@ -440,6 +475,63 @@ async function callUserRequest(type, reason, options) {
   }
 }
 
+/**
+ * 调用猫咖内部端点 POST /api/internal/create-pr。
+ * 成功（2xx）→ { ok: true, number, url }（number/url 透传服务端 createPr 结果）；
+ * 失败 → { ok: false, reason }（含 HTTP 状态/响应 reason——403 角色白名单 /
+ * 422 业务失败（not-authed/branch-not-pushed 等）错误文本直接回模型可诊断）。
+ * 环境变量缺失检查与 callUserRequest 同款（同一内部端点鉴权链）。
+ */
+async function callCreatePr(base, head, title, body) {
+  const baseUrl = env('CATSTUDY_SERVER_URL')
+  const token = env('CATSTUDY_SIGNAL_TOKEN')
+  const sessionId = env('CATSTUDY_SESSION_ID')
+  const agentId = env('CATSTUDY_AGENT_ID')
+  const msgId = env('CATSTUDY_MSG_ID')
+
+  if (!baseUrl || !token || !sessionId || !agentId || !msgId) {
+    const missing = [
+      ['CATSTUDY_SERVER_URL', baseUrl],
+      ['CATSTUDY_SIGNAL_TOKEN', token],
+      ['CATSTUDY_SESSION_ID', sessionId],
+      ['CATSTUDY_AGENT_ID', agentId],
+      ['CATSTUDY_MSG_ID', msgId],
+    ]
+      .filter(([, v]) => !v)
+      .map(([n]) => n)
+    return { ok: false, reason: `MCP 环境缺失（${missing.join('/')}），创建 PR 不可用` }
+  }
+
+  let res
+  try {
+    res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/internal/create-pr`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-signal-token': token,
+      },
+      body: JSON.stringify({ sessionId, agentId, msgId, base, head, title, body }),
+    })
+  } catch (err) {
+    return { ok: false, reason: `内部端点不可达: ${err.message}` }
+  }
+
+  let resBody = null
+  try {
+    resBody = await res.json()
+  } catch {
+    /* 非 JSON 响应体 */
+  }
+
+  if (res.ok && resBody?.ok) {
+    return { ok: true, number: resBody.number, url: resBody.url }
+  }
+  return {
+    ok: false,
+    reason: resBody?.reason || `内部端点 HTTP ${res.status}`,
+  }
+}
+
 // 直接运行时才启动 stdio server——vitest import 本模块（validateSearchParams
 // 单测）不挂 stdin listener（resolve 兼容相对路径调用 node scripts/mcp-server.mjs）
 const isDirectRun =
@@ -494,6 +586,7 @@ if (isDirectRun) {
             SEARCH_KNOWLEDGE_TOOL,
             QUERY_DB_TOOL,
             REQUEST_USER_ACTION_TOOL,
+            CREATE_PR_TOOL,
           ],
         },
       })
@@ -634,11 +727,36 @@ if (isDirectRun) {
         })
         return
       }
+      if (name === CREATE_PR_TOOL_NAME) {
+        const args = params?.arguments ?? {}
+        const parsed = validateCreatePrParams(args)
+        if (!parsed.ok) {
+          send(rpcError(id, -32602, parsed.reason))
+          return
+        }
+        const result = await callCreatePr(parsed.base, parsed.head, parsed.title, parsed.body)
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: result.ok
+                  ? `✅ PR 已创建：#${result.number} ${result.url}`
+                  : `❌ PR 创建失败：${result.reason}`,
+              },
+            ],
+            isError: !result.ok,
+          },
+        })
+        return
+      }
       send(
         rpcError(
           id,
           -32602,
-          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge、query_db 和 request_user_action 四个工具）`
+          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge、query_db、request_user_action 和 create_pr 五个工具）`
         )
       )
       return
