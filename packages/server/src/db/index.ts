@@ -223,6 +223,13 @@ export function initDb(): void {
       sql: `ALTER TABLE messages ADD COLUMN thinking_content TEXT`,
     },
     {
+      name: 'tool_content on messages',
+      // 工具调用记录（结构化 JSON 数组：id/name/status/input/output 截断摘要）。
+      // 独立列 = 与正文/思考三通道分离、永不进 LLM 上下文（上下文构建只消费 content）；
+      // additive ALTER + 存量行 NULL（无工具 = 旧消息/纯文本回复，读侧 undefined 兼容）
+      sql: `ALTER TABLE messages ADD COLUMN tool_content TEXT`,
+    },
+    {
       name: 'dispatch_state on messages',
       sql: `ALTER TABLE messages ADD COLUMN dispatch_state TEXT DEFAULT NULL`,
     },

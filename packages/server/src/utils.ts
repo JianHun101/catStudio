@@ -12,3 +12,13 @@ export function parseJsonArray(raw: string | null | undefined): string[] {
     return []
   }
 }
+
+/** JSON 字符串 → 任意结构化值的安全解析（tool_content/extra 等对象列用；失败返回 undefined） */
+export function parseJsonValue<T = unknown>(raw: string | null | undefined): T | undefined {
+  if (!raw) return undefined
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return undefined
+  }
+}

@@ -16,7 +16,7 @@
 
 import { existsSync, writeFileSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { ThinkingSegment } from '@cat-study/shared'
+import type { StreamSegment } from '@cat-study/shared'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('socketio')
@@ -26,8 +26,8 @@ export interface StreamState {
   sessionId: string
   messageId: string
   content: string
-  /** 结构化分段（kind+content）——会话恢复补推时随 AGENT_TYPING 一起带出，供前端按 kind 渲染 */
-  segments?: ThinkingSegment[]
+  /** 结构化分段（kind+content+tool 元数据）——会话恢复补推时随 AGENT_TYPING 一起带出，供前端按 kind 渲染 */
+  segments?: StreamSegment[]
   token: string
 }
 

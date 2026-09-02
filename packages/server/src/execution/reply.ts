@@ -9,7 +9,14 @@
 import { randomBytes } from 'node:crypto'
 import { v4 as uuid } from 'uuid'
 import { estimateTokens, estimateMessageTokens } from '@cat-study/shared'
-import type { AgentConfig, LLMMessage, Message, ThinkingSegment } from '@cat-study/shared'
+import type {
+  AgentConfig,
+  Chunk,
+  LLMMessage,
+  Message,
+  StreamSegment,
+  ToolCallInfo,
+} from '@cat-study/shared'
 import type { MessageRow } from '../db/repository/index.js'
 import {
   messages as messagesRepo,
@@ -66,11 +73,16 @@ const log = createLogger('socketio')
 /** 运行时长心跳间隔（从 socketio.ts 随迁；headless 黑盒可观测性） */
 const HEARTBEAT_INTERVAL_MS = 10_000
 
-/** 累积流式分段：同类相邻合并（text 后 text 追加、thinking 后 thinking 追加），
- *  切换 kind 时 push 新段——前端按 kind 渲染折叠块，结构不依赖 [思考] 文本标记。
- *  chunk.kind 缺失/undefined 的适配器按 text 处理（与 fullContent 累积语义一致）。 */
+/** 工具 input/output 落库单值截断上限（字符）——只防爆存储，工具名/状态恒全量可查 */
+const MAX_TOOL_IO_CHARS = 4000
+
+/**
+ * 累积流式分段：同类相邻合并（text 后 text 追加、thinking 后 thinking 追加），
+ * 切换 kind 时 push 新段——前端按 kind 渲染折叠块，结构不依赖 [思考] 文本标记。
+ * tool kind 不在此合并（多状态推进需按 id 关联，见 mergeToolSegment）。
+ * chunk.kind 缺失/undefined 的适配器按 text 处理（与 fullContent 累积语义一致）。 */
 function appendSegment(
-  segments: ThinkingSegment[],
+  segments: StreamSegment[],
   kind: 'text' | 'thinking',
   content: string
 ): void {
@@ -80,6 +92,59 @@ function appendSegment(
   } else {
     segments.push({ kind, content })
   }
+}
+
+/**
+ * 工具分段合并（按 id）：同一次工具调用的多状态快照（running→completed）流式到来时
+ * 更新既有 tool 段而非新增——前端工具卡实时从 running 翻到 completed，不刷一列重复卡。
+ * 未知状态原样透出（status 是开放 union）。缺 id 的工具事件无法归并 → push 新段
+ * （顺序执行假设成立时 id 恒在；并行工具交错时同 id 段仍正确更新）。 */
+function mergeToolSegment(segments: StreamSegment[], chunk: Chunk): void {
+  const tool = chunk.tool
+  if (!tool) return
+  const existingIdx = segments.findIndex(
+    (s) => s.kind === 'tool' && s.tool?.id != null && tool.id != null && s.tool.id === tool.id
+  )
+  const wireTool: ToolCallInfo = { id: tool.id, name: tool.name, status: tool.status }
+  if (existingIdx >= 0) {
+    const ex = segments[existingIdx]
+    ex.content = chunk.content
+    ex.tool = wireTool
+  } else {
+    segments.push({ kind: 'tool', content: chunk.content, tool: wireTool })
+  }
+}
+
+/** 截断工具 input/output 单值（落库防爆存储）：序列化超上限 → {truncated:true, preview:<前缀>}
+ *  结构占位保留——查询侧知道结果不完整、仍能看到摘要；不把「这单跑了哪个工具」一起截掉。 */
+function clipToolIo(value: unknown): { value: unknown; truncated: boolean } {
+  if (value === undefined) return { value: undefined, truncated: false }
+  const s = JSON.stringify(value)
+  if (s && s.length <= MAX_TOOL_IO_CHARS) return { value, truncated: false }
+  return {
+    value: { truncated: true, preview: (s ?? '').slice(0, MAX_TOOL_IO_CHARS) },
+    truncated: true,
+  }
+}
+
+/** 工具持久化记录 upsert（按 id 合并多状态快照成单条；顺序保持首次出现序） */
+function upsertTool(tools: ToolCallInfo[], chunk: Chunk): void {
+  const info = chunk.tool
+  if (!info) return
+  const inputClipped = clipToolIo(info.input)
+  const outputClipped = clipToolIo(info.output)
+  const record: ToolCallInfo = {
+    id: info.id,
+    name: info.name,
+    status: info.status,
+    input: inputClipped.value,
+    output: outputClipped.value,
+    isError: info.isError,
+    ...(inputClipped.truncated || outputClipped.truncated ? { truncated: true } : {}),
+  }
+  const idx = tools.findIndex((t) => t.id != null && info.id != null && t.id === info.id)
+  if (idx >= 0) tools[idx] = record
+  else tools.push(record)
 }
 
 export async function runAgentReply(
@@ -568,11 +633,14 @@ export async function runAgentReply(
 
   // 流式生成回复
   let fullContent = '' // 仅文本内容 — 存入 DB，参与 agent-to-agent 上下文
-  let displayContent = '' // 文本 + 思考 — 流式推送给前端（content 兼容字段，保留完整展示文本）
+  let displayContent = '' // 文本 + 思考 — 流式推送给前端（content 兼容字段，保留完整展示文本；不含 tool）
   let thinkingContent = '' // 仅思考过程 — 存入 DB 的 thinking_content 列，回复后仍可查看
-  // 结构化分段（kind+content）——替代前端从 [思考] 文本标记回推结构；同类相邻合并。
-  // 推 typing 与 setActiveStream 均携带（会话恢复补推复用），前端优先消费，缺失才退化。
-  const segments: ThinkingSegment[] = []
+  // 工具调用持久化记录（id/name/status/input/output 截断摘要）——落 messages.tool_content
+  // 结构化 JSON 列（可查「这单跑了哪个工具/结果」）；与正文/思考三通道分离，永不进上下文
+  const tools: ToolCallInfo[] = []
+  // 结构化分段（kind+content+tool）——替代前端从 [思考] 文本标记回推结构；同类相邻合并、
+  // tool 按 id 归并。推 typing 与 setActiveStream 均携带（会话恢复补推复用），前端优先消费，缺失才退化。
+  const segments: StreamSegment[] = []
   const msgId = uuid()
   // 每 spawn 随机的信号 token（一次流一次 spawn——「每 spawn 随机」语义保持）。
   // 随 context 进 buildEnv → .mcp.json env → MCP server 的 x-signal-token 头；
@@ -687,16 +755,28 @@ export async function runAgentReply(
         state.deleteActiveStream(agent.id, sessionId)
         return { content: fullContent, msgId }
       }
-      if (chunk.content) {
-        displayContent += chunk.content
-        // 思考内容只流式展示，不进入存储和上下文；按 kind 累积结构化分段
-        if (chunk.kind === 'thinking') {
-          thinkingContent += chunk.content
-          appendSegment(segments, 'thinking', chunk.content)
-        } else {
-          fullContent += chunk.content
-          appendSegment(segments, 'text', chunk.content)
+      // 三通道分流（语义拆分）：text → fullContent（正文，入上下文）；thinking →
+      // thinkingContent（纯思考，落 thinking_content 不入上下文）；tool → tools
+      // 持久化数组（落 tool_content，独立通道）。displayContent 只含 text+thinking
+      // （content 兼容字段），tool 不并入——旧前端无 tool 段消费能力，工具不进正文/思考。
+      if (chunk.kind === 'tool') {
+        upsertTool(tools, chunk)
+        mergeToolSegment(segments, chunk)
+      } else {
+        if (chunk.content) {
+          displayContent += chunk.content
+          if (chunk.kind === 'thinking') {
+            thinkingContent += chunk.content
+            appendSegment(segments, 'thinking', chunk.content)
+          } else {
+            fullContent += chunk.content
+            appendSegment(segments, 'text', chunk.content)
+          }
         }
+      }
+      // 每次有实际推进（text/thinking 内容或 tool 状态变化）就推送一次 typing
+      // ——tool chunk 可能 content 空（claude running 阶段），仍须推（卡片状态推进）
+      if (chunk.kind === 'tool' || chunk.content) {
         bus.emitTyping({
           sessionId,
           agentId: agent.id,
@@ -739,7 +819,10 @@ export async function runAgentReply(
     // 同构——审查链投递带 taskId 后，审查回复落库 = 源链 trace_id，verdict JOIN m.task_id = chain_task_id 匹配；
     // 投递缺失（老版本已知噪声）→ 落库 = 本链 trace_id，仍关联不到任务链，噪声记录在案
     triggerMsg.taskId || traceId,
-    thinkingContent || undefined
+    thinkingContent || undefined,
+    // 工具调用记录：结构化 JSON 数组（id/name/status/input/output 截断摘要）——
+    // 独立列 tool_content，与正文/思考三通道分离，query_db/get_message 可查
+    tools.length > 0 ? JSON.stringify(tools) : undefined
   )
 
   const estimatedPromptLen = llmMessages.reduce((sum, m) => sum + m.content.length, 0)
@@ -793,6 +876,7 @@ export async function runAgentReply(
     mentions: [] as string[],
     taskId: triggerMsg.taskId || undefined,
     thinkingContent: thinkingContent || undefined,
+    ...(tools.length > 0 ? { toolContent: tools } : {}),
     createdAt: new Date().toISOString(),
     // agent 耗时（C5）：随广播注入，前端气泡展示「耗时 X.X 秒」。瞬态不落库——
     // 落库在 708 行 insertAgentMessage（独立参数，先于 finalMsg 构造），此处仅广播对象；

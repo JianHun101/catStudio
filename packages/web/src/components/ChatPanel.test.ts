@@ -365,3 +365,37 @@ describe('ChatPanel 思考展示结构分离（typing.segments 优先 + 旧前�
     expect(source).toContain("tc.replace(/\\[思考\\]\\s*/g, '')")
   })
 })
+
+describe('ChatPanel 工具语义拆分（kind:\'tool\' 独立通道 + messages.toolContent）', () => {
+  it('streaming 模板按 seg.kind 三分支渲染：text → tool 工具卡 → details 思考折叠（tool 独立于 thinking）', () => {
+    // 语义拆分后工具反馈不再混进思考折叠块——模板顺序 text → tool → thinking(details)，
+    // tool 分支用 v-else-if 在 v-else(details) 之前独立成卡片
+    const segToolIdx = source.indexOf("seg.kind === 'tool'")
+    expect(segToolIdx).toBeGreaterThan(-1)
+    expect(source.indexOf("seg.kind === 'text'")).toBeLessThan(segToolIdx)
+    expect(source.indexOf('details v-else class="thinking-block"')).toBeGreaterThan(segToolIdx)
+  })
+
+  it('streaming 工具卡展示 name（seg.tool?.name 回退 seg.content）+ status 彩色标签 + toolLabel title', () => {
+    expect(source).toContain('v-else-if="seg.kind === \'tool\'"')
+    expect(source).toContain('class="tool-card"')
+    expect(source).toContain('{{ seg.tool?.name || seg.content }}')
+    expect(source).toContain('toolStatusLabel(seg.tool.status)')
+    expect(source).toContain(':class="`tool-status-${seg.tool.status}`"')
+  })
+
+  it('历史消息工具日志卡：msg.toolContent?.length 存在才渲染（tool-log 容器 + 每工具一条 tool-card）', () => {
+    expect(source).toContain('v-if="msg.toolContent?.length"')
+    expect(source).toContain('class="tool-log"')
+    expect(source).toContain('v-for="(t, ti) in msg.toolContent"')
+    expect(source).toContain('class="tool-card"')
+  })
+
+  it('历史工具卡渲染 name/status/truncated：{{ t.name }} + toolStatusLabel(t.status) + 超限省略号', () => {
+    expect(source).toContain('{{ t.name }}')
+    expect(source).toContain('toolStatusLabel(t.status)')
+    expect(source).toContain(':class="`tool-status-${t.status}`"')
+    expect(source).toContain('v-if="t.truncated"')
+    expect(source).toContain('tool-card-truncated')
+  })
+})

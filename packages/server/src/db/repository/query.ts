@@ -68,6 +68,7 @@ export const QUERY_TABLE_SCHEMAS = {
       'images',
       'task_id',
       'thinking_content',
+      'tool_content',
       'dispatch_state',
       'created_at',
     ],

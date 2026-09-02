@@ -53,6 +53,9 @@ export interface MessageRow {
   images: string | null // JSON 字符串数组（base64 dataURL）
   task_id: string | null
   thinking_content: string | null
+  /** 工具调用记录 JSON（结构化数组：id/name/status/input/output 截断摘要；
+   *  独立列，永不进 LLM 上下文——正文/思考/工具三通道分离） */
+  tool_content: string | null
   dispatch_state: string | null
   /** 附加富内容 JSON（diff 块等；独立列，永不进 LLM 上下文） */
   extra: string | null

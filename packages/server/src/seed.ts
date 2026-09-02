@@ -25,6 +25,8 @@ import {
 } from './seed-data.js'
 import { embedText } from './memory/embedding.js'
 import { vectorToBlob } from './memory/index.js'
+import { writeIronLaws } from './config/iron-laws.js'
+import { IRON_LAWS_CODER, IRON_LAWS_REVIEWER } from './seed-data.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('seed')
@@ -104,6 +106,15 @@ async function seed(): Promise<void> {
     const kVerb = kResult.changes === 1 ? '✅' : '🔄'
     console.log(`  ${kVerb} Knowledge: ${doc.id} (${doc.source})${embedding ? '' : ' [无嵌入]'}`)
   }
+
+  // ── Sync 铁律 → settings（writeIronLaws 运行期生效）────────────────
+  // 铁律是全局运营策略：代码常量（seed-data.ts）是规范源，但运行期注入读的是
+  // settings 表（settings 优先、常量兜底）——只改常量对已存在 settings 行的现役
+  // 库不生效。seed（含 --reset 重建）是显式治理动作，把常量规范写入 settings，
+  // 让「输出结构」等新增契约下一轮回复立即对现役猫生效（无需重启 server）。
+  // 显式跑 seed 会覆盖 UI 上的铁律自定义（全局治理以代码常量为规范源，行为预期内）
+  writeIronLaws(IRON_LAWS_CODER.trim(), IRON_LAWS_REVIEWER.trim())
+  console.log('  🧭 Iron laws synced to settings (writeIronLaws)')
 
   console.log('\n🌱 Seed complete!')
 }

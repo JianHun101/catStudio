@@ -445,9 +445,10 @@ export class OpencodeAdapter implements LLMAdapter {
  *
  * type === 'text' → 实时产出内容 chunk；type === 'reasoning' → 产出纯思考文本
  * chunk（kind:'thinking' 前端折叠展示、不入库）；type === 'tool_use' →
- * 产出 [工具] 前缀 chunk（kind:'thinking' 流式可见、不落库不参与上下文——工具
- * 过程是观感反馈，不进存储内容；状态标签见 TOOL_STATUS_LABELS）；type === 'error'
- * → 产出错误 chunk 并终止（错误是终止性事件，后续不再有有效内容）。无法解析的行跳过。
+ * 产出独立 kind:'tool' chunk（结构化 tool 元数据：id/name/status/input/output，
+ * 状态标签见 TOOL_STATUS_LABELS）——reply 分流：io 落 messages.tool_content 可查，
+ * 不再降维 [工具] thinking 混进思考块；type === 'error' → 产出错误 chunk 并终止
+ * （错误是终止性事件，后续不再有有效内容）。无法解析的行跳过。
  */
 async function* parseOpencodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
@@ -474,25 +475,41 @@ async function* parseOpencodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
           yield { content: text, done: false, kind: 'thinking' }
         }
       } else if (event.type === 'tool_use') {
-        // 工具调用事件（--agent build 模式）。映射 [工具] 前缀 chunk：实时
-        // 观感反馈（长思考期间用户看到工具推进而非死寂）；kind:'thinking' 与
-        // [思考] 同语义——流式展示、socketio.ts:2706 不落库不参与上下文，工具
-        // 过程不进存储内容。input 落日志审计（与 serve 适配器同款：tool/status/
-        // input 三字段，序列化截断防大对象刷屏）。结构防御：part.tool 非字符串
-        // 直接跳过（开放 union，未来新增 part 变体不炸解析）。
+        // 工具调用事件（--agent build 模式）。语义拆分后映射独立 kind:'tool' chunk：
+        // 实时观感反馈（长思考期间用户看到工具推进而非死寂）；tool 元数据
+        // （id/name/status/input/output）随 chunk 携带——reply 分流：input/output
+        // 落 messages.tool_content（结构化 JSON，可查「这单跑了哪个工具/结果」），
+        // 正文/思考/工具三通道彻底分离（不再降维成 [工具] thinking 混进思考块）。
+        // 同一次调用的多状态推进（running→completed）以 callID 关联——reply 落库
+        // 按 id 合并成单条工具记录。input/output 原样带出（落库前 reply 统一截断防
+        // 爆存储）。input 落日志审计（与 serve 适配器同款：tool/status/input 三字段，
+        // 序列化截断防大对象刷屏）。结构防御：part.tool 非字符串直接跳过（开放
+        // union，未来新增 part 变体不炸解析）。
         const part = event.part
         if (typeof part?.tool === 'string') {
           const status = part.state?.status
           const label = status != null ? (TOOL_STATUS_LABELS[status] ?? String(status)) : ''
+          const input = part.state?.input
+          const output = part.state?.output
           log.info('opencode 工具调用', {
             tool: part.tool,
             status,
-            input: part.state?.input ? JSON.stringify(part.state.input).slice(0, 500) : undefined,
+            input: input !== undefined ? JSON.stringify(input).slice(0, 500) : undefined,
           })
           yield {
-            content: `[工具] ${part.tool}${label ? `: ${label}` : ''}`,
+            content: `${part.tool}${label ? `: ${label}` : ''}`,
             done: false,
-            kind: 'thinking',
+            kind: 'tool',
+            tool: {
+              // part.id 是事件/part id（同调用多状态快照共用同一 id），callID 是调用 id——
+              // 取 callID 作合并键（无 callID 退化 part.id，仍可归并同 id 快照）
+              id: typeof part.callID === 'string' ? part.callID : part.id,
+              name: part.tool,
+              status,
+              input,
+              output,
+              isError: status === 'error',
+            },
           }
         }
       } else if (event.type === 'error') {

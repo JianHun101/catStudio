@@ -8,7 +8,7 @@ import type {
   AgentConfig,
   AgentTokenStats,
   SendMessageAck,
-  ThinkingSegment,
+  StreamSegment,
 } from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
 import { api, type ContextConfig } from '@/composables/useApi'
@@ -72,7 +72,7 @@ export const useChatStore = defineStore('chat', () => {
       messageId: string
       content: string
       sessionId: string
-      segments?: ThinkingSegment[]
+      segments?: StreamSegment[]
     }>
   >(new Map())
   const unreadCounts = ref<Map<string, number>>(new Map()) // sessionId → unread count
@@ -630,7 +630,7 @@ export const useChatStore = defineStore('chat', () => {
         messageId: string
         content: string
         sessionId: string
-        segments?: ThinkingSegment[]
+        segments?: StreamSegment[]
       }) => {
         if (data.sessionId !== activeSessionId.value) return
         typingStates.value.set(data.agentId, data)

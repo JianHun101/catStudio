@@ -687,9 +687,9 @@ describe('OpencodeServeAdapter', () => {
     ])
   })
 
-  // ─── 工具调用审计（bash 允许但留审计）─────
+  // ─── 工具调用（语义拆分：审计 + 独立 kind:'tool' chunk——serve 不再黑盒）─────
 
-  it('logs tool call for audit and yields no chunk (bash allowed but audited)', async () => {
+  it('logs tool call for audit and yields kind:tool chunk (语义拆分后 serve 工具过程可见)', async () => {
     const stream = makeEventStream()
     stubFetch({ eventStream: stream.stream })
     const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
@@ -726,8 +726,22 @@ describe('OpencodeServeAdapter', () => {
     stream.push(sseEvent('session.idle', { sessionID: TEST_SESSION }))
 
     const chunks = await chunksPromise
-    // 工具事件不产出 chunk——只有收尾 done
-    expect(chunks).toEqual([{ content: '', done: true }])
+    // 语义拆分后工具事件产出独立 kind:'tool' chunk（结构化元数据——serve 工具过程不再黑盒）
+    expect(chunks).toEqual([
+      {
+        content: 'bash: completed',
+        done: false,
+        kind: 'tool',
+        tool: {
+          id: 'prt_t1',
+          name: 'bash',
+          status: 'completed',
+          input: { command: 'ls', workdir: 'D:/workspace' },
+          isError: false,
+        },
+      },
+      { content: '', done: true },
+    ])
     // 审计日志：tool + status + input（序列化截断）
     expect(logMocks.info).toHaveBeenCalledWith(
       'opencode-serve 工具调用',

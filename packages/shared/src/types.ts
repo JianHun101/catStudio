@@ -106,6 +106,10 @@ export interface Message {
   mentions: string[] // agent names mentioned with @
   taskId?: string // 任务 ID，串联同一任务的多轮 agent 交互
   thinkingContent?: string // 思考过程内容（仅前端展示，不参与 Agent 间上下文）
+  /** agent 回复的工具调用记录数组（messages.tool_content JSON 列反序列化）。
+   *  独立于正文/思考——永不进 LLM 上下文（上下文构建只消费 content），
+   *  历史渲染独立工具日志卡片、clowder get_message 可查「这单跑了哪个工具/结果」 */
+  toolContent?: ToolCallInfo[]
   createdAt: string
   /** 消息类型（服务端检测附加，默认 normal 不携带该字段） */
   messageType?: MessageType
@@ -221,21 +225,55 @@ export interface ChatOptions {
   cwd?: string
 }
 
+/** 分段 kind——text 正文 / thinking 思考 / tool 工具调用过程（语义拆分后三通道独立） */
+export type SegmentKind = 'text' | 'thinking' | 'tool'
+
+/**
+ * 工具调用记录（结构化）——流式 Chunk/StreamSegment 的 tool 元数据与
+ * messages.tool_content JSON 列共用同一形状。input/output 为快照摘要
+ * （落库前 reply.ts 统一截断；超限 truncated=true 留结构占位，工具名/状态
+ * 恒可查——「这单跑了哪个工具、结果是什么」不被截断一起砍掉）。
+ */
+export interface ToolCallInfo {
+  /** 工具调用 id（同一次调用的多状态推进——running→completed——用 id 关联合并；上游缺 id 省略） */
+  id?: string
+  /** 工具名（bash / read / apply_patch / mcp__catstudy__post_message …） */
+  name: string
+  /** 状态开放 union（pending/running/completed/error，上游可能新增——未知状态原样透出） */
+  status?: string
+  /** 工具输入快照（结构化对象或文本；落库截断摘要） */
+  input?: unknown
+  /** 工具输出/结果快照（仅 completed/error 携带；落库截断摘要） */
+  output?: unknown
+  /** 工具执行是否报错（上游 is_error / status=error → true） */
+  isError?: boolean
+  /** 截断标记：input/output 超出落库上限被截断时为 true——查询侧知道结果不完整 */
+  truncated?: boolean
+}
+
 export interface Chunk {
   content: string
   done: boolean
-  /** 区分文本内容和思考过程，思考内容只用于前端流式展示，不存入 DB */
-  kind?: 'text' | 'thinking'
+  /** 区分文本/思考/工具——thinking 只用于前端流式展示不存 DB；tool 为工具过程（独立落库 tool_content） */
+  kind?: SegmentKind
+  /** kind==='tool' 时携带的工具调用结构化信息（id/name/status/input/output；reply 分流持久化） */
+  tool?: ToolCallInfo
 }
 
 /**
  * 流式分段——server 按 chunk.kind 累积推送（思考展示结构分离，
- * 替代前端从 `[思考]` 文本标记回推结构；thinking 段内容为纯思考文本，无前缀）。
+ * 替代前端从 `[思考]` 文本标记回推结构；thinking 段内容为纯思考文本，无前缀；
+ * tool 段为工具调用——seg.tool 携带结构化元数据供前端工具日志卡片实时更新）。
  */
-export interface ThinkingSegment {
-  kind: 'text' | 'thinking'
+export interface StreamSegment {
+  kind: SegmentKind
   content: string
+  /** kind==='tool' 时携带工具元数据（流式轻量：id+name+status 驱动卡片；io 只进落库） */
+  tool?: ToolCallInfo
 }
+
+/** @deprecated 旧名——流式分段已泛化含 tool kind，新代码用 StreamSegment */
+export type ThinkingSegment = StreamSegment
 
 // ─── Summary & Handoff ──────────────────────────────
 
@@ -285,14 +323,14 @@ export interface MessageAgentStatusPayload {
   startedAt?: number
 }
 
-/** AGENT_TYPING 事件载荷（流式增量；content = 已累积展示全文，向后兼容；
- *  segments = 结构化分段（kind+content），流式链路优先消费——缺失时前端退化 parseThinkingBlocks） */
+/** AGENT_TYPING 事件载荷（流式增量；content = 已累积展示全文（text+thinking，不含 tool），向后兼容；
+ *  segments = 结构化分段（kind+content+tool 元数据），流式链路优先消费——缺失时前端退化 parseThinkingBlocks） */
 export interface TypingUpdatePayload {
   sessionId: string
   agentId: string
   messageId: string
   content: string
-  segments?: ThinkingSegment[]
+  segments?: StreamSegment[]
 }
 
 /** system 通知消息形状（role 恒为 'system'，类型隐含不再逐处写） */

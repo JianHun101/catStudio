@@ -10,7 +10,7 @@
 import { Server as HttpServer } from 'node:http'
 import { Server as SocketServer } from 'socket.io'
 import { Events, estimateTokens } from '@cat-study/shared'
-import type { SendMessageAck } from '@cat-study/shared'
+import type { SendMessageAck, ToolCallInfo } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
   agents as agentsRepo,
@@ -30,7 +30,7 @@ import {
 } from '../dispatch/index.js'
 import { createLogger } from '../logger.js'
 import { gitResetHard, gitCleanWorkingTree, npmUninstall } from '../llm/git-utils.js'
-import { parseJsonArray } from '../utils.js'
+import { parseJsonArray, parseJsonValue } from '../utils.js'
 import { parseMessageExtra } from '../git/diff-collector.js'
 import { ingestUserMessage } from './ingest.js'
 import {
@@ -213,6 +213,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           mentions: JSON.parse(row.mentions || '[]'),
           taskId: row.task_id || undefined,
           thinkingContent: row.thinking_content || undefined,
+          // 工具调用记录：tool_content JSON 列反序列化（三通道分离后历史独立工具卡渲染）
+          toolContent: parseJsonValue<ToolCallInfo[]>(row.tool_content),
           extra: msgExtra,
           createdAt: row.created_at.replace(' ', 'T') + 'Z',
           // 历史恢复同样携带重启类型（前端按钮渲染依据；DB 不存类型，内容前缀是唯一事实源）

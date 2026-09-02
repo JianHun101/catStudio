@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 import {
   resolveJsEntry,
   messagesToPrompt,
@@ -8,8 +9,9 @@ import {
   ensureProxy,
   stopProxyIfSpawned,
   __test_reset,
+  parseClaudeCodeOutput,
 } from './cli-utils.js'
-import type { LLMMessage } from '@cat-study/shared'
+import type { Chunk, LLMMessage } from '@cat-study/shared'
 
 // ─── spawnSupervised env 合并测试 ────────────────
 
@@ -290,5 +292,150 @@ describe('stopProxyIfSpawned', () => {
     stopProxyIfSpawned()
     stopProxyIfSpawned()
     expect(child.kill).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ─── parseClaudeCodeOutput（tool_use→tool_result 跨事件解析）────────────
+
+describe('parseClaudeCodeOutput tool_use→tool_result 跨事件解析（工具语义拆分 2026-09-02）', () => {
+  /** 从 NDJSON 行序列构造子进程 stdout Readable */
+  function childFromLines(lines: string[]): { stdout: Readable } {
+    return { stdout: Readable.from([lines.join('\n')]) }
+  }
+
+  /** 收集解析器全部产出 chunk */
+  async function collect(lines: string[]): Promise<Chunk[]> {
+    const chunks: Chunk[] = []
+    for await (const c of parseClaudeCodeOutput(childFromLines(lines) as any)) chunks.push(c)
+    return chunks
+  }
+
+  it('assistant tool_use 产 running chunk；user tool_result（content 字符串）关联合并产 completed chunk 带 output', async () => {
+    // feed 顺序：tool_use（assistant）→ tool_result（user，content 为纯字符串形态）
+    const chunks = await collect([
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 't1', name: 'bash', input: { command: 'ls' } }],
+        },
+      }),
+      JSON.stringify({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'a.txt' }] },
+      }),
+    ])
+    expect(chunks).toHaveLength(2)
+    // running chunk：只带 name/input，无 output（claude CLI 的 tool_use 事件带不出结果）
+    expect(chunks[0]).toEqual({
+      content: 'bash',
+      done: false,
+      kind: 'tool',
+      tool: { id: 't1', name: 'bash', status: 'running', input: { command: 'ls' } },
+    })
+    // completed chunk：tool_result 关联合并补 output + isError:false（is_error 缺省）
+    expect(chunks[1]).toEqual({
+      content: 'bash',
+      done: false,
+      kind: 'tool',
+      tool: {
+        id: 't1',
+        name: 'bash',
+        status: 'completed',
+        input: { command: 'ls' },
+        output: 'a.txt',
+        isError: false,
+      },
+    })
+  })
+
+  it('tool_result content 数组形态（[{type:text,text}]）→ output 按行拼接', async () => {
+    const chunks = await collect([
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 't2', name: 'Read', input: { path: 'f.ts' } }] },
+      }),
+      JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 't2',
+              content: [
+                { type: 'text', text: '第一行' },
+                { type: 'text', text: '第二行' },
+              ],
+            },
+          ],
+        },
+      }),
+    ])
+    expect(chunks).toHaveLength(2)
+    expect(chunks[1].tool).toMatchObject({ status: 'completed', output: '第一行\n第二行' })
+  })
+
+  it('tool_result is_error=true → status=error + isError:true', async () => {
+    const chunks = await collect([
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 't3', name: 'bash', input: {} }] },
+      }),
+      JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't3', content: 'exit 1', is_error: true },
+          ],
+        },
+      }),
+    ])
+    expect(chunks).toHaveLength(2)
+    expect(chunks[1].tool).toMatchObject({ status: 'error', isError: true, output: 'exit 1' })
+  })
+
+  it('无对应 pending tool_use 的 tool_result 静默跳过（孤儿 tool_result 不产 chunk）', async () => {
+    const chunks = await collect([
+      JSON.stringify({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'ghost', content: 'x' }] },
+      }),
+    ])
+    expect(chunks).toHaveLength(0)
+  })
+
+  it('无 tool_use 的 assistant text 产 text chunk；thinking 块独立产 thinking chunk（无前缀回归锚定）', async () => {
+    const chunks = await collect([
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: '正文' }] },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'thinking', thinking: '纯思考文本' }] },
+      }),
+    ])
+    expect(chunks).toEqual([
+      { content: '正文', done: false, kind: 'text' },
+      { content: '纯思考文本', done: false, kind: 'thinking' },
+    ])
+  })
+
+  it('tool_use 未闭环（无 tool_result 即流结束）→ 只产 running chunk，不伪造 completed', async () => {
+    // OQ2 场景：工具调用悬空——解析器侧只保留 running，闭环责任在 tool_result；
+    // 正常结束的 claude CLI 工具循环必闭环 tool_result，running-only 仅在中断时出现
+    const chunks = await collect([
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 't9', name: 'bash', input: {} }] },
+      }),
+    ])
+    expect(chunks).toEqual([
+      {
+        content: 'bash',
+        done: false,
+        kind: 'tool',
+        tool: { id: 't9', name: 'bash', status: 'running', input: {} },
+      },
+    ])
   })
 })
