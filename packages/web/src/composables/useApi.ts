@@ -1,3 +1,5 @@
+import type { ExecutionMeta } from '@cat-study/shared'
+
 const BASE = '/api'
 const DEFAULT_TIMEOUT = 10_000 // 10s，确保重试循环能推进
 
@@ -234,6 +236,11 @@ export const api = {
 
   markSessionRead: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}/read`, { method: 'POST' }),
+
+  // 执行元数据（气泡 footer 耗时/token 的落库稳定数据源——execution_logs.message_id 关联回复消息，
+  // GET /api/sessions/:id/executions，camelCase 由 server 转换；空 session 返回 { executions: [] }）
+  getSessionExecutions: (id: string) =>
+    request<{ executions: ExecutionMeta[] }>(`/sessions/${id}/executions`),
 
   // Connector bindings (QQ / OneBot)
   getConnectorBindings: (platform?: string) => {

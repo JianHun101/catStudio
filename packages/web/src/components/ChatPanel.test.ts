@@ -184,6 +184,18 @@ describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）'
   it('system 消息保持原 msg-time 结构（无 footer 行）', () => {
     expect(source).toMatch(/v-else class="msg-time"/)
   })
+
+  it('执行元数据（execution_logs 落库稳定耗时/token）优先展示，durationMs 降为无 meta 时兜底', () => {
+    // 稳定 meta 分支（v-if）在 durationMs 之前；durationMs 保留为 v-else-if 兜底（execution 未拉取时新回复短暂可显）
+    expect(source).toContain('v-if="execMetaTextFor(msg)" class="msg-duration"')
+    expect(source).toContain('· {{ execMetaTextFor(msg) }}')
+    expect(source).toContain('v-else-if="msg.durationMs != null" class="msg-duration"')
+    expect(source).toContain('function execMetaFor(msg')
+    expect(source).toContain('store.sessionExecutions.get(msg.id)')
+    expect(source).toContain('function execMetaTextFor(msg')
+    expect(source).toContain('meta.latencyMs != null')
+    expect(source).toContain('fmtTokens(inTok ?? 0)')
+  })
 })
 
 describe('ChatPanel 停止按钮重定位（B2——正在思考的气泡 / busy 无流式时的用户消息状态行）', () => {

@@ -109,6 +109,38 @@ export function getAgentStats(agentId: string): {
     .get(agentId) as { total_prompt: number; total_completion: number; total_calls: number }
 }
 
+/** 按 session 查全部 execution 的展示列投影（message_id 关联回复气泡）。
+ *  message_id = execution_logs.message_id（finalize 写回 replyMessageId，成功路径精确 1:1；
+ *  失败/中断为 NULL——展示耗时/token 只关心成功回复，够用）。
+ *  ⚠️ 禁用 triggered_by_message_id 作回复消息关联：那是「触发消息」（一条广播/@ 可触发
+ *  多个 agent → N:1），关联回复气泡会混淆（店长裁决，别踩反）。
+ *  只投影展示所需列，避免整行含 error_message 等无关字段。 */
+export function getExecutionsBySession(sessionId: string): Array<{
+  message_id: string | null
+  agent_id: string
+  status: string
+  latency_ms: number | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  started_at: string | null
+}> {
+  return db
+    .prepare(
+      `SELECT message_id, agent_id, status, latency_ms, prompt_tokens, completion_tokens, started_at
+       FROM execution_logs
+       WHERE session_id = ?`
+    )
+    .all(sessionId) as Array<{
+    message_id: string | null
+    agent_id: string
+    status: string
+    latency_ms: number | null
+    prompt_tokens: number | null
+    completion_tokens: number | null
+    started_at: string | null
+  }>
+}
+
 export function getAgentSessionStats(
   agentId: string,
   sessionId: string

@@ -9,6 +9,7 @@ import type {
   AgentTokenStats,
   SendMessageAck,
   StreamSegment,
+  ExecutionMeta,
 } from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
 import { api, type ContextConfig } from '@/composables/useApi'
@@ -158,6 +159,15 @@ export const useChatStore = defineStore('chat', () => {
   /** 上下文窗口 token 用量（驱动 handoff 的真实数字）: agentId → contextTokens */
   const contextTokens = ref<Map<string, number>>(new Map())
 
+  /**
+   * 会话执行元数据缓存：messageId → ExecutionMeta（execution_logs 展示投影）。
+   *  message_id = execution_logs.message_id（finalize 写回 replyMessageId，成功路径精确 1:1）；
+   *  落库稳定数据——刷新/历史仍在（取代 Message.durationMs 瞬态广播的展示用途，durationMs 保留兜底）。
+   *  无对应 execution 的消息（老消息/失败回复）无键——气泡据此不误显。
+   *  当前会话维度：joinSession 切换时清空、SESSION_HISTORY 权威校正后重拉。
+   */
+  const sessionExecutions = ref<Map<string, ExecutionMeta>>(new Map())
+
   /** context 阈值配置（80% 告警 / 90% 交接——服务端权威 context-config.json，失败回退默认 0.8/0.9） */
   const contextConfig = ref({
     warnThreshold: 0.8,
@@ -306,6 +316,8 @@ export const useChatStore = defineStore('chat', () => {
     typingStates.value.clear()
     // 清除旧会话的上下文窗口 token 数据（不同会话的 Agent 上下文不同）
     contextTokens.value.clear()
+    // 清除旧会话的执行元数据缓存（messageId 关联的是旧会话的回复气泡）
+    sessionExecutions.value = new Map()
     // 标记已读（清除未读计数 + 通知服务端）
     unreadCounts.value.delete(sessionId)
     api.markSessionRead(sessionId).catch(() => {
@@ -317,8 +329,29 @@ export const useChatStore = defineStore('chat', () => {
     socket.emit(Events.JOIN_SESSION, sessionId)
     socket.emit('get-agent-states')
 
+    // 执行元数据（耗时/token）独立拉取：JOIN 即拉一次，SESSION_HISTORY 到达后权威重拉兜底
+    // （缓存命中时 SESSION_HISTORY 校正后仍会重拉，覆盖切走期间的增量 execution）
+    fetchSessionExecutions()
+
     // 欢迎消息由服务端通过 SESSION_HISTORY 事件统一发送（含历史消息批量加载）
     // 不再在客户端生成，避免与历史消息渲染不同步
+  }
+
+  /** 拉取当前会话的执行元数据（GET /api/sessions/:id/executions——execution_logs.message_id 关联回复气泡）。
+   *  落库稳定值：刷新/历史仍在。fire-and-forget：失败仅 log、不清空旧缓存（会话内仍显示已加载部分）。 */
+  async function fetchSessionExecutions(): Promise<void> {
+    const sessionId = activeSessionId.value
+    if (!sessionId) return
+    try {
+      const { executions } = await api.getSessionExecutions(sessionId)
+      const map = new Map<string, ExecutionMeta>()
+      for (const ex of executions) {
+        if (ex.messageId) map.set(ex.messageId, ex)
+      }
+      sessionExecutions.value = map
+    } catch (err: any) {
+      log.error('fetchSessionExecutions failed', { error: friendlyError(err) })
+    }
   }
 
   /** 发送用户消息（images: base64 dataURL 数组，用于视觉模型识别） */
@@ -613,6 +646,8 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
       loadingMessages.value = false
+      // 权威历史到达后重拉执行元数据（覆盖切走/刷新期间的增量 execution——耗时/token 落库稳定展示）
+      fetchSessionExecutions()
     })
 
     // Agent 回复中的 @mentions 在消息发送后才解析，通过此事件补发
@@ -894,6 +929,8 @@ export const useChatStore = defineStore('chat', () => {
     agentTokenStats,
     contextTokens,
     contextConfig,
+    sessionExecutions,
+    fetchSessionExecutions,
     messageStatus,
     handoffFailed,
     dismissHandoffFailed,
