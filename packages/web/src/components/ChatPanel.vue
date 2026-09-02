@@ -110,28 +110,44 @@ const dateSepIndices = computed(() => {
 })
 
 /** 仅显示活跃会话中 Agent 的打字气泡（双重校验：sessionId + agentId） */
+type ThoughtEntry =
+  | { kind: 'thinking'; content: string }
+  | { kind: 'tool'; tool: ToolCallInfo }
 type StreamSegItem = { type: 'seg'; seg: StreamSegment }
-type StreamToolAreaItem = { type: 'toolArea'; tools: ToolCallInfo[]; open: boolean; frozen: boolean }
-type StreamItem = StreamSegItem | StreamToolAreaItem
+/**
+ * 思考折叠块（思考+工具唯一容器，对齐用户「对外只露正文+思考框」）：thinking 文本与
+ * tool 行按时间序交错（segments 有序性保证，工具嵌在实际发生位置，不聚尾部）；
+ * tools 为 header 摘要快照（推进中/完成统计）
+ */
+type StreamFoldItem = {
+  type: 'fold'
+  entries: ThoughtEntry[]
+  tools: ToolCallInfo[]
+  open: boolean
+  /** 过程仍在推进（有 running/pending 工具，或正文尚未开始的思考）——驱动自动展开与 header 动点 */
+  processing: boolean
+  frozen: boolean
+}
+type StreamItem = StreamSegItem | StreamFoldItem
 
 interface ActiveTyping {
   messageId: string
   content: string
   sessionId: string
   segments?: StreamSegment[]
-  /** 渲染条目：tool 段聚合为单一 toolArea（对齐 clowder 工具工作区），text/thinking 按序保留 */
+  /** 渲染条目：thinking 与 tool 段收进单一思考折叠块（时间序交错），text 正文段保留在外 */
   items: StreamItem[]
 }
 
-/** 用户点过流式工具区 header 后的冻结态（frozen=true 停止自动展开/收起） */
-const streamToolState = ref(new Map<string, { frozen: boolean; open: boolean }>())
+/** 用户点过流式思考折叠块 header 后的冻结态（frozen=true 停止自动展开/收起） */
+const streamFoldState = ref(new Map<string, { frozen: boolean; open: boolean }>())
 /**
- * 工具区交互版本号：用户点击 header 时 bump——activeTypingStates 对 toggle 的
+ * 折叠块交互版本号：用户点击 header 时 bump——activeTypingStates 对 toggle 的
  * 直接响应依赖。item.open 来自 computed 重建的渲染条目，而 toggle 只写
- * streamToolState Map；fc2fc9e 审查实证 Map key 级追踪覆盖不到「auto-close 后
+ * streamFoldState Map；fc2fc9e 审查实证 Map key 级追踪覆盖不到「auto-close 后
  * 点开」的窗口（无后续 typing 则永不重建）——版本号 bump 强制立即重建。
  */
-const streamToolVersion = ref(0)
+const streamFoldVersion = ref(0)
 
 /** 工具是否推进中（running/pending）——驱动流式工具区自动展开 */
 function isToolActive(t: { status?: string }): boolean {
@@ -145,32 +161,45 @@ function toolRowFromSeg(seg: StreamSegment): ToolCallInfo {
 
 /**
  * 流式 typing segments → 渲染条目列表。
- * 所有 tool 段聚合到「首个工具出现位置」的单一 toolArea 容器（不再散卡混排），
- * 其余 text/thinking 段按序保留；toolArea 展开态由 streamToolState 控制——
- * 自动逻辑：有工具推进中即展开，全部结束即收起；用户点过 header 后冻结。
+ * text 段保留在外层（正文直接可见）；thinking 与 tool 段收进单一 fold
+ * （思考折叠块），entries 按时间序交错——工具嵌在实际发生位置，不聚尾部。
+ * fold 展开态由 streamFoldState 控制——自动逻辑：过程推进中（有 running/pending
+ * 工具，或正文尚未开始的思考段）展开，进入纯正文且无推进工具则收起；
+ * 用户点过 header 后冻结（frozen=true 尊重用户选择）。
  */
 function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] {
-  // 依赖工具区交互版本号：toggle bump 后强制重建渲染条目，item.open 立即翻转
-  void streamToolVersion.value
+  // 依赖折叠块交互版本号：toggle bump 后强制重建渲染条目，item.open 立即翻转
+  void streamFoldVersion.value
   const items: StreamItem[] = []
-  let toolArea: StreamToolAreaItem | null = null
+  let fold: StreamFoldItem | null = null
   for (const seg of segs) {
-    if (seg.kind === 'tool') {
-      if (!toolArea) {
-        toolArea = { type: 'toolArea', tools: [], open: true, frozen: false }
-        items.push(toolArea)
-      }
-      toolArea.tools.push(toolRowFromSeg(seg))
-    } else {
+    if (seg.kind === 'text') {
       items.push({ type: 'seg', seg })
+      continue
+    }
+    if (!fold) {
+      fold = { type: 'fold', entries: [], tools: [], open: true, processing: false, frozen: false }
+      items.push(fold)
+    }
+    if (seg.kind === 'tool') {
+      const tool = toolRowFromSeg(seg)
+      fold.tools.push(tool)
+      fold.entries.push({ kind: 'tool', tool })
+    } else {
+      fold.entries.push({ kind: 'thinking', content: seg.content })
     }
   }
-  if (toolArea) {
-    const st = streamToolState.value.get(agentId)
-    const hasActive = toolArea.tools.some(isToolActive)
+  if (fold) {
+    const st = streamFoldState.value.get(agentId)
+    const hasActiveTool = fold.tools.some(isToolActive)
+    const enteredText = segs.some((s) => s.kind === 'text')
+    const hasThinking = fold.entries.some((e) => e.kind === 'thinking')
+    // 自动逻辑：工具推进中必展开；正文开始前的思考展开；进入纯正文或纯工具已完 → 收起
+    const processing = hasActiveTool || (!enteredText && hasThinking)
     const frozen = st?.frozen ?? false
-    toolArea.frozen = frozen
-    toolArea.open = st ? (frozen ? st.open : hasActive) : hasActive
+    fold.frozen = frozen
+    fold.processing = processing
+    fold.open = st ? (frozen ? st.open : processing) : processing
   }
   return items
 }
@@ -191,13 +220,13 @@ function typingView(
   return { ...v, items: buildStreamItems(agentId, resolveTypingSegs(v)) }
 }
 
-/** 流式工具区 header 点击：记冻结态（open 取反），此后不再随工具状态自动开合 */
-function toggleStreamToolArea(agentId: string, wasOpen: boolean): void {
-  streamToolState.value.set(agentId, { frozen: true, open: !wasOpen })
+/** 流式思考折叠块 header 点击：记冻结态（open 取反），此后不再随过程状态自动开合 */
+function toggleStreamFold(agentId: string, wasOpen: boolean): void {
+  streamFoldState.value.set(agentId, { frozen: true, open: !wasOpen })
   // bump 版本号：buildStreamItems 依赖它，强制 activeTypingStates 立即重建渲染条目。
   // 否则点击只在「下一次 AGENT_TYPING 触发 rebuild」时生效——若该 typing 已是流式
   // 最后一发，点击永不生效（fc2fc9e 审查缺陷）。
-  streamToolVersion.value++
+  streamFoldVersion.value++
 }
 
 const activeTypingStates = computed(() => {
@@ -210,13 +239,13 @@ const activeTypingStates = computed(() => {
   return filtered
 })
 
-// 流式结束（typing 条目删除）→ 清理该 agent 的工具区冻结态，下一条流式从干净状态开始
+// 流式结束（typing 条目删除）→ 清理该 agent 的折叠块冻结态，下一条流式从干净状态开始
 watch(
   () => Array.from(store.typingStates.keys()).sort().join(','),
   (csv) => {
     const alive = new Set(csv ? csv.split(',') : [])
-    for (const agentId of Array.from(streamToolState.value.keys())) {
-      if (!alive.has(agentId)) streamToolState.value.delete(agentId)
+    for (const agentId of Array.from(streamFoldState.value.keys())) {
+      if (!alive.has(agentId)) streamFoldState.value.delete(agentId)
     }
   }
 )
@@ -951,40 +980,33 @@ const warnedAgentsText = computed(() => {
                   {{ senderName(msg.agentId) }}
                 </div>
                 <div class="msg-bubble">
+                  <!-- 思考+工具单折叠块（思考框内嵌工具，对齐用户「对外只露正文+思考框」）：
+                       有 thinkingContent 或 toolContent 才渲染；取消独立 tool-area，工具不再
+                       堆积气泡正下方。思考文本在前、工具行随后（历史 thinkingContent blob 与
+                       toolContent 两独立列、交错序未存——精确交错需 server 存 segments，见流式面） -->
                   <details
-                    v-if="msg.thinkingContent"
+                    v-if="msg.thinkingContent || msg.toolContent?.length"
                     class="thinking-block stored-thinking"
                     :open="false"
                   >
                     <summary class="thinking-summary">
                       <span class="thinking-icon">🐾</span>
                       <span class="thinking-label">思考过程</span>
+                      <span
+                        v-if="msg.toolContent?.length"
+                        class="thinking-tool-hint"
+                        :title="toolAreaSummary(msg.toolContent)"
+                      >
+                        {{ toolAreaSummary(msg.toolContent) }}
+                      </span>
                       <span class="thinking-chevron">▶</span>
                     </summary>
-                    <div class="thinking-content" v-html="renderThinkingMarkdown(msg)"></div>
-                  </details>
-                  <div v-if="msg.images && msg.images.length" class="msg-images">
-                    <img
-                      v-for="(src, i) in msg.images"
-                      :key="i"
-                      :src="src"
-                      class="msg-image"
-                      :alt="`图片${i + 1}`"
-                      :title="`点击查看大图${msg.images.length > 1 ? `（${i + 1}/${msg.images.length}）` : ''}`"
-                      @click="openPreview(msg.images, i)"
-                    />
-                  </div>
-                  <div class="msg-text" v-html="renderMessageMarkdown(msg)"></div>
-                  <!-- 工具工作区（可折叠容器，对齐 clowder）：messages.toolContent 存在才渲染——
-                       结构化 JSON 列反序列化（id/name/status/input/output 截断摘要），
-                       正文/思考/工具三通道分离，工具过程不进正文也不混思考折叠。
-                       整体默认收起（header 显示 N 个工具 · 状态），点开容器后逐行可再展开看 io -->
-                  <details v-if="msg.toolContent?.length" class="tool-area">
-                    <summary class="tool-area-header">
-                      <span class="tool-area-summary">{{ toolAreaSummary(msg.toolContent) }}</span>
-                      <span class="tool-area-chevron">▶</span>
-                    </summary>
-                    <div class="tool-area-body">
+                    <div
+                      v-if="msg.thinkingContent"
+                      class="thinking-content"
+                      v-html="renderThinkingMarkdown(msg)"
+                    ></div>
+                    <div v-if="msg.toolContent?.length" class="fold-tool-list">
                       <template v-for="(t, ti) in msg.toolContent" :key="ti">
                         <details
                           v-if="toolHasIo(t)"
@@ -1056,6 +1078,18 @@ const warnedAgentsText = computed(() => {
                       </template>
                     </div>
                   </details>
+                  <div v-if="msg.images && msg.images.length" class="msg-images">
+                    <img
+                      v-for="(src, i) in msg.images"
+                      :key="i"
+                      :src="src"
+                      class="msg-image"
+                      :alt="`图片${i + 1}`"
+                      :title="`点击查看大图${msg.images.length > 1 ? `（${i + 1}/${msg.images.length}）` : ''}`"
+                      @click="openPreview(msg.images, i)"
+                    />
+                  </div>
+                  <div class="msg-text" v-html="renderMessageMarkdown(msg)"></div>
                   <!-- 对话内 diff 展示：extra.rich.blocks 存在才渲染（服务端采集附加，
                        永不进 LLM 上下文）；旧消息/无 extra → 纯文本回退与现网一致 -->
                   <DiffViewer
@@ -1165,75 +1199,81 @@ const warnedAgentsText = computed(() => {
           <div class="msg-body">
             <div class="msg-sender">{{ senderName(agentId) }}</div>
             <div class="msg-bubble">
-              <!-- 结构分离：优先消费 server 推的 typing.segments（kind+content 分段）；工具段由
-                   buildStreamItems 聚合为单一 toolArea（见 typingView）——旧 server 无 segments 时
-                   退化 parseThinkingBlocks 从 [思考] 文本标记回推 -->
+              <!-- 结构分离：优先消费 server 推的 typing.segments（kind+content 分段）。
+                   text 段保留外层渲染正文；thinking/tool 段由 buildStreamItems 收进单一 fold
+                   （思考折叠块，时间序交错）——旧 server 无 segments 时退化 parseThinkingBlocks -->
               <template v-for="(item, ii) in typing.items" :key="ii">
-                <template v-if="item.type === 'seg'">
-                  <div
-                    v-if="item.seg.kind === 'text'"
-                    class="msg-text"
-                    v-html="renderMarkdown(resolveDisplayPlaceholders(item.seg.content, store.agents))"
-                  ></div>
-                  <details v-else class="thinking-block" :open="false">
-                    <summary class="thinking-summary">
-                      <span class="thinking-icon">🐾</span>
-                      <span class="thinking-label">思考过程</span>
-                      <span class="thinking-dots"><i></i><i></i><i></i></span>
-                      <span class="thinking-chevron">▶</span>
-                    </summary>
-                    <div class="thinking-content" v-html="renderMarkdown(item.seg.content)"></div>
-                  </details>
-                </template>
-                <!-- 工具工作区（单一可折叠容器）：流式 tool 段聚合进同一 toolArea，不再散卡混排——
-                     推进中自动展开、全部结束自动收起；用户点过 header 冻结自动行为 -->
                 <div
-                  v-else-if="item.type === 'toolArea'"
-                  class="tool-area"
+                  v-if="item.type === 'seg'"
+                  class="msg-text"
+                  v-html="renderMarkdown(resolveDisplayPlaceholders(item.seg.content, store.agents))"
+                ></div>
+                <!-- 思考+工具单折叠块：thinking 文本与 tool 行在折叠块内按时间序交错
+                     （工具嵌在实际发生位置，不聚尾部）；受控展开态 item.open 驱动
+                     （推进自动展开/结束自动收起，用户点过冻结），processing 时 header 显动点。
+                     取消独立 tool-area——工具长在思考框内、不再堆积气泡正下方 -->
+                <div
+                  v-else-if="item.type === 'fold'"
+                  class="thinking-block stream-fold"
                   :class="{ open: item.open }"
                 >
                   <div
-                    class="tool-area-header"
+                    class="thinking-summary"
                     role="button"
                     tabindex="0"
                     :aria-expanded="item.open"
-                    @click="toggleStreamToolArea(agentId, item.open)"
-                    @keydown.enter.prevent="toggleStreamToolArea(agentId, item.open)"
+                    @click="toggleStreamFold(agentId, item.open)"
+                    @keydown.enter.prevent="toggleStreamFold(agentId, item.open)"
                   >
-                    <span class="tool-area-summary">{{ toolAreaSummary(item.tools) }}</span>
-                    <span class="tool-area-chevron">▶</span>
-                  </div>
-                  <div v-show="item.open" class="tool-area-body">
-                    <div
-                      v-for="(t, ti) in item.tools"
-                      :key="ti"
-                      class="tool-row"
-                      :class="toolRowClass(t)"
-                      :title="toolLabel(t)"
+                    <span class="thinking-icon">🐾</span>
+                    <span class="thinking-label">思考过程</span>
+                    <span
+                      v-if="item.tools.length"
+                      class="thinking-tool-hint"
+                      :title="toolAreaSummary(item.tools)"
                     >
-                      <div class="tool-row-head tool-row-head-plain">
-                        <span class="tool-status-glyph" :class="`tool-status-${t.status}`">
-                          <span v-if="t.status === 'running'" class="tool-spinner"></span>
-                          <template v-else-if="t.status === 'completed'">✓</template>
-                          <template v-else-if="t.status === 'error'">✕</template>
-                          <template v-else-if="t.status === 'pending'">○</template>
-                        </span>
-                        <span class="tool-card-icon">🛠</span>
-                        <span class="tool-card-name">{{ t.name }}</span>
-                        <span
-                          v-if="t.truncated"
-                          class="tool-card-truncated"
-                          title="工具输入/输出超限已截断"
-                          >…</span
-                        >
-                        <span
-                          v-if="t.status"
-                          class="tool-card-status"
-                          :class="`tool-status-${t.status}`"
-                          >{{ toolStatusLabel(t.status) }}</span
-                        >
+                      {{ toolAreaSummary(item.tools) }}
+                    </span>
+                    <span v-if="item.processing" class="thinking-dots"><i></i><i></i><i></i></span>
+                    <span class="thinking-chevron">▶</span>
+                  </div>
+                  <div v-show="item.open" class="stream-fold-body">
+                    <template v-for="(e, ei) in item.entries" :key="ei">
+                      <div
+                        v-if="e.kind === 'thinking'"
+                        class="fold-thinking"
+                        v-html="renderMarkdown(e.content)"
+                      ></div>
+                      <div
+                        v-else
+                        class="tool-row stream-tool-row"
+                        :class="toolRowClass(e.tool)"
+                        :title="toolLabel(e.tool)"
+                      >
+                        <div class="tool-row-head tool-row-head-plain">
+                          <span class="tool-status-glyph" :class="`tool-status-${e.tool.status}`">
+                            <span v-if="e.tool.status === 'running'" class="tool-spinner"></span>
+                            <template v-else-if="e.tool.status === 'completed'">✓</template>
+                            <template v-else-if="e.tool.status === 'error'">✕</template>
+                            <template v-else-if="e.tool.status === 'pending'">○</template>
+                          </span>
+                          <span class="tool-card-icon">🛠</span>
+                          <span class="tool-card-name">{{ e.tool.name }}</span>
+                          <span
+                            v-if="e.tool.truncated"
+                            class="tool-card-truncated"
+                            title="工具输入/输出超限已截断"
+                            >…</span
+                          >
+                          <span
+                            v-if="e.tool.status"
+                            class="tool-card-status"
+                            :class="`tool-status-${e.tool.status}`"
+                            >{{ toolStatusLabel(e.tool.status) }}</span
+                          >
+                        </div>
                       </div>
-                    </div>
+                    </template>
                   </div>
                 </div>
               </template>
@@ -2251,7 +2291,8 @@ const warnedAgentsText = computed(() => {
     background var(--ease-out);
 }
 
-.thinking-block[open] {
+.thinking-block[open],
+.thinking-block.open {
   border-color: rgba(180, 160, 140, 0.45);
   background: rgba(180, 160, 140, 0.1);
 }
@@ -2332,7 +2373,8 @@ const warnedAgentsText = computed(() => {
   opacity: 0.6;
 }
 
-.thinking-block[open] .thinking-chevron {
+.thinking-block[open] .thinking-chevron,
+.thinking-block.open .thinking-chevron {
   transform: rotate(90deg);
 }
 
@@ -2351,74 +2393,45 @@ const warnedAgentsText = computed(() => {
   padding-left: 0.4em;
 }
 
-/* ─── Tool Work Area（可折叠工作区——对齐 clowder）────────
-   工具过程独立展示（语义拆分后 kind:'tool' 段 / 历史 tool_content 共用）：
-   正文/思考/工具三通道分离；工具区整体一个可折叠容器（历史默认收起），
-   行级可再展开看 input/output（流式轻量段无 io 不可展开）。
-   冷色系 rgba(130,170,220,*) 与思考块暖色 rgba(180,160,140,*) 区分视觉层级 */
+/* ─── 思考框内嵌工具行（对齐用户「对外只露正文+思考框」）──────
+   工具长在思考折叠块内部、与思考文本按时间序交错（流式由 typing.segments 有序性
+   保证，工具嵌在实际发生位置；历史 thinkingContent blob 与 toolContent 两列交错序
+   未存——顺序近似）。取消独立 tool-area 容器——thinking-block 是思考+工具唯一
+   折叠容器。工具行保留冷色系蓝卡，在暖色思考块内作独立小卡与思考文本区分 */
 
-.tool-area {
-  margin: 6px 0;
-  border: 1px solid rgba(130, 170, 220, 0.28);
-  border-radius: var(--radius-sm);
-  background: rgba(130, 170, 220, 0.05);
-  overflow: hidden;
-  transition:
-    border-color var(--ease-out),
-    background var(--ease-out);
-}
-
-.tool-area[open] {
-  border-color: rgba(130, 170, 220, 0.45);
-}
-
-.tool-area-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 12px;
-  cursor: pointer;
-  user-select: none;
-  font-size: 12px;
+.thinking-tool-hint {
+  font-size: 11px;
+  font-weight: 400;
   color: var(--text-muted);
-  list-style: none; /* hide native <details> marker */
-  transition:
-    background var(--ease-in),
-    color var(--ease-out);
-}
-.tool-area-header::-webkit-details-marker {
-  display: none;
+  opacity: 0.85;
 }
 
-.tool-area-header:hover {
-  background: rgba(130, 170, 220, 0.1);
+/* 流式受控容器（div.open）内交错内容：thinking 文本 + 工具行 */
+.stream-fold-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 10px 10px;
+  border-top: 1px solid rgba(180, 160, 140, 0.18);
+}
+.stream-fold-body .fold-thinking {
+  padding: 6px 2px 0;
+  font-size: 13px;
+  line-height: 1.6;
   color: var(--text-secondary);
 }
-
-.tool-area-summary {
-  flex: 1;
-  min-width: 0;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* 历史 details 内思考文本与工具行之间的分隔 */
+.stream-fold-body .tool-row,
+.fold-tool-list .tool-row {
+  margin-top: 2px;
 }
 
-.tool-area-chevron {
-  font-size: 10px;
-  transition: transform var(--ease-out);
-  opacity: 0.6;
-}
-.tool-area[open] .tool-area-chevron,
-.tool-area.open .tool-area-chevron {
-  transform: rotate(90deg);
-}
-
-.tool-area-body {
+/* 历史：思考块内工具行列表（思考文本后、同折叠块内） */
+.fold-tool-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 8px;
+  padding: 8px 12px 10px;
   border-top: 1px solid rgba(130, 170, 220, 0.18);
 }
 
