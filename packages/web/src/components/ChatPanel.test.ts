@@ -354,7 +354,7 @@ describe('ChatPanel renderMarkdown 记忆化（per-message 缓存）', () => {
 })
 
 describe('ChatPanel 思考展示结构分离（typing.segments 优先 + 旧前缀兼容）', () => {
-  it('streaming 模板优先消费 typing.segments，无 segments 时退化 parseThinkingBlocks', () => {
+  it('typingView/resolveTypingSegs 优先消费 typing.segments，无 segments 时退化 parseThinkingBlocks', () => {
     expect(source).toContain('typing.segments && typing.segments.length')
     expect(source).toContain('? typing.segments')
     expect(source).toContain('parseThinkingBlocks(typing.content)')
@@ -366,36 +366,63 @@ describe('ChatPanel 思考展示结构分离（typing.segments 优先 + 旧前�
   })
 })
 
-describe('ChatPanel 工具语义拆分（kind:\'tool\' 独立通道 + messages.toolContent）', () => {
-  it('streaming 模板按 seg.kind 三分支渲染：text → tool 工具卡 → details 思考折叠（tool 独立于 thinking）', () => {
-    // 语义拆分后工具反馈不再混进思考折叠块——模板顺序 text → tool → thinking(details)，
-    // tool 分支用 v-else-if 在 v-else(details) 之前独立成卡片
-    const segToolIdx = source.indexOf("seg.kind === 'tool'")
-    expect(segToolIdx).toBeGreaterThan(-1)
-    expect(source.indexOf("seg.kind === 'text'")).toBeLessThan(segToolIdx)
-    expect(source.indexOf('details v-else class="thinking-block"')).toBeGreaterThan(segToolIdx)
+describe('ChatPanel 工具语义拆分（kind:\'tool\' 独立通道 + 可折叠工具工作区，对齐 clowder）', () => {
+  it('buildStreamItems 把 tool 段聚合为单一 toolArea（不再散卡混排），text/thinking 按序保留为 seg', () => {
+    // 对齐 clowder：所有 kind==='tool' 段进同一个 toolArea 容器（带结构化行 tools + open/frozen），
+    // 非 tool 段按 type==='seg' 保留——工具与思考在数据层即分开，不混折叠块
+    expect(source).toContain("seg.kind === 'tool'")
+    expect(source).toContain("type: 'toolArea'")
+    expect(source).toContain('toolArea.tools.push')
+    expect(source).toContain("type: 'seg'")
+    expect(source).toContain('toolArea.open = st ? (frozen ? st.open : hasActive) : hasActive')
   })
 
-  it('streaming 工具卡展示 name（seg.tool?.name 回退 seg.content）+ status 彩色标签 + toolLabel title', () => {
-    expect(source).toContain('v-else-if="seg.kind === \'tool\'"')
-    expect(source).toContain('class="tool-card"')
-    expect(source).toContain('{{ seg.tool?.name || seg.content }}')
-    expect(source).toContain('toolStatusLabel(seg.tool.status)')
-    expect(source).toContain(':class="`tool-status-${seg.tool.status}`"')
+  it('流式模板按 item 分支渲染：seg 分支内 text → thinking(details)，toolArea 独立工作区分支', () => {
+    // 模板 item.type 判别——toolArea 在工作区分支独立渲染，思考折叠块只在 seg 分支 else 出现
+    expect(source).toContain('v-for="(item, ii) in typing.items"')
+    expect(source).toContain("item.type === 'seg'")
+    expect(source).toContain("v-else-if=\"item.type === 'toolArea'\"")
+    expect(source).toContain('class="tool-area"')
+    expect(source).toContain('details v-else class="thinking-block"')
   })
 
-  it('历史消息工具日志卡：msg.toolContent?.length 存在才渲染（tool-log 容器 + 每工具一条 tool-card）', () => {
-    expect(source).toContain('v-if="msg.toolContent?.length"')
-    expect(source).toContain('class="tool-log"')
-    expect(source).toContain('v-for="(t, ti) in msg.toolContent"')
-    expect(source).toContain('class="tool-card"')
+  it('流式工具区 header 用户点过冻结：toggleStreamToolArea 记 frozen + open 取反，停止自动开合', () => {
+    expect(source).toContain('toggleStreamToolArea(agentId, item.open)')
+    expect(source).toContain('streamToolState.value.set')
+    expect(source).toContain('frozen: true')
+    expect(source).toContain('@keydown.enter.prevent="toggleStreamToolArea(agentId, item.open)"')
   })
 
-  it('历史工具卡渲染 name/status/truncated：{{ t.name }} + toolStatusLabel(t.status) + 超限省略号', () => {
+  it('流式工具区 header 点击即时生效：toggle bump streamToolVersion + buildStreamItems 读取（fc2fc9e ⚠️ 修复）', () => {
+    // 审查缺陷：toggle 只写 streamToolState，而模板折叠态渲染的是 activeTypingStates
+    // computed 产出的 item.open——computed 不依赖该 ref，点击要等下一次 AGENT_TYPING
+    // 重建才生效；若该 typing 已是流式最后一发则点击永不生效。
+    // 修复：引入 streamToolVersion ref，toggle bump + buildStreamItems 读取建立直接依赖。
+    expect(source).toContain('const streamToolVersion = ref(0)')
+    expect(source).toContain('streamToolVersion.value++')
+    expect(source).toMatch(/function buildStreamItems[\s\S]{0,300}streamToolVersion\.value/s)
+  })
+
+  it('历史消息工具日志：msg.toolContent?.length 存在才渲染——默认收起的 tool-area 容器 + 每工具一条 tool-row', () => {
+    expect(source).toContain('<details v-if="msg.toolContent?.length" class="tool-area">')
+    expect(source).toContain('<template v-for="(t, ti) in msg.toolContent" :key="ti">')
+    expect(source).toContain('class="tool-row"')
+    expect(source).toContain('class="tool-area-chevron"')
+  })
+
+  it('历史工具行渲染 name/status/truncated：{{ t.name }} + toolStatusLabel(t.status) + 超限省略号', () => {
     expect(source).toContain('{{ t.name }}')
     expect(source).toContain('toolStatusLabel(t.status)')
     expect(source).toContain(':class="`tool-status-${t.status}`"')
     expect(source).toContain('v-if="t.truncated"')
     expect(source).toContain('tool-card-truncated')
+  })
+
+  it('历史行级 io：toolHasIo 门控可展开行（tool-row-io 内显示 输入/输出 + 截断提示）', () => {
+    expect(source).toContain('toolHasIo(t)')
+    expect(source).toContain('class="tool-row-io"')
+    expect(source).toContain('toolIoText(t.input)')
+    expect(source).toContain('toolIoText(t.output)')
+    expect(source).toContain('class="tool-io-truncated"')
   })
 })

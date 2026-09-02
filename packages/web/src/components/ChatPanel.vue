@@ -110,18 +110,116 @@ const dateSepIndices = computed(() => {
 })
 
 /** 仅显示活跃会话中 Agent 的打字气泡（双重校验：sessionId + agentId） */
+type StreamSegItem = { type: 'seg'; seg: StreamSegment }
+type StreamToolAreaItem = { type: 'toolArea'; tools: ToolCallInfo[]; open: boolean; frozen: boolean }
+type StreamItem = StreamSegItem | StreamToolAreaItem
+
+interface ActiveTyping {
+  messageId: string
+  content: string
+  sessionId: string
+  segments?: StreamSegment[]
+  /** 渲染条目：tool 段聚合为单一 toolArea（对齐 clowder 工具工作区），text/thinking 按序保留 */
+  items: StreamItem[]
+}
+
+/** 用户点过流式工具区 header 后的冻结态（frozen=true 停止自动展开/收起） */
+const streamToolState = ref(new Map<string, { frozen: boolean; open: boolean }>())
+/**
+ * 工具区交互版本号：用户点击 header 时 bump——activeTypingStates 对 toggle 的
+ * 直接响应依赖。item.open 来自 computed 重建的渲染条目，而 toggle 只写
+ * streamToolState Map；fc2fc9e 审查实证 Map key 级追踪覆盖不到「auto-close 后
+ * 点开」的窗口（无后续 typing 则永不重建）——版本号 bump 强制立即重建。
+ */
+const streamToolVersion = ref(0)
+
+/** 工具是否推进中（running/pending）——驱动流式工具区自动展开 */
+function isToolActive(t: { status?: string }): boolean {
+  return t.status === 'running' || t.status === 'pending'
+}
+
+/** 工具段 → 展示行（seg.tool 流式轻量元数据；上游缺 tool 时回退段内容文本作名） */
+function toolRowFromSeg(seg: StreamSegment): ToolCallInfo {
+  return seg.tool ?? { name: seg.content || '工具' }
+}
+
+/**
+ * 流式 typing segments → 渲染条目列表。
+ * 所有 tool 段聚合到「首个工具出现位置」的单一 toolArea 容器（不再散卡混排），
+ * 其余 text/thinking 段按序保留；toolArea 展开态由 streamToolState 控制——
+ * 自动逻辑：有工具推进中即展开，全部结束即收起；用户点过 header 后冻结。
+ */
+function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] {
+  // 依赖工具区交互版本号：toggle bump 后强制重建渲染条目，item.open 立即翻转
+  void streamToolVersion.value
+  const items: StreamItem[] = []
+  let toolArea: StreamToolAreaItem | null = null
+  for (const seg of segs) {
+    if (seg.kind === 'tool') {
+      if (!toolArea) {
+        toolArea = { type: 'toolArea', tools: [], open: true, frozen: false }
+        items.push(toolArea)
+      }
+      toolArea.tools.push(toolRowFromSeg(seg))
+    } else {
+      items.push({ type: 'seg', seg })
+    }
+  }
+  if (toolArea) {
+    const st = streamToolState.value.get(agentId)
+    const hasActive = toolArea.tools.some(isToolActive)
+    const frozen = st?.frozen ?? false
+    toolArea.frozen = frozen
+    toolArea.open = st ? (frozen ? st.open : hasActive) : hasActive
+  }
+  return items
+}
+
+/** 老载兼容：结构优先消费 typing.segments；无 segments 退化 [思考] 文本标记解析 */
+function resolveTypingSegs(typing: {
+  content: string
+  segments?: StreamSegment[]
+}): StreamSegment[] {
+  return typing.segments && typing.segments.length ? typing.segments : parseThinkingBlocks(typing.content)
+}
+
+/** typing 条目构造：保留原字段 + 附 buildStreamItems 渲染条目供模板消费 */
+function typingView(
+  agentId: string,
+  v: { messageId: string; content: string; sessionId: string; segments?: StreamSegment[] }
+): ActiveTyping {
+  return { ...v, items: buildStreamItems(agentId, resolveTypingSegs(v)) }
+}
+
+/** 流式工具区 header 点击：记冻结态（open 取反），此后不再随工具状态自动开合 */
+function toggleStreamToolArea(agentId: string, wasOpen: boolean): void {
+  streamToolState.value.set(agentId, { frozen: true, open: !wasOpen })
+  // bump 版本号：buildStreamItems 依赖它，强制 activeTypingStates 立即重建渲染条目。
+  // 否则点击只在「下一次 AGENT_TYPING 触发 rebuild」时生效——若该 typing 已是流式
+  // 最后一发，点击永不生效（fc2fc9e 审查缺陷）。
+  streamToolVersion.value++
+}
+
 const activeTypingStates = computed(() => {
-  const filtered = new Map<
-    string,
-    { messageId: string; content: string; sessionId: string; segments?: StreamSegment[] }
-  >()
+  const filtered = new Map<string, ActiveTyping>()
   const activeAgentIds = new Set(store.activeSession?.agentIds ?? [])
   store.typingStates.forEach((v, agentId) => {
     if (v.sessionId !== store.activeSessionId) return
-    if (activeAgentIds.has(agentId)) filtered.set(agentId, v)
+    if (activeAgentIds.has(agentId)) filtered.set(agentId, typingView(agentId, v))
   })
   return filtered
 })
+
+// 流式结束（typing 条目删除）→ 清理该 agent 的工具区冻结态，下一条流式从干净状态开始
+watch(
+  () => Array.from(store.typingStates.keys()).sort().join(','),
+  (csv) => {
+    const alive = new Set(csv ? csv.split(',') : [])
+    for (const agentId of Array.from(streamToolState.value.keys())) {
+      if (!alive.has(agentId)) streamToolState.value.delete(agentId)
+    }
+  }
+)
 
 // ─── Message Grouping ──────────────────────
 
@@ -537,6 +635,44 @@ function toolLabel(t: ToolCallInfo): string {
   return t.status ? `${t.name} · ${toolStatusLabel(t.status)}` : t.name
 }
 
+/** 行是否有可展开的 io 快照（历史 tool_content 落库结果级；流式轻量段无 io → 不可展开） */
+function toolHasIo(t: ToolCallInfo): boolean {
+  return t.input != null || t.output != null
+}
+
+/** io 快照展示文本：字符串原样，结构化对象/数组 JSON 美化 */
+function toolIoText(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  try {
+    return JSON.stringify(v, null, 2)
+  } catch {
+    return String(v)
+  }
+}
+
+/** 工具行视觉类：推进中左缘高亮（当前活工具），失败左缘标红 */
+function toolRowClass(t: ToolCallInfo): string {
+  if (t.status === 'running' || t.status === 'pending') return 'tool-row-active'
+  if (t.status === 'error') return 'tool-row-error'
+  return ''
+}
+
+/** 工具区状态摘要：有推进中 → 运行中；有失败 → N 失败；否则 → 完成 */
+function toolAreaStatusWord(tools: ToolCallInfo[]): string {
+  if (tools.some(isToolActive)) return '运行中'
+  const errs = tools.filter((t) => t.status === 'error').length
+  if (errs) return errs === tools.length ? '失败' : `${errs} 失败`
+  if (tools.length) return '完成'
+  return ''
+}
+
+/** 工具区 header 摘要文案：N 个工具 · 状态（历史/流式共用） */
+function toolAreaSummary(tools: ToolCallInfo[]): string {
+  const word = toolAreaStatusWord(tools)
+  return `${tools.length} 个工具${word ? ` · ${word}` : ''}`
+}
+
 // ─── renderMarkdown 记忆化（per-message）────────────────────────
 // 防御放大器 2：即使还有「缓存命中满列表赋值 + SESSION_HISTORY 权威校正再赋值」两次
 // 全量 render，未变消息的 markdown 也只算一次。renderMarkdown 是 CPU 密集（marked.parse
@@ -839,32 +975,87 @@ const warnedAgentsText = computed(() => {
                     />
                   </div>
                   <div class="msg-text" v-html="renderMessageMarkdown(msg)"></div>
-                  <!-- 工具日志卡片（语义拆分后独立通道）：messages.toolContent 存在才渲染——
+                  <!-- 工具工作区（可折叠容器，对齐 clowder）：messages.toolContent 存在才渲染——
                        结构化 JSON 列反序列化（id/name/status/input/output 截断摘要），
-                       正文/思考/工具三通道分离，工具过程不进正文也不混思考折叠 -->
-                  <div v-if="msg.toolContent?.length" class="tool-log">
-                    <div
-                      v-for="(t, ti) in msg.toolContent"
-                      :key="ti"
-                      class="tool-card"
-                      :title="toolLabel(t)"
-                    >
-                      <span class="tool-card-icon">🛠</span>
-                      <span class="tool-card-name">{{ t.name }}</span>
-                      <span
-                        v-if="t.status"
-                        class="tool-card-status"
-                        :class="`tool-status-${t.status}`"
-                        >{{ toolStatusLabel(t.status) }}</span
-                      >
-                      <span
-                        v-if="t.truncated"
-                        class="tool-card-truncated"
-                        title="工具输入/输出超限已截断"
-                        >…</span
-                      >
+                       正文/思考/工具三通道分离，工具过程不进正文也不混思考折叠。
+                       整体默认收起（header 显示 N 个工具 · 状态），点开容器后逐行可再展开看 io -->
+                  <details v-if="msg.toolContent?.length" class="tool-area">
+                    <summary class="tool-area-header">
+                      <span class="tool-area-summary">{{ toolAreaSummary(msg.toolContent) }}</span>
+                      <span class="tool-area-chevron">▶</span>
+                    </summary>
+                    <div class="tool-area-body">
+                      <template v-for="(t, ti) in msg.toolContent" :key="ti">
+                        <details
+                          v-if="toolHasIo(t)"
+                          class="tool-row"
+                          :class="toolRowClass(t)"
+                          :title="toolLabel(t)"
+                        >
+                          <summary class="tool-row-head">
+                            <span class="tool-status-glyph" :class="`tool-status-${t.status}`">
+                              <span v-if="t.status === 'running'" class="tool-spinner"></span>
+                              <template v-else-if="t.status === 'completed'">✓</template>
+                              <template v-else-if="t.status === 'error'">✕</template>
+                              <template v-else-if="t.status === 'pending'">○</template>
+                            </span>
+                            <span class="tool-card-icon">🛠</span>
+                            <span class="tool-card-name">{{ t.name }}</span>
+                            <span
+                              v-if="t.truncated"
+                              class="tool-card-truncated"
+                              title="工具输入/输出超限已截断"
+                              >…</span
+                            >
+                            <span
+                              v-if="t.status"
+                              class="tool-card-status"
+                              :class="`tool-status-${t.status}`"
+                              >{{ toolStatusLabel(t.status) }}</span
+                            >
+                            <span class="tool-row-chevron">▶</span>
+                          </summary>
+                          <div class="tool-row-io">
+                            <div v-if="t.input != null" class="tool-io-block">
+                              <div class="tool-io-label">输入</div>
+                              <pre class="tool-io-value">{{ toolIoText(t.input) }}</pre>
+                            </div>
+                            <div v-if="t.output != null" class="tool-io-block">
+                              <div class="tool-io-label">输出</div>
+                              <pre class="tool-io-value">{{ toolIoText(t.output) }}</pre>
+                            </div>
+                            <div v-if="t.truncated" class="tool-io-truncated">
+                              ⚠️ 输入/输出超限已截断——完整快照存于服务端 tool_content（query_db 可查）
+                            </div>
+                          </div>
+                        </details>
+                        <div v-else class="tool-row" :class="toolRowClass(t)" :title="toolLabel(t)">
+                          <div class="tool-row-head tool-row-head-plain">
+                            <span class="tool-status-glyph" :class="`tool-status-${t.status}`">
+                              <span v-if="t.status === 'running'" class="tool-spinner"></span>
+                              <template v-else-if="t.status === 'completed'">✓</template>
+                              <template v-else-if="t.status === 'error'">✕</template>
+                              <template v-else-if="t.status === 'pending'">○</template>
+                            </span>
+                            <span class="tool-card-icon">🛠</span>
+                            <span class="tool-card-name">{{ t.name }}</span>
+                            <span
+                              v-if="t.truncated"
+                              class="tool-card-truncated"
+                              title="工具输入/输出超限已截断"
+                              >…</span
+                            >
+                            <span
+                              v-if="t.status"
+                              class="tool-card-status"
+                              :class="`tool-status-${t.status}`"
+                              >{{ toolStatusLabel(t.status) }}</span
+                            >
+                          </div>
+                        </div>
+                      </template>
                     </div>
-                  </div>
+                  </details>
                   <!-- 对话内 diff 展示：extra.rich.blocks 存在才渲染（服务端采集附加，
                        永不进 LLM 上下文）；旧消息/无 extra → 纯文本回退与现网一致 -->
                   <DiffViewer
@@ -974,44 +1165,77 @@ const warnedAgentsText = computed(() => {
           <div class="msg-body">
             <div class="msg-sender">{{ senderName(agentId) }}</div>
             <div class="msg-bubble">
-              <!-- 结构分离：优先消费 server 推的 typing.segments（kind+content 分段）；
-                    旧 server / 无 segments 时退化 parseThinkingBlocks 从 [思考] 文本标记回推 -->
-              <template
-                v-for="(seg, si) in (typing.segments && typing.segments.length
-                  ? typing.segments
-                  : parseThinkingBlocks(typing.content))"
-                :key="si"
-              >
+              <!-- 结构分离：优先消费 server 推的 typing.segments（kind+content 分段）；工具段由
+                   buildStreamItems 聚合为单一 toolArea（见 typingView）——旧 server 无 segments 时
+                   退化 parseThinkingBlocks 从 [思考] 文本标记回推 -->
+              <template v-for="(item, ii) in typing.items" :key="ii">
+                <template v-if="item.type === 'seg'">
+                  <div
+                    v-if="item.seg.kind === 'text'"
+                    class="msg-text"
+                    v-html="renderMarkdown(resolveDisplayPlaceholders(item.seg.content, store.agents))"
+                  ></div>
+                  <details v-else class="thinking-block" :open="false">
+                    <summary class="thinking-summary">
+                      <span class="thinking-icon">🐾</span>
+                      <span class="thinking-label">思考过程</span>
+                      <span class="thinking-dots"><i></i><i></i><i></i></span>
+                      <span class="thinking-chevron">▶</span>
+                    </summary>
+                    <div class="thinking-content" v-html="renderMarkdown(item.seg.content)"></div>
+                  </details>
+                </template>
+                <!-- 工具工作区（单一可折叠容器）：流式 tool 段聚合进同一 toolArea，不再散卡混排——
+                     推进中自动展开、全部结束自动收起；用户点过 header 冻结自动行为 -->
                 <div
-                  v-if="seg.kind === 'text'"
-                  class="msg-text"
-                  v-html="renderMarkdown(resolveDisplayPlaceholders(seg.content, store.agents))"
-                ></div>
-                <!-- 工具日志卡片（语义拆分后独立 kind:'tool' 段）：实时显示工具推进
-                     （name + status），工具过程不再混进思考折叠块 -->
-                <div
-                  v-else-if="seg.kind === 'tool'"
-                  class="tool-card"
-                  :title="seg.tool ? toolLabel(seg.tool) : seg.content"
+                  v-else-if="item.type === 'toolArea'"
+                  class="tool-area"
+                  :class="{ open: item.open }"
                 >
-                  <span class="tool-card-icon">🛠</span>
-                  <span class="tool-card-name">{{ seg.tool?.name || seg.content }}</span>
-                  <span
-                    v-if="seg.tool?.status"
-                    class="tool-card-status"
-                    :class="`tool-status-${seg.tool.status}`"
-                    >{{ toolStatusLabel(seg.tool.status) }}</span
+                  <div
+                    class="tool-area-header"
+                    role="button"
+                    tabindex="0"
+                    :aria-expanded="item.open"
+                    @click="toggleStreamToolArea(agentId, item.open)"
+                    @keydown.enter.prevent="toggleStreamToolArea(agentId, item.open)"
                   >
+                    <span class="tool-area-summary">{{ toolAreaSummary(item.tools) }}</span>
+                    <span class="tool-area-chevron">▶</span>
+                  </div>
+                  <div v-show="item.open" class="tool-area-body">
+                    <div
+                      v-for="(t, ti) in item.tools"
+                      :key="ti"
+                      class="tool-row"
+                      :class="toolRowClass(t)"
+                      :title="toolLabel(t)"
+                    >
+                      <div class="tool-row-head tool-row-head-plain">
+                        <span class="tool-status-glyph" :class="`tool-status-${t.status}`">
+                          <span v-if="t.status === 'running'" class="tool-spinner"></span>
+                          <template v-else-if="t.status === 'completed'">✓</template>
+                          <template v-else-if="t.status === 'error'">✕</template>
+                          <template v-else-if="t.status === 'pending'">○</template>
+                        </span>
+                        <span class="tool-card-icon">🛠</span>
+                        <span class="tool-card-name">{{ t.name }}</span>
+                        <span
+                          v-if="t.truncated"
+                          class="tool-card-truncated"
+                          title="工具输入/输出超限已截断"
+                          >…</span
+                        >
+                        <span
+                          v-if="t.status"
+                          class="tool-card-status"
+                          :class="`tool-status-${t.status}`"
+                          >{{ toolStatusLabel(t.status) }}</span
+                        >
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <details v-else class="thinking-block" :open="false">
-                  <summary class="thinking-summary">
-                    <span class="thinking-icon">🐾</span>
-                    <span class="thinking-label">思考过程</span>
-                    <span class="thinking-dots"><i></i><i></i><i></i></span>
-                    <span class="thinking-chevron">▶</span>
-                  </summary>
-                  <div class="thinking-content" v-html="renderMarkdown(seg.content)"></div>
-                </details>
               </template>
               <span class="typing-cursor inline">|</span>
               <!-- streaming 气泡 footer：正在思考时的停止按钮落点（B2 重定位——
@@ -2127,31 +2351,185 @@ const warnedAgentsText = computed(() => {
   padding-left: 0.4em;
 }
 
-/* ─── Tool Log Cards（语义拆分后工具过程独立展示） ── */
+/* ─── Tool Work Area（可折叠工作区——对齐 clowder）────────
+   工具过程独立展示（语义拆分后 kind:'tool' 段 / 历史 tool_content 共用）：
+   正文/思考/工具三通道分离；工具区整体一个可折叠容器（历史默认收起），
+   行级可再展开看 input/output（流式轻量段无 io 不可展开）。
+   冷色系 rgba(130,170,220,*) 与思考块暖色 rgba(180,160,140,*) 区分视觉层级 */
 
-.tool-log {
+.tool-area {
+  margin: 6px 0;
+  border: 1px solid rgba(130, 170, 220, 0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(130, 170, 220, 0.05);
+  overflow: hidden;
+  transition:
+    border-color var(--ease-out),
+    background var(--ease-out);
+}
+
+.tool-area[open] {
+  border-color: rgba(130, 170, 220, 0.45);
+}
+
+.tool-area-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  list-style: none; /* hide native <details> marker */
+  transition:
+    background var(--ease-in),
+    color var(--ease-out);
+}
+.tool-area-header::-webkit-details-marker {
+  display: none;
+}
+
+.tool-area-header:hover {
+  background: rgba(130, 170, 220, 0.1);
+  color: var(--text-secondary);
+}
+
+.tool-area-summary {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-area-chevron {
+  font-size: 10px;
+  transition: transform var(--ease-out);
+  opacity: 0.6;
+}
+.tool-area[open] .tool-area-chevron,
+.tool-area.open .tool-area-chevron {
+  transform: rotate(90deg);
+}
+
+.tool-area-body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin: 6px 0;
+  padding: 8px;
+  border-top: 1px solid rgba(130, 170, 220, 0.18);
 }
 
-.tool-card {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 3px 10px;
-  border: 1px solid rgba(130, 170, 220, 0.28);
+/* 工具行：浅蓝卡片；推进中左缘高亮（当前活工具）、失败左缘标红 */
+.tool-row {
+  border: 1px solid rgba(130, 170, 220, 0.22);
   border-radius: var(--radius-sm);
   background: rgba(130, 170, 220, 0.07);
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-secondary);
+  overflow: hidden;
+}
+.tool-row-active {
+  border-left: 2px solid #4a9eff;
+  background: rgba(130, 170, 220, 0.12);
+}
+.tool-row-error {
+  border-left: 2px solid #ff6b6b;
 }
 
-/* 流式工具卡虚线边框——「过程进行中」的视觉区分（历史卡实线） */
-.tool-card.streaming {
-  border-style: dashed;
+.tool-row-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  cursor: pointer;
+  list-style: none; /* hide native <details> marker */
+}
+.tool-row-head::-webkit-details-marker {
+  display: none;
+}
+.tool-row-head-plain {
+  cursor: default;
+}
+
+/* 状态 glyph：running 转圈 / completed ✓ / error ✕ / pending ○（复用 tool-status-* 色） */
+.tool-status-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  font-size: 11px;
+  line-height: 1;
+}
+.tool-status-glyph.tool-status-running {
+  color: #4a9eff;
+}
+.tool-status-glyph.tool-status-completed {
+  color: #58c97b;
+}
+.tool-status-glyph.tool-status-error {
+  color: #ff6b6b;
+}
+.tool-status-glyph.tool-status-pending {
+  color: var(--text-muted);
+}
+
+.tool-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: toolSpin 0.8s linear infinite;
+}
+@keyframes toolSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tool-row-chevron {
+  font-size: 10px;
+  opacity: 0.5;
+  transition: transform var(--ease-out);
+}
+.tool-row[open] .tool-row-chevron {
+  transform: rotate(90deg);
+}
+
+.tool-row-io {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 10px 8px;
+  border-top: 1px dashed rgba(130, 170, 220, 0.25);
+  background: rgba(130, 170, 220, 0.05);
+}
+.tool-io-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+.tool-io-value {
+  margin: 0;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.tool-io-truncated {
+  font-size: 11px;
+  color: var(--accent-red, #ff6b6b);
+  opacity: 0.8;
 }
 
 .tool-card-icon {
