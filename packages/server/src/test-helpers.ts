@@ -52,6 +52,7 @@ const SCHEMA_SQL = `
     task_id TEXT,
     images TEXT,
     thinking_content TEXT,
+    tool_content TEXT,
     dispatch_state TEXT DEFAULT NULL,
     extra TEXT DEFAULT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

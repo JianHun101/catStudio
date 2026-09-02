@@ -191,6 +191,7 @@ describe('messages repo — 队列持久化', () => {
         '摘要',
         null,
         undefined,
+        undefined, // tool_content
         '{"rich":{"v":1,"blocks":[]}}'
       )
 
@@ -198,6 +199,35 @@ describe('messages repo — 队列持久化', () => {
         extra: string | null
       }
       expect(row.extra).toBe('{"rich":{"v":1,"blocks":[]}}')
+    })
+
+    it('insertAgentMessage 带 tool_content 结构化 JSON 落库（工具记录独立列）', () => {
+      const id = uuid()
+      messagesRepo.insertAgentMessage(
+        id,
+        's1',
+        'agent-1',
+        '正文',
+        null,
+        '纯思考',
+        JSON.stringify([
+          {
+            id: 'call_1',
+            name: 'apply_patch',
+            status: 'completed',
+            input: { filePath: 'hello.txt' },
+            output: 'diff: +hello',
+          },
+        ])
+      )
+
+      const row = db.prepare('SELECT thinking_content, tool_content FROM messages WHERE id = ?').get(id) as {
+        thinking_content: string | null
+        tool_content: string | null
+      }
+      expect(row.thinking_content).toBe('纯思考')
+      expect(row.tool_content).toContain('"apply_patch"')
+      expect(JSON.parse(row.tool_content!).length).toBe(1)
     })
 
     it('insertAgentMessage 不带 extra → extra 列为 NULL（旧消息零回归）', () => {

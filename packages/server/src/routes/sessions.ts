@@ -5,6 +5,7 @@ import {
   SessionUpdateSchema,
   Events,
   type SessionConfig,
+  type ToolCallInfo,
 } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
@@ -17,7 +18,7 @@ import type { SessionRow } from '../db/repository/index.js'
 import { getIO } from '../connectors/socketio.js'
 import { getExecutionEngine } from '../execution/registry.js'
 import { createLogger } from '../logger.js'
-import { parseJsonArray } from '../utils.js'
+import { parseJsonArray, parseJsonValue } from '../utils.js'
 
 const log = createLogger('sessions')
 
@@ -203,6 +204,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         mentions: JSON.parse(r.mentions || '[]'),
         taskId: r.task_id || null,
         thinkingContent: r.thinking_content || undefined,
+        toolContent: parseJsonValue<ToolCallInfo[]>(r.tool_content),
         createdAt: r.created_at.replace(' ', 'T') + 'Z',
       }
     })

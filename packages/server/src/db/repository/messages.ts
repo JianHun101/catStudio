@@ -239,12 +239,22 @@ export function insertAgentMessage(
   content: string,
   taskId: string | null,
   thinkingContent?: string,
+  toolContentJson?: string,
   extraJson?: string
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content, extra)
-     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?, ?)`
-  ).run(id, sessionId, agentId, content, taskId, thinkingContent ?? null, extraJson ?? null)
+    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content, tool_content, extra)
+     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?, ?, ?)`
+  ).run(
+    id,
+    sessionId,
+    agentId,
+    content,
+    taskId,
+    thinkingContent ?? null,
+    toolContentJson ?? null,
+    extraJson ?? null
+  )
 }
 
 /** 补写消息的附加富内容（extra 列）。

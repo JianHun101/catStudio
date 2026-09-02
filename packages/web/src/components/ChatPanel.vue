@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import type { Message, ThinkingSegment } from '@cat-study/shared'
+import type { Message, StreamSegment, ToolCallInfo } from '@cat-study/shared'
 import { useChatStore } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { useSkillCommand } from '@/composables/useSkillCommand'
@@ -113,7 +113,7 @@ const dateSepIndices = computed(() => {
 const activeTypingStates = computed(() => {
   const filtered = new Map<
     string,
-    { messageId: string; content: string; sessionId: string; segments?: ThinkingSegment[] }
+    { messageId: string; content: string; sessionId: string; segments?: StreamSegment[] }
   >()
   const activeAgentIds = new Set(store.activeSession?.agentIds ?? [])
   store.typingStates.forEach((v, agentId) => {
@@ -520,6 +520,23 @@ function statusEmoji(status: string): string {
   }
 }
 
+// ─── Tool status（工具日志卡片——语义拆分后 kind:'tool' 段/历史 toolContent 共用文案）───
+const TOOL_STATUS_LABELS: Record<string, string> = {
+  pending: '排队中',
+  running: '运行中',
+  completed: '完成',
+  error: '失败',
+}
+/** 工具状态 → 中文标签（与 server 端 TOOL_STATUS_LABELS 同源口径；未知状态原样透出） */
+function toolStatusLabel(status: string | undefined): string {
+  if (!status) return ''
+  return TOOL_STATUS_LABELS[status] ?? status
+}
+/** 工具调用展示文案：name + 状态（卡片 title/降级文本共用） */
+function toolLabel(t: ToolCallInfo): string {
+  return t.status ? `${t.name} · ${toolStatusLabel(t.status)}` : t.name
+}
+
 // ─── renderMarkdown 记忆化（per-message）────────────────────────
 // 防御放大器 2：即使还有「缓存命中满列表赋值 + SESSION_HISTORY 权威校正再赋值」两次
 // 全量 render，未变消息的 markdown 也只算一次。renderMarkdown 是 CPU 密集（marked.parse
@@ -822,6 +839,32 @@ const warnedAgentsText = computed(() => {
                     />
                   </div>
                   <div class="msg-text" v-html="renderMessageMarkdown(msg)"></div>
+                  <!-- 工具日志卡片（语义拆分后独立通道）：messages.toolContent 存在才渲染——
+                       结构化 JSON 列反序列化（id/name/status/input/output 截断摘要），
+                       正文/思考/工具三通道分离，工具过程不进正文也不混思考折叠 -->
+                  <div v-if="msg.toolContent?.length" class="tool-log">
+                    <div
+                      v-for="(t, ti) in msg.toolContent"
+                      :key="ti"
+                      class="tool-card"
+                      :title="toolLabel(t)"
+                    >
+                      <span class="tool-card-icon">🛠</span>
+                      <span class="tool-card-name">{{ t.name }}</span>
+                      <span
+                        v-if="t.status"
+                        class="tool-card-status"
+                        :class="`tool-status-${t.status}`"
+                        >{{ toolStatusLabel(t.status) }}</span
+                      >
+                      <span
+                        v-if="t.truncated"
+                        class="tool-card-truncated"
+                        title="工具输入/输出超限已截断"
+                        >…</span
+                      >
+                    </div>
+                  </div>
                   <!-- 对话内 diff 展示：extra.rich.blocks 存在才渲染（服务端采集附加，
                        永不进 LLM 上下文）；旧消息/无 extra → 纯文本回退与现网一致 -->
                   <DiffViewer
@@ -944,6 +987,22 @@ const warnedAgentsText = computed(() => {
                   class="msg-text"
                   v-html="renderMarkdown(resolveDisplayPlaceholders(seg.content, store.agents))"
                 ></div>
+                <!-- 工具日志卡片（语义拆分后独立 kind:'tool' 段）：实时显示工具推进
+                     （name + status），工具过程不再混进思考折叠块 -->
+                <div
+                  v-else-if="seg.kind === 'tool'"
+                  class="tool-card"
+                  :title="seg.tool ? toolLabel(seg.tool) : seg.content"
+                >
+                  <span class="tool-card-icon">🛠</span>
+                  <span class="tool-card-name">{{ seg.tool?.name || seg.content }}</span>
+                  <span
+                    v-if="seg.tool?.status"
+                    class="tool-card-status"
+                    :class="`tool-status-${seg.tool.status}`"
+                    >{{ toolStatusLabel(seg.tool.status) }}</span
+                  >
+                </div>
                 <details v-else class="thinking-block" :open="false">
                   <summary class="thinking-summary">
                     <span class="thinking-icon">🐾</span>
@@ -2066,6 +2125,70 @@ const warnedAgentsText = computed(() => {
 .thinking-content :deep(ul) {
   list-style-position: inside;
   padding-left: 0.4em;
+}
+
+/* ─── Tool Log Cards（语义拆分后工具过程独立展示） ── */
+
+.tool-log {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.tool-card {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px;
+  border: 1px solid rgba(130, 170, 220, 0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(130, 170, 220, 0.07);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* 流式工具卡虚线边框——「过程进行中」的视觉区分（历史卡实线） */
+.tool-card.streaming {
+  border-style: dashed;
+}
+
+.tool-card-icon {
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+.tool-card-name {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.tool-card-status {
+  font-size: 11px;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+.tool-card-status.tool-status-running {
+  color: #4a9eff;
+}
+
+.tool-card-status.tool-status-completed {
+  color: #58c97b;
+}
+
+.tool-card-status.tool-status-error {
+  color: #ff6b6b;
+}
+
+.tool-card-truncated {
+  font-size: 11px;
+  opacity: 0.55;
 }
 
 /* ─── Input Area ────────────────────────── */

@@ -610,14 +610,38 @@ export class OpencodeServeAdapter implements LLMAdapter {
           return null
         }
         if (part.type === 'tool') {
-          // bash 允许但留审计（店长契约）：工具执行状态落日志，不产出 chunk
-          // input 实测是对象（bash: {command, workdir} / read: {filePath, ...}），
-          // 序列化截断落日志，防大对象刷屏
-          log.info('opencode-serve 工具调用', {
-            tool: part.tool,
-            status: part.state?.status,
-            input: part.state?.input ? JSON.stringify(part.state.input).slice(0, 500) : undefined,
-          })
+          // bash 允许但留审计（店长契约）+ 语义拆分：工具执行产出独立 kind:'tool'
+          // chunk（结构化 tool 元数据）——serve 模式此前工具过程完全黑盒（只落日志
+          // return null），与 run 模式语义对齐后：工具卡流式可见、io 落
+          // messages.tool_content 可查（正文/思考/工具三通道分离）。input 实测是对象
+          // （bash: {command, workdir} / read: {filePath, ...}），序列化截断落日志，
+          // 防大对象刷屏。多状态快照（running→completed）以 callID 关联——reply
+          // 落库按 id 合并成单条工具记录。
+          const tool = typeof part.tool === 'string' ? part.tool : undefined
+          if (tool) {
+            const status = part.state?.status
+            const input = part.state?.input
+            const output = part.state?.output
+            log.info('opencode-serve 工具调用', {
+              tool,
+              status,
+              input: input !== undefined ? JSON.stringify(input).slice(0, 500) : undefined,
+            })
+            return {
+              content: `${tool}${status ? `: ${status}` : ''}`,
+              done: false,
+              kind: 'tool',
+              tool: {
+                // serve 快照的 part.id 是事件 id（同调用多状态快照共用），callID 同 run 模式
+                id: typeof part.callID === 'string' ? part.callID : part.id,
+                name: tool,
+                status,
+                input,
+                output,
+                isError: status === 'error',
+              },
+            }
+          }
           return null
         }
         return null

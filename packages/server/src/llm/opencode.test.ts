@@ -667,15 +667,15 @@ describe('OpencodeAdapter', () => {
     ])
   })
 
-  // ─── tool_use 事件（--agent build 模式工具循环 → [工具] chunk）────────
+  // ─── tool_use 事件（--agent build 模式工具循环 → 独立 kind:'tool' chunk）────────
 
-  it('maps tool_use events to [工具] chunks (店长实测结构——run --agent build 真实序列)', async () => {
+  it('maps tool_use events to kind:tool chunks (店长实测结构——run --agent build 真实序列)', async () => {
     // 店长实测 run --agent build --auto 真实工具循环序列（7.7s：apply_patch
     // 真实写文件 completed 输出 diff → read 真实读回）——tool_use 事件 part 嵌套
     // （与 text/reasoning 同 envelope），part 结构与 serve 适配器工具事件映射
-    // 同款 schema（opencode.db 落盘样本三源一致）；产出 [工具] 前缀 chunk
-    // （kind:'thinking'：流式可见、socketio.ts:2706 不落库不参与上下文——
-    // 工具过程是观感反馈不进存储内容）
+    // 同款 schema（opencode.db 落盘样本三源一致）；语义拆分后产出独立 kind:'tool'
+    // chunk（结构化 tool 元数据 id/name/status/input/output——reply 落库
+    // tool_content 可查，不再降维 [工具] thinking 混进思考块）
     const adapter = new OpencodeAdapter({ model: 'openai/gpt-5.6-luna' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -734,9 +734,44 @@ describe('OpencodeAdapter', () => {
 
     const chunks = await collect(gen)
     expect(chunks).toEqual([
-      { content: '[工具] apply_patch: 运行中', done: false, kind: 'thinking' },
-      { content: '[工具] apply_patch: 完成', done: false, kind: 'thinking' },
-      { content: '[工具] read: 完成', done: false, kind: 'thinking' },
+      {
+        content: 'apply_patch: 运行中',
+        done: false,
+        kind: 'tool',
+        tool: {
+          id: 'call_1',
+          name: 'apply_patch',
+          status: 'running',
+          input: { filePath: 'hello.txt', patch: '+hello' },
+          isError: false,
+        },
+      },
+      {
+        content: 'apply_patch: 完成',
+        done: false,
+        kind: 'tool',
+        tool: {
+          id: 'call_1',
+          name: 'apply_patch',
+          status: 'completed',
+          input: { filePath: 'hello.txt', patch: '+hello' },
+          output: 'diff: +hello',
+          isError: false,
+        },
+      },
+      {
+        content: 'read: 完成',
+        done: false,
+        kind: 'tool',
+        tool: {
+          id: 'call_2',
+          name: 'read',
+          status: 'completed',
+          input: { filePath: 'hello.txt' },
+          output: 'hello',
+          isError: false,
+        },
+      },
       { content: '已读回：hello', done: false, kind: 'text' },
       { content: '', done: true },
     ])
@@ -770,7 +805,12 @@ describe('OpencodeAdapter', () => {
     const chunks = await collect(gen)
     // 未知状态原样透出（不吞）；缺 tool 字段的两行跳过
     expect(chunks).toEqual([
-      { content: '[工具] bash: 未知状态', done: false, kind: 'thinking' },
+      {
+        content: 'bash: 未知状态',
+        done: false,
+        kind: 'tool',
+        tool: { name: 'bash', status: '未知状态', isError: false },
+      },
       { content: '', done: true },
     ])
   })

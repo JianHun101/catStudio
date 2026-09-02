@@ -282,7 +282,7 @@ export function __test_reset(): void {
 // ─── NDJSON Stream Parsing ─────────────────────────────────
 
 /**
- * 从 Claude Code CLI 的 NDJSON 输出流中提取文本 Chunk。
+ * 从 Claude Code CLI 的 NDJSON 输出流中提取 Chunk。
  * 格式: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
  *
  * 过滤策略：text 块暂存到 buffer，遇到 tool_use 则清空（因为前面的 text
@@ -296,14 +296,67 @@ export function __test_reset(): void {
  *
  * thinking 块始终实时产出（纯思考文本，无前缀——结构分离后由 kind 字段驱动前端折叠），
  * 让前端看到流式进度。
+ *
+ * 工具语义拆分（2026-09-02）：tool_use/tool_result 从「文本降维」升级为独立
+ * kind:'tool' chunk（结构化 tool 元数据）——assistant 事件里的 tool_use 块产
+ * running chunk 并暂存 pendingTools（claude CLI 的 tool_use 事件带不出结果：
+ * 输出在后续 user role 的 tool_result 块）；tool_result 到达后关联合并产出
+ * completed/error chunk（带 output）。reply.ts 按 id 合并成单条工具记录落
+ * messages.tool_content——正文/思考/工具三通道彻底分离。
  */
+
+/** 提取 tool_result 的内容文本（content 为字符串或 [{type:'text',text}] 数组双形态） */
+function extractToolResultText(block: any): string | undefined {
+  const c = block?.content
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) {
+    return c
+      .map((p: any) => (typeof p?.text === 'string' ? p.text : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  return undefined
+}
+
 export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable<Chunk> {
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
+  // 跨事件工具状态表：tool_use（assistant）暂存 → tool_result（user）关联合并。
+  // 以 tool_use id 为键——同一次调用的多状态推进在 reply 落库侧按 id 合并单条记录。
+  const pendingTools = new Map<string, { name: string; input?: unknown }>()
 
   for await (const line of rl) {
     if (!line.trim()) continue
     try {
       const event = JSON.parse(line)
+
+      // ── user role 事件的 tool_result：补齐该调用的 status + output（cli 的
+      //    tool_use 事件只含 name/input，结果在 tool_result——不扩解析面则
+      //    「查历史工具结果」对 claude provider 落空）──
+      if (event.type === 'user' && event.message?.content) {
+        for (const block of event.message.content) {
+          if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+            const pending = pendingTools.get(block.tool_use_id)
+            if (pending) {
+              pendingTools.delete(block.tool_use_id)
+              const output = extractToolResultText(block)
+              yield {
+                content: pending.name,
+                done: false,
+                kind: 'tool',
+                tool: {
+                  id: block.tool_use_id,
+                  name: pending.name,
+                  status: block.is_error ? 'error' : 'completed',
+                  input: pending.input,
+                  output,
+                  isError: !!block.is_error,
+                },
+              }
+            }
+          }
+        }
+        continue
+      }
 
       if (event.type === 'assistant' && event.message?.content) {
         // 预扫描：检测当前事件是否含 tool_use
@@ -325,6 +378,20 @@ export async function* parseClaudeCodeOutput(child: ChildProcess): AsyncIterable
           // 前端按 kind 渲染折叠块，不再依赖文本标记回推）
           if (block.type === 'thinking' && typeof block.thinking === 'string') {
             yield { content: block.thinking, done: false, kind: 'thinking' }
+          }
+          // tool_use 块 → 独立 kind:'tool' chunk（running 状态 + input），暂存等 tool_result
+          if (
+            block.type === 'tool_use' &&
+            typeof block.name === 'string' &&
+            typeof block.id === 'string'
+          ) {
+            pendingTools.set(block.id, { name: block.name, input: block.input })
+            yield {
+              content: block.name,
+              done: false,
+              kind: 'tool',
+              tool: { id: block.id, name: block.name, status: 'running', input: block.input },
+            }
           }
         }
       }

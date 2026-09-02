@@ -454,4 +454,71 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     expect(row.thinking_content).toBe('这是思考过程')
     expect(row.content).toBe('正文开始正文里说[思考]不是标记')
   })
+
+  it('工具语义拆分：tool chunk 独立分段 + tool_content 落库（正文/思考/工具三通道分离）', async () => {
+    // 混合流：text → tool(running) → thinking → tool(completed 同 id) → text
+    const chatStream = vi.fn(async function* () {
+      yield { content: '开始', done: false, kind: 'text' }
+      yield {
+        content: 'bash: 运行中',
+        done: false,
+        kind: 'tool',
+        tool: { id: 'c1', name: 'bash', status: 'running', input: { command: 'ls' } },
+      }
+      yield { content: '静想', done: false, kind: 'thinking' }
+      yield {
+        content: 'bash: 完成',
+        done: false,
+        kind: 'tool',
+        tool: {
+          id: 'c1',
+          name: 'bash',
+          status: 'completed',
+          input: { command: 'ls' },
+          output: 'a.txt',
+        },
+      }
+      yield { content: '正文', done: false, kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await runPaired(engine, 'msg-tool', 'trace-tool')
+
+    // typing segments：tool 按 id 合并成单段（running→completed 原地更新，不产生重复卡）；
+    // wire 轻量只带 id/name/status（io 只进落库）
+    const lastTyping = calls.typing[calls.typing.length - 1]
+    expect(lastTyping.segments).toEqual([
+      { kind: 'text', content: '开始' },
+      {
+        kind: 'tool',
+        content: 'bash: 完成',
+        tool: { id: 'c1', name: 'bash', status: 'completed' },
+      },
+      { kind: 'thinking', content: '静想' },
+      { kind: 'text', content: '正文' },
+    ])
+    // content 兼容字段不含 tool（正文+思考仅两通道），工具不进旧前端 content 解析面
+    expect(lastTyping.content).toBe('开始静想正文')
+
+    // 落库：content 只含文本、thinking_content 纯思考、tool_content 结构化 JSON——
+    // 工具记录按 id 合并成单条（running→completed 状态推进）
+    const row = getDb()
+      .prepare(`SELECT * FROM messages WHERE role = 'agent' AND session_id = 'session-1'`)
+      .get() as any
+    expect(row.content).toBe('开始正文')
+    expect(row.thinking_content).toBe('静想')
+    const tools = JSON.parse(row.tool_content)
+    expect(tools).toHaveLength(1)
+    // 夹具 chunk 未带 isError → 记录无该键（JSON 序列化省略 undefined；
+    // 真实适配器恒带布尔 isError，见 opencode/serve/cli 工具 chunk 形状）
+    expect(tools[0]).toEqual({
+      id: 'c1',
+      name: 'bash',
+      status: 'completed',
+      input: { command: 'ls' },
+      output: 'a.txt',
+    })
+  })
 })
