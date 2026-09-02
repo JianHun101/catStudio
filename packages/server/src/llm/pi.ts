@@ -152,7 +152,8 @@ export class PiAdapter implements LLMAdapter {
 
           case 'thinking_delta':
             if (event.text && typeof event.text === 'string') {
-              pushChunk({ content: `[思考] ${event.text}`, done: false, kind: 'thinking' })
+              // 纯思考文本无 [思考] 前缀——结构分离后 kind 字段即结构信号
+              pushChunk({ content: event.text, done: false, kind: 'thinking' })
             }
             break
 

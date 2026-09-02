@@ -228,6 +228,15 @@ export interface Chunk {
   kind?: 'text' | 'thinking'
 }
 
+/**
+ * 流式分段——server 按 chunk.kind 累积推送（思考展示结构分离，
+ * 替代前端从 `[思考]` 文本标记回推结构；thinking 段内容为纯思考文本，无前缀）。
+ */
+export interface ThinkingSegment {
+  kind: 'text' | 'thinking'
+  content: string
+}
+
 // ─── Summary & Handoff ──────────────────────────────
 
 /** 会话摘要（存在 sessions.running_summary 列） */
@@ -276,12 +285,14 @@ export interface MessageAgentStatusPayload {
   startedAt?: number
 }
 
-/** AGENT_TYPING 事件载荷（流式增量；content = 已累积展示全文） */
+/** AGENT_TYPING 事件载荷（流式增量；content = 已累积展示全文，向后兼容；
+ *  segments = 结构化分段（kind+content），流式链路优先消费——缺失时前端退化 parseThinkingBlocks） */
 export interface TypingUpdatePayload {
   sessionId: string
   agentId: string
   messageId: string
   content: string
+  segments?: ThinkingSegment[]
 }
 
 /** system 通知消息形状（role 恒为 'system'，类型隐含不再逐处写） */

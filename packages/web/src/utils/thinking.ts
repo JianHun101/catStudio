@@ -1,10 +1,15 @@
-export interface ThinkingSegment {
-  kind: 'text' | 'thinking'
-  content: string
-}
+import type { ThinkingSegment } from '@cat-study/shared'
+
+export type { ThinkingSegment }
 
 /**
- * 把含 [思考] 标记的流式内容拆成文本段和思考段。
+ * 老载兼容路径：把含 [思考] 标记的流式内容拆成文本段和思考段。
+ *
+ * 思考展示结构分离后（server 按 chunk.kind 累积推送 typing.segments），流式链路
+ * 优先消费结构化 segments，本函数只在 segments 缺失时作为退化路径被调用——
+ * 覆盖旧 server（仍推 `[思考]` 前缀 content）与历史数据。纯文本内容（无标记）
+ * 原样输出 text 段，行为与结构分离前一致。
+ *
  * 连续的 [思考] 块会合并为单个思考段，避免产生多个折叠窗口。
  *
  * 通过 split 按 [思考] 标记切分，再收集连续的思考块来合并。

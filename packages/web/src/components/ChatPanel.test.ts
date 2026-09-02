@@ -352,3 +352,16 @@ describe('ChatPanel renderMarkdown 记忆化（per-message 缓存）', () => {
     expect(source).not.toContain('v-html="renderMarkdown(msg.thinkingContent')
   })
 })
+
+describe('ChatPanel 思考展示结构分离（typing.segments 优先 + 旧前缀兼容）', () => {
+  it('streaming 模板优先消费 typing.segments，无 segments 时退化 parseThinkingBlocks', () => {
+    expect(source).toContain('typing.segments && typing.segments.length')
+    expect(source).toContain('? typing.segments')
+    expect(source).toContain('parseThinkingBlocks(typing.content)')
+  })
+
+  it('renderThinkingMarkdown 兼容旧库 [思考] 前缀（新纯文本原样返回、含前缀才剥）', () => {
+    expect(source).toContain("tc.includes('[思考]')")
+    expect(source).toContain("tc.replace(/\\[思考\\]\\s*/g, '')")
+  })
+})

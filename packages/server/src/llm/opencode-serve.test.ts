@@ -681,7 +681,7 @@ describe('OpencodeServeAdapter', () => {
 
     const chunks = await chunksPromise
     expect(chunks).toEqual([
-      { content: '[思考] Let me solve', done: false, kind: 'thinking' },
+      { content: 'Let me solve', done: false, kind: 'thinking' },
       { content: 'answer', done: false, kind: 'text' },
       { content: '', done: true },
     ])
