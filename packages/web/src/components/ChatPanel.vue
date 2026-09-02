@@ -2386,9 +2386,12 @@ const warnedAgentsText = computed(() => {
   border-top: 1px solid rgba(180, 160, 140, 0.18);
 }
 
-/* 修复列表序号被 overflow:hidden 裁剪的问题 */
+/* 修复列表序号被 overflow:hidden 裁剪的问题（历史 thinking-content + 流式 fold-thinking
+   同源——两处都渲染 markdown 产出 ol/ul，容器 .thinking-block 均 overflow:hidden） */
 .thinking-content :deep(ol),
-.thinking-content :deep(ul) {
+.thinking-content :deep(ul),
+.stream-fold-body .fold-thinking :deep(ol),
+.stream-fold-body .fold-thinking :deep(ul) {
   list-style-position: inside;
   padding-left: 0.4em;
 }
@@ -2426,13 +2429,14 @@ const warnedAgentsText = computed(() => {
   margin-top: 2px;
 }
 
-/* 历史：思考块内工具行列表（思考文本后、同折叠块内） */
+/* 历史：思考块内工具行列表（思考文本后、同折叠块内）。
+   分隔线走容器暖色系（与 .thinking-content/.stream-fold-body 一致），工具行卡片本体仍是冷色蓝卡 */
 .fold-tool-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 8px 12px 10px;
-  border-top: 1px solid rgba(130, 170, 220, 0.18);
+  border-top: 1px solid rgba(180, 160, 140, 0.18);
 }
 
 /* 工具行：浅蓝卡片；推进中左缘高亮（当前活工具）、失败左缘标红 */
