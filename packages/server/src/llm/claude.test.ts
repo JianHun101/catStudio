@@ -292,10 +292,12 @@ describe('ClaudeAdapter', () => {
     expect(args).toContain('--mcp-config')
     expect(args).toContain('--allowedTools')
     expect(args).toContain('--disallowedTools')
-    // 白名单四工具并存（逗号串单值——知识库 Phase 1 扩面 + 2026-09-01 放行 query_db/request_user_action）
+    // 白名单五工具并存（逗号串单值——知识库 Phase 1 扩面 + 2026-09-01 放行 query_db/request_user_action
+    // + 2026-09-02 放行 create_pr 收口链发布关载体）
     const allowedIdx = args.indexOf('--allowedTools')
     expect(args[allowedIdx + 1]).toContain('mcp__catstudy__post_message')
     expect(args[allowedIdx + 1]).toContain('mcp__catstudy__search_knowledge')
+    expect(args[allowedIdx + 1]).toContain('mcp__catstudy__create_pr')
     // .mcp.json 生成后由 finally 清理——断言临时文件已删
     const cfgIdx = args.indexOf('--mcp-config')
     expect(cfgIdx).toBeGreaterThan(-1)
@@ -329,6 +331,7 @@ describe('ClaudeAdapter', () => {
   // ─── 验收 #5/#6（知识库 Phase 1）：白名单双工具并存 ───
 
   it('chatStream with context allows both MCP tools (post_message + search_knowledge)', async () => {
+    // 注：2026-09-02 create_pr 放行后本测试改为全量白名单精确比对（见下）
     const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
     const spawned = { on: vi.fn(), stderr: null, kill: vi.fn(), exitCode: 0, killed: false }
     vi.mocked(spawnSupervised).mockReturnValue(spawned as any)
@@ -346,7 +349,7 @@ describe('ClaudeAdapter', () => {
     const idx = args.indexOf('--allowedTools')
     expect(idx).toBeGreaterThan(-1)
     expect(args[idx + 1]).toBe(
-      'mcp__catstudy__post_message,mcp__catstudy__search_knowledge,mcp__catstudy__query_db,mcp__catstudy__request_user_action'
+      'mcp__catstudy__post_message,mcp__catstudy__search_knowledge,mcp__catstudy__query_db,mcp__catstudy__request_user_action,mcp__catstudy__create_pr'
     )
   })
 

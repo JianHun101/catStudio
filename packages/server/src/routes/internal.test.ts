@@ -35,6 +35,12 @@ vi.mock('../memory/embedding.js', () => ({
   embedText: mockEmbedText,
 }))
 
+// Mock create-pr：端点只做「角色白名单 + 透传」，createPr 业务逻辑由
+// git/create-pr.test.ts 单测覆盖——真实 gh/git 绝不在端点测试执行
+vi.mock('../git/create-pr.js', () => ({
+  createPr: vi.fn(),
+}))
+
 /** 插入会话 fixture：store 店长 + implementer 实施猫 + reviewer 吐槽猫（角色白名单判定用） */
 const insertFixture = () => {
   const db = getDb()
@@ -83,6 +89,12 @@ describe('internal route-signals', () => {
     vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue(
       undefined
     )
+    // 默认：createPr 成功（业务失败分支用例按需覆盖）
+    vi.mocked((await import('../git/create-pr.js')).createPr).mockResolvedValue({
+      ok: true,
+      number: 123,
+      url: 'https://github.com/org/repo/pull/123',
+    } as any)
   })
 
   afterEach(async () => {
@@ -1039,6 +1051,222 @@ describe('internal route-signals', () => {
         expect(res.statusCode).toBe(200)
         const signals = consumeUserRequestSignals('session-1', 'agent-store', 'msg-1')
         expect(signals[0].options).toBeUndefined()
+      })
+    })
+  })
+
+  describe('create-pr 端点（create_pr 工具——收口链发布关载体）', () => {
+    /** 发送者 = 店长（store 角色——角色白名单通过态） */
+    const cpBody = (over: Record<string, unknown> = {}) => ({
+      sessionId: 'session-1',
+      agentId: 'agent-store',
+      msgId: 'msg-1',
+      head: 'session/abc',
+      title: 'feat: 测试',
+      body: '改动说明',
+      ...over,
+    })
+    const mockActive = async () =>
+      vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue({
+        sessionId: 'session-1',
+        messageId: 'reply-1',
+        content: '',
+        token: VALID_TOKEN,
+      })
+
+    describe('body 基本校验（400）', () => {
+      it('缺 head / head 空串 → 400 + reason 点名 head', async () => {
+        for (const head of [undefined, '', '   ']) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/create-pr',
+            payload: cpBody({ head }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('head')
+        }
+      })
+
+      it('缺 title / 缺 body → 400 + reason 点名', async () => {
+        const noTitle = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody({ title: undefined }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(noTitle.statusCode).toBe(400)
+        const noBody = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody({ body: undefined }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(noBody.statusCode).toBe(400)
+        expect(JSON.parse(noBody.body).reason).toContain('body')
+      })
+
+      it('base 非字符串 → 400 + reason 点名 base', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody({ base: 123 }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).reason).toContain('base')
+      })
+    })
+
+    describe('鉴权链（404/401/409 与 user-request 同款）', () => {
+      it('无活跃流 → 404 + reason', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(404)
+        expect(JSON.parse(res.body).reason).toContain('无活跃流')
+      })
+
+      it('token 不匹配 → 401', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody(),
+          headers: { 'x-signal-token': 'wrong-token' },
+        })
+        expect(res.statusCode).toBe(401)
+      })
+
+      it('sessionId 不匹配 → 409', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody({ sessionId: 'session-other' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(409)
+      })
+    })
+
+    describe('角色白名单（403）——防实施猫误发 PR', () => {
+      it('implementer 角色调用 → 403 + 可诊断错误文本', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody({ agentId: 'agent-impl' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(403)
+        expect(JSON.parse(res.body).reason).toContain('role=store')
+      })
+
+      it('未知 agent（不在 agents 表）→ 403（fail-closed）', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody({ agentId: 'agent-ghost' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(403)
+        expect(JSON.parse(res.body).reason).toContain('unknown')
+      })
+
+      it('reviewer 角色调用 → 403', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody({ agentId: 'agent-reviewer' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(403)
+      })
+    })
+
+    describe('业务失败（422 不静默）', () => {
+      it('createPr 返回 not-authed → 422 + reason 含原因与 error', async () => {
+        await mockActive()
+        vi.mocked((await import('../git/create-pr.js')).createPr).mockResolvedValue({
+          ok: false,
+          reason: 'not-authed',
+          error: 'Please run: gh auth login',
+        } as any)
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(422)
+        const body = JSON.parse(res.body)
+        expect(body.ok).toBe(false)
+        expect(body.reason).toContain('not-authed')
+        expect(body.error).toBe('Please run: gh auth login')
+      })
+
+      it('createPr 返回 branch-not-pushed → 422 透传', async () => {
+        await mockActive()
+        vi.mocked((await import('../git/create-pr.js')).createPr).mockResolvedValue({
+          ok: false,
+          reason: 'branch-not-pushed',
+          error: 'Command failed: git ls-remote',
+        } as any)
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(422)
+        expect(JSON.parse(res.body).reason).toContain('branch-not-pushed')
+      })
+    })
+
+    describe('成功路径（200 透传 createPr 结果）', () => {
+      it('store 角色全过 → 200 + number/url 透传 + createPr 参数正确', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body)).toEqual({
+          ok: true,
+          number: 123,
+          url: 'https://github.com/org/repo/pull/123',
+        })
+        expect((await import('../git/create-pr.js')).createPr).toHaveBeenCalledWith({
+          base: undefined,
+          head: 'session/abc',
+          title: 'feat: 测试',
+          body: '改动说明',
+        })
+      })
+
+      it('base 显式传值透传 + head/title/body trim', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/create-pr',
+          payload: cpBody({ base: 'main', head: '  feat-x  ', title: '  T  ', body: '  B  ' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect((await import('../git/create-pr.js')).createPr).toHaveBeenCalledWith({
+          base: 'main',
+          head: 'feat-x',
+          title: 'T',
+          body: 'B',
+        })
       })
     })
   })

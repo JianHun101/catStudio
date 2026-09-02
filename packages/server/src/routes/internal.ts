@@ -19,6 +19,12 @@
  * 可发，403）→ storeUserRequestSignal 入 Map——socketio.ts runAgentReply 完成
  * 点消费，与 isRestartRequestContent 文本检测取并集（结构化主路径 + 文本 fallback）。
  *
+ * POST /api/internal/create-pr（create_pr 工具，收口链发布关载体）：同款鉴权链
+ * （400→404→401→409）+ 角色白名单（仅 store 角色可提 PR，403——防实施猫误发）
+ * → 透传 createPr（git/create-pr.ts，前置校验 gh auth + 分支已 push）——
+ * 业务失败四种原因（no-main-root/not-authed/branch-not-pushed/create-failed）
+ * 422 返回不静默，error 透传命令 stderr 回模型可诊断。
+ *
  * 失败一律 4xx + reason 字段——mcp-server.mjs 把 reason 拼进工具错误文本
  * 回模型（提示改行首 @ fallback）。
  */
@@ -38,6 +44,7 @@ import { storeUserRequestSignal } from '../llm/user-request-signals.js'
 import { filterAllowedMentions } from '../dispatch/mention-policy.js'
 import { embedText } from '../memory/embedding.js'
 import { vectorToBlob } from '../memory/index.js'
+import { createPr } from '../git/create-pr.js'
 import type { AgentRole } from '@cat-study/shared'
 
 const log = createLogger('internal')
@@ -75,6 +82,16 @@ interface UserRequestBody {
   type?: unknown
   reason?: unknown
   options?: unknown
+}
+
+interface CreatePrBody {
+  sessionId?: unknown
+  agentId?: unknown
+  msgId?: unknown
+  base?: unknown
+  head?: unknown
+  title?: unknown
+  body?: unknown
 }
 
 const QUERY_OPS = new Set<QueryOp>(['=', '>', '<', 'LIKE'])
@@ -481,5 +498,98 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       reason: reason.trim(),
     })
     return reply.send({ ok: true, reason: '用户请求已入队' })
+  })
+
+  app.post('/api/internal/create-pr', async (req, reply) => {
+    const body = (req.body ?? {}) as CreatePrBody
+
+    // ── 1. body 基本校验（400）── 与 user-request 同款：防御纵深（mcp-server.mjs 已做参数校验）
+    const { sessionId, agentId, msgId, head, title, body: prBody } = body
+    if (
+      typeof sessionId !== 'string' ||
+      !sessionId ||
+      typeof agentId !== 'string' ||
+      !agentId ||
+      typeof msgId !== 'string' ||
+      !msgId
+    ) {
+      return reply.status(400).send({ ok: false, reason: 'sessionId/agentId/msgId 必填非空字符串' })
+    }
+    if (typeof head !== 'string' || !head.trim()) {
+      return reply.status(400).send({ ok: false, reason: 'head 必须是非空字符串' })
+    }
+    if (typeof title !== 'string' || !title.trim()) {
+      return reply.status(400).send({ ok: false, reason: 'title 必须是非空字符串' })
+    }
+    if (typeof prBody !== 'string' || !prBody.trim()) {
+      return reply.status(400).send({ ok: false, reason: 'body 必须是非空字符串' })
+    }
+    const base = body.base
+    if (base !== undefined && (typeof base !== 'string' || !base.trim())) {
+      return reply.status(400).send({ ok: false, reason: 'base 必须是字符串' })
+    }
+
+    // ── 2. lookup activeStreams（404）──
+    const stream = getActiveStream(agentId)
+    if (!stream) {
+      return reply
+        .status(404)
+        .send({ ok: false, reason: `agent ${agentId} 当前无活跃流，创建 PR 被拒` })
+    }
+
+    // ── 3. token 精确匹配（401）──
+    const token = req.headers['x-signal-token']
+    if (typeof token !== 'string' || token !== stream.token) {
+      return reply.status(401).send({ ok: false, reason: 'x-signal-token 不匹配' })
+    }
+
+    // ── 4. 复合键 sessionId 匹配（409）──
+    if (stream.sessionId !== sessionId) {
+      return reply.status(409).send({
+        ok: false,
+        reason: `agent ${agentId} 正在会话 ${stream.sessionId} 执行，本请求会话 ${sessionId} 不匹配`,
+      })
+    }
+
+    // ── 5. 角色白名单（403）——提 PR 是店长收口权限，防实施猫误发 PR。
+    // 与 user-request 同款 fail-closed（未知/缺失角色不放行）——
+    // 这里是「往 GitHub 发 PR」的对外动作，误发代价远大于漏拦
+    const fromRow = agentsRepo.getAgentById(agentId)
+    if (fromRow?.role !== 'store') {
+      return reply.status(403).send({
+        ok: false,
+        reason: `仅店长（role=store）可创建 PR（当前 agent ${agentId} role=${fromRow?.role ?? 'unknown'}）`,
+      })
+    }
+
+    // ── 6. 执行 createPr（业务失败 422 不静默——四种原因透传）──
+    const result = await createPr({
+      base: base?.trim() || undefined,
+      head: head.trim(),
+      title: title.trim(),
+      body: prBody.trim(),
+    })
+    if (!result.ok) {
+      log.warn('PR create failed via internal endpoint', {
+        sessionId,
+        agentId,
+        msgId,
+        reason: result.reason,
+        error: result.error,
+      })
+      return reply.status(422).send({
+        ok: false,
+        reason: `PR 创建失败（${result.reason}）：${result.error}`,
+        error: result.error,
+      })
+    }
+    log.info('PR created via internal endpoint', {
+      sessionId,
+      agentId,
+      msgId,
+      number: result.number,
+      url: result.url,
+    })
+    return reply.send({ ok: true, number: result.number, url: result.url })
   })
 }

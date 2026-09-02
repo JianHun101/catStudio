@@ -11,6 +11,7 @@ import {
   validateSearchParams,
   validateQueryDbParams,
   validateUserRequestParams,
+  validateCreatePrParams,
   QUERY_DB_TABLES,
   USER_REQUEST_TYPES,
 } from './mcp-server-utils.mjs'
@@ -213,5 +214,60 @@ describe('validateUserRequestParams (request_user_action)', () => {
 
   it('枚举常量只含 restart/choice（契约钉死，防误扩）', () => {
     expect(USER_REQUEST_TYPES).toEqual(['restart', 'choice'])
+  })
+})
+
+describe('validateCreatePrParams (create_pr)', () => {
+  it('合法入参：仅 head/title/body → ok，base 默认 undefined（服务端 createPr 兜底 dev）', () => {
+    const r = validateCreatePrParams({ head: 'session/abc', title: 'T', body: 'B' })
+    expect(r).toEqual({ ok: true, base: undefined, head: 'session/abc', title: 'T', body: 'B' })
+  })
+
+  it('合法入参：head/title/body + base 显式 → ok 透传', () => {
+    const r = validateCreatePrParams({ base: 'main', head: 'feat-x', title: 'T', body: 'B' })
+    expect(r).toEqual({ ok: true, base: 'main', head: 'feat-x', title: 'T', body: 'B' })
+  })
+
+  it('head/title/body 前后空白裁剪', () => {
+    const r = validateCreatePrParams({ head: '  feat-x  ', title: '  T  ', body: '  B  ' })
+    expect(r).toEqual({ ok: true, base: undefined, head: 'feat-x', title: 'T', body: 'B' })
+  })
+
+  it('缺 head / 空串 / 纯空白 → 错误文本点名 head', () => {
+    for (const bad of [undefined, '', '   ']) {
+      const r = validateCreatePrParams({ head: bad, title: 'T', body: 'B' })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('head')
+    }
+  })
+
+  it('head 非字符串（数字/数组）→ 错误文本', () => {
+    expect(validateCreatePrParams({ head: 123, title: 'T', body: 'B' }).ok).toBe(false)
+    expect(validateCreatePrParams({ head: ['x'], title: 'T', body: 'B' }).ok).toBe(false)
+  })
+
+  it('缺 title / 缺 body → 错误文本点名对应字段', () => {
+    expect(validateCreatePrParams({ head: 'x', body: 'B' }).ok).toBe(false)
+    const r = validateCreatePrParams({ head: 'x', title: 'T' })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain('body')
+  })
+
+  it('base 非字符串（数字/布尔）→ 错误文本点名 base', () => {
+    expect(validateCreatePrParams({ base: 123, head: 'x', title: 'T', body: 'B' }).ok).toBe(false)
+    expect(validateCreatePrParams({ base: true, head: 'x', title: 'T', body: 'B' }).ok).toBe(false)
+  })
+
+  it('base 空串/纯空白 → 错误文本点名 base（与端点 400 一致，不静默归一）', () => {
+    for (const bad of ['', '   ']) {
+      const r = validateCreatePrParams({ base: bad, head: 'x', title: 'T', body: 'B' })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('base')
+    }
+  })
+
+  it('base 缺省 → ok（服务端 createPr 兜底 dev）', () => {
+    const r = validateCreatePrParams({ head: 'x', title: 'T', body: 'B' })
+    expect(r).toEqual({ ok: true, base: undefined, head: 'x', title: 'T', body: 'B' })
   })
 })
