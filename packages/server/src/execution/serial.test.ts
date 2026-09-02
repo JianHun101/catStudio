@@ -520,5 +520,13 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
       input: { command: 'ls' },
       output: 'a.txt',
     })
+
+    // 落库 segments（insertAgentMessage 第 9 参写回 messages.segments）：非空 JSON 字符串、
+    // 结构与最终 typing.segments 一致（text/tool/thinking 三通道交错序；tool 段只带 wire 轻量
+    // 字段 id/name/status，io 走 tool_content 独立列）。缺此断言则 reply.ts 第 9 参位漂移
+    // （如参数调序/拼接错列）无回归保护——历史折叠块交错还原的权威源就断在这里。
+    expect(typeof row.segments).toBe('string')
+    expect(row.segments.length).toBeGreaterThan(0)
+    expect(JSON.parse(row.segments)).toEqual(lastTyping.segments)
   })
 })

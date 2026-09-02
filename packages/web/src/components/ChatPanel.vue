@@ -11,6 +11,7 @@ import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { createLogger } from '@/utils/logger'
 import DiffViewer from './DiffViewer.vue'
 import AgentStatusLabel from './AgentStatusLabel.vue'
+import ToolRow from './ToolRow.vue'
 
 const log = createLogger('ChatPanel')
 
@@ -110,9 +111,7 @@ const dateSepIndices = computed(() => {
 })
 
 /** 仅显示活跃会话中 Agent 的打字气泡（双重校验：sessionId + agentId） */
-type ThoughtEntry =
-  | { kind: 'thinking'; content: string }
-  | { kind: 'tool'; tool: ToolCallInfo }
+type ThoughtEntry = { kind: 'thinking'; content: string } | { kind: 'tool'; tool: ToolCallInfo }
 type StreamSegItem = { type: 'seg'; seg: StreamSegment }
 /**
  * 思考折叠块（思考+工具唯一容器，对齐用户「对外只露正文+思考框」）：thinking 文本与
@@ -209,7 +208,9 @@ function resolveTypingSegs(typing: {
   content: string
   segments?: StreamSegment[]
 }): StreamSegment[] {
-  return typing.segments && typing.segments.length ? typing.segments : parseThinkingBlocks(typing.content)
+  return typing.segments && typing.segments.length
+    ? typing.segments
+    : parseThinkingBlocks(typing.content)
 }
 
 /** typing 条目构造：保留原字段 + 附 buildStreamItems 渲染条目供模板消费 */
@@ -647,46 +648,7 @@ function statusEmoji(status: string): string {
   }
 }
 
-// ─── Tool status（工具日志卡片——语义拆分后 kind:'tool' 段/历史 toolContent 共用文案）───
-const TOOL_STATUS_LABELS: Record<string, string> = {
-  pending: '排队中',
-  running: '运行中',
-  completed: '完成',
-  error: '失败',
-}
-/** 工具状态 → 中文标签（与 server 端 TOOL_STATUS_LABELS 同源口径；未知状态原样透出） */
-function toolStatusLabel(status: string | undefined): string {
-  if (!status) return ''
-  return TOOL_STATUS_LABELS[status] ?? status
-}
-/** 工具调用展示文案：name + 状态（卡片 title/降级文本共用） */
-function toolLabel(t: ToolCallInfo): string {
-  return t.status ? `${t.name} · ${toolStatusLabel(t.status)}` : t.name
-}
-
-/** 行是否有可展开的 io 快照（历史 tool_content 落库结果级；流式轻量段无 io → 不可展开） */
-function toolHasIo(t: ToolCallInfo): boolean {
-  return t.input != null || t.output != null
-}
-
-/** io 快照展示文本：字符串原样，结构化对象/数组 JSON 美化 */
-function toolIoText(v: unknown): string {
-  if (v == null) return ''
-  if (typeof v === 'string') return v
-  try {
-    return JSON.stringify(v, null, 2)
-  } catch {
-    return String(v)
-  }
-}
-
-/** 工具行视觉类：推进中左缘高亮（当前活工具），失败左缘标红 */
-function toolRowClass(t: ToolCallInfo): string {
-  if (t.status === 'running' || t.status === 'pending') return 'tool-row-active'
-  if (t.status === 'error') return 'tool-row-error'
-  return ''
-}
-
+// ─── 工具区 header 摘要（行级 name/status/io 渲染已抽到 ToolRow.vue 共享 partial）───
 /** 工具区状态摘要：有推进中 → 运行中；有失败 → N 失败；否则 → 完成 */
 function toolAreaStatusWord(tools: ToolCallInfo[]): string {
   if (tools.some(isToolActive)) return '运行中'
@@ -754,9 +716,7 @@ function renderThinkingMarkdown(msg: Message): string {
  *  tool_content，防 typing socket 膨胀）。text 段由 msg-text 外层渲染，折叠块内跳过。
  *  判别式 union（thinking/tool 各自承重字段非可选）——模板 v-if/v-else 分支窄化
  *  后 vue-tsc 可验证属性访问，buildStreamItems fold entries 同款写法。 */
-type StoredFoldEntry =
-  | { kind: 'thinking'; content: string }
-  | { kind: 'tool'; tool: ToolCallInfo }
+type StoredFoldEntry = { kind: 'thinking'; content: string } | { kind: 'tool'; tool: ToolCallInfo }
 
 /**
  * 有 msg.segments（新消息）→ 返回按时间序交错的渲染条目；无 segments（老消息）→ null
@@ -1079,84 +1039,14 @@ const warnedAgentsText = computed(() => {
                          思考段 markdown（fold-thinking）、工具段有 io 展开行 / 无 io name+status 行；
                          text 段由 storedFoldEntries 跳过（正文已在外层 msg-text 渲染） -->
                     <div v-if="storedFoldEntries(msg)" class="stream-fold-body">
+                      <!-- 条目：thinking 段 markdown；tool 段走 ToolRow（有 io → details 可展开 / 无 io → 纯行） -->
                       <template v-for="(e, ei) in storedFoldEntries(msg)" :key="ei">
                         <div
                           v-if="e.kind === 'thinking'"
                           class="fold-thinking"
                           v-html="renderMarkdown(e.content)"
                         ></div>
-                        <details
-                          v-else-if="toolHasIo(e.tool)"
-                          class="tool-row"
-                          :class="toolRowClass(e.tool)"
-                          :title="toolLabel(e.tool)"
-                        >
-                          <summary class="tool-row-head">
-                            <span class="tool-status-glyph" :class="`tool-status-${e.tool.status}`">
-                              <span v-if="e.tool.status === 'running'" class="tool-spinner"></span>
-                              <template v-else-if="e.tool.status === 'completed'">✓</template>
-                              <template v-else-if="e.tool.status === 'error'">✕</template>
-                              <template v-else-if="e.tool.status === 'pending'">○</template>
-                            </span>
-                            <span class="tool-card-icon">🛠</span>
-                            <span class="tool-card-name">{{ e.tool.name }}</span>
-                            <span
-                              v-if="e.tool.truncated"
-                              class="tool-card-truncated"
-                              title="工具输入/输出超限已截断"
-                              >…</span
-                            >
-                            <span
-                              v-if="e.tool.status"
-                              class="tool-card-status"
-                              :class="`tool-status-${e.tool.status}`"
-                              >{{ toolStatusLabel(e.tool.status) }}</span
-                            >
-                            <span class="tool-row-chevron">▶</span>
-                          </summary>
-                          <div class="tool-row-io">
-                            <div v-if="e.tool.input != null" class="tool-io-block">
-                              <div class="tool-io-label">输入</div>
-                              <pre class="tool-io-value">{{ toolIoText(e.tool.input) }}</pre>
-                            </div>
-                            <div v-if="e.tool.output != null" class="tool-io-block">
-                              <div class="tool-io-label">输出</div>
-                              <pre class="tool-io-value">{{ toolIoText(e.tool.output) }}</pre>
-                            </div>
-                            <div v-if="e.tool.truncated" class="tool-io-truncated">
-                              ⚠️ 输入/输出超限已截断——完整快照存于服务端 tool_content（query_db 可查）
-                            </div>
-                          </div>
-                        </details>
-                        <div
-                          v-else
-                          class="tool-row"
-                          :class="toolRowClass(e.tool)"
-                          :title="toolLabel(e.tool)"
-                        >
-                          <div class="tool-row-head tool-row-head-plain">
-                            <span class="tool-status-glyph" :class="`tool-status-${e.tool.status}`">
-                              <span v-if="e.tool.status === 'running'" class="tool-spinner"></span>
-                              <template v-else-if="e.tool.status === 'completed'">✓</template>
-                              <template v-else-if="e.tool.status === 'error'">✕</template>
-                              <template v-else-if="e.tool.status === 'pending'">○</template>
-                            </span>
-                            <span class="tool-card-icon">🛠</span>
-                            <span class="tool-card-name">{{ e.tool.name }}</span>
-                            <span
-                              v-if="e.tool.truncated"
-                              class="tool-card-truncated"
-                              title="工具输入/输出超限已截断"
-                              >…</span
-                            >
-                            <span
-                              v-if="e.tool.status"
-                              class="tool-card-status"
-                              :class="`tool-status-${e.tool.status}`"
-                              >{{ toolStatusLabel(e.tool.status) }}</span
-                            >
-                          </div>
-                        </div>
+                        <ToolRow v-else :tool="e.tool" />
                       </template>
                     </div>
                     <!-- 老消息（无 segments）：思考 blob + 工具列表两块堆叠（退化现行为，零回归） -->
@@ -1167,74 +1057,9 @@ const warnedAgentsText = computed(() => {
                         v-html="renderThinkingMarkdown(msg)"
                       ></div>
                       <div v-if="msg.toolContent?.length" class="fold-tool-list">
+                        <!-- 工具行（有 io → details 可展开 / 无 io → 纯行）共用 ToolRow partial -->
                         <template v-for="(t, ti) in msg.toolContent" :key="ti">
-                          <details
-                            v-if="toolHasIo(t)"
-                            class="tool-row"
-                            :class="toolRowClass(t)"
-                            :title="toolLabel(t)"
-                          >
-                            <summary class="tool-row-head">
-                              <span class="tool-status-glyph" :class="`tool-status-${t.status}`">
-                                <span v-if="t.status === 'running'" class="tool-spinner"></span>
-                                <template v-else-if="t.status === 'completed'">✓</template>
-                                <template v-else-if="t.status === 'error'">✕</template>
-                                <template v-else-if="t.status === 'pending'">○</template>
-                              </span>
-                              <span class="tool-card-icon">🛠</span>
-                              <span class="tool-card-name">{{ t.name }}</span>
-                              <span
-                                v-if="t.truncated"
-                                class="tool-card-truncated"
-                                title="工具输入/输出超限已截断"
-                                >…</span
-                              >
-                              <span
-                                v-if="t.status"
-                                class="tool-card-status"
-                                :class="`tool-status-${t.status}`"
-                                >{{ toolStatusLabel(t.status) }}</span
-                              >
-                              <span class="tool-row-chevron">▶</span>
-                            </summary>
-                            <div class="tool-row-io">
-                              <div v-if="t.input != null" class="tool-io-block">
-                                <div class="tool-io-label">输入</div>
-                                <pre class="tool-io-value">{{ toolIoText(t.input) }}</pre>
-                              </div>
-                              <div v-if="t.output != null" class="tool-io-block">
-                                <div class="tool-io-label">输出</div>
-                                <pre class="tool-io-value">{{ toolIoText(t.output) }}</pre>
-                              </div>
-                              <div v-if="t.truncated" class="tool-io-truncated">
-                                ⚠️ 输入/输出超限已截断——完整快照存于服务端 tool_content（query_db 可查）
-                              </div>
-                            </div>
-                          </details>
-                          <div v-else class="tool-row" :class="toolRowClass(t)" :title="toolLabel(t)">
-                            <div class="tool-row-head tool-row-head-plain">
-                              <span class="tool-status-glyph" :class="`tool-status-${t.status}`">
-                                <span v-if="t.status === 'running'" class="tool-spinner"></span>
-                                <template v-else-if="t.status === 'completed'">✓</template>
-                                <template v-else-if="t.status === 'error'">✕</template>
-                                <template v-else-if="t.status === 'pending'">○</template>
-                              </span>
-                              <span class="tool-card-icon">🛠</span>
-                              <span class="tool-card-name">{{ t.name }}</span>
-                              <span
-                                v-if="t.truncated"
-                                class="tool-card-truncated"
-                                title="工具输入/输出超限已截断"
-                                >…</span
-                              >
-                              <span
-                                v-if="t.status"
-                                class="tool-card-status"
-                                :class="`tool-status-${t.status}`"
-                                >{{ toolStatusLabel(t.status) }}</span
-                              >
-                            </div>
-                          </div>
+                          <ToolRow :tool="t" />
                         </template>
                       </div>
                     </template>
@@ -1369,7 +1194,9 @@ const warnedAgentsText = computed(() => {
                 <div
                   v-if="item.type === 'seg'"
                   class="msg-text"
-                  v-html="renderMarkdown(resolveDisplayPlaceholders(item.seg.content, store.agents))"
+                  v-html="
+                    renderMarkdown(resolveDisplayPlaceholders(item.seg.content, store.agents))
+                  "
                 ></div>
                 <!-- 思考+工具单折叠块：thinking 文本与 tool 行在折叠块内按时间序交错
                      （工具嵌在实际发生位置，不聚尾部）；受控展开态 item.open 驱动
@@ -1407,35 +1234,7 @@ const warnedAgentsText = computed(() => {
                         class="fold-thinking"
                         v-html="renderMarkdown(e.content)"
                       ></div>
-                      <div
-                        v-else
-                        class="tool-row stream-tool-row"
-                        :class="toolRowClass(e.tool)"
-                        :title="toolLabel(e.tool)"
-                      >
-                        <div class="tool-row-head tool-row-head-plain">
-                          <span class="tool-status-glyph" :class="`tool-status-${e.tool.status}`">
-                            <span v-if="e.tool.status === 'running'" class="tool-spinner"></span>
-                            <template v-else-if="e.tool.status === 'completed'">✓</template>
-                            <template v-else-if="e.tool.status === 'error'">✕</template>
-                            <template v-else-if="e.tool.status === 'pending'">○</template>
-                          </span>
-                          <span class="tool-card-icon">🛠</span>
-                          <span class="tool-card-name">{{ e.tool.name }}</span>
-                          <span
-                            v-if="e.tool.truncated"
-                            class="tool-card-truncated"
-                            title="工具输入/输出超限已截断"
-                            >…</span
-                          >
-                          <span
-                            v-if="e.tool.status"
-                            class="tool-card-status"
-                            :class="`tool-status-${e.tool.status}`"
-                            >{{ toolStatusLabel(e.tool.status) }}</span
-                          >
-                        </div>
-                      </div>
+                      <ToolRow v-else :tool="e.tool" class="stream-tool-row" plain />
                     </template>
                   </div>
                 </div>
@@ -2600,153 +2399,6 @@ const warnedAgentsText = computed(() => {
   gap: 4px;
   padding: 8px 12px 10px;
   border-top: 1px solid rgba(180, 160, 140, 0.18);
-}
-
-/* 工具行：浅蓝卡片；推进中左缘高亮（当前活工具）、失败左缘标红 */
-.tool-row {
-  border: 1px solid rgba(130, 170, 220, 0.22);
-  border-radius: var(--radius-sm);
-  background: rgba(130, 170, 220, 0.07);
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-  overflow: hidden;
-}
-.tool-row-active {
-  border-left: 2px solid #4a9eff;
-  background: rgba(130, 170, 220, 0.12);
-}
-.tool-row-error {
-  border-left: 2px solid #ff6b6b;
-}
-
-.tool-row-head {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 4px 10px;
-  cursor: pointer;
-  list-style: none; /* hide native <details> marker */
-}
-.tool-row-head::-webkit-details-marker {
-  display: none;
-}
-.tool-row-head-plain {
-  cursor: default;
-}
-
-/* 状态 glyph：running 转圈 / completed ✓ / error ✕ / pending ○（复用 tool-status-* 色） */
-.tool-status-glyph {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: 14px;
-  height: 14px;
-  font-size: 11px;
-  line-height: 1;
-}
-.tool-status-glyph.tool-status-running {
-  color: #4a9eff;
-}
-.tool-status-glyph.tool-status-completed {
-  color: #58c97b;
-}
-.tool-status-glyph.tool-status-error {
-  color: #ff6b6b;
-}
-.tool-status-glyph.tool-status-pending {
-  color: var(--text-muted);
-}
-
-.tool-spinner {
-  width: 10px;
-  height: 10px;
-  border: 2px solid currentColor;
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: toolSpin 0.8s linear infinite;
-}
-@keyframes toolSpin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.tool-row-chevron {
-  font-size: 10px;
-  opacity: 0.5;
-  transition: transform var(--ease-out);
-}
-.tool-row[open] .tool-row-chevron {
-  transform: rotate(90deg);
-}
-
-.tool-row-io {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 6px 10px 8px;
-  border-top: 1px dashed rgba(130, 170, 220, 0.25);
-  background: rgba(130, 170, 220, 0.05);
-}
-.tool-io-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  opacity: 0.85;
-}
-.tool-io-value {
-  margin: 0;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 180px;
-  overflow-y: auto;
-}
-.tool-io-truncated {
-  font-size: 11px;
-  color: var(--accent-red, #ff6b6b);
-  opacity: 0.8;
-}
-
-.tool-card-icon {
-  font-size: 13px;
-  line-height: 1;
-  opacity: 0.9;
-}
-
-.tool-card-name {
-  flex: 1;
-  min-width: 0;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
-  font-size: 11.5px;
-  word-break: break-all;
-}
-
-.tool-card-status {
-  font-size: 11px;
-  white-space: nowrap;
-  opacity: 0.9;
-}
-
-.tool-card-status.tool-status-running {
-  color: #4a9eff;
-}
-
-.tool-card-status.tool-status-completed {
-  color: #58c97b;
-}
-
-.tool-card-status.tool-status-error {
-  color: #ff6b6b;
-}
-
-.tool-card-truncated {
-  font-size: 11px;
-  opacity: 0.55;
 }
 
 /* ─── Input Area ────────────────────────── */
