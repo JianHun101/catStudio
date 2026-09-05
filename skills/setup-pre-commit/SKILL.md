@@ -5,6 +5,8 @@ description: Set up Husky pre-commit hooks with lint-staged (Prettier), type che
 
 # Setup Pre-Commit Hooks
 
+> **Before you start**: If the target repository already uses a self-contained hook solution (e.g. `scripts/hooks-install.mjs` + git hooks pointing at `.husky`), this skill does NOT apply — skip it and do NOT run `npx husky init`. Confirm the repo's current hook mechanism first.
+
 ## What This Sets Up
 
 - **Husky** pre-commit hook
