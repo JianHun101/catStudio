@@ -1270,4 +1270,285 @@ describe('internal route-signals', () => {
       })
     })
   })
+
+  describe('session-messages 端点（query_session_messages 工具——B agent 会话回读）', () => {
+    /** 发送者 = 实施猫（回读是通用能力，无角色白名单——任何活跃流角色可调） */
+    const smBody = (over: Record<string, unknown> = {}) => ({
+      sessionId: 'session-1',
+      agentId: 'agent-impl',
+      msgId: 'msg-1',
+      ...over,
+    })
+    const mockActive = async () =>
+      vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue({
+        sessionId: 'session-1',
+        messageId: 'reply-1',
+        content: '',
+        token: VALID_TOKEN,
+      })
+
+    /** 会话消息 fixture：agent 回复带 segments / 用户图带 images / 老 agent 回复 segments NULL / system */
+    const insertSmFixture = () => {
+      const db = getDb()
+      const segs = [
+        { kind: 'thinking', content: '先想一下再调工具' },
+        {
+          kind: 'tool',
+          content: '',
+          tool: { id: 'call_1', name: 'apply_patch', status: 'completed' },
+        },
+        { kind: 'text', content: '这是正文' },
+      ]
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, segments, created_at)
+         VALUES ('msg-reply-1', ?, 'agent-store', 'agent', '这是正文', '[]', ?, '2026-09-01 10:00:00')`
+      ).run('session-1', JSON.stringify(segs))
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, images, created_at)
+         VALUES ('msg-user-1', ?, 'user', '看图', '[]', ?, '2026-09-01 09:00:00')`
+      ).run('session-1', JSON.stringify(['data:image/png;base64,AAAA']))
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+         VALUES ('msg-old-1', ?, 'agent-impl', 'agent', '旧回复（无 segments）', '[]', '2026-09-01 08:00:00')`
+      ).run('session-1')
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES ('msg-sys-1', ?, 'system', '重启完成', '[]', '2026-09-01 11:00:00')`
+      ).run('session-1')
+    }
+
+    describe('body 基本校验（400）', () => {
+      it('缺 sessionId → 400 + reason', async () => {
+        const body = smBody() as Record<string, unknown>
+        delete body.sessionId
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: body,
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).reason).toContain('sessionId')
+      })
+
+      it('limit 越界（0 / 101 / 小数）→ 400', async () => {
+        for (const bad of [0, 101, 2.5]) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/session-messages',
+            payload: smBody({ limit: bad }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('limit')
+        }
+      })
+
+      it('kinds 非法（非数组/空数组/含未知 kind）→ 400', async () => {
+        for (const bad of ['text', [], ['text', 'unknown']]) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/session-messages',
+            payload: smBody({ kinds: bad }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('kinds')
+        }
+      })
+
+      it('agentIdFilter 非字符串 / before 非字符串 → 400', async () => {
+        const cases: Array<[string, unknown]> = [
+          ['agentIdFilter', 123],
+          ['before', ['x']],
+        ]
+        for (const [key, val] of cases) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/session-messages',
+            payload: smBody({ [key]: val }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+        }
+      })
+    })
+
+    describe('鉴权链（404/401/409 与 knowledge-search 同款——回读通用能力无 403 角色白名单）', () => {
+      it('无活跃流 → 404 + reason', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(404)
+        expect(JSON.parse(res.body).reason).toContain('无活跃流')
+      })
+
+      it('token 不匹配 → 401', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody(),
+          headers: { 'x-signal-token': 'wrong-token' },
+        })
+        expect(res.statusCode).toBe(401)
+      })
+
+      it('sessionId 不匹配 → 409', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ sessionId: 'session-other' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(409)
+      })
+
+      it('实施猫角色调用 → 200（无角色白名单——历史回读不限角色）', async () => {
+        await mockActive()
+        insertSmFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ agentId: 'agent-impl' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+      })
+    })
+
+    describe('回读成功路径（200）', () => {
+      it('segments 行 → 结构化块 + agentName JOIN + 新→旧 + system 排除 + total', async () => {
+        await mockActive()
+        insertSmFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.ok).toBe(true)
+        // 非 system 三条，新→旧：msg-reply-1 → msg-user-1 → msg-old-1
+        expect(body.total).toBe(3)
+        expect(body.messages.map((m: any) => m.messageId)).toEqual([
+          'msg-reply-1',
+          'msg-user-1',
+          'msg-old-1',
+        ])
+
+        const reply = body.messages[0]
+        expect(reply).toMatchObject({
+          messageId: 'msg-reply-1',
+          role: 'agent',
+          agentId: 'agent-store',
+          agentName: '店长', // LEFT JOIN agents.name
+          createdAt: '2026-09-01T10:00:00Z',
+        })
+        // 三个块 kind 齐全 + tool 元数据透传
+        expect(reply.blocks.map((b: any) => b.kind)).toEqual(['thinking', 'tool', 'text'])
+        expect(reply.blocks[1].tool).toMatchObject({ id: 'call_1', name: 'apply_patch' })
+        expect(reply.blocks[2].content).toBe('这是正文')
+
+        const user = body.messages[1]
+        expect(user.agentName).toBeNull() // user 消息无 agent
+        // images 挂在承载 body 的单 text 块
+        expect(user.blocks).toEqual([
+          { kind: 'text', content: '看图', images: ['data:image/png;base64,AAAA'] },
+        ])
+      })
+
+      it('segments NULL 老行 → 退化单 text 块（不崩，不拼 thinking_content/tool_content 旧块）', async () => {
+        await mockActive()
+        insertSmFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ agentIdFilter: 'agent-impl' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.messages).toHaveLength(1)
+        expect(body.messages[0].messageId).toBe('msg-old-1')
+        expect(body.messages[0].blocks).toEqual([
+          { kind: 'text', content: '旧回复（无 segments）' },
+        ])
+      })
+
+      it('limit 生效 + before 游标翻页（B 端点复用 A 读层窗口）', async () => {
+        await mockActive()
+        insertSmFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ limit: 2 }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(JSON.parse(res.body).messages.map((m: any) => m.messageId)).toEqual([
+          'msg-reply-1',
+          'msg-user-1',
+        ])
+
+        const page2 = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ limit: 2, before: 'msg-user-1' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(JSON.parse(page2.body).messages.map((m: any) => m.messageId)).toEqual(['msg-old-1'])
+      })
+
+      it('kinds 过滤 → 只回该 kind 块；空块消息被丢弃', async () => {
+        await mockActive()
+        insertSmFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ kinds: ['thinking'] }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        // msg-reply-1 有 thinking 块 → 保留且只剩 thinking；user/old 无 thinking → 丢弃
+        expect(body.messages).toHaveLength(1)
+        expect(body.messages[0].messageId).toBe('msg-reply-1')
+        expect(body.messages[0].blocks).toEqual([{ kind: 'thinking', content: '先想一下再调工具' }])
+        expect(body.total).toBe(1)
+      })
+
+      it('agentIdFilter → 只回该 agent 的消息（悬空 agent 名 null）', async () => {
+        await mockActive()
+        insertSmFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ agentIdFilter: 'agent-impl' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.messages).toHaveLength(1)
+        expect(body.messages[0]).toMatchObject({ messageId: 'msg-old-1', agentName: '实施猫' })
+      })
+
+      it('无命中（before 指向不存在的消息）→ 200 + 空 messages 不崩', async () => {
+        await mockActive()
+        insertSmFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ before: 'ghost-message' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body)).toEqual({ ok: true, messages: [], total: 0 })
+      })
+    })
+  })
 })

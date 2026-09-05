@@ -179,6 +179,8 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   })
 
   // ─── GET /api/sessions/:id/messages — 获取消息列表 ──
+  // 方案 3 A 读层端点：limit/before（messageId 游标）/from/to（created_at 时间窗）——
+  // 无参数时行为与既有 getRecentMessages(id, 200) 一致（role != system 口径不变）。
 
   app.get('/api/sessions/:id/messages', async (req, reply) => {
     const id = (req.params as any).id
@@ -187,11 +189,29 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: 'Session not found' })
     }
 
-    const limit = Math.min(
-      Math.max(parseInt((req.query as any)?.limit || '200', 10) || 200, 1),
-      1000
-    )
-    const rows = messagesRepo.getRecentMessages(id, limit)
+    const q = (req.query as any) ?? {}
+    const limit = Math.min(Math.max(parseInt(q?.limit || '200', 10) || 200, 1), 1000)
+
+    // 可选窗口参数校验：before = 消息 id 游标；from/to = created_at 时间窗（ISO/DB 秒级串）
+    const before = q?.before
+    if (before !== undefined && (typeof before !== 'string' || !before.trim())) {
+      return reply.status(400).send({ error: 'before 必须是非空字符串（消息 id 游标）' })
+    }
+    const from = q?.from
+    if (from !== undefined && (typeof from !== 'string' || !from.trim())) {
+      return reply.status(400).send({ error: 'from 必须是非空字符串（created_at 下界）' })
+    }
+    const to = q?.to
+    if (to !== undefined && (typeof to !== 'string' || !to.trim())) {
+      return reply.status(400).send({ error: 'to 必须是非空字符串（created_at 上界）' })
+    }
+
+    const rows = messagesRepo.getSessionMessagesRange(id, {
+      limit,
+      before: before ?? undefined,
+      from: from ?? undefined,
+      to: to ?? undefined,
+    })
 
     return rows.map((r) => {
       const msgImages: string[] = parseJsonArray(r.images)

@@ -111,6 +111,76 @@ export function getRecentMessages(sessionId: string, limit: number = 500): Messa
     .all(sessionId, limit) as MessageRow[]
 }
 
+/** 时间戳归一：DB created_at 为 'YYYY-MM-DD HH:MM:SS'（UTC 秒精度，datetime('now')）。
+ *  调用方常传 ISO 'YYYY-MM-DDTHH:MM:SSZ'（与 GET 端点返回的 createdAt 同形）——
+ *  'T'→空格 + 去尾 Z + 去毫秒，使字符串比较与库值同形（否则 'T' vs ' ' 永远不命中）。 */
+function toDbTs(ts: string): string {
+  return ts
+    .replace('T', ' ')
+    .replace(/\.\d+Z?$/, '')
+    .replace(/Z$/, '')
+}
+
+/** 会话消息读层查询（方案 3 A 地基——前端历史渲染与 agent 回读共用同一查询函数）。
+ *
+ *  窗口参数（全部可选，逐项 AND）：
+ *    limit  — 返回条数上限 1-1000，默认 200（无参数调用行为与 getRecentMessages(id, 200) 一致）
+ *    before — messageId 游标：返回「严格早于该消息」的批次（翻更早历史用）
+ *    from   — created_at >= from；to — created_at <= to（时间窗；可含 ISO 秒级时间戳）
+ *    agentId— 可选：仅返回指定 agent 的消息（B 工具 body 的 agentIdFilter 落点）
+ *
+ *  排序 created_at DESC, id DESC——SQLite 秒级精度字符串，同秒多条会碰撞，
+ *  只比 created_at 会漏行/重行；before 游标用 (created_at, id) 复合 tie-break。
+ *  before 消息不在本会话 → 位置不可定 → 返回空数组（客户端自然停止翻页）。
+ */
+export function getSessionMessagesRange(
+  sessionId: string,
+  opts: {
+    limit?: number
+    before?: string
+    from?: string
+    to?: string
+    agentId?: string
+  } = {}
+): MessageRow[] {
+  const rawLimit = opts.limit ?? 200
+  const limit = Number.isFinite(rawLimit) ? Math.min(1000, Math.max(1, Math.floor(rawLimit))) : 200
+
+  const where: string[] = ['session_id = ?', "role != 'system'"]
+  const params: Array<string | number> = [sessionId]
+
+  if (opts.before) {
+    const cursor = db
+      .prepare('SELECT created_at, id FROM messages WHERE id = ? AND session_id = ?')
+      .get(opts.before, sessionId) as { created_at: string; id: string } | undefined
+    if (!cursor) return []
+    where.push('(created_at < ? OR (created_at = ? AND id < ?))')
+    params.push(cursor.created_at, cursor.created_at, cursor.id)
+  }
+  if (opts.from !== undefined) {
+    where.push('created_at >= ?')
+    params.push(toDbTs(opts.from))
+  }
+  if (opts.to !== undefined) {
+    where.push('created_at <= ?')
+    params.push(toDbTs(opts.to))
+  }
+  if (opts.agentId !== undefined) {
+    where.push('agent_id = ?')
+    params.push(opts.agentId)
+  }
+  params.push(limit)
+
+  return db
+    .prepare(
+      `SELECT * FROM messages
+       WHERE ${where.join(' AND ')}
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(...params) as MessageRow[]
+}
+
 /** 同会话同 task_id 是否已有 agent 回复（补填风暴根治方向 2：重放/零执行扫描前查）。
  *  批量答复场景下兄弟消息无独立 execution_log，但同 task_id 的 agent 回复
  *  已证明"这条消息事实上被执行过"——不再反复补派。task_id NULL → false

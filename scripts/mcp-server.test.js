@@ -12,8 +12,10 @@ import {
   validateQueryDbParams,
   validateUserRequestParams,
   validateCreatePrParams,
+  validateQuerySessionMessagesParams,
   QUERY_DB_TABLES,
   USER_REQUEST_TYPES,
+  SESSION_MESSAGE_KINDS,
 } from './mcp-server-utils.mjs'
 
 describe('validateSearchParams (search_knowledge)', () => {
@@ -269,5 +271,82 @@ describe('validateCreatePrParams (create_pr)', () => {
   it('base 缺省 → ok（服务端 createPr 兜底 dev）', () => {
     const r = validateCreatePrParams({ head: 'x', title: 'T', body: 'B' })
     expect(r).toEqual({ ok: true, base: undefined, head: 'x', title: 'T', body: 'B' })
+  })
+})
+
+describe('validateQuerySessionMessagesParams (query_session_messages)', () => {
+  it('合法入参：全空 → ok，limit 默认 20、其余 undefined（服务端走默认）', () => {
+    const r = validateQuerySessionMessagesParams({})
+    expect(r).toEqual({
+      ok: true,
+      limit: 20,
+      before: undefined,
+      from: undefined,
+      to: undefined,
+      kinds: undefined,
+      agentIdFilter: undefined,
+    })
+  })
+
+  it('合法入参：全部显式传 → ok 透传', () => {
+    const r = validateQuerySessionMessagesParams({
+      limit: 5,
+      before: 'msg-abc',
+      from: '2026-09-01T10:00:00Z',
+      to: '2026-09-01T12:00:00Z',
+      kinds: ['thinking', 'text'],
+      agentIdFilter: 'agent-1',
+    })
+    expect(r).toEqual({
+      ok: true,
+      limit: 5,
+      before: 'msg-abc',
+      from: '2026-09-01T10:00:00Z',
+      to: '2026-09-01T12:00:00Z',
+      kinds: ['thinking', 'text'],
+      agentIdFilter: 'agent-1',
+    })
+  })
+
+  it('limit 边界 1/100 放行，越界（0/101/-1/小数）→ 错误文本', () => {
+    expect(validateQuerySessionMessagesParams({ limit: 1 }).ok).toBe(true)
+    expect(validateQuerySessionMessagesParams({ limit: 100 }).ok).toBe(true)
+    for (const bad of [0, 101, -1, 2.5]) {
+      const r = validateQuerySessionMessagesParams({ limit: bad })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('limit')
+    }
+    expect(validateQuerySessionMessagesParams({ limit: '20' }).ok).toBe(false)
+  })
+
+  it('before/from/to/agentIdFilter 非字符串或缺省空串/纯空白 → 错误文本点名', () => {
+    for (const [key, bad] of [
+      ['before', 123],
+      ['from', ['x']],
+      ['to', true],
+      ['agentIdFilter', ''],
+      ['before', '   '],
+    ]) {
+      const r = validateQuerySessionMessagesParams({ [key]: bad })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain(key)
+    }
+  })
+
+  it('before 前后空白裁剪（id 游标不可含空白）', () => {
+    const r = validateQuerySessionMessagesParams({ before: '  msg-abc  ' })
+    expect(r.before).toBe('msg-abc')
+  })
+
+  it('kinds 非法（非数组/空数组/含未知 kind/元素非字符串）→ 错误文本', () => {
+    for (const bad of ['text', [], ['text', 'image'], [123]]) {
+      const r = validateQuerySessionMessagesParams({ kinds: bad })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('kinds')
+    }
+  })
+
+  it('kinds 三项枚举常量契约钉死（防误扩）', () => {
+    expect(SESSION_MESSAGE_KINDS).toEqual(['text', 'thinking', 'tool'])
   })
 })

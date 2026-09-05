@@ -34,9 +34,11 @@ import { createLogger } from '../logger.js'
 import {
   sessions as sessionsRepo,
   agents as agentsRepo,
+  messages as messagesRepo,
   knowledge as knowledgeRepo,
   query as queryRepo,
 } from '../db/repository/index.js'
+import type { MessageRow } from '../db/repository/index.js'
 import { QUERY_TABLE_SCHEMAS, type QueryOp } from '../db/repository/query.js'
 import { getActiveStream } from '../connectors/socketio.js'
 import { storeRouteSignal } from '../llm/route-signals.js'
@@ -45,7 +47,8 @@ import { filterAllowedMentions } from '../dispatch/mention-policy.js'
 import { embedText } from '../memory/embedding.js'
 import { vectorToBlob } from '../memory/index.js'
 import { createPr } from '../git/create-pr.js'
-import type { AgentRole } from '@cat-study/shared'
+import { parseJsonArray, parseJsonValue } from '../utils.js'
+import type { AgentRole, StreamSegment, ToolCallInfo } from '@cat-study/shared'
 
 const log = createLogger('internal')
 
@@ -94,7 +97,57 @@ interface CreatePrBody {
   body?: unknown
 }
 
+interface SessionMessagesBody {
+  sessionId?: unknown
+  agentId?: unknown
+  msgId?: unknown
+  limit?: unknown
+  before?: unknown
+  from?: unknown
+  to?: unknown
+  kinds?: unknown
+  agentIdFilter?: unknown
+}
+
+/** 会话消息回读的块形状（内部端点返回，不上 shared——只被 mcp-server 消费，非 web 契约）。
+ *  与 shared.StreamSegment 同构 + 消息级 images 挂在承载 body 的块上。 */
+interface SessionMessageBlock {
+  kind: 'text' | 'thinking' | 'tool'
+  content: string
+  tool?: ToolCallInfo
+  images?: string[]
+}
+
 const QUERY_OPS = new Set<QueryOp>(['=', '>', '<', 'LIKE'])
+const SEGMENT_KINDS = new Set(['text', 'thinking', 'tool'])
+
+/** 消息行 → 结构化块数组（对应方案 3 C 兼容全砍决策）：
+ *  segments 非空 → 按 segments 逐块映射（kind/content/tool）；
+ *  segments 为 NULL → 只返回单 text 块（row.content），不去拼 thinking_content/tool_content
+ *  旧块——「当前 shape 读」的自然退化。消息级 images（用户图）挂在首个 text 块（body 承载块）。 */
+function buildMessageBlocks(
+  row: MessageRow,
+  images: string[],
+  kinds?: Set<string>
+): SessionMessageBlock[] {
+  let blocks: SessionMessageBlock[]
+  const segs = parseJsonValue<StreamSegment[]>(row.segments)
+  if (segs && segs.length > 0) {
+    blocks = segs.map((s) => {
+      const b: SessionMessageBlock = { kind: s.kind, content: s.content ?? '' }
+      if (s.kind === 'tool' && s.tool) b.tool = s.tool
+      return b
+    })
+    if (images.length > 0) {
+      const firstText = blocks.find((b) => b.kind === 'text')
+      if (firstText) firstText.images = images
+    }
+  } else {
+    blocks = [{ kind: 'text', content: row.content }]
+    if (images.length > 0) blocks[0].images = images
+  }
+  return kinds ? blocks.filter((b) => kinds.has(b.kind)) : blocks
+}
 
 /** request_user_action 类型枚举——restart 已落地；choice 枚举就绪但渲染未落地（诚实拒绝，避免半吊子功能误导模型） */
 const USER_REQUEST_TYPES = new Set(['restart', 'choice'] as const)
@@ -591,5 +644,134 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       url: result.url,
     })
     return reply.send({ ok: true, number: result.number, url: result.url })
+  })
+
+  app.post('/api/internal/session-messages', async (req, reply) => {
+    const body = (req.body ?? {}) as SessionMessagesBody
+
+    // ── 1. body 基本校验（400）── 与 route-signals 同款：防御纵深（mcp-server.mjs 已做参数校验）
+    const { sessionId, agentId, msgId } = body
+    if (
+      typeof sessionId !== 'string' ||
+      !sessionId ||
+      typeof agentId !== 'string' ||
+      !agentId ||
+      typeof msgId !== 'string' ||
+      !msgId
+    ) {
+      return reply.status(400).send({ ok: false, reason: 'sessionId/agentId/msgId 必填非空字符串' })
+    }
+    const limit = body.limit ?? 20
+    if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return reply.status(400).send({ ok: false, reason: 'limit 必须是 1-100 整数' })
+    }
+    // 可选窗口/过滤参数校验（before/from/to/agentIdFilter 非空字符串；kinds 非空子集）
+    const before = body.before
+    if (before !== undefined && (typeof before !== 'string' || !before.trim())) {
+      return reply
+        .status(400)
+        .send({ ok: false, reason: 'before 必须是非空字符串（消息 id 游标）' })
+    }
+    const from = body.from
+    if (from !== undefined && (typeof from !== 'string' || !from.trim())) {
+      return reply
+        .status(400)
+        .send({ ok: false, reason: 'from 必须是非空字符串（created_at 下界）' })
+    }
+    const to = body.to
+    if (to !== undefined && (typeof to !== 'string' || !to.trim())) {
+      return reply.status(400).send({ ok: false, reason: 'to 必须是非空字符串（created_at 上界）' })
+    }
+    const agentIdFilter = body.agentIdFilter
+    if (
+      agentIdFilter !== undefined &&
+      (typeof agentIdFilter !== 'string' || !agentIdFilter.trim())
+    ) {
+      return reply
+        .status(400)
+        .send({ ok: false, reason: 'agentIdFilter 必须是非空字符串（agent id）' })
+    }
+    const kindsRaw = body.kinds
+    let kinds: Set<string> | undefined
+    if (kindsRaw !== undefined) {
+      if (
+        !Array.isArray(kindsRaw) ||
+        kindsRaw.length === 0 ||
+        !kindsRaw.every((k) => typeof k === 'string' && SEGMENT_KINDS.has(k))
+      ) {
+        return reply.status(400).send({
+          ok: false,
+          reason: `kinds 必须是非空数组且每项 ∈ ${[...SEGMENT_KINDS].join('/')}`,
+        })
+      }
+      kinds = new Set(kindsRaw as string[])
+    }
+
+    // ── 2. lookup activeStreams（404）──
+    const stream = getActiveStream(agentId)
+    if (!stream) {
+      return reply
+        .status(404)
+        .send({ ok: false, reason: `agent ${agentId} 当前无活跃流，会话消息回读被拒` })
+    }
+
+    // ── 3. token 精确匹配（401）──
+    const token = req.headers['x-signal-token']
+    if (typeof token !== 'string' || token !== stream.token) {
+      return reply.status(401).send({ ok: false, reason: 'x-signal-token 不匹配' })
+    }
+
+    // ── 4. 复合键 sessionId 匹配（409）──
+    if (stream.sessionId !== sessionId) {
+      return reply.status(409).send({
+        ok: false,
+        reason: `agent ${agentId} 正在会话 ${stream.sessionId} 执行，本请求会话 ${sessionId} 不匹配`,
+      })
+    }
+
+    // ── 5. 回读（200）——通用能力，无角色白名单（历史回读不限角色，不加 403）。
+    // A 地基共用：调 getSessionMessagesRange（同一读层查询函数），agentName 单独
+    // JOIN agents 批量补名（行内无 agent 名列）。before 消息缺失 → 空批次自然停翻。
+    const rows = messagesRepo.getSessionMessagesRange(sessionId, {
+      limit,
+      before: before ?? undefined,
+      from: from ?? undefined,
+      to: to ?? undefined,
+      agentId: agentIdFilter ?? undefined,
+    })
+    // 批量补 agent 名（去重查一次；缺失 agent（悬空 FK）→ null）
+    const agentIds = [...new Set(rows.map((r) => r.agent_id).filter((x): x is string => !!x))]
+    const nameById = new Map(
+      (agentIds.length > 0 ? agentsRepo.listAgentsByIds(agentIds) : []).map((a) => [a.id, a.name])
+    )
+    const messages = rows
+      .map((r) => {
+        const images = parseJsonArray(r.images)
+        const blocks = buildMessageBlocks(r, images, kinds)
+        return {
+          messageId: r.id,
+          role: r.role,
+          agentId: r.agent_id || null,
+          agentName: r.agent_id ? (nameById.get(r.agent_id) ?? null) : null,
+          createdAt: r.created_at.replace(' ', 'T') + 'Z',
+          blocks,
+        }
+      })
+      .filter((m) => (kinds ? m.blocks.length > 0 : true))
+    const total = messages.length
+    log.info('session messages read', {
+      sessionId,
+      agentId,
+      msgId,
+      limit,
+      before: before ?? undefined,
+      from: from ?? undefined,
+      to: to ?? undefined,
+      agentIdFilter: agentIdFilter ?? undefined,
+      kinds: kinds ? [...kinds] : undefined,
+      rows: rows.length,
+      messages: total,
+    })
+    return reply.send({ ok: true, messages, total })
   })
 }

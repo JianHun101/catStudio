@@ -296,7 +296,11 @@ describe('Session Routes', () => {
       const db = (await import('../db/index.js')).getDb()
       const segs = [
         { kind: 'thinking', content: '先想一下再调工具' },
-        { kind: 'tool', content: '', tool: { id: 'call_1', name: 'apply_patch', status: 'completed' } },
+        {
+          kind: 'tool',
+          content: '',
+          tool: { id: 'call_1', name: 'apply_patch', status: 'completed' },
+        },
         { kind: 'text', content: '正文结论' },
       ]
       db.prepare(
@@ -344,6 +348,113 @@ describe('Session Routes', () => {
       const body = JSON.parse(res.body)
       const m = body.find((x: any) => x.id === 'm-old')
       expect(m.segments).toBeUndefined()
+    })
+
+    it('无参数行为与现状一致（A 读层向后兼容铁律：换函数后既有断言全绿）', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '兼容测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = (await import('../db/index.js')).getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES ('m-c1', ?, 'user', '旧', '[]', '2026-09-01 10:00:00')`
+      ).run(id)
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES ('m-c2', ?, 'user', '新', '[]', '2026-09-01 12:00:00')`
+      ).run(id)
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES ('m-c3', ?, 'system', '重启', '[]', '2026-09-01 13:00:00')`
+      ).run(id)
+
+      const res = await app.inject({ method: 'GET', url: `/api/sessions/${id}/messages` })
+      expect(res.statusCode).toBe(200)
+      // 新→旧、system 消息不返回（口径与 getRecentMessages 一致）
+      expect(JSON.parse(res.body).map((x: any) => x.id)).toEqual(['m-c2', 'm-c1'])
+    })
+
+    it('before 游标翻更早历史：limit=1 后取最旧一条做游标 → 返回更早批次不重叠', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '游标测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = (await import('../db/index.js')).getDb()
+      for (const [mid, ts] of [
+        ['m-p1', '2026-09-01 10:00:00'],
+        ['m-p2', '2026-09-01 11:00:00'],
+        ['m-p3', '2026-09-01 12:00:00'],
+      ]) {
+        db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, ?, 'user', ?, '[]', ?)`
+        ).run(mid, id, mid, ts)
+      }
+
+      const page1 = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${id}/messages?limit=1`,
+      })
+      expect(JSON.parse(page1.body).map((x: any) => x.id)).toEqual(['m-p3'])
+
+      const page2 = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${id}/messages?limit=1&before=m-p3`,
+      })
+      expect(JSON.parse(page2.body).map((x: any) => x.id)).toEqual(['m-p2'])
+
+      const page3 = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${id}/messages?limit=1&before=m-p2`,
+      })
+      expect(JSON.parse(page3.body).map((x: any) => x.id)).toEqual(['m-p1'])
+    })
+
+    it('from/to 时间窗（ISO 秒级时间戳）过滤批次', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '时间窗测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = (await import('../db/index.js')).getDb()
+      for (const [mid, ts] of [
+        ['m-w1', '2026-09-01 10:00:00'],
+        ['m-w2', '2026-09-01 12:00:00'],
+        ['m-w3', '2026-09-01 14:00:00'],
+      ]) {
+        db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, ?, 'user', ?, '[]', ?)`
+        ).run(mid, id, mid, ts)
+      }
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${id}/messages?from=2026-09-01T12:00:00Z&to=2026-09-01T13:00:00Z`,
+      })
+      expect(JSON.parse(res.body).map((x: any) => x.id)).toEqual(['m-w2'])
+    })
+
+    it('before/from/to 空串 → 400（窗口参数校验）', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '参数校验', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      for (const qs of ['before=', 'from=', 'to=']) {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/sessions/${id}/messages?${qs}`,
+        })
+        expect(res.statusCode).toBe(400)
+      }
     })
   })
 
