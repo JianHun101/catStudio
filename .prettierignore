@@ -1,0 +1,3 @@
+# 锁文件由包管理器维护其自有格式——prettier 重排会整文件 churn（lint-staged 的
+# "*": prettier --write 会扫到 staged 的 pnpm-lock.yaml，锁文件必须豁免）。
+pnpm-lock.yaml

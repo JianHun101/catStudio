@@ -17,11 +17,10 @@
     "test:server": "pnpm --filter @cat-study/server test",
     "test:web": "pnpm --filter @cat-study/web test",
     "test:shared": "pnpm --filter @cat-study/shared test",
-    "prepare": "husky"
+    "prepare": "node scripts/hooks-install.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.1.9",
-    "husky": "^9.1.7",
     "lint-staged": "^17.0.8",
     "playwright": "^1.62.0",
     "prettier": "^3.9.5",

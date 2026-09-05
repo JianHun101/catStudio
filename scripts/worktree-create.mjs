@@ -1,17 +1,19 @@
 /**
  * CatStudy worktree 创建脚本（worktree 落地方案单①）。
  *
- * worktree 落地方案定稿契约（2026-08，店长裁决 + 吐槽猫核实）：审查链 hook 在
- * worktree 默认全哑——.husky/_ 被自身 .gitignore（内容 `*`）排除、git 不跟踪；
- * core.hooksPath = .husky/_ 是 repo 级 config（worktree 共享）且相对 worktree
- * 根解析；worktree 无 node_modules（.gitignore:2），pre-commit 的 npx
- * lint-staged / pnpm lint / pnpm test 全依赖依赖面；.push-gate 本地不跟踪
- * （.gitignore:54），worktree 内 push 必被阻断——这是防御正确的预期行为。
+ * worktree 落地方案定稿契约（2026-08，店长裁决 + 吐槽猫核实；2026-09-05 hooks
+ * 根修单更新）：审查链 hook 依赖 core.hooksPath=.husky——repo 级 config、worktree
+ * 共享、相对各 worktree 根解析；.husky/post-commit|pre-commit|pre-push 是被跟踪的
+ * 自包含脚本（不 source _/husky.sh shim，自 1e0d812 迁移；husky prepare 已随根修
+ * 单删除，由 scripts/hooks-install.mjs 在每次 install 后把 hooksPath 固化回
+ * .husky——不再有 prepare:husky 写 .husky/_ 的副作用）。
+ * worktree 无 node_modules（.gitignore:2），pre-commit 的 npx lint-staged /
+ * pnpm lint / pnpm test 全依赖依赖面；.push-gate 本地不跟踪（.gitignore:54），
+ * worktree 内 push 必被阻断——这是防御正确的预期行为。
  *
  * 本脚本做四件事：门禁校验（主工作区干净 + origin/dev 是 dev 祖先）→ 创建 worktree
- * （目录在仓库外）→ hook 引导（复制 .husky/ 整目录，含 _ shim）→ 依赖引导
- * （worktree 内 pnpm install）。复制在前、install 在后：install 的
- * prepare:husky 会再生 shim（cwd=worktree），复制是 install 失败时的兜底。
+ * （目录在仓库外）→ hook 引导（复制 .husky/ 整目录——钩子已被跟踪，复制是
+ * install 前就位兜底）→ 依赖引导（worktree 内 pnpm install）。
  *
  * 用法: node scripts/worktree-create.mjs <feature>
  *   feature: 功能名 → 分支 feat/{feature}、目录 ../catstudy-{feature}（仓库外）
@@ -111,15 +113,16 @@ const wtArg = wtDir.replace(/\\/g, '/')
 console.log(`[worktree] 创建 worktree: ${wtArg}（分支 ${branch}，基线 dev=${devSha.slice(0, 7)}）`)
 git(['worktree', 'add', '-b', branch, wtArg, 'dev'])
 
-// 6. hook 引导：复制 .husky/ 整目录（含 _ shim）。worktree checkout 只带被跟踪
-// 文件（.husky/pre-commit 等），.husky/_ 不被跟踪——不复制则 hooksPath 指向
-// 不存在的 .husky/_ → hook 全哑。复制在前、install 在后（见文件头注释）。
+// 6. hook 引导：复制 .husky/ 整目录。.husky/* 三钩子均被跟踪（git rm .husky/_
+// 起不再有 _ 占位文件），worktree checkout 即自带；复制是 install 前就位兜底，
+// 与 hooksPath 共享 .husky 的语义一致（hook 直接命中 .husky/<hook>）。
 cpSync(path.join(ROOT, '.husky'), path.join(wtDir, '.husky'), { recursive: true })
 console.log('[worktree] 已复制 .husky/ → worktree（hook 引导就位）')
 
-// 7. 依赖引导：worktree 内 pnpm install（走全局 store 缓存；prepare:husky
-// 以 worktree 为 cwd 再生 shim）。pnpm 在 Windows 是 .cmd 包装——cmd /c 执行
-// （dev.js NapCat 同款），非 Windows 直接 spawn。
+// 7. 依赖引导：worktree 内 pnpm install（走全局 store 缓存）。pnpm 在 Windows 是
+// .cmd 包装——cmd /c 执行（dev.js NapCat 同款），非 Windows 直接 spawn。
+// prepare 现为 node scripts/hooks-install.mjs——只把 hooksPath 固化回 .husky
+// （幂等；husky 依赖已移除，不再有 prepare:husky 写 .husky/_ 的副作用）。
 const installRes = isWindows
   ? spawnSync('cmd.exe', ['/c', 'pnpm', 'install'], {
       cwd: wtDir,
