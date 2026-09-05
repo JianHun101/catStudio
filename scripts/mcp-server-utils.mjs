@@ -184,3 +184,74 @@ export function validateCreatePrParams(args) {
     body: body.trim(),
   }
 }
+
+/**
+ * query_session_messages 参数校验（纯函数，供单测——scripts/mcp-server.test.js）。
+ * 契约（全部可选，服务端 default 兜底）：limit 可选 1-100 整数（默认 20）、
+ * before 可选非空字符串（消息 id 游标）、from/to 可选非空字符串（created_at 时间窗）、
+ * kinds 可选非空数组（每项 ∈ text/thinking/tool）、agentIdFilter 可选非空字符串。
+ * 服务端鉴权链与窗口解析由 internal.ts 权威处理（400/404/401/409 层）——本层只校形状，
+ * 与 validateQueryDbParams 同款分层。可选字段缺省返回 undefined（调用方 JSON.stringify
+ * 自动省略该键 → 服务端走默认）。
+ * 返回 { ok: true, limit, before, from, to, kinds, agentIdFilter } 或 { ok: false, reason }。
+ */
+export const SESSION_MESSAGE_KINDS = ['text', 'thinking', 'tool']
+
+export function validateQuerySessionMessagesParams(args) {
+  const limit = args?.limit ?? 20
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    return {
+      ok: false,
+      reason: `query_session_messages 参数无效: limit 必须是 1-100 整数（当前: ${JSON.stringify(limit)}）`,
+    }
+  }
+  const before = args?.before
+  if (before !== undefined && (typeof before !== 'string' || !before.trim())) {
+    return {
+      ok: false,
+      reason: `query_session_messages 参数无效: before 必须是非空字符串（当前: ${JSON.stringify(before)}）`,
+    }
+  }
+  const from = args?.from
+  if (from !== undefined && (typeof from !== 'string' || !from.trim())) {
+    return {
+      ok: false,
+      reason: `query_session_messages 参数无效: from 必须是非空字符串（当前: ${JSON.stringify(from)}）`,
+    }
+  }
+  const to = args?.to
+  if (to !== undefined && (typeof to !== 'string' || !to.trim())) {
+    return {
+      ok: false,
+      reason: `query_session_messages 参数无效: to 必须是非空字符串（当前: ${JSON.stringify(to)}）`,
+    }
+  }
+  const kinds = args?.kinds
+  if (
+    kinds !== undefined &&
+    (!Array.isArray(kinds) ||
+      kinds.length === 0 ||
+      !kinds.every((k) => typeof k === 'string' && SESSION_MESSAGE_KINDS.includes(k)))
+  ) {
+    return {
+      ok: false,
+      reason: `query_session_messages 参数无效: kinds 必须是非空数组且每项 ∈ ${SESSION_MESSAGE_KINDS.join('/')}（当前: ${JSON.stringify(kinds)}）`,
+    }
+  }
+  const agentIdFilter = args?.agentIdFilter
+  if (agentIdFilter !== undefined && (typeof agentIdFilter !== 'string' || !agentIdFilter.trim())) {
+    return {
+      ok: false,
+      reason: `query_session_messages 参数无效: agentIdFilter 必须是非空字符串（当前: ${JSON.stringify(agentIdFilter)}）`,
+    }
+  }
+  return {
+    ok: true,
+    limit,
+    before: before?.trim() || undefined,
+    from: from?.trim() || undefined,
+    to: to?.trim() || undefined,
+    kinds,
+    agentIdFilter: agentIdFilter?.trim() || undefined,
+  }
+}
