@@ -1,10 +1,15 @@
 /**
  * mcp-server 纯函数单测（知识库 Phase 1 测试三层分治之一）。
  *
- * validateSearchParams 抽为可导出纯函数供单测（mcp-server-utils.mjs——
+ * validate*Params 抽为可导出纯函数供单测（mcp-server-utils.mjs——
  * mcp-server.mjs 带 shebang，vitest 模块执行器会把它当非法 token）——
  * 工具面本体保持 spike 留档模式（不做 spawn 子进程级测试）；
  * 端点侧由 internal.test.ts 覆盖。
+ *
+ * 工具 2（tools/list schema 瘦身）回归护栏：工具定义元数据集中
+ * mcp-server-utils.mjs（MCP_TOOLS = tools/list 真实载荷），本文件直接
+ * import 测量 JSON.stringify 体量 + inputSchema 结构冻结基线——放 vitest
+ * 不放 hook（钩子断护栏不能跟着断，hooks 根修同思路）。
  */
 import { describe, it, expect } from 'vitest'
 import {
@@ -16,7 +21,29 @@ import {
   QUERY_DB_TABLES,
   USER_REQUEST_TYPES,
   SESSION_MESSAGE_KINDS,
+  MCP_TOOLS,
+  TOOL_NAME,
+  SEARCH_TOOL_NAME,
+  QUERY_DB_TOOL_NAME,
+  QUERY_SESSION_MESSAGES_TOOL_NAME,
+  LIST_SESSION_MEMBERS_TOOL_NAME,
+  REQUEST_USER_ACTION_TOOL_NAME,
+  CREATE_PR_TOOL_NAME,
 } from './mcp-server-utils.mjs'
+
+/** 深删 description 键（inputSchema 结构冻结对比用——瘦身只允许 description 文案变化） */
+function stripDescriptions(v) {
+  if (Array.isArray(v)) return v.map(stripDescriptions)
+  if (v && typeof v === 'object') {
+    const out = {}
+    for (const [k, val] of Object.entries(v)) {
+      if (k === 'description') continue
+      out[k] = stripDescriptions(val)
+    }
+    return out
+  }
+  return v
+}
 
 describe('validateSearchParams (search_knowledge)', () => {
   it('合法入参：仅 query → ok，topK 默认 3', () => {
@@ -348,5 +375,136 @@ describe('validateQuerySessionMessagesParams (query_session_messages)', () => {
 
   it('kinds 三项枚举常量契约钉死（防误扩）', () => {
     expect(SESSION_MESSAGE_KINDS).toEqual(['text', 'thinking', 'tool'])
+  })
+})
+
+describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成单）', () => {
+  const SIX_EXISTING = [
+    TOOL_NAME,
+    SEARCH_TOOL_NAME,
+    QUERY_DB_TOOL_NAME,
+    QUERY_SESSION_MESSAGES_TOOL_NAME,
+    REQUEST_USER_ACTION_TOOL_NAME,
+    CREATE_PR_TOOL_NAME,
+  ]
+
+  it('tools/list 暴露七把工具、名字唯一、含新增 list_session_members（无参数工具）', () => {
+    expect(MCP_TOOLS.map((t) => t.name)).toEqual([
+      'post_message',
+      'search_knowledge',
+      'query_db',
+      'query_session_messages',
+      'list_session_members',
+      'request_user_action',
+      'create_pr',
+    ])
+    expect(new Set(MCP_TOOLS.map((t) => t.name)).size).toBe(7)
+    const lsm = MCP_TOOLS.find((t) => t.name === LIST_SESSION_MEMBERS_TOOL_NAME)
+    expect(lsm?.inputSchema).toEqual({ type: 'object', properties: {} })
+  })
+
+  it('工具 2 护栏①：瘦身后六把既有工具 JSON.stringify 合计 ≤ 3400（防回卷）', () => {
+    // 目标集 = 六把既有工具（list_session_members 是工具 1 新增、独立小体量）；
+    // 派活单验收「六把合计 ≤ 3400」字面落地。放 vitest 不放 hook（hooks 根修同思路）。
+    const six = MCP_TOOLS.filter((t) => SIX_EXISTING.includes(t.name))
+    expect(six).toHaveLength(6)
+    expect(JSON.stringify(six).length).toBeLessThanOrEqual(3400)
+  })
+
+  it('工具 2 护栏②：实际 resident（全七把 tools/list 载荷）< 瘦身前基线 4090', () => {
+    // tools/list 真实返回 MCP_TOOLS——加 list_session_members 后仍应低于瘦身前
+    // 六把基线 4090（勘察实测值），钉死「瘦身净效果」不因新增工具被吃掉。
+    expect(JSON.stringify(MCP_TOOLS).length).toBeLessThan(4090)
+  })
+
+  it('工具 2 护栏③：六把既有工具 inputSchema 结构与瘦身前逐字段零差异', () => {
+    // 冻结基线 = 工具 2 改动前六把 inputSchema 去 description 快照。瘦身只允许
+    // description 文案变化；property 名/required/enum/type/嵌套结构是 tools/call
+    // 参数校验契约，动了即破既有调用——此处把「不破契约」变成可执行断言。
+    const BASELINE = {
+      post_message: {
+        type: 'object',
+        properties: {
+          targetCats: { type: 'array', items: { type: 'string' } },
+          clientMessageId: { type: 'string' },
+        },
+        required: ['targetCats'],
+      },
+      search_knowledge: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          topK: { type: 'integer', minimum: 1, maximum: 10 },
+        },
+        required: ['query'],
+      },
+      query_db: {
+        type: 'object',
+        properties: {
+          table: {
+            type: 'string',
+            enum: ['messages', 'memories', 'execution_logs', 'sessions', 'agents', 'knowledge'],
+          },
+          conditions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                column: { type: 'string' },
+                op: { type: 'string', enum: ['=', '>', '<', 'LIKE'] },
+                value: { type: 'string' },
+              },
+              required: ['column', 'op', 'value'],
+            },
+          },
+          limit: { type: 'integer', minimum: 1, maximum: 100 },
+        },
+        required: ['table'],
+      },
+      query_session_messages: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', minimum: 1, maximum: 100 },
+          before: { type: 'string' },
+          from: { type: 'string' },
+          to: { type: 'string' },
+          kinds: { type: 'array', items: { type: 'string', enum: ['text', 'thinking', 'tool'] } },
+          agentIdFilter: { type: 'string' },
+        },
+      },
+      request_user_action: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['restart', 'choice'] },
+          reason: { type: 'string' },
+          options: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                label: { type: 'string' },
+              },
+              required: ['id', 'label'],
+            },
+          },
+        },
+        required: ['type', 'reason'],
+      },
+      create_pr: {
+        type: 'object',
+        properties: {
+          base: { type: 'string' },
+          head: { type: 'string' },
+          title: { type: 'string' },
+          body: { type: 'string' },
+        },
+        required: ['head', 'title', 'body'],
+      },
+    }
+    for (const t of MCP_TOOLS) {
+      if (t.name === LIST_SESSION_MEMBERS_TOOL_NAME) continue // 新工具无「瘦身前」基线
+      expect(stripDescriptions(t.inputSchema)).toEqual(BASELINE[t.name])
+    }
   })
 })

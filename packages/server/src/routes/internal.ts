@@ -109,6 +109,14 @@ interface SessionMessagesBody {
   agentIdFilter?: unknown
 }
 
+/** list_session_members 端点请求体：sessionId/agentId 必填（msgId 可选——纯日志用，
+ *  无 store-by-messageId 语义，不进 400 校验）。 */
+interface SessionMembersBody {
+  sessionId?: unknown
+  agentId?: unknown
+  msgId?: unknown
+}
+
 /** 会话消息回读的块形状（内部端点返回，不上 shared——只被 mcp-server 消费，非 web 契约）。
  *  与 shared.StreamSegment 同构 + 消息级 images 挂在承载 body 的块上。 */
 interface SessionMessageBlock {
@@ -773,5 +781,58 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       messages: total,
     })
     return reply.send({ ok: true, messages, total })
+  })
+
+  app.post('/api/internal/session-members', async (req, reply) => {
+    const body = (req.body ?? {}) as SessionMembersBody
+
+    // ── 1. body 基本校验（400）── 与 session-messages 同款：防御纵深（mcp-server.mjs 已做形状兜底）
+    const { sessionId, agentId } = body
+    if (typeof sessionId !== 'string' || !sessionId || typeof agentId !== 'string' || !agentId) {
+      return reply.status(400).send({ ok: false, reason: 'sessionId/agentId 必填非空字符串' })
+    }
+    const msgId = body.msgId
+
+    // ── 2. lookup activeStreams（404）──
+    const stream = getActiveStream(agentId)
+    if (!stream) {
+      return reply
+        .status(404)
+        .send({ ok: false, reason: `agent ${agentId} 当前无活跃流，会话成员查询被拒` })
+    }
+
+    // ── 3. token 精确匹配（401）──
+    const token = req.headers['x-signal-token']
+    if (typeof token !== 'string' || token !== stream.token) {
+      return reply.status(401).send({ ok: false, reason: 'x-signal-token 不匹配' })
+    }
+
+    // ── 4. 复合键 sessionId 匹配（409）──
+    if (stream.sessionId !== sessionId) {
+      return reply.status(409).send({
+        ok: false,
+        reason: `agent ${agentId} 正在会话 ${stream.sessionId} 执行，本请求会话 ${sessionId} 不匹配`,
+      })
+    }
+
+    // ── 5. 成员解析（200）——通用能力，无角色白名单（成员查询不限角色，不加 403）。
+    // session agent_ids JSON 数组顺序 = 注册序；listAgentsByIds 的 IN 子句不保证顺序，
+    // 用 id→row Map 按 ids 顺序回查投影（参照 session-messages :743 批量补名手法）——
+    // 悬空 agent（session 引用已删成员）补 name/role null，不丢、不崩。
+    const memberIds = sessionsRepo.getSessionAgentIds(sessionId)
+    const rowById = new Map(
+      (memberIds.length > 0 ? agentsRepo.listAgentsByIds(memberIds) : []).map((a) => [a.id, a])
+    )
+    const members = memberIds.map((id) => {
+      const row = rowById.get(id)
+      return { agentId: id, name: row?.name ?? null, role: row?.role ?? null }
+    })
+    log.info('session members read', {
+      sessionId,
+      agentId,
+      msgId: typeof msgId === 'string' && msgId ? msgId : undefined,
+      members: members.length,
+    })
+    return reply.send({ ok: true, members })
   })
 }
