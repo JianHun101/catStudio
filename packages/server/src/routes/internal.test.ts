@@ -1551,4 +1551,166 @@ describe('internal route-signals', () => {
       })
     })
   })
+
+  describe('session-members 端点（list_session_members 工具——会话成员带 role 查询）', () => {
+    /** 发送者 = 实施猫（成员查询是通用能力，无角色白名单——任何活跃流角色可调） */
+    const memBody = (over: Record<string, unknown> = {}) => ({
+      sessionId: 'session-1',
+      agentId: 'agent-impl',
+      msgId: 'msg-1',
+      ...over,
+    })
+    const mockActiveIn = async (sessionId: string) =>
+      vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue({
+        sessionId,
+        messageId: 'reply-1',
+        content: '',
+        token: VALID_TOKEN,
+      })
+
+    describe('body 基本校验（400）', () => {
+      it('缺 sessionId → 400 + reason 点名', async () => {
+        const body = memBody() as Record<string, unknown>
+        delete body.sessionId
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: body,
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).reason).toContain('sessionId')
+      })
+
+      it('缺 agentId → 400 + reason 点名', async () => {
+        const body = memBody() as Record<string, unknown>
+        delete body.agentId
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: body,
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).reason).toContain('agentId')
+      })
+
+      it('sessionId/agentId 非字符串（数字）→ 400', async () => {
+        for (const key of ['sessionId', 'agentId']) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/session-members',
+            payload: memBody({ [key]: 123 }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+        }
+      })
+    })
+
+    describe('鉴权链（404/401/409 与 session-messages 同款——成员查询通用能力无 403 角色白名单）', () => {
+      it('无活跃流 → 404 + reason', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: memBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(404)
+        expect(JSON.parse(res.body).reason).toContain('无活跃流')
+      })
+
+      it('token 不匹配 → 401', async () => {
+        await mockActiveIn('session-1')
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: memBody(),
+          headers: { 'x-signal-token': 'wrong-token' },
+        })
+        expect(res.statusCode).toBe(401)
+      })
+
+      it('sessionId 不匹配 → 409', async () => {
+        await mockActiveIn('session-1')
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: memBody({ sessionId: 'session-other' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(409)
+      })
+
+      it('reviewer 角色调用 → 200（无角色白名单——成员查询不限角色，非 store/implementer 专属）', async () => {
+        await mockActiveIn('session-1')
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: memBody({ agentId: 'agent-reviewer' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+      })
+    })
+
+    describe('成员解析成功路径（200）', () => {
+      it('返回 members 含 agentId/name/role + session 注册序保持（非 IN 子句序）', async () => {
+        await mockActiveIn('session-1')
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: memBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.ok).toBe(true)
+        expect(body.members).toEqual([
+          { agentId: 'agent-store', name: '店长', role: 'store' },
+          { agentId: 'agent-impl', name: '实施猫', role: 'implementer' },
+          { agentId: 'agent-reviewer', name: '吐槽猫', role: 'reviewer' },
+        ])
+      })
+
+      it('悬空 agent（session 引用已删成员）→ name/role null 不丢不崩 + 其余成员正常', async () => {
+        const db = getDb()
+        db.prepare(
+          `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+           VALUES (?, ?, ?, datetime('now'), datetime('now'))`
+        ).run('session-2', '悬空会话', JSON.stringify(['agent-impl', 'ghost-agent', 'agent-store']))
+        await mockActiveIn('session-2')
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: memBody({ sessionId: 'session-2' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.members).toEqual([
+          { agentId: 'agent-impl', name: '实施猫', role: 'implementer' },
+          { agentId: 'ghost-agent', name: null, role: null },
+          { agentId: 'agent-store', name: '店长', role: 'store' },
+        ])
+      })
+
+      it('会话无成员（agent_ids 空数组）→ 200 + members [] 不崩', async () => {
+        const db = getDb()
+        db.prepare(
+          `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+           VALUES (?, ?, ?, datetime('now'), datetime('now'))`
+        ).run('session-empty', '空会话', JSON.stringify([]))
+        await mockActiveIn('session-empty')
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-members',
+          payload: memBody({ sessionId: 'session-empty' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body)).toEqual({ ok: true, members: [] })
+      })
+    })
+  })
 })

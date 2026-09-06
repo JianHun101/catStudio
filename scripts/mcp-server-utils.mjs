@@ -1,10 +1,248 @@
 /**
  * mcp-server.mjs 纯函数工具层（无 shebang、无副作用——供 vitest 单测直接
- * import）。参数校验抽离原因：mcp-server.mjs 带 shebang（#!/usr/bin/env
- * node），vitest 模块执行器把带 shebang 的代码作为函数体执行时报
- * "Invalid or unexpected token"——测试 import 本文件即可，工具面本体保持
- * spike 留档模式（不做 spawn 子进程级测试）。
+ * import）。
+ *
+ * 抽离原因（两层）：
+ * 1. 参数校验——mcp-server.mjs 带 shebang（#!/usr/bin/env node），vitest
+ *    模块执行器把带 shebang 的代码作为函数体执行时报 "Invalid or unexpected
+ *    token"——测试 import 本文件即可，工具面本体保持 spike 留档模式（不做
+ *    spawn 子进程级测试）。
+ * 2. 工具定义元数据（工具 2「tools/list schema 瘦身」回归护栏）——resident
+ *    体量硬断言（JSON.stringify(MCP_TOOLS) ≤ 上限）必须能 import 到真实
+ *    tools/list 载荷；defs 放 mcp-server.mjs 则 shebang 使 vitest 不可达。
+ *    故工具 name 常量 + 定义对象集中本文件（单一来源），mcp-server.mjs 只
+ *    import 使用——tools/list 返回的正是本文件 MCP_TOOLS，测量即真值。
  */
+
+// ─── 工具名常量 ──────────────────────────────────────────
+export const TOOL_NAME = 'post_message'
+export const SEARCH_TOOL_NAME = 'search_knowledge'
+export const QUERY_DB_TOOL_NAME = 'query_db'
+export const QUERY_SESSION_MESSAGES_TOOL_NAME = 'query_session_messages'
+export const LIST_SESSION_MEMBERS_TOOL_NAME = 'list_session_members'
+export const REQUEST_USER_ACTION_TOOL_NAME = 'request_user_action'
+export const CREATE_PR_TOOL_NAME = 'create_pr'
+
+/**
+ * 工具定义（tools/list 常驻载荷）——inputSchema 结构钉死契约：
+ * property 名/required/enum/type/minimum/maximum/嵌套结构不可动（瘦身只压
+ * description 文案；结构是 tools/call 参数校验契约）。mcp-server.mjs 只 import
+ * 本文件 MCP_TOOLS 返回 tools/list，故 resident 体量 == JSON.stringify(MCP_TOOLS)。
+ */
+const POST_MESSAGE_TOOL = {
+  name: TOOL_NAME,
+  description:
+    '把消息结构化投递给猫咖的下一棒 Agent（替代文本行首 @）。' +
+    'targetCats 传目标猫完整名字，可一次投多个。' +
+    '仅「真要把下一棒叫起来干活」时用；叙述性提及猫名勿用。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      targetCats: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '目标猫完整名字数组（会话成员，非空）',
+      },
+      clientMessageId: {
+        type: 'string',
+        description: '可选：客户端消息 id（幂等）',
+      },
+    },
+    required: ['targetCats'],
+  },
+}
+
+const QUERY_DB_TOOL = {
+  name: QUERY_DB_TOOL_NAME,
+  description:
+    '查猫咖数据库表（排障取证，替代 raw SQL；表/列白名单服务端强制）。' +
+    'table 传白名单表；conditions 过滤（AND 连接；op ∈ =/>/</LIKE，LIKE 的 % 写进 value）；' +
+    'limit 1-100 默认 50；返回 snake_case 原样。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      table: {
+        type: 'string',
+        enum: ['messages', 'memories', 'execution_logs', 'sessions', 'agents', 'knowledge'],
+        description: '白名单表名',
+      },
+      conditions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            column: { type: 'string', description: '该表可查列名（白名单）' },
+            op: { type: 'string', enum: ['=', '>', '<', 'LIKE'] },
+            value: { type: 'string' },
+          },
+          required: ['column', 'op', 'value'],
+        },
+        description: '可选：AND 条件数组',
+      },
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+        description: '返回条数 1-100，默认 50',
+      },
+    },
+    required: ['table'],
+  },
+}
+
+const REQUEST_USER_ACTION_TOOL = {
+  name: REQUEST_USER_ACTION_TOOL_NAME,
+  description:
+    '把「需用户介入」的请求结构化投递给用户（替代文本格式匹配）。' +
+    'type：restart（申请重启 server，仅店长可发，需用户批准）；choice（暂不支持）。' +
+    'reason 必填写明原因。仅「真需用户操作」时用。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      type: {
+        type: 'string',
+        enum: ['restart', 'choice'],
+        description: 'restart 已落地；choice 暂不支持',
+      },
+      reason: {
+        type: 'string',
+        description: '请求原因（必填非空）',
+      },
+      options: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: '选项 id（回灌用）' },
+            label: { type: 'string', description: '选项展示文本' },
+          },
+          required: ['id', 'label'],
+        },
+        description: '可选：选项组（choice 用）',
+      },
+    },
+    required: ['type', 'reason'],
+  },
+}
+
+const SEARCH_KNOWLEDGE_TOOL = {
+  name: SEARCH_TOOL_NAME,
+  description:
+    '检索猫咖知识库（运营方标准数据：接入文档/领域标准/规范）。' +
+    'query 传检索意图，topK 1-10 默认 3；' +
+    '返回命中条目 JSON（含 content/source/distance），无命中返回空数组。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: '检索意图（非空）',
+      },
+      topK: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 10,
+        description: '返回条数 1-10，默认 3',
+      },
+    },
+    required: ['query'],
+  },
+}
+
+const CREATE_PR_TOOL = {
+  name: CREATE_PR_TOOL_NAME,
+  description:
+    '创建 GitHub PR（收口链发布关，替代 push 审批）。' +
+    '仅店长可调（非 store 被 403 拒）。' +
+    'head 传已 push origin 的源分支（本工具不代推，未推报 branch-not-pushed）；' +
+    'base 默认 dev；title/body 必填。成功返回 PR 号+URL，失败原因不静默透传。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      base: {
+        type: 'string',
+        description: '默认 dev',
+      },
+      head: {
+        type: 'string',
+        description: '源分支（须已 push origin）',
+      },
+      title: {
+        type: 'string',
+        description: 'PR title（非空）',
+      },
+      body: {
+        type: 'string',
+        description: 'PR body（非空）',
+      },
+    },
+    required: ['head', 'title', 'body'],
+  },
+}
+
+const QUERY_SESSION_MESSAGES_TOOL = {
+  name: QUERY_SESSION_MESSAGES_TOOL_NAME,
+  description:
+    '回读当前会话历史消息（agent 中途回看的语境通道）。' +
+    '返回 messages（含 role/agentName/createdAt/blocks——原生结构化块 kind ∈ text/thinking/tool 交错）。' +
+    'limit 1-100 默认 20；before 传消息 id 翻更早；from/to 时间窗；kinds 留指定块；agentIdFilter 只看某 agent。' +
+    '勿回读自己刚写的连续 thinking（防复读），勿整段照抄。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+        description: '返回消息条数 1-100，默认 20',
+      },
+      before: {
+        type: 'string',
+        description: '消息 id 游标（更早批次）',
+      },
+      from: {
+        type: 'string',
+        description: 'created_at 下界',
+      },
+      to: {
+        type: 'string',
+        description: 'created_at 上界',
+      },
+      kinds: {
+        type: 'array',
+        items: { type: 'string', enum: ['text', 'thinking', 'tool'] },
+        description: '可选：只留这些块类型',
+      },
+      agentIdFilter: {
+        type: 'string',
+        description: '可选：只看某 agent',
+      },
+    },
+  },
+}
+
+const LIST_SESSION_MEMBERS_TOOL = {
+  name: LIST_SESSION_MEMBERS_TOOL_NAME,
+  description:
+    '列出当前会话全部成员（agentId/name/role）。' +
+    'role 是身份定位：store=店长（收口决策）、reviewer=审查猫、implementer=实施猫、vision=视觉验收——' +
+    '派活/收口前查会话有哪些猫、各自干嘛。会话由环境注入，无参数。',
+  inputSchema: {
+    type: 'object',
+    properties: {},
+  },
+}
+
+/** tools/list 常驻载荷（顺序即 tools/list 返回顺序；resident 体量 = JSON.stringify 本数组） */
+export const MCP_TOOLS = [
+  POST_MESSAGE_TOOL,
+  SEARCH_KNOWLEDGE_TOOL,
+  QUERY_DB_TOOL,
+  QUERY_SESSION_MESSAGES_TOOL,
+  LIST_SESSION_MEMBERS_TOOL,
+  REQUEST_USER_ACTION_TOOL,
+  CREATE_PR_TOOL,
+]
 
 /**
  * search_knowledge 参数校验（纯函数，供单测——scripts/mcp-server.test.js）。
