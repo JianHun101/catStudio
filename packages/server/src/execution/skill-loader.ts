@@ -23,8 +23,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-/** skill 名白名单（首期 role→skill 白名单，对齐 manifest 顶级 source: self 的开发流程链）。
- *  只允许这些名字被注入；其余（mattpocock/external 系）留给 CLI 原生消费不注入。
+/** skill 名白名单（首期 role→skill 白名单 = 开发流程链 4 技能）。
+ *  判据不是 source：spec-gate/quality-gate/request-review 在 manifest 为 source: self，
+ *  而 implement 是 source: mattpocock 基底（manifest.yaml:214）——57d1078 已在其上增补
+ *  猫咖前置门槛段，是开发流程链关键技能，故一并入白名单。真正判据 = 「开发流程链、
+ *  agent 角色生命周期直接相关、内容已猫咖化」。名单外技能（纯 mattpocock/external 系）
+ *  留给 CLI 原生消费不注入。
  *  名字只允许小写字母/数字/连字符——loadSkill 路径守卫依赖该格式（防穿越）。 */
 const SUPPORTED_SKILLS: ReadonlySet<string> = new Set([
   'spec-gate',
@@ -53,9 +57,15 @@ const ROLE_DEFAULT_SKILLS: Readonly<Record<string, readonly string[]>> = {
  * 触发阶段信号 → 追加技能（triggerContent 含关键词时并入，与 role 默认去重）。
  * 只对开发流程链执行者（store/implementer）生效——reviewer/vision 的触发消息常引用
  * quality-gate/spec-gate/自查 等词汇（审查报告、交接文档转述），若按关键词命中会给
- * 它们注入无关实施技能，纯噪音。铁律一审查自动化：request-review 属「作者发起审查」，
- * 猫 harness 由 post-commit hook 自动投递，agent 只补填不自行发起——信号注入只让模型
- * 读到模板/前置条件，不改变「不自行发起」的铁律。
+ * 它们注入无关实施技能，纯噪音。
+ *
+ * request-review 信号当前停用（见 STAGE_SIGNALS 内 TODO）：注入顶层
+ * request-review/SKILL.md 会让模型读到「作者主动打包发审查请求 + @审查者」的动作指令，
+ * 与猫 harness 运行时约束冲突——铁律一审查自动化（post-commit hook 自动投递、agent 只
+ * 补填不自行发起）+ 该技能正文 `@审查者` 字面在 skill 块 append 后才进文本、不被
+ * resolveRolePlaceholders 解析（reply.ts:417 只处理 baseSystemPrompt 一次）——照技能行事
+ * 会输出字面 @审查者，mention 精确匹配落空 → 静默丢投递。待 loader 具备 skills/catstudy/
+ * 子目录两级路径注入能力后，按描述猫真实审查链的 catstudy-request-review 定制层启用。
  */
 interface StageSignal {
   skill: string
@@ -74,10 +84,14 @@ const STAGE_SIGNALS: readonly StageSignal[] = [
     skill: 'quality-gate',
     keywords: ['quality-gate', 'quality gate', '提交前检查', '自查'],
   },
-  {
-    skill: 'request-review',
-    keywords: ['request-review', 'request review', '发起审查', '请审查'],
-  },
+  // TODO(catstudy 两级路径注入)：request-review 信号停用（吐槽猫审查 P1）。
+  // 注入顶层 request-review/SKILL.md 与铁律一冲突 + `@审查者` 字面不被解析（见上方注释）。
+  // 待 loadSkill 支持 skills/catstudy/<name>/SKILL.md 后，按 catstudy-request-review 启用。
+  // SUPPORTED_SKILLS 仍保留 'request-review'：role 默认不命中、仅防未来启用时漏加白名单。
+  // {
+  //   skill: 'request-review',
+  //   keywords: ['request-review', 'request review', '发起审查', '请审查'],
+  // },
 ]
 
 /** resolveSkillsForContext 的上下文——reply.ts runAgentReply 直接可用字段 */

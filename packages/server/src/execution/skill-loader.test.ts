@@ -84,10 +84,12 @@ describe('resolveSkillsForContext — role 默认 + 阶段信号（白名单求�
     expect(resolveSkillsForContext({})).toEqual([])
   })
 
-  it('implementer + 触发含「请审查」→ 追加 request-review（与 role 默认并存不重复）', () => {
+  it('implementer + 触发含「请审查」→ 不追加 request-review（信号停用，防铁律一冲突 + @字面不解析）', () => {
+    // 吐槽猫审查 P1：request-review STAGE_SIGNALS 停用——顶层 SKILL.md 教「作者主动
+    // @审查者 打包发审查」与铁律一冲突，且正文 `@审查者` 字面在注入后才进文本不被解析。
     expect(
       resolveSkillsForContext({ role: 'implementer', triggerContent: '请审查这段代码' })
-    ).toEqual(['implement', 'quality-gate', 'request-review'])
+    ).toEqual(['implement', 'quality-gate'])
   })
 
   it('reviewer / vision + 阶段信号关键词 → 仍空（信号只对开发链角色生效，防转述噪音）', () => {
@@ -111,13 +113,13 @@ describe('resolveSkillsForContext — role 默认 + 阶段信号（白名单求�
     ).toEqual(['spec-gate'])
   })
 
-  it('implementer + 触发含多处关键词 → 白名单求交（未知技能名永不注入）', () => {
+  it('implementer + 触发含多处关键词 → 白名单求交（request-review 停用不进、未知技能名不进）', () => {
     expect(
       resolveSkillsForContext({
         role: 'implementer',
-        triggerContent: '发起审查 + code-review 也提一下',
+        triggerContent: '先跑 quality-gate 自查 + spec-gate 复核 + code-review 也提一下',
       })
-    ).toEqual(['implement', 'quality-gate', 'request-review']) // code-review 不在白名单 → 不进
+    ).toEqual(['implement', 'quality-gate', 'spec-gate']) // request-review 信号停用；code-review 不在白名单 → 不进
   })
 })
 
