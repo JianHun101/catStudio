@@ -65,6 +65,7 @@ import {
   resolveRolePlaceholders,
   buildDynamicHints,
 } from './hints.js'
+import { buildSkillContextBlock, resolveSkillsForContext } from './skill-loader.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 import type { EngineState } from './state.js'
 
@@ -391,8 +392,12 @@ export async function runAgentReply(
     maxContext: MAX_CONTEXT,
   })
 
-  // system prompt 直接使用 agent.systemPrompt——skill 注入链已拆除，
-  // 技能由 CLI 原生消费（斜杠触发 / 模型自主调用），server 不做拼装（实测驱动）
+  // system prompt 直接使用 agent.systemPrompt——skill 注入链已拆除，技能由 CLI 原生
+  // 消费（斜杠触发 / 模型自主调用），server 不做拼装（实测驱动）。
+  // 2026-09-06 方向反转（clowder 路线第一段）：猫 harness 执行体大多非 Claude CLI
+  // （opencode/ollama/dsh），CLI file-scan 在猫流程空转——server 新增 skill 运行时注入
+  // 通道（见下方「skill 运行时注入」块，从仓库 skills/ 源库读 SKILL.md 拼进 system
+  // prompt，覆盖全部 provider）。CLI file-scan 保留给人肉开发，两通道并存。
 
   // 铁律运行期注入：铁律从「seed 期烘焙」升级为「settings 表全局策略」（getIronLaws
   // 单一权威访问器）——按 role 取应注入铁律（reviewer→审查铁律；store/implementer→开发
@@ -607,8 +612,28 @@ export async function runAgentReply(
     })
   }
 
+  // ── skill 运行时注入（仓库源库 + server 注入，clowder 路线第一段）──────────
+  // 从仓库 skills/ 源库按 role/阶段信号读 SKILL.md 拼进 system prompt——覆盖全部执行体
+  // （opencode/ollama/dsh 等非 Claude CLI），worktree 物理断点整体绕开。只新增通道，
+  // 不拆 claude CLI file-scan（人肉开发保留）；读缺失/失败降级为空，永不阻塞回复。
+  // 放记忆/知识库之后、最终 token 预算复核之前——注入量计入预算，超限走既有 handoff。
+  {
+    const skillCtx = { role: agent.role, triggerContent: triggerMsg.content }
+    const skillBlock = buildSkillContextBlock(skillCtx)
+    if (skillBlock) {
+      llmMessages[0] = { ...llmMessages[0], content: llmMessages[0].content + skillBlock }
+      log.info('技能上下文已注入', {
+        traceId,
+        agentId: agent.id,
+        agentRole: agent.role,
+        skills: resolveSkillsForContext(skillCtx),
+        skillChars: skillBlock.length,
+      })
+    }
+  }
+
   // ── 最终 token 预算复核 ──────────────────────────
-  // summary + memory 注入后重新估算总 token。
+  // summary + memory + skill 注入后重新估算总 token。
   // 超预算时不丢弃任何上下文，直接触发会话交接（fire-and-forget）——
   // 当前回复正常发送，下一条消息在新会话中带着完整摘要继续。
   {

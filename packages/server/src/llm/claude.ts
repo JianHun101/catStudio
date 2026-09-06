@@ -47,7 +47,9 @@ const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.
  * Write/Edit 同权限面零新增风险；ScheduleWakeup/Cron 系「便宜时段跑活」是真实
  * 需求（一次性 CLI 子进程无持久宿主、定时不可靠记应用层后续项，不阻塞放行）；
  * Skill 由 CLI 原生消费（实测 /grill-me 斜杠触发 grilling 会话、未禁时模型
- * 自主调用 Skill 工具）——server 端零注入，SkillLoader 注入链拆除见配套单。
+ * 自主调用 Skill 工具）——人肉开发保留此通道；2026-09-06 起 server 另增运行时
+ * 注入（execution/skill-loader.ts 从仓库 skills/ 读 SKILL.md 拼进 system prompt，
+ * 服务猫执行体经由此通道读到技能，见配套单）。两通道并存，不冲突。
  * 维持禁 9 项：WebFetch（域名安全校验依赖 claude.ai 服务，2026-08-09
  * 网络策略下实测不可用——Unable to verify if domain...is safe to fetch，
  * 放行是死工具）、SendMessage/AskUserQuestion（已被 MCP post_message /
