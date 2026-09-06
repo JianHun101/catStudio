@@ -319,7 +319,7 @@ skills:
 # ── 项目定制层（catstudy/，随迁保留，一期不切路由）──
 # 4 个 catstudy-* 定制 skill 与顶级同名 skill 是两套不同定义：
 # 当前 manifest 路由顶级通用版；定制版转正评估列二期。
-# catstudy/ 内部条目不参与顶级计数（27/27），由 check-manifest 单独校验前缀。
+# catstudy/ 内部条目不参与顶级计数（28/28），由 check-manifest 单独校验前缀。
 catstudy:
   # merged_from：合并来源登记（catstudy 定制层随迁保留，转正评估列二期）
   catstudy-quality-gate:

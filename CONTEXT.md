@@ -89,7 +89,7 @@ _Avoid_: 日志, 请求记录
 ## 文档位置约定
 
 - `docs/adr/` — 架构决策留痕（跨会话，给下个会话重建「为什么这么设计」的地图）
-- `docs/requirements/` — 一个活 = 一个语义命名 MD（如 `2026-09-06-dev-process-gate-flow.md`），六段生命周期完整：愿景→需求→契约→决策留痕→验收结果。写者是店长/架构师
+- `docs/requirements/` — 一个活 = 一个语义命名 MD（如 `2026-09-06-dev-process-gate-flow.md`），六段生命周期完整：愿景→需求→契约→过程决策留痕→架构决策留痕→验收结果。写者是店长/架构师
 - `docs/sessions/` — 会话总结（session-summary skill 产出）
 - 过程决策留痕（本会话内：跳 grilling 的为什么、Gate 答案、争议裁决）→ spec 尾部 `## 决策留痕` 固定段，一行一决策、可 grep，不单独建文档
 
