@@ -63,3 +63,46 @@ _Avoid_: 事件总线, 队列
 
 Agent 每次回复的完整执行记录。包含触发消息、开始时间、结束时间、最终状态。用于调试和审计。
 _Avoid_: 日志, 请求记录
+
+## 判据线（什么该写进本文档）
+
+**「这个信息变了，是不是意味着架构 / 契约 / 流程变了？」** —— 是 → 写进本文档；否（只是代码实现变了）→ 不写，让代码自己说话。
+
+- **写**（稳定，跨代码迭代仍成立）：模块目录结构、文档位置约定、补全术语、流程约定（见下四节）。
+- **不写**（易变，代码是唯一真相）：函数签名、接口形状、文件行号、commit 内容。
+
+## 模块目录结构
+
+- `packages/shared/` — Types、Zod schemas、Socket.IO 事件常量（无运行逻辑）
+- `packages/server/` — Fastify + Socket.IO + SQLite + LLM adapters + dispatch + memory
+  - `src/routes/` — HTTP 端点（含 `internal.ts` 的 `/api/internal/*` 信号端点）
+  - `src/db/repository/` — SQLite 查询层（agents/sessions/messages/memories/executionLogs 等）
+  - `src/llm/` — LLM 适配器（chatStream：DeepSeek/Claude/OpenAI/...）
+  - `src/dispatch/` + `src/execution/` — 调度与执行引擎
+  - `src/connectors/` — 平台适配器（socketio 等）
+  - `src/env.ts` — 环境变量手动解析（无 dotenv）
+- `packages/web/` — Vue 3 + Vite + Pinia + Socket.IO client
+- `scripts/` — dev/seed/stop、MCP server（mcp-server.mjs + mcp-server-utils.mjs）、hooks/skills 治理（hooks-install.mjs、skills-check-manifest.mjs）
+- `skills/` — 猫咖技能活源（`.claude/skills` junction 指向此处）
+- `docs/` — adr/（架构决策）、requirements/（需求文档）、sessions/（会话总结）
+
+## 文档位置约定
+
+- `docs/adr/` — 架构决策留痕（跨会话，给下个会话重建「为什么这么设计」的地图）
+- `docs/requirements/` — 一个活 = 一个语义命名 MD（如 `2026-09-06-dev-process-gate-flow.md`），六段生命周期完整：愿景→需求→契约→决策留痕→验收结果。写者是店长/架构师
+- `docs/sessions/` — 会话总结（session-summary skill 产出）
+- 过程决策留痕（本会话内：跳 grilling 的为什么、Gate 答案、争议裁决）→ spec 尾部 `## 决策留痕` 固定段，一行一决策、可 grep，不单独建文档
+
+## 术语补全
+
+- `agent_ids`（sessions 表 JSON 数组）= 会话成员，按注册顺序（无 FK 约束，成员可能被删成悬空 id）
+- `segments`（messages 表 JSON）= 消息的结构化块（kind: text/thinking/tool），非拼接字符串
+- `role` = 身份定位（agents.role：store/reviewer/implementer/vision），非状态、非消息行 role（user/agent/system）——两个 role 不是一回事
+- `dispatch_state` / `execution_logs.status` = 调度与执行状态（running/completed/failed），忙闲不影响入队
+
+## 流程约定
+
+- 审查链（后半个门）：`quality-gate → request-review → receive-review`；收口归店长；提交触发 post-commit 自动投递审查链
+- 收口链：确认审查结论 → ff-only 合并回 dev → 更新 `.push-gate` → 推 session 分支 → createPr（base=dev）→ GitHub merge → 拉回 dev 同步
+- 开发流程 gate 决策点：`spec-gate`（前半个门——需求可证伪/契约钉死，放行才拆票/进 implement）+ `quality-gate`（后半个门——提交前自查）
+- 依赖声明优先：装任何包前先声明 + 审查者批准，声明与安装不同轮

@@ -59,6 +59,32 @@ skills:
       - 'on-site-project'
       - 'diagnosing-bugs'
 
+  spec-gate:
+    source: self
+    use_when: |
+      requirements or a spec is ready and needs a falsifiability + contract-lock check before tickets are cut or code is built.
+    not_for: |
+      code that is already being implemented or reviewed (use quality-gate), or fuzzy ideas that still need grilling (use grilling/to-spec).
+    category: '需求流程'
+    description: |
+      需求/规格进入实施前的自查门（前半个门，对称后端 quality-gate）。
+      检查需求可证伪性、验收信号、边界/契约/验收是否钉死，通过后才能拆票/实施。
+    triggers:
+      - 'spec gate'
+      - '需求自查'
+      - '规格检查'
+      - '开工前检查'
+    output: 'Gate Report（PASS/FAIL + Gate A/B/C 逐项结果）'
+    prev: 'grilling/to-spec'
+    next: 'to-tickets/implement'
+    refs:
+      - 'quality-gate'
+      - 'implement'
+      - 'to-spec'
+      - 'to-tickets'
+    preconditions:
+      - 'spec 或需求文档已成型（grilling/to-spec 产物）'
+
   quality-gate:
     source: self
     use_when: |
@@ -191,6 +217,9 @@ skills:
     not_for: |
       fuzzy ideas that still need investigation (use wayfinder) or prototype exploration (use prototype).
     category: '外部技能'
+    preconditions:
+      - 'spec + 工单在场（grilling/to-spec → to-tickets 产物；跳 grilling 须 spec 尾部决策留痕）'
+      - 'spec-gate PASS（每条需求可证伪、验收信号明确）'
   improve-codebase-architecture:
     source: mattpocock
     use_when: |
@@ -306,9 +335,14 @@ catstudy:
     source: self
     merged_from: 'receive-review（顶级通用版 + 猫咖定制）'
 
-# 审查流程链
+# 开发流程链（前端 gate 半门，骑在现有前端 skill 上）
+# 大块工作 wayfinder 起图 → grilling/to-spec 出 spec → spec-gate 前门放行 → to-tickets 拆票 → implement → quality-gate（进 review 链）
+# spec-gate 是需求→实施之间的机械门：需求可证伪 + 契约钉死才放行；前段 skill 靠 use_when 衔接
+# 审查流程链（后半个门）
 # quality-gate → request-review → receive-review → (loop until ✅)
 pipeline:
+  dev:
+    - spec-gate
   review:
     - quality-gate
     - request-review

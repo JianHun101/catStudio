@@ -6,6 +6,16 @@ disable-model-invocation: true
 
 Implement the work described by the user in the spec or tickets.
 
+## 前置门槛（猫咖约定，缺任一先回上一环，别直接写码）
+
+开始前逐项确认：
+
+- [ ] 有一份 spec + 一张工单（`grilling`/`to-spec` → `to-tickets` 产物）
+- [ ] spec 每条需求**可证伪**、验收信号明确（`spec-gate` PASS）
+- [ ] 跳过了 `grilling` → spec 尾部 `## 决策留痕` 段已写「为什么」（没留 → 审查可抓）
+
+门槛不过 = 需求还没立住，先回 `grilling` / `to-spec` / `spec-gate`，不是硬着头皮 implement。**把「偷偷跳段」变成「看得见的跳段」**：跳可以，但必须留痕，审查链才接得住。
+
 Use /tdd where possible, at pre-agreed seams.
 
 Run typechecking regularly, single test files regularly, and the full test suite once at the end.
