@@ -382,27 +382,31 @@ describe('ChatPanel 思考展示结构分离（typing.segments 优先 + 旧前�
 })
 
 describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐用户「对外只露正文+思考框」）', () => {
-  it('buildStreamItems 把 thinking+tool 段收进单一 fold（时间序交错 entries），text 正文保留外层 seg', () => {
+  it('buildStreamItems 把 thinking+tool 段收进单一 fold（时间序交错 entries），流式期间 text 段全不渲染（既不产出外层 seg 也不进 fold）', () => {
     // 重构自 fc2fc9e toolArea：thinking 与 tool 不再分容器——思考折叠块是唯一过程容器，
-    // tool 嵌在 thinking 间实际发生位置；text 段保留外层渲染正文
+    // tool 嵌在 thinking 间实际发生位置；点1 新规格流式期间 text 段 drop——最终正文只在流结束定格
     expect(source).toContain("seg.kind === 'text'")
     expect(source).toContain("type: 'fold'")
     expect(source).toContain("fold.entries.push({ kind: 'tool', tool })")
     expect(source).toContain("fold.entries.push({ kind: 'thinking', content: seg.content })")
-    expect(source).toContain("type: 'seg'")
+    // 流式期间不再产出外层 seg（text 段被 drop——最终正文由 storedFoldEntries 在完成态留外层）
+    expect(source).not.toMatch(/items\.push\(\{ type: 'seg', seg \}\)/)
     // 独立 toolArea 数据结构已移除
     expect(source).not.toContain("type: 'toolArea'")
   })
 
-  it('点1：buildStreamItems 只把最后一个 text 段留外层（finalTextIndex），非末尾 text 段（中间叙述）收进折叠块，纯正文（仅一个 text 段）不建 fold', () => {
-    // 定位最后一个 text 段
-    expect(source).toContain('let finalTextIndex = -1')
-    expect(source).toContain("if (s.kind === 'text') finalTextIndex = i")
-    // 最后一个 text 段留外层渲染
-    expect(source).toContain('if (i === finalTextIndex) {')
-    expect(source).toContain("items.push({ type: 'seg', seg })")
-    // 非末尾 text 段按 thinking 收进折叠块（继续分支，不额外 push 外层 seg）
-    expect(source).toMatch(/fold\.entries\.push\(\{ kind: 'thinking', content: seg\.content \}\)/)
+  it('点1：流式期间 buildStreamItems 不渲染 text 段（既不产出外层 seg 也不进 fold），thinking+tool 才收进单一 fold；纯正文流无折叠块', () => {
+    // text 段在流式中被 continue 跳过（drop——不进外层 seg、也不建/收进 fold）
+    expect(source).toContain("if (seg.kind === 'text') {")
+    expect(source).toMatch(/seg\.kind === 'text'[\s\S]{0,120}continue/)
+    // 不再定位/保留最后一个 text 段（流途中最终段未定，正文只在流结束定格）
+    expect(source).not.toContain('finalTextIndex')
+    // 不再产出外层 seg
+    expect(source).not.toMatch(/items\.push\(\{ type: 'seg', seg \}\)/)
+    // fold 创建条件：thinking/tool 段触发（text 段不再建 fold）
+    expect(source).toMatch(/type: 'fold', entries: \[\], tools: \[\], open: true/)
+    // 单调展开指针保持：一旦出现 thinking 或 tool 段即展开（治 flap 逻辑不因 text drop 退化）
+    expect(source).toContain('const monotonicOpen = hasThinking || fold.tools.length > 0')
   })
 
   it('折叠块自动展开判据：出现 thinking 或 tool 段即单调展开（monotonicOpen），不随正文进入/工具完成中段收起（治 flap）', () => {

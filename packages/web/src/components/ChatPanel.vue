@@ -160,45 +160,26 @@ function toolRowFromSeg(seg: StreamSegment): ToolCallInfo {
 
 /**
  * 流式 typing segments → 渲染条目列表。
- * 点1（气泡只放最终回复）：最后一个 text 段 = 最终回复，留外层（正文直接可见）；
- * 其余 text 段（中间叙述）与 thinking/tool 段一并收进单一 fold（思考折叠块），
- * entries 按时间序交错——工具嵌在实际发生位置，不聚尾部。streaming 中"最后段"随
- * text 增长移动——中间叙述暂露外层、下个 text 段来即收进 fold，收尾定格为最终回复
- * 留外层。fold 展开态由 streamFoldState 控制——自动逻辑：一旦出现 thinking、tool 或
- * 非末尾 text 段即保持展开（单调，不随正文进入/工具完成中段收起——治 flap）；
+ * 点1（气泡只放最终回复）：流式期间不渲染任何 text 段——最终正文只在流结束
+ * （NEW_MESSAGE 清 typing → 打字气泡换持久化 message）由 storedFoldEntries 留外层。
+ * 流途中"最终段"未定，任何 text 段都属过程性内容，既不产出外层 seg、也不收进 fold；
+ * thinking+tool 段照常收进单一 fold（思考折叠块），entries 按时间序交错——工具嵌在
+ * 实际发生位置，不聚尾部。fold 展开态由 streamFoldState 控制——自动逻辑：一旦出现
+ * thinking 或 tool 段即保持展开（单调，不随正文进入/工具完成中段收起——治 flap）；
  * processing 仅驱动 header 活跃指示。用户点过 header 后冻结（frozen=true 尊重用户选择）。
  */
 function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] {
   // 依赖折叠块交互版本号：toggle bump 后强制重建渲染条目，item.open 立即翻转
   void streamFoldVersion.value
   const items: StreamItem[] = []
-  // 定位最后一个 text 段（= 最终回复，留外层）；其余 text 段按 thinking 收进折叠框
-  let finalTextIndex = -1
-  segs.forEach((s, i) => {
-    if (s.kind === 'text') finalTextIndex = i
-  })
   let fold: StreamFoldItem | null = null
   for (let i = 0; i < segs.length; i++) {
     const seg = segs[i]
     if (seg.kind === 'text') {
-      if (i === finalTextIndex) {
-        items.push({ type: 'seg', seg })
-        continue
-      }
-      // 非末尾 text 段（中间叙述）：不作为最终回复，按 thinking 渲染收进折叠框
-      if (!seg.content) continue
-      if (!fold) {
-        fold = {
-          type: 'fold',
-          entries: [],
-          tools: [],
-          open: true,
-          processing: false,
-          frozen: false,
-        }
-        items.push(fold)
-      }
-      fold.entries.push({ kind: 'thinking', content: seg.content })
+      // 点1 新规格：流式期间不渲染任何 text 段——最终正文只在流结束（NEW_MESSAGE 清
+      // typing → 打字气泡换持久化 message）由 storedFoldEntries 留外层。流途中"最终段"未定，
+      // 任何 text 段都属过程性内容：既不留外层 seg，也不收进 fold——思考+tool 段照常进
+      // 单一折叠块（时间序交错）。纯正文流（无 thinking/tool）items 为空 → 气泡只剩 cursor。
       continue
     }
     if (!fold) {
@@ -217,9 +198,9 @@ function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] 
     const st = streamFoldState.value.get(agentId)
     const hasActiveTool = fold.tools.some(isToolActive)
     const enteredText = segs.some((s) => s.kind === 'text')
-    // hasThinking 含「中间叙述 text 收进 fold 的 thinking entry」——非末尾 text 也令其展开
+    // hasThinking 只含真·thinking 段（text 段已 drop、不进 fold）
     const hasThinking = fold.entries.some((e) => e.kind === 'thinking')
-    // 自动开合单调化：一旦出现 thinking、tool 或非末尾 text 段即保持展开，不因正文进入/工具完成中段收起
+    // 自动开合单调化：一旦出现 thinking 或 tool 段即保持展开，不因正文进入/工具完成中段收起
     // ——thinking/tool 段只增不减，hasThinking || tools.length>0 天然单调，无需持久 latch。
     const monotonicOpen = hasThinking || fold.tools.length > 0
     // processing 保留供 header 活跃指示（thinking-dots）：工具推进中，或正文开始前的思考段
@@ -1244,8 +1225,10 @@ const warnedAgentsText = computed(() => {
             <div class="msg-sender">{{ senderName(agentId) }}</div>
             <div class="msg-bubble">
               <!-- 结构分离：优先消费 server 推的 typing.segments（kind+content 分段）。
-                   text 段保留外层渲染正文；thinking/tool 段由 buildStreamItems 收进单一 fold
-                   （思考折叠块，时间序交错）——旧 server 无 segments 时退化 parseThinkingBlocks -->
+                   点1 新规格：流式期间 text 段不渲染（buildStreamItems drop，不产出外层 seg）——
+                   思考+tool 段由 buildStreamItems 收进单一 fold（思考折叠块，时间序交错）；
+                   最终正文只在流结束由持久化 message（storedFoldEntries）留外层。
+                   ——旧 server 无 segments 时退化 parseThinkingBlocks -->
               <template v-for="(item, ii) in typing.items" :key="ii">
                 <div
                   v-if="item.type === 'seg'"
