@@ -415,6 +415,13 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).toMatch(/<ToolRow v-else[\s\S]{0,90}stream-tool-row[\s\S]{0,90}plain \/>/)
   })
 
+  it('流式折叠体高度上限：.stream-fold-body 有 max-height + overflow-y:auto（长思考不撑爆气泡/拖累窗口滚动）', () => {
+    const foldBodyBlock = source.match(/\.stream-fold-body \{[\s\S]*?\n\}/)
+    expect(foldBodyBlock).toBeTruthy()
+    expect(foldBodyBlock![0]).toContain('max-height: 220px')
+    expect(foldBodyBlock![0]).toContain('overflow-y: auto')
+  })
+
   it('流式折叠块 header 用户点过冻结：toggleStreamFold 记 frozen + open 取反 + 版本号 bump 即时生效（fc2fc9e ⚠️ 修复延续）', () => {
     expect(source).toContain('toggleStreamFold(agentId, item.open)')
     expect(source).toContain('streamFoldState.value.set')

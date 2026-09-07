@@ -2378,6 +2378,10 @@ const warnedAgentsText = computed(() => {
   gap: 5px;
   padding: 2px 10px 10px;
   border-top: 1px solid rgba(180, 160, 140, 0.18);
+  /* 高度上限：思考再长在框内滚，不再撑爆气泡/拖累窗口滚动（6f8d27d4 调查病灶）。
+     思考与工具行同在此滚动容器内；header（.thinking-summary）是容器外的兄弟，不受裁剪 */
+  max-height: 220px;
+  overflow-y: auto;
 }
 .stream-fold-body .fold-thinking {
   padding: 6px 2px 0;
