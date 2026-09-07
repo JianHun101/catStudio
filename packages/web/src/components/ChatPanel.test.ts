@@ -415,11 +415,18 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).toMatch(/<ToolRow v-else[\s\S]{0,90}stream-tool-row[\s\S]{0,90}plain \/>/)
   })
 
-  it('流式折叠体高度上限：.stream-fold-body 有 max-height + overflow-y:auto（长思考不撑爆气泡/拖累窗口滚动）', () => {
-    const foldBodyBlock = source.match(/\.stream-fold-body \{[\s\S]*?\n\}/)
+  it('流式折叠体高度上限只作用流式：.stream-fold .stream-fold-body 有 max-height + overflow-y:auto（长思考不撑爆气泡/拖累窗口滚动）', () => {
+    const foldBodyBlock = source.match(/\.stream-fold \.stream-fold-body \{[\s\S]*?\n\}/)
     expect(foldBodyBlock).toBeTruthy()
     expect(foldBodyBlock![0]).toContain('max-height: 220px')
     expect(foldBodyBlock![0]).toContain('overflow-y: auto')
+  })
+
+  it('流式折叠体限高不泄漏到历史折叠：共享 base .stream-fold-body 无 max-height（b12e858 回归修复——历史工具段不被挤到滚动区下方）', () => {
+    const baseBlock = source.match(/\.stream-fold-body \{[\s\S]*?\n\}/)
+    expect(baseBlock).toBeTruthy()
+    expect(baseBlock![0]).not.toContain('max-height')
+    expect(source).not.toMatch(/\.stored-thinking \.stream-fold-body\s*\{[^}]*max-height/)
   })
 
   it('流式折叠块 header 用户点过冻结：toggleStreamFold 记 frozen + open 取反 + 版本号 bump 即时生效（fc2fc9e ⚠️ 修复延续）', () => {
