@@ -162,9 +162,9 @@ function toolRowFromSeg(seg: StreamSegment): ToolCallInfo {
  * 流式 typing segments → 渲染条目列表。
  * text 段保留在外层（正文直接可见）；thinking 与 tool 段收进单一 fold
  * （思考折叠块），entries 按时间序交错——工具嵌在实际发生位置，不聚尾部。
- * fold 展开态由 streamFoldState 控制——自动逻辑：过程推进中（有 running/pending
- * 工具，或正文尚未开始的思考段）展开，进入纯正文且无推进工具则收起；
- * 用户点过 header 后冻结（frozen=true 尊重用户选择）。
+ * fold 展开态由 streamFoldState 控制——自动逻辑：一旦出现 thinking 或 tool 段即
+ * 保持展开（单调，不随正文进入/工具完成中段收起——治 flap）；processing 仅驱动
+ * header 活跃指示。用户点过 header 后冻结（frozen=true 尊重用户选择）。
  */
 function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] {
   // 依赖折叠块交互版本号：toggle bump 后强制重建渲染条目，item.open 立即翻转
@@ -193,12 +193,15 @@ function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] 
     const hasActiveTool = fold.tools.some(isToolActive)
     const enteredText = segs.some((s) => s.kind === 'text')
     const hasThinking = fold.entries.some((e) => e.kind === 'thinking')
-    // 自动逻辑：工具推进中必展开；正文开始前的思考展开；进入纯正文或纯工具已完 → 收起
+    // 自动开合单调化：一旦出现 thinking 或 tool 段即保持展开，不因正文进入/工具完成中段收起
+    // ——thinking/tool 段只增不减，hasThinking || tools.length>0 天然单调，无需持久 latch。
+    const monotonicOpen = hasThinking || fold.tools.length > 0
+    // processing 保留供 header 活跃指示（thinking-dots）：工具推进中，或正文开始前的思考段
     const processing = hasActiveTool || (!enteredText && hasThinking)
     const frozen = st?.frozen ?? false
     fold.frozen = frozen
     fold.processing = processing
-    fold.open = st ? (frozen ? st.open : processing) : processing
+    fold.open = st ? (frozen ? st.open : monotonicOpen) : monotonicOpen
   }
   return items
 }
@@ -1234,7 +1237,7 @@ const warnedAgentsText = computed(() => {
                         class="fold-thinking"
                         v-html="renderMarkdown(e.content)"
                       ></div>
-                      <ToolRow v-else :tool="e.tool" class="stream-tool-row" plain />
+                      <ToolRow v-else :tool="e.tool" class="stream-tool-row" />
                     </template>
                   </div>
                 </div>
