@@ -455,6 +455,12 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(storedBlock![0]).toContain('overflow-y: auto')
   })
 
+  it('折叠体直接子项 flex-shrink:0（行为修复：flex column + 有界高度会把 <details> 工具行压成 ~2px 细线——flex-shrink:0 让内容由容器 overflow 滚动而非压缩子项）', () => {
+    const shrinkBlock = source.match(/\.stream-fold-body > \* \{[\s\S]*?\n\}/)
+    expect(shrinkBlock).toBeTruthy()
+    expect(shrinkBlock![0]).toContain('flex-shrink: 0')
+  })
+
   it('流式折叠块 header 用户点过冻结：toggleStreamFold 记 frozen + open 取反 + 版本号 bump 即时生效（fc2fc9e ⚠️ 修复延续）', () => {
     expect(source).toContain('toggleStreamFold(agentId, item.open)')
     expect(source).toContain('streamFoldState.value.set')

@@ -2436,6 +2436,13 @@ const warnedAgentsText = computed(() => {
   padding: 2px 10px 10px;
   border-top: 1px solid rgba(180, 160, 140, 0.18);
 }
+/* flex column + 有界高度（max-height 使 height 固定）会让子项被 flex-shrink 压扁——
+   `<details>` 工具行的 min-height:auto 对 flex 失效、被压缩到 ~2px 细线（"工具一条线"
+   根因），点击区也消失。给直接子项 flex-shrink:0：内容超出时由容器 overflow 滚动、
+   不再压缩子项——工具行回到完整卡片行（✓/✕ 状态 glyph + 名称 + 状态标签 + chevron）。 */
+.stream-fold-body > * {
+  flex-shrink: 0;
+}
 /* 高度上限只作用流式受控容器（.stream-fold .stream-fold-body）：
    思考再长在框内滚，不再撑爆气泡/拖累窗口滚动（6f8d27d4 调查病灶）。
    header（.thinking-summary）是容器外的兄弟，不受裁剪 */
