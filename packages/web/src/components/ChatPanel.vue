@@ -160,20 +160,45 @@ function toolRowFromSeg(seg: StreamSegment): ToolCallInfo {
 
 /**
  * 流式 typing segments → 渲染条目列表。
- * text 段保留在外层（正文直接可见）；thinking 与 tool 段收进单一 fold
- * （思考折叠块），entries 按时间序交错——工具嵌在实际发生位置，不聚尾部。
- * fold 展开态由 streamFoldState 控制——自动逻辑：一旦出现 thinking 或 tool 段即
- * 保持展开（单调，不随正文进入/工具完成中段收起——治 flap）；processing 仅驱动
- * header 活跃指示。用户点过 header 后冻结（frozen=true 尊重用户选择）。
+ * 点1（气泡只放最终回复）：最后一个 text 段 = 最终回复，留外层（正文直接可见）；
+ * 其余 text 段（中间叙述）与 thinking/tool 段一并收进单一 fold（思考折叠块），
+ * entries 按时间序交错——工具嵌在实际发生位置，不聚尾部。streaming 中"最后段"随
+ * text 增长移动——中间叙述暂露外层、下个 text 段来即收进 fold，收尾定格为最终回复
+ * 留外层。fold 展开态由 streamFoldState 控制——自动逻辑：一旦出现 thinking、tool 或
+ * 非末尾 text 段即保持展开（单调，不随正文进入/工具完成中段收起——治 flap）；
+ * processing 仅驱动 header 活跃指示。用户点过 header 后冻结（frozen=true 尊重用户选择）。
  */
 function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] {
   // 依赖折叠块交互版本号：toggle bump 后强制重建渲染条目，item.open 立即翻转
   void streamFoldVersion.value
   const items: StreamItem[] = []
+  // 定位最后一个 text 段（= 最终回复，留外层）；其余 text 段按 thinking 收进折叠框
+  let finalTextIndex = -1
+  segs.forEach((s, i) => {
+    if (s.kind === 'text') finalTextIndex = i
+  })
   let fold: StreamFoldItem | null = null
-  for (const seg of segs) {
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i]
     if (seg.kind === 'text') {
-      items.push({ type: 'seg', seg })
+      if (i === finalTextIndex) {
+        items.push({ type: 'seg', seg })
+        continue
+      }
+      // 非末尾 text 段（中间叙述）：不作为最终回复，按 thinking 渲染收进折叠框
+      if (!seg.content) continue
+      if (!fold) {
+        fold = {
+          type: 'fold',
+          entries: [],
+          tools: [],
+          open: true,
+          processing: false,
+          frozen: false,
+        }
+        items.push(fold)
+      }
+      fold.entries.push({ kind: 'thinking', content: seg.content })
       continue
     }
     if (!fold) {
@@ -192,8 +217,9 @@ function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] 
     const st = streamFoldState.value.get(agentId)
     const hasActiveTool = fold.tools.some(isToolActive)
     const enteredText = segs.some((s) => s.kind === 'text')
+    // hasThinking 含「中间叙述 text 收进 fold 的 thinking entry」——非末尾 text 也令其展开
     const hasThinking = fold.entries.some((e) => e.kind === 'thinking')
-    // 自动开合单调化：一旦出现 thinking 或 tool 段即保持展开，不因正文进入/工具完成中段收起
+    // 自动开合单调化：一旦出现 thinking、tool 或非末尾 text 段即保持展开，不因正文进入/工具完成中段收起
     // ——thinking/tool 段只增不减，hasThinking || tools.length>0 天然单调，无需持久 latch。
     const monotonicOpen = hasThinking || fold.tools.length > 0
     // processing 保留供 header 活跃指示（thinking-dots）：工具推进中，或正文开始前的思考段
@@ -683,12 +709,27 @@ function markdownAgentNames(): string {
   return `${architect}|${reviewer}`
 }
 
+/**
+ * 最终回复正文内容：新消息（segments 落库）取最后一个 text 段（= 最终回复，其余 text
+ * 段由 storedFoldEntries 收进折叠块）；无 segments 老消息退化渲染整列 content。
+ */
+function finalTextContent(msg: Message): string {
+  if (msg.segments?.length) {
+    for (let i = msg.segments.length - 1; i >= 0; i--) {
+      const s = msg.segments[i]
+      if (s.kind === 'text') return s.content
+    }
+  }
+  return msg.content
+}
+
 /** 记忆化渲染正文：内容 + 相关 agent 名未变 → 直接返回缓存 html */
 function renderMessageMarkdown(msg: Message): string {
-  const key = `${msg.id}:${markdownAgentNames()}:${msg.content}`
+  const textContent = finalTextContent(msg)
+  const key = `${msg.id}:${markdownAgentNames()}:${textContent}`
   const cached = markdownCache.get(key)
   if (cached !== undefined) return cached
-  const html = renderMarkdown(resolveDisplayPlaceholders(msg.content, store.agents))
+  const html = renderMarkdown(resolveDisplayPlaceholders(textContent, store.agents))
   markdownCache.set(key, html)
   return html
 }
@@ -736,9 +777,21 @@ function storedFoldEntries(msg: Message): StoredFoldEntry[] | null {
     if (t.id != null) byId.set(t.id, t)
     else idlessByName.push(t)
   }
+  // 点1：最后一个 text 段（= 最终回复）由外层 msg-text 渲染，其余 text 段（中间叙述）
+  // 按 thinking 收进折叠框——与 buildStreamItems 的"只留最后 text"判定保持一致
+  let lastTextIndex = -1
+  for (let i = 0; i < msg.segments.length; i++) {
+    if (msg.segments[i].kind === 'text') lastTextIndex = i
+  }
   const entries: StoredFoldEntry[] = []
-  for (const seg of msg.segments) {
-    if (seg.kind === 'text') continue // 正文由外层 msg-text 渲染，不进思考折叠块
+  for (let i = 0; i < msg.segments.length; i++) {
+    const seg = msg.segments[i]
+    if (seg.kind === 'text') {
+      if (i === lastTextIndex) continue // 最后一个 text 段（最终回复）由外层 msg-text 渲染
+      if (!seg.content) continue
+      entries.push({ kind: 'thinking', content: seg.content })
+      continue
+    }
     if (seg.kind === 'thinking') {
       if (!seg.content) continue
       entries.push({ kind: 'thinking', content: seg.content })
@@ -2383,12 +2436,25 @@ const warnedAgentsText = computed(() => {
   padding: 2px 10px 10px;
   border-top: 1px solid rgba(180, 160, 140, 0.18);
 }
+/* flex column + 有界高度（max-height 使 height 固定）会让子项被 flex-shrink 压扁——
+   `<details>` 工具行的 min-height:auto 对 flex 失效、被压缩到 ~2px 细线（"工具一条线"
+   根因），点击区也消失。给直接子项 flex-shrink:0：内容超出时由容器 overflow 滚动、
+   不再压缩子项——工具行回到完整卡片行（✓/✕ 状态 glyph + 名称 + 状态标签 + chevron）。 */
+.stream-fold-body > * {
+  flex-shrink: 0;
+}
 /* 高度上限只作用流式受控容器（.stream-fold .stream-fold-body）：
    思考再长在框内滚，不再撑爆气泡/拖累窗口滚动（6f8d27d4 调查病灶）。
-   历史折叠体（.stored-thinking .stream-fold-body）不设上限——恢复自然生长，
-   思考段不再挤占可视区、把按时间序在其后的工具段藏到滚动区下方。
    header（.thinking-summary）是容器外的兄弟，不受裁剪 */
 .stream-fold .stream-fold-body {
+  max-height: 220px;
+  overflow-y: auto;
+}
+/* 点3：历史折叠体也有界（仅 .stored-thinking .stream-fold-body，专有后代选择器——
+   不碰 .stream-fold-body 共享基础规则，避免重蹈 b12e858「共享 class 把历史也限高」的
+   覆辙）。最终回复后折叠（.stored-thinking <details :open="false">）、展开仍 220px 框内滚，
+   思考/中间叙述/工具在框内滚到达（用户拍板「有界就靠框内滚到达」）。 */
+.stored-thinking .stream-fold-body {
   max-height: 220px;
   overflow-y: auto;
 }
