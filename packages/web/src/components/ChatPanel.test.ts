@@ -350,9 +350,11 @@ describe('ChatPanel renderMarkdown 记忆化（per-message 缓存）', () => {
     expect(source).toContain('function renderThinkingMarkdown(msg: Message): string')
   })
 
-  it('正文缓存键覆盖相关 agent 名（占位符替换依赖 store/reviewer 角色名，改名则键变重算）', () => {
+  it('正文缓存键覆盖相关 agent 名 + 最终回复 text 段（占位符替换依赖 store/reviewer 角色名；点1 正文只渲染最后 text 段）', () => {
     expect(source).toContain('function markdownAgentNames(): string')
-    expect(source).toContain('const key = `${msg.id}:${markdownAgentNames()}:${msg.content}`')
+    expect(source).toContain('const key = `${msg.id}:${markdownAgentNames()}:${textContent}`')
+    expect(source).toContain('function finalTextContent(msg: Message): string')
+    expect(source).toContain("if (s.kind === 'text') return s.content")
     expect(source).toContain("a.role === 'store'")
     expect(source).toContain("a.role === 'reviewer'")
   })
@@ -390,6 +392,17 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).toContain("type: 'seg'")
     // 独立 toolArea 数据结构已移除
     expect(source).not.toContain("type: 'toolArea'")
+  })
+
+  it('点1：buildStreamItems 只把最后一个 text 段留外层（finalTextIndex），非末尾 text 段（中间叙述）收进折叠块，纯正文（仅一个 text 段）不建 fold', () => {
+    // 定位最后一个 text 段
+    expect(source).toContain('let finalTextIndex = -1')
+    expect(source).toContain("if (s.kind === 'text') finalTextIndex = i")
+    // 最后一个 text 段留外层渲染
+    expect(source).toContain('if (i === finalTextIndex) {')
+    expect(source).toContain("items.push({ type: 'seg', seg })")
+    // 非末尾 text 段按 thinking 收进折叠块（继续分支，不额外 push 外层 seg）
+    expect(source).toMatch(/fold\.entries\.push\(\{ kind: 'thinking', content: seg\.content \}\)/)
   })
 
   it('折叠块自动展开判据：出现 thinking 或 tool 段即单调展开（monotonicOpen），不随正文进入/工具完成中段收起（治 flap）', () => {
@@ -431,11 +444,15 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(foldBodyBlock![0]).toContain('overflow-y: auto')
   })
 
-  it('流式折叠体限高不泄漏到历史折叠：共享 base .stream-fold-body 无 max-height（b12e858 回归修复——历史工具段不被挤到滚动区下方）', () => {
+  it('流式/历史折叠体限高各用专有后代选择器：共享 base .stream-fold-body 无 max-height（不重蹈 b12e858 共享 class 泄漏），历史 .stored-thinking .stream-fold-body 有界（点3）', () => {
     const baseBlock = source.match(/\.stream-fold-body \{[\s\S]*?\n\}/)
     expect(baseBlock).toBeTruthy()
     expect(baseBlock![0]).not.toContain('max-height')
-    expect(source).not.toMatch(/\.stored-thinking \.stream-fold-body\s*\{[^}]*max-height/)
+    // 点3：历史折叠体也 220px 有界（专有后代选择器；用户拍板「有界就靠框内滚到达」，取代 b12e858「历史无上限/工具恒可见」）
+    const storedBlock = source.match(/\.stored-thinking \.stream-fold-body \{[\s\S]*?\n\}/)
+    expect(storedBlock).toBeTruthy()
+    expect(storedBlock![0]).toContain('max-height: 220px')
+    expect(storedBlock![0]).toContain('overflow-y: auto')
   })
 
   it('流式折叠块 header 用户点过冻结：toggleStreamFold 记 frozen + open 取反 + 版本号 bump 即时生效（fc2fc9e ⚠️ 修复延续）', () => {
@@ -480,11 +497,12 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
 })
 
 describe('ChatPanel 历史消息 segments 交错还原（segments 落库后时间序优先 + 老消息退化）', () => {
-  it('storedFoldEntries：有 segments 时按时间序产出 thinking/tool 交错条目（tool 按 id join tool_content 补 io、text 段跳过）', () => {
+  it('storedFoldEntries：有 segments 时按时间序产出 thinking/tool 交错条目（tool 按 id join tool_content 补 io、只跳过最后一个 text 段——点1 中间叙述收进折叠块）', () => {
     expect(source).toContain('function storedFoldEntries(msg: Message): StoredFoldEntry[] | null')
     expect(source).toContain('if (!msg.segments?.length) return null')
     expect(source).toContain('const byId = new Map<string, ToolCallInfo>()')
-    expect(source).toContain("if (seg.kind === 'text') continue")
+    expect(source).toContain('let lastTextIndex = -1')
+    expect(source).toContain('if (i === lastTextIndex) continue')
     expect(source).toContain('full = byId.get(t.id)')
     expect(source).toContain("entries.push({ kind: 'thinking', content: seg.content })")
     expect(source).toContain("entries.push({ kind: 'tool', tool: full ?? t })")
