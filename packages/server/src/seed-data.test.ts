@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildDemoAgents,
   buildDemoKnowledge,
+  COMMON_IRON_LAWS,
   IRON_LAWS_CODER,
   IRON_LAWS_REVIEWER,
 } from './seed-data.js'
@@ -32,8 +33,8 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('店长和手下（ds猫/flash猫）的 systemPrompt 不再烘焙反镜像规则（运行期注入铁律承载）', () => {
-    // 反镜像规则（"用自己的话表达"）在 IRON_LAWS_CODER 铁律层——seed 已解除烘焙，
+  it('店长和手下（ds猫/flash猫）的 systemPrompt 不再烘焙反镜像规则（共通铁律层承载）', () => {
+    // 反镜像规则（"用自己的话表达"）在 COMMON_IRON_LAWS 共通层——seed 已解除烘焙，
     // 铁律改由运行期按 role 注入（ironLawForRole），base prompt 不再内含
     for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
@@ -110,15 +111,45 @@ describe('agent system prompts', () => {
 
   // ═══ 精简后 prompt 关键规则完整性 ═══
 
-  it('IRON_LAWS_CODER 常量仍包含所有出口检查+审查+依赖+引用规则（运行期注入源）', () => {
-    // 常量是运行期注入源（getIronLaws 缺省兜底）——内容完整性仍须保证
+  it('共通铁律层随 IRON_LAWS_CODER 注入——出口检查/投递/依赖安装/@引用/重启/结论先行齐全', () => {
+    // 共通铁律层单源定义、组合进开发铁律（运行期注入源缺省兜底）——内容完整性仍须保证
     expect(IRON_LAWS_CODER).toContain('出口检查')
     expect(IRON_LAWS_CODER).toContain('自问')
-    expect(IRON_LAWS_CODER).toContain('行首@对方')
+    expect(IRON_LAWS_CODER).toContain('投递下一棒')
     expect(IRON_LAWS_CODER).toContain('@审查者')
     expect(IRON_LAWS_CODER).toContain('依赖安装')
-    expect(IRON_LAWS_CODER).toContain('禁止直接安装')
     expect(IRON_LAWS_CODER).toContain('行首独占一行')
+    expect(IRON_LAWS_CODER).toContain('结论先行')
+    expect(IRON_LAWS_CODER).toContain('重启审批')
+  })
+
+  it('共通铁律层单源——CODER 与 REVIEWER 都注入同一段共通控制流，且不跨角色重复', () => {
+    // 共通控制流（出口检查/投递/重启审批等）单源到 COMMON_IRON_LAWS：每个角色常量
+    // 各含一次、不各自复制改写——改一处共通规则，两角色同步生效
+    expect(COMMON_IRON_LAWS).toContain('出口检查')
+    expect(COMMON_IRON_LAWS).toContain('重启审批')
+    expect(COMMON_IRON_LAWS).toContain('@引用规则')
+    expect(COMMON_IRON_LAWS).toContain('结论先行')
+    expect(COMMON_IRON_LAWS).toContain('投递下一棒')
+    for (const law of [IRON_LAWS_CODER, IRON_LAWS_REVIEWER]) {
+      expect(law.split('出口检查').length - 1).toBe(1)
+      expect(law.split('重启审批').length - 1).toBe(1)
+      expect(law.split('@引用规则').length - 1).toBe(1)
+      expect(law.split('投递下一棒').length - 1).toBe(1)
+    }
+  })
+
+  it('共通铁律层非命令式收敛——禁令堆砌不在铁律常量出现（对照 Pi 判据清单语气）', () => {
+    // 派活单对照 Pi：把 禁止/必须/严禁 密集堆砌收敛为「什么情况该做什么」的判据语气。
+    // 硬性 git 门禁保留单条「绝不 --no-verify」；一般禁令措辞改用正向行为描述。
+    expect(IRON_LAWS_CODER).not.toContain('禁止直接安装')
+    expect(IRON_LAWS_CODER).not.toContain('严禁声明和安装出现在同一轮回复中')
+    expect(IRON_LAWS_CODER).not.toContain('禁止自行 kill 或重启 server')
+    expect(COMMON_IRON_LAWS).not.toContain('必须')
+    expect(COMMON_IRON_LAWS).not.toContain('严禁')
+    expect(COMMON_IRON_LAWS).not.toContain('禁止')
+    expect(COMMON_IRON_LAWS).not.toContain('绝不') // 硬性门禁在 CODER_DUTIES（Worktree 段），不在共通层
+    expect(IRON_LAWS_CODER).toContain('绝不 --no-verify')
   })
 
   it('店长和手下的 systemPrompt 不再烘焙 IRON_LAWS_CODER 内容（出口检查/依赖安装/@审查者）', () => {
@@ -130,13 +161,13 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('【安装请求】块格式并入铁律常量（seed prompt 不再烘焙）', () => {
-    // 行为规则进铁律（操作层 md 拆除后）——内容在常量中，base prompt 不烘焙
+  it('【安装请求】块格式并入共通铁律层（seed prompt 不再烘焙）', () => {
+    // 行为规则进共通铁律层（操作层 md 拆除后）——内容随 CODER/REVIEWER 注入，base prompt 不烘焙
     expect(IRON_LAWS_CODER).toContain('【安装请求】')
     expect(IRON_LAWS_CODER).toContain('包名: <package-name>')
     expect(IRON_LAWS_CODER).toContain('用途: <为什么需要这个包>')
     expect(IRON_LAWS_CODER).toContain('替代: <有没有可以不装的方案>')
-    expect(IRON_LAWS_CODER).toContain('严禁声明和安装出现在同一轮回复中')
+    expect(IRON_LAWS_CODER).toContain('声明与安装分两轮')
     for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).not.toContain('【安装请求】')
@@ -187,17 +218,29 @@ describe('agent system prompts', () => {
     expect(tucao.systemPrompt).not.toContain('✅可合并 → 行首@架构师')
   })
 
-  it('店长 prompt 不再烘焙重启规则为工具教法（铁律运行期注入承载）', () => {
+  it('店长 prompt 不再烘焙重启规则为工具教法（共通铁律层承载）', () => {
     const boss = agents.find((a) => a.name === '店长')!
-    // 重启审批规则在 IRON_LAWS_CODER 铁律层（运行期注入）——base prompt 不再内含
+    // 重启审批规则在 COMMON_IRON_LAWS 共通层（随开发铁律注入）——base prompt 不再内含
     expect(boss.systemPrompt).not.toContain('request_user_action')
     expect(boss.systemPrompt).not.toContain("type:'restart'")
   })
 
-  it('店长和手下的 prompt 不再烘焙重启审批工具教法（铁律常量承载）', () => {
-    // 工具教法在 IRON_LAWS_CODER 常量中（运行期注入源）——内容完整性仍须保证
+  it('店长/吐槽猫 systemPrompt 不再烘焙共通控制流（投递/出口判断——共通铁律层承载）', () => {
+    // 共通控制流（投递/出口判断/重启审批/安装请求/结论先行）单源到 COMMON_IRON_LAWS，
+    // 角色 systemPrompt 只留「我是谁 + 特有这批活怎么干」——共通层由 runAgentReply 按 role 注入
+    const boss = agents.find((a) => a.name === '店长')!
+    expect(boss.systemPrompt).not.toContain('投递下一棒')
+    expect(boss.systemPrompt).not.toContain('post_message')
+    const tucao = agents.find((a) => a.name === '吐槽猫')!
+    expect(tucao.systemPrompt).not.toContain('出口检查')
+    expect(tucao.systemPrompt).not.toContain('投递下一棒')
+    expect(tucao.systemPrompt).not.toContain('post_message')
+  })
+
+  it('店长和手下的 prompt 不再烘焙重启审批工具教法（共通铁律层承载）', () => {
+    // 工具教法在 COMMON_IRON_LAWS 共通层中（随 CODER/REVIEWER 注入）——内容完整性仍须保证
     expect(IRON_LAWS_CODER).toContain('request_user_action')
-    expect(IRON_LAWS_CODER).toContain('禁止自行 kill 或重启 server')
+    expect(IRON_LAWS_CODER).toContain('不自 kill')
     for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).not.toContain('request_user_action')
