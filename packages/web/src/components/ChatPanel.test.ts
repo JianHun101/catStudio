@@ -392,11 +392,19 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).not.toContain("type: 'toolArea'")
   })
 
-  it('折叠块自动展开判据：工具推进中/正文前思考展开；进入纯正文无推进工具则收起（processing 驱动）', () => {
-    expect(source).toContain('const processing = hasActiveTool || (!enteredText && hasThinking)')
+  it('折叠块自动展开判据：出现 thinking 或 tool 段即单调展开（monotonicOpen），不随正文进入/工具完成中段收起（治 flap）', () => {
     expect(source).toContain('const hasActiveTool = fold.tools.some(isToolActive)')
     expect(source).toContain("const enteredText = segs.some((s) => s.kind === 'text')")
-    expect(source).toContain('fold.open = st ? (frozen ? st.open : processing) : processing')
+    expect(source).toContain('const monotonicOpen = hasThinking || fold.tools.length > 0')
+    expect(source).toContain('fold.open = st ? (frozen ? st.open : monotonicOpen) : monotonicOpen')
+  })
+
+  it('processing 解耦保留：仅供 header 活跃指示（thinking-dots），不驱动 open（open 归 monotonicOpen）', () => {
+    expect(source).toContain('const processing = hasActiveTool || (!enteredText && hasThinking)')
+    expect(source).toContain('fold.processing = processing')
+    expect(source).not.toMatch(
+      /fold\.open\s*=\s*st \? \(frozen \? st\.open : processing\) : processing/
+    )
   })
 
   it('流式模板 item 分支：seg 渲染正文，fold 渲染 thinking-block 受控折叠容器（取消独立 tool-area）', () => {
@@ -411,8 +419,9 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).toContain('v-for="(e, ei) in item.entries"')
     expect(source).toContain("e.kind === 'thinking'")
     expect(source).toContain('class="fold-thinking"')
-    // 流式工具行走 ToolRow 共享 partial：class 透传 stream-tool-row + plain 恒纯行（io 只进落库）
-    expect(source).toMatch(/<ToolRow v-else[\s\S]{0,90}stream-tool-row[\s\S]{0,90}plain \/>/)
+    // 流式工具行走 ToolRow 共享 partial：class 透传 stream-tool-row，去 plain（卡片头饱满 + 为 B 铺路）
+    expect(source).toMatch(/<ToolRow v-else[\s\S]{0,90}stream-tool-row[^\n]*\/>/)
+    expect(source).not.toMatch(/<ToolRow v-else[\s\S]{0,90}stream-tool-row[\s\S]{0,90}plain \/>/)
   })
 
   it('流式折叠体高度上限只作用流式：.stream-fold .stream-fold-body 有 max-height + overflow-y:auto（长思考不撑爆气泡/拖累窗口滚动）', () => {
