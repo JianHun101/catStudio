@@ -410,15 +410,17 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
   })
 
   it('折叠块自动展开判据：出现 thinking 或 tool 段即单调展开（monotonicOpen），不随正文进入/工具完成中段收起（治 flap）', () => {
-    expect(source).toContain('const hasActiveTool = fold.tools.some(isToolActive)')
-    expect(source).toContain("const enteredText = segs.some((s) => s.kind === 'text')")
     expect(source).toContain('const monotonicOpen = hasThinking || fold.tools.length > 0')
     expect(source).toContain('fold.open = st ? (frozen ? st.open : monotonicOpen) : monotonicOpen')
   })
 
-  it('processing 解耦保留：仅供 header 活跃指示（thinking-dots），不驱动 open（open 归 monotonicOpen）', () => {
-    expect(source).toContain('const processing = hasActiveTool || (!enteredText && hasThinking)')
+  it('processing 解耦保留：仅供 header 活跃指示（thinking-dots），不驱动 open（open 归 monotonicOpen）；并改为折叠体存在即恒亮到流结束', () => {
+    // 新公式：折叠体有过程内容（thinking/tool）即 processing=true，dots 恒亮到流结束
+    expect(source).toContain('const processing = fold.entries.length > 0')
     expect(source).toContain('fold.processing = processing')
+    // 旧瞬时态公式（hasActiveTool/enteredText 驱动）已移除——processing 不再依赖工具推进/正文前思考
+    expect(source).not.toContain('hasActiveTool')
+    expect(source).not.toContain('enteredText')
     expect(source).not.toMatch(
       /fold\.open\s*=\s*st \? \(frozen \? st\.open : processing\) : processing/
     )

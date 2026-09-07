@@ -166,7 +166,8 @@ function toolRowFromSeg(seg: StreamSegment): ToolCallInfo {
  * thinking+tool 段照常收进单一 fold（思考折叠块），entries 按时间序交错——工具嵌在
  * 实际发生位置，不聚尾部。fold 展开态由 streamFoldState 控制——自动逻辑：一旦出现
  * thinking 或 tool 段即保持展开（单调，不随正文进入/工具完成中段收起——治 flap）；
- * processing 仅驱动 header 活跃指示。用户点过 header 后冻结（frozen=true 尊重用户选择）。
+ * processing 仅驱动 header 活跃指示（thinking-dots）——折叠体存在（有 thinking/tool 过程内容）
+ * 即恒亮到流结束，不随正文进入/工具完成中段熄灭。用户点过 header 后冻结（frozen=true 尊重用户选择）。
  */
 function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] {
   // 依赖折叠块交互版本号：toggle bump 后强制重建渲染条目，item.open 立即翻转
@@ -196,15 +197,16 @@ function buildStreamItems(agentId: string, segs: StreamSegment[]): StreamItem[] 
   }
   if (fold) {
     const st = streamFoldState.value.get(agentId)
-    const hasActiveTool = fold.tools.some(isToolActive)
-    const enteredText = segs.some((s) => s.kind === 'text')
     // hasThinking 只含真·thinking 段（text 段已 drop、不进 fold）
     const hasThinking = fold.entries.some((e) => e.kind === 'thinking')
     // 自动开合单调化：一旦出现 thinking 或 tool 段即保持展开，不因正文进入/工具完成中段收起
     // ——thinking/tool 段只增不减，hasThinking || tools.length>0 天然单调，无需持久 latch。
     const monotonicOpen = hasThinking || fold.tools.length > 0
-    // processing 保留供 header 活跃指示（thinking-dots）：工具推进中，或正文开始前的思考段
-    const processing = hasActiveTool || (!enteredText && hasThinking)
+    // processing 供 header 活跃指示（thinking-dots）：折叠体存在（有 thinking/tool 过程内容）即
+    // 恒亮到流结束——text 段已 drop，折叠体内容从出现到流结束只增不减，不是"工具推进中/思考中"
+    // 这类瞬时态，而是"只要折叠体存在就持续亮"。流结束转持久化消息后 processing 不落
+    // （storedFoldEntries 不带 processing），天然熄灭，无 dots 残留。
+    const processing = fold.entries.length > 0
     const frozen = st?.frozen ?? false
     fold.frozen = frozen
     fold.processing = processing
