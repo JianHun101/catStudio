@@ -2371,15 +2371,21 @@ const warnedAgentsText = computed(() => {
   opacity: 0.85;
 }
 
-/* 流式受控容器（div.open）内交错内容：thinking 文本 + 工具行 */
+/* 流式/历史折叠体共用的受控容器（流式 div.open / 历史 details 折叠体）：
+   thinking 文本 + 工具行按时间序交错。基础布局两处共用 */
 .stream-fold-body {
   display: flex;
   flex-direction: column;
   gap: 5px;
   padding: 2px 10px 10px;
   border-top: 1px solid rgba(180, 160, 140, 0.18);
-  /* 高度上限：思考再长在框内滚，不再撑爆气泡/拖累窗口滚动（6f8d27d4 调查病灶）。
-     思考与工具行同在此滚动容器内；header（.thinking-summary）是容器外的兄弟，不受裁剪 */
+}
+/* 高度上限只作用流式受控容器（.stream-fold .stream-fold-body）：
+   思考再长在框内滚，不再撑爆气泡/拖累窗口滚动（6f8d27d4 调查病灶）。
+   历史折叠体（.stored-thinking .stream-fold-body）不设上限——恢复自然生长，
+   思考段不再挤占可视区、把按时间序在其后的工具段藏到滚动区下方。
+   header（.thinking-summary）是容器外的兄弟，不受裁剪 */
+.stream-fold .stream-fold-body {
   max-height: 220px;
   overflow-y: auto;
 }
