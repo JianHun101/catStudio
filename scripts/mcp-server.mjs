@@ -36,9 +36,8 @@
  */
 
 import readline from 'node:readline'
-import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import {
   validateSearchParams,
   validateQueryDbParams,
@@ -58,8 +57,8 @@ import {
   READ_SKILL_TOOL_NAME,
   LIST_SKILLS_TOOL_NAME,
   MCP_TOOLS,
-  SKILL_NAME_RE,
-  SKILL_CATALOG,
+  readSkill,
+  listSkills,
 } from './mcp-server-utils.mjs'
 
 const SERVER_INFO = { name: 'catstudy', version: '0.1.0' }
@@ -521,69 +520,8 @@ async function listSessionMembers() {
 }
 
 // ─── 技能懒加载（注入层改造：模型经 read_skill/list_skills 自取，server 不再塞全文）───
-// 技能源库定位与 skill-loader.ts 同款：CATSTUDY_SKILLS_DIR 环境覆盖优先，否则从
-// process.cwd() 上溯找 pnpm-workspace.yaml 定位仓库根 → skills/。MCP server 由
-// claude/opencode/dsh spawn，cwd 落在会话 worktree，遍历即达（skills/ 是 git 追踪目录）。
-
-/** 从 start 上溯找仓库根（存在 pnpm-workspace.yaml 的那层；找不到返回 null）。 */
-function findRepoRoot(start) {
-  let cur = resolve(start)
-  for (;;) {
-    if (existsSync(join(cur, 'pnpm-workspace.yaml'))) return cur
-    const parent = dirname(cur)
-    if (parent === cur) return null
-    cur = parent
-  }
-}
-
-/** 定位技能源库根（CATSTUDY_SKILLS_DIR 覆盖优先；找不到 → null → read_skill 降级）。 */
-function getSkillsRoot() {
-  const envRoot = env('CATSTUDY_SKILLS_DIR')
-  if (envRoot) return existsSync(envRoot) ? envRoot : null
-  const repoRoot = findRepoRoot(process.cwd())
-  if (!repoRoot) return null
-  const skillsDir = join(repoRoot, 'skills')
-  return existsSync(skillsDir) ? skillsDir : null
-}
-
-/**
- * 按名读技能正文（read_skill 工具实现）。name 已由 validateReadSkillParams 收进
- * SKILL_CATALOG，此处再以 SKILL_NAME_RE 作第二道路径守卫（防御纵深，防穿越）。
- * 成功 → { ok: true, text }（SKILL.md 全文）；失败 → { ok: false, reason }（可回模型诊断）。
- */
-function readSkill(name) {
-  if (!SKILL_NAME_RE.test(name)) {
-    return { ok: false, reason: `技能名非法（` + name + `），仅允许小写字母/数字/连字符` }
-  }
-  const root = getSkillsRoot()
-  if (!root) {
-    return {
-      ok: false,
-      reason: '技能源库未定位（CATSTUDY_SKILLS_DIR 未设且无法从 cwd 上溯到仓库根）',
-    }
-  }
-  const file = join(root, name, 'SKILL.md')
-  try {
-    if (!existsSync(file)) {
-      return {
-        ok: false,
-        reason: `技能正文未找到：${name}/SKILL.md（清单内但源库暂无此文件——可能由交付单 B 才落地）`,
-      }
-    }
-    return { ok: true, text: readFileSync(file, 'utf-8') }
-  } catch (err) {
-    return { ok: false, reason: `技能正文读取失败：${err.message}` }
-  }
-}
-
-/** 列技能清单（list_skills 工具实现）——catalog 即 P2=A 流程链 8 技能 + 一句话说明。 */
-function listSkills() {
-  const lines = Object.entries(SKILL_CATALOG).map(([n, desc]) => `- ${n}: ${desc}`)
-  return {
-    ok: true,
-    text: `技能清单（P2 流程链 ${Object.keys(SKILL_CATALOG).length} 技能）：\n` + lines.join('\n'),
-  }
-}
+// 读盘原语（findRepoRoot/getSkillsRoot/readSkill/listSkills）集中在 mcp-server-utils.mjs
+// （无 shebang，供 vitest 直接 import 做读盘契约测试）；本文件的 tools/call 只 import 调用。
 
 // 直接运行时才启动 stdio server——vitest import 本模块（validateSearchParams
 // 单测）不挂 stdin listener（resolve 兼容相对路径调用 node scripts/mcp-server.mjs）

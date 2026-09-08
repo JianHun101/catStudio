@@ -14,6 +14,9 @@
  *    import 使用——tools/list 返回的正是本文件 MCP_TOOLS，测量即真值。
  */
 
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+
 // ─── 工具名常量 ──────────────────────────────────────────
 export const TOOL_NAME = 'post_message'
 export const SEARCH_TOOL_NAME = 'search_knowledge'
@@ -236,7 +239,7 @@ const LIST_SESSION_MEMBERS_TOOL = {
 }
 
 // ─── 技能懒加载（注入层改造：server 不再塞全文进 prompt，模型经 read_skill 自取）──────
-// 技能名路径守卫（loadSkill 同款——名字只允许小写字母/数字/连字符，防空穿越）。
+// 技能名路径守卫（readSkill 读盘前第二道防御——名字只允许小写字母/数字/连字符，防空穿越）。
 // 虽 validateReadSkillParams 已把 name 收进 SKILL_CATALOG，readSkill 读盘前仍用它做第二道防御。
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/
 
@@ -585,4 +588,72 @@ export function validateReadSkillParams(args) {
     }
   }
   return { ok: true, name: trimmed }
+}
+
+// ─── 技能读盘原语（read_skill/list_skills 实现——注入层改造：模型经工具自取正文）───
+// readSkill 读顶层 skills/<name>/SKILL.md（catalog 名即顶层目录名）。
+// catstudy 定制版（catstudy-quality-gate / catstudy-receive-review）是「独立定义」，非本工具
+// 路由目标——manifest §294 明示两套不同定义、一期不切路由；ADR 0014 §74 已剖除两级路径注入。
+// 故顶层是意图（与旧注入层一致：其在 skills/catstudy/ 上的两级注入本就是 V1 未实现的 TODO 缺口）。
+// 读盘定位与 skill-loader.ts（已删）同款：CATSTUDY_SKILLS_DIR 环境覆盖优先，否则从 cwd 上溯找
+// pnpm-workspace.yaml → skills/。
+
+/** 从 start 上溯找仓库根（存在 pnpm-workspace.yaml 的那层；找不到返回 null）。 */
+export function findRepoRoot(start) {
+  let cur = resolve(start)
+  for (;;) {
+    if (existsSync(join(cur, 'pnpm-workspace.yaml'))) return cur
+    const parent = dirname(cur)
+    if (parent === cur) return null
+    cur = parent
+  }
+}
+
+/** 定位技能源库根（CATSTUDY_SKILLS_DIR 覆盖优先；找不到 → null → read_skill 降级）。 */
+export function getSkillsRoot() {
+  const envRoot = process.env['CATSTUDY_SKILLS_DIR']
+  if (envRoot) return existsSync(envRoot) ? envRoot : null
+  const repoRoot = findRepoRoot(process.cwd())
+  if (!repoRoot) return null
+  const skillsDir = join(repoRoot, 'skills')
+  return existsSync(skillsDir) ? skillsDir : null
+}
+
+/**
+ * 按名读技能正文（read_skill 工具实现）。name 已由 validateReadSkillParams 收进
+ * SKILL_CATALOG，此处再以 SKILL_NAME_RE 作第二道路径守卫（防御纵深，防穿越）。
+ * 成功 → { ok: true, text }（SKILL.md 全文）；失败 → { ok: false, reason }（可回模型诊断）。
+ */
+export function readSkill(name) {
+  if (!SKILL_NAME_RE.test(name)) {
+    return { ok: false, reason: `技能名非法（${name}），仅允许小写字母/数字/连字符` }
+  }
+  const root = getSkillsRoot()
+  if (!root) {
+    return {
+      ok: false,
+      reason: '技能源库未定位（CATSTUDY_SKILLS_DIR 未设且无法从 cwd 上溯到仓库根）',
+    }
+  }
+  const file = join(root, name, 'SKILL.md')
+  try {
+    if (!existsSync(file)) {
+      return {
+        ok: false,
+        reason: `技能正文未找到：${name}/SKILL.md（清单内但源库暂无此文件——可能由交付单 B 才落地）`,
+      }
+    }
+    return { ok: true, text: readFileSync(file, 'utf-8') }
+  } catch (err) {
+    return { ok: false, reason: `技能正文读取失败：${err.message}` }
+  }
+}
+
+/** 列技能清单（list_skills 工具实现）——catalog 即 P2=A 流程链 8 技能 + 一句话说明。 */
+export function listSkills() {
+  const lines = Object.entries(SKILL_CATALOG).map(([n, desc]) => `- ${n}: ${desc}`)
+  return {
+    ok: true,
+    text: `技能清单（P2 流程链 ${Object.keys(SKILL_CATALOG).length} 技能）：\n` + lines.join('\n'),
+  }
 }

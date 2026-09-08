@@ -11,7 +11,10 @@
  * import 测量 JSON.stringify 体量 + inputSchema 结构冻结基线——放 vitest
  * 不放 hook（钩子断护栏不能跟着断，hooks 根修同思路）。
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   validateSearchParams,
   validateQueryDbParams,
@@ -34,6 +37,10 @@ import {
   LIST_SKILLS_TOOL_NAME,
   SKILL_CATALOG,
   FLOW_CHAIN_SKILLS,
+  findRepoRoot,
+  getSkillsRoot,
+  readSkill,
+  listSkills,
 } from './mcp-server-utils.mjs'
 
 /** 深删 description 键（inputSchema 结构冻结对比用——瘦身只允许 description 文案变化） */
@@ -592,5 +599,86 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     ])
     expect(FLOW_CHAIN_SKILLS).not.toContain('request-review')
     expect(FLOW_CHAIN_SKILLS).not.toContain('wayfinder')
+  })
+})
+
+describe('技能读盘契约（readSkill / getSkillsRoot / findRepoRoot / listSkills）', () => {
+  let tmpRoot
+  let prevEnv
+  const ENV_KEY = 'CATSTUDY_SKILLS_DIR'
+
+  beforeEach(() => {
+    prevEnv = process.env[ENV_KEY]
+    tmpRoot = mkdtempSync(join(tmpdir(), 'catstudy-skills-'))
+    process.env[ENV_KEY] = tmpRoot
+  })
+
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env[ENV_KEY]
+    else process.env[ENV_KEY] = prevEnv
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  it('getSkillsRoot 命中 CATSTUDY_SKILLS_DIR 覆盖目录', () => {
+    expect(getSkillsRoot()).toBe(tmpRoot)
+  })
+
+  it('getSkillsRoot 无覆盖 → 从 cwd 上溯找仓库根 skills/（含 manifest.yaml 标志文件）', () => {
+    delete process.env[ENV_KEY]
+    const root = getSkillsRoot()
+    expect(root).toBeTruthy()
+    expect(existsSync(join(root, 'manifest.yaml'))).toBe(true)
+  })
+
+  it('findRepoRoot 上溯到含 pnpm-workspace.yaml 的仓库根', () => {
+    const root = findRepoRoot(process.cwd())
+    expect(root).toBeTruthy()
+    expect(existsSync(join(root, 'pnpm-workspace.yaml'))).toBe(true)
+  })
+
+  it('readSkill 按名读 skills/<name>/SKILL.md 全文', () => {
+    mkdirSync(join(tmpRoot, 'implement'), { recursive: true })
+    writeFileSync(join(tmpRoot, 'implement', 'SKILL.md'), '# Implement\n\n生产代码。')
+    const r = readSkill('implement')
+    expect(r.ok).toBe(true)
+    expect(r.text).toContain('# Implement')
+    expect(r.text).toContain('生产代码。')
+  })
+
+  it('readSkill 读顶层通用版而非 catstudy 嵌套定制版（ADR 0014 §74 剖除两级注入）', () => {
+    mkdirSync(join(tmpRoot, 'quality-gate'), { recursive: true })
+    mkdirSync(join(tmpRoot, 'catstudy', 'quality-gate'), { recursive: true })
+    writeFileSync(join(tmpRoot, 'quality-gate', 'SKILL.md'), '# quality-gate 顶层通用版')
+    writeFileSync(
+      join(tmpRoot, 'catstudy', 'quality-gate', 'SKILL.md'),
+      '# catstudy-quality-gate 定制版'
+    )
+    const r = readSkill('quality-gate')
+    expect(r.ok).toBe(true)
+    expect(r.text).toContain('quality-gate 顶层通用版')
+    expect(r.text).not.toContain('catstudy-quality-gate 定制版')
+  })
+
+  it('readSkill 清单内但源库缺文件 → ok:false 点名（交付单 B 才落地场景）', () => {
+    const r = readSkill('grilling')
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain('grilling')
+    expect(r.reason).toContain('SKILL.md')
+  })
+
+  it('readSkill 名字非法（穿越/含特殊字符）→ 路径守卫拒绝', () => {
+    for (const bad of ['../foo', 'a/b', '..', 'quality-gate/../../etc']) {
+      const r = readSkill(bad)
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('技能名非法')
+    }
+  })
+
+  it('listSkills 返回 8 技能清单（catalog 即流程链）', () => {
+    const r = listSkills()
+    expect(r.ok).toBe(true)
+    for (const name of FLOW_CHAIN_SKILLS) {
+      expect(r.text).toContain(name)
+    }
   })
 })
