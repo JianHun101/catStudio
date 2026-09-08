@@ -126,11 +126,10 @@ pnpm build → exit 0 ✅
 | Skill                        | 关注点               | 时机             |
 | ---------------------------- | -------------------- | ---------------- |
 | **quality-gate（本 skill）** | 对照需求 + 证据验证  | 提 review 之前   |
-| `catstudy-request-review`    | 发出 review 请求     | 自检通过之后     |
 | `catstudy-receive-review`    | 处理 reviewer 的反馈 | 收到 review 之后 |
 
-一句话：quality-gate 是"你自己检查自己"，request-review 是"把改动送到审查者面前"，receive-review 是"你处理审查者的意见"。
+一句话：quality-gate 是"你自己检查自己"，receive-review 是"你处理审查者的意见"。
 
 ## 下一步
 
-Quality Gate 通过后 → **直接加载 `catstudy-request-review`** skill 请求 review。不要停下来问用户"要不要继续"。
+Quality Gate 通过后 → 提交代码，post-commit hook 自动触发审查（code-review 承担）。不要停下来问用户"要不要继续"。

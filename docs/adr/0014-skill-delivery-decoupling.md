@@ -1,7 +1,7 @@
 # ADR 0014: Skill 与投递解耦——skill 管「怎么把活做对」，投递管「谁接下棒」
 
 > **背景**：猫咖 skill 体系反复出现的病灶（request-review 信号停用、@审查者 静默丢单、DS 猫自发 @ + hook 又触发一次）不是单点 bug，而是**一类结构性病根**——「投递」被编进了 skill 内容里。本 ADR 从根上拆开这两个正交关注点，并明确这是对既有 `skill-consumption-architecture`（server 零注入 + CLI file-scan）的一次方向性延续（注入侧已定，见 skill-loader.ts），但把**投递**提到与 skill 并列的一等关注点。
-> **状态**：定稿，三契约（§4）已逐项钉死（契约①轻信号、承载于铁律层出口检查段 / 契约②确定性推导为主 / 契约③字段+日志审计缝合）。投递外移拆单已放行；经用户拍板修订——**去两级路径注入、request-review 启用 base（剥投递后）淘汰 catstudy 投递定制层、契约③状态机进本批闭环（完整闭环测试）**。
+> **状态**：定稿，三契约（§4）已逐项钉死（契约①轻信号、承载于铁律层出口检查段 / 契约②确定性推导为主 / 契约③字段+日志审计缝合）。投递外移拆单已放行；经用户拍板修订——**去两级路径注入、request-review 作为独立路由层去掉（内容资产并入基础技能，投递由 post-commit hook + code-review 承担）、catstudy 投递定制层（handoff/request-review）移除、契约③状态机进本批闭环（完整闭环测试）**。
 
 ## 1. 问题：投递被编进 skill 内容
 
@@ -32,7 +32,7 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于 skill-l
 - **投递外移为「铁律层出口检查段」**（用户拍板，取代原「结尾思考」）：「投递给谁」从 skill 内容移入**铁律层出口检查段**——每条回复收尾的强制动作。铁律拼入 `baseSystemPrompt`（`execution/reply.ts:407-410`）、经过 `resolveRolePlaceholders`（`reply.ts:417`）可被解析；产出投递信号 → 调 `post_message`（结构化路由）/ 行首 `@`（fallback）。触发锚点从 skill（软、且字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
 - **猫咖定制层分化（非近乎消失）**：`skills/catstudy/` 的「定制增量」按份区分——handoff/request-review 偏投递规则（铁律一、A2A 审查链、收口链），但 quality-gate 与 receive-review 是**实质领域重写**：quality-gate 重写为猫咖特有门禁判据（「两条铁律合一」= 与需求对齐 + 承诺需要证据；`NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE`；凡声称完成必须附本次真实运行输出），receive-review 重写为被审者行为准则（Red→Green 修复、禁止表演性同意、技术正确性 > 社交舒适、VERIFY 三道门）。这两份领域知识并**非**继承 mattpocock 通用版。拆出投递后，定制层**部分技能（投递型）存在必要性大减、领域型保留**——剩「基础 skill（通用版领域内容）+ 猫咖领域型定制 + 投递策略（外层）」。
 
-**投递型定制层的去留（用户拍板）**：request-review / handoff 这类以投递路由为核心的定制层，投递外移后路由离开 skill 正文，其存在理由消亡——**直接启用 base 版（剥投递后），不再建 catstudy 投递定制层，老投递版淘汰**。`skills/catstudy/` 仅保留领域型重写（quality-gate、receive-review）与共享 refs（`cat-roles.md`）；refs 资产统一指向共享 `skills/refs/review-request-template.md`（base 版本地 `refs/` 是悬空引用）。
+**投递型定制层的去留（用户拍板）**：request-review / handoff 这类以投递路由为核心的定制层，投递外移后路由离开 skill 正文，其存在理由消亡——**作为独立路由层去掉，内容资产并入基础技能，不再建 catstudy 投递定制层**（`handoff` 改名 `session-handoff`；`request-review` 技能层移除、其递送状态仍由状态机保留）。`skills/catstudy/` 仅保留领域型重写（quality-gate、receive-review）与共享 refs（`cat-roles.md`）；refs 资产统一指向共享 `skills/refs/review-request-template.md`（base 版本地 `refs/` 是悬空引用）。
 
 ### 3.1 两套投递通道（不是删一套，是分通道）
 
@@ -63,8 +63,8 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于 skill-l
 ## 5. Consequences
 
 - **P1 类 bug 从根上消失**：路由不再写死在 skill 内容里，「@审查者 字面不被解析 → 静默丢单」这一整类不再产生。
-- **`request-review` 信号直接解禁**：投递外移 + base 版剥投递后，直接启用 base（`skills/request-review/SKILL.md` 剥掉「选择审查者/@审查者」路由，refs 修正为共享 `skills/refs/review-request-template.md`）。**无需两级路径注入**（用户拍板剖除——投递外移后为覆盖坏 base 路由而生的注入补丁失去存在理由）。
-- **skill 白名单需对齐猫咖化流程链**（后续项，见 §6）：当前 `SUPPORTED_SKILLS`（skill-loader.ts:33-38）= `[spec-gate, quality-gate, implement, request-review]`，与 manifest 满链 `wayfinder → grilling → to-spec → spec-gate → to-tickets → implement → quality-gate → request-review → receive-review`（10 步）差距明显——`grilling/to-spec/to-tickets/receive-review` 缺口、`wayfinder` 按设计排除（`disable-model-invocation`）、`request-review` 信号停用待启用。投递外移后白名单判据也应重构：白名单按「领域内容是否已猫咖化 + 流程链直接相关」，投递规则从 skill 内容剥离后不再参与白名单判定。
+- **`request-review` 独立路由层移除**：投递外移后请求审查由 post-commit hook 机械触发 + code-review 承担，`request-review` 不再作为独立技能登记（索引/目录移除）；其内容资产（review-request 模板、双轴 Reviewer Checklist 判据）并入共享 `skills/refs/review-request-template.md` 与 quality-gate 自查门。**状态机 `FLOW_MAIN_CHAIN` 仍保留 `request-review` 递送状态**（审查链的机械驱动），仅技能层不再登记该名。**无需两级路径注入**（用户拍板剖除——投递外移后为覆盖坏 base 路由而生的注入补丁失去存在理由）。
+- **skill 白名单需对齐猫咖化流程链**（后续项，见 §6）：`request-review` 已从技能层移除（不再入白名单/索引，投递走 post-commit hook 机械触发）；白名单重构面向 `{grilling, to-spec, spec-gate, to-tickets, implement, quality-gate, receive-review, session-handoff}`。当前 `SUPPORTED_SKILLS`（skill-loader.ts:33-38）= `[spec-gate, quality-gate, implement, request-review]`，与 manifest 满链差距明显——`grilling/to-spec/to-tickets/receive-review` 缺口、`wayfinder` 按设计排除（`disable-model-invocation`）。投递外移后白名单判据也应重构：白名单按「领域内容是否已猫咖化 + 流程链直接相关」，投递规则从 skill 内容剥离后不再参与白名单判定。
 
 ## 6. 后续项（用户明确要求记录）
 
