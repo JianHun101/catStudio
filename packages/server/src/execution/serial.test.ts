@@ -531,9 +531,11 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
   })
 })
 
-// ═══ 收口链回作者通路修复（修法②）：被拦 @ 的 store 兜底通知 ═══
+// ═══ 收口链回作者通路修复（修法②）：被拦 @ 的 store UI 提示 ═══
+// 裁决 (a)：这是 UI 提示（人类可见），**不触达 store agent 上下文**——
+// emitSystemNotice 不落库 + agent 上下文过滤 role != 'system'。
 
-describe('serial — 被拦 @ 的 store 兜底通知', () => {
+describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 上下文）', () => {
   const REVIEWER: AgentConfig = {
     id: 'agent-reviewer',
     name: '吐槽猫',
@@ -574,7 +576,7 @@ describe('serial — 被拦 @ 的 store 兜底通知', () => {
     vi.unstubAllEnvs()
   })
 
-  it('reviewer @ 图测猫（被拦）→ 提示发送者 + 兜底通知会话内 store 猫', async () => {
+  it('reviewer @ 图测猫（被拦）→ 提示发送者 + store 猫收到 UI 提示（人类可见，不进 agent 上下文）', async () => {
     makeAdapter({ chunks: ['⚠️建议修改\n\n@图测猫 请看看'] })
     const { bus, calls } = createFakeBus()
     const engine = createExecutionEngine(bus)
@@ -590,7 +592,9 @@ describe('serial — 被拦 @ 的 store 兜底通知', () => {
     // ① 原有行为保留：发送者收到违规提示
     const toSender = calls.systemNotices.filter((n) => n.agentId === 'agent-reviewer')
     expect(toSender.some((n) => n.content.includes('不在你的角色允许范围内'))).toBe(true)
-    // ② 兜底：store 猫收到通知——被拦的结论不再静默悬空
+    // ② UI 提示：store 猫（人）能看到——被拦的结论不再无声消失。
+    //    注意只断言「发过」（假 bus 被 push），不代表店长 agent 读到了
+    //    （emitSystemNotice 不落库 + agent 上下文过滤 system）——见裁决 (a)。
     const toStore = calls.systemNotices.filter((n) => n.agentId === 'agent-store')
     expect(toStore).toHaveLength(1)
     expect(toStore[0].content).toContain('吐槽猫')
@@ -603,7 +607,7 @@ describe('serial — 被拦 @ 的 store 兜底通知', () => {
     expect(visionLog).toBeUndefined()
   })
 
-  it('reviewer @ 店长（合法）→ 不发兜底通知', async () => {
+  it('reviewer @ 店长（合法）→ 不发 UI 提示', async () => {
     let call = 0
     const chatStream = vi.fn(async function* () {
       call++
@@ -628,10 +632,10 @@ describe('serial — 被拦 @ 的 store 兜底通知', () => {
     )
   })
 
-  it('reviewer↔implementer 互 @ 成环 → depth 护栏截断，不无限递归（派活单实测项）', async () => {
+  it('reviewer↔implementer 互 @ 成环 → mention 配额截断，不无限递归（派活单实测项）', async () => {
     // 隔离 token 池：PROVIDER_TOKEN_CAP=0（不限制）。默认 cap=2 时该环会先在
     // token 池上死锁（见交接文档 OQ——executeRun 持 token 期间做 A2A 递归，
-    // 环=嵌套持有=互等）。此处只验证风暴护栏本体（depth/配额）截断环。
+    // 环=嵌套持有=互等）。此处只验证风暴护栏本体（配额）截断环。
     vi.stubEnv('PROVIDER_TOKEN_CAP', '0')
     const db = getDb()
     db.prepare(
@@ -659,9 +663,11 @@ describe('serial — 被拦 @ 的 store 兜底通知', () => {
       0
     )
 
-    // 环被截断而非无限：depth 上限 10 → 执行层数有限（护栏与边表内容无关，
-    // 作用在 policy.allowed 之后——补边不放宽风暴防护）
+    // 环被截断而非无限：截断者是 **mention 配额**（MAX_MENTIONS_PER_AGENT=5，
+    // serial.ts:678 调度点预留 + :498 执行后计数双计），**不是 depth=10 门**——
+    // 实测第 8 跳 ds猫 被 `agent-to-agent mention limit filtered` 拦下，此时
+    // depth 仅 6，远未触门。护栏作用在 policy.allowed 之后——补边不放宽风暴防护。
     expect(chatStream.mock.calls.length).toBeGreaterThan(1) // 环确实转起来了
-    expect(chatStream.mock.calls.length).toBeLessThanOrEqual(10)
+    expect(chatStream.mock.calls.length).toBe(7)
   }, 60000)
 })

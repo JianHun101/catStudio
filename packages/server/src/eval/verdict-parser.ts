@@ -5,8 +5,10 @@
  * 解析 + 落库包装（socketio.ts 钩子调用点），内部每个写操作独立 try/catch，
  * DB 异常静默丢弃——审查链主流程零阻塞（契约边界钉死）。
  *
- * 标记锚定**行首**（允许前导空白）：✅可合并 / ⚠️建议修改 / ❌需重做。
- * 防正文复述误命中——"这个方案 ✅可合并" 出现在句中不算结论。
+ * 标记锚定**行首**（归一化后——允许前导空白、markdown 装饰、「结论：」类标签
+ * 前缀）：✅可合并 / ⚠️建议修改 / ❌需重做。
+ * 防正文复述误命中——"这个方案 ✅可合并" 出现在句中不算结论（装饰剥离只做
+ * 行首/行尾，句中复述仍不匹配）。
  * 多标记取最后出现者（与 buildReviewLoopHint 同语义：结论总在消息末尾）。
  */
 
@@ -28,8 +30,40 @@ const VERDICT_MARKERS: Array<{ emoji: string; suffix: string; verdict: ReviewVer
   { emoji: '❌', suffix: '需重做', verdict: 'reject' },
 ]
 
-/** 行首三个结论 emoji 之一（bad_verdict 防御判定：有 emoji 但非标准 marker） */
-const VERDICT_EMOJI_RE = /^\s*[✅⚠️❌]/
+/** 归一化后行首三个结论 emoji 之一（bad_verdict 防御：有 emoji 但非标准 marker） */
+const VERDICT_EMOJI_RE = /^[✅⚠️❌]/
+
+/** 行首装饰：空白 / markdown 标题 / 引用 / 列表标记 / 强调开 */
+const LEADING_DECOR_RES: RegExp[] = [/^\s+/, /^#{1,6}\s+/, /^>\s?/, /^[-*+]\s+/, /^(\*\*|__)/]
+
+/** 行尾装饰：空白 / 强调闭 */
+const TRAILING_DECOR_RES: RegExp[] = [/\s+$/, /(\*\*|__)$/]
+
+/** 行首标签前缀——真实审查输出的常见形态（`结论：⚠️建议修改`） */
+const LABEL_PREFIX_RE = /^(?:审查结论|结论|判定)\s*[:：]\s*/
+
+/**
+ * 归一化单行：循环剥行首装饰 + 标签前缀 + 行尾装饰，直至稳定。
+ *
+ * 为什么需要：真实审查输出是 `**结论：⚠️建议修改**` 这类带 markdown 装饰与
+ * 标签前缀的写法，旧实现只允许前导空白 → 既不匹配 marker、也不记 bad_verdict，
+ * 静默 no-marker（2026-09-09 实证：本会话 review_verdicts 零行）。规范层
+ * （cat-roles.md）只要求「标记独立成行」，没要求「裸标记」。
+ * 剥离只做行首/行尾——句中复述仍不匹配，保留防误命中的初衷。
+ * 循环上限 8：装饰与标签交错时（`**结论：✅可合并**`）需两轮，正常 1 轮收敛。
+ */
+function normalizeVerdictLine(line: string): string {
+  let s = line
+  for (let i = 0; i < 8; i++) {
+    let next = s
+    for (const re of LEADING_DECOR_RES) next = next.replace(re, '')
+    next = next.replace(LABEL_PREFIX_RE, '')
+    for (const re of TRAILING_DECOR_RES) next = next.replace(re, '')
+    if (next === s) break
+    s = next
+  }
+  return s
+}
 
 export type VerdictParseResult =
   /** 无行首标记 → 钩子不落库不记录 */
@@ -64,13 +98,14 @@ function stripCode(content: string): string {
 export function parseReviewVerdict(content: string, targets: VerdictTarget[]): VerdictParseResult {
   const text = stripCode(content)
 
-  // 行首精确匹配标准 marker，取最后出现者（结论在末尾语义）
+  // 归一化后行首精确匹配标准 marker，取最后出现者（结论在末尾语义）
+  const lines = text.split('\n').map(normalizeVerdictLine)
   let last: { marker: (typeof VERDICT_MARKERS)[number]; line: string } | null = null
-  for (const line of text.split('\n')) {
+  for (const line of lines) {
     for (const marker of VERDICT_MARKERS) {
       const escaped = marker.emoji.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       // (?=\s|$) 行尾必须是空白或行尾——防 ✅可合并了 这类前缀误命中
-      if (new RegExp(`^\\s*${escaped}${marker.suffix}(?=\\s|$)`, 'm').test(line)) {
+      if (new RegExp(`^${escaped}${marker.suffix}(?=\\s|$)`).test(line)) {
         // 同行使多个 marker 时后者胜（正则按行测，取整行最后一次循环结果）
         last = { marker, line }
       }
@@ -78,8 +113,8 @@ export function parseReviewVerdict(content: string, targets: VerdictTarget[]): V
   }
 
   if (!last) {
-    // 无标准 marker：行首是结论 emoji 但格式漂移 → bad_verdict（不静默）
-    const hasStrayEmoji = text.split('\n').some((line) => VERDICT_EMOJI_RE.test(line))
+    // 无标准 marker：归一化后行首是结论 emoji 但格式漂移 → bad_verdict（不静默）
+    const hasStrayEmoji = lines.some((line) => VERDICT_EMOJI_RE.test(line))
     if (hasStrayEmoji) {
       return { kind: 'failure', reason: 'bad_verdict' }
     }

@@ -81,6 +81,52 @@ describe('parseReviewVerdict — 纯函数', () => {
     expect(r).toEqual({ kind: 'failure', reason: 'bad_verdict' })
   })
 
+  // ─── 装饰 / 标签前缀放宽（2026-09-09 裁决 B）───────────────────────────
+  // 规范层（cat-roles.md）只要求「标记独立成行」，未要求「裸标记」；真实审查
+  // 输出带 markdown 装饰与「结论：」标签 → 旧实现静默 no-marker。
+
+  it('真实审查输出 **结论：⚠️建议修改**（装饰 + 标签前缀）→ suggest', () => {
+    const r = parseReviewVerdict('## 审查结论\n\n**结论：⚠️建议修改**\n\n3 点需处理，见下。', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('结论：⚠️建议修改（仅标签前缀，无装饰）→ suggest', () => {
+    const r = parseReviewVerdict('结论：⚠️建议修改', [{ name: 'ds猫', isStore: false }])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('### ❌需重做（markdown 标题装饰）→ reject', () => {
+    const r = parseReviewVerdict('### ❌需重做', [{ name: 'ds猫', isStore: false }])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'reject', subject: 'ds猫', failure: null })
+  })
+
+  it('> ✅可合并（引用块装饰）→ approve', () => {
+    const r = parseReviewVerdict('> ✅可合并', TARGETS)
+    expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
+  })
+
+  it('标签前缀 + 强调闭合 **结论：✅可合并** → approve（装饰与标签交错）', () => {
+    const r = parseReviewVerdict('**结论：✅可合并**', TARGETS)
+    expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
+  })
+
+  it('**结论：✅ 可合并**（标签内空格变体）→ bad_verdict（不静默）', () => {
+    const r = parseReviewVerdict('**结论：✅ 可合并**', TARGETS)
+    expect(r).toEqual({ kind: 'failure', reason: 'bad_verdict' })
+  })
+
+  it('标签前缀后是句中复述 → no-marker（标签剥离不越过行首语义）', () => {
+    const r = parseReviewVerdict('结论：这个方案 ✅可合并，不用改。', TARGETS)
+    expect(r).toEqual({ kind: 'no-marker' })
+  })
+
+  it('代码块内的标签前缀标记 → 不误命中（剥离后 no-marker）', () => {
+    const r = parseReviewVerdict('```\n结论：✅可合并\n```\n正文无结论。', TARGETS)
+    expect(r).toEqual({ kind: 'no-marker' })
+  })
+
   it('多标记取最后出现者（结论在末尾语义，同 buildReviewLoopHint）', () => {
     const r = parseReviewVerdict('⚠️建议修改 先说问题。\n✅可合并 后来确认了', TARGETS)
     expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
@@ -159,6 +205,20 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
     const fail = failuresOf('m-bad')!
     expect(fail.reason).toBe('bad_verdict')
     expect(fail.raw).toContain('✅ 可合并')
+  })
+
+  it('装饰 + 标签前缀格式 → review_verdicts 真实落库（旧实现静默 no-marker）', () => {
+    recordReviewVerdict({
+      messageId: 'm-decorated',
+      sessionId: 's1',
+      reviewerAgentId: 'reviewer-1',
+      content: '**结论：⚠️建议修改**\n\n3 点需处理。',
+      targets: TARGETS,
+    })
+    const row = verdictsOf('m-decorated')!
+    expect(row.verdict).toBe('suggest')
+    expect(row.subject_agent_id).toBe('ds猫')
+    expect(failuresOf('m-decorated')).toBeUndefined()
   })
 
   it('no-marker → 两表都不写', () => {

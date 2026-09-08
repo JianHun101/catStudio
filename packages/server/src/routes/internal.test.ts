@@ -295,6 +295,17 @@ describe('internal route-signals', () => {
       targetCats: ['实施猫'],
       ...over,
     })
+    /** 插入 vision 图测猫（非 reviewer 边表角色）并加入会话成员——1a/1c 共用 */
+    const insertVisionCat = () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules, role)
+         VALUES ('agent-vision', '图测猫', '🐱', 'prompt', 'deepseek', 'model', 'key', '', 'high', '[]', 'vision')`
+      ).run()
+      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+        JSON.stringify(['agent-store', 'agent-impl', 'agent-reviewer', 'agent-vision'])
+      )
+    }
     const mockActive = async () =>
       vi.mocked((await import('../connectors/socketio.js')).getActiveStream).mockReturnValue({
         sessionId: 'session-1',
@@ -303,19 +314,24 @@ describe('internal route-signals', () => {
         token: VALID_TOKEN,
       })
 
-    it('验收1a：reviewer 带 triggerAuthorName（= 请求人）→ 200 入 Map（特殊边放行）', async () => {
+    it('验收1a：reviewer @ 图测猫 带 triggerAuthorName（= 请求人）→ 200 入 Map（特殊边放行）', async () => {
+      // 边表补 implementer 后，用 implementer 当 target 已无法隔离「特殊边」——
+      // 边表本身就放行（见 1b，两者的 200 无法区分归因）。改用非边表角色
+      // vision 验证例外边：只有 triggerAuthorName 命中才 200（与 1c 的无
+      // triggerAuthorName → 422 成对，否则例外边只剩负例、正例零覆盖）。
       await mockActive()
+      insertVisionCat()
       const res = await app.inject({
         method: 'POST',
         url: '/api/internal/route-signals',
-        payload: reviewerBody({ triggerAuthorName: '实施猫' }),
+        payload: reviewerBody({ targetCats: ['图测猫'], triggerAuthorName: '图测猫' }),
         headers: { 'x-signal-token': VALID_TOKEN },
       })
       expect(res.statusCode).toBe(200)
       expect(JSON.parse(res.body).ok).toBe(true)
       const signals = consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')
       expect(signals).toHaveLength(1)
-      expect(signals[0].targetCats).toEqual(['实施猫'])
+      expect(signals[0].targetCats).toEqual(['图测猫'])
     })
 
     it('验收1b：reviewer @ 实施猫 不带 triggerAuthorName → 仍 200（边表放行，不依赖触发者）', async () => {
@@ -334,16 +350,9 @@ describe('internal route-signals', () => {
       ])
     })
 
-    it('验收1c：reviewer @ 图测猫（vision，非边表角色）→ 仍 422（不放开）', async () => {
+    it('验收1c：reviewer @ 图测猫（vision，非边表角色）不带 triggerAuthorName → 仍 422（不放开）', async () => {
       await mockActive()
-      const db = getDb()
-      db.prepare(
-        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules, role)
-         VALUES ('agent-vision', '图测猫', '🐱', 'prompt', 'deepseek', 'model', 'key', '', 'high', '[]', 'vision')`
-      ).run()
-      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
-        JSON.stringify(['agent-store', 'agent-impl', 'agent-reviewer', 'agent-vision'])
-      )
+      insertVisionCat()
       const res = await app.inject({
         method: 'POST',
         url: '/api/internal/route-signals',
