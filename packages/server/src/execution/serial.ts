@@ -42,6 +42,7 @@ import {
 import { filterAllowedMentions, allowedTargetsDescription } from '../dispatch/mention-policy.js'
 import { consumeRouteSignals } from '../llm/route-signals.js'
 import { recordReviewVerdict } from '../eval/verdict-parser.js'
+import { advanceFlowAfterVerdict } from './flow-advance.js'
 import { maybeScoreSample } from '../eval/sampler.js'
 import { resolveRolePlaceholders } from './hints.js'
 import { runAgentReply } from './reply.js'
@@ -592,13 +593,30 @@ async function executeOneAgent(
         // 本块，钩子天然不触发。recordReviewVerdict 内部写操作独立 try/catch，
         // DB 异常静默丢弃——审查链主流程零阻塞（契约边界）
         if (agent.role === 'reviewer') {
-          recordReviewVerdict({
+          // 契约③ X2（flow-advance）：verdict 落盘后推进状态机 + closeout 兜底提醒。
+          // recordReviewVerdict 返回落盘的 verdict（null=无有效结论，不推进）；
+          // verdict 判据（approve→closed 推进 / suggest●reject→内容寻址不动）+ 判定式
+          // 收口是否已投（targets 含 store 猫）由 flow-advance 内判。非阻塞：内部 try/catch，
+          // fire-and-forget 语义（本钩子本身也在评审回复落库后，主流程零影响）。
+          const parsedVerdict = recordReviewVerdict({
             messageId: reply.msgId,
             sessionId,
             reviewerAgentId: agent.id,
             content: reply.content,
             targets: policy.allowed.map((a) => ({ name: a.name, isStore: a.role === 'store' })),
           })
+          const reviewedTargets = policy.allowed.map((a) => ({
+            name: a.name,
+            isStore: a.role === 'store',
+          }))
+          if (parsedVerdict) {
+            advanceFlowAfterVerdict({
+              messageId: reply.msgId,
+              sessionId,
+              verdict: parsedVerdict,
+              targets: reviewedTargets,
+            })
+          }
         }
 
         // 通知前端更新该消息的 mentions（因为在 runAgentReply 发送

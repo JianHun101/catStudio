@@ -125,10 +125,10 @@ describe('agent system prompts', () => {
 
   it('T2 铁律层承载——出口检查段含「未结束必须产出结构化投递信号」（硬信号，非软思考）', () => {
     // 承载物=铁律层出口检查段（ADR 0014 用户拍板取代「结尾思考」软触发）：流程未结束
-    // 必须产出结构化投递信号 {target,intent,ref} → post_message/行首 @。触发锚点从 skill
+    // 必须产出结构化投递信号 {targets,intent,ref} → post_message/行首 @。触发锚点从 skill
     //（软、字面死）迁移到铁律层（硬、可解析、每回复在场）。
     expect(COMMON_IRON_LAWS).toContain('未结束必须产出结构化投递信号')
-    expect(COMMON_IRON_LAWS).toContain('{target, intent, ref}')
+    expect(COMMON_IRON_LAWS).toContain('{targets, intent, ref}')
     expect(COMMON_IRON_LAWS).toContain('post_message')
     expect(COMMON_IRON_LAWS).toContain('commit_sha')
   })
