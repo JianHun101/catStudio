@@ -27,13 +27,13 @@ describe('db/repository/flowStates — recordFlowTransition / getFlowState', () 
   })
 
   it('记录后 → 读到当前状态（状态字段落库）', () => {
-    recordFlowTransition(SESSION, SHA, 'quality-gate', 'review_commit')
+    recordFlowTransition(SESSION, SHA, 'quality-gate', 'quality_gate')
     const row = getFlowState(SESSION, SHA)
     expect(row?.state).toBe('quality-gate')
   })
 
   it('同事务更新：状态字段 + 审计流水一起落（幂等 upsert 覆盖当前状态，流水 append）', () => {
-    recordFlowTransition(SESSION, SHA, 'quality-gate', 'review_commit')
+    recordFlowTransition(SESSION, SHA, 'quality-gate', 'quality_gate')
     recordFlowTransition(SESSION, SHA, 'request-review', 'receive_review')
     const row = getFlowState(SESSION, SHA)
     // 当前状态被后续迁移覆盖
@@ -45,14 +45,14 @@ describe('db/repository/flowStates — recordFlowTransition / getFlowState', () 
       )
       .all(SESSION, SHA) as Array<{ from_state: string | null; to_state: string; intent: string }>
     expect(events).toEqual([
-      { from_state: null, to_state: 'quality-gate', intent: 'review_commit' },
+      { from_state: null, to_state: 'quality-gate', intent: 'quality_gate' },
       { from_state: 'quality-gate', to_state: 'request-review', intent: 'receive_review' },
     ])
   })
 
   it('重启 in-flight 恢复：记录后重新注入 repo 实例，状态仍在且状态机可据此推导「下一步」', () => {
     // 模拟 commit 已进入主干道但审查未完成（in-flight）
-    recordFlowTransition(SESSION, SHA, 'quality-gate', 'review_commit')
+    recordFlowTransition(SESSION, SHA, 'quality-gate', 'quality_gate')
     // 重新初始化（等价重启后仓库层连接到同一持久库）
     const freshDb = getDb()
     initRepository(freshDb)
