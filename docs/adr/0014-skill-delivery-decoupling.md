@@ -58,7 +58,7 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于 skill-l
 
 **状态机边界**：只管**主干道**（机械确定，如 quality-gate PASS → 自动触发 request-review）。岔道——实现猫卡住@求助、审查❌打回、需求需澄清——**不进状态机**，走判断式投递（agent 自主）；否则状态机要在链定义堆异常转移规则，复杂度爆炸。
 
-- **❌打回语义（OQ1，边界归 T6）**：实现是**内容寻址**——❌打回 → 作者重新实现 → 产出**新 commit_sha** → 状态机在新键、新 quality-gate 入口看到；原被打回的 `(session_id, commit_sha)` 行**自然留作历史**，`recordFlowTransition` 对**同一 sha** 是 upsert 幂等、不覆盖。此「靠新 sha 自解」为隐含假设，ADR 曾一字未提；边界（❌打回后是否需清/重置 `flow_state` 键语义）**归 T6 定义**，本 ADR 只声明由内容寻址自解、旧行留史。
+- **❌打回语义（OQ1，边界归 T6）**：实现是**内容寻址**——❌打回 → 作者重新实现 → 产出**新 commit_sha** → 状态机在新键、新 quality-gate 入口看到；原被打回的 `(session_id, commit_sha)` 行**自然留作历史**——对**同一 sha**，`recordFlowTransition` 是 upsert：`flow_states` 状态**字段被覆盖**（`ON CONFLICT DO UPDATE SET state`），历史留痕靠 `flow_state_events` **审计流水 append**（每条历史迁移各自留一行，该表不覆盖）。故「旧行留史」由审计流水兜住；状态字段是覆盖当前事实、不保留旧值。此「靠新 sha 自解」为隐含假设，ADR 曾一字未提；边界（❌打回后是否需清/重置 `flow_state` 键语义）**归 T6 定义**，本 ADR 只声明由内容寻址自解、旧行留史。
 
 ## 5. Consequences
 
