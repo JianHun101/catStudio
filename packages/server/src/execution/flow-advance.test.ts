@@ -4,8 +4,8 @@
  * 验证 verdict 落盘后的状态机推进 + closeout 兜底提醒（非阻塞、DB 异常静默）：
  * - 反查链：verdict message → task_id（源链 trace）→ execution_logs.commit_hash
  * - approve → 沿主干道推进至 closed（recordFlowTransition 每步留审计）
- * - 判定式收口已投（targets 含 store 猫）→ 不重复补 closeout 信号
- * - 判定式收口未投 → 派生 closeout 信号（buildDeliverySignal）
+ * - 判定式收口已投（targets 含 store 猫）→ 不重复补 closeout 提醒
+ * - 判定式收口未投 → 真正投递 closeout 提醒（ingest 落库 @店长 + 源链 task_id）
  * - suggest/reject → 打回内容寻址，状态机不动
  * - 纯会话无 commit 链路（task_id 空 / 执行行无 commit_hash）→ 跳过不抛错
  */
