@@ -1,6 +1,6 @@
 # ADR 0014: Skill 与投递解耦——skill 管「怎么把活做对」，投递管「谁接下棒」
 
-> **背景**：猫咖 skill 体系反复出现的病灶（request-review 信号停用、@审查者 静默丢单、DS 猫自发 @ + hook 又触发一次）不是单点 bug，而是**一类结构性病根**——「投递」被编进了 skill 内容里。本 ADR 从根上拆开这两个正交关注点，并明确这是对既有 `skill-consumption-architecture`（server 零注入 + CLI file-scan）的一次方向性延续（注入侧已定，见 skill-loader.ts），但把**投递**提到与 skill 并列的一等关注点。
+> **背景**：猫咖 skill 体系反复出现的病灶（request-review 信号停用、@审查者 静默丢单、DS 猫自发 @ + hook 又触发一次）不是单点 bug，而是**一类结构性病根**——「投递」被编进了 skill 内容里。本 ADR 从根上拆开这两个正交关注点，并明确这是对既有 `skill-consumption-architecture`（server 零注入 + CLI file-scan）的一次方向性延续（注入侧已定，见 scripts/mcp-server-utils.mjs 的 read_skill/list_skills），但把**投递**提到与 skill 并列的一等关注点。
 > **状态**：定稿，三契约（§4）已逐项钉死（契约①轻信号、承载于铁律层出口检查段 / 契约②确定性推导为主 / 契约③字段+日志审计缝合）。投递外移拆单已放行；经用户拍板修订——**去两级路径注入、request-review 作为独立路由层去掉（内容资产并入基础技能，投递由 post-commit hook + code-review 承担）、catstudy 投递定制层（handoff/request-review）移除、契约③状态机进本批闭环（完整闭环测试）**。
 
 ## 1. 问题：投递被编进 skill 内容
@@ -13,7 +13,7 @@
 焊合招来的两层麻烦，都被实测钉死过：
 
 1. **与铁律一冲突**：铁律一（`manifest.yaml:353`）「审查由 post-commit hook 机械触发、agent 只补填不自行发起」，skill 却说「作者自己 @审查者」——内容自打架。
-2. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（`execution/skill-loader.ts` 注入晚于 `reply.ts:417` 的 `resolveRolePlaceholders`），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 修复停止 request-review 信号的直接原因）。
+2. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（旧注入层 skill 注入晚于 `reply.ts:417` 的 `resolveRolePlaceholders`），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 修复停止 request-review 信号的直接原因）。
 
 **这证明方向错了**：把路由写死在内容里，必然在某个环节解析炸、静默丢单（P1）或双触发（DS 自发 + hook 重复）。修 P1（标注 TODO 停用）是止血，不是根治。
 
@@ -24,7 +24,7 @@
 | **skill** | 领域知识 / 流程规程 | 「这个活**怎么**做对」——spec-gate 检查清单、quality-gate 自查门、grilling 压测法 | 单个 agent 自身，不关心下家是谁 |
 | **投递**  | 控制流 / 组织拓扑   | 「这单**谁**接下棒」——下一个 agent 是谁、何时切、何时请审/请收口                 | 会话图全貌，与领域内容无关      |
 
-skill 依赖：离线、可版本化、可按 role 注入（已实现于 skill-loader）。投递依赖：运行时、拓扑相关、必须确定性可复算（否则无法防重投/漏投）。
+skill 依赖：离线、可版本化、可按 role 注入（已实现于注入侧 mcp-server-utils）。投递依赖：运行时、拓扑相关、必须确定性可复算（否则无法防重投/漏投）。
 
 ## 3. 决策：投递外移除 skill，作为每次对话收尾/外层
 
@@ -64,7 +64,7 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于 skill-l
 
 - **P1 类 bug 从根上消失**：路由不再写死在 skill 内容里，「@审查者 字面不被解析 → 静默丢单」这一整类不再产生。
 - **`request-review` 独立路由层移除**：投递外移后请求审查由 post-commit hook 机械触发 + code-review 承担，`request-review` 不再作为独立技能登记（索引/目录移除）；其内容资产（review-request 模板、双轴 Reviewer Checklist 判据）并入共享 `skills/refs/review-request-template.md` 与 quality-gate 自查门。**状态机 `FLOW_MAIN_CHAIN` 仍保留 `request-review` 递送状态**（审查链的机械驱动），仅技能层不再登记该名。**无需两级路径注入**（用户拍板剖除——投递外移后为覆盖坏 base 路由而生的注入补丁失去存在理由）。
-- **skill 白名单需对齐猫咖化流程链**（后续项，见 §6）：`request-review` 已从技能层移除（不再入白名单/索引，投递走 post-commit hook 机械触发）；白名单重构面向 `{grilling, to-spec, spec-gate, to-tickets, implement, quality-gate, receive-review, session-handoff}`。当前 `SUPPORTED_SKILLS`（skill-loader.ts:33-38）= `[spec-gate, quality-gate, implement, request-review]`，与 manifest 满链差距明显——`grilling/to-spec/to-tickets/receive-review` 缺口、`wayfinder` 按设计排除（`disable-model-invocation`）。投递外移后白名单判据也应重构：白名单按「领域内容是否已猫咖化 + 流程链直接相关」，投递规则从 skill 内容剥离后不再参与白名单判定。
+- **skill 白名单需对齐猫咖化流程链**（后续项，见 §6）：`request-review` 已从技能层移除（不再入白名单/索引，投递走 post-commit hook 机械触发）；白名单重构面向 `{grilling, to-spec, spec-gate, to-tickets, implement, quality-gate, receive-review, session-handoff}`。当前注入侧 `SKILL_CATALOG`（scripts/mcp-server-utils.mjs:266）= 8 技能流程链 `{grilling, to-spec, spec-gate, to-tickets, implement, quality-gate, receive-review, session-handoff}`，request-review 已随流程链移除；`wayfinder` 按设计排除（`disable-model-invocation`）。投递外移后白名单判据也应重构：白名单按「领域内容是否已猫咖化 + 流程链直接相关」，投递规则从 skill 内容剥离后不再参与白名单判定。
 
 ## 6. 后续项（用户明确要求记录）
 

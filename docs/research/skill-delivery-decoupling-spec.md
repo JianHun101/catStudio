@@ -4,9 +4,9 @@
 
 ## Problem Statement
 
-投递方向（「这单给谁」）焊死在 skill 内容里——`request-review` 教「作者**@审查者**」（base `skills/request-review/SKILL.md:68`、描述 L3 `@mentioning the paired reviewer`），`handoff` 教「末尾行首**@审查者 请审查**」（catstudy `handoff/SKILL.md:67`）。这一焊，三类病根实测集齐（`execution/skill-loader.ts:87-94` 注释自证，request-review 因之停用）：
+投递方向（「这单给谁」）焊死在 skill 内容里——`request-review` 教「作者**@审查者**」（base `skills/request-review/SKILL.md:68`、描述 L3 `@mentioning the paired reviewer`），`handoff` 教「末尾行首**@审查者 请审查**」（catstudy `handoff/SKILL.md:67`）。这一焊，三类病根实测集齐（旧注入层注释自证，request-review 因之停用）：
 
-1. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（`execution/skill-loader.ts` 注入晚于 `reply.ts:417` 的 `resolveRolePlaceholders`），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 的直接原因）。
+1. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（旧注入层 skill 注入晚于 `reply.ts:417` 的 `resolveRolePlaceholders`），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 的直接原因）。
 2. **与铁律一冲突**：铁律说「审查由 post-commit hook 机械触发、agent 只补填」，skill 却说「作者自己 @审查者」——内容自打架。
 3. **双触发**：DS 猫自发 @ + hook 再追一次。
 
@@ -77,7 +77,7 @@
 
 - `packages/server/src/config/iron-laws.ts` — 共通铁律层出口检查段承载投递信号（**承载物**）。铁律拼入 `execution/reply.ts:407-410` 的 `baseSystemPrompt`、经 `reply.ts:417` `resolveRolePlaceholders`。
 - `packages/server/src/execution/reply.ts` — 投递信号产出 + 消费的接缝；`baseSystemPrompt`/`finalSystemPrompt` 组装（L407-442）；skill 块 append 在 L622（晚于替换——这正是字面 @ 不被解析的根）。
-- `packages/server/src/execution/skill-loader.ts` — `STAGE_SIGNALS`（L78-95）request-review 信号启用；`loadSkill`（L164-175，单级路径，**不改**——不建两级注入）；`SUPPORTED_SKILLS`（L33-38）保留 request-review。
+- `scripts/mcp-server-utils.mjs` — `read_skill`/`list_skills`/`SKILL_CATALOG`（P2 流程链 8 技能；注入层改造后 server 不再全文注入，模型经 read_skill 自取正文，request-review 已从流程链移除——单级路径，**不建两级注入**）。
 - `skills/request-review/SKILL.md`（base）— 剥「选择审查者/@审查者/@mentioning the paired reviewer」路由；`refs/review-request-template.md` 相对引用**悬空**，修正为共享 `skills/refs/review-request-template.md`。
 - `skills/catstudy/handoff/SKILL.md` — 剥「行首@审查者 请审查」；`../../refs/...` 统一指向共享 `skills/refs/`。
 - `skills/catstudy/request-review/SKILL.md`、`skills/catstudy/handoff/SKILL.md` — 投递型定制层：**淘汰**（投递外移后 no reason）；领域型重写（`quality-gate`、`receive-review`）与共享 `cat-roles.md` 保留。
@@ -117,4 +117,4 @@
 - 去两级注入 + 启用 base + 淘汰老投递版：用户拍板（投递外移后注入补丁无存在理由）。
 - 契约③状态机进本批：用户要求「完整闭环测试」，不标保留缺口。
 - refs 资产位置：`skills/refs/review-request-template.md` 为唯一共享副本，base 版本地引用悬空（已核实）。
-- 路径勘正：skill-loader/reply 实际在 `packages/server/src/execution/`（ADR 旧引用 `src/` 已一并勘正）。
+- 路径勘正：reply 实际在 `packages/server/src/execution/`、注入侧在 `scripts/mcp-server-utils.mjs`（ADR 旧引用 `src/` 已一并勘正）。
