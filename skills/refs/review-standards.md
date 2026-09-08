@@ -91,3 +91,7 @@
 - **表演性同意**（对称于 receive-review 的禁区）——「写得不错」「lgtm」而无逐条核实，等于没审
 - **只给「不够优雅」不给证据** → 每条发现附具体文件/行/hunk，能引用规范/坏味道名就引用
 - **硬违规与判断标签混为一谈** → 文档化规范违规可报硬；坏味道永远是判断，且文档规范优先于基线
+
+## cat-study 项目特有 Diff 检查点
+
+通用坏味道基线之上，cat-study 有一套**项目特有 diff 检查点**（CJK 正则边界、`skill_modules` 清空、`retractionRequests`/`activeStreams` 清理配对、`agentSlots.currentTriggerMessageId`、`.push-gate` 拦截、`parseInt('0')` 零值吞、`seed.ts --reset` FK 顺序、Socket.IO room 前缀一致性、Window ② 撤回保护等）。审查扫描 diff 时按改动范围选择性套用，完整清单见 **`refs/catstudy-review-checklist.md`**（本文件聚焦审查标准定义，逐条清单独立存放，避免两份内容漂移）。
