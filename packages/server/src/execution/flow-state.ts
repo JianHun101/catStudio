@@ -11,7 +11,13 @@
  *
  * 本模块纯函数、无 DB 依赖——只有状态名、主链序、下一步推导。注入链路消费方
  * （routes/db）自行决定何时记录状态、何时取派生下一步。
+ *
+ * intent 谱对齐（P0 投递契约对齐）：intent 值域单源取自 delivery-signal.ts 的
+ * DELIVERY_INTENTS 契约常量——状态机派生谱 === 契约值域（结构性对齐，编译期
+ * 保证，见单测 bijection）。弃 T1 旧注释 request_review / close_out 变体。
  */
+
+import { DELIVERY_INTENTS, type DeliveryIntent } from './delivery-signal.js'
 
 /** 主干道状态序（值取自 ADR 契约③示例：quality-gate / request-review／receive-review）。 */
 export const FLOW_MAIN_CHAIN = [
@@ -27,7 +33,7 @@ export type FlowStage = (typeof FLOW_MAIN_CHAIN)[number]
 /** 派生「下一步」：{ stage: 下一步达成后的状态, intent: 动作语义（供投递信号 intent 字段）} */
 export interface NextStep {
   stage: FlowStage
-  intent: string
+  intent: DeliveryIntent
 }
 
 /**

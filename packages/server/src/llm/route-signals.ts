@@ -21,6 +21,11 @@ export interface RouteSignal {
   msgId: string
   targetCats: string[]
   clientMessageId?: string
+  /** 投递语义（供审计）——定位键分工：ref=commit_sha 审查事件主键（delivery-signal 层）
+   *  vs msgId 流内标签，各司其职；intent 承载「为什么被叫起来」。当前仅类型契约——
+   *  populate 留 T4/T5（状态机派生谱对齐后由 flow_state 服务写入，模型侧受
+   *  mcp-server.mjs 护栏③冻结 schema 不直接传）。 */
+  intent?: string
 }
 
 /** 存储：agentId → 该 agent 的信号列表（按到达序） */
@@ -34,6 +39,8 @@ export function storeRouteSignal(signal: RouteSignal): void {
     // 同流重复投递（模型多次调 post_message）→ 目标并集，去重保序
     same.targetCats = [...new Set([...same.targetCats, ...signal.targetCats])]
     same.clientMessageId = signal.clientMessageId ?? same.clientMessageId
+    // intent 携带语义（同 clientMessageId 覆盖取向：后投的 intent 优先，供审计）
+    same.intent = signal.intent ?? same.intent
     return
   }
   existing.push(signal)
