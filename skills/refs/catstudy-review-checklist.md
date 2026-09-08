@@ -2,11 +2,11 @@
 
 供 diff 审查（code-review）实际扫描时参照的**检查项列表**。原宿主 `skills/catstudy/handoff/SKILL.md` 随投递层移除（handoff 改名 session-handoff），此为内容资产迁移——**审查判据必须保留文件载体**，不能只剩审查者记忆兜底。
 
-> 来源：`skills/catstudy/handoff/SKILL.md`（88... 移除）「Checklist 自动生成规则」段。投递型定制层 `catstudy/request-review` 亦移除，属纯投递路由，无领域资产丢失。
+> 来源：`skills/catstudy/handoff/SKILL.md`（于 `8738f8b` 移除，前一状态为 `8738f8b~1`）「Checklist 自动生成规则」段。投递型定制层 `catstudy/request-review` 亦移除，属纯投递路由，无领域资产丢失。
 
 ## 用途
 
-审查者/作者在扫描 diff 时按改动类型命中对应检查项。属于**领域审查内容**，与投递机制无关，故独立保存，不随投递层删除。被 base `quality-gate` / `code-review` 或 `catstudy/quality-gate` 引用（见此处引用关系）。
+审查者/作者在扫描 diff 时按改动类型命中对应检查项。属于**领域审查内容**，与投递机制无关，故独立保存，不随投递层删除。引用入口为 `review-standards.md` 的「cat-study 项目特有 Diff 检查点」段（catch-all，指向本文件）。
 
 ## 分类：通用检查点
 
