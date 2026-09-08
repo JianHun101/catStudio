@@ -1,6 +1,6 @@
 ---
 name: receive-review
-description: 接收并处理审查反馈。逐项核实审查发现，按严重度分类处理，拒绝表演性同意。Use when another agent's review feedback arrives after a /request-review. Not for review conclusions that are mergeable (nothing to fix), or when you are the reviewer. Output a fix confirmation table with per-item status and test results.
+description: 接收并处理审查反馈。逐项核实审查发现，按严重度分类处理，拒绝表演性同意。Use when another agent's review feedback arrives after a code review. Not for review conclusions that are mergeable (nothing to fix), or when you are the reviewer. Output a fix confirmation table with per-item status and test results.
 ---
 
 # receive-review
@@ -10,12 +10,12 @@ description: 接收并处理审查反馈。逐项核实审查发现，按严重�
 ## 何时使用
 
 - 收到其他猫的审查反馈时
-- `/request-review` 后审查者返回了结论
+- 审查（code-review）后审查者返回了结论
 
 ## 不使用的情况
 
 - 审查结论是 ✅ 可以合并（无需处理）
-- 自己是审查者（用 `/request-review` 返回结果，不是 receive）
+- 自己是审查者（用 code-review 返回结果，不是 receive）
 
 ## 执行步骤
 
@@ -117,8 +117,8 @@ description: 接收并处理审查反馈。逐项核实审查发现，按严重�
 
 ## 与其他 skill 区别
 
-| skill          | 区别                                                                         |
-| -------------- | ---------------------------------------------------------------------------- |
-| request-review | 互为对端：request-review 发出审查请求，receive-review 接收并处理反馈         |
-| quality-gate   | quality-gate 是作者自查（提交前）；receive-review 是收到他人审查后的处理流程 |
-| code-review    | code-review 是执行双轴审查产出结论；receive-review 是结论的接收方            |
+| skill        | 区别                                                                         |
+| ------------ | ---------------------------------------------------------------------------- |
+| code review  | code-review 产生审查结论，receive-review 接收并处理反馈                      |
+| quality-gate | quality-gate 是作者自查（提交前）；receive-review 是收到他人审查后的处理流程 |
+| code-review  | code-review 是执行双轴审查产出结论；receive-review 是结论的接收方            |

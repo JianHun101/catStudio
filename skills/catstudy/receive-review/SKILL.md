@@ -3,7 +3,7 @@ name: catstudy-receive-review
 description: >
   处理审查者反馈：Red→Green 修复 + 技术论证（禁止表演性同意）。
   Use when: 收到 review 结果、审查者提了 P1/P2、需要处理反馈。
-  Not for: 发 review 请求（用 catstudy-request-review）、自检（用 catstudy-quality-gate）。
+  Not for: 发 review 请求（review 由 post-commit hook 自动触发）、自检（用 catstudy-quality-gate）。
   Output: 逐项修复确认。
 triggers:
   - 'review 结果'
@@ -134,5 +134,4 @@ Commit: {sha} — {message}
 | Skill                                   | 关注点                      | 时机             |
 | --------------------------------------- | --------------------------- | ---------------- |
 | `catstudy-quality-gate`                 | 自己检查自己（需求 + 证据） | 提 review 之前   |
-| `catstudy-request-review`               | 发出 review 请求            | 自检通过之后     |
 | **catstudy-receive-review（本 skill）** | 处理审查者的反馈            | 收到 review 之后 |

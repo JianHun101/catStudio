@@ -35,7 +35,7 @@ skills:
       - 'break-tunnel-vision'
       - 'diagnosing-bugs'
       - 'session-summary'
-      - 'handoff'
+      - 'session-handoff'
 
   break-tunnel-vision:
     source: self
@@ -101,40 +101,15 @@ skills:
       - '提交前检查'
       - '检查一下代码'
     output: 'Quality Gate Report（通过/未通过 + 逐项结果）'
-    next: 'request-review'
+    next: 'review（post-commit hook 自动触发 code-review 承担）'
     refs:
       - 'CODING_STANDARDS.md'
       - 'refs/review-standards.md'
 
-  request-review:
-    source: self
-    use_when: |
-      work is complete and verified, quality-gate passed, and a review is needed.
-    not_for: |
-      reviewing code yourself (use code-review), receiving feedback (use receive-review), or requesting before quality-gate passes.
-    category: '审查流程'
-    description: |
-      打包完成的工作并发送审查请求。
-      按照审查配对规则选择审查者，使用标准模板格式。
-    triggers:
-      - '发起审查'
-      - 'request review'
-      - '让人看看'
-      - 'review 一下'
-    output: '审查请求文档（按模板格式 + @审查者）'
-    next: 'receive-review'
-    refs:
-      - 'refs/review-request-template.md'
-      - 'refs/shared-rules.md'
-    preconditions:
-      - 'quality-gate PASS'
-      - 'pnpm test 全过'
-      - 'pnpm lint 无新增错误'
-
   receive-review:
     source: self
     use_when: |
-      another agent's review feedback arrives after a /request-review.
+      another agent's review feedback arrives after a code review.
     not_for: |
       review conclusions that are mergeable (nothing to fix), or when you are the reviewer.
     category: '审查流程'
@@ -147,7 +122,7 @@ skills:
       - '审查反馈'
       - '@审查者 的审查结果'
     output: '修复确认表（逐项状态 + 测试结果）'
-    next: 'request-review (如需重新审查)'
+    next: 'implement (❌打回重做)'
     refs:
       - 'refs/review-standards.md'
       - 'refs/shared-rules.md'
@@ -157,7 +132,7 @@ skills:
     use_when: |
       the session's work is finished and the user wants a summary document.
     not_for: |
-      handing work to another agent across sessions (use handoff), or a recap without the strict five-section format.
+      handing work to another agent across sessions (use session-handoff), or a recap without the strict five-section format.
     category: '文档'
     description: |
       自研技能：生成 CatStudy 格式的结构化会议总结
@@ -203,12 +178,12 @@ skills:
     not_for: |
       quick interviews with no doc output (use grill-me).
     category: '外部技能'
-  handoff:
+  session-handoff:
     source: mattpocock
     use_when: |
       work crosses sessions, another agent needs your context, or you are handing a task to a fresh session.
     not_for: |
-      sending a review request for finished work (use request-review), or for project-internal summaries (use session-summary).
+      sending a review request for finished work (review is auto-triggered by post-commit hook), or for project-internal summaries (use session-summary).
     category: '外部技能'
   implement:
     source: mattpocock
@@ -317,20 +292,15 @@ skills:
     category: '外部技能'
 
 # ── 项目定制层（catstudy/，随迁保留，一期不切路由）──
-# 4 个 catstudy-* 定制 skill 与顶级同名 skill 是两套不同定义：
+# 2 个 catstudy-* 定制 skill 与顶级同名 skill 是两套不同定义：
 # 当前 manifest 路由顶级通用版；定制版转正评估列二期。
-# catstudy/ 内部条目不参与顶级计数（28/28），由 check-manifest 单独校验前缀。
+# catstudy/ 内部条目不参与顶级计数（27/27），由 check-manifest 单独校验前缀。
+# 投递型定制层（handoff/request-review）已按 ADR-0014 §3 移除——投递外移后其存在理由消亡，内容并入基础技能。
 catstudy:
   # merged_from：合并来源登记（catstudy 定制层随迁保留，转正评估列二期）
   catstudy-quality-gate:
     source: self
     merged_from: 'quality-gate（顶级通用版 + 猫咖定制）'
-  catstudy-handoff:
-    source: self
-    merged_from: 'handoff（顶级 mattpocock 版 + 猫咖定制）'
-  catstudy-request-review:
-    source: self
-    merged_from: 'request-review（顶级通用版 + 猫咖定制）'
   catstudy-receive-review:
     source: self
     merged_from: 'receive-review（顶级通用版 + 猫咖定制）'
@@ -339,13 +309,13 @@ catstudy:
 # 大块工作 wayfinder 起图 → grilling/to-spec 出 spec → spec-gate 前门放行 → to-tickets 拆票 → implement → quality-gate（进 review 链）
 # spec-gate 是需求→实施之间的机械门：需求可证伪 + 契约钉死才放行；前段 skill 靠 use_when 衔接
 # 审查流程链（后半个门）
-# quality-gate → request-review → receive-review → (loop until ✅)
+# quality-gate → （post-commit hook 自动触发 code-review 审查）→ receive-review → (loop until ✅)
+# 审查请求由 hook 机械触发 + code-review 承担，不再有独立的 request-review 技能（ADR-0014 §3）。
 pipeline:
   dev:
     - spec-gate
   review:
     - quality-gate
-    - request-review
     - receive-review
 
 # 三条铁律

@@ -4,7 +4,7 @@
  *
  * 原生 JSON-RPC 2.0 stdio 实现 MCP 最小子集（零依赖，Phase 0 spike 已验证协议层）：
  *   - initialize        → 协议握手
- *   - tools/list        → 暴露 MCP_TOOLS（工具定义在 mcp-server-utils.mjs：post_message / search_knowledge / query_db / query_session_messages / list_session_members / request_user_action / create_pr）
+ *   - tools/list        → 暴露 MCP_TOOLS（工具定义在 mcp-server-utils.mjs：post_message / search_knowledge / query_db / query_session_messages / list_session_members / request_user_action / create_pr / read_skill / list_skills）
  *   - tools/call        → 参数校验 → POST 内部端点 → ACK / 错误文本（含 reason）
  *   - ping / 其他       → 空 result / method not found
  *   - notifications（无 id 消息）→ 不回复
@@ -44,6 +44,7 @@ import {
   validateUserRequestParams,
   validateCreatePrParams,
   validateQuerySessionMessagesParams,
+  validateReadSkillParams,
 } from './mcp-server-utils.mjs'
 import {
   TOOL_NAME,
@@ -53,7 +54,11 @@ import {
   LIST_SESSION_MEMBERS_TOOL_NAME,
   REQUEST_USER_ACTION_TOOL_NAME,
   CREATE_PR_TOOL_NAME,
+  READ_SKILL_TOOL_NAME,
+  LIST_SKILLS_TOOL_NAME,
   MCP_TOOLS,
+  readSkill,
+  listSkills,
 } from './mcp-server-utils.mjs'
 
 const SERVER_INFO = { name: 'catstudy', version: '0.1.0' }
@@ -514,6 +519,10 @@ async function listSessionMembers() {
   }
 }
 
+// ─── 技能懒加载（注入层改造：模型经 read_skill/list_skills 自取，server 不再塞全文）───
+// 读盘原语（findRepoRoot/getSkillsRoot/readSkill/listSkills）集中在 mcp-server-utils.mjs
+// （无 shebang，供 vitest 直接 import 做读盘契约测试）；本文件的 tools/call 只 import 调用。
+
 // 直接运行时才启动 stdio server——vitest import 本模块（validateSearchParams
 // 单测）不挂 stdin listener（resolve 兼容相对路径调用 node scripts/mcp-server.mjs）
 const isDirectRun =
@@ -769,11 +778,52 @@ if (isDirectRun) {
         })
         return
       }
+      if (name === READ_SKILL_TOOL_NAME) {
+        const args = params?.arguments ?? {}
+        const parsed = validateReadSkillParams(args)
+        if (!parsed.ok) {
+          send(rpcError(id, -32602, parsed.reason))
+          return
+        }
+        const result = readSkill(parsed.name)
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: result.ok ? result.text : `❌ 技能读取失败：${result.reason}`,
+              },
+            ],
+            isError: !result.ok,
+          },
+        })
+        return
+      }
+      if (name === LIST_SKILLS_TOOL_NAME) {
+        // 无参数工具——readSkill 的游标兜底：catalog 已嵌 read_skill 描述，本工具是冗余。
+        const result = listSkills()
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: result.text,
+              },
+            ],
+            isError: false,
+          },
+        })
+        return
+      }
       send(
         rpcError(
           id,
           -32602,
-          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge、query_db、query_session_messages、list_session_members、request_user_action 和 create_pr 七个工具）`
+          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge、query_db、query_session_messages、list_session_members、request_user_action、create_pr、read_skill 和 list_skills 九个工具）`
         )
       )
       return

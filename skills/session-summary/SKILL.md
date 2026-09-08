@@ -1,6 +1,6 @@
 ---
 name: session-summary
-description: Generate a structured summary of the current session's changes in the CatStudy project format (What/Why/Tradeoff/Open Questions/Next Action). Use when the session's work is finished and the user wants a summary document. Not for handing work to another agent across sessions (use handoff), or a recap without the strict five-section format. Output a docs/sessions/cat-study-<slug>-summary.md file with exactly the five sections.
+description: Generate a structured summary of the current session's changes in the CatStudy project format (What/Why/Tradeoff/Open Questions/Next Action). Use when the session's work is finished and the user wants a summary document. Not for handing work to another agent across sessions (use session-handoff), or a recap without the strict five-section format. Output a docs/sessions/cat-study-<slug>-summary.md file with exactly the five sections.
 ---
 
 When the user asks to summarize the current session, generate a session work, or create a summary document, produce a markdown file following the strict format established by `cat-study-multi-agent-summary.md`.
@@ -81,7 +81,7 @@ After writing the summary file, tell the user the file path (relative to project
 
 ## 与其他 skill 区别
 
-| skill          | 区别                                                                                                        |
-| -------------- | ----------------------------------------------------------------------------------------------------------- |
-| handoff        | session-summary 产项目内结构化总结（docs/sessions/）；handoff 产跨会话交接文档（OS 临时目录，给新会话接手） |
-| request-review | session-summary 总结「做了什么」；request-review 请求「审查做得对不对」，两者文档用途不同                   |
+| skill           | 区别                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------- |
+| session-handoff | session-summary 产项目内结构化总结（docs/sessions/）；session-handoff 产跨会话交接文档（OS 临时目录，给新会话接手） |
+| code review     | session-summary 总结「做了什么」；code review 审查「做得对不对」，两者文档用途不同                                  |

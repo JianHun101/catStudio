@@ -14,6 +14,9 @@
  *    import 使用——tools/list 返回的正是本文件 MCP_TOOLS，测量即真值。
  */
 
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+
 // ─── 工具名常量 ──────────────────────────────────────────
 export const TOOL_NAME = 'post_message'
 export const SEARCH_TOOL_NAME = 'search_knowledge'
@@ -22,6 +25,8 @@ export const QUERY_SESSION_MESSAGES_TOOL_NAME = 'query_session_messages'
 export const LIST_SESSION_MEMBERS_TOOL_NAME = 'list_session_members'
 export const REQUEST_USER_ACTION_TOOL_NAME = 'request_user_action'
 export const CREATE_PR_TOOL_NAME = 'create_pr'
+export const READ_SKILL_TOOL_NAME = 'read_skill'
+export const LIST_SKILLS_TOOL_NAME = 'list_skills'
 
 /**
  * 工具定义（tools/list 常驻载荷）——inputSchema 结构钉死契约：
@@ -233,6 +238,70 @@ const LIST_SESSION_MEMBERS_TOOL = {
   },
 }
 
+// ─── 技能懒加载（注入层改造：server 不再塞全文进 prompt，模型经 read_skill 自取）──────
+// 技能名路径守卫（readSkill 读盘前第二道防御——名字只允许小写字母/数字/连字符，防空穿越）。
+// 虽 validateReadSkillParams 已把 name 收进 SKILL_CATALOG，readSkill 读盘前仍用它做第二道防御。
+export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/
+
+/**
+ * P2=A 流程链技能集合（注入层目录——catalog 嵌进 read_skill 描述、不再注入 prompt）。
+ * 判据：开发流程链（wayfinder 起图 → grilling/to-spec → spec-gate → to-tickets → implement
+ * → quality-gate → receive-review） + 会话压缩 session-handoff（handoff 重命名）。
+ * request-review 已移除（递送语义归状态机 FLOW_MAIN_CHAIN，见 execution/flow-state.ts——
+ * 该状态保留，仅技能身份连根拔掉）；wayfinder 排除（disable-model-invocation 是设计）。
+ * session-handoff 目录由交付单 B 重命名 handoff 落地——清单先行，readSkill 读缺返回错误文本。
+ */
+export const FLOW_CHAIN_SKILLS = [
+  'grilling',
+  'to-spec',
+  'spec-gate',
+  'to-tickets',
+  'implement',
+  'quality-gate',
+  'receive-review',
+  'session-handoff',
+]
+
+/** 技能名 → 一句话说明（catalog 清单，read_skill 描述 + list_skills 共用同一本）。 */
+export const SKILL_CATALOG = {
+  grilling: '压测计划/需求：用提问把粗糙计划压出可证伪需求理解',
+  'to-spec': '把 grilling 出的需求写成可证伪 spec',
+  'spec-gate': '需求进实施前的自查门（可证伪性/契约/验收，前半个门）',
+  'to-tickets': '把 spec 拆成工单',
+  implement: '按 spec/工单实施，产出满足验收的代码',
+  'quality-gate': '代码提交审查前的自查门（后半个门）',
+  'receive-review': '接收并处理审查反馈（P1/P2/P3 分类）',
+  'session-handoff': '会话压缩交接（跨会话把上下文传给下一棒）',
+}
+
+const READ_SKILL_TOOL = {
+  name: READ_SKILL_TOOL_NAME,
+  description:
+    '读取猫咖技能正文（按名取 skills/<名>/SKILL.md 全文；懒加载——模型按需自取，不再由 server 全文注入 prompt）。' +
+    'name 必须在技能清单内：' +
+    FLOW_CHAIN_SKILLS.join(' / ') +
+    '。' +
+    '技能正文即该技能定义（含使用时机/输出/前置门槛），模型在对应流程阶段按需调用本工具自取。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: '技能名（技能清单内，kebab-case）' },
+    },
+    required: ['name'],
+  },
+}
+
+const LIST_SKILLS_TOOL = {
+  name: LIST_SKILLS_TOOL_NAME,
+  description:
+    '列出猫咖技能清单（P2 流程链 8 技能 + 一句话说明）。' +
+    'catalog 已内嵌 read_skill 描述，本工具是冗余兜底——模型不确定有哪些技能时可先调本工具。',
+  inputSchema: {
+    type: 'object',
+    properties: {},
+  },
+}
+
 /** tools/list 常驻载荷（顺序即 tools/list 返回顺序；resident 体量 = JSON.stringify 本数组） */
 export const MCP_TOOLS = [
   POST_MESSAGE_TOOL,
@@ -242,6 +311,8 @@ export const MCP_TOOLS = [
   LIST_SESSION_MEMBERS_TOOL,
   REQUEST_USER_ACTION_TOOL,
   CREATE_PR_TOOL,
+  READ_SKILL_TOOL,
+  LIST_SKILLS_TOOL,
 ]
 
 /**
@@ -491,5 +562,98 @@ export function validateQuerySessionMessagesParams(args) {
     to: to?.trim() || undefined,
     kinds,
     agentIdFilter: agentIdFilter?.trim() || undefined,
+  }
+}
+
+/**
+ * read_skill 参数校验（纯函数，供单测——scripts/mcp-server.test.js）。
+ * 契约：name 必填非空字符串且 ∈ SKILL_CATALOG（P2=A 流程链清单）。
+ * 收进 SKILL_CATALOG 即双重作用：一是把模型可自取的范围钉死在流程链（wayfinder 排除），
+ * 二是名单内名字全是 kebab-case，天然满足 SKILL_NAME_RE 路径守卫（读盘前 mcp-server.mjs
+ * 再以 SKILL_NAME_RE 作第二道防御）。返回 { ok: true, name } 或 { ok: false, reason }。
+ */
+export function validateReadSkillParams(args) {
+  const name = args?.name
+  if (typeof name !== 'string' || !name.trim()) {
+    return {
+      ok: false,
+      reason: `read_skill 参数无效: name 必须是非空字符串（当前: ${JSON.stringify(name)}）`,
+    }
+  }
+  const trimmed = name.trim()
+  if (!SKILL_CATALOG[trimmed]) {
+    return {
+      ok: false,
+      reason: `read_skill 参数无效: name 不在技能清单（${FLOW_CHAIN_SKILLS.join('/')}；当前: ${JSON.stringify(name)}）`,
+    }
+  }
+  return { ok: true, name: trimmed }
+}
+
+// ─── 技能读盘原语（read_skill/list_skills 实现——注入层改造：模型经工具自取正文）───
+// readSkill 读顶层 skills/<name>/SKILL.md（catalog 名即顶层目录名）。
+// catstudy 定制版（catstudy-quality-gate / catstudy-receive-review）是「独立定义」，非本工具
+// 路由目标——manifest §294 明示两套不同定义、一期不切路由；ADR 0014 §74 已剖除两级路径注入。
+// 故顶层是意图（与旧注入层一致：其在 skills/catstudy/ 上的两级注入本就是 V1 未实现的 TODO 缺口）。
+// 读盘定位与 skill-loader.ts（已删）同款：CATSTUDY_SKILLS_DIR 环境覆盖优先，否则从 cwd 上溯找
+// pnpm-workspace.yaml → skills/。
+
+/** 从 start 上溯找仓库根（存在 pnpm-workspace.yaml 的那层；找不到返回 null）。 */
+export function findRepoRoot(start) {
+  let cur = resolve(start)
+  for (;;) {
+    if (existsSync(join(cur, 'pnpm-workspace.yaml'))) return cur
+    const parent = dirname(cur)
+    if (parent === cur) return null
+    cur = parent
+  }
+}
+
+/** 定位技能源库根（CATSTUDY_SKILLS_DIR 覆盖优先；找不到 → null → read_skill 降级）。 */
+export function getSkillsRoot() {
+  const envRoot = process.env['CATSTUDY_SKILLS_DIR']
+  if (envRoot) return existsSync(envRoot) ? envRoot : null
+  const repoRoot = findRepoRoot(process.cwd())
+  if (!repoRoot) return null
+  const skillsDir = join(repoRoot, 'skills')
+  return existsSync(skillsDir) ? skillsDir : null
+}
+
+/**
+ * 按名读技能正文（read_skill 工具实现）。name 已由 validateReadSkillParams 收进
+ * SKILL_CATALOG，此处再以 SKILL_NAME_RE 作第二道路径守卫（防御纵深，防穿越）。
+ * 成功 → { ok: true, text }（SKILL.md 全文）；失败 → { ok: false, reason }（可回模型诊断）。
+ */
+export function readSkill(name) {
+  if (!SKILL_NAME_RE.test(name)) {
+    return { ok: false, reason: `技能名非法（${name}），仅允许小写字母/数字/连字符` }
+  }
+  const root = getSkillsRoot()
+  if (!root) {
+    return {
+      ok: false,
+      reason: '技能源库未定位（CATSTUDY_SKILLS_DIR 未设且无法从 cwd 上溯到仓库根）',
+    }
+  }
+  const file = join(root, name, 'SKILL.md')
+  try {
+    if (!existsSync(file)) {
+      return {
+        ok: false,
+        reason: `技能正文未找到：${name}/SKILL.md（清单内但源库暂无此文件——可能由交付单 B 才落地）`,
+      }
+    }
+    return { ok: true, text: readFileSync(file, 'utf-8') }
+  } catch (err) {
+    return { ok: false, reason: `技能正文读取失败：${err.message}` }
+  }
+}
+
+/** 列技能清单（list_skills 工具实现）——catalog 即 P2=A 流程链 8 技能 + 一句话说明。 */
+export function listSkills() {
+  const lines = Object.entries(SKILL_CATALOG).map(([n, desc]) => `- ${n}: ${desc}`)
+  return {
+    ok: true,
+    text: `技能清单（P2 流程链 ${Object.keys(SKILL_CATALOG).length} 技能）：\n` + lines.join('\n'),
   }
 }

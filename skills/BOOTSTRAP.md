@@ -16,25 +16,25 @@ skills/（唯一真相源）
 - 三方一致校验（阻塞）：`node scripts/skills-check-manifest.mjs`
 - 失效链接清理：`node scripts/skills-clean-stale.mjs`
 
-## 注册表（27 顶级 + 4 定制层）
+## 注册表（27 顶级 + 2 定制层）
 
 来源：`self` = 猫咖自研 / `mattpocock` = mattpocock 系 / `external` = 其他第三方（provenance 追踪）
 
 ### 自研（self，7）
 
-| skill               | 说明                                                   |
-| ------------------- | ------------------------------------------------------ |
-| quality-gate        | 提交审查前自查门（审查链入口）                         |
-| request-review      | 发起审查请求（审查链）                                 |
-| receive-review      | 处理审查反馈（审查链，拒绝表演性同意 + P1/P2/P3 分级） |
-| vision-assist       | 项目 qwen3.5:9b 视觉管线（模型无法原生看图时路由）     |
-| on-site-project     | 驻场外部项目全流程方法论（集中+持久工作区）            |
-| break-tunnel-vision | 跳出牛角尖排障方法论                                   |
-| session-summary     | 生成 CatStudy 五段式会话总结（v1.1 起归自研维护）      |
+| skill               | 说明                                                       |
+| ------------------- | ---------------------------------------------------------- |
+| spec-gate           | 需求进实施前自查门（可证伪 + 契约锁定，对称 quality-gate） |
+| quality-gate        | 提交审查前自查门（审查链入口）                             |
+| receive-review      | 处理审查反馈（审查链，拒绝表演性同意 + P1/P2/P3 分级）     |
+| vision-assist       | 项目 qwen3.5:9b 视觉管线（模型无法原生看图时路由）         |
+| on-site-project     | 驻场外部项目全流程方法论（集中+持久工作区）                |
+| break-tunnel-vision | 跳出牛角尖排障方法论                                       |
+| session-summary     | 生成 CatStudy 五段式会话总结（v1.1 起归自研维护）          |
 
 ### mattpocock 系（mattpocock，12）
 
-grill-me · grill-with-docs · handoff · implement · improve-codebase-architecture ·
+grill-me · grill-with-docs · session-handoff · implement · improve-codebase-architecture ·
 prototype · to-spec · to-tickets · triage · wayfinder · writing-great-skills · code-review
 
 （v1.1 主线：`grill-with-docs → to-spec → to-tickets → implement → code-review`；
@@ -45,9 +45,9 @@ prototype · to-spec · to-tickets · triage · wayfinder · writing-great-skill
 codebase-design · diagnosing-bugs · domain-modeling · git-guardrails-claude-code ·
 grilling · resolving-merge-conflicts · setup-pre-commit · tdd
 
-### 项目定制层（catstudy/，4，self）
+### 项目定制层（catstudy/，2，self）
 
-catstudy-quality-gate · catstudy-handoff · catstudy-request-review · catstudy-receive-review
+catstudy-quality-gate · catstudy-receive-review
 
 参照 clowder-ai 的 `cat-cafe-skills/` 架构设计的先行试验（README 为设计文档）。
 随迁保留但**一期不切路由**（manifest 仍路由顶级通用版），转正评估列二期。

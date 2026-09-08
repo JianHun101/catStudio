@@ -1,6 +1,6 @@
 ---
 name: quality-gate
-description: 代码变更提交审查前的自查门。检查编码规范、测试覆盖、架构边界、安全性和未完成项。通过后才能发起 /request-review。Use when a code change is finished and needs a self-check before review. Not for pure conversation without code changes, exploration, or when already inside the review loop. Output a Quality Gate Report (PASS/FAIL with per-item results).
+description: 代码变更提交审查前的自查门。检查编码规范、测试覆盖、架构边界、安全性和未完成项。通过后由 post-commit hook 自动触发审查。Use when a code change is finished and needs a self-check before review. Not for pure conversation without code changes, exploration, or when already inside the review loop. Output a Quality Gate Report (PASS/FAIL with per-item results).
 ---
 
 # quality-gate
@@ -10,7 +10,7 @@ description: 代码变更提交审查前的自查门。检查编码规范、测�
 ## 何时使用
 
 - 完成一个代码变更后
-- 在发起 `/request-review` 之前（前置条件）
+- 提交审查（post-commit hook 自动触发）之前（前置条件）
 - 对已有代码做改动后自查
 
 ## 不使用的情况
@@ -135,13 +135,13 @@ pnpm lint → 通过 / M errors
 ✅ 无命中 / ⚠️ 以下坏味道：...
 
 ### Gate Result
-✅ PASS → 可以发起 /request-review
+✅ PASS → 提交代码，post-commit hook 自动触发审查
 ❌ FAIL → 以下项目需要先修复：...
 ```
 
 ## 衔接
 
-- 通过 → 自动提示执行 `/request-review`
+- 通过 → 提交代码，post-commit hook 自动触发审查（code-review 承担）
 - 未通过 → 修复后重新运行 quality-gate
 
 ## Common Mistakes
@@ -155,8 +155,8 @@ pnpm lint → 通过 / M errors
 
 ## 与其他 skill 区别
 
-| skill          | 区别                                                                         |
-| -------------- | ---------------------------------------------------------------------------- |
-| receive-review | quality-gate 是作者提交前自查；receive-review 是收到审查反馈后处理           |
-| request-review | quality-gate 是前置门，PASS 后才能发起审查；request-review 是发起动作本身    |
-| code-review    | quality-gate 是自查（自己过门）；code-review 是双轴代码审查（他人/工具视角） |
+| skill          | 区别                                                                                      |
+| -------------- | ----------------------------------------------------------------------------------------- |
+| receive-review | quality-gate 是作者提交前自查；receive-review 是收到审查反馈后处理                        |
+| code review    | quality-gate 是前置门，PASS 后可提交；code review 是审查动作（post-commit hook 自动触发） |
+| code-review    | quality-gate 是自查（自己过门）；code-review 是双轴代码审查（他人/工具视角）              |

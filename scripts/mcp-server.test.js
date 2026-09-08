@@ -11,13 +11,17 @@
  * import 测量 JSON.stringify 体量 + inputSchema 结构冻结基线——放 vitest
  * 不放 hook（钩子断护栏不能跟着断，hooks 根修同思路）。
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   validateSearchParams,
   validateQueryDbParams,
   validateUserRequestParams,
   validateCreatePrParams,
   validateQuerySessionMessagesParams,
+  validateReadSkillParams,
   QUERY_DB_TABLES,
   USER_REQUEST_TYPES,
   SESSION_MESSAGE_KINDS,
@@ -29,6 +33,14 @@ import {
   LIST_SESSION_MEMBERS_TOOL_NAME,
   REQUEST_USER_ACTION_TOOL_NAME,
   CREATE_PR_TOOL_NAME,
+  READ_SKILL_TOOL_NAME,
+  LIST_SKILLS_TOOL_NAME,
+  SKILL_CATALOG,
+  FLOW_CHAIN_SKILLS,
+  findRepoRoot,
+  getSkillsRoot,
+  readSkill,
+  listSkills,
 } from './mcp-server-utils.mjs'
 
 /** 深删 description 键（inputSchema 结构冻结对比用——瘦身只允许 description 文案变化） */
@@ -378,7 +390,42 @@ describe('validateQuerySessionMessagesParams (query_session_messages)', () => {
   })
 })
 
-describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成单）', () => {
+describe('validateReadSkillParams (read_skill)', () => {
+  it('合法入参：清单内 name → ok，trim 后透传', () => {
+    const r = validateReadSkillParams({ name: 'quality-gate' })
+    expect(r).toEqual({ ok: true, name: 'quality-gate' })
+  })
+
+  it('合法入参：清单内全部 8 技能全放行', () => {
+    for (const name of FLOW_CHAIN_SKILLS) {
+      expect(validateReadSkillParams({ name }).ok).toBe(true)
+    }
+  })
+
+  it('name 前后空白裁剪', () => {
+    const r = validateReadSkillParams({ name: '  quality-gate  ' })
+    expect(r.name).toBe('quality-gate')
+  })
+
+  it('name 缺省 / 空串 / 纯空白 / 非字符串 → 错误文本点名 name', () => {
+    for (const bad of [undefined, '', '   ', 123, ['x']]) {
+      const r = validateReadSkillParams({ name: bad })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('name')
+    }
+  })
+
+  it('name 非清单内（request-review/wayfinder/code-review/..）→ 错误文本', () => {
+    for (const bad of ['request-review', 'wayfinder', 'code-review', '..', 'a/b', 'QUALITY-GATE']) {
+      const r = validateReadSkillParams({ name: bad })
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('技能清单')
+    }
+  })
+})
+
+describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成单 + 技能懒加载工具）', () => {
+  // 既有六把（瘦身子集护栏用的目标集 = 工具 2 改动前的工具，list_session_members 隔离）
   const SIX_EXISTING = [
     TOOL_NAME,
     SEARCH_TOOL_NAME,
@@ -387,8 +434,13 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     REQUEST_USER_ACTION_TOOL_NAME,
     CREATE_PR_TOOL_NAME,
   ]
+  // 工具 2 后的七把（含 list_session_members）——「瘦身净效果」护栏测的集合；
+  // read_skill/list_skills 是注入层改造新增（见下方护栏②注释），不混入净效果计量。
+  const SLIM_7 = [...SIX_EXISTING, LIST_SESSION_MEMBERS_TOOL_NAME]
+  // 注入层改造新增的技能懒加载工具（无「瘦身前」基线 → 护栏③跳过）
+  const NEW_SKILL_TOOLS = [READ_SKILL_TOOL_NAME, LIST_SKILLS_TOOL_NAME]
 
-  it('tools/list 暴露七把工具、名字唯一、含新增 list_session_members（无参数工具）', () => {
+  it('tools/list 暴露九把工具、名字唯一、含新增 read_skill/list_skills', () => {
     expect(MCP_TOOLS.map((t) => t.name)).toEqual([
       'post_message',
       'search_knowledge',
@@ -397,10 +449,14 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
       'list_session_members',
       'request_user_action',
       'create_pr',
+      'read_skill',
+      'list_skills',
     ])
-    expect(new Set(MCP_TOOLS.map((t) => t.name)).size).toBe(7)
+    expect(new Set(MCP_TOOLS.map((t) => t.name)).size).toBe(9)
     const lsm = MCP_TOOLS.find((t) => t.name === LIST_SESSION_MEMBERS_TOOL_NAME)
     expect(lsm?.inputSchema).toEqual({ type: 'object', properties: {} })
+    const ls = MCP_TOOLS.find((t) => t.name === LIST_SKILLS_TOOL_NAME)
+    expect(ls?.inputSchema).toEqual({ type: 'object', properties: {} })
   })
 
   it('工具 2 护栏①：瘦身后六把既有工具 JSON.stringify 合计 ≤ 3400（防回卷）', () => {
@@ -411,16 +467,21 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     expect(JSON.stringify(six).length).toBeLessThanOrEqual(3400)
   })
 
-  it('工具 2 护栏②：实际 resident（全七把 tools/list 载荷）< 瘦身前基线 4090', () => {
+  it('工具 2 护栏②：瘦身后七把（含 list_session_members）resident < 瘦身前基线 4090', () => {
     // tools/list 真实返回 MCP_TOOLS——加 list_session_members 后仍应低于瘦身前
     // 六把基线 4090（勘察实测值），钉死「瘦身净效果」不因新增工具被吃掉。
-    expect(JSON.stringify(MCP_TOOLS).length).toBeLessThan(4090)
+    // 注意：read_skill/list_skills 是注入层改造新增（工具 3），体量不计入瘦身净效果
+    // 计量——本护栏测 SLIM_7（工具 2 时的 resident），避免被工具 3 的体量误伤。
+    const slim = MCP_TOOLS.filter((t) => SLIM_7.includes(t.name))
+    expect(slim).toHaveLength(7)
+    expect(JSON.stringify(slim).length).toBeLessThan(4090)
   })
 
-  it('工具 2 护栏③：六把既有工具 inputSchema 结构与瘦身前逐字段零差异', () => {
+  it('工具 2 护栏③：既有工具（除 read_skill/list_skills）inputSchema 结构与瘦身前逐字段零差异', () => {
     // 冻结基线 = 工具 2 改动前六把 inputSchema 去 description 快照。瘦身只允许
     // description 文案变化；property 名/required/enum/type/嵌套结构是 tools/call
     // 参数校验契约，动了即破既有调用——此处把「不破契约」变成可执行断言。
+    // read_skill/list_skills 无「瘦身前」基线，跳过（与 list_session_members 同款）。
     const BASELINE = {
       post_message: {
         type: 'object',
@@ -504,7 +565,120 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     }
     for (const t of MCP_TOOLS) {
       if (t.name === LIST_SESSION_MEMBERS_TOOL_NAME) continue // 新工具无「瘦身前」基线
+      if (t.name === READ_SKILL_TOOL_NAME || t.name === LIST_SKILLS_TOOL_NAME) continue // 注入层改造新增无基线
       expect(stripDescriptions(t.inputSchema)).toEqual(BASELINE[t.name])
+    }
+  })
+
+  it('catalog 契约：read_skill 的 name 枚举 = FLOW_CHAIN_SKILLS，description 内嵌清单', () => {
+    const tool = MCP_TOOLS.find((t) => t.name === READ_SKILL_TOOL_NAME)
+    expect(tool).toBeTruthy()
+    expect(tool?.inputSchema).toEqual({
+      type: 'object',
+      properties: { name: { type: 'string', description: '技能名（技能清单内，kebab-case）' } },
+      required: ['name'],
+    })
+    // catalog 嵌进工具描述：read_skill description 须包含全部流程链技能名
+    for (const name of FLOW_CHAIN_SKILLS) {
+      expect(tool?.description).toContain(name)
+    }
+    // SKILL_CATALOG 键 == FLOW_CHAIN_SKILLS（单本 catalog，两处不漂移）
+    expect(Object.keys(SKILL_CATALOG)).toEqual(FLOW_CHAIN_SKILLS)
+  })
+
+  it('catalog 定死 8 技能、request-review 移除、wayfinder 排除', () => {
+    expect(FLOW_CHAIN_SKILLS).toEqual([
+      'grilling',
+      'to-spec',
+      'spec-gate',
+      'to-tickets',
+      'implement',
+      'quality-gate',
+      'receive-review',
+      'session-handoff',
+    ])
+    expect(FLOW_CHAIN_SKILLS).not.toContain('request-review')
+    expect(FLOW_CHAIN_SKILLS).not.toContain('wayfinder')
+  })
+})
+
+describe('技能读盘契约（readSkill / getSkillsRoot / findRepoRoot / listSkills）', () => {
+  let tmpRoot
+  let prevEnv
+  const ENV_KEY = 'CATSTUDY_SKILLS_DIR'
+
+  beforeEach(() => {
+    prevEnv = process.env[ENV_KEY]
+    tmpRoot = mkdtempSync(join(tmpdir(), 'catstudy-skills-'))
+    process.env[ENV_KEY] = tmpRoot
+  })
+
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env[ENV_KEY]
+    else process.env[ENV_KEY] = prevEnv
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  it('getSkillsRoot 命中 CATSTUDY_SKILLS_DIR 覆盖目录', () => {
+    expect(getSkillsRoot()).toBe(tmpRoot)
+  })
+
+  it('getSkillsRoot 无覆盖 → 从 cwd 上溯找仓库根 skills/（含 manifest.yaml 标志文件）', () => {
+    delete process.env[ENV_KEY]
+    const root = getSkillsRoot()
+    expect(root).toBeTruthy()
+    expect(existsSync(join(root, 'manifest.yaml'))).toBe(true)
+  })
+
+  it('findRepoRoot 上溯到含 pnpm-workspace.yaml 的仓库根', () => {
+    const root = findRepoRoot(process.cwd())
+    expect(root).toBeTruthy()
+    expect(existsSync(join(root, 'pnpm-workspace.yaml'))).toBe(true)
+  })
+
+  it('readSkill 按名读 skills/<name>/SKILL.md 全文', () => {
+    mkdirSync(join(tmpRoot, 'implement'), { recursive: true })
+    writeFileSync(join(tmpRoot, 'implement', 'SKILL.md'), '# Implement\n\n生产代码。')
+    const r = readSkill('implement')
+    expect(r.ok).toBe(true)
+    expect(r.text).toContain('# Implement')
+    expect(r.text).toContain('生产代码。')
+  })
+
+  it('readSkill 读顶层通用版而非 catstudy 嵌套定制版（ADR 0014 §74 剖除两级注入）', () => {
+    mkdirSync(join(tmpRoot, 'quality-gate'), { recursive: true })
+    mkdirSync(join(tmpRoot, 'catstudy', 'quality-gate'), { recursive: true })
+    writeFileSync(join(tmpRoot, 'quality-gate', 'SKILL.md'), '# quality-gate 顶层通用版')
+    writeFileSync(
+      join(tmpRoot, 'catstudy', 'quality-gate', 'SKILL.md'),
+      '# catstudy-quality-gate 定制版'
+    )
+    const r = readSkill('quality-gate')
+    expect(r.ok).toBe(true)
+    expect(r.text).toContain('quality-gate 顶层通用版')
+    expect(r.text).not.toContain('catstudy-quality-gate 定制版')
+  })
+
+  it('readSkill 清单内但源库缺文件 → ok:false 点名（交付单 B 才落地场景）', () => {
+    const r = readSkill('grilling')
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain('grilling')
+    expect(r.reason).toContain('SKILL.md')
+  })
+
+  it('readSkill 名字非法（穿越/含特殊字符）→ 路径守卫拒绝', () => {
+    for (const bad of ['../foo', 'a/b', '..', 'quality-gate/../../etc']) {
+      const r = readSkill(bad)
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('技能名非法')
+    }
+  })
+
+  it('listSkills 返回 8 技能清单（catalog 即流程链）', () => {
+    const r = listSkills()
+    expect(r.ok).toBe(true)
+    for (const name of FLOW_CHAIN_SKILLS) {
+      expect(r.text).toContain(name)
     }
   })
 })

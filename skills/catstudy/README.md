@@ -9,16 +9,13 @@ catstudy/
 ├── README.md                    # 本文件 — 架构说明 + 索引
 ├── quality-gate/                # 质量门 — 开发完成后的自检
 │   └── SKILL.md
-├── handoff/                     # 工作交接 — 自动生成交接文档
-│   └── SKILL.md
-├── request-review/              # 发起审查 — 把改动送到审查者面前
-│   └── SKILL.md
 ├── receive-review/              # 接收审查 — 处理审查者的反馈
 │   └── SKILL.md
 └── refs/                        # 共享参考文件
     └── cat-roles.md             # 猫角色定义 + 审查配对规则（角色词典）
     # shared-rules / review-standards / review-request-template 已随 refs 双套合并
     # 迁至顶级 skills/refs/（单源，此处不维护副本）
+    # 投递型定制层（handoff/request-review）已按 ADR-0014 §3 移除，内容并入基础技能
 ```
 
 ## 工作流
@@ -28,8 +25,7 @@ catstudy/
   → 架构师设计 + 派活
   → 实施猫落地
   → /catstudy-quality-gate    （自检：需求对照 + 测试 + lint + build）
-  → /catstudy-handoff          （交接：自动生成文件清单 + Checklist，填写 Why/Tradeoff/OQ）
-  → /catstudy-request-review   （发起审查：调用 /review、/code-review、/security-review）
+  → 提交 → post-commit hook 自动生成交接文档 + 触发审查（code-review 承担）
   → /catstudy-receive-review   （处理反馈：Red→Green 修复）
    → 审查者审查 ✅ → 架构师收口（ff-only 合并 → 发起 push 审批，用户批准才推）
 ```
@@ -47,15 +43,13 @@ catstudy/
 
 ## 为什么没有 PR 流程
 
-catStudy 没有 PR 冲突场景：提交后由 post-commit 自动投递交接文档，quality-gate → handoff → request-review → receive-review 四步覆盖从自检、生成交接文档、发起审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 发起 push 审批，用户批准才推）。
+catStudy 没有 PR 冲突场景：提交后由 post-commit 自动投递交接文档，quality-gate → （post-commit hook 自动触发审查）→ receive-review 覆盖从自检、生成交接文档、审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 发起 push 审批，用户批准才推）。
 
 ## 技能命名
 
 所有 catStudy 技能以 `catstudy-` 前缀命名，与 mattpocock 的通用技能区分：
 
 - `/catstudy-quality-gate`
-- `/catstudy-handoff`
-- `/catstudy-request-review`
 - `/catstudy-receive-review`
 
 用户也可以说"自检"、"交接"、"请 review"、"处理反馈"等自然语言触发。
