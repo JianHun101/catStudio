@@ -15,7 +15,7 @@
 ## Solution
 
 - **skill 只管领域**（怎么把活做对），内容里**不再含任何 `@谁`/`请谁审查`/`投给谁` 的指令**。
-- **投递外移为「铁律层出口检查段」**：`packages/server/src/config/iron-laws.ts` 的共通铁律层（`COMMON_IRON_LAWS`）出口检查段，从「自问 + 投递给下一棒」升级为「**流程未结束必须产出投递信号 `{targets, intent, ref}`** → 调 `post_message` / 行首 `@`」。触发锚点从 skill（软、字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
+- **投递外移为「铁律层出口检查段」**：`packages/server/src/seed-data.ts` 的共通铁律层（`COMMON_IRON_LAWS`）出口检查段，从「自问 + 投递给下一棒」升级为「**流程未结束必须产出投递信号 `{targets, intent, ref}`** → 调 `post_message` / 行首 `@`」。`config/iron-laws.ts` 仅作**访问器**（`ironLawForRole` 按 role 从 settings 优先读取、回退 seed-data 常量）。触发锚点从 skill（软、字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
 
 ### 三层可靠性叠起来（回应「外部投递不好触发」）
 
@@ -75,7 +75,7 @@
 
 ## 改哪些文件（勘察后的真实锚点）
 
-- `packages/server/src/seed-data.ts` — 共通铁律层出口检查段**承载物**（`COMMON_IRON_LAWS` 文本，含投递信号出口检查）。`packages/server/src/config/iron-laws.ts` — **访问器**（`ironLawForRole` 按 role 从 settings 优先读取、回退 seed-data 常量）。铁律拼入 `execution/reply.ts:407-410` 的 `baseSystemPrompt`、经 `reply.ts:417` `resolveRolePlaceholders`。
+- `packages/server/src/seed-data.ts` — 共通铁律层出口检查段**承载物**（`COMMON_IRON_LAWS` 文本，含投递信号出口检查）。`packages/server/src/config/iron-laws.ts` — **访问器**（`ironLawForRole` 按 role 从 settings 优先读取、回退 seed-data 常量）。铁律拼入 `execution/reply.ts:404` 的 `baseSystemPrompt`、经 `reply.ts:413` `resolveRolePlaceholders`。
 - `packages/server/src/execution/reply.ts` — 投递信号产出 + 消费的接缝；`baseSystemPrompt`/`finalSystemPrompt` 组装（L407-442）；skill 块 append 在 L622（晚于替换——这正是字面 @ 不被解析的根）。
 - `scripts/mcp-server-utils.mjs` — `read_skill`/`list_skills`/`SKILL_CATALOG`（P2 流程链 8 技能；注入层改造后 server 不再全文注入，模型经 read_skill 自取正文，request-review 已从流程链移除——单级路径，**不建两级注入**）。
 - `skills/request-review/SKILL.md`（base）— 剥「选择审查者/@审查者/@mentioning the paired reviewer」路由；`refs/review-request-template.md` 相对引用**悬空**，修正为共享 `skills/refs/review-request-template.md`。
