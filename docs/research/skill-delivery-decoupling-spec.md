@@ -4,9 +4,9 @@
 
 ## Problem Statement
 
-投递方向（「这单给谁」）焊死在 skill 内容里——`request-review` 教「作者**@审查者**」（base `skills/request-review/SKILL.md:68`、描述 L3 `@mentioning the paired reviewer`），`handoff` 教「末尾行首**@审查者 请审查**」（catstudy `handoff/SKILL.md:67`）。这一焊，三类病根实测集齐（`execution/skill-loader.ts:87-94` 注释自证，request-review 因之停用）：
+投递方向（「这单给谁」）焊死在 skill 内容里——`request-review` 教「作者**@审查者**」（base `skills/request-review/SKILL.md:68`、描述 L3 `@mentioning the paired reviewer`），`handoff` 教「末尾行首**@审查者 请审查**」（catstudy `handoff/SKILL.md:67`）。这一焊，三类病根实测集齐（旧注入层注释自证，request-review 因之停用）：
 
-1. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（`execution/skill-loader.ts` 注入晚于 `reply.ts:417` 的 `resolveRolePlaceholders`），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 的直接原因）。
+1. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（旧注入层 skill 注入晚于 `reply.ts:417` 的 `resolveRolePlaceholders`），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 的直接原因）。
 2. **与铁律一冲突**：铁律说「审查由 post-commit hook 机械触发、agent 只补填」，skill 却说「作者自己 @审查者」——内容自打架。
 3. **双触发**：DS 猫自发 @ + hook 再追一次。
 
@@ -15,7 +15,7 @@
 ## Solution
 
 - **skill 只管领域**（怎么把活做对），内容里**不再含任何 `@谁`/`请谁审查`/`投给谁` 的指令**。
-- **投递外移为「铁律层出口检查段」**：`packages/server/src/config/iron-laws.ts` 的共通铁律层（`COMMON_IRON_LAWS`）出口检查段，从「自问 + 投递给下一棒」升级为「**流程未结束必须产出投递信号 `{targets, intent, ref}`** → 调 `post_message` / 行首 `@`」。触发锚点从 skill（软、字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
+- **投递外移为「铁律层出口检查段」**：`packages/server/src/seed-data.ts` 的共通铁律层（`COMMON_IRON_LAWS`）出口检查段，从「自问 + 投递给下一棒」升级为「**流程未结束必须产出投递信号 `{targets, intent, ref}`** → 调 `post_message` / 行首 `@`」。`config/iron-laws.ts` 仅作**访问器**（`ironLawForRole` 按 role 从 settings 优先读取、回退 seed-data 常量）。触发锚点从 skill（软、字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
 
 ### 三层可靠性叠起来（回应「外部投递不好触发」）
 
@@ -39,9 +39,9 @@
 ### 契约③ 状态机 + 机械兜底（进本批，完整闭环）
 
 - **当前状态**（commit 走到哪步，如是否已 quality-gate）→ DB 字段 `flow_state`，键 `(session_id, commit_sha)`，值如 `quality-gate`。service 在投递/事件发生时**同事务更新**。不变的事实，主链（manifest）调整不影响历史行。
-- **下一步动作**（触发谁、什么 intent）→ **不落库**，运行时程序读 `flow_state` + 查 manifest 主链 **机械算出**，全程无 agent 参与（派生数据，落库需跑迁移=一致债）。
+- **下一步动作**（若驱动则该触发谁、什么 intent）→ **不落库**，运行时程序读 `flow_state` + 查 manifest 主链 **机械算出**（派生数据，落库需跑迁移=一致债）。**X2 口径（用户拍板，否决 X1 驱动者）**：派生意图**不直接驱动投递**——下一棒由 agent 自己的 `@`/`post_message` 表态决定（判断式投递，保留 agent 自由接棒），状态机不替 agent 决定该干嘛。状态机只在 hook 不覆盖的跳**补信号**：① verdict 推进账本；② 恰好一次去重（`commit_sha` 主键判同源）；③ closeout 提醒店长收口。
 - **审计留痕** → 日志，每次投递/状态变更随写，做兜底留痕。与字段双保险。
-- **状态机边界**：只管**主干道**（机械确定，如 quality-gate PASS → 自动触发 request-review）。岔道——实现猫卡住@求助、审查❌打回、需求需澄清——**不进状态机**，走判断式投递。
+- **状态机边界**：只管**主干道**（记账+兜底，quality-gate → request-review → receive-review → closed）。岔道——实现猫卡住@求助、审查❌打回、需求需澄清——**不进状态机**，走判断式投递。
 
 ## 用户故事
 
@@ -75,9 +75,9 @@
 
 ## 改哪些文件（勘察后的真实锚点）
 
-- `packages/server/src/config/iron-laws.ts` — 共通铁律层出口检查段承载投递信号（**承载物**）。铁律拼入 `execution/reply.ts:407-410` 的 `baseSystemPrompt`、经 `reply.ts:417` `resolveRolePlaceholders`。
+- `packages/server/src/seed-data.ts` — 共通铁律层出口检查段**承载物**（`COMMON_IRON_LAWS` 文本，含投递信号出口检查）。`packages/server/src/config/iron-laws.ts` — **访问器**（`ironLawForRole` 按 role 从 settings 优先读取、回退 seed-data 常量）。铁律拼入 `execution/reply.ts:404` 的 `baseSystemPrompt`、经 `reply.ts:413` `resolveRolePlaceholders`。
 - `packages/server/src/execution/reply.ts` — 投递信号产出 + 消费的接缝；`baseSystemPrompt`/`finalSystemPrompt` 组装（L407-442）；skill 块 append 在 L622（晚于替换——这正是字面 @ 不被解析的根）。
-- `packages/server/src/execution/skill-loader.ts` — `STAGE_SIGNALS`（L78-95）request-review 信号启用；`loadSkill`（L164-175，单级路径，**不改**——不建两级注入）；`SUPPORTED_SKILLS`（L33-38）保留 request-review。
+- `scripts/mcp-server-utils.mjs` — `read_skill`/`list_skills`/`SKILL_CATALOG`（P2 流程链 8 技能；注入层改造后 server 不再全文注入，模型经 read_skill 自取正文，request-review 已从流程链移除——单级路径，**不建两级注入**）。
 - `skills/request-review/SKILL.md`（base）— 剥「选择审查者/@审查者/@mentioning the paired reviewer」路由；`refs/review-request-template.md` 相对引用**悬空**，修正为共享 `skills/refs/review-request-template.md`。
 - `skills/catstudy/handoff/SKILL.md` — 剥「行首@审查者 请审查」；`../../refs/...` 统一指向共享 `skills/refs/`。
 - `skills/catstudy/request-review/SKILL.md`、`skills/catstudy/handoff/SKILL.md` — 投递型定制层：**淘汰**（投递外移后 no reason）；领域型重写（`quality-gate`、`receive-review`）与共享 `cat-roles.md` 保留。
@@ -117,4 +117,4 @@
 - 去两级注入 + 启用 base + 淘汰老投递版：用户拍板（投递外移后注入补丁无存在理由）。
 - 契约③状态机进本批：用户要求「完整闭环测试」，不标保留缺口。
 - refs 资产位置：`skills/refs/review-request-template.md` 为唯一共享副本，base 版本地引用悬空（已核实）。
-- 路径勘正：skill-loader/reply 实际在 `packages/server/src/execution/`（ADR 旧引用 `src/` 已一并勘正）。
+- 路径勘正：reply 实际在 `packages/server/src/execution/`、注入侧在 `scripts/mcp-server-utils.mjs`（ADR 旧引用 `src/` 已一并勘正）。

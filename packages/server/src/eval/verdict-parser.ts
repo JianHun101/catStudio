@@ -107,6 +107,9 @@ export function parseReviewVerdict(content: string, targets: VerdictTarget[]): V
  * 解析 + 落库包装（socketio.ts 钩子调用点）。
  * 每个写操作独立 try/catch——DB 异常静默丢弃（写入包 try/catch 契约），
  * 函数永不抛，审查链主流程零阻塞。
+ *
+ * @returns 落盘的审查结论（approve/suggest/reject）；无有效结论（no-marker/failure）
+ *   返回 null——供契约③状态机（flow-advance）判断是否推进，null 则不推进。
  */
 export function recordReviewVerdict(opts: {
   messageId: string
@@ -114,9 +117,9 @@ export function recordReviewVerdict(opts: {
   reviewerAgentId: string
   content: string
   targets: VerdictTarget[]
-}): void {
+}): ReviewVerdict | null {
   const result = parseReviewVerdict(opts.content, opts.targets)
-  if (result.kind === 'no-marker') return
+  if (result.kind === 'no-marker') return null
 
   if (result.kind === 'failure') {
     try {
@@ -128,7 +131,7 @@ export function recordReviewVerdict(opts: {
     } catch {
       // DB 异常静默丢弃
     }
-    return
+    return null
   }
 
   try {
@@ -153,4 +156,5 @@ export function recordReviewVerdict(opts: {
       // DB 异常静默丢弃
     }
   }
+  return result.verdict
 }

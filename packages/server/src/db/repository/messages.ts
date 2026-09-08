@@ -41,6 +41,19 @@ export function getMessageByIdOnly(
     { id: string; session_id: string; role: string } | undefined
 }
 
+/** 按消息 id 反查所属会话 + task_id（契约③ 反查源链 commit）。
+ *  审查链 verdict 消息的 task_id = 源链 trace_id（handoff-gen E3 接线投递），
+ *  经 execution_logs.commit_hash 反查被审 commit——契约③ 状态机推进的定位键。
+ *  task_id NULL / 消息不存在 → undefined（纯会话无 commit 链路，状态机不接管）。 */
+export function getTaskIdByMessageId(
+  id: string
+): { session_id: string; task_id: string } | undefined {
+  const row = db.prepare('SELECT session_id, task_id FROM messages WHERE id = ?').get(id) as
+    { session_id: string; task_id: string | null } | undefined
+  if (!row || !row.task_id) return undefined
+  return { session_id: row.session_id, task_id: row.task_id }
+}
+
 /** 获取会话中最近的用户消息 ID */
 export function getLatestUserMessageId(sessionId: string): string | undefined {
   const row = db
