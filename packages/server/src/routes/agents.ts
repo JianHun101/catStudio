@@ -36,8 +36,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         agent.llmApiKey,
         agent.llmBaseUrl || null,
         agent.effortLevel || null,
-        // skill_modules 列保留兼容（历史数据），新建 Agent 不再声明技能——注入源是
-        // 仓库 skills/（execution/skill-loader.ts 按 role 运行时注入），不是 DB 列
+        // skill_modules 列保留兼容（历史数据），新建 Agent 不再声明技能——技能源是
+        // 仓库 skills/（模型经 MCP read_skill 懒加载自取），不是 DB 列
         '[]',
         agent.llmMaxTokens ?? null, // 静态运行配置：null → repository 兜底 2048
         agent.llmTemperature ?? null // null → repository 兜底 0.7

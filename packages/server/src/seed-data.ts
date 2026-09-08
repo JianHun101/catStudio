@@ -8,11 +8,10 @@
  *           叠各自角色差异层（CODER=代码提交+Worktree；REVIEWER=审查职责+审查流程）。
  *           运行期注入（settings 表），常量仅作缺省兜底——seed 不再烘焙进 systemPrompt，
  *           注入点在 runAgentReply（按 role 取 ironLawForRole），编辑后下一轮回复生效
- *   操作层 → 2026-09-06 方向反转（clowder 路线第一段）：server 运行时注入加回——
- *   execution/skill-loader.ts 从仓库 skills/ 源库读 SKILL.md、按 role/阶段信号注入
- *   system prompt（覆盖 opencode/ollama/dsh 等非 Claude CLI 执行体）；CLI file-scan
- *   （斜杠 /skill-name 触发）保留给人肉开发，两通道并存。DB skill_modules 列仍不消费
- *   （注入源是仓库 skills/ 目录，不是 DB 列）。
+ *   操作层 → 2026-09-08 注入层再反转（delivery 单 A）：server 运行时全文注入拆除——
+ *   技能由模型经 MCP read_skill 工具懒加载自取（scripts/mcp-server.mjs 按名读
+ *   skills/<名>/SKILL.md）；CLI file-scan（斜杠 /skill-name 触发）保留给人肉开发。
+ *   DB skill_modules 列仍不消费（技能源是仓库 skills/ 目录，不是 DB 列）。
  *   行为规则（依赖审批【安装请求】块、重启请求契约等）已并入共通铁律层，
  *   文档模板（交接文档等）单源到 skills/refs/。
  */

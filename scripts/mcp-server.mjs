@@ -4,7 +4,7 @@
  *
  * 原生 JSON-RPC 2.0 stdio 实现 MCP 最小子集（零依赖，Phase 0 spike 已验证协议层）：
  *   - initialize        → 协议握手
- *   - tools/list        → 暴露 MCP_TOOLS（工具定义在 mcp-server-utils.mjs：post_message / search_knowledge / query_db / query_session_messages / list_session_members / request_user_action / create_pr）
+ *   - tools/list        → 暴露 MCP_TOOLS（工具定义在 mcp-server-utils.mjs：post_message / search_knowledge / query_db / query_session_messages / list_session_members / request_user_action / create_pr / read_skill / list_skills）
  *   - tools/call        → 参数校验 → POST 内部端点 → ACK / 错误文本（含 reason）
  *   - ping / 其他       → 空 result / method not found
  *   - notifications（无 id 消息）→ 不回复
@@ -36,14 +36,16 @@
  */
 
 import readline from 'node:readline'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   validateSearchParams,
   validateQueryDbParams,
   validateUserRequestParams,
   validateCreatePrParams,
   validateQuerySessionMessagesParams,
+  validateReadSkillParams,
 } from './mcp-server-utils.mjs'
 import {
   TOOL_NAME,
@@ -53,7 +55,11 @@ import {
   LIST_SESSION_MEMBERS_TOOL_NAME,
   REQUEST_USER_ACTION_TOOL_NAME,
   CREATE_PR_TOOL_NAME,
+  READ_SKILL_TOOL_NAME,
+  LIST_SKILLS_TOOL_NAME,
   MCP_TOOLS,
+  SKILL_NAME_RE,
+  SKILL_CATALOG,
 } from './mcp-server-utils.mjs'
 
 const SERVER_INFO = { name: 'catstudy', version: '0.1.0' }
@@ -514,6 +520,71 @@ async function listSessionMembers() {
   }
 }
 
+// ─── 技能懒加载（注入层改造：模型经 read_skill/list_skills 自取，server 不再塞全文）───
+// 技能源库定位与 skill-loader.ts 同款：CATSTUDY_SKILLS_DIR 环境覆盖优先，否则从
+// process.cwd() 上溯找 pnpm-workspace.yaml 定位仓库根 → skills/。MCP server 由
+// claude/opencode/dsh spawn，cwd 落在会话 worktree，遍历即达（skills/ 是 git 追踪目录）。
+
+/** 从 start 上溯找仓库根（存在 pnpm-workspace.yaml 的那层；找不到返回 null）。 */
+function findRepoRoot(start) {
+  let cur = resolve(start)
+  for (;;) {
+    if (existsSync(join(cur, 'pnpm-workspace.yaml'))) return cur
+    const parent = dirname(cur)
+    if (parent === cur) return null
+    cur = parent
+  }
+}
+
+/** 定位技能源库根（CATSTUDY_SKILLS_DIR 覆盖优先；找不到 → null → read_skill 降级）。 */
+function getSkillsRoot() {
+  const envRoot = env('CATSTUDY_SKILLS_DIR')
+  if (envRoot) return existsSync(envRoot) ? envRoot : null
+  const repoRoot = findRepoRoot(process.cwd())
+  if (!repoRoot) return null
+  const skillsDir = join(repoRoot, 'skills')
+  return existsSync(skillsDir) ? skillsDir : null
+}
+
+/**
+ * 按名读技能正文（read_skill 工具实现）。name 已由 validateReadSkillParams 收进
+ * SKILL_CATALOG，此处再以 SKILL_NAME_RE 作第二道路径守卫（防御纵深，防穿越）。
+ * 成功 → { ok: true, text }（SKILL.md 全文）；失败 → { ok: false, reason }（可回模型诊断）。
+ */
+function readSkill(name) {
+  if (!SKILL_NAME_RE.test(name)) {
+    return { ok: false, reason: `技能名非法（` + name + `），仅允许小写字母/数字/连字符` }
+  }
+  const root = getSkillsRoot()
+  if (!root) {
+    return {
+      ok: false,
+      reason: '技能源库未定位（CATSTUDY_SKILLS_DIR 未设且无法从 cwd 上溯到仓库根）',
+    }
+  }
+  const file = join(root, name, 'SKILL.md')
+  try {
+    if (!existsSync(file)) {
+      return {
+        ok: false,
+        reason: `技能正文未找到：${name}/SKILL.md（清单内但源库暂无此文件——可能由交付单 B 才落地）`,
+      }
+    }
+    return { ok: true, text: readFileSync(file, 'utf-8') }
+  } catch (err) {
+    return { ok: false, reason: `技能正文读取失败：${err.message}` }
+  }
+}
+
+/** 列技能清单（list_skills 工具实现）——catalog 即 P2=A 流程链 8 技能 + 一句话说明。 */
+function listSkills() {
+  const lines = Object.entries(SKILL_CATALOG).map(([n, desc]) => `- ${n}: ${desc}`)
+  return {
+    ok: true,
+    text: `技能清单（P2 流程链 ${Object.keys(SKILL_CATALOG).length} 技能）：\n` + lines.join('\n'),
+  }
+}
+
 // 直接运行时才启动 stdio server——vitest import 本模块（validateSearchParams
 // 单测）不挂 stdin listener（resolve 兼容相对路径调用 node scripts/mcp-server.mjs）
 const isDirectRun =
@@ -769,11 +840,52 @@ if (isDirectRun) {
         })
         return
       }
+      if (name === READ_SKILL_TOOL_NAME) {
+        const args = params?.arguments ?? {}
+        const parsed = validateReadSkillParams(args)
+        if (!parsed.ok) {
+          send(rpcError(id, -32602, parsed.reason))
+          return
+        }
+        const result = readSkill(parsed.name)
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: result.ok ? result.text : `❌ 技能读取失败：${result.reason}`,
+              },
+            ],
+            isError: !result.ok,
+          },
+        })
+        return
+      }
+      if (name === LIST_SKILLS_TOOL_NAME) {
+        // 无参数工具——readSkill 的游标兜底：catalog 已嵌 read_skill 描述，本工具是冗余。
+        const result = listSkills()
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: result.text,
+              },
+            ],
+            isError: false,
+          },
+        })
+        return
+      }
       send(
         rpcError(
           id,
           -32602,
-          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge、query_db、query_session_messages、list_session_members、request_user_action 和 create_pr 七个工具）`
+          `unknown tool: ${name}（本 server 仅有 post_message、search_knowledge、query_db、query_session_messages、list_session_members、request_user_action、create_pr、read_skill 和 list_skills 九个工具）`
         )
       )
       return
