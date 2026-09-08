@@ -39,11 +39,23 @@ Work the **frontier**：下列按阻塞顺序排列，blockers 全绿的票先�
 - [ ] 静态源断言：被剥 skill 内容不再含 `@谁`/`请谁审查`/`投给谁`
 - [ ] refs 模板位置核正（唯一共享副本，无悬空引用）
 
+## T4a/B · P0 投递契约对齐（intent 词汇表 + 形状数组化）
+
+**What to build:** 把 intent 词汇表与投递信号形状在契约层**定死为一份**，作为 T4/T6 接线的唯一依据。用户 2026-09-08 拍板合并 T4a/T4b 为一张单（一个 agent 上下文够，投递链路垂直切片、文件依赖线性链、不跨包不涉 LLM 行为）。
+
+**Blocked by:** None — can start immediately（对 T4 是本单前置；与 T3 零文件重叠可并行）。
+
+- [ ] intent 词汇表以状态机派生谱为准：`quality_gate` / `review_commit` / `receive_review` / `closeout`（弃 T1 旧注释 `request_review`/`close_out` 变体）；`flow-state.ts` 派生谱 === `delivery-signal.ts` 契约值域（单测断言一致）
+- [ ] 形状数组化：`DeliverySignal.targets: string[]`（弃单数 `target`）；`DeliveryAction.targets` 同步数组；契约即传输层形状，无适配层
+- [ ] `RouteSignal` 补 `intent` 字段承载语义（当前无 intent，供审计）；定位键分工：`ref`=commit_sha 审查事件主键 vs `RouteSignal.msgId` 流内标签，各司其职不互替
+- [ ] 消费点对齐数组：`serial.ts` / `mcp-server.mjs` 消费 `targets`；多播一次投多只天然承载
+- [ ] 单测：intent 值域一致 + 多播映射 + 判断式原链路不回归；server/shared 全绿
+
 ## T4 · request-review 信号启用 base（剥投递后）
 
 **What to build:** `STAGE_SIGNALS` 里停用的 request-review 信号重新启用，直接指向 base（剥投递后）；不建 catstudy 投递定制层、不做两级注入。真实审查链走通。
 
-**Blocked by:** T3（base 先剥好）+ T1（信号契约就位）。
+**Blocked by:** T3（base 先剥好）+ P0 投递契约对齐（词汇表+形状先定死）。
 
 - [ ] `STAGE_SIGNALS`（`skill-loader.ts:78-95`）启用 request-review 信号
 - [ ] 指向 base（剥投递后）；`SUPPORTED_SKILLS` 保留 request-review；不建定制层
