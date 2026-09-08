@@ -138,3 +138,23 @@ export interface ConnectorBindingRow {
   session_id: string
   created_at: string
 }
+
+/** flow_states 表行（契约③当前状态，键 (session_id, commit_sha)） */
+export interface FlowStateRow {
+  session_id: string
+  commit_sha: string
+  /** 主干道状态（implement/quality-gate/request-review/receive-review/closed，见 execution/flow-state.ts） */
+  state: string
+  updated_at: string
+}
+
+/** flow_state_events 表行（同事务审计随写，与状态字段双保险） */
+export interface FlowStateEventRow {
+  id: number
+  session_id: string
+  commit_sha: string
+  from_state: string | null
+  to_state: string
+  intent: string
+  created_at: string
+}

@@ -34,6 +34,29 @@ describe('db', () => {
     })
   })
 
+  describe('schema - flow_states table (契约③)', () => {
+    it('has session_id/commit_sha/state columns', () => {
+      const db = getDb()
+      const cols = db.pragma('table_info(flow_states)') as Array<{ name: string }>
+      const colNames = cols.map((c) => c.name)
+      expect(colNames).toContain('session_id')
+      expect(colNames).toContain('commit_sha')
+      expect(colNames).toContain('state')
+      expect(colNames).toContain('updated_at')
+    })
+
+    it('flow_state_events 审计流水有 from_state/to_state/intent', () => {
+      const db = getDb()
+      const cols = db.pragma('table_info(flow_state_events)') as Array<{ name: string }>
+      const colNames = cols.map((c) => c.name)
+      expect(colNames).toContain('session_id')
+      expect(colNames).toContain('commit_sha')
+      expect(colNames).toContain('from_state')
+      expect(colNames).toContain('to_state')
+      expect(colNames).toContain('intent')
+    })
+  })
+
   describe('schema - agents table', () => {
     it('has expected columns', () => {
       const db = getDb()
