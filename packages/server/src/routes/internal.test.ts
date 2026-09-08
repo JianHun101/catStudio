@@ -286,8 +286,8 @@ describe('internal route-signals', () => {
     })
   })
 
-  describe('triggerAuthorName（OQ③ 补丁）', () => {
-    /** reviewer 投递 body：target 实施猫（implementer）——正常会被角色白名单拦 */
+  describe('reviewer 目标放行（边表 + triggerAuthorName 例外）', () => {
+    /** reviewer 投递 body：target 实施猫（implementer）——边表内，放行 */
     const reviewerBody = (over: Record<string, unknown> = {}) => ({
       sessionId: 'session-1',
       agentId: 'agent-reviewer',
@@ -318,12 +318,36 @@ describe('internal route-signals', () => {
       expect(signals[0].targetCats).toEqual(['实施猫'])
     })
 
-    it('验收1b：对照——不带 triggerAuthorName → 仍 422（既有行为零回归）', async () => {
+    it('验收1b：reviewer @ 实施猫 不带 triggerAuthorName → 仍 200（边表放行，不依赖触发者）', async () => {
+      // 收口链回作者通路修复：边表补 reviewer→implementer 后，触发者是用户/店长
+      // 时也能投回作者（原行为 422——「作者」概念在白名单里根本不存在）
       await mockActive()
       const res = await app.inject({
         method: 'POST',
         url: '/api/internal/route-signals',
         payload: reviewerBody(),
+        headers: { 'x-signal-token': VALID_TOKEN },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')[0].targetCats).toEqual([
+        '实施猫',
+      ])
+    })
+
+    it('验收1c：reviewer @ 图测猫（vision，非边表角色）→ 仍 422（不放开）', async () => {
+      await mockActive()
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules, role)
+         VALUES ('agent-vision', '图测猫', '🐱', 'prompt', 'deepseek', 'model', 'key', '', 'high', '[]', 'vision')`
+      ).run()
+      db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+        JSON.stringify(['agent-store', 'agent-impl', 'agent-reviewer', 'agent-vision'])
+      )
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/internal/route-signals',
+        payload: reviewerBody({ targetCats: ['图测猫'] }),
         headers: { 'x-signal-token': VALID_TOKEN },
       })
       expect(res.statusCode).toBe(422)

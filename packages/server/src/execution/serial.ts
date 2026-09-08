@@ -580,6 +580,34 @@ async function executeOneAgent(
           mentions: [],
           createdAt: new Date().toISOString(),
         })
+
+        // 兜底通知（收口链回作者通路修复 · 修法②）：仅提示发送者不够——它若没
+        // 另寻他路，被拦的结论就静默停摆（2026-09-09 实证：吐槽猫 的 ⚠️ 被拦，
+        // 作者与店长均不知情，卡 10 分钟）。故除提示发送者外，同时告知会话内
+        // store 猫（收口决策归店长）。只对 role-not-allowed 发——count-limit 的
+        // 补救路径明确（拆条重发，提示已给发送者），不构成结论悬空。
+        // 目标从 sessionAgentIds 反查（不能复用 allMentionedAgents——那已按
+        // routeNames 过滤，正是被剥除后的集合）；发送者本身是 store 时跳过。
+        if (roleBlocked.length > 0 && agent.role !== 'store') {
+          const storeCat = sessionAgentIds
+            .map((id: string) => {
+              const row = agentsRepo.getAgentById(id)
+              return row ? rowToAgent(row) : null
+            })
+            .find((a): a is AgentConfig => a !== null && a.role === 'store')
+          if (storeCat) {
+            bus.emitSystemNotice({
+              id: uuid(),
+              sessionId,
+              agentId: storeCat.id,
+              content: `🐱 ${agent.name} 的 @ 被角色策略拦下（${roleBlocked
+                .map((b) => b.name)
+                .join('、')}）——该结论可能悬空，请关注`,
+              mentions: [],
+              createdAt: new Date().toISOString(),
+            })
+          }
+        }
       }
 
       if (allowedNames.length > 0) {

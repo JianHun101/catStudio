@@ -92,7 +92,7 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
     })
   })
 
-  describe('reviewer（吐槽猫）→ {store} ∪ 本次触发消息作者', () => {
+  describe('reviewer（吐槽猫）→ {store, implementer} ∪ 本次触发消息作者', () => {
     it('可 @ 店长（store）', () => {
       const { allowed, blocked } = filterAllowedMentions(
         { role: 'reviewer', triggerAuthorName: 'ds猫' },
@@ -102,31 +102,42 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
       expect(blocked).toEqual([])
     })
 
-    it('可 @ 回本次触发消息作者（若为 agent）——审查结论回请求人', () => {
+    it('可 @ 实施猫（implementer）——收口链回作者通路，无需是触发作者', () => {
+      // 关键回归：触发者是用户/店长时，⚠️/❌ 仍能投回作者（事故根因：
+      // 边表原先只有「触发者」概念、没有「作者」，@作者 永远不可达）
       const { allowed, blocked } = filterAllowedMentions(
-        { role: 'reviewer', triggerAuthorName: 'ds猫' },
-        [target('ds猫', 'implementer')]
+        { role: 'reviewer', triggerAuthorName: '店长' },
+        [target('ds猫', 'implementer'), target('flash猫', 'implementer')]
       )
-      expect(names(allowed)).toEqual(['ds猫'])
+      expect(names(allowed)).toEqual(['ds猫', 'flash猫'])
       expect(blocked).toEqual([])
     })
 
-    it('不可 @ 非触发作者的其他猫', () => {
+    it('可 @ 回本次触发消息作者（角色不在边表时仍放行——例外边保留）', () => {
       const { allowed, blocked } = filterAllowedMentions(
-        { role: 'reviewer', triggerAuthorName: 'ds猫' },
-        [target('flash猫', 'implementer')]
+        { role: 'reviewer', triggerAuthorName: '图测猫' },
+        [target('图测猫', 'vision')]
       )
-      expect(allowed).toEqual([])
-      expect(blocked).toEqual([{ name: 'flash猫', reason: 'role-not-allowed' }])
+      expect(names(allowed)).toEqual(['图测猫'])
+      expect(blocked).toEqual([])
     })
 
-    it('用户触发（无触发作者）→ 只可 @ 店长', () => {
+    it('不可 @ 图测猫（vision）——非触发作者，不放开', () => {
+      const { allowed, blocked } = filterAllowedMentions(
+        { role: 'reviewer', triggerAuthorName: 'ds猫' },
+        [target('图测猫', 'vision')]
+      )
+      expect(allowed).toEqual([])
+      expect(blocked).toEqual([{ name: '图测猫', reason: 'role-not-allowed' }])
+    })
+
+    it('用户触发（无触发作者）→ 可 @ 店长与实施猫', () => {
       const { allowed, blocked } = filterAllowedMentions({ role: 'reviewer' }, [
         target('店长', 'store'),
         target('ds猫', 'implementer'),
       ])
-      expect(names(allowed)).toEqual(['店长'])
-      expect(blocked).toEqual([{ name: 'ds猫', reason: 'role-not-allowed' }])
+      expect(names(allowed)).toEqual(['店长', 'ds猫'])
+      expect(blocked).toEqual([])
     })
   })
 
@@ -177,7 +188,7 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
       expect(allowedTargetsDescription('implementer')).toContain('店长')
       expect(allowedTargetsDescription('implementer')).toContain('吐槽猫')
       expect(allowedTargetsDescription('reviewer')).toContain('店长')
-      expect(allowedTargetsDescription('reviewer')).toContain('本次请求你的猫')
+      expect(allowedTargetsDescription('reviewer')).toContain('实施猫')
       expect(allowedTargetsDescription('vision')).toBe('店长')
       expect(allowedTargetsDescription(undefined)).toBe('任意猫')
       expect(allowedTargetsDescription('unknown' as AgentRole)).toBe('任意猫')
