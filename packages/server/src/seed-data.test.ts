@@ -123,6 +123,16 @@ describe('agent system prompts', () => {
     expect(IRON_LAWS_CODER).toContain('重启审批')
   })
 
+  it('T2 铁律层承载——出口检查段含「未结束必须产出结构化投递信号」（硬信号，非软思考）', () => {
+    // 承载物=铁律层出口检查段（ADR 0014 用户拍板取代「结尾思考」软触发）：流程未结束
+    // 必须产出结构化投递信号 {target,intent,ref} → post_message/行首 @。触发锚点从 skill
+    //（软、字面死）迁移到铁律层（硬、可解析、每回复在场）。
+    expect(COMMON_IRON_LAWS).toContain('未结束必须产出结构化投递信号')
+    expect(COMMON_IRON_LAWS).toContain('{target, intent, ref}')
+    expect(COMMON_IRON_LAWS).toContain('post_message')
+    expect(COMMON_IRON_LAWS).toContain('commit_sha')
+  })
+
   it('共通铁律层单源——CODER 与 REVIEWER 都注入同一段共通控制流，且不跨角色重复', () => {
     // 共通控制流（出口检查/投递/重启审批等）单源到 COMMON_IRON_LAWS：每个角色常量
     // 各含一次、不各自复制改写——改一处共通规则，两角色同步生效
@@ -145,7 +155,9 @@ describe('agent system prompts', () => {
     expect(IRON_LAWS_CODER).not.toContain('禁止直接安装')
     expect(IRON_LAWS_CODER).not.toContain('严禁声明和安装出现在同一轮回复中')
     expect(IRON_LAWS_CODER).not.toContain('禁止自行 kill 或重启 server')
-    expect(COMMON_IRON_LAWS).not.toContain('必须')
+    // 「必须」在共通层放宽：单处 T2 规格强制（未结束必须产出结构化投递信号）——是
+    // 正向行为指令（必须做 X），非禁令堆砌；严禁/禁止/绝不 仍全查、hard 门禁仍保留
+    expect(COMMON_IRON_LAWS.split('必须').length - 1).toBe(1) // 仅一处强制信号，不堆砌
     expect(COMMON_IRON_LAWS).not.toContain('严禁')
     expect(COMMON_IRON_LAWS).not.toContain('禁止')
     expect(COMMON_IRON_LAWS).not.toContain('绝不') // 硬性门禁在 CODER_DUTIES（Worktree 段），不在共通层

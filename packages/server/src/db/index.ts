@@ -418,6 +418,34 @@ export function initDb(): void {
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`,
     },
+    // 契约③ flow_state 当前状态表（additive：CREATE TABLE IF NOT EXISTS 幂等，老库重跑零副作用）。
+    // 键 (session_id, commit_sha) = 一个 commit 在某个会话的主干道走到哪；值=主干道状态
+    // （implement/quality-gate/request-review/receive-review/closed，见 execution/flow-state.ts）。
+    // 状态机只管主干道；岔道走判断式投递不落此表。同事务更新见 db/repository/flowStates.ts。
+    {
+      name: 'flow_states table (契约③ 当前状态)',
+      sql: `CREATE TABLE IF NOT EXISTS flow_states (
+        session_id TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        state TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (session_id, commit_sha)
+      )`,
+    },
+    // 契约③ flow_state 审计流水表（additive：幂等）。每次状态变更随写一条（含 from→to+intent），
+    // 与 flow_states.state 字段双保险——状态字段被误改时可由流水还原；独立于状态字段做兜底留痕。
+    {
+      name: 'flow_state_events table (契约③ 审计流水)',
+      sql: `CREATE TABLE IF NOT EXISTS flow_state_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        from_state TEXT,
+        to_state TEXT NOT NULL,
+        intent TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    },
   ]
 
   for (const m of migrations) {

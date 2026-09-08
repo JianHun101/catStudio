@@ -9,8 +9,12 @@ import {
   messages as messagesRepo,
   executionLogs as execLogsRepo,
   verdicts as verdictsRepo,
+  flowStates as flowStatesRepo,
 } from '../db/repository/index.js'
 import { ingestUserMessage } from '../connectors/ingest.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('messages')
 
 export async function messageRoutes(app: FastifyInstance): Promise<void> {
   /**
@@ -84,6 +88,33 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const result = agentId
       ? execLogsRepo.updateRunningExecutionCommitHash(id, commitHash, agentId)
       : execLogsRepo.updateRunningExecutionCommitHash(id, commitHash)
+    // 契约③ 状态机入口（T5）：commit 写回 execution 后，记该 commit 进入主干道——
+    // 入口状态=quality-gate（作者已完成自查、审查链即将由 handoff-gen 触发 request-review）。
+    // 只记事实、不驱动审查（hook 仍为准）；完整闭环推进（verdict 推进/恰好一次去重）归 T6。
+    // 仅当 commit 真正命中一条执行记录（changes>0）才记，避免无执行关联的孤儿 flow 行。
+    // intent=quality_gate：本入口事件记录「进入 quality-gate」本次动作的语义（与
+    // deriveNextIntent(implement)→quality-gate 的 intent 一致）；真正 review_commit（离开
+    // quality-gate 去请求审查）是「下一步」，按 ADR §4「下一步不落库」由状态机派生，不入本入口事件。
+    if (result.changes > 0) {
+      try {
+        const msg = messagesRepo.getMessageByIdOnly(id)
+        if (msg) {
+          flowStatesRepo.recordFlowTransition(
+            msg.session_id,
+            commitHash,
+            'quality-gate',
+            'quality_gate'
+          )
+        }
+      } catch (err) {
+        // 状态机入口是加装侧-car：失败仅 log，不把 commit_hash 写回变成 500（P2）
+        log.error('flow state entry failed (non-blocking)', {
+          id,
+          commitHash,
+          error: (err as Error).message,
+        })
+      }
+    }
     return reply.send({ ok: true, updated: result.changes })
   })
 

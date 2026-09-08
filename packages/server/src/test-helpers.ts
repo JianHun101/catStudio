@@ -193,6 +193,24 @@ const SCHEMA_SQL = `
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS flow_states (
+    session_id TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    state TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (session_id, commit_sha)
+  );
+
+  CREATE TABLE IF NOT EXISTS flow_state_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `
 
 /**
