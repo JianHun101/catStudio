@@ -52,10 +52,13 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于 skill-l
 **契约③落地形态（字段+日志审计缝合，用户拍板）**：状态机**不二选一**，而是"当前状态"与"下一步"分层——
 
 - **当前状态**（这个 commit 走到哪一步，如是否已 quality-gate）→ DB 字段 `flow_state`，键 `(session_id, commit_sha)`，值如 `quality-gate`。service 在每次投递/事件发生时**同事务更新**。这是不变的事实，主链（manifest）调整不影响历史行。
-- **下一步动作**（该触发谁、什么 intent）→ **不落库**，运行时由程序读 `flow_state` 当前状态 + 查 manifest 主链（`spec-gate → to-tickets → implement → quality-gate → request-review`）**机械算出**，全程无 agent 参与。因它是**派生数据**：若也存一列，主链一改所有历史行"下一步"全错，须跑迁移——一致性债。
+- **下一步动作**（该触发谁、什么 intent）→ **不落库**，运行时由程序读 `flow_state` 当前状态，沿**主干道线性链段**（`implement → quality-gate → request-review → receive-review → closed`，即 T5 `FLOW_MAIN_CHAIN`）**机械算出**，全程无 agent 参与。因它是**派生数据**：若也存一列，链段一改所有历史行"下一步"全错，须跑迁移——一致性债。
+  - **链段口径校准（OQ2/OQ3）**：此链段与 manifest 的**审查链段**对齐（`quality-gate.next → request-review.next → receive-review`），但 manifest **无单一线性主链表**——它是逐 skill `next` 指针（如 `spec-gate.next → to-tickets/implement`）+ `receive-review.next → request-review`（❌打回重走）回环。故「查 manifest 主链」在此是**设计语义对齐**（链段由 T5 硬编码 `FLOW_MAIN_CHAIN` 承载），**非运行时逐项读表**。前段（grilling/to-spec/spec-gate/to-tickets）属实施前规划，不在状态机范围（见 §4 状态机边界）。后续若 manifest 增加线性主链表，应回填对齐此硬编码——链调整导致的历史行差异即前述一致债。
 - **审计留痕** → 日志，每次投递/状态变更随写，做兜底留痕。与状态字段双保险。
 
 **状态机边界**：只管**主干道**（机械确定，如 quality-gate PASS → 自动触发 request-review）。岔道——实现猫卡住@求助、审查❌打回、需求需澄清——**不进状态机**，走判断式投递（agent 自主）；否则状态机要在链定义堆异常转移规则，复杂度爆炸。
+
+- **❌打回语义（OQ1，边界归 T6）**：实现是**内容寻址**——❌打回 → 作者重新实现 → 产出**新 commit_sha** → 状态机在新键、新 quality-gate 入口看到；原被打回的 `(session_id, commit_sha)` 行**自然留作历史**，`recordFlowTransition` 对**同一 sha** 是 upsert 幂等、不覆盖。此「靠新 sha 自解」为隐含假设，ADR 曾一字未提；边界（❌打回后是否需清/重置 `flow_state` 键语义）**归 T6 定义**，本 ADR 只声明由内容寻址自解、旧行留史。
 
 ## 5. Consequences
 
@@ -80,6 +83,6 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于 skill-l
 
 ## 决策留痕
 
-- 跳 grilling 未完全：此 ADR 即 grilling 访谈对象，§4 三契约待逐项钉死后正式定稿，非「草稿即终稿」。
+- 跳 grilling 未完全：此 ADR 即 grilling 访谈对象——经多轮 grilling，§4 三契约已逐项钉死并落定为最终形态，当前状态为「定稿」（见 §4 标题与首段状态行），非「草稿即终稿」的草稿态。
 - 投递外移方向：用户拍板（与 clowder「仓库源库 + server 驱动 + agent 自主」设计哲学一致）。
 - 白名单后续项：用户明确要求「记录走完这套之后要处理 agent skill 白名单」——见 §6。
