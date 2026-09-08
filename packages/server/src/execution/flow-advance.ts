@@ -7,13 +7,15 @@
  * - 状态机只在 hook 不覆盖的跳**补信号**，3 件事：
  *   ① verdict 推进账本——审查 {✅/⚠️/❌} 落盘事件 → recordFlowTransition 沿主干道前进
  *   ② 恰好一次去重——commit_sha 主键判同源，防「判定式投递 + hook 兜底」双触发
- *   ③ verdict ✅ → 派生 closeout 信号提醒店长收口
+ *   ③ verdict ✅ → closeout 信号**真正投递**店长收口（判定式投递缺席时）
  *
  * 边界：只管主干道（FLOW_MAIN_CHAIN）；岔道（@求助 / ❌打回 / 澄清）不进状态机。
  * 不重做 post-commit hook 自动投审路径（request-review 那跳仍由 hook 触发）。
  *
  * 本模块是 verdict 落盘后的**非阻塞**接缝——serial.ts 的 review 钩子在
- * recordReviewVerdict 之后 fire-and-forget 调用（不 await、不抛错，审查链主流程零阻塞）。
+ * recordReviewVerdict 之后调用。函数体同步（推进是同步 DB 写）；closeout 投递
+ * 内部走 ingest（async 管线）以 `.then/.catch` 收尾，不 await、不抛错——审查链
+ * 主流程零阻塞（本模块整体被 try/catch 包住，DB 异常只记日志）。
  *
  * 反查链（E3 接线）：verdict 消息 message_id → messages.task_id（= 源链 trace_id）→
  * execution_logs.commit_hash（源链实施行挂的 commit）→ flow_states (session_id, commit_sha)。
@@ -22,25 +24,111 @@
 import { createLogger } from '../logger.js'
 import {
   messages as messagesRepo,
+  sessions as sessionsRepo,
+  agents as agentsRepo,
   flowStates as flowStatesRepo,
   executionLogs as execLogsRepo,
 } from '../db/repository/index.js'
 import { deriveNextIntent, type FlowStage } from './flow-state.js'
 import { buildDeliverySignal } from './delivery-signal.js'
+import { ingestUserMessage } from '../connectors/ingest.js'
 import type { ReviewVerdict } from '../eval/verdict-parser.js'
 
 const log = createLogger('flow-advance')
 
-/** 反查被审 commit_sha（verdict 消息 →源链 trace_id → commit_hash）。无 commit 链路返回 undefined。 */
-function resolveCommitSha(messageId: string): string | undefined {
+/**
+ * 反查被审 commit（verdict 消息 → 源链 trace_id → commit_hash）。
+ * 同时回吐 trace_id——closeout 投递要带源链 task_id，让店长收口链与任务链同线程。
+ * 无 commit 链路（纯会话）返回 undefined。
+ */
+function resolveCommitChain(messageId: string): { commitSha: string; traceId: string } | undefined {
   const meta = messagesRepo.getTaskIdByMessageId(messageId)
   if (!meta) return undefined
-  return execLogsRepo.getCommitHashByTraceId(meta.task_id)
+  const commitSha = execLogsRepo.getCommitHashByTraceId(meta.task_id)
+  if (!commitSha) return undefined
+  return { commitSha, traceId: meta.task_id }
+}
+
+/** 会话内 store 角色猫名（收口提醒的投递目标）。无 store 成员 → undefined。 */
+function resolveStoreCatName(sessionId: string): string | undefined {
+  for (const id of sessionsRepo.getSessionAgentIds(sessionId)) {
+    const row = agentsRepo.getAgentById(id)
+    if (row?.role === 'store') return row.name
+  }
+  return undefined
 }
 
 /** 推进到终态是否需收口提醒（verdict approve → yes；suggest/reject 打回 → 不推进不提醒）。 */
 function shouldAdvance(verdict: ReviewVerdict): boolean {
   return verdict === 'approve'
+}
+
+/**
+ * 收口提醒**真正投递**（X2 第③件事的落地点）。
+ *
+ * 走 ingest 管线（落库 + 广播 + dispatch）注入一条 @店长 消息——店长收到即执行
+ * 收口动作（合并 → 更新 .push-gate → 推分支 → 开 PR）。这是「机械补信号」的落地：
+ * 判定式投递（reviewer @店长）缺席时，状态机不替 agent 决策收不收口，只把
+ * 「这个 commit 已可收口」变成一条可见消息送达店长。
+ *
+ * 恰好一次：同 commit 重复 approve 时 flow_state 已 closed → 外层 advanced=false
+ * 不进入本函数；判定式已投（targets 含 store 猫）→ 外层直接跳过。两层去重都在
+ * 调用点，本函数只负责投递一次。
+ *
+ * 非阻塞：ingest 返回的 Promise 以 then/catch 收尾，失败只记日志。
+ */
+function deliverCloseoutNotice(opts: {
+  sessionId: string
+  commitSha: string
+  traceId: string
+}): void {
+  const storeCatName = resolveStoreCatName(opts.sessionId)
+  if (!storeCatName) {
+    // 会话无 store 成员——无处可投。记日志而非静默：这是「提醒没送达」的可观测痕迹
+    log.warn('closeout notice skipped — no store cat in session', {
+      sessionId: opts.sessionId,
+      commitSha: opts.commitSha.slice(0, 7),
+    })
+    return
+  }
+
+  const signal = buildDeliverySignal({
+    targets: [storeCatName],
+    intent: 'closeout',
+    commitSha: opts.commitSha,
+    traceId: opts.traceId,
+  })
+
+  ingestUserMessage({
+    sessionId: opts.sessionId,
+    content:
+      `【契约③·状态机兜底】commit ${opts.commitSha.slice(0, 7)} 审查结论 ✅，` +
+      `主干道已推进至 closed。审查者未 @店长 收口，状态机补投本提醒——请店长收口。`,
+    mentions: signal.targets,
+    taskId: opts.traceId,
+  })
+    .then((result) => {
+      if (result.ok) {
+        log.info('closeout notice delivered', {
+          sessionId: opts.sessionId,
+          commitSha: opts.commitSha.slice(0, 7),
+          target: storeCatName,
+          messageId: result.messageId,
+        })
+      } else {
+        log.warn('closeout notice rejected by ingest', {
+          sessionId: opts.sessionId,
+          status: result.status,
+          error: result.error,
+        })
+      }
+    })
+    .catch((err: any) => {
+      log.warn('closeout notice delivery failed (non-blocking)', {
+        sessionId: opts.sessionId,
+        error: err.message,
+      })
+    })
 }
 
 /**
@@ -68,14 +156,15 @@ export function advanceFlowAfterVerdict(opts: {
       return
     }
 
-    const commitSha = resolveCommitSha(opts.messageId)
-    if (!commitSha) {
+    const chain = resolveCommitChain(opts.messageId)
+    if (!chain) {
       log.info('flow advance skipped — no commit chain (pure session)', {
         messageId: opts.messageId,
         sessionId: opts.sessionId,
       })
       return
     }
+    const { commitSha, traceId } = chain
 
     // 读当前状态 → 沿主干道机械推进（deriveNextIntent 循环，每步 recordFlowTransition）
     const current = flowStatesRepo.getFlowState(opts.sessionId, commitSha)?.state as
@@ -97,23 +186,13 @@ export function advanceFlowAfterVerdict(opts: {
     }
 
     if (advanced) {
-      // 恰好一次去重（①）：判定式收口未投（targets 无 store 猫）→ 状态机补 closeout 提醒店长收口。
-      // 判定式已投（reviewer @店长收口，A2A 层在推进）→ 状态机不重复补（防双触发）。
+      // 恰好一次去重（②）：判定式收口未投（targets 无 store 猫）→ 状态机补 closeout
+      // 提醒店长收口。判定式已投（reviewer @店长收口，A2A 层在推进）→ 状态机不重复补
+      // （防双触发）。advance 已发生 = 本 commit 首次走到终态，同 commit 重复 verdict
+      // 不再进入本块（flow_state 已 closed，advanced=false）。
       const storeCat = opts.targets.find((t) => t.isStore)
       if (!storeCat) {
-        const signal = buildDeliverySignal({
-          targets: ['店长'], // store 猫名——会话成员固定名
-          intent: 'closeout',
-          commitSha,
-          traceId: opts.sessionId,
-        })
-        log.info('closeout signal derived (mechanical fallback)', {
-          sessionId: opts.sessionId,
-          commitSha: commitSha.slice(0, 7),
-          signal,
-        })
-        // 注：信号已产出留痕；真正触发店长收口由 store 收口链（closeoutSession）接手，
-        // 状态机只负责"记账 + 派生信号提醒"，不替 agent 执行收口动作（X2 边界）。
+        deliverCloseoutNotice({ sessionId: opts.sessionId, commitSha, traceId })
       }
     }
   } catch (err: any) {

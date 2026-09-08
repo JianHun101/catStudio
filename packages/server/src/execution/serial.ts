@@ -596,19 +596,20 @@ async function executeOneAgent(
           // 契约③ X2（flow-advance）：verdict 落盘后推进状态机 + closeout 兜底提醒。
           // recordReviewVerdict 返回落盘的 verdict（null=无有效结论，不推进）；
           // verdict 判据（approve→closed 推进 / suggest●reject→内容寻址不动）+ 判定式
-          // 收口是否已投（targets 含 store 猫）由 flow-advance 内判。非阻塞：内部 try/catch，
-          // fire-and-forget 语义（本钩子本身也在评审回复落库后，主流程零影响）。
+          // 收口是否已投（targets 含 store 猫）由 flow-advance 内判。非阻塞：同步函数
+          // 内部 try/catch（状态推进是同步 DB 写；closeout 投递走 ingest 异步管线，
+          // 以 then/catch 收尾不 await）——本钩子在评审回复落库后，主流程零影响。
+          const reviewedTargets = policy.allowed.map((a) => ({
+            name: a.name,
+            isStore: a.role === 'store',
+          }))
           const parsedVerdict = recordReviewVerdict({
             messageId: reply.msgId,
             sessionId,
             reviewerAgentId: agent.id,
             content: reply.content,
-            targets: policy.allowed.map((a) => ({ name: a.name, isStore: a.role === 'store' })),
+            targets: reviewedTargets,
           })
-          const reviewedTargets = policy.allowed.map((a) => ({
-            name: a.name,
-            isStore: a.role === 'store',
-          }))
           if (parsedVerdict) {
             advanceFlowAfterVerdict({
               messageId: reply.msgId,

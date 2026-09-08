@@ -53,6 +53,12 @@ describe('execution/flow-advance — 契约③ X2 闭环', () => {
       `INSERT INTO agents (id, name, system_prompt, llm_provider, llm_model, llm_api_key)
        VALUES ('agent-1', '吐槽猫', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk')`
     ).run()
+    // store 角色猫（closeout 投递目标解析用）——默认不在会话成员里（agent_ids='[]'），
+    // 投递用例单独把本行挂进会话，其余用例走「无 store 成员 → 不投递」路径
+    db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES ('agent-store', '店长', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk', 'store')`
+    ).run()
   })
 
   afterEach(() => {
@@ -101,6 +107,50 @@ describe('execution/flow-advance — 契约③ X2 闭环', () => {
     })
     // closed 是终态，不因重复 approve 变化；审计流水不止增（幂等，closed 无下一步）
     expect(getFlowState(SESSION, SHA)?.state).toBe('closed')
+  })
+
+  it('approve 且判定式收口未投 → closeout 提醒真正投递（@店长 消息落库 + 源链 task_id）', () => {
+    // 会话成员含 store 猫——投递目标可解析（其余用例 agent_ids='[]' 走不投递路径）
+    getDb().prepare(`UPDATE sessions SET agent_ids = '["agent-store"]' WHERE id = ?`).run(SESSION)
+    const msgId = seedReviewContext({ taskId: TRACE, commitHash: SHA })
+
+    advanceFlowAfterVerdict({
+      messageId: msgId,
+      sessionId: SESSION,
+      verdict: 'approve',
+      targets: [], // 判定式收口未投（allowedNames 无 store 猫）
+    })
+
+    expect(getFlowState(SESSION, SHA)?.state).toBe('closed')
+    // 投递落库可见：ingest 同步段在首个 await 前完成 INSERT（本模块不 await 也能断言）
+    const notices = getDb()
+      .prepare(
+        `SELECT content, mentions, task_id FROM messages
+         WHERE session_id = ? AND role = 'user' ORDER BY created_at DESC, rowid DESC`
+      )
+      .all(SESSION) as Array<{ content: string; mentions: string; task_id: string | null }>
+    const notice = notices.find((r) => r.content.includes('契约③·状态机兜底'))
+    expect(notice).toBeDefined()
+    expect(JSON.parse(notice!.mentions)).toEqual(['店长'])
+    expect(notice!.task_id).toBe(TRACE) // 源链 task_id 随投递携带（收口链同线程）
+    expect(notice!.content).toContain(SHA.slice(0, 7))
+  })
+
+  it('会话无 store 成员 → closeout 提醒不投递（仅留痕，不抛错）', () => {
+    const msgId = seedReviewContext({ taskId: TRACE, commitHash: SHA })
+    expect(() =>
+      advanceFlowAfterVerdict({
+        messageId: msgId,
+        sessionId: SESSION,
+        verdict: 'approve',
+        targets: [],
+      })
+    ).not.toThrow()
+    // 无 store 成员 = 无处可投：不产生任何 user 消息
+    const count = getDb()
+      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE session_id = ? AND role = 'user'`)
+      .get(SESSION) as { n: number }
+    expect(count.n).toBe(0)
   })
 
   it('suggest/reject → 打回内容寻址新 sha 自解，状态机不动（不推进）', () => {
