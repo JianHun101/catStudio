@@ -15,7 +15,7 @@
 ## Solution
 
 - **skill 只管领域**（怎么把活做对），内容里**不再含任何 `@谁`/`请谁审查`/`投给谁` 的指令**。
-- **投递外移为「铁律层出口检查段」**：`packages/server/src/config/iron-laws.ts` 的共通铁律层（`COMMON_IRON_LAWS`）出口检查段，从「自问 + 投递给下一棒」升级为「**流程未结束必须产出投递信号 `{target, intent, ref}`** → 调 `post_message` / 行首 `@`」。触发锚点从 skill（软、字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
+- **投递外移为「铁律层出口检查段」**：`packages/server/src/config/iron-laws.ts` 的共通铁律层（`COMMON_IRON_LAWS`）出口检查段，从「自问 + 投递给下一棒」升级为「**流程未结束必须产出投递信号 `{targets, intent, ref}`** → 调 `post_message` / 行首 `@`」。触发锚点从 skill（软、字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
 
 ### 三层可靠性叠起来（回应「外部投递不好触发」）
 
@@ -27,7 +27,8 @@
 
 ### 契约① 信号形状 + 承载物
 
-- **信号形状**：轻信号 `{target, intent, ref}`（如 `{target: 吐槽猫, intent: review_commit, ref: <sha>}`），不载全文、不比较内容。
+- **信号形状**：轻信号 `{targets, intent, ref}`（`targets` 为 **`string[]` 数组**——对齐传输层 `post_message` 的 `targetCats` 真实形状，如 `{targets: [吐槽猫], intent: review_commit, ref: <sha>}`），不载全文、不比较内容。
+- **shape 对齐原则**：契约即传输层形状，不设适配层。`targets: string[]` 直接承载 `post_message` 多播（一次投多只，CLAUDE.md 明确支持）；`at-mention` 通道转成多行 `@`。**用户 2026-09-08 拍板**：弃 `target: string` 单数（对已审 T1 契约 shape 的修订，因 `planDelivery`/`buildDeliverySignal` 无生产消费点，改零涟漪）。
 - **ref 主键**：以 **commit_sha 为主键**（定位 + 去重同源）；纯会话无 commit 退 **trace_id** 兜底。trace_id 仅作**关联列**，绝不替代 ref 做定位/去重。
 - **承载物**：信号产出动作写入**铁律层出口检查段**（非「结尾顺带想想」软触发）；产出 → `post_message` / 行首 `@`。
 
@@ -59,7 +60,7 @@
 
 - skill 内容剥投递（base `request-review` 剥「选择审查者/@审查者」，`handoff` 剥「行首@审查者」）。
 - 铁律层出口检查段承载投递信号产出。
-- 投递信号 `{target, intent, ref}` 契约 + 判断式投递链路（`post_message`/行首 `@` 消费）。
+- 投递信号 `{targets, intent, ref}` 契约 + 判断式投递链路（`post_message`/行首 `@` 消费）。
 - request-review 信号**直接启用 base**（剥投递后），不建 catstudy 投递定制层；老投递版淘汰。
 - 契约③ `flow_state` 状态机 + 主链机械推导（进本批）。
 - 完整闭环端到端测试。
@@ -84,7 +85,7 @@
 
 ## 测试决策
 
-- 信号形状/ref 主键/trace_id 兜底：**纯单元**断言产出 + 消费 `{target, intent, ref}`；ref 以 commit_sha 键、纯会话退 trace_id。
+- 信号形状/ref 主键/trace_id 兜底：**纯单元**断言产出 + 消费 `{targets, intent, ref}`；ref 以 commit_sha 键、纯会话退 trace_id。
 - 内容剥离：**静态源断言**——被剥 skill 内容不再含 `@谁`/`请谁审查`/`投给谁`。
 - 铁律层承载：静态源断言出口检查段含「未结束必须产出投递信号」。
 - request-review 启用：组装式/端到端断言真实审查链走通，每个 commit 恰好触达审查猫一次。
