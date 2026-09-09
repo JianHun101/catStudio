@@ -102,9 +102,9 @@ describe('parseReviewVerdict — 纯函数', () => {
     expect(r).toEqual({ kind: 'verdict', verdict: 'reject', subject: 'ds猫', failure: null })
   })
 
-  it('> ✅可合并（引用块装饰）→ approve', () => {
+  it('> ✅可合并（引用块）→ no-marker（引用按定义是转述，一律排除）', () => {
     const r = parseReviewVerdict('> ✅可合并', TARGETS)
-    expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
+    expect(r).toEqual({ kind: 'no-marker' })
   })
 
   it('标签前缀 + 强调闭合 **结论：✅可合并** → approve（装饰与标签交错）', () => {
@@ -127,9 +127,160 @@ describe('parseReviewVerdict — 纯函数', () => {
     expect(r).toEqual({ kind: 'no-marker' })
   })
 
-  it('多标记取最后出现者（结论在末尾语义，同 buildReviewLoopHint）', () => {
-    const r = parseReviewVerdict('⚠️建议修改 先说问题。\n✅可合并 后来确认了', TARGETS)
+  // ─── 真实形态（2026-09-09 吐槽猫 ⚠️ 主项 1）──────────────────────────
+  // 实测本会话 14 条真实审查消息：结论行主导形态是 `**结论：⚠️建议修改**——续写正文`，
+  // 强调闭合 + 标点紧贴标记 → 旧 lookahead `(?=\s|$)` 遇 `*` 不匹配，86% 静默不落库。
+
+  it('真实形态 **结论：⚠️建议修改**——续写正文 → suggest（强调闭合 + 破折号）', () => {
+    const r = parseReviewVerdict('**结论：⚠️建议修改**——方向正确，但 3 点需处理。', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('真实形态 **结论：✅可合并**——续写正文 → approve', () => {
+    const r = parseReviewVerdict('**结论：✅可合并**——方向对、测试全绿。', TARGETS)
     expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
+  })
+
+  it('真实形态 - **结论**：⚠️建议修改（LOW）——续写 → suggest（标签夹强调闭 + 括号）', () => {
+    const r = parseReviewVerdict('- **结论**：⚠️建议修改（LOW）——docs 清理达标。', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('真实形态 **结论判定：⚠️建议修改（LOW）**。→ suggest（长标签须早于短标签）', () => {
+    const r = parseReviewVerdict('**结论判定：⚠️建议修改（低严重度收尾）**。3 处待修。', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('标记后接汉字仍不匹配 → bad_verdict（✅可合并了，不因放宽而误收）', () => {
+    const r = parseReviewVerdict('✅可合并了，结论如下', TARGETS)
+    expect(r).toEqual({ kind: 'failure', reason: 'bad_verdict' })
+  })
+
+  // ─── 引用 / 列表行不覆盖真结论（2026-09-09 吐槽猫 ⚠️ 主项 2）──────────
+  // 引用块/列表项里的标记多为引用他人结论或列表描述 → 不参与「最后出现者」覆盖，
+  // 只在全消息无普通结论行时兜底识别。否则一条 ⚠️ 审查会被末尾引用的一行 ✅ 误判 approve。
+
+  it('引用行 ✅ 不覆盖真结论 ⚠️ → suggest（旧实现误判 approve）', () => {
+    const r = parseReviewVerdict('**结论：⚠️建议修改**——需改。\n\n> ✅可合并', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('列表行 ✅ 不覆盖真结论 ⚠️ → suggest（旧实现误判 approve）', () => {
+    const r = parseReviewVerdict('- ✅可合并 → 行首@店长\n\n**结论：⚠️建议修改**——需改。', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('全消息只有引用行标记 → no-marker（引用一律排除，不兜底识别）', () => {
+    const r = parseReviewVerdict('审查意见见上。\n> ✅可合并', TARGETS)
+    expect(r).toEqual({ kind: 'no-marker' })
+  })
+
+  it('列表项无标签 ✅ 排除 → no-marker（清单描述不误判 approve）', () => {
+    const r = parseReviewVerdict('- ✅可合并 → 行首@店长', TARGETS)
+    expect(r).toEqual({ kind: 'no-marker' })
+  })
+
+  it('列表项带标签 ⚠️ → suggest（真实形态，A 级候选不受列表前缀影响）', () => {
+    const r = parseReviewVerdict('- **结论**：⚠️建议修改（LOW）——docs 清理达标。', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('A 级优先于 B 级：带标签 ✅ + 裸 ⚠️ → approve（标签行是结论）', () => {
+    const r = parseReviewVerdict('⚠️建议修改 先记问题。\n**结论：✅可合并**——复审已通过。', TARGETS)
+    expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
+  })
+
+  it('同级冲突取最严：裸 ⚠️ + 裸 ✅ → suggest（错误代价不对称）', () => {
+    const r = parseReviewVerdict('⚠️建议修改 先说问题。\n✅可合并 后来确认了', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('同级无冲突取该值：裸 ❌ 重复出现 → reject', () => {
+    const r = parseReviewVerdict('❌需重做 第一轮。\n❌需重做 复审仍不过。', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'reject', subject: 'ds猫', failure: null })
+  })
+
+  // ─── 真实语料回归（2026-09-09 店长验收硬指标）────────────────────────
+  // 语料 = 本会话（86e15a43）DB 中吐槽猫 15 条审查消息的**结论行原文**，
+  // 逐条从 `cat-study-dev.db` 导出（非手写夹具）。修复前实测 2/15 落 verdict。
+  // 保留原文标点/全半角冒号差异——它们是真实形态的一部分。
+  const CORPUS: Array<[string, string]> = [
+    [
+      'suggest',
+      '**结论:⚠️建议修改**——方向正确(MCP read_skill 懒加载是对的选择,测试全绿、catalog 与磁盘对齐、request-review 递送状态保留),但上述 3-4 点建议收口前处理,最实质的是 catstudy 嵌套定制版的内容正确性与 skill-loader 死代码。',
+    ],
+    [
+      'suggest',
+      '**结论：⚠️建议修改**——方向完全对（投递外移/改名/request-review 移除都正确，门禁全绿、命名收敛、无悬空），但上述主要问题建议收口前处理：把 16 项检查点清单迁移到保留文件，兑现"内容资产并入"的承诺。',
+    ],
+    [
+      'suggest',
+      '**结论判定：⚠️建议修改（低严重度收尾）**。内容资产找回这一核心目标**已一锤定音地达成**（15 项特有 + 48 项通用完整逐字迁移、门禁绿、纯 docs 无需重启），但上述 3 处描述性错误建议修正后再闭环。',
+    ],
+    [
+      'approve',
+      '**结论：✅可合并**——方向对、3 处描述性错误全部修正、清单内容完整无损（55=55）、门禁绿、无新引入问题。纯 docs 改动，店长可直接收口合并。',
+    ],
+    [
+      'approve',
+      '**结论：✅可合并**——方向对、四点 ⚠️ 全部落地、读盘逻辑单源化并补了自动化契约测试、无新引入问题、脚本与 server 双绿、tsc 过。此提交与 flash猫 `fc34675` 均已审 ✅，店长可一并收口合并。',
+    ],
+    [
+      'suggest',
+      '**结论：⚠️建议修改（LOW）**——docs 清理达标、契约①核实准确且有价值，仅 spec:77 承载物一处角色误述需 flashCat 补一行；契约① shape 不符是独立的、更重要的接线输入，单独上报店长。',
+    ],
+    [
+      'suggest',
+      '**结论：⚠️建议修改（LOW）**——line 78 修正本身准确、方向对；但同一承载物误述在 line 18 残留、fix 不完整。补 line 18 一处 + 拨正 reply.ts 行号即闭环。',
+    ],
+    [
+      'suggest',
+      '**结论：⚠️建议修改**——X2 接线方向完全对（verdict 推进 + commit_sha 去重 + 铁律 shape 对齐 + 门禁绿），核心逻辑正确且测试全绿；但 **OQ1（closeout 提醒店长收口未真正投递）** 是实质缺口，需你按 (a)/(b) 二选一定夺；OQ2 建议补接线测试。处理完我复审。',
+    ],
+    [
+      'approve',
+      '**结论：✅可合并**——两处 ⚠️ 全部修正、与实际磁盘一致、无新引入问题、纯 docs 无需重启。店长收口即可。',
+    ],
+    ['suggest', '## 审查结论：⚠️建议修改（`81f253b` 契约③ X2 闭环接线）'],
+    [
+      'approve',
+      '**结论：✅可合并**——OQ1 按 (a) 真正投递、OQ2 补真实接线测试、次要两条均已落地，实测无回归、无环、类型干净。两条观察属 spec 层口径与边界覆盖，挂后续单。',
+    ],
+    [
+      'suggest',
+      '**结论：⚠️建议修改**——修法①（边表 + 注释 + 文案）✅ 正确且是本事故正解，测试同步到位、无回归；修法② 需按 (a)/(b) 定夺（推荐 (a)，改动仅注释/测试名/文档）。改完我复审。',
+    ],
+    [
+      'suggest',
+      '**结论：⚠️建议修改**——裁决 A + 次要两条正确、全量 1320 + tsc 全绿；但裁决 B 未达成核心目标（真实审查消息 86% 仍不落 verdict），且放宽引入「引用行误判 approve」新面。这是「重启后 e2e 验证 verdict→closeout」的直接前置，**建议修好再收口重启**。',
+    ],
+  ]
+
+  it.each(CORPUS)('真实语料：%s ← %s', (expected, line) => {
+    const r = parseReviewVerdict(line, TARGETS)
+    expect(r.kind).toBe('verdict')
+    if (r.kind === 'verdict') expect(r.verdict).toBe(expected)
+  })
+
+  it('引用/列表行 emoji 不记 bad_verdict（噪音消除）→ no-marker', () => {
+    const r = parseReviewVerdict('- ✅ 绝大部分都对了——仅 2 点。\n> ⚠️ 参考历史结论。', TARGETS)
+    expect(r).toEqual({ kind: 'no-marker' })
   })
 
   it('suggest 但 targets 为空（防御）→ subject=null + no_subject', () => {
