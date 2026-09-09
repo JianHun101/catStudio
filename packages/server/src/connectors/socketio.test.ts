@@ -14,7 +14,15 @@ import { Events, estimateTokens } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
-import { RESTART_REQUEST_FILE, RESTART_DONE_FILE } from '../restart-request.js'
+import {
+  RESTART_REQUEST_FILE,
+  RESTART_DONE_FILE,
+  RESTART_TTL_MS,
+  RESTART_CONFIRMED_TTL_MS,
+} from '../restart-request.js'
+// 跨包引入 dev.js 侧的判定纯函数——验收要求「读回文件喂真实判定」而非只断言时间算术，
+// 保证「续期后 dev.js 真的会重启」被端到端钉住（scripts/ 是 workspace 第四个 vitest 项目）
+import { decideRestartAction } from '../../../../scripts/restart-gate.js'
 import type { AgentReplyMessage } from './replyBus.js'
 import { IRON_LAWS_CODER, IRON_LAWS_REVIEWER } from '../seed-data.js'
 import { getExecutionEngine, getExecutionBus } from '../execution/registry.js'
@@ -3881,6 +3889,52 @@ describe('socketio connector', () => {
         expect.objectContaining({ state: 'confirmed' })
       )
       expect(ack).toHaveBeenCalledWith({ ok: true })
+    })
+
+    it('确认续期：pending 只剩 2 分钟时确认 → expiresAt 续到确认时刻+35min，且 5 分钟后 dev.js 仍判 restart', () => {
+      // 造「创建于 8 分钟前、原 10min TTL 只剩 2 分钟」的 pending——模拟长执行吃掉 pending 窗口
+      const createdAt = new Date(Date.now() - 8 * 60 * 1000)
+      writeRestartRequest({
+        createdAt: createdAt.toISOString(),
+        expiresAt: new Date(createdAt.getTime() + RESTART_TTL_MS).toISOString(),
+      })
+      const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
+
+      const before = Date.now()
+      const ack = vi.fn()
+      handlers![0]({ messageId: 'msg-restart' }, ack)
+
+      const raw = readFileSync(RESTART_REQUEST_FILE, 'utf-8')
+      const req = JSON.parse(raw)
+      expect(req.state).toBe('confirmed')
+      // 续期基准 = 确认时刻（非 createdAt）
+      const renewed = new Date(req.expiresAt).getTime()
+      expect(renewed).toBeGreaterThanOrEqual(before + RESTART_CONFIRMED_TTL_MS)
+      expect(renewed).toBeLessThanOrEqual(Date.now() + RESTART_CONFIRMED_TTL_MS)
+      // 回推值 = 文件现值（旧值会让前端按旧时间提前隐藏按钮）
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'confirmed', expiresAt: req.expiresAt })
+      )
+      expect(ack).toHaveBeenCalledWith({ ok: true })
+      // 忙碌等待 5 分钟后 dev.js 仍应执行重启——旧实现 expiresAt 停在 createdAt+10min
+      //（= 现在 +2min）→ decideRestartAction 返回 'expired'，此断言必挂
+      expect(decideRestartAction(raw, Date.now() + 5 * 60 * 1000)).toBe('restart')
+    })
+
+    it('已 confirmed 再确认不重复续期（expiresAt 保持文件现值，防无限延长）', () => {
+      const fixed = new Date(Date.now() + 20 * 60 * 1000).toISOString()
+      writeRestartRequest({ state: 'confirmed', expiresAt: fixed })
+      const handlers = socketHandlers.get(Events.RESTART_CONFIRM)
+
+      handlers![0]({ messageId: 'msg-restart' }, vi.fn())
+
+      const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8'))
+      expect(req.expiresAt).toBe(fixed)
+      expect(mockSocketEmit).toHaveBeenCalledWith(
+        Events.RESTART_STATUS,
+        expect.objectContaining({ state: 'confirmed', expiresAt: fixed })
+      )
     })
 
     it('已过期 → 删文件 + ERROR + 推 expired + ack expired（dev.js 不会执行）', () => {

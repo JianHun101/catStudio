@@ -21,6 +21,31 @@ export const RESTART_PREFIX = '【重启请求】'
 /** 请求有效期：10 分钟（过期后 dev.js 忽略、前端隐藏按钮） */
 export const RESTART_TTL_MS = 10 * 60 * 1000
 
+/**
+ * 确认后有效期：35 分钟（从**确认时刻**起算，非 createdAt）。
+ *
+ * 两个 TTL 语义分工（勿合并成一个）：
+ * - RESTART_TTL_MS 管 pending：防陈旧请求被误确认，从 createdAt 起算，短。
+ * - 本值管 confirmed：用户已明确点确认，此后唯一风险是 dev.js 的执行保护窗
+ *   （`.agent-busy` 锁 / execution_logs 有 running）尚未释放。
+ *
+ * 为什么必须续期：dev.js `pollRestart`（scripts/dev.js:632）**先判过期、再判保护窗**
+ * （:644）。confirmed 若沿用 createdAt 起算的 10 分钟，一次长执行就能把 TTL 吃光
+ * → 超时 `unlink` + 仅 dev 终端一行日志（UI 零提示）→ 用户视角「点了没反应」。
+ * 实证：2026-09-09 本会话请求剩 2.9 分钟余量，靠店长手工续期才保住。
+ *
+ * 取值：35min = AGENT_HARD_TIMEOUT_MS（默认 30min，单次执行上限）+ 5min 余量
+ * （轮询间隔与收尾）。注意该推导是**单次**口径，保护窗的真实上界见残余。
+ *
+ * 已知残余（可达，非极小面）：忙碌窗上界不是单次执行上限，而是**连续忙碌链的累计时长**。
+ * 执行可串接（completeExecution 出队即起下一个，serial.ts:227-273），而 dev.js 的等待判据
+ * 是「`.agent-busy` 锁在 或 execution_logs 有 running」（dev.js:644 / :169）——只要还有执行
+ * 在跑就继续等，与单次时长无关。⇒ 忙碌链累计 > 35min 时请求仍会过期掉单。
+ * 根治方向（未做，需架构裁决）：server 侧在存在未执行 confirmed 请求时拒绝新派发，
+ * 或 dev.js 按「已等待时长」而非固定 TTL 判新鲜度。本注释只描述现状，不构成「禁止修复」。
+ */
+export const RESTART_CONFIRMED_TTL_MS = 35 * 60 * 1000
+
 /** 文件基础目录——生产不设 env → 项目根（与 dev.js 轮询路径一致）；测试经 vitest env 隔离 */
 const RESTART_FILES_DIR = process.env.RESTART_FILES_DIR ?? process.cwd()
 // 隔离目录（测试）可能不存在——模块加载时确保可写（生产 = cwd 已存在 → no-op）
@@ -40,7 +65,8 @@ export interface RestartRequestFile {
   /** 请求原因（「原因：xxx」中的 xxx，dev.js 重启日志与完成广播使用） */
   reason: string
   createdAt: string // ISO 8601
-  expiresAt: string // ISO 8601（createdAt + RESTART_TTL_MS）
+  /** ISO 8601——pending 为 createdAt + RESTART_TTL_MS；确认后续期到确认时刻 + RESTART_CONFIRMED_TTL_MS */
+  expiresAt: string
   state: 'pending' | 'confirmed'
 }
 
