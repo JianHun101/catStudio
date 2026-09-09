@@ -34,8 +34,15 @@ export const RESTART_TTL_MS = 10 * 60 * 1000
  * → 超时 `unlink` + 仅 dev 终端一行日志（UI 零提示）→ 用户视角「点了没反应」。
  * 实证：2026-09-09 本会话请求剩 2.9 分钟余量，靠店长手工续期才保住。
  *
- * 35 分钟取值：AGENT_HARD_TIMEOUT_MS（30min，单次执行上限）+ 5min 余量。
- * 已知残余：单次执行 > 35min 仍会掉单——极小面，接受不修（注释钉住，勿当 bug 修）。
+ * 取值：35min = AGENT_HARD_TIMEOUT_MS（默认 30min，单次执行上限）+ 5min 余量
+ * （轮询间隔与收尾）。注意该推导是**单次**口径，保护窗的真实上界见残余。
+ *
+ * 已知残余（可达，非极小面）：忙碌窗上界不是单次执行上限，而是**连续忙碌链的累计时长**。
+ * 执行可串接（completeExecution 出队即起下一个，serial.ts:227-273），而 dev.js 的等待判据
+ * 是「`.agent-busy` 锁在 或 execution_logs 有 running」（dev.js:644 / :169）——只要还有执行
+ * 在跑就继续等，与单次时长无关。⇒ 忙碌链累计 > 35min 时请求仍会过期掉单。
+ * 根治方向（未做，需架构裁决）：server 侧在存在未执行 confirmed 请求时拒绝新派发，
+ * 或 dev.js 按「已等待时长」而非固定 TTL 判新鲜度。本注释只描述现状，不构成「禁止修复」。
  */
 export const RESTART_CONFIRMED_TTL_MS = 35 * 60 * 1000
 
