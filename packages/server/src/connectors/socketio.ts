@@ -39,7 +39,9 @@ import {
   removeRestartRequest,
   readRestartDone,
   removeRestartDone,
+  RESTART_CONFIRMED_TTL_MS,
 } from '../restart-request.js'
+import type { RestartRequestFile } from '../restart-request.js'
 import { getRelevantMessages } from '../execution/context.js'
 import { createExecutionEngine } from '../execution/serial.js'
 import type { StreamState } from '../execution/state.js'
@@ -496,12 +498,25 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           ack?.({ ok: false, reason: 'expired' })
           return
         }
+        // 回推的 expiresAt 须与文件一致——pending→confirmed 走续期后的值（见下），
+        // 已 confirmed 走文件现值（不重复续期，防无限延长）
+        let confirmedExpiresAt = req.expiresAt
         if (req.state === 'pending') {
-          // pending → confirmed：dev.js 轮询到 confirmed 且新鲜即执行重启
-          updateRestartRequest({ ...req, state: 'confirmed' })
+          // pending → confirmed：dev.js 轮询到 confirmed 且新鲜即执行重启。
+          // 确认动作同时续期：confirmed 的 TTL 从确认时刻起算，覆盖 dev.js 的忙碌
+          // 等待窗（pending 的 10min 从 createdAt 起算，会被长执行吃光 → 超时静默掉单；
+          // 语义与取值依据见 restart-request.ts RESTART_CONFIRMED_TTL_MS 注释）
+          const confirmed: RestartRequestFile = {
+            ...req,
+            state: 'confirmed',
+            expiresAt: new Date(Date.now() + RESTART_CONFIRMED_TTL_MS).toISOString(),
+          }
+          updateRestartRequest(confirmed)
+          confirmedExpiresAt = confirmed.expiresAt
           log.info('restart request confirmed', {
-            messageId: req.messageId,
-            sessionId: req.sessionId,
+            messageId: confirmed.messageId,
+            sessionId: confirmed.sessionId,
+            expiresAt: confirmed.expiresAt,
           })
         }
         // 已 confirmed → 幂等重推（重复点击不报错）
@@ -509,7 +524,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           sessionId: req.sessionId,
           messageId: req.messageId,
           state: 'confirmed',
-          expiresAt: req.expiresAt,
+          expiresAt: confirmedExpiresAt,
         })
         ack?.({ ok: true })
       }
