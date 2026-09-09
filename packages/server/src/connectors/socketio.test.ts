@@ -631,6 +631,74 @@ describe('socketio connector', () => {
       expect(m.restartExpiresAt).toBeUndefined()
     })
 
+    // ─── 历史恢复判据 = 请求文件精确匹配（不依赖正文前缀） ───────────
+    // 真根因：结构化通道（request_user_action）下 agent 正文不含「【重启请求】」字样，
+    // 旧判据的文本前缀那一层把当前生效请求误杀 → 刷新后按钮消失。
+    // 幽灵按钮防护 = 精确匹配（只认文件指向的那一条）+ 前端 restartExpiresAt 过期守卫。
+
+    it('① 文件指向的 agent 消息正文无重启字样 → 历史恢复带 messageType + restartExpiresAt', () => {
+      // 结构化通道产物形态：普通汇报正文，无「【重启请求】」字样
+      writeRestartRequest({ messageId: 'msg-agent-restart' })
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions)
+        VALUES (?, 'session-1', 'agent', '收到 ✅ 已申请重启，等你点确认。', '[]')
+      `
+      ).run('msg-agent-restart')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-agent-restart')
+      expect(m.messageType).toBe('restart_request')
+      // expiresAt 取文件权威值（前端过期守卫依据）
+      expect(m.restartExpiresAt).toBe(
+        JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8')).expiresAt
+      )
+    })
+
+    it('② 文件指向别的消息 → 正文无重启字样的消息不带类型（精确匹配防护不退化）', () => {
+      writeRestartRequest({ messageId: 'msg-other-request' })
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions)
+        VALUES (?, 'session-1', 'agent', '收到 ✅ 已申请重启，等你点确认。', '[]')
+      `
+      ).run('msg-agent-plain')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-agent-plain')
+      expect(m.messageType).toBeUndefined()
+      expect(m.restartExpiresAt).toBeUndefined()
+    })
+
+    it('③ 无请求文件 → 正文无重启字样的消息全不带类型', () => {
+      const db = getDb()
+      db.prepare(
+        `
+        INSERT INTO messages (id, session_id, role, content, mentions)
+        VALUES (?, 'session-1', 'agent', '收到 ✅ 已申请重启，等你点确认。', '[]')
+      `
+      ).run('msg-agent-nofile')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      mockSocketEmit.mockClear()
+      handlers![0]('session-1')
+
+      const call = mockSocketEmit.mock.calls.find((c: any[]) => c[0] === Events.SESSION_HISTORY)!
+      const m = call[1].messages.find((x: any) => x.id === 'msg-agent-nofile')
+      expect(m.messageType).toBeUndefined()
+      expect(m.restartExpiresAt).toBeUndefined()
+    })
+
     it('JOIN 不给纯富文本消息附加类型（普通 diff 消息不带 messageType）', () => {
       const db = getDb()
       db.prepare(
