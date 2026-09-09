@@ -10,6 +10,11 @@
 # code-review 无 disable-model-invocation 字段仍标 mattpocock（店长裁决，追平 v1.1）；
 # session-summary 已转自研维护（不在 v1.1 树），归 self；
 # 其余无该字段的第三方技能统一标 external（来源待核，列入 .sync-provenance.json 追踪）。
+#
+# 两层机制（勿混）：
+#   · MCP read_skill 白名单（scripts/mcp-server-utils.mjs 的 SKILL_CATALOG）= 猫可自取范围，是访问约束；
+#   · disable-model-invocation = 上游来源标记（mattpocock 技能集的标志性 frontmatter），本仓库不构成访问约束。
+#   白名单 ≠ 猫咖流程权威：流程权威在 seed 角色 prompt 与 CONTEXT.md，本清单只决定「能取哪些技能正文」。
 
 skills:
   # ── 自研（猫咖定制，参与审查流程链）──

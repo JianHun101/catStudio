@@ -74,7 +74,17 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于注入�
 - 补齐缺口：`grilling/to-spec/to-tickets/receive-review` 按角色加入白名单/默认映射；
 - ~~两级路径注入~~：**已从待办移除**（用户拍板）——投递外移后路由离开 skill 正文，为覆盖坏 base 路由而生的注入补丁失去存在理由；catstudy 投递型定制层直接淘汰、不建。
 - `wayfinder` 保持排除（`disable-model-invocation: true` 是设计，人肉刻意发起）；
-- 白名单判据重构：剥离投递规则后，白名单只按「领域内容猫咖化 + 流程链相关」收敛。
+- 白名单判据重构：剥离投递规则后，白名单只按「领域内容猫咖化 + 流程链相关」收敛。**→ 已收口，见 §6.1**。
+
+### 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化
+
+**白名单判据重构（§6 末条）已裁决——拆两层，互不代偿**：
+
+- **MCP `read_skill` 白名单**（`scripts/mcp-server-utils.mjs` 的 `SKILL_CATALOG`）= 猫可自取范围的**访问约束**；
+- **`disable-model-invocation`** = 上游**来源标记**（mattpocock 技能集标志性 frontmatter），本仓库**不构成访问约束**——`to-spec`/`to-tickets` 均带该字段且都在猫清单内，两者不矛盾；
+- **白名单 ≠ 猫咖流程权威**：流程权威在 seed 角色 prompt 与 `CONTEXT.md`；skill 清单只决定「能取哪些技能正文」。
+
+**`to-spec` / `to-tickets` 去 matt 化（用户裁决）**：两技能携带 matt 上游的基础设施假设——`issue tracker`、`/setup-matt-pocock-skills`、`ready-for-agent` triage 标签。三者在本仓库的在场性实测均为零（无 `docs/agents/`、该 setup 命令已在 v1.1 对齐时删除、无标签体系）。处理原则：**剥离外部依赖，保留方法内核**——spec 模板结构 / tracer-bullet 垂直切片 / 显式 blocking edges 原样保留；落点中性化，改由调用方指定（tracker / 文件 / 交接皆可）。**否决「猫咖化」**：把派活单 / `flow_state` / handoff 写进 skill 会重建 skill↔流程耦合，正撞本 ADR 的解耦方向。
 
 ## Considered Options
 
