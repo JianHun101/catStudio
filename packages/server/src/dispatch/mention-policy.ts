@@ -9,8 +9,10 @@
  * - store（店长）→ 任意：架构裁决者，允许被任何人 @ 也允许 @ 任何人
  * - implementer（实施猫）→ {store, reviewer}：只对店长（求助/汇报）和
  *   审查者（审查链）喊话；且每条回复最多 @ 1 个 agent（防多线触发风暴）
- * - reviewer（审查猫）→ {store} ∪ 本次触发消息作者：审查结论分流——
- *   ✅可合并 → @架构师（收口信号直接到位）；⚠️/❌ → @作者（要改的才回作者）
+ * - reviewer（审查猫）→ {store, implementer} ∪ 本次触发消息作者：审查结论分流——
+ *   ✅可合并 → @架构师（收口信号直接到位）；⚠️/❌ → @作者（要改的才回作者）。
+ *   implementer 边是收口链的必要边：白名单原先只有「触发者」概念、没有「作者」，
+ *   而触发者常是用户或店长 → ⚠️/❌ 永远投不回作者（结论静默悬空，2026-09-09 实证）
  * - vision（图测猫）→ {store}：视觉评审专用，只响应店长派活
  *
  * 关键语义：角色未知/缺失（老库迁移默认 'unknown'）→ 发送者放行不拦截、
@@ -26,7 +28,7 @@ export const IMPLEMENTER_MAX_MENTIONS_PER_REPLY = 1
 const ROLE_ALLOWED_MENTIONS: Record<AgentRole, 'any' | AgentRole[]> = {
   store: 'any',
   implementer: ['store', 'reviewer'],
-  reviewer: ['store'],
+  reviewer: ['store', 'implementer'],
   vision: ['store'],
 }
 
@@ -116,7 +118,7 @@ export function allowedTargetsDescription(role?: AgentRole): string {
     case 'implementer':
       return `店长、吐槽猫（每条回复最多 ${IMPLEMENTER_MAX_MENTIONS_PER_REPLY} 个 @）`
     case 'reviewer':
-      return '店长或本次请求你的猫'
+      return '店长或实施猫'
     case 'vision':
       return '店长'
     default:

@@ -453,7 +453,11 @@ describe('socketio connector', () => {
       const db = getDb()
       const segs = [
         { kind: 'thinking', content: '先想一下再调工具' },
-        { kind: 'tool', content: '', tool: { id: 'call_1', name: 'apply_patch', status: 'completed' } },
+        {
+          kind: 'tool',
+          content: '',
+          tool: { id: 'call_1', name: 'apply_patch', status: 'completed' },
+        },
         { kind: 'text', content: '正文结论' },
       ]
       db.prepare(
@@ -2680,8 +2684,7 @@ describe('socketio connector', () => {
       const db = getDb()
 
       // A = 吐槽猫（reviewer），B = 店长（store）——✅可合并 收口链标准路径
-      // （mention-policy：reviewer 只可 @ store 或本次触发作者，@implementer 会被
-      // 真实白名单拦截——首版用例即因此 dispatch 0 次，必须用合法 A2A 形态）
+      // （mention-policy：reviewer 可 @ store / implementer / 本次触发作者）
       db.prepare(`UPDATE agents SET role = 'store' WHERE id = 'agent-1'`).run()
       seedAgent(db, 'agent-2', '吐槽猫', 'reviewer')
       // 触发消息（同消息 @2 猫 → 同一批并发执行）

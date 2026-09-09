@@ -530,3 +530,144 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     expect(JSON.parse(row.segments)).toEqual(lastTyping.segments)
   })
 })
+
+// ═══ 收口链回作者通路修复（修法②）：被拦 @ 的 store UI 提示 ═══
+// 裁决 (a)：这是 UI 提示（人类可见），**不触达 store agent 上下文**——
+// emitSystemNotice 不落库 + agent 上下文过滤 role != 'system'。
+
+describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 上下文）', () => {
+  const REVIEWER: AgentConfig = {
+    id: 'agent-reviewer',
+    name: '吐槽猫',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'reviewer',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    // reviewer（发送者）+ store（兜底收件人）+ vision（被拦目标）
+    const insert = db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
+    )
+    insert.run('agent-reviewer', '吐槽猫', 'reviewer')
+    insert.run('agent-store', '店长', 'store')
+    insert.run('agent-vision', '图测猫', 'vision')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', '["agent-reviewer","agent-store","agent-vision"]', 0)`
+    ).run()
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-1', 'session-1', 'user', '请审查', '[]')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.unstubAllEnvs()
+  })
+
+  it('reviewer @ 图测猫（被拦）→ 提示发送者 + store 猫收到 UI 提示（人类可见，不进 agent 上下文）', async () => {
+    makeAdapter({ chunks: ['⚠️建议修改\n\n@图测猫 请看看'] })
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-1',
+      0
+    )
+
+    // ① 原有行为保留：发送者收到违规提示
+    const toSender = calls.systemNotices.filter((n) => n.agentId === 'agent-reviewer')
+    expect(toSender.some((n) => n.content.includes('不在你的角色允许范围内'))).toBe(true)
+    // ② UI 提示：store 猫（人）能看到——被拦的结论不再无声消失。
+    //    注意只断言「发过」（假 bus 被 push），不代表店长 agent 读到了
+    //    （emitSystemNotice 不落库 + agent 上下文过滤 system）——见裁决 (a)。
+    const toStore = calls.systemNotices.filter((n) => n.agentId === 'agent-store')
+    expect(toStore).toHaveLength(1)
+    expect(toStore[0].content).toContain('吐槽猫')
+    expect(toStore[0].content).toContain('图测猫')
+    expect(toStore[0].content).toContain('悬空')
+    // ③ 被拦目标未被路由（无 A2A 子链）
+    const visionLog = getDb()
+      .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-vision'`)
+      .get()
+    expect(visionLog).toBeUndefined()
+  })
+
+  it('reviewer @ 店长（合法）→ 不发 UI 提示', async () => {
+    let call = 0
+    const chatStream = vi.fn(async function* () {
+      call++
+      // 第一次 = 吐槽猫结论；第二次 = A2A 唤起的店长（普通回复，避免递归）
+      yield { content: call === 1 ? '✅可合并\n\n@店长 请收口' : '收到', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-1',
+      0
+    )
+
+    expect(calls.systemNotices.filter((n) => n.agentId === 'agent-store')).toHaveLength(0)
+    expect(calls.systemNotices.some((n) => n.content.includes('不在你的角色允许范围内'))).toBe(
+      false
+    )
+  })
+
+  it('reviewer↔implementer 互 @ 成环 → mention 配额截断，不无限递归（派活单实测项）', async () => {
+    // 隔离 token 池：PROVIDER_TOKEN_CAP=0（不限制）。默认 cap=2 时该环会先在
+    // token 池上死锁（见交接文档 OQ——executeRun 持 token 期间做 A2A 递归，
+    // 环=嵌套持有=互等）。此处只验证风暴护栏本体（配额）截断环。
+    vi.stubEnv('PROVIDER_TOKEN_CAP', '0')
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES ('agent-impl', 'ds猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', 'implementer')`
+    ).run()
+    db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+      JSON.stringify(['agent-reviewer', 'agent-store', 'agent-vision', 'agent-impl'])
+    )
+    // 每跳互 @ 对方：reviewer→ds猫→reviewer→…（边表补 implementer 后成环可达）
+    let call = 0
+    const chatStream = vi.fn(async function* () {
+      call++
+      yield { content: call % 2 === 1 ? '@ds猫 继续' : '@吐槽猫 继续', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-loop',
+      0
+    )
+
+    // 环被截断而非无限：截断者是 **mention 配额**（MAX_MENTIONS_PER_AGENT=5，
+    // serial.ts:678 调度点预留 + :498 执行后计数双计），**不是 depth=10 门**——
+    // 实测第 8 跳 ds猫 被 `agent-to-agent mention limit filtered` 拦下，此时
+    // depth 仅 6，远未触门。护栏作用在 policy.allowed 之后——补边不放宽风暴防护。
+    expect(chatStream.mock.calls.length).toBeGreaterThan(1) // 环确实转起来了
+    expect(chatStream.mock.calls.length).toBe(7)
+  }, 60000)
+})
