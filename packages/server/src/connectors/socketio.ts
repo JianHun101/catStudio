@@ -34,7 +34,6 @@ import { parseJsonArray, parseJsonValue } from '../utils.js'
 import { parseMessageExtra } from '../git/diff-collector.js'
 import { ingestUserMessage } from './ingest.js'
 import {
-  isRestartRequestContent,
   readRestartRequest,
   updateRestartRequest,
   removeRestartRequest,
@@ -192,10 +191,14 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       const restartReq = readRestartRequest()
 
       // 历史恢复只给「当前生效请求」的消息附加重启类型——按钮只属于当前请求，
-      // 其他以【重启请求】开头的历史消息不附加（幽灵按钮：点它必报「已失效」）
+      // 其他历史重启消息不附加（幽灵按钮：点它必报「已失效」）。
+      // 判据 = 请求文件精确匹配（sessionId + messageId），不以正文文本前缀为辅——
+      // 文件由该消息的完成点写入（ingest 用户路径 / reply agent 路径），messageId 是
+      // 比文本前缀更严的判据；结构化通道（request_user_action）下 agent 正文不含
+      // 「【重启请求】」字样，文本检测那一层是纯冗余且会误杀（刷新后按钮消失的真根因）。
+      // 幽灵按钮防护由精确匹配 + 前端 restartExpiresAt 过期守卫共同承担。
       const isActiveRestart = (row: MessageRow): boolean => {
         if (!restartReq) return false
-        if (!isRestartRequestContent(row.content)) return false
         return restartReq.sessionId === row.session_id && restartReq.messageId === row.id
       }
 
@@ -220,7 +223,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           segments: parseJsonValue<StreamSegment[]>(row.segments),
           extra: msgExtra,
           createdAt: row.created_at.replace(' ', 'T') + 'Z',
-          // 历史恢复同样携带重启类型（前端按钮渲染依据；DB 不存类型，内容前缀是唯一事实源）
+          // 历史恢复同样携带重启类型（前端按钮渲染依据；DB 不存类型，请求文件是唯一事实源）
           ...(isRestart
             ? {
                 messageType: 'restart_request' as const,
