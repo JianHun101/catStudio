@@ -28,6 +28,7 @@ import { initRepository } from '../db/repository/index.js'
 import { __test_reset } from '../dispatch/index.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import { createExecutionEngine } from './serial.js'
+import { maybeScoreSample } from '../eval/sampler.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 
@@ -901,5 +902,150 @@ describe('serial — token 作用域收窄（A 方案死锁根治）', () => {
     } finally {
       spy.mockRestore()
     }
+  }, 20000)
+})
+
+describe('serial — mentions 写回时机（P0：不依赖 drain/A2A await）', () => {
+  const STORE: AgentConfig = {
+    id: 'agent-store',
+    name: '店长',
+    avatar: '🐱',
+    systemPrompt: 'S_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'store',
+  }
+  const REVIEWER: AgentConfig = {
+    id: 'agent-reviewer',
+    name: '吐槽猫',
+    avatar: '🐱',
+    systemPrompt: 'R_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'reviewer',
+  }
+  const IMPL2: AgentConfig = {
+    id: 'agent-impl2',
+    name: 'flash猫',
+    avatar: '🐱',
+    systemPrompt: 'I2_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'implementer',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    const insert = db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, '🐱', ?, 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
+    )
+    insert.run(STORE.id, STORE.name, STORE.systemPrompt, 'store')
+    insert.run(REVIEWER.id, REVIEWER.name, REVIEWER.systemPrompt, 'reviewer')
+    insert.run(IMPL2.id, IMPL2.name, IMPL2.systemPrompt, 'implementer')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', ?, 0)`
+    ).run(JSON.stringify([STORE.id, REVIEWER.id, IMPL2.id]))
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-1', 'session-1', 'user', '请审查', '[]')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.unstubAllEnvs()
+  })
+
+  /** 该 agent 最早一条回复的 mentions 列 */
+  const mentionsOf = (agentId: string): string[] => {
+    const row = getDb()
+      .prepare(`SELECT mentions FROM messages WHERE role='agent' AND agent_id=? ORDER BY rowid`)
+      .get(agentId) as any
+    return row ? JSON.parse(row.mentions) : []
+  }
+
+  it('① 写回不依赖 drain：嵌套执行未完成时，父回复的 mentions 已落库', async () => {
+    // 场景：父执行（reviewer）回复 @flash猫，同时自己槽位上排了第二条命令 →
+    // completeExecution 弹出 → drain 嵌套执行。旧实现的写回点排在 drain 之后，
+    // 父执行卡在 drain 期间该消息 mentions 仍为 '[]'（链一断即永久丢失——
+    // 实证 7daf017c / 163a981f / 1b1e33c5 至今为空）。
+    let nestedStarted!: () => void
+    const nestedStartedP = new Promise<void>((r) => (nestedStarted = r))
+    let releaseNested!: () => void
+    const releaseNestedP = new Promise<void>((r) => (releaseNested = r))
+    let call = 0
+    const chatStream = vi.fn(async function* () {
+      call++
+      if (call === 1) {
+        yield { content: '@flash猫 继续', kind: 'text' }
+      } else {
+        nestedStarted()
+        await releaseNestedP
+        yield { content: '收到', kind: 'text' }
+      }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    const db = getDb()
+    for (const id of ['msg-p1', 'msg-p2']) {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 'session-1', 'user', '请审查', '[]')`
+      ).run(id)
+    }
+    const cmd = (triggerMessageId: string): DispatchCommand => ({
+      sessionId: 'session-1',
+      agentId: REVIEWER.id,
+      triggerMessageId,
+      triggerContent: '请审查',
+      mentions: [],
+      traceId: 'trace-p0-writeback',
+      depth: 0,
+      pendingTriggers: [],
+    })
+
+    const p1 = engine.execute(cmd('msg-p1'))
+    const p2 = engine.execute(cmd('msg-p2')) // 槽位 busy → 入队
+    await nestedStartedP // 父执行已进入 drain，嵌套执行挂起
+
+    // 旧实现：写回排在 drain 之后 → 此刻为 []
+    expect(mentionsOf(REVIEWER.id)).toEqual([IMPL2.name])
+
+    releaseNested()
+    await Promise.all([p1, p2])
+    // 编排段收场后仍非空（写回不被后续 drain 覆盖或清除）
+    expect(mentionsOf(REVIEWER.id)).toEqual([IMPL2.name])
+  }, 20000)
+
+  it('② 父执行异常中断：写回已落库，不随编排段异常丢失', async () => {
+    // 旧实现：maybeScoreSample（finalizeRun 之后、写回点之前）抛错 → 进 catch →
+    // 写回点永不执行，该回复 mentions 永久为 '[]'。
+    // 新实现：写回在 finalizeRun/编排段之前，异常路径照样保留。
+    makeAdapter({ chunks: ['@flash猫 继续'] })
+    vi.mocked(maybeScoreSample).mockImplementationOnce(() => {
+      throw new Error('boom: post-execution error')
+    })
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-p0-ex',
+      0
+    )
+
+    expect(mentionsOf(REVIEWER.id)).toEqual([IMPL2.name])
   }, 20000)
 })

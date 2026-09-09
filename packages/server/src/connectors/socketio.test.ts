@@ -2084,9 +2084,11 @@ describe('socketio connector', () => {
         }
       })
       vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
-      // 主回复无 mention；drain 审查结论 @实施猫。drain 段位于 A2A 派发之前
-      // （FIFO 修复），故第一次 parse 调用是 drain 的回复（@ds猫），第二次是主回复
+      // 主回复无 mention；drain 审查结论 @实施猫。P0 后解析前移到槽位释放之前，
+      // 故第一次 parse 是主回复（[]），第二次是 drain 的回复（@ds猫）——
+      // 断言不变（写回/调度/审计仍走真实链路），只随解析时机调整 mock 顺序
       vi.mocked(parseMentionsFromReply).mockReset()
+      vi.mocked(parseMentionsFromReply).mockReturnValueOnce([])
       vi.mocked(parseMentionsFromReply).mockReturnValueOnce(['ds猫'])
       vi.mocked(parseMentionsFromReply).mockReturnValue([])
       mod.__test_resetMentionCounts()
@@ -2375,13 +2377,13 @@ describe('socketio connector', () => {
 
       // C1 v3：真实队列——主执行先启动（busy）→ 排队命令入队 → 收口 drain。
       // drain 内层回复 @吐槽猫 → A2A 子链路由到 claude 猫；主回复 parse 抛错进 catch。
-      // 顺序：drain 段在 A2A 派发之前，故第一次 parse 是 drain 回复（路由 claude），
-      // 第二次是主回复（抛错 → catch）
+      // 顺序：P0 后解析前移到槽位释放之前，故第一次 parse 是主回复（抛错 → catch），
+      // 第二次是 drain 的回复（路由 claude 猫）——断言不变，只随解析时机调整 mock 顺序
       vi.mocked(parseMentionsFromReply).mockReset()
-      vi.mocked(parseMentionsFromReply).mockReturnValueOnce(['吐槽猫'])
       vi.mocked(parseMentionsFromReply).mockImplementationOnce(() => {
         throw new Error('parse boom')
       })
+      vi.mocked(parseMentionsFromReply).mockReturnValueOnce(['吐槽猫'])
       vi.mocked(parseMentionsFromReply).mockReturnValue([])
       let streamCall = 0
       const chatStream = vi.fn(async function* (_messages: any[], _opts: any) {
