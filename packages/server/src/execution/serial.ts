@@ -6,8 +6,8 @@
  * C1 v3（调度层重构）：模块级槽位状态（dispatch/ 的 agentSlots/agentQueues）收进
  * engine 闭包——调度键升 agentId+sessionId（跨会话同猫并行、同会话同猫 FIFO 保留），
  * 执行器并发化（批内并行），加 ProviderTokenPool（provider 并发 cap）。外面只认
- * engine 的 execute(cmd) 单接口：决策(直跑/入队) → acquire token → 执行 →
- * finally{release+收口+排空}。
+ * engine 的 execute(cmd) 单接口：决策(直跑/入队) → 执行 → finally{收口+排空}
+ * （token 由 executeOneAgent 的 LLM 段自持——A 方案，见该函数注释）。
  *
  * executeOneAgent / executeAgentsSerial / drainQueuedCommand + 执行常量与
  * no-key 守卫。输出经注入 bus（EngineBus & HandoffBus），状态经注入 state。
@@ -153,7 +153,7 @@ export interface EngineCtx {
   ): Promise<DispatchCommand | undefined>
   /** 队列拒绝入队时的系统消息桥（dispatch 模块 setSystemMessageBridge 迁入） */
   systemBridge: ((sessionId: string, agentId: string, content: string) => void) | null
-  /** per-agent 顶层入口：决策 → token → 执行 → finally{release+收口+排空} */
+  /** per-agent 顶层入口：决策 → 执行 → finally{收口+排空}（token 由 LLM 段自持） */
   execute(cmd: DispatchCommand): Promise<boolean>
 }
 
@@ -271,9 +271,11 @@ async function drainQueuedCommand(
         : undefined,
   }
   // 直接执行（不走 execute 决策——槽位已被 completeExecution 标 busy，重入会再排队）。
-  // 不 acquire token——drain 是同一 agent 的 FIFO 延续，运行在父 executeRun 持有的
-  // token 之下（若嵌套 acquire，父持锁等子、子持锁等孙 → token cap 下死锁，实测
-  // 4 连排队 drain 卡死）。drain 与父执行共享一个 provider 并发额度，顺序消费。
+  // token 不在此 acquire：A 方案后 token 由 executeOneAgent 的 LLM 段自行
+  // acquire/release——drain 与父执行各自在 LLM 段持 token、编排段都不持。原注释
+  // 「运行在父 executeRun 持有的 token 之下」的前提已随作用域收窄失效（父不再持
+  // token；而那种共享持锁写法正是嵌套死锁的另一半）。两条入口共用同一 acquire 点，
+  // drain 不会无护栏裸跑。
   return (
     (await executeOneAgent(
       ctx,
@@ -381,17 +383,29 @@ async function executeOneAgent(
     // OQ3：registerAbort 带 sessionId——同 agent 跨会话并行各占独立 run 条目
     state.registerAbort(agent.id, sessionId, abortController)
     try {
-      // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
-      // AbortController 确保超时后子进程被 kill（P0-1 修复）
-      reply = await Promise.race([
-        runAgentReply(state, bus, sessionId, agent, triggerMsg, traceId, abortController.signal),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => {
-            abortController.abort()
-            reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
-          }, AGENT_HARD_TIMEOUT_MS)
-        ),
-      ])
+      // ── A 方案（死锁根治，2026-09-09）：token 只包 LLM 段 ──
+      // 原 executeRun 把 token 持到「整棵 A2A 子树结束」才在 finally 释放，而 A2A
+      // 派发是 await 嵌套子执行（下方 :732）——父持 token 等子、子等 token，链深
+      // ≥ cap 即循环等待（09:48:23 静默 7m47s 事故：cap=8、第 9 跳永久互等）。
+      // 收窄到此处后，持有 token 的代码段内不再有任何会申请 token 的路径（编排段
+      // finalize/drain/A2A 一律不持），等待图从「有环」变成「无环且有界」。
+      // executeRun 与 drainQueuedCommand 两条入口都经本函数，自动覆盖。
+      const releaseToken = await ctx.tokenPool.acquire(providerKey(agent))
+      try {
+        // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
+        // AbortController 确保超时后子进程被 kill（P0-1 修复）
+        reply = await Promise.race([
+          runAgentReply(state, bus, sessionId, agent, triggerMsg, traceId, abortController.signal),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => {
+              abortController.abort()
+              reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
+            }, AGENT_HARD_TIMEOUT_MS)
+          ),
+        ])
+      } finally {
+        releaseToken()
+      }
     } catch (err: any) {
       // run 注册表收口由 finalizeRun 的 endRun 统一（此前 abort 注销在 finally、
       // stream 清理在此处、其余失败漏斗不清理——各管各的正是本刀收编对象）
@@ -885,10 +899,12 @@ async function executeAgentsSerialImpl(
  *  3.5 刀补状态 accessor：connector handler（MESSAGE_RETRACT / JOIN_SESSION）与
  *  internal.ts（经 socketio 委托）经此寻址引擎实例态。
  *  C1 v3：调度键升 agentId+sessionId——同 agent 跨会话并行，同会话同 agent FIFO
- *  保留；execute(cmd) 单入口（决策→token→执行→finally 收口+排空）；加并发护栏
- *  （ProviderTokenPool）。 */
+ *  保留；execute(cmd) 单入口（决策→执行→finally 收口+排空；token 由 LLM 段自持）；
+ *  加并发护栏（ProviderTokenPool）。 */
 export interface ExecutionEngine {
-  /** C1 v3 顶层单入口：决策(直跑/入队)→acquire token→执行→finally{release+收口+排空}。
+  /** C1 v3 顶层单入口：决策(直跑/入队)→执行→finally{收口+排空}。token 不在此层
+   *  acquire——A 方案收进 executeOneAgent 的 LLM 段（原覆盖整棵 A2A 子树，链深
+   *  ≥ cap 即循环等待死锁）。
    *  命令是 per-agent 意图（agents 数组不进命令——多猫并行是外层 for 循环职责）。
    *  返回是否执行过 Claude 适配器（顶层收尾据此外链脏文件清理）。 */
   execute(cmd: DispatchCommand): Promise<boolean>
@@ -940,6 +956,12 @@ export interface ExecutionEngineTestHooks {
   __test_resetRuns(): void
   __getMentionCount(traceId: string, agentId: string): number
   __setMentionCount(traceId: string, agentId: string, count: number): void
+  /**
+   * 测试钩子：读 token 池在某 providerKey 上的在飞数。
+   * 验收③/⑧ 用它断言「LLM 段外 activeCount = 0」——作用域收窄前父执行在
+   * 编排段仍持有 token（值 1），收窄后编排段为 0。
+   */
+  __getTokenActiveCount(providerKey: string): number
   /**
    * 测试钩子：种子化槽位状态（替代旧测试 mock dispatch.getAgentState 的形态）。
    * 设置 (agentId, sessionId) 槽位为 busy + 指定 currentTrigger，并可选注入排队命令
@@ -1169,9 +1191,10 @@ export function createExecutionEngine(
     execute: () => Promise.resolve(false), // 占位——下方 execute 内引用 ctx 时替换
   }
 
-  /** per-agent 核心执行体：acquire token → executeOneAgent → finally release */
+  /** per-agent 核心执行体：executeOneAgent + 崩溃兜底收口。
+   *  token 不在此 acquire——A 方案把它收进 executeOneAgent 的 LLM 段（见该函数
+   *  注释：原作用域覆盖整棵 A2A 子树，链深 ≥ cap 即死锁）。 */
   async function executeRun(cmd: DispatchCommand, agent: AgentConfig): Promise<boolean> {
-    const release = await tokenPool.acquire(providerKey(agent))
     let execError: unknown
     try {
       const triggerMsg = buildTriggerMsg(ctx, cmd)
@@ -1185,7 +1208,6 @@ export function createExecutionEngine(
       })
       return false
     } finally {
-      release()
       // 原 S2 手动兜底（ingest .catch 里的槽位释放）移入 execute 的 finally：
       // executeOneAgent 若逃逸异常未自收口（槽位仍 busy），此处补收口 + 排空
       const s = getSlotInternal(cmd.agentId, cmd.sessionId)
@@ -1209,7 +1231,7 @@ export function createExecutionEngine(
     }
   }
 
-  /** C1 v3 顶层单入口：决策(直跑/入队) → token → 执行 → finally{release+收口+排空} */
+  /** C1 v3 顶层单入口：决策(直跑/入队) → 执行 → finally{收口+排空} */
   async function execute(cmd: DispatchCommand): Promise<boolean> {
     const agent = agentsRepo.getAgentById(cmd.agentId)
     if (!agent) {
@@ -1401,6 +1423,7 @@ export function createExecutionEngine(
     __test_resetRuns: () => state.__test_resetRuns(),
     __getMentionCount: (traceId, agentId) => state.getMentionCount(traceId, agentId),
     __setMentionCount: (traceId, agentId, count) => state.setMentionCount(traceId, agentId, count),
+    __getTokenActiveCount: (providerKey) => tokenPool.activeCount(providerKey),
     __test_seedSlot: (agentId, sessionId, opts) => {
       const slot = ensureSlot(agentId, sessionId)
       slot.status = 'busy'

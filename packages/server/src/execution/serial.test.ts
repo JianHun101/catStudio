@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type {
   AgentConfig,
   ContextWindowStats,
+  DispatchCommand,
   HandoffEvent,
   HandoffFailedPayload,
   Message,
@@ -20,6 +21,7 @@ import type {
   SystemNoticePayload,
   TypingUpdatePayload,
 } from '@cat-study/shared'
+import { ProviderTokenPool } from './token-pool.js'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
@@ -633,9 +635,11 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
   })
 
   it('reviewer↔implementer 互 @ 成环 → mention 配额截断，不无限递归（派活单实测项）', async () => {
-    // 隔离 token 池：PROVIDER_TOKEN_CAP=0（不限制）。默认 cap=2 时该环会先在
-    // token 池上死锁（见交接文档 OQ——executeRun 持 token 期间做 A2A 递归，
-    // 环=嵌套持有=互等）。此处只验证风暴护栏本体（配额）截断环。
+    // 隔离 token 池：PROVIDER_TOKEN_CAP=0（不限制）——本用例只验证风暴护栏本体
+    // （配额）截断环，不混入 token 池的排队时序。注：原注释写「默认 cap=2 时该环
+    // 会先在 token 池上死锁」，描述的是 A 方案修复前的缺陷（executeRun 持 token
+    // 期间做 A2A 递归 → 环 = 嵌套持有 = 互等），该缺陷已修（token 只包 LLM 段，
+    // 见 token-pool 死锁根治单）；隔离保留只为让断言只反映配额截断。
     vi.stubEnv('PROVIDER_TOKEN_CAP', '0')
     const db = getDb()
     db.prepare(
@@ -670,4 +674,232 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     expect(chatStream.mock.calls.length).toBeGreaterThan(1) // 环确实转起来了
     expect(chatStream.mock.calls.length).toBe(7)
   }, 60000)
+})
+
+// ═══ ProviderTokenPool 死锁根治（A 方案：token 只包 LLM 段） ═══
+// 事故（2026-09-09 09:48:23）：executeRun 从 acquire 持 token 到整棵 A2A 子树结束
+// 才在 finally 释放，而 A2A 派发是 await 嵌套子执行 → 父持 token 等子、子等 token。
+// 链深 ≥ cap 时第 cap+1 跳永久互等（cap=8 → 第 9 跳），日志静默 7m47s。
+// 本组用例是行为级钉子：旧实现下 ①⑦⑧ 会在 token 池上互等直到 vitest 超时。
+
+describe('serial — token 作用域收窄（A 方案死锁根治）', () => {
+  const STORE: AgentConfig = {
+    id: 'agent-store',
+    name: '店长',
+    avatar: '🐱',
+    systemPrompt: 'S_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'store',
+  }
+  const REVIEWER: AgentConfig = {
+    id: 'agent-reviewer',
+    name: '吐槽猫',
+    avatar: '🐱',
+    systemPrompt: 'R_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'reviewer',
+  }
+  const IMPL: AgentConfig = {
+    id: 'agent-impl',
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: 'I_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'implementer',
+  }
+  const IMPL2: AgentConfig = {
+    id: 'agent-impl2',
+    name: 'flash猫',
+    avatar: '🐱',
+    systemPrompt: 'I2_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'implementer',
+  }
+
+  const POOL_KEY = 'deepseek:sk-test'
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    const insert = db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, '🐱', ?, 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
+    )
+    insert.run(STORE.id, STORE.name, STORE.systemPrompt, 'store')
+    insert.run(REVIEWER.id, REVIEWER.name, REVIEWER.systemPrompt, 'reviewer')
+    insert.run(IMPL.id, IMPL.name, IMPL.systemPrompt, 'implementer')
+    insert.run(IMPL2.id, IMPL2.name, IMPL2.systemPrompt, 'implementer')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', ?, 0)`
+    ).run(JSON.stringify([STORE.id, REVIEWER.id, IMPL.id, IMPL2.id]))
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-1', 'session-1', 'user', '请审查', '[]')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.unstubAllEnvs()
+  })
+
+  /** 按 system prompt 标记分派回复——并发批内无法靠调用序号区分 agent */
+  function makeMarkedAdapter(): ReturnType<typeof vi.fn> {
+    const chatStream = vi.fn(async function* (messages: Array<{ content?: string }>) {
+      const sys = String(messages?.[0]?.content ?? '')
+      if (sys.includes('S_MARK')) yield { content: '@flash猫 继续', kind: 'text' }
+      else if (sys.includes('R_MARK')) yield { content: '@ds猫 继续', kind: 'text' }
+      else yield { content: '收到', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    return chatStream
+  }
+
+  const logsOf = (): any[] =>
+    getDb()
+      .prepare(`SELECT agent_id, status FROM execution_logs ORDER BY started_at, rowid`)
+      .all() as any[]
+
+  it('① 死锁回归钉子：cap=1 下父执行 A2A 派发子执行 → 两者都 completed', async () => {
+    vi.stubEnv('PROVIDER_TOKEN_CAP', '1')
+    const chatStream = makeMarkedAdapter()
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-deadlock',
+      0
+    )
+
+    // 旧实现：父持 token 等子、子等 token → 本用例在 vitest 超时处失败
+    expect(chatStream).toHaveBeenCalledTimes(2)
+    const logs = logsOf()
+    expect(logs.map((l) => l.agent_id)).toEqual([REVIEWER.id, IMPL.id])
+    expect(logs.every((l) => l.status === 'completed')).toBe(true)
+    // 父子各落一条回复（A2A 链真实跑完）
+    expect(calls.agentMessages).toHaveLength(2)
+    expect(engine.getSlot(IMPL.id, 'session-1')).toMatchObject({ status: 'idle' })
+  }, 20000)
+
+  it('③ 作用域断言：子执行 acquire 时该 key 在飞数为 0（旧实现为 1）', async () => {
+    const origAcquire = ProviderTokenPool.prototype.acquire
+    const observed: number[] = []
+    const spy = vi.spyOn(ProviderTokenPool.prototype, 'acquire').mockImplementation(function (
+      this: ProviderTokenPool,
+      key: string
+    ) {
+      observed.push(this.activeCount(key))
+      return origAcquire.call(this, key)
+    })
+    try {
+      makeMarkedAdapter()
+      const { bus } = createFakeBus()
+      const engine = createExecutionEngine(bus)
+
+      await engine.executeAgentsSerial(
+        'session-1',
+        [REVIEWER],
+        { id: 'msg-1', content: '请审查', mentions: [] },
+        'trace-scope',
+        0
+      )
+
+      // 父 acquire 时 0、子 acquire 时也是 0——编排段（A2A 派发）不持 token。
+      // 旧实现：父的 executeRun 持 token 到子树结束 → 子 acquire 时观测到 1。
+      expect(observed).toEqual([0, 0])
+      expect(engine.__getTokenActiveCount(POOL_KEY)).toBe(0)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 20000)
+
+  it('⑦ 多链并发：cap=2 下两条独立 A2A 链同时执行 → 全部 completed，无队头阻塞', async () => {
+    vi.stubEnv('PROVIDER_TOKEN_CAP', '2')
+    const chatStream = makeMarkedAdapter()
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [STORE, REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-multi',
+      0
+    )
+
+    // 4 个节点（2 父 + 2 子）全跑完：cap=2 恰好被两条父链占满，旧实现下子链
+    // acquire 会永久等待（父链都在 await 子链）
+    expect(chatStream).toHaveBeenCalledTimes(4)
+    const logs = logsOf()
+    expect(new Set(logs.map((l) => l.agent_id)).size).toBe(4)
+    expect(logs.every((l) => l.status === 'completed')).toBe(true)
+    expect(engine.__getTokenActiveCount(POOL_KEY)).toBe(0)
+  }, 20000)
+
+  it('⑧ drain 占位断言：出队命令自行 acquire，父已释放（LLM 段外 activeCount=0）', async () => {
+    vi.stubEnv('PROVIDER_TOKEN_CAP', '1')
+    const origAcquire = ProviderTokenPool.prototype.acquire
+    const observed: number[] = []
+    const spy = vi.spyOn(ProviderTokenPool.prototype, 'acquire').mockImplementation(function (
+      this: ProviderTokenPool,
+      key: string
+    ) {
+      observed.push(this.activeCount(key))
+      return origAcquire.call(this, key)
+    })
+    try {
+      const chatStream = makeAdapter()
+      const { bus } = createFakeBus()
+      const engine = createExecutionEngine(bus)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES ('msg-d1', 'session-1', 'user', '一', '[]')`
+      ).run()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES ('msg-d2', 'session-1', 'user', '二', '[]')`
+      ).run()
+      const cmd = (triggerMessageId: string): DispatchCommand => ({
+        sessionId: 'session-1',
+        agentId: IMPL.id,
+        triggerMessageId,
+        triggerContent: '你好',
+        mentions: [],
+        traceId: 'trace-drain',
+        depth: 0,
+        pendingTriggers: [],
+      })
+
+      const p1 = engine.execute(cmd('msg-d1'))
+      const p2 = engine.execute(cmd('msg-d2')) // 槽位已 busy → 入队
+      await Promise.all([p1, p2])
+
+      // 两条命令各自 acquire 一次，且 acquire 时在飞数均为 0——编排段（finalize/
+      // drain）不持 token。旧实现：父在 executeRun 持 token 到子树结束、drain 不
+      // acquire（rides 父锁）→ 观测只有 1 次且 cap=1 下第二条永久互等。
+      expect(chatStream).toHaveBeenCalledTimes(2)
+      expect(observed).toEqual([0, 0])
+      expect(engine.__getTokenActiveCount(POOL_KEY)).toBe(0)
+      const logs = logsOf()
+      expect(logs.map((l) => l.status)).toEqual(['completed', 'completed'])
+    } finally {
+      spy.mockRestore()
+    }
+  }, 20000)
 })
