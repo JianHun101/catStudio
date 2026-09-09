@@ -163,8 +163,8 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 
   // ─── 引用 / 列表行不覆盖真结论（2026-09-09 吐槽猫 ⚠️ 主项 2）──────────
-  // 引用块/列表项里的标记多为引用他人结论或列表描述 → 不参与「最后出现者」覆盖，
-  // 只在全消息无普通结论行时兜底识别。否则一条 ⚠️ 审查会被末尾引用的一行 ✅ 误判 approve。
+  // 引用块行**一律排除、无兜底识别**（引用按定义是转述）；列表项只在带标签时
+  // 才算候选。否则一条 ⚠️ 审查会因末尾引用的一行 ✅ 被误判 approve。
 
   it('引用行 ✅ 不覆盖真结论 ⚠️ → suggest（旧实现误判 approve）', () => {
     const r = parseReviewVerdict('**结论：⚠️建议修改**——需改。\n\n> ✅可合并', [
@@ -217,8 +217,11 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 
   // ─── 真实语料回归（2026-09-09 店长验收硬指标）────────────────────────
-  // 语料 = 本会话（86e15a43）DB 中吐槽猫 15 条审查消息的**结论行原文**，
-  // 逐条从 `cat-study-dev.db` 导出（非手写夹具）。修复前实测 2/15 落 verdict。
+  // 语料 = 本会话（86e15a43）DB 中吐槽猫 15 条审查消息的结论行原文，
+  // 逐条从 `cat-study-dev.db` 导出（非手写夹具）。修复前实测 2/15 落 verdict，
+  // 修复后 13 条落 verdict（CORPUS）+ 2 条 no-marker（NO_MARKER_CORPUS，标记在
+  // 句中且无标准后缀，属「标记须独立成行」的合理漏判）——后两条也钉住，防未来
+  // 放宽把它们变成 verdict 时无回归钉。
   // 保留原文标点/全半角冒号差异——它们是真实形态的一部分。
   const CORPUS: Array<[string, string]> = [
     [
@@ -272,10 +275,20 @@ describe('parseReviewVerdict — 纯函数', () => {
     ],
   ]
 
+  // 同一批语料的另 2 条——标记在句中且无标准后缀 → no-marker（安全方向：漏判只多一轮）
+  const NO_MARKER_CORPUS: string[] = [
+    '**结论先行：本轮是同源重复派发，不是新交付——✅ 结论维持，不重审、不重启审查循环。**',
+    '**结论先行：`de525b8` 归档确认 ✅ —— 不填、不重审、不重启审查循环。**',
+  ]
+
   it.each(CORPUS)('真实语料：%s ← %s', (expected, line) => {
     const r = parseReviewVerdict(line, TARGETS)
     expect(r.kind).toBe('verdict')
     if (r.kind === 'verdict') expect(r.verdict).toBe(expected)
+  })
+
+  it.each(NO_MARKER_CORPUS)('真实语料 no-marker：%s', (line) => {
+    expect(parseReviewVerdict(line, TARGETS).kind).toBe('no-marker')
   })
 
   it('引用/列表行 emoji 不记 bad_verdict（噪音消除）→ no-marker', () => {
