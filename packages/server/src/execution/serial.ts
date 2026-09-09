@@ -477,6 +477,78 @@ async function executeOneAgent(
       return claudeRan
     }
 
+    // ── P0（2026-09-09）：mention 解析 + 白名单 + 写回必须早于 drain/A2A await ──
+    // 原写回点排在 `await drainQueuedCommand` 与 A2A 子链之后，父执行一旦 drain 了
+    // 排队命令，写回就被推迟到整棵下游子树收场；链一断（重启/超时/抛错）即丢失
+    // ——实证 7daf017c / 163a981f / 1b1e33c5 / 4377a2e0 / 5c75a555 至今 mentions=[]，
+    // 而同窗未 drain 的嵌套回复全部送达。写回是「这条消息路由给谁」的事实记录，
+    // 不该依赖下游编排是否跑完，故整体前移到槽位释放之前。
+    // 解析前归一化（解析层兜底）：prompt 层注入（resolveRolePlaceholders）只保证
+    // system prompt 已替换，不保证 LLM 必然照做——LLM 只要照抄 prompt 的占位符
+    // 字面输出，解析层严格精确匹配就会落空、收口信号静默丢失（a2c7f73 后事故链
+    // 第三次变体：mock 泄漏盲区——端到端测试 mock 了解析层假结果，真实链路仍裸奔）。
+    // 此处对回复正文再调一次同一函数，把 @架构师/@审查者/@作者 归一为真名后才解析，
+    // 普通文本叙述（"是项目架构师"无 @ 前缀）零影响。解析层本身保持精确匹配不动。
+    const mentionedNames = parseMentionsFromReply(
+      resolveRolePlaceholders(reply.content, triggerMsg.authorName),
+      sessionAgentNames
+    ).filter((name) => name !== agent.name) // 排除自己 @ 自己
+
+    // M3 防线：文本行首 @ 了会话外未知名 → warn 不路由（MCP 信号侧的
+    // 未知名由 internal.ts 预校验 4xx 拦截回模型，此处只覆盖文本通道）
+    const unknownHandle = detectUnknownHandle(reply.content, sessionAgentNames)
+    if (unknownHandle) {
+      log.warn('agent-to-agent mention: unknown handle', {
+        traceId,
+        fromAgent: agent.name,
+        handle: unknownHandle,
+      })
+    }
+
+    // MCP 结构化路由信号（汇入式合并，契约 5）：流中途 post_message 声明的
+    // 目标与文本行首 @ 取并集（Set 去重）——一次 dispatch、配额单计数。
+    // messageId 标签：只消费本流 msgId 的信号——abort 残留（旧流 msgId）
+    // 天然失效，无需清理逻辑。
+    // ⚠️ consumeRouteSignals 是消费语义（取走即清），全流程只能调用一次——
+    // 本段前移后，下方 A2A 派发段直接复用此处结果，不得二次调用。
+    const signalNames = consumeRouteSignals(sessionId, agent.id, reply.msgId)
+      .flatMap((s) => s.targetCats)
+      .filter((name) => name !== agent.name)
+    const routeNames = [...new Set([...mentionedNames, ...signalNames])]
+    // 白名单结果需跨 drain 复用（下方 A2A 派发段），故声明在 if 之外。
+    // 泛型实参显式给 AgentConfig：ReturnType 默认按约束实例化会退化成
+    // MentionPolicyTarget（丢 id），而下游派发段需要完整 AgentConfig。
+    let policy: ReturnType<typeof filterAllowedMentions<AgentConfig>> | undefined
+    let allowedNames: string[] = []
+    if (routeNames.length > 0) {
+      // 找到被 @ 的 Agent 配置（提前——白名单判定需要目标角色）
+      const allMentionedAgents = sessionAgentIds
+        .map((id: string) => {
+          const row = agentsRepo.getAgentById(id)
+          return row ? rowToAgent(row) : null
+        })
+        .filter(
+          (a: AgentConfig | null): a is AgentConfig => a !== null && routeNames.includes(a.name)
+        )
+
+      // A2A 风暴治理白名单：按发送者角色剥除违规 mention（执行顺序：白名单→配额→dispatch）。
+      // 写回 DB 用允许集合——被拦猫在上下文过滤（getRelevantMessages 基于
+      // mentions.includes 判定可见性）里也不可见，语义自洽。
+      // 未知/缺失角色 → 放行不拦截（老库零回归，误杀审查链代价远大于漏拦一条 @）
+      policy = filterAllowedMentions(
+        { role: agent.role, triggerAuthorName: triggerMsg.authorName },
+        allMentionedAgents
+      )
+      allowedNames = policy.allowed.map((a) => a.name)
+
+      // 将解析出的 mentions 写回 DB，确保后续 Agent 构建上下文时
+      // 能通过 mentions.includes(agent.name) 过滤规则看到本消息。
+      // 位置契约（P0）：必须在 finalizeRun/drain/A2A 之前——理由见本段首注释。
+      if (allowedNames.length > 0) {
+        messagesRepo.updateMessageMentions(reply.msgId, JSON.stringify(allowedNames))
+      }
+    }
+
     // 释放槽位并检查队列（P0-2 修复：不再丢弃 completeExecution 返回值）。
     // 成功路径写回回复 id（洞 A 判据：execution_logs.message_id 非空即已回复，
     // 重启恢复精确跳过，不再被后续其他回复的时间窗误判）。撤回窗（Window ②/③）
@@ -512,57 +584,9 @@ async function executeOneAgent(
       state.setMentionCount(traceId, agent.id, state.getMentionCount(traceId, agent.id) + 1)
     }
 
-    // Agent-to-agent dispatch: 检测回复中的 @mentions
-    // 解析前归一化（解析层兜底）：prompt 层注入（resolveRolePlaceholders）只保证
-    // system prompt 已替换，不保证 LLM 必然照做——LLM 只要照抄 prompt 的占位符
-    // 字面输出，解析层严格精确匹配就会落空、收口信号静默丢失（a2c7f73 后事故链
-    // 第三次变体：mock 泄漏盲区——端到端测试 mock 了解析层假结果，真实链路仍裸奔）。
-    // 此处对回复正文再调一次同一函数，把 @架构师/@审查者/@作者 归一为真名后才解析，
-    // 普通文本叙述（"是项目架构师"无 @ 前缀）零影响。解析层本身保持精确匹配不动。
-    const mentionedNames = parseMentionsFromReply(
-      resolveRolePlaceholders(reply.content, triggerMsg.authorName),
-      sessionAgentNames
-    ).filter((name) => name !== agent.name) // 排除自己 @ 自己
-
-    // M3 防线：文本行首 @ 了会话外未知名 → warn 不路由（MCP 信号侧的
-    // 未知名由 internal.ts 预校验 4xx 拦截回模型，此处只覆盖文本通道）
-    const unknownHandle = detectUnknownHandle(reply.content, sessionAgentNames)
-    if (unknownHandle) {
-      log.warn('agent-to-agent mention: unknown handle', {
-        traceId,
-        fromAgent: agent.name,
-        handle: unknownHandle,
-      })
-    }
-
-    // MCP 结构化路由信号（汇入式合并，契约 5）：流中途 post_message 声明的
-    // 目标与文本行首 @ 取并集（Set 去重）——一次 dispatch、配额单计数。
-    // messageId 标签：只消费本流 msgId 的信号——abort 残留（旧流 msgId）
-    // 天然失效，无需清理逻辑
-    const signalNames = consumeRouteSignals(sessionId, agent.id, reply.msgId)
-      .flatMap((s) => s.targetCats)
-      .filter((name) => name !== agent.name)
-    const routeNames = [...new Set([...mentionedNames, ...signalNames])]
-    if (routeNames.length > 0) {
-      // 找到被 @ 的 Agent 配置（提前——白名单判定需要目标角色）
-      const allMentionedAgents = sessionAgentIds
-        .map((id: string) => {
-          const row = agentsRepo.getAgentById(id)
-          return row ? rowToAgent(row) : null
-        })
-        .filter(
-          (a: AgentConfig | null): a is AgentConfig => a !== null && routeNames.includes(a.name)
-        )
-
-      // A2A 风暴治理白名单：按发送者角色剥除违规 mention（执行顺序：白名单→配额→dispatch）。
-      // 写回 DB 用允许集合——被拦猫在上下文过滤（getRelevantMessages 基于
-      // mentions.includes 判定可见性）里也不可见，语义自洽。
-      // 未知/缺失角色 → 放行不拦截（老库零回归，误杀审查链代价远大于漏拦一条 @）
-      const policy = filterAllowedMentions(
-        { role: agent.role, triggerAuthorName: triggerMsg.authorName },
-        allMentionedAgents
-      )
-      const allowedNames = policy.allowed.map((a) => a.name)
+    // Agent-to-agent dispatch：解析/白名单/写回已在上方 P0 段完成（槽位释放
+    // 之前），本段只做「通知 + 配额 + 派发」——写回不再依赖本段执行时机。
+    if (policy) {
       if (policy.blocked.length > 0) {
         log.warn('agent-to-agent mention blocked by role policy', {
           traceId,
@@ -633,13 +657,9 @@ async function executeOneAgent(
       }
 
       if (allowedNames.length > 0) {
-        // 将解析出的 mentions 写回 DB，确保后续 Agent 构建上下文时
-        // 能通过 mentions.includes(agent.name) 过滤规则看到本消息
-        messagesRepo.updateMessageMentions(reply.msgId, JSON.stringify(allowedNames))
-
         // W3 L3 审查结论解析钩子（reviewer 角色门 + 锚定行首标记）。
-        // subject 从作用域 allowedNames 直取——不读 DB mentions 列（此刻落库的是
-        // '[]'，上一行才刚写回）；routeNames/allowedNames 为空（全剥除）时不进入
+        // subject 从作用域 allowedNames 直取——不读 DB mentions 列（写回已在上方
+        // P0 段独立完成，与本钩子解耦）；allowedNames 为空（全剥除）时不进入
         // 本块，钩子天然不触发。recordReviewVerdict 内部写操作独立 try/catch，
         // DB 异常静默丢弃——审查链主流程零阻塞（契约边界）
         if (agent.role === 'reviewer') {
