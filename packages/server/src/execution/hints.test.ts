@@ -159,6 +159,50 @@ describe('hints', () => {
       expect(hint!).toContain('继续审查循环')
     })
 
+    // ─── T-L：emoji 与后缀之间空格零容忍 ──────────────────────────────
+    // 旧实现 lastIndexOf('⚠️建议修改') 在 `⚠️ 建议修改`（带空格）上落空 →
+    // 静默降级「未给出明确结论」（判词丢了但没人看得见）。
+
+    it('buildReviewLoopHint：**结论：⚠️ 建议修改。**（emoji 后带空格）→ 判词被识别，不降级', async () => {
+      seedHintAgents(getDb())
+      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
+        {
+          role: 'agent',
+          agent_id: 'agent-2',
+          content: '**结论：⚠️ 建议修改。** 见下。',
+          mentions: JSON.stringify(['ds猫']),
+        },
+      ])
+      expect(hint).not.toBeNull()
+      expect(hint!).toContain('⚠️建议修改')
+      expect(hint!).not.toContain('未给出明确结论')
+    })
+
+    it('buildReviewLoopHint：✅ 可合并（带空格）→ 不注入（该收口的必须收得了）', async () => {
+      seedHintAgents(getDb())
+      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
+        {
+          role: 'agent',
+          agent_id: 'agent-2',
+          content: '**结论：✅ 可合并。** 通过。',
+          mentions: JSON.stringify(['ds猫']),
+        },
+      ])
+      expect(hint).toBeNull()
+    })
+
+    it('buildReviewLoopHint：带/不带空格**同判**（注入文案逐字相等）', async () => {
+      seedHintAgents(getDb())
+      const build = (content: string) =>
+        buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
+          { role: 'agent', agent_id: 'agent-2', content, mentions: JSON.stringify(['ds猫']) },
+        ])
+      const withSpace = build('**结论：⚠️ 建议修改。** 见下。')
+      const withoutSpace = build('**结论：⚠️建议修改。** 见下。')
+      expect(withSpace).not.toBeNull()
+      expect(withSpace).toBe(withoutSpace)
+    })
+
     it('buildHandoffTriggerHint：DB 有 reviewer → 注入 @吐槽猫 发起代码审查（真名动态装配）', async () => {
       seedHintAgents(getDb())
       const hint = buildHandoffTriggerHint('@店长 请补填以下交接文档')

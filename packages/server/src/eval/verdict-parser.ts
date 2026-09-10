@@ -11,7 +11,12 @@
  * 行首/行尾，句中复述仍不匹配）。
  * 多标记并存的取舍见下方「候选分级」段（A 级优先 + 同级取最严）——**不取
  * 「最后出现者」**。注意 hints.ts 的 buildReviewLoopHint 仍是 lastIndexOf 语义，
- * 两者已不同源，勿再按「同语义」对齐。
+ * 两者已**匹配语义**不同源，勿再按「同语义」对齐。
+ *
+ * 标记**字符串集**则单一来源（`review-verdict-markers.ts`，T-L 2026-09-10 裁决）：
+ * 语义分叉是既裁的，字符串集分叉没有理由——两处各维护字面量时改一处漏一处 =
+ * 视觉同形不同判（`⚠️ 建议修改` 带空格实测 3/5 样本判词丢失）。
+ * 空格放宽只加在 emoji 与后缀**之间**；行尾判据（`✅可合并了` 后接汉字）不放松。
  *
  * 候选分级（2026-09-09 店长裁决，治吐槽猫 ⚠️ 主项 2）：**A 级**=带标签前缀的
  * 标记（可带装饰），**B 级**=无标签、行首独占的裸标记；A 级优先于 B 级。
@@ -28,8 +33,14 @@
  */
 
 import { insertReviewVerdict, insertReviewParseFailure } from '../db/repository/verdicts.js'
+import {
+  REVIEW_VERDICT_MARKERS,
+  REVIEW_VERDICT_EMOJI_RE,
+  escapeRegExpLiteral,
+} from './review-verdict-markers.js'
+import type { ReviewVerdict, ReviewVerdictMarker } from './review-verdict-markers.js'
 
-export type ReviewVerdict = 'approve' | 'comment' | 'suggest' | 'reject'
+export type { ReviewVerdict } from './review-verdict-markers.js'
 
 export type VerdictParseFailureReason = 'no_subject' | 'bad_verdict'
 
@@ -38,16 +49,6 @@ export interface VerdictTarget {
   name: string
   isStore: boolean
 }
-
-const VERDICT_MARKERS: Array<{ emoji: string; suffix: string; verdict: ReviewVerdict }> = [
-  { emoji: '✅', suffix: '可合并', verdict: 'approve' },
-  { emoji: '💬', suffix: '仅评论', verdict: 'comment' },
-  { emoji: '⚠️', suffix: '建议修改', verdict: 'suggest' },
-  { emoji: '❌', suffix: '需重做', verdict: 'reject' },
-]
-
-/** 归一化后行首结论 emoji 之一（bad_verdict 防御：有 emoji 但非标准 marker） */
-const VERDICT_EMOJI_RE = /^[✅💬⚠️❌]/
 
 /** 行首通用装饰：空白 / markdown 标题 / 强调开 */
 const LEADING_DECOR_RES: RegExp[] = [/^\s+/, /^#{1,6}\s+/, /^(\*\*|__)/]
@@ -113,17 +114,22 @@ function normalizeVerdictLine(line: string): VerdictLine {
 }
 
 /**
- * 标记匹配：`^<emoji><suffix>` 且后接**非字母数字**（空白 / 行尾 / 强调闭 / 标点）。
+ * 标记匹配：`^<emoji>\s*<suffix>` 且后接**非字母数字**（空白 / 行尾 / 强调闭 / 标点）。
  *
  * 为什么要「非字母数字」而非旧的 `(?=\s|$)`：真实审查输出是
  * `**结论：⚠️建议修改**——方向正确，但 3 点需处理。`——强调闭合 `**` 与破折号
  * 紧贴标记，旧 lookahead 遇 `*` 不匹配 → 整条结论静默 bad_verdict（2026-09-09
  * 吐槽猫实测：本会话 14 条真实审查消息仅 2 条落 verdict）。
  * 仍拒绝 `✅可合并了`（后接汉字）——那是句中复述/格式漂移，记 bad_verdict。
+ *
+ * emoji 与后缀**之间**允许空白（T-L）：真实输出 `**结论：⚠️ 建议修改。**` 与
+ * `⚠️建议修改` 并存且视觉同形。行尾判据不动 ⇒ 空格放宽**不引入**新误命中。
  */
-function matchesMarker(line: string, marker: (typeof VERDICT_MARKERS)[number]): boolean {
-  const escaped = marker.emoji.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`^${escaped}${marker.suffix}(?=\\s|$|[^\\p{L}\\p{N}])`, 'u').test(line)
+function matchesMarker(line: string, marker: ReviewVerdictMarker): boolean {
+  const emoji = escapeRegExpLiteral(marker.emoji)
+  const suffix = escapeRegExpLiteral(marker.suffix)
+  const re = new RegExp(`^${emoji}\\s*${suffix}(?=\\s|$|[^\\p{L}\\p{N}])`, 'u')
+  return re.test(line)
 }
 
 /**
@@ -148,7 +154,7 @@ function pickVerdict(lines: VerdictLine[]): ReviewVerdict | null {
   const candidates: Array<{ level: 'A' | 'B'; verdict: ReviewVerdict }> = []
   for (const line of lines) {
     if (line.excluded) continue
-    for (const marker of VERDICT_MARKERS) {
+    for (const marker of REVIEW_VERDICT_MARKERS) {
       if (matchesMarker(line.text, marker)) {
         candidates.push({ level: line.hasLabel ? 'A' : 'B', verdict: marker.verdict })
       }
@@ -203,7 +209,9 @@ export function parseReviewVerdict(content: string, targets: VerdictTarget[]): V
   if (!verdict) {
     // 无标准 marker：**参与判定的行**归一化后行首是结论 emoji 但格式漂移 →
     // bad_verdict（不静默）。排除行（引用/列表描述）的 emoji 记 failure 是噪音。
-    const hasStrayEmoji = lines.some((line) => !line.excluded && VERDICT_EMOJI_RE.test(line.text))
+    const hasStrayEmoji = lines.some(
+      (line) => !line.excluded && REVIEW_VERDICT_EMOJI_RE.test(line.text)
+    )
     if (hasStrayEmoji) {
       return { kind: 'failure', reason: 'bad_verdict' }
     }

@@ -72,7 +72,9 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 
   it('行首 emoji 非标准 marker → failure=bad_verdict（格式漂移防御）', () => {
-    const r = parseReviewVerdict('✅ 可合并（带空格变体）', TARGETS)
+    // fixture 用**后缀漂移**（`需处理` 非标准后缀）；旧 fixture 是 `✅ 可合并`
+    // 带空格，T-L 后那已是**合法标记**（→ approve），不再能充当本用例样本
+    const r = parseReviewVerdict('⚠️ 需处理（后缀漂移）', TARGETS)
     expect(r).toEqual({ kind: 'failure', reason: 'bad_verdict' })
   })
 
@@ -112,9 +114,9 @@ describe('parseReviewVerdict — 纯函数', () => {
     expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
   })
 
-  it('**结论：✅ 可合并**（标签内空格变体）→ bad_verdict（不静默）', () => {
+  it('**结论：✅ 可合并**（emoji 与后缀间空格）→ approve（T-L 翻转：旧实现判 bad_verdict）', () => {
     const r = parseReviewVerdict('**结论：✅ 可合并**', TARGETS)
-    expect(r).toEqual({ kind: 'failure', reason: 'bad_verdict' })
+    expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
   })
 
   it('标签前缀后是句中复述 → no-marker（标签剥离不越过行首语义）', () => {
@@ -234,9 +236,9 @@ describe('parseReviewVerdict — 纯函数', () => {
     expect(r).toEqual({ kind: 'verdict', verdict: 'comment', subject: null, failure: null })
   })
 
-  it('comment：行首 💬 但后缀漂移（💬 仅评论 带空格）→ bad_verdict', () => {
+  it('comment：行首 💬 但后缀漂移（💬 仅评论 带空格）→ comment（T-L 翻转：旧实现判 bad_verdict）', () => {
     const r = parseReviewVerdict('💬 仅评论（带空格变体）', TARGETS)
-    expect(r).toEqual({ kind: 'failure', reason: 'bad_verdict' })
+    expect(r).toEqual({ kind: 'verdict', verdict: 'comment', subject: null, failure: null })
   })
 
   it('同级冲突：裸 💬 + 裸 ✅ → comment（有观察项就不算干净通过）', () => {
@@ -340,6 +342,61 @@ describe('parseReviewVerdict — 纯函数', () => {
       failure: 'no_subject',
     })
   })
+
+  // ─── T-L：emoji 与后缀之间的空格零容忍（2026-09-10 店长裁决）────────────
+  // 样本首行取自真库（cat-study-dev.db）原文：`**结论：⚠️ 建议修改。**` 这类
+  // emoji 后带空格的形态，旧实现（emoji 紧贴后缀）下 **3 条必红** —— 该返工的
+  // 没返工、该收口的收不了。下面是判别性判据。
+
+  it('T-L 实证 `69fc0765`：**结论：⚠️ 建议修改。**（emoji 后带空格）→ suggest + subject', () => {
+    const r = parseReviewVerdict(
+      '**结论：⚠️ 建议修改。** 四条待核项里三条成立（谓词那条我复核了）。',
+      TARGETS
+    )
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('T-L 实证 `c4c40fac`：**结论：✅ 可合并。**（emoji 后带空格）→ approve', () => {
+    const r = parseReviewVerdict('**结论：✅ 可合并。** `ad8af8b` 两处必改方向正确。', TARGETS)
+    expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
+  })
+
+  it('T-L 实证 `fde26688`：**结论：✅ 可合并。**（emoji 后带空格）→ approve', () => {
+    const r = parseReviewVerdict('**结论：✅ 可合并。** `a1200a7` 三项必修全过。', TARGETS)
+    expect(r).toEqual({ kind: 'verdict', verdict: 'approve', subject: null, failure: null })
+  })
+
+  it('T-L 阴性对照 `032b6ccd`：**结论：⚠️建议修改**（无空格）→ 修前修后同值 suggest', () => {
+    const r = parseReviewVerdict(
+      '**结论：⚠️建议修改** —— 门禁那一半修对了，但台账那半方向相反。',
+      TARGETS
+    )
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('T-L 同判：同一结论行带/不带空格 → 同值（视觉同形必须同判）', () => {
+    const withSpace = parseReviewVerdict('**结论：⚠️ 建议修改。** 见下。', TARGETS)
+    const withoutSpace = parseReviewVerdict('**结论：⚠️建议修改。** 见下。', TARGETS)
+    expect(withSpace).toEqual(withoutSpace)
+  })
+
+  it('T-L 阴性对照 `e2781808` 形状：行中「⚠️ 建议修改」不因放宽而翻转 → 仍取行尾 suggest', () => {
+    // 行中（非行首）的带空格复述 + 标题行后缀不符，均不得改写结论
+    const r = parseReviewVerdict(
+      [
+        '我写「⚠️ 建议修改」（带空格）四个 marker 全不匹配 —— 危害不止 ⚠️。',
+        '### ⚠️ 必改 1｜台账把一条真实派发缺口判反了',
+        '⚠️建议修改',
+      ].join('\n'),
+      TARGETS
+    )
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
+  it('T-L 行尾判据**未**放松：`✅ 可合并了`（带空格且后接汉字）→ 仍 bad_verdict', () => {
+    const r = parseReviewVerdict('**结论：✅ 可合并了**', TARGETS)
+    expect(r).toEqual({ kind: 'failure', reason: 'bad_verdict' })
+  })
 })
 
 describe('recordReviewVerdict — 解析 + 落库', () => {
@@ -411,13 +468,13 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
       messageId: 'm-bad',
       sessionId: 's1',
       reviewerAgentId: 'reviewer-1',
-      content: '✅ 可合并',
+      content: '✅ 通过（后缀漂移，T-L 后 `✅ 可合并` 已是合法标记）',
       targets: TARGETS,
     })
     expect(verdictsOf('m-bad')).toBeUndefined()
     const fail = failuresOf('m-bad')!
     expect(fail.reason).toBe('bad_verdict')
-    expect(fail.raw).toContain('✅ 可合并')
+    expect(fail.raw).toContain('✅ 通过')
   })
 
   it('装饰 + 标签前缀格式 → review_verdicts 真实落库（旧实现静默 no-marker）', () => {
