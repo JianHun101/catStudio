@@ -93,6 +93,13 @@ export function formatAgentMessage(
  *     循环指令；T-C 判词三档）
  *   - ⚠️建议修改 / ❌需重做 → 需要继续循环
  *
+ * 归属判据（T-N）：判词 `subject_agent_id` 为空 = **归属不明** → 不注入（fail-closed）。
+ * 真库实测该档只由 suggest/reject 走到（approve/comment 的 null 是设计），且 4/4 行
+ * 判词的正文只 @ 了店长——写侧无信息可补，只能读侧收严。与 T-L「向严不向宽」同口径。
+ * ⚠️ 已知缺陷（**未修，待裁**）：该列由 `verdict-parser.ts:237` 写的是**名字**
+ * （`subject.name`），而此处比的是 `agent.id`（uuid）⇒「subject 非空且 == 本猫」在
+ * 生产上**不可达**，权威路径实际从不注入。见交接文档 OQ-1，勿在此处就地打补丁。
+ *
  * **权威路径 = 按链锚查最新判词**（`eval/chain-verdicts.ts`）。原实现只看
  * 「可见窗口里最近一条审查者消息」——而 ✅/💬 按分流规则只投店长，进不了实施猫的
  * 窗口 ⇒ 唯一能进窗口的那条陈旧 ⚠️（对象 `94742a2`，早已修于 `a1200a7`）被**无限重放**，
@@ -123,9 +130,18 @@ export function buildReviewLoopHint(
   // ① 权威路径：按锚查该链**最新**判词
   const latest = getLatestChainVerdict(chain.anchor, chain.sessionId)
   if (latest) {
-    // 判词对象不是本猫 → 这条结论不该驱动本猫。subject 为空（解析降级档）时
-    // 无从归属 → 按「可能是我」处理，不因归属信息缺失而漏注入。
-    if (latest.subject_agent_id && agent.id && latest.subject_agent_id !== agent.id) return null
+    // 归属判据（T-N）：**subject 为空 = 归属不明 → 不注入**（fail-closed）。
+    //
+    // 原实现按「可能是我」放行，理由是「不因归属信息缺失而漏注入」。实测推翻：
+    // `approve`/`comment` 的 subject 恒为 null 是**设计**（`verdict-parser.ts` 恒置 null），
+    // 且下一行已先把这两档 return 掉 ⇒ 走到这里的 null subject **只有 suggest/reject**，
+    // 真库现 4 行，其中 3 行判词自己只 @ 了店长（clause 里压根没有非 store 目标）
+    // ——即该档**不存在**「其实是我」的信息，写侧无信息可补，放行只会把只投给店长的
+    // 结论注入到无关实施猫。与 T-L「向严不向宽」同口径：归属判不出来时，宁可漏注入
+    // 也不误注入。定向闸一旦缺失就是静默死循环（本 hint 的病灶本身）。
+    if (!latest.subject_agent_id) return null
+    // 判词对象明确不是本猫 → 这条结论不该驱动本猫
+    if (agent.id && latest.subject_agent_id !== agent.id) return null
     if (latest.verdict === 'approve' || latest.verdict === 'comment') return null
     const reviewerName = agentsRepo.getAgentNameById(latest.reviewer_agent_id) ?? '审查者'
     return loopInstruction(reviewerName, verdictLabel(latest.verdict))

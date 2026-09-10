@@ -83,7 +83,14 @@ describe('execution/flow-advance — 契约③ X2 闭环', () => {
         `SELECT from_state, to_state, intent FROM flow_state_events WHERE session_id = ? AND commit_sha = ? ORDER BY id`
       )
       .all(SESSION, SHA) as Array<{ from_state: string | null; to_state: string; intent: string }>
-    expect(events.length).toBeGreaterThanOrEqual(3)
+    // T-N 并入：原为 `expect(events.length).toBeGreaterThanOrEqual(3)`——注释写「四步留痕」
+    // 却只要求 ≥3，少一步、错一步、顺序颠倒都发现不了（弱断言 = 恒真面）。钉死计数 + 逐步三字段。
+    expect(events).toEqual([
+      { from_state: null, to_state: 'quality-gate', intent: 'quality_gate' },
+      { from_state: 'quality-gate', to_state: 'request-review', intent: 'review_commit' },
+      { from_state: 'request-review', to_state: 'receive-review', intent: 'receive_review' },
+      { from_state: 'receive-review', to_state: 'closed', intent: 'closeout' },
+    ])
     const last = events[events.length - 1]
     expect(last.to_state).toBe('closed')
     expect(last.intent).toBe('closeout')

@@ -290,12 +290,14 @@ describe('hints', () => {
       verdict: 'approve' | 'comment' | 'suggest' | 'reject'
       subject: string | null
       createdAt: string
+      /** 缺省 = ANCHOR；T-N 多档用例需各挂独立锚免得互相盖成「最新」 */
+      anchor?: string
     }): void {
       const db = getDb()
       db.prepare(
         `INSERT INTO messages (id, session_id, role, content, mentions, task_id, created_at)
          VALUES (?, ?, 'agent', '审查回复', '[]', ?, ?)`
-      ).run(opts.msgId, SESSION_ID, ANCHOR, opts.createdAt)
+      ).run(opts.msgId, SESSION_ID, opts.anchor ?? ANCHOR, opts.createdAt)
       db.prepare(
         `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
          VALUES (?, ?, 'agent-2', ?, ?, ?)`
@@ -367,6 +369,60 @@ describe('hints', () => {
       expect(
         buildReviewLoopHint(DS, STALE_WINDOW, { anchor: ANCHOR, sessionId: SESSION_ID })
       ).toBeNull()
+    })
+
+    // ─── T-N：归属不明（subject 为空）fail-closed ─────────────────────────
+    // 病灶：原实现把「subject 为空」当「可能是我」放行 ⇒ 只 @ 了店长的判词被注入到
+    // 无关实施猫。真库实证该档只有 suggest/reject 会走到（approve/comment 的 null
+    // 是设计且已被上一行 return 掉），4 行里 3 行判词正文只 @ 店长 —— 写侧无信息可补。
+
+    it('T-N：subject 为空 + 打回档 → 不注入（fail-closed；旧实现返回循环指令，必红）', () => {
+      seedChain()
+      for (const verdict of ['suggest', 'reject'] as const) {
+        // 每条 verdict 用独立锚，避免互相盖成「最新」
+        const anchor = `anchor-tn-${verdict}`
+        seedVerdict({
+          msgId: `v-${verdict}`,
+          verdict,
+          subject: null,
+          createdAt: '2026-09-10 10:00:00',
+          anchor,
+        })
+        const hint = buildReviewLoopHint(DS, STALE_WINDOW, { anchor, sessionId: SESSION_ID })
+        expect(hint, `${verdict} 归属不明不得注入`).toBeNull()
+      }
+    })
+
+    it('T-N 阴性对照：subject 明确是本猫 → 仍注入（收窄不误杀；新旧同值，非区分项）', () => {
+      seedChain()
+      seedVerdict({
+        msgId: 'v1',
+        verdict: 'suggest',
+        subject: 'agent-3',
+        createdAt: '2026-09-10 10:00:00',
+      })
+
+      const hint = buildReviewLoopHint(DS, [], { anchor: ANCHOR, sessionId: SESSION_ID })
+      expect(hint).not.toBeNull()
+      expect(hint!).toContain('⚠️建议修改')
+    })
+
+    it('T-N：闭环档（approve/comment）+ subject 为空 → 不注入（两态，既有不变）', () => {
+      seedChain()
+      for (const verdict of ['approve', 'comment'] as const) {
+        const anchor = `anchor-tn-closed-${verdict}`
+        seedVerdict({
+          msgId: `v-${verdict}`,
+          verdict,
+          subject: null,
+          createdAt: '2026-09-10 10:00:00',
+          anchor,
+        })
+        expect(
+          buildReviewLoopHint(DS, STALE_WINDOW, { anchor, sessionId: SESSION_ID }),
+          `${verdict} 不得注入`
+        ).toBeNull()
+      }
     })
 
     it('audit D3 兜底：链上无判词行（审查者未打标记）→ 退回窗口扫描，口径与权威路径逐字一致', () => {

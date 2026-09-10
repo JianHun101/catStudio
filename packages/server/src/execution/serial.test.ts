@@ -30,6 +30,7 @@ import { getAdapterForAgent } from '../llm/registry.js'
 import { createExecutionEngine } from './serial.js'
 import { resolveMentionLimit, DEFAULT_MAX_MENTIONS_PER_AGENT } from './serial.js'
 import { maybeScoreSample } from '../eval/sampler.js'
+import { gitCommit } from '../llm/git-utils.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 
@@ -779,6 +780,119 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
       expect.objectContaining({ limit: 1, skippedCount: 1, remainingCount: 0 })
     )
   }, 60000)
+})
+
+// ═══ T-M：depth=0 自动提交的「歧义拒写」可观测面 ═══
+// `execution/serial.ts` 的 depth=0 收尾块在 `updateExecutionLogCommitHash` 回报
+// `skippedAmbiguous` 时打 warn——这条 warn 是「拒写」唯一的可观测面（不静默拦截正是
+// T-K 治的形态）。此前**零覆盖**：`gitCommit` mock 恒返 undefined ⇒ 整个收尾块不执行，
+// 拒写分支与 warn 从未被跑过（T-M 实测裁定的那半段等于没钉子）。
+
+describe('serial — T-M 自动提交歧义拒写（可观测面）', () => {
+  const TRIGGER = 'msg-tm'
+  const TRACE = 'trace-tm'
+
+  function seedBase(): void {
+    const db = getDb()
+    const addAgent = (id: string, name: string) =>
+      db
+        .prepare(
+          `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+           VALUES (?, ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test')`
+        )
+        .run(id, name)
+    addAgent('agent-1', '店长')
+    addAgent('agent-2', 'ds猫')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', '["agent-1"]', 0)`
+    ).run()
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, 'session-1', 'user', '你好', '[]')`
+    ).run(TRIGGER)
+  }
+
+  /** 该触发消息下已写了 commit_hash 的行数（拒写 ⇒ 0；照写 ⇒ >0） */
+  function writtenRows(): number {
+    const r = getDb()
+      .prepare(
+        `SELECT COUNT(*) AS n FROM execution_logs
+         WHERE triggered_by_message_id = ? AND commit_hash IS NOT NULL`
+      )
+      .get(TRIGGER) as { n: number }
+    return r.n
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    seedBase()
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  it('同 uuid 跨猫执行行 → 拒写 + warn（commit_hash 全留空）；旧实现无此日志、必红', async () => {
+    makeAdapter()
+    vi.mocked(gitCommit).mockReturnValue('cafe1234567890abcdef')
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    // 同一触发消息下已有**另一只猫**的执行行 ⇒ distinctAgentCount=2 ⇒ 消歧失败
+    // （正是 b365ee9b/486f79ab 同 uuid 双猫那条实测形态的最小复现）
+    getDb()
+      .prepare(
+        `INSERT INTO execution_logs
+           (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+         VALUES ('log-other-cat', 'session-1', 'agent-2', ?, 'completed', ?, '2026-09-10 10:00:00')`
+      )
+      .run(TRIGGER, TRACE)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [DEFAULT_AGENT],
+      { id: TRIGGER, content: '你好', mentions: [] },
+      TRACE,
+      0
+    )
+
+    expect(logWarn).toHaveBeenCalledWith(
+      'auto-commit hash not written back — executor ambiguous',
+      expect.objectContaining({
+        traceId: TRACE,
+        triggerMessageId: TRIGGER,
+        commitHash: 'cafe1234567890abcdef',
+        writtenRows: 0,
+      })
+    )
+    // 拒写落点：归属留空（读侧反查返 undefined → 调用方兜底 @店长），不制造"看似精确"的错归属
+    expect(writtenRows()).toBe(0)
+  })
+
+  it('单猫轮次 → 照写 + 无 warn（阴性对照：warn 不得恒发）', async () => {
+    makeAdapter()
+    vi.mocked(gitCommit).mockReturnValue('cafe1234567890abcdef')
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [DEFAULT_AGENT],
+      { id: TRIGGER, content: '你好', mentions: [] },
+      TRACE,
+      0
+    )
+
+    expect(logWarn).not.toHaveBeenCalledWith(
+      'auto-commit hash not written back — executor ambiguous',
+      expect.anything()
+    )
+    expect(writtenRows()).toBeGreaterThan(0)
+  })
 })
 
 // ═══ ProviderTokenPool 死锁根治（A 方案：token 只包 LLM 段） ═══
