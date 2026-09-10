@@ -12,9 +12,10 @@
  * 不放 hook（钩子断护栏不能跟着断，hooks 根修同思路）。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   validateSearchParams,
   validateQueryDbParams,
@@ -42,6 +43,17 @@ import {
   readSkill,
   listSkills,
 } from './mcp-server-utils.mjs'
+
+/**
+ * 读技能正文（静态源断言用——catalog 回流技能须守住 ADR 0014 §3 的零路由不变量）。
+ * 路径由本文件位置推导，不依赖 cwd；只读真实仓库单源 `skills/`。
+ */
+function readSkillDoc(name) {
+  return readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'skills', name, 'SKILL.md'),
+    'utf8'
+  )
+}
 
 /** 深删 description 键（inputSchema 结构冻结对比用——瘦身只允许 description 文案变化） */
 function stripDescriptions(v) {
@@ -415,8 +427,8 @@ describe('validateReadSkillParams (read_skill)', () => {
     }
   })
 
-  it('name 非清单内（request-review/wayfinder/code-review/..）→ 错误文本', () => {
-    for (const bad of ['request-review', 'wayfinder', 'code-review', '..', 'a/b', 'QUALITY-GATE']) {
+  it('name 非清单内（wayfinder/code-review/tdd/..）→ 错误文本', () => {
+    for (const bad of ['wayfinder', 'code-review', 'tdd', '..', 'a/b', 'QUALITY-GATE']) {
       const r = validateReadSkillParams({ name: bad })
       expect(r.ok).toBe(false)
       expect(r.reason).toContain('技能清单')
@@ -586,7 +598,7 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     expect(Object.keys(SKILL_CATALOG)).toEqual(FLOW_CHAIN_SKILLS)
   })
 
-  it('catalog 定死 8 技能、request-review 移除、wayfinder 排除', () => {
+  it('catalog 定死 9 技能、request-review 回流、wayfinder 排除', () => {
     expect(FLOW_CHAIN_SKILLS).toEqual([
       'grilling',
       'to-spec',
@@ -594,11 +606,30 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
       'to-tickets',
       'implement',
       'quality-gate',
+      'request-review',
       'receive-review',
       'session-handoff',
     ])
-    expect(FLOW_CHAIN_SKILLS).not.toContain('request-review')
+    expect(FLOW_CHAIN_SKILLS).toContain('request-review')
     expect(FLOW_CHAIN_SKILLS).not.toContain('wayfinder')
+  })
+
+  // ADR 0014 §3 不变量：技能正文只管领域内容，不含路由（@谁 / 请谁审查 / 投给谁）。
+  // request-review 回流（2026-09-10）是「名字回流、范围收窄」——本断言把它守死，
+  // 防这次翻转把 §3 一起翻掉。
+  it('request-review 技能正文零路由（ADR 0014 §3 不变量）', () => {
+    const text = readSkillDoc('request-review')
+    // frontmatter 一并纳入守卫：路由藏在 description 里同样破坏不变量
+    expect(text).not.toContain('@')
+    expect(text).not.toMatch(/请谁审查|投给谁/)
+  })
+
+  // 回流技能的领域内容三条（票单 T-B 验收一）：门槛六条 / 同型 audit / 轮次升级
+  it('request-review 技能正文含三条领域规则', () => {
+    const text = readSkillDoc('request-review')
+    expect(text).toContain('BLOCKED 前置门槛（六条）')
+    expect(text).toContain('强制 failure-mode audit')
+    expect(text).toMatch(/同对象 ≥3 轮/)
   })
 })
 

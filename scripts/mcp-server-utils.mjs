@@ -246,9 +246,10 @@ export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/
 /**
  * P2=A 流程链技能集合（注入层目录——catalog 嵌进 read_skill 描述、不再注入 prompt）。
  * 判据：开发流程链（wayfinder 起图 → grilling/to-spec → spec-gate → to-tickets → implement
- * → quality-gate → receive-review） + 会话压缩 session-handoff（handoff 重命名）。
- * request-review 已移除（递送语义归状态机 FLOW_MAIN_CHAIN，见 execution/flow-state.ts——
- * 该状态保留，仅技能身份连根拔掉）；wayfinder 排除（disable-model-invocation 是设计）。
+ * → quality-gate → request-review → receive-review） + 会话压缩 session-handoff（handoff 重命名）。
+ * request-review 于 2026-09-10 回流（ADR 0014 §5 修订：post-commit hook 不再机械投递，
+ * 请求审查改由 Agent 自行发起；范围收窄——技能正文零路由，递送语义仍归状态机
+ * FLOW_MAIN_CHAIN，见 execution/flow-state.ts）；wayfinder 排除（disable-model-invocation 是设计）。
  * session-handoff 目录由交付单 B 重命名 handoff 落地——清单先行，readSkill 读缺返回错误文本。
  */
 export const FLOW_CHAIN_SKILLS = [
@@ -258,6 +259,7 @@ export const FLOW_CHAIN_SKILLS = [
   'to-tickets',
   'implement',
   'quality-gate',
+  'request-review',
   'receive-review',
   'session-handoff',
 ]
@@ -270,6 +272,7 @@ export const SKILL_CATALOG = {
   'to-tickets': '把 spec 拆成工单',
   implement: '按 spec/工单实施，产出满足验收的代码',
   'quality-gate': '代码提交审查前的自查门（后半个门）',
+  'request-review': '发起审查请求前的门槛与轮次规则（BLOCKED 六条 / 同型 audit / ≥3 轮升级）',
   'receive-review': '接收并处理审查反馈（P1/P2/P3 分类）',
   'session-handoff': '会话压缩交接（跨会话把上下文传给下一棒）',
 }

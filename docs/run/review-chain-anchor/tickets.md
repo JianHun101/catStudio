@@ -57,22 +57,36 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 
 ---
 
-### T-B｜`request-review` 技能
+### T-B｜`request-review` 技能（2026-09-10 修订：A 方案 + 范围收窄）
 
-**交付**：新建技能（照 clowder `request-review` 形式，砍掉沙盒路径 / 跨家族匹配 / PR 三块——本仓库不存在）。
-含三块：
+**背景（前置发现，决定本票形态）**：ADR 0014 §5 曾把 `request-review` 从技能层**连根拔掉**，且 `scripts/mcp-server.test.js` 有硬断言守着。本次回流是**用户拍板的反转**（§5 的移除前提「post-commit hook 机械投递」正是本轮要拆掉的），同车在 ADR 补留痕。
 
-1. **前置门槛（BLOCKED）**：quality-gate 通过 / 测试全绿 / 原始需求可引用 / ownership 声明 / 前端真机自证 / 根目录工件闸门。不满足 → 请求**发不出去**。
-2. **轮次规则**：R2+ 同型 finding → 强制 failure-mode audit（作者先扫全 diff 再修）；同对象 ≥3 轮 → 停手升级到需求/方案层。
-3. **交接文档的机械生成从钩子搬进技能**——触发权交回给猫（复用现成 `handoff-gen --no-post` 生成草稿，不重写机械部分）。
+- **F1**：§5 称内容资产「并入 `skills/refs/review-request-template.md`」——文件在，但末行仍是「行首 @审查者 发起审查…」，正是 §3 明令禁止的路由表述（并入时漏剥）。
+- **F2**：§5 称由 `code-review` 承担——实测 `skills/code-review/` **不在 `SKILL_CATALOG`**（猫经 `read_skill` 读不到），且正文携带本仓库零在场的 matt 依赖。承担者从猫可读面看**实际不存在**，即 §5 的一个未兑现前提。
+
+**交付**：新建 `skills/request-review/SKILL.md`（照 clowder `request-review` 形式，砍掉沙盒路径 / 跨家族匹配 / PR 三块——本仓库不存在）。
+含四块：
+
+1. **前置门槛（BLOCKED 六条）**：quality-gate 通过 / 测试全绿 / 原始需求可引用 / ownership 声明 / 前端真机自证 / 根目录工件闸门。不满足 → 请求**发不出去**。
+2. **R2+ 同型 finding → 强制 failure-mode audit**（作者先扫全 diff 再修）。
+3. **同对象 ≥3 轮 → 停手升级到需求/方案层**（F229 20 轮教训）。
+4. **模板引用**共享 `skills/refs/review-request-template.md`（**不重写模板**）。
+
+**变更面（一个 commit）**：SKILL.md 新建 · `manifest.yaml` 登记 + `pipeline.review` 插入 · `mcp-server-utils.mjs` 8→9 · `mcp-server.test.js` 断言**翻转并加强** · `refs/review-request-template.md` 剥路由行（F1） · ADR 0014 §5 留痕（含 F2 修正）。
+
+**边界（不反转 §6.1）**：技能正文**零路由**——不含 `@谁` / `请谁审查` / `投给谁`；派活单 / `flow_state` / handoff 都不进 skill。原「第 5 块：handoff 机械生成搬进技能」**砍掉**——撞 §6.1，且依赖 T-A 对 hook / `.handoff-delivered.json` 的结论。
 
 **无阻塞**，可与 T-A 并行。
 
 **验收**：
 
-- [ ] 静态源断言：技能文本含上述三条规则
-- [ ] 门槛不满足时审查请求**发不出去**（不是"发出去再打回"）
-- [ ] 实施猫能按技能拿到交接文档草稿，内容与现有机械生成等价
+- [ ] `node scripts/skills-check-manifest.mjs` → **28/28 全覆盖**，exit 0
+- [ ] 静态源断言：技能文本含上述三条领域规则（BLOCKED 六条 / failure-mode audit / ≥3 轮升级）
+- [ ] 静态源断言：SKILL.md **正文零路由**（无 `@` 提及）——把 §3 不变量真正守起来，不随本次翻转一起消失
+- [ ] `mcp-server.test.js` 全绿：9 技能 + 零路由断言两条都在
+- [ ] `refs/review-request-template.md` 无 `@` 行
+- [ ] ADR 0014 §5 留痕段落存在
+- [ ] 「门槛不满足发不出去」在本票 = **猫自守 + 静态源断言**；**机械阻断归 T-F 入口主闸**，不在本票做
 
 ---
 

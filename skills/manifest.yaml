@@ -111,6 +111,28 @@ skills:
       - 'CODING_STANDARDS.md'
       - 'refs/review-standards.md'
 
+  request-review:
+    source: self
+    use_when: |
+      a code change has passed self-check and you are about to request review.
+    not_for: |
+      writing the review conclusion, or when you are the reviewer.
+    category: '审查流程'
+    description: |
+      发起审查请求前的前置门槛与轮次规则。
+      六条 BLOCKED 门槛不满足则请求发不出去；同型 finding 二犯触发 failure-mode audit；
+      同对象 ≥3 轮停手升级到需求/方案层。
+    triggers:
+      - '发起审查'
+      - '请求审查'
+      - 'request review'
+      - '提交审查'
+    output: '可投递的审查请求（模板 + 自检证据）或 BLOCKED 清单'
+    next: 'receive-review'
+    refs:
+      - 'refs/review-request-template.md'
+      - 'refs/shared-rules.md'
+
   receive-review:
     source: self
     use_when: |
@@ -321,6 +343,7 @@ pipeline:
     - spec-gate
   review:
     - quality-gate
+    - request-review
     - receive-review
 
 # 三条铁律
