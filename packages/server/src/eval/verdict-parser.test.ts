@@ -216,6 +216,41 @@ describe('parseReviewVerdict — 纯函数', () => {
     expect(r).toEqual({ kind: 'verdict', verdict: 'reject', subject: 'ds猫', failure: null })
   })
 
+  // ─── T-C 判词三档：💬仅评论（非阻断）────────────────────────────────
+  // 语义（docs/plans/review-chain-anchor.md C5）：低严重度观察项不再一律打成
+  // ⚠️（每条强制起一轮）。💬 不要求返工 → subject 恒 null（写 subject 会被下游
+  // 当返工派发）；严重度落在 ✅ 与 ⚠️ 之间（有观察项就不算干净通过）。
+
+  it('comment：💬仅评论 → comment + subject=null（@ 了非 store 目标也不写 subject）', () => {
+    const r = parseReviewVerdict('💬仅评论 3 点非阻断观察，不要求返工。', [
+      { name: '店长', isStore: true },
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'comment', subject: null, failure: null })
+  })
+
+  it('comment：**结论：💬仅评论**（装饰 + 标签前缀）→ comment', () => {
+    const r = parseReviewVerdict('**结论：💬仅评论**——两条小建议，不阻断收口。', TARGETS)
+    expect(r).toEqual({ kind: 'verdict', verdict: 'comment', subject: null, failure: null })
+  })
+
+  it('comment：行首 💬 但后缀漂移（💬 仅评论 带空格）→ bad_verdict', () => {
+    const r = parseReviewVerdict('💬 仅评论（带空格变体）', TARGETS)
+    expect(r).toEqual({ kind: 'failure', reason: 'bad_verdict' })
+  })
+
+  it('同级冲突：裸 💬 + 裸 ✅ → comment（有观察项就不算干净通过）', () => {
+    const r = parseReviewVerdict('✅可合并 主结论。\n💬仅评论 另有两条小建议', TARGETS)
+    expect(r).toEqual({ kind: 'verdict', verdict: 'comment', subject: null, failure: null })
+  })
+
+  it('同级冲突：裸 💬 + 裸 ⚠️ → suggest（既有向严裁决不放宽，💬 不得降级 ⚠️）', () => {
+    const r = parseReviewVerdict('💬仅评论 小建议。\n⚠️建议修改 但这条必须改', [
+      { name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+  })
+
   // ─── 真实语料回归（2026-09-09 店长验收硬指标）────────────────────────
   // 语料 = 本会话（86e15a43）DB 中吐槽猫 15 条审查消息的结论行原文，
   // 逐条从 `cat-study-dev.db` 导出（非手写夹具）。修复前实测 2/15 落 verdict，
@@ -355,6 +390,20 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
     const fail = failuresOf('m-nosubject')!
     expect(fail.reason).toBe('no_subject')
     expect(fail.raw).toContain('❌需重做')
+  })
+
+  it('comment → review_verdicts 落库 verdict=comment，failure 表不写（CHECK 已放宽）', () => {
+    recordReviewVerdict({
+      messageId: 'm-comment',
+      sessionId: 's1',
+      reviewerAgentId: 'reviewer-1',
+      content: '💬仅评论 两条小建议。',
+      targets: TARGETS,
+    })
+    const row = verdictsOf('m-comment')!
+    expect(row.verdict).toBe('comment')
+    expect(row.subject_agent_id).toBeNull()
+    expect(failuresOf('m-comment')).toBeUndefined()
   })
 
   it('bad_verdict → 只写 failure 表，不写 review_verdicts', () => {

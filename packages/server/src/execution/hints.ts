@@ -57,7 +57,8 @@ export function formatAgentMessage(
  *   - 其他 role（store/implementer/vision/unknown）→ coder（需要被审查）
  *
  * 结论判断基于 IRON_LAWS_REVIEWER 强制输出的结构化标记：
- *   - ✅可合并 → 通过，循环结束
+ *   - ✅可合并 / 💬仅评论 → 通过，循环结束（💬 非阻断 = 不要求返工，故不注入
+ *     循环指令；T-C 判词三档）
  *   - ⚠️建议修改 / ❌需重做 → 需要继续循环
  *
  * @returns 系统指令字符串，不需要时返回 null
@@ -90,7 +91,7 @@ export function buildReviewLoopHint(
     // 找到审查者的消息。用 lastIndexOf 检测结论标记（而非 includes），
     // 因为审查正文可能引用/讨论这些标记，但审查结论总在消息末尾。
     // 取三个标记中最后出现者作为实际结论。
-    const CONCLUSION_MARKERS = ['✅可合并', '⚠️建议修改', '❌需重做']
+    const CONCLUSION_MARKERS = ['✅可合并', '💬仅评论', '⚠️建议修改', '❌需重做']
     let conclusionMarker: string | null = null
     let conclusionPos = -1
     for (const marker of CONCLUSION_MARKERS) {
@@ -101,7 +102,8 @@ export function buildReviewLoopHint(
       }
     }
 
-    if (conclusionMarker === '✅可合并') return null // 审查通过
+    // 审查通过（✅ 明确通过 / 💬 非阻断观察项，均不要求返工）→ 不注入循环指令
+    if (conclusionMarker === '✅可合并' || conclusionMarker === '💬仅评论') return null
 
     // 审查未通过（⚠️建议修改 / ❌需重做 / 无明确结论）→ 注入循环指令
     const reviewerName = senderRow.name

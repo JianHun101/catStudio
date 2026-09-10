@@ -42,6 +42,42 @@ export function resetDb(): void {
   }
 }
 
+/**
+ * 放宽 review_verdicts.verdict 的 CHECK 约束（加 'comment'，T-C 判词三档）。
+ *
+ * SQLite 不支持改 CHECK → 只能走标准的「建新表 + 拷数据 + 换名」重建。重建
+ * **必须带闸门**：迁移数组每次启动全量重跑，把重建裸写进数组 = 每次开服 DROP
+ * 一次生产表；更糟的是日后若有人给 review_verdicts 加列，会被这次重建按固定
+ * 列清单静默回退。闸门 = 读 sqlite_master 里的建表 SQL，已含 'comment' 即跳过
+ * （全新库走上面的 CREATE TABLE，天然命中跳过）。整个重建包在事务里，中途
+ * 失败不会留下半成品。
+ */
+function widenReviewVerdictsCheck(): void {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'review_verdicts'`)
+    .get() as { sql: string } | undefined
+  if (!row || row.sql.includes("'comment'")) return
+
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE review_verdicts_widened (
+        message_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        reviewer_agent_id TEXT NOT NULL,
+        subject_agent_id TEXT,
+        verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'comment', 'suggest', 'reject')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT OR IGNORE INTO review_verdicts_widened
+        SELECT message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at
+        FROM review_verdicts;
+      DROP TABLE review_verdicts;
+      ALTER TABLE review_verdicts_widened RENAME TO review_verdicts;
+    `)
+  })()
+  console.log('[db] migrated: review_verdicts verdict CHECK widened (comment)')
+}
+
 export function initDb(): void {
   const db = getDb()
 
@@ -279,7 +315,7 @@ export function initDb(): void {
         session_id TEXT NOT NULL,
         reviewer_agent_id TEXT NOT NULL,
         subject_agent_id TEXT,
-        verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'suggest', 'reject')),
+        verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'comment', 'suggest', 'reject')),
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`,
     },
@@ -456,6 +492,8 @@ export function initDb(): void {
       // 列已存在则忽略
     }
   }
+
+  widenReviewVerdictsCheck()
 
   console.log('[db] SQLite initialized at', DB_PATH)
 }

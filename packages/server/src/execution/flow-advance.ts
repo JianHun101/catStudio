@@ -5,7 +5,8 @@
  * - **agent 自由接棒保留**：下一棒由 agent 自己的 @ / post_message 表态决定，
  *   状态机**不替 agent 决定**该干嘛、该调哪个 skill。
  * - 状态机只在 hook 不覆盖的跳**补信号**，3 件事：
- *   ① verdict 推进账本——审查 {✅/⚠️/❌} 落盘事件 → recordFlowTransition 沿主干道前进
+ *   ① verdict 推进账本——审查 {✅可合并 / 💬仅评论} 落盘事件 → recordFlowTransition
+ *      沿主干道前进（⚠️/❌ 打回不推进；💬 非阻断档照常推进，T-C）
  *   ② 恰好一次去重——commit_sha 主键判同源，防「判定式投递 + hook 兜底」双触发
  *   ③ verdict ✅ → closeout 信号**真正投递**店长收口（判定式投递缺席时）
  *
@@ -58,9 +59,15 @@ function resolveStoreCatName(sessionId: string): string | undefined {
   return undefined
 }
 
-/** 推进到终态是否需收口提醒（verdict approve → yes；suggest/reject 打回 → 不推进不提醒）。 */
+/**
+ * 推进到终态是否需收口提醒。
+ *
+ * approve / **comment** → yes：💬 是**非阻断**档（T-C）——审查者有低严重度
+ * 观察项，不要求返工，故不该把链卡住；「不阻断收口」的落地就是照常推进。
+ * suggest/reject 打回 → 不推进不提醒（内容寻址新 sha 自解）。
+ */
 function shouldAdvance(verdict: ReviewVerdict): boolean {
-  return verdict === 'approve'
+  return verdict === 'approve' || verdict === 'comment'
 }
 
 /**
@@ -81,6 +88,7 @@ function deliverCloseoutNotice(opts: {
   sessionId: string
   commitSha: string
   traceId: string
+  verdict: ReviewVerdict
 }): void {
   const storeCatName = resolveStoreCatName(opts.sessionId)
   if (!storeCatName) {
@@ -102,7 +110,8 @@ function deliverCloseoutNotice(opts: {
   ingestUserMessage({
     sessionId: opts.sessionId,
     content:
-      `【契约③·状态机兜底】commit ${opts.commitSha.slice(0, 7)} 审查结论 ✅，` +
+      `【契约③·状态机兜底】commit ${opts.commitSha.slice(0, 7)} 审查结论 ` +
+      `${opts.verdict === 'approve' ? '✅可合并' : '💬仅评论（非阻断）'}，` +
       `主干道已推进至 closed。审查者未 @店长 收口，状态机补投本提醒——请店长收口。`,
     mentions: signal.targets,
     taskId: opts.traceId,
@@ -192,7 +201,12 @@ export function advanceFlowAfterVerdict(opts: {
       // 不再进入本块（flow_state 已 closed，advanced=false）。
       const storeCat = opts.targets.find((t) => t.isStore)
       if (!storeCat) {
-        deliverCloseoutNotice({ sessionId: opts.sessionId, commitSha, traceId })
+        deliverCloseoutNotice({
+          sessionId: opts.sessionId,
+          commitSha,
+          traceId,
+          verdict: opts.verdict,
+        })
       }
     }
   } catch (err: any) {

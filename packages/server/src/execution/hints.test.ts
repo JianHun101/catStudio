@@ -132,6 +132,33 @@ describe('hints', () => {
       expect(hint).toBeNull()
     })
 
+    it('buildReviewLoopHint：💬仅评论 → 不注入（非阻断档不要求返工，T-C）', async () => {
+      seedHintAgents(getDb())
+      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
+        {
+          role: 'agent',
+          agent_id: 'agent-2',
+          content: '💬仅评论 两条非阻断观察，不要求返工。',
+          mentions: JSON.stringify(['ds猫']),
+        },
+      ])
+      expect(hint).toBeNull()
+    })
+
+    it('buildReviewLoopHint：💬 在前 ⚠️ 在后 → 仍注入循环指令（取最后出现者，不因 💬 放行）', async () => {
+      seedHintAgents(getDb())
+      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
+        {
+          role: 'agent',
+          agent_id: 'agent-2',
+          content: '💬仅评论 先说小建议。\n⚠️建议修改 但这条必须改。',
+          mentions: JSON.stringify(['ds猫']),
+        },
+      ])
+      expect(hint).not.toBeNull()
+      expect(hint!).toContain('继续审查循环')
+    })
+
     it('buildHandoffTriggerHint：DB 有 reviewer → 注入 @吐槽猫 发起代码审查（真名动态装配）', async () => {
       seedHintAgents(getDb())
       const hint = buildHandoffTriggerHint('@店长 请补填以下交接文档')
