@@ -423,6 +423,49 @@ for (const sc of SCENARIOS) {
   console.log(`  ${sc.id}: ${sc.desc} ✅`)
 }
 
+// ─── 近因对照：必改 2 的「现状必红」自证 ──────────────────────
+//
+// legacy 列是**改动前（pre-T-O）**那份 hook。它在「删 ref + HEAD 未审」下也拦，
+// 但拦的理由不同（压根不读 stdin、纯按 HEAD 判）——所以 legacy 列证明的是
+// 「本票整体改了行为」，**不证明**「计数拆分这一处修的是真缺口」。
+// 故补一份**直接父提交**的 hook（T-O 首版，含回落 bug）作近因基线：
+// 它必须在该场景**拦**，否则复审要求的「现状必红」不成立。
+
+const NEAR_CAUSE_HOOK_BLOB = '64ab61e681cc5a052b2edcdf68f1a95febf62815' // T-O 首版（含回落 bug）
+const nearCauseDir = mkdtempSync(join(TEST_BASE, 'nearcause-hooks-'))
+const nearCauseHookContent = execFileSync('git', ['show', NEAR_CAUSE_HOOK_BLOB], {
+  cwd: REPO_ROOT,
+  encoding: 'utf-8',
+  env: GIT_ENV,
+})
+writeFileSync(join(nearCauseDir, 'pre-push'), nearCauseHookContent, { mode: 0o755 })
+
+// 近因基线必须**真是**近因：既不等于远因 legacy、也不等于 current，
+// 且含 T-O 首版的 stdin 解析、不含本笔新引入的 saw_refspec。
+assert(
+  nearCauseHookContent !== legacyHookContent && nearCauseHookContent !== currentHookContent,
+  '近因基线应既不等于 pre-T-O legacy、也不等于 current（否则它证明不了「这一处修复」）'
+)
+assert(
+  nearCauseHookContent.includes('PUSH_SPECS') && !nearCauseHookContent.includes('saw_refspec'),
+  '近因基线应含 T-O 首版的 stdin 解析、且不含本笔新引入的 saw_refspec'
+)
+
+const sc8 = SCENARIOS.find((s) => s.id === '8')
+const nearCause8 = sc8.run(nearCauseDir)
+const row8 = rows.find((r) => r.id === '8')
+assert(
+  isBlocked(nearCause8),
+  '必改 2·近因对照：T-O 首版在「删远端 ref + HEAD 未审」下应 **拦**（= 现状必红）；实得放行'
+)
+assert(isAllowed(row8.current), '必改 2·近因对照：本笔修复后同场景应 **放行**；实得拦')
+console.log('')
+console.log(
+  `  必改 2 近因对照（删远端 ref + HEAD 未审）：` +
+    `T-O 首版(blob ${NEAR_CAUSE_HOOK_BLOB.slice(0, 12)})=${isBlocked(nearCause8) ? '拦' : '放行'}` +
+    ` / 本笔=${isAllowed(row8.current) ? '放行' : '拦'}`
+)
+
 // ─── 对照表 ──────────────────────────────────────────────────
 
 // 不用花框表格：CJK 是双宽字符，`padEnd` 按码点数补空格 ⇒ 中英混排必然错位，

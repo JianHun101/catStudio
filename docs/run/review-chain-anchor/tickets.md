@@ -724,8 +724,8 @@ running 两行 → 旧实现盖 2 条、新实现只 1 条」（字面实现 = �
 - [x] ⑤ `--no-verify` 仍绕过（逃生口保留，旧实现同）
 - 另：缺 `.push-gate` → 拦；内容非法 → 拦；无 stdin 回落 HEAD → 拦（回归对照）
 
-**证据**：`node scripts/pre-push-gate.e2e.mjs` → **28 passed / 0 failed**（12 场景 × legacy/current 双跑），
-**5 条**区分性场景 legacy 与 current **结论全部相反**。**新增 1 文件**：`scripts/pre-push-gate.e2e.mjs`。
+**证据**：`node scripts/pre-push-gate.e2e.mjs` → **32 passed / 0 failed**（12 场景 × legacy/current
+双跑 + 近因对照），**5 条**区分性场景 legacy 与 current **结论全部相反**。**新增 1 文件**：`scripts/pre-push-gate.e2e.mjs`。
 
 ### T-O 复审 ⚠️ 必改 2 条（`36f4548` → 本笔）
 
@@ -744,6 +744,13 @@ ref，而本提交自己就移动了它** ⇒ 取回来的是 current 自己，�
 **修法**：拆两个计数——`saw_refspec` 在空行跳过之后自增（删除 ref 是一行**合法** refspec），
 回落分支只认「一行都没解析出」。**新增场景 8**（HEAD 未审 + 删 ref → 放行，★区分性）、
 **11**（删 ref 与未审 refspec 同推 → 拦，★区分性）、**12**（删 ref + HEAD 已审 → 放行，回归对照）。
+
+**「现状必红」需近因基线（自补，非复审要求）**：legacy 列是 **pre-T-O** 那份 hook，它在
+「删 ref + HEAD 未审」下也拦，但理由不同（压根不读 stdin、纯按 HEAD 判）⇒ legacy 列证明的是
+「本票整体改了行为」，**不证明**「计数拆分这一处修的是真缺口」。故补第三份基线 = **直接父提交**
+（T-O 首版，含回落 bug，blob `64ab61e6`），断言它在该场景**拦**、本笔**放行**——这才是派活单
+所要求的「现状必红（实得 BLOCK、期望 ALLOW）」的自证。另加两条自证钉住这份基线**真是**近因
+（≠pre-T-O legacy、≠current；含 `PUSH_SPECS`、不含本笔新引入的 `saw_refspec`）。
 
 **并入 6 条**：
 
