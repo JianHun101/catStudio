@@ -84,8 +84,27 @@ const AGENT_HARD_TIMEOUT_MS = isNaN(_HARD_TIMEOUT) ? 30 * 60 * 1000 : _HARD_TIME
 /** Agent 间调度的最大递归深度（防止无限循环） */
 const MAX_AGENT_DISPATCH_DEPTH = 10
 
-/** 单个 Agent 在同一 traceId 下被 A2A @ 的最大次数（用户顶层触发不计数） */
-const MAX_MENTIONS_PER_AGENT = 5
+/** 单 Agent 在同一 traceId 下被 A2A @ 的**默认**执行上限（用户顶层触发不计数）。 */
+export const DEFAULT_MAX_MENTIONS_PER_AGENT = 5
+
+/** 配额阈值（T-K 可配）：`MAX_MENTIONS_PER_AGENT`。
+ *
+ *  **每次判据处现读**而非模块加载时快照——护栏参数不该重启才生效（与同为运行期
+ *  读取的 `PROVIDER_TOKEN_CAP` 同口径），且让"阈值可配"能被测试直接钉住
+ *  （改 env → 行为变），不必重载模块。
+ *
+ *  `0` / 负数 / 非法值 → **回默认 5**，不开放"不限"：这是防循环护栏，不是性能旋钮。
+ *  与 `PROVIDER_TOKEN_CAP`（0 = 不限）**刻意不同**，写在此处防按那个惯例误推。
+ *
+ *  **注意双计**：调度点「检查 + 预留」（下方原子段）与执行完成处（`depth>0`，
+ *  本文件下方另一处 `setMentionCount`）**各计一次** ⇒ 实际可执行轮次 ≈ limit / 2
+ *  （默认 5 → 约 3 轮；第 4 轮起被拦，拦截时记 warn）。 */
+export function resolveMentionLimit(
+  raw: string | undefined = process.env.MAX_MENTIONS_PER_AGENT
+): number {
+  const n = parseInt(raw || '')
+  return isNaN(n) || n <= 0 ? DEFAULT_MAX_MENTIONS_PER_AGENT : n
+}
 
 // ─── Agent Execution（同消息并发调度） ────────────
 
@@ -759,20 +778,31 @@ async function executeOneAgent(
         // 预留写先落，后到者读到已预留值被拦截。
         // 预留 = 调度即计数：目标执行成功的递增（上方 completeExecution
         // 后，depth>0）仍在——双计让防护阈值更早触达，正常审查链深度
-        // （2-3）远在阈值（MAX_MENTIONS_PER_AGENT=5）内不受影响；预留后
-        // 未执行（跳过/失败）的配额不扣回——阈值 5 下影响边际，防循环优先
+        // （2-3）远在阈值（默认 5）内不受影响；预留后未执行（跳过/失败）
+        // 的配额不扣回——阈值 5 下影响边际，防循环优先。
+        // 阈值 T-K 起可配（resolveMentionLimit 现读 env）：双计⇒**实际轮次 ≈ limit/2**，
+        // 不要把 limit 直接读成"能派几轮"。
+        const limit = resolveMentionLimit()
         const limitedAgents: AgentConfig[] = []
         for (const a of policy.allowed) {
           const count = state.getMentionCount(traceId, a.id)
-          if (count >= MAX_MENTIONS_PER_AGENT) continue
+          if (count >= limit) continue
           state.setMentionCount(traceId, a.id, count + 1) // 预留配额
           limitedAgents.push(a)
         }
         if (limitedAgents.length < policy.allowed.length) {
-          log.info('agent-to-agent mention limit filtered', {
+          const skipped = policy.allowed.filter((a) => !limitedAgents.includes(a))
+          // T-K：配额拦截此前**只有 info 级日志**——info 级在生产没人看 ⇒ 观感上就是
+          // "派活凭空消失"（派活单实证：4 条被吞的派活 `dispatch_state=NULL`，执行链上
+          // 无 warn）。抬到 `warn`，与 depth limit 同口径。
+          // 计数字段名带**单位**（Count = 只数）：双计下 `limit` 不是"轮次"，别再误读。
+          log.warn('agent-to-agent mention limit filtered', {
             traceId,
             fromAgent: agent.name,
-            skipped: policy.allowed.filter((a) => !limitedAgents.includes(a)).map((a) => a.name),
+            limit,
+            skippedCount: skipped.length,
+            skipped: skipped.map((a) => a.name),
+            remainingCount: limitedAgents.length,
             remaining: limitedAgents.map((a) => a.name),
           })
         }

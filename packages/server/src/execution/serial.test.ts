@@ -28,11 +28,25 @@ import { initRepository } from '../db/repository/index.js'
 import { __test_reset } from '../dispatch/index.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import { createExecutionEngine } from './serial.js'
+import { resolveMentionLimit, DEFAULT_MAX_MENTIONS_PER_AGENT } from './serial.js'
 import { maybeScoreSample } from '../eval/sampler.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 
 // ═══ 边界 mock（真实 dispatch / SQLite / 纯函数保留） ═══
+
+// 日志按边界 mock：T-K 的交付面之一是"配额拦截从 info 抬到 warn"，可观测面就是这条
+// warn——不 mock 就只能断言"跳数变少"（那测的是拦截行为，不是**可观测性**那条修复）。
+const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }))
+vi.mock('../logger.js', () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: logWarn,
+    error: vi.fn(),
+  }),
+  setLogLevel: vi.fn(),
+}))
 
 vi.mock('../llm/registry.js', () => ({
   getAdapterForAgent: vi.fn(() => null),
@@ -668,12 +682,102 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
       0
     )
 
-    // 环被截断而非无限：截断者是 **mention 配额**（MAX_MENTIONS_PER_AGENT=5，
-    // serial.ts:678 调度点预留 + :498 执行后计数双计），**不是 depth=10 门**——
+    // 环被截断而非无限：截断者是 **mention 配额**（默认阈值 5，
+    // serial.ts:790 调度点预留 + :649 执行后计数双计），**不是 depth=10 门**——
     // 实测第 8 跳 ds猫 被 `agent-to-agent mention limit filtered` 拦下，此时
     // depth 仅 6，远未触门。护栏作用在 policy.allowed 之后——补边不放宽风暴防护。
     expect(chatStream.mock.calls.length).toBeGreaterThan(1) // 环确实转起来了
     expect(chatStream.mock.calls.length).toBe(7)
+    // T-K：拦截**可见**——抬到 warn（此前 info 级，生产上等于静默丢派）。
+    // `limit` 是计数值不是轮次（双计 ⇒ 5 只够约 3 轮），故连同计数一起断言。
+    expect(logWarn).toHaveBeenCalledWith(
+      'agent-to-agent mention limit filtered',
+      expect.objectContaining({ limit: DEFAULT_MAX_MENTIONS_PER_AGENT, skippedCount: 1 })
+    )
+  }, 60000)
+})
+
+// ═══ A2A 配额阈值可配（T-K） ═══
+
+describe('serial — A2A 配额阈值可配（T-K）', () => {
+  const REVIEWER: AgentConfig = {
+    id: 'agent-reviewer',
+    name: '吐槽猫',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'reviewer',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    const insert = db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
+    )
+    insert.run('agent-reviewer', '吐槽猫', 'reviewer')
+    insert.run('agent-impl', 'ds猫', 'implementer')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', '["agent-reviewer","agent-impl"]', 0)`
+    ).run()
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-1', 'session-1', 'user', '请审查', '[]')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.unstubAllEnvs()
+  })
+
+  it('阈值解析：0 / 负数 / 非法 / 空 → 默认值；正数原样（**不**开放"不限"）', () => {
+    expect(DEFAULT_MAX_MENTIONS_PER_AGENT).toBe(5)
+    expect(resolveMentionLimit(undefined)).toBe(5)
+    expect(resolveMentionLimit('')).toBe(5)
+    expect(resolveMentionLimit('0')).toBe(5) // 与 PROVIDER_TOKEN_CAP 的「0=不限」刻意不同
+    expect(resolveMentionLimit('-3')).toBe(5)
+    expect(resolveMentionLimit('abc')).toBe(5)
+    expect(resolveMentionLimit('1')).toBe(1)
+    expect(resolveMentionLimit('12')).toBe(12)
+  })
+
+  it('MAX_MENTIONS_PER_AGENT=1 → 环更早被拦（3 跳 vs 默认 7 跳）+ 拦截记 warn', async () => {
+    // 隔离 token 池（同既有环截断用例：本用例只验配额，不混排队时序）
+    vi.stubEnv('PROVIDER_TOKEN_CAP', '0')
+    vi.stubEnv('MAX_MENTIONS_PER_AGENT', '1')
+    // 每跳互 @ 对方：reviewer→ds猫→reviewer→…（与既有用例同构，只换阈值）
+    let call = 0
+    const chatStream = vi.fn(async function* () {
+      call++
+      yield { content: call % 2 === 1 ? '@ds猫 继续' : '@吐槽猫 继续', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-limit-1',
+      0
+    )
+
+    // 配额 = 计数 1：调度点预留一次即达阈值 ⇒ 第 2 次 A2A 派发起全被拦。
+    // 实测 3 跳（reviewer 顶层 → ds猫 → reviewer），第 4 跳被 `continue` 拦下。
+    expect(chatStream.mock.calls.length).toBe(3)
+    expect(logWarn).toHaveBeenCalledWith(
+      'agent-to-agent mention limit filtered',
+      expect.objectContaining({ limit: 1, skippedCount: 1, remainingCount: 0 })
+    )
   }, 60000)
 })
 
