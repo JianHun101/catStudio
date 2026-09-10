@@ -58,6 +58,8 @@ export type IngestResult =
 export async function ingestUserMessage(input: IngestInput): Promise<IngestResult> {
   const { sessionId, content } = input
   const mentions = input.mentions ?? []
+  /** 调用方显式传入的锚（REST 注入 / 前端 SEND_MESSAGE / flow-advance 收口提醒）。
+   *  可空——首轮空锚由下方 `anchor` 生成，不再是落库的空值。 */
   const taskId = input.taskId || undefined
   // 图片守卫：必须 data:image/ 前缀、单张 base64 ≤ 3MB、最多 4 张
   // （前端已压缩到最长边 1280，此处仅防滥用）
@@ -69,6 +71,13 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
 
   const msgId = uuid()
   const traceId = uuid() // 贯穿全链路的请求追踪 ID
+  // 链锚（T-E）：首轮锚由服务端生成——显式传入优先，缺省取本轮 traceId。
+  // 旧实现落的是调用方的 `taskId || null`：traceId 早在上一行就生成了却没落列，
+  // 于是链首锚恒为空，而 episodes / flow-advance / recovery / reply 四处消费方
+  // 全按 messages.task_id 查——空锚即静默失配（不是报错，是查不到）。
+  // 锚同时进广播 msg（与落库同源）：下游 reply.ts:822 / serial.ts:790 继承读的
+  // 就是触发消息的 taskId，两处 `|| traceId` 从此只对存量空锚降级，不再是逃生舱。
+  const anchor = taskId || traceId
 
   log.info('message received', {
     traceId,
@@ -100,7 +109,7 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
       effectiveSessionId,
       content,
       mentionsJson,
-      taskId || null,
+      anchor,
       JSON.stringify(images)
     )
   } catch (err: any) {
@@ -140,7 +149,7 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     content,
     images: images.length > 0 ? images : undefined,
     mentions,
-    taskId,
+    taskId: anchor,
     createdAt: new Date().toISOString(),
     ...(isRestartRequest ? { messageType: 'restart_request' as const, restartExpiresAt } : {}),
   }
