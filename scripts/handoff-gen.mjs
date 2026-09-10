@@ -773,11 +773,35 @@ async function alreadyDelivered(serverUrl, sessionId, message) {
 }
 
 /**
+ * 日志措辞：这次反查到底是**怎么**命中的（T-M 取证陷阱修复）。
+ *
+ * 旧实现写的是 `${commitSha ? ', commit_hash 精确匹配' : ''}`——只要调用方传了
+ * commitSha 就无条件打"精确匹配"，**哪怕服务端根本没按 hash 命中、退回了 uuid 反查**。
+ * 于是排障时看到的那行日志正好把"回退猜的"说成"精确匹配的"：归属是猜的，日志说不是。
+ * 现在只认服务端回报的 `matchedBy`，拿不到就**明说不知道**——宁可少说，不可谎报。
+ *
+ * @param {'commit'|'trigger'|undefined} matchedBy — 服务端回报的命中方式
+ * @param {string} [commitSha] — 调用方是否带过 commit
+ * @returns {string} 可直接拼进括号的片段（含前导分隔符，空串表示无需补充）
+ */
+export function describeExecutorMatch(matchedBy, commitSha) {
+  if (matchedBy === 'commit') return ', commit_hash 精确匹配'
+  if (matchedBy === 'trigger') {
+    return commitSha ? ', commit_hash 未命中→回退触发消息反查' : ', 按触发消息反查'
+  }
+  return commitSha ? '，匹配方式未知（服务端未回报 matchedBy）' : ''
+}
+
+/**
  * 反查"实施者"——执行触发消息的 agent 名（交接文档补填人）。
- * GET /api/messages/:uuid/executor?commit=<sha> → { agentName }。
- * 带 commitSha 时服务端按 execution_logs.commit_hash 精确匹配——同 uuid 多
+ * GET /api/messages/:uuid/executor?commit=<sha> → { agentName, taskId, matchedBy, ambiguous }。
+ * 带 commitSha 时服务端**优先**按 execution_logs.commit_hash 精确匹配——同 uuid 多
  * 执行者（一封派活消息触发多只猫）各 commit 各命中各的实施者，根治
- * "取最近开始执行"误指；不带 commitSha（老调用/e2e）退化原 uuid 逻辑。
+ * "取最近开始执行"误指；hash 未命中（老 commit 没写回 hash）或没传 commitSha 时
+ * 回退触发消息反查。回退**不等于**精确命中——措辞按 `matchedBy` 走
+ * （`describeExecutorMatch`）。
+ * 多执行者且消歧不了时服务端回 `ambiguous: true`（agentName 为 null）→ 这里返回
+ * null，调用方兜底 @店长（T-M：**不猜**）。
  *
  * 任何失败都返回 null 而非抛出：补填人反查是增强不是硬依赖——
  * 目标会话反查（resolveCommitSessionId）才是主链，它失败已由调用方 fatal/transient
@@ -809,7 +833,7 @@ export async function resolveExecutorName(serverUrl, uuid, commitSha) {
     const body = await res.json()
     if (body?.agentName) {
       console.log(
-        `[handoff-gen] 实施者: ${body.agentName}（execution_logs 反查${commitSha ? ', commit_hash 精确匹配' : ''}）`
+        `[handoff-gen] 实施者: ${body.agentName}（execution_logs 反查${describeExecutorMatch(body.matchedBy, commitSha)}）`
       )
       const taskId = typeof body.taskId === 'string' && body.taskId ? body.taskId : undefined
       if (taskId) {
@@ -820,6 +844,15 @@ export async function resolveExecutorName(serverUrl, uuid, commitSha) {
         console.log(`[handoff-gen] ⚠️  反查响应缺 taskId——投递时自铸锚（T-F 必改 1）`)
       }
       return { agentName: body.agentName, taskId }
+    }
+    // T-M：有执行行但指不出唯一执行者（同 uuid 多执行者，按 commit 也消歧不了）——
+    // 服务端已明确回报。这是**兜底 @店长**，不是"反查不可用"，日志必须分开，
+    // 否则排障时会把"归属指不出来"误读成"server 挂了"。
+    if (body?.ambiguous === true) {
+      console.log(
+        `[handoff-gen] ⚠️  归属不可消歧（同 uuid 多执行者，commit_hash 也指不出唯一实施者）——兜底 @店长 补填`
+      )
+      return null
     }
     console.log(`[handoff-gen] ⚠️  实施者反查响应缺少 agentName——兜底 @店长 补填`)
   } catch {
@@ -929,22 +962,28 @@ async function verifyOrTransient(serverUrl, sessionId, message) {
  *   ③ **同 uuid 同猫并发另一条在跑**（写回按 agentId 精确命中，落到别人行上）→ 同上。
  * 后两者被判「无归属」→ 钩子多投一条 → 正是 T-A 要止住的「白起一轮」。
  *
- * 判据源 = `GET /api/messages/:id/executor`：其 `triggered_by_message_id` 反查
- * **不带 status 过滤**（`db/repository/executionLogs.ts` `getExecutorNameByTriggeredBy`），
- * 命中即「存在任一状态执行行」——恰是归属的定义。纯 scripts 侧可得的信号，
- * 无需给写回端点加字段（也就无需重启 server）。
+ * 判据源 = `GET /api/messages/:id/executor`：**200 即「存在可反查执行行」**——
+ * 反查不带 status 过滤（`db/repository/executionLogs.ts`），恰是归属的定义。
+ *
+ * ⚠️ T-M 起 `agentName` 非空**不再是**「有执行行」的同义词：同 uuid 多执行者且
+ * 消歧不了时，端点回 **200 + `agentName: null` + `ambiguous: true`**（不是 404 —
+ * 404 在本函数语义里是"无归属"，那会把有归属的 agent 提交判成钩子该兜底 → 多投
+ * 一轮，正是 T-A / T-H 要止住的"白起一轮"）。故这里必须显式认 `ambiguous`：
+ * 它是"有执行行"的**直接证据**（服务端只在有行时才回它）。
  *
  * 与写回响应的关系：写回命中 running 行（`updated > 0`）是归属的**充分条件**，
  * 调用方据此短路、不调本探针；`updated === 0` 才落到这里（三种可能见上）。
  *
  * 三态（③ 降级语义：判据查不动一律投递，不静默吞）：
- *   true  200 且有 agentName → 有归属（存在执行行）→ 不投
- *   false 404               → 无归属（从无执行行）  → 投
+ *   true  200 且有 agentName            → 有归属（存在执行行）→ 不投
+ *   true  200 且 ambiguous === true     → 有归属（存在执行行，只是指不出人）→ 不投
+ *   false 404                           → 无归属（从无执行行）  → 投
  *   null  其他 HTTP / 不可达 / 响应不可解析 → 查不动 → 投
  *
  * 已知窄口径（失败方向安全，不是穷尽）：executor 端点 INNER JOIN agents，agent 行
- * 被删则 404 → 判「无归属」→ 多投一条。多投是本判据的**安全方向**（宁可多投不可漏投），
- * 与 ③ 降级同向，故不为此加路径。
+ * 被删则 404 → 判「无归属」→ 多投一条（`hasExecutorRowsForTrigger` 同口径，T-M 起
+ * 仍如此）。多投是本判据的**安全方向**（宁可多投不可漏投），与 ③ 降级同向，
+ * 故不为此加路径。
  *
  * @param {string} serverUrl
  * @param {string} uuid — commit message 里的 catstudy [uuid]
@@ -958,6 +997,9 @@ export async function probeAttribution(serverUrl, uuid) {
     if (res.status === 404) return false
     if (!res.ok) return null
     const body = await res.json().catch(() => null)
+    // T-M：有执行行但指不出唯一执行者 —— 服务端只在**有行**时才回 ambiguous，
+    // 故它是"有归属"的直接证据（不投）。
+    if (body && body.ambiguous === true) return true
     // 200 但响应缺 agentName（端点契约变了 / 被代理改写）→ 不假装它是「有归属」，
     // 也不假装是「无归属」——查不动，走降级投递。
     return body && typeof body.agentName === 'string' && body.agentName ? true : null
@@ -1115,6 +1157,13 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
         if (Number.isFinite(updated) && updated > 0) {
           attributed = true
           attributionFrom = '写回命中 running 行（充分条件，未打探针）'
+        }
+        // T-M：跨多只猫且没带 agentId 时服务端**拒写**（0 行是"拒写"，不是"没命中"）。
+        // 单独一行日志——两类 0 的后续处置不同（一个去问探针，一个是真没归属线索）。
+        if (body?.skippedAmbiguous === true) {
+          console.log(
+            `[handoff-gen] ⚠️  commit_hash 未写回：同 uuid 多只猫在跑且无 CATSTUDY_AGENT_ID，归属不可消歧——不猜（T-M）`
+          )
         }
         console.log(
           `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}，命中 running 行 ${body?.updated ?? '未知'}）`

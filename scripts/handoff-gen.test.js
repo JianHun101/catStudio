@@ -5,8 +5,14 @@
  * 判据查不动 → 投递（降级语义：宁可多投不可漏投）。
  */
 import { readFileSync } from 'node:fs'
-import { describe, it, expect } from 'vitest'
-import { decideHookDelivery, parseArgs } from './handoff-gen.mjs'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import {
+  decideHookDelivery,
+  parseArgs,
+  resolveExecutorName,
+  probeAttribution,
+  describeExecutorMatch,
+} from './handoff-gen.mjs'
 
 describe('decideHookDelivery — T-A ① 钩子侧归属判据', () => {
   it('有归属执行（agent 执行中提交）→ 不投（实施猫负责主动投递）', () => {
@@ -117,6 +123,107 @@ describe('parseArgs — 未知参数拒绝（必改 2）', () => {
     expect(() => parseArgs([])).not.toThrow()
     expect(() => parseArgs(['--gate-deliver'])).not.toThrow()
     expect(() => parseArgs(['--fallback-sha=' + 'a'.repeat(40), '--cwd=/tmp'])).not.toThrow()
+  })
+})
+
+describe('resolveExecutorName — 措辞不得把「回退」说成「精确匹配」（T-M 取证陷阱）', () => {
+  const origFetch = globalThis.fetch
+  let logs
+
+  const stubFetch = (payload, status = 200) => {
+    globalThis.fetch = vi.fn(async () => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => payload,
+    }))
+  }
+
+  const captureLogs = () => {
+    logs = []
+    vi.spyOn(console, 'log').mockImplementation((...args) => {
+      logs.push(args.join(' '))
+    })
+  }
+
+  afterEach(() => {
+    globalThis.fetch = origFetch
+    vi.restoreAllMocks()
+  })
+
+  it('服务端回报 matchedBy=trigger → 日志写「回退」，绝不出现「精确匹配」（旧实现无条件写「精确匹配」→ 必红）', async () => {
+    captureLogs()
+    stubFetch({ agentName: 'ds猫', taskId: 'anchor-1', matchedBy: 'trigger', ambiguous: false })
+    const who = await resolveExecutorName('http://x', 'uuid-1', 'a'.repeat(40))
+    expect(who?.agentName).toBe('ds猫')
+    const line = logs.find((l) => l.includes('实施者:'))
+    expect(line).toContain('回退触发消息反查')
+    expect(logs.join('\n')).not.toContain('精确匹配')
+  })
+
+  it('服务端回报 matchedBy=commit → 日志写「精确匹配」', async () => {
+    captureLogs()
+    stubFetch({ agentName: 'flash猫', taskId: 'anchor-1', matchedBy: 'commit', ambiguous: false })
+    await resolveExecutorName('http://x', 'uuid-1', 'a'.repeat(40))
+    expect(logs.find((l) => l.includes('实施者:'))).toContain('精确匹配')
+  })
+
+  it('老 server 不回报 matchedBy → 明说「匹配方式未知」，不冒充精确匹配（旧实现必红）', async () => {
+    captureLogs()
+    stubFetch({ agentName: 'ds猫', taskId: 'anchor-1' })
+    await resolveExecutorName('http://x', 'uuid-1', 'a'.repeat(40))
+    const line = logs.find((l) => l.includes('实施者:'))
+    expect(line).toContain('匹配方式未知')
+    expect(logs.join('\n')).not.toContain('精确匹配')
+  })
+
+  it('ambiguous:true → 返回 null（兜底 @店长）且日志与「server 不可达」区分开', async () => {
+    captureLogs()
+    stubFetch({ agentId: null, agentName: null, taskId: null, matchedBy: null, ambiguous: true })
+    const who = await resolveExecutorName('http://x', 'uuid-1', 'a'.repeat(40))
+    expect(who).toBeNull()
+    const joined = logs.join('\n')
+    expect(joined).toContain('归属不可消歧')
+    expect(joined).not.toContain('不可达')
+  })
+
+  it('describeExecutorMatch 的三态措辞（纯函数口径）', () => {
+    expect(describeExecutorMatch('commit', 'a'.repeat(40))).toBe(', commit_hash 精确匹配')
+    expect(describeExecutorMatch('trigger', 'a'.repeat(40))).toContain('回退触发消息反查')
+    expect(describeExecutorMatch('trigger', undefined)).toBe(', 按触发消息反查')
+    expect(describeExecutorMatch(undefined, 'a'.repeat(40))).toContain('匹配方式未知')
+  })
+})
+
+describe('probeAttribution — ambiguous 是「有归属」的直接证据（T-M）', () => {
+  const origFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = origFetch
+    vi.restoreAllMocks()
+  })
+
+  const stub = (payload, status = 200) => {
+    globalThis.fetch = vi.fn(async () => ({ ok: status < 300, status, json: async () => payload }))
+  }
+
+  it('200 + ambiguous:true → true（有执行行 ⇒ 不投，避免白起一轮）', async () => {
+    stub({ agentId: null, agentName: null, taskId: null, matchedBy: null, ambiguous: true })
+    expect(await probeAttribution('http://x', 'uuid-1')).toBe(true)
+  })
+
+  it('404 → false（无执行行）——ambiguous 改判不得把这条既有语义带跑', async () => {
+    stub({}, 404)
+    expect(await probeAttribution('http://x', 'uuid-1')).toBe(false)
+  })
+
+  it('200 有 agentName → true', async () => {
+    stub({ agentName: 'ds猫', matchedBy: 'trigger', ambiguous: false })
+    expect(await probeAttribution('http://x', 'uuid-1')).toBe(true)
+  })
+
+  it('200 但既无 agentName 也无 ambiguous（契约漂移）→ null（查不动，降级投递）', async () => {
+    stub({ matchedBy: null })
+    expect(await probeAttribution('http://x', 'uuid-1')).toBeNull()
   })
 })
 

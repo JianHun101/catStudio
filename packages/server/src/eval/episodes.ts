@@ -6,7 +6,10 @@
  * - episode 锚点 = 根触发消息（role='user'；U 根用户任务 / H 根交接消息，双根语义）
  * - 判定优先级 1-5：running 在途 skip / completed 按 reject·suggest 时序 / 非重启失败归因 /
  *   server_restart 或零执行超窗 abandoned / 其他 unclassified
- * - chain_task_id 从链末 execution_log.trace_id 抄录（G2：不取 messages.task_id，防双值漂移）
+ * - chain_task_id = **链锚** = 根触发消息的 messages.task_id（T-G：全链同锚，下游判词按它 JOIN）。
+ *   原实现抄**链末 execution_log.trace_id**——那是**当轮**执行追踪 id，不是锚：实测 958 条
+ *   执行行里 706 条（73.7%）两者不等，导致真实链 `f352c2e7`（锚 `28aa26c4`）查 0 行，
+ *   而该锚名下实有 17 条消息 + 1 条 suggest 判词 ⇒ 打回检测形同不存在（G2 已被 T-E 推翻）。
  * - 零执行扫描：role='user' > 30min 无 execution_log 引用 → abandoned（chain_task_id=NULL，G2-N5）
  * - G3 三阶 H 根判定（task_id 匹配既有 episode / N9 内容特征精确前缀 / U 已知噪声兜底）
  */
@@ -14,6 +17,7 @@
 import { v4 as uuid } from 'uuid'
 import { getDb } from '../db/index.js'
 import type { ExecutionLogRow } from '../db/repository/types.js'
+import { getChainRejectionsSince } from './chain-verdicts.js'
 
 /** 判定规则版本号（P5 全量重评承重：规则升级时改此常量，全量 upsert 重评覆盖历史结局） */
 export const EPISODE_CLASSIFICATION_VER = 'v2.1'
@@ -107,8 +111,33 @@ export function collectChain(rootMsgId: string): ExecutionLogRow[] {
   return chain
 }
 
-/** 链末 trace_id 抄录（G2-残留 A：锚定源钉死 execution_logs.trace_id，不取 messages.task_id） */
-function chainTaskId(chain: ExecutionLogRow[]): string | null {
+/**
+ * 链锚（T-G）：**优先**取根触发消息的 `messages.task_id`。
+ *
+ * 锚由 ingest 在首轮显式落库（`anchor = taskId || traceId`），链内每条消息
+ * （含 agent 回复，reply.ts `triggerMsg.taskId`）继承同一个值 ⇒ 全链同锚。
+ *
+ * 为什么不取链末执行行的 `trace_id`：那是**当轮**追踪 id，全链每轮各不相同
+ * （实测 958 条执行行里 706 条两者不等），拿它 JOIN `messages.task_id` 常是空集
+ * ——真实链 `f352c2e7`（根锚 `28aa26c4`）按旧值查 0 行，按锚查命中 17 条消息 + 1 条 suggest 判词。
+ *
+ * 存量降级（pre-T-E 落库的链，根 `task_id` 为 NULL）：退到旧近似值（链末执行行的
+ * `trace_id`）。**实测代价**：全库 540 条链上判词命中「按锚 3 增 / 4 失」，
+ * 4 条失的全是这种 NULL 锚存量链（`3fee9a56` / `e2a9338d` / `4bb97d3a` / `b8961220`，均 2026-08/09 落库）。
+ * 退化的理由：**不为修一个缺口制造另一个缺口**；且这批数据不会被重写，降级路径随
+ * 存量自然退场。代价是链锚列在存量行上可能仍是「当轮锚」而非「全链锚」——
+ * 该歧义已在 `tg-audit.md` 面②记账，新链不受影响。
+ */
+function chainAnchor(
+  rootMsg: Pick<RootMessageRow, 'task_id'>,
+  chain: ExecutionLogRow[]
+): string | null {
+  if (rootMsg.task_id) return rootMsg.task_id
+  return legacyTailTrace(chain)
+}
+
+/** 旧近似值（T-G 前 `chainTaskId` 的全部实现）——仅存量 NULL 锚链降级用 */
+function legacyTailTrace(chain: ExecutionLogRow[]): string | null {
   let tail = chain[0]
   for (const l of chain) {
     if ((l.started_at ?? '') > (tail.started_at ?? '')) tail = l
@@ -129,24 +158,13 @@ function latestCompletedAt(chain: ExecutionLogRow[]): string | null {
 
 // ─── 判定优先级 1-5 ───────────────────────────────────
 
-/** 判定 2：completed 存在 → 按 reject/suggest 时序判结局（G2 + N1） */
+/** 判定 2：completed 存在 → 按 reject/suggest 时序判结局（G2 + N1；锚源 T-G 修正） */
 function classifyCompleted(chain: ExecutionLogRow[], rootMsg: RootMessageRow): EpisodeOutcome {
-  const taskId = chainTaskId(chain)
-  // chain_task_id 为空（存量空串 trace_id 已知噪声）→ 跳过 verdict 关联，不参与打回判定
-  const verdicts = taskId
-    ? (getDb()
-        .prepare(
-          `SELECT v.verdict, v.created_at
-           FROM review_verdicts v
-           JOIN messages m ON m.id = v.message_id
-           WHERE m.task_id = ? AND m.session_id = ? AND v.created_at > ? AND v.verdict IN ('reject', 'suggest')
-           ORDER BY v.created_at DESC`
-        )
-        .all(taskId, rootMsg.session_id, rootMsg.created_at) as Array<{
-        verdict: string
-        created_at: string
-      }>)
-    : []
+  // 锚为空只可能发生在「链上一条执行行都没有」——判定 2 已保证有 completed 行，
+  // 故此处 anchor 必非空。真正要区分的是「有锚但查无打回」（success，正常）与
+  // 「查询未命中」（同判 success 但 chain_task_id 落库可查，见 D2 记账）。
+  const anchor = chainAnchor(rootMsg, chain)
+  const verdicts = getChainRejectionsSince(anchor, rootMsg.session_id, rootMsg.created_at)
   if (verdicts.length === 0) return 'success'
   // 最近一次 reject/suggest 审查时间（DESC 首行）；N1：比较对象钉死最近打回
   const lastRejectAt = verdicts[0].created_at
@@ -293,7 +311,7 @@ export function scanZeroExecutionEpisodes(): number {
       rootTriggeredBy: by,
       rootMessageId: row.id,
       taskId: row.task_id,
-      chainTaskId: null, // G2-N5：零执行场景无链末 trace_id 可抄录
+      chainTaskId: null, // G2-N5：零执行场景无执行链，无锚可抄录（根消息自己的 task_id 已在 taskId 列）
       sessionId: row.session_id,
       outcome: 'abandoned',
       episodeState: 'classified',
@@ -386,7 +404,7 @@ export function classifyEpisodes(): { upserted: number; open: number } {
       rootTriggeredBy: by,
       rootMessageId: root.id,
       taskId: root.task_id,
-      chainTaskId: chainTaskId(chain),
+      chainTaskId: chainAnchor(root, chain),
       sessionId: root.session_id,
       outcome,
       episodeState: state,

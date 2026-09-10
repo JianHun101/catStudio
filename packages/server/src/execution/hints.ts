@@ -13,7 +13,8 @@ import {
   escapeRegExpLiteral,
   reviewMarkerLabel,
 } from '../eval/review-verdict-markers.js'
-import type { ReviewVerdictMarker } from '../eval/review-verdict-markers.js'
+import type { ReviewVerdict, ReviewVerdictMarker } from '../eval/review-verdict-markers.js'
+import { getLatestChainVerdict } from '../eval/chain-verdicts.js'
 
 /**
  * 取**最后出现**的判词标记（审查结论总在消息末尾，正文可能引用/讨论这些标记）。
@@ -87,26 +88,50 @@ export function formatAgentMessage(
  *   - role === 'reviewer' → 审查者
  *   - 其他 role（store/implementer/vision/unknown）→ coder（需要被审查）
  *
- * 结论判断基于 IRON_LAWS_REVIEWER 强制输出的结构化标记：
+ * 结论判断（T-G §7 根修）：
  *   - ✅可合并 / 💬仅评论 → 通过，循环结束（💬 非阻断 = 不要求返工，故不注入
  *     循环指令；T-C 判词三档）
  *   - ⚠️建议修改 / ❌需重做 → 需要继续循环
  *
+ * **权威路径 = 按链锚查最新判词**（`eval/chain-verdicts.ts`）。原实现只看
+ * 「可见窗口里最近一条审查者消息」——而 ✅/💬 按分流规则只投店长，进不了实施猫的
+ * 窗口 ⇒ 唯一能进窗口的那条陈旧 ⚠️（对象 `94742a2`，早已修于 `a1200a7`）被**无限重放**，
+ * 实施猫修完后仍被持续要求「逐项处理反馈」，直到它自然老出窗口才停。
+ * 窗口是近似值，判词的权威在库里，按锚查才对得上「这条链现在还有没有待返工」。
+ *
+ * 降级路径（无判词行 = 无锚存量链 / 审查回复未解析出标记）：退回窗口扫描。
+ * 保留它是为了不把「审查者没打标记」的链判成「无需返工」——那条链仍需循环指令。
+ * 两条路径共用同一个指令模板（`loopInstruction`），且测试断言「同输入下两路径输出逐字相等」。
+ *
+ * @param chain 链上下文：`anchor` = 触发本轮的链锚（`messages.task_id`，缺省 = 存量无锚）；
+ *   `sessionId` = 会话（判词查询作用域）
  * @returns 系统指令字符串，不需要时返回 null
  */
 export function buildReviewLoopHint(
-  agent: { name: string; role?: string },
+  agent: { id?: string; name: string; role?: string },
   relevantMessages: Array<{
     role: string
     agent_id: string | null
     content: string
     mentions: string | null
-  }>
+  }>,
+  chain: { anchor: string | undefined; sessionId: string }
 ): string | null {
   // 审查者自己不需要被注入（role === 'reviewer' 的 agent 是审查者）
   if (agent.role === 'reviewer') return null
 
-  // 找最近一条来自审查者且 @mention 当前 agent 的消息
+  // ① 权威路径：按锚查该链**最新**判词
+  const latest = getLatestChainVerdict(chain.anchor, chain.sessionId)
+  if (latest) {
+    // 判词对象不是本猫 → 这条结论不该驱动本猫。subject 为空（解析降级档）时
+    // 无从归属 → 按「可能是我」处理，不因归属信息缺失而漏注入。
+    if (latest.subject_agent_id && agent.id && latest.subject_agent_id !== agent.id) return null
+    if (latest.verdict === 'approve' || latest.verdict === 'comment') return null
+    const reviewerName = agentsRepo.getAgentNameById(latest.reviewer_agent_id) ?? '审查者'
+    return loopInstruction(reviewerName, verdictLabel(latest.verdict))
+  }
+
+  // ② 降级路径：窗口扫描（语义与原实现一致）
   for (let i = relevantMessages.length - 1; i >= 0; i--) {
     const m = relevantMessages[i]
     if (m.role !== 'agent' || !m.agent_id) continue
@@ -127,16 +152,25 @@ export function buildReviewLoopHint(
     if (marker && (marker.verdict === 'approve' || marker.verdict === 'comment')) return null
 
     // 审查未通过（⚠️建议修改 / ❌需重做 / 无明确结论）→ 注入循环指令
-    const reviewerName = senderRow.name
-    const verdict = marker ? reviewMarkerLabel(marker) : '未给出明确结论'
-    return [
-      `[系统指令] ${reviewerName} 的审查结论为 ${verdict}。`,
-      `你必须逐项处理反馈，修正完成后在行首独占一行 @${reviewerName} 继续审查循环。`,
-      `只有收到 ✅可合并 时才能结束回复。`,
-    ].join(' ')
+    return loopInstruction(senderRow.name, marker ? reviewMarkerLabel(marker) : '未给出明确结论')
   }
 
   return null
+}
+
+/** 判词枚举 → 规范显示形态（走标记表，不另立字面量；表外值保留原始枚举名） */
+function verdictLabel(verdict: ReviewVerdict): string {
+  const marker = REVIEW_VERDICT_MARKERS.find((m) => m.verdict === verdict)
+  return marker ? reviewMarkerLabel(marker) : verdict
+}
+
+/** 循环指令正文（两条路径共用同一模板——口径分叉会变成下一个分歧点） */
+function loopInstruction(reviewerName: string, verdict: string): string {
+  return [
+    `[系统指令] ${reviewerName} 的审查结论为 ${verdict}。`,
+    `你必须逐项处理反馈，修正完成后在行首独占一行 @${reviewerName} 继续审查循环。`,
+    `只有收到 ✅可合并 时才能结束回复。`,
+  ].join(' ')
 }
 
 /**
@@ -222,17 +256,18 @@ export function resolveRolePlaceholders(prompt: string, triggerAuthorName?: stri
  * 新场景只需加一行调用，无需改动 runAgentReply 主流程。
  */
 export function buildDynamicHints(
-  agent: { name: string; role?: string },
+  agent: { id?: string; name: string; role?: string },
   triggerContent: string,
   relevantMessages: Array<{
     role: string
     agent_id: string | null
     content: string
     mentions: string | null
-  }>
+  }>,
+  chain: { anchor: string | undefined; sessionId: string }
 ): string[] {
   return [
-    buildReviewLoopHint(agent, relevantMessages),
+    buildReviewLoopHint(agent, relevantMessages, chain),
     buildHandoffTriggerHint(triggerContent),
     buildTriggerFocusHint(triggerContent),
   ].filter((h): h is string => h !== null)

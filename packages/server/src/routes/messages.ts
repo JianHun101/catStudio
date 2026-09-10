@@ -42,6 +42,16 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
    * （老 commit 未写回 hash）回退 uuid 逻辑；无执行记录 404。
    * 回传的 `taskId` = **链锚**（该消息的 `messages.task_id`，T-I）——调用方把它当
    * 下一份交接文档的锚，**不是**当轮 `execution_logs.trace_id`。
+   *
+   * T-M 起回传两个新字段：
+   * - `matchedBy`：`'commit'`（hash 精确命中）/ `'trigger'`（回退触发消息反查）/
+   *   `null`（指不出人）。**调用方必须按它措辞**——旧实现在有 commitSha 时无条件打印
+   *   "commit_hash 精确匹配"，回退命中也被说成精确命中，排障时把假归属当真归属读。
+   * - `ambiguous`：`true` = **有可反查执行行但指不出唯一执行者**（同 uuid 多执行者，
+   *   且按 commit 也消歧不了）。此时 **200 + `agentName: null`**，不是 404——
+   *   404 在调用方（`probeAttribution`）语义里是"该 uuid 无执行行 ⇒ 无归属 ⇒
+   *   钩子兜底投递"，把"指不出人"报成 404 会让有归属的 agent 提交被多投一轮
+   *   （T-A / T-H 要止住的"白起一轮"）。无执行行仍 404，语义不变。
    */
   app.get('/api/messages/:id/executor', async (req, reply) => {
     const { id } = req.params as { id: string }
@@ -49,11 +59,22 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'id is required' })
     }
     const { commit } = req.query as { commit?: string }
-    const executor = commit
-      ? (execLogsRepo.getExecutorNameByCommitHash(commit) ??
-        execLogsRepo.getExecutorNameByTriggeredBy(id))
-      : execLogsRepo.getExecutorNameByTriggeredBy(id)
+    let executor = commit ? execLogsRepo.getExecutorNameByCommitHash(commit) : undefined
+    let matchedBy: 'commit' | 'trigger' | null = executor ? 'commit' : null
     if (!executor) {
+      executor = execLogsRepo.getExecutorNameByTriggeredBy(id)
+      if (executor) matchedBy = 'trigger'
+    }
+    if (!executor) {
+      if (execLogsRepo.hasExecutorRowsForTrigger(id)) {
+        return reply.send({
+          agentId: null,
+          agentName: null,
+          taskId: null,
+          matchedBy: null,
+          ambiguous: true,
+        })
+      }
       return reply.status(404).send({ error: 'No execution log for this message' })
     }
     // taskId = **链锚**，取该消息行的 `messages.task_id`（T-I：一跳 JOIN，与 executor 同源）。
@@ -65,6 +86,8 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       agentId: executor.agent_id,
       agentName: executor.name,
       taskId: executor.task_id || null,
+      matchedBy,
+      ambiguous: false,
     })
   })
 
@@ -75,7 +98,11 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
    * "取最近"误指。写回后同 uuid 双执行者各 commit 各命中各的实施者。
    * 可选 body.agentId：handoff-gen 从 CATSTUDY_AGENT_ID（claude.ts spawn env
    * 注入，post-commit 父进程链继承）透传——双 running 行按 agent_id 精确命中
-   * 自己的行，根治 eae5a5e 错投竞态；不带则 fallback 全刷 running（手动提交）。
+   * 自己的行，根治 `eae5a5e` **实害化**的错投竞态（`eae5a5e` 是该 sha 的改动
+   * 本身 = handoff-gen 审查须知绝对引用唯一化，**不是**本竞态的修复；按 agent_id
+   * 精确化的根治是 `0fe8292`）。不带 agentId 则 fallback 全刷 running（手动提交），
+   * 但**跨多只猫时拒写**（T-M，见 `executionLogs.ts` 同名函数）——此时 update=0
+   * 且回 `skippedAmbiguous: true`，调用方据此知道"没写"而不是"写不到"。
    * 写回失败不阻断投递（反查增强不是硬依赖，失败退化 uuid 逻辑 + 兜底店长）。
    */
   app.post('/api/messages/:id/commit-hash', async (req, reply) => {
@@ -92,6 +119,17 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const result = agentId
       ? execLogsRepo.updateRunningExecutionCommitHash(id, commitHash, agentId)
       : execLogsRepo.updateRunningExecutionCommitHash(id, commitHash)
+    // T-M：无 agentId 且该 uuid 的 running 行跨多只猫 → 归属不可消歧，写回侧拒写。
+    // 不静默（T-K 的口径：拦截必须可观测），且在响应里给判别位——调用方据此区分
+    // "拒写"（归属真的指不出来）与"没有命中行"（执行已终态等）。
+    if (result.skippedAmbiguous) {
+      log.warn('commit-hash write-back skipped — executor ambiguous', {
+        id,
+        commitHash,
+        distinctRunningAgents: '>1',
+        reason: '同 uuid 多只猫在跑且未带 agentId，无法指认提交者（T-M）',
+      })
+    }
     // 契约③ 状态机入口（T5）：commit 写回 execution 后，记该 commit 进入主干道——
     // 入口状态=quality-gate（作者已完成自查、审查链即将由 handoff-gen 触发 request-review）。
     // 只记事实、不驱动审查（hook 仍为准）；完整闭环推进（verdict 推进/恰好一次去重）归 T6。
@@ -119,7 +157,11 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
         })
       }
     }
-    return reply.send({ ok: true, updated: result.changes })
+    return reply.send({
+      ok: true,
+      updated: result.changes,
+      skippedAmbiguous: result.skippedAmbiguous,
+    })
   })
 
   /**

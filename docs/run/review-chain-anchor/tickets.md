@@ -536,6 +536,90 @@ limit filtered')`）。生产上 info 级没人看 ⇒ 从观感与排障面看�
 
 ---
 
+### T-M｜归属反查「消歧失败不得猜」+ 三写一读收窄（2026-09-10 新立）
+
+**交付**：`execution_logs` 的归属反查在**指不出唯一执行者**时返回"无结论"而非猜一个；三条写路径不得制造
+"跨 agent 同 hash"这种不可消歧的归属；`/executor` 回报**匹配方式**，杜绝"回退命中被说成精确命中"。
+
+**缺陷（实证，非推论；件 1 合成单变量实验，`packages/server/src/db/repository/executionLogs.test.ts` 头注存读数）**：
+
+fixture：一条触发消息 U + 三条执行行 `e0`(flash, completed) / `e1`(flash, running) / `e2`(ds, running)。
+
+| 路  | 调用                                                                   | 命中行数                      | 反查返回                                        |
+| --- | ---------------------------------------------------------------------- | ----------------------------- | ----------------------------------------------- |
+| A   | `updateRunningExecutionCommitHash(U, SHA)`（无 agentId）               | **2**（e1,e2）                | —                                               |
+| B   | 同法**带** agentId                                                     | 1（各中自己的行）             | 各 commit 各命中作者 ✓                          |
+| C   | `updateExecutionLogCommitHash(U, SHA)`（`serial.ts` depth=0 自动提交） | **3**（**ended 行 e0 被盖**） | 该函数返回 `void`，调用方拿不到行数             |
+| D   | `getExecutorNameByCommitHash(SHA)`（A 之后）                           | —                             | **ds猫**（`started_at` 靠后者，与真实作者无关） |
+| D   | `getExecutorNameByTriggeredBy(U)`（A 之后）                            | —                             | **ds猫**（同上）                                |
+
+⇒ 判据「**A 命中 2 行 ⇒ 全刷子因成立，写侧一并收窄**」**成立**。
+
+1. **反查回退猜而非拒（本条主病灶）**：`getExecutorNameByTriggeredBy` / `getExecutorNameByCommitHash`
+   都靠 `ORDER BY started_at DESC LIMIT 1` 收口 —— 一旦同 uuid 有两只猫在执行（店长一条消息派两单的
+   **常态**），"谁是提交者"这个信息在读侧**根本不存在**，却被一个排序**冒充**成存在（D 路读数：返回的
+   是"谁后开始"，与"谁提交"无关）。调用方 `handoff-gen` 拿它当补填人 ⇒ 交接文档**误投**。
+2. **取证陷阱：回退命中被无条件说成"精确匹配"**（`scripts/handoff-gen.mjs:811-813` 的 `console.log` 块，
+   模板串在 `:812`；grep 复核的是 **HEAD 版行号**，本单落地后该块为 `:826-830`）：
+   `` `[handoff-gen] 实施者: ${body.agentName}（execution_logs 反查${commitSha ? ', commit_hash 精确匹配' : ''}）` ``
+   —— 只要调用方带过 commitSha 就打"精确匹配"，**哪怕服务端根本没按 hash 命中、退回了 uuid 反查**。
+   归属是猜的，日志说不是：排障时按"精确匹配"这条线索去查，方向从一开始就错。
+3. **第三写者（`execution/serial.ts` depth=0 自动提交）**：`updateExecutionLogCommitHash` 无 `status`/agent
+   过滤，把**本轮自动提交**的 sha 刷到该触发消息的**全部**执行行（C 路读数：3 行含 ended 行），且返回
+   `void` —— 调用方连"写了几行"都看不见。它同样制造跨 agent 同 hash（⇒ 读侧只能猜）。
+
+**修法（形状已裁 + 一处按实测改判，见下）**：
+
+- **读侧消歧失败不得猜**：两个反查函数改为**跨 agent 多行 ⇒ `undefined`**。判据取 **distinct agent**
+  而非行数（同 agent 多行 = 重试，执行者是确定的，按行数拒会把"同一只猫重试"误判成歧义、白丢归属；
+  返回值仍取该 agent 最近一行）。
+- **写侧不得制造不可消歧的归属**：
+  - `updateRunningExecutionCommitHash` 无 agentId 分支：该 uuid 的 **running 行跨 >1 只猫 ⇒ 拒写**
+    （`changes: 0` + `skippedAmbiguous: true`）；带 agentId 的精确分支不受影响。
+  - `updateExecutionLogCommitHash`：同一规则（**执行行跨 >1 只猫 ⇒ 拒写**）。
+- **失败语义分两种、不得混报**：`/executor` 新增 `matchedBy`（`commit` / `trigger` / `null`）与
+  `ambiguous`；**"有执行行但指不出人"回 200 + `agentName: null` + `ambiguous: true`，不是 404** ——
+  404 在调用方 `probeAttribution` 语义里是"无归属 ⇒ 钩子兜底投递"，把"指不出人"报成 404 会让**有归属的
+  agent 提交被多投一轮**（正是 T-A / T-H 要止住的形态）。无执行行仍 404（`hasExecutorRowsForTrigger`
+  与反查同 INNER JOIN 口径，"删 agent ⇒ 404 ⇒ 多投"的既有安全方向不变）。
+- **措辞按服务端回报走**：`handoff-gen` 新增 `describeExecutorMatch(matchedBy, commitSha)`；**老 server
+  不回报 matchedBy 时明说"匹配方式未知"**，不冒充精确匹配。
+
+**⚠️ 一处按实测改判（与派活单验收②的字面实现不同，请审查者/店长裁决）**：派活单验收② 期望「收窄 C：ended +
+running 两行 → 旧实现盖 2 条、新实现只 1 条」（字面实现 = 给 C 加 `status='running'` 过滤）。
+**实测该字面实现是恒空操作，不是收窄**：C 的唯一调用点（`serial.ts` depth=0 收尾块）在所有 `execute()`
+**返回之后**执行，而每个 execute 的收口漏斗（`execute` → `executeRun` → `finalizeRun` →
+`completeExecution` → `finalizeExecutionLog`）**已在返回前把行置终态** —— 加 running 过滤 ⇒ 恒 0 行 ⇒
+这条路径被**废掉**而非收窄（且其注释本意就是"本轮**所有**相关日志"）。故 C 的收窄点改为**同一消歧规则**
+（跨 agent 拒写），保留单猫轮次的 round 快照语义（含 ended 行）。该判断为**代码路径阅读**所得，非运行期
+实测，已在测试里以 `updateExecutionLogCommitHash — 单 agent → 照写，已终态行一并覆盖` 固化并写明理由。
+
+**验收（须含区分性；「必红」= 剥掉本单改动后该断言在旧实现下的结果）**：
+
+- [x] ① 合成 A 场景：跨 agent running → `changes=0` + `skippedAmbiguous=true` + 两行 hash 仍 NULL
+      （**旧实现 `changes=2`** —— 区分性实证：把 HEAD 版 `executionLogs.ts` 逐字复制成 legacy 模块、
+      同 fixture 同断言跑出 `A=2 / D=ds猫 / C=3`，与旧读数**逐个吻合**，跑完即删）
+- [x] ② 读侧：跨 agent 同 hash / 跨 agent uuid → `undefined`
+      （**旧实现返回 ds猫**，即 `started_at` 靠后者）
+- [x] ③ `handoff-gen` 措辞：服务端回报 `matchedBy=trigger` 或**不回报**时，日志**不出现"精确匹配"**
+      （**旧实现无条件打印"精确匹配"** —— HEAD 原文见上「缺陷 2」，模板里 `commitSha ? ... : ''` 与
+      实际命中方式无关）
+- [x] ④ 阴性对照：同一 agent 多行（重试）**不误拒**；`/executor` 无 commit 仍 `matchedBy='trigger'`；
+      404（无执行行）语义不变；`probeAttribution` 的 `ambiguous ⇒ true`（有归属 ⇒ 不投）与
+      `404 ⇒ false`（无归属 ⇒ 投）两向都未带跑
+- [x] ⑤ 「有行但指不出人」不报 404（否则 `probeAttribution` 判"无归属"→ 钩子多投一轮）——
+      路由级断言 `ambiguous: true` + 200
+- [x] ⑥ 写侧拒写可观测：`routes/messages.ts` / `serial.ts` 两处 `log.warn`（`skippedAmbiguous`），
+      响应体带判别位（T-K 口径：**拦截不得静默**）
+
+**边界**：`db/repository/executionLogs.ts` · `routes/messages.ts` · `execution/serial.ts` ·
+`scripts/handoff-gen.mjs` · `docs/run/review-chain-anchor/tickets.md`（本文件本轮归 flash猫独占）。
+`handoff-gen.e2e.mjs` **未动**（派活单边界外）；验收③ 的区分性落在 `handoff-gen.test.js` 单测面。
+
+**Blocked by**：无。**归口 flash猫**（读侧 + 路由 + serial 写回 + handoff-gen 措辞）。
+
+---
+
 ## 依赖图
 
 ```
@@ -549,6 +633,8 @@ limit filtered')`）。生产上 info 级没人看 ⇒ 从观感与排障面看�
   T-J 交接去重判据自击穿（独立，无前置——`dispatch/index.ts`，随整批重启）
   T-K A2A 配额静默丢派（独立，无前置——`execution/serial.ts`，随整批重启）
   T-L 判词 marker 空格零容忍（独立，无前置——`eval/verdict-parser.ts` + `execution/hints.ts`，随整批重启）
+  T-M 归属反查消歧（独立，无前置——`db/repository/executionLogs.ts` + `routes/messages.ts`
+      + `execution/serial.ts` + `scripts/handoff-gen.mjs`，随整批重启）
 ```
 
 **跨阶段无硬依赖**：阶段一的「已投递」判据用 `mentions` 启发式，不依赖锚 → T-A 可立即开工。阶段二落地后应收紧为锚判据。

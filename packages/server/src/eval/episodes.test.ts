@@ -271,27 +271,52 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
     expect(getEpisode(rootId)!.outcome).toBe('corrected_success')
   })
 
-  it("②''' 用户 taskId vs traceId 双值：chain_task_id 从 execution_logs 抄录（非 task-123），reject 仍关联到", () => {
+  it("②''' 锚源修正（T-G）：chain_task_id = 根消息 task_id（非链末 trace），reject 按锚关联到", () => {
+    // **本条即 T-G 验收① 的区分性用例**：fixture 刻意让「锚」与「链末 trace」不等
+    // （真实库实测 706/958 执行行如此），且判词消息挂在**锚**上——
+    // 旧实现（chain_task_id = 链末 trace_id = 'trace-B'）下按 'trace-B' 查判词 0 行
+    // → 误判 success，下面三处断言必红。
     const rootId = insertRootMessage({
       id: 'msg-root',
-      task_id: 'task-123',
+      task_id: 'anchor-A',
       created_at: sqliteNow(60),
     })
     insertExecution({
       triggered_by: rootId,
       status: 'completed',
-      trace_id: 'trace-B',
+      trace_id: 'trace-B', // 当轮追踪 id ≠ 锚（非同一个值，旧实现正是拿它去 JOIN）
       started_at: sqliteNow(50),
       ended_at: sqliteNow(45),
     })
-    // 审查链带 traceId（非用户 task-123）——若从 messages.task_id 抄录则 JOIN 永不匹配 → 误判 success
-    insertVerdict({ task_id: 'trace-B', verdict: 'reject', created_at: sqliteNow(40) })
+    // 判词消息 task_id = 链锚（T-E 后 agent 回复继承触发消息的 task_id）
+    insertVerdict({ task_id: 'anchor-A', verdict: 'reject', created_at: sqliteNow(40) })
 
     classifyEpisodes()
     const ep = getEpisode(rootId)
-    expect(ep!.chain_task_id).toBe('trace-B')
-    expect(ep!.chain_task_id).not.toBe('task-123')
+    expect(ep!.chain_task_id).toBe('anchor-A')
+    expect(ep!.chain_task_id).not.toBe('trace-B')
     expect(ep!.outcome).toBe('needs_investigation')
+  })
+
+  it("②'''' 锚为空的存量链（pre-T-E）：退到链末 trace 近似值，判词仍关联（降级不制造新缺口）", () => {
+    // 实测：全库 540 条链上判词命中「按锚 3 增 / 4 失」，4 条失的全是根 task_id 为 NULL
+    // 的存量链（`3fee9a56` 等）。降级路径保住这 4 条——旧近似值只在**没有锚**时启用。
+    const rootId = insertRootMessage({ id: 'msg-root-legacy', created_at: sqliteNow(60) }) // task_id 缺省 NULL
+    insertExecution({
+      triggered_by: rootId,
+      status: 'completed',
+      trace_id: 'trace-legacy',
+      started_at: sqliteNow(50),
+      ended_at: sqliteNow(45),
+    })
+    insertVerdict({ task_id: 'trace-legacy', verdict: 'suggest', created_at: sqliteNow(40) })
+
+    classifyEpisodes()
+    const ep = getEpisode(rootId)
+    expect(ep!.chain_task_id).toBe('trace-legacy')
+    expect(ep!.outcome).toBe('needs_investigation')
+    // 对照：有锚的链不因「链末 trace 恰好也是某条消息的 task_id」而劫持锚
+    expect(ep!.chain_task_id).not.toBeNull()
   })
 
   it('③ suggest + completed 晚于最近 suggest → corrected_success', () => {

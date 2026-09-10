@@ -109,6 +109,45 @@ describe('execution/flow-advance — 契约③ X2 闭环', () => {
     expect(getFlowState(SESSION, SHA)?.state).toBe('closed')
   })
 
+  it('同一链第二条判词 → 提醒仍投出（不被 (session, sha) 记账吞掉，T-G bug B 后半）', () => {
+    // **本条即 T-G 验收③ 的区分性用例**：两条**不同**判词消息解析到**同一个** commit
+    // （sha 反查 1 trace→1 commit 残留缺陷下，后一轮判词恒落到已 closed 的 sha）。
+    // 旧实现把提醒挂在 `advanced` 上 → 第 2 条撞已 closed ⇒ 提醒永久不投且不报错：
+    // 断言 2 条时旧实现给 1 条，**必红**。
+    getDb().prepare(`UPDATE sessions SET agent_ids = '["agent-store"]' WHERE id = ?`).run(SESSION)
+    const msg1 = seedReviewContext({ taskId: TRACE, commitHash: SHA })
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES ('msg-2', ?, 'agent', '💬仅评论', '[]', ?)`
+      )
+      .run(SESSION, TRACE)
+
+    advanceFlowAfterVerdict({
+      messageId: msg1,
+      sessionId: SESSION,
+      verdict: 'approve',
+      targets: [],
+    })
+    advanceFlowAfterVerdict({
+      messageId: 'msg-2',
+      sessionId: SESSION,
+      verdict: 'comment',
+      targets: [],
+    })
+
+    const notices = getDb()
+      .prepare(
+        `SELECT content FROM messages
+         WHERE session_id = ? AND role = 'user' AND content LIKE '%契约③·状态机兜底%'
+         ORDER BY rowid`
+      )
+      .all(SESSION) as Array<{ content: string }>
+    expect(notices.length).toBe(2)
+    // 复核状态机本身仍幂等：closed 是终态，不因第二条判词重复推进
+    expect(getFlowState(SESSION, SHA)?.state).toBe('closed')
+  })
+
   it('approve 且判定式收口未投 → closeout 提醒真正投递（@店长 消息落库 + 源链 task_id）', () => {
     // 会话成员含 store 猫——投递目标可解析（其余用例 agent_ids='[]' 走不投递路径）
     getDb().prepare(`UPDATE sessions SET agent_ids = '["agent-store"]' WHERE id = ?`).run(SESSION)

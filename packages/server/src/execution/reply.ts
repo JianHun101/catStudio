@@ -77,6 +77,43 @@ const HEARTBEAT_INTERVAL_MS = 10_000
 const MAX_TOOL_IO_CHARS = 4000
 
 /**
+ * 同锚（`messages.task_id`）历史回捞上界（T-G 验收④）——两个维度同时生效，
+ * 超出丢**最旧**。单位：`TASK_HISTORY_MAX_MESSAGES` = 条，`TASK_HISTORY_BUDGET_TOKENS` = token。
+ *
+ * 条数取 30：病灶实测单锚名下 20 条，30 是「不再无界」的护栏而非精确阈值；
+ * token 预算 12000 与 `context.ts` 的 `SUMMARY_KEEP_TOKENS`（30k）同量级但更小——
+ * 同锚历史是**附加**上下文，不该与摘要后的保留原文抢同一份预算。
+ */
+export const TASK_HISTORY_MAX_MESSAGES = 30
+export const TASK_HISTORY_BUDGET_TOKENS = 12_000
+
+/**
+ * 同锚历史截取（纯函数，T-G 验收④）——时间正序进、时间正序出。
+ *
+ * 从**最新**往回累加 token（与 summary 层 `applySummaryReplace` 同向）：丢的是最旧的
+ * 噪声，不是链首任务书。单条即超预算时仍保该条（宁超预算不丢最新，同款启发式）。
+ * `excludeIds` = 已在近期窗口里的消息（不重复注入）。
+ */
+export function selectTaskHistory<T extends { id: string; content: string }>(
+  ascendingMsgs: T[],
+  excludeIds: Set<string>,
+  budgetTokens: number
+): T[] {
+  let budget = budgetTokens
+  const kept: T[] = []
+  for (let i = ascendingMsgs.length - 1; i >= 0; i--) {
+    const m = ascendingMsgs[i]
+    if (excludeIds.has(m.id)) continue
+    const t = estimateTokens(m.content) + 50 // role 前缀开销（与 preTruncation 同口径）
+    if (kept.length > 0 && t > budget) break
+    budget -= t
+    kept.push(m)
+  }
+  kept.reverse()
+  return kept
+}
+
+/**
  * 累积流式分段：同类相邻合并（text 后 text 追加、thinking 后 thinking 追加），
  * 切换 kind 时 push 新段——前端按 kind 渲染折叠块，结构不依赖 [思考] 文本标记。
  * tool kind 不在此合并（多状态推进需按 id 关联，见 mergeToolSegment）。
@@ -189,22 +226,37 @@ export async function runAgentReply(
   allMessages.reverse()
 
   // 加载同一 taskId 的完整历史（跨越消息加载限制，按 token 预算合并）
+  // T-G 验收④：回捞**上界**——原实现无任何上限（病灶实测：单锚名下 20 条 / 7.7 万字符，
+  // 整段塞进上下文且与 summary 层的 30k 保留预算各自为政）。
+  // 为什么是「条数 + token 预算」而不是「墙钟时间窗」：时间窗会**系统性丢掉链首**——
+  // 而链首恰恰是任务书（用户诉求原文），对长链是最贵的那段；token 预算按「离当前多远」
+  // 收口，丢的是最旧的噪声。单位：条 / token。
   const taskHistory: MessageRow[] = []
   if (triggerMsg.taskId) {
     const loadedIds = new Set(allMessages.map((m: MessageRow) => m.id))
-    const taskMsgs = messagesRepo.getTaskHistory(triggerMsg.taskId, sessionId)
+    const taskMsgs = messagesRepo.getTaskHistory(
+      triggerMsg.taskId,
+      sessionId,
+      TASK_HISTORY_MAX_MESSAGES
+    )
     taskMsgs.reverse() // 恢复时间正序
-    for (const m of taskMsgs) {
-      if (!loadedIds.has(m.id)) {
-        taskHistory.push(m)
-      }
-    }
+    const kept = selectTaskHistory(taskMsgs, loadedIds, TASK_HISTORY_BUDGET_TOKENS)
+    taskHistory.push(...kept)
     if (taskHistory.length > 0) {
+      const tokens = kept.reduce((sum, m) => sum + estimateTokens(m.content) + 50, 0)
+      // 三个计数**单位与含义各自独立**，不合并（面③：计数混义 = 下一个误读源）。
+      // loaded 是**查询返回**条数——等于 TASK_HISTORY_MAX_MESSAGES 时表示
+      // 「可能还有更旧的没取到」，不是链的真实长度。
+      const dupCount = taskMsgs.filter((m) => loadedIds.has(m.id)).length
       log.info('task history loaded', {
         traceId,
         agentId: agent.id,
         taskId: triggerMsg.taskId,
-        taskHistoryCount: taskHistory.length,
+        taskHistoryCount: kept.length, // 条（实际并入上下文）
+        taskHistoryTokens: tokens, // token（并入部分）
+        taskHistoryLoaded: taskMsgs.length, // 条（查询返回）
+        taskHistoryDupSkipped: dupCount, // 条（已在本轮窗口内，不重复注入）
+        taskHistoryBudgetDropped: taskMsgs.length - dupCount - kept.length, // 条（超 token 预算丢弃）
       })
     }
   }
@@ -413,7 +465,12 @@ export async function runAgentReply(
   const finalSystemPrompt = resolveRolePlaceholders(baseSystemPrompt, triggerMsg.authorName)
 
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
-  const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages)
+  const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages, {
+    // 链锚 = 触发消息的 messages.task_id（T-E 后 ingest 必落此列）。缺省 = 存量无锚
+    // → 审查循环 hint 走窗口降级路径（见 hints.ts）
+    anchor: triggerMsg.taskId,
+    sessionId,
+  })
 
   // 已回复用户消息识别（陈旧上下文重复回答失败模式根修，2026-08-13 实证）：
   // 若某条用户消息在时间序上之后存在该 agent 自己的回复（截断窗口内），则视为

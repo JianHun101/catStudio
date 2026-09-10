@@ -130,13 +130,14 @@ describe('Message Routes', () => {
       expect(res.statusCode).toBe(404)
     })
 
-    it('returns the latest execution when multiple agents were triggered', async () => {
+    it('多执行者且消歧不了 → 200 + ambiguous:true（T-M：不再"取最近执行"猜一只）', async () => {
       const db = getDb()
       insertFixture(UUID)
       db.prepare(
         `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
          VALUES (?, ?, '😼', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
       ).run('agent-reviewer', '吐槽猫')
+      // 后开始的一行——旧实现正是靠 started_at 挑中它（"取最近执行"）
       db.prepare(
         `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
          VALUES (?, ?, ?, ?, 'failed', datetime('now', '+1 minute'))`
@@ -145,9 +146,31 @@ describe('Message Routes', () => {
         method: 'GET',
         url: `/api/messages/${UUID}/executor`,
       })
+      // 为什么不是 404：404 在调用方 probeAttribution 语义里是"该 uuid 无执行行 ⇒ 无归属
+      // ⇒ 钩子兜底投递"——把"指不出人"报成 404 会让有归属的 agent 提交被多投一轮。
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({
+        agentId: null,
+        agentName: null,
+        taskId: null,
+        matchedBy: null,
+        ambiguous: true,
+      })
+    })
+
+    it('同一 agent 的多行执行（重试）不算歧义 → 仍指认该实施者', async () => {
+      const db = getDb()
+      insertFixture(UUID)
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, trace_id)
+         VALUES ('log-retry', 'session-exec-1', 'agent-ds', ?, 'failed', datetime('now', '+1 minute'), 'trace-retry')`
+      ).run(UUID)
+      const res = await app.inject({ method: 'GET', url: `/api/messages/${UUID}/executor` })
       expect(res.statusCode).toBe(200)
       const body = JSON.parse(res.body)
-      expect(body.agentName).toBe('吐槽猫')
+      expect(body.agentName).toBe('ds猫')
+      expect(body.ambiguous).toBe(false)
+      expect(body.matchedBy).toBe('trigger')
     })
 
     it('?commit= 按 commit_hash 精确命中各自实施者（同 uuid 双执行者各 commit 各命中各）', async () => {
@@ -179,6 +202,8 @@ describe('Message Routes', () => {
       // T-I：taskId = 链锚（同一条链上两个 commit 回传**同一个锚**），不是各行的 trace_id
       expect(JSON.parse(resA.body).taskId).toBe(ANCHOR)
       expect(JSON.parse(resA.body).taskId).not.toBe('trace-ds')
+      // T-M：hash 真命中才叫精确匹配
+      expect(JSON.parse(resA.body).matchedBy).toBe('commit')
 
       const resB = await app.inject({
         method: 'GET',
@@ -188,6 +213,41 @@ describe('Message Routes', () => {
       expect(JSON.parse(resB.body).agentName).toBe('flash猫')
       expect(JSON.parse(resB.body).taskId).toBe(ANCHOR)
       expect(JSON.parse(resB.body).taskId).not.toBe('trace-flash')
+      expect(JSON.parse(resB.body).matchedBy).toBe('commit')
+    })
+
+    it('同一 sha 落在跨 agent 的多行上 → ambiguous（T-M；旧实现返回 started_at 靠后者）', async () => {
+      const uuid = UUID
+      const sha = 'd'.repeat(40)
+      const db = getDb()
+      insertFixture(uuid) // log-1：agent-ds
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES (?, ?, '😼', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run('agent-flash', 'flash猫')
+      // 无 agentId 全刷 / 自动提交快照的产物形态：一个 sha 盖在两只猫的行上
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, trace_id)
+         VALUES ('log-flash-2', 'session-exec-1', 'agent-flash', ?, 'completed', datetime('now', '+1 minute'), 'trace-flash')`
+      ).run(uuid)
+      db.prepare('UPDATE execution_logs SET commit_hash = ? WHERE triggered_by_message_id = ?').run(
+        sha,
+        uuid
+      )
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/messages/${uuid}/executor?commit=${sha}`,
+      })
+      // 按 hash 指不出唯一作者 ⇒ 回退 uuid 分支同样指不出 ⇒ ambiguous（不是挑一只）
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({
+        agentId: null,
+        agentName: null,
+        taskId: null,
+        matchedBy: null,
+        ambiguous: true,
+      })
     })
 
     it('?commit= 查不到（老 commit 未写回 hash）时回退 uuid 逻辑', async () => {
@@ -203,6 +263,9 @@ describe('Message Routes', () => {
       expect(body.agentName).toBe('ds猫')
       // 回退路径同样回传链锚（锚源与反查路径无关——两条路径都从触发消息行取）
       expect(body.taskId).toBe(ANCHOR)
+      // T-M：回退必须自报家门——调用方据此措辞，不再把回退说成"commit_hash 精确匹配"
+      expect(body.matchedBy).toBe('trigger')
+      expect(body.ambiguous).toBe(false)
     })
 
     it('消息行缺失（存量 fixture）→ 仍 200，taskId 归 null（加 JOIN 不改失败语义，T-I 验收②）', async () => {
@@ -229,6 +292,8 @@ describe('Message Routes', () => {
         agentId: 'agent-orphan',
         agentName: '孤猫',
         taskId: null,
+        matchedBy: 'trigger',
+        ambiguous: false,
       })
     })
 
@@ -262,7 +327,11 @@ describe('Message Routes', () => {
         url: `/api/messages/${HOP1}/commit-hash`,
         payload: { commitHash: sha },
       })
-      expect(JSON.parse(wrote.body)).toEqual({ ok: true, updated: 1 })
+      expect(JSON.parse(wrote.body)).toEqual({
+        ok: true,
+        updated: 1,
+        skippedAmbiguous: false,
+      })
 
       // 第 2 跳的锚 = /executor 回传值（handoff-gen 就是这么用的）
       const exec = await app.inject({
@@ -325,7 +394,11 @@ describe('Message Routes', () => {
         payload: { commitHash: hash },
       })
       expect(res.statusCode).toBe(200)
-      expect(JSON.parse(res.body)).toEqual({ ok: true, updated: 1 })
+      expect(JSON.parse(res.body)).toEqual({
+        ok: true,
+        updated: 1,
+        skippedAmbiguous: false,
+      })
 
       const rowRunning = db
         .prepare('SELECT commit_hash FROM execution_logs WHERE id = ?')
@@ -337,7 +410,7 @@ describe('Message Routes', () => {
       expect(rowDone.commit_hash).toBeNull()
     })
 
-    it('带 agentId 精确命中自己的 running 行——双 running 各 commit 各刷各，无覆盖无错投（eae5a5e 竞态根治）', async () => {
+    it('带 agentId 精确命中自己的 running 行——双 running 各 commit 各刷各，无覆盖无错投（eae5a5e 实害化 → 0fe8292 根治）', async () => {
       const uuid = '553bbc08-3819-4d75-9499-f23c6eb1282f'
       const DUAL_ANCHOR = 'anchor-dual-exec'
       const hashA = 'a'.repeat(40)
@@ -377,7 +450,11 @@ describe('Message Routes', () => {
         payload: { commitHash: hashA, agentId: 'agent-ds' },
       })
       expect(resA.statusCode).toBe(200)
-      expect(JSON.parse(resA.body)).toEqual({ ok: true, updated: 1 })
+      expect(JSON.parse(resA.body)).toEqual({
+        ok: true,
+        updated: 1,
+        skippedAmbiguous: false,
+      })
       // 中间态：ds猫 写回后 flash猫 的行未被触碰（无覆盖）
       const rowFlashMid = db
         .prepare('SELECT commit_hash FROM execution_logs WHERE id = ?')
@@ -389,7 +466,11 @@ describe('Message Routes', () => {
         payload: { commitHash: hashB, agentId: 'agent-flash' },
       })
       expect(resB.statusCode).toBe(200)
-      expect(JSON.parse(resB.body)).toEqual({ ok: true, updated: 1 })
+      expect(JSON.parse(resB.body)).toEqual({
+        ok: true,
+        updated: 1,
+        skippedAmbiguous: false,
+      })
 
       // 各 commit 各命中各的行
       const rowDs = db
@@ -412,6 +493,8 @@ describe('Message Routes', () => {
         agentId: 'agent-ds',
         agentName: 'ds猫',
         taskId: DUAL_ANCHOR,
+        matchedBy: 'commit',
+        ambiguous: false,
       })
       const execB = await app.inject({
         method: 'GET',
@@ -421,7 +504,57 @@ describe('Message Routes', () => {
         agentId: 'agent-flash',
         agentName: 'flash猫',
         taskId: DUAL_ANCHOR,
+        matchedBy: 'commit',
+        ambiguous: false,
       })
+    })
+
+    it('无 agentId + 同 uuid 多只猫在跑 → 拒写（updated:0 + skippedAmbiguous，旧实现 updated:2 且两行同 sha）', async () => {
+      const uuid = 'aa11bb22-0000-4000-8000-00000000c001'
+      const sha = 'e'.repeat(40)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES ('session-ambig', 'debug', '[]', datetime('now'), datetime('now'))`
+      ).run()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES (?, 'session-ambig', 'agent', '派双单', '[]', 'anchor-ambig')`
+      ).run(uuid)
+      for (const [id, name] of [
+        ['agent-ds', 'ds猫'],
+        ['agent-flash', 'flash猫'],
+      ]) {
+        db.prepare(
+          `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+           VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+        ).run(id, name)
+        db.prepare(
+          `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+           VALUES (?, 'session-ambig', ?, ?, 'running', datetime('now'))`
+        ).run(`log-${id}`, id, uuid)
+      }
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/messages/${uuid}/commit-hash`,
+        payload: { commitHash: sha },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({
+        ok: true,
+        updated: 0,
+        skippedAmbiguous: true,
+      })
+      // 拒写 = 一个字都没写（不是"写了但没命中"）：归属留空，读侧 404/ambiguous，
+      // 调用方兜底 @店长——而不是给两只猫都记一笔"我提交了它"
+      const rows = db
+        .prepare('SELECT commit_hash FROM execution_logs WHERE triggered_by_message_id = ?')
+        .all(uuid) as Array<{ commit_hash: string | null }>
+      expect(rows.map((r) => r.commit_hash)).toEqual([null, null])
+      // 反查闭环：该 uuid 有执行行但指不出人 ⇒ ambiguous（不是挑一只）
+      const exec = await app.inject({ method: 'GET', url: `/api/messages/${uuid}/executor` })
+      expect(JSON.parse(exec.body).ambiguous).toBe(true)
     })
 
     it('拒绝非 40-hex 的 commitHash', async () => {
