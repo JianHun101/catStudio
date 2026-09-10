@@ -27,10 +27,10 @@ skill 只管切票，谁调用谁指定往哪落。
 本文件（`README.md`）是目录门牌，长期保留；`<work-slug>/` 子目录一个都不留。
 
 **这一步挂在收口链上**（`CONTEXT.md`「流程约定」）——清 `<slug>/` 是收口的固定动作之一，
-不靠谁记得。**落点和顺序都有讲究**：它必须提交在**要进 PR 的那个分支**上——落在 `dev` 上就
-进不了 PR，远端永远清不掉 `<slug>/`；并且排在**更新 `.push-gate` 之前**——`.push-gate` 必须
-指向最终 HEAD，否则推送会被 pre-push 门禁阻断（`merge-base --is-ancestor` 判「有新 commit
-未经 review」）。
+不靠谁记得。**落点和顺序都有讲究**：它必须提交在**要进 PR 的那个分支**上（在会话 worktree
+内提交）——落在 `dev` 上就进不了 PR，远端永远清不掉 `<slug>/`；并且排在**主工作区 `ff-only`
+合并回 `dev` 之前**（因而也在**更新 `.push-gate` 之前**）——`.push-gate` 必须指向最终 HEAD，
+否则推送会被 pre-push 门禁阻断（`merge-base --is-ancestor` 判「有新 commit 未经 review」）。
 
 ## 为什么必须清
 
