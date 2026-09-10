@@ -19,8 +19,14 @@
  * 内部走 ingest（async 管线）以 `.then/.catch` 收尾，不 await、不抛错——审查链
  * 主流程零阻塞（本模块整体被 try/catch 包住，DB 异常只记日志）。
  *
- * 反查链（E3 接线）：verdict 消息 message_id → messages.task_id（= 源链 trace_id）→
- * execution_logs.commit_hash（源链实施行挂的 commit）→ flow_states (session_id, commit_sha)。
+ * 反查链（E3 接线）：verdict 消息 message_id → messages.task_id（**链锚**）→
+ * execution_logs.commit_hash → flow_states (session_id, commit_sha)。
+ *
+ * ⚠️ 锚 ≠ `execution_logs.trace_id`（T-G 实测：958 条执行行里 706 条两者不等）。
+ * 下面 `resolveCommitChain` 里那次 `getCommitHashByTraceId(锚)` 是**已知残留缺陷**
+ * （函数名就把 `trace_id` 当锚；1 trace→1 commit 假设实测 1:N），修它要改
+ * `db/repository/executionLogs.ts`（T-G 本轮归 flash猫 独占）⇒ 本票**只交规格不落码**，
+ * 规格见 `docs/run/review-chain-anchor/tg-audit.md` §F2。本条不写「已修」。
  */
 
 import { createLogger } from '../logger.js'
@@ -39,9 +45,13 @@ import type { ReviewVerdict } from '../eval/verdict-parser.js'
 const log = createLogger('flow-advance')
 
 /**
- * 反查被审 commit（verdict 消息 → 源链 trace_id → commit_hash）。
- * 同时回吐 trace_id——closeout 投递要带源链 task_id，让店长收口链与任务链同线程。
+ * 反查被审 commit（verdict 消息 → 链锚 → commit_hash）。
+ * 同时回吐链锚——closeout 投递要带源链 task_id，让店长收口链与任务链同线程。
  * 无 commit 链路（纯会话）返回 undefined。
+ *
+ * 已知残留（本票不修）：`getCommitHashByTraceId` 按 `trace_id` 列查、而非按锚，
+ * 且 `ORDER BY started_at DESC` 在 1:N 时静默取一条——「一条链挂多 commit 时提醒
+ * 指错 sha」即由此而来。修法规格见 `tg-audit.md` §F2（需改 db/ 侧）。
  */
 function resolveCommitChain(messageId: string): { commitSha: string; traceId: string } | undefined {
   const meta = messagesRepo.getTaskIdByMessageId(messageId)
@@ -79,9 +89,9 @@ function shouldAdvance(verdict: ReviewVerdict): boolean {
  * 判定式投递（reviewer @店长）缺席时，状态机不替 agent 决策收不收口，只把
  * 「这个 commit 已可收口」变成一条可见消息送达店长。
  *
- * 恰好一次：同 commit 重复 approve 时 flow_state 已 closed → 外层 advanced=false
- * 不进入本函数；判定式已投（targets 含 store 猫）→ 外层直接跳过。两层去重都在
- * 调用点，本函数只负责投递一次。
+ * 去重（T-G 改后）在**调用点**：判定式已投（targets 含 store 猫）→ 外层直接跳过；
+ * 本函数只负责**每轮判词投递一次**（不再由 commit 级 flow_state 封顶——那正是
+ * 「第二条判词撞已 close → 真提醒永久不投」的成因）。
  *
  * 非阻塞：ingest 返回的 Promise 以 then/catch 收尾，失败只记日志。
  */
@@ -148,9 +158,21 @@ function deliverCloseoutNotice(opts: {
  * verdict 落盘后推进契约③状态机（X2 记账）。
  *
  * 触发点：serial.ts review 钩子（recordReviewVerdict 落盘后）。
- * 幂等：recordFlowTransition 是 (session_id, commit_sha) 键 upsert + 审计 append——
- * 同一 commit 多次 approve 重复推进 → 审计流水多一条、当前状态已 closed 不再前进
- * （deriveNextIntent(closed)=null），天然防重复收口。
+ * 两个副作用**各自去重、互不绑定**（T-G bug B 后半改）：
+ * - **状态推进**幂等于 (session_id, commit_sha)：同一 commit 重复 approve → 审计流水
+ *   多一条、当前状态已 closed 不再前进（deriveNextIntent(closed)=null）。
+ * - **closeout 兜底提醒**幂等于**这一轮判词**（每次进入本函数至多一次），判「判定式
+ *   收口是否已投」由 targets 含 store 猫决定。
+ *
+ * 为什么必须解绑：原实现把提醒挂在 `advanced` 上，而 `advanced` 是**commit 级**事实。
+ * 一旦 sha 反查落到一个早已 closed 的 commit（见上方残留缺陷），**后续每一轮判词的提醒
+ * 都被永久吞掉且不报错**（只有一条 info 日志）——「真提醒不投」比「提醒指错 sha」更重。
+ *
+ * 代价（如实记账）：commit 级去重随之失去对提醒的封顶——同一条判词消息若被重复处理
+ * （`recordReviewVerdict` 的 INSERT OR IGNORE 只在 verdict 表去重，不拦本函数），
+ * 会重复投递一次 closeout 提醒。本函数的调用点（serial.ts review 钩子）按「每条审查
+ * 回复至多一次」运行，故当前无实际路径；要硬保证需给 `flow_states`/新表加「提醒已投」
+ * 记账列（跨 `db/` 面，见交付说明 OQ-3）。
  *
  * 非阻塞：DB 异常/task 查无 commit 链路 → 仅记日志，不抛错（审查链主流程零影响）。
  *
@@ -179,17 +201,15 @@ export function advanceFlowAfterVerdict(opts: {
     }
     const { commitSha, traceId } = chain
 
-    // 读当前状态 → 沿主干道机械推进（deriveNextIntent 循环，每步 recordFlowTransition）
+    // ① 状态推进：读当前状态 → 沿主干道机械推进（deriveNextIntent 循环，每步 recordFlowTransition）
     const current = flowStatesRepo.getFlowState(opts.sessionId, commitSha)?.state as
       FlowStage | undefined
     let stage: FlowStage | undefined = current
-    let advanced = false
     while (true) {
       const next = deriveNextIntent(stage)
       if (!next) break // closed 终态 → 无下一步
       flowStatesRepo.recordFlowTransition(opts.sessionId, commitSha, next.stage, next.intent)
       stage = next.stage
-      advanced = true
       log.info('flow state advanced', {
         sessionId: opts.sessionId,
         commitSha: commitSha.slice(0, 7),
@@ -198,20 +218,17 @@ export function advanceFlowAfterVerdict(opts: {
       })
     }
 
-    if (advanced) {
-      // 恰好一次去重（②）：判定式收口未投（targets 无 store 猫）→ 状态机补 closeout
-      // 提醒店长收口。判定式已投（reviewer @店长收口，A2A 层在推进）→ 状态机不重复补
-      // （防双触发）。advance 已发生 = 本 commit 首次走到终态，同 commit 重复 verdict
-      // 不再进入本块（flow_state 已 closed，advanced=false）。
-      const storeCat = opts.targets.find((t) => t.isStore)
-      if (!storeCat) {
-        deliverCloseoutNotice({
-          sessionId: opts.sessionId,
-          commitSha,
-          traceId,
-          verdict: opts.verdict,
-        })
-      }
+    // ② closeout 兜底提醒：判定式收口未投（targets 无 store 猫）→ 状态机补投提醒店长收口。
+    //    判定式已投（reviewer @店长收口，A2A 层在推进）→ 不重复补（防双触发）。
+    //    **不挂 `advanced`**：那是 commit 级事实，会让已 closed 的 sha 永久吞掉后续每轮提醒。
+    const storeCat = opts.targets.find((t) => t.isStore)
+    if (!storeCat) {
+      deliverCloseoutNotice({
+        sessionId: opts.sessionId,
+        commitSha,
+        traceId,
+        verdict: opts.verdict,
+      })
     }
   } catch (err: any) {
     log.warn('flow advance failed (non-blocking)', {

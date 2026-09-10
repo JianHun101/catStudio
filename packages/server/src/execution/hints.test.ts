@@ -78,14 +78,18 @@ describe('hints', () => {
 
     it('buildReviewLoopHint：reviewer（role）发 ⚠️建议修改 且 @实施猫 → 注入循环指令（真名动态装配）', async () => {
       seedHintAgents(getDb())
-      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
-        {
-          role: 'agent',
-          agent_id: 'agent-2',
-          content: '⚠️建议修改 需要改 X',
-          mentions: JSON.stringify(['ds猫']),
-        },
-      ])
+      const hint = buildReviewLoopHint(
+        { name: 'ds猫', role: 'implementer' },
+        [
+          {
+            role: 'agent',
+            agent_id: 'agent-2',
+            content: '⚠️建议修改 需要改 X',
+            mentions: JSON.stringify(['ds猫']),
+          },
+        ],
+        { anchor: undefined, sessionId: 'hints-test-session' }
+      )
       expect(hint).not.toBeNull()
       expect(hint!).toContain('吐槽猫') // 真名由运行时动态装配（规则说角色，运行时给名字）
       expect(hint!).toContain('继续审查循环')
@@ -94,67 +98,87 @@ describe('hints', () => {
 
     it('buildReviewLoopHint：发送者非 reviewer（implementer 消息）→ 不注入（role 判定等价旧 skillModules 判据）', async () => {
       seedHintAgents(getDb())
-      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
-        {
-          role: 'agent',
-          agent_id: 'agent-3',
-          content: '⚠️建议修改 需要改 X',
-          mentions: JSON.stringify(['ds猫']),
-        },
-      ])
+      const hint = buildReviewLoopHint(
+        { name: 'ds猫', role: 'implementer' },
+        [
+          {
+            role: 'agent',
+            agent_id: 'agent-3',
+            content: '⚠️建议修改 需要改 X',
+            mentions: JSON.stringify(['ds猫']),
+          },
+        ],
+        { anchor: undefined, sessionId: 'hints-test-session' }
+      )
       // 发送者 agent-3 是 implementer 不是 reviewer → 走发送者检查 continue → 不注入
       expect(hint).toBeNull()
     })
 
     it('buildReviewLoopHint：reviewer 自己 → 不注入（审查者不需要循环指令）', async () => {
       seedHintAgents(getDb())
-      const hint = buildReviewLoopHint({ name: '吐槽猫', role: 'reviewer' }, [
-        {
-          role: 'agent',
-          agent_id: 'agent-3',
-          content: '⚠️建议修改 需要改 X',
-          mentions: JSON.stringify(['吐槽猫']),
-        },
-      ])
+      const hint = buildReviewLoopHint(
+        { name: '吐槽猫', role: 'reviewer' },
+        [
+          {
+            role: 'agent',
+            agent_id: 'agent-3',
+            content: '⚠️建议修改 需要改 X',
+            mentions: JSON.stringify(['吐槽猫']),
+          },
+        ],
+        { anchor: undefined, sessionId: 'hints-test-session' }
+      )
       expect(hint).toBeNull()
     })
 
     it('buildReviewLoopHint：✅可合并 → 不注入（审查通过循环结束）', async () => {
       seedHintAgents(getDb())
-      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
-        {
-          role: 'agent',
-          agent_id: 'agent-2',
-          content: '✅可合并 通过',
-          mentions: JSON.stringify(['ds猫']),
-        },
-      ])
+      const hint = buildReviewLoopHint(
+        { name: 'ds猫', role: 'implementer' },
+        [
+          {
+            role: 'agent',
+            agent_id: 'agent-2',
+            content: '✅可合并 通过',
+            mentions: JSON.stringify(['ds猫']),
+          },
+        ],
+        { anchor: undefined, sessionId: 'hints-test-session' }
+      )
       expect(hint).toBeNull()
     })
 
     it('buildReviewLoopHint：💬仅评论 → 不注入（非阻断档不要求返工，T-C）', async () => {
       seedHintAgents(getDb())
-      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
-        {
-          role: 'agent',
-          agent_id: 'agent-2',
-          content: '💬仅评论 两条非阻断观察，不要求返工。',
-          mentions: JSON.stringify(['ds猫']),
-        },
-      ])
+      const hint = buildReviewLoopHint(
+        { name: 'ds猫', role: 'implementer' },
+        [
+          {
+            role: 'agent',
+            agent_id: 'agent-2',
+            content: '💬仅评论 两条非阻断观察，不要求返工。',
+            mentions: JSON.stringify(['ds猫']),
+          },
+        ],
+        { anchor: undefined, sessionId: 'hints-test-session' }
+      )
       expect(hint).toBeNull()
     })
 
     it('buildReviewLoopHint：💬 在前 ⚠️ 在后 → 仍注入循环指令（取最后出现者，不因 💬 放行）', async () => {
       seedHintAgents(getDb())
-      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
-        {
-          role: 'agent',
-          agent_id: 'agent-2',
-          content: '💬仅评论 先说小建议。\n⚠️建议修改 但这条必须改。',
-          mentions: JSON.stringify(['ds猫']),
-        },
-      ])
+      const hint = buildReviewLoopHint(
+        { name: 'ds猫', role: 'implementer' },
+        [
+          {
+            role: 'agent',
+            agent_id: 'agent-2',
+            content: '💬仅评论 先说小建议。\n⚠️建议修改 但这条必须改。',
+            mentions: JSON.stringify(['ds猫']),
+          },
+        ],
+        { anchor: undefined, sessionId: 'hints-test-session' }
+      )
       expect(hint).not.toBeNull()
       expect(hint!).toContain('继续审查循环')
     })
@@ -165,14 +189,18 @@ describe('hints', () => {
 
     it('buildReviewLoopHint：**结论：⚠️ 建议修改。**（emoji 后带空格）→ 判词被识别，不降级', async () => {
       seedHintAgents(getDb())
-      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
-        {
-          role: 'agent',
-          agent_id: 'agent-2',
-          content: '**结论：⚠️ 建议修改。** 见下。',
-          mentions: JSON.stringify(['ds猫']),
-        },
-      ])
+      const hint = buildReviewLoopHint(
+        { name: 'ds猫', role: 'implementer' },
+        [
+          {
+            role: 'agent',
+            agent_id: 'agent-2',
+            content: '**结论：⚠️ 建议修改。** 见下。',
+            mentions: JSON.stringify(['ds猫']),
+          },
+        ],
+        { anchor: undefined, sessionId: 'hints-test-session' }
+      )
       expect(hint).not.toBeNull()
       expect(hint!).toContain('⚠️建议修改')
       expect(hint!).not.toContain('未给出明确结论')
@@ -180,23 +208,29 @@ describe('hints', () => {
 
     it('buildReviewLoopHint：✅ 可合并（带空格）→ 不注入（该收口的必须收得了）', async () => {
       seedHintAgents(getDb())
-      const hint = buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
-        {
-          role: 'agent',
-          agent_id: 'agent-2',
-          content: '**结论：✅ 可合并。** 通过。',
-          mentions: JSON.stringify(['ds猫']),
-        },
-      ])
+      const hint = buildReviewLoopHint(
+        { name: 'ds猫', role: 'implementer' },
+        [
+          {
+            role: 'agent',
+            agent_id: 'agent-2',
+            content: '**结论：✅ 可合并。** 通过。',
+            mentions: JSON.stringify(['ds猫']),
+          },
+        ],
+        { anchor: undefined, sessionId: 'hints-test-session' }
+      )
       expect(hint).toBeNull()
     })
 
     it('buildReviewLoopHint：带/不带空格**同判**（注入文案逐字相等）', async () => {
       seedHintAgents(getDb())
       const build = (content: string) =>
-        buildReviewLoopHint({ name: 'ds猫', role: 'implementer' }, [
-          { role: 'agent', agent_id: 'agent-2', content, mentions: JSON.stringify(['ds猫']) },
-        ])
+        buildReviewLoopHint(
+          { name: 'ds猫', role: 'implementer' },
+          [{ role: 'agent', agent_id: 'agent-2', content, mentions: JSON.stringify(['ds猫']) }],
+          { anchor: undefined, sessionId: 'hints-test-session' }
+        )
       const withSpace = build('**结论：⚠️ 建议修改。** 见下。')
       const withoutSpace = build('**结论：⚠️建议修改。** 见下。')
       expect(withSpace).not.toBeNull()
@@ -221,6 +255,156 @@ describe('hints', () => {
       seedHintAgents(getDb())
       const hint = buildHandoffTriggerHint('普通派活消息')
       expect(hint).toBeNull()
+    })
+  })
+
+  // ─── T-G §7：按锚查最新判词（治陈旧 ⚠️ 无限重放）──────────────────
+  // 病灶：原实现只看**可见窗口**里最近一条审查者消息。✅/💬 按分流规则只投店长，
+  // 进不了实施猫的窗口 ⇒ 唯一进得去的那条陈旧 ⚠️ 被无限重放（对象 `94742a2`，
+  // 早已修于 `a1200a7`，实施猫修完后仍被持续要求「逐项处理反馈」）。
+  // 权威在库里（review_verdicts 按链锚查最新），不在窗口里。
+  describe('buildReviewLoopHint — T-G 按锚查最新判词', () => {
+    const ANCHOR = 'anchor-chain-1'
+    const SESSION_ID = 'session-tg'
+
+    /** reviewer（agent-2 吐槽猫）/ implementer（agent-3 ds猫）+ 会话行（messages FK 依赖） */
+    function seedChain(): void {
+      const db = getDb()
+      db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 't', '[]')`).run(
+        SESSION_ID
+      )
+      const add = (id: string, name: string, role: string) =>
+        db
+          .prepare(
+            `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+             VALUES (?, ?, '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-test', ?)`
+          )
+          .run(id, name, role)
+      add('agent-2', '吐槽猫', 'reviewer')
+      add('agent-3', 'ds猫', 'implementer')
+    }
+
+    /** 落一条判词：消息 task_id = 链锚（T-E 后 agent 回复继承锚），verdict 行同源 */
+    function seedVerdict(opts: {
+      msgId: string
+      verdict: 'approve' | 'comment' | 'suggest' | 'reject'
+      subject: string | null
+      createdAt: string
+    }): void {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id, created_at)
+         VALUES (?, ?, 'agent', '审查回复', '[]', ?, ?)`
+      ).run(opts.msgId, SESSION_ID, ANCHOR, opts.createdAt)
+      db.prepare(
+        `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
+         VALUES (?, ?, 'agent-2', ?, ?, ?)`
+      ).run(opts.msgId, SESSION_ID, opts.subject, opts.verdict, opts.createdAt)
+    }
+
+    const DS = { id: 'agent-3', name: 'ds猫', role: 'implementer' }
+    /** 窗口里躺着的那条陈旧 ⚠️（实施猫可见） */
+    const STALE_WINDOW = [
+      {
+        role: 'agent',
+        agent_id: 'agent-2',
+        content: '⚠️建议修改 需要改 X',
+        mentions: JSON.stringify(['ds猫']),
+      },
+    ]
+
+    it('陈旧 ⚠️ 之后已有 ✅（按锚查最新）→ 不注入（旧实现只看窗口 → 无限重放，必红）', () => {
+      seedChain()
+      seedVerdict({
+        msgId: 'v1',
+        verdict: 'suggest',
+        subject: 'agent-3',
+        createdAt: '2026-09-10 10:00:00',
+      })
+      seedVerdict({
+        msgId: 'v2',
+        verdict: 'approve',
+        subject: 'agent-3',
+        createdAt: '2026-09-10 11:00:00',
+      })
+
+      const hint = buildReviewLoopHint(DS, STALE_WINDOW, { anchor: ANCHOR, sessionId: SESSION_ID })
+      // 最新判词 = approve ⇒ 该收口的收得了；陈旧 ⚠️ 不得再驱动返工
+      expect(hint).toBeNull()
+    })
+
+    it('最新判词是 ⚠️ → 注入，且文案走标记表规范形态', () => {
+      seedChain()
+      seedVerdict({
+        msgId: 'v1',
+        verdict: 'approve',
+        subject: 'agent-3',
+        createdAt: '2026-09-10 10:00:00',
+      })
+      seedVerdict({
+        msgId: 'v2',
+        verdict: 'suggest',
+        subject: 'agent-3',
+        createdAt: '2026-09-10 11:00:00',
+      })
+
+      const hint = buildReviewLoopHint(DS, [], { anchor: ANCHOR, sessionId: SESSION_ID })
+      expect(hint).not.toBeNull()
+      expect(hint!).toContain('⚠️建议修改')
+      expect(hint!).toContain('吐槽猫')
+      // 窗口为空仍注入 ⇒ 结论来自库、不来自窗口（区分性：旧实现窗口空 = 返回 null）
+    })
+
+    it('判词对象是他猫 → 不注入（不拿别人的结论驱动本猫）', () => {
+      seedChain()
+      seedVerdict({
+        msgId: 'v1',
+        verdict: 'suggest',
+        subject: 'agent-9',
+        createdAt: '2026-09-10 10:00:00',
+      })
+
+      expect(
+        buildReviewLoopHint(DS, STALE_WINDOW, { anchor: ANCHOR, sessionId: SESSION_ID })
+      ).toBeNull()
+    })
+
+    it('audit D3 兜底：链上无判词行（审查者未打标记）→ 退回窗口扫描，口径与权威路径逐字一致', () => {
+      seedChain()
+      // 无判词行 = 权威路径查不到；窗口里同一条 ⚠️
+      const viaWindow = buildReviewLoopHint(DS, STALE_WINDOW, {
+        anchor: ANCHOR,
+        sessionId: SESSION_ID,
+      })
+      expect(viaWindow).not.toBeNull()
+      // 同形状的权威路径（同一条 ⚠️ 落成判词行）→ 输出必须逐字相等（两条路径同模板）
+      seedVerdict({
+        msgId: 'v1',
+        verdict: 'suggest',
+        subject: 'agent-3',
+        createdAt: '2026-09-10 10:00:00',
+      })
+      const viaAnchor = buildReviewLoopHint(DS, STALE_WINDOW, {
+        anchor: ANCHOR,
+        sessionId: SESSION_ID,
+      })
+      expect(viaAnchor).toBe(viaWindow)
+    })
+
+    it('无锚（存量链）→ 权威路径不触发，走窗口（与旧行为等价）', () => {
+      seedChain()
+      seedVerdict({
+        msgId: 'v1',
+        verdict: 'approve',
+        subject: 'agent-3',
+        createdAt: '2026-09-10 10:00:00',
+      })
+      // anchor=undefined ⇒ 不按锚查（无锚即无链，不猜）→ 窗口里那条陈旧 ⚠️ 照旧驱动
+      const hint = buildReviewLoopHint(DS, STALE_WINDOW, {
+        anchor: undefined,
+        sessionId: SESSION_ID,
+      })
+      expect(hint).not.toBeNull()
     })
   })
 

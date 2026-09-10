@@ -374,6 +374,10 @@ export async function recoverQueuedMessages(bus: EngineBus & HandoffBus): Promis
 /** 重放时窗（分钟）：落库超过该时长仍无任何调度痕迹的用户消息 → 补派候选 */
 export const REPLAY_STUCK_WINDOW_MINUTES = 30
 
+/** 锚内有序判据的取证上限（条）：只需「有没有晚于本条的回复」，取最新 N 条足够。
+ *  仅在同锚**已有** agent 回复时才触发（`hasAgentReplyByTaskId` 前置），不是每轮全量读。 */
+export const TASK_HISTORY_PROBE_LIMIT = 200
+
 /**
  * 静默丢重放扫描：周期补派"落库但从未被调度"的用户消息。
  * 16:09/02:24 案例：@ 消息 INSERT 成功但 ingest 在 dispatch 之前崩溃/异常退出——
@@ -406,18 +410,40 @@ export async function replayStuckUserMessages(bus: EngineBus & HandoffBus): Prom
           continue
         }
 
-        // 补填风暴根治方向 2：同 task_id 已有 agent 回复 → 消息事实上已被执行
-        // （批量答复场景兄弟消息无独立 execution_log，NULL 面扫描会误判静默丢）→
-        // 归一 done 不补派，防每轮空转（recoverQueuedMessages 同款 terminal 语义）。
+        // 补填风暴根治方向 2（T-G 收窄为**锚内有序**判据）：批量答复场景兄弟消息无独立
+        // execution_log，NULL 面扫描会误判静默丢 → 归一 done 不补派（recoverQueuedMessages
+        // 同款 terminal 语义）。
+        //
+        // 原判据是**链级存在性**（`hasAgentReplyByTaskId` = `LIMIT 1` 任意一条同锚回复），
+        // 在长链里失真：锚 `28aa26c4` 名下实测 17 条消息，链首一条旧回复就会让**之后**
+        // 真被静默丢的消息永久跳过（既不再重放、也没有 warn 之外的痕迹）。
+        // 锚语义的正确判据是**同锚且晚于本条**——「本条之后有人答过」才叫已被覆盖。
         // task_id NULL → 退化现状（宁可不挡也不误伤真静默丢）。
         if (row.task_id && messagesRepo.hasAgentReplyByTaskId(row.session_id, row.task_id)) {
-          messagesRepo.setDispatchState(row.id, 'done')
-          log.warn('重放跳过：同 task_id 已有 agent 回复', {
+          const chain = messagesRepo.getTaskHistory(
+            row.task_id,
+            row.session_id,
+            TASK_HISTORY_PROBE_LIMIT
+          )
+          // created_at 同为库内 'YYYY-MM-DD HH:MM:SS'（UTC 秒）⇒ 字符串比较即时间序
+          const repliedAfter = chain.some(
+            (m) => m.role === 'agent' && m.agent_id !== null && m.created_at > row.created_at
+          )
+          if (repliedAfter) {
+            messagesRepo.setDispatchState(row.id, 'done')
+            log.warn('重放跳过：同锚且晚于本条的 agent 回复已存在', {
+              messageId: row.id,
+              sessionId: row.session_id,
+              taskId: row.task_id,
+            })
+            continue
+          }
+          // 链上只有更早的回复 ⇒ 本条确实无人应答 → 落到下面走补派
+          log.warn('重放继续：同锚回复均早于本条（非链级存在性可判）', {
             messageId: row.id,
             sessionId: row.session_id,
             taskId: row.task_id,
           })
-          continue
         }
 
         const mentions = JSON.parse(row.mentions || '[]') as string[]
