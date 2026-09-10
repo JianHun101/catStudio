@@ -168,6 +168,11 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       mentions: Array.isArray(body.mentions) ? body.mentions : [],
       images: Array.isArray(body.images) ? body.images : undefined,
       taskId: typeof body.taskId === 'string' ? body.taskId : undefined,
+      // T-F 入口主闸：REST 注入通道 = **agent 入口**（工具/服务端投递，前端走 socketio），
+      // 强制携带链锚；审查类投递另需 chainType 对账位（缺 → 400）。
+      origin: 'agent',
+      chainType:
+        body.chainType === 'first' || body.chainType === 'followup' ? body.chainType : undefined,
       skipRestartRequest: req.headers['x-test-call'] === '1',
     })
 

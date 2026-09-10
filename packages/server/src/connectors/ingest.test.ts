@@ -25,7 +25,12 @@ import type {
 } from '../execution/serial.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
 import { getAdapterForAgent } from '../llm/registry.js'
-import { ingestUserMessage } from './ingest.js'
+import {
+  ingestUserMessage,
+  buildDeliveryGateError,
+  deriveChainExistence,
+  isReviewDelivery,
+} from './ingest.js'
 
 // ═══ 边界 mock（真实 DB / ingest / dispatch / 执行引擎保留） ═══
 
@@ -131,28 +136,32 @@ function ingest(content: string, taskId?: string) {
   })
 }
 
+/** 真实 SQLite + 真 ingest 的基座（两组共用：T-E 链锚 / T-F 入口主闸） */
+function setupFixture(): void {
+  __test_reset()
+  __resetDispatch()
+  const db = createTestDb()
+  setDb(db)
+  initRepository(db)
+  db.prepare(
+    `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+     VALUES ('agent-impl', ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', 'implementer')`
+  ).run(IMPL_NAME)
+  // reviewer 与 implementer 两个角色：A2A 边表 reviewer→implementer 存在，
+  // 组 3 的两跳（吐槽猫 → ds猫）走它；组 1/2 只用 ds猫。T-F 组另靠 reviewer 角色
+  // 判定「审查类投递」（按 role 不按猫名）。
+  db.prepare(
+    `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+     VALUES ('agent-reviewer', '吐槽猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', 'reviewer')`
+  ).run()
+  db.prepare(
+    `INSERT INTO sessions (id, title, agent_ids)
+     VALUES ('session-1', '测试会话', '["agent-impl","agent-reviewer"]')`
+  ).run()
+}
+
 describe('connectors/ingest — 链锚贯通（T-E）', () => {
-  beforeEach(() => {
-    __test_reset()
-    __resetDispatch()
-    const db = createTestDb()
-    setDb(db)
-    initRepository(db)
-    db.prepare(
-      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
-       VALUES ('agent-impl', ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', 'implementer')`
-    ).run(IMPL_NAME)
-    // reviewer 与 implementer 两个角色：A2A 边表 reviewer→implementer 存在，
-    // 组 3 的两跳（吐槽猫 → ds猫）走它；组 1/2 只用 ds猫
-    db.prepare(
-      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
-       VALUES ('agent-reviewer', '吐槽猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', 'reviewer')`
-    ).run()
-    db.prepare(
-      `INSERT INTO sessions (id, title, agent_ids)
-       VALUES ('session-1', '测试会话', '["agent-impl","agent-reviewer"]')`
-    ).run()
-  })
+  beforeEach(setupFixture)
 
   afterEach(() => {
     __test_reset()
@@ -250,4 +259,157 @@ describe('connectors/ingest — 链锚贯通（T-E）', () => {
       userRow!.task_id,
     ])
   }, 60000)
+})
+
+/**
+ * 投递契约主闸（T-F）。
+ *
+ * 判据**全部读入参**，不读落库列——T-E 之后 `messages.task_id` 由服务端自动生成、
+ * 落库列恒非空，任何"按 DB 列判 agent 缺锚"的写法都是死码（T-E 审查 OQ-1 落锤）。
+ * 结构推导（链在不在）是唯一一处 DB 查询，且**只**在「审查类 + 声明建链」时才发起。
+ */
+describe('connectors/ingest — 投递契约主闸（T-F）', () => {
+  beforeEach(setupFixture)
+
+  afterEach(() => {
+    __test_reset()
+    __resetDispatch()
+    resetDb()
+  })
+
+  // ── 判据（纯函数：结构推导结果由调用方传入，四方向各一例 + 降级） ──
+
+  const gate = (o: Partial<Parameters<typeof buildDeliveryGateError>[0]>) =>
+    buildDeliveryGateError({
+      origin: 'agent',
+      taskId: 'anchor-a',
+      chainType: 'first',
+      isReview: false,
+      chainExistence: 'absent',
+      ...o,
+    })
+
+  it('主闸①：人类入口空锚 → 放行（用户消息天然是链首轮）', () => {
+    expect(gate({ origin: 'human', taskId: undefined })).toBeNull()
+    // 未标注 origin 的既有入口走 human 档，行为不变
+    expect(gate({ origin: undefined, taskId: undefined })).toBeNull()
+  })
+
+  it('主闸②：agent 投递缺锚 → 400（非审查类也拦）', () => {
+    const err = gate({ taskId: undefined })
+    expect(err?.status).toBe(400)
+    expect(err?.error).toContain('缺链锚')
+  })
+
+  it('主闸③：审查类缺 chainType → 400（对账位必填）', () => {
+    const err = gate({ isReview: true, chainType: undefined })
+    expect(err?.status).toBe(400)
+    expect(err?.error).toContain('chainType')
+  })
+
+  it('主闸④：审查类声明 followup 但锚为空 → 400（漏带锚，走特异性分支而非通用缺锚）', () => {
+    const err = gate({ isReview: true, chainType: 'followup', taskId: undefined })
+    expect(err?.status).toBe(400)
+    expect(err?.error).toContain('followup')
+  })
+
+  it('主闸⑤：审查类声明 first 但链已存在 → 400（静默挂错链）', () => {
+    const err = gate({ isReview: true, chainType: 'first', chainExistence: 'exists' })
+    expect(err?.status).toBe(400)
+    expect(err?.error).toContain('first')
+  })
+
+  it('主闸⑥：结构推导查不动 → 以声明为准放行（降级方向与 B3 一致：不把合法投递判死）', () => {
+    expect(gate({ isReview: true, chainType: 'first', chainExistence: 'unknown' })).toBeNull()
+  })
+
+  it('主闸⑦：审查类声明 first + 链不存在 → 放行（真建链）', () => {
+    expect(gate({ isReview: true, chainType: 'first', chainExistence: 'absent' })).toBeNull()
+    // followup 带锚 = 链内更新，放行
+    expect(gate({ isReview: true, chainType: 'followup' })).toBeNull()
+  })
+
+  it('审查类判定按 role（不按猫名）：点名 reviewer 角色才要求 chainType', () => {
+    expect(isReviewDelivery(['吐槽猫'])).toBe(true)
+    expect(isReviewDelivery([IMPL_NAME])).toBe(false)
+    expect(isReviewDelivery([])).toBe(false)
+  })
+
+  // ── 结构推导（真 DB） ──
+
+  it('结构推导：空锚 → absent（无需查询）；有消息 → exists；无消息 → absent', () => {
+    expect(deriveChainExistence(SESSION, undefined)).toBe('absent')
+    expect(deriveChainExistence(SESSION, 'anchor-never-used')).toBe('absent')
+
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES ('m-chain', ?, 'user', 'hi', '[]', 'anchor-existing')`
+      )
+      .run(SESSION)
+    expect(deriveChainExistence(SESSION, 'anchor-existing')).toBe('exists')
+  })
+
+  // ── 组装（真 SQLite + 真 ingest）：拒绝发生在 INSERT 之前，零副作用 ──
+
+  it('组装：agent 缺锚被拒 → 400 且不落库、不派发', async () => {
+    const { bus, broadcast } = createFakeBus()
+    const dispatches: { triggerMsg: AgentTriggerMsg; traceId: string }[] = []
+    setExecutionBus(bus)
+    setExecutionEngine(createStubEngine(dispatches))
+
+    const res = await ingestUserMessage({
+      sessionId: SESSION,
+      content: '请审查',
+      mentions: [IMPL_NAME],
+      origin: 'agent',
+    })
+    expect(res.ok).toBe(false)
+    if (res.ok) throw new Error('unreachable')
+    expect(res.status).toBe(400)
+    expect(dispatches).toHaveLength(0)
+    expect(broadcast).toHaveLength(0)
+    const count = getDb().prepare(`SELECT COUNT(*) AS n FROM messages`).get() as { n: number }
+    expect(count.n).toBe(0)
+  })
+
+  it('组装：审查类声明 first 但链已存在（真查）→ 400', async () => {
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES ('m-old', ?, 'user', '旧轮', '[]', 'anchor-live')`
+      )
+      .run(SESSION)
+
+    const res = await ingestUserMessage({
+      sessionId: SESSION,
+      content: '返工投递',
+      mentions: ['吐槽猫'],
+      taskId: 'anchor-live',
+      origin: 'agent',
+      chainType: 'first',
+    })
+    expect(res.ok).toBe(false)
+    if (res.ok) throw new Error('unreachable')
+    expect(res.status).toBe(400)
+  })
+
+  it('组装：审查类带锚 + followup → 放行（链内更新是合法投递）', async () => {
+    const { bus, broadcast } = createFakeBus()
+    const dispatches: { triggerMsg: AgentTriggerMsg; traceId: string }[] = []
+    setExecutionBus(bus)
+    setExecutionEngine(createStubEngine(dispatches))
+
+    const res = await ingestUserMessage({
+      sessionId: SESSION,
+      content: '@吐槽猫 复申',
+      mentions: ['吐槽猫'],
+      taskId: 'anchor-live',
+      origin: 'agent',
+      chainType: 'followup',
+    })
+    if (!res.ok) throw new Error(`ingest 失败：${res.error}`)
+    expect(anchorOf(res.messageId)).toBe('anchor-live')
+    expect(broadcast).toHaveLength(1)
+  })
 })

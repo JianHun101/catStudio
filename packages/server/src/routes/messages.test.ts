@@ -425,8 +425,15 @@ describe('Message Routes', () => {
       ).run(id, 'rest-test')
     }
 
+    // T-F 之后 REST 注入通道 = **agent 入口**：投递必须带链锚（缺 → 400）。
+    // 本组用例测的是图片守卫 / 会话路由，锚取固定值且不参与断言——补锚是**契约适配**，
+    // 不是绕过（缺锚行为另有专门用例覆盖，见 connectors/ingest.test.ts 主闸组）。
     const postMessage = (payload: Record<string, unknown>) =>
-      app.inject({ method: 'POST', url: '/api/messages', payload })
+      app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { taskId: 'anchor-rest-fixture', ...payload },
+      })
 
     const lastStoredImages = (sessionId: string): string[] => {
       const row = getDb()
@@ -467,6 +474,7 @@ describe('Message Routes', () => {
             content: '防滥用',
             mentions: [],
             images: ['data:image/png;base64,small', oversized],
+            taskId: 'anchor-rest-fixture', // T-F：REST = agent 入口，缺锚 400（同 postMessage 注释）
           },
         })
         expect(res.statusCode).toBe(201)
@@ -521,8 +529,15 @@ describe('Message Routes', () => {
         .run(id, sessionId)
     }
 
+    // T-F 之后 REST 注入通道 = **agent 入口**：投递必须带链锚（缺 → 400）。
+    // 本组用例测的是图片守卫 / 会话路由，锚取固定值且不参与断言——补锚是**契约适配**，
+    // 不是绕过（缺锚行为另有专门用例覆盖，见 connectors/ingest.test.ts 主闸组）。
     const postMessage = (payload: Record<string, unknown>) =>
-      app.inject({ method: 'POST', url: '/api/messages', payload })
+      app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { taskId: 'anchor-rest-fixture', ...payload },
+      })
 
     it('AC4: 发往已交接旧会话 → 消息落子会话，响应带 redirectedTo', async () => {
       insertSession('old-session')
@@ -593,6 +608,7 @@ describe('Message Routes', () => {
           sessionId: 'session-restart-isolate',
           content: '【重启请求】原因：测试重启',
           mentions: [],
+          taskId: 'anchor-restart-fixture', // T-F：REST = agent 入口，缺锚 400
         },
       })
 
@@ -613,6 +629,7 @@ describe('Message Routes', () => {
           sessionId: 'session-restart-isolate',
           content: '【重启请求】原因：测试重启',
           mentions: [],
+          taskId: 'anchor-restart-fixture', // T-F：REST = agent 入口，缺锚 400
         },
       })
 
@@ -621,6 +638,56 @@ describe('Message Routes', () => {
       const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8')) as any
       expect(req.state).toBe('pending')
       expect(req.sessionId).toBe('session-restart-isolate')
+    })
+  })
+
+  // T-F 入口主闸：REST 注入通道 = agent 入口（前端走 socketio，不受此限）。
+  // 这一组验的是**路由接线**（origin/chainType 是否真透传到 ingest），行为本身在
+  // connectors/ingest.test.ts 覆盖——两处不是重复：那里测判据，这里测接对了没有。
+  describe('POST /api/messages（T-F 投递契约主闸）', () => {
+    const SESSION = 'session-gate'
+
+    const seed = () => {
+      getDb()
+        .prepare(
+          `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+           VALUES ('agent-rev', '吐槽猫', '🐱', 'p', 'deepseek', 'm', 'k', 'reviewer')`
+        )
+        .run()
+      getDb()
+        .prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 'gate', '["agent-rev"]')`)
+        .run(SESSION)
+    }
+
+    it('REST 缺 taskId → 400 缺链锚（agent 入口强制锚）', async () => {
+      seed()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { sessionId: SESSION, content: '投递', mentions: [] },
+      })
+      expect(res.statusCode).toBe(400)
+      expect(JSON.parse(res.body).error).toContain('缺链锚')
+    })
+
+    it('REST 审查类缺 chainType → 400；补上 chainType 后 201（接线正确）', async () => {
+      seed()
+      const base = {
+        sessionId: SESSION,
+        content: '请审查',
+        mentions: ['吐槽猫'],
+        taskId: 'anchor-gate',
+      }
+      const missing = await app.inject({ method: 'POST', url: '/api/messages', payload: base })
+      expect(missing.statusCode).toBe(400)
+      expect(JSON.parse(missing.body).error).toContain('chainType')
+
+      const ok = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { ...base, chainType: 'followup' },
+      })
+      expect(ok.statusCode).toBe(201)
     })
   })
 })

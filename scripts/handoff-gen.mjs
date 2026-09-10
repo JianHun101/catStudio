@@ -15,12 +15,27 @@
  *   node scripts/handoff-gen.mjs --cwd=/path        # 指定仓库路径
  *
  * T-A 兜底投递（2026-09-10）：post-commit **不再每 commit 必投**——先判归属
- * （`decideHookDelivery`，判据源 = commit-hash 写回端点返回的 running 命中行数）：
- *   - 有归属（agent 执行中提交）→ 静默，审查请求归实施猫自己投（铁律 + request-review）
+ * （`decideHookDelivery`，判据源 = **该 uuid 是否存在任一状态的执行行**，
+ * 见 `probeAttribution`；T-H ① 前的判据是「写回端点返回的 running 命中行数」，
+ * 两者在「执行已终态 / 同猫并发另一条在跑」时结论相反——那正是 T-H ① 治的假阴性）：
+ *   - 有归属（agent 执行）→ 静默，审查请求归实施猫自己投（铁律 + request-review）
  *   - 无归属（用户终端手动提交）→ 无人会投，钩子兜底
  *   - 判据查不动 → 一律投递（不静默吞）
  * 漏投由 server 执行收尾补（`--fallback-sha`，判据见 execution/review-fallback.ts）。
  * 原痛点：钩子每 commit 必投 → 中途返工每新 SHA 叠一条链。
+ *
+ * T-H ②（2026-09-10）审查请求覆盖**裁决：显式接受「只看 HEAD」**——一次派发 = 一条
+ * 审查请求，锚在该派发**最新的**那个 commit，投递文档的改动面也就只有它。
+ * 已知缺口（留痕，不修）：同一派发里更早的 commit 不进这条请求的改动面。
+ *   - **主动投递路径不受影响**（T-A 主路径）：猫自己写审查请求、自己点名 sha，
+ *     审查者读 push 后的完整 diff——覆盖面由猫掌握，不由本文档决定。
+ *   - 缺口仅在「猫忘投 → 收尾兜底」支路，且需该派发已产出 ≥2 个 commit。
+ * 否决的替代（含实测证据，别重走）：
+ *   - 逐 commit 各投一条 → 正是 T-A 要止住的「返工每新 SHA 叠一条链」。
+ *   - 按同一 uuid 回溯、把改动面扩到整段 → **实测会裹进兄弟票**：店长一条消息
+ *     @ 两只猫是**常态**（并行派活），两猫的 commit 共享 uuid 且相邻，回溯判为一段
+ *     → 文档 file list 混入兄弟票的文件、审查须知指向一个不属于本单的 diff。
+ *     flash猫 本票自己的草稿就是现场样本（spans 到 ds猫 的 T-E `7dd0e14`）。
  *
  * 投递幂等（修复重复投递，见重复投递根治计划 A+B+C+D）：
  *   .handoff-delivered.json 状态文件按 commit SHA 记录投递结果，锚点取代"内容字节"：
@@ -84,8 +99,6 @@ export function generateHandoff(opts = {}) {
   const cwd = opts.cwd || process.cwd()
   const range = opts.range || 'HEAD~1..HEAD'
   const target = opts.sha || 'HEAD'
-  // pending 补投：range 跟随 target（sha~1..sha），保证审查须知行指向正确 commit
-  const effectiveRange = opts.sha ? `${opts.sha}~1..${opts.sha}` : range
 
   // 验证仓库
   if (!existsSync(join(cwd, '.git'))) {
@@ -103,6 +116,11 @@ export function generateHandoff(opts = {}) {
     console.log('[handoff-gen] 仓库尚无目标 commit，跳过')
     return null
   }
+
+  // pending 补投：range 跟随 target（sha~1..sha），保证审查须知行指向正确 commit。
+  // T-H ② 裁决：**只看 target 这一个 commit**，不回溯扩展到同一 uuid 的整段——理由
+  // 与实测证据见文件头（回溯会裹进兄弟票，而「一条消息 @ 两只猫」是常态）。
+  const effectiveRange = opts.sha ? `${opts.sha}~1..${opts.sha}` : range
 
   // 处理初始 commit（无 ~1 父提交）
   let diffFiles
@@ -236,6 +254,14 @@ export function parseArgs(argv) {
     if (spec.value) {
       const value = eqMatch[2] !== undefined ? eqMatch[2] : argv[++i]
       if (value === undefined) throw new Error(`${arg} 缺少值`)
+      // T-H / N5：取值型 flag 的值**不能以后随 flag 开头**——`--cwd --no-post` 会把
+      // `--no-post` 当成 cwd 的值吞掉，写成 `{cwd:'--no-post'}`：本次少传一个 flag，
+      // 且畸形值只有撞上后续 git 校验才暴露（`不是 git 仓库`），报错点离病因很远。
+      // 值以 `-` 开头一律判参数错误（路径/sha 都不长这样），与「未知参数不静默忽略」同款：
+      // **参数错误的后果不能是「换一条路继续干」**。
+      if (value.startsWith('-')) {
+        throw new Error(`${arg} 的值不能以 - 开头（收到 ${value}）——疑似后随 flag 被当作值吞掉`)
+      }
       opts[spec.key] = value
     } else {
       if (eqMatch[2] !== undefined) throw new Error(`${arg} 不接受值（收到 ${eqMatch[2]}）`)
@@ -892,22 +918,68 @@ async function verifyOrTransient(serverUrl, sessionId, message) {
 }
 
 /**
+ * T-H ①（2026-09-10）归属探针：该触发消息 uuid 是否存在**任一状态**的执行行。
+ *
+ * 为什么必须问「任一状态」而不是「running 命中行数」（T-A OQ-1 的假阴性，本票
+ * 的靶心）：running 命中数把三个不同事实压成同一个 0——
+ *   ① 该 uuid **从无执行行** → 真·用户手动提交 → 该投；
+ *   ② 执行**已终态**（猫在收尾后才提交 / `--amend` / 收尾竞态）→ agent 提交 → 该静默；
+ *   ③ **同 uuid 同猫并发另一条在跑**（写回按 agentId 精确命中，落到别人行上）→ 同上。
+ * 后两者被判「无归属」→ 钩子多投一条 → 正是 T-A 要止住的「白起一轮」。
+ *
+ * 判据源 = `GET /api/messages/:id/executor`：其 `triggered_by_message_id` 反查
+ * **不带 status 过滤**（`db/repository/executionLogs.ts` `getExecutorNameByTriggeredBy`），
+ * 命中即「存在任一状态执行行」——恰是归属的定义。纯 scripts 侧可得的信号，
+ * 无需给写回端点加字段（也就无需重启 server）。
+ *
+ * 与写回响应的关系：写回命中 running 行（`updated > 0`）是归属的**充分条件**，
+ * 调用方据此短路、不调本探针；`updated === 0` 才落到这里（三种可能见上）。
+ *
+ * 三态（③ 降级语义：判据查不动一律投递，不静默吞）：
+ *   true  200 且有 agentName → 有归属（存在执行行）→ 不投
+ *   false 404               → 无归属（从无执行行）  → 投
+ *   null  其他 HTTP / 不可达 / 响应不可解析 → 查不动 → 投
+ *
+ * 已知窄口径（失败方向安全，不是穷尽）：executor 端点 INNER JOIN agents，agent 行
+ * 被删则 404 → 判「无归属」→ 多投一条。多投是本判据的**安全方向**（宁可多投不可漏投），
+ * 与 ③ 降级同向，故不为此加路径。
+ *
+ * @param {string} serverUrl
+ * @param {string} uuid — commit message 里的 catstudy [uuid]
+ * @returns {Promise<boolean|null>}
+ */
+export async function probeAttribution(serverUrl, uuid) {
+  try {
+    const res = await fetch(`${serverUrl}/api/messages/${encodeURIComponent(uuid)}/executor`, {
+      signal: AbortSignal.timeout(3000),
+    })
+    if (res.status === 404) return false
+    if (!res.ok) return null
+    const body = await res.json().catch(() => null)
+    // 200 但响应缺 agentName（端点契约变了 / 被代理改写）→ 不假装它是「有归属」，
+    // 也不假装是「无归属」——查不动，走降级投递。
+    return body && typeof body.agentName === 'string' && body.agentName ? true : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * T-A ①（2026-09-10）钩子侧归属判据：这个 commit 该不该由 post-commit 钩子兜底投递。
+ * 判据源见 `probeAttribution`（T-H ① 起 = 「该 uuid 是否存在任一状态执行行」；
+ * 此前是写回端点返回的 running 命中行数——两者在「执行已终态 / 同猫并发」时结论
+ * 相反，那正是 T-H ① 治的假阴性）。
  *
- * 判据源 = commit-hash 写回端点的 `updated` 数（`UPDATE ... WHERE status='running'`
- * 的命中行数）——命中即「该 commit 归属某次 agent 执行」，这是归属的**定义本身**，
- * 不是近似：同一个 UPDATE 既写回 commit_hash，也顺手给出归属。
- *
- * 语义：有归属 ⇒ commit 由某只猫在执行中提交 ⇒ 审查请求归实施猫自己投（铁律 +
+ * 语义：有归属 ⇒ commit 由某只猫提交 ⇒ 审查请求归实施猫自己投（铁律 +
  * request-review），钩子静默（原痛点：钩子每 commit 必投 → 返工每新 SHA 叠一条链）；
  * 无归属 ⇒ 用户在终端手动提交，没有任何猫会替它投，钩子兜底。
  *
  * 三态（③ 降级语义：判据查不动一律投递，不静默吞）：
  *   true  有归属 → 不投
  *   false 无归属 → 投
- *   null  查不动（写回失败 / 响应不可解析）→ 投
+ *   null  查不动（探针失败 / 响应不可解析）→ 投
  *
- * ⚠️ 与 `.handoff-delivered.json` 的分工（本票定死）：账本是「同一 SHA 是否已投过」
+ * ⚠️ 与 `.handoff-delivered.json` 的分工（T-A 定死）：账本是「同一 SHA 是否已投过」
  * 的幂等锁（键=SHA），本判据是「该不该由钩子投」的归属判定（源=执行行）——两者
  * 不同源，账本无法表达归属，故不合并、不互相替代。
  *
@@ -1008,8 +1080,11 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   let fillerName = '店长'
   /** E3 接线：源链 task_id（executor 反查同源，commit_hash → execution_logs → trace_id） */
   let taskId
-  /** T-A ① 归属三态：null=查不动（先置未知，写回成功后由 updated 落地） */
+  /** T-A ① / T-H ① 归属三态：null=查不动（判据查不动一律投递）；无 uuid = 无归属 */
   let attributed = commitUuid ? null : false
+  /** 归属结论的**来源**（留痕用）——两条来路（写回短路 / 探针）不可混称，
+   *  否则日志会把没跑过的机制说成跑过（本 spec 一直在治的「陈述假机制」）。 */
+  let attributionFrom = commitUuid ? '待定' : 'commit message 无 catstudy [uuid]'
   if (commitUuid) {
     // 写回 commit_hash（agent 人工提交路径此前从不写，只有 socketio 自动提交
     // 兜底写）——executor 反查按 commit 精确匹配的前提。失败仅告警不阻断投递：
@@ -1026,14 +1101,20 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
         signal: AbortSignal.timeout(3000),
       })
       if (res.ok) {
-        // T-A ①：写回响应的 updated = 命中 running 执行行数 = 归属判据源（见
-        // decideHookDelivery）。解析不出来（老 server 无此字段/非 JSON）→ 保持
-        // null（查不动）→ 走降级语义投递，不静默。
+        // 写回响应仍读——但它**不再是归属判据源**（T-H ①：它数的是 running 命中行，
+        // 在「执行已终态 / 同猫并发另一条在跑」时为 0，会把 agent 提交误判成手动提交）。
+        // 判据改问 probeAttribution（见下）。
         const body = await res.json().catch(() => null)
         const updated = Number(body?.updated)
-        if (Number.isFinite(updated)) attributed = updated > 0
+        // 唯一保留的用法：命中 running 行 ⇒ 该 uuid 的执行行**必然存在** ⇒ 归属成立。
+        // 这是**充分条件**（不是判据本身）：真值时短路掉探针那次往返；为 0 时无信息量
+        // （终态行 / 并发行 / 真无行三种都可能是 0），交给探针分辨。
+        if (Number.isFinite(updated) && updated > 0) {
+          attributed = true
+          attributionFrom = '写回命中 running 行（充分条件，未打探针）'
+        }
         console.log(
-          `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}，归属执行行 ${body?.updated ?? '未知'}）`
+          `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}，命中 running 行 ${body?.updated ?? '未知'}）`
         )
       }
     } catch {
@@ -1042,17 +1123,26 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
       )
     }
   }
-  // T-A ①：归属判据放在实施者反查之前——静默路径不必再花两次往返。
   // 判据**只属于 post-commit 入口**（runHandoff 无其他入口 flag 时传 opts.judgeAttribution；
   // 钩子就是无参调用，不做显式 flag——挂了 flag 而钩子不传 = 判据在生产路径上不跑）。
   // --gate-deliver 补投 与 收尾兜底（--fallback-sha）是独立入口，判据不适用——
   // 前者补的是「当时判定该投但投失败」的 SHA，后者补的是「有归属但猫没投」，
   // 两者都必然有归属，再判一次只会把自己判静默（自己吞掉自己）。
-  // 留痕：每次裁决一行日志（投/不投 + 理由）——本票唯一安全网。
+  // 留痕：每次裁决一行日志（投/不投 + 理由 + 探针读数）——本票唯一安全网。
   if (opts.judgeAttribution) {
+    // T-H ①：探针单独问一次。写回**必须**在判据之前（静默路径也要记 commit_hash——
+    // 收尾兜底与 verdict 反查都靠它），而「任一状态执行行」这个事实写回响应给不了
+    // （它只数 running 命中行）→ 模糊情形比 T-A 多一次往返，是买正确性的代价。
+    // attributed 已被写回短路成 true（命中 running 行）时不问——那已是充分条件。
+    if (commitUuid && attributed === null) {
+      attributed = await probeAttribution(serverUrl, commitUuid)
+      attributionFrom =
+        attributed === null ? '探针查不动' : attributed ? '探针：存在执行行' : '探针：无执行行'
+    }
     const verdict = decideHookDelivery(attributed)
     console.log(
-      `[handoff-gen] 🔎 兜底投递判据: ${verdict.deliver ? '投递' : '静默'}——${verdict.reason}`
+      `[handoff-gen] 🔎 兜底投递判据: ${verdict.deliver ? '投递' : '静默'}——${verdict.reason}` +
+        `（归属来源：${attributionFrom}）`
     )
     // 返回 'skip' 而非 'ok'：'ok' 会被 deliverSha 记进 delivered 账本，
     // 把这个 SHA 的收尾兜底（--fallback-sha）当场锁死（探针实测：兜底恒被
@@ -1354,6 +1444,12 @@ async function drainPending(cwd, serverUrl) {
  * execution_logs.commit_hash 取来的，必然有归属——再判一次只会把自己判静默。
  * 幂等由 `.handoff-delivered.json` 账本兜（同一 SHA 全流程至多投一条），
  * 与 post-commit 入口共用账本，故两个入口叠加也不会重复投。
+ *
+ * ⚠️ 覆盖面契约（T-H ② 裁决，有意如此）：本入口只拿到 `execution_logs.commit_hash`
+ * 里的**一个** sha（`getRunningExecutionCommitHash` 取该 agent 最新 running 行的单列），
+ * 故补投文档的改动面 = 那一个 commit。同一次执行若提交了多个 commit，更早的那些
+ * **不在**本请求的改动面内——这是「一次派发 = 一条审查请求」的代价，替代方案
+ * （逐 commit 各投 / 按 uuid 回溯成段）均已实测否决，理由与现场证据见文件头 T-H ②。
  *
  * @returns {Promise<'ok'|'transient'|'fatal'|'skip'>}
  */
