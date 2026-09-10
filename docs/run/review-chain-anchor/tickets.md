@@ -156,7 +156,7 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 
 ### T-F｜投递契约 + 入口主闸
 
-**交付**：审查类投递必须带 **锚 + `chainType`**。缺锚 / 缺 `chainType` → **入口 400** 当场退回；`chainType` 与结构推导冲突 → 拒绝，不猜测。审查猫保留**语义次闸**（收到绕过入口的直投且无锚 → 不审，回一句要求带）。
+**交付**：审查类投递必须带 **锚 + `chainType`**。缺锚 / 缺 `chainType` → **入口 400** 当场退回；`chainType` 与结构推导冲突 → 拒绝，不猜测。~~审查猫保留**语义次闸**（收到绕过入口的直投且无锚 → 不审，回一句要求带）~~ —— **2026-09-10 划掉**（spec D13）：主闸落地后**不存在绕过入口的直投路径**（审查类投递生产路径 = MCP `post_message` → `/api/internal/route-signals`，纯内存不落消息；REST 过闸），次闸不可达，落进提示词即"文档说保留、其实不存在"的机制——正是本 spec 靶心。重启条件见 spec A3。
 
 **Blocked by**：T-E。
 
@@ -167,6 +167,18 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 - [ ] agent 发起的投递缺锚 → 400；用户消息空锚不受影响
 - [ ] 审查类缺 `chainType` → 400；声明 `first` 但链已存在 → 拒绝；声明 `followup` 但锚为空 → 拒绝（三方向各一例）
 - [ ] 结构推导查不动 → 以声明为准 + 记日志，不拒绝、不静默改归属
+
+**T-F 复审留痕（2026-09-10 吐槽猫 ⚠️ → 店长拍板）**：见本节末「复审必改与裁决」。
+
+---
+
+**复审必改与裁决**：
+
+- **必改 1｜手动提交补投通路 100% 死**（严重度由店长上调：不是"偶尔少投一条"，是 spec D5 / 用户故事 14 那条边界**整条**失效）。构造链已源级复核：`routes/messages.ts:173` 硬编码 `origin: 'agent'` → `ingest.ts` 规则 5（`!taskId` → 400）；`handoff-gen.mjs:1084` `attributed = commitUuid ? null : false`，`decideHookDelivery` 对 `false`/`null` 均 `deliver: true` ⇒ 两条无归属路径都走到 `taskId = executorInfo?.taskId`（`:1157`）为 `undefined` → payload 无锚 → 400。**修法**：反查失败时由 `handoff-gen.mjs` 自己 **mint 一个 uuid 当锚**（语义 = 新链首轮，与今日"落 NULL → 服务端生成"等价）。**否决**"给 REST 整体开豁免口"（要动验收①与 spec）。**归口 flash猫**——`handoff-gen.mjs` 是其 T-H 在飞文件，同批落地避免跨猫同文件；**e2e stub 须按 `body.taskId` 缺省返 400**，现 stub 无条件 `201`，这层"绿"正是本缺口上轮没被拦住的原因。
+- **OQ-3 命名 → 统一 `chainType`**（spec D12，spec 内 13 处已回改）。根因：`chainType`→`chainRole` 是 spec **单侧**改名、从未传导工单，而店长派活单又误称"落盘 spec 也是 chainType"，三方各执一词。
+- **OQ-4 → `IngestInput.origin` 改必填**（spec D15），归 **ds猫**（T-F 返工件）。原默认 `'human'` 在**生产上零消费方**（四入口已全显式标注），只为"未来新入口忘标"而存在且取**放行**侧——与主闸目的方向相反。
+- **OQ-5 → 认宽口径**（"该链上已有**任何**消息"），spec 括注已同步（spec D14）；实现宽得对且向严。
+- **§三 E3 端点锚源 → 新立 T-I**（spec D16，见下节）。
 
 ---
 
@@ -281,6 +293,24 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 
 ---
 
+### T-I｜E3 接线锚源更正：`/executor` 回传 `messages.task_id`（2026-09-10 新立）
+
+**交付**：`GET /api/messages/:id/executor` 回传的 `taskId` 改为该消息行的 **`messages.task_id`**（一跳 JOIN：`execution_logs.message_id → messages.task_id`），不再回传 `execution_logs.trace_id`。
+
+**依据（spec D16 / A4 首行）**：A4 首行要求"不再用当轮 `trace_id` 冒充链锚"，但该端点**从未有票单落点**。现回传值 = `execution_logs.trace_id`（`routes/messages.ts:63` 直选 `el.trace_id`），与 `messages.task_id` 在**显式锚投递**上必然不等——真实库实测 `cdc476ba`：锚 `de0534ca…` vs 回传 `e8809eac…`。而 `handoff-gen.mjs:1157` 正拿回传值当下一份交接文档的锚 ⇒ **返工轮换锚 → 开新链**，即 spec 头号目标（用户故事 1）**不会因 A3 主闸达成**：主闸只保证"锚非空"，不保证"链内不变"。
+
+**证据分级**：值分歧 = 实测；"下一跳换锚" = 机制推论（所追执行 `commit_hash` 为 `null`，库中无完整两跳断链可指）。**故验收必须补端到端证据**（见下第 3 条），不接受仅凭推论收口。
+
+**Blocked by**：T-E（锚落库）。**归口 ds猫**。含 server 侧 → 与 T-E/T-F 同批重启。
+
+**验收**：
+
+- [ ] 显式锚投递的消息，`/executor` 回传 `taskId` == 该消息 `messages.task_id`（真实库复现 `cdc476ba` 分歧消失）
+- [ ] 无执行行 → 仍 404（不因加 JOIN 变更既有失败语义）
+- [ ] 端到端两跳：显式锚投递 → 产出 commit → 下一份交接文档，**两跳锚同值**（阴性对照——改动前该断言必红）
+
+---
+
 ## 依赖图
 
 ```
@@ -290,6 +320,7 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
   T-C COMMENT ──┘
 阶段二（根因）
   T-E 链锚 ─→ T-F 主闸 ─→ T-G 四消费方对齐
+                     └─→ T-I E3 端点锚源（与 T-G 同为"按锚查"口径，可并行）
 ```
 
 **跨阶段无硬依赖**：阶段一的「已投递」判据用 `mentions` 启发式，不依赖锚 → T-A 可立即开工。阶段二落地后应收紧为锚判据。
