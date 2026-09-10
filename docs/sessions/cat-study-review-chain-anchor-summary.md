@@ -109,6 +109,7 @@ hook 是**无状态触发器**：commit 时刻它没有「猫是否已经投过�
 >
 > 修法：5 处一律改指本文件（§2.2 口径 / §5 规格）。**本次未改**——全在 `server/` 与 `scripts/` 代码面、不在本单边界内 ⇒ 已报店长挂后续。
 > 反面提示（不必动）：`docs/run/README.md:8`、`CONTEXT.md:95`、`skills/to-tickets/SKILL.md:62` 命中的是**命名约定**（`<work-slug>/tickets.md`），不是悬空引用。
+> 另有两处命中是**活文件**：`eval/verdict-parser.ts:29` 与 `eval/verdict-parser.test.ts:223` 引的是 `docs/plans/review-chain-anchor.md`——`docs/plans/` 是**定稿件**，按 `docs/run/README.md:56-60` 明写「原地保留、读者自行判时效」**豁免清理** ⇒ 不是悬空引用。**枚举面交代**：代码面（`packages/` + `scripts/` + `.husky/` + `skills/` + `CONTEXT.md`，排除 `docs/`）全量 `git grep` 共 **9 行**命中 = **5 处悬空**（上表）+ **4 处非悬空** = **2 条命名约定**（`CONTEXT.md:95` / `skills/to-tickets/SKILL.md:62`）+ **2 条活文件引用**（`verdict-parser.ts:29` / `verdict-parser.test.ts:223`）。其中 `skills/to-tickets/SKILL.md:62` 同时是 §4.1 第 7 条的复发成因。
 
 ### 4.2 覆盖缺口
 
