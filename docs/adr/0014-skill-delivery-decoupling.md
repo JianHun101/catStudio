@@ -67,6 +67,10 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于注入�
 - **`request-review` 独立路由层移除**：投递外移后请求审查由 post-commit hook 机械触发 + code-review 承担，`request-review` 不再作为独立技能登记（索引/目录移除）；其内容资产（review-request 模板、双轴 Reviewer Checklist 判据）并入共享 `skills/refs/review-request-template.md` 与 quality-gate 自查门。**状态机 `FLOW_MAIN_CHAIN` 仍保留 `request-review` 递送状态**（审查链的记账/兜底补信号锚点，见 §4 契约③ X2——只记账推进，不驱动 agent），仅技能层不再登记该名。**无需两级路径注入**（用户拍板剖除——投递外移后为覆盖坏 base 路由而生的注入补丁失去存在理由）。
 - **skill 白名单需对齐猫咖化流程链**（后续项，见 §6）：`request-review` 已从技能层移除（不再入白名单/索引，投递走 post-commit hook 机械触发）；白名单重构面向 `{grilling, to-spec, spec-gate, to-tickets, implement, quality-gate, receive-review, session-handoff}`。当前注入侧 `SKILL_CATALOG`（scripts/mcp-server-utils.mjs:266）= 8 技能流程链 `{grilling, to-spec, spec-gate, to-tickets, implement, quality-gate, receive-review, session-handoff}`，request-review 已随流程链移除；`wayfinder` 按设计排除（`disable-model-invocation`）。投递外移后白名单判据也应重构：白名单按「领域内容是否已猫咖化 + 流程链直接相关」，投递规则从 skill 内容剥离后不再参与白名单判定。
 
+> **2026-09-10 修订（用户拍板，本次会话）**：本条**前提被反转**——post-commit hook 不再机械投递审查请求，改由 Agent 自行投递（见 `docs/plans/review-chain-anchor.md` B1/B2）。故 `request-review` **技能名回流**，重新登记为独立技能（manifest + `SKILL_CATALOG`）。
+> **范围收窄（不反转 §3）**：回流技能正文**零路由**，不含任何 `@谁`/`请谁审查`/`投给谁`；内容仅含审查请求的前置门槛与轮次规则，模板引用共享 `skills/refs/review-request-template.md`。§3「skill 只管领域」不变，§6.1「否决猫咖化」不变。
+> **另修正**：本条原称「由 post-commit hook 机械触发 + code-review 承担」——实测 `skills/code-review/` 未登记进 `SKILL_CATALOG`（猫经 `read_skill` 读不到），且正文携带本仓库零在场的 matt 依赖，该承担者从猫可读面看实际不存在；本次回流即补齐该空洞。
+
 ## 6. 后续项（用户明确要求记录）
 
 **走完这套（投递外移落地）之后，需要处理 agent skill 白名单**：
