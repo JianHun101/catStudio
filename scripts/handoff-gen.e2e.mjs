@@ -145,7 +145,8 @@ async function callWithTransientRetry(fn, attempts = 3, delayMs = 100) {
  *  为什么必须镜像：inline stub 原先一律无条件 201 ⇒「载荷无锚」这个缺口在 e2e 里
  *  **恒不显形**——文档照样"投出"、断言照样绿。这层假绿正是上一轮没拦住 T-F 缺口的
  *  直接原因。`startAttributionStub` 已按此修；本组把同一件事推到全部**会应答 2xx**
- *  的 stub（清单与"为何三处不接"见 tickets.md T-O 段）。
+ *  的 stub（例外 3 处均无闸可接、且在各自 handler 就地注明理由：一处应答固定 400，
+ *  两处 `socket.destroy()` 永不返回）。
  *
  *  规则 B（审查类投递缺 chainType）在本 e2e 里**当前不可达**：handoff-gen 只发补填
  *  请求，载荷 `mentions:[fillerName]` 且 filler ∈ {store, implementer}——实测 agents

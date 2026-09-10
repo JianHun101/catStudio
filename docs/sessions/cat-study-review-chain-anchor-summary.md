@@ -107,7 +107,8 @@ hook 是**无状态触发器**：commit 时刻它没有「猫是否已经投过�
 > | 4   | `packages/server/src/db/repository/executionLogs.test.ts:7` | 裸 `tickets.md`  | **静默落进根 `tickets.md`**（86 行、无 `T-M`/`T-O` 段）          |
 > | 5   | `scripts/handoff-gen.e2e.mjs:148`                           | 裸 `tickets.md`  | 同上                                                             |
 >
-> 修法：5 处一律改指本文件（§2.2 口径 / §5 规格）。**本次未改**——全在 `server/` 与 `scripts/` 代码面、不在本单边界内 ⇒ 已报店长挂后续。
+> 修法：**已逐处处置（本笔；店长授权扩权后）**，判据 = **目标内容已上浮 ⇒ 改指；未上浮 ⇒ 内联化**——#1 / #2 改指本文件 **§5**（§F2 照录）；#4 改指本文件 **§2.2**（T-M 口径）；#3（面② 存量锚歧义）与 #5（"为何三处不接"）**目标内容未上浮** ⇒ **内联化**、不引任何外部指针——**不许改指到空处**（那等于制造第二个假指针）。
+> **第 6 处（单列，非同类）**：`docs/plans/review-chain-anchor.md:192` 提及 `tickets.md` 是**历史叙述**（过去时记当时读数）、**不是导航指针**；且 `docs/plans/` 是定稿件、豁免清理 ⇒ **不动**。
 > 反面提示（不必动）：`docs/run/README.md:8`、`CONTEXT.md:95`、`skills/to-tickets/SKILL.md:62` 命中的是**命名约定**（`<work-slug>/tickets.md`），不是悬空引用。
 > 另有两处命中是**活文件**：`eval/verdict-parser.ts:29` 与 `eval/verdict-parser.test.ts:223` 引的是 `docs/plans/review-chain-anchor.md`——`docs/plans/` 是**定稿件**，按 `docs/run/README.md:56-60` 明写「原地保留、读者自行判时效」**豁免清理** ⇒ 不是悬空引用。**枚举面交代**：代码面（`packages/` + `scripts/` + `.husky/` + `skills/` + `CONTEXT.md`，排除 `docs/`）全量 `git grep` 共 **9 行**命中 = **5 处悬空**（上表）+ **4 处非悬空** = **2 条命名约定**（`CONTEXT.md:95` / `skills/to-tickets/SKILL.md:62`）+ **2 条活文件引用**（`verdict-parser.ts:29` / `verdict-parser.test.ts:223`）。其中 `skills/to-tickets/SKILL.md:62` 同时是 §4.1 第 7 条的复发成因。
 

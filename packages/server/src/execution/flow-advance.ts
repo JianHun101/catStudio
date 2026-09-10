@@ -26,7 +26,8 @@
  * 下面 `resolveCommitChain` 里那次 `getCommitHashByTraceId(锚)` 是**已知残留缺陷**
  * （函数名就把 `trace_id` 当锚；1 trace→1 commit 假设实测 1:N），修它要改
  * `db/repository/executionLogs.ts`（T-G 本轮归 flash猫 独占）⇒ 本票**只交规格不落码**，
- * 规格见 `docs/run/review-chain-anchor/tg-audit.md` §F2。本条不写「已修」。
+ * 规格见 `docs/sessions/cat-study-review-chain-anchor-summary.md` §5（T-G audit §F2 照录）。
+ * 本条不写「已修」。
  */
 
 import { createLogger } from '../logger.js'
@@ -51,7 +52,8 @@ const log = createLogger('flow-advance')
  *
  * 已知残留（本票不修）：`getCommitHashByTraceId` 按 `trace_id` 列查、而非按锚，
  * 且 `ORDER BY started_at DESC` 在 1:N 时静默取一条——「一条链挂多 commit 时提醒
- * 指错 sha」即由此而来。修法规格见 `tg-audit.md` §F2（需改 db/ 侧）。
+ * 指错 sha」即由此而来。修法规格见
+ * `docs/sessions/cat-study-review-chain-anchor-summary.md` §5（需改 db/ 侧）。
  */
 function resolveCommitChain(messageId: string): { commitSha: string; traceId: string } | undefined {
   const meta = messagesRepo.getTaskIdByMessageId(messageId)
