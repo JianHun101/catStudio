@@ -1759,7 +1759,8 @@ function makeSpanRepo(dirName, uuid, commits) {
   return tmp
 }
 
-// 15a: 同一 uuid 两个 commit → 文档覆盖**两者**，审查须知指向整段
+// 15a: 同一 uuid 两个 commit → 改动面**只看 HEAD**（更早的 commit 属有意缺口，见本组头注与
+// handoff-gen.mjs 文件头 T-H ②——「按 uuid 回溯成段」已实测否决并回退）
 {
   const uuid = '15aa0000-0000-4000-8000-00000000000a'
   const tmp = makeSpanRepo('.handoff-test-span-multi', uuid, [
