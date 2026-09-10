@@ -44,8 +44,17 @@ export type { ReviewVerdict } from './review-verdict-markers.js'
 
 export type VerdictParseFailureReason = 'no_subject' | 'bad_verdict'
 
-/** subject 候选目标（调用方传 role 判定 store——纯函数不做 DB 查询） */
+/**
+ * subject 候选目标（调用方传 role 判定 store——纯函数不做 DB 查询）。
+ *
+ * `id` 必填（T-N 修复）：落库的 `review_verdicts.subject_agent_id` 是**外键语义**的
+ * agent id（姊妹列 `reviewer_agent_id` 真存 uuid），下游 `hints.ts` 拿它比 `agent.id`。
+ * 原本投影里只有 `name`、落库写了名字 ⇒ 读写两侧不同域，`hints.ts` 的定向闸在
+ * 生产上恒不成立（权威路径从不注入）。必填是为了让「投影漏带 id」在编译期就炸，
+ * 而不是退化成运行时的静默失配。
+ */
 export interface VerdictTarget {
+  id: string
   name: string
   isStore: boolean
 }
@@ -197,7 +206,8 @@ function stripCode(content: string): string {
  *
  * @param content reviewer 回复全文
  * @param targets 作用域 allowedNames 对应的目标（含 store 角色判定）——
- *   subject = 首个非 store 目标；suggest/reject 时无非 store 目标 → null + no_subject
+ *   subject = 首个非 store 目标的 **id**；suggest/reject 时无非 store 目标 →
+ *   null + no_subject
  */
 export function parseReviewVerdict(content: string, targets: VerdictTarget[]): VerdictParseResult {
   const text = stripCode(content)
@@ -234,7 +244,9 @@ export function parseReviewVerdict(content: string, targets: VerdictTarget[]): V
       failure: 'no_subject',
     }
   }
-  return { kind: 'verdict', verdict, subject: subject.name, failure: null }
+  // subject 落 **id** 不落 name（T-N 修复）：下游 `hints.ts` 用 `agent.id` 比对本列，
+  // 落名字会让定向闸在生产上恒不成立。见 `VerdictTarget` 注释。
+  return { kind: 'verdict', verdict, subject: subject.id, failure: null }
 }
 
 /**

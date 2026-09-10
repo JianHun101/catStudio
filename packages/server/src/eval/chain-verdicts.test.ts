@@ -150,7 +150,9 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
     })
 
     const rows = getChainRejectionsSince('A', SESSION, '2026-09-10 10:00:00')
-    // [0] 被 episodes 当「最近一次打回」的时间源 —— 取错条会误导 corrected_success 判定
+    // [0] 被 episodes 当「最近一次打回」的时间源——但它只取 `.created_at`，同秒并列时
+    // 两边同值 ⇒ 这条钉的是**口径一致**，不是「取错条会翻转 corrected_success」。
+    // 判别力来自「哪种插入序胜出」：旧实现按 uuid 字典序，胜者必为 v-zzz。
     expect(rows[0].message_id).toBe('v-aaa')
   })
 })

@@ -37,7 +37,11 @@ export interface ChainVerdictRow {
  *
  * tie-break 用 `m.rowid`（messages 的插入序）而非 `v.message_id`：message_id 是 uuid，
  * 字典序与时间无关——同秒落库的两条判词谁胜出会是随机的（T-G 补，原写法如此）。
- * 两条查询同一口径（`getChainRejectionsSince` 取 `[0]` 当「最近一次打回」也依赖它）。
+ *
+ * **承重面只有 `getLatestChainVerdict`**：`LIMIT 1` 下胜者的 `verdict` 不同，选错就是
+ * 「该返工的判成通过」。`getChainRejectionsSince` 沿用同一 ORDER BY 只为**口径一致**，
+ * 它的 `[0]` 只被 `episodes.ts:175` 取 `.created_at` 用——同秒并列时两边**同值**，
+ * `classifyCompleted` 结局逐字不变（理由别讲过头：改这里不是为修 corrected_success）。
  */
 export function getLatestChainVerdict(
   anchor: string | null | undefined,

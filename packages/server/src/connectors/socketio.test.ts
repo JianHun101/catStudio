@@ -1930,8 +1930,11 @@ describe('socketio connector', () => {
 
       const row = lastVerdict()
       expect(row!.verdict).toBe('suggest')
-      // subject 从作用域 allowedNames 直取（名字数组，不读 DB mentions 列）——存名字
-      expect(row!.subject_agent_id).toBe('ds猫')
+      // subject 落 **agent id**（T-N 修复：原落 `subject.name` = `'ds猫'`，与下游
+      // hints.ts 比的 `agent.id` 不同域 ⇒ 定向闸恒不成立）。ds猫 在本用例 seed 为
+      // `agent-9`，reviewer 为 `agent-2`——两列**同域**（都是 agents.id）。
+      expect(row!.subject_agent_id).toBe('agent-9')
+      expect(row!.reviewer_agent_id).toBe('agent-2')
       expect(lastFailure()).toBeUndefined()
     })
 

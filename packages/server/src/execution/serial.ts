@@ -735,7 +735,13 @@ async function executeOneAgent(
           // 收口是否已投（targets 含 store 猫）由 flow-advance 内判。非阻塞：同步函数
           // 内部 try/catch（状态推进是同步 DB 写；closeout 投递走 ingest 异步管线，
           // 以 then/catch 收尾不 await）——本钩子在评审回复落库后，主流程零影响。
+          // id 必须带（T-N 修复）：`recordReviewVerdict` 落库的 subject 取 target.id，
+          // 少了它编译期就炸（VerdictTarget.id 必填）——这正是必填的目的。
+          // policy.allowed 运行时是完整 AgentConfig（见上方 :538-540 注释——
+          // 那里特意显式给了泛型实参，防的正是「退化成 MentionPolicyTarget 丢 id」），
+          // 所以 id 现成，不需回查 DB。
           const reviewedTargets = policy.allowed.map((a) => ({
+            id: a.id,
             name: a.name,
             isStore: a.role === 'store',
           }))

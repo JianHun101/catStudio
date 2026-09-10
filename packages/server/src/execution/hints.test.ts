@@ -373,8 +373,8 @@ describe('hints', () => {
 
     // ─── T-N：归属不明（subject 为空）fail-closed ─────────────────────────
     // 病灶：原实现把「subject 为空」当「可能是我」放行 ⇒ 只 @ 了店长的判词被注入到
-    // 无关实施猫。真库实证该档只有 suggest/reject 会走到（approve/comment 的 null
-    // 是设计且已被上一行 return 掉），4 行里 3 行判词正文只 @ 店长 —— 写侧无信息可补。
+    // 无关实施猫。判据与复核 SQL 见 `hints.ts` 文件头「归属判据」段（**单处维护**，
+    // 勿在此复述数字——本会话同族计数打架已出现 5 次）。
 
     it('T-N：subject 为空 + 打回档 → 不注入（fail-closed；旧实现返回循环指令，必红）', () => {
       seedChain()
@@ -393,6 +393,9 @@ describe('hints', () => {
       }
     })
 
+    // fixture **刻意一字未改**（`subject: 'agent-3'` 与 `DS.id` 同域）：T-N 之前它
+    // 证明的是一个**生产上不可达**的配置（写侧落的是 `name`），是假绿门；写侧改落
+    // `agents.id` 后它即**生产域**——同一条 fixture 由假绿变真绿，故仍须绿。
     it('T-N 阴性对照：subject 明确是本猫 → 仍注入（收窄不误杀；新旧同值，非区分项）', () => {
       seedChain()
       seedVerdict({
