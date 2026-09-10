@@ -44,6 +44,7 @@ import { consumeRouteSignals } from '../llm/route-signals.js'
 import { recordReviewVerdict } from '../eval/verdict-parser.js'
 import { advanceFlowAfterVerdict } from './flow-advance.js'
 import { maybeScoreSample } from '../eval/sampler.js'
+import { judgeReviewFallback, spawnReviewFallback } from './review-fallback.js'
 import { resolveRolePlaceholders } from './hints.js'
 import { runAgentReply } from './reply.js'
 import { rowToAgent } from './row.js'
@@ -547,6 +548,52 @@ async function executeOneAgent(
       if (allowedNames.length > 0) {
         messagesRepo.updateMessageMentions(reply.msgId, JSON.stringify(allowedNames))
       }
+    }
+
+    // ── T-A ②（2026-09-10）：执行收尾兜底投递 ──
+    // 本执行有 commit 但回复未 @ 审查者 → 补投审查请求（判据与设计理由见
+    // execution/review-fallback.ts）。位置契约：必须在 mentions 写回之后（判据读的
+    // 就是写回结果）、finalizeExecutionLog 之前（commit_hash 只在 running 行上）。
+    // 判据用内存态 allowedNames 而非回读 DB：insertAgentMessage 落库恒为 '[]'，
+    // 仅非空时被 updateMessageMentions 覆盖，故 allowedNames 与落库列恒等。
+    // fire-and-forget + 全 catch：兜底是安全网，不能把成功路径拖成异常路径。
+    try {
+      const commitSha = execLogsRepo.getRunningExecutionCommitHash(agent.id)
+      const reviewerName =
+        sessionAgentIds
+          .map((id: string) => agentsRepo.getAgentById(id))
+          .find((row) => row?.role === 'reviewer')?.name ?? null
+      const judgement = judgeReviewFallback({ commitSha, mentions: allowedNames, reviewerName })
+      // 留痕：每一次裁决都记（投/不投 + 理由）——本票唯一的安全网
+      log.info('review fallback judged', {
+        traceId,
+        agentId: agent.id,
+        commitSha: commitSha ?? null,
+        deliver: judgement.deliver,
+        reason: judgement.reason,
+      })
+      if (judgement.deliver && commitSha) {
+        const outcome = spawnReviewFallback(
+          getSessionWorktreePath(sessionId) ?? process.cwd(),
+          commitSha
+        )
+        if (!outcome.spawned) {
+          log.error('review fallback spawn failed', {
+            traceId,
+            commitSha,
+            reason: outcome.reason,
+          })
+        }
+      }
+    } catch (err: any) {
+      // 判据查不动（本地 DB 读失败）→ 不静默：error 级留痕。此处 sha 不可知、
+      // 无投递目标，故只记错——真正需要防的「查不动就静默吞掉投递」在钩子侧
+      // （远端 HTTP 判据），那里按降级语义一律投递。
+      log.error('review fallback judgement failed — not delivered', {
+        traceId,
+        agentId: agent.id,
+        error: err.message,
+      })
     }
 
     // 释放槽位并检查队列（P0-2 修复：不再丢弃 completeExecution 返回值）。

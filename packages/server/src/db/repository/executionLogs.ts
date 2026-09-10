@@ -92,6 +92,21 @@ export function getExecutorNameByCommitHash(
     .get(commitHash) as { agent_id: string; name: string; trace_id: string } | undefined
 }
 
+/** 反查"该 agent 当前 running 执行"的 commit_hash（T-A ② 收尾兜底判据）。
+ *  定位口径与 finalizeExecutionLog 完全一致（agent 最新 running）——**必须在
+ *  finalizeExecutionLog 之前调用**，否则行已 completed、恒 undefined。
+ *  无 commit 链路（纯会话执行/写回未发生）返回 undefined。 */
+export function getRunningExecutionCommitHash(agentId: string): string | undefined {
+  const row = db
+    .prepare(
+      `SELECT commit_hash FROM execution_logs
+       WHERE agent_id = ? AND status = 'running'
+       ORDER BY started_at DESC LIMIT 1`
+    )
+    .get(agentId) as { commit_hash: string | null } | undefined
+  return row?.commit_hash ?? undefined
+}
+
 /** 按 trace_id 反查 commit_hash（契约③ 状态机推进的定位键）。
  *  审查链 verdict 消息的 task_id = 源链 trace_id（E3 接线），源链执行行挂 commit_hash——
  *  反查被审 commit 供 flow_states 推进。无 commit 链路的执行行（纯会话/未写回）返回 undefined。 */
