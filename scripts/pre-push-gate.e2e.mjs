@@ -9,7 +9,7 @@
  *
  * 区分性：非贪婪要求——每个场景同时跑**两份 hook**：
  *   - current = 工作区 `.husky/pre-push`（被测对象，真身，非副本）
- *   - legacy  = `git show HEAD:.husky/pre-push` 的逐字副本（改动前实现）
+ *   - legacy  = 改动前那份 hook 的逐字副本，**按 blob sha 内容寻址**取
  * 打印对照表；标注为 discriminator 的场景断言两者**结论相反**——
  * 「新实现必拦」若在旧实现下也拦，那条断言什么都没证明（恒真门）。
  *
@@ -163,15 +163,33 @@ const BLOCK_MARKERS = ['推送阻断', '.push-gate 内容无效']
 const isBlocked = (r) => r.code !== 0 && BLOCK_MARKERS.some((m) => r.out.includes(m))
 const isAllowed = (r) => r.code === 0
 
-// ─── legacy 副本：`git show HEAD:.husky/pre-push` 逐字 ────────
+// ─── legacy 副本：按**内容寻址**取改动前那一份（T-O 复审 必改 1）────
+//
+// 原实现取 `git show HEAD:.husky/pre-push`——**HEAD 是可变 ref，而本提交自己就
+// 移动了它** ⇒ 取回来的是 current 自己，两份 hook 逐字相同：两条自证断言翻红、
+// 三条区分性场景退化成「同结论」（实测 HEAD 在本提交上跑出 19 passed / 5 failed）。
+// 基线挂在会动的东西上 = 交付物自带一套在 HEAD 上跑红的测试，文件头自称的
+// 「自包含、可进 CI」也不成立。改按 blob sha：该对象躺在改动前的 commit 里，
+// 与 HEAD / 分支指向哪里无关（`git show <blob>` 对任意可达对象均有效）。
+const LEGACY_HOOK_BLOB = '3c9dd3cb96c384efefcd2aa8007740b016544db0' // T-O 改动前的 .husky/pre-push
 
 const legacyDir = mkdtempSync(join(TEST_BASE, 'legacy-hooks-'))
 const currentHookContent = readFileSync(join(HOOKS_CURRENT, 'pre-push'), 'utf-8')
-const legacyHookContent = execFileSync('git', ['show', 'HEAD:.husky/pre-push'], {
-  cwd: REPO_ROOT,
-  encoding: 'utf-8',
-  env: GIT_ENV,
-})
+let legacyHookContent
+try {
+  legacyHookContent = execFileSync('git', ['show', LEGACY_HOOK_BLOB], {
+    cwd: REPO_ROOT,
+    encoding: 'utf-8',
+    env: GIT_ENV,
+  })
+} catch (err) {
+  // 取不到就**明确报错**，不要静默退化成空串——那会让两条自证断言以「兜住了」
+  // 的姿态翻红，掩盖真实原因（对象被 gc / 仓库不完整）。
+  console.error(`  ❌ 无法取出 legacy 基线 blob ${LEGACY_HOOK_BLOB}`)
+  console.error(`     ${String(err.stderr || err.message).trim()}`)
+  console.error('     该 blob = T-O 改动前的 .husky/pre-push；若已被 gc，改用当次 commit 定位。')
+  process.exit(1)
+}
 writeFileSync(join(legacyDir, 'pre-push'), legacyHookContent, { mode: 0o755 })
 
 console.log('📦 pre-push 审查门禁 e2e（T-O）')
@@ -179,7 +197,9 @@ console.log('')
 console.log(`  仓库根:      ${REPO_ROOT}`)
 console.log(`  临时根:      ${TEST_BASE}`)
 console.log(`  current hook: ${HOOKS_CURRENT}/pre-push  sha256:${sha256(currentHookContent)}`)
-console.log(`  legacy  hook: git show HEAD:.husky/pre-push  sha256:${sha256(legacyHookContent)}`)
+console.log(
+  `  legacy  hook: blob ${LEGACY_HOOK_BLOB.slice(0, 12)}（改动前那份）  sha256:${sha256(legacyHookContent)}`
+)
 console.log('')
 
 // 副本必须**真是**改动前那份——否则「区分性」是在跟自己的影子比。
@@ -303,15 +323,21 @@ const SCENARIOS = [
   },
   {
     id: '8',
-    desc: '删除远端 ref（local sha 全 0）→ 放行（无对象可审）',
+    desc: '★区分性：删除远端 ref + HEAD 未审 → 放行（无对象可审，不回落 HEAD）',
     expect: 'allow',
+    discriminator: true,
+    // 删除 ref 是**一行合法 refspec**（local sha 全 0），无对象可审 ⇒ 放行，
+    // 与 HEAD 的审查状态无关。旧实现不读 stdin ⇒ 落 HEAD 回落分支，按 HEAD
+    // 判成「有未审 commit」拦下（实测复现）。
+    // 原 fixture 把 HEAD 摆在 gate 上，测到的是回落的**幸运路径**、不是本场景
+    // 自称的那条 ⇒ 假绿；故 HEAD 必须离 gate 一格。
     run: (hooks) => {
       const repo = newRepo(hooks)
       const c1 = commitFile(repo, 'a.txt', '1', 'c1')
       const c2 = commitFile(repo, 'a.txt', '2', 'c2')
-      writeGate(repo, c2)
       // 先把 feat 推上去（绕过门禁），再删
       tryPush(repo, [`${c1}:refs/heads/feat`], { noVerify: true })
+      writeGate(repo, c1) // 已审点 = c1；HEAD = c2 **未审**
       return tryPush(repo, [':refs/heads/feat'])
     },
   },
@@ -336,6 +362,37 @@ const SCENARIOS = [
       commitFile(repo, 'a.txt', '1', 'c1')
       writeFileSync(join(repo, '.push-gate'), 'not-a-sha\n', 'utf-8')
       return tryPush(repo, ['HEAD:refs/heads/main'])
+    },
+  },
+  {
+    id: '11',
+    desc: '★区分性：删除远端 ref 与未审 refspec 同推 → 拦（删除不掩盖未审）',
+    expect: 'block',
+    discriminator: true,
+    // 一行删除 + 一行未审：删除被放行**不等于**整条推送放行。
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      const c2 = commitFile(repo, 'a.txt', '2', 'c2')
+      git(repo, ['checkout', '-q', '-b', 'feat', c1])
+      const cFeat = commitFile(repo, 'feat.txt', 'x', 'feat: 未审')
+      git(repo, ['checkout', '-q', c2])
+      tryPush(repo, [`${c1}:refs/heads/doomed`], { noVerify: true })
+      writeGate(repo, c2) // HEAD == gate（旧实现据此放行）
+      return tryPush(repo, [':refs/heads/doomed', `${cFeat}:refs/heads/feat`])
+    },
+  },
+  {
+    id: '12',
+    desc: '回归对照：删除远端 ref + HEAD 已审 → 放行（结论与 HEAD 审查状态无关）',
+    expect: 'allow',
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      const c2 = commitFile(repo, 'a.txt', '2', 'c2')
+      tryPush(repo, [`${c1}:refs/heads/feat`], { noVerify: true })
+      writeGate(repo, c2) // 已审点 == HEAD
+      return tryPush(repo, [':refs/heads/feat'])
     },
   },
 ]
@@ -371,7 +428,9 @@ for (const sc of SCENARIOS) {
 // 不用花框表格：CJK 是双宽字符，`padEnd` 按码点数补空格 ⇒ 中英混排必然错位，
 // 要修就得引一个显示宽度库。改成「结论在前、逐行缩进」，零对齐依赖。
 console.log('')
-console.log('  区分性对照（legacy = `git show HEAD:.husky/pre-push` / current = 本单实现）：')
+console.log(
+  `  区分性对照（legacy = blob ${LEGACY_HOOK_BLOB.slice(0, 12)} 改动前实现 / current = 工作区实现）：`
+)
 for (const r of rows) {
   const cell = (x) => (isBlocked(x) ? '拦' : x.code === 0 ? '放行' : `非零(code=${x.code})`)
   console.log(

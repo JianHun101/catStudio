@@ -715,17 +715,35 @@ running 两行 → 旧实现盖 2 条、新实现只 1 条」（字面实现 = �
 故 ③ 显式放行（理由写进 hook 注释：内容全在已审面内）。**判据 4（reset/rebase 无祖先关系 → 拦）不受影响**——
 那种情形落在 ④。**已报店长，可否决**。
 
-**验收（5 条，区分性用 `git show HEAD:.husky/pre-push` 逐字副本同场景对照）**：
+**验收（5 条，区分性用改动前 hook 的逐字副本同场景对照）**：
 
 - [x] ① HEAD 停在已审点 + 推**另一个未审 sha** → 拦　（**旧实现放行** ★区分性成立）
 - [x] ② 推的正是 `.push-gate` 那一笔 → 放行（旧实现同）
 - [x] ③ 一次推多 refspec（一审一未审）→ 拦　（**旧实现放行** ★区分性成立）
 - [x] ④ reset/rebase 后无祖先关系 → 拦　（**旧实现 exit 0 放行** ★区分性成立）
 - [x] ⑤ `--no-verify` 仍绕过（逃生口保留，旧实现同）
-- 另：缺 `.push-gate` → 拦；内容非法 → 拦；删除 ref → 放行；无 stdin 回落 HEAD → 拦（均回归对照）
+- 另：缺 `.push-gate` → 拦；内容非法 → 拦；无 stdin 回落 HEAD → 拦（回归对照）
 
-**证据**：`node scripts/pre-push-gate.e2e.mjs` → **24 passed / 0 failed**（10 场景 × legacy/current 双跑），
-3 条区分性场景 legacy 与 current **结论全部相反**。**新增 1 文件**：`scripts/pre-push-gate.e2e.mjs`。
+**证据**：`node scripts/pre-push-gate.e2e.mjs` → **28 passed / 0 failed**（12 场景 × legacy/current 双跑），
+**5 条**区分性场景 legacy 与 current **结论全部相反**。**新增 1 文件**：`scripts/pre-push-gate.e2e.mjs`。
+
+### T-O 复审 ⚠️ 必改 2 条（`36f4548` → 本笔）
+
+**必改 1｜legacy 基线挂在会动的 ref 上**：原取 `git show HEAD:.husky/pre-push`——**HEAD 是可变
+ref，而本提交自己就移动了它** ⇒ 取回来的是 current 自己，两份逐字相同：两条自证断言翻红、
+三条区分性场景退化成「同结论」。**实测 HEAD 在本提交上跑出 19 passed / 5 failed**，
+即交付物自带一套在 HEAD 上跑红的测试，文件头自称的「自包含、可进 CI」也不成立。
+**修法**：改按 **blob sha 内容寻址**（`LEGACY_HOOK_BLOB = 3c9dd3cb96c3…`，即 T-O 改动前的
+`.husky/pre-push`），取不到即明确报错退出（不静默退化为空串）。两条自证断言原样保留继续兜底。
+
+**必改 2｜「删除 ref → 放行」不成立，场景 8 是假绿**：删除 ref 的 `continue`（hook `:99-102`）
+**不计入计数**，于是落进「一行都没解析出」的 HEAD 回落分支 ⇒ 删除动作被 HEAD 的审查状态左右，
+回报还误导成「有未审 commit」。**独立探针实测**（自建 bare remote + 真 push + 真 hook）：
+`gate=c1 / HEAD=c2 未审 + 删远端 ref` → **BLOCK（旧实现）**；`gate=HEAD` → ALLOW。
+原场景 8 的 fixture 恰把 HEAD 摆在 gate 上，测到的是回落的**幸运路径**、不是它自称的那条。
+**修法**：拆两个计数——`saw_refspec` 在空行跳过之后自增（删除 ref 是一行**合法** refspec），
+回落分支只认「一行都没解析出」。**新增场景 8**（HEAD 未审 + 删 ref → 放行，★区分性）、
+**11**（删 ref 与未审 refspec 同推 → 拦，★区分性）、**12**（删 ref + HEAD 已审 → 放行，回归对照）。
 
 **并入 6 条**：
 
@@ -738,13 +756,21 @@ running 两行 → 旧实现盖 2 条、新实现只 1 条」（字面实现 = �
    （那行 `return body.sessionId` 才在 try 里），**两文件同号不同物**）。新增 `callWithTransientRetry`
    （只重试 `HANDOFF_TRANSIENT`，其余上抛）+ helper 自证两条断言。
 3. **e2e stub 镜像补全**：`handleMessagePost` + `mirrorEntryGateError` 忠实镜像
-   `buildDeliveryGateError` 两个 400 条件。**接了 11 处**（全部会应答 2xx 的 inline stub）；
-   **3 处刻意不接并就地注明理由**——11b（设计应答就是 400，闸门被包含、零区分性）、
-   13b/13c（`socket.destroy()` 永不应答，400/201 在客户端不可观测）。
-   规则 B（审查类缺 chainType）在本 e2e **当前不可达**（`mentions:[fillerName]`，filler ∈ {store,
-   implementer}——**DB 实测**：店长=store / ds猫·flash猫·dsh猫=implementer / reviewer 只有吐槽猫）
-   ⇒ 仍实现（要忠实镜像，不要现状快照）并加诊断断言钉住「放行载荷不得点名 reviewer」。
-   另加**非恒真**自证：`gatedPostBodies.length > 0`（镜像没接上时，全部投递断言会退化成恒真门）。
+   `buildDeliveryGateError` 两个 400 条件。全文件 15 处 `/api/messages` POST 分支 =
+   **11 处经 `handleMessagePost` 接闸** + **3 处刻意不接并就地注明理由**（11b 设计应答
+   就是 400，闸门被包含、零区分性；13b/13c `socket.destroy()` 永不应答，400/201 在
+   客户端不可观测）+ 1 处 `startAttributionStub` **自带走内联闸**（缺 taskId 即 400）。
+   > **更正（T-O 复审 §四-1）**：本段原写「**接了 11 处**（全部会应答 2xx 的 inline stub）」
+   > ——**两处都不实**。当时实为 10 处，且 `11d`（现 `:1067`）是唯一一处**无条件答 201、
+   > 既无闸也不在 3 处例外里**的 stub（其断言 `okNotApproved==='ok'` 在「载荷无锚」下
+   > 照样绿）。**无 live gap**（该路径经 `attemptDeliver` 自铸锚），故当时只记不阻断；
+   > 本笔已**把 11d 接上闸**，「全部 2xx stub 都已接镜像」于兹成立。
+   > 计数口径：`grep -c 'return handleMessagePost'` 会多算 1（JSDoc `:175` 里有一处示范），
+   > 调用点实为 11 处。
+   > 规则 B（审查类缺 chainType）在本 e2e **当前不可达**（`mentions:[fillerName]`，filler ∈ {store,
+   > implementer}——**DB 实测**：店长=store / ds猫·flash猫·dsh猫=implementer / reviewer 只有吐槽猫）
+   > ⇒ 仍实现（要忠实镜像，不要现状快照）并加诊断断言钉住「放行载荷不得点名 reviewer」。
+   > 另加**非恒真**自证：`gatedPostBodies.length > 0`（镜像没接上时，全部投递断言会退化成恒真门）。
 4. **`shortHash` vs `COMMIT_SHA_RE`**：见下方观察项（**属 ds猫 边界，本笔只记不修**）。
 5. **本段（T-N/T-O 立单）+ 行号漂移更正 2 处**（见 T-M 段件 4）。
 6. 顺手：e2e 临时目录**崩溃路径清理**（`process.on('exit')`）——实测残留 `handoff-e2e-nexELU`

@@ -8,6 +8,8 @@
 #   在「HEAD 恰好停在已审点」时落进「LAST_REVIEWED == HEAD_SHA → exit 0」分支
 #   **整条放行**。审计对象必须与执行对象同面——git 在 stdin 逐行传的就是本次要推的
 #   `<local ref> <local sha> <remote ref> <remote sha>`，不读 stdin 等于换了判据面。
+#   回落 HEAD 只在「一行 refspec 都没解析出」（人工直跑 / 无 stdin）时生效——
+#   删除 ref（local sha 全 0）是一行合法的 refspec，无对象可审 ⇒ 放行，不回落。
 #
 # 自动补投：调用 handoff-gen.mjs --gate-deliver 补投滞留的交接文档
 # （pending 队列按 SHA 补投 + 兜底投递 HEAD）。
@@ -74,13 +76,19 @@ fi
 
 PUSH_SPECS=$(cat)
 blocked=0
-checked=0
+saw_refspec=0
 blocked_list=""
 ok_list=""
 
 while read -r local_ref local_sha remote_ref remote_sha; do
-  # 空行 / 字段不全的行跳过；「一行都没解析出」由下方 checked 兜底
+  # 空行 / 字段不全的行跳过（git 不会传这种行；人工直跑 hook 时压根没有 stdin）
   [ -z "$local_sha" ] && continue
+
+  # 解析到了一行 refspec —— 这与「其中几行可审」是**两件事**，计数必须在这里自增。
+  # 若落到下面「删除 ref」那个 continue 之后才自增，「只删远端 ref」就会漏计，
+  # 被下方的「一行都没解析出」回落分支捞走、转去校验 HEAD：删除动作于是被 HEAD
+  # 的审查状态左右，回报还误导成「有未审 commit」（T-O 复审 必改 2 实测复现）。
+  saw_refspec=$((saw_refspec + 1))
 
   # 非 hex → 拒（fail-closed：看不懂的输入不放行）
   case "$local_sha" in
@@ -96,12 +104,12 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     continue
   fi
 
-  # 删除 ref（local sha 全 0）：无对象可审，放行
+  # 删除 ref（local sha 全 0）：无对象可审，放行。
+  # 它**已经**被上面的 saw_refspec 计过——放行的是这一行 refspec 本身，
+  # 与 HEAD 停在哪儿无关。
   if [ "$local_sha" = "$ZERO_SHA" ]; then
     continue
   fi
-
-  checked=$((checked + 1))
 
   # ① 推的正是审查记录那一笔 ⇒ 已审
   if [ "$LAST_REVIEWED" = "$local_sha" ]; then
@@ -134,8 +142,11 @@ done <<EOF
 $PUSH_SPECS
 EOF
 
-# 无 refspec（人工直跑 hook / git 未传 stdin）→ 回落 HEAD 校验，保持旧行为
-if [ "$checked" -eq 0 ] && [ "$blocked" -eq 0 ]; then
+# 无 refspec（人工直跑 hook / git 未传 stdin）→ 回落 HEAD 校验，保持旧行为。
+# 判据是「一行 refspec 都**没解析出**」，**不是**「没有可审的 refspec」——后者会把
+# 「只删远端 ref」误并入本分支（见上方 saw_refspec 处注释）。
+# （blocked=1 必然蕴含 saw_refspec≥1，故无需再叠加 blocked 判据。）
+if [ "$saw_refspec" -eq 0 ]; then
   HEAD_SHA=$(git rev-parse HEAD)
   if [ "$LAST_REVIEWED" = "$HEAD_SHA" ]; then
     exit 0

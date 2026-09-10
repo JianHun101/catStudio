@@ -1065,10 +1065,14 @@ console.log('📦 测试组 11: 投递瞬态重试')
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHitsNotApproved++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      // T-O 复审 §四-1：本处原为**未接闸**的 inline 201——「全部会应答 2xx 的
+      // inline stub 都已接镜像」的说法因它而不成立（它恰是唯一一处）。接上：
+      // 载荷无锚时应在入口 400，而不是被这个 stub 无条件吞成 201。
+      return handleMessagePost(req, res, () => {
+        postHitsNotApproved++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
