@@ -297,7 +297,7 @@ const READ_SKILL_TOOL = {
 const LIST_SKILLS_TOOL = {
   name: LIST_SKILLS_TOOL_NAME,
   description:
-    '列出猫咖技能清单（P2 流程链 8 技能 + 一句话说明）。' +
+    `列出猫咖技能清单（P2 流程链 ${FLOW_CHAIN_SKILLS.length} 技能 + 一句话说明）。` +
     'catalog 已内嵌 read_skill 描述，本工具是冗余兜底——模型不确定有哪些技能时可先调本工具。',
   inputSchema: {
     type: 'object',
@@ -652,7 +652,7 @@ export function readSkill(name) {
   }
 }
 
-/** 列技能清单（list_skills 工具实现）——catalog 即 P2=A 流程链 8 技能 + 一句话说明。 */
+/** 列技能清单（list_skills 工具实现）——catalog 即 P2=A 流程链技能；数量动态渲染，不在文案写死。 */
 export function listSkills() {
   const lines = Object.entries(SKILL_CATALOG).map(([n, desc]) => `- ${n}: ${desc}`)
   return {

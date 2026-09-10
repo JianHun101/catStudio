@@ -45,15 +45,29 @@ import {
 } from './mcp-server-utils.mjs'
 
 /**
- * 读技能正文（静态源断言用——catalog 回流技能须守住 ADR 0014 §3 的零路由不变量）。
- * 路径由本文件位置推导，不依赖 cwd；只读真实仓库单源 `skills/`。
+ * 读 `skills/` 下任意仓库源文件（静态源断言用；路径由本文件位置推导，不依赖 cwd）。
+ * 只读真实仓库单源 `skills/`，不读测试内快照常量——断言守的必须是技能/模板本体。
  */
-function readSkillDoc(name) {
+function readSkillsFile(...segments) {
   return readFileSync(
-    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'skills', name, 'SKILL.md'),
+    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'skills', ...segments),
     'utf8'
   )
 }
+
+/** 读技能正文（ADR 0014 §3 零路由不变量守卫用） */
+function readSkillDoc(name) {
+  return readSkillsFile(name, 'SKILL.md')
+}
+
+/**
+ * ADR 0014 §3 零路由黑名单（**冒烟守卫**——窄内容黑名单，不是不变量强制）。
+ * 本系统路由判据是 `@`；中文短语只挡最常见表述，不保证穷尽（如英文 "Reviewer" 不在此列）。
+ */
+const ROUTING_PATTERNS = [
+  /请谁审查|投给谁/,
+  /(请|交给|转给|发给|递给|通知|告知)\s*(审查者|审查猫|吐槽猫|店长)/,
+]
 
 /** 深删 description 键（inputSchema 结构冻结对比用——瘦身只允许 description 文案变化） */
 function stripDescriptions(v) {
@@ -408,7 +422,7 @@ describe('validateReadSkillParams (read_skill)', () => {
     expect(r).toEqual({ ok: true, name: 'quality-gate' })
   })
 
-  it('合法入参：清单内全部 8 技能全放行', () => {
+  it('合法入参：清单内全部技能全放行', () => {
     for (const name of FLOW_CHAIN_SKILLS) {
       expect(validateReadSkillParams({ name }).ok).toBe(true)
     }
@@ -615,13 +629,21 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
   })
 
   // ADR 0014 §3 不变量：技能正文只管领域内容，不含路由（@谁 / 请谁审查 / 投给谁）。
-  // request-review 回流（2026-09-10）是「名字回流、范围收窄」——本断言把它守死，
-  // 防这次翻转把 §3 一起翻掉。
+  // request-review 回流（2026-09-10）是「名字回流、范围收窄」——本断言把它守住
+  // （冒烟守卫：`@` 是硬判据，中文黑名单是窄的），防这次翻转把 §3 一起翻掉。
   it('request-review 技能正文零路由（ADR 0014 §3 不变量）', () => {
     const text = readSkillDoc('request-review')
     // frontmatter 一并纳入守卫：路由藏在 description 里同样破坏不变量
     expect(text).not.toContain('@')
-    expect(text).not.toMatch(/请谁审查|投给谁/)
+    for (const re of ROUTING_PATTERNS) expect(text).not.toMatch(re)
+  })
+
+  // F1 实证：路由行曾藏在技能**引用的 ref** 里（ADR §5 合并时漏剥末行），当前恰好没被踩到。
+  // 本断言把零路由守卫从 SKILL.md 扩到它引用的共享模板——同一形状的洞不再只靠运气。
+  it('request-review 引用的共享模板无 @ 行 / 无中文路由黑名单（F1 回归守卫）', () => {
+    const text = readSkillsFile('refs', 'review-request-template.md')
+    expect(text).not.toContain('@')
+    for (const re of ROUTING_PATTERNS) expect(text).not.toMatch(re)
   })
 
   // 回流技能的领域内容三条（票单 T-B 验收一）：门槛六条 / 同型 audit / 轮次升级
@@ -705,7 +727,7 @@ describe('技能读盘契约（readSkill / getSkillsRoot / findRepoRoot / listSk
     }
   })
 
-  it('listSkills 返回 8 技能清单（catalog 即流程链）', () => {
+  it('listSkills 返回全量技能清单（catalog 即流程链）', () => {
     const r = listSkills()
     expect(r.ok).toBe(true)
     for (const name of FLOW_CHAIN_SKILLS) {

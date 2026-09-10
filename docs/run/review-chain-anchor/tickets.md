@@ -115,6 +115,13 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 - [ ] 全仓 grep 无残留「自动触发审查」表述
 - [ ] 文案指向的技能名真实存在
 
+**T-B 复审连带（2026-09-10 吐槽猫 ⚠️，计数消费方清单）**：同一「8→9」事实在仓库有 7 处落点，T-B 修掉 5 处（`mcp-server-utils.mjs` 工具描述 + `listSkills` 注释、`mcp-server.test.js` 两处测试名、`manifest.yaml` 27/27→28/28）。**余下各处归 T-D 一并收**，勿再按单点修：
+
+- `manifest.yaml:325`「投递型定制层（handoff/request-review）…已移除」——与同文件 `:345-347` 的 `pipeline.review` 现直接矛盾
+- `manifest.yaml:340` / `:351`（铁律一「post-commit hook 触发 handoff-gen，Agent 只补填不自行发起」）
+- `docs/adr/0014:68` 白名单枚举仍 8 项、仍写「request-review 已从技能层移除」
+- `docs/research/skill-delivery-decoupling-spec.md:80`、`skills/refs/shared-rules.md:28/44/96/97` 路由口径（历史快照 / 共享 ref，两者本票均未动）
+
 ---
 
 ## 阶段二 · 治根因（链锚统一）
