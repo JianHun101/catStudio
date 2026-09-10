@@ -8,8 +8,9 @@
  */
 
 import { execSync } from 'node:child_process'
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -77,10 +78,16 @@ function startStubServer(handler) {
 
 // ─── Setup: 创建临时 git 仓库 ───────────────────────────────
 
-const TMP = join(ROOT, '.handoff-test-tmp')
-if (existsSync(TMP)) {
-  rmSync(TMP, { recursive: true, force: true })
-}
+// 所有测试仓库都建在**系统临时目录**下的一个私有根里，绝不建在仓库树内。
+// 起因：本文件此前用 `join(ROOT, '.handoff-test-*')` 在仓库根建临时仓库，而
+// 那些目录既不在 .gitignore 里、清理又不全（模块级的 EMPTY_TMP / SNAPSHOT_TMP /
+// NO_POST_TMP / RANGE_TMP 从不删除）——任何并发的 `git add -A`（auto-commit）
+// 都会把它们扫进提交。本仓库已因此踩过两次。改到 os.tmpdir() 是根修：
+// 临时产物不该出现在仓库树里，于是"清理不全"也就不再是污染源。
+// 注意：不补 .gitignore 兜底——那会掩盖同类回归（目录再出现时不再刺眼）。
+const TEST_BASE = mkdtempSync(join(tmpdir(), 'handoff-e2e-'))
+
+const TMP = join(TEST_BASE, 'tmp')
 mkdirSync(TMP, { recursive: true })
 
 function git(cmd) {
@@ -432,7 +439,7 @@ console.log('')
 console.log('📦 测试组 6: 边界情况')
 
 // 6a: 无改动的仓库
-const EMPTY_TMP = join(ROOT, '.handoff-test-empty')
+const EMPTY_TMP = join(TEST_BASE, '.handoff-test-empty')
 if (existsSync(EMPTY_TMP)) rmSync(EMPTY_TMP, { recursive: true, force: true })
 mkdirSync(EMPTY_TMP, { recursive: true })
 execSync('git init', { cwd: EMPTY_TMP, stdio: 'pipe' })
@@ -451,7 +458,7 @@ try {
 
 // 6b: catstudy 自动快照 commit → 有代码改动时不应跳过，应正常生成 handoff
 // （死循环已由 git-utils.ts gitCommit() 自然阻断——无改动时 commit 失败不触发 hook）
-const SNAPSHOT_TMP = join(ROOT, '.handoff-test-snapshot')
+const SNAPSHOT_TMP = join(TEST_BASE, '.handoff-test-snapshot')
 if (existsSync(SNAPSHOT_TMP)) rmSync(SNAPSHOT_TMP, { recursive: true, force: true })
 mkdirSync(SNAPSHOT_TMP, { recursive: true })
 execSync('git init', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
@@ -521,7 +528,7 @@ console.log('')
 console.log('📦 测试组 8: --no-post 标志')
 
 // 8a: --no-post 时不尝试连接服务器，文件留在磁盘
-const NO_POST_TMP = join(ROOT, '.handoff-test-nopost')
+const NO_POST_TMP = join(TEST_BASE, '.handoff-test-nopost')
 if (existsSync(NO_POST_TMP)) rmSync(NO_POST_TMP, { recursive: true, force: true })
 mkdirSync(NO_POST_TMP, { recursive: true })
 
@@ -592,7 +599,7 @@ function runCliExpectExit(args, opts = {}) {
 }
 
 // 构建: 3 个 commit（基线 → 改 a.ts → 新增 b.ts）
-const RANGE_TMP = join(ROOT, '.handoff-test-range')
+const RANGE_TMP = join(TEST_BASE, '.handoff-test-range')
 if (existsSync(RANGE_TMP)) rmSync(RANGE_TMP, { recursive: true, force: true })
 mkdirSync(RANGE_TMP, { recursive: true })
 execSync('git init', { cwd: RANGE_TMP, stdio: 'pipe' })
@@ -700,7 +707,7 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   })
   const serverUrl = `http://127.0.0.1:${port}`
 
-  const LOOKUP_TMP = join(ROOT, '.handoff-test-lookup')
+  const LOOKUP_TMP = join(TEST_BASE, '.handoff-test-lookup')
   if (existsSync(LOOKUP_TMP)) rmSync(LOOKUP_TMP, { recursive: true, force: true })
   mkdirSync(LOOKUP_TMP, { recursive: true })
   execSync('git init', { cwd: LOOKUP_TMP, stdio: 'pipe' })
@@ -788,7 +795,7 @@ console.log('📦 测试组 11: 投递瞬态重试')
   const uuid = '77c0e5b4-3d14-4f66-bc8e-11ab22cd33dd'
 
   // git 仓库：commit 带 catstudy [uuid] → 反查可命中
-  const RETRY_TMP = join(ROOT, '.handoff-test-retry')
+  const RETRY_TMP = join(TEST_BASE, '.handoff-test-retry')
   if (existsSync(RETRY_TMP)) rmSync(RETRY_TMP, { recursive: true, force: true })
   mkdirSync(RETRY_TMP, { recursive: true })
   execSync('git init', { cwd: RETRY_TMP, stdio: 'pipe' })
@@ -990,7 +997,7 @@ console.log('📦 测试组 12: 投递去重')
 
 {
   const uuid = 'aabbccdd-1122-3344-5566-778899aabbcc'
-  const DEDUP_TMP = join(ROOT, '.handoff-test-dedup')
+  const DEDUP_TMP = join(TEST_BASE, '.handoff-test-dedup')
   if (existsSync(DEDUP_TMP)) rmSync(DEDUP_TMP, { recursive: true, force: true })
   mkdirSync(DEDUP_TMP, { recursive: true })
   execSync('git init', { cwd: DEDUP_TMP, stdio: 'pipe' })
@@ -1142,7 +1149,7 @@ async function runInProc(cwd, url, opts = {}) {
 
 /** 建一个带 catstudy [uuid] commit 的临时仓库 */
 function makeUuidRepo(dirName, uuid, files) {
-  const tmp = join(ROOT, dirName)
+  const tmp = join(TEST_BASE, dirName)
   if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
   mkdirSync(tmp, { recursive: true })
   execSync('git init', { cwd: tmp, stdio: 'pipe' })
@@ -1312,7 +1319,7 @@ function gitIn(tmp, cmd) {
 {
   const uuid1 = '13dd0000-0000-4000-8000-000000000001'
   const uuid2 = '13dd0000-0000-4000-8000-000000000002'
-  const TMP13D = join(ROOT, '.handoff-test-prune')
+  const TMP13D = join(TEST_BASE, '.handoff-test-prune')
   if (existsSync(TMP13D)) rmSync(TMP13D, { recursive: true, force: true })
   mkdirSync(TMP13D, { recursive: true })
   execSync('git init', { cwd: TMP13D, stdio: 'pipe' })
@@ -1390,7 +1397,7 @@ function gitIn(tmp, cmd) {
 {
   const uuid2 = '13ee0000-0000-4000-8000-000000000002'
   const uuid3 = '13ee0000-0000-4000-8000-000000000003'
-  const TMP13E = join(ROOT, '.handoff-test-pending')
+  const TMP13E = join(TEST_BASE, '.handoff-test-pending')
   if (existsSync(TMP13E)) rmSync(TMP13E, { recursive: true, force: true })
   mkdirSync(TMP13E, { recursive: true })
   execSync('git init', { cwd: TMP13E, stdio: 'pipe' })
@@ -1472,7 +1479,7 @@ function gitIn(tmp, cmd) {
 {
   const uuidBad = '13ff0000-0000-4000-8000-0000000000ff'
   const uuidOk = '13ff0000-0000-4000-8000-00000000000f'
-  const TMP13F = join(ROOT, '.handoff-test-pending-fatal')
+  const TMP13F = join(TEST_BASE, '.handoff-test-pending-fatal')
   if (existsSync(TMP13F)) rmSync(TMP13F, { recursive: true, force: true })
   mkdirSync(TMP13F, { recursive: true })
   execSync('git init', { cwd: TMP13F, stdio: 'pipe' })
@@ -1532,7 +1539,7 @@ function gitIn(tmp, cmd) {
 
 // 13g: writeState 并发合并语义（基线合并 + 删除权威——2026-08-01 实测并发事故的回归防护）
 {
-  const TMP13G = join(ROOT, '.handoff-test-merge')
+  const TMP13G = join(TEST_BASE, '.handoff-test-merge')
   if (existsSync(TMP13G)) rmSync(TMP13G, { recursive: true, force: true })
   mkdirSync(TMP13G, { recursive: true })
   const shaA = 'a'.repeat(40)
@@ -1729,7 +1736,7 @@ async function startAttributionStub({ uuid, sessionId, updated, executor }) {
 
 /** 基础提交（无 uuid）+ N 个共享同一 catstudy uuid 的提交（模拟"一次派发多 commit"） */
 function makeSpanRepo(dirName, uuid, commits) {
-  const tmp = join(ROOT, dirName)
+  const tmp = join(TEST_BASE, dirName)
   if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
   mkdirSync(tmp, { recursive: true })
   execSync('git init', { cwd: tmp, stdio: 'pipe' })
@@ -1793,7 +1800,9 @@ console.log('')
 
 // ─── Cleanup ────────────────────────────────────────────────
 
-rmSync(TMP, { recursive: true, force: true })
+// 整个私有根一次删掉——不再逐个 rmSync，于是「漏删某个测试仓库」这个类别消失。
+// 即便本进程在删之前崩掉，残留也落在系统临时目录里，不进仓库树。
+rmSync(TEST_BASE, { recursive: true, force: true })
 
 // ─── 结果汇总 ───────────────────────────────────────────────
 
