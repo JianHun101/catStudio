@@ -6,20 +6,35 @@
  * 补完后转发给 @吐槽猫 审查——全程不需要用户手动干预。
  *
  * 用法:
- *   node scripts/handoff-gen.mjs                    # 分析 HEAD~1..HEAD，自动投递到 cat-study
+ *   node scripts/handoff-gen.mjs                    # post-commit：判归属后投递 HEAD（见下）
  *   node scripts/handoff-gen.mjs --no-post          # 只生成 .handoff-draft.md，不投递
  *   node scripts/handoff-gen.mjs --gate-deliver     # pre-push 门禁入口：补投 pending 队列
  *                                                   # + 兜底投递 HEAD（若尚未投递）
+ *   node scripts/handoff-gen.mjs --fallback-sha=<sha>  # 收尾兜底入口（server 执行收尾调用，
+ *                                                   # 补「有 commit 但回复未 @ 审查者」）
  *   node scripts/handoff-gen.mjs --cwd=/path        # 指定仓库路径
+ *
+ * T-A 兜底投递（2026-09-10）：post-commit **不再每 commit 必投**——先判归属
+ * （`decideHookDelivery`，判据源 = commit-hash 写回端点返回的 running 命中行数）：
+ *   - 有归属（agent 执行中提交）→ 静默，审查请求归实施猫自己投（铁律 + request-review）
+ *   - 无归属（用户终端手动提交）→ 无人会投，钩子兜底
+ *   - 判据查不动 → 一律投递（不静默吞）
+ * 漏投由 server 执行收尾补（`--fallback-sha`，判据见 execution/review-fallback.ts）。
+ * 原痛点：钩子每 commit 必投 → 中途返工每新 SHA 叠一条链。
  *
  * 投递幂等（修复重复投递，见重复投递根治计划 A+B+C+D）：
  *   .handoff-delivered.json 状态文件按 commit SHA 记录投递结果，锚点取代"内容字节"：
  *     { "delivered": { "<full-sha>": "<iso-time>" }, "pending": ["<sha>", ...] }
- *   - 同一 SHA 投递成功一次后，后续任何投递机会（post-commit / --gate-deliver）
- *     查状态直接跳过，不再重复投递
+ *   - 同一 SHA 投递成功一次后，后续任何投递机会（post-commit / --gate-deliver /
+ *     --fallback-sha）查状态直接跳过，不再重复投递
  *   - 投递失败（瞬态重试耗尽）的 SHA 记入 pending，每次投递机会先补投 pending：
  *     文档从 git 按 SHA 重新生成（确定性的，不依赖草稿文件）→ 投递 → 成功移入 delivered
  *   - 状态文件丢失/历史改写（reset）自动退化为"首次投递"——宁可多投不可漏投
+ *   ⚠️ 账本与本判据的分工（T-A 定死）：账本键=SHA，答的是「同一 SHA 是否投过」
+ *   （幂等锁）；归属判据源=执行行，答的是「该不该由钩子投」。两者不同源，
+ *   账本无法表达归属——不合并、不互相替代。**判静默不记账本**（账本单态=真投过）：
+ *   记了会把收尾兜底锁死；不给门禁加 skipped 态则是有意的——见 deliverSha 注释。
+ *   pre-push 门禁的 HEAD 兜底因此仍是「有归属但猫没投」的最后一道网。
  *
  * 成功判定（修复 B）：POST 超时/5xx 后不再立即判失败，改为轮询目标会话最近消息
  * 验证"消息是否客观落库"（write→broadcast→dispatch 顺序，落库先于 dispatch 同步等待）。
@@ -180,32 +195,51 @@ export function generateHandoff(opts = {}) {
 
 // ─── 命令参数解析 ───────────────────────────────────────────
 
-function parseArgs(argv) {
+const RANGE_REMOVED = '--range 已移除（Fix C：投递按 commit SHA 幂等，不再生成范围版合并审文档）'
+
+/**
+ * flag 白名单：`--name` → { key: opts 键名, value: 是否取值 }。
+ * **新增 flag 必须在此登记**——未登记即被下面的兜底拒绝（见 parseArgs）。
+ */
+const FLAGS = {
+  cwd: { key: 'cwd', value: true },
+  'fallback-sha': { key: 'fallbackSha', value: true },
+  'no-post': { key: 'noPost', value: false },
+  'gate-deliver': { key: 'gateDeliver', value: false },
+}
+
+/**
+ * 解析命令行参数。**未知参数一律抛错**，绝不静默忽略。
+ *
+ * 为什么必须拒绝而不是忽略：**无参调用 = post-commit 投递路径**（runHandoff 的
+ * 兜底分支）。忽略未知参数 → 拼错的 flag / `--help` 会静默落进那条路径并**真发出
+ * 一条消息**（2026-09-10 实证：`node scripts/handoff-gen.mjs --help` 投出一条补填
+ * 请求 cdc476ba）。`--range` 已因同款理由先行抛错（Fix C），此处把该判据推广到
+ * 全部参数：**参数错误的后果不能是「换一条路继续干」**。
+ * 同款地，取值型 flag 缺值也必须报错（旧实现 `i + 1 < argv.length` 不成立时静默
+ * 跳过 → 参数被悄悄丢掉，等价于没写）。
+ *
+ * 出口语义：参数错误由 main 分支直接 exit 非 0（区别于运行时失败的 exit 0）。
+ */
+export function parseArgs(argv) {
   const opts = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    // 等号形式 --cwd=/path（pre-push 曾用 --range=X..Y，已移除——见下）
-    const eqMatch = /^--([a-z-]+)=(.*)$/.exec(arg)
-    if (eqMatch) {
-      const [, key, value] = eqMatch
-      if (key === 'cwd') opts.cwd = value
-      else if (key === 'no-post') opts.noPost = true
-      else if (key === 'gate-deliver') opts.gateDeliver = true
-      else if (key === 'range') {
-        // 重复投递根治计划 Fix C：pre-push 不再生成范围版合并审文档。
-        // 遇到旧调用必须报错而非静默忽略——静默回退默认 HEAD~1..HEAD 会投出错误文档
-        throw new Error('--range 已移除（Fix C：投递按 commit SHA 幂等，不再生成范围版合并审文档）')
-      }
-      continue
+    // 等号形式 --cwd=/path 与空格形式 --cwd /path 都支持
+    const eqMatch = /^--([a-z-]+)(?:=(.*))?$/.exec(arg)
+    const key = eqMatch ? eqMatch[1] : null
+    if (key === 'range') throw new Error(RANGE_REMOVED)
+    const spec = key ? FLAGS[key] : undefined
+    if (!spec) {
+      throw new Error(`未知参数：${arg}（已知：${Object.keys(FLAGS).join(' / ')}）`)
     }
-    if (arg === '--cwd' && i + 1 < argv.length) {
-      opts.cwd = argv[++i]
-    } else if (arg === '--no-post') {
-      opts.noPost = true
-    } else if (arg === '--gate-deliver') {
-      opts.gateDeliver = true
-    } else if (arg === '--range' && i + 1 < argv.length) {
-      throw new Error('--range 已移除（Fix C：投递按 commit SHA 幂等，不再生成范围版合并审文档）')
+    if (spec.value) {
+      const value = eqMatch[2] !== undefined ? eqMatch[2] : argv[++i]
+      if (value === undefined) throw new Error(`${arg} 缺少值`)
+      opts[spec.key] = value
+    } else {
+      if (eqMatch[2] !== undefined) throw new Error(`${arg} 不接受值（收到 ${eqMatch[2]}）`)
+      opts[spec.key] = true
     }
   }
   return opts
@@ -858,6 +892,42 @@ async function verifyOrTransient(serverUrl, sessionId, message) {
 }
 
 /**
+ * T-A ①（2026-09-10）钩子侧归属判据：这个 commit 该不该由 post-commit 钩子兜底投递。
+ *
+ * 判据源 = commit-hash 写回端点的 `updated` 数（`UPDATE ... WHERE status='running'`
+ * 的命中行数）——命中即「该 commit 归属某次 agent 执行」，这是归属的**定义本身**，
+ * 不是近似：同一个 UPDATE 既写回 commit_hash，也顺手给出归属。
+ *
+ * 语义：有归属 ⇒ commit 由某只猫在执行中提交 ⇒ 审查请求归实施猫自己投（铁律 +
+ * request-review），钩子静默（原痛点：钩子每 commit 必投 → 返工每新 SHA 叠一条链）；
+ * 无归属 ⇒ 用户在终端手动提交，没有任何猫会替它投，钩子兜底。
+ *
+ * 三态（③ 降级语义：判据查不动一律投递，不静默吞）：
+ *   true  有归属 → 不投
+ *   false 无归属 → 投
+ *   null  查不动（写回失败 / 响应不可解析）→ 投
+ *
+ * ⚠️ 与 `.handoff-delivered.json` 的分工（本票定死）：账本是「同一 SHA 是否已投过」
+ * 的幂等锁（键=SHA），本判据是「该不该由钩子投」的归属判定（源=执行行）——两者
+ * 不同源，账本无法表达归属，故不合并、不互相替代。
+ *
+ * @param {boolean|null} attributed — 该 commit 是否有归属执行
+ * @returns {{ deliver: boolean, reason: string }}
+ */
+export function decideHookDelivery(attributed) {
+  if (attributed === true) {
+    return {
+      deliver: false,
+      reason: '该 commit 有归属执行（agent 提交）——实施猫负责主动投递，钩子静默',
+    }
+  }
+  if (attributed === false) {
+    return { deliver: true, reason: '该 commit 无归属执行（用户手动提交）——兜底投递' }
+  }
+  return { deliver: true, reason: '归属判据查不动——一律投递（不静默吞）' }
+}
+
+/**
  * 单次投递尝试：确定目标会话 + POST 交接文档。
  *
  * @param {string} content — 完整的交接文档 markdown
@@ -866,10 +936,11 @@ async function verifyOrTransient(serverUrl, sessionId, message) {
  * @param {Object} [opts]
  * @param {string} [opts.sha] — 目标 commit（pending 补投时传旧 commit SHA，
  *                              反查该 commit 自己的 uuid 所在会话；缺省为 HEAD）
- * @returns {Promise<'ok'|'transient'|'fatal'>}
+ * @returns {Promise<'ok'|'transient'|'fatal'|'skip'>}
  *   ok       — 投递成功（POST 2xx，或超时/5xx 后落库验证命中）
  *   transient— 瞬态故障（连接失败 / 5xx / 落库验证未命中），调用方可延迟重试
  *   fatal    — 确定性失败（无 uuid / 404 / 4xx），重试无意义
+ *   skip     — T-A ① 归属判据判静默（有归属，审查请求归实施猫自己投），非错误
  */
 async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   // 获取 session ID：CATSTUDY_SESSION_ID（人工显式指定，明确意图优先）
@@ -937,6 +1008,8 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   let fillerName = '店长'
   /** E3 接线：源链 task_id（executor 反查同源，commit_hash → execution_logs → trace_id） */
   let taskId
+  /** T-A ① 归属三态：null=查不动（先置未知，写回成功后由 updated 落地） */
+  let attributed = commitUuid ? null : false
   if (commitUuid) {
     // 写回 commit_hash（agent 人工提交路径此前从不写，只有 socketio 自动提交
     // 兜底写）——executor 反查按 commit 精确匹配的前提。失败仅告警不阻断投递：
@@ -953,8 +1026,14 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
         signal: AbortSignal.timeout(3000),
       })
       if (res.ok) {
+        // T-A ①：写回响应的 updated = 命中 running 执行行数 = 归属判据源（见
+        // decideHookDelivery）。解析不出来（老 server 无此字段/非 JSON）→ 保持
+        // null（查不动）→ 走降级语义投递，不静默。
+        const body = await res.json().catch(() => null)
+        const updated = Number(body?.updated)
+        if (Number.isFinite(updated)) attributed = updated > 0
         console.log(
-          `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}）`
+          `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}，归属执行行 ${body?.updated ?? '未知'}）`
         )
       }
     } catch {
@@ -962,6 +1041,25 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
         `[handoff-gen] ⚠️  commit_hash 写回失败——executor 反查退化 uuid 逻辑（兜底 @店长）`
       )
     }
+  }
+  // T-A ①：归属判据放在实施者反查之前——静默路径不必再花两次往返。
+  // 判据**只属于 post-commit 入口**（runHandoff 无其他入口 flag 时传 opts.judgeAttribution；
+  // 钩子就是无参调用，不做显式 flag——挂了 flag 而钩子不传 = 判据在生产路径上不跑）。
+  // --gate-deliver 补投 与 收尾兜底（--fallback-sha）是独立入口，判据不适用——
+  // 前者补的是「当时判定该投但投失败」的 SHA，后者补的是「有归属但猫没投」，
+  // 两者都必然有归属，再判一次只会把自己判静默（自己吞掉自己）。
+  // 留痕：每次裁决一行日志（投/不投 + 理由）——本票唯一安全网。
+  if (opts.judgeAttribution) {
+    const verdict = decideHookDelivery(attributed)
+    console.log(
+      `[handoff-gen] 🔎 兜底投递判据: ${verdict.deliver ? '投递' : '静默'}——${verdict.reason}`
+    )
+    // 返回 'skip' 而非 'ok'：'ok' 会被 deliverSha 记进 delivered 账本，
+    // 把这个 SHA 的收尾兜底（--fallback-sha）当场锁死（探针实测：兜底恒被
+    // 「已投递过（状态文件）」跳过）。静默不是投递，账本不能记。
+    if (!verdict.deliver) return 'skip'
+  }
+  if (commitUuid) {
     const executorInfo = (await resolveExecutorName(serverUrl, commitUuid, commitSha)) || null
     fillerName = executorInfo?.agentName || '店长'
     // E3 接线：源链 task_id 随投递携带（ingest.ts:39 已支持 taskId 字段）——审查链
@@ -1033,8 +1131,8 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
  *
  * @param {string} content — 完整的交接文档 markdown
  * @param {string} [cwd] — 工作目录
- * @param {Object} [opts] — 透传 attemptDeliver（如 { sha }）
- * @returns {Promise<'ok'|'transient'|'fatal'>} 最后一次尝试的结果
+ * @param {Object} [opts] — 透传 attemptDeliver（如 { sha, judgeAttribution }）
+ * @returns {Promise<'ok'|'transient'|'fatal'|'skip'>} 最后一次尝试的结果
  */
 export async function tryPostToCatstudy(content, cwd, opts = {}) {
   const serverUrl = process.env.CATSTUDY_URL || 'http://127.0.0.1:3200'
@@ -1170,12 +1268,15 @@ function resolveFullSha(cwd, sha) {
  * - delivered 命中 → 跳过（幂等；CATSTUDY_SESSION_ID 显式指定时旁路——明确意图，
  *   如会话重建后重投）
  * - ok → 记 delivered、移出 pending
+ * - skip（T-A ①：归属判据判静默）→ **不记账本、不记 pending**，原样返回
  * - fatal → 移出 pending（确定性失败重试无意义，死 SHA 不滞留）
  * - transient（重试已耗尽）→ 记入 pending，下次投递机会自动补投
  *
- * @returns {Promise<'ok'|'transient'|'fatal'>}
+ * @param {Object} [opts] — 透传 tryPostToCatstudy（如 { judgeAttribution: true }，
+ *                          仅 post-commit 入口传——见 decideHookDelivery）
+ * @returns {Promise<'ok'|'transient'|'fatal'|'skip'>}
  */
-async function deliverSha(cwd, serverUrl, sha, content) {
+async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
   const fullSha = resolveFullSha(cwd, sha)
   const state = readState(cwd)
   if (state.delivered[fullSha]) {
@@ -1193,7 +1294,13 @@ async function deliverSha(cwd, serverUrl, sha, content) {
       `[handoff-gen] ℹ️  ${fullSha.slice(0, 7)} 已投递过，但 CATSTUDY_SESSION_ID 显式指定——按明确意图重新投递`
     )
   }
-  const result = await tryPostToCatstudy(content, cwd, { sha })
+  const result = await tryPostToCatstudy(content, cwd, { sha, ...opts })
+  if (result === 'skip') {
+    // T-A ①：归属判据判静默——**不记账本**。账本记的是「真投过」，静默不是投递；
+    // 若在此记 delivered，server 收尾兜底（--fallback-sha）会被自己这条记录锁死
+    // （同一个 SHA 的兜底投递恰好发生在静默之后）。账本语义保持单态：投过才算。
+    return 'skip'
+  }
   if (result === 'ok') {
     state.delivered[fullSha] = new Date().toISOString()
   }
@@ -1234,6 +1341,38 @@ async function drainPending(cwd, serverUrl) {
     console.log(`[handoff-gen] 📤 补投 pending: ${sha.slice(0, 7)}（从 git 重新生成）`)
     await deliverSha(cwd, serverUrl, sha, doc)
   }
+}
+
+/**
+ * --fallback-sha 入口（T-A ②）：**收尾兜底投递**。
+ *
+ * 调用方是 cat-study server 的执行收尾（`execution/review-fallback.ts`）：判定
+ * 「本次执行有 commit，但其回复 mentions 未含审查者」时补投——把「钩子每 commit
+ * 必投」换成「猫主动投、漏了收尾补」的第二道闸。
+ *
+ * 与 post-commit 入口的关键差别：**不跑归属判据**。本入口的 SHA 正是从
+ * execution_logs.commit_hash 取来的，必然有归属——再判一次只会把自己判静默。
+ * 幂等由 `.handoff-delivered.json` 账本兜（同一 SHA 全流程至多投一条），
+ * 与 post-commit 入口共用账本，故两个入口叠加也不会重复投。
+ *
+ * @returns {Promise<'ok'|'transient'|'fatal'|'skip'>}
+ */
+export async function deliverFallbackSha(cwd, serverUrl, sha) {
+  const fullSha = resolveFullSha(cwd, sha)
+  if (!fullSha) {
+    console.log(`[handoff-gen] ⚠️  收尾兜底：sha 无法解析（${sha}）——跳过`)
+    return 'skip'
+  }
+  const doc = generateHandoff({ cwd, sha: fullSha, range: `${fullSha}~1..${fullSha}` })
+  if (!doc) {
+    // merge commit / 空提交 → 无文件改动，无内容可投（与 drainPending 同款处理）
+    console.log(`[handoff-gen] ⏭️  收尾兜底：${fullSha.slice(0, 7)} 无文件改动——无内容可投，跳过`)
+    return 'skip'
+  }
+  console.log(
+    `[handoff-gen] 📤 收尾兜底投递：${fullSha.slice(0, 7)}（执行收尾判定回复未 @ 审查者）`
+  )
+  return await deliverSha(cwd, serverUrl, fullSha, doc)
 }
 
 /** --gate-deliver 兜底：HEAD 若尚未投递则生成并投递（覆盖 post-commit 中途崩溃窗口） */
@@ -1279,6 +1418,13 @@ export async function runHandoff(args) {
     return
   }
 
+  // 收尾兜底入口（T-A ②）：server 在执行收尾判定「有 commit 但回复未 @ 审查者」
+  // 时调用，指定 SHA 生成并投递。独立入口——不跑归属判据（见 deliverFallbackSha）。
+  if (args.fallbackSha) {
+    await deliverFallbackSha(cwd, serverUrl, args.fallbackSha)
+    return
+  }
+
   // post-commit 路径：先补投 pending（每次投递机会先处理），再生成并投递 HEAD
   await drainPending(cwd, serverUrl)
   const result = generateHandoff(args)
@@ -1286,8 +1432,8 @@ export async function runHandoff(args) {
     writeFileSync(join(cwd, '.handoff-draft.md'), result, 'utf-8')
     console.log('📋 .handoff-draft.md 已生成')
 
-    // 自动投递到 cat-study
-    const outcome = await deliverSha(cwd, serverUrl, 'HEAD', result)
+    // 自动投递到 cat-study（judgeAttribution：post-commit 入口才判归属——T-A ①）
+    const outcome = await deliverSha(cwd, serverUrl, 'HEAD', result, { judgeAttribution: true })
     if (outcome === 'ok') {
       // 投递成功 → 清理本地草稿（内容已在 cat-study 消息管道中）
       try {
@@ -1303,10 +1449,19 @@ export async function runHandoff(args) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])
 
 if (isMain) {
+  // 参数解析独立于主流程：**参数错误 = 调用方错误**，必须 exit 非 0 且**绝不投递**
+  // （不落进无参的 post-commit 投递路径——那正是必改 2 要封的类）。
+  let args
   try {
-    await runHandoff(parseArgs(process.argv.slice(2)))
+    args = parseArgs(process.argv.slice(2))
   } catch (err) {
-    // post-commit hook 不应阻断 commit，失败时只告警
+    console.error('[handoff-gen] 参数错误:', err.message)
+    process.exit(2)
+  }
+  try {
+    await runHandoff(args)
+  } catch (err) {
+    // 运行时失败：post-commit hook 不应阻断 commit，失败时只告警（exit 0）
     console.error('[handoff-gen] 生成失败:', err.message)
     process.exit(0)
   }
