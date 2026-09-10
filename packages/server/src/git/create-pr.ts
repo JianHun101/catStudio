@@ -3,7 +3,7 @@
  *
  * 归宿：git/ 目录（与 diff-collector.ts 同属「push/PR 工作流」地盘）。
  * 只做「提 pr」这一件事：校验前置（gh 已 auth + 分支已 push origin）→ 执行 gh pr create。
- * 不改内部审查链（post-commit 质量关）、不动 .push-gate 核心门禁、不重写收口流程
+ * 不改内部审查链（提交后审查投递）、不动 .push-gate 核心门禁、不重写收口流程
  * （新开发流程未定——AC 证据化等属于未来流程，本模块不含任何 PR body 的 AC checklist）。
  *
  * 失败语义：不静默——四种失败原因（no-main-root / not-authed / branch-not-pushed /

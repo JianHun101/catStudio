@@ -175,6 +175,40 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 
 ---
 
+### T-H｜T-A 复盘三合一：判据收紧 · 多 commit 覆盖 · 判据 e2e
+
+**来源**：T-A 审查（吐槽猫，2026-09-10）在 OQ 逐条落锤时点出的三条同族缺口——同一处归属判据的三个失效面，**一次修**，不按单点修。
+
+**无阻塞**：与 T-E / T-F / T-G 无依赖，可独立开工。
+
+**交付**：
+
+1. **归属判据假阴性**（T-A OQ-1）：`scripts/handoff-gen.mjs` 的 `attributed = updated > 0` 只数 `status='running'` 行，
+   于是「该 uuid 从无执行行」（= 真手动提交，该投）与「执行已终态 / 同猫并发另一条在跑」**同得 0**
+   → 后两者被误判成手动提交 → 多投一条。改判据为「**该 uuid 存在任一状态的执行行 → 有归属 → 静默**」。
+2. **一执行多 commit 的审查请求覆盖**（T-A OQ-4）：同一执行提交多个 commit 时，钩子（`runHandoff`）与收尾兜底
+   （`getRunningExecutionCommitHash`）**都只看 HEAD**，补投文档的 `range` 也只有 `sha~1..sha`
+   → 早期 commit **全流程拿不到审查请求**（与既有 post-commit 行为同口径，非 T-A 引入，但 T-H 要裁决）。
+   需定：逐 commit 覆盖，还是显式接受「只看 HEAD」并写进 Tradeoff。
+3. **判据的 e2e 覆盖**（T-A N4）：`scripts/handoff-gen.e2e.mjs` 的 stub server 无 commit-hash 端点
+   → `attributed=null` → 走降级投递，**三条判据在 e2e 里全不生效**（这也是 e2e 仍全绿的原因）。
+   补一条「stub 返回 `updated:1` → POST **0** 次」，并附**阴性对照**证明该断言能区分新旧（不是恒真）。
+
+**顺带观察项**（本单一起看，不必单独修）：
+
+- **N5** 取值型 flag 被后随 flag 贪吃（`--cwd --no-post` → `{cwd:'--no-post'}`）：自限于 git 校验（畸形值立刻撞
+  `不是 git 仓库`），进不去投递路径。硬化方式 = 取值以 `-` 开头即报错。
+- **N6** `spawnReviewFallback` 的 `stdio:'ignore'` 吞掉子进程失败原因；`stdio:['ignore','ignore','inherit']`
+  （inherit 传父进程 fd、**不建 pipe**）与 `child.unref()` 不冲突，实测父进程 9ms 退出。
+
+**验收**：
+
+- [ ] 执行已终态、同猫并发两种情形下重跑，均判「有归属 → 静默」（各一例）
+- [ ] 一执行多 commit 的覆盖范围有明确裁决，且代码与裁决一致
+- [ ] e2e 补判据用例 + 阴性对照（旧实现下该断言必须红）
+
+---
+
 ## 依赖图
 
 ```

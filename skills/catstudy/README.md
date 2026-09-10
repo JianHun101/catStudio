@@ -25,7 +25,7 @@ catstudy/
   → 架构师设计 + 派活
   → 实施猫落地
   → /catstudy-quality-gate    （自检：需求对照 + 测试 + lint + build）
-  → 提交 → post-commit hook 自动生成交接文档 + 触发审查（code-review 承担）
+  → 提交 → 补填交接文档 + 由作者发起审查请求（request-review）
   → /catstudy-receive-review   （处理反馈：Red→Green 修复）
    → 审查者审查 ✅ → 架构师收口（ff-only 合并 → 发起 push 审批，用户批准才推）
 ```
@@ -43,7 +43,7 @@ catstudy/
 
 ## 为什么没有 PR 流程
 
-catStudy 没有 PR 冲突场景：提交后由 post-commit 自动投递交接文档，quality-gate → （post-commit hook 自动触发审查）→ receive-review 覆盖从自检、生成交接文档、审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 发起 push 审批，用户批准才推）。
+catStudy 没有 PR 冲突场景：提交后由作者补填交接文档并发起审查请求，quality-gate → （request-review 发起）→ receive-review 覆盖从自检、生成交接文档、审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 发起 push 审批，用户批准才推）。
 
 ## 技能命名
 

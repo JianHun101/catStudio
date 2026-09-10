@@ -106,7 +106,7 @@ skills:
       - '提交前检查'
       - '检查一下代码'
     output: 'Quality Gate Report（通过/未通过 + 逐项结果）'
-    next: 'review（post-commit hook 自动触发 code-review 承担）'
+    next: 'review（作者按 request-review 发起，审查者承担）'
     refs:
       - 'CODING_STANDARDS.md'
       - 'refs/review-standards.md'
@@ -210,7 +210,7 @@ skills:
     use_when: |
       work crosses sessions, another agent needs your context, or you are handing a task to a fresh session.
     not_for: |
-      sending a review request for finished work (review is auto-triggered by post-commit hook), or for project-internal summaries (use session-summary).
+      sending a review request for finished work (the author sends that via request-review), or for project-internal summaries (use session-summary).
     category: '外部技能'
   implement:
     source: mattpocock
@@ -322,7 +322,8 @@ skills:
 # 2 个 catstudy-* 定制 skill 与顶级同名 skill 是两套不同定义：
 # 当前 manifest 路由顶级通用版；定制版转正评估列二期。
 # catstudy/ 内部条目不参与顶级计数（28/28），由 check-manifest 单独校验前缀。
-# 投递型定制层（handoff/request-review）已按 ADR-0014 §3 移除——投递外移后其存在理由消亡，内容并入基础技能。
+# 投递型定制层（handoff）已按 ADR-0014 §3 移除——投递外移后其存在理由消亡，内容并入基础技能。
+# request-review 于 2026-09-10 回流为顶级技能（ADR-0014 §5 修订）：hook 不再机械投递，改由作者自行发起。
 catstudy:
   # merged_from：合并来源登记（catstudy 定制层随迁保留，转正评估列二期）
   catstudy-quality-gate:
@@ -336,8 +337,8 @@ catstudy:
 # 大块工作 wayfinder 起图 → grilling/to-spec 出 spec → spec-gate 前门放行 → to-tickets 拆票 → implement → quality-gate（进 review 链）
 # spec-gate 是需求→实施之间的机械门：需求可证伪 + 契约钉死才放行；前段 skill 靠 use_when 衔接
 # 审查流程链（后半个门）
-# quality-gate → （post-commit hook 自动触发 code-review 审查）→ receive-review → (loop until ✅)
-# 审查请求由 hook 机械触发 + code-review 承担，不再有独立的 request-review 技能（ADR-0014 §3）。
+# quality-gate → （作者按 request-review 发起审查）→ receive-review → (loop until ✅)
+# 审查请求由作者自行发起（ADR-0014 §5 修订）；post-commit hook 仅在提交无归属执行时兜底投递。
 pipeline:
   dev:
     - spec-gate
@@ -348,6 +349,6 @@ pipeline:
 
 # 三条铁律
 iron_laws:
-  - '审查自动化：post-commit hook 触发 handoff-gen，Agent 只补填不自行发起'
+  - '审查发起：Agent 自查后自行发起审查请求（request-review）；post-commit hook 仅在提交无归属执行时兜底'
   - '禁止冒充：每只猫有固定身份和角色'
   - '依赖声明优先：安装任何包前必须声明并获得审查者批准'

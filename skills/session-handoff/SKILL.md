@@ -1,6 +1,6 @@
 ---
 name: session-handoff
-description: Compact the current conversation into a handoff document for another agent to pick up. Use when work crosses sessions, another agent needs your context, or you are handing a task to a fresh session. Not for sending a review request for finished work (review is auto-triggered by post-commit hook), or for project-internal summaries (use session-summary). Output a handoff document in the OS temp directory with suggested skills.
+description: Compact the current conversation into a handoff document for another agent to pick up. Use when work crosses sessions, another agent needs your context, or you are handing a task to a fresh session. Not for sending a review request for finished work (the author sends that via request-review), or for project-internal summaries (use session-summary). Output a handoff document in the OS temp directory with suggested skills.
 argument-hint: 'What will the next session be used for?'
 disable-model-invocation: true
 ---
@@ -17,7 +17,7 @@ If the user passed arguments, treat them as a description of what the next sessi
 
 ## 与其他 skill 区别
 
-| skill           | 区别                                                                                                                     |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| session-summary | session-handoff 产物放 OS 临时目录、含 suggested skills 供接手者调用；session-summary 产物放 docs/sessions/ 供项目留档   |
-| code review     | session-handoff 压会话上下文给新会话/新 agent 接手；code review 是对已提交改动的质量审查（由 post-commit hook 自动触发） |
+| skill           | 区别                                                                                                                       |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| session-summary | session-handoff 产物放 OS 临时目录、含 suggested skills 供接手者调用；session-summary 产物放 docs/sessions/ 供项目留档     |
+| code review     | session-handoff 压会话上下文给新会话/新 agent 接手；code review 是对已提交改动的质量审查（由作者按 `request-review` 发起） |

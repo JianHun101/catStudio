@@ -2,8 +2,8 @@
  * Handoff 交接文档生成器 — post-commit hook 自动调用。
  *
  * 从 git diff 提取机械部分（文件清单 + Reviewer Checklist），
- * 然后自动投递到 cat-study，由店长 agent 补填 Why / Tradeoff / Open Questions，
- * 补完后转发给 @吐槽猫 审查——全程不需要用户手动干预。
+ * 再按归属判据决定是否投递到 cat-study（T-A 起的兜底语义，见下）——投出后由当事人
+ * 补填 Why / Tradeoff / Open Questions，再按 request-review 自行发起审查。
  *
  * 用法:
  *   node scripts/handoff-gen.mjs                    # post-commit：判归属后投递 HEAD（见下）
@@ -646,7 +646,7 @@ function buildChecklistSection(changeTypes) {
   return lines.join('\n')
 }
 
-// ─── cat-study 自动投递 ──────────────────────────────────────
+// ─── cat-study 投递 ──────────────────────────────────────────
 
 /**
  * 从 commit message 提取 catstudy [uuid] 中的消息 id。
@@ -1375,7 +1375,16 @@ export async function deliverFallbackSha(cwd, serverUrl, sha) {
   return await deliverSha(cwd, serverUrl, fullSha, doc)
 }
 
-/** --gate-deliver 兜底：HEAD 若尚未投递则生成并投递（覆盖 post-commit 中途崩溃窗口） */
+/**
+ * --gate-deliver 兜底：HEAD 若尚未投递则生成并投递（覆盖 post-commit 中途崩溃窗口）。
+ *
+ * 判据只认 `.handoff-delivered.json` 账本，而 T-A 后账本**只记「真投过」**：
+ * 钩子判静默不记账、猫的主动投递也不记账。故留一个窄窗口——**猫已主动投递、
+ * 判决尚未产出**时 push 被门禁拦下 → 账本无记录 → 对同一 SHA 再投一条补填请求。
+ * 取舍（T-A 复盘裁决）：**有意**不给账本加「已静默」态——加了会连「收尾兜底
+ * spawn 失败」时的最后一道网一起关掉，与票单 ③「判据查不动一律投递」相反。
+ * 窗口窄、无害（同形状请求，最多多唤醒一次）；approve 闸已拦掉「已审 ✅」的大多数。
+ */
 async function deliverHeadIfUndelivered(cwd, serverUrl) {
   const headSha = safeGit(cwd, 'rev-parse HEAD')
   if (!headSha) return
@@ -1432,7 +1441,7 @@ export async function runHandoff(args) {
     writeFileSync(join(cwd, '.handoff-draft.md'), result, 'utf-8')
     console.log('📋 .handoff-draft.md 已生成')
 
-    // 自动投递到 cat-study（judgeAttribution：post-commit 入口才判归属——T-A ①）
+    // 投递到 cat-study（judgeAttribution：post-commit 入口才判归属——T-A ①；有归属则静默不发）
     const outcome = await deliverSha(cwd, serverUrl, 'HEAD', result, { judgeAttribution: true })
     if (outcome === 'ok') {
       // 投递成功 → 清理本地草稿（内容已在 cat-study 消息管道中）

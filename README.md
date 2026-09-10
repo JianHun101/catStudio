@@ -310,10 +310,10 @@ LLM 侧通过 MCP 工具与系统交互（`packages/server/src/connectors/socket
 
 ## 代码审查链
 
-git post-commit hook 自动触发审查链（提交消息需带 `catstudy [uuid]` 标记，uuid = 触发消息 id）：
+审查请求由实施角色自行发起（提交消息需带 `catstudy [uuid]` 标记，uuid = 触发消息 id；post-commit hook 只在「提交无归属执行」时兜底）：
 
 1. 实施角色提交 commit（限定路径：只 add 本次改动文件，禁止 `git add -A`）
-2. post-commit 自动投递 @店长 → @吐槽猫 审查
+2. 补填交接文档后由实施角色投递 @店长 → @吐槽猫 审查
 3. 审查结论分流：✅可合并 → 店长收口（ff-only 合并 → 更新 `.push-gate` → 发起 push 审批（用户批准才推））；⚠️建议修改 / ❌需重做 → 回到实施角色修改后复申
 4. 会话 worktree 收口：从主仓库根执行（优先 `closeoutSession`）→ `git merge session/<8位id>` 回 dev → `git worktree remove --force` → 删除会话分支 → 标准收口序列
 

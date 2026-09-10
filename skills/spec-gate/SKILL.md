@@ -97,4 +97,4 @@ description: 需求/规格进入实施前的自查门（前半个门，对称后
 | quality-gate         | spec-gate 是需求/规格进实施前的**前门**；quality-gate 是代码提交审查前的**后门**自查        |
 | grilling             | grilling 用提问压测计划、产出需求理解；spec-gate 对已成型 spec 做可证伪/契约/验收静态 check |
 | to-spec / to-tickets | spec-gate 检查它们产出的质量、是它们之间/之前的 gate，不替代产出本身                        |
-| code review          | spec-gate PASS 才拆票/实施；code review 是代码完成后审查（post-commit hook 自动触发）       |
+| code review          | spec-gate PASS 才拆票/实施；code review 是代码完成后审查（由作者按 `request-review` 发起）  |
