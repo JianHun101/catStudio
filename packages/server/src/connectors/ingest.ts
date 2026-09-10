@@ -2,7 +2,9 @@
  * 消息摄入共享核心（ingest）——Socket.IO 与 REST 两个入口共用的消息注入管线。
  *
  * 与 SEND_MESSAGE / POST /api/messages 原有逻辑完全同构：
- * 图片守卫 → session 校验 → handoff 重定向 → INSERT → 广播 → agent 解析 → 调度 → 串行执行。
+ * 图片守卫 → session 校验 → handoff 重定向 → 投递契约主闸 → INSERT → 广播
+ * → agent 解析 → 调度 → 串行执行。
+ * （重定向在闸门**之前**：结构推导须按消息真正落地的会话查，见 N-2。）
  * 入口只保留通道专属包装：socketio 的 ERROR emit、REST 的 status 映射与响应体。
  *
  * 断环说明（第 4 刀）：ingest 不再 import connector——广播/执行经执行注册表
@@ -124,7 +126,14 @@ export function buildDeliveryGateError(input: {
   taskId?: string
   chainType?: ChainType
   isReview: boolean
-  chainExistence: ChainExistence
+  /** 结构推导结果。**可空 = 不适用**（本条不需要探针：非 `agent` 入口 / 非审查类 /
+   *  未声明 `first`）——与 `'absent'`（**探过了，确认不存在**）是两回事。
+   *
+   *  N-3 返工：原实现对"不适用"分支传字面量 `'absent'`，用假数据表达"不适用"。
+   *  今天读起来等价（`absent` 与 `undefined` 在四条规则下同样放行），但下一个
+   *  消费方无从区分"探针说链不存在"与"压根没探"——而这两者的正确处置相反
+   *  （前者可拒 `first`，后者不能）。 */
+  chainExistence?: ChainExistence
 }): { status: number; error: string } | null {
   const { origin, taskId, chainType, isReview, chainExistence } = input
   if (origin !== 'agent') return null
@@ -144,6 +153,14 @@ export function buildDeliveryGateError(input: {
     }
     if (chainType === 'first' && chainExistence === 'unknown') {
       log.warn('chainType=first 且结构推导查不动——以声明为准放行', { taskId })
+    }
+    if (chainType === 'first' && chainExistence === undefined) {
+      // N-3：走到这里 = 调用方**该探针却没探**（`needsProbe` 为真时必传结果）。
+      // 行为仍是放行（不把合法投递判死），但把"静默"消掉——这是调用方 bug，
+      // 不该像 `unknown`（外部查询失败）那样被当成正常降级。
+      log.warn('chainType=first 但调用方未提供结构推导——以声明为准放行（调用方缺探针）', {
+        taskId,
+      })
     }
   }
 
@@ -197,9 +214,22 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     return { ok: false, status: 404, error: 'Session not found' }
   }
 
-  // 1.2 投递契约主闸（T-F）：审查类投递必须带 锚 + chainType；agent 投递必须带锚。
-  //     放在 session 校验之后（结构推导按会话查）、INSERT 之前（拒绝时零副作用）。
-  //     结构推导只在"审查类 + 声明建链"时才查——其余分支不需要知道链在不在。
+  // 1.2 已交接会话路由兜底（方案 A）：消息重定向到最新真实子会话。
+  //     命中时通知旧房间前端切换（复用现有 SESSION_HANDOFF 机制），
+  //     后续写入/广播/dispatch 全部走子会话，旧会话不再膨胀。
+  //     **N-2 返工：解析前移到闸门之前**——闸门的结构推导与下方 INSERT 必须看
+  //     同一个会话。原实现闸门探 `sessionId`（父会话）、写入落 `effectiveSessionId`
+  //     （子会话）：已交接会话的投递，链的消息全在子会话，探针在父会话必判
+  //     `absent` ⇒「声明 first 但链已存在」**漏拦**（fail-open）。
+  //     **不接受**"探针内部再解析一次"——两处解析就是下一个分歧点。
+  //     本函数只读无副作用，前移不影响闸门"拒绝时零副作用"的性质。
+  const handoffTarget = resolveHandoffTarget(sessionId)
+  const effectiveSessionId = handoffTarget?.newSessionId ?? sessionId
+
+  // 1.3 投递契约主闸（T-F）：审查类投递必须带 锚 + chainType；agent 投递必须带锚。
+  //     放在 session 校验与路由解析之后（结构推导按**落地会话**查）、INSERT 之前
+  //     （拒绝时零副作用）。结构推导只在"审查类 + 声明建链"时才查——其余分支
+  //     不需要知道链在不在，传 `undefined`（不适用）而非 `'absent'`（确认不存在）。
   const isReview = isReviewDelivery(mentions)
   const needsProbe = input.origin === 'agent' && isReview && input.chainType === 'first'
   const gateError = buildDeliveryGateError({
@@ -207,11 +237,12 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     taskId,
     chainType: input.chainType,
     isReview,
-    chainExistence: needsProbe ? deriveChainExistence(sessionId, taskId) : 'absent',
+    chainExistence: needsProbe ? deriveChainExistence(effectiveSessionId, taskId) : undefined,
   })
   if (gateError) {
     log.warn('delivery rejected by entry gate', {
       sessionId,
+      effectiveSessionId, // 探针查的就是它——N-2 漏拦正是"查的会话 ≠ 写的会话"，日志里必须看得见
       traceId,
       origin: input.origin,
       chainType: input.chainType,
@@ -221,12 +252,6 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     })
     return { ok: false, status: gateError.status, error: gateError.error }
   }
-
-  // 1.5 已交接会话路由兜底（方案 A）：消息重定向到最新真实子会话。
-  //     命中时通知旧房间前端切换（复用现有 SESSION_HANDOFF 机制），
-  //     后续写入/广播/dispatch 全部走子会话，旧会话不再膨胀。
-  const handoffTarget = resolveHandoffTarget(sessionId)
-  const effectiveSessionId = handoffTarget?.newSessionId ?? sessionId
 
   // 2. 写入消息（先落库、后通知切换——写入失败时前端不应收到切换信号）
   const mentionsJson = JSON.stringify(mentions)

@@ -156,6 +156,19 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (!body.content || typeof body.content !== 'string') {
       return reply.status(400).send({ error: 'content is required (string)' })
     }
+    // T-F 返工 N-4：`chainType` 只接受值域内的两个字面量。原实现把非法值
+    // （`'First'` / 拼错 / `null`）**静默归一为 `undefined`**，于是下游主闸回
+    // 「缺 chainType」——把"拼错"报成"没给"，调用方按文案改不出来（行为安全、
+    // 文案误导）。值域外当场退回，独立文案，不静默降级。
+    if (
+      body.chainType !== undefined &&
+      body.chainType !== 'first' &&
+      body.chainType !== 'followup'
+    ) {
+      return reply.status(400).send({
+        error: `chainType 非法：${String(body.chainType)}——仅接受 'first' / 'followup'`,
+      })
+    }
 
     // 摄入管线（校验/重定向/落库/广播/调度/执行）已提取为共享核心，
     // 与 socketio SEND_MESSAGE 同构——两入口共用 ingest.ts。
@@ -170,9 +183,9 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       taskId: typeof body.taskId === 'string' ? body.taskId : undefined,
       // T-F 入口主闸：REST 注入通道 = **agent 入口**（工具/服务端投递，前端走 socketio），
       // 强制携带链锚；审查类投递另需 chainType 对账位（缺 → 400）。
+      // 值域已在上方校验：到这里 `chainType` 非 `undefined` 即必为合法值（N-4）。
       origin: 'agent',
-      chainType:
-        body.chainType === 'first' || body.chainType === 'followup' ? body.chainType : undefined,
+      chainType: body.chainType,
       skipRestartRequest: req.headers['x-test-call'] === '1',
     })
 

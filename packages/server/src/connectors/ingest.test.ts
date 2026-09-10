@@ -25,6 +25,7 @@ import type {
 } from '../execution/serial.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
 import { getAdapterForAgent } from '../llm/registry.js'
+import { resolveHandoffTarget } from '../handoff/index.js'
 import {
   ingestUserMessage,
   buildDeliveryGateError,
@@ -33,6 +34,20 @@ import {
 } from './ingest.js'
 
 // ═══ 边界 mock（真实 DB / ingest / dispatch / 执行引擎保留） ═══
+
+// 日志按边界 mock：N-3 的**唯一可观测面**就是那条 warn（"不适用"与"确认不存在"
+// 今天行为等价，差别只在日志与类型）——不 mock 就只能断言"两者都放行"，
+// 那是恒真的假绿门（同 T-J 的「验证面必须与被判面同面」）。
+const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }))
+vi.mock('../logger.js', () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: logWarn,
+    error: vi.fn(),
+  }),
+  setLogLevel: vi.fn(),
+}))
 
 vi.mock('../llm/registry.js', () => ({
   getAdapterForAgent: vi.fn(() => null),
@@ -132,6 +147,9 @@ function ingest(content: string, taskId?: string) {
     sessionId: SESSION,
     content,
     mentions: [IMPL_NAME],
+    // T-F 返工 OQ-4：`origin` 已必填（fail-loud，D15）。本组模拟**用户消息**，
+    // 走 human 档（允许空锚）——补的是必填字段字面量，判据与断言未动。
+    origin: 'human',
     ...(taskId ? { taskId } : {}),
   })
 }
@@ -140,6 +158,7 @@ function ingest(content: string, taskId?: string) {
 function setupFixture(): void {
   __test_reset()
   __resetDispatch()
+  logWarn.mockClear()
   const db = createTestDb()
   setDb(db)
   initRepository(db)
@@ -237,6 +256,7 @@ describe('connectors/ingest — 链锚贯通（T-E）', () => {
       sessionId: SESSION,
       content: '@吐槽猫 请审查',
       mentions: ['吐槽猫'],
+      origin: 'human', // T-F 返工 OQ-4：origin 必填，本跳模拟用户消息（human 档）
     })
     if (!res.ok) throw new Error(`ingest 失败：${res.error}`)
     await inflight
@@ -291,7 +311,8 @@ describe('connectors/ingest — 投递契约主闸（T-F）', () => {
 
   it('主闸①：人类入口空锚 → 放行（用户消息天然是链首轮）', () => {
     expect(gate({ origin: 'human', taskId: undefined })).toBeNull()
-    // 未标注 origin 的既有入口走 human 档，行为不变
+    // 纯函数的 `origin` 仍可空（非 `'agent'` ⇒ 放行）：OQ-4 之后这是**防御性契约**，
+    // 不再是可达状态——`IngestInput.origin` 必填，四个生产入口全部显式标注。
     expect(gate({ origin: undefined, taskId: undefined })).toBeNull()
   })
 
@@ -327,6 +348,31 @@ describe('connectors/ingest — 投递契约主闸（T-F）', () => {
     expect(gate({ isReview: true, chainType: 'first', chainExistence: 'absent' })).toBeNull()
     // followup 带锚 = 链内更新，放行
     expect(gate({ isReview: true, chainType: 'followup' })).toBeNull()
+  })
+
+  it('主闸⑧（N-3）：`undefined`（不适用）与 `absent`（确认不存在）都是放行——但可区分', () => {
+    // 行为今天等价（两者都不命中 `exists` 拒绝分支），差别在**语义与日志**：
+    // `absent` = 探过了、确认链不存在；`undefined` = 本条压根不需要探针。
+    // 旧实现用 `'absent'` 表达"不适用"（假数据），下一个消费方无从分辨。
+    expect(gate({ isReview: true, chainType: 'first', chainExistence: undefined })).toBeNull()
+    expect(gate({ isReview: true, chainType: 'first', chainExistence: 'absent' })).toBeNull()
+    // 对照：只有 `exists` 会拒——证明上面两条不是"恒真的空断言"
+    expect(gate({ isReview: true, chainType: 'first', chainExistence: 'exists' })?.status).toBe(400)
+  })
+
+  it('主闸⑨（N-3）：该探针而未探（传 undefined）→ 放行但记 warn（不再静默）', () => {
+    logWarn.mockClear()
+    expect(gate({ isReview: true, chainType: 'first', chainExistence: undefined })).toBeNull()
+    expect(logWarn).toHaveBeenCalledWith(
+      'chainType=first 但调用方未提供结构推导——以声明为准放行（调用方缺探针）',
+      { taskId: 'anchor-a' }
+    )
+    // 区分性：`unknown`（外部查询失败，正常降级）走的是另一条文案——两者不可混同
+    logWarn.mockClear()
+    gate({ isReview: true, chainType: 'first', chainExistence: 'unknown' })
+    expect(logWarn).toHaveBeenCalledWith('chainType=first 且结构推导查不动——以声明为准放行', {
+      taskId: 'anchor-a',
+    })
   })
 
   it('审查类判定按 role（不按猫名）：点名 reviewer 角色才要求 chainType', () => {
@@ -392,6 +438,43 @@ describe('connectors/ingest — 投递契约主闸（T-F）', () => {
     expect(res.ok).toBe(false)
     if (res.ok) throw new Error('unreachable')
     expect(res.status).toBe(400)
+  })
+
+  it('组装 N-2：已交接会话 → 探针查**落地子会话**（链在子会话 ⇒ `first` 被拒）', async () => {
+    const CHILD = 'session-child'
+    getDb()
+      .prepare(
+        `INSERT INTO sessions (id, title, agent_ids, handoff_from)
+         VALUES (?, '子会话', '[]', ?)`
+      )
+      .run(CHILD, SESSION)
+    // 链的消息全在**子**会话，父会话 0 行——旧实现探父会话必判 `absent` ⇒ 漏拦（fail-open）
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES ('m-in-child', ?, 'user', '链上旧轮', '[]', 'anchor-handed-off')`
+      )
+      .run(CHILD)
+    vi.mocked(resolveHandoffTarget).mockReturnValueOnce({
+      oldSessionId: SESSION,
+      newSessionId: CHILD,
+      summary: '',
+    })
+
+    const res = await ingestUserMessage({
+      sessionId: SESSION, // 投递打的是**父**会话
+      content: '返工投递',
+      mentions: ['吐槽猫'],
+      taskId: 'anchor-handed-off',
+      origin: 'agent',
+      chainType: 'first',
+    })
+    expect(res.ok).toBe(false)
+    if (res.ok) throw new Error('unreachable')
+    expect(res.status).toBe(400)
+    // 拒绝仍零副作用：只有 fixture 那一条，父/子会话都没多出消息
+    const count = getDb().prepare(`SELECT COUNT(*) AS n FROM messages`).get() as { n: number }
+    expect(count.n).toBe(1)
   })
 
   it('组装：审查类带锚 + followup → 放行（链内更新是合法投递）', async () => {

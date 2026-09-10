@@ -689,5 +689,31 @@ describe('Message Routes', () => {
       })
       expect(ok.statusCode).toBe(201)
     })
+
+    it('REST chainType 非法值 → 400 独立文案（不把「拼错」报成「没给」，N-4）', async () => {
+      seed()
+      const payload = {
+        sessionId: SESSION,
+        content: '请审查',
+        mentions: ['吐槽猫'],
+        taskId: 'anchor-gate',
+        chainType: 'First', // 大小写拼错：旧实现静默归一为 undefined → 报「缺 chainType」
+      }
+      const res = await app.inject({ method: 'POST', url: '/api/messages', payload })
+      expect(res.statusCode).toBe(400)
+      const err = JSON.parse(res.body).error as string
+      expect(err).toContain('First') // 文案里回显非法值，调用方一眼看出拼错
+      expect(err).toContain('非法')
+      expect(err).not.toContain('缺') // 区分性：不是「缺 chainType」那条文案
+
+      // 对照：真正的「没给」仍走「缺 chainType」文案（两条文案不可混同）
+      const missing = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { ...payload, chainType: undefined },
+      })
+      expect(missing.statusCode).toBe(400)
+      expect(JSON.parse(missing.body).error).toContain('缺 chainType')
+    })
   })
 })
