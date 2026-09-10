@@ -85,7 +85,7 @@ _Avoid_: 日志, 请求记录
 - `packages/web/` — Vue 3 + Vite + Pinia + Socket.IO client
 - `scripts/` — dev/seed/stop、MCP server（mcp-server.mjs + mcp-server-utils.mjs）、hooks/skills 治理（hooks-install.mjs、skills-check-manifest.mjs）
 - `skills/` — 猫咖技能活源（`.claude/skills` junction 指向此处）
-- `docs/` — adr/（架构决策）、requirements/（需求文档）、sessions/（会话总结）
+- `docs/` — 子目录：adr/（架构决策）、requirements/（需求文档）、sessions/（会话总结）、plans/（定稿规格）、research/（勘察报告）、run/（开发文档·在飞）；根级另有 roadmap.md、css-coding-standards.md
 
 ## 文档位置约定
 
@@ -93,16 +93,18 @@ _Avoid_: 日志, 请求记录
 - `docs/requirements/` — 一个活 = 一个语义命名 MD（如 `2026-09-06-dev-process-gate-flow.md`），六段生命周期完整：愿景→需求→契约→过程决策留痕→架构决策留痕→验收结果。写者是店长/架构师
 - `docs/sessions/` — 会话总结（session-summary skill 产出）
 - `docs/run/` — 开发文档（在飞）：to-tickets 切出的票单，落 `docs/run/<work-slug>/tickets.md`，**一事一目录**（并行会话 worktree 下扁平单文件必撞名互覆）。写者是本轮实施猫；落点由调用方指定，不写死在 skill 正文。**活收口即清**——结论上浮到 `requirements/`/`sessions/`，本目录对应子目录删除
+- `docs/plans/` — 定稿规格（to-spec 产物，如 `episode-evaluation-v2.md`、`knowledge-base-v1.md`）：活还在时就已**定稿**，活一结束即停止维护。它不承诺「仍然有效」——读者须自行判时效
+- `docs/research/` — 勘察报告 / 调研结论（如 `clowder-ac-evidence-and-vision-guard.md`）：一次性调研的产出，写完即停更，同样属「定稿·随活过期」
 - 过程决策留痕（本会话内：跳 grilling 的为什么、Gate 答案、争议裁决）→ spec 尾部 `## 决策留痕` 固定段，一行一决策、可 grep，不单独建文档
 
 **开发文档 vs 沉淀文档判据**：
 
-|      | 开发文档 `docs/run/`                | 沉淀文档 `requirements/` `sessions/` `adr/` `plans/` |
-| ---- | ----------------------------------- | ---------------------------------------------------- |
-| 时效 | 在飞，活结束即失效                  | 跨会话重建「为什么这么设计」                         |
-| 读者 | 本轮实施猫 / 审查猫                 | 下个会话的猫                                         |
-| 形态 | tracer-bullet 票单 + blocking edges | 六段生命周期 / 决策留痕 / 会话总结                   |
-| 归宿 | 收口即清，结论上浮                  | 长期保留                                             |
+|      | 开发文档 `docs/run/`                | 沉淀文档 `requirements/` `sessions/` `adr/` | 定稿文档 `plans/` `research/`        |
+| ---- | ----------------------------------- | ------------------------------------------- | ------------------------------------ |
+| 时效 | 在飞，活结束即失效                  | 跨会话长期有效，随架构演进而更新            | 写完即定稿，随活结束停止维护         |
+| 读者 | 本轮实施猫 / 审查猫                 | 下个会话的猫                                | 需要「当时那份定稿规格」的人         |
+| 形态 | tracer-bullet 票单 + blocking edges | 六段生命周期 / 决策留痕 / 会话总结          | to-spec 定稿规格 / 勘察报告          |
+| 归宿 | 收口即清，结论上浮                  | 长期保留，持续维护                          | 原地保留，不再维护（读者自行判时效） |
 
 ## 术语补全
 
@@ -114,6 +116,6 @@ _Avoid_: 日志, 请求记录
 ## 流程约定
 
 - 审查链（后半个门）：`quality-gate → request-review → receive-review`；收口归店长；提交触发 post-commit 自动投递审查链
-- 收口链：确认审查结论 → ff-only 合并回 dev → 更新 `.push-gate` → 推 session 分支 → createPr（base=dev）→ GitHub merge → 拉回 dev 同步
+- 收口链：确认审查结论 → ff-only 合并回 dev → 更新 `.push-gate` → **清 `docs/run/` 中已收口活的 `<slug>/`**（结论上浮后删除；删除须与本次改动同批进 PR，故排在推分支之前）→ 推 session 分支 → createPr（base=dev）→ GitHub merge → 拉回 dev 同步
 - 开发流程 gate 决策点：`spec-gate`（前半个门——需求可证伪/契约钉死，放行才拆票/进 implement）+ `quality-gate`（后半个门——提交前自查）
 - 依赖声明优先：装任何包前先声明 + 审查者批准，声明与安装不同轮
