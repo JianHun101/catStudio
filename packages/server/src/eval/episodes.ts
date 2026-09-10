@@ -126,7 +126,8 @@ export function collectChain(rootMsgId: string): ExecutionLogRow[] {
  * 4 条失的全是这种 NULL 锚存量链（`3fee9a56` / `e2a9338d` / `4bb97d3a` / `b8961220`，均 2026-08/09 落库）。
  * 退化的理由：**不为修一个缺口制造另一个缺口**；且这批数据不会被重写，降级路径随
  * 存量自然退场。代价是链锚列在存量行上可能仍是「当轮锚」而非「全链锚」——
- * 该歧义已在 `tg-audit.md` 面②记账，新链不受影响。
+ * 该歧义属**存量数据面**（只作用于 pre-T-E 落库的行），故此处**只就地说明、不引外部指针**；
+ * 新链不受影响。
  */
 function chainAnchor(
   rootMsg: Pick<RootMessageRow, 'task_id'>,

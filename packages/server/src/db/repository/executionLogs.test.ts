@@ -4,7 +4,8 @@
  * 被测面全部走**真实 repo 函数**（不手抄 SQL——手抄 SQL 就是「验证面与被判面
  * 不同面」，本 spec 已吃过一次恒真假绿门）。
  *
- * 件 1 合成单变量实验读数（修前，2026-09-10，见 `tickets.md` T-M 段）：
+ * 件 1 合成单变量实验读数（修前，2026-09-10；T-M 票面口径见
+ * `docs/sessions/cat-study-review-chain-anchor-summary.md` §2.2）：
  *   A `updateRunningExecutionCommitHash(U,SHA)`（无 agentId） → changes=2（命中 e1,e2 两行）
  *   B 同法带 agentId                                       → changes=1（各中自己的行）
  *   C `updateExecutionLogCommitHash(U,SHA)`（无 status 过滤）→ 3 行全中，**ended 行 e0 被盖**
