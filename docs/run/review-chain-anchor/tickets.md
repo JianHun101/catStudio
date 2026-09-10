@@ -102,6 +102,12 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 - [ ] `COMMENT` 不触发返工派发、不新起链
 - [ ] 同级冲突取最严的现有规则不被打破
 
+**生产者侧贯通（2026-09-10 T-D 复审 必改 2，随 T-D 返工补）**：本票原实现只动**消费方**（`verdict-parser` / `flow-advance` / `hints`），**生产者侧零落点**——审查猫自己的 prompt 与它读的 refs 仍只写三档 → 「机器认 💬、猫从不发 💬」，**本票全部改动不可达**。已补齐全部枚举落点：`seed-data.ts`（`REVIEWER_DUTIES` 三行 + 吐槽猫 `systemPrompt` 的 Review 指南 + 3 只实施猫 prompt + `mention-policy.ts` 注释）、`skills/refs/review-standards.md` 结论表、`skills/refs/shared-rules.md` 分流、`skills/catstudy/refs/cat-roles.md`、`skills/receive-review/SKILL.md`、`skills/refs/pr-template.md`、`README.md`。
+
+- **向严不向宽边界已写进 prompt**：💬 只装「不要求返工的观察项」，判不准时取严——**不得把已判定的 ⚠️ 因"问题不大"改判 💬**。
+- **新增生效判据**（并入 T-D 段那条 seed 硬前置）：吐槽猫 `agents.system_prompt` 与 `IRON_LAWS_REVIEWER` **contains** `💬仅评论`。
+- **回归护栏**：`seed-data.test.ts` 新增断言把「猫能发 💬」钉成契约——**改动前该断言必红**（HEAD 版本 `seed-data.ts` 中 💬 出现 0 次，实测）。
+
 ---
 
 ### T-D｜文案对齐

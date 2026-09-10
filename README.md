@@ -314,7 +314,7 @@ LLM 侧通过 MCP 工具与系统交互（`packages/server/src/connectors/socket
 
 1. 实施角色提交 commit（限定路径：只 add 本次改动文件，禁止 `git add -A`）
 2. 补填交接文档后由实施角色投递 @店长 → @吐槽猫 审查
-3. 审查结论分流：✅可合并 → 店长收口（ff-only 合并 → 更新 `.push-gate` → 发起 push 审批（用户批准才推））；⚠️建议修改 / ❌需重做 → 回到实施角色修改后复申
+3. 审查结论分流：✅可合并 / 💬仅评论（非阻断）→ 店长收口（ff-only 合并 → 更新 `.push-gate` → 发起 push 审批（用户批准才推））；⚠️建议修改 / ❌需重做 → 回到实施角色修改后复申
 4. 会话 worktree 收口：从主仓库根执行（优先 `closeoutSession`）→ `git merge session/<8位id>` 回 dev → `git worktree remove --force` → 删除会话分支 → 标准收口序列
 
 配套：`docs/adr/` 之外还依赖 git 钩子（`git diff-collector` 收集 diff 作为审查输入）。**收口决策归店长（架构师）**，实施角色不自行合并。
