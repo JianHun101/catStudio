@@ -166,7 +166,13 @@ export function spawnReviewFallback(cwd: string, commitSha: string): SpawnOutcom
       log.error('review fallback spawn error', { commitSha, error: err.message })
     })
     child.on('exit', (code) => {
-      log.info('review fallback child exited', { commitSha, code })
+      // 票单 ③「不静默吞」——② 是本票自称唯一的收尾安全网，它自己的失败必须可见：
+      // 非零退出码 = 补投没发生，该 SHA 只剩 pre-push 一道网，抬到 error。
+      // 不做 stdio:'pipe' 接 stderr：pipe 的读句柄会让父进程事件循环保持引用，
+      // 与下面 child.unref()（不阻塞执行收尾）的目的相冲。退出码是这里能拿到的最
+      // 廉价信号，够定位「补投没跑成」。
+      if (code === 0) log.info('review fallback child exited', { commitSha, code })
+      else log.error('review fallback child exited non-zero——补投未发生', { commitSha, code })
     })
     // 不阻塞父进程退出——补投跑完与否不影响执行收尾
     child.unref()
