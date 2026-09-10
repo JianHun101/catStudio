@@ -1142,6 +1142,9 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   let taskId
   /** T-A ① / T-H ① 归属三态：null=查不动（判据查不动一律投递）；无 uuid = 无归属 */
   let attributed = commitUuid ? null : false
+  /** 归属结论的**来源**（留痕用）——两条来路（写回短路 / 探针）不可混称，
+   *  否则日志会把没跑过的机制说成跑过（本 spec 一直在治的「陈述假机制」）。 */
+  let attributionFrom = commitUuid ? '待定' : 'commit message 无 catstudy [uuid]'
   if (commitUuid) {
     // 写回 commit_hash（agent 人工提交路径此前从不写，只有 socketio 自动提交
     // 兜底写）——executor 反查按 commit 精确匹配的前提。失败仅告警不阻断投递：
@@ -1166,7 +1169,10 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
         // 唯一保留的用法：命中 running 行 ⇒ 该 uuid 的执行行**必然存在** ⇒ 归属成立。
         // 这是**充分条件**（不是判据本身）：真值时短路掉探针那次往返；为 0 时无信息量
         // （终态行 / 并发行 / 真无行三种都可能是 0），交给探针分辨。
-        if (Number.isFinite(updated) && updated > 0) attributed = true
+        if (Number.isFinite(updated) && updated > 0) {
+          attributed = true
+          attributionFrom = '写回命中 running 行（充分条件，未打探针）'
+        }
         console.log(
           `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}，命中 running 行 ${body?.updated ?? '未知'}）`
         )
@@ -1188,12 +1194,15 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
     // 收尾兜底与 verdict 反查都靠它），而「任一状态执行行」这个事实写回响应给不了
     // （它只数 running 命中行）→ 模糊情形比 T-A 多一次往返，是买正确性的代价。
     // attributed 已被写回短路成 true（命中 running 行）时不问——那已是充分条件。
-    if (commitUuid && attributed === null)
+    if (commitUuid && attributed === null) {
       attributed = await probeAttribution(serverUrl, commitUuid)
+      attributionFrom =
+        attributed === null ? '探针查不动' : attributed ? '探针：存在执行行' : '探针：无执行行'
+    }
     const verdict = decideHookDelivery(attributed)
     console.log(
       `[handoff-gen] 🔎 兜底投递判据: ${verdict.deliver ? '投递' : '静默'}——${verdict.reason}` +
-        `（归属探针：${attributed === null ? '查不动' : attributed ? '存在执行行' : '无执行行'}）`
+        `（归属来源：${attributionFrom}）`
     )
     // 返回 'skip' 而非 'ok'：'ok' 会被 deliverSha 记进 delivered 账本，
     // 把这个 SHA 的收尾兜底（--fallback-sha）当场锁死（探针实测：兜底恒被
