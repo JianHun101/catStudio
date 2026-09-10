@@ -163,6 +163,11 @@ function classifyCompleted(chain: ExecutionLogRow[], rootMsg: RootMessageRow): E
   // 锚为空只可能发生在「链上一条执行行都没有」——判定 2 已保证有 completed 行，
   // 故此处 anchor 必非空。真正要区分的是「有锚但查无打回」（success，正常）与
   // 「查询未命中」（同判 success 但 chain_task_id 落库可查，见 D2 记账）。
+  //
+  // 但 `chain_task_id` 列上的 NULL **不是判据**（T-G 补记，原注释在此处被删）：
+  // 零执行扫描的 abandoned 行本就落 NULL（G2-N5），存量 pre-T-E 链的根 `task_id`
+  // 也是 NULL（降级到链末 trace_id 近似值，实测 4 条判词关联净失）。NULL 是**已知噪声**，
+  // 不是「该链无打回」的证据——列上有它，别把它读成结论。
   const anchor = chainAnchor(rootMsg, chain)
   const verdicts = getChainRejectionsSince(anchor, rootMsg.session_id, rootMsg.created_at)
   if (verdicts.length === 0) return 'success'

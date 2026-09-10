@@ -93,6 +93,26 @@ export function formatAgentMessage(
  *     循环指令；T-C 判词三档）
  *   - ⚠️建议修改 / ❌需重做 → 需要继续循环
  *
+ * 归属判据（T-N）：判词 `subject_agent_id` 为空 = **归属不明** → 不注入（fail-closed）。
+ * 与 T-L「向严不向宽」同口径：归属判不出来时宁可漏注入也不误注入（定向闸一旦缺失
+ * 就是静默死循环，正是本 hint 的病灶本身）。
+ *
+ * **判据**（不写裸数字——数字会漂，判据不会）：走到本档的**只有** suggest/reject，
+ * 因为 approve/comment 的 subject 恒为 null 是**设计**（`verdict-parser.ts` 恒置 null），
+ * 且下方已先把这两档 return 掉。故该档不存在「其实是我」的信息，放行只会把只投给
+ * 店长的结论注入到无关实施猫。复核 SQL（真库只读，测量时刻 2026-09-10 23:05）：
+ *   SELECT v.verdict, m.mentions FROM review_verdicts v
+ *     JOIN messages m ON m.id = v.message_id
+ *    WHERE v.verdict IN ('suggest','reject') AND v.subject_agent_id IS NULL;
+ * 实测：该档 4 行，`mentions` **4/4 全部**为 `["店长"]`（clause 里压根没有非 store 目标）。
+ * 判据与 SQL 在本文件内**只此一处**，别在别处复述数字。
+ *
+ * **域一致性**（T-N 修复，2026-09-10）：本函数比的是 `agent.id`，故 `subject_agent_id`
+ * 必须存 **id**。原写侧落的是 `subject.name`（名字）⇒ 读写两侧不同域，「subject 非空且
+ * == 本猫」在生产上**恒不成立**、权威路径从不注入（真库实测：`agents.id` 是 uuid，
+ * 而该列非空值只有 `'ds猫'` 这个**名字**）。修法取**写侧改落 id**
+ * （`verdict-parser.ts` → `subject.id` + `serial.ts` 投影补 `id`），本函数不动。
+ *
  * **权威路径 = 按链锚查最新判词**（`eval/chain-verdicts.ts`）。原实现只看
  * 「可见窗口里最近一条审查者消息」——而 ✅/💬 按分流规则只投店长，进不了实施猫的
  * 窗口 ⇒ 唯一能进窗口的那条陈旧 ⚠️（对象 `94742a2`，早已修于 `a1200a7`）被**无限重放**，
@@ -123,9 +143,12 @@ export function buildReviewLoopHint(
   // ① 权威路径：按锚查该链**最新**判词
   const latest = getLatestChainVerdict(chain.anchor, chain.sessionId)
   if (latest) {
-    // 判词对象不是本猫 → 这条结论不该驱动本猫。subject 为空（解析降级档）时
-    // 无从归属 → 按「可能是我」处理，不因归属信息缺失而漏注入。
-    if (latest.subject_agent_id && agent.id && latest.subject_agent_id !== agent.id) return null
+    // 归属判据（T-N）：**subject 为空 = 归属不明 → 不注入**（fail-closed）。
+    // 原实现按「可能是我」放行；判据与复核 SQL 见文件头「归属判据」段（单处维护）。
+    if (!latest.subject_agent_id) return null
+    // 判词对象明确不是本猫 → 这条结论不该驱动本猫。
+    // `subject_agent_id` 存 **id**（T-N 修复后写侧统一域），故与 `agent.id` 同域可比。
+    if (agent.id && latest.subject_agent_id !== agent.id) return null
     if (latest.verdict === 'approve' || latest.verdict === 'comment') return null
     const reviewerName = agentsRepo.getAgentNameById(latest.reviewer_agent_id) ?? '审查者'
     return loopInstruction(reviewerName, verdictLabel(latest.verdict))

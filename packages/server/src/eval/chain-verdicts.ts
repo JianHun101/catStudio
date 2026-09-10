@@ -34,6 +34,14 @@ export interface ChainVerdictRow {
  *
  * 无锚（空/未定义）→ undefined（无锚即无链，不猜）；有锚无判词 → undefined。
  * 两者对消费方都等价于「无待处理判词」，但**不与「查到了一条闭环判词」混同**。
+ *
+ * tie-break 用 `m.rowid`（messages 的插入序）而非 `v.message_id`：message_id 是 uuid，
+ * 字典序与时间无关——同秒落库的两条判词谁胜出会是随机的（T-G 补，原写法如此）。
+ *
+ * **承重面只有 `getLatestChainVerdict`**：`LIMIT 1` 下胜者的 `verdict` 不同，选错就是
+ * 「该返工的判成通过」。`getChainRejectionsSince` 沿用同一 ORDER BY 只为**口径一致**，
+ * 它的 `[0]` 只被 `episodes.ts:175` 取 `.created_at` 用——同秒并列时两边**同值**，
+ * `classifyCompleted` 结局逐字不变（理由别讲过头：改这里不是为修 corrected_success）。
  */
 export function getLatestChainVerdict(
   anchor: string | null | undefined,
@@ -46,7 +54,7 @@ export function getLatestChainVerdict(
        FROM review_verdicts v
        JOIN messages m ON m.id = v.message_id
        WHERE m.task_id = ? AND m.session_id = ?
-       ORDER BY v.created_at DESC, v.message_id DESC
+       ORDER BY v.created_at DESC, m.rowid DESC
        LIMIT 1`
     )
     .get(anchor, sessionId) as ChainVerdictRow | undefined
@@ -72,7 +80,7 @@ export function getChainRejectionsSince(
        WHERE m.task_id = ? AND m.session_id = ?
          AND v.created_at > ?
          AND v.verdict IN ('reject', 'suggest')
-       ORDER BY v.created_at DESC, v.message_id DESC`
+       ORDER BY v.created_at DESC, m.rowid DESC`
     )
     .all(anchor, sessionId, since) as ChainVerdictRow[]
 }

@@ -79,6 +79,124 @@ function startStubServer(handler) {
   })
 }
 
+/**
+ * 瞬态重试（OQ-1 保护面）：`resolveCommitSessionId` 在 server 不可达时**抛**
+ * `HANDOFF_TRANSIENT`（设计如此——调用方按「瞬态 → 延迟重试」处理）。
+ * 但组 10 的三个调用点在顶层裸块里、外面没有 try，一次 fetch 抖动就把整轮 e2e 打崩：
+ * **无汇总、exit 非 0、已跑过的组全白跑**（实测 6 次运行命中 1 次，失败形态与
+ * `handoff-gen.mjs` catch 里构造的错误对象一致）。
+ *
+ * 只重试 `HANDOFF_TRANSIENT`（可重试的那一类）；其余异常照旧上抛——不掩盖真 bug。
+ * 断言仍落在**成功那一次**的返回值上，判据强度不变：这不是"把红的测成绿的"，
+ * 是把"基础设施抖一下就没有汇总"换成"抖一下重试一次"。
+ */
+async function callWithTransientRetry(fn, attempts = 3, delayMs = 100) {
+  let lastErr
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err?.code !== 'HANDOFF_TRANSIENT') throw err
+      lastErr = err
+      if (i < attempts) await new Promise((r) => setTimeout(r, delayMs))
+    }
+  }
+  throw lastErr
+}
+
+// helper 自证：它自己没被测的话，"保护面"就只是句声明（本会话已反复踩过恒真门）。
+{
+  let n = 0
+  const v = await callWithTransientRetry(async () => {
+    n++
+    if (n < 3) {
+      const e = new Error('transient')
+      e.code = 'HANDOFF_TRANSIENT'
+      throw e
+    }
+    return 'ok'
+  })
+  assert(v === 'ok' && n === 3, `瞬态重试应重试到成功（实得 v=${v} n=${n}）`)
+
+  let m = 0
+  let threw = null
+  try {
+    await callWithTransientRetry(async () => {
+      m++
+      const e = new Error('real bug')
+      e.code = 'OTHER'
+      throw e
+    })
+  } catch (e) {
+    threw = e
+  }
+  assert(
+    threw?.message === 'real bug' && m === 1,
+    `非瞬态异常应原样上抛且只跑一次——重试不得掩盖真 bug（实得 m=${m}）`
+  )
+}
+
+// ─── 入口主闸镜像（T-O 并入）────────────────────────────────
+
+/** 真实 REST 通道上的两个 400 条件，逐字对齐 `connectors/ingest.ts:buildDeliveryGateError`。
+ *  handoff-gen 的投递固定 `origin:'agent'`（`routes/messages.ts:173` 硬编码），
+ *  故「缺锚即 400」对**每一次**投递都适用。
+ *
+ *  为什么必须镜像：inline stub 原先一律无条件 201 ⇒「载荷无锚」这个缺口在 e2e 里
+ *  **恒不显形**——文档照样"投出"、断言照样绿。这层假绿正是上一轮没拦住 T-F 缺口的
+ *  直接原因。`startAttributionStub` 已按此修；本组把同一件事推到全部**会应答 2xx**
+ *  的 stub（清单与"为何三处不接"见 tickets.md T-O 段）。
+ *
+ *  规则 B（审查类投递缺 chainType）在本 e2e 里**当前不可达**：handoff-gen 只发补填
+ *  请求，载荷 `mentions:[fillerName]` 且 filler ∈ {store, implementer}——实测 agents
+ *  表：店长=store，ds猫/flash猫/dsh猫=implementer，reviewer 只有吐槽猫 ⇒
+ *  `isReviewDelivery` 恒 false。仍然实现它（要的是闸门的**忠实镜像**，不是现状快照），
+ *  并另加一条诊断断言钉住「放行载荷不得点名 reviewer」——改 filler 或加 mentions 的
+ *  人会在那里立刻看到指向上游的红。
+ */
+const STUB_REVIEWER_NAMES = ['吐槽猫']
+
+function mirrorEntryGateError(body) {
+  if (!body || typeof body.taskId !== 'string' || !body.taskId) {
+    return '缺链锚：agent 投递必须携带 task_id（首轮锚 = 本轮 trace_id）'
+  }
+  const mentions = Array.isArray(body.mentions) ? body.mentions : []
+  if (mentions.some((n) => STUB_REVIEWER_NAMES.includes(n)) && !body.chainType) {
+    return '审查类投递缺 chainType（需声明 first=建链 / followup=链内更新）'
+  }
+  return null
+}
+
+/** 经镜像闸**放行**的全部载荷——末尾用它断言「镜像真接上了」。 */
+const gatedPostBodies = []
+
+/**
+ * 统一的 `/api/messages` POST 处理：读 body → 过入口主闸镜像 → 交 `onOk(body, raw)`。
+ * 调用方在自己的 POST 分支里 `return handleMessagePost(req, res, cb)`。
+ * @param {(body: any, raw: string) => void} onOk — 闸门放行后的应答逻辑
+ */
+function handleMessagePost(req, res, onOk) {
+  let raw = ''
+  req.on('data', (c) => (raw += c))
+  req.on('end', () => {
+    let body = null
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      body = null
+    }
+    gatedPostBodies.push(body)
+    const gateError = mirrorEntryGateError(body)
+    if (gateError) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: gateError }))
+      return
+    }
+    onOk(body, raw)
+  })
+  return true
+}
+
 // ─── Setup: 创建临时 git 仓库 ───────────────────────────────
 
 // 所有测试仓库都建在**系统临时目录**下的一个私有根里，绝不建在仓库树内。
@@ -89,6 +207,16 @@ function startStubServer(handler) {
 // 临时产物不该出现在仓库树里，于是"清理不全"也就不再是污染源。
 // 注意：不补 .gitignore 兜底——那会掩盖同类回归（目录再出现时不再刺眼）。
 const TEST_BASE = mkdtempSync(join(tmpdir(), 'handoff-e2e-'))
+
+// 崩溃路径也要收：文件末尾的 `rmSync(TEST_BASE)` 只在跑到底时执行——中途 uncaught
+// 会留下一整个 fixture 根（实测：`handoff-e2e-nexELU`，mtime 13:37:11Z，内含
+// `.handoff-test-lookup` + `tmp`，正是 OQ-1 那次瞬态逃逸崩在半路留下的）。
+// exit 钩子在 uncaught exception 之后仍会跑，与末尾清理幂等（force + recursive）。
+process.on('exit', () => {
+  try {
+    rmSync(TEST_BASE, { recursive: true, force: true })
+  } catch {}
+})
 
 const TMP = join(TEST_BASE, 'tmp')
 mkdirSync(TMP, { recursive: true })
@@ -723,7 +851,7 @@ console.log('📦 测试组 10: commit uuid 反查会话')
 
   // 10b: 命中 → 返回消息所在会话
   hits = []
-  const sid = await resolveCommitSessionId(LOOKUP_TMP, serverUrl)
+  const sid = await callWithTransientRetry(() => resolveCommitSessionId(LOOKUP_TMP, serverUrl))
   assert(sid === 'session-debug-1', 'uuid 反查应返回消息所在会话')
   assert(hits.includes(`/api/messages/${uuid}`), '应请求反查 API')
   console.log('  10b: uuid 反查命中 ✅')
@@ -735,7 +863,7 @@ console.log('📦 测试组 10: commit uuid 反查会话')
     cwd: LOOKUP_TMP,
     stdio: 'pipe',
   })
-  const sid404 = await resolveCommitSessionId(LOOKUP_TMP, serverUrl)
+  const sid404 = await callWithTransientRetry(() => resolveCommitSessionId(LOOKUP_TMP, serverUrl))
   assert(sid404 === null, '404 时应返回 null（报错不投递，禁止降级兜底）')
   console.log('  10c: 404 报错不投递 ✅')
 
@@ -744,7 +872,9 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   execSync('git add -A', { cwd: LOOKUP_TMP, stdio: 'pipe' })
   execSync('git commit -m "fix: manual commit"', { cwd: LOOKUP_TMP, stdio: 'pipe' })
   hits = []
-  const sidManual = await resolveCommitSessionId(LOOKUP_TMP, serverUrl)
+  const sidManual = await callWithTransientRetry(() =>
+    resolveCommitSessionId(LOOKUP_TMP, serverUrl)
+  )
   assert(sidManual === null, '手动 commit（无 uuid）应返回 null')
   assert(hits.length === 0, '无 uuid 时不应发起反查请求')
   console.log('  10d: 手动 commit 报错不投递 ✅')
@@ -825,21 +955,18 @@ console.log('📦 测试组 11: 投递瞬态重试')
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHits++
-      let body = ''
-      req.on('data', (c) => (body += c))
-      req.on('end', () => {
-        lastPostBody = body
+      return handleMessagePost(req, res, (_body, raw) => {
+        postHits++
+        lastPostBody = raw
+        // 前两次模拟瞬态连接失败（连接被 reset → fetch 抛错 → transient）
+        if (postHits <= 2) {
+          destroyed++
+          req.socket.destroy()
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ id: 'm1', sessionId: 'session-debug-1' }))
       })
-      // 前两次模拟瞬态连接失败（连接被 reset → fetch 抛错 → transient）
-      if (postHits <= 2) {
-        destroyed++
-        req.socket.destroy()
-        return
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ id: 'm1', sessionId: 'session-debug-1' }))
-      return
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -868,6 +995,8 @@ console.log('📦 测试组 11: 投递瞬态重试')
   // 11b: 4xx 确定性失败不重试（CATSTUDY_SESSION_ID 显式指定，跳过反查）
   let postHits400 = 0
   const { server: server400, port: port400 } = await startStubServer((req, res) => {
+    // 入口主闸镜像**不接**此处（T-O 并入的刻意例外）：本 stub 的设计应答就是 400
+    // （测「4xx 确定性失败不重试」），闸门被它包含、接上去零区分性。
     if (req.url === '/api/messages' && req.method === 'POST') {
       postHits400++
       res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -903,10 +1032,11 @@ console.log('📦 测试组 11: 投递瞬态重试')
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHitsApproved++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      return handleMessagePost(req, res, () => {
+        postHitsApproved++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -935,10 +1065,14 @@ console.log('📦 测试组 11: 投递瞬态重试')
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHitsNotApproved++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      // T-O 复审 §四-1：本处原为**未接闸**的 inline 201——「全部会应答 2xx 的
+      // inline stub 都已接镜像」的说法因它而不成立（它恰是唯一一处）。接上：
+      // 载荷无锚时应在入口 400，而不是被这个 stub 无条件吞成 201。
+      return handleMessagePost(req, res, () => {
+        postHitsNotApproved++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -964,10 +1098,11 @@ console.log('📦 测试组 11: 投递瞬态重试')
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHitsDown++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      return handleMessagePost(req, res, () => {
+        postHitsDown++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -1026,10 +1161,11 @@ console.log('📦 测试组 12: 投递去重')
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHitsDup++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      return handleMessagePost(req, res, () => {
+        postHitsDup++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -1060,10 +1196,11 @@ console.log('📦 测试组 12: 投递去重')
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHitsFresh++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      return handleMessagePost(req, res, () => {
+        postHitsFresh++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -1095,10 +1232,11 @@ console.log('📦 测试组 12: 投递去重')
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHitsRange++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      return handleMessagePost(req, res, () => {
+        postHitsRange++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -1136,6 +1274,23 @@ function readStateFile(tmp) {
  * 对 127.0.0.1 的 TCP，execSync 起的 CLI 连不上 stub，必须进程内调用）。
  * 覆盖 CATSTUDY_URL、清空 CATSTUDY_SESSION_ID 走自动反查，结束后恢复。
  */
+/** 捕获 `console.log` 输出跑一段代码——用于断言**日志本身**（本会话的观测面）。
+ *  日志是排障唯一入口，写错方向比不写更坏，所以它也要有断言而不是只靠人眼看。 */
+async function captureLogs(fn) {
+  const lines = []
+  const orig = console.log
+  console.log = (...a) => {
+    lines.push(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '))
+    orig(...a)
+  }
+  try {
+    await fn()
+  } finally {
+    console.log = orig
+  }
+  return lines
+}
+
 async function runInProc(cwd, url, opts = {}) {
   const prevUrl = process.env.CATSTUDY_URL
   const prevSid = process.env.CATSTUDY_SESSION_ID
@@ -1192,10 +1347,11 @@ function gitIn(tmp, cmd) {
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHits++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      return handleMessagePost(req, res, () => {
+        postHits++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -1247,6 +1403,9 @@ function gitIn(tmp, cmd) {
       )
       return
     }
+    // 入口主闸镜像**不接**此处（T-O 并入的刻意例外）：本 stub 永不应答
+    // （`socket.destroy()` 模拟 POST 不返回 → 走落库验证），400/201 在客户端不可观测，
+    // 接上去只是把 body 读一遍、零区分性。
     if (req.url === '/api/messages' && req.method === 'POST') {
       postHits++
       landed = true // 消息已落库
@@ -1289,6 +1448,7 @@ function gitIn(tmp, cmd) {
       res.end(JSON.stringify([])) // 消息从未落库
       return
     }
+    // 入口主闸镜像**不接**此处（同上：永不应答，无可观测差异）
     if (req.url === '/api/messages' && req.method === 'POST') {
       postHits++
       req.socket.destroy()
@@ -1374,10 +1534,11 @@ function gitIn(tmp, cmd) {
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHits++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      return handleMessagePost(req, res, () => {
+        postHits++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -1443,14 +1604,11 @@ function gitIn(tmp, cmd) {
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      let raw = ''
-      req.on('data', (chunk) => (raw += chunk))
-      req.on('end', () => {
-        postBodies.push(JSON.parse(raw))
+      return handleMessagePost(req, res, (body) => {
+        postBodies.push(body)
         res.writeHead(201, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
       })
-      return
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -1523,10 +1681,11 @@ function gitIn(tmp, cmd) {
       return
     }
     if (req.url === '/api/messages' && req.method === 'POST') {
-      postHits++
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
-      return
+      return handleMessagePost(req, res, () => {
+        postHits++
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-new' }))
+      })
     }
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
@@ -1605,6 +1764,7 @@ async function startAttributionStub({
   updated,
   executor,
   executorTaskId = 'task-1',
+  skippedAmbiguous = false,
 }) {
   const hits = { writeback: 0, executor: 0, post: 0 }
   const postBodies = []
@@ -1618,7 +1778,12 @@ async function startAttributionStub({
     }
     if (req.url === `/api/messages/${uuid}/commit-hash` && req.method === 'POST') {
       hits.writeback++
-      return json(200, { ok: true, updated })
+      // skippedAmbiguous = T-M 的服务端**拒写**（同 uuid 多猫在跑且没带 agentId）
+      return json(200, {
+        ok: true,
+        updated,
+        ...(skippedAmbiguous ? { skippedAmbiguous: true } : {}),
+      })
     }
     if (req.url.startsWith(`/api/messages/${uuid}/executor`) && req.method === 'GET') {
       hits.executor++
@@ -1667,11 +1832,17 @@ async function startAttributionStub({
     updated: 0,
     executor: 'ok',
   })
-  await runInProc(tmp, stub.url)
+  const logs14a = await captureLogs(() => runInProc(tmp, stub.url))
 
   assert(
     stub.hits.writeback === 1,
     `前置：写回应确实发生（实际 ${stub.hits.writeback}）——否则本场景没被构造出来`
+  )
+  // 三态之三：**调用成功但 0 行**（区别于 14g 的「拒写」）。两者都说成「已写回（命中 0）」
+  // 正是旧实现的措辞病——这里钉住它有自己的说法。
+  assert(
+    logs14a.some((l) => l.includes('写回调用成功但命中 0 行')),
+    '写回成功但 0 行命中的日志应自成一态（不得与 14g 的「拒写」混称）'
   )
   // 阴性对照（证明下面那条不是恒真）：本场景写回读数 = 0，而旧判据把「updated=0」
   // 映射成 attributed=false → decideHookDelivery(false).deliver === true（投递）。
@@ -1755,7 +1926,7 @@ async function startAttributionStub({
     updated: 1,
     executor: 'ok',
   })
-  await runInProc(tmp, stub.url)
+  const logs14d = await captureLogs(() => runInProc(tmp, stub.url))
 
   assert(stub.hits.post === 0, `写回命中 running 行 → 有归属 → 静默（实际 ${stub.hits.post}）`)
   assert(
@@ -1763,10 +1934,55 @@ async function startAttributionStub({
     `正信号短路：命中 running 行即已确证有归属，不应再问探针（实际 ${stub.hits.executor}）`
   )
   assert(stub.postBodies.length === 0, `静默路径不该有载荷（实际 ${stub.postBodies.length} 条）`)
+  // 阳性对照：真命中时必须打「已写回」——14g 断言拒写时**不**打这一行，
+  // 得先钉住这一行在正常路径上确实存在，否则「不打」可能只是它压根被删了。
+  assert(
+    logs14d.some((l) => l.includes('commit_hash 已写回 execution_logs')),
+    '写回命中 1 行时应打「已写回」（14g 的阴性对照基线）'
+  )
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
   console.log('  14d: 写回命中 running 行 → 静默且省掉探针往返 ✅')
+}
+
+// 14g: 服务端**拒写**（同 uuid 多猫在跑且无 CATSTUDY_AGENT_ID ⇒ skippedAmbiguous）
+//      日志必须只说「未写回…不猜」，**不得**紧跟一行「已写回（命中 0）」。
+//      旧实现是无条件打印：相邻两行自相矛盾（上一行「未写回」/ 下一行「已写回」），
+//      而日志是本票唯一观测面——矛盾的一行会把排障引向「服务端没写」，
+//      真因却是「客户端没带 agentId」，两个方向的修法相反。
+{
+  // 必须全 hex：`extractCommitUuid` 按 UUID 形态匹配，含非 hex 字符会被判成
+  // 「commit message 无 uuid」而走手动提交路径——那样就绕开了写回，测不到本组
+  const uuid = '14ee0000-0000-4000-8000-00000000000e'
+  const tmp = makeUuidRepo('.handoff-test-attr-ambiguous', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14g',
+    updated: 0,
+    skippedAmbiguous: true,
+    executor: 'ok',
+  })
+  const logs14g = await captureLogs(() => runInProc(tmp, stub.url))
+
+  assert(
+    logs14g.some((l) => l.includes('commit_hash 未写回')),
+    '拒写应打「未写回…不猜」（T-M）'
+  )
+  assert(
+    !logs14g.some((l) => l.includes('commit_hash 已写回')),
+    '拒写时**不得**再打「已写回」——相邻两行自相矛盾（旧实现必红：它无条件打印这一行）'
+  )
+  // 三态互斥：拒写 ≠ 「调用成功但没命中」——旧实现把两者都说成「已写回（命中 running 行 0）」，
+  // 混淆的正是这两类 0 的后续处置（一个去问探针，一个是真没归属线索）。
+  assert(
+    !logs14g.some((l) => l.includes('命中 running 行 0')),
+    '拒写不得复用「命中 running 行 0」这套措辞（那是「调用成功但 0 行」，另一态）'
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14g: 服务端拒写 → 日志只说「未写回」，不再跟一行「已写回」✅')
 }
 
 // 14e: 用户终端**手动提交**（commit message 无 catstudy [uuid]）→ 兜底投递且自铸锚
@@ -1929,6 +2145,25 @@ function makeSpanRepo(dirName, uuid, commits) {
 }
 
 console.log('')
+
+// ─── 入口主闸镜像：接线自证 + 不变式 ────────────────────────
+
+// **非恒真**：本组是"镜像真被接上"的自证。镜像若没接（或接成死代码），
+// 下面所有投递断言都仍然全绿——那正是本轮要消灭的假绿形态。
+assert(
+  gatedPostBodies.length > 0,
+  `入口主闸镜像应至少放行过一次 POST（实际 0 次 ⇒ 镜像没接上，投递类断言全部成了恒真门）`
+)
+// 以下两条**构造上恒真**（闸门已先拦），留作诊断：失败信息指向真因而不是
+// 让人去猜为什么某条投递用例莫名变红。
+assert(
+  gatedPostBodies.every((b) => b?.taskId),
+  '放行载荷应全部带锚（闸门已保证；此处若红说明有人绕过了 handleMessagePost）'
+)
+assert(
+  gatedPostBodies.every((b) => !(b?.mentions ?? []).some((n) => STUB_REVIEWER_NAMES.includes(n))),
+  '放行载荷不应点名 reviewer——真机上那会触发「审查类投递缺 chainType」400（handoff-gen 从不发 chainType）'
+)
 
 // ─── Cleanup ────────────────────────────────────────────────
 

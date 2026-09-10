@@ -11,11 +11,14 @@ import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 import { parseReviewVerdict, recordReviewVerdict } from './verdict-parser.js'
 
-/** 店长（store）+ 作者（非 store）的典型作用域 */
-const TARGETS = [
-  { name: '店长', isStore: true },
-  { name: 'ds猫', isStore: false },
-]
+/**
+ * 店长（store）+ 作者（非 store）的典型作用域。
+ * `id` 与 `name` **刻意不同域**：id 是 agents.id 形态，name 是展示名——
+ * 断言值取 id（T-N 修复后 subject 落 id），若实现退回 `subject.name` 立即红。
+ */
+const STORE = { id: 'agent-1', name: '店长', isStore: true }
+const AUTHOR = { id: 'agent-3', name: 'ds猫', isStore: false }
+const TARGETS = [STORE, AUTHOR]
 
 describe('parseReviewVerdict — 纯函数', () => {
   it('approve 行首标记 → verdict=approve、subject=null（即使 @ 店长）', () => {
@@ -24,35 +27,49 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 
   it('suggest 只@作者 → subject=作者', () => {
-    const r = parseReviewVerdict('⚠️建议修改 见下。', [{ name: 'ds猫', isStore: false }])
+    const r = parseReviewVerdict('⚠️建议修改 见下。', [AUTHOR])
     expect(r).toEqual({
       kind: 'verdict',
       verdict: 'suggest',
-      subject: 'ds猫',
+      subject: 'agent-3',
       failure: null,
     })
   })
 
   it('suggest @店长+作者 → subject=作者（首个非 store 目标，店长排前也取作者）', () => {
-    const r = parseReviewVerdict('⚠️建议修改 需返工。', [
-      { name: '店长', isStore: true },
-      { name: 'ds猫', isStore: false },
-    ])
+    const r = parseReviewVerdict('⚠️建议修改 需返工。', [STORE, AUTHOR])
     expect(r).toEqual({
       kind: 'verdict',
       verdict: 'suggest',
-      subject: 'ds猫',
+      subject: 'agent-3',
       failure: null,
     })
   })
 
   it('reject 只@店长 → subject=null + failure=no_subject', () => {
-    const r = parseReviewVerdict('❌需重做 全部推倒。', [{ name: '店长', isStore: true }])
+    const r = parseReviewVerdict('❌需重做 全部推倒。', [STORE])
     expect(r).toEqual({
       kind: 'verdict',
       verdict: 'reject',
       subject: null,
       failure: 'no_subject',
+    })
+  })
+
+  // ─── T-N 域契约：subject 落 id 不落 name（2026-09-10 修复）─────────────
+  // 生产域形状：`agents.id` 是 uuid、`name` 是展示名（真库实测该列非空值曾是
+  // `'ds猫'` 这个**名字**）。下游 `hints.ts` 比的是 `agent.id` ⇒ 落名字时定向闸
+  // 恒不成立、权威路径从不注入。本用例断言值**只可能是 id**。
+  it('T-N：subject 落目标 id 而非 name（旧实现返 name，必红）', () => {
+    const r = parseReviewVerdict('⚠️建议修改 需返工。', [
+      { id: 'a1b2c3d4-0000-4000-8000-000000000001', name: '店长', isStore: true },
+      { id: 'a1b2c3d4-0000-4000-8000-000000000002', name: 'ds猫', isStore: false },
+    ])
+    expect(r).toEqual({
+      kind: 'verdict',
+      verdict: 'suggest',
+      subject: 'a1b2c3d4-0000-4000-8000-000000000002',
+      failure: null,
     })
   })
 
@@ -89,19 +106,19 @@ describe('parseReviewVerdict — 纯函数', () => {
 
   it('真实审查输出 **结论：⚠️建议修改**（装饰 + 标签前缀）→ suggest', () => {
     const r = parseReviewVerdict('## 审查结论\n\n**结论：⚠️建议修改**\n\n3 点需处理，见下。', [
-      { name: 'ds猫', isStore: false },
+      AUTHOR,
     ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('结论：⚠️建议修改（仅标签前缀，无装饰）→ suggest', () => {
-    const r = parseReviewVerdict('结论：⚠️建议修改', [{ name: 'ds猫', isStore: false }])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('结论：⚠️建议修改', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('### ❌需重做（markdown 标题装饰）→ reject', () => {
-    const r = parseReviewVerdict('### ❌需重做', [{ name: 'ds猫', isStore: false }])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'reject', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('### ❌需重做', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'reject', subject: 'agent-3', failure: null })
   })
 
   it('> ✅可合并（引用块）→ no-marker（引用按定义是转述，一律排除）', () => {
@@ -134,10 +151,8 @@ describe('parseReviewVerdict — 纯函数', () => {
   // 强调闭合 + 标点紧贴标记 → 旧 lookahead `(?=\s|$)` 遇 `*` 不匹配，86% 静默不落库。
 
   it('真实形态 **结论：⚠️建议修改**——续写正文 → suggest（强调闭合 + 破折号）', () => {
-    const r = parseReviewVerdict('**结论：⚠️建议修改**——方向正确，但 3 点需处理。', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('**结论：⚠️建议修改**——方向正确，但 3 点需处理。', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('真实形态 **结论：✅可合并**——续写正文 → approve', () => {
@@ -146,17 +161,13 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 
   it('真实形态 - **结论**：⚠️建议修改（LOW）——续写 → suggest（标签夹强调闭 + 括号）', () => {
-    const r = parseReviewVerdict('- **结论**：⚠️建议修改（LOW）——docs 清理达标。', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('- **结论**：⚠️建议修改（LOW）——docs 清理达标。', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('真实形态 **结论判定：⚠️建议修改（LOW）**。→ suggest（长标签须早于短标签）', () => {
-    const r = parseReviewVerdict('**结论判定：⚠️建议修改（低严重度收尾）**。3 处待修。', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('**结论判定：⚠️建议修改（低严重度收尾）**。3 处待修。', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('标记后接汉字仍不匹配 → bad_verdict（✅可合并了，不因放宽而误收）', () => {
@@ -169,17 +180,13 @@ describe('parseReviewVerdict — 纯函数', () => {
   // 才算候选。否则一条 ⚠️ 审查会因末尾引用的一行 ✅ 被误判 approve。
 
   it('引用行 ✅ 不覆盖真结论 ⚠️ → suggest（旧实现误判 approve）', () => {
-    const r = parseReviewVerdict('**结论：⚠️建议修改**——需改。\n\n> ✅可合并', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('**结论：⚠️建议修改**——需改。\n\n> ✅可合并', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('列表行 ✅ 不覆盖真结论 ⚠️ → suggest（旧实现误判 approve）', () => {
-    const r = parseReviewVerdict('- ✅可合并 → 行首@店长\n\n**结论：⚠️建议修改**——需改。', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('- ✅可合并 → 行首@店长\n\n**结论：⚠️建议修改**——需改。', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('全消息只有引用行标记 → no-marker（引用一律排除，不兜底识别）', () => {
@@ -193,10 +200,8 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 
   it('列表项带标签 ⚠️ → suggest（真实形态，A 级候选不受列表前缀影响）', () => {
-    const r = parseReviewVerdict('- **结论**：⚠️建议修改（LOW）——docs 清理达标。', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('- **结论**：⚠️建议修改（LOW）——docs 清理达标。', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('A 级优先于 B 级：带标签 ✅ + 裸 ⚠️ → approve（标签行是结论）', () => {
@@ -205,17 +210,13 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 
   it('同级冲突取最严：裸 ⚠️ + 裸 ✅ → suggest（错误代价不对称）', () => {
-    const r = parseReviewVerdict('⚠️建议修改 先说问题。\n✅可合并 后来确认了', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('⚠️建议修改 先说问题。\n✅可合并 后来确认了', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('同级无冲突取该值：裸 ❌ 重复出现 → reject', () => {
-    const r = parseReviewVerdict('❌需重做 第一轮。\n❌需重做 复审仍不过。', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'reject', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('❌需重做 第一轮。\n❌需重做 复审仍不过。', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'reject', subject: 'agent-3', failure: null })
   })
 
   // ─── T-C 判词三档：💬仅评论（非阻断）────────────────────────────────
@@ -224,10 +225,7 @@ describe('parseReviewVerdict — 纯函数', () => {
   // 当返工派发）；严重度落在 ✅ 与 ⚠️ 之间（有观察项就不算干净通过）。
 
   it('comment：💬仅评论 → comment + subject=null（@ 了非 store 目标也不写 subject）', () => {
-    const r = parseReviewVerdict('💬仅评论 3 点非阻断观察，不要求返工。', [
-      { name: '店长', isStore: true },
-      { name: 'ds猫', isStore: false },
-    ])
+    const r = parseReviewVerdict('💬仅评论 3 点非阻断观察，不要求返工。', [STORE, AUTHOR])
     expect(r).toEqual({ kind: 'verdict', verdict: 'comment', subject: null, failure: null })
   })
 
@@ -247,10 +245,8 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 
   it('同级冲突：裸 💬 + 裸 ⚠️ → suggest（既有向严裁决不放宽，💬 不得降级 ⚠️）', () => {
-    const r = parseReviewVerdict('💬仅评论 小建议。\n⚠️建议修改 但这条必须改', [
-      { name: 'ds猫', isStore: false },
-    ])
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    const r = parseReviewVerdict('💬仅评论 小建议。\n⚠️建议修改 但这条必须改', [AUTHOR])
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   // ─── 真实语料回归（2026-09-09 店长验收硬指标）────────────────────────
@@ -353,7 +349,7 @@ describe('parseReviewVerdict — 纯函数', () => {
       '**结论：⚠️ 建议修改。** 四条待核项里三条成立（谓词那条我复核了）。',
       TARGETS
     )
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('T-L 实证 `c4c40fac`：**结论：✅ 可合并。**（emoji 后带空格）→ approve', () => {
@@ -371,7 +367,7 @@ describe('parseReviewVerdict — 纯函数', () => {
       '**结论：⚠️建议修改** —— 门禁那一半修对了，但台账那半方向相反。',
       TARGETS
     )
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('T-L 同判：同一结论行带/不带空格 → 同值（视觉同形必须同判）', () => {
@@ -390,7 +386,7 @@ describe('parseReviewVerdict — 纯函数', () => {
       ].join('\n'),
       TARGETS
     )
-    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'ds猫', failure: null })
+    expect(r).toEqual({ kind: 'verdict', verdict: 'suggest', subject: 'agent-3', failure: null })
   })
 
   it('T-L 行尾判据**未**放松：`✅ 可合并了`（带空格且后接汉字）→ 仍 bad_verdict', () => {
@@ -439,7 +435,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
       sessionId: 's1',
       reviewerAgentId: 'reviewer-1',
       content: '❌需重做',
-      targets: [{ name: '店长', isStore: true }],
+      targets: [STORE],
     })
     const row = verdictsOf('m-nosubject')!
     expect(row.verdict).toBe('reject')
@@ -487,7 +483,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
     })
     const row = verdictsOf('m-decorated')!
     expect(row.verdict).toBe('suggest')
-    expect(row.subject_agent_id).toBe('ds猫')
+    expect(row.subject_agent_id).toBe('agent-3')
     expect(failuresOf('m-decorated')).toBeUndefined()
   })
 

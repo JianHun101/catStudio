@@ -1160,14 +1160,25 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
         }
         // T-M：跨多只猫且没带 agentId 时服务端**拒写**（0 行是"拒写"，不是"没命中"）。
         // 单独一行日志——两类 0 的后续处置不同（一个去问探针，一个是真没归属线索）。
+        //
+        // 三态**互斥**：旧实现在拒写告警之后无条件再打一行「已写回 execution_logs
+        // （命中 running 行 0）」——相邻两行自相矛盾（上一行「未写回…不猜」/ 下一行
+        // 「已写回」）。日志是本票唯一的观测面，自相矛盾的一行会把排障引向
+        //「服务端没写」而不是「客户端没带 agentId」——两个完全不同的修法方向。
         if (body?.skippedAmbiguous === true) {
           console.log(
             `[handoff-gen] ⚠️  commit_hash 未写回：同 uuid 多只猫在跑且无 CATSTUDY_AGENT_ID，归属不可消歧——不猜（T-M）`
           )
+        } else if (Number.isFinite(updated) && updated > 0) {
+          console.log(
+            `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}，命中 running 行 ${updated}）`
+          )
+        } else {
+          // updated 非有限值 = 响应体缺失/非数字（老 server），同样不能说「已写回」
+          console.log(
+            `[handoff-gen] commit_hash 写回调用成功但命中 0 行（${(commitSha || '').slice(0, 7)}，updated=${body?.updated ?? '未知'}）——无 running 行可写，交探针分辨`
+          )
         }
-        console.log(
-          `[handoff-gen] commit_hash 已写回 execution_logs（${(commitSha || '').slice(0, 7)}，命中 running 行 ${body?.updated ?? '未知'}）`
-        )
       }
     } catch {
       console.log(

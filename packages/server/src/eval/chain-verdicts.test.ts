@@ -111,4 +111,48 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
   it('getChainRejectionsSince：无锚 → 空数组（不抛错）', () => {
     expect(getChainRejectionsSince(null, SESSION, '2026-09-10 00:00:00')).toEqual([])
   })
+
+  // ─── tie-break：同 created_at 时按**插入序**（T-G 补）─────────────────
+  // 原实现 `ORDER BY v.created_at DESC, v.message_id DESC`——message_id 是 uuid，
+  // 字典序与时间无关 ⇒ 同秒落库的两条判词谁胜出是随机的。改用 `m.rowid DESC`（插入序）。
+  // 判别设计：先插字典序**大**的、后插字典序**小**的，两种实现的胜者必然相反。
+
+  it('getLatestChainVerdict：同 created_at → 取后插入的那条（旧实现按 uuid 字典序，必红）', () => {
+    seedVerdict({
+      msgId: 'v-zzz',
+      anchor: 'A',
+      verdict: 'suggest',
+      createdAt: '2026-09-10 10:00:00',
+    })
+    seedVerdict({
+      msgId: 'v-aaa',
+      anchor: 'A',
+      verdict: 'approve',
+      createdAt: '2026-09-10 10:00:00',
+    })
+
+    // 后插入 = 更新的那条 ⇒ 旧实现返回 v-zzz（uuid 字典序更大者）
+    expect(getLatestChainVerdict('A', SESSION)?.message_id).toBe('v-aaa')
+  })
+
+  it('getChainRejectionsSince：同 created_at → [0] 是后插入的那条（旧实现按 uuid 字典序，必红）', () => {
+    seedVerdict({
+      msgId: 'v-zzz',
+      anchor: 'A',
+      verdict: 'suggest',
+      createdAt: '2026-09-10 11:00:00',
+    })
+    seedVerdict({
+      msgId: 'v-aaa',
+      anchor: 'A',
+      verdict: 'reject',
+      createdAt: '2026-09-10 11:00:00',
+    })
+
+    const rows = getChainRejectionsSince('A', SESSION, '2026-09-10 10:00:00')
+    // [0] 被 episodes 当「最近一次打回」的时间源——但它只取 `.created_at`，同秒并列时
+    // 两边同值 ⇒ 这条钉的是**口径一致**，不是「取错条会翻转 corrected_success」。
+    // 判别力来自「哪种插入序胜出」：旧实现按 uuid 字典序，胜者必为 v-zzz。
+    expect(rows[0].message_id).toBe('v-aaa')
+  })
 })
