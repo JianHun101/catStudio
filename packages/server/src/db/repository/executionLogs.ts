@@ -53,8 +53,34 @@ export function getLogsByTriggerMessage(triggeredByMessageId: string): Execution
     .all(triggeredByMessageId) as ExecutionLogRow[]
 }
 
+/** 执行者反查的候选行形状（三个反查函数共用）。 */
+export interface ExecutorLookup {
+  agent_id: string
+  name: string
+  trace_id: string
+  task_id: string | null
+}
+
+/** 从候选执行行里**唯一**指认执行者（T-M）。
+ *  同一 agent 的多行（重试 / 重放）**不算歧义**——执行者是同一只猫；跨 agent 才算。
+ *  不可消歧 ⇒ `undefined`（**不猜**）：T-M 治的正是「`ORDER BY started_at DESC LIMIT 1`
+ *  取最近」在双执行者下有一半概率指向非作者（合成实验：同 uuid 双 running、只有后者提交，
+ *  反查却返回后者——刚好对；把 started_at 反过来就恒错）。
+ *  判据取 **distinct agent** 而非行数：同 agent 多行时执行者是确定的，按行数拒会把
+ *  "同一只猫重试"误判成歧义、白丢归属。 */
+function pickSingleExecutor(rows: ExecutorLookup[]): ExecutorLookup | undefined {
+  if (rows.length === 0) return undefined
+  const first = rows[0]
+  for (const row of rows) {
+    if (row.agent_id !== first.agent_id) return undefined
+  }
+  return first
+}
+
 /** 反查"执行某条消息"的 agent（handoff-gen 动态补填人用）。
- *  一条消息可触发多个 agent（多人 @），取最近开始执行的一条；无记录返回 undefined。
+ *  一条消息可触发多个 agent（多人 @）——**跨 agent 不再"取最近"猜**（T-M）：
+ *  那是双执行者下 50% 指错人的根因，改为返回 undefined（调用方退回兜底 @店长）。
+ *  同一 agent 多行时取最近开始执行的一条。无记录返回 undefined。
  *
  *  `task_id`（T-I）：**链锚**，取该执行行触发的那条消息的 `messages.task_id`
  *  （一跳 JOIN）。与 `trace_id` 是两个不同的东西——`trace_id` 是**当轮**执行追踪 id，
@@ -63,44 +89,62 @@ export function getLogsByTriggerMessage(triggeredByMessageId: string): Execution
  *  ——不因加 JOIN 改变"有无执行行"的判据（404 语义归调用方）。 */
 export function getExecutorNameByTriggeredBy(
   triggeredByMessageId: string
-): { agent_id: string; name: string; trace_id: string; task_id: string | null } | undefined {
-  return db
+): ExecutorLookup | undefined {
+  const rows = db
     .prepare(
       `SELECT el.agent_id, a.name, el.trace_id, m.task_id
        FROM execution_logs el
        JOIN agents a ON a.id = el.agent_id
        LEFT JOIN messages m ON m.id = el.triggered_by_message_id
        WHERE el.triggered_by_message_id = ?
-       ORDER BY el.started_at DESC
-       LIMIT 1`
+       ORDER BY el.started_at DESC`
     )
-    .get(triggeredByMessageId) as
-    { agent_id: string; name: string; trace_id: string; task_id: string | null } | undefined
+    .all(triggeredByMessageId) as ExecutorLookup[]
+  return pickSingleExecutor(rows)
+}
+
+/** 该触发消息是否存在**可反查的执行行**（INNER JOIN agents，与上面两个反查同口径）。
+ *  只回答"有没有行"，不回答"是谁"——`/executor` 用它区分两种失败（T-M）：
+ *    - 无行 → 404（"该消息没有任何执行行"，既有语义）
+ *    - 有行但不可消歧 → 200 + `ambiguous:true`（**不能报 404**：`probeAttribution`
+ *      拿 404 当"无归属 ⇒ 钩子兜底投递"，把"指不出人"报成 404 会让有归属的 agent
+ *      提交被钩子多投一轮——正是 T-A / T-H 要止住的形态）。
+ *  口径与反查一致（INNER JOIN agents）：agent 行被删的行不算"可反查"，保持既有
+ *  「删 agent ⇒ 404 ⇒ 多投」的安全方向不变。 */
+export function hasExecutorRowsForTrigger(triggeredByMessageId: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 AS hit FROM execution_logs el
+       JOIN agents a ON a.id = el.agent_id
+       WHERE el.triggered_by_message_id = ? LIMIT 1`
+    )
+    .get(triggeredByMessageId) as { hit: number } | undefined
+  return row !== undefined
 }
 
 /** 反查"提交某 commit"的 agent（handoff-gen 动态补填人，commit_hash 精确匹配）。
  *  commit 由实施者提交时经 POST /api/messages/:id/commit-hash 写回
  *  （updateRunningExecutionCommitHash），同 uuid 多执行者时各 commit 各命中
  *  各的实施者，不再"取最近开始执行"误指。无记录返回 undefined。
+ *  **跨 agent 命中多行时同样不猜**（T-M）：一个 sha 落到两只猫的行上（无 agentId 的
+ *  全刷 / 自动提交快照制造出来的），谁是真作者已不可知 → undefined，而不是按
+ *  started_at 挑一个。同 agent 多行取最近。
  *  trace_id 一并返回——`/api/handoff/verdict` 的判据链仍走它
  *  （commit_hash → execution_logs → trace_id → review_verdicts）。
  *  task_id（T-I）同上：**链锚**取触发消息的 `messages.task_id`，供 `/executor`
  *  回传给 handoff-gen 当交接文档的锚。 */
-export function getExecutorNameByCommitHash(
-  commitHash: string
-): { agent_id: string; name: string; trace_id: string; task_id: string | null } | undefined {
-  return db
+export function getExecutorNameByCommitHash(commitHash: string): ExecutorLookup | undefined {
+  const rows = db
     .prepare(
       `SELECT el.agent_id, a.name, el.trace_id, m.task_id
        FROM execution_logs el
        JOIN agents a ON a.id = el.agent_id
        LEFT JOIN messages m ON m.id = el.triggered_by_message_id
        WHERE el.commit_hash = ?
-       ORDER BY el.started_at DESC
-       LIMIT 1`
+       ORDER BY el.started_at DESC`
     )
-    .get(commitHash) as
-    { agent_id: string; name: string; trace_id: string; task_id: string | null } | undefined
+    .all(commitHash) as ExecutorLookup[]
+  return pickSingleExecutor(rows)
 }
 
 /** 反查"该 agent 当前 running 执行"的 commit_hash（T-A ② 收尾兜底判据）。
@@ -267,42 +311,81 @@ export function updateExecutionLogDiagnostics(
   )
 }
 
+/** 该触发消息的执行行跨了几只**不同的猫**。>1 = 归属不可消歧（T-M 两条写路径共用）。 */
+function distinctAgentCount(triggeredByMessageId: string, onlyRunning: boolean): number {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT agent_id FROM execution_logs
+       WHERE triggered_by_message_id = ?${onlyRunning ? " AND status = 'running'" : ''}`
+    )
+    .all(triggeredByMessageId) as Array<{ agent_id: string }>
+  return rows.length
+}
+
+/** depth=0 自动提交写回：把本轮自动生成的那个 commit 记到该触发消息的**全部**执行行上
+ *  （round 级快照，不是"某只猫的执行产物"）。
+ *
+ *  **为什么不过滤 `status`**（T-M 实测裁定）：唯一调用点（`execution/serial.ts` 的
+ *  depth=0 收尾块）在所有 `execute()` 返回**之后**执行，而每个 execute 的收口漏斗
+ *  （`finalizeRun` → `completeExecution` → `finalizeExecutionLog`）已在返回前把行置终态
+ *  ⇒ 给这里加 `status='running'` 过滤会让该路径**恒为空操作**（不是收窄，是废掉它）。
+ *  合成实验：ended + 2×running 三行，现实现 changes=3（ended 行确实被盖）。
+ *
+ *  **收窄点改为消歧**：该触发消息的执行行跨多只猫时，这个"本轮快照"sha 无法指认作者，
+ *  刷上去只会让读侧反查从"猜"变成"更自信地猜" ⇒ 拒写并回报 `skippedAmbiguous`，
+ *  归属留空（读侧反查返 undefined → 调用方兜底 @店长）。单猫轮次照写（含已终态行，
+ *  那正是本函数存在的意义）。 */
 export function updateExecutionLogCommitHash(
   triggeredByMessageId: string,
   commitHash: string
-): void {
-  db.prepare('UPDATE execution_logs SET commit_hash = ? WHERE triggered_by_message_id = ?').run(
-    commitHash,
-    triggeredByMessageId
-  )
+): { changes: number; skippedAmbiguous: boolean } {
+  if (distinctAgentCount(triggeredByMessageId, false) > 1) {
+    return { changes: 0, skippedAmbiguous: true }
+  }
+  const r = db
+    .prepare('UPDATE execution_logs SET commit_hash = ? WHERE triggered_by_message_id = ?')
+    .run(commitHash, triggeredByMessageId)
+  return { changes: r.changes, skippedAmbiguous: false }
 }
 
 /** post-commit 写回：把本次 commit 的 hash 记到"仍 running 的执行记录"上。
  *  agentId：post-commit → handoff-gen 继承 claude.ts spawn env 注入的
  *  CATSTUDY_AGENT_ID（dispatch 派发子进程自带），按 agent_id 精确命中自己的
  *  执行行——同 uuid 双 running（双猫同时执行，店长一条消息派两单）时
- *  两个 commit 各刷各的行，互不覆盖（eae5a5e 错投 ds猫 竞态根治，双 running
- *  写回互覆实害化后裁决）；无 agentId（开发者终端手动提交，env 不存在）走
- *  fallback：running 过滤 + 全刷，行为与修复前一致。 */
+ *  两个 commit 各刷各的行，互不覆盖（`eae5a5e` 是**实害化**锚——该 sha 的改动
+ *  本身是 handoff-gen 审查须知绝对引用，不是本竞态的修复；按 agent_id 精确化的
+ *  根治是 `0fe8292`，双 running 写回互覆实害化后裁决）。
+ *  无 agentId（开发者终端手动提交，env 不存在）走 fallback：running 过滤 + 全刷。
+ *  **但全刷前先消歧**（T-M）：该 uuid 的 running 行跨**多只不同的猫**时，无法判断
+ *  这个 commit 是谁提交的——刷上去等于给每只猫都记一笔"我提交了它"，读侧只能按
+ *  `started_at` 猜（合成实验：双 running 全刷 changes=2，反查返回 started_at 靠后的
+ *  那只，与真实作者无关）。此时**拒写**（changes=0 + `skippedAmbiguous`），归属留空
+ *  让调用方兜底 @店长，而不是制造一条"看似精确"的错归属。
+ *  同一只猫的多个 running 行（重试）不算歧义——执行者是同一只猫。 */
 export function updateRunningExecutionCommitHash(
   triggeredByMessageId: string,
   commitHash: string,
   agentId?: string
-): { changes: number } {
+): { changes: number; skippedAmbiguous: boolean } {
   if (agentId) {
-    return db
+    const r = db
       .prepare(
         `UPDATE execution_logs SET commit_hash = ?
          WHERE triggered_by_message_id = ? AND status = 'running' AND agent_id = ?`
       )
       .run(commitHash, triggeredByMessageId, agentId)
+    return { changes: r.changes, skippedAmbiguous: false }
   }
-  return db
+  if (distinctAgentCount(triggeredByMessageId, true) > 1) {
+    return { changes: 0, skippedAmbiguous: true }
+  }
+  const r = db
     .prepare(
       `UPDATE execution_logs SET commit_hash = ?
        WHERE triggered_by_message_id = ? AND status = 'running'`
     )
     .run(commitHash, triggeredByMessageId)
+  return { changes: r.changes, skippedAmbiguous: false }
 }
 
 /** 启动时修复：将所有 running 状态标记为 failed。

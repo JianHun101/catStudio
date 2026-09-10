@@ -945,8 +945,21 @@ async function executeAgentsSerialImpl(
         ? gitCommit(`catstudy [${triggerMsg.id}]`, { cwd: worktreeCwd })
         : gitCommit(`catstudy [${triggerMsg.id}]`)
       if (commitHash) {
-        // 将 commit hash 写回 execution_logs（本轮所有相关日志）
-        execLogsRepo.updateExecutionLogCommitHash(triggerMsg.id, commitHash)
+        // 将 commit hash 写回 execution_logs（本轮所有相关日志）。
+        // T-M：本轮执行行跨多只猫时这个 sha 指认不出作者 → 写回侧**拒写**（不再给每只猫
+        // 都记一笔"我提交了它"，把"指错人"从读侧的猜变成写侧的制造）。拒写可观测：
+        // 不静默——静默拦截正是 T-K 治的形态。
+        const written = execLogsRepo.updateExecutionLogCommitHash(triggerMsg.id, commitHash)
+        if (written.skippedAmbiguous) {
+          log.warn('auto-commit hash not written back — executor ambiguous', {
+            traceId,
+            triggerMessageId: triggerMsg.id,
+            commitHash,
+            distinctAgents: '>1',
+            writtenRows: written.changes,
+            reason: '本轮执行行跨多只猫，自动提交的 sha 无法指认唯一作者（T-M）',
+          })
+        }
       }
     } finally {
       if (anyClaude) {
