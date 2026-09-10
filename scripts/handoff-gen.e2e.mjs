@@ -66,6 +66,9 @@ function assertNotContains(haystack, needle, msg) {
   }
 }
 
+/** 链锚形状断言用：`randomUUID()` 的 v4 形态。投递载荷有没有锚，就靠它分辨。 */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 /** 启动一个临时 HTTP stub server（127.0.0.1 随机端口），用于测试反查投递目标 */
 function startStubServer(handler) {
   return new Promise((resolve) => {
@@ -1147,8 +1150,8 @@ async function runInProc(cwd, url, opts = {}) {
   }
 }
 
-/** 建一个带 catstudy [uuid] commit 的临时仓库 */
-function makeUuidRepo(dirName, uuid, files) {
+/** 建一个临时仓库，HEAD 是一笔给定 message 的提交 */
+function makeCommitRepo(dirName, files, commitMsg) {
   const tmp = join(TEST_BASE, dirName)
   if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
   mkdirSync(tmp, { recursive: true })
@@ -1159,8 +1162,13 @@ function makeUuidRepo(dirName, uuid, files) {
     writeFileSync(join(tmp, fp), content, 'utf-8')
   }
   execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
-  execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: tmp, stdio: 'pipe' })
+  execSync(`git commit -m "${commitMsg}"`, { cwd: tmp, stdio: 'pipe' })
   return tmp
+}
+
+/** 建一个带 catstudy [uuid] commit 的临时仓库 */
+function makeUuidRepo(dirName, uuid, files) {
+  return makeCommitRepo(dirName, files, `catstudy [${uuid}]`)
 }
 
 function gitIn(tmp, cmd) {
@@ -1579,14 +1587,25 @@ function gitIn(tmp, cmd) {
 // e2e 的 stub 从来没有 commit-hash 端点 → writeback 恒失败 → attributed 恒 null
 // → 一律走降级投递。于是**三条判据在 e2e 里全不生效**，测试全绿也不代表判据对。
 // 本组把两个端点都补上，让「静默」这条路径第一次在 e2e 里可断言。
+// T-F 必改 1 追加：组内的 POST stub 镜像真实入口主闸（agent 入口缺 taskId → 400），
+// 且 14b/14c/14e/14f 断言**载荷本体**带锚——上一轮那条「载荷无锚」的缺口在
+// 「无条件 201 + 只数 POST 次数」下恒为绿，本组把它关掉。
 
 /**
  * 归属场景 stub：写回 `updated`（旧判据源）与 executor（新判据源）各自可配，
  * 用来构造「两者结论相反」的场景——那正是 T-H ① 的靶心。
  * @param {number} cfg.updated — 写回响应里的 running 命中行数
  * @param {'ok'|404|500} cfg.executor — executor 端点行为（'ok' = 存在任一状态执行行）
+ * @param {string|null} [cfg.executorTaskId='task-1'] — executor 回传的 taskId；
+ *        传 null 表示**回传有 agentName 但 trace_id 空**（老库执行行）——自铸锚的另一条来路
  */
-async function startAttributionStub({ uuid, sessionId, updated, executor }) {
+async function startAttributionStub({
+  uuid,
+  sessionId,
+  updated,
+  executor,
+  executorTaskId = 'task-1',
+}) {
   const hits = { writeback: 0, executor: 0, post: 0 }
   const postBodies = []
   const { server, port } = await startStubServer((req, res) => {
@@ -1605,7 +1624,11 @@ async function startAttributionStub({ uuid, sessionId, updated, executor }) {
       hits.executor++
       if (executor === 404) return json(404, { error: 'No execution log for this message' })
       if (executor === 500) return json(500, { error: 'boom' })
-      return json(200, { agentId: 'a-1', agentName: 'ds猫', taskId: 'task-1' })
+      return json(200, {
+        agentId: 'a-1',
+        agentName: 'ds猫',
+        ...(executorTaskId ? { taskId: executorTaskId } : {}),
+      })
     }
     if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
       return json(200, [])
@@ -1615,7 +1638,15 @@ async function startAttributionStub({ uuid, sessionId, updated, executor }) {
       let raw = ''
       req.on('data', (c) => (raw += c))
       req.on('end', () => {
-        postBodies.push(JSON.parse(raw))
+        const body = JSON.parse(raw)
+        postBodies.push(body)
+        // 入口主闸**镜像**（T-F 必改 1）：真实 REST 通道固定以 `origin: 'agent'` 摄入，
+        // `ingest.ts` 规则 5 对 agent 入口缺 taskId 一律 400。本 stub 原先是无条件 201，
+        // 于是「载荷无锚」这个缺口在 e2e 里恒不显形——文档照样"投出"、断言照样绿：
+        // 这层假绿正是上一轮没拦住它的直接原因。缺锚即 400 是对真机的忠实模拟。
+        // 注意由此产生的盲区：4xx = fatal 不重试，`hits.post` 在 400 下**同样是 1**，
+        // 所以本组的断言必须落在 `postBodies` 的载荷本体上（只数次数等于没测）。
+        if (!body.taskId) return json(400, { error: '缺链锚：agent 投递必须携带 task_id' })
         json(201, { ok: true, messageId: 'm-new' })
       })
       return
@@ -1651,6 +1682,7 @@ async function startAttributionStub({ uuid, sessionId, updated, executor }) {
   )
   assert(stub.hits.post === 0, `执行已终态仍有归属 → 应静默（POST 0 次，实际 ${stub.hits.post}）`)
   assert(stub.hits.executor === 1, `应问一次归属探针（实际 ${stub.hits.executor}）`)
+  assert(stub.postBodies.length === 0, `静默路径不该有载荷（实际 ${stub.postBodies.length} 条）`)
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
@@ -1676,6 +1708,14 @@ async function startAttributionStub({ uuid, sessionId, updated, executor }) {
     stub.hits.executor >= 1,
     `无执行行时也应问过探针（二者同得 updated=0，实际 ${stub.hits.executor} 次）`
   )
+  // T-F 必改 1 的区分性断言：反查不到执行行 → 载荷必须**自铸锚**。
+  // 为什么必须断载荷本体：stub 现在按 `body.taskId` 缺省返 400，而 4xx = fatal 不重试、
+  // `hits.post` 照样是 1——只数 POST 次数的话，删掉自铸逻辑本用例仍会全绿。
+  assert(stub.postBodies.length === 1, `应投出 1 条载荷（实际 ${stub.postBodies.length}）`)
+  assert(
+    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
+    `反查未命中 → 载荷必须自带链锚（自铸 uuid），实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+  )
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
@@ -1695,6 +1735,10 @@ async function startAttributionStub({ uuid, sessionId, updated, executor }) {
   await runInProc(tmp, stub.url)
 
   assert(stub.hits.post === 1, `探针查不动 → 降级一律投递（实际 ${stub.hits.post}）`)
+  assert(
+    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
+    `降级投递同样必须带锚（探针 500 不改变无锚载荷的命运），实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+  )
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
@@ -1718,10 +1762,97 @@ async function startAttributionStub({ uuid, sessionId, updated, executor }) {
     stub.hits.executor === 0,
     `正信号短路：命中 running 行即已确证有归属，不应再问探针（实际 ${stub.hits.executor}）`
   )
+  assert(stub.postBodies.length === 0, `静默路径不该有载荷（实际 ${stub.postBodies.length} 条）`)
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
   console.log('  14d: 写回命中 running 行 → 静默且省掉探针往返 ✅')
+}
+
+// 14e: 用户终端**手动提交**（commit message 无 catstudy [uuid]）→ 兜底投递且自铸锚
+//      这是 T-F 必改 1 的原始病案：无 uuid ⇒ 无源链可反查 ⇒ 载荷原本不带锚 ⇒
+//      入口主闸 400 ⇒ 4xx=fatal 不重试、连 pending 都不留，「手动提交补投通路 100% 死」
+//      （spec D5 / 用户故事 14 整条边界）。无 uuid 反查不出会话，投递目标按既有契约
+//      由 CATSTUDY_SESSION_ID 人工指定——本用例顺带钉住这条契约。
+{
+  const tmp = makeCommitRepo(
+    '.handoff-test-attr-manual-nouuid',
+    { 'a.txt': '1' },
+    'chore: 手动提交'
+  )
+  const stub = await startAttributionStub({
+    uuid: 'unused-no-uuid',
+    sessionId: 'session-14e',
+    updated: 0,
+    executor: 404,
+  })
+
+  const prevUrl = process.env.CATSTUDY_URL
+  const prevSid = process.env.CATSTUDY_SESSION_ID
+  process.env.CATSTUDY_URL = stub.url
+  process.env.CATSTUDY_SESSION_ID = 'session-14e'
+  try {
+    await runHandoff({ cwd: tmp })
+  } finally {
+    if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+    else process.env.CATSTUDY_URL = prevUrl
+    if (prevSid === undefined) delete process.env.CATSTUDY_SESSION_ID
+    else process.env.CATSTUDY_SESSION_ID = prevSid
+  }
+
+  assert(stub.hits.post === 1, `手动提交 → 应兜底投 1 条（实际 ${stub.hits.post}）`)
+  assert(stub.postBodies.length === 1, `应投出 1 条载荷（实际 ${stub.postBodies.length}）`)
+  assert(
+    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
+    `无 uuid 路径必须自铸锚，实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+  )
+  // 阴性对照：无 uuid 时 commitUuid === null ⇒ 归属判据判「无归属 → 投递」，
+  // 与自铸锚是两件事——判"该投"不等于**投得出去**（原缺口正是死在这一步）。
+  assert(
+    decideHookDelivery(null).deliver === true,
+    '阴性对照：无 uuid 路径的归属判据确实判「投」——缺口在载荷无锚，不在判据'
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14e: 手动提交（无 uuid）→ 自铸锚兜底投递 ✅')
+}
+
+// 14f: 执行行**存在但 trace_id 空**（executor 200 有 agentName、无 taskId）→ 自铸锚
+//      走 --fallback-sha 入口（收尾兜底，不跑归属判据）：post-commit 入口下这条路径会被
+//      探针判「有归属 → 静默」，本就到不了投递；而收尾兜底必然要投，锚却取不到
+//      ——「任何无锚载荷一律自铸锚」这条兜底要覆盖的第二种来路。
+{
+  const uuid = '14ff0000-0000-4000-8000-00000000000f'
+  const tmp = makeUuidRepo('.handoff-test-attr-empty-trace', uuid, { 'a.txt': '1' })
+  const headSha = gitIn(tmp, 'rev-parse HEAD')
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14f',
+    updated: 0,
+    executor: 'ok',
+    executorTaskId: null, // 老库执行行：有执行、trace_id 列空
+  })
+  await runInProc(tmp, stub.url, { fallbackSha: headSha })
+
+  assert(
+    stub.hits.executor === 1,
+    `前置：实施者反查确实发生（实际 ${stub.hits.executor}）——否则本场景没被构造出来`
+  )
+  assert(stub.postBodies.length === 1, `应投出 1 条载荷（实际 ${stub.postBodies.length}）`)
+  assert(
+    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
+    `trace_id 空路径必须自铸锚，实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+  )
+  // 反查本身是成功的（补填人仍取到 ds猫）——自铸锚不因反查"半成功"而退化成兜底店长
+  assert(
+    (stub.postBodies[0]?.mentions || []).includes('ds猫'),
+    `实施者反查仍应生效（补填人 = ds猫），实际 ${JSON.stringify(stub.postBodies[0]?.mentions)}`
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14f: 执行行 trace_id 空 → 自铸锚投递（补填人仍取到）✅')
 }
 
 // ═══ 测试组 15: 审查请求覆盖裁决（T-H ②「只看 HEAD」） ═══════════════════════

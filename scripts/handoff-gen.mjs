@@ -68,6 +68,7 @@
  *   HANDOFF_VERIFY_MS    落库验证轮询预算（默认 10000ms，测试可调小）
  */
 
+import { randomUUID } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, unlinkSync, renameSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -785,7 +786,8 @@ async function alreadyDelivered(serverUrl, sessionId, message) {
  * 返回对象含 taskId（= 命中执行行的 trace_id）：E3 接线——投递 payload 携带源链
  * task_id（与 chain_task_id 同源反查 commit_hash → execution_logs → trace_id），
  * 审查回复落库 task_id = 源链 trace_id，verdict JOIN m.task_id = chain_task_id 才匹配。
- * taskId 缺失（反查失败/无执行记录）→ undefined，调用方不带（老行为，噪声记录在案）。
+ * taskId 缺失（反查失败/无执行记录/执行行 trace_id 为空）→ undefined——调用方
+ * (`attemptDeliver`) 据此自铸锚，不再「无锚硬投」（T-F 必改 1：无锚载荷必被入口 400 拒）。
  *
  * @param {string} serverUrl
  * @param {string} uuid — commit message 里的 catstudy [uuid]（触发消息 id）
@@ -815,7 +817,7 @@ export async function resolveExecutorName(serverUrl, uuid, commitSha) {
           `[handoff-gen] 源链 taskId: ${taskId.slice(0, 8)}…（投递 payload 携带，E3 接线）`
         )
       } else {
-        console.log(`[handoff-gen] ⚠️  反查响应缺 taskId——投递不携带（老行为，噪声记录在案）`)
+        console.log(`[handoff-gen] ⚠️  反查响应缺 taskId——投递时自铸锚（T-F 必改 1）`)
       }
       return { agentName: body.agentName, taskId }
     }
@@ -1078,7 +1080,8 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
     }
   }
   let fillerName = '店长'
-  /** E3 接线：源链 task_id（executor 反查同源，commit_hash → execution_logs → trace_id） */
+  /** 投递载荷的链锚。两条来路：E3 接线的源链 task_id（executor 反查同源，
+   *  commit_hash → execution_logs → trace_id）；取不到则**自铸**（见下方 T-F 必改 1）。 */
   let taskId
   /** T-A ① / T-H ① 归属三态：null=查不动（判据查不动一律投递）；无 uuid = 无归属 */
   let attributed = commitUuid ? null : false
@@ -1152,9 +1155,30 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   if (commitUuid) {
     const executorInfo = (await resolveExecutorName(serverUrl, commitUuid, commitSha)) || null
     fillerName = executorInfo?.agentName || '店长'
-    // E3 接线：源链 task_id 随投递携带（ingest.ts:39 已支持 taskId 字段）——审查链
-    // verdict 消息与任务链共享 task_id，JOIN 匹配成立。缺失不带（老行为，噪声在案）。
+    // E3 接线：源链 task_id 随投递携带（ingest.ts 已支持 taskId 字段）——审查链
+    // verdict 消息与任务链共享 task_id，JOIN 匹配成立。
     taskId = executorInfo?.taskId
+  }
+
+  // T-F 必改 1（2026-09-10）：**任何无锚载荷自铸锚**——入口主闸下「有则带、无则不带」
+  // 已经不是一个选项。REST 通道固定以 `origin: 'agent'` 摄入（`routes/messages.ts`），
+  // 主闸规则 5 对 agent 入口缺 taskId 一律 400；4xx 是确定性失败、不重试，于是文档
+  // 直接死掉、连 pending 都不留。原实现恰好在两条路径上不带锚：
+  //   ① commit message 无 `catstudy [uuid]`（用户终端手动提交）→ 整个 if 块跳过；
+  //   ② 有 uuid 但反查不到执行行（executor 404 / 响应无 taskId）→ `executorInfo?.taskId` 为 undefined。
+  // 两条都落在 post-commit 兜底判据的「该投」侧（`decideHookDelivery(false|null).deliver === true`）
+  // ——即 spec D5 / 用户故事 14 那条「手动提交补投」边界整条失效。
+  // 自铸语义 = **新链首轮**：与「落 NULL → 服务端 `anchor = taskId || traceId` 兜底」
+  // 完全等价（同一条兜底规则，只是挪到客户端显式表达），对服务端与被审链零行为变化。
+  // 粒度也对齐：服务端每消息生成一次，这里每次投递尝试生成一次（重试即重投，
+  // 与「重试可能产生重复消息」的既有语义同源）。
+  if (!taskId) {
+    taskId = randomUUID()
+    console.log(
+      `[handoff-gen] 无源链锚（${
+        commitUuid ? '有 uuid 但反查未命中 taskId' : 'commit message 无 catstudy [uuid]'
+      }）——自铸锚 ${taskId}（语义=新链首轮，等价服务端 traceId 兜底）`
+    )
   }
   const message = buildHandoffMessage(content, fillerName)
 
