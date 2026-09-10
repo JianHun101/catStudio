@@ -54,42 +54,53 @@ export function getLogsByTriggerMessage(triggeredByMessageId: string): Execution
 }
 
 /** 反查"执行某条消息"的 agent（handoff-gen 动态补填人用）。
- *  一条消息可触发多个 agent（多人 @），取最近开始执行的一条；无记录返回 undefined。 */
+ *  一条消息可触发多个 agent（多人 @），取最近开始执行的一条；无记录返回 undefined。
+ *
+ *  `task_id`（T-I）：**链锚**，取该执行行触发的那条消息的 `messages.task_id`
+ *  （一跳 JOIN）。与 `trace_id` 是两个不同的东西——`trace_id` 是**当轮**执行追踪 id，
+ *  显式锚投递下两者必然不等；谁要"链锚"谁拿 `task_id`，谁要"这一轮执行"谁拿 `trace_id`。
+ *  LEFT JOIN：消息行缺失（存量/手工造的 fixture）时仍返回执行者本身，只把 task_id 置空
+ *  ——不因加 JOIN 改变"有无执行行"的判据（404 语义归调用方）。 */
 export function getExecutorNameByTriggeredBy(
   triggeredByMessageId: string
-): { agent_id: string; name: string; trace_id: string } | undefined {
+): { agent_id: string; name: string; trace_id: string; task_id: string | null } | undefined {
   return db
     .prepare(
-      `SELECT el.agent_id, a.name, el.trace_id
+      `SELECT el.agent_id, a.name, el.trace_id, m.task_id
        FROM execution_logs el
        JOIN agents a ON a.id = el.agent_id
+       LEFT JOIN messages m ON m.id = el.triggered_by_message_id
        WHERE el.triggered_by_message_id = ?
        ORDER BY el.started_at DESC
        LIMIT 1`
     )
-    .get(triggeredByMessageId) as { agent_id: string; name: string; trace_id: string } | undefined
+    .get(triggeredByMessageId) as
+    { agent_id: string; name: string; trace_id: string; task_id: string | null } | undefined
 }
 
 /** 反查"提交某 commit"的 agent（handoff-gen 动态补填人，commit_hash 精确匹配）。
  *  commit 由实施者提交时经 POST /api/messages/:id/commit-hash 写回
  *  （updateRunningExecutionCommitHash），同 uuid 多执行者时各 commit 各命中
  *  各的实施者，不再"取最近开始执行"误指。无记录返回 undefined。
- *  trace_id 一并返回——E3 接线：审查链投递 payload 的 taskId 与 chain_task_id
- *  同源反查（commit_hash → execution_logs → trace_id），verdict 消息才能与
- *  任务链 JOIN 匹配。 */
+ *  trace_id 一并返回——`/api/handoff/verdict` 的判据链仍走它
+ *  （commit_hash → execution_logs → trace_id → review_verdicts）。
+ *  task_id（T-I）同上：**链锚**取触发消息的 `messages.task_id`，供 `/executor`
+ *  回传给 handoff-gen 当交接文档的锚。 */
 export function getExecutorNameByCommitHash(
   commitHash: string
-): { agent_id: string; name: string; trace_id: string } | undefined {
+): { agent_id: string; name: string; trace_id: string; task_id: string | null } | undefined {
   return db
     .prepare(
-      `SELECT el.agent_id, a.name, el.trace_id
+      `SELECT el.agent_id, a.name, el.trace_id, m.task_id
        FROM execution_logs el
        JOIN agents a ON a.id = el.agent_id
+       LEFT JOIN messages m ON m.id = el.triggered_by_message_id
        WHERE el.commit_hash = ?
        ORDER BY el.started_at DESC
        LIMIT 1`
     )
-    .get(commitHash) as { agent_id: string; name: string; trace_id: string } | undefined
+    .get(commitHash) as
+    { agent_id: string; name: string; trace_id: string; task_id: string | null } | undefined
 }
 
 /** 反查"该 agent 当前 running 执行"的 commit_hash（T-A ② 收尾兜底判据）。

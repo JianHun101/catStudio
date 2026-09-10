@@ -40,6 +40,8 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
    * ?commit=<full-sha> 时 commit_hash 精确匹配优先（同 uuid 多执行者时各 commit
    * 各命中各的实施者，根治"取最近开始执行"误指）；未传 commit 或按 hash 查不到
    * （老 commit 未写回 hash）回退 uuid 逻辑；无执行记录 404。
+   * 回传的 `taskId` = **链锚**（该消息的 `messages.task_id`，T-I）——调用方把它当
+   * 下一份交接文档的锚，**不是**当轮 `execution_logs.trace_id`。
    */
   app.get('/api/messages/:id/executor', async (req, reply) => {
     const { id } = req.params as { id: string }
@@ -54,13 +56,15 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (!executor) {
       return reply.status(404).send({ error: 'No execution log for this message' })
     }
-    // taskId = 命中执行行的 trace_id——E3 接线：审查链投递 payload 带 taskId，与
-    // chain_task_id 同源反查（commit_hash → execution_logs → trace_id）。反查路径
-    // （uuid 退化 / commit_hash 精确匹配）与 executor 同源，taskId 随之精确。
+    // taskId = **链锚**，取该消息行的 `messages.task_id`（T-I：一跳 JOIN，与 executor 同源）。
+    // 不再回传 `execution_logs.trace_id`——那是**当轮**执行追踪 id，与链锚在显式锚投递下
+    // 必然不等（真实库实测 cdc476ba：锚 de0534ca… vs 回传 e8809eac…）。消费方
+    // handoff-gen 拿这个值当**下一份交接文档的锚**，回传当轮 trace_id ⇒ 返工轮换锚 →
+    // 开新链，本 spec 头号目标（链内锚不变）不达成。失败语义不变：无执行行仍 404。
     return reply.send({
       agentId: executor.agent_id,
       agentName: executor.name,
-      taskId: executor.trace_id || null,
+      taskId: executor.task_id || null,
     })
   })
 
