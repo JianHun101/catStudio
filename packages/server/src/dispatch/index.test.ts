@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import type { AgentConfig, Message } from '@cat-study/shared'
+import type { AgentConfig, DispatchCommand, Message } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
@@ -16,6 +16,7 @@ import { createExecutionEngine } from '../execution/serial.js'
 import type { ExecutionEngine } from '../execution/serial.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
 import { getAdapterForAgent } from '../llm/registry.js'
+import { isStaleHandoffRequest } from './index.js'
 
 // Mock LLM registry（测试只打边界）
 vi.mock('../llm/registry.js', () => ({
@@ -616,6 +617,150 @@ describe('dispatch（C1 v3 引擎决策行为）', () => {
 
       release()
       await p1
+    })
+  })
+
+  describe('isStaleHandoffRequest — 交接去重判据（T-J）', () => {
+    const SHA = 'a1b2c3d' // 模板落的是 shortHash（7 位），COMMIT_SHA_RE 取它
+
+    /** 交接文档**体**（照 handoff-gen 模板剪裁：§1–§5 行首小节 + Commit 行） */
+    const buildDocBody = (sha: string, whySection = '因为 C。') =>
+      [
+        '# 工作交接',
+        '',
+        '## 1. What — 改了什么',
+        '',
+        `> Commit: ${sha}`,
+        '',
+        '改动：把 A 改成 B。'.repeat(60),
+        '',
+        '## 2. Why — 关键决策',
+        '',
+        whySection,
+        '',
+        '## 3. Tradeoff — 放弃了什么',
+        '',
+        '放弃了 D。',
+        '',
+        '## 4. Open Questions — 不确定的点',
+        '',
+        '我动了 E，请重点查 F。',
+        '',
+        '## 5. Reviewer Checklist',
+        '',
+      ].join('\n')
+
+    /** 补填请求消息（handoff-gen buildHandoffMessage 形状：前缀 + 内嵌整份文档）。
+     *  模板同款的 `> Commit: <sha>` 行显式放在触发内容里：判据从**触发内容**取被审
+     *  的 sha（`COMMIT_SHA_RE` 取首个匹配），本单要能构造"请求点的 sha ≠ 会话里那份
+     *  文档的 sha"，缺了这行就构造不出来。 */
+    const buildRequest = (sha: string, doc: string) =>
+      [
+        '@吐槽猫 请补填以下交接文档中 TODO 标注的部分（Why / Tradeoff / Open Questions）。',
+        '',
+        `> Commit: ${sha}`,
+        '',
+        '补填规则：',
+        '- **Why**（关键决策）：从 commit message 和文件改动推导每个关键决策及理由。',
+        '',
+        '---',
+        '',
+        doc,
+      ].join('\n')
+
+    const insertMsg = (id: string, content: string, sessionId = 'session-1') => {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', ?, '[]')`
+        )
+        .run(id, sessionId, content)
+    }
+
+    const cmd = (triggerMessageId: string, triggerContent: string): DispatchCommand => ({
+      sessionId: 'session-1',
+      agentId: 'agent-1',
+      triggerMessageId,
+      triggerContent,
+      mentions: [],
+      traceId: 'trace-1',
+      depth: 0,
+      pendingTriggers: [],
+    })
+
+    it('阴性对照：正文**引用**真占位形态（行中、带注释符）→ 仍判 stale=true（现状 false）', () => {
+      // 形状逐字对齐实测样本 0319b7f3-d973-4778-9f49-d4a8850ece76（len 6757）：
+      // 引用落在**过程叙述行的行中**，带注释符，**不顶行**（实测注释符偏移 799、
+      // 裸串 804，列 804）。
+      const prose =
+        '复核记录：模板占位实测确为注释形态（<!-- TODO: 补填 —）——故判据须同时带注释符与行首锚定。'
+      // 文档体本身是**已补填**的（§2 已有真内容），引用只在过程叙述里
+      const doc = buildDocBody(SHA) + '\n' + prose + '\n'
+      insertMsg('msg-trigger', buildRequest(SHA, doc))
+      insertMsg('msg-filled-doc', doc)
+
+      // fixture 形状自证：引用确在行中（列 > 0）——防止有人把引用挪到行首，
+      // 让"半吊子实现"（只收窄注释形态、不加行首锚定）也能全绿
+      const refIdx = doc.indexOf('<!-- TODO: 补填')
+      expect(refIdx - (doc.lastIndexOf('\n', refIdx) + 1)).toBeGreaterThan(0)
+
+      expect(isStaleHandoffRequest(cmd('msg-trigger', buildRequest(SHA, doc)))).toBe(true)
+    })
+
+    it('正例不破：模板真占位（行首、未补填）→ 仍判 false', () => {
+      const unfilled = buildDocBody(SHA, '<!-- TODO: 补填 — 说明核心设计决策及理由。 -->')
+      insertMsg('msg-trigger', buildRequest(SHA, unfilled))
+      // 另一条消息里是同一份**未补填**文档（占位行首在位）→ 不算"已补填"
+      insertMsg('msg-doc-copy', buildRequest(SHA, unfilled))
+      expect(isStaleHandoffRequest(cmd('msg-trigger', buildRequest(SHA, unfilled)))).toBe(false)
+    })
+
+    it('防自证：触发消息自身不作证据（排除 id）', () => {
+      // 会话里只有触发请求它自己（内嵌一份**已补填**文档）→ 不能自证已补填
+      const filled = buildDocBody(SHA)
+      const req = buildRequest(SHA, filled)
+      insertMsg('msg-trigger', req)
+      expect(isStaleHandoffRequest(cmd('msg-trigger', req))).toBe(false)
+    })
+
+    it('验收④：引用 `Commit: <sha>` 的台账/更正消息不算完整文档', () => {
+      const filled = buildDocBody(SHA)
+      const ledger = [
+        '# 台账',
+        '',
+        `更正：${SHA} 那条的结论我重新核过，Commit: ${SHA} 确有归属执行。`,
+        '',
+        '## 复核记录',
+        '',
+        '逐条 grep 复核后成立。'.repeat(40),
+        '',
+        '## 附注',
+        '',
+        '无。',
+        '',
+      ].join('\n')
+      // 台账长度过阈值、也有 `## ` 小节——但**没有三个固定小节名**（判据的核心）
+      insertMsg('msg-trigger', buildRequest(SHA, ledger))
+      insertMsg('msg-ledger', ledger)
+      expect(isStaleHandoffRequest(cmd('msg-trigger', buildRequest(SHA, ledger)))).toBe(false)
+
+      // 对照：同一会话里放回**真文档体** → 立刻 true（证明上面不是恒假的空断言）
+      insertMsg('msg-filled-doc', filled)
+      expect(isStaleHandoffRequest(cmd('msg-trigger', buildRequest(SHA, ledger)))).toBe(true)
+    })
+
+    it('锚不匹配：文档体是**别的** sha → false（不认错链）', () => {
+      const otherDoc = buildDocBody('b9c8d7e')
+      insertMsg('msg-trigger', buildRequest(SHA, otherDoc))
+      insertMsg('msg-other-doc', otherDoc)
+      expect(isStaleHandoffRequest(cmd('msg-trigger', buildRequest(SHA, otherDoc)))).toBe(false)
+    })
+
+    it('跨会话不串：文档在别的 session → false', () => {
+      const filled = buildDocBody(SHA)
+      insertMsg('msg-trigger', buildRequest(SHA, filled))
+      insertMsg('msg-doc-other-session', filled, 'session-2')
+      expect(isStaleHandoffRequest(cmd('msg-trigger', buildRequest(SHA, filled)))).toBe(false)
     })
   })
 

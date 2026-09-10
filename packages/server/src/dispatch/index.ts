@@ -25,17 +25,54 @@ export const MAX_QUEUE_PER_AGENT = 3
 
 /** 交接文档补填请求的固定前缀（handoff-gen 生成，N9 钉死的精确前缀） */
 const HANDOFF_FILL_REQUEST_PREFIX = '请补填以下交接文档'
-/** 交接文档模板中的 TODO 占位标记（作者补填后删除） */
-const HANDOFF_TODO_MARKER = 'TODO: 补填'
+/** 交接文档模板中的 TODO 占位标记（作者补填后删除）。
+ *
+ *  **注释形态 + 行首锚定，两个半缺一不可**（T-J 修法 1）：
+ *  - 裸串 `TODO: 补填` 扫全会话 `content` 会把**描述本机制**的正文（票单 / 复审 /
+ *    交付叙述自己）判成"未补填"，而入口不止文档体——过程叙述与文档体**同面**
+ *    （`getAllSessionMessages` 取整条 `content`）。
+ *  - 只要注释形态、不要行首锚定**同样拦不住实测样本**：`0319b7f3`（len 6757）的
+ *    引用里**就带** `<!--`（注释符偏移 799、裸串 804），且落在**过程叙述行的行中**
+ *    （列 804，不顶行）——救下它的只有"行首锚定"那半。
+ *  - 范围：**只覆盖 §2–§4** 的模板占位（`handoff-gen.mjs:192/197/202`，行首）；
+ *    **不含** §5 的 `buildChecklistSection` 降级文案（`handoff-gen.mjs:658`）。
+ *    「改动类型未匹配」是**正常降级**，把降级当「未补填」会让它触发补填——
+ *    正是本 spec 要治的无效消耗。 */
+const HANDOFF_TODO_MARKER_RE = /^\s*<!-- TODO: 补填/m
 const COMMIT_SHA_RE = /Commit: ([0-9a-f]{7,})/
+
+/** 交接文档**体**的判据（T-J 修法 2）：`Commit: <sha>` 只证明"这条消息提到了该
+ *  commit"——台账 / 更正 / 复审消息同样命中，于是被当成"该 sha 的完整文档"。
+ *  完整文档体另有**结构**特征：三个固定小节名**行首锚定**（模板生成即各自独占一行）。
+ *
+ *  - "有 `## ` 小节结构"由这三个行首标题承载，**不另设**"标题计数 ≥ 3"——同一事实的
+ *    两种说法，多一条就多一个会漂的真相源。
+ *  - 取小节名**前缀**（`## 2. Why`）而非全名：编号 + 英文名是模板的固定部分，
+ *    破折号后的中文注解可改，改注解不该让判据失效。
+ *  - 长度阈值是三者里**最弱**的一条，如实标：真实库实测**零过滤**（232 条含
+ *    `Commit: ` 的消息全部 ≥500 字符——补填请求本身就内嵌整份文档）。留着只防
+ *    "极短消息恰好凑齐小节名"的构造，真正干活的是那三个行首小节名。 */
+const HANDOFF_DOC_MIN_LEN = 500
+const HANDOFF_DOC_SECTION_RES = [/^## 2\. Why/m, /^## 3\. Tradeoff/m, /^## 4\. Open Questions/m]
+
+function isHandoffDocBody(content: string): boolean {
+  return (
+    content.length >= HANDOFF_DOC_MIN_LEN && HANDOFF_DOC_SECTION_RES.every((re) => re.test(content))
+  )
+}
 
 /**
  * 交接请求是否已 stale：触发消息是「请补填交接文档」请求，且同 session 已有
- * 该 commit 的完整文档（含 Commit: <sha> 且不含 TODO 占位标记）→ 请求已过时，
+ * 该 commit 的**完整文档体**（文档体判据 + 含 Commit: <sha> + 无真占位）→ 请求已过时，
  * 执行只会白叫醒猫。只做执行时点检查（入队时文档可能还没落库）。
  *
- * 契约④ 防自证：请求自身不得作为"已补填"证据——TODO 占位标记检查天然排除；
- * 同时排除触发消息自身 id。
+ * 两个判据面都必须是"被判面本身"（T-J）：
+ * - 「已补填」= 有**文档体**且无**真占位**，不是"消息里出现过这几个字"；
+ * - 扫的是消息 `content`（`getAllSessionMessages` 取整条），所以判据必须扛得住
+ *   描述本机制的**过程叙述**——那是同一条 `content` 的一部分，躲不开。
+ *
+ * 契约④ 防自证：请求自身不得作为"已补填"证据——真占位判据天然排除；同时排除
+ * 触发消息自身 id。
  */
 export function isStaleHandoffRequest(cmd: DispatchCommand): boolean {
   if (!cmd.triggerContent.includes(HANDOFF_FILL_REQUEST_PREFIX)) return false
@@ -47,7 +84,8 @@ export function isStaleHandoffRequest(cmd: DispatchCommand): boolean {
     (r) =>
       r.id !== cmd.triggerMessageId && // 排除触发消息自身（防自证）
       r.content.includes(`Commit: ${sha}`) &&
-      !r.content.includes(HANDOFF_TODO_MARKER)
+      isHandoffDocBody(r.content) &&
+      !HANDOFF_TODO_MARKER_RE.test(r.content)
   )
 }
 
