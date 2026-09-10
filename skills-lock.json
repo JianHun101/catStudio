@@ -115,11 +115,11 @@
       "skillPath": "skills/engineering/wayfinder/SKILL.md",
       "computedHash": "51423ea3aa642c3d105545a2a6f5211d5205e71b27d80ee6a73ce3fc6e9944de"
     },
-    "writing-great-skills": {
+    "writing-for-agents": {
       "source": "mattpocock/skills",
       "sourceType": "github",
-      "skillPath": "skills/productivity/writing-great-skills/SKILL.md",
-      "computedHash": "2b59844ac5b4c6bdddc4de9c6638406c4de3f14caec507b4a76372029df9fffe"
+      "skillPath": "skills/productivity/writing-for-agents/SKILL.md",
+      "computedHash": "cf4d39fd5b74508c2aeb5ce3b3e2c2d674c70d4cb7c88895b51e5bb3d27a7064"
     }
   },
   "hashSemantics": "sha256 of this skill's SKILL.md blob as committed (git cat-file blob HEAD:skills/<name>/SKILL.md). NOT the upstream file hash — vendor content may differ after project prettier normalization (markdown emphasis *_* vs *_*) and git core.autocrlf line-ending conversion."

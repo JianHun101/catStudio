@@ -230,12 +230,12 @@ skills:
   wayfinder:
     source: mattpocock
     category: '外部技能'
-  writing-great-skills:
+  writing-for-agents:
     source: mattpocock
     use_when: |
-      writing or editing a SKILL.md and want to apply proven skill-design principles.
+      creating or editing a skill, or modifying AGENTS.md or CLAUDE.md.
     not_for: |
-      invoking other skills, or one-off style advice without a skill to write.
+      writing human-facing prose (READMEs, articles, release notes) or invoking other skills.
     category: '外部技能'
 
   # ── 其他第三方（无来源特征，列入 provenance 追踪）──

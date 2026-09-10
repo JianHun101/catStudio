@@ -35,7 +35,7 @@ skills/（唯一真相源）
 ### mattpocock 系（mattpocock，12）
 
 grill-me · grill-with-docs · session-handoff · implement · improve-codebase-architecture ·
-prototype · to-spec · to-tickets · triage · wayfinder · writing-great-skills · code-review
+prototype · to-spec · to-tickets · triage · wayfinder · writing-for-agents · code-review
 
 （v1.1 主线：`grill-with-docs → to-spec → to-tickets → implement → code-review`；
 `to-spec`=旧 `to-prd` 改名、`to-tickets`=旧 `to-issues` 改名+并 `to-plan`、`wayfinder` 全新、`code-review` 取代旧 `review`）
