@@ -24,10 +24,18 @@
  * 漏投由 server 执行收尾补（`--fallback-sha`，判据见 execution/review-fallback.ts）。
  * 原痛点：钩子每 commit 必投 → 中途返工每新 SHA 叠一条链。
  *
- * T-H ②（2026-09-10）审查请求覆盖：一次派发里猫可能提交多个 commit（共享同一个
- * `catstudy [uuid]`），而审查请求一次只发一条——投递文档的改动面因此按**该 uuid 的
- * 连续 commit 段**取（`resolveExecutionCommitSpan`），不止 HEAD 那一个：否则更早的
- * commit 全流程拿不到审查，评审覆盖出现静默缺口。
+ * T-H ②（2026-09-10）审查请求覆盖**裁决：显式接受「只看 HEAD」**——一次派发 = 一条
+ * 审查请求，锚在该派发**最新的**那个 commit，投递文档的改动面也就只有它。
+ * 已知缺口（留痕，不修）：同一派发里更早的 commit 不进这条请求的改动面。
+ *   - **主动投递路径不受影响**（T-A 主路径）：猫自己写审查请求、自己点名 sha，
+ *     审查者读 push 后的完整 diff——覆盖面由猫掌握，不由本文档决定。
+ *   - 缺口仅在「猫忘投 → 收尾兜底」支路，且需该派发已产出 ≥2 个 commit。
+ * 否决的替代（含实测证据，别重走）：
+ *   - 逐 commit 各投一条 → 正是 T-A 要止住的「返工每新 SHA 叠一条链」。
+ *   - 按同一 uuid 回溯、把改动面扩到整段 → **实测会裹进兄弟票**：店长一条消息
+ *     @ 两只猫是**常态**（并行派活），两猫的 commit 共享 uuid 且相邻，回溯判为一段
+ *     → 文档 file list 混入兄弟票的文件、审查须知指向一个不属于本单的 diff。
+ *     flash猫 本票自己的草稿就是现场样本（spans 到 ds猫 的 T-E `7dd0e14`）。
  *
  * 投递幂等（修复重复投递，见重复投递根治计划 A+B+C+D）：
  *   .handoff-delivered.json 状态文件按 commit SHA 记录投递结果，锚点取代"内容字节"：
@@ -109,18 +117,10 @@ export function generateHandoff(opts = {}) {
     return null
   }
 
-  // T-H ②：改动面按**本次投递覆盖的 commit 段**取——同一 `catstudy [uuid]` 的连续
-  // commit 全纳入，不止 target 那一个（见 resolveExecutionCommitSpan）。单 commit 时
-  // 与此前逐字相同（`<sha>~1..<sha>` / opts.range），既有行为零扰动。
-  const span = resolveExecutionCommitSpan(cwd, target)
-  const spanCount = span?.count ?? 1
-  let effectiveRange
-  if (spanCount > 1) {
-    effectiveRange = `${span.first}~1..${target}`
-  } else {
-    // pending 补投：range 跟随 target（sha~1..sha），保证审查须知行指向正确 commit
-    effectiveRange = opts.sha ? `${opts.sha}~1..${opts.sha}` : range
-  }
+  // pending 补投：range 跟随 target（sha~1..sha），保证审查须知行指向正确 commit。
+  // T-H ② 裁决：**只看 target 这一个 commit**，不回溯扩展到同一 uuid 的整段——理由
+  // 与实测证据见文件头（回溯会裹进兄弟票，而「一条消息 @ 两只猫」是常态）。
+  const effectiveRange = opts.sha ? `${opts.sha}~1..${opts.sha}` : range
 
   // 处理初始 commit（无 ~1 父提交）
   let diffFiles
@@ -157,17 +157,6 @@ export function generateHandoff(opts = {}) {
   const diffBody = safeGit(cwd, `diff ${effectiveRange}`) || safeGit(cwd, `show ${target}`) || ''
   const shortHash = safeGit(cwd, `log -1 --pretty=%h ${target}`) || 'HEAD'
 
-  // T-H ②：审查须知指向**覆盖全段**的绝对引用（短 sha 是绝对引用，不随 HEAD 前进
-  // 漂移——391d89a/f161728 禁的是 `HEAD~1..HEAD` 那种相对范围，不是绝对 sha 段）。
-  // 单 commit 时与既有文案逐字相同。
-  let reviewPointer = `\`git show ${shortHash}\``
-  if (spanCount > 1) {
-    const firstShort = safeGit(cwd, `log -1 --pretty=%h ${span.first}`) || shortHash
-    reviewPointer =
-      `\`git diff ${firstShort}~1..${shortHash}\`` +
-      `（本次覆盖同一 catstudy uuid 的连续 ${spanCount} 个 commit：\`${firstShort}\`..\`${shortHash}\`）`
-  }
-
   // 解析文件列表
   const files = parseChangedFiles(diffFiles)
 
@@ -190,9 +179,9 @@ export function generateHandoff(opts = {}) {
     // 审查须知只给 `git show <sha>` 绝对引用——相对范围（git diff <range>）在
     // HEAD 前进后指向漂移（吐槽猫两次审查点名，391d89a 补填单 + f161728），删掉唯一化。
     // effectiveRange 仍用于上方 diff 提取，仅展示层不再暴露相对引用。
-    '> ⚠️ 审查须知：先通读改动对应的完整 diff（' +
-      reviewPointer +
-      '），再核对本文档——本文档是作者的声明清单，不是事实本身，不要只验证文档声称的点。',
+    '> ⚠️ 审查须知：先通读改动对应的完整 diff（`git show ' +
+      shortHash +
+      '`），再核对本文档——本文档是作者的声明清单，不是事实本身，不要只验证文档声称的点。',
     '',
     '## 1. What — 改了什么',
     '',
@@ -695,55 +684,6 @@ function buildChecklistSection(changeTypes) {
 export function extractCommitUuid(commitMsg) {
   const m = /catstudy\s+\[([0-9a-f-]{36})\]/.exec(commitMsg || '')
   return m ? m[1] : null
-}
-
-/** 跨度回溯上限——防病态长链（正常一次派发 1~3 个 commit） */
-const MAX_SPAN = 50
-
-/**
- * T-H ②（2026-09-10）：本次投递**覆盖的 commit 段**。
- *
- * 问题：审查请求一次派发只发一条（T-A：不叠链），而投递文档的改动面此前恒为
- * `<sha>~1..<sha>`——只覆盖那一个 commit。同一派发里更早提交的 commit 因此
- * **全流程拿不到审查**（钩子对有归属的 commit 静默、收尾兜底只拿得到最后一个
- * commit_hash、pending 补投按单 SHA 重生成）——评审覆盖出现静默缺口。
- *
- * 判据是 commit message 里的 `catstudy [uuid]`：同一个 uuid = 同一次派发，
- * 从 target 往回走、直到 uuid 不再相同即止（另一个 uuid = 另一次派发）。
- * **零新增状态**——uuid 本来就写在每个 commit 里，不需要任何账本/DB 列。
- *
- * 边界（诚实声明，不是穷尽）：
- *   - 只看**连续**一段，不穿越别的 uuid 去找同名——中间夹别的 uuid 说明不是同一批
- *     产出，跨越它会把别人的改动裹进本单变更面。
- *   - 同一次派发 @ 了两只猫时，两猫各自一个 commit 共享 uuid 且相邻 → 会被判成
- *     一段。此时覆盖面是两者之并（超集，不多不少地「多」，不会漏）。用词因此只陈述
- *     机械事实（「同一 uuid 的连续 N 个 commit」），**不声称「同一次执行」**。
- *   - 回溯上限 MAX_SPAN，超限只用已走到的那段。
- *
- * @param {string} cwd — 仓库路径
- * @param {string} [target='HEAD'] — 段尾 commit（rev-parse 可解析的任意引用）
- * @returns {{uuid: string, first: string, count: number}|null}
- *          无 uuid / 非 git 仓库 / 解析不到 → null（调用方退回单 commit 范围）
- */
-export function resolveExecutionCommitSpan(cwd, target = 'HEAD') {
-  const uuid = extractCommitUuid(safeGit(cwd, `log -1 --pretty=%B ${target}`))
-  if (!uuid) return null
-  const shas = (safeGit(cwd, `log -n ${MAX_SPAN} --format=%H ${target}`) || '')
-    .split('\n')
-    .map((s) => s.trim())
-    .filter((s) => /^[0-9a-f]{40}$/.test(s))
-  if (!shas.length) return null
-  const span = []
-  for (const sha of shas) {
-    // 逐条读 message（不用 %B 混排 + 控制字符切分：commit body 是不可信文本，
-    // 靠分隔符解析会在正文含分隔符时静默错切；这里每步都真读一次）
-    if (extractCommitUuid(safeGit(cwd, `log -1 --pretty=%B ${sha}`)) !== uuid) break
-    span.push(sha)
-  }
-  // span 的首元素恒为 target 自己（`git log <target>` 从 target 起算，且上面读完
-  // 它的 message 才拿到 uuid），故 count ≥ 1；为 0 只可能是 git 输出形态变了。
-  if (!span.length) return null
-  return { uuid, first: span[span.length - 1], count: span.length }
 }
 
 /**
@@ -1504,6 +1444,12 @@ async function drainPending(cwd, serverUrl) {
  * execution_logs.commit_hash 取来的，必然有归属——再判一次只会把自己判静默。
  * 幂等由 `.handoff-delivered.json` 账本兜（同一 SHA 全流程至多投一条），
  * 与 post-commit 入口共用账本，故两个入口叠加也不会重复投。
+ *
+ * ⚠️ 覆盖面契约（T-H ② 裁决，有意如此）：本入口只拿到 `execution_logs.commit_hash`
+ * 里的**一个** sha（`getRunningExecutionCommitHash` 取该 agent 最新 running 行的单列），
+ * 故补投文档的改动面 = 那一个 commit。同一次执行若提交了多个 commit，更早的那些
+ * **不在**本请求的改动面内——这是「一次派发 = 一条审查请求」的代价，替代方案
+ * （逐 commit 各投 / 按 uuid 回溯成段）均已实测否决，理由与现场证据见文件头 T-H ②。
  *
  * @returns {Promise<'ok'|'transient'|'fatal'|'skip'>}
  */

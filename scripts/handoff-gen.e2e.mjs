@@ -17,7 +17,6 @@ import {
   extractCommitUuid,
   resolveCommitSessionId,
   resolveExecutorName,
-  resolveExecutionCommitSpan,
   probeAttribution,
   decideHookDelivery,
   tryPostToCatstudy,
@@ -1718,11 +1717,17 @@ async function startAttributionStub({ uuid, sessionId, updated, executor }) {
   console.log('  14d: 写回命中 running 行 → 静默且省掉探针往返 ✅')
 }
 
-// ═══ 测试组 15: 审查请求覆盖（T-H ②「同一 uuid 的连续 commit 段」） ═══════
-// 一次派发只发一条审查请求（T-A：不叠链），而投递文档的改动面此前恒为 `<sha>~1..<sha>`
-// ——同一派发里更早的 commit 因此全流程拿不到审查。本组钉住修复后的覆盖面。
+// ═══ 测试组 15: 审查请求覆盖裁决（T-H ②「只看 HEAD」） ═══════════════════════
+// 裁决：一次派发 = 一条审查请求，锚在该派发**最新**的 commit——改动面也就只有它。
+// 本组把这个裁决**钉成契约**（而不是让它靠"碰巧如此"）：同一次派发里更早的 commit
+// 不进这条请求的改动面。这是**有意接受**的已知缺口，不是漏改——替代方案（逐 commit
+// 各投一条 / 按 uuid 回溯成段）均已实测否决，理由见 handoff-gen.mjs 文件头 T-H ②。
+//
+// 为什么用「断言不含」来钉一个缺口：缺口本身是裁决的一部分（「代码与裁决一致」的
+// 要求）。哪天有人重提「按 uuid 回溯扩展改动面」，这条会红，并把他引到文件头那段
+// 实测证据（回溯会裹进兄弟票——本 workflow 里「一条消息 @ 两只猫」是常态）。
 
-/** 基础提交（无 uuid，作跨度回溯的停止点）+ N 个共享 uuid 的提交 */
+/** 基础提交（无 uuid）+ N 个共享同一 catstudy uuid 的提交（模拟"一次派发多 commit"） */
 function makeSpanRepo(dirName, uuid, commits) {
   const tmp = join(ROOT, dirName)
   if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
@@ -1755,11 +1760,6 @@ function makeSpanRepo(dirName, uuid, commits) {
     ['b.txt', '2'],
   ])
   const headSha = gitIn(tmp, 'rev-parse HEAD')
-  const firstSha = gitIn(tmp, 'rev-parse HEAD~1')
-
-  const span = resolveExecutionCommitSpan(tmp, 'HEAD')
-  assert(span?.count === 2, `跨度应回溯到 2 个 commit（实际 ${span?.count}）`)
-  assert(span?.first === firstSha, '跨度首元素应为更早那个 commit')
 
   const stub = await startAttributionStub({
     uuid,
@@ -1771,50 +1771,22 @@ function makeSpanRepo(dirName, uuid, commits) {
 
   assert(stub.postBodies.length === 1, `应投出 1 条（实际 ${stub.postBodies.length}）`)
   const doc = stub.postBodies[0]?.content || ''
-  assertContains(doc, 'a.txt', '早期 commit 的文件（a.txt）也应在覆盖范围内——这是本票的靶心')
-  assertContains(doc, 'b.txt', 'HEAD commit 的文件（b.txt）应在覆盖范围内')
-  const headShort = gitIn(tmp, `log -1 --pretty=%h ${headSha}`)
-  const firstShort = gitIn(tmp, `log -1 --pretty=%h ${firstSha}`)
-  assertContains(
+  assertContains(doc, 'b.txt', 'HEAD commit 的文件应在改动面内')
+  assertNotContains(
     doc,
-    `git diff ${firstShort}~1..${headShort}`,
-    '审查须知应指向覆盖整段的绝对 sha 引用'
+    'a.txt',
+    '裁决：同派发里更早的 commit（a.txt）**不在**本请求改动面内——这是有意的「一次派发一条请求」代价'
   )
-  assertContains(doc, '连续 2 个 commit', '应显式说明覆盖了几个 commit（不假装只有一个）')
-
-  stub.server.close()
-  rmSync(tmp, { recursive: true, force: true })
-  console.log('  15a: 同一 uuid 多 commit → 文档覆盖整段 ✅')
-}
-
-// 15b: 单 commit → 与既有文案逐字相同（回归：改动面不因本票变化）
-{
-  const uuid = '15bb0000-0000-4000-8000-00000000000b'
-  const tmp = makeSpanRepo('.handoff-test-span-single', uuid, [['a.txt', '1']])
-  const headSha = gitIn(tmp, 'rev-parse HEAD')
-  const span = resolveExecutionCommitSpan(tmp, 'HEAD')
-  assert(span?.count === 1, `单 commit 跨度应为 1（实际 ${span?.count}）`)
-
-  const stub = await startAttributionStub({
-    uuid,
-    sessionId: 'session-15b',
-    updated: 0,
-    executor: 404,
-  })
-  await runInProc(tmp, stub.url)
-
-  assert(stub.postBodies.length === 1, `应投出 1 条（实际 ${stub.postBodies.length}）`)
-  const doc = stub.postBodies[0]?.content || ''
   assertContains(
     doc,
     `git show ${gitIn(tmp, `log -1 --pretty=%h ${headSha}`)}`,
-    '单 commit 仍用 git show <sha>（既有文案不变）'
+    '审查须知指向 HEAD 自身的绝对引用（不扩展成 commit 段）'
   )
-  assertNotContains(doc, '连续', '单 commit 不应出现「连续 N 个 commit」措辞')
+  assertNotContains(doc, '连续', '不应出现「连续 N 个 commit」这类段式措辞')
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
-  console.log('  15b: 单 commit → 文案与既有逐字相同 ✅')
+  console.log('  15a: 多 commit 同派发 → 改动面只看 HEAD（裁决契约）✅')
 }
 
 console.log('')
