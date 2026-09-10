@@ -11,7 +11,8 @@
  *   ③ verdict ✅ → closeout 信号**真正投递**店长收口（判定式投递缺席时）
  *
  * 边界：只管主干道（FLOW_MAIN_CHAIN）；岔道（@求助 / ❌打回 / 澄清）不进状态机。
- * 不重做 post-commit hook 自动投审路径（request-review 那跳仍由 hook 触发）。
+ * 不重做 post-commit 投审路径（request-review 那跳由实施猫按技能自行发起，hook 只在
+ * commit 无归属执行时兜底补投——scripts/handoff-gen.mjs、execution/review-fallback.ts）。
  *
  * 本模块是 verdict 落盘后的**非阻塞**接缝——serial.ts 的 review 钩子在
  * recordReviewVerdict 之后调用。函数体同步（推进是同步 DB 写）；closeout 投递

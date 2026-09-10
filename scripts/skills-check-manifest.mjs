@@ -4,10 +4,10 @@
  *                           + requires_mcp 运行时健康检查（红示 advisory，不阻塞）
  *
  * 校验项：
- *   1. manifest.yaml `skills:` 下的登记 ↔ `skills/` 顶级 skill 目录 双向覆盖（40/40）
+ *   1. manifest.yaml `skills:` 下的登记 ↔ `skills/` 顶级 skill 目录 双向覆盖（28/28）
  *   2. 每个 SKILL.md frontmatter 的 name 与目录名一致、description 存在
  *   3. 每个登记的 skill 有 source 标记（self / mattpocock / external），取值合法
- *   4. catstudy/ 定制层不参与顶级计数（随迁保留，另行校验其 4 个 skill 的 frontmatter）
+ *   4. catstudy/ 定制层不参与顶级计数（随迁保留，另行校验其 2 个 skill 的 frontmatter）
  *   5. merged_from（catstudy 定制层合并来源登记）/ requires_mcp（运行时依赖声明）格式入 schema
  *   6. use_when / not_for 与 SKILL.md description 三件套（Use when / Not for 段）逐字一致
  *      （从三件套提取，机器校验；未声明的 skill 跳过不阻塞——新 skill 准入语义）

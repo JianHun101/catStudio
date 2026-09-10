@@ -16,16 +16,17 @@ skills/（唯一真相源）
 - 三方一致校验（阻塞）：`node scripts/skills-check-manifest.mjs`
 - 失效链接清理：`node scripts/skills-clean-stale.mjs`
 
-## 注册表（27 顶级 + 2 定制层）
+## 注册表（28 顶级 + 2 定制层）
 
 来源：`self` = 猫咖自研 / `mattpocock` = mattpocock 系 / `external` = 其他第三方（provenance 追踪）
 
-### 自研（self，7）
+### 自研（self，8）
 
 | skill               | 说明                                                       |
 | ------------------- | ---------------------------------------------------------- |
 | spec-gate           | 需求进实施前自查门（可证伪 + 契约锁定，对称 quality-gate） |
 | quality-gate        | 提交审查前自查门（审查链入口）                             |
+| request-review      | 发起审查请求的门槛与轮次规则（作者自行发起，非 hook 投递） |
 | receive-review      | 处理审查反馈（审查链，拒绝表演性同意 + P1/P2/P3 分级）     |
 | vision-assist       | 项目 qwen3.5:9b 视觉管线（模型无法原生看图时路由）         |
 | on-site-project     | 驻场外部项目全流程方法论（集中+持久工作区）                |
@@ -51,7 +52,7 @@ catstudy-quality-gate · catstudy-receive-review
 
 参照 clowder-ai 的 `cat-cafe-skills/` 架构设计的先行试验（README 为设计文档）。
 随迁保留但**一期不切路由**（manifest 仍路由顶级通用版），转正评估列二期。
-内容已同步为当前角色化团队结构（审查链：实施猫 → post-commit 投递 → 审查者审查 → 架构师收口；真名映射由 agents 表 role 字段动态确定）。
+内容已同步为当前角色化团队结构（审查链：实施猫 → 自行发起审查请求 → 审查者审查 → 架构师收口；真名映射由 agents 表 role 字段动态确定）。
 
 ## 同步溯源
 

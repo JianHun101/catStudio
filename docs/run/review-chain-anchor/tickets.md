@@ -122,6 +122,13 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 - `docs/adr/0014:68` 白名单枚举仍 8 项、仍写「request-review 已从技能层移除」
 - `docs/research/skill-delivery-decoupling-spec.md:80`、`skills/refs/shared-rules.md:28/44/96/97` 路由口径（历史快照 / 共享 ref，两者本票均未动）
 
+**收口硬前置（2026-09-10 吐槽猫 ⚠️ 实测，T-D 复审带入）**：本票的文案**不会自动生效**——铁律三段（`COMMON_IRON_LAWS` / `CODER_DUTIES` / `REVIEWER_DUTIES`）经 `getIronLaws()` **运行期注入**，改常量 + 重启即生效；但 3 只实施猫的 `systemPrompt` 与知识库文档是 **seed 烘焙落库**的（`db/repository/agents.ts:113-115` 的 `ON CONFLICT(name) DO UPDATE SET system_prompt = excluded.system_prompt`），**只有跑 `pnpm seed` 才写**。
+
+- **机制更正（原表述错）**：铁律与 DB 角色块是**叠加**关系，不是覆盖——`execution/reply.ts:403-407` 的守卫 `!agent.systemPrompt.includes(ironLaw)` 实测**恒真**（旧库 prompt 668 字不可能包含 1727 字新铁律）→ **不 seed，实施猫 prompt 里同时存在**「post-commit 自动投递审查链」与「自行发起」两条互斥指令。
+- **生效判据**（seed 后实查 DB）：3 只实施猫的 `agents.system_prompt` **not contains** `post-commit 自动投递审查链`，且 **contains** `request-review`。
+- **落哪个库**：本会话走 dev 库（`db/index.ts:13`，`NODE_ENV≠production`）；prod 库（`cat-study.db`）下次启用前同样要跑。
+- **执行者**：写 DB 状态，归店长**收口时**执行，不在实施猫权限内。
+
 ---
 
 ## 阶段二 · 治根因（链锚统一）
@@ -193,6 +200,15 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 3. **判据的 e2e 覆盖**（T-A N4）：`scripts/handoff-gen.e2e.mjs` 的 stub server 无 commit-hash 端点
    → `attributed=null` → 走降级投递，**三条判据在 e2e 里全不生效**（这也是 e2e 仍全绿的原因）。
    补一条「stub 返回 `updated:1` → POST **0** 次」，并附**阴性对照**证明该断言能区分新旧（不是恒真）。
+
+**T-D 复审带入（2026-09-10 吐槽猫 ⚠️，同族「假机制陈述 / 守卫半闭」，本票立名分、不单开票）**：
+
+4. **refs 守卫只覆盖单个 SKILL.md**（T-D N7）：`scripts/mcp-server.test.js` 的 refs 枚举派生实测只扫 `request-review/SKILL.md`；
+   全仓另一个引 refs 的 `receive-review/SKILL.md:24 → refs/review-standards.md` **零覆盖**（该 ref 实测 `@` = 0，无实害）。扩成扫 `skills/*/SKILL.md` 是三行改。
+5. **`execution/reply.ts:403-407` 防重复注入守卫是死代码**（T-D N8）：实测 DB prompt 从不含完整铁律 → 恒追加。
+   非 T-D 引入，但它是「旧库出现双份 / 矛盾 prompt」的机制底座——留痕以免下个读者继续以为「运行期注入会覆盖 seed 烘焙」。
+6. **`eval/phase0.ts:361` ext-05 金标答案陈述假机制**（T-D OQ-5）：仍写「post-commit hook 据此自动投递审查链」。
+   T-D 有意未改（eval golden 是已收口基线，改金标会扰动 judge 校准的历史可比性；且它不注入任何猫的 prompt）——在此立名分，别无限期挂着。
 
 **顺带观察项**（本单一起看，不必单独修）：
 
