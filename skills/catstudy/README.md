@@ -25,7 +25,7 @@ catstudy/
   → 架构师设计 + 派活
   → 实施猫落地
   → /catstudy-quality-gate    （自检：需求对照 + 测试 + lint + build）
-  → 提交 → post-commit hook 自动生成交接文档 + 触发审查（code-review 承担）
+  → 提交 → 补填交接文档 + 由作者发起审查请求（request-review）
   → /catstudy-receive-review   （处理反馈：Red→Green 修复）
    → 审查者审查 ✅ → 架构师收口（ff-only 合并 → 发起 push 审批，用户批准才推）
 ```
@@ -35,15 +35,15 @@ catstudy/
 | 维度       | clowder-ai                                           | catStudy                                                            |
 | ---------- | ---------------------------------------------------- | ------------------------------------------------------------------- |
 | 猫数量     | 3 只真正的 Claude Code agent                         | 4 只真正的 Claude Code agent（1 架构师 + 2 实施 + 1 审查者）        |
-| 审查方式   | 跨猫互审（Ragdoll ↔ Maine Coon ↔ Siamese）           | 真实跨猫审查链（提交 → post-commit 投递 → 审查者审查 → 架构师收口） |
+| 审查方式   | 跨猫互审（Ragdoll ↔ Maine Coon ↔ Siamese）           | 真实跨猫审查链（提交 → 作者发起审查请求 → 审查者审查 → 架构师收口） |
 | 技能位置   | `cat-cafe-skills/` → `~/.claude/skills/`（符号链接） | `skills/` 单源 + `.claude/skills` junction 挂载                     |
-| manifest   | `manifest.yaml`（1324 行路由配置）                   | `skills/manifest.yaml`（40/40 全覆盖 + pipeline + 铁律）            |
+| manifest   | `manifest.yaml`（1324 行路由配置）                   | `skills/manifest.yaml`（28/28 全覆盖 + pipeline + 铁律）            |
 | SOP 定义   | `sop-definitions/development.yaml`                   | 无（规模不需要）                                                    |
 | merge-gate | 完整 PR 流程 + remote review                         | 无 PR 流程：审查 ✅ 后由架构师 ff-only 收口                         |
 
 ## 为什么没有 PR 流程
 
-catStudy 没有 PR 冲突场景：提交后由 post-commit 自动投递交接文档，quality-gate → （post-commit hook 自动触发审查）→ receive-review 覆盖从自检、生成交接文档、审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 发起 push 审批，用户批准才推）。
+catStudy 没有 PR 冲突场景：提交后由作者补填交接文档并发起审查请求，quality-gate → （request-review 发起）→ receive-review 覆盖从自检、生成交接文档、审查到修复的完整循环，审查 ✅ 后由架构师收口（ff-only 合并 → 更新 .push-gate → 发起 push 审批，用户批准才推）。
 
 ## 技能命名
 

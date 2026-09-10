@@ -4,7 +4,7 @@
  * 测试流程:
  *   1. 连接 cat-study server → 验证健康
  *   2. 查找（或创建）包含店长和吐槽猫的会话
- *   3. 创建测试文件 → git commit → post-commit hook → handoff-gen.mjs 自动投递
+ *   3. 创建测试文件 → git commit → post-commit hook → handoff-gen.mjs 按归属判据投递
  *   4. 轮询 GET /api/sessions/:id/messages，等待 Agent 回复
  *   5. 验证：店长补填了 Why/Tradeoff/OQ → @吐槽猫被触发 → 吐槽猫生成审查回复
  *   6. 输出完整的消息链路 + 测试报告
@@ -379,7 +379,7 @@ async function stepWaitForStoreManager(sessionId, startTime, timeoutS) {
         if (dmReply.content.includes('@吐槽猫')) {
           log('✅', '店长的回复中包含 @吐槽猫 — 将触发审查')
         } else {
-          log('⚠️', '店长的回复中未包含 @吐槽猫 — 审查可能不会自动触发')
+          log('⚠️', '店长的回复中未包含 @吐槽猫 — 审查请求可能不会发出')
         }
         return dmReply
       }

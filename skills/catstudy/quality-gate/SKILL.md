@@ -132,4 +132,4 @@ pnpm build → exit 0 ✅
 
 ## 下一步
 
-Quality Gate 通过后 → 提交代码，post-commit hook 自动触发审查（code-review 承担）。不要停下来问用户"要不要继续"。
+Quality Gate 通过后 → 提交代码，由作者自行发起审查请求（`request-review`）。不要停下来问用户"要不要继续"。

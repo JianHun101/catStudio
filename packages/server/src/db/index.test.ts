@@ -179,4 +179,69 @@ describe('db', () => {
       expect(cols.map((c) => c.name)).toContain('compressed_summaries')
     })
   })
+
+  describe('migration - review_verdicts CHECK 放宽（T-C 💬仅评论）', () => {
+    /** 把 review_verdicts 换成「旧 CHECK」版本，模拟 T-C 之前的存量库 */
+    function downgradeToOldCheck(): void {
+      getDb().exec(`
+        DROP TABLE review_verdicts;
+        CREATE TABLE review_verdicts (
+          message_id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          reviewer_agent_id TEXT NOT NULL,
+          subject_agent_id TEXT,
+          verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'suggest', 'reject')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `)
+    }
+
+    const tableSql = () =>
+      (
+        getDb()
+          .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='review_verdicts'")
+          .get() as { sql: string }
+      ).sql
+
+    it('存量库（旧 CHECK）→ initDb 重建后可落 comment', async () => {
+      const { initDb } = await import('./index.js')
+      downgradeToOldCheck()
+      expect(tableSql()).not.toContain("'comment'")
+
+      initDb()
+
+      expect(tableSql()).toContain("'comment'")
+      expect(() =>
+        getDb()
+          .prepare(
+            `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict)
+             VALUES ('m-comment', 's1', 'r1', 'comment')`
+          )
+          .run()
+      ).not.toThrow()
+    })
+
+    it('重建保数据 + 闸门幂等：旧行原样搬过去，第二次 initDb 不再重建', async () => {
+      const { initDb } = await import('./index.js')
+      downgradeToOldCheck()
+      getDb()
+        .prepare(
+          `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict)
+           VALUES ('m-old', 's1', 'r1', 'suggest')`
+        )
+        .run()
+
+      initDb()
+      const row = getDb()
+        .prepare(`SELECT verdict FROM review_verdicts WHERE message_id = 'm-old'`)
+        .get() as { verdict: string } | undefined
+      expect(row?.verdict).toBe('suggest') // 重建不是清库
+
+      initDb() // 闸门命中（sql 已含 comment）→ 跳过重建，数据不动
+      const count = getDb().prepare(`SELECT COUNT(*) AS n FROM review_verdicts`).get() as {
+        n: number
+      }
+      expect(count.n).toBe(1)
+    })
+  })
 })

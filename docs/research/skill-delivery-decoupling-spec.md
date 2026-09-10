@@ -77,7 +77,7 @@
 
 - `packages/server/src/seed-data.ts` — 共通铁律层出口检查段**承载物**（`COMMON_IRON_LAWS` 文本，含投递信号出口检查）。`packages/server/src/config/iron-laws.ts` — **访问器**（`ironLawForRole` 按 role 从 settings 优先读取、回退 seed-data 常量）。铁律拼入 `execution/reply.ts:404` 的 `baseSystemPrompt`、经 `reply.ts:413` `resolveRolePlaceholders`。
 - `packages/server/src/execution/reply.ts` — 投递信号产出 + 消费的接缝；`baseSystemPrompt`/`finalSystemPrompt` 组装（L407-442）；skill 块 append 在 L622（晚于替换——这正是字面 @ 不被解析的根）。
-- `scripts/mcp-server-utils.mjs` — `read_skill`/`list_skills`/`SKILL_CATALOG`（P2 流程链 8 技能；注入层改造后 server 不再全文注入，模型经 read_skill 自取正文，request-review 已从流程链移除——单级路径，**不建两级注入**）。
+- `scripts/mcp-server-utils.mjs` — `read_skill`/`list_skills`/`SKILL_CATALOG`（P2 流程链 9 技能——request-review 于 2026-09-10 回流，见 ADR 0014 §5 修订；注入层改造后 server 不再全文注入，模型经 read_skill 自取正文——单级路径，**不建两级注入**）。
 - `skills/request-review/SKILL.md`（base）— 剥「选择审查者/@审查者/@mentioning the paired reviewer」路由；`refs/review-request-template.md` 相对引用**悬空**，修正为共享 `skills/refs/review-request-template.md`。
 - `skills/catstudy/handoff/SKILL.md` — 剥「行首@审查者 请审查」；`../../refs/...` 统一指向共享 `skills/refs/`。
 - `skills/catstudy/request-review/SKILL.md`、`skills/catstudy/handoff/SKILL.md` — 投递型定制层：**淘汰**（投递外移后 no reason）；领域型重写（`quality-gate`、`receive-review`）与共享 `cat-roles.md` 保留。

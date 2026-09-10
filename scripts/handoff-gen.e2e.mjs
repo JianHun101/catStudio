@@ -232,7 +232,7 @@ function selectSkill(s: any) {
 writeFileSync(
   join(TMP, 'packages/server/src/seed-data.ts'),
   `
-export const IRON_LAWS_CODER = "代码审查由 post-commit hook 自动触发——写完代码后结束回复即可。"
+export const IRON_LAWS_CODER = "代码审查：提交后由作者按 request-review 自行发起审查请求。"
 export const IRON_LAWS_REVIEWER = "审查铁律：逐项检查 Checklist，行首独占一行 @作者 告知结果。"
 `.trim()
 )

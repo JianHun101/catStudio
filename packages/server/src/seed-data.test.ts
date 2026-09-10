@@ -281,10 +281,12 @@ describe('agent system prompts', () => {
     const implementers = agents.filter((a) => a.role === 'implementer')
     expect(implementers.length).toBeGreaterThanOrEqual(1)
     for (const agent of implementers) {
-      // 主路径：提交后等待审查链自动收口、无需主动跟进
+      // 主路径：投递审查请求后无需主动跟进（漏投有兜底：回复没投出审查者时服务端在收尾补投）
       expect(agent.systemPrompt).toContain('无需主动跟进')
       expect(agent.systemPrompt).toContain('先改再复申')
       expect(agent.systemPrompt).toContain('❌需重做')
+      // T-C 三档：作者侧也要认 💬（非阻断 → 同走收口，不返工）
+      expect(agent.systemPrompt).toContain('💬仅评论')
       // 兜底路径：若收到 ✅（分流失败时原链仍通）→ 请收口指令保留
       expect(agent.systemPrompt).toContain('兜底路径')
       expect(agent.systemPrompt).toContain('✅可合并 → 行首@架构师 请收口')
@@ -301,6 +303,33 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).toContain('唯一审查触发')
       // 回归护栏：旧歧义表述不再出现
       expect(agent.systemPrompt).not.toContain('结束回复，post-commit 自动投递，@审查者 审查')
+    }
+  })
+
+  it('审查猫 prompt 含 💬仅评论 档 + 向严不向宽边界（T-C 生产者侧贯通）', () => {
+    // 病灶：T-C 的 💬 只落在 verdict-parser / flow-advance / hints 三个**消费方**，
+    // 生产者侧（审查猫自己的 prompt 与它读的 refs）零落点 → 「机器认 💬、猫从不发 💬」，
+    // T-C 的全部改动不可达（T-D 复审必改 2）。本断言把「猫能发 💬」钉成契约防卷回。
+    expect(IRON_LAWS_REVIEWER).toContain('💬仅评论')
+    expect(IRON_LAWS_REVIEWER).toContain('向严不向宽')
+    const reviewers = agents.filter((a) => a.role === 'reviewer')
+    expect(reviewers.length).toBeGreaterThanOrEqual(1)
+    for (const agent of reviewers) {
+      expect(agent.systemPrompt).toContain('💬仅评论')
+    }
+  })
+
+  it('实施猫 prompt 指向 request-review、不再写钩子自动触发（T-D 文案对齐）', () => {
+    // T-A 把 post-commit 改成「有归属则静默」后，「提交后钩子自动投递」不再成立。
+    // 铁律仍写自动触发 → 猫会等一个不会发生的投递（T-D 要关的正是这个窗口）。
+    expect(IRON_LAWS_CODER).toContain('request-review')
+    expect(IRON_LAWS_CODER).not.toContain('自动触发')
+    const implementers = agents.filter((a) => a.role === 'implementer')
+    expect(implementers.length).toBeGreaterThanOrEqual(1)
+    for (const agent of implementers) {
+      expect(agent.systemPrompt).toContain('request-review')
+      expect(agent.systemPrompt).not.toContain('post-commit 自动投递审查链')
+      expect(agent.systemPrompt).not.toContain('自动触发审查')
     }
   })
 

@@ -6,7 +6,7 @@
  * DB 异常静默丢弃——审查链主流程零阻塞（契约边界钉死）。
  *
  * 标记锚定**行首**（归一化后——允许前导空白、markdown 装饰、「结论：」类标签
- * 前缀）：✅可合并 / ⚠️建议修改 / ❌需重做。
+ * 前缀）：✅可合并 / 💬仅评论 / ⚠️建议修改 / ❌需重做。
  * 防正文复述误命中——"这个方案 ✅可合并" 出现在句中不算结论（装饰剥离只做
  * 行首/行尾，句中复述仍不匹配）。
  * 多标记并存的取舍见下方「候选分级」段（A 级优先 + 同级取最严）——**不取
@@ -17,13 +17,19 @@
  * 标记（可带装饰），**B 级**=无标签、行首独占的裸标记；A 级优先于 B 级。
  * **一律排除**引用块行（`> `——引用按定义是转述）与列表项中的无标签标记
  * （`- ✅` 多为检查清单描述）；否则一条 ⚠️ 审查会因末尾引用了一行 ✅ 被误判
- * approve（契约③ 错误推进到 closed，不可逆）。同级冲突取最严（❌ > ⚠️ > ✅）——
- * 解析错误代价不对称：漏判只多一轮，误判 approve 会错误收口。
+ * approve（契约③ 错误推进到 closed，不可逆）。同级冲突取最严
+ * （❌ > ⚠️ > 💬 > ✅）——解析错误代价不对称：漏判只多一轮，误判 approve 会
+ * 错误收口。
+ *
+ * 四档语义（T-C，2026-09-10；`docs/plans/review-chain-anchor.md` C5/D8）：
+ * ✅可合并=通过；💬仅评论=**非阻断**（有低严重度观察项，不要求返工、不阻断收口）；
+ * ⚠️建议修改=返工后复申；❌需重做=推倒。COMMENT 存在的理由是止住轮次浪费——
+ * 现状把低严重度观察项一律打成 ⚠️，每一条都强制起一轮。
  */
 
 import { insertReviewVerdict, insertReviewParseFailure } from '../db/repository/verdicts.js'
 
-export type ReviewVerdict = 'approve' | 'suggest' | 'reject'
+export type ReviewVerdict = 'approve' | 'comment' | 'suggest' | 'reject'
 
 export type VerdictParseFailureReason = 'no_subject' | 'bad_verdict'
 
@@ -35,12 +41,13 @@ export interface VerdictTarget {
 
 const VERDICT_MARKERS: Array<{ emoji: string; suffix: string; verdict: ReviewVerdict }> = [
   { emoji: '✅', suffix: '可合并', verdict: 'approve' },
+  { emoji: '💬', suffix: '仅评论', verdict: 'comment' },
   { emoji: '⚠️', suffix: '建议修改', verdict: 'suggest' },
   { emoji: '❌', suffix: '需重做', verdict: 'reject' },
 ]
 
-/** 归一化后行首三个结论 emoji 之一（bad_verdict 防御：有 emoji 但非标准 marker） */
-const VERDICT_EMOJI_RE = /^[✅⚠️❌]/
+/** 归一化后行首结论 emoji 之一（bad_verdict 防御：有 emoji 但非标准 marker） */
+const VERDICT_EMOJI_RE = /^[✅💬⚠️❌]/
 
 /** 行首通用装饰：空白 / markdown 标题 / 强调开 */
 const LEADING_DECOR_RES: RegExp[] = [/^\s+/, /^#{1,6}\s+/, /^(\*\*|__)/]
@@ -119,12 +126,23 @@ function matchesMarker(line: string, marker: (typeof VERDICT_MARKERS)[number]): 
   return new RegExp(`^${escaped}${marker.suffix}(?=\\s|$|[^\\p{L}\\p{N}])`, 'u').test(line)
 }
 
-/** 结论严重度——同级冲突取最严（错误代价不对称，见文件头） */
-const VERDICT_SEVERITY: Record<ReviewVerdict, number> = { approve: 0, suggest: 1, reject: 2 }
+/**
+ * 结论严重度——同级冲突取最严（错误代价不对称，见文件头）。
+ *
+ * 💬 排在 ✅ 与 ⚠️ 之间：它**不要求返工**（比 ⚠️ 宽），但**也不是明确通过**
+ * （比 ✅ 严）。故一条消息同时出现 `✅可合并` 与 `💬仅评论` 时取 💬——
+ * 有观察项就不算干净通过；而 `⚠️` 与 `💬` 并存仍取 ⚠️（既有向严裁决不放宽）。
+ */
+const VERDICT_SEVERITY: Record<ReviewVerdict, number> = {
+  approve: 0,
+  comment: 1,
+  suggest: 2,
+  reject: 3,
+}
 
 /**
  * 从归一化行中选出结论：A 级（带标签）优先于 B 级（裸标记）；
- * 同级冲突取最严（❌ > ⚠️ > ✅），无冲突即该标记本身。
+ * 同级冲突取最严（❌ > ⚠️ > 💬 > ✅），无冲突即该标记本身。
  */
 function pickVerdict(lines: VerdictLine[]): ReviewVerdict | null {
   const candidates: Array<{ level: 'A' | 'B'; verdict: ReviewVerdict }> = []
@@ -192,9 +210,11 @@ export function parseReviewVerdict(content: string, targets: VerdictTarget[]): V
     return { kind: 'no-marker' }
   }
 
-  if (verdict === 'approve') {
-    // approve 恒置 null（即使 @ 了店长——subject 语义只对需要返工的结论有意义）
-    return { kind: 'verdict', verdict: 'approve', subject: null, failure: null }
+  if (verdict === 'approve' || verdict === 'comment') {
+    // approve/comment 恒置 null（即使 @ 了店长——subject 语义只对**需要返工**的
+    // 结论有意义；💬 明确不要求返工，写 subject 会让下游把观察项当返工派发，
+    // 正是 T-C 要止住的轮次浪费）
+    return { kind: 'verdict', verdict, subject: null, failure: null }
   }
 
   const subject = targets.find((t) => !t.isStore)
@@ -214,8 +234,9 @@ export function parseReviewVerdict(content: string, targets: VerdictTarget[]): V
  * 每个写操作独立 try/catch——DB 异常静默丢弃（写入包 try/catch 契约），
  * 函数永不抛，审查链主流程零阻塞。
  *
- * @returns 落盘的审查结论（approve/suggest/reject）；无有效结论（no-marker/failure）
- *   返回 null——供契约③状态机（flow-advance）判断是否推进，null 则不推进。
+ * @returns 落盘的审查结论（approve/comment/suggest/reject）；无有效结论
+ *   （no-marker/failure）返回 null——供契约③状态机（flow-advance）判断是否推进，
+ *   null 则不推进。
  */
 export function recordReviewVerdict(opts: {
   messageId: string

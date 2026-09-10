@@ -125,8 +125,10 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
    * 去重键只防同 SHA，已闭环提交照样被反复补填的因果链第四层）。
    * 判定链：commit_hash → execution_logs（getExecutorNameByCommitHash，:80）→
    * trace_id（与 executor 反查同源）→ review_verdicts JOIN messages 查 approve。
-   * 语义：只认 verdict='approve'；suggest/reject/无 verdict/无执行记录 → false
+   * 语义：闭环档 = approve / **comment**（💬 非阻断，链不再产生新 commit，
+   * 投补填请求等于白起一轮——T-C）；suggest/reject/无 verdict/无执行记录 → false
    * （有修改就有新审查，仍须补填）。sha 缺失/非 40 位十六进制 → 400。
+   * 响应字段名沿用 `approved`（消费方 handoff-gen 契约不动），语义以后端函数为准。
    */
   app.get('/api/handoff/verdict', async (req, reply) => {
     const { sha } = req.query as { sha?: string }
@@ -137,7 +139,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (!executor) {
       return reply.send({ ok: true, approved: false })
     }
-    const approved = verdictsRepo.hasApproveVerdictByTaskId(executor.trace_id)
+    const approved = verdictsRepo.hasClosedVerdictByTaskId(executor.trace_id)
     return reply.send({ ok: true, approved })
   })
 

@@ -60,6 +60,20 @@ function readSkillDoc(name) {
   return readSkillsFile(name, 'SKILL.md')
 }
 
+/** 读仓库内任意文件（本文件在 scripts/，上跳一级即仓库根） */
+function readRepoFile(...segments) {
+  return readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', ...segments), 'utf8')
+}
+
+/** 取 `const <name> = \`…\`` 模板字面量的正文；取不到返回 ''（守卫据此判红） */
+function templateLiteralOf(source, constName) {
+  const anchor = source.indexOf(`const ${constName} = \``)
+  if (anchor < 0) return ''
+  const bodyStart = source.indexOf('`', anchor) + 1
+  const bodyEnd = source.indexOf('`', bodyStart)
+  return bodyEnd < 0 ? '' : source.slice(bodyStart, bodyEnd)
+}
+
 /**
  * ADR 0014 §3 零路由黑名单（**冒烟守卫**——窄内容黑名单，不是不变量强制）。
  * 本系统路由判据是 `@`；中文短语只挡最常见表述，不保证穷尽（如英文 "Reviewer" 不在此列）。
@@ -628,6 +642,36 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     expect(FLOW_CHAIN_SKILLS).not.toContain('wayfinder')
   })
 
+  // T-D 验收「文案指向的技能名真实存在」——铁律文案点名的技能必须真在流程链清单内。
+  // 静态源断言（读 seed-data.ts 铁律三段的模板字面量，不做模糊全文扫描）。
+  // 判据是**失败安全**的：名单派生的 token 一旦既不是技能、又不在窄白名单里 → 红，
+  // 逼人显式裁决「这是技能名还是普通术语」，而不是静静地指向一个不存在的技能。
+  it('铁律文案点名的 kebab token 要么是技能、要么在非技能白名单里（T-D）', () => {
+    const seed = readRepoFile('packages', 'server', 'src', 'seed-data.ts')
+    const laws = ['COMMON_IRON_LAWS', 'CODER_DUTIES', 'REVIEWER_DUTIES']
+      .map((name) => {
+        const body = templateLiteralOf(seed, name)
+        expect(body, `seed-data.ts 取不到 ${name} 正文`).not.toBe('')
+        return body
+      })
+      .join('\n')
+    const tokens = [
+      ...new Set(
+        [...laws.matchAll(/(?<![a-zA-Z-])([a-z][a-z0-9]*(?:-[a-z0-9]+)+)(?![a-zA-Z-])/g)].map(
+          (m) => m[1]
+        )
+      ),
+    ]
+    // 非技能专名的 kebab token（窄白名单，与本文件 ROUTING_PATTERNS 同款取舍：不保证穷尽，求失败安全）
+    const NOT_SKILLS = new Set(['package-name', 'post-commit', 'push-gate', 'ff-only', 'rev-parse'])
+    const named = tokens.filter((t) => !NOT_SKILLS.has(t))
+    // 铁律至少点名一个技能，否则修成「谁也不提」也算过
+    expect(named.length).toBeGreaterThan(0)
+    for (const token of named) {
+      expect(FLOW_CHAIN_SKILLS, `铁律点名 ${token}，但它不在技能清单`).toContain(token)
+    }
+  })
+
   // ADR 0014 §3 不变量：技能正文只管领域内容，不含路由（@谁 / 请谁审查 / 投给谁）。
   // request-review 回流（2026-09-10）是「名字回流、范围收窄」——本断言把它守住
   // （冒烟守卫：`@` 是硬判据，中文黑名单是窄的），防这次翻转把 §3 一起翻掉。
@@ -639,11 +683,30 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
   })
 
   // F1 实证：路由行曾藏在技能**引用的 ref** 里（ADR §5 合并时漏剥末行），当前恰好没被踩到。
-  // 本断言把零路由守卫从 SKILL.md 扩到它引用的共享模板——同一形状的洞不再只靠运气。
-  it('request-review 引用的共享模板无 @ 行 / 无中文路由黑名单（F1 回归守卫）', () => {
-    const text = readSkillsFile('refs', 'review-request-template.md')
-    expect(text).not.toContain('@')
-    for (const re of ROUTING_PATTERNS) expect(text).not.toMatch(re)
+  // 本断言把零路由守卫从 SKILL.md 扩到它引用的共享 ref——同一形状的洞不再只靠运气。
+  //
+  // 枚举派生（T-D / N2）：早先这里**硬编码** review-request-template.md 一个文件名，
+  // 于是「正文换引另一个 ref」= 守卫静默漏守（旧断言照绿，新 ref 零覆盖）。
+  // 现在改从 SKILL.md 正文解析引用清单——正文换引用即自动纳入。
+  // 边界：只取**一级**引用（技能正文直接点名的）。ref 之间再互相引用不在本守卫范围
+  // （如模板引 shared-rules.md，那是共享规则层、按设计带路由，不在 §3 技能正文约束内）。
+  it('request-review 引用的每个共享 ref 无 @ 行 / 无中文路由黑名单（F1 回归守卫·枚举派生）', () => {
+    const cited = [
+      ...new Set(
+        [...readSkillDoc('request-review').matchAll(/(?:skills\/)?refs\/([a-z0-9-]+\.md)/g)].map(
+          (m) => m[1]
+        )
+      ),
+    ]
+    // 解析不出任何引用 = 守卫失效（改名/换写法），必须红
+    expect(cited.length).toBeGreaterThan(0)
+    for (const name of cited) {
+      const text = readSkillsFile('refs', name)
+      expect(text, `${name} 含 @`).not.toContain('@')
+      for (const re of ROUTING_PATTERNS) {
+        expect(re.test(text), `${name} 命中路由黑名单 ${re}`).not.toBe(true)
+      }
+    }
   })
 
   // 回流技能的领域内容三条（票单 T-B 验收一）：门槛六条 / 同型 audit / 轮次升级

@@ -3,7 +3,7 @@
  *
  * 验证 verdict 落盘后的状态机推进 + closeout 兜底提醒（非阻塞、DB 异常静默）：
  * - 反查链：verdict message → task_id（源链 trace）→ execution_logs.commit_hash
- * - approve → 沿主干道推进至 closed（recordFlowTransition 每步留审计）
+ * - approve / comment（💬 非阻断档）→ 沿主干道推进至 closed（每步留审计）
  * - 判定式收口已投（targets 含 store 猫）→ 不重复补 closeout 提醒
  * - 判定式收口未投 → 真正投递 closeout 提醒（ingest 落库 @店长 + 源链 task_id）
  * - suggest/reject → 打回内容寻址，状态机不动
@@ -134,6 +134,38 @@ describe('execution/flow-advance — 契约③ X2 闭环', () => {
     expect(JSON.parse(notice!.mentions)).toEqual(['店长'])
     expect(notice!.task_id).toBe(TRACE) // 源链 task_id 随投递携带（收口链同线程）
     expect(notice!.content).toContain(SHA.slice(0, 7))
+  })
+
+  it('comment（💬 非阻断）→ 照常推进至 closed（「不阻断收口」的落地，T-C）', () => {
+    const msgId = seedReviewContext({ taskId: TRACE, commitHash: SHA })
+    advanceFlowAfterVerdict({
+      messageId: msgId,
+      sessionId: SESSION,
+      verdict: 'comment',
+      targets: [],
+    })
+    expect(getFlowState(SESSION, SHA)?.state).toBe('closed')
+  })
+
+  it('comment 且判定式收口未投 → closeout 提醒正文标注 💬仅评论（非阻断），不冒充 ✅', () => {
+    getDb().prepare(`UPDATE sessions SET agent_ids = '["agent-store"]' WHERE id = ?`).run(SESSION)
+    const msgId = seedReviewContext({ taskId: TRACE, commitHash: SHA })
+
+    advanceFlowAfterVerdict({
+      messageId: msgId,
+      sessionId: SESSION,
+      verdict: 'comment',
+      targets: [],
+    })
+
+    const notices = getDb()
+      .prepare(`SELECT content FROM messages WHERE session_id = ? AND role = 'user'`)
+      .all(SESSION) as Array<{ content: string }>
+    const notice = notices.find((r) => r.content.includes('契约③·状态机兜底'))
+    expect(notice).toBeDefined()
+    // 店长据提醒决定收不收口——档位必须如实标注，不能让 💬 读起来像 ✅
+    expect(notice!.content).toContain('💬仅评论（非阻断）')
+    expect(notice!.content).not.toContain('✅可合并')
   })
 
   it('会话无 store 成员 → closeout 提醒不投递（仅留痕，不抛错）', () => {

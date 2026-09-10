@@ -148,7 +148,7 @@ const SCHEMA_SQL = `
     session_id TEXT NOT NULL,
     reviewer_agent_id TEXT NOT NULL,
     subject_agent_id TEXT,
-    verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'suggest', 'reject')),
+    verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'comment', 'suggest', 'reject')),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 

@@ -102,6 +102,12 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 - [ ] `COMMENT` 不触发返工派发、不新起链
 - [ ] 同级冲突取最严的现有规则不被打破
 
+**生产者侧贯通（2026-09-10 T-D 复审 必改 2，随 T-D 返工补）**：本票原实现只动**消费方**（`verdict-parser` / `flow-advance` / `hints`），**生产者侧零落点**——审查猫自己的 prompt 与它读的 refs 仍只写三档 → 「机器认 💬、猫从不发 💬」，**本票全部改动不可达**。已补齐全部枚举落点：`seed-data.ts`（`REVIEWER_DUTIES` 三行 + 吐槽猫 `systemPrompt` 的 Review 指南 + 3 只实施猫 prompt + `mention-policy.ts` 注释）、`skills/refs/review-standards.md` 结论表、`skills/refs/shared-rules.md` 分流、`skills/catstudy/refs/cat-roles.md`、`skills/receive-review/SKILL.md`、`skills/refs/pr-template.md`、`README.md`。
+
+- **向严不向宽边界已写进 prompt**：💬 只装「不要求返工的观察项」，判不准时取严——**不得把已判定的 ⚠️ 因"问题不大"改判 💬**。
+- **新增生效判据**（并入 T-D 段那条 seed 硬前置）：吐槽猫 `agents.system_prompt` 与 `IRON_LAWS_REVIEWER` **contains** `💬仅评论`。
+- **回归护栏**：`seed-data.test.ts` 新增断言把「猫能发 💬」钉成契约——**改动前该断言必红**（HEAD 版本 `seed-data.ts` 中 💬 出现 0 次，实测）。
+
 ---
 
 ### T-D｜文案对齐
@@ -121,6 +127,13 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 - `manifest.yaml:340` / `:351`（铁律一「post-commit hook 触发 handoff-gen，Agent 只补填不自行发起」）
 - `docs/adr/0014:68` 白名单枚举仍 8 项、仍写「request-review 已从技能层移除」
 - `docs/research/skill-delivery-decoupling-spec.md:80`、`skills/refs/shared-rules.md:28/44/96/97` 路由口径（历史快照 / 共享 ref，两者本票均未动）
+
+**收口硬前置（2026-09-10 吐槽猫 ⚠️ 实测，T-D 复审带入）**：本票的文案**不会自动生效**——铁律三段（`COMMON_IRON_LAWS` / `CODER_DUTIES` / `REVIEWER_DUTIES`）经 `getIronLaws()` **运行期注入**，改常量 + 重启即生效；但 3 只实施猫的 `systemPrompt` 与知识库文档是 **seed 烘焙落库**的（`db/repository/agents.ts:113-115` 的 `ON CONFLICT(name) DO UPDATE SET system_prompt = excluded.system_prompt`），**只有跑 `pnpm seed` 才写**。
+
+- **机制更正（原表述错）**：铁律与 DB 角色块是**叠加**关系，不是覆盖——`execution/reply.ts:403-407` 的守卫 `!agent.systemPrompt.includes(ironLaw)` 实测**恒真**（旧库 prompt 668 字不可能包含 1727 字新铁律）→ **不 seed，实施猫 prompt 里同时存在**「post-commit 自动投递审查链」与「自行发起」两条互斥指令。
+- **生效判据**（seed 后实查 DB）：3 只实施猫的 `agents.system_prompt` **not contains** `post-commit 自动投递审查链`，且 **contains** `request-review`。
+- **落哪个库**：本会话走 dev 库（`db/index.ts:13`，`NODE_ENV≠production`）；prod 库（`cat-study.db`）下次启用前同样要跑。
+- **执行者**：写 DB 状态，归店长**收口时**执行，不在实施猫权限内。
 
 ---
 
@@ -172,6 +185,49 @@ commit 发生在执行**中途**（猫在工具循环里跑 `git commit`），�
 - [ ] 一条链挂多 commit 时，收口提醒的 sha = **被审的那个**
 - [ ] 同一链的第二条判词**仍能投出提醒**（不被 (session, sha) 记账吞掉）
 - [ ] 回捞限定链内 + 条数/时间窗上限（治一个 task_id 名下 20 条 / 7.7 万字符）
+
+---
+
+### T-H｜T-A 复盘三合一：判据收紧 · 多 commit 覆盖 · 判据 e2e
+
+**来源**：T-A 审查（吐槽猫，2026-09-10）在 OQ 逐条落锤时点出的三条同族缺口——同一处归属判据的三个失效面，**一次修**，不按单点修。
+
+**无阻塞**：与 T-E / T-F / T-G 无依赖，可独立开工。
+
+**交付**：
+
+1. **归属判据假阴性**（T-A OQ-1）：`scripts/handoff-gen.mjs` 的 `attributed = updated > 0` 只数 `status='running'` 行，
+   于是「该 uuid 从无执行行」（= 真手动提交，该投）与「执行已终态 / 同猫并发另一条在跑」**同得 0**
+   → 后两者被误判成手动提交 → 多投一条。改判据为「**该 uuid 存在任一状态的执行行 → 有归属 → 静默**」。
+2. **一执行多 commit 的审查请求覆盖**（T-A OQ-4）：同一执行提交多个 commit 时，钩子（`runHandoff`）与收尾兜底
+   （`getRunningExecutionCommitHash`）**都只看 HEAD**，补投文档的 `range` 也只有 `sha~1..sha`
+   → 早期 commit **全流程拿不到审查请求**（与既有 post-commit 行为同口径，非 T-A 引入，但 T-H 要裁决）。
+   需定：逐 commit 覆盖，还是显式接受「只看 HEAD」并写进 Tradeoff。
+3. **判据的 e2e 覆盖**（T-A N4）：`scripts/handoff-gen.e2e.mjs` 的 stub server 无 commit-hash 端点
+   → `attributed=null` → 走降级投递，**三条判据在 e2e 里全不生效**（这也是 e2e 仍全绿的原因）。
+   补一条「stub 返回 `updated:1` → POST **0** 次」，并附**阴性对照**证明该断言能区分新旧（不是恒真）。
+
+**T-D 复审带入（2026-09-10 吐槽猫 ⚠️，同族「假机制陈述 / 守卫半闭」，本票立名分、不单开票）**：
+
+4. **refs 守卫只覆盖单个 SKILL.md**（T-D N7）：`scripts/mcp-server.test.js` 的 refs 枚举派生实测只扫 `request-review/SKILL.md`；
+   全仓另一个引 refs 的 `receive-review/SKILL.md:24 → refs/review-standards.md` **零覆盖**（该 ref 实测 `@` = 0，无实害）。扩成扫 `skills/*/SKILL.md` 是三行改。
+5. **`execution/reply.ts:403-407` 防重复注入守卫是死代码**（T-D N8）：实测 DB prompt 从不含完整铁律 → 恒追加。
+   非 T-D 引入，但它是「旧库出现双份 / 矛盾 prompt」的机制底座——留痕以免下个读者继续以为「运行期注入会覆盖 seed 烘焙」。
+6. **`eval/phase0.ts:361` ext-05 金标答案陈述假机制**（T-D OQ-5）：仍写「post-commit hook 据此自动投递审查链」。
+   T-D 有意未改（eval golden 是已收口基线，改金标会扰动 judge 校准的历史可比性；且它不注入任何猫的 prompt）——在此立名分，别无限期挂着。
+
+**顺带观察项**（本单一起看，不必单独修）：
+
+- **N5** 取值型 flag 被后随 flag 贪吃（`--cwd --no-post` → `{cwd:'--no-post'}`）：自限于 git 校验（畸形值立刻撞
+  `不是 git 仓库`），进不去投递路径。硬化方式 = 取值以 `-` 开头即报错。
+- **N6** `spawnReviewFallback` 的 `stdio:'ignore'` 吞掉子进程失败原因；`stdio:['ignore','ignore','inherit']`
+  （inherit 传父进程 fd、**不建 pipe**）与 `child.unref()` 不冲突，实测父进程 9ms 退出。
+
+**验收**：
+
+- [ ] 执行已终态、同猫并发两种情形下重跑，均判「有归属 → 静默」（各一例）
+- [ ] 一执行多 commit 的覆盖范围有明确裁决，且代码与裁决一致
+- [ ] e2e 补判据用例 + 阴性对照（旧实现下该断言必须红）
 
 ---
 

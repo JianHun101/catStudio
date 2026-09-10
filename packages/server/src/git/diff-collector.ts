@@ -131,7 +131,7 @@ function appendDiffText(acc: BlockAccumulator, text: string): void {
  * 按 `catstudy [uuid]` 反查 commit 并采集文件级 diff，转为富文本块。
  *
  * @param uuid 触发消息 id（commit message 携带 `catstudy [uuid]` 标记，
- *             post-commit hook 据此投递审查链——diff 采集复用同一锚点）
+ *             post-commit hook 据此判定提交归属——diff 采集复用同一锚点）
  * @returns RichBlock[]（每文件一块）；查不到 commit / 全为二进制 / 失败 → null
  */
 export async function collectCommitDiffs(uuid: string): Promise<RichBlock[] | null> {
