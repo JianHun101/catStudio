@@ -560,7 +560,7 @@ fixture：一条触发消息 U + 三条执行行 `e0`(flash, completed) / `e1`(f
    **常态**），"谁是提交者"这个信息在读侧**根本不存在**，却被一个排序**冒充**成存在（D 路读数：返回的
    是"谁后开始"，与"谁提交"无关）。调用方 `handoff-gen` 拿它当补填人 ⇒ 交接文档**误投**。
 2. **取证陷阱：回退命中被无条件说成"精确匹配"**（`scripts/handoff-gen.mjs:811-813` 的 `console.log` 块，
-   模板串在 `:812`；grep 复核的是 **HEAD 版行号**，本单落地后该块为 `:826-830`）：
+   模板串在 `:812`；grep 复核的是 **HEAD 版行号**，本单落地后该块为 `:835-837`）：
    `` `[handoff-gen] 实施者: ${body.agentName}（execution_logs 反查${commitSha ? ', commit_hash 精确匹配' : ''}）` ``
    —— 只要调用方带过 commitSha 就打"精确匹配"，**哪怕服务端根本没按 hash 命中、退回了 uuid 反查**。
    归属是猜的，日志说不是：排障时按"精确匹配"这条线索去查，方向从一开始就错。
@@ -616,7 +616,152 @@ running 两行 → 旧实现盖 2 条、新实现只 1 条」（字面实现 = �
 `scripts/handoff-gen.mjs` · `docs/run/review-chain-anchor/tickets.md`（本文件本轮归 flash猫独占）。
 `handoff-gen.e2e.mjs` **未动**（派活单边界外）；验收③ 的区分性落在 `handoff-gen.test.js` 单测面。
 
+**件 4｜注释溯源修正**（本单第 4 件，落地时未记入本段，T-O 轮补记）：`git show` 复核证实
+**`eae5a5e` 是「实害化」锚**（其改动本身是 handoff-gen 审查须知绝对引用唯一化）、**根治是 `0fe8292`**
+（其 commit body 自述「eae5a5e 错投 ds猫 实害化根因」）。原三处注释都把「根治」记在 `eae5a5e` 名下
+⇒ 溯源错（会让人去查一个不是修复的 sha）。已修：
+
+- `db/repository/executionLogs.ts:355`（原 `:283`——**加代码后行号已漂**）
+- `routes/messages.ts:101`（原 `:78`）
+- `routes/messages.test.ts:413` 测试名（原报 `:410`，T-O 轮 grep 复核为 `:413`）
+
+**行号漂移更正**（T-O 轮复核，两处）：本段上文 `:826-830` → **`:835-837`**；
+件 4 的 `messages.test.ts:410` → **`:413`**。订正理由同本 spec 的一贯口径：**行号是快照，不是真相源**。
+
 **Blocked by**：无。**归口 flash猫**（读侧 + 路由 + serial 写回 + handoff-gen 措辞）。
+
+---
+
+### T-N｜权威判词注入缺定向闸：`subject` 为空也照注入（2026-09-10 新立 → 已落地 `792ce85`）
+
+**交付**：`execution/hints.ts` 的 `buildReviewLoopHint` 守卫改为 **subject 为空即不注入**（fail-closed）。
+**归口 ds猫**（server 面）。**本段是落地后的补记**——代码先于票面落库，故写成事实而非待办。
+
+**缺陷**：守卫原为
+`if (latest.subject_agent_id && agent.id && latest.subject_agent_id !== agent.id) return null`
+—— 第一项是 `subject_agent_id` 为**真值**，subject 为空时整个条件短路为假、**继续注入**。
+旧窗口路径有定向闸，新权威判词路径没把它接回来 ⇒ **任何**猫都会收到这条循环指令。
+
+**定性更正（店长实测推翻上轮采纳的「92% 是常态缺陷」）**：按 verdict 分档直查 dev 库（现 27 行）：
+
+| verdict | 总数 | subject 空 | 说明                                                                                                                   |
+| ------- | ---- | ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| approve | 17   | 17         | `verdict-parser.ts:221-225` 明写 approve/comment **恒置 null**（💬 不要求返工，写 subject 会让下游把观察项当返工派发） |
+| comment | 4    | 4          | `hints.ts` 下一行 `if (verdict==='approve'                                                                             |     | verdict==='comment') return null` **先把这两档挡掉** ⇒ subject 空对它们**零影响** |
+| suggest | 6    | **4**      | **真实触发面**                                                                                                         |
+
+⇒ 25 里 21 是设计使然。真实触发面 = **suggest 的 4 行**；逐行查 `mentions`：**4 行全是 `["店长"]`**
+（判词自己只 @ 了店长；派活单原估 3 行，ds猫 实测 4 行）⇒ 上轮「写侧补 `subject_agent_id`，信息在手」
+**不成立**——clause 里压根没有非 store 目标，**写侧无信息可补**。
+
+**修法**：`hints.ts:142` 新增 `if (!latest.subject_agent_id) return null`——**向严不向宽**（与 T-L 同口径），
+而不是往写侧加数据。**不碰** `verdict-parser.ts`（写侧无信息可补，实测已证）。
+
+**验收（含区分性，落地时实测）**：
+
+- [x] ① subject 空 + suggest/reject → **不注入**（单变量回退实测：删掉该行 → hints **1 红**）
+- [x] ② 阴性对照：subject 非空 == 本猫 → **仍注入**（三轮回退下照常绿，不因收窄误杀）
+- [x] ③ subject 非空 != 本猫 → 不注入（既有不变）
+- [x] ④ approve/comment → 不注入（两态，既有不变）
+- [x] ⑤ 真库回归：`mentions=["店长"]` 的 suggest 链上非 reviewer 猫跑 → 不再被注入
+
+**并入 4 条（ds猫 实施，含三处落点更正）**：
+
+1. `flow-advance.test.ts` 弱断言 → 钉死四步（`:88-93` 逐步 `from/to/intent`）。**落点更正**：派活单写 `:86`，
+   该行是注释，断言块在 `:88-93`。
+2. `episodes.ts:167-170` 恢复被 T-G 删掉的 NULL 噪声说明（`chain_task_id` 上的 NULL 是**已知噪声**，不是判据）
+3. tie-break `v.message_id DESC`（uuid 字典序，与时间无关）→ `m.rowid DESC`（插入序）。
+   **落点更正**：派活单写 `flow-advance.ts`，**实际在 `eval/chain-verdicts.ts:53/79`**（回退实测 2 红）
+4. `serial.test.ts:791` 补 T-M 拒写 warn 覆盖（此前 `gitCommit` mock 恒返 `undefined` ⇒ depth=0 收尾块
+   整个不执行，拒写分支与 warn **从未被跑过**；加 `&& false` → 1 红）
+
+**OQ（待裁，ds猫 交接文档 OQ-1）**：`verdict-parser.ts:237` 写的是 `subject.name`（**名字**），
+而 `hints.ts` 比的是 `agent.id`（**uuid**）⇒ 验收②「subject 非空且 == 本猫」在生产路径上**不可达**
+（恒走 ③ 不注入）。本笔不就地打补丁——属架构裁决面。
+
+**Blocked by**：无。
+
+---
+
+### T-O｜pre-push 门禁审计对象错位：只看 HEAD、不读 stdin + 无祖先关系 fail-open（2026-09-10 新立 → 本笔落地）
+
+**交付**：`.husky/pre-push` 改为**逐个校验本次推送的 refspec**；新增 `scripts/pre-push-gate.e2e.mjs`。
+**归口 flash猫**（`scripts/` + hooks 面）。
+
+**缺陷（两条，同一根因：审计对象 ≠ 执行对象）**：
+
+1. **只看 HEAD**：`:50` `HEAD_SHA=$(git rev-parse HEAD)`，**完全不读 stdin**。于是
+   `git push origin <未审 sha>:refs/heads/x` 在「HEAD 恰好停在已审点」时落进 `:63`
+   `LAST_REVIEWED = HEAD_SHA → exit 0`，**整条放行**。git 在 stdin 逐行传的才是本次要推的
+   `<local ref> <local sha> <remote ref> <remote sha>`——不读它等于换了判据面。
+2. **无祖先关系 exit 0**（`:85-90`）：reset/rebase 后 LAST_REVIEWED 与 HEAD 无祖先关系 → 打一行
+   「⚠️ 历史不一致」后 **`exit 0` 放行**（fail-open）。
+
+**修法（四条判据，逐 refspec）**：
+
+| 情形                               | 处置                                         |
+| ---------------------------------- | -------------------------------------------- |
+| `local_sha == .push-gate`          | 放行（①）                                    |
+| `.push-gate` 是 `local_sha` 的祖先 | **拒**（②有未审 commit）                     |
+| `local_sha` 是 `.push-gate` 的祖先 | 放行（③**已审历史的子集**——见下方「偏离」）  |
+| 两边都无祖先关系                   | **拒**（④fail-closed，原为 exit 0）          |
+| `local_sha` 全 0（删除 ref）       | 放行（无对象可审）                           |
+| 非 40 位 hex / 长度非 40           | **拒**（看不懂的输入不放行）                 |
+| 一行 refspec 都没解析出            | 回落 HEAD 校验（人工直跑 hook 时保持旧行为） |
+
+**⚠️ 一处显式偏离派活单字面**：派活单要求「`:87` 分支改 exit 1（fail-closed）」。
+字面实现会让情形③（如推一个落后的 `main`——**实测 main `53690b4` 是 dev `5d527b5` 的祖先**）
+掉进 ④ 被**误拦**；误拦合法推送的压力会把 `--no-verify` 变成常规操作，正是本票要止住的形态。
+故 ③ 显式放行（理由写进 hook 注释：内容全在已审面内）。**判据 4（reset/rebase 无祖先关系 → 拦）不受影响**——
+那种情形落在 ④。**已报店长，可否决**。
+
+**验收（5 条，区分性用 `git show HEAD:.husky/pre-push` 逐字副本同场景对照）**：
+
+- [x] ① HEAD 停在已审点 + 推**另一个未审 sha** → 拦　（**旧实现放行** ★区分性成立）
+- [x] ② 推的正是 `.push-gate` 那一笔 → 放行（旧实现同）
+- [x] ③ 一次推多 refspec（一审一未审）→ 拦　（**旧实现放行** ★区分性成立）
+- [x] ④ reset/rebase 后无祖先关系 → 拦　（**旧实现 exit 0 放行** ★区分性成立）
+- [x] ⑤ `--no-verify` 仍绕过（逃生口保留，旧实现同）
+- 另：缺 `.push-gate` → 拦；内容非法 → 拦；删除 ref → 放行；无 stdin 回落 HEAD → 拦（均回归对照）
+
+**证据**：`node scripts/pre-push-gate.e2e.mjs` → **24 passed / 0 failed**（10 场景 × legacy/current 双跑），
+3 条区分性场景 legacy 与 current **结论全部相反**。**新增 1 文件**：`scripts/pre-push-gate.e2e.mjs`。
+
+**并入 6 条**：
+
+1. **`handoff-gen.mjs:1168` 的「已写回」无条件打印**：拒写告警后紧跟一行「已写回（命中 running 行 0）」
+   ——相邻两行自相矛盾（上一行「未写回…不猜」），会把排障引向「服务端没写」而真因是「客户端没带
+   agentId」，两个修法方向相反。改为**三态互斥**（未写回 / 已写回 N 行 / 调用成功但 0 行）。
+   区分性实测：把旧的无条件打印放回 → e2e **2 条必红**（14g）。
+2. **e2e OQ-1 瞬态保护**（**原锚已复核：`handoff-gen.e2e.mjs`（非 `.mjs`）的组 10 三个调用点确实在
+   顶层裸块里、外面没有 try**——派活单「我 grep 到该行在 try 块内」是查了 `handoff-gen.mjs:726`
+   （那行 `return body.sessionId` 才在 try 里），**两文件同号不同物**）。新增 `callWithTransientRetry`
+   （只重试 `HANDOFF_TRANSIENT`，其余上抛）+ helper 自证两条断言。
+3. **e2e stub 镜像补全**：`handleMessagePost` + `mirrorEntryGateError` 忠实镜像
+   `buildDeliveryGateError` 两个 400 条件。**接了 11 处**（全部会应答 2xx 的 inline stub）；
+   **3 处刻意不接并就地注明理由**——11b（设计应答就是 400，闸门被包含、零区分性）、
+   13b/13c（`socket.destroy()` 永不应答，400/201 在客户端不可观测）。
+   规则 B（审查类缺 chainType）在本 e2e **当前不可达**（`mentions:[fillerName]`，filler ∈ {store,
+   implementer}——**DB 实测**：店长=store / ds猫·flash猫·dsh猫=implementer / reviewer 只有吐槽猫）
+   ⇒ 仍实现（要忠实镜像，不要现状快照）并加诊断断言钉住「放行载荷不得点名 reviewer」。
+   另加**非恒真**自证：`gatedPostBodies.length > 0`（镜像没接上时，全部投递断言会退化成恒真门）。
+4. **`shortHash` vs `COMMIT_SHA_RE`**：见下方观察项（**属 ds猫 边界，本笔只记不修**）。
+5. **本段（T-N/T-O 立单）+ 行号漂移更正 2 处**（见 T-M 段件 4）。
+6. 顺手：e2e 临时目录**崩溃路径清理**（`process.on('exit')`）——实测残留 `handoff-e2e-nexELU`
+   （mtime `13:37:11Z`，内含 `.handoff-test-lookup`+`tmp`）**正是 OQ-1 那次瞬态逃逸崩在半路留下的**。
+
+**观察项（未修，属 ds猫 边界 `dispatch/index.ts`）**：生产者写 **7 位短 sha**（`handoff-gen.mjs:355`
+`> Commit: ${shortHash}`，`:159` `--pretty=%h`），消费者 `COMMIT_SHA_RE = /Commit: ([0-9a-f]{7,})/`
+（`:42`）按**等长精确子串**比对（`:86`）。生产路径两侧同源（触发消息内嵌整份文档）⇒ **当前一致、无 live bug**；
+长度不一致时（消息引用 40 位全 sha 而文档是 7 位）判据返回 false ⇒ stale 检测失效 ⇒ **多派一轮**
+（**fail-open 向多余工作，不是静默丢弃**）。建议修法：比对改为**前缀容忍**（取短的一方长度比较）。
+**判定：低severity 观察项，不单开一单**——挂 T-J 后续。
+
+**边界**：`.husky/pre-push` · `scripts/handoff-gen.mjs` · `scripts/handoff-gen.e2e.mjs` ·
+`scripts/pre-push-gate.e2e.mjs`（新增）· 本文件。**未碰** `ingest.ts` / `routes/messages.ts` /
+`dispatch/` / `serial.ts`（ds猫 面）。
+
+**Blocked by**：无。
 
 ---
 
@@ -635,7 +780,13 @@ running 两行 → 旧实现盖 2 条、新实现只 1 条」（字面实现 = �
   T-L 判词 marker 空格零容忍（独立，无前置——`eval/verdict-parser.ts` + `execution/hints.ts`，随整批重启）
   T-M 归属反查消歧（独立，无前置——`db/repository/executionLogs.ts` + `routes/messages.ts`
       + `execution/serial.ts` + `scripts/handoff-gen.mjs`，随整批重启）
+  T-N 判词注入定向闸 fail-closed（独立，无前置——`execution/hints.ts`，随整批重启；已落地 `792ce85`）
+  T-O pre-push 门禁按 refspec 校验（独立，无前置——`.husky/pre-push` + `scripts/pre-push-gate.e2e.mjs`；
+      **不需重启**：hook 是 git 每次 push 现读的脚本，落盘即生效）
 ```
+
+**T-O 的生效面与 server 无关**：`.husky/pre-push` 由 git 在 push 时**直接执行文件**，不经过常驻进程
+⇒ 本笔**不产生重启需求**（同批 server 侧 T-N/T-G/T-M 仍需要）。
 
 **跨阶段无硬依赖**：阶段一的「已投递」判据用 `mentions` 启发式，不依赖锚 → T-A 可立即开工。阶段二落地后应收紧为锚判据。
 

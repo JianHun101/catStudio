@@ -1,0 +1,402 @@
+#!/usr/bin/env node
+/**
+ * pre-push 审查门禁（T-O）· CLI 级 e2e —— 自包含、可进 CI。
+ *
+ * 为什么必须**真 git push**：门禁的输入是 git 在 stdin 逐行传的
+ * `<local ref> <local sha> <remote ref> <remote sha>`。把 hook 当纯函数喂字符串，
+ * 测的是"我以为 git 会传什么"；只有真 push 才验得了「审计对象 == 执行对象」这件事。
+ * 旧实现正是没读 stdin（换判据面）才让「HEAD 停在已审点 + 推未审 sha」整条放行。
+ *
+ * 区分性：非贪婪要求——每个场景同时跑**两份 hook**：
+ *   - current = 工作区 `.husky/pre-push`（被测对象，真身，非副本）
+ *   - legacy  = `git show HEAD:.husky/pre-push` 的逐字副本（改动前实现）
+ * 打印对照表；标注为 discriminator 的场景断言两者**结论相反**——
+ * 「新实现必拦」若在旧实现下也拦，那条断言什么都没证明（恒真门）。
+ *
+ * 隔离：全部临时目录落在 os.tmpdir()，仓库树零残留（曾把 e2e 临时目录落在仓库根）。
+ */
+
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
+
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url))
+const REPO_ROOT = join(SCRIPTS_DIR, '..')
+const HOOKS_CURRENT = join(REPO_ROOT, '.husky')
+
+const TEST_BASE = mkdtempSync(join(tmpdir(), 'catstudy-prepush-e2e-'))
+
+// 崩溃路径也要收：末段的显式 cleanup 只在跑到底时执行，中途 uncaught 会留下
+// 一整个 fixture 根（实测踩过一次——首次调试崩溃就残留了一个）。exit 钩子在
+// uncaught exception 之后仍会跑，且与显式 cleanup 幂等（force + recursive）。
+process.on('exit', () => {
+  try {
+    rmSync(TEST_BASE, { recursive: true, force: true })
+  } catch {}
+})
+
+// ─── 计数与断言 ──────────────────────────────────────────────
+
+let passed = 0
+let failed = 0
+const failures = []
+
+function assert(cond, msg) {
+  if (cond) {
+    passed++
+  } else {
+    failed++
+    failures.push(msg)
+    console.error(`  ❌ ${msg}`)
+  }
+}
+
+function sha256(s) {
+  return createHash('sha256').update(s).digest('hex').slice(0, 12)
+}
+
+// ─── git 执行：git 环境变量必须清干净 ────────────────────────
+// 从 git hook 内嵌跑（或 CI 里带 GIT_DIR）时，残留的 GIT_DIR/GIT_WORK_TREE 会让
+// 临时仓库的 git 命令指向宿主仓库。清掉才保证每个 fixture 是它自己。
+
+const GIT_ENV = { ...process.env }
+delete GIT_ENV.GIT_DIR
+delete GIT_ENV.GIT_WORK_TREE
+delete GIT_ENV.GIT_INDEX_FILE
+delete GIT_ENV.GIT_COMMON_DIR
+
+/** 空 hooks 目录：临时仓库里的 `git commit` 会触发**真 pre-commit**（`npx lint-staged`
+ *  + 全量 pnpm test）——那是宿主仓库的钩子，在 fixture 里必炸且与本票无关。
+ *  除 push 外一律用 `-c core.hooksPath=<空目录>` 压掉；push 才放真钩子上场。 */
+const NO_HOOKS_DIR = join(TEST_BASE, 'no-hooks')
+mkdirSync(NO_HOOKS_DIR, { recursive: true })
+
+function git(repo, args, { noHooks = true } = {}) {
+  const full = noHooks
+    ? ['-c', `core.hooksPath=${NO_HOOKS_DIR.replace(/\\/g, '/')}`, ...args]
+    : args
+  return execFileSync('git', full, {
+    cwd: repo,
+    encoding: 'utf-8',
+    env: GIT_ENV,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+}
+
+let remoteSeq = 0
+const repos = []
+
+/** 造一个全新工作仓库 + 空的 bare remote，`core.hooksPath` 指向给定 hook 目录。 */
+function newRepo(hooksDir) {
+  const repo = mkdtempSync(join(TEST_BASE, 'wt-'))
+  repos.push(repo)
+  const remote = join(TEST_BASE, `remote-${remoteSeq++}.git`)
+  git(repo, ['init', '-q'])
+  git(repo, ['config', 'user.email', 'prepush-e2e@catstudy.local'])
+  git(repo, ['config', 'user.name', 'prepush-e2e'])
+  git(repo, ['config', 'commit.gpgsign', 'false'])
+  // 绝对路径，正斜杠——Windows 下 git 接受 D:/... 形态
+  git(repo, ['init', '-q', '--bare', remote.replace(/\\/g, '/')])
+  git(repo, ['remote', 'add', 'origin', remote.replace(/\\/g, '/')])
+  git(repo, ['config', 'core.hooksPath', hooksDir.replace(/\\/g, '/')])
+  // hook 阻断时会调 `node scripts/handoff-gen.mjs --gate-deliver`；stub 掉，
+  // 让输出确定（本 e2e 不测补投逻辑，那是 handoff-gen.e2e.mjs 的面）。
+  mkdirSync(join(repo, 'scripts'), { recursive: true })
+  writeFileSync(join(repo, 'scripts', 'handoff-gen.mjs'), 'process.exit(0)\n')
+  return repo
+}
+
+function commitFile(repo, name, content, msg) {
+  writeFileSync(join(repo, name), content, 'utf-8')
+  git(repo, ['add', name])
+  git(repo, ['commit', '-q', '-m', msg])
+  return git(repo, ['rev-parse', 'HEAD']).trim()
+}
+
+function writeGate(repo, sha) {
+  writeFileSync(join(repo, '.push-gate'), `${sha}\n`, 'utf-8')
+}
+
+/** 跑一次真 push，返回 { code, out }（out = stdout+stderr 合并）。 */
+function tryPush(repo, refspecs, opts = {}) {
+  const args = ['push']
+  if (opts.noVerify) args.push('--no-verify')
+  args.push('origin', ...refspecs)
+  try {
+    // noHooks:false —— 本 e2e 的被测对象就是钩子本身，这里必须放真钩子上场
+    const out = git(repo, args, { noHooks: false })
+    return { code: 0, out }
+  } catch (err) {
+    return {
+      code: typeof err.status === 'number' ? err.status : 1,
+      out: `${err.stdout || ''}${err.stderr || ''}`,
+    }
+  }
+}
+
+/** 直跑 hook（stdin 关闭）——测「无 refspec 回落 HEAD」那条分支。 */
+function runHookDirect(repo, hooksDir) {
+  const hookPath = join(hooksDir, 'pre-push')
+  try {
+    const out = execFileSync('sh', [hookPath], {
+      cwd: repo,
+      encoding: 'utf-8',
+      env: GIT_ENV,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { code: 0, out }
+  } catch (err) {
+    return {
+      code: typeof err.status === 'number' ? err.status : 1,
+      out: `${err.stdout || ''}${err.stderr || ''}`,
+    }
+  }
+}
+
+/** 阻断判据：**非零退出且输出带门禁拒绝标记**。两条标记各有来路——
+ *  「推送阻断」= refspec 未审；「.push-gate 内容无效」= 门禁前置拦下。
+ *  不能只判 code !== 0：推送因网络/权限失败同样非零，那是假绿门。 */
+const BLOCK_MARKERS = ['推送阻断', '.push-gate 内容无效']
+const isBlocked = (r) => r.code !== 0 && BLOCK_MARKERS.some((m) => r.out.includes(m))
+const isAllowed = (r) => r.code === 0
+
+// ─── legacy 副本：`git show HEAD:.husky/pre-push` 逐字 ────────
+
+const legacyDir = mkdtempSync(join(TEST_BASE, 'legacy-hooks-'))
+const currentHookContent = readFileSync(join(HOOKS_CURRENT, 'pre-push'), 'utf-8')
+const legacyHookContent = execFileSync('git', ['show', 'HEAD:.husky/pre-push'], {
+  cwd: REPO_ROOT,
+  encoding: 'utf-8',
+  env: GIT_ENV,
+})
+writeFileSync(join(legacyDir, 'pre-push'), legacyHookContent, { mode: 0o755 })
+
+console.log('📦 pre-push 审查门禁 e2e（T-O）')
+console.log('')
+console.log(`  仓库根:      ${REPO_ROOT}`)
+console.log(`  临时根:      ${TEST_BASE}`)
+console.log(`  current hook: ${HOOKS_CURRENT}/pre-push  sha256:${sha256(currentHookContent)}`)
+console.log(`  legacy  hook: git show HEAD:.husky/pre-push  sha256:${sha256(legacyHookContent)}`)
+console.log('')
+
+// 副本必须**真是**改动前那份——否则「区分性」是在跟自己的影子比。
+// 这一条同时证明本单确实改了 hook（没改 = 无从谈区分性）。
+assert(
+  currentHookContent !== legacyHookContent,
+  'legacy 副本应与 current hook 不同（否则本单没改 hook，区分性无从谈起）'
+)
+// legacy 副本必须走旧逻辑：旧实现无条件 `HEAD_SHA=$(git rev-parse HEAD)`。
+assert(
+  legacyHookContent.includes('HEAD_SHA=$(git rev-parse HEAD)') &&
+    !legacyHookContent.includes('PUSH_SPECS'),
+  'legacy 副本应含旧实现的 HEAD 判据（`HEAD_SHA=$(git rev-parse HEAD)`）且不含新实现的 stdin 解析'
+)
+
+// ─── 场景 ────────────────────────────────────────────────────
+//
+// 每个场景自建仓库（互不污染），签名 (hooksDir) => {code, out}。
+// expect: 'block' | 'allow'；discriminator: true = 断言 legacy 与 current 结论相反。
+
+const SCENARIOS = [
+  {
+    id: '1',
+    desc: '缺 .push-gate → 拦',
+    expect: 'block',
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      commitFile(repo, 'a.txt', '1', 'c1')
+      return tryPush(repo, ['HEAD:refs/heads/main'])
+    },
+  },
+  {
+    id: '2',
+    desc: '推的正是 .push-gate 那一笔 → 放行',
+    expect: 'allow',
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      writeGate(repo, c1)
+      return tryPush(repo, ['HEAD:refs/heads/main'])
+    },
+  },
+  {
+    id: '3',
+    desc: '★区分性：HEAD 停在已审点，推**另一个未审 sha** → 拦',
+    expect: 'block',
+    discriminator: true,
+    // 旧实现只读 HEAD：HEAD == .push-gate ⇒ exit 0 整条放行（本票靶心）。
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      const c2 = commitFile(repo, 'a.txt', '2', 'c2')
+      // 从 c1 分叉出一条未审支线（与 c2 无祖先关系）
+      git(repo, ['checkout', '-q', '-b', 'feat', c1])
+      const cFeat = commitFile(repo, 'feat.txt', 'x', 'feat: 未审')
+      git(repo, ['checkout', '-q', c2]) // HEAD 回到已审点（detached，与 .push-gate 同值）
+      writeGate(repo, c2)
+      return tryPush(repo, [`${cFeat}:refs/heads/feat`])
+    },
+  },
+  {
+    id: '4',
+    desc: '★区分性：一次推多 refspec（一审一未审）→ 拦',
+    expect: 'block',
+    discriminator: true,
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      const c2 = commitFile(repo, 'a.txt', '2', 'c2')
+      git(repo, ['checkout', '-q', '-b', 'feat', c1])
+      const cFeat = commitFile(repo, 'feat.txt', 'x', 'feat: 未审')
+      git(repo, ['checkout', '-q', c2])
+      writeGate(repo, c2)
+      // 一审（c2）一未审（cFeat）在同一条命令里——只看 HEAD 会漏掉后者
+      return tryPush(repo, ['HEAD:refs/heads/main', `${cFeat}:refs/heads/feat`])
+    },
+  },
+  {
+    id: '5',
+    desc: '★区分性：reset/rebase 后无祖先关系 → 拦（旧实现 exit 0）',
+    expect: 'block',
+    discriminator: true,
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      const c2 = commitFile(repo, 'a.txt', '2', 'c2')
+      writeGate(repo, c2)
+      // reset 回去再造一笔（rebase 形态：新 sha 与已审线无祖先关系）
+      git(repo, ['reset', '-q', '--hard', c1])
+      const c2b = commitFile(repo, 'a.txt', '2-rebased', 'c2 (rebased)')
+      assert(c2b !== c2, 'rebase 场景应产出与 c2 不同的新 sha')
+      return tryPush(repo, ['HEAD:refs/heads/main'])
+    },
+  },
+  {
+    id: '6',
+    desc: '阳性对照：推**已审历史的子集**（落后分支，如 main）→ 放行',
+    expect: 'allow',
+    // 这是新实现引入的**显式**判据（旧实现走「历史不一致 exit 0」放行，理由不同）。
+    // 无此条会掉进「无祖先关系」被误拦 ⇒ 误拦的压力把人推向 --no-verify。
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      commitFile(repo, 'a.txt', '2', 'c2')
+      const c3 = commitFile(repo, 'a.txt', '3', 'c3')
+      writeGate(repo, c3) // 已审点 = c3（模拟 dev），推 c1（模拟落后的 main）
+      return tryPush(repo, [`${c1}:refs/heads/main`])
+    },
+  },
+  {
+    id: '7',
+    desc: '逃生口：--no-verify 仍绕过 → 放行',
+    expect: 'allow',
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      commitFile(repo, 'a.txt', '2', 'c2')
+      writeGate(repo, c1) // c2 未审
+      return tryPush(repo, ['HEAD:refs/heads/main'], { noVerify: true })
+    },
+  },
+  {
+    id: '8',
+    desc: '删除远端 ref（local sha 全 0）→ 放行（无对象可审）',
+    expect: 'allow',
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      const c2 = commitFile(repo, 'a.txt', '2', 'c2')
+      writeGate(repo, c2)
+      // 先把 feat 推上去（绕过门禁），再删
+      tryPush(repo, [`${c1}:refs/heads/feat`], { noVerify: true })
+      return tryPush(repo, [':refs/heads/feat'])
+    },
+  },
+  {
+    id: '9',
+    desc: '无 stdin（人工直跑 hook）→ 回落 HEAD 校验：未审 → 拦',
+    expect: 'block',
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      commitFile(repo, 'a.txt', '2', 'c2')
+      writeGate(repo, c1)
+      return runHookDirect(repo, hooks)
+    },
+  },
+  {
+    id: '10',
+    desc: '.push-gate 内容非法（非 40 位 hex）→ 拦',
+    expect: 'block',
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      commitFile(repo, 'a.txt', '1', 'c1')
+      writeFileSync(join(repo, '.push-gate'), 'not-a-sha\n', 'utf-8')
+      return tryPush(repo, ['HEAD:refs/heads/main'])
+    },
+  },
+]
+
+// ─── 跑场景 ──────────────────────────────────────────────────
+
+const rows = []
+for (const sc of SCENARIOS) {
+  const legacy = sc.run(legacyDir)
+  const current = sc.run(HOOKS_CURRENT)
+  rows.push({ ...sc, legacy, current })
+
+  const want = sc.expect === 'block' ? isBlocked : isAllowed
+  const legacySame = sc.expect === 'block' ? isBlocked(legacy) : isAllowed(legacy)
+
+  assert(
+    want(current),
+    `场景 ${sc.id}（${sc.desc}）：current 应 ${sc.expect}，实得 code=${current.code}`
+  )
+  if (sc.discriminator) {
+    assert(
+      !legacySame,
+      `场景 ${sc.id}（${sc.desc}）：legacy 旧实现应与新实现**结论相反**（区分性），实得同结论`
+    )
+  } else {
+    assert(legacySame, `场景 ${sc.id}（${sc.desc}）：legacy 应同为 ${sc.expect}（回归对照）`)
+  }
+  console.log(`  ${sc.id}: ${sc.desc} ✅`)
+}
+
+// ─── 对照表 ──────────────────────────────────────────────────
+
+// 不用花框表格：CJK 是双宽字符，`padEnd` 按码点数补空格 ⇒ 中英混排必然错位，
+// 要修就得引一个显示宽度库。改成「结论在前、逐行缩进」，零对齐依赖。
+console.log('')
+console.log('  区分性对照（legacy = `git show HEAD:.husky/pre-push` / current = 本单实现）：')
+for (const r of rows) {
+  const cell = (x) => (isBlocked(x) ? '拦' : x.code === 0 ? '放行' : `非零(code=${x.code})`)
+  console.log(
+    `    ${String(r.id).padStart(2)}. legacy=${cell(r.legacy)} / current=${cell(r.current)}` +
+      `${r.discriminator ? '  ★ 结论相反（区分性成立）' : ''}  — ${r.desc}`
+  )
+}
+
+// ─── Cleanup ─────────────────────────────────────────────────
+
+rmSync(TEST_BASE, { recursive: true, force: true })
+if (existsSync(TEST_BASE)) {
+  console.error(`  ⚠️  临时目录未删净: ${TEST_BASE}`)
+}
+
+// ─── 结果汇总 ────────────────────────────────────────────────
+
+console.log('')
+console.log('═'.repeat(50))
+console.log(`  ${passed} passed, ${failed} failed, ${passed + failed} total`)
+console.log('═'.repeat(50))
+
+if (failed > 0) {
+  console.error('')
+  console.error('失败项：')
+  for (const f of failures) console.error(`  - ${f}`)
+  process.exit(1)
+}

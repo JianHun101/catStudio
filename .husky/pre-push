@@ -1,7 +1,13 @@
 #!/usr/bin/env sh
-# pre-push 审查门禁：检查 HEAD 是否已经过 @吐槽猫 review
+# pre-push 审查门禁：检查**本次推送的每个 sha** 是否已经过 @吐槽猫 review
 # 审查通过后运行: git rev-parse HEAD > .push-gate
 # 紧急绕过: git push --no-verify
+#
+# T-O：被审对象 = **本次推送的 refspec**，不是 HEAD。
+#   旧实现只读 `git rev-parse HEAD`，于是 `git push origin <未审 sha>:refs/heads/x`
+#   在「HEAD 恰好停在已审点」时落进「LAST_REVIEWED == HEAD_SHA → exit 0」分支
+#   **整条放行**。审计对象必须与执行对象同面——git 在 stdin 逐行传的就是本次要推的
+#   `<local ref> <local sha> <remote ref> <remote sha>`，不读 stdin 等于换了判据面。
 #
 # 自动补投：调用 handoff-gen.mjs --gate-deliver 补投滞留的交接文档
 # （pending 队列按 SHA 补投 + 兜底投递 HEAD）。
@@ -11,6 +17,7 @@
 # Fix C 移除）。
 
 GATE_FILE=".push-gate"
+ZERO_SHA="0000000000000000000000000000000000000000"
 
 # ─── 辅助：补投滞留交接文档（委托 handoff-gen.mjs 单源） ───────
 
@@ -26,7 +33,7 @@ deliver_pending() {
   fi
 }
 
-# ─── 门禁检查 ──────────────────────────────────────────
+# ─── 门禁前置：.push-gate 必须存在且内容合法 ──────────────────
 
 if [ ! -f "$GATE_FILE" ]; then
   echo ""
@@ -47,7 +54,6 @@ if [ ! -f "$GATE_FILE" ]; then
 fi
 
 LAST_REVIEWED=$(cat "$GATE_FILE" | tr -d '[:space:]')
-HEAD_SHA=$(git rev-parse HEAD)
 
 # 防止空文件或无效内容绕过门禁
 if ! echo "$LAST_REVIEWED" | grep -qE '^[0-9a-f]{40}$'; then
@@ -60,31 +66,109 @@ if ! echo "$LAST_REVIEWED" | grep -qE '^[0-9a-f]{40}$'; then
   exit 1
 fi
 
-if [ "$LAST_REVIEWED" = "$HEAD_SHA" ]; then
+# ─── 逐个校验本次推送的 sha ──────────────────────────────────
+#
+# git 为每个待推 ref 传一行（无需推送的 ref 不传；ref 删除传 40 个 0）。
+# 用 here-doc 喂 while read——POSIX sh 里 here-doc **不开**子 shell，
+# 循环里置的 blocked / checked 能带回父 shell（用管道会丢在子 shell 里）。
+
+PUSH_SPECS=$(cat)
+blocked=0
+checked=0
+blocked_list=""
+ok_list=""
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # 空行 / 字段不全的行跳过；「一行都没解析出」由下方 checked 兜底
+  [ -z "$local_sha" ] && continue
+
+  # 非 hex → 拒（fail-closed：看不懂的输入不放行）
+  case "$local_sha" in
+    *[!0-9a-f]*)
+      blocked=1
+      blocked_list="${blocked_list}   - ${remote_ref:-?}（非法 sha: ${local_sha}）\n"
+      continue
+      ;;
+  esac
+  if [ "${#local_sha}" -ne 40 ]; then
+    blocked=1
+    blocked_list="${blocked_list}   - ${remote_ref:-?}（sha 长度非 40: ${local_sha}）\n"
+    continue
+  fi
+
+  # 删除 ref（local sha 全 0）：无对象可审，放行
+  if [ "$local_sha" = "$ZERO_SHA" ]; then
+    continue
+  fi
+
+  checked=$((checked + 1))
+
+  # ① 推的正是审查记录那一笔 ⇒ 已审
+  if [ "$LAST_REVIEWED" = "$local_sha" ]; then
+    ok_list="${ok_list}   - ${remote_ref:-?} $(echo "$local_sha" | cut -c1-7)（== .push-gate）\n"
+    continue
+  fi
+
+  # ② 审查记录是它的祖先 ⇒ 它带着未审的新 commit
+  if git merge-base --is-ancestor "$LAST_REVIEWED" "$local_sha" 2>/dev/null; then
+    blocked=1
+    blocked_list="${blocked_list}   - ${remote_ref:-?} $(echo "$local_sha" | cut -c1-7)（有未审 commit：$(echo "$LAST_REVIEWED" | cut -c1-7)..$(echo "$local_sha" | cut -c1-7)）\n"
+    continue
+  fi
+
+  # ③ 它是审查记录的祖先 ⇒ 推的是**已审历史的子集**（例：dev 已审、往前推一个
+  #    落后的源流分支，如 main——实测 main `53690b4` 是 dev `5d527b5` 的祖先）。
+  #    内容全在已审面内，放行。这一条**不是旧行为的延续**（旧实现压根没看 sha），
+  #    是本票新引入的**显式**判据：没有它，「推已审历史的子集」会掉进 ④ 被误拦，
+  #    而误拦合法推送的压力会把人推向 `--no-verify`——正是本票要止住的形态。
+  if git merge-base --is-ancestor "$local_sha" "$LAST_REVIEWED" 2>/dev/null; then
+    ok_list="${ok_list}   - ${remote_ref:-?} $(echo "$local_sha" | cut -c1-7)（位于已审历史内）\n"
+    continue
+  fi
+
+  # ④ 两边祖先关系都不成立（reset / rebase / 推了别处的 sha）⇒ **拒**
+  #    旧实现这里 exit 0（fail-open）——「HEAD 停在已审点 + 推未审 sha」即由此放行。
+  blocked=1
+  blocked_list="${blocked_list}   - ${remote_ref:-?} $(echo "$local_sha" | cut -c1-7)（与审查记录无祖先关系：reset/rebase，或非本仓库已审线）\n"
+done <<EOF
+$PUSH_SPECS
+EOF
+
+# 无 refspec（人工直跑 hook / git 未传 stdin）→ 回落 HEAD 校验，保持旧行为
+if [ "$checked" -eq 0 ] && [ "$blocked" -eq 0 ]; then
+  HEAD_SHA=$(git rev-parse HEAD)
+  if [ "$LAST_REVIEWED" = "$HEAD_SHA" ]; then
+    exit 0
+  fi
+  blocked=1
+  if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
+    blocked_list="${blocked_list}   - (HEAD 回落) $(echo "$HEAD_SHA" | cut -c1-7)（有未审 commit）\n"
+  else
+    blocked_list="${blocked_list}   - (HEAD 回落) $(echo "$HEAD_SHA" | cut -c1-7)（与审查记录无祖先关系）\n"
+  fi
+fi
+
+if [ "$blocked" -eq 0 ]; then
   exit 0
 fi
 
-# HEAD 有新未审查 commit（LAST_REVIEWED 是 HEAD 的祖先）
-if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
+# ─── 阻断 ────────────────────────────────────────────────────
+echo ""
+echo "❌ 推送阻断：本次推送含未经 @吐槽猫 review 的 commit"
+echo ""
+echo "   最后审查: $(echo "$LAST_REVIEWED" | cut -c1-7)  (.push-gate)"
+printf "%b" "$blocked_list"
+if [ -n "$ok_list" ]; then
   echo ""
-  echo "❌ 推送阻断：HEAD 有新 commit 未经 @吐槽猫 review"
-  echo ""
-  echo "   最后审查: $(git rev-parse --short "$LAST_REVIEWED")"
-  echo "   当前 HEAD: $(git rev-parse --short "$HEAD_SHA")"
-  echo ""
-  echo "   审查通过后运行: git rev-parse HEAD > .push-gate"
-  echo "   紧急绕过: git push --no-verify"
-  echo ""
-
-  # 自动补投滞留交接文档（不重新生成范围版——投递按 commit SHA 幂等）
-  deliver_pending
-
-  exit 1
+  echo "   （另已放行：）"
+  printf "%b" "$ok_list"
 fi
+echo ""
+echo "   审查通过后运行: git rev-parse HEAD > .push-gate"
+echo "   紧急绕过: git push --no-verify"
+echo ""
 
-# LAST_REVIEWED 不是 HEAD 的祖先（reset/rebase 后）
-echo ""
-echo "⚠️  审查记录与当前历史不一致（可能发生了 reset/rebase）。"
-echo "   如当前 HEAD 已经过审查，运行: git rev-parse HEAD > .push-gate"
-echo ""
-exit 0
+# 自动补投滞留交接文档（不重新生成范围版——投递按 commit SHA 幂等）
+deliver_pending
+
+exit 1
