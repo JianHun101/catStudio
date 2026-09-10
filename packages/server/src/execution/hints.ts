@@ -8,6 +8,37 @@
  */
 
 import { agents as agentsRepo } from '../db/repository/index.js'
+import {
+  REVIEW_VERDICT_MARKERS,
+  escapeRegExpLiteral,
+  reviewMarkerLabel,
+} from '../eval/review-verdict-markers.js'
+import type { ReviewVerdictMarker } from '../eval/review-verdict-markers.js'
+
+/**
+ * 取**最后出现**的判词标记（审查结论总在消息末尾，正文可能引用/讨论这些标记）。
+ *
+ * 匹配**语义**与 `eval/verdict-parser.ts` 的行首锚定 + A/B 分级**不同源**
+ * （既有裁决，勿再按同语义对齐）——此处只有「最后出现者胜」一条规则。
+ * 共享的只是**字符串集**（`review-verdict-markers.ts`，T-L）。
+ *
+ * emoji 与后缀之间允许空白：`⚠️ 建议修改` 与 `⚠️建议修改` 视觉同形必须同判
+ * （T-L 根因——带空格时此处 `lastIndexOf` 落空，静默降级为「未给出明确结论」）。
+ */
+function findLastVerdictMarker(content: string): ReviewVerdictMarker | null {
+  let last: { pos: number; marker: ReviewVerdictMarker } | null = null
+  for (const marker of REVIEW_VERDICT_MARKERS) {
+    const re = new RegExp(
+      `${escapeRegExpLiteral(marker.emoji)}\\s*${escapeRegExpLiteral(marker.suffix)}`,
+      'g'
+    )
+    for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+      // 严格大于：位置相同时保持标记表顺序（与旧 lastIndexOf 比较口径一致）
+      if (!last || m.index > last.pos) last = { pos: m.index, marker }
+    }
+  }
+  return last?.marker ?? null
+}
 
 /**
  * 计算用户消息的受众标签。
@@ -88,26 +119,16 @@ export function buildReviewLoopHint(
     const mentions: string[] = m.mentions ? JSON.parse(m.mentions) : []
     if (!mentions.includes(agent.name)) continue
 
-    // 找到审查者的消息。用 lastIndexOf 检测结论标记（而非 includes），
-    // 因为审查正文可能引用/讨论这些标记，但审查结论总在消息末尾。
-    // 取三个标记中最后出现者作为实际结论。
-    const CONCLUSION_MARKERS = ['✅可合并', '💬仅评论', '⚠️建议修改', '❌需重做']
-    let conclusionMarker: string | null = null
-    let conclusionPos = -1
-    for (const marker of CONCLUSION_MARKERS) {
-      const pos = m.content.lastIndexOf(marker)
-      if (pos > conclusionPos) {
-        conclusionPos = pos
-        conclusionMarker = marker
-      }
-    }
+    // 找到审查者的消息。取**最后出现**的判词标记作为实际结论——
+    // 审查正文可能引用/讨论这些标记，但审查结论总在消息末尾。
+    const marker = findLastVerdictMarker(m.content)
 
     // 审查通过（✅ 明确通过 / 💬 非阻断观察项，均不要求返工）→ 不注入循环指令
-    if (conclusionMarker === '✅可合并' || conclusionMarker === '💬仅评论') return null
+    if (marker && (marker.verdict === 'approve' || marker.verdict === 'comment')) return null
 
     // 审查未通过（⚠️建议修改 / ❌需重做 / 无明确结论）→ 注入循环指令
     const reviewerName = senderRow.name
-    const verdict = conclusionMarker || '未给出明确结论'
+    const verdict = marker ? reviewMarkerLabel(marker) : '未给出明确结论'
     return [
       `[系统指令] ${reviewerName} 的审查结论为 ${verdict}。`,
       `你必须逐项处理反馈，修正完成后在行首独占一行 @${reviewerName} 继续审查循环。`,

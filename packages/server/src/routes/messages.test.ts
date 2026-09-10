@@ -81,6 +81,12 @@ describe('Message Routes', () => {
   })
 
   describe('GET /api/messages/:id/executor（实施者反查，handoff-gen 动态补填人）', () => {
+    // T-I：链锚在**消息行**上，与执行行的 trace_id 是**两个值**——本组 fixture 刻意
+    // 让两者不同（ANCHOR ≠ TRACE），把"回传的是哪一个"变成可判定的断言。
+    const UUID = '6cfecca8-ba78-4039-a12c-71313afd29cd'
+    const ANCHOR = 'anchor-msg-1' // 该消息的 messages.task_id（链锚）
+    const TRACE = 'trace-exec-1' // 该轮执行 execution_logs.trace_id（当轮追踪，≠ 锚）
+
     const insertFixture = (triggeredBy: string) => {
       const db = getDb()
       db.prepare(
@@ -92,23 +98,28 @@ describe('Message Routes', () => {
          VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
       ).run('agent-ds', 'ds猫')
       db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES (?, 'session-exec-1', 'user', '派活', '[]', ?)`
+      ).run(triggeredBy, ANCHOR)
+      db.prepare(
         `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, trace_id)
          VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?)`
-      ).run('log-1', 'session-exec-1', 'agent-ds', triggeredBy, 'trace-exec-1')
+      ).run('log-1', 'session-exec-1', 'agent-ds', triggeredBy, TRACE)
     }
 
     it('returns executor agentName for a message with execution log', async () => {
-      insertFixture('6cfecca8-ba78-4039-a12c-71313afd29cd')
+      insertFixture(UUID)
       const res = await app.inject({
         method: 'GET',
-        url: '/api/messages/6cfecca8-ba78-4039-a12c-71313afd29cd/executor',
+        url: `/api/messages/${UUID}/executor`,
       })
       expect(res.statusCode).toBe(200)
       const body = JSON.parse(res.body)
       expect(body.agentId).toBe('agent-ds')
       expect(body.agentName).toBe('ds猫')
-      // E3 接线：taskId = 命中执行行的 trace_id（审查链投递 payload 同源反查）
-      expect(body.taskId).toBe('trace-exec-1')
+      // T-I：taskId = **该消息的链锚**（messages.task_id），不是执行行的当轮 trace_id
+      expect(body.taskId).toBe(ANCHOR)
+      expect(body.taskId).not.toBe(TRACE) // 阴性对照：旧实现回传的正是 TRACE
     })
 
     it('returns 404 when no execution log exists for the message', async () => {
@@ -121,7 +132,7 @@ describe('Message Routes', () => {
 
     it('returns the latest execution when multiple agents were triggered', async () => {
       const db = getDb()
-      insertFixture('6cfecca8-ba78-4039-a12c-71313afd29cd')
+      insertFixture(UUID)
       db.prepare(
         `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
          VALUES (?, ?, '😼', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
@@ -129,10 +140,10 @@ describe('Message Routes', () => {
       db.prepare(
         `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
          VALUES (?, ?, ?, ?, 'failed', datetime('now', '+1 minute'))`
-      ).run('log-2', 'session-exec-1', 'agent-reviewer', '6cfecca8-ba78-4039-a12c-71313afd29cd')
+      ).run('log-2', 'session-exec-1', 'agent-reviewer', UUID)
       const res = await app.inject({
         method: 'GET',
-        url: '/api/messages/6cfecca8-ba78-4039-a12c-71313afd29cd/executor',
+        url: `/api/messages/${UUID}/executor`,
       })
       expect(res.statusCode).toBe(200)
       const body = JSON.parse(res.body)
@@ -140,7 +151,7 @@ describe('Message Routes', () => {
     })
 
     it('?commit= 按 commit_hash 精确命中各自实施者（同 uuid 双执行者各 commit 各命中各）', async () => {
-      const uuid = '6cfecca8-ba78-4039-a12c-71313afd29cd'
+      const uuid = UUID
       const hashA = 'a'.repeat(40)
       const hashB = 'b'.repeat(40)
       const db = getDb()
@@ -165,8 +176,9 @@ describe('Message Routes', () => {
       })
       expect(resA.statusCode).toBe(200)
       expect(JSON.parse(resA.body).agentName).toBe('ds猫')
-      // E3 接线：taskId 随 commit 精确匹配各自执行行的 trace_id（与 executor 同源）
-      expect(JSON.parse(resA.body).taskId).toBe('trace-ds')
+      // T-I：taskId = 链锚（同一条链上两个 commit 回传**同一个锚**），不是各行的 trace_id
+      expect(JSON.parse(resA.body).taskId).toBe(ANCHOR)
+      expect(JSON.parse(resA.body).taskId).not.toBe('trace-ds')
 
       const resB = await app.inject({
         method: 'GET',
@@ -174,11 +186,12 @@ describe('Message Routes', () => {
       })
       expect(resB.statusCode).toBe(200)
       expect(JSON.parse(resB.body).agentName).toBe('flash猫')
-      expect(JSON.parse(resB.body).taskId).toBe('trace-flash')
+      expect(JSON.parse(resB.body).taskId).toBe(ANCHOR)
+      expect(JSON.parse(resB.body).taskId).not.toBe('trace-flash')
     })
 
     it('?commit= 查不到（老 commit 未写回 hash）时回退 uuid 逻辑', async () => {
-      const uuid = '6cfecca8-ba78-4039-a12c-71313afd29cd'
+      const uuid = UUID
       insertFixture(uuid) // log-1：无 commit_hash
       const res = await app.inject({
         method: 'GET',
@@ -188,8 +201,94 @@ describe('Message Routes', () => {
       const body = JSON.parse(res.body)
       expect(body.agentId).toBe('agent-ds')
       expect(body.agentName).toBe('ds猫')
-      // 回退 uuid 逻辑时 taskId 同步取 uuid 路径命中行的 trace_id
-      expect(body.taskId).toBe('trace-exec-1')
+      // 回退路径同样回传链锚（锚源与反查路径无关——两条路径都从触发消息行取）
+      expect(body.taskId).toBe(ANCHOR)
+    })
+
+    it('消息行缺失（存量 fixture）→ 仍 200，taskId 归 null（加 JOIN 不改失败语义，T-I 验收②）', async () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES ('session-orphan', 'debug', '[]', datetime('now'), datetime('now'))`
+      ).run()
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
+         VALUES ('agent-orphan', '孤猫', '🐈', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
+      ).run()
+      // 执行行在，但它指向的消息**不在** messages 表（LEFT JOIN 的边界）
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, trace_id)
+         VALUES ('log-orphan', 'session-orphan', 'agent-orphan', 'no-such-message', 'completed', datetime('now'), 'trace-orphan')`
+      ).run()
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/messages/no-such-message/executor',
+      })
+      expect(res.statusCode).toBe(200) // 有执行行 ⇒ 不是 404（404 判据仍是"有无执行行"）
+      expect(JSON.parse(res.body)).toEqual({
+        agentId: 'agent-orphan',
+        agentName: '孤猫',
+        taskId: null,
+      })
+    })
+
+    it('端到端两跳（T-I 验收③）：显式锚投递 → commit 写回 → /executor 回传锚 → 下一跳锚不换', async () => {
+      const HOP1 = '2b9d6d4c-0000-4000-8000-000000000a01'
+      const CHAIN_ANCHOR = 'anchor-chain-1'
+      const ROUND_TRACE = 'trace-round-1'
+      const sha = 'f'.repeat(40)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
+         VALUES ('session-two-hop', 'debug', '[]', datetime('now'), datetime('now'))`
+      ).run()
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules, role)
+         VALUES ('agent-hop', '接棒猫', '🐈', 'prompt', 'claude', 'model', 'key', '', 'high', '[]', 'implementer')`
+      ).run()
+      // 第 1 跳：显式锚投递（messages.task_id = CHAIN_ANCHOR），该轮执行另有一个 trace_id
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES (?, 'session-two-hop', 'user', '派活', '[]', ?)`
+      ).run(HOP1, CHAIN_ANCHOR)
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, trace_id)
+         VALUES ('log-hop', 'session-two-hop', 'agent-hop', ?, 'running', datetime('now'), ?)`
+      ).run(HOP1, ROUND_TRACE)
+
+      // 产出 commit → 写回执行行
+      const wrote = await app.inject({
+        method: 'POST',
+        url: `/api/messages/${HOP1}/commit-hash`,
+        payload: { commitHash: sha },
+      })
+      expect(JSON.parse(wrote.body)).toEqual({ ok: true, updated: 1 })
+
+      // 第 2 跳的锚 = /executor 回传值（handoff-gen 就是这么用的）
+      const exec = await app.inject({
+        method: 'GET',
+        url: `/api/messages/${HOP1}/executor?commit=${sha}`,
+      })
+      const nextAnchor = JSON.parse(exec.body).taskId as string
+      expect(nextAnchor).toBe(CHAIN_ANCHOR)
+      expect(nextAnchor).not.toBe(ROUND_TRACE) // 阴性对照：旧实现回传 ROUND_TRACE
+
+      // 拿它当锚投下一跳 → 落库锚仍等于第 1 跳的锚（链内锚不变，spec 头号目标）
+      const hop2 = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: {
+          sessionId: 'session-two-hop',
+          content: '下一跳投递',
+          mentions: ['接棒猫'],
+          taskId: nextAnchor,
+        },
+      })
+      expect(hop2.statusCode).toBe(201)
+      const row = db
+        .prepare(`SELECT task_id FROM messages WHERE id = ?`)
+        .get(JSON.parse(hop2.body).messageId) as { task_id: string }
+      expect(row.task_id).toBe(CHAIN_ANCHOR)
     })
   })
 
@@ -240,6 +339,7 @@ describe('Message Routes', () => {
 
     it('带 agentId 精确命中自己的 running 行——双 running 各 commit 各刷各，无覆盖无错投（eae5a5e 竞态根治）', async () => {
       const uuid = '553bbc08-3819-4d75-9499-f23c6eb1282f'
+      const DUAL_ANCHOR = 'anchor-dual-exec'
       const hashA = 'a'.repeat(40)
       const hashB = 'b'.repeat(40)
       const db = getDb()
@@ -247,6 +347,11 @@ describe('Message Routes', () => {
         `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at)
          VALUES (?, ?, '[]', datetime('now'), datetime('now'))`
       ).run('session-exec-2', 'debug')
+      // T-I：链锚落在消息行上（两条执行行共用同一条触发消息 ⇒ 同一个锚）
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES (?, 'session-exec-2', 'user', '派双单', '[]', ?)`
+      ).run(uuid, DUAL_ANCHOR)
       db.prepare(
         `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
          VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
@@ -301,11 +406,12 @@ describe('Message Routes', () => {
         method: 'GET',
         url: `/api/messages/${uuid}/executor?commit=${hashA}`,
       })
-      // 该 fixture 未写 trace_id（存量行 DEFAULT ''）→ taskId 归 null（已知噪声契约）
+      // T-I：两条执行行**同一条链**（同一个触发消息）⇒ taskId 同为该消息的锚；
+      // 与各自执行行的 trace_id（此 fixture 未写，DEFAULT ''）无关
       expect(JSON.parse(execA.body)).toEqual({
         agentId: 'agent-ds',
         agentName: 'ds猫',
-        taskId: null,
+        taskId: DUAL_ANCHOR,
       })
       const execB = await app.inject({
         method: 'GET',
@@ -314,7 +420,7 @@ describe('Message Routes', () => {
       expect(JSON.parse(execB.body)).toEqual({
         agentId: 'agent-flash',
         agentName: 'flash猫',
-        taskId: null,
+        taskId: DUAL_ANCHOR,
       })
     })
 
@@ -425,8 +531,15 @@ describe('Message Routes', () => {
       ).run(id, 'rest-test')
     }
 
+    // T-F 之后 REST 注入通道 = **agent 入口**：投递必须带链锚（缺 → 400）。
+    // 本组用例测的是图片守卫 / 会话路由，锚取固定值且不参与断言——补锚是**契约适配**，
+    // 不是绕过（缺锚行为另有专门用例覆盖，见 connectors/ingest.test.ts 主闸组）。
     const postMessage = (payload: Record<string, unknown>) =>
-      app.inject({ method: 'POST', url: '/api/messages', payload })
+      app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { taskId: 'anchor-rest-fixture', ...payload },
+      })
 
     const lastStoredImages = (sessionId: string): string[] => {
       const row = getDb()
@@ -467,6 +580,7 @@ describe('Message Routes', () => {
             content: '防滥用',
             mentions: [],
             images: ['data:image/png;base64,small', oversized],
+            taskId: 'anchor-rest-fixture', // T-F：REST = agent 入口，缺锚 400（同 postMessage 注释）
           },
         })
         expect(res.statusCode).toBe(201)
@@ -521,8 +635,15 @@ describe('Message Routes', () => {
         .run(id, sessionId)
     }
 
+    // T-F 之后 REST 注入通道 = **agent 入口**：投递必须带链锚（缺 → 400）。
+    // 本组用例测的是图片守卫 / 会话路由，锚取固定值且不参与断言——补锚是**契约适配**，
+    // 不是绕过（缺锚行为另有专门用例覆盖，见 connectors/ingest.test.ts 主闸组）。
     const postMessage = (payload: Record<string, unknown>) =>
-      app.inject({ method: 'POST', url: '/api/messages', payload })
+      app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { taskId: 'anchor-rest-fixture', ...payload },
+      })
 
     it('AC4: 发往已交接旧会话 → 消息落子会话，响应带 redirectedTo', async () => {
       insertSession('old-session')
@@ -593,6 +714,7 @@ describe('Message Routes', () => {
           sessionId: 'session-restart-isolate',
           content: '【重启请求】原因：测试重启',
           mentions: [],
+          taskId: 'anchor-restart-fixture', // T-F：REST = agent 入口，缺锚 400
         },
       })
 
@@ -613,6 +735,7 @@ describe('Message Routes', () => {
           sessionId: 'session-restart-isolate',
           content: '【重启请求】原因：测试重启',
           mentions: [],
+          taskId: 'anchor-restart-fixture', // T-F：REST = agent 入口，缺锚 400
         },
       })
 
@@ -621,6 +744,82 @@ describe('Message Routes', () => {
       const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8')) as any
       expect(req.state).toBe('pending')
       expect(req.sessionId).toBe('session-restart-isolate')
+    })
+  })
+
+  // T-F 入口主闸：REST 注入通道 = agent 入口（前端走 socketio，不受此限）。
+  // 这一组验的是**路由接线**（origin/chainType 是否真透传到 ingest），行为本身在
+  // connectors/ingest.test.ts 覆盖——两处不是重复：那里测判据，这里测接对了没有。
+  describe('POST /api/messages（T-F 投递契约主闸）', () => {
+    const SESSION = 'session-gate'
+
+    const seed = () => {
+      getDb()
+        .prepare(
+          `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+           VALUES ('agent-rev', '吐槽猫', '🐱', 'p', 'deepseek', 'm', 'k', 'reviewer')`
+        )
+        .run()
+      getDb()
+        .prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 'gate', '["agent-rev"]')`)
+        .run(SESSION)
+    }
+
+    it('REST 缺 taskId → 400 缺链锚（agent 入口强制锚）', async () => {
+      seed()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { sessionId: SESSION, content: '投递', mentions: [] },
+      })
+      expect(res.statusCode).toBe(400)
+      expect(JSON.parse(res.body).error).toContain('缺链锚')
+    })
+
+    it('REST 审查类缺 chainType → 400；补上 chainType 后 201（接线正确）', async () => {
+      seed()
+      const base = {
+        sessionId: SESSION,
+        content: '请审查',
+        mentions: ['吐槽猫'],
+        taskId: 'anchor-gate',
+      }
+      const missing = await app.inject({ method: 'POST', url: '/api/messages', payload: base })
+      expect(missing.statusCode).toBe(400)
+      expect(JSON.parse(missing.body).error).toContain('chainType')
+
+      const ok = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { ...base, chainType: 'followup' },
+      })
+      expect(ok.statusCode).toBe(201)
+    })
+
+    it('REST chainType 非法值 → 400 独立文案（不把「拼错」报成「没给」，N-4）', async () => {
+      seed()
+      const payload = {
+        sessionId: SESSION,
+        content: '请审查',
+        mentions: ['吐槽猫'],
+        taskId: 'anchor-gate',
+        chainType: 'First', // 大小写拼错：旧实现静默归一为 undefined → 报「缺 chainType」
+      }
+      const res = await app.inject({ method: 'POST', url: '/api/messages', payload })
+      expect(res.statusCode).toBe(400)
+      const err = JSON.parse(res.body).error as string
+      expect(err).toContain('First') // 文案里回显非法值，调用方一眼看出拼错
+      expect(err).toContain('非法')
+      expect(err).not.toContain('缺') // 区分性：不是「缺 chainType」那条文案
+
+      // 对照：真正的「没给」仍走「缺 chainType」文案（两条文案不可混同）
+      const missing = await app.inject({
+        method: 'POST',
+        url: '/api/messages',
+        payload: { ...payload, chainType: undefined },
+      })
+      expect(missing.statusCode).toBe(400)
+      expect(JSON.parse(missing.body).error).toContain('缺 chainType')
     })
   })
 })

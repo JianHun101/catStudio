@@ -344,6 +344,9 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           mentions: data.mentions || [],
           images: data.images,
           taskId: data.taskId,
+          // T-F 入口主闸：前端 SEND_MESSAGE = 人类入口（用户消息天然是链首轮）→ 允许空锚，
+          // 不受 agent 投递的锚必填约束。
+          origin: 'human',
           saveMemory: true,
         })
         // ack 回传（C5）：成功带服务端生成的 messageId（客户端只消费不生成 id，安全性第一）；

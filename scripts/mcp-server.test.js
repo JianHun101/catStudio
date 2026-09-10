@@ -12,7 +12,15 @@
  * 不放 hook（钩子断护栏不能跟着断，hooks 根修同思路）。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  existsSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,11 +56,11 @@ import {
  * 读 `skills/` 下任意仓库源文件（静态源断言用；路径由本文件位置推导，不依赖 cwd）。
  * 只读真实仓库单源 `skills/`，不读测试内快照常量——断言守的必须是技能/模板本体。
  */
+/** skills/ 活源根（路径由本文件位置推导，不依赖 cwd） */
+const SKILLS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'skills')
+
 function readSkillsFile(...segments) {
-  return readFileSync(
-    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'skills', ...segments),
-    'utf8'
-  )
+  return readFileSync(resolve(SKILLS_ROOT, ...segments), 'utf8')
 }
 
 /** 读技能正文（ADR 0014 §3 零路由不变量守卫用） */
@@ -690,21 +698,32 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
   // 现在改从 SKILL.md 正文解析引用清单——正文换引用即自动纳入。
   // 边界：只取**一级**引用（技能正文直接点名的）。ref 之间再互相引用不在本守卫范围
   // （如模板引 shared-rules.md，那是共享规则层、按设计带路由，不在 §3 技能正文约束内）。
-  it('request-review 引用的每个共享 ref 无 @ 行 / 无中文路由黑名单（F1 回归守卫·枚举派生）', () => {
-    const cited = [
-      ...new Set(
-        [...readSkillDoc('request-review').matchAll(/(?:skills\/)?refs\/([a-z0-9-]+\.md)/g)].map(
-          (m) => m[1]
-        )
-      ),
-    ]
-    // 解析不出任何引用 = 守卫失效（改名/换写法），必须红
-    expect(cited.length).toBeGreaterThan(0)
-    for (const name of cited) {
+  it('每个技能引用的共享 ref 无 @ 行 / 无中文路由黑名单（F1 回归守卫·枚举派生·全技能）', () => {
+    // T-H④（原 T-D N7）：原先只枚举 `request-review` **一个**技能的引用清单，于是
+    // 另一个引 refs 的技能（`receive-review` → `refs/review-standards.md`）**零覆盖**
+    // ——「ref 里藏路由行」这个形状的洞只堵了一半。改为枚举 `skills/*/SKILL.md` 全部。
+    const skillNames = readdirSync(SKILLS_ROOT, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name !== 'refs' && d.name !== 'catstudy')
+      .map((d) => d.name)
+      .filter((name) => existsSync(join(SKILLS_ROOT, name, 'SKILL.md')))
+    // 枚举面为空 = 守卫失效（目录改名/换布局），必须红
+    expect(skillNames.length).toBeGreaterThan(0)
+
+    const cited = new Map() // ref 文件名 → 引用它的技能（报错信息用）
+    for (const skill of skillNames) {
+      const text = readSkillDoc(skill)
+      for (const m of text.matchAll(/(?:skills\/)?refs\/([a-z0-9-]+\.md)/g)) {
+        if (!cited.has(m[1])) cited.set(m[1], skill)
+      }
+    }
+    // 解析不出任何引用同样是守卫失效
+    expect(cited.size).toBeGreaterThan(0)
+
+    for (const [name, skill] of cited) {
       const text = readSkillsFile('refs', name)
-      expect(text, `${name} 含 @`).not.toContain('@')
+      expect(text, `${name}（被 ${skill} 引用）含 @`).not.toContain('@')
       for (const re of ROUTING_PATTERNS) {
-        expect(re.test(text), `${name} 命中路由黑名单 ${re}`).not.toBe(true)
+        expect(re.test(text), `${name}（被 ${skill} 引用）命中路由黑名单 ${re}`).not.toBe(true)
       }
     }
   })

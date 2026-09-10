@@ -4,6 +4,7 @@
  * 判据三态：有归属（agent 提交）→ 静默；无归属（用户手动提交）→ 投递；
  * 判据查不动 → 投递（降级语义：宁可多投不可漏投）。
  */
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import { decideHookDelivery, parseArgs } from './handoff-gen.mjs'
 
@@ -83,6 +84,16 @@ describe('parseArgs — 未知参数拒绝（必改 2）', () => {
     expect(() => parseArgs(['--no-post=1'])).toThrow(/不接受值/)
   })
 
+  // T-H / N5：取值型 flag 的值被后随 flag 贪吃（`--cwd --no-post` → {cwd:'--no-post'}）。
+  // 旧行为的实害不是"值错了"——是**后随 flag 被静默吞掉**（少传一个 flag），且畸形值
+  // 要等撞上后续 git 校验（`不是 git 仓库`）才暴露，报错点离病因很远。取值以 `-`
+  // 开头一律判参数错误——路径与 sha 都不长这样。
+  it('取值型 flag 的值是后随 flag（--cwd --no-post）→ 抛错，不静默吞掉后面那个 flag', () => {
+    expect(() => parseArgs(['--cwd', '--no-post'])).toThrow(/不能以 - 开头/)
+    expect(() => parseArgs(['--fallback-sha', '--cwd=/tmp'])).toThrow(/不能以 - 开头/)
+    expect(() => parseArgs(['--cwd=--no-post'])).toThrow(/不能以 - 开头/)
+  })
+
   it('--range（已移除）空格形式也抛错（不缺值时也一样）', () => {
     expect(() => parseArgs(['--range', 'a..b'])).toThrow(/已移除/)
   })
@@ -106,5 +117,25 @@ describe('parseArgs — 未知参数拒绝（必改 2）', () => {
     expect(() => parseArgs([])).not.toThrow()
     expect(() => parseArgs(['--gate-deliver'])).not.toThrow()
     expect(() => parseArgs(['--fallback-sha=' + 'a'.repeat(40), '--cwd=/tmp'])).not.toThrow()
+  })
+})
+
+describe('handoff-gen.e2e.mjs — 临时仓库不得建在仓库树内（静态源断言）', () => {
+  // 回归模式：有人新加一条用例，又把临时 git 仓库写成 join(ROOT, '.handoff-test-x')。
+  // 那样它既不在 .gitignore、也多半不会被删——并发的 `git add -A`（auto-commit）
+  // 会把它整棵扫进提交。本仓库已因此踩过两次（第二次在审查者点名后复发）。
+  // 断言源码而不是断言运行时：运行时即使漏删，用例自己也可能看不见残留。
+  // 只断言**代码**：e2e 的注释里正记录着这个模式（那段历史说明），不剥注释会让
+  // 守卫被自己的说明文字打红——第一次跑就是这么红的。
+  const source = readFileSync(new URL('./handoff-gen.e2e.mjs', import.meta.url), 'utf-8')
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+  it('不出现 join(ROOT, …)——临时仓库一律挂系统临时目录', () => {
+    expect(code).not.toContain('join(ROOT, ')
+  })
+
+  it('私有根由 os.tmpdir() 派生（根修本身在位，而非只是恰好没写 ROOT）', () => {
+    expect(source).toContain("from 'node:os'")
+    expect(source).toMatch(/mkdtempSync\(join\(tmpdir\(\),/)
   })
 })

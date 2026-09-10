@@ -8,8 +8,9 @@
  */
 
 import { execSync } from 'node:child_process'
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -17,6 +18,8 @@ import {
   extractCommitUuid,
   resolveCommitSessionId,
   resolveExecutorName,
+  probeAttribution,
+  decideHookDelivery,
   tryPostToCatstudy,
   buildHandoffMessage,
   runHandoff,
@@ -63,6 +66,9 @@ function assertNotContains(haystack, needle, msg) {
   }
 }
 
+/** 链锚形状断言用：`randomUUID()` 的 v4 形态。投递载荷有没有锚，就靠它分辨。 */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 /** 启动一个临时 HTTP stub server（127.0.0.1 随机端口），用于测试反查投递目标 */
 function startStubServer(handler) {
   return new Promise((resolve) => {
@@ -75,10 +81,16 @@ function startStubServer(handler) {
 
 // ─── Setup: 创建临时 git 仓库 ───────────────────────────────
 
-const TMP = join(ROOT, '.handoff-test-tmp')
-if (existsSync(TMP)) {
-  rmSync(TMP, { recursive: true, force: true })
-}
+// 所有测试仓库都建在**系统临时目录**下的一个私有根里，绝不建在仓库树内。
+// 起因：本文件此前用 `join(ROOT, '.handoff-test-*')` 在仓库根建临时仓库，而
+// 那些目录既不在 .gitignore 里、清理又不全（模块级的 EMPTY_TMP / SNAPSHOT_TMP /
+// NO_POST_TMP / RANGE_TMP 从不删除）——任何并发的 `git add -A`（auto-commit）
+// 都会把它们扫进提交。本仓库已因此踩过两次。改到 os.tmpdir() 是根修：
+// 临时产物不该出现在仓库树里，于是"清理不全"也就不再是污染源。
+// 注意：不补 .gitignore 兜底——那会掩盖同类回归（目录再出现时不再刺眼）。
+const TEST_BASE = mkdtempSync(join(tmpdir(), 'handoff-e2e-'))
+
+const TMP = join(TEST_BASE, 'tmp')
 mkdirSync(TMP, { recursive: true })
 
 function git(cmd) {
@@ -430,7 +442,7 @@ console.log('')
 console.log('📦 测试组 6: 边界情况')
 
 // 6a: 无改动的仓库
-const EMPTY_TMP = join(ROOT, '.handoff-test-empty')
+const EMPTY_TMP = join(TEST_BASE, '.handoff-test-empty')
 if (existsSync(EMPTY_TMP)) rmSync(EMPTY_TMP, { recursive: true, force: true })
 mkdirSync(EMPTY_TMP, { recursive: true })
 execSync('git init', { cwd: EMPTY_TMP, stdio: 'pipe' })
@@ -449,7 +461,7 @@ try {
 
 // 6b: catstudy 自动快照 commit → 有代码改动时不应跳过，应正常生成 handoff
 // （死循环已由 git-utils.ts gitCommit() 自然阻断——无改动时 commit 失败不触发 hook）
-const SNAPSHOT_TMP = join(ROOT, '.handoff-test-snapshot')
+const SNAPSHOT_TMP = join(TEST_BASE, '.handoff-test-snapshot')
 if (existsSync(SNAPSHOT_TMP)) rmSync(SNAPSHOT_TMP, { recursive: true, force: true })
 mkdirSync(SNAPSHOT_TMP, { recursive: true })
 execSync('git init', { cwd: SNAPSHOT_TMP, stdio: 'pipe' })
@@ -519,7 +531,7 @@ console.log('')
 console.log('📦 测试组 8: --no-post 标志')
 
 // 8a: --no-post 时不尝试连接服务器，文件留在磁盘
-const NO_POST_TMP = join(ROOT, '.handoff-test-nopost')
+const NO_POST_TMP = join(TEST_BASE, '.handoff-test-nopost')
 if (existsSync(NO_POST_TMP)) rmSync(NO_POST_TMP, { recursive: true, force: true })
 mkdirSync(NO_POST_TMP, { recursive: true })
 
@@ -590,7 +602,7 @@ function runCliExpectExit(args, opts = {}) {
 }
 
 // 构建: 3 个 commit（基线 → 改 a.ts → 新增 b.ts）
-const RANGE_TMP = join(ROOT, '.handoff-test-range')
+const RANGE_TMP = join(TEST_BASE, '.handoff-test-range')
 if (existsSync(RANGE_TMP)) rmSync(RANGE_TMP, { recursive: true, force: true })
 mkdirSync(RANGE_TMP, { recursive: true })
 execSync('git init', { cwd: RANGE_TMP, stdio: 'pipe' })
@@ -698,7 +710,7 @@ console.log('📦 测试组 10: commit uuid 反查会话')
   })
   const serverUrl = `http://127.0.0.1:${port}`
 
-  const LOOKUP_TMP = join(ROOT, '.handoff-test-lookup')
+  const LOOKUP_TMP = join(TEST_BASE, '.handoff-test-lookup')
   if (existsSync(LOOKUP_TMP)) rmSync(LOOKUP_TMP, { recursive: true, force: true })
   mkdirSync(LOOKUP_TMP, { recursive: true })
   execSync('git init', { cwd: LOOKUP_TMP, stdio: 'pipe' })
@@ -786,7 +798,7 @@ console.log('📦 测试组 11: 投递瞬态重试')
   const uuid = '77c0e5b4-3d14-4f66-bc8e-11ab22cd33dd'
 
   // git 仓库：commit 带 catstudy [uuid] → 反查可命中
-  const RETRY_TMP = join(ROOT, '.handoff-test-retry')
+  const RETRY_TMP = join(TEST_BASE, '.handoff-test-retry')
   if (existsSync(RETRY_TMP)) rmSync(RETRY_TMP, { recursive: true, force: true })
   mkdirSync(RETRY_TMP, { recursive: true })
   execSync('git init', { cwd: RETRY_TMP, stdio: 'pipe' })
@@ -988,7 +1000,7 @@ console.log('📦 测试组 12: 投递去重')
 
 {
   const uuid = 'aabbccdd-1122-3344-5566-778899aabbcc'
-  const DEDUP_TMP = join(ROOT, '.handoff-test-dedup')
+  const DEDUP_TMP = join(TEST_BASE, '.handoff-test-dedup')
   if (existsSync(DEDUP_TMP)) rmSync(DEDUP_TMP, { recursive: true, force: true })
   mkdirSync(DEDUP_TMP, { recursive: true })
   execSync('git init', { cwd: DEDUP_TMP, stdio: 'pipe' })
@@ -1138,9 +1150,9 @@ async function runInProc(cwd, url, opts = {}) {
   }
 }
 
-/** 建一个带 catstudy [uuid] commit 的临时仓库 */
-function makeUuidRepo(dirName, uuid, files) {
-  const tmp = join(ROOT, dirName)
+/** 建一个临时仓库，HEAD 是一笔给定 message 的提交 */
+function makeCommitRepo(dirName, files, commitMsg) {
+  const tmp = join(TEST_BASE, dirName)
   if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
   mkdirSync(tmp, { recursive: true })
   execSync('git init', { cwd: tmp, stdio: 'pipe' })
@@ -1150,8 +1162,13 @@ function makeUuidRepo(dirName, uuid, files) {
     writeFileSync(join(tmp, fp), content, 'utf-8')
   }
   execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
-  execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: tmp, stdio: 'pipe' })
+  execSync(`git commit -m "${commitMsg}"`, { cwd: tmp, stdio: 'pipe' })
   return tmp
+}
+
+/** 建一个带 catstudy [uuid] commit 的临时仓库 */
+function makeUuidRepo(dirName, uuid, files) {
+  return makeCommitRepo(dirName, files, `catstudy [${uuid}]`)
 }
 
 function gitIn(tmp, cmd) {
@@ -1310,7 +1327,7 @@ function gitIn(tmp, cmd) {
 {
   const uuid1 = '13dd0000-0000-4000-8000-000000000001'
   const uuid2 = '13dd0000-0000-4000-8000-000000000002'
-  const TMP13D = join(ROOT, '.handoff-test-prune')
+  const TMP13D = join(TEST_BASE, '.handoff-test-prune')
   if (existsSync(TMP13D)) rmSync(TMP13D, { recursive: true, force: true })
   mkdirSync(TMP13D, { recursive: true })
   execSync('git init', { cwd: TMP13D, stdio: 'pipe' })
@@ -1388,7 +1405,7 @@ function gitIn(tmp, cmd) {
 {
   const uuid2 = '13ee0000-0000-4000-8000-000000000002'
   const uuid3 = '13ee0000-0000-4000-8000-000000000003'
-  const TMP13E = join(ROOT, '.handoff-test-pending')
+  const TMP13E = join(TEST_BASE, '.handoff-test-pending')
   if (existsSync(TMP13E)) rmSync(TMP13E, { recursive: true, force: true })
   mkdirSync(TMP13E, { recursive: true })
   execSync('git init', { cwd: TMP13E, stdio: 'pipe' })
@@ -1470,7 +1487,7 @@ function gitIn(tmp, cmd) {
 {
   const uuidBad = '13ff0000-0000-4000-8000-0000000000ff'
   const uuidOk = '13ff0000-0000-4000-8000-00000000000f'
-  const TMP13F = join(ROOT, '.handoff-test-pending-fatal')
+  const TMP13F = join(TEST_BASE, '.handoff-test-pending-fatal')
   if (existsSync(TMP13F)) rmSync(TMP13F, { recursive: true, force: true })
   mkdirSync(TMP13F, { recursive: true })
   execSync('git init', { cwd: TMP13F, stdio: 'pipe' })
@@ -1530,7 +1547,7 @@ function gitIn(tmp, cmd) {
 
 // 13g: writeState 并发合并语义（基线合并 + 删除权威——2026-08-01 实测并发事故的回归防护）
 {
-  const TMP13G = join(ROOT, '.handoff-test-merge')
+  const TMP13G = join(TEST_BASE, '.handoff-test-merge')
   if (existsSync(TMP13G)) rmSync(TMP13G, { recursive: true, force: true })
   mkdirSync(TMP13G, { recursive: true })
   const shaA = 'a'.repeat(40)
@@ -1565,11 +1582,359 @@ function gitIn(tmp, cmd) {
   console.log('  13g: writeState 并发合并（基线合并 + 删除权威）✅')
 }
 
+// ═══ 测试组 14: 归属判据（T-H ①「任一状态执行行」） ═══════════════════════
+// 本组的存在理由：T-A 的判据源是写回端点的 `updated`（running 命中行数），而
+// e2e 的 stub 从来没有 commit-hash 端点 → writeback 恒失败 → attributed 恒 null
+// → 一律走降级投递。于是**三条判据在 e2e 里全不生效**，测试全绿也不代表判据对。
+// 本组把两个端点都补上，让「静默」这条路径第一次在 e2e 里可断言。
+// T-F 必改 1 追加：组内的 POST stub 镜像真实入口主闸（agent 入口缺 taskId → 400），
+// 且 14b/14c/14e/14f 断言**载荷本体**带锚——上一轮那条「载荷无锚」的缺口在
+// 「无条件 201 + 只数 POST 次数」下恒为绿，本组把它关掉。
+
+/**
+ * 归属场景 stub：写回 `updated`（旧判据源）与 executor（新判据源）各自可配，
+ * 用来构造「两者结论相反」的场景——那正是 T-H ① 的靶心。
+ * @param {number} cfg.updated — 写回响应里的 running 命中行数
+ * @param {'ok'|404|500} cfg.executor — executor 端点行为（'ok' = 存在任一状态执行行）
+ * @param {string|null} [cfg.executorTaskId='task-1'] — executor 回传的 taskId；
+ *        传 null 表示**回传有 agentName 但 trace_id 空**（老库执行行）——自铸锚的另一条来路
+ */
+async function startAttributionStub({
+  uuid,
+  sessionId,
+  updated,
+  executor,
+  executorTaskId = 'task-1',
+}) {
+  const hits = { writeback: 0, executor: 0, post: 0 }
+  const postBodies = []
+  const { server, port } = await startStubServer((req, res) => {
+    const json = (code, obj) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(obj))
+    }
+    if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
+      return json(200, { id: uuid, sessionId, role: 'user' })
+    }
+    if (req.url === `/api/messages/${uuid}/commit-hash` && req.method === 'POST') {
+      hits.writeback++
+      return json(200, { ok: true, updated })
+    }
+    if (req.url.startsWith(`/api/messages/${uuid}/executor`) && req.method === 'GET') {
+      hits.executor++
+      if (executor === 404) return json(404, { error: 'No execution log for this message' })
+      if (executor === 500) return json(500, { error: 'boom' })
+      return json(200, {
+        agentId: 'a-1',
+        agentName: 'ds猫',
+        ...(executorTaskId ? { taskId: executorTaskId } : {}),
+      })
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      return json(200, [])
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      hits.post++
+      let raw = ''
+      req.on('data', (c) => (raw += c))
+      req.on('end', () => {
+        const body = JSON.parse(raw)
+        postBodies.push(body)
+        // 入口主闸**镜像**（T-F 必改 1）：真实 REST 通道固定以 `origin: 'agent'` 摄入，
+        // `ingest.ts` 规则 5 对 agent 入口缺 taskId 一律 400。本 stub 原先是无条件 201，
+        // 于是「载荷无锚」这个缺口在 e2e 里恒不显形——文档照样"投出"、断言照样绿：
+        // 这层假绿正是上一轮没拦住它的直接原因。缺锚即 400 是对真机的忠实模拟。
+        // 注意由此产生的盲区：4xx = fatal 不重试，`hits.post` 在 400 下**同样是 1**，
+        // 所以本组的断言必须落在 `postBodies` 的载荷本体上（只数次数等于没测）。
+        if (!body.taskId) return json(400, { error: '缺链锚：agent 投递必须携带 task_id' })
+        json(201, { ok: true, messageId: 'm-new' })
+      })
+      return
+    }
+    json(404, { error: 'not found' })
+  })
+  return { server, url: `http://127.0.0.1:${port}`, hits, postBodies }
+}
+
+// 14a: 执行**已终态**（写回命中 running 行 = 0，但执行行存在）→ 静默，不多投
+//      这是 T-H ① 的靶心：旧判据源在此判「无归属 → 兜底投递」，返工每次提交都叠一条链。
+{
+  const uuid = '14aa0000-0000-4000-8000-00000000000a'
+  const tmp = makeUuidRepo('.handoff-test-attr-terminal', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14a',
+    updated: 0,
+    executor: 'ok',
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(
+    stub.hits.writeback === 1,
+    `前置：写回应确实发生（实际 ${stub.hits.writeback}）——否则本场景没被构造出来`
+  )
+  // 阴性对照（证明下面那条不是恒真）：本场景写回读数 = 0，而旧判据把「updated=0」
+  // 映射成 attributed=false → decideHookDelivery(false).deliver === true（投递）。
+  // 也就是说：换回旧实现，本场景必然 POST 1 次，断言当场红。
+  assert(
+    decideHookDelivery(0 > 0).deliver === true,
+    '阴性对照：旧判据输入（running 命中 0 → 无归属）在旧实现下会投递'
+  )
+  assert(stub.hits.post === 0, `执行已终态仍有归属 → 应静默（POST 0 次，实际 ${stub.hits.post}）`)
+  assert(stub.hits.executor === 1, `应问一次归属探针（实际 ${stub.hits.executor}）`)
+  assert(stub.postBodies.length === 0, `静默路径不该有载荷（实际 ${stub.postBodies.length} 条）`)
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14a: 执行已终态仍有归属 → 静默（旧判据会多投一条）✅')
+}
+
+// 14b: 真·用户手动提交（该 uuid 从无执行行）→ 兜底投递 1 条
+{
+  const uuid = '14bb0000-0000-4000-8000-00000000000b'
+  const tmp = makeUuidRepo('.handoff-test-attr-manual', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14b',
+    updated: 0,
+    executor: 404,
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.hits.post === 1, `无执行行 = 手动提交 → 应兜底投 1 条（实际 ${stub.hits.post}）`)
+  // 投递路径会**两次**打这个端点：先归属探针、后实施者反查（补填人）。故这里是 ≥1
+  // 而不是 ===1——14a 的静默路径才是「只打探针一次」的干净读数。
+  assert(
+    stub.hits.executor >= 1,
+    `无执行行时也应问过探针（二者同得 updated=0，实际 ${stub.hits.executor} 次）`
+  )
+  // T-F 必改 1 的区分性断言：反查不到执行行 → 载荷必须**自铸锚**。
+  // 为什么必须断载荷本体：stub 现在按 `body.taskId` 缺省返 400，而 4xx = fatal 不重试、
+  // `hits.post` 照样是 1——只数 POST 次数的话，删掉自铸逻辑本用例仍会全绿。
+  assert(stub.postBodies.length === 1, `应投出 1 条载荷（实际 ${stub.postBodies.length}）`)
+  assert(
+    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
+    `反查未命中 → 载荷必须自带链锚（自铸 uuid），实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14b: 真手动提交（无执行行）→ 兜底投 1 条 ✅')
+}
+
+// 14c: 探针查不动（executor 500）→ 一律投递，不静默吞
+{
+  const uuid = '14cc0000-0000-4000-8000-00000000000c'
+  const tmp = makeUuidRepo('.handoff-test-attr-unprobeable', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14c',
+    updated: 0,
+    executor: 500,
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.hits.post === 1, `探针查不动 → 降级一律投递（实际 ${stub.hits.post}）`)
+  assert(
+    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
+    `降级投递同样必须带锚（探针 500 不改变无锚载荷的命运），实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14c: 探针查不动 → 降级投递（不静默吞）✅')
+}
+
+// 14d: 写回已命中 running 行 = 归属的**充分条件** → 静默，且不再花探针那次往返
+{
+  const uuid = '14dd0000-0000-4000-8000-00000000000d'
+  const tmp = makeUuidRepo('.handoff-test-attr-running', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14d',
+    updated: 1,
+    executor: 'ok',
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.hits.post === 0, `写回命中 running 行 → 有归属 → 静默（实际 ${stub.hits.post}）`)
+  assert(
+    stub.hits.executor === 0,
+    `正信号短路：命中 running 行即已确证有归属，不应再问探针（实际 ${stub.hits.executor}）`
+  )
+  assert(stub.postBodies.length === 0, `静默路径不该有载荷（实际 ${stub.postBodies.length} 条）`)
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14d: 写回命中 running 行 → 静默且省掉探针往返 ✅')
+}
+
+// 14e: 用户终端**手动提交**（commit message 无 catstudy [uuid]）→ 兜底投递且自铸锚
+//      这是 T-F 必改 1 的原始病案：无 uuid ⇒ 无源链可反查 ⇒ 载荷原本不带锚 ⇒
+//      入口主闸 400 ⇒ 4xx=fatal 不重试、连 pending 都不留，「手动提交补投通路 100% 死」
+//      （spec D5 / 用户故事 14 整条边界）。无 uuid 反查不出会话，投递目标按既有契约
+//      由 CATSTUDY_SESSION_ID 人工指定——本用例顺带钉住这条契约。
+{
+  const tmp = makeCommitRepo(
+    '.handoff-test-attr-manual-nouuid',
+    { 'a.txt': '1' },
+    'chore: 手动提交'
+  )
+  const stub = await startAttributionStub({
+    uuid: 'unused-no-uuid',
+    sessionId: 'session-14e',
+    updated: 0,
+    executor: 404,
+  })
+
+  const prevUrl = process.env.CATSTUDY_URL
+  const prevSid = process.env.CATSTUDY_SESSION_ID
+  process.env.CATSTUDY_URL = stub.url
+  process.env.CATSTUDY_SESSION_ID = 'session-14e'
+  try {
+    await runHandoff({ cwd: tmp })
+  } finally {
+    if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+    else process.env.CATSTUDY_URL = prevUrl
+    if (prevSid === undefined) delete process.env.CATSTUDY_SESSION_ID
+    else process.env.CATSTUDY_SESSION_ID = prevSid
+  }
+
+  assert(stub.hits.post === 1, `手动提交 → 应兜底投 1 条（实际 ${stub.hits.post}）`)
+  assert(stub.postBodies.length === 1, `应投出 1 条载荷（实际 ${stub.postBodies.length}）`)
+  assert(
+    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
+    `无 uuid 路径必须自铸锚，实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+  )
+  // 阴性对照：无 uuid 时 commitUuid === null ⇒ 归属判据判「无归属 → 投递」，
+  // 与自铸锚是两件事——判"该投"不等于**投得出去**（原缺口正是死在这一步）。
+  assert(
+    decideHookDelivery(null).deliver === true,
+    '阴性对照：无 uuid 路径的归属判据确实判「投」——缺口在载荷无锚，不在判据'
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14e: 手动提交（无 uuid）→ 自铸锚兜底投递 ✅')
+}
+
+// 14f: 执行行**存在但 trace_id 空**（executor 200 有 agentName、无 taskId）→ 自铸锚
+//      走 --fallback-sha 入口（收尾兜底，不跑归属判据）：post-commit 入口下这条路径会被
+//      探针判「有归属 → 静默」，本就到不了投递；而收尾兜底必然要投，锚却取不到
+//      ——「任何无锚载荷一律自铸锚」这条兜底要覆盖的第二种来路。
+{
+  const uuid = '14ff0000-0000-4000-8000-00000000000f'
+  const tmp = makeUuidRepo('.handoff-test-attr-empty-trace', uuid, { 'a.txt': '1' })
+  const headSha = gitIn(tmp, 'rev-parse HEAD')
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14f',
+    updated: 0,
+    executor: 'ok',
+    executorTaskId: null, // 老库执行行：有执行、trace_id 列空
+  })
+  await runInProc(tmp, stub.url, { fallbackSha: headSha })
+
+  assert(
+    stub.hits.executor === 1,
+    `前置：实施者反查确实发生（实际 ${stub.hits.executor}）——否则本场景没被构造出来`
+  )
+  assert(stub.postBodies.length === 1, `应投出 1 条载荷（实际 ${stub.postBodies.length}）`)
+  assert(
+    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
+    `trace_id 空路径必须自铸锚，实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+  )
+  // 反查本身是成功的（补填人仍取到 ds猫）——自铸锚不因反查"半成功"而退化成兜底店长
+  assert(
+    (stub.postBodies[0]?.mentions || []).includes('ds猫'),
+    `实施者反查仍应生效（补填人 = ds猫），实际 ${JSON.stringify(stub.postBodies[0]?.mentions)}`
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14f: 执行行 trace_id 空 → 自铸锚投递（补填人仍取到）✅')
+}
+
+// ═══ 测试组 15: 审查请求覆盖裁决（T-H ②「只看 HEAD」） ═══════════════════════
+// 裁决：一次派发 = 一条审查请求，锚在该派发**最新**的 commit——改动面也就只有它。
+// 本组把这个裁决**钉成契约**（而不是让它靠"碰巧如此"）：同一次派发里更早的 commit
+// 不进这条请求的改动面。这是**有意接受**的已知缺口，不是漏改——替代方案（逐 commit
+// 各投一条 / 按 uuid 回溯成段）均已实测否决，理由见 handoff-gen.mjs 文件头 T-H ②。
+//
+// 为什么用「断言不含」来钉一个缺口：缺口本身是裁决的一部分（「代码与裁决一致」的
+// 要求）。哪天有人重提「按 uuid 回溯扩展改动面」，这条会红，并把他引到文件头那段
+// 实测证据（回溯会裹进兄弟票——本 workflow 里「一条消息 @ 两只猫」是常态）。
+
+/** 基础提交（无 uuid）+ N 个共享同一 catstudy uuid 的提交（模拟"一次派发多 commit"） */
+function makeSpanRepo(dirName, uuid, commits) {
+  const tmp = join(TEST_BASE, dirName)
+  if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
+  mkdirSync(tmp, { recursive: true })
+  execSync('git init', { cwd: tmp, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: tmp, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: tmp, stdio: 'pipe' })
+  writeFileSync(join(tmp, 'base.txt'), 'base', 'utf-8')
+  execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
+  execSync('git commit -m "base（无 uuid——跨度回溯的停止点）"', { cwd: tmp, stdio: 'pipe' })
+  for (const [file, content] of commits) {
+    writeFileSync(join(tmp, file), content, 'utf-8')
+    execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
+    // uuid 写在 **body**（与真实仓库一致，不是 subject）——extractCommitUuid 读整条 message。
+    // 用两次 `-m`（= 空行分段）而不是在单个 `-m` 里塞 `\n`：execSync 在 Windows 走
+    // cmd.exe，参数里的真实换行会把命令行截断（本 helper 首版就踩了这个）。
+    execSync(`git commit -m "feat: ${file}" -m "catstudy [${uuid}]"`, {
+      cwd: tmp,
+      stdio: 'pipe',
+    })
+  }
+  return tmp
+}
+
+// 15a: 同一 uuid 两个 commit → 改动面**只看 HEAD**（更早的 commit 属有意缺口，见本组头注与
+// handoff-gen.mjs 文件头 T-H ②——「按 uuid 回溯成段」已实测否决并回退）
+{
+  const uuid = '15aa0000-0000-4000-8000-00000000000a'
+  const tmp = makeSpanRepo('.handoff-test-span-multi', uuid, [
+    ['a.txt', '1'],
+    ['b.txt', '2'],
+  ])
+  const headSha = gitIn(tmp, 'rev-parse HEAD')
+
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-15a',
+    updated: 0,
+    executor: 404, // 无执行行 → 走兜底投递，好把文档正文抓下来
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.postBodies.length === 1, `应投出 1 条（实际 ${stub.postBodies.length}）`)
+  const doc = stub.postBodies[0]?.content || ''
+  assertContains(doc, 'b.txt', 'HEAD commit 的文件应在改动面内')
+  assertNotContains(
+    doc,
+    'a.txt',
+    '裁决：同派发里更早的 commit（a.txt）**不在**本请求改动面内——这是有意的「一次派发一条请求」代价'
+  )
+  assertContains(
+    doc,
+    `git show ${gitIn(tmp, `log -1 --pretty=%h ${headSha}`)}`,
+    '审查须知指向 HEAD 自身的绝对引用（不扩展成 commit 段）'
+  )
+  assertNotContains(doc, '连续', '不应出现「连续 N 个 commit」这类段式措辞')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  15a: 多 commit 同派发 → 改动面只看 HEAD（裁决契约）✅')
+}
+
 console.log('')
 
 // ─── Cleanup ────────────────────────────────────────────────
 
-rmSync(TMP, { recursive: true, force: true })
+// 整个私有根一次删掉——不再逐个 rmSync，于是「漏删某个测试仓库」这个类别消失。
+// 即便本进程在删之前崩掉，残留也落在系统临时目录里，不进仓库树。
+rmSync(TEST_BASE, { recursive: true, force: true })
 
 // ─── 结果汇总 ───────────────────────────────────────────────
 
