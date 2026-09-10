@@ -32,12 +32,30 @@ import {
 
 const log = createLogger('ingest')
 
+/** 链内角色声明（T-F）。**对账位、不是锚**——它答不了"返到哪条链"（那仍从锚继承来），
+ *  只用来抓两个今天正在静默通过的矛盾：声明 `first` 但链已存在（静默挂错链）、
+ *  声明 `followup` 但锚为空（静默开新链）。 */
+export type ChainType = 'first' | 'followup'
+
+/** 结构推导三态。`unknown` = 查询失败/查不动（降级：以声明为准，不拒绝、不静默改归属）。 */
+export type ChainExistence = 'exists' | 'absent' | 'unknown'
+
 export interface IngestInput {
   sessionId: string
   content: string
   mentions?: string[]
   images?: string[]
   taskId?: string
+  /** 投递来源（T-F 入口主闸）。`human` = 人/前端入口（SEND_MESSAGE / OneBot），
+   *  天然是链首轮，**允许空锚**；`agent` = 工具/服务端入口（REST 注入 / 契约③），
+   *  **强制携带链锚**。默认 `human`（未标注的既有入口行为不变）。
+   *
+   *  为什么判据落在**入参**而不是落库列：T-E 之后 `messages.task_id` 由服务端自动
+   *  生成，落库列**恒非空**——按 DB 列判"agent 缺锚"是一条永远判不出来的死码。
+   *  唯一能回答"调用方漏没漏带锚"的地方是入参本身。 */
+  origin?: 'human' | 'agent'
+  /** 链内角色声明（审查类投递必填）。见 `ChainType`。 */
+  chainType?: ChainType
   /** 是否将消息写入向量记忆库。socketio 入口传 true（保持现有行为），
    *  REST 入口不传（外部工具注入的管道消息不进记忆库，保持现状）。 */
   saveMemory?: boolean
@@ -50,6 +68,85 @@ export interface IngestInput {
 export type IngestResult =
   | { ok: true; messageId: string; effectiveSessionId: string; redirectedFrom?: string }
   | { ok: false; status: number; error: string }
+
+/** 审查类投递 = mentions 里点名了本会话的审查者（role === 'reviewer'）。
+ *
+ *  基于 role 而非猫名：与 `execution/hints.ts` / `flow-advance` 的角色判据同源，
+ *  换猫不用改这里。mentions 里的非猫名（用户手打错字）静默不命中——与 mention
+ *  解析层"严格精确匹配"的既有语义一致。 */
+export function isReviewDelivery(mentions: string[]): boolean {
+  if (mentions.length === 0) return false
+  return agentsRepo.listAllAgents().some((a) => a.role === 'reviewer' && mentions.includes(a.name))
+}
+
+/** 结构推导：该锚在 messages 表上是否已存在（⟹ 链已存在）。
+ *
+ *  - 锚为空 → `absent`（无锚即无链，确定，不需要查询）
+ *  - 查询异常 → `unknown`（**查不动**，调用方降级为"以声明为准 + 记日志"）
+ *
+ *  这条查询**只**回答"链在不在"，不回答"锚合不合法"——后者是入参判据的事。 */
+export function deriveChainExistence(sessionId: string, anchor?: string): ChainExistence {
+  if (!anchor) return 'absent'
+  try {
+    return messagesRepo.hasMessagesByTaskId(sessionId, anchor) ? 'exists' : 'absent'
+  } catch (err: any) {
+    log.warn('chain existence probe failed — 降级为以声明为准', {
+      sessionId,
+      anchor,
+      error: err?.message,
+    })
+    return 'unknown'
+  }
+}
+
+/**
+ * 投递契约主闸（T-F）——纯函数，无 I/O（结构推导已由调用方算好传入）。
+ *
+ * 四条规则，按特异性从高到低：
+ *  1. 非 agent 入口 → 放行（人类消息天然是链首轮，允许空锚）
+ *  2. 审查类缺 `chainType` → 400（对账位必填）
+ *  3. 声明 `followup` 但锚为空 → 400（**漏带锚**：说是链内更新，却给不出链）
+ *  4. 声明 `first` 但链已存在 → 400（**静默挂错链**：说是建链，链却在）
+ *  5. 其余 agent 投递缺锚 → 400（A3 主闸）
+ *
+ * 降级（A5）：结构推导 `unknown`（查不动）→ 以声明为准、记日志，**不拒绝**。
+ * 方向与 B3 一致——宁可漏拦一次，不可把一条合法投递判死。
+ *
+ * @returns 拒绝时的 `{status, error}`；放行返回 null
+ */
+export function buildDeliveryGateError(input: {
+  origin?: 'human' | 'agent'
+  taskId?: string
+  chainType?: ChainType
+  isReview: boolean
+  chainExistence: ChainExistence
+}): { status: number; error: string } | null {
+  const { origin, taskId, chainType, isReview, chainExistence } = input
+  if (origin !== 'agent') return null
+
+  if (isReview) {
+    if (!chainType) {
+      return {
+        status: 400,
+        error: '审查类投递缺 chainType（需声明 first=建链 / followup=链内更新）',
+      }
+    }
+    if (chainType === 'followup' && !taskId) {
+      return { status: 400, error: '声明 chainType=followup 但缺链锚——链内更新必须带 task_id' }
+    }
+    if (chainType === 'first' && chainExistence === 'exists') {
+      return { status: 400, error: '声明 chainType=first 但该链已存在——请改用 followup 或修正锚' }
+    }
+    if (chainType === 'first' && chainExistence === 'unknown') {
+      log.warn('chainType=first 且结构推导查不动——以声明为准放行', { taskId })
+    }
+  }
+
+  if (!taskId) {
+    return { status: 400, error: '缺链锚：agent 投递必须携带 task_id（首轮锚 = 本轮 trace_id）' }
+  }
+  return null
+}
 
 /**
  * 摄入一条用户消息：校验 → 重定向 → 落库 → 广播 → 调度 → 串行执行。
@@ -93,6 +190,31 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
   if (!sessionRow) {
     log.warn('session not found', { sessionId })
     return { ok: false, status: 404, error: 'Session not found' }
+  }
+
+  // 1.2 投递契约主闸（T-F）：审查类投递必须带 锚 + chainType；agent 投递必须带锚。
+  //     放在 session 校验之后（结构推导按会话查）、INSERT 之前（拒绝时零副作用）。
+  //     结构推导只在"审查类 + 声明建链"时才查——其余分支不需要知道链在不在。
+  const isReview = isReviewDelivery(mentions)
+  const needsProbe = input.origin === 'agent' && isReview && input.chainType === 'first'
+  const gateError = buildDeliveryGateError({
+    origin: input.origin,
+    taskId,
+    chainType: input.chainType,
+    isReview,
+    chainExistence: needsProbe ? deriveChainExistence(sessionId, taskId) : 'absent',
+  })
+  if (gateError) {
+    log.warn('delivery rejected by entry gate', {
+      sessionId,
+      traceId,
+      origin: input.origin,
+      chainType: input.chainType,
+      isReview,
+      hasAnchor: !!taskId,
+      error: gateError.error,
+    })
+    return { ok: false, status: gateError.status, error: gateError.error }
   }
 
   // 1.5 已交接会话路由兜底（方案 A）：消息重定向到最新真实子会话。

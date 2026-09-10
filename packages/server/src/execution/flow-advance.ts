@@ -116,6 +116,9 @@ function deliverCloseoutNotice(opts: {
       `主干道已推进至 closed。审查者未 @店长 收口，状态机补投本提醒——请店长收口。`,
     mentions: signal.targets,
     taskId: opts.traceId,
+    // T-F 入口主闸：契约③收口提醒 = **服务端 agent 入口**，锚 = 源链 trace_id（下面那行），
+    // 受 agent 投递的锚必填约束（这里天然满足）。非审查类（投给店长）→ 不需要 chainType。
+    origin: 'agent',
   })
     .then((result) => {
       if (result.ok) {

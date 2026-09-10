@@ -498,6 +498,8 @@ async function handleOneBotEvent(event: OneBotMessageEvent): Promise<void> {
     sessionId: binding.session_id,
     content: parsed.content,
     mentions: parsed.mentions,
+    // T-F 入口主闸：OneBot 群友消息 = 人类入口 → 允许空锚（与前端 SEND_MESSAGE 同档）。
+    origin: 'human',
     saveMemory: true,
   })
   if (!result.ok) {

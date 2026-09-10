@@ -208,6 +208,18 @@ export function hasAgentReplyByTaskId(sessionId: string, taskId: string): boolea
     .get(sessionId, taskId)
 }
 
+/** 链是否存在：同会话同 task_id 是否已有消息（T-F 入口主闸的**结构推导**源）。
+ *
+ *  语义 = 「该锚名下已经有东西了」⟹ 链已存在。比 spec A5 括注的
+ *  「该链上是否已有审查请求消息」更宽也更机械：审查请求形态要靠内容前缀匹配
+ *  （脆弱、且审查请求只是链上消息的一种），而锚的全部含义就是"同锚即同链"。
+ *  taskId 为空 → false（无锚即无链，确定）。 */
+export function hasMessagesByTaskId(sessionId: string, taskId: string): boolean {
+  return !!db
+    .prepare(`SELECT 1 FROM messages WHERE session_id = ? AND task_id = ? LIMIT 1`)
+    .get(sessionId, taskId)
+}
+
 /** 获取同一 taskId 的完整消息历史 */
 export function getTaskHistory(
   taskId: string,
