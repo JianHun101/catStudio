@@ -99,12 +99,12 @@ _Avoid_: 日志, 请求记录
 
 **开发文档 vs 沉淀文档判据**：
 
-|      | 开发文档 `docs/run/`                | 沉淀文档 `requirements/` `sessions/` `adr/` | 定稿文档 `plans/` `research/`                      |
-| ---- | ----------------------------------- | ------------------------------------------- | -------------------------------------------------- |
-| 时效 | 在飞，活结束即失效                  | 跨会话长期有效，随架构演进而更新            | 随活停更（活进行中会随实施更新），活结束即停止维护 |
-| 读者 | 本轮实施猫 / 审查猫                 | 下个会话的猫                                | 需要「当时那份定稿规格」的人                       |
-| 形态 | tracer-bullet 票单 + blocking edges | 六段生命周期 / 决策留痕 / 会话总结          | to-spec 定稿规格 / 勘察报告 / 执行规格             |
-| 归宿 | 收口即清，结论上浮                  | 长期保留，持续维护                          | 原地保留，不再维护（读者自行判时效）               |
+|      | 开发文档 `docs/run/`                | 沉淀文档 `requirements/` `sessions/` `adr/` | 定稿文档 `plans/` `research/`                                                                   |
+| ---- | ----------------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 时效 | 在飞，活结束即失效                  | 跨会话长期有效，随架构演进而更新            | `plans/`：活中即定稿、之后冻结 ／ `research/`：随活停更（活中随实施更新）；两者活结束即停止维护 |
+| 读者 | 本轮实施猫 / 审查猫                 | 下个会话的猫                                | 需要「当时那份定稿规格」的人                                                                    |
+| 形态 | tracer-bullet 票单 + blocking edges | 六段生命周期 / 决策留痕 / 会话总结          | to-spec 定稿规格 / 勘察报告 / 执行规格                                                          |
+| 归宿 | 收口即清，结论上浮                  | 长期保留，持续维护                          | 原地保留，不再维护（读者自行判时效）                                                            |
 
 ## 术语补全
 
@@ -116,7 +116,7 @@ _Avoid_: 日志, 请求记录
 ## 流程约定
 
 - 审查链（后半个门）：`quality-gate → request-review → receive-review`；收口归店长；提交触发 post-commit 自动投递审查链
-- 收口链：确认审查结论 → ff-only 合并回 dev → **清 `docs/run/` 中已收口活的 `<slug>/` 并提交**（先把结论上浮到 `requirements/`/`sessions/`；删除动的是已跟踪文件，必须落成 commit）→ 更新 `.push-gate` → 推 session 分支 → createPr（base=dev）→ GitHub merge → 拉回 dev 同步
-  - **`<slug>/` 的清理必须排在更新 `.push-gate` 之前**：删除会产生新 commit，HEAD 随之前移；`.push-gate` 必须指向**最终** HEAD，否则 pre-push 的 `merge-base --is-ancestor` 会把这次删除判成「有新 commit 未经 review」而阻断推送。即「更新 `.push-gate` 是 push 前的最后一步」（与 `scripts/worktree-create.mjs` 的收口说明一致）
+- 收口链：确认审查结论 → **清 `docs/run/` 中已收口活的 `<slug>/` 并提交到「要进 PR 的那个分支」**（session 分支，或按需建的隔离 closeout 分支；先把结论上浮到 `requirements/`/`sessions/`；删除动的是已跟踪文件，必须落成 commit）→ **在检出该分支的工作区**更新 `.push-gate` → 推该分支 → createPr（base=dev）→ GitHub merge → 主工作区 ff-only 重新对齐 dev → 再写一次 `.push-gate`
+  - **清理必须提交在 PR 承载的那个分支上；gate 必须写在被推分支的检出点**。三条机制约束：① 清理 commit 落在 `dev` 上就**进不了 PR**——远端永远清不掉 `<slug>/`，且「拉回 dev 同步」时本地 dev 有 origin/dev 没有的 commit，`ff-only` 会失败；② `.push-gate` 是 gitignored 的 per-worktree 文件（仅主工作区存在），而 pre-push 校验的是**当前检出的 HEAD**（`git rev-parse HEAD`，不看你推的是哪个 ref）——两者错位时门禁校验的不是你要推的东西；③ 若本次确有可清项，删除会产生新 commit、HEAD 随之前移，`.push-gate` 必须指向**最终** HEAD，否则 `merge-base --is-ancestor` 会把这次删除判成「有新 commit 未经 review」而阻断推送。即「更新 `.push-gate` 是 push 前的最后一步」（与 `scripts/worktree-create.mjs` 的收口说明一致）；合并落地、拉回 dev 后本地 HEAD 再次前移，**需重新写入 `.push-gate`**
 - 开发流程 gate 决策点：`spec-gate`（前半个门——需求可证伪/契约钉死，放行才拆票/进 implement）+ `quality-gate`（后半个门——提交前自查）
 - 依赖声明优先：装任何包前先声明 + 审查者批准，声明与安装不同轮
