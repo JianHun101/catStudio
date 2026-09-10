@@ -17,6 +17,9 @@ import {
   extractCommitUuid,
   resolveCommitSessionId,
   resolveExecutorName,
+  resolveExecutionCommitSpan,
+  probeAttribution,
+  decideHookDelivery,
   tryPostToCatstudy,
   buildHandoffMessage,
   runHandoff,
@@ -1563,6 +1566,255 @@ function gitIn(tmp, cmd) {
 
   rmSync(TMP13G, { recursive: true, force: true })
   console.log('  13g: writeState 并发合并（基线合并 + 删除权威）✅')
+}
+
+// ═══ 测试组 14: 归属判据（T-H ①「任一状态执行行」） ═══════════════════════
+// 本组的存在理由：T-A 的判据源是写回端点的 `updated`（running 命中行数），而
+// e2e 的 stub 从来没有 commit-hash 端点 → writeback 恒失败 → attributed 恒 null
+// → 一律走降级投递。于是**三条判据在 e2e 里全不生效**，测试全绿也不代表判据对。
+// 本组把两个端点都补上，让「静默」这条路径第一次在 e2e 里可断言。
+
+/**
+ * 归属场景 stub：写回 `updated`（旧判据源）与 executor（新判据源）各自可配，
+ * 用来构造「两者结论相反」的场景——那正是 T-H ① 的靶心。
+ * @param {number} cfg.updated — 写回响应里的 running 命中行数
+ * @param {'ok'|404|500} cfg.executor — executor 端点行为（'ok' = 存在任一状态执行行）
+ */
+async function startAttributionStub({ uuid, sessionId, updated, executor }) {
+  const hits = { writeback: 0, executor: 0, post: 0 }
+  const postBodies = []
+  const { server, port } = await startStubServer((req, res) => {
+    const json = (code, obj) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(obj))
+    }
+    if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
+      return json(200, { id: uuid, sessionId, role: 'user' })
+    }
+    if (req.url === `/api/messages/${uuid}/commit-hash` && req.method === 'POST') {
+      hits.writeback++
+      return json(200, { ok: true, updated })
+    }
+    if (req.url.startsWith(`/api/messages/${uuid}/executor`) && req.method === 'GET') {
+      hits.executor++
+      if (executor === 404) return json(404, { error: 'No execution log for this message' })
+      if (executor === 500) return json(500, { error: 'boom' })
+      return json(200, { agentId: 'a-1', agentName: 'ds猫', taskId: 'task-1' })
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      return json(200, [])
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      hits.post++
+      let raw = ''
+      req.on('data', (c) => (raw += c))
+      req.on('end', () => {
+        postBodies.push(JSON.parse(raw))
+        json(201, { ok: true, messageId: 'm-new' })
+      })
+      return
+    }
+    json(404, { error: 'not found' })
+  })
+  return { server, url: `http://127.0.0.1:${port}`, hits, postBodies }
+}
+
+// 14a: 执行**已终态**（写回命中 running 行 = 0，但执行行存在）→ 静默，不多投
+//      这是 T-H ① 的靶心：旧判据源在此判「无归属 → 兜底投递」，返工每次提交都叠一条链。
+{
+  const uuid = '14aa0000-0000-4000-8000-00000000000a'
+  const tmp = makeUuidRepo('.handoff-test-attr-terminal', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14a',
+    updated: 0,
+    executor: 'ok',
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(
+    stub.hits.writeback === 1,
+    `前置：写回应确实发生（实际 ${stub.hits.writeback}）——否则本场景没被构造出来`
+  )
+  // 阴性对照（证明下面那条不是恒真）：本场景写回读数 = 0，而旧判据把「updated=0」
+  // 映射成 attributed=false → decideHookDelivery(false).deliver === true（投递）。
+  // 也就是说：换回旧实现，本场景必然 POST 1 次，断言当场红。
+  assert(
+    decideHookDelivery(0 > 0).deliver === true,
+    '阴性对照：旧判据输入（running 命中 0 → 无归属）在旧实现下会投递'
+  )
+  assert(stub.hits.post === 0, `执行已终态仍有归属 → 应静默（POST 0 次，实际 ${stub.hits.post}）`)
+  assert(stub.hits.executor === 1, `应问一次归属探针（实际 ${stub.hits.executor}）`)
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14a: 执行已终态仍有归属 → 静默（旧判据会多投一条）✅')
+}
+
+// 14b: 真·用户手动提交（该 uuid 从无执行行）→ 兜底投递 1 条
+{
+  const uuid = '14bb0000-0000-4000-8000-00000000000b'
+  const tmp = makeUuidRepo('.handoff-test-attr-manual', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14b',
+    updated: 0,
+    executor: 404,
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.hits.post === 1, `无执行行 = 手动提交 → 应兜底投 1 条（实际 ${stub.hits.post}）`)
+  // 投递路径会**两次**打这个端点：先归属探针、后实施者反查（补填人）。故这里是 ≥1
+  // 而不是 ===1——14a 的静默路径才是「只打探针一次」的干净读数。
+  assert(
+    stub.hits.executor >= 1,
+    `无执行行时也应问过探针（二者同得 updated=0，实际 ${stub.hits.executor} 次）`
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14b: 真手动提交（无执行行）→ 兜底投 1 条 ✅')
+}
+
+// 14c: 探针查不动（executor 500）→ 一律投递，不静默吞
+{
+  const uuid = '14cc0000-0000-4000-8000-00000000000c'
+  const tmp = makeUuidRepo('.handoff-test-attr-unprobeable', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14c',
+    updated: 0,
+    executor: 500,
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.hits.post === 1, `探针查不动 → 降级一律投递（实际 ${stub.hits.post}）`)
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14c: 探针查不动 → 降级投递（不静默吞）✅')
+}
+
+// 14d: 写回已命中 running 行 = 归属的**充分条件** → 静默，且不再花探针那次往返
+{
+  const uuid = '14dd0000-0000-4000-8000-00000000000d'
+  const tmp = makeUuidRepo('.handoff-test-attr-running', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14d',
+    updated: 1,
+    executor: 'ok',
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.hits.post === 0, `写回命中 running 行 → 有归属 → 静默（实际 ${stub.hits.post}）`)
+  assert(
+    stub.hits.executor === 0,
+    `正信号短路：命中 running 行即已确证有归属，不应再问探针（实际 ${stub.hits.executor}）`
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14d: 写回命中 running 行 → 静默且省掉探针往返 ✅')
+}
+
+// ═══ 测试组 15: 审查请求覆盖（T-H ②「同一 uuid 的连续 commit 段」） ═══════
+// 一次派发只发一条审查请求（T-A：不叠链），而投递文档的改动面此前恒为 `<sha>~1..<sha>`
+// ——同一派发里更早的 commit 因此全流程拿不到审查。本组钉住修复后的覆盖面。
+
+/** 基础提交（无 uuid，作跨度回溯的停止点）+ N 个共享 uuid 的提交 */
+function makeSpanRepo(dirName, uuid, commits) {
+  const tmp = join(ROOT, dirName)
+  if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
+  mkdirSync(tmp, { recursive: true })
+  execSync('git init', { cwd: tmp, stdio: 'pipe' })
+  execSync('git config user.email "test@catstudy.local"', { cwd: tmp, stdio: 'pipe' })
+  execSync('git config user.name "Test Cat"', { cwd: tmp, stdio: 'pipe' })
+  writeFileSync(join(tmp, 'base.txt'), 'base', 'utf-8')
+  execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
+  execSync('git commit -m "base（无 uuid——跨度回溯的停止点）"', { cwd: tmp, stdio: 'pipe' })
+  for (const [file, content] of commits) {
+    writeFileSync(join(tmp, file), content, 'utf-8')
+    execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
+    // uuid 写在 **body**（与真实仓库一致，不是 subject）——extractCommitUuid 读整条 message。
+    // 用两次 `-m`（= 空行分段）而不是在单个 `-m` 里塞 `\n`：execSync 在 Windows 走
+    // cmd.exe，参数里的真实换行会把命令行截断（本 helper 首版就踩了这个）。
+    execSync(`git commit -m "feat: ${file}" -m "catstudy [${uuid}]"`, {
+      cwd: tmp,
+      stdio: 'pipe',
+    })
+  }
+  return tmp
+}
+
+// 15a: 同一 uuid 两个 commit → 文档覆盖**两者**，审查须知指向整段
+{
+  const uuid = '15aa0000-0000-4000-8000-00000000000a'
+  const tmp = makeSpanRepo('.handoff-test-span-multi', uuid, [
+    ['a.txt', '1'],
+    ['b.txt', '2'],
+  ])
+  const headSha = gitIn(tmp, 'rev-parse HEAD')
+  const firstSha = gitIn(tmp, 'rev-parse HEAD~1')
+
+  const span = resolveExecutionCommitSpan(tmp, 'HEAD')
+  assert(span?.count === 2, `跨度应回溯到 2 个 commit（实际 ${span?.count}）`)
+  assert(span?.first === firstSha, '跨度首元素应为更早那个 commit')
+
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-15a',
+    updated: 0,
+    executor: 404, // 无执行行 → 走兜底投递，好把文档正文抓下来
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.postBodies.length === 1, `应投出 1 条（实际 ${stub.postBodies.length}）`)
+  const doc = stub.postBodies[0]?.content || ''
+  assertContains(doc, 'a.txt', '早期 commit 的文件（a.txt）也应在覆盖范围内——这是本票的靶心')
+  assertContains(doc, 'b.txt', 'HEAD commit 的文件（b.txt）应在覆盖范围内')
+  const headShort = gitIn(tmp, `log -1 --pretty=%h ${headSha}`)
+  const firstShort = gitIn(tmp, `log -1 --pretty=%h ${firstSha}`)
+  assertContains(
+    doc,
+    `git diff ${firstShort}~1..${headShort}`,
+    '审查须知应指向覆盖整段的绝对 sha 引用'
+  )
+  assertContains(doc, '连续 2 个 commit', '应显式说明覆盖了几个 commit（不假装只有一个）')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  15a: 同一 uuid 多 commit → 文档覆盖整段 ✅')
+}
+
+// 15b: 单 commit → 与既有文案逐字相同（回归：改动面不因本票变化）
+{
+  const uuid = '15bb0000-0000-4000-8000-00000000000b'
+  const tmp = makeSpanRepo('.handoff-test-span-single', uuid, [['a.txt', '1']])
+  const headSha = gitIn(tmp, 'rev-parse HEAD')
+  const span = resolveExecutionCommitSpan(tmp, 'HEAD')
+  assert(span?.count === 1, `单 commit 跨度应为 1（实际 ${span?.count}）`)
+
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-15b',
+    updated: 0,
+    executor: 404,
+  })
+  await runInProc(tmp, stub.url)
+
+  assert(stub.postBodies.length === 1, `应投出 1 条（实际 ${stub.postBodies.length}）`)
+  const doc = stub.postBodies[0]?.content || ''
+  assertContains(
+    doc,
+    `git show ${gitIn(tmp, `log -1 --pretty=%h ${headSha}`)}`,
+    '单 commit 仍用 git show <sha>（既有文案不变）'
+  )
+  assertNotContains(doc, '连续', '单 commit 不应出现「连续 N 个 commit」措辞')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  15b: 单 commit → 文案与既有逐字相同 ✅')
 }
 
 console.log('')

@@ -83,6 +83,16 @@ describe('parseArgs — 未知参数拒绝（必改 2）', () => {
     expect(() => parseArgs(['--no-post=1'])).toThrow(/不接受值/)
   })
 
+  // T-H / N5：取值型 flag 的值被后随 flag 贪吃（`--cwd --no-post` → {cwd:'--no-post'}）。
+  // 旧行为的实害不是"值错了"——是**后随 flag 被静默吞掉**（少传一个 flag），且畸形值
+  // 要等撞上后续 git 校验（`不是 git 仓库`）才暴露，报错点离病因很远。取值以 `-`
+  // 开头一律判参数错误——路径与 sha 都不长这样。
+  it('取值型 flag 的值是后随 flag（--cwd --no-post）→ 抛错，不静默吞掉后面那个 flag', () => {
+    expect(() => parseArgs(['--cwd', '--no-post'])).toThrow(/不能以 - 开头/)
+    expect(() => parseArgs(['--fallback-sha', '--cwd=/tmp'])).toThrow(/不能以 - 开头/)
+    expect(() => parseArgs(['--cwd=--no-post'])).toThrow(/不能以 - 开头/)
+  })
+
   it('--range（已移除）空格形式也抛错（不缺值时也一样）', () => {
     expect(() => parseArgs(['--range', 'a..b'])).toThrow(/已移除/)
   })
