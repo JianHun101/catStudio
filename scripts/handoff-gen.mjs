@@ -195,35 +195,51 @@ export function generateHandoff(opts = {}) {
 
 // ─── 命令参数解析 ───────────────────────────────────────────
 
-function parseArgs(argv) {
+const RANGE_REMOVED = '--range 已移除（Fix C：投递按 commit SHA 幂等，不再生成范围版合并审文档）'
+
+/**
+ * flag 白名单：`--name` → { key: opts 键名, value: 是否取值 }。
+ * **新增 flag 必须在此登记**——未登记即被下面的兜底拒绝（见 parseArgs）。
+ */
+const FLAGS = {
+  cwd: { key: 'cwd', value: true },
+  'fallback-sha': { key: 'fallbackSha', value: true },
+  'no-post': { key: 'noPost', value: false },
+  'gate-deliver': { key: 'gateDeliver', value: false },
+}
+
+/**
+ * 解析命令行参数。**未知参数一律抛错**，绝不静默忽略。
+ *
+ * 为什么必须拒绝而不是忽略：**无参调用 = post-commit 投递路径**（runHandoff 的
+ * 兜底分支）。忽略未知参数 → 拼错的 flag / `--help` 会静默落进那条路径并**真发出
+ * 一条消息**（2026-09-10 实证：`node scripts/handoff-gen.mjs --help` 投出一条补填
+ * 请求 cdc476ba）。`--range` 已因同款理由先行抛错（Fix C），此处把该判据推广到
+ * 全部参数：**参数错误的后果不能是「换一条路继续干」**。
+ * 同款地，取值型 flag 缺值也必须报错（旧实现 `i + 1 < argv.length` 不成立时静默
+ * 跳过 → 参数被悄悄丢掉，等价于没写）。
+ *
+ * 出口语义：参数错误由 main 分支直接 exit 非 0（区别于运行时失败的 exit 0）。
+ */
+export function parseArgs(argv) {
   const opts = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    // 等号形式 --cwd=/path（pre-push 曾用 --range=X..Y，已移除——见下）
-    const eqMatch = /^--([a-z-]+)=(.*)$/.exec(arg)
-    if (eqMatch) {
-      const [, key, value] = eqMatch
-      if (key === 'cwd') opts.cwd = value
-      else if (key === 'no-post') opts.noPost = true
-      else if (key === 'gate-deliver') opts.gateDeliver = true
-      else if (key === 'fallback-sha') opts.fallbackSha = value
-      else if (key === 'range') {
-        // 重复投递根治计划 Fix C：pre-push 不再生成范围版合并审文档。
-        // 遇到旧调用必须报错而非静默忽略——静默回退默认 HEAD~1..HEAD 会投出错误文档
-        throw new Error('--range 已移除（Fix C：投递按 commit SHA 幂等，不再生成范围版合并审文档）')
-      }
-      continue
+    // 等号形式 --cwd=/path 与空格形式 --cwd /path 都支持
+    const eqMatch = /^--([a-z-]+)(?:=(.*))?$/.exec(arg)
+    const key = eqMatch ? eqMatch[1] : null
+    if (key === 'range') throw new Error(RANGE_REMOVED)
+    const spec = key ? FLAGS[key] : undefined
+    if (!spec) {
+      throw new Error(`未知参数：${arg}（已知：${Object.keys(FLAGS).join(' / ')}）`)
     }
-    if (arg === '--cwd' && i + 1 < argv.length) {
-      opts.cwd = argv[++i]
-    } else if (arg === '--no-post') {
-      opts.noPost = true
-    } else if (arg === '--gate-deliver') {
-      opts.gateDeliver = true
-    } else if (arg === '--fallback-sha' && i + 1 < argv.length) {
-      opts.fallbackSha = argv[++i]
-    } else if (arg === '--range' && i + 1 < argv.length) {
-      throw new Error('--range 已移除（Fix C：投递按 commit SHA 幂等，不再生成范围版合并审文档）')
+    if (spec.value) {
+      const value = eqMatch[2] !== undefined ? eqMatch[2] : argv[++i]
+      if (value === undefined) throw new Error(`${arg} 缺少值`)
+      opts[spec.key] = value
+    } else {
+      if (eqMatch[2] !== undefined) throw new Error(`${arg} 不接受值（收到 ${eqMatch[2]}）`)
+      opts[spec.key] = true
     }
   }
   return opts
@@ -1433,10 +1449,19 @@ export async function runHandoff(args) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])
 
 if (isMain) {
+  // 参数解析独立于主流程：**参数错误 = 调用方错误**，必须 exit 非 0 且**绝不投递**
+  // （不落进无参的 post-commit 投递路径——那正是必改 2 要封的类）。
+  let args
   try {
-    await runHandoff(parseArgs(process.argv.slice(2)))
+    args = parseArgs(process.argv.slice(2))
   } catch (err) {
-    // post-commit hook 不应阻断 commit，失败时只告警
+    console.error('[handoff-gen] 参数错误:', err.message)
+    process.exit(2)
+  }
+  try {
+    await runHandoff(args)
+  } catch (err) {
+    // 运行时失败：post-commit hook 不应阻断 commit，失败时只告警（exit 0）
     console.error('[handoff-gen] 生成失败:', err.message)
     process.exit(0)
   }

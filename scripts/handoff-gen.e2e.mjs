@@ -563,9 +563,31 @@ rmSync(NO_POST_TMP, { recursive: true, force: true })
 
 console.log('')
 
-// ═══ 测试组 9: --range 已移除（Fix C） ══════════════════════
+// ═══ 测试组 9: 参数错误（--range 已移除 / 未知参数拒绝） ═══════
 
-console.log('📦 测试组 9: --range 已移除（Fix C）')
+console.log('📦 测试组 9: 参数错误（--range 已移除 / 未知参数拒绝）')
+
+/**
+ * 跑 CLI 且**容忍非零退出**——返回 { code, output }。
+ *
+ * 参数错误现在是 exit 非 0（必改 2：参数错误 = 调用方错误，不是运行时故障，
+ * 后者才维持 exit 0 以免阻断 commit）。execSync 对非零退出会抛，输出需从
+ * err.stdout 取回（命令带 2>&1，stderr 已并入 stdout）。
+ */
+function runCliExpectExit(args, opts = {}) {
+  try {
+    const output = execSync(`node ${HANDOFF_SCRIPT} ${args} 2>&1`, {
+      cwd: ROOT,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: 10000,
+      ...opts,
+    }).toString()
+    return { code: 0, output }
+  } catch (err) {
+    return { code: err.status ?? -1, output: `${err.stdout ?? ''}${err.stderr ?? ''}` }
+  }
+}
 
 // 构建: 3 个 commit（基线 → 改 a.ts → 新增 b.ts）
 const RANGE_TMP = join(ROOT, '.handoff-test-range')
@@ -595,19 +617,10 @@ const rangeBase = rangeGit('rev-parse HEAD~2')
 const rangeHead = rangeGit('rev-parse HEAD')
 
 // 9a: = 形式 --range=X..Y（旧 pre-push 调用方式）→ 报错提示已移除，不产生草稿
-let output9a = ''
-let threw9a = false
-try {
-  output9a = execSync(
-    `node ${HANDOFF_SCRIPT} --cwd "${RANGE_TMP}" --no-post --range="${rangeBase}..${rangeHead}" 2>&1`,
-    { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe', timeout: 10000 }
-  ).toString()
-} catch {
-  // CLI 对参数错误应 exit 0（post-commit hook 不阻断），走 assert 判定
-  threw9a = true
-}
-assert(!threw9a, 'CLI 对 --range 应静默退出 0（hook 不阻断 commit）')
-assertContains(output9a, '已移除', '--range 应提示已移除（Fix C）')
+// 注：此处曾断言「参数错误 exit 0」，必改 2 裁定参数错误一律 exit 非 0（见下 9c）
+const r9a = runCliExpectExit(`--cwd "${RANGE_TMP}" --no-post --range="${rangeBase}..${rangeHead}"`)
+assert(r9a.code !== 0, '参数错误应 exit 非 0（必改 2：参数错误 = 调用方错误）')
+assertContains(r9a.output, '已移除', '--range 应提示已移除（Fix C）')
 assert(
   !existsSync(join(RANGE_TMP, '.handoff-draft.md')),
   '--range 报错后不应生成草稿（参数错误先于生成）'
@@ -615,19 +628,32 @@ assert(
 console.log('  9a: = 形式 --range 报错提示已移除 ✅')
 
 // 9b: 空格形式 --range X..Y 同样报错
-let output9b = ''
-let threw9b = false
-try {
-  output9b = execSync(
-    `node ${HANDOFF_SCRIPT} --cwd "${RANGE_TMP}" --no-post --range ${rangeBase}..${rangeHead} 2>&1`,
-    { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe', timeout: 10000 }
-  ).toString()
-} catch {
-  threw9b = true
-}
-assert(!threw9b, 'CLI 对空格形式 --range 应静默退出 0')
-assertContains(output9b, '已移除', '空格形式 --range 也应提示已移除')
+const r9b = runCliExpectExit(`--cwd "${RANGE_TMP}" --no-post --range ${rangeBase}..${rangeHead}`)
+assert(r9b.code !== 0, '空格形式 --range 也应 exit 非 0')
+assertContains(r9b.output, '已移除', '空格形式 --range 也应提示已移除')
 console.log('  9b: 空格形式 --range 报错提示已移除 ✅')
+
+// 9c: 未知参数拒绝（必改 2——静默忽略的后果是「换一条路继续干」）
+// 回归证据：修复前 `node scripts/handoff-gen.mjs --help` 静默落进**无参 post-commit
+// 投递路径**并真发出一条消息（2026-09-10 实证 cdc476ba）。
+// 用「无 --no-post」形态跑：修复若退化，它会**生成草稿**（post-commit 路径先写草稿、
+// 仅投递成功才清理），故「无草稿」正是「没进入投递路径」的判据。CATSTUDY_URL 指向
+// 必然拒连的端口，且清掉 CATSTUDY_SESSION_ID——退化时也不污染任何真实会话。
+{
+  const env = { ...process.env, CATSTUDY_URL: 'http://127.0.0.1:1' }
+  delete env.CATSTUDY_SESSION_ID
+  const r9c = runCliExpectExit(`--cwd "${RANGE_TMP}" --help`, { env })
+  assert(r9c.code !== 0, '未知参数 --help 应 exit 非 0')
+  assertContains(r9c.output, '未知参数', '--help 应报「未知参数」')
+  assertContains(r9c.output, 'no-post', '报错应列出已知 flag（可自助纠错）')
+  assert(
+    !existsSync(join(RANGE_TMP, '.handoff-draft.md')),
+    '未知参数不应生成草稿——即未进入 post-commit 投递路径'
+  )
+  const r9d = runCliExpectExit(`--cwd "${RANGE_TMP}" --no-postt`, { env })
+  assert(r9d.code !== 0, '拼错的 flag 应 exit 非 0')
+}
+console.log('  9c: 未知参数拒绝（--help / 拼错 flag 均不投递） ✅')
 
 rmSync(RANGE_TMP, { recursive: true, force: true })
 
@@ -881,7 +907,10 @@ console.log('📦 测试组 11: 投递瞬态重试')
   if (prevSid !== undefined) process.env.CATSTUDY_SESSION_ID = prevSid
 
   assert(okApproved === 'ok', 'verdict 命中 approve 应视为投递成功（返回 ok）')
-  assert(postHitsApproved === 0, `已审 ✅ 的 commit 不应投递补填（实际 ${postHitsApproved} 次 POST）`)
+  assert(
+    postHitsApproved === 0,
+    `已审 ✅ 的 commit 不应投递补填（实际 ${postHitsApproved} 次 POST）`
+  )
   assert(verdictHitsApproved >= 1, '应请求 verdict 反查 API')
   console.log('  11c: verdict approved=true → 跳过补填投递 ✅')
 

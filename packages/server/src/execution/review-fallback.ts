@@ -19,7 +19,8 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('review-fallback')
@@ -68,10 +69,53 @@ export function judgeReviewFallback(input: {
   }
 }
 
-/** handoff-gen 脚本路径（项目根/scripts）——与 cli-utils getWorkspaceDir 同款
- *  cwd 假设：dev.js 把 server 进程的 cwd 设为项目根。 */
-function handoffGenPath(): string {
-  return resolve(process.cwd(), 'scripts', 'handoff-gen.mjs')
+/** 本模块所在目录（源码与构建产物通用——向上找根不依赖层级） */
+const moduleDir = dirname(fileURLToPath(import.meta.url))
+
+/** 补投脚本相对仓库根的路径 */
+const HANDOFF_GEN_REL = ['scripts', 'handoff-gen.mjs'] as const
+
+/** 从 startDir 向上找**确实含有** `scripts/handoff-gen.mjs` 的最近祖先（含自身）；
+ *  存在性即自校验，找不到返回 null——绝不猜。 */
+function findRepoRootFrom(startDir: string): string | null {
+  let dir = resolve(startDir)
+  for (;;) {
+    if (existsSync(join(dir, ...HANDOFF_GEN_REL))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
+/**
+ * 定位补投脚本 `scripts/handoff-gen.mjs` 的绝对路径；找不到返回 null。
+ *
+ * 两个候选起点，按序：① 本模块所在目录向上找——锚「当前加载的 server 代码所属
+ * 检出」，与正在跑的 server 版本同源；② 进程 cwd 向上找——模块落在检出之外时兜底。
+ *
+ * **为什么不锚 `process.cwd()`**（必改 1，原实现的缺陷）：cwd 不是仓库根的稳定代理。
+ * `pnpm dev:server`（AGENTS.md 明列的单包启动）= `pnpm --filter @cat-study/server dev`
+ * = `tsx watch src/index.ts`，cwd = `packages/server` → 原实现解析出
+ * `packages/server/scripts/handoff-gen.mjs`，existsSync false → ② 整条兜底链**静默
+ * 失效**（只留一条 error 日志）。dev.js:252-253 把 cwd 设成 ROOT 只是那一种启动形态
+ * 的巧合，不是契约。
+ *
+ * 为什么不是固定层级 `new URL('../../../..', import.meta.url)`：源码与构建产物深度
+ * 不同——tsconfig `rootDir: ".."` + `outDir: "./dist"`，产物落在 `dist/server/src/
+ * execution/`（见 packages/server/package.json start），比 `src/execution/` 深一层。
+ * 固定层级必有一边解析错；向上找对两种布局都成立。
+ *
+ * 为什么不用 git-utils 的 getMainRepoRoot()：它在执行收尾路径上多一次**同步 git
+ * 子进程**，且语义是**主仓库**根——从 worktree 内跑 server 时它指向主仓库的脚本
+ * （版本与正在运行的 server 代码不一致），而本函数要的正是「代码所属检出」。
+ */
+export function resolveHandoffGenScript(opts: { cwd?: string } = {}): string | null {
+  const starts = [moduleDir, opts.cwd ?? process.cwd()]
+  for (const start of starts) {
+    const root = findRepoRootFrom(start)
+    if (root) return join(root, ...HANDOFF_GEN_REL)
+  }
+  return null
 }
 
 export interface SpawnOutcome {
@@ -91,12 +135,21 @@ export interface SpawnOutcome {
  * @param commitSha — 补投目标 commit（本执行 commit_hash）
  */
 export function spawnReviewFallback(cwd: string, commitSha: string): SpawnOutcome {
-  const script = handoffGenPath()
-  if (!existsSync(script)) {
-    return { spawned: false, reason: `handoff-gen 脚本不存在：${script}` }
+  const script = resolveHandoffGenScript()
+  if (!script) {
+    // 不静默降级：解析已按存在性自校验，走到这里说明两处起点向上都没有该脚本。
+    // 报出两个起点——安全网自己失效时必须可诊断（否则只剩一句「找不到」）。
+    return {
+      spawned: false,
+      reason: `定位不到 scripts/handoff-gen.mjs（起点：${moduleDir} / ${process.cwd()}）`,
+    }
   }
-  // 会话 worktree 可能已被收口清理（收口后进行中的执行）→ 退回 server cwd
-  const workdir = existsSync(cwd) ? cwd : process.cwd()
+  // 会话 worktree 可能已被收口清理（收口后进行中的执行）→ 退回**脚本所属仓库根**。
+  // 为什么不用 process.cwd()：`pnpm dev:server` 下它是 packages/server——把手写的
+  // cwd 换成子目录会让 handoff-gen 的 git diff 落在错误范围（同一 cwd 假设的另一处
+  // 残留）。脚本自身所在仓库根才是它的同源工作区，且与 hook 的调用 cwd 一致。
+  // 注：修复前该降级分支在 dev:server 形态下不可达（脚本路径先错了），现在可达。
+  const workdir = existsSync(cwd) ? cwd : resolve(script, '..', '..')
   // 清掉 CATSTUDY_SESSION_ID（不继承）：该变量在 handoff-gen 里是「人工显式指定」
   // 的最高优先目标，且**旁路 delivered 账本**（显式指定即明确意图）。server 侧
   // 若带着它（注入给 CLI 子进程的那份被误继承/外部 shell 导出），兜底就会投错
