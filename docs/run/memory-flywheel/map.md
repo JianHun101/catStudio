@@ -386,7 +386,7 @@
 - ~~**Q2-e · ADR 产出机制接线**~~ —— **已关闭**（Decisions 10：skill 保持上游形状 + 一行门牌指针；本地附加落仓内门牌；白名单后续加、提示落店长 prompt）
 - ~~**Q2-g · 通行证：落地锚算不算必填**~~ —— **已关闭**（Decisions 11：自证标记 + 机器只校存在性 + 语义归审查链；老文件一律 fail-closed）
 - **票乙 · 审查兜底交付物闸 + 免审白名单**（**已过 spec-gate · 已派活 flash猫**）—— **票单本体见 `docs/run/memory-flywheel/tickets.md`**（规格不再散在会话消息里；过门记录见 Decisions 26）。落点 `scripts/handoff-gen.mjs`（原拟 `review-fallback.ts` 已推翻：server 侧拿不到路径清单，见 Decisions 25）：commit 触及路径**全部**在 `docs/run/**` 内 → 静默留痕。**零 server 改动 ⇒ 零重启**，下一条 commit 即生效。**先于票甲**：它解除地图落盘的阻塞（Decisions 15/18/25/26）
-- **票甲 · 嵌入层换 `Xenova/bge-m3`**（**形态已裁 · 时机未授权**）—— `embedding.ts` 换模型 + 三护栏（pooling 核对 / 模型-维度成对声明 + 启动自检 / 清老向量，Decisions 16）。**待实测**：m3 的 CLS pooling 口径
+- **票甲 · 嵌入层换 `Xenova/bge-m3`**（**形态已裁 · 时机未授权**）—— `embedding.ts` 换模型 + 三护栏（pooling 核对 / 模型-维度成对声明 + 启动自检 / 清老向量，Decisions 16）。**待实测**：m3 的 CLS pooling 口径。**开跑前多一道前置（2026-09-12 勘察新增，未裁）**：嵌入留在**进程内 transformers.js**，还是改**独立 sidecar**——蓝本 clowder 的 LL-034 判词是「绝不在 API 进程内跑模型推理」，见 Notes「clowder-ai 向量栈实测」
 - **Q2-c · 规范标准的落点** —— 门牌形态（对齐 `docs/run/README.md` 范式）与机器可校验性（静态断言 / `skills-check-manifest.mjs` 同权）。含状态字段值域（ADR 四值是否本地扩写、`unverified` 与「已决未落地」的关系）——**依赖 Q2-g 的裁法**；另含 requirements 侧与 to-spec 七段模板的合并结果
 - ~~**Q2-d · 例外通道的操作定义（「较近」以什么划）**~~ —— **子问「较近」已关闭**（Decisions 22：断点 2026-08-13 / ADR 0007 起 7 份，依据是创建日两个自然簇）；**剩余子问**：抽出的卡片落哪个目录、走不走审查链
 - **Q3 · 切片粒度与入库标准** —— 切片形态**已裁**（Decisions 14：450 上限 + L1/L2/L3 确定性回退 + 小块检索整节返回）；**块不放大 + 每块带标题链**已裁（Decisions 21 三/四）；~~**Q3-b 表格子规则**~~ —— **已关闭**（Decisions 27：乙案定稿 = 转「列名：值」句子；剩一个转写**触发面**子问，店长推荐 (b) 全表无条件转写，待点头）；「入库标准的可校验字段」并入 **Q6-a**（见 Decisions 20）
