@@ -1315,7 +1315,10 @@ function makeCommitRepo(dirName, files, commitMsg) {
   execSync('git config user.email "test@catstudy.local"', { cwd: tmp, stdio: 'pipe' })
   execSync('git config user.name "Test Cat"', { cwd: tmp, stdio: 'pipe' })
   for (const [fp, content] of Object.entries(files)) {
-    writeFileSync(join(tmp, fp), content, 'utf-8')
+    // 目录可能不存在（如 `docs/run/a.md`）——递归建，别让嵌套路径的用例只能写平铺文件
+    const abs = join(tmp, fp)
+    mkdirSync(dirname(abs), { recursive: true })
+    writeFileSync(abs, content, 'utf-8')
   }
   execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
   execSync(`git commit -m "${commitMsg}"`, { cwd: tmp, stdio: 'pipe' })
@@ -2143,6 +2146,250 @@ function makeSpanRepo(dirName, uuid, commits) {
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
   console.log('  15a: 多 commit 同派发 → 改动面只看 HEAD（裁决契约）✅')
+}
+
+console.log('')
+
+// ═══ 测试组 16: 免审白名单（票乙：纯 docs/run/** 提交不发起审查轮） ═══════════
+// 靶心：在飞过程文档每落一次盘 → handoff 投一条审查请求（噪声 + 唤醒回环）。
+// 16a 是主判据；16b–16e 是它的四道**非恒真护栏**——没有它们，「POST = 0」在
+// stub 没接上 / 会话反查失败 / 判据恒真时同样绿，那是本仓踩过的假绿形态。
+//
+// 16d 是**审查回炉补的**（P2 实害）：首版判据带 `!process.env.CATSTUDY_SESSION_ID`
+// 前置，而该 env 是 server 注入给每只猫 CLI 的**常驻变量**（`llm/claude.ts:361` /
+// `llm/opencode.ts:91` / `llm/dsh.ts:94`），钩子（裸 node 调用）全量继承它 ⇒ 前置在
+// 产品路径上恒为假，免审豁免等于不存在。首版之所以全绿：样本跑在
+// `env -u CATSTUDY_SESSION_ID` 下——**验证面不是被判面**（本仓记过的假绿形态）。
+// 16d 把「猫的真实环境」钉成用例。四条用例各用独立临时仓库（账本按仓库隔离）。
+
+/**
+ * 建一个**有父提交**的仓库（首提交为 'chore: base'）。
+ * 必须两步：`changedPathsOf` 走 `<sha>~1..<sha>`，根 commit 没有 `~1` ⇒ 异常分支
+ * ⇒ 判据查不动 ⇒ 不豁免（安全侧）。本组要验的是**正常提交**上的豁免，故造父提交。
+ */
+function makeRepoWithParent(dirName, baseFiles, files, commitMsg) {
+  const tmp = makeCommitRepo(dirName, baseFiles, 'chore: base')
+  for (const [fp, content] of Object.entries(files)) {
+    const abs = join(tmp, fp)
+    mkdirSync(dirname(abs), { recursive: true })
+    writeFileSync(abs, content, 'utf-8')
+  }
+  execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
+  execSync(`git commit -m "${commitMsg}"`, { cwd: tmp, stdio: 'pipe' })
+  return tmp
+}
+
+/**
+ * runInProc 的 env 注入版：显式设置一组 env（值传 `undefined` = 显式清空）。
+ * 16 组用它构造「生产环境形态」（CATSTUDY_SESSION_ID 常驻）与「显式意图」
+ * （CATSTUDY_FORCE_DELIVER=1）两种条件——**只差 env，其余全同**。
+ */
+async function runInProcWithEnv(cwd, url, envPairs, opts = {}) {
+  const prevUrl = process.env.CATSTUDY_URL
+  const saved = new Map()
+  process.env.CATSTUDY_URL = url
+  for (const [k, v] of Object.entries(envPairs)) {
+    saved.set(k, process.env[k])
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
+  try {
+    await runHandoff({ cwd, ...opts })
+  } finally {
+    if (prevUrl === undefined) delete process.env.CATSTUDY_URL
+    else process.env.CATSTUDY_URL = prevUrl
+    for (const [k, prev] of saved) {
+      if (prev === undefined) delete process.env[k]
+      else process.env[k] = prev
+    }
+  }
+}
+
+/** HEAD commit 的改动路径（断言「场景确被构造出来」用——判据对了但 fixture 错了同样是假绿） */
+function changedPathsOfHead(tmp) {
+  return gitIn(tmp, 'diff --name-status HEAD~1..HEAD')
+    .split('\n')
+    .map((l) => l.split('\t').pop())
+    .filter(Boolean)
+}
+
+// 16a–16e：纯 docs/run 提交（判据靶心）。四条用例各用独立仓库，共用一个 stub。
+{
+  const uuid = '16aa0000-0000-4000-8000-000000000016'
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-16a',
+    updated: 0,
+    executor: 'ok',
+  })
+  /** 纯 docs/run 提交、**带父提交**（`changedPathsOf` 走 `<sha>~1..<sha>`） */
+  const mkExemptRepo = (dirName) =>
+    makeRepoWithParent(
+      dirName,
+      { 'README.md': '# base\n' },
+      { 'docs/run/memory-flywheel/map.md': '# 地图\n' },
+      `catstudy [${uuid}] docs(map): 落图`
+    )
+
+  // 16a: env 未设（人工终端直跑）→ 判静默（POST 0 + 留痕 + 不记账本）
+  {
+    const tmp = mkExemptRepo('.handoff-test-exempt-docsrun')
+    const headSha = gitIn(tmp, 'rev-parse HEAD')
+    const paths = changedPathsOfHead(tmp)
+    assert(
+      paths.length > 0 && paths.every((p) => p.startsWith('docs/run/')),
+      `前置：HEAD 确为纯 docs/run 提交（实际 ${JSON.stringify(paths)}）——否则本场景没被构造出来`
+    )
+
+    const post0 = stub.hits.post
+    const exec0 = stub.hits.executor
+    let threw = null
+    const logs16a = await captureLogs(async () => {
+      try {
+        await runInProc(tmp, stub.url, { fallbackSha: headSha })
+      } catch (err) {
+        threw = err
+      }
+    })
+
+    // A4：进程内 `runHandoff` 返回即等价 exit 0（顶层 catch 也兜异常，故"不抛"要显式断言）
+    assert(threw === null, `免审路径不得抛异常（实际 ${threw?.message}）`)
+    assert(stub.hits.post === post0, `纯 docs/run 提交不得 POST（实际 ${stub.hits.post - post0}）`)
+    assert(
+      logs16a.some((l) => l.includes('免审')),
+      '应留痕一行含「免审」（可 grep）——否则「静默」与「投递链路整个坏掉」不可区分'
+    )
+    assert(
+      stub.hits.executor === exec0,
+      `应在实施者反查**之前**返回（实际反查 ${stub.hits.executor - exec0} 次）——否则静默点不在入口`
+    )
+    assert(
+      !existsSync(join(tmp, STATE_FILE)),
+      '判静默不得记账本（账本单态 = 真投过；记了会锁死收尾兜底）'
+    )
+    console.log('  16a: 纯 docs/run 提交（env 未设）→ 判静默（POST 0 / 留痕 / 不记账本）✅')
+  }
+
+  // 16d（回归·本轮新增）：**生产环境形态** —— CATSTUDY_SESSION_ID 由 server 注入给猫的
+  //      CLI（llm/claude.ts:361），`.husky/post-commit` 是裸 node 调用、全量继承它。
+  //      首版判据「该 env 未设 且 全免审」在此形态下恒假 ⇒ 纯 docs 提交照发审查请求。
+  //      与 16a **同 sha 形态、只差这一个 env**：任何差异只能归因于它。
+  {
+    const tmp = mkExemptRepo('.handoff-test-exempt-prodenv')
+    const headSha = gitIn(tmp, 'rev-parse HEAD')
+    const post0 = stub.hits.post
+    let threw = null
+    const logs16d = await captureLogs(async () => {
+      try {
+        await runInProcWithEnv(
+          tmp,
+          stub.url,
+          { CATSTUDY_SESSION_ID: 'session-16d', CATSTUDY_FORCE_DELIVER: undefined },
+          { fallbackSha: headSha }
+        )
+      } catch (err) {
+        threw = err
+      }
+    })
+
+    assert(threw === null, `生产形态下免审路径不得抛异常（实际 ${threw?.message}）`)
+    assert(
+      stub.hits.post === post0,
+      `生产形态（CATSTUDY_SESSION_ID 常驻）下仍须判静默——实际 POST ${stub.hits.post - post0} 次`
+    )
+    assert(
+      logs16d.some((l) => l.includes('免审')),
+      '生产形态下应留痕含「免审」——首版在此形态判「照常投递」，正是回炉的那条 P2'
+    )
+    assert(!existsSync(join(tmp, STATE_FILE)), '生产形态下同样不得记账本')
+    console.log('  16d: 生产形态（CATSTUDY_SESSION_ID 常驻，无强制开关）→ 仍判静默 ✅')
+  }
+
+  // 16c: 显式意图 = CATSTUDY_FORCE_DELIVER=1 → 强制投递，豁免不得把它吞掉
+  //      （首版这个信号源是 CATSTUDY_SESSION_ID——它在生产路径上恒为真，等于没有开关）
+  {
+    const tmp = mkExemptRepo('.handoff-test-exempt-force')
+    const headSha = gitIn(tmp, 'rev-parse HEAD')
+    const post0 = stub.hits.post
+    const logs16c = await captureLogs(() =>
+      runInProcWithEnv(
+        tmp,
+        stub.url,
+        { CATSTUDY_SESSION_ID: undefined, CATSTUDY_FORCE_DELIVER: '1' },
+        { fallbackSha: headSha }
+      )
+    )
+    assert(
+      stub.hits.post === post0 + 1,
+      `强制投递不得被白名单吞掉（实际 POST ${stub.hits.post - post0} 次）——人工重投旁路必须活着`
+    )
+    assert(
+      !logs16c.some((l) => l.includes('免审')),
+      'FORCE_DELIVER=1 时不应走豁免分支（判据是「未强制 且 全免审」）'
+    )
+    assert(
+      existsSync(join(tmp, STATE_FILE)),
+      '16c 真投递 → 应落 delivered 账本（与 16a 的「不记账本」成对照）'
+    )
+    console.log('  16c: CATSTUDY_FORCE_DELIVER=1 → 显式意图优先，照常投递 ✅')
+  }
+
+  // 16e: 生产形态 + 强制开关并存 → 仍照常投递（两个信号不得互相污染）
+  {
+    const tmp = mkExemptRepo('.handoff-test-exempt-prodenv-force')
+    const headSha = gitIn(tmp, 'rev-parse HEAD')
+    const post0 = stub.hits.post
+    await runInProcWithEnv(
+      tmp,
+      stub.url,
+      { CATSTUDY_SESSION_ID: 'session-16e', CATSTUDY_FORCE_DELIVER: 'true' },
+      { fallbackSha: headSha }
+    )
+    assert(
+      stub.hits.post === post0 + 1,
+      `生产形态下强制开关仍须生效（实际 POST ${stub.hits.post - post0} 次）`
+    )
+    assert(existsSync(join(tmp, STATE_FILE)), '16e 真投递 → 应落 delivered 账本')
+    console.log('  16e: 生产形态 + FORCE_DELIVER=true → 照常投递 ✅')
+  }
+
+  stub.server.close()
+}
+
+// 16b: 混合改动（一条 docs/run + 一条 packages/server）→ 照常投递，不回归
+{
+  const uuid = '16bb0000-0000-4000-8000-000000000016'
+  const tmp = makeRepoWithParent(
+    '.handoff-test-exempt-mixed',
+    { 'README.md': '# base\n' },
+    { 'docs/run/a.md': '# a\n', 'packages/server/src/x.ts': 'export const x = 1\n' },
+    `catstudy [${uuid}] feat: 混合改动`
+  )
+  const headSha = gitIn(tmp, 'rev-parse HEAD')
+  const paths = changedPathsOfHead(tmp)
+  assert(
+    paths.includes('docs/run/a.md') && paths.includes('packages/server/src/x.ts'),
+    `前置：混合场景确被构造出来（实际 ${JSON.stringify(paths)}）`
+  )
+
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-16b',
+    updated: 0,
+    executor: 'ok',
+  })
+  const logs16b = await captureLogs(() => runInProc(tmp, stub.url, { fallbackSha: headSha }))
+
+  // 非恒真护栏：同一 stub、同一入口，只差改动面 ⇒ 16a 的 POST 0 不是「stub 没接上」
+  assert(stub.hits.post === 1, `混合改动应照常投递（实际 POST ${stub.hits.post} 次）`)
+  assert(
+    !logs16b.some((l) => l.includes('免审')),
+    '只要有一条非免审路径，整条提交照常走审查——不得出现「免审」留痕'
+  )
+  console.log('  16b: 混合改动 → 照常投递（免审判据不是恒真门）✅')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
 }
 
 console.log('')

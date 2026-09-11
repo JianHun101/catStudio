@@ -12,6 +12,10 @@ import {
   resolveExecutorName,
   probeAttribution,
   describeExecutorMatch,
+  isExemptDelivery,
+  isForceDeliver,
+  REVIEW_EXEMPT_PREFIXES,
+  parseChangedFiles,
 } from './handoff-gen.mjs'
 
 describe('decideHookDelivery — T-A ① 钩子侧归属判据', () => {
@@ -227,6 +231,117 @@ describe('probeAttribution — ambiguous 是「有归属」的直接证据（T-M
   })
 })
 
+describe('isExemptDelivery — docs/run/ 免审白名单（票乙）', () => {
+  // 判据的靶心：纯 `docs/run/**` 提交（在飞过程文档）不再发起独立审查轮。
+  // 两个陷阱都在下面钉死：**尾斜杠**（前缀 ≠ 路径段）与**空数组**（every 对空集恒真）。
+
+  it('常量带尾斜杠（docs/run-x/a.md 不得命中的唯一保证）', () => {
+    expect(REVIEW_EXEMPT_PREFIXES).toEqual(['docs/run/'])
+  })
+
+  it('单路径命中前缀 → true', () => {
+    expect(isExemptDelivery(['docs/run/map.md'])).toBe(true)
+  })
+
+  it('深层路径命中前缀 → true（前缀匹配不是同层匹配）', () => {
+    expect(isExemptDelivery(['docs/run/memory-flywheel/map.md'])).toBe(true)
+  })
+
+  it('混合路径（一条非免审）→ false，整条提交照常走审查', () => {
+    expect(isExemptDelivery(['docs/run/a.md', 'packages/server/src/x.ts'])).toBe(false)
+    // 顺序无关：非免审那条在后也在前，都是 false
+    expect(isExemptDelivery(['packages/server/src/x.ts', 'docs/run/a.md'])).toBe(false)
+  })
+
+  it('docs/run-x/a.md → false（前缀相似但缺尾斜杠边界，不是命中）', () => {
+    expect(isExemptDelivery(['docs/run-x/a.md'])).toBe(false)
+    expect(isExemptDelivery(['docs/runs/a.md'])).toBe(false)
+    // 单条也不行——不是「至少一条命中」而是「全部命中」
+    expect(isExemptDelivery(['docs/run/a.md', 'docs/run-x/b.md'])).toBe(false)
+  })
+
+  it('空数组 → false（every 对空集恒真，是陷阱）', () => {
+    expect(isExemptDelivery([])).toBe(false)
+  })
+
+  it('null / undefined / 非数组（判据查不动）→ false，照常投递', () => {
+    expect(isExemptDelivery(null)).toBe(false)
+    expect(isExemptDelivery(undefined)).toBe(false)
+    expect(isExemptDelivery('docs/run/a.md')).toBe(false)
+  })
+
+  it('rename 取新路径（parseChangedFiles，A2）——改名**进**免审前缀要判豁免', () => {
+    const files = parseChangedFiles('R100\tdocs/old.md\tdocs/run/new.md')
+    expect(files).toEqual([{ status: 'R100', path: 'docs/run/new.md' }])
+    expect(isExemptDelivery(files.map((f) => f.path))).toBe(true)
+    // 反向：从免审前缀改名**出去**，取新路径 ⇒ 不再豁免（取旧路径就会误判）
+    const out = parseChangedFiles('R100\tdocs/run/old.md\tscripts/x.mjs')
+    expect(isExemptDelivery(out.map((f) => f.path))).toBe(false)
+  })
+
+  it('阴性对照：非豁免清单在旧行为下会投递（判据不是恒真门）', () => {
+    // 上一轮的噪声源形态：地图提交 `docs/run/memory-flywheel/map.md` 单文件。
+    // 本判据上线前它必投一条——即本票的原始病案。
+    expect(isExemptDelivery(['docs/run/memory-flywheel/map.md'])).toBe(true)
+    expect(
+      isExemptDelivery(['docs/run/memory-flywheel/tickets.md', 'scripts/handoff-gen.mjs'])
+    ).toBe(false)
+  })
+})
+
+describe('isForceDeliver — 免审豁免的强制投递开关（票乙·审查回炉）', () => {
+  it('1 / true（含大小写与首尾空白）→ true', () => {
+    expect(isForceDeliver('1')).toBe(true)
+    expect(isForceDeliver('true')).toBe(true)
+    expect(isForceDeliver('TRUE')).toBe(true)
+    expect(isForceDeliver(' 1 ')).toBe(true)
+  })
+
+  it('未设（undefined / null / 空串）→ false', () => {
+    expect(isForceDeliver(undefined)).toBe(false)
+    expect(isForceDeliver(null)).toBe(false)
+    expect(isForceDeliver('')).toBe(false)
+    expect(isForceDeliver('   ')).toBe(false)
+  })
+
+  it('「非空即真」是陷阱：0 / false / no / 任意值 → false（手滑不得静默变成强制投递）', () => {
+    expect(isForceDeliver('0')).toBe(false)
+    expect(isForceDeliver('false')).toBe(false)
+    expect(isForceDeliver('FALSE')).toBe(false)
+    expect(isForceDeliver('no')).toBe(false)
+    expect(isForceDeliver('yes')).toBe(false)
+    expect(isForceDeliver('2')).toBe(false)
+  })
+})
+
+describe('免审豁免前置不得回退到 CATSTUDY_SESSION_ID（静态源断言）', () => {
+  // 病案（审查回炉 P2，实害）：首版判据是
+  //   `!process.env.CATSTUDY_SESSION_ID && isExemptDelivery(paths)`
+  // 而该 env 是 **server 注入给每只猫 CLI 的常驻变量**（llm/claude.ts:361 /
+  // opencode.ts:91 / dsh.ts:94），钩子（裸 node 调用）全量继承它 ⇒ 前置在产品路径上
+  // 恒为假，免审豁免等于不存在，纯 docs/run 提交照发审查请求。
+  // 断言**源码**而不是行为：行为面在 e2e 16d；这里钉的是「别再退回那个 env」——
+  // 行为用例需要一个真为假的 env 才红，而源码断言在任何环境下都红。
+  //
+  // 按行滤注释，**不**用 `/\/\*[\s\S]*?\*\//` 剥块注释：本仓注释里到处是
+  // `docs/run/**`，其中的 `/*` 会被当成块注释开头，一路吞到下一个 `*/`——
+  // 实测把 guard 行整段吃掉了（该 strip 的旧用法见下方 e2e 静态断言组，已同步改）。
+  const src = readFileSync(new URL('./handoff-gen.mjs', import.meta.url), 'utf-8')
+  const codeLines = src.split('\n').filter((l) => {
+    const t = l.trim()
+    return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+  })
+
+  it('豁免判据行用 CATSTUDY_FORCE_DELIVER，且不含 CATSTUDY_SESSION_ID', () => {
+    const guard = codeLines
+      .filter((l) => l.includes('isExemptDelivery(paths)'))
+      .filter((l) => !l.includes('function ')) // 排除定义行，只留调用/判据行
+    expect(guard.length).toBe(1)
+    expect(guard[0]).toContain('CATSTUDY_FORCE_DELIVER')
+    expect(guard[0]).not.toContain('CATSTUDY_SESSION_ID')
+  })
+})
+
 describe('handoff-gen.e2e.mjs — 临时仓库不得建在仓库树内（静态源断言）', () => {
   // 回归模式：有人新加一条用例，又把临时 git 仓库写成 join(ROOT, '.handoff-test-x')。
   // 那样它既不在 .gitignore、也多半不会被删——并发的 `git add -A`（auto-commit）
@@ -234,8 +349,17 @@ describe('handoff-gen.e2e.mjs — 临时仓库不得建在仓库树内（静态�
   // 断言源码而不是断言运行时：运行时即使漏删，用例自己也可能看不见残留。
   // 只断言**代码**：e2e 的注释里正记录着这个模式（那段历史说明），不剥注释会让
   // 守卫被自己的说明文字打红——第一次跑就是这么红的。
+  // 按行滤注释（`//` / `*` / `/*` 开头），**不**用 `/\/\*[\s\S]*?\*\//` 剥块注释：
+  // 本仓文本里到处是 `docs/run/**`，其中的 `/*` 会被当成块注释开头、一路吞到下一个
+  // `*/`——那段被吞掉的代码恰好包含要断言的目标，守卫于是恒绿（假绿门）。
   const source = readFileSync(new URL('./handoff-gen.e2e.mjs', import.meta.url), 'utf-8')
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const code = source
+    .split('\n')
+    .filter((l) => {
+      const t = l.trim()
+      return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+    })
+    .join('\n')
 
   it('不出现 join(ROOT, …)——临时仓库一律挂系统临时目录', () => {
     expect(code).not.toContain('join(ROOT, ')
