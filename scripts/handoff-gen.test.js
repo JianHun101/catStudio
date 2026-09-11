@@ -13,6 +13,7 @@ import {
   probeAttribution,
   describeExecutorMatch,
   isExemptDelivery,
+  isForceDeliver,
   REVIEW_EXEMPT_PREFIXES,
   parseChangedFiles,
 } from './handoff-gen.mjs'
@@ -288,6 +289,59 @@ describe('isExemptDelivery — docs/run/ 免审白名单（票乙）', () => {
   })
 })
 
+describe('isForceDeliver — 免审豁免的强制投递开关（票乙·审查回炉）', () => {
+  it('1 / true（含大小写与首尾空白）→ true', () => {
+    expect(isForceDeliver('1')).toBe(true)
+    expect(isForceDeliver('true')).toBe(true)
+    expect(isForceDeliver('TRUE')).toBe(true)
+    expect(isForceDeliver(' 1 ')).toBe(true)
+  })
+
+  it('未设（undefined / null / 空串）→ false', () => {
+    expect(isForceDeliver(undefined)).toBe(false)
+    expect(isForceDeliver(null)).toBe(false)
+    expect(isForceDeliver('')).toBe(false)
+    expect(isForceDeliver('   ')).toBe(false)
+  })
+
+  it('「非空即真」是陷阱：0 / false / no / 任意值 → false（手滑不得静默变成强制投递）', () => {
+    expect(isForceDeliver('0')).toBe(false)
+    expect(isForceDeliver('false')).toBe(false)
+    expect(isForceDeliver('FALSE')).toBe(false)
+    expect(isForceDeliver('no')).toBe(false)
+    expect(isForceDeliver('yes')).toBe(false)
+    expect(isForceDeliver('2')).toBe(false)
+  })
+})
+
+describe('免审豁免前置不得回退到 CATSTUDY_SESSION_ID（静态源断言）', () => {
+  // 病案（审查回炉 P2，实害）：首版判据是
+  //   `!process.env.CATSTUDY_SESSION_ID && isExemptDelivery(paths)`
+  // 而该 env 是 **server 注入给每只猫 CLI 的常驻变量**（llm/claude.ts:361 /
+  // opencode.ts:91 / dsh.ts:94），钩子（裸 node 调用）全量继承它 ⇒ 前置在产品路径上
+  // 恒为假，免审豁免等于不存在，纯 docs/run 提交照发审查请求。
+  // 断言**源码**而不是行为：行为面在 e2e 16d；这里钉的是「别再退回那个 env」——
+  // 行为用例需要一个真为假的 env 才红，而源码断言在任何环境下都红。
+  //
+  // 按行滤注释，**不**用 `/\/\*[\s\S]*?\*\//` 剥块注释：本仓注释里到处是
+  // `docs/run/**`，其中的 `/*` 会被当成块注释开头，一路吞到下一个 `*/`——
+  // 实测把 guard 行整段吃掉了（该 strip 的旧用法见下方 e2e 静态断言组，已同步改）。
+  const src = readFileSync(new URL('./handoff-gen.mjs', import.meta.url), 'utf-8')
+  const codeLines = src.split('\n').filter((l) => {
+    const t = l.trim()
+    return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+  })
+
+  it('豁免判据行用 CATSTUDY_FORCE_DELIVER，且不含 CATSTUDY_SESSION_ID', () => {
+    const guard = codeLines
+      .filter((l) => l.includes('isExemptDelivery(paths)'))
+      .filter((l) => !l.includes('function ')) // 排除定义行，只留调用/判据行
+    expect(guard.length).toBe(1)
+    expect(guard[0]).toContain('CATSTUDY_FORCE_DELIVER')
+    expect(guard[0]).not.toContain('CATSTUDY_SESSION_ID')
+  })
+})
+
 describe('handoff-gen.e2e.mjs — 临时仓库不得建在仓库树内（静态源断言）', () => {
   // 回归模式：有人新加一条用例，又把临时 git 仓库写成 join(ROOT, '.handoff-test-x')。
   // 那样它既不在 .gitignore、也多半不会被删——并发的 `git add -A`（auto-commit）
@@ -295,8 +349,17 @@ describe('handoff-gen.e2e.mjs — 临时仓库不得建在仓库树内（静态�
   // 断言源码而不是断言运行时：运行时即使漏删，用例自己也可能看不见残留。
   // 只断言**代码**：e2e 的注释里正记录着这个模式（那段历史说明），不剥注释会让
   // 守卫被自己的说明文字打红——第一次跑就是这么红的。
+  // 按行滤注释（`//` / `*` / `/*` 开头），**不**用 `/\/\*[\s\S]*?\*\//` 剥块注释：
+  // 本仓文本里到处是 `docs/run/**`，其中的 `/*` 会被当成块注释开头、一路吞到下一个
+  // `*/`——那段被吞掉的代码恰好包含要断言的目标，守卫于是恒绿（假绿门）。
   const source = readFileSync(new URL('./handoff-gen.e2e.mjs', import.meta.url), 'utf-8')
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const code = source
+    .split('\n')
+    .filter((l) => {
+      const t = l.trim()
+      return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+    })
+    .join('\n')
 
   it('不出现 join(ROOT, …)——临时仓库一律挂系统临时目录', () => {
     expect(code).not.toContain('join(ROOT, ')

@@ -65,6 +65,10 @@
  *                         两者都不可用时**报错不投递**——绝不猜目标。
  *                         曾因反查失败静默降级到环境变量/API 第一个会话，
  *                         把审查文档投到错误会话（"UI优化"打偏、b8b0a6d 跨会话）。
+ *   CATSTUDY_FORCE_DELIVER=1  强制投递：跳过 `docs/run/**` 免审豁免（票乙）。
+ *                         **钩子永不设**——只有人工在 shell 里显式 export 才为真；
+ *                         用 CATSTUDY_SESSION_ID 当这个信号是错的（它常驻，见
+ *                         `isForceDeliver` 注释）。
  *   HANDOFF_VERIFY_MS    落库验证轮询预算（默认 10000ms，测试可调小）
  */
 
@@ -348,6 +352,33 @@ export function isExemptDelivery(paths) {
     paths.length > 0 &&
     paths.every((p) => REVIEW_EXEMPT_PREFIXES.some((pre) => p.startsWith(pre)))
   )
+}
+
+/**
+ * 强制投递开关（纯函数）：`CATSTUDY_FORCE_DELIVER=1|true` → 跳过免审豁免。
+ *
+ * 语义仍是**「显式意图 > 自动豁免」**，但信号源换过了——首版拿
+ * `CATSTUDY_SESSION_ID` 当前置，审查回炉实测推翻：
+ *
+ * - 它**不是**「人工显式指定」的标记，而是 server 给每只猫的 CLI 子进程注入的
+ *   **常驻变量**（`llm/claude.ts:361`、`llm/opencode.ts:91`、`llm/dsh.ts:94`）；
+ * - `.husky/post-commit` 与 `.husky/pre-push` 是裸 `node` 调用，**全量继承**该 env
+ *   （`execution/review-fallback.ts:153-158` 正因知道这点才显式 `delete` 它）；
+ * - ⇒ 在猫驱动的每次提交/推送上它都为真，做前置等于**把免审豁免整个关死**——
+ *   纯 `docs/run/**` 提交照发审查请求，本票的可证伪目标在真实环境下不成立。
+ *
+ * 换成一个**钩子永不设**的开关：只有人工在 shell 里显式 export 才为真。
+ * 取值从宽只认 `1` / `true`（大小写与首尾空白容忍），**不做「非空即真」**——
+ * 否则 `CATSTUDY_FORCE_DELIVER=0` 这种手滑会静默变成「强制投递」。
+ *
+ * @param {string|undefined|null} raw — 原始 env 值
+ * @returns {boolean}
+ */
+export function isForceDeliver(raw) {
+  const v = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+  return v === '1' || v === 'true'
 }
 
 /**
@@ -1539,13 +1570,21 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
   // 免审白名单（票乙）：改动**全部**在 `docs/run/**` 内 → 判静默，不 POST、不记账本。
   // 位置在 delivered 早退**之后**（已投过的不重复判）、tryPostToCatstudy **之前**
   // （省掉整条投递链路：会话反查 / 实施者反查 / POST）。
-  // `CATSTUDY_SESSION_ID` 前置 = **显式意图 > 自动豁免**：该 env 是既定的人工重投
-  // 旁路（handoff 静默丢弃时的恢复路径），白名单不得把它一起吞掉。
+  // 前置 = **显式意图 > 自动豁免**，但信号源是 `CATSTUDY_FORCE_DELIVER` 而**不是**
+  // `CATSTUDY_SESSION_ID`——首版用后者，而它在猫的 CLI 环境里常驻 ⇒ 豁免恒不生效
+  // （详见 `isForceDeliver` 注释；e2e 16d 把这个生产形态钉成回归用例）。
+  //
+  // 已知代价（审查回炉留痕，非漏改）：本早退同时跳过 `attemptDeliver` 里的
+  // **commit_hash 写回**（同文件 :1262 声明「静默路径也要记 commit_hash」）。
+  // 对免审提交而言这条链锚没有消费方——免审提交不进审查链，收尾兜底
+  // （--fallback-sha）也正是在它身上静默；下游若另有依赖，属架构面（OQ3）。
+  //
   // 返回既有 'skip'：与归属静默同一语义（非错误、不记账本，见上方注释）。
   const paths = changedPathsOf(cwd, fullSha)
-  if (!process.env.CATSTUDY_SESSION_ID && isExemptDelivery(paths)) {
+  if (!isForceDeliver(process.env.CATSTUDY_FORCE_DELIVER) && isExemptDelivery(paths)) {
     console.log(
-      `[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 改动全在免审前缀内（${paths.join(', ')}）——静默，不投递`
+      `[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 改动全在免审前缀内（${paths.join(', ')}）` +
+        `——静默，不投递（连带跳过 commit_hash 写回）`
     )
     return 'skip'
   }

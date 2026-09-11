@@ -73,32 +73,36 @@ function changedPathsOf(cwd, fullSha) -> string[] | null
 
 ```js
 const paths = changedPathsOf(cwd, fullSha)
-if (!process.env.CATSTUDY_SESSION_ID && isExemptDelivery(paths)) {
+if (!isForceDeliver(process.env.CATSTUDY_FORCE_DELIVER) && isExemptDelivery(paths)) {
   console.log(
-    `[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 改动全在免审前缀内（${paths.join(', ')}）——静默，不投递`
+    `[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 改动全在免审前缀内（${paths.join(', ')}）` +
+      `——静默，不投递（连带跳过 commit_hash 写回）`
   )
   return 'skip'
 }
 ```
 
 - **为什么落在 `deliverSha`**：全部 **4 个调用点**——post-commit（`:1625`）/ `--gate-deliver`（`:1574`）/ `--fallback-sha`（`:1555`）/ `drainPending`（`:1516`）——都经此 ⇒ **一处判、全覆盖**。放 CLI 三个分支则漏掉 `drainPending`（它被 post-commit 与 gate-deliver 两条路径共用）。
-- **`CATSTUDY_SESSION_ID` 优先于白名单**：显式意图 > 自动豁免。该 env 是既定的人工重投旁路（handoff 静默丢弃的恢复路径），白名单不得把它一起关掉。
+- **前置开关 = `CATSTUDY_FORCE_DELIVER`**：显式意图 > 自动豁免，但信号源**审查回炉已换**——首版写的是 `!process.env.CATSTUDY_SESSION_ID`，该 env 是 server 注入给**每只猫 CLI 的常驻变量**（`llm/claude.ts:361` / `opencode.ts:91` / `dsh.ts:94`），而钩子（裸 `node` 调用）全量继承它 ⇒ 前置在产品路径上**恒为假**，免审豁免等于不存在。改用**钩子永不设**的专用开关（人工 shell 显式 export 才为真，取值只认 `1`/`true`）。
+- **已知代价（留痕，非漏改）**：本早退同时跳过 `attemptDeliver` 的 **commit_hash 写回**（同文件 `:1262` 声明「静默路径也要记 commit_hash」）。免审提交不进审查链，这条链锚无消费方；下游若另有依赖属架构面（挂 OQ3 交店长裁）。
 - **返回既有 `'skip'` 而非新值**：与归属静默同一语义（非错误、不记账本，见 `:1472-1477` 既有契约）。
 - **留痕 = stdout 一行**，含关键词 `免审`（可 grep）；不新增文件、不写状态。
 
 ### 验收（逐条可执行）
 
-| #   | 验收项                | 判据                                                                                                                                                                                                        |
-| --- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A1  | 纯判据单测            | `scripts/handoff-gen.test.js` 新增 6 条：① 单路径全命中 → true ② 混合路径 → false ③ `docs/run-x/a.md` → false ④ `[]` → false ⑤ `null` / `undefined` → false ⑥ 深层 `docs/run/memory-flywheel/map.md` → true |
-| A2  | rename 取新路径       | 单测：`parseChangedFiles("R100\tdocs/old.md\tdocs/run/new.md")` → 路径为 `docs/run/new.md`                                                                                                                  |
-| A3  | 全量测试绿            | `pnpm test` 全绿；既有 `scripts/handoff-gen.test.js`（248 行）断言一条不删不弱                                                                                                                              |
-| A4  | 端到端 · 命中判静默   | `handoff-gen.e2e.mjs` 新增组：临时 repo 造**纯 `docs/run/**` commit**；stub server **计数 POST**；`--fallback-sha <sha>`（清 `CATSTUDY_SESSION_ID`）→ **POST 计数 = 0** + stdout 含 `免审` + exit 0         |
-| A5  | 端到端 · 非命中不回归 | 同组：混合 commit（`docs/run/a.md` + `packages/server/src/x.ts`）→ **POST 计数 = 1**                                                                                                                        |
-| A6  | 端到端 · 旁路优先     | 同组：命中 sha + `CATSTUDY_SESSION_ID=<id>` → **POST 计数 = 1**（显式意图不被白名单吞）                                                                                                                     |
-| A7  | 零 server 改动        | `git diff --name-only` 不含 `packages/server/**`；交付说明「无需重启」                                                                                                                                      |
+| #   | 验收项                | 判据                                                                                                                                                                                                                                                          |
+| --- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1  | 纯判据单测            | `scripts/handoff-gen.test.js` 新增 6 条：① 单路径全命中 → true ② 混合路径 → false ③ `docs/run-x/a.md` → false ④ `[]` → false ⑤ `null` / `undefined` → false ⑥ 深层 `docs/run/memory-flywheel/map.md` → true                                                   |
+| A2  | rename 取新路径       | 单测：`parseChangedFiles("R100\tdocs/old.md\tdocs/run/new.md")` → 路径为 `docs/run/new.md`                                                                                                                                                                    |
+| A3  | 全量测试绿            | `pnpm test` 全绿；既有 `scripts/handoff-gen.test.js`（248 行）断言一条不删不弱                                                                                                                                                                                |
+| A4  | 端到端 · 命中判静默   | `handoff-gen.e2e.mjs` 新增组：临时 repo 造**纯 `docs/run/**` commit**；stub server **计数 POST**；`--fallback-sha <sha>` → **POST 计数 = 0** + stdout 含 `免审` + exit 0。**两条形态**：16a（env 未设）/ **16d（`CATSTUDY_SESSION_ID` 常驻 = 猫的真实环境）** |
+| A5  | 端到端 · 非命中不回归 | 同组：混合 commit（`docs/run/a.md` + `packages/server/src/x.ts`）→ **POST 计数 = 1**                                                                                                                                                                          |
+| A6  | 端到端 · 旁路优先     | 同组：命中 sha + `CATSTUDY_FORCE_DELIVER=1` → **POST 计数 = 1**（显式意图不被白名单吞；16e 再验「生产形态 + 开关并存」）                                                                                                                                      |
+| A7  | 零 server 改动        | `git diff --name-only` 不含 `packages/server/**`；交付说明「无需重启」                                                                                                                                                                                        |
 
 **签收判据**：A1–A7 全过 + 实施者自报「未触碰 Out of Scope 清单任一项」。
+
+**修订（审查回炉 · 2026-09-11）**：首版不合规项 = 前置信号源选错（`CATSTUDY_SESSION_ID` 常驻 ⇒ 豁免在生产路径恒不生效，A4 的原始判据只在 `env -u` 下为真——**验证面不是被判面**）。已改：C4 前置换 `CATSTUDY_FORCE_DELIVER`；A4 增加 16d（生产形态回归）；A6 换开关；新增静态源断言防回退（`handoff-gen.test.js`：「豁免判据行不得含 `CATSTUDY_SESSION_ID`」）。**A1/A2/A3/A5/A7 未变**。
 
 ### 决策留痕
 
