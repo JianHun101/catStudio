@@ -291,8 +291,9 @@ function safeGit(cwd, cmd) {
 /**
  * @param {string} raw — git diff --name-status 输出
  * @returns {Array<{path: string, status: string}>}
+ * 导出供单测直接断言 rename 取新路径的语义（票乙 A2）——纯函数，无副作用。
  */
-function parseChangedFiles(raw) {
+export function parseChangedFiles(raw) {
   return raw
     .split('\n')
     .map((line) => line.trim())
@@ -306,6 +307,71 @@ function parseChangedFiles(raw) {
       }
       return { status, path: parts[1] || parts[0] }
     })
+}
+
+// ─── 免审白名单（票乙：纯 docs/run/** 提交不发起独立审查轮）─────────
+// 在飞过程文档（`docs/run/**`：地图 / 票单 / 派活单）每落一次盘就触发一条无意义
+// 审查请求 → 噪声 + 唤醒回环（map Decisions 15/18/25）。
+//
+// ⚠️ 边界（有意，别当漏改）：免的是**独立审查轮**，不是「上远端」。命中后不进
+// `.push-gate`，pre-push 仍按「已审历史」拦——纯 docs 提交随收口批次一次性进
+// 已审面，与既有规矩一致。
+// ⚠️ 判静默**不记账本**：账本单态 = 「真投过」（见 deliverSha 注释）。记了会把
+// server 收尾兜底（--fallback-sha）自己锁死——同一个 SHA 的兜底恰好发生在静默之后。
+//
+// 落点选在 `deliverSha`（4 个调用点全经此：post-commit / --gate-deliver /
+// --fallback-sha / drainPending）⇒ 一处判、全覆盖。放 CLI 三个分支则漏掉
+// `drainPending`（被 post-commit 与 gate-deliver 共用）。原拟落点 `review-fallback.ts`
+// 已推翻：server 侧拿不到路径清单（要新开同步 git 子进程，该文件明确回避过）。
+
+/**
+ * 免审路径前缀清单。**必须带尾斜杠**——这是 `docs/run-x/a.md` 不得命中的唯一保证。
+ * 本票只此一个前缀，不扩清单（Out of Scope）。
+ */
+export const REVIEW_EXEMPT_PREFIXES = ['docs/run/']
+
+/**
+ * 纯判据：改动路径**全部**落在免审前缀内 → 判静默（不投递、不记账本、不记 pending）。
+ *
+ * - 空数组必须判 `false`——`every` 对空集恒真，是陷阱（上游 generateHandoff 已对空
+ *   diff 早退，此处**不依赖**它；本函数自己挡）
+ * - `null` / `undefined` / 非数组（判据查不动）同样 `false`——静默只在判据明确时发生，
+ *   与 `decideHookDelivery(null)`「查不动一律投递」同款精神
+ * - 前缀匹配是**字符串前缀**而非路径段：靠常量带尾斜杠保证边界，不在此另写路径归一
+ *
+ * @param {string[]|null|undefined} paths — 仓库相对路径清单
+ * @returns {boolean}
+ */
+export function isExemptDelivery(paths) {
+  return (
+    Array.isArray(paths) &&
+    paths.length > 0 &&
+    paths.every((p) => REVIEW_EXEMPT_PREFIXES.some((pre) => p.startsWith(pre)))
+  )
+}
+
+/**
+ * 取单个 commit 的改动路径清单（内部 helper，不导出）。
+ * 复用 `parseChangedFiles`（rename 取**新路径**），不另写解析器。
+ *
+ * 任何异常 → `null` ⇒ **不豁免**（照常投递）——失败方向落在「多投一条」而非
+ * 「静默吞掉」，与全文件的「宁可多投不可漏投」一致。
+ *
+ * 已知边界（留痕，非漏改）：**根 commit**（无 `~1` 父提交）会走异常分支 → null →
+ * 不豁免。真实提交恒有父提交，实际不可达；方向也是安全侧（多投一条审查请求）。
+ *
+ * @param {string} cwd
+ * @param {string} fullSha — 完整 SHA
+ * @returns {string[]|null}
+ */
+function changedPathsOf(cwd, fullSha) {
+  try {
+    return parseChangedFiles(git(cwd, `diff --name-status ${fullSha}~1..${fullSha}`)).map(
+      (f) => f.path
+    )
+  } catch {
+    return null
+  }
 }
 
 /** 分层排序权重 */
@@ -1442,7 +1508,8 @@ function resolveFullSha(cwd, sha) {
  * - delivered 命中 → 跳过（幂等；CATSTUDY_SESSION_ID 显式指定时旁路——明确意图，
  *   如会话重建后重投）
  * - ok → 记 delivered、移出 pending
- * - skip（T-A ①：归属判据判静默）→ **不记账本、不记 pending**，原样返回
+ * - skip（T-A ①：归属判据判静默 / 票乙：改动全在免审前缀内）→ **不记账本、
+ *   不记 pending**，原样返回
  * - fatal → 移出 pending（确定性失败重试无意义，死 SHA 不滞留）
  * - transient（重试已耗尽）→ 记入 pending，下次投递机会自动补投
  *
@@ -1468,6 +1535,21 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
       `[handoff-gen] ℹ️  ${fullSha.slice(0, 7)} 已投递过，但 CATSTUDY_SESSION_ID 显式指定——按明确意图重新投递`
     )
   }
+
+  // 免审白名单（票乙）：改动**全部**在 `docs/run/**` 内 → 判静默，不 POST、不记账本。
+  // 位置在 delivered 早退**之后**（已投过的不重复判）、tryPostToCatstudy **之前**
+  // （省掉整条投递链路：会话反查 / 实施者反查 / POST）。
+  // `CATSTUDY_SESSION_ID` 前置 = **显式意图 > 自动豁免**：该 env 是既定的人工重投
+  // 旁路（handoff 静默丢弃时的恢复路径），白名单不得把它一起吞掉。
+  // 返回既有 'skip'：与归属静默同一语义（非错误、不记账本，见上方注释）。
+  const paths = changedPathsOf(cwd, fullSha)
+  if (!process.env.CATSTUDY_SESSION_ID && isExemptDelivery(paths)) {
+    console.log(
+      `[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 改动全在免审前缀内（${paths.join(', ')}）——静默，不投递`
+    )
+    return 'skip'
+  }
+
   const result = await tryPostToCatstudy(content, cwd, { sha, ...opts })
   if (result === 'skip') {
     // T-A ①：归属判据判静默——**不记账本**。账本记的是「真投过」，静默不是投递；

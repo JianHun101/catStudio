@@ -12,6 +12,9 @@ import {
   resolveExecutorName,
   probeAttribution,
   describeExecutorMatch,
+  isExemptDelivery,
+  REVIEW_EXEMPT_PREFIXES,
+  parseChangedFiles,
 } from './handoff-gen.mjs'
 
 describe('decideHookDelivery — T-A ① 钩子侧归属判据', () => {
@@ -224,6 +227,64 @@ describe('probeAttribution — ambiguous 是「有归属」的直接证据（T-M
   it('200 但既无 agentName 也无 ambiguous（契约漂移）→ null（查不动，降级投递）', async () => {
     stub({ matchedBy: null })
     expect(await probeAttribution('http://x', 'uuid-1')).toBeNull()
+  })
+})
+
+describe('isExemptDelivery — docs/run/ 免审白名单（票乙）', () => {
+  // 判据的靶心：纯 `docs/run/**` 提交（在飞过程文档）不再发起独立审查轮。
+  // 两个陷阱都在下面钉死：**尾斜杠**（前缀 ≠ 路径段）与**空数组**（every 对空集恒真）。
+
+  it('常量带尾斜杠（docs/run-x/a.md 不得命中的唯一保证）', () => {
+    expect(REVIEW_EXEMPT_PREFIXES).toEqual(['docs/run/'])
+  })
+
+  it('单路径命中前缀 → true', () => {
+    expect(isExemptDelivery(['docs/run/map.md'])).toBe(true)
+  })
+
+  it('深层路径命中前缀 → true（前缀匹配不是同层匹配）', () => {
+    expect(isExemptDelivery(['docs/run/memory-flywheel/map.md'])).toBe(true)
+  })
+
+  it('混合路径（一条非免审）→ false，整条提交照常走审查', () => {
+    expect(isExemptDelivery(['docs/run/a.md', 'packages/server/src/x.ts'])).toBe(false)
+    // 顺序无关：非免审那条在后也在前，都是 false
+    expect(isExemptDelivery(['packages/server/src/x.ts', 'docs/run/a.md'])).toBe(false)
+  })
+
+  it('docs/run-x/a.md → false（前缀相似但缺尾斜杠边界，不是命中）', () => {
+    expect(isExemptDelivery(['docs/run-x/a.md'])).toBe(false)
+    expect(isExemptDelivery(['docs/runs/a.md'])).toBe(false)
+    // 单条也不行——不是「至少一条命中」而是「全部命中」
+    expect(isExemptDelivery(['docs/run/a.md', 'docs/run-x/b.md'])).toBe(false)
+  })
+
+  it('空数组 → false（every 对空集恒真，是陷阱）', () => {
+    expect(isExemptDelivery([])).toBe(false)
+  })
+
+  it('null / undefined / 非数组（判据查不动）→ false，照常投递', () => {
+    expect(isExemptDelivery(null)).toBe(false)
+    expect(isExemptDelivery(undefined)).toBe(false)
+    expect(isExemptDelivery('docs/run/a.md')).toBe(false)
+  })
+
+  it('rename 取新路径（parseChangedFiles，A2）——改名**进**免审前缀要判豁免', () => {
+    const files = parseChangedFiles('R100\tdocs/old.md\tdocs/run/new.md')
+    expect(files).toEqual([{ status: 'R100', path: 'docs/run/new.md' }])
+    expect(isExemptDelivery(files.map((f) => f.path))).toBe(true)
+    // 反向：从免审前缀改名**出去**，取新路径 ⇒ 不再豁免（取旧路径就会误判）
+    const out = parseChangedFiles('R100\tdocs/run/old.md\tscripts/x.mjs')
+    expect(isExemptDelivery(out.map((f) => f.path))).toBe(false)
+  })
+
+  it('阴性对照：非豁免清单在旧行为下会投递（判据不是恒真门）', () => {
+    // 上一轮的噪声源形态：地图提交 `docs/run/memory-flywheel/map.md` 单文件。
+    // 本判据上线前它必投一条——即本票的原始病案。
+    expect(isExemptDelivery(['docs/run/memory-flywheel/map.md'])).toBe(true)
+    expect(
+      isExemptDelivery(['docs/run/memory-flywheel/tickets.md', 'scripts/handoff-gen.mjs'])
+    ).toBe(false)
   })
 })
 
