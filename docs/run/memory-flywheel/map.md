@@ -58,6 +58,25 @@
 | 6   | 门牌体系外的散件            | 仓库根 `tickets.md`                                                                                                                                                                       |
 | 7   | 会话 worktree 驻留 35 个    | `git worktree list`——**属收口链范畴，不在本段范围**（已有清理链在管，列出仅为划界）                                                                                                       |
 
+### ADR 产出机制取证（2026-09-11，用户问「没看到 ADR 如何产出」后实测）
+
+**结论：ADR 有格式规范，但规范封在猫够不到的地方——产出靠习惯不靠机制。**
+
+- **规范本体齐全**：`skills/domain-modeling/ADR-FORMAT.md` 定义编号规则（扫最高号 +1）、模板（1~3 句）、可选段（Status frontmatter，值域 `proposed|accepted|deprecated|superseded by ADR-NNNN` / Considered Options / Consequences）、以及「何时该写 ADR」三条件（难逆转 / 无上下文会困惑 / 真实取舍）
+- **触发技能存在**：`skills/domain-modeling/SKILL.md`（Offer ADRs sparingly）+ `skills/grill-with-docs`（边访谈边写 ADR 与术语表），二者均在 `skills/manifest.yaml` 登记（source: external）
+- **但猫取不到**：`scripts/mcp-server-utils.mjs:255` 的 `FLOW_CHAIN_SKILLS` 白名单只含 9 个流程链技能——**domain-modeling / grill-with-docs 不在内**，而 read_skill 是猫取技能正文的唯一通道 ⇒ 物理上读不到 ADR-FORMAT
+- **server 侧零接线**：`packages/server/src/` 与 `scripts/` 全域 grep `domain-modeling|ADR-FORMAT|grill-with-docs` **命中 0** ⇒ 从未落进任何猫的角色 prompt
+- **猫可达面上唯一的 ADR 文字**：`skills/spec-gate/SKILL.md:74` 一行「架构决策留痕（跨会话）：进 `docs/adr/`」——无格式、无编号规则、无「何时该写」判据
+- **实际产出路径**（git log 实证）：ADR 随「活」提交——0007 随用户拍板、0012 随实施刀、0013 随 grilling 结论 ⇒ **谁想起来谁写**，无流程节点
+- **⇒ 与上表「状态字段缺失 / 键名两种拼写」是同一条因果链**：不是没人定规范，是规范在猫够不到的地方。**段一「规范化」若不同时接上产出机制，清完存量会重新长回原样**
+
+### 文档生命周期三站（2026-09-11，答用户「plans 要不要放 run/」）
+
+- `docs/run/<slug>/` = 票单（在飞 → 收口即删）
+- `docs/plans/<slug>.md` = spec（活中定稿、冻结、原地保留）—— **不放 run/**：run 定性是「收口即清」，而 spec 的读者（实施/审查/复盘）跨活存在
+- `docs/requirements/<date>-<slug>.md` = 收口归档
+- **待裁**：plans 与 requirements 是否合成一条链（上轮 A/B/C 未裁）
+
 ### 外部调研（2026-09-11，三路并行）
 
 - **显式录入通道是行业稀缺品**：主流框架（mem0 / Zep+Graphiti / Cognee / Memori）几乎全是「喂消息 → 后台 LLM 自动抽」；原生提供**显式写入工具**的只有 Letta（`memory_insert`/`memory_replace`）、LangMem（`create_manage_memory_tool`）、Anthropic 官方 memory tool（`view`/`create`/`str_replace`/`insert`/`delete`，已 GA）
@@ -101,6 +120,7 @@
 - ~~**Q2 · 源侧准入门**~~ —— **已关闭**（Decisions 7：存量不收 / 规范化前置 / 过闸准入）
 - **Q2-b · 规范化段的形状** ← 当前 —— 用户已裁「先规范化内容与位置」，但**深度未定**：只做位置归位+门牌补齐（形态合规），还是连内容与代码现实的一致性一起复核（能揪出 0008 那类「已决未落地」，但 13 ADR + 32 session 的工作量）。承重：决定规范化段的工期，以及飞轮何时能开机
 - **Q2-c · 规范标准的落点** —— 门牌以什么形态落地：各目录 README（对齐 `docs/run/README.md` 范式），还是 `CONTEXT.md`「文档位置约定」扩容，还是机器可校验的静态断言。含状态字段的值域（`active` / `candidate` / `review` / `deprecated` / `unverified` 怎么裁）与「已决未落地」单列哪一档
+- **Q2-e · ADR 产出机制接线** —— 规范已存在但猫够不到（见 Notes「ADR 产出机制取证」）：把 ADR-FORMAT 的三条件判据 + 编号规则 + Status 值域接到猫可达面。三条候选：① 加进 `FLOW_CHAIN_SKILLS` 白名单；② 就近扩写 `spec-gate/SKILL.md:74` 那一行（零新增技能）；③ 钉进店长/架构师角色 prompt。**不定这条，段一清完存量会重新长回原样**
 - **Q2-d · 例外通道的操作定义** —— 「日期较近的若干文档」的「较近」以什么划（时间窗 / 会话数 / 指定清单）；抽出的卡片落哪个目录、走不走审查链
 - **Q3 · 切片粒度与入库标准** —— 按**小节**切 + `# 文件路径 > ## 小节` 面包屑前缀，检索**返回父文档**（ParentDocumentRetriever 模式）；不采用固定 512（该基线为二手转述，Anthropic 一手口径是「几百 token」）；证据字段落成什么可校验结构
 - **Q4 · 冲突修正闭环** —— 矛盾发现的审核面、谁确认、在什么面确认（会话内一句话 / 文档批 / UI）；受 Decisions 4 的「状态字段须在索引侧 + 查询期过滤」硬约束
