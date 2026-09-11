@@ -19,6 +19,15 @@
 - 文档约定：`CONTEXT.md`（文档位置约定）、`docs/run/README.md`（在飞件落点）、`docs/adr/`
 - 本仓已成立的分工铁律（`CONTEXT.md:73`）：同一事实只在一处定义
 - **既成事实**（本轮实测）：`.env:34-35` `MEMORY_ENABLED=false`，注释原文「关闭向量记忆（2026-08-25 店长按用户指令）：记忆库当前存对话原话（非陈述性/文档），判定为错误来源先关停」。存量 198 条止于 2026-08-24；关停后 2.5 周 / 579 条用户消息 / 0 行入库，无任何可观测退化
+- **本仓 MCP 写入口现状**（本轮实测）：MCP 九工具**全是只读或投递类，无任何写入知识/记忆的工具**；`knowledge` 表唯一写入口是 `packages/server/src/seed.ts:99`（`pnpm seed`）；`search_knowledge` 只读（`scripts/mcp-server.mjs:168` → `POST /api/internal/knowledge-search` → `routes/internal.ts:273`）；`upsertKnowledge` 已存在可复用（`db/repository/knowledge.ts:58`）；`routes/internal.ts` 七个端点无一为写知识端点。⇒「显式录入通道」**物理上不存在，要从零建**
+
+### 外部调研（2026-09-11，三路并行）
+
+- **显式录入通道是行业稀缺品**：主流框架（mem0 / Zep+Graphiti / Cognee / Memori）几乎全是「喂消息 → 后台 LLM 自动抽」；原生提供**显式写入工具**的只有 Letta（`memory_insert`/`memory_replace`）、LangMem（`create_manage_memory_tool`）、Anthropic 官方 memory tool（`view`/`create`/`str_replace`/`insert`/`delete`，已 GA）
+- **厂商自白（本次最高价值单点）**：Windsurf 官方文档明写——想可靠复用某知识，**别用 memory，去写 Rule 或 `AGENTS.md`**（可版本控制、可共享、激活时机可控）。与本仓 Decisions 1/2 同向，属外部独立印证
+- **索引侧普遍不解决删除且重建昂贵**：GraphRAG 全量重建（HotpotQA 约 2,927.7M tokens）、LightRAG 是唯一为增量而设计的 ⇒ 支持「索引可整份丢弃重建」
+- **两个反例**：ChatGPT 把「用户显式要存的」与「模型自动记的」混在一个池子（纠错时用户分不清该删哪条）；Copilot 记忆**只能全清、不能单删**
+- **star 数口径**（引用需标）：basic-memory 3,927★ / mcp-obsidian 4,391★ / cline 67,813★ 为 2026-09-11 GitHub API 直取；mem0 ≈64.3k、Graphiti ≈27.2k、Letta ≈23.2k、LangMem ≈1.6k 为第三方追踪站快照（非直取）；Cognee 源间冲突大（16.8k~29.8k），谨慎引用
 
 ## Decisions so far
 
@@ -26,6 +35,10 @@
 2. **AGENTS.md 准入判据（三关）** — 关一·适用面：无条件适用 **或** 高频任务域内的必用坐标系；关二·检索不可替代性（两问任一为「会」即过）：问 1 约束型「不知道它 → 会不会做错、且无信号」、问 2 导航型「不知道它 → 会不会**根本不去找**」；关三·形态硬比例：能压进 1~2 行放全文，装不下**只放指针**，导航条目须比其索引的内容短一个数量级。预算测试**降级为防退化护栏**（判据是闸门，测试防慢破）。触发机制：收口 checklist 增必填字段「本轮经验是否够格进 AGENTS.md」，店长裁决，走既有审查链，不发明新审批面。
 3. **收录标准（平移 clowder F102，管线不搬）** — 三类枚举（决策/教训/方法）；每条必须带证据（对话 id / commit sha / 原文摘录）；explicit 判定收窄三条（operator 明确拍板 / 有可直接引用的共识语句 / 已对应到 merged doc 或代码事实），「说得像决定」不算；**禁止清单**：未定方案、brainstorm、临时 TODO/WIP、碎片上下文、模型总结性发挥——定位是抽取器不是总结器。
 4. **演化原则** — 追加而非重写（APPEND, don't rewrite，保留演化脉络）；**软删除不物理删**（状态标记，检索过滤）；过时的高相似条目比查不到更危险 → `superseded` 降权/过滤；淘汰需强证据 + 提案人审。
+   - **形态参照（2026-09-11 调研）**：Graphiti 双时态——事件时间 `t_valid/t_invalid` + 事务时间 `t'_created/t'_expired`，冲突时只打失效标记、旧边留 tombstone；引用计数**不引入布尔 `deprecated`**（无时间轴、做不了 as-of 查询）
+   - **工程默认值**：LangMem `enable_deletes` 默认 **False**（inserts/updates 默认 True）；mem0 的硬 `DELETE` 被评测点名批评（丢历史不可审计）
+   - **硬约束**：状态字段**必须落在索引侧并参与查询期过滤**——只改存储行不改索引缓存，旧版本照常被返回（headroom commit `93a2bc2` 实证，与本仓「索引是派生投影」同险）
+   - **量化（口径待回溯）**：HOH benchmark 过时文档致 ≥20pp 退化（二手汇编）；余弦相似度区分不了「被推翻」与「被复述」（AUROC 0.59，未独立验证）
 5. **Q1 关闭：只索引结晶后的 MD，不索引对话原话** — 用户陈述中真有价值的部分本就会落成决策/ADR/文档；未经辨明真伪或价值的原话，检索到也无意义。故 `memories` 的「用户消息实时嵌入」层**退役**，不再作为候选层保留（不搞双索引/双通道）。实证：见 Notes 的既成事实；外部同形：clowder KD-3（什么都 retain → 碎片化垃圾 → 整库废弃）。**推论**：飞轮的成败全部押在「结晶」这一环上——md 是唯一入口，必须另有捕获机制（见 Q1′）。
 
 ## Not yet specified
@@ -38,12 +51,12 @@
 
 ## Frontier（可成票，按承重排序）
 
-- **Q1′ · 捕获入口** ← 当前 —— 陈述/教训从会话流进 MD 的通道形态（显式轻量入口 / 收口沉淀 / 二者并用）
-- **Q2 · 切片粒度与入库标准** —— 按文件还是按小节切；证据字段落成什么可校验结构
-- **Q3 · 冲突修正闭环** —— 矛盾发现的审核面、谁确认、在什么面确认（会话内一句话 / 文档批 / UI）
-- **Q4 · 自动扫描管线** —— 扫哪些目录、mtime/hash 触发、与三段式去重/更新的关系
-- **Q5 · schema 形态** —— 新索引表 vs 复用 memories 加列；「重建索引」的确切语义
-- **Q6 · 注入与配额** —— 检索注入与 AGENTS.md 全文加载的 token 预算分工；`MEMORY_TOP_K` / 退休机制
+- **Q1′ · 捕获入口** ← 当前 —— 陈述/教训从会话流进 MD 的通道形态。**用户已提硬需求**：除 MD 派生外，保留一条「通过 MCP / skill 明确要求录入·纠正」的显式通道（现物理上不存在，见 Notes）。承重分歧 = 通道落点（写 MD / 直写索引表 / 写现有 knowledge 表）
+- **Q2 · 切片粒度与入库标准** —— 按**小节**切 + `# 文件路径 > ## 小节` 面包屑前缀，检索**返回父文档**（ParentDocumentRetriever 模式）；不采用固定 512（该基线为二手转述，Anthropic 一手口径是「几百 token」）；证据字段落成什么可校验结构
+- **Q3 · 冲突修正闭环** —— 矛盾发现的审核面、谁确认、在什么面确认（会话内一句话 / 文档批 / UI）；受 Decisions 4 的「状态字段须在索引侧 + 查询期过滤」硬约束
+- **Q4 · 自动扫描管线** —— 扫哪些目录、**触发用 git blob SHA 而非 mtime**（LlamaIndex issue #21461 反例：文件 stat 元数据混进 hash 致无效重嵌；本仓 checkout / 切分支会污染 mtime）、与三段式去重/更新的关系
+- **Q5 · schema 形态** —— **新索引表**（原话与结晶是语义不同类，不是「同类不同源」）；`valid_from`/`valid_to`/`superseded_by` 一次到位；`origin_id` = blob SHA；「重建索引」的确切语义
+- **Q6 · 注入与配额** —— 检索注入与 AGENTS.md 全文加载的 token 预算分工；注入顺序（最新/最权威的条目不能埋在中部——Lost in the Middle, arXiv:2307.03172）；`MEMORY_TOP_K` / 退休机制
 
 ## Out of scope
 
