@@ -74,8 +74,7 @@
 
 - `docs/run/<slug>/` = 票单（在飞 → 收口即删）
 - `docs/plans/<slug>.md` = spec（活中定稿、冻结、原地保留）—— **不放 run/**：run 定性是「收口即清」，而 spec 的读者（实施/审查/复盘）跨活存在
-- `docs/requirements/<date>-<slug>.md` = 收口归档
-- **待裁**：plans 与 requirements 是否合成一条链（上轮 A/B/C 未裁）
+- `docs/requirements/` = **已裁删除**（Decisions 12）；唯一样例**迁移保留** → `docs/plans/dev-process-gate-flow.md`
 
 ### ADR 模板 vs skill 合规对账（2026-09-11，用户问「收紧后还符合 domain-modeling 吗」）
 
@@ -144,7 +143,15 @@
     - **`docs/requirements/` 整目录删除**；唯一样例 `2026-09-06-dev-process-gate-flow.md` **迁移保留**（店长拍板，用户可否决）→ `docs/plans/dev-process-gate-flow.md`：补状态行 + §六 回填，正文不重写（承 Decisions 11 存量不重写）。
     - **门牌唯一权威**：模板附加要求（状态行 + `## 验收结果`）与切片白名单**只落 `docs/plans/README.md`**；`skills/to-spec/SKILL.md` **只加一行指针**、模板本体保持上游形状（承 Decisions 10 两层分工）——这是「改一处不产生冲突」的判据：同一事实在门牌只出现一次。
     - **连锁**：`docs/run/` 收口上浮目标由 `requirements/` 改为 **plans（原地改）或 sessions**；`docs/run/README.md` 的「日期属于 requirements 命名词汇」提法失去对象。
-    - **不做**：存量三份 plan 一行不回填（承 Decisions 11 老文件 fail-closed）。引用面清单与验收见票 E（本会话派单 flash猫）。
+    - **不做**：存量三份 plan 一行不回填（承 Decisions 11 老文件 fail-closed）。引用面清单与验收见票 E——**票 E 已撤回，见 Decisions 13**。
+
+13. **票 E 撤回：裁决 ≠ 派活授权，grilling 未走完不出票**（2026-09-11 用户叫停）
+    - **事实**：用户裁「可以按 A 走」后，店长在**同一轮**把裁决拆成票 E 并 @了 flash猫 → 触发执行（09:25:47 起跑，16 秒后 `interrupted`／`status=failed`／无 commit／工作区零残留——用户暂停 flash猫 所致）。
+    - **用户判词**：「后面不是说进 Q3 吗，我暂停了 flash猫，怎么直接派活了？」⇒ **裁决只关闭议题，不等于派活授权**；grilling 的产出是规格，不是工单。
+    - **票 E 撤回三条理由**：① 流程上 Q3（切片粒度与入库标准）未裁就出票，越过了正在走的 grilling；② 实质上票 E 的 `docs/plans/README.md` 门牌含**切片白名单**——**其内容正是 Q3 的题目本身**，先写门牌＝替用户把 Q3 答了，顺序倒置；③ 整单撤回**不拆**（落点搬迁与门牌改的是同一批文件，拆两批＝两次动同一处，违「改一处不产生冲突」）。
+    - **处置**：待 Q3 裁完，连同 Q2-c/Q2-d 一起**一次出全**，不预出、不半出。
+    - **requirements 样例**：用户本轮确认「requirements 样例方面可以迁移保留」——店长原拍板（Decisions 12，标「可否决」）**已被采纳，不再可否决**。
+    - **用户新增待办**：「后续看看有什么值得往记忆库里写的吧」——记忆飞轮建成后，回扫本轮 grilling 与 `requirements/` 样例等近期文档，按准入标准抽卡。**挂在飞轮落地之后，不进本轮票。**
 
 ## Not yet specified
 
