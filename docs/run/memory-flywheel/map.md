@@ -77,6 +77,23 @@
 - `docs/requirements/<date>-<slug>.md` = 收口归档
 - **待裁**：plans 与 requirements 是否合成一条链（上轮 A/B/C 未裁）
 
+### ADR 模板 vs skill 合规对账（2026-09-11，用户问「收紧后还符合 domain-modeling 吗」）
+
+**结论：做减法（摘掉愿景/需求/后续项/实施进度）＝回归 skill 原形，合规；做加法（把可选项定为固定段）＝过度收紧，已撤回。**
+
+- skill 原文（`ADR-FORMAT.md`）：模板 = 标题 + 1~3 句（context + decided + why），「**That's it.** ... The value is in recording _that_ a decision was made and _why_ — **not in filling out sections**」；Considered Options / Consequences / Status **均为可选**——「Only include these when they add genuine value. **Most ADRs won't need them.**」
+- ⇒ 上轮提议的「收紧到 背景与摩擦 / 决策 / Considered Options / Consequences / Status」中，**后两项定为固定段属越界**，撤回；**唯一保留的偏离 = Status 从可选升为必填**（消费者变了：扫描器无判断力，只读字段——没字段 = 该文件对索引不存在）
+- **状态行现状实测（四种形态，非两种）**：裸行 `**Status**: accepted`（0002:5）／引用块 `> **Status**:`（0011:3、0012:3、0013:3）／中文 `> **状态**：`（0014:4）／**散文标签无字段** `> **已退役（2026-09-01）**`（0005:3，无任何 Status）。值域侧：0013 用 `superseded`（skill 值域简写）、0012 把 Status 与退役叙述混写一行
+- **编号规则已定**：扫最高号 +1（skill 原文）——断档 0010 是否会因「扫最高号」而被复用，段一归位时一并裁
+
+### requirements 规范现状取证（同轮）
+
+**结论：requirements 连「规范」都没有，只有一句约定；且该约定与上游 skill 的模板是两套形状。**
+
+- **全部规范** = `CONTEXT.md:93` 一句话（六段生命周期 + 写者店长）；`docs/requirements/` 无 README / 门牌；全仓 grep `REQUIREMENTS-FORMAT` = **0**；无任何 skill 管它（`spec-gate` 只管「spec 尾部 `## 决策留痕` 固定段」这一条）
+- **两套模板打架**：`skills/to-spec/SKILL.md` 自带 spec-template 七段（Problem Statement / Solution / User Stories / Implementation Decisions / Testing Decisions / Out of Scope / Further Notes）；而 `CONTEXT.md:96` 定义 `docs/plans/` 是 to-spec 产物 ⇒ 若按 Q2-f 裁 A（plans 与 requirements 合成一条链），**这条链上现在漂着两套互不相同的模板**，合并第一步就得先合成一套
+- 对照：ADR 侧至少有 `ADR-FORMAT.md`（方法层规范齐全），requirements 侧两层都缺
+
 ### 外部调研（2026-09-11，三路并行）
 
 - **显式录入通道是行业稀缺品**：主流框架（mem0 / Zep+Graphiti / Cognee / Memori）几乎全是「喂消息 → 后台 LLM 自动抽」；原生提供**显式写入工具**的只有 Letta（`memory_insert`/`memory_replace`）、LangMem（`create_manage_memory_tool`）、Anthropic 官方 memory tool（`view`/`create`/`str_replace`/`insert`/`delete`，已 GA）
@@ -110,6 +127,10 @@
 
 9. **第三格 `docs/lessons/` 已立**（2026-09-11 用户裁定「我支持 lessons」）—— 装**无取舍的经验**（教训 / 可复用做法），编号 `LL-NNN-slug.md`，与 ADR 同权（同挂状态字段、同进索引、同受三关判据管）。**立格理由（非口味）**：教训过不了 ADR 自己的准入门槛——`skills/domain-modeling/ADR-FORMAT.md` 要求三条件全真，其第 3 条「the result of a real trade-off」被教训**确定性击穿**（「pnpm 遇 junction 报 `ERR_PNPM_UNSAFE_*`」是撞出来的，当时没有备选方案）。硬塞进 `docs/adr/` 会持续稀释该目录的信噪比。
 
+10. **Q2-e 关闭：skill 规范的两层分工**（2026-09-11 用户裁定后收敛）—— 用户裁决：skill 白名单**后续加**、相关提示**落店长 prompt** 即可（本轮不动白名单）。据此定分工：**通用方法留 skill 正文**（模板形状 / 三条件 / 编号规则——上游更新可直接跟），**本地附加落仓内门牌**（Status 必填、值域拼写、编号、落地锚、闸门 → `docs/adr/README.md`；requirements 侧同理立 `docs/requirements/README.md`）。skill 正文**只加一行**「若仓内有 `docs/adr/README.md` 门牌，以门牌为准」的通用指针——不把仓规混进方法内核。
+    - **ADR 模板定稿形状**（唯一偏离 skill 处已标注）：标题 + `**Status**:`（必填，值域沿用 skill 四值）+ 1~3 句（背景与摩擦 / 决策 / 为什么）；Considered Options / Consequences **保持可选**。
+    - 撤回记录：上轮「收紧到固定五段骨架」中的「Considered Options / Consequences 定固定段」属过度收紧，已废（见 Notes「ADR 模板 vs skill 合规对账」）。
+
 ## Not yet specified
 
 <!-- 雾区：能看出要来、但还问不出精确问题的 -->
@@ -124,8 +145,9 @@
 - ~~**Q2 · 源侧准入门**~~ —— **已关闭**（Decisions 7：存量不收 / 规范化前置 / 过闸准入）
 - ~~**Q2-b · 规范化段的形状**~~ —— **已关闭**（Decisions 8：按 C 分级）
 - **Q2-f · ADR 与 requirements 的内容重叠切分** ← 当前 —— 用户判「明显存在内容重叠」。实测为**双向越界**：requirements 第六段含 §五「架构决策留痕」（ADR 的地盘）；ADR 侧含「目标愿景」（0009 §目标愿景）、「后续项（需求）」（0014 §6）、「实施进度」（0011/0012 头部）——requirements 的地盘。**根因**：`CONTEXT.md` 的门牌只规定「哪个**文件**放哪个目录」（按文件粒度分），从未规定「哪种**内容**归哪个目录」（按内容性质分），故同一内容可在多目录各自安家，正撞 `CONTEXT.md:73` 铁律「同一事实只在一处定义」。**候选切分线**：ADR/lessons 按内容性质立文件（跨活复用），requirements/plans 按活立文件；性质件在活文档里只留**指针**不留副本 → requirements 六段改五段 + 产出链接段，ADR 模板收紧到 背景/决策/备选/后果/Status
-- **Q2-c · 规范标准的落点** —— 门牌以什么形态落地：各目录 README（对齐 `docs/run/README.md` 范式），还是 `CONTEXT.md`「文档位置约定」扩容，还是机器可校验的静态断言。含状态字段的值域（`active` / `candidate` / `review` / `deprecated` / `unverified` 怎么裁）与「已决未落地」单列哪一档
-- **Q2-e · ADR 产出机制接线** —— 规范已存在但猫够不到（见 Notes「ADR 产出机制取证」）：把 ADR-FORMAT 的三条件判据 + 编号规则 + Status 值域接到猫可达面。三条候选：① 加进 `FLOW_CHAIN_SKILLS` 白名单；② 就近扩写 `spec-gate/SKILL.md:74` 那一行（零新增技能）；③ 钉进店长/架构师角色 prompt。**不定这条，段一清完存量会重新长回原样**
+- ~~**Q2-e · ADR 产出机制接线**~~ —— **已关闭**（Decisions 10：skill 保持上游形状 + 一行门牌指针；本地附加落仓内门牌；白名单后续加、提示落店长 prompt）
+- **Q2-g · 通行证：落地锚算不算必填** ← 当前 —— `ADR 0008`「写着 accepted、代码里无 acp.ts」一类，**skill 四值值域表达不了**（`accepted` 是对的，决策确实做了；坏的只是没落地——这是**独立于 Status 的轴**）。三选：A 准入闸加「落地锚」必填（commit / 文件路径 / PR，**机器校验存在性**；写不出 = 在飞件不进索引，与「知识 = 现行约束」定性同构）；B 写进模板但不机器校验；C 加第五状态值（复合值，把两个正交问题压进一字段）
+- **Q2-c · 规范标准的落点** —— 门牌形态（对齐 `docs/run/README.md` 范式）与机器可校验性（静态断言 / `skills-check-manifest.mjs` 同权）。含状态字段值域（ADR 四值是否本地扩写、`unverified` 与「已决未落地」的关系）——**依赖 Q2-g 的裁法**；另含 requirements 侧与 to-spec 七段模板的合并结果
 - **Q2-d · 例外通道的操作定义** —— 「日期较近的若干文档」的「较近」以什么划（时间窗 / 会话数 / 指定清单）；抽出的卡片落哪个目录、走不走审查链
 - **Q3 · 切片粒度与入库标准** —— 按**小节**切 + `# 文件路径 > ## 小节` 面包屑前缀，检索**返回父文档**（ParentDocumentRetriever 模式）；不采用固定 512（该基线为二手转述，Anthropic 一手口径是「几百 token」）；证据字段落成什么可校验结构
 - **Q4 · 冲突修正闭环** —— 矛盾发现的审核面、谁确认、在什么面确认（会话内一句话 / 文档批 / UI）；受 Decisions 4 的「状态字段须在索引侧 + 查询期过滤」硬约束
