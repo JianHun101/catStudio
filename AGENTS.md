@@ -12,7 +12,7 @@ pnpm dev:server / dev:web # 单包启动
 pnpm stop                 # 释放端口 3200、5173-5175
 pnpm test                 # vitest run（projects：shared / server / web / scripts）
 pnpm test:shared / :server / :web / :watch / :coverage
-pnpm lint                 # 类型检查：server/shared 走 tsc --noEmit，web 走 vue-tsc --noEmit
+pnpm lint                 # 类型检查：node scripts/lint.js 直调各包 tsc/vue-tsc（不走 pnpm -r）
 pnpm seed [--reset]       # upsert 演示猫与会话；--reset 先清空再重建
 pnpm build                # pnpm -r build
 ```

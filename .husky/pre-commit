@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# set -e：少一行则退出码只取末条命令（pnpm test）——lint 红海静默进库（lint 直调单）。
+set -e
 npx lint-staged
 pnpm lint
 pnpm test
