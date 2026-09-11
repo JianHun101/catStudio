@@ -9,7 +9,7 @@
     "dev:web": "pnpm --filter @cat-study/web dev",
     "seed": "node scripts/seed.js",
     "build": "pnpm -r build",
-    "lint": "pnpm -r lint",
+    "lint": "node scripts/lint.js",
     "stop": "node scripts/stop.js",
     "test": "vitest run",
     "test:watch": "vitest",
