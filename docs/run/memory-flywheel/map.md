@@ -101,6 +101,21 @@
 - **两个反例**：ChatGPT 把「用户显式要存的」与「模型自动记的」混在一个池子（纠错时用户分不清该删哪条）；Copilot 记忆**只能全清、不能单删**
 - **star 数口径**（引用需标）：basic-memory 3,927★ / mcp-obsidian 4,391★ / cline 67,813★ 为 2026-09-11 GitHub API 直取；mem0 ≈64.3k、Graphiti ≈27.2k、Letta ≈23.2k、LangMem ≈1.6k 为第三方追踪站快照（非直取）；Cognee 源间冲突大（16.8k~29.8k），谨慎引用
 
+### clowder-ai 向量栈实测（2026-09-12，用户指派勘察）
+
+**结论：clowder 用 `Qwen3-Embedding-0.6B` + `sqlite-vec` 的 `vec0` 虚拟表 + BM25/向量 RRF 混合检索；嵌入跑在独立 Python sidecar，不在 Node 进程内。**
+
+- **模型**：mac 默认 `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ`（~400MB，MLX 4bit 量化；`packages/api/src/domains/services/service-manifest.ts:251-256`）；**win32/x64 档默认恰是 `BAAI/bge-small-zh-v1.5`（512 维 / ~90MB）**——正是本仓要换掉的那个（`scripts/services/recommendation-matrix.yaml:500-502`）。同表另有 jina-v2-base-zh(768, ~640MB) / multilingual-e5-large(1024, ~2.3GB) 档位。
+- **维度取 768，非原生上限**：`memory/interfaces.ts:430` `embedDim: 768 // LL-034: 768 is sweet spot for CJK bilingual; 256 too low`；sidecar 做 **MRL 截断到目标 dim + L2 归一化**（`scripts/services/embed-api.py:222-227`）。⚠️ **不可直接搬**：Qwen3-Embedding 官方宣称 MRL，**bge-m3 不宣称**——本条只作「维度可裁」的参照，票甲仍按 m3 原生 1024。
+- **存储与本仓同栈**：`sqlite-vec ^0.1.9` + `better-sqlite3`，`vec0` 虚拟表 `anchor TEXT PRIMARY KEY, embedding float[dim]`（`memory/schema.ts:755-786`），段落级另起 `passage_vectors`（`passage_key` 主键）⇒ **零迁移成本**，本仓现状可比。
+- **⭐ 直接命中本仓护栏②③**：clowder 有 `embedding_meta(key,value)` 表写 `embedding_model_id / rev / dim`，不一致即 `clearAll()` + 全量重嵌（`VectorStore.ts:32-58`、`embed-utils.ts:22-29`）——**这就是 Decisions 16 护栏②「模型-维度成对声明 + 启动自检」与护栏③「清老向量」的现成实现**，形态可直接照抄。
+- **⭐ 最该摆上台面的一条：嵌入不在主进程** —— `EmbeddingService.ts:1-5` 注释原文 `LL-034: must not run model inference in API process` / `Replaces in-process ONNX`；实现在独立 `embed-api.py`（`:9880`，OpenAI 兼容 `POST /v1/embeddings`，`MAX_BATCH_SIZE=64` / `MAX_TEXT_LENGTH=8192` / GPU 侧 `asyncio.Lock` 串行化）。本仓现状是**进程内 transformers.js**（`embedding.ts:66`）⇒ **换 bge-m3（568MB）后冷启动与常驻内存的代价，蓝本用「进程外 + 不用即关」解**。**票甲开跑前须先裁：沿用进程内，还是引入 sidecar**（本仓 token 池 / 硬超时的前车之鉴属同类——大对象压在主进程里，坏起来是全局的）。
+- **距离度量**：vec0 建表**未声明 `distance_metric`**（全仓零命中）⇒ 取上游默认 L2；靠 embedding 侧 L2 归一化使 L2 排序 ≡ cosine。本仓走 `vec_distance_cosine`——**做法不同、前提同一条**：向量必须归一化。
+- **检索形态**：FTS5 BM25 + 向量 NN 的 **RRF 融合（k=60）**；**中文查询把 NN 权重提到 `CJK_NN_WEIGHT = 1.5`**（`SqliteEvidenceStore.ts:38,1162-1189`），理由是中文 BM25 召回差 ⇒ **纯向量不是唯一解，是本仓 Q7（注入与配额）的参照**。候选池 `min(max(limit*4,20),100)`；rerank 备有多套（MMR λ=0.7 / 消费加权 / authority）但**默认全 off**。三模式（lexical / semantic / hybrid）设计见 `docs/decisions/020-f102-memory-system-architecture.md:65-77`；向量不可用时 **fail-open 退回纯 FTS**。
+- **多模态：无** —— 全仓 `CREATE VIRTUAL TABLE` 仅 4 处（2×fts5 + 2×vec0），**无任何图像向量表**；`multimodal` 的两处命中都只是猫的能力标签与视频 feature 设想 ⇒ **本仓 ADR 0009 第二子空间（SigLIP）领先蓝本，无先例可抄**。
+- **蓝本本机并未真跑向量**（诚实标注）：`.env:116 EMBED_MODE=off`，`evidence.sqlite` 里只有**空的** `embedding_meta`、无 vec 表 ⇒ 以上全部结论来自**源码与配置**，**非运行态实测**；`docs/decisions/020-...:84` 留有历史运行记录（`evidence_vectors 850 行 · dim=768 · Qwen3-Embedding-0.6B`）。
+- **可配置面**（本仓对照）：`EMBED_MODE`(off/shadow/on，默认 **off**) / `EMBED_MODEL`（**无默认、必填**）/ `EMBED_DIM`(768) / `EMBED_URL`(127.0.0.1:9880) / `EVIDENCE_DB` / `embedTimeoutMs`(3000) / `maxModelMemMb`(800)。**真正生效的 modelId 取自 sidecar `/health` 的 `model` 字段**——TS 侧刻意不写死模型白名单（`interfaces.ts:423-426` 注释：`The scripted sidecar is the runtime authority for the concrete model`）。
+
 ## Decisions so far
 
 1. **定位与边界** — MD 是唯一真相源（决策/ADR 落文件，用户可观测），向量表只是**索引**，可随时从 MD 重建；**AGENTS.md 是框架语义载体、不是知识载体**（单文件全文嵌入检索粒度糊，全文加载上下文膨胀）。不吞并文档体系、不平行于文档体系。
