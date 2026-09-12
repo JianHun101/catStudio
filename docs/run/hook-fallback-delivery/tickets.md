@@ -120,3 +120,57 @@
 - 处置：用户裁「出现率很低，先记得」。**再次出现（用户报「猫没动静」）时优先查这条**，
   查法：`execution_logs` 里 `status='failed'` + `error_message='execute crash'` 的行，
   比对 `triggered_by_message_id` 对应 trace 下是否有 `completed` 兄弟行；回复是否落库看 `messages`。
+
+---
+
+## 验收实测（flash猫 回填 · 2026-09-12 · 审查面 = `44de053`）
+
+**自查门**：`pnpm test` → **1999 passed / 100 files / 0 failed**；`pnpm lint` → 3 包类型检查通过；
+`node scripts/handoff-gen.e2e.mjs` → **228 passed / 0 failed**（新增用例已计入，无 skip/only）。
+
+**验收 #3（无残留矛盾注释）**：`grep -n "查不动" scripts/handoff-gen.mjs` 14 行逐行复核，全部属新语义。
+`:1823` 仍含「查不动 → 投」，但原句即「**判据源从**「查不动 → 投」**换成**「查不动 → 静默让位」」的历史陈述，属应有。
+
+**验收 #2（判别力实测）**
+
+突变①——`scripts/handoff-gen.mjs:1173` 的 `deliver: false` 改回 `deliver: true`（= 旧语义）：
+
+```
+  219 passed, 9 failed, 228 total
+  ❌ FAIL: 前置 + 判别力：POST 恰为 drain 那一条的重试上限（实际 6）…     ← 14k
+  ❌ FAIL: 前置 + 判别力：POST 恰为 drain 那一条的重试上限（实际 6）      ← 14l
+  ❌ FAIL: 探针查不动 → 静默让位（POST 0 次，实际 1）                    ← 14c
+  ❌ FAIL: 静默要有留痕，且必须落在判词字段上
+  ❌ FAIL: 静默不是投递 ⇒ 不得记 delivered（账本单态=真投过）
+  ❌ FAIL: 静默路径不该有载荷（实际 1 条）
+  ❌ FAIL: 探针超时 → 静默让位（POST 0 次，实际 1）                      ← 14j
+  ❌ FAIL: 静默要有留痕，且必须落在判词字段上
+  ❌ FAIL: 静默不是投递 ⇒ 不得记 delivered（账本单态=真投过）
+```
+
+⇒ **A7（14j）与 P1/P2（14k/14l）全红**，与验收 #2 相符。附带修掉一处软化断言：原写「日志含『静默』」
+在突变下仍被 reason 文案里的「静默让位」蒙混过关（实测踩到），已收紧为断言判词字段本身
+「`兜底投递判据: 静默`」。
+
+突变②——去掉 `drainPending` 的 `pendingSrc: entry.src`（= P3 要防的退化）：
+
+```
+  226 passed, 2 failed, 228 total
+  ❌ FAIL: 二次失败后 src 必须保住（实际 legacy）——退化成 legacy/hook 会让它在下一轮被当钩子条目重判静默，收尾兜底整条失效
+  ❌ FAIL: 二次失败后 src 必须保住（实际 legacy）——gate 条目被重判归属同样会被判静默砍掉…
+```
+
+⇒ P1/P2 的靶心（二次失败后保标）确有判别力，退化值实测就是 `legacy`（= P3 描述的退化成因）。
+两次突变后均已 `cp` 还原并核 `md5` 与前一致。
+
+**与派活单的两处偏差（自报）**
+
+1. **A7 的形态**：新增 14j 用 stub `'hang'`（永不响应 ⇒ `AbortSignal.timeout(3000)` abort ⇒ catch ⇒ null），
+   并**就地翻转**原 14c（HTTP 500 = 响应不可解析）——原 14c 正钉着旧语义「一律投递，不静默吞」，不翻必红。
+   两条合起来覆盖 `probeAttribution` 的 `null` 分支两个来路。
+2. **票面未列的连带同步**：e2e 中 4 处矛盾陈述（`:1503` 13c 断言文案、`:1778` 组头注、`:1980-1985` 14h 头注、
+   `:2033` 14h 收尾行）。按 A5「不得残留与新语义矛盾的陈述」的精神处理，均只改注释/文案。
+
+**票面外的一处遗留（未动，请店长裁）**：`packages/server/src/execution/serial.ts:608-610`
+注释写「真正需要防的『查不动就静默吞掉投递』在钩子侧（远端 HTTP 判据），那里按降级语义**一律投递**」——
+本票翻的正是这一格，该注释现已与钩子侧相反。不在票 A 的三文件落点内，故未动。
