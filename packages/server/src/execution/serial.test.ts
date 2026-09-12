@@ -788,6 +788,170 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
   }, 60000)
 })
 
+// ═══ 票子：A2A 配额拦截的**可见面** ═══
+// 动机（Decisions 38 二 / 39 二）：桶耗尽时此前**只有一行 `log.warn`** ⇒ 生产上等于
+// 静默，链上无人在能感知（2026-09-12 实测两点：12:55:02 ds猫 的审查请求 / 12:59:37
+// 店长的补投，两次撞同一堵墙，被拦方故障窗口 6 分钟）。本组用例把「发送者提示 +
+// store 广播」钉成机器判据——**存在任一路径仍静默 ⇒ 票子失败**。
+//
+// 场景构造：预置被 @ 目标（ds猫）的桶至上限 ⇒ 该 @ **第 1 跳**就被配额闸拦下，
+// 不必跑 7 跳环（省时，且不引入 depth 门等其它截断源的干扰）。预置走测试钩子
+// `__setMentionCount`——**不触碰生产计数点**（`:664`/`:805` 是票丑的面）。
+
+describe('serial — A2A 配额拦截的可见面（票子）', () => {
+  const REVIEWER: AgentConfig = {
+    id: 'agent-reviewer',
+    name: '吐槽猫',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'reviewer',
+  }
+  const STORE: AgentConfig = {
+    ...REVIEWER,
+    id: 'agent-store',
+    name: '店长',
+    role: 'store',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    // 发送者（reviewer）+ store（兜底收件人）+ 被拦目标（implementer）
+    const insert = db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
+    )
+    insert.run('agent-reviewer', '吐槽猫', 'reviewer')
+    insert.run('agent-store', '店长', 'store')
+    insert.run('agent-impl', 'ds猫', 'implementer')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', '["agent-reviewer","agent-store","agent-impl"]', 0)`
+    ).run()
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-1', 'session-1', 'user', '请审查', '[]')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.unstubAllEnvs()
+  })
+
+  it('桶耗尽 → 发送者收到明确提示 + store 面广播实测出现（Z1/Z2）', async () => {
+    makeAdapter({ chunks: ['⚠️建议修改\n\n@ds猫 请返工'] })
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    engine.__setMentionCount('trace-quota', 'agent-impl', DEFAULT_MAX_MENTIONS_PER_AGENT)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-quota',
+      0
+    )
+
+    // Z1：发送者侧可见（非仅日志）——且只发一条（防重复投递）
+    const toSender = calls.systemNotices.filter((n) => n.agentId === 'agent-reviewer')
+    expect(toSender).toHaveLength(1)
+    expect(toSender[0].content).toContain('ds猫')
+    expect(toSender[0].content).toContain('未派发')
+    expect(toSender[0].content).toContain('配额')
+    // Z2：store 面广播**实测出现**（不是只写了代码）。
+    //     与 role-not-allowed 同口径：UI 提示（人类可见），**不进 agent 上下文**
+    //     （emitSystemNotice 不落库 + agent 上下文过滤 system）——见裁决 (a)。
+    const toStore = calls.systemNotices.filter((n) => n.agentId === 'agent-store')
+    expect(toStore).toHaveLength(1)
+    expect(toStore[0].content).toContain('吐槽猫')
+    expect(toStore[0].content).toContain('ds猫')
+    expect(toStore[0].content).toContain('悬空')
+    // 可见面是**增加**、不是替换：warn 仍在（文件日志 + UI 双通道）
+    expect(logWarn).toHaveBeenCalledWith(
+      'agent-to-agent mention limit filtered',
+      expect.objectContaining({ traceId: 'trace-quota', skippedCount: 1 })
+    )
+    // 被拦目标确实没被派发
+    expect(
+      getDb().prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-impl'`).get()
+    ).toBeUndefined()
+  }, 60000)
+
+  it('配额拦截不落执行表：行数增量 = 发送者自身那一次执行（Z4）', async () => {
+    makeAdapter({ chunks: ['⚠️建议修改\n\n@ds猫 请返工'] })
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    engine.__setMentionCount('trace-quota-rows', 'agent-impl', DEFAULT_MAX_MENTIONS_PER_AGENT)
+
+    const countRows = (): number =>
+      (getDb().prepare(`SELECT COUNT(*) AS n FROM execution_logs`).get() as { n: number }).n
+    const before = countRows()
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-quota-rows',
+      0
+    )
+
+    // 拦截本身零执行记录：增量只来自发送者自己那一次运行（被拦的 A2A 目标没有行）。
+    // 落表会污染「是否被派发」的判据——`execution_logs` 两列语义相反，
+    // `triggered_by_message_id` 才是判据面（票面契约③）。
+    expect(countRows() - before).toBe(1)
+  }, 60000)
+
+  it('会话内无 store 成员 → 只发发送者提示，不发 store 广播（不崩、不空投）', async () => {
+    getDb()
+      .prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`)
+      .run(JSON.stringify(['agent-reviewer', 'agent-impl']))
+    makeAdapter({ chunks: ['⚠️建议修改\n\n@ds猫 请返工'] })
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    engine.__setMentionCount('trace-quota-nostore', 'agent-impl', DEFAULT_MAX_MENTIONS_PER_AGENT)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [] },
+      'trace-quota-nostore',
+      0
+    )
+
+    expect(calls.systemNotices.filter((n) => n.content.includes('未派发'))).toHaveLength(1)
+    expect(calls.systemNotices.filter((n) => n.content.includes('悬空'))).toHaveLength(0)
+  }, 60000)
+
+  it('发送者本身是 store → 提示自己但不给自己发 store 广播（同 role-not-allowed 口径）', async () => {
+    makeAdapter({ chunks: ['@ds猫 继续'] })
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    engine.__setMentionCount('trace-quota-self', 'agent-impl', DEFAULT_MAX_MENTIONS_PER_AGENT)
+
+    await engine.executeAgentsSerial(
+      'session-1',
+      [STORE],
+      { id: 'msg-1', content: '请继续', mentions: [] },
+      'trace-quota-self',
+      0
+    )
+
+    // 两条通知的收件人都是 agent-store，故按**文案**区分（发送者提示含「未派发」，
+    // store 广播含「悬空」）——只发前者。
+    const toStore = calls.systemNotices.filter((n) => n.agentId === 'agent-store')
+    expect(toStore).toHaveLength(1)
+    expect(toStore[0].content).toContain('未派发')
+    expect(toStore[0].content).not.toContain('悬空')
+  }, 60000)
+})
+
 // ═══ T-M：depth=0 自动提交的「歧义拒写」可观测面 ═══
 // `execution/serial.ts` 的 depth=0 收尾块在 `updateExecutionLogCommitHash` 回报
 // `skippedAmbiguous` 时打 warn——这条 warn 是「拒写」唯一的可观测面（不静默拦截正是
