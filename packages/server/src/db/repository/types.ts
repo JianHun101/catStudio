@@ -78,6 +78,42 @@ export interface MemoryRow {
   created_at: string
 }
 
+/**
+ * chunks 表行（段三切片索引，Decisions 34 X1/X2）。
+ *
+ * 身份键 = `doc_path` + `section_anchor` + `content_hash`（唯一索引，Decisions 17
+ * 明裁「不带片序号」）；`part_index`/`part_total`/`hard_cut` 是重扫可被覆盖的切片
+ * 信息，**不进身份键**。表内无任何扫描时间戳列（X3，「删表 → 重扫 → 逐行等价」）。
+ * `date` 是 MD 里的历史事实（票戊冻结），不是扫描时刻。
+ */
+export interface ChunkRow {
+  /** 内部行号；`chunk_vectors.chunk_id` 与之对齐。不进身份键 */
+  id: number
+  doc_path: string
+  section_anchor: string
+  /** `body` 的 sha256 hex（与票庚扫描器同算法，否则唯一键失效） */
+  content_hash: string
+  /** 扫描时该 MD 的 git blob SHA（`git hash-object <path>`），增量比对键 */
+  origin_id: string
+  type: string | null
+  /** **节级**（Decisions 24）；硬排除集合 = superseded/deprecated，NULL = 未声明状态（放行） */
+  status: string | null
+  date: string | null
+  /** JSON 数组文本（X2-a：不建关联表） */
+  evidence: string | null
+  supersedes: string | null
+  superseded_by: string | null
+  valid_from: string | null
+  valid_to: string | null
+  part_index: number
+  part_total: number
+  /** 该片由 L3-f 字符硬切产生 */
+  hard_cut: number
+  /** 片正文（不含面包屑） */
+  body: string
+  breadcrumb: string
+}
+
 export interface ExecutionLogRow {
   id: string
   session_id: string

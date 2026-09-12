@@ -482,6 +482,84 @@ export function initDb(): void {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`,
     },
+    // ─── 段三索引表（记忆飞轮：MD → 切片索引，Decisions 34 X1/X2）───────────
+    // chunks 是**派生投影**（可从 MD 无损重建，Decisions 1）——写入侧是扫描器
+    // （票庚），读侧是检索接线（票辛），本段只建表，不含任何写入同步逻辑。
+    //
+    // ⚠️ 表内**禁存任何扫描时间戳 / 运行态列**（X3）：`scanned_at`/`updated_at`/
+    // `last_seen` 一类列一旦落表，「删表 → 重扫 → 逐行等价」这条不变式必破。
+    // 唯一例外是 `date`——它是 **MD 里的历史事实**（由票戊冻结），不是扫描时刻。
+    //
+    // 身份键 = (doc_path, section_anchor, content_hash)（Decisions 17 明裁
+    // 「不必带片序号」）：带片序号会让「节内插入一段」把后续所有碎片身份全变。
+    // `part_index`/`part_total` **是列、不进唯一键**——它们是重扫时被覆盖的搬运工。
+    // 已知边界：同一节内两片 body 完全相同 ⇒ 唯一键相撞、幂等合一（丢一个片序号）。
+    // 取舍照 Decisions 17 原样：合一是确定性的 ⇒ 「重扫 N 次结果不变」仍成立。
+    {
+      name: 'chunks table (段三切片索引)',
+      sql: `CREATE TABLE IF NOT EXISTS chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_path TEXT NOT NULL,
+        section_anchor TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        origin_id TEXT NOT NULL,
+        type TEXT,
+        status TEXT,
+        date TEXT,
+        evidence TEXT,
+        supersedes TEXT,
+        superseded_by TEXT,
+        valid_from TEXT,
+        valid_to TEXT,
+        part_index INTEGER NOT NULL,
+        part_total INTEGER NOT NULL,
+        hard_cut INTEGER NOT NULL DEFAULT 0,
+        body TEXT NOT NULL,
+        breadcrumb TEXT NOT NULL
+      )`,
+    },
+    {
+      name: 'chunks identity unique index (doc_path, section_anchor, content_hash)',
+      sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_identity
+        ON chunks(doc_path, section_anchor, content_hash)`,
+    },
+    // 查询体过滤面（X4）：status 是节级硬排除维度（Decisions 24）
+    {
+      name: 'idx_chunks_status',
+      sql: `CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status)`,
+    },
+    // 增量比对面（Q5 S2）：扫描器按 origin_id（= 扫描时 MD 的 git blob SHA）比对
+    {
+      name: 'idx_chunks_origin',
+      sql: `CREATE INDEX IF NOT EXISTS idx_chunks_origin ON chunks(origin_id)`,
+    },
+    // 切片向量（X1）：sqlite-vec vec0，512 维（= Xenova/bge-small-zh-v1.5 输出维度，
+    // 与 memories/knowledge 的 embedding BLOB 同维）。chunk_id ↔ chunks.id 对齐。
+    //
+    // ⚠️ 写入侧地雷（本仓首次引入 vec0，实测取证）：vec0 是虚拟表，**没有列的
+    // INTEGER 亲和性**，PK 值必须原样以 SQLITE_INTEGER 抵达 xUpdate。better-sqlite3
+    // 把 JS number 一律按 REAL 绑定（`typeof(?)` 实测 = real），普通表靠列亲和性
+    // 把 real 收敛回 integer 所以看不出来，vec0 则直接抛
+    // 「Only integers are allows for primary key values」。⇒ **显式写 chunk_id 必须
+    // 传 BigInt**（`BigInt(chunkId)`）；不传 PK 让 SQLite 自增则不受影响。
+    {
+      name: 'chunk_vectors table (sqlite-vec vec0)',
+      sql: `CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
+        chunk_id INTEGER PRIMARY KEY,
+        embedding float[512]
+      )`,
+    },
+    // 关键词通道（W1）：**逐项对齐 memories_fts**——非 external content 独立表，
+    // content 列存 bigram 预分词串（空格 join，两侧对称），tokenize='unicode61'
+    // 按空格切回 token（零中文分词器依赖）；rowid 映射 chunks.rowid，检索 JOIN 取原文。
+    // 本票**只建表**：写入侧同步（bigram 切分 + 双写）归票庚/票辛。
+    {
+      name: 'chunks_fts table (FTS5 关键词通道)',
+      sql: `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        content,
+        tokenize='unicode61'
+      )`,
+    },
   ]
 
   for (const m of migrations) {
