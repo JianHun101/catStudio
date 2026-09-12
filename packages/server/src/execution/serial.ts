@@ -177,6 +177,19 @@ export interface EngineCtx {
   execute(cmd: DispatchCommand): Promise<boolean>
 }
 
+/** 会话内 store 猫反查（收口决策归店长）——`role-not-allowed` 与 A2A 配额闸
+ *  **共用同一形态**（票子：复用而非另写一份）。从 sessionAgentIds 反查，不能复用
+ *  allMentionedAgents——那已按 routeNames 过滤，正是被剥除后的集合。无 store 成员
+ *  或 store 不在会话内时返回 undefined（调用方据此跳过广播）。 */
+function findStoreCat(sessionAgentIds: string[]): AgentConfig | undefined {
+  return sessionAgentIds
+    .map((id: string) => {
+      const row = agentsRepo.getAgentById(id)
+      return row ? rowToAgent(row) : null
+    })
+    .find((a): a is AgentConfig => a !== null && a.role === 'store')
+}
+
 /** token 池键——复用 llm/registry.ts 的 provider:apiKey 形态（registry 默认分支） */
 function providerKey(agent: AgentConfig): string {
   return `${agent.llmProvider}:${agent.llmApiKey}`
@@ -702,12 +715,7 @@ async function executeOneAgent(
         // 属新的自动唤醒链（要过 ADR-0007 + 风暴护栏评估），另单评估。
         // 所以本通知的作用是「给人看、别让结论无声消失」，**不是「叫醒店长」**。
         if (roleBlocked.length > 0 && agent.role !== 'store') {
-          const storeCat = sessionAgentIds
-            .map((id: string) => {
-              const row = agentsRepo.getAgentById(id)
-              return row ? rowToAgent(row) : null
-            })
-            .find((a): a is AgentConfig => a !== null && a.role === 'store')
+          const storeCat = findStoreCat(sessionAgentIds)
           if (storeCat) {
             bus.emitSystemNotice({
               id: uuid(),
@@ -812,6 +820,39 @@ async function executeOneAgent(
             remainingCount: limitedAgents.length,
             remaining: limitedAgents.map((a) => a.name),
           })
+
+          // 票子（Decisions 39 二）：warn 只落文件 ⇒ 生产上仍等于静默。实证两点
+          // （2026-09-12 12:55:02 ds猫 的审查请求 / 12:59:37 店长的补投，两次撞同一
+          // 堵墙）——被拦方故障窗口 6 分钟，链上无人在能感知。故按同文件另两条护栏
+          // 补「可见面」，形态逐项对齐、不引新机制：
+          //   · 发送者提示 ← count-limit（emitSystemNotice 到发送者 agent.id）
+          //   · store 广播 ← role-not-allowed（收口决策归店长；发送者是 store 时跳过）
+          // 触达边界与 role-not-allowed 同（裁决 (a)）：UI 提示、不进 agent 上下文。
+          // ⚠️ 与 role-not-allowed 的**差异**在此：那条的补救路径明确（拆条/换目标
+          // 重发），本条桶 `(traceId, agentId)` 已耗尽 ⇒ 发送者自己修不了，所以
+          // **不能照搬「补救路径明确就不发 store」的豁免**，store 广播必须发。
+          const skippedNames = skipped.map((a) => a.name)
+          bus.emitSystemNotice({
+            id: uuid(),
+            sessionId,
+            agentId: agent.id,
+            content: `🐱 ${agent.name} 你 @ 的 ${skippedNames.join('、')} 未派发：本任务链上该猫的 A2A 配额已用尽（上限 ${limit}），该 mention 已忽略`,
+            mentions: [],
+            createdAt: new Date().toISOString(),
+          })
+          if (agent.role !== 'store') {
+            const storeCat = findStoreCat(sessionAgentIds)
+            if (storeCat) {
+              bus.emitSystemNotice({
+                id: uuid(),
+                sessionId,
+                agentId: storeCat.id,
+                content: `🐱 ${agent.name} 的 @ 被 A2A 配额拦下（${skippedNames.join('、')}）——该结论可能悬空，请关注`,
+                mentions: [],
+                createdAt: new Date().toISOString(),
+              })
+            }
+          }
         }
 
         if (limitedAgents.length > 0) {
