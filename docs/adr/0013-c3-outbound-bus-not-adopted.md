@@ -1,3 +1,18 @@
+---
+type: decision
+date: 2026-09-01
+status: superseded
+evidence:
+  - kind: file
+    ref: packages/server/src/routes/sessions.ts
+  - kind: file
+    ref: packages/server/src/execution/bus.ts
+  - kind: commit
+    ref: feb1905
+  - kind: commit
+    ref: b1cb4cd
+---
+
 # ADR 0013: C3（客户端事件出口收敛 single OutboundBus）— 降级为不做
 
 > **Status**: superseded（2026-09-01 grilling 后裁定「不做」）——归档 C3 候选的降级理由，防未来重新提起时无据可依。

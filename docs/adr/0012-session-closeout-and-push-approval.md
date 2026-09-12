@@ -1,3 +1,16 @@
+---
+type: decision
+date: 2026-08-26
+status: accepted
+evidence:
+  - kind: file
+    ref: packages/server/src/llm/session-closeout.ts
+  - kind: file
+    ref: packages/server/src/git/create-pr.ts
+  - kind: file
+    ref: packages/server/src/llm/git-utils.ts
+---
+
 # ADR 0012: 收口器 + push 审批——收口链路收敛进函数、push 边界归用户
 
 > **Status**: accepted（2026-08-26 店长派活单定稿）；**push 审批部分已退役（2026-09-01）**——发布关载体改 PR（`git/create-pr.ts`，`gh pr create --base dev --head <branch>`），PR 的 merge 即发布关，不再有「批准推 dev」审批节点；收口器部分（刀 1）仍在用。

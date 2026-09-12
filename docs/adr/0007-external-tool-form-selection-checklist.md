@@ -1,3 +1,14 @@
+---
+type: decision
+date: 2026-08-13
+status: accepted
+evidence:
+  - kind: commit
+    ref: d555732
+  - kind: file
+    ref: AGENTS.md
+---
+
 # ADR 0007: 外部工具形态选型前置检查单
 
 > **背景案例（opencode serve 立项回退）**：opencode 接入立项时，路线图把 `run` 形态定性为「单轮切片（消息进→文本出）」、agent 循环被认定只在 `serve`/`acp`——该定性未经验证即进入路线图前提，协议实测只覆盖 serve 形态，拍板基于被前提收窄的报告。事后实测 `opencode run --agent build --auto` 原生跑通工具循环（写盘+读回 7.7s），且 `--agent`/`--auto` 两个选项一直躺在 `--help` 里——对开源工具，能力对账比立项实测便宜一个数量级。回退 run 形态后，serve 特有的 4 个坑（守护进程死亡 / undici 300s 掐断 / SSE 缓冲非实时 / 「完成才响应」哨兵竞态）形态性消失。教训：拍板链上任何一环有机制卡住（前提未验证、实测不对称、复杂形态默认、决策无留痕），都不会走到回退这一步。

@@ -1,3 +1,12 @@
+---
+type: decision
+date: 2026-08-20
+status: accepted
+evidence:
+  - kind: file
+    ref: packages/shared/src/schemas.ts
+---
+
 # ADR 0009: 多模态知识库架构——文档块契约 + 跨模态向量子空间分离
 
 > **背景**：用户定位多 agent 平台、对标生产环境、要求精确识别。知识库需订阅 AI 平台论文/博客/文档 + 网络知识，后续支持 PDF/Word 录入与图片语义检索。本 ADR 从目标愿景反推演进路径，钉死「一期内容不会被二期改掉或删掉」的两条不变量。

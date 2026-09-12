@@ -1,3 +1,24 @@
+---
+type: decision
+date: 2026-08-26
+status: accepted
+evidence:
+  - kind: commit
+    ref: 86341bb
+  - kind: commit
+    ref: 02766c5
+  - kind: commit
+    ref: e0b202e
+  - kind: commit
+    ref: 8d0b405
+  - kind: commit
+    ref: e9928d2
+  - kind: commit
+    ref: 923725f
+  - kind: file
+    ref: packages/server/src/execution/
+---
+
 # ADR 0011: Execution 执行引擎抽取——Connector 回归传输层
 
 > **Status**: accepted（2026-08-25 店长终审；ADR 0011 收口分配）

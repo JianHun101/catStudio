@@ -1,3 +1,20 @@
+---
+type: decision
+date: 2026-09-07
+status: accepted
+evidence:
+  - kind: file
+    ref: packages/server/src/execution/reply.ts
+  - kind: file
+    ref: scripts/mcp-server-utils.mjs
+  - kind: file
+    ref: skills/refs/review-request-template.md
+  - kind: file
+    ref: docs/plans/review-chain-anchor.md
+  - kind: file
+    ref: skills/manifest.yaml
+---
+
 # ADR 0014: Skill 与投递解耦——skill 管「怎么把活做对」，投递管「谁接下棒」
 
 > **背景**：猫咖 skill 体系反复出现的病灶（request-review 信号停用、@审查者 静默丢单、DS 猫自发 @ + hook 又触发一次）不是单点 bug，而是**一类结构性病根**——「投递」被编进了 skill 内容里。本 ADR 从根上拆开这两个正交关注点，并明确这是对既有 `skill-consumption-architecture`（server 零注入 + CLI file-scan）的一次方向性延续（注入侧已定，见 scripts/mcp-server-utils.mjs 的 read_skill/list_skills），但把**投递**提到与 skill 并列的一等关注点。
