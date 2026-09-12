@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { createServer } from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -37,6 +38,7 @@ import {
 } from '../../packages/server/src/db/repository/index.js'
 import { segmentDocument } from '../../packages/server/src/memory/flywheel/segment.js'
 import { vectorToBlob } from '../../packages/server/src/memory/index.js'
+import { EmbeddingClient } from '../../packages/server/src/memory/embedding-client.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -587,5 +589,135 @@ describe('S13 evidence 往返（G4）', () => {
     expect(Array.isArray(parsed)).toBe(true)
     expect(parsed[0].kind).toBe('commit')
     expect(parsed[0].ref).toBe('d555732')
+  })
+})
+
+// ─── 票午 · 嵌入超时与批大小解耦（走多批 + 失败重试）─────
+
+/** 多节件：n 个 `## 小节` ⇒ n 片（切片器一节一片）——用来把「切批」变成可观测量 */
+function multiSectionDoc(n) {
+  // evidence 非空是准入硬条件（S2 fail-closed）——缺了它整件会被跳过，根本走不到嵌入
+  const meta = {
+    type: 'decision',
+    date: '2026-09-12',
+    status: 'accepted',
+    evidence: [{ kind: 'commit', ref: 'abc1234' }],
+  }
+  const parts = ['---', fm(meta), '---', '', '# 多节件', '']
+  for (let i = 1; i <= n; i++) parts.push(`## 第 ${i} 节`, '', `第 ${i} 节的正文。`, '')
+  return parts.join('\n')
+}
+
+/**
+ * 真起一个 127.0.0.1 stub sidecar（/health + /v1/embeddings）。
+ * `failFirst` > 0 ⇒ 前 N 次嵌入请求立即回 500（不挂起，无时序竞态）。
+ */
+async function startEmbedStub({ failFirst = 0 } = {}) {
+  let remainingFailures = failFirst
+  const hits = { health: 0, embeddings: 0 }
+  const batchSizes = []
+
+  const server = createServer((req, res) => {
+    if (req.url === '/health') {
+      hits.health++
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, ready: true, model: 'stub', dim: 512 }))
+      return
+    }
+    if (req.url === '/v1/embeddings' && req.method === 'POST') {
+      hits.embeddings++
+      const chunks = []
+      req.on('data', (c) => chunks.push(c))
+      req.on('end', () => {
+        const input = JSON.parse(Buffer.concat(chunks).toString()).input
+        const texts = typeof input === 'string' ? [input] : input
+        batchSizes.push(texts.length) // 失败批也记——好断「重试的是同一批」
+        if (remainingFailures > 0) {
+          remainingFailures--
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, reason: 'boom' }))
+          return
+        }
+        const data = texts.map((t, index) => ({ index, embedding: vecFor(t) }))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ model: 'stub', dim: 512, data }))
+      })
+      return
+    }
+    res.writeHead(404).end()
+  })
+
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const port = server.address().port
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    hits,
+    batchSizes,
+    close: () => new Promise((r) => server.close(() => r())),
+  }
+}
+
+describe('票午 切批 + 重试（真链路：真 client + 真 HTTP + 真切片器 + 真库）', () => {
+  let stub = null
+  let prevEnabled
+
+  beforeEach(() => {
+    // 真 client 的启用开关；scripts 项目不预设（只有 server 项目设 false）
+    prevEnabled = process.env.MEMORY_ENABLED
+    process.env.MEMORY_ENABLED = 'true'
+  })
+
+  afterEach(async () => {
+    if (stub) {
+      await stub.close()
+      stub = null
+    }
+    if (prevEnabled === undefined) delete process.env.MEMORY_ENABLED
+    else process.env.MEMORY_ENABLED = prevEnabled
+  })
+
+  const chunkCount = (rel) =>
+    getDb().prepare('SELECT COUNT(*) c FROM chunks WHERE doc_path = ?').get(rel).c
+
+  it('D4 首败 + 重试成功 ⇒ 该件**完整入库**（不是整件白跑）', async () => {
+    stub = await startEmbedStub({ failFirst: 1 })
+    const client = new EmbeddingClient({ baseUrl: stub.baseUrl, batchSize: 2 })
+    writeFiles(root, { 'docs/adr/multi.md': multiSectionDoc(5) })
+    initGitRepo(root)
+
+    const report = await scan({ embed: client })
+
+    expect(report.errors).toEqual([])
+    expect(report.inserted).toBe(5) // 5 片全写
+    expect(chunkCount('docs/adr/multi.md')).toBe(5)
+    // (a) 切批真的生效：整件一次会是 [5]；这里 3 批，首批失败后**重试的是同一批**
+    expect(stub.batchSizes).toEqual([2, 2, 2, 1])
+    expect(stub.hits.embeddings).toBe(4) // 3 批 + 1 次重试——空转的重试会停在 3
+  })
+
+  it('重试也失败 ⇒ 该件一行不写（契约 ①：写库粒度**仍是整件**，重试不改它）', async () => {
+    stub = await startEmbedStub({ failFirst: 99 })
+    const client = new EmbeddingClient({ baseUrl: stub.baseUrl, batchSize: 2 })
+    writeFiles(root, { 'docs/adr/multi.md': multiSectionDoc(5) })
+    initGitRepo(root)
+
+    const report = await scan({ embed: client })
+
+    expect(report.errors).toHaveLength(1)
+    expect(report.errors[0]).toMatchObject({ path: 'docs/adr/multi.md', reason: 'embed-failed' })
+    expect(report.inserted).toBe(0)
+    expect(chunkCount('docs/adr/multi.md')).toBe(0) // 半截索引比没索引更坏
+  })
+
+  it('承重反例 D1 的扫描器面：批大小 = MAX_BATCH（整件一次）⇒ 请求体骤增', async () => {
+    stub = await startEmbedStub()
+    const oneShot = new EmbeddingClient({ baseUrl: stub.baseUrl, batchSize: 64 })
+    writeFiles(root, { 'docs/adr/multi.md': multiSectionDoc(5) })
+    initGitRepo(root)
+
+    await scan({ embed: oneShot })
+
+    // 同一件文档：不切 ⇒ 一个请求装 5 片（票午现状 ① 的形态）；切（batchSize 2）⇒ [2,2,2,1]
+    expect(stub.batchSizes).toEqual([5])
   })
 })
