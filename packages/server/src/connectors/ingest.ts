@@ -23,7 +23,6 @@ import type { AgentConfig } from '@cat-study/shared'
 import { rowToAgent } from '../execution/row.js'
 import { getExecutionEngine, getExecutionBus } from '../execution/registry.js'
 import { resolveHandoffTarget } from '../handoff/index.js'
-import { saveMessageMemory } from '../memory/index.js'
 import { createLogger } from '../logger.js'
 import {
   RESTART_TTL_MS,
@@ -364,18 +363,6 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
     }
     return true
   })
-
-  // 将用户消息保存为向量记忆（异步不阻塞消息流；REST 入口按 input.saveMemory 保持现状）
-  if (input.saveMemory) {
-    saveMessageMemory(
-      effectiveSessionId,
-      content,
-      msgId,
-      validAgents.map((a) => a.id)
-    ).catch((err) => {
-      log.warn('记忆存储失败', { error: err.message, traceId })
-    })
-  }
 
   // 5. 调度 + 执行——C1 v3 单入口（executeAgentsSerial 内部走 execute(cmd)：
   // 决策(直跑/入队)→token→执行→finally{release+收口+排空}）。槽位由 execute 决策段

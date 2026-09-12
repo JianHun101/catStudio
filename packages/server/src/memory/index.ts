@@ -1,7 +1,11 @@
 /**
- * 记忆服务 — 向量记忆的存储、检索与上下文构建。
+ * 记忆服务 — 向量记忆的检索与上下文构建。
  *
- * 存储: 用户消息 → 嵌入 → memories 表（单行，所有 Agent 共享）
+ * ⚠️ **本模块只读**（票壬 · 旧写口退役）：把「用户消息」写成向量记忆的那个函数
+ * 已删除（见 `scripts/flywheel/retire-message-memory.mjs`）——索引侧唯一写口是
+ * 飞轮扫描器（`scripts/flywheel/scan.mjs`），对话原话不再入库。
+ * 检索面保留：`memories` 表结构未动（DROP 归票辛接线时统一做）。
+ *
  * 检索: 原话 + 改写查询双通道 → 嵌入 → sqlite-vec cosine 相似度 → 距离下限过滤 → 合并去重 → top-K
  * 注入: 格式化记忆文本 → 拼接到 system prompt（始终是存储原文，改写不参与注入）
  *
@@ -9,24 +13,12 @@
  *   MEMORY_TOP_K                — 检索记忆数量（默认 3）
  *   KNOWLEDGE_TOP_K             — 知识库检索数量（默认 3），见 buildKnowledgeContext
  *   MEMORY_MAX_DISTANCE         — 检索距离下限（默认 0.6），余弦距离超过此值的记忆不召回
- *   MEMORY_DEDUP_THRESHOLD      — 去重余弦距离阈值（默认 0.20），小于此值时跳过存储
- *   MEMORY_UPDATE_THRESHOLD     — 更新余弦距离阈值（默认 0.35），去重与更新之间的记忆会被 UPDATE 而非 INSERT
- *   MEMORY_DEDUP_ENABLED        — 是否开启去重/更新（默认 "1"），设为 "0" 关闭
  *   MEMORY_QUERY_REWRITE_ENABLED— 查询改写开关（默认 "1"），见 query-rewrite.ts
- *   MEMORY_FILTER_ENABLED       — 入库筛选开关（默认 "1"），见 filter.ts
- *   MEMORY_MIN_CONTENT_LENGTH   — 最小入库内容长度（默认 4），短于该值的消息不入库
- *
- * 三段式逻辑:
- *   距离 < DEDUP_THRESHOLD      → 跳过（几乎相同，无需存储）
- *   DEDUP ≤ 距离 < UPDATE       → UPDATE（话题相关但内容不同，修正旧记忆）
- *   距离 ≥ UPDATE               → INSERT（全新话题）
  */
 
-import { v4 as uuid } from 'uuid'
 import { memories as memoriesRepo, knowledge as knowledgeRepo } from '../db/repository/index.js'
 import { embedText, getEmbeddingStatus, isMemoryEnabled } from './embedding.js'
 import { rewriteRetrievalQueries } from './query-rewrite.js'
-import { evaluateMemoryContent, isMemoryFilterEnabled } from './filter.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('memory')
@@ -41,108 +33,6 @@ export function vectorToBlob(vec: number[]): Buffer {
 /** Buffer → Float32Array → number[]（从 BLOB 读取） */
 export function blobToVector(blob: Buffer): number[] {
   return Array.from(new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4))
-}
-
-// ─── 存储 ────────────────────────────────────────────
-
-/**
- * 将用户消息存为向量记忆。
- *
- * 共享记忆模式：同一条消息只存一行，不再为每个 Agent 复制一份。
- * agentIds[0] 作为来源元数据记录在 agent_id 列。
- *
- * 这是"即发即弃"的——失败只记日志，不抛异常、不阻塞消息流。
- */
-export async function saveMessageMemory(
-  _sessionId: string,
-  content: string,
-  sourceMessageId: string,
-  agentIds: string[]
-): Promise<void> {
-  if (!isMemoryEnabled()) return
-  if (!agentIds.length) return
-
-  // 剥离 @mention 再嵌入，避免路由元数据污染语义向量。
-  // @mention 是分发信息而非用户意图，混入会降低去重精度，
-  // 尤其在短消息场景下，@前缀占比过高会导致误判重复。
-  const cleanContent = content.replace(/@\S+\s*/g, '').trim()
-  if (!cleanContent) {
-    log.debug('消息仅含 @mention，跳过记忆存储', { content })
-    return
-  }
-
-  // 入库筛选：deny-list，只过滤高置信度垃圾（应答词/纯填充/一次性指令）。
-  // 长期/偏好标记命中时无条件存储——约定的优先级高于指令特征。
-  if (isMemoryFilterEnabled()) {
-    const verdict = evaluateMemoryContent(cleanContent)
-    if (!verdict.store) {
-      log.debug('记忆筛选：跳过', { reason: verdict.reason, content: cleanContent })
-      return
-    }
-  }
-
-  // 嵌入不可用（未启用 / sidecar 起不来 / 超时 / 维度不符）⇒ 显式跳过存储。
-  // 失败原因由 embedding-client 首次失败时记 error；此处只留 debug 一级，不刷屏。
-  const embedded = await embedText(cleanContent)
-  if (!embedded.ok) {
-    log.debug('嵌入不可用，跳过记忆存储', { reason: embedded.reason })
-    return
-  }
-  const embedding = embedded.vector
-  if (embedding.length === 0) return
-
-  const blob = vectorToBlob(embedding)
-  const now = new Date().toISOString()
-
-  // ── 去重 / 更新检测（全局，不再按 agent 隔离） ──────
-  const dedupEnabled = (process.env.MEMORY_DEDUP_ENABLED || '1') !== '0'
-  const dedupThreshold = parseFloat(process.env.MEMORY_DEDUP_THRESHOLD || '0.20')
-  const updateThreshold = parseFloat(process.env.MEMORY_UPDATE_THRESHOLD || '0.35')
-
-  if (dedupEnabled) {
-    try {
-      const nearest = memoriesRepo.findNearestMemory(blob)
-
-      if (nearest && nearest.distance < dedupThreshold) {
-        // 几乎相同的记忆 → 跳过
-        log.debug('记忆去重：跳过重复记忆', {
-          distance: nearest.distance.toFixed(4),
-          threshold: dedupThreshold,
-        })
-        return
-      }
-
-      if (nearest && nearest.distance < updateThreshold) {
-        // 话题相关但内容不同 → 更新旧记忆（修正）
-        memoriesRepo.updateMemory(nearest.id, cleanContent, blob, sourceMessageId, now)
-        log.debug('记忆修正：更新已有记忆', {
-          memoryId: nearest.id,
-          distance: nearest.distance.toFixed(4),
-          updateThreshold: updateThreshold.toFixed(2),
-          contentLen: cleanContent.length,
-        })
-        return
-      }
-
-      // else: 全新话题 → 继续执行 INSERT
-    } catch {
-      // 去重查询失败不阻塞存储
-    }
-  }
-
-  // ── 写入：共享模式只存一行，用第一个 agent 作为来源 ──
-
-  try {
-    const provenanceAgentId = agentIds[0]
-    memoriesRepo.insertMemory(uuid(), provenanceAgentId, cleanContent, blob, sourceMessageId, now)
-    log.debug('记忆已存储', {
-      provenanceAgentId,
-      contentLen: cleanContent.length,
-      dim: embedding.length,
-    })
-  } catch (err: any) {
-    log.error('记忆写入失败', { error: err.message, sourceMessageId })
-  }
 }
 
 // ─── 检索 ────────────────────────────────────────────
@@ -343,8 +233,8 @@ async function searchMemoriesHybridPath(
  * 改写失败/关闭时自动降级为仅原话检索。
  */
 export async function buildMemoryContext(triggerContent: string): Promise<string> {
-  // 剥离 @mention 再检索，与 saveMessageMemory 存储时保持一致，
-  // 避免查询向量与存储向量处于不同语义空间导致召回质量下降。
+  // 剥离 @mention 再检索：@mention 是路由元数据而非用户意图，混入查询会
+  // 拉偏查询向量、降低召回质量。
   const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
   if (!cleanContent) return ''
 
