@@ -489,6 +489,76 @@ describe('segmentDocument · A10 frontmatter 不进正文（真实 ADR）', () =
   })
 })
 
+describe('segmentDocument · A12 L3-e 围栏前缀预算（审查反例回归）', () => {
+  const assertInvariant = (r: SegmentReport): void => {
+    for (const s of r.segments) expect(s.text.length).toBeLessThanOrEqual(MAX_TEXT_LENGTH)
+    expect(r.maxTextLength).toBeLessThanOrEqual(MAX_TEXT_LENGTH)
+    expect(r.maxTextLength).toBe(Math.max(0, ...r.segments.map((s) => s.text.length)))
+  }
+
+  it('① 开栏行本身 ≥450 ⇒ 前缀整体放弃、该行退回内容硬切，450 不变式不破', () => {
+    const open = '```' + 'x'.repeat(500) // 前缀（含 `\n`）= 504 > 450：物理上塞不进任何预算
+    const code = ['const a = 1;', 'const b = 2;']
+    const r = segmentDocument({
+      path: 'p.md',
+      content: `# T\n\n## S\n\n${open}\n${code.join('\n')}\n\`\`\``,
+    })
+
+    assertInvariant(r)
+    // 零内容丢失：开栏行退回内容后被硬切，逐字仍在
+    const all = stripWs(r.segments.map((s) => s.body).join(''))
+    expect(all).toContain(stripWs(open))
+    for (const l of code) expect(all).toContain(stripWs(l))
+    // 且不因「预算被夹到 1」炸成逐字片
+    expect(r.segments.length).toBeLessThan(10)
+  })
+
+  it('② 同上但**未闭合**（无闭围栏可丢）⇒ 不变式不破、不炸片数', () => {
+    const open = '```' + 'x'.repeat(500)
+    const r = segmentDocument({ path: 'p.md', content: `# T\n\n## S\n\n${open}\nconst a = 1;` })
+
+    assertInvariant(r)
+    expect(r.segments.length).toBeLessThan(10)
+    expect(stripWs(r.segments.map((s) => s.body).join(''))).toContain(stripWs(open))
+  })
+
+  it('③ 前缀放得下 ⇒ 照旧复制到每片（正常路径不被本次修正波及）', () => {
+    const code = Array.from({ length: 40 }, (_, i) => `const value${i} = ${i};`)
+    const r = segmentDocument({
+      path: 'p.md',
+      content: `# T\n\n## S\n\n\`\`\`ts\n${code.join('\n')}\n\`\`\``,
+    })
+
+    expect(r.segments.length).toBeGreaterThan(1)
+    for (const s of r.segments) {
+      expect(s.body.startsWith('```ts')).toBe(true)
+      expect(s.body.split('\n').slice(1)).not.toContain('```') // 闭围栏仍丢
+    }
+    assertInvariant(r)
+  })
+
+  it('④ 判据边界两侧：留得出 1 字正文 ⇒ 留前缀；留不出 ⇒ 整体放弃', () => {
+    // 与 A6「锚放不进预算就整体放弃」同一条规则：前缀是派生上下文，弃之不丢源内容
+    const bc = 'p.md > T > S'.length + 1 // 面包屑在 text 里占的字节数（含 `\n`）
+    const content = 'abcdefghij' // 10 字，保证弃前缀侧只有 1 片
+
+    const fits = '```' + 'x'.repeat(MAX_TEXT_LENGTH - bc - 2 - 3) // 前缀 + 面包屑 = MAX-2 ⇒ 还留得下
+    const rFits = segmentDocument({ path: 'p.md', content: `# T\n\n## S\n\n${fits}\n${content}` })
+    assertInvariant(rFits)
+    // 「当前缀用」= 该行 + `\n` + 后续内容同片
+    expect(rFits.segments.length).toBeGreaterThan(1)
+    for (const s of rFits.segments) expect(s.body.startsWith(`${fits}\n`)).toBe(true)
+
+    const nomore = '```' + 'x'.repeat(MAX_TEXT_LENGTH - bc - 2 - 3 + 1) // 再多 1 字 ⇒ 连 1 字正文都留不出
+    const rNo = segmentDocument({ path: 'p.md', content: `# T\n\n## S\n\n${nomore}\n${content}` })
+    assertInvariant(rNo)
+    expect(rNo.segments.some((s) => s.body.startsWith(`${nomore}\n`))).toBe(false)
+    expect(rNo.segments.some((s) => s.body === nomore)).toBe(true) // 退回内容，独立成片
+    // 放弃前缀 ≠ 丢内容：开栏行本身照样进正文
+    expect(stripWs(rNo.segments.map((s) => s.body).join(''))).toContain(stripWs(nomore))
+  })
+})
+
 describe('segmentDocument · A7 纯函数静态断言', () => {
   // 读的就是被判面本身（同目录同名的真实源码文件）。此处用 readFileSync 而非 Vite `?raw`：
   // server 包没有 `vite/client` 类型面，`?raw` 会让 `pnpm lint` 挂——两者读到的字节相同。

@@ -45,6 +45,9 @@
  *    上下文、不进 `body`，放弃它不丢任何源内容。
  * 6. **L3-e 的「语言标记复制到每片」**落实为：切分时每片的 `body` 前缀**开围栏行原文**
  *    （```` ```ts ````），闭围栏行丢弃；整块放得下时原样保留开闭两行、不加前缀。
+ *    该前缀是派生上下文，与话题锚同一条预算规则（口径 5）：**连 1 字正文都留不出就整体
+ *    放弃**，并把开栏行退回内容走普通预算。否则 `body = 前缀 + 1` 自己就 > 450，而保险丝
+ *    只脱面包屑 / 锚、不动 `body`，救不了（`hardCut` 的 `Math.max(1, …)` 兜底是那条缝）。
  * 7. **不跨「降级」边界回并**：某原子超限而降级切出的片直接定稿，不再与相邻原子贪心
  *    回并。代价只是偶尔切得比必要的小，不影响 450 不变式与内容保全。
  * 8. **`warnings` 是对契约的加性扩展**：C1 要求「列多于表头不得静默错位」，而
@@ -600,21 +603,31 @@ function descendCode(
   const lines = text.split('\n')
   const openMatch = lines.length > 0 ? FENCE_LINE.exec(lines[0]) : null
   const open = openMatch ? lines[0] : ''
-  let content = open === '' ? lines : lines.slice(1)
-  if (openMatch && content.length > 0) {
-    const m = FENCE_LINE.exec(content[content.length - 1])
+  const breadcrumbBase = textBase(breadcrumbOf(ctx.path, headings))
+
+  // 复制到每片的开栏行是一条**派生上下文**（与面包屑 / 话题锚同类），故与话题锚同一条规则
+  // （口径 5）：至少给正文留 1 个字才用，留不出就**整体放弃**——不截断、不引比例阈值。
+  // 放弃时把开栏行**退回内容**走普通预算：这行本身塞不进 450，只能作为正文被硬切。
+  const wanted = open === '' ? '' : `${open}\n`
+  const prefix = breadcrumbBase + wanted.length < MAX_TEXT_LENGTH ? wanted : ''
+
+  // 闭围栏行丢弃（零信息）。开 / 闭两行可能分处 `content` 两端（前缀被放弃时开栏行回流），
+  // 故按**原始行号**定位，不靠 `content` 长度推。
+  let end = lines.length
+  if (openMatch && lines.length > 1) {
+    const m = FENCE_LINE.exec(lines[lines.length - 1])
     if (
       m &&
       m[1][0] === openMatch[1][0] &&
       m[1].length >= openMatch[1].length &&
       m[2].trim() === ''
     ) {
-      content = content.slice(0, -1)
+      end = lines.length - 1
     }
   }
+  const content = prefix === '' ? lines.slice(0, end) : lines.slice(1, end)
 
-  const prefix = open === '' ? '' : `${open}\n`
-  const base = textBase(breadcrumbOf(ctx.path, headings)) + prefix.length
+  const base = breadcrumbBase + prefix.length
   const parts: WorkingPart[] = []
   let buf: string[] = []
   const flush = (): void => {
