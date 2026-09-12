@@ -569,4 +569,68 @@ describe('stop()', () => {
     expect(handles).toHaveLength(1)
     expect(handles[0].killed()).toBe(true)
   })
+
+  // ─── 票巳 (a)：StopReceipt 四条可达分支 ────────────────────
+  // 回执是「回收到底有没有发生」的**唯一可判面**（票丁 OQ4 的判定规则正建立在它之上），
+  // 故它自己必须有断言 —— 上面那条既有用例只看 kill 副作用、把返回值丢掉，
+  // 改动后照旧绿 = 「测试不挡新行为」的假绿面。
+
+  it('spawn 分支：握手后 stop() ⇒ port = 握手真实端口、killedChild=true', async () => {
+    const stub = await makeStub()
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub) })
+
+    expect((await client.embed('x')).ok).toBe(true)
+    expect(client.stop()).toEqual({ port: stub.port, killedChild: true })
+  })
+
+  it('反例面：env 摆假端口也不进回执（port 是握手真值，不是 env 反推）', async () => {
+    const stub = await makeStub()
+    // 实现若改成「用 EMBED_SIDECAR_PORT 反推」，本断言必红
+    process.env.EMBED_SIDECAR_PORT = '9999'
+    try {
+      const client = new EmbeddingClient({ spawnFn: spawnTo(stub) })
+      expect((await client.embed('x')).ok).toBe(true)
+
+      const receipt = client.stop()
+      expect(receipt.port).toBe(stub.port)
+      expect(receipt.port).not.toBe(9999)
+    } finally {
+      delete process.env.EMBED_SIDECAR_PORT
+    }
+  })
+
+  it('baseUrl 直连分支（无 child）⇒ killedChild=false，port 仍由 URL 解析', async () => {
+    const stub = await makeStub()
+    const client = new EmbeddingClient({ baseUrl: `http://127.0.0.1:${stub.port}` })
+
+    expect((await client.embed('x')).ok).toBe(true)
+    // 直连不 spawn ⇒ 「本次关停无进程可回收」必须如实报 false，不能与「有 child 但杀失败」混淆
+    expect(client.stop()).toEqual({ port: stub.port, killedChild: false })
+  })
+
+  it('live 已被 drop（失败即杀进程）⇒ 退到 lastSuccess 的握手端口、killedChild=false', async () => {
+    const stub = await makeStub()
+    // retryAttempts:0 —— 挡掉「首败自动重试」重新 spawn 出一条 live，否则本用例测不到右支
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), retryAttempts: 0 })
+
+    expect((await client.embed('x')).ok).toBe(true)
+    stub.setEmbedStatus(500)
+    expect((await client.embed('x')).ok).toBe(false) // 失败路径已 dropSidecar：live 清零、child 被杀
+
+    // live 缺席 ⇒ 走 `live?.port ?? lastSuccess?.port` 的**右支**（port 依旧是握手真值）
+    expect(client.stop()).toEqual({ port: stub.port, killedChild: false })
+  })
+
+  it('从未连接 ⇒ 不编端口：port undefined 且 killedChild=false', () => {
+    const client = new EmbeddingClient() // 不 embed ⇒ 既不 spawn 也不探活
+
+    const receipt = client.stop()
+    expect(receipt.killedChild).toBe(false)
+    expect(receipt.port).toBeUndefined()
+  })
+
+  // 未覆盖：`port && port > 0` 的 `>0` 分支在本仓**不可达**，故不造假用例去「覆盖」它 ——
+  // 握手解析已拒 `info.port <= 0`（embedding-client.ts 的 awaitHandshake），直连分支只有
+  // URL 省略端口时 parsePortFromUrl 才回 0，而那意味着请求打到默认 80（stub 占不住、
+  // 真机 sidecar 也不用 80）⇒ live 根本建不起来。属防御性守卫，本组只钉四条可达分支。
 })

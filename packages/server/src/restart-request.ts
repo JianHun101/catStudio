@@ -46,7 +46,17 @@ export const RESTART_TTL_MS = 10 * 60 * 1000
  */
 export const RESTART_CONFIRMED_TTL_MS = 35 * 60 * 1000
 
-/** 文件基础目录——生产不设 env → 项目根（与 dev.js 轮询路径一致）；测试经 vitest env 隔离 */
+/**
+ * 文件基础目录——生产不设 env → 项目根（与 dev.js 轮询路径一致）；测试经 vitest env 隔离。
+ *
+ * ⚠️ **勿在 `.env` 设置 `RESTART_FILES_DIR`**。它是**测试专用**隔离通道（来源 =
+ * `vitest.config.ts` 的 `test.env`），生产侧的路径对齐靠一条**隐式契约**撑着：
+ * dev.js 以仓库根 spawn server（`cwd: ROOT`）⇒ server 的 `process.cwd()` = ROOT。
+ * 而 dev.js 侧是**硬编码** `path.join(ROOT, ...)`（scripts/dev.js:82 / :91）、**不读这个 env**，
+ * 且 `env.ts` 会把 `.env` 的键写进 `process.env`（env.ts:50）——真在 `.env` 里设了它，
+ * 两端路径当场分叉，而失败形态是**静默**的：server 写的文件 dev.js 永远轮询不到
+ * ⇒ 用户视角「点了按钮没反应」，零报错。故该键只应存在于测试配置。
+ */
 const RESTART_FILES_DIR = process.env.RESTART_FILES_DIR ?? process.cwd()
 // 隔离目录（测试）可能不存在——模块加载时确保可写（生产 = cwd 已存在 → no-op）
 mkdirSync(RESTART_FILES_DIR, { recursive: true })
@@ -56,6 +66,31 @@ export const RESTART_REQUEST_FILE = resolve(RESTART_FILES_DIR, '.restart-request
 
 /** 重启完成标记路径（dev.js 重启成功后写，新 server 启动时读并广播） */
 export const RESTART_DONE_FILE = resolve(RESTART_FILES_DIR, '.restart-done')
+
+/**
+ * 关停请求文件路径（票巳 (b)，契约 6）。
+ *
+ * 链路：dev.js 按钮重启**杀旧进程之前**写本文件（空文件）→ server 侧自检消费
+ * （`shutdown-request.ts`）→ 走既有 `shutdown()` 优雅退出 → dev.js 有界宽限窗等它
+ * 自退 → 超窗兜底 `taskkill /F /T`（现状不变）。**全自动，不需要用户点击**。
+ *
+ * 为什么用文件不用信号：Windows 上 `child.kill()` = `TerminateProcess`，**根本不
+ * 投递信号**（实测子进程处理函数零执行）⇒「先发 SIGTERM」结构性不可行，只能照抄
+ * 仓内既有的文件握手范式。
+ *
+ * **内容契约（契约 7）：「存在即请求」，内容不参与判定——空文件即合法**，读方
+ * 不校验、不解析。理由：关停请求**不携带任何数据**（对照 `.restart-request` 需
+ * `messageId`/`sessionId`/`reason`）。加最小 schema 就必须回答「字段缺了算不算
+ * 请求」，等于把陈旧文件 / 重入这两个问题重新开一遍。
+ *
+ * ⚠️ **不得复用 `.restart-request` 这个文件名**（契约 8）：dev.js 的 watcher
+ * （`scripts/dev.js` 重启确认区块）会把它当重启请求触发。
+ *
+ * 定义处与 `RESTART_REQUEST_FILE` / `RESTART_DONE_FILE` 同源（同一个
+ * `RESTART_FILES_DIR`）——契约 6 要求「不得散落第二处路径常量」，故本常量必须留在
+ * 本模块，消费逻辑才另起 `shutdown-request.ts`。
+ */
+export const SHUTDOWN_REQUEST_FILE = resolve(RESTART_FILES_DIR, '.shutdown-request')
 
 export interface RestartRequestFile {
   /** 触发消息 ID（前端按消息关联按钮状态） */

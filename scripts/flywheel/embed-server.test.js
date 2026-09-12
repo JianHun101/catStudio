@@ -6,9 +6,16 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 import { MAX_BATCH, createEmbedServer, resolveTransformersEntry } from './embed-server.mjs'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const SIDECAR_SRC_PATH = resolve(__dirname, 'embed-server.mjs')
+const CLIENT_SRC_PATH = resolve(__dirname, '../../packages/server/src/memory/embedding-client.ts')
+/** 折叠空白：静态断言只认符号配对，不认换行/缩进排版 */
+const squash = (s) => s.replace(/\s+/g, ' ')
 
 /** 假嵌入：维度 3，值 = 文本长度（可断言顺序与内容） */
 const fakeEmbed = async (texts) => texts.map((t) => [t.length, 3, 1])
@@ -144,5 +151,37 @@ describe('embed-server', () => {
       expect((await fetch(`${base}/health`, { method: 'POST' })).status).toBe(404)
       expect((await fetch(`${base}/v1/embeddings`)).status).toBe(404) // GET ≠ POST
     })
+  })
+})
+
+// ─── 父子关停配对（票巳 (c)）────────────────────────────────────
+// 票面原判「非 Windows killTree 只杀 server ⇒ sidecar 成孤儿」**已实测证伪**：
+// 父进程无论软杀硬杀，OS 回收时都会关掉管道写端 → 子进程 stdin 收 EOF → 自退
+// （孤立实测 + 阳性/阴性对照，见交接文档；真进程复现见 embed-server.e2e.mjs）。
+//
+// 但这条自检**是配对才活的**：子侧注册 stdin 自检 + 父侧用 pipe 起进程，缺任一侧
+// 它都是死代码（写成 'ignore' 就永远收不到 EOF）。本组把这对配对钉死——纯源码断言，
+// 不加载模型。
+describe('关停自检（票巳 (c)：父子配对，缺一侧即死代码）', () => {
+  const sidecarSrc = squash(readFileSync(SIDECAR_SRC_PATH, 'utf8'))
+  const clientSrc = squash(readFileSync(CLIENT_SRC_PATH, 'utf8'))
+
+  it('子侧：main() 注册 stdin end/close → stop，并 resume（不 resume 收不到 EOF）', () => {
+    expect(sidecarSrc).toContain("process.stdin.on('end', stop)")
+    expect(sidecarSrc).toContain("process.stdin.on('close', stop)")
+    expect(sidecarSrc).toContain('process.stdin.resume()')
+  })
+
+  it('子侧：自检在**握手之后立刻**注册，不等模型加载完（加载期父进程死也照样自退）', () => {
+    // ⚠️ 锚点必须是**握手写入点**，不是 `READY_PREFIX` 首次出现处——那是文件头的
+    //    常量声明（embed-server.mjs:41），拿它比排序是恒真的假绿门。
+    const handshakeAt = sidecarSrc.indexOf('process.stdout.write(`${READY_PREFIX}')
+    const selfCheckAt = sidecarSrc.indexOf("process.stdin.on('end', stop)")
+    expect(handshakeAt).toBeGreaterThan(-1)
+    expect(selfCheckAt).toBeGreaterThan(handshakeAt)
+  })
+
+  it('父侧：EmbeddingClient 起 sidecar 必须用三管道 stdio（否则 EOF 永远不来）', () => {
+    expect(clientSrc).toContain("stdio: ['pipe', 'pipe', 'pipe']")
   })
 })

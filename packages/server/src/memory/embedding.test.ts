@@ -214,6 +214,50 @@ describe('代理接线', () => {
   })
 })
 
+// ─── D1 回收行（票巳 (a) 的靶心）──────────────────────
+// `stopEmbeddingSidecar()` 的回收行是「回收有没有发生」在日志上的**唯一可判面**
+// （票丁 OQ4 的判定规则正是「关停后无回收行 ⇒ 出票」）。没有断言 ⇒ 这行日志被删、
+// 字段写错、port 改成 env 反推，全量测试照旧绿 —— 靶心落进假绿面。
+
+describe('D1 回收行', () => {
+  it('有 client：落「嵌入 sidecar 关停」+ 握手真 port + killedChild=true', async () => {
+    process.env.MEMORY_ENABLED = 'true'
+    await startStub(512)
+    const realPort = stub!.port
+    let killed = 0
+    // 反例面：env 摆个显眼假端口 —— 回收行的 port 若改成 env 反推，本断言必红
+    process.env.EMBED_SIDECAR_PORT = '9999'
+    __setEmbeddingClientForTest(
+      new EmbeddingClient({
+        spawnFn: () => ({ ...handshakeChild(realPort), kill: () => (killed++, true) }) as any,
+      })
+    )
+
+    await startEmbeddingSidecar()
+    logMocks.info.mockClear() // 只留回收行：就绪行同样打 info，不清会把断言喂绿
+
+    stopEmbeddingSidecar()
+
+    expect(killed).toBe(1)
+    expect(realPort).not.toBe(9999)
+    expect(logMocks.info).toHaveBeenCalledWith('嵌入 sidecar 关停', {
+      port: realPort,
+      killedChild: true,
+    })
+  })
+
+  it('无 client：killedChild=false、port undefined —— 把「日志没打」与「确实无进程可回收」分开', () => {
+    __setEmbeddingClientForTest(null)
+
+    stopEmbeddingSidecar()
+
+    expect(logMocks.info).toHaveBeenCalledWith('嵌入 sidecar 关停', {
+      port: undefined,
+      killedChild: false,
+    })
+  })
+})
+
 // ─── 维度自检的比对基准 ───────────────────────────────
 
 describe('resolveStoredVectorDim', () => {

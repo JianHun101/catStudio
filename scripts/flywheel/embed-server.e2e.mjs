@@ -10,16 +10,22 @@
  *   B1  同文本 → sidecar 向量 与 进程内（同一 ESM 入口、同选项）向量 **逐位相同**
  *   B1' 同文本两次 → 向量相同（无随机性）
  *   B9  sidecar 是**独立 pid**；杀掉它本进程仍存活，且该端口不再可连
+ *   B10 孤儿自退（票巳 (c)）：**只杀父进程、不杀 sidecar** ⇒ sidecar 收 stdin EOF 自退
  *
  * 不覆盖（另有人管）：B8 真机 `pnpm start`（占端口 + 主库，按票面约定由店长协调时间窗）。
+ *
+ * 内部双角色：`--fake-server` 时本文件反过来充当「假 server」（起 sidecar 并保活），
+ * 供 B10 的 driver 硬杀——这样孤儿自退的拓扑能在一个文件里自洽复现，不引额外脚本。
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolveTransformersEntry } from './embed-server.mjs'
 
+const SELF = fileURLToPath(import.meta.url)
 const SIDECAR = fileURLToPath(new URL('embed-server.mjs', import.meta.url))
 const READY_PREFIX = 'EMBED_SIDECAR_READY'
+const FAKE_SERVER_FLAG = '--fake-server'
 
 let passed = 0
 let failed = 0
@@ -74,6 +80,105 @@ async function waitReady(base, budgetMs) {
     await sleep(1000)
   }
   throw new Error(`等待 /health ready 超时；最后响应: ${JSON.stringify(last)}`)
+}
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/** pid 存活判据（signal 0）；非本进程子进程在 Windows 上无 zombie 面 */
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 清理用硬杀（带 /T 连坐整棵树）——**只用于善后**，判据断言不用它（见 B10 注释） */
+function killPidTree(pid) {
+  if (!pid || !pidAlive(pid)) return
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' })
+  } else {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {}
+  }
+}
+
+/**
+ * B10（票巳 (c)）：「只杀 server 不杀 sidecar」的孤立实测。
+ *
+ * 拓扑镜像真机：driver → fakeServer（冒充 server，三管道起 sidecar）→ embed-server.mjs。
+ * 硬杀只打 fakeServer（Windows `taskkill /F`，**不带 `/T`**）——带 /T 会连坐杀树，
+ * 测的就不是这件事了。
+ *
+ * 证伪对象 = 票面原判「非 Windows `killTree` 只杀 server ⇒ sidecar 成孤儿」。
+ * 判据**必须带对照**：杀前两侧都要报活、杀后 fakeServer 必须报死 —— 否则
+ * 「sidecar 不在了」可能是存活判据本身坏掉造出的假绿。
+ */
+async function checkOrphanSelfExit() {
+  const parent = spawn(process.execPath, [SELF, FAKE_SERVER_FLAG], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    // 动态端口：避开在跑的 dev sidecar（EMBED_SIDECAR_PORT 可能被外部 shell 设成 3210）
+    env: { ...process.env, EMBED_SIDECAR_PORT: '0' },
+  })
+  parent.stderr.on('data', () => {})
+  let sidecarPid = null
+  let buf = ''
+  parent.stdout.on('data', (c) => {
+    buf += c.toString()
+    let i
+    while ((i = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, i)
+      buf = buf.slice(i + 1)
+      if (line.startsWith('SIDECAR_PID ')) sidecarPid = Number(line.split(' ')[1])
+    }
+  })
+
+  try {
+    const deadline = Date.now() + 60_000
+    while (!sidecarPid && Date.now() < deadline) await sleepMs(200)
+    if (!sidecarPid) {
+      check(false, 'B10 拿到 sidecar pid（端口握手）')
+      return
+    }
+    await sleepMs(2000) // 留出 sidecar 注册 stdin 自检的时间（握手后同步注册，不等模型）
+
+    const preParent = pidAlive(parent.pid)
+    const preSidecar = pidAlive(sidecarPid)
+    check(
+      preParent && preSidecar,
+      'B10 阳性对照：杀前两侧都活着（存活判据不是坏的）',
+      `parent=${parent.pid} sidecar=${sidecarPid}`
+    )
+
+    const t0 = Date.now()
+    const parentExited = new Promise((r) => parent.once('exit', () => r(true)))
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/F', '/PID', String(parent.pid)], { stdio: 'ignore' })
+    } else {
+      process.kill(parent.pid, 'SIGKILL') // 非 Windows 的 killTree 同款：只杀 server 本身
+    }
+    await parentExited // 等 exit 事件 = 顺带完成 POSIX 侧的回收，存活判据才可信
+    check(!pidAlive(parent.pid), 'B10 阴性对照：硬杀后 parent 判死（判据能观测到死）')
+
+    while (Date.now() - t0 < 15_000 && pidAlive(sidecarPid)) await sleepMs(200)
+    const gone = !pidAlive(sidecarPid)
+
+    check(
+      gone,
+      'B10 **只杀 server 不杀 sidecar ⇒ sidecar 自退**（stdin EOF 自检成立）',
+      gone ? `${Date.now() - t0}ms 内消失` : '15s 仍存活 = 孤儿'
+    )
+  } finally {
+    // 善后放 finally：提前 return / 断言失败 / 抛异常三条路径都不留孤儿。
+    // 原先只清 sidecar ⇒ 阴性对照失败（parent 没死）时 parent 会漏在盘上占端口。
+    // 两侧各扫一遍：parent 已死则 killPidTree 是 no-op。
+    killPidTree(parent.pid)
+    killPidTree(sidecarPid)
+  }
 }
 
 async function main() {
@@ -164,6 +269,10 @@ async function main() {
       unreachable = true
     }
     check(unreachable, '停掉后该端口不再可用（客户端将走降级路径）')
+
+    // ── 6. B10：孤儿自退（票巳 (c)，孤立实测）──────────────
+    console.log('\n[6] B10 孤儿自退：只杀「server」不杀 sidecar')
+    await checkOrphanSelfExit()
   } finally {
     if (!killed) child.kill()
     const err = stderr.join('').trim()
@@ -174,7 +283,35 @@ async function main() {
   process.exit(failed === 0 ? 0 : 1)
 }
 
-main().catch((err) => {
-  console.error(`\n❌ e2e 异常: ${err.stack || err}`)
-  process.exit(1)
-})
+/**
+ * `--fake-server`：本文件反过来冒充 server —— 用三管道起 sidecar 并保活，
+ * 等 driver（B10）把它硬杀掉。**故意不走任何清理路径**：被硬杀时正是被测面。
+ */
+function runFakeServer() {
+  const child = spawn(process.execPath, [SIDECAR], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+  child.stderr.on('data', () => {})
+  let buf = ''
+  child.stdout.on('data', (c) => {
+    buf += c.toString()
+    let i
+    while ((i = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, i)
+      buf = buf.slice(i + 1)
+      if (!line.startsWith(READY_PREFIX)) continue
+      process.stdout.write(`SIDECAR_PID ${child.pid}\n`)
+    }
+  })
+  setInterval(() => {}, 1000) // 保活
+}
+
+if (process.argv.includes(FAKE_SERVER_FLAG)) {
+  runFakeServer()
+} else {
+  main().catch((err) => {
+    console.error(`\n❌ e2e 异常: ${err.stack || err}`)
+    process.exit(1)
+  })
+}

@@ -37,6 +37,7 @@ import { resolve } from 'node:path'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
 import { stopLlamaServerIfSpawned } from './llm/llama-server.js'
 import { startEmbeddingSidecar, stopEmbeddingSidecar } from './memory/embedding.js'
+import { clearStaleShutdownRequest, startShutdownRequestWatcher } from './shutdown-request.js'
 import { stopOllamaIfSpawned } from './llm/ollama.js'
 import { stopProxyIfSpawned } from './llm/cli-utils.js'
 
@@ -142,6 +143,12 @@ async function main(): Promise<void> {
     unlinkSync(lockFile)
     log.warn('启动时清理残留锁文件')
   }
+
+  // 1.6b 启动时清理**陈旧的关停请求文件**（票巳 (b) 契约 4）
+  //      dev.js 写了 .shutdown-request 但进程没来得及消费（走了兜底硬杀）⇒ 文件残留。
+  //      不清理的话新起的 server 一启动就会被它打掉 —— **启动即自杀**。
+  //      必须在下面的 startShutdownRequestWatcher() **之前**（见那里的注释）。
+  clearStaleShutdownRequest()
 
   // 1.7 启动时清理幽灵 execution_logs（agent 已被删除但日志残留）
   const ghostResult = execLogsRepo.deleteGhostExecutionLogs()
@@ -327,7 +334,17 @@ async function main(): Promise<void> {
   // （嵌入 sidecar 已前移到 1.8：扫描器之前，见那里的注释）
 
   // 5. 优雅关闭
+  // 契约 5（票巳）：`.shutdown-request` 文件握手与 SIGINT 可能**同窗到达** ⇒
+  // `shutdown()` 会被重入。现状无守卫，第二次会撞上已关闭的 io/app（抛错，关停链
+  // 断在半路，尾部进程回收走不到）。守卫必须是「幂等 + 记一行」，不是静默吞掉：
+  // 重入本身就是关停链的可观测事实。
+  let shuttingDown = false
   const shutdown = async () => {
+    if (shuttingDown) {
+      log.info('已在关停中，忽略重复触发')
+      return
+    }
+    shuttingDown = true
     log.info('shutting down...')
     // P4 #1: 先取消 OneBot 出站订阅，停止 replyBus 投递（关停后不应再发 QQ）
     stopOneBotOutbound?.()
@@ -351,6 +368,16 @@ async function main(): Promise<void> {
 
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
+
+  // 关停请求自检（票巳 (b) 契约 4/7）：dev.js 按钮重启时写 `.shutdown-request`，
+  // 本处轮询消费 → 走**同一个** `shutdown()`（Ctrl+C 与文件握手共用一条关停链，
+  // 重入由上面的守卫兜住）。
+  //
+  // 必须晚于 1.6b 的 `clearStaleShutdownRequest()`——顺序反了就是「新 server 被
+  // 陈旧文件打掉」。此处已是 main 尾部，天然满足。
+  startShutdownRequestWatcher(() => {
+    void shutdown()
+  })
 }
 
 main().catch((err) => {
