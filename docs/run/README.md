@@ -21,7 +21,7 @@ skill 只管切票，谁调用谁指定往哪落。
 
 活结束（合并 / 废弃 / 需求变更）时：
 
-1. 结论上浮到 `docs/plans/`（定稿规格）或 `docs/sessions/`（会话总结）；
+1. 结论上浮到 **`docs/plans/`**（定稿规格，**点名，不二选一**）——`docs/sessions/` 归 session-summary skill 另产，不是 run 收口的上浮出口；
 2. 删掉 `docs/run/<work-slug>/` 整个子目录。
 
 本文件（`README.md`）是目录门牌，长期保留；`<work-slug>/` 子目录一个都不留。
