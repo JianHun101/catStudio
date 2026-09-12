@@ -1897,6 +1897,49 @@ async function startAttributionStub({
   console.log('  14b: 真手动提交（无执行行）→ 兜底投 1 条 ✅')
 }
 
+// 14h: pending 补投**重判归属**（2026-09-12 修 T-A 时期的分类错误）
+//      条目进 pending 的唯一来路是「POST 瞬态失败」，而那一刻 server 多半不可达 ⇒
+//      探针同样答不出 ⇒ attributed=null ⇒ 判据降级为「投」。**「查不动」是那一刻的
+//      读数，不是这个 commit 的属性**。原实现补投不重判 ⇒ 一次时点降级被固化成永久
+//      事实，且此后每次投递机会都照投（实害：被 auto-commit 抢收的 agent 提交在
+//      server 恢复后被永久误投，每 commit 叠一条无主的审查链）。
+{
+  const uuid = '14ab0000-0000-4000-8000-0000000000ab'
+  const tmp = makeUuidRepo('.handoff-test-pending-rejudge', uuid, { 'a.txt': '1' })
+  const sha = gitIn(tmp, 'rev-parse HEAD')
+  // 手工构造「当时 POST 瞬态失败」的现场：这笔 SHA 躺在 pending 里
+  writeFileSync(join(tmp, STATE_FILE), JSON.stringify({ delivered: {}, pending: [sha] }))
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14h',
+    updated: 0, // 写回无 running 行（执行已终态）——无信息量，交探针
+    executor: 'ok', // 探针：该 uuid 存在执行行 ⇒ 有归属
+  })
+  const logs14h = await captureLogs(() => runInProc(tmp, stub.url))
+  const state14h = readStateFile(tmp)
+
+  assert(stub.hits.post === 0, `补投重判为有归属 → 应静默（POST 0 次，实际 ${stub.hits.post}）`)
+  assert(
+    !state14h.pending.includes(sha),
+    '判静默即义务解除 ⇒ 应移出 pending——留着会每次投递机会重判一遍（探针往返 + 日志）'
+  )
+  assert(state14h.delivered[sha] === undefined, '静默不是投递 ⇒ 不得记 delivered（账本单态）')
+  assert(
+    logs14h.some((l) => l.includes('pending 移除')),
+    '移出 pending 要有独立留痕：补投行只证明"试过"、静默行只说"不投"，都不是"移除"的证词'
+  )
+  // 阴性对照（证明本用例钉的不是恒真）：有归属在三态判据下判静默，而**原实现的补投
+  // 路径根本不调用这个判据**（deliverSha 不带 judgeAttribution）⇒ 同一场景必 POST 1 次。
+  assert(
+    decideHookDelivery(true).deliver === false,
+    '阴性对照：有归属在判据下判静默——原实现补投路径不调用它，故会照投'
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14h: pending 补投重判归属 → 静默 + 移出 pending（「查不动」不固化）✅')
+}
+
 // 14c: 探针查不动（executor 500）→ 一律投递，不静默吞
 {
   const uuid = '14cc0000-0000-4000-8000-00000000000c'

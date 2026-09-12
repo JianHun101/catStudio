@@ -43,7 +43,9 @@
  *   - 同一 SHA 投递成功一次后，后续任何投递机会（post-commit / --gate-deliver /
  *     --fallback-sha）查状态直接跳过，不再重复投递
  *   - 投递失败（瞬态重试耗尽）的 SHA 记入 pending，每次投递机会先补投 pending：
- *     文档从 git 按 SHA 重新生成（确定性的，不依赖草稿文件）→ 投递 → 成功移入 delivered
+ *     文档从 git 按 SHA 重新生成（确定性的，不依赖草稿文件）→ **重判归属**（见
+ *     decideHookDelivery 的调用面注释）→ 投递 → 成功移入 delivered；重判为静默则
+ *     移出 pending（义务归实施猫），不记 delivered
  *   - 状态文件丢失/历史改写（reset）自动退化为"首次投递"——宁可多投不可漏投
  *   ⚠️ 账本与本判据的分工（T-A 定死）：账本键=SHA，答的是「同一 SHA 是否投过」
  *   （幂等锁）；归属判据源=执行行，答的是「该不该由钩子投」。两者不同源，
@@ -1283,11 +1285,19 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
       )
     }
   }
-  // 判据**只属于 post-commit 入口**（runHandoff 无其他入口 flag 时传 opts.judgeAttribution；
-  // 钩子就是无参调用，不做显式 flag——挂了 flag 而钩子不传 = 判据在生产路径上不跑）。
-  // --gate-deliver 补投 与 收尾兜底（--fallback-sha）是独立入口，判据不适用——
-  // 前者补的是「当时判定该投但投失败」的 SHA，后者补的是「有归属但猫没投」，
-  // 两者都必然有归属，再判一次只会把自己判静默（自己吞掉自己）。
+  // 判据的**调用面**（2026-09-12 修正 T-A 时期的错误分类）：凡「这次投递的裁决依据
+  // 可能不是当下事实」的入口都要重判。三个入口的真实处境各不相同——
+  //   - post-commit（钩子无参调用 ⇒ runHandoff 传 judgeAttribution）：当下事实，判。
+  //   - **drainPending 补投（post-commit 与 --gate-deliver 共用）：必须判**。条目进
+  //     pending 的唯一来路是「POST 瞬态失败」，而那一刻 server 多半不可达 ⇒ 探针同样
+  //     答不出 ⇒ attributed=null ⇒ 降级投递。**「查不动」是那一刻的读数，不是这个
+  //     commit 的属性**——补投不重判 = 把一次时点降级固化成永久事实，且此后每次投递
+  //     机会都不复判（原实现的实际行为；实害：被 auto-commit 抢收的 agent 提交在
+  //     server 恢复后被永久误投，每 commit 叠一条无主的审查链）。
+  //   - 收尾兜底（--fallback-sha）：**不判**，理由与上面那句原本就成立——它的 SHA 取自
+  //     execution_logs.commit_hash，必然有归属，判了只会把自己判静默。原注释的病是
+  //     把 drainPending 一并归进了这一类：两者来源不同（一个是「投失败的 SHA」，一个
+  //     是「有归属的 SHA」），用后者给前者作保 = 分类错误。
   // 留痕：每次裁决一行日志（投/不投 + 理由 + 探针读数）——本票唯一安全网。
   if (opts.judgeAttribution) {
     // T-H ①：探针单独问一次。写回**必须**在判据之前（静默路径也要记 commit_hash——
@@ -1545,7 +1555,8 @@ function resolveFullSha(cwd, sha) {
  * - transient（重试已耗尽）→ 记入 pending，下次投递机会自动补投
  *
  * @param {Object} [opts] — 透传 tryPostToCatstudy（如 { judgeAttribution: true }，
- *                          仅 post-commit 入口传——见 decideHookDelivery）
+ *                          两个入口传：post-commit 与 drainPending 补投；
+ *                          --fallback-sha 不传——见 decideHookDelivery 的调用面注释）
  * @returns {Promise<'ok'|'transient'|'fatal'|'skip'>}
  */
 async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
@@ -1611,6 +1622,13 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
  * 补投 pending 队列（每次投递机会先处理）：
  * 交接文档是 `git show <sha>` 的确定性生成结果，重新生成必然得到同一文档——
  * pending 只记 SHA 不存内容，草稿被覆盖不影响补投（Fix D）。
+ *
+ * 补投**必须重判归属**（2026-09-12）：pending 条目的来路是「POST 瞬态失败」，而那一刻
+ * server 多半不可达 ⇒ 探针答不出 ⇒ 判据降级为「投」。不重判等于把那次降级固化，且此后
+ * 每次投递机会都不复判。重判拿到的是**当下**读数（server 已恢复 ⇒ 探针能给出真答案），
+ * 比把当时的读数和结论一起存下来更准——故这里不引入「持久化裁决」那套，直接重问。
+ * 判静默即钩子义务解除（该 commit 的审查请求归实施猫，与 post-commit 静默同源），
+ * 故移出 pending；不移出会每次投递机会重判一遍（探针往返 + 日志），而结论不会变。
  */
 async function drainPending(cwd, serverUrl) {
   const state = readState(cwd)
@@ -1634,7 +1652,21 @@ async function drainPending(cwd, serverUrl) {
       continue
     }
     console.log(`[handoff-gen] 📤 补投 pending: ${sha.slice(0, 7)}（从 git 重新生成）`)
-    await deliverSha(cwd, serverUrl, sha, doc)
+    const outcome = await deliverSha(cwd, serverUrl, sha, doc, { judgeAttribution: true })
+    if (outcome === 'skip') {
+      // 判静默 ⇒ 钩子不该投这条 ⇒ 义务解除，移出 pending（否则每次投递机会重判一遍）。
+      // 用**当轮新读**的 state 作合并基线（writeState 的基线合并语义，见 e2e 13g）：
+      // 不用循环入口那份旧快照——那要求「skip 路径必然没写过盘」这个当前成立的实现
+      // 细节继续成立，而基线本就该是"我写之前盘上是什么"。
+      const fresh = readState(cwd)
+      if (fresh.pending.includes(sha)) {
+        fresh.pending = fresh.pending.filter((s) => s !== sha)
+        writeState(cwd, fresh)
+        console.log(
+          `[handoff-gen] ⏹️  pending 移除 ${sha.slice(0, 7)}：补投重判为不该由钩子投（归属成立 / 免审前缀）——义务解除，不记 delivered`
+        )
+      }
+    }
   }
 }
 
