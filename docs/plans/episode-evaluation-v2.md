@@ -1,3 +1,14 @@
+---
+type: plan
+date: 2026-08-11
+status: 已定稿
+evidence:
+  - kind: commit
+    ref: 8352116
+  - kind: commit
+    ref: a0ade7d
+---
+
 # v2 episode 评估设计（评任务结局）
 
 > 状态：已定稿 ✅（2026-08-11 第九轮复核通过，G5/N8/N9 修正到位）。已合并 main=dev=8352116；E1 判定引擎已实施（a0ade7d，25 测试全绿 + server 852 全绿），E2 归因分流 + E3 接线拆活进行中。

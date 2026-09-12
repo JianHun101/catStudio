@@ -1,3 +1,18 @@
+---
+type: plan
+date: 2026-09-10
+status: 已收口
+evidence:
+  - kind: commit
+    ref: e396aef
+  - kind: commit
+    ref: 5d527b5
+  - kind: commit
+    ref: 99eb516
+  - kind: commit
+    ref: 8ad2c69
+---
+
 # 审查链锚统一 + 提交钩子兜底化（spec）
 
 > 写者：店长 · 日期：2026-09-10 · 状态：spec-gate PASS（含 `chainType` 对账位，见 D11）

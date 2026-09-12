@@ -1,3 +1,13 @@
+---
+type: plan
+status: 已收口
+evidence:
+  - kind: commit
+    ref: 391f03e
+  - kind: commit
+    ref: 12a0a82
+---
+
 # 知识库 Phase 1 落地计划（v3，审查复核版）
 
 > 方向基准：docs/roadmap.md 四·知识库。本计划把 roadmap 概要落成可执行规格
