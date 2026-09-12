@@ -1039,7 +1039,7 @@ packages/server/src/execution/serial.test.ts
 
 ## 票巳 · 关停链**可观测性** + sidecar **回收正确性**（票丁 OQ4 兑现 · 机制层 · **非本 effort 面**）
 
-**状态**：出票（2026-09-12，店长）。**实施面料期待定**（见 OQ-1）。
+**状态**：**已派活**（2026-09-12，ds猫）——方案（**a+b**）经吐槽猫**方案审查 ✅ 可派**（2026-09-12，三问全过；三条 P3 已处置，见文末「审查留痕」）。**实施面料期待定**（见 OQ-1）。
 
 **动机**：票丁 OQ4 留账「关停链未观察」，店长判定规则 = **「下次 server 关停时验，无回收行才出票」**。2026-09-12 20:33 重启窗口首次取证 ⇒ **关停侧零日志** ⇒ 按规则**出票**。
 
@@ -1047,14 +1047,14 @@ packages/server/src/execution/serial.test.ts
 
 | #   | 事实                                                                                                                                                       | 取证面                        |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| 1   | `index.ts:330 shutdown()` **首行即** `log.info('shutting down...')`；链尾 `index.ts:348 stopEmbeddingSidecar()`                                            | 源码                          |
+| 1   | `index.ts:330-331`（`:330` 声明 `const shutdown`、`:331` **即** `log.info('shutting down...')`）；链尾 `index.ts:348 stopEmbeddingSidecar()`               | 源码                          |
 | 2   | 但 `stopEmbeddingSidecar()`（`embedding.ts:73-76`）**只有 `client?.stop()` + 置 null，零日志**                                                             | 源码                          |
 | 3   | **按钮重启路径下 `shutdown()` 根本不执行**：`dev.js:248 killTree(serverChild.pid)` → `dev.js:108 taskkill /F /T`（Windows 硬杀，**不发 SIGTERM**）         | 源码                          |
 | 4   | 20:33:39「restart request confirmed」→ 20:33:41 新进程「database ready」，**中间零关停日志**；全日志 28 条 `shutting down...`，最后一条停在 `15:13:51`     | `cat-study.log`（两窗口对读） |
 | 5   | 今日**无孤儿** sidecar（现存仅 PID 22360，parent=25624）——票面原判「唯一原因是 `/T` **连坐杀树**」**⚠️ 已更正，见下**                                      | `Get-CimInstance`             |
 | 6   | 非 Windows：`killTree` = `process.kill(pid,'SIGKILL')`（`dev.js:103`）**只杀 server 本身** ⇒ 票面原判「sidecar 作子进程**会成为孤儿**」**⚠️ 已更正，见下** | 源码                          |
 
-**⚠️ 2026-09-12 店长读码更正（⑤⑥ 两条的原判各说重了一半，待审查面证实）**：`EmbeddingClient` 起 sidecar 用的是 **`stdio: ['pipe','pipe','pipe']`**（`embedding-client.ts:571`），而 `embed-server.mjs:303-306` **自带 stdin 关断自检**（`stdin.on('end'/'close')` → `stop`）⇒ **父进程无论是软杀还是 `TerminateProcess` 硬杀，OS 都会关闭管道写端、子进程收 EOF 自退**。故：⑤「唯一原因是 `/T`」**不是唯一原因**；⑥「非 Windows 会成孤儿」**大概率不成立**（`SIGKILL` 父进程同样闭管道）。**判据待实测**：只杀 server、不杀 sidecar，看 sidecar 是否自退（可证伪）。**若成立 ⇒ (c) 从「补回收代码」降为「补一条断言/测试」，且 ⑥ 需按实更正**。
+**⚠️ 2026-09-12 店长读码更正（⑤⑥ 两条的原判各说重了一半，待审查面证实）**：`EmbeddingClient` 起 sidecar 用的是 **`stdio: ['pipe','pipe','pipe']`**（`embedding-client.ts:572`——**原写 `:571` 系 off-by-one，吐槽猫方案审查勘误、店长 `grep` 复核确认**），而 `embed-server.mjs:303-306` **自带 stdin 关断自检**（`stdin.on('end'/'close')` → `stop`）⇒ **父进程无论是软杀还是 `TerminateProcess` 硬杀，OS 都会关闭管道写端、子进程收 EOF 自退**。故：⑤「唯一原因是 `/T`」**不是唯一原因**；⑥「非 Windows 会成孤儿」**大概率不成立**（`SIGKILL` 父进程同样闭管道）。**判据待实测**：只杀 server、不杀 sidecar，看 sidecar 是否自退（可证伪）。**若成立 ⇒ (c) 从「补回收代码」降为「补一条断言/测试」，且 ⑥ 需按实更正**。
 
 **结论**：回收是**偶然兜住的**——链条本身**至少不可观测**（②）；③（按钮路径不走 `shutdown()`）成立且是本票靶心；⑥ 的「非 Windows 不成立」**已降级为待实测**（上条）。
 
@@ -1073,7 +1073,25 @@ packages/server/src/execution/serial.test.ts
 3. **不改 `embed-server.mjs`** 的监听 / 握手行为
 4. **(b) 的陈旧请求文件必须被清理**：`.shutdown-request` 落盘后若进程没来得及消费，**新起的 server 会一启动就自杀**。清理点须**至少**在 server 启动路径（防御性），建议 dev.js 消费后也删。**须有测试面**（预置该文件 → 启动 → 进程不退出）
 5. **(b) 的 `shutdown()` 调用须幂等**：文件握手与 SIGINT 可能同窗到达 ⇒ `shutdown()` 被重入。须有不重入保证或明确论证（对照 `index.ts:330` 现状）
-6. `shutdown-request` 文件名 / 路径**与既有 `RESTART_FILES_DIR` 同源**（`restart-request.ts:55`），且**进 `.gitignore`** —— 不得散落第二处路径常量
+6. `shutdown-request` 文件名 / 路径**与既有 `RESTART_FILES_DIR` 同源**（`restart-request.ts:50`；`:55` 是该目录下的 `RESTART_REQUEST_FILE`，**符号与行号须对齐**），且**进 `.gitignore`** —— 不得散落第二处路径常量
+7. **`.shutdown-request` 的文件内容契约 = 「存在即请求」，内容不参与判定**（**P3-1，方案审查提，店长定稿**）：**空文件即合法**，读方**不校验、不解析**内容。理由：关停请求**不携带任何数据**（对照 `.restart-request` 需 `messageId`/`sessionId`/`reason` 供广播与日志）——加最小 schema 就必须回答「字段缺了算不算请求」，那是把契约 4/5 已经关掉的陈旧文件 / 重入问题**重新开一遍**。消费语义另钉两条：
+   - **读后即删**（删在调 `shutdown()` **之前**）：防宽限窗内自检被重复触发
+   - **`unlink` 失败（`ENOENT`）不得阻断关停**：dev.js 兜底清理可能抢先删掉 ⇒ 文件已不在是**正常态**，不得升级为错误中止
+8. **dev.js 侧过滤器：实测后判「无需放行」，真坑在反方向**（**P3-2，方案审查提；店长读码复核后给出与提问方向相反的结论，待审查面确认**）：`scripts/dev.js:692-697`（`:690` `watch(ROOT, ...)`、`:696` 过滤行、`:697` `pollRestart()`）现有两行守卫是「**非 `.restart-request` 即早退**」⇒ `.shutdown-request` 落在 `ROOT` 会被**早退**，**dev.js 不需要为它加分支**（该文件由 dev.js **自己写**、由 **server 自检消费**，不经 watcher）。真正的坑两条：
+   - **`.shutdown-request` 不得复用 `.restart-request` 这个文件名**——否则 dev.js 会把它当重启请求触发
+   - `filename` 为 **null**（Windows `fs.watch` 全树 stat 误报，`dev.js:593` 注释在案）时，现有两行守卫**都不命中**、直落 `pollRestart()`；**新增逻辑若插在这两行之前，必须保持 null 的落点语义不变**（5s 兜底轮询是第二道保险，不得因新增分支被削弱）
+
+### 审查留痕（2026-09-12，方案审查 · **非 commit 审查**）
+
+**结论：✅ 可派**（吐槽猫；材料 = 票面 + `dfc57e5` 落痕 + 源码三处实核）。三条 P3 处置：
+
+| #    | 审查提出                                            | 店长处置                                                                                                                                       |
+| ---- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| P3-1 | 文件内容契约缺失（空文件 or schema）                | **采纳**，定稿为「存在即请求、不校验内容」⇒ **契约 7**                                                                                         |
+| P3-2 | dev.js watcher 须放行 `.shutdown-request`           | **部分不采纳**：读码后判**无需放行**，真坑是「不得复用 `.restart-request` 名」+ null 落点语义 ⇒ **契约 8**（**与提问方向相反，请审查面确认**） |
+| P3-3 | 行号 off-by-one：`embedding-client.ts:571` → `:572` | **采纳**，票面 + `map.md` 已改（店长 `grep` 复核确认 `:572` 为 `stdio:` 行）                                                                   |
+
+**承重反例（审查面已确认）**：D4 —— 宽限窗若被设为极大则重启卡死；兜底 `taskkill /F /T` **必须保留**。
 
 ### 验收
 
