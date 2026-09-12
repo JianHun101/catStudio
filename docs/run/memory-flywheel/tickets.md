@@ -1,6 +1,7 @@
 # 票单 · memory-flywheel
 
-> 规格地图见同目录 `map.md`（grilling 产出，Decisions 1–31 为已裁结论）。
+> 规格地图见同目录 `map.md`（grilling 产出，Decisions 1–35 为已裁结论）。
+> **2026-09-12 段三发车批次**（**Decisions 34/35**，用户原话「1 物理删 2 退 + 删 3发车」）：段三 15 问全裁（2 条用户裁 + 13 条店长拍板）⇒ **五票出票 = 票己（索引表 schema）/ 票庚（扫描器）/ 票辛（检索接线）/ 票壬（旧写口退役）/ 票癸（段一归位）**。**本轮派活 = 票己 → ds猫、票癸 → flash猫**；庚/辛 依赖票己，壬与庚同批（**单槽位 FIFO ⇒ 不一次堆满队列**）。
 > **2026-09-12 授权批次**（Decisions 31）：票丙 / 票丁 / 票戊 出票；票丁排队。
 > **⚠️ 派活中断修正（2026-09-12 补）**：首次执行在 `31c7eb5` 落盘后被中断（`execution_logs` 记 `interrupted`），**派活消息从未发出**（本会话 `messages` 表零条含「票丙/票戊/ds猫」；实施者零执行记录）。本行原写「票丙、票戊已派活」是**未兑现的乐观表述，已改**。**票丙、票戊已于本轮补派**（ds猫 / flash猫），状态见各票「状态」行。
 > **收口清账（2026-09-12 补，店长 `git merge-base --is-ancestor` 实查非转述）**：**票丙**（交付 `c953dd4` → 审查反例回归补正 `4552237`）与**票戊**（交付 `edb1f2d`）**均已并入 `dev`**（携带者 `20f9c93` / `1395a44`）⇒ 两票状态行本轮翻「**已收口**」，**勿再派活**。**票乙**已收口且挂账两轮 ⇒ 按本文第 7 行「活收口即清」**移出本文件**（结论承接面 = `map.md` Frontier 票乙条 + Decisions 26；票单正文留 git 历史）。**票丁**排队原因（怕与票丙/票戊并行、收口时分不清「是谁的行为变化」）**已随两票落地消解 ⇒ 本轮派活**。
@@ -319,3 +320,367 @@ evidence:
 - Gate B 契约：[边界=7 份白名单 + 正文零改动 / 契约=frontmatter 四字段 + evidence 形态 / 验收=E1–E6]
 - 值域临时口径：见上，不替 Q2-c 决策
 - 本票过门记录：Gate Report 见 map Decisions 31
+
+---
+
+## 票己 · 索引表 schema（段三主链第一步 · Q6 全落）
+
+**状态**：**本轮派 ds猫**（2026-09-12 用户「3发车」授权）
+**承**：map Decisions 34 四–八（X1–X5 全裁）/ Decisions 17（**chunk 身份键 = 路径 + 小节锚 + 内容哈希**，**明确「不必带片序号」**）/ Decisions 4（状态过滤硬约束）/ Decisions 24（status 管到节）
+**动机**：段三主链（schema → 扫描器 → 接线）的底座。**扫描器写、接线读，两侧都以本票列名为准** ⇒ 必须先行，否则下游两边各自发明列名。
+
+### 目标（可证伪）
+
+`initDb()` 后 `chunks` / `chunk_vectors` / `chunks_fts` 三表存在且列与本节契约**逐字一致**；同一片重复写两次表内仍 1 行（幂等 upsert）；检索查询体不返回 `superseded`/`deprecated` 行。**存在任一契约列缺失、或唯一索引未生效（重复写产生两行）、或老库重跑 `initDb()` 报错 ⇒ 本票失败。**
+
+### 落点
+
+```
+packages/server/src/db/index.ts                 （additive 迁移段，照既有 CREATE TABLE IF NOT EXISTS 幂等范式）
+packages/server/src/db/repository/chunks.ts     + chunks.test.ts（同目录同名前缀）
+```
+
+### 契约（钉死，下游只许引用不许改名）
+
+**`chunks` 列清单 —— 一次到位（X2）**
+
+| 列                                                                                                   | 类型                       | 说明                                                                                          |
+| ---------------------------------------------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------- |
+| `id`                                                                                                 | INTEGER PK AUTOINCREMENT   | 内部行号（**不进身份键**）                                                                    |
+| `doc_path`                                                                                           | TEXT NOT NULL              | 仓库相对路径，正斜杠                                                                          |
+| `section_anchor`                                                                                     | TEXT NOT NULL              | 节锚（= 票丙 `Segment.sectionAnchor`；无标题节为 `''`）                                       |
+| `content_hash`                                                                                       | TEXT NOT NULL              | 该片正交内容指纹（`body` 的 sha256 hex）                                                      |
+| `origin_id`                                                                                          | TEXT NOT NULL              | 扫描时该 MD 的 **git blob SHA**（`git hash-object <path>`）                                   |
+| `type` / `status` / `date` / `evidence` / `supersedes` / `superseded_by` / `valid_from` / `valid_to` | TEXT                       | 元数据；`status` **节级**（Decisions 24）；`evidence` = **JSON 数组文本**（X2-a：不建关联表） |
+| `part_index` / `part_total`                                                                          | INTEGER NOT NULL           | 片序号（**是列、不进唯一键**——Decisions 17 明裁「不必带片序号」）                             |
+| `hard_cut`                                                                                           | INTEGER NOT NULL DEFAULT 0 | 该片由 L3-f 字符硬切产生                                                                      |
+| `body`                                                                                               | TEXT NOT NULL              | 片正文（不含面包屑）                                                                          |
+| `breadcrumb`                                                                                         | TEXT NOT NULL              | `相对路径 > H1 > H2 > H3`                                                                     |
+
+- **唯一键（X2）**：`UNIQUE(doc_path, section_anchor, content_hash)`。
+  - **⚠️ 已知边界（写进票面以免实施者自行发明）**：同节内若出现**两片 `body` 完全相同**，唯一键相撞 ⇒ 幂等合一（**丢一片序号**）。**取舍 = 严格照 Decisions 17**（带片序号会让「节内插入一段」把后续碎片身份全变）；且合一是**确定性**的 ⇒ 「重扫 N 次结果不变」不变式仍成立。**判据**：不合一（新增行）⇒ 违约；合一但重扫行数不稳定 ⇒ 违约。
+  - upsert 语义 = `ON CONFLICT DO UPDATE`（重扫更新元数据列 + `part_index`/`part_total`/`hard_cut`）。
+- **索引**：`idx_chunks_status`（供查询体过滤面）、`idx_chunks_origin`（供增量比对按 `origin_id` 查）。
+- **`text` 不单独存**（可重算 = `breadcrumb` + 话题锚 + `body`）——**建了就是违约**（X2）。
+- **表内禁止任何扫描时间戳 / 运行态字段**（X3 新钉）：不得有 `scanned_at` / `updated_at` / `created_at` / `last_seen` 类列。**存了则「删表 → 重扫 → 逐行等价」必破**（唯一例外 = `date`，它是 **MD 里的历史事实**、由票戊冻结，不是扫描时刻）。
+
+**`chunk_vectors`**：sqlite-vec `vec0`，`embedding float[512]`，以 `chunk_id`（= `chunks.id`）关联。**照 `db/index.ts` 既有 vec0 建表范式**（与 `memories_vec` 同形）。
+
+**`chunks_fts`**：FTS5，索引 `body` + `breadcrumb`。**照 `db/index.ts:425` 既有 `memories_fts` 范式**（含 external-content 与否、tokenizer 选择——**实施前先读那 20 行，逐项对齐，不另发明**）。
+
+**查询体过滤面（X4，硬约束）**：`chunks.ts` 导出的**所有**检索函数必带
+
+```sql
+WHERE status IS NULL OR status NOT IN ('superseded','deprecated')
+```
+
+- **`status IS NULL` 放行**（裁定）：`status` 是**可选声明**字段，排除集合是**显式失效标记**；NULL = 未声明状态，不是「已失效」。**排除集合取两者**（`superseded` + `deprecated`）——`deprecated` 语义 = 已退役，被检索到就是 Decisions 4 点名的劣化。
+- **判据**：任一导出检索函数缺该 WHERE ⇒ 违约（**测试直接断源码**，见 C5）。
+
+### 边界
+
+**In Scope**：三表建表（additive 迁移）/ `chunks.ts` repository（upsert + 按 `origin_id` 查 + 按 `status` 过滤的检索入口）/ 单元测试
+**Out of Scope（钉死）**
+
+- **不写扫描器**（票庚）；**不改 `memories` 表结构、不 drop 它**（票壬清数据 / 票辛 drop 表）
+- **不接线检索**（票辛）——本票只提供 repository，**不改 `memory/index.ts` 与 `reply.ts`**
+- **不建 `chunks_fts` 的同步触发器逻辑**（写入侧同步归票庚/票辛；本票只建表）
+- **不删 `memories` 存量**（票壬）
+
+### 验收（逐条可执行）
+
+| #   | 验收项                        | 判据                                                                                                                                                                                                            |
+| --- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C1  | 三表建齐                      | `PRAGMA table_info(chunks)` 的列名集合 **=== 契约清单**（脚本断言，非目测）；`chunk_vectors`/`chunks_fts` 存在                                                                                                  |
+| C2  | 唯一索引生效                  | 同一 `(doc_path, section_anchor, content_hash)` upsert 两次 ⇒ `COUNT(*)` = 1；改 `content_hash` 再 upsert ⇒ 2 行                                                                                                |
+| C3  | 老库幂等                      | 对**已有库**（含 `memories` 等旧表）重跑 `initDb()` 零报错、零副作用（旧表行数不变）                                                                                                                            |
+| C4  | 无时间戳列                    | `PRAGMA table_info(chunks)` 列名**不含** `*_at` / `*_time` / `*_ts` / `scanned*` / `last_seen`（脚本断言）                                                                                                      |
+| C5  | 过滤面覆盖全部入口            | 对 `chunks.ts` **每个导出检索函数**做源码断言：函数体内含 `NOT IN ('superseded','deprecated')`；**运行时**断言：写 1 条 `superseded` + 1 条 `deprecated` + 1 条 `status IS NULL` + 1 条 `active` ⇒ 只返回后两条 |
+| C6  | 无 `text` 列                  | `chunks` 列名不含 `text`（脚本断言）——可重算字段不落表                                                                                                                                                          |
+| C7  | 测试环境                      | 用 `:memory:`（`setDb()`/`resetDb()` 钩子）+ `MEMORY_ENABLED=false`（承 AGENTS.md 铁律）                                                                                                                        |
+| C8  | （Gate C 反例补）列定义完整性 | `PRAGMA table_info(chunks)` 的 **type / notnull / dflt_value** 与契约表**逐列相等**——C1 只断列名，会被「列在但类型/约束松」绕过                                                                                 |
+
+**签收判据**：C1–C7 全过 + 实施者自报 Out of Scope 未触碰（**尤其：`memory/index.ts` / `reply.ts` 零 diff**）。
+
+### 决策留痕
+
+- 跳 grilling：范围由 Decisions 34 四–八 已裁，本票只落地
+- Gate B 契约：[边界 = 三表 + repository / 契约 = 列清单 + 唯一键 + 过滤面 / 验收 = C1–C7]
+- 本票过门记录：Gate Report 见 map Decisions 35（与本批同过）
+
+---
+
+## 票庚 · 扫描器（段三 · Q5 全落 + S4 孤儿物理删）
+
+**状态**：**已出票 · 待派**（依赖票己落地）
+**承**：map Decisions 34 一–三（S1/S2/S3）/ S4（**用户裁「物理删」**）/ Decisions 20/22（fail-closed 准入）/ Decisions 17（身份键）/ 票丙 `segmentDocument` / 票丁 sidecar
+**动机**：把白名单里的结晶 MD 变成 `chunks` 行。**它是唯一「读 MD 写索引」的入口**（Decisions 6：索引侧无独立写口）。
+
+### 目标（可证伪）
+
+给定仓库工作区，`pnpm flywheel:scan` 后：白名单内、frontmatter 合格、`evidence` 非空的件**全部**在 `chunks` 表内且 ≥1 行；**任一不合格件被静默丢弃（既不入库又不出现在跳过报告里）** ⇒ 本票失败。源文件被删后重扫，其 `chunks` 行**物理消失**（不是标记）。
+
+### 落点
+
+```
+scripts/flywheel/scan.mjs        + scan.test.js（scripts 用 **/*.test.js——承 Conventions）
+package.json                     （flywheel:scan / flywheel:reindex 两条 script）
+packages/server/src/index.ts     （启动时 spawn 一次，fire-and-forget）
+```
+
+### 契约（钉死）
+
+**① 白名单（S1）——写死为导出常量，测试直接断言**
+
+```js
+export const SCAN_PREFIXES = ['docs/adr/', 'docs/lessons/', 'docs/plans/']
+```
+
+- `docs/plans/**` **仅**收 `status ∈ {已定稿, 已收口}`（`进行中` 不扫）。
+- **不扫**：`docs/run/**`（在飞、收口即清）、`docs/research/**`（未结晶）、`docs/sessions/**`（**一期不扫**，列二期候选）、`AGENTS.md`/`CONTEXT.md`（Decisions 1 明否）。
+- 扩展名白名单：`.md`。
+
+**② 触发点（S2）**
+
+- 手动：`pnpm flywheel:scan`（= 显式通道落点）；全量：`pnpm flywheel:reindex`（drop → create → scan → embed）。
+- 自动：**server 启动时 spawn 一次**（fire-and-forget，失败不阻塞启动、不 fail 启动）。
+- **不做定时任务**（Out of scope 已否 clowder 全自动管线）。
+
+**③ 增量判据（S2）**
+
+- `origin_id` = `git hash-object <path>`（**blob SHA**）。与库内该 `doc_path` 的 `origin_id` 相同 ⇒ 跳过（报告 `skipped: unchanged`）。
+- **绝不用 mtime**（LlamaIndex issue #21461 反例；本仓 checkout / 切分支会污染 mtime）。**判据：`touch` 改 mtime 不改内容 ⇒ 必须仍 skip**（见 S4）。
+
+**④ fail-closed 跳件（S3，Decisions 20）**
+
+- 缺 frontmatter / `type` 缺 / `evidence` 空数组 ⇒ **跳过**（不入库）+ 进**跳过报告**。
+- 报告形态：stdout 结构化 JSON（`{scanned, inserted, updated, skipped:[{path, reason}], orphansDeleted, errors}`）+ `log.info` 一行汇总。**「跳过」永不是静默的**（承票丁「失败不静默」同形）。
+- 脏件自动挡住：`research-*.md` / `.e2e.mjs` 无 frontmatter ⇒ 命中本规则（**不需要枚举黑名单**）。
+
+**⑤ 切片与嵌入**
+
+- 切片 = 调票丙 `segmentDocument({path, content})`（**不重新实现**）。
+- 嵌入 = 调票丁 `EmbeddingClient`（**不内联 `pipeline()`**）。**sidecar 不可用时：该件不写任何行**，记 `errors` + summary（**禁止写半截**）。
+- `content_hash` = `body` 的 sha256 hex（**与票己同算法**——须一致，否则唯一键失效）。
+
+**⑥ 孤儿清理（S4，用户裁「物理删」）**
+
+- 重扫后，库内 `doc_path ∈ 白名单` 且**不属本次扫描产出集合**的行（含其 `chunk_vectors` 行）**物理 DELETE**。
+- **用户裁决原文「1 物理删」**；与 Decisions 4 的关系见 map Decisions 34 一（索引行是派生投影，不是知识条目）。
+- **判据**：删源文件 → 重扫 ⇒ 该 `doc_path` 行数 = 0。
+
+**⑦ 只读 MD**：扫描器**不写任何 MD**（X2-b：节级 status 不回写）。**判据**：跑完 `git status --porcelain` 中 MD 零改动。
+
+### 边界
+
+**In Scope**：scan.mjs（白名单 / 增量 / fail-closed / 孤儿删 / 报告）/ 两条 npm script / 启动 spawn / 单测
+**Out of Scope**：**不改检索链**（票辛）/ **不改 `memories`**（票壬/辛）/ **不做定时任务** / **不建索引埋点**（X5 落 log 归票辛）/ 不实现切片与嵌入（票丙/丁 已交付）
+
+### 验收（逐条可执行）
+
+| #   | 验收项                        | 判据                                                                                                                                                      |
+| --- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1  | 白名单                        | 4 类目录各放一件合格样本：仅三前缀内且 `status` 合格者入库；`docs/run/**`、`docs/research/**`、`docs/sessions/**` 零行                                    |
+| S2  | fail-closed 不静默            | 放一件无 frontmatter ⇒ 零行**且**出现在 `skipped[]`（含 reason）；`evidence: []` 同样                                                                     |
+| S3  | 幂等                          | 连扫两次：第二次 `inserted=0, updated=0`，行数不变                                                                                                        |
+| S4  | 增量是 SHA 不是 mtime         | `touch`（或 checkout 切分支）后重扫 ⇒ 仍 `skipped: unchanged`                                                                                             |
+| S5  | 孤儿物理删                    | 删源文件重扫 ⇒ 该 `doc_path` 在 `chunks` 与 `chunk_vectors` 均 0 行                                                                                       |
+| S6  | 嵌入失败不写脏行              | mock sidecar 失败 ⇒ 该件零行 + `errors[]` 含 reason（**无半截行**）                                                                                       |
+| S7  | 不写 MD                       | 跑完 `git status --porcelain -- '*.md'` 输出为空                                                                                                          |
+| S8  | reindex 可重建                | 同输入连续两次 `reindex` ⇒ `chunks` 按身份键排序后**逐列相等**（X3 不变式）                                                                               |
+| S9  | 启动不阻塞                    | sidecar / git 不可用时 server 正常启动（spawn 失败只记 log）                                                                                              |
+| S10 | （Gate C 反例补）真实仓库全量 | 对**真实工作区**跑一次全量 `scan`：`scanned` 数 == 白名单内合格文件数，且 `skipped[]` **逐个列名**——S1 只验「4 类各一件」，**小样本全绿不能反证真实仓库** |
+
+**签收判据**：S1–S9 全过 + `memory/index.ts` / `reply.ts` 零 diff。
+
+### 决策留痕
+
+- Gate B 契约：[边界 = 扫描器单点 / 契约 = 白名单 + 增量 + fail-closed + 物理删 / 验收 = S1–S9]
+- ⚠️ **收口时判重启**：本票 spawn 接线进 `packages/server/src/index.ts` ⇒ **改 server 代码，收口需用户重启审批**（`request_user_action`）
+
+---
+
+## 票壬 · 旧写口退役（段三 · S5，**用户裁「退 + 删」**）
+
+**状态**：**已出票 · 待派**（独立，无前置）
+**承**：map Decisions 34 零（**用户原话「2 退 + 删」**）/ Decisions 5（只索引结晶 MD、不索引对话原话）/ Decisions 6（索引侧永远无独立写口）/ Decisions 17（DEDUP 作废、改身份键幂等）
+**动机**：`saveMessageMemory` 是**第二个写口**，与「索引侧无写口」正面冲突；其 `0.20 ≤ d < 0.35` 分支还会**覆写旧记忆正文**（演化原则 #4）。留着它，段三的新链路就永远有一条旁路在写旧表。
+
+### 目标（可证伪）
+
+`saveMessageMemory` 全仓**零引用**（含测试与 mock）；`memories` 表存量 **0 行**；对话消息入库流程行为不变。**存在任一残留引用、或 `SELECT COUNT(*) FROM memories` > 0、或 `ingest` 其它行为回归 ⇒ 本票失败。**
+
+### 落点
+
+```
+packages/server/src/connectors/ingest.ts        （:26 import、:370 调用 —— ⚠️ 行号须 grep 复核后再改）
+packages/server/src/memory/index.ts             （saveMessageMemory 函数 + 其私有分支）
+packages/server/src/memory/index.test.ts        （:93 起的 describe 块）
+packages/server/src/connectors/socketio.test.ts （:72 的 mock）
+scripts/flywheel/retire-message-memory.mjs      （一次性、幂等 DELETE）
+```
+
+### 契约（钉死）
+
+**① 三步（顺序固定）**
+
+1. **摘调用**：`ingest.ts` 移除 `saveMessageMemory` 的 import 与调用点。**该调用点周围的行为不得改变**（消息落库 / 广播 / 后续处理全部原样）。
+2. **删函数**：`memory/index.ts` 删 `saveMessageMemory` 及其**仅供它使用**的私有分支（含 `0.20 ≤ d < 0.35` 覆写分支 `memory/index.ts:115-125` 附近——**行号 grep 复核**）。**公共检索函数一律不动**（那是票辛的面）。
+3. **清存量**：`DELETE FROM memories` + `DELETE FROM memories_fts`（+ `memories_vec` 若存在）。**⚠️ 只清数据、不 DROP 表**。
+
+**② 为什么「不 drop 表」（诚实标注，防下游误读）**
+
+- 读侧 `searchMemoriesHybridPath`（`memory/index.ts:212` → `db/repository/memories.ts:280`）**仍在调用**；此刻 drop 表 ⇒ 读侧抛「no such table」。
+- ⇒ 本票交付后是一个**显式临时态**：**空表 + 零写口**，读侧返回零命中。**旧表结构的 DROP 归票辛**（接线时旧链整体下线）。
+- **风险可接受**：`MEMORY_ENABLED=false` 已 2.5 周且零退化 ⇒ 读侧本就不活跃。
+
+**③ 清理脚本**：`scripts/flywheel/retire-message-memory.mjs`，**幂等**（再跑无行可删、零报错），对 dev 库与主库分别执行并各自留执行记录（行数前后）。
+
+### 边界
+
+**In Scope**：三步 + 清理脚本 + 相应测试删除/改写
+**Out of Scope**：**不 drop 旧表**（票辛）/ **不建新表**（票己）/ **不改检索链**（票辛）/ 不碰 `query-rewrite.ts`（那是另一条对话记忆链，本票不涉）
+
+### 验收（逐条可执行）
+
+| #   | 验收项                      | 判据                                                                                                                                                                       |
+| --- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| V1  | 零引用                      | `grep -rn "saveMessageMemory" packages/ scripts/` ⇒ **零命中**（含 `.test.ts` 与 mock）                                                                                    |
+| V2  | ingest 不回归               | `connectors/socketio.test.ts` 全绿；消息落库 / 广播断言不变                                                                                                                |
+| V3  | 存量清零                    | 对目标库执行后 `SELECT COUNT(*) FROM memories` = 0 且 `memories_fts` 同（**执行记录附前后行数**）                                                                          |
+| V4  | 幂等                        | 清理脚本连跑两次：第二次零报错、零变更                                                                                                                                     |
+| V5  | 无 skip 残留                | 删除的测试不留 `.skip` / 注释掉的死代码                                                                                                                                    |
+| V6  | 表结构还在                  | `PRAGMA table_info(memories)` 仍有列（**未 drop**——防实施者「顺手」drop）                                                                                                  |
+| V7  | （Gate C 反例补）删除面收敛 | 清理脚本**硬编码三张目标表**（`memories`/`memories_fts`/`memories_vec`），**不接受参数化表名**；执行记录列出**三表各自**的前后行数（防「误删其它表」在单条汇总数里不可见） |
+
+**签收判据**：V1–V6 全过 + `memory/index.ts` 中**公共检索函数零 diff**。
+
+### 决策留痕
+
+- **用户裁决原文「2 退 + 删」**（含删数据动作已明确点头，此前票面明标「不是默认项」）
+- Gate B 契约：[边界 = 写口三步 / 契约 = 零引用 + 零行 + 不 drop / 验收 = V1–V6]
+
+---
+
+## 票辛 · 检索接线（段三收口 · W 组 + Q7 全落）
+
+**状态**：**已出票 · 待派**（依赖票己 + 票庚 + 票壬 落地）
+**承**：map Decisions 34 九–十三（W1–W5）/ Decisions 32（埋点契约 = **阈值前 top-N 切片身份 + 距离**）/ Decisions 14（450 上限 + 小块检索整节返回）/ Decisions 28/30（两条条件触发的信号源）
+**动机**：把 `chunks` 接进 `reply` 的上下文注入，让记忆飞轮真正闭环——**这也是 B8「启用」分支的天然真机窗口**（票丁收口留账：`MEMORY_ENABLED=true` 的真机验证刻意留给本票）。
+
+### 目标（可证伪）
+
+`MEMORY_ENABLED=true` 时，回复上下文注入的条目**只能来自 `chunks`**（`memories` 路径彻底消失）；超预算时**按节截断**；「未启用 / 无命中 / 嵌入失败」三态在结果与日志上**可区分**；日志能答出「阈值前 top-N 有哪些、距离各多少」。**存在任一路径静默返回空且无痕、或仍从 `memories` 读、或超预算按块截断 ⇒ 本票失败。**
+
+### 落点
+
+```
+packages/server/src/memory/index.ts             （检索改走 chunks；旧链下线）
+packages/server/src/db/repository/chunks.ts     （hybrid 检索：向量 + chunks_fts + RRF）
+packages/server/src/db/index.ts                 （DROP 旧 memories 链路表 + chunks_fts 同步逻辑）
+packages/server/src/execution/reply.ts          （注入配额：预算 / 顺序 / 三态日志）
+packages/server/src/index.ts                    （MEMORY_ENABLED 分支：启动 sidecar 探活）
+```
+
+### 契约（钉死）
+
+**① W1 复用现有 RRF 形态**：`chunks_fts`（FTS5，票己已建）+ 同一 `RRF_K = 60` 融合；**实现前先读 `db/repository/memories.ts:247-300`，逐项对齐**（向量通道取 topK / 关键词通道取 topN / 融合打分公式）。⚠️ **中文 BM25 权重问题本仓未实测** ⇒ **不预设调整、不转述 clouder 结论**；跑真实语料后若有问题**另立票**。
+
+**② W2 注入与配额**
+
+- **W2-a 预算**：硬上限 **8k token 起**（实施时按实测调，**调整须在实施说明里给出依据**）；超限 **按节截断**（同一 `(doc_path, section_anchor)` 的片整体进退）。**按块截断 = 违约**（破坏 Decisions 14 安全网）。
+- **W2-b 顺序**：最相关的条目**首尾各半**（Lost in the Middle, arXiv:2307.03172）。
+- **W2-c**：`MEMORY_TOP_K` 沿用现值；**退休机制先不做**（语料量级未知，防防御性建设）。
+
+**③ W3 降级三态可区分**：`MEMORY_ENABLED=false` / 无命中 / 嵌入失败 —— 三态在**结果**与**日志**上必须可区分（票丁已给 `reason`；本票把它接到检索结果层）。
+
+**④ X5 埋点（Decisions 32 契约）**：结构化 `log.info`，字段 = **阈值前 top-N 的「切片身份（`doc_path` + `section_anchor`）+ 距离」**，且「空手而归」与「被阈值挡掉」**可区分**。**落 log 不落表**（落表 = 新增 GC/保留期面，且索引可重建、埋点表不可）。
+
+**⑤ W4 冲突修正闭环 = 不建新机制**：**不实现任何新的审核面 / UI / 批量通道**；撞「与现实矛盾」走既有审查链（提审查 → 改 MD → 重扫）。**本项在票面上是「不做」**——实施者若建了机制即违约。
+
+**⑥ 旧链下线**：`memories` / `memories_fts` / `memories_vec` **DROP**；`searchMemoriesHybrid` 及其调用链删除（`db/repository/memories.ts` 相应函数、`query-rewrite.ts` 若仅供旧链则一并退役——**须先 grep 调用面**）。
+
+### 边界
+
+**In Scope**：检索改走 chunks / RRF 复用 / 注入配额 / 三态 / 埋点 / 旧链表 DROP
+**Out of Scope**：**不建摘要或情境化改写层**（Decisions 30 五：不立项）/ **不做 UI 面板**（X5）/ **不做定时任务** / **不改切片器与嵌入层**（票丙/丁 已收口）
+
+### 验收（逐条可执行）
+
+| #   | 验收项                        | 判据                                                                                                                                  |
+| --- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| W1  | 注入只来自 chunks             | 注入条目的 `doc_path` 全在白名单前缀内；`memories` 表已不存在                                                                         |
+| W2  | 按节截断                      | 构造超预算语料 ⇒ 截断边界落在**节边界**（同节片不拆开），token 总数 ≤ 上限                                                            |
+| W3  | 首尾各半                      | 最相关条目出现在注入串的**首部或尾部**，不落正中段                                                                                    |
+| W4  | 三态可区分                    | 三种情形各跑一次：日志与结果**互不相同**（断言三者 `reason` 字段相异）                                                                |
+| W5  | 埋点可答问                    | 构造「差一点被阈值挡掉」的条目 ⇒ 日志含其 `doc_path` + `section_anchor` + 距离；「无命中」与「被挡掉」两条日志可区分                  |
+| W6  | 无新机制                      | `git diff` 中**不存在**新的审核/UI/批量修正入口（W4 是「不做」）                                                                      |
+| W7  | 真机                          | `MEMORY_ENABLED=true` 起 server：**B8「启用」分支**（sidecar 自起 + 真文本 512 维 + 停 sidecar 走降级）**逐条补齐**并附实测输出       |
+| W8  | 旧链零残留                    | `grep -rn "searchMemoriesHybrid\|memories_fts" packages/server/src` 零命中（DROP 后无悬挂调用）                                       |
+| W9  | （Gate C 反例补）真实语料注入 | 对**真实全量 `chunks`** 跑一次注入：记录注入 token 数 / 截断节数 / 是否触上限——**构造语料全绿不能反证**（真实语料可能单节即接近上限） |
+
+**签收判据**：W1–W8 全过 + **用户重启审批已批**（本票改 server 运行时 ⇒ 收口必走 `request_user_action`）。
+
+### 决策留痕
+
+- **本票 = 段三收口票**：S/X/W 三组的最后一棒；W4 是显式「不做」，W5 埋点字段由 Decisions 32 钉死
+- Gate B 契约：[边界 = 检索链路替换 / 契约 = RRF 复用 + 配额 + 三态 + 埋点 / 验收 = W1–W8]
+- ⚠️ **收口需用户重启审批**
+
+---
+
+## 票癸 · 段一归位（段一收口 · 发现②四项 + Q2-c/Q2-d 落地）
+
+**状态**：**本轮派 flash猫**（2026-09-12 用户「3发车」授权）
+**承**：map Decisions 34 零 + 十三 / Decisions 12（删 `docs/requirements/` + 迁 `docs/plans/dev-process-gate-flow.md`）/ Decisions 9（`docs/lessons/` 立格）/ Decisions 13（本票触发条件「待 Q3 裁完」**已满足**——Q3 随票丙收口裁完）
+**动机**：段三扫描器按「白名单 + fail-closed」挡得住脏件，但**门牌缺失是段二的基线问题**：文件放错目录 ⇒ 白名单扫不到 ⇒ 沉淀的知识永远进不了索引。**它是段三的下游受益方，不卡段三开工**（S3 已裁解耦）。
+
+### 现状（**实测取证，非转述**——2026-09-12 店长实查）
+
+| #   | 违例                          | 实测                                                                                                                                                          |
+| --- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `docs/adr/` 混居非 ADR        | `dsh-acp-probe.e2e.mjs` + `research-2026-08-17-acp-feasibility.md` + `research-2026-08-17-opencode-32k-avoidance.md` + `research-dsh-prompt-length-bypass.md` |
+| 2   | 仓库根 `tickets.md` 仍在      | 根版 **6449 B**（「投递外移」effort 票单）与 `docs/run/hook-fallback-delivery/tickets.md` **15985 B** —— **两份内容不同**（非简单重复）                       |
+| 3   | `docs/requirements/` 未删未迁 | `docs/requirements/2026-09-06-dev-process-gate-flow.md` 仍在；`docs/plans/` 无该文件                                                                          |
+| 4   | `docs/lessons/` 未建          | 目录不存在（Decisions 9 已立格）                                                                                                                              |
+
+### 目标（可证伪）
+
+`docs/adr/` 下**只有 ADR 文件**；根 `tickets.md` 消失且其活票有明确承接（**逐票比对清单**为证）；`docs/requirements/` 不存在且引用全部改指；`docs/lessons/README.md` 门牌存在。**存在任一文件被删而无承接、或引用悬空（grep 命中已删路径）、或 `git diff` 出现代码改动 ⇒ 本票失败。**
+
+### 落点与动作
+
+1. **ADR 清居**：三份 `research-*.md` → `docs/research/`（`git mv`，文件名不变）。
+2. **`.e2e.mjs` 探针归位**：`dsh-acp-probe.e2e.mjs` → **先查它的被测对象**（读文件头注释 + grep 其调用的模块路径）⇒ 搬至**被测模块同目录**（承 Conventions「e2e 跟随被测脚本同目录」）；查无被测对象则落 `scripts/probes/`。**落点理由写进实施说明**。
+3. **`docs/requirements/` 处置**：`git mv docs/requirements/2026-09-06-dev-process-gate-flow.md docs/plans/dev-process-gate-flow.md` → 删空目录 → `grep -rn "docs/requirements"` 全仓改指。
+4. **`docs/lessons/` 建立**（Q2-c/Q2-d **店长就地拍板**）：`docs/lessons/README.md` 门牌，**对齐 `docs/run/README.md` 范式**，含：① 什么内容进这里（跨活复用的教训，非活内过程）② 卡片命名 `<slug>.md` ③ **状态字段值域**（照 ADR 四值的最小口径，**不替 Q2-c 的值域决策**，标临时口径）④ 卡片落此 ⇒ **自动落必审侧**（不在 Decisions 15 免审白名单）。
+5. **根 `tickets.md` 处置（⚠️ 属另一在飞 effort，只搬不改）**：先**逐票号比对**根版 vs `docs/run/hook-fallback-delivery/tickets.md`：
+   - 若 run 版是**超集**（根版活票全部在 run 版中）⇒ **删根版**（内容留 git 历史）；
+   - 否则 ⇒ **只搬不改**并入 run 版，并在实施说明里列出「根版有而 run 版无」的票号清单；
+   - **严禁只删不核**。动它前后各查一次 `git status`。
+
+### 边界
+
+**In Scope**：上述 5 项文件移动 / 删除 / 新增门牌
+**Out of Scope**：**不改任何 ADR / plans / 票单正文内容**（只搬位置）/ **不建 lessons 卡片**（只建门牌）/ 不动 `docs/run/memory-flywheel/**`（本 effort 的在飞面）/ 不碰 `docs/sessions/**`
+
+### 验收（逐条可执行）
+
+| #   | 验收项                    | 判据                                                                                                                                   |
+| --- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| E1  | ADR 目录纯净              | `git ls-files docs/adr/` 全部匹配 `^\d{4}-.*\.md$`（脚本断言）                                                                         |
+| E2  | requirements 消失         | 目录不存在；`grep -rn "docs/requirements" --include="*.md" .` 零命中（`docs/run/**` 历史记录若命中，逐条列名并说明）                   |
+| E3  | lessons 门牌              | `docs/lessons/README.md` 存在且含「内容边界 / 命名 / 状态值域（标临时口径）/ 必审说明」四项                                            |
+| E4  | 根 tickets 有承接         | 根 `tickets.md` 不存在；实施说明含**逐票号比对清单**（根版各票在 run 版中的对应状态）                                                  |
+| E5  | 零代码改动                | `git diff --stat` 仅含 `R`（重命名）/ `D`（删除）/ 新增 README；**`packages/`、`scripts/` 零改动**                                     |
+| E6  | 无悬空引用                | `grep -rn "adr/research-\|adr/dsh-acp-probe"` 零命中（搬后引用已改指）或列出已改指清单                                                 |
+| E7  | 内容零改动                | 每个被 `git mv` 的文件 `git diff --stat -M` 显示 **R100**（100% 相似度）——**动了内容即违约**                                           |
+| E8  | （Gate C 反例补）比对可核 | 逐票比对清单**按票号逐条**列出「根版标题 → run 版对应票标题」；**每行结论必须能指回 run 版某票的标题原文**（「已覆盖」类断言不可注水） |
+
+**签收判据**：E1–E7 全过 + 实施者自报「另一 effort 票单只搬不改」。
+
+### 决策留痕
+
+- **Q2-c/Q2-d 由店长在票内就地拍板**（设计面，不占用户裁量额度）；⚠️ 状态字段值域标**临时口径**，不替 Q2-c 的完整决策
+- Gate B 契约：[边界 = 5 项归位动作 / 契约 = 只搬不改 + 逐票比对 / 验收 = E1–E7]
+- ⚠️ **本票不在 Decisions 15 免审白名单内**（动 `docs/adr/**`、`docs/plans/**`、根文件）⇒ **必走审查链**
