@@ -936,6 +936,8 @@ packages/server/src/execution/serial.test.ts
 
 ## 票辰 · 嵌入 sidecar 端口**可观测** + 扫描器端口**隔离**（段三收尾 · 运维面 · 用户裁「按你说的做吧」）
 
+**状态**：**已收口**（2026-09-12：交付 `38bb30e`（7 文件 / +181 −7）→ 吐槽猫审查 **✅ 零返工**（C1–C5 逐项独立实测 / 承重反例 C3 亲手复现为红再恢复为绿 / OQ-2 承重前提源码实证 `defaultSpawn` 不传 `env`；五条 OQ 全裁）→ **PR #60** carrier = merge commit **`c02764bd`** 并入 `dev`（`dev` = `origin/dev` = `.push-gate` 三方对齐，店长实测）；店长独立复核：**11 处行号 `grep` 逐个命中**（`embedding-client.ts` `72/106/123/160/315/337/419/506` + `embedding.ts:66` + `scan.mjs:575` + `.env.example:60`）/ `35 + 22 passed` / **C3 亲手复现 `expected '9999' to be '0'`，还原后盘面干净**；(c) 的 `.env` 部分由店长写入 `EMBED_SIDECAR_PORT=3210`（已核 3210 空闲）。参见 **map Decisions 51**。**⚠️ C6 真机验证未完成**（需重启 + 真跑一次增量扫描），归收口窗口。**勿再派活**）
+
 ### 现状（**实测取证，非转述**——2026-09-12 店长逐处读码）
 
 **端口为何观察不到：**
