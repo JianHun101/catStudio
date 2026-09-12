@@ -488,9 +488,9 @@ describe('S10 真实工作区全量', () => {
 
     // 每条跳过都带非空 reason（「跳过永不是静默的」）
     expect(report.skipped.every((s) => typeof s.reason === 'string' && s.reason !== '')).toBe(true)
-    // 稳定事实抽查：门牌 README 无 frontmatter；docs/plans 现有件是散文规格（无 frontmatter）
+    // 稳定事实抽查：门牌 README 无 frontmatter；票卯 回填后 docs/plans 已产出
     expect(skippedPaths).toContain('docs/lessons/README.md')
-    expect(skippedPaths).toContain('docs/plans/review-chain-anchor.md')
+    expect(produced).toContain('docs/plans/review-chain-anchor.md')
     // 票戊回填过 frontmatter 的 ADR 必须真的进去了
     expect(produced).toContain('docs/adr/0007-external-tool-form-selection-checklist.md')
   })

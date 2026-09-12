@@ -1,3 +1,14 @@
+---
+type: plan
+date: 2026-09-06
+status: 已定稿
+evidence:
+  - kind: file
+    ref: skills/spec-gate/SKILL.md
+  - kind: file
+    ref: skills/manifest.yaml
+---
+
 # 开发流程定义：前端 gate 链 + 需求文档约定 + CONTEXT.md 翻新
 
 > 一个活 = 一份语义命名 MD。本文档是 `docs/requirements/` 的**第一份样例**，同时记录本活自身。
