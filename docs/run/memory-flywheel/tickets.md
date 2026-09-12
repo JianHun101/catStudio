@@ -931,3 +931,104 @@ packages/server/src/execution/serial.test.ts
 - **跳 grilling**：用户直接指令「plans补票吧」；成因单一（内容侧从未落地），无形态分歧
 - **Gate B 契约**：[边界 = 只这 4 份头部 / 契约 = frontmatter 形状照 ADR 0007 + status 判定**不得超前于正文** / 验收 = P1–P6] 已钉死
 - **Gate C 自曝一条**：P1–P6 全绿**不能**证明「白名单三前缀全部通电」——`docs/lessons/` 仍会是暗的（零内容）。那**不是**本票的漏网需求，是**显式划出边界**的项；段三的扫描面结论须继续如实写作「有效面 = `docs/adr/` + `docs/plans/`，`docs/lessons/` 无内容」
+
+---
+
+## 票辰 · 嵌入 sidecar 端口**可观测** + 扫描器端口**隔离**（段三收尾 · 运维面 · 用户裁「按你说的做吧」）
+
+### 现状（**实测取证，非转述**——2026-09-12 店长逐处读码）
+
+**端口为何观察不到：**
+
+- `embed-server.mjs:285` `app.listen(parseInt(process.env.EMBED_SIDECAR_PORT || '0', 10))`；`:287` 自陈动机「OS 分配 → 并行实例不撞端口」⇒ **动态分配是刻意设计，不是缺陷**
+- `.env.example:60` 早已文档化（注释行、未生效）
+- 端口拿到后：`embedding-client.ts:337-344` 握手解析 → `:313` 拼进 `baseUrl` ⇒ **端口此后只活在 `baseUrl` 字符串里，未进 status**
+- `embedding.ts:64` `log.info('嵌入 sidecar 就绪', { model: status.model, dim: status.dim })` —— **无 `port`** ⇒ 店长验 W7 时只能 netstat 捞（Decisions 47 已记该痛点）
+- `embedding-client.ts:471-475` `defaultSpawn` **不传 `env`** ⇒ sidecar 继承父进程 env（端口只从 env 来）
+
+**两个 spawn 点 + 两条到达扫描器的通道（关键）：**
+
+| #   | spawn 点       | 位置                                                                          |
+| --- | -------------- | ----------------------------------------------------------------------------- |
+| ①   | 主 server      | `index.ts:160` `void startEmbeddingSidecar()` → `embedding.ts:57`             |
+| ②   | 扫描器自 spawn | `scan.mjs:578` `new EmbeddingClient()` **不传 `baseUrl`** ⇒ 走 `defaultSpawn` |
+
+| 通道  | 路径                                                                  | 该通道下扫描器的 `EMBED_SIDECAR_PORT`                                           |
+| ----- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **A** | server 启动 spawn `scan.mjs`（`index.ts:74-78` options **无 `env`**） | 继承 server 的 `process.env`（= `.env` 的值）                                   |
+| **B** | 手动 `pnpm flywheel:scan`（新进程）                                   | `scan.mjs:562` **自己 `await import('env.js')` 加载 `.env`** ⇒ **同样拿到该值** |
+
+⇒ **固定端口后，两条通道的扫描器 sidecar 都会去抢主 sidecar 的端口** ⇒ `EADDRINUSE` ⇒ 握手超时 ⇒ 按票庚 fail-closed「嵌入不可用则整件不写」⇒ **那一轮扫描白跑**（恰是有新内容、最需要它成的场景；无变更轮次不调嵌入 ⇒ 不撞）。
+
+**⚠️ 决定修法落点的取证（本票承重）：**
+
+- `env.ts:48-52`：`if (key && !(key in process.env)) process.env[key] = value` —— **`.env` 加载不覆盖已存在的环境变量**
+- ⇒ 显式注入的 `EMBED_SIDECAR_PORT` **能穿透** `scan.mjs` 那次 `.env` 加载，不会被冲掉 ⇒ 在扫描器侧覆盖**成立**
+- 反之：只在 `index.ts:74` 覆盖 ⇒ **只覆盖通道 A，漏通道 B**（店长原提法，见「决策留痕」自曝）
+
+### 目标（可证伪）
+
+1. 主 server 的 sidecar 端口**可预测**且**出现在启动日志**中（不再需要 netstat）
+2. 扫描器拉起的 sidecar **恒为动态端口**（**两条通道皆然**），与主 sidecar **永不互撞**
+
+### 落点与动作
+
+**(a) 端口进 status + 日志**（`packages/server/src/memory/`）
+
+- `embedding-client.ts`：`LiveSidecar` 增 `port: number`；`connect()` 的 spawn 分支取 `handshake.port`，`opts.baseUrl` 直连分支由 URL 解析；`lastSuccess` 增 `port`；`EmbeddingStatus` 增 `port?: number`；`status()` 的 ok 分支透出
+- `embedding.ts:64` 日志加 `port: status.port`
+- **不新增 env、不新增机制**
+
+**(b) 扫描器端口隔离**（`scripts/flywheel/scan.mjs`）
+
+- 在 `main()` 内、**早于** `new EmbeddingClient()`（`:578`）处，显式 `process.env.EMBED_SIDECAR_PORT = '0'`
+- 必须带注释写明**不变量**：「扫描器的 sidecar 是短命私有的，恒用动态端口；**固定端口只属于主 server 的 sidecar**」
+- **不在 `index.ts` 重复覆盖**——一处覆盖两条通道；父进程替子进程表达其内部需求是知识泄漏，且两处写同一条不变量 = 两处真相源
+
+**(c) `.env` 与文档**
+
+- `.env.example:60` 注释补边界：该值**仅作用于主 server 的 sidecar**；扫描器拉起的 sidecar 恒为 `0`
+- `.env` 本身（**gitignored、且 worktree 内不存在**——已实测 `catStudy-sessions/3d977683/.env` 无此文件）由**店长在收口时**写入 `EMBED_SIDECAR_PORT=3210`。取值依据：`3210` 是 `embed-server.mjs:9` 文件头自带的示例值；已核不与 3200（server）/ 5173-5175（web）/ 3000（OneBot）/ 8080（llama-server）相撞
+
+### 契约（钉死）
+
+1. **端口来源唯一 = 握手真实值**。不得用 `process.env.EMBED_SIDECAR_PORT` 反推（默认 `0` 时它没有信息量）；`opts.baseUrl` 直连分支由 URL 解析，解析不出 ⇒ `port: 0`，**不抛错**（该分支是单测/stub 专用）
+2. **`status().ok === false` ⇒ 无 `port`**（保持 `undefined`）；从未成功过时亦无
+3. **不变量**：固定端口**只属于主 server 的 sidecar**；任何由扫描器拉起的 sidecar **恒动态**。该句写在 `scan.mjs` 覆盖点旁
+4. **覆盖点顺序刚性**：必须早于 `new EmbeddingClient()`。**建议**紧随 `import('env.js')`（`:562`）之后——放其**之前**其实也成立（因契约承重的 `env.ts:49` 不覆盖），但**不采用**：那会让本票的正确性耦合到 `env.ts` 的实现细节上；放之后 = 「对已解析结果做显式覆盖」，语义自足
+5. **不改 `embed-server.mjs`**：`listen` 与握手回报**保持原样**。本票是「把已有值暴露出来 + 隔离两个消费者」，不是改 sidecar 行为
+6. **不给 `EmbeddingClient` 加 port 选项、不动 `defaultSpawn`**——避免「env + option」两处真相源
+
+### 验收（逐条可执行）
+
+| #      | 判据                                                                                                                                                                                                  |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **C1** | `embedding.ts` 就绪日志含 `port`，其值 = 握手真实端口（**不是** env 值）——单测断言                                                                                                                    |
+| **C2** | `status()` 成功后返回 `port`；失败 / 未成功时 `port === undefined`（**正反两态各一条**断言）                                                                                                          |
+| **C3** | `scan.mjs` 的覆盖点**可证伪**：删掉该行 ⇒ 某条测试**变红**，恢复 ⇒ 转绿（**不接受纯文本 grep 当判据**）。若实施者实测后确无行为缝隙、只能退到静态源断言，**须在交接文档论证**为何无缝隙，不许静默降级 |
+| **C4** | `.env.example` 注释已写明「仅主 server sidecar」边界                                                                                                                                                  |
+| **C5** | **既有测试全绿**（`memory/**` + `scripts/**` 全量），零回归                                                                                                                                           |
+| **C6** | **收口验收**（**需重启，归店长，不在 worktree 面**）：重启后启动日志出现 `port=3210`；再构造一次真实增量扫描 ⇒ 扫描器 sidecar 落在**非 3210** 端口、**无 `EADDRINUSE`**、报告 `errors:0`              |
+
+**签收判据**：C1–C5 全过 + C3 的可证伪性已实证。C6 属收口面（需用户重启审批），本票在 worktree 面**无法自行闭合**——届时 C6 不绿则出返工票。
+
+### 边界
+
+**In Scope**：上述 (a)(b)(c) 三处 + 随之而来的既有测试同步
+
+**Out of Scope**：
+
+- **不做**「扫描器复用主 sidecar 连接」——**Decisions 48 三 已撤回**（三冲突之一为真耦合：`embedding-client.ts:218-222` **任一请求失败即杀进程**，复用会把服务端一次检索超时传染成扫描整轮崩）
+- **不改 `embed-server.mjs`** 的监听 / 握手行为
+- **不加 `EmbeddingClient` 的 port 选项**、不动 `defaultSpawn`
+- **不改 `dropSidecar` 的重试策略**——「一次失败就杀」是否为最优是**独立取舍**（改后每次真故障多等一整个超时周期），本票不碰
+- **不动 `index.ts:74` 的 spawn options**（理由见 (b)）
+- 不清理 `map.md` Frontier 的其他条目
+
+### 决策留痕
+
+- **跳 grilling**：用户直接指令「按你说的做吧」（承 Decisions 48 三 的方案形态 + 本轮两轮答疑）；成因单一、无形态分歧
+- **⚠️ 店长出票时自曝形态修订**：③ 的落点**从 `index.ts:74` 上移到 `scan.mjs` 的 `main()`**。原提法**只覆盖两条通道中的一条**——漏了手动 `pnpm flywheel:scan`（`scan.mjs:562` 自己加载 `.env`，实测取证）。修订后**一处覆盖两条通道**。**对用户可见的形态不变**（仍是「三件套」），变的只是第三件的落点
+- **契约承重取证（须记，否则将来会被无声改坏）**：③ 成立的前提是 `env.ts:49`「`.env` 不覆盖已存在 env」。若该行为将来改成覆盖式，覆盖点**仍成立**（因它在 env.js 之后）；但若有人把覆盖点**上移到 env.js 之前**再叠加覆盖式加载，**③ 会静默失效** ⇒ **C3 的可证伪测试就是这条的护栏**
+- **Gate B 契约**：[边界 = (a)(b)(c) 三处 / 契约 = 端口来源唯一 + 扫描器恒动态不变量 / 验收 = C1–C6] 已钉死
+- **Gate C 自曝一条**：C1–C5 全绿**不能**证明「真机不再撞端口」——那需要**真跑一次扫描 + 一次重启**，归 C6（店长收口面）。本票在 worktree 面**结构性地无法自证最后一步**，如实标注而非假装闭合
