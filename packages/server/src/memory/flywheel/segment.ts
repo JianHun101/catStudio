@@ -302,7 +302,7 @@ function splitH3(src: Transformed): { h3: string; transformed: Transformed }[] {
   for (let k = 0; k < h3Idx.length; k++) {
     const s = h3Idx[k]
     const e = k + 1 < h3Idx.length ? h3Idx[k + 1] : lines.length
-    push(s, e, h3Text[k])
+    push(s + 1, e, h3Text[k]) // 标题行不进 body（与 L1 同款）
   }
   return out
 }
