@@ -414,7 +414,7 @@ WHERE status IS NULL OR status NOT IN ('superseded','deprecated')
 
 ## 票庚 · 扫描器（段三 · Q5 全落 + S4 孤儿物理删）
 
-**状态**：**本轮派 ds猫**（2026-09-12：票己 `f493979` 已收口 ⇒ 前置满足；票面已按票己审查补钉 **G1–G5 五条**，见下 §契约补遗）
+**状态**：**已收口**（2026-09-12：交付 `4d3e5a4` → 吐槽猫审查 **✅ 零返工**（G1–G5 逐条核算 / 三条反例实跑为红：G1→S11 · G3→S12 · mtime→S4 / `memory/index.ts`·`reply.ts` 零 diff）→ **PR #53** carrier = merge commit **`bf11cbd`** 并入 `dev`；店长实查。参见 **map Decisions 39**。**勿再派活**）｜原记录「本轮派 ds猫」
 **承**：map Decisions 34 一–三（S1/S2/S3）/ S4（**用户裁「物理删」**）/ Decisions 20/22（fail-closed 准入）/ Decisions 17（身份键）/ 票丙 `segmentDocument` / 票丁 sidecar
 **动机**：把白名单里的结晶 MD 变成 `chunks` 行。**它是唯一「读 MD 写索引」的入口**（Decisions 6：索引侧无独立写口）。
 
@@ -520,7 +520,7 @@ export const SCAN_PREFIXES = ['docs/adr/', 'docs/lessons/', 'docs/plans/']
 
 ## 票壬 · 旧写口退役（段三 · S5，**用户裁「退 + 删」**）
 
-**状态**：**本轮派 flash猫**（2026-09-12：独立票、无前置；与票庚同批派——两者改动面无交集：本票动 `memory/index.ts`/`ingest.ts`，票庚动 `scan.mjs`/`chunks.ts`/`index.ts`）
+**状态**：**已收口**（2026-09-12：交付 `d0e3fac` → 吐槽猫审查 **✅ 零返工**（`git grep saveMessageMemory` 零命中 / 独立开库核实 主库 `0/0` + 快照 `198/110` / 独立复跑 9+23+212 passed）→ **PR #52** carrier = merge commit **`854f766`** 并入 `dev`；店长实查。四条 OQ 分流见 **map Decisions 37**。**勿再派活**）｜原记录「本轮派 flash猫」
 **承**：map Decisions 34 零（**用户原话「2 退 + 删」**）/ Decisions 5（只索引结晶 MD、不索引对话原话）/ Decisions 6（索引侧永远无独立写口）/ Decisions 17（DEDUP 作废、改身份键幂等）
 **动机**：`saveMessageMemory` 是**第二个写口**，与「索引侧无写口」正面冲突；其 `0.20 ≤ d < 0.35` 分支还会**覆写旧记忆正文**（演化原则 #4）。留着它，段三的新链路就永远有一条旁路在写旧表。
 
@@ -725,7 +725,7 @@ packages/server/src/index.ts                    （MEMORY_ENABLED 分支：启�
 
 ## 票子 · A2A 配额拦截的**静默面**补齐（机制层 · **非本 effort 面**）
 
-**状态**：**已出票 · 待派**（**排期在票辛之后**——单槽位 FIFO，不一次堆满队列）
+**状态**：**已收口**（2026-09-12：交付 `b886399` → 吐槽猫审查 **✅ 零返工**（Z1–Z4 判据面 + 三反例独立复核为实 / OQ-2 `findStoreCat` 逐字等价从 diff 实证）→ **PR #55** carrier = merge commit **`a170f9b`** 并入 `dev`；店长实查。参见 **map Decisions 43**。**勿再派活**）｜原记录「已出票 · 待派」（排期在票辛之后）
 **承**：Decisions 38 二（勘误后的真根因）+ **Decisions 39 二**（店长立票裁决，**不占用户裁量额度**——机制缺口修复，非形态裁决）
 **动机**：`(traceId, agentId)` 桶耗尽后，正常的审查链投递被吞掉且**链上无人在能感知**。同一文件里另两条同类护栏**都有兜底**（`role-not-allowed` → store 广播 / count-limit → 发送者提示），**唯配额这条两者皆无**。
 **实证**（**两个独立数据点，非孤证**）：`12:55:02` ds猫 的票庚审查请求 / `12:59:37` 店长的补投，**两次撞同一堵墙**，被拦方（吐槽猫）实测故障窗口 6 分钟。
