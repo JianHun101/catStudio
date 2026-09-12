@@ -1000,6 +1000,38 @@ Decisions 37 的四 记「`map.md` 改动落在主仓 dev 工作区、未提交�
 
 `dev` 此刻同时含**票子 `b886399` + 票丑 `b6c9cdd`**，两者都改 `serial.ts`（server 运行时）⇒ **一次重启覆盖两票**。**用户本轮唯一动作 = 点这次重启**（`.restart-request`）。承 Decisions 40 三 观测项：`pending` 态无清理路径，**若用户长期不点，该文件会永久留存**（当前无害，可被新请求顶掉）。
 
+### 45. 重启**已落地**，但 B8/W7 窗口**未开**——门是 `MEMORY_ENABLED` 不是重启；店长上轮判断**自曝勘误**（2026-09-12 用户「重启好了」）
+
+**一、重启实证（读进程/日志原文，非转述）**
+
+| 项               | 实测                                                                                                                        |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| 新进程           | PID 28144 `node scripts/dev.js` / PID 14848 tsx server，**CreationDate `15:13:53`**；`server started` log 于 `15:13:58.194` |
+| 代码面           | 进程启动晚于 merge `ee2c93f`；工作区干净 = 磁盘源码即 `ee2c93f`（tsx 直读源码）⇒ **票子+票丑真机生效**                      |
+| 三方对齐         | `dev` = `origin/dev` = `.push-gate` = **`ee2c93f`** ✅                                                                      |
+| 新代码在跑的铁证 | 启动日志含票庚的 **`飞轮扫描完成`**（启动 spawn）与票辛的 `candidateChunks`/`blockedByStatus`/`budgetTokens` 字段           |
+
+**二、⚠️ 但「启用」窗口没打开 —— 门是 `MEMORY_ENABLED`，不是重启**
+
+- `.env:35` **仍为 `MEMORY_ENABLED=false`**；启动日志 `飞轮扫描完成 {scanned:7, inserted:0, skipped:6, aborted:"not-enabled"}`，检索侧 `记忆上下文为空 {reason:"not-enabled"}` + `知识库查询嵌入不可用,跳过检索`。
+- ⇒ **段三做的一切（扫描器 / 三张索引表 / 检索接线 / 注入配额）此刻一行没跑**。B8「启用」分支与 W7 三验**同为此门所挡**。
+
+**三、店长自曝勘误（本条存在的直接理由）**
+
+上轮的重启请求 `reason` 与回复正文均写「**重启后同时打开两个待验窗口：票丁 B8 + 票辛 W7**」——**与同一条 reason 里自己写的「两者同一道门 = `MEMORY_ENABLED=true`」自相矛盾**，且更早一轮（Decisions 41 一）**已更正过**「W7 前置不是重启（已满足），是 `MEMORY_ENABLED`」。**同一条错误在同轮内被自己写下又推翻，隔轮复发。** 判据面：重启只换代码，不改 env。**「换代码」与「开功能」是两个开关**——此为通用形态，不限于本 effort。
+
+**四、`.restart-request` 实况**：`state` 仍 `pending`、`expiresAt` 已过（`07:07:28Z`）⇒ **本次是用户手工重启**（未走界面按钮，故 `dev.js` 的消费路径未触发）。文件按 Decisions 40 三 是残渣，无需处置。
+
+**五、输入面变化：当初「刻意不开」的理由**已消失
+
+票丙时期不开的依据 = 票面 `tickets.md:233`「与 Q1 裁决（不索引对话原话）冲突 ⇒ 刻意不为测试打开」。**该冲突已由段三自身解除**：票壬退役对话原话写口（`saveMessageMemory` git grep **零命中**）+ 票辛检索改走文档 `chunks` ⇒ **开启后飞轮只索引 `docs/adr|lessons|plans` 三前缀文档**（Decisions 34 一 白名单），**符合 Q1**。
+
+**六、开启代价实测极低**：嵌入模型**已在本地**——`node_modules/.pnpm/@huggingface+transformers@4.2.0/node_modules/@huggingface/transformers/.cache/Xenova/bge-small-zh-v1.5/onnx/model.onnx`（另含 siglip）。`embed-server.mjs` 仅在显式设 `HF_ENDPOINT` 时切镜像，默认走 huggingface.co 但**模型命中本地缓存即无需联网**。⇒ 代价 = **改 `.env` 一行 + 一次重启**。
+
+**七、待用户裁（店长推荐：开）**：开 ⇒ ① 段三全链真机首次通电；② B8「启用」分支 + W7 三验一次做完（票面明写「未验部分不得记 B1–B9 全过」）；③ 顺带产出扫描器真实 `inserted` 计数。**不开** ⇒ 功能面保持关闭，代码全落地但**零消费**，验收面永留一块未验。
+
+**八、诚实标注**：本次窗口重启的是 `pnpm dev`（`cat-study-dev.db`）而非 B8 票面原文的 `pnpm start`（主库）——**主库形态仍未覆盖**（该差异票面已标注过：sidecar 链路同一份代码）；主库另挂 `memories`/`memories_fts` 两表**未 DROP**（生产模式启动才迁移），恢复面 = `cat-study-pre-retire.db`（198/110）。
+
 ## Not yet specified
 
 <!-- 雾区：能看出要来、但还问不出精确问题的 -->
