@@ -8,6 +8,8 @@
     "dev:server": "pnpm --filter @cat-study/server dev",
     "dev:web": "pnpm --filter @cat-study/web dev",
     "seed": "node scripts/seed.js",
+    "flywheel:scan": "node scripts/flywheel/scan.mjs",
+    "flywheel:reindex": "node scripts/flywheel/scan.mjs --reindex",
     "build": "pnpm -r build",
     "lint": "node scripts/lint.js",
     "stop": "node scripts/stop.js",

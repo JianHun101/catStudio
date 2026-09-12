@@ -226,10 +226,20 @@ describe('chunks repo（票己 · 段三索引表）', () => {
     /** 检索入口（必带 X4 过滤面）——新增导出函数必须在此二表之一，否则本测试爆 */
     const RETRIEVAL_FUNCS = ['searchChunksByVector', 'searchChunksByKeyword']
     /**
-     * 非检索导出：`setRepoDb` 配置 / `upsertChunk` 写入 /
-     * `getChunksByOrigin` 扫描器增量比对（**必须见全量行含 superseded**，否则孤儿物理删会漏）
+     * 非检索导出：`setRepoDb` 配置 / `upsertChunk` 身份键裸写口 /
+     * `getChunksByOrigin` 扫描器增量比对（**必须见全量行含 superseded**，否则孤儿物理删会漏）/
+     * 票庚 写侧四件（三表同步写口 + 全量路径枚举 + 两处物理删）——**写入与删除，不是检索面**，
+     * 故不受 X4 过滤面约束（过滤面管的是「召回」，不是「落库」与「物理删」）
      */
-    const NON_RETRIEVAL_FUNCS = ['setRepoDb', 'upsertChunk', 'getChunksByOrigin']
+    const NON_RETRIEVAL_FUNCS = [
+      'setRepoDb',
+      'upsertChunk',
+      'upsertChunkWithIndexes',
+      'getChunksByOrigin',
+      'listChunkDocPaths',
+      'deleteChunksByDocPaths',
+      'deleteStaleChunkRows',
+    ]
 
     function exportFunctionBodies(src: string): Map<string, string> {
       const out = new Map<string, string>()
@@ -330,6 +340,164 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       expect(rows.map((r) => r.content_hash).sort()).toEqual(['x1', 'x2'])
       expect(rows.some((r) => r.status === 'superseded')).toBe(true)
       expect(rows[0].id).toBe(a)
+    })
+  })
+
+  // ─── 票庚 写侧（G1–G5） ───────────────────────────────
+  describe('upsertChunkWithIndexes（扫描器唯一写口）', () => {
+    const counts = () => ({
+      chunks: (getDb().prepare('SELECT COUNT(*) c FROM chunks').get() as { c: number }).c,
+      fts: (getDb().prepare('SELECT COUNT(*) c FROM chunks_fts').get() as { c: number }).c,
+      vec: (getDb().prepare('SELECT COUNT(*) c FROM chunk_vectors').get() as { c: number }).c,
+    })
+
+    it('G1/G2：FTS 行内容 = bigram 预分词串（非原文），rowid = chunks.rowid', () => {
+      const { id } = chunksRepo.upsertChunkWithIndexes(chunkInput(), vectorToBlob(oneHot(0)))
+
+      const fts = getDb().prepare('SELECT rowid, content FROM chunks_fts').all() as Array<{
+        rowid: number
+        content: string
+      }>
+      expect(fts).toHaveLength(1)
+      expect(fts[0].rowid).toBe(id)
+      // 原文（含空格）本身不是 bigram 串：断言两者不等 + 是空格 join 的 bigram
+      const raw = `${chunkInput().body} ${chunkInput().breadcrumb}`
+      expect(fts[0].content).not.toBe(raw)
+      expect(fts[0].content).toBe(bigramTokenize(raw).join(' '))
+    })
+
+    it('G1 反例：FTS 行写成原文 ⇒ 关键词通道零命中（静默失败）', () => {
+      // 手写「照原文写」的错误形态，证明读侧确实依赖 bigram —— 这条用例是
+      // 让「G1 地雷」从口头约定变成可复现事实
+      const bare = chunksRepo.upsertChunk(chunkInput({ contentHash: 'bare' }))
+      getDb()
+        .prepare('INSERT INTO chunks_fts (rowid, content) VALUES (?, ?)')
+        .run(bare, '猫咖测试正文 docs/adr/0001-a.md > 决策')
+      expect(chunksRepo.searchChunksByKeyword('猫咖', 10)).toHaveLength(0)
+    })
+
+    it('G1：写入后按正文关键词真能命中', () => {
+      chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ body: '扫描器写入侧的关键词命中用例' }),
+        vectorToBlob(oneHot(0))
+      )
+      const hits = chunksRepo.searchChunksByKeyword('关键词', 10)
+      expect(hits).toHaveLength(1)
+      expect(hits[0].body).toBe('扫描器写入侧的关键词命中用例')
+    })
+
+    it('G3：向量行写入后向量通道能召回该片', () => {
+      const { id } = chunksRepo.upsertChunkWithIndexes(chunkInput(), vectorToBlob(oneHot(3)))
+      const hits = chunksRepo.searchChunksByVector(vectorToBlob(oneHot(3)), 10, 1.5)
+      expect(hits.map((r) => r.id)).toEqual([id])
+      expect(hits[0].distance).toBeCloseTo(0, 6)
+    })
+
+    it('G3 反例：vec0 PK 不传 BigInt ⇒ 写入被拒', () => {
+      const { id } = chunksRepo.upsertChunkWithIndexes(chunkInput(), vectorToBlob(oneHot(0)))
+      expect(() =>
+        getDb()
+          .prepare('INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)')
+          .run(id, vectorToBlob(oneHot(1)))
+      ).toThrow(/integer/i)
+    })
+
+    it('重写同身份键：id 不变、三表各 1 行、FTS 不残留旧 bigram', () => {
+      const first = chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ body: '第一版正文' }),
+        vectorToBlob(oneHot(0))
+      )
+      expect(first.created).toBe(true)
+      const second = chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ body: '第二版正文' }),
+        vectorToBlob(oneHot(1))
+      )
+      expect(second.created).toBe(false)
+      expect(second.id).toBe(first.id)
+      expect(counts()).toEqual({ chunks: 1, fts: 1, vec: 1 })
+      expect(chunksRepo.searchChunksByKeyword('第一版', 10)).toHaveLength(0)
+      expect(chunksRepo.searchChunksByKeyword('第二版', 10)).toHaveLength(1)
+    })
+
+    it('G4：evidence 传 {kind, ref} 对象数组 ⇒ 落 JSON 文本、读回可解出字段', () => {
+      const id = chunksRepo.upsertChunk({
+        ...chunkInput({ contentHash: 'ev' }),
+        evidence: [
+          { kind: 'commit', ref: 'd555732' },
+          { kind: 'file', ref: 'AGENTS.md' },
+        ],
+      })
+      const row = getDb().prepare('SELECT evidence FROM chunks WHERE id = ?').get(id) as {
+        evidence: string
+      }
+      const parsed = JSON.parse(row.evidence)
+      expect(parsed).toEqual([
+        { kind: 'commit', ref: 'd555732' },
+        { kind: 'file', ref: 'AGENTS.md' },
+      ])
+      expect(parsed[0].kind).toBe('commit')
+      expect(parsed[0].ref).toBe('d555732')
+    })
+  })
+
+  describe('孤儿物理删（G5 · 三表齐删）', () => {
+    const countAll = () => {
+      const c = (sql: string) => (getDb().prepare(sql).get() as { c: number }).c
+      return [
+        c('SELECT COUNT(*) c FROM chunks'),
+        c('SELECT COUNT(*) c FROM chunks_fts'),
+        c('SELECT COUNT(*) c FROM chunk_vectors'),
+      ]
+    }
+
+    it('deleteChunksByDocPaths：chunks / chunks_fts / chunk_vectors 三表归零', () => {
+      chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ docPath: 'docs/adr/gone.md', contentHash: 'g1' }),
+        vectorToBlob(oneHot(0))
+      )
+      chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ docPath: 'docs/adr/kept.md', contentHash: 'k1' }),
+        vectorToBlob(oneHot(1))
+      )
+      expect(countAll()).toEqual([2, 2, 2])
+
+      expect(chunksRepo.deleteChunksByDocPaths(['docs/adr/gone.md'])).toBe(1)
+      expect(countAll()).toEqual([1, 1, 1])
+      expect(chunksRepo.listChunkDocPaths()).toEqual(['docs/adr/kept.md'])
+    })
+
+    it('deleteChunksByDocPaths：空数组是 no-op（不误删全表）', () => {
+      chunksRepo.upsertChunkWithIndexes(chunkInput(), vectorToBlob(oneHot(0)))
+      expect(chunksRepo.deleteChunksByDocPaths([])).toBe(0)
+      expect(countAll()).toEqual([1, 1, 1])
+    })
+
+    it('deleteStaleChunkRows：只删旧代，本次写入的代数保留', () => {
+      // 旧代两片
+      chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ originId: 'old', contentHash: 'a', sectionAnchor: '## A' }),
+        vectorToBlob(oneHot(0))
+      )
+      chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ originId: 'old', contentHash: 'b', sectionAnchor: '## B' }),
+        vectorToBlob(oneHot(1))
+      )
+      // 新代：A 节改了（新 hash），B 节原样（同身份键 ⇒ upsert 刷 origin_id）
+      chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ originId: 'new', contentHash: 'a2', sectionAnchor: '## A' }),
+        vectorToBlob(oneHot(2))
+      )
+      chunksRepo.upsertChunkWithIndexes(
+        chunkInput({ originId: 'new', contentHash: 'b', sectionAnchor: '## B' }),
+        vectorToBlob(oneHot(3))
+      )
+
+      expect(chunksRepo.deleteStaleChunkRows('docs/adr/0001-a.md', 'new')).toBe(1)
+      const rows = chunksRepo.getChunksByOrigin('new')
+      expect(rows.map((r) => r.content_hash).sort()).toEqual(['a2', 'b'])
+      expect(chunksRepo.getChunksByOrigin('old')).toHaveLength(0)
+      // 三表同步收缩：被删的那片不留 FTS/向量僵尸行
+      expect(countAll()).toEqual([2, 2, 2])
     })
   })
 })

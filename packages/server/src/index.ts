@@ -31,6 +31,8 @@ import { runL1Aggregation } from './eval/l1-aggregator.js'
 import { classifyEpisodes, ZERO_EXECUTION_WINDOW_MINUTES } from './eval/episodes.js'
 import { runEpisodeAttribution } from './eval/attribution.js'
 import { existsSync, unlinkSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
 import { stopLlamaServerIfSpawned } from './llm/llama-server.js'
@@ -42,6 +44,77 @@ const log = createLogger('server')
 
 const PORT = parseInt(process.env.PORT || '3200', 10)
 const HOST = process.env.HOST || '127.0.0.1'
+
+// ─── 飞轮扫描器接线（票庚 · 契约 ② 自动触发点）─────────────
+
+/** 仓库根：`packages/server/src/` 与打包后 `dist/server/src/` **同为 3 层深** ⇒ 上溯 3 层恒为仓库根 */
+const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url))
+
+/** 飞轮扫描器脚本（`node scripts/flywheel/scan.mjs`；它自己会拉 tsx 跑 TS 依赖） */
+const FLYWHEEL_SCAN_SCRIPT = resolve(REPO_ROOT, 'scripts', 'flywheel', 'scan.mjs')
+
+/**
+ * 启动时把扫描器 spawn 一次（**fire-and-forget**）。
+ *
+ * 「失败不阻塞」是刻意的：索引是**派生投影**，重建者起不来不该拖垮 server
+ * （承 AGENTS.md「记忆: fire-and-forget，失败不阻塞」）。脚本缺失 / spawn 抛错 /
+ * 子进程非零退出**全部只记 log**。
+ *
+ * 形态 = `node <绝对路径.mjs> --root <仓库根>`：不走 shell、不经 `.cmd` wrapper
+ * （AGENTS.md：Windows 会 EINVAL）；`--root` 显式传，避免 server 的 cwd 落在
+ * `workspace/` 降级路径时扫错目录。tsx 知识不在这里——扫描器自己负责把自己
+ * 拉进能跑 TS 的运行时。
+ */
+function spawnFlywheelScan(): void {
+  try {
+    if (!existsSync(FLYWHEEL_SCAN_SCRIPT)) {
+      log.warn('飞轮扫描器脚本缺失，跳过本轮扫描', { path: FLYWHEEL_SCAN_SCRIPT })
+      return
+    }
+    const child = spawn(process.execPath, [FLYWHEEL_SCAN_SCRIPT, '--root', REPO_ROOT], {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    })
+    let stdout = ''
+    child.stdout?.on('data', (buf: Buffer) => {
+      stdout += buf.toString()
+    })
+    child.on('error', (err: Error) => {
+      log.warn('飞轮扫描器 spawn 失败（不阻塞启动）', { error: err.message })
+    })
+    child.on('exit', (code) => {
+      const report = parseScanReport(stdout)
+      if (code !== 0 || !report) {
+        log.warn('飞轮扫描器未正常完成', { code, aborted: report?.aborted?.reason ?? null })
+        return
+      }
+      log.info('飞轮扫描完成', {
+        scanned: report.scanned,
+        inserted: report.inserted,
+        updated: report.updated,
+        skipped: report.skipped.length,
+        orphansDeleted: report.orphansDeleted,
+        errors: report.errors.length,
+        // 中止（如嵌入未启用）= 本轮没写索引，不是失败——留痕以便分辨「扫完没变化」与「压根没扫」
+        aborted: report.aborted?.reason ?? null,
+      })
+    })
+  } catch (err: any) {
+    log.warn('飞轮扫描器启动失败（不阻塞启动）', { error: err.message })
+  }
+}
+
+/** 扫描器 stdout 的 JSON 报告；空/半行/中止导致解析不出 ⇒ null（调用方按未完成处理） */
+function parseScanReport(stdout: string): any | null {
+  const line = stdout.trim().split('\n').filter(Boolean).pop()
+  if (!line) return null
+  try {
+    return JSON.parse(line)
+  } catch {
+    return null
+  }
+}
 
 async function main(): Promise<void> {
   // 调试模式下输出 DEBUG 日志
@@ -75,6 +148,10 @@ async function main(): Promise<void> {
   if (ghostResult.changes > 0) {
     log.warn('启动时清理幽灵 execution_logs', { deleted: ghostResult.changes })
   }
+
+  // 1.8 飞轮扫描器（票庚 S2 自动触发点）：白名单内的结晶 MD 增量同步进 `chunks`
+  //     索引表。fire-and-forget —— 起不来只记 log，不阻塞启动、不 fail 启动。
+  spawnFlywheelScan()
 
   // 2. 首次启动自动初始化种子数据（Agents 表为空时）
   const agentCount = agentsRepo.countAgents()
