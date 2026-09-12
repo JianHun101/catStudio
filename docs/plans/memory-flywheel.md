@@ -175,8 +175,15 @@ pnpm flywheel:scan       # 增量扫描（blob SHA 判据，边检边修）
 pnpm flywheel:reindex    # 全量重建索引（删表 → 重扫 → 逐行等价）
 ```
 
-- `MEMORY_ENABLED`（本机 `true`）/ `MEMORY_EMBEDDING_MODEL` / `MEMORY_CONTEXT_TOKEN_BUDGET`（默认 8000）/ `MEMORY_TOP_K` / `MEMORY_MAX_DISTANCE` / `MEMORY_DEDUP_*` / `MEMORY_UPDATE_THRESHOLD`。
+- `MEMORY_ENABLED`（本机 `true`）/ `MEMORY_EMBEDDING_MODEL` / `MEMORY_CONTEXT_TOKEN_BUDGET`（默认 8000）/ `MEMORY_TOP_K` / `MEMORY_MAX_DISTANCE`。
 - `EMBED_SIDECAR_PORT`（本机 `3210`，默认 `0` = OS 分配）——**只管主 server**；扫描器侧恒动态。
+
+> **已作废，勿拧**（旧写口退役 / §2.8）：`MEMORY_DEDUP_ENABLED` / `MEMORY_DEDUP_THRESHOLD`
+> / `MEMORY_UPDATE_THRESHOLD` / `MEMORY_FILTER_ENABLED` / `MEMORY_MIN_CONTENT_LENGTH` ——
+> 生产代码**零消费**（`MEMORY_DEDUP_THRESHOLD` 仅剩 `eval/phase0.ts` 一处文档字符串）。
+> 新链走**身份键幂等 upsert**（`chunks.content_hash` 唯一索引），不设阈值去重；
+> 入库筛选随 `saveMessageMemory` 一并退役（`memory/filter.ts` 已无生产调用方）。
+> 五项仍物理躺在 `.env.example`，已同批标注作废 —— 设置它们**零效果**。
 
 ## 8. 过程留痕（票单已清，留痕在 git 历史）
 
