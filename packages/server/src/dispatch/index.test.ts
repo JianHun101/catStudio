@@ -36,7 +36,13 @@ vi.mock('../summarizer/index.js', () => ({
 }))
 
 vi.mock('../memory/index.js', () => ({
-  buildMemoryContext: vi.fn().mockResolvedValue(''),
+  // 记忆注入一律 stub 成「没命中」（票辛后入口返回结构化结果，reason 带痕）
+  retrieveMemoryContext: vi.fn().mockResolvedValue({
+    text: '',
+    reason: 'no-hit',
+    sections: [],
+    stats: {},
+  }),
   buildKnowledgeContext: vi.fn().mockResolvedValue(''),
 }))
 

@@ -324,11 +324,11 @@ describe('Agent Routes', () => {
       expect(get.statusCode).toBe(404)
     })
 
-    it('cascades deletes associated messages and memories', async () => {
+    it('cascades deletes associated messages', async () => {
       const create = await app.inject({ method: 'POST', url: '/api/agents', payload: validAgent })
       const { id } = JSON.parse(create.body)
 
-      const { sessions, messages, memories } = await import('../db/repository/index.js')
+      const { sessions, messages } = await import('../db/repository/index.js')
       const sessionId = 'test-session-cascade'
 
       // 创建 session
@@ -336,11 +336,6 @@ describe('Agent Routes', () => {
 
       // 插入关联消息
       messages.insertMessage('msg-1', sessionId, 'user', 'hello', '[]', id, null)
-
-      // 插入关联记忆
-      const embedding = new Float32Array(512).fill(0.1)
-      const embBuf = Buffer.from(embedding.buffer)
-      memories.insertMemory('mem-1', id, 'test memory', embBuf, 'msg-1', new Date().toISOString())
 
       // 删除 agent
       const res = await app.inject({ method: 'DELETE', url: `/api/agents/${id}` })
@@ -350,8 +345,8 @@ describe('Agent Routes', () => {
       const msgs = messages.getAllSessionMessages(sessionId)
       expect(msgs).toHaveLength(0)
 
-      // 记忆表没有 list 函数，用再次删除不抛异常来验证级联生效
-      expect(() => memories.deleteMemoriesByAgent(id)).not.toThrow()
+      // ⚠️ 原用例还验了 `memories.deleteMemoriesByAgent` 的级联：`memories` 表连同
+      // 该函数已随段三接线下线（票辛 ⑥），这一支已无对象可验
     })
 
     it('returns 404 for nonexistent id', async () => {

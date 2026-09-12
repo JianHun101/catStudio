@@ -81,24 +81,29 @@ export function __setEmbeddingClientForTest(next: EmbeddingClient | null): void 
 /**
  * 库内已存向量的维度（维度自检的比对基准）。
  *
- * 读 `memories` / `knowledge` 两个表里第一条非空向量的长度 —— 与落库格式同源
- * （f32 BLOB ⇒ 字节数 / 4）。无向量（全新库）或 DB 未就绪 ⇒ null = 跳过自检。
+ * 读 `chunk_vectors`（vec0，段三索引）与 `knowledge` 里第一条非空向量的长度 ——
+ * 与落库格式同源（f32 ⇒ 字节数 / 4；vec0 的 `embedding` 列读出仍是 f32 BLOB，
+ * 实测 `length()` = 2048 ⇒ 512）。无向量（全新库）或 DB 未就绪 ⇒ null = 跳过自检。
  * 只读，不建表、不写表。
+ *
+ * 两个来源**各自独立 try**：`chunk_vectors` 是后加的（存量库要重启才建），它缺席
+ * 不该把 `knowledge` 的自检一起拖没。`memories` 已随段三接线下线，不再参与。
  */
 export function resolveStoredVectorDim(): number | null {
-  try {
-    const row = getDb()
-      .prepare(
-        `SELECT length(embedding) / 4 AS dim FROM memories WHERE embedding IS NOT NULL
-         UNION ALL
-         SELECT length(embedding) / 4 AS dim FROM knowledge WHERE embedding IS NOT NULL
-         LIMIT 1`
-      )
-      .get() as { dim: number } | undefined
-    const dim = Number(row?.dim)
-    return Number.isFinite(dim) && dim > 0 ? dim : null
-  } catch (err: any) {
-    log.warn('读取库内向量维度失败，跳过维度自检', { error: err?.message })
-    return null
+  const readDim = (sql: string): number | null => {
+    try {
+      const row = getDb().prepare(sql).get() as { dim: number } | undefined
+      const dim = Number(row?.dim)
+      return Number.isFinite(dim) && dim > 0 ? dim : null
+    } catch (err: any) {
+      log.warn('读取库内向量维度失败，跳过该来源', { error: err?.message })
+      return null
+    }
   }
+  return (
+    readDim('SELECT length(embedding) / 4 AS dim FROM chunk_vectors LIMIT 1') ??
+    readDim(
+      'SELECT length(embedding) / 4 AS dim FROM knowledge WHERE embedding IS NOT NULL LIMIT 1'
+    )
+  )
 }

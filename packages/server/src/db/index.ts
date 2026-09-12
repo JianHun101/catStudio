@@ -78,6 +78,52 @@ function widenReviewVerdictsCheck(): void {
   console.log('[db] migrated: review_verdicts verdict CHECK widened (comment)')
 }
 
+/**
+ * `chunk_vectors` 建表 DDL —— 迁移数组与量纲校正守卫**共用一份**，防两处漂移。
+ * `distance_metric=cosine` 是与全仓阈值口径对齐的关键，见迁移条目处注释。
+ */
+const CHUNK_VECTORS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
+        chunk_id INTEGER PRIMARY KEY,
+        embedding float[512] distance_metric=cosine
+      )`
+
+/**
+ * 存量库的 `chunk_vectors` 距离量纲校正（票辛 · 契约对齐，非新机制）。
+ *
+ * 为什么需要单独一个守卫：虚拟表的量纲写在 DDL 里，`CREATE ... IF NOT EXISTS`
+ * 对**已存在**的表是 no-op ⇒ 老库会一直保留 L2 量纲，而代码侧的阈值全是余弦口径。
+ * 不能把 `DROP + CREATE` 直接塞进迁移数组——那个循环**每次 initDb() 都跑**，
+ * 会把索引向量每次启动清空一次。
+ *
+ * 校正代价 = 清空 `chunks` 三表。这是**必须**的：`chunk_vectors` 一重建，原有
+ * `chunks` 行的向量就没了，而扫描器按 `origin_id` 增量比对 ⇒ 这些行会被判「没变」
+ * 而跳过，永远补不上向量（静默不可召回）。三表同清 ⇒ 下次扫描全量重建 + 重嵌入
+ * ——`chunks` 是 MD 的派生投影，清空可无损重建（Decisions 1）。
+ */
+function ensureChunkVectorCosineMetric(): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunk_vectors'")
+    .get() as { sql: string } | undefined
+  if (!row || row.sql.includes('distance_metric=cosine')) return
+
+  db.exec(`
+    DROP TABLE IF EXISTS chunk_vectors;
+    CREATE VIRTUAL TABLE chunk_vectors USING vec0(
+      chunk_id INTEGER PRIMARY KEY,
+      embedding float[512] distance_metric=cosine
+    );
+  `)
+  // 三表同清：见上面「为什么必须清 chunks」的注释。逐表 try —— 极老库可能缺表
+  for (const t of ['chunks_fts', 'chunks']) {
+    try {
+      db.exec(`DELETE FROM ${t}`)
+    } catch {
+      /* 表不存在：无事可清 */
+    }
+  }
+  console.log('[db] chunk_vectors 距离量纲已校正为 cosine，chunks 三表已清空待重扫')
+}
+
 export function initDb(): void {
   const db = getDb()
 
@@ -124,19 +170,14 @@ export function initDb(): void {
     CREATE INDEX IF NOT EXISTS idx_messages_session
       ON messages(session_id, created_at);
 
-    CREATE TABLE IF NOT EXISTS memories (
-      id TEXT PRIMARY KEY,
-      agent_id TEXT NOT NULL,
-      content TEXT NOT NULL,
-      embedding BLOB,
-      source_message_id TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (agent_id) REFERENCES agents(id)
-    );
+    -- ⚠️ memories 表**已下线**（票辛 ⑥ 段三检索接线）：对话原话不再入库，
+    -- 索引唯一来源是飞轮扫描器产出的 chunks。全新库不再建该表；存量库由
+    -- 迁移数组末尾的 DROP 清除。原 DDL 见 git 历史（本块删除前的版本）。
 
     -- 知识库表（知识库 Phase 1）：运营方维护的标准数据，独立表不加 type 列
-    -- 混进 memories——对话记忆可被 UPDATE 修正（去重三段式），知识库不可被
-    -- 对话覆盖，复用表会让去重/更新语义硬分叉（roadmap 已定，保持）
+    -- 混进 memories（该表已下线，本句保留为历史语义说明）——对话记忆可被
+    -- UPDATE 修正（去重三段式，已随旧写口退役），知识库不可被对话覆盖，
+    -- 复用表会让去重/更新语义硬分叉（roadmap 已定，保持）
     CREATE TABLE IF NOT EXISTS knowledge (
       id         TEXT PRIMARY KEY,
       content    TEXT NOT NULL,
@@ -413,20 +454,10 @@ export function initDb(): void {
         FOREIGN KEY (episode_id) REFERENCES episodes(id)
       )`,
     },
-    // 混合检索 FTS5 关键词通道表（additive：CREATE VIRTUAL TABLE IF NOT EXISTS 幂等，
-    // 老库重跑零副作用）。独立表（非 external content）——内容为 bigram 预分词串
-    // （空格 join，memories.ts bigramTokenize 应用层切分），unicode61 按字母/数字切
-    // token：每个 bigram 独立成 token，FTS 侧零中文分词依赖；rowid 映射
-    // memories.rowid，检索 JOIN 取原文。同步走应用层双写（memories.ts 各写函数
-    // 配套），测试 :memory: 无此表时双写容错降级（no such table 静默跳过），
-    // 检索侧 hybrid 开关下同样降级纯向量
-    {
-      name: 'memories_fts table (FTS5 混合检索)',
-      sql: `CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-        content,
-        tokenize='unicode61'
-      )`,
-    },
+    // ⚠️ `memories_fts`（FTS5 关键词通道）建表迁移**已删除**：整条 memories
+    // 检索链随段三接线下线（票辛 ⑥），关键词通道改由 `chunks_fts` 承担。
+    // 全新库不建该表；存量库由数组末尾的 DROP 清除。原 DDL 见 git 历史。
+    //
     // 摘要替代压缩列（additive ALTER；存量行 NULL = 无压缩历史，兼容）。
     // JSON 数组，每次压缩 append 一条 {createdAt, tokenCount, content}；
     // content 空串 = 异步生成中的 pending 占位（生成完成回填，消费侧跳过空条目）
@@ -536,6 +567,12 @@ export function initDb(): void {
     // 切片向量（X1）：sqlite-vec vec0，512 维（= Xenova/bge-small-zh-v1.5 输出维度，
     // 与 memories/knowledge 的 embedding BLOB 同维）。chunk_id ↔ chunks.id 对齐。
     //
+    // ⚠️ **必须显式声明 `distance_metric=cosine`**（票辛实测）：vec0 不写这一句时
+    // 默认量纲是 **L2**，而全仓的距离阈值词汇（`MEMORY_MAX_DISTANCE` 0.6 /
+    // knowledge 0.35 / `searchChunksByVector` 文档写的「余弦距离」）全是余弦口径。
+    // 实测同一对向量：默认 L2 = 0.7654，cosine = 0.2929 —— 混用会让阈值静默变严，
+    // 属于「不报错的召回劣化」。存量库的校正见 `ensureChunkVectorCosineMetric()`。
+    //
     // ⚠️ 写入侧地雷（本仓首次引入 vec0，实测取证）：vec0 是虚拟表，**没有列的
     // INTEGER 亲和性**，PK 值必须原样以 SQLITE_INTEGER 抵达 xUpdate。better-sqlite3
     // 把 JS number 一律按 REAL 绑定（`typeof(?)` 实测 = real），普通表靠列亲和性
@@ -544,10 +581,7 @@ export function initDb(): void {
     // 传 BigInt**（`BigInt(chunkId)`）；不传 PK 让 SQLite 自增则不受影响。
     {
       name: 'chunk_vectors table (sqlite-vec vec0)',
-      sql: `CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
-        chunk_id INTEGER PRIMARY KEY,
-        embedding float[512]
-      )`,
+      sql: CHUNK_VECTORS_DDL,
     },
     // 关键词通道（W1）：**逐项对齐 memories_fts**——非 external content 独立表，
     // content 列存 bigram 预分词串（空格 join，两侧对称），tokenize='unicode61'
@@ -559,6 +593,25 @@ export function initDb(): void {
         content,
         tokenize='unicode61'
       )`,
+    },
+    // ─── 票辛 ⑥ 旧链下线：memories / memories_fts 双 DROP ──────────────────
+    // 对话原话向量记忆链整体退役：写口已由票壬摘除（`saveMessageMemory` 删除 +
+    // 存量清零），读口本票改走 `chunks`，两张表再无任何调用方（W8 判据）。
+    //
+    // ⚠️ **不可逆**，且与「删表可重建」的索引侧不同：`chunks` 是 MD 的派生投影
+    // （可无损重建），`memories` 是**对话原话**——没有源文件可重放，DROP 即永久
+    // 丢失。执行前提是票壬已先清空数据（实测 198/110 → 0，删的是空表）。
+    //
+    // FK 安全性：`memories.agent_id → agents(id)` 是**它引用别人**，无子表引用它
+    // ⇒ DROP 不触发 FK 逐行校验，也不需要先删 agents。
+    //
+    // `DROP TABLE IF EXISTS` 对全新库是 no-op：上面两处 CREATE 已删，全新库压根
+    // 没有这两张表；存量库由本条目清除。放在数组**末尾** = 所有建表迁移都跑完
+    // 之后才执行，避免「先删后建」把表又建回来。
+    {
+      name: 'drop memories chain tables (票辛 旧链下线)',
+      sql: `DROP TABLE IF EXISTS memories_fts;
+            DROP TABLE IF EXISTS memories`,
     },
   ]
 
@@ -572,6 +625,7 @@ export function initDb(): void {
   }
 
   widenReviewVerdictsCheck()
+  ensureChunkVectorCosineMetric()
 
   console.log('[db] SQLite initialized at', DB_PATH)
 }
