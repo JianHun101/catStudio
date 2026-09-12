@@ -57,6 +57,31 @@ export const RESTART_REQUEST_FILE = resolve(RESTART_FILES_DIR, '.restart-request
 /** 重启完成标记路径（dev.js 重启成功后写，新 server 启动时读并广播） */
 export const RESTART_DONE_FILE = resolve(RESTART_FILES_DIR, '.restart-done')
 
+/**
+ * 关停请求文件路径（票巳 (b)，契约 6）。
+ *
+ * 链路：dev.js 按钮重启**杀旧进程之前**写本文件（空文件）→ server 侧自检消费
+ * （`shutdown-request.ts`）→ 走既有 `shutdown()` 优雅退出 → dev.js 有界宽限窗等它
+ * 自退 → 超窗兜底 `taskkill /F /T`（现状不变）。**全自动，不需要用户点击**。
+ *
+ * 为什么用文件不用信号：Windows 上 `child.kill()` = `TerminateProcess`，**根本不
+ * 投递信号**（实测子进程处理函数零执行）⇒「先发 SIGTERM」结构性不可行，只能照抄
+ * 仓内既有的文件握手范式。
+ *
+ * **内容契约（契约 7）：「存在即请求」，内容不参与判定——空文件即合法**，读方
+ * 不校验、不解析。理由：关停请求**不携带任何数据**（对照 `.restart-request` 需
+ * `messageId`/`sessionId`/`reason`）。加最小 schema 就必须回答「字段缺了算不算
+ * 请求」，等于把陈旧文件 / 重入这两个问题重新开一遍。
+ *
+ * ⚠️ **不得复用 `.restart-request` 这个文件名**（契约 8）：dev.js 的 watcher
+ * （`scripts/dev.js` 重启确认区块）会把它当重启请求触发。
+ *
+ * 定义处与 `RESTART_REQUEST_FILE` / `RESTART_DONE_FILE` 同源（同一个
+ * `RESTART_FILES_DIR`）——契约 6 要求「不得散落第二处路径常量」，故本常量必须留在
+ * 本模块，消费逻辑才另起 `shutdown-request.ts`。
+ */
+export const SHUTDOWN_REQUEST_FILE = resolve(RESTART_FILES_DIR, '.shutdown-request')
+
 export interface RestartRequestFile {
   /** 触发消息 ID（前端按消息关联按钮状态） */
   messageId: string

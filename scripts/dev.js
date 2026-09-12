@@ -39,6 +39,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { decideRestartAction } from './restart-gate.js'
+import { stopProcessGracefully, SHUTDOWN_REQUEST_FILE_NAME } from './graceful-stop.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -80,6 +81,14 @@ const LOCK_FILE = path.join(ROOT, '.agent-busy')
 // 重启成功后写 .restart-done 供新 server 广播「重启完成」。
 const RESTART_REQUEST_FILE = path.join(ROOT, '.restart-request')
 const RESTART_DONE_FILE = path.join(ROOT, '.restart-done')
+
+// 关停请求文件（票巳 (b)，与 server 侧 restart-request.ts 的 SHUTDOWN_REQUEST_FILE 同源）：
+// 按钮重启**杀旧 server 之前**由本进程写（空文件），server 侧自检消费 → 走既有
+// shutdown() 优雅退出 → 本进程在有界宽限窗内等它自退 → 超窗兜底 taskkill /F /T。
+// ⚠️ 不得复用 .restart-request 这个文件名——上面那个 watcher 会把它当重启请求触发。
+// 文件名与宽限窗的**唯一真相源**在 ./graceful-stop.js（策略抽出去才可测：D4 承重反例
+// 「宽限窗必须有界」；照 restart-gate.js 的既有范式），本行只补目录。
+const SHUTDOWN_REQUEST_FILE = path.join(ROOT, SHUTDOWN_REQUEST_FILE_NAME)
 
 if (!fs.existsSync(TSX_CLI)) {
   console.error('[dev] 找不到 tsx，请确认已执行 pnpm install')
@@ -215,7 +224,7 @@ async function restartWithRetry(reason) {
       baseDelay *= 2
     }
 
-    startServer()
+    await startServer()
     const ok = await waitForServer()
     if (ok) return true
 
@@ -229,7 +238,7 @@ async function restartWithRetry(reason) {
   console.error('[dev] server 重启失败（已重试 3 次），每 30s 继续尝试...')
   const keepTrying = setInterval(async () => {
     console.log('[dev] 再次尝试重启 server...')
-    startServer()
+    await startServer()
     const ok = await waitForServer()
     if (ok) {
       console.log('[dev] server 恢复!')
@@ -239,13 +248,17 @@ async function restartWithRetry(reason) {
   return false
 }
 
-function startServer() {
+async function startServer() {
   cleanupDeadLock()
 
-  // 杀掉旧 server 进程
+  // 停掉旧 server 进程：优雅优先（写 .shutdown-request → server 走既有 shutdown()），
+  // **有界**宽限窗内不退出则兜底 hard kill（现状不变）。策略在 ./graceful-stop.js。
   if (serverChild && serverChild.exitCode === null) {
     console.log('[dev] 终止旧 server 进程 (pid=' + serverChild.pid + ')')
-    killTree(serverChild.pid)
+    await stopProcessGracefully(serverChild, {
+      requestFile: SHUTDOWN_REQUEST_FILE,
+      killTree,
+    })
     children.delete(serverChild)
   }
 
@@ -552,7 +565,7 @@ async function pollNapcatRequest() {
 // ─── 启动流程 ─────────────────────────────────
 
 // 1. 启动 Server
-startServer()
+await startServer()
 const ready = await waitForServer()
 if (!ready) {
   killAll()

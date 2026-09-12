@@ -47,6 +47,8 @@ workspace/
 # 重启确认机制（店长发【重启请求】→ 前端确认 → dev.js 重启；工作流状态文件不入库）
 .restart-request
 .restart-done
+# 关停握手（票巳 (b)：dev.js 按钮重启前写、server 自检消费；工作流状态文件不入库）
+.shutdown-request
 
 # NapCat 生命周期（.napcat-pid 记录 dev.js 拉起的实例所有权；.napcat-request 是 server 薄桥→dev.js 的启停请求文件；.napcat-config.json 是配置页面保存的启动路径——本机环境数据，换机器不同；工作流状态文件不入库）
 .napcat-pid

@@ -69,10 +69,23 @@ export async function startEmbeddingSidecar(): Promise<void> {
   }
 }
 
-/** 关停 sidecar（server shutdown 调用；只杀本进程 spawn 的实例） */
+/**
+ * 关停 sidecar（server shutdown 调用；只杀本进程 spawn 的实例）。
+ *
+ * 票巳 (a)：**必须留下回收行**——这是「回收有没有发生」的唯一可判面（票丁 OQ4 的
+ * 判定规则正是「关停后无回收行 ⇒ 出票」，而原实现只有 `client?.stop()` 零日志，
+ * 关停链在日志上等于不存在）。`port` 取自 `StopReceipt` = **握手真值**，非 env 反推。
+ *
+ * `killedChild:false` 不是噪声：它把「日志没打」与「确实无进程可回收」（未启用 /
+ * 从未 spawn / sidecar 已自退）区分开——这正是 OQ4 当年判不出来的那一格。
+ */
 export function stopEmbeddingSidecar(): void {
-  client?.stop()
+  const receipt = client?.stop()
   client = null
+  log.info('嵌入 sidecar 关停', {
+    port: receipt?.port,
+    killedChild: receipt?.killedChild ?? false,
+  })
 }
 
 /** 仅在测试中使用：替换单例客户端（null = 复位，下次调用重建） */

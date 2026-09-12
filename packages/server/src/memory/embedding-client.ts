@@ -116,6 +116,21 @@ export interface EmbeddingStatus {
   failingSince?: string
 }
 
+/**
+ * `stop()` 的回收回执（票巳 (a)）——「回收到底有没有发生」原先在调用侧零可判面
+ * （`stop()` 无返回值、无日志），票丁 OQ4「关停链未观察」正是这么攒出来的。
+ */
+export interface StopReceipt {
+  /**
+   * 真实监听端口，来源唯一 = **握手回报值**（`live.port`）。与 `EmbeddingStatus.port`
+   * 同口径：**不得**用 `process.env.EMBED_SIDECAR_PORT` 反推（默认 `0` 时它没有信息量）。
+   * 从未握手成功 / 直连分支解析不出 ⇒ undefined（不编一个数出来）。
+   */
+  port?: number
+  /** 是否持有（并已尝试杀掉）本进程 spawn 的子进程句柄；false = 本次关停无进程可回收 */
+  killedChild: boolean
+}
+
 /** spawn 出的 sidecar 子进程（只取本模块用到的面 —— 单测可传假实现） */
 export interface SidecarChild {
   stdout: NodeJS.ReadableStream | null
@@ -241,9 +256,15 @@ export class EmbeddingClient {
     return results
   }
 
-  /** 关停 sidecar（server shutdown 调用；只杀本进程 spawn 的实例） */
-  stop(): void {
-    const child = this.live?.child
+  /**
+   * 关停 sidecar（server shutdown 调用；只杀本进程 spawn 的实例）。
+   *
+   * 票巳 (a)：返回 `StopReceipt` 供调用侧记回收日志——`port` 是**握手真实值**，
+   * 不从环境变量反推（票辰契约 1，见 `StopReceipt`）。
+   */
+  stop(): StopReceipt {
+    const live = this.live
+    const child = live?.child ?? null
     this.live = null
     this.connecting = null
     if (child) {
@@ -253,6 +274,9 @@ export class EmbeddingClient {
         /* 已退出/无法杀：不阻塞关停链 */
       }
     }
+    // live 缺席时退到 lastSuccess（曾握手成功过 ⇒ port 仍是握手真值，不是反推值）
+    const port = live?.port ?? this.lastSuccess?.port
+    return { port: port && port > 0 ? port : undefined, killedChild: child !== null }
   }
 
   /** 提前预热（server 启动时调用；含维度自检；失败留痕不抛） */
