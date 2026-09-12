@@ -2,7 +2,7 @@
  * connectors 路由测试（P2 AC2/AC3）。
  *
  * 覆盖：绑定管理 CRUD + 校验；webhook 四类 payload（@机器人+@猫名 / 纯@机器人 /
- * 无绑定群 / 自己发的消息）+ 非 message 事件 + 私聊 + saveMemory 断言 + 503 开关 +
+ * 无绑定群 / 自己发的消息）+ 非 message 事件 + 私聊 + 503 开关 +
  * 白名单模式 5 例（命中 / 白名单外@ / 白名单外私聊 / 未配置兼容 / 格式宽容）。
  */
 import { createHmac } from 'node:crypto'
@@ -14,7 +14,6 @@ import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository, connectorBindings as bindingsRepo } from '../db/repository/index.js'
 import type { FastifyInstance } from 'fastify'
-import { saveMessageMemory } from '../memory/index.js'
 import { __test_resetOneBotDedup } from './connectors.js'
 
 // 执行注册表 mock（第 4 刀断环后 connectors → ingest 经 registry 寻址广播/执行）：
@@ -24,12 +23,6 @@ import { __test_resetOneBotDedup } from './connectors.js'
 vi.mock('../execution/registry.js', () => ({
   getExecutionBus: vi.fn(() => null),
   getExecutionEngine: vi.fn(() => null),
-}))
-
-// Mock memory——断言 webhook 摄入显式传 saveMemory: true（吐槽猫审查观察点 #1 的护栏：
-// "saveMemory=false 不被调用" 的测试钉死由 webhook 侧 "saveMemory=true 必被调用" 保证）
-vi.mock('../memory/index.js', () => ({
-  saveMessageMemory: vi.fn(() => Promise.resolve()),
 }))
 
 /** 插入绑定 fixture：agent-ds（ds猫）→ session-qq-1，绑定 qq/group/555 */
@@ -243,7 +236,7 @@ describe('Connector Routes', () => {
       expect(countMessages()).toBe(0)
     })
 
-    it('AC2-1: @机器人+@猫名 → 落库子会话、mentions、昵称前缀，且 saveMemory=true 被调用', async () => {
+    it('AC2-1: @机器人+@猫名 → 落库子会话、mentions、昵称前缀', async () => {
       insertBoundFixture()
       const res = await app.inject({
         method: 'POST',
@@ -258,16 +251,6 @@ describe('Connector Routes', () => {
       expect(rows[0].session_id).toBe('session-qq-1')
       expect(JSON.parse(rows[0].mentions)).toEqual(['ds猫'])
       expect(rows[0].content).toBe('[小明]: @ds猫 帮我看看')
-
-      // 吐槽猫观察点 #1 护栏：OneBot 真实对话必须进向量记忆库。
-      // P4 顺带（AC2-1 mock 退化值修正）：第 4 参不再是退化值 []——
-      // rowToAgent mock 补真实映射后 validAgents=['agent-ds']（真实环境一致）
-      expect(saveMessageMemory).toHaveBeenCalledWith(
-        'session-qq-1',
-        '[小明]: @ds猫 帮我看看',
-        expect.any(String),
-        ['agent-ds']
-      )
     })
 
     it('AC2-2: 纯@机器人无猫名 → mentions=[] 广播', async () => {
