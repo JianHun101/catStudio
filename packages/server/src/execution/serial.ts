@@ -606,8 +606,9 @@ async function executeOneAgent(
       }
     } catch (err: any) {
       // 判据查不动（本地 DB 读失败）→ 不静默：error 级留痕。此处 sha 不可知、
-      // 无投递目标，故只记错——真正需要防的「查不动就静默吞掉投递」在钩子侧
-      // （远端 HTTP 判据），那里按降级语义一律投递。
+      // 无投递目标，故只记错。钩子侧的同一判据**已不是这个方向**：2026-09-12 A 案
+      // （`44de053`）把 `decideHookDelivery(null)` 由「投」翻转为「静默让位」，
+      // 补投责任移交收尾兜底 `--fallback-sha`——本处的 error 留痕不受其影响。
       log.error('review fallback judgement failed — not delivered', {
         traceId,
         agentId: agent.id,

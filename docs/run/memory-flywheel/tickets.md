@@ -69,7 +69,10 @@ function changedPathsOf(cwd, fullSha) -> string[] | null
 - 实现：`parseChangedFiles(git(cwd, \`diff --name-status ${fullSha}~1..${fullSha}\`)).map(f => f.path)`
 - 复用既有 `parseChangedFiles`（`:295`，rename `R100\told\tnew` 取**新路径**）——不另写解析器
 - 任何异常 → `null`
-- **`null` ⇒ 不豁免（照常投递）**——与 `decideHookDelivery(null)`「判据查不动一律投递」同款精神，静默只在判据明确时发生
+- **`null` ⇒ 不豁免（照常投递）**——静默只在判据明确时发生。理由**不是**「与钩子判据同款」：
+  2026-09-12 A 案（`44de053`）已把 `decideHookDelivery(null)` 由「投」翻转为「静默让位」，
+  两者方向现在**有意相反**。真正的理由是**代价不对称**——漏免审只多投一条，
+  误免审则吞掉一条本该书写的审查请求（同款论证见 `scripts/handoff-gen.mjs` 的 `isExemptDelivery` 注释）
 
 **C4 · 接入点（唯一一处）**
 
