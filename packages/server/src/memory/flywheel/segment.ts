@@ -23,6 +23,11 @@
  * | L3-e | 行边界 `\n`（**代码块专用**）         | ``` 围栏       |
  * | L3-f | 字符硬切 450 + 记例外（标记不阻断）   | 无边界连续串   |
  *
+ * ## frontmatter（C3 · Decisions 33 二）
+ *
+ * 进入回退链**之前**先剥离文件头部的 YAML frontmatter（六条规则见 `stripFrontmatter`）——
+ * 元数据不进嵌入文本（Decisions 21 四），且多份 ADR 的前言片彼此同质会互相挤占 top-K。
+ *
  * ## 实施期钉死的几处口径（规格未写死，此处定）
  *
  * 1. **构成分派不做比例阈值**：L3-a/b/c 实现为「边界层级 + 贪心回并」——先把块拆到
@@ -198,6 +203,35 @@ function splitSentences(text: string): string[] {
   }
   if (cur !== '') out.push(cur)
   return out
+}
+
+// ---------------------------------------------------------------------------
+// C3：frontmatter 剥离（Decisions 33 二）
+// ---------------------------------------------------------------------------
+
+/**
+ * 剥离文件头部的 YAML frontmatter（Decisions 33 二 · tickets.md 票丙 C3 六规则）。
+ *
+ * 动机：frontmatter 是**正常元数据不是异常**，但它是结构不是语义——`status: accepted`
+ * 进嵌入文本会污染向量，且多份 ADR 的前言片彼此高度同质、在 top-K 内互相挤占。剥离
+ * 正面维持 Decisions 21 四「**元数据不进嵌入文本**」。
+ *
+ * 六条规则：
+ *   ① 仅当**第 1 行恰为 `---`**（允许空白）才进入剥离判定；正文中间的 `---` 是水平
+ *      分割线，不剥
+ *   ② 向下找下一个恰为 `---` 或 `...` 的行，**含该行**一并剥离
+ *   ③ **未闭合 ⇒ 不剥**，整份按普通正文处理（**向严不向宽**：宁可多索引，不可误删）
+ *   ④ 剥离段不进 `body` / `breadcrumb` / `warnings`——正常元数据，不报异常
+ *   ⑤ **不解析 YAML**：不引 yaml 库、不校验键值，只做围栏剥离（字段消费是扫描器的事）
+ *   ⑥ 剥离后首行若为空行不影响后续；H1 仍由面包屑承担
+ */
+function stripFrontmatter(lines: string[]): string[] {
+  if (lines.length === 0 || lines[0].trim() !== '---') return lines
+  for (let i = 1; i < lines.length; i++) {
+    const t = lines[i].trim()
+    if (t === '---' || t === '...') return lines.slice(i + 1)
+  }
+  return lines // ③ 未闭合：不剥
 }
 
 // ---------------------------------------------------------------------------
@@ -665,7 +699,7 @@ function processSubBlock(
  */
 export function segmentDocument(input: SegmentInput): SegmentReport {
   const ctx: Ctx = { path: input.path, warnings: [] }
-  const lines = input.content.replace(/\r\n?/g, '\n').split('\n')
+  const lines = stripFrontmatter(input.content.replace(/\r\n?/g, '\n').split('\n'))
 
   const working: WorkingPart[] = []
   for (const block of splitTopLevel(lines)) {

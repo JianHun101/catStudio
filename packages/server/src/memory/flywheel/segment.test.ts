@@ -312,8 +312,10 @@ describe('segmentDocument · A4/A5 真实语料', () => {
       const corpus = bodyCorpus(report)
       const lines = readFileSync(abs, 'utf-8').replace(/\r\n?/g, '\n').split('\n')
       const fenced = fenceFlags(lines)
+      const frontmatter = frontmatterRange(lines)
 
       for (let i = 0; i < lines.length; i++) {
+        if (frontmatter.has(i)) continue // frontmatter 按 C3 有意剥离，不算「正文缺失」
         const line = lines[i]
         if (line.trim() === '') continue
         if (!fenced[i] && /^\s*#{1,6}\s/.test(line)) continue // 标题由面包屑承担，另行校验
@@ -326,7 +328,7 @@ describe('segmentDocument · A4/A5 真实语料', () => {
       // 标题文本必须落到某片的面包屑里（不丢，只是换了个位置）
       const crumbs = report.segments.map((s) => s.breadcrumb).join('\n')
       for (let i = 0; i < lines.length; i++) {
-        if (fenced[i]) continue // 围栏里的 `# 注释` 不是标题
+        if (fenced[i] || frontmatter.has(i)) continue // 围栏里的 `# 注释` 不是标题
         const m = /^\s*#{1,3}\s+(.*)$/.exec(lines[i])
         if (m && !crumbs.includes(m[1].trim())) missing.push(`${rel} 标题未进面包屑: ${m[1]}`)
       }
@@ -365,6 +367,20 @@ function fenceFlags(lines: string[]): boolean[] {
   return out
 }
 
+/** 独立实现：被 C3 剥离掉的 frontmatter 行索引集合（未闭合则不剥） */
+function frontmatterRange(lines: string[]): Set<number> {
+  const skip = new Set<number>()
+  if (lines.length === 0 || lines[0].trim() !== '---') return skip
+  for (let i = 1; i < lines.length; i++) {
+    const t = lines[i].trim()
+    if (t === '---' || t === '...') {
+      for (let k = 0; k <= i; k++) skip.add(k)
+      return skip
+    }
+  }
+  return skip
+}
+
 /** 独立实现（不复用被测模块的拆分器）：抽出所有表格数据行的非空单元格值 */
 function tableCellValues(lines: string[]): string[] {
   const out: string[] = []
@@ -386,6 +402,92 @@ function tableCellValues(lines: string[]): string[] {
   }
   return out
 }
+
+describe('segmentDocument · A11 frontmatter 剥离边界四例（C3）', () => {
+  it('① 正文中间的 `---` 是水平分割线 ⇒ **不剥**', () => {
+    const content = '# T\n\n上半段。\n\n---\n\n下半段。'
+    const r = segmentDocument({ path: 'p.md', content })
+    const body = r.segments.map((s) => s.body).join('\n')
+    expect(body).toContain('上半段。')
+    expect(body).toContain('下半段。')
+  })
+
+  it('② 只有开头 `---`、无闭合 ⇒ **不剥**（向严不向宽：宁可多索引，不可误删）', () => {
+    const content = ['---', 'type: decision', '', '# T', '', '正文一段。'].join('\n')
+    const r = segmentDocument({ path: 'p.md', content })
+    const body = r.segments.map((s) => s.body).join('\n')
+    // 未闭合 ⇒ 整份当普通正文，元数据行仍在（不静默丢内容）
+    expect(body).toContain('type: decision')
+    expect(body).toContain('正文一段。')
+  })
+
+  it('③ 剥离后首行是空行 ⇒ 不影响后续 L1 切分', () => {
+    const content = ['---', 'type: decision', '---', '', '# T', '', '## 大节', '', '内容。'].join(
+      '\n'
+    )
+    const r = segmentDocument({ path: 'p.md', content })
+    expect(r.segments).toHaveLength(1)
+    expect(r.segments[0].breadcrumb).toBe('p.md > T > 大节')
+    expect(r.segments[0].body).toBe('内容。')
+  })
+
+  it('④ frontmatter + 无 H1 直接 `##` ⇒ 前言块为空，**不产出空片**', () => {
+    const content = ['---', 'type: decision', '---', '', '## 大节', '', '内容。'].join('\n')
+    const r = segmentDocument({ path: 'p.md', content })
+    expect(r.segments).toHaveLength(1)
+    expect(r.segments[0].sectionAnchor).toBe('大节')
+    for (const s of r.segments) expect(s.body.trim()).not.toBe('')
+  })
+
+  it('闭合符 `...` 同样算闭合；剥离段不进 body / breadcrumb / warnings', () => {
+    const content = [
+      '---',
+      'type: decision',
+      'status: accepted',
+      '...',
+      '',
+      '# T',
+      '',
+      '正文。',
+    ].join('\n')
+    const r = segmentDocument({ path: 'p.md', content })
+    expect(r.warnings).toEqual([])
+    expect(r.segments).toHaveLength(1)
+    expect(r.segments[0].text).not.toContain('type:')
+    expect(r.segments[0].text).not.toContain('status:')
+    expect(r.segments[0].breadcrumb).not.toContain('type')
+  })
+})
+
+describe('segmentDocument · A10 frontmatter 不进正文（真实 ADR）', () => {
+  it('7 份带 frontmatter 的近期 ADR：所有片的 body 与 text 均不含元数据字面', () => {
+    const withFm = [
+      '0007-external-tool-form-selection-checklist.md',
+      '0008-acp-multi-provider-unification.md',
+      '0009-multimodal-knowledge-base.md',
+      '0011-execution-engine-extraction.md',
+      '0012-session-closeout-and-push-approval.md',
+      '0013-c3-outbound-bus-not-adopted.md',
+      '0014-skill-delivery-decoupling.md',
+    ]
+    const literals = ['type:', 'status:', 'evidence:', '- kind:']
+
+    const hits: string[] = []
+    for (const name of withFm) {
+      const abs = resolve(REPO_ROOT, 'docs/adr', name)
+      expect(readFileSync(abs, 'utf-8').startsWith('---')).toBe(true) // 该件确有 frontmatter
+      const { report } = reportFor(abs)
+      expect(report.segments.length).toBeGreaterThan(0)
+      for (const s of report.segments) {
+        for (const lit of literals) {
+          if (s.body.includes(lit)) hits.push(`${name}#${s.partIndex} body 含 ${lit}`)
+          if (s.text.includes(lit)) hits.push(`${name}#${s.partIndex} text 含 ${lit}`)
+        }
+      }
+    }
+    expect(hits).toEqual([])
+  })
+})
 
 describe('segmentDocument · A7 纯函数静态断言', () => {
   // 读的就是被判面本身（同目录同名的真实源码文件）。此处用 readFileSync 而非 Vite `?raw`：
