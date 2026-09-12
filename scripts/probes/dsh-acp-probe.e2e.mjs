@@ -14,7 +14,7 @@
  *      （预期：单 block 答案 = 恰好 1 次 chunk，且不在推理过程中逐 token 推送）
  *
  * 用法:
- *   node docs/adr/dsh-acp-probe.e2e.mjs [--probe-dir <dir>]
+ *   node scripts/probes/dsh-acp-probe.e2e.mjs [--probe-dir <dir>]
  *
  * --probe-dir 默认取 %TEMP%/opencode/dsh-acp-probe（或 Unix 下 ~/tmp/opencode/dsh-acp-probe），
  * 该目录需已安装 @deepseek-ai/dsh-acp-demo@0.1.0-rc.7 及其 peer 依赖、leaf 插件与 cordis.yml。
