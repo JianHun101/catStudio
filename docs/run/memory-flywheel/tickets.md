@@ -771,7 +771,7 @@ packages/server/src/execution/serial.ts   （配额闸 `continue` 处补齐投�
 
 ## 票丑 · 配额**单位归一**（机制层 · **非本 effort 面**）
 
-**状态**：**复申 ✅ 通过 · 待派**（审查 ⚠️ 两处必修已按裁决修订 + 复申补钉 V2 跳数口径；见「决策留痕」末两条）
+**状态**：**已收口**（2026-09-12：交付 `b6c9cdd` → 吐槽猫审查 **✅ 零返工**（V2 两数钉死 / V4 判别面 / V7 下葬凭证独立复验；`serial.test.ts` + `socketio.test.ts` **191 passed**）→ **PR #56** carrier = merge commit **`ee2c93f`** 并入 `dev`（`dev` = `origin/dev` = `.push-gate` 三方对齐，店长实测）；店长独立复核 `memory/` / `reply.ts` / `db/` **零 diff** + 生产代码 `setMentionCount` 全量 grep ⇒ 唯一计数点 = 派发预留。参见 **map Decisions 44**。**勿再派活**）｜原记录「复申 ✅ 通过 · 待派」
 **承**：Decisions 41 二/三
 **与票子的关系**：**同文件同区域**（`serial.ts` A2A 段，见本文件票子「落点」）⇒ **两票必须串行**，不得两猫并行（同区域改动冲突）
 
