@@ -12,6 +12,7 @@ import { PassThrough } from 'node:stream'
 import {
   EmbeddingClient,
   MAX_BATCH,
+  REQUEST_BATCH_SIZE,
   parsePortFromUrl,
   type SidecarChild,
   type SpawnSidecar,
@@ -83,6 +84,8 @@ interface StubSidecar {
   setEmbedStatus: (status: number) => void
   hangEmbeddings: (yes: boolean) => void
   setDataCount: (n: number) => void
+  /** 接下来 n 次嵌入请求立即回 500（不挂起、无时序竞态）——票午 (b) 造「首败」用 */
+  failNextEmbeddings: (n: number) => void
 }
 
 /** 真起一个 127.0.0.1 stub sidecar */
@@ -93,6 +96,7 @@ async function startStub(initialHealth: Record<string, unknown> = {}): Promise<S
   let embedStatus = 200
   let hang = false
   let dataCount: number | undefined
+  let failNext = 0
 
   const server: Server = createServer((req, res) => {
     if (req.url === '/health') {
@@ -115,6 +119,13 @@ async function startStub(initialHealth: Record<string, unknown> = {}): Promise<S
         const input = JSON.parse(Buffer.concat(chunks).toString()).input
         const texts: string[] = typeof input === 'string' ? [input] : input
         batchSizes.push(texts.length)
+        // 票午 (b)：按需造「首败」——仍记 batchSizes，好断「重试的是同一批」
+        if (failNext > 0) {
+          failNext--
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, reason: 'boom' }))
+          return
+        }
         // 向量维度跟着 /health 的 dim 走（真实 sidecar 亦然——两侧同源）
         const dim = Number(health.dim) || 3
         const items = texts.map((t, index) => {
@@ -157,6 +168,9 @@ async function startStub(initialHealth: Record<string, unknown> = {}): Promise<S
     },
     setDataCount: (n) => {
       dataCount = n
+    },
+    failNextEmbeddings: (n) => {
+      failNext = n
     },
   }
 }
@@ -211,14 +225,111 @@ describe('B1 正常路径', () => {
     expect(client.status()).toMatchObject({ ok: true, model: 'X', dim: 1024 })
   })
 
-  it('embedMany 按 MAX_BATCH 分块（调用方不必知道上限）', async () => {
+  it('embedMany 按 REQUEST_BATCH_SIZE 分块（票午 a：切批 = 每批各持一份请求预算）', async () => {
     const stub = await makeStub()
     const client = new EmbeddingClient({ spawnFn: spawnTo(stub) })
 
     const results = await client.embedMany(Array.from({ length: MAX_BATCH + 1 }, () => 'x'))
     expect(results).toHaveLength(MAX_BATCH + 1)
     expect(results.every((r) => r.ok)).toBe(true)
+    // 常量层面先钉住「不切就是退化」——批大小回到 MAX_BATCH 即等于整件一次
+    expect(REQUEST_BATCH_SIZE).toBeLessThan(MAX_BATCH)
+    // **承重反例 D1**：把切批去掉（批大小改回 MAX_BATCH）⇒ 本行必红（实测得到 [64, 1]）
+    expect(stub.batchSizes).toEqual([16, 16, 16, 16, 1])
+  })
+})
+
+// ─── 票午 · 超时预算与批大小解耦 ──────────────────────
+
+describe('票午 (a) 批大小参数化', () => {
+  it('构造项 batchSize 覆盖默认值（契约 ④：不散落硬编码）', async () => {
+    const stub = await makeStub()
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), batchSize: 8 })
+
+    await client.embedMany(Array.from({ length: 20 }, () => 'x'))
+    expect(stub.batchSizes).toEqual([8, 8, 4])
+  })
+
+  it('batchSize 超 MAX_BATCH 由协议上限封顶（sidecar 侧同值，越界即 400）', async () => {
+    const stub = await makeStub()
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), batchSize: 999 })
+
+    await client.embedMany(Array.from({ length: MAX_BATCH + 1 }, () => 'x'))
     expect(stub.batchSizes).toEqual([MAX_BATCH, 1])
+  })
+
+  it('batchSize 非法（0 / 负数）不造成死循环（下界 1）', async () => {
+    const stub = await makeStub()
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), batchSize: 0 })
+
+    const results = await client.embedMany(['a', 'b', 'c'])
+    expect(results.map((r) => r.ok)).toEqual([true, true, true])
+    expect(stub.batchSizes).toEqual([1, 1, 1])
+  })
+})
+
+describe('票午 (b) 批次失败自动重试一次', () => {
+  it('首败 + 重试成功 ⇒ 整批 ok，且重试**真发了请求**（票午 D4 的客户端面）', async () => {
+    const stub = await makeStub()
+    stub.failNextEmbeddings(1)
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub) })
+
+    const results = await client.embedMany(['a', 'b'])
+
+    expect(results.map((r) => r.ok)).toEqual([true, true])
+    expect(stub.hits.embeddings).toBe(2) // 空转的重试会停在 1
+    expect(stub.batchSizes).toEqual([2, 2]) // 重试的是**同一批**，不是换批/切碎
+    expect(client.status().ok).toBe(true) // 首败痕迹被清（冷却不残留）
+  })
+
+  it('重试有界：两次都失败 ⇒ 恰好两次请求，不是无限重试', async () => {
+    const stub = await makeStub()
+    stub.setEmbedStatus(500)
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub) })
+
+    const r = await client.embed('x')
+    expect(r.ok === false && r.reason).toBe('bad-status')
+    expect(stub.hits.embeddings).toBe(2)
+  })
+
+  it('冷却拒绝**不**触发重试（否则 30s 冷却被架空：每次调用都硬拉一只新侧车）', async () => {
+    const counter = { n: 0 }
+    const stub = await makeStub()
+    stub.setEmbedStatus(500)
+    const client = new EmbeddingClient({
+      spawnFn: spawnTo(stub, counter),
+      reprobeCooldownMs: 60_000,
+    })
+
+    expect((await client.embed('x')).ok).toBe(false)
+    const afterFirst = counter.n
+    const second = await client.embed('x')
+    expect(second.ok).toBe(false)
+    expect(counter.n).toBe(afterFirst) // 冷却期内不重 spawn、不重发请求
+  })
+
+  it('retryAttempts=0 ⇒ 关掉重试（首败即返回）', async () => {
+    const stub = await makeStub()
+    stub.failNextEmbeddings(1)
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), retryAttempts: 0 })
+
+    const r = await client.embedMany(['a', 'b'])
+    expect(r.every((x) => !x.ok)).toBe(true)
+    expect(stub.hits.embeddings).toBe(1)
+  })
+
+  it('**不**重试启动类失败（spawn-failed / health-timeout）：确定性故障不该翻倍拖长', async () => {
+    const counter = { n: 0 }
+    const client = new EmbeddingClient({
+      spawnFn: () => {
+        counter.n++
+        return deadChild()
+      },
+    })
+
+    const r = await client.embed('x')
+    expect(r.ok === false && r.reason).toBe('spawn-failed')
+    expect(counter.n).toBe(1) // 只 spawn 一次
   })
 })
 

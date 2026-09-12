@@ -10,6 +10,8 @@
  *
  * 参数（票丁契约 ②，默认值即契约值）：
  *   首启探活上限 30s / 单次请求超时 10s / 探活失败后重探冷却 30s / 批量上限 64
+ * 参数（票午）：
+ *   单次请求条目数 16（`REQUEST_BATCH_SIZE`）/ 批次失败自动重试 1 次（`EMBED_RETRY_ATTEMPTS`）
  *
  * 环境变量:
  *   MEMORY_ENABLED         — 'false' 时直接 not-enabled（不 spawn、零开销）
@@ -40,10 +42,50 @@ export const PROBE_TIMEOUT_MS = 30_000
 export const REQUEST_TIMEOUT_MS = 10_000
 /** 探活失败后的重探冷却（冷却期内直接复用失败结论，不重 spawn） */
 export const REPROBE_COOLDOWN_MS = 30_000
-/** 批量上限（与 sidecar 侧 MAX_BATCH 一致） */
+/** 批量上限（与 sidecar 侧 MAX_BATCH 一致）——**协议上限**，越界即 400 */
 export const MAX_BATCH = 64
 /** 探活轮询间隔 */
 export const PROBE_INTERVAL_MS = 200
+
+/**
+ * 单次嵌入**请求**的条目数（票午 (a)：超时预算与批大小解耦）。
+ *
+ * 病灶是接口层耦合：请求预算是**常数**（`REQUEST_TIMEOUT_MS`），请求体大小是**变量**
+ * （整件文档的片数），两个数互不知道对方存在 ⇒ 大文档必超（票午现状 ①–③）。
+ * 切批 = 让**每批各持一份** 10s 预算，而不是整件共用一份；且机器耗时抖动过 25 倍
+ * （现状 ⑦）⇒ 固定绝对时限在这里本就脆，切批正是在给抖动买余量。
+ *
+ * 取值 16 的依据（票午 OQ-1；**本实现真机复测**——同一件 56 片文档、打活侧车、
+ * 热身剔除后各 3 样本，见票午交接文档 D3）：
+ *   批大小 16：均值 14.3s / 最坏 14.6s（单批均摊 ≤3.65s ⇒ 对 10s 预算余量 ≥2.7×）
+ *   批大小  8：均值 14.1s / 最坏 14.3s（单批均摊 ≤2.05s ⇒ 余量 ≥4.9×）
+ *   不切（64）：**两次都 `request-timeout`**（20.4s / 20.5s = 首试超时 10s ＋ 重试超时 10s）
+ * ⇒ 病灶在真机复现；16 与 8 总耗时统计上无差（14.3 vs 14.1s）⇒ 取票面倾向值 16
+ *   （余量 2.7× 已足）。要更稳可下调 `batchSize`——已参数化，一处改。
+ *
+ * ⚠️ 与 `MAX_BATCH` 的分工：`MAX_BATCH` 是**协议上限**（侧车同值），本值只决定
+ * 「一次请求装多少条」，故实际取 `min(batchSize, MAX_BATCH)`。
+ */
+export const REQUEST_BATCH_SIZE = 16
+
+/** 批次失败后自动重试次数（票午 (b)）：1 = 重试一次，0 = 不重试 */
+export const EMBED_RETRY_ATTEMPTS = 1
+
+/**
+ * **可重试**的失败原因（票午 (b)）——刻意收窄到「侧车起着、请求没干净回来」这两类：
+ *   - `request-timeout`：票午的靶心（大文档 + 抖动）；重试 = 换一只干净侧车 + 一份新预算
+ *   - `bad-status`：瞬时 5xx / 半截响应
+ *
+ * **不重试**的三类各有理由，不是遗漏：
+ *   - `spawn-failed` / `health-timeout`：这是**启动**失败，不是请求失败。确定性成因
+ *     （路径错 / 模型缺 / 端口占用）重试一次只是把同一个故障翻倍拖长（探活上限 30s
+ *     ⇒ 最坏 60s 才报错，会顶穿调用方预算），且会盖掉「失败即冷却」的既有契约。
+ *   - `dim-mismatch`：配置错，票丁定为**粘性失败**，重试无意义。
+ */
+const RETRYABLE_REASONS: ReadonlySet<EmbedFailureReason> = new Set([
+  'request-timeout',
+  'bad-status',
+])
 
 // ─── 形态 ─────────────────────────────────────────────
 
@@ -89,6 +131,10 @@ export interface EmbeddingClientOptions {
   requestTimeoutMs?: number
   reprobeCooldownMs?: number
   probeIntervalMs?: number
+  /** 单次请求的条目数（默认 `REQUEST_BATCH_SIZE`；内部按 `MAX_BATCH` 封顶） */
+  batchSize?: number
+  /** 批次失败后的重试次数（默认 `EMBED_RETRY_ATTEMPTS`） */
+  retryAttempts?: number
   /** 期望维度提供者；返回 null = 库内尚无向量可校，跳过维度自检 */
   expectedDim?: () => number | null
   spawnFn?: SpawnSidecar
@@ -128,6 +174,8 @@ export class EmbeddingClient {
       requestTimeoutMs: options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS,
       reprobeCooldownMs: options.reprobeCooldownMs ?? REPROBE_COOLDOWN_MS,
       probeIntervalMs: options.probeIntervalMs ?? PROBE_INTERVAL_MS,
+      batchSize: options.batchSize ?? REQUEST_BATCH_SIZE,
+      retryAttempts: options.retryAttempts ?? EMBED_RETRY_ATTEMPTS,
       spawnFn: options.spawnFn ?? defaultSpawn,
       expectedDim: options.expectedDim,
       baseUrl: options.baseUrl,
@@ -171,8 +219,11 @@ export class EmbeddingClient {
   }
 
   /**
-   * 批量嵌入（按 MAX_BATCH 分块——调用方不必知道上限）。
+   * 批量嵌入（按 `REQUEST_BATCH_SIZE` 分块——调用方不必知道上限）。
    * 逐条返回结果：单条失败不影响同批其他条目（与本仓 memory 链 fire-and-forget 一致）。
+   *
+   * 票午 (a)：**切批不是为了省内存，是给每批各买一份 `REQUEST_TIMEOUT_MS`**。
+   * 票午 (b)：单批失败自动重试一次，见 `embedChunkWithRetry`。
    */
   async embedMany(texts: string[]): Promise<EmbedResult[]> {
     if (!this.isEnabled()) {
@@ -180,10 +231,12 @@ export class EmbeddingClient {
     }
     if (texts.length === 0) return []
 
+    // 协议上限不可越（sidecar 侧同值）；下界 1 防调用方传 0/负数造成死循环
+    const size = Math.max(1, Math.min(this.opts.batchSize, MAX_BATCH))
     const results: EmbedResult[] = []
-    for (let i = 0; i < texts.length; i += MAX_BATCH) {
-      const chunk = texts.slice(i, i + MAX_BATCH)
-      results.push(...(await this.embedChunk(chunk)))
+    for (let i = 0; i < texts.length; i += size) {
+      const chunk = texts.slice(i, i + size)
+      results.push(...(await this.embedChunkWithRetry(chunk)))
     }
     return results
   }
@@ -211,10 +264,32 @@ export class EmbeddingClient {
 
   // ─── 内部 ───────────────────────────────────────────
 
-  private async embedChunk(texts: string[]): Promise<EmbedResult[]> {
+  /**
+   * 一批（= 一次 HTTP 请求）嵌入 + **失败重试一次**（票午 (b)）。
+   *
+   * (b) 修的是「失败后**损失多大**」：(a) 只修「会不会失败」，而写库粒度是**整件文档**
+   * （契约 ①，半截索引比没索引更坏）⇒ 4 批的文档里 1 批超时 = 整件白跑。重试那一批即可救回。
+   *
+   * **重试 ≠ 绕开冷却**：冷却拒绝在函数入口就返回了，本轮**根本没发请求** ⇒ 不重试。
+   * （否则每次调用都会硬拉起一只新 sidecar，30s 冷却形同虚设——既有契约会破。）
+   * 能走到重试的只有「本轮真发过请求且失败」，且失败路径已 `dropSidecar()` 杀掉旧进程
+   * （票丁 P3-1「失败即杀进程」策略不变）⇒ 重试 = 重新 spawn 一只干净的 + 一份新预算。
+   *
+   * 退避：**不加**。重试的前提是刚杀过侧车，spawn + 探活本身就是天然的等待；
+   * 再叠一层 sleep 只会把扫描总耗时往上推（契约 ③），而抖动是请求级的、不是连接级的。
+   */
+  private async embedChunkWithRetry(texts: string[]): Promise<EmbedResult[]> {
     const refused = this.refusalReason()
-    if (refused) return texts.map(() => refused)
+    if (refused) return texts.map(() => ({ ...refused }))
 
+    const first = await this.embedChunk(texts)
+    if (this.opts.retryAttempts < 1) return first
+    if (!first.every((r) => !r.ok && RETRYABLE_REASONS.has(r.reason))) return first
+    return this.embedChunk(texts)
+  }
+
+  /** 单批嵌入（调用方 `embedChunkWithRetry` 已确认不在冷却期） */
+  private async embedChunk(texts: string[]): Promise<EmbedResult[]> {
     let live: LiveSidecar
     try {
       live = await this.ensureLive()
