@@ -20,7 +20,11 @@
  * 两者在「执行已终态 / 同猫并发另一条在跑」时结论相反——那正是 T-H ① 治的假阴性）：
  *   - 有归属（agent 执行）→ 静默，审查请求归实施猫自己投（铁律 + request-review）
  *   - 无归属（用户终端手动提交）→ 无人会投，钩子兜底
- *   - 判据查不动 → 一律投递（不静默吞）
+ *   - 判据查不动 → **静默让位**（A 案，2026-09-12 用户裁定）：查不动最常见于 server
+ *     正忙着跑那只猫——那正是「有归属」的字面状态，而钩子此刻做不出判断。投出去的却是
+ *     Why/Tradeoff/OQ 全是 TODO 的空壳，猫补填后还会再投一份完整版（两份内容不同 ⇒
+ *     过不了内容去重 ⇒ 审查者收到两份）。这一格想覆盖的场景已由**收尾兜底闸**在更对的
+ *     时刻、用更对的判据（回复 mentions 是否含审查者 = 投递本身）覆盖 ⇒ 钩子让位，不猜。
  * 漏投由 server 执行收尾补（`--fallback-sha`，判据见 execution/review-fallback.ts）。
  * 原痛点：钩子每 commit 必投 → 中途返工每新 SHA 叠一条链。
  *
@@ -49,8 +53,10 @@
  *     （义务归实施猫），不记 delivered
  *   - ⭐ `src` = 这条义务的**来路**，唯一作用 = 决定补投时要不要重判归属
  *     （2026-09-12 修；缺它的实测后果见 e2e 14i）：
- *       · `hook`     post-commit 钩子判过一次，但那次可能因 server 不可达而降级为
- *                    「查不动 → 投」——故补投**必须**以当下读数复判（唯一判归属的来路）
+ *       · `hook`     post-commit 钩子判过一次，但那次的探针读数可能因 server 不可达而
+ *                    答不出——**读数是时点值，不是这个 commit 的属性** ⇒ 补投**必须**以
+ *                    当下读数复判（唯一判归属的来路）。复判得 `null` 与当场同判静默
+ *                    （让位，非永久放弃）
  *       · `fallback` 收尾兜底（--fallback-sha）。SHA 取自 execution_logs.commit_hash，
  *                    **必然有归属** ⇒ 判了只会把自己判静默、把这条安全网关掉
  *       · `gate`     pre-push 门禁 HEAD 兜底（--gate-deliver），同理不判
@@ -355,8 +361,10 @@ export const REVIEW_EXEMPT_PREFIXES = ['docs/run/']
  *
  * - 空数组必须判 `false`——`every` 对空集恒真，是陷阱（上游 generateHandoff 已对空
  *   diff 早退，此处**不依赖**它；本函数自己挡）
- * - `null` / `undefined` / 非数组（判据查不动）同样 `false`——静默只在判据明确时发生，
- *   与 `decideHookDelivery(null)`「查不动一律投递」同款精神
+ * - `null` / `undefined` / 非数组（判据查不动）同样 `false`——免审是**例外**，例外只在
+ *   判据明确时成立：查不动 ⇒ 不免审 ⇒ 照投。与 `decideHookDelivery(null)`「查不动 →
+ *   静默让位」（2026-09-12 A 案）方向相反是**有意**的——两者误判的代价不同：漏免审
+ *   只多投一条，误免审则吞掉一条本该书写的审查请求
  * - 前缀匹配是**字符串前缀**而非路径段：靠常量带尾斜杠保证边界，不在此另写路径归一
  *
  * @param {string[]|null|undefined} paths — 仓库相对路径清单
@@ -1087,16 +1095,17 @@ async function verifyOrTransient(serverUrl, sessionId, message) {
  * 与写回响应的关系：写回命中 running 行（`updated > 0`）是归属的**充分条件**，
  * 调用方据此短路、不调本探针；`updated === 0` 才落到这里（三种可能见上）。
  *
- * 三态（③ 降级语义：判据查不动一律投递，不静默吞）：
+ * 三态（③ 的降级方向 2026-09-12 由「投」翻转为**静默让位**，见 `decideHookDelivery`）：
  *   true  200 且有 agentName            → 有归属（存在执行行）→ 不投
  *   true  200 且 ambiguous === true     → 有归属（存在执行行，只是指不出人）→ 不投
  *   false 404                           → 无归属（从无执行行）  → 投
- *   null  其他 HTTP / 不可达 / 响应不可解析 → 查不动 → 投
+ *   null  其他 HTTP / 不可达 / 响应不可解析 → 查不动 → 交调用方判静默让位
  *
  * 已知窄口径（失败方向安全，不是穷尽）：executor 端点 INNER JOIN agents，agent 行
  * 被删则 404 → 判「无归属」→ 多投一条（`hasExecutorRowsForTrigger` 同口径，T-M 起
- * 仍如此）。多投是本判据的**安全方向**（宁可多投不可漏投），与 ③ 降级同向，
- * 故不为此加路径。
+ * 仍如此）。多投是本判据的**安全方向**（宁可多投不可漏投）；它与 ③ 的降级方向
+ * **不再同向**（③ 自 2026-09-12 起 = 让位不投），故两者的理由要分开看：
+ * 404 是「问得出、答案是无归属」，`null` 是「根本问不出」——只有后者才让位。
  *
  * @param {string} serverUrl
  * @param {string} uuid — commit message 里的 catstudy [uuid]
@@ -1114,7 +1123,7 @@ export async function probeAttribution(serverUrl, uuid) {
     // 故它是"有归属"的直接证据（不投）。
     if (body && body.ambiguous === true) return true
     // 200 但响应缺 agentName（端点契约变了 / 被代理改写）→ 不假装它是「有归属」，
-    // 也不假装是「无归属」——查不动，走降级投递。
+    // 也不假装是「无归属」——查不动，交调用方判（`decideHookDelivery` 判静默让位）。
     return body && typeof body.agentName === 'string' && body.agentName ? true : null
   } catch {
     return null
@@ -1129,12 +1138,19 @@ export async function probeAttribution(serverUrl, uuid) {
  *
  * 语义：有归属 ⇒ commit 由某只猫提交 ⇒ 审查请求归实施猫自己投（铁律 +
  * request-review），钩子静默（原痛点：钩子每 commit 必投 → 返工每新 SHA 叠一条链）；
- * 无归属 ⇒ 用户在终端手动提交，没有任何猫会替它投，钩子兜底。
+ * 无归属 ⇒ 用户在终端手动提交，没有任何猫会替它投，钩子兜底；
+ * 查不动 ⇒ **钩子让位**（A 案，2026-09-12 用户裁定）——查不动最常见于 server 正忙着
+ * 跑那只猫（= 「有归属」的字面状态），此刻钩子做不出判断，投出去的是待补填的空壳，
+ * 且猫补填后还会再投一份完整版（内容不同、过不了内容去重 ⇒ 审查者收到两份）。
+ * 这一格原本想覆盖的场景已由收尾兜底闸（`--fallback-sha`）在更对的时刻、以更对的
+ * 判据（回复 mentions 是否含审查者 = 投递本身）覆盖。**让位 ≠ 永久放弃**：义务归
+ * 实施猫铁律自投，漏了由收尾兜底接手。
  *
- * 三态（③ 降级语义：判据查不动一律投递，不静默吞）：
+ * 三态（③ 降级语义 2026-09-12 翻转——方向与 `isExemptDelivery` 的「查不动 ⇒ 不免审」
+ * 相反是**有意**的：那里查不动时投出去只多一条，这里查不动时投出去是空壳）：
  *   true  有归属 → 不投
  *   false 无归属 → 投
- *   null  查不动（探针失败 / 响应不可解析）→ 投
+ *   null  查不动（探针失败 / 响应不可解析）→ 静默让位
  *
  * ⚠️ 与 `.handoff-delivered.json` 的分工（T-A 定死）：账本是「同一 SHA 是否已投过」
  * 的幂等锁（键=SHA），本判据是「该不该由钩子投」的归属判定（源=执行行）——两者
@@ -1153,7 +1169,11 @@ export function decideHookDelivery(attributed) {
   if (attributed === false) {
     return { deliver: true, reason: '该 commit 无归属执行（用户手动提交）——兜底投递' }
   }
-  return { deliver: true, reason: '归属判据查不动——一律投递（不静默吞）' }
+  return {
+    deliver: false,
+    reason:
+      '归属判据查不动——静默让位（不猜：钩子此刻判不出，义务归实施猫自投 / 收尾兜底 --fallback-sha 接手）',
+  }
 }
 
 /**
@@ -1169,7 +1189,7 @@ export function decideHookDelivery(attributed) {
  *   ok       — 投递成功（POST 2xx，或超时/5xx 后落库验证命中）
  *   transient— 瞬态故障（连接失败 / 5xx / 落库验证未命中），调用方可延迟重试
  *   fatal    — 确定性失败（无 uuid / 404 / 4xx），重试无意义
- *   skip     — T-A ① 归属判据判静默（有归属，审查请求归实施猫自己投），非错误
+ *   skip     — T-A ① 归属判据判静默（有归属 / 查不动让位，审查请求归实施猫自己投），非错误
  */
 async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   // 获取 session ID：CATSTUDY_SESSION_ID（人工显式指定，明确意图优先）
@@ -1238,7 +1258,7 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   /** 投递载荷的链锚。两条来路：E3 接线的源链 task_id（executor 反查同源，
    *  commit_hash → execution_logs → trace_id）；取不到则**自铸**（见下方 T-F 必改 1）。 */
   let taskId
-  /** T-A ① / T-H ① 归属三态：null=查不动（判据查不动一律投递）；无 uuid = 无归属 */
+  /** T-A ① / T-H ① 归属三态：null=查不动（2026-09-12 起判**静默让位**）；无 uuid = 无归属 */
   let attributed = commitUuid ? null : false
   /** 归属结论的**来源**（留痕用）——两条来路（写回短路 / 探针）不可混称，
    *  否则日志会把没跑过的机制说成跑过（本 spec 一直在治的「陈述假机制」）。 */
@@ -1302,11 +1322,15 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   // 判据的**调用面**（2026-09-12 修正 T-A 时期的错误分类）：凡「这次投递的裁决依据
   // 可能不是当下事实」的入口都要重判。三个入口的真实处境各不相同——
   //   - post-commit（钩子无参调用 ⇒ runHandoff 传 judgeAttribution）：当下事实，判。
-  //   - **drainPending 补投的 `hook` 条目：必须判**。钩子那次判据可能因 server 不可达
-  //     而答不出 ⇒ attributed=null ⇒ 降级投递。**「查不动」是那一刻的读数，不是这个
-  //     commit 的属性**——不重判 = 把一次时点降级固化成永久事实，且此后每次投递
-  //     机会都不复判（原实现的实际行为；实害：被 auto-commit 抢收的 agent 提交在
-  //     server 恢复后被永久误投，每 commit 叠一条无主的审查链）。
+  //   - **drainPending 补投的 `hook` 条目：必须判**。复判的理由不是「上次判错了」，而是
+  //     **探针读数是时点值、不是这个 commit 的属性**：条目入 pending 的来路是「判了
+  //     『无归属 → 投』而 POST 瞬态失败」，而那一刻 server 多半正不可达——下一轮执行行
+  //     可能已落库（被 auto-commit 抢收的 agent 提交），读数会翻成「有归属」（实害：
+  //     不重判 = 每 commit 叠一条无主的审查链）；也可能仍然问不出。
+  //     新语义下复判得 `null` 与当场同判**静默** ⇒ 条目 `skip` 出 pending：
+  //     **「查不动 = 让位，不是永久放弃」**——接手的闸有两条（猫自己按铁律投 /
+  //     收尾兜底 `--fallback-sha`）。不重判 = 把一次时点读数固化成永久事实，此后每次
+  //     投递机会都不复判。
   //     ⚠️ 但「该判」的**范围**只到钩子条目为止。首版曾断言「条目进 pending 的唯一
   //     来路是 POST 瞬态失败」并据此判全部条目——**该断言是假的**：瞬态失败是**每条
   //     投递路径共有**的入 pending 方式，`--fallback-sha` 与 `--gate-deliver` 同样会
@@ -1353,7 +1377,8 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   // 直接死掉、连 pending 都不留。原实现恰好在两条路径上不带锚：
   //   ① commit message 无 `catstudy [uuid]`（用户终端手动提交）→ 整个 if 块跳过；
   //   ② 有 uuid 但反查不到执行行（executor 404 / 响应无 taskId）→ `executorInfo?.taskId` 为 undefined。
-  // 两条都落在 post-commit 兜底判据的「该投」侧（`decideHookDelivery(false|null).deliver === true`）
+  // 两条都落在 post-commit 兜底判据的「该投」侧（`decideHookDelivery(false).deliver === true`；
+  // `null` 自 2026-09-12 起翻为静默，不属此列）
   // ——即 spec D5 / 用户故事 14 那条「手动提交补投」边界整条失效。
   // 自铸语义 = **新链首轮**：与「落 NULL → 服务端 `anchor = taskId || traceId` 兜底」
   // 完全等价（同一条兜底规则，只是挪到客户端显式表达），对服务端与被审链零行为变化。
@@ -1676,11 +1701,13 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
  *
  * 补投**按 `src` 分流**（2026-09-12 二次修正；首版不分流，砍掉了收尾兜底——e2e 14i）：
  *   - `src === 'hook'`：**必须重判归属**。钩子那次判据的来路是「POST 瞬态失败」，而那一刻
- *     server 多半不可达 ⇒ 探针答不出 ⇒ 判据降级为「投」。不重判等于把那次降级固化，且此后
- *     每次投递机会都不复判。重判拿到的是**当下**读数（server 已恢复 ⇒ 探针能给出真答案），
- *     比把当时的读数和结论一起存下来更准——故 hook 条目不引入「持久化裁决」那套，直接重问。
+ *     server 多半不可达 ⇒ 探针答不出（读数 `null`）。读数是**时点值**，不是这个 commit 的
+ *     属性——server 已恢复 ⇒ 探针能给出真答案。不重判等于把那次读数固化，且此后每次投递
+ *     机会都不复判；重判比把当时的读数与结论一起存下来更准，故 hook 条目不引入「持久化
+ *     裁决」那套，直接重问。**新语义（2026-09-12 A 案）下复判得 `null` 与当场同判静默**：
  *     判静默即钩子义务解除（该 commit 的审查请求归实施猫，与 post-commit 静默同源），
- *     故移出 pending；不移出会每次投递机会重判一遍（探针往返 + 日志），而结论不会变。
+ *     故移出 pending——**让位，不是永久放弃**（接手的是猫铁律自投 + 收尾兜底）。
+ *     不移出会每次投递机会重判一遍（探针往返 + 日志），而结论不会变。
  *   - 其余来路（`fallback`/`gate`/`legacy`）：**一律不判、直接补投**。兜底条目的 SHA 取自
  *     `execution_logs.commit_hash`，必然有归属——判了只会把自己判静默。首版把这条判据
  *     套到了全部条目上，于是 `--fallback-sha` 的补投被重判为静默并移出 pending，
@@ -1791,8 +1818,11 @@ export async function deliverFallbackSha(cwd, serverUrl, sha) {
  * 判据只认 `.handoff-delivered.json` 账本，而 T-A 后账本**只记「真投过」**：
  * 钩子判静默不记账、猫的主动投递也不记账。故留一个窄窗口——**猫已主动投递、
  * 判决尚未产出**时 push 被门禁拦下 → 账本无记录 → 对同一 SHA 再投一条补填请求。
- * 取舍（T-A 复盘裁决）：**有意**不给账本加「已静默」态——加了会连「收尾兜底
- * spawn 失败」时的最后一道网一起关掉，与票单 ③「判据查不动一律投递」相反。
+ * 取舍（T-A 复盘裁决；判据 ③ 的降级方向 2026-09-12 翻转后**结论不变、理由换了**）：
+ * **有意**不给账本加「已静默」态——加了会连「收尾兜底 spawn 失败」时的最后一道网
+ * 一起关掉。账本单态 = 「真投过」：静默一旦入账，同一 SHA 的收尾兜底（`--fallback-sha`）
+ * 会被账本自己跳过。判据源从「查不动 → 投」换成「查不动 → 静默让位」后，这条代价
+ * 只会更大（静默的格子变多了），故本条与 ③ 无关地独立成立。
  * 窗口窄、无害（同形状请求，最多多唤醒一次）；approve 闸已拦掉「已审 ✅」的大多数。
  */
 async function deliverHeadIfUndelivered(cwd, serverUrl) {

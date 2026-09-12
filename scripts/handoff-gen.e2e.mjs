@@ -1500,7 +1500,7 @@ function gitIn(tmp, cmd) {
   assert(pendingShas(state13c).includes(headSha13c), '重试耗尽后 SHA 应记入 pending')
   assert(
     pendingSrcOf(state13c, headSha13c) === 'hook',
-    'post-commit 入 pending 的条目须标 src=hook——标错则补投不跑判据，「查不动」被固化成永久事实'
+    'post-commit 入 pending 的条目须标 src=hook——标错则补投不跑判据，该被重判静默的条目会照投（多一条无主链）'
   )
   assert(state13c.delivered[headSha13c] === undefined, '失败 SHA 不应出现在 delivered')
   assert(existsSync(join(TMP13C, '.handoff-draft.md')), '投递失败应保留草稿')
@@ -1775,8 +1775,10 @@ function gitIn(tmp, cmd) {
 // ═══ 测试组 14: 归属判据（T-H ①「任一状态执行行」） ═══════════════════════
 // 本组的存在理由：T-A 的判据源是写回端点的 `updated`（running 命中行数），而
 // e2e 的 stub 从来没有 commit-hash 端点 → writeback 恒失败 → attributed 恒 null
-// → 一律走降级投递。于是**三条判据在 e2e 里全不生效**，测试全绿也不代表判据对。
-// 本组把两个端点都补上，让「静默」这条路径第一次在 e2e 里可断言。
+// → 按当时的降级语义（③=投）一律走降级投递。于是**三条判据在 e2e 里全不生效**，
+// 测试全绿也不代表判据对。本组把两个端点都补上，让「静默」这条路径第一次可断言。
+// （③ 的降级方向 2026-09-12 已翻为「静默让位」——判据缺端点时的失效形态从「恒投」
+//  变成「恒静默」，同样不会自己显形，故本组「补端点 + 断言日志」照旧必要。）
 // T-F 必改 1 追加：组内的 POST stub 镜像真实入口主闸（agent 入口缺 taskId → 400），
 // 且 14b/14c/14e/14f 断言**载荷本体**带锚——上一轮那条「载荷无锚」的缺口在
 // 「无条件 201 + 只数 POST 次数」下恒为绿，本组把它关掉。
@@ -1785,7 +1787,8 @@ function gitIn(tmp, cmd) {
  * 归属场景 stub：写回 `updated`（旧判据源）与 executor（新判据源）各自可配，
  * 用来构造「两者结论相反」的场景——那正是 T-H ① 的靶心。
  * @param {number} cfg.updated — 写回响应里的 running 命中行数
- * @param {'ok'|404|500} cfg.executor — executor 端点行为（'ok' = 存在任一状态执行行）
+ * @param {'ok'|404|500|'hang'} cfg.executor — executor 端点行为（'ok' = 存在任一状态执行行；
+ *        'hang' = 永不响应，模拟探针超时/不可达）
  * @param {string|null} [cfg.executorTaskId='task-1'] — executor 回传的 taskId；
  *        传 null 表示**回传有 agentName 但 trace_id 空**（老库执行行）——自铸锚的另一条来路
  */
@@ -1824,6 +1827,13 @@ async function startAttributionStub({
       hits.urls.push(req.url)
       if (executor === 404) return json(404, { error: 'No execution log for this message' })
       if (executor === 500) return json(500, { error: 'boom' })
+      // 'hang'：**不响应**——探针的 `AbortSignal.timeout(3000)` 到点 abort ⇒ catch ⇒ null
+      //（探针超时那条子形态）。定时兜底销毁 socket，免得挂着的连接拖住 server.close()。
+      if (executor === 'hang') {
+        const t = setTimeout(() => req.socket.destroy(), 4000)
+        req.on('close', () => clearTimeout(t))
+        return
+      }
       return json(200, {
         agentId: 'a-1',
         agentName: 'ds猫',
@@ -1854,6 +1864,45 @@ async function startAttributionStub({
     json(404, { error: 'not found' })
   })
   return { server, url: `http://127.0.0.1:${port}`, hits, postBodies }
+}
+
+/**
+ * 「投递本身恒瞬态失败」stub：写回 / 探针 / 会话反查都正常，只有 POST 打不通
+ * （socket 直接断）+ 落库验证查不到 ⇒ `tryPostToCatstudy` 重试耗尽判 transient。
+ * 用来构造 **drain 补投这一轮又失败** 的现场（P1/P2：来源标记必须在二次失败后保住）。
+ *
+ * `executor` 默认 '500'（探针查不动）是有意的：那样 post-commit 投 HEAD 那一步会判
+ * **静默让位**、一次 POST 都不发，于是 POST 计数里只剩 drain 那一条的重试——读数干净，
+ * 同时让用例对「查不动 → 投」的旧语义敏感（翻回去 ⇒ HEAD 再投 3 次，计数当场变）。
+ */
+async function startTransientPostStub({ uuid, sessionId, executor = 500 }) {
+  let postHits = 0
+  const { server, port } = await startStubServer((req, res) => {
+    const json = (code, obj) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(obj))
+    }
+    if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
+      return json(200, { id: uuid, sessionId, role: 'user' })
+    }
+    if (req.url === `/api/messages/${uuid}/commit-hash` && req.method === 'POST') {
+      return json(200, { ok: true, updated: 0 })
+    }
+    if (req.url.startsWith(`/api/messages/${uuid}/executor`) && req.method === 'GET') {
+      if (executor === 404) return json(404, { error: 'No execution log for this message' })
+      return json(500, { error: 'boom' })
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      return json(200, []) // 消息从未落库 → 落库验证失败 → transient
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits++
+      req.socket.destroy()
+      return
+    }
+    json(404, { error: 'not found' })
+  })
+  return { server, url: `http://127.0.0.1:${port}`, postHits: () => postHits }
 }
 
 // 14a: 执行**已终态**（写回命中 running 行 = 0，但执行行存在）→ 静默，不多投
@@ -1929,11 +1978,11 @@ async function startAttributionStub({
 }
 
 // 14h: pending 补投**重判归属**（2026-09-12 修 T-A 时期的分类错误）
-//      条目进 pending 的唯一来路是「POST 瞬态失败」，而那一刻 server 多半不可达 ⇒
-//      探针同样答不出 ⇒ attributed=null ⇒ 判据降级为「投」。**「查不动」是那一刻的
-//      读数，不是这个 commit 的属性**。原实现补投不重判 ⇒ 一次时点降级被固化成永久
-//      事实，且此后每次投递机会都照投（实害：被 auto-commit 抢收的 agent 提交在
-//      server 恢复后被永久误投，每 commit 叠一条无主的审查链）。
+//      hook 条目入 pending 的来路是「判了『无归属 → 投』而 POST 瞬态失败」，而那一刻
+//      server 多半不可达 ⇒ 探针答不出（null）。**读数是时点值，不是这个 commit 的属性**：
+//      下一轮 server 恢复 ⇒ 探针给出真答案（本用例 = 「有归属」）。原实现补投不重判 ⇒
+//      一次时点读数被固化成永久事实，且此后每次投递机会都照投（实害：被 auto-commit
+//      抢收的 agent 提交在 server 恢复后被永久误投，每 commit 叠一条无主的审查链）。
 {
   const uuid = '14ab0000-0000-4000-8000-0000000000ab'
   const tmp = makeUuidRepo('.handoff-test-pending-rejudge', uuid, { 'a.txt': '1' })
@@ -1981,7 +2030,7 @@ async function startAttributionStub({
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
-  console.log('  14h: pending 补投重判归属 → 静默 + 移出 pending（「查不动」不固化）✅')
+  console.log('  14h: pending 补投重判归属 → 静默 + 移出 pending（时点读数不固化）✅')
 }
 
 // 14i: 收尾兜底条目（src=fallback）补投**不得重判归属**（2026-09-12 二次修正）
@@ -2070,7 +2119,94 @@ async function startAttributionStub({
   console.log('  14i: 兜底条目补投 → 照投 + 不咨询判据（收尾兜底不被重判砍掉）✅')
 }
 
-// 14c: 探针查不动（executor 500）→ 一律投递，不静默吞
+// 14k（P3/P1）: `src='fallback'` 条目在 drain 补投时**再次**瞬态失败 ⇒ src 必须保住
+//      为什么必须钉：`drainPending` 以 `pendingSrc: entry.src` 原样透传（本条的唯一被测面）。
+//      src 一旦退化成 `legacy`/`hook`，下一轮 drain 就会把**兜底条目**当钩子条目去重判归属
+//      ⇒ 判静默砍掉 ⇒ ef8c752 修好的安全网又断（`--fallback-sha` 的审查请求永久消失）。
+//      14i 只覆盖「失败一次 → drain 成功」；「drain 里再失败一次」是本条补的格子，
+//      也是该安全网**唯一**的报警器。
+{
+  // ⚠️ uuid 必须**十六进制**（`extractCommitUuid` 只认 [0-9a-f]）——写成 14kk… 会被判
+  // 「commit message 无 uuid」，用例当场退化成「手动提交」路径、断言全不成立。
+  const uuid = '14b10000-0000-4000-8000-0000000000b1'
+  const tmp = makeSpanRepo('.handoff-test-fallback-resrc', uuid, [
+    ['a.txt', '1'],
+    ['b.txt', '2'],
+  ])
+  // 靶心取 HEAD~1：它有父提交（drain 按 `<sha>~1..<sha>` 生成文档，根提交会生成不出内容
+  // 而被当"无内容可投"记 delivered、绕开被测路径），且与 HEAD 不同 SHA ⇒ HEAD 那一步的
+  // 读数不会串到本条条目的 src 上。
+  const target = gitIn(tmp, 'rev-parse HEAD~1')
+  writeFileSync(
+    join(tmp, STATE_FILE),
+    JSON.stringify({ delivered: {}, pending: [{ sha: target, src: 'fallback' }] })
+  )
+  const stub = await startTransientPostStub({ uuid, sessionId: 'session-14k' })
+  await runInProc(tmp, stub.url)
+  const state14k = readStateFile(tmp)
+
+  assert(
+    stub.postHits() === 3,
+    `前置 + 判别力：POST 恰为 drain 那一条的重试上限（实际 ${stub.postHits()}）——` +
+      'HEAD 那一步探针查不动 ⇒ 静默让位 ⇒ 0 次；旧语义（查不动一律投）下这里会变 6'
+  )
+  assert(
+    pendingShas(state14k).includes(target),
+    '二次瞬态失败 → 该 SHA 仍须在 pending（义务不得凭空消失）'
+  )
+  assert(
+    pendingSrcOf(state14k, target) === 'fallback',
+    `二次失败后 src 必须保住（实际 ${pendingSrcOf(state14k, target)}）——退化成 legacy/hook ` +
+      '会让它在下一轮被当钩子条目重判静默，收尾兜底整条失效'
+  )
+  assert(state14k.delivered[target] === undefined, '失败不得记 delivered（账本单态=真投过）')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14k: fallback 条目二次瞬态失败 → 仍在 pending 且 src 保住 ✅')
+}
+
+// 14l（P3/P2）: 同款覆盖 `src='gate'`（`deliverHeadIfUndelivered` 的 `pendingSrc: 'gate'`）
+//      与 14k 同一形状、不同来路：门禁兜底条目的 SHA 同样「必然有归属」，退化后一样会被
+//      重判静默砍掉。两条合起来才证明保住 src 是 drain 的通用行为，不是 fallback 的特例。
+{
+  const uuid = '14b20000-0000-4000-8000-0000000000b2'
+  const tmp = makeSpanRepo('.handoff-test-gate-resrc', uuid, [
+    ['c.txt', '1'],
+    ['d.txt', '2'],
+  ])
+  const target = gitIn(tmp, 'rev-parse HEAD~1')
+  writeFileSync(
+    join(tmp, STATE_FILE),
+    JSON.stringify({ delivered: {}, pending: [{ sha: target, src: 'gate' }] })
+  )
+  const stub = await startTransientPostStub({ uuid, sessionId: 'session-14l' })
+  await runInProc(tmp, stub.url)
+  const state14l = readStateFile(tmp)
+
+  assert(
+    stub.postHits() === 3,
+    `前置 + 判别力：POST 恰为 drain 那一条的重试上限（实际 ${stub.postHits()}）`
+  )
+  assert(pendingShas(state14l).includes(target), '二次瞬态失败 → 该 SHA 仍须在 pending')
+  assert(
+    pendingSrcOf(state14l, target) === 'gate',
+    `二次失败后 src 必须保住（实际 ${pendingSrcOf(state14l, target)}）——gate 条目被重判归属` +
+      '同样会被判静默砍掉（它取自 pre-push 的门禁兜底，判据问了必答「有归属」）'
+  )
+  assert(state14l.delivered[target] === undefined, '失败不得记 delivered（账本单态=真投过）')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14l: gate 条目二次瞬态失败 → 仍在 pending 且 src 保住 ✅')
+}
+
+// 14c: 探针查不动（executor 500 = 响应不可解析）→ **静默让位**（A 案，2026-09-12 翻转）
+//      旧语义是「一律投递，不静默吞」——本用例原样钉着它，故判据一翻它必红，就地翻转。
+//      为什么查不动不再投：查不动最常见于 server 正忙着跑那只猫（=「有归属」的字面状态），
+//      钩子此刻投出去的是 Why/Tradeoff/OQ 全 TODO 的空壳，猫补填后还会再投一份完整版
+//      （内容不同 ⇒ 过不了内容去重 ⇒ 审查者收到两份）。让位 ≠ 永久放弃：义务归实施猫
+//      铁律自投，漏了由收尾兜底 `--fallback-sha` 接手。
 {
   const uuid = '14cc0000-0000-4000-8000-00000000000c'
   const tmp = makeUuidRepo('.handoff-test-attr-unprobeable', uuid, { 'a.txt': '1' })
@@ -2080,17 +2216,72 @@ async function startAttributionStub({
     updated: 0,
     executor: 500,
   })
-  await runInProc(tmp, stub.url)
+  const logs14c = await captureLogs(() => runInProc(tmp, stub.url))
+  const state14c = existsSync(join(tmp, STATE_FILE))
+    ? readStateFile(tmp)
+    : { delivered: {}, pending: [] }
 
-  assert(stub.hits.post === 1, `探针查不动 → 降级一律投递（实际 ${stub.hits.post}）`)
+  assert(stub.hits.post === 0, `探针查不动 → 静默让位（POST 0 次，实际 ${stub.hits.post}）`)
   assert(
-    UUID_RE.test(stub.postBodies[0]?.taskId || ''),
-    `降级投递同样必须带锚（探针 500 不改变无锚载荷的命运），实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
+    // 断言**判词字段本身**（`🔎 兜底投递判据: 静默`），不是「整行含『静默』」：
+    // 后者会被 reason 文案里的「静默让位」蒙混过关——`deliver` 翻回 true 时日志会打出
+    // 「判据: 投递——…静默让位…」这种自相矛盾的行，而宽松断言照样绿（实测踩到）。
+    logs14c.some((l) => l.includes('兜底投递判据: 静默')),
+    '静默要有留痕，且必须落在判词字段上——本票唯一的安全网就是日志'
   )
+  assert(
+    logs14c.some((l) => l.includes('探针查不动')),
+    '日志须写明归属来源是「探针查不动」，不得与「有归属静默」混称（陈述假机制的老病）'
+  )
+  assert(
+    Object.keys(state14c.delivered).length === 0,
+    '静默不是投递 ⇒ 不得记 delivered（账本单态=真投过）'
+  )
+  assert(pendingShas(state14c).length === 0, '静默不入 pending——不入的是「待补投」，义务另有所归')
+  assert(stub.postBodies.length === 0, `静默路径不该有载荷（实际 ${stub.postBodies.length} 条）`)
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
-  console.log('  14c: 探针查不动 → 降级投递（不静默吞）✅')
+  console.log('  14c: 探针查不动（HTTP 500）→ 静默让位（POST 0 / 无账本 / 无 pending）✅')
+}
+
+// 14j（A7，新增）: 探针**超时**（不可达）⇒ 同一结论——静默让位
+//      与 14c 是 `probeAttribution` 同一 `null` 分支的两个子形态：14c = 服务端答了但
+//      答不成（HTTP 500），本用例 = 服务端压根不答（`AbortSignal.timeout(3000)` 到点 abort）。
+//      **判别力对照**：把 `decideHookDelivery` 里 `null` 那一格改回 `deliver: true` ⇒
+//      本用例 POST 变 1、日志不含「静默」、状态文件多一条 pending，三条断言全红。
+{
+  const uuid = '14c20000-0000-4000-8000-0000000000c2'
+  const tmp = makeUuidRepo('.handoff-test-attr-probe-timeout', uuid, { 'a.txt': '1' })
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14j',
+    updated: 0,
+    executor: 'hang', // 永不响应 ⇒ 探针 3s 超时 ⇒ catch ⇒ null
+  })
+  const logs14j = await captureLogs(() => runInProc(tmp, stub.url))
+  const state14j = existsSync(join(tmp, STATE_FILE))
+    ? readStateFile(tmp)
+    : { delivered: {}, pending: [] }
+
+  assert(stub.hits.post === 0, `探针超时 → 静默让位（POST 0 次，实际 ${stub.hits.post}）`)
+  assert(
+    logs14j.some((l) => l.includes('兜底投递判据: 静默')),
+    '静默要有留痕，且必须落在判词字段上（不是整行含「静默」——reason 文案里也有那两个字）'
+  )
+  assert(
+    logs14j.some((l) => l.includes('探针查不动')),
+    '日志须写明归属来源是「探针查不动」——超时与「有归属」「无归属」三态不可混称'
+  )
+  assert(
+    Object.keys(state14j.delivered).length === 0,
+    '静默不是投递 ⇒ 不得记 delivered（账本单态=真投过）'
+  )
+  assert(pendingShas(state14j).length === 0, '静默不入 pending——「让位」不等于「待补投」')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14j: 探针超时 → 静默让位（POST 0 / 无账本 / 无 pending）✅')
 }
 
 // 14d: 写回已命中 running 行 = 归属的**充分条件** → 静默，且不再花探针那次往返
@@ -2199,11 +2390,14 @@ async function startAttributionStub({
     UUID_RE.test(stub.postBodies[0]?.taskId || ''),
     `无 uuid 路径必须自铸锚，实际 ${JSON.stringify(stub.postBodies[0]?.taskId)}`
   )
-  // 阴性对照：无 uuid 时 commitUuid === null ⇒ 归属判据判「无归属 → 投递」，
-  // 与自铸锚是两件事——判"该投"不等于**投得出去**（原缺口正是死在这一步）。
+  // 阴性对照：无 uuid 时 `attributed` 的初值是 `false`（不是 `null`）⇒ 归属判据判
+  // 「无归属 → 投递」，与自铸锚是两件事——判"该投"不等于**投得出去**（原缺口正是死在
+  // 这一步）。A4 安全底线：本次翻转改的是 `null` 那格，`false` 这一格一字未动。
+  // ⚠️ 旧版本行传的是 `null` 却在注释里写「无 uuid 路径」——**陈述假机制**（`null` 是
+  // 探针查不动那一格，2026-09-12 起判静默）。实参改成 `false` 后与注释所述机制一致。
   assert(
-    decideHookDelivery(null).deliver === true,
-    '阴性对照：无 uuid 路径的归属判据确实判「投」——缺口在载荷无锚，不在判据'
+    decideHookDelivery(false).deliver === true,
+    '阴性对照：无 uuid 路径（attributed=false）的归属判据确实判「投」——缺口在载荷无锚，不在判据'
   )
 
   stub.server.close()

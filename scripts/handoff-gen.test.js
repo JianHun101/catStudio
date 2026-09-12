@@ -2,7 +2,12 @@
  * decideHookDelivery 判定逻辑单测（T-A ①：post-commit 兜底投递三分支）。
  *
  * 判据三态：有归属（agent 提交）→ 静默；无归属（用户手动提交）→ 投递；
- * 判据查不动 → 投递（降级语义：宁可多投不可漏投）。
+ * 判据查不动 → **静默让位**（A 案，2026-09-12 用户裁定）。
+ *
+ * 为什么查不动不再投：查不动最常见于 server 正忙着跑那只猫——那正是「有归属」的
+ * 字面状态，钩子此刻做不出判断、投出去的是待补填的空壳（猫补填后还会再投一份，
+ * 内容不同 ⇒ 过不了内容去重 ⇒ 审查者收到两份）。让位 ≠ 永久放弃：义务归实施猫
+ * 铁律自投，漏了由收尾兜底 `--fallback-sha` 接手。
  */
 import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi, afterEach } from 'vitest'
@@ -31,14 +36,23 @@ describe('decideHookDelivery — T-A ① 钩子侧归属判据', () => {
     expect(verdict.reason).toContain('手动提交')
   })
 
-  it('归属判据查不动（写回失败/响应不可解析）→ 投递，不静默吞', () => {
+  it('归属判据查不动（探针超时/不可达/响应不可解析）→ 静默让位，不猜', () => {
     const verdict = decideHookDelivery(null)
-    expect(verdict.deliver).toBe(true)
+    expect(verdict.deliver).toBe(false)
     expect(verdict.reason).toContain('查不动')
+    expect(verdict.reason).toContain('静默')
+    expect(verdict.reason).toContain('让位')
   })
 
-  it('undefined 与 null 同语义（判据缺失 = 查不动 → 投递）', () => {
-    expect(decideHookDelivery(undefined).deliver).toBe(true)
+  it('undefined 与 null 同语义（判据缺失 = 查不动 → 静默让位）', () => {
+    expect(decideHookDelivery(undefined).deliver).toBe(false)
+  })
+
+  it('安全底线（A4）：翻的是 `null`，不是 `false`——无归属仍照投', () => {
+    // 无 uuid 的手动提交路径传的是 `false`（不是 `null`），行为必须一字不变。
+    // 这条断言与上面两条构成对：同一次改动只许翻转 `null` 那一格。
+    expect(decideHookDelivery(false).deliver).toBe(true)
+    expect(decideHookDelivery(false).reason).toContain('手动提交')
   })
 })
 
@@ -225,7 +239,7 @@ describe('probeAttribution — ambiguous 是「有归属」的直接证据（T-M
     expect(await probeAttribution('http://x', 'uuid-1')).toBe(true)
   })
 
-  it('200 但既无 agentName 也无 ambiguous（契约漂移）→ null（查不动，降级投递）', async () => {
+  it('200 但既无 agentName 也无 ambiguous（契约漂移）→ null（查不动，交调用方判静默让位）', async () => {
     stub({ matchedBy: null })
     expect(await probeAttribution('http://x', 'uuid-1')).toBeNull()
   })
