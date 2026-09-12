@@ -592,6 +592,7 @@ function hardCut(
 
 /**
  * L3-e：代码块按 `\n` 切；开围栏行（含语言标记）复制到每片，闭围栏行丢弃。
+ * 前缀**放不进预算就连同复用一并放弃**（口径 6），此时开栏行退回内容。
  * 单行仍超限 ⇒ 该行走 L3-f 字符硬切。
  */
 function descendCode(
@@ -608,8 +609,8 @@ function descendCode(
   // 复制到每片的开栏行是一条**派生上下文**（与面包屑 / 话题锚同类），故与话题锚同一条规则
   // （口径 5）：至少给正文留 1 个字才用，留不出就**整体放弃**——不截断、不引比例阈值。
   // 放弃时把开栏行**退回内容**走普通预算：这行本身塞不进 450，只能作为正文被硬切。
-  const wanted = open === '' ? '' : `${open}\n`
-  const prefix = breadcrumbBase + wanted.length < MAX_TEXT_LENGTH ? wanted : ''
+  const prefixCandidate = open === '' ? '' : `${open}\n`
+  const prefix = breadcrumbBase + prefixCandidate.length < MAX_TEXT_LENGTH ? prefixCandidate : ''
 
   // 闭围栏行丢弃（零信息）。开 / 闭两行可能分处 `content` 两端（前缀被放弃时开栏行回流），
   // 故按**原始行号**定位，不靠 `content` 长度推。
@@ -625,7 +626,9 @@ function descendCode(
       end = lines.length - 1
     }
   }
-  const content = prefix === '' ? lines.slice(0, end) : lines.slice(1, end)
+  // 前缀被放弃（含本来就没有围栏行）⇒ 开栏行必须自己留在内容里，否则丢字
+  const openIsContent = prefix === ''
+  const content = openIsContent ? lines.slice(0, end) : lines.slice(1, end)
 
   const base = breadcrumbBase + prefix.length
   const parts: WorkingPart[] = []
