@@ -298,8 +298,8 @@ describe('segmentDocument · A4/A5 真实语料', () => {
     expect(violations).toEqual([])
     expect(maxTextLength).toBeLessThanOrEqual(MAX_TEXT_LENGTH)
 
-    // 换型触发条件②「千级切片」的**第一个真实读数**（写进交付说明，勿用估算）
-    // eslint-disable-next-line no-console
+    // 换型触发条件②「千级切片」的**第一个真实读数**——故意留痕（tickets.md 票丙签收判据
+    // 要求「实测片数/硬切次数写进交付说明」），不是调试残留
     console.log(
       `[A4 实测] ${files.length} 文件 / ${segs} 片 / 硬切 ${hard} 次 / maxTextLength ${maxTextLength}`
     )
