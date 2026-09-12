@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
+import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
@@ -67,6 +68,18 @@ async function startStub(dim = 512): Promise<string> {
   return `http://127.0.0.1:${port}`
 }
 
+/** 假 sidecar 子进程：只发一行端口握手（口径同 embedding-client.test.ts 的 fakeChild） */
+function handshakeChild(port: number) {
+  const stdout = new PassThrough()
+  setImmediate(() => stdout.write(`EMBED_SIDECAR_READY {"port":${port},"host":"127.0.0.1"}\n`))
+  return {
+    stdout,
+    stderr: new PassThrough(),
+    kill: () => true,
+    once: () => null,
+  } as any
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   __setEmbeddingClientForTest(null)
@@ -82,6 +95,7 @@ afterEach(async () => {
   }
   resetDb()
   delete process.env.MEMORY_ENABLED
+  delete process.env.EMBED_SIDECAR_PORT
 })
 
 // ─── B9 模型真在进程外 ────────────────────────────────
@@ -171,9 +185,32 @@ describe('代理接线', () => {
     expect(logMocks.info).toHaveBeenCalledWith('嵌入 sidecar 就绪', {
       model: 'stub-model',
       dim: 512,
+      // baseUrl 直连分支：端口由 URL 解析（票辰）
+      port: stub!.port,
     })
     stopEmbeddingSidecar()
     expect(killed).toBe(0)
+  })
+
+  // ─── C1 端口进就绪日志（票辰）─────────────────────────
+
+  it('C1 就绪日志的 port = 握手真实端口，不是 env 值', async () => {
+    process.env.MEMORY_ENABLED = 'true'
+    const baseUrl = await startStub(512)
+    const realPort = stub!.port
+    // 反例面：env 里摆一个假端口——若实现改成「用 env 反推」，日志的 port 会变成 9999
+    process.env.EMBED_SIDECAR_PORT = '9999'
+    __setEmbeddingClientForTest(new EmbeddingClient({ spawnFn: () => handshakeChild(realPort) }))
+
+    await startEmbeddingSidecar()
+
+    expect(realPort).not.toBe(9999)
+    expect(logMocks.info).toHaveBeenCalledWith('嵌入 sidecar 就绪', {
+      model: 'stub-model',
+      dim: 512,
+      port: realPort,
+    })
+    expect(baseUrl).toContain(String(realPort)) // 握手端口确实是探活命中的那个
   })
 })
 

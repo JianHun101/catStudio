@@ -64,6 +64,12 @@ export interface EmbeddingStatus {
   reason?: EmbedFailureReason
   model?: string
   dim?: number
+  /**
+   * sidecar 监听端口（票辰）：**来源唯一 = 握手回报 / baseUrl 解析出的真实值**，
+   * 不用 `process.env.EMBED_SIDECAR_PORT` 反推（默认 `0` 时它没有信息量）。
+   * 失败 / 从未成功过 ⇒ undefined；直连分支解析不出 ⇒ 0。
+   */
+  port?: number
   /** 本轮失败起始时刻（ISO）；上次成功则 undefined */
   failingSince?: string
 }
@@ -96,6 +102,8 @@ interface LiveSidecar {
   baseUrl: string
   model: string
   dim: number
+  /** 真实监听端口：spawn 分支 = 握手回报；baseUrl 直连分支 = 由 URL 解析（解析不出为 0） */
+  port: number
 }
 
 // ─── 客户端 ───────────────────────────────────────────
@@ -112,7 +120,7 @@ export class EmbeddingClient {
   /** 维度不符是配置错，重试无意义 ⇒ 粘性失败，不再重探 */
   private dimMismatch: { reported: number; expected: number } | null = null
   private loggedStreak = false
-  private lastSuccess: { model: string; dim: number } | null = null
+  private lastSuccess: { model: string; dim: number; port: number } | null = null
 
   constructor(options: EmbeddingClientOptions = {}) {
     this.opts = {
@@ -145,8 +153,14 @@ export class EmbeddingClient {
       }
     }
     if (this.lastSuccess) {
-      return { ok: true, model: this.lastSuccess.model, dim: this.lastSuccess.dim }
+      return {
+        ok: true,
+        model: this.lastSuccess.model,
+        dim: this.lastSuccess.dim,
+        port: this.lastSuccess.port,
+      }
     }
+    // 从未成功过 ⇒ 无端口可报（契约：ok 但无 lastSuccess 时不编一个）
     return { ok: true }
   }
 
@@ -248,7 +262,7 @@ export class EmbeddingClient {
 
     this.failure = null
     this.loggedStreak = false
-    this.lastSuccess = { model: live.model, dim: live.dim }
+    this.lastSuccess = { model: live.model, dim: live.dim, port: live.port }
     return vectors.map((vector) => ({ ok: true, vector }) as EmbedResult)
   }
 
@@ -292,7 +306,14 @@ export class EmbeddingClient {
 
   private async connect(): Promise<LiveSidecar> {
     if (this.opts.baseUrl) {
-      return this.probe({ child: null, baseUrl: this.opts.baseUrl, model: '', dim: 0 })
+      return this.probe({
+        child: null,
+        baseUrl: this.opts.baseUrl,
+        model: '',
+        dim: 0,
+        // 直连分支（单测/stub 专用）没有握手，端口只能从 URL 解析——解析不出记 0，不抛错
+        port: parsePortFromUrl(this.opts.baseUrl),
+      })
     }
 
     const scriptPath = this.opts.scriptPath ?? resolveSidecarPath()
@@ -313,6 +334,7 @@ export class EmbeddingClient {
       baseUrl: `http://127.0.0.1:${handshake.port}`,
       model: '',
       dim: 0,
+      port: handshake.port,
     }).catch((err: any) => {
       killQuietly(child)
       throw err
@@ -393,9 +415,11 @@ export class EmbeddingClient {
           baseUrl,
           model: String(payload.model ?? ''),
           dim: reported,
+          // 端口贯穿 seed → live：/health 不回报端口，唯一来源是握手 / URL 解析
+          port: seed.port,
         }
         this.live = liveInput
-        this.lastSuccess = { model: liveInput.model, dim: liveInput.dim }
+        this.lastSuccess = { model: liveInput.model, dim: liveInput.dim, port: liveInput.port }
         return liveInput
       }
 
@@ -473,6 +497,20 @@ const defaultSpawn: SpawnSidecar = (scriptPath) =>
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   }) as unknown as SidecarChild
+
+/**
+ * 从 baseUrl 解析端口（直连/stub 分支的端口来源）。
+ * 解析不出（URL 非法 / 未写端口）⇒ **返回 0，不抛错**——该分支只用于单测与 stub，
+ * 不该因为「地址里没端口」把整条探测路径炸掉。
+ */
+export function parsePortFromUrl(baseUrl: string): number {
+  try {
+    const port = Number(new URL(baseUrl).port)
+    return Number.isInteger(port) && port > 0 ? port : 0
+  } catch {
+    return 0
+  }
+}
 
 function resolveSidecarPath(): string {
   if (existsSync(SIDECAR_SCRIPT_PATH)) return SIDECAR_SCRIPT_PATH

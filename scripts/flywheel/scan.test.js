@@ -26,6 +26,7 @@ import {
   gitHashObject,
   runScan,
   summaryLine,
+  main,
 } from './scan.mjs'
 
 import { createTestDb } from '../../packages/server/src/test-helpers.js'
@@ -537,6 +538,31 @@ describe('S12 向量行真写进去了（G3）', () => {
         .prepare('INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)')
         .run(id, vectorToBlob(vecFor('x')))
     ).toThrow(/integer/i)
+  })
+})
+
+// ─── C3 扫描器端口隔离（票辰） ─────────────────────────
+
+describe('C3 扫描器端口隔离可证伪', () => {
+  /**
+   * **承重用例**：删掉 `main()` 里那行 `process.env.EMBED_SIDECAR_PORT = '0'`，本用例必红。
+   *
+   * 判据面 = `main()` 跑完后进程 env 里的值。这不是「读源码猜行为」——它就是
+   * sidecar 子进程**实际继承到的**值（`defaultSpawn` 不传 `env`，子进程继承父进程 env）。
+   * 两条到达扫描器的通道（server 启动 spawn / 手动 `pnpm flywheel:scan`）都必经 `main()`。
+   */
+  it('main() 把 EMBED_SIDECAR_PORT 压成 0（删掉覆盖行 ⇒ 本用例变红）', async () => {
+    // 反例面：模拟「.env 里配了固定端口」——两条通道拿到的初始值都长这样
+    process.env.EMBED_SIDECAR_PORT = '9999'
+    const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fw-scan-empty-'))
+    try {
+      const code = await main(['--root', emptyRoot]) // 空 root ⇒ 零候选 ⇒ 不触发嵌入/spawn
+      expect(code).toBe(0)
+      expect(process.env.EMBED_SIDECAR_PORT).toBe('0')
+    } finally {
+      delete process.env.EMBED_SIDECAR_PORT
+      fs.rmSync(emptyRoot, { recursive: true, force: true })
+    }
   })
 })
 

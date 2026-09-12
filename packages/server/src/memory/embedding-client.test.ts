@@ -12,6 +12,7 @@ import { PassThrough } from 'node:stream'
 import {
   EmbeddingClient,
   MAX_BATCH,
+  parsePortFromUrl,
   type SidecarChild,
   type SpawnSidecar,
 } from './embedding-client.js'
@@ -218,6 +219,59 @@ describe('B1 正常路径', () => {
     expect(results).toHaveLength(MAX_BATCH + 1)
     expect(results.every((r) => r.ok)).toBe(true)
     expect(stub.batchSizes).toEqual([MAX_BATCH, 1])
+  })
+})
+
+// ─── C2 端口透出（票辰）───────────────────────────────
+
+describe('C2 端口透出', () => {
+  it('spawn 分支：status().port = 握手真实端口（不读 EMBED_SIDECAR_PORT）', async () => {
+    const stub = await makeStub()
+    // 反例面：env 里摆一个显眼的假端口——实现若改成「用 env 反推端口」，本断言必红
+    process.env.EMBED_SIDECAR_PORT = '9999'
+    try {
+      const client = new EmbeddingClient({ spawnFn: spawnTo(stub) })
+      expect((await client.embed('x')).ok).toBe(true)
+      expect(client.status()).toMatchObject({ ok: true, port: stub.port })
+      expect(stub.port).not.toBe(9999) // 防「假端口恰好是真端口」的退化
+    } finally {
+      delete process.env.EMBED_SIDECAR_PORT
+    }
+  })
+
+  it('baseUrl 直连分支：端口由 URL 解析（同样不读 env）', async () => {
+    const stub = await makeStub()
+    const client = new EmbeddingClient({ baseUrl: `http://127.0.0.1:${stub.port}` })
+
+    expect((await client.embed('x')).ok).toBe(true)
+    expect(client.status()).toMatchObject({ ok: true, port: stub.port })
+  })
+
+  it('失败态无 port：spawn 失败 ⇒ status().port === undefined', async () => {
+    const client = new EmbeddingClient({
+      spawnFn: () => {
+        throw new Error('ENOENT')
+      },
+    })
+
+    expect((await client.embed('x')).ok).toBe(false)
+    expect(client.status().ok).toBe(false)
+    expect(client.status().port).toBeUndefined()
+  })
+
+  it('未成功态无 port：从未跑过 ⇒ ok:true 但无 port（不编一个）', () => {
+    const client = new EmbeddingClient() // 不调用 embed ⇒ 既不 spawn 也不探活
+    expect(client.status()).toEqual({ ok: true })
+    expect(client.status().port).toBeUndefined()
+  })
+})
+
+describe('parsePortFromUrl（直连分支的端口来源）', () => {
+  it('正常 URL 取端口；未写端口 / 非法 URL ⇒ 0（不抛错）', () => {
+    expect(parsePortFromUrl('http://127.0.0.1:8080')).toBe(8080)
+    expect(parsePortFromUrl('http://127.0.0.1')).toBe(0)
+    expect(parsePortFromUrl('not-a-url')).toBe(0)
+    expect(parsePortFromUrl('')).toBe(0)
   })
 })
 

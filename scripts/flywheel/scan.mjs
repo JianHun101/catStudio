@@ -560,6 +560,20 @@ export async function main(argv = process.argv.slice(2)) {
   // server 的启动 spawn 天然继承已加载的 process.env，而手动 `pnpm flywheel:scan` 是新进程，
   // 不加载就会让「MEMORY_ENABLED 等开关」在两条通道上取到不同的值。
   await import('../../packages/server/src/env.js')
+
+  // ─── 端口隔离（票辰不变量）───────────────────────────────────────────────
+  // **不变量**：扫描器拉起的 sidecar 是**短命私有**的，恒用动态端口（`0` = OS 分配）；
+  // **固定端口 `EMBED_SIDECAR_PORT` 只属于主 server 的 sidecar**。
+  // 不覆盖的后果 = 扫描器的 sidecar 去抢主 server 的端口 ⇒ `EADDRINUSE` ⇒ 握手超时
+  // ⇒ 整轮扫描判「嵌入不可用」而一行不写（恰是有新内容、最需要它成的场景）。
+  //
+  // 位置刚性：**早于 `new EmbeddingClient()`**，且放在 env.js 之后——两条到达本进程的
+  // 通道（① server 启动时 spawn 本脚本、② 手动 `pnpm flywheel:scan`）都必经 `main()`，
+  // 故**一处覆盖即覆盖两条通道**；父进程（index.ts）替子进程表达其内部需求是知识泄漏，
+  // 同一条不变量写两处 = 两个真相源。放 env.js **之后**的语义是「对已解析结果做显式
+  // 覆盖」，不依赖 env.js「不覆盖已存在变量」这条实现细节。
+  process.env.EMBED_SIDECAR_PORT = '0'
+
   const { initDb, getDb } = await import('../../packages/server/src/db/index.js')
   const { initRepository, chunks: chunksRepo } =
     await import('../../packages/server/src/db/repository/index.js')
