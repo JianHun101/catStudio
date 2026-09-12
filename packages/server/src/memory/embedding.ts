@@ -61,7 +61,9 @@ export async function startEmbeddingSidecar(): Promise<void> {
   }
   const status = await getClient().warmup()
   if (status.ok) {
-    log.info('嵌入 sidecar 就绪', { model: status.model, dim: status.dim })
+    // port = 握手回报的真实监听端口（票辰）：动态分配时它是唯一可观测的地址来源，
+    // 不再需要 netstat 去捞
+    log.info('嵌入 sidecar 就绪', { model: status.model, dim: status.dim, port: status.port })
   } else {
     log.error('嵌入 sidecar 未就绪，记忆链降级', { reason: status.reason })
   }
