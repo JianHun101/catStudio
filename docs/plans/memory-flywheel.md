@@ -182,7 +182,7 @@ pnpm flywheel:reindex    # 全量重建索引（删表 → 重扫 → 逐行等�
 > / `MEMORY_UPDATE_THRESHOLD` / `MEMORY_FILTER_ENABLED` / `MEMORY_MIN_CONTENT_LENGTH` ——
 > 生产代码**零消费**（`MEMORY_DEDUP_THRESHOLD` 仅剩 `eval/phase0.ts` 一处文档字符串）。
 > 新链走**身份键幂等 upsert**（`chunks.content_hash` 唯一索引），不设阈值去重；
-> 入库筛选随 `saveMessageMemory` 一并退役（`memory/filter.ts` 已无生产调用方）。
+> 入库筛选随 `saveMessageMemory` 一并退役（`memory/filter.ts` 已于 2026-09-13 物理删除，含其测试）。
 > 五项仍物理躺在 `.env.example`，已同批标注作废 —— 设置它们**零效果**。
 
 ## 8. 过程留痕（票单已清，留痕在 git 历史）
