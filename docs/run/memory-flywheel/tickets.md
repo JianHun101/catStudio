@@ -861,7 +861,7 @@ packages/server/src/execution/serial.test.ts
 
 ## 票卯 · `docs/plans/**` 补 YAML frontmatter（段三补票 · **内容侧落地** · Q2-f 乙案的落地动作）
 
-**状态**：**已收口**（2026-09-12：交付 `dd85c97` → 吐槽猫审查 **✅ 零返工**（P1–P6 逐条独立实测：P3 直调 `classifyDocument` 四份全 `ok:true` / P6 反例独立复现为真 / P2 查库硬读数 `168 = 14+63+35+56` 与 `inserted:168` 逐字对上 / 8 个 evidence sha 逐个验实 / P4 删行全 0）→ **PR #<待回填>** carrier = merge commit **`<待回填>`** 并入 `dev`（`dev` = `origin/dev` = `.push-gate` 三方对齐，店长实测）；店长独立复跑 `scan.test.js` **21 passed** / scripts 全量 **162 passed**，独立查库 `chunks` 总数 **128 → 296**（plans 贡献 168 = 14+63+35+56 ⇒ **增量扫描真扫进去，非 `--reindex` 硬灌**）。参见 **map Decisions 49**。**勿再派活**）
+**状态**：**已收口**（2026-09-12：交付 `dd85c97` → 吐槽猫审查 **✅ 零返工**（P1–P6 逐条独立实测：P3 直调 `classifyDocument` 四份全 `ok:true` / P6 反例独立复现为真 / P2 查库硬读数 `168 = 14+63+35+56` 与 `inserted:168` 逐字对上 / 8 个 evidence sha 逐个验实 / P4 删行全 0）→ **PR #59** carrier = merge commit **`836e1bd`** 并入 `dev`（`dev` = `origin/dev` = `.push-gate` 三方对齐，店长实测）；店长独立复跑 `scan.test.js` **21 passed** / scripts 全量 **162 passed**，独立查库 `chunks` 总数 **128 → 296**（plans 贡献 168 = 14+63+35+56 ⇒ **增量扫描真扫进去，非 `--reindex` 硬灌**）。参见 **map Decisions 49**。**勿再派活**）
 
 ### 现状（**实测取证，非转述**——2026-09-12 店长逐份实读 + 真机日志）
 
