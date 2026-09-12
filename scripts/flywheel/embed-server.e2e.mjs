@@ -94,6 +94,18 @@ function pidAlive(pid) {
   }
 }
 
+/** 清理用硬杀（带 /T 连坐整棵树）——**只用于善后**，判据断言不用它（见 B10 注释） */
+function killPidTree(pid) {
+  if (!pid || !pidAlive(pid)) return
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' })
+  } else {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {}
+  }
+}
+
 /**
  * B10（票巳 (c)）：「只杀 server 不杀 sidecar」的孤立实测。
  *
@@ -125,47 +137,47 @@ async function checkOrphanSelfExit() {
     }
   })
 
-  const deadline = Date.now() + 60_000
-  while (!sidecarPid && Date.now() < deadline) await sleepMs(200)
-  if (!sidecarPid) {
-    check(false, 'B10 拿到 sidecar pid（端口握手）')
-    try {
-      parent.kill()
-    } catch {}
-    return
-  }
-  await sleepMs(2000) // 留出 sidecar 注册 stdin 自检的时间（握手后同步注册，不等模型）
+  try {
+    const deadline = Date.now() + 60_000
+    while (!sidecarPid && Date.now() < deadline) await sleepMs(200)
+    if (!sidecarPid) {
+      check(false, 'B10 拿到 sidecar pid（端口握手）')
+      return
+    }
+    await sleepMs(2000) // 留出 sidecar 注册 stdin 自检的时间（握手后同步注册，不等模型）
 
-  const preParent = pidAlive(parent.pid)
-  const preSidecar = pidAlive(sidecarPid)
-  check(
-    preParent && preSidecar,
-    'B10 阳性对照：杀前两侧都活着（存活判据不是坏的）',
-    `parent=${parent.pid} sidecar=${sidecarPid}`
-  )
+    const preParent = pidAlive(parent.pid)
+    const preSidecar = pidAlive(sidecarPid)
+    check(
+      preParent && preSidecar,
+      'B10 阳性对照：杀前两侧都活着（存活判据不是坏的）',
+      `parent=${parent.pid} sidecar=${sidecarPid}`
+    )
 
-  const t0 = Date.now()
-  const parentExited = new Promise((r) => parent.once('exit', () => r(true)))
-  if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/F', '/PID', String(parent.pid)], { stdio: 'ignore' })
-  } else {
-    process.kill(parent.pid, 'SIGKILL') // 非 Windows 的 killTree 同款：只杀 server 本身
-  }
-  await parentExited // 等 exit 事件 = 顺带完成 POSIX 侧的回收，存活判据才可信
-  check(!pidAlive(parent.pid), 'B10 阴性对照：硬杀后 parent 判死（判据能观测到死）')
+    const t0 = Date.now()
+    const parentExited = new Promise((r) => parent.once('exit', () => r(true)))
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/F', '/PID', String(parent.pid)], { stdio: 'ignore' })
+    } else {
+      process.kill(parent.pid, 'SIGKILL') // 非 Windows 的 killTree 同款：只杀 server 本身
+    }
+    await parentExited // 等 exit 事件 = 顺带完成 POSIX 侧的回收，存活判据才可信
+    check(!pidAlive(parent.pid), 'B10 阴性对照：硬杀后 parent 判死（判据能观测到死）')
 
-  while (Date.now() - t0 < 15_000 && pidAlive(sidecarPid)) await sleepMs(200)
-  const gone = !pidAlive(sidecarPid)
+    while (Date.now() - t0 < 15_000 && pidAlive(sidecarPid)) await sleepMs(200)
+    const gone = !pidAlive(sidecarPid)
 
-  check(
-    gone,
-    'B10 **只杀 server 不杀 sidecar ⇒ sidecar 自退**（stdin EOF 自检成立）',
-    gone ? `${Date.now() - t0}ms 内消失` : '15s 仍存活 = 孤儿'
-  )
-
-  // 无论结果都别留孤儿占端口
-  if (pidAlive(sidecarPid)) {
-    spawnSync('taskkill', ['/F', '/T', '/PID', String(sidecarPid)], { stdio: 'ignore' })
+    check(
+      gone,
+      'B10 **只杀 server 不杀 sidecar ⇒ sidecar 自退**（stdin EOF 自检成立）',
+      gone ? `${Date.now() - t0}ms 内消失` : '15s 仍存活 = 孤儿'
+    )
+  } finally {
+    // 善后放 finally：提前 return / 断言失败 / 抛异常三条路径都不留孤儿。
+    // 原先只清 sidecar ⇒ 阴性对照失败（parent 没死）时 parent 会漏在盘上占端口。
+    // 两侧各扫一遍：parent 已死则 killPidTree 是 no-op。
+    killPidTree(parent.pid)
+    killPidTree(sidecarPid)
   }
 }
 

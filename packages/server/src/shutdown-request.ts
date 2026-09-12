@@ -72,8 +72,11 @@ export interface ShutdownWatcherOptions {
  * **调用时机必须在 `clearStaleShutdownRequest()` 之后**——否则刚启动就可能被一个
  * 陈旧文件打掉。返回值是停止函数（shutdown 链与测试都靠它收尾，防定时器泄漏）。
  *
- * 单次触发即停：本文件是「一次性请求」，同一次关停不需要第二次回调；
- * 即便文件被重复写入（重入），`shutdown()` 自身的幂等守卫（契约 5）兜底。
+ * **单次触发即停**（由本函数自己执行，不依赖调用侧）——本文件是「一次性请求」，
+ * 同一次关停不需要第二次回调：`consumeShutdownRequest()` 已把文件删掉（契约 7②），
+ * 再轮询只剩空转。自停不削弱兜底：宽限窗内若真有第二次写入，它要么被 `shutdown()`
+ * 的幂等守卫（契约 5）吞掉、要么留在盘上由下次启动的 `clearStaleShutdownRequest()`
+ * 清掉（契约 4）——两条都在，故不靠「继续轮询」保命。
  */
 export function startShutdownRequestWatcher(
   onRequest: () => void,
@@ -81,14 +84,18 @@ export function startShutdownRequestWatcher(
 ): () => void {
   const intervalMs = options.intervalMs ?? SHUTDOWN_POLL_INTERVAL_MS
   let stopped = false
-  const timer = setInterval(() => {
-    if (stopped) return
-    if (!consumeShutdownRequest()) return
-    log.info('收到关停请求（文件握手），走优雅关停')
-    onRequest()
-  }, intervalMs)
-  return () => {
+  const stop = (): void => {
     stopped = true
     clearInterval(timer)
   }
+  const timer = setInterval(() => {
+    if (stopped) return
+    if (!consumeShutdownRequest()) return
+    // 先停自检再回调，顺序不可反：回调（生产 = `shutdown()`）里抛错时自检也必须已经停了，
+    // 否则定时器会在一个半死的进程上继续轮询。
+    stop()
+    log.info('收到关停请求（文件握手），走优雅关停')
+    onRequest()
+  }, intervalMs)
+  return stop
 }

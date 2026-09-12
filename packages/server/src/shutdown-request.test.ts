@@ -144,6 +144,26 @@ describe('startShutdownRequestWatcher 自检行为', () => {
     await sleep(120)
     expect(onRequest).not.toHaveBeenCalled()
   })
+
+  it('单次触发即停：消费过一次后再写入 ⇒ 不再回调，且第二个文件**留在盘上**', async () => {
+    const onRequest = vi.fn()
+    const stop = api.startShutdownRequestWatcher(onRequest, { intervalMs: 20 })
+    try {
+      writeFileSync(file, '')
+      await vi.waitFor(() => expect(onRequest).toHaveBeenCalledTimes(1))
+
+      writeFileSync(file, '') // 第二次请求（宽限窗内重复写入）
+      await sleep(120) // ≫ 5 个轮询周期
+
+      expect(onRequest).toHaveBeenCalledTimes(1)
+      // 关键鉴别断言：文件仍在 = 自检**真的停了**。
+      // 若实现只是「消费了但不回调」（仍在轮询），文件会被删 ⇒ 本断言必红。
+      expect(existsSync(file)).toBe(true)
+      stop() // 自停后再调返回的 stop()：幂等，不抛
+    } finally {
+      stop()
+    }
+  })
 })
 
 // ─── 契约 4 承重面（成对用例，防假绿）────────────────────────────

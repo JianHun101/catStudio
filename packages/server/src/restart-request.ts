@@ -46,7 +46,17 @@ export const RESTART_TTL_MS = 10 * 60 * 1000
  */
 export const RESTART_CONFIRMED_TTL_MS = 35 * 60 * 1000
 
-/** 文件基础目录——生产不设 env → 项目根（与 dev.js 轮询路径一致）；测试经 vitest env 隔离 */
+/**
+ * 文件基础目录——生产不设 env → 项目根（与 dev.js 轮询路径一致）；测试经 vitest env 隔离。
+ *
+ * ⚠️ **勿在 `.env` 设置 `RESTART_FILES_DIR`**。它是**测试专用**隔离通道（来源 =
+ * `vitest.config.ts` 的 `test.env`），生产侧的路径对齐靠一条**隐式契约**撑着：
+ * dev.js 以仓库根 spawn server（`cwd: ROOT`）⇒ server 的 `process.cwd()` = ROOT。
+ * 而 dev.js 侧是**硬编码** `path.join(ROOT, ...)`（scripts/dev.js:82 / :91）、**不读这个 env**，
+ * 且 `env.ts` 会把 `.env` 的键写进 `process.env`（env.ts:50）——真在 `.env` 里设了它，
+ * 两端路径当场分叉，而失败形态是**静默**的：server 写的文件 dev.js 永远轮询不到
+ * ⇒ 用户视角「点了按钮没反应」，零报错。故该键只应存在于测试配置。
+ */
 const RESTART_FILES_DIR = process.env.RESTART_FILES_DIR ?? process.cwd()
 // 隔离目录（测试）可能不存在——模块加载时确保可写（生产 = cwd 已存在 → no-op）
 mkdirSync(RESTART_FILES_DIR, { recursive: true })
