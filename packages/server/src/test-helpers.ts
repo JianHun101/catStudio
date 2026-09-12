@@ -63,15 +63,9 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, created_at);
 
-  CREATE TABLE IF NOT EXISTS memories (
-    id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    content TEXT NOT NULL,
-    embedding BLOB,
-    source_message_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (agent_id) REFERENCES agents(id)
-  );
+  -- ⚠️ memories 表不在此列：该表已随段三接线下线（票辛 ⑥ 双 DROP）。
+  -- 测试 schema 必须与生产 schema 同面——留着它会让「表已不存在」的判据
+  -- （W1）在测试里恒假绿，也会让测试看不出调用方还挂着旧链。
 
   CREATE TABLE IF NOT EXISTS knowledge (
     id TEXT PRIMARY KEY,

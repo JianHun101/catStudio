@@ -13,7 +13,7 @@
  */
 import type Database from 'better-sqlite3'
 import type { ChunkRow } from './types.js'
-import { buildFtsQuery, bigramTokenize } from './memories.js'
+import { buildFtsQuery, bigramTokenize, HYBRID_CHANNEL_TOP_N, RRF_K } from './memories.js'
 
 let db: Database.Database
 
@@ -268,6 +268,15 @@ export interface ChunkVectorSearchResult extends ChunkRow {
 }
 
 /**
+ * `chunks` 全列清单（带 `c.` 前缀）——检索入口共用一份，防「加了列只改一处」的漂移。
+ * 列顺序与 `getChunksByOrigin` 一致（那边无别名，独立一份字面量）。
+ */
+const CHUNK_COLUMNS = `c.id, c.doc_path, c.section_anchor, c.content_hash, c.origin_id,
+              c.type, c.status, c.date, c.evidence, c.supersedes, c.superseded_by,
+              c.valid_from, c.valid_to, c.part_index, c.part_total, c.hard_cut,
+              c.body, c.breadcrumb`
+
+/**
  * 向量通道：`chunk_vectors`（vec0）KNN → JOIN `chunks` 取原文。
  *
  * ⚠️ 候选池 = KNN 内层 `LIMIT topK`（**先近邻截断、后状态过滤**）⇒ 若最近的 topK
@@ -284,10 +293,7 @@ export function searchChunksByVector(
 ): ChunkVectorSearchResult[] {
   return db
     .prepare(
-      `SELECT c.id, c.doc_path, c.section_anchor, c.content_hash, c.origin_id,
-              c.type, c.status, c.date, c.evidence, c.supersedes, c.superseded_by,
-              c.valid_from, c.valid_to, c.part_index, c.part_total, c.hard_cut,
-              c.body, c.breadcrumb, v.distance AS distance
+      `SELECT ${CHUNK_COLUMNS}, v.distance AS distance
        FROM (
          SELECT chunk_id, distance
          FROM chunk_vectors
@@ -303,14 +309,28 @@ export function searchChunksByVector(
     .all(queryBlob, topK, maxDistance) as ChunkVectorSearchResult[]
 }
 
-/** 关键词通道检索结果（FTS 表 content 列存的是 bigram 预分词串，不可直接输出 ⇒ JOIN 取原文） */
-export interface ChunkKeywordSearchResult {
-  id: number
-  doc_path: string
-  section_anchor: string
-  body: string
-  breadcrumb: string
+/**
+ * 按 `(doc_path, section_anchor)` 取该节**全部片**，按 `part_index` 升序。
+ *
+ * 用途 = Decisions 14「小块检索、整节返回」：命中的是片，注入的是节——调用方拿到
+ * 命中片后用它补齐全节，避免猫读到被腰斩的半节。
+ *
+ * 与检索入口同一 X4 过滤面：被标失效的片不该因为同节另一片命中而被顺带注入。
+ */
+export function getChunksBySection(docPath: string, sectionAnchor: string): ChunkRow[] {
+  return db
+    .prepare(
+      `SELECT ${CHUNK_COLUMNS}
+       FROM chunks c
+       WHERE c.doc_path = ? AND c.section_anchor = ?
+         AND (c.status IS NULL OR c.status NOT IN ('superseded','deprecated'))
+       ORDER BY c.part_index`
+    )
+    .all(docPath, sectionAnchor) as ChunkRow[]
 }
+
+/** 关键词通道检索结果（FTS 表 content 列存的是 bigram 预分词串，不可直接输出 ⇒ JOIN 取原文） */
+export type ChunkKeywordSearchResult = ChunkRow
 
 /**
  * 关键词通道：bigram 查询词 MATCH + bm25 排序。
@@ -319,6 +339,10 @@ export interface ChunkKeywordSearchResult {
  * 与 `memories_fts` 同一套切分，两侧对称是 MATCH 能命中的前提。
  * 无可用查询词 → 空结果（调用方降级纯向量）；FTS 表缺失（老库/手搓 schema）同样
  * 静默降级，其他 SQL 错误照抛（不掩盖真实问题）。
+ *
+ * 返回**整行**（含 `part_index`/`part_total`/`status` 等）：RRF 融合要求两条通道的
+ * 行形态一致，且融合后调用方要按节补齐（`getChunksBySection`）——只给 FTS 侧四个
+ * 列会让纯关键词命中在补节时拿不到节身份。
  */
 export function searchChunksByKeyword(query: string, topN: number): ChunkKeywordSearchResult[] {
   const matchExpr = buildFtsQuery(query)
@@ -326,7 +350,7 @@ export function searchChunksByKeyword(query: string, topN: number): ChunkKeyword
   try {
     return db
       .prepare(
-        `SELECT c.id, c.doc_path, c.section_anchor, c.body, c.breadcrumb
+        `SELECT ${CHUNK_COLUMNS}
          FROM chunks_fts f
          JOIN chunks c ON c.rowid = f.rowid
          WHERE chunks_fts MATCH ?
@@ -339,4 +363,108 @@ export function searchChunksByKeyword(query: string, topN: number): ChunkKeyword
     if (err?.message && err.message.includes('no such table: chunks_fts')) return []
     throw err
   }
+}
+
+/**
+ * 混合检索：向量通道 + 关键词通道各取 topN → RRF 融合（k=60）→ 排序取 topK。
+ *
+ * **逐项对齐 `memories.ts` 的 `searchMemoriesHybrid`**（W1：同一 RRF 形态、同一
+ * `RRF_K`、同一通道配额，两个常数直接 import 而非各自再写一份）：
+ * - 两通道都命中的片：RRF 分相加，distance 取向量通道真值
+ * - 纯关键词命中：distance 填 `maxDistance`（语义 = 超出向量通道召回边界、由关键词
+ *   通道救回——是边界值不是伪造距离，与 memories 侧同款哨兵）
+ * - 通道容错：关键词通道空结果 / FTS 表缺失 → 结果即纯向量 topK（含距离真值）
+ *
+ * `LIMIT topK` 在融合排序**之后**：两通道各召回 20 片参与打分，最终只出 topK。
+ */
+export function searchChunksHybrid(
+  queryBlob: Buffer,
+  query: string,
+  topK: number,
+  maxDistance: number
+): ChunkVectorSearchResult[] {
+  const vectorHits = searchChunksByVector(queryBlob, HYBRID_CHANNEL_TOP_N, maxDistance)
+  const keywordHits = searchChunksByKeyword(query, HYBRID_CHANNEL_TOP_N)
+
+  type Scored = { score: number; row: ChunkVectorSearchResult }
+  const scores = new Map<number, Scored>()
+  vectorHits.forEach((row, i) => {
+    scores.set(row.id, { score: 1 / (RRF_K + i + 1), row })
+  })
+  keywordHits.forEach((hit, i) => {
+    const kwScore = 1 / (RRF_K + i + 1)
+    const existing = scores.get(hit.id)
+    if (existing) {
+      existing.score += kwScore
+    } else {
+      scores.set(hit.id, { score: kwScore, row: { ...hit, distance: maxDistance } })
+    }
+  })
+
+  return [...scores.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK)
+    .map((s) => s.row)
+}
+
+/** 向量候选探针行（阈值/状态过滤**之前**的原始 KNN 池） */
+export interface ChunkVectorCandidate {
+  id: number
+  docPath: string
+  sectionAnchor: string
+  status: string | null
+  distance: number
+  /** X4 状态过滤是否放行（false = 该片被 `superseded`/`deprecated` 挡掉） */
+  passesStatusFilter: boolean
+}
+
+/**
+ * **诊断探针（非检索入口）**：向量通道 KNN 内层候选池——`LIMIT topK` 截断之后、
+ * `maxDistance` 阈值与 X4 状态过滤**之前**的原始行。
+ *
+ * 两条判据都要它，缺了就只能靠猜（`searchChunksByVector` 的 SQL 把两重过滤做在
+ * 一起，返回空时**分不清**是「库空」「被阈值挡掉」还是「被状态挡掉」）：
+ *   - **X5 埋点**：要「阈值前 top-N 的切片身份（`doc_path` + `section_anchor`）+ 距离」
+ *   - **W11 三态**：「召回空（被状态过滤）」必须与「真的无命中」分开报
+ *
+ * 刻意**不是检索入口**：它返回的是被过滤掉的行，调用方只许读、不许直接注入。
+ * 过滤面判据用与检索入口**同向**的写法（`passesStatusFilter` 由含同一字面量的
+ * CASE 求值），免得「诊断开关一改就把语义写反」。
+ */
+export function probeChunkVectorCandidates(
+  queryBlob: Buffer,
+  topK: number
+): ChunkVectorCandidate[] {
+  const rows = db
+    .prepare(
+      `SELECT c.id AS id, c.doc_path AS doc_path, c.section_anchor AS section_anchor,
+              c.status AS status, v.distance AS distance,
+              CASE WHEN (c.status IS NULL OR c.status NOT IN ('superseded','deprecated'))
+                   THEN 1 ELSE 0 END AS passes
+       FROM (
+         SELECT chunk_id, distance
+         FROM chunk_vectors
+         WHERE embedding MATCH ?
+         ORDER BY distance
+         LIMIT ?
+       ) v
+       JOIN chunks c ON c.id = v.chunk_id
+       ORDER BY v.distance`
+    )
+    .all(queryBlob, topK) as Array<{
+    id: number
+    doc_path: string
+    section_anchor: string
+    status: string | null
+    distance: number
+    passes: number
+  }>
+  return rows.map((r) => ({
+    id: r.id,
+    docPath: r.doc_path,
+    sectionAnchor: r.section_anchor,
+    status: r.status,
+    distance: r.distance,
+    passesStatusFilter: r.passes === 1,
+  }))
 }

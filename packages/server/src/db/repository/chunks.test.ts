@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createTestDb } from '../../test-helpers.js'
-import { setDb, resetDb, getDb, initDb } from '../index.js'
+import { setDb, resetDb, getDb, initDb, CHUNK_VECTOR_METRIC_FIX_SEQUENCE } from '../index.js'
 import { initRepository } from './index.js'
 import { chunks as chunksRepo } from './index.js'
 import { vectorToBlob } from '../../memory/index.js'
@@ -178,26 +178,28 @@ describe('chunks repo（票己 · 段三索引表）', () => {
 
   // ─── C3 ───────────────────────────────────────────────
   describe('C3 老库幂等', () => {
-    it('对已有旧表的库重跑 initDb() 零报错、旧表行数不变', () => {
+    it('对已有旧表的库重跑 initDb() 零报错、既有表数据不动', () => {
       const db = getDb()
       db.prepare(
         `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
          VALUES ('agent-1', '店长', '🐱', 'prompt', 'deepseek', 'deepseek-v4-pro', 'sk')`
       ).run()
       db.prepare(
-        `INSERT INTO memories (id, agent_id, content, created_at) VALUES ('m1', 'agent-1', '旧记忆', '2026-01-01')`
+        `INSERT INTO knowledge (id, content, source, created_at) VALUES ('k1', '旧知识', 'doc', '2026-01-01')`
       ).run()
       const before = {
         agents: db.prepare('SELECT COUNT(*) c FROM agents').get(),
-        memories: db.prepare('SELECT COUNT(*) c FROM memories').get(),
+        knowledge: db.prepare('SELECT COUNT(*) c FROM knowledge').get(),
       }
 
       expect(() => initDb()).not.toThrow()
       initDb()
 
       expect(db.prepare('SELECT COUNT(*) c FROM agents').get()).toEqual(before.agents)
-      expect(db.prepare('SELECT COUNT(*) c FROM memories').get()).toEqual(before.memories)
+      expect(db.prepare('SELECT COUNT(*) c FROM knowledge').get()).toEqual(before.knowledge)
       expect(tableNames()).toContain('chunks')
+      // ⚠️ 本用例原以 `memories` 代表「旧表」：该表已随票辛 ⑥ 主动 DROP，
+      // 不再是「幂等保留」的对象（DROP 面另有专门用例，见 db/index.test.ts）
     })
   })
 
@@ -223,13 +225,27 @@ describe('chunks repo（票己 · 段三索引表）', () => {
 
   // ─── C5 ───────────────────────────────────────────────
   describe('C5 过滤面覆盖全部入口', () => {
-    /** 检索入口（必带 X4 过滤面）——新增导出函数必须在此二表之一，否则本测试爆 */
-    const RETRIEVAL_FUNCS = ['searchChunksByVector', 'searchChunksByKeyword']
+    /**
+     * 检索入口——**原子型**（自己发 SQL，必带 X4 过滤面）：body 内必须出现过滤字面量。
+     * 新增导出函数必须落进「原子检索 ∪ 组合检索 ∪ 非检索」三表之一，否则本测试爆。
+     */
+    const RETRIEVAL_FUNCS = ['searchChunksByVector', 'searchChunksByKeyword', 'getChunksBySection']
+    /**
+     * 组合型检索入口（票辛）：自身**不发 SQL**，只编排上面那些原子入口 ⇒ 过滤面由
+     * 被调用者承担。断言比原子的弱一档（查它确实调了原子入口），但比把它塞进
+     * 「非检索」诚实——它返回的就是召回结果。
+     */
+    const COMPOSED_RETRIEVAL_FUNCS = ['searchChunksHybrid']
     /**
      * 非检索导出：`setRepoDb` 配置 / `upsertChunk` 身份键裸写口 /
      * `getChunksByOrigin` 扫描器增量比对（**必须见全量行含 superseded**，否则孤儿物理删会漏）/
      * 票庚 写侧四件（三表同步写口 + 全量路径枚举 + 两处物理删）——**写入与删除，不是检索面**，
-     * 故不受 X4 过滤面约束（过滤面管的是「召回」，不是「落库」与「物理删」）
+     * 故不受 X4 过滤面约束（过滤面管的是「召回」，不是「落库」与「物理删」）/
+     * `probeChunkVectorCandidates`（票辛）诊断探针——**刻意返回被过滤掉的行**
+     * （用途 = W11 分辨「召回空（被状态过滤）」、X5 记阈值前 top-N）。
+     * ⚠️ 它的 CASE 里也含 `NOT IN ('superseded','deprecated')` 字面量，故**不许**
+     * 挪进 RETRIEVAL_FUNCS——那会让「含字面量」这条子串判据替一个语义相反的
+     * 函数背书（向严不向宽：宁可它留在非检索表里被显式说明）。
      */
     const NON_RETRIEVAL_FUNCS = [
       'setRepoDb',
@@ -239,6 +255,7 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       'listChunkDocPaths',
       'deleteChunksByDocPaths',
       'deleteStaleChunkRows',
+      'probeChunkVectorCandidates',
     ]
 
     function exportFunctionBodies(src: string): Map<string, string> {
@@ -264,8 +281,10 @@ describe('chunks repo（票己 · 段三索引表）', () => {
     const SRC = fs.readFileSync(fileURLToPath(new URL('./chunks.ts', import.meta.url)), 'utf8')
     const bodies = exportFunctionBodies(SRC)
 
-    it('导出函数集合 = 检索入口 ∪ 非检索（无函数逃逸在断言之外）', () => {
-      expect([...bodies.keys()].sort()).toEqual([...RETRIEVAL_FUNCS, ...NON_RETRIEVAL_FUNCS].sort())
+    it('导出函数集合 = 原子检索 ∪ 组合检索 ∪ 非检索（无函数逃逸在断言之外）', () => {
+      expect([...bodies.keys()].sort()).toEqual(
+        [...RETRIEVAL_FUNCS, ...COMPOSED_RETRIEVAL_FUNCS, ...NON_RETRIEVAL_FUNCS].sort()
+      )
     })
 
     it.each(RETRIEVAL_FUNCS)('%s 函数体含硬排除集合 + NULL 放行', (fn) => {
@@ -273,6 +292,13 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       expect(body, `${fn} 未找到`).toBeTruthy()
       expect(body).toContain("NOT IN ('superseded','deprecated')")
       expect(body).toContain('status IS NULL')
+    })
+
+    it.each(COMPOSED_RETRIEVAL_FUNCS)('%s 只编排原子检索入口（过滤面由被调用者承担）', (fn) => {
+      const body = bodies.get(fn)
+      expect(body, `${fn} 未找到`).toBeTruthy()
+      const delegated = RETRIEVAL_FUNCS.filter((f) => body!.includes(`${f}(`))
+      expect(delegated.length, `${fn} 未调用任何原子检索入口`).toBeGreaterThan(0)
     })
 
     it('运行时：四态各一条 ⇒ 只召回 NULL 与 active', () => {
@@ -498,6 +524,132 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       expect(chunksRepo.getChunksByOrigin('old')).toHaveLength(0)
       // 三表同步收缩：被删的那片不留 FTS/向量僵尸行
       expect(countAll()).toEqual([2, 2, 2])
+    })
+  })
+
+  // ─── 距离量纲（票辛 · 契约对齐）───────────────────────
+  describe('chunk_vectors 距离量纲 = cosine（全仓阈值口径）', () => {
+    /** 三表行数 [chunks, chunks_fts, chunk_vectors]（与上面孤儿删用例同形） */
+    const countAll = () => {
+      const c = (sql: string) => (getDb().prepare(sql).get() as { c: number }).c
+      return [
+        c('SELECT COUNT(*) c FROM chunks'),
+        c('SELECT COUNT(*) c FROM chunks_fts'),
+        c('SELECT COUNT(*) c FROM chunk_vectors'),
+      ]
+    }
+
+    /** 与 oneHot(0) 夹角 45° 的**单位**向量 */
+    const unit45 = () => {
+      const v = new Array(512).fill(0)
+      v[0] = Math.cos(Math.PI / 4)
+      v[1] = Math.sin(Math.PI / 4)
+      return v
+    }
+
+    it('DDL 显式声明 distance_metric=cosine', () => {
+      const row = getDb()
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunk_vectors'")
+        .get() as { sql: string }
+      expect(row.sql).toContain('distance_metric=cosine')
+    })
+
+    it('运行时：45° 单位向量的距离是余弦 0.2929，不是 L2 0.7654', () => {
+      const id = chunksRepo.upsertChunk(chunkInput())
+      writeVectorRow(id, unit45())
+      const hits = chunksRepo.searchChunksByVector(vectorToBlob(oneHot(0)), 5, 1.5)
+      expect(hits).toHaveLength(1)
+      // 判据是「落在余弦那一侧」而不是精确值：L2 会是 0.7654（差 0.47），
+      // 余弦 0.2929 —— 两位小数足够把两者分开
+      expect(hits[0].distance).toBeCloseTo(0.293, 2)
+    })
+
+    it('存量库的 L2 量纲在同一次 initDb() 里被校正（且三表同清待重扫）', () => {
+      const db = getDb()
+      const id = chunksRepo.upsertChunk(chunkInput())
+      writeFtsRow(id, '猫咖测试正文')
+      writeVectorRow(id, unit45())
+
+      // 造一张「老量纲」的表：模拟票己时期建的 L2 表
+      db.exec('DROP TABLE chunk_vectors')
+      db.exec(
+        `CREATE VIRTUAL TABLE chunk_vectors USING vec0(
+           chunk_id INTEGER PRIMARY KEY, embedding float[512]
+         )`
+      )
+      writeVectorRow(id, unit45())
+      expect(
+        (
+          db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chunk_vectors'").get() as {
+            sql: string
+          }
+        ).sql
+      ).not.toContain('distance_metric=cosine')
+
+      initDb()
+
+      const row = db
+        .prepare("SELECT sql FROM sqlite_master WHERE name = 'chunk_vectors'")
+        .get() as { sql: string }
+      expect(row.sql).toContain('distance_metric=cosine')
+      // 向量行没了的 chunks 行必须一起清掉，否则扫描器按 origin_id 判「没变」
+      // 会永远跳过它们 ⇒ 永久不可召回
+      expect(countAll()).toEqual([0, 0, 0])
+    })
+
+    it('崩溃点穷举：守卫序列每个前缀后重跑 initDb() 都收敛（不残留「满库 + 空向量」）', () => {
+      // 「不可达的状态」没法用一条运行用例覆盖 ⇒ 对崩溃点穷举：逐个前缀模拟
+      // 「崩在第 n 条之后」，再跑一次生产启动链，断言不变式成立。
+      // 判据面 = 守卫自己导出的 sequence，所以**改序即改被测对象**，用例不会假绿。
+      // 反序实现（先 DROP/CREATE 再清数据）在第 1 个前缀就红：DROP 后崩 ⇒
+      // 迁移把空表建回 cosine ⇒ 守卫 no-op ⇒ 留下 chunks 满库 / 向量空的形态。
+      const total = CHUNK_VECTOR_METRIC_FIX_SEQUENCE.length
+      for (let n = 1; n <= total; n++) {
+        const at = `崩溃点 ${n}/${total}`
+        resetDb()
+        setDb(createTestDb())
+        initDb()
+        initRepository(getDb())
+        const db = getDb()
+
+        // 造「老量纲 + 满库」现场（= 存量库首次升级前的状态）
+        const id = chunksRepo.upsertChunk(chunkInput())
+        writeFtsRow(id, '猫咖测试正文')
+        db.exec('DROP TABLE chunk_vectors')
+        db.exec(
+          `CREATE VIRTUAL TABLE chunk_vectors USING vec0(
+             chunk_id INTEGER PRIMARY KEY, embedding float[512]
+           )`
+        )
+        writeVectorRow(id, unit45())
+
+        // 模拟「崩在第 n 条之后」：optional 步骤照守卫口径容忍缺表
+        for (const step of CHUNK_VECTOR_METRIC_FIX_SEQUENCE.slice(0, n)) {
+          try {
+            db.exec(step.sql)
+          } catch {
+            /* 极老库缺表 */
+          }
+        }
+
+        initDb()
+
+        const { sql } = db
+          .prepare("SELECT sql FROM sqlite_master WHERE name = 'chunk_vectors'")
+          .get() as { sql: string }
+        expect(sql, at).toContain('distance_metric=cosine')
+        // 不变式：绝不允许「chunks 有行而向量为空」——那正是扫描器按 origin_id
+        // 永远跳过、永久不可召回的形态（scan.mjs 增量判据只看 chunks 行）
+        expect(countAll(), at).toEqual([0, 0, 0])
+      }
+    })
+
+    it('量纲已对的库：重跑 initDb() 不动索引数据（不误清）', () => {
+      const id = chunksRepo.upsertChunk(chunkInput())
+      writeFtsRow(id, '猫咖测试正文')
+      writeVectorRow(id, oneHot(0))
+      initDb()
+      expect(countAll()).toEqual([1, 1, 1])
     })
   })
 })

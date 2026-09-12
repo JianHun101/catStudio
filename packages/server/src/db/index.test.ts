@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestDb } from '../test-helpers.js'
-import { setDb, resetDb, getDb } from './index.js'
+import { setDb, resetDb, getDb, initDb } from './index.js'
 
 describe('db', () => {
   beforeEach(() => {
@@ -20,7 +20,7 @@ describe('db', () => {
   })
 
   describe('schema - tables', () => {
-    it('has all 5 expected tables', () => {
+    it('has all expected tables', () => {
       const db = getDb()
       const tables = db
         .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -29,8 +29,10 @@ describe('db', () => {
       expect(names).toContain('agents')
       expect(names).toContain('sessions')
       expect(names).toContain('messages')
-      expect(names).toContain('memories')
+      expect(names).toContain('knowledge')
       expect(names).toContain('execution_logs')
+      // `chunks` 系三表由迁移建，本文件的手搓测试 schema 不含 —— 见下方
+      // 「旧 memories 链已下线」describe（那里走真实 initDb() 迁移路径）
     })
   })
 
@@ -111,12 +113,36 @@ describe('db', () => {
     })
   })
 
-  describe('schema - memories table', () => {
-    it('has embedding BLOB column', () => {
-      const db = getDb()
-      const cols = db.pragma('table_info(memories)') as Array<{ name: string }>
-      const colNames = cols.map((c) => c.name)
-      expect(colNames).toContain('embedding')
+  describe('schema - 旧 memories 链已下线（票辛 ⑥）', () => {
+    const tableNames = () =>
+      (
+        getDb().prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
+          name: string
+        }>
+      ).map((r) => r.name)
+
+    it('存量老库跑迁移后 memories / memories_fts 双双消失', () => {
+      // 先在「老库」里造出这两张表 —— DROP 才真的被执行到（不是空跑）
+      getDb().exec(`
+        CREATE TABLE IF NOT EXISTS memories (
+          id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, content TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, tokenize='unicode61');
+      `)
+      expect(tableNames()).toContain('memories')
+
+      initDb()
+
+      const names = tableNames()
+      expect(names).not.toContain('memories')
+      expect(names).not.toContain('memories_fts')
+      expect(names).toContain('chunks')
+    })
+
+    it('DROP 是幂等的：连跑两次 initDb() 不抛', () => {
+      initDb()
+      expect(() => initDb()).not.toThrow()
+      expect(tableNames()).not.toContain('memories')
     })
   })
 

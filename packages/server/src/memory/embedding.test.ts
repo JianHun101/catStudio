@@ -189,16 +189,25 @@ describe('resolveStoredVectorDim', () => {
     expect(resolveStoredVectorDim()).toBeNull()
   })
 
-  it('memories 有向量 ⇒ 按 BLOB 字节数 / 4 得维度', () => {
+  it('chunk_vectors 有向量 ⇒ 按 BLOB 字节数 / 4 得维度（vec0 读出的仍是 f32 BLOB）', () => {
     const db = getDb()
-    db.prepare(
-      `INSERT INTO agents (id, name, system_prompt, llm_api_key, role)
-       VALUES ('a1', '猫', 'p', 'k', 'implementer')`
-    ).run()
-    db.prepare(
-      `INSERT INTO memories (id, agent_id, content, embedding, created_at)
-       VALUES ('m1', 'a1', 'c', ?, '2026-01-01')`
-    ).run(Buffer.from(new Float32Array(512).buffer))
+    // vec0 表不在 createTestDb 的手搓 schema 里 —— 按生产迁移 DDL 建（幂等）
+    db.exec(
+      `CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
+         chunk_id INTEGER PRIMARY KEY, embedding float[512]
+       )`
+    )
+    db.prepare('INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)').run(
+      BigInt(1),
+      Buffer.from(new Float32Array(512).buffer)
+    )
+    expect(resolveStoredVectorDim()).toBe(512)
+  })
+
+  it('chunk_vectors 缺席（存量库未重启）⇒ 回落到 knowledge，不整体判失败', () => {
+    getDb()
+      .prepare(`INSERT INTO knowledge (id, content, embedding) VALUES ('k9', 'c', ?)`)
+      .run(Buffer.from(new Float32Array(512).buffer))
     expect(resolveStoredVectorDim()).toBe(512)
   })
 

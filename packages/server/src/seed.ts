@@ -14,7 +14,6 @@ import {
   sessions as sessionsRepo,
   messages as messagesRepo,
   executionLogs as execLogsRepo,
-  memories as memoriesRepo,
   knowledge as knowledgeRepo,
 } from './db/repository/index.js'
 import {
@@ -45,7 +44,8 @@ async function seed(): Promise<void> {
     messagesRepo.deleteAllMessages()
     execLogsRepo.deleteAllExecutionLogs()
     sessionsRepo.deleteAllSessions()
-    memoriesRepo.deleteAllMemories() // FK 依赖 agents，必须在 deleteAllAgents 之前
+    // ⚠️ 原此处有「清空 memories」一步（注释：FK 依赖 agents，必须先删）
+    // ——`memories` 表随段三接线下线（票辛 ⑥），该 FK 与这次清理一并消失
     agentsRepo.deleteAllAgents()
   }
 

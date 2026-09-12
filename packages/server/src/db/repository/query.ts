@@ -7,8 +7,9 @@
  *   2. 列名白名单 = 返回列白名单（一套表定义两用）——conditions.column 必须 ∈
  *      该表可查列，校验后双引号包裹；SELECT 只投影白名单列
  *   3. 敏感列硬剔除：agents 排除 llm_api_key / llm_base_url / system_prompt
- *      （密钥绝不能进模型视野）；memories / knowledge 排除 embedding BLOB
+ *      （密钥绝不能进模型视野）；knowledge 排除 embedding BLOB
  *      （512-dim 向量与检索语义无关且体积大）；value 全部 `?` 参数化绑定
+ *      （memories 表已随段三接线下线，不再在白名单内）
  *
  * 契约细节（店长裁决）：
  *   - 表级 orderBy——5 张表 created_at DESC；execution_logs 无 created_at 列，
@@ -75,10 +76,11 @@ export const QUERY_TABLE_SCHEMAS = {
     ],
     orderBy: 'created_at',
   },
-  memories: {
-    columns: ['id', 'agent_id', 'content', 'source_message_id', 'created_at'],
-    orderBy: 'created_at',
-  },
+  // ⚠️ 原 `memories` 条目已删除（票辛 ⑥）：该表已 DROP，白名单里留着它会让
+  // query_db(table='memories') 从「表名不在白名单」的明确拒绝，退化成
+  // 「no such table」的 SQL 报错——是悬挂引用，不是能力保留。
+  // （是否把新的索引表 `chunks` 纳进来是**另一个决策**：白名单 = 安全边界，
+  //  列级暴露面要店长裁，本票不自行扩面。）
   knowledge: {
     columns: ['id', 'content', 'source', 'tags', 'created_at'],
     orderBy: 'created_at',

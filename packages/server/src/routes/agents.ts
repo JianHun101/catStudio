@@ -5,7 +5,6 @@ import type { AgentTokenStats } from '@cat-study/shared'
 import {
   agents as agentsRepo,
   executionLogs as execLogsRepo,
-  memories as memoriesRepo,
   messages as messagesRepo,
 } from '../db/repository/index.js'
 import type { AgentRow } from '../db/repository/index.js'
@@ -161,9 +160,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: 'Agent not found' })
     }
 
-    // 清理关联数据（FK 约束无 ON DELETE CASCADE，需手动删除）
+    // 清理关联数据（FK 约束无 ON DELETE CASCADE，需手动删除）。
+    // `memories` 已随段三接线下线（票辛 ⑥ 表已 DROP）⇒ 不再有该表要清
     execLogsRepo.deleteExecutionLogsByAgent(id)
-    memoriesRepo.deleteMemoriesByAgent(id)
     messagesRepo.deleteMessagesByAgent(id)
     agentsRepo.deleteAgentById(id)
     return { ok: true }

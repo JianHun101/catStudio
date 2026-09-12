@@ -149,7 +149,17 @@ async function main(): Promise<void> {
     log.warn('启动时清理幽灵 execution_logs', { deleted: ghostResult.changes })
   }
 
-  // 1.8 飞轮扫描器（票庚 S2 自动触发点）：白名单内的结晶 MD 增量同步进 `chunks`
+  // 1.8 嵌入 sidecar 探活（票辛 W7）：**先于扫描器**——扫描器要嵌入（嵌入不可用
+  //     则整件不写，票庚 ⑤），sidecar 后起会让首轮扫描白跑一次。
+  //
+  //     分支在 `startEmbeddingSidecar` 内部：`MEMORY_ENABLED=false` ⇒ 记一行
+  //     「不启动」直接返回（不 spawn、零开销）；否则 spawn + 探活 + 维度自检。
+  //     仍是 fire-and-forget（不 await）：冷启动含模型加载，最长 30s，不能拖住
+  //     server 起来（AGENTS.md「记忆: fire-and-forget，失败不阻塞」）。扫描器
+  //     侧另有兜底：其 EmbeddingClient 首次调用会自行 spawn sidecar。
+  void startEmbeddingSidecar()
+
+  // 1.9 飞轮扫描器（票庚 S2 自动触发点）：白名单内的结晶 MD 增量同步进 `chunks`
   //     索引表。fire-and-forget —— 起不来只记 log，不阻塞启动、不 fail 启动。
   spawnFlywheelScan()
 
@@ -314,10 +324,7 @@ async function main(): Promise<void> {
 
   log.info('server started', { host: HOST, port: PORT })
 
-  // 4.5 嵌入 sidecar：随 server 启动（独立进程，模型不进主进程内存）。
-  //     fire-and-forget —— 起不来只记日志并降级记忆链，不阻塞 server 启动
-  //     （AGENTS.md「记忆: fire-and-forget，失败不阻塞」）。含库内维度自检。
-  void startEmbeddingSidecar()
+  // （嵌入 sidecar 已前移到 1.8：扫描器之前，见那里的注释）
 
   // 5. 优雅关闭
   const shutdown = async () => {

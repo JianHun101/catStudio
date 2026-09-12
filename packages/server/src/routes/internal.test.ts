@@ -563,7 +563,7 @@ describe('internal route-signals', () => {
   })
 
   describe('db-query 端点', () => {
-    /** 查库 fixture：messages 显式 created_at 控序（DESC 断言）；memories/execution_logs 各两条 */
+    /** 查库 fixture：messages 显式 created_at 控序（DESC 断言）；knowledge/execution_logs 各一条 */
     const insertDbQueryFixture = () => {
       const db = getDb()
       db.prepare(
@@ -594,10 +594,12 @@ describe('internal route-signals', () => {
         '[]',
         '2026-08-08 10:00:00'
       )
+      // ⚠️ 原 fixture 此处插 `memories` 一行：该表已随段三接线下线（票辛 ⑥）。
+      // BLOB 剔除面改用同样带 `embedding BLOB` 列的 `knowledge` 验（见下方案例）
       db.prepare(
-        `INSERT INTO memories (id, agent_id, content, embedding, source_message_id, created_at)
-         VALUES (?, ?, ?, NULL, ?, datetime('now'))`
-      ).run('mem-1', 'agent-impl', '一条记忆', 'msg-old')
+        `INSERT INTO knowledge (id, content, embedding, source, created_at)
+         VALUES (?, ?, NULL, ?, datetime('now'))`
+      ).run('kb-1', '一条知识', 'doc-a')
       db.prepare(
         `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`
@@ -814,20 +816,31 @@ describe('internal route-signals', () => {
         }
       })
 
-      it('memories 返回列不含 embedding BLOB', async () => {
+      it('knowledge 返回列不含 embedding BLOB', async () => {
         await mockActive()
         insertDbQueryFixture()
         const res = await app.inject({
           method: 'POST',
           url: '/api/internal/db-query',
-          payload: qBody({ table: 'memories' }),
+          payload: qBody({ table: 'knowledge' }),
           headers: { 'x-signal-token': VALID_TOKEN },
         })
         expect(res.statusCode).toBe(200)
         const body = JSON.parse(res.body)
         expect(body.rows.length).toBe(1)
         expect(body.rows[0]).not.toHaveProperty('embedding')
-        expect(body.rows[0]).toMatchObject({ id: 'mem-1', content: '一条记忆' })
+        expect(body.rows[0]).toMatchObject({ id: 'kb-1', content: '一条知识' })
+      })
+
+      it('已下线的 memories 不在白名单（明确拒绝，不是 SQL 报错）', async () => {
+        await mockActive()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'memories' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).not.toBe(200)
       })
 
       it('limit 截断 + total 仍为全量', async () => {

@@ -25,7 +25,11 @@ import {
   executionLogs as execLogsRepo,
 } from '../db/repository/index.js'
 import { getAdapterForAgent } from '../llm/registry.js'
-import { buildMemoryContext, buildKnowledgeContext } from '../memory/index.js'
+import {
+  retrieveMemoryContext,
+  buildKnowledgeContext,
+  type MemoryContextResult,
+} from '../memory/index.js'
 import { createLogger } from '../logger.js'
 import { snapshotPackageDeps, diffNewPackages, ensureSessionWorktree } from '../llm/git-utils.js'
 import { parseJsonArray } from '../utils.js'
@@ -610,17 +614,26 @@ export async function runAgentReply(
     }
   }
 
-  // 检索相关记忆并注入 system prompt（带超时，不阻塞 LLM 调用）
+  // 检索相关记忆并注入 system prompt（带超时，不阻塞 LLM 调用）。
+  // 超时/抛错 → 结果置 null（reason 记 'timeout'/'error'），与记忆模块自己的
+  // 六种 reason 一起构成**穷尽的**空结果台账——不许有「返回空且无痕」的路径。
   const MEMORY_TIMEOUT_MS = 10_000
-  let memoryContext = ''
+  let memoryResult: MemoryContextResult | null = null
+  let memoryTimeout = false
   try {
-    memoryContext = await Promise.race([
-      buildMemoryContext(triggerMsg.content),
-      new Promise<string>((resolve) => setTimeout(() => resolve(''), MEMORY_TIMEOUT_MS)),
+    memoryResult = await Promise.race([
+      retrieveMemoryContext(triggerMsg.content),
+      new Promise<null>((resolve) =>
+        setTimeout(() => {
+          memoryTimeout = true
+          resolve(null)
+        }, MEMORY_TIMEOUT_MS)
+      ),
     ])
-  } catch {
-    memoryContext = ''
+  } catch (err: any) {
+    log.warn('记忆检索抛错，本轮不注入', { traceId, agentId: agent.id, error: err?.message })
   }
+  const memoryContext = memoryResult?.text ?? ''
   if (memoryContext) {
     llmMessages[0] = {
       ...llmMessages[0],
@@ -634,10 +647,29 @@ export async function runAgentReply(
       memoryTokens,
       totalContextChars: llmMessages.reduce((sum, m) => sum + m.content.length, 0),
       totalContextTokens: contextTokenStats.total + memoryTokens,
+      // ── 检索面台账（W1/W3/W5/W11 判据）──────────────────────
+      reason: memoryResult?.reason,
+      // 注入来源（W1：只来自白名单内的 MD 切片）
+      sections: memoryResult?.sections.map((s) => ({
+        docPath: s.docPath,
+        sectionAnchor: s.sectionAnchor,
+        distance: s.distance,
+      })),
+      ...memoryResult?.stats,
+    })
+  } else {
+    // 三态/四态可区分（W3 + W11）：未启用 / 无命中 / 嵌入失败 / 召回空（被状态过滤）
+    // 各带互不相同的 reason，且都带 X5 埋点（阈值前 top-N 的身份 + 距离）——
+    // 「空手而归」与「被阈值挡掉」凭 topCandidates / droppedByThreshold 可分辨。
+    log.info('记忆上下文为空', {
+      traceId,
+      agentId: agent.id,
+      reason: memoryTimeout ? 'timeout' : (memoryResult?.reason ?? 'error'),
+      ...memoryResult?.stats,
     })
   }
 
-  // 检索知识库并注入 system prompt（知识库 Phase 1）——buildMemoryContext
+  // 检索知识库并注入 system prompt（知识库 Phase 1）——retrieveMemoryContext
   // 同款位置 + 同款 Promise.race 超时降级防护：知识库是读增强，不阻塞 LLM 调用。
   // 独立【知识库】区块，零污染【相关记忆】
   let knowledgeContext = ''

@@ -135,10 +135,10 @@ process.env.EVAL_ALERT_TIMEOUT_RATE ??= '0.1'
 process.env.EVAL_ALERT_REWORK_RATE ??= '0.3'
 
 // ─── 混合检索配置 ──────────────────────────────
-// MEMORY_HYBRID_ENABLED — 混合检索开关（'1' 开 / 默认 '0' 关）：
-//   向量通道 + FTS5 关键词通道（bigram + RRF 融合）。默认关——保守策略：
-//   检索行为与现网逐字节一致，防评估数据突变，上线观察后再开
-process.env.MEMORY_HYBRID_ENABLED ??= '0'
+// ⚠️ 原 `MEMORY_HYBRID_ENABLED` 开关已删除（票辛 ⑥）：它管的是**旧 memories 链**
+// 的「纯向量 / 向量+关键词」二选一，而旧链已整体下线。新 chunks 链的混合检索
+// （vec0 + chunks_fts + RRF）是**唯一路径**，无开关——再留一个永远读不到的
+// 环境变量只会让排障时误以为「关掉它就能回到纯向量」。
 
 // ─── 摘要替代压缩配置 ──────────────────────────────
 // SUMMARY_REPLACE_HISTORY — 会话内 token 压缩开关（'1' 开 / '0' 关，默认开）：
