@@ -9,7 +9,7 @@
 
 一事一目录，不扁平堆单文件——本仓并行跑几十个会话 worktree，扁平命名必撞、互覆。
 
-`<work-slug>` 用 kebab-case、不加日期前缀（日期属于 `requirements/` 的命名词汇，那是归档件；
+`<work-slug>` 用 kebab-case、不加日期前缀（日期前缀是归档件的命名词汇，本仓已不用——归档语义改由状态字段承担；
 `docs/run/` 是在飞件，slug 只要本轮可读、可 grep）。
 
 落点在调用方（`CONTEXT.md`「文档位置约定」），不写死在 `to-tickets` 正文里；
@@ -21,7 +21,7 @@ skill 只管切票，谁调用谁指定往哪落。
 
 活结束（合并 / 废弃 / 需求变更）时：
 
-1. 结论上浮到 `docs/requirements/`（六段生命周期）或 `docs/sessions/`（会话总结）；
+1. 结论上浮到 `docs/plans/`（定稿规格）或 `docs/sessions/`（会话总结）；
 2. 删掉 `docs/run/<work-slug>/` 整个子目录。
 
 本文件（`README.md`）是目录门牌，长期保留；`<work-slug>/` 子目录一个都不留。
