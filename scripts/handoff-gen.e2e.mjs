@@ -1270,6 +1270,25 @@ function readStateFile(tmp) {
   return JSON.parse(readFileSync(join(tmp, STATE_FILE), 'utf-8'))
 }
 
+/** pending 只剩 sha 面的投影——`pending` 自 2026-09-12 起是 `{ sha, src }` 条目数组 */
+function pendingShas(state) {
+  return state.pending.map((e) => e.sha)
+}
+
+/** 取某条 pending 条目的来源标记（不存在则 undefined） */
+function pendingSrcOf(state, sha) {
+  return state.pending.find((e) => e.sha === sha)?.src
+}
+
+/**
+ * executor 端点的两种调用**必须分开数**（同一个 URL 前缀，靠 query 区分）：
+ * - 归属探针 `probeAttribution`：不带 query —— 「判据有没有被咨询」只认这一种
+ * - 实施者反查 `resolveExecutorName`：带 `?commit=` —— 投递成功路径的例行调用，
+ *   与判据无关。混着数会让「没咨询判据」被一次名字反查假证成「咨询了」。
+ */
+const probeCalls = (hits) => hits.urls.filter((u) => !u.includes('?')).length
+const nameLookupCalls = (hits) => hits.urls.filter((u) => u.includes('?')).length
+
 /**
  * 进程内跑 CLI 主流程（stub server 与测试同进程——某些沙箱环境阻断子进程
  * 对 127.0.0.1 的 TCP，execSync 起的 CLI 连不上 stub，必须进程内调用）。
@@ -1478,7 +1497,11 @@ function gitIn(tmp, cmd) {
   await runInProc(TMP13C, url13c)
   const headSha13c = gitIn(TMP13C, 'rev-parse HEAD')
   const state13c = readStateFile(TMP13C)
-  assert(state13c.pending.includes(headSha13c), '重试耗尽后 SHA 应记入 pending')
+  assert(pendingShas(state13c).includes(headSha13c), '重试耗尽后 SHA 应记入 pending')
+  assert(
+    pendingSrcOf(state13c, headSha13c) === 'hook',
+    'post-commit 入 pending 的条目须标 src=hook——标错则补投不跑判据，「查不动」被固化成永久事实'
+  )
   assert(state13c.delivered[headSha13c] === undefined, '失败 SHA 不应出现在 delivered')
   assert(existsSync(join(TMP13C, '.handoff-draft.md')), '投递失败应保留草稿')
 
@@ -1553,8 +1576,8 @@ function gitIn(tmp, cmd) {
 
   const state13d = readStateFile(TMP13D)
   assert(state13d.delivered[bogus] === undefined, '非祖先 delivered 条目应被 prune')
-  assert(!state13d.pending.includes(bogus), '非祖先 pending 条目应被 prune')
-  assert(!state13d.pending.includes(sha1), 'pending 中的有效 SHA 处理完应移除')
+  assert(!pendingShas(state13d).includes(bogus), '非祖先 pending 条目应被 prune')
+  assert(!pendingShas(state13d).includes(sha1), 'pending 中的有效 SHA 处理完应移除')
   assert(
     state13d.delivered[sha1] !== undefined,
     'sha1（已 delivered）补投时状态跳过，仍留 delivered'
@@ -1699,7 +1722,7 @@ function gitIn(tmp, cmd) {
   await runInProc(TMP13F, url13f, { gateDeliver: true })
 
   const state13f = readStateFile(TMP13F)
-  assert(!state13f.pending.includes(sha1), 'pending 中 fatal（反查 404）→ 应移除死条目')
+  assert(!pendingShas(state13f).includes(sha1), 'pending 中 fatal（反查 404）→ 应移除死条目')
   assert(state13f.delivered[sha1] === undefined, 'fatal 不应记 delivered')
   assert(state13f.delivered[sha2] !== undefined, 'HEAD 兜底投递应正常')
   assert(postHits === 1, `仅 HEAD 投 1 次（fatal 不 POST，实际 ${postHits}）`)
@@ -1725,21 +1748,25 @@ function gitIn(tmp, cmd) {
   const after1 = readState(TMP13G)
   assert(after1.delivered[shaA] !== undefined, '合并后 A 的 delivered 保留')
   assert(
-    after1.pending.includes(shaB),
+    pendingShas(after1).includes(shaB),
     '并发 B 新增的 pending 不应被 A 的写回覆盖（丢 pending 即丢文档）'
   )
-  assert(!after1.pending.includes(shaA), '已 delivered 的 sha 不应留在 pending')
+  assert(!pendingShas(after1).includes(shaA), '已 delivered 的 sha 不应留在 pending')
+  assert(
+    pendingSrcOf(after1, shaB) === 'legacy',
+    '裸字符串条目（旧形态 / 未标来源）→ src=legacy：不判归属、照投（安全方向），不得丢条目'
+  )
 
   // 场景 2：删除权威——A 基线读到 pending=[shaX]，A 移除 shaX（fatal）后写回，
   // 盘上旧条目不得把它"复活"
   const baseline2 = readState(TMP13G)
   writeState(TMP13G, { delivered: {}, pending: [shaX], raw: baseline2.raw }) // 初始含 shaX
   const baseline3 = readState(TMP13G)
-  assert(baseline3.pending.includes(shaX), '前置：shaX 已在 pending 中')
+  assert(pendingShas(baseline3).includes(shaX), '前置：shaX 已在 pending 中')
   writeState(TMP13G, { delivered: {}, pending: [shaB], raw: baseline3.raw }) // A 只移除 shaX
   const after2 = readState(TMP13G)
-  assert(!after2.pending.includes(shaX), 'A 删除的 pending 条目不应被盘上旧文件复活')
-  assert(after2.pending.includes(shaB), 'A 未触及的条目保留')
+  assert(!pendingShas(after2).includes(shaX), 'A 删除的 pending 条目不应被盘上旧文件复活')
+  assert(pendingShas(after2).includes(shaB), 'A 未触及的条目保留')
 
   rmSync(TMP13G, { recursive: true, force: true })
   console.log('  13g: writeState 并发合并（基线合并 + 删除权威）✅')
@@ -1770,7 +1797,10 @@ async function startAttributionStub({
   executorTaskId = 'task-1',
   skippedAmbiguous = false,
 }) {
-  const hits = { writeback: 0, executor: 0, post: 0 }
+  // urls 记 executor 端点的**逐次原始 URL**：该端点同时服务两件事——归属探针
+  // （`probeAttribution`，不带 query）与实施者反查（`resolveExecutorName`，带 `?commit=`）。
+  // 只数总数会把两者混为一谈，而「判据到底被咨询过吗」必须能分开数（见 14h/14i）。
+  const hits = { writeback: 0, executor: 0, post: 0, urls: [] }
   const postBodies = []
   const { server, port } = await startStubServer((req, res) => {
     const json = (code, obj) => {
@@ -1791,6 +1821,7 @@ async function startAttributionStub({
     }
     if (req.url.startsWith(`/api/messages/${uuid}/executor`) && req.method === 'GET') {
       hits.executor++
+      hits.urls.push(req.url)
       if (executor === 404) return json(404, { error: 'No execution log for this message' })
       if (executor === 500) return json(500, { error: 'boom' })
       return json(200, {
@@ -1907,8 +1938,13 @@ async function startAttributionStub({
   const uuid = '14ab0000-0000-4000-8000-0000000000ab'
   const tmp = makeUuidRepo('.handoff-test-pending-rejudge', uuid, { 'a.txt': '1' })
   const sha = gitIn(tmp, 'rev-parse HEAD')
-  // 手工构造「当时 POST 瞬态失败」的现场：这笔 SHA 躺在 pending 里
-  writeFileSync(join(tmp, STATE_FILE), JSON.stringify({ delivered: {}, pending: [sha] }))
+  // 手工构造「钩子那次 POST 瞬态失败」的现场：这笔 SHA 躺在 pending 里，来源 hook。
+  // ⚠️ src 必须显式写 'hook'——裸字符串会被规范化成 'legacy'（不判、照投），
+  // 那正是 14i 的场景，本用例的靶心（重判）就落空了。
+  writeFileSync(
+    join(tmp, STATE_FILE),
+    JSON.stringify({ delivered: {}, pending: [{ sha, src: 'hook' }] })
+  )
   const stub = await startAttributionStub({
     uuid,
     sessionId: 'session-14h',
@@ -1920,7 +1956,7 @@ async function startAttributionStub({
 
   assert(stub.hits.post === 0, `补投重判为有归属 → 应静默（POST 0 次，实际 ${stub.hits.post}）`)
   assert(
-    !state14h.pending.includes(sha),
+    !pendingShas(state14h).includes(sha),
     '判静默即义务解除 ⇒ 应移出 pending——留着会每次投递机会重判一遍（探针往返 + 日志）'
   )
   assert(state14h.delivered[sha] === undefined, '静默不是投递 ⇒ 不得记 delivered（账本单态）')
@@ -1928,16 +1964,110 @@ async function startAttributionStub({
     logs14h.some((l) => l.includes('pending 移除')),
     '移出 pending 要有独立留痕：补投行只证明"试过"、静默行只说"不投"，都不是"移除"的证词'
   )
-  // 阴性对照（证明本用例钉的不是恒真）：有归属在三态判据下判静默，而**原实现的补投
-  // 路径根本不调用这个判据**（deliverSha 不带 judgeAttribution）⇒ 同一场景必 POST 1 次。
+  // 对照组（证明本用例钉的不是恒真）：判据**确实被咨询过**——探针往返是这条分支的
+  // 可观测成本。判据没跑（原实现：补投不带 judgeAttribution）这一格必为 0 而 POST 变 1。
+  // ⚠️ 旧版此处断言 `decideHookDelivery(true).deliver === false`，只是把纯函数输出
+  // 重述一遍、不驱动任何路径，撑不起「对照」这个标签（审查意见）。真正有判别力的是
+  // 探针读数——它与 14i 的「兜底条目不咨询判据 ⇒ executor=0」构成同一场景形状的两面。
   assert(
-    decideHookDelivery(true).deliver === false,
-    '阴性对照：有归属在判据下判静默——原实现补投路径不调用它，故会照投'
+    probeCalls(stub.hits) === 2,
+    `hook 条目须被咨询判据两次——drain 补投重判 1 次 + post-commit 投 HEAD 再 1 次；` +
+      `实际归属探针 ${probeCalls(stub.hits)} 次 / 名字反查 ${nameLookupCalls(stub.hits)} 次`
+  )
+  assert(
+    nameLookupCalls(stub.hits) === 0,
+    '两次裁决都判静默 ⇒ 从未走到投递，故不该有实施者反查（它一出现即"其实投了"的证词）'
   )
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })
   console.log('  14h: pending 补投重判归属 → 静默 + 移出 pending（「查不动」不固化）✅')
+}
+
+// 14i: 收尾兜底条目（src=fallback）补投**不得重判归属**（2026-09-12 二次修正）
+//      首版让 drainPending 判**全部** pending 条目，依据是「条目进 pending 的唯一来路
+//      是 POST 瞬态失败」——该前提是假的：瞬态失败是每条投递路径共有的入队方式，
+//      --fallback-sha 与 --gate-deliver 同样会走。而兜底条目的 SHA 取自
+//      execution_logs.commit_hash，**必然有归属** ⇒ 补投被判据判静默、移出 pending
+//      ⇒ 收尾兜底整条失效（`review-fallback.ts` 明写「失败时随下次 post-commit /
+//      pre-push 的 pending 逻辑补上」）。本用例两半都验：① 兜底入口失败入 pending 时
+//      带 src；② 该条目补投**照投**、且判据**根本不被咨询**（与 14h 同场景形状，
+//      executor 读数 0 vs 1 构成两面对照）。
+{
+  const uuid = '14ff0000-0000-4000-8000-00000000000f'
+  const tmp = makeUuidRepo('.handoff-test-fallback-pending', uuid, { 'a.txt': '1' })
+  const sha = gitIn(tmp, 'rev-parse HEAD')
+
+  // ① 兜底入口 --fallback-sha → POST 瞬态失败（连接被打断 + 落库验证查不到）→ 入 pending
+  let postHits14i = 0
+  const { server: deadServer, port: deadPort } = await startStubServer((req, res) => {
+    if (req.url === `/api/messages/${uuid}` && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: uuid, sessionId: 'session-14i', role: 'user' }))
+      return
+    }
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([])) // 消息从未落库 → 落库验证失败 → transient
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      postHits14i++
+      req.socket.destroy()
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  await runInProc(tmp, `http://127.0.0.1:${deadPort}`, { fallbackSha: sha })
+  const afterFail14i = readStateFile(tmp)
+  assert(
+    postHits14i === 3,
+    `前置：POST 重试确实耗尽（实际 ${postHits14i}）——否则本场景没被构造出来`
+  )
+  assert(pendingShas(afterFail14i).includes(sha), '兜底投递瞬态失败 → SHA 应入 pending')
+  assert(
+    pendingSrcOf(afterFail14i, sha) === 'fallback',
+    `兜底入口入 pending 须标 src=fallback（实际 ${pendingSrcOf(afterFail14i, sha)}）——` +
+      '标成 hook 会让它在补投时被重判静默，收尾兜底失效'
+  )
+  assert(afterFail14i.delivered[sha] === undefined, '失败不得记 delivered（账本单态=真投过）')
+  deadServer.close()
+
+  // ② 换成「探针会答『有归属』」的 server：补投必须照投，且不得咨询判据
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-14i',
+    updated: 0, // 写回无 running 行——无信息量，逼判据去问探针
+    executor: 'ok', // 探针：该 uuid 存在执行行 ⇒ 有归属（若被咨询，判据必静默）
+  })
+  const logs14i = await captureLogs(() => runInProc(tmp, stub.url))
+  const afterDrain14i = readStateFile(tmp)
+  assert(
+    stub.hits.post === 1,
+    `兜底条目补投应照投 1 条（实际 ${stub.hits.post}）——重判会把它砍成 0，` +
+      '而这正是首版的行为（收尾兜底的审查请求永久消失）'
+  )
+  assert(
+    probeCalls(stub.hits) === 0,
+    `兜底条目不得咨询归属判据（实际归属探针 ${probeCalls(stub.hits)} 次）——` +
+      '问了必答「有归属」⇒ 必静默（首版即如此，兜底审查请求永久消失）'
+  )
+  assert(
+    nameLookupCalls(stub.hits) === 1,
+    `兜底条目照投 ⇒ 恰好一次实施者反查（实际 ${nameLookupCalls(stub.hits)}）——` +
+      '它与 probeCalls=0 分开数正是要点：反查是投递路径的例行调用，不是判据被咨询的证据'
+  )
+  assert(afterDrain14i.delivered[sha] !== undefined, '补投成功 → 应移入 delivered')
+  assert(!pendingShas(afterDrain14i).includes(sha), '补投成功 → 应移出 pending')
+  assert(
+    logs14i.some((l) => l.includes('来源 fallback，不判归属')),
+    '补投日志须自带来源与「不判归属」——本票唯一安全网是留痕，判错方向要能一眼看出来'
+  )
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+  console.log('  14i: 兜底条目补投 → 照投 + 不咨询判据（收尾兜底不被重判砍掉）✅')
 }
 
 // 14c: 探针查不动（executor 500）→ 一律投递，不静默吞

@@ -39,13 +39,27 @@
  *
  * 投递幂等（修复重复投递，见重复投递根治计划 A+B+C+D）：
  *   .handoff-delivered.json 状态文件按 commit SHA 记录投递结果，锚点取代"内容字节"：
- *     { "delivered": { "<full-sha>": "<iso-time>" }, "pending": ["<sha>", ...] }
+ *     { "delivered": { "<full-sha>": "<iso-time>" },
+ *       "pending": [{ "sha": "<full-sha>", "src": "hook|fallback|gate|legacy" }, ...] }
  *   - 同一 SHA 投递成功一次后，后续任何投递机会（post-commit / --gate-deliver /
  *     --fallback-sha）查状态直接跳过，不再重复投递
- *   - 投递失败（瞬态重试耗尽）的 SHA 记入 pending，每次投递机会先补投 pending：
- *     文档从 git 按 SHA 重新生成（确定性的，不依赖草稿文件）→ **重判归属**（见
- *     decideHookDelivery 的调用面注释）→ 投递 → 成功移入 delivered；重判为静默则
- *     移出 pending（义务归实施猫），不记 delivered
+ *   - 投递失败（瞬态重试耗尽）的 SHA 记入 pending（**连来源 `src` 一并记**），每次
+ *     投递机会先补投 pending：文档从 git 按 SHA 重新生成（确定性的，不依赖草稿文件）→
+ *     **按 `src` 决定判不判归属** → 投递 → 成功移入 delivered；判静默则移出 pending
+ *     （义务归实施猫），不记 delivered
+ *   - ⭐ `src` = 这条义务的**来路**，唯一作用 = 决定补投时要不要重判归属
+ *     （2026-09-12 修；缺它的实测后果见 e2e 14i）：
+ *       · `hook`     post-commit 钩子判过一次，但那次可能因 server 不可达而降级为
+ *                    「查不动 → 投」——故补投**必须**以当下读数复判（唯一判归属的来路）
+ *       · `fallback` 收尾兜底（--fallback-sha）。SHA 取自 execution_logs.commit_hash，
+ *                    **必然有归属** ⇒ 判了只会把自己判静默、把这条安全网关掉
+ *       · `gate`     pre-push 门禁 HEAD 兜底（--gate-deliver），同理不判
+ *       · `legacy`   本字段引入前的旧条目（裸字符串）与未标来源的写入，来路不可考，
+ *                    按「不判、照投」处置——与旧版行为一致，且落在「宁可多投不可漏投」
+ *                    的安全方向（漏标来源只会多投，不会漏投）
+ *     ⇒ 判归属**当且仅当 `src === 'hook'`**。不记 `src` 就无法区分「该重判的钩子条目」
+ *     与「绝不能重判的兜底条目」，补投会拿同一把判据把所有条目一起砍掉——那正是本字段
+ *     的由来：`--fallback-sha` 的补投在重判下被永久静默，收尾兜底整条失效。
  *   - 状态文件丢失/历史改写（reset）自动退化为"首次投递"——宁可多投不可漏投
  *   ⚠️ 账本与本判据的分工（T-A 定死）：账本键=SHA，答的是「同一 SHA 是否投过」
  *   （幂等锁）；归属判据源=执行行，答的是「该不该由钩子投」。两者不同源，
@@ -1288,12 +1302,18 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   // 判据的**调用面**（2026-09-12 修正 T-A 时期的错误分类）：凡「这次投递的裁决依据
   // 可能不是当下事实」的入口都要重判。三个入口的真实处境各不相同——
   //   - post-commit（钩子无参调用 ⇒ runHandoff 传 judgeAttribution）：当下事实，判。
-  //   - **drainPending 补投（post-commit 与 --gate-deliver 共用）：必须判**。条目进
-  //     pending 的唯一来路是「POST 瞬态失败」，而那一刻 server 多半不可达 ⇒ 探针同样
-  //     答不出 ⇒ attributed=null ⇒ 降级投递。**「查不动」是那一刻的读数，不是这个
-  //     commit 的属性**——补投不重判 = 把一次时点降级固化成永久事实，且此后每次投递
+  //   - **drainPending 补投的 `hook` 条目：必须判**。钩子那次判据可能因 server 不可达
+  //     而答不出 ⇒ attributed=null ⇒ 降级投递。**「查不动」是那一刻的读数，不是这个
+  //     commit 的属性**——不重判 = 把一次时点降级固化成永久事实，且此后每次投递
   //     机会都不复判（原实现的实际行为；实害：被 auto-commit 抢收的 agent 提交在
   //     server 恢复后被永久误投，每 commit 叠一条无主的审查链）。
+  //     ⚠️ 但「该判」的**范围**只到钩子条目为止。首版曾断言「条目进 pending 的唯一
+  //     来路是 POST 瞬态失败」并据此判全部条目——**该断言是假的**：瞬态失败是**每条
+  //     投递路径共有**的入 pending 方式，`--fallback-sha` 与 `--gate-deliver` 同样会
+  //     走（`deliverSha` 的 transient 分支不区分来路）。于是兜底条目也被套上判据，
+  //     而它们的 SHA 必然有归属 ⇒ 补投恒被重判为静默并移出 pending ⇒ 收尾兜底失效。
+  //     判据的适用范围由条目的 `src` 决定，不由「它为什么在 pending 里」决定（后者
+  //     对所有条目都是同一个答案）。
   //   - 收尾兜底（--fallback-sha）：**不判**，理由与上面那句原本就成立——它的 SHA 取自
   //     execution_logs.commit_hash，必然有归属，判了只会把自己判静默。原注释的病是
   //     把 drainPending 一并归进了这一类：两者来源不同（一个是「投失败的 SHA」，一个
@@ -1452,12 +1472,35 @@ export function readState(cwd) {
     const parsed = JSON.parse(raw)
     return {
       delivered: parsed?.delivered && typeof parsed.delivered === 'object' ? parsed.delivered : {},
-      pending: Array.isArray(parsed?.pending) ? parsed.pending : [],
+      pending: normalizePending(parsed?.pending),
       raw,
     }
   } catch {
     return { delivered: {}, pending: [], raw }
   }
+}
+
+/**
+ * pending 条目规范化 ⇒ `{ sha, src }`（见文件头 `src` 说明）。**读写两侧共用**，
+ * 故 pending 的构造面（含 e2e 手工写的状态文件）仍可传裸字符串。
+ *
+ * - 裸字符串 = `src` 字段引入前（2026-09-12）的旧形态 ⇒ `legacy`
+ * - 缺/非字符串 `src` 的对象同理 ⇒ `legacy`（含将来某处忘了标来源的写入：
+ *   默认落在**安全方向**——不判归属 ⇒ 多投，而不是漏投）
+ * - 无 sha / sha 非字符串的条目丢弃（损坏数据不放大）
+ * - 同一 sha 去重，首个胜出
+ */
+function normalizePending(raw) {
+  if (!Array.isArray(raw)) return []
+  const bySha = new Map()
+  for (const entry of raw) {
+    const sha = typeof entry === 'string' ? entry : entry?.sha
+    if (typeof sha !== 'string' || !sha) continue
+    if (bySha.has(sha)) continue
+    const src = typeof entry?.src === 'string' && entry.src ? entry.src : 'legacy'
+    bySha.set(sha, { sha, src })
+  }
+  return [...bySha.values()]
 }
 
 /**
@@ -1481,20 +1524,21 @@ export function writeState(cwd, state) {
   const p = statePath(cwd)
   const onDisk = readState(cwd)
   const delivered = { ...state.delivered }
-  const pending = [...new Set(state.pending)]
+  const pending = normalizePending(state.pending)
   if (onDisk.raw !== state.raw) {
     // 并发修改：只并入基线里没有的新条目
     const base = JSON.parse(state.raw || '{}') || {}
     const baseDelivered = base.delivered && typeof base.delivered === 'object' ? base.delivered : {}
-    const basePending = Array.isArray(base.pending) ? base.pending : []
+    const basePendingShas = normalizePending(base.pending).map((e) => e.sha)
     for (const sha of Object.keys(onDisk.delivered)) {
       if (!baseDelivered[sha]) delivered[sha] = onDisk.delivered[sha]
     }
-    for (const sha of onDisk.pending) {
-      if (!basePending.includes(sha) && !delivered[sha]) pending.push(sha)
+    for (const entry of onDisk.pending) {
+      if (!basePendingShas.includes(entry.sha) && !delivered[entry.sha]) pending.push(entry)
     }
   }
-  const finalPending = pending.filter((sha) => !delivered[sha])
+  // 合并可能让同一 sha 从两条路进来（本进程新加 + 并发进程新加），故去重放在最后
+  const finalPending = normalizePending(pending).filter((e) => !delivered[e.sha])
   const tmp = `${p}.tmp`
   writeFileSync(tmp, JSON.stringify({ delivered, pending: finalPending }, null, 2) + '\n', 'utf-8')
   renameSync(tmp, p)
@@ -1526,7 +1570,7 @@ function pruneState(cwd) {
       changed = true
     }
   }
-  const kept = state.pending.filter((sha) => isAncestorOfHead(cwd, sha))
+  const kept = state.pending.filter((entry) => isAncestorOfHead(cwd, entry.sha))
   if (kept.length !== state.pending.length) {
     state.pending = kept
     changed = true
@@ -1555,20 +1599,25 @@ function resolveFullSha(cwd, sha) {
  * - transient（重试已耗尽）→ 记入 pending，下次投递机会自动补投
  *
  * @param {Object} [opts] — 透传 tryPostToCatstudy（如 { judgeAttribution: true }，
- *                          两个入口传：post-commit 与 drainPending 补投；
- *                          --fallback-sha 不传——见 decideHookDelivery 的调用面注释）
+ *                          两个入口传：post-commit 与 drainPending 的 hook 条目）
+ * @param {string} [opts.pendingSrc] — 本条投递**失败入 pending 时**要记的来源标记
+ *                          （`hook`/`fallback`/`gate`，见文件头 `src` 说明）。四个调用点
+ *                          都显式传；未传 ⇒ `legacy`（不判归属、照投——安全方向）
  * @returns {Promise<'ok'|'transient'|'fatal'|'skip'>}
  */
 async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
   const fullSha = resolveFullSha(cwd, sha)
   const state = readState(cwd)
+  // 来源标记只对「本条投递失败 → 记入 pending」有意义；它决定这条义务补投时要不要重判归属。
+  // 缺省 'legacy'（不判）：漏标来源只会多投一条，不会漏投——安全方向。
+  const pendingSrc = opts.pendingSrc || 'legacy'
   if (state.delivered[fullSha]) {
     if (!process.env.CATSTUDY_SESSION_ID) {
       console.log(`[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 已投递过（状态文件）——跳过，不重复投递`)
       // 顺带清出 pending：delivered 与 pending 不应同时存在（跳过路径也要移，否则
       // 该 SHA 每次投递机会都会被 drainPending 重新处理一遍）
-      if (state.pending.includes(fullSha)) {
-        state.pending = state.pending.filter((s) => s !== fullSha)
+      if (state.pending.some((e) => e.sha === fullSha)) {
+        state.pending = state.pending.filter((e) => e.sha !== fullSha)
         writeState(cwd, state)
       }
       return 'ok'
@@ -1610,9 +1659,11 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
   if (result === 'ok') {
     state.delivered[fullSha] = new Date().toISOString()
   }
-  state.pending = state.pending.filter((s) => s !== fullSha) // ok/fatal 移出；transient 下面重新记入
+  state.pending = state.pending.filter((e) => e.sha !== fullSha) // ok/fatal 移出；transient 下面重新记入
   if (result === 'transient') {
-    if (!state.pending.includes(fullSha)) state.pending.push(fullSha)
+    if (!state.pending.some((e) => e.sha === fullSha)) {
+      state.pending.push({ sha: fullSha, src: pendingSrc })
+    }
   }
   writeState(cwd, state)
   return result
@@ -1623,23 +1674,32 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
  * 交接文档是 `git show <sha>` 的确定性生成结果，重新生成必然得到同一文档——
  * pending 只记 SHA 不存内容，草稿被覆盖不影响补投（Fix D）。
  *
- * 补投**必须重判归属**（2026-09-12）：pending 条目的来路是「POST 瞬态失败」，而那一刻
- * server 多半不可达 ⇒ 探针答不出 ⇒ 判据降级为「投」。不重判等于把那次降级固化，且此后
- * 每次投递机会都不复判。重判拿到的是**当下**读数（server 已恢复 ⇒ 探针能给出真答案），
- * 比把当时的读数和结论一起存下来更准——故这里不引入「持久化裁决」那套，直接重问。
- * 判静默即钩子义务解除（该 commit 的审查请求归实施猫，与 post-commit 静默同源），
- * 故移出 pending；不移出会每次投递机会重判一遍（探针往返 + 日志），而结论不会变。
+ * 补投**按 `src` 分流**（2026-09-12 二次修正；首版不分流，砍掉了收尾兜底——e2e 14i）：
+ *   - `src === 'hook'`：**必须重判归属**。钩子那次判据的来路是「POST 瞬态失败」，而那一刻
+ *     server 多半不可达 ⇒ 探针答不出 ⇒ 判据降级为「投」。不重判等于把那次降级固化，且此后
+ *     每次投递机会都不复判。重判拿到的是**当下**读数（server 已恢复 ⇒ 探针能给出真答案），
+ *     比把当时的读数和结论一起存下来更准——故 hook 条目不引入「持久化裁决」那套，直接重问。
+ *     判静默即钩子义务解除（该 commit 的审查请求归实施猫，与 post-commit 静默同源），
+ *     故移出 pending；不移出会每次投递机会重判一遍（探针往返 + 日志），而结论不会变。
+ *   - 其余来路（`fallback`/`gate`/`legacy`）：**一律不判、直接补投**。兜底条目的 SHA 取自
+ *     `execution_logs.commit_hash`，必然有归属——判了只会把自己判静默。首版把这条判据
+ *     套到了全部条目上，于是 `--fallback-sha` 的补投被重判为静默并移出 pending，
+ *     收尾兜底整条失效（`review-fallback.ts` 明写「失败时随下次 pending 逻辑补上」）。
+ *     ⇒ 判据的适用范围是「钩子判过一次的条目」，不是「所有 pending 条目」。
  */
 async function drainPending(cwd, serverUrl) {
   const state = readState(cwd)
   if (!state.pending.length) return
-  for (const sha of [...state.pending]) {
+  for (const entry of [...state.pending]) {
+    const { sha } = entry
+    // 只有钩子条目需要复判归属；兜底条目连判据都不该问（问了必静默，见函数头注释）
+    const judgeAttribution = entry.src === 'hook'
     if (!isAncestorOfHead(cwd, sha)) {
       // 历史改写后 SHA 失效（prune 兜底），正常不会走到这里
       console.log(
         `[handoff-gen] ⏭️  pending 中 ${sha.slice(0, 7)} 不是当前 HEAD 祖先（历史已改写）——移除`
       )
-      state.pending = state.pending.filter((s) => s !== sha)
+      state.pending = state.pending.filter((e) => e.sha !== sha)
       writeState(cwd, state)
       continue
     }
@@ -1647,23 +1707,39 @@ async function drainPending(cwd, serverUrl) {
     if (doc === null) {
       // 无文件改动/merge commit → 无内容可投，直接记已投
       state.delivered[sha] = new Date().toISOString()
-      state.pending = state.pending.filter((s) => s !== sha)
+      state.pending = state.pending.filter((e) => e.sha !== sha)
       writeState(cwd, state)
       continue
     }
-    console.log(`[handoff-gen] 📤 补投 pending: ${sha.slice(0, 7)}（从 git 重新生成）`)
-    const outcome = await deliverSha(cwd, serverUrl, sha, doc, { judgeAttribution: true })
+    console.log(
+      `[handoff-gen] 📤 补投 pending: ${sha.slice(0, 7)}（从 git 重新生成；来源 ${entry.src}` +
+        `${judgeAttribution ? '，重判归属' : '，不判归属'}）`
+    )
+    const outcome = await deliverSha(
+      cwd,
+      serverUrl,
+      sha,
+      doc,
+      // pendingSrc 原样透传：本轮若又瞬态失败，重记入的条目必须保住来源标记，
+      // 否则一条兜底条目第二次失败就会退化成 hook 条目、在下一轮被判据砍掉。
+      judgeAttribution
+        ? { judgeAttribution: true, pendingSrc: entry.src }
+        : { pendingSrc: entry.src }
+    )
     if (outcome === 'skip') {
-      // 判静默 ⇒ 钩子不该投这条 ⇒ 义务解除，移出 pending（否则每次投递机会重判一遍）。
+      // 义务解除，移出 pending。两条来路都成立：
+      //   - hook 条目：重判为静默（归属成立 / 免审前缀）
+      //   - 兜底条目：免审前缀（路径确定性，复算结论不变）——不判归属故不可能因归属而 skip
       // 用**当轮新读**的 state 作合并基线（writeState 的基线合并语义，见 e2e 13g）：
       // 不用循环入口那份旧快照——那要求「skip 路径必然没写过盘」这个当前成立的实现
       // 细节继续成立，而基线本就该是"我写之前盘上是什么"。
       const fresh = readState(cwd)
-      if (fresh.pending.includes(sha)) {
-        fresh.pending = fresh.pending.filter((s) => s !== sha)
+      if (fresh.pending.some((e) => e.sha === sha)) {
+        fresh.pending = fresh.pending.filter((e) => e.sha !== sha)
         writeState(cwd, fresh)
         console.log(
-          `[handoff-gen] ⏹️  pending 移除 ${sha.slice(0, 7)}：补投重判为不该由钩子投（归属成立 / 免审前缀）——义务解除，不记 delivered`
+          `[handoff-gen] ⏹️  pending 移除 ${sha.slice(0, 7)}：补投判为不该由钩子投` +
+            `（来源 ${entry.src}——${judgeAttribution ? '归属成立' : '免审前缀'}）——义务解除，不记 delivered`
         )
       }
     }
@@ -1705,7 +1781,8 @@ export async function deliverFallbackSha(cwd, serverUrl, sha) {
   console.log(
     `[handoff-gen] 📤 收尾兜底投递：${fullSha.slice(0, 7)}（执行收尾判定回复未 @ 审查者）`
   )
-  return await deliverSha(cwd, serverUrl, fullSha, doc)
+  // pendingSrc: 'fallback' ⇒ 这条若失败入 pending，补投**不判归属**（判了必静默、整条安全网失效）
+  return await deliverSha(cwd, serverUrl, fullSha, doc, { pendingSrc: 'fallback' })
 }
 
 /**
@@ -1724,7 +1801,8 @@ async function deliverHeadIfUndelivered(cwd, serverUrl) {
   const state = readState(cwd)
   if (state.delivered[headSha] && !process.env.CATSTUDY_SESSION_ID) return
   const doc = generateHandoff({ cwd })
-  if (doc) await deliverSha(cwd, serverUrl, 'HEAD', doc)
+  // pendingSrc: 'gate' ⇒ 同收尾兜底：本入口的 HEAD 已有归属，补投不得重判（见文件头 `src`）
+  if (doc) await deliverSha(cwd, serverUrl, 'HEAD', doc, { pendingSrc: 'gate' })
 }
 
 // ─── CLI entry ──────────────────────────────────
@@ -1775,7 +1853,10 @@ export async function runHandoff(args) {
     console.log('📋 .handoff-draft.md 已生成')
 
     // 投递到 cat-study（judgeAttribution：post-commit 入口才判归属——T-A ①；有归属则静默不发）
-    const outcome = await deliverSha(cwd, serverUrl, 'HEAD', result, { judgeAttribution: true })
+    const outcome = await deliverSha(cwd, serverUrl, 'HEAD', result, {
+      judgeAttribution: true,
+      pendingSrc: 'hook',
+    })
     if (outcome === 'ok') {
       // 投递成功 → 清理本地草稿（内容已在 cat-study 消息管道中）
       try {
