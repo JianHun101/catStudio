@@ -1,7 +1,7 @@
 # 票单 · memory-flywheel
 
 > 规格地图见同目录 `map.md`（grilling 产出，Decisions 1–35 为已裁结论）。
-> **2026-09-12 段三发车批次**（**Decisions 34/35**，用户原话「1 物理删 2 退 + 删 3发车」）：段三 15 问全裁（2 条用户裁 + 13 条店长拍板）⇒ **五票出票 = 票己（索引表 schema）/ 票庚（扫描器）/ 票辛（检索接线）/ 票壬（旧写口退役）/ 票癸（段一归位）**。**本轮派活 = 票己 → ds猫、票癸 → flash猫**；庚/辛 依赖票己，壬与庚同批（**单槽位 FIFO ⇒ 不一次堆满队列**）。
+> **2026-09-12 段三发车批次**（**Decisions 34/35**，用户原话「1 物理删 2 退 + 删 3发车」）：段三 15 问全裁（2 条用户裁 + 13 条店长拍板）⇒ **五票出票 = 票己（索引表 schema）/ 票庚（扫描器）/ 票辛（检索接线）/ 票壬（旧写口退役）/ 票癸（段一归位）**。**首发派活 = 票己 → ds猫、票癸 → flash猫**（**两票已收口 `8efab3d`**，见 map Decisions 36）。**第二轮派活（2026-09-12）= 票庚 → ds猫、票壬 → flash猫**——两者改动面无交集；**票辛 依赖票庚 + 票壬 落地 ⇒ 留待下一轮**（**单槽位 FIFO ⇒ 不一次堆满队列**）。
 > **2026-09-12 授权批次**（Decisions 31）：票丙 / 票丁 / 票戊 出票；票丁排队。
 > **⚠️ 派活中断修正（2026-09-12 补）**：首次执行在 `31c7eb5` 落盘后被中断（`execution_logs` 记 `interrupted`），**派活消息从未发出**（本会话 `messages` 表零条含「票丙/票戊/ds猫」；实施者零执行记录）。本行原写「票丙、票戊已派活」是**未兑现的乐观表述，已改**。**票丙、票戊已于本轮补派**（ds猫 / flash猫），状态见各票「状态」行。
 > **收口清账（2026-09-12 补，店长 `git merge-base --is-ancestor` 实查非转述）**：**票丙**（交付 `c953dd4` → 审查反例回归补正 `4552237`）与**票戊**（交付 `edb1f2d`）**均已并入 `dev`**（携带者 `20f9c93` / `1395a44`）⇒ 两票状态行本轮翻「**已收口**」，**勿再派活**。**票乙**已收口且挂账两轮 ⇒ 按本文第 7 行「活收口即清」**移出本文件**（结论承接面 = `map.md` Frontier 票乙条 + Decisions 26；票单正文留 git 历史）。**票丁**排队原因（怕与票丙/票戊并行、收口时分不清「是谁的行为变化」）**已随两票落地消解 ⇒ 本轮派活**。
@@ -325,7 +325,8 @@ evidence:
 
 ## 票己 · 索引表 schema（段三主链第一步 · Q6 全落）
 
-**状态**：**本轮派 ds猫**（2026-09-12 用户「3发车」授权）
+**状态**：**已收口**（2026-09-12：交付 `f493979` → 吐槽猫审查 **✅ 零返工**（独立复跑 `chunks.test.ts` **18 passed**、C8 期望表抽查回对票面、`chunks_fts` 建表与 `memories_fts` 逐字节对齐）→ **PR #51** carrier = merge commit `8efab3d` 并入 `dev`；店长实查。**勿再派活**）
+**收口留痕**：本次审查曝出 **6 条下游契约地雷**（G1–G5 / X1）**已就地补进票庚·票辛票面**，并回改 map 两处勘误——见 **map Decisions 36**。⚠️ 本票只交付**读侧** repository；**写侧（FTS 行 / 向量行 / 三表孤儿删）全归票庚**。
 **承**：map Decisions 34 四–八（X1–X5 全裁）/ Decisions 17（**chunk 身份键 = 路径 + 小节锚 + 内容哈希**，**明确「不必带片序号」**）/ Decisions 4（状态过滤硬约束）/ Decisions 24（status 管到节）
 **动机**：段三主链（schema → 扫描器 → 接线）的底座。**扫描器写、接线读，两侧都以本票列名为准** ⇒ 必须先行，否则下游两边各自发明列名。
 
@@ -364,7 +365,8 @@ packages/server/src/db/repository/chunks.ts     + chunks.test.ts（同目录同�
 - **`text` 不单独存**（可重算 = `breadcrumb` + 话题锚 + `body`）——**建了就是违约**（X2）。
 - **表内禁止任何扫描时间戳 / 运行态字段**（X3 新钉）：不得有 `scanned_at` / `updated_at` / `created_at` / `last_seen` 类列。**存了则「删表 → 重扫 → 逐行等价」必破**（唯一例外 = `date`，它是 **MD 里的历史事实**、由票戊冻结，不是扫描时刻）。
 
-**`chunk_vectors`**：sqlite-vec `vec0`，`embedding float[512]`，以 `chunk_id`（= `chunks.id`）关联。**照 `db/index.ts` 既有 vec0 建表范式**（与 `memories_vec` 同形）。
+**`chunk_vectors`**：sqlite-vec `vec0`，`embedding float[512]`，以 `chunk_id`（= `chunks.id`）关联。**照 `db/index.ts` 既有 `chunks` 侧 vec0 建表范式**。
+⚠️ **勘误（2026-09-12 审查 OQ-0）**：本行原写「（与 `memories_vec` 同形）」——**`memories_vec` 在本仓不存在**（实测 `grep` 零命中；向量是 `memories.embedding BLOB`）。该空引用已删（票己实现选了「vec0 / `float[512]`」那半句显式契约，正确）。**下游警号**：向量通道走 vec0 `MATCH`，**不是** BLOB 扫表——见票辛 ⑦ X1。
 
 **`chunks_fts`**：FTS5，索引 `body` + `breadcrumb`。**照 `db/index.ts:425` 既有 `memories_fts` 范式**（含 external-content 与否、tokenizer 选择——**实施前先读那 20 行，逐项对齐，不另发明**）。
 
@@ -412,7 +414,7 @@ WHERE status IS NULL OR status NOT IN ('superseded','deprecated')
 
 ## 票庚 · 扫描器（段三 · Q5 全落 + S4 孤儿物理删）
 
-**状态**：**已出票 · 待派**（依赖票己落地）
+**状态**：**本轮派 ds猫**（2026-09-12：票己 `f493979` 已收口 ⇒ 前置满足；票面已按票己审查补钉 **G1–G5 五条**，见下 §契约补遗）
 **承**：map Decisions 34 一–三（S1/S2/S3）/ S4（**用户裁「物理删」**）/ Decisions 20/22（fail-closed 准入）/ Decisions 17（身份键）/ 票丙 `segmentDocument` / 票丁 sidecar
 **动机**：把白名单里的结晶 MD 变成 `chunks` 行。**它是唯一「读 MD 写索引」的入口**（Decisions 6：索引侧无独立写口）。
 
@@ -465,15 +467,27 @@ export const SCAN_PREFIXES = ['docs/adr/', 'docs/lessons/', 'docs/plans/']
 
 **⑥ 孤儿清理（S4，用户裁「物理删」）**
 
-- 重扫后，库内 `doc_path ∈ 白名单` 且**不属本次扫描产出集合**的行（含其 `chunk_vectors` 行）**物理 DELETE**。
+- 重扫后，库内 `doc_path ∈ 白名单` 且**不属本次扫描产出集合**的行**三表齐删**：`chunks` + `chunk_vectors`（按 `chunk_id`）+ **`chunks_fts`（按 `rowid`）**。
 - **用户裁决原文「1 物理删」**；与 Decisions 4 的关系见 map Decisions 34 一（索引行是派生投影，不是知识条目）。
-- **判据**：删源文件 → 重扫 ⇒ 该 `doc_path` 行数 = 0。
+- **判据**：删源文件 → 重扫 ⇒ 该 `doc_path` 在**三张表**行数均 = 0。
 
 **⑦ 只读 MD**：扫描器**不写任何 MD**（X2-b：节级 status 不回写）。**判据**：跑完 `git status --porcelain` 中 MD 零改动。
 
+**⑧ 契约补遗（G1–G5）——票己审查后店长补钉（承 map Decisions 36 二）**
+
+> **背景**：票己 只交付了 `chunks.ts` 的**读侧**入口；**写侧（FTS 行 / 向量行 / 三表孤儿删）全是本票的面**，而本票原票面**一字未提**。以下五条为**派单前就地补钉**，不是实施期追认。
+
+- **G1 · `chunks_fts.content` 存 bigram 预分词串，不是原文**：必须 `bigramTokenize(body + ' ' + breadcrumb).join(' ')` 后写入。**`bigramTokenize` 直接复用 `db/repository/memories.ts:29`**（`memories.ts:108` 的 `ftsContent` 是同一形态）——**实现前先读那条写侧范式，逐项对齐，不另发明**。**判据**：写入侧照原文写 ⇒ 关键词通道 `MATCH` **永远零命中且不报错**（静默失败，S2 抓不到）⇒ 必须有「写入后按关键词能命中」的用例。
+- **G2 · FTS 行 `rowid` 必须 = `chunks.rowid`**：读侧 `chunks.ts:196` 写死 `JOIN chunks c ON c.rowid = f.rowid`（`chunks.id` 是 `INTEGER PRIMARY KEY` ⇒ 与 rowid 同值）。写入照 `memories.ts:169-174` 形态：先 `DELETE FROM chunks_fts WHERE rowid = ?` 再 `INSERT INTO chunks_fts (rowid, content) VALUES (?, ?)`。
+- **G3 · vec0 主键必须传 `BigInt`**：写 `chunk_vectors` 时 `BigInt(chunkId)`——sqlite-vec **拒非整数 PK**（建表注释见 `db/index.ts:543-550`）。**判据**：不传 BigInt ⇒ 向量行写不进（报错或静默）⇒ 向量通道零召回。
+- **G4 · `evidence` 入参形态 = `{kind, ref}` 对象数组**：真实 frontmatter（票戊已落 7 份）形态为 `evidence: [{kind: commit, ref: d555732}, …]`；map Decisions 20 定「每条 `{kind, ref}`，`kind ∈ {commit, file, exec-log, external}`」。票己 的 `ChunkUpsertInput.evidence?: string[]` **太窄** ⇒ **授权最小放宽**（改为可承载该对象数组的类型），**但 SQL/存储语义不变**（仍 `JSON.stringify` 落 JSON 文本）。**判据**：拿 `docs/adr/0007-*.md` 真实 frontmatter 走一遍 `upsertChunk` ⇒ `evidence` 列是对象数组的 JSON，读回可解析出 `kind`/`ref`。
+- **G5 · 孤儿删三表齐删**（已并入上方 ⑥ / S5）。
+
+**⑨ 搭车项（店长拍的搭车，非本票原生范围）**：`scripts/probes/dsh-acp-probe.e2e.mjs` 头注释仍指旧路径（票癸保留 R100 是有意取舍）⇒ **顺手修一行注释**指新落点。**判据**：注释路径存在。
+
 ### 边界
 
-**In Scope**：scan.mjs（白名单 / 增量 / fail-closed / 孤儿删 / 报告）/ 两条 npm script / 启动 spawn / 单测
+**In Scope**：scan.mjs（白名单 / 增量 / fail-closed / 孤儿删 / 报告）/ 两条 npm script / 启动 spawn / 单测 / **`chunks.ts` 写侧同步（FTS + 向量 + 三表孤儿删，见 ⑧）** / **G4 的 `evidence` 入参类型最小放宽** / 搭车项 ⑨
 **Out of Scope**：**不改检索链**（票辛）/ **不改 `memories`**（票壬/辛）/ **不做定时任务** / **不建索引埋点**（X5 落 log 归票辛）/ 不实现切片与嵌入（票丙/丁 已交付）
 
 ### 验收（逐条可执行）
@@ -484,14 +498,18 @@ export const SCAN_PREFIXES = ['docs/adr/', 'docs/lessons/', 'docs/plans/']
 | S2  | fail-closed 不静默            | 放一件无 frontmatter ⇒ 零行**且**出现在 `skipped[]`（含 reason）；`evidence: []` 同样                                                                     |
 | S3  | 幂等                          | 连扫两次：第二次 `inserted=0, updated=0`，行数不变                                                                                                        |
 | S4  | 增量是 SHA 不是 mtime         | `touch`（或 checkout 切分支）后重扫 ⇒ 仍 `skipped: unchanged`                                                                                             |
-| S5  | 孤儿物理删                    | 删源文件重扫 ⇒ 该 `doc_path` 在 `chunks` 与 `chunk_vectors` 均 0 行                                                                                       |
+| S5  | 孤儿物理删（三表）            | 删源文件重扫 ⇒ 该 `doc_path` 在 `chunks` **与** `chunk_vectors` **与** `chunks_fts` **三表**均 0 行（原只写前两表 ⇒ FTS 僵尸行累积；承 ⑥/G5）             |
 | S6  | 嵌入失败不写脏行              | mock sidecar 失败 ⇒ 该件零行 + `errors[]` 含 reason（**无半截行**）                                                                                       |
 | S7  | 不写 MD                       | 跑完 `git status --porcelain -- '*.md'` 输出为空                                                                                                          |
 | S8  | reindex 可重建                | 同输入连续两次 `reindex` ⇒ `chunks` 按身份键排序后**逐列相等**（X3 不变式）                                                                               |
 | S9  | 启动不阻塞                    | sidecar / git 不可用时 server 正常启动（spawn 失败只记 log）                                                                                              |
 | S10 | （Gate C 反例补）真实仓库全量 | 对**真实工作区**跑一次全量 `scan`：`scanned` 数 == 白名单内合格文件数，且 `skipped[]` **逐个列名**——S1 只验「4 类各一件」，**小样本全绿不能反证真实仓库** |
 
-**签收判据**：S1–S9 全过 + `memory/index.ts` / `reply.ts` 零 diff。
+| S11 | （补钉 G1/G2）关键词通道真能命中 | 写入后按 `body` 里的词调 `searchChunksByKeyword` ⇒ **命中且非空**；并断言 `chunks_fts.content` 已是 bigram 串（≠ 原文）——**G1 是静默失败型地雷，S2/S3 抓不到** |
+| S12 | （补钉 G3）向量行真写进去了 | 写 `chunk_vectors` 后 `searchChunksByVector` 能召回该片；且写入用 `BigInt(chunkId)`——**不传 BigInt 的写法必须有一条反例用例** |
+| S13 | （补钉 G4）evidence 往返 | 用 `docs/adr/0007-*.md` 的**真实 frontmatter** 走一遍 ⇒ `evidence` 列为对象数组 JSON，读回能解出 `kind`/`ref` |
+
+**签收判据**：S1–S13 全过 + `memory/index.ts` / `reply.ts` 零 diff。
 
 ### 决策留痕
 
@@ -502,7 +520,7 @@ export const SCAN_PREFIXES = ['docs/adr/', 'docs/lessons/', 'docs/plans/']
 
 ## 票壬 · 旧写口退役（段三 · S5，**用户裁「退 + 删」**）
 
-**状态**：**已出票 · 待派**（独立，无前置）
+**状态**：**本轮派 flash猫**（2026-09-12：独立票、无前置；与票庚同批派——两者改动面无交集：本票动 `memory/index.ts`/`ingest.ts`，票庚动 `scan.mjs`/`chunks.ts`/`index.ts`）
 **承**：map Decisions 34 零（**用户原话「2 退 + 删」**）/ Decisions 5（只索引结晶 MD、不索引对话原话）/ Decisions 6（索引侧永远无独立写口）/ Decisions 17（DEDUP 作废、改身份键幂等）
 **动机**：`saveMessageMemory` 是**第二个写口**，与「索引侧无写口」正面冲突；其 `0.20 ≤ d < 0.35` 分支还会**覆写旧记忆正文**（演化原则 #4）。留着它，段三的新链路就永远有一条旁路在写旧表。
 
@@ -526,7 +544,8 @@ scripts/flywheel/retire-message-memory.mjs      （一次性、幂等 DELETE）
 
 1. **摘调用**：`ingest.ts` 移除 `saveMessageMemory` 的 import 与调用点。**该调用点周围的行为不得改变**（消息落库 / 广播 / 后续处理全部原样）。
 2. **删函数**：`memory/index.ts` 删 `saveMessageMemory` 及其**仅供它使用**的私有分支（含 `0.20 ≤ d < 0.35` 覆写分支 `memory/index.ts:115-125` 附近——**行号 grep 复核**）。**公共检索函数一律不动**（那是票辛的面）。
-3. **清存量**：`DELETE FROM memories` + `DELETE FROM memories_fts`（+ `memories_vec` 若存在）。**⚠️ 只清数据、不 DROP 表**。
+3. **清存量**：`DELETE FROM memories` + `DELETE FROM memories_fts`。**⚠️ 只清数据、不 DROP 表**。
+   - ⚠️ **勘误（2026-09-12 店长实测）**：`memories_vec` **在本仓不存在**——`grep -rn 'memories_vec' packages/ scripts/ docs/adr/` **零命中**；向量是 `memories.embedding BLOB`（`db/index.ts:131`），**没有对应的 vec0 表**。原括号「`memories_vec` 若存在」是**空引用**，已删；**不得**把它写成硬编码目标表（写了 ⇒ 脚本当场 `no such table`）。
 
 **② 为什么「不 drop 表」（诚实标注，防下游误读）**
 
@@ -543,15 +562,16 @@ scripts/flywheel/retire-message-memory.mjs      （一次性、幂等 DELETE）
 
 ### 验收（逐条可执行）
 
-| #   | 验收项                      | 判据                                                                                                                                                                       |
-| --- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| V1  | 零引用                      | `grep -rn "saveMessageMemory" packages/ scripts/` ⇒ **零命中**（含 `.test.ts` 与 mock）                                                                                    |
-| V2  | ingest 不回归               | `connectors/socketio.test.ts` 全绿；消息落库 / 广播断言不变                                                                                                                |
-| V3  | 存量清零                    | 对目标库执行后 `SELECT COUNT(*) FROM memories` = 0 且 `memories_fts` 同（**执行记录附前后行数**）                                                                          |
-| V4  | 幂等                        | 清理脚本连跑两次：第二次零报错、零变更                                                                                                                                     |
-| V5  | 无 skip 残留                | 删除的测试不留 `.skip` / 注释掉的死代码                                                                                                                                    |
-| V6  | 表结构还在                  | `PRAGMA table_info(memories)` 仍有列（**未 drop**——防实施者「顺手」drop）                                                                                                  |
-| V7  | （Gate C 反例补）删除面收敛 | 清理脚本**硬编码三张目标表**（`memories`/`memories_fts`/`memories_vec`），**不接受参数化表名**；执行记录列出**三表各自**的前后行数（防「误删其它表」在单条汇总数里不可见） |
+| #   | 验收项                      | 判据                                                                                                                                                                                                    |
+| --- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| V1  | 零引用                      | `grep -rn "saveMessageMemory" packages/ scripts/` ⇒ **零命中**（含 `.test.ts` 与 mock）                                                                                                                 |
+| V2  | ingest 不回归               | `connectors/socketio.test.ts` 全绿；消息落库 / 广播断言不变                                                                                                                                             |
+| V3  | 存量清零                    | 对目标库执行后 `SELECT COUNT(*) FROM memories` = 0 且 `memories_fts` 同（**执行记录附前后行数**）                                                                                                       |
+| V4  | 幂等                        | 清理脚本连跑两次：第二次零报错、零变更                                                                                                                                                                  |
+| V5  | 无 skip 残留                | 删除的测试不留 `.skip` / 注释掉的死代码                                                                                                                                                                 |
+| V6  | 表结构还在                  | `PRAGMA table_info(memories)` 仍有列（**未 drop**——防实施者「顺手」drop）                                                                                                                               |
+| V7  | （Gate C 反例补）删除面收敛 | 清理脚本**硬编码两张真实存在的目标表**（`memories` / `memories_fts`——`memories_vec` 本仓不存在，见 ③ 勘误），**不接受参数化表名**；执行记录列出**各表前后行数**（防「误删其它表」在单条汇总数里不可见） |
+| V8  | 无空引用报错                | 脚本对目标库执行**零 `no such table`**（任何人照 map 或旧票面补一句 `memories_vec` 就会当场炸——这是本票唯一「照文档抄就翻车」的点）                                                                     |
 
 **签收判据**：V1–V6 全过 + `memory/index.ts` 中**公共检索函数零 diff**。
 
@@ -564,7 +584,7 @@ scripts/flywheel/retire-message-memory.mjs      （一次性、幂等 DELETE）
 
 ## 票辛 · 检索接线（段三收口 · W 组 + Q7 全落）
 
-**状态**：**已出票 · 待派**（依赖票己 + 票庚 + 票壬 落地）
+**状态**：**已出票 · 待派**（依赖：票己 ✅**已落地 `8efab3d`** / 票庚 · 票壬 **本轮在飞** ⇒ 本票**不在本轮派**；票面已按票己审查补钉 **X1–X3**，见下 §契约补遗）
 **承**：map Decisions 34 九–十三（W1–W5）/ Decisions 32（埋点契约 = **阈值前 top-N 切片身份 + 距离**）/ Decisions 14（450 上限 + 小块检索整节返回）/ Decisions 28/30（两条条件触发的信号源）
 **动机**：把 `chunks` 接进 `reply` 的上下文注入，让记忆飞轮真正闭环——**这也是 B8「启用」分支的天然真机窗口**（票丁收口留账：`MEMORY_ENABLED=true` 的真机验证刻意留给本票）。
 
@@ -598,7 +618,15 @@ packages/server/src/index.ts                    （MEMORY_ENABLED 分支：启�
 
 **⑤ W4 冲突修正闭环 = 不建新机制**：**不实现任何新的审核面 / UI / 批量通道**；撞「与现实矛盾」走既有审查链（提审查 → 改 MD → 重扫）。**本项在票面上是「不做」**——实施者若建了机制即违约。
 
-**⑥ 旧链下线**：`memories` / `memories_fts` / `memories_vec` **DROP**；`searchMemoriesHybrid` 及其调用链删除（`db/repository/memories.ts` 相应函数、`query-rewrite.ts` 若仅供旧链则一并退役——**须先 grep 调用面**）。
+**⑥ 旧链下线**：`memories` / `memories_fts` **DROP**（⚠️ **`memories_vec` 本仓不存在**——实测零命中，向量是 `memories.embedding BLOB`，见 ⑧ X1）；`searchMemoriesHybrid` 及其调用链删除（`db/repository/memories.ts` 相应函数、`query-rewrite.ts` 若仅供旧链则一并退役——**须先 grep 调用面**）。
+
+**⑦ 契约补遗（X1–X3）——票己审查后店长补钉（承 map Decisions 36 二）**
+
+> **背景**：以下三条都是**「照某个文档抄就翻车」**型地雷，票己审查逐条取证后交给本票。补钉在**派单前**，不是实施期追认。
+
+- **X1 · `memories_vec` 是空引用（OQ-0）**：票己票面写的「与 `memories_vec` 同形」在**本仓根本不存在该对象**（`grep` 零命中）。票己实现选了票面**显式契约**那半句（vec0 / `float[512]`）——**正确**。对本票的含义：**向量通道一律走 vec0 `MATCH`**（票己 `searchChunksByVector` 已交付，直接调），**不要照 `searchMemoriesByVector` 的 BLOB 扫表写法抄**——那是 `memories.embedding BLOB` 的旧形态，两者**不是同一种检索**。
+- **X2 · 降级三态的「召回空」≠「嵌入失败」（OQ-4）**：票己 `searchChunksByVector` 是**先 KNN 截断、后 `status` 过滤**（`LIMIT topK` 在**内层**）⇒ 最近的 topK 片若全被标失效，返回**空**但**嵌入是好的**。W3 三态必须把这种空与「嵌入失败」「`MEMORY_ENABLED=false`」**分开报**，否则把全失效候选池误判成嵌入坏、修错地方。
+- **X3 · 过滤面以票面为准，不是 map（OQ-1）**：权威原文 = **票己票面 · 契约 §查询体过滤面**：`WHERE (status IS NULL OR status NOT IN ('superseded','deprecated'))`——**`status IS NULL` 放行**（NULL = 未声明状态，不是已失效）。map 那句原缺 `status IS NULL` 分支，**已回改**（Decisions 34 七勘误行），但**判据仍取票面**。**照 map 旧句抄 = 实现出相反语义**（NULL 行被静默滤掉）。
 
 ### 边界
 
@@ -619,7 +647,11 @@ packages/server/src/index.ts                    （MEMORY_ENABLED 分支：启�
 | W8  | 旧链零残留                    | `grep -rn "searchMemoriesHybrid\|memories_fts" packages/server/src` 零命中（DROP 后无悬挂调用）                                       |
 | W9  | （Gate C 反例补）真实语料注入 | 对**真实全量 `chunks`** 跑一次注入：记录注入 token 数 / 截断节数 / 是否触上限——**构造语料全绿不能反证**（真实语料可能单节即接近上限） |
 
-**签收判据**：W1–W8 全过 + **用户重启审批已批**（本票改 server 运行时 ⇒ 收口必走 `request_user_action`）。
+| W10 | （补钉 X1）向量通道形态 | 向量召回走 `chunk_vectors` 的 vec0 `MATCH`（调票己 `searchChunksByVector`）——**全仓 grep 不得出现 `memories_vec` 引用**；不得引入 BLOB 扫表式向量检索 |
+| W11 | （补钉 X2）召回空 ≠ 嵌入失败 | 构造「最近 topK 全被 `status` 挡掉」的库 ⇒ 结果与日志必须报**「召回空（被状态过滤）」**，**不是**嵌入失败；三态断言各自 `reason` 相异（W4 加此第四态） |
+| W12 | （补钉 X3）NULL 行真被放行 | 库内放一条 `status IS NULL` 的片 ⇒ **必须被召回**（运行时断言，非只断源码）——照 map 旧句抄会让它静默消失 |
+
+**签收判据**：W1–W12 全过 + **用户重启审批已批**（本票改 server 运行时 ⇒ 收口必走 `request_user_action`）。
 
 ### 决策留痕
 
@@ -631,7 +663,8 @@ packages/server/src/index.ts                    （MEMORY_ENABLED 分支：启�
 
 ## 票癸 · 段一归位（段一收口 · 发现②四项 + Q2-c/Q2-d 落地）
 
-**状态**：**本轮派 flash猫**（2026-09-12 用户「3发车」授权）
+**状态**：**已收口**（2026-09-12：交付 `9df86fd` → 吐槽猫审查 **✅ 零返工**（**6×R100** 实测 / `git rev-parse 9df86fd^:tickets.md` == 目标 blob `6ee3ed8…` 根 `tickets.md` **逐字节未动** / E1 十三份 ADR 全合规 / `packages/` 零命中）→ **PR #51** carrier = merge commit `8efab3d` 并入 `dev`；店长实查。**勿再派活**）
+**收口留痕**：本票审查曝出两条偏差（**均由实施者自报、非静默**）：① **探针 usage 行破窗**——头注释仍指旧路径，但改它会破 R100 ⇒ 两害相权保留 R100（**店长裁：正确**），修正式注释**搭车到票庚 ⑨**；② **OQ-3 命名冲突**（map Decisions 9 写 `LL-NNN-slug.md` vs 门牌写 `<slug>.md`）⇒ **店长裁：以落地事实 `<slug>.md` 为准**，已回改 map Decisions 9（见 Decisions 36 一）。
 **承**：map Decisions 34 零 + 十三 / Decisions 12（删 `docs/requirements/` + 迁 `docs/plans/dev-process-gate-flow.md`）/ Decisions 9（`docs/lessons/` 立格）/ Decisions 13（本票触发条件「待 Q3 裁完」**已满足**——Q3 随票丙收口裁完）
 **动机**：段三扫描器按「白名单 + fail-closed」挡得住脏件，但**门牌缺失是段二的基线问题**：文件放错目录 ⇒ 白名单扫不到 ⇒ 沉淀的知识永远进不了索引。**它是段三的下游受益方，不卡段三开工**（S3 已裁解耦）。
 
