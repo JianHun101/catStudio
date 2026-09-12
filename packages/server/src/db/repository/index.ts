@@ -27,6 +27,7 @@ import { setRepoDb as setEvalScoresDb } from './evalScores.js'
 import { setRepoDb as setUserFeedbackDb } from './userFeedback.js'
 import { setRepoDb as setSettingsDb } from './settings.js'
 import { setRepoDb as setFlowStatesDb } from './flowStates.js'
+import { setRepoDb as setChunksDb } from './chunks.js'
 
 /** 初始化所有 repository 模块的 db 实例（在 initDb() 之后调用） */
 export function initRepository(db: Database.Database): void {
@@ -44,6 +45,7 @@ export function initRepository(db: Database.Database): void {
   setUserFeedbackDb(db)
   setSettingsDb(db)
   setFlowStatesDb(db)
+  setChunksDb(db)
 }
 
 // 按实体分组导出，调用方用 repo.agents.xxx / repo.sessions.xxx 等
@@ -61,6 +63,7 @@ export * as evalScores from './evalScores.js'
 export * as userFeedback from './userFeedback.js'
 export * as settings from './settings.js'
 export * as flowStates from './flowStates.js'
+export * as chunks from './chunks.js'
 
 // Row 类型也一并导出
 export type {
@@ -69,6 +72,7 @@ export type {
   MessageRow,
   MessageWithAgentName,
   MemoryRow,
+  ChunkRow,
   ExecutionLogRow,
   SessionReadStateRow,
   ConnectorBindingRow,

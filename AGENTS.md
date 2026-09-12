@@ -79,7 +79,7 @@ pnpm build                # pnpm -r build
 
 - `CONTEXT.md` — 术语表、模块目录结构、文档位置约定、流程约定
 - `docs/adr/` — 架构决策记录（新增前先读既有编号）
-- `docs/run/` — 开发文档·在飞（本轮票单）；活收口即清，结论上浮到 `docs/requirements/`/`docs/sessions/`
+- `docs/run/` — 开发文档·在飞（本轮票单）；活收口即清，结论上浮到 `docs/plans/`/`docs/sessions/`
 - `CODING_STANDARDS.md` — 编码规范
 - `.env.example` — 全部环境变量与默认值
 - `README.md` — 面向用户的项目说明

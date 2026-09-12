@@ -6,14 +6,14 @@ evidence:
   - kind: commit
     ref: 0583825
   - kind: file
-    ref: docs/adr/research-2026-08-17-acp-feasibility.md
+    ref: docs/research/research-2026-08-17-acp-feasibility.md
   - kind: file
     ref: packages/server/src/llm/adapter.ts
 ---
 
 # ADR 0008: 多供应商统一接入采用 ACP（connector 并存、分步迁移）
 
-> **调研来源**：`docs/adr/research-2026-08-17-acp-feasibility.md`（commit `0583825`，flash猫 调研，吐槽猫 审查 ✅可合并）。用户拍板方向「直接上 ACP」，本 ADR 将调研结论固化为架构决策。
+> **调研来源**：`docs/research/research-2026-08-17-acp-feasibility.md`（commit `0583825`，flash猫 调研，吐槽猫 审查 ✅可合并）。用户拍板方向「直接上 ACP」，本 ADR 将调研结论固化为架构决策。
 > **过 ADR 0007 四步检查单**：能力对账前置（§1 覆盖表）／假设标红 + 实测对称（§8，🔴 转 ✅、cancel 证伪）／简单形态默认复杂举证倒置（§5.2 一轮一进程不可行证伪）／决策留痕（本 ADR 证据段引用调研笔记）。
 
 ## 决策
