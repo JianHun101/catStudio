@@ -1413,6 +1413,30 @@ Decisions 37 的四 记「`map.md` 改动落在主仓 dev 工作区、未提交�
 
 **五、收口顺带复核到的一件事（供后续票参考，未立票）**：`dev.js` 的重启链**只重启 server 子进程，不 re-exec 自己**（`restartWithRetry` → `startServer()` → `spawn(tsx, index.ts)`，`process.execPath` 只在起 web/vite 时用）⇒ **凡是改到 `scripts/dev.js` 的票，都天然多一层「dev.js 自身需重跑」的收口前置**；票巳是第一个撞上的，此后同类票（含票辰那类端口改动）出票时就该在验收面写明这一步。
 
+## Decisions 58 —— 票巳 **D1/D2/D3 真机三验全过 ⇒ 本票真收口**（2026-09-12 23:45:55 按钮重启窗口；**日志原文时间戳，非转述**）
+
+**一、序已走完（Decisions 57 三 那条内存态前置已消解）**：用户重跑 `pnpm dev`（`dev.js` 换新）→ 店长发重启审批 → 用户点按钮。**旧进程 PID 对照佐证换新**：server `996 → 31492 → 2876`、sidecar `16628 → 27136 → 10156`（`Get-Process` 读 `StartTime`：server `23:45:55`、sidecar `23:45:57`，与日志逐毫秒对齐）。
+
+**二、日志原文（`packages/server/data/cat-study.log`，本轮窗口）**
+
+| 时刻           | module             | 原文                                                                         |
+| -------------- | ------------------ | ---------------------------------------------------------------------------- |
+| `23:45:55.691` | `shutdown-request` | 收到关停请求（文件握手），走优雅关停                                         |
+| `23:45:55.692` | `server`           | `shutting down...`                                                           |
+| `23:45:55.698` | `memory:embedding` | 嵌入 sidecar 关停 · `port:3210` · `killedChild:true`                         |
+| `23:45:57.853` | `server`           | `server started` · `127.0.0.1:3200`                                          |
+| `23:45:57.964` | `memory:embedding` | 嵌入 sidecar 就绪 · `port:3210`                                              |
+| `23:45:58.134` | `server`           | 飞轮扫描完成 · `scanned:18 inserted:0 updated:0 skipped:18 orphansDeleted:0` |
+
+**三、三项判定**
+
+- **D1 ✅**——回收行带**真端口 `3210`**（非 fallback 值），且 `killedChild:true`。
+- **D2 ✅**——`shutting down...` + 回收行**均出现**；**兜底强杀行未出现**。判据说明（**如实标注取证方式**）：强杀行只在**宽限窗 `SHUTDOWN_GRACE_MS` 用尽后**才打印，而本次「收到关停请求 → 新 server 已起」跨度 **2.16s**（`:55.691 → :57.853`）**远小于 5s 上界** ⇒ 该分支**结构性不可达**；这是**由时间戳推定的判定，不是直接读用户终端缓冲**（店长无该终端的读权，不伪装成直接观测）。
+- **D3 ✅**——`embed-server.mjs` 进程数 = **1**（`Get-CimInstance Win32_Process` 计数；重启前基线同为 1）。
+- **契约 4（陈旧文件清理）双向实测生效**：重启后 `.shutdown-request` 与 `.restart-request` **均不在盘上**——读方消费后删（server）与写方 `finally` 兜底删（`dev.js`）两道都跑到了，无「启动即自杀」风险。
+
+**四、顺带发现（**不属票巳**，登记待裁）**：本窗口的启动扫描 `skipped:18`（无新内容 ⇒ **未调嵌入**）⇒ **票辰 C6 后半「真实增量扫描时扫描器侧 sidecar 落在非 3210 端口、无 `EADDRINUSE`」仍未通电**；C6 前半「日志见 `port=3210`」已由本窗口 `:57.964` 行闭合。**可证伪触发条件**：下次**有新内容**的扫描若报 `EADDRINUSE` 或扫描整轮 `embed-failed` ⇒ 出返工票（承 Decisions 51 一 的 C6 原判据）。
+
 ## Not yet specified
 
 <!-- 雾区：能看出要来、但还问不出精确问题的 -->

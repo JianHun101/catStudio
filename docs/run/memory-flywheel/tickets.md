@@ -1045,7 +1045,12 @@ packages/server/src/execution/serial.test.ts
 
 - **单测复跑**：`shutdown-request.test.ts` + `memory/embedding.test.ts` + `memory/embedding-client.test.ts` + `scripts/graceful-stop.test.js` ⇒ **75 passed / 4 files**（≥ 审查面所报 66/3，含全部新增用例）。
 - **D3 孤立实测（真机，`embed-server.e2e.mjs` B10）**：`EMBED_SIDECAR_PORT=3211 node scripts/flywheel/embed-server.e2e.mjs` ⇒ **14 passed / 0 failed**；B10 阳性对照（杀前两侧都活）+ 阴性对照（硬杀后 parent 判死）齐，**`taskkill /F` 只杀父进程（不带 `/T`）⇒ sidecar `124ms` 内自退**。**⇒ 现状 ⑥「非 Windows 会成孤儿」不成立、⑤「唯一原因是 `/T`」非唯一原因，两条更正均经实测坐实**；`(c)` 降为「补断言」有据（e2e B10 即该断言）。
-- **D2 真机 + D3「重启后 sidecar 数 = 1」⇒ 待重启窗口**，且**该窗口有一层前置**：当前长驻的 `dev.js` 进程是**改动前**起的（`startServer` 的优雅停旧逻辑在内存里还是旧版）⇒ **先重跑 `pnpm dev` 让 dev.js 一并换新**，再走按钮重启，才观测得到 `shutting down...` + 回收行 + 无兜底强杀行。**在此之前 D2 不得记 ✅**。
+- **D2 真机 + D3「重启后 sidecar 数 = 1」⇒ ✅ 已闭合**（2026-09-12 `23:45:55` 按钮重启窗口，日志原文时间戳）。前置（长驻 `dev.js` 需先重跑换新）已由用户走完，`dev.js` 换新对照 = 旧 PID `996/31492` → 新 `2876`、sidecar `16628/27136` → `10156`：
+  - **D1 ✅** 回收行带**真端口 `3210`**（非 fallback）+ `killedChild:true`。
+  - **D2 ✅** `shutting down...` + 回收行**均出现**、**兜底强杀行未出现**——判据由时间戳推定（「收到关停请求 → 新 server 已起」= **2.16s**，远小于 `SHUTDOWN_GRACE_MS = 5s` ⇒ 强杀分支结构性不可达），**非直接读用户终端缓冲**（如实标注取证方式，不伪装成直接观测）。
+  - **D3 ✅** `embed-server.mjs` 进程数 = **1**（重启前基线同为 1）。
+  - **契约 4 双向实测生效**：重启后 `.shutdown-request` / `.restart-request` 均不在盘上（读方消费后删 + 写方 `finally` 兜底删两道都跑到）。
+  - 全链明细见 **map Decisions 58**。**勿再派活。**
 
 **动机**：票丁 OQ4 留账「关停链未观察」，店长判定规则 = **「下次 server 关停时验，无回收行才出票」**。2026-09-12 20:33 重启窗口首次取证 ⇒ **关停侧零日志** ⇒ 按规则**出票**。
 
