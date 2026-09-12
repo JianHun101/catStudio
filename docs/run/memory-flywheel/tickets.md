@@ -584,7 +584,9 @@ scripts/flywheel/retire-message-memory.mjs      （一次性、幂等 DELETE）
 
 ## 票辛 · 检索接线（段三收口 · W 组 + Q7 全落）
 
-**状态**：**已派 ds猫**（2026-09-12：依赖**已全满足**——票己 ✅ `8efab3d` / 票庚 ✅ **`bf11cbd`**（PR #53）/ 票壬 ✅ `854f766`，三票均已并入 `dev`；票面已按票己审查补钉 **X1–X3**，见下 §契约补遗）
+**状态**：**已收口**（2026-09-12：交付 `a0624c6` + 返工 `14e1706` → 吐槽猫**首轮两条必修** → 返工后**复查 ✅ 零返工** → **PR #54** carrier = merge commit **`db2216e`** 并入 `dev`（`dev` = `origin/dev` = `.push-gate` 三方对齐，店长实测）；店长独立复跑 `chunks.test.ts` **35 passed** / `mcp-server.test.js` **67 passed**。参见 **map Decisions 40**）
+**⚠️ 唯一未完成项**：**W7 真机三验**（`MEMORY_ENABLED=true` 起 server 的 sidecar 自起 / 真文本 512 维 / 停 sidecar 走降级）——**重启后执行**，重启审批已重发（与票丁 B8 同一窗口合并做）。**勿再派活。**
+**派活留痕**：曾派 ds猫（依赖**已全满足**——票己 ✅ `8efab3d` / 票庚 ✅ **`bf11cbd`**（PR #53）/ 票壬 ✅ `854f766`，三票均已并入 `dev`；票面已按票己审查补钉 **X1–X3**，见下 §契约补遗）
 **派活留痕**：派 ds猫 的理由 = `chunks` schema 的**读侧（票己）与写侧（票庚）均为其交付**，接线面最熟
 **承**：map Decisions 34 九–十三（W1–W5）/ Decisions 32（埋点契约 = **阈值前 top-N 切片身份 + 距离**）/ Decisions 14（450 上限 + 小块检索整节返回）/ Decisions 28/30（两条条件触发的信号源）
 **动机**：把 `chunks` 接进 `reply` 的上下文注入，让记忆飞轮真正闭环——**这也是 B8「启用」分支的天然真机窗口**（票丁收口留账：`MEMORY_ENABLED=true` 的真机验证刻意留给本票）。
