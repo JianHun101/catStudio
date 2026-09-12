@@ -96,9 +96,14 @@ export const DEFAULT_MAX_MENTIONS_PER_AGENT = 5
  *  `0` / 负数 / 非法值 → **回默认 5**，不开放"不限"：这是防循环护栏，不是性能旋钮。
  *  与 `PROVIDER_TOKEN_CAP`（0 = 不限）**刻意不同**，写在此处防按那个惯例误推。
  *
- *  **注意双计**：调度点「检查 + 预留」（下方原子段）与执行完成处（`depth>0`，
- *  本文件下方另一处 `setMentionCount`）**各计一次** ⇒ 实际可执行轮次 ≈ limit / 2
- *  （默认 5 → 约 3 轮；第 4 轮起被拦，拦截时记 warn）。 */
+ *  **计数口径 = 单计**（票丑归一）：唯一计数点是 A2A 调度点的「检查 + 预留」
+ *  原子段（下方锚点 `+ 1) // 预留配额`），计的是**被派发的目标**。故
+ *  `MAX_MENTIONS_PER_AGENT = N` ⇒ **单 trace 内单猫最多被 A2A 派发 N 次**，可直读。
+ *  原「调度点 + 执行完成处各计一次 ⇒ 实际轮次 ≈ limit / 2（默认 5 → 约 3 轮）」
+ *  的双计口径**已作废**（那是配置值不可直读的根因）。
+ *
+ *  语义注：预留先于槽位检查 ⇒ **调度即计数**——入队后未执行/失败的派发同样占额
+ *  （「预留不退回」是既有语义），钉在 V7。 */
 export function resolveMentionLimit(
   raw: string | undefined = process.env.MAX_MENTIONS_PER_AGENT
 ): number {
@@ -652,17 +657,16 @@ async function executeOneAgent(
       claudeRan = await drainQueuedCommand(ctx, agent, queuedCmd, claudeRan)
     }
 
-    // 执行成功后记录 mention 计数（防止无限 agent-to-agent 循环——
-    // 同一 trace 内某 agent 真实完成 ≥MAX 次 A2A 执行后，不再被重新调度。
-    // 计数的是实际执行次数而非进入执行循环的次数，因此未执行的
-    // 排队任务/审查闭环 mention 不消耗配额（阈值内不受限）。
-    // 仅 depth>0（A2A 链路）计数——用户顶层触发（depth=0）不消耗配额，
-    // 否则用户 @ 触发的执行会把计数推满，后续同 trace 的 A2A @ 被误杀）
-    // 并发化后注：A2A 调度点的「检查+预留」（下方原子段）与本处实际执行
-    // 双计——预留是并发互斥机制（防双双放行），本处计真实执行（配额确认）
-    if (depth > 0) {
-      state.setMentionCount(traceId, agent.id, state.getMentionCount(traceId, agent.id) + 1)
-    }
+    // ── 票丑 · 计数点归一：此处原「执行成功后记录 mention 计数」（`depth>0` 时对
+    // **执行者自己** +1）已删除，配额改为**单计**。唯一计数点是下方 A2A 调度点的
+    // 「检查 + 预留」原子段（锚点 `+ 1) // 预留配额`），计的是**被派发的目标**。
+    //   · 语义 = **调度即计数**：预留先于槽位检查 ⇒ 入队未执行/失败的派发同样占额
+    //     （「预留不退回」是既有语义）。原此处注释主张的「未执行的排队任务不消耗
+    //     配额」在单计下**与原意相反**，下葬凭证是 V7（机器判据，非注释）。
+    //   · 单位可直读：`MAX_MENTIONS_PER_AGENT=N` ⇒ 单 trace 内单猫最多被 A2A **派发** N 次。
+    //   · 顶层触发（depth=0）不消耗**自己的**配额——单计后执行者永不自计，与旧
+    //     `depth>0` 门等效（用户 @ 触发的执行不会把计数推满、误杀后续同 trace 的 A2A @）。
+    //   · 并发互斥仍由预留点单独承担（检查与执行之间隔着整个 LLM 调用，见下方原子段）。
 
     // Agent-to-agent dispatch：解析/白名单/写回已在上方 P0 段完成（槽位释放
     // 之前），本段只做「通知 + 配额 + 派发」——写回不再依赖本段执行时机。
@@ -791,12 +795,12 @@ async function executeOneAgent(
         // filter 只读不改），批内 A、B 执行体同时检查到 count=4 会双双
         // 放行、目标 C 实际被调度超限 1（派活单必改点 1）——先到者的
         // 预留写先落，后到者读到已预留值被拦截。
-        // 预留 = 调度即计数：目标执行成功的递增（上方 completeExecution
-        // 后，depth>0）仍在——双计让防护阈值更早触达，正常审查链深度
-        // （2-3）远在阈值（默认 5）内不受影响；预留后未执行（跳过/失败）
-        // 的配额不扣回——阈值 5 下影响边际，防循环优先。
-        // 阈值 T-K 起可配（resolveMentionLimit 现读 env）：双计⇒**实际轮次 ≈ limit/2**，
-        // 不要把 limit 直接读成"能派几轮"。
+        // 预留 = **调度即计数**（票丑归一后**唯一**计数点，本处即配额单位本身）：
+        // 单位 = 被派发次数，含**入队未执行/后续失败**的派发（预留后不扣回）；
+        // 本段之前的「目标执行成功再 +1」已删——那条双计让 limit 不可直读。
+        // 顶层触发（depth=0）不消耗自己的配额：计数只落**目标桶**，执行者永不自计。
+        // 阈值 T-K 起可配（resolveMentionLimit 现读 env）：单计 ⇒ `limit` **就是
+        // 「单 trace 内单猫最多被派发几次」**，可直读。
         const limit = resolveMentionLimit()
         const limitedAgents: AgentConfig[] = []
         for (const a of policy.allowed) {
@@ -810,7 +814,8 @@ async function executeOneAgent(
           // T-K：配额拦截此前**只有 info 级日志**——info 级在生产没人看 ⇒ 观感上就是
           // "派活凭空消失"（派活单实证：4 条被吞的派活 `dispatch_state=NULL`，执行链上
           // 无 warn）。抬到 `warn`，与 depth limit 同口径。
-          // 计数字段名带**单位**（Count = 只数）：双计下 `limit` 不是"轮次"，别再误读。
+          // 计数字段名带**单位**：单计后 `limit` = 该 trace 内该猫的**派发次数**上限，
+          // 可直读（不再有双计那层「实际轮次 ≈ limit/2」的折半）。
           log.warn('agent-to-agent mention limit filtered', {
             traceId,
             fromAgent: agent.name,
