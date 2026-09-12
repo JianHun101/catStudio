@@ -51,6 +51,8 @@ import {
   readSkill,
   listSkills,
 } from './mcp-server-utils.mjs'
+// 服务端权威白名单（query.ts 只 `import type`，无运行期副作用——可直接 import）
+import { QUERY_TABLE_SCHEMAS } from '../packages/server/src/db/repository/query.js'
 
 /**
  * 读 `skills/` 下任意仓库源文件（静态源断言用；路径由本文件位置推导，不依赖 cwd）。
@@ -172,10 +174,23 @@ describe('validateQueryDbParams (query_db)', () => {
     expect(r).toEqual({ ok: true, table: 'agents', conditions: conds, limit: 5 })
   })
 
-  it('六张白名单表全部放行', () => {
+  it('白名单表全部放行', () => {
     for (const t of QUERY_DB_TABLES) {
       expect(validateQueryDbParams({ table: t }).ok).toBe(true)
     }
+  })
+
+  // 表名这一层**不适用**「本层只校形状」——它是服务端 QUERY_TABLE_SCHEMAS 的镜像。
+  // 两边漂移 ⇒ 同一张表「MCP 侧 advertised / 服务端明确拒绝」两种结论
+  // （`memories` 随段三下线时就漏改过一次）。逐项钉死：改一处必须改三处。
+  it('QUERY_DB_TABLES 与服务端 QUERY_TABLE_SCHEMAS 逐项一致', () => {
+    expect([...QUERY_DB_TABLES].sort()).toEqual(Object.keys(QUERY_TABLE_SCHEMAS).sort())
+  })
+
+  it('query_db 的 tool schema enum 与 QUERY_DB_TABLES 一致', () => {
+    const tool = MCP_TOOLS.find((t) => t.name === QUERY_DB_TOOL_NAME)
+    expect(tool).toBeDefined()
+    expect([...tool.inputSchema.properties.table.enum].sort()).toEqual([...QUERY_DB_TABLES].sort())
   })
 
   it('表名非白名单（sqlite_master/不存在表/非字符串/缺省）→ 错误文本', () => {
@@ -552,7 +567,7 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
         properties: {
           table: {
             type: 'string',
-            enum: ['messages', 'memories', 'execution_logs', 'sessions', 'agents', 'knowledge'],
+            enum: ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge'],
           },
           conditions: {
             type: 'array',

@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createTestDb } from '../../test-helpers.js'
-import { setDb, resetDb, getDb, initDb } from '../index.js'
+import { setDb, resetDb, getDb, initDb, CHUNK_VECTOR_METRIC_FIX_SEQUENCE } from '../index.js'
 import { initRepository } from './index.js'
 import { chunks as chunksRepo } from './index.js'
 import { vectorToBlob } from '../../memory/index.js'
@@ -595,6 +595,53 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       // 向量行没了的 chunks 行必须一起清掉，否则扫描器按 origin_id 判「没变」
       // 会永远跳过它们 ⇒ 永久不可召回
       expect(countAll()).toEqual([0, 0, 0])
+    })
+
+    it('崩溃点穷举：守卫序列每个前缀后重跑 initDb() 都收敛（不残留「满库 + 空向量」）', () => {
+      // 「不可达的状态」没法用一条运行用例覆盖 ⇒ 对崩溃点穷举：逐个前缀模拟
+      // 「崩在第 n 条之后」，再跑一次生产启动链，断言不变式成立。
+      // 判据面 = 守卫自己导出的 sequence，所以**改序即改被测对象**，用例不会假绿。
+      // 反序实现（先 DROP/CREATE 再清数据）在第 1 个前缀就红：DROP 后崩 ⇒
+      // 迁移把空表建回 cosine ⇒ 守卫 no-op ⇒ 留下 chunks 满库 / 向量空的形态。
+      const total = CHUNK_VECTOR_METRIC_FIX_SEQUENCE.length
+      for (let n = 1; n <= total; n++) {
+        const at = `崩溃点 ${n}/${total}`
+        resetDb()
+        setDb(createTestDb())
+        initDb()
+        initRepository(getDb())
+        const db = getDb()
+
+        // 造「老量纲 + 满库」现场（= 存量库首次升级前的状态）
+        const id = chunksRepo.upsertChunk(chunkInput())
+        writeFtsRow(id, '猫咖测试正文')
+        db.exec('DROP TABLE chunk_vectors')
+        db.exec(
+          `CREATE VIRTUAL TABLE chunk_vectors USING vec0(
+             chunk_id INTEGER PRIMARY KEY, embedding float[512]
+           )`
+        )
+        writeVectorRow(id, unit45())
+
+        // 模拟「崩在第 n 条之后」：optional 步骤照守卫口径容忍缺表
+        for (const step of CHUNK_VECTOR_METRIC_FIX_SEQUENCE.slice(0, n)) {
+          try {
+            db.exec(step.sql)
+          } catch {
+            /* 极老库缺表 */
+          }
+        }
+
+        initDb()
+
+        const { sql } = db
+          .prepare("SELECT sql FROM sqlite_master WHERE name = 'chunk_vectors'")
+          .get() as { sql: string }
+        expect(sql, at).toContain('distance_metric=cosine')
+        // 不变式：绝不允许「chunks 有行而向量为空」——那正是扫描器按 origin_id
+        // 永远跳过、永久不可召回的形态（scan.mjs 增量判据只看 chunks 行）
+        expect(countAll(), at).toEqual([0, 0, 0])
+      }
     })
 
     it('量纲已对的库：重跑 initDb() 不动索引数据（不误清）', () => {

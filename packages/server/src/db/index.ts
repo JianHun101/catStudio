@@ -79,13 +79,17 @@ function widenReviewVerdictsCheck(): void {
 }
 
 /**
- * `chunk_vectors` 建表 DDL —— 迁移数组与量纲校正守卫**共用一份**，防两处漂移。
+ * `chunk_vectors` 的 vec0 表体 —— 迁移数组与量纲校正守卫**共用一份**，防两处漂移。
  * `distance_metric=cosine` 是与全仓阈值口径对齐的关键，见迁移条目处注释。
  */
-const CHUNK_VECTORS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
+const CHUNK_VECTORS_VEC0_BODY = `vec0(
         chunk_id INTEGER PRIMARY KEY,
         embedding float[512] distance_metric=cosine
       )`
+/** 迁移数组用（`IF NOT EXISTS`：全新库与存量库都安全） */
+const CHUNK_VECTORS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING ${CHUNK_VECTORS_VEC0_BODY}`
+/** 守卫用（前置 `DROP` 已执行 ⇒ 不带 `IF NOT EXISTS`，建表失败必须响亮） */
+const CHUNK_VECTORS_RECREATE_DDL = `CREATE VIRTUAL TABLE chunk_vectors USING ${CHUNK_VECTORS_VEC0_BODY}`
 
 /**
  * 存量库的 `chunk_vectors` 距离量纲校正（票辛 · 契约对齐，非新机制）。
@@ -100,24 +104,43 @@ const CHUNK_VECTORS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USIN
  * 而跳过，永远补不上向量（静默不可召回）。三表同清 ⇒ 下次扫描全量重建 + 重嵌入
  * ——`chunks` 是 MD 的派生投影，清空可无损重建（Decisions 1）。
  */
+/**
+ * 量纲校正守卫的**有序**执行序列 —— **顺序即契约**。
+ *
+ * 两条 `DELETE` 必须排在 `DROP/CREATE` **之前**：`db.exec` 多语句**非原子**
+ * （无显式事务），崩在任意两条之间都必须能收敛。反序（先 DROP+CREATE 再清数据）
+ * 的窗口是：崩在 `DROP` 与 `CREATE` 之间 ⇒ 留下「`chunk_vectors` 缺表 + `chunks`
+ * 满库」⇒ 下次启动迁移数组用 cosine DDL 把**空表**建回来、守卫见 cosine 直接
+ * no-op ⇒ 扫描器按 `origin_id` 判「没变」全跳过（`scripts/flywheel/scan.mjs` 的
+ * 增量判据）⇒ **永久静默不可召回**。正序则每个崩溃点要么 `chunks` 已清、要么
+ * 守卫条件（非 cosine）仍成立会重跑 ⇒ 全路径收敛到「三表已清 ⇒ 下次扫描全量重建」。
+ *
+ * 导出给测试**按前缀逐点模拟崩溃**（`db/repository/chunks.test.ts`）：「不可达的
+ * 状态」没法用一条运行用例覆盖，只能对崩溃点穷举。
+ */
+export const CHUNK_VECTOR_METRIC_FIX_SEQUENCE: ReadonlyArray<{
+  sql: string
+  optional: boolean
+}> = [
+  // ① 先清数据（optional：极老库可能缺 chunks_fts / chunks，无事可清）
+  { sql: 'DELETE FROM chunks_fts', optional: true },
+  { sql: 'DELETE FROM chunks', optional: true },
+  // ② 再重建向量表（失败必须响亮——静默 = 量纲没校正却以为校正了）
+  { sql: 'DROP TABLE IF EXISTS chunk_vectors', optional: false },
+  { sql: CHUNK_VECTORS_RECREATE_DDL, optional: false },
+]
+
 function ensureChunkVectorCosineMetric(): void {
   const row = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunk_vectors'")
     .get() as { sql: string } | undefined
   if (!row || row.sql.includes('distance_metric=cosine')) return
 
-  db.exec(`
-    DROP TABLE IF EXISTS chunk_vectors;
-    CREATE VIRTUAL TABLE chunk_vectors USING vec0(
-      chunk_id INTEGER PRIMARY KEY,
-      embedding float[512] distance_metric=cosine
-    );
-  `)
-  // 三表同清：见上面「为什么必须清 chunks」的注释。逐表 try —— 极老库可能缺表
-  for (const t of ['chunks_fts', 'chunks']) {
+  for (const step of CHUNK_VECTOR_METRIC_FIX_SEQUENCE) {
     try {
-      db.exec(`DELETE FROM ${t}`)
-    } catch {
+      db.exec(step.sql)
+    } catch (err) {
+      if (!step.optional) throw err
       /* 表不存在：无事可清 */
     }
   }

@@ -68,7 +68,7 @@ const QUERY_DB_TOOL = {
     properties: {
       table: {
         type: 'string',
-        enum: ['messages', 'memories', 'execution_logs', 'sessions', 'agents', 'knowledge'],
+        enum: ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge'],
         description: '白名单表名',
       },
       conditions: {
@@ -347,16 +347,16 @@ export function validateSearchParams(args) {
  * op: =/>/</LIKE, value: 字符串 }）、limit 可选 1-100 整数（默认 50）。
  * 列名白名单由服务端 QUERY_TABLE_SCHEMAS 权威校验（400 层）——本层只校形状，
  * 避免 JS/TS 两侧白名单双份漂移。
+ *
+ * ⚠️ **表名这一层不适用「只校形状」**：本常量与 `QUERY_DB_TOOL` 的 `enum` 是
+ * 服务端 `QUERY_TABLE_SCHEMAS` 的**镜像**，两边不一致会出现「同一张表两条通道
+ * 两种结论」（MCP 侧 advertised、服务端明确拒绝）。`mcp-server.test.js` 有逐项
+ * 一致性用例钉住——**改一处必须改三处**（本常量 / tool enum / 服务端 schemas）。
+ * `memories` 已随段三接线下线（表已 DROP），三处同步摘除。
+ *
  * 返回 { ok: true, table, conditions, limit } 或 { ok: false, reason }。
  */
-export const QUERY_DB_TABLES = [
-  'messages',
-  'memories',
-  'execution_logs',
-  'sessions',
-  'agents',
-  'knowledge',
-]
+export const QUERY_DB_TABLES = ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge']
 const QUERY_DB_OPS = ['=', '>', '<', 'LIKE']
 
 export function validateQueryDbParams(args) {
