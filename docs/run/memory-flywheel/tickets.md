@@ -1101,7 +1101,9 @@ packages/server/src/execution/serial.test.ts
 
 ## 票午 · 嵌入**超时与批大小解耦**（走多批 + 失败重试）· 段三衍生病灶 · **用户裁「派活」**
 
-**状态**：出票（2026-09-12，店长）。
+**状态**：✅ **已收口**（2026-09-12；PR **#61** → carrier `6d19f1fca909a21d2516c48fd5d6716c7ed63ed0`；吐槽猫审查 `cc533e1` ✅ 零返工；三方对齐 `dev` = `origin/dev` = `.push-gate` = `6d19f1f`）。
+
+**✅ D2 真机验证已在收口时当场做完（不挂重启窗口）**：扫描器走 tsx **直读源码**、主仓 dev 已含本票 ⇒ 无需重启即可验。`pnpm flywheel:scan --reindex`（清空索引行 296 重扫）⇒ **`inserted:296 / errors:0 / aborted:null`**，**三表齐平 296/296/296**，其中 `docs/plans/review-chain-anchor.md` = **56 片完整入库**（正是本票的靶心文档）。⚠️ 收口面仍需一次重启——**但不是为 D2**，是为让**长驻 server 进程**吃到本票的运行时改动（`embedding-client.ts` 被 `embedding.ts` import）。
 
 **动机**：票辰 C6 真机验证期间发现 `docs/plans/review-chain-anchor.md`（**56 片，全库最大**）在「前面已有约 240 片嵌入」时**必** `embed-failed / request-timeout`（**2 红 2 绿稳定复现**）。用户 2026-09-12 裁定形态：**「按 10 秒的能力，走多批」**。
 
