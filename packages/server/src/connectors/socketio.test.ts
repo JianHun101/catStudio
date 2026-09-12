@@ -1279,10 +1279,12 @@ describe('socketio connector', () => {
   })
 
   // ─── MAX_MENTIONS_PER_AGENT 限流语义 ──────────
-  // 回归测试：be5d861 将 mention 计数从"进入执行循环"改为"实际执行成功"。
+  // 历史：be5d861 曾把计数从"进入执行循环"改为"实际执行成功"；**票丑（2026-09-12）
+  // 再归一为单计**——唯一计数点是 A2A 调度点的「检查 + 预留」，计的是**被派发方**，
+  // 执行者永不自计（"执行成功 +1" 与"调度预留"的双计已删）。
   // 守护两个语义：
-  //  ① 已执行 ≥MAX 次的 agent 不再被 A2A 调度（防无限循环仍在）
-  //  ② 未执行（busy/currentTrigger 不匹配跳过）的 mention 不消耗配额
+  //  ① 被派发 ≥MAX 次的 agent 不再被 A2A 调度（防无限循环仍在；链长另有 depth 闸）
+  //  ② 计数只发生在 **A2A 派发点**：直接执行路径零计数（见本组第一条用例）
 
   describe('MAX_MENTIONS_PER_AGENT — mention 限流语义', () => {
     const execAgentCfg = {
@@ -1315,7 +1317,11 @@ describe('socketio connector', () => {
       )
     }
 
-    it('未执行的 mention 不消耗配额——排队中（未执行）不计，真实执行才 +1', async () => {
+    // 票丑归一后本用例**语义反转**（原「未执行的 mention 不消耗配额——排队中不计，
+    // 真实执行才 +1」已作废）：计数点是 **A2A 派发预留**，不在执行完成处。
+    // 故这里钉的是反面——**执行本身（含入队后 drain 的补执行）零计数**，
+    // 防止「归一后仍有旁路在计执行」。派发路径的计数在 serial.test.ts 的 V1/V4/V7 钉。
+    it('配额只在 A2A 派发点计数：直接执行 + 入队 drain 补执行均零计数（执行者桶恒 0）', async () => {
       const mod = await import('./socketio.js')
       const { getAdapterForAgent } = await import('../llm/registry.js')
 
@@ -1358,7 +1364,7 @@ describe('socketio connector', () => {
       )
       await streaming // 等 A 进入流（槽位 busy 确立）
 
-      // B 进来 → 槽位 busy → 入队不执行 → 配额不消耗
+      // B 进来 → 槽位 busy → 入队不执行
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
@@ -1366,13 +1372,22 @@ describe('socketio connector', () => {
         'trace-quota',
         1
       )
-      // 排队中的 B 未执行：计数仍为 0（未执行的 mention 不消耗配额）
+      // 两条都**不是 A2A 派发**（直接调 executeAgentsSerial，回复里也没有 @）：
+      // 单计后执行者桶恒 0——「执行成功 +1」的旧计数点已删（票丑）
       expect(mod.__getMentionCount('trace-quota', 'agent-1')).toBe(0)
 
-      // A 完成 → 收口 drain B（同一 trace、depth=1）→ A + B 真实执行各 +1
+      // A 完成 → 收口 drain B（同一 trace、depth=1）→ B 真实补执行落审计
       releaseGate()
       await execA
-      expect(mod.__getMentionCount('trace-quota', 'agent-1')).toBe(2)
+      // drain 的补执行同样零计数：单计下没有任何「执行 → 计数」的路径
+      expect(mod.__getMentionCount('trace-quota', 'agent-1')).toBe(0)
+      // 反向守卫：drain 确实执行了（计数 0 不是「压根没执行」的假绿）
+      const implRows = getDb()
+        .prepare(
+          `SELECT COUNT(*) AS n FROM execution_logs WHERE agent_id = 'agent-1' AND trace_id = 'trace-quota'`
+        )
+        .get() as { n: number }
+      expect(implRows.n).toBe(2) // A + drain 出来的 B
     })
 
     it('已执行 ≥MAX 次的 agent 不再被 A2A 调度（过滤）', async () => {
@@ -1441,10 +1456,15 @@ describe('socketio connector', () => {
       expect(execFull).toBeUndefined()
     })
 
-    it('用户顶层触发（depth=0）不消耗配额；A2A（depth=1）执行才计数', async () => {
+    // V3（票丑）：原断言打**执行者桶**（「depth=1 执行成功 → agent-1 计数 +1」），
+    // 那是「执行完成处计数」的读数——归一后该计数点已删。改走 **A2A 派发路径**、
+    // 断言对象改为**目标桶**（agent-2 吐槽猫）。V6 保留：顶层触发不消耗配额。
+    it('用户顶层触发（depth=0）不消耗配额；计数只落**目标桶**（执行者永不自计，V3/V6）', async () => {
       const mod = await import('./socketio.js')
       const { getAgentState } = await import('../dispatch/index.js')
       const { getAdapterForAgent } = await import('../llm/registry.js')
+      const { parseMentionsFromReply } = await import('./a2a-mentions.js')
+      seedSecondAgent(getDb()) // 目标（agent-2 吐槽猫）须在会话成员内，A2A 才可达
 
       // currentTrigger 匹配 → 正常执行成功
       vi.mocked(getAgentState).mockReturnValue({
@@ -1459,41 +1479,37 @@ describe('socketio connector', () => {
           yield { content: '收到', kind: 'text' }
         }),
       } as any)
+      // 路由由本用例显式驱动（parseMentionsFromReply 是模块级 mock，`clearAllMocks`
+      // 不清实现 ⇒ 必须显式设，否则读到上一个用例遗留的 ['吐槽猫'] —— 实测踩过）
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
       // 触发消息必须存在于 DB，否则 runAgentReply 的 Window ② 撤回保护
       // （!messageExists → retracted）会在 LLM 调用前提前返回，不走 adapter
-      getDb()
-        .prepare(
-          `INSERT INTO messages (id, session_id, role, content, mentions)
-           VALUES (?, ?, 'user', ?, '[]')`
-        )
-        .run('msg-user', 'session-1', '收到请处理')
+      const seedTriggerMsg = (id: string): void => {
+        getDb()
+          .prepare(
+            `INSERT INTO messages (id, session_id, role, content, mentions)
+             VALUES (?, ?, 'user', ?, '[]')`
+          )
+          .run(id, 'session-1', '收到请处理')
+      }
+      seedTriggerMsg('msg-user')
 
-      // depth=0（用户 @ 顶层触发）执行成功 → 不消耗配额。
-      // 注：depth=0 结束后顶层清理会删除本 trace 的全部计数键（:699-704），
-      // 断言 0 是"无残留、未污染后续 trace"的终态检查
+      // ① 执行本身不计数：depth=1、回复无 @（无派发）→ **两个桶都 0**。
+      //    「depth>0 执行成功 +1」的旧计数点已删 ⇒ 双计下此处会读到 agent-1 = 1
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
         { id: 'msg-user', content: '@店长 x', mentions: ['店长'] },
         'trace-user',
-        0
+        1
       )
       expect(mod.__getMentionCount('trace-user', 'agent-1')).toBe(0)
+      expect(mod.__getMentionCount('trace-user', 'agent-2')).toBe(0)
 
-      // depth=1（A2A 链路）执行成功 → 计数 +1（防循环防护保留）
-      vi.mocked(getAgentState).mockReturnValue({
-        agentId: 'agent-1',
-        sessionId: 'session-1',
-        status: 'busy',
-        queueLength: 0,
-        currentTriggerMessageId: 'msg-a2a',
-      })
-      getDb()
-        .prepare(
-          `INSERT INTO messages (id, session_id, role, content, mentions)
-           VALUES (?, ?, 'user', ?, '[]')`
-        )
-        .run('msg-a2a', 'session-1', '收到请处理')
+      // ② A2A 派发才计数，且落在**目标桶**：店长 回复 @吐槽猫 → 派发一次
+      //    ⇒ agent-2 = 1（双计下为 2：预留 1 + 目标执行成功 1）；执行者 agent-1 仍 0
+      vi.mocked(parseMentionsFromReply).mockReturnValue(['吐槽猫'])
+      seedTriggerMsg('msg-a2a')
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
@@ -1501,7 +1517,31 @@ describe('socketio connector', () => {
         'trace-a2a',
         1
       )
-      expect(mod.__getMentionCount('trace-a2a', 'agent-1')).toBe(1)
+      expect(mod.__getMentionCount('trace-a2a', 'agent-2')).toBe(1)
+      expect(mod.__getMentionCount('trace-a2a', 'agent-1')).toBe(0)
+      // 派发真实发生（计数 1 不是空转）：目标落了执行审计
+      expect(
+        getDb()
+          .prepare(
+            `SELECT COUNT(*) AS n FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-a2a'`
+          )
+          .get() as { n: number }
+      ).toMatchObject({ n: 1 })
+
+      // ③ 用户顶层触发（depth=0）不消耗配额：结束后顶层清理删除本 trace 全部计数键
+      //    ——断言 0 是「无残留、未污染后续 trace」的终态检查
+      seedTriggerMsg('msg-cleanup')
+      await getExecutionEngine()!.executeAgentsSerial(
+        'session-1',
+        [execAgentCfg as any],
+        { id: 'msg-cleanup', content: '@店长 x', mentions: ['店长'] },
+        'trace-top',
+        0
+      )
+      expect(mod.__getMentionCount('trace-top', 'agent-2')).toBe(0)
+      expect(mod.__getMentionCount('trace-top', 'agent-1')).toBe(0)
+      // 恢复 mock 默认（防污染后续用例——本文件既有约定）
+      vi.mocked(parseMentionsFromReply).mockReturnValue([])
     })
 
     it('P4 #3: A2A 链回复（depth=1）同样触发 replyBus 转发（契约钉死）', async () => {
@@ -4775,8 +4815,10 @@ describe('socketio connector', () => {
         .get() as any
       expect(replyRow).toBeDefined()
       expect(JSON.parse(replyRow.mentions)).toEqual(['吐槽猫'])
-      // 配额计 1（A2A 链 depth>0 计数执行者 agent-1）
-      expect(mod.__getMentionCount('trace-signal', 'agent-1')).toBe(1)
+      // 配额计 1 —— **目标桶**（agent-2 吐槽猫）：V3 归一后计数点是 A2A 派发预留，
+      // 落**被派发方**而非执行者；双计下此处为 2（预留 1 + 目标执行成功 1）
+      expect(mod.__getMentionCount('trace-signal', 'agent-2')).toBe(1)
+      expect(mod.__getMentionCount('trace-signal', 'agent-1')).toBe(0) // 执行者永不自计
     })
 
     it('验收3-双通道同目标：信号 + 文本行首 @ 同目标 → mentions 一次、dispatch 一次、配额计 1', async () => {
@@ -4818,7 +4860,10 @@ describe('socketio connector', () => {
         .prepare(`SELECT * FROM messages WHERE role = 'agent' AND content LIKE '%请审查%'`)
         .get() as any
       expect(JSON.parse(replyRow.mentions)).toEqual(['吐槽猫']) // 一次，非重复
-      expect(mod.__getMentionCount('trace-dual', 'agent-1')).toBe(1) // 配额单计数（执行者）
+      // 配额单计数落**目标桶**（agent-2 吐槽猫）：双通道同目标 ⇒ 派发一次 ⇒ 1
+      // （去重后不重复计；执行者 agent-1 恒 0）
+      expect(mod.__getMentionCount('trace-dual', 'agent-2')).toBe(1)
+      expect(mod.__getMentionCount('trace-dual', 'agent-1')).toBe(0)
     })
 
     it('验收4-工具成功 + 末段嵌句 @ → M1 零告警（防线只在全链路失败时响）', async () => {

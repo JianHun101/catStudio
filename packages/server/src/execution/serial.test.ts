@@ -408,19 +408,54 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     expect(log.status).toBe('completed')
   })
 
-  it('mention 配额跨 run 存活（engine 级字段），顶层收尾按 trace 清空', async () => {
-    makeAdapter()
+  // ── V1（票丑）：单计成立。计数点是「A2A 派发预留」⇒ 派发 N 次 ⇒ 桶 === N，
+  // 而**不是**「执行 N 次」。故本用例改走 **A2A 派发路径**、断言对象由执行者桶
+  // 改为**目标桶**——`__setMentionCount` 播种不算（那测不到计数时点本身）。
+  // 判红能力：把计数点改回「执行完成处再计一次」的双计 ⇒ 同构造读到 2 / 4。
+  it('V1 单计成立：A2A 派发 N 次 ⇒ 目标桶 === N（跨 run 累加），顶层收尾按 trace 清空', async () => {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+       VALUES ('agent-2', 'ds猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test')`
+    ).run()
+    db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
+      JSON.stringify(['agent-1', 'agent-2'])
+    )
+    // 第 1/3 次调用（agent-1 执行）@ds猫 → 一次派发；其余（ds猫 自己执行）普通回复，不递归
+    let call = 0
+    const chatStream = vi.fn(async function* () {
+      call++
+      yield { content: call === 1 || call === 3 ? '@ds猫 继续' : '收到', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
     const { bus } = createFakeBus()
     const engine = createExecutionEngine(bus)
 
-    // depth=1（A2A 链）执行两次同 trace → 计数跨 run 累加
-    await runPaired(engine, 'msg-p1', 'trace-persist', 1)
-    expect(engine.__getMentionCount('trace-persist', 'agent-1')).toBe(1)
-    await runPaired(engine, 'msg-p2', 'trace-persist', 1)
-    expect(engine.__getMentionCount('trace-persist', 'agent-1')).toBe(2)
-    // depth=0 顶层收尾 → 该 trace 配额清空（防无限循环计数泄漏）
-    await runPaired(engine, 'msg-p3', 'trace-persist', 0)
+    const runOnce = async (triggerId: string, depth: number): Promise<boolean> => {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 'session-1', 'user', '你好', '[]')`
+      ).run(triggerId)
+      return engine.executeAgentsSerial(
+        'session-1',
+        [DEFAULT_AGENT],
+        { id: triggerId, content: '你好', mentions: [] },
+        'trace-persist',
+        depth
+      )
+    }
+
+    // run1：depth=1（A2A 链）执行一次 → 派发 ds猫 一次 ⇒ 目标桶 1
+    await runOnce('msg-p1', 1)
+    expect(engine.__getMentionCount('trace-persist', 'agent-2')).toBe(1)
+    // 执行者桶恒 0——单计后执行者永不自计（旧的「执行成功 +1」已删）
     expect(engine.__getMentionCount('trace-persist', 'agent-1')).toBe(0)
+    // run2：同 trace 再来一次 ⇒ 计数跨 run 累加（engine 级字段）
+    await runOnce('msg-p2', 1)
+    expect(engine.__getMentionCount('trace-persist', 'agent-2')).toBe(2)
+    // depth=0 顶层收尾 → 该 trace 配额清空（防无限循环计数泄漏）
+    await runOnce('msg-p3', 0)
+    expect(engine.__getMentionCount('trace-persist', 'agent-2')).toBe(0)
   })
 
   it('实例态隔离：引擎间零共享（模块态 → 实例态的核心承诺）', () => {
@@ -656,7 +691,7 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     )
   })
 
-  it('reviewer↔implementer 互 @ 成环 → mention 配额截断，不无限递归（派活单实测项）', async () => {
+  it('reviewer↔implementer 互 @ 成环 → **depth 闸**截断（单计后配额不再是环截断者），不无限递归', async () => {
     // 隔离 token 池：PROVIDER_TOKEN_CAP=0（不限制）——本用例只验证风暴护栏本体
     // （配额）截断环，不混入 token 池的排队时序。注：原注释写「默认 cap=2 时该环
     // 会先在 token 池上死锁」，描述的是 A 方案修复前的缺陷（executeRun 持 token
@@ -689,18 +724,31 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
       0
     )
 
-    // 环被截断而非无限：截断者是 **mention 配额**（默认阈值 5，
-    // serial.ts:790 调度点预留 + :649 执行后计数双计），**不是 depth=10 门**——
-    // 实测第 8 跳 ds猫 被 `agent-to-agent mention limit filtered` 拦下，此时
-    // depth 仅 6，远未触门。护栏作用在 policy.allowed 之后——补边不放宽风暴防护。
+    // ── V2（票丑）：环用例按**新语义重钉**，不追旧读数。
+    // 截断者是 **depth 闸**（`MAX_AGENT_DISPATCH_DEPTH=10`），**不是**配额——
+    // 裁决 a：depth = 链长上限 / 配额 = per-agent 预算，两闸各司其职。
+    //
+    // ⚠️ **跳数口径钉死**：「跳数」= **chatStream / LLM 执行调用数**（与旧
+    // `toBe(7)` 同计量），**不是**「派发尝试序号」。单计 + `limit=5` 下：
+    // 两猫的桶各被派发 5 次（8 次预留后 ds猫/吐槽猫 各 5），实测执行 10 跳
+    // （depth 0..9 各一次）；第 **11** 跳（`depth=10` 的那次派发）被 depth 闸拦下。
+    // **两个数字（10 / 11）一起断死**，禁止只断其一、禁止与「派发尝试序号」混用。
+    // 附注：现网形态（执行 7 / 第 8 次尝试被拦）在单计下**无整数 `limit` 可复现**
+    // （单计被拦尝试恒为 `2L+1` = 奇数，现网是偶数）⇒ 只能按新语义重测。
     expect(chatStream.mock.calls.length).toBeGreaterThan(1) // 环确实转起来了
-    expect(chatStream.mock.calls.length).toBe(7)
-    // T-K：拦截**可见**——抬到 warn（此前 info 级，生产上等于静默丢派）。
-    // `limit` 是计数值不是轮次（双计 ⇒ 5 只够约 3 轮），故连同计数一起断言。
-    expect(logWarn).toHaveBeenCalledWith(
-      'agent-to-agent mention limit filtered',
-      expect.objectContaining({ limit: DEFAULT_MAX_MENTIONS_PER_AGENT, skippedCount: 1 })
+    expect(chatStream.mock.calls.length).toBe(10) // ← 10 跳
+    const depthWarns = logWarn.mock.calls.filter(
+      (c) => c[0] === 'agent dispatch depth limit reached'
     )
+    expect(depthWarns).toHaveLength(1) // ← 第 11 跳：恰一次、唯一截断点
+    expect(depthWarns[0][1]).toEqual({ traceId: 'trace-loop', depth: 10 })
+    // 配额 warn **零触发**：单计 + limit=5 下配额不是截断者（旧用例断言它触发，
+    // 正是被裁决 a 推翻的那条——`limit` 不再是「轮次」的折半口径）
+    expect(
+      logWarn.mock.calls.filter((c) => c[0] === 'agent-to-agent mention limit filtered')
+    ).toHaveLength(0)
+    // `limit` 仍在契约内（配置面未动）：本 trace 的可派发预算就是默认阈值
+    expect(DEFAULT_MAX_MENTIONS_PER_AGENT).toBe(5)
   }, 60000)
 })
 
@@ -756,7 +804,11 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
     expect(resolveMentionLimit('12')).toBe(12)
   })
 
-  it('MAX_MENTIONS_PER_AGENT=1 → 环更早被拦（3 跳 vs 默认 7 跳）+ 拦截记 warn', async () => {
+  // ── V4（票丑）：**反例为红** + 配额仍是真拦截者。
+  // 判红能力：把计数点改回「执行完成处再计一次」的双计 ⇒ 本用例实跑为红
+  // （桶读到 2/2 而非 1/1）。故断言**桶值本身**，不能只断跳数——单计/双计在
+  // `limit=1` 下跳数恰好都是 3，只断跳数会空洞通过。
+  it('V4 MAX_MENTIONS_PER_AGENT=1 → 第二次派发即被**配额**拦（3 跳 / depth 远未触门）', async () => {
     // 隔离 token 池（同既有环截断用例：本用例只验配额，不混排队时序）
     vi.stubEnv('PROVIDER_TOKEN_CAP', '0')
     vi.stubEnv('MAX_MENTIONS_PER_AGENT', '1')
@@ -770,21 +822,136 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
     const { bus } = createFakeBus()
     const engine = createExecutionEngine(bus)
 
+    // depth=1 起跑（而非 0）：depth=0 的顶层收尾会 `clearMentionCountsForTrace`
+    // 清空本 trace 的桶 ⇒ 桶值不可观测。depth=1 只是「本条链是 A2A 链」的标记，
+    // 配额机制与 depth=0 同（计数点在派发预留，与发送者 depth 无关）。
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
       { id: 'msg-1', content: '请审查', mentions: [] },
       'trace-limit-1',
-      0
+      1
     )
 
-    // 配额 = 计数 1：调度点预留一次即达阈值 ⇒ 第 2 次 A2A 派发起全被拦。
-    // 实测 3 跳（reviewer 顶层 → ds猫 → reviewer），第 4 跳被 `continue` 拦下。
+    // 单计：`limit=1` ⇒ 每猫最多被派发 **1** 次。实测 3 跳
+    // （reviewer 顶层 → ds猫 → reviewer），第 3 跳末 reviewer 的回复要再派 ds猫 时
+    // 其桶已 = 1 ≥ limit ⇒ `continue` 拦下，第 4 跳不发生。
     expect(chatStream.mock.calls.length).toBe(3)
     expect(logWarn).toHaveBeenCalledWith(
       'agent-to-agent mention limit filtered',
       expect.objectContaining({ limit: 1, skippedCount: 1, remainingCount: 0 })
     )
+    // 桶值 === 派发次数（各 1）——**本断言即单计/双计的判别面**：
+    // 双计下 ds猫 预留 1 + 执行成功 1 = 2、吐槽猫 同理 = 2（跳数不变，桶值变）。
+    expect(engine.__getMentionCount('trace-limit-1', 'agent-impl')).toBe(1)
+    expect(engine.__getMentionCount('trace-limit-1', 'agent-reviewer')).toBe(1)
+    // 截断确来自**配额**而非 depth 闸顺手兜住（防「用例空洞通过」）：
+    // 截断时 depth 仅 2，远未触门 ⇒ depth 闸 warn 全程零触发。
+    expect(
+      logWarn.mock.calls.filter((c) => c[0] === 'agent dispatch depth limit reached')
+    ).toHaveLength(0)
+    // 被拦目标无新执行记录：ds猫 的 execution_log 恰 1 行（首次派发那次），
+    // 第 2 次派发被拦 ⇒ 零行增量
+    const implRows = getDb()
+      .prepare(
+        `SELECT COUNT(*) AS n FROM execution_logs WHERE agent_id = 'agent-impl' AND trace_id = ?`
+      )
+      .get('trace-limit-1') as { n: number }
+    expect(implRows.n).toBe(1)
+  }, 60000)
+
+  // ── V7（票丑）：语义变更有**机器判据**（不只是改注释）。
+  // 票面 ③：归一后计的是**派发次数**（含入队后未执行/失败的派发——「预留不退回」
+  // 是既有语义），而 `:656-662` 旧注释主张的「未执行的排队任务不消耗配额」在单计下
+  // **与原意相反**。⛔ 只改注释不加判据 ⇒ 本票不通过 —— 本用例即那句旧主张的下葬凭证。
+  it('V7 调度即计数：目标槽位忙 ⇒ 派发入队**未执行**，配额仍 +1', async () => {
+    vi.stubEnv('PROVIDER_TOKEN_CAP', '0')
+    const IMPL: AgentConfig = {
+      id: 'agent-impl',
+      name: 'ds猫',
+      avatar: '🐱',
+      systemPrompt: 'You are a cat.',
+      llmProvider: 'deepseek',
+      llmModel: 'deepseek-v4-pro',
+      llmApiKey: 'sk-test',
+      role: 'implementer',
+    }
+    // ds猫 的流挂起占槽；吐槽猫 的流 @ds猫（触发 A2A 派发）
+    let signalStreaming = () => {}
+    const streaming = new Promise<void>((r) => {
+      signalStreaming = r
+    })
+    let releaseGate = () => {}
+    const gate = new Promise<void>((r) => {
+      releaseGate = r
+    })
+    vi.mocked(getAdapterForAgent).mockImplementation((agent: any) =>
+      agent?.id === 'agent-impl'
+        ? ({
+            chatStream: vi.fn(async function* () {
+              yield { content: '占槽中', kind: 'text' }
+              signalStreaming() // 首段已消费、流挂起——槽位保持 busy
+              await gate
+              yield { content: '完成', kind: 'text' }
+            }),
+          } as any)
+        : ({
+            chatStream: vi.fn(async function* () {
+              yield { content: '@ds猫 继续', kind: 'text' }
+            }),
+          } as any)
+    )
+    const db = getDb()
+    for (const id of ['msg-v7-busy', 'msg-v7-send']) {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 'session-1', 'user', '请处理', '[]')`
+      ).run(id)
+    }
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    const implRows = (): number =>
+      (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM execution_logs WHERE agent_id = 'agent-impl' AND trace_id = 'trace-v7'`
+          )
+          .get() as { n: number }
+      ).n
+
+    // ① ds猫 起跑并挂起——槽位 busy 确立。depth=1 起跑：depth=0 的顶层收尾会清桶，
+    //    桶值就不可观测了（计数点本身与 depth 无关，见 V4 同款说明）
+    const busyRun = engine.executeAgentsSerial(
+      'session-1',
+      [IMPL],
+      { id: 'msg-v7-busy', content: '请处理', mentions: [] },
+      'trace-v7',
+      1
+    )
+    await streaming
+
+    // ② 吐槽猫 执行 → 回复 @ds猫 → A2A 派发；ds猫 槽位忙 ⇒ depth>0 走**入队**分支，
+    //    本次派发**不执行**——但配额预留已落（票丑的全部要点就在这个时点）
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-v7-send', content: '请审查', mentions: [] },
+      'trace-v7',
+      1
+    )
+
+    // ③ 断言取在 drain **之前**：派发已入队未执行，桶仍 +1
+    //    （旧语义「未执行的排队任务不消耗配额」在此读到 0 —— 判别面）
+    expect(engine.__getMentionCount('trace-v7', 'agent-impl')).toBe(1)
+    expect(engine.getSlot('agent-impl', 'session-1')?.queueLength).toBe(1)
+    expect(implRows()).toBe(1) // 只有 ① 那次占槽运行，派发那次零执行记录
+
+    // ④ 放闸 → 收口时 drain 出队执行（depth 沿用入队时的 2，仍是 A2A 链）⇒
+    //    桶**不再**变化：单计下执行者永不自计（「执行完成再计一次」的双计在此读到 2）
+    releaseGate()
+    await busyRun
+    expect(engine.__getMentionCount('trace-v7', 'agent-impl')).toBe(1)
+    expect(implRows()).toBe(2) // drain 补执行落审计——证明第 ④ 步确实执行过
   }, 60000)
 })
 
@@ -795,8 +962,9 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
 // store 广播」钉成机器判据——**存在任一路径仍静默 ⇒ 票子失败**。
 //
 // 场景构造：预置被 @ 目标（ds猫）的桶至上限 ⇒ 该 @ **第 1 跳**就被配额闸拦下，
-// 不必跑 7 跳环（省时，且不引入 depth 门等其它截断源的干扰）。预置走测试钩子
-// `__setMentionCount`——**不触碰生产计数点**（`:664`/`:805` 是票丑的面）。
+// 不必跑长环（省时，且不引入 depth 门等其它截断源的干扰）。预置走测试钩子
+// `__setMentionCount`——**不触碰生产计数点**：票丑归一后唯一计数点是 A2A 调度点的
+// 预留（锚点 `+ 1) // 预留配额`），本组只读它的结果、不播它的种。
 
 describe('serial — A2A 配额拦截的可见面（票子）', () => {
   const REVIEWER: AgentConfig = {
