@@ -44,7 +44,7 @@ pnpm build                # pnpm -r build
 
 **LLM 适配器**: 按缓存键（`llm/registry.ts`，含 provider / apiKey / model / envExtra 维度）复用单实例——同键的猫共享一个实例，故需 token 池封顶并发。
 
-**记忆**: 本地嵌入 `Xenova/bge-small-zh-v1.5`（512 维）。入库：embed → 去重（余弦距离 < `MEMORY_DEDUP_THRESHOLD`）→ 存储；检索：top-K → 注入 system prompt。fire-and-forget，失败不阻塞。
+**记忆**: 本地嵌入 `Xenova/bge-small-zh-v1.5`（512 维），跑在**独立 sidecar 进程**（`scripts/flywheel/embed-server.mjs`，随 server 启停，只监听 `127.0.0.1`；主进程经 HTTP 调用）——模型不进主进程内存。入库：embed → 去重（余弦距离 < `MEMORY_DEDUP_THRESHOLD`）→ 存储；检索：top-K → 注入 system prompt。fire-and-forget，失败不阻塞（失败返回带 `reason` 的显式结果并记日志，不静默返回空向量）。
 
 **数据库**: SQLite `packages/server/data/cat-study.db`（dev 模式为 `cat-study-dev.db`；WAL + sqlite-vec）；表与查询层见 `packages/server/src/db/`。API 边界做 snake_case ↔ camelCase 转换。
 

@@ -81,17 +81,18 @@ async function seed(): Promise<void> {
   console.log(`  ${sVerb} Session: ${DEMO_SESSION_TITLE} (${DEMO_SESSION_ID})`)
 
   // ── Upsert 知识文档（知识库 Phase 1）──────────────────
-  // 嵌入走 await embedText（首次触发 ~100MB 模型下载）；嵌入失败（抛错或
-  // 返回空向量）→ embedding 存 NULL + warn，不阻塞 seed 主流程（重跑幂等补齐）
+  // 嵌入走 await embedText（首次触发 sidecar 冷启动 + ~100MB 模型下载）；
+  // 嵌入不可用（返回带 reason 的失败 / 空向量）→ embedding 存 NULL + warn，
+  // 不阻塞 seed 主流程（重跑幂等补齐）。embedText 不再抛错。
   const knowledgeDocs = buildDemoKnowledge()
 
   for (const doc of knowledgeDocs) {
     let embedding: Buffer | null = null
-    try {
-      const vec = await embedText(doc.content)
-      if (vec.length > 0) embedding = vectorToBlob(vec)
-    } catch (err: any) {
-      log.warn('知识文档嵌入失败，embedding 存 NULL', { docId: doc.id, error: err.message })
+    const embedded = await embedText(doc.content)
+    if (embedded.ok && embedded.vector.length > 0) {
+      embedding = vectorToBlob(embedded.vector)
+    } else if (!embedded.ok) {
+      log.warn('知识文档嵌入不可用，embedding 存 NULL', { docId: doc.id, reason: embedded.reason })
     }
     if (!embedding) {
       console.log(`  ⚠️ ${doc.id} 嵌入失败，embedding 存 NULL（重跑幂等补齐）`)

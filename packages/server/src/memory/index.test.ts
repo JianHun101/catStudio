@@ -9,20 +9,26 @@ import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 import { memories as memoriesRepo, knowledge as knowledgeRepo } from '../db/repository/index.js'
+import type { EmbedResult } from './embedding-client.js'
 
 // 禁用去重/更新（避免 sqlite-vec vec_distance_cosine 不可用）
 process.env.MEMORY_DEDUP_ENABLED = '0'
 
-// Mock embedding — return fake 4-dim vectors
-const mockEmbedText = vi.fn(async (text: string) => {
-  return [text.length, text.charCodeAt(0) || 0, 1.0, 0.5]
-})
+// Mock embedding — return fake 4-dim vectors（票丁后返回形态为 {ok, vector}）
+const mockEmbedText = vi.fn(async (text: string): Promise<EmbedResult> => ({
+  ok: true,
+  vector: [text.length, text.charCodeAt(0) || 0, 1.0, 0.5],
+}))
+
+/** 嵌入不可用的降级结果（票丁：失败 = 带 reason 的对象，不再返回空数组） */
+const embedFailure = () => ({ ok: false as const, reason: 'spawn-failed' as const })
 
 const mockIsMemoryEnabled = vi.fn(() => true)
 
 vi.mock('./embedding.js', () => ({
   embedText: mockEmbedText,
   isMemoryEnabled: mockIsMemoryEnabled,
+  getEmbeddingStatus: () => ({ ok: false, reason: 'spawn-failed' }),
 }))
 
 // Mock 查询改写 — 默认不提供额外查询（降级为仅原话检索）
@@ -97,7 +103,7 @@ describe('memory', () => {
     })
 
     it('skips gracefully when embedding fails', async () => {
-      mockEmbedText.mockRejectedValueOnce(new Error('model not loaded'))
+      mockEmbedText.mockResolvedValueOnce(embedFailure())
       // Should not throw
       await expect(
         memoryModule.saveMessageMemory('s1', 'hello', 'msg-1', ['agent-1'])
@@ -199,7 +205,7 @@ describe('memory', () => {
     })
 
     it('returns empty array when embedding fails', async () => {
-      mockEmbedText.mockRejectedValueOnce(new Error('model error'))
+      mockEmbedText.mockResolvedValueOnce(embedFailure())
       const results = await memoryModule.searchMemories('query')
       expect(results).toEqual([])
     })
@@ -371,7 +377,7 @@ describe('memory', () => {
     })
 
     it('嵌入失败降级空串（不抛）', async () => {
-      mockEmbedText.mockRejectedValueOnce(new Error('model not loaded'))
+      mockEmbedText.mockResolvedValueOnce(embedFailure())
       await expect(memoryModule.buildKnowledgeContext('x')).resolves.toBe('')
     })
 

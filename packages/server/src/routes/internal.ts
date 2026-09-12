@@ -318,18 +318,17 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
     // ── 5. 知识库检索（200）——无「目标猫」语义，跳过目标预校验 ──
     // 单向量通道：query 原样嵌入（结构化 query 无口语歧义，不改写双通道）；
     // 嵌入失败降级空结果（与 buildKnowledgeContext 同款，不阻塞）
-    let vector: number[]
-    try {
-      vector = await embedText(query.trim())
-    } catch (err: any) {
-      log.warn('knowledge search embedding failed', {
-        error: err.message,
+    const embedded = await embedText(query.trim())
+    if (!embedded.ok) {
+      log.warn('knowledge search embedding unavailable', {
+        reason: embedded.reason,
         sessionId,
         agentId,
         msgId,
       })
       return reply.send({ ok: true, results: [] })
     }
+    const vector = embedded.vector
     if (vector.length === 0) {
       log.warn('knowledge search embedding empty', { sessionId, agentId, msgId })
       return reply.send({ ok: true, results: [] })

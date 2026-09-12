@@ -1,74 +1,104 @@
 /**
- * 本地嵌入模块 — 使用 Transformers.js 运行 bge-small-zh-v1.5 模型。
+ * 本地嵌入模块 —— 客户端代理。
  *
- * 零 API 成本，离线可用。首次调用时自动下载模型（~100MB），之后使用缓存。
+ * **模型不再跑在主进程里**：本模块只负责把请求转给独立 sidecar
+ * （`scripts/flywheel/embed-server.mjs`，见 `embedding-client.ts`），
+ * 并保留对外的两个导出名（`isMemoryEnabled` / `embedText`）。
+ *
+ * 换返回形态（票丁契约 ①）：`embedText` 返回 `{ ok:true, vector }` /
+ * `{ ok:false, reason }` —— **不再用空数组表失败**。「未启用」（`not-enabled`）
+ * 与「失败」（其余五种 reason）因此可区分。
  *
  * 环境变量:
- *   MEMORY_ENABLED        — 'false' 禁用全部记忆功能
- *   MEMORY_EMBEDDING_MODEL — 模型名（默认 Xenova/bge-small-zh-v1.5）
+ *   MEMORY_ENABLED         — 'false' 禁用全部记忆功能（不 spawn sidecar，零开销）
+ *   MEMORY_EMBEDDING_MODEL — 模型名（**sidecar** 读；主进程以 /health 回报为权威）
  */
 
+import { getDb } from '../db/index.js'
 import { createLogger } from '../logger.js'
+import { EmbeddingClient, type EmbedResult, type EmbeddingStatus } from './embedding-client.js'
 
 const log = createLogger('memory:embedding')
 
-/** 嵌入是否全局启用 */
-export function isMemoryEnabled(): boolean {
-  return process.env.MEMORY_ENABLED !== 'false'
-}
+let client: EmbeddingClient | null = null
 
-// ─── 模型单例 ─────────────────────────────────────────────
-
-let pipelinePromise: Promise<any> | null = null
-
-function getPipeline(): Promise<any> {
-  if (!pipelinePromise) {
-    pipelinePromise = (async () => {
-      const modelName =
-        process.env.MEMORY_EMBEDDING_MODEL || 'Xenova/bge-small-zh-v1.5'
-      log.info('加载嵌入模型...', { model: modelName })
-      const t0 = Date.now()
-
-      // Transformers.js 动态 import
-      const { env, pipeline } = await import('@huggingface/transformers')
-
-      // 仅在显式设置了 HF_ENDPOINT 时切换镜像（否则用默认 huggingface.co）
-      const mirror = process.env.HF_ENDPOINT
-      if (mirror && mirror !== 'https://huggingface.co') {
-        env.remoteHost = mirror.replace(/\/+$/, '') + '/'
-        env.remotePathTemplate = '{model}/resolve/{revision}/'
-        log.info('使用自定义 HF 端点', { remoteHost: env.remoteHost })
-      }
-
-      const pipe = await pipeline('feature-extraction', modelName)
-      log.info('嵌入模型加载完成', {
-        model: modelName,
-        remoteHost: env.remoteHost,
-        elapsedMs: Date.now() - t0,
-      })
-      return pipe
-    })()
+function getClient(): EmbeddingClient {
+  if (!client) {
+    client = new EmbeddingClient({ expectedDim: resolveStoredVectorDim })
   }
-  return pipelinePromise
+  return client
 }
 
-// ─── 公共 API ─────────────────────────────────────────────
+/** 嵌入是否全局启用（口径不变：只认显式 'false'） */
+export function isMemoryEnabled(): boolean {
+  return getClient().isEnabled()
+}
 
 /**
- * 将文本转为向量嵌入（number[]）。
+ * 将文本转为向量嵌入。
  *
- * 首次调用会触发模型下载（~100MB），后续调用复用缓存的 pipeline。
- * 失败时返回空数组，调用方应降级处理。
+ * 失败返回 `{ ok:false, reason }`，调用方按 reason 分流（不再有空数组歧义）。
+ * 首次调用会触发 sidecar 冷启动（含模型加载，上限见 `PROBE_TIMEOUT_MS`）。
  */
-export async function embedText(text: string): Promise<number[]> {
+export async function embedText(text: string): Promise<EmbedResult> {
+  return getClient().embed(text)
+}
+
+/** 嵌入链当前状态（供检索面打降级标记；不触发 I/O） */
+export function getEmbeddingStatus(): EmbeddingStatus {
+  return getClient().status()
+}
+
+/**
+ * 启动 sidecar 并预热（server 启动时调用，fire-and-forget）。含维度自检：
+ * sidecar 回报维度 ≠ 库内向量维度 ⇒ 直接报错并拒绝嵌入路径（Decisions 16 护栏②），
+ * 不让 `vec_distance_cosine` 在查询期才炸成「记忆突然搜不到」。
+ */
+export async function startEmbeddingSidecar(): Promise<void> {
+  if (!isMemoryEnabled()) {
+    log.info('记忆功能未启用（MEMORY_ENABLED=false），嵌入 sidecar 不启动')
+    return
+  }
+  const status = await getClient().warmup()
+  if (status.ok) {
+    log.info('嵌入 sidecar 就绪', { model: status.model, dim: status.dim })
+  } else {
+    log.error('嵌入 sidecar 未就绪，记忆链降级', { reason: status.reason })
+  }
+}
+
+/** 关停 sidecar（server shutdown 调用；只杀本进程 spawn 的实例） */
+export function stopEmbeddingSidecar(): void {
+  client?.stop()
+  client = null
+}
+
+/** 仅在测试中使用：替换单例客户端（null = 复位，下次调用重建） */
+export function __setEmbeddingClientForTest(next: EmbeddingClient | null): void {
+  client = next
+}
+
+/**
+ * 库内已存向量的维度（维度自检的比对基准）。
+ *
+ * 读 `memories` / `knowledge` 两个表里第一条非空向量的长度 —— 与落库格式同源
+ * （f32 BLOB ⇒ 字节数 / 4）。无向量（全新库）或 DB 未就绪 ⇒ null = 跳过自检。
+ * 只读，不建表、不写表。
+ */
+export function resolveStoredVectorDim(): number | null {
   try {
-    const pipe = await getPipeline()
-    const result = await pipe(text, { pooling: 'mean', normalize: true })
-    // result 是 ONNX tensor → 提取为 number[]
-    const vec = Array.from(result.data) as number[]
-    return vec
+    const row = getDb()
+      .prepare(
+        `SELECT length(embedding) / 4 AS dim FROM memories WHERE embedding IS NOT NULL
+         UNION ALL
+         SELECT length(embedding) / 4 AS dim FROM knowledge WHERE embedding IS NOT NULL
+         LIMIT 1`
+      )
+      .get() as { dim: number } | undefined
+    const dim = Number(row?.dim)
+    return Number.isFinite(dim) && dim > 0 ? dim : null
   } catch (err: any) {
-    log.error('嵌入失败', { error: err.message, textLen: text.length })
-    return []
+    log.warn('读取库内向量维度失败，跳过维度自检', { error: err?.message })
+    return null
   }
 }

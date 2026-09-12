@@ -11,6 +11,7 @@ import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository, knowledge as knowledgeRepo } from '../db/repository/index.js'
 import { vectorToBlob } from '../memory/index.js'
+import type { EmbedResult } from '../memory/embedding-client.js'
 import type { FastifyInstance } from 'fastify'
 import { consumeRouteSignals, __test_resetRouteSignals } from '../llm/route-signals.js'
 import {
@@ -29,7 +30,8 @@ vi.mock('../connectors/socketio.js', () => ({
 // factory（internal.ts → memory/index.ts → embedding.js），普通 const 声明
 // 会 ReferenceError（hoisting 时未初始化）
 const { mockEmbedText } = vi.hoisted(() => ({
-  mockEmbedText: vi.fn(async () => [1, 0, 0, 0]),
+  // 票丁后返回形态为 {ok, vector}（失败 = 带 reason 的对象，不再返回空数组）
+  mockEmbedText: vi.fn(async (): Promise<EmbedResult> => ({ ok: true, vector: [1, 0, 0, 0] })),
 }))
 vi.mock('../memory/embedding.js', () => ({
   embedText: mockEmbedText,
@@ -533,9 +535,9 @@ describe('internal route-signals', () => {
         expect(JSON.parse(res.body).results).toHaveLength(1)
       })
 
-      it('嵌入失败（空向量）→ 200 + 空结果（降级不阻塞）', async () => {
+      it('嵌入失败（明确 reason）→ 200 + 空结果（降级不阻塞）', async () => {
         await mockActive()
-        mockEmbedText.mockResolvedValueOnce([])
+        mockEmbedText.mockResolvedValueOnce({ ok: false, reason: 'spawn-failed' })
         const res = await app.inject({
           method: 'POST',
           url: '/api/internal/knowledge-search',

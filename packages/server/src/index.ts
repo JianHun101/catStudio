@@ -34,6 +34,7 @@ import { existsSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
 import { stopLlamaServerIfSpawned } from './llm/llama-server.js'
+import { startEmbeddingSidecar, stopEmbeddingSidecar } from './memory/embedding.js'
 import { stopOllamaIfSpawned } from './llm/ollama.js'
 import { stopProxyIfSpawned } from './llm/cli-utils.js'
 
@@ -236,6 +237,11 @@ async function main(): Promise<void> {
 
   log.info('server started', { host: HOST, port: PORT })
 
+  // 4.5 嵌入 sidecar：随 server 启动（独立进程，模型不进主进程内存）。
+  //     fire-and-forget —— 起不来只记日志并降级记忆链，不阻塞 server 启动
+  //     （AGENTS.md「记忆: fire-and-forget，失败不阻塞」）。含库内维度自检。
+  void startEmbeddingSidecar()
+
   // 5. 优雅关闭
   const shutdown = async () => {
     log.info('shutting down...')
@@ -254,6 +260,8 @@ async function main(): Promise<void> {
     stopLlamaServerIfSpawned()
     stopOllamaIfSpawned()
     stopProxyIfSpawned()
+    // 嵌入 sidecar（本进程 spawn ⇒ 关停时一并回收，防孤儿进程占端口/内存）
+    stopEmbeddingSidecar()
     process.exit(0)
   }
 

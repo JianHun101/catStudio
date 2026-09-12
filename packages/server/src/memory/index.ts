@@ -24,7 +24,7 @@
 
 import { v4 as uuid } from 'uuid'
 import { memories as memoriesRepo, knowledge as knowledgeRepo } from '../db/repository/index.js'
-import { embedText, isMemoryEnabled } from './embedding.js'
+import { embedText, getEmbeddingStatus, isMemoryEnabled } from './embedding.js'
 import { rewriteRetrievalQueries } from './query-rewrite.js'
 import { evaluateMemoryContent, isMemoryFilterEnabled } from './filter.js'
 import { createLogger } from '../logger.js'
@@ -81,15 +81,15 @@ export async function saveMessageMemory(
     }
   }
 
-  let embedding: number[]
-  try {
-    embedding = await embedText(cleanContent)
-  } catch (err: any) {
-    log.warn('嵌入生成失败，跳过记忆存储', { error: err.message })
+  // 嵌入不可用（未启用 / sidecar 起不来 / 超时 / 维度不符）⇒ 显式跳过存储。
+  // 失败原因由 embedding-client 首次失败时记 error；此处只留 debug 一级，不刷屏。
+  const embedded = await embedText(cleanContent)
+  if (!embedded.ok) {
+    log.debug('嵌入不可用，跳过记忆存储', { reason: embedded.reason })
     return
   }
-
-  if (!embedding || embedding.length === 0) return
+  const embedding = embedded.vector
+  if (embedding.length === 0) return
 
   const blob = vectorToBlob(embedding)
   const now = new Date().toISOString()
@@ -155,6 +155,28 @@ export interface RetrievedMemory {
   createdAt: string
 }
 
+// ─── 降级标记（票丁契约 ①-②）─────────────────────────
+// 嵌入链不可用时，检索会静默变空。此处**每条失败链只留一条痕**：
+// 首次在检索面记 warn（带 reason），此后静默——避免每轮刷日志。
+// 失败原因本身由 embedding-client 在首次失败时记 error。
+
+let degradationNoted = false
+
+/** 检索结果为空且嵌入链已降级 ⇒ 记一次痕（同一条失败链不重复记） */
+function noteEmbeddingDegradation(): void {
+  const status = getEmbeddingStatus()
+  if (status.ok) {
+    degradationNoted = false
+    return
+  }
+  if (degradationNoted) return
+  degradationNoted = true
+  log.warn('记忆检索降级：嵌入链不可用，本轮召回为空', {
+    reason: status.reason,
+    failingSince: status.failingSince,
+  })
+}
+
 /**
  * 按余弦相似度从全局记忆空间中搜索与 queryText 最相关的 top-K 记忆。
  * 单通道便捷入口（= searchMemoriesMulti([queryText], topK)）。
@@ -193,16 +215,19 @@ export async function searchMemoriesMulti(
   // 并行嵌入所有查询；单条失败降级为跳过该通道
   const vectors = await Promise.all(
     uniqueQueries.map(async (q) => {
-      try {
-        return await embedText(q)
-      } catch (err: any) {
-        log.warn('查询嵌入生成失败，跳过该通道', { error: err.message })
-        return []
+      const r = await embedText(q)
+      if (!r.ok) {
+        log.debug('查询嵌入不可用，跳过该通道', { reason: r.reason })
+        return null
       }
+      return r.vector
     })
   )
-  const blobs = vectors.filter((v) => v && v.length > 0).map(vectorToBlob)
-  if (blobs.length === 0) return []
+  const blobs = vectors.filter((v): v is number[] => !!v && v.length > 0).map(vectorToBlob)
+  if (blobs.length === 0) {
+    noteEmbeddingDegradation()
+    return []
+  }
 
   // 各通道结果按 id 合并，保留最小距离
   const merged = new Map<string, RetrievedMemory>()
@@ -263,11 +288,12 @@ async function searchMemoriesHybridPath(
 
   for (const q of queries) {
     let blob: Buffer | null = null
-    try {
-      const v = await embedText(q)
-      if (v && v.length > 0) blob = vectorToBlob(v)
-    } catch (err: any) {
-      log.warn('混合检索：查询嵌入失败，降级仅关键词通道', { error: err.message })
+    const embedded = await embedText(q)
+    if (embedded.ok && embedded.vector.length > 0) {
+      blob = vectorToBlob(embedded.vector)
+    } else if (!embedded.ok) {
+      log.debug('混合检索：查询嵌入不可用，降级仅关键词通道', { reason: embedded.reason })
+      noteEmbeddingDegradation()
     }
 
     let rows: memoriesRepo.MemorySearchResult[] | memoriesRepo.KeywordSearchResult[]
@@ -354,14 +380,13 @@ export async function buildKnowledgeContext(triggerContent: string): Promise<str
   if (!cleanContent) return ''
 
   const topK = parseInt(process.env.KNOWLEDGE_TOP_K || '3', 10)
-  let vector: number[]
-  try {
-    vector = await embedText(cleanContent)
-  } catch (err: any) {
-    log.warn('知识库查询嵌入失败，跳过检索', { error: err.message })
+  const embedded = await embedText(cleanContent)
+  if (!embedded.ok) {
+    log.debug('知识库查询嵌入不可用，跳过检索', { reason: embedded.reason })
     return ''
   }
-  if (!vector || vector.length === 0) return ''
+  const vector = embedded.vector
+  if (vector.length === 0) return ''
 
   const rows = knowledgeRepo.searchKnowledgeByVector(vectorToBlob(vector), topK)
   if (rows.length === 0) return ''
