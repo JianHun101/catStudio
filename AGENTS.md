@@ -24,7 +24,7 @@ pnpm build                # pnpm -r build
 - `packages/web/` — Vue 3 前端（Vite + Pinia + Socket.IO client）
 - `scripts/` — 开发/种子/停服、MCP server、hooks 与 skills 治理
 - `skills/` — 技能活源（`.claude/skills` 是指向此处的链接，不在 `.claude` 内另存）
-- `docs/` — 项目文档（ADR 在 `docs/adr/`；`docs/run/` 为开发文档·在飞；完整清单以目录为准）
+- `docs/` — 项目文档（**定稿规格在 `docs/plans/`**、ADR 在 `docs/adr/`、`docs/run/` 为开发文档·在飞；完整清单以目录为准）
 
 子目录职责见 `CONTEXT.md`「模块目录结构」，本文不复述。
 
@@ -44,7 +44,7 @@ pnpm build                # pnpm -r build
 
 **LLM 适配器**: 按缓存键（`llm/registry.ts`，含 provider / apiKey / model / envExtra 维度）复用单实例——同键的猫共享一个实例，故需 token 池封顶并发。
 
-**记忆**: 本地嵌入 `Xenova/bge-small-zh-v1.5`（512 维），跑在**独立 sidecar 进程**（`scripts/flywheel/embed-server.mjs`，随 server 启停，只监听 `127.0.0.1`；主进程经 HTTP 调用）——模型不进主进程内存。入库：embed → 去重（余弦距离 < `MEMORY_DEDUP_THRESHOLD`）→ 存储；检索：top-K → 注入 system prompt。fire-and-forget，失败不阻塞（失败返回带 `reason` 的显式结果并记日志，不静默返回空向量）。
+**记忆**: 本地嵌入 `Xenova/bge-small-zh-v1.5`（512 维），跑在**独立 sidecar 进程**（`scripts/flywheel/embed-server.mjs`，随 server 启停，只监听 `127.0.0.1`；主进程经 HTTP 调用）——模型不进主进程内存。**MD 是唯一写入口**（对话原话实时嵌入层已整体退役：写口 + `memories` 表双删，别再找 `MEMORY_DEDUP_*` 那类阈值旋钮）——入库 = 扫描器把白名单 MD（`docs/adr/` `docs/lessons/` `docs/plans/`）切片 → 嵌入 → 按身份键（`content_hash`）幂等 upsert 进 `chunks` 三表；检索 = `retrieveMemoryContext` → `searchChunksHybrid`（向量 + 关键词 RRF）→ top-K 注入 system prompt。嵌入失败**不静默**：返回带 `reason` 的显式结果并记日志，不返回空向量。
 
 **数据库**: SQLite `packages/server/data/cat-study.db`（dev 模式为 `cat-study-dev.db`；WAL + sqlite-vec）；表与查询层见 `packages/server/src/db/`。API 边界做 snake_case ↔ camelCase 转换。
 
@@ -79,7 +79,7 @@ pnpm build                # pnpm -r build
 
 - `CONTEXT.md` — 术语表、模块目录结构、文档位置约定、流程约定
 - `docs/adr/` — 架构决策记录（新增前先读既有编号）
-- `docs/run/` — 开发文档·在飞（本轮票单）；活收口即清，结论上浮到 `docs/plans/`/`docs/sessions/`
+- `docs/run/` — 开发文档·在飞（本轮票单）；活收口即清，**结论上浮到 `docs/plans/`**（定稿规格，点名，不二选一）
 - `CODING_STANDARDS.md` — 编码规范
 - `.env.example` — 全部环境变量与默认值
 - `README.md` — 面向用户的项目说明
