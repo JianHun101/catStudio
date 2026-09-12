@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+# commit-msg 门禁：commit message 里的 `catstudy [uuid]` 必须真在 `messages` 表里
+# 逻辑**单源**在 scripts/commit-uuid-gate.mjs —— 本文件只是把 $1 转交过去的薄壳。
+#
+# 为什么是 commit-msg 而不是 pre-commit：pre-commit 在 commit message 生成**之前**
+# 跑，物理上拿不到 message；git 提供 message 的钩子是 commit-msg（$1 = message 文件）。
+#
+# ── 判据
+# 只查该 uuid 在 `messages.id` 里是否存在。**不**看 role、**不**查 execution_logs
+# （「手打真 id 但无执行」是用户手动提交的合法形态）、**不**拿 $CATSTUDY_TRIGGER_MSG_ID
+# 当判据（env 只是取证提示，库才是真相源）。
+#
+# ── 五态判决
+#   ① 无 catstudy [uuid] 标记                        → 放行（merge / revert / 手动提交不受影响）
+#   ② 有标记，uuid 形状非法（非 8-4-4-4-12 小写 hex）  → 阻断 exit 1
+#   ③ 有标记，形状合法，两库都查无此 id                → 阻断 exit 1
+#   ④ 两库文件都不存在                                → 放行 + 显式警示（**走 stderr**）
+#   ⑤ 库存在但读取失败（加锁超时 / 表缺失）            → 阻断 exit 1（查不动 ≠ 放行）
+#
+# ⚠️ 标记提取沿用 handoff-gen.mjs 的 extractCommitUuid，**只认小写 hex**：message 里
+#    写**大写** uuid 时它返回 null ⇒ 视为**无标记**，走 ① 放行（无归属，与现状一致）。
+#    本仓 uuid 出自 crypto.randomUUID()（全小写），现实无害——但别把「形状非法 ⇒ 阻断」
+#    读成已覆盖大写这种形态。
+#
+# ── 出口
+# 阻断信息含：被拒 uuid 原文 + 出处提示 + `echo $CATSTUDY_TRIGGER_MSG_ID` + 逃生口
+# `git commit --no-verify`（本仓既有**唯一**显式逃生口，不新增第二个开关）。
+#
+# 根解析取主仓库（worktree 内 packages/server/data/ 没有 .db），逻辑同源在 JS 侧。
+#
+# `--disable-warning=ExperimentalWarning`：脚本要用 node:sqlite（实验特性）查库，不压掉
+# 的话**每次提交**都先刷两行 ExperimentalWarning。Node ≥ 22.5 才有 node:sqlite，该 flag
+# 同代可用（本仓无 engines 约束，但功能本身已把下限钉在 22.5）。
+set -e
+node --disable-warning=ExperimentalWarning scripts/commit-uuid-gate.mjs "$1"

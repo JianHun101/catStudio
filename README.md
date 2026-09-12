@@ -310,7 +310,9 @@ LLM 侧通过 MCP 工具与系统交互（`packages/server/src/connectors/socket
 
 ## 代码审查链
 
-审查请求由实施角色自行发起（提交消息需带 `catstudy [uuid]` 标记，uuid = 触发消息 id；post-commit hook 只在「提交无归属执行」时兜底）：
+审查请求由实施角色自行发起（提交消息需带 `catstudy [uuid]` 标记，uuid = 触发本次执行的那条消息 id（用户消息或别的猫投来的 A2A 消息皆可）；post-commit hook 只在「提交无归属执行」时兜底）：
+
+`catstudy [uuid]` 会被 `.husky/commit-msg` 门禁按 `messages` 表校验存在性（`scripts/commit-uuid-gate.mjs`）——**查无 ⇒ 提交被拒**（手打/杜撰的 uuid 挂在提交那一刻；无标记的 merge / revert / 手动提交照旧放行）。逃生口是本仓既有的 `git commit --no-verify`。
 
 1. 实施角色提交 commit（限定路径：只 add 本次改动文件，禁止 `git add -A`）
 2. 补填交接文档后由实施角色投递 @店长 → @吐槽猫 审查
