@@ -30,7 +30,7 @@
 - `chunks` 是可重建派生投影，重扫会换 `content_hash` / chunk id → 标注键必须用身份键 `(doc_path, section_anchor, content_hash)`
 - 免审白名单：`docs/run/**`（含本目录）改动不进审查链
 - 已有基建别重造：L1 八口径已接线（缺端点/时序）、L2 判官打分已通、L4 episode 已通
-- **`execution_logs.latency_ms` 全表 100% NULL**（店长实测 dev 库 1080/1080，completed/failed/running 全中）。不是没采集——同一条 UPDATE 的兄弟列有值（`prompt_tokens` / `reply_chars` 各 1007 行非空，铁证它跑过）；是 `reply.ts:1077` 写入后被 `serial.ts:1261` 的 `finalizeExecutionLog` 以 `opts?.latencyMs ?? null` 覆盖，而调用点（`serial.ts:389` 等）**不传 latencyMs**。连带 L1 `avgLatencyMs` 恒 null（`l1-aggregator.ts:82`）。**修它一行，白得两段耗时**：`replyMs` = `latency_ms`、`nonReplyMs` = `ended_at − started_at − latency_ms`
+- **[已修 · P1-A `51170dc`，2026-09-14 重启生效；存量 1096 行按裁决不回填]** **`execution_logs.latency_ms` 全表 100% NULL**（店长实测 dev 库 1080/1080，completed/failed/running 全中）。不是没采集——同一条 UPDATE 的兄弟列有值（`prompt_tokens` / `reply_chars` 各 1007 行非空，铁证它跑过）；是 `reply.ts:1077` 写入后被 `serial.ts:1261` 的 `finalizeExecutionLog` 以 `opts?.latencyMs ?? null` 覆盖，而调用点（`serial.ts:389` 等）**不传 latencyMs**。连带 L1 `avgLatencyMs` 恒 null（`l1-aggregator.ts:82`）。**修它一行，白得两段耗时**：`replyMs` = `latency_ms`、`nonReplyMs` = `ended_at − started_at − latency_ms`
   - ⚠️ **两段的命名边界（店长 2026-09-13 实测纠正，早先写的「LLM 段 / 前置等锁段」是错的）**：`t0` 在 `reply.ts:207`（`runAgentReply` **内部**），而 token 获取在 `serial.ts:431`，**在 `runAgentReply` 之前** ⇒ `replyMs` = 上下文过滤 + 记忆检索 + LLM 流式 + 落库（**不只是 LLM**）；`nonReplyMs` = **等 token 锁 + 编排收尾 + 建行开销**（等锁是主要成分，**占比未实测**）。**禁用 `lockWaitMs`/「等锁段」这类字段名与文案——会把假数报成真数**；纯等锁数字需新增列 = P2 动表
 - **`/api/eval/aggregates` 已被 L2 按猫评分聚合占用**（`routes/eval.ts:47`）——L1 八口径端点须另起名
 - **链锚取法已定（见 Decisions）：`coalesce(回复消息.task_id, 触发消息.task_id)`**。单用触发侧会丢 **32.5%（351/1081）**——用户消息 564 条里 **342 条没有 `task_id`**（agent 消息 0 条缺失）；单用回复侧丢 **7.5%**（其中 70 行是失败跳，根本没有回复消息可 join）；coalesce 后仅剩 **28 行（2.6%）无锚**，这 28 行必须显式呈现为**孤儿跳**、不得静默丢弃
@@ -46,6 +46,15 @@
 - **【店长裁决 · 链锚口径与观察单位】**（2026-09-13，非票单）— **观察单位 = 执行跳（`execution_logs` 行），链锚 = `coalesce(回复消息.task_id, 触发消息.task_id)`**。依据三条实测（dev 库 1081 行）：① **失败的跳不产生消息行**——头号链 `9b4509e7` 27 消息行 / 25 执行跳 / `completed 21 + failed 4`，4 条失败跳 `reply_chars=0`；按消息行分组会**静默吞掉卡点本身**（页面显示"27 行都回了"，实际 4 跳死了）② 耗时/瀑布只能从 `execution_logs` 的 `started_at`/`ended_at` 算，两张表分组口径不一致会导致「页面显示 27 跳、瀑布只画 25 条」的自相矛盾 ③ 触发侧链锚覆盖 67.5%、回复侧 92.5%、coalesce **97.4%**。**该链跨度 3846 秒（64 分钟）**，是「耗时最长」切面的真实样本
 
 - **【店长裁决 · P1 范围与理由】**（2026-09-13，用户批准开工）— **P1 = 一行采集修复 + 两个只读端点 + 一个 tab，不碰表结构**。依据**可逆性**这把尺子：① `latency_ms` **持续写入且不可回填**（值丢了就是丢了，全表无第二列能反推）⇒ 唯一「越晚做越亏」的一项，必须最先落地；② 读接口与展示是叶子节点（无模块 import），改口径是加法不是改；③ **表结构（DDL）全部推到 P2**——那才是「后面一改就返工」的一层。**推论：把可逆的活压在不可逆的活后面 = 顺序反了。** 另收回一条早先建议：「把 `TelemetryGap` 式缺失状态显式化并进 P1」——若落在**写入侧**（新列/新枚举）就是锁表，属「后面可能改」那类 ⇒ **只做在读侧**（端点把「无数据」与「值为 0」分开推导），价值照拿，表不动
+
+- **【店长裁决 · P1 收口与通电实证】**（2026-09-14，非票单）— P1 三票（A / A2 / B）全部并入 `dev`，三方对齐 `dev = origin/dev = .push-gate = 6812375c`。**用户 2026-09-14 重启后，整批代码首次真机生效**，逐条实证：
+  - **进程换血**：server PID `159684` 创建于 `16:37:38Z`（tsx 直跑 `packages/server/src/index.ts`，主仓库在 `dev@6812375c`）；侧车 PID `255024` 于 `16:37:46Z` 随之重生（`127.0.0.1:3210` 监听）。
+  - **采集修复在位**：工作区源码 `db/repository/executionLogs.ts:316` = `latency_ms = COALESCE(?, latency_ms)`（**注意行号已从票单写的 :275 漂移到 :316**）。
+  - **两端点真机 200**：`/api/eval/l1-metrics` 返回 8 口径（`avgLatencyMs: null` —— 存量不可回填，符合预期）；`/api/eval/chains` 返回 485 链 / 1096 跳 / 孤儿 28 / 均 2.20 / 最长 26，锚串 `coalesce(reply.task_id, trigger.task_id)` 原样回传。
+  - **P1-A2 守卫真机生效（硬证据）**：`limit` 上限 100 导致在飞跳被排序挤出窗口，改用 `windowDays=1` 收窄窗口使其进入返回面 —— running 跳 `1b86d535` 的 `flags: []`（修复前必被标 `no_reply`），同窗口 `no_reply` 3 条**全部 `status=failed`**（防过度修正闸通过）。
+  - **幽灵 running 已清**：全表唯一 `status='running'` 行 = 当轮店长执行本身，重启前的残留行均已被 recovery 收口。
+  - **前端视觉自证（解 P1-B 「门槛 #5 真机联调」）**：playwright 驱动真实浏览器，L1 六卡 + 窗口/样本 + 说明文案齐；概览五要素齐；列表按跨度降序、失败徽章带文字、`失败 0` 灰显；孤儿区恒显示「28 跳 触发/回复消息均无 task_id，无法归入任何链」；**`平均耗时 —` 而非 `0`**（null≠0 契约肉眼确认）；**零 console error**。
+  - **仍未验的（诚实挂账）**：`latency_ms` 首个非空真值须等**一次执行收尾**（本轮执行 `1b86d535` 收尾时写入）——下一轮复核；若仍为 NULL 则 P1-A 未真生效，须返工。
 
 ## Not yet specified
 
@@ -69,9 +78,18 @@
 - ~~**T1 票单：RAG 检索评估生态与落地路径** — `T1-rag-eval-landscape.md`~~ ✅ **已关票**（2026-09-13，见 Decisions so far）
 - ~~**T2 票单：Trace 可观测性与评测平台** — `T2-trace-observability.md`~~ ✅ **已关票**（2026-09-13，见 Decisions so far）
 
-### P1（用户 2026-09-13 批准开工）
+### P1（用户 2026-09-13 批准开工）— ✅ **全部关票（2026-09-13/14）**
 
-- **P1-A：采集修复 + 链路查询端点 + L1 口径端点** — `P1-a-backend-chain-query.md`（后端，可立即开工）
-- **P1-B：评估中心「链路」tab** — `P1-b-web-chain-tab.md`（前端，契约已冻结，与 A 并行）
+- ~~**P1-A：采集修复 + 链路查询端点 + L1 口径端点** — `P1-a-backend-chain-query.md`~~ ✅ 已关票（`51170dc`，PR #72 merge `8b3fc712`）
+- ~~**P1-B：评估中心「链路」tab** — `P1-b-web-chain-tab.md`~~ ✅ 已关票（`5ec2b3e`，PR #73 merge `ba49c60b`）
+- ~~**P1-A2：no_reply 加 running 守卫**（OQ-1 裁决产物）— `P1-a2-no-reply-guard.md`~~ ✅ 已关票（`0ca73cf`，PR #74 merge `6812375c`）
 
 **P1 不做**：表结构改动（`retrieval_events` / span 表 = P2）、存量回填、RAG 检索指标（P2）。
+
+### 待排（P1 审查挂账）
+
+- **OQ-6：env 阈值解析 NaN 族** — `OQ-6-env-threshold-nan.md`（P3，真 bug 但需 env 配错才触发；**未派活**，等与 P2 一并排期）
+
+### P2（未开工 — **等用户授权**）
+
+`retrieval_events` 表 + span 表（一次做对）→ 记忆库 `recall@k` / `precision@k`。**动 DDL（不可逆）**，须先出设计再实施。
