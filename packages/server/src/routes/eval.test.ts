@@ -355,4 +355,248 @@ describe('Eval Routes', () => {
       expect(body.stats.versionStale).toBe(6) // 6 行全部 stale 版本
     })
   })
+
+  describe('P1-A 链路查询与 L1 口径端点', () => {
+    // 注意：**不能在 describe body 里 `const db = getDb()`**——describe 回调在收集期跑，
+    // 早于 beforeEach 的 setDb，会捕到上一个用例的句柄。每处用时现取。
+    const q = () => getDb()
+
+    /** 响应体最小形状——只声明断言用到的字段（免 `any`） */
+    interface ChainHopBody {
+      executionLogId: string
+      status: string
+    }
+    interface ChainBody {
+      chainId: string
+      hopCount: number
+      hops: ChainHopBody[]
+    }
+
+    /** 插一条消息（task_id = 链锚，null 即孤儿），返回 id */
+    function seedMsg(sessionId: string, id: string, taskId: string | null): string {
+      q()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+           VALUES (?, ?, 'agent', 'x', '[]', ?)`
+        )
+        .run(id, sessionId, taskId)
+      return id
+    }
+
+    /** 插一条执行行。`startedOffsetSec`/`endedOffsetSec` 相对 now 的秒偏移（便于造跨度与超窗行）；
+     *  `endedOffsetSec: null` ⇒ ended_at 为 NULL（在飞跳）。 */
+    function seedExec(spec: {
+      id: string
+      agentId: string
+      triggerMsgId: string
+      status: string
+      latencyMs?: number | null
+      replyChars?: number | null
+      messageId?: string | null
+      startedOffsetSec?: number
+      endedOffsetSec?: number | null
+    }): void {
+      const start = spec.startedOffsetSec ?? 0
+      const end = spec.endedOffsetSec === undefined ? start + 1 : spec.endedOffsetSec
+      q()
+        .prepare(
+          `INSERT INTO execution_logs
+             (id, session_id, agent_id, triggered_by_message_id, status, trace_id,
+              started_at, ended_at, latency_ms, reply_chars, message_id)
+           VALUES (?, 's1', ?, ?, ?, 'tr', datetime('now', ?), datetime('now', ?), ?, ?, ?)`
+        )
+        .run(
+          spec.id,
+          spec.agentId,
+          spec.triggerMsgId,
+          spec.status,
+          `${start} seconds`,
+          // SQLite 日期函数遇 NULL 参数返回 NULL —— 恰好就是「在飞跳」要的语义
+          end === null ? null : `${end} seconds`,
+          spec.latencyMs ?? null,
+          spec.replyChars ?? null,
+          spec.messageId ?? null
+        )
+    }
+
+    beforeEach(() => {
+      q().prepare("INSERT OR IGNORE INTO sessions (id, title) VALUES ('s1', 't')").run()
+    })
+
+    it('GET /api/eval/l1-metrics：200 且 avgLatencyMs 非 null（有 completed 样本时）', async () => {
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      const trig = seedMsg(sid, 'trig-1', 'anchor-1')
+      seedExec({ id: 'x1', agentId: a, triggerMsgId: trig, status: 'completed', latencyMs: 1200 })
+
+      const res = await app.inject({ method: 'GET', url: '/api/eval/l1-metrics' })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.windowDays).toBe(30)
+      expect(body.avgLatencyMs).toBe(1200)
+      expect(body.sampleTotal).toBe(1)
+    })
+
+    it('GET /api/eval/l1-metrics 是纯读：不落任何告警消息', async () => {
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      const trig = seedMsg(sid, 'trig-1', 'anchor-1')
+      seedExec({ id: 'x1', agentId: a, triggerMsgId: trig, status: 'failed', latencyMs: null })
+      const before = (q().prepare('SELECT COUNT(*) AS c FROM messages').get() as { c: number }).c
+
+      await app.inject({ method: 'GET', url: '/api/eval/l1-metrics' })
+      // 一次 GET 顺带触发滞回状态机 = 假告警——本端点不得走 runL1Aggregation
+      const after = (q().prepare('SELECT COUNT(*) AS c FROM messages').get() as { c: number }).c
+      expect(after).toBe(before)
+    })
+
+    it('GET /api/eval/chains：totals 与手工 SQL 一致，孤儿只落 orphanChain', async () => {
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      const t1 = seedMsg(sid, 'trig-1', 'anchor-1')
+      const t2 = seedMsg(sid, 'trig-2', 'anchor-2')
+      const t3 = seedMsg(sid, 'trig-3', null) // 无链锚 → 孤儿
+      seedExec({ id: 'x1', agentId: a, triggerMsgId: t1, status: 'completed', latencyMs: 1000 })
+      seedExec({ id: 'x2', agentId: a, triggerMsgId: t1, status: 'completed', latencyMs: 2000 })
+      seedExec({ id: 'x3', agentId: a, triggerMsgId: t2, status: 'completed', latencyMs: 3000 })
+      seedExec({ id: 'x4', agentId: a, triggerMsgId: t3, status: 'failed', latencyMs: null })
+
+      const res = await app.inject({ method: 'GET', url: '/api/eval/chains' })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.windowDays).toBe(30)
+      expect(body.anchor).toBe('coalesce(reply.task_id, trigger.task_id)')
+      expect(body.slowMs).toBe(300000)
+
+      // 手工 SQL 对照（验证面与被判面同面）
+      const expected = q()
+        .prepare(
+          `SELECT COUNT(*) AS hops,
+                  COUNT(DISTINCT COALESCE(rm.task_id, tm.task_id)) AS chains,
+                  SUM(CASE WHEN COALESCE(rm.task_id, tm.task_id) IS NULL THEN 1 ELSE 0 END) AS orphans
+           FROM execution_logs el
+           LEFT JOIN messages rm ON rm.id = el.message_id
+           LEFT JOIN messages tm ON tm.id = el.triggered_by_message_id
+           WHERE el.started_at >= datetime('now', '-30 days')`
+        )
+        .get() as { hops: number; chains: number; orphans: number }
+
+      expect(body.totals.chains).toBe(expected.chains)
+      expect(body.totals.hops).toBe(expected.hops)
+      expect(body.totals.orphanHops).toBe(expected.orphans)
+      expect(body.totals.orphanHops).toBe(1)
+      expect(body.totals.maxHops).toBe(2) // 真链最大 2 跳；孤儿桶不计入
+
+      // chains[] 里的链不含孤儿跳
+      const ids = (body.chains as ChainBody[]).flatMap((c) => c.hops.map((h) => h.executionLogId))
+      expect(ids).not.toContain('x4')
+      expect(body.orphanChain.chainId).toBeNull()
+      expect(body.orphanChain.hopCount).toBe(1)
+      expect((body.orphanChain.hops as ChainHopBody[]).map((h) => h.executionLogId)).toEqual(['x4'])
+    })
+
+    it('orphanChain 恒在：无孤儿时 hopCount 0 / hops []（字段不省略）', async () => {
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      const t1 = seedMsg(sid, 'trig-1', 'anchor-1')
+      seedExec({ id: 'x1', agentId: a, triggerMsgId: t1, status: 'completed', latencyMs: 1000 })
+
+      const body = JSON.parse((await app.inject({ method: 'GET', url: '/api/eval/chains' })).body)
+      expect(body.orphanChain).toEqual({ chainId: null, hopCount: 0, hops: [] })
+    })
+
+    it('limit 只截链不截跳：每条返回链 hops.length === hopCount', async () => {
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      const t1 = seedMsg(sid, 'trig-1', 'anchor-1')
+      const t2 = seedMsg(sid, 'trig-2', 'anchor-2')
+      seedExec({
+        id: 'x1',
+        agentId: a,
+        triggerMsgId: t1,
+        status: 'completed',
+        latencyMs: 1000,
+        startedOffsetSec: -9000,
+        endedOffsetSec: -8000,
+      })
+      seedExec({
+        id: 'x2',
+        agentId: a,
+        triggerMsgId: t1,
+        status: 'completed',
+        latencyMs: 1000,
+        startedOffsetSec: -7000,
+        endedOffsetSec: -6000,
+      })
+      seedExec({ id: 'x3', agentId: a, triggerMsgId: t2, status: 'completed', latencyMs: 1000 })
+
+      const body = JSON.parse(
+        (await app.inject({ method: 'GET', url: '/api/eval/chains?limit=1' })).body
+      )
+      expect(body.chains).toHaveLength(1)
+      expect(body.chains[0].hopCount).toBe(2) // 整链回来，不是半条
+      expect(body.chains[0].hops).toHaveLength(2)
+      // totals 仍是全窗口，不受 limit 影响
+      expect(body.totals.chains).toBe(2)
+      expect(body.totals.hops).toBe(3)
+    })
+
+    it('limit 越界钳位不报错（999 → 100、abc → 默认 20）', async () => {
+      expect(
+        (await app.inject({ method: 'GET', url: '/api/eval/chains?limit=999' })).statusCode
+      ).toBe(200)
+      expect(
+        (await app.inject({ method: 'GET', url: '/api/eval/chains?limit=abc' })).statusCode
+      ).toBe(200)
+      expect(
+        (await app.inject({ method: 'GET', url: '/api/eval/chains?limit=-5' })).statusCode
+      ).toBe(200)
+    })
+
+    it('windowDays 生效：窗口收紧后 totals 变小且原样回报', async () => {
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      const t1 = seedMsg(sid, 'trig-1', 'anchor-1')
+      seedExec({ id: 'recent', agentId: a, triggerMsgId: t1, status: 'completed', latencyMs: 1000 })
+      q()
+        .prepare(
+          `INSERT INTO execution_logs
+             (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+           VALUES ('old', 's1', ?, ?, 'completed', 'tr', datetime('now', '-90 days'))`
+        )
+        .run(a, t1)
+
+      const wide = JSON.parse(
+        (await app.inject({ method: 'GET', url: '/api/eval/chains?windowDays=365' })).body
+      )
+      const narrow = JSON.parse(
+        (await app.inject({ method: 'GET', url: '/api/eval/chains?windowDays=30' })).body
+      )
+      expect(narrow.windowDays).toBe(30)
+      expect(wide.totals.hops).toBe(2)
+      expect(narrow.totals.hops).toBe(1)
+    })
+
+    it('链级字段：startedAt/endedAt 是 UTC 字符串原样透传，spanMs 为毫秒差', async () => {
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      const t1 = seedMsg(sid, 'trig-1', 'anchor-1')
+      seedExec({
+        id: 'x1',
+        agentId: a,
+        triggerMsgId: t1,
+        status: 'completed',
+        latencyMs: 1000,
+        startedOffsetSec: -120,
+        endedOffsetSec: -60,
+      })
+
+      const body = JSON.parse((await app.inject({ method: 'GET', url: '/api/eval/chains' })).body)
+      const chain = body.chains[0]
+      expect(chain.chainId).toBe('anchor-1')
+      expect(chain.spanMs).toBe(60000)
+      expect(chain.startedAt).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/) // 无时区后缀 = 未经转换
+      expect(chain.hopCount).toBe(1)
+    })
+  })
 })

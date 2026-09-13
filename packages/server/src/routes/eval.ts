@@ -8,6 +8,8 @@
  *                                           重复提交同一 eval_score_id → 覆盖 + log 留痕（契约钉死分支）
  * - GET /api/eval/episode-stats             任务结局分布（U 根/H 根 outcome 计数 + open + 版本偏差，
  *                                           挂现成 episodeStats()，办成率前端算）
+ * - GET /api/eval/l1-metrics                L1 八口径聚合（P1-A：给已有 aggregateMetrics() 开门）
+ * - GET /api/eval/chains?limit=&windowDays= 链路查询（P1-A：哪条链最长 / 卡在哪一跳）
  *
  * 返回 snake_case 原样出（前端直接消费 DB 行），错误 { error } + 4xx 钉死契约类型。
  * 纯展示 + 回标写入，零 LLM 调用。
@@ -17,8 +19,11 @@ import { v4 as uuid } from 'uuid'
 import {
   evalScores as evalScoresRepo,
   userFeedback as userFeedbackRepo,
+  executionLogs as executionLogsRepo,
 } from '../db/repository/index.js'
 import { episodeStats } from '../eval/episodes.js'
+import { aggregateMetrics, WINDOW_DAYS } from '../eval/l1-aggregator.js'
+import { buildChains } from '../eval/chain-query.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('eval-routes')
@@ -28,6 +33,15 @@ function parseLimit(raw: unknown): number | null {
   if (raw === undefined || raw === '') return 50
   const n = Number(raw)
   return Number.isInteger(n) && n >= 1 && n <= 200 ? n : null
+}
+
+/** 链路查询的取参：**越界钳位不报错**（契约冻结）——与 parseLimit 的 400 语义刻意不同。
+ *  非数字（含 `?limit=abc`）回默认值，不静默当 0 用。 */
+function clampInt(raw: unknown, fallback: number, min: number, max: number): number {
+  if (raw === undefined || raw === '') return fallback
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, Math.floor(n)))
 }
 
 export async function evalRoutes(app: FastifyInstance): Promise<void> {
@@ -55,6 +69,47 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
    */
   app.get('/api/eval/episode-stats', async (_req, reply) => {
     return reply.send({ ok: true, stats: episodeStats() })
+  })
+
+  /**
+   * L1 八口径聚合（P1-A）。
+   *
+   * 路径**必须**是 `l1-metrics`——`/api/eval/aggregates`（上方）已被 L2 按猫评分聚合占用，
+   * 撞名会静默覆盖。
+   *
+   * **纯读**：只调 `aggregateMetrics()`，**不得**触发 `runL1Aggregation()` 的滞回状态机
+   * 与告警投递——那是定时任务的事，被一次 GET 顺带触发 = 假告警。
+   */
+  app.get('/api/eval/l1-metrics', async (_req, reply) => {
+    return reply.send({ windowDays: WINDOW_DAYS, ...aggregateMetrics() })
+  })
+
+  /**
+   * 链路查询（P1-A）：按链锚 `COALESCE(回复.task_id, 触发.task_id)` 分组，
+   * 回答「哪条链耗时最长 / 卡在哪一跳」。
+   *
+   * 取数归 repo、变换归 `eval/chain-query.ts` 纯函数，本路由只做「取数 → 调纯函数 → 返回」。
+   * 字段级契约见 `docs/run/eval-system/P1-a-backend-chain-query.md`（P1-B 前端按此消费）。
+   */
+  app.get('/api/eval/chains', async (req, reply) => {
+    const { limit: rawLimit, windowDays: rawWindow } = req.query as {
+      limit?: string
+      windowDays?: string
+    }
+    // 与 /scores 的 parseLimit 不同：**越界钳位不报错**（契约），limit 只截链不截跳
+    const limit = clampInt(rawLimit, 20, 1, 100)
+    const windowDays = clampInt(rawWindow, WINDOW_DAYS, 1, 3650)
+    const slowMs = parseFloat(process.env.EVAL_CHAIN_SLOW_MS || '300000')
+    const result = buildChains(executionLogsRepo.getExecutionHopsWithChainAnchor(windowDays), {
+      slowMs,
+      limit,
+    })
+    return reply.send({
+      windowDays,
+      anchor: 'coalesce(reply.task_id, trigger.task_id)',
+      slowMs,
+      ...result,
+    })
   })
 
   /** 待回标样本：low_score 且无 user_feedback，每条附回复全文 + 前置最近 10 条上下文 */

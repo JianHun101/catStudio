@@ -134,6 +134,11 @@ process.env.EVAL_ALERT_SUCCESS_RATE ??= '0.8'
 process.env.EVAL_ALERT_TIMEOUT_RATE ??= '0.1'
 process.env.EVAL_ALERT_REWORK_RATE ??= '0.3'
 
+// EVAL_CHAIN_SLOW_MS — 链路查询的「慢跳」判据阈值（毫秒，默认 5 分钟）：
+// 跳的 totalMs 严格大于此值即标 slow flag。P1 裁决 = 四类卡点标记全标不筛选
+// ——现在选阈值是拍脑袋，先让用户看到真实分布再定（无分布依据的阈值必然返工）。
+process.env.EVAL_CHAIN_SLOW_MS ??= '300000'
+
 // ─── 混合检索配置 ──────────────────────────────
 // ⚠️ 原 `MEMORY_HYBRID_ENABLED` 开关已删除（票辛 ⑥）：它管的是**旧 memories 链**
 // 的「纯向量 / 向量+关键词」二选一，而旧链已整体下线。新 chunks 链的混合检索

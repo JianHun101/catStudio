@@ -3,6 +3,7 @@
  */
 import type Database from 'better-sqlite3'
 import type { ExecutionLogRow } from './types.js'
+import type { ExecHopRow } from '../../eval/chain-query.js'
 
 let db: Database.Database
 
@@ -239,6 +240,36 @@ export function getAgentSessionStats(
     .get(agentId, sessionId) as { session_prompt: number; session_completion: number }
 }
 
+/**
+ * 链路查询取数（P1-A）——execution_logs 行 + 链锚 + 猫名。
+ *
+ * **链锚** `COALESCE(回复消息.task_id, 触发消息.task_id)`（地图 Decisions 已裁死，
+ * 覆盖率 97.4%）：单用触发侧丢 32.5%、单用回复侧丢 7.5%，**别改回单侧**。
+ * 锚为 NULL 的行是**孤儿跳**（dev 库实测 28 行 ≈ 2.6%），由 `buildChains` 归入
+ * `orphanChain`——**本函数不筛掉它们**，筛掉等于把卡点静默丢弃。
+ *
+ * 时间窗口径与 `eval/l1-aggregator.ts` 一致（`started_at >= datetime('now','-N days')`）。
+ * 只取数不做变换——分组/段算/flags/排序/截断全归 `eval/chain-query.ts` 的纯函数。
+ *
+ * @param windowDays 窗口天数（拼进 `datetime('now', ?)` 的修饰符，非字符串插值）
+ */
+export function getExecutionHopsWithChainAnchor(windowDays: number): ExecHopRow[] {
+  return db
+    .prepare(
+      `SELECT el.id AS execution_log_id, el.agent_id, a.name AS agent_name,
+              el.status, el.error_type, el.started_at, el.ended_at,
+              el.latency_ms, el.reply_chars, el.message_id,
+              el.triggered_by_message_id,
+              COALESCE(rm.task_id, tm.task_id) AS chain_id
+       FROM execution_logs el
+       JOIN agents a ON a.id = el.agent_id
+       LEFT JOIN messages rm ON rm.id = el.message_id
+       LEFT JOIN messages tm ON tm.id = el.triggered_by_message_id
+       WHERE el.started_at >= datetime('now', ?)`
+    )
+    .all(`-${windowDays} days`) as ExecHopRow[]
+}
+
 // ─── 写入 ──────────────────────────────────────────────
 
 export function insertExecutionLog(
@@ -260,7 +291,17 @@ export function insertExecutionLog(
  *  失败/中断路径不传保持 NULL，恢复回退时间窗判据。
  *  errorType：L1 错误分类桶（W1 契约）——必须与 status/error_message **同一条
  *  UPDATE** 带走（finalize 按 agent 最新 running 定位、无 id，二次更新在重启
- *  恢复时会把恢复后新执行的错误错配到旧行）。 */
+ *  恢复时会把恢复后新执行的错误错配到旧行）。
+ *
+ *  **latency_ms 用 COALESCE（P1 采集修复）**：成功路径的耗时由
+ *  `updateExecutionLogDiagnostics` 先写、`finalizeExecutionLog` 后擦（opts 里没有
+ *  latencyMs，impl 传 null）——修复前该列 100% 被擦成 NULL。要求：
+ *  1. **永不擦除已记录的耗时**：传 null + 行内已有值 → 保留 → 传 null + 行内也 null
+ *     → 仍 null。**不能写成 0**——0 是「瞬间完成」，与「无数据」是两回事。
+ *  2. **不把 latencyMs 穿线到 completeExecution**（架构裁决）：穿线要动
+ *     EngineCtx.completeExecution 接口 + finalizeRun opts + 3 个调用点；更糟的是
+ *     本函数按 `agent_id + 最新 running` 定位（**WHERE 里没有 sessionId**），同一只猫
+ *     跨会话并行时穿线会把 A 执行的耗时刻到 B 行上——COALESCE 只读行内已有值，不会串。 */
 export function finalizeExecutionLog(
   agentId: string,
   status: 'completed' | 'failed',
@@ -272,7 +313,7 @@ export function finalizeExecutionLog(
   db.prepare(
     `UPDATE execution_logs
      SET status = ?, ended_at = datetime('now'),
-         latency_ms = ?, error_message = ?, message_id = ?, error_type = ?
+         latency_ms = COALESCE(?, latency_ms), error_message = ?, message_id = ?, error_type = ?
      WHERE agent_id = ? AND status = 'running'
      ORDER BY started_at DESC LIMIT 1`
   ).run(status, latencyMs, errorMessage, replyMessageId, errorType, agentId)

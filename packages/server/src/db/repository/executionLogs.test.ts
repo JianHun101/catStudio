@@ -323,3 +323,170 @@ describe('execution_logs repo — 归属反查（T-M）', () => {
     })
   })
 })
+
+/**
+ * P1-A：latency_ms 采集修复（`finalizeExecutionLog` 的 COALESCE）+ 链路取数。
+ *
+ * 修复前形态：`updateExecutionLogDiagnostics` 先写 latency_ms，`finalizeExecutionLog`
+ * 再以 null 盖掉（opts 里没有 latencyMs）⇒ 全表 100% NULL。下列断言即钉死该回归。
+ */
+describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 't')").run()
+    db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+       VALUES ('agent-ds', 'ds猫', '🐯', 'p', 'claude', 'm', 'k')`
+    ).run()
+    // 触发消息（task_id = 链锚）
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+       VALUES (?, 's1', 'agent', '派活', '[]', ?)`
+    ).run(U, ANCHOR)
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  /** 起一个 running 行（started_at 取当前，保证落在 30 天窗口内） */
+  function startRun(id: string, agent = 'agent-ds'): void {
+    db.prepare(
+      `INSERT INTO execution_logs
+         (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+       VALUES (?, 's1', ?, ?, 'running', 'tr', datetime('now'))`
+    ).run(id, agent, U)
+  }
+
+  function latencyOf(id: string): number | null {
+    return (
+      db.prepare('SELECT latency_ms FROM execution_logs WHERE id = ?').get(id) as {
+        latency_ms: number | null
+      }
+    ).latency_ms
+  }
+
+  const DIAG = {
+    packagesInstalled: '',
+    promptChars: 10,
+    replyChars: 20,
+    promptTokens: 3,
+    completionTokens: 4,
+  }
+
+  describe('finalizeExecutionLog 不擦除耗时', () => {
+    it('先写 diagnostics、后 finalize(null) ⇒ 保留 1234（修复前被盖成 NULL）', () => {
+      startRun('e1')
+      repo.updateExecutionLogDiagnostics('agent-ds', { latencyMs: 1234, ...DIAG })
+      expect(latencyOf('e1')).toBe(1234)
+      repo.finalizeExecutionLog('agent-ds', 'completed', null, null, 'm-reply', null)
+      expect(latencyOf('e1')).toBe(1234)
+    })
+
+    it('反向用例：没写过 diagnostic 的行 finalize 后仍 NULL——不得变成 0', () => {
+      startRun('e2')
+      repo.finalizeExecutionLog('agent-ds', 'failed', null, 'boom', null, 'timeout')
+      // 0 是「瞬间完成」，与「无数据」是两回事——失败跳就该是 NULL
+      expect(latencyOf('e2')).toBeNull()
+    })
+
+    it('显式传入 latencyMs ⇒ 照写（COALESCE 不吞真值）', () => {
+      startRun('e3')
+      repo.finalizeExecutionLog('agent-ds', 'completed', 777, null, 'm-reply', null)
+      expect(latencyOf('e3')).toBe(777)
+    })
+
+    it('diagnostics 写的值跨多次 finalize 调用仍在（幂等，不被后续调用擦）', () => {
+      startRun('e4')
+      repo.updateExecutionLogDiagnostics('agent-ds', { latencyMs: 555, ...DIAG })
+      repo.finalizeExecutionLog('agent-ds', 'completed', null, null, 'm-reply', null)
+      // 第二次调用命不中（行已 completed，WHERE status='running'）——但值必须还在
+      repo.finalizeExecutionLog('agent-ds', 'completed', null, null, 'm-reply', null)
+      expect(latencyOf('e4')).toBe(555)
+    })
+  })
+
+  describe('getExecutionHopsWithChainAnchor', () => {
+    /** 插一条 messages 行并返回 id（role=agent，task_id 可 null） */
+    function msg(id: string, taskId: string | null): string {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES (?, 's1', 'agent', 'x', '[]', ?)`
+      ).run(id, taskId)
+      return id
+    }
+
+    it('触发侧 task_id 即链锚', () => {
+      startRun('e1')
+      const rows = repo.getExecutionHopsWithChainAnchor(30)
+      expect(rows).toHaveLength(1)
+      expect(rows[0].chain_id).toBe(ANCHOR)
+      expect(rows[0].agent_name).toBe('ds猫')
+    })
+
+    it('回复侧 task_id 优先于触发侧（coalesce 左项赢）', () => {
+      const reply = msg('m-reply', 'bbbb2222-0000-4000-8000-0000000000bb')
+      startRun('e2')
+      db.prepare('UPDATE execution_logs SET message_id = ? WHERE id = ?').run(reply, 'e2')
+      expect(repo.getExecutionHopsWithChainAnchor(30)[0].chain_id).toBe(
+        'bbbb2222-0000-4000-8000-0000000000bb'
+      )
+    })
+
+    it('回复侧 task_id 为 NULL ⇒ 回落到触发侧，不丢锚', () => {
+      const reply = msg('m-reply', null)
+      startRun('e3')
+      db.prepare('UPDATE execution_logs SET message_id = ? WHERE id = ?').run(reply, 'e3')
+      expect(repo.getExecutionHopsWithChainAnchor(30)[0].chain_id).toBe(ANCHOR)
+    })
+
+    it('两侧都无 task_id ⇒ chain_id NULL（孤儿跳，仍返回不筛掉）', () => {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+         VALUES ('m-orphan', 's1', 'agent', 'x', '[]', NULL)`
+      ).run()
+      db.prepare(
+        `INSERT INTO execution_logs
+           (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+         VALUES ('e4', 's1', 'agent-ds', 'm-orphan', 'running', 'tr', datetime('now'))`
+      ).run()
+      const rows = repo.getExecutionHopsWithChainAnchor(30)
+      expect(rows).toHaveLength(1)
+      expect(rows[0].chain_id).toBeNull()
+    })
+
+    it('message_id 为 NULL 的失败跳仍返回（LEFT JOIN 不吞行）', () => {
+      startRun('e5')
+      db.prepare(
+        "UPDATE execution_logs SET status = 'failed', message_id = NULL WHERE id = 'e5'"
+      ).run()
+      const rows = repo.getExecutionHopsWithChainAnchor(30)
+      expect(rows).toHaveLength(1)
+      expect(rows[0].message_id).toBeNull()
+      expect(rows[0].status).toBe('failed')
+    })
+
+    it('窗口外（started_at 超窗）的行不返回', () => {
+      db.prepare(
+        `INSERT INTO execution_logs
+           (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+         VALUES ('old', 's1', 'agent-ds', ?, 'completed', 'tr', datetime('now', '-90 days'))`
+      ).run(U)
+      expect(repo.getExecutionHopsWithChainAnchor(30)).toHaveLength(0)
+      expect(repo.getExecutionHopsWithChainAnchor(365)).toHaveLength(1)
+    })
+
+    it('取到的 latency_ms / reply_chars 原样带出（供纯函数算段）', () => {
+      startRun('e6')
+      repo.updateExecutionLogDiagnostics('agent-ds', { latencyMs: 4242, ...DIAG })
+      const r = repo.getExecutionHopsWithChainAnchor(30)[0]
+      expect(r.latency_ms).toBe(4242)
+      expect(r.reply_chars).toBe(20)
+      expect(r.triggered_by_message_id).toBe(U)
+    })
+  })
+})
