@@ -71,7 +71,7 @@ pnpm build                # pnpm -r build
 
 **测试 mock 边界**：只在边界 mock（子进程 / 文件系统 / 网络 / logger / 被测模块的协作者）；Zod、纯函数、SQLite、Fastify 用真的。
 
-**提交**：`git commit --only <paths>` 限定路径；多 Agent 并行时勿 `git add -A`（会扫走别人未提交的文件）。
+**提交**：`git add <paths>` → `git diff --cached --name-only` 核对暂存区 → 裸 `git commit`（裸 commit 提交**整个**暂存区，故核对步是限定路径的替代保证，不是可选礼仪）；**勿用 `git commit --only`**——`.husky/pre-commit` 为挡 git 注入污染会 `unset GIT_INDEX_FILE`，而 `--only` 恰是靠这个变量把临时索引递给钩子的，剥掉后 lint-staged 回落真 index、撞上 git 全程自持的 `index.lock`（实测：`--only` 期 gitdir 内有 `index.lock`，裸 commit 无）；多 Agent 并行时勿 `git add -A`（会扫走别人未提交的文件）。
 
 **外部工具形态选型**：任何外部 CLI/工具形态决策必须过 ADR 0007 清单（`docs/adr/0007-external-tool-form-selection-checklist.md`）——能力对账前置 / 假设标红+实测对称 / 简单形态默认+复杂举证倒置 / 决策留痕。
 
