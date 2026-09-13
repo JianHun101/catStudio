@@ -6,20 +6,26 @@ import {
   type ScoreAggregate,
   type PendingReviewScore,
   type EpisodeStats,
+  type EvalL1Metrics,
+  type EvalChainsResponse,
+  type ChainHop,
+  type HopFlag,
 } from '@/composables/useApi'
 
 /**
  * 全屏评估中心（E4-B，左侧栏底部入口进入，无 vue-router 的 App 级 view 切换）。
- * 双 tab（用户看得懂是硬要求）：
+ * 三 tab（用户看得懂是硬要求）：
  *   - 观察：评分列表 + 按猫聚合卡片 + 任务结局分布（episodes 7 类计数 + 办成率）
  *   - 回标：低分样本卡（回复全文 + 上下文折叠 + 1-5 分单选 + 评语）→ 提交移出待回标 + 角标减一
- * 契约：消费 E4-A 后端四接口 + episode-stats（契约缺口裁决补充的只读路由）；
+ *   - 链路（P1）：L1 八口径 + 链概览 + 每链跳瀑布（回答「哪条链最长 / 卡在哪一跳」）
+ * 契约：消费 E4-A 后端四接口 + episode-stats（契约缺口裁决补充的只读路由）
+ * + P1-A 的 l1-metrics / chains（平铺响应，无 ok 外壳）；
  * 办成率口径店长钉死：(success + corrected_success) / Σ(uRoot 已分类)，open 不计分母。
  * 纯展示 + 回标写入，零 LLM 调用。
  */
 const emit = defineEmits<{ close: [] }>()
 
-const activeTab = ref<'observe' | 'review'>('observe')
+const activeTab = ref<'observe' | 'review' | 'chain'>('observe')
 
 // ─── 观察 tab ─────────────────────────────
 const scores = ref<EvalScoreRow[]>([])
@@ -36,6 +42,159 @@ const pendingError = ref('')
 const reviewState = ref<Record<string, { score: number; comment: string }>>({})
 const submittingId = ref<string | null>(null)
 const submitError = ref('')
+
+// ─── 链路 tab（P1：哪条链耗时最长 / 卡在哪一跳）──────────
+const l1 = ref<EvalL1Metrics | null>(null)
+const chains = ref<EvalChainsResponse | null>(null)
+const chainLoading = ref(true)
+const chainError = ref('')
+/** 展开状态按链锚键控（默认全收起——一条链可达 26 跳，全铺开会淹掉列表） */
+const expanded = ref<Record<string, boolean>>({})
+const ORPHAN_KEY = '__orphan__'
+
+/** 渲染用分组：正文链 + 末尾孤儿组。
+ *  归一成同一形状后，孤儿区复用同一套跳渲染（否则要复制一份 ~20 行的跳模板）。
+ *  孤儿组没有跨度/完成/失败口径（契约只保证 `{ chainId, hopCount, hops }`）→ 取 null。 */
+interface ChainGroup {
+  key: string
+  orphan: boolean
+  spanMs: number | null
+  startedAt: string | null
+  endedAt: string | null
+  hopCount: number
+  completedCount: number | null
+  failedCount: number | null
+  hops: ChainHop[]
+}
+
+const chainGroups = computed<ChainGroup[]>(() => {
+  const c = chains.value
+  if (!c) return []
+  return [
+    ...c.chains.map((ch, i) => ({
+      key: ch.chainId || `chain-${i}`,
+      orphan: false,
+      spanMs: ch.spanMs,
+      startedAt: ch.startedAt,
+      endedAt: ch.endedAt,
+      hopCount: ch.hopCount,
+      completedCount: ch.completedCount,
+      failedCount: ch.failedCount,
+      hops: ch.hops,
+    })),
+    {
+      key: ORPHAN_KEY,
+      orphan: true,
+      spanMs: null,
+      startedAt: null,
+      endedAt: null,
+      hopCount: c.orphanChain.hopCount,
+      completedCount: null,
+      failedCount: null,
+      hops: c.orphanChain.hops,
+    },
+  ]
+})
+
+function isExpanded(key: string): boolean {
+  return expanded.value[key] === true
+}
+
+function toggleChain(key: string): void {
+  expanded.value[key] = !expanded.value[key]
+}
+
+/** 卡点徽章文案——**带文字**不只靠颜色（色盲可读） */
+const FLAG_LABELS: Record<HopFlag, string> = {
+  failed: '失败',
+  no_reply: '无回复',
+  slow: '超时',
+  no_data: '无数据',
+}
+const FLAG_ORDER: HopFlag[] = ['failed', 'no_reply', 'slow', 'no_data']
+
+/** 按白名单取标记：后端将来新增标记不会渲染成一个没有文案的空徽章 */
+function hopFlags(hop: ChainHop): HopFlag[] {
+  return FLAG_ORDER.filter((f) => hop.flags?.includes(f))
+}
+
+/** execution_logs.status 四值（db/index.ts CHECK 约束） */
+const STATUS_LABELS: Record<string, string> = {
+  queued: '排队中',
+  running: '进行中',
+  completed: '完成',
+  failed: '失败',
+}
+
+function statusLabel(s: string): string {
+  return STATUS_LABELS[s] || s
+}
+
+/** 毫秒 → 人话；null（无数据）→ `—`，**不是** `0ms`——「我不知道」≠「我没有」 */
+function fmtMs(ms: number | null | undefined): string {
+  if (ms == null) return '—'
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${(ms / 60_000).toFixed(1)}min`
+}
+
+/** 比率 → 百分比；null → `—`（不编 0%） */
+function fmtRate(r: number | null | undefined): string {
+  if (r == null) return '—'
+  return `${Math.round(r * 100)}%`
+}
+
+/** 计数 → 字符串（非整数保留 2 位，如均跳数 2.19）；null → `—` */
+function fmtNum(n: number | null | undefined): string {
+  if (n == null) return '—'
+  return Number.isInteger(n) ? String(n) : n.toFixed(2)
+}
+
+/** L1 八口径卡片：`value` 留原始值供「无数据」样式判定（任一口径为 null 都置灰），
+ *  `text` 是展示串——两者分开，避免用展示串反推「是不是没有数据」。 */
+const l1Cards = computed(() => {
+  const m = l1.value
+  return [
+    { label: '成功率', value: m?.successRate ?? null, text: fmtRate(m?.successRate) },
+    { label: '超时率', value: m?.timeoutRate ?? null, text: fmtRate(m?.timeoutRate) },
+    { label: '平均耗时', value: m?.avgLatencyMs ?? null, text: fmtMs(m?.avgLatencyMs) },
+    { label: '总 token', value: m?.totalTokens ?? null, text: fmtNum(m?.totalTokens) },
+    { label: '建议率', value: m?.suggestRate ?? null, text: fmtRate(m?.suggestRate) },
+    { label: '驳回率', value: m?.rejectRate ?? null, text: fmtRate(m?.rejectRate) },
+    { label: '解析失败率', value: m?.parseFailureRate ?? null, text: fmtRate(m?.parseFailureRate) },
+    { label: '基建故障', value: m?.infraFailures ?? null, text: fmtNum(m?.infraFailures) },
+  ]
+})
+
+/** SQLite 透传的 UTC 串（无时区后缀）→ 本地时区 `MM-DD HH:mm`。
+ *  直接交给 Date 会按**本地时区**解析（差 8 小时），必须显式当 UTC 解析。 */
+function fmtUtcShort(s: string | null | undefined): string {
+  if (!s) return '—'
+  const d = new Date(s.replace(' ', 'T') + 'Z')
+  if (Number.isNaN(d.getTime())) return s
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** 该跳仍在飞（无结束时点）→ 耗时不可得，展示 `—` */
+function hopRunning(hop: ChainHop): boolean {
+  return hop.endedAt == null
+}
+
+/** 三段拆分可用：replyMs / nonReplyMs / totalMs 齐备且总耗时 > 0 */
+function canSplit(hop: ChainHop): boolean {
+  return hop.replyMs !== null && hop.nonReplyMs !== null && hop.totalMs !== null && hop.totalMs > 0
+}
+
+/** 该段占该跳总耗时的百分比宽度（比例 = `totalMs` 内占比） */
+function segPct(part: number | null, total: number | null): string {
+  if (part == null || total == null || total <= 0) return '0%'
+  return `${Math.max(0, Math.min(100, (part / total) * 100))}%`
+}
+
+function hopTotalText(hop: ChainHop): string {
+  return hopRunning(hop) ? '—' : fmtMs(hop.totalMs)
+}
 
 /** 组件卸载（评估中心关闭）后停止写 ref——防写已卸载组件的警告 */
 let disposed = false
@@ -141,6 +300,22 @@ async function loadPending(): Promise<void> {
   }
 }
 
+/** 链路 tab 两份数据并行拉取（Promise.all——互不依赖，失败任一 → 整区错误态） */
+async function loadChains(): Promise<void> {
+  chainLoading.value = true
+  chainError.value = ''
+  try {
+    const [l1Res, chainRes] = await Promise.all([api.getEvalL1Metrics(), api.getEvalChains()])
+    if (disposed) return
+    l1.value = l1Res
+    chains.value = chainRes
+  } catch (err: any) {
+    if (!disposed) chainError.value = err.message || '链路数据加载失败'
+  } finally {
+    if (!disposed) chainLoading.value = false
+  }
+}
+
 /** 提交回标 → 成功即从列表移除（角标自动减一），失败保留样本卡 + 错误提示 */
 async function submitReview(id: string): Promise<void> {
   submitError.value = ''
@@ -163,6 +338,7 @@ async function submitReview(id: string): Promise<void> {
 onMounted(() => {
   loadObserve()
   loadPending()
+  loadChains()
 })
 onUnmounted(() => {
   disposed = true
@@ -203,6 +379,13 @@ onUnmounted(() => {
       >
         回标
         <span v-if="pendingBadge > 0" class="tab-badge">{{ pendingBadge }}</span>
+      </button>
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'chain' }"
+        @click="activeTab = 'chain'"
+      >
+        链路
       </button>
     </div>
 
@@ -334,6 +517,135 @@ onUnmounted(() => {
         </div>
         <div v-if="submitError" class="error-msg">{{ submitError }}</div>
       </div>
+    </div>
+
+    <!-- ─── 链路 tab（P1）─────────────────── -->
+    <div v-show="activeTab === 'chain'" class="eval-pane">
+      <div v-if="chainLoading" class="list-hint"><span class="status-spinner"></span> 加载中…</div>
+      <div v-else-if="chainError" class="error-msg">
+        {{ chainError }}
+        <button class="btn-retry-sm" @click="loadChains">重试</button>
+      </div>
+      <template v-else>
+        <div class="section-title">L1 指标</div>
+        <div class="l1-grid">
+          <div v-for="c in l1Cards" :key="c.label" class="l1-card">
+            <span class="l1-label">{{ c.label }}</span>
+            <span class="l1-value" :class="{ 'l1-nodata': c.value === null }">{{ c.text }}</span>
+          </div>
+        </div>
+        <div class="l1-note">
+          <span>窗口 {{ l1?.windowDays ?? '—' }} 天</span>
+          <span>样本 {{ fmtNum(l1?.sampleTotal) }}</span>
+          <span class="hint">平均耗时只算 completed 执行；无样本时为 —</span>
+        </div>
+
+        <div class="section-title">链路概览</div>
+        <div v-if="!chains" class="list-hint">暂无链路数据</div>
+        <template v-else>
+          <div class="overview-bar">
+            <span class="ov-item">
+              链 <b>{{ chains.totals.chains }}</b>
+            </span>
+            <span class="ov-item">
+              总跳数 <b>{{ chains.totals.hops }}</b>
+            </span>
+            <span class="ov-item">
+              均跳数 <b>{{ fmtNum(chains.totals.avgHopsPerChain) }}</b>
+            </span>
+            <span class="ov-item">
+              最长跳数 <b>{{ chains.totals.maxHops }}</b>
+            </span>
+            <span class="ov-item" :class="{ 'ov-warn': chains.totals.orphanHops > 0 }">
+              孤儿跳 <b>{{ chains.totals.orphanHops }}</b>
+            </span>
+            <span class="ov-item ov-dim"> 近 {{ chains.windowDays }} 天 </span>
+          </div>
+
+          <div class="section-title">链路列表（按跨度降序）</div>
+          <div v-if="chains.chains.length === 0" class="list-hint">窗口内没有链</div>
+          <div class="chain-list">
+            <template v-for="g in chainGroups" :key="g.key">
+              <div v-if="g.orphan" class="section-title orphan-title">未归属跳（无链锚）</div>
+              <div
+                class="chain-card"
+                :class="{
+                  'chain-has-failure': (g.failedCount || 0) > 0,
+                  'chain-orphan': g.orphan,
+                }"
+              >
+                <button
+                  class="chain-head"
+                  :aria-expanded="isExpanded(g.key)"
+                  @click="toggleChain(g.key)"
+                >
+                  <span class="chain-caret">{{ isExpanded(g.key) ? '▾' : '▸' }}</span>
+                  <template v-if="g.orphan">
+                    <span class="chain-item chain-bad">{{ g.hopCount }} 跳</span>
+                    <span class="chain-note">触发/回复消息均无 task_id，无法归入任何链</span>
+                  </template>
+                  <template v-else>
+                    <span class="chain-item">跨度 {{ fmtMs(g.spanMs) }}</span>
+                    <span class="chain-item">{{ g.hopCount }} 跳</span>
+                    <span class="chain-item">完成 {{ g.completedCount }}</span>
+                    <span class="chain-item" :class="{ 'chain-bad': (g.failedCount || 0) > 0 }">
+                      失败 {{ g.failedCount }}
+                    </span>
+                    <span class="chain-item chain-time">
+                      {{ fmtUtcShort(g.startedAt) }} → {{ fmtUtcShort(g.endedAt) }}
+                    </span>
+                  </template>
+                </button>
+                <div v-if="g.orphan && g.hopCount === 0" class="list-hint">无</div>
+                <div v-else-if="isExpanded(g.key)" class="hop-list">
+                  <div v-for="h in g.hops" :key="h.executionLogId" class="hop-row">
+                    <div class="hop-head">
+                      <span class="hop-agent">{{ h.agentName || '未知猫' }}</span>
+                      <span class="hop-status">{{ statusLabel(h.status) }}</span>
+                      <span
+                        v-for="f in hopFlags(h)"
+                        :key="f"
+                        class="flag-badge"
+                        :class="`flag-${f}`"
+                      >
+                        {{ FLAG_LABELS[f] }}
+                      </span>
+                      <span v-if="h.errorType" class="hop-err">{{ h.errorType }}</span>
+                    </div>
+                    <div class="hop-body">
+                      <div class="hop-bar" :title="`总耗时 ${hopTotalText(h)}`">
+                        <template v-if="canSplit(h)">
+                          <div
+                            class="hop-seg seg-reply"
+                            :style="{ width: segPct(h.replyMs, h.totalMs) }"
+                            :title="`回复生成段 ${fmtMs(h.replyMs)}`"
+                          ></div>
+                          <div
+                            class="hop-seg seg-nonreply"
+                            :style="{ width: segPct(h.nonReplyMs, h.totalMs) }"
+                            :title="`非回复段 ${fmtMs(h.nonReplyMs)}`"
+                          ></div>
+                        </template>
+                        <div v-else class="hop-seg seg-nodata" title="耗时拆分无数据"></div>
+                      </div>
+                      <span class="hop-dur">
+                        <template v-if="canSplit(h)">
+                          总 {{ hopTotalText(h) }} · 回复生成段 {{ fmtMs(h.replyMs) }} · 非回复段
+                          {{ fmtMs(h.nonReplyMs) }}
+                        </template>
+                        <template v-else>
+                          总 {{ hopTotalText(h) }} · <span class="hop-nodata">耗时拆分无数据</span>
+                        </template>
+                      </span>
+                      <span v-if="h.segmentClamped" class="hop-clamp">秒级舍入</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </template>
     </div>
   </div>
 </template>
@@ -897,5 +1209,301 @@ onUnmounted(() => {
 .btn-submit:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* ─── 链路 tab（P1）────────────────────── */
+
+.l1-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 8px;
+}
+
+.l1-card {
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.l1-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.l1-value {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 无数据（null）与 0 必须视觉可分——「我不知道」≠「我没有」 */
+.l1-nodata {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.l1-note {
+  margin: 10px 0 22px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.l1-note .hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.overview-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+
+.ov-item {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+
+.ov-item b {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-left: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-warn {
+  color: var(--accent-red);
+  border-color: rgba(224, 85, 106, 0.35);
+}
+
+.ov-warn b {
+  color: var(--accent-red);
+}
+
+.ov-dim {
+  color: var(--text-muted);
+}
+
+.chain-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chain-card {
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+/* 含失败跳的链整条可见区分（不只靠「失败 N」这个数字） */
+.chain-has-failure {
+  border-left: 3px solid var(--accent-red);
+}
+
+.chain-orphan {
+  border-left: 3px solid #6b7a8f;
+}
+
+.orphan-title {
+  margin-top: 16px;
+}
+
+.chain-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--ease-out);
+}
+
+.chain-head:hover {
+  background: var(--bg-hover);
+}
+
+.chain-caret {
+  width: 10px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.chain-item {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.chain-bad {
+  color: var(--accent-red);
+  font-weight: 600;
+}
+
+.chain-note {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.chain-time {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.hop-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.hop-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 10px 26px;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+
+.hop-row:last-child {
+  border-bottom: none;
+}
+
+.hop-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hop-agent {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.hop-status {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.hop-err {
+  font-size: 10px;
+  color: var(--accent-red);
+  background: rgba(224, 85, 106, 0.1);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+/* 卡点徽章：四类各一色，且**都带文字**（色盲可读；四值可同时出现） */
+.flag-badge {
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid transparent;
+}
+
+.flag-failed {
+  color: #e0556a;
+  background: rgba(224, 85, 106, 0.12);
+  border-color: rgba(224, 85, 106, 0.3);
+}
+
+.flag-no_reply {
+  color: #e8794a;
+  background: rgba(232, 121, 74, 0.12);
+  border-color: rgba(232, 121, 74, 0.3);
+}
+
+.flag-slow {
+  color: #f2b84a;
+  background: rgba(242, 184, 74, 0.12);
+  border-color: rgba(242, 184, 74, 0.3);
+}
+
+.flag-no_data {
+  color: #9aa7b8;
+  background: rgba(107, 122, 143, 0.14);
+  border-color: rgba(107, 122, 143, 0.35);
+}
+
+.hop-body {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.hop-bar {
+  flex: 1;
+  min-width: 140px;
+  height: 10px;
+  display: flex;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+
+.hop-seg {
+  height: 100%;
+}
+
+.seg-reply {
+  background: #3ecf8e;
+}
+
+.seg-nonreply {
+  background: #6b7a8f;
+}
+
+/* 拆分缺失（replyMs 为 null）：斜纹灰条**占满整条**，绝不画成 0 长度——
+ *  文案「耗时拆分无数据」放在条旁边的 .hop-nodata（10px 高的条里塞不下 9px 字） */
+.seg-nodata {
+  width: 100%;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(107, 122, 143, 0.45) 0 4px,
+    rgba(107, 122, 143, 0.15) 4px 8px
+  );
+}
+
+.hop-dur {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.hop-nodata {
+  color: var(--text-muted);
+}
+
+.hop-clamp {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-default);
+  border-radius: 999px;
+  padding: 1px 7px;
 }
 </style>

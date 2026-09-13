@@ -159,6 +159,85 @@ export interface EpisodeStats {
   open: number
 }
 
+// ─── P1 链路视图（GET /eval/l1-metrics + GET /eval/chains，契约由 P1-A 冻结在字段级）──
+// 两条响应均为**平铺**（无 `ok` 外壳）——与上方 E4-A 的 `{ ok, … }` 不同，照契约读顶层字段。
+
+/** L1 八口径（服务端 `aggregateMetrics()` 原样）。`avgLatencyMs` 为 null = 窗口内无 completed
+ *  样本（或 latency 采集修复前的存量窗口）。「无数据」≠「0」，展示端必须区分。 */
+export interface EvalL1Metrics {
+  windowDays: number
+  successRate: number
+  timeoutRate: number
+  avgLatencyMs: number | null
+  totalTokens: number
+  suggestRate: number
+  rejectRate: number
+  parseFailureRate: number
+  infraFailures: number
+  sampleTotal: number
+}
+
+/** 卡点标记（P1 裁决：四值互不排斥、全标不筛选——先看到真实分布再定阈值） */
+export type HopFlag = 'failed' | 'no_reply' | 'slow' | 'no_data'
+
+/** 一跳 = 一条 execution_logs（执行跳，**不是**一条 messages 行）。
+ *  失败跳没有回复消息，但**必须**出现在 `hops[]` 里——按消息行分组会把卡点静默吞掉。 */
+export interface ChainHop {
+  executionLogId: string
+  agentId: string
+  agentName: string
+  status: string
+  errorType: string | null
+  /** SQLite 原样 UTC 串（无时区后缀）——转换归前端，见 EvaluationView 的 `fmtUtcShort` */
+  startedAt: string | null
+  /** null = 该跳仍在飞（展示「进行中」+ 耗时 `—`） */
+  endedAt: string | null
+  /** 秒级精度（`datetime('now')` 写）；`endedAt` 为 null → null */
+  totalMs: number | null
+  /** = `latency_ms`（毫秒精度）。语义 = 上下文过滤 + 记忆检索 + LLM 流式 + 落库（不只是 LLM） */
+  replyMs: number | null
+  /** = `totalMs − replyMs`。语义 = 等 token 锁 + 编排收尾 + 建行开销——**禁用「等锁」类命名** */
+  nonReplyMs: number | null
+  /** true = 秒级舍入导致 `totalMs − replyMs < 0`（已钳位但显式暴露，不静默） */
+  segmentClamped: boolean
+  flags: HopFlag[]
+  triggerMessageId: string
+  replyMessageId: string | null
+}
+
+/** 一条链（后端已按 `spanMs` 降序排好并截断，前端不重排） */
+export interface EvalChain {
+  /** 链锚 = `coalesce(reply.task_id, trigger.task_id)` */
+  chainId: string
+  startedAt: string | null
+  /** 链内有在飞跳时是**已结束跳的下界**，故 `spanMs` 偏小 */
+  endedAt: string | null
+  spanMs: number | null
+  hopCount: number
+  completedCount: number
+  failedCount: number
+  hops: ChainHop[]
+}
+
+export interface EvalChainTotals {
+  chains: number
+  hops: number
+  orphanHops: number
+  avgHopsPerChain: number
+  maxHops: number
+}
+
+/** GET /eval/chains 响应体（窗口全量口径在 `totals`，`chains[]` 是被 `limit` 截断的那部分） */
+export interface EvalChainsResponse {
+  windowDays: number
+  anchor: string
+  slowMs: number
+  totals: EvalChainTotals
+  chains: EvalChain[]
+  /** 链锚为 NULL 的孤儿跳。**恒在**——无孤儿时 `{ chainId: null, hopCount: 0, hops: [] }` */
+  orphanChain: { chainId: null; hopCount: number; hops: ChainHop[] }
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -344,4 +423,10 @@ export const api = {
     }),
 
   getEvalEpisodeStats: () => request<{ ok: boolean; stats: EpisodeStats }>('/eval/episode-stats'),
+
+  /** L1 八口径（纯读；窗口由服务端 env 控制——P1 不做筛选交互，故不传参） */
+  getEvalL1Metrics: () => request<EvalL1Metrics>('/eval/l1-metrics'),
+
+  /** 链路视图（后端已排序 + 截断；孤儿跳只在 `orphanChain`，不在 `chains[]` 内） */
+  getEvalChains: () => request<EvalChainsResponse>('/eval/chains'),
 }
