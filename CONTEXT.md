@@ -123,3 +123,4 @@ _Avoid_: 日志, 请求记录
     - **隔离 closeout 分支承载（PR 承载分支 ≠ session 分支）——链尾不可直接落 `closeoutSession`**：该函数签名只有 `sessionId`，**没有「合哪个分支」的参数**——step ① 取的 ref 硬编码为 `sessionBranch(shortId)`（`session-closeout.ts` 的 `sessionBranch` → `git-utils.ts` 的 `session/${shortId}`），即合的是**整个 session 分支**。而隔离路径的存在前提恰是 session 分支上**有未审 commit**（没有就不必隔离）→ ff-only 一旦成功，未审 commit **静默进 dev**——**与上行相反：分叉态是拒绝，本态是误合**。该路径的收口落点未定案
 - 开发流程 gate 决策点：`spec-gate`（前半个门——需求可证伪/契约钉死，放行才拆票/进 implement）+ `quality-gate`（后半个门——提交前自查）
 - 依赖声明优先：装任何包前先声明 + 审查者批准，声明与安装不同轮
+- 记账类提交（纯文档收口记录）**免完整审查轮，但必过「数字独立抽验」**：收口记录是审计底账，一个错数字会污染此后全部取证——其中每个可被命令复现的数字（sha / parent 序 / diff stat / DB 计数 / 触发 uuid）必须由**第二只猫实测复核**，作者自报不成立。免完整轮与免审前缀是两件事：`scripts/handoff-gen.mjs` 的 `REVIEW_EXEMPT_PREFIXES`（判据为路径 `every` 命中 `docs/run/`）只决定「是否发起审查轮」，不豁免记录可信度——记账提交可静默，静默不等于免抽验
