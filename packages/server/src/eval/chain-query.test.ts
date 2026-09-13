@@ -115,6 +115,42 @@ describe('卡点 flags（四类互不排斥，全标不筛选）', () => {
     expect(hop.flags).toContain('no_reply')
   })
 
+  it('no_reply 守卫：running 跳不标——在飞 ≠ 无回复（P1-A2）', () => {
+    // 在飞跳 message_id 必为 null 是结构性必然（回复还没产生）；标 no_reply 等于
+    // 在同一行并排渲染「进行中」+「无回复」——报假数，比欠报更坏。
+    const [hop] = build([
+      row({
+        status: 'running',
+        started_at: '2026-09-01 10:03:00',
+        ended_at: null,
+        latency_ms: null,
+        reply_chars: null,
+        message_id: null,
+      }),
+    ]).chains[0].hops
+    expect(hop.flags).not.toContain('no_reply')
+    // 段算全 null ⇒ slow 也进不来；running ⇒ 不进 failed / no_data。四类一个都不该有。
+    expect(hop.flags).toEqual([])
+  })
+
+  it('no_reply 守卫负例：已结束的跳仍照标（防过度修正）', () => {
+    // failed：压根不产生回复消息行
+    expect(build([row({ status: 'failed', message_id: null })]).chains[0].hops[0].flags).toContain(
+      'no_reply'
+    )
+    // completed 但 message_id 为 null
+    expect(build([row({ message_id: null })]).chains[0].hops[0].flags).toContain('no_reply')
+    // completed 且 reply_chars 为 0
+    expect(build([row({ reply_chars: 0 })]).chains[0].hops[0].flags).toContain('no_reply')
+  })
+
+  it('no_reply 守卫方向向严：非 running 的未知 status 仍照标，不静默漏标', () => {
+    // 守卫写成 `!== 'running'` 而非白名单 `=== 'failed' | 'completed'`：
+    // 将来新增结束态 status 时，宁可多标也不静默漏标。
+    const [hop] = build([row({ status: 'cancelled', message_id: null })]).chains[0].hops
+    expect(hop.flags).toContain('no_reply')
+  })
+
   it('slow：totalMs > slowMs（严格大于，等于不算）', () => {
     // 10:00:00 → 10:05:00 = 300000 = slowMs，不算慢
     const equal = build([row({ ended_at: '2026-09-01 10:05:00' })]).chains[0].hops[0]

@@ -118,9 +118,14 @@ function toHop(row: ExecHopRow, slowMs: number): ChainHop {
 
   const flags: HopFlag[] = []
   if (row.status === 'failed') flags.push('failed')
-  // ⚠️ 无 status 守卫（契约原文如此，对照 no_data 有守卫）：在飞跳 message_id 必为 null
-  //    ⇒ 会被标 no_reply。若语义应为「尚未回复 ≠ 无回复」需架构裁决加 running 守卫。
-  if (row.message_id === null || row.reply_chars === 0) flags.push('no_reply')
+  // running 守卫（P1-A2 裁决）：在飞跳 `message_id` 必为 null 是**结构性必然**（回复还没产生），
+  // 拿它当「无回复」的证据是拿「尚未」当「没有」。且不能与上面「段算全 null = 本段尚未结束」
+  // 自相矛盾——同一行渲染出「进行中」+「无回复」是报假数。
+  // `no_reply` 与 `no_data` 对称：两者都只描述**已结束的跳**的缺失，故守卫同形。
+  // 方向向严：非 running 的未知 status 仍照标，不因新增状态值而静默漏标。
+  if (row.status !== 'running' && (row.message_id === null || row.reply_chars === 0)) {
+    flags.push('no_reply')
+  }
   if (totalMs !== null && totalMs > slowMs) flags.push('slow')
   // 有回复却无耗时——正是采集修复前全表的形态；修复后新数据不再出现，存量行会显示
   if (row.status === 'completed' && replyMs === null) flags.push('no_data')
