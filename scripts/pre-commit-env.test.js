@@ -244,4 +244,24 @@ describe('.husky/pre-commit：剥掉 git 注入的定位变量', () => {
       'unset 必须在 npx lint-staged 之前 —— 否则 lint-staged 及其子进程仍在被注入的 env 下'
     ).toBeLessThan(lintIdx)
   })
+
+  it('清单 · unset 覆盖 C2 定位类三项（清单被精简 ⇒ 真机回归静默放行）', () => {
+    const line = readFileSync(PRE_COMMIT, 'utf8')
+      .split(/\r?\n/)
+      .find((l) => /^\s*unset\s/.test(l))
+    expect(line, '钩子里找不到 unset 剥离行').toBeTruthy()
+    const stripped = line.trim().split(/\s+/).slice(1) // 去行首 `unset` 本身，余下即变量清单
+
+    // 只断言「unset 行存在 + 位置靠前」护不住**清单内容**：上一条用例的判据是「行在不在、在哪儿」，
+    // 不含「剥了哪些」。把 `GIT_INDEX_FILE` 从清单里删掉（恰是票面标注「主工作区注入无害」的那项，
+    // 未来清理者最可能下刀处）⇒ payload 的 `git init` 在 `cwd=tmp` 不受 index 影响、五字段读数也
+    // 不含 index 字节 ⇒ 上一条用例照绿，而 worktree 内的 index 劫持已静默回归。
+    // 故此处钉死 C2 清单，取**定位类三项**为下限（能改变 git 解析到**哪个仓库 / 哪个 index** 的变量）：
+    // `GIT_WORK_TREE` 是票面明示的「零成本防御性冗余」且 Phase A 实测**从未被注入**（evidence §1.4），
+    // 硬断言它 = 给一条永不触发的防线立断言（与 OQ-3 不给 `hooks-config.test.js` 加断言的判据同型）。
+    expect(
+      stripped,
+      `unset 清单缺定位类变量 ⇒ 真机回归会被静默放行。实测行: ${line.trim()}`
+    ).toEqual(expect.arrayContaining(['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']))
+  })
 })
