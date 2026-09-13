@@ -43,5 +43,7 @@ frontmatter `status:` 沿用 ADR 四值的**最小口径**（同一词汇表，�
 卡片落此 ⇒ **自动落必审侧**：`docs/lessons/**` **不在免审白名单内**（该白名单只含
 `docs/run/**`），天然必审——与 `docs/adr/**` 同理，它是知识真相源，不是过程留痕。
 
-写入走**独立 commit + `git commit --only <路径>`**：`git add -A` 型 auto-commit 抢收在本仓
-已复发 3 次，卡片一旦被抢收就跳过审查链；限定路径是这条通道的固定动作，不是可选礼仪。
+写入走**独立 commit + `git add <路径>` → 核对暂存区（`git diff --cached --name-only`）→ 裸 `git commit`**：
+`git commit --only` 在本仓不可用——`.husky/pre-commit` 的 `unset GIT_INDEX_FILE` 与它冲突（口径与实测见
+`AGENTS.md` 提交段）。`git add -A` 型 auto-commit 抢收在本仓已复发 3 次，卡片一旦被抢收就跳过审查链；
+限定路径是这条通道的固定动作，不是可选礼仪。
