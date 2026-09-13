@@ -254,3 +254,12 @@ WHERE el.started_at >= datetime('now', '-N days')
 - **uuid 标记**：commit message 带 `catstudy [<uuid>]`，uuid 取 **`$CATSTUDY_TRIGGER_MSG_ID`**（本会话 = `d4c52ec4-e909-4f53-93a6-6108a3aa3e2a`）。
   ⚠️ **不是 `$CATSTUDY_MSG_ID`**——那是个诱饵变量，用了会被 uuid 门禁挡下。
 - **禁 `--no-verify`**；push 归店长，实施者不自行收口。
+
+## 决策留痕
+
+- 跳 grilling：因 需求经 wayfinder 地图收敛（T1+T2 双票已关）+ 用户 2026-09-13 批「开工」，无新歧义待压测 → 故本单不单跑 grill
+- Gate B 契约：[边界=只做后端三处（一行 SQL / 一个新纯函数模块 / 两个路由 + 一个 env），**不碰 DDL、不碰前端、不回填存量** / 契约=两端点 JSON 字段级冻结 + 链锚 `coalesce(reply,trigger)` 已裁死 / 验收=7 条可执行项，含直连 dev 库 SQL 复核与纯函数单测] 已钉死
+- 架构裁决①：`finalizeExecutionLog` 用 **SQL COALESCE** 而非「把 latencyMs 穿到 completeExecution」——理由见二①（穿线面大 + 会放大 finalize 无 sessionId 的错配）
+- 架构裁决②：段命名用 `replyMs` / `nonReplyMs`，**禁 `lockWaitMs`**——`t0`（`reply.ts:207`）在 token 获取（`serial.ts:431`）**之后**，残余段不等于等锁
+- 卡点判据：P1 裁决 = **四类全标不筛选**，`slow` 阈值 env 化；待真实分布再定阈值（把地图「Not yet specified」该项毕业）
+- 可逆性排序：本票是 P1 里**唯一不可逆**的部分（采集窗口持续丢），故排在读接口/展示之前

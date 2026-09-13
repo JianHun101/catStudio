@@ -149,3 +149,12 @@ Blocked by: **无**（契约已冻结到字段级，可照契约先写 UI + mock
 - **uuid 标记**：commit message 带 `catstudy [<uuid>]`，uuid 取 **`$CATSTUDY_TRIGGER_MSG_ID`**（本会话 = `d4c52ec4-e909-4f53-93a6-6108a3aa3e2a`）。
   ⚠️ **不是 `$CATSTUDY_MSG_ID`**——诱饵变量，会被门禁挡下。
 - **禁 `--no-verify`**；push 归店长。
+
+## 决策留痕
+
+- 跳 grilling：因 需求经 wayfinder 地图收敛 + 用户 2026-09-13 批「开工」；契约由 P1-A 冻结在字段级 → 故本单不单跑 grill
+- Gate B 契约：[边界=**只碰 `packages/web/**`**，不加 view/router/筛选/轮询/图表库 / 契约=P1-A 端点 JSON 逐字段照抄 + DTO 落 `useApi.ts`（既有惯例）/ 验收=5 条，含 4 条针对性单测（失败跳可见 / null≠0 / 孤儿区 / 时区）] 已钉死
+- 架构裁决①：**不新建 view**，加在既有 `EvaluationView.vue` 的 tab 栏做第三个 tab（本项目无 vue-router，App 级布尔切换是既有形态）
+- 架构裁决②：DTO **不进 `@cat-study/shared`**——shared 放领域类型，HTTP 响应 DTO 的惯例在 `useApi.ts`（`EvalScoreRow:119` 等）
+- 展示裁决：`null`（无数据）**必须**与 `0`（自解释为零）视觉可分——正面抄 clowder-ai 的 `TelemetryGap` 教训（「我不知道」和「我没有」是两种状态）
+- 文案裁决：禁「等锁段」，用「回复生成段 / 非回复段」
