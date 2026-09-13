@@ -109,3 +109,25 @@ failed  跳数: 69 | 其中带 no_reply: 69
 1. **`$CATSTUDY_TRIGGER_MSG_ID` 与票单「诱饵」标记冲突——以环境变量真值为准。**
    票单第五节（承店长上轮叙述）把 `af5f13a4…` 标为「诱饵不用」。实证推翻：该 id **命中 dev 库**，归属到恰好 1 条执行（`6701eb89`，本会话，`running`，`started_at 16:04:26`）——即本次执行。pre-commit 门禁亦判「命中 dev 库 → 放行」并将 `commit_hash` 写回该 running 行。**规律**：uuid 逐轮不同（`d4c52ec4` → `bcb8dd2f` → `9cf7d7be` → `af5f13a4`），票单里写死的那一个是**写票那轮**的值，不是实施轮的值——实施一律取当时的 `$CATSTUDY_TRIGGER_MSG_ID`。
 2. **临时复核脚本删不掉**：`packages/server/data/eval/p1a2-check.ts` 残留（`rm` 被权限规则拒绝，未绕过）。该目录在 `.gitignore` 内，**不进任何提交**（`git status` 无此文件，已实证）；收口时可顺手清。
+   **收口时复核：已清空**（`packages/server/data/eval/` 目录存在但为空，`git status` 干净）。
+
+## 七、收口（店长，2026-09-13 16:13 UTC）
+
+| 项            | 值                                                                              |
+| ------------- | ------------------------------------------------------------------------------- |
+| 审查结论      | 💬 仅评论（吐槽猫）——无必须修项，实施猫未返工                                   |
+| 收口 PR       | #74 `closeout/p1a2-0ca73cf`（base=dev）                                         |
+| 收口方式      | 隔离分支 pin 已审 sha 字面量 `0ca73cf`（**未整推 session 分支**）+ merge commit |
+| merge commit  | `6812375c`                                                                      |
+| 落 dev 后对账 | `dev = origin/dev = .push-gate = 6812375c` ✅                                   |
+| 随行 docs     | `48374c9`（P1-B 票单回填）、`5e8897c`（P1-A 追补票单）——均 `docs/run/**` 免审   |
+| 分支清理      | 本地 `-D` + 远端随 PR delete-branch；`ls-remote` 复核为 0                       |
+
+**生效条件（未满足）**：本票是 **server 代码**，跑着的 server 仍是旧代码 ⇒ `/api/eval/chains` 端点里 `running` 跳**仍会被标 `no_reply`**。需重启才生效——与 P1-A 的 `latency_ms` 采集修复（`51170dc`，PR #72）**同一批**。
+
+**收口时实测（两处独立证据）**：
+
+1. `.restart-request` 仍为 `state: "pending"`、`expiresAt 2026-09-13T16:14:26Z` 到期——**用户未点确认，重启未发生**；
+2. `execution_logs.latency_ms` 非空 **0 / 1095**——P1-A 的采集修复同样未生效，**数据窗口仍闭着**。
+
+**已知滞留（记录≠真相，记一笔）**：§六 Resolution 由 `6172653` 引入，**未随本 PR 落 dev**——它是 `0ca73cf` 的**后代**而非祖先，隔离分支只 carry 已审 sha 及其祖先。⇒ **dev 上的本文件缺 §六、呈「未解决」态**。按既有惯例（纯 `docs/run/**` 提交从不单独开 PR），随下一次**代码类**收口一并带入。
