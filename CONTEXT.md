@@ -124,3 +124,4 @@ _Avoid_: 日志, 请求记录
 - 开发流程 gate 决策点：`spec-gate`（前半个门——需求可证伪/契约钉死，放行才拆票/进 implement）+ `quality-gate`（后半个门——提交前自查）
 - 依赖声明优先：装任何包前先声明 + 审查者批准，声明与安装不同轮
 - 记账类提交（纯文档收口记录）**免完整审查轮，但必过「数字独立抽验」**：收口记录是审计底账，一个错数字会污染此后全部取证——其中每个可被命令复现的数字（sha / parent 序 / diff stat / DB 计数 / 触发 uuid）必须由**第二只猫实测复核**，作者自报不成立。免完整轮与免审前缀是两件事：`scripts/handoff-gen.mjs` 的 `REVIEW_EXEMPT_PREFIXES`（判据为路径 `every` 命中 `docs/run/`）只决定「是否发起审查轮」，不豁免记录可信度——记账提交可静默，静默不等于免抽验
+- **行号核对必须走字节级 oracle**：`git grep -n <sha> -- <path>`（或 `git show <sha>:<path> | grep -n`），**不得用 PowerShell 管道读文件取行号**——PS 5.1 在中文 ACP（如 936/GB2312）下按旧代码页解码 UTF-8 输出，双字节序列吞掉换行、行被静默合并，行号随位置累积偏移（实测同一 blob 的常量行号被读成偏小近百行），且**无任何告警**；伪影会让复核者拿错误证据推翻正确提交。`git grep` 是 C 层字节匹配、绕开 shell 解码，在任何终端下只有一种结果——佐证可用「blob sha 自哈希回环」（`git cat-file -p $B \| git hash-object --stdin` 应回吐 `$B` 本身）
