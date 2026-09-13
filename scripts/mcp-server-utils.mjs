@@ -230,7 +230,7 @@ const LIST_SESSION_MEMBERS_TOOL = {
   name: LIST_SESSION_MEMBERS_TOOL_NAME,
   description:
     '列出当前会话全部成员（agentId/name/role）。' +
-    'role 是身份定位：store=店长（收口决策）、reviewer=审查猫、implementer=实施猫、vision=视觉验收——' +
+    'role 是身份定位：store=店长（收口决策）、reviewer=审查猫、implementer=实施猫——' +
     '派活/收口前查会话有哪些猫、各自干嘛。会话由环境注入，无参数。',
   inputSchema: {
     type: 'object',

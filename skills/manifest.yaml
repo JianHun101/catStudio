@@ -170,23 +170,6 @@ skills:
       - '会议总结'
     output: 'docs/sessions/cat-study-{slug}-summary.md'
 
-  vision-assist:
-    source: self
-    use_when: |
-      the task requires SEEING an image — the user attaches an image and asks what it shows, asks to describe a picture, wants visual review of a UI screenshot, or needs image-link functionality verified. Your own model cannot render images natively (Read returns "[Unsupported Image]"), so route any image-seeing task through this pipeline instead of trying to read pixels yourself.
-    not_for: |
-      text-only questions where no pixel content exists.
-    category: '视觉'
-    requires_mcp: 'ollama:qwen3.5:9b (127.0.0.1:11434)'
-    description: |
-      自研技能：用项目 qwen3.5:9b（Ollama）视觉管线当眼睛。
-      模型无法原生看图时路由到本技能。
-    triggers:
-      - '看图'
-      - 'vision'
-      - '截图'
-    output: '图片内容描述'
-
   # ── mattpocock 系（来源仓库 mattpocock/skills，v1.1 主线）──
   code-review:
     source: mattpocock

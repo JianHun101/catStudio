@@ -453,7 +453,7 @@ export async function runAgentReply(
 
   // 铁律运行期注入：铁律从「seed 期烘焙」升级为「settings 表全局策略」（getIronLaws
   // 单一权威访问器）——按 role 取应注入铁律（reviewer→审查铁律；store/implementer→开发
-  // 铁律；vision/unknown→'' 不注入），拼到 system prompt 之后统一走占位符替换。防重复注入：
+  // 铁律；其余 role→'' 不注入），拼到 system prompt 之后统一走占位符替换。防重复注入：
   // seed 已解除烘焙，但老库 system_prompt 可能仍带旧铁律（收口后 seed 清洗前）——本 agent
   // 的 systemPrompt 已包含该铁律全文时不再追加（避免双份）。
   const ironLaw = ironLawForRole(agent.role)

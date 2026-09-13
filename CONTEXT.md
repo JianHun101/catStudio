@@ -110,7 +110,7 @@ _Avoid_: 日志, 请求记录
 
 - `agent_ids`（sessions 表 JSON 数组）= 会话成员，按注册顺序（无 FK 约束，成员可能被删成悬空 id）
 - `segments`（messages 表 JSON）= 消息的结构化块（kind: text/thinking/tool），非拼接字符串
-- `role` = 身份定位（agents.role：store/reviewer/implementer/vision），非状态、非消息行 role（user/agent/system）——两个 role 不是一回事
+- `role` = 身份定位（agents.role：store/reviewer/implementer；`vision` 已于 2026-09-13 退役，老库残留行按「角色不在边表 → 放行」兜底），非状态、非消息行 role（user/agent/system）——两个 role 不是一回事
 - `dispatch_state` / `execution_logs.status` = 调度与执行状态（running/completed/failed），忙闲不影响入队
 
 ## 流程约定

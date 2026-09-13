@@ -18,17 +18,17 @@ import {
 describe('agent system prompts', () => {
   const agents = buildDemoAgents()
 
-  it('所有 agent 的 systemPrompt 包含共享角色边界（视觉专用猫豁免）', () => {
+  // 原两条对「视觉专用猫」的 continue 豁免已随 vision 角色退役删除（2026-09-13，单A）：
+  // 种子内不再有非角色扮演 prompt，断言恢复为无豁免的全量——覆盖面比退役前更严。
+  it('所有 agent 的 systemPrompt 包含共享角色边界', () => {
     for (const agent of agents) {
-      if (agent.role === 'vision') continue // 图测猫是视觉指令 prompt，非角色扮演
       expect(agent.systemPrompt).toContain('只扮演自己的角色')
       expect(agent.systemPrompt).toContain('禁止代写或预判其他 Agent')
     }
   })
 
-  it('所有 agent 的 systemPrompt 以共享前置声明开头（视觉专用猫豁免）', () => {
+  it('所有 agent 的 systemPrompt 以共享前置声明开头', () => {
     for (const agent of agents) {
-      if (agent.role === 'vision') continue
       expect(agent.systemPrompt).toMatch(/^你是一只拥有人工智能的猫/)
     }
   })

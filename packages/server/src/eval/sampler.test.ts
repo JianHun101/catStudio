@@ -80,7 +80,7 @@ describe('getSampleRate', () => {
 })
 
 describe('maybeScoreSample', () => {
-  it('ollama 图测猫不采样，random 不被调用', () => {
+  it('ollama 猫不采样，random 不被调用', () => {
     const random = vi.fn(() => 0)
     maybeScoreSample(OLLAMA_AGENT, 's-1', 'm-1', random)
     expect(random).not.toHaveBeenCalled()

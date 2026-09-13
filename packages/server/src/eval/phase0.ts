@@ -2,7 +2,7 @@
  * Phase 0 选型预验证（W2 L2 评估子系统）。
  *
  * 契约要点：
- * - 50 条 = 30 猫咖真实（来源限定 DS 族猫，排除 ollama 图测猫）+ 20 外部构造对照
+ * - 50 条 = 30 猫咖真实（来源限定 DS 族猫，排除 ollama 猫）+ 20 外部构造对照
  * - 判定口径：score ≥4 通过 / ≤2 不通过 / 3 不计
  * - 主指标：Spearman ≥ 0.7 且与人工一致率 ≥ 80%；子指标：自有族 vs 外部
  *   一致率差距 ≤ 15pp（超阈否决）；主指标并列时跨族优先
@@ -225,7 +225,7 @@ export function buildCandidates(): JudgeCandidate[] {
 // ─── 样本收集（30 条真实 + 20 外部对照） ─────────────
 
 /**
- * 从消息表挑 DS 族猫回复（排除 ollama 图测猫），取最新 count 条。
+ * 从消息表挑 DS 族猫回复（排除 ollama 猫），取最新 count 条。
  * 纯函数（测试用注入数据）；agentById 为 agent_id → {provider, model} 映射。
  * DS 族判定按模型名包含 'deepseek'（生产主猫 llmProvider='opencode'、
  * llmModel='opencode-go/deepseek-v4-flash' 经 opencode 适配器跑 Go 订阅；

@@ -34,7 +34,7 @@ export function writeIronLaws(coder: string, reviewer: string): void {
 /**
  * 按 role 取应注入的铁律——运行期注入点（runAgentReply）消费。
  * 映射必须与 seed 现状严格一致：reviewer→审查铁律；store/implementer→开发铁律；
- * 其余（vision/unknown 等）→'' 不注入（图测猫与 UI 新建猫当前无铁律，不得引入行为变化）。
+ * 其余（unknown 等）→'' 不注入（老库残留角色与 UI 新建猫当前无铁律，不得引入行为变化）。
  */
 export function ironLawForRole(role: string | undefined): string {
   if (role === 'reviewer') return getIronLaws().reviewer

@@ -62,10 +62,13 @@ describe('config/iron-laws — ironLawForRole 三态映射', () => {
     expect(ironLawForRole('implementer')).toBe(IRON_LAWS_CODER)
   })
 
-  it('vision / unknown / 缺失 → 不注入（空串）', () => {
-    expect(ironLawForRole('vision')).toBe('')
+  it('不在边表的角色 / unknown / 缺失 → 不注入（空串）', () => {
+    // 原 'vision' 一档随角色退役删除（2026-09-13，单A）：ironLawForRole 只有
+    // reviewer / store|implementer / 其余 三个分支，'unknown' 覆盖的正是同一个
+    // "其余"分支——留 'vision' 会是一个同分支同断言的重复用例，不增覆盖。
     expect(ironLawForRole('unknown')).toBe('')
     expect(ironLawForRole(undefined)).toBe('')
+    expect(ironLawForRole('')).toBe('')
   })
 
   it('写后 ironLawForRole 返回新值（运行期编辑生效）', () => {

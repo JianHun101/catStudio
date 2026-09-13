@@ -13,10 +13,12 @@
  *   ✅可合并/💬仅评论（非阻断）→ @架构师（收口信号直接到位）；⚠️/❌ → @作者（要改的才回作者）。
  *   implementer 边是收口链的必要边：白名单原先只有「触发者」概念、没有「作者」，
  *   而触发者常是用户或店长 → ⚠️/❌ 永远投不回作者（结论静默悬空，2026-09-09 实证）
- * - vision（图测猫）→ {store}：视觉评审专用，只响应店长派活
+ * - vision（图测猫）→ {store}：**已于 2026-09-13 退役**（模型已能原生看图，外部视觉
+ *   旁路整链删除）——该键已从边表移除，老库残留的 `role='vision'` 行因此落到下面
+ *   那条「角色不在边表 → 放行不拦截」兜底上，这与退役前的目标侧行为一致、不倒退。
  *
- * 关键语义：角色未知/缺失（老库迁移默认 'unknown'）→ 发送者放行不拦截、
- * 目标放行——误杀审查链的代价远大于漏拦一条 @（店长边界）。
+ * 关键语义：角色未知/缺失（老库迁移默认 'unknown'；含已退役的 'vision' 残留行）
+ * → 发送者放行不拦截、目标放行——误杀审查链的代价远大于漏拦一条 @（店长边界）。
  */
 
 import type { AgentRole } from '@cat-study/shared'
@@ -29,7 +31,8 @@ const ROLE_ALLOWED_MENTIONS: Record<AgentRole, 'any' | AgentRole[]> = {
   store: 'any',
   implementer: ['store', 'reviewer'],
   reviewer: ['store', 'implementer'],
-  vision: ['store'],
+  // vision 键已随角色退役移除（2026-09-13，单A）——**不是**为了让老库 vision 行
+  // 落到这里，而是角色本身不该再存在于边表；残留行靠下方 `!rule` 兜底放行。
 }
 
 /** 发送者上下文 */
@@ -64,7 +67,9 @@ export function filterAllowedMentions<T extends MentionPolicyTarget>(
   from: MentionPolicyFrom,
   targets: T[]
 ): { allowed: T[]; blocked: BlockedMention[] } {
-  // 发送者角色未知（undefined 或不在边表中，如老库默认 'unknown'）→ 全放行
+  // 发送者角色未知（undefined 或不在边表中：老库默认 'unknown'、**已退役角色的残留行**
+  // 如 `role='vision'`）→ 全放行。退役后这条兜底多承接了一类输入，故显式点名它：
+  // 残留 vision 行不因退役而被拦死，行为与退役前一致。
   const rule = from.role ? ROLE_ALLOWED_MENTIONS[from.role] : undefined
   if (!rule) {
     return { allowed: [...targets], blocked: [] }
@@ -102,7 +107,9 @@ function isRoleAllowed(
   t: MentionPolicyTarget
 ): boolean {
   if (rule === 'any') return true
-  // 目标角色未知（老库未配）→ 放行——无法判定边表时误杀风险大于漏拦
+  // 目标角色未知（老库未配）→ 放行——无法判定边表时误杀风险大于漏拦。
+  // 注意已退役角色的残留目标**不走这里**（t.role='vision' 是真值）——它落到
+  // `rule.includes` 失败而被拦，与退役前同——目标侧行为未变。
   if (!t.role) return true
   if (rule.includes(t.role)) return true
   // reviewer 特殊边：可 @ 回本次触发消息作者（若为 agent）——审查结论回请求人
@@ -119,8 +126,6 @@ export function allowedTargetsDescription(role?: AgentRole): string {
       return `店长、吐槽猫（每条回复最多 ${IMPLEMENTER_MAX_MENTIONS_PER_REPLY} 个 @）`
     case 'reviewer':
       return '店长或实施猫'
-    case 'vision':
-      return '店长'
     default:
       return '任意猫'
   }
