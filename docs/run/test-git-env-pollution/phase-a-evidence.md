@@ -239,6 +239,6 @@ git config --unset …
 1. **C1 unset 清单（实测支持）**：`GIT_DIR` · `GIT_INDEX_FILE` · `GIT_PREFIX`（+ `GIT_WORK_TREE` 作防御性冗余，零成本）。**与 `cleanGitEnv()` 四项完全一致** ⇒ 钩子侧与测试侧同口径。
 2. **不要 unset** `GIT_EXEC_PATH`（非定位变量，是 git 自身安装路径）。
 3. `GIT_AUTHOR_*`：**待店长裁**（§1.4）。不影响本票判据。
-4. **落点**：`set -e` 之后、`npx lint-staged` **之前**（spec-gate 追加要求；lint-staged 自身 spawn git）。
+4. **落点**：`set -e` 之后、`npx lint-staged` **之前**（spec-gate 追加要求）。**本括注原写「lint-staged 自身 spawn git」，经复核不成立、已作废**（`.lintstagedrc` 两个任务 grep `git|execSync|spawnSync|cwd` **零命中**），与票面 C1 同批更正。位置**不变**，理由换成：**前移零成本且可证** —— git 跑非 bare 仓钩子时 cwd = 工作树根，被注入的 `GIT_DIR` 恰是**本 worktree 自己的 gitdir** ⇒ 剥掉后按 cwd 探测回到**同一个**仓库；真正买到的不变量是「**本钩子不在被注入的 env 下跑任何子进程**」。
 5. **A3 红→绿复核用沙箱**：本报告脚本在 `D:/Game/ai/_probe-test-git-env/`（**仓库外**，已实核不在任何 repo 内；可弃，Phase B 若复用建议重建）。
 6. **A1 已复现 ⇒ 不触发停手**；OQ-4 的「C2 取证仍有效」条款本轮无需启用（取证与复现都拿到了）。

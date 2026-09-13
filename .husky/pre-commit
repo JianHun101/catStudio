@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 # set -e：少一行则退出码只取末条命令（pnpm test）——lint 红海静默进库（lint 直调单）。
 set -e
+# 剥掉 git 注入的定位变量：worktree 内 commit 时 git 向钩子注入**绝对** GIT_DIR/GIT_INDEX_FILE，其优先级高于 cwd 探测 ⇒ 钩子里任何子进程（lint-staged、vitest 里 cwd=tmp 的 git 操作）都会被劫持到真实仓库、写坏共享 config（core.bare=true / user.*）与分支。前移零成本：git 跑非 bare 仓钩子时 cwd = 工作树根，剥掉后按 cwd 探测回到同一个 worktree（取证：docs/run/test-git-env-pollution/phase-a-evidence.md）。
+# 清单与 packages/server/src/llm/git-utils.ts 的 cleanGitEnv() 四项同口径（GIT_WORK_TREE 为防御性冗余，实测未被注入）；护栏 scripts/pre-commit-env.test.js 直接重放本行。
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX
 npx lint-staged
 pnpm lint
 pnpm test
