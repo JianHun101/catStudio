@@ -81,3 +81,46 @@ Work the **frontier**：本活只有一张票。
 | A3 `pnpm test` 全绿                                                              | ✅                                  | 108 files / 2149 tests passed。**口径**：本 worktree 基线是 dev `f43ae0f`，**不含**本会话 T1 的 `d96d3f8`——与 T1 交接里的「2171 passed」不是同一基线，不可直接比。本单净删 2 个 `it`（同分支去重 + 无被测对象的正向块），净增 3 个 `it`（退役残留两向 + seed 反向断言） |
 | A4 空库 seed → agents 5 只、无图测猫                                             | ✅                                  | `pnpm seed` 于 worktree 独立 DB：店长/ds猫/flash猫/吐槽猫/dsh猫 = 5；`role='vision'` 行数 = 0；session `agent_ids` 5 项                                                                                                                                                 |
 | A5 文档对齐                                                                      | ✅                                  | `CONTEXT.md` / `README.md` / `review-chain-anchor.md`（用户故事 15 + §六 + D7 三处标落地）                                                                                                                                                                              |
+
+## 收口记录（店长 · 2026-09-13）
+
+**审查**：吐槽猫 **✅ 可合并**（独立复跑 2149 passed / 108 files、三包 tsc/vue-tsc，明示「非采信自报」）。
+
+**carrier**：PR **#69** → merge commit `7e7ef65`，parents = `[dev 47e64cd, 被审 981241d]`。
+被审 sha 作 **parent 字面量**保留——未 squash、未 `commit-tree` 造等价 sha。
+合并净差 `git diff --stat 47e64cd 7e7ef65` = **28 files, +245 −277**，与被审 diff 数字逐字一致 ⇒ 无冲突消解污染。
+
+**合并态复跑**（两条线首次同场：dev 侧 `test-git-env-pollution` × 本单）：
+`pnpm test` → **109 files / 2152 passed**，exit 0。
+较审查者读数的 +1 文件来自 dev 侧 PR #68 新增的钩子护栏测试——**不是同一基线，不可直接比**（同 A3 口径）。
+
+**三方对齐**：`dev = origin/dev = .push-gate = 7e7ef65`。
+分支 `feat/vision-retire` 本地 `-d` 删除（`-d` 要求已合并，通过）+ 远端显式 refspec 删除，`ls-remote` 复核为空。
+
+**DB 清理（收口窗口执行，本单实施面零 SQL）**
+
+全表扫描 `like '%0ac78872-80ad-4bfa-84ad-3bc0c0d05a1e%'`：
+
+| 库                         | `agents` | `sessions.agent_ids` | `messages.agent_id` | `execution_logs.agent_id` |
+| -------------------------- | -------- | -------------------- | ------------------- | ------------------------- |
+| `cat-study.db`（主）       | 1        | 18                   | 2                   | 11                        |
+| `cat-study-dev.db`（在跑） | 1        | 26                   | 0                   | 1                         |
+
+**裁决：保 `agents` 行作墓碑，只摘会话成员。** 两条依据——
+① `execution_logs.agent_id` 有 FK 指向 `agents(id)`，且 `foreign_keys=1` ⇒ 删行被 RESTRICT 拦；
+② 不变量 1「不得删任何 messages / execution_logs 行」禁止先删日志再删行。
+（`agents.role` 无 CHECK 约束 ⇒ 残留 `'vision'` 值不会炸库层，正是不变量 2 fail-open 那条路。）
+
+**执行**：两库各改写 18 / 26 条会话（解析 → 过滤 → 重序列化 → 逐条自校验），
+**残留 0、非法 JSON 0**；`messages` / `execution_logs` 计数清理前后不变 ⇒ 历史零损失。
+回滚记录（改写前完整 `agent_ids`）落 **系统临时区** `%TEMP%/catstudy-vision-retire-rollback.json`，不入仓库。
+
+**一处副作用（如实记录，未擅自"修"）**：主库会话 `197a1561`「图片链路测试」（2026-07-31 建，11 条消息）
+**唯一成员就是图测猫**，摘除后成员归零 ⇒ 退化为「无成员的历史存档」（历史可读、无可 @ 对象）。
+是否补一名成员**由用户定夺**，我不代替拍板。
+
+**待办**：本单动 `packages/shared` + `packages/server` ⇒ **落地需重启**，
+已由店长发起 `request_user_action(type:'restart')` 等用户批准。
+
+**观察项（不在本单）**：`ui-review.ts` / `scripts/ui-screenshot.mjs` / ollama 适配器 / web 渲染代码均未动；
+`agents` 表墓碑行仍会被「列全部 agents」的调用面看到（会话成员面已不可见）。
