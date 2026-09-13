@@ -1,8 +1,10 @@
 /** Agent 槽位状态 */
 export type SlotStatus = 'idle' | 'thinking' | 'busy'
 
-/** Agent 角色——A2A mention 白名单的判定依据（店长架构定稿：store/implementer/reviewer/vision） */
-export type AgentRole = 'store' | 'implementer' | 'reviewer' | 'vision'
+/** Agent 角色——A2A mention 白名单的判定依据（店长架构定稿：store/implementer/reviewer）。
+ *  `vision` 已退役（2026-09-13，单A）：模型已能原生看图，外部视觉旁路整链删除。
+ *  老库残留的 `role='vision'` 行不在本联合类型内——消费侧一律走「角色不在边表 → 放行」兜底。 */
+export type AgentRole = 'store' | 'implementer' | 'reviewer'
 
 /** 消息角色 */
 export type MessageRole = 'user' | 'agent' | 'system'

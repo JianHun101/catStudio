@@ -15,10 +15,10 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
       const { allowed, blocked } = filterAllowedMentions({ role: 'store' }, [
         target('吐槽猫', 'reviewer'),
         target('ds猫', 'implementer'),
-        target('图测猫', 'vision'),
+        target('dsh猫', 'implementer'),
         target('flash猫', 'implementer'),
       ])
-      expect(names(allowed)).toEqual(['吐槽猫', 'ds猫', '图测猫', 'flash猫'])
+      expect(names(allowed)).toEqual(['吐槽猫', 'ds猫', 'dsh猫', 'flash猫'])
       expect(blocked).toEqual([])
     })
   })
@@ -48,13 +48,10 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
       expect(blocked).toEqual([{ name: 'flash猫', reason: 'role-not-allowed' }])
     })
 
-    it('不可 @ 图测猫（vision）', () => {
-      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
-        target('图测猫', 'vision'),
-      ])
-      expect(allowed).toEqual([])
-      expect(blocked).toEqual([{ name: '图测猫', reason: 'role-not-allowed' }])
-    })
+    // 原「不可 @ 图测猫（vision）」负向用例已随 vision 退役删除（2026-09-13，单A）：
+    // implementer 边表现在只剩 {store, reviewer}，**唯一**的非白名单角色就是
+    // implementer 自身——上一条「implementer 互 @ 被拦」覆盖的正是同一分支，
+    // 保留会得到一个同分支同断言的重复用例。覆盖未下降。
 
     it(`同 @ 两猫（均合法）→ 保 reviewer，另一被剥（count-limit，上限 ${IMPLEMENTER_MAX_MENTIONS_PER_REPLY}）`, () => {
       const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
@@ -114,21 +111,24 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
     })
 
     it('可 @ 回本次触发消息作者（角色不在边表时仍放行——例外边保留）', () => {
+      // 目标用 reviewer 自身：reviewer 边表 = {store, implementer}，reviewer 是
+      // **真正不在边表里**的角色（vision 退役后，这是最后一个非边表角色）。
+      // 与下一条同目标、只差 triggerAuthorName——隔离出的正是「例外边」这一个变量。
       const { allowed, blocked } = filterAllowedMentions(
-        { role: 'reviewer', triggerAuthorName: '图测猫' },
-        [target('图测猫', 'vision')]
+        { role: 'reviewer', triggerAuthorName: '吐槽猫' },
+        [target('吐槽猫', 'reviewer')]
       )
-      expect(names(allowed)).toEqual(['图测猫'])
+      expect(names(allowed)).toEqual(['吐槽猫'])
       expect(blocked).toEqual([])
     })
 
-    it('不可 @ 图测猫（vision）——非触发作者，不放开', () => {
+    it('不可 @ 另一位审查猫（reviewer）——非触发作者，不放开', () => {
       const { allowed, blocked } = filterAllowedMentions(
         { role: 'reviewer', triggerAuthorName: 'ds猫' },
-        [target('图测猫', 'vision')]
+        [target('吐槽猫', 'reviewer')]
       )
       expect(allowed).toEqual([])
-      expect(blocked).toEqual([{ name: '图测猫', reason: 'role-not-allowed' }])
+      expect(blocked).toEqual([{ name: '吐槽猫', reason: 'role-not-allowed' }])
     })
 
     it('用户触发（无触发作者）→ 可 @ 店长与实施猫', () => {
@@ -141,35 +141,16 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
     })
   })
 
-  describe('vision（图测猫）→ {store}', () => {
-    it('可 @ 店长', () => {
-      const { allowed, blocked } = filterAllowedMentions({ role: 'vision' }, [
-        target('店长', 'store'),
-      ])
-      expect(names(allowed)).toEqual(['店长'])
-      expect(blocked).toEqual([])
-    })
-
-    it('不可 @ 其他猫', () => {
-      const { allowed, blocked } = filterAllowedMentions({ role: 'vision' }, [
-        target('ds猫', 'implementer'),
-        target('吐槽猫', 'reviewer'),
-      ])
-      expect(allowed).toEqual([])
-      expect(blocked).toEqual([
-        { name: 'ds猫', reason: 'role-not-allowed' },
-        { name: '吐槽猫', reason: 'role-not-allowed' },
-      ])
-    })
-  })
+  // 原 describe('vision（图测猫）→ {store}') 整块随角色退役删除（2026-09-13，单A）：
+  // 边表已无该键，该角色不再有「允许集」，正向用例无被测对象。
 
   describe('未知角色 → 放行不拦截（老库零回归）', () => {
     it('发送者 role 缺失（undefined）→ 全放行', () => {
       const { allowed, blocked } = filterAllowedMentions({}, [
         target('ds猫', 'implementer'),
-        target('图测猫', 'vision'),
+        target('吐槽猫', 'reviewer'),
       ])
-      expect(names(allowed)).toEqual(['ds猫', '图测猫'])
+      expect(names(allowed)).toEqual(['ds猫', '吐槽猫'])
       expect(blocked).toEqual([])
     })
 
@@ -182,6 +163,34 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
     })
   })
 
+  // ─── 退役不变量（vision，2026-09-13 单A）────────────────────────────
+  // 老库残留行仍带 role='vision'（D 列取值域不受 TS 联合类型约束，残留照样读得出）。
+  // 下面两条**成对**钉住退役后的两个方向——它们不是同一件事，方向相反：
+  //   · 发送者侧：边表已无该键 → 落 `!rule` 兜底**放行**（fail-open）
+  //   · 目标侧：`t.role='vision'` 是真值 → 落 `rule.includes` 失败**被拦**
+  // 之所以要写下来：店长派活单把两者一并描述为"保住既有兜底"——**发送者侧并非
+  // "保住"**，退役前该键在边表里、vision 发送者被限到 {store}；退役后才是全放行。
+  // 这是一处**行为放宽**（不再是收紧），且只作用于已不存在的角色，实害为零；
+  // 但"描述成守恒"与"实际放宽"必须分开记，否则下一个人会照描述去推。
+  describe('已退役角色（vision）残留行的两向行为', () => {
+    it('发送者残留 role=vision → 全放行（边表无该键 → !rule 兜底，非"守恒"是"放宽"）', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'vision' as AgentRole }, [
+        target('ds猫', 'implementer'),
+        target('吐槽猫', 'reviewer'),
+      ])
+      expect(names(allowed)).toEqual(['ds猫', '吐槽猫'])
+      expect(blocked).toEqual([])
+    })
+
+    it('目标残留 role=vision → 仍被拦（目标侧真值走 includes 失败，行为与退役前同）', () => {
+      const { allowed, blocked } = filterAllowedMentions({ role: 'implementer' }, [
+        target('图测猫', 'vision' as AgentRole),
+      ])
+      expect(allowed).toEqual([])
+      expect(blocked).toEqual([{ name: '图测猫', reason: 'role-not-allowed' }])
+    })
+  })
+
   describe('allowedTargetsDescription', () => {
     it('各角色返回对应规则描述', () => {
       expect(allowedTargetsDescription('store')).toBe('任意猫')
@@ -189,7 +198,6 @@ describe('mention-policy — A2A 白名单边矩阵', () => {
       expect(allowedTargetsDescription('implementer')).toContain('吐槽猫')
       expect(allowedTargetsDescription('reviewer')).toContain('店长')
       expect(allowedTargetsDescription('reviewer')).toContain('实施猫')
-      expect(allowedTargetsDescription('vision')).toBe('店长')
       expect(allowedTargetsDescription(undefined)).toBe('任意猫')
       expect(allowedTargetsDescription('unknown' as AgentRole)).toBe('任意猫')
     })

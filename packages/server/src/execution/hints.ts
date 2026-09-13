@@ -86,7 +86,7 @@ export function formatAgentMessage(
  *
  * 角色判断基于 agents 表 role 字段（而非硬编码名称/ID/skillModules）：
  *   - role === 'reviewer' → 审查者
- *   - 其他 role（store/implementer/vision/unknown）→ coder（需要被审查）
+ *   - 其他 role（store/implementer/unknown）→ coder（需要被审查）
  *
  * 结论判断（T-G §7 根修）：
  *   - ✅可合并 / 💬仅评论 → 通过，循环结束（💬 非阻断 = 不要求返工，故不注入

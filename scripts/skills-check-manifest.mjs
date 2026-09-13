@@ -4,7 +4,7 @@
  *                           + requires_mcp 运行时健康检查（红示 advisory，不阻塞）
  *
  * 校验项：
- *   1. manifest.yaml `skills:` 下的登记 ↔ `skills/` 顶级 skill 目录 双向覆盖（28/28）
+ *   1. manifest.yaml `skills:` 下的登记 ↔ `skills/` 顶级 skill 目录 双向覆盖（27/27）
  *   2. 每个 SKILL.md frontmatter 的 name 与目录名一致、description 存在
  *   3. 每个登记的 skill 有 source 标记（self / mattpocock / external），取值合法
  *   4. catstudy/ 定制层不参与顶级计数（随迁保留，另行校验其 2 个 skill 的 frontmatter）
@@ -12,7 +12,7 @@
  *   6. use_when / not_for 与 SKILL.md description 三件套（Use when / Not for 段）逐字一致
  *      （从三件套提取，机器校验；未声明的 skill 跳过不阻塞——新 skill 准入语义）
  *   7. requires_mcp 运行时健康检查：声明但运行时缺失 → 红示 advisory 不阻塞
- *      （MCP 是可选运行时——如 vision-assist 依赖 Ollama，服务未起时技能文档仍可读可用）
+ *      （MCP 是可选运行时——服务未起时技能文档仍可读可用）
  *
  * 任一校验失败 → exit 1（阻塞提交/合并）。健康检查缺失 → 仅红示提示，exit 0。
  * 本脚本只读单源 `skills/`，不依赖挂载位——CI/新机器天然可跑。

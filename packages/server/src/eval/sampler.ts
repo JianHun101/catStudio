@@ -5,7 +5,7 @@
  * - 随机 1-5% 采样（EVAL_SAMPLE_RATE，默认 0.02），只对 DS 族猫
  *   （llmModel 包含 'deepseek'——生产主猫 llmProvider='opencode'，模型
  *   opencode-go/deepseek-v4-flash 经 opencode 适配器跑 Go 订阅；旧 claude 适配器
- *   直连形态仍命中）的回复采样——ollama 图测猫不进入评估（Phase 0 来源限定同口径）
+ *   直连形态仍命中）的回复采样——ollama 猫不进入评估（Phase 0 来源限定同口径）
  * - fire-and-forget：调用方不 await（socketio 成功路径触发即返回），
  *   不占 agent slot、不进 dispatch 主链，失败只记日志
  * - 评分后 score ≤ 2 由 scorer 落库时标注 sample_reason='low_score'
@@ -37,7 +37,7 @@ export function maybeScoreSample(
 ): void {
   // 评估对象限定 DS 族猫（Phase 0 来源限定同口径）：按模型名过滤——生产主猫
   // llmProvider='opencode'（opencode-go/deepseek-v4-flash 经 opencode 适配器跑
-  // Go 订阅），按 provider 过滤会把全猫误杀；同时显式排除 ollama 图测猫（回复为
+  // Go 订阅），按 provider 过滤会把全猫误杀；同时显式排除 ollama 猫（回复为
   // 图片描述，不同族）。用 includes('deepseek') 而非 startsWith——切 Go 后模型名
   // 前缀变成 'opencode-go/'，但模型族仍是 DeepSeek（跑的是 DeepSeek V4 Flash）
   if (agent.llmProvider === 'ollama' || !agent.llmModel?.includes('deepseek')) return

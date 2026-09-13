@@ -612,17 +612,19 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     const db = createTestDb()
     setDb(db)
     initRepository(db)
-    // reviewer（发送者）+ store（兜底收件人）+ vision（被拦目标）
+    // reviewer（发送者）+ store（兜底收件人）+ 第二位 reviewer（被拦目标）
+    // 被拦目标用一个**真正不在 reviewer 边表里**的角色：reviewer 边表 = {store,
+    // implementer}，故取 reviewer 自身（原 vision 已随角色退役，2026-09-13 单A）
     const insert = db.prepare(
       `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
        VALUES (?, ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
     )
     insert.run('agent-reviewer', '吐槽猫', 'reviewer')
     insert.run('agent-store', '店长', 'store')
-    insert.run('agent-vision', '图测猫', 'vision')
+    insert.run('agent-reviewer-2', '副审查猫', 'reviewer')
     db.prepare(
       `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
-       VALUES ('session-1', '测试会话', '["agent-reviewer","agent-store","agent-vision"]', 0)`
+       VALUES ('session-1', '测试会话', '["agent-reviewer","agent-store","agent-reviewer-2"]', 0)`
     ).run()
     db.prepare(
       `INSERT INTO messages (id, session_id, role, content, mentions)
@@ -635,8 +637,8 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     vi.unstubAllEnvs()
   })
 
-  it('reviewer @ 图测猫（被拦）→ 提示发送者 + store 猫收到 UI 提示（人类可见，不进 agent 上下文）', async () => {
-    makeAdapter({ chunks: ['⚠️建议修改\n\n@图测猫 请看看'] })
+  it('reviewer @ 另一只 reviewer（被拦）→ 提示发送者 + store 猫收到 UI 提示（人类可见，不进 agent 上下文）', async () => {
+    makeAdapter({ chunks: ['⚠️建议修改\n\n@副审查猫 请看看'] })
     const { bus, calls } = createFakeBus()
     const engine = createExecutionEngine(bus)
 
@@ -657,13 +659,13 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     const toStore = calls.systemNotices.filter((n) => n.agentId === 'agent-store')
     expect(toStore).toHaveLength(1)
     expect(toStore[0].content).toContain('吐槽猫')
-    expect(toStore[0].content).toContain('图测猫')
+    expect(toStore[0].content).toContain('副审查猫')
     expect(toStore[0].content).toContain('悬空')
     // ③ 被拦目标未被路由（无 A2A 子链）
-    const visionLog = getDb()
-      .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-vision'`)
+    const blockedLog = getDb()
+      .prepare(`SELECT * FROM execution_logs WHERE agent_id = 'agent-reviewer-2'`)
       .get()
-    expect(visionLog).toBeUndefined()
+    expect(blockedLog).toBeUndefined()
   })
 
   it('reviewer @ 店长（合法）→ 不发 UI 提示', async () => {
@@ -704,7 +706,7 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
        VALUES ('agent-impl', 'ds猫', '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', 'implementer')`
     ).run()
     db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
-      JSON.stringify(['agent-reviewer', 'agent-store', 'agent-vision', 'agent-impl'])
+      JSON.stringify(['agent-reviewer', 'agent-store', 'agent-reviewer-2', 'agent-impl'])
     )
     // 每跳互 @ 对方：reviewer→ds猫→reviewer→…（边表补 implementer 后成环可达）
     let call = 0

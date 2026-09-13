@@ -646,7 +646,7 @@ async function executeOneAgent(
     })
 
     // W2 L2 评估采样：fire-and-forget——不 await、不占 slot、不进 dispatch 主链，
-    // 失败静默（内部 catch）。只对 DS 族猫回复采样（ollama 图测猫不评估）
+    // 失败静默（内部 catch）。只对 DS 族猫回复采样（ollama 猫不评估）
     maybeScoreSample(agent, sessionId, reply.msgId)
 
     // 队列命令优先执行（FIFO）：completeExecution 已弹出下一命令并标 busy/running，

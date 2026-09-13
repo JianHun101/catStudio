@@ -1616,8 +1616,11 @@ describe('socketio connector', () => {
   // A2A 风暴治理：按发送者角色剥除违规 mention（写回 DB 用允许集合，
   // 被拦猫在上下文过滤里也不可见——语义自洽）。
 
-  /** 在 session-1 中加入吐槽猫（reviewer）与图测猫（vision）。
-   *  模块级共享：A2A 白名单块 + W3 审查结论钩子块共用同一角色种子 */
+  /** 在 session-1 中加入吐槽猫（reviewer）与 flash猫（implementer）。
+   *  模块级共享：A2A 白名单块 + W3 审查结论钩子块共用同一角色种子。
+   *  第二个目标原为图测猫（vision）——随角色退役改为 flash猫（2026-09-13 单A）：
+   *  它要充当的角色是「implementer 边表外的目标」（implementer 边表 = {store,
+   *  reviewer}），implementer 自身正是那个角色，且 flash猫 是真实种子猫。 */
   function seedRoleAgents(db: any) {
     db.prepare(
       `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
@@ -1637,13 +1640,13 @@ describe('socketio connector', () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'agent-3',
-      '图测猫',
+      'flash猫',
       '🐱',
       'You are a cat.',
       'deepseek',
       'deepseek-v4-flash',
       'sk-test',
-      'vision'
+      'implementer'
     )
     db.prepare(`UPDATE sessions SET agent_ids = ? WHERE id = 'session-1'`).run(
       JSON.stringify(['agent-1', 'agent-2', 'agent-3'])
@@ -1682,7 +1685,12 @@ describe('socketio connector', () => {
         }),
       } as any)
       const { parseMentionsFromReply } = await import('./a2a-mentions.js')
-      vi.mocked(parseMentionsFromReply).mockReturnValue(parseResult)
+      // C1 v3 同款（见下方 W3 块）：只让**被测的第一跳**产出 mention，子链回复一律
+      // 解析为空。不这么做的话本次解析结果会被递归复用——第一跳的子链回复按同一份
+      // 名字再播一次，被测的「剥除」结论会被第二跳的旁支执行掩盖（本块断言的是
+      // **发送者侧**白名单判定，递归派发不在被测面内）。
+      vi.mocked(parseMentionsFromReply).mockReturnValueOnce(parseResult)
+      vi.mocked(parseMentionsFromReply).mockImplementation(() => [])
       getDb()
         .prepare(
           `INSERT INTO messages (id, session_id, role, content, mentions)
@@ -1692,7 +1700,7 @@ describe('socketio connector', () => {
       return cfg
     }
 
-    it('implementer @ reviewer+vision → 剥除 vision，只路由 reviewer + 系统提示', async () => {
+    it('implementer @ reviewer+implementer → 剥除后者，只路由 reviewer + 系统提示', async () => {
       const mod = await import('./socketio.js')
       const { dispatch, getAgentState } = await import('../dispatch/index.js')
       const { getAdapterForAgent } = await import('../llm/registry.js')
@@ -1715,7 +1723,7 @@ describe('socketio connector', () => {
           'sk-test',
           'implementer'
         )
-      await setupExecution(['吐槽猫', '图测猫'], dsCatCfg)
+      await setupExecution(['吐槽猫', 'flash猫'], dsCatCfg)
       vi.mocked(dispatch).mockClear()
       mockRoomEmit.mockClear()
 
@@ -1728,7 +1736,7 @@ describe('socketio connector', () => {
       )
 
       // ① C1 v3：A2A 子链真实递归执行（非 dispatch shim）——只路由合法目标
-      // （吐槽猫），不路由被剥除的图测猫。executeAgentCommand 落 execution_log
+      // （吐槽猫），不路由被剥除的 flash猫。executeAgentCommand 落 execution_log
       // 是子链到达的最可靠信号
       const execTu = getDb()
         .prepare(
@@ -1736,12 +1744,12 @@ describe('socketio connector', () => {
         )
         .get()
       expect(execTu).toBeDefined()
-      const execVision = getDb()
+      const execFlash = getDb()
         .prepare(
           `SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-policy'`
         )
         .get()
-      expect(execVision).toBeUndefined()
+      expect(execFlash).toBeUndefined()
 
       // ② 系统提示 emit（点名违规与正确规则）
       const systemMsgs = mockRoomEmit.mock.calls.filter((c: any[]) => c[0] === Events.NEW_MESSAGE)
@@ -1750,7 +1758,7 @@ describe('socketio connector', () => {
           c[1]?.role === 'system' && String(c[1]?.content).includes('不在你的角色允许范围内')
       )
       expect(policyHint).toBeDefined()
-      expect(policyHint![1].content).toContain('图测猫')
+      expect(policyHint![1].content).toContain('flash猫')
       expect(policyHint![1].content).toContain('店长、吐槽猫')
 
       // ③ 写回 DB 的 mentions 只含允许集合——被拦猫上下文过滤不可见。
@@ -1769,7 +1777,7 @@ describe('socketio connector', () => {
       seedRoleAgents(getDb())
 
       const storeCfg = makeAgentCfg({ role: 'store' })
-      await setupExecution(['吐槽猫', '图测猫'], storeCfg)
+      await setupExecution(['吐槽猫', 'flash猫'], storeCfg)
       vi.mocked(dispatch).mockClear()
 
       await getExecutionEngine()!.executeAgentsSerial(
@@ -1779,19 +1787,19 @@ describe('socketio connector', () => {
         'trace-store'
       )
 
-      // C1 v3：store 白名单放行任意角色——吐槽猫 + 图测猫都被 A2A 子链调度执行
+      // C1 v3：store 白名单放行任意角色——吐槽猫 + flash猫都被 A2A 子链调度执行
       const execTu = getDb()
         .prepare(
           `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-store'`
         )
         .get()
       expect(execTu).toBeDefined()
-      const execVision = getDb()
+      const execFlash = getDb()
         .prepare(
           `SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-store'`
         )
         .get()
-      expect(execVision).toBeDefined()
+      expect(execFlash).toBeDefined()
     })
 
     it('发送者角色缺失（老库）→ 全放行零回归', async () => {
@@ -1800,7 +1808,7 @@ describe('socketio connector', () => {
       seedRoleAgents(getDb())
 
       const noRoleCfg = makeAgentCfg({ role: undefined })
-      await setupExecution(['吐槽猫', '图测猫'], noRoleCfg)
+      await setupExecution(['吐槽猫', 'flash猫'], noRoleCfg)
       vi.mocked(dispatch).mockClear()
 
       await getExecutionEngine()!.executeAgentsSerial(
@@ -1810,19 +1818,19 @@ describe('socketio connector', () => {
         'trace-no-role'
       )
 
-      // C1 v3：角色缺失 → 白名单放行不拦截——吐槽猫 + 图测猫都被子链调度执行
+      // C1 v3：角色缺失 → 白名单放行不拦截——吐槽猫 + flash猫都被子链调度执行
       const execTu = getDb()
         .prepare(
           `SELECT * FROM execution_logs WHERE agent_id = 'agent-2' AND trace_id = 'trace-no-role'`
         )
         .get()
       expect(execTu).toBeDefined()
-      const execVision = getDb()
+      const execFlash = getDb()
         .prepare(
           `SELECT * FROM execution_logs WHERE agent_id = 'agent-3' AND trace_id = 'trace-no-role'`
         )
         .get()
-      expect(execVision).toBeDefined()
+      expect(execFlash).toBeDefined()
     })
 
     it('用户消息永不拦——用户 @ 任何猫原样进入 dispatch（白名单只挂 A2A 路径）', async () => {
@@ -1836,8 +1844,8 @@ describe('socketio connector', () => {
 
       await handlers![0]({
         sessionId: 'session-1',
-        content: '你好 @图测猫',
-        mentions: ['图测猫'],
+        content: '你好 @flash猫',
+        mentions: ['flash猫'],
       })
 
       // 用户消息的 mentions 原样保留——白名单只挂 A2A 路径（parseMentionsFromReply
@@ -1849,7 +1857,7 @@ describe('socketio connector', () => {
            ORDER BY created_at DESC LIMIT 1`
         )
         .get() as { mentions: string }
-      expect(JSON.parse(row.mentions)).toEqual(['图测猫'])
+      expect(JSON.parse(row.mentions)).toEqual(['flash猫'])
     })
   })
 
@@ -5141,8 +5149,8 @@ describe('runAgentReply — per-agent 静态运行配置透传', () => {
 
 // ─── 铁律运行期注入（getIronLaws 访问器 → runAgentReply 按 role 注入）────────
 // 验收（店长派活单）：reviewer 猫含审查铁律、store/implementer 含开发铁律、
-// vision/unknown 不含任何铁律，且无重复注入。注入在 resolveRolePlaceholders 之前
-// 拼入 systemPrompt——注入铁律里的占位符（@作者/@架构师/@审查者）同样被替换。
+// 不在边表的角色（unknown 等）不含任何铁律，且无重复注入。注入在 resolveRolePlaceholders
+// 之前拼入 systemPrompt——注入铁律里的占位符（@作者/@架构师/@审查者）同样被替换。
 
 describe('runAgentReply — 铁律运行期注入（ironLawForRole）', () => {
   beforeEach(() => {
@@ -5233,8 +5241,8 @@ describe('runAgentReply — 铁律运行期注入（ironLawForRole）', () => {
     }
   })
 
-  it('vision / unknown / 无 role → 不注入任何铁律', async () => {
-    for (const role of ['vision', 'unknown', undefined]) {
+  it('不在边表的角色 / unknown / 无 role → 不注入任何铁律', async () => {
+    for (const role of ['unknown', undefined]) {
       const msgs = await runWithRole({
         id: `agent-il-${role ?? 'none'}`,
         // C1 v3：agent 配置落 DB（agents.name UNIQUE）——循环内 name 须唯一

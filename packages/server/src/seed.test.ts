@@ -20,21 +20,14 @@ function fixedId(name: string): string {
 describe('seed agents', () => {
   const agents = buildDemoAgents()
 
-  it('种子包含 6 只猫（店长/ds猫/flash猫/吐槽猫/图测猫/dsh猫）', () => {
-    expect(agents.map((a) => a.name).sort()).toEqual([
-      'dsh猫',
-      'ds猫',
-      'flash猫',
-      '吐槽猫',
-      '图测猫',
-      '店长',
-    ])
+  it('种子包含 5 只猫（店长/ds猫/flash猫/吐槽猫/dsh猫）——图测猫已随 vision 角色退役', () => {
+    expect(agents.map((a) => a.name).sort()).toEqual(['dsh猫', 'ds猫', 'flash猫', '吐槽猫', '店长'])
   })
 
-  it('图测猫 role=vision 且 id 为 DB 现有 id（幂等命中不重建）', () => {
-    const vision = agents.find((a) => a.name === '图测猫')!
-    expect(vision.role).toBe('vision')
-    expect(vision.id).toBe('0ac78872-80ad-4bfa-84ad-3bc0c0d05a1e')
+  it('seed 不再产出任何已退役角色（vision）条目', () => {
+    // 反向断言：退役不是"改个名字"——若有人把 vision 条目换个名字加回来，名字断言
+    // 抓不到；这条按 role 值断言，角色一旦复活即红。
+    expect(agents.filter((a) => a.role === 'vision')).toEqual([])
   })
 
   it('四只对话猫的角色与白名单边表对齐', () => {
@@ -43,15 +36,6 @@ describe('seed agents', () => {
     expect(roleOf('ds猫')).toBe('implementer')
     expect(roleOf('flash猫')).toBe('implementer')
     expect(roleOf('吐槽猫')).toBe('reviewer')
-  })
-
-  it('vision 角色条目必须使用视觉指令 prompt（角色↔prompt 语义绑定）', () => {
-    // 按 role 找而非按名字找——绑定「任何 role=vision 的猫都必须是视觉指令 prompt」，
-    // 防未来把 prompt 改成角色扮演模板但漏改 role 的漂移（名字找会绕过此检查）
-    const vision = agents.filter((a) => a.role === 'vision')
-    expect(vision).toHaveLength(1)
-    expect(vision[0].systemPrompt).toContain('视觉测试专用')
-    expect(vision[0].systemPrompt).toContain('发图')
   })
 })
 

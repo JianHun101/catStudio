@@ -334,14 +334,14 @@ LLM 侧通过 MCP 工具与系统交互（`packages/server/src/connectors/socket
 
 ## 演示角色
 
-seed 数据内置 5 个角色（角色类型：store / implementer / reviewer / vision）：
+seed 数据内置 5 个角色（角色类型：store / implementer / reviewer）：
 
 | 角色    | 类型        | 职责                         |
 | ------- | ----------- | ---------------------------- |
 | 店长    | store       | 架构师：组件设计、派活、收口 |
 | ds猫    | implementer | 实施工程师                   |
 | flash猫 | implementer | 实施工程师                   |
-| 图测猫  | vision      | 视觉/UI 测试                 |
+| dsh猫   | implementer | 实施工程师（dsh 试点）       |
 | 吐槽猫  | reviewer    | 审查者：代码审查             |
 
 ## 核心概念

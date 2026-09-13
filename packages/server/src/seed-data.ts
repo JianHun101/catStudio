@@ -38,7 +38,8 @@ export interface DemoAgent {
   llmApiKey: string
   llmBaseUrl: string
   effortLevel?: string
-  /** 角色——A2A mention 白名单依据（store/implementer/reviewer/vision） */
+  /** 角色——A2A mention 白名单依据（store/implementer/reviewer；
+   *  `vision` 已于 2026-09-13 退役，seed 不再产出该角色） */
   role?: string
 }
 
@@ -233,18 +234,6 @@ export function buildDemoAgents(): DemoAgent[] {
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'implementer',
-    },
-    {
-      id: '0ac78872-80ad-4bfa-84ad-3bc0c0d05a1e',
-      name: '图测猫',
-      avatar: '🐈',
-      systemPrompt: '你是视觉测试专用猫。用户发图时，请用一两句话准确描述图片内容。',
-      llmProvider: 'ollama',
-      llmModel: 'qwen3.5:9b',
-      llmApiKey: 'local',
-      llmBaseUrl: '',
-      effortLevel: 'low',
-      role: 'vision',
     },
     {
       id: fixedId('吐槽猫'),
