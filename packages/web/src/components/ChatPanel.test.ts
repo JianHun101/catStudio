@@ -1,7 +1,20 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 import source from './ChatPanel.vue?raw'
 import statusLabelSource from './AgentStatusLabel.vue?raw'
-import toolRowSource from './ToolRow.vue?raw'
+import ChatPanel from './ChatPanel.vue'
+import { useChatStore } from '@/stores/chat'
+import { renderMarkdown } from '@/utils/markdown'
+import type { Message, StreamSegment } from '@cat-study/shared'
+
+// A1：renderMarkdown 计数桩——按调用次数把「一个 chunk 触发多少条历史消息重算 markdown」
+// 钉成机械断言（CPU 密集段：marked.parse + DOMPurify.sanitize）。其余导出保持真实现。
+vi.mock('@/utils/markdown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/utils/markdown')>()
+  return { ...actual, renderMarkdown: vi.fn(() => '<p>stub</p>') }
+})
 
 /**
  * Verify ChatPanel.vue's TransitionGroup animation setup.
@@ -86,35 +99,8 @@ describe('ChatPanel markdown table overflow', () => {
   })
 })
 
-describe('ChatPanel restart confirm feedback', () => {
-  it('pending 态显示 [确认重启][取消] 按钮，点击走 store.confirmRestart', () => {
-    expect(source).toContain('store.confirmRestart(msg.id)')
-    expect(source).toContain('store.cancelRestart(msg.id)')
-  })
-
-  it('confirming 中（store.confirmingRestartMessageId === msg.id）显示「已确认，等待重启…」脉冲样式', () => {
-    expect(source).toContain('store.confirmingRestartMessageId === msg.id')
-    expect(source).toContain('已确认，等待重启…')
-    // 复用 restart-label 脉冲样式（点击即有反馈，无需等服务端）
-    expect(source).toMatch(/已确认，等待重启…/)
-  })
-
-  it('confirmed 态仍显示「重启中…」restart-label', () => {
-    expect(source).toContain('重启中…')
-    expect(source).toContain('restart-label')
-  })
-})
-
-describe('ChatPanel 对话内 diff 展示接入（富文本块通道）', () => {
-  it('import DiffViewer 组件', () => {
-    expect(source).toContain("import DiffViewer from './DiffViewer.vue'")
-  })
-
-  it('extra.rich.blocks 存在才渲染 DiffViewer（无 extra 纯文本回退与现网一致）', () => {
-    expect(source).toContain('v-if="msg.extra?.rich?.blocks?.length"')
-    expect(source).toContain(':blocks="msg.extra.rich.blocks"')
-  })
-})
+// 重启确认按钮 / 对话内 diff 展示的静态断言已随消息块迁入 MessageItem.test.ts
+// （历史气泡的标记不再在 ChatPanel 模板里）。
 
 describe('ChatPanel skill 提示（SkillLoader 拆除后）', () => {
   it('提示框展示 CLI 原生触发说明（不再是「未找到匹配的技能」空壳）', () => {
@@ -148,20 +134,8 @@ describe('ChatPanel 右栏 props 清理（B2 删右栏）', () => {
 })
 
 describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）', () => {
-  it('agent 消息每条显示 {模型} · {n}k/{m}k tokens（分组消息同样渲染，守卫仅限 role/agentId）', () => {
-    expect(source).toContain('class="msg-footer"')
-    // 守卫已去掉 !isGrouped(i)：同 agent 连续回复（分组气泡）每条都带 footer
-    expect(source).toMatch(/v-if="msg\.role === 'agent' && msg\.agentId"/)
-    expect(source).not.toMatch(/agentId && !isGrouped\(i\)/)
-    // 模板插值：{{ modelNameFor(msg.agentId) }} · {{ tokensTextFor(msg.agentId) }}
-    // 正则而非 toContain——prettier 会把后续 <span> 重排到新行，tokensTextFor(msg.agentId) 后
-    // 可能是换行再 }}；正则匹配到 tokensTextFor(msg.agentId) 前缀即通过（对 prettier 格式鲁棒）
-    expect(source).toMatch(/modelNameFor\(msg\.agentId\) \}\} · \{\{ tokensTextFor\(msg\.agentId\)/)
-    // C5：agent 耗时徽标（durationMs 随广播注入，瞬态不落库）
-    expect(source).toContain('msg.durationMs != null')
-    expect(source).toContain('耗时 {{ formatDuration(msg.durationMs) }}')
-    expect(source).toContain('function formatDuration(ms: number): string')
-  })
+  // footer 标记本体已随消息块迁入 MessageItem.vue（静态断言见 MessageItem.test.ts）；
+  // 这里保留的是 footer 数据源（模型/tokens/execMeta 文案）在父组件的口径。
 
   it('tokens 文案：m = maxContextTokens（上下文窗口数，非 llm_max_tokens 单次输出上限）', () => {
     expect(source).toContain('function tokensTextFor(agentId: string): string')
@@ -177,25 +151,19 @@ describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）'
     expect(source).not.toContain('stopAgent(msg.agentId)')
   })
 
-  it('canStop 判定：busy 或有排队任务', () => {
-    expect(source).toContain("state?.status === 'busy'")
-    expect(source).toContain('state?.queueLength ?? 0) > 0')
-  })
-
-  it('system 消息保持原 msg-time 结构（无 footer 行）', () => {
-    expect(source).toMatch(/v-else class="msg-time"/)
-  })
-
   it('执行元数据（execution_logs 落库稳定耗时/token）优先展示，durationMs 降为无 meta 时兜底', () => {
     // 稳定 meta 分支（v-if）在 durationMs 之前；durationMs 保留为 v-else-if 兜底（execution 未拉取时新回复短暂可显）
-    expect(source).toContain('v-if="execMetaTextFor(msg)" class="msg-duration"')
-    expect(source).toContain('· {{ execMetaTextFor(msg) }}')
-    expect(source).toContain('v-else-if="msg.durationMs != null" class="msg-duration"')
     expect(source).toContain('function execMetaFor(msg')
     expect(source).toContain('store.sessionExecutions.get(msg.id)')
     expect(source).toContain('function execMetaTextFor(msg')
     expect(source).toContain('meta.latencyMs != null')
     expect(source).toContain('fmtTokens(inTok ?? 0)')
+    // 两条分支的文案各算一次后随视图模型下发（MessageItem 只做展示）
+    expect(source).toContain('execMetaText: execMetaTextFor(msg)')
+    expect(source).toContain(
+      'durationText: msg.durationMs != null ? `耗时 ${formatDuration(msg.durationMs)}` : null'
+    )
+    expect(source).toContain('function formatDuration(ms: number): string')
   })
 })
 
@@ -208,11 +176,8 @@ describe('ChatPanel 停止按钮重定位（B2——正在思考的气泡 / busy
     expect(source).toContain('store.interruptAgent(agentId, store.activeSessionId ?? undefined)')
   })
 
-  it('用户消息状态行（per-agent）承载：无流式内容（!typingStates.has）且可停止时挂按钮', () => {
-    expect(source).toContain('!store.typingStates.has(s.agentId) && canStopAgent(s.agentId)')
-    expect(source).toContain('@click.stop="stopAgent(s.agentId)"')
-    expect(source).toContain('class="agent-status-row"')
-  })
+  // 用户消息状态行（agent-status-row / 停止按钮）已随消息块迁入 MessageItem.vue——
+  // 静态断言与行为断言见 MessageItem.test.ts。这里只留 streaming 气泡侧。
 
   it('streaming 气泡每 agent 唯一（v-for activeTypingStates）——无分组问题；footer info 守卫已移除（分组消息同样渲染 footer）', () => {
     expect(source).toContain('v-for="[agentId, typing] in activeTypingStates"')
@@ -243,10 +208,11 @@ describe('ChatPanel 80% 告警横幅（阈值来自配置）', () => {
     expect(source).toContain('交接触发线')
   })
 
-  it('色阶：>= 交接线红、>= 告警线黄（contextLevelFor 返回值驱动 class）', () => {
+  it('色阶：>= 交接线红、>= 告警线黄（contextLevelFor 算成标量 prop 下发）', () => {
     expect(source).toContain("return 'critical'")
     expect(source).toContain("return 'warn'")
-    expect(source).toContain(':class="contextLevelFor(msg.agentId)"')
+    // 判定在父组件算一次（contextLevel 进视图模型），MessageItem 只消费标量
+    expect(source).toContain('contextLevel: agentId ? contextLevelFor(agentId) : ')
     expect(source).toContain('.msg-footer-info.warn')
     expect(source).toContain('.msg-footer-info.critical')
   })
@@ -298,9 +264,8 @@ describe('ChatPanel 运行时长心跳隔离（1s tick 下沉 AgentStatusLabel �
     expect(source).not.toContain('HEARTBEAT_STALE_MS')
   })
 
-  it('模板用 <AgentStatusLabel :entry="s" /> 替换 statusLabelZh(s)（整条 entry 透传）', () => {
-    expect(source).toContain("import AgentStatusLabel from './AgentStatusLabel.vue'")
-    expect(source).toContain('<AgentStatusLabel :entry="s" />')
+  // `<AgentStatusLabel :entry="s" />` 的模板断言随状态行迁入 MessageItem.test.ts
+  it('tick 隔离后 ChatPanel 里不再有 statusLabelZh(s.status) 调用', () => {
     expect(source).not.toContain('statusLabelZh(s.status)')
   })
 })
@@ -343,26 +308,21 @@ describe('AgentStatusLabel 运行时长心跳（回复中 · 已 N 秒——4775
   })
 })
 
-describe('ChatPanel renderMarkdown 记忆化（per-message 缓存）', () => {
-  it('定义 markdownCache Map + 记忆化函数（renderMessageMarkdown / renderThinkingMarkdown）', () => {
-    expect(source).toContain('const markdownCache = new Map<string, string>()')
-    expect(source).toContain('function renderMessageMarkdown(msg: Message): string')
-    expect(source).toContain('function renderThinkingMarkdown(msg: Message): string')
+describe('ChatPanel renderMarkdown 记忆化（L3：手写缓存整体退役）', () => {
+  it('手写 markdownCache 与两条记忆化函数已删除——缓存改由 MessageItem 的 computed 承担', () => {
+    // 抽组件后 markdown 在子组件里跑 computed（依赖追踪自带缓存、无键拼接、无无界增长），
+    // 父组件的手写 Map 成为纯复杂度：键含整条正文、无淘汰、无界增长。
+    expect(source).not.toContain('markdownCache')
+    expect(source).not.toContain('renderMessageMarkdown')
+    expect(source).not.toContain('renderThinkingMarkdown')
+    expect(source).not.toContain('markdownAgentNames')
+    expect(source).not.toContain('finalTextContent')
   })
 
-  it('正文缓存键覆盖相关 agent 名 + 最终回复 text 段（占位符替换依赖 store/reviewer 角色名；点1 正文只渲染最后 text 段）', () => {
-    expect(source).toContain('function markdownAgentNames(): string')
-    expect(source).toContain('const key = `${msg.id}:${markdownAgentNames()}:${textContent}`')
-    expect(source).toContain('function finalTextContent(msg: Message): string')
-    expect(source).toContain("if (s.kind === 'text') return s.content")
-    expect(source).toContain("a.role === 'store'")
-    expect(source).toContain("a.role === 'reviewer'")
-  })
-
-  it('模板正文/思考渲染点已切到记忆化函数（未变消息 markdown 只算一次）', () => {
-    expect(source).toContain('v-html="renderMessageMarkdown(msg)"')
-    expect(source).toContain('v-html="renderThinkingMarkdown(msg)"')
-    // 模板里 v-html 不再直接调 renderMarkdown（记忆化函数体内仍含 renderMarkdown，那是实现细节）
+  it('流式气泡的 markdown 只渲染体（正文段仍是死代码，热区只有折叠块 thinking 段）', () => {
+    // 流式期间的 markdown 调用点收在流式折叠块内（历史消息已由 MessageItem 自渲染）
+    expect(source).toContain('v-html="renderMarkdown(e.content)"')
+    // 历史消息正文/思考不再由父组件渲染
     expect(source).not.toContain('v-html="renderMarkdown(resolveDisplayPlaceholders(msg.content')
     expect(source).not.toContain('v-html="renderMarkdown(msg.thinkingContent')
   })
@@ -375,10 +335,7 @@ describe('ChatPanel 思考展示结构分离（typing.segments 优先 + 旧前�
     expect(source).toContain('parseThinkingBlocks(typing.content)')
   })
 
-  it('renderThinkingMarkdown 兼容旧库 [思考] 前缀（新纯文本原样返回、含前缀才剥）', () => {
-    expect(source).toContain("tc.includes('[思考]')")
-    expect(source).toContain("tc.replace(/\\[思考\\]\\s*/g, '')")
-  })
+  // 旧库 [思考] 前缀兼容随思考渲染迁入 MessageItem.vue（断言见 MessageItem.test.ts）
 })
 
 describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐用户「对外只露正文+思考框」）', () => {
@@ -396,9 +353,13 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
   })
 
   it('点1：流式期间 buildStreamItems 不渲染 text 段（既不产出外层 seg 也不进 fold），thinking+tool 才收进单一 fold；纯正文流无折叠块', () => {
-    // text 段在流式中被 continue 跳过（drop——不进外层 seg、也不建/收进 fold）
+    // text 段在流式中被 continue 跳过（drop——不进外层 seg、也不建/收进 fold）。
+    // 断言锚在 buildStreamItems 本体上：同文件别处不再有 `seg.kind === 'text' ... continue`
+    // 可供误命中（历史折叠块的同判据已随消息块迁入 MessageItem）——防「断言被别处满足」假绿。
     expect(source).toContain("if (seg.kind === 'text') {")
-    expect(source).toMatch(/seg\.kind === 'text'[\s\S]{0,120}continue/)
+    expect(source).toMatch(
+      /function buildStreamItems[\s\S]*?if \(seg\.kind === 'text'\) \{[\s\S]*?continue/
+    )
     // 不再定位/保留最后一个 text 段（流途中最终段未定，正文只在流结束定格）
     expect(source).not.toContain('finalTextIndex')
     // 不再产出外层 seg
@@ -483,54 +444,170 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
     expect(source).toContain('v-if="item.processing" class="thinking-dots"')
   })
 
-  it('历史消息思考+工具单折叠：thinkingContent 或 toolContent 存在才渲染默认收起 thinking-block（无独立 tool-area）', () => {
-    expect(source).toMatch(
-      /<details\s+v-if="msg\.thinkingContent \|\| msg\.toolContent\?\.length"\s+class="thinking-block stored-thinking"/
-    )
-    expect(source).toContain(':open="false"')
-    expect(source).toContain('class="fold-tool-list"')
-    expect(source).not.toContain('class="tool-area"')
-  })
-
-  it('历史折叠块工具行渲染抽 ToolRow 共享 partial：退化路径按 msg.toolContent 驱动（行级 io/status 渲染单源收在 ToolRow.vue）', () => {
-    expect(source).toContain('<template v-for="(t, ti) in msg.toolContent" :key="ti">')
-    expect(source).toContain('<ToolRow :tool="t" />')
-    // name/status/io 行级渲染不再在 ChatPanel 内联复制（io 门控/展开逻辑收在 ToolRow.vue）
-    expect(source).not.toContain('toolHasIo(t)')
-    expect(source).not.toContain('toolIoText(t.input)')
-    expect(source).not.toContain('toolStatusLabel(t.status)')
-    expect(toolRowSource).toContain('function toolHasIo(t: ToolCallInfo): boolean')
-    expect(toolRowSource).toContain('toolStatusLabel(tool.status)')
-    expect(toolRowSource).toContain('class="tool-row-io"')
-    expect(toolRowSource).toContain('toolIoText(tool.input)')
-    expect(toolRowSource).toContain('toolIoText(tool.output)')
-    expect(toolRowSource).toContain('v-if="tool.truncated"')
-  })
+  // 历史折叠块（单折叠 + ToolRow 退化路径 + segments 交错还原）的标记已随消息块
+  // 迁入 MessageItem.vue；本文件的这些断言整体迁到 MessageItem.test.ts。
+  // ToolRow 行级渲染的单源断言在 ToolRow.test.ts 已覆盖，不重复。
 })
 
 describe('ChatPanel 历史消息 segments 交错还原（segments 落库后时间序优先 + 老消息退化）', () => {
-  it('storedFoldEntries：有 segments 时按时间序产出 thinking/tool 交错条目（tool 按 id join tool_content 补 io、只跳过最后一个 text 段——点1 中间叙述收进折叠块）', () => {
-    expect(source).toContain('function storedFoldEntries(msg: Message): StoredFoldEntry[] | null')
-    expect(source).toContain('if (!msg.segments?.length) return null')
-    expect(source).toContain('const byId = new Map<string, ToolCallInfo>()')
-    expect(source).toContain('let lastTextIndex = -1')
-    expect(source).toContain('if (i === lastTextIndex) continue')
-    expect(source).toContain('full = byId.get(t.id)')
-    expect(source).toContain("entries.push({ kind: 'thinking', content: seg.content })")
-    expect(source).toContain("entries.push({ kind: 'tool', tool: full ?? t })")
+  it('父组件不再持有历史折叠块逻辑（函数与模板标记整体迁入 MessageItem）', () => {
+    expect(source).not.toContain('storedFoldEntries')
+    expect(source).not.toContain('StoredFoldEntry')
+    expect(source).not.toContain('class="fold-tool-list"')
+    expect(source).not.toContain('<ToolRow :tool="t" />')
   })
 
-  it('历史折叠块内容体两路径：新消息走 stream-fold-body 时间序交错；老消息走 template v-else 两块退化（零回归）', () => {
-    // 新消息（segments 落库）：折叠块内按时间序交错渲染思考段 + 工具行
-    expect(source).toContain('v-if="storedFoldEntries(msg)" class="stream-fold-body"')
-    expect(source).toContain('<template v-for="(e, ei) in storedFoldEntries(msg)" :key="ei">')
-    expect(source).toContain('class="fold-thinking"')
-    expect(source).toContain('v-html="renderMarkdown(e.content)"')
-    // 新消息交错路径工具行走 ToolRow 共享 partial（io 分支由 ToolRow 内部 toolHasIo 决定）
-    expect(source).toMatch(/<ToolRow v-else :tool="e\.tool" \/>/)
-    // 老消息退化路径仍保留（thinking blob + fold-tool-list 两块，工具行同样走 ToolRow）
-    expect(source).toContain('v-html="renderThinkingMarkdown(msg)"')
-    expect(source).toContain('class="fold-tool-list"')
-    expect(source).toContain('<ToolRow :tool="t" />')
+  it('两条内容体路径（segments 交错 / 老消息退化）现由 MessageItem 持有，标记见 MessageItem.test.ts', () => {
+    expect(source).not.toContain('v-if="storedFoldEntries(msg)" class="stream-fold-body"')
+    expect(source).not.toContain('v-html="renderThinkingMarkdown(msg)"')
+  })
+})
+
+// ─── A1：渲染边界机械断言（O(N)/chunk → O(1)/chunk）────────────────────────
+// 票单 docs/run/frontend-perf/tickets.md A1：200 条带 segments 的历史消息 + 一次
+// AGENT_TYPING 更新 ⇒ renderMarkdown 调用增量为常数（与 N 无关）。
+
+// ─── A2：静态源断言（模板不再在渲染期现算数组级判定）──────────────────────
+
+describe('A2 渲染边界：模板不再现算数组级判定', () => {
+  it('ChatPanel 模板不再出现 storedFoldEntries( / isLatestUserMessage( / isGrouped( ', () => {
+    const template = source.slice(source.indexOf('<template>'))
+    expect(template).not.toContain('storedFoldEntries(')
+    expect(template).not.toContain('isLatestUserMessage(')
+    // 分组判定从模板 3 次现算改为视图模型内算一次（MessageItem 只收标量 grouped）
+    expect(template).not.toContain('isGrouped(')
+    expect(template).not.toContain('dateSepIndices.has(')
+  })
+
+  it('消息列表改渲染 MessageItem 且不下传数组/下标（C1 硬约束）', () => {
+    expect(source).toContain("import MessageItem from './MessageItem.vue'")
+    const itemTag = source.match(/<MessageItem[\s\S]*?\/>/)?.[0]
+    expect(itemTag).toBeTruthy()
+    expect(itemTag).toContain(':msg="view.msg"')
+    expect(itemTag).toContain(':grouped="view.grouped"')
+    expect(itemTag).toContain(':status-entries="view.statusEntries"')
+    expect(itemTag).not.toContain('activeMessages')
+    expect(itemTag).not.toContain(':index')
+  })
+
+  it('视图模型：标量判定集中一次算 + 逐字段相等复用对象引用（子组件 props 身份稳定）', () => {
+    expect(source).toContain('const messageViews = computed<MessageView[]>(() => {')
+    expect(source).toContain('function isSameView(a: MessageView, b: MessageView): boolean')
+    expect(source).toContain('const view = cached && isSameView(cached, fresh) ? cached : fresh')
+    // O(N²) 消除：最新用户消息一次倒序求得，不再每条消息跑一次全量 filter
+    expect(source).toContain('const lastUserMessageId = computed')
+    expect(source).not.toContain('activeMessages.filter((m) => m.role === ')
+  })
+})
+
+// ─── A1：渲染边界机械断言（O(N)/chunk → O(1)/chunk）────────────────────────
+// 票单 docs/run/frontend-perf/tickets.md A1：200 条带 segments 的历史消息 + 一次
+// AGENT_TYPING 更新 ⇒ renderMarkdown 调用增量为常数（与 N 无关）。
+
+const A1_MESSAGE_COUNT = 200
+
+function a1HistoricalMessage(i: number): Message {
+  if (i % 2 === 0) {
+    return {
+      id: `m${i}`,
+      sessionId: 's1',
+      agentId: null,
+      role: 'user',
+      content: `第 ${i} 条用户提问。`,
+      mentions: ['ds猫'],
+      createdAt: '2026-01-01T00:00:00Z',
+    }
+  }
+  const body = `第 ${i} 条回复正文。`.repeat(4)
+  const thinking = `第 ${i} 条推理过程。`.repeat(20)
+  return {
+    id: `m${i}`,
+    sessionId: 's1',
+    agentId: 'a1',
+    role: 'agent',
+    content: body,
+    mentions: [],
+    thinkingContent: thinking,
+    toolContent: [{ id: `t${i}`, name: 'Bash', status: 'done' }],
+    segments: [
+      { kind: 'thinking', content: thinking },
+      { kind: 'tool', content: '', tool: { id: `t${i}`, name: 'Bash', status: 'done' } },
+      { kind: 'text', content: body },
+    ],
+    createdAt: '2026-01-01T00:00:00Z',
+  }
+}
+
+describe('A1 渲染边界：单次 chunk 不按 N 触发 markdown 重算', () => {
+  let scrollToStub: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    // jsdom 未实现 Element.scrollTo（ChatPanel 贴底滚动会调）
+    scrollToStub = vi.fn()
+    Object.defineProperty(Element.prototype, 'scrollTo', {
+      configurable: true,
+      writable: true,
+      value: scrollToStub,
+    })
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.mocked(renderMarkdown).mockClear()
+  })
+
+  it(`${A1_MESSAGE_COUNT} 条历史消息 + 一次 AGENT_TYPING ⇒ renderMarkdown 调用增量 ≤ 5`, async () => {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'A1', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [
+      { id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
+    ]
+    store.messages = Array.from({ length: A1_MESSAGE_COUNT }, (_, i) => a1HistoricalMessage(i))
+    // 真实会话形态：最新用户消息带 agent 状态行（状态行里读 store.typingStates——这条读取
+    // 是 typingStates 进入「消息列表渲染依赖」的唯一入口；纯 agent 历史测不出真实基线）
+    store.messageStatus = new Map([
+      [
+        `m${A1_MESSAGE_COUNT - 2}`,
+        [
+          {
+            agentId: 'a1',
+            agentName: 'ds猫',
+            agentAvatar: '🐱',
+            status: 'replying' as const,
+          },
+        ],
+      ],
+    ])
+
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await nextTick()
+    await nextTick()
+
+    const baseline = vi.mocked(renderMarkdown).mock.calls.length
+    vi.mocked(renderMarkdown).mockClear()
+
+    // 一次 chunk：typing 内容推进（服务端 reply.ts 逐 chunk emit 的等价触发）
+    store.typingStates.set('a1', {
+      messageId: 'stream1',
+      sessionId: 's1',
+      content: '流式思考片段 1',
+      segments: [{ kind: 'thinking', content: '流式思考片段 1' }],
+    })
+    await nextTick()
+    await nextTick()
+
+    const delta = vi.mocked(renderMarkdown).mock.calls.length
+    // 改前基线（3237 行单组件、零消息级子组件边界，2026-09-13 本机实测）：**delta = 101**
+    // ——200 条消息里 100 条 agent 消息，单个 chunk 触发整张列表重算 ⇒ 每条折叠块内的
+    // `renderMarkdown(e.content)`（历史 thinking 段，无缓存）重跑一次，+1 条流式折叠块。
+    // 即 delta ≈ agent 消息数 × 每条 thinking 条目数，与 N 线性。改后须为常数（≤5）。
+    expect(baseline).toBeGreaterThan(0)
+    expect(delta).toBeLessThanOrEqual(5)
+
+    wrapper.unmount()
   })
 })

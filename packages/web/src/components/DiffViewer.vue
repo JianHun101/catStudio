@@ -27,6 +27,15 @@ const validBlocks = computed(() =>
   )
 )
 
+/**
+ * 行解析结果按块缓存：`parseUnifiedDiff` 过去直接写在模板 v-for 里，父级每次重渲染
+ * 都把每块 diff 重解析一遍（消息列表重渲染的下游开销）。移入 computed——props.blocks
+ * 引用不变则不重算。
+ */
+const parsedBlocks = computed(() =>
+  validBlocks.value.map((block) => ({ block, lines: parseUnifiedDiff(block.diff) }))
+)
+
 function lineClass(line: { type: string; text: string }): string {
   if (line.text === DIFF_TRUNCATED_MARKER) return 'diff-line diff-truncated'
   switch (line.type) {
@@ -46,17 +55,13 @@ function lineClass(line: { type: string; text: string }): string {
 
 <template>
   <div class="diff-viewer">
-    <div v-for="block in validBlocks" :key="block.id" class="diff-block">
+    <div v-for="{ block, lines } in parsedBlocks" :key="block.id" class="diff-block">
       <div class="diff-file-header">
         <span class="diff-file-icon">📄</span>
         <code class="diff-file-path">{{ block.filePath }}</code>
       </div>
       <div class="diff-lines">
-        <div
-          v-for="(line, i) in parseUnifiedDiff(block.diff)"
-          :key="`${block.id}-${i}`"
-          :class="lineClass(line)"
-        >
+        <div v-for="(line, i) in lines" :key="`${block.id}-${i}`" :class="lineClass(line)">
           <span class="diff-line-num">{{ line.oldLine ?? '' }}</span>
           <span class="diff-line-num">{{ line.newLine ?? '' }}</span>
           <span class="diff-line-text">{{ line.text }}</span>

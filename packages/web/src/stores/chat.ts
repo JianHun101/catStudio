@@ -60,6 +60,23 @@ function writeActiveSessionId(id: string | null): void {
   }
 }
 
+/**
+ * 每条消息对应的 Agent 执行状态。
+ * 提到模块作用域并导出：`messageStatus` 本就是 store 的公开投影，消息级子组件
+ * （MessageItem.vue）需要按标量 prop 收这份状态——类型不导出会让消费侧只能
+ * 自己再抄一份结构（漂移源）。纯类型导出，零运行时代码/行为变更。
+ */
+export type AgentStatusEntry = {
+  agentId: string
+  agentName: string
+  agentAvatar: string
+  status: 'queued' | 'thinking' | 'replying' | 'done'
+  /** 回复开始时间戳（epoch ms）——服务端心跳注入，前端据此显示「回复中 · 已 N 秒」 */
+  startedAt?: number
+  /** 最后一次收到 replying 心跳的客户端接收时间戳（epoch ms）——心跳失联超阈值显示「无响应」 */
+  lastBeatAt?: number
+}
+
 export const useChatStore = defineStore('chat', () => {
   // ─── State ────────────────────────────────
 
@@ -69,12 +86,15 @@ export const useChatStore = defineStore('chat', () => {
   const agentStates = ref<Map<string, Map<string, AgentRuntimeState>>>(new Map())
   const agents = ref<AgentConfig[]>([])
   const typingStates = ref<
-    Map<string, {
-      messageId: string
-      content: string
-      sessionId: string
-      segments?: StreamSegment[]
-    }>
+    Map<
+      string,
+      {
+        messageId: string
+        content: string
+        sessionId: string
+        segments?: StreamSegment[]
+      }
+    >
   >(new Map())
   const unreadCounts = ref<Map<string, number>>(new Map()) // sessionId → unread count
   const loading = ref(false)
@@ -123,17 +143,6 @@ export const useChatStore = defineStore('chat', () => {
     handoffFailed.value = null
   }
 
-  /** 每条消息对应的 Agent 执行状态 */
-  type AgentStatusEntry = {
-    agentId: string
-    agentName: string
-    agentAvatar: string
-    status: 'queued' | 'thinking' | 'replying' | 'done'
-    /** 回复开始时间戳（epoch ms）——服务端心跳注入，前端据此显示「回复中 · 已 N 秒」 */
-    startedAt?: number
-    /** 最后一次收到 replying 心跳的客户端接收时间戳（epoch ms）——心跳失联超阈值显示「无响应」 */
-    lastBeatAt?: number
-  }
   const messageStatus = ref<Map<string, AgentStatusEntry[]>>(new Map())
 
   // ─── Message lifecycle (C5) ─────────────────
