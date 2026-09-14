@@ -235,7 +235,7 @@ describe('chunks repo（票己 · 段三索引表）', () => {
      * 被调用者承担。断言比原子的弱一档（查它确实调了原子入口），但比把它塞进
      * 「非检索」诚实——它返回的就是召回结果。
      */
-    const COMPOSED_RETRIEVAL_FUNCS = ['searchChunksHybrid']
+    const COMPOSED_RETRIEVAL_FUNCS = ['searchChunksHybrid', 'searchChunksKeywordScored']
     /**
      * 非检索导出：`setRepoDb` 配置 / `upsertChunk` 身份键裸写口 /
      * `getChunksByOrigin` 扫描器增量比对（**必须见全量行含 superseded**，否则孤儿物理删会漏）/

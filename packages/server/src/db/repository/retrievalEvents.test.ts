@@ -28,6 +28,7 @@ function makeEvent(over: Partial<RetrievalEventInput> = {}): RetrievalEventInput
     thresholdMaxDistance: 0.6,
     paramTopK: 3,
     paramProbeN: 20,
+    paramPoolN: 20,
     reason: 'ok',
     retrievalMs: 42,
     contextTokens: 100,
@@ -331,6 +332,48 @@ describe('retrievalEvents 写口', () => {
 
       const cands = repo.getRetrievalCandidates(id)
       expect(cands.map((c) => c.content_hash).sort()).toEqual(['h-q0', 'h-q1'])
+    })
+  })
+
+  // ─── R1-b：param_pool_n（验收 7 / 8）─────────────────
+  // 判据面在**写口**：值的正确性（== 当时的池常数）由 `execution/reply.test.ts`
+  // 从消费侧取，这里只判「列在、存得住、老行是 NULL」。
+  describe('R1-b · param_pool_n 查询级池快照', () => {
+    it('验收 8 · additive 迁移：老行该列为 NULL，重跑迁移既有行一行不变', () => {
+      const db = getDb()
+      // 先落一行「R1-b 之前」形态的数据（该列不存在于契约 → NULL）
+      const oldId = repo.insertRetrievalTrace(makeEvent({ paramPoolN: null }))!
+      const rowBefore = db
+        .prepare('SELECT param_pool_n FROM retrieval_events WHERE id = ?')
+        .get(oldId) as { param_pool_n: number | null }
+      expect(rowBefore.param_pool_n).toBeNull()
+
+      const eventsBefore = countRows('retrieval_events')
+      const candsBefore = countRows('retrieval_candidates')
+
+      // 老库重跑迁移：`ALTER TABLE ... ADD COLUMN` 撞「列已存在」→ 被 `catch {}` 吞掉
+      // （`db/index.ts` 迁移循环的既有幂等范式），**不得**重建表或清行
+      initDb()
+
+      expect(countRows('retrieval_events')).toBe(eventsBefore)
+      expect(countRows('retrieval_candidates')).toBe(candsBefore)
+      const rowAfter = db
+        .prepare('SELECT param_pool_n FROM retrieval_events WHERE id = ?')
+        .get(oldId) as { param_pool_n: number | null }
+      expect(rowAfter.param_pool_n).toBeNull()
+    })
+
+    it('新行按传入值落库（含 0 与 NULL 的区分：不把「没有」写成 0）', () => {
+      const a = repo.insertRetrievalTrace(makeEvent({ paramPoolN: 20 }))!
+      const b = repo.insertRetrievalTrace(makeEvent({ paramPoolN: null, executionId: 'exec-2' }))!
+      const read = (id: number) =>
+        (
+          getDb().prepare('SELECT param_pool_n FROM retrieval_events WHERE id = ?').get(id) as {
+            param_pool_n: number | null
+          }
+        ).param_pool_n
+      expect(read(a)).toBe(20)
+      expect(read(b)).toBeNull()
     })
   })
 })

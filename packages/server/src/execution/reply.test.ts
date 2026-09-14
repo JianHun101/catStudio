@@ -22,6 +22,7 @@ import {
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
 import { initRepository, executionLogs as execLogsRepo } from '../db/repository/index.js'
+import { HYBRID_POOL_PER_QUERY } from '../db/repository/chunks.js'
 import type { MemoryContextResult } from '../memory/index.js'
 
 /** 生成一条同锚历史（数组下标越小越旧） */
@@ -179,6 +180,9 @@ describe('execution/reply — R1 检索流水埋点', () => {
     // 内测耗时优先（同一趟），不是外侧计时
     expect(ev.retrieval_ms).toBe(37)
     expect(ev.reason).toBe('ok')
+    // R1-b 验收 7：`param_pool_n` == **当前池常数**（import 真源比对，不写死 20——
+    // 写死的话常数一改这条就变成假绿门）。真机对账（重启后查生产库）不在单测内。
+    expect(ev.param_pool_n).toBe(HYBRID_POOL_PER_QUERY)
   })
 
   // ─── 验收 6：超时路径 ──────────────────────────────

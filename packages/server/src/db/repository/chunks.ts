@@ -368,6 +368,18 @@ export function searchChunksByKeyword(query: string, topN: number): ChunkKeyword
 /** 混合检索两通道各自召回数量（本模块 RRF 融合的通道配额） */
 const HYBRID_CHANNEL_TOP_N = 20
 /**
+ * **每条查询**送进跨查询合并的候选池大小（R1-b §二 改动 1）。
+ *
+ * 与 `HYBRID_CHANNEL_TOP_N` 同量级是刻意的：两通道各召回 20 片，双通道命中是
+ * **打分相加**而非扩容 ⇒ 一趟查询最多 20 个候选。这里是**查询级出口**的截断，
+ * 与「最终注入几条」（调用方的 `MEMORY_TOP_K`，见 `memory/index.ts` 的末次 `slice`）
+ * 是两回事——把后者当前者用，第 4~20 名连参与跨查询合并的资格都没有。
+ *
+ * ⚠️ 截断**只认本常数**，不看调用方传进来的参数：池大小以本处为唯一真相源，
+ * 调用方无法从外部把池改小（R1-b 的病灶正是「调用方的 `topK` 漏进了池」）。
+ */
+export const HYBRID_POOL_PER_QUERY = 20
+/**
  * 检索流水里 `body_head` 的截断长度（P2 §四 表 3：片段正文前 120 字，**截断快照非全文**）。
  * 探针侧在 SQL 里 `substr` 截断（不把整篇正文拉进内存），融合侧由调用方按同一常数截断。
  */
@@ -409,7 +421,12 @@ export interface ChunkHybridHit {
  * - 纯关键词命中：`channel='keyword'`（distance 的内存态哨兵值见上）
  * - 通道容错：关键词通道空结果 / FTS 表缺失 → 结果即纯向量 topK（`channel='vector'`）
  *
- * `LIMIT topK` 在融合排序**之后**：两通道各召回 20 片参与打分，最终只出 topK。
+ * 出口截断在融合排序**之后**，取 `HYBRID_POOL_PER_QUERY`（**不是**调用方传的
+ * `topK`）：两通道各召回 20 片参与打分，池子全须交给调用方的跨查询合并层，
+ * 「最终注入几条」由调用方自己切（R1-b §二 改动 1/5）。
+ *
+ * ⚠️ `topK` 参数**已不参与本函数的任何计算**（签名保留只为调用点稳定，
+ * 见 `HYBRID_POOL_PER_QUERY` 的常数说明）——别再把它接回 `slice`。
  */
 export function searchChunksHybrid(
   queryBlob: Buffer,
@@ -417,6 +434,8 @@ export function searchChunksHybrid(
   topK: number,
   maxDistance: number
 ): ChunkHybridHit[] {
+  // 显式作废：参数只表达「调用方以为的出口条数」，与池大小无关（见函数头 ⚠️）
+  void topK
   const vectorHits = searchChunksByVector(queryBlob, HYBRID_CHANNEL_TOP_N, maxDistance)
   const keywordHits = searchChunksByKeyword(query, HYBRID_CHANNEL_TOP_N)
 
@@ -448,7 +467,7 @@ export function searchChunksHybrid(
 
   return [...scores.values()]
     .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
+    .slice(0, HYBRID_POOL_PER_QUERY)
     .map((s) => ({
       row: s.row,
       rrfScore: s.score,
@@ -456,6 +475,38 @@ export function searchChunksHybrid(
       keywordRank: s.keywordRank,
       channel: s.vectorRank !== null ? (s.keywordRank !== null ? 'both' : 'vector') : 'keyword',
     }))
+}
+
+/**
+ * 纯关键词路径的**带分**出口（R1-b §三 落点甲）：与 `searchChunksHybrid` 的出口
+ * **同形状**，让「整趟嵌入挂了」的降级路径与混合路径在跨查询合并层拿到**同一种
+ * 类型** ⇒ 合并逻辑零分支、零类型守卫。
+ *
+ * 分数公式与混合路径**同一条**（`1 / (RRF_K + rank_in_channel + 1)`，见
+ * `searchChunksHybrid` 的 `kwScore`）：降级路径只有关键词通道那一项，无需另立分支。
+ *
+ * ⚠️ 两条**明写禁止**（R1-b §三）——这是本函数唯一可能产出的**静默**错误：
+ *   · **禁止**返回 `null` 分再参与求和——`null` 在 JS 里当 `0` 或 `NaN`，**两种都
+ *     不抛**，只是结果悄悄错；
+ *   · **禁止**填与 RRF 不同量纲的值（原始 bm25 `rank` / 余弦距离）——降级路径在
+ *     跨查询合并时的权重会错得离谱。
+ *
+ * `row.distance` 仍是 `maxDistance` 哨兵（内存态沿用，`RetrievedSection.distance`
+ * 等消费方按 `number` 消费）；**落库面按 `channel` 转 NULL**（见
+ * `db/repository/retrievalEvents.ts`）——判别语义由 `channel` 承担。
+ */
+export function searchChunksKeywordScored(
+  query: string,
+  pool: number,
+  maxDistance: number
+): ChunkHybridHit[] {
+  return searchChunksByKeyword(query, pool).map((hit, i) => ({
+    row: { ...hit, distance: maxDistance },
+    rrfScore: 1 / (RRF_K + i + 1),
+    vectorRank: null,
+    keywordRank: i,
+    channel: 'keyword',
+  }))
 }
 
 /** 向量候选探针行（阈值/状态过滤**之前**的原始 KNN 池） */
