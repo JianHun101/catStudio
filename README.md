@@ -6,13 +6,12 @@
 
 ## 前置依赖
 
-| 依赖                           | 版本要求 | 用途                     | 必需？                                   |
-| ------------------------------ | -------- | ------------------------ | ---------------------------------------- |
-| [Node.js](https://nodejs.org/) | >= 20    | 运行时                   | ✅                                       |
-| [pnpm](https://pnpm.io/)       | >= 8     | 包管理 + monorepo        | ✅                                       |
-| [Redis](https://redis.io/)     | >= 7.0   | Agent 状态跨进程同步     | ⚠️ 可选（单机 Web 场景可降级为内存模式） |
-| Claude Code CLI                | 最新     | `claude` provider 适配器 | ❌ 仅使用该 provider 时需要              |
-| Codex CLI + codex-proxy        | 最新     | `openai` provider 适配器 | ❌ 仅使用该 provider 时需要              |
+| 依赖                           | 版本要求 | 用途                     | 必需？                      |
+| ------------------------------ | -------- | ------------------------ | --------------------------- |
+| [Node.js](https://nodejs.org/) | >= 20    | 运行时                   | ✅                          |
+| [pnpm](https://pnpm.io/)       | >= 8     | 包管理 + monorepo        | ✅                          |
+| Claude Code CLI                | 最新     | `claude` provider 适配器 | ❌ 仅使用该 provider 时需要 |
+| Codex CLI + codex-proxy        | 最新     | `openai` provider 适配器 | ❌ 仅使用该 provider 时需要 |
 
 ### 安装前置依赖
 
@@ -22,10 +21,6 @@ node --version  # 确认 >= 20
 
 # pnpm
 npm install -g pnpm
-
-# Redis（Windows，可选）
-winget install Redis.Redis
-# 安装后 Redis 作为 Windows Service 自动运行，监听 localhost:6379
 
 # Claude Code CLI（可选——仅使用 claude provider 时）
 npm install -g @anthropic-ai/claude-code
@@ -76,14 +71,13 @@ catStudy/
 │   │   └── src/
 │   │       ├── types.ts        # AgentConfig, SessionConfig, Message, Memory…
 │   │       ├── schemas.ts      # Zod 校验 (AgentCreate, SessionCreate…)
-│   │       ├── events.ts       # Socket.IO 事件名 + Redis 频道模式
+│   │       ├── events.ts       # Socket.IO 事件名
 │   │       └── token-counter.ts# Token 计数工具（字符估算 + tiktoken）
 │   ├── server/          # 后端 (Fastify + Socket.IO + SQLite)
 │   │   └── src/
 │   │       ├── index.ts        # 服务入口：Fastify → Socket.IO → 优雅关闭
 │   │       ├── db/
 │   │       │   ├── index.ts    # SQLite 初始化 (WAL + sqlite-vec + 迁移)
-│   │       │   ├── redis.ts    # Redis 客户端（可选，失败降级）
 │   │       │   └── repository/ # 仓储层（agents/sessions/messages/chunks/knowledge/verdicts…）
 │   │       ├── llm/
 │   │       │   ├── adapter.ts  # LLMAdapter 统一接口
@@ -214,7 +208,6 @@ pnpm lint             # 全项目 TypeScript 类型检查
 | `KIMI_API_KEY`                                                                   | —                          | Kimi K3 API Key（kimi 推理 provider）                                                            |
 | `PORT`                                                                           | `3200`                     | Server 监听端口                                                                                  |
 | `HOST`                                                                           | `127.0.0.1`                | Server 监听地址                                                                                  |
-| `REDIS_URL`                                                                      | `redis://localhost:6379`   | Redis 连接地址                                                                                   |
 | `HF_ENDPOINT`                                                                    | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`）                               |
 | `LOG_LEVEL`                                                                      | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                                                    |
 | `MEMORY_ENABLED`                                                                 | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                                               |
@@ -405,15 +398,14 @@ pnpm test -- --reporter=verbose  # 逐条显示
 
 ## 技术栈
 
-| 层         | 技术                                                               |
-| ---------- | ------------------------------------------------------------------ |
-| 运行时     | Node.js 20+ / TypeScript 5.5                                       |
-| 包管理     | pnpm workspace (monorepo)                                          |
-| 后端框架   | Fastify 5                                                          |
-| 实时通信   | Socket.IO 4                                                        |
-| 数据库     | SQLite (better-sqlite3 + WAL + sqlite-vec 向量扩展)                |
-| 消息中间件 | Redis 7 (ioredis，可选)                                            |
-| LLM 推理   | DeepSeek HTTP API / Claude Code CLI / Codex CLI / Ollama / Kimi K3 |
-| 嵌入模型   | HuggingFace Transformers (Xenova/bge-small-zh-v1.5, 512 维)        |
-| 前端框架   | Vue 3 + Vite + Pinia                                               |
-| 测试       | Vitest 4                                                           |
+| 层       | 技术                                                               |
+| -------- | ------------------------------------------------------------------ |
+| 运行时   | Node.js 20+ / TypeScript 5.5                                       |
+| 包管理   | pnpm workspace (monorepo)                                          |
+| 后端框架 | Fastify 5                                                          |
+| 实时通信 | Socket.IO 4                                                        |
+| 数据库   | SQLite (better-sqlite3 + WAL + sqlite-vec 向量扩展)                |
+| LLM 推理 | DeepSeek HTTP API / Claude Code CLI / Codex CLI / Ollama / Kimi K3 |
+| 嵌入模型 | HuggingFace Transformers (Xenova/bge-small-zh-v1.5, 512 维)        |
+| 前端框架 | Vue 3 + Vite + Pinia                                               |
+| 测试     | Vitest 4                                                           |
