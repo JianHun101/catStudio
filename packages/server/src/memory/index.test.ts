@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
 import { initRepository, chunks as chunksRepo } from '../db/repository/index.js'
-import { bigramTokenize } from '../db/repository/memories.js'
+import { bigramTokenize } from '../db/repository/fts.js'
 import type { EmbedResult } from './embedding-client.js'
 
 // 扫描器白名单前缀（真源 = scripts/flywheel/scan.mjs；import 而非手抄，防漂移）

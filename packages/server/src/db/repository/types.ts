@@ -69,15 +69,6 @@ export interface MessageWithAgentName extends MessageRow {
   agent_name: string | null
 }
 
-export interface MemoryRow {
-  id: string
-  agent_id: string
-  content: string
-  embedding: Buffer | null
-  source_message_id: string | null
-  created_at: string
-}
-
 /**
  * chunks 表行（段三切片索引，Decisions 34 X1/X2）。
  *

@@ -363,7 +363,7 @@ export function buildExternalSamples(): Phase0Sample[] {
     good(
       'ext-06',
       ctx('记忆去重的阈值怎么调?'),
-      'MEMORY_DEDUP_THRESHOLD 默认 0.20:余弦距离小于此值的记忆跳过存储。调大更激进去重(少存),调小更保守(多存)。更新阈值 0.35 介于去重与插入之间。'
+      '现在没有去重阈值这个旋钮了——对话原话的实时嵌入层已整体退役(写口与 memories 表双删),MEMORY_DEDUP_* 系列参数一并作废。现行机制是 MD 为唯一写入口:扫描器把白名单 MD(docs/adr、docs/lessons、docs/plans)切片后嵌入,按身份键 content_hash 幂等 upsert 进 chunks 三表——重扫同一份文档是覆盖而非新增,所以不需要相似度去重。检索走 searchChunksHybrid(向量+关键词 RRF),阈值是 MEMORY_MAX_DISTANCE 默认 0.6,知识库侧另为 0.35。'
     ),
     good(
       'ext-07',

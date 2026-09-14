@@ -16,7 +16,6 @@ import type Database from 'better-sqlite3'
 import { setRepoDb as setAgentsDb } from './agents.js'
 import { setRepoDb as setSessionsDb } from './sessions.js'
 import { setRepoDb as setMessagesDb } from './messages.js'
-import { setRepoDb as setMemoriesDb } from './memories.js'
 import { setRepoDb as setKnowledgeDb } from './knowledge.js'
 import { setRepoDb as setExecutionLogsDb } from './executionLogs.js'
 import { setRepoDb as setSessionReadStateDb } from './sessionReadState.js'
@@ -34,7 +33,6 @@ export function initRepository(db: Database.Database): void {
   setAgentsDb(db)
   setSessionsDb(db)
   setMessagesDb(db)
-  setMemoriesDb(db)
   setKnowledgeDb(db)
   setExecutionLogsDb(db)
   setSessionReadStateDb(db)
@@ -52,7 +50,6 @@ export function initRepository(db: Database.Database): void {
 export * as agents from './agents.js'
 export * as sessions from './sessions.js'
 export * as messages from './messages.js'
-export * as memories from './memories.js'
 export * as knowledge from './knowledge.js'
 export * as executionLogs from './executionLogs.js'
 export * as sessionReadState from './sessionReadState.js'
@@ -71,7 +68,6 @@ export type {
   SessionRow,
   MessageRow,
   MessageWithAgentName,
-  MemoryRow,
   ChunkRow,
   ExecutionLogRow,
   SessionReadStateRow,

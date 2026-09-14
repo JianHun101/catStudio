@@ -13,7 +13,7 @@
  */
 import type Database from 'better-sqlite3'
 import type { ChunkRow } from './types.js'
-import { buildFtsQuery, bigramTokenize, HYBRID_CHANNEL_TOP_N, RRF_K } from './memories.js'
+import { buildFtsQuery, bigramTokenize } from './fts.js'
 
 let db: Database.Database
 
@@ -281,10 +281,10 @@ const CHUNK_COLUMNS = `c.id, c.doc_path, c.section_anchor, c.content_hash, c.ori
  *
  * ⚠️ 候选池 = KNN 内层 `LIMIT topK`（**先近邻截断、后状态过滤**）⇒ 若最近的 topK
  * 片恰好全被标失效，本函数返回空而不是「顺延取更远的片」。这是刻意的形态对齐
- * （`searchMemoriesByVector` 同为「先召回后过滤」），非缺陷——但接线侧（票辛）
- * 的降级三态（W3）不能把这种空当成「嵌入失败」。
+ * （`knowledge.ts` 的 `searchKnowledgeByVector` 同为「先召回后过滤」），非缺陷
+ * ——但接线侧（票辛）的降级三态（W3）不能把这种空当成「嵌入失败」。
  *
- * maxDistance 为距离下限（余弦距离 ≥ 此值不召回），与 memories 侧同口径。
+ * maxDistance 为距离下限（余弦距离 ≥ 此值不召回）。
  */
 export function searchChunksByVector(
   queryBlob: Buffer,
@@ -335,8 +335,8 @@ export type ChunkKeywordSearchResult = ChunkRow
 /**
  * 关键词通道：bigram 查询词 MATCH + bm25 排序。
  *
- * 分词**复用 `memories.ts` 的 `bigramTokenize`/`buildFtsQuery`**（不另发明）——
- * 与 `memories_fts` 同一套切分，两侧对称是 MATCH 能命中的前提。
+ * 分词**复用 `fts.ts` 的 `bigramTokenize`/`buildFtsQuery`**（不另发明）——
+ * 与 `chunks_fts` 写入侧同一套切分，两侧对称是 MATCH 能命中的前提。
  * 无可用查询词 → 空结果（调用方降级纯向量）；FTS 表缺失（老库/手搓 schema）同样
  * 静默降级，其他 SQL 错误照抛（不掩盖真实问题）。
  *
@@ -365,14 +365,19 @@ export function searchChunksByKeyword(query: string, topN: number): ChunkKeyword
   }
 }
 
+/** 混合检索两通道各自召回数量（本模块 RRF 融合的通道配额） */
+const HYBRID_CHANNEL_TOP_N = 20
+/** RRF 融合常数 k（控制排名分衰减速度） */
+const RRF_K = 60
+
 /**
  * 混合检索：向量通道 + 关键词通道各取 topN → RRF 融合（k=60）→ 排序取 topK。
  *
- * **逐项对齐 `memories.ts` 的 `searchMemoriesHybrid`**（W1：同一 RRF 形态、同一
- * `RRF_K`、同一通道配额，两个常数直接 import 而非各自再写一份）：
+ * W1 契约：本模块的 RRF 形态与本文件的 `RRF_K` / `HYBRID_CHANNEL_TOP_N` 同源
+ * （两个常数原先借住在别处的共享底座模块，随 2026-09-14 拆解就地定义在唯一消费方）：
  * - 两通道都命中的片：RRF 分相加，distance 取向量通道真值
  * - 纯关键词命中：distance 填 `maxDistance`（语义 = 超出向量通道召回边界、由关键词
- *   通道救回——是边界值不是伪造距离，与 memories 侧同款哨兵）
+ *   通道救回——是边界值不是伪造距离，即 R1 待接管的哨兵值）
  * - 通道容错：关键词通道空结果 / FTS 表缺失 → 结果即纯向量 topK（含距离真值）
  *
  * `LIMIT topK` 在融合排序**之后**：两通道各召回 20 片参与打分，最终只出 topK。

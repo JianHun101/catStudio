@@ -15,7 +15,7 @@ import { setDb, resetDb, getDb, initDb, CHUNK_VECTOR_METRIC_FIX_SEQUENCE } from 
 import { initRepository } from './index.js'
 import { chunks as chunksRepo } from './index.js'
 import { vectorToBlob } from '../../memory/index.js'
-import { bigramTokenize } from './memories.js'
+import { bigramTokenize } from './fts.js'
 
 /** 契约列清单（票己正文「`chunks` 列清单 —— 一次到位（X2）」逐列抄录） */
 const CONTRACT_COLUMNS: Array<{
