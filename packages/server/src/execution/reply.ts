@@ -23,11 +23,13 @@ import {
   sessions as sessionsRepo,
   agents as agentsRepo,
   executionLogs as execLogsRepo,
+  retrievalEvents as retrievalRepo,
 } from '../db/repository/index.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import {
   retrieveMemoryContext,
   buildKnowledgeContext,
+  currentRetrievalParams,
   type MemoryContextResult,
 } from '../memory/index.js'
 import { createLogger } from '../logger.js'
@@ -186,6 +188,89 @@ function upsertTool(tools: ToolCallInfo[], chunk: Chunk): void {
   const idx = tools.findIndex((t) => t.id != null && info.id != null && t.id === info.id)
   if (idx >= 0) tools[idx] = record
   else tools.push(record)
+}
+
+/**
+ * 检索流水落盘（P2 / R1）——**三处口径与既有代码逐字同源**，不是重新推导：
+ *
+ * · `taskId` = `triggerMsg.taskId || traceId`：与写回复消息那一行
+ *   （`insertAgentMessage`，下方 `:911`）**同一表达式**。链锚口径 = P1 的
+ *   `COALESCE(回复.task_id, 触发.task_id)`，而回复侧因这个 `|| traceId` 恒非空
+ *   ⇒ 链锚 = 本表达式。写成 `triggerMsg.taskId` 会与 P1 对不上账。
+ * · `reason`：照抄下方日志的三元式——值域 **9**（模块 7 枚举 + `timeout` +
+ *   `error`）。超时那次 `memoryResult === null`，只读 `memoryResult.reason`
+ *   会恰好在「最慢、最该记」的那一次丢数据。
+ * · `executionId`：该 (会话, 猫, 触发消息) 当前 running 的执行行。**不在
+ *   serial 里穿线拿 logId**——那要改 4 个签名、把 R1 拖进 `serial.ts` 这个
+ *   事故密集区（P2 §八 已把它划给另票）。此处多带 session + trigger 两个条件，
+ *   比 `updateExecutionLogDiagnostics` 的「agent + running」窄，错挂面更小。
+ *
+ * 写失败在写口内部吞掉（硬约束 2），本函数不抛。
+ *
+ * 导出供直测（与 `selectTaskHistory` 同款：`runAgentReply` 主流程需 LLM 适配器，
+ * 而本函数只依赖 db——组装口径是本票最容易写错的一处，必须能独立断言）。
+ * 「调用点位置」由静态源断言守（见 `reply.test.ts`）。
+ */
+export function recordRetrievalTrace(args: {
+  sessionId: string
+  agentId: string
+  triggerMessageId: string
+  taskId: string
+  memoryResult: MemoryContextResult | null
+  memoryTimeout: boolean
+  /** 外侧计时——超时/抛错路径拿不到内测值时的唯一来源 */
+  elapsedMs: number
+}): void {
+  // 关键路径兜底（硬约束 2 的**本意**）：埋点**整段**不许杀死本轮注入。
+  // 写口内部已自吞一次；这里防的是写口之外的三段——查执行行、取参数快照、组装。
+  // 它们任一段抛（实测过的例子：`../memory/index.js` 被测试替身换成 partial
+  // factory ⇒ `currentRetrievalParams` 是 undefined），回复就整条发不出去。
+  try {
+    const logRow = execLogsRepo
+      .getLogsByTriggerMessage(args.triggerMessageId)
+      .find(
+        (r) =>
+          r.agent_id === args.agentId && r.session_id === args.sessionId && r.status === 'running'
+      )
+    if (!logRow) {
+      // 生产路径不可达：`execute()` 先 executeAgentCommand（落 running 行）再 executeRun。
+      // 不写 = 不留一行挂不上执行的账；但不静默（本模块不允许「返回空且无痕」）。
+      log.warn('检索流水：找不到本轮 running 执行行，跳过落盘', {
+        agentId: args.agentId,
+        sessionId: args.sessionId,
+        triggerMessageId: args.triggerMessageId,
+      })
+      return
+    }
+
+    const stats = args.memoryResult?.stats
+    const params = currentRetrievalParams()
+    retrievalRepo.insertRetrievalTrace({
+      executionId: logRow.id,
+      sessionId: args.sessionId,
+      agentId: args.agentId,
+      taskId: args.taskId,
+      createdAt: new Date().toISOString(),
+      // 参数快照：有 stats 就取同一趟读到的值；超时/抛错路径无 stats，现读 env
+      thresholdMaxDistance: stats?.thresholdMaxDistance ?? params.maxDistance,
+      paramTopK: stats?.paramTopK ?? params.topK,
+      paramProbeN: stats?.paramProbeN ?? params.probeN,
+      reason: args.memoryTimeout ? 'timeout' : (args.memoryResult?.reason ?? 'error'),
+      // 同上：内测值优先（同一趟），外侧计时只兜超时/抛错两条无内测值的路径
+      retrievalMs: stats?.retrievalMs ?? args.elapsedMs,
+      contextTokens: stats?.contextTokens ?? null,
+      budgetTokens: stats?.budgetTokens ?? null,
+      truncated: stats?.truncated ?? null,
+      queries: stats?.queryTraces ?? [],
+      candidates: stats?.candidates ?? [],
+    })
+  } catch (err: any) {
+    log.warn('检索流水埋点异常（已跳过，不影响本轮回复）', {
+      agentId: args.agentId,
+      sessionId: args.sessionId,
+      error: err?.message,
+    })
+  }
 }
 
 export async function runAgentReply(
@@ -618,6 +703,7 @@ export async function runAgentReply(
   // 超时/抛错 → 结果置 null（reason 记 'timeout'/'error'），与记忆模块自己的
   // 六种 reason 一起构成**穷尽的**空结果台账——不许有「返回空且无痕」的路径。
   const MEMORY_TIMEOUT_MS = 10_000
+  const memoryT0 = Date.now()
   let memoryResult: MemoryContextResult | null = null
   let memoryTimeout = false
   try {
@@ -633,6 +719,23 @@ export async function runAgentReply(
   } catch (err: any) {
     log.warn('记忆检索抛错，本轮不注入', { traceId, agentId: agent.id, error: err?.message })
   }
+
+  // ── 检索流水落盘（P2 / R1）────────────────────────────
+  // 位置两条都是硬要求：
+  //  ① 在 10s `Promise.race` **之外**——写库耗时不算进检索超时预算，且 race 超时
+  //     不会把整个写库丢掉（那恰是检索最慢、最该记的一次）；
+  //  ② 在下方 `if (memoryContext)` **之外**——那一分支只在注入成功时走，写在里
+  //     面会让「空手而归」和「超时」两条路径无痕。
+  recordRetrievalTrace({
+    sessionId,
+    agentId: agent.id,
+    triggerMessageId: triggerMsg.id,
+    taskId: triggerMsg.taskId || traceId,
+    memoryResult,
+    memoryTimeout,
+    elapsedMs: Date.now() - memoryT0,
+  })
+
   const memoryContext = memoryResult?.text ?? ''
   if (memoryContext) {
     llmMessages[0] = {

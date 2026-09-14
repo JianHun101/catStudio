@@ -74,6 +74,10 @@ vi.mock('../memory/index.js', () => ({
     stats: {},
   }),
   buildKnowledgeContext: vi.fn().mockResolvedValue(''),
+  // R1（P2）起 `execution/reply.ts` 还消费这个导出（超时/抛错路径取参数快照的
+  // 单一来源）。partial factory 缺它 = 调用点当场 TypeError，回复整条发不出去
+  // ——实测踩过。**替身必须镜像真模块被消费的导出面**。
+  currentRetrievalParams: vi.fn(() => ({ topK: 3, maxDistance: 0.6, probeN: 20 })),
 }))
 
 vi.mock('../handoff/index.js', () => ({

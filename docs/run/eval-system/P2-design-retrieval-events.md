@@ -306,3 +306,51 @@ const rows = blob ? searchChunksHybrid(...) : searchChunksByKeyword(...)  // ind
   - **有强理由无断言**：票面把「`task_id` 不冗余则 P2 数据与链路 tab 是两张互不相干的表」写成核心卖点，却没有一条断言守它（→ 14）；用户裁「拆」的分界线（第 3 步不得夹带）只有一句边界、无越界证明（→ 17）。
   - **教训**：**Gate C 不是一次性动作**。它在「设计当时」对账一遍、在「派活当时」必须再对一遍——因为**验收项是随设计增补而失配的**：§三 落点表后补一行、§七 边界后补一条，都不会自动长出对应验收。**判据：落点表每一行、边界每一条，各要能指到一个验收编号**；指不到的就是漏网。
 - **本票与 C1 的次序**：C1 前置（两票改同一批文件，`memory/index.ts:273` 与 R1 的 `:249-313` 改动区间**直接重叠**，并行必冲突）→ 见 [C1](C1-legacy-memory-chain-cleanup.md)。**C1 已于 2026-09-14 关票（PR #75 / merge `4a33553`）⇒ R1 可开工。**
+
+## 十一、R1 实施留痕（2026-09-14）
+
+### 11.1 改动面（行号为实施后实测，`grep` 复核）
+
+| 落点                               | 实施位置                                                                                                         | 内容                                                               |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `db/index.ts`                      | `:642` / `:677` / `:696`                                                                                         | 三表 DDL + 4 条索引，additive（`CREATE TABLE IF NOT EXISTS`）      |
+| `db/repository/retrievalEvents.ts` | **新建**（`insertRetrievalTrace:123`，读侧 `:224`/`:244`）                                                       | 三表同事务写口 + 行类型（**契约唯一真相源**）                      |
+| `db/repository/chunks.ts`          | `:374`(`CANDIDATE_BODY_HEAD_CHARS`) / `:394`(`ChunkHybridHit`) / `:414`(`searchChunksHybrid`) / `:491`(探针扩列) | 出口带出通道身份 + RRF 分 + 两位次；探针补身份三元组与 `body_head` |
+| `memory/index.ts`                  | `:149`(`currentRetrievalParams`) / `:290`(`queryTraces`) / `:414`(`candidates`) / `:536`(`renderOrder`)          | 采集流水；注入面回填                                               |
+| `execution/reply.ts`               | `:214`(`recordRetrievalTrace`) / `:706`(`memoryT0`) / `:729`(调用点)                                             | 埋点写库（race 外、`if` 外）                                       |
+| `README.md`                        | 8 行                                                                                                             | Redis 死面清理（**独立 commit**，见 §九 18）                       |
+
+### 11.2 §九 十八条验收 → 证据（逐条）
+
+| #   | 落点                                        | 用例                                                                                         |
+| --- | ------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| 1   | `retrievalEvents.test.ts`                   | 验 1：老库塞既有行 → 再跑迁移 → 三表在、三表行数不变                                         |
+| 2   | `reply.test.ts` + `retrievalEvents.test.ts` | 验 2（组装）/ 验 2（写口）：`execution_id` JOIN 回 `execution_logs` 对上                     |
+| 3   | `retrievalEvents.test.ts`                   | 验 3：注入 `content_hash=null` 真错 → **前两张表零残留**                                     |
+| 4   | `memory/index.test.ts`                      | 验 4 ×2：`keyword`→NULL（对照同片 probe 行距离 0.293）/ `vector`→非空                        |
+| 5   | `memory/index.test.ts`                      | 验 5：仅改写那趟嵌入失败 → 该行 `queryEmbedOk=0`，其候选 `channel='keyword'` 非 `both`       |
+| 6   | `reply.test.ts`                             | 验 6 ×2：`memoryTimeout` → `'timeout'`；抛错 → `'error'`                                     |
+| 7   | `memory/index.test.ts` + `reply.test.ts`    | 验 15 空召回 + 超时路径：行仍在、reason 正确                                                 |
+| 8   | `retrievalEvents.test.ts` + `reply.test.ts` | 验 8 + 找不到执行行：均不抛、返回 undefined / 不落盘                                         |
+| 9   | `memory/index.test.ts`                      | 验 9：`finalRank=[0,1,2,3]`、`injected` 节集合 == `r.sections`、`injectedPosition=[1,2,4,3]` |
+| 10  | `retrievalEvents.test.ts`                   | 验 10：FK 拒（query/候选两处）+ UNIQUE 拒 + CASCADE 删                                       |
+| 11  | `retrievalEvents.test.ts` + `reply.test.ts` | 验 11：两行不同阈值互不影响；超时路径参数快照仍带                                            |
+| 12  | 全套                                        | `npx vitest run` **113 文件 / 2268 用例全绿**；`node scripts/lint.js` 三包通过               |
+| 13  | `memory/index.test.ts`                      | 验 13：`sources == {final, probe}`、每项带 `queryIndex`、参数快照 + `retrievalMs`            |
+| 14  | `reply.test.ts`                             | 验 14 ×2：带锚 → 锚；无锚 → `traceId`（与回复侧 `\|\| traceId` 同构）                        |
+| 15  | `memory/index.test.ts`                      | 验 15 ×3：`no-hit` / `budget-exhausted` / `not-enabled`+`empty-query`                        |
+| 16  | `memory/index.test.ts`                      | 验 16：同片双通道 → `both`，`rrfScore > 1/61`（两通道相加）                                  |
+| 17  | `memory/index.test.ts`                      | 验 17 ×3：n=1..5 逐窗口「实际 sections 喂旧算法」逐字节比对 + 节序仍由 `bestIndex` 决定      |
+| 18  | `README.md`                                 | `grep -in redis` 命中 **2 行**且均在 ADR 表内（`0002`/`0005`）；`redis.ts` 字样归零          |
+
+> **票面行号漂移**：§九 18 写「`:369` `0002` / `:372` `0005`」，实测在 **`:358` / `:361`**（差 11 行）。判据按**内容**（ADR 表内两行）成立，行号系票面写作时的快照，已在提交前 grep 复核。
+
+### 11.3 偏离与自主决策（**请审查重点看这一节**）
+
+1. **`execution_id` 的来源票面未钉死**（§三 落点表只列 `reply.ts:635`，但 `logId` 是 `serial.ts:1232` 的局部量，隔 3 个函数帧）。**取法选了查库**（`getLogsByTriggerMessage` 按 (会话, 猫, 触发消息) + `status='running'` 窄定位），**没有在 serial 穿线**——理由：① 票 §八 自己把 `serial.ts` 划为「事故密集区、另票一个风险面」，穿线要改 4 个签名；② 与同文件 `:1077` 既有的「按 agent + running 定位」同款，只是多带两个条件、错挂面更小。**未命中时不编 `execution_id`、直接跳过并记 warn**（不违反 NOT NULL、也不编数据）。_这是契约缺口，若店长要穿线版，改动量 = 4 签名。_
+2. **`truncated` 在 `budget-exhausted` 路径由 `false` 改判 `true`**（声明的微修正）：该路径按定义就是「预算截断发生」（`bySection` 非空却一节没进），原值落成 `EMPTY_STATS` 的默认 `false` —— 与 ok 路径同口径（`kept.length < bySection.size` ⇒ `0 < N` ⇒ true）后修正。**不动会让这张表在「预算够不够」这个头号问题上产出反向读数。**
+3. **流水类型合并到写口契约**：`memory/index.ts` 原本另写了一份 `MemoryCandidateTrace` / `MemoryQueryTrace` 字段表（与写口 20 列重复），已改为 `type = RetrievalCandidateInput` 别名。理由：两处各写一份，改一处漏一处**没有编译期信号**——**合并当场抓出一处真错**（测试里写的 `passesStatusFilter` vs 契约的 `passedStatusFilter`，旧名来自 C1 前的 memory 侧）。
+4. **`renderSections` 改为复用 `renderOrder`**（唯一真相源）：`injectedPosition` 要答「猫读到的第几条」，与渲染序必须同源；两份各写会**静默**漂移。行为不变，由 §九 17 的差分用例守（n=1..5 全窗口逐字节）。
+5. **埋点整段加 try/catch**（票 §三 硬约束 2 的本意）：原实现只包了写口内部，**查执行行 / 取参数快照 / 组装**三段在外——实测被 5 个测试替身（partial `vi.mock` factory 缺 `currentRetrievalParams`）打中，`runAgentReply` 整条中断、**87 个用例连片失败**。修法是双管：① 整段兜底 + `log.warn`；② **5 个替身补上该导出**（替身必须镜像真模块被消费的导出面）。
+6. **顺手清一处死 import**：`memory/index.ts` 的 `ChunkRow`（`isVectorHitRow` 删除后零消费方），A5 同病灶。
+7. **超时路径的 `retrieval_ms` 取外侧计时**：有 `memoryResult` 时取模块内测值（同一趟），超时/抛错无内测值才退到 `reply.ts` 外侧计时。两把尺子的分界写死在代码注释里。
