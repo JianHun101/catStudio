@@ -135,8 +135,12 @@
   - ⚠️ **更正**：本行原写「实测 **26 次** bad-status 全落在测试窗口内」。**两个数都不准，且结论过强**——现测当前日志 `bad-status` **15 行** / 轮转件 `catStudy.log.1` **75 行**；抽样窗口（`16:28:40` 夹具段 → 9 秒后 `16:28:49`）**能证明测试条目与生产条目同文件交错，但「全部是测试造的」既证不出也证不伪**（两个来源在文件里无任何可分标记）。**后者才是 F1-c 的立论，且更强**：不是「日志脏」，是「生产上嵌入挂没挂过——答不出来」
   - ✅ **验收 6 真机通过（店长 2026-09-14 实测，非单测）**：F1 落地后跑了两轮全套 vitest（17:26 一轮 + 17:58 一轮），**生产日志 `packages/server/data/cat-study.log` 一行未增**（最后一条 `bad-status` 停在 **17:16:44**，此后 0 条；该文件 mtime `17:55:50` 来自运行中的旧 server 自己写 PR-created，不是测试）。同期测试条目落在 **`<repo>/node_modules/.cache/test-logs/cat-study-test.log`**，且带上 F1-a 的新 `detail`：`POST /v1/embeddings → HTTP 500 | reason=boom`（旧形态只有裸 `HTTP 500`）——**F1-a 与 F1-c 双双活体观测到**。
   - ⚠️ **一条观察（不阻塞）**：`LOG_FILE` 是**相对路径**，`resolveLogFile` 用 `path.resolve` ⇒ 落点随 **cwd** 变（根 workspace 跑批落 `<repo>/node_modules/.cache/`，`pnpm test:server` 落 `packages/server/node_modules/.cache/`）。两处都在 `node_modules` 内、都不进仓库，**隔离成立**；但「路径随 cwd 变」与本仓反复栽的隐式契约同类，记一笔备查。
-- **R2：span 表** — 设计同源、实施另票。**设计本体已定稿（2026-09-14）** → [R2-design-span-table.md](R2-design-span-table.md)（`dev @ 310eb07` 基线）
-  - **形态（待用户点头）**：**窄骨架 + 类型详情表**——`spans`（15 列）+ `span_llm`（9 列）+ 复用 R1 的 `retrieval_events`（**它就是第一张详情表**）。4 索引。
+- **R2：span 表** — **设计 + 实施同票**（用户 2026-09-15 裁「一张票」，本票原「实施另开票」声明作废）→ [R2-design-span-table.md](R2-design-span-table.md)
+  - **形态（用户 2026-09-15 已裁：窄骨架 + 详情）**：**窄骨架 + 类型详情表**——`spans`（15 列）+ `span_llm`（9 列）+ 复用 R1 的 `retrieval_events`（**它就是第一张详情表**）。4 索引。
+  - **五项裁决全裁（2026-09-15）**：① 形态＝窄骨架+详情 ② v1 段范围＝11 段一起做 ③ 实施＝一张票 ④ 时间列＝ISO TEXT `start_at`（用户口径「其他表是什么类型，统一格式吧」）⑤ 采集器＝**加 1 个 `trace` 参数**，**不做 7 参数整体收口**。
+  - **⑤ 的判据是实测（并修正我先前的说法）**：`runAgentReply` 生产调用点**只 1 个**（`serial.ts:436`）——障碍不在调用点；成本在**函数体内**，7 个名字引用共 **241 处**（`agent.` 79 / `sessionId` 62 / `traceId` 39 / `triggerMsg.` 28 / `signal` 13 / `state.` 11 / `bus.` 9），全量改写 **1208 行事故密集热文件**而**观测收益为零**——「不再为每个观测维度加参数」这个目的，一个对象参数已全部拿到。**本条修正本票早期「取上下文对象形态而非第 8 个参数」的表述——那句是测量之前说的。**
+  - **一条实施必踩的坑（已立为验收 19/20）**：`ExecTrace` 必须 **per-execution**，**绝不能挂 `EngineState`**——后者是引擎级单例，而并发批内 **3 个执行体同时跑**（`CONCURRENT_AGENTS_PER_MESSAGE = 3`），挂上去就是三个执行互相写对方的 span。
+  - **计数失守第四次（记在案）**：本票 D8 自称「本票一切计数均为实测」，却把骨架写成「**14 列**」（实为 15）——**同一句里立规矩、同一句里破规矩**。累计：① R1-b 计数单位混用 → ② 逐词 token 当行数相加 → ③ commit message 写「6 处」实为 7 → ④ 本条。**纪律重申：票面一切计数，落笔前逐条点数。**
   - **同源不同形**：R1 拆三表是因为有**三类粒度不同的东西**；R2 所有行是**同一类东西**（start / duration / parent / name），层级靠 `parent_span_id` 自引用表达 ⇒ **判据是「一类东西」，不是「一律拆」。**
   - **v1 段名闭集 11 段**（`invoke_agent` / `dispatch.queue_wait` / `dispatch.token_wait` / `context.assemble` / `context.compress` / `memory.retrieval` / `knowledge.retrieval` / `llm.chat` / `diff.collect` / `reply.persist` / `git.auto_commit`）；**延后 2 段**（`tool.execute` 需跨包类型改动 / `dispatch.a2a` 需递归穿线）。
   - **本票最高价值的两个段是 `dispatch.queue_wait` 与 `dispatch.token_wait`**——今天**零观测**，且正是「猫没动静 / 幽灵 running / token 池死锁」这类事故的所在。`dispatch.queue_wait` **在数据里根本不存在行**（`execution_logs` 只在真正开始执行时插入）。
