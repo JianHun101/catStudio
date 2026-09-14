@@ -11,6 +11,7 @@ import {
   userFeedback as userFeedbackRepo,
 } from '../db/repository/index.js'
 import { evalRoutes } from './eval.js'
+import { getLogLevel, setLogLevel } from '../logger.js'
 import type { FastifyInstance } from 'fastify'
 
 describe('Eval Routes', () => {
@@ -248,6 +249,11 @@ describe('Eval Routes', () => {
       const scoreId = seedScore({ agentId, sessionId, messageId: replyId, score: 1 })
 
       const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      // 本用例断言的留痕是 `log.warn`（routes/eval.ts「user feedback overwrote previous」）
+      // ⇒ 必须**自己把级别放到 warn**：票 F1-c c2 起测试进程真的吃 `LOG_LEVEL=error` 了
+      // （改前该配置是死的、minLevel 恒为 debug），不声明前置条件这条 warn 会被静默掉。
+      const prevLevel = getLogLevel()
+      setLogLevel('warn')
       try {
         await app.inject({
           method: 'POST',
@@ -271,6 +277,7 @@ describe('Eval Routes', () => {
         expect(calls.some((l) => l.includes('user feedback overwrote previous'))).toBe(true)
       } finally {
         stdoutSpy.mockRestore()
+        setLogLevel(prevLevel)
       }
     })
 

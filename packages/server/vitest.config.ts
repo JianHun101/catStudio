@@ -26,6 +26,11 @@ export default defineConfig({
       // 重启机制文件隔离——测试跑批的 afterEach 清理（socketio.test.ts unlinkSync）只会碰
       // 该隔离目录，不再删除运行时真实 .restart-request/.restart-done（17:38 事故根因）
       RESTART_FILES_DIR: 'node_modules/.cache/restart-test',
+      // 日志文件隔离（票 F1-c c1）——同一范式、同一病灶：测试与生产原先**写同一个**
+      // packages/server/data/cat-study.log（__dirname 恒为 src ⇒ dev/prod/测试三者同路径），
+      // 实测测试夹具条目与生产条目逐行交错在同一个文件里 ⇒「生产上嵌入挂没挂过」不可判定。
+      // 重定向到 node_modules/.cache/（构建产物区，不污染仓库）。
+      LOG_FILE: 'node_modules/.cache/test-logs/cat-study-test.log',
     },
     coverage: {
       thresholds: {

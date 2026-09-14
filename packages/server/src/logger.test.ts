@@ -1,4 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import path from 'node:path'
+
+/** 默认日志路径（与 `logger.ts` 同一算法——`__dirname` 两边同目录，可直接对齐） */
+const DEFAULT_LOG_FILE = path.join(__dirname, '..', 'data', 'cat-study.log')
 
 // 捕获文件写入（appendFileSync），隔离真实文件系统副作用
 const { appendFileSyncMock } = vi.hoisted(() => ({ appendFileSyncMock: vi.fn() }))
@@ -212,6 +216,96 @@ describe('logger', () => {
       expect(entry.a).toBe(1)
       expect('b' in entry).toBe(false)
       expect('c' in entry).toBe(false)
+    })
+  })
+
+  // ─── 票 F1-c c1：日志文件路径 env 覆盖 ────────────────
+  //
+  // 本文件已 mock `node:fs`，故「落盘」断言走 `appendFileSync` 的**第一实参**——
+  // 目标路径正是 c1 的被测面（改前该值恒为 `packages/server/data/cat-study.log`）。
+  // 「跑完全套生产日志零增量」是行为面验收，见票 §四 第 6 条（跑批实测，非单测）。
+
+  describe('F1-c c1 LOG_FILE 路径覆盖', () => {
+    afterEach(() => vi.unstubAllEnvs())
+
+    it('未设 / 空白 ⇒ 目标路径仍是 packages/server/data/cat-study.log（生产语义不变）', () => {
+      vi.stubEnv('LOG_FILE', '')
+      loggerModule.createLogger('f1c').error('默认路径')
+      const file = String(appendFileSyncMock.mock.calls.at(-1)![0])
+      expect(file).toBe(DEFAULT_LOG_FILE)
+    })
+
+    it('设了 ⇒ 目标路径 = 覆盖值（相对路径按 cwd 解析）', () => {
+      vi.stubEnv('LOG_FILE', 'node_modules/.cache/test-logs/cat-study-test.log')
+      loggerModule.createLogger('f1c').error('隔离路径')
+      const file = String(appendFileSyncMock.mock.calls.at(-1)![0])
+      expect(file).toBe(path.resolve('node_modules/.cache/test-logs/cat-study-test.log'))
+      expect(file).not.toBe(DEFAULT_LOG_FILE)
+    })
+
+    it('路径**每次写时**解析，不是模块顶层冻死的常量', () => {
+      vi.stubEnv('LOG_FILE', path.join('tmp', 'a.log'))
+      loggerModule.createLogger('f1c').error('first')
+      vi.stubEnv('LOG_FILE', path.join('tmp', 'b.log'))
+      loggerModule.createLogger('f1c').error('second')
+
+      const calls = appendFileSyncMock.mock.calls
+      expect(String(calls.at(-2)![0])).toBe(path.resolve('tmp/a.log'))
+      expect(String(calls.at(-1)![0])).toBe(path.resolve('tmp/b.log'))
+    })
+
+    it('resolveLogFile 是纯映射（未设/空白/相对/绝对）', () => {
+      expect(loggerModule.resolveLogFile({})).toBe(DEFAULT_LOG_FILE)
+      expect(loggerModule.resolveLogFile({ LOG_FILE: '   ' })).toBe(DEFAULT_LOG_FILE)
+      expect(loggerModule.resolveLogFile({ LOG_FILE: 'rel/x.log' })).toBe(path.resolve('rel/x.log'))
+      const abs = path.resolve('abs', 'x.log') // 已绝对 ⇒ 原样返回（不再叠 cwd）
+      expect(loggerModule.resolveLogFile({ LOG_FILE: abs })).toBe(abs)
+    })
+  })
+
+  // ─── 票 F1-c c2：LOG_LEVEL 在**模块初始化**时生效 ──────
+  //
+  // 改前的死法：`setLogLevel` 全仓只在 `index.ts:122` 调用，而测试**不 import `index.ts`**
+  // （直接 import 被测模块）⇒ `minLevel` 恒停在模块初值 `'debug'`，vitest 配置里写的
+  // `LOG_LEVEL: 'error'` **从未被应用**。硬证据：配置写着 error 的那轮仍落了一条
+  // `"level":"debug"` 的嵌入降级行。
+
+  describe('F1-c c2 LOG_LEVEL 初始即生效', () => {
+    afterEach(() => vi.unstubAllEnvs())
+
+    it('vitest env 的 LOG_LEVEL=error 真的被模块初始化读到（改前恒为 debug）', async () => {
+      // 前置：本套跑批确实注入了 LOG_LEVEL=error（否则本用例会**空转通过**）
+      expect(process.env.LOG_LEVEL).toBe('error')
+      vi.resetModules()
+      vi.stubEnv('LOG_LEVEL', 'error')
+      const fresh = await import('./logger.js')
+      expect(fresh.getLogLevel()).toBe('error')
+    })
+
+    it('未设 ⇒ 默认 debug（生产默认不变）', async () => {
+      vi.resetModules()
+      vi.stubEnv('LOG_LEVEL', '')
+      const fresh = await import('./logger.js')
+      expect(fresh.getLogLevel()).toBe('debug')
+    })
+
+    it('设 info ⇒ 初始化即 info（不必再等 index.ts 设一次）', async () => {
+      vi.resetModules()
+      vi.stubEnv('LOG_LEVEL', 'info')
+      const fresh = await import('./logger.js')
+      expect(fresh.getLogLevel()).toBe('info')
+    })
+
+    it('非法值 ⇒ 回落 debug（不炸，也不落进「未知键全放行」）', async () => {
+      vi.resetModules()
+      vi.stubEnv('LOG_LEVEL', 'bogus')
+      const fresh = await import('./logger.js')
+      expect(fresh.getLogLevel()).toBe('debug')
+    })
+
+    it('setLogLevel 仍可改级别（index.ts 的调用点不动）', () => {
+      loggerModule.setLogLevel('warn')
+      expect(loggerModule.getLogLevel()).toBe('warn')
     })
   })
 })
