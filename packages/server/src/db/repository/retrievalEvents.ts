@@ -76,7 +76,13 @@ export interface RetrievalCandidateInput {
   distance: number | null
   /** 该片在其命中通道内的**最好位次**（0-based；`both` 取两通道较小值） */
   rank: number | null
-  /** RRF 融合分（probe 行 / 纯关键词降级行无融合 ⇒ NULL） */
+  /**
+   * **跨查询累加**的 RRF 融合分（R1-b 起口径）。
+   *
+   * `final` 行恒为有限正数——**含纯关键词降级路径**（R1-b §三 补分，不再写 `null`）；
+   * 只有 `probe` 行是 `null`（探针来自向量通道 KNN，压根不参与 RRF，`null` 是正确
+   * 的「不适用」，不是缺口）。
+   */
   rrfScore: number | null
   /** 跨查询二次合并后的位次（0-based，仅 `final` 行） */
   finalRank: number | null
@@ -105,6 +111,12 @@ export interface RetrievalEventInput {
   thresholdMaxDistance: number
   paramTopK: number
   paramProbeN: number | null
+  /**
+   * **每条查询**送进跨查询合并的候选池大小（R1-b §四 4.1）。
+   * R1-b 之前的行该列为 NULL——`final_rank` 在两段窗口里**同名不同义**，
+   * 严格可比的分析必须按 `created_at` 切窗口或按本列 `IS NULL` 区分（§四 4.2）。
+   */
+  paramPoolN: number | null
   /** 值域 **9**（模块 7 枚举 + `timeout` + `error`，见 P2 §二③） */
   reason: string
   retrievalMs: number | null
@@ -127,9 +139,9 @@ export function insertRetrievalTrace(input: RetrievalEventInput): number | undef
         .prepare(
           `INSERT INTO retrieval_events (
              execution_id, session_id, agent_id, task_id, created_at,
-             threshold_max_distance, param_top_k, param_probe_n, reason,
+             threshold_max_distance, param_top_k, param_probe_n, param_pool_n, reason,
              retrieval_ms, context_tokens, budget_tokens, truncated
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           input.executionId,
@@ -140,6 +152,7 @@ export function insertRetrievalTrace(input: RetrievalEventInput): number | undef
           input.thresholdMaxDistance,
           input.paramTopK,
           input.paramProbeN,
+          input.paramPoolN,
           input.reason,
           input.retrievalMs,
           input.contextTokens,

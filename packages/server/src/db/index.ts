@@ -730,6 +730,20 @@ export function initDb(): void {
       sql: `CREATE INDEX IF NOT EXISTS idx_retrieval_candidates_hash
         ON retrieval_candidates(content_hash)`,
     },
+    // ─── R1-b：跨查询合并的**查询级池大小**快照（additive）────────────────
+    // 与上面 `retrieval_events` 的三项参数快照同一判据（P2 §一 推论一「凡事后
+    // 无法可靠重算的值一律冗余进表」）：`param_top_k` 是最终注入数、`param_probe_n`
+    // 是阈值前 KNN 探针池，**没有一列描述「每条查询召回多少」**——R1-b 恰好改的
+    // 就是这个，故是新参数，不是复用。
+    //
+    // 老库走 ALTER 补列（`catch {}` 幂等：列已存在则忽略），**既有行该列为 NULL**；
+    // 新采集的行恒为当时的池常数。⚠️ 该列同时是窗口切分判据：`final_rank` 在
+    // R1-b 前后**同名不同义**（名次最小 → 累加分最大），严格可比的分析必须按
+    // `param_pool_n IS NULL` 区分两段（R1-b §四 4.2）。
+    {
+      name: 'retrieval_events.param_pool_n (R1-b 查询级池快照)',
+      sql: `ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER`,
+    },
     // ─── 票辛 ⑥ 旧链下线：memories / memories_fts 双 DROP ──────────────────
     // 对话原话向量记忆链整体退役：写口已由票壬摘除（`saveMessageMemory` 删除 +
     // 存量清零），读口本票改走 `chunks`，两张表再无任何调用方（W8 判据）。

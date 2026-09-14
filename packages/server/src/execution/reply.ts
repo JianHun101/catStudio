@@ -25,6 +25,7 @@ import {
   executionLogs as execLogsRepo,
   retrievalEvents as retrievalRepo,
 } from '../db/repository/index.js'
+import { HYBRID_POOL_PER_QUERY } from '../db/repository/chunks.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import {
   retrieveMemoryContext,
@@ -255,6 +256,11 @@ export function recordRetrievalTrace(args: {
       thresholdMaxDistance: stats?.thresholdMaxDistance ?? params.maxDistance,
       paramTopK: stats?.paramTopK ?? params.topK,
       paramProbeN: stats?.paramProbeN ?? params.probeN,
+      // R1-b §四 4.1 参数快照的第三项。**不取 `stats`**：与另两项不同，池大小是
+      // 编译期常量（非 env 驱动）⇒ 跑这次检索的二进制里它就是这个值，同趟/跨趟同值，
+      // 再往 `MemoryContextStats` 里复制一份是冗余字段（P2 三表方案正是靠「删冗余」
+      // 立身的）。真源 = `HYBRID_POOL_PER_QUERY` 本身。
+      paramPoolN: HYBRID_POOL_PER_QUERY,
       reason: args.memoryTimeout ? 'timeout' : (args.memoryResult?.reason ?? 'error'),
       // 同上：内测值优先（同一趟），外侧计时只兜超时/抛错两条无内测值的路径
       retrievalMs: stats?.retrievalMs ?? args.elapsedMs,

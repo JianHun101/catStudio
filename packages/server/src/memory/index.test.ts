@@ -634,7 +634,10 @@ describe('memory', () => {
       expect(fromDegraded!.channel).toBe('keyword')
       // 验收 4：纯关键词命中写 NULL，不写 maxDistance 哨兵
       expect(fromDegraded!.distance).toBeNull()
-      expect(fromDegraded!.rrfScore).toBeNull()
+      // R1-b §三 补分后此处**不再是 null**：降级路径按同一条 RRF 公式有分
+      // （`1/(RRF_K + 关键词位次 + 1)`，本行位次 0 ⇒ 1/61）。填 null 会让它在跨查询
+      // 求和时静默当 0/NaN——正是 §三 两条禁令之一。分值的完整性由 R1-b 验收 5 守。
+      expect(fromDegraded!.rrfScore).toBeCloseTo(1 / 61, 12)
 
       // 对照组：同一片在阈值前探针池里**带着真距离**（证明 NULL 是通道转换的结果，
       // 不是「本来就取不到距离」）
@@ -773,7 +776,12 @@ describe('memory', () => {
         expect(r.stats.contextTokens).toBe(0)
       })
 
-      it('节序仍由 bestIndex 决定（第 3 步「跨查询合并改排序」未被夹带）', async () => {
+      // ⚠️ 本用例的**标题与注释**随 R1-b 改写（断言本身不变）：
+      // 改动前它守的是「R1 未夹带跨查询合并改排序」；R1-b 正是那一步，
+      // 故「未被夹带」的语义已完成。留下的是另一条仍成立的事实——**单趟查询下
+      // 名次序与累加分序重合**（`1/(61+rank+1)` 单调递减），所以这条序不受 R1-b 影响。
+      // 跨查询的差异由本文件 R1-b 组的验收 1/2 守。
+      it('单趟查询下节序 == 名次序（名次序与累加分序在单趟时重合，R1-b 后仍成立）', async () => {
         process.env.MEMORY_MAX_DISTANCE = '1.5'
         process.env.MEMORY_TOP_K = '5'
         const angles = [30, 0, 45, 15]
@@ -781,7 +789,7 @@ describe('memory', () => {
           seedChunk({ docPath: `docs/adr/000${i + 1}-x.md`, body: `猫咖测试${i}`, angle: a })
         )
         const r = await memoryModule.retrieveMemoryContext(Q)
-        // 序 = 距离升序（angle 越小越相关）——若合并键被换成 RRF 分累加，这里会先变
+        // 序 = 距离升序（angle 越小越相关）
         expect(r.sections.map((s) => s.docPath)).toEqual([
           'docs/adr/0002-x.md',
           'docs/adr/0004-x.md',
@@ -789,6 +797,321 @@ describe('memory', () => {
           'docs/adr/0003-x.md',
         ])
       })
+    })
+  })
+
+  // ═══ R1-b：跨查询合并改按 RRF 分累加（**行为变更**）═══════════
+  // 病灶三条叠加（票 §一）：查询级出口被调用方 `topK` 砍（池 12 → 本可 80）+
+  // 合并键取「名次」而非「跨查询累加分」。本组守 §六 12 条里**可在此文件判定**的
+  // 9 条；`param_pool_n` 迁移与落库（7/8）在 `db/repository/retrievalEvents.test.ts`
+  // 与 `execution/reply.test.ts`，全套绿与提交纪律（11/12）不在单测内。
+  describe('R1-b 跨查询合并改按 RRF 分累加', () => {
+    /** 与夹具正文**无 bigram 交集**的改写查询词 ⇒ 关键词通道必然空手，序由向量定 */
+    const REWRITE = '佐藤木野'
+
+    // `vi.clearAllMocks()` **不清实现**（只清 calls），逐个用例里换过的嵌入替身会
+    // 串到下一个用例 ⇒ 本组自带还原钩子（钉在 `embedOk` 驱动的默认实现上）。
+    afterEach(() => {})
+
+    /**
+     * 逐查询给**不同向量**：改写趟 `vecAt(90)`、原话趟 `vecAt(0)`。
+     * 两趟的名次因此互为镜像。**查询向量相同 ⇒ 名次恒等**（名次只是「查询向量到各片
+     * 距离」的排序），故逐查询给不同向量是构造「同一片在两趟里名次不同」的**必要**
+     * 条件——也是本组构造「两趟名次可不同」的基础（默认替身对所有文本返回同一向量）。
+     * ⚠️ 只声明**必要**：手段不唯一（若关键词通道逐查询有别，向量相同也能让出口名次不同）。
+     */
+    function embedMirrored(): void {
+      mockEmbedText.mockImplementation(async (text: string): Promise<EmbedResult> =>
+        text === REWRITE ? { ok: true, vector: vecAt(90) } : { ok: true, vector: vecAt(0) }
+      )
+    }
+
+    /** 把替身还原成 `embedOk` 驱动的默认实现（`clearAllMocks` 不清实现，会串场） */
+    function restoreEmbedMock(): void {
+      mockEmbedText.mockImplementation(async (): Promise<EmbedResult> =>
+        embedOk ? { ok: true, vector: vecAt(0) } : { ok: false, reason: 'spawn-failed' }
+      )
+    }
+
+    /** `renderSections` 的渲染序部分——与模块同序（首尾各半），只取 text/tokens */
+    function renderBefore(sections: Array<{ parts: string[] }>): { text: string; tokens: number } {
+      if (sections.length === 0) return { text: '', tokens: 0 }
+      const half = Math.ceil(sections.length / 2)
+      const ordered = [...sections.slice(0, half), ...sections.slice(half).reverse()]
+      const lines = ordered.map((s, i) => `${i + 1}. ${s.parts.join('\n')}`)
+      const text = `\n\n【相关记忆】\n${lines.join('\n')}`
+      return { text, tokens: estimateTokens(text) }
+    }
+
+    /**
+     * **节级段改动前**的实现（按节补齐 → 整节进退的预算截断 → 渲染），逐字抄自
+     * `memory/index.ts` 的 `:448-473` + `:558-564`（R1-b 未动这段，故「改动前」= 现在）。
+     * 抄它是为了**差分**：把**实跑出来的** `ordered` 喂进来，与模块真实输出逐字节比
+     * （验收 9b），而不是重抄一遍公式自证。
+     *
+     * ⚠️ **与真实现唯一的一处差异，且是有意的**：真实现取不到同节片时退回**命中片的
+     * `body`**；而 `ordered` 是从 `stats.candidates`（流水）还原的，流水不携带完整正文
+     * （只有 120 字的 `bodyHead` 截断快照）⇒ 这里退回 `chunk.doc_path`（`parts` 恒非空时
+     * 该兜底不可达，故不追求与真实现同值，只求分支可达性声明属实）。该分支只有在
+     * 「命中后该节被并发删空」时才可达，本组夹具下 `parts` 恒非空 ⇒ **不影响判定力**，
+     * 但**不假装它逐字等价**。
+     */
+    function sectionLevelBefore(
+      ordered: Array<{ doc_path: string; section_anchor: string }>,
+      budgetTokens: number
+    ): { text: string; keys: string[] } {
+      const bySection = new Map<
+        string,
+        { docPath: string; sectionAnchor: string; parts: string[] }
+      >()
+      for (const chunk of ordered) {
+        const key = `${chunk.doc_path}\0${chunk.section_anchor}`
+        if (bySection.has(key)) continue
+        const parts = chunksRepo.getChunksBySection(chunk.doc_path, chunk.section_anchor)
+        bySection.set(key, {
+          docPath: chunk.doc_path,
+          sectionAnchor: chunk.section_anchor,
+          parts: parts.length > 0 ? parts.map((p) => p.body) : [chunk.doc_path],
+        })
+      }
+      const kept: Array<{ docPath: string; sectionAnchor: string; parts: string[] }> = []
+      for (const section of bySection.values()) {
+        if (renderBefore([...kept, section]).tokens > budgetTokens) break
+        kept.push(section)
+      }
+      return {
+        text: renderBefore(kept).text,
+        keys: kept.map((s) => `${s.docPath}\0${s.sectionAnchor}`),
+      }
+    }
+
+    /** 实跑的 `ordered`——只取节级段消费的三个字段（seq 由 `finalRank` 还原） */
+    function orderedRowsOf(r: { stats: { candidates: any[] } }): Array<{
+      doc_path: string
+      section_anchor: string
+    }> {
+      return r.stats.candidates
+        .filter((c) => c.source === 'final')
+        .sort((a, b) => a.finalRank - b.finalRank)
+        .map((c) => ({ doc_path: c.docPath, section_anchor: c.sectionAnchor }))
+    }
+
+    const finalRows = (r: { stats: { candidates: any[] } }) =>
+      r.stats.candidates.filter((c) => c.source === 'final')
+
+    // ─── 验收 1 / 9a：查询级池不再被 topK 砍 ──────────────
+    it('验收 1 · 池不再被逐查询 topK 砍：A 趟第 5 名 + B 趟第 2 名的片进入合并并胜出', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+      // ⚠️ 这个数必须**小**才测得出池：旧实现把 `topK` 同时当「每查询池」与
+      // 「最终注入数」，`topK` 一旦 ≥ 库内片数，两趟各自就都拿全了，池扩不扩看不出。
+      process.env.MEMORY_TOP_K = '2'
+      mockRewriteRetrievalQueries.mockResolvedValue([REWRITE])
+      embedMirrored()
+      // 夹角决定两趟名次（距离 = 1 - cos(夹角)）：
+      //   原话趟 vecAt(0) ：乙0 < c10 < c20 < c30 < 甲45 ⇒ 甲 = **第 5 名**（0-based 4）
+      //   改写趟 vecAt(90)：丙90 < 甲45(0.293) < c30(0.5)，其余 >0.6 被阈值挡 ⇒ 甲 = **第 2 名**
+      seedChunk({ docPath: 'docs/adr/0001-yi.md', body: '猫咖测试乙片', angle: 0 })
+      seedChunk({ docPath: 'docs/adr/0002-c10.md', body: '猫咖测试丙片', angle: 10 })
+      seedChunk({ docPath: 'docs/adr/0003-c20.md', body: '猫咖测试丁片', angle: 20 })
+      seedChunk({ docPath: 'docs/adr/0004-c30.md', body: '猫咖测试戊片', angle: 30 })
+      seedChunk({ docPath: 'docs/adr/0005-jia.md', body: '猫咖测试己片', angle: 45 })
+      seedChunk({ docPath: 'docs/adr/0006-bing.md', body: '猫咖测试庚片', angle: 90 })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      // 改动前：每查询池 = `params.topK` = 2 ⇒ A 只交回 {乙, c10}、B 只交回 {丙, 甲}，
+      // 按名次排序后注入 {乙, 丙}——**甲连参与合并的资格都没有**（这就是本票的理由）。
+      // 改动后：池 = 20/趟 ⇒ 甲凭两趟累加分（1/65 + 1/62）压过所有单趟片而胜出。
+      expect(r.sections).toHaveLength(2)
+      expect(r.sections[0].docPath).toBe('docs/adr/0005-jia.md')
+      const jia = finalRows(r).find((c) => c.docPath === 'docs/adr/0005-jia.md')!
+      expect(jia.rrfScore).toBeCloseTo(1 / 65 + 1 / 62, 12)
+    })
+
+    // ─── 验收 2：累加生效（只改 sort 不改合并守卫 ⇒ 本用例红）──
+    it('验收 2 · 甲片 = 两趟都排第 2，压过只在单趟排第 1 的片', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+      process.env.MEMORY_TOP_K = '1'
+      mockRewriteRetrievalQueries.mockResolvedValue([REWRITE])
+      embedMirrored()
+      // 甲 45°：两趟距离均 ≈0.293 ⇒ 两趟都排第 2（0-based 名次 1）
+      // 乙 0° ：原话趟距离 0（第 1），改写趟距离 1.0 > 0.6 被阈值挡掉
+      // 丙 90°：改写趟距离 0（第 1），原话趟距离 1.0 被挡掉
+      seedChunk({ docPath: 'docs/adr/0001-jia.md', body: '猫咖测试甲片', angle: 45 })
+      seedChunk({ docPath: 'docs/adr/0002-yi.md', body: '猫咖测试乙片', angle: 0 })
+      seedChunk({ docPath: 'docs/adr/0003-bing.md', body: '猫咖测试丙片', angle: 90 })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      // 甲 = 1/62 + 1/62 = 2/62 > 乙/丙各自的 1/61。改动前按 bestIndex 排 ⇒ 乙(0) 胜出。
+      expect(r.sections.map((s) => s.docPath)).toEqual(['docs/adr/0001-jia.md'])
+      const jia = finalRows(r)[0]
+      expect(jia.rrfScore).toBeCloseTo(1 / 62 + 1 / 62, 12)
+      expect(jia.rrfScore).toBeGreaterThan(1 / 61)
+    })
+
+    // ─── 验收 3：确定性（同夹具连跑两次逐字段一致）──────
+    it('验收 3 · 同一夹具连跑两次 ⇒ 注入序与候选行逐字段一致，无 Map 迭代序抖动', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '6'
+      mockRewriteRetrievalQueries.mockResolvedValue([REWRITE])
+      embedMirrored()
+      for (let i = 0; i < 6; i++) {
+        seedChunk({ docPath: `docs/adr/000${i + 1}-q.md`, body: `猫咖测试第${i}片`, angle: i * 15 })
+      }
+
+      const first = await memoryModule.retrieveMemoryContext(Q)
+      const second = await memoryModule.retrieveMemoryContext(Q)
+      expect(second.sections).toEqual(first.sections)
+      expect(second.stats.candidates).toEqual(first.stats.candidates)
+      expect(first.sections.length).toBeGreaterThan(1) // 夹具非退化：真的有多节参与排序
+    })
+
+    // ─── 验收 3 前半句：跨查询同分 ⇒ 按 bestIndex 升序 tie-break ──
+    /**
+     * 票 §七 曾断言「同分不可构造」（⇒ tie-break 分支不可达 ⇒ 只落地后半句）。
+     * **该断言已被证伪，本用例即反例**：片分是 `Σ 1/(61 + 位次)`（位次 = 该趟
+     * `searchChunksHybrid` 出口下标），而四位次多重集 `{2,2,2,16}` 与 `{5,5,5,5}`
+     * 在 float64 下**精确同分**——`1/77 + 3/63` 与 `4/66` 的有理值同为 `2/33`，
+     * 且两条累加路径的舍入结果也逐位相同（实测 `a === b`，非 `toBeCloseTo`）。
+     * 穷举 0..19（池上限 20 ⇒ 下标值域）的**全部 8855 个**四元多重集：**有理值**
+     * 同分且 `bestIndex` 不同的构型共 **3 组**（`{2,2,2,16}`/`{5,5,5,5}`、
+     * `{2,2,2,17}`/`{4,4,4,9}`、`{2,2,19,19}`/`{9,9,9,11}`）；若再要求「float64
+     * 累加后**逐位**相等」，则剩 **2 组**（`{2,2,2,17}` 那组 4!×4! 全试无一命中）。
+     * ⇒「唯一一组」只在**复合口径**（**本夹具的累加顺序** + `===`）下成立，
+     * **不是全域唯一**——判据口径必须写明。
+     *
+     * 夹具（纯向量：夹具正文与 `Q` / 三条改写词均无 bigram 交集 ⇒ 关键词通道空手，
+     * 出口下标 == 向量名次）：
+     *   原话趟 θ=180°：中段 5 片占满第 1~5 名 ⇒ 乙 = 第 6 名（0-based 5）；
+     *                  甲（0°，对径）落到**末位**（0-based 16）
+     *   三条改写趟 θ=30°：近端 2 片（5°/25°）比甲近 ⇒ 甲 = 第 3 名（0-based 2）；
+     *                  乙（100°）仍为第 6 名（0-based 5）
+     * ⇒ 甲累加分 `1/77 + 3/63`、乙 `4/66`，**精确相等**；甲 `bestIndex`=2 < 乙 5。
+     *
+     * 判别力（删掉 tie-break 必红）：`merged` 的插入序里**乙先于甲**（原话趟按名次
+     * 遍历，乙在第 5 位、甲在第 16 位），`Array#sort` 自 ES2019 起稳定 ⇒ 只按分排序
+     * 时乙保留在前，`finalRank` 判据当场反转。
+     */
+    it('验收 3 前半句 · 跨查询累加分精确同分 ⇒ 按 bestIndex 升序决定先后（分支可达）', async () => {
+      // > 2.0（对径 = 距离上限）⇒ 17 片在四趟里全量进池，名次只由夹角决定
+      process.env.MEMORY_MAX_DISTANCE = '2.5'
+      // 甲/乙按累加分排在第 6/7 位（0-based 5/6）⇒ 两者都进 `ordered`
+      process.env.MEMORY_TOP_K = '7'
+      // 三条改写词**互不相同**（⇒ 三趟独立查询），但都拿同一个向量（几何相同）
+      mockRewriteRetrievalQueries.mockResolvedValue([REWRITE, '林原葵', '桐谷莲'])
+      mockEmbedText.mockImplementation(async (text: string): Promise<EmbedResult> =>
+        text === Q ? { ok: true, vector: vecAt(180) } : { ok: true, vector: vecAt(30) }
+      )
+      seedChunk({ docPath: 'docs/adr/0001-jia.md', body: '猫咖测试甲片', angle: 0 })
+      seedChunk({ docPath: 'docs/adr/0002-yi.md', body: '猫咖测试乙片', angle: 100 })
+      const middle = [140, 150, 160, 170, 180]
+      middle.forEach((angle, i) =>
+        seedChunk({ docPath: `docs/adr/001${i}-mid.md`, body: `猫咖测试中${i}片`, angle })
+      )
+      const near = [5, 25]
+      near.forEach((angle, i) =>
+        seedChunk({ docPath: `docs/adr/002${i}-near.md`, body: `猫咖测试近${i}片`, angle })
+      )
+      const mid2 = [70, 90]
+      mid2.forEach((angle, i) =>
+        seedChunk({ docPath: `docs/adr/003${i}-out.md`, body: `猫咖测试外${i}片`, angle })
+      )
+      const far = [265, 275, 285, 295, 305, 315]
+      far.forEach((angle, i) =>
+        seedChunk({ docPath: `docs/adr/004${i}-far.md`, body: `猫咖测试远${i}片`, angle })
+      )
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+
+      const rows = finalRows(r)
+      const jia = rows.find((c) => c.docPath === 'docs/adr/0001-jia.md')!
+      const yi = rows.find((c) => c.docPath === 'docs/adr/0002-yi.md')!
+      // 前提断言：**精确**同分（夹具一旦漂移，本行先红——不会退化成「测了个近似」）
+      expect(jia.rrfScore).toBe(yi.rrfScore)
+      expect(jia.rrfScore).toBeCloseTo(1 / 77 + 3 / 63, 15)
+      // 判别断言：bestIndex 小者在前。删掉 tie-break ⇒ 稳定序把乙排在甲前 ⇒ 本行红
+      expect(jia.finalRank).toBeLessThan(yi.finalRank)
+
+      restoreEmbedMock()
+    })
+
+    // ─── 验收 4：注入片数仍由 MEMORY_TOP_K 决定 ───────────
+    it('验收 4 · 池变大（20/趟）但最终注入片数仍 == MEMORY_TOP_K', async () => {
+      mockEmbedText.mockImplementation(async (): Promise<EmbedResult> => ({
+        ok: true,
+        vector: vecAt(0),
+      }))
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '3'
+      for (let i = 0; i < 6; i++) {
+        seedChunk({ docPath: `docs/adr/000${i + 1}-r.md`, body: `猫咖测试第${i}片`, angle: i * 10 })
+      }
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      // 库里有 6 片、池已放到 20/趟（验收 1 守池），但出口仍被 `MEMORY_TOP_K` 切：
+      // `ordered` 与 `finalTraces` 都是切完之后的 3 条（消费面口径不变）
+      expect(r.sections).toHaveLength(3)
+      expect(finalRows(r)).toHaveLength(3)
+    })
+
+    // ─── 验收 5：降级路径有分、且不是 NaN ────────────────
+    it('验收 5 · 整趟嵌入挂了 ⇒ 关键词路径候选仍有有限正分，finalRank 序列无 NaN', async () => {
+      // 显式钉死替身（不靠 `embedOk` + 还原钩子的时序，避免用例结果随执行序漂移）
+      mockEmbedText.mockImplementation(async (): Promise<EmbedResult> => ({
+        ok: false,
+        reason: 'spawn-failed',
+      }))
+      process.env.MEMORY_MAX_DISTANCE = '0.1'
+      for (let i = 0; i < 3; i++) {
+        seedChunk({ docPath: `docs/adr/000${i + 1}-s.md`, body: `猫咖测试第${i}片`, angle: i * 30 })
+      }
+      const r = await memoryModule.retrieveMemoryContext('猫咖测试')
+      expect(r.reason).toBe('ok')
+
+      const finals = finalRows(r)
+      expect(finals.length).toBeGreaterThan(1)
+      for (const c of finals) {
+        expect(typeof c.rrfScore).toBe('number')
+        expect(Number.isFinite(c.rrfScore)).toBe(true)
+        expect(c.rrfScore).toBeGreaterThan(0)
+      }
+      // 累加分序与 finalRank 同序（NaN 参与比较时该断言必红——NaN 的比较恒 false）
+      const byRank = [...finals].sort((a, b) => a.finalRank - b.finalRank)
+      for (let i = 1; i < byRank.length; i++) {
+        expect(byRank[i - 1].rrfScore).toBeGreaterThanOrEqual(byRank[i].rrfScore)
+      }
+    })
+
+    // ─── 验收 9b：节级逻辑对任意片级序**逐字节不变** ──────
+    it('验收 9b · 节级段差分：实跑 ordered 喂改动前的节级实现，输出逐字节一致', async () => {
+      // 覆盖面故意取两组不同形态的 ordered：多节均质（8 片镜像序）与节集合被预算裁过
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      mockRewriteRetrievalQueries.mockResolvedValue([REWRITE])
+      embedMirrored()
+
+      // topK=3 < 片数 ⇒ 片级序**确实被 R1-b 改过**（旧序按名次、新序按累加分），
+      // 故这组喂进节级实现的 ordered 是「新口径的输入」，差分才有意义
+      process.env.MEMORY_TOP_K = '3'
+      for (let i = 0; i < 8; i++) {
+        seedChunk({ docPath: `docs/adr/000${i + 1}-t.md`, body: `猫咖测试第${i}片`, angle: i * 10 })
+      }
+      const full = await memoryModule.retrieveMemoryContext(Q)
+      expect(full.reason).toBe('ok')
+      expect(full.sections).toHaveLength(3)
+      const beforeFull = sectionLevelBefore(orderedRowsOf(full), 8000)
+      expect(full.text).toBe(beforeFull.text)
+      expect(full.sections.map((s) => `${s.docPath}\0${s.sectionAnchor}`)).toEqual(beforeFull.keys)
+
+      // 第二组：预算把节集合裁掉一部分（`break` 起停路径也走一遍）
+      process.env.MEMORY_CONTEXT_TOKEN_BUDGET = '60'
+      process.env.MEMORY_TOP_K = '6'
+      const cut = await memoryModule.retrieveMemoryContext(Q)
+      expect(cut.reason).toBe('ok')
+      expect(cut.sections.length).toBeLessThan(6) // 夹具非退化：真的发生了预算截断
+      const beforeCut = sectionLevelBefore(orderedRowsOf(cut), 60)
+      expect(cut.text).toBe(beforeCut.text)
+      expect(cut.sections.map((s) => `${s.docPath}\0${s.sectionAnchor}`)).toEqual(beforeCut.keys)
     })
   })
 })

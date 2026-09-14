@@ -30,7 +30,11 @@
 
 import { estimateTokens } from '@cat-study/shared'
 import { chunks as chunksRepo, knowledge as knowledgeRepo } from '../db/repository/index.js'
-import { CANDIDATE_BODY_HEAD_CHARS, type ChunkVectorSearchResult } from '../db/repository/chunks.js'
+import {
+  CANDIDATE_BODY_HEAD_CHARS,
+  HYBRID_POOL_PER_QUERY,
+  type ChunkVectorSearchResult,
+} from '../db/repository/chunks.js'
 import type {
   RetrievalCandidateInput,
   RetrievalChannel,
@@ -68,7 +72,7 @@ export interface RetrievedSection {
   breadcrumb: string
   /** 该节全部片正文，按 `part_index` 升序 */
   parts: string[]
-  /** 该节内最相关片的余弦距离（台账列：当前不参与排序，节序由片级位次 bestIndex 决定） */
+  /** 该节内最相关片的余弦距离（台账列：当前不参与排序，节序由片级累加 RRF 分决定，`bestIndex` 仅作同分 tie-break） */
   distance: number
 }
 
@@ -277,9 +281,15 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
   // 每个候选额外带上**通道身份**与位次（R1：判别不再靠 distance 等值哨兵）。
   type Scored = {
     row: ChunkVectorSearchResult
+    /** 该片在各趟命中里的**最小**名次——**仅作同分 tie-break**（R1-b §二 改动 4b） */
     bestIndex: number
     channel: RetrievalChannel
-    rrfScore: number | null
+    /**
+     * **跨查询累加**的 RRF 分（R1-b §二 改动 4a）——排序主键。
+     * 两路出口都保证它是**有限正数**（降级路径由 `searchChunksKeywordScored` 补分，
+     * §三），故这里不再是 `number | null`：`null` 会静默当 0 参与求和。
+     */
+    rrfScore: number
     vectorRank: number | null
     keywordRank: number | null
     /** 产出该候选的查询序号（跨查询合并后仍要答「它是哪趟召回的」） */
@@ -309,45 +319,43 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
     // 它答的是「这趟查询的向量通道有没有跑」，与候选行的 channel 正交。
     queryTraces.push({ queryIndex, queryText: q, queryEmbedOk: blob !== null })
 
-    if (blob) {
-      const hits = chunksRepo.searchChunksHybrid(blob, q, params.topK, params.maxDistance)
-      hits.forEach((hit, i) => {
-        const existing = merged.get(hit.row.id)
-        if (!existing || i < existing.bestIndex) {
-          merged.set(hit.row.id, {
-            row: hit.row,
-            bestIndex: i,
-            channel: hit.channel,
-            rrfScore: hit.rrfScore,
-            vectorRank: hit.vectorRank,
-            keywordRank: hit.keywordRank,
-            queryIndex,
-          })
-        }
-      })
-    } else {
-      const rows = chunksRepo.searchChunksByKeyword(q, params.topK)
-      rows.forEach((r, i) => {
-        const existing = merged.get(r.id)
-        if (!existing || i < existing.bestIndex) {
-          merged.set(r.id, {
-            // 内存态的 distance 哨兵沿用（`RetrievedSection.distance` 等消费方按
-            // number 消费）；**落库面按 channel 转 NULL**，判别职责已交给 channel
-            row: { ...r, distance: params.maxDistance },
-            bestIndex: i,
-            channel: 'keyword',
-            rrfScore: null,
-            vectorRank: null,
-            keywordRank: i,
-            queryIndex,
-          })
-        }
-      })
-    }
+    // 两路出口**同形状**（R1-b §三 落点甲）：混合路径与「整趟嵌入挂了」的降级路径
+    // 拿到同一种类型 ⇒ 下面的合并逻辑零分支、零类型守卫。降级路径的分由
+    // `searchChunksKeywordScored` 按同一条 RRF 公式补（不是假值，见 §三 两条禁令）。
+    const hits = blob
+      ? chunksRepo.searchChunksHybrid(blob, q, HYBRID_POOL_PER_QUERY, params.maxDistance)
+      : chunksRepo.searchChunksKeywordScored(q, HYBRID_POOL_PER_QUERY, params.maxDistance)
+    hits.forEach((hit, i) => {
+      const existing = merged.get(hit.row.id)
+      if (!existing) {
+        // (c) **首趟胜出**：`row` / `channel` / 两位次 / `queryIndex` 描述的是
+        //     「这片长什么样」，与累计分无关
+        // 内存态的 distance 哨兵沿用（`RetrievedSection.distance` 等消费方按
+        // number 消费）；**落库面按 channel 转 NULL**，判别职责已交给 channel
+        merged.set(hit.row.id, {
+          row: hit.row,
+          bestIndex: i,
+          channel: hit.channel,
+          rrfScore: hit.rrfScore,
+          vectorRank: hit.vectorRank,
+          keywordRank: hit.keywordRank,
+          queryIndex,
+        })
+        return
+      }
+      // (a) **累加**：同一片被多趟查询命中 ⇒ 各趟分相加（这正是 RRF 的原始形态）。
+      //     只改下面的排序键而漏掉这里的话，`rrfScore` 仍是单趟值——「累加」根本
+      //     没发生，排序键换汤不换药（R1-b §二 改动 4 展开，最易只做一半的一步）
+      existing.rrfScore += hit.rrfScore
+      // (b) 位次取 min，**仅作同分 tie-break**，保排序确定性
+      existing.bestIndex = Math.min(existing.bestIndex, i)
+    })
   }
 
   const ordered = [...merged.values()]
-    .sort((a, b) => a.bestIndex - b.bestIndex)
+    // 排序主键 = **跨查询累加 RRF 分降序**；同分按 `bestIndex` 升序 tie-break
+    // （R1-b §二 改动 4：口径从「哪趟名次最小」变成「跨查询累计得分最大」）
+    .sort((a, b) => b.rrfScore - a.rrfScore || a.bestIndex - b.bestIndex)
     .slice(0, params.topK)
   const orderedRows = ordered.map((s) => s.row)
 

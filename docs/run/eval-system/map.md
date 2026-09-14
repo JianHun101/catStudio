@@ -35,6 +35,7 @@
 - **`/api/eval/aggregates` 已被 L2 按猫评分聚合占用**（`routes/eval.ts:47`）——L1 八口径端点须另起名
 - **链锚取法已定（见 Decisions）：`coalesce(回复消息.task_id, 触发消息.task_id)`**。单用触发侧会丢 **32.5%（351/1081）**——用户消息 564 条里 **342 条没有 `task_id`**（agent 消息 0 条缺失）；单用回复侧丢 **7.5%**（其中 70 行是失败跳，根本没有回复消息可 join）；coalesce 后仅剩 **28 行（2.6%）无锚**，这 28 行必须显式呈现为**孤儿跳**、不得静默丢弃
 - 「链长」= **执行跳数**（不是消息行数）：coalesce 口径下 **479 条链 / 均 2.20 跳 / 最长 26 跳**。早先记录的 15 / 25 / 27 三个数全是口径不统一的产物，作废
+- **取证行号只能用 `git grep -n <sha> -- <path>`（字节路径）**。2026-09-14 一次行号仲裁被推翻的教训：PowerShell 5.1 下 `git show <sha> | …` / `Get-Content` 按 **ANSI(GBK)** 解码 UTF-8 无 BOM 源码，**多字节字符把尾随 `\n` 吞进双字节配对**，合成一份「行数只多不少的反向错位」假读数（实测同一 blob：真 727 行 → 假 654 行；`describeBadStatus` 真 **692** 被读成 **614**）。叠加 `Measure-Object -Line` **只数非空行**，两套工具假象能拼出一份看似自洽的假证据。**判据**：凡行号结论，命令本身要能复现；文本管道在 UTF-8 源码上不可信。另：`Select-String` 与 `Get-Content` 对同一文件给不同行号时，第一反应应是「解码口径不同」，不是「文件有问题」
 
 ## Decisions so far
 
@@ -64,9 +65,12 @@
   **裁决 · README Redis 死面（C1 §六 待裁项）= 并入 R1，独立 commit + 独立验收项**。判据是**是否改行为**，不是是否同主题——同一把尺子把 R1-b 拆了出去（它改猫实际读到的记忆）。本项 **6 处 / 8 行纯删除、零行为、零依赖**，判据可机械复核，省下一整轮 spec-gate + 审查。**前置已实测**：`db/redis.ts` 不存在、`redis`/`ioredis` 连 `package.json` 都没声明、`REDIS_URL` 零消费方。**明写不做**：`:369`/`:372` ADR 表两行是历史记录，不动。
 
 - **【店长裁决 · R1-b / F1 两票立票，含两处我拍的板】**（2026-09-14，执行用户已批顺序「R1 → 止血单（并行）→ R2 设计 → OQ-6 → P3」）— 立 [R1-b](R1-b-crossquery-merge-rerank.md) 与 [F1](F1-embedding-failure-visibility.md)。**两处需要用户知悉的架构裁决（均由我拍板，可驳）**：
-  1. **R1-b 含一条 additive 迁移 `ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER`**——依据 P2 设计票 §一 推论一「凡事后无法可靠重算的值，一律冗余进表」：R1-b 引入新的可调常量 `HYBRID_POOL_PER_QUERY`，无快照则历史行不可解释。**独立 commit + 独立验收项**（沿用 C1 §六 Redis 死面范式）。⚠️ 这动的是 `retrieval_events` 的 DDL（用户此前对列数问题追问过三轮），故显式上浮。**现已不是「35/36/37 列」那类选择题**：加列实测 **0.10 ms**、O(1)、不重建表，`db/index.ts` 已有 10+ 条 `ADD COLUMN` 先例。
+  1. **R1-b 含一条 additive 迁移 `ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER`**——依据 P2 设计票 §一 推论一「凡事后无法可靠重算的值，一律冗余进表」：R1-b 引入新的可调常量 `HYBRID_POOL_PER_QUERY`，无快照则历史行不可解释。**独立 commit + 独立验收项**（沿用 C1 §六 Redis 死面范式）。⚠️ 这动的是 `retrieval_events` 的 DDL（用户此前对列数问题追问过三轮），故显式上浮。**现已不是「35/36/37 列」那类选择题**：加列实测 **0.10 ms**、O(1)、不重建表，`db/index.ts` 的 migrations 数组（`:247` 起）已有 **30 行** `ADD COLUMN` 先例。
   2. **R1-b 的分数统一口径**：`chunks.ts:333` 的 `ChunkKeywordSearchResult = ChunkRow` **没有分数字段**，而合并改按分累加后纯关键词降级路径必须也有分 ⇒ 统一为 **Σ(各通道 `1/(RRF_K + rank_in_channel + 1)`)**——这不是新公式，**混合路径今天就是这么算的**（`chunks.ts:397` / `:400-403`）。**明写禁止**填 `NULL`（JS 里当 0 或 NaN，都不抛）或填不同量纲的值。
   - 另：**R1-b 的 `final_rank` 与 R1 段同名不同义**（旧=名次最小 / 新=累加分最大）⇒ 两段数据不可比，须按 `created_at` 或 `param_pool_n IS NULL` 切窗口。**本仓已有同型前科（`trace_id` ↔ 链锚同名不同义）。**
+  - **行号面已随 R1 落地整体重审**（2026-09-14，基线 `dev@2f31698`）：R1 大改了本票引用的**全部两个文件**，初稿 17 处行号整体作废（`chunks.ts` 出口 411→**451**、`memory/index.ts` 合并段 225→**316**/**332**、`sort` 231→**350**、`slice` 232→**351**…）。**规矩**：票一旦在前置票落地后才派活，行号面要「**重取基线**」而非「复核漂移」。
+- **【OQ8 · 观察项，不阻塞】**（2026-09-14，F1 复审带出）`embedding-client.test.ts` 的「`stop()` 后走 `> baseUrl` 直连分支（无 child）」用例在**父提交 `71280c6` 即存在**（本单未新增），默认 `testTimeout: 10_000` **无余量**，全套负载下偶发超时。判**既有边界型 flaky**。**处置**：后续单给它显式 timeout（一行）。**本期不阻塞**，未立票。
+  - **一条新证据（店长 2026-09-14 实测，方向支持但未能指认）**：当日提交 `9076356` 的 pre-commit 钩子跑批出现 **`1 failed | 112 passed`（2286 中 1 条）**，同一条命令**重跑即 113/113 全绿**，直接 `npx vitest run` 亦全绿 ⇒ 确认是 flaky 而非回归。**但失败用例名未能取得**——钩子输出在我的捕获里被截断，只留下汇总行。**如实记这一笔**：结论（flaky）成立，**指认（就是 OQ8 那条）没有证据**，不要当成已证。附带印证了 F1-c 的立论：**跑批失败时定位不到是哪条失败**，与「嵌入挂没挂过答不出来」是同一个可观测性缺口。
 
 ## Not yet specified
 
@@ -113,10 +117,14 @@
 **执行顺序（用户裁「按你建议的走」）**：**R1 → 止血单（并行）→ R2 设计 → OQ-6 → P3**。
 
 - ~~**C1：老记忆链残留核查与清除** — `C1-legacy-memory-chain-cleanup.md`~~ ✅ **已关票**（2026-09-14，PR #75 / merge `4a33553`；含 server 代码 ⇒ 需重启生效）
-- **R1：`retrieval_*` 三表 + 采集接线** — 设计见 [P2 设计票](P2-design-retrieval-events.md)（**已派活**）。**动 DDL（不可逆）**，形态已定稿。**随票尾巴**：C1 §六 的 README Redis 死面（6 处 / 8 行，独立 commit + 独立验收项，与 R1 主体无依赖）
-- **R1-b：跨查询合并改排序**（自 R1 拆出，**行为变更**）— [R1-b-crossquery-merge-rerank.md](R1-b-crossquery-merge-rerank.md)（2026-09-14 立票，**未派活**；**依赖 R1 出口形状，串行**）
-- **F1 止血单**（与 R1 并行，零依赖）— [F1-embedding-failure-visibility.md](F1-embedding-failure-visibility.md)（2026-09-14 立票，**未派活**）：① `embedding-client.ts:337-340` 失败只读 status **不读 body**（根因就在同一响应的 `embed-server.mjs:161` 里，`res.json()` 只在成功路径 `:344` 被调）；② `child.stderr` **从 spawn 出来无人接管**（`:596` 是 `stdio:['pipe','pipe','pipe']`，全文件 `stderr` 只出现在 `:137` 接口声明——**且管道写满会阻塞子进程**）；③ 测试与生产**写同一个日志文件**，且 `packages/server/vitest.config.ts:20` 的 `LOG_LEVEL:'error'` **是死的**（`setLogLevel` 全仓只在 `index.ts:122` 调用，测试不 import 它）
+- ~~**R1：`retrieval_*` 三表 + 采集接线**~~ ✅ **已关票**（2026-09-14，PR #76 / merge `b436886`，已审 sha `ce60621`；含 server 代码 ⇒ **需重启生效**，三表未生效前每次记忆检索都不落账）
+  - **审查者移交一笔待办**：合并后首跑时用 `/api/eval/chains` 抽一条做「链锚真机对账」（单测已钉死口径，真机待验）——归店长收口动作，**重启后做**。
+- **R1-b：跨查询合并改排序**（自 R1 拆出，**行为变更**）— [R1-b-crossquery-merge-rerank.md](R1-b-crossquery-merge-rerank.md)（2026-09-14 立票；**R1 已落地 ⇒ 串行前置满足**；**行号已于 2026-09-14 按 `dev@2f31698` 全量重审**；**未派活**——派活时机待用户授权）
+  - **重审带来两处实质变化（不只是行号）**：① §一 病灶「RRF 分被 `.map` 丢掉」**已被 R1 消解**——出口现返回完整 `ChunkHybridHit`，本票不再需要「捞分」，改动面比初稿小；② §三 的接口缺口从「推测必然撞上」升级为「代码里已可见」——`memory/index.ts:339` 把降级路径 `rrfScore` 显式写 `null`，而同处 `:341` 已写 `keywordRank: i`（**名次在手上、分没有**）。
+- ~~**F1 止血单**~~ ✅ **已关票**（2026-09-14，PR #77 / merge `2f31698`，已审 sha `603f966`；**代码零 amend**——`git diff 396360d 603f966` 为空、三关键 blob sha 逐字节一致；含 server 代码 ⇒ **需重启生效**）：① `embedding-client.ts:337-340` 失败只读 status **不读 body**（根因就在同一响应的 `embed-server.mjs:161` 里，`res.json()` 只在成功路径 `:344` 被调）；② `child.stderr` **从 spawn 出来无人接管**（`:596` 是 `stdio:['pipe','pipe','pipe']`，全文件 `stderr` 只出现在 `:137` 接口声明——**且管道写满会阻塞子进程**）；③ 测试与生产**写同一个日志文件**，且 `packages/server/vitest.config.ts:20` 的 `LOG_LEVEL:'error'` **是死的**（`setLogLevel` 全仓只在 `index.ts:122` 调用，测试不 import 它）
   - ⚠️ **更正**：本行原写「实测 **26 次** bad-status 全落在测试窗口内」。**两个数都不准，且结论过强**——现测当前日志 `bad-status` **15 行** / 轮转件 `catStudy.log.1` **75 行**；抽样窗口（`16:28:40` 夹具段 → 9 秒后 `16:28:49`）**能证明测试条目与生产条目同文件交错，但「全部是测试造的」既证不出也证不伪**（两个来源在文件里无任何可分标记）。**后者才是 F1-c 的立论，且更强**：不是「日志脏」，是「生产上嵌入挂没挂过——答不出来」
+  - ✅ **验收 6 真机通过（店长 2026-09-14 实测，非单测）**：F1 落地后跑了两轮全套 vitest（17:26 一轮 + 17:58 一轮），**生产日志 `packages/server/data/cat-study.log` 一行未增**（最后一条 `bad-status` 停在 **17:16:44**，此后 0 条；该文件 mtime `17:55:50` 来自运行中的旧 server 自己写 PR-created，不是测试）。同期测试条目落在 **`<repo>/node_modules/.cache/test-logs/cat-study-test.log`**，且带上 F1-a 的新 `detail`：`POST /v1/embeddings → HTTP 500 | reason=boom`（旧形态只有裸 `HTTP 500`）——**F1-a 与 F1-c 双双活体观测到**。
+  - ⚠️ **一条观察（不阻塞）**：`LOG_FILE` 是**相对路径**，`resolveLogFile` 用 `path.resolve` ⇒ 落点随 **cwd** 变（根 workspace 跑批落 `<repo>/node_modules/.cache/`，`pnpm test:server` 落 `packages/server/node_modules/.cache/`）。两处都在 `node_modules` 内、都不进仓库，**隔离成立**；但「路径随 cwd 变」与本仓反复栽的隐式契约同类，记一笔备查。
 - **R2：span 表** — 设计同源、实施另票，**但字段设计本体尚不存在**（票 §八 只有「为什么这么排」的理由，一个字段都没设计）。**这是当前最大的洞**，可与三表并行推进
 
 > **纠偏（原第 95 行的说法）**：早先写「`retrieval_events` 表 → 记忆库 `recall@k` / `precision@k`」——**这句把 P2 说大了**。R1 落的是**原料**（候选 / 位次 / 通道 / 分数），不是指标本身；`recall@k` / `precision@k` 必须人工标注（13 件外部工具无一件能不靠参考答案给出此数），属 P3。
