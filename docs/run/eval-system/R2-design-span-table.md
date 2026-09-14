@@ -54,7 +54,7 @@
 
 R1 拆表（`retrieval_events` / `queries` / `candidates`）的判据是**三类粒度不同的东西**：一次检索 / 一趟查询 / 一个候选片，是 1:N:N 的嵌套，各自有独立身份。
 
-**R2 的所有行是同一类东西**：`{span_id, parent_span_id, name, start_ms, duration_ms, status}`。层级靠 `parent_span_id` 自引用表达，**不是粒度不同的表**。
+**R2 的所有行是同一类东西**：`{span_id, parent_span_id, name, start_at, duration_ms, status}`。层级靠 `parent_span_id` 自引用表达，**不是粒度不同的表**。
 
 ⇒ **判据是「一类东西」，不是「一律拆」或「一律不拆」。** 同一条判据在两张票上给出不同答案，因为被问的对象不同。
 
@@ -88,14 +88,14 @@ R1 拆表（`retrieval_events` / `queries` / `candidates`）的判据是**三类
 CREATE TABLE IF NOT EXISTS spans (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   span_id        TEXT NOT NULL UNIQUE,
-  parent_span_id TEXT,
+  parent_span_id TEXT REFERENCES spans(span_id),
   chain_id       TEXT,
   execution_id   TEXT NOT NULL,
   session_id     TEXT,
   agent_id       TEXT,
   name           TEXT NOT NULL,
   operation_name TEXT,
-  start_ms       INTEGER NOT NULL,
+  start_at       TEXT NOT NULL,
   duration_ms    INTEGER NOT NULL,
   status         TEXT NOT NULL,
   error_type     TEXT,
@@ -108,19 +108,29 @@ CREATE TABLE IF NOT EXISTS spans (
 | ----- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | ----------------- |
 | 1     | `id`                           | 自增主键（行身份）                                                                                                       | NOT NULL          |
 | 2     | `span_id`                      | **span 身份**，`randomBytes(16).toString('hex')`（本仓既有 idiom，见 `reply.ts:847`）。导出时映射 OTLP `spanId`          | NOT NULL / UNIQUE |
-| 3     | `parent_span_id`               | 自引用；**NULL = 该执行的根 span**                                                                                       | 可空              |
+| 3     | `parent_span_id`               | 自引用 → `spans(span_id)`；**NULL = 该执行的根 span**。见下方「自引用为何可加 FK」                                       | 可空              |
 | 4     | `chain_id`                     | **链锚** = `messages.task_id`。导出时映射 OTLP `traceId`。**注意本仓 `execution_logs.trace_id` 是当轮执行 id，不是此物** | 可空（孤儿跳）    |
 | 5     | `execution_id`                 | 挂 `execution_logs.id`——与 R1 同款挂载点                                                                                 | NOT NULL          |
 | 6-7   | `session_id` / `agent_id`      | 身份面冗余（看板免 join）                                                                                                | 可空              |
 | 8     | `name`                         | **段名**，闭集见 §五                                                                                                     | NOT NULL          |
 | 9     | `operation_name`               | OTel `gen_ai.operation.name` 字面量。**NULL = 规范无此概念**（自定义段）                                                 | 可空              |
-| 10    | `start_ms`                     | epoch 毫秒（UTC）                                                                                                        | NOT NULL          |
+| 10    | `start_at`                     | ISO 8601 UTC 带毫秒（`2026-09-14T13:20:00.000Z`），与 R1 `retrieval_events.created_at` **同形态**。取 `Date.now()` 生成  | NOT NULL          |
 | 11    | `duration_ms`                  | 段时长                                                                                                                   | NOT NULL          |
 | 12    | `status`                       | `ok` / `error` / `timeout` / `skipped`                                                                                   | NOT NULL          |
 | 13-14 | `error_type` / `error_message` | 复用 `execution_logs` 的分类口径                                                                                         | 可空              |
 | 15    | `item_count`                   | **通用**产出计数（上下文条数 / 命中数 / 工具结果条数）；无产出概念的段留 NULL                                            | 可空              |
 
-> **为什么没有 `created_at`**：R1 的 `retrieval_events.created_at` 是「这次检索发生的时刻」——因为那次检索自己没有起止。span 有 `start_ms`，**它本身就是时间轴**；再加一个「写入时刻」会造出**两个时间列、语义近似而不同**的混淆面。**一条时间真相。**
+> **为什么没有 `created_at`**：R1 的 `retrieval_events.created_at` 是「这次检索发生的时刻」——因为那次检索自己没有起止。span 有 `start_at`，**它本身就是时间轴**；再加一个「写入时刻」会造出**两个时间列、语义近似而不同**的混淆面。**一条时间真相。**
+
+> **自引用为何可加 FK**：`PRAGMA foreign_keys = ON`（`db/index.ts:27`）且 SQLite 是**即时检查** ⇒ 同事务内按**拓扑序**插入（根先、子后）即可满足，不需要延迟约束。收益是堵住「父子指向不存在的 span」（原先只靠单测兜）。**`parent_span_id` 与 `span_llm.span_id` 两处 FK 形态由此对称。**
+
+> **为什么时间列用 ISO TEXT 而不是 epoch INTEGER**（实测两向转换均可，故不是可逆性判据）：
+>
+> - **同库同形态**：R1 的 `retrieval_events.created_at` 已是 ISO TEXT 且已上线有数据；再加一种 epoch INTEGER 会让本库出现**第三种时间形态**（`datetime('now')` 秒级 / ISO 毫秒 / epoch 毫秒）。
+> - **自描述**：epoch 毫秒是不可直读的数（`1757856000000`），排查时要先换算。
+> - **字典序 = 时间序**（同精度定长、同 UTC 同格式），排序与范围比较照常走索引。
+> - 代价：算术（时间差）需 `julianday()` 换算，或由应用层算好写进 `duration_ms`——**本表已有 `duration_ms`，故该代价实际不付**。
+> - **与 `execution_logs` 比较注意精度**：那边是 `datetime('now')`（**秒级**，`YYYY-MM-DD HH:MM:SS`），字典序与 ISO 可比，但时间差有亚秒舍入。
 
 > **`item_count` 的定位**：它是骨架上的**通用量**（「这段工作产出/消费了多少个东西」），不是类型专属属性——故不进详情表。判据与 R1 §一 的「外部可变状态快照」同族：它是**写入当时的事实**，事后无法可靠重算。
 
@@ -157,11 +167,11 @@ CREATE TABLE IF NOT EXISTS span_llm (
 ```sql
 CREATE INDEX idx_spans_execution ON spans(execution_id);   -- 看板主路径：按执行取全段时间轴
 CREATE INDEX idx_spans_chain     ON spans(chain_id);       -- 与 P1 链锚对齐，跨执行串链
-CREATE INDEX idx_spans_start     ON spans(start_ms);       -- 时间窗取数
+CREATE INDEX idx_spans_start     ON spans(start_at);       -- 时间窗取数
 CREATE INDEX idx_spans_name      ON spans(name);           -- 按段聚合（「哪段最耗时」）
 ```
 
-> `(execution_id, start_ms)` 复合索引**不建**——v1 每次执行约 8–12 行，单列索引已足够；建成复合是在为一个不存在的规模付代价。
+> `(execution_id, start_at)` 复合索引**不建**——v1 每次执行约 8–12 行，单列索引已足够；建成复合是在为一个不存在的规模付代价。
 
 ### 4.4 与 `retrieval_events` 的挂载
 
@@ -169,9 +179,9 @@ CREATE INDEX idx_spans_name      ON spans(name);           -- 按段聚合（「
 
 ```sql
 -- 一次执行的完整时间轴（这是 R2 存在的理由：一条查询回答诉求③）
-SELECT s.name, s.start_ms, s.duration_ms, s.status,
+SELECT s.name, s.start_at, s.duration_ms, s.status,
        (SELECT COUNT(*) FROM retrieval_events r WHERE r.execution_id = s.execution_id) AS has_detail
-FROM spans s WHERE s.execution_id = ? ORDER BY s.start_ms
+FROM spans s WHERE s.execution_id = ? ORDER BY s.start_at
 ```
 
 **为何本次不加 `span_id` 到详情表**：现阶段 `execution_id` 对记忆检索**唯一**（实测 `buildKnowledgeContext` 不写 `retrieval_events`）。若将来知识库检索也落 `retrieval_events`，届时再加 `span_id`（增列 O(1)，见 §九 第 9 条）——**additive 的事不提前付**。
@@ -180,12 +190,32 @@ FROM spans s WHERE s.execution_id = ? ORDER BY s.start_ms
 
 `spans` 的 `memory.retrieval` 行与 `retrieval_events` 各有一个耗时列。**处置：两者由同一变量、同一次写库写入**（不是两处独立测量）。查询口径：
 
-- `start_ms >= <R2 上线时刻>`：取 `spans.duration_ms`
+- `start_at >= <R2 上线时刻>`：取 `spans.duration_ms`
 - 跨窗口：`COALESCE(spans.duration_ms, retrieval_events.retrieval_ms)`
 
 R1 窗口的历史行没有 span，**这是唯一不需要编造数据的切法**（同 R1-b 用 `param_pool_n IS NULL` 切窗口的范式）。
 
 ---
+
+### 4.6 两表靠什么关联 + id 形态（用户提问后钉死，防实施者自行发挥）
+
+**关联键：`span_llm.span_id` → `spans.span_id`**——不是 `id`。`spans.id` / `span_llm.id` 是**各自表内的行身份**，跨表**没有一条 join 走它们**。
+
+本票**两个身份列的分工**（实测，非设计意图）：
+
+| 列                         | 形态                       | 谁生成                                         | 作用                                                             |
+| -------------------------- | -------------------------- | ---------------------------------------------- | ---------------------------------------------------------------- |
+| `spans.id` / `span_llm.id` | `INTEGER PK AUTOINCREMENT` | **SQLite**                                     | 行身份。表内唯一、仅此而已。当前**零消费方**（无任何 FK 指向它） |
+| `spans.span_id`            | `TEXT UNIQUE`（32 hex）    | **应用层** `randomBytes(16)`                   | 业务身份 + 导出面 OTLP `spanId`                                  |
+| `spans.execution_id`       | `TEXT`                     | 应用层 `uuid()`（`serial.ts:1232` 的 `logId`） | 挂 `execution_logs.id`                                           |
+
+**为什么自增 id 不会在关联上出问题**（用户担心「多写 / 数据合并容易冲突」）：
+
+1. **关联一律走 TEXT 列**——`execution_id` 挂的 `execution_logs.id` 实测是 `TEXT PRIMARY KEY`，由 `uuid()` 生成（非自增整数）。`span_id` 是 128 位随机数。**合并两个库时这两列天然不撞**。
+2. **自增 id 只在表内消费**——`spans.id` 无外键指向，跨库合并时行身份碰撞**不会破坏任何关系**（没有任何 join 依赖它）。
+3. **同执行多写不冲突**——同一次执行的 8–12 行在 `finalizeRun` **同一事务**内插入；并发批内 3 个执行体各自成事务，`AUTOINCREMENT` 保证不重复。
+
+> **一处该记的不对称**（不阻塞，防后人照抄困惑）：R1 的三表用 `INTEGER PK AUTOINCREMENT` 做**业务身份**且**互有 FK 指向它**（`retrieval_queries.retrieval_id → retrieval_events(id)`）。R2 用随机 TEXT 做业务身份、`id` 纯行身份。**若将来 R1 三表也需要跨库合并，那处才是真风险点**（两库各自从 1 自增，`retrieval_id` 会串线）——R2 反过来天然免疫。**本票不改 R1**（R1 已上线有数据），仅记此账。
 
 ## 五、段名闭集（`spans.name`）
 
@@ -229,7 +259,13 @@ R1 窗口的历史行没有 span，**这是唯一不需要编造数据的切法*
 
 ## 七、埋点落点表
 
-**全部为 `performance.now()` 差值，零新依赖。** 符号定位（本仓新规矩：票面引用一律 `文件:符号`，不用行号）。
+**`duration_ms` 全部为 `Date.now()` 差值；`start_at` 取 `Date.now()` 的 ISO 形态。零新依赖。**
+
+> **不要用 `performance.now()`**：它是**进程启动以来的毫秒数、不是 epoch**——重启归零、跨进程不可比，`idx_spans_start` 的时间窗查询会直接废掉，且「新数据 / 旧数据」无从区分。实测 `performance.now()` 在本仓非测试代码**零命中**（是凭空引入的新 idiom），`Date.now()` 有 41 处。
+
+符号定位（本仓新规矩：票面引用一律 `文件:符号`，不用行号）。
+
+> **形态提示（别照抄第 13 行的写法）**：`duration_ms` 与 `item_count` 是 **INTEGER**，`start_at` 是 **TEXT**——§七 表格里逐行看列名，不要因为「都在同一张表」就统一按数字处理。
 
 | 段                    | 入口符号 → 出口符号                                                                           | 写入时机 |
 | --------------------- | --------------------------------------------------------------------------------------------- | -------- |
@@ -249,7 +285,7 @@ R1 窗口的历史行没有 span，**这是唯一不需要编造数据的切法*
 
 1. **`dispatch.queue_wait` 的时刻必须在 `slot.queue.push` 当场打**（`serial.ts:1453` 一带）——存进队列条目本身（内存态，无需落库）。**事后用 `messages.created_at → started_at` 代理是错的**：对重放/恢复路径不准（底稿 §3.2 已判）。
 2. **写库放在 `finalizeRun` 收尾，一次执行一个事务**——与 R1 三表同事务同款。**写库失败绝不抛**（它在关键路径上）。
-3. **`llm.chat` 的 `start_ms` 取 `chatStream` 调用前一刻**，不是 `for await` 进入时刻——否则 TTFT 的分母错了。
+3. **`llm.chat` 的 `start_at` 取 `chatStream` 调用前一刻**，不是 `for await` 进入时刻——否则 TTFT 的分母错了。
 
 ### 一条如实声明的残余风险
 
@@ -287,9 +323,9 @@ R1 窗口的历史行没有 span，**这是唯一不需要编造数据的切法*
 | 10  | `memory.retrieval` 行的 `duration_ms` == 同行 `retrieval_events.retrieval_ms`（同源同值）                                                     | 单测                                                |
 | 11  | `operation_name` 对 `memory.retrieval` / `knowledge.retrieval` / `llm.chat` 分别为 `retrieval`/`retrieval`/`chat`；对两个 wait 段为 NULL      | 单测                                                |
 | 12  | `item_count` 在 `knowledge.retrieval` 上 == 实际命中数                                                                                        | 单测                                                |
-| 13  | **一条 SQL 出全段时间轴**（§4.4 那条查询原样跑通，按 `start_ms` 升序）                                                                        | 单测 + 真机                                         |
+| 13  | **一条 SQL 出全段时间轴**（§4.4 那条查询原样跑通，按 `start_at` 升序）                                                                        | 单测 + 真机                                         |
 | 14  | 时间轴**覆盖已知段**：一次正常执行至少产出 `invoke_agent` + `dispatch.token_wait` + `context.assemble` + `memory.retrieval` + `llm.chat` 五行 | 单测                                                |
-| 15  | `start_ms` 是**毫秒精度**（同一次执行内两段的 `start_ms` 可区分，非秒级对齐）                                                                 | 静态 + 单测                                         |
+| 15  | `start_at` 是**毫秒精度**（同一次执行内两段的 `start_at` 可区分，非秒级对齐；格式 `...THH:MM:SS.mmmZ`）                                       | 静态 + 单测                                         |
 | 16  | `spans` 表**无 `trace_id` 列**（§六 纪律防回退）                                                                                              | 静态源断言                                          |
 | 17  | 边界证明：`git grep -n "otlp\|opentelemetry\|exporter" -- packages/` **零命中**；`shared/src/types.ts` 的 `ToolCallInfo` **未增时间字段**     | 静态源断言                                          |
 | 18  | 全套 `vitest run` 全绿 + `node scripts/lint.js` 三包通过                                                                                      | 门禁复跑                                            |
@@ -304,7 +340,9 @@ R1 窗口的历史行没有 span，**这是唯一不需要编造数据的切法*
 | 2   | **v1 段范围**：§五 标 ✅ 的 11 段 vs 砍到 5 段              | 11 段一起做（同一处收尾写库，分批反而是多轮返工）              | 可逆（段少了可加）                 |
 | 3   | **实施票拆分**：一张票 vs 按风险面拆两张（串行段 / LLM 段） | **一张票**——所有落点共享同一处收尾写库，拆开要改两遍同一个写口 | 可逆                               |
 
-**派活时机我另问一次**——形态裁决不等于开工授权。
+**已裁（用户 2026-09-14）**：时间列形态取 **ISO TEXT `start_at`**（不取 epoch INTEGER `start_ms`）——用户口径「两种转换方便就用哪种」；实测两向转换均可、均为单条 SQL 无损无重建，故**转换便利性不构成判据**，改按「与 R1 同库同形态」定裁。随此裁一并落 §4.1 三处修订（`start_at` / `parent_span_id` FK / 弃 `performance.now()`）与新增 §4.6。
+
+**派活时机我另问一次**——形态裁决不等于开工授权。**题 1（表形态）仍未裁**，不点头则派不了活。
 
 ---
 
@@ -316,5 +354,8 @@ R1 窗口的历史行没有 span，**这是唯一不需要编造数据的切法*
 - **D4** 一次执行**一个事务**在 `finalizeRun` 写全部 span。判据：与 R1 同款；超时三条路径均走失败漏斗进 `finalizeRun`，只有进程崩溃丢——**不为崩溃可见性牺牲关键路径延迟**。
 - **D5** `dispatch.queue_wait` 的时刻在 `slot.queue.push` 当场打（内存态）。否决「用 `messages.created_at → started_at` 代理」——对重放/恢复路径不准。
 - **D6** `tool.execute` / `dispatch.a2a` **v1 不做**——跨包类型改动 / 递归穿线，各自另票。
-- **D7** 骨架**不设 `created_at`**。判据：span 的 `start_ms` 本身就是时间轴，再加「写入时刻」会造两个语义近似的时间列——**一条时间真相**（本仓反复栽在「同一事实两处存储」上）。
+- **D7** 骨架**不设 `created_at`**。判据：span 的 `start_at` 本身就是时间轴，再加「写入时刻」会造两个语义近似的时间列——**一条时间真相**（本仓反复栽在「同一事实两处存储」上）。
+- **D7b**（用户问「所有表都该有 created_at 吧」后补）**时间列取 ISO TEXT `start_at`，不取 epoch INTEGER `start_ms`**。判据：与 R1 `retrieval_events.created_at` 同库同形态；epoch 不可直读；字典序 = 时间序。**两向转换实测均可**（见 §4.1 引注），故此项**不是**可逆性判据，纯粹是形态一致性选择。
+- **D7c**（同上）**`parent_span_id` 补 FK → `spans(span_id)`**。判据：`span_llm.span_id` 已有 FK，两处不对称；SQLite FK 即时检查，同事务拓扑序插入即可满足。**原票「不加 FK」的理由（怕插入顺序冲突）不成立**——拓扑序插入本来就要求父行先落。
+- **D7d**（同上）**`performance.now()` 一律不用**，改 `Date.now()`。原文 §七「全部为 `performance.now()` 差值」与 §4.1「epoch 毫秒」**自相矛盾**——前者是进程相对时刻，后者是墙钟。实测该 idiom 在本仓非测试代码零命中。
 - **D8** 计数与命名纪律：本票一切计数（14 列 / 9 列 / 4 索引 / 11 段）**均为实测或逐条点数**，不凭印象。行号一律改用符号引用（R1-b 教训）。
