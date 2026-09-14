@@ -66,7 +66,19 @@ phase0.ts:363-367
 
 **这不是过期注释，是过期标准答案**：`phase0.ts` 是判官校准集，`good(...)` 的内容是**被判为正确**的期望。后果是 Phase 0 一旦重跑，**模型背诵这个死旋钮得满分，说真话（「该旋钮已作废」）反而判错**。校准集把死知识编码成了 ground truth。
 
-**修法**：改写该条的问题与期望答案，指向现行机制（MD 是唯一写入口，`chunks` 三表索引，无去重三段式）；或整条删除。**由店长定稿后交实施者照抄**——判分基准的措辞不宜由实施者自由发挥。
+**修法**：**照抄下面这段（店长已定稿，实施者不要自由发挥判分基准的措辞）**——保留 `ext-06` 的 id 与 `good()`（`humanScore: 5`）标签，**只把期望答案换成实话**，问题一字不动：
+
+```
+good(
+  'ext-06',
+  ctx('记忆去重的阈值怎么调?'),
+  '现在没有去重阈值这个旋钮了——对话原话的实时嵌入层已整体退役(写口与 memories 表双删),MEMORY_DEDUP_* 系列参数一并作废。现行机制是 MD 为唯一写入口:扫描器把白名单 MD(docs/adr、docs/lessons、docs/plans)切片后嵌入,按身份键 content_hash 幂等 upsert 进 chunks 三表——重扫同一份文档是覆盖而非新增,所以不需要相似度去重。检索走 searchChunksHybrid(向量+关键词 RRF),阈值是 MEMORY_MAX_DISTANCE 默认 0.6,知识库侧另为 0.35。'
+),
+```
+
+> **为什么保留问题而不整条删**：这是一道**有价值的陷阱题**——它测的正是「模型知不知道现状，还是在背诵已退役的文档」。`good()` 标签是对的，错的只是期望答案的**内容**。整条删掉等于把这道题浪费了。
+>
+> 定稿里的三条事实依据（实施者别改数）：`MEMORY_MAX_DISTANCE` 默认 0.6 = `memory/index.ts:187`；知识库 0.35 = `knowledge.ts:39`；MD 唯一写入口 + `content_hash` 幂等 upsert = `AGENTS.md` 「记忆」段。
 
 **验收**：全仓 grep `MEMORY_DEDUP` 零命中（含 `phase0.ts`）。
 
@@ -87,7 +99,11 @@ phase0.ts:363-367
 
 「节级排序依据」不成立：节序由 `bestIndex` 定（`:231-234`），`kept` 按插入序（`:290-294`），`renderSections` 只按位置首尾各半（`:327`）——**全链没有任何一处 sort 用 `distance`**。它当下唯一的真实读点是 `reply.ts:656` 的台账日志列。
 
-**修法**：改成实话（「台账列；当前不参与排序，排序由片级位次决定」）。
+**修法**：照抄这句，一字不改——`/** 该节内最相关片的余弦距离（台账列：当前不参与排序，节序由片级位次 bestIndex 决定） */`
+
+**验收**：`grep -n "节级排序依据" packages/server/src/memory/index.ts` **零命中**（该字样只此一处）。
+
+> 补这条验收的原因（spec-gate Gate C 抓的）：A4 原先只有「改成实话」这个说法，**没有任何可观察结果能证明它被满足**——「实话」不可证伪。换成「旧字样零命中」即可机械判定。
 
 #### A5. `chunks.ts` 两处指向**已删对象**的注释
 
@@ -118,14 +134,14 @@ phase0.ts:363-367
 
 #### B2. 拆解方案（店长裁决）
 
-| 原内容                                                                         | 去哪                                                                 | 理由                                                                                                     |
-| ------------------------------------------------------------------------------ | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `bigramTokenize` / `buildFtsQuery` / `KEYWORD_STOPWORDS` / `FTS_SPECIAL_CHARS` | **新建** `db/repository/fts.ts`                                      | FTS5 切分与查询构造是一个独立关注点；**无 db 依赖 ⇒ 无 `setRepoDb`、无 repository/index 接线**           |
-| `HYBRID_CHANNEL_TOP_N` / `RRF_K`                                               | 移入 `chunks.ts`                                                     | 唯一消费者就是它，常量跟着用法走                                                                         |
-| `searchMemoriesByVector` / `MemorySearchResult`                                | **并入 `knowledge.ts`**，用 `knowledge.ts` 自己的 db 句柄            | 白名单只剩 `knowledge`，参数化表名已无存在理由                                                           |
-| `SEARCHABLE_TABLES` 白名单 + `table` 参数 + `TypeError` 分支                   | **整个删除**                                                         | **「参数来源永不放宽到外部输入」的安全边界，在只有一个值之后退化为死代码**。删掉即消灭一条永不触发的路径 |
-| `MemorySearchResult` 类型                                                      | **删除**，与既有 `KnowledgeSearchResult`（`knowledge.ts:21-28`）合一 | 两者形状本就相同——`knowledge.ts:42-48` 现在做的正是**逐字段搬运**。合并后这层映射整个消失                |
-| `MemoryRow` 类型（`repository/index.ts:74` 导出）                              | 核查后清理（若无消费方）                                             | 随 memories 语义一起退场                                                                                 |
+| 原内容                                                                         | 去哪                                                                                                              | 理由                                                                                                     |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `bigramTokenize` / `buildFtsQuery` / `KEYWORD_STOPWORDS` / `FTS_SPECIAL_CHARS` | **新建** `db/repository/fts.ts`                                                                                   | FTS5 切分与查询构造是一个独立关注点；**无 db 依赖 ⇒ 无 `setRepoDb`、无 repository/index 接线**           |
+| `HYBRID_CHANNEL_TOP_N` / `RRF_K`                                               | 移入 `chunks.ts`                                                                                                  | 唯一消费者就是它，常量跟着用法走                                                                         |
+| `searchMemoriesByVector` / `MemorySearchResult`                                | **并入 `knowledge.ts`**，用 `knowledge.ts` 自己的 db 句柄                                                         | 白名单只剩 `knowledge`，参数化表名已无存在理由                                                           |
+| `SEARCHABLE_TABLES` 白名单 + `table` 参数 + `TypeError` 分支                   | **整个删除**                                                                                                      | **「参数来源永不放宽到外部输入」的安全边界，在只有一个值之后退化为死代码**。删掉即消灭一条永不触发的路径 |
+| `MemorySearchResult` 类型                                                      | **删除**，与既有 `KnowledgeSearchResult`（`knowledge.ts:21-28`）合一                                              | 两者形状本就相同——`knowledge.ts:42-48` 现在做的正是**逐字段搬运**。合并后这层映射整个消失                |
+| `MemoryRow` 类型（`repository/index.ts:74` 导出）                              | **删除**（已实测**零消费方**：全仓仅 `types.ts:72` 定义 + `repository/index.ts:74` re-export 两处，无任何使用点） | 随 memories 语义一起退场                                                                                 |
 
 **连带从 `repository/index.ts` 删除**：`:19`（`setMemoriesDb` 导入）、`:37`（调用）、`:55`（`export * as memories`）。`fts.ts` 无 db 句柄，**不新增任何接线**。
 
@@ -155,14 +171,16 @@ phase0.ts:363-367
 
 1. **A1**：`file packages/server/src/memory/index.ts` 不再判为 `data`；**不加 `-a`** 的 `grep -rn "MAX_PROBE_N" packages/server/src/memory/index.ts` 能命中。
 2. **A1 语义不变**：全库测试绿（NUL→`\0` 是等价改写，节内去重行为逐字节不变）。
-3. **A2**：全仓（含 `phase0.ts`）grep `MEMORY_DEDUP` **零命中**。
-4. **A3**：`.env.example` grep `已作废` 零命中；`MEMORY_TOP_K` / `MEMORY_MAX_DISTANCE` **仍在**且仍被 `memory/index.ts:186-187` 消费。
-5. **B1**：`db/repository/memories.ts` 与 `memories.test.ts` **文件不存在**；全仓 grep `repository/memories` 与 `from './memories` **零命中**。
-6. **B2 行为等价（本票最关键的一条）**：知识库检索回归——`search_knowledge` 命中结果与改动前**逐字段一致**（`id`/`content`/`source`/`created_at`/`distance`，含 `maxDistance=0.35` 默认值语义与 topK 排序）。
-7. **B3**：`repository/index.ts` 的 `initRepository` 不再引用 `setMemoriesDb`；`repo.memories` 命名空间不存在（若外部无消费方）。
-8. **A5**：`chunks.ts` 内 grep `searchMemoriesHybrid` **零命中**；`memories.ts` 相关指向全部改写。
-9. 全套 `npx vitest run` 绿 + `node scripts/lint.js` 通过。
-10. 提交 `catstudy [uuid]`，提交前 grep 复核行号（本仓纪律）。
+3. **A2**：全仓（含 `phase0.ts`）grep `MEMORY_DEDUP` **零命中**；且 `ext-06` 的期望答案与店长定稿**逐字一致**（防实施者自行改写判分基准）。
+4. **A4**：`grep -n "节级排序依据" packages/server/src/memory/index.ts` **零命中**（该字样只此一处）。
+5. **A3**：`.env.example` grep `已作废` 零命中；`MEMORY_TOP_K` / `MEMORY_MAX_DISTANCE` **仍在**且仍被 `memory/index.ts:186-187` 消费。
+6. **B1**：`db/repository/memories.ts` 与 `memories.test.ts` **文件不存在**；全仓 grep `repository/memories` 与 `from './memories` **零命中**。
+7. **B2 行为等价（本票最关键的一条）**：知识库检索回归——`search_knowledge` 命中结果与改动前**逐字段一致**（`id`/`content`/`source`/`created_at`/`distance`，含 `maxDistance=0.35` 默认值语义与 topK 排序）。
+8. **B3**：`repository/index.ts` 的 `initRepository` 不再引用 `setMemoriesDb`；`repo.memories` 命名空间不存在（若外部无消费方）。
+9. **A5**：`chunks.ts` 内 grep `searchMemoriesHybrid` **零命中**；`memories.ts` 相关指向全部改写。
+10. **MemoryRow 已删**：全仓 grep `MemoryRow` **零命中**（含 `types.ts` 与 `repository/index.ts`）。
+11. 全套 `npx vitest run` 绿 + `node scripts/lint.js` 通过。
+12. 提交 `catstudy [uuid]`，提交前 grep 复核行号（本仓纪律）。
 
 ## 五、与 R1 的关系
 
@@ -175,3 +193,11 @@ phase0.ts:363-367
 | `db/repository/knowledge.ts` / `index.ts` | 拆解                                | —                                | —                                |
 
 并行必冲突。**C1 先合、R1 再开**——且 C1 先落正好达成用户要的「减少对我们设计的影响」：R1 实施者拿到的 `chunks.ts` 不再有指向死函数的注释。
+
+## 决策留痕
+
+- **跳 grilling**：因本票需求来自**用户明确指令 + 店长实测核查**（不是模糊想法）——核查面、病灶、拆解方案均有逐条源码证据与行号，无待澄清的需求分歧 → 故本单不单跑 grill。
+- **Gate A 需求照准**：A1~~A5 + B1~~B3 每条都有可观察结果（`file` 判定 / grep 零命中 / 文件不存在 / 检索结果逐字段一致）。
+- **Gate B 契约锁定**：边界 = §三（明写不做：不动检索行为、不删哨兵、不动 `db/index.ts:641-647` 的 `catch {}`、不做全量票辛分诊）；契约 = §二·B2 拆解表（四样东西的去向逐个钉死，含 `MemoryRow` 零消费方实测）；验收 = §四 十二条。
+- **Gate C 反向证明**：逐条对账后**补了两处漏网**——① A4 原只有「改成实话」这个不可证伪的说法，补「旧字样零命中」；② `MemoryRow` 原写「核查后清理（若无消费方）」是条件式空头承诺，实测零消费方后钉死为「删除」并补验收第 10 条。
+- **原「挂后续单」不在本票**：`db/index.ts:641-647` 全覆盖 `catch {}`、`reply.ts:620` 的 `MEMORY_TIMEOUT_MS` 命名误导、20 处票辛标记的全面分诊——均记在 §三，**本票不碰**。
