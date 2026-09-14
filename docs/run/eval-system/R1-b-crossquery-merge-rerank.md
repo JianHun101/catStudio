@@ -2,7 +2,7 @@
 
 > 来源：用户 2026-09-14 裁「拆」——R1 只采不改，跨查询合并改排序**拆出另票**（见 [P2 设计票](P2-design-retrieval-events.md) §三「本票范围」）。
 > 定位：**R1 之后，串行**。本票依赖 R1 的出口形状（`{ row, rrfScore, ..., channel }`）——**R1 已于 2026-09-14 合入 dev（PR #76 / `ce60621`），前置已满足**。
-> 状态：**已派活**（2026-09-14，flash猫，基线 `dev@04c1dbc`）。行号已按 R1 落地后的代码全量重审（基线 `dev@2f31698`，其后代码面未漂移），**并已过 spec-gate 二次过门**（抓出 2 处硬伤 + 2 处补充，见文末「Gate C 二次过门」）。
+> 状态：**已收口**（PR #78 → merge `3ca8c91`；基线 `dev@04c1dbc`，flash猫实施）。行号已按 R1 落地后的代码全量重审（基线 `dev@2f31698`，其后代码面未漂移），**并已过 spec-gate 二次过门**（抓出 2 处硬伤 + 2 处补充，见文末「Gate C 二次过门」）。收口后重启已落地，**验收 7 的「真机半」已关**（见 §七 第 1 条）。
 > **本票改行为**——改的是**猫实际读到的记忆**。这是它被从 R1 拆出来的唯一理由，也是本票验收的重心。
 
 ## 一、病灶：跨查询的「多路共识」信号，结构性不可见
@@ -320,7 +320,14 @@ ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER
 
 ### 七、未覆盖 / 待真机（如实记，不写成已通电）
 
-1. **验收 7 的「真机对账」半**：单测只证到「写口把真源的值原样落库」。**「重启后新采集的行该列 == 当前值」须等 server 重启后查生产库**，本单不含。
+1. ~~**验收 7 的「真机对账」半**：单测只证到「写口把真源的值原样落库」。「重启后新采集的行该列 == 当前值」须等 server 重启后查生产库，本单不含。~~ **【已关·2026-09-14 收口后 店长实测】** 重启于**本地 `19:16:52`** 落地（server `PID 14632`；嵌入 sidecar `PID 21500` 起于 `19:16:53`）——**不是听用户口述，是核进程 `CreationDate`**。随后查 `cat-study-dev.db`（`pnpm dev` 的运行库）：
+
+   - **additive 迁移真跑了**：`retrieval_events` 现有 **15 列**，含 `param_pool_n`（迁移定义在 `db/index.ts` 的 `retrieval_events.param_pool_n (R1-b 查询级池快照)` 条目，`ALTER TABLE ... ADD COLUMN ... INTEGER`）。
+   - **新采集行 == 真源常量**：重启后首条（`id=11`）`param_pool_n = 20`；真源 `HYBRID_POOL_PER_QUERY = 20`（`db/repository/chunks.ts`）。
+   - **窗口按 §四 4.2 的判据切得干净**：`param_pool_n IS NULL` **10 行**（重启前旧口径）/ `IS NOT NULL` **1 行**（重启后新口径）——**零交叉**。
+   - **该行不是造出来的**：其 `query_text = '重启了'`、`session_id = e896dd06…`、`query_embed_ok = 1`、候选 **23** 行 ⇒ 正是用户「已重启」那条消息触发的实检索（也顺带第三度复现了「约 23 行/次」的票面预估）。
+   - 复核命令（只读，可原样重跑）：`cd packages/server && node -e "const D=require('better-sqlite3');const db=new D('data/cat-study-dev.db',{readonly:true});console.log(db.prepare('SELECT id,param_pool_n,param_probe_n FROM retrieval_events ORDER BY id').all())"`
+
 2. ~~**验收 3 前半句「同分时按 `bestIndex` 升序」不可构造**~~ **【已推翻·已补用例】** 审查轮实测证伪，tie-break 分支**可达**。原文两处错，一并订正：
 
    - **公式 off-by-one（本处是根因）**：片分是 `Σ 1/(61 + 位次)`——真源在 `chunks.ts` 的 `1 / (RRF_K + i + 1)`，`RRF_K = 60`、`i` = 该趟出口下标（0-based）⇒ 即 `1/(61 + 位次)`。原文写 `Σ 1/(61 + 位次 + 1)`，是把 `K + 1 = 61` 代入之后**又加了一次 `+1`**。审查报告引用的反例数值（`{1,1,1,15}` / `{4,4,4,4}`）沿用的正是这个错公式；按真公式同一反例**整体左移 1**：`{2,2,2,16}` / `{5,5,5,5}`。
