@@ -63,6 +63,11 @@
   **同批补回一笔跨轮滞留**：P1-A2 的 §六 Resolution（`6172653`）与 §七 收口留痕（`6595f75`）**从未落 dev**——它们当年是隔离分支只 carry 已审 sha 及其祖先的**必然产物**（票面 `P1-a2-no-reply-guard.md` §七 自己记了这笔账，写明「随下一次**代码类**收口一并带入」）。C1 正是那次收口，但两条 commit 在 `session/0eb66b63` 上、不在收口分支的祖先链里，**该惯例第一次执行就漏了**。已 cherry-pick 落 dev（`8e48564` / `12ab58f`，均 `docs/run/**` 免审）。
   **裁决 · README Redis 死面（C1 §六 待裁项）= 并入 R1，独立 commit + 独立验收项**。判据是**是否改行为**，不是是否同主题——同一把尺子把 R1-b 拆了出去（它改猫实际读到的记忆）。本项 **6 处 / 8 行纯删除、零行为、零依赖**，判据可机械复核，省下一整轮 spec-gate + 审查。**前置已实测**：`db/redis.ts` 不存在、`redis`/`ioredis` 连 `package.json` 都没声明、`REDIS_URL` 零消费方。**明写不做**：`:369`/`:372` ADR 表两行是历史记录，不动。
 
+- **【店长裁决 · R1-b / F1 两票立票，含两处我拍的板】**（2026-09-14，执行用户已批顺序「R1 → 止血单（并行）→ R2 设计 → OQ-6 → P3」）— 立 [R1-b](R1-b-crossquery-merge-rerank.md) 与 [F1](F1-embedding-failure-visibility.md)。**两处需要用户知悉的架构裁决（均由我拍板，可驳）**：
+  1. **R1-b 含一条 additive 迁移 `ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER`**——依据 P2 设计票 §一 推论一「凡事后无法可靠重算的值，一律冗余进表」：R1-b 引入新的可调常量 `HYBRID_POOL_PER_QUERY`，无快照则历史行不可解释。**独立 commit + 独立验收项**（沿用 C1 §六 Redis 死面范式）。⚠️ 这动的是 `retrieval_events` 的 DDL（用户此前对列数问题追问过三轮），故显式上浮。**现已不是「35/36/37 列」那类选择题**：加列实测 **0.10 ms**、O(1)、不重建表，`db/index.ts` 已有 10+ 条 `ADD COLUMN` 先例。
+  2. **R1-b 的分数统一口径**：`chunks.ts:333` 的 `ChunkKeywordSearchResult = ChunkRow` **没有分数字段**，而合并改按分累加后纯关键词降级路径必须也有分 ⇒ 统一为 **Σ(各通道 `1/(RRF_K + rank_in_channel + 1)`)**——这不是新公式，**混合路径今天就是这么算的**（`chunks.ts:397` / `:400-403`）。**明写禁止**填 `NULL`（JS 里当 0 或 NaN，都不抛）或填不同量纲的值。
+  - 另：**R1-b 的 `final_rank` 与 R1 段同名不同义**（旧=名次最小 / 新=累加分最大）⇒ 两段数据不可比，须按 `created_at` 或 `param_pool_n IS NULL` 切窗口。**本仓已有同型前科（`trace_id` ↔ 链锚同名不同义）。**
+
 ## Not yet specified
 
 <!-- 看得见但还说不清的问题，随 frontier 推进毕业成票 -->
@@ -109,8 +114,9 @@
 
 - ~~**C1：老记忆链残留核查与清除** — `C1-legacy-memory-chain-cleanup.md`~~ ✅ **已关票**（2026-09-14，PR #75 / merge `4a33553`；含 server 代码 ⇒ 需重启生效）
 - **R1：`retrieval_*` 三表 + 采集接线** — 设计见 [P2 设计票](P2-design-retrieval-events.md)（**已派活**）。**动 DDL（不可逆）**，形态已定稿。**随票尾巴**：C1 §六 的 README Redis 死面（6 处 / 8 行，独立 commit + 独立验收项，与 R1 主体无依赖）
-- **R1-b：跨查询合并改排序**（自 R1 拆出，**行为变更**）— 无票单，待立
-- **止血单**（与 R1 并行，零依赖）：`embedding-client.ts:337` 失败只读 status **不读 body**（根因 20 行前已被 `embed-server.mjs:161` 写进 body）+ `child.stderr` **从 spawn 出来无人接管**（五个 CLI 适配器全接了，只有嵌入 sidecar 没接）+ 测试与生产**写同一个日志文件**（实测 26 次 bad-status 全落在测试窗口内）— 无票单，待立
+- **R1-b：跨查询合并改排序**（自 R1 拆出，**行为变更**）— [R1-b-crossquery-merge-rerank.md](R1-b-crossquery-merge-rerank.md)（2026-09-14 立票，**未派活**；**依赖 R1 出口形状，串行**）
+- **F1 止血单**（与 R1 并行，零依赖）— [F1-embedding-failure-visibility.md](F1-embedding-failure-visibility.md)（2026-09-14 立票，**未派活**）：① `embedding-client.ts:337-340` 失败只读 status **不读 body**（根因就在同一响应的 `embed-server.mjs:161` 里，`res.json()` 只在成功路径 `:344` 被调）；② `child.stderr` **从 spawn 出来无人接管**（`:596` 是 `stdio:['pipe','pipe','pipe']`，全文件 `stderr` 只出现在 `:137` 接口声明——**且管道写满会阻塞子进程**）；③ 测试与生产**写同一个日志文件**，且 `packages/server/vitest.config.ts:20` 的 `LOG_LEVEL:'error'` **是死的**（`setLogLevel` 全仓只在 `index.ts:122` 调用，测试不 import 它）
+  - ⚠️ **更正**：本行原写「实测 **26 次** bad-status 全落在测试窗口内」。**两个数都不准，且结论过强**——现测当前日志 `bad-status` **15 行** / 轮转件 `catStudy.log.1` **75 行**；抽样窗口（`16:28:40` 夹具段 → 9 秒后 `16:28:49`）**能证明测试条目与生产条目同文件交错，但「全部是测试造的」既证不出也证不伪**（两个来源在文件里无任何可分标记）。**后者才是 F1-c 的立论，且更强**：不是「日志脏」，是「生产上嵌入挂没挂过——答不出来」
 - **R2：span 表** — 设计同源、实施另票，**但字段设计本体尚不存在**（票 §八 只有「为什么这么排」的理由，一个字段都没设计）。**这是当前最大的洞**，可与三表并行推进
 
 > **纠偏（原第 95 行的说法）**：早先写「`retrieval_events` 表 → 记忆库 `recall@k` / `precision@k`」——**这句把 P2 说大了**。R1 落的是**原料**（候选 / 位次 / 通道 / 分数），不是指标本身；`recall@k` / `precision@k` 必须人工标注（13 件外部工具无一件能不靠参考答案给出此数），属 P3。
