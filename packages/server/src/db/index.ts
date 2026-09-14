@@ -617,6 +617,119 @@ export function initDb(): void {
         tokenize='unicode61'
       )`,
     },
+    // ─── 段四记忆检索流水（P2 / R1）：retrieval_* 三表 ──────────────────────
+    // 定位：**只采不改**——纯新增写口，读侧（评估中心「链路」tab / 检索面看板）
+    // 是后续叶子节点（P2 §七 边界）。三表按粒度分层：一 event 含 N query，
+    // 一 query 含 N candidate（归属，不是流水线先后）。
+    //
+    // 拆表判据（用户 2026-09-14 裁「表需要具有代表性，主要代表某类东西」）：
+    // 单表方案把检索级/查询级事实复制到每个候选行上（约 23 遍），一致性只能靠
+    // 「冗余列一律全行写」这类纪律看住；拆开后这些值各自只有一行，**按定义
+    // 不可能稀疏**——一致性由结构保证，不由纪律看住。
+    //
+    // 冗余判据（P2 §一）：「凡事后无法可靠重算的值，一律冗余进表」——
+    //   · 参数快照（threshold_max_distance / param_top_k / param_probe_n）：
+    //     `.env` 改一次阈值，全部历史行的可解释性当场归零（分不清某片被挡掉
+    //     是离得远还是当时阈值是 0.5）；
+    //   · 人类可读快照（breadcrumb / body_head / status_at_query）：`chunks`
+    //     是可重建的派生表（重扫 id 全变、status/body 被覆盖），不冗余则历史行
+    //     退化成读不懂的锚点。
+    //
+    // ⚠️ 表内**禁存**任何可从别处 join 出来的冗余计数（如 query_total /
+    // queries_embedded）——首版单表方案里这两列是「追着用户要签字」的产物，
+    // 拆表后它们由 `SELECT COUNT(*)` 派生，**不是被回答，是不存在了**。
+    {
+      name: 'retrieval_events table (段四检索流水·检索级)',
+      sql: `CREATE TABLE IF NOT EXISTS retrieval_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        execution_id TEXT NOT NULL,
+        session_id TEXT,
+        agent_id TEXT,
+        task_id TEXT,
+        created_at TEXT NOT NULL,
+        threshold_max_distance REAL NOT NULL,
+        param_top_k INTEGER NOT NULL,
+        param_probe_n INTEGER,
+        reason TEXT NOT NULL,
+        retrieval_ms INTEGER,
+        context_tokens INTEGER,
+        budget_tokens INTEGER,
+        truncated INTEGER
+      )`,
+    },
+    // 索引：挂链路（execution_id）/ 时间窗取数（created_at）/ 与 P1 链锚对齐（task_id）
+    {
+      name: 'idx_retrieval_events_execution',
+      sql: `CREATE INDEX IF NOT EXISTS idx_retrieval_events_execution
+        ON retrieval_events(execution_id)`,
+    },
+    {
+      name: 'idx_retrieval_events_created',
+      sql: `CREATE INDEX IF NOT EXISTS idx_retrieval_events_created
+        ON retrieval_events(created_at)`,
+    },
+    {
+      name: 'idx_retrieval_events_task',
+      sql: `CREATE INDEX IF NOT EXISTS idx_retrieval_events_task
+        ON retrieval_events(task_id)`,
+    },
+    {
+      name: 'retrieval_queries table (段四检索流水·查询级)',
+      sql: `CREATE TABLE IF NOT EXISTS retrieval_queries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        retrieval_id INTEGER NOT NULL REFERENCES retrieval_events(id) ON DELETE CASCADE,
+        query_index INTEGER NOT NULL,
+        query_text TEXT NOT NULL,
+        query_embed_ok INTEGER NOT NULL,
+        UNIQUE(retrieval_id, query_index)
+      )`,
+    },
+    // 候选级 20 列。两处口径必须与 §四 表 3 逐字一致，易写错：
+    //   · `distance` 纯关键词命中写 **NULL**（不写 maxDistance 哨兵）——「这片怎么
+    //     进来的」由 `channel` 承担，哨兵值退休；
+    //   · `injected` 的口径是**节**（注入单位是节，Decisions 14）：该片所属的节
+    //     最终进了 prompt ⇒ 1。`injected` 与 `dropped_reason` 必须分开——「被阈值
+    //     挡掉」和「被预算截断」是两个相反的药方（松阈值 vs 加预算）。
+    //   · `chunk_id` 是**诊断专用探针**（回查「现在的 chunk_id 还是不是同一片」），
+    //     **绝不作 join 键**——身份一律走 (doc_path, section_anchor, content_hash)。
+    {
+      name: 'retrieval_candidates table (段四检索流水·候选级)',
+      sql: `CREATE TABLE IF NOT EXISTS retrieval_candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query_id INTEGER NOT NULL REFERENCES retrieval_queries(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        channel TEXT,
+        doc_path TEXT NOT NULL,
+        section_anchor TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        chunk_id INTEGER,
+        breadcrumb TEXT,
+        body_head TEXT,
+        status_at_query TEXT,
+        distance REAL,
+        rank INTEGER,
+        rrf_score REAL,
+        final_rank INTEGER,
+        passed_status_filter INTEGER,
+        injected INTEGER NOT NULL,
+        section_rank INTEGER,
+        injected_position INTEGER,
+        dropped_reason TEXT
+      )`,
+    },
+    // 看板主查询路径：按查询取候选
+    {
+      name: 'idx_retrieval_candidates_query',
+      sql: `CREATE INDEX IF NOT EXISTS idx_retrieval_candidates_query
+        ON retrieval_candidates(query_id)`,
+    },
+    // 同一片的历次召回序列（改前改后对比）。**单列**——时间窗条件在
+    // retrieval_events.created_at 上，跨表 join 后过滤。
+    {
+      name: 'idx_retrieval_candidates_content_hash',
+      sql: `CREATE INDEX IF NOT EXISTS idx_retrieval_candidates_hash
+        ON retrieval_candidates(content_hash)`,
+    },
     // ─── 票辛 ⑥ 旧链下线：memories / memories_fts 双 DROP ──────────────────
     // 对话原话向量记忆链整体退役：写口已由票壬摘除（`saveMessageMemory` 删除 +
     // 存量清零），读口本票改走 `chunks`，两张表再无任何调用方（W8 判据）。

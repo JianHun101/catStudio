@@ -2,7 +2,8 @@
 
 > 来源：用户 2026-09-14 认可 P2 方向，要求「讲清具体实现 + 定表字段」，并明示**「有些字段可以冗余一下」**。
 > 后续裁决（同日）：用户裁 **拆三表**（题干「表需要具有代表性，主要代表某类东西」），并裁 **R1 实施范围**（第 1、2 步进 R1，第 3 步跨查询合并改排序**拆出另票**）。
-> 状态：**设计定稿（三表），待收口进 dev**。落 `docs/run/`（免审、可逆）。
+> 状态：**设计定稿（三表），已收口进 dev（`90553f7`，2026-09-14）**。落 `docs/run/`（免审、可逆）。
+> **R1 已过两轮 spec-gate（Gate C 两轮各补漏，共 18 条验收）⇒ 可开工。**
 > 本票只关 **R1（`retrieval_*` 三表）**；R2（span 表）设计同源但**实施另票**，见 §八。
 
 ## 一、Why 冗余：一条判据，两条推论
@@ -281,6 +282,12 @@ const rows = blob ? searchChunksHybrid(...) : searchChunksByKeyword(...)  // ind
 10. **FK 与唯一约束生效**：`db/index.ts:27` 已开 `foreign_keys = ON`；用例断言「插入不存在的 `retrieval_id` 被拒」+「同 `(retrieval_id, query_index)` 插两次被拒」。
 11. **参数快照**：改 `MEMORY_MAX_DISTANCE` 后新行 `threshold_max_distance` 随之改变，旧行不变。
 12. 全套 `npx vitest run` 绿 + `node scripts/lint.js` 通过。
+13. **`MemoryContextStats` 扩字段生效**（§三 落点表第 4 行）：断言候选明细**同时含两类**——`source='probe'`（阈值前 KNN 池）与 `source='final'`（融合 topK）；且每项带 `queryIndex` / `retrievalMs`。_（Gate C 补：该落点在 §三 有行、此前无验收项）_
+14. **链锚口径与 P1 一致**（§四 表 1 的 `task_id`）：落库行的 `task_id` == 同次执行的 `coalesce(回复消息.task_id, 触发消息.task_id)`；**真机对账**——用 `/api/eval/chains` 返回的同一锚串核。_（Gate C 补：票面把「不冗余这列，P2 数据与链路 tab 就是两张互不相干的表」当成强理由，却没有一条断言守它）_
+15. **三条 return 路径全覆盖**（§三 落点表第 5 行）：空召回 / **budget-exhausted** / ok **各构造一次**，断言三条都有行落库、`reason` 与 `truncated` 各自正确。_（Gate C 补：原第 7 条只覆盖「空结果」，`:296-298` 那条路径无覆盖——它恰是「预算够不够」这个头号问题的载体）_
+16. **`channel` 三值判定**：构造「同片被向量与关键词双通道命中」场景，断言该候选行 `channel='both'`。_（Gate C 补：原第 4/5 条只覆盖 `keyword` / `vector` 两值）_
+17. **越界证明 · R1 未夹带排序改动**（守 §七 的第一条边界，也是 R1 / R1-b 的分界线）：同输入下 `retrieveMemoryContext` 的返回（节序 / 正文 / `contextTokens`）与改动前**逐字段一致**——用与 C1 §二 同款的差分法（同进程同夹具，跑改动前后两份实现）。**这条抓的正是用户裁「拆」时要防的那件事**。
+18. **README Redis 死面清理**（C1 §六 尾巴，店长 2026-09-14 裁决并入本票，独立 commit）：`grep -in redis README.md` 命中**仅剩 2 行**，且两行**均在 ADR 表内**（`:369` `0002` / `:372` `0005` — 历史记录，明写不动）；`db/redis.ts` 字样归零。**与 R1 主体无依赖——R1 若因 DDL 返工，本条可独立先落。**
 
 ## 十、已裁决（原「待用户拍板」两条均已关闭）
 
@@ -291,7 +298,67 @@ const rows = blob ? searchChunksHybrid(...) : searchChunksByKeyword(...)  // ind
 ## 决策留痕
 
 - **跳 grilling**：因本票是**逐轮与用户对账压出来的**——三轮问答（哨兵用途 → 通道判别 → 表形态）里每一条结论都带源码实证与行号，用户已就形态、范围、顺序逐项裁决 → 故本单不单跑 grill。
-- **Gate A 需求照准**：本票是**设计票**，需求 = 「三表 DDL + 采集点 + 验收」；§九 十二条验收均可机械判定（行数增量 / `distance IS NULL` 断言 / mock 抛错后无残留行 / `reason='timeout'`）。
+- **Gate A 需求照准**：本票是**设计票**，需求 = 「三表 DDL + 采集点 + 验收」；§九 **十八条**验收均可机械判定（行数增量 / `distance IS NULL` 断言 / mock 抛错后无残留行 / `reason='timeout'` / grep 字样归零）。
 - **Gate B 契约锁定**：边界 = §七（明写不做：不改前端、不建 span 表、不建节表、不改排序、不实现留存）；契约 = §四 三表 39 列逐个钉死 + §三 落点表逐文件钉死；验收 = §九。
 - **Gate C 反向证明**：逐条对账后**补了两处**——① §二③ 发现 `reason` 值域是 9 不是 7，补验收第 6 条（超时路径必须落 `timeout` 而非 NULL）；② 拆三表新引入「半写完」风险面，补验收第 3 条（mock 第三张表抛错，断言前两张表无残留行）。
-- **本票与 C1 的次序**：C1 前置（两票改同一批文件，`memory/index.ts:273` 与 R1 的 `:249-313` 改动区间**直接重叠**，并行必冲突）→ 见 [C1](C1-legacy-memory-chain-cleanup.md)。
+- **Gate C 第二轮（派活前，2026-09-14 店长复查）**：**又补 6 条**（13~~18）。_这是同一张票第二次被抓 Gate C 漏网——第一次是关票前，第二次是派活前。_ 漏网形态两类：
+  - **有落点无验收**：§三 落点表的 7 行里有 3 行没有任何验收项守它——`MemoryContextStats` 扩字段（→ 13）、三条 return 路径只覆盖了「空结果」而漏 `budget-exhausted`（→ 15）、`both` 通道值无断言（→ 16）。
+  - **有强理由无断言**：票面把「`task_id` 不冗余则 P2 数据与链路 tab 是两张互不相干的表」写成核心卖点，却没有一条断言守它（→ 14）；用户裁「拆」的分界线（第 3 步不得夹带）只有一句边界、无越界证明（→ 17）。
+  - **教训**：**Gate C 不是一次性动作**。它在「设计当时」对账一遍、在「派活当时」必须再对一遍——因为**验收项是随设计增补而失配的**：§三 落点表后补一行、§七 边界后补一条，都不会自动长出对应验收。**判据：落点表每一行、边界每一条，各要能指到一个验收编号**；指不到的就是漏网。
+- **本票与 C1 的次序**：C1 前置（两票改同一批文件，`memory/index.ts:273` 与 R1 的 `:249-313` 改动区间**直接重叠**，并行必冲突）→ 见 [C1](C1-legacy-memory-chain-cleanup.md)。**C1 已于 2026-09-14 关票（PR #75 / merge `4a33553`）⇒ R1 可开工。**
+
+## 十一、R1 实施留痕（2026-09-14）
+
+### 11.1 改动面（行号为实施后实测，`grep` 复核）
+
+| 落点                               | 实施位置                                                                                                         | 内容                                                               |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `db/index.ts`                      | `:642` / `:677` / `:696`                                                                                         | 三表 DDL + 4 条索引，additive（`CREATE TABLE IF NOT EXISTS`）      |
+| `db/repository/retrievalEvents.ts` | **新建**（`insertRetrievalTrace:123`，读侧 `:224`/`:244`）                                                       | 三表同事务写口 + 行类型（**契约唯一真相源**）                      |
+| `db/repository/chunks.ts`          | `:374`(`CANDIDATE_BODY_HEAD_CHARS`) / `:394`(`ChunkHybridHit`) / `:414`(`searchChunksHybrid`) / `:491`(探针扩列) | 出口带出通道身份 + RRF 分 + 两位次；探针补身份三元组与 `body_head` |
+| `memory/index.ts`                  | `:149`(`currentRetrievalParams`) / `:290`(`queryTraces`) / `:414`(`candidates`) / `:536`(`renderOrder`)          | 采集流水；注入面回填                                               |
+| `execution/reply.ts`               | `:214`(`recordRetrievalTrace`) / `:706`(`memoryT0`) / `:729`(调用点)                                             | 埋点写库（race 外、`if` 外）                                       |
+| `README.md`                        | 8 行                                                                                                             | Redis 死面清理（**独立 commit**，见 §九 18）                       |
+
+### 11.2 §九 十八条验收 → 证据（逐条）
+
+| #   | 落点                                        | 用例                                                                                         |
+| --- | ------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| 1   | `retrievalEvents.test.ts`                   | 验 1：老库塞既有行 → 再跑迁移 → 三表在、三表行数不变                                         |
+| 2   | `reply.test.ts` + `retrievalEvents.test.ts` | 验 2（组装）/ 验 2（写口）：`execution_id` JOIN 回 `execution_logs` 对上                     |
+| 3   | `retrievalEvents.test.ts`                   | 验 3：注入 `content_hash=null` 真错 → **前两张表零残留**                                     |
+| 4   | `memory/index.test.ts`                      | 验 4 ×2：`keyword`→NULL（对照同片 probe 行距离 0.293）/ `vector`→非空                        |
+| 5   | `memory/index.test.ts`                      | 验 5：仅改写那趟嵌入失败 → 该行 `queryEmbedOk=0`，其候选 `channel='keyword'` 非 `both`       |
+| 6   | `reply.test.ts`                             | 验 6 ×2：`memoryTimeout` → `'timeout'`；抛错 → `'error'`                                     |
+| 7   | `memory/index.test.ts` + `reply.test.ts`    | 验 15 空召回 + 超时路径：行仍在、reason 正确                                                 |
+| 8   | `retrievalEvents.test.ts` + `reply.test.ts` | 验 8 + 找不到执行行：均不抛、返回 undefined / 不落盘                                         |
+| 9   | `memory/index.test.ts`                      | 验 9：`finalRank=[0,1,2,3]`、`injected` 节集合 == `r.sections`、`injectedPosition=[1,2,4,3]` |
+| 10  | `retrievalEvents.test.ts`                   | 验 10：FK 拒（query/候选两处）+ UNIQUE 拒 + CASCADE 删                                       |
+| 11  | `retrievalEvents.test.ts` + `reply.test.ts` | 验 11：两行不同阈值互不影响；超时路径参数快照仍带                                            |
+| 12  | 全套                                        | `npx vitest run` **113 文件 / 2268 用例全绿**；`node scripts/lint.js` 三包通过               |
+| 13  | `memory/index.test.ts`                      | 验 13：`sources == {final, probe}`、每项带 `queryIndex`、参数快照 + `retrievalMs`            |
+| 14  | `reply.test.ts`                             | 验 14 ×2：带锚 → 锚；无锚 → `traceId`（与回复侧 `\|\| traceId` 同构）                        |
+| 15  | `memory/index.test.ts`                      | 验 15 ×3：`no-hit` / `budget-exhausted` / `not-enabled`+`empty-query`                        |
+| 16  | `memory/index.test.ts`                      | 验 16：同片双通道 → `both`，`rrfScore > 1/61`（两通道相加）                                  |
+| 17  | `memory/index.test.ts`                      | 验 17 ×3：n=1..5 逐窗口「实际 sections 喂旧算法」逐字节比对 + 节序仍由 `bestIndex` 决定      |
+| 18  | `README.md`                                 | `grep -in redis` 命中 **2 行**且均在 ADR 表内（`0002`/`0005`）；`redis.ts` 字样归零          |
+
+> **票面行号漂移**：§九 18 写「`:369` `0002` / `:372` `0005`」，实测在 **`:358` / `:361`**（差 11 行）。判据按**内容**（ADR 表内两行）成立，行号系票面写作时的快照，已在提交前 grep 复核。
+
+### 11.3 偏离与自主决策（**请审查重点看这一节**）
+
+1. **`execution_id` 的来源票面未钉死**（§三 落点表只列 `reply.ts:635`，但 `logId` 是 `serial.ts:1232` 的局部量，隔 3 个函数帧）。**取法选了查库**（`getLogsByTriggerMessage` 按 (会话, 猫, 触发消息) + `status='running'` 窄定位），**没有在 serial 穿线**——理由：① 票 §八 自己把 `serial.ts` 划为「事故密集区、另票一个风险面」，穿线要改 4 个签名；② 与同文件 `updateExecutionLogDiagnostics`（实施后实测 `:1180`）既有的「按 agent + running 定位」同款，只是多带两个条件、错挂面更小。**未命中时不编 `execution_id`、直接跳过并记 warn**（不违反 NOT NULL、也不编数据）。_这是契约缺口，若店长要穿线版，改动量 = 4 签名。_
+2. **`truncated` 在 `budget-exhausted` 路径由 `false` 改判 `true`**（声明的微修正）：该路径按定义就是「预算截断发生」（`bySection` 非空却一节没进），原值落成 `EMPTY_STATS` 的默认 `false` —— 与 ok 路径同口径（`kept.length < bySection.size` ⇒ `0 < N` ⇒ true）后修正。**不动会让这张表在「预算够不够」这个头号问题上产出反向读数。**
+3. **流水类型合并到写口契约**：`memory/index.ts` 原本另写了一份 `MemoryCandidateTrace` / `MemoryQueryTrace` 字段表（与写口 20 列重复），已改为 `type = RetrievalCandidateInput` 别名。理由：两处各写一份，改一处漏一处**没有编译期信号**——**合并当场抓出一处真错**（测试里写的 `passesStatusFilter` vs 契约的 `passedStatusFilter`，旧名来自 C1 前的 memory 侧）。
+4. **`renderSections` 改为复用 `renderOrder`**（唯一真相源）：`injectedPosition` 要答「猫读到的第几条」，与渲染序必须同源；两份各写会**静默**漂移。行为不变，由 §九 17 的差分用例守（n=1..5 全窗口逐字节）。
+5. **埋点整段加 try/catch**（票 §三 硬约束 2 的本意）：原实现只包了写口内部，**查执行行 / 取参数快照 / 组装**三段在外——实测被 5 个测试替身（partial `vi.mock` factory 缺 `currentRetrievalParams`）打中，`runAgentReply` 整条中断、**87 个用例连片失败**。修法是双管：① 整段兜底 + `log.warn`；② **5 个替身补上该导出**（替身必须镜像真模块被消费的导出面）。
+6. **顺手清一处死 import**：`memory/index.ts` 的 `ChunkRow`（`isVectorHitRow` 删除后零消费方），A5 同病灶。
+7. **超时路径的 `retrieval_ms` 取外侧计时**：有 `memoryResult` 时取模块内测值（同一趟），超时/抛错无内测值才退到 `reply.ts` 外侧计时。两把尺子的分界写死在代码注释里。
+
+### 11.4 行号审计（改完全仓复核，本仓反复病灶）
+
+§十一 11.1 的行号是**实施后实测**（`grep` 复核过）。但审计中发现**我自己引入了一处行号漂移**：`reply.ts` 的埋点注释写「（`insertAgentMessage`，下方 `:911`）」——`:911` 是**改动前**的地址，我往该文件插了约 100 行后实际在 `:1006`。
+
+**修法不是改成 `:1006`，而是换成符号引用**（「本文件下方『写入完整消息』段」）——绝对行号会被下一次编辑再次打漂，符号不会。同批核过的引用：`db/index.ts:642/677/696`、`chunks.ts:374/394/414/491`、`memory/index.ts:149/290/414/536`、`reply.ts:214/706/729`、`serial.ts:1232`、`updateExecutionLogDiagnostics` 实施后 `:1180`（本票 11.3 原写 `:1077`，同为改动前地址，已更正）。
+
+**教训**：设计票里的行号是「写下那一刻」的快照，实施后必然全体漂移。**实施留痕给实测号；代码注释给符号**——两者混用就是本仓记过多次的「记录≠真相」。

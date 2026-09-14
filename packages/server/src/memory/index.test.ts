@@ -10,6 +10,7 @@
  * `MEMORY_HYBRID_ENABLED` 开关）：整条旧链已随票辛 ⑥ 下线，相应用例一并删除。
  */
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest'
+import { estimateTokens } from '@cat-study/shared'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -266,13 +267,17 @@ describe('memory', () => {
       expect(r.text).toContain('猫咖测试甲')
       expect(r.text).not.toContain('猫咖测试乙')
 
-      // 埋点含阈值前 top-N 的切片身份 + 距离
-      const blocked = r.stats.topCandidates.find((c) => c.docPath === 'docs/adr/0003-c.md')
+      // 埋点含阈值前 top-N 的切片身份 + 距离。**按 `source='probe'` 取**——
+      // 该池的定义就是「阈值/状态过滤**之前**的原始 KNN 池」，而 `candidates`
+      // 现在同列承载 `final`（融合 topK，`passedStatusFilter` 恒 null = 不适用）。
+      const blocked = r.stats.candidates.find(
+        (c) => c.source === 'probe' && c.docPath === 'docs/adr/0003-c.md'
+      )
       expect(blocked).toBeTruthy()
       expect(blocked!.sectionAnchor).toBe('## 决策')
       // 余弦口径（vec0 显式 distance_metric=cosine）——L2 会得 0.7654，见 db/index.ts 注
       expect(blocked!.distance).toBeCloseTo(0.293, 2)
-      expect(blocked!.passesStatusFilter).toBe(true)
+      expect(blocked!.passedStatusFilter).toBe(true)
       expect(r.stats.droppedByThreshold).toBeGreaterThanOrEqual(1)
 
       // 「空手而归」与「被阈值挡掉」可区分：库空时池子为空、两个计数都归零
@@ -281,7 +286,7 @@ describe('memory', () => {
       getDb().prepare('DELETE FROM chunks_fts').run()
       const empty = await memoryModule.retrieveMemoryContext(Q)
       expect(empty.reason).toBe('no-hit')
-      expect(empty.stats.topCandidates).toEqual([])
+      expect(empty.stats.candidates).toEqual([])
       expect(empty.stats.droppedByThreshold).toBe(0)
       expect(empty.stats.blockedByStatus).toBe(0)
     })
@@ -547,6 +552,243 @@ describe('memory', () => {
       const ctx = await memoryModule.buildKnowledgeContext('猫咖测试')
       expect(ctx).toContain('同向知识')
       expect(ctx).not.toContain('正交知识')
+    })
+  })
+
+  // ═══ R1（P2）：检索流水采集 ═══════════════════════════════
+  //
+  // 判据面在**本模块**（映射与降级路径），不在写口——写口只原样存值
+  // （见 `db/repository/retrievalEvents.test.ts` 文件头）。
+  describe('R1 检索流水（P2 §四）', () => {
+    /** 取某 source 的候选，找不到即断言失败（不用 `!` 掩盖「压根没采到」） */
+    const candOf = (r: { stats: { candidates: any[] } }, pred: (c: any) => boolean) =>
+      r.stats.candidates.find(pred)
+
+    // ─── 验收 13：MemoryContextStats 扩字段 ────────────
+    it('验收 13 · 候选明细同时含 probe 与 final 两类，且带 queryIndex / 参数快照 / 耗时', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+      process.env.MEMORY_TOP_K = '3'
+      seedChunk({ docPath: 'docs/adr/0002-b.md', body: '猫咖测试甲', angle: 0 })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+
+      const sources = new Set(r.stats.candidates.map((c) => c.source))
+      expect(sources).toEqual(new Set(['final', 'probe']))
+
+      // 每一项都能答「它是哪趟召回的」（跨查询合并后仍要能答）
+      for (const c of r.stats.candidates) {
+        expect(typeof c.queryIndex).toBe('number')
+      }
+      // 参数快照与耗时
+      expect(r.stats.thresholdMaxDistance).toBe(0.6)
+      expect(r.stats.paramTopK).toBe(3)
+      expect(r.stats.paramProbeN).toBeGreaterThan(0)
+      expect(typeof r.stats.retrievalMs).toBe('number')
+      expect(r.stats.retrievalMs).toBeGreaterThanOrEqual(0)
+      // 逐趟查询流水
+      expect(r.stats.queryTraces).toEqual([{ queryIndex: 0, queryText: Q, queryEmbedOk: true }])
+    })
+
+    // ─── 验收 16：channel 三值判定（both）──────────────
+    it('验收 16 · 同片被两通道命中 ⇒ channel=both，且两位次都带出', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+      // 查询词与正文有 bigram 交集 ⇒ 关键词通道必命中；angle=0 ⇒ 向量通道也命中
+      seedChunk({ docPath: 'docs/adr/0002-b.md', body: '猫咖测试甲', angle: 0 })
+
+      const r = await memoryModule.retrieveMemoryContext('猫咖测试甲')
+      const final = r.stats.candidates.find((c) => c.source === 'final')
+      expect(final).toBeTruthy()
+      expect(final!.channel).toBe('both')
+      // 双通道 ⇒ 距离取向量真值（非 NULL），RRF 分是两通道相加
+      expect(final!.distance).not.toBeNull()
+      expect(final!.rrfScore).toBeGreaterThan(1 / 61)
+    })
+
+    // ─── 验收 4 + 5：降级路径与哨兵退休 ────────────────
+    it('验收 5 · 某趟嵌入失败 ⇒ 该趟 queryEmbedOk=0，其候选 channel=keyword（非 both）', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.1' // 向量通道够不着（见下）
+      // 原话与夹具无 bigram 交集 ⇒ 原话两通道都拿不到它；改写查询独占关键词通道
+      const ORIGINAL = '不含乙的词'
+      const REWRITE = '贝塔伽马'
+      mockRewriteRetrievalQueries.mockResolvedValue([REWRITE])
+      // 仅改写那趟嵌入失败——「某趟失败、其余成功」的部分降级场景
+      mockEmbedText.mockImplementation(async (text: string): Promise<EmbedResult> =>
+        text === REWRITE ? { ok: false, reason: 'spawn-failed' } : { ok: true, vector: vecAt(0) }
+      )
+      // angle=45 ⇒ 距离 ≈0.293 > 0.1：原话的向量通道过滤掉它（但它在阈值前的探针池里）
+      seedChunk({ docPath: 'docs/adr/0002-b.md', body: '贝塔伽马正文', angle: 45 })
+
+      const r = await memoryModule.retrieveMemoryContext(ORIGINAL)
+
+      // 逐趟流水：两趟，只有改写那趟 ok=0（与候选行 channel 正交）
+      expect(r.stats.queryTraces).toEqual([
+        { queryIndex: 0, queryText: ORIGINAL, queryEmbedOk: true },
+        { queryIndex: 1, queryText: REWRITE, queryEmbedOk: false },
+      ])
+      expect(r.reason).toBe('ok')
+
+      // 降级那趟产出的候选：keyword（**不是 both**）——判据是「向量通道压根没跑」
+      const fromDegraded = r.stats.candidates.find((c) => c.queryIndex === 1)
+      expect(fromDegraded).toBeTruthy()
+      expect(fromDegraded!.channel).toBe('keyword')
+      // 验收 4：纯关键词命中写 NULL，不写 maxDistance 哨兵
+      expect(fromDegraded!.distance).toBeNull()
+      expect(fromDegraded!.rrfScore).toBeNull()
+
+      // 对照组：同一片在阈值前探针池里**带着真距离**（证明 NULL 是通道转换的结果，
+      // 不是「本来就取不到距离」）
+      const probeRow = r.stats.candidates.find(
+        (c) => c.source === 'probe' && c.contentHash === fromDegraded!.contentHash
+      )
+      expect(probeRow!.distance).toBeCloseTo(0.293, 2)
+      expect(probeRow!.droppedReason).toBe('threshold')
+    })
+
+    it('验收 4 · channel=vector 的候选 distance 非空', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+      seedChunk({ docPath: 'docs/adr/0002-b.md', body: '猫咖测试甲', angle: 45 })
+      const r = await memoryModule.retrieveMemoryContext(Q) // 无 bigram 交集 ⇒ 纯向量
+      const final = r.stats.candidates.find((c) => c.source === 'final')
+      expect(final!.channel).toBe('vector')
+      expect(final!.distance).toBeCloseTo(0.293, 2)
+    })
+
+    // ─── 验收 9：位次与注入面 ──────────────────────────
+    it('验收 9 · finalRank 与注入序一致，injected=1 的节集合 == 实际注入的节；渲染位次用首尾重排后的编号', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '5'
+      // 4 节 ⇒ 首尾重排后渲染序为 [0,1,3,2]（n=4 时 half=2，后半逆序）——
+      // 选 4 节是为了让重排**可观测**（n=3 时渲染序恰是恒等，测不出问题）
+      const docs = ['a', 'b', 'c', 'd']
+      docs.forEach((d, i) =>
+        seedChunk({ docPath: `docs/adr/000${i + 1}-${d}.md`, body: `猫咖测试${d}`, angle: i * 5 })
+      )
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      expect(r.sections.length).toBe(4)
+
+      const finalRows = r.stats.candidates.filter((c) => c.source === 'final')
+      // finalRank 是 ordered 的下标（0-based），与注入序同源
+      expect(finalRows.map((c) => c.finalRank)).toEqual([0, 1, 2, 3])
+
+      const injected = finalRows.filter((c) => c.injected)
+      const injectedSections = new Set(injected.map((c) => `${c.docPath}\0${c.sectionAnchor}`))
+      // 「injected=1 的行数 == 实际注入的节点数」的准确形态：**按节去重**后相等
+      // （同一节可能有多个片入选，它们在行面上各占一行但只算一个注入节点）
+      expect(injectedSections.size).toBe(r.sections.length)
+      expect([...injectedSections].map((k) => k.split('\0')[0]).sort()).toEqual(
+        r.sections.map((s) => s.docPath).sort()
+      )
+
+      // sectionRank = kept 下标（相关度序）；injectedPosition = 渲染后编号 1..n
+      expect(finalRows.map((c) => c.sectionRank)).toEqual([0, 1, 2, 3])
+      expect(finalRows.map((c) => c.injectedPosition)).toEqual([1, 2, 4, 3])
+    })
+
+    // ─── 验收 15：三条 return 路径全覆盖 ────────────────
+    it('验收 15 · 空召回路径也带完整 trace（不是无痕）', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('no-hit')
+      expect(r.stats.candidates).toEqual([])
+      expect(r.stats.queryTraces).toHaveLength(1)
+      // 参数快照与耗时在**每条**返回路径上都带（否则「为什么没召回」无解）
+      expect(r.stats.thresholdMaxDistance).toBe(0.6)
+      expect(typeof r.stats.retrievalMs).toBe('number')
+      expect(r.stats.truncated).toBe(false)
+    })
+
+    it('验收 15 · budget-exhausted 路径：truncated=true 且 droppedSections 落账', async () => {
+      process.env.MEMORY_CONTEXT_TOKEN_BUDGET = '1'
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      seedChunk({ docPath: 'docs/adr/0002-b.md', body: '猫咖测试甲', angle: 0 })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('budget-exhausted')
+      // 全程被预算挡掉却记 truncated=false 是这张表最不该产出的谎账
+      expect(r.stats.truncated).toBe(true)
+      expect(r.stats.droppedSections).toBeGreaterThan(0)
+      // 召回是成功的 ⇒ 候选明细仍在（「召回失败」与「注入失败」是两回事）
+      expect(r.stats.candidates.some((c) => c.source === 'final')).toBe(true)
+      expect(typeof r.stats.retrievalMs).toBe('number')
+    })
+
+    it('验收 15 · not-enabled / empty-query 两条早退路径也带参数快照', async () => {
+      mockIsMemoryEnabled.mockReturnValue(false)
+      const off = await memoryModule.retrieveMemoryContext(Q)
+      expect(off.reason).toBe('not-enabled')
+      expect(off.stats.paramTopK).toBe(3)
+      expect(off.stats.paramProbeN).toBeGreaterThan(0)
+
+      mockIsMemoryEnabled.mockReturnValue(true)
+      const blank = await memoryModule.retrieveMemoryContext('@某猫')
+      expect(blank.reason).toBe('empty-query')
+      expect(blank.stats.paramTopK).toBe(3)
+      expect(blank.stats.queryTraces).toEqual([])
+    })
+
+    // ─── 验收 17：越界证明 · 未夹带排序改动 ────────────
+    describe('验收 17 · 差分法证明未夹带排序/渲染改动', () => {
+      /**
+       * 改动**前**的 `renderSections`——逐字抄自
+       * `git show 18f0fcd:packages/server/src/memory/index.ts`（该行区间未变）。
+       * 只取 `text`：旧实现的 `tokens` 也是 `estimateTokens(text)`，同源。
+       */
+      function renderSectionsBefore(sections: Array<{ parts: string[] }>): string {
+        if (sections.length === 0) return ''
+        const half = Math.ceil(sections.length / 2)
+        const ordered = [...sections.slice(0, half), ...sections.slice(half).reverse()]
+        const lines = ordered.map((s, i) => `${i + 1}. ${s.parts.join('\n')}`)
+        return `\n\n【相关记忆】\n${lines.join('\n')}`
+      }
+
+      it('真实检索下逐窗口对账：n=1..5 的注入串与改动前旧算法逐字节一致', async () => {
+        process.env.MEMORY_MAX_DISTANCE = '1.5'
+        process.env.MEMORY_TOP_K = '5'
+        // 每次多放一节，把 1..5 个节的全量窗口都跑一遍（topK=5 是上界）
+        for (let n = 1; n <= 5; n++) {
+          getDb().prepare('DELETE FROM chunks').run()
+          getDb().prepare('DELETE FROM chunk_vectors').run()
+          getDb().prepare('DELETE FROM chunks_fts').run()
+          for (let i = 0; i < n; i++) {
+            seedChunk({ docPath: `docs/adr/000${i + 1}-x.md`, body: `猫咖测试${i}`, angle: i * 5 })
+          }
+          const r = await memoryModule.retrieveMemoryContext(Q)
+          expect(r.reason).toBe('ok')
+          expect(r.sections).toHaveLength(n)
+          // 差分：**实际** sections 喂旧算法，与模块实际输出比——不是重抄一遍公式自证
+          expect(r.text).toBe(renderSectionsBefore(r.sections))
+          expect(r.stats.contextTokens).toBe(estimateTokens(r.text))
+          // 改动前该字段就存在且语义未变
+          expect(r.stats.truncated).toBe(false)
+        }
+      })
+
+      it('空召回路径的输出与改动前一致（空串，零 token）', async () => {
+        process.env.MEMORY_MAX_DISTANCE = '0.6'
+        const r = await memoryModule.retrieveMemoryContext(Q)
+        expect(r.text).toBe(renderSectionsBefore([]))
+        expect(r.stats.contextTokens).toBe(0)
+      })
+
+      it('节序仍由 bestIndex 决定（第 3 步「跨查询合并改排序」未被夹带）', async () => {
+        process.env.MEMORY_MAX_DISTANCE = '1.5'
+        process.env.MEMORY_TOP_K = '5'
+        const angles = [30, 0, 45, 15]
+        angles.forEach((a, i) =>
+          seedChunk({ docPath: `docs/adr/000${i + 1}-x.md`, body: `猫咖测试${i}`, angle: a })
+        )
+        const r = await memoryModule.retrieveMemoryContext(Q)
+        // 序 = 距离升序（angle 越小越相关）——若合并键被换成 RRF 分累加，这里会先变
+        expect(r.sections.map((s) => s.docPath)).toEqual([
+          'docs/adr/0002-x.md',
+          'docs/adr/0004-x.md',
+          'docs/adr/0001-x.md',
+          'docs/adr/0003-x.md',
+        ])
+      })
     })
   })
 })

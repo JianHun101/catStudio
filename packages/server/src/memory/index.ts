@@ -30,8 +30,12 @@
 
 import { estimateTokens } from '@cat-study/shared'
 import { chunks as chunksRepo, knowledge as knowledgeRepo } from '../db/repository/index.js'
-import type { ChunkVectorSearchResult } from '../db/repository/chunks.js'
-import type { ChunkRow } from '../db/repository/types.js'
+import { CANDIDATE_BODY_HEAD_CHARS, type ChunkVectorSearchResult } from '../db/repository/chunks.js'
+import type {
+  RetrievalCandidateInput,
+  RetrievalChannel,
+  RetrievalQueryInput,
+} from '../db/repository/retrievalEvents.js'
 import { embedText, getEmbeddingStatus, isMemoryEnabled } from './embedding.js'
 import { rewriteRetrievalQueries } from './query-rewrite.js'
 import { createLogger } from '../logger.js'
@@ -78,14 +82,17 @@ export type MemoryRetrievalReason =
   | 'no-hit'
   | 'budget-exhausted'
 
-/** X5 埋点字段：阈值**前** top-N 候选的切片身份 + 距离 */
-export interface MemoryCandidateTrace {
-  docPath: string
-  sectionAnchor: string
-  distance: number
-  /** X4 状态过滤是否放行（false = 该候选被 `superseded`/`deprecated` 挡掉） */
-  passesStatusFilter: boolean
-}
+// ─── 检索流水（P2 / R1：只采不改，字段口径见 P2 §四）─────
+//
+// 类型**直接复用写口契约**（`db/repository/retrievalEvents.ts`），不在这里另写一份
+// 字段表：两处各定义一份的话，改一处漏一处**没有编译期信号**——`stats` 与落库行
+// 会静默错位。`RetrievalEventInput` 的候选/查询形状就是这里的形状。
+
+/** 一趟查询的流水（`retrieval_queries` 一行的来源） */
+export type MemoryQueryTrace = RetrievalQueryInput
+
+/** 一个候选片的流水（`retrieval_candidates` 一行的来源） */
+export type MemoryCandidateTrace = RetrievalCandidateInput
 
 export interface MemoryContextStats {
   /** 参与检索的查询条数（原话 + 改写） */
@@ -99,8 +106,19 @@ export interface MemoryContextStats {
   contextTokens: number
   budgetTokens: number
   truncated: boolean
-  /** 阈值前 top-N 候选（X5 埋点） */
-  topCandidates: MemoryCandidateTrace[]
+  /** 本次检索总耗时（含嵌入 + 两通道检索 + 分节渲染）——诉求③性能面 */
+  retrievalMs: number
+  /** 参数快照（P2 §一 推论一：阈值改一次，历史行的可解释性当场归零 ⇒ 必须冗余） */
+  thresholdMaxDistance: number
+  paramTopK: number
+  paramProbeN: number
+  /** 逐趟查询的流水 */
+  queryTraces: MemoryQueryTrace[]
+  /**
+   * 候选明细：**probe 池 + 融合 topK 同列**，靠 `source` 判别（P2 §四 表 3）。
+   * 「部分降级有没有发生」靠 `queryTraces.queryEmbedOk` 与本列的 `channel` 联看。
+   */
+  candidates: MemoryCandidateTrace[]
   /** 候选池里被 X4 状态过滤挡掉的行数（W11：与「真的无命中」区分） */
   blockedByStatus: number
   /** 候选池里被距离阈值挡掉的行数（W5：与「空手而归」区分） */
@@ -118,6 +136,50 @@ export interface MemoryContextResult {
   stats: MemoryContextStats
 }
 
+export interface RetrievalParamsSnapshot {
+  topK: number
+  maxDistance: number
+  probeN: number
+}
+
+/**
+ * 本次检索的参数快照。单一来源——检索链与 `execution/reply.ts` 的超时/抛错
+ * 路径（拿不到 `MemoryContextResult` 时）都取它，避免两处各读一遍 env 漂移。
+ */
+export function currentRetrievalParams(): RetrievalParamsSnapshot {
+  return {
+    topK: parseInt(process.env.MEMORY_TOP_K || '3', 10),
+    maxDistance: parseFloat(process.env.MEMORY_MAX_DISTANCE || '0.6'),
+    probeN: MAX_PROBE_N,
+  }
+}
+
+/**
+ * 一个片在其命中通道内的**最好位次**（0-based）。两通道都命中时取较小值
+ * ——「这片排得多靠前」问的是它最好的那次表现，不是某条通道的。
+ */
+function bestChannelRank(vectorRank: number | null, keywordRank: number | null): number | null {
+  if (vectorRank === null) return keywordRank
+  if (keywordRank === null) return vectorRank
+  return Math.min(vectorRank, keywordRank)
+}
+
+/**
+ * 该候选是否**其所属节在融合 topK 里的代表片**。
+ *
+ * 节的代表由 `bySection` 的「首个胜出」决定，而 `ordered` 的顺序就是
+ * `finalTraces` 的顺序 ⇒ 代表 = 前面没有同节的片。非代表片记 `section_dup`：
+ * 它的正文没进 prompt **不是因为被挡**，而是同节已有更优片代表了整节
+ * （整节返回，正文并不缺）——与 `budget`/`threshold` 是第三个不同的因。
+ */
+function isSectionRepresentative(traces: MemoryCandidateTrace[], index: number): boolean {
+  const c = traces[index]
+  return !traces.some(
+    (other, j) =>
+      j < index && other.docPath === c.docPath && other.sectionAnchor === c.sectionAnchor
+  )
+}
+
 const EMPTY_STATS: MemoryContextStats = {
   queries: 0,
   candidateChunks: 0,
@@ -126,7 +188,12 @@ const EMPTY_STATS: MemoryContextStats = {
   contextTokens: 0,
   budgetTokens: 0,
   truncated: false,
-  topCandidates: [],
+  retrievalMs: 0,
+  thresholdMaxDistance: 0,
+  paramTopK: 0,
+  paramProbeN: MAX_PROBE_N,
+  queryTraces: [],
+  candidates: [],
   blockedByStatus: 0,
   droppedByThreshold: 0,
 }
@@ -162,29 +229,41 @@ function noteEmbeddingDegradation(): void {
 
 // ─── 检索 ────────────────────────────────────────────
 
-/** 类型守卫：向量/混合通道的行带 distance 真值，纯关键词行无该字段 */
-function isVectorHitRow(r: ChunkRow | ChunkVectorSearchResult): r is ChunkVectorSearchResult {
-  return 'distance' in r
-}
-
 /**
  * 检索并构建记忆上下文（票辛主入口）。
  *
  * 与旧的 `buildMemoryContext` 的差别：返回**结构化的结果**而不只是字符串——
  * `reason` 与 `stats` 是 W3/W4/W5/W11 的判据面（调用方据此打三态日志与埋点）。
  * 不返回结构化对象的话，调用方只能看见「有 / 没有」，三态就退化成两态。
+ *
+ * R1（P2）起 `stats` 额外承载**检索流水**（`queryTraces` / `candidates` / 参数快照
+ * / `retrievalMs`）——**只采不改**：检索行为（召回、排序、注入）逐字节不变，
+ * 落盘点在 `execution/reply.ts` 的 10s `Promise.race` **之外**。
  */
 export async function retrieveMemoryContext(triggerContent: string): Promise<MemoryContextResult> {
+  const t0 = Date.now()
+  const params = currentRetrievalParams()
+  /** 本次检索的公共 trace（参数快照 + 耗时）——**每一条返回路径都带**，
+   *  否则「为什么没召回」在流水里无痕（W3：本模块不允许「返回空且无痕」） */
+  const baseStats = (): Partial<MemoryContextStats> => ({
+    thresholdMaxDistance: params.maxDistance,
+    paramTopK: params.topK,
+    paramProbeN: params.probeN,
+    retrievalMs: Date.now() - t0,
+  })
+  const empty = (
+    reason: MemoryRetrievalReason,
+    stats: Partial<MemoryContextStats> = {}
+  ): MemoryContextResult => emptyResult(reason, { ...baseStats(), ...stats })
+
   // 未启用优先于一切：此时连嵌入都不该碰（票丁：not-enabled 不 spawn sidecar）
-  if (!isMemoryEnabled()) return emptyResult('not-enabled')
+  if (!isMemoryEnabled()) return empty('not-enabled')
 
   // 剥离 @mention 再检索：@mention 是路由元数据而非用户意图，混入查询会
   // 拉偏查询向量、降低召回质量。
   const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
-  if (!cleanContent) return emptyResult('empty-query')
+  if (!cleanContent) return empty('empty-query')
 
-  const topK = parseInt(process.env.MEMORY_TOP_K || '3', 10)
-  const maxDistance = parseFloat(process.env.MEMORY_MAX_DISTANCE || '0.6')
   const budgetTokens = parseInt(
     process.env.MEMORY_CONTEXT_TOKEN_BUDGET || String(DEFAULT_CONTEXT_TOKEN_BUDGET),
     10
@@ -195,62 +274,152 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
 
   // 逐查询检索：嵌入成功走混合（向量 + 关键词 RRF），失败降级为仅关键词通道
   // ——关键词通道正是为短词召回设计，嵌入坏了不该连它一起废掉。
-  type Scored = { row: ChunkVectorSearchResult; bestIndex: number }
+  // 每个候选额外带上**通道身份**与位次（R1：判别不再靠 distance 等值哨兵）。
+  type Scored = {
+    row: ChunkVectorSearchResult
+    bestIndex: number
+    channel: RetrievalChannel
+    rrfScore: number | null
+    vectorRank: number | null
+    keywordRank: number | null
+    /** 产出该候选的查询序号（跨查询合并后仍要答「它是哪趟召回的」） */
+    queryIndex: number
+  }
   const merged = new Map<number, Scored>()
   const blobs: Buffer[] = []
+  const queryTraces: MemoryQueryTrace[] = []
   let embedReason: string | undefined
   let embeddedAny = false
+  /** 首个嵌入成功的查询序号——探针池取自它（「原话优先」） */
+  let firstEmbeddedQueryIndex: number | null = null
 
-  for (const q of queries) {
+  for (const [queryIndex, q] of queries.entries()) {
     let blob: Buffer | null = null
     const embedded = await embedText(q)
     if (embedded.ok && embedded.vector.length > 0) {
       blob = vectorToBlob(embedded.vector)
       blobs.push(blob)
       embeddedAny = true
+      if (firstEmbeddedQueryIndex === null) firstEmbeddedQueryIndex = queryIndex
     } else if (!embedded.ok) {
       embedReason = embedded.reason
       log.debug('记忆检索：查询嵌入不可用，降级仅关键词通道', { reason: embedded.reason })
     }
+    // 落流水的布尔与上面那个分支**同源同趟**（不是从候选行反推出来的）：
+    // 它答的是「这趟查询的向量通道有没有跑」，与候选行的 channel 正交。
+    queryTraces.push({ queryIndex, queryText: q, queryEmbedOk: blob !== null })
 
-    const rows: Array<ChunkRow | ChunkVectorSearchResult> = blob
-      ? chunksRepo.searchChunksHybrid(blob, q, topK, maxDistance)
-      : chunksRepo.searchChunksByKeyword(q, topK)
-
-    rows.forEach((r, i) => {
-      const candidate: ChunkVectorSearchResult = isVectorHitRow(r)
-        ? r
-        : { ...r, distance: maxDistance }
-      const existing = merged.get(r.id)
-      if (!existing || i < existing.bestIndex) {
-        merged.set(r.id, { row: candidate, bestIndex: i })
-      }
-    })
+    if (blob) {
+      const hits = chunksRepo.searchChunksHybrid(blob, q, params.topK, params.maxDistance)
+      hits.forEach((hit, i) => {
+        const existing = merged.get(hit.row.id)
+        if (!existing || i < existing.bestIndex) {
+          merged.set(hit.row.id, {
+            row: hit.row,
+            bestIndex: i,
+            channel: hit.channel,
+            rrfScore: hit.rrfScore,
+            vectorRank: hit.vectorRank,
+            keywordRank: hit.keywordRank,
+            queryIndex,
+          })
+        }
+      })
+    } else {
+      const rows = chunksRepo.searchChunksByKeyword(q, params.topK)
+      rows.forEach((r, i) => {
+        const existing = merged.get(r.id)
+        if (!existing || i < existing.bestIndex) {
+          merged.set(r.id, {
+            // 内存态的 distance 哨兵沿用（`RetrievedSection.distance` 等消费方按
+            // number 消费）；**落库面按 channel 转 NULL**，判别职责已交给 channel
+            row: { ...r, distance: params.maxDistance },
+            bestIndex: i,
+            channel: 'keyword',
+            rrfScore: null,
+            vectorRank: null,
+            keywordRank: i,
+            queryIndex,
+          })
+        }
+      })
+    }
   }
 
   const ordered = [...merged.values()]
     .sort((a, b) => a.bestIndex - b.bestIndex)
-    .slice(0, topK)
-    .map((s) => s.row)
+    .slice(0, params.topK)
+  const orderedRows = ordered.map((s) => s.row)
 
   // X5 埋点 + W11 判据：候选池探针取**首个嵌入成功的查询**（原话优先）。
   // 无任何嵌入成功 ⇒ 无池可探（嵌入失败本身已是结论）。
-  const probe = blobs.length > 0 ? chunksRepo.probeChunkVectorCandidates(blobs[0], MAX_PROBE_N) : []
-  const topCandidates: MemoryCandidateTrace[] = probe.map((c) => ({
-    docPath: c.docPath,
-    sectionAnchor: c.sectionAnchor,
-    distance: c.distance,
-    passesStatusFilter: c.passesStatusFilter,
-  }))
+  const probe =
+    blobs.length > 0 ? chunksRepo.probeChunkVectorCandidates(blobs[0], params.probeN) : []
   const blockedByStatus = probe.filter((c) => !c.passesStatusFilter).length
   const droppedByThreshold = probe.filter(
-    (c) => c.passesStatusFilter && c.distance >= maxDistance
+    (c) => c.passesStatusFilter && c.distance >= params.maxDistance
   ).length
+
+  // ── 候选流水（P2 §四 表 3）：`final` = 融合 topK / `probe` = 阈值前 KNN 池 ──
+  // 两类**同列**，靠 `source` 判别；`dropped_reason` 按 source 分工（结构上不重叠）。
+  const finalTraces: MemoryCandidateTrace[] = ordered.map((s, finalRank) => ({
+    source: 'final',
+    queryIndex: s.queryIndex,
+    docPath: s.row.doc_path,
+    sectionAnchor: s.row.section_anchor,
+    contentHash: s.row.content_hash,
+    chunkId: s.row.id,
+    breadcrumb: s.row.breadcrumb,
+    bodyHead: s.row.body.slice(0, CANDIDATE_BODY_HEAD_CHARS),
+    statusAtQuery: s.row.status,
+    // 纯关键词命中写 NULL，**不写 maxDistance 哨兵**（P2 §二①）
+    distance: s.channel === 'keyword' ? null : s.row.distance,
+    channel: s.channel,
+    rank: bestChannelRank(s.vectorRank, s.keywordRank),
+    rrfScore: s.rrfScore,
+    finalRank,
+    // final 行按构造必然过 X4 过滤 ⇒ null = 不适用（该列只为 probe 池的归因存在）
+    passedStatusFilter: null,
+    injected: false,
+    sectionRank: null,
+    injectedPosition: null,
+    droppedReason: null,
+  }))
+  const probeTraces: MemoryCandidateTrace[] = probe.map((c, rank) => ({
+    source: 'probe',
+    queryIndex: firstEmbeddedQueryIndex ?? 0,
+    docPath: c.docPath,
+    sectionAnchor: c.sectionAnchor,
+    contentHash: c.contentHash,
+    chunkId: c.id,
+    breadcrumb: c.breadcrumb,
+    bodyHead: c.bodyHead,
+    statusAtQuery: c.status,
+    // 探针池来自向量通道 KNN（阈值之前）⇒ 恒有距离真值
+    distance: c.distance,
+    channel: 'vector',
+    rank,
+    rrfScore: null,
+    finalRank: null,
+    passedStatusFilter: c.passesStatusFilter,
+    injected: false,
+    sectionRank: null,
+    injectedPosition: null,
+    droppedReason: !c.passesStatusFilter
+      ? 'status'
+      : c.distance >= params.maxDistance
+        ? 'threshold'
+        : 'not_topk',
+  }))
+  const candidates = [...finalTraces, ...probeTraces]
+
   const trace: Partial<MemoryContextStats> = {
+    ...baseStats(),
     queries: queries.length,
     candidateChunks: ordered.length,
     budgetTokens,
-    topCandidates,
+    queryTraces,
+    candidates,
     blockedByStatus,
     droppedByThreshold,
   }
@@ -261,15 +430,15 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
     // 字段，不丢信息。
     if (!embeddedAny && embedReason) {
       noteEmbeddingDegradation()
-      return emptyResult('embed-failed', { ...trace, embedReason })
+      return empty('embed-failed', { ...trace, embedReason })
     }
-    if (blockedByStatus > 0) return emptyResult('filtered-empty', trace)
-    return emptyResult('no-hit', trace)
+    if (blockedByStatus > 0) return empty('filtered-empty', trace)
+    return empty('no-hit', trace)
   }
 
   // 按节补齐（Decisions 14）：命中的是片，注入的是节——节内片序按 part_index
   const bySection = new Map<string, RetrievedSection>()
-  for (const chunk of ordered) {
+  for (const chunk of orderedRows) {
     const key = `${chunk.doc_path}\0${chunk.section_anchor}`
     if (bySection.has(key)) continue
     const parts = chunksRepo.getChunksBySection(chunk.doc_path, chunk.section_anchor)
@@ -294,7 +463,46 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
   }
 
   if (kept.length === 0) {
-    return emptyResult('budget-exhausted', { ...trace, droppedSections: bySection.size })
+    // `truncated: true`——本条路径**按定义**就是「发生了预算截断」（`bySection` 非空
+    // 却一节都没进）。不写会落成 `EMPTY_STATS` 的默认 `false`，而 P2 §四 表 1 明写
+    // 该列答「预算够不够」：全程被截却记 0，是这张表最不该产出的那种谎账。
+    // 与 ok 路径同口径（`kept.length < bySection.size` ⇒ `0 < N` ⇒ true）。
+    return empty('budget-exhausted', {
+      ...trace,
+      truncated: true,
+      droppedSections: bySection.size,
+    })
+  }
+
+  // ── 注入面回填：injected / section_rank / injected_position / dropped_reason ──
+  // 节的判定按 (doc_path, section_anchor) **成对比较**，刻意不另拼字符串键：
+  // 本仓 C1 实证过「写入层把源码里的转义序列展开成真 NUL 字节」，能少写一处
+  // 就少一处（成对比较与 `bySection` 的键等同——NUL 分隔符本就是为消歧而设）。
+  const keptIndexOf = (docPath: string, sectionAnchor: string): number =>
+    kept.findIndex((s) => s.docPath === docPath && s.sectionAnchor === sectionAnchor)
+  const renderedPositions = renderOrder(kept.length)
+  finalTraces.forEach((c, i) => {
+    const keptIndex = keptIndexOf(c.docPath, c.sectionAnchor)
+    if (keptIndex < 0) {
+      // 节没进预算（kept 循环 `break` 起停）——与 probe 行的 'threshold' 是两个
+      // 相反的药方（加预算 vs 松阈值），故各留各的因
+      c.droppedReason = 'budget'
+      return
+    }
+    c.injected = true
+    c.sectionRank = keptIndex
+    c.injectedPosition = renderedPositions.indexOf(keptIndex) + 1
+    // 同节已有更优片代表（`bySection` 只留首个，即 `ordered` 里最靠前的那片）
+    if (!isSectionRepresentative(finalTraces, i)) c.droppedReason = 'section_dup'
+  })
+  for (const c of probeTraces) {
+    const keptIndex = keptIndexOf(c.docPath, c.sectionAnchor)
+    if (keptIndex < 0) continue
+    // 口径统一：`injected` 答的是「该片正文有没有进 prompt」——节进了则同节全部片
+    // 都进了（整节返回），与它作为 probe 候选是否被挡无关（`droppedReason` 另记）
+    c.injected = true
+    c.sectionRank = keptIndex
+    c.injectedPosition = renderedPositions.indexOf(keptIndex) + 1
   }
 
   const rendered = renderSections(kept)
@@ -314,17 +522,34 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
 }
 
 /**
- * 把若干节渲染成注入块，**最相关的首尾各半**（Lost in the Middle,
- * arXiv:2307.03172）：前半按相关度顺序置于串首，后半**逆序**置于串尾 ⇒
- * 最相关的两条分别落在首部与尾部的最外侧，不落正中段（W3）。
+ * 渲染序：**最相关的首尾各半**（Lost in the Middle, arXiv:2307.03172）——
+ * 前半按相关度顺序置于串首，后半**逆序**置于串尾 ⇒ 最相关的两条分别落在首部
+ * 与尾部的最外侧，不落正中段（W3）。
+ *
+ * 返回 `[渲染位置] = 原始下标`（0-based）。
+ *
+ * ⚠️ 本函数是这套重排的**唯一真相源**：`renderSections` 与检索流水里的
+ * `injectedPosition` 都取它。分开写两份的话，谁改了重排而没改另一份，
+ * 流水会**静默**记下与猫实际读到的位置不符的编号——而「位置效应」正是
+ * 这列存在的理由。
+ */
+function renderOrder(n: number): number[] {
+  const half = Math.ceil(n / 2)
+  const order: number[] = []
+  for (let i = 0; i < half; i++) order.push(i)
+  for (let i = n - 1; i >= half; i--) order.push(i)
+  return order
+}
+
+/**
+ * 把若干节渲染成注入块（重排见 `renderOrder`）。
  *
  * 序号按**最终位置**编（猫读到的是连续 1..n），故本函数的输出即最终注入串，
  * token 核算与实际注入逐字节同源（预算判据不会与注入面脱钩）。
  */
 function renderSections(sections: RetrievedSection[]): { text: string; tokens: number } {
   if (sections.length === 0) return { text: '', tokens: 0 }
-  const half = Math.ceil(sections.length / 2)
-  const ordered = [...sections.slice(0, half), ...sections.slice(half).reverse()]
+  const ordered = renderOrder(sections.length).map((i) => sections[i])
   const lines = ordered.map((s, i) => `${i + 1}. ${s.parts.join('\n')}`)
   const text = `\n\n【相关记忆】\n${lines.join('\n')}`
   return { text, tokens: estimateTokens(text) }

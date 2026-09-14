@@ -367,18 +367,47 @@ export function searchChunksByKeyword(query: string, topN: number): ChunkKeyword
 
 /** 混合检索两通道各自召回数量（本模块 RRF 融合的通道配额） */
 const HYBRID_CHANNEL_TOP_N = 20
+/**
+ * 检索流水里 `body_head` 的截断长度（P2 §四 表 3：片段正文前 120 字，**截断快照非全文**）。
+ * 探针侧在 SQL 里 `substr` 截断（不把整篇正文拉进内存），融合侧由调用方按同一常数截断。
+ */
+export const CANDIDATE_BODY_HEAD_CHARS = 120
 /** RRF 融合常数 k（控制排名分衰减速度） */
 const RRF_K = 60
+
+/** 通道身份（P2 §二①）：该片是哪条通道召回的 */
+export type ChunkHitChannel = 'vector' | 'keyword' | 'both'
+
+/**
+ * 混合检索命中 = 整行 + 融合分 + **通道身份** + 两通道位次。
+ *
+ * 通道身份是**显式契约**，不是装饰：它接管了原先靠 `distance === maxDistance`
+ * 等值判别隐式表达的「这片是关键词通道救回的」。那条隐式约定寄居在
+ * `searchChunksByVector` 的 SQL 比较符 `<` 上——谁把 `<` 改成 `<=`（看起来
+ * 无关紧要的一行），等值判别当场失效且不报错、不告警，直接把「关键词捞回的片」
+ * 报成「贴着阈值边界的向量命中」，阈值松紧这个头号问题的读数就废了。
+ *
+ * ⚠️ `row.distance` 里纯关键词命中仍是 `maxDistance`（内存态沿用，`RetrievedSection.distance`
+ * 等消费方按 `number` 消费）；**落库面一律按 `channel` 转 NULL**（见
+ * `db/repository/retrievalEvents.ts`）——判别语义已由 `channel` 承担。
+ */
+export interface ChunkHybridHit {
+  row: ChunkVectorSearchResult
+  /** RRF 融合分（现状被出口的 `.map(s => s.row)` 丢弃，R1 捞回） */
+  rrfScore: number
+  vectorRank: number | null
+  keywordRank: number | null
+  channel: ChunkHitChannel
+}
 
 /**
  * 混合检索：向量通道 + 关键词通道各取 topN → RRF 融合（k=60）→ 排序取 topK。
  *
  * W1 契约：本模块的 RRF 形态与本文件的 `RRF_K` / `HYBRID_CHANNEL_TOP_N` 同源
  * （两个常数原先借住在别处的共享底座模块，随 2026-09-14 拆解就地定义在唯一消费方）：
- * - 两通道都命中的片：RRF 分相加，distance 取向量通道真值
- * - 纯关键词命中：distance 填 `maxDistance`（语义 = 超出向量通道召回边界、由关键词
- *   通道救回——是边界值不是伪造距离，即 R1 待接管的哨兵值）
- * - 通道容错：关键词通道空结果 / FTS 表缺失 → 结果即纯向量 topK（含距离真值）
+ * - 两通道都命中的片：RRF 分相加，distance 取向量通道真值，`channel='both'`
+ * - 纯关键词命中：`channel='keyword'`（distance 的内存态哨兵值见上）
+ * - 通道容错：关键词通道空结果 / FTS 表缺失 → 结果即纯向量 topK（`channel='vector'`）
  *
  * `LIMIT topK` 在融合排序**之后**：两通道各召回 20 片参与打分，最终只出 topK。
  */
@@ -387,29 +416,46 @@ export function searchChunksHybrid(
   query: string,
   topK: number,
   maxDistance: number
-): ChunkVectorSearchResult[] {
+): ChunkHybridHit[] {
   const vectorHits = searchChunksByVector(queryBlob, HYBRID_CHANNEL_TOP_N, maxDistance)
   const keywordHits = searchChunksByKeyword(query, HYBRID_CHANNEL_TOP_N)
 
-  type Scored = { score: number; row: ChunkVectorSearchResult }
+  type Scored = {
+    score: number
+    row: ChunkVectorSearchResult
+    vectorRank: number | null
+    keywordRank: number | null
+  }
   const scores = new Map<number, Scored>()
   vectorHits.forEach((row, i) => {
-    scores.set(row.id, { score: 1 / (RRF_K + i + 1), row })
+    scores.set(row.id, { score: 1 / (RRF_K + i + 1), row, vectorRank: i, keywordRank: null })
   })
   keywordHits.forEach((hit, i) => {
     const kwScore = 1 / (RRF_K + i + 1)
     const existing = scores.get(hit.id)
     if (existing) {
       existing.score += kwScore
+      existing.keywordRank = i
     } else {
-      scores.set(hit.id, { score: kwScore, row: { ...hit, distance: maxDistance } })
+      scores.set(hit.id, {
+        score: kwScore,
+        row: { ...hit, distance: maxDistance },
+        vectorRank: null,
+        keywordRank: i,
+      })
     }
   })
 
   return [...scores.values()]
     .sort((a, b) => b.score - a.score)
     .slice(0, topK)
-    .map((s) => s.row)
+    .map((s) => ({
+      row: s.row,
+      rrfScore: s.score,
+      vectorRank: s.vectorRank,
+      keywordRank: s.keywordRank,
+      channel: s.vectorRank !== null ? (s.keywordRank !== null ? 'both' : 'vector') : 'keyword',
+    }))
 }
 
 /** 向量候选探针行（阈值/状态过滤**之前**的原始 KNN 池） */
@@ -417,6 +463,12 @@ export interface ChunkVectorCandidate {
   id: number
   docPath: string
   sectionAnchor: string
+  /** 身份三元组的第三元——探针行同样要能自解释（P2 §四 表 3 的 NOT NULL 列） */
+  contentHash: string
+  /** ✅ 历史行自解释（`chunks` 重扫后该列会被覆盖） */
+  breadcrumb: string
+  /** ✅ 正文前 120 字（**截断快照**——探针不该把整篇正文拉进内存） */
+  bodyHead: string
   status: string | null
   distance: number
   /** X4 状态过滤是否放行（false = 该片被 `superseded`/`deprecated` 挡掉） */
@@ -443,6 +495,8 @@ export function probeChunkVectorCandidates(
   const rows = db
     .prepare(
       `SELECT c.id AS id, c.doc_path AS doc_path, c.section_anchor AS section_anchor,
+              c.content_hash AS content_hash, c.breadcrumb AS breadcrumb,
+              substr(c.body, 1, ${CANDIDATE_BODY_HEAD_CHARS}) AS body_head,
               c.status AS status, v.distance AS distance,
               CASE WHEN (c.status IS NULL OR c.status NOT IN ('superseded','deprecated'))
                    THEN 1 ELSE 0 END AS passes
@@ -460,6 +514,9 @@ export function probeChunkVectorCandidates(
     id: number
     doc_path: string
     section_anchor: string
+    content_hash: string
+    breadcrumb: string
+    body_head: string
     status: string | null
     distance: number
     passes: number
@@ -468,6 +525,9 @@ export function probeChunkVectorCandidates(
     id: r.id,
     docPath: r.doc_path,
     sectionAnchor: r.section_anchor,
+    contentHash: r.content_hash,
+    breadcrumb: r.breadcrumb,
+    bodyHead: r.body_head,
     status: r.status,
     distance: r.distance,
     passesStatusFilter: r.passes === 1,
