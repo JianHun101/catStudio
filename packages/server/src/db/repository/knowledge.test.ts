@@ -2,16 +2,19 @@
  * Knowledge repo 测试（知识库 Phase 1）— 真实 sqlite-vec（createTestDb 已加载扩展）。
  *
  * 覆盖：upsert 幂等（ON CONFLICT + COALESCE 嵌入保护）、检索排序/阈值
- * （maxDistance=0.35）、source 列映射、表名白名单（复用 searchMemoriesByVector
- * 入口校验——非法表名抛 TypeError）。
+ * （maxDistance=0.35）、source 列映射、top-K 截断。
+ *
+ * ⚠️ 表名白名单用例已随机制删除（2026-09-14）：`searchKnowledgeByVector` 原先委托
+ * 一个共享底座模块的参数化向量查询体并做表名白名单校验，而白名单只剩 `knowledge`
+ * 一个值 ⇒ 参数化表名与 `TypeError` 分支退化为死代码，整体删除（查询体已内联）。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestDb } from '../../test-helpers.js'
 import { setDb, resetDb, getDb } from '../index.js'
-import { initRepository, knowledge as knowledgeRepo, memories as memoriesRepo } from './index.js'
+import { initRepository, knowledge as knowledgeRepo } from './index.js'
 import { vectorToBlob } from '../../memory/index.js'
 
-// 归一化向量（同 memories.test.ts 构造）
+// 归一化向量
 const V_QUERY = [1, 0, 0, 0]
 const V_SAME = [1, 0, 0, 0]
 const V_ORTHOGONAL = [0, 1, 0, 0]
@@ -103,9 +106,12 @@ describe('knowledge repo', () => {
     })
   })
 
-  it('表名白名单：searchMemoriesByVector 传非法表名抛 TypeError', () => {
-    expect(() =>
-      memoriesRepo.searchMemoriesByVector(vectorToBlob(V_QUERY), 10, 1.5, 'messages' as any)
-    ).toThrow(TypeError)
+  it('距离下限过滤与 top-K 截断的顺序（截断在过滤之后）', () => {
+    // 0.5 下限：k3（距离 1）先被挡掉，再从剩下的里取 top-1
+    const rows = knowledgeRepo.searchKnowledgeByVector(vectorToBlob(V_QUERY), 1, 0.5)
+    expect(rows.map((r) => r.id)).toEqual(['k1'])
+    const wider = knowledgeRepo.searchKnowledgeByVector(vectorToBlob(V_QUERY), 10, 0.5)
+    expect(wider.map((r) => r.id)).toEqual(['k1', 'k2'])
+    expect(wider[1].distance).toBeCloseTo(0.293, 2)
   })
 })

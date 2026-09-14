@@ -64,7 +64,7 @@ export interface RetrievedSection {
   breadcrumb: string
   /** 该节全部片正文，按 `part_index` 升序 */
   parts: string[]
-  /** 该节内最相关片的余弦距离（节级排序依据） */
+  /** 该节内最相关片的余弦距离（台账列：当前不参与排序，节序由片级位次 bestIndex 决定） */
   distance: number
 }
 
@@ -270,7 +270,7 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
   // 按节补齐（Decisions 14）：命中的是片，注入的是节——节内片序按 part_index
   const bySection = new Map<string, RetrievedSection>()
   for (const chunk of ordered) {
-    const key = `${chunk.doc_path} ${chunk.section_anchor}`
+    const key = `${chunk.doc_path}\0${chunk.section_anchor}`
     if (bySection.has(key)) continue
     const parts = chunksRepo.getChunksBySection(chunk.doc_path, chunk.section_anchor)
     bySection.set(key, {

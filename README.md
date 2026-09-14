@@ -84,7 +84,7 @@ catStudy/
 │   │       ├── db/
 │   │       │   ├── index.ts    # SQLite 初始化 (WAL + sqlite-vec + 迁移)
 │   │       │   ├── redis.ts    # Redis 客户端（可选，失败降级）
-│   │       │   └── repository/ # 仓储层（agents/sessions/messages/memories/verdicts…）
+│   │       │   └── repository/ # 仓储层（agents/sessions/messages/chunks/knowledge/verdicts…）
 │   │       ├── llm/
 │   │       │   ├── adapter.ts  # LLMAdapter 统一接口
 │   │       │   ├── deepseek.ts # DeepSeek HTTP Chat Completions 适配器
@@ -107,9 +107,8 @@ catStudy/
 │   │       ├── handoff/
 │   │       │   └── index.ts    # 会话交接（90% token 阈值自动创建新会话）
 │   │       ├── memory/
-│   │       │   ├── index.ts    # 记忆存储 + 检索 + 去重（向量 + 混合检索）
+│   │       │   ├── index.ts    # 切片检索 + 上下文构建（向量 + 关键词 RRF 混合检索）
 │   │       │   ├── embedding.ts# HuggingFace 本地嵌入模型加载
-│   │       │   ├── filter.ts   # 记忆筛选 deny-list
 │   │       │   └── query-rewrite.ts # 检索 query 改写
 │   │       ├── eval/           # 评估体系（L1/L2/L3 + episodes + Phase 0）
 │   │       │   ├── scorer.ts   # 评分器
@@ -219,9 +218,6 @@ pnpm lint             # 全项目 TypeScript 类型检查
 | `HF_ENDPOINT`                                                                    | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`）                               |
 | `LOG_LEVEL`                                                                      | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                                                    |
 | `MEMORY_ENABLED`                                                                 | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                                               |
-| `MEMORY_HYBRID_ENABLED`                                                          | —                          | 是否启用混合检索（向量 + 关键词）                                                                |
-| `MEMORY_DEDUP_ENABLED`                                                           | `1`                        | 是否启用记忆去重（`0` 关闭）                                                                     |
-| `MEMORY_DEDUP_THRESHOLD`                                                         | `0.20`                     | 记忆去重余弦距离阈值（越小越严格）                                                               |
 | `MEMORY_TOP_K`                                                                   | `3`                        | 检索时返回的相关记忆条数                                                                         |
 | `MEMORY_EMBEDDING_MODEL`                                                         | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                                                 |
 | `SUMMARY_ENABLED`                                                                | `true`                     | 是否启用增量摘要                                                                                 |

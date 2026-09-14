@@ -9,8 +9,9 @@
  *   读当前状态 + 查主链机械算出。本模块只负责记录「当前状态」这一事实 + 审计留痕。
  *
  * 注意：db/repository 各 repo 用模块级 db 单例（setRepoDb 注入）——事务必须在模块
- * 内部自开 db.transaction（参照 memories.ts:335-367 的本地批事务范式；路由层不包事务、
- * repo 间无共享事务句柄），否则状态字段与审计流水无法同事务原子落库。
+ * 内部自开 db.transaction（参照 chunks.ts 的 deleteChunksByDocPaths /
+ * deleteStaleChunkRows 那种「函数内自开事务再立即调用」的本地批事务范式；路由层不包
+ * 事务、repo 间无共享事务句柄），否则状态字段与审计流水无法同事务原子落库。
  */
 import type Database from 'better-sqlite3'
 import { createLogger } from '../../logger.js'
