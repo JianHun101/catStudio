@@ -1,49 +1,54 @@
 # R1-b 票：跨查询候选合并改按 RRF 分累加（**行为变更**）
 
 > 来源：用户 2026-09-14 裁「拆」——R1 只采不改，跨查询合并改排序**拆出另票**（见 [P2 设计票](P2-design-retrieval-events.md) §三「本票范围」）。
-> 定位：**R1 之后，串行**。本票依赖 R1 的出口形状（`{ row, rrfScore, ..., channel }`），R1 未落地时开工 = 必然返工。
-> 状态：**票单已立，未派活**（待 R1 落地 + 店长派活裁决）。
+> 定位：**R1 之后，串行**。本票依赖 R1 的出口形状（`{ row, rrfScore, ..., channel }`）——**R1 已于 2026-09-14 合入 dev（PR #76 / `ce60621`），前置已满足**。
+> 状态：**票单已立 + 行号已按 R1 落地后的代码全量重审**（2026-09-14，基线 `dev@2f31698`），**未派活**（待店长派活裁决）。
 > **本票改行为**——改的是**猫实际读到的记忆**。这是它被从 R1 拆出来的唯一理由，也是本票验收的重心。
 
 ## 一、病灶：跨查询的「多路共识」信号，结构性不可见
 
 三处叠加，缺一条都不致此，三条凑齐就必然：
 
-| #   | 位置                           | 现状                                                        | 后果                                                               |
-| --- | ------------------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------ |
-| 1   | `db/repository/chunks.ts:411`  | `.slice(0, topK)` —— 融合出口被**调用方传进来的 `topK`** 砍 | 每查询 **40 个候选（向量 20 + 关键词 20）被砍到 3 个**才交回调用方 |
-| 2   | `memory/index.ts:217-218`      | 传的是 `topK`（=3），不是池常数                             | 第 4~20 名**连参与合并的资格都没有**                               |
-| 3   | `memory/index.ts:225` / `:231` | 合并键是 `bestIndex`（**名次**），`:231` 的 `sort` 也按名次 | 「A 查询第 3 名」与「A 第 3 名 + B 第 3 名」**同权**               |
+| #   | 位置                                                       | 现状                                                        | 后果                                                               |
+| --- | ---------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------ |
+| 1   | `db/repository/chunks.ts:451`                              | `.slice(0, topK)` —— 融合出口被**调用方传进来的 `topK`** 砍 | 每查询 **40 个候选（向量 20 + 关键词 20）被砍到 3 个**才交回调用方 |
+| 2   | `memory/index.ts:313` / `:329`                             | 两条路径传的都是 `topK`（=3），不是池常数                   | 第 4~20 名**连参与合并的资格都没有**                               |
+| 3   | `memory/index.ts:316` / `:332`（合并键）· `:350`（`sort`） | 合并键是 `bestIndex`（**名次**），`:350` 的 `sort` 也按名次 | 「A 查询第 3 名」与「A 第 3 名 + B 第 3 名」**同权**               |
 
-**且 RRF 分在 `chunks.ts:412` 的 `.map((s) => s.row)` 就被丢了**——`scores` 里明明有 `score`（`:397` / `:400-403` 累加），出门只剩 `row`。
+**且 RRF 分在出口被丢**——`scores` 里明明有 `score`（`chunks.ts:431` / `:434-437` 累加）。
 
-**实测参数**（本仓现值）：
+> **R1 已消解这一条**：`chunks.ts:452-458` 的 `.map` 现在返回完整 `ChunkHybridHit`（含 `rrfScore` / `channel` / 两位次），`memory/index.ts:313` 拿到的 `hit.rrfScore` 即可用。**本票不再需要捞分**，只需把它接进合并键。
+> ⚠️ 但**纯关键词降级路径的 `rrfScore` 仍是 `null`**（`memory/index.ts:339`）——§三 的接口缺口原样存在，那是本票必须补的一步。
+
+**实测参数**（2026-09-14 R1 落地后复测，`dev@2f31698`）：
 
 ```
-memory/index.ts:186     const topK = parseInt(process.env.MEMORY_TOP_K || '3', 10)
-db/repository/chunks.ts:369   const HYBRID_CHANNEL_TOP_N = 20
-db/repository/chunks.ts:371   const RRF_K = 60
+memory/index.ts:151          const topK = parseInt(process.env.MEMORY_TOP_K || '3', 10)
+db/repository/chunks.ts:369  const HYBRID_CHANNEL_TOP_N = 20
+db/repository/chunks.ts:376  const RRF_K = 60
 ```
 
 **一句话**：通道级池子（20）早就是对的，**被砍错的是查询级出口**——它把「最终注入几条」当成了「每条查询召回几条」。一次检索最多 4 趟查询（1 原话 + 最多 3 改写），合并层实际只看得见 **12 个候选**，而它本可以看见 **最多 80 个**。
 
-> 值得记一笔：**这些候选本来就已经被算出来了**。`searchChunksByVector` / `searchChunksByKeyword` 各取 20（`:391-392`），RRF 也已经在 40 个上算完。被丢弃的是**已经付过计算成本的结果**——所以本票**不新增任何 SQL 开销**，只停止丢弃。
+> 值得记一笔：**这些候选本来就已经被算出来了**。`searchChunksByVector` / `searchChunksByKeyword` 各取 20（`chunks.ts:420-421`），RRF 也已经在 40 个上算完。被丢弃的是**已经付过计算成本的结果**——所以本票**不新增任何 SQL 开销**，只停止丢弃。
 
 ## 二、改什么（五处，逐一钉死）
 
-| #   | 位置                                              | 改法                                                                                                                   |
-| --- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| 1   | `chunks.ts:411` `slice` 参数                      | 换成**新常量** `HYBRID_POOL_PER_QUERY`（建议值 **20**，与 `HYBRID_CHANNEL_TOP_N` 同量级），**不再用调用方传的 `topK`** |
-| 2   | `chunks.ts:412` `.map((s) => s.row)`              | 保留 `{ row, rrfScore, vectorRank, keywordRank, channel }` —— **R1 已改此处**，本票只确认形状可用                      |
-| 3   | `memory/index.ts:217-218`                         | 两条路径都传**池常数**，不传 `topK`                                                                                    |
-| 4   | `memory/index.ts:225`（合并键）/ `:231`（`sort`） | 合并键改**累加 `rrfScore`**；`bestIndex` 降级为 **tie-break**（保确定性），取 `min`                                    |
-| 5   | `memory/index.ts:232` `.slice(0, topK)`           | **保留不动** —— 最终注入片数仍由 `MEMORY_TOP_K` 决定                                                                   |
+| #   | 位置                                                       | 改法                                                                                                                   |
+| --- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 1   | `chunks.ts:451` `slice` 参数                               | 换成**新常量** `HYBRID_POOL_PER_QUERY`（建议值 **20**，与 `HYBRID_CHANNEL_TOP_N` 同量级），**不再用调用方传的 `topK`** |
+| 2   | `chunks.ts:452-458` `.map((s) => …)`                       | **R1 已改此处**（现返回完整 `ChunkHybridHit`），本票只确认形状可用——**不动它**                                         |
+| 3   | `memory/index.ts:313` / `:329`                             | 两条路径都传**池常数**，不传 `params.topK`                                                                             |
+| 4   | `memory/index.ts:316` / `:332`（合并键）· `:350`（`sort`） | 合并键改**累加 `rrfScore`**；`bestIndex` 降级为 **tie-break**（保确定性），取 `min`                                    |
+| 5   | `memory/index.ts:351` `.slice(0, params.topK)`             | **保留不动** —— 最终注入片数仍由 `MEMORY_TOP_K` 决定                                                                   |
 
 **净效果**：一次检索的合并池 12 → 最多 80；`final_rank` 的口径从「名次最小」变成「跨查询累加分最大」。
 
 ## 三、一个必须钉死的接口缺口：纯关键词路径**没有分**
 
-`memory/index.ts:218` 的 `searchChunksByKeyword` 返回 `ChunkKeywordSearchResult`，而它**就是 `ChunkRow`**（`chunks.ts:333`）——**没有任何分数字段**。合并改按分累加后，这条路径必须也有分，否则只能填假值。
+`memory/index.ts:329` 的 `searchChunksByKeyword` 返回 `ChunkKeywordSearchResult`，而它**就是 `ChunkRow`**（`chunks.ts:333`）——**没有任何分数字段**。合并改按分累加后，这条路径必须也有分，否则只能填假值。
+
+> **R1 已把坑挖出来但没填**：`memory/index.ts:339` 在该路径上把 `rrfScore` 显式写成 `null`，而 `:341` 同时写了 `keywordRank: i`——**名次在手上，分没有**。这正是本票要补的一步。
 
 ### 统一口径（唯一的自洽解）
 
@@ -52,16 +57,16 @@ db/repository/chunks.ts:371   const RRF_K = 60
 这不是为打补丁新编的公式——**混合路径今天就是这么算的**：
 
 ```
-chunks.ts:397     scores.set(row.id, { score: 1 / (RRF_K + i + 1), row })      // 向量通道
-chunks.ts:400     const kwScore = 1 / (RRF_K + i + 1)                          // 关键词通道
-chunks.ts:403     existing.score += kwScore                                     // 双通道相加
+chunks.ts:431     scores.set(row.id, { score: 1 / (RRF_K + i + 1), row, … })   // 向量通道
+chunks.ts:434     const kwScore = 1 / (RRF_K + i + 1)                          // 关键词通道
+chunks.ts:437     existing.score += kwScore                                     // 双通道相加
 ```
 
 纯关键词降级路径（整趟嵌入挂了）**只有关键词通道那一项** ⇒ 同一个公式，**无需分支**。而跨查询合并 = 对每趟的分数求和——这正是 RRF 的原始形态。
 
 ### 落点（二选一，**店长推荐甲**）
 
-- **甲（推荐）**：`chunks.ts` 新增导出 `searchChunksKeywordScored(query, pool): ScoredChunk[]`，与 `searchChunksHybrid` 的出口**同形状**。`memory/index.ts:216-218` 两条路径拿到**同一种类型** ⇒ 合并逻辑零分支、零类型守卫。
+- **甲（推荐）**：`chunks.ts` 新增导出 `searchChunksKeywordScored(query, pool): ScoredChunk[]`，与 `searchChunksHybrid` 的出口**同形状**。`memory/index.ts:312-346` 两条路径拿到**同一种类型** ⇒ 合并逻辑零分支、零类型守卫。
 - 乙：从 `chunks.ts` 导出 `RRF_K`，在 `memory/index.ts` 就地补算。**缺点**：RRF 形态出现第二个产地，`RRF_K` 一改两处不同步。
 
 **明写禁止**（这是本票最容易写出的静默错误）：
@@ -79,7 +84,7 @@ chunks.ts:403     existing.score += kwScore                                     
 ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER
 ```
 
-- **先例**：`db/index.ts` 的 migrations 数组里已有 10+ 条 `ADD COLUMN`（`:250` / `:254` / `:258` …），跑法见迁移循环 `db/index.ts:641-647`（`try { exec } catch { /* 列已存在则忽略 */ }`）。**加列 O(1)、不重建表。**
+- **先例**：`db/index.ts:247` 起的 migrations 数组里 `ADD COLUMN` 实测 **30 行**（如 `:498` 的 `ALTER TABLE episode_attributions ADD COLUMN delivery_message_id TEXT`），跑法见迁移循环 `db/index.ts:754-762`（`try { db.exec(m.sql) } catch { /* 列已存在则忽略 */ }`）。**加列 O(1)、不重建表**（实测 20 万行表 0.10 ms）。
 - **独立 commit + 独立验收项**（沿用 C1 §六 Redis 死面的裁决范式）：`param_pool_n` 与排序改造**无依赖**，可分开 revert。
 - **时序自洽**：本票本就依赖 R1（§五），故 R1 的表必已存在。**但若 R1 因故延后而本票先开工，迁移会落进 `catch {}` 被静默吞掉** ⇒ 实施前先确认 `retrieval_events` 存在。
 
@@ -102,11 +107,11 @@ ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER
 
 - **不改任何常量的值**：`RRF_K`（60）、`HYBRID_CHANNEL_TOP_N`（20）、`MEMORY_TOP_K`（3）、`MAX_PROBE_N`（20）**一律不动**。本票改的是**怎么用**，不是**用多少**。
 - **不改 `chunks.ts:306` 的 `v.distance < ?`**（严格小于）——哨兵判别的前提，动它要连带重审 `channel`。
-- **不删哨兵**（`chunks.ts:405` / `memory/index.ts:222`）——见 [C1](C1-legacy-memory-chain-cleanup.md) §三。
+- **不删哨兵**（`chunks.ts:442` / `memory/index.ts:336`）——见 [C1](C1-legacy-memory-chain-cleanup.md) §三。
 - **不改节级逻辑**：`memory/index.ts` 的按节补齐 / 预算截断 / `section_dup` 去重**原样**。本票只改**片级顺序**，不改「哪一节被注入」的规则。
 - **不改通道内召回与排序**：`searchChunksByVector` / `searchChunksByKeyword` 的 SQL 与 `ORDER BY` 原样。
 - **不做「跨查询去重以外的重排」**——不引入新模型、不做 rerank、不加新依赖。
-- **不动 R1 的埋点写库**（`reply.ts:635` 之后那段）。
+- **不动 R1 的埋点写库**（`reply.ts:723-737` 的 `recordRetrievalTrace` 段——它在 `Promise.race`（`:710`）之外、`if (memoryContext)`（`:740`）之外，这两条位置是 R1 的硬要求）。
 - **不改前端**。
 
 ## 六、验收标准（行为可验证）
@@ -114,26 +119,26 @@ ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER
 1. **池不再被 `topK` 提前砍**（§一 病灶 1+2）：构造「某片在 A 查询排第 5、B 查询排第 2」的场景，断言该片**进入合并**（改动前必然不进）。**这是本票存在的理由，必须有这条用例**。
 2. **累加生效**（§一 病灶 3）：构造「甲片 = A 第 2 + B 第 2」「乙片 = A 第 1（B 未命中）」，断言**甲片 `final_rank` 更小**。
 3. **tie-break 确定性**：同分时按 `bestIndex` 升序决定；同一夹具**连跑两次结果逐字段一致**（防 `Map` 迭代序 / 排序不稳定性引入的抖动）。
-4. **注入片数不变**：同夹具下最终注入的片数 == `MEMORY_TOP_K`（`memory/index.ts:232` 的 `slice` 未被误改）。
+4. **注入片数不变**：同夹具下最终注入的片数 == `MEMORY_TOP_K`（`memory/index.ts:351` 的 `slice` 未被误改）。
 5. **纯关键词路径有分、且不是 NaN**（§三）：某趟嵌入失败时，该趟产出的候选行 `rrfScore` 为**有限正数**，且最终 `final_rank` 序列中**无 `NaN`**。断言方式：对 `final_rank` 序列做全序检查（无 `NaN` 参与比较）。
 6. **节级行为不变**（§五）：构造「同节多片」场景，断言 `section_dup` 去重结果**与改动前一致**——变了的是顺序，不是去重规则。
 7. **`param_pool_n` 落库**（§四 4.1）：新采集的行该列 == `HYBRID_POOL_PER_QUERY` 当前值（真机对账，非单测常量比对）。
 8. **迁移 additive**（§四 4.1）：老库重跑迁移，`retrieval_events` **既有行数一行不变**、既有行 `param_pool_n IS NULL`。
 9. **越界证明 · 只改了顺序**：差分法（同进程同夹具，跑改动前后两份实现），断言 `renderSections` 的输出**结构**（节数 / 正文内容集合 / `contextTokens` 计算 / 预算截断点）不变，**只有顺序**允许变。—— 不变量：**注入内容的「集合」不变，变的只是「顺序」**。若集合也变了，说明 §五 边界被越过。
 10. 全套 `npx vitest run` 绿 + `node scripts/lint.js` 通过。
-11. 提交 `catstudy [uuid]`；提交前 grep 复核行号（本仓纪律；本票引用的行号均为 2026-09-14 `dev@18f0fcd` 实测，落地前须复核漂移）。
+11. 提交 `catstudy [uuid]`；提交前 grep 复核行号（本仓纪律；本票引用的行号已按 **2026-09-14 `dev@2f31698`（R1 落地后）** 全量重审，见文末留痕，落地前仍须复核漂移）。
 
 ## 七、与 R1 的关系（串行，不并行）
 
-| 文件                        | R1 动                                  | R1-b 动                 | 冲突面                 |
+| 文件                        | R1 动（已落地）                        | R1-b 动                 | 冲突面                 |
 | --------------------------- | -------------------------------------- | ----------------------- | ---------------------- |
-| `db/repository/chunks.ts`   | `:385-412` 出口带通道身份 + `rrfScore` | `:411` slice 参数       | **同一函数同一行区间** |
-| `memory/index.ts`           | `:216-234` 采集 + `:90-110` 统计       | `:217-233` 合并键与传参 | **同一段**             |
-| `db/index.ts`（migrations） | 建三表                                 | 加 `param_pool_n` 列    | 同数组，不同条目       |
+| `db/repository/chunks.ts`   | `:378-459` 出口带通道身份 + `rrfScore` | `:451` slice 参数       | **同一函数同一行区间** |
+| `memory/index.ts`           | `:278-346` 采集 + `:97-110` 统计       | `:313-351` 合并键与传参 | **同一段**             |
+| `db/index.ts`（migrations） | 建三表（`:643` / `:678` / `:697`）     | 加 `param_pool_n` 列    | 同数组，不同条目       |
 
-**并行必冲突。R1 先合、R1-b 再开。**
+**R1 已合入 dev（PR #76 / `ce60621`）⇒ 串行条件已满足，本票可开工。**
 
-**且本票依赖 R1 的产出**：R1 把 `rrfScore` 带出出口（`:412` 的 `.map((s) => s.row)` 被改），R1-b 才拿得到分。**若 R1 落地时纯关键词路径仍无分（§三），R1-b 一并补——不得填假分。**
+**且本票依赖 R1 的产出**：R1 已把 `rrfScore` 带出出口（`chunks.ts:452-458`），本票拿得到分——**但纯关键词降级路径 R1 写的是 `null`（`memory/index.ts:339`），本票一并补满——不得填假分（§三）。**
 
 ## 八、本票为什么值得单独做（防「为了改而改」的质疑）
 
@@ -156,4 +161,39 @@ ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER
 - **一条对本票的诚实限制**：`param_pool_n` 只能记录**参数**，无法记录「排序键是名次还是分数」⇒ §4.2 的窗口切分口径**必须靠文档留痕**，不是靠数据自证。这是本票的口径债，已写明。
 - **落盘后逐条 grep 复核行号，修正 4 处（2026-09-14，提交前）**：`memory/index.ts` 的合并段实际是 **`sort`=231 / `slice`=232 / `map`=233**，初稿把 232 当成 `sort`、233 当成 `slice`（**整体偏 1**）；哨兵在 **`:222`** 不是 `:223`。已改：§一 病灶 3、§二 改动 4/5、§五 边界、§六 验收 4。
   - **`chunks.ts` 侧引用全部正确**（`:411` slice / `:412` map / `:333` / `:369` / `:371` / `:397` / `:400` / `:403` / `:405` / `:306` 逐条实测无误）——**同一票内一侧全对、一侧偏 1**，说明校对必须逐文件做，不能「核过一处就放心」。
-  - ⚠️ **同批核出一处相邻事实**：`reply.ts` 的埋点窗口实测为 **`:636` = `const memoryContext`、`:637` = `if (memoryContext)`**（`Promise.race` 收在 `:632`、`catch` 收在 `:635`）⇒ R1 派活单里「`:635` 之后 + `:637` 之外」**两处均正确，无需勘误**。
+  - ⚠️ **同批核出一处相邻事实**：`reply.ts` 的埋点窗口实测为 **`:636` = `const memoryContext`、`:637` = `if (memoryContext)`**（`Promise.race` 收在 `:632`、`catch` 收在 `:635`）⇒ R1 派活单里「`:635` 之后 + `:637` 之外」**两处均正确，无需勘误**。**（此条本身已于重审时作废，见下）**
+
+### 行号全量重审（2026-09-14，R1 合入 dev 后；基线 `dev@2f31698`）
+
+**为什么必须重审**：本票 17 处行号引用**全部**指向 R1 大改的两个文件（`memory/index.ts` 采集段重写、`chunks.ts` 出口重写）。R1 落地即宣告初稿行号面整体作废——**不重审就派活，等于把「照票抄行号」这种错直接喂给实施者**（本仓已栽过 4 次）。
+
+**逐条实测修正**（`git grep -n` / `grep -n` 于工作区，未过任何文本解码管道）：
+
+| 符号                                                       | 初稿    | 重审后                                                                   |
+| ---------------------------------------------------------- | ------- | ------------------------------------------------------------------------ |
+| `chunks.ts` 混合出口 `.slice(0, topK)`                     | 411     | **451**                                                                  |
+| `chunks.ts` 出口 `.map((s) => …)`                          | 412     | **452-458**                                                              |
+| `chunks.ts` 向量通道 `scores.set(…score…)`                 | 397     | **431**                                                                  |
+| `chunks.ts` `const kwScore`                                | 400     | **434**                                                                  |
+| `chunks.ts` `existing.score += kwScore`                    | 403     | **437**                                                                  |
+| `chunks.ts` 关键词哨兵 `{ ...hit, distance: maxDistance }` | 405     | **442**                                                                  |
+| `chunks.ts` `RRF_K = 60`                                   | 371     | **376**                                                                  |
+| `chunks.ts` 两通道调用                                     | 391-392 | **420-421**                                                              |
+| `memory/index.ts` `MEMORY_TOP_K`                           | 186     | **151**                                                                  |
+| `memory/index.ts` 混合路径调用                             | 217     | **313**                                                                  |
+| `memory/index.ts` 关键词路径调用                           | 218     | **329**                                                                  |
+| `memory/index.ts` 合并键 `bestIndex`                       | 225     | **316**（混合）/ **332**（降级）                                         |
+| `memory/index.ts` `sort`                                   | 231     | **350**                                                                  |
+| `memory/index.ts` 最终 `slice`                             | 232     | **351**                                                                  |
+| `memory/index.ts` 哨兵                                     | 222     | **336**                                                                  |
+| `db/index.ts` 迁移循环                                     | 641-647 | **754-762**                                                              |
+| `reply.ts` 埋点段                                          | 635     | **723-737**（`Promise.race`=710 / `const memoryContext`=739 / `if`=740） |
+
+**未漂移（原样正确）**：`chunks.ts:306`（`v.distance < ?`）、`chunks.ts:333`（`ChunkKeywordSearchResult = ChunkRow`）、`chunks.ts:369`（`HYBRID_CHANNEL_TOP_N`）。
+
+**两处实质变化（不只是行号，是票的结论要改）**：
+
+1. **§一 病灶「RRF 分被 `.map` 丢掉」已被 R1 消解**——出口现在返回完整 `ChunkHybridHit`。本票不再需要「捞分」，只需把已有的 `hit.rrfScore` 接进合并键。**改动面比初稿小。**
+2. **§三 的接口缺口原样存在，且被 R1 现形**：`memory/index.ts:339` 把降级路径的 `rrfScore` 显式写成 `null`，而同处 `:341` 已写 `keywordRank: i`——**名次在手上、分没有**。这一条从「初稿推测的必然撞上」升级为「代码里已可见的 `null`」。
+
+**教训**：设计票写下的行号是**某一刻代码的快照**，而票的生命周期跨越多次改动。**票一旦在前置票落地后才派活，行号面就必须整体重审**——这不是「复核漂移」，是「重取基线」。
