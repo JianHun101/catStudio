@@ -126,6 +126,12 @@ CREATE TABLE IF NOT EXISTS spans (
 > **为什么时间列用 ISO TEXT 而不是 epoch INTEGER**（实测两向转换均可，故不是可逆性判据）：
 >
 > - **同库同形态**：R1 的 `retrieval_events.created_at` 已是 ISO TEXT 且已上线有数据；再加一种 epoch INTEGER 会让本库出现**第三种时间形态**（`datetime('now')` 秒级 / ISO 毫秒 / epoch 毫秒）。
+> - **全库时间列普查（2026-09-15 实测，回答用户「其他表是什么类型」；数字均为逐列采样点数，非印象）**：`sqlite_master` 共 **30 张表**，其中 **10 张是 FTS / vec0 影子表**（`chunks_fts_*` 6 + `chunk_vectors_*` 4）⇒ **20 张领域表**。其中 **18 张有时间列、2 张没有**（正是 R1 的 `retrieval_queries` / `retrieval_candidates`——靠 FK 派生）。**时间戳列 100% 是 TEXT，全库零个 INTEGER epoch**。TEXT 内部共 **3 种形状**：
+>   - `YYYY-MM-DD HH:MM:SS`（秒级、空格分隔）——**14 / 16 张可判定表**（如 `messages.created_at` / `execution_logs.started_at`）；另 2 张（`eval_scores` / `user_feedback`）列在但**零行**，形态未实测
+>   - `YYYY-MM-DDTHH:MM:SS.mmmZ`（ISO 毫秒）——**仅 R1 的 `retrieval_events`**（实测值 `2026-09-14T16:22:45.775Z`）
+>   - `YYYY-MM-DD`（仅日期）——**仅 `chunks.date`**（实测值 `2026-08-13`）
+>   **故「统一」= 统一在 TEXT 家族内**；形状选 R1 同款 ISO 毫秒，理由见下条。
+> - **与秒级形态的取舍（如实标出张力）**：若按**多数派**取 `YYYY-MM-DD HH:MM:SS`，则验收 15（同一次执行内两段可区分、非秒级对齐）**不成立**——`dispatch.token_wait` 这类段常在同一个秒内开始与结束。取 ISO 毫秒的代价是：与 `messages` / `execution_logs` 的秒级列做**字典序比较仍正确**（同日内空格 `0x20` < `T` `0x54`），但**时间差有亚秒舍入**。**裁决：取 ISO 毫秒**（与 R2 直接相邻的 `retrieval_events` 同形，且满足时间轴排序所需精度）。
 > - **自描述**：epoch 毫秒是不可直读的数（`1757856000000`），排查时要先换算。
 > - **字典序 = 时间序**（同精度定长、同 UTC 同格式），排序与范围比较照常走索引。
 > - 代价：算术（时间差）需 `julianday()` 换算，或由应用层算好写进 `duration_ms`——**本表已有 `duration_ms`，故该代价实际不付**。
