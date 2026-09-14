@@ -358,6 +358,13 @@ R1 窗口的历史行没有 span，**这是唯一不需要编造数据的切法*
 | 19  | **采集器 per-execution**：并发批内 3 个执行体各持一个 `ExecTrace`，三者的 span **互不串台**（每个 `execution_id` 下 `parent_span_id` 均指向本执行内的 span） | 单测：并发跑 3 个执行，SQL 断言                     |
 | 20  | **采集器未挂 `EngineState`**（§4.7 的坑防回退）                                                                                                              | 静态源断言：`EngineState` 类型上无 span/采集字段    |
 | 21  | `runAgentReply` 原 **7 个参数签名未变**，只**新增** `trace` 一个（§4.7 明写不做整体收口）                                                                    | 静态源断言                                          |
+| 22  | **段名闭集无越界**：源码中全部 `startSpan(...)` 的实参取值 **⊆ §五 闭集**（防实施者自增段名）                                                                | 静态源断言                                          |
+| 23  | **落点覆盖 · `context.compress`**：走压缩路径时有行                                                                                                          | 单测                                                |
+| 24  | **落点覆盖 · `diff.collect`**：有行；且 5s 超时路径 `status='timeout'`                                                                                       | 单测                                                |
+| 25  | **落点覆盖 · `reply.persist`**：有行且 `duration_ms >= 0`                                                                                                    | 单测                                                |
+| 26  | **落点覆盖 · `git.auto_commit`**：有未提交改动时有行；无改动时该段可缺（**缺 ≠ 失败**）                                                                      | 单测                                                |
+
+> **验收 22–26 是 spec-gate 二次过门补的**：原 21 条里，§七 落点表 11 行中有 **4 行**（`context.compress` / `diff.collect` / `reply.persist` / `git.auto_commit`）**没有任何验收项守它**。「落点表每行、边界每条，各要能指到一个验收编号」这条判据（R1 过门时立的）在本票首轮漏网——**Gate C 的典型漏网形态，记在案**。
 
 ---
 
