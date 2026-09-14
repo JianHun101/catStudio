@@ -7,6 +7,12 @@
  * - 文件超过 10MB 自动轮转（保留 1 个旧文件）
  * - 支持 traceId 请求追踪
  *
+ * 环境变量（票 F1-c）:
+ *   LOG_LEVEL — debug | info | warn | error（未设/非法 ⇒ debug，生产默认不变）
+ *   LOG_FILE  — 日志文件路径覆盖；**测试专用**隔离通道（同 `RESTART_FILES_DIR` 范式），
+ *               vitest `test.env` 指向 `node_modules/.cache/test-logs/`。未设 ⇒ 默认路径。
+ *               ⚠️ 勿在 `.env` 里设它——那是把生产日志重定向走，排查时找不到文件的经典事故。
+ *
  * 用法:
  *   import { createLogger } from './logger.js'
  *   const log = createLogger('dispatch')
@@ -19,9 +25,22 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+/** 默认日志目录（`packages/server/data`）——`LOG_FILE` 覆盖时以覆盖值为准 */
 const LOG_DIR = path.join(__dirname, '..', 'data')
-const LOG_FILE = path.join(LOG_DIR, 'cat-study.log')
+const LOG_FILE_NAME = 'cat-study.log'
 const MAX_SIZE = 10 * 1024 * 1024 // 10MB
+
+/**
+ * 日志文件绝对路径（票 F1-c c1）。
+ *
+ * **每次写时解析**，不在模块顶层冻成常量：顶层常量会把「首次 import 那一刻的 env」
+ * 钉死——测试无法按用例切换路径，且 import 顺序会变成隐式契约。
+ * 未设 `LOG_FILE` ⇒ 默认路径，与改前**逐字节同路径**（生产语义不变）。
+ */
+export function resolveLogFile(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.LOG_FILE?.trim()
+  return override ? path.resolve(override) : path.join(LOG_DIR, LOG_FILE_NAME)
+}
 
 // ─── Log levels ─────────────────────────────────────
 
@@ -34,33 +53,56 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
   error: 3,
 }
 
-/** 最低输出级别，低于此级别的日志静默丢弃 */
-let minLevel: LogLevel = 'debug'
+/**
+ * 解析级别字符串；未设 / 非法 ⇒ `'debug'`（= 模块初值的既有语义，生产默认不变）。
+ * 非法值回落而非报错，与 `index.ts` 的 `setLogLevel(env.LOG_LEVEL as LogLevel)`
+ * 在**可观察面上等价**（未知键 `LEVEL_ORDER[x]` 为 undefined，比较恒 false ⇒ 全放行）。
+ */
+function parseLogLevel(raw: string | undefined): LogLevel {
+  return raw === 'debug' || raw === 'info' || raw === 'warn' || raw === 'error' ? raw : 'debug'
+}
+
+/**
+ * 最低输出级别，低于此级别的日志静默丢弃。
+ *
+ * 票 F1-c c2：**模块初始化时读一次 env**。原先只有 `index.ts:122` 调 `setLogLevel`，
+ * 而测试**不 import `index.ts`**（直接 import 被测模块）⇒ `minLevel` 恒停在 `'debug'`，
+ * vitest 配置里写的 `LOG_LEVEL: 'error'` **从未生效**（实测硬证据：配置写着 error 的那轮
+ * 仍落了一条 `"level":"debug"`）。生产语义不变——`index.ts` 仍会再设一次。
+ */
+let minLevel: LogLevel = parseLogLevel(process.env.LOG_LEVEL)
 
 export function setLogLevel(level: LogLevel): void {
   minLevel = level
 }
 
+/** 当前最低输出级别（只读可观察面——让「级别到底是多少」不必靠副作用反推） */
+export function getLogLevel(): LogLevel {
+  return minLevel
+}
+
 // ─── File rotation ──────────────────────────────────
 
-function rotateLog(): void {
+function rotateLog(file: string): void {
   try {
-    if (fs.existsSync(LOG_FILE)) {
-      const stat = fs.statSync(LOG_FILE)
+    if (fs.existsSync(file)) {
+      const stat = fs.statSync(file)
       if (stat.size < MAX_SIZE) return
 
-      const bak = LOG_FILE + '.1'
+      const bak = file + '.1'
       if (fs.existsSync(bak)) fs.unlinkSync(bak)
-      fs.renameSync(LOG_FILE, bak)
+      fs.renameSync(file, bak)
     }
   } catch {
     // 轮转失败不阻塞日志输出
   }
 }
 
-function ensureLogDir(): void {
-  if (!fs.existsSync(LOG_DIR)) {
-    fs.mkdirSync(LOG_DIR, { recursive: true })
+/** 目录取**该文件自己的** dirname（覆盖到别的目录时不再去建默认目录） */
+function ensureLogDir(file: string): void {
+  const dir = path.dirname(file)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
   }
 }
 
@@ -164,9 +206,10 @@ function writeLine(level: LogLevel, module: string, msg: string, meta?: LogMeta)
 
   // file (best-effort)：JSON Lines 原格式（检索/排查用，逐字节兼容）
   try {
-    ensureLogDir()
-    rotateLog()
-    fs.appendFileSync(LOG_FILE, formatLine(level, module, msg, meta) + '\n')
+    const file = resolveLogFile()
+    ensureLogDir(file)
+    rotateLog(file)
+    fs.appendFileSync(file, formatLine(level, module, msg, meta) + '\n')
   } catch {
     // 写文件失败不阻塞
   }

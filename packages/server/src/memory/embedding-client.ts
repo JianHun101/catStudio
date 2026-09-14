@@ -16,6 +16,11 @@
  * 环境变量:
  *   MEMORY_ENABLED         — 'false' 时直接 not-enabled（不 spawn、零开销）
  *   MEMORY_EMBEDDING_MODEL — 模型名（sidecar 读；主进程不写死白名单，以 /health 回报为准）
+ *
+ * 票 F1（止血·故障可见性，三条均**不改行为面**的失败语义）：
+ *   F1-a 非 2xx 时读一次 body，把 sidecar 写好的根因并入 `detail`（`describeBadStatus`）
+ *   F1-b `defaultSpawn` 在 spawn 返回后**立即**接管 `stderr`（`logSidecarStderr`）
+ *   —— `reason` 值域 / 重试 / 熔断 / 降级行为一律原样（票 §五 边界）
  */
 
 import { spawn } from 'node:child_process'
@@ -335,8 +340,12 @@ export class EmbeddingClient {
     }
 
     if (!res.ok) {
+      // 票 F1-a：**先读 body 再杀侧车**——根因就在这份响应里（sidecar 侧
+      // `sendJson(res, 500, { ok:false, reason, detail })`），先 kill 会把「刚写好、
+      // 还没读完」的那份 body 一并带走。读取自身不抛（见 `describeBadStatus`）。
+      const detail = await describeBadStatus(res)
       this.dropSidecar()
-      return this.failAll(texts.length, 'bad-status', `POST /v1/embeddings → HTTP ${res.status}`)
+      return this.failAll(texts.length, 'bad-status', detail)
     }
 
     let payload: any
@@ -590,12 +599,45 @@ function embedError(reason: EmbedFailureReason, message: string): EmbedError {
   return err
 }
 
-/** 默认 spawn：`node <绝对路径>.mjs` —— 禁用 .cmd 包装 / shell:true（Windows EINVAL） */
-const defaultSpawn: SpawnSidecar = (scriptPath) =>
-  spawn(process.execPath, [scriptPath], {
+/** stderr 单块落痕的截断上限（与 `llm/cli-utils.ts` 的 `attachExitError` 同款 500） */
+const STDERR_MAX = 500
+
+/**
+ * sidecar 的 stderr 单块 → 日志（**截断 + 分级**，形态照 `llm/cli-utils.ts`）。
+ *
+ * 分级判据沿用 `cli-utils.ts:496`：含 `Warning`/`info` 视为噪声记 `debug`，其余记 `error`。
+ * 每块只落**一行**（cli-utils 那版同块 debug+error 各写一次，在默认 `LOG_LEVEL=debug`
+ * 下等于每块两行；同信息不重复落，可读性按排查场景优先）。
+ */
+function logSidecarStderr(chunk: unknown): void {
+  const text = String(chunk ?? '').trim()
+  if (!text) return
+  const meta = { text: text.slice(0, STDERR_MAX) }
+  if (!text.includes('Warning') && !text.includes('info')) log.error('sidecar stderr', meta)
+  else log.debug('sidecar stderr', meta)
+}
+
+/**
+ * 默认 spawn：`node <绝对路径>.mjs` —— 禁用 .cmd 包装 / shell:true（Windows EINVAL）。
+ *
+ * 票 F1-b：**stderr 必须在这里、在 `spawn` 返回后立刻接管**，三条理由缺一不可：
+ *   ① **诊断全丢**：模型的加载失败 / OOM / 端口占用 / 异常栈全在 stderr 上，而本模块
+ *      原先只有 `SidecarChild` 的接口声明（`stderr`），**没有任何 `.on('data')`**
+ *      ⇒ 一条都没留；
+ *   ② **不是「晚点接也行」**：`stdio` 三路全 `'pipe'` 而没有读者，管道缓冲写满
+ *      （Windows 约 64KB）后**子进程 write 会阻塞**——表现成探活超时，
+ *      而根因在几秒前就被自己堵死了（挂死 ≠ 报错）；
+ *   ③ **更不能等 `ensureLive()`**：按需 spawn + 失败即杀的模型下，冷启动期
+ *      （**最可能出根因的那一段**）的 stderr 会先于监听器到达而**永久丢失**。
+ */
+const defaultSpawn: SpawnSidecar = (scriptPath) => {
+  const child = spawn(process.execPath, [scriptPath], {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
-  }) as unknown as SidecarChild
+  })
+  child.stderr?.on('data', logSidecarStderr)
+  return child as unknown as SidecarChild
+}
 
 /**
  * 从 baseUrl 解析端口（直连/stub 分支的端口来源）。
@@ -628,6 +670,40 @@ function killQuietly(child: SidecarChild): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+/** 非 2xx 时并入 `detail` 的根因截断上限（与 `llm/cli-utils.ts` 的 stderr 同款 500） */
+const STATUS_DETAIL_MAX = 500
+
+/**
+ * 非 2xx 响应的 `detail`（票 F1-a）——把 sidecar **已经写进 body 的根因**读出来。
+ *
+ * 病灶（F1-a）：`detail` 原先只有状态码，而根因就在同一份响应里、一行之前，
+ * 却从未被读过——`res.json()` 只在**成功路径**上调用（在非 2xx 早退之后）。
+ * 落痕于是长成 `POST /v1/embeddings → HTTP 500`，**根因信息量为零**。
+ *
+ * 三条硬约束（票 §三）：
+ *   ① **绝不抛**——本函数在失败路径上，抛了会把「嵌入失败」升级成「未捕获异常」；
+ *   ② **有上限**——截断到 `STATUS_DETAIL_MAX`（sidecar 的 `detail` 是 `err.message`，
+ *      长度不受本模块控制）；
+ *   ③ **不新增失败态**——非 JSON / body 为空 / 读失败一律**回落**到旧文案，
+ *      `reason` 仍是 `bad-status`。
+ */
+async function describeBadStatus(res: Response): Promise<string> {
+  const fallback = `POST /v1/embeddings → HTTP ${res.status}`
+  try {
+    const text = (await res.text()).trim()
+    if (!text) return fallback
+    // 收窄成只读形状而不是裸 `any`（CODING_STANDARDS §13：新代码不加未豁免的 any）
+    const payload = JSON.parse(text) as { reason?: unknown; detail?: unknown }
+    const reason = typeof payload?.reason === 'string' ? payload.reason : ''
+    const detail = typeof payload?.detail === 'string' ? payload.detail : ''
+    if (!reason && !detail) return fallback
+    const extra = [reason && `reason=${reason}`, detail].filter(Boolean).join(' ')
+    return `${fallback} | ${extra.slice(0, STATUS_DETAIL_MAX)}`
+  } catch {
+    return fallback
+  }
 }
 
 /** 响应体 → 向量数组；形态不符返回 null（不抛，交调用方记 bad-status） */

@@ -6,9 +6,12 @@
  * 不加载模型：stub 直接回向量。
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { PassThrough } from 'node:stream'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
   EmbeddingClient,
   MAX_BATCH,
@@ -86,6 +89,14 @@ interface StubSidecar {
   setDataCount: (n: number) => void
   /** 接下来 n 次嵌入请求立即回 500（不挂起、无时序竞态）——票午 (b) 造「首败」用 */
   failNextEmbeddings: (n: number) => void
+  /**
+   * 非 2xx 的 body 原文（票 F1-a）——默认 `{ok:false,reason:'boom'}`。
+   * 传非 JSON 串 = 造「body 不是 JSON」；传 sidecar 真实形态
+   * `{"ok":false,"reason":"internal","detail":"..."}` = 造「根因在 body 里」。
+   */
+  setEmbedErrorBody: (body: string) => void
+  /** >0 ⇒ 非 2xx 时只写前 N 字节就断链（造「读 body 本身抛错」） */
+  setEmbedAbortAfter: (bytes: number) => void
 }
 
 /** 真起一个 127.0.0.1 stub sidecar */
@@ -97,6 +108,8 @@ async function startStub(initialHealth: Record<string, unknown> = {}): Promise<S
   let hang = false
   let dataCount: number | undefined
   let failNext = 0
+  let embedErrorBody: string | null = null
+  let embedAbortAfter = 0
 
   const server: Server = createServer((req, res) => {
     if (req.url === '/health') {
@@ -113,7 +126,14 @@ async function startStub(initialHealth: Record<string, unknown> = {}): Promise<S
         if (hang) return // 故意不响应（B3 超时）
         if (embedStatus !== 200) {
           res.writeHead(embedStatus, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ ok: false, reason: 'boom' }))
+          const body = embedErrorBody ?? JSON.stringify({ ok: false, reason: 'boom' })
+          // F1-a 反例面：写完半截 body 就断链 ⇒ 客户端读 body 抛（须回落，不得升级成未捕获异常）
+          if (embedAbortAfter > 0) {
+            res.write(body.slice(0, embedAbortAfter))
+            setTimeout(() => res.destroy(), 10)
+            return
+          }
+          res.end(body)
           return
         }
         const input = JSON.parse(Buffer.concat(chunks).toString()).input
@@ -171,6 +191,12 @@ async function startStub(initialHealth: Record<string, unknown> = {}): Promise<S
     },
     failNextEmbeddings: (n) => {
       failNext = n
+    },
+    setEmbedErrorBody: (body) => {
+      embedErrorBody = body
+    },
+    setEmbedAbortAfter: (bytes) => {
+      embedAbortAfter = bytes
     },
   }
 }
@@ -549,6 +575,233 @@ describe('bad-status', () => {
     stub.setDataCount(1) // 请求 2 条只回 1 条
     const r = await client.embedMany(['a', 'b'])
     expect(r.every((x) => !x.ok && x.reason === 'bad-status')).toBe(true)
+  })
+})
+
+// ─── 票 F1-a 非 2xx 读 body · 根因可见 ────────────────
+
+describe('票 F1-a 非 2xx 的 detail 带根因', () => {
+  /** sidecar 的真实形态（`embed-server.mjs:161` 的 sendJson(500, {ok,reason,detail})） */
+  const SIDECAR_ERROR = JSON.stringify({
+    ok: false,
+    reason: 'internal',
+    detail: '模型加载失败: xxx',
+  })
+
+  it('根因在 body 里 ⇒ detail 带出来（改前恒为 `HTTP 500`，本断言必红）', async () => {
+    const stub = await makeStub()
+    stub.setEmbedStatus(500)
+    stub.setEmbedErrorBody(SIDECAR_ERROR)
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub) })
+
+    const r = await client.embed('x')
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.reason).toBe('bad-status')
+    // 承重断言：改前 detail = 'POST /v1/embeddings → HTTP 500'，不含任何根因
+    expect(r.ok === false && r.detail).toContain('模型加载失败: xxx')
+    expect(r.ok === false && r.detail).toContain('reason=internal')
+  })
+
+  it('落痕同面：日志里的 detail 也带根因（「生产上嵌入为什么挂」才答得出）', async () => {
+    const stub = await makeStub()
+    stub.setEmbedStatus(500)
+    stub.setEmbedErrorBody(SIDECAR_ERROR)
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub) })
+
+    await client.embed('x')
+
+    expect(logMocks.error).toHaveBeenCalledWith(
+      '嵌入不可用，记忆链降级',
+      expect.objectContaining({
+        reason: 'bad-status',
+        detail: expect.stringContaining('模型加载失败: xxx'),
+      })
+    )
+  })
+
+  it('非 JSON body ⇒ 回落旧文案，不新增失败态', async () => {
+    const stub = await makeStub()
+    stub.setEmbedStatus(500)
+    stub.setEmbedErrorBody('<html>500 Internal Server Error</html>')
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), retryAttempts: 0 })
+
+    const r = await client.embed('x')
+    expect(r.ok === false && r.reason).toBe('bad-status')
+    expect(r.ok === false && r.detail).toBe('POST /v1/embeddings → HTTP 500')
+  })
+
+  it('空 body ⇒ 回落旧文案', async () => {
+    const stub = await makeStub()
+    stub.setEmbedStatus(500)
+    stub.setEmbedErrorBody('')
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), retryAttempts: 0 })
+
+    const r = await client.embed('x')
+    expect(r.ok === false && r.reason).toBe('bad-status')
+    expect(r.ok === false && r.detail).toBe('POST /v1/embeddings → HTTP 500')
+  })
+
+  it('JSON 但不是根因形态（无 reason/detail）⇒ 同样回落，不编内容', async () => {
+    const stub = await makeStub()
+    stub.setEmbedStatus(503)
+    stub.setEmbedErrorBody(JSON.stringify({ error: 'unavailable' }))
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), retryAttempts: 0 })
+
+    const r = await client.embed('x')
+    expect(r.ok === false && r.detail).toBe('POST /v1/embeddings → HTTP 503')
+  })
+
+  it('读 body 本身抛错（半截 body 后断链）⇒ 回落，不升级成未捕获异常', async () => {
+    const stub = await makeStub()
+    stub.setEmbedStatus(500)
+    stub.setEmbedErrorBody(SIDECAR_ERROR)
+    stub.setEmbedAbortAfter(12) // 写 12 字节就 destroy ⇒ 客户端读 body 抛
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), retryAttempts: 0 })
+
+    const r = await client.embed('x')
+    expect(r.ok === false && r.reason).toBe('bad-status')
+    expect(r.ok === false && r.detail).toBe('POST /v1/embeddings → HTTP 500')
+  })
+
+  it('超长 detail 截断到 500 字符（长度不受本模块控制）', async () => {
+    const stub = await makeStub()
+    stub.setEmbedStatus(500)
+    stub.setEmbedErrorBody(
+      JSON.stringify({ ok: false, reason: 'internal', detail: 'x'.repeat(5000) })
+    )
+    const client = new EmbeddingClient({ spawnFn: spawnTo(stub), retryAttempts: 0 })
+
+    const r = await client.embed('x')
+    const detail = (r.ok === false && r.detail) || ''
+    // 截断作用在**根因段**上（`|` 之后）：恰好 500 字符，且切的是根因串本身
+    // （改前 detail 恒为 `POST /v1/embeddings → HTTP 500`，本断言必红）
+    const extra = detail.slice(detail.indexOf(' | ') + 3)
+    expect(extra).toHaveLength(500)
+    // 短字段（reason）在前 ⇒ 截断先切长字段（detail），契约信息不因截断而丢
+    expect(/^reason=internal x+$/.test(extra)).toBe(true)
+    expect(detail).toContain('POST /v1/embeddings → HTTP 500') // 前缀文案不变
+  })
+})
+
+// ─── 票 F1-b defaultSpawn 接管 stderr ─────────────────
+//
+// 本组**不 mock 子进程**：被测面就是 `defaultSpawn` 与**真实管道**的关系，
+// 换成 PassThrough 假 child 等于把被测对象换成替身（自证）。
+// 真 spawn 一个假 sidecar（临时 .mjs），走完整「握手 → /health → /v1/embeddings」。
+
+const STUB_SIDECAR_SRC = `import { createServer } from 'node:http'
+
+// F1-b 假 sidecar：**先灌 stderr、后握手**——顺序即病灶。真实 sidecar 的模型加载失败 /
+// OOM / 端口占用 / 异常栈都发生在 listen 之前，正是「冷启动期」那一段。
+const mode = process.env.F1_STUB_STDERR || 'boom'
+if (mode === 'flood') {
+  const chunk = 'x'.repeat(8192)
+  for (let i = 0; i < 256; i++) process.stderr.write(chunk) // 2MB ≫ 管道缓冲（约 64KB）
+} else {
+  process.stderr.write('boom\\n')
+}
+
+const dim = 3
+const server = createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, ready: true, model: 'f1-stub', dim: dim }))
+    return
+  }
+  if (req.url === '/v1/embeddings' && req.method === 'POST') {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const input = JSON.parse(Buffer.concat(chunks).toString()).input
+      const texts = typeof input === 'string' ? [input] : input
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          model: 'f1-stub',
+          dim: dim,
+          data: texts.map((t, index) => ({ index: index, embedding: [t.length, 0, 0] })),
+        })
+      )
+    })
+    return
+  }
+  res.writeHead(404).end()
+})
+
+server.listen(0, '127.0.0.1', () => {
+  process.stdout.write(
+    'EMBED_SIDECAR_READY ' +
+      JSON.stringify({ port: server.address().port, host: '127.0.0.1' }) +
+      '\\n'
+  )
+})
+`
+
+/** 有界等待（stderr 落痕与 HTTP 往返是两条独立异步链） */
+async function waitFor(pred: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (pred()) return
+    await new Promise((r) => setTimeout(r, 20))
+  }
+}
+
+describe('票 F1-b defaultSpawn 接管 stderr', () => {
+  let tmpDir: string
+  let scriptPath: string
+  let live: EmbeddingClient | null = null
+
+  beforeAll(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'f1-sidecar-'))
+    scriptPath = path.join(tmpDir, 'stub-sidecar.mjs')
+    fs.writeFileSync(scriptPath, STUB_SIDECAR_SRC)
+  })
+
+  afterAll(() => {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    } catch {
+      /* 子进程刚被杀、句柄尚未释放（Windows）——临时目录在系统 tmp 下，留着无害 */
+    }
+  })
+
+  afterEach(() => {
+    live?.stop()
+    live = null
+    delete process.env.F1_STUB_STDERR
+  })
+
+  it('stderr 有痕：假 sidecar 写 `boom` ⇒ 日志出现该内容', async () => {
+    process.env.F1_STUB_STDERR = 'boom'
+    live = new EmbeddingClient({ scriptPath, probeTimeoutMs: 5000, requestTimeoutMs: 5000 })
+
+    expect((await live.embed('abcd')).ok).toBe(true)
+    await waitFor(() => logMocks.error.mock.calls.some(([msg]) => msg === 'sidecar stderr'), 2000)
+    // 改前：整个模块没有任何 `.on('data')`，stderr 一条不落 ⇒ 本断言必红
+    expect(logMocks.error).toHaveBeenCalledWith(
+      'sidecar stderr',
+      expect.objectContaining({ text: expect.stringContaining('boom') })
+    )
+  })
+
+  it('**不阻塞**：连续写 >1MB 到 stderr，探活 / 请求仍能完成', async () => {
+    process.env.F1_STUB_STDERR = 'flood'
+    live = new EmbeddingClient({ scriptPath, probeTimeoutMs: 5000, requestTimeoutMs: 5000 })
+
+    const r = await live.embed('abcd')
+
+    // 改前：stderr 无读者 ⇒ 管道写满后子进程在 `process.stderr.write` 阻塞 ⇒
+    // 永远走不到 listen ⇒ 握手不发 ⇒ 客户端 spawn-failed（本断言是本票唯一能证明
+    // 「第二重害 = 挂死而非报错」的用例）
+    expect(r.ok).toBe(true)
+    expect(r.ok && r.vector.slice(0, 3)).toEqual([4, 0, 0])
+
+    // 截断上限：2MB 被切成多块落痕，每块都必须 ≤ 500 字符
+    const calls = logMocks.error.mock.calls.filter(([msg]) => msg === 'sidecar stderr')
+    expect(calls.length).toBeGreaterThan(0)
+    for (const [, meta] of calls) {
+      expect(String((meta as { text: string }).text).length).toBeLessThanOrEqual(500)
+    }
   })
 })
 
