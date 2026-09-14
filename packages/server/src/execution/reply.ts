@@ -194,7 +194,7 @@ function upsertTool(tools: ToolCallInfo[], chunk: Chunk): void {
  * 检索流水落盘（P2 / R1）——**三处口径与既有代码逐字同源**，不是重新推导：
  *
  * · `taskId` = `triggerMsg.taskId || traceId`：与写回复消息那一行
- *   （`insertAgentMessage`，下方 `:911`）**同一表达式**。链锚口径 = P1 的
+ *   （`insertAgentMessage`，本文件下方「写入完整消息」段）**同一表达式**。链锚口径 = P1 的
  *   `COALESCE(回复.task_id, 触发.task_id)`，而回复侧因这个 `|| traceId` 恒非空
  *   ⇒ 链锚 = 本表达式。写成 `triggerMsg.taskId` 会与 P1 对不上账。
  * · `reason`：照抄下方日志的三元式——值域 **9**（模块 7 枚举 + `timeout` +

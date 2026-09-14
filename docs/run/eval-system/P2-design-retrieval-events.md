@@ -347,10 +347,18 @@ const rows = blob ? searchChunksHybrid(...) : searchChunksByKeyword(...)  // ind
 
 ### 11.3 偏离与自主决策（**请审查重点看这一节**）
 
-1. **`execution_id` 的来源票面未钉死**（§三 落点表只列 `reply.ts:635`，但 `logId` 是 `serial.ts:1232` 的局部量，隔 3 个函数帧）。**取法选了查库**（`getLogsByTriggerMessage` 按 (会话, 猫, 触发消息) + `status='running'` 窄定位），**没有在 serial 穿线**——理由：① 票 §八 自己把 `serial.ts` 划为「事故密集区、另票一个风险面」，穿线要改 4 个签名；② 与同文件 `:1077` 既有的「按 agent + running 定位」同款，只是多带两个条件、错挂面更小。**未命中时不编 `execution_id`、直接跳过并记 warn**（不违反 NOT NULL、也不编数据）。_这是契约缺口，若店长要穿线版，改动量 = 4 签名。_
+1. **`execution_id` 的来源票面未钉死**（§三 落点表只列 `reply.ts:635`，但 `logId` 是 `serial.ts:1232` 的局部量，隔 3 个函数帧）。**取法选了查库**（`getLogsByTriggerMessage` 按 (会话, 猫, 触发消息) + `status='running'` 窄定位），**没有在 serial 穿线**——理由：① 票 §八 自己把 `serial.ts` 划为「事故密集区、另票一个风险面」，穿线要改 4 个签名；② 与同文件 `updateExecutionLogDiagnostics`（实施后实测 `:1180`）既有的「按 agent + running 定位」同款，只是多带两个条件、错挂面更小。**未命中时不编 `execution_id`、直接跳过并记 warn**（不违反 NOT NULL、也不编数据）。_这是契约缺口，若店长要穿线版，改动量 = 4 签名。_
 2. **`truncated` 在 `budget-exhausted` 路径由 `false` 改判 `true`**（声明的微修正）：该路径按定义就是「预算截断发生」（`bySection` 非空却一节没进），原值落成 `EMPTY_STATS` 的默认 `false` —— 与 ok 路径同口径（`kept.length < bySection.size` ⇒ `0 < N` ⇒ true）后修正。**不动会让这张表在「预算够不够」这个头号问题上产出反向读数。**
 3. **流水类型合并到写口契约**：`memory/index.ts` 原本另写了一份 `MemoryCandidateTrace` / `MemoryQueryTrace` 字段表（与写口 20 列重复），已改为 `type = RetrievalCandidateInput` 别名。理由：两处各写一份，改一处漏一处**没有编译期信号**——**合并当场抓出一处真错**（测试里写的 `passesStatusFilter` vs 契约的 `passedStatusFilter`，旧名来自 C1 前的 memory 侧）。
 4. **`renderSections` 改为复用 `renderOrder`**（唯一真相源）：`injectedPosition` 要答「猫读到的第几条」，与渲染序必须同源；两份各写会**静默**漂移。行为不变，由 §九 17 的差分用例守（n=1..5 全窗口逐字节）。
 5. **埋点整段加 try/catch**（票 §三 硬约束 2 的本意）：原实现只包了写口内部，**查执行行 / 取参数快照 / 组装**三段在外——实测被 5 个测试替身（partial `vi.mock` factory 缺 `currentRetrievalParams`）打中，`runAgentReply` 整条中断、**87 个用例连片失败**。修法是双管：① 整段兜底 + `log.warn`；② **5 个替身补上该导出**（替身必须镜像真模块被消费的导出面）。
 6. **顺手清一处死 import**：`memory/index.ts` 的 `ChunkRow`（`isVectorHitRow` 删除后零消费方），A5 同病灶。
 7. **超时路径的 `retrieval_ms` 取外侧计时**：有 `memoryResult` 时取模块内测值（同一趟），超时/抛错无内测值才退到 `reply.ts` 外侧计时。两把尺子的分界写死在代码注释里。
+
+### 11.4 行号审计（改完全仓复核，本仓反复病灶）
+
+§十一 11.1 的行号是**实施后实测**（`grep` 复核过）。但审计中发现**我自己引入了一处行号漂移**：`reply.ts` 的埋点注释写「（`insertAgentMessage`，下方 `:911`）」——`:911` 是**改动前**的地址，我往该文件插了约 100 行后实际在 `:1006`。
+
+**修法不是改成 `:1006`，而是换成符号引用**（「本文件下方『写入完整消息』段」）——绝对行号会被下一次编辑再次打漂，符号不会。同批核过的引用：`db/index.ts:642/677/696`、`chunks.ts:374/394/414/491`、`memory/index.ts:149/290/414/536`、`reply.ts:214/706/729`、`serial.ts:1232`、`updateExecutionLogDiagnostics` 实施后 `:1180`（本票 11.3 原写 `:1077`，同为改动前地址，已更正）。
+
+**教训**：设计票里的行号是「写下那一刻」的快照，实施后必然全体漂移。**实施留痕给实测号；代码注释给符号**——两者混用就是本仓记过多次的「记录≠真相」。
