@@ -21,6 +21,7 @@ import { __test_reset } from '../dispatch/index.js'
 import { createExecutionEngine } from './serial.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
+import { ensureSessionWorktree } from '../llm/git-utils.js'
 
 // ═══ 边界 mock（真实 dispatch / SQLite / 采集器 / 写口保留） ═══
 
@@ -48,6 +49,10 @@ vi.mock('../llm/git-utils.js', () => ({
   ensureSessionWorktree: vi.fn(() => null),
   snapshotPackageDeps: vi.fn(() => []),
   diffNewPackages: vi.fn(() => []),
+  // T-1 Phase 2：serial.ts 清理段改带 `cleanGitEnv()`（与 gitCommit 对称）。
+  // 本工厂是**部分导出**——漏键 ⇒ serial.ts 拿到 undefined、调用即 TypeError，
+  // 而清理段自带 `catch {}` 会把它静默吞掉（表现为「清理莫名没跑」）。
+  cleanGitEnv: vi.fn(() => ({ ...process.env })),
 }))
 
 vi.mock('../summarizer/index.js', () => ({
@@ -194,6 +199,10 @@ describe('serial × R2 段五（引擎接线面）', () => {
     })
     h.collectCommitDiffs.mockResolvedValue(null)
     h.gitCommit.mockReturnValue(null)
+    // T-1 Phase 2：① 的提交作用域只认 `ensureSessionWorktree`。默认置 null（= 无 worktree
+    // ⇒ 不提交），需要「真有 commit」的用例自行覆盖——与 `h.gitCommit` 同款「每用例显式
+    // 置默认」：`clearAllMocks` 清调用**不清实现**，上个用例的实现会残留到本用例
+    vi.mocked(ensureSessionWorktree).mockReturnValue(null)
     h.chatStream.mockImplementation(async function* () {
       yield { content: '收到', kind: 'text' }
     })
@@ -495,6 +504,8 @@ describe('serial × R2 段五（引擎接线面）', () => {
 
   // ─── 验收 26：轮次自动提交段 ──────────────────────────
   it('验收 26 · 有 commit ⇒ `git.auto_commit` 有行（挂在本次执行的根段下）', async () => {
+    // T-1 Phase 2：① 只在 `ensureSessionWorktree` 给出路径时才提交（不再有「无 cwd 兜底」）
+    vi.mocked(ensureSessionWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-spans')
     h.gitCommit.mockReturnValue('abc1234')
     const engine = createExecutionEngine(createFakeBus())
     await runRound(engine, 'msg-1', 'trace-1')

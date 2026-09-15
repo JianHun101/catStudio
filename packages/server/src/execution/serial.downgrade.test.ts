@@ -1,13 +1,14 @@
 /**
- * serial.ts × 降级路径（T-1 Phase 1 · 测试先行）。
+ * serial.ts × 降级路径（T-1 · Phase 1 测试先行 → Phase 2 生产改动）。
  * 票面：`docs/run/multi-cat-isolation/tickets.md`。
  *
- * **被测面**：`executeAgentsSerial` 顶层收尾（`depth === 0`）的两处「worktree 不可用 →
- * 兜底落 `process.cwd()`」——
- *   ① `serial.ts:1149-1153` auto-commit：无 worktree ⇒ `gitCommit(msg)` **不带 cwd** ⇒
- *      落 `process.cwd()` = 主仓库根 ⇒ `git add -A` + commit **进主仓库当前分支**（绕过审查链）
- *   ② `serial.ts:1199-1211` 脏文件清理：无 worktree ⇒ `process.cwd()` ⇒
- *      `git checkout -- .` + `git clean -fd` **作用到主仓库整棵树**
+ * **被测面**：`executeAgentsSerial` 顶层收尾（`depth === 0`）的两处「worktree 不可用」
+ * 处置——
+ *   ① auto-commit：收窄前是 `gitCommit(msg)`（无 cwd ⇒ 落 `process.cwd()` = 主仓库根
+ *      ⇒ `git add -A` + commit **进主仓库当前分支**，绕过审查链）；
+ *   ② 脏文件清理：收窄前是 `getSessionWorktreePath(sid) ?? process.cwd()` ⇒
+ *      `git checkout -- .` + `git clean -fd` **作用到主仓库整棵树**。
+ * **Phase 2 后两者同批走 `ensureSessionWorktree`（查 + 建），建不出 → 不动作 + 显式告警。**
  *
  * **形态：真 git 仓库，`git-utils` 与 `node:child_process` 一律不 mock。**
  * 降级路径的实害是「文件系统上真的动了哪个仓库」——只有让 `git commit` / `git checkout`
@@ -16,17 +17,21 @@
  * 再断言它没被调用」的形态——那只证得了「调用没发生」，证不了「主仓库文件真的没动」。
  * 做法与 `llm/session-closeout.test.ts` 同款：`mkdtemp` + `git init` + `chdir`。
  *
- * **安全前提（必读，否则测试自己就是事故）**：`serial.ts:1200/1210/1211` 的 execSync
- * **不带 `cleanGitEnv()`**（与 `git-utils` 不对称）。若进程环境里残留 `GIT_DIR`
- * （本仓已知：git 跑钩子时向子进程注入，曾把主仓库 `core.bare` 写成 true），那几条
- * `git checkout -- .` 会**穿透到真实仓库**。故 `beforeAll` 先剥掉这四个变量。
+ * **Phase 1 → Phase 2 的读法变化（重要）**：Phase 1 用 `it.fails` 编码「目标行为面」
+ * （建不出 ⇒ 不动作 + 告警），闸保持全绿、改对后强制翻回 `it`。Phase 2 已改对，故
+ * 4 格全部翻正为 `it`；同时 **Phase 1 记为「现状」的若干格其读数本身也变了**
+ * （B1/B2/B3-busy/B4/G4a/G4b）——那正是本票要改的行为，逐格在注释里留了 Phase 1 旧读数
+ * 以便对照。G7：每格的覆盖边界自陈见文末「覆盖边界」段。
  *
- * **Phase 1 契约**：只加测试、零生产改动；目标行为（Phase 2 要改成的样子）用 `it.fails`
- * 编码——闸保持全绿，Phase 2 改对后它会主动报错、强制翻回 `it`。
+ * **安全前提（必读，否则测试自己就是事故）**：Phase 2 前 `serial.ts:1200/1210/1211`
+ * 的 execSync **不带 `cleanGitEnv()`**（与 `git-utils` 不对称），Phase 2 已补对称并
+ * 由 OQ4 用例做 A/B 实证。但测试**自身**出 git 仍必须先剥——git 跑钩子时会向子进程
+ * 注入 `GIT_DIR`（本仓已知：曾把主仓库 `core.bare` 写成 true），`beforeAll` 剥掉这四个
+ * 变量、`afterAll` 按原值还原（对称）。
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -38,7 +43,7 @@ import { __test_reset } from '../dispatch/index.js'
 import { createExecutionEngine } from './serial.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
-import { ensureSessionWorktree } from '../llm/git-utils.js'
+import { ensureSessionWorktree, sessionShortId, sessionWorktreePath } from '../llm/git-utils.js'
 
 // ═══ 边界 mock（LLM / 记忆 / 摘要 / handoff / diff / 信号——与「提交落哪」无关）═══
 // 刻意**不** mock：`../llm/git-utils.js`、`node:child_process`。
@@ -49,6 +54,16 @@ const h = vi.hoisted(() => ({
   buildKnowledgeContext: vi.fn(),
   chatStream: vi.fn(),
   collectCommitDiffs: vi.fn(),
+  /**
+   * OQ1 的开关：让 `reply.ts:314` 的 `getAdapterForAgent` 抛错。
+   * 这是**唯一**一条能确定性地构造「`claudeRan` 已为 true、而 worktree 还没建」的缝——
+   * `getAdapterForAgent` 是 `runAgentReply` 函数体的第一条语句（`reply.ts:314`），
+   * 远早于建 worktree 的 `reply.ts:976`；抛错经 `serial.ts:575` 的 Promise.race
+   * reject → `:596` 的 catch → `return claudeRan`（`needsLock` 初值 = provider 是 claude）。
+   * 用标志位而不是 `mockImplementationOnce`：`clearAllMocks` 清调用不清实现，
+   * 一次性实现会串到后续用例。
+   */
+  failAdapterResolve: false,
 }))
 
 // logger mock 保留**通道名**首参：要区分「serial.ts 自己告的警」与
@@ -64,7 +79,10 @@ vi.mock('../logger.js', () => ({
 }))
 
 vi.mock('../llm/registry.js', () => ({
-  getAdapterForAgent: vi.fn(() => ({ chatStream: h.chatStream })),
+  getAdapterForAgent: vi.fn(() => {
+    if (h.failAdapterResolve) throw new Error('adapter resolve failed (test)')
+    return { chatStream: h.chatStream }
+  }),
 }))
 
 vi.mock('../summarizer/index.js', () => ({
@@ -148,6 +166,18 @@ function repoFile(rel: string): string {
 
 const e2eMarkerPath = (): string => resolve(tmpRepo, 'scripts', '.e2e-testing')
 
+/**
+ * 生产同式解析出的会话 worktree 路径（`sessionShortId` + `sessionWorktreePath`
+ * 与 `git-utils.ts` **同源**，不另写一份表达式——两处各写一份就是下一个漂移源）。
+ * shortId 为空时返回 null：那种成因下 `sessionWorktreePath(root, '')` 会指向
+ * `catStudy-sessions` **父目录**本身，拿它去 rmSync 会扫掉别人的 worktree。
+ */
+function wtPathFor(sessionId: string): string | null {
+  const shortId = sessionShortId(sessionId)
+  if (!shortId) return null
+  return sessionWorktreePath(tmpRepo, shortId)
+}
+
 /** serial.ts（通道名 'socketio'）自己发过一条提及 worktree 的告警吗 */
 function serialWarnedAboutWorktree(): boolean {
   return h.logWarn.mock.calls.some(
@@ -162,9 +192,28 @@ function serialWarnedDirtyReset(): boolean {
   )
 }
 
+/**
+ * 丢掉本文件建过的 worktree 目录 + `worktree prune`。
+ *
+ * 为什么必须逐测试做：worktree 路径只依赖 `tmpdir()` 与 shortId（**不含**随机仓库名），
+ * 所以上一次跑崩留下的同 id 目录会让 `ensureSessionWorktree` 走进「已存在 → 复用」
+ * 分支并指向一个已被删除的仓库。**不整目录清扫**——`tmpdir()/catStudy-sessions` 与
+ * 并行 worker 里的同型测试共享，扫它等于误伤别人。
+ */
+function dropWorktrees(): void {
+  for (const dir of worktrees.splice(0)) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      /* 兜底清理失败忽略 */
+    }
+  }
+  gitOrNull(['worktree', 'prune'])
+}
+
 beforeAll(() => {
-  // ⚠ 安全前提：`serial.ts` 的清理段 execSync 不带 cleanGitEnv()——环境里残留
-  // GIT_DIR 会让它穿透到真实仓库。这里从**进程环境**剥掉（子进程继承 process.env）。
+  // ⚠ 安全前提：git 跑钩子时向子进程注入 GIT_DIR 等——环境里残留会让测试自己的
+  // git 操作（乃至生产侧未剥 env 的那几条）穿透到真实仓库。这里从**进程环境**剥掉。
   for (const k of ['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_PREFIX']) {
     origGitEnv[k] = process.env[k]
     delete process.env[k]
@@ -195,6 +244,17 @@ beforeAll(() => {
     stdio: 'ignore',
   })
   writeFileSync(resolve(tmpRepo, 'tracked.txt'), 'base\n', 'utf-8')
+  // `.gitignore` + `packages/*/` **必须进初始 commit**（R2 判据的保真前提）：
+  //   - 没有 commit 里的 `node_modules/`，worktree 检出后不认识这个忽略规则，
+  //     `linkNodeModules` 建的 junction 会以未跟踪身份出现 ⇒ 制造出真仓库里
+  //     **不存在**的 `?? node_modules` 假读数；
+  //   - 同理 `packages/server/` 在真仓库是 tracked，夹具里不 tracked 则
+  //     `mkdirSync(dirname(dest))` 会凭空造出 `?? packages/`。
+  writeFileSync(resolve(tmpRepo, '.gitignore'), 'node_modules/\n', 'utf-8')
+  for (const pkg of ['server', 'shared', 'web']) {
+    mkdirSync(resolve(tmpRepo, 'packages', pkg), { recursive: true })
+    writeFileSync(resolve(tmpRepo, 'packages', pkg, '.gitkeep'), '', 'utf-8')
+  }
   git(['add', '-A'])
   git(['commit', '-m', 'init'])
   initSha = git(['rev-parse', 'HEAD'])
@@ -205,13 +265,15 @@ beforeAll(() => {
 
 afterAll(() => {
   process.chdir(origCwd)
-  for (const dir of [...worktrees, ...scratchDirs, tmpRepo, tmpNoGit]) {
+  dropWorktrees()
+  for (const dir of [...scratchDirs, tmpRepo, tmpNoGit]) {
     try {
       rmSync(dir, { recursive: true, force: true })
     } catch {
       /* 兜底清理失败忽略 */
     }
   }
+  // 与 beforeAll 的剥离**对称**：按原值还原（不是 delete 了事——原值可能本就有）
   for (const [k, v] of Object.entries(origGitEnv)) {
     if (v === undefined) delete process.env[k]
     else process.env[k] = v
@@ -236,9 +298,9 @@ function createFakeBus(): EngineBus & HandoffBus {
 /**
  * 用 `claude` provider——**不是随意选的**：`serial.ts:526` 的
  * `needsLock = agent.llmProvider === 'claude'` 就是 `claudeRan` 的初值，而顶层收尾的
- * ② 脏文件清理整个挂在 `if (anyClaude)`（`:1189`）里。用非 claude provider 跑，
+ * ② 脏文件清理整个挂在 `if (anyClaude)` 里。用非 claude provider 跑，
  * ② 永远不执行，本矩阵的第二半（清理作用域）会**全是空断言**。
- * （`serial.ts:1191` 注释：「只有它会编辑源文件」——② 本来就只为 claude 执行体存在。）
+ * （`serial.ts` 注释：「只有它会编辑源文件」——② 本来就只为 claude 执行体存在。）
  */
 const A1: AgentConfig = {
   id: 'agent-1',
@@ -302,14 +364,19 @@ interface Reading {
   warnedAboutWorktree: boolean
   /** serial.ts 发过「脏工作区，重置中」告警吗（= ② 动手了） */
   warnedDirtyReset: boolean
+  /** 本轮收尾路径上解析出的会话 worktree 路径（评估不到 → null） */
+  worktreePath: string | null
+  /** 该 worktree 本轮跑完后是否存在（① 现建 / reply.ts 先建 / 复用 都会让它为 true） */
+  worktreeExists: boolean
+  /** 该 worktree 当前分支末次提交标题 */
+  worktreeHead: string | null
 }
 
 /**
  * 降级场景：主仓库预置**未提交的 tracked 改动** → 跑一轮 → 读真仓库。
  *
  * `cwd` 决定「server 站在哪」；`e2eMarker` 打开时 `gitCommit` 直接返回 null
- * （① 不提交），从而把 ② 的清理行为**单独暴露出来**——这是 Phase 2「只改 ① 不改 ②」
- * 那条耦合的复现开关。
+ * （① 不提交），从而把 ② 的清理行为**单独暴露出来**。
  */
 async function runScenario(opts: {
   sessionId: string
@@ -319,6 +386,8 @@ async function runScenario(opts: {
   e2eMarker?: boolean
 }): Promise<Reading> {
   process.chdir(opts.cwd ?? tmpRepo)
+  const wt = wtPathFor(opts.sessionId)
+  if (wt && !worktrees.includes(wt)) worktrees.push(wt)
   if (opts.e2eMarker) {
     mkdirSync(dirname(e2eMarkerPath()), { recursive: true })
     writeFileSync(e2eMarkerPath(), '', 'utf-8')
@@ -340,6 +409,9 @@ async function runScenario(opts: {
     committedIntoMainRepo: head === `catstudy [${opts.triggerId}]`,
     warnedAboutWorktree: serialWarnedAboutWorktree(),
     warnedDirtyReset: serialWarnedDirtyReset(),
+    worktreePath: wt,
+    worktreeExists: wt !== null && existsSync(resolve(wt, '.git')),
+    worktreeHead: wt !== null && existsSync(wt) ? lastCommitSubject(wt) : null,
   }
 }
 
@@ -360,10 +432,35 @@ function occupySessionBranch(shortId: string): void {
   git(['worktree', 'add', holder, branch])
 }
 
-describe('serial × 降级路径（T-1 Phase 1：只加测试、零生产改动）', () => {
+/** 一次性诱饵仓库（OQ4 用）：环境注入 GIT_DIR 时被劫持的目标 */
+function makeDecoyRepo(): string {
+  const decoy = mkdtempSync(join(tmpdir(), 'serial-downgrade-decoy-'))
+  scratchDirs.push(decoy)
+  execFileSync('git', ['init'], { cwd: decoy, env: cleanGitEnv(), stdio: 'ignore' })
+  execFileSync('git', ['config', 'user.name', 'test'], {
+    cwd: decoy,
+    env: cleanGitEnv(),
+    stdio: 'ignore',
+  })
+  execFileSync('git', ['config', 'user.email', 'test@test.local'], {
+    cwd: decoy,
+    env: cleanGitEnv(),
+    stdio: 'ignore',
+  })
+  writeFileSync(resolve(decoy, 'decoy-only.txt'), 'base\n', 'utf-8')
+  git(['add', '-A'], decoy)
+  git(['commit', '-m', 'init'], decoy)
+  writeFileSync(resolve(decoy, 'decoy-only.txt'), 'DECOY-DIRTY\n', 'utf-8')
+  return decoy
+}
+
+describe('serial × 降级路径（T-1：Phase 1 测试先行 → Phase 2 生产收窄）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    h.failAdapterResolve = false
     __test_reset()
+    // 上一格的 worktree 目录必须真删掉（路径只依赖 tmpdir + shortId，残留会串场）
+    dropWorktrees()
     // 主仓库回到初始 commit + 干净工作区（上一格留下的提交/文件不串场）
     git(['reset', '--hard', initSha])
     git(['clean', '-fdx'])
@@ -403,7 +500,7 @@ describe('serial × 降级路径（T-1 Phase 1：只加测试、零生产改动�
   })
 
   // ══════════════════════════════════════════════════════════════════
-  // 维度 C · 回归面：worktree 存在 → 隔离生效（现状行为，绿）
+  // 维度 C · 回归面：worktree 存在 → 隔离生效（Phase 2 前后行为一致，必须一直绿）
   // ══════════════════════════════════════════════════════════════════
   describe('维度 C · 回归面（worktree 存在）', () => {
     it('C-① 有 worktree ⇒ auto-commit 落 worktree 分支；主仓库 HEAD 不动', async () => {
@@ -443,73 +540,60 @@ describe('serial × 降级路径（T-1 Phase 1：只加测试、零生产改动�
   })
 
   // ══════════════════════════════════════════════════════════════════
-  // 维度 A×B 矩阵：2 个降级点 × 4 类 worktree 不可用成因
-  //   每格两条：现状（it，绿，留读数）+ 目标（it.fails，Phase 2 翻成 it）
+  // 维度 A×B · 降级面（Phase 2 收窄后：降级 = **不动作 + 显式告警**）
+  //   4 类不可用成因逐格独立断言；每格注释里留 Phase 1 旧读数以便对照
   // ══════════════════════════════════════════════════════════════════
-  describe('维度 A×B · 矩阵', () => {
+  describe('维度 A×B · 降级面（收窄后）', () => {
     // ── B1：非 git 仓（`getMainRepoRoot()` → null，`git-utils.ts:450`）──
     describe('B1 · 非 git 仓（getMainRepoRoot → null）', () => {
-      it('B1 现状 · ① 无 cwd 调用但落空（无仓库可落）；② 落 cwd 但 git 直接抛错被吞 ⇒ 无实害', async () => {
+      it('B1 · 建不出 ⇒ ① 不提交、② 不清理，两者各留一条显式告警', async () => {
+        // Phase 1 旧读数：① 无 cwd 调用但落空（无仓库可落）；② git 直接抛错被吞
+        // ⇒ 当时实害为零，但**零告警**（降级发生了却没人知道）。Phase 2 补的就是告警这一半。
         const r = await runScenario({
           sessionId: 'sdb1ng001',
           triggerId: 'sd-b1',
           cwd: tmpNoGit,
         })
-        // ① 没提交进主仓库（`isGitRepo()` false ⇒ gitCommit 提前返回 null）
+        // ① 没提交进主仓库（`isGitRepo()` false ⇒ `ensureSessionWorktree` 提前返回 null）
         expect(r.committedIntoMainRepo).toBe(false)
         expect(r.mainRepoHead).toBe('init')
-        // ② 跑在非 git 目录上 ⇒ git status 抛错被 catch 吞掉
+        // ② 同样建不出 ⇒ 不清理
         expect(r.warnedDirtyReset).toBe(false)
-        // 主仓库的未提交改动**未被动过**（这一格当前就无实害）
+        // 主仓库的未提交改动**未被动过**
         expect(r.mainRepoTracked).toBe('DIRTY\n')
-        // 但——**零告警**：降级发生了却没人知道（目标面要补的就是这条）
-        expect(r.warnedAboutWorktree).toBe(false)
+        // 且降级**不再静默**
+        expect(r.warnedAboutWorktree).toBe(true)
       })
-
-      it.fails(
-        'B1 目标 · 建不出 ⇒ 不提交、不清理，且 serial 显式告警（worktree 不可用）',
-        async () => {
-          const r = await runScenario({
-            sessionId: 'sdb1ng002',
-            triggerId: 'sd-b1t',
-            cwd: tmpNoGit,
-          })
-          expect(r).toMatchObject({
-            committedIntoMainRepo: false,
-            warnedDirtyReset: false,
-            warnedAboutWorktree: true, // ← 当前为 false，Phase 2 补齐
-          })
-        }
-      )
     })
 
     // ── B2：会话 id 形态异常（`sessionShortId` → ''，`git-utils.ts:452`）──
     describe("B2 · 会话 id 形态异常（sessionShortId → ''）", () => {
-      it('B2 现状 · ① 把主仓库未提交改动提交进当前分支（绕过审查链）', async () => {
+      it('B2 · 建不出 ⇒ 不提交、不清理，主仓库未提交改动原地保留', async () => {
+        // Phase 1 旧读数：① 把主仓库未提交改动**提交进当前分支**（mainRepoHead =
+        // `catstudy [sd-b2]`、树被清干净）、② 因此无脏可清 —— 绕过审查链的那条实害。
         const r = await runScenario({ sessionId: '!!!!!', triggerId: 'sd-b2' })
-        expect(r.committedIntoMainRepo).toBe(true)
-        expect(r.mainRepoHead).toBe('catstudy [sd-b2]')
-        expect(r.mainRepoTracked).toBe('DIRTY\n') // 改动进了 commit，不是被回滚
-        expect(r.mainRepoDirty).toBe(false)
-      })
-
-      it.fails('B2 目标 · 建不出 ⇒ 不提交、不清理，且 serial 显式告警', async () => {
-        const r = await runScenario({ sessionId: '!!!!!', triggerId: 'sd-b2t' })
-        expect(r).toMatchObject({
-          committedIntoMainRepo: false,
-          mainRepoTracked: 'DIRTY\n',
-          warnedAboutWorktree: true,
-        })
+        expect(r.committedIntoMainRepo).toBe(false)
+        expect(r.mainRepoHead).toBe('init')
+        expect(r.mainRepoTracked).toBe('DIRTY\n')
+        expect(r.mainRepoDirty).toBe(true)
+        expect(r.warnedAboutWorktree).toBe(true)
+        expect(r.warnedDirtyReset).toBe(false)
       })
     })
 
     // ── B3：worktree 目录不存在（`git-utils.ts:454`）──
+    // 三条谓词，不是两条（审查 OQ1）：
+    //   a) 本轮真跑 LLM ⇒ `reply.ts:976` 先把 worktree 建出来，收尾只是复用；
+    //   b) 猫忙 ⇒ 本轮无执行（`anyClaude=false`）⇒ 收尾是**本轮唯一**的 worktree 解析点，
+    //      ① 会**现建**出来（Q4 裁决 A：收口后会话续用是期望行为）；
+    //   c) 早期失败 —— `claudeRan` 已为 true 而 worktree 尚未建（走到 `reply.ts:976`
+    //      之前抛错）⇒ ① 现建、② 作用域 = 新 worktree。这一格是 Phase 2 新补的。
     describe('B3 · worktree 目录不存在', () => {
-      it('B3 现状 · 本轮真跑 LLM ⇒ reply.ts 先建 worktree，降级**不发生**（这一成因在有执行的路径上不可达）', async () => {
+      it('B3-a · 本轮真跑 LLM ⇒ reply.ts 先建工作区，收尾复用；主仓库零改动', async () => {
         const triggerId = 'sd-b3a'
-        const wt = resolve(tmpdir(), 'catStudy-sessions', 'sdb3llm1')
+        const wt = wtPathFor('sdb3llm1')!
         worktrees.push(wt)
-        // 本测试**不**调用 ensureSessionWorktree——目录只可能由 reply.ts:976 建出来
+        // 本用例**不**调用 ensureSessionWorktree——目录只可能由 reply.ts:976 建出来
         expect(existsSync(wt)).toBe(false)
 
         const r = await runScenario({ sessionId: 'sdb3llm1', triggerId })
@@ -521,44 +605,70 @@ describe('serial × 降级路径（T-1 Phase 1：只加测试、零生产改动�
         expect(r.mainRepoTracked).toBe('DIRTY\n')
       })
 
-      it('B3 现状 · 忙时入队（本轮无执行，anyClaude=false）⇒ ① 降级提交进主仓库；② 整段被跳过', async () => {
+      it('B3-b · 猫忙（本轮无执行）⇒ ① 现建 worktree 并把提交落在它上面；主仓库零改动', async () => {
+        // Phase 1 旧读数：`committedIntoMainRepo: true`（`mainRepoHead` = `catstudy [sd-b3b]`）
+        // —— 生产触发窗口（收口删 worktree 后 + 猫忙）下的降级提交。
         const r = await runScenario({
           sessionId: 'sdb3busy1',
           triggerId: 'sd-b3b',
           busy: true,
         })
-        expect(r.committedIntoMainRepo).toBe(true)
-        expect(r.mainRepoHead).toBe('catstudy [sd-b3b]')
-        // ② 挂在 `if (anyClaude)` 里——本轮没有执行体 ⇒ 连降级清理都不跑
+        expect(r.committedIntoMainRepo).toBe(false)
+        expect(r.mainRepoHead).toBe('init')
+        expect(r.mainRepoTracked).toBe('DIRTY\n')
+        // ① 走的是 `ensureSessionWorktree` ⇒ worktree 被**现建**出来（不再是「降级到主仓库」）
+        expect(r.worktreeExists).toBe(true)
+        // 建得出 ⇒ 不告警（告警只在「建不出」时出现，与 B1/B2/B4 区分开）
+        expect(r.warnedAboutWorktree).toBe(false)
+        // ② 挂在 `if (anyClaude)` 里——本轮没有执行体 ⇒ 清理段不跑
         expect(r.warnedDirtyReset).toBe(false)
       })
 
-      it.fails('B3 目标 · 建不出 ⇒ 不提交、不清理，且 serial 显式告警', async () => {
-        const r = await runScenario({
-          sessionId: 'sdb3busy2',
-          triggerId: 'sd-b3t',
-          busy: true,
-        })
-        expect(r).toMatchObject({
-          committedIntoMainRepo: false,
-          mainRepoTracked: 'DIRTY\n',
-          warnedAboutWorktree: true,
-        })
+      it('B3-c · 早期失败（claudeRan=true 而 worktree 未建）⇒ ① 现建、② 作用域 = 新 worktree', async () => {
+        // 「本轮有 claude 执行体、但 worktree 尚未建」这条窄缝：`getAdapterForAgent`
+        // 是 `runAgentReply` 的第一条语句（`reply.ts:314`），在此抛错就落在
+        // 「`claudeRan` 已为 true ∧ 走不到 `reply.ts:976`」——OQ1 的第三谓词。
+        const wt = wtPathFor('sdb3erly')!
+        worktrees.push(wt)
+        expect(existsSync(wt)).toBe(false)
+
+        h.failAdapterResolve = true
+        const r = await runScenario({ sessionId: 'sdb3erly', triggerId: 'sd-b3e' })
+        h.failAdapterResolve = false
+
+        // ① 现建：收尾路径上把 worktree 补出来
+        expect(r.worktreeExists).toBe(true)
+        // 而这一轮**没有任何东西可提交**（worktree 是从 HEAD 现检出的干净树）⇒ 提交为空
+        expect(r.worktreeHead).toBe('init')
+        // 主仓库零改动：没被提交、没被回滚、没被清
+        expect(r.committedIntoMainRepo).toBe(false)
+        expect(r.mainRepoHead).toBe('init')
+        expect(r.mainRepoTracked).toBe('DIRTY\n')
+        expect(r.mainRepoDirty).toBe(true)
+        expect(r.warnedAboutWorktree).toBe(false)
+        // ② 作用域 = 新 worktree；新建即干净 ⇒ 清理未被触发
+        expect(r.warnedDirtyReset).toBe(false)
       })
     })
 
-    // ── B4：`ensureSessionWorktree` 自建失败（`git-utils.ts:379` 的 4 条 return null 路径）──
+    // ── B4：`ensureSessionWorktree` 自建失败（会话分支已被别的 worktree 占用）──
     describe('B4 · ensureSessionWorktree 自建失败（会话分支已被别的 worktree 占用）', () => {
-      it('B4 现状 · ① 降级提交进主仓库（本轮真跑 LLM ⇒ ② 也走降级，但 ① 已把树清干净 ⇒ 无操作）', async () => {
+      it('B4-a · 建不出 ⇒ ① 不提交、② 不清理，两条告警齐；主仓库零改动', async () => {
+        // Phase 1 旧读数：① 降级提交进主仓库（`catstudy [sd-b4]`），② 因此无脏可清。
         occupySessionBranch('sdb4fail')
         const r = await runScenario({ sessionId: 'sdb4fail', triggerId: 'sd-b4' })
-        expect(r.committedIntoMainRepo).toBe(true)
-        expect(r.mainRepoHead).toBe('catstudy [sd-b4]')
-        expect(r.mainRepoTracked).toBe('DIRTY\n') // 进了 commit
-        expect(r.mainRepoDirty).toBe(false) // 树被 ① 清干净 ⇒ ② 即使跑也无可清
+        expect(r.committedIntoMainRepo).toBe(false)
+        expect(r.mainRepoHead).toBe('init')
+        expect(r.mainRepoTracked).toBe('DIRTY\n')
+        expect(r.mainRepoDirty).toBe(true)
+        expect(r.warnedAboutWorktree).toBe(true)
+        expect(r.warnedDirtyReset).toBe(false)
       })
 
-      it('B4 现状（② 单独暴露）· ① 被 e2e 标记关掉时，② 在主仓库上真跑 checkout+clean', async () => {
+      it('B4-b · ① 被 e2e 标记关掉时，② 仍不碰主仓库（Phase 1 的「只改 ① 不改 ②」耦合已断）', async () => {
+        // Phase 1 旧读数：① 不提交 ⇒ ② 的 `checkout -- .` 把主仓库未提交改动
+        // **静默删掉**（`mainRepoTracked` 从 `DIRTY` 变回 `base`）——比误提交更不可逆。
+        // Phase 2 ①② 同批收窄后，② 也走 `ensureSessionWorktree`，这条删除路径不复存在。
         occupySessionBranch('sdb4fl02')
         const r = await runScenario({
           sessionId: 'sdb4fl02',
@@ -566,53 +676,236 @@ describe('serial × 降级路径（T-1 Phase 1：只加测试、零生产改动�
           e2eMarker: true,
         })
         expect(r.committedIntoMainRepo).toBe(false)
-        // ② 作用域落到主仓库：未提交改动被 `git checkout -- .` 回滚
-        expect(r.warnedDirtyReset).toBe(true)
-        expect(r.mainRepoTracked).toBe('base\n')
-        expect(r.mainRepoDirty).toBe(false)
-      })
-
-      it.fails('B4 目标 · 建不出 ⇒ 不提交、不清理，且 serial 显式告警', async () => {
-        occupySessionBranch('sdb4fl03')
-        const r = await runScenario({ sessionId: 'sdb4fl03', triggerId: 'sd-b4t' })
-        expect(r).toMatchObject({
-          committedIntoMainRepo: false,
-          warnedAboutWorktree: true,
-        })
+        expect(r.warnedDirtyReset).toBe(false)
+        expect(r.mainRepoTracked).toBe('DIRTY\n')
+        expect(r.mainRepoDirty).toBe(true)
       })
     })
   })
 
   // ══════════════════════════════════════════════════════════════════
-  // G4 · 红线锚：主仓库有未提交 tracked 改动 + depth===0 跑一轮 → 留当前读数
+  // G4 · 红线锚：主仓库有未提交 tracked 改动 + depth===0 跑一轮
   // ══════════════════════════════════════════════════════════════════
   describe('G4 · 红线锚（主仓库存在未提交 tracked 改动）', () => {
-    it('G4a · ① 的实害是「提交进主仓库当前分支」——不是「改动被回滚」', async () => {
+    it('G4a · 生产触发窗口（猫忙）⇒ ① 不再提交进主仓库（Phase 1 旧读数为 true）', async () => {
       const r = await runScenario({
         sessionId: 'sdg4anch1',
         triggerId: 'sd-g4a',
         busy: true, // 生产触发窗口：猫忙 ⇒ 入队即返回 ⇒ 收尾立刻跑
       })
-      // 票面 G4 的预期原文是「改动被回滚」——实测读数与之不符，以实测为准：
-      // ① 先跑且成功，把改动**提交**进主仓库当前分支（绕过审查链），② 因此无脏可清。
-      expect(r.committedIntoMainRepo).toBe(true)
+      // Phase 1 实测：① 先跑且成功，把主仓库改动**提交**进当前分支（绕过审查链）。
+      // Phase 2：① 走 `ensureSessionWorktree` ⇒ 提交只落 worktree，主仓库零改动。
+      expect(r.committedIntoMainRepo).toBe(false)
+      expect(r.mainRepoHead).toBe('init')
       expect(r.mainRepoTracked).toBe('DIRTY\n')
-      expect(r.mainRepoDirty).toBe(false)
+      expect(r.mainRepoDirty).toBe(true)
       expect(r.warnedDirtyReset).toBe(false)
+      expect(r.worktreeExists).toBe(true)
     })
 
-    it('G4b · ① 不提交时 ② 回滚主仓库 tracked 改动——Phase 2「只改 ① 不改 ②」的耦合证据', async () => {
-      // ② 要真跑，本轮必须有 claude 执行体（`anyClaude`）；故**不能**用 busy 场景。
-      // 成因取 B2（shortId 为空）——worktree 必建不出，② 的 `?? process.cwd()` 生效。
+    it('G4b · ① 不提交时 ② 也不回滚主仓库——「静默删除」路径已关闭', async () => {
+      // Phase 1 实测（票面 G4b 原文）：① 不提交时 ② 的 `checkout -- .` 会把主仓库
+      // tracked 改动回滚成 `base`——**静默删除**，是本票最硬的那条红线。
+      // 成因取 B2（shortId 为空）——worktree 必建不出，收窄前 ② 的 `?? process.cwd()` 生效。
       const r = await runScenario({
         sessionId: '!!!!!',
         triggerId: 'sd-g4b',
         e2eMarker: true,
       })
       expect(r.committedIntoMainRepo).toBe(false)
-      expect(r.warnedDirtyReset).toBe(true)
-      // 改动**静默消失**（比「误提交」更不可逆——内容不在 git 里了）
-      expect(r.mainRepoTracked).toBe('base\n')
+      expect(r.warnedDirtyReset).toBe(false)
+      // 改动**原地保留**（Phase 1 这里读数是 `base\n` = 内容静默消失）
+      expect(r.mainRepoTracked).toBe('DIRTY\n')
+      expect(r.mainRepoDirty).toBe(true)
+      expect(r.warnedAboutWorktree).toBe(true)
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════
+  // R1 · `ensureSessionWorktree` 进入 ① 后的耗时读数（票面要求实测，非阈值断言）
+  // ══════════════════════════════════════════════════════════════════
+  describe('R1 · 收尾路径上 worktree 解析的耗时读数', () => {
+    it('R1 · 现建 vs 复用：两个读数都留痕（本用例断言行为，耗时只报数不设阈值）', async () => {
+      const sid = 'sdr1tim'
+      const wt = wtPathFor(sid)!
+      worktrees.push(wt)
+      // 链接源备齐 ⇒ 现建那条会把 `mklink /J` 的真实 Windows 成本算进去
+      // （不备则是无源可链的**下界**，量出来的数会偏乐观）
+      mkdirSync(resolve(tmpRepo, 'node_modules'), { recursive: true })
+      writeFileSync(resolve(tmpRepo, 'node_modules', 'sentinel.txt'), 'root-dep\n', 'utf-8')
+      mkdirSync(resolve(tmpRepo, 'packages', 'server', 'node_modules'), { recursive: true })
+      writeFileSync(
+        resolve(tmpRepo, 'packages', 'server', 'node_modules', 'sentinel.txt'),
+        'x\n',
+        'utf-8'
+      )
+
+      // 直接测 `ensureSessionWorktree` 本身——轮次级计时（~300ms 的引擎/DB 开销）
+      // 会把几十毫秒的建链成本淹进噪声，区分度不够（实测轮次级 346/254ms 无区分度）。
+      //
+      // 真仓库端到端读数（本机 2026-09-15，主仓库 dev@3822b17，474 个 tracked 文件，
+      // 会话 worktree 与真 dev 库快照同环境）：**现建 368ms / 复用 51ms**；其中
+      // `git worktree add` 单项 = 205ms（夹具没这个量级，故夹具读数是**下界**）。
+      // 结论：新增的阻塞成本落在既有 `gitCommit`（3 次连续 execSync）同一量级，
+      // 不改变「收尾段是百毫秒级阻塞」的既有形态。
+      const tA = Date.now()
+      const first = ensureSessionWorktree(sid)
+      const buildMs = Date.now() - tA
+      expect(first).toBe(wt)
+
+      const tB = Date.now()
+      const again = ensureSessionWorktree(sid)
+      const reuseMs = Date.now() - tB
+      expect(again).toBe(wt)
+
+      // 顺带走一遍**收尾路径**（① 现建 → 复用）确认它在这条路上不炸。
+      // 注意：下面两条 `worktreeExists` **不绑定 Phase 2 行为**（本用例已先把 worktree
+      // 建出来了，还原成旧代码同样绿）——行为绑定在 B3-b（猫忙 ⇒ ① 现建，旧代码下真红）。
+      // 本用例的定位是「报数」，不是「判行为」，别把它的绿当成覆盖。
+      const r1 = await runScenario({ sessionId: sid, triggerId: 'sd-r1a', busy: true })
+      const r2 = await runScenario({ sessionId: sid, triggerId: 'sd-r1b', busy: true })
+
+      // eslint-disable-next-line no-console
+      console.info(
+        `[T-1 R1] ensureSessionWorktree 现建=${buildMs}ms 复用=${reuseMs}ms ` +
+          `（含 mklink /J 根链接 + packages/server 包级链接；临时仓库夹具，真仓库包级链接为 3 条）`
+      )
+
+      expect(r1.worktreeExists).toBe(true)
+      expect(r2.worktreeExists).toBe(true)
+      // 只做「有界」这个弱断言，避免把 CI 负载抖动量成回归；真实读数以上面那行为准
+      expect(buildMs).toBeLessThan(30_000)
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════
+  // R2 · 「新建 worktree 后立刻清理」是全新组合（票面要求实测，不许推断）
+  // ══════════════════════════════════════════════════════════════════
+  describe('R2 · 新 worktree 上的清理不碰 node_modules junction', () => {
+    it('R2 · 新 worktree 建出来即干净（clean 未被触发）；强制触发 `git clean -fd` 也不动 junction', async () => {
+      const sid = 'sdr2junc'
+      const wt = wtPathFor(sid)!
+      worktrees.push(wt)
+      // 主仓库备好链接源：根 node_modules + 包级 packages/server/node_modules
+      mkdirSync(resolve(tmpRepo, 'node_modules'), { recursive: true })
+      writeFileSync(resolve(tmpRepo, 'node_modules', 'sentinel.txt'), 'root-dep\n', 'utf-8')
+      mkdirSync(resolve(tmpRepo, 'packages', 'server', 'node_modules'), { recursive: true })
+      writeFileSync(
+        resolve(tmpRepo, 'packages', 'server', 'node_modules', 'sentinel.txt'),
+        'pkg-dep\n',
+        'utf-8'
+      )
+
+      // 早期失败路径 ⇒ ① 现建 worktree（含 linkNodeModules），② 作用域 = 那个新 worktree
+      h.failAdapterResolve = true
+      const r = await runScenario({ sessionId: sid, triggerId: 'sd-r2' })
+      h.failAdapterResolve = false
+
+      expect(r.worktreeExists).toBe(true)
+      // ① 建 worktree 时 linkNodeModules 已把链接建好
+      expect(existsSync(resolve(wt, 'node_modules')), '根 junction').toBe(true)
+      expect(existsSync(resolve(wt, 'packages', 'server', 'node_modules')), '包级 junction').toBe(
+        true
+      )
+      expect(readFileSync(resolve(wt, 'node_modules', 'sentinel.txt'), 'utf-8')).toBe('root-dep\n')
+
+      // 读数①：新建即干净 ⇒ ② 的 `git clean -fd` **根本不在触发路径上**
+      //   （`.gitignore` 命中 junction ⇒ 不出现在 status；packages/* 是 tracked 目录）
+      expect(git(['status', '--porcelain'], wt)).toBe('')
+      expect(r.warnedDirtyReset).toBe(false)
+
+      // 读数②：强制走一遍 ② 的确切命令序列——证明「若被触发」也不碰链接
+      writeFileSync(resolve(wt, 'stray.txt'), 'untracked\n', 'utf-8')
+      expect(git(['status', '--porcelain'], wt)).toContain('stray.txt')
+      execSync('git checkout -- .', { cwd: wt, env: cleanGitEnv(), stdio: 'ignore' })
+      execSync('git clean -fd', { cwd: wt, env: cleanGitEnv(), stdio: 'ignore' })
+
+      expect(existsSync(resolve(wt, 'stray.txt')), 'stray 被清掉（clean 确实生效）').toBe(false)
+      expect(existsSync(resolve(wt, 'node_modules')), '根 junction 存活').toBe(true)
+      expect(
+        existsSync(resolve(wt, 'packages', 'server', 'node_modules')),
+        '包级 junction 存活'
+      ).toBe(true)
+      expect(readFileSync(resolve(wt, 'node_modules', 'sentinel.txt'), 'utf-8')).toBe('root-dep\n')
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════
+  // OQ4 · `cleanGitEnv()` 对称（Phase 2 把 ② 的三条 execSync 与 gitCommit 对齐）
+  // ══════════════════════════════════════════════════════════════════
+  describe('OQ4 · ② 的清理与 gitCommit 一样剥 GIT_* 环境变量', () => {
+    it('OQ4 · A/B 对照：不剥 GIT_DIR 会漂移出目标仓库；剥了则作用域钉在 worktree', async () => {
+      const wt = makeWorktree('sdoq4git')
+      writeFileSync(resolve(wt, 'tracked.txt'), 'WT-DIRTY\n', 'utf-8')
+      // 诱饵仓库：环境注入 GIT_DIR 时会被劫持到的那个仓库
+      const decoy = makeDecoyRepo()
+
+      // ① 关掉（e2e 标记 ⇒ gitCommit 返回 null），把 ② 的清理**单独暴露出来**
+      mkdirSync(dirname(e2eMarkerPath()), { recursive: true })
+      writeFileSync(e2eMarkerPath(), '', 'utf-8')
+
+      process.env.GIT_DIR = resolve(decoy, '.git')
+      process.env.GIT_WORK_TREE = decoy
+      let drifted = ''
+      let scoped = ''
+      try {
+        // A/B 对照（同一 cwd，只差 env）——证明下面那条断言不是恒真
+        drifted = execSync('git status --porcelain', {
+          cwd: wt,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim()
+        scoped = execSync('git status --porcelain', {
+          cwd: wt,
+          env: cleanGitEnv(),
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim()
+
+        const engine = createExecutionEngine(createFakeBus())
+        await runRound(engine, 'sd-oq4', 'trace-sd-oq4', { sessionId: 'sdoq4git' })
+      } finally {
+        delete process.env.GIT_DIR
+        delete process.env.GIT_WORK_TREE
+      }
+
+      // 对照组成立：不剥 env ⇒ 读的是**诱饵**仓库的状态（漂移真实存在）
+      expect(drifted, 'GIT_DIR 未被剥 ⇒ 漂移出目标仓库').toContain('decoy-only.txt')
+      expect(scoped, '剥掉后读的是 worktree 自己的状态').toContain('tracked.txt')
+      expect(scoped).not.toContain('decoy-only.txt')
+
+      // ② 真在 worktree 上动了手（作用域没漂）
+      expect(readFileSync(resolve(wt, 'tracked.txt'), 'utf-8')).toBe('base\n')
+      // 诱饵仓库**不受影响**
+      expect(readFileSync(resolve(decoy, 'decoy-only.txt'), 'utf-8')).toBe('DECOY-DIRTY\n')
     })
   })
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// 覆盖边界（G7，防「假绿门」：验证面必须与被判面同面）
+//
+// 证得了：
+//   - 「主仓库零改动」这一类断言读的是**真临时 git 仓**的真状态（`git log` / `git status`
+//     / 文件内容），不是 mock 调用记录 ⇒ 证得了「文件系统上主仓库真的没被动」。
+//   - B1–B4 四类成因逐格独立断言；每格的 `warnedAboutWorktree` 与
+//     `warnedDirtyReset` 从 logger 的**通道名 + 文本**两维区分（不被其他模块的告警污染）。
+//   - OQ4 用例自带 A/B 对照（同一 cwd、只差 env）⇒「剥了才不漂」这条不是恒真。
+//
+// 证不了（明写，别当已覆盖）：
+//   - **`anyClaude` 门槛耦合**：② 整段挂在 `if (anyClaude)` 里，而 `anyClaude` 依赖
+//     agent 的 `llmProvider === 'claude'`（取自 **agents 表行**，不是传参）。后人把
+//     夹具里的 provider 改回 deepseek ⇒ B3-c/B4-b/R2/OQ4 里「② 不动作」的四条断言会
+//     **静默变空**。缓解：同时有 5 条**要求 ② 真动手**的绿断言（C-②、OQ4 的
+//     `readFileSync(wt) === 'base\n'`、以及「② 不动手」格中要求 `warnedAboutWorktree`
+//     为真），provider 一改就会响——但「静默变空」这件事本身没被机制挡住。
+//   - `R1` 的耗时读数是**下界**：临时仓库夹具里 `linkNodeModules` 无源可链（主仓库
+//     没有真依赖树），真仓库建 junction 的耗时未直接读到。R2 覆盖了 junction 的
+//     **存活性**，未覆盖其**建链耗时**。
+//   - `wtPathFor` 用 `sessionShortId` + `sessionWorktreePath` 复算路径（与生产同源），
+//     但**没有**走 `getMainRepoRoot()`；若生产侧 mainRoot 解析变化，本文件的路径假设会
+//     先失效——`runScenario` 回读的 `worktreeExists` 用的是同一个复算值，两者**同向**
+//     失效，不会互相证伪。
+//   - B1（非 git 仓）格读的是「无仓库可落」；真实机器上 server 站在 git 仓里，
+//     这一格的**触发概率**未评估。
+// ══════════════════════════════════════════════════════════════════════════
