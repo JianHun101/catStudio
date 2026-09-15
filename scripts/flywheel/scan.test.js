@@ -30,7 +30,7 @@ import {
   main,
 } from './scan.mjs'
 
-import { createTestDb } from '../../packages/server/src/test-helpers.js'
+import { createTestDb, listenFetchable } from '../../packages/server/src/test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../../packages/server/src/db/index.js'
 import {
   initRepository,
@@ -647,8 +647,9 @@ async function startEmbedStub({ failFirst = 0 } = {}) {
     res.writeHead(404).end()
   })
 
-  await new Promise((r) => server.listen(0, '127.0.0.1', r))
-  const port = server.address().port
+  // 端口必须能被 fetch 触达：`listen(0)` 偶尔分到 WHATWG 禁用端口黑名单里的端口，
+  // 那种端口上服务在听、fetch 却永久 `bad port` ⇒ 被测的重试路径吃满超时。见 test-helpers。
+  const port = await listenFetchable(server)
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     hits,

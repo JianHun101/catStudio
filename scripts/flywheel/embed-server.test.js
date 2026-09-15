@@ -7,9 +7,15 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { MAX_BATCH, createEmbedServer, resolveTransformersEntry } from './embed-server.mjs'
+import {
+  MAX_BATCH,
+  createEmbedServer,
+  isFetchReachable,
+  resolveTransformersEntry,
+} from './embed-server.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SIDECAR_SRC_PATH = resolve(__dirname, 'embed-server.mjs')
@@ -183,5 +189,97 @@ describe('关停自检（票巳 (c)：父子配对，缺一侧即死代码）', 
 
   it('父侧：EmbeddingClient 起 sidecar 必须用三管道 stdio（否则 EOF 永远不来）', () => {
     expect(clientSrc).toContain("stdio: ['pipe', 'pipe', 'pipe']")
+  })
+})
+
+// ─── 端口可达性（F5 反向对照）──────────────────────────────────
+// 根因（`docs/run/flaky-precommit/finding-2026-09-16.md`）：`listen(0)` 偶尔分到
+// **WHATWG Fetch 禁用端口黑名单**里的端口 —— 服务真在听（裸 TCP 连得通），`fetch` 却在
+// 发请求前就拒（`bad port`）且**永不恢复** ⇒ 主进程嵌入链静默失败。
+//
+// 加固后**判据自己必须能被证伪**：若 `isFetchReachable` 恒 true（catch 写反 / 抄了一份
+// 过期的黑名单），"校验"就是空转，而一切照旧全绿 —— 那正是本仓栽过的恒真绿门。
+describe('端口可达性（F5 反向对照）', () => {
+  const sidecarSrc = squash(readFileSync(SIDECAR_SRC_PATH, 'utf8'))
+  const cold = () => createEmbedServer({ embed: fakeEmbed, getModel: () => 'm', getDim: () => 3 })
+
+  /** 候选池与 server 侧 `test-helpers.test.ts` **错开**：两文件可能并行跑，共用端口会 EADDRINUSE */
+  const BLACKLISTED = [5060, 6566, 6667, 6668, 6669, 10080]
+
+  /** 在指定端口起一个裸服务；被占 ⇒ null */
+  async function bindRaw(port) {
+    const srv = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('ok')
+    })
+    try {
+      await new Promise((resolve, reject) => {
+        srv.once('error', reject)
+        srv.listen(port, '127.0.0.1', resolve)
+      })
+      return srv
+    } catch {
+      return null
+    }
+  }
+
+  it('isFetchReachable 非恒真亦非恒假：黑名单端口 false、正常端口 true', async () => {
+    let srv = null
+    let port = 0
+    for (const candidate of BLACKLISTED) {
+      const bound = await bindRaw(candidate)
+      if (bound) {
+        srv = bound
+        port = candidate
+        break
+      }
+    }
+    if (srv === null) {
+      throw new Error(
+        `黑名单候选端口全被占用（试过 ${BLACKLISTED.join(' / ')}）——本票的承重判据无法验证，不静默跳过`
+      )
+    }
+
+    // 先证「服务确实在听」：否则下面的 false 可能只是「什么都没连上」，判据就没有分辨力
+    expect(srv.listening).toBe(true)
+    expect(await isFetchReachable('127.0.0.1', port)).toBe(false)
+    await new Promise((resolve) => {
+      srv.close(() => resolve())
+      srv.closeAllConnections()
+    })
+
+    // 正控：同一个函数、同一种「服务在听」，端口不在黑名单 ⇒ true
+    expect(await isFetchReachable('127.0.0.1', Number(new URL(base).port))).toBe(true)
+  })
+
+  it('listen(0)：返回的端口必须对 fetch 可达（加固后的正向行为）', async () => {
+    const app2 = cold()
+    const port = await app2.listen(0)
+    expect(await isFetchReachable('127.0.0.1', port)).toBe(true)
+    await app2.close()
+  })
+
+  it('显式端口落在黑名单 ⇒ 启动即报错，不静默换端口', async () => {
+    let hardened = null
+    for (const candidate of BLACKLISTED) {
+      const app2 = cold()
+      try {
+        await app2.listen(candidate)
+        await app2.close() // 竟然可达（不在黑名单）⇒ 换下一个候选
+      } catch (err) {
+        if (/不可被 fetch 触达/.test(err.message)) {
+          hardened = err
+          break
+        }
+        // EADDRINUSE 之类 —— 换下一个候选（候选全废时下面的断言会红，不静默放行）
+      }
+    }
+    expect(hardened).not.toBeNull()
+    expect(hardened.message).toMatch(/EMBED_SIDECAR_PORT=\d+ 不可被 fetch 触达/)
+  })
+
+  it('静态：listen() 绑定后必须校验可达性；重取只在 OS 分配态（pin 态不得偷换端口）', () => {
+    expect(sidecarSrc).toContain('await isFetchReachable(host, bound)')
+    expect(sidecarSrc).toContain('const attempts = auto ? LISTEN_ATTEMPTS : 1')
   })
 })
