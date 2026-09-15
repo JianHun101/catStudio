@@ -57,17 +57,25 @@ evidence:
 
 ### D1 · 粒度：worktree 与工作分支从「按会话」改为「按 (会话, 猫)」
 
-- **工作分支**：`session/<sid8>/<cat8>`
+- **工作分支**：`session/<sid8>-<cat8>`（**连字符**，不是斜杠——见下方命名修正）
 - **worktree 路径**：`<主仓库>/../catStudy-sessions/<sid8>-<cat8>`
+- **分叉点**：猫分支从 **`session/<sid8>`（集成分支）分叉**，**不从 dev 分叉**。这是 §6.3 方案 (a) 与 D2「收口链一行不改」共同成立的前提。
 - `sid8` = 会话 id 前 8 位（沿用 `sessionShortId`）；`cat8` = **agent id 前 8 位**。
+
+> **2026-09-15 命名修正（实测推翻初稿）**：初稿写 `session/<sid8>/<cat8>`——**不可实现**。git 的 ref 是一棵文件树，`refs/heads/session/<sid8>` 与 `refs/heads/session/<sid8>/<cat8>` 构成目录/文件冲突：`git branch` 与 `git worktree add -b` **双双被拒**（`fatal: cannot lock ref 'refs/heads/session/s1/catA': 'refs/heads/session/s1' exists`），**`git pack-refs` 也绕不过**，反序创建（先子后父）失败形态相同。改连字符后实测两者可共存。**后果等级**：`ensureSessionWorktree` 建分支失败走 `catch → return null`（`git-utils.ts:417-423`）= **静默降级、猫拿不到 worktree**——正好撞在 T-1 刚收窄的那条路上。故这是**开工前必须修掉的项**，不是实现细节。
 
 **为什么用 id8 而不是猫名**：猫名是中文（`店长` / `ds猫` / `flash猫` / `吐槽猫` / `本地qwen猫` / `dsh猫`），做分支名与目录名要额外过一遍 sanitize（空格、斜杠、全角）+ 碰撞处理，而收益只是「目录好看」。id8 是 **ASCII、稳定、零映射表、零碰撞**。可读性由日志补偿：建 worktree 时同时打 `agentId` 与 `agents.name`（一行 log 即可解析）。**若用户更看重目录可读性，这是本 ADR 唯一可无痛替换的子决策**（换名不改结构）。
 
 - **`session/<sid>` 分支保留**，降级为**会话集成分支**（店长侧的集成入口 + 收口器的输入）。它不再由实施猫直接提交。
 
-### D2 · 会话级 worktree 保留为**店长的** worktree
+### D2 · 会话级 worktree 保留为**店长的** worktree（兼 fan-in 冲突隔离区）
 
-`ensureSessionWorktree(sessionId)` **保留现有语义与路径**（`catStudy-sessions/<sid>`），不再扩展为多猫共用，而是**店长自己**的工作目录。理由：① 收口器（`session-closeout.ts`）与 `removeSessionWorktree` 的自指守卫、`mainRoot` 探测等既有机制**一行不用改**；② 店长本来就在会话 worktree 里读写票面，语义自然。
+`ensureSessionWorktree(sessionId)` **保留现有语义与路径**（`catStudy-sessions/<sid>`）。理由：① 收口器（`session-closeout.ts`）与 `removeSessionWorktree` 的自指守卫、`mainRoot` 探测等既有机制**一行不用改**；② **它还兼任 §6.3 的 fan-in 冲突隔离区**——主工作区被 preflight 钉死在 dev（`session-closeout.ts:268`），而 fan-in 的 no-ff 合并必须发生在某个 checkout 了 `session/<sid>` 的地方，会话 worktree 是唯一现成的那个。**这不是「给店长分块地盘」，是保住一套按会话算的机制。**
+
+> **2026-09-15 措辞修正（实测推翻初稿）**：初稿写「店长本来就在会话 worktree 里读写票面，语义自然」——**是错的**。所有猫（含店长）的执行 cwd 由 `reply.ts:976` 统一设为会话 worktree，**无角色区分**；但**店长的文档提交一律落 `mainRoot`（dev，主工作区）**，因为票面是派活依据，实施猫从 dev 分叉、只看得见 dev 上的文件。实测：店长的会话进程 cwd 在 `catStudy-sessions/f3517413`（分支 `session/f3517413`），而文档提交落在 dev。
+
+- **派活前置（两步，缺一即静默失效）**：① 店长文档提交落 `mainRoot`；② 派活前把 `session/<sid>` 同步到 dev HEAD，否则实施猫的票面是旧的。
+- **现状**：这两步目前**全靠肌肉记忆**，零机制保证——与「通知没投出去」同族（靠人记，不靠结构）。**T-2 落地后缺口加重**：届时没有猫再共用店长目录，也就没人在日常工作中撞见它。
 
 ⇒ 净变化：**实施猫 / 审查猫从「共用店长的目录」变为「各有自己的目录」**，店长不动。
 
@@ -116,19 +124,56 @@ git worktree add --detach <sessionsRoot>/.review-<sha8> <sha>
 | **pre-commit** | 不再跨猫互锁 ✅ 但每个 worktree **各跑一遍全量 vitest**（实测 15s）                                    | 成本 ×N；这是**用算力换正确性**                                        |
 | **既有机制**   | `removeSessionWorktree` 的自指守卫、`mainRoot` 探测、收口器 5 步**均不需改**（店长 worktree 路径未变） | —                                                                      |
 
-## 6. 留给 T-3 的接口（本文不裁）
+## 6. T-3 的接口与重切（本节 2026-09-15 重写）
 
-- `session-closeout.ts:105` 是**唯一**合并调用点，现为 `merge --ff-only`。**N 条并行猫分支下 ff-only 必然非快进失败**（两条猫分支都从同一点切出，合完 A 再合 B，B 的 tip 不是 A 的后代）。
-- `session-closeout.ts:281` 的 `removeWorktree` 排在 merge 之后 ⇒ 要 rebase 必须**先放掉 worktree**，而死锁在「merge 失败即停」（`:279`）——这是 T-3 要解的结构。
-- **`cherry-pick` 已排除**：它改变 sha，而**审查链的锚就是 sha**（「审的 sha ≠ 落的 sha」是本仓反复栽过的坑）。
-- **`--no-ff` 不是新形态**：远端 dev 上 `5dedbd7` 就是 PR merge commit。
-- **no-ff 会破坏现有幂等**（`session-closeout.ts:97` 注释明写靠 ff-only 的 "Already up to date"）——中断重跑会**再产生一个 merge commit**。T-3 必须单独补幂等。
+> 初稿本节含一条**错误判断**（「no-ff 会破坏现有幂等，中断重跑会再产生一个 merge commit」）——五组实测推翻。原始读数见「决策留痕」。
+
+### 6.1 实测结论（临时仓实跑，非推演）
+
+| #   | 问题                                                  | 实测结果                                                                                                                                                                |
+| --- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| E1  | `session/<sid>` 与 `session/<sid>/<cat8>` 能否共存    | **不能**。`git branch` 与 `git worktree add -b` 均 `fatal: cannot lock ref`；**pack-refs 绕不过**；反序（先子后父）同样失败 ⇒ D1 初稿命名**不可实现**（已修正为连字符） |
+| E2  | 两条猫分支自同一点切出，按序 `merge --ff-only`        | 第一条快进 OK；**第二条「非快进」失败** ⇒ ADR 原预言**成立**                                                                                                            |
+| E3  | `merge --no-ff` 重跑同一条已合分支                    | **`Already up to date.`，HEAD 不变** ⇒ **no-ff 自身是幂等的**（原判断「会再产生 merge commit」**错误**）                                                                |
+| E4  | 真冲突后的仓库态                                      | 留 `MERGE_HEAD` + `UU` 半合并态；重跑 merge 报 `Merging is not possible because you have unmerged files`                                                                |
+| E5  | `session/<sid>` 停在分叉点时 `closeoutSession` 会怎样 | `merge --ff-only` 输出 `Already up to date.`，**退出码 0**                                                                                                              |
+
+### 6.2 由 E5 得到的硬结论：fan-in 是 T-2 的**必备件**，不是 T-3 的后继
+
+T-2 落地后 `session/<sid>` **不再收到提交**（猫只在自己的分支提交），而 `closeoutSession` 只合这一条分支（`session-closeout.ts:102`），`removeSessionWorktree` 也只删这一条（`git-utils.ts:610`）。E5 证明这条路径会：
+
+**空合并成功（退出码 0）→ 写 gate → 删掉会话 worktree + 会话分支**，而**猫的分支与猫的 worktree 全部留在原地、从未进过任何地方**。失效形态是**静默的**——工具返回 `ok:true`。
+
+⇒ 「N 条猫分支按序合进集成分支」必须与 T-2 **同批落地**；原 T-3 定义（把 dev 侧合并改成 no-ff + 补幂等）**方向是错的**：它假设合并发生在 dev 侧，而真正需要 no-ff 的是集成分支侧的 fan-in。
+
+### 6.3 合并落点：fan-in 关进集成分支，dev 侧保持 ff-only
+
+| 方案                                                                                 | 冲突落在哪                         | `mergeSession` 的幂等基石                                        | 新增面                    |
+| ------------------------------------------------------------------------------------ | ---------------------------------- | ---------------------------------------------------------------- | ------------------------- |
+| **(a) fan-in 在会话 worktree（checkout `session/<sid>`）里 no-ff；dev 侧仍 ff-only** | **不落 dev**                       | **原样保留**（`session-closeout.ts:97` 的 "Already up to date"） | fan-in 枚举 + 幂等判断    |
+| (b) 直接把 N 条猫分支 no-ff 合进 dev                                                 | 冲突落 **dev 主工作区 ⇒ 全仓阻塞** | 被替换                                                           | 更大：`mergeSession` 重写 |
+
+⇒ **取 (a)**。它同时给了 D2 一个比「机制不用改」更硬的理由：**会话 worktree 是唯一能安全承载 fan-in 冲突的地方**（主工作区被 preflight 钉死在 dev）。
+
+### 6.4 fan-in 的四个新面（T-2 范围内）
+
+1. **枚举**：按 `session/<sid8>-` 前缀列猫分支。全仓**当前零** `for-each-ref` 调用（已搜）⇒ 纯新增原语。
+2. **幂等**：每条猫分支合并前判 `git merge-base --is-ancestor <cat> <integration>`（**原语仓里已有**，`session-closeout.ts:209` 在用）——已合即跳过，给中断重跑兜底（E3 证明 no-ff 本身已幂等，这层是双保险）。
+3. **中断态守卫**：preflight 探测 `MERGE_HEAD`（E4）⇒ 显式失败交店长仲裁，**绝不在半合并态上继续跑 writeGate / checkoutDev**。
+4. **回收**：fan-in 完成后按同一枚举删猫 worktree + 猫分支——否则只增不减（无回收器，§5 已记）。
+
+### 6.5 结论：T-3 消解
+
+原 T-3「no-ff 合并策略 + 幂等」**整体前移进 T-2**；dev 侧维持 ff-only、幂等基石不动 ⇒ **T-3 不再是一张独立票**。
+
+- `cherry-pick` **仍排除**：它改变 sha，而**审查链的锚就是 sha**。
+- `--no-ff` 不是新形态：远端 dev 上 `5dedbd7` 就是 PR merge commit。
 
 ## 7. 待用户确认的三点
 
-1. **主决策**：一猫一 worktree（D1–D3）。
-2. **命名子决策**：`cat8`（agent id 前 8 位，ASCII 稳定）还是中文猫名 slug（可读但要 sanitize）？
-3. **D5 存量**：接受「不迁移、随废弃自然消失」？
+1. **主决策**：一猫一 worktree（D1–D3）——**范围已扩**：含 §6.4 的 fan-in 四个新面（原 T-3 内容前移）。开工时机需重新点头（范围变了）。
+2. **命名子决策**：~~`cat8` 还是中文猫名~~ —— 分隔符已实测定为**连字符**；`cat8`（agent id 前 8 位）仍是本 ADR 唯一可无痛替换子决策。
+3. **D5 存量**：接受「不迁移、随废弃自然消失」？（注：存量 24 个是**会话级** worktree，不适用新命名，与本决策无关。）
 
 ## 决策留痕
 
@@ -143,3 +188,27 @@ git worktree add --detach <sessionsRoot>/.review-<sha8> <sha>
 - 顺带清除一个**空壳孤儿目录** `catStudy-sessions/082b2ae7`（无 `.git`、无文件，不在 `git worktree list` 内）。
 - **安全约束执行**：worktree 内的 `node_modules` 与 `packages/*/node_modules` 均是指向**主仓库**的 symlink；`git worktree remove` 只注销 git 层并留下 symlink 空壳，残留清理由 Node `unlinkSync` 逐链接删除（**绝不 recursive 跟随**），删除前后主仓库 `node_modules` 顶层条目数均为 **97**（未跟穿）。
 - 结果：worktree **43 → 25**（1 主 + 24 会话）、`session/*` 分支 **42 → 24**、`catStudy-sessions/` 磁盘目录 **43 → 24**；`dev = 34fa0c1` 未变，主仓库工作区干净。
+
+### T-3 风险的实测取证（2026-09-15，用户提问「T-2 落地后走 T-3 会出问题吗」）
+
+**方法**：在**仓外临时目录**建一次性 git 仓复现（不碰本仓），五组对照。命令要点：
+
+```bash
+git init -q -b dev r && cd r            # 造 base 提交
+git branch session/s1 && git branch session/s1/catA   # E1：D/F 冲突
+git worktree add -b session/s1/catA ../wtA            # E1：真实机制复验
+# E2：两条猫分支自同一点切出，按序 merge --ff-only
+# E3：merge --no-ff 合完再合一次 → Already up to date
+# E4：同文件双改 → 冲突 → ls .git/MERGE_HEAD → 重跑 merge
+# E5：session/s1 停在分叉点，merge --ff-only → exit 0
+```
+
+| #   | 实测输出（节选）                                                                                                     | 结论                                                                                      |
+| --- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| E1  | `fatal: cannot lock ref 'refs/heads/session/s1/catA': 'refs/heads/session/s1' exists; cannot create ...`（反序同错） | 斜杠命名**不可实现**；pack-refs 无效；改连字符后 `session/s1` + `session/s1-catA` 共存 OK |
+| E2  | 合 catA `OK`；合 catB `失败（非快进）`                                                                               | ADR 原预言成立                                                                            |
+| E3  | `Already up to date.`；HEAD 前后同一个 sha                                                                           | **no-ff 幂等，原判断错误**                                                                |
+| E4  | `MERGE_HEAD` 存在、`UU f.txt`；重跑报 `Merging is not possible because you have unmerged files`                      | 中断态需 preflight 守卫                                                                   |
+| E5  | `Already up to date.` `exit=0`                                                                                       | 空合并**静默成功**⇒ §6.2                                                                  |
+
+**注意**：E1 只是「斜杠命名」被判死；**整套隔离设计本身未被推翻**——改一个字符即可落地。真正被推翻的是初稿 §6 的幂等判断与「T-3 在后」的排序。
