@@ -1,0 +1,1462 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>R3 原型 · 右侧面板内嵌执行 trace（真机几何 1:1）</title>
+    <style>
+      /* ── 设计令牌·逐字照抄 packages/web/index.html :root ───────────── */
+      :root {
+        --bg-deep: #14110e;
+        --bg-base: #1b1815;
+        --bg-surface: #231f1b;
+        --bg-hover: #2c2722;
+        --bg-raised: #312b25;
+        --border-subtle: #292420;
+        --border-default: #3a332c;
+        --border-table: #5c4a3b;
+        --border-focus: #b08968;
+        --text-primary: #e6ddd0;
+        --text-secondary: #a0988e;
+        --text-muted: #6b655c;
+        --accent: #d4a574;
+        --accent-soft: rgba(212, 165, 116, 0.15);
+        --accent-tint: rgba(212, 165, 116, 0.06);
+        --accent-pink: #d4849a;
+        --accent-red: #e0556a;
+        --accent-green: #7eb899;
+        --accent-yellow: #d4a854;
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
+        --font-sans:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+          sans-serif;
+        --font-mono: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+
+        /* 段相位配色 —— 按「这段时间在干什么」分五类 */
+        --ph-wait: #5c5852; /* 等待：dispatch.token_wait */
+        --ph-orch: #b08968; /* 编排：context.assemble / context.compress */
+        --ph-retr: #7eb899; /* 检索：memory.retrieval / knowledge.retrieval */
+        --ph-llm: #d4a574; /* 模型：llm.chat */
+        --ph-write: #d4849a; /* 落库：reply.persist / diff.collect */
+        --ph-gap: #3a332c; /* 空档：段与段之间的纯 JS 开销 */
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 32px 40px 80px;
+        background: var(--bg-deep);
+        color: var(--text-primary);
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      h1 {
+        font-size: 20px;
+        font-weight: 700;
+        margin: 0 0 6px;
+      }
+      .sub {
+        color: var(--text-secondary);
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+      .sub code {
+        font-family: var(--font-mono);
+        background: var(--bg-surface);
+        padding: 1px 5px;
+        border-radius: 4px;
+        color: var(--accent);
+        font-size: 11px;
+      }
+      h2 {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 44px 0 6px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      h2 .n {
+        color: var(--accent);
+        font-family: var(--font-mono);
+        margin-right: 8px;
+      }
+      h3 {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        margin: 24px 0 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      p.note {
+        color: var(--text-secondary);
+        font-size: 12px;
+        margin: 8px 0 16px;
+        max-width: 900px;
+      }
+      .warn {
+        color: var(--accent-yellow);
+      }
+      .ok {
+        color: var(--accent-green);
+      }
+      .bad {
+        color: var(--accent-red);
+      }
+      code.m {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--accent);
+      }
+
+      /* ══════════ 面板复刻（1:1 · 尺寸同 App.vue/SessionAgentsPanel.vue） ══════════
+         列宽 300px / border-left 1px / padding 14px 12px 16px / flex column gap 12px
+         可用内容宽 = 300 − 1 − 24 = 275px                                        */
+      .panel {
+        position: relative;
+        width: 300px;
+        flex: 0 0 300px;
+        background: var(--bg-base);
+        border-left: 1px solid var(--border-subtle);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 14px 12px 16px;
+        font-size: 13px;
+      }
+      .panel.static {
+        height: auto;
+      }
+
+      /* 模块行 —— 标注浮到右侧（不改面板几何） */
+      .mod {
+        position: relative;
+      }
+      .mod > .dim {
+        position: absolute;
+        left: 100%;
+        top: 0;
+        height: 100%;
+        margin-left: 14px;
+        display: none;
+        align-items: center;
+        gap: 8px;
+        white-space: nowrap;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-muted);
+        pointer-events: none;
+      }
+      .mod > .dim::before {
+        content: '';
+        position: absolute;
+        left: -14px;
+        top: 0;
+        bottom: 0;
+        width: 0;
+        border-left: 1px dashed var(--border-table);
+      }
+      .mod > .dim b {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .mod > .dim .tag {
+        border: 1px solid var(--border-default);
+        border-radius: 999px;
+        padding: 0 6px;
+        font-size: 9px;
+        color: var(--text-secondary);
+      }
+      body.dim-on .mod > .dim {
+        display: flex;
+      }
+      body.dim-on .mod {
+        outline: 1px dashed rgba(92, 74, 59, 0.55);
+        outline-offset: 0;
+      }
+
+      /* ── 统计计数卡（原样） ── */
+      .stat-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-around;
+        padding: 12px 8px;
+        background: var(--bg-base);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+      }
+      .stat-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        flex: 1;
+      }
+      .stat-value {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+        line-height: 1.2;
+      }
+      .stat-label {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+      .stat-divider {
+        width: 1px;
+        height: 28px;
+        background: var(--border-subtle);
+      }
+
+      .section-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        padding: 4px 2px 0;
+      }
+
+      /* ── 成员卡（原样） ── */
+      .member-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .member-card {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+      }
+      .member-card.clickable {
+        cursor: pointer;
+      }
+      .member-card.clickable:hover {
+        border-color: var(--border-default);
+      }
+      .member-card.open {
+        border-color: var(--border-table);
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+      }
+      .member-avatar {
+        font-size: 26px;
+        flex-shrink: 0;
+        line-height: 1;
+      }
+      .member-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .member-top {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .member-name {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .dot-idle {
+        background: var(--text-muted);
+      }
+      .dot-busy {
+        background: var(--accent-yellow);
+      }
+      .member-status {
+        margin-left: auto;
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+      .member-meta {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 4px;
+      }
+      .member-tokens {
+        font-size: 11px;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+      }
+      .member-tokens-label {
+        font-size: 9px;
+        color: var(--text-muted);
+      }
+      .btn-remove {
+        width: 22px;
+        height: 22px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 11px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+
+      /* ── 队列 / 配置 / 按钮（原样） ── */
+      .queue-empty {
+        font-size: 11px;
+        color: var(--text-muted);
+        padding: 8px 0;
+      }
+      .config-summary {
+        font-size: 12px;
+        color: var(--text-secondary);
+        padding: 10px 12px;
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        justify-content: space-between;
+      }
+      .btn-add-members {
+        width: 100%;
+        padding: 10px 12px;
+        font-size: 12px;
+        font-family: inherit;
+        color: var(--text-secondary);
+        background: var(--bg-surface);
+        border: 1px dashed var(--border-default);
+        border-radius: var(--radius-md);
+        cursor: pointer;
+      }
+
+      /* ══════════ 新增：trace 段模块（本原型要你拍板的部分） ══════════ */
+      .trace-block {
+        border: 1px solid var(--border-table);
+        border-radius: var(--radius-md);
+        background: var(--bg-surface);
+        padding: 10px 12px 12px;
+      }
+      .trace-block.inline {
+        border-top: none;
+        border-top-left-radius: 0;
+        border-top-right-radius: 0;
+      }
+      .trace-head {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      .trace-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      .trace-total {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+      }
+      .trace-when {
+        margin-left: auto;
+        font-size: 9px;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+      }
+
+      /* 概览条 —— 真比例，不加最小值粉饰（llm.chat 独占可见性本身就是结论） */
+      .bar {
+        display: flex;
+        height: 10px;
+        border-radius: 3px;
+        overflow: hidden;
+        background: var(--bg-base);
+      }
+      .bar i {
+        display: block;
+        min-width: 2px;
+        height: 100%;
+      }
+      .bar i.gap {
+        min-width: 0;
+      }
+      .bar-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 9px;
+        color: var(--text-muted);
+        margin-top: 3px;
+        font-family: var(--font-mono);
+      }
+
+      /* 剩余段放大条（去掉最大段后重新归一到 100%）——解决「除 llm 外全 0 像素」 */
+      .zoom-wrap {
+        margin-top: 9px;
+      }
+      .zoom-cap {
+        font-size: 9px;
+        color: var(--text-muted);
+        margin-bottom: 3px;
+      }
+      .zoom-cap b {
+        color: var(--text-secondary);
+        font-weight: 600;
+      }
+
+      /* 数值清单 */
+      .seg-list {
+        margin-top: 9px;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .seg-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10px;
+        line-height: 1.6;
+      }
+      .seg-chip {
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+        flex-shrink: 0;
+      }
+      .seg-name {
+        font-family: var(--font-mono);
+        color: var(--text-secondary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+        min-width: 0;
+      }
+      .seg-ms {
+        font-family: var(--font-mono);
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+      }
+      .seg-pct {
+        font-family: var(--font-mono);
+        color: var(--text-muted);
+        width: 42px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .seg-more {
+        font-size: 10px;
+        color: var(--text-muted);
+        padding-left: 13px;
+        cursor: pointer;
+      }
+
+      /* 一句话结论 */
+      .verdict {
+        margin-top: 9px;
+        padding-top: 8px;
+        border-top: 1px solid var(--border-subtle);
+        font-size: 10px;
+        color: var(--text-secondary);
+        line-height: 1.55;
+      }
+      .verdict b {
+        color: var(--accent);
+        font-family: var(--font-mono);
+        font-weight: 600;
+      }
+
+      /* 状态态样 */
+      .state-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 9px;
+        border-radius: 999px;
+        padding: 1px 7px;
+        border: 1px solid var(--border-default);
+        color: var(--text-muted);
+      }
+      .state-chip.run {
+        color: var(--accent-yellow);
+        border-color: rgba(212, 168, 84, 0.35);
+        background: rgba(212, 168, 84, 0.1);
+      }
+      .state-chip.ok {
+        color: var(--accent-green);
+        border-color: rgba(126, 184, 153, 0.3);
+        background: rgba(126, 184, 153, 0.08);
+      }
+      .empty-block {
+        border: 1px dashed var(--border-default);
+        border-radius: var(--radius-md);
+        padding: 14px 12px;
+        text-align: center;
+        font-size: 10px;
+        color: var(--text-muted);
+        line-height: 1.6;
+      }
+      .collecting {
+        border: 1px solid rgba(212, 168, 84, 0.3);
+        background: rgba(212, 168, 84, 0.06);
+        border-radius: var(--radius-md);
+        padding: 12px;
+        font-size: 10px;
+        color: var(--accent-yellow);
+        line-height: 1.6;
+      }
+
+      /* ══════════ 布局脚手架 ══════════ */
+      .stage {
+        display: flex;
+        align-items: flex-start;
+        gap: 0;
+        padding: 18px 0 10px;
+      }
+      .stage-anno {
+        padding-left: 190px; /* 给右侧标注留位 */
+        min-height: 10px;
+      }
+      .triple {
+        display: flex;
+        gap: 34px;
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+      .triple > div > .cap {
+        font-size: 11px;
+        color: var(--text-secondary);
+        margin-bottom: 8px;
+        font-weight: 600;
+      }
+      .triple > div > .cap span {
+        color: var(--text-muted);
+        font-weight: 400;
+      }
+      .viewport-ruler {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-muted);
+        padding-left: 0;
+        margin-top: 10px;
+      }
+
+      table {
+        border-collapse: collapse;
+        font-size: 11px;
+        margin: 10px 0 4px;
+      }
+      th,
+      td {
+        border: 1px solid var(--border-table);
+        padding: 5px 9px;
+        text-align: left;
+      }
+      th {
+        background: var(--bg-surface);
+        color: var(--text-secondary);
+        font-weight: 600;
+      }
+      td.num {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+      tr.hl td {
+        background: var(--accent-tint);
+      }
+      tr.dim td {
+        color: var(--text-muted);
+      }
+
+      .toggle {
+        position: fixed;
+        top: 14px;
+        right: 18px;
+        z-index: 99;
+        font-family: inherit;
+        font-size: 11px;
+        padding: 7px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--border-default);
+        background: var(--bg-raised);
+        color: var(--text-primary);
+        cursor: pointer;
+      }
+      .toggle.on {
+        border-color: var(--border-focus);
+        color: var(--accent);
+      }
+      .qa {
+        border-left: 2px solid var(--border-table);
+        padding: 2px 0 2px 16px;
+        margin: 14px 0;
+        max-width: 900px;
+      }
+      .qa .q {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 6px;
+      }
+      .qa .a {
+        font-size: 12px;
+        color: var(--text-secondary);
+        line-height: 1.75;
+      }
+      .qa .a b {
+        color: var(--text-primary);
+      }
+      .qa .a code {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        background: var(--bg-surface);
+        padding: 0 4px;
+        border-radius: 3px;
+        color: var(--accent);
+      }
+      ul.tight {
+        margin: 6px 0;
+        padding-left: 20px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        line-height: 1.8;
+      }
+      ul.tight code {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <button class="toggle" id="toggle">显示尺寸标注</button>
+
+    <h1>右侧面板内嵌执行 trace —— 尺寸与位置原型</h1>
+    <p class="sub">
+      面板几何 <b>1:1 复刻</b> <code>App.vue</code> + <code>SessionAgentsPanel.vue</code>（300px 列
+      / padding 14·12·16 / gap 12 / 可用宽 275px）。 段数据为 <b>真机实测</b>：执行
+      <code>05c4387e</code>（dev 库 <code>spans</code> 表，9 段全落）。 会话成员数 =
+      5（本会话真实成员）。
+    </p>
+
+    <!-- ═══════════ ① 现有面板 ═══════════ -->
+    <h2><span class="n">①</span>现有右侧面板 · 逐模块几何（对照基线）</h2>
+    <p class="note">
+      这是<b>今天线上真实的样子</b>。点右上角按钮可把每个模块的<b>高度</b>与<b>纵向起止位置</b>标出来。
+      下面所有数字都是按 <code>SessionAgentsPanel.vue</code> 的 CSS 逐条算出来的，不是目测。
+    </p>
+
+    <div class="stage">
+      <div class="panel static">
+        <div class="mod">
+          <div class="stat-card">
+            <div class="stat-item">
+              <span class="stat-value">128</span><span class="stat-label">消息总数</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-value">84</span><span class="stat-label">猫咪回复</span>
+            </div>
+          </div>
+          <div class="dim"><b>67px</b> <span class="tag">y 14→81</span> 统计计数卡</div>
+        </div>
+
+        <div class="mod">
+          <div class="section-title">会话成员</div>
+          <div class="dim"><b>21px</b> <span class="tag">y 93→114</span> 分区标题</div>
+        </div>
+
+        <div class="mod">
+          <div class="member-list">
+            <div class="member-card">
+              <span class="member-avatar">🐱</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">店长</span><span class="status-dot dot-busy"></span>
+                  <span class="member-status">回复中…</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">38.6k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+            <div class="member-card">
+              <span class="member-avatar">🐈</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">ds猫</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">30.7k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+            <div class="member-card">
+              <span class="member-avatar">🐆</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">flash猫</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">48.3k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+            <div class="member-card">
+              <span class="member-avatar">🐈‍⬛</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">吐槽猫</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">81.2k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+            <div class="member-card">
+              <span class="member-avatar">🐾</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">图测猫</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">15.6k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+          </div>
+          <div class="dim">
+            <b>334px</b> <span class="tag">y 126→460</span> 成员卡 ×5（卡 62px / 间距 6px）
+          </div>
+        </div>
+
+        <div class="mod">
+          <div class="section-title">调度队列</div>
+          <div class="dim"><b>21px</b> <span class="tag">y 472→493</span> 分区标题</div>
+        </div>
+
+        <div class="mod">
+          <div class="queue-empty">暂无排队任务</div>
+          <div class="dim"><b>32px</b> <span class="tag">y 505→537</span> 空态（多数时间如此）</div>
+        </div>
+
+        <div class="mod">
+          <details class="config-summary"><span>会话配置</span><span>▸</span></details>
+          <div class="dim"><b>38px</b> <span class="tag">y 549→587</span> 折叠配置</div>
+        </div>
+
+        <div class="mod">
+          <button class="btn-add-members">＋ 添加猫咪</button>
+          <div class="dim"><b>38px</b> <span class="tag">y 599→637</span> 添加按钮</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="viewport-ruler">
+      面板内容总高 <b>653.5px</b>（含上下 padding 30px）· 纵向余量：1080p 窗口
+      <b class="ok">426px</b> ／ 900px 窗口 <b class="warn">246px</b> ／ 768px 窗口
+      <b class="warn">114px</b>
+    </div>
+
+    <!-- ═══════════ ② 三个插入位置 ═══════════ -->
+    <h2><span class="n">②</span>trace 模块插在哪 —— 三种位置，尺寸与余量各不同</h2>
+    <p class="note">
+      三种都用<b>同一份真机数据</b>（执行 <code>05c4387e</code>：根段 236.7s，其中
+      <code>llm.chat</code> 235.3s）。
+      差别只在<b>位置</b>与<b>每次展示几条</b>——这决定了它要占多少高度、以及会不会把面板顶到滚动。
+    </p>
+
+    <div class="triple">
+      <!-- ── A ── -->
+      <div>
+        <div class="cap">A · 成员卡内联展开 <span>（点猫展开 · 手风琴单开 · ~119px）</span></div>
+        <div class="panel static">
+          <div class="stat-card">
+            <div class="stat-item">
+              <span class="stat-value">128</span><span class="stat-label">消息总数</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-value">84</span><span class="stat-label">猫咪回复</span>
+            </div>
+          </div>
+          <div class="section-title">会话成员</div>
+          <div class="member-list">
+            <div class="member-card open">
+              <span class="member-avatar">🐱</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">店长</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">38.6k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+            <div class="trace-block inline">
+              <div class="trace-head">
+                <span class="trace-title">最近一次执行</span>
+                <span class="trace-total">236.7s</span>
+                <span class="state-chip ok">✓ 完成</span>
+                <span class="trace-when">01:50:08</span>
+              </div>
+              <div class="bar">
+                <i style="background: var(--ph-wait); width: 0.03%"></i>
+                <i style="background: var(--ph-orch); width: 0.03%"></i>
+                <i style="background: var(--ph-retr); width: 0.5%"></i>
+                <i style="background: var(--ph-llm); width: 99.4%"></i>
+                <i style="background: var(--ph-write); width: 0.03%"></i>
+              </div>
+              <div class="bar-label"><span>0s</span><span>根段 236.7s</span></div>
+              <div class="zoom-wrap">
+                <div class="zoom-cap">
+                  去掉 <b>llm.chat</b> 后的剩余 <b>1.39s</b> · 按时长降序（<b>非时间轴</b>）
+                </div>
+                <div class="bar" style="height: 7px">
+                  <i style="background: var(--ph-retr); width: 78.8%"></i>
+                  <i style="background: var(--ph-write); width: 6.3%"></i>
+                  <i style="background: var(--ph-retr); width: 5.5%"></i>
+                  <i style="background: var(--ph-orch); width: 4.9%"></i>
+                  <i class="gap" style="background: var(--ph-gap); width: 4%"></i>
+                  <i style="background: var(--ph-orch); width: 0.3%"></i>
+                  <i style="background: var(--ph-write); width: 0.14%"></i>
+                </div>
+              </div>
+              <div class="seg-list">
+                <div class="seg-row">
+                  <span class="seg-chip" style="background: var(--ph-llm)"></span>
+                  <span class="seg-name">llm.chat</span><span class="seg-ms">235.3s</span
+                  ><span class="seg-pct">99.4%</span>
+                </div>
+                <div class="seg-row">
+                  <span class="seg-chip" style="background: var(--ph-retr)"></span>
+                  <span class="seg-name">memory.retrieval</span><span class="seg-ms">1.09s</span
+                  ><span class="seg-pct">0.46%</span>
+                </div>
+                <div class="seg-row">
+                  <span class="seg-chip" style="background: var(--ph-write)"></span>
+                  <span class="seg-name">diff.collect</span><span class="seg-ms">88ms</span
+                  ><span class="seg-pct">0.04%</span>
+                </div>
+                <div class="seg-row">
+                  <span class="seg-chip" style="background: var(--ph-retr)"></span>
+                  <span class="seg-name">knowledge.retrieval</span><span class="seg-ms">77ms</span
+                  ><span class="seg-pct">0.03%</span>
+                </div>
+                <div class="seg-more">＋ 另有 5 段 · 展开</div>
+              </div>
+              <div class="verdict">
+                首字 <b>3.39s</b> ／ 生成 <b>232s</b> —— 慢在<b>吐完</b>不在<b>等首字</b>
+              </div>
+            </div>
+            <div class="member-card">
+              <span class="member-avatar">🐈</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">ds猫</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">30.7k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+            <div class="member-card">
+              <span class="member-avatar">🐆</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">flash猫</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">48.3k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+          </div>
+          <div class="section-title">调度队列</div>
+          <div class="queue-empty">暂无排队任务</div>
+        </div>
+        <p class="note" style="max-width: 300px">
+          展开体 <b>119px</b>（头 20 + 概览条 13 + 放大条 26 + 清单 4 行 60）。<br />
+          面板总高 653.5 → <b>772.5px</b>。1080p 下不滚动；900px 窗口差 127px，需滚动。<br />
+          <span class="ok">优点</span>：与「这只猫」强绑定，语义最准，零新分区。<br />
+          <span class="warn">代价</span>：必须手风琴（5 只同时展开 = +595px，面板必滚）。
+        </p>
+      </div>
+
+      <!-- ── B ── -->
+      <div>
+        <div class="cap">B · 独立分区置顶 <span>（全局一条 · stat-card 之后 · ~149px）</span></div>
+        <div class="panel static">
+          <div class="stat-card">
+            <div class="stat-item">
+              <span class="stat-value">128</span><span class="stat-label">消息总数</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-value">84</span><span class="stat-label">猫咪回复</span>
+            </div>
+          </div>
+          <div class="section-title">最近执行 · 店长</div>
+          <div class="trace-block">
+            <div class="trace-head">
+              <span class="trace-title">执行 trace</span><span class="trace-total">236.7s</span>
+              <span class="state-chip ok">✓ 完成</span><span class="trace-when">01:50:08</span>
+            </div>
+            <div class="bar">
+              <i style="background: var(--ph-wait); width: 0.03%"></i>
+              <i style="background: var(--ph-orch); width: 0.03%"></i>
+              <i style="background: var(--ph-retr); width: 0.5%"></i>
+              <i style="background: var(--ph-llm); width: 99.4%"></i>
+              <i style="background: var(--ph-write); width: 0.03%"></i>
+            </div>
+            <div class="bar-label"><span>0s</span><span>根段 236.7s</span></div>
+            <div class="zoom-wrap">
+              <div class="zoom-cap">
+                去掉 <b>llm.chat</b> 后的剩余 <b>1.39s</b> · 按时长降序（<b>非时间轴</b>）
+              </div>
+              <div class="bar" style="height: 7px">
+                <i style="background: var(--ph-retr); width: 78.8%"></i>
+                <i style="background: var(--ph-write); width: 6.3%"></i>
+                <i class="gap" style="background: var(--ph-gap); width: 4%"></i>
+                <i style="background: var(--ph-write); width: 5.5%"></i>
+                <i style="background: var(--ph-orch); width: 4.9%"></i>
+                <i style="background: var(--ph-orch); width: 0.3%"></i>
+              </div>
+            </div>
+            <div class="seg-list">
+              <div class="seg-row">
+                <span class="seg-chip" style="background: var(--ph-llm)"></span>
+                <span class="seg-name">llm.chat</span><span class="seg-ms">235.3s</span
+                ><span class="seg-pct">99.4%</span>
+              </div>
+              <div class="seg-row">
+                <span class="seg-chip" style="background: var(--ph-retr)"></span>
+                <span class="seg-name">memory.retrieval</span><span class="seg-ms">1.09s</span
+                ><span class="seg-pct">0.46%</span>
+              </div>
+              <div class="seg-row">
+                <span class="seg-chip" style="background: var(--ph-write)"></span>
+                <span class="seg-name">diff.collect</span><span class="seg-ms">88ms</span
+                ><span class="seg-pct">0.04%</span>
+              </div>
+              <div class="seg-row">
+                <span class="seg-chip" style="background: var(--ph-retr)"></span>
+                <span class="seg-name">knowledge.retrieval</span><span class="seg-ms">77ms</span
+                ><span class="seg-pct">0.03%</span>
+              </div>
+              <div class="seg-row">
+                <span class="seg-chip" style="background: var(--ph-orch)"></span>
+                <span class="seg-name">context.assemble</span><span class="seg-ms">68ms</span
+                ><span class="seg-pct">0.03%</span>
+              </div>
+              <div class="seg-more">＋ 另有 4 段 · 展开</div>
+            </div>
+            <div class="verdict">
+              首字 <b>3.39s</b> ／ 生成 <b>232s</b> —— 慢在<b>吐完</b>不在<b>等首字</b>
+            </div>
+          </div>
+          <div class="section-title">会话成员</div>
+          <div class="member-list">
+            <div class="member-card">
+              <span class="member-avatar">🐱</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">店长</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">38.6k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+            <div class="member-card">
+              <span class="member-avatar">🐈</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">ds猫</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">30.7k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+          </div>
+        </div>
+        <p class="note" style="max-width: 300px">
+          模块 <b>149px</b>（5 行清单）。面板总高 653.5 → <b>802.5px</b>。<br />
+          <span class="ok">优点</span
+          >：全局只有一条，<b>位置固定、高度恒定</b>——最容易被眼睛养成习惯；「刚才那次多慢」一眼可见。<br />
+          <span class="warn">代价</span>：新增一个分区标题；与「哪只猫」的绑定靠标题里的猫名。
+        </p>
+      </div>
+
+      <!-- ── C ── -->
+      <div>
+        <div class="cap">C · 顶替「调度队列」区 <span>（位置复用 · 净增 ~48px）</span></div>
+        <div class="panel static">
+          <div class="stat-card">
+            <div class="stat-item">
+              <span class="stat-value">128</span><span class="stat-label">消息总数</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-value">84</span><span class="stat-label">猫咪回复</span>
+            </div>
+          </div>
+          <div class="section-title">会话成员</div>
+          <div class="member-list">
+            <div class="member-card">
+              <span class="member-avatar">🐱</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">店长</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">38.6k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+            <div class="member-card">
+              <span class="member-avatar">🐈</span>
+              <div class="member-info">
+                <div class="member-top">
+                  <span class="member-name">ds猫</span><span class="status-dot dot-idle"></span>
+                  <span class="member-status">空闲</span>
+                </div>
+                <div class="member-meta">
+                  <span class="member-tokens">30.7k / 128k</span
+                  ><span class="member-tokens-label">tokens</span>
+                </div>
+              </div>
+              <button class="btn-remove">✕</button>
+            </div>
+          </div>
+          <div class="section-title">最近执行（原「调度队列」位）</div>
+          <div class="trace-block">
+            <div class="trace-head">
+              <span class="trace-title">店长 · 执行 trace</span
+              ><span class="trace-total">236.7s</span>
+              <span class="state-chip ok">✓ 完成</span>
+            </div>
+            <div class="bar">
+              <i style="background: var(--ph-wait); width: 0.03%"></i>
+              <i style="background: var(--ph-orch); width: 0.03%"></i>
+              <i style="background: var(--ph-retr); width: 0.5%"></i>
+              <i style="background: var(--ph-llm); width: 99.4%"></i>
+              <i style="background: var(--ph-write); width: 0.03%"></i>
+            </div>
+            <div class="bar-label"><span>0s</span><span>根段 236.7s</span></div>
+            <div class="zoom-wrap">
+              <div class="zoom-cap">
+                去掉 <b>llm.chat</b> 后的剩余 <b>1.39s</b> · 按时长降序（<b>非时间轴</b>）
+              </div>
+              <div class="bar" style="height: 7px">
+                <i style="background: var(--ph-retr); width: 78.8%"></i>
+                <i style="background: var(--ph-write); width: 6.3%"></i>
+                <i class="gap" style="background: var(--ph-gap); width: 4%"></i>
+                <i style="background: var(--ph-write); width: 5.5%"></i>
+                <i style="background: var(--ph-orch); width: 4.9%"></i>
+              </div>
+            </div>
+            <div class="verdict">
+              首字 <b>3.39s</b> ／ 生成 <b>232s</b> —— 慢在<b>吐完</b>不在<b>等首字</b>
+            </div>
+          </div>
+          <details class="config-summary"><span>会话配置</span><span>▸</span></details>
+          <button class="btn-add-members">＋ 添加猫咪</button>
+        </div>
+        <p class="note" style="max-width: 300px">
+          净增 <b>48.5px</b>（用掉队列区 65.5px，换进 114px）。面板总高 →
+          <b>702px</b>，是三种里<b>最省纵向空间</b>的。<br />
+          <span class="ok">优点</span
+          >：不新增分区标题；「调度」与「执行」本就同一语义域；队列空态（32px）多数时间是纯浪费。<br />
+          <span class="warn">代价</span
+          >：排队信息被挤走——但<b>排队时那是当下最要紧的信息</b>，需保留一个「有队列才出现」的条件分支。
+        </p>
+      </div>
+    </div>
+
+    <!-- ═══════════ ③ 尺寸规格表 ═══════════ -->
+    <h2><span class="n">③</span>尺寸与位置规格表（可直接当实施依据）</h2>
+
+    <h3>现有模块（基线，勿动）</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>模块</th>
+          <th>高度</th>
+          <th>纵向起止</th>
+          <th>关键 CSS</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>面板容器</td>
+          <td class="num">—</td>
+          <td class="num">0 → 653.5</td>
+          <td><code class="m">width 300 · padding 14 12 16 · gap 12</code></td>
+        </tr>
+        <tr>
+          <td>统计计数卡</td>
+          <td class="num">67</td>
+          <td class="num">14 → 81</td>
+          <td><code class="m">padding 12 8 · value 20px/700</code></td>
+        </tr>
+        <tr>
+          <td>分区标题「会话成员」</td>
+          <td class="num">21</td>
+          <td class="num">93 → 114</td>
+          <td><code class="m">font 11 · padding 4 2 0</code></td>
+        </tr>
+        <tr>
+          <td>成员卡 ×5</td>
+          <td class="num">334</td>
+          <td class="num">126 → 460</td>
+          <td><code class="m">卡 62 · gap 6 · avatar 26px</code></td>
+        </tr>
+        <tr>
+          <td>分区标题「调度队列」</td>
+          <td class="num">21</td>
+          <td class="num">472 → 493</td>
+          <td>同上</td>
+        </tr>
+        <tr>
+          <td>队列空态</td>
+          <td class="num">32</td>
+          <td class="num">505 → 537</td>
+          <td><code class="m">font 11 · padding 8 0</code></td>
+        </tr>
+        <tr>
+          <td>折叠配置</td>
+          <td class="num">38</td>
+          <td class="num">549 → 587</td>
+          <td><code class="m">padding 10 12 · font 12</code></td>
+        </tr>
+        <tr>
+          <td>添加猫咪按钮</td>
+          <td class="num">38</td>
+          <td class="num">599 → 637</td>
+          <td><code class="m">padding 10 12 · 虚线边框</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>新增 trace 模块（三档，按需选用）</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>档</th>
+          <th>内容</th>
+          <th>高度</th>
+          <th>适用</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="hl">
+          <td><b>L 完整</b></td>
+          <td>段头 + 概览条 + 剩余放大条 + 5 行清单 + 结论句</td>
+          <td class="num">149</td>
+          <td>形态 B / C 主区</td>
+        </tr>
+        <tr>
+          <td><b>M 紧凑</b></td>
+          <td>段头 + 概览条 + 剩余放大条 + 4 行清单 + 结论句</td>
+          <td class="num">119</td>
+          <td>形态 A 成员卡内联</td>
+        </tr>
+        <tr class="dim">
+          <td>S 极简</td>
+          <td>段头 + 概览条 + 结论句</td>
+          <td class="num">48</td>
+          <td>面板高度吃紧时的降级</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>三形态总高对照</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>形态</th>
+          <th>净增</th>
+          <th>面板总高</th>
+          <th>1080p 余量</th>
+          <th>900px 余量</th>
+          <th>768px 余量</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>基线（今日线上）</td>
+          <td class="num">0</td>
+          <td class="num">653.5</td>
+          <td class="num ok">426</td>
+          <td class="num">246</td>
+          <td class="num">114</td>
+        </tr>
+        <tr class="hl">
+          <td><b>A 成员卡内联（M）</b></td>
+          <td class="num">+119</td>
+          <td class="num">772.5</td>
+          <td class="num ok">307</td>
+          <td class="num bad">−127</td>
+          <td class="num bad">−359</td>
+        </tr>
+        <tr>
+          <td><b>B 独立分区（L）</b></td>
+          <td class="num">+149</td>
+          <td class="num">802.5</td>
+          <td class="num ok">277</td>
+          <td class="num bad">−157</td>
+          <td class="num bad">−389</td>
+        </tr>
+        <tr>
+          <td><b>C 顶替队列区（L）</b></td>
+          <td class="num">+48.5</td>
+          <td class="num">702</td>
+          <td class="num ok">378</td>
+          <td class="num">198</td>
+          <td class="num bad">−89</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">
+      负数 = 面板内容超出窗口高，出现滚动条。三者<b>在 768px 窗口都会滚</b>——这是面板本身已 653.5px
+      的必然结果， 不是 trace 模块带来的。<b>若要让 768px 也不滚</b
+      >，得动的是基线（例如成员卡折叠成一行 32px），那是另一张票。
+    </p>
+
+    <!-- ═══════════ ④ 三种状态 ═══════════ -->
+    <h2><span class="n">④</span>三种状态 —— 面板里必须显式区分，不能都画成空白</h2>
+    <p class="note">
+      硬约束：R2
+      的段是<b>一次执行一个事务、在收尾才落库</b>。所以「正在跑」时库里<b>一行段都没有</b>——
+      它和「没有数据」长得一样，含义却完全不同。
+    </p>
+    <div class="triple">
+      <div>
+        <div class="cap">① 采集中 <span>（有 executing 的猫）</span></div>
+        <div class="panel static">
+          <div class="section-title">最近执行</div>
+          <div class="collecting">
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px">
+              <span class="state-chip run">● 采集中</span
+              ><span style="font-size: 10px">店长 · 已跑 42s</span>
+            </div>
+            段数据在本次执行收尾时<b>一次性落库</b>（R2 现有能力）。<br />
+            此处显示「采集中」，<b>不显示空条、不显示 0</b>。
+          </div>
+        </div>
+        <p class="note" style="max-width: 300px">
+          想让它<b>边跑边长</b>，需要 server 在每段开始/结束时推 socket 事件——<b
+            >这不是 R2 的现有能力</b
+          >，是另一张票。
+        </p>
+      </div>
+
+      <div>
+        <div class="cap">② 有数据 <span>（跑完了）</span></div>
+        <div class="panel static">
+          <div class="section-title">最近执行</div>
+          <div class="trace-block">
+            <div class="trace-head">
+              <span class="trace-title">店长 · 执行 trace</span
+              ><span class="trace-total">236.7s</span>
+              <span class="state-chip ok">✓ 完成</span>
+            </div>
+            <div class="bar">
+              <i style="background: var(--ph-retr); width: 0.5%"></i>
+              <i style="background: var(--ph-llm); width: 99.4%"></i>
+            </div>
+            <div class="bar-label"><span>0s</span><span>236.7s</span></div>
+            <div class="verdict">首字 <b>3.39s</b> ／ 生成 <b>232s</b></div>
+          </div>
+        </div>
+        <p class="note" style="max-width: 300px">这是常态。S 档 48px，够看结论。</p>
+      </div>
+
+      <div>
+        <div class="cap">③ 无数据 <span>（该猫还没跑过 / 老执行无 span）</span></div>
+        <div class="panel static">
+          <div class="section-title">最近执行</div>
+          <div class="empty-block">
+            <div style="font-size: 18px; opacity: 0.5; margin-bottom: 4px">🫥</div>
+            该猫在窗口内还没有已完成的执行<br />
+            <span style="color: var(--text-muted)">（不是 0ms，是<b>没有数据</b>）</span>
+          </div>
+        </div>
+        <p class="note" style="max-width: 300px">
+          与 P1-B 为 <code>null ≠ 0</code> 立的同款判据一致：<b>「没有」和「是零」不能长一样</b>。
+        </p>
+      </div>
+    </div>
+
+    <!-- ═══════════ ⑤ 回答你的三个问题 ═══════════ -->
+    <h2><span class="n">⑤</span>链路数据是怎么来的 · 超时怎么判断 · 数据什么意思</h2>
+
+    <div class="qa">
+      <div class="q">Q1 · 评估里的链路数据是怎么来的？</div>
+      <div class="a">
+        一句话：<b>不是新采的，是把已有的两张表按一个键重新分组算出来的。</b>
+        <ul class="tight">
+          <li>
+            <b>取数</b>（一条 SQL，<code>executionLogs.ts</code>）：<code>execution_logs</code> 左连
+            <code>messages</code> 两次——一次连「回复消息」、一次连「触发消息」，算出
+            <code>chain_id = COALESCE(回复消息.task_id, 触发消息.task_id)</code>。
+          </li>
+          <li>
+            <b>分组</b>：同一个 <code>chain_id</code> 的执行行 = <b>一条链</b>；链内每一行 =
+            <b>一跳</b>。 锚为 NULL 的行是<b>孤儿跳</b>，单独放
+            <code>orphanChain</code>，不进链列表（dev 库实测约 2.6%）。
+          </li>
+          <li>
+            <b>变换</b>（<code>chain-query.ts</code>，纯函数、零
+            I/O）：算每跳的段、打四个卡点标记、按链跨度降序排。 HTTP 只做「取数 → 调纯函数 →
+            返回」（<code>GET /api/eval/chains</code>）。
+          </li>
+          <li>
+            <b>为什么这个键</b>：只认触发侧会丢 32.5% 的行，只认回复侧丢 7.5%，取两者合并（覆盖率
+            97.4%）。 这是<b>已裁死的口径</b>，不是实现细节。
+          </li>
+          <li>
+            <b>另一类数据不同源</b>：段分解（本原型的瀑布）来自 R2 新加的 <code>spans</code> 表， 按
+            <code>execution_id</code> 挂；它的 <code>chain_id</code> 就是上面那个值——两边能对上。
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="qa">
+      <div class="q">Q2 · 超时是怎么判断的？</div>
+      <div class="a">
+        <b>不是「超过某个时间就算超时」。</b>评估里有<b>三个互不相干</b>的东西容易被当成同一件事：
+        <ul class="tight">
+          <li>
+            <b>① 真超时（执行体层面）</b>——由调度器判定，写进
+            <code>execution_logs.status='failed'</code> +
+            <code>error_type</code>，错误文案是「执行超时 (Ns)」。触发源有三条：dispatch 硬超时
+            <code>AGENT_HARD_TIMEOUT_MS</code>（默认 30min）、CLI 空闲超时（默认 20min）、网络超时。
+            分类器 <code>classify-error.ts</code> 把带这些关键词的错误归进 <code>timeout</code> 桶。
+          </li>
+          <li>
+            <b>② 超时率（L1 只看这一个数）</b>——<code
+              >timeoutRate = timeout 条数 ÷ (completed + failed 中 error_type≠server_restart)</code
+            >， 近 30 天窗口，告警阈值 <code>EVAL_ALERT_TIMEOUT_RATE</code> 默认 10%。
+            <b>分母刻意排除了 server_restart</b>——重启杀死的行是 infra
+            桶，算进成功率/超时率会冤枉模型。
+          </li>
+          <li>
+            <b>③ 「慢」标记（链路页那个 <code>slow</code> 徽章）</b>——<b>这个跟超时无关</b>。
+            它是一条<b>纯阈值线</b>：<code>totalMs &gt; EVAL_CHAIN_SLOW_MS</code>（默认
+            <b>300000ms = 5 分钟</b>）就标。
+            它不判失败、不判超时，只是「这一跳值得看一眼」。所以一次 <b>成功</b>但跑了 6
+            分钟的执行， 会同时带 <code>slow</code> 而
+            <b>status 仍是 completed</b>——这是设计如此，不是矛盾。
+          </li>
+        </ul>
+        <b>一句话记法</b>：<code>status=failed + error_type=timeout</code> 才是超时；
+        <code>slow</code> 只是慢；<code>EVAL_ALERT_TIMEOUT_RATE</code> 是拿前者算比例、发告警。
+      </div>
+    </div>
+
+    <div class="qa">
+      <div class="q">Q3 · 数据意义是什么？（每个数字在说什么）</div>
+      <div class="a">
+        <ul class="tight">
+          <li>
+            <b>链（chain）</b>——一次「用户提问 → 猫A回 → 猫B接 → …」的完整协作回合。
+            <code>spanMs</code> =
+            链内最早开始到最晚结束的墙钟跨度。<b>注意</b>：链里有在飞跳时它是<b>下界</b>（偏小）。
+          </li>
+          <li><b>跳（hop）</b>——链里一只猫的一次执行。<code>status</code> 是完成/失败/进行中。</li>
+          <li>
+            <b>三个耗时口径，别混</b>： <br />· <code>totalMs</code> =
+            <code>ended_at − started_at</code>，两列都是 <b>UTC 字符串、精度 1 秒</b> → 必是 1000
+            的整数倍，<b>不是毫秒精度</b>。 <br />· <code>replyMs</code> =
+            <code>latency_ms</code>，进程内毫秒计时 → <b>真的毫秒</b>； 语义 = 上下文过滤 + 记忆检索
+            + LLM 流式 + 落库，<b>不只是 LLM</b>。 <br />· <code>nonReplyMs</code> = 两者相减、钳到
+            ≥0。名字刻意用中性词——它包含等 token 锁和建行开销，
+            <b>不含</b>等锁之外的东西也说不出，所以不叫 <code>lockWaitMs</code>。
+          </li>
+          <li>
+            <b>举个真例</b>（就是上面那条执行）：<code>execution_logs</code> 说 237.000s（秒级），
+            <code>spans</code> 根段说 236.710s（毫秒级）——<b>差 290ms 全是精度</b>，不是错。
+          </li>
+          <li>
+            <b>四个卡点标记</b>（可同时出现，不互斥）： <code>failed</code> 失败 ／
+            <code>no_reply</code> 结束了但没回复（或回复 0 字）／ <code>slow</code> 超阈值 ／
+            <code>no_data</code> 完成了却没有耗时记录（采集修复前的存量行）。
+          </li>
+          <li>
+            <b>段（span）</b>——一次跳内部的分解，回答「这 236 秒花在哪」。<b>口径铁律</b>：
+            执行总时长只认根段 <code>invoke_agent</code>，<b>禁止加总子段</b>——
+            <code>git.auto_commit</code> 是轮次段挂在根段下、时间窗在根段之外，加总会算到 &gt;100%。
+          </li>
+          <li>
+            <b>它回答了什么</b>（这是这套数据的全部价值）：地图上的问题③「哪里耗时最长」，
+            在链路粒度只能答到「哪一跳」，在段粒度才能答到「哪一段」。真例：
+            <code>llm.chat</code> 占 <b>99.4%</b>，而首字只等 <b>3.39s（1.4%）</b>——
+            <b>不是等第一个字慢，是吐完所有字慢</b>。这句话在段数据出现之前<b>算不出来</b>。
+          </li>
+        </ul>
+      </div>
+    </div>
+  </body>
+</html>
+
+<script>
+  const btn = document.getElementById('toggle')
+  btn.addEventListener('click', () => {
+    document.body.classList.toggle('dim-on')
+    const on = document.body.classList.contains('dim-on')
+    btn.classList.toggle('on', on)
+    btn.textContent = on ? '隐藏尺寸标注' : '显示尺寸标注'
+  })
+</script>
