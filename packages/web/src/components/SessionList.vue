@@ -262,8 +262,8 @@ async function handleDelete(id: string): Promise<void> {
 }
 
 .btn-new-session-header:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 
@@ -455,10 +455,10 @@ async function handleDelete(id: string): Promise<void> {
 
 .btn-retry {
   padding: 6px 18px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-text);
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
@@ -467,7 +467,7 @@ async function handleDelete(id: string): Promise<void> {
 
 .btn-retry:hover {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
 }
 
 .loading {

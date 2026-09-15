@@ -244,7 +244,7 @@ async function handleCreate(): Promise<void> {
 }
 
 .agent-select-item.selected {
-  border-color: var(--accent);
+  border-color: var(--accent-text);
   background: var(--accent-soft);
 }
 
@@ -311,7 +311,7 @@ async function handleCreate(): Promise<void> {
 
 .btn-create {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
   font-weight: 600;
 }
 

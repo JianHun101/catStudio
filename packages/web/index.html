@@ -3,10 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="CatStudio — 多Agent AI对话平台，多只猫咪角色协作完成任务"
-    />
+    <meta name="description" content="CatStudio — 多Agent AI对话平台，多只猫咪角色协作完成任务" />
     <meta name="theme-color" content="#1b1815" />
     <link
       rel="icon"
@@ -35,10 +32,13 @@
         /* Text */
         --text-primary: #e6ddd0; /* 主文字 — 暖白 */
         --text-secondary: #a0988e; /* 副文字 */
-        --text-muted: #6b655c; /* 占位符/禁用 */
+        --text-muted: #989287; /* 占位符/禁用 — 票 H 提亮：原 #6b655c 对四种底全不达 4.5:1 */
+        --text-muted-frozen: #6b655c; /* 票 H 冻结位 = 原 muted 值；仅红框 A/D 两处消费者，勿扩散 */
 
         /* Accent — 暖焦糖色系 */
         --accent: #d4a574; /* 主强调色 */
+        --accent-text: #d4a574; /* 票 H：accent 当**文字色**时用；暗色与 --accent 同值 ⇒ 零视觉变化。实底仍走 --accent */
+        --text-on-accent: #14110e; /* 票 H：accent 实底上的前景色；暗色 = --bg-deep ⇒ 零视觉变化 */
         --accent-soft: rgba(212, 165, 116, 0.15); /* 背景强调 */
         --accent-glow: rgba(212, 165, 116, 0.25); /* focus 光晕 — 由 accent 派生 */
         --accent-tint: rgba(212, 165, 116, 0.06); /* 最淡强调 — 提示框背景 */
@@ -112,10 +112,13 @@
         /* Text */
         --text-primary: #3c3028;
         --text-secondary: #6b5c4a;
-        --text-muted: #a09080;
+        --text-muted: #706153; /* 票 H 提亮：原 #a09080 对四种底全不达 4.5:1 */
+        --text-muted-frozen: #a09080; /* 票 H 冻结位 = 原 muted 值；仅红框 A/D 两处消费者，勿扩散 */
 
         /* Accent — slightly deepened for legibility on light bg */
         --accent: #c89060;
+        --accent-text: #87572f; /* 票 H：accent 当**文字色**时用；浅底上原 #c89060 仅 2.52~2.76:1 */
+        --text-on-accent: #3c3028; /* 票 H：accent 实底上的前景色；浅色原用 --bg-deep(#f8f4ed) 仅 2.52:1 */
         --accent-soft: rgba(180, 130, 80, 0.12);
         --accent-glow: rgba(200, 144, 96, 0.25); /* focus 光晕 — 对应用亮色 accent #c89060 */
         --accent-tint: rgba(
