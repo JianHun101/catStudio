@@ -35,6 +35,29 @@
 - **动作**：只剥行尾 CR，**不改内容、不动 index、不产生任何提交**。
 - **判据（逐条留痕）**：每条 checkout 处理完后 `git diff --exit-code` 退出码为 **0**，且 `git ls-files --eol` 中 `w/crlf` 计数归零。
 
+#### §B 实施留痕（2026-09-15，ds猫）
+
+**criterion C3 实测：25 处（主仓库 + 24 worktree）全部 `w/crlf = 0`、`git diff --exit-code = 0`、且 status 干净。**逐条读数见实现交接文档。
+
+实施中量出**两点票面未覆盖的事实**，第二点构成一处**对 §B「不动 index」的显式偏离**：
+
+**① `git diff --exit-code = 0` 不足以判「干净」——只剥 CR 会留下成批幽灵 M。**
+
+剥离后文件与 index blob **逐字节相同**（blob 本就是 LF），`git diff` 亦报零差异；但 `git status` 把该批文件全标 M。成因是 index 的 stat 缓存记的是**剥离前**（CRLF）的 size/mtime，不是内容差异。三条实测排除法：
+
+| 探针                                | 读数              | 结论                         |
+| ----------------------------------- | ----------------- | ---------------------------- |
+| `git update-index --refresh`        | rc=1，status 仍 M | 刷不动                       |
+| `git add --refresh`                 | rc=0，status 仍 M | 刷不动                       |
+| `git -c core.autocrlf=false status` | 仍 M              | **与属性/autocrlf 语义无关** |
+| 真 `git add <path>`                 | status 转干净     | 唯一有效通道                 |
+
+且该 `git add` 在此处是**内容无操作**：`git rev-parse :path` 前后同值、`git diff --cached` 为空、文件字节 `cmp` 一致。
+
+⇒ **§B 的完整动作是「剥 CR + `git add` 该批路径（刷新 stat 缓存）」**。只做前者，会让这 25 处 status 全部显脏，而 `scripts/worktree-create.mjs:75` 以「主工作区干净」为硬门禁 ⇒ **今后每次 `worktree add` 都会失败**。
+
+**② 「本仓 0 个 tracked 二进制」只对主仓库成立。** 24 个存量 worktree 中 `b6d0b2f4` 有 **6 个 tracked PNG**（`packages/{server,shared,web}/coverage/{favicon,sort-arrow-sprite}.png`），另有若干 worktree 的 `packages/server/src/memory/index.ts` 在旧修订上含 **1 个 NUL 字节**被 git 判为 `-text`。按「含 CRLF 字节对」判定的剥 CR 会损坏前者；已由「剥离后必须与 index blob 逐字节相同才入 index」的守卫拦下，6 个 PNG 按 index 还原（`git checkout --`，`cmp` 逐字节一致），**其余 23 处 mismatch 均为 0**。
+
 ---
 
 ## 二、Out of Scope（明确不做）
