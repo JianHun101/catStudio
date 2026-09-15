@@ -5,5 +5,5 @@ pnpm-lock.yaml
 # 逐字 vendor 的外部技能正文（上游镜像目录）：prettier 会重排 markdown 表层
 # （表格对齐 / `*` 列表符 → `-` / `*强调*` → `_强调_` / 补空行），使内容与上游不再
 # 逐字节一致——而本仓对该目录的验收判据正是「与上游 sha256 一致」。
-# 故本目录不由本仓格式化；要改内容请改上游后重新 vendor（口径见 docs/run/taste-skill/install.md）。
+# 故本目录不由本仓格式化；要改内容请改上游后重新 vendor（约定见 skills/BOOTSTRAP.md「同步溯源」）。
 skills/design-taste-frontend/
