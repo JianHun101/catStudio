@@ -20,18 +20,26 @@
 
 ## 0. 取证口径
 
-| 项               | 值                                                                                                                      |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| 判据源           | 探针 clone `/d/Game/ai/_skill-probe2/taste`，HEAD=`ccbc15639c97057cbfcf32ecebc38ef716e4bb37`（与店长给的 HEAD 一致）    |
-| 判据正文         | `skills/taste-skill/SKILL.md`，1206 行，`sha256=aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89`（LF） |
-| 上游 frontmatter | `name: design-taste-frontend`                                                                                           |
-| 被测             | `packages/web/src/views/EvaluationView.vue`(1509) + `SettingsView.vue`(2628)                                            |
-| 设计令牌         | `packages/web/index.html:21-159`（暗/亮两套）                                                                           |
-| 真机             | dev `127.0.0.1:5173`（PID 1684）+ server `:3200`（PID 25396），1440×900                                                 |
-| 截图脚本         | `scripts/shots/taste-shots.mjs`（临时件，落 gitignore 目录 `scripts/shots/`，未入库）                                   |
+| 项               | 值                                                                                                                                                                                                              |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 判据源           | 探针 clone `/d/Game/ai/_skill-probe2/taste`，HEAD=`ccbc15639c97057cbfcf32ecebc38ef716e4bb37`（与店长给的 HEAD 一致）                                                                                            |
+| 判据正文         | `skills/design-taste-frontend/SKILL.md`（票 A 落地件，`81d3b80`）= 探针 `skills/taste-skill/SKILL.md`，1206 行，`sha256=aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89`（LF），**逐字节一致** |
+| 上游 frontmatter | `name: design-taste-frontend`                                                                                                                                                                                   |
+| 被测             | `packages/web/src/views/EvaluationView.vue`(1509) + `SettingsView.vue`(2628)                                                                                                                                    |
+| 设计令牌         | `packages/web/index.html:21-159`（暗/亮两套）                                                                                                                                                                   |
+| 真机             | dev `127.0.0.1:5173`（PID 1684）+ server `:3200`（PID 25396），1440×900                                                                                                                                         |
+| 截图脚本         | `scripts/shots/taste-shots.mjs`（临时件，落 gitignore 目录 `scripts/shots/`，未入库）                                                                                                                           |
 
-**票 A 未落地**：`skills/design-taste-frontend/` 与 `docs/run/taste-skill/install.md` 均不存在，
-故按店长给的 B 方案走探针 clone，内容同源。落地后可用 `sha256` 复核一致。
+**票 A 落地核对（已复核通过）**：开工时 `skills/design-taste-frontend/` 尚不存在，故按店长给的 B 方案
+走探针 clone 取判据；诊断期间票 A 于 `81d3b80` 落地，随后按店长要求核对同源——
+
+```
+sha256(skills/design-taste-frontend/SKILL.md) = aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89
+sha256(探针 skills/taste-skill/SKILL.md)      = aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89
+```
+
+**逐字节一致**（同 1206 行、同 frontmatter `name: design-taste-frontend`）。
+即本报告全部判据引用对落地件同样成立，无需回归。
 
 ---
 
@@ -192,7 +200,7 @@ token 起了个头（`index.html` 两套完整变量），但被 24 处硬编码
 - **未覆盖**：`App.vue` / `ChatPanel.vue` / `AgentEditModal.vue` / `SessionCreateModal.vue` 等未在票内；
   但 G-1/G-2/G-3/G-4/G-5/G-6 是**令牌与全局层**问题，**必然同样命中这些文件**——整改时应跨页一起核。
 - **对比度数值口径**：WCAG 2.x 相对亮度公式，阈值 AA（正文 4.5:1 / 大字 3:1）。脚本一次性计算，未手推。
-- **判据源为探针 clone**：票 A 落地 `skills/design-taste-frontend/SKILL.md` 后，可用
-  `sha256` 对比 `aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89` 复核同源。
+- **判据源同源已复核**：票 A 落地件 `skills/design-taste-frontend/SKILL.md`（`81d3b80`）与探针 clone 的
+  `skills/taste-skill/SKILL.md` **逐字节一致**（`sha256=aa194351…`，见 §0）。
 - **建议的整改切法**（供店长裁）：① 令牌层一单（G-1/G-2/G-6，改动小、两页+全站受益）；
   ② 状态与动效一单（G-3/G-4/G-5/E-6/E-9/S-12）；③ 结构语义一单（E-2/E-7/S-1/S-4，含行为改动需回归）。
