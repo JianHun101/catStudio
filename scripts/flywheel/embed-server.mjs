@@ -17,13 +17,18 @@
  * 环境变量:
  *   MEMORY_EMBEDDING_MODEL — 模型名（默认 Xenova/bge-small-zh-v1.5，与进程内实现一致）
  *   HF_ENDPOINT            — 自定义 HF 端点（仅显式设置时切换镜像）
- *   EMBED_SIDECAR_PORT     — 监听端口（默认 0 = 由 OS 分配，端口经 stdout 握手回报）
+ *   EMBED_SIDECAR_PORT     — 监听端口（默认 0 = 由 OS 分配，端口经 stdout 握手回报；
+ *                            显式指定的值若落在 fetch 禁用端口黑名单里 ⇒ 启动即报错，
+ *                            不静默换端口）
  *
  * 设计要点:
  * - **import 期不加载模型**：`@huggingface/transformers` 在 modelLoader 内动态 import，
  *   故单测可直接 import 本模块的 createEmbedServer 而不触发 ~100MB 模型加载。
  * - **端口握手**：监听成功后向 stdout 打印 `EMBED_SIDECAR_READY {"port":N}` ——
  *   spawn 方据此获知实际端口（OS 分配，避免并行测试/多实例撞端口）。
+ * - **端口必须对 `fetch` 可达**：OS 分配的端口可能落在 WHATWG Fetch 禁用端口黑名单
+ *   （1719 / 3659 / 6666 / 10080 …）—— 那种端口上服务在听、`fetch` 却永久 `bad port`。
+ *   `listen()` 因此绑定后即校验，命中则换端口重来（显式指定则报错）。见 `isFetchReachable`。
  * - 嵌入选项与进程内实现逐字一致（`pooling:'mean', normalize:true`）——换壳不换语义。
  */
 
@@ -36,6 +41,31 @@ export const MAX_BATCH = 64
 
 /** 请求体上限（防超大 body 打爆 sidecar；单条 450 字 × 64 远小于此值） */
 export const MAX_BODY_BYTES = 4 * 1024 * 1024
+
+/** 端口不可被 fetch 触达时的重取上限（仅 OS 分配态）——命中黑名单概率约 15/13977，5 次已足够 */
+const LISTEN_ATTEMPTS = 5
+
+/**
+ * 该端口能否被 `fetch` **触达** —— 判据必须与消费方同面。
+ *
+ * undici 的 `fetch` 有一份 **WHATWG 禁用端口黑名单**（1719 / 1720 / 1723 / 3659 / 4045 /
+ * 4190 / 5060 / 6000 / 6566 / 6665–6669 / 10080 …）。服务可以**真的在监听**这类端口
+ * （裸 TCP 连得通、`listening:true`），但 `fetch` 在发请求**之前**就拒
+ * （`cause = "bad port"`），且**永不恢复** —— 而主进程正是经 HTTP `fetch` 调 sidecar
+ * （`embedding-client.ts`），命中即**嵌入功能整体静默失败**。
+ *
+ * TCP 层判不出来（实测同一端口 `CONNECT-OK` 与 `bad port` 并存），唯一的 oracle 就是
+ * `fetch` 本身，故此处不比对硬编码黑名单（那份表随 undici 版本漂移，抄一份就是下次复发）。
+ * 探的是必定 404 的路径 —— 只验**传输可达**，不碰 `/health` 的应用状态。
+ */
+export async function isFetchReachable(host, port) {
+  try {
+    await fetch(`http://${host}:${port}/__portcheck`)
+    return true
+  } catch {
+    return false
+  }
+}
 
 /** stdout 握手行前缀（spawn 方按行解析） */
 export const READY_PREFIX = 'EMBED_SIDECAR_READY'
@@ -217,17 +247,49 @@ export function createEmbedServer(opts) {
   return {
     server,
     host,
-    listen(port = 0) {
-      return new Promise((resolve, reject) => {
-        server.once('error', reject)
-        server.listen(port, host, () => {
-          server.removeListener('error', reject)
-          resolve(server.address().port)
+    /**
+     * 监听端口，并校验该端口**对 `fetch` 可达**（判据见 `isFetchReachable`）。
+     *
+     * - `port` 为 0（默认）⇒ OS 分配；不可达即关掉换一个重来（上限 `LISTEN_ATTEMPTS`）。
+     * - `port` 显式指定 ⇒ 同样校验，但**命中即抛错、不静默换端口**：配置方按固定端口对接，
+     *   悄悄换一个等于骗人（客户端只会看到永久连不上）。
+     *
+     * 换端口对 spawn 方透明 —— 端口是经 stdout 握手回报的，不是猜的。
+     */
+    async listen(port = 0) {
+      const auto = !port
+      const attempts = auto ? LISTEN_ATTEMPTS : 1
+      const bindOnce = (p) =>
+        new Promise((resolve, reject) => {
+          server.once('error', reject)
+          server.listen(p, host, () => {
+            server.removeListener('error', reject)
+            resolve(server.address().port)
+          })
         })
-      })
+      const closeOnce = () =>
+        new Promise((resolve) => {
+          server.close(() => resolve())
+          server.closeAllConnections()
+        })
+
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        const bound = await bindOnce(auto ? 0 : port)
+        if (await isFetchReachable(host, bound)) return bound
+        await closeOnce()
+      }
+      throw new Error(
+        auto
+          ? `embed sidecar: 连续 ${LISTEN_ATTEMPTS} 次分配到的端口都不可被 fetch 触达（落在 WHATWG 禁用端口黑名单里？）`
+          : `embed sidecar: EMBED_SIDECAR_PORT=${port} 不可被 fetch 触达（落在 WHATWG 禁用端口黑名单里），请改用其他端口`
+      )
     },
     close() {
-      return new Promise((resolve) => server.close(() => resolve()))
+      return new Promise((resolve) => {
+        server.close(() => resolve())
+        // 强制断开既有连接（含 fetch keep-alive 池里的空闲 socket）——否则 close 回调可能一直等
+        server.closeAllConnections()
+      })
     },
   }
 }
