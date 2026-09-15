@@ -40,18 +40,33 @@
 
 **维度 C — 回归面（worktree 存在）**：三处动作的**现状行为**断言，防 Phase 2 改坏。
 
-### Phase 2（本单不做，Phase 1 读数回报后派）
+### Phase 2（**已派活** —— 2026-09-15，用户裁决「①派」）
 
 `serial.ts` 两处（①②）同批改：`getSessionWorktreePath` → `ensureSessionWorktree`，去掉 `?? process.cwd()`。
 
 **①② 必须同批。** 只改 ① 不改 ②：① 「不提交」留下的改动，会被 ② 的 `git checkout -- .` + `git clean -fd` 抹掉 —— **从「误提交」升级成「静默删除」**（误提交至少内容还在 git 里）。这是本单最硬的一条耦合。
+
+**Phase 2 交付面（五条，缺一不可）**：
+
+1. **① 收窄**（`serial.ts:1149-1153`）：`getSessionWorktreePath` → `ensureSessionWorktree`；建不出 → **不提交** + `log.warn`。**去掉 `?? process.cwd()`**。
+2. **② 收窄**（`serial.ts:1199-1211`）：同上；建不出 → **不清理** + `log.warn`（**清理作用域不得落到主仓库**）。
+3. **翻回 `it`**：Phase 1 的 4 个 `it.fails` 目标格改为 `it` —— 改对后 `it.fails` 会**主动报错**，这正是它设计的信号（G3）。
+4. **补 B3 早期失败格**（OQ1）：`claudeRan` 为 true 但 worktree 未建（走到 `reply.ts:976` 之前抛错）⇒ 谓词是**三条**不是两条，补一格并把措辞按三谓词收窄。
+5. **`cleanGitEnv()` 对称**（OQ4）：`beforeAll` 剥环境变量是进程级、`afterAll` 只还原 → 补对称。
+
+**Phase 2 的两条新风险（本轮拍板时识别，实施者必须实测留痕）**：
+
+- **R1 · `ensureSessionWorktree` 是同步阻塞的**（`execFileSync` 建分支 + `git worktree add` + `linkNodeModules`），而它现在要进的是 auto-commit 收尾路径（原本只跑 `git add -A`）。Windows 上建 junction 有实感耗时。**必须实测该路径耗时并留读数**——落在既有阻塞段内、量级可接受，但**不许拍脑袋说「应该没问题」**。
+- **R2 · 「新建 worktree 后立刻跑 `git clean -fd`」是全新组合**。原先 ② 只在 worktree **已存在**时跑清理；收窄后会先 `ensure` 建一个再清理。须实测确认 `git clean -fd` **不会碰掉新 worktree 里的 `node_modules` junction 与包级链接**（理论上 `.gitignore` 命中即免删，但这是新路径，**要实测不能推断**）。
+
+**`serial.ts:765` 裁决（Phase 2 是否纳入 —— 已裁：不纳入）**：保持**观察项**。理由三条：① 它只决定「审查兜底在哪投」，**不改动任何 git 状态**——实害量级与 ①②（误提交 / 静默删除）不同；② Phase 1 读数未提供纳入理由（两条路在 dev.js 形态下殊途同归）；③ 审查 cwd 会被 **T-2 整体重设计**（一次性 detached worktree），现在改它 = 改两遍。**观测点**：T-2 落地时重新评估。
 
 ---
 
 ## 二、Out of Scope（明确不做）
 
 - **`closed_out_at` 列 / sessions 表改动 / dispatch 入口拦截**——用户裁决 A 后**不做**（理由见「结论先行」第 2 条）。
-- **`serial.ts:765`（审查兜底 cwd）**——**从「三处降级点」降级为观察项**，见「§三 纠正」第 1 条。Phase 2 是否纳入，由 Phase 1 读数决定。
+- **`serial.ts:765`（审查兜底 cwd）**——**从「三处降级点」降级为观察项**，见「§三 纠正」第 1 条。**已裁：Phase 2 不纳入**（理由与观测点见 §一 Phase 2 末段）。
 - **一猫一 worktree 隔离（T-2）与 no-ff 合并策略（T-3）**——本活的设计树已定，但**另票另派**，见 §五。
 - **`git add -A` 收整个工作区的跨猫误提交根修**——同属 T-2 的 B 项（限定提交范围），不并入本票。
 
