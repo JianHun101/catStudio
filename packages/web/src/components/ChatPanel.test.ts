@@ -88,7 +88,9 @@ describe('ChatPanel markdown table overflow', () => {
     const msgTextBlock = source.match(/\.msg-text\s*\{[^}]*\}/s)
     expect(msgTextBlock).toBeTruthy()
     expect(msgTextBlock![0]).toContain('overflow-wrap: anywhere')
-    const preBlock = source.match(/\.chat-panel \.msg-text pre\s*\{[^}]*\}/s)
+    // pre 规则现为三落点并列组（正文 + 流式思考框 + 历史思考框），故选择器后允许并列项，
+    // 锚点仍是「首条 .msg-text pre 规则块」——断言意图不变（代码块覆盖回 normal）
+    const preBlock = source.match(/\.chat-panel \.msg-text pre[^{]*\{[^}]*\}/s)
     expect(preBlock).toBeTruthy()
     expect(preBlock![0]).toContain('overflow-wrap: normal')
     const tdBlock = source.match(
@@ -447,6 +449,108 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
   // 历史折叠块（单折叠 + ToolRow 退化路径 + segments 交错还原）的标记已随消息块
   // 迁入 MessageItem.vue；本文件的这些断言整体迁到 MessageItem.test.ts。
   // ToolRow 行级渲染的单源断言在 ToolRow.test.ts 已覆盖，不重复。
+})
+
+// ─── 思考框横向溢出（正文/流式思考框/历史思考框三落点同源）────────────────────
+// 病灶：思考框里渲染出的 markdown（代码块 white-space:pre 永不折行、行内 code 掉进 UA
+// 默认的 word-break:normal）没有任何专属规则，溢出冒到最近的滚动容器 .stream-fold-body
+// （overflow-y:auto 会令未声明的 overflow-x 强制计算成 auto），有 1px 就冒横条。
+// 本组断言锁住「三组规则各自并列三个落点」——新增落点漏一个就红。
+
+describe('ChatPanel 思考框横向溢出（三落点同源：正文 / 流式思考框 / 历史思考框）', () => {
+  it('行内 code：三落点并列 + word-break:break-all（无空格长路径可折行）', () => {
+    expect(source).toContain(
+      '.chat-panel .msg-text code,\n.chat-panel .fold-thinking code,\n.chat-panel .thinking-content code {'
+    )
+    const block = source.match(/\.chat-panel \.thinking-content code\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toContain('word-break: break-all')
+  })
+
+  it('代码块：三落点并列 + overflow-x:auto（长行由 pre 自己滚，不外溢到容器）', () => {
+    expect(source).toContain(
+      '.chat-panel .msg-text pre,\n.chat-panel .fold-thinking pre,\n.chat-panel .thinking-content pre {'
+    )
+    const block = source.match(/\.chat-panel \.thinking-content pre\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toContain('overflow-x: auto')
+    expect(block![0]).toContain('overflow-wrap: normal')
+  })
+
+  it('块内 code：三落点并列 + white-space:pre（块内保持原样换行语义）', () => {
+    expect(source).toContain(
+      '.chat-panel .msg-text pre code,\n.chat-panel .fold-thinking pre code,\n.chat-panel .thinking-content pre code {'
+    )
+    const block = source.match(/\.chat-panel \.thinking-content pre code\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toContain('white-space: pre')
+  })
+
+  it('亮色主题的 pre 覆盖同样并列三落点（否则思考框代码块在浅底上留白边）', () => {
+    expect(source).toContain("[data-theme='light'] .chat-panel .fold-thinking pre,")
+    expect(source).toContain("[data-theme='light'] .chat-panel .thinking-content pre {")
+    expect(source).toContain("[data-theme='light'] .chat-panel .thinking-content pre code {")
+  })
+
+  it('兜底：.stream-fold-body 显式 overflow-x:hidden（防止漏网内容顶出横条；注释写明不是主修）', () => {
+    const baseBlock = source.match(/\.stream-fold-body \{[\s\S]*?\n\}/)
+    expect(baseBlock).toBeTruthy()
+    expect(baseBlock![0]).toContain('overflow-x: hidden')
+    expect(baseBlock![0]).toContain('横向兜底')
+  })
+})
+
+// ─── 思考框内跟进（stick-to-bottom，框内滚动）────────────────────────────────
+// 观测面是 .stream-fold-inner 的尺寸，不是「枚举内容增长来源」——后者漏一条渲染路径就
+// 静默失效。不能观测 .stream-fold-body 自身：它 max-height:220px 固定，观测不到增长。
+
+describe('ChatPanel 思考框内跟进（观测 .stream-fold-inner 尺寸 + 三不变量）', () => {
+  it('模板：条目列表外包 .stream-fold-inner 并挂 v-fold-stick（RO 的观测对象）', () => {
+    expect(source).toContain('<div v-fold-stick class="stream-fold-inner">')
+    // 包裹层必须在 .stream-fold-body 之内（RO 回调读 parentElement 当滚动容器）
+    expect(source).toMatch(
+      /class="stream-fold-body"[\s\S]{0,400}class="stream-fold-inner"[\s\S]{0,400}class="fold-thinking"/
+    )
+  })
+
+  it('观测接线：指令 mounted 建 RO 观测 inner、卸载 disconnect（随元素生命周期，不泄漏）', () => {
+    expect(source).toContain('const vFoldStick: Directive<HTMLElement> = {')
+    expect(source).toContain('new ResizeObserver(() => scheduleFoldStick(body))')
+    expect(source).toContain('ro.observe(el)')
+    expect(source).toContain('foldObservers.get(el)?.disconnect()')
+    expect(source).toContain('foldObservers.delete(el)')
+  })
+
+  it('三不变量：几何距离判据（在框底才贴底、滚上去不抢）+ behavior:auto + rAF 节流', () => {
+    // I1/I2/I3 同一套几何判据：距离 ≥ 容差即让位，回到容差内自动恢复跟随
+    expect(source).toContain(
+      'const distToBottom = body.scrollHeight - body.scrollTop - body.clientHeight'
+    )
+    expect(source).toContain('if (distToBottom >= FOLD_SCROLL_TOLERANCE) return')
+    // 流式期平滑滚动追不上逐 chunk 增长，且会与用户手动滚动打架
+    expect(source).toContain("body.scrollTo({ top: body.scrollHeight, behavior: 'auto' })")
+    // rAF 节流：同帧多次触发合并一次，且滚动写推迟到下一帧（避免 RO loop 告警）
+    expect(source).toContain('let foldStickRaf = 0')
+    expect(source).toContain('foldStickRaf = requestAnimationFrame(')
+  })
+
+  it('卸载清理：取消在途 rAF + 清空待处理集合（RO 实例由指令逐个 disconnect，不重复）', () => {
+    expect(source).toContain('cancelAnimationFrame(foldStickRaf)')
+    expect(source).toContain('pendingFoldBodies.clear()')
+  })
+
+  it('布局迁移：包裹层承接 flex column + gap，其子项 flex-shrink:0（工具行不被压成细线）', () => {
+    const innerBlock = source.match(/\.stream-fold-inner \{[\s\S]*?\n\}/)
+    expect(innerBlock).toBeTruthy()
+    expect(innerBlock![0]).toContain('flex-direction: column')
+    expect(innerBlock![0]).toContain('gap: 5px')
+    const innerChild = source.match(/\.stream-fold-inner > \* \{[\s\S]*?\n\}/)
+    expect(innerChild).toBeTruthy()
+    expect(innerChild![0]).toContain('flex-shrink: 0')
+    // base 的 gap 仍是历史路径（不套包裹层）的承重项，不能顺手删
+    const baseBlock = source.match(/\.stream-fold-body \{[\s\S]*?\n\}/)
+    expect(baseBlock![0]).toContain('gap: 5px')
+  })
 })
 
 describe('ChatPanel 历史消息 segments 交错还原（segments 落库后时间序优先 + 老消息退化）', () => {

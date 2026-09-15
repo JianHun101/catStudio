@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import type { Directive } from 'vue'
 import type { Message, StreamSegment, ToolCallInfo, ExecutionMeta } from '@cat-study/shared'
 import { useChatStore, type AgentStatusEntry } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
@@ -372,6 +373,63 @@ watch(
   }
 )
 
+// ─── 思考框内跟进（stick-to-bottom，框内滚动）─────────
+// 流式思考框自己就是有界滚动容器（.stream-fold .stream-fold-body：max-height:220px +
+// overflow-y:auto），思考/工具在框内滚。三不变量与消息区同构：
+//   I1 跟随——内容增长 且 用户此刻在框底 → 贴底
+//   I2 让位——用户滚上去阅读 → 不抢滚动条、不打断阅读
+//   I3 复位——滚回框底 → 恢复跟随
+// 观测面选「尺寸」而非「内容增长来源」：后者要求穷举才正确（每新增一条渲染路径都得记得
+// 补一个 watch，漏一个就静默失效），尺寸观测一个点天然覆盖所有来源（文本、工具行展开、
+// 图片解码、字体加载……）。也不用「每次更新后读 scrollHeight」——流式每 chunk 一次会强制
+// 同步布局，RO 回调由浏览器批量派发。
+// ⚠️ 只作用流式折叠块。历史折叠块（.stored-thinking，MessageItem 渲染）展开后不再增长。
+const FOLD_SCROLL_TOLERANCE = 4
+
+function stickFoldToBottom(body: HTMLElement): void {
+  // I2/I3 判据用几何距离而非布尔状态位——与消息区 checkScrollPosition 同一口径，
+  // 免得「跟随开关」与真实位置脱节（用户用滚动条/触控板/键盘都能滚，状态位追不全）。
+  const distToBottom = body.scrollHeight - body.scrollTop - body.clientHeight
+  if (distToBottom >= FOLD_SCROLL_TOLERANCE) return
+  // behavior:'auto'——流式期平滑滚动既追不上逐 chunk 的增长，也会与用户手动滚动打架。
+  body.scrollTo({ top: body.scrollHeight, behavior: 'auto' })
+}
+
+// rAF 节流：合并同帧内的多次触发起见，并把滚动写推迟到下一帧——滚动条出现/消失会改变
+// clientWidth 进而又改内容尺寸，同帧内回写会触发 ResizeObserver loop 告警。
+const pendingFoldBodies = new Set<HTMLElement>()
+let foldStickRaf = 0
+
+function scheduleFoldStick(body: HTMLElement): void {
+  pendingFoldBodies.add(body)
+  if (foldStickRaf) return
+  foldStickRaf = requestAnimationFrame(() => {
+    foldStickRaf = 0
+    const bodies = [...pendingFoldBodies]
+    pendingFoldBodies.clear()
+    bodies.forEach(stickFoldToBottom)
+  })
+}
+
+// 每个折叠体一个 RO，随元素生命周期装卸。用指令而非函数 ref：指令的 mounted/unmounted 与
+// 元素严格配对，卸载时能确切 disconnect（函数 ref 卸载只收到 null，认不出是哪一个元素，
+// 观测集只增不减会随会话时长泄漏——本组件是长驻的）。
+const foldObservers = new Map<HTMLElement, ResizeObserver>()
+
+const vFoldStick: Directive<HTMLElement> = {
+  mounted(el) {
+    const body = el.parentElement
+    if (!body) return
+    const ro = new ResizeObserver(() => scheduleFoldStick(body))
+    ro.observe(el)
+    foldObservers.set(el, ro)
+  },
+  unmounted(el) {
+    foldObservers.get(el)?.disconnect()
+    foldObservers.delete(el)
+  },
+}
+
 // C5：滚动监听恰好一份——挂在模板 @scroll.passive 上（Vue 随组件生命周期自动装卸），
 // 不再于 onMounted 里对同一元素重复 addEventListener（此前两处并存，每次滚动跑两遍
 // checkScrollPosition，其中一遍还挂在可能已卸载的节点上）。
@@ -381,6 +439,13 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onPreviewKeydown)
+  // 组件卸载时在途的 rAF 要取消：否则回调会在已脱离文档的节点上跑一遍。
+  // RO 实例由指令的 unmounted 逐个 disconnect，此处不重复。
+  if (foldStickRaf) {
+    cancelAnimationFrame(foldStickRaf)
+    foldStickRaf = 0
+  }
+  pendingFoldBodies.clear()
 })
 
 // ─── Image preview (lightbox) ─────────────
@@ -1062,14 +1127,19 @@ const messageViews = computed<MessageView[]>(() => {
                     <span class="thinking-chevron">▶</span>
                   </div>
                   <div v-show="item.open" class="stream-fold-body">
-                    <template v-for="(e, ei) in item.entries" :key="ei">
-                      <div
-                        v-if="e.kind === 'thinking'"
-                        class="fold-thinking"
-                        v-html="renderMarkdown(e.content)"
-                      ></div>
-                      <ToolRow v-else :tool="e.tool" class="stream-tool-row" />
-                    </template>
+                    <!-- 内跟进观测层：v-fold-stick 的 RO 观测本元素（高度随内容增长）。
+                         不能观测外层 .stream-fold-body——它 max-height:220px 固定，
+                         思考再长尺寸也不变，观测它等于没接。 -->
+                    <div v-fold-stick class="stream-fold-inner">
+                      <template v-for="(e, ei) in item.entries" :key="ei">
+                        <div
+                          v-if="e.kind === 'thinking'"
+                          class="fold-thinking"
+                          v-html="renderMarkdown(e.content)"
+                        ></div>
+                        <ToolRow v-else :tool="e.tool" class="stream-tool-row" />
+                      </template>
+                    </div>
                   </div>
                 </div>
               </template>
@@ -2054,7 +2124,13 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Inline code ───────────────────────── */
 
-.chat-panel .msg-text code {
+/* 三个落点同源——正文（.msg-text）、流式思考框（.fold-thinking）、历史思考框
+   （.thinking-content）都渲染 markdown 产出的 code。此前只写正文一处，思考框里的
+   行内 code 掉进 UA 默认（word-break: normal）：无空格长路径（实测 120 字符）不折行，
+   顶出容器横向溢出（overRight=79.7px）。三组规则一一并列，新增落点不再各写一份。 */
+.chat-panel .msg-text code,
+.chat-panel .fold-thinking code,
+.chat-panel .thinking-content code {
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', 'Monaco', monospace;
   font-size: 0.9em;
   background: rgba(127, 127, 127, 0.12);
@@ -2065,7 +2141,13 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Code blocks ───────────────────────── */
 
-.chat-panel .msg-text pre {
+/* 同上：正文代码块早就有 overflow-x:auto（长行自己横向滚），思考框一条 pre 规则都没有，
+   代码块的 white-space:pre 让长行永不折行、自己又 overflow:visible 抓不住溢出 ⇒ 一路冒到
+   最近的滚动容器 .stream-fold-body，把它的 scrollWidth 顶到 9257px（实测 22/38 个思考框
+   溢出，最严重 17.5 倍）。本组规则让思考框代码块与正文同款：自己滚，不外溢。 */
+.chat-panel .msg-text pre,
+.chat-panel .fold-thinking pre,
+.chat-panel .thinking-content pre {
   background: var(--syntax-bg);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
@@ -2076,7 +2158,10 @@ const messageViews = computed<MessageView[]>(() => {
   overflow-wrap: normal;
 }
 
-.chat-panel .msg-text pre code {
+/* 特异性说明：本组 (0,2,2) 高于上面行内 code 组的 (0,2,1)，块内 code 恒走本组。 */
+.chat-panel .msg-text pre code,
+.chat-panel .fold-thinking pre code,
+.chat-panel .thinking-content pre code {
   background: none;
   padding: 0;
   font-size: 0.85em;
@@ -2141,12 +2226,16 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Code blocks — light theme overrides ─── */
 
-[data-theme='light'] .chat-panel .msg-text pre {
+[data-theme='light'] .chat-panel .msg-text pre,
+[data-theme='light'] .chat-panel .fold-thinking pre,
+[data-theme='light'] .chat-panel .thinking-content pre {
   background: var(--syntax-bg);
   border-color: rgba(0, 0, 0, 0.08);
 }
 
-[data-theme='light'] .chat-panel .msg-text pre code {
+[data-theme='light'] .chat-panel .msg-text pre code,
+[data-theme='light'] .chat-panel .fold-thinking pre code,
+[data-theme='light'] .chat-panel .thinking-content pre code {
   color: var(--syntax-text);
 }
 
@@ -2843,13 +2932,35 @@ const messageViews = computed<MessageView[]>(() => {
   gap: 5px;
   padding: 2px 10px 10px;
   border-top: 1px solid rgba(180, 160, 140, 0.18);
+  /* 横向兜底，不是主修：overflow-y 一旦不是 visible，未声明的 overflow-x 会被强制计算成
+     auto —— 本容器天生就能出横条，有 1px 溢出就冒。主修是让代码块自己滚、行内 code 折行
+     （见上方三组规则）。本行只是不让任何漏网内容把横条顶出来，不是「新增内容源免修」的
+     金牌——新渲染路径仍须自证不溢出。本条落在 base 类上：流式/历史两个变体是同一个元素，
+     无需各自再声明一遍。 */
+  overflow-x: hidden;
 }
 
 /* flex column + 有界高度（max-height 使 height 固定）会让子项被 flex-shrink 压扁——
    `<details>` 工具行的 min-height:auto 对 flex 失效、被压缩到 ~2px 细线（"工具一条线"
    根因），点击区也消失。给直接子项 flex-shrink:0：内容超出时由容器 overflow 滚动、
-   不再压缩子项——工具行回到完整卡片行（✓/✕ 状态 glyph + 名称 + 状态标签 + chevron）。 */
+   不再压缩子项——工具行回到完整卡片行（✓/✕ 状态 glyph + 名称 + 状态标签 + chevron）。
+   流式路径的直接子项现在是 .stream-fold-inner（见下），故压缩防护同时落在包裹层与其
+   子项两层上；历史路径（无包裹层）仍由本条直接兜住。 */
 .chat-panel .stream-fold-body > * {
+  flex-shrink: 0;
+}
+
+/* 思考框内跟进（stick-to-bottom）的观测对象：.stream-fold-body 的唯一子元素，高度随内容
+   增长。不能观测 .stream-fold-body 自身——它 max-height:220px 固定，思考再长尺寸也不变，
+   观测它等于没接。本层同时承接流式路径的条目布局（flex column + gap）；base 规则里的
+   gap 对历史路径（不套本包裹层）仍是承重的，故不移除。 */
+.chat-panel .stream-fold-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chat-panel .stream-fold-inner > * {
   flex-shrink: 0;
 }
 
