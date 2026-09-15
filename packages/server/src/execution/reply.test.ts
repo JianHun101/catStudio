@@ -305,6 +305,59 @@ describe('execution/reply — R1 检索流水埋点', () => {
     expect(ev.task_id).toBe('anchor-b')
   })
 
+  // ═══ R2（段五）：签名与硬点（静态源断言） ═══════════════
+  describe('R2 段五 · 签名与落点硬点', () => {
+    const SRC = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), 'reply.ts'),
+      'utf8'
+    )
+
+    it('验收 21 · `runAgentReply` 原 7 个参数**未变**，只新增 `trace` 一个（不做 7 参数整体收口）', () => {
+      const start = SRC.indexOf('export async function runAgentReply(')
+      expect(start).toBeGreaterThan(0)
+      const end = SRC.indexOf('): Promise<{ content: string; msgId: string }> {', start)
+      expect(end).toBeGreaterThan(start)
+      const params = [...SRC.slice(start, end).matchAll(/^ {2}(\w+)[,?:]/gm)].map((m) => m[1])
+      expect(params).toEqual([
+        'state',
+        'bus',
+        'sessionId',
+        'agent',
+        'triggerMsg',
+        'traceId',
+        'signal',
+        'trace',
+      ])
+    })
+
+    it('硬点 3 · `llm.chat` 段的起点在 `chatStream` 调用**之前**（否则 TTFT 分母错）', () => {
+      const spanStart = SRC.indexOf("trace.startSpan('llm.chat'")
+      const call = SRC.indexOf('adapter.chatStream(')
+      expect(spanStart).toBeGreaterThan(0)
+      expect(call).toBeGreaterThan(spanStart)
+    })
+
+    it('硬点 3 · `markFirstChunk` 在 `for await` 循环体内（整段结束才记 ⇒ 首 chunk 语义丢失）', () => {
+      const loop = SRC.indexOf('for await (const chunk of stream) {')
+      const mark = SRC.indexOf('llmHandle.markFirstChunk()')
+      const loopEnd = SRC.indexOf('} finally {', loop)
+      expect(loop).toBeGreaterThan(0)
+      expect(mark).toBeGreaterThan(loop)
+      expect(mark).toBeLessThan(loopEnd)
+    })
+
+    it('`llm.chat` 段在 `finally` 里收口（撤回/abort 两条 return 不留 duration=0 的半截段）', () => {
+      const clear = SRC.indexOf('clearInterval(heartbeatTimer)')
+      const finOpen = SRC.lastIndexOf('} finally {', clear)
+      const close = SRC.indexOf('trace.endSpan(llmHandle, llmStreamStatus')
+      const finClose = SRC.indexOf('\n  }', close)
+      expect(finOpen).toBeGreaterThan(0)
+      expect(clear).toBeGreaterThan(finOpen) // clearInterval 在这个 finally 块内
+      expect(close).toBeGreaterThan(clear) // 收段紧随其后（同一块）
+      expect(finClose).toBeGreaterThan(close) // 且没跑出这个块
+    })
+  })
+
   // ─── 调用点位置（票 §三 硬要求，静态源断言）─────────
   describe('调用点位置（P2 §三：必须在 race 之外、if 之外）', () => {
     const SRC = fs.readFileSync(

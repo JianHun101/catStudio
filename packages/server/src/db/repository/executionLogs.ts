@@ -69,7 +69,7 @@ export interface ExecutorLookup {
  *  反查却返回后者——刚好对；把 started_at 反过来就恒错）。
  *  判据取 **distinct agent** 而非行数：同 agent 多行时执行者是确定的，按行数拒会把
  *  "同一只猫重试"误判成歧义、白丢归属。 */
-function pickSingleExecutor(rows: ExecutorLookup[]): ExecutorLookup | undefined {
+function pickSingleExecutor<T extends { agent_id: string }>(rows: T[]): T | undefined {
   if (rows.length === 0) return undefined
   const first = rows[0]
   for (const row of rows) {
@@ -121,6 +121,28 @@ export function hasExecutorRowsForTrigger(triggeredByMessageId: string): boolean
     )
     .get(triggeredByMessageId) as { hit: number } | undefined
   return row !== undefined
+}
+
+/** R2 轮次级 span（`git.auto_commit`）的归属行：该触发消息**唯一**执行者那一行。
+ *
+ *  depth=0 的自动提交在**全部 `execute()` 返回之后**跑，此刻每个执行体的 trace 都已
+ *  在 `finalizeRun` 落库 ⇒ 「把提交段塞进某次执行」需要反查归属。判据与
+ *  `updateExecutionLogCommitHash`（T-M）**逐字同源**：同一 agent 的多行（重试/重放）
+ *  不算歧义，跨 agent 才算——那边拒写 sha，这边拒写段，两个消费点同一口径。
+ *  不可消歧 ⇒ `undefined`（**不猜**，调用方跳过该段：缺 ≠ 失败，R2 §九 26）。
+ *
+ *  返回 `id` 而非 `agent_id`：span 要挂的是 `execution_logs.id`（`spans.execution_id`）。 */
+export function getUnambiguousExecutionRow(
+  triggeredByMessageId: string
+): { id: string; agent_id: string; session_id: string } | undefined {
+  const rows = db
+    .prepare(
+      `SELECT id, agent_id, session_id FROM execution_logs
+       WHERE triggered_by_message_id = ?
+       ORDER BY started_at DESC`
+    )
+    .all(triggeredByMessageId) as Array<{ id: string; agent_id: string; session_id: string }>
+  return pickSingleExecutor(rows)
 }
 
 /** 反查"提交某 commit"的 agent（handoff-gen 动态补填人，commit_hash 精确匹配）。

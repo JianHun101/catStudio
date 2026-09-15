@@ -21,8 +21,10 @@ const log = createLogger('diff-collector')
 
 const execFileAsync = promisify(execFile)
 
-/** git 命令超时（5s）——超时静默跳过，不阻塞回复 */
-const GIT_TIMEOUT_MS = 5000
+/** git 命令超时（5s）——超时静默跳过，不阻塞回复。
+ *  导出给 R2 段五：调用方据「本段耗时 ≥ 本值」判 `diff.collect` 的 `status='timeout'`
+ *  ——`execFile` 在满 5s 时 kill，故「跑满」与「被超时 kill」**在当前实现下等价**。 */
+export const GIT_TIMEOUT_MS = 5000
 /** 单文件 diff 行数上限（含 hunk 头与上下文行） */
 const MAX_DIFF_LINES_PER_FILE = 200
 /** 全部文件 diff 总行数上限 */

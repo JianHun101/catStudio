@@ -28,6 +28,7 @@ import { setRepoDb as setSettingsDb } from './settings.js'
 import { setRepoDb as setFlowStatesDb } from './flowStates.js'
 import { setRepoDb as setChunksDb } from './chunks.js'
 import { setRepoDb as setRetrievalEventsDb } from './retrievalEvents.js'
+import { setRepoDb as setSpansDb } from './spans.js'
 
 /** 初始化所有 repository 模块的 db 实例（在 initDb() 之后调用） */
 export function initRepository(db: Database.Database): void {
@@ -46,6 +47,7 @@ export function initRepository(db: Database.Database): void {
   setFlowStatesDb(db)
   setChunksDb(db)
   setRetrievalEventsDb(db)
+  setSpansDb(db)
 }
 
 // 按实体分组导出，调用方用 repo.agents.xxx / repo.sessions.xxx 等
@@ -64,6 +66,9 @@ export * as settings from './settings.js'
 export * as flowStates from './flowStates.js'
 export * as chunks from './chunks.js'
 export * as retrievalEvents from './retrievalEvents.js'
+export * as spans from './spans.js'
+
+export type { SpanInput, SpanRow, LlmSpanDetail } from './spans.js'
 
 // Row 类型也一并导出
 export type {

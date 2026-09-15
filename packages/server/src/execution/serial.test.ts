@@ -89,6 +89,10 @@ vi.mock('../handoff/index.js', () => ({
 
 vi.mock('../git/diff-collector.js', () => ({
   collectCommitDiffs: vi.fn().mockResolvedValue(null),
+  // R2 段五起 reply.ts 消费这个常量（`diff.collect` 的超时判据）——替身必须镜像
+  // 真模块**被消费的导出面**：漏一个 = 调用点当场 TypeError，回复整条发不出去
+  // （与 memory/index.js 替身缺 currentRetrievalParams 同款，实测踩过）
+  GIT_TIMEOUT_MS: 5000,
 }))
 
 // 顶层收尾的脏文件清理用真实 execSync 会命中真实仓库——恒返回空串（"干净"跳过）
