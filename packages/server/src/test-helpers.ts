@@ -3,11 +3,14 @@
  *
  * - 创建内存 SQLite 数据库（含完整 schema）
  * - Fastify 测试应用构建
+ * - 起 stub 服务时的**端口分配**（避开 WHATWG Fetch 禁用端口黑名单，见 `listenFetchable`）
  */
 import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
 import type { FastifyInstance } from 'fastify'
 import Fastify from 'fastify'
+import type { Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS agents (
@@ -231,4 +234,78 @@ export function createTestDb(): Database.Database {
 export async function buildTestApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false })
   return app
+}
+
+/** `listenFetchable` 的重取上限 —— 单次命中黑名单概率约 15/13977，8 次已是天文安全裕度 */
+const LISTEN_ATTEMPTS = 8
+
+/**
+ * 服务已在监听时，判断该端口能否被 `fetch` **触达**。
+ *
+ * 判据必须是 fetch 本身（而不是「端口在听」）：实测同一端口可以 `TCP CONNECT-OK`
+ * 而 `fetch` 报 `bad port` —— 两个谓词不同面。任何异常（含 `ECONNREFUSED`，
+ * 表示端口没被拒、只是没人听）都算「不可触达」，由调用方决定怎么处置。
+ */
+export async function isFetchReachable(host: string, port: number): Promise<boolean> {
+  try {
+    await fetch(`http://${host}:${port}/`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 让 `server` 监听一个 **fetch 可触达**的端口，返回实际端口。
+ *
+ * 为什么不能只用 `listen(0)`：OS 分配的端口可能落在 **WHATWG Fetch 禁用端口黑名单**
+ * （1719 / 1720 / 1723 / 3659 / 4045 / 4190 / 5060 / 6000 / 6566 / 6665–6669 / 10080 …）。
+ * 这类端口上服务**真的在监听**（裸 TCP 连得通、`listening:true`），但 undici 的 `fetch`
+ * 在发请求**之前**就拒（`cause = "bad port"`），且**永不恢复** ⇒ 客户端探活吃满超时预算
+ * ⇒ 测试撞穿 harness 预算（`Test timed out`）。本机动态端口池是 1024–15000
+ * （`netsh int ipv4 show dynamicport tcp`），与黑名单**有交叠**，故命中概率非零。
+ *
+ * 此处**不比对硬编码黑名单**——那份表随 undici 版本漂移，抄一份就是下一次静默复发；
+ * 改为**真的 fetch 一次**，与消费方同面。命中即可换端口重来。
+ */
+export async function listenFetchable(server: Server, host = '127.0.0.1'): Promise<number> {
+  return withFetchablePort(
+    () =>
+      new Promise<number>((resolve) => {
+        server.listen(0, host, () => resolve((server.address() as AddressInfo).port))
+      }),
+    // 换端口前必须真的关掉：同一个 Server 实例可 close 后重新 listen，
+    // 但不关就再 listen 会 EADDRINUSE。
+    () => closeServer(server),
+    (port) => isFetchReachable(host, port)
+  )
+}
+
+/**
+ * 「分配 → 校验 → 命中则重取」循环。判据（`probe`）与副作用（`bind`/`unbind`）都从外面传：
+ * **重取分支在真机上要 OS 恰好分到黑名单端口才走得到**（约 15/13977），注入替身才能把它
+ * 钉进单测——否则这条分支的「写了但从不执行」与「压根没写」在判据上无法区分。
+ */
+export async function withFetchablePort(
+  bind: () => Promise<number>,
+  unbind: () => Promise<void>,
+  probe: (port: number) => Promise<boolean>,
+  attempts = LISTEN_ATTEMPTS
+): Promise<number> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const port = await bind()
+    if (await probe(port)) return port
+    await unbind()
+  }
+  throw new Error(
+    `withFetchablePort: 连续 ${attempts} 次分配到的端口都不可被 fetch 触达` +
+      `（WHATWG 禁用端口黑名单？）——端口池配置可能异常，见 listenFetchable 注释`
+  )
+}
+
+/** 关掉 server，并**强制断开**已有连接（含 fetch keep-alive 池里的空闲 socket，否则 close 回调可能一直等） */
+export async function closeServer(server: Server): Promise<void> {
+  const closed = new Promise<void>((resolve) => server.close(() => resolve()))
+  server.closeAllConnections()
+  await closed
 }

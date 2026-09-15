@@ -20,6 +20,7 @@ import {
   type SidecarChild,
   type SpawnSidecar,
 } from './embedding-client.js'
+import { isFetchReachable, listenFetchable } from '../test-helpers.js'
 
 // ─── logger 边界 mock ─────────────────────────────────
 
@@ -169,8 +170,9 @@ async function startStub(initialHealth: Record<string, unknown> = {}): Promise<S
     res.writeHead(404).end()
   })
 
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
-  const port = (server.address() as { port: number }).port
+  // 端口必须**能被 fetch 触达**：`listen(0)` 偶尔会分到 WHATWG 禁用端口黑名单里的端口，
+  // 那种端口上服务在听、fetch 却永久 `bad port` ⇒ 被测的重试路径吃满超时。见 test-helpers。
+  const port = await listenFetchable(server)
 
   return {
     port,
@@ -728,13 +730,28 @@ const server = createServer((req, res) => {
   res.writeHead(404).end()
 })
 
-server.listen(0, '127.0.0.1', () => {
-  process.stdout.write(
-    'EMBED_SIDECAR_READY ' +
-      JSON.stringify({ port: server.address().port, host: '127.0.0.1' }) +
-      '\\n'
+// 端口必须能被 fetch 触达：listen(0) 偶尔分到 WHATWG 禁用端口黑名单里的端口，
+// 那种端口上服务在听、fetch 却永久 bad port ⇒ 客户端探活吃满超时。命中则换端口重来。
+// （本文件是独立子进程，拿不到 test-helpers；判据取「真的 fetch 一次」，不做黑名单比对。）
+let port = null
+for (let attempt = 0; attempt < 8 && port === null; attempt++) {
+  const candidate = await new Promise((resolve) =>
+    server.listen(0, '127.0.0.1', () => resolve(server.address().port))
   )
-})
+  try {
+    await fetch('http://127.0.0.1:' + candidate + '/')
+    port = candidate
+  } catch {
+    await new Promise((resolve) => {
+      server.close(() => resolve())
+      server.closeAllConnections()
+    })
+  }
+}
+if (port === null) throw new Error('stub sidecar: 连续 8 次分配到的端口都不可被 fetch 触达')
+process.stdout.write(
+  'EMBED_SIDECAR_READY ' + JSON.stringify({ port, host: '127.0.0.1' }) + '\\n'
+)
 `
 
 /** 有界等待（stderr 落痕与 HTTP 往返是两条独立异步链） */
