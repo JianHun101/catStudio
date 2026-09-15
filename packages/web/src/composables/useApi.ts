@@ -238,6 +238,50 @@ export interface EvalChainsResponse {
   orphanChain: { chainId: null; hopCount: number; hops: ChainHop[] }
 }
 
+// ─── R3 段分解（GET /eval/spans，契约由 R3 票面 §二 冻结在字段级）──
+
+/** 一行段（R2 `spans` 表原样 snake_case）。
+ *  ⚠️ `start_at` 是 **ISO 毫秒 UTC**（`2026-09-14T13:20:00.000Z`），与
+ *  `execution_logs` 的秒级 `YYYY-MM-DD HH:MM:SS` **不同形**——别套 `fmtUtcShort`。 */
+export interface SpanRow {
+  id: number
+  span_id: string
+  /** NULL = 该执行的根段（`invoke_agent`） */
+  parent_span_id: string | null
+  chain_id: string | null
+  /** = `ChainHop.executionLogId`（同值，故前端零契约变更） */
+  execution_id: string
+  session_id: string | null
+  agent_id: string | null
+  /** 段名——闭集 11 条（R2 §五） */
+  name: string
+  operation_name: string | null
+  start_at: string
+  duration_ms: number
+  status: string
+  error_type: string | null
+  error_message: string | null
+  item_count: number | null
+}
+
+/** `llm.chat` 段专属详情（`span_llm` 表）。**camelCase**——服务端换算过，不是 DB 列名 */
+export interface LlmSpanDetail {
+  provider: string
+  model: string
+  inputTokens: number | null
+  outputTokens: number | null
+  /** 首 chunk 延迟（毫秒）；本仓存毫秒，导出 OTel 时才换算成秒 */
+  ttftMs: number | null
+  stream: boolean
+  maxTokens: number | null
+}
+
+/** 段 + **内联**的 LLM 详情。非 `llm.chat` 段 `llm` 恒 `null`；
+ *  内联而非单开端点，是为了掐掉前端 N+1（11 段各发一次请求）。 */
+export interface SpanDto extends SpanRow {
+  llm: LlmSpanDetail | null
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -429,4 +473,11 @@ export const api = {
 
   /** 链路视图（后端已排序 + 截断；孤儿跳只在 `orphanChain`，不在 `chains[]` 内） */
   getEvalChains: () => request<EvalChainsResponse>('/eval/chains'),
+
+  /** 一次执行的段分解时间轴（R3）。**空数组是合法响应**——running 中 / 采集修复前的
+   *  存量行都回 `[]`，不是 404；前端据「跳是否结束」区分文案，不靠这个空数组。 */
+  getEvalSpans: (executionId: string) =>
+    request<{ ok: boolean; spans: SpanDto[] }>(
+      `/eval/spans?execution_id=${encodeURIComponent(executionId)}`
+    ),
 }

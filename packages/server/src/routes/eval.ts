@@ -10,6 +10,8 @@
  *                                           挂现成 episodeStats()，办成率前端算）
  * - GET /api/eval/l1-metrics                L1 八口径聚合（P1-A：给已有 aggregateMetrics() 开门）
  * - GET /api/eval/chains?limit=&windowDays= 链路查询（P1-A：哪条链最长 / 卡在哪一跳）
+ * - GET /api/eval/spans?execution_id=       一次执行的段分解时间轴（R3：卡点从「哪一跳」
+ *                                           下沉到「哪一段」；接线 R2 既有读口，不写新 SQL）
  *
  * 返回 snake_case 原样出（前端直接消费 DB 行），错误 { error } + 4xx 钉死契约类型。
  * 纯展示 + 回标写入，零 LLM 调用。
@@ -20,7 +22,9 @@ import {
   evalScores as evalScoresRepo,
   userFeedback as userFeedbackRepo,
   executionLogs as executionLogsRepo,
+  spans as spansRepo,
 } from '../db/repository/index.js'
+import type { SpanRow, LlmSpanDetail } from '../db/repository/index.js'
 import { episodeStats } from '../eval/episodes.js'
 import { aggregateMetrics, WINDOW_DAYS } from '../eval/l1-aggregator.js'
 import { buildChains } from '../eval/chain-query.js'
@@ -42,6 +46,30 @@ function clampInt(raw: unknown, fallback: number, min: number, max: number): num
   const n = Number(raw)
   if (!Number.isFinite(n)) return fallback
   return Math.min(max, Math.max(min, Math.floor(n)))
+}
+
+/** 一行段 + 内联的 LLM 详情（R3 契约）：`SpanRow` 原样 snake_case **加上** `llm`。
+ *
+ *  `llm` 内联而**不是**单开一个 `span_llm` 端点，是为了掐掉前端 N+1——
+ *  11 段各发一次请求，等于把「一次执行的时间轴」拆成 11 个可乱序的往返。
+ *  非 `llm.chat` 段恒 `null`（闭集里只有它建 `span_llm` 行，见 R2 §五）。 */
+export interface SpanDto extends SpanRow {
+  llm: LlmSpanDetail | null
+}
+
+/** `span_llm` 行（snake_case 列）→ 契约类型 `LlmSpanDetail`（camelCase）。
+ *  只在这里换算一次，前端拿到的就是定型字段，不必自己认列名。 */
+function toLlmDetail(raw: Record<string, unknown>): LlmSpanDetail {
+  return {
+    provider: String(raw.provider),
+    model: String(raw.model),
+    inputTokens: raw.input_tokens == null ? null : Number(raw.input_tokens),
+    outputTokens: raw.output_tokens == null ? null : Number(raw.output_tokens),
+    ttftMs: raw.ttft_ms == null ? null : Number(raw.ttft_ms),
+    // SQLite 无布尔类型，`stream` 列存 0/1（R2 DDL `INTEGER NOT NULL`）
+    stream: raw.stream === 1 || raw.stream === true,
+    maxTokens: raw.max_tokens == null ? null : Number(raw.max_tokens),
+  }
 }
 
 export async function evalRoutes(app: FastifyInstance): Promise<void> {
@@ -110,6 +138,34 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
       slowMs,
       ...result,
     })
+  })
+
+  /**
+   * 一次执行的段分解时间轴（R3）。前端消费粒度 = **一跳**（用户展开的就是某跳），
+   * 故按 `execution_id` 取而非 `chain_id`——按链取会把整条链的段混在一起，
+   * 逼前端把**已经存在的分组信息丢掉再按 execution_id 重建**，纯亏。
+   * `ChainHop.executionLogId` 与 `spans.execution_id` 同值 ⇒ 前端零契约变更；
+   * `idx_spans_execution` 正是为此建（「看板主路径：按执行取全段时间轴」）。
+   *
+   * **空数组是合法响应，不是 404**：`execution_id` 不存在 / 该执行未落段
+   * （running 中，或采集修复前的存量行）一律 200 + `[]`——对用户都是「无段数据」，
+   * 404 只会诱发一条无意义的错误分支。缺参才是 400。
+   *
+   * **纯读**：只调 `getSpansByExecution()` / `getLlmDetail()`，不写新 SQL、不回写任何表。
+   * 排序归 repo（`ORDER BY start_at, id`），本路由**不得重排**。
+   */
+  app.get('/api/eval/spans', async (req, reply) => {
+    const { execution_id } = req.query as { execution_id?: string }
+    if (typeof execution_id !== 'string' || execution_id === '') {
+      return reply.status(400).send({ error: 'execution_id is required' })
+    }
+    const spans: SpanDto[] = spansRepo.getSpansByExecution(execution_id).map((row) => {
+      // 非 `llm.chat` 段**连查都不查**（闭集保证它没有详情行）——省掉每执行 10 次空查询，
+      // 也让「非 llm.chat 恒 null」是结构性的，不依赖「恰好没数据」。
+      const detail = row.name === 'llm.chat' ? spansRepo.getLlmDetail(row.span_id) : undefined
+      return { ...row, llm: detail ? toLlmDetail(detail) : null }
+    })
+    return reply.send({ ok: true, spans })
   })
 
   /** 待回标样本：low_score 且无 user_feedback，每条附回复全文 + 前置最近 10 条上下文 */

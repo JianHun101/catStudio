@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import {
   api,
   type EvalScoreRow,
@@ -10,6 +10,7 @@ import {
   type EvalChainsResponse,
   type ChainHop,
   type HopFlag,
+  type SpanDto,
 } from '@/composables/useApi'
 
 /**
@@ -51,6 +52,12 @@ const chainError = ref('')
 /** 展开状态按链锚键控（默认全收起——一条链可达 26 跳，全铺开会淹掉列表） */
 const expanded = ref<Record<string, boolean>>({})
 const ORPHAN_KEY = '__orphan__'
+
+// ─── R3 段分解：展开一跳时拉该执行的段（回答「这一跳里卡在哪一段」）──────────
+/** 键 = `executionLogId`（= `spans.execution_id`）。缓存住，收起再展开不重发 */
+const spansByExec = ref<Record<string, SpanDto[]>>({})
+const spanLoading = ref<Record<string, boolean>>({})
+const spanError = ref<Record<string, string>>({})
 
 /** 渲染用分组：正文链 + 末尾孤儿组。
  *  归一成同一形状后，孤儿区复用同一套跳渲染（否则要复制一份 ~20 行的跳模板）。
@@ -100,8 +107,11 @@ function isExpanded(key: string): boolean {
   return expanded.value[key] === true
 }
 
-function toggleChain(key: string): void {
-  expanded.value[key] = !expanded.value[key]
+function toggleChain(g: ChainGroup): void {
+  const next = !expanded.value[g.key]
+  expanded.value[g.key] = next
+  // 展开才拉段——收起状态下发 26 跳 × N 段纯属浪费（一条链可达 26 跳）
+  if (next) loadSpansForGroup(g)
 }
 
 /** 卡点徽章文案——**带文字**不只靠颜色（色盲可读） */
@@ -181,23 +191,266 @@ function hopRunning(hop: ChainHop): boolean {
   return hop.endedAt == null
 }
 
-/** 三段拆分可用：replyMs / nonReplyMs / totalMs 齐备且总耗时 > 0 */
-function canSplit(hop: ChainHop): boolean {
-  return hop.replyMs !== null && hop.nonReplyMs !== null && hop.totalMs !== null && hop.totalMs > 0
-}
-
-/** 该段占该跳总耗时的百分比宽度（比例 = `totalMs` 内占比） */
-function segPct(part: number | null, total: number | null): string {
-  if (part == null || total == null || total <= 0) return '0%'
-  return `${Math.max(0, Math.min(100, (part / total) * 100))}%`
-}
-
 function hopTotalText(hop: ChainHop): string {
   return hopRunning(hop) ? '—' : fmtMs(hop.totalMs)
 }
 
 /** 组件卸载（评估中心关闭）后停止写 ref——防写已卸载组件的警告 */
 let disposed = false
+
+// ─── R3 段瀑布（跳展开处：把「两段条」换成 11 段的时间轴）──────────────
+
+/** 段相位 → 配色分组（按 R2 §五 的段语义分组，不按段名硬编 11 种色） */
+const SPAN_PHASE: Record<string, string> = {
+  invoke_agent: 'llm',
+  'llm.chat': 'llm',
+  'dispatch.queue_wait': 'wait',
+  'dispatch.token_wait': 'wait',
+  'context.assemble': 'orch',
+  'context.compress': 'orch',
+  'memory.retrieval': 'retr',
+  'knowledge.retrieval': 'retr',
+  'reply.persist': 'pers',
+  'diff.collect': 'pers',
+  'git.auto_commit': 'pers',
+}
+
+/** 段名说明（悬停段名时出）。闭集 11 条，与 R2 §五 同源 */
+const SEG_DOC: Record<string, string> = {
+  invoke_agent: '根段。一次完整执行的全程——从调度器接手到收尾。执行总时长只认它。',
+  'dispatch.queue_wait':
+    '槽位 FIFO 排队。消息在猫的队列里等前面任务做完的时间。窗口在本次执行开始之前，不计入本次执行。',
+  'dispatch.token_wait': 'token 池等待。ProviderTokenPool 配额已满时的阻塞时间。',
+  'context.assemble': '上下文构建。取最近消息 / 任务历史 / 相关消息，拼出本轮 prompt。',
+  'context.compress': '摘要压缩 + token 感知软截断。超预算时把旧消息压成摘要。',
+  'memory.retrieval': '记忆混合检索（向量 + 关键词 RRF）。明细落在 retrieval_events 三表。',
+  'knowledge.retrieval': '知识库检索。命中的区块按查询注入 system prompt。',
+  'llm.chat': '模型流式生成。含首字延迟 ttft。明细落在 span_llm。',
+  'diff.collect': '采集本轮 commit 的 diff（5s 超时）。在关键路径上 await。',
+  'reply.persist': '回复落库。写入 messages 表。',
+  'git.auto_commit':
+    '顶层 auto-commit（3 次 execSync，阻塞整个事件循环）。轮次段——时间窗在根段之外。',
+}
+
+/** 字段说明：**只讲真展示在前端的字段**（用户原话「没有展示在前端上的字段，就不用描述了」）。
+ *  后端有、界面无的（`item_count` / `operation_name` / `stream` / `max_tokens` …）不在此列。 */
+interface FieldDoc {
+  key: string
+  name: string
+  desc: string
+}
+const FIELD_DOCS: FieldDoc[] = [
+  {
+    key: 'duration',
+    name: '耗时',
+    desc: '该段自己的耗时。总时长的权威是根段 invoke_agent——段是嵌套的，子段之和会超过它，不能加总。',
+  },
+  {
+    key: 'status',
+    name: '状态',
+    desc: 'ok / error / timeout / skipped。只有非 ok 才挂徽章；红条 = 该段失败或超时。',
+  },
+  {
+    key: 'ttft',
+    name: '首字',
+    desc: '首个 chunk 的延迟，只在 llm.chat 段上有（来自 span_llm.ttft_ms）。',
+  },
+]
+
+/** 轴外段的友好名（起点早于根段 / 终点晚于根段，硬画会溢出轴） */
+const OUTSIDE_LABELS: Record<string, string> = {
+  'dispatch.queue_wait': '排队等待',
+  'git.auto_commit': 'auto-commit',
+}
+
+interface WfRow {
+  key: string
+  name: string
+  isRoot: boolean
+  phase: string
+  /** 相对轴起点（根段 `start_at`）的百分比——**这就是几何量本身**，不是样式糖 */
+  leftPct: number
+  widthPct: number
+  durationMs: number
+  sharePct: string
+  status: string
+  bad: boolean
+  ttftText: string | null
+}
+
+interface WfOutside {
+  key: string
+  text: string
+}
+
+interface Waterfall {
+  /** 横轴总长 = 根段 `duration_ms`（**禁止加总子段**：段嵌套，实测 2.0× / 1.6× / 3.0×） */
+  axisMs: number
+  rows: WfRow[]
+  /** 轴外段：不进瀑布、不计总时长，只作单行文字标注 */
+  outside: WfOutside[]
+}
+
+/** 占轴长的百分比（≥10% 保留 1 位，小段保留 2 位——小段的差别全在小数位） */
+function sharePct(part: number, total: number): string {
+  if (total <= 0) return '—'
+  const p = (part / total) * 100
+  return `${p.toFixed(p >= 10 ? 1 : 2)}%`
+}
+
+/** 段 → 瀑布。**纯函数**：几何全部可复算，测试据此断言，不必依赖 DOM 布局引擎。 */
+function buildWaterfall(spans: SpanDto[]): Waterfall | null {
+  // 根段 = `invoke_agent`（R2：一次执行恰一根，`parent_span_id` 恒 NULL）。
+  // **按名优先**、再回落 NULL 判定：若将来有段被错挂成 NULL 父，纯 `find(NULL)`
+  // 会逮到它当根 —— 轴起点与轴长一起错位，瀑布只剩那一行**且不报错**（静默）。
+  // 真实库佐证：`parent_span_id IS NULL` 的段只有 `invoke_agent`（61/61）。
+  const root =
+    spans.find((s) => s.parent_span_id === null && s.name === 'invoke_agent') ??
+    spans.find((s) => s.parent_span_id === null)
+  if (!root) return null
+  const rootStart = Date.parse(root.start_at)
+  const axisMs = root.duration_ms
+  if (Number.isNaN(rootStart) || axisMs <= 0) return null
+  const rootEnd = rootStart + axisMs
+
+  // 时间序：按 `start_at` 升序（`id` 兜底同刻段）。**本组件自己排**，不继承上游顺序——
+  // 「时间序」是排查读法的前提（先看哪一步坏），不是可以靠对方保证的巧合。
+  const ordered = [...spans].sort(
+    (a, b) => Date.parse(a.start_at) - Date.parse(b.start_at) || a.id - b.id
+  )
+
+  const rows: WfRow[] = []
+  const outside: WfOutside[] = []
+  for (const s of ordered) {
+    const start = Date.parse(s.start_at)
+    if (Number.isNaN(start)) continue
+    const end = start + s.duration_ms
+    // 轴外 = 起点早于根段 **或** 终点晚于根段。
+    // ⚠️ 轴的起点**必须**取根段 `start_at`，严禁 `min(start_at)`——那会把排队段拉进轴内。
+    if (start < rootStart || end > rootEnd) {
+      outside.push({
+        key: s.span_id,
+        text: `${OUTSIDE_LABELS[s.name] || s.name} ${fmtMs(s.duration_ms)}（不计入本次执行）`,
+      })
+      continue
+    }
+    rows.push({
+      key: s.span_id,
+      name: s.name,
+      isRoot: s.parent_span_id === null,
+      phase: SPAN_PHASE[s.name] || 'orch',
+      leftPct: ((start - rootStart) / axisMs) * 100,
+      widthPct: (s.duration_ms / axisMs) * 100,
+      durationMs: s.duration_ms,
+      sharePct: sharePct(s.duration_ms, axisMs),
+      status: s.status,
+      bad: s.status === 'error' || s.status === 'timeout',
+      ttftText: s.llm?.ttftMs == null ? null : fmtMs(s.llm.ttftMs),
+    })
+  }
+  return { axisMs, rows, outside }
+}
+
+/** 按执行缓存瀑布。**未到达的执行不进表**——据此把「还在加载 / 加载失败」与
+ *  「到了但是空数组（存量行）」区分开，两者文案不同（null ≠ 0 同款判据）。 */
+const waterfalls = computed<Record<string, Waterfall>>(() => {
+  const out: Record<string, Waterfall> = {}
+  for (const [execId, spans] of Object.entries(spansByExec.value)) {
+    const wf = buildWaterfall(spans)
+    if (wf) out[execId] = wf
+  }
+  return out
+})
+
+/** 拉一次执行的段。已缓存 / 在途则不重发（同跳反复展开收起不刷屏） */
+async function loadSpans(executionLogId: string): Promise<void> {
+  if (spansByExec.value[executionLogId] || spanLoading.value[executionLogId]) return
+  spanLoading.value[executionLogId] = true
+  spanError.value[executionLogId] = ''
+  try {
+    const res = await api.getEvalSpans(executionLogId)
+    if (disposed) return
+    spansByExec.value[executionLogId] = res.spans
+  } catch (err: any) {
+    if (!disposed) spanError.value[executionLogId] = err.message || '段数据加载失败'
+  } finally {
+    if (!disposed) spanLoading.value[executionLogId] = false
+  }
+}
+
+/** 展开一条链时批量拉它各跳的段。**在飞的跳跳过**——R2 一次执行一事务、`finalizeRun`
+ *  才写，跑着的执行库里必然零段行，查了也是空；文案由 `hopRunning` 给，不必白跑一趟。 */
+function loadSpansForGroup(g: ChainGroup): void {
+  for (const h of g.hops) {
+    if (!hopRunning(h)) void loadSpans(h.executionLogId)
+  }
+}
+
+// ─── 悬浮说明：自绘浮层（**不用原生 `title`**）──────────────────
+// 原生 `title` 撑不起多字段排版、延迟约 1s、且贴不到「段名」上（R3 架构裁决 1）。
+interface Tip {
+  title: string
+  body: string
+}
+const tip = ref<Tip | null>(null)
+const tipPos = ref<{ left: number; top: number } | null>(null)
+const tipEl = ref<HTMLElement | null>(null)
+
+function hideTip(): void {
+  tip.value = null
+  tipPos.value = null
+}
+
+/**
+ * 定位：**贴名字**——右侧、水平小间隙（6px）、垂直居中于名字。
+ *
+ * 「不得遮挡该段数值读数」靠**右边界硬约束**实现：行内数值块（`.wf-nums`）的左沿
+ * 就是浮层能到的最远处，够不到就一定不遮。右侧塞不下时，行内场景落到名字正下方，
+ * 表头场景（无数值块）翻到名字左侧。
+ */
+function positionTip(anchor: HTMLElement): void {
+  const el = tipEl.value
+  if (!el) return
+  const GAP = 6
+  const r = anchor.getBoundingClientRect()
+  const t = el.getBoundingClientRect()
+  const nums = anchor.closest('.wf-row')?.querySelector('.wf-nums')
+  const rightLimit = (nums ? nums.getBoundingClientRect().left : window.innerWidth) - GAP
+  let left = r.right + GAP
+  let top = r.top + r.height / 2 - t.height / 2
+  if (left + t.width > rightLimit) {
+    if (nums) {
+      left = r.left
+      top = r.bottom + GAP
+    } else {
+      left = r.left - t.width - GAP
+    }
+  }
+  tipPos.value = {
+    left: Math.max(8, left),
+    top: Math.max(8, Math.min(top, window.innerHeight - t.height - 8)),
+  }
+}
+
+async function showTip(content: Tip, anchor: HTMLElement): Promise<void> {
+  tip.value = content
+  tipPos.value = null // 先渲染但透明（`.is-placing`）——不渲染就量不出尺寸，定位无从谈起
+  await nextTick()
+  positionTip(anchor)
+}
+
+function onFieldTip(doc: FieldDoc, ev: MouseEvent): void {
+  void showTip({ title: doc.name, body: doc.desc }, ev.currentTarget as HTMLElement)
+}
+
+/** 命中区 = **段名元素本身**（用户明确要求）。事件只挂在 `.wf-name` 上——
+ *  段身（条）/整行/空白都不触发，模板里没有第二个 handler。 */
+function onSegTip(name: string, ev: MouseEvent): void {
+  void showTip(
+    { title: name, body: SEG_DOC[name] || '（未登记的段名）' },
+    ev.currentTarget as HTMLElement
+  )
+}
 
 // ─── 任务结局（E2/E3 规格 §4：U 根任务结局 7 类全集）─────────
 const OUTCOME_LABELS: Record<string, string> = {
@@ -577,7 +830,7 @@ onUnmounted(() => {
                 <button
                   class="chain-head"
                   :aria-expanded="isExpanded(g.key)"
-                  @click="toggleChain(g.key)"
+                  @click="toggleChain(g)"
                 >
                   <span class="chain-caret">{{ isExpanded(g.key) ? '▾' : '▸' }}</span>
                   <template v-if="g.orphan">
@@ -613,31 +866,93 @@ onUnmounted(() => {
                       <span v-if="h.errorType" class="hop-err">{{ h.errorType }}</span>
                     </div>
                     <div class="hop-body">
-                      <div class="hop-bar" :title="`总耗时 ${hopTotalText(h)}`">
-                        <template v-if="canSplit(h)">
-                          <div
-                            class="hop-seg seg-reply"
-                            :style="{ width: segPct(h.replyMs, h.totalMs) }"
-                            :title="`回复生成段 ${fmtMs(h.replyMs)}`"
-                          ></div>
-                          <div
-                            class="hop-seg seg-nonreply"
-                            :style="{ width: segPct(h.nonReplyMs, h.totalMs) }"
-                            :title="`非回复段 ${fmtMs(h.nonReplyMs)}`"
-                          ></div>
-                        </template>
-                        <div v-else class="hop-seg seg-nodata" title="耗时拆分无数据"></div>
+                      <div class="hop-sum">
+                        <span class="hop-dur">总 {{ hopTotalText(h) }}</span>
+                        <span v-if="h.segmentClamped" class="hop-clamp">秒级舍入</span>
                       </div>
-                      <span class="hop-dur">
-                        <template v-if="canSplit(h)">
-                          总 {{ hopTotalText(h) }} · 回复生成段 {{ fmtMs(h.replyMs) }} · 非回复段
-                          {{ fmtMs(h.nonReplyMs) }}
-                        </template>
-                        <template v-else>
-                          总 {{ hopTotalText(h) }} · <span class="hop-nodata">耗时拆分无数据</span>
-                        </template>
-                      </span>
-                      <span v-if="h.segmentClamped" class="hop-clamp">秒级舍入</span>
+
+                      <!-- 在飞：R2 一次执行一事务、收尾才落库 ⇒ 跑着的执行查出来必然空。
+                           文案与「有耗时但无段」（存量行）**分开** —— null ≠ 0。 -->
+                      <div v-if="hopRunning(h)" class="wf-nodata">进行中 · 段未落库</div>
+                      <div v-else-if="spanLoading[h.executionLogId]" class="wf-nodata">
+                        段数据加载中…
+                      </div>
+                      <div v-else-if="spanError[h.executionLogId]" class="wf-err">
+                        段数据加载失败：{{ spanError[h.executionLogId] }}
+                      </div>
+                      <div v-else-if="!waterfalls[h.executionLogId]" class="wf-nodata">
+                        无段数据（存量行）
+                      </div>
+
+                      <div v-else class="wf">
+                        <div class="wf-head">
+                          <span class="wf-title">执行 trace</span>
+                          <span class="wf-total">
+                            总 {{ fmtMs(waterfalls[h.executionLogId].axisMs) }}
+                          </span>
+                          <span class="wf-legend">
+                            <span
+                              v-for="d in FIELD_DOCS"
+                              :key="d.key"
+                              class="wf-lg"
+                              @mouseenter="onFieldTip(d, $event)"
+                              @mouseleave="hideTip()"
+                            >
+                              {{ d.name }}<span class="info-btn">ⓘ</span>
+                            </span>
+                          </span>
+                        </div>
+
+                        <div class="wf-rows">
+                          <div
+                            v-for="r in waterfalls[h.executionLogId].rows"
+                            :key="r.key"
+                            class="wf-row"
+                          >
+                            <!-- 命中区 = 段名文本本身（含色点），不是整行/段身：
+                                 浮层只在移到名字上时出 —— 这是用户本轮点名的验收点 -->
+                            <span class="wf-name">
+                              <span
+                                class="wf-name-hit"
+                                @mouseenter="onSegTip(r.name, $event)"
+                                @mouseleave="hideTip()"
+                              >
+                                <span class="wf-dot" :class="`ph-${r.phase}`"></span>{{ r.name }}
+                              </span>
+                            </span>
+                            <span class="wf-track">
+                              <span
+                                class="wf-bar"
+                                :class="[
+                                  `ph-${r.phase}`,
+                                  { 'bar-bad': r.bad, 'bar-root': r.isRoot },
+                                ]"
+                                :style="{ left: `${r.leftPct}%`, width: `${r.widthPct}%` }"
+                              ></span>
+                            </span>
+                            <span class="wf-nums">
+                              <span v-if="r.bad" class="wf-badge">{{ r.status }}</span>
+                              <span v-if="r.ttftText" class="wf-ttft">首字 {{ r.ttftText }}</span>
+                              <span class="wf-dur">{{ fmtMs(r.durationMs) }}</span>
+                              <span class="wf-share">{{ r.sharePct }}</span>
+                            </span>
+                          </div>
+                        </div>
+
+                        <!-- 轴外段：起点早于根段（排队等的是上一个 trace）/ 终点晚于根段
+                             （git.auto_commit 是轮次段）——不进瀑布、不计总时长，只作单行标注 -->
+                        <div
+                          v-for="o in waterfalls[h.executionLogId].outside"
+                          :key="o.key"
+                          class="wf-outside"
+                        >
+                          {{ o.text }}
+                        </div>
+
+                        <div class="wf-foot">
+                          总时长只认根段 invoke_agent；段是嵌套的，子段之和会超过它。
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -646,6 +961,20 @@ onUnmounted(() => {
           </div>
         </template>
       </template>
+    </div>
+
+    <!-- 悬浮说明浮层：挂在视图根上（`position: fixed` 相对视口定位）。
+         `.is-placing` 期间透明但**已渲染**——不渲染量不出宽高，定位就无从谈起。 -->
+    <div
+      v-if="tip"
+      ref="tipEl"
+      class="span-tip"
+      :class="{ 'is-placing': !tipPos }"
+      :style="tipPos ? { left: `${tipPos.left}px`, top: `${tipPos.top}px` } : undefined"
+      role="tooltip"
+    >
+      <div class="tip-h">{{ tip.title }}</div>
+      <div class="tip-b">{{ tip.body }}</div>
     </div>
   </div>
 </template>
@@ -1451,42 +1780,15 @@ onUnmounted(() => {
 
 .hop-body {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.hop-bar {
-  flex: 1;
-  min-width: 140px;
-  height: 10px;
-  display: flex;
-  border-radius: 999px;
-  overflow: hidden;
-  background: var(--bg-surface);
-}
-
-.hop-seg {
-  height: 100%;
-}
-
-.seg-reply {
-  background: #3ecf8e;
-}
-
-.seg-nonreply {
-  background: #6b7a8f;
-}
-
-/* 拆分缺失（replyMs 为 null）：斜纹灰条**占满整条**，绝不画成 0 长度——
- *  文案「耗时拆分无数据」放在条旁边的 .hop-nodata（10px 高的条里塞不下 9px 字） */
-.seg-nodata {
+  flex-direction: column;
+  gap: 6px;
   width: 100%;
-  background: repeating-linear-gradient(
-    45deg,
-    rgba(107, 122, 143, 0.45) 0 4px,
-    rgba(107, 122, 143, 0.15) 4px 8px
-  );
+}
+
+.hop-sum {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .hop-dur {
@@ -1495,15 +1797,240 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.hop-nodata {
-  color: var(--text-muted);
-}
-
 .hop-clamp {
   font-size: 10px;
   color: var(--text-muted);
   border: 1px dashed var(--border-default);
   border-radius: 999px;
   padding: 1px 7px;
+}
+
+/* ─── R3 段瀑布 ───────────────────────────
+   每条段一行（Gantt 式）：行序 = 时间序，行内条按「相对根段起点的偏移」定位、
+   宽度 = 该段耗时 ÷ 根段耗时。**轴长只认根段**——段是嵌套的，子段之和会超过轴长。 */
+
+.wf {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.wf-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.wf-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wf-total {
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+/* ⓘ 字段说明触发区 */
+.wf-lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-muted);
+  cursor: help;
+}
+
+.info-btn {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.wf-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.wf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 段名列定宽（各行对齐），但**命中区只有文本本身**——.wf-name-hit 收缩包裹，
+   段名右侧的留白不触发浮层（R3 §B7 的反例就靠这条） */
+.wf-name {
+  width: 172px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.wf-name-hit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.wf-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.wf-track {
+  flex: 1;
+  min-width: 120px;
+  height: 9px;
+  position: relative;
+  background: var(--bg-surface);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.wf-bar {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 2px;
+  /* 0ms 段（token_wait / reply.persist 实测常见）仍要看得见——
+     给个像素下限；非退化段不受影响，宽度语义仍是 duration ÷ 轴长 */
+  min-width: 2px;
+}
+
+.wf-nums {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-ttft {
+  color: var(--text-muted);
+}
+
+.wf-dur {
+  min-width: 54px;
+  text-align: right;
+  color: var(--text-secondary);
+}
+
+.wf-share {
+  min-width: 54px;
+  text-align: right;
+  color: var(--text-muted);
+}
+
+.wf-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-red);
+  background: rgba(224, 85, 106, 0.12);
+  border: 1px solid rgba(224, 85, 106, 0.3);
+  border-radius: 999px;
+  padding: 0 7px;
+}
+
+/* 段相位配色（按 R2 §五 的语义分组，不按段名硬编 11 色） */
+.ph-wait {
+  background: #6b7a8f;
+}
+
+.ph-orch {
+  background: #8a7bd8;
+}
+
+.ph-retr {
+  background: #4aa8e0;
+}
+
+.ph-llm {
+  background: #3ecf8e;
+}
+
+.ph-pers {
+  background: #d8a24a;
+}
+
+/* 失败 / 超时压过相位色——必须排在 .ph-* 之后，否则同特异度下被盖掉 */
+.bar-bad {
+  background: #e0556a;
+}
+
+/* 根段描边：一眼认出「总时长的那一条」 */
+.bar-root {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+/* 轴外段：不进瀑布、不计总时长，单行文字标注 */
+.wf-outside {
+  font-size: 10px;
+  color: var(--text-muted);
+  padding-left: 180px;
+}
+
+.wf-foot {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.wf-nodata {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.wf-err {
+  font-size: 11px;
+  color: var(--accent-red);
+}
+
+/* ─── 悬浮说明浮层（自绘，非原生 `title`）───────────────── */
+
+.span-tip {
+  position: fixed;
+  z-index: 10000;
+  max-width: 320px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  /* 不吃指针事件：否则浮层一出就截断 hover，自己把自己关掉（抖动） */
+  pointer-events: none;
+}
+
+.span-tip.is-placing {
+  opacity: 0;
+}
+
+.tip-h {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.tip-b {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-secondary);
 }
 </style>
