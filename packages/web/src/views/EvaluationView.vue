@@ -1914,11 +1914,16 @@ onUnmounted(() => {
   min-width: 2px;
 }
 
+/* **定宽**：数值列宽度若随内容变（llm.chat 行多一个「首字」徽章、失败行多一个状态徽章），
+   `flex: 1` 的 `.wf-track` 就被挤窄 ⇒ **各行轴宽不等，跨行位置不可比**。
+   真机实测：llm.chat 行轴 408px vs 其余 460px，极差 52px —— 同一时刻在两行里画在不同 x 上，
+   最大偏 12% 轴长，正好砸掉「时间序一眼看出卡在哪」。轴是**整条瀑布的属性，不是每行各自的**。 */
 .wf-nums {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
-  flex-shrink: 0;
+  flex: 0 0 200px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }

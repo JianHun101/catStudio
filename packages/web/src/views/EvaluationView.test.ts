@@ -584,6 +584,18 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     wrapper.unmount()
   })
 
+  it('B3 静态源：数值列定宽 ⇒ 各行轴宽一致（跨行位置可比）', () => {
+    // jsdom 无布局引擎，量不出轴宽——但**轴宽一致的充分条件**可静态钉死：段名列本就定宽
+    // （172px）、间隙定长，故轴宽只由数值列决定。数值列一随内容伸缩，`llm.chat` 行（多
+    // 一个「首字」）与失败行（多一个状态徽章）就会把 `flex: 1` 的轴挤窄。
+    // 真机实测（Chromium + 真库）：llm.chat 行轴 408px vs 其余 460px，极差 52px —— 同一时刻
+    // 在两行里画在不同 x 上，最大偏 12% 轴长，正好砸掉「时间序一眼看出卡在哪」。
+    const nums = /\.wf-nums\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    const track = /\.wf-track\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(track).toMatch(/flex:\s*1/) // 轴 = flex:1 的那一列
+    expect(nums).toMatch(/flex:\s*0\s+0\s+\d+px/) // 数值列**定宽**（不许随内容伸缩）
+  })
+
   it('B5：轴外段不进瀑布、不计总时长，只作独立单行标注', async () => {
     const wrapper = mount(EvaluationView)
     await flushPromises()
