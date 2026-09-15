@@ -51,3 +51,15 @@ live 已被 drop（失败即杀进程）⇒ 退到 lastSuccess 的握手端口�
 2. 不删断言、不放宽断言、不加 retry / 重试掩盖。
 3. 提交限定路径；开工前确认无并发实例（`git status` + `execution_logs` 同 agent 时间窗）。
 4. 本票**只动测试代码**——若根因在生产代码（如 `embedding-client.ts` 真有时序缺陷），**停下报店长**再定，不要顺手改生产逻辑。
+
+---
+
+## 四、根因已定位（2026-09-16，见 `finding-2026-09-16.md`）
+
+**不是时序竞态，是端口分配的确定性缺陷**：`listen(0)` 偶尔分到 WHATWG Fetch 的**禁用端口黑名单** ⇒ 服务真的在听（裸 TCP `CONNECT-OK`），但 `fetch` 在发请求前就被 undici 拒绝（`cause = "bad port"`，永不恢复）⇒ 重试路径吃满 `PROBE_TIMEOUT_MS` 30s ⇒ **撞穿 harness 10s 预算**。
+
+- **现场行号纠正**：真凶是 `:311`「重试有界」，**不是票面 §一 写的 `:864`**（`:864` 行号漂移）。同类失败另打到 `scripts/flywheel/scan.test.js`。
+- **复跑证据**：`node docs/run/flaky-precommit/probe7.mjs`（15 个黑名单端口 `bind: ok` + `bad port`；4 个对照端口 `FETCH-OK`）。
+- **上游触发**：`PROBE_TIMEOUT_MS`(30s) / `REQUEST_TIMEOUT_MS`(10s) **≥** harness 预算（server 10s / scripts 5s）——默认预算驱动重试路径的测试必然先红。
+
+**⚠️ 红线 4 已触发**：生产侧同病 —— `scripts/flywheel/embed-server.mjs:285` `listen(process.env.EMBED_SIDECAR_PORT || '0')` 同款 OS 分配，而主进程经 `fetch` 调用（`embedding-client.ts:554`）⇒ 命中即嵌入功能整体失败。**该修复**含 server 代码，**须另立单并报店长**，不在本票范围。
