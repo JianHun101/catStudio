@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="CatStudio — 多Agent AI对话平台，多只猫咪角色协作完成任务" />
-    <meta name="theme-color" content="#1b1815" />
+    <meta name="theme-color" content="#f8f4ed" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐱</text></svg>"
@@ -93,6 +93,10 @@
 
       /* ═══════════════════════════════════════════════
        Light Theme — warm cream tones, same cafe identity
+
+       ⚠️ 特异度陷阱：`:root` 与 `[data-theme='light']` 特异度**相同**（均 0,1,0），
+       浅色规则能生效**只靠源码顺序**——本块必须留在 `:root` 之后。
+       挪到前面 ⇒ 浅色变体整块被 `:root` 覆盖（默认浅色直接失效）。
        ═══════════════════════════════════════════════ */
 
       [data-theme='light'] {

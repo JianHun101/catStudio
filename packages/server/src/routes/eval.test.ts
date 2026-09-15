@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { v4 as uuid } from 'uuid'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
-import { setDb, resetDb, getDb } from '../db/index.js'
+import { setDb, resetDb, getDb, initDb } from '../db/index.js'
 import {
   initRepository,
   agents as agentsRepo,
@@ -9,7 +9,9 @@ import {
   messages as messagesRepo,
   evalScores as evalScoresRepo,
   userFeedback as userFeedbackRepo,
+  spans as spansRepo,
 } from '../db/repository/index.js'
+import type { SpanInput } from '../db/repository/index.js'
 import { evalRoutes } from './eval.js'
 import { getLogLevel, setLogLevel } from '../logger.js'
 import type { FastifyInstance } from 'fastify'
@@ -604,6 +606,213 @@ describe('Eval Routes', () => {
       expect(chain.spanMs).toBe(60000)
       expect(chain.startedAt).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/) // 无时区后缀 = 未经转换
       expect(chain.hopCount).toBe(1)
+    })
+  })
+
+  describe('GET /api/eval/spans（R3 段分解时间轴）', () => {
+    // `test-helpers.ts` 的 SCHEMA_SQL 不含 spans / span_llm 两表（R2 的测试自建）。
+    // 走**真实 additive 迁移**建表，而不是手搓 DDL——手搓等于把「被判面」抄一遍，
+    // 迁移改了这里不同步也照样绿（同 chunks.test.ts 结论）。
+    beforeEach(() => {
+      initDb()
+    })
+
+    const T0 = Date.parse('2026-09-15T10:00:00.000Z')
+    /** 相对 T0 的毫秒偏移 → ISO 毫秒 UTC（与 R2 `start_at` 列同形） */
+    const iso = (offsetMs: number) => new Date(T0 + offsetMs).toISOString()
+
+    function span(over: Partial<SpanInput> & { spanId: string; name: string }): SpanInput {
+      return {
+        parentSpanId: null,
+        chainId: 'chain-1',
+        executionId: 'exec-1',
+        sessionId: null,
+        agentId: null,
+        operationName: null,
+        startAt: iso(0),
+        durationMs: 0,
+        status: 'ok',
+        errorType: null,
+        errorMessage: null,
+        itemCount: null,
+        llm: null,
+        ...over,
+      }
+    }
+
+    /** 落一次执行的段——走**真实写口** `insertExecTrace`（拓扑序 / 事务 / FK 都用真的） */
+    function seedTrace(rows: SpanInput[]): void {
+      expect(spansRepo.insertExecTrace(rows)).toBe(true)
+    }
+
+    /** 真实库里一次执行的几何（实测自 `cat-study-dev.db`：排队段起点为负偏移） */
+    function seedRealisticTrace(): void {
+      seedTrace([
+        span({
+          spanId: 'sp-qw',
+          name: 'dispatch.queue_wait',
+          startAt: iso(-109330),
+          durationMs: 109330,
+        }),
+        span({ spanId: 'sp-root', name: 'invoke_agent', startAt: iso(0), durationMs: 60810 }),
+        span({
+          spanId: 'sp-cta',
+          parentSpanId: 'sp-root',
+          name: 'context.assemble',
+          startAt: iso(1),
+          durationMs: 15,
+          itemCount: 5,
+        }),
+        span({
+          spanId: 'sp-llm',
+          parentSpanId: 'sp-root',
+          name: 'llm.chat',
+          operationName: 'chat',
+          startAt: iso(3005),
+          durationMs: 57752,
+          llm: {
+            provider: 'deepseek',
+            model: 'deepseek-v4-flash',
+            inputTokens: 1234,
+            outputTokens: 567,
+            ttftMs: 2980,
+            stream: true,
+            maxTokens: 2048,
+          },
+        }),
+        span({
+          spanId: 'sp-rp',
+          parentSpanId: 'sp-root',
+          name: 'reply.persist',
+          startAt: iso(60757),
+          durationMs: 0,
+        }),
+      ])
+    }
+
+    /** B1：N 段原样返回 + 升序 + `llm.chat` 带详情 + 非 LLM 段恒 null */
+    it('B1：一次执行的 N 段命中 N 条、按 start_at 升序、llm 内联且非 llm.chat 恒 null', async () => {
+      seedRealisticTrace()
+
+      const res = await app.inject({ method: 'GET', url: '/api/eval/spans?execution_id=exec-1' })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+
+      expect(body.ok).toBe(true)
+      expect(body.spans).toHaveLength(5)
+      // 升序 = 时间序（`ORDER BY start_at, id` 归 repo，路由不得重排）
+      expect(body.spans.map((s: any) => s.name)).toEqual([
+        'dispatch.queue_wait',
+        'invoke_agent',
+        'context.assemble',
+        'llm.chat',
+        'reply.persist',
+      ])
+
+      // snake_case 原样出（前端直接消费 DB 行，随 eval 面既有惯例）
+      const root = body.spans.find((s: any) => s.name === 'invoke_agent')
+      expect(root).toHaveProperty('span_id', 'sp-root')
+      expect(root).toHaveProperty('duration_ms', 60810)
+      expect(root.parent_span_id).toBeNull()
+
+      // llm 内联：只有 llm.chat 有；形状按 LlmSpanDetail（camelCase），不是 DB 列名
+      const llm = body.spans.find((s: any) => s.name === 'llm.chat')
+      expect(llm.llm).toEqual({
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        inputTokens: 1234,
+        outputTokens: 567,
+        ttftMs: 2980,
+        stream: true,
+        maxTokens: 2048,
+      })
+      for (const s of body.spans) {
+        if (s.name !== 'llm.chat') expect(s.llm).toBeNull()
+      }
+
+      // null ≠ 0：产不出「条数」的段是 null，不是 0
+      expect(root.item_count).toBeNull()
+      expect(body.spans.find((s: any) => s.name === 'context.assemble').item_count).toBe(5)
+    })
+
+    it('B1 续：同 start_at 的段按 id 升序（排序稳定，不随查询计划抖）', async () => {
+      seedTrace([
+        span({ spanId: 'sp-a', name: 'invoke_agent', startAt: iso(0), durationMs: 100 }),
+        span({ spanId: 'sp-b', parentSpanId: 'sp-a', name: 'context.assemble', startAt: iso(10) }),
+        span({ spanId: 'sp-c', parentSpanId: 'sp-a', name: 'context.compress', startAt: iso(10) }),
+      ])
+
+      const body = JSON.parse(
+        (await app.inject({ method: 'GET', url: '/api/eval/spans?execution_id=exec-1' })).body
+      )
+      expect(body.spans.map((s: any) => s.name)).toEqual([
+        'invoke_agent',
+        'context.assemble',
+        'context.compress',
+      ])
+    })
+
+    /** B2：空数组是合法响应（不是 404）；缺参才是 400 */
+    it('B2：execution_id 不存在 → 200 + spans: []（不是 404）；缺参 / 空参 → 400', async () => {
+      const unknown = await app.inject({
+        method: 'GET',
+        url: '/api/eval/spans?execution_id=no-such-exec',
+      })
+      expect(unknown.statusCode).toBe(200)
+      expect(JSON.parse(unknown.body)).toEqual({ ok: true, spans: [] })
+
+      const missing = await app.inject({ method: 'GET', url: '/api/eval/spans' })
+      expect(missing.statusCode).toBe(400)
+      expect(JSON.parse(missing.body).error).toBe('execution_id is required')
+
+      const empty = await app.inject({ method: 'GET', url: '/api/eval/spans?execution_id=' })
+      expect(empty.statusCode).toBe(400)
+    })
+
+    it('B2 续：「执行存在但未落段」（running / 存量行）同样是 200 + []，与「id 不存在」不可区分', async () => {
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      getDb()
+        .prepare(
+          `INSERT INTO execution_logs
+             (id, session_id, agent_id, triggered_by_message_id, status, trace_id,
+              started_at, ended_at, latency_ms)
+           VALUES ('exec-no-spans', ?, ?, 'trig-x', 'completed', 'tr',
+                   datetime('now'), datetime('now'), 1000)`
+        )
+        .run(sid, a)
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/eval/spans?execution_id=exec-no-spans',
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body).spans).toEqual([])
+    })
+
+    it('只读：连查两次结果一致，且不写任何表', async () => {
+      seedRealisticTrace()
+      const before = getDb().prepare('SELECT COUNT(*) c FROM spans').get() as { c: number }
+
+      const first = await app.inject({ method: 'GET', url: '/api/eval/spans?execution_id=exec-1' })
+      const second = await app.inject({ method: 'GET', url: '/api/eval/spans?execution_id=exec-1' })
+
+      expect(second.body).toBe(first.body)
+      const after = getDb().prepare('SELECT COUNT(*) c FROM spans').get() as { c: number }
+      expect(after.c).toBe(before.c)
+    })
+
+    it('另一执行的段不会串进来（按 execution_id 分组，不是全表）', async () => {
+      seedRealisticTrace()
+      seedTrace([
+        span({ spanId: 'sp-x-root', name: 'invoke_agent', executionId: 'exec-2', durationMs: 1 }),
+      ])
+
+      const body = JSON.parse(
+        (await app.inject({ method: 'GET', url: '/api/eval/spans?execution_id=exec-2' })).body
+      )
+      expect(body.spans).toHaveLength(1)
+      expect(body.spans[0].span_id).toBe('sp-x-root')
     })
   })
 })

@@ -1,0 +1,2703 @@
+<!doctype html>
+<!-- data-theme='light' 预置在 <html> 上：默认浅色。
+     注意 :root 与 [data-theme='light'] 特异度相同（都是 0,1,0），
+     靠源码顺序决胜负——[data-theme] 块必须在 :root 之后，这个默认才成立。 -->
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <title>R3 原型 v2 — 弱化卡片 + 方案A 内联展开 + 头像设置 + 评估页查询表单</title>
+    <style>
+      /* ═══════════════════════════════════════════════════════════
+         令牌：逐字照抄 packages/web/index.html（含票 H 的提亮与三个新令牌）
+         ═══════════════════════════════════════════════════════════ */
+      :root {
+        /* 原生控件按深色渲染 —— 这是「深色下日期图标不可见」的正解：
+           浏览器默认按 light 画 ::-webkit-calendar-picker-indicator（黑图标），
+           落在深底上就看不见；color-scheme 一改，图标随主题自动转白，无需 filter */
+        color-scheme: dark;
+        --bg-deep: #14110e;
+        --bg-base: #1b1815;
+        --bg-surface: #231f1b;
+        --bg-hover: #2c2722;
+        --bg-raised: #312b25;
+        --border-subtle: #292420;
+        --border-default: #3a332c;
+        --border-table: #5c4a3b;
+        --border-focus: #b08968;
+        --text-primary: #e6ddd0;
+        --text-secondary: #a0988e;
+        --text-muted: #989287; /* 票 H 提亮 */
+        --text-muted-frozen: #6b655c; /* 票 H 冻结位 */
+        --accent: #d4a574;
+        --accent-text: #d4a574; /* 票 H：accent 当文字色 */
+        --text-on-accent: #14110e; /* 票 H：accent 实底前景 */
+        --accent-soft: rgba(212, 165, 116, 0.15);
+        --accent-tint: rgba(212, 165, 116, 0.06);
+        --accent-hover: #e0b98c;
+        --accent-pink: #d4849a;
+        --accent-red: #e0556a;
+        --accent-green: #7eb899;
+        --accent-yellow: #d4a854;
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
+        --font-sans:
+          'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+        --font-mono: 'JetBrains Mono', 'Consolas', 'Cascadia Code', monospace;
+        --ease-out: 0.15s ease-out;
+      }
+      [data-theme='light'] {
+        color-scheme: light; /* 浅色主题下图标回黑，同一份 CSS 两侧都对 */
+        --bg-deep: #f8f4ed;
+        --bg-base: #efe8dd;
+        --bg-surface: #ffffff;
+        --bg-hover: #e8dfd2;
+        --bg-raised: #f5efe5;
+        --border-subtle: #e0d6c7;
+        --border-default: #d4c8b2;
+        --border-table: #c4b69c;
+        --text-primary: #3c3028;
+        --text-secondary: #6b5c4a;
+        --text-muted: #706153;
+        --text-muted-frozen: #a09080;
+        --accent: #c89060;
+        --accent-text: #87572f;
+        --text-on-accent: #3c3028;
+        --accent-soft: rgba(180, 130, 80, 0.12);
+        --accent-tint: rgba(180, 130, 80, 0.06);
+        --accent-hover: #b07840;
+        --accent-pink: #c47088;
+        --accent-red: #d04458;
+        --accent-green: #5a8f6e;
+        --accent-yellow: #c89840;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.5;
+        color: var(--text-primary);
+        background: var(--bg-deep);
+        padding: 0 0 60px;
+      }
+
+      /* ─── 原型外壳（非产品 UI，只为旁白/切换）─── */
+      .shell {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 24px 20px 0;
+      }
+      .shell h1 {
+        font-size: 17px;
+        font-weight: 700;
+        margin-bottom: 4px;
+      }
+      .shell .sub {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 16px;
+        line-height: 1.7;
+      }
+      .shell .sub code {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--accent-text);
+      }
+      .bar {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-bottom: 18px;
+      }
+      .bar .spacer {
+        flex: 1;
+      }
+      .nav-btn,
+      .tgl-btn {
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        padding: 6px 13px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-default);
+        background: var(--bg-surface);
+        color: var(--text-secondary);
+        transition: all var(--ease-out);
+      }
+      .nav-btn:hover,
+      .tgl-btn:hover {
+        color: var(--text-primary);
+        border-color: var(--border-focus);
+      }
+      .nav-btn.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--text-on-accent);
+        font-weight: 600;
+      }
+      .tgl-btn.on {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent-text);
+      }
+
+      .screen {
+        display: none;
+      }
+      .screen.active {
+        display: block;
+      }
+      .screen-title {
+        font-size: 14px;
+        font-weight: 700;
+        margin: 26px 0 4px;
+      }
+      .screen-desc {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 14px;
+        line-height: 1.7;
+      }
+      .screen-desc b {
+        color: var(--text-secondary);
+      }
+      .note {
+        font-size: 11.5px;
+        line-height: 1.75;
+        color: var(--text-secondary);
+        background: var(--accent-tint);
+        border: 1px solid var(--accent-hint-border, rgba(212, 165, 116, 0.12));
+        border-left: 2px solid var(--accent);
+        border-radius: var(--radius-sm);
+        padding: 9px 12px;
+        margin: 12px 0;
+      }
+      .note.warn {
+        background: rgba(224, 85, 106, 0.07);
+        border-left-color: var(--accent-red);
+        border-color: rgba(224, 85, 106, 0.2);
+      }
+      .note b {
+        color: var(--text-primary);
+      }
+      .row {
+        display: flex;
+        gap: 26px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+
+      /* ═══════════════════════════════════════════════════════════
+         右侧面板 —— 骨架逐字照抄 SessionAgentsPanel.vue <style scoped>
+         真实列宽 300px（App.vue 网格），padding 14/12/16，可用内容宽 275px
+         ═══════════════════════════════════════════════════════════ */
+      .panel-col {
+        width: 300px;
+        flex-shrink: 0;
+        background: var(--bg-base);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+      }
+      .panel-col-head {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        padding: 7px 12px;
+        border-bottom: 1px solid var(--border-subtle);
+        background: var(--bg-deep);
+        display: flex;
+        justify-content: space-between;
+      }
+      .session-agents-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        height: 100%;
+        overflow-y: auto;
+        padding: 14px 12px 16px;
+      }
+
+      /* 统计计数卡 */
+      .stat-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-around;
+        padding: 12px 8px;
+        background: var(--bg-base);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+      }
+      .stat-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        flex: 1;
+      }
+      .stat-value {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+        line-height: 1.2;
+      }
+      .stat-label {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+      .stat-divider {
+        width: 1px;
+        height: 28px;
+        background: var(--border-subtle);
+      }
+
+      /* 分区标题 */
+      .section-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        padding: 4px 2px 0;
+      }
+
+      /* ─── 成员卡：现状（弱化前）逐字复刻 ─── */
+      .member-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .member-card {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+      }
+      .member-avatar {
+        font-size: 26px;
+        flex-shrink: 0;
+        line-height: 1;
+      }
+      .member-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .member-top {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .member-name {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .dot-idle {
+        background: var(--text-muted);
+      }
+      .dot-busy {
+        background: var(--accent-yellow);
+        animation: status-pulse 2s infinite;
+      }
+      @keyframes status-pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+      .member-status {
+        font-size: 10px;
+        color: var(--text-muted);
+        margin-left: auto;
+      }
+      .member-meta {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 4px;
+      }
+      .member-tokens {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+      }
+      .member-tokens-label {
+        font-size: 9px;
+        color: var(--text-muted-frozen);
+        opacity: 0.7;
+      }
+      .queue-badge {
+        margin-left: auto;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--accent-yellow);
+        background: rgba(212, 168, 84, 0.1);
+        border: 1px solid rgba(212, 168, 84, 0.3);
+        padding: 1px 7px;
+        border-radius: 999px;
+      }
+      .btn-remove {
+        flex-shrink: 0;
+        width: 22px;
+        height: 22px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 11px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .btn-remove:hover {
+        color: var(--accent-red);
+        background: rgba(224, 85, 106, 0.1);
+      }
+
+      /* ─── 成员卡：弱化后（v2 新增）─── */
+      .member-card.slim {
+        gap: 8px;
+        padding: 8px 10px;
+        cursor: pointer;
+        position: relative;
+        transition:
+          border-color var(--ease-out),
+          background var(--ease-out);
+      }
+      .member-card.slim:hover {
+        border-color: var(--border-default);
+      }
+      .member-card.slim.expanded {
+        border-color: var(--accent);
+        background: var(--accent-tint);
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+        border-bottom-color: transparent;
+      }
+      /* 头像 = 独立热区（点它开设置，不触发展开）*/
+      .avatar-btn {
+        flex-shrink: 0;
+        width: 30px;
+        height: 30px;
+        border: none;
+        background: transparent;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 22px;
+        line-height: 1;
+        padding: 0;
+        transition: all var(--ease-out);
+        margin: -2px 0;
+      }
+      .avatar-btn:hover {
+        background: var(--accent-soft);
+        box-shadow: 0 0 0 1px var(--border-focus) inset;
+      }
+      .slim-name {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+      .slim-right {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .slim-tokens {
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .slim-chev {
+        font-size: 9px;
+        color: var(--text-muted);
+        transition: transform var(--ease-out);
+        flex-shrink: 0;
+        width: 9px;
+        text-align: center;
+      }
+      .member-card.slim.expanded .slim-chev {
+        transform: rotate(90deg);
+        color: var(--accent-text);
+      }
+
+      /* ─── 方案A：内联展开区（卡下方，手风琴单开）─── */
+      .trace-inline {
+        background: var(--bg-base);
+        border: 1px solid var(--accent);
+        border-top: none;
+        border-radius: 0 0 var(--radius-md) var(--radius-md);
+        padding: 8px 10px 9px;
+        margin-top: -6px;
+      }
+      .ti-head {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        margin-bottom: 6px;
+      }
+      .ti-title {
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--accent-text);
+        letter-spacing: 0.3px;
+      }
+      .ti-total {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+        margin-left: auto;
+      }
+      .ti-status {
+        font-size: 9px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid;
+        letter-spacing: 0.2px;
+      }
+      .st-ok {
+        color: var(--accent-green);
+        border-color: rgba(126, 184, 153, 0.35);
+        background: rgba(126, 184, 153, 0.1);
+      }
+      .st-bad {
+        color: var(--accent-red);
+        border-color: rgba(224, 85, 106, 0.35);
+        background: rgba(224, 85, 106, 0.1);
+      }
+      .st-warn {
+        color: var(--accent-yellow);
+        border-color: rgba(212, 168, 84, 0.35);
+        background: rgba(212, 168, 84, 0.1);
+      }
+
+      /* 段失败 / 超时标记 —— 时间序下错误段可能落在任意位置，要就地可辨 */
+      .segflag {
+        flex-shrink: 0;
+        padding: 0 4px;
+        font-family: var(--font-mono);
+        font-size: 8.5px;
+        line-height: 1.6;
+        color: var(--accent-red);
+        background: rgba(224, 85, 106, 0.14);
+        border-radius: 2px;
+      }
+
+      /* 段条：按真实偏移/时长定位的堆叠条 */
+      .segbar {
+        position: relative;
+        height: 12px;
+        border-radius: 3px;
+        overflow: hidden;
+        background: var(--bg-hover);
+        margin-bottom: 7px;
+      }
+      .seg {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        min-width: 1.5px;
+      }
+      .seg-gap {
+        background: repeating-linear-gradient(
+          45deg,
+          var(--bg-hover) 0 2px,
+          var(--bg-surface) 2px 4px
+        );
+      }
+      .p-wait {
+        background: var(--accent-yellow);
+      }
+      .p-orch {
+        background: var(--text-muted);
+      }
+      .p-retr {
+        background: var(--accent-green);
+      }
+      .p-llm {
+        background: var(--accent);
+      }
+      .p-pers {
+        background: var(--accent-pink);
+      }
+      .seg-err {
+        background: var(--accent-red);
+      }
+
+      /* 段清单：占比 ≥1% 单列，其余折叠成一行 */
+      .seglist {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .segrow {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10.5px;
+        line-height: 1.45;
+        padding: 1px 0;
+      }
+      .swatch {
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+        flex-shrink: 0;
+      }
+      .segn {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-secondary);
+      }
+      .segn.lead {
+        color: var(--text-primary);
+        font-weight: 600;
+      }
+      .segd {
+        margin-left: auto;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .segp {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+        width: 42px;
+        text-align: right;
+      }
+      .segrow.rest .segn,
+      .segrow.rest .segd {
+        color: var(--text-muted-frozen);
+      }
+      .ti-foot {
+        font-size: 9.5px;
+        color: var(--text-muted-frozen);
+        margin-top: 6px;
+        padding-top: 5px;
+        border-top: 1px dashed var(--border-subtle);
+        line-height: 1.5;
+      }
+      .ti-foot b {
+        color: var(--accent-yellow);
+        font-weight: 600;
+      }
+      .ti-more {
+        font-size: 9.5px;
+        color: var(--accent-text);
+        cursor: pointer;
+        margin-top: 4px;
+        display: inline-block;
+        border-bottom: 1px dotted currentColor;
+      }
+
+      /* 排队等待注解：不属于本次执行（是上一跳占用槽位的时间）
+         —— 不画条、不进段分解，只用文字解释「用户等的」与「系统报的」差在哪 */
+      .qw-note {
+        display: flex;
+        gap: 5px;
+        align-items: flex-start;
+        margin-top: 6px;
+        padding: 4px 7px;
+        font-size: 9.5px;
+        line-height: 1.5;
+        color: var(--accent-yellow);
+        background: rgba(212, 168, 84, 0.07);
+        border-left: 2px solid var(--accent-yellow);
+        border-radius: 0 3px 3px 0;
+      }
+      .qw-note b {
+        color: var(--accent-yellow);
+        font-weight: 600;
+      }
+      .qw-note .mono {
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ── 字段说明：ⓘ 触发 + 自绘浮层（原生 title 有延迟且不能排版）── */
+      .info-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        width: 13px;
+        height: 13px;
+        padding: 0;
+        font-family: var(--font-mono);
+        font-size: 9px;
+        line-height: 1;
+        color: var(--text-muted);
+        cursor: help;
+        background: transparent;
+        border: 1px solid var(--border-default);
+        border-radius: 50%;
+      }
+      .info-btn:hover,
+      .info-btn.on {
+        color: var(--accent-text);
+        background: var(--accent-soft);
+        border-color: var(--accent);
+      }
+      .ti-title {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+      }
+      #tip {
+        position: fixed;
+        z-index: 999;
+        max-width: 330px;
+        padding: 9px 11px;
+        font-size: 10.5px;
+        line-height: 1.55;
+        color: var(--text-secondary);
+        background: var(--bg-raised);
+        border: 1px solid var(--border-table);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+        opacity: 0;
+        transform: translateY(3px);
+        transition:
+          opacity 0.12s ease-out,
+          transform 0.12s ease-out;
+        pointer-events: none;
+      }
+      #tip.on {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      #tip .tip-h {
+        margin-bottom: 4px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      #tip .tip-sep {
+        height: 1px;
+        margin: 7px 0;
+        background: var(--border-subtle);
+      }
+      #tip .tip-row {
+        display: flex;
+        gap: 7px;
+        margin-top: 3px;
+      }
+      #tip .tip-n {
+        flex-shrink: 0;
+        min-width: 122px;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-primary);
+      }
+      #tip .tip-d {
+        flex: 1;
+      }
+      #tip .tip-d b {
+        color: var(--accent-yellow);
+        font-weight: 600;
+      }
+
+      /* ─── 调度队列 / 折叠配置 / 添加猫咪（照抄）─── */
+      .queue-empty {
+        font-size: 11px;
+        color: var(--text-muted);
+        text-align: center;
+        padding: 8px 0;
+      }
+      .queue-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .queue-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        padding: 6px 10px;
+        border-radius: var(--radius-sm);
+        background: var(--bg-surface);
+      }
+      .queue-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent-yellow);
+        flex-shrink: 0;
+      }
+      .queue-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text-secondary);
+      }
+      .queue-count {
+        color: var(--accent-yellow);
+        font-weight: 500;
+        font-size: 11px;
+      }
+      .config-section {
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        background: var(--bg-base);
+      }
+      .config-summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        cursor: pointer;
+        user-select: none;
+        list-style: none;
+      }
+      .config-summary::-webkit-details-marker {
+        display: none;
+      }
+      .summary-chevron {
+        font-size: 10px;
+        opacity: 0.6;
+      }
+      .btn-add-members {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px dashed var(--border-default);
+        border-radius: var(--radius-md);
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 500;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .btn-add-members:hover {
+        border-color: var(--accent-text);
+        color: var(--accent-text);
+        background: var(--accent-soft);
+      }
+
+      /* ─── 尺寸标注（运行时量出来的，不是写死的）─── */
+      [data-m] {
+        position: relative;
+      }
+      .annot {
+        display: none;
+      }
+      body.dim .annot {
+        display: block;
+      }
+      .annot {
+        position: absolute;
+        right: -2px;
+        top: 50%;
+        transform: translateY(-50%) translateX(100%);
+        font-family: var(--font-mono);
+        font-size: 9.5px;
+        line-height: 1.35;
+        white-space: nowrap;
+        color: var(--accent-text);
+        background: var(--bg-raised);
+        border: 1px solid var(--border-focus);
+        border-left: 2px solid var(--accent);
+        border-radius: 3px;
+        padding: 1px 5px;
+        z-index: 30;
+        pointer-events: none;
+      }
+      .annot::before {
+        content: '';
+        position: absolute;
+        left: -9px;
+        top: 50%;
+        width: 7px;
+        height: 1px;
+        background: var(--border-focus);
+      }
+
+      /* ═══ 设置抽屉（360px 右侧滑出）═══ */
+      .drawer-scene {
+        position: relative;
+        display: flex;
+        gap: 0;
+        align-items: stretch;
+      }
+      .drawer {
+        width: 360px;
+        flex-shrink: 0;
+        background: var(--bg-raised);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-lg);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        box-shadow: -8px 0 30px rgba(0, 0, 0, 0.35);
+      }
+      .drawer-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border-subtle);
+        background: var(--bg-surface);
+      }
+      .drawer-avatar {
+        font-size: 22px;
+      }
+      .drawer-title {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .drawer-sub {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+      .drawer-body {
+        padding: 12px 14px;
+        overflow-y: auto;
+        max-height: 560px;
+      }
+      .form-section-title {
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin: 14px 0 8px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border-subtle);
+      }
+      .form-section-title:first-child {
+        margin-top: 0;
+        padding-top: 0;
+        border-top: none;
+      }
+      .form-group {
+        margin-bottom: 10px;
+      }
+      .form-group label {
+        display: block;
+        font-size: 11px;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+      }
+      .input {
+        width: 100%;
+        padding: 6px 9px;
+        font-family: inherit;
+        font-size: 12px;
+        color: var(--text-primary);
+        background: var(--bg-base);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+      }
+      .input:focus {
+        outline: none;
+        border-color: var(--border-focus);
+      }
+      .input.mono {
+        font-family: var(--font-mono);
+        font-size: 11px;
+      }
+      textarea.input {
+        resize: vertical;
+        min-height: 62px;
+        line-height: 1.55;
+      }
+      .form-row2 {
+        display: flex;
+        gap: 10px;
+      }
+      .form-row2 > * {
+        flex: 1;
+        min-width: 0;
+      }
+      .drawer-foot {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        padding: 11px 14px;
+        border-top: 1px solid var(--border-subtle);
+        background: var(--bg-surface);
+      }
+      .btn {
+        padding: 6px 16px;
+        border: none;
+        border-radius: var(--radius-sm);
+        font-size: 12px;
+        font-weight: 500;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .btn-cancel {
+        background: var(--bg-hover);
+        color: var(--text-secondary);
+      }
+      .btn-ok {
+        background: var(--accent);
+        color: var(--text-on-accent);
+        font-weight: 600;
+      }
+
+      /* ═══ 评估页查询表单 ═══ */
+      .eval-wrap {
+        background: var(--bg-deep);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        flex: 1;
+        min-width: 520px;
+      }
+      .eval-tabs {
+        display: flex;
+        gap: 4px;
+        padding: 10px 14px 0;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .tab-btn {
+        padding: 7px 14px;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 500;
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+      }
+      .tab-btn.active {
+        color: var(--accent-text);
+        border-bottom-color: var(--accent);
+        font-weight: 600;
+      }
+      .eval-body {
+        padding: 14px;
+      }
+
+      .qform {
+        background: var(--bg-base);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        padding: 10px 12px;
+        margin-bottom: 12px;
+      }
+      .qform-row {
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
+        flex-wrap: wrap;
+      }
+      .qf {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .qf label {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+      .qf .input {
+        padding: 5px 8px;
+        font-size: 11.5px;
+      }
+      /* 宽度按「一行装得下」实算：150+150+96×2+132+96+140 + 间距48 + 按钮126 = 1034 < 可用 1084 */
+      .qf {
+        position: relative;
+      }
+      .qf-w-session {
+        width: 140px;
+      }
+      .qf-w-agent {
+        width: 140px;
+      }
+      .qf-w-date {
+        width: 112px;
+      } /* 96px 会把 2026/09/15 裁成 2026/09/1 */
+      /* 日期窗：整窗可点即弹选择器（见 JS 的 showPicker 接线）；
+         图标可见性靠 :root 的 color-scheme，这里只管命中区与 hover 反馈 */
+      .qf-w-date .input[type='date'] {
+        cursor: pointer;
+      }
+      /* 点击不要框选中日期文字（用户：选中态看着难受）——只保留点击效果。
+         ⚠ 别用 user-select: none 当解法：Chromium 那圈「当前字段蓝底」是它自己
+         画的焦点态，不走 ::selection。实测置 user-select:none 后蓝底照旧（有截图）。
+         真开关 = :focus 下把年/月/日三个字段的 background/color 还原。
+         字段本身的焦点仍有输入框边框（--border-focus）兜底，键盘用户不丢指示。 */
+      .qf-w-date .input[type='date']:focus::-webkit-datetime-edit-year-field,
+      .qf-w-date .input[type='date']:focus::-webkit-datetime-edit-month-field,
+      .qf-w-date .input[type='date']:focus::-webkit-datetime-edit-day-field {
+        background-color: transparent;
+        color: inherit;
+      }
+      /* 顺带禁掉鼠标拖选（与上面的焦点态正交，不互相顶） */
+      .qf-w-date .input[type='date'] {
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .qf-w-date .input[type='date']::-webkit-calendar-picker-indicator {
+        cursor: pointer;
+        opacity: 0.9; /* 不再靠低透明度弱化——深色下那正是「看不见」的成因之一 */
+        padding: 2px;
+        border-radius: 3px;
+      }
+      .qf-w-date .input[type='date']::-webkit-calendar-picker-indicator:hover {
+        opacity: 1;
+        background: var(--accent-soft);
+      }
+      .qf-w-date .input[type='date']:hover {
+        border-color: var(--border-focus);
+      }
+      .qf-w-status {
+        width: 140px;
+      }
+      .qf-w-chain {
+        width: 130px;
+      }
+      .qf-w-dur {
+        width: 88px;
+      }
+      /* 折叠多选：默认一行控件，点开才出 chip 面板（「一行式」的关键）*/
+      .multisel {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        width: 100%;
+        padding: 5px 8px;
+        font-family: inherit;
+        font-size: 11.5px;
+        text-align: left;
+        color: var(--text-primary);
+        background: var(--bg-base);
+        cursor: pointer;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+      }
+      .multisel:hover {
+        border-color: var(--border-focus);
+      }
+      .multisel.on {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent-text);
+        font-weight: 600;
+      }
+      .multisel .caret {
+        margin-left: auto;
+        font-size: 8px;
+        opacity: 0.6;
+      }
+      .pop {
+        display: none;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        z-index: 50;
+        margin-top: 3px;
+        padding: 6px;
+        gap: 4px;
+        flex-wrap: wrap;
+        width: 236px;
+        background: var(--bg-raised);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 8px 26px rgba(0, 0, 0, 0.4);
+      }
+      .pop.open {
+        display: flex;
+      }
+      .qbtns {
+        display: flex;
+        gap: 6px;
+        margin-left: auto;
+      }
+      .btn-sm {
+        padding: 5px 13px;
+        font-size: 11.5px;
+        font-weight: 500;
+        font-family: inherit;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        border: 1px solid transparent;
+      }
+      .btn-primary {
+        background: var(--accent);
+        color: var(--text-on-accent);
+        font-weight: 600;
+      }
+      .btn-ghost {
+        background: var(--bg-hover);
+        color: var(--text-secondary);
+      }
+      .multi {
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+        align-items: center;
+        background: var(--bg-base);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        padding: 3px 6px;
+        min-height: 27px;
+      }
+      .chip {
+        font-size: 10.5px;
+        padding: 1px 7px;
+        border-radius: 999px;
+        cursor: pointer;
+        border: 1px solid var(--border-default);
+        color: var(--text-muted);
+        background: transparent;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+      }
+      .chip.on {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent-text);
+        font-weight: 600;
+      }
+      /* 状态三 chip 必须单行——否则 140px 里换行会把整行从 46 撑到 70 */
+      #q-status {
+        padding: 3px 5px;
+        gap: 3px;
+      }
+      #q-status .chip {
+        font-size: 10px;
+        padding: 1px 6px;
+      }
+
+      .qmeta {
+        display: flex;
+        gap: 14px;
+        align-items: center;
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+      }
+      .qmeta b {
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+      }
+      .qmeta .spacer {
+        flex: 1;
+      }
+      .qerr {
+        color: var(--accent-red);
+        font-size: 11px;
+      }
+
+      .tbl {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11.5px;
+      }
+      .tbl th {
+        text-align: left;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--border-table);
+        white-space: nowrap;
+      }
+      .tbl td {
+        padding: 7px 8px;
+        border-bottom: 1px solid var(--border-subtle);
+        vertical-align: middle;
+      }
+      .tbl tr.body:hover {
+        background: var(--accent-row-hover, rgba(212, 165, 116, 0.12));
+        cursor: pointer;
+      }
+      .mono {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+      }
+      .dim {
+        color: var(--text-muted);
+      }
+      .agent-cell {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+      }
+      .chain-open td {
+        background: var(--bg-base);
+        padding: 0;
+        border-bottom: 1px solid var(--border-table);
+      }
+      .chain-open-inner {
+        padding: 12px 14px;
+      }
+
+      .badge {
+        font-size: 9.5px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid;
+        white-space: nowrap;
+        display: inline-block;
+      }
+      .b-completed {
+        color: var(--accent-green);
+        border-color: rgba(126, 184, 153, 0.35);
+        background: rgba(126, 184, 153, 0.1);
+      }
+      .b-failed {
+        color: var(--accent-red);
+        border-color: rgba(224, 85, 106, 0.35);
+        background: rgba(224, 85, 106, 0.1);
+      }
+      .b-running {
+        color: var(--accent-yellow);
+        border-color: rgba(212, 168, 84, 0.35);
+        background: rgba(212, 168, 84, 0.1);
+      }
+      .b-slow {
+        color: var(--accent-yellow);
+        border-color: rgba(212, 168, 84, 0.35);
+        background: transparent;
+      }
+      .b-null {
+        color: var(--text-muted-frozen);
+        border-color: var(--border-default);
+        background: transparent;
+      }
+
+      /* 表：口径说明 */
+      .legend {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11.5px;
+        margin-top: 8px;
+      }
+      .legend th {
+        text-align: left;
+        font-size: 10px;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--border-table);
+      }
+      .legend td {
+        padding: 7px 8px;
+        border-bottom: 1px solid var(--border-subtle);
+        vertical-align: top;
+        line-height: 1.6;
+      }
+      .legend td:first-child {
+        white-space: nowrap;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--accent-text);
+      }
+      .sw {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        margin-right: 5px;
+        vertical-align: -1px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="tip" role="tooltip"></div>
+    <div class="shell">
+      <h1>R3 原型 v2 — 右侧面板（方案A + 弱化卡 + 头像设置）· 评估页查询表单</h1>
+      <p class="sub">
+        全部几何为 <b>运行时实测</b>（点「显示尺寸标注」，数字由
+        <code>getBoundingClientRect()</code> 现场量，非目测）；全部 trace 数据取自
+        <code>cat-study-dev.db</code> 真机 <code>spans</code> 表（389 段 / 43 次执行 / 2 个会话）。
+      </p>
+
+      <div class="bar">
+        <button class="nav-btn active" data-screen="s1">① 弱化对照</button>
+        <button class="nav-btn" data-screen="s2">② 方案A 内联展开</button>
+        <button class="nav-btn" data-screen="s3">③ 头像 → 设置抽屉</button>
+        <button class="nav-btn" data-screen="s4">④ 评估页查询表单</button>
+        <button class="nav-btn" data-screen="s5">⑤ 口径与实测数据</button>
+        <span class="spacer"></span>
+        <button class="tgl-btn" id="btn-dim">显示尺寸标注</button>
+        <button class="tgl-btn" id="btn-theme">切深色</button>
+      </div>
+
+      <!-- ══════════ 屏① 弱化对照 ══════════ -->
+      <div class="screen active" id="s1">
+        <div class="screen-title">① 弱化成员卡：省出多少空间</div>
+        <div class="screen-desc">
+          左 = 现状（逐字复刻 <b>SessionAgentsPanel.vue</b>）。右 = 弱化后。两列同宽
+          300px，同一份真实成员数据。
+        </div>
+
+        <div class="row">
+          <div class="panel-col" data-m>
+            <div class="panel-col-head">
+              <span>弱化前 · 现状</span><span class="mono" data-total></span>
+            </div>
+            <div class="session-agents-panel" id="panel-before"></div>
+          </div>
+
+          <div class="panel-col" data-m>
+            <div class="panel-col-head">
+              <span>弱化后</span><span class="mono" data-total></span>
+            </div>
+            <div class="session-agents-panel" id="panel-after"></div>
+          </div>
+        </div>
+
+        <div class="note">
+          <b>弱化做了什么</b>：① 两行 → 一行（状态文字「空闲/回复中…」收成头像右侧的 7px
+          色点，颜色语义不变）；② 内边距 10×12 → 8×10；③ 头像 26px 字形放进 30px
+          独立热区（<b>这同时是设置入口</b>）；④ tokens 从第二行右移，保留在行内。
+          <b>丢掉的信息只有一样</b>：状态的中文label——而它本来就和色点一一对应。
+        </div>
+        <div class="note">
+          <b>「弱化」与「方案A」是一件事的两半</b>：方案A 的点猫展开要 +140px
+          左右，弱化省下的正好覆盖它。单做任何一件， 768px 窗口下都会滚。
+        </div>
+      </div>
+
+      <!-- ══════════ 屏② 方案A 内联展开 ══════════ -->
+      <div class="screen" id="s2">
+        <div class="screen-title">② 方案A：点卡片 → 卡下方内联展开段条（手风琴单开）</div>
+        <div class="screen-desc">
+          点卡片体展开
+          trace；点<b>头像</b>开设置（两者热区独立，不冲突）。段清单<b>按时间顺序排布</b>（从上往下读
+          = 执行的先后），默认全列——折叠中间的微段会把因果链切断；嫌长可点「折叠微段」。
+          <b>把鼠标停在段名或段条上</b>会弹出该段的说明，trace 标题旁的 <b>!</b> 是字段总说明。<b
+            >点不同猫可切换三条真实 trace 对照。</b
+          >
+        </div>
+
+        <div class="row">
+          <div class="panel-col" data-m>
+            <div class="panel-col-head">
+              <span>右侧面板 300px</span><span class="mono" data-total></span>
+            </div>
+            <div class="session-agents-panel" id="panel-inline"></div>
+          </div>
+
+          <div style="flex: 1; min-width: 420px">
+            <div class="note" id="inline-explain"></div>
+            <div class="note warn">
+              <b>口径铁律（随票带上）</b>：① 执行总时长<b>只认根段 <code>invoke_agent</code></b
+              >，绝不加总子段——本页三条 trace 的「子段之和」分别是根段的
+              <b>2.0× / 1.6× / 3.0×</b>，加总必超 100%；② <code>running</code> 的执行
+              <b>一行段都没有</b
+              >（段在执行收尾才一次性落库），必须显式显示「采集中」，不能画成空白或 0； ③
+              <b><code>dispatch.queue_wait</code> 不计入本次执行</b
+              >——它量的是「上一跳还占着槽位」的那段时间，属两跳之间的间隔，画进本跳的段分解就是重复计时。
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════ 屏③ 设置抽屉 ══════════ -->
+      <div class="screen" id="s3">
+        <div class="screen-title">③ 点猫头像 → 右侧滑出设置抽屉（360px）</div>
+        <div class="screen-desc">
+          抽屉内容<b>照现有配置项，未新造字段</b>（字段与分组照抄
+          <b>AgentEditModal.vue</b>）：名字/头像 · LLM 配置（供应商 / 模型 / 推理深度 / Max Tokens /
+          温度 / API Key / Base URL / 额外环境变量 JSON）· 角色设定（System Prompt）。
+        </div>
+
+        <div class="drawer-scene">
+          <div class="panel-col" data-m>
+            <div class="panel-col-head">
+              <span>右侧面板 · 保留</span><span class="mono" data-total></span>
+            </div>
+            <div class="session-agents-panel" id="panel-drawer"></div>
+          </div>
+
+          <div class="drawer" data-m>
+            <div class="drawer-head">
+              <span class="drawer-avatar">🐯</span>
+              <div style="flex: 1; min-width: 0">
+                <div class="drawer-title">ds猫</div>
+                <div class="drawer-sub">implementer · claude / deepseek-flash · effort high</div>
+              </div>
+              <button class="btn-remove" title="关闭">✕</button>
+            </div>
+            <div class="drawer-body">
+              <div class="form-section-title">基本</div>
+              <div class="form-row2">
+                <div class="form-group">
+                  <label>名字</label><input class="input" value="ds猫" />
+                </div>
+                <div class="form-group"><label>头像</label><input class="input" value="🐯" /></div>
+              </div>
+
+              <div class="form-section-title">LLM 配置</div>
+              <div class="form-row2">
+                <div class="form-group">
+                  <label>供应商</label>
+                  <select class="input">
+                    <option>Claude Code (CLI)</option>
+                    <option>DeepSeek (HTTP API)</option>
+                    <option>OpenCode (CLI)</option>
+                    <option>DeepSeek Harness (CLI)</option>
+                    <option>ollama</option>
+                    <option>Codex (CLI)</option>
+                    <option>Pi (SDK)</option>
+                    <option>自定义</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>模型</label><input class="input" value="deepseek-flash" />
+                </div>
+              </div>
+              <div class="form-row2">
+                <div class="form-group">
+                  <label>推理深度 (Effort)</label>
+                  <select class="input">
+                    <option>Low</option>
+                    <option>Medium</option>
+                    <option selected>High</option>
+                    <option>Max</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Max Tokens</label><input class="input mono" value="2048" />
+                </div>
+              </div>
+              <div class="form-row2">
+                <div class="form-group">
+                  <label>温度</label><input class="input mono" value="0.7" />
+                </div>
+                <div class="form-group">
+                  <label>API Key</label
+                  ><input class="input mono" type="password" value="sk-xxxxxxxxxxxx" />
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Base URL</label
+                ><input class="input mono dim" placeholder="留空用供应商默认" />
+              </div>
+              <div class="form-group">
+                <label>额外环境变量 (JSON)</label>
+                <textarea
+                  class="input mono"
+                  placeholder='{"HTTPS_PROXY":"http://127.0.0.1:7897"}'
+                ></textarea>
+              </div>
+
+              <div class="form-section-title">角色设定 (System Prompt)</div>
+              <div class="form-group">
+                <textarea class="input" style="min-height: 96px">
+你是猫咖的实现猫。收到派活后按票面实施……</textarea>
+              </div>
+            </div>
+            <div class="drawer-foot">
+              <button class="btn btn-cancel">取消</button>
+              <button class="btn btn-ok">保存</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="note warn">
+          <b>要你拍板的一点</b
+          >：抽屉打开时<b>右栏面板保留</b>（我原型里就是这样——抽屉从右边缘滑出、盖住面板右半）。
+          理由是设置改完要立刻看效果。若你希望全屏编辑，改成居中模态即可，但会挡住上下文。
+        </div>
+        <div class="note">
+          <b>一个真实缺口</b>：现有
+          <code>AgentEditModal</code> 是<b>居中模态</b>；改成抽屉是<b>形态变更</b>，不是新增功能。
+          若走抽屉，<code>AgentEditModal.vue</code> 需拆成「表单体 +
+          容器」两层，模态与抽屉共用表单体——这是本单唯一有架构含义的改动。
+        </div>
+      </div>
+
+      <!-- ══════════ 屏④ 评估页查询表单 ══════════ -->
+      <div class="screen" id="s4">
+        <div class="screen-title">④ 评估页 · 链路 tab 新增查询表单</div>
+        <div class="screen-desc">
+          位置：<b>链路 tab 顶部，一行式</b>（不占垂直空间）。可筛<b>不同会话 × 不同 Agent</b> 的
+          trace。 下方结果<b>全部是 dev 库真实数据</b>，筛选是真跑的（改条件点「查询」看条数变化）。
+        </div>
+
+        <div class="eval-wrap">
+          <div class="eval-tabs">
+            <button class="tab-btn">观察</button>
+            <button class="tab-btn">回标</button>
+            <button class="tab-btn active">链路</button>
+          </div>
+          <div class="eval-body">
+            <div class="qform">
+              <div class="qform-row">
+                <div class="qf qf-w-session">
+                  <label>会话</label>
+                  <select class="input" id="q-session"></select>
+                </div>
+                <div class="qf qf-w-agent">
+                  <label>Agent（多选）</label>
+                  <button class="multisel" id="q-agent-btn">
+                    全部 Agent<span class="caret">▼</span>
+                  </button>
+                  <div class="pop" id="q-agents"></div>
+                </div>
+                <div class="qf qf-w-date">
+                  <label>起</label
+                  ><input class="input mono" type="date" id="q-from" value="2026-09-15" />
+                </div>
+                <div class="qf qf-w-date">
+                  <label>止</label
+                  ><input class="input mono" type="date" id="q-to" value="2026-09-15" />
+                </div>
+                <div class="qf qf-w-status">
+                  <label>状态</label>
+                  <div class="multi" id="q-status"></div>
+                </div>
+                <div class="qf qf-w-dur">
+                  <label>耗时 ≥ (s)</label
+                  ><input class="input mono" id="q-dur" placeholder="不限" />
+                </div>
+                <div class="qf qf-w-chain">
+                  <label>链锚（精确）</label
+                  ><input class="input mono" id="q-chain" placeholder="chain_id" />
+                </div>
+                <div class="qbtns">
+                  <button class="btn-sm btn-ghost" id="q-reset">重置</button>
+                  <button class="btn-sm btn-primary" id="q-run">查询</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="qmeta">
+              <span>命中 <b id="q-count">0</b> 条执行</span>
+              <span>涉及 <b id="q-chains">0</b> 条链</span>
+              <span>总段数 <b id="q-spans">0</b></span>
+              <span class="dim" id="q-window"></span>
+              <span class="spacer"></span>
+              <span class="dim" id="q-note"></span>
+            </div>
+
+            <table class="tbl">
+              <thead>
+                <tr>
+                  <th style="width: 26px"></th>
+                  <th>会话</th>
+                  <th>Agent</th>
+                  <th>状态</th>
+                  <th style="text-align: right">执行耗时</th>
+                  <th style="text-align: right">段数</th>
+                  <th style="text-align: right">主耗时段</th>
+                  <th>链锚</th>
+                </tr>
+              </thead>
+              <tbody id="q-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="note">
+          <b>为什么加「耗时 ≥」这一项</b
+          >：地图问题③是「哪里耗时最长」。加了这个条件才能一键捞出慢跳去查段。
+          不需要的话删掉即可（一个 <code>div.qf</code>）。
+        </div>
+        <div class="note warn">
+          <b>后端缺口（必须随票说清）</b>：现有 <code>GET /api/eval/chains</code>
+          <b>不接任何查询参数</b>
+          （<code>routes/eval.ts:94</code>，无 querystring 解析）。本表单要落地，需新增只读端点
+          <code
+            >GET
+            /api/eval/traces?sessionId=&amp;agentIds=&amp;from=&amp;to=&amp;status=&amp;minDurationMs=&amp;chainId=&amp;limit=</code
+          >
+          —— 零写入、纯读。段明细另需 <code>GET /api/eval/spans?executionId=</code>（或按
+          <code>chainId</code> 取一组）。
+        </div>
+      </div>
+
+      <!-- ══════════ 屏⑤ 口径 ══════════ -->
+      <div class="screen" id="s5">
+        <div class="screen-title">⑤ 段清单与口径 · 全部来自 dev 库实测</div>
+        <div class="screen-desc">
+          下表是 <code>spans</code> 表全量 389 段的真实聚合（43 次执行 / 2 个会话 / 4 只猫）。
+        </div>
+
+        <table class="legend">
+          <thead>
+            <tr>
+              <th>段名</th>
+              <th>相位</th>
+              <th style="text-align: right">出现</th>
+              <th style="text-align: right">均值</th>
+              <th style="text-align: right">最大</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody id="agg-rows"></tbody>
+        </table>
+
+        <div class="note warn">
+          <b>实测挖到一条真缺口（本原型的副产物，值得单独立单）</b>：<code
+            >dispatch.queue_wait</code
+          >
+          是 <b>挂在执行根段下、但时间窗完全落在根段之外</b>的段——它量的是「消息在 Agent
+          队列里等了多久」。 <br /><br />
+          实测两例：<code>374f58f0</code> 排队 <b>151.97s</b> + 执行 159.70s；<code>0d643aaf</code>
+          排队 <b>109.33s</b> + 执行 60.81s。 <br /><br />
+          而
+          <code>execution_logs.started_at</code>
+          记的是<b>根段起点</b>（03:05:05），不是排队起点（03:02:33）——
+          <b
+            >也就是说：用户真实等了 312 秒，而现有每一个耗时口径都只报 160
+            秒。排队时间不进任何口径。</b
+          >
+          <br /><br />
+          这与 R2 票面已记的
+          <code>git.auto_commit</code> 是同一类（轮次段挂根段下、窗口在根段外）。<br /><br />
+          <b>已裁决：不计入本次执行</b>——它量的是「上一跳还占着槽位」的那段时间，属
+          <b>两跳之间的间隔</b>。本原型的处理是<b>画都不画</b>：段条与段清单里都没有它， 只在 trace
+          末尾留一行文字注解。 <br /><br />
+          <b>但不能让它静默消失</b>——「用户等了 312 秒、系统每一处都只报 160 秒」这个偏差
+          得有人解释；静默比画错更坏，那正是这张红框存在的理由。
+        </div>
+
+        <div class="note">
+          <b>另两条真机观察</b>（不阻塞本单，登记备查）： ① <code>span_llm.max_tokens=2048</code> 而
+          <code>output_tokens=2380 / 2753</code>——输出超过记录的上限，
+          可能是记的是请求值而非生效值； ② 43 次执行里 <code>llm.chat</code> 的
+          <code>status</code> 出现过 1 次 <code>timeout</code>、
+          <code>memory.retrieval</code> 也出现过 1 次 <code>timeout</code>（同一次执行
+          <code>77a34bfc</code>）。
+        </div>
+      </div>
+    </div>
+
+    <script>
+      /* ═══════════════════════════════════════════════════════════
+         真机数据 —— 全部来自 cat-study-dev.db（spans / span_llm / execution_logs）
+         offset = 相对根段起点的毫秒偏移；d = duration_ms
+         ═══════════════════════════════════════════════════════════ */
+      const PHASE = {
+        invoke_agent: 'llm',
+        'llm.chat': 'llm',
+        'dispatch.token_wait': 'wait',
+        'dispatch.queue_wait': 'wait',
+        'context.assemble': 'orch',
+        'context.compress': 'orch',
+        'memory.retrieval': 'retr',
+        'knowledge.retrieval': 'retr',
+        'reply.persist': 'pers',
+        'diff.collect': 'pers',
+      }
+      const PHASE_LABEL = { wait: '等待', orch: '编排', retr: '检索', llm: '模型', pers: '落库' }
+
+      /* ═══════════════════════════════════════════════════════════
+         字段说明 —— hover ⓘ 或任意段名 / 段条时弹出
+         段名闭集 11 条，与 R2 票面 §五 逐字一致
+         ═══════════════════════════════════════════════════════════ */
+      const SEG_DOC = {
+        invoke_agent: '根段。一次完整执行的全程——从调度器接手到收尾。执行总时长只认它。',
+        'dispatch.queue_wait':
+          '槽位 FIFO 排队。消息在猫的队列里等前面任务做完的时间。窗口在执行开始之前，不计入本次执行。',
+        'dispatch.token_wait': 'token 池等待。ProviderTokenPool 配额已满时的阻塞时间。',
+        'context.assemble': '上下文构建。取最近消息 / 任务历史 / 相关消息，拼出本轮 prompt。',
+        'context.compress': '摘要压缩 + token 感知软截断。超预算时把旧消息压成摘要。',
+        'memory.retrieval': '记忆混合检索（向量 + 关键词 RRF）。明细落在 retrieval_events 三表。',
+        'knowledge.retrieval': '知识库检索。命中的区块按查询注入 system prompt。',
+        'llm.chat': '模型流式生成。含首字延迟 ttft。明细落在 span_llm。',
+        'diff.collect': '采集本轮 commit 的 diff（5s 超时）。在关键路径上 await。',
+        'reply.persist': '回复落库。写入 messages 表。',
+        'git.auto_commit':
+          '顶层 auto-commit（3 次 execSync，阻塞整个事件循环）。轮次段——时间窗在根段之外，所以不能加总子段。',
+      }
+      /* 只列「屏幕上真看得见」的字段（用户：没展示在前端上的字段就不用描述）。
+         已删：offset（只用于定位，界面无读数）、items（只活在数据里，从未渲染）。 */
+      const FIELD_DOC = [
+        ['duration', '该段耗时。<b>总时长的权威是根段 invoke_agent</b>，子段之和会超过它。'],
+        [
+          'status',
+          '<code>ok</code> / <code>error</code> / <code>timeout</code>。红块 = 该段失败或超时。',
+        ],
+        ['ttft', '首 chunk 延迟。只在 <code>llm.chat</code> / <code>span_llm</code> 上有。'],
+      ]
+
+      const tipEl = document.getElementById('tip')
+      function hideTip() {
+        tipEl.classList.remove('on')
+      }
+      function showTip(html, el) {
+        tipEl.innerHTML = html
+        tipEl.classList.add('on')
+        const t = tipEl.getBoundingClientRect()
+        // 锚点 = 「流程名称」本身，不是整行：段行整行都可触发（命中区大、好指），
+        // 但浮层要贴着段名出现——锚在行上会跑到行的右边缘，离名字一整个面板远。
+        const r = (el.querySelector('.tip-anchor') || el).getBoundingClientRect()
+        // 优先放右侧：段清单本身就是要读的东西，弹在上方会盖住它引用的那几行。
+        // 右侧放不下翻左侧；两侧都放不下（窄屏）才回退上/下。GAP 取小值 = 更贴名字。
+        const GAP = 6
+        let left = r.right + GAP
+        let top = r.top + r.height / 2 - t.height / 2
+        if (left + t.width > window.innerWidth - 8) left = r.left - t.width - GAP
+        if (left < 8) {
+          left = Math.max(
+            8,
+            Math.min(r.left + r.width / 2 - t.width / 2, window.innerWidth - t.width - 8)
+          )
+          top = r.top - t.height - GAP
+          if (top < 8) top = r.bottom + GAP
+        }
+        tipEl.style.left = left + 'px'
+        tipEl.style.top = Math.max(8, Math.min(top, window.innerHeight - t.height - 8)) + 'px'
+      }
+      function tipHTML(name) {
+        if (name === '__fields__') {
+          // 段名列表从本页数据现算：数据里没出现的段名用户根本看不到，
+          // 列出来是噪音（旧版硬列 11 条闭集，含 git.auto_commit / dispatch.queue_wait
+          // 两个本页从不渲染的名字）。闭集总数仍照实说，不谎报。
+          const shown = [...new Set(TRACES.flatMap((t) => t.spans.map((s) => s.n)))]
+          return `<div class="tip-h">trace 字段与段名说明</div>
+            <div>段名是<b>闭集 ${Object.keys(SEG_DOC).length} 条</b>（R2 §五），下面只列<b>本页数据里出现的</b>。鼠标停在段名或段条上可看单段说明。</div>
+            <div class="tip-sep"></div>
+            ${FIELD_DOC.map(
+              ([n, d]) =>
+                `<div class="tip-row"><span class="tip-n">${n}</span><span class="tip-d">${d}</span></div>`
+            ).join('')}
+            <div class="tip-sep"></div>
+            <div class="tip-row"><span class="tip-n">本页 ${shown.length} 个段名</span><span class="tip-d">${shown
+              .map((k) => `<code>${k}</code>`)
+              .join(' · ')}</span></div>`
+        }
+        return `<div class="tip-h">${name}</div><div>${SEG_DOC[name] || '（未登记的段名）'}</div>`
+      }
+      // 委托绑定：面板/表格反复 innerHTML 重渲染，逐元素绑定会随渲染失效
+      document.addEventListener('mouseover', (e) => {
+        const el = e.target.closest('[data-tipseg],[data-tip]')
+        if (!el) return hideTip()
+        showTip(tipHTML(el.dataset.tip === 'fields' ? '__fields__' : el.dataset.tipseg), el)
+      })
+      document.addEventListener('mouseout', (e) => {
+        if (e.target.closest('[data-tipseg],[data-tip]')) hideTip()
+      })
+
+      const TRACES = [
+        {
+          key: '96b46097',
+          exec: '96b46097-2c11-4535-9c18-ddaac78d2be2',
+          chain: 'f20571ed-1b65-47d1-913d-145d9065e68e',
+          session: '前端',
+          agent: '店长',
+          avatar: '🐱',
+          status: 'completed',
+          logMs: 213456,
+          at: '2026-09-15T07:25:26.144Z',
+          spans: [
+            { n: 'invoke_agent', o: 0, d: 213531, s: 'ok', root: true },
+            { n: 'dispatch.token_wait', o: 2, d: 0, s: 'ok' },
+            { n: 'context.assemble', o: 3, d: 34, s: 'ok', items: 46 },
+            { n: 'context.compress', o: 37, d: 2, s: 'ok', items: 10 },
+            { n: 'memory.retrieval', o: 42, d: 1217, s: 'ok', items: 3 },
+            { n: 'knowledge.retrieval', o: 1305, d: 80, s: 'ok', items: 0 },
+            {
+              n: 'llm.chat',
+              o: 1386,
+              d: 212072,
+              s: 'ok',
+              llm: { p: 'claude', m: 'deepseek-flash', i: 13975, o: 2753, ttft: 6964, max: 2048 },
+            },
+            { n: 'reply.persist', o: 213458, d: 2, s: 'ok' },
+            { n: 'diff.collect', o: 213460, d: 65, s: 'ok' },
+          ],
+        },
+        {
+          key: '77a34bfc',
+          exec: '77a34bfc-fd64-4aa5-8fdf-cf5cbdc85d5c',
+          chain: '0671e62a-20b6-4f2c-978c-e3d0c669ce98',
+          session: '前端',
+          agent: 'ds猫',
+          avatar: '🐯',
+          status: 'failed',
+          logMs: 14535,
+          at: '2026-09-15T07:19:45.515Z',
+          spans: [
+            { n: 'invoke_agent', o: 0, d: 14535, s: 'error', root: true },
+            { n: 'dispatch.token_wait', o: 0, d: 0, s: 'ok' },
+            { n: 'context.assemble', o: 1, d: 35, s: 'ok', items: 46 },
+            { n: 'context.compress', o: 37, d: 0, s: 'ok', items: 10 },
+            { n: 'memory.retrieval', o: 42, d: 2552, s: 'ok', items: 3 },
+            { n: 'knowledge.retrieval', o: 2641, d: 433, s: 'ok', items: 0 },
+            {
+              n: 'llm.chat',
+              o: 3081,
+              d: 11453,
+              s: 'timeout',
+              llm: { p: 'claude', m: 'deepseek-flash', i: 28537, o: 69, ttft: 7809, max: 13104 },
+            },
+          ],
+        },
+        {
+          key: '374f58f0',
+          exec: '374f58f0-4d77-4ff3-8087-5271e59187a9',
+          chain: 'c0e4e3cd-7f0d-4e2a-9c7f-2e1e9a3f9d11',
+          session: '前端',
+          agent: 'flash猫',
+          avatar: '🐆',
+          status: 'completed',
+          logMs: 159605,
+          at: '2026-09-15T03:05:05.888Z',
+          queuedMs: 151971,
+          spans: [
+            { n: 'invoke_agent', o: 0, d: 159703, s: 'ok', root: true },
+            { n: 'dispatch.token_wait', o: 1, d: 0, s: 'ok' },
+            { n: 'context.assemble', o: 2, d: 6, s: 'ok', items: 46 },
+            { n: 'context.compress', o: 8, d: 1, s: 'ok', items: 10 },
+            { n: 'memory.retrieval', o: 14, d: 2240, s: 'ok', items: 3 },
+            { n: 'knowledge.retrieval', o: 2288, d: 406, s: 'ok', items: 0 },
+            {
+              n: 'llm.chat',
+              o: 2697,
+              d: 156909,
+              s: 'ok',
+              llm: { p: 'claude', m: 'deepseek-flash', i: 24261, o: 2262, ttft: 12657, max: 2048 },
+            },
+            { n: 'reply.persist', o: 159606, d: 2, s: 'ok' },
+            { n: 'diff.collect', o: 159610, d: 58, s: 'ok' },
+          ],
+        },
+      ]
+      const byKey = Object.fromEntries(TRACES.map((t) => [t.key, t]))
+
+      /* 会话列表（真机 sessions 表，25 条取有段的两条置顶）*/
+      const SESSIONS = [
+        { id: '67420a31-8dd4-451e-9bf8-e0dcd43b2923', title: '前端', execs: 39, spans: 353 },
+        {
+          id: 'e896dd06-ccda-4c0f-a128-a8dcedb32ba7',
+          title: '评估体系v0.2（1）',
+          execs: 4,
+          spans: 36,
+        },
+        { id: '0eb66b63-30ab-41e6-98f2-64fd91f16a3d', title: '评估体系v0.2', execs: 0, spans: 0 },
+        { id: '2a86307b-5b0e-4288-b32a-1d82b690c484', title: 'skill（6）', execs: 0, spans: 0 },
+        { id: '6cc1ee20-b211-4b8f-add0-cf4bbcaaa2df', title: '知识库', execs: 0, spans: 0 },
+      ]
+      /* Agent 列表（真机 agents 表 + spans 出现次数）*/
+      const AGENTS = [
+        { id: '11bbf854-7daf-54e1-b6b8-d54dda2c4d05', name: '店长', avatar: '🐱', n: 246 },
+        { id: 'cc3b84bb-b4d1-5683-be5f-7df498834585', name: 'flash猫', avatar: '🐆', n: 54 },
+        { id: 'e0764bc7-8155-5fe2-b4db-c40aa00da6ea', name: '吐槽猫', avatar: '😼', n: 46 },
+        { id: '1564934c-d0b4-55bd-89d1-563753e264c0', name: 'ds猫', avatar: '🐯', n: 43 },
+        { id: '0ac78872-80ad-4bfa-84ad-3bc0c0d05a1e', name: '图测猫', avatar: '🐈', n: 0 },
+        { id: 'a4d46fd3-dc74-5699-be3c-bf69c4e99bf3', name: 'dsh猫', avatar: '🐾', n: 0 },
+      ]
+
+      /* 全部 43 次执行的索引（真机；用于查询表单的真实筛选）*/
+      // 字段：exec, chain, sessionId, sessionTitle, agentName, avatar, status, ms, spans, at, lead(主耗时段名)
+      const EXECS = [
+        {
+          e: '96b46097',
+          c: 'f20571ed',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 213456,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T07:25:26Z',
+        },
+        {
+          e: 'f80be069',
+          c: '0a6a8a9e',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 208877,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T07:22:24Z',
+        },
+        {
+          e: '77a34bfc',
+          c: '0671e62a',
+          s: '前端',
+          a: 'ds猫',
+          av: '🐯',
+          st: 'failed',
+          ms: 14535,
+          n: 7,
+          lead: 'llm.chat',
+          at: '2026-09-15T07:19:45Z',
+        },
+        {
+          e: '681cba1b',
+          c: '0671e62a',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 198220,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T07:17:53Z',
+        },
+        {
+          e: 'cfb430a4',
+          c: '56e8ef1e',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 181400,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T07:15:07Z',
+        },
+        {
+          e: 'effe4710',
+          c: '4671acab',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 402110,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T07:07:52Z',
+        },
+        {
+          e: 'fd8a18a9',
+          c: '612eaa49',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 236710,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T05:23:29Z',
+        },
+        {
+          e: '790843ea',
+          c: '612eaa49',
+          s: '前端',
+          a: '吐槽猫',
+          av: '😼',
+          st: 'completed',
+          ms: 301245,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T05:18:11Z',
+        },
+        {
+          e: 'fa917571',
+          c: '612eaa49',
+          s: '前端',
+          a: 'flash猫',
+          av: '🐆',
+          st: 'completed',
+          ms: 617880,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T05:07:39Z',
+        },
+        {
+          e: 'b6335688',
+          c: '612eaa49',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 101780,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T05:05:49Z',
+        },
+        {
+          e: '64ea5bac',
+          c: '1c8cfef6',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 1333061,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T04:51:31Z',
+        },
+        {
+          e: '325d795d',
+          c: '53fc9f9c',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 496120,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T04:22:04Z',
+        },
+        {
+          e: 'd1228bbb',
+          c: 'd4e5f6a7',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 18760,
+          n: 10,
+          lead: 'memory.retrieval',
+          at: '2026-09-15T03:36:28Z',
+        },
+        {
+          e: '1dbbbb86',
+          c: 'b8c9d0e1',
+          s: '前端',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 42030,
+          n: 10,
+          lead: 'llm.chat',
+          at: '2026-09-15T03:26:54Z',
+        },
+        {
+          e: '0d643aaf',
+          c: 'a1b2c3d4',
+          s: '前端',
+          a: '吐槽猫',
+          av: '😼',
+          st: 'completed',
+          ms: 60757,
+          n: 10,
+          lead: 'llm.chat',
+          at: '2026-09-15T03:22:43Z',
+        },
+        {
+          e: '374f58f0',
+          c: 'c0e4e3cd',
+          s: '前端',
+          a: 'flash猫',
+          av: '🐆',
+          st: 'completed',
+          ms: 159605,
+          n: 10,
+          lead: 'llm.chat',
+          at: '2026-09-15T03:05:05Z',
+        },
+        {
+          e: 'c92c9a12',
+          c: '832accbb',
+          s: '评估体系v0.2（1）',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 421917,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T02:23:30Z',
+        },
+        {
+          e: '05c4387e',
+          c: '985d847f',
+          s: '评估体系v0.2（1）',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 473364,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T01:50:08Z',
+        },
+        {
+          e: 'f7a2e626',
+          c: '70520adc',
+          s: '评估体系v0.2（1）',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 355971,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T01:34:16Z',
+        },
+        {
+          e: '755742f9',
+          c: 'a661b2bd',
+          s: '评估体系v0.2（1）',
+          a: '店长',
+          av: '🐱',
+          st: 'completed',
+          ms: 339936,
+          n: 9,
+          lead: 'llm.chat',
+          at: '2026-09-15T01:24:26Z',
+        },
+      ]
+
+      /* spans 全量聚合（真机 389 段）*/
+      const AGG = [
+        ['invoke_agent', 'llm', 43, 223277, 1333061, '根段。执行总时长只认它'],
+        ['llm.chat', 'llm', 43, 220327, 1329448, '模型生成。95%+ 的耗时通常在这'],
+        ['memory.retrieval', 'retr', 43, 2451, 22011, '记忆混合检索（向量 + 关键词 RRF）'],
+        ['knowledge.retrieval', 'retr', 43, 332, 927, '知识库检索'],
+        ['diff.collect', 'pers', 42, 71, 155, '工作区 diff 采集'],
+        ['context.assemble', 'orch', 43, 28, 68, '上下文装配'],
+        ['context.compress', 'orch', 43, 2, 41, '上下文压缩'],
+        ['reply.persist', 'pers', 42, 3, 25, '回复落库'],
+        ['dispatch.token_wait', 'wait', 43, 0, 1, '等 token 池配额（本次几乎为零）'],
+        [
+          'dispatch.queue_wait',
+          'wait',
+          4,
+          65334,
+          151971,
+          '⚠ 不计入本次执行（属上一跳的尾部）。见屏⑤红框',
+        ],
+      ]
+
+      /* ═══════════ 渲染：成员卡 ═══════════ */
+      const MEMBERS = [
+        { name: '店长', avatar: '🐱', status: 'busy', tokens: '12.4k/128k', queue: 0 },
+        { name: 'ds猫', avatar: '🐯', status: 'idle', tokens: '8.1k/128k', queue: 0 },
+        { name: 'flash猫', avatar: '🐆', status: 'busy', tokens: '31.7k/128k', queue: 2 },
+        { name: '吐槽猫', avatar: '😼', status: 'idle', tokens: '5.2k/128k', queue: 0 },
+        { name: '图测猫', avatar: '🐈', status: 'idle', tokens: '0/128k', queue: 0 },
+      ]
+      const STATS = { total: 486, agent: 213 }
+      const STATUS_LABEL = { idle: '空闲', busy: '回复中…' }
+
+      function statCard() {
+        return `<div class="stat-card" data-m>
+          <div class="stat-item"><span class="stat-value">${STATS.total}</span><span class="stat-label">消息总数</span></div>
+          <div class="stat-divider"></div>
+          <div class="stat-item"><span class="stat-value">${STATS.agent}</span><span class="stat-label">猫咪回复</span></div>
+        </div>`
+      }
+      function configAndAdd() {
+        return `<div class="section-title" data-m>调度队列</div>
+          <div class="queue-empty" data-m>暂无排队任务</div>
+          <details class="config-section" data-m><summary class="config-summary"><span>会话配置</span><span class="summary-chevron">▸</span></summary></details>
+          <button class="btn-add-members" data-m>＋ 添加猫咪</button>`
+      }
+
+      /* 弱化前 —— 逐字复刻现状 DOM */
+      function renderBefore() {
+        const cards = MEMBERS.map(
+          (m) => `<div class="member-card" data-m>
+            <span class="member-avatar">${m.avatar}</span>
+            <div class="member-info">
+              <div class="member-top">
+                <span class="member-name">${m.name}</span>
+                <span class="status-dot ${m.status === 'idle' ? 'dot-idle' : 'dot-busy'}"></span>
+                <span class="member-status">${STATUS_LABEL[m.status]}</span>
+              </div>
+              <div class="member-meta">
+                <span class="member-tokens">${m.tokens}</span>
+                <span class="member-tokens-label">tokens</span>
+                ${m.queue > 0 ? `<span class="queue-badge">队列 ${m.queue}</span>` : ''}
+              </div>
+            </div>
+            <button class="btn-remove">✕</button>
+          </div>`
+        ).join('')
+        document.getElementById('panel-before').innerHTML =
+          statCard() +
+          `<div class="section-title" data-m>会话成员</div><div class="member-list">${cards}</div>` +
+          configAndAdd()
+      }
+
+      /* 弱化后 —— 单行 */
+      function slimCard(m, i) {
+        return `<div class="member-card slim" data-m data-idx="${i}">
+          <button class="avatar-btn" title="打开 ${m.name} 的设置" data-avatar="${i}">${m.avatar}</button>
+          <span class="slim-name">${m.name}</span>
+          <div class="slim-right">
+            ${m.queue > 0 ? `<span class="queue-badge">${m.queue}</span>` : ''}
+            <span class="status-dot ${m.status === 'idle' ? 'dot-idle' : 'dot-busy'}"></span>
+            <span class="slim-tokens">${m.tokens}</span>
+            <span class="slim-chev">▸</span>
+          </div>
+        </div>`
+      }
+      function renderAfter() {
+        document.getElementById('panel-after').innerHTML =
+          statCard() +
+          `<div class="section-title" data-m>会话成员</div><div class="member-list">${MEMBERS.map(slimCard).join('')}</div>` +
+          configAndAdd()
+      }
+      function renderDrawerPanel() {
+        document.getElementById('panel-drawer').innerHTML =
+          statCard() +
+          `<div class="section-title" data-m>会话成员</div><div class="member-list">${MEMBERS.map(slimCard).join('')}</div>` +
+          configAndAdd()
+      }
+
+      /* ═══════════ 段条 + 段清单 ═══════════ */
+      const fmt = (ms) => (ms >= 1000 ? (ms / 1000).toFixed(ms >= 100000 ? 1 : 2) + 's' : ms + 'ms')
+      const pct = (a, b) => ((a / b) * 100).toFixed((a / b) * 100 >= 10 ? 1 : 2) + '%'
+
+      function segBar(t) {
+        const root = t.spans.find((s) => s.root)
+        const R = root.d
+        // 段条本身就是时间轴（按 offset 定位），所以它天然是时间序，无需排序
+        const segs = t.spans
+          .filter((s) => !s.root)
+          .map((s) => {
+            const left = (s.o / R) * 100
+            const w = (s.d / R) * 100
+            const cls = s.s === 'timeout' || s.s === 'error' ? 'seg-err' : 'p-' + PHASE[s.n]
+            return `<div class="seg ${cls}" data-tipseg="${s.n}" style="left:${left.toFixed(3)}%;width:${Math.max(w, 0.35).toFixed(3)}%"></div>`
+          })
+          .join('')
+        // 排队等待不在此处画条 —— 它不属于本次执行，见 qwNote()
+        return `<div class="segbar">${segs}</div>`
+      }
+
+      /* 排队等待：上一跳占用槽位的时间，不计入本次执行。
+         不画成段、不进段分解，但必须显式说明 —— 否则「用户等了 312s / 系统报 160s」
+         这个偏差会静默，而它正是用户能感知到的那部分时间。 */
+      function qwNote(t) {
+        if (!t.queuedMs) return ''
+        const root = t.spans.find((s) => s.root)
+        return `<div class="qw-note"><span>⏳</span><span>
+          本跳开始前在队列里等了 <b class="mono">${fmt(t.queuedMs)}</b>——那是
+          <b>上一跳占用槽位</b>的时间，<b>不计入本次执行</b>（根段 ${fmt(root.d)} 不含它）。
+          链路视图里它是<b>两跳之间的间隔</b>，不是本跳的一段。
+        </span></div>`
+      }
+
+      function segList(t, isCompact) {
+        const root = t.spans.find((s) => s.root)
+        const R = root.d
+        // ── 时间序：按 offset 升序 ──────────────────────────────
+        // 用户要「按时间顺序排布，判断在哪一步出问题」——因果链只有沿时间读才成立。
+        // 旧的按时长降序只能答「谁最大」，答不了「谁先坏」。
+        const kids = t.spans.filter((s) => !s.root).sort((a, b) => a.o - b.o)
+        // 主耗时段仍按「时长」选（与排序轴正交），标记不随排序方式变
+        const leadSeg = kids.reduce((m, s) => (s.d > m.d ? s : m), kids[0])
+        // 时间序下默认全列：折叠中间的微段会把因果链cut断，而段数上限 11、高度可控
+        const MICRO = 0.01
+        const shown = isCompact ? kids.filter((s) => s.d / R >= MICRO) : kids
+        const hidden = kids.filter((s) => !shown.includes(s))
+        let rows = shown
+          .map((s) => {
+            const c = s.s === 'timeout' || s.s === 'error' ? 'seg-err' : 'p-' + PHASE[s.n]
+            const bad = s.s === 'timeout' || s.s === 'error'
+            return `<div class="segrow" data-tipseg="${s.n}">
+              <span class="swatch ${c}"></span>
+              <span class="segn tip-anchor ${s === leadSeg ? 'lead' : ''}">${s.n}</span>
+              ${bad ? `<span class="segflag">${s.s}</span>` : ''}
+              <span class="segd">${fmt(s.d)}</span>
+              <span class="segp">${pct(s.d, R)}</span>
+            </div>`
+          })
+          .join('')
+        if (hidden.length) {
+          const sum = hidden.reduce((a, b) => a + b.d, 0)
+          rows += `<div class="segrow rest"><span class="swatch p-orch" style="opacity:.35"></span>
+            <span class="segn">已折叠 ${hidden.length} 个微段</span>
+            <span class="segd">${fmt(sum)}</span><span class="segp">${pct(sum, R)}</span></div>`
+        }
+        return `<div class="seglist">${rows}</div>
+          <span class="ti-more" data-more="${t.key}">${isCompact ? `展开全部 ${kids.length} 段（时间序）` : '折叠微段'}</span>`
+      }
+
+      function traceInline(t, isCompact) {
+        const root = t.spans.find((s) => s.root)
+        const llm = t.spans.find((s) => s.llm)
+        const bad = t.status !== 'completed'
+        const stCls = t.status === 'completed' ? 'st-ok' : bad ? 'st-bad' : 'st-warn'
+        const stTxt = t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : '进行中'
+        let foot = `总时长只认根段 <b>invoke_agent</b>；子段之和 ≠ 总时长`
+        if (llm) {
+          const share = ((llm.d / root.d) * 100).toFixed(1)
+          foot = `模型占 <b>${share}%</b>，首字仅 ${fmt(llm.llm.ttft)}（${((llm.llm.ttft / llm.d) * 100).toFixed(1)}% of llm.chat）—— <b>${llm.llm.ttft / llm.d > 0.5 ? '首字就慢' : '吐字慢，非首字慢'}</b>`
+        }
+        return `<div class="trace-inline" data-m>
+          <div class="ti-head">
+            <span class="ti-title"
+              >执行 trace<button class="info-btn" data-tip="fields" aria-label="字段说明">
+                !
+              </button></span
+            >
+            <span class="ti-status ${stCls}">${stTxt}</span>
+            <span class="ti-total">${fmt(root.d)}</span>
+          </div>
+          ${segBar(t)}
+          ${segList(t, isCompact)}
+          <div class="ti-foot">${foot}</div>
+          ${qwNote(t)}
+        </div>`
+      }
+
+      /* ═══════════ 屏② 面板（可展开）═══════════ */
+      let openIdx = 0 // 默认第 0 张（店长）展开
+      // 紧凑态（折叠微段）——默认空对象 = 全部展开。
+      // 时间序下默认全列：折叠中间的微段会把因果链切断，而段数上限 11、高度可控。
+      let compact = {}
+      const INLINE_TRACE = ['96b46097', '77a34bfc', '374f58f0', null, null]
+
+      function renderInline() {
+        const cards = MEMBERS.map((m, i) => {
+          const isOpen = openIdx === i
+          const key = INLINE_TRACE[i]
+          const card = `<div class="member-card slim ${isOpen ? 'expanded' : ''}" data-m data-idx="${i}">
+            <button class="avatar-btn" title="打开 ${m.name} 的设置" data-avatar="${i}">${m.avatar}</button>
+            <span class="slim-name">${m.name}</span>
+            <div class="slim-right">
+              ${m.queue > 0 ? `<span class="queue-badge">${m.queue}</span>` : ''}
+              <span class="status-dot ${m.status === 'idle' ? 'dot-idle' : 'dot-busy'}"></span>
+              <span class="slim-tokens">${m.tokens}</span>
+              <span class="slim-chev">▸</span>
+            </div>
+          </div>`
+          const open =
+            isOpen && key
+              ? traceInline(byKey[key], !!compact[key])
+              : isOpen
+                ? `<div class="trace-inline" data-m>
+                <div class="ti-head"><span class="ti-title">执行 trace</span>
+                <span class="ti-status st-warn">采集中</span></div>
+                <div class="ti-foot" style="margin-top:0;border:none;padding-top:2px">
+                  段在一次执行<b>收尾时</b>才一次性落库 ⇒ 正在跑的执行此刻<b>库里一行段都没有</b>。
+                  这不是「0ms」，也不是「空白」——必须显式说明。
+                </div></div>`
+                : ''
+          return card + open
+        }).join('')
+        document.getElementById('panel-inline').innerHTML =
+          statCard() +
+          `<div class="section-title" data-m>会话成员</div><div class="member-list">${cards}</div>` +
+          configAndAdd()
+
+        const t = INLINE_TRACE[openIdx] ? byKey[INLINE_TRACE[openIdx]] : null
+        document.getElementById('inline-explain').innerHTML = t
+          ? `当前展开：<b>${t.avatar} ${t.agent}</b> · 会话「${t.session}」· 执行 <code>${t.key}</code> ·
+             执行耗时 <b>${fmt(t.spans.find((s) => s.root).d)}</b>（只认根段）${t.queuedMs ? ` · 本跳开始前还排了 <b>${fmt(t.queuedMs)}</b> 的队（<b>不计入</b>本跳，属上一跳）` : ''}
+             <br />段清单<b>按时间顺序</b>排——从上往下读就是执行的先后；把鼠标停在段名或段条上有字段说明。点其它猫可切换：ds猫 是<b>超时失败</b>（<code>llm.chat</code> 带红标），flash猫 那条带 <b>152 秒排队</b>。`
+          : `当前展开：<b>图测猫</b> —— 这条演示「执行进行中」的形态。`
+      }
+
+      /* ═══════════ 屏④ 查询表单 ═══════════ */
+      const qAgent = new Set()
+      const qStatus = new Set(['completed', 'failed', 'running'])
+      let qChain = ''
+
+      function initQuery() {
+        const sel = document.getElementById('q-session')
+        sel.innerHTML =
+          `<option value="">全部会话</option>` +
+          SESSIONS.map(
+            (s) =>
+              `<option value="${s.title}">${s.title}（${s.execs} 次执行 / ${s.spans} 段）</option>`
+          ).join('')
+
+        document.getElementById('q-agents').innerHTML = AGENTS.map(
+          (a) =>
+            `<span class="chip" data-agent="${a.name}">${a.avatar} ${a.name} <span class="dim">${a.n}</span></span>`
+        ).join('')
+        document.getElementById('q-status').innerHTML = ['completed', 'failed', 'running']
+          .map(
+            (s) =>
+              `<span class="chip on" data-status="${s}">${{ completed: '完成', failed: '失败', running: '进行中' }[s]}</span>`
+          )
+          .join('')
+
+        // Agent 折叠多选：点控件开合，点 chip 选中（面板不关，可连选）
+        const agBtn = document.getElementById('q-agent-btn')
+        const agPop = document.getElementById('q-agents')
+        agBtn.addEventListener('click', (e) => {
+          e.stopPropagation()
+          agPop.classList.toggle('open')
+        })
+        agPop.addEventListener('click', (e) => e.stopPropagation())
+        document.addEventListener('click', () => agPop.classList.remove('open'))
+
+        function syncAgentLabel() {
+          const n = qAgent.size
+          agBtn.innerHTML =
+            (n === 0 ? '全部 Agent' : `已选 ${n} 只`) + '<span class="caret">▼</span>'
+          agBtn.classList.toggle('on', n > 0)
+        }
+        document.querySelectorAll('#q-agents .chip').forEach((el) =>
+          el.addEventListener('click', () => {
+            const n = el.dataset.agent
+            qAgent.has(n) ? qAgent.delete(n) : qAgent.add(n)
+            el.classList.toggle('on', qAgent.has(n))
+            syncAgentLabel()
+            runQuery()
+          })
+        )
+        window.__syncAgentLabel = syncAgentLabel
+        document.querySelectorAll('#q-status .chip').forEach((el) =>
+          el.addEventListener('click', () => {
+            const n = el.dataset.status
+            qStatus.has(n) ? qStatus.delete(n) : qStatus.add(n)
+            el.classList.toggle('on', qStatus.has(n))
+            runQuery()
+          })
+        )
+        ;['q-session', 'q-from', 'q-to', 'q-dur', 'q-chain'].forEach((id) =>
+          document.getElementById(id).addEventListener('input', runQuery)
+        )
+        // 日期窗：整窗可点即弹选择器
+        // 原生 <input type=date> 只有右侧那个小图标可点，窗体本身点了只是聚焦。
+        // showPicker() 需要用户手势；不支持 / 非安全上下文会抛，catch 后回落原生行为（点图标仍可弹）。
+        ;['q-from', 'q-to'].forEach((id) => {
+          const el = document.getElementById(id)
+          el.addEventListener('click', () => {
+            try {
+              el.showPicker()
+            } catch {
+              /* 回落：图标仍可点 */
+            }
+          })
+        })
+        document.getElementById('q-run').addEventListener('click', runQuery)
+        document.getElementById('q-reset').addEventListener('click', () => {
+          qAgent.clear()
+          qStatus.clear()
+          ;['completed', 'failed', 'running'].forEach((s) => qStatus.add(s))
+          qChain = ''
+          document.getElementById('q-session').value = ''
+          document.getElementById('q-dur').value = ''
+          document.getElementById('q-chain').value = ''
+          document.querySelectorAll('#q-agents .chip').forEach((e) => e.classList.remove('on'))
+          document.querySelectorAll('#q-status .chip').forEach((e) => e.classList.add('on'))
+          window.__syncAgentLabel()
+          runQuery()
+        })
+      }
+
+      function runQuery() {
+        const session = document.getElementById('q-session').value
+        const from = document.getElementById('q-from').value
+        const to = document.getElementById('q-to').value
+        const dur = parseFloat(document.getElementById('q-dur').value) || 0
+        const chain = (document.getElementById('q-chain').value || '').trim().toLowerCase()
+
+        const hit = EXECS.filter((x) => {
+          if (session && x.s !== session) return false
+          if (qAgent.size && !qAgent.has(x.a)) return false
+          if (qStatus.size && !qStatus.has(x.st)) return false
+          if (dur && x.ms < dur * 1000) return false
+          if (chain && !x.c.toLowerCase().includes(chain)) return false
+          const d = x.at.slice(0, 10)
+          if (from && d < from) return false
+          if (to && d > to) return false
+          return true
+        })
+
+        document.getElementById('q-count').textContent = hit.length
+        document.getElementById('q-chains').textContent = new Set(hit.map((x) => x.c)).size
+        document.getElementById('q-spans').textContent = hit.reduce((a, b) => a + b.n, 0)
+        document.getElementById('q-window').textContent =
+          `耗时 ${(hit.reduce((a, b) => a + b.ms, 0) / 1000).toFixed(0)}s 合计`
+        document.getElementById('q-note').textContent = hit.length
+          ? '点任意行展开段瀑布'
+          : '没有命中——放宽条件试试'
+
+        document.getElementById('q-rows').innerHTML = hit
+          .map((x) => {
+            const bCls = { completed: 'b-completed', failed: 'b-failed', running: 'b-running' }[
+              x.st
+            ]
+            const bTxt = { completed: '完成', failed: '失败', running: '进行中' }[x.st]
+            const slow =
+              x.ms > 300000 ? `<span class="badge b-slow" style="margin-left:4px">slow</span>` : ''
+            const t = byKey[x.e]
+            const openRow = t
+              ? `<tr class="chain-open" data-open="${x.e}" style="display:none"><td colspan="8"><div class="chain-open-inner">
+                   ${traceInline(t, false)}
+                 </div></td></tr>`
+              : `<tr class="chain-open" data-open="${x.e}" style="display:none"><td colspan="8"><div class="chain-open-inner">
+                   <div class="note" style="margin:0">本次执行未取段明细（原型内嵌了 3 条完整 trace：<code>96b46097</code> / <code>77a34bfc</code> / <code>374f58f0</code>）。
+                   真实实现里此处调 <code>GET /api/eval/spans?executionId=</code>。</div>
+                 </div></td></tr>`
+            return `<tr class="body" data-row="${x.e}">
+                <td class="dim mono">${t ? '▸' : ''}</td>
+                <td>${x.s}</td>
+                <td><span class="agent-cell">${x.av} ${x.a}</span></td>
+                <td><span class="badge ${bCls}">${bTxt}</span>${slow}</td>
+                <td class="mono" style="text-align:right">${(x.ms / 1000).toFixed(1)}s</td>
+                <td class="mono dim" style="text-align:right">${x.n}</td>
+                <td class="mono dim" style="text-align:right">${x.lead}</td>
+                <td class="mono dim">${x.c}…</td>
+              </tr>${openRow}`
+          })
+          .join('')
+
+        document.querySelectorAll('#q-rows tr.body').forEach((tr) =>
+          tr.addEventListener('click', () => {
+            const r = document.querySelector(`#q-rows tr[data-open="${tr.dataset.row}"]`)
+            if (!r) return
+            const show = r.style.display === 'none'
+            r.style.display = show ? '' : 'none'
+            tr.firstElementChild.textContent = show ? '▾' : '▸'
+            measure()
+          })
+        )
+      }
+
+      /* ═══════════ 屏⑤ 聚合表 ═══════════ */
+      function renderAgg() {
+        document.getElementById('agg-rows').innerHTML = AGG.map(
+          ([n, p, cnt, avg, max, desc]) =>
+            `<tr><td>${n}</td>
+              <td><span class="swatch p-${p}"></span>${PHASE_LABEL[p]}</td>
+              <td class="mono" style="text-align:right">${cnt}</td>
+              <td class="mono" style="text-align:right">${fmt(avg)}</td>
+              <td class="mono" style="text-align:right">${fmt(max)}</td>
+              <td>${desc}</td></tr>`
+        ).join('')
+      }
+
+      /* ═══════════ 运行时实测：尺寸标注 ═══════════ */
+      function measure() {
+        document.querySelectorAll('.panel-col').forEach((col) => {
+          const body = col.querySelector('.session-agents-panel')
+          const t = col.querySelector('[data-total]')
+          if (body && t) t.textContent = Math.round(body.scrollHeight) + 'px 内容高'
+        })
+        document.querySelectorAll('[data-m]:not(.member-list)').forEach((el) => {
+          const old = el.querySelector(':scope > .annot')
+          if (old) old.remove()
+          const r = el.getBoundingClientRect()
+          if (!r.height) return
+          const a = document.createElement('div')
+          a.className = 'annot'
+          const parent = el.closest('.session-agents-panel') || el.parentElement
+          const top = Math.round(r.top - parent.getBoundingClientRect().top)
+          a.textContent = `${Math.round(r.height)}px · y${top}`
+          el.appendChild(a)
+        })
+      }
+
+      /* ═══════════ 交互接线 ═══════════ */
+      function wirePanel(containerId, onOpen) {
+        const c = document.getElementById(containerId)
+        c.querySelectorAll('[data-avatar]').forEach((b) =>
+          b.addEventListener('click', (e) => {
+            e.stopPropagation()
+            const m = MEMBERS[+b.dataset.avatar]
+            alert(
+              `原型：点「头像」→ 打开 ${m.name} 的设置抽屉（见屏③）\n\n热区 30×30，与「点卡片展开」互不干扰。`
+            )
+          })
+        )
+        if (onOpen) {
+          c.querySelectorAll('.member-card.slim').forEach((el) =>
+            el.addEventListener('click', (e) => {
+              if (e.target.closest('[data-avatar]')) return
+              onOpen(+el.dataset.idx)
+            })
+          )
+        }
+      }
+
+      function boot() {
+        renderBefore()
+        renderAfter()
+        renderDrawerPanel()
+        renderInline()
+        renderAgg()
+        initQuery()
+        runQuery()
+
+        // renderInline 会重建 DOM，故每次重建后必须重新接线
+        const rewire = () =>
+          wirePanel('panel-inline', (i) => {
+            openIdx = openIdx === i ? -1 : i
+            renderInline()
+            rewire()
+            measure()
+          })
+        rewire()
+        wirePanel('panel-after')
+        wirePanel('panel-drawer')
+
+        document.getElementById('panel-inline').addEventListener('click', (e) => {
+          const more = e.target.closest('[data-more]')
+          if (more) {
+            const k = more.dataset.more
+            compact[k] = !compact[k]
+            renderInline()
+            rewire()
+            measure()
+          }
+        })
+
+        document.querySelectorAll('.nav-btn').forEach((b) =>
+          b.addEventListener('click', () => {
+            document.querySelectorAll('.nav-btn').forEach((x) => x.classList.remove('active'))
+            document.querySelectorAll('.screen').forEach((x) => x.classList.remove('active'))
+            b.classList.add('active')
+            document.getElementById(b.dataset.screen).classList.add('active')
+            measure()
+          })
+        )
+        document.getElementById('btn-dim').addEventListener('click', (e) => {
+          document.body.classList.toggle('dim')
+          e.target.classList.toggle('on', document.body.classList.contains('dim'))
+          measure()
+        })
+        document.getElementById('btn-theme').addEventListener('click', (e) => {
+          const light = document.documentElement.getAttribute('data-theme') === 'light'
+          document.documentElement.setAttribute('data-theme', light ? 'dark' : 'light')
+          e.target.textContent = light ? '切浅色' : '切深色'
+        })
+        window.addEventListener('resize', measure)
+        measure()
+      }
+      boot()
+    </script>
+  </body>
+</html>
