@@ -275,6 +275,29 @@ export function sessionWorktreePath(mainRoot: string, shortId: string): string {
   return resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX, shortId)
 }
 
+/** 猫 short id（agent id 前 8 位，分支/目录名用） */
+function catShortId(agentId: string): string {
+  return agentId.slice(0, 8)
+}
+
+/**
+ * 猫分支名（一猫一工作分支，ADR 0015 D1）。
+ *
+ * **连字符而非斜杠**：`session/<sid8>` 与 `session/<sid8>/<cat8>` 在 git ref 树里
+ * 是「目录 vs 文件」冲突——`git branch` 与真实机制 `git worktree add -b` 均报
+ * `fatal: cannot lock ref`，`pack-refs --all` 绕不过、反序（先子后父）同样失败
+ * （ADR 0015 E1，仓外临时仓实跑）。失败形态是静默的：`git worktree add` 失败走
+ * catch → 返回 null，猫拿不到 worktree 而无人察觉。
+ */
+export function catBranch(shortId: string, agentId: string): string {
+  return `${sessionBranch(shortId)}-${catShortId(agentId)}`
+}
+
+/** 猫 worktree 路径（主仓库兄弟目录，与会话 worktree 同层） */
+export function catWorktreePath(mainRoot: string, shortId: string, agentId: string): string {
+  return resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX, `${shortId}-${catShortId(agentId)}`)
+}
+
 /**
  * pnpm 包级依赖目录（不提升到根 node_modules，如 uuid、vitejs/plugin-vue）。
  * 与 WT_RESIDUE_LINK_PATHS 覆盖的残留路径一致（建与清对称）。
@@ -360,6 +383,92 @@ function removeStaleWorktreeDir(wtPath: string): boolean {
   return false
 }
 
+/** ensureWorktreeAt 的产出：路径 + 是否本次新建（复用不重复打 ready 日志） */
+interface WorktreeReady {
+  path: string
+  created: boolean
+}
+
+/**
+ * 建/复用 worktree 的三步判定骨架（会话 worktree 与猫 worktree 共享）。
+ *
+ * 抽自 ensureSessionWorktree（原实现内联）：① 目录已存在且带 `.git` 标记 → 复用；
+ * 无标记（残留）→ removeStaleWorktreeDir 链接先行安全清理；② 分支不存在才建；
+ * ③ `git worktree add`（**不带 `-b`**——分支已在步骤 ② 建好）。**两处调用同一份
+ * 代码：复制必然漂移**（本仓既有教训：建与清的路径清单必须对称）。
+ *
+ * - `startPoint` 省略 → 分支从 mainRoot 当前 HEAD 分叉（会话 worktree 既有语义）
+ * - `startPoint` 给出 → 从该起点分叉（猫 worktree 从集成分支 `session/<sid8>`，不是 dev）
+ * - 失败一律返回 null（是否降级、降到哪由调用方决定，不在本函数内自作主张）
+ */
+function ensureWorktreeAt(opts: {
+  mainRoot: string
+  branch: string
+  wtPath: string
+  startPoint?: string
+  /** 失败日志前缀（'session' | 'cat'）——会话路径文案逐字不变 */
+  label: string
+}): WorktreeReady | null {
+  const { mainRoot, branch, wtPath, startPoint, label } = opts
+
+  // 已存在 → 复用（重启恢复路径：目录与分支 ref 均持久）。
+  // worktree 标记（.git 文件）存在才算有效；无标记的残留目录删除重建。
+  if (existsSync(wtPath)) {
+    if (existsSync(resolve(wtPath, '.git'))) return { path: wtPath, created: false }
+    // 无 .git 标记 = 残留目录（上次收口只清 git 层留下的物理残留 / 崩溃残留）。
+    // 旧实现直接 rmSync 扫树——残留含 junction 时「是否跟随」押在 Node 版本
+    // 行为上，且 EPERM 静默降级；现走链接先行安全清理（removeStaleWorktreeDir）
+    if (!removeStaleWorktreeDir(wtPath)) return null
+  }
+
+  // 分支不存在才建
+  let branchExists = false
+  try {
+    execFileSync('git', ['rev-parse', '--verify', `refs/heads/${branch}`], {
+      cwd: mainRoot,
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
+    branchExists = true
+  } catch {
+    /* 分支不存在 */
+  }
+  if (!branchExists) {
+    try {
+      execFileSync('git', startPoint ? ['branch', branch, startPoint] : ['branch', branch], {
+        cwd: mainRoot,
+        env: cleanGitEnv(),
+        stdio: 'ignore',
+      })
+    } catch (err: any) {
+      log.warn(`${label} branch create failed — fallback to main workspace`, {
+        branch,
+        error: err.message,
+      })
+      return null
+    }
+  }
+
+  try {
+    mkdirSync(resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX), { recursive: true })
+    execFileSync('git', ['worktree', 'add', wtPath, branch], {
+      cwd: mainRoot,
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
+  } catch (err: any) {
+    log.warn('worktree add failed — fallback to main workspace', {
+      branch,
+      wtPath,
+      error: err.message,
+    })
+    return null
+  }
+
+  linkNodeModules(mainRoot, wtPath)
+  return { path: wtPath, created: true }
+}
+
 /**
  * 确保会话 worktree 存在（幂等）。
  *
@@ -385,63 +494,46 @@ export function ensureSessionWorktree(sessionId: string): string | null {
   const branch = sessionBranch(shortId)
   const wtPath = sessionWorktreePath(mainRoot, shortId)
 
-  // 已存在 → 复用（重启恢复路径：目录与分支 ref 均持久）。
-  // worktree 标记（.git 文件）存在才算有效；无标记的残留目录删除重建。
-  if (existsSync(wtPath)) {
-    if (existsSync(resolve(wtPath, '.git'))) return wtPath
-    // 无 .git 标记 = 残留目录（上次收口只清 git 层留下的物理残留 / 崩溃残留）。
-    // 旧实现直接 rmSync 扫树——残留含 junction 时「是否跟随」押在 Node 版本
-    // 行为上，且 EPERM 静默降级；现走链接先行安全清理（removeStaleWorktreeDir）
-    if (!removeStaleWorktreeDir(wtPath)) return null
-  }
+  const ready = ensureWorktreeAt({ mainRoot, branch, wtPath, label: 'session' })
+  if (!ready) return null
+  if (ready.created) log.info('session worktree ready', { sessionId, branch, wtPath })
+  return ready.path
+}
 
-  // 分支不存在才建（从主仓库当前 HEAD 分叉）
-  let branchExists = false
-  try {
-    execFileSync('git', ['rev-parse', '--verify', `refs/heads/${branch}`], {
-      cwd: mainRoot,
-      env: cleanGitEnv(),
-      stdio: 'ignore',
-    })
-    branchExists = true
-  } catch {
-    /* 分支不存在 */
-  }
-  if (!branchExists) {
-    try {
-      execFileSync('git', ['branch', branch], {
-        cwd: mainRoot,
-        env: cleanGitEnv(),
-        stdio: 'ignore',
-      })
-    } catch (err: any) {
-      log.warn('session branch create failed — fallback to main workspace', {
-        branch,
-        error: err.message,
-      })
-      return null
-    }
-  }
+/**
+ * 确保某只猫的 worktree 存在（幂等）——一猫一 worktree（ADR 0015 D1）。
+ *
+ * 与会话 worktree 同骨架，两处差异：
+ * - 分支/目录名带猫后缀（连字符，见 catBranch）
+ * - **从集成分支 `session/<sid8>` 分叉，不是 dev**——猫的工作起点是会话集成分支，
+ *   fan-in 再把它合回该分支（ADR 0015 §6.3 方案 a：冲突关在会话 worktree 里，
+ *   绝不落 dev 主工作区）
+ *
+ * 集成分支不存在 ⇒ 建分支失败 ⇒ 返回 **null**：降级到哪由调用方决定，
+ * 本函数**绝不自行落主仓库**（T-1 已收窄的降级路径，不得回退）。
+ * `agentId` 前 8 位为空 ⇒ 返回 null（否则造出 `session/<sid8>-` 空后缀分支，
+ * 与枚举侧 S3-5 的过滤同理）。
+ */
+export function ensureCatWorktree(sessionId: string, agentId: string): string | null {
+  if (!isGitRepo()) return null
+  const mainRoot = getMainRepoRoot()
+  if (!mainRoot) return null
+  const shortId = sessionShortId(sessionId)
+  if (!shortId) return null
+  if (!catShortId(agentId)) return null
+  const branch = catBranch(shortId, agentId)
+  const wtPath = catWorktreePath(mainRoot, shortId, agentId)
 
-  try {
-    mkdirSync(resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX), { recursive: true })
-    execFileSync('git', ['worktree', 'add', wtPath, branch], {
-      cwd: mainRoot,
-      env: cleanGitEnv(),
-      stdio: 'ignore',
-    })
-  } catch (err: any) {
-    log.warn('worktree add failed — fallback to main workspace', {
-      branch,
-      wtPath,
-      error: err.message,
-    })
-    return null
-  }
-
-  linkNodeModules(mainRoot, wtPath)
-  log.info('session worktree ready', { sessionId, branch, wtPath })
-  return wtPath
+  const ready = ensureWorktreeAt({
+    mainRoot,
+    branch,
+    wtPath,
+    startPoint: sessionBranch(shortId),
+    label: 'cat',
+  })
+  if (!ready) return null
+  if (ready.created) log.info('cat worktree ready', { sessionId, agentId, branch, wtPath })
+  return ready.path
 }
 
 /** 查询会话 worktree 路径（目录存在才返回，无则 null——调用方走降级路径） */
@@ -527,7 +619,15 @@ function rmdirEmpty(p: string): void {
   }
 }
 
-function cleanupWorktreeResidue(wtPath: string): void {
+/**
+ * 链接先行的物理残留清理（worktree 目录级）。
+ *
+ * 导出供 `worktree-fanin.ts` 的猫 worktree 回收复用——**不复制的理由同
+ * ensureWorktreeAt**：这段守卫（链接先删 + 复核无链接才 recursive 清扫）是
+ * 「删 symlink 绝不跟随」的唯一承载点，第二份拷贝漂移一次就是删穿主仓库
+ * node_modules 的灾难。语义与调用方约束见上方大段注释。
+ */
+export function cleanupWorktreeResidue(wtPath: string): void {
   try {
     for (const rel of WT_RESIDUE_LINK_PATHS) {
       removeLinkOnly(resolve(wtPath, rel))
