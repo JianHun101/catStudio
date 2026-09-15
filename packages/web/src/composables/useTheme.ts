@@ -4,6 +4,13 @@ type Theme = 'dark' | 'light'
 
 const STORAGE_KEY = 'catstudy-theme'
 
+/**
+ * 生效主题 = 存储值 → 默认值。
+ * 默认取 `'light'`：改的只是**无存储时的兜底字面量**，不是覆盖用户选择——
+ * 存过 `'dark'` 的用户仍走上面的早返回、继续进深色（优先级未动）。
+ * `index.html` 的 `<html data-theme="light">` 预置只负责消首屏 FOUC，
+ * 收口同样落在这里：dark 走 applyTheme() 的 `delete dataset.theme` 回落 `:root` 深色。
+ */
 function readStoredTheme(): Theme {
   try {
     const v = localStorage.getItem(STORAGE_KEY)
@@ -11,7 +18,7 @@ function readStoredTheme(): Theme {
   } catch {
     // localStorage 不可用（隐私模式等），忽略
   }
-  return 'dark'
+  return 'light'
 }
 
 function applyTheme(t: Theme): void {
