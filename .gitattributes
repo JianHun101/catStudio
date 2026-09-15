@@ -1,0 +1,14 @@
+# 行尾策略（Windows 行尾假红根修单 §A）
+# 背景：本仓 core.autocrlf=true 且此前无 .gitattributes ⇒ worktree 检出 CRLF，
+# 而 blob 存 LF ⇒ `?raw` 读源码拿到 \r\n ⇒ 静态源断言必红 ⇒ pre-commit 全仓闸挡死提交。
+#
+# ① 文本文件一律 LF：检出 LF、入库 LF，消除「工作副本行尾 ≠ blob 行尾」这一整类假红。
+* text=auto eol=lf
+
+# ② cmd.exe 对 LF-only 的 .bat/.cmd 在 goto/标签上有坑，显式保 CRLF。
+#    本仓当前 0 个此类文件，属预防性规则。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 不加二进制项：本仓 0 个 tracked 二进制，text=auto 已能自动判定；
+# 无消费者的预留规则会腐烂。
