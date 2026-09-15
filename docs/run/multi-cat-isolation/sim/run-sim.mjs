@@ -158,22 +158,15 @@ function grid(id, title, fn) {
   GRIDS.push({ id, title, fn })
 }
 
-/** 格内上下文 */
+/** 格内上下文：一次性仓（会话分支由各格自行 `git branch session/<sid8>` 建） */
 function ctxFor(name) {
-  return {
-    repo: makeRepo(name),
-    /** 建会话分支（T-2 的分叉点） */
-    makeSession(repo, sid8) {
-      git(repo, ['branch', `session/${sid8}`])
-      return `session/${sid8}`
-    },
-  }
+  return { repo: makeRepo(name) }
 }
 
 // ── 组 A · 建立（3 格）───────────────────────────────────
 
 grid('A1', '猫 worktree 分叉与共存', () => {
-  const { repo, makeSession } = ctxFor('A1')
+  const { repo } = ctxFor('A1')
   const steps = []
   const checks = []
   const sid = 'abcd1234'
@@ -252,7 +245,7 @@ grid('A1', '猫 worktree 分叉与共存', () => {
 })
 
 grid('A2', '同猫重复建 → 幂等复用（复刻 git-utils.ts:379 语义）', () => {
-  const { repo, makeSession } = ctxFor('A2')
+  const { repo } = ctxFor('A2')
   const steps = []
   const checks = []
   const sid = 'abcd1234'
@@ -343,7 +336,7 @@ grid('A2', '同猫重复建 → 幂等复用（复刻 git-utils.ts:379 语义）
 })
 
 grid('A3', '双猫并存 + 提交作用域', () => {
-  const { repo, makeSession } = ctxFor('A3')
+  const { repo } = ctxFor('A3')
   const steps = []
   const checks = []
   const sid = 'abcd1234'
@@ -416,7 +409,7 @@ grid('A3', '双猫并存 + 提交作用域', () => {
 // ── 组 B · 审查侧（2 格）─────────────────────────────────
 
 grid('B1', 'detached 审查 worktree 读到该 sha 的树', () => {
-  const { repo, makeSession } = ctxFor('B1')
+  const { repo } = ctxFor('B1')
   const steps = []
   const checks = []
   const sid = 'abcd1234'
@@ -470,7 +463,7 @@ grid('B1', 'detached 审查 worktree 读到该 sha 的树', () => {
 })
 
 grid('B2', '审查 worktree 回收（含 symlink 与 Windows EPERM）', () => {
-  const { repo, makeSession } = ctxFor('B2')
+  const { repo } = ctxFor('B2')
   const steps = []
   const checks = []
   const sid = 'abcd1234'
