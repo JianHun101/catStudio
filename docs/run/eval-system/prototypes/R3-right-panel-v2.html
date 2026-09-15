@@ -8,6 +8,10 @@
          令牌：逐字照抄 packages/web/index.html（含票 H 的提亮与三个新令牌）
          ═══════════════════════════════════════════════════════════ */
       :root {
+        /* 原生控件按深色渲染 —— 这是「深色下日期图标不可见」的正解：
+           浏览器默认按 light 画 ::-webkit-calendar-picker-indicator（黑图标），
+           落在深底上就看不见；color-scheme 一改，图标随主题自动转白，无需 filter */
+        color-scheme: dark;
         --bg-deep: #14110e;
         --bg-base: #1b1815;
         --bg-surface: #231f1b;
@@ -40,6 +44,7 @@
         --ease-out: 0.15s ease-out;
       }
       [data-theme='light'] {
+        color-scheme: light; /* 浅色主题下图标回黑，同一份 CSS 两侧都对 */
         --bg-deep: #f8f4ed;
         --bg-base: #efe8dd;
         --bg-surface: #ffffff;
@@ -504,29 +509,16 @@
         background: rgba(212, 168, 84, 0.1);
       }
 
-      /* 队列等待条（在根段之外——必须与执行段物理分离）*/
-      .qwait {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        margin-bottom: 5px;
-        font-size: 10px;
-        color: var(--accent-yellow);
-      }
-      .qwait-bar {
-        flex: 1;
-        height: 6px;
-        border-radius: 3px;
-        overflow: hidden;
-        background: repeating-linear-gradient(
-          45deg,
-          rgba(212, 168, 84, 0.45) 0 3px,
-          rgba(212, 168, 84, 0.12) 3px 6px
-        );
-      }
-      .qwait-num {
+      /* 段失败 / 超时标记 —— 时间序下错误段可能落在任意位置，要就地可辨 */
+      .segflag {
+        flex-shrink: 0;
+        padding: 0 4px;
         font-family: var(--font-mono);
-        font-variant-numeric: tabular-nums;
+        font-size: 8.5px;
+        line-height: 1.6;
+        color: var(--accent-red);
+        background: rgba(224, 85, 106, 0.14);
+        border-radius: 2px;
       }
 
       /* 段条：按真实偏移/时长定位的堆叠条 */
@@ -638,6 +630,113 @@
         margin-top: 4px;
         display: inline-block;
         border-bottom: 1px dotted currentColor;
+      }
+
+      /* 排队等待注解：不属于本次执行（是上一跳占用槽位的时间）
+         —— 不画条、不进段分解，只用文字解释「用户等的」与「系统报的」差在哪 */
+      .qw-note {
+        display: flex;
+        gap: 5px;
+        align-items: flex-start;
+        margin-top: 6px;
+        padding: 4px 7px;
+        font-size: 9.5px;
+        line-height: 1.5;
+        color: var(--accent-yellow);
+        background: rgba(212, 168, 84, 0.07);
+        border-left: 2px solid var(--accent-yellow);
+        border-radius: 0 3px 3px 0;
+      }
+      .qw-note b {
+        color: var(--accent-yellow);
+        font-weight: 600;
+      }
+      .qw-note .mono {
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ── 字段说明：ⓘ 触发 + 自绘浮层（原生 title 有延迟且不能排版）── */
+      .info-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        width: 13px;
+        height: 13px;
+        padding: 0;
+        font-family: var(--font-mono);
+        font-size: 9px;
+        line-height: 1;
+        color: var(--text-muted);
+        cursor: help;
+        background: transparent;
+        border: 1px solid var(--border-default);
+        border-radius: 50%;
+      }
+      .info-btn:hover,
+      .info-btn.on {
+        color: var(--accent-text);
+        background: var(--accent-soft);
+        border-color: var(--accent);
+      }
+      .ti-title {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+      }
+      #tip {
+        position: fixed;
+        z-index: 999;
+        max-width: 330px;
+        padding: 9px 11px;
+        font-size: 10.5px;
+        line-height: 1.55;
+        color: var(--text-secondary);
+        background: var(--bg-raised);
+        border: 1px solid var(--border-table);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+        opacity: 0;
+        transform: translateY(3px);
+        transition:
+          opacity 0.12s ease-out,
+          transform 0.12s ease-out;
+        pointer-events: none;
+      }
+      #tip.on {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      #tip .tip-h {
+        margin-bottom: 4px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      #tip .tip-sep {
+        height: 1px;
+        margin: 7px 0;
+        background: var(--border-subtle);
+      }
+      #tip .tip-row {
+        display: flex;
+        gap: 7px;
+        margin-top: 3px;
+      }
+      #tip .tip-n {
+        flex-shrink: 0;
+        min-width: 122px;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-primary);
+      }
+      #tip .tip-d {
+        flex: 1;
+      }
+      #tip .tip-d b {
+        color: var(--accent-yellow);
+        font-weight: 600;
       }
 
       /* ─── 调度队列 / 折叠配置 / 添加猫咪（照抄）─── */
@@ -959,6 +1058,24 @@
       .qf-w-date {
         width: 112px;
       } /* 96px 会把 2026/09/15 裁成 2026/09/1 */
+      /* 日期窗：整窗可点即弹选择器（见 JS 的 showPicker 接线）；
+         图标可见性靠 :root 的 color-scheme，这里只管命中区与 hover 反馈 */
+      .qf-w-date .input[type='date'] {
+        cursor: pointer;
+      }
+      .qf-w-date .input[type='date']::-webkit-calendar-picker-indicator {
+        cursor: pointer;
+        opacity: 0.9; /* 不再靠低透明度弱化——深色下那正是「看不见」的成因之一 */
+        padding: 2px;
+        border-radius: 3px;
+      }
+      .qf-w-date .input[type='date']::-webkit-calendar-picker-indicator:hover {
+        opacity: 1;
+        background: var(--accent-soft);
+      }
+      .qf-w-date .input[type='date']:hover {
+        border-color: var(--border-focus);
+      }
       .qf-w-status {
         width: 140px;
       }
@@ -1221,6 +1338,7 @@
     </style>
   </head>
   <body>
+    <div id="tip" role="tooltip"></div>
     <div class="shell">
       <h1>R3 原型 v2 — 右侧面板（方案A + 弱化卡 + 头像设置）· 评估页查询表单</h1>
       <p class="sub">
@@ -1281,8 +1399,11 @@
         <div class="screen-title">② 方案A：点卡片 → 卡下方内联展开段条（手风琴单开）</div>
         <div class="screen-desc">
           点卡片体展开
-          trace；点<b>头像</b>开设置（两者热区独立，不冲突）。展开区高度<b>随数据自适应</b>——只列占比
-          ≥1% 的段，其余收成一行「其他 N 段」。<b>点不同猫可切换三条真实 trace 对照。</b>
+          trace；点<b>头像</b>开设置（两者热区独立，不冲突）。段清单<b>按时间顺序排布</b>（从上往下读
+          = 执行的先后），默认全列——折叠中间的微段会把因果链切断；嫌长可点「折叠微段」。
+          <b>把鼠标停在段名或段条上</b>会弹出该段的说明，trace 标题旁的 <b>!</b> 是字段总说明。<b
+            >点不同猫可切换三条真实 trace 对照。</b
+          >
         </div>
 
         <div class="row">
@@ -1300,7 +1421,9 @@
               >，绝不加总子段——本页三条 trace 的「子段之和」分别是根段的
               <b>2.0× / 1.6× / 3.0×</b>，加总必超 100%；② <code>running</code> 的执行
               <b>一行段都没有</b
-              >（段在执行收尾才一次性落库），必须显式显示「采集中」，不能画成空白或 0。
+              >（段在执行收尾才一次性落库），必须显式显示「采集中」，不能画成空白或 0； ③
+              <b><code>dispatch.queue_wait</code> 不计入本次执行</b
+              >——它量的是「上一跳还占着槽位」的那段时间，属两跳之间的间隔，画进本跳的段分解就是重复计时。
             </div>
           </div>
         </div>
@@ -1559,8 +1682,12 @@
           >
           <br /><br />
           这与 R2 票面已记的
-          <code>git.auto_commit</code> 是同一类（轮次段挂根段下、窗口在根段外）。本原型对它的处理是
-          <b>物理分离</b>：段条之外单画一条斜纹「排队等待」，绝不混进 100% 堆叠条。
+          <code>git.auto_commit</code> 是同一类（轮次段挂根段下、窗口在根段外）。<br /><br />
+          <b>已裁决：不计入本次执行</b>——它量的是「上一跳还占着槽位」的那段时间，属
+          <b>两跳之间的间隔</b>。本原型的处理是<b>画都不画</b>：段条与段清单里都没有它， 只在 trace
+          末尾留一行文字注解。 <br /><br />
+          <b>但不能让它静默消失</b>——「用户等了 312 秒、系统每一处都只报 160 秒」这个偏差
+          得有人解释；静默比画错更坏，那正是这张红框存在的理由。
         </div>
 
         <div class="note">
@@ -1592,6 +1719,89 @@
         'diff.collect': 'pers',
       }
       const PHASE_LABEL = { wait: '等待', orch: '编排', retr: '检索', llm: '模型', pers: '落库' }
+
+      /* ═══════════════════════════════════════════════════════════
+         字段说明 —— hover ⓘ 或任意段名 / 段条时弹出
+         段名闭集 11 条，与 R2 票面 §五 逐字一致
+         ═══════════════════════════════════════════════════════════ */
+      const SEG_DOC = {
+        invoke_agent: '根段。一次完整执行的全程——从调度器接手到收尾。执行总时长只认它。',
+        'dispatch.queue_wait':
+          '槽位 FIFO 排队。消息在猫的队列里等前面任务做完的时间。窗口在执行开始之前，不计入本次执行。',
+        'dispatch.token_wait': 'token 池等待。ProviderTokenPool 配额已满时的阻塞时间。',
+        'context.assemble': '上下文构建。取最近消息 / 任务历史 / 相关消息，拼出本轮 prompt。',
+        'context.compress': '摘要压缩 + token 感知软截断。超预算时把旧消息压成摘要。',
+        'memory.retrieval': '记忆混合检索（向量 + 关键词 RRF）。明细落在 retrieval_events 三表。',
+        'knowledge.retrieval': '知识库检索。命中的区块按查询注入 system prompt。',
+        'llm.chat': '模型流式生成。含首字延迟 ttft。明细落在 span_llm。',
+        'diff.collect': '采集本轮 commit 的 diff（5s 超时）。在关键路径上 await。',
+        'reply.persist': '回复落库。写入 messages 表。',
+        'git.auto_commit':
+          '顶层 auto-commit（3 次 execSync，阻塞整个事件循环）。轮次段——时间窗在根段之外，所以不能加总子段。',
+      }
+      const FIELD_DOC = [
+        ['offset', '相对根段起点的毫秒偏移。段条按它定位——<b>所以段条本身就是时间轴</b>。'],
+        ['duration', '该段耗时。<b>总时长的权威是根段 invoke_agent</b>，子段之和会超过它。'],
+        [
+          'status',
+          '<code>ok</code> / <code>error</code> / <code>timeout</code>。红块 = 该段失败或超时。',
+        ],
+        ['items', '段内条数（拼进 prompt 的消息数 / 检索命中数）。'],
+        ['ttft', '首 chunk 延迟。只在 <code>llm.chat</code> / <code>span_llm</code> 上有。'],
+      ]
+
+      const tipEl = document.getElementById('tip')
+      function hideTip() {
+        tipEl.classList.remove('on')
+      }
+      function showTip(html, el) {
+        tipEl.innerHTML = html
+        tipEl.classList.add('on')
+        const t = tipEl.getBoundingClientRect()
+        const r = el.getBoundingClientRect()
+        // 优先放右侧：段清单本身就是要读的东西，弹在上方会盖住它引用的那几行。
+        // 右侧放不下翻左侧；两侧都放不下（窄屏）才回退上/下。
+        let left = r.right + 10
+        let top = r.top + r.height / 2 - t.height / 2
+        if (left + t.width > window.innerWidth - 8) left = r.left - t.width - 10
+        if (left < 8) {
+          left = Math.max(
+            8,
+            Math.min(r.left + r.width / 2 - t.width / 2, window.innerWidth - t.width - 8)
+          )
+          top = r.top - t.height - 10
+          if (top < 8) top = r.bottom + 10
+        }
+        tipEl.style.left = left + 'px'
+        tipEl.style.top = Math.max(8, Math.min(top, window.innerHeight - t.height - 8)) + 'px'
+      }
+      function tipHTML(name) {
+        if (name === '__fields__') {
+          return `<div class="tip-h">trace 字段与段名说明</div>
+            <div>段名是<b>闭集 11 条</b>（R2 §五）。鼠标移到任意段名或段条上可看单段说明。</div>
+            <div class="tip-sep"></div>
+            ${FIELD_DOC.map(
+              ([n, d]) =>
+                `<div class="tip-row"><span class="tip-n">${n}</span><span class="tip-d">${d}</span></div>`
+            ).join('')}
+            <div class="tip-sep"></div>
+            <div class="tip-row"><span class="tip-n">${Object.keys(SEG_DOC).length} 个段名</span><span class="tip-d">${Object.keys(
+              SEG_DOC
+            )
+              .map((k) => `<code>${k}</code>`)
+              .join(' · ')}</span></div>`
+        }
+        return `<div class="tip-h">${name}</div><div>${SEG_DOC[name] || '（未登记的段名）'}</div>`
+      }
+      // 委托绑定：面板/表格反复 innerHTML 重渲染，逐元素绑定会随渲染失效
+      document.addEventListener('mouseover', (e) => {
+        const el = e.target.closest('[data-tipseg],[data-tip]')
+        if (!el) return hideTip()
+        showTip(tipHTML(el.dataset.tip === 'fields' ? '__fields__' : el.dataset.tipseg), el)
+      })
+      document.addEventListener('mouseout', (e) => {
+        if (e.target.closest('[data-tipseg],[data-tip]')) hideTip()
+      })
 
       const TRACES = [
         {
@@ -1965,7 +2175,7 @@
           4,
           65334,
           151971,
-          '⚠ 队列等待。窗口完全在根段之外，见屏⑤红框',
+          '⚠ 不计入本次执行（属上一跳的尾部）。见屏⑤红框',
         ],
       ]
 
@@ -2053,50 +2263,70 @@
       function segBar(t) {
         const root = t.spans.find((s) => s.root)
         const R = root.d
+        // 段条本身就是时间轴（按 offset 定位），所以它天然是时间序，无需排序
         const segs = t.spans
           .filter((s) => !s.root)
           .map((s) => {
             const left = (s.o / R) * 100
             const w = (s.d / R) * 100
             const cls = s.s === 'timeout' || s.s === 'error' ? 'seg-err' : 'p-' + PHASE[s.n]
-            return `<div class="seg ${cls}" style="left:${left.toFixed(3)}%;width:${Math.max(w, 0.35).toFixed(3)}%" title="${s.n} · ${fmt(s.d)}"></div>`
+            return `<div class="seg ${cls}" data-tipseg="${s.n}" style="left:${left.toFixed(3)}%;width:${Math.max(w, 0.35).toFixed(3)}%"></div>`
           })
           .join('')
-        const qw = t.queuedMs
-          ? `<div class="qwait"><span>排队等待</span><span class="qwait-bar"></span><span class="qwait-num">${fmt(t.queuedMs)}</span></div>`
-          : ''
-        return qw + `<div class="segbar">${segs}</div>`
+        // 排队等待不在此处画条 —— 它不属于本次执行，见 qwNote()
+        return `<div class="segbar">${segs}</div>`
       }
 
-      function segList(t, expandedAll) {
+      /* 排队等待：上一跳占用槽位的时间，不计入本次执行。
+         不画成段、不进段分解，但必须显式说明 —— 否则「用户等了 312s / 系统报 160s」
+         这个偏差会静默，而它正是用户能感知到的那部分时间。 */
+      function qwNote(t) {
+        if (!t.queuedMs) return ''
+        const root = t.spans.find((s) => s.root)
+        return `<div class="qw-note"><span>⏳</span><span>
+          本跳开始前在队列里等了 <b class="mono">${fmt(t.queuedMs)}</b>——那是
+          <b>上一跳占用槽位</b>的时间，<b>不计入本次执行</b>（根段 ${fmt(root.d)} 不含它）。
+          链路视图里它是<b>两跳之间的间隔</b>，不是本跳的一段。
+        </span></div>`
+      }
+
+      function segList(t, isCompact) {
         const root = t.spans.find((s) => s.root)
         const R = root.d
-        const kids = t.spans.filter((s) => !s.root).sort((a, b) => b.d - a.d)
-        const sig = kids.filter((s) => s.d / R >= 0.01)
-        const rest = kids.filter((s) => s.d / R < 0.01)
-        const shown = expandedAll ? kids : sig
+        // ── 时间序：按 offset 升序 ──────────────────────────────
+        // 用户要「按时间顺序排布，判断在哪一步出问题」——因果链只有沿时间读才成立。
+        // 旧的按时长降序只能答「谁最大」，答不了「谁先坏」。
+        const kids = t.spans.filter((s) => !s.root).sort((a, b) => a.o - b.o)
+        // 主耗时段仍按「时长」选（与排序轴正交），标记不随排序方式变
+        const leadSeg = kids.reduce((m, s) => (s.d > m.d ? s : m), kids[0])
+        // 时间序下默认全列：折叠中间的微段会把因果链cut断，而段数上限 11、高度可控
+        const MICRO = 0.01
+        const shown = isCompact ? kids.filter((s) => s.d / R >= MICRO) : kids
+        const hidden = kids.filter((s) => !shown.includes(s))
         let rows = shown
-          .map((s, i) => {
+          .map((s) => {
             const c = s.s === 'timeout' || s.s === 'error' ? 'seg-err' : 'p-' + PHASE[s.n]
-            return `<div class="segrow">
+            const bad = s.s === 'timeout' || s.s === 'error'
+            return `<div class="segrow" data-tipseg="${s.n}">
               <span class="swatch ${c}"></span>
-              <span class="segn ${i === 0 ? 'lead' : ''}">${s.n}</span>
+              <span class="segn ${s === leadSeg ? 'lead' : ''}">${s.n}</span>
+              ${bad ? `<span class="segflag">${s.s}</span>` : ''}
               <span class="segd">${fmt(s.d)}</span>
               <span class="segp">${pct(s.d, R)}</span>
             </div>`
           })
           .join('')
-        if (!expandedAll && rest.length) {
-          const sum = rest.reduce((a, b) => a + b.d, 0)
+        if (hidden.length) {
+          const sum = hidden.reduce((a, b) => a + b.d, 0)
           rows += `<div class="segrow rest"><span class="swatch p-orch" style="opacity:.35"></span>
-            <span class="segn">其他 ${rest.length} 段</span>
+            <span class="segn">已折叠 ${hidden.length} 个微段</span>
             <span class="segd">${fmt(sum)}</span><span class="segp">${pct(sum, R)}</span></div>`
         }
         return `<div class="seglist">${rows}</div>
-          <span class="ti-more" data-more="${t.key}">${expandedAll ? '收起' : `展开全部 ${kids.length} 段`}</span>`
+          <span class="ti-more" data-more="${t.key}">${isCompact ? `展开全部 ${kids.length} 段（时间序）` : '折叠微段'}</span>`
       }
 
-      function traceInline(t, expandedAll) {
+      function traceInline(t, isCompact) {
         const root = t.spans.find((s) => s.root)
         const llm = t.spans.find((s) => s.llm)
         const bad = t.status !== 'completed'
@@ -2109,19 +2339,26 @@
         }
         return `<div class="trace-inline" data-m>
           <div class="ti-head">
-            <span class="ti-title">执行 trace</span>
+            <span class="ti-title"
+              >执行 trace<button class="info-btn" data-tip="fields" aria-label="字段说明">
+                !
+              </button></span
+            >
             <span class="ti-status ${stCls}">${stTxt}</span>
             <span class="ti-total">${fmt(root.d)}</span>
           </div>
           ${segBar(t)}
-          ${segList(t, expandedAll)}
+          ${segList(t, isCompact)}
           <div class="ti-foot">${foot}</div>
+          ${qwNote(t)}
         </div>`
       }
 
       /* ═══════════ 屏② 面板（可展开）═══════════ */
       let openIdx = 0 // 默认第 0 张（店长）展开
-      let expandedAll = {}
+      // 紧凑态（折叠微段）——默认空对象 = 全部展开。
+      // 时间序下默认全列：折叠中间的微段会把因果链切断，而段数上限 11、高度可控。
+      let compact = {}
       const INLINE_TRACE = ['96b46097', '77a34bfc', '374f58f0', null, null]
 
       function renderInline() {
@@ -2140,7 +2377,7 @@
           </div>`
           const open =
             isOpen && key
-              ? traceInline(byKey[key], expandedAll[key])
+              ? traceInline(byKey[key], !!compact[key])
               : isOpen
                 ? `<div class="trace-inline" data-m>
                 <div class="ti-head"><span class="ti-title">执行 trace</span>
@@ -2160,8 +2397,8 @@
         const t = INLINE_TRACE[openIdx] ? byKey[INLINE_TRACE[openIdx]] : null
         document.getElementById('inline-explain').innerHTML = t
           ? `当前展开：<b>${t.avatar} ${t.agent}</b> · 会话「${t.session}」· 执行 <code>${t.key}</code> ·
-             <b>${fmt(t.spans.find((s) => s.root).d)}</b>${t.queuedMs ? ` · 另有排队等待 <b>${fmt(t.queuedMs)}</b>（在根段之外）` : ''}
-             <br />点其它猫可切换：ds猫 是一条<b>超时失败</b>的 trace，flash猫 那条带<b>152 秒排队</b>。`
+             执行耗时 <b>${fmt(t.spans.find((s) => s.root).d)}</b>（只认根段）${t.queuedMs ? ` · 本跳开始前还排了 <b>${fmt(t.queuedMs)}</b> 的队（<b>不计入</b>本跳，属上一跳）` : ''}
+             <br />段清单<b>按时间顺序</b>排——从上往下读就是执行的先后；把鼠标停在段名或段条上有字段说明。点其它猫可切换：ds猫 是<b>超时失败</b>（<code>llm.chat</code> 带红标），flash猫 那条带 <b>152 秒排队</b>。`
           : `当前展开：<b>图测猫</b> —— 这条演示「执行进行中」的形态。`
       }
 
@@ -2227,6 +2464,19 @@
         ;['q-session', 'q-from', 'q-to', 'q-dur', 'q-chain'].forEach((id) =>
           document.getElementById(id).addEventListener('input', runQuery)
         )
+        // 日期窗：整窗可点即弹选择器
+        // 原生 <input type=date> 只有右侧那个小图标可点，窗体本身点了只是聚焦。
+        // showPicker() 需要用户手势；不支持 / 非安全上下文会抛，catch 后回落原生行为（点图标仍可弹）。
+        ;['q-from', 'q-to'].forEach((id) => {
+          const el = document.getElementById(id)
+          el.addEventListener('click', () => {
+            try {
+              el.showPicker()
+            } catch {
+              /* 回落：图标仍可点 */
+            }
+          })
+        })
         document.getElementById('q-run').addEventListener('click', runQuery)
         document.getElementById('q-reset').addEventListener('click', () => {
           qAgent.clear()
@@ -2282,7 +2532,7 @@
             const t = byKey[x.e]
             const openRow = t
               ? `<tr class="chain-open" data-open="${x.e}" style="display:none"><td colspan="8"><div class="chain-open-inner">
-                   ${traceInline(t, true)}
+                   ${traceInline(t, false)}
                  </div></td></tr>`
               : `<tr class="chain-open" data-open="${x.e}" style="display:none"><td colspan="8"><div class="chain-open-inner">
                    <div class="note" style="margin:0">本次执行未取段明细（原型内嵌了 3 条完整 trace：<code>96b46097</code> / <code>77a34bfc</code> / <code>374f58f0</code>）。
@@ -2394,7 +2644,7 @@
           const more = e.target.closest('[data-more]')
           if (more) {
             const k = more.dataset.more
-            expandedAll[k] = !expandedAll[k]
+            compact[k] = !compact[k]
             renderInline()
             rewire()
             measure()
