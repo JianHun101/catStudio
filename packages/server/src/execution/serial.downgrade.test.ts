@@ -238,7 +238,7 @@ function createFakeBus(): EngineBus & HandoffBus {
  * `needsLock = agent.llmProvider === 'claude'` 就是 `claudeRan` 的初值，而顶层收尾的
  * ② 脏文件清理整个挂在 `if (anyClaude)`（`:1189`）里。用非 claude provider 跑，
  * ② 永远不执行，本矩阵的第二半（清理作用域）会**全是空断言**。
- * （`:3570` 注释：「只有它会编辑源文件」——② 本来就只为 claude 执行体存在。）
+ * （`serial.ts:1191` 注释：「只有它会编辑源文件」——② 本来就只为 claude 执行体存在。）
  */
 const A1: AgentConfig = {
   id: 'agent-1',
@@ -509,7 +509,7 @@ describe('serial × 降级路径（T-1 Phase 1：只加测试、零生产改动�
         const triggerId = 'sd-b3a'
         const wt = resolve(tmpdir(), 'catStudy-sessions', 'sdb3llm1')
         worktrees.push(wt)
-        // 本测试**不**调用 ensureSessionWorktree——目录只可能由 reply.ts:980 建出来
+        // 本测试**不**调用 ensureSessionWorktree——目录只可能由 reply.ts:976 建出来
         expect(existsSync(wt)).toBe(false)
 
         const r = await runScenario({ sessionId: 'sdb3llm1', triggerId })
