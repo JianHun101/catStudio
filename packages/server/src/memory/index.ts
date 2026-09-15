@@ -582,21 +582,38 @@ function renderSections(sections: RetrievedSection[]): { text: string; tokens: n
  *
  * 环境变量: KNOWLEDGE_TOP_K — 检索条目数（默认 3）
  */
-export async function buildKnowledgeContext(triggerContent: string): Promise<string> {
+export async function buildKnowledgeContext(
+  triggerContent: string,
+  /**
+   * R2 段五：把**本条查询的实际命中数**报给调用方（`knowledge.retrieval` 段的
+   * `item_count`）。走回调而不是改返回类型——返回串是既有契约，为观测改掉它是
+   * 「为观测改行为」。**空手而归的各条早退路径都会报 0**（不报 = 调用方分不清
+   * 「没命中」与「压根没跑」，那正是本仓反复栽的「返回空且无痕」）。
+   */
+  onHits?: (hits: number) => void
+): Promise<string> {
   // 与 retrieveMemoryContext 同款：剥离 @mention 再检索，查询向量与存储向量同语义空间
   const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
-  if (!cleanContent) return ''
+  if (!cleanContent) {
+    onHits?.(0)
+    return ''
+  }
 
   const topK = parseInt(process.env.KNOWLEDGE_TOP_K || '3', 10)
   const embedded = await embedText(cleanContent)
   if (!embedded.ok) {
     log.debug('知识库查询嵌入不可用，跳过检索', { reason: embedded.reason })
+    onHits?.(0)
     return ''
   }
   const vector = embedded.vector
-  if (vector.length === 0) return ''
+  if (vector.length === 0) {
+    onHits?.(0)
+    return ''
+  }
 
   const rows = knowledgeRepo.searchKnowledgeByVector(vectorToBlob(vector), topK)
+  onHits?.(rows.length)
   if (rows.length === 0) return ''
 
   const lines = rows.map((r, i) => `${i + 1}. ${r.content}`)

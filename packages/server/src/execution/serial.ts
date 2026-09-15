@@ -27,7 +27,9 @@ import {
   sessions as sessionsRepo,
   agents as agentsRepo,
   executionLogs as execLogsRepo,
+  spans as spansRepo,
 } from '../db/repository/index.js'
+import { createExecTrace, insertDetachedSpan, type ExecTrace } from './trace.js'
 import { createLogger } from '../logger.js'
 import { MAX_QUEUE_PER_AGENT, isStaleHandoffRequest } from '../dispatch/index.js'
 import { ProviderTokenPool } from './token-pool.js'
@@ -118,6 +120,21 @@ export function resolveMentionLimit(
  *  （A2A 接力不受影响——触发前提是回复已落库）；前端显示顺序 = 完成顺序 */
 const CONCURRENT_AGENTS_PER_MESSAGE = 3
 
+/**
+ * 入队时刻表（R2 §七 硬点 1）——`dispatch.queue_wait` 的时刻**必须在
+ * `slot.queue.push(cmd)` 当场打**，存进队列条目本身。
+ *
+ * 为什么不落 `DispatchCommand` 上的一个字段：那是 `@cat-study/shared` 的公共类型，
+ * 为一个纯观测面的时刻加列要动共享层；`WeakMap` 以队列条目**对象本身**为键，
+ * 语义上就是「存在这个条目上」（条目被 shift 出来时同一个引用），且内存态、
+ * 不落库、随条目 GC——**硬点要的是「当场打 + 不落库 + 不用
+ * `messages.created_at → started_at` 代理」，三条都满足**。
+ *
+ * 为什么不能用 created_at 代理：对**重放 / 恢复**路径不准（命令重新入队时
+ * created_at 是原消息的落库时刻，不是这次排队的时刻）——那正是本段要量的东西。
+ */
+const queueArrival = new WeakMap<DispatchCommand, number>()
+
 /** 触发消息的静态形状（executeAgentsSerial / executeOneAgent 共用） */
 export type AgentTriggerMsg = {
   id: string
@@ -163,8 +180,10 @@ export interface EngineCtx {
   /** 槽位队列长度/状态变更 → 前端 agent-status 广播（socket 桥接） */
   updateQueueState(slot: Slot): void
   publishAgentStatus(slot: Slot, status: string): Promise<void>
-  /** 标 busy + 写执行日志（原 dispatch.executeAgentCommand） */
-  executeAgentCommand(agent: AgentConfig, cmd: DispatchCommand, traceId: string): Promise<void>
+  /** 标 busy + 写执行日志（原 dispatch.executeAgentCommand）。
+   *  R2 起**返回 execution_logs.id**——段采集器要用它当 `spans.execution_id`
+   *  （`ExecTrace` 必须 per-execution，而 executionId 只在这里诞生）。 */
+  executeAgentCommand(agent: AgentConfig, cmd: DispatchCommand, traceId: string): Promise<string>
   /** 收口：finalize 执行日志 + 弹队列 + 槽位复位（原 dispatch.completeExecution） */
   completeExecution(
     agentId: string,
@@ -193,6 +212,57 @@ function findStoreCat(sessionAgentIds: string[]): AgentConfig | undefined {
       return row ? rowToAgent(row) : null
     })
     .find((a): a is AgentConfig => a !== null && a.role === 'store')
+}
+
+/**
+ * 段 G `git.auto_commit` 的归属与落库（R2 段五，**轮次级**）。
+ *
+ * 反查链：触发消息 → 该消息**唯一**执行者那一行（判据与 T-M
+ * `updateExecutionLogCommitHash` 逐字同源，`executionLogs.getUnambiguousExecutionRow`）
+ * → 该执行的根段 → 挂父落一行。
+ *
+ * 任一环断了都**只记痕不写行**：跨多只猫（不可消歧）、执行行不存在、时间轴没落库
+ * （写失败/被跳过）。**不猜**——「指错父」比「缺一段」坏得多（缺是 R2 §九 26 明写
+ * 允许的形态）。全程 try/catch：它在顶层收尾块里，抛了会带走下面的脏文件清理。
+ */
+function recordAutoCommitSpan(
+  triggerMsgId: string,
+  chainId: string,
+  startMs: number,
+  durationMs: number
+): void {
+  try {
+    const logRow = execLogsRepo.getUnambiguousExecutionRow(triggerMsgId)
+    if (!logRow) {
+      log.info('auto-commit span skipped — executor ambiguous or absent', {
+        triggerMessageId: triggerMsgId,
+      })
+      return
+    }
+    const rootSpanId = spansRepo.getRootSpanId(logRow.id)
+    if (!rootSpanId) {
+      log.info('auto-commit span skipped — no root span for execution', {
+        triggerMessageId: triggerMsgId,
+        executionId: logRow.id,
+      })
+      return
+    }
+    insertDetachedSpan({
+      executionId: logRow.id,
+      parentSpanId: rootSpanId,
+      chainId,
+      sessionId: logRow.session_id,
+      agentId: logRow.agent_id,
+      name: 'git.auto_commit',
+      startMs,
+      durationMs,
+    })
+  } catch (err: any) {
+    log.warn('auto-commit span failed (non-blocking)', {
+      triggerMessageId: triggerMsgId,
+      error: err?.message,
+    })
+  }
 }
 
 /** token 池键——复用 llm/registry.ts 的 provider:apiKey 形态（registry 默认分支） */
@@ -250,10 +320,27 @@ async function finalizeRun(
   ctx: EngineCtx,
   agentId: string,
   sessionId: string,
-  opts: { success: boolean; errorMessage?: string; replyMessageId?: string; traceId: string }
+  opts: {
+    success: boolean
+    errorMessage?: string
+    replyMessageId?: string
+    traceId: string
+    /** R2：本执行的段采集器；**收口即落库**（一次事务落 `spans` + `span_llm`）。
+     *  缺省 = 无采集器（崩溃兜底路径）——那就不落，不编数据。 */
+    trace?: ExecTrace
+  }
 ): Promise<DispatchCommand | undefined> {
   // OQ3：runs 注册表 session 化——精确删本会话 run（跨会话并行的兄弟 run 不受影响）
   ctx.state.endRun(agentId, sessionId)
+  // ── R2 段五：关根段 + 一次事务落两表（硬点 2）──────────
+  // 位置在 `completeExecution` **之前**：段是这次执行的产物，先落产物再释放槽位。
+  // 写库失败绝不抛（`finish` 内部吞掉）——它在关键路径上，抛了会把槽位释放与
+  // 队列排空一起带走。超时三条路径（30min 硬超时 / 20min CLI 空闲 / 35min token）
+  // 都走本漏斗 ⇒ **都不丢**；只有进程级崩溃丢（R2 §七 残余风险，v1 接受）。
+  opts.trace?.finish({
+    success: opts.success,
+    ...(opts.errorMessage !== undefined ? { errorMessage: opts.errorMessage } : {}),
+  })
   return ctx.completeExecution(agentId, sessionId, opts.success, {
     ...(opts.errorMessage ? { errorMessage: opts.errorMessage } : {}),
     ...(opts.replyMessageId ? { replyMessageId: opts.replyMessageId } : {}),
@@ -282,7 +369,7 @@ async function drainQueuedCommand(
   // 补执行审计（恢复路径 recoverInterruptedExecutions 同款）：completeExecution
   // 已弹出队列命令并更新槽位（busy + currentTrigger），此处补 executeAgentCommand
   // 写 execution_log——否则排队命令的执行零审计（审查结论 151 秒执行无记录的根因）
-  await ctx.executeAgentCommand(agent, queuedCmd, queuedCmd.traceId)
+  const queueExecutionId = await ctx.executeAgentCommand(agent, queuedCmd, queuedCmd.traceId)
   // 出队反查触发作者（恢复路径 recoverInterruptedExecutions 同款）：
   // A2A 审查结论 @回请求人依赖 triggerAuthorName 例外判定（mention-policy），
   // 缺失则 undefined 与写死名比对失败 → 白名单误拦（10:38 事故根因）；
@@ -321,7 +408,12 @@ async function drainQueuedCommand(
       agent,
       queuedTrigger,
       queuedCmd.traceId,
-      queuedCmd.depth
+      queuedCmd.depth,
+      {
+        executionId: queueExecutionId,
+        // 入队时刻（`execute()` 的 push 处当场打的）——本段是「在队列里等了多久」
+        ...(queueArrival.has(queuedCmd) ? { queuedAtMs: queueArrival.get(queuedCmd) } : {}),
+      }
     )) || claudeRan
   )
 }
@@ -347,9 +439,14 @@ async function executeOneAgent(
   agent: AgentConfig,
   triggerMsg: AgentTriggerMsg,
   traceId: string,
-  depth: number
+  depth: number,
+  /** R2 段五：本次执行的身份 + 入队时刻（见 `queueArrival`） */
+  exec: { executionId: string; queuedAtMs?: number }
 ): Promise<boolean> {
   const { state, bus } = ctx
+  // 根段起点取**函数入口时刻**（早于下面两个守卫的判定）——根段覆盖的是一次
+  // 「已排上槽位」的完整执行
+  const entryMs = Date.now()
   // 会话成员 id 与名（A2A mention 解析用）——原 executeAgentsSerialImpl 循环外
   // 计算一次传入，C1 v3 后 execute 单入口各执行体自行查（DB 小读，正确性优先）
   const sessionAgentIds = sessionsRepo.getSessionAgentIds(sessionId)
@@ -366,6 +463,26 @@ async function executeOneAgent(
   // completeExecution 弹出队列时会更新 currentTriggerMessageId，
   // 排空路径自然通过此检查。
   if (slot.currentTriggerMessageId !== triggerMsg.id) return false
+
+  // ── R2 段五：采集器创建点（**per-execution**，绝不上 `EngineState`）──────
+  // 建在两个守卫**之后**：那两条是「本次不执行」的提前返回（槽位不对/已被别的
+  // 触发接管），没有执行可分解，不该留下一个空时间轴。以下任何出口都经
+  // `finalizeRun` ⇒ 带着这个 trace 落库。
+  const trace = createExecTrace({
+    executionId: exec.executionId,
+    // 链锚口径 = P1 的 `coalesce(回复.task_id, 触发.task_id)`，回复侧因
+    // `insertAgentMessage(..., triggerMsg.taskId || traceId)` 恒非空 ⇒ 链锚 = 本表达式
+    chainId: triggerMsg.taskId || traceId,
+    sessionId,
+    agentId: agent.id,
+    startMs: entryMs,
+  })
+  // ── 段 H `dispatch.queue_wait`（R2 §七 硬点 1）─────────
+  // 时刻在 `slot.queue.push(cmd)` 当场打的（`queueArrival`），此处只是补记；
+  // 空闲直跑（没进过队列）**没有这一段**——不是漏采，是它压根没排队。
+  if (exec.queuedAtMs !== undefined) {
+    trace.recordSpan('dispatch.queue_wait', { startMs: exec.queuedAtMs })
+  }
 
   // 检查 API Key（免 key provider 如 opencode 本地认证，不拦）
   if (!agentHasUsableApiKey(agent)) {
@@ -386,7 +503,7 @@ async function executeOneAgent(
     // 排队命令同样会落入 running+无执行日志的幽灵态（slot 卡 busy，恢复机制
     // 全盲）。弹出后补 drain：子链在 no-key 检查处逐个 completeExecution 弹
     // 下一个，直到队列空（每条发一次配置提示，执行日志逐条落库）
-    const nextCmd = await finalizeRun(ctx, agent.id, sessionId, { success: true, traceId })
+    const nextCmd = await finalizeRun(ctx, agent.id, sessionId, { success: true, traceId, trace })
     if (nextCmd) {
       try {
         await drainQueuedCommand(ctx, agent, nextCmd, false)
@@ -428,12 +545,44 @@ async function executeOneAgent(
       // 收窄到此处后，持有 token 的代码段内不再有任何会申请 token 的路径（编排段
       // finalize/drain/A2A 一律不持），等待图从「有环」变成「无环且有界」。
       // executeRun 与 drainQueuedCommand 两条入口都经本函数，自动覆盖。
-      const releaseToken = await ctx.tokenPool.acquire(providerKey(agent))
+      // ── 段 D `dispatch.token_wait`（R2 段五）────────────
+      // 量在池内（`acquire` 的 `onWaited` 回调）而不是在调用点外侧包一层计时：
+      // 「池满时等了多久」是池**自身**的事实（while 循环 + release 唤醒都在里面）。
+      // 超时那趟同样报——acquire 的 finally 保证两条路径都回调。
+      let tokenWaitedMs: number | null = null
+      let releaseToken: (() => void) | undefined
+      try {
+        releaseToken = await ctx.tokenPool.acquire(providerKey(agent), (ms) => {
+          tokenWaitedMs = ms
+        })
+      } catch (err: unknown) {
+        // 池内等待超时（`ProviderTokenAcquireTimeoutError`）：这段**等过、没等着**，
+        // 仍要留行（不留 = 事故现场零痕）。本地计时兜底防回调未及触发。
+        trace.recordSpan('dispatch.token_wait', {
+          startMs: Date.now() - (tokenWaitedMs ?? 0),
+          status: 'timeout',
+          error: err,
+        })
+        throw err
+      }
+      trace.recordSpan('dispatch.token_wait', {
+        startMs: Date.now() - (tokenWaitedMs ?? 0),
+        durationMs: tokenWaitedMs ?? 0,
+      })
       try {
         // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
         // AbortController 确保超时后子进程被 kill（P0-1 修复）
         reply = await Promise.race([
-          runAgentReply(state, bus, sessionId, agent, triggerMsg, traceId, abortController.signal),
+          runAgentReply(
+            state,
+            bus,
+            sessionId,
+            agent,
+            triggerMsg,
+            traceId,
+            abortController.signal,
+            trace
+          ),
           new Promise<never>((_, reject) =>
             setTimeout(() => {
               abortController.abort()
@@ -474,6 +623,7 @@ async function executeOneAgent(
         success: false,
         errorMessage: err.message || 'unknown error',
         traceId,
+        trace,
       })
       if (nextCmd) {
         try {
@@ -511,6 +661,7 @@ async function executeOneAgent(
         success: false,
         errorMessage: 'interrupted',
         traceId,
+        trace,
       })
       return claudeRan
     }
@@ -643,6 +794,7 @@ async function executeOneAgent(
       success: true,
       replyMessageId: reply.msgId,
       traceId,
+      trace,
     })
 
     // W2 L2 评估采样：fire-and-forget——不 await、不占 slot、不进 dispatch 主链，
@@ -925,6 +1077,7 @@ async function executeOneAgent(
       success: false,
       errorMessage: err.message || 'post-execution error',
       traceId,
+      trace,
     }).catch(() => {
       log.error('critical: completeExecution itself failed', {
         agentId: agent.id,
@@ -994,10 +1147,28 @@ async function executeAgentsSerialImpl(
       // 会话 worktree 存在时提交到 worktree（落会话分支，提交隔离）；
       // 无 worktree（存量会话/降级）→ 提交主工作区 dev，行为与现网一致
       const worktreeCwd = getSessionWorktreePath(sessionId)
+      const commitT0 = Date.now()
       const commitHash = worktreeCwd
         ? gitCommit(`catstudy [${triggerMsg.id}]`, { cwd: worktreeCwd })
         : gitCommit(`catstudy [${triggerMsg.id}]`)
+      // ── 段 G `git.auto_commit`（R2 段五）─────────────────
+      // 这是本票唯一一段**跨执行**的 span：`depth=0` 的自动提交在全部 `execute()`
+      // 返回之后跑，收的是整轮改动，不属于任何单次执行。归属判据与下面
+      // `updateExecutionLogCommitHash`（T-M）**逐字同源**：执行行跨多只猫时这个 sha
+      // 指认不出作者 ⇒ 段也指认不出父 ⇒ **不写**（缺 ≠ 失败，验收 26）。
+      // `gitCommit` 是 3 次连续 `execSync`（阻塞整个 Node 事件循环）——`execLogsRepo`
+      // 之外本段是全票唯一的「跨执行隐藏停顿」，值得留痕。
+      // 只为**真产生了 commit** 的轮次留行：无改动时 `gitCommit` 返回 null，
+      // 该段缺省（验收 26 明写「无改动时该段可缺」）。
       if (commitHash) {
+        // 链锚口径与执行内各段**逐字同源**（`triggerMsg.taskId || traceId`）——
+        // 轮次段与执行段必须能串进同一条链，两处各写一份表达式就是下一个漂移源
+        recordAutoCommitSpan(
+          triggerMsg.id,
+          triggerMsg.taskId || traceId,
+          commitT0,
+          Date.now() - commitT0
+        )
         // 将 commit hash 写回 execution_logs（本轮所有相关日志）。
         // T-M：本轮执行行跨多只猫时这个 sha 指认不出作者 → 写回侧**拒写**（不再给每只猫
         // 都记一笔"我提交了它"，把"指错人"从读侧的猜变成写侧的制造）。拒写可观测：
@@ -1222,7 +1393,7 @@ export function createExecutionEngine(
     agent: AgentConfig,
     cmd: DispatchCommand,
     traceId: string
-  ): Promise<void> {
+  ): Promise<string> {
     const slot = ensureSlot(agent.id, cmd.sessionId)
     slot.status = 'busy'
     slot.currentTriggerMessageId = cmd.triggerMessageId
@@ -1240,6 +1411,8 @@ export function createExecutionEngine(
     })
 
     await publishAgentStatus(slot, 'busy')
+    // R2：把 execution_logs.id 交给执行体——段采集器的 `spans.execution_id` 就是它
+    return logId
   }
 
   async function completeExecution(
@@ -1357,11 +1530,17 @@ export function createExecutionEngine(
   /** per-agent 核心执行体：executeOneAgent + 崩溃兜底收口。
    *  token 不在此 acquire——A 方案把它收进 executeOneAgent 的 LLM 段（见该函数
    *  注释：原作用域覆盖整棵 A2A 子树，链深 ≥ cap 即死锁）。 */
-  async function executeRun(cmd: DispatchCommand, agent: AgentConfig): Promise<boolean> {
+  async function executeRun(
+    cmd: DispatchCommand,
+    agent: AgentConfig,
+    executionId: string
+  ): Promise<boolean> {
     let execError: unknown
     try {
       const triggerMsg = buildTriggerMsg(ctx, cmd)
-      return await executeOneAgent(ctx, cmd.sessionId, agent, triggerMsg, cmd.traceId, cmd.depth)
+      return await executeOneAgent(ctx, cmd.sessionId, agent, triggerMsg, cmd.traceId, cmd.depth, {
+        executionId,
+      })
     } catch (err: any) {
       execError = err
       log.error('execute crashed — releasing slot in finally', {
@@ -1450,6 +1629,9 @@ export function createExecutionEngine(
         }
         return false
       }
+      // R2 §七 硬点 1：入队时刻**当场打**（存进队列条目本身，内存态不落库）。
+      // 事后用 `messages.created_at → started_at` 代理对重放/恢复路径不准。
+      queueArrival.set(cmd, Date.now())
       slot.queue.push(cmd)
       updateQueueState(slot)
       // P0 队列持久化：入队即落库 queued，server 重启后可恢复
@@ -1476,8 +1658,8 @@ export function createExecutionEngine(
     }
 
     // ── idle → 标 busy + 审计 + 执行 ──
-    await executeAgentCommand(agentCfg, cmd, cmd.traceId)
-    return executeRun(cmd, agentCfg)
+    const executionId = await executeAgentCommand(agentCfg, cmd, cmd.traceId)
+    return executeRun(cmd, agentCfg, executionId)
   }
 
   // 修正 ctx 的 execute 引用（占位换真实现）

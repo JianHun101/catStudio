@@ -79,11 +79,23 @@ export class ProviderTokenPool {
    * 获取一个 provider token。池满时阻塞等待（await Promise——Node 单线程下
    * 等待者不占 CPU，release 时按 FIFO 唤醒）。等待超过 acquireTimeoutMs →
    * reject ProviderTokenAcquireTimeoutError（0 禁用超时，行为退回纯阻塞）。
+   *
+   * `onWaited`（R2 段五）：把**本趟等了多久**报给调用方，供 `dispatch.token_wait`
+   * 段打点。「池满时等了多久」是池**自身**的事实（调用方看不见池内的 while/release
+   * 唤醒），故量在这里而不是在调用点外侧包一层计时。回调在 settle 时触发
+   * ——**成功与超时两条路径都报**（超时那趟同样"等过"，只是没等着）。
+   * 回调不得抛（它在 `finally` 里跑，抛了会顶掉原异常）。
+   *
    * @returns release 函数（执行收口后必须调用，否则泄漏 token 死锁）
    */
-  async acquire(providerKey: string): Promise<() => void> {
-    while (this.cap > 0 && (this.counts.get(providerKey) ?? 0) >= this.cap) {
-      await this.waitForSlot(providerKey)
+  async acquire(providerKey: string, onWaited?: (waitedMs: number) => void): Promise<() => void> {
+    const t0 = Date.now()
+    try {
+      while (this.cap > 0 && (this.counts.get(providerKey) ?? 0) >= this.cap) {
+        await this.waitForSlot(providerKey)
+      }
+    } finally {
+      onWaited?.(Date.now() - t0)
     }
     this.counts.set(providerKey, (this.counts.get(providerKey) ?? 0) + 1)
     return () => this.release(providerKey)
