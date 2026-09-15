@@ -744,6 +744,90 @@ export function initDb(): void {
       name: 'retrieval_events.param_pool_n (R1-b 查询级池快照)',
       sql: `ALTER TABLE retrieval_events ADD COLUMN param_pool_n INTEGER`,
     },
+    // ─── 段五·执行时间轴（P2 / R2）：spans + span_llm 两表 ──────────────────
+    // 定位：**只采不改**——给「一次执行」补上段分解时间轴。今天的两端是
+    // `execution_logs`（一次执行一个总时长，秒级）与 `retrieval_events`（一次检索，
+    // 毫秒级），**中间十级全部不存在**。纯观测面：不改检索/LLM/调度任何行为。
+    //
+    // 形态（R2 §三）：**窄骨架 + 类型详情表**。骨架只放「每一行都有」的字段
+    // （段与段是同类东西：start / duration / parent / name），类型专属属性进详情表。
+    // `llm.chat` 属性最富（模型 / token / TTFT）⇒ 只有它建 `span_llm`；
+    // `dispatch.queue_wait` / `token_wait` **什么属性都没有**（时长本身就是全部数据）。
+    // 「第一张详情表」其实是 R1 的 `retrieval_events`（`memory.retrieval` 直接复用），
+    // 本表不是发明新模式，是接着用。
+    //
+    // 三条形态纪律（逐条有据，别"顺手统一"）：
+    //   · **不设 `trace_id` 列**，链锚列名取 `chain_id`——本仓 `execution_logs.trace_id`
+    //     已经是「当轮执行 id」，再装 OTel 语义会让同一个库里 `trace_id` 有两个意思。
+    //     OTel 语义纪律约束的是**导出面**（导出时 traceId ← `chain_id`、spanId ← `span_id`）。
+    //   · **不设 `created_at`**——span 的 `start_at` 本身就是时间轴，再加一个「写入时刻」
+    //     会造出两个语义近似而不同的时间列。**一条时间真相。**
+    //   · `start_at` 取 **ISO 8601 毫秒 TEXT**（与 R1 `retrieval_events.created_at` 同形），
+    //     不取 epoch INTEGER——全库时间列 100% 是 TEXT（实测 20 张领域表 / 18 张有时间列），
+    //     再加一种就是第三种形态。秒级不够用：`dispatch.token_wait` 常在同一个秒内起止。
+    //
+    // `parent_span_id` **自带 FK → `spans(span_id)`**：`PRAGMA foreign_keys = ON` 且
+    // SQLite 是即时检查 ⇒ 同事务内按拓扑序插入（根先、子后）即可满足，不需要延迟约束；
+    // 收益是堵住「父子指向不存在的 span」。与 `span_llm.span_id` 的 FK 形态由此对称。
+    {
+      name: 'spans table (段五执行时间轴·骨架)',
+      sql: `CREATE TABLE IF NOT EXISTS spans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        span_id TEXT NOT NULL UNIQUE,
+        parent_span_id TEXT REFERENCES spans(span_id),
+        chain_id TEXT,
+        execution_id TEXT NOT NULL,
+        session_id TEXT,
+        agent_id TEXT,
+        name TEXT NOT NULL,
+        operation_name TEXT,
+        start_at TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        error_type TEXT,
+        error_message TEXT,
+        item_count INTEGER
+      )`,
+    },
+    // LLM 段详情（9 列）。`provider` / `model` / `max_tokens` 是**快照列**——
+    // `agents` 表是运行态权威且可变，事后 join 拿到的是「今天的配置」而非「当时的配置」。
+    {
+      name: 'span_llm table (段五执行时间轴·LLM 详情)',
+      sql: `CREATE TABLE IF NOT EXISTS span_llm (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        span_id TEXT NOT NULL UNIQUE REFERENCES spans(span_id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        ttft_ms INTEGER,
+        stream INTEGER NOT NULL,
+        max_tokens INTEGER
+      )`,
+    },
+    // 看板主路径：按执行取全段时间轴
+    {
+      name: 'idx_spans_execution',
+      sql: `CREATE INDEX IF NOT EXISTS idx_spans_execution ON spans(execution_id)`,
+    },
+    // 与 P1 链锚对齐，跨执行串链
+    {
+      name: 'idx_spans_chain',
+      sql: `CREATE INDEX IF NOT EXISTS idx_spans_chain ON spans(chain_id)`,
+    },
+    // 时间窗取数
+    {
+      name: 'idx_spans_start',
+      sql: `CREATE INDEX IF NOT EXISTS idx_spans_start ON spans(start_at)`,
+    },
+    // 按段聚合（「哪段最耗时」）
+    {
+      name: 'idx_spans_name',
+      sql: `CREATE INDEX IF NOT EXISTS idx_spans_name ON spans(name)`,
+    },
+    // ⚠️ `(execution_id, start_at)` 复合索引**不建**——v1 每次执行约 8–12 行，
+    // 单列索引已足够；建成复合是在为一个不存在的规模付代价。
+
     // ─── 票辛 ⑥ 旧链下线：memories / memories_fts 双 DROP ──────────────────
     // 对话原话向量记忆链整体退役：写口已由票壬摘除（`saveMessageMemory` 删除 +
     // 存量清零），读口本票改走 `chunks`，两张表再无任何调用方（W8 判据）。

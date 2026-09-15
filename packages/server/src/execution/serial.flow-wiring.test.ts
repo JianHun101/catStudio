@@ -64,6 +64,8 @@ vi.mock('../handoff/index.js', () => ({
 
 vi.mock('../git/diff-collector.js', () => ({
   collectCommitDiffs: vi.fn().mockResolvedValue(null),
+  // R2 段五：替身镜像真模块被消费的导出面（`diff.collect` 的超时判据）
+  GIT_TIMEOUT_MS: 5000,
 }))
 
 vi.mock('node:child_process', async (importOriginal) => {

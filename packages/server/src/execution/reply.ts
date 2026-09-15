@@ -36,7 +36,8 @@ import {
 import { createLogger } from '../logger.js'
 import { snapshotPackageDeps, diffNewPackages, ensureSessionWorktree } from '../llm/git-utils.js'
 import { parseJsonArray } from '../utils.js'
-import { collectCommitDiffs } from '../git/diff-collector.js'
+import { collectCommitDiffs, GIT_TIMEOUT_MS } from '../git/diff-collector.js'
+import type { ExecTrace } from './trace.js'
 import {
   shouldHandoff,
   performHandoff,
@@ -292,7 +293,23 @@ export async function runAgentReply(
     authorName?: string
   },
   traceId: string,
-  signal?: AbortSignal
+  /**
+   * ⚠️ 形态由 `signal?: AbortSignal` 改为 `signal: AbortSignal | undefined`：
+   * TS 不允许**必填参数跟在可选参数之后**（TS1016），而 `trace` 必须是必填——
+   * 可选的话每个埋点都要写 `trace?.`，漏传就静默不采（观测面最怕的正是静默）。
+   * **调用侧契约零变化**（两者都接受省略/`undefined`），原 7 个参数一个没挪位。
+   */
+  signal: AbortSignal | undefined,
+  /**
+   * R2 段五采集器（**per-execution**，由 `executeOneAgent` 创建并传入）。
+   *
+   * 形态裁决（R2 §4.7 / D9）：**只加这一个参数**，不做本函数 7 参数 → 上下文对象的
+   * 整体收口——那要改本文件内这 7 个名字的 **241 处**引用（`agent.` 79 / `sessionId`
+   * 62 / `traceId` 39 / `triggerMsg.` 28 / `signal` 13 / `state.` 11 / `bus.` 9），
+   * 动的是 1208 行的事故密集热文件，而**观测收益为零**：新维度加在 `trace` 上即可，
+   * 不加在签名上。
+   */
+  trace: ExecTrace
 ): Promise<{ content: string; msgId: string }> {
   const adapter = getAdapterForAgent(agent)
   const t0 = Date.now()
@@ -314,6 +331,9 @@ export async function runAgentReply(
     status: 'thinking',
   })
 
+  // ── 段 E1 `context.assemble`（R2 段五）──────────────────
+  // 起止 = 取消息 → 过滤出「本猫可见」的那批（压缩/截断前的原始上下文量）
+  const assembleHandle = trace.startSpan('context.assemble')
   // 构建对话上下文：只包含与该 Agent 相关的消息
   // 按时间倒序取最近消息（generous safety limit），后续用 token 预算做软截断
   const allMessages = messagesRepo.getRecentMessages(sessionId)
@@ -377,6 +397,13 @@ export async function runAgentReply(
   for (const m of relevantMessages) {
     preTruncationTokens += estimateTokens(m.content) + 50 // role 前缀开销
   }
+  // E1 收口：item_count = 过滤后进入压缩/截断的消息**条数**（单位：条）
+  trace.endSpan(assembleHandle, 'ok', { itemCount: relevantMessages.length })
+
+  // ── 段 E2 `context.compress`（R2 段五）──────────────────
+  // 覆盖「摘要替代 + token 软截断」两段——它们是同一件事（把上下文压进预算）的
+  // 两级手段，顺序钉死（先压缩后截断），中间没有可归属给别段的等待。
+  const compressHandle = trace.startSpan('context.compress')
 
   // ── 摘要替代压缩（截断前，顺序钉死：先压缩后截断） ──────
   // 长会话消息超阈值时把旧消息压成摘要块（保留最近 10 条/30k 双保险），
@@ -527,6 +554,8 @@ export async function runAgentReply(
     truncatedMessages.push(messagesForTruncation[i])
   }
   truncatedMessages.reverse() // 恢复时间正序
+  // E2 收口：item_count = 压缩/截断后**实际进 prompt** 的消息条数（单位：条）
+  trace.endSpan(compressHandle, 'ok', { itemCount: truncatedMessages.length })
 
   log.info('token-aware truncation applied', {
     traceId,
@@ -726,6 +755,20 @@ export async function runAgentReply(
     log.warn('记忆检索抛错，本轮不注入', { traceId, agentId: agent.id, error: err?.message })
   }
 
+  // ── 段 E3 `memory.retrieval`（R2 段五；详情表 = R1 `retrieval_events`）──
+  // **双写同源**（R2 §4.5）：本段的 `duration_ms` 与 `retrieval_events.retrieval_ms`
+  // 由**同一个变量**给出，不是两处独立测量——否则「同一件事两个耗时」当场造出
+  // 「哪个才对」的混淆面。内测值优先（同一趟），外侧计时只兜超时/抛错两条无内测
+  // 值的路径（与 `recordRetrievalTrace` 的 `stats?.retrievalMs ?? args.elapsedMs` 逐字同源）。
+  const memoryElapsedMs = Date.now() - memoryT0
+  trace.recordSpan('memory.retrieval', {
+    startMs: memoryT0,
+    durationMs: memoryResult?.stats?.retrievalMs ?? memoryElapsedMs,
+    status: memoryTimeout ? 'timeout' : memoryResult ? 'ok' : 'error',
+    // 命中数 = 实际注入的节数（与 retrieval_events 的 sections 同口径）
+    itemCount: memoryResult?.stats?.sections ?? null,
+  })
+
   // ── 检索流水落盘（P2 / R1）────────────────────────────
   // 位置两条都是硬要求：
   //  ① 在 10s `Promise.race` **之外**——写库耗时不算进检索超时预算，且 race 超时
@@ -739,7 +782,7 @@ export async function runAgentReply(
     taskId: triggerMsg.taskId || traceId,
     memoryResult,
     memoryTimeout,
-    elapsedMs: Date.now() - memoryT0,
+    elapsedMs: memoryElapsedMs,
   })
 
   const memoryContext = memoryResult?.text ?? ''
@@ -781,15 +824,35 @@ export async function runAgentReply(
   // 检索知识库并注入 system prompt（知识库 Phase 1）——retrieveMemoryContext
   // 同款位置 + 同款 Promise.race 超时降级防护：知识库是读增强，不阻塞 LLM 调用。
   // 独立【知识库】区块，零污染【相关记忆】
+  // ── 段 E5 `knowledge.retrieval`（R2 段五）───────────────
+  // `knowledge` 表**没有** R1 那样的详情表（它不是 `chunks` 的派生投影，检索形态也
+  // 不同），故命中数只落在骨架的 `item_count` 上。
   let knowledgeContext = ''
+  const knowledgeT0 = Date.now()
+  let knowledgeHits: number | null = null
+  let knowledgeTimedOut = false
   try {
     knowledgeContext = await Promise.race([
-      buildKnowledgeContext(triggerMsg.content),
-      new Promise<string>((resolve) => setTimeout(() => resolve(''), MEMORY_TIMEOUT_MS)),
+      // 命中数经回调带出：**空手而归的各条早退路径都会报 0**（不报 = 分不清
+      // 「没命中」与「压根没跑」）
+      buildKnowledgeContext(triggerMsg.content, (n) => {
+        knowledgeHits = n
+      }),
+      new Promise<string>((resolve) =>
+        setTimeout(() => {
+          knowledgeTimedOut = true
+          resolve('')
+        }, MEMORY_TIMEOUT_MS)
+      ),
     ])
   } catch {
     knowledgeContext = ''
   }
+  trace.recordSpan('knowledge.retrieval', {
+    startMs: knowledgeT0,
+    status: knowledgeHits !== null ? 'ok' : knowledgeTimedOut ? 'timeout' : 'error',
+    itemCount: knowledgeHits,
+  })
   if (knowledgeContext) {
     llmMessages[0] = {
       ...llmMessages[0],
@@ -887,6 +950,19 @@ export async function runAgentReply(
     return { content: '[消息已撤回]', msgId }
   }
 
+  // ── 段 E7 `llm.chat`（R2 段五；详情表 = `span_llm`）─────
+  // **硬点 3**：`start_at` 取 `chatStream` 调用**前一刻**，不是 `for await` 进入时刻——
+  // 否则 TTFT（`gen_ai.response.time_to_first_chunk`）的分母把「建流」那段也算了进去。
+  // `provider` / `model` / `max_tokens` 是**快照**：`agents` 表可变，事后 join 拿到的是
+  // 「今天的配置」而非「当时的配置」。
+  const llmHandle = trace.startSpan('llm.chat', {
+    llm: {
+      provider: agent.llmProvider,
+      model: agent.llmModel,
+      maxTokens: agent.llmMaxTokens ?? null,
+      stream: true,
+    },
+  })
   const stream = adapter.chatStream(llmMessages, {
     model: agent.llmModel,
     signal,
@@ -935,8 +1011,14 @@ export async function runAgentReply(
     })
   }, HEARTBEAT_INTERVAL_MS)
 
+  // 流的两条提前退出（撤回 / abort）走 `return`——用 finally 收段，避免留下
+  // `duration_ms = 0` 的半截 LLM 段（那会让「哪段最耗时」把最贵的一段算成 0）
+  let llmStreamStatus: 'ok' | 'timeout' | 'skipped' = 'ok'
   try {
     for await (const chunk of stream) {
+      // ttft：**首个 chunk 到达即记**（幂等，重复调用只认第一次）。放在循环体最前——
+      // 它是「模型什么时候开始吐字」，与后面的撤回/abort 判定无关。
+      llmHandle.markFirstChunk()
       // ── 撤回时窗保护（Window ③）──────────────────────
       // 流式输出中途撤回 → 提前终止
       // 检查是否被撤回或超时取消
@@ -947,11 +1029,13 @@ export async function runAgentReply(
         })
         state.deleteActiveStream(agent.id, sessionId)
         state.clearRetraction(triggerMsg.id)
+        llmStreamStatus = 'skipped'
         return { content: fullContent || '[消息已撤回]', msgId }
       }
       if (signal?.aborted) {
         log.info('agent reply aborted (timeout)', { traceId, agentId: agent.id })
         state.deleteActiveStream(agent.id, sessionId)
+        llmStreamStatus = 'timeout'
         return { content: fullContent, msgId }
       }
       // 三通道分流（语义拆分）：text → fullContent（正文，入上下文）；thinking →
@@ -994,6 +1078,15 @@ export async function runAgentReply(
     }
   } finally {
     clearInterval(heartbeatTimer)
+    // E7 收口：`ttft_ms` 在 `endSpan` 内结算（首 chunk 相对本段起点）。token 数取与
+    // `updateExecutionLogDiagnostics` **同一表达式**的估算值——适配器不回流 usage，
+    // 本仓的 `Chunk` 没有 usage 字段（R2 §八 明写不改 shared 类型）。
+    trace.endSpan(llmHandle, llmStreamStatus, {
+      llmUsage: {
+        inputTokens: contextTokenStats.total,
+        outputTokens: estimateTokens(fullContent),
+      },
+    })
   }
 
   // 超时取消时不写入消息也不更新状态（由 catch 块处理）
@@ -1009,6 +1102,10 @@ export async function runAgentReply(
   const latencyMs = Date.now() - t0
 
   // 写入完整消息
+  // ── 段 E8 `reply.persist`（R2 段五）─────────────────────
+  // 只包「回复落库」这一句：它是本地同步写，与后面的 diff 采集（外部 git 子进程）
+  // 是两件不同的事，时长必须分得开。
+  const persistT0 = Date.now()
   messagesRepo.insertAgentMessage(
     msgId,
     sessionId,
@@ -1028,6 +1125,7 @@ export async function runAgentReply(
     // 按 id 归并成最终形态（生成期前端看到的交错序），落库持久化后历史不再「工具收拢尾部」
     segments.length > 0 ? JSON.stringify(segments) : undefined
   )
+  trace.recordSpan('reply.persist', { startMs: persistT0 })
 
   const estimatedPromptLen = llmMessages.reduce((sum, m) => sum + m.content.length, 0)
   const promptTokens = contextTokenStats.total
@@ -1098,10 +1196,13 @@ export async function runAgentReply(
   // 失败静默跳过（collectCommitDiffs 内部 5s 超时 + 查不到即 null），不阻塞回复；
   // 外层 try/catch 双保险（保险丝：任何意外都不让回复 emit 延迟/失败）。
   if (triggerMsg.id) {
+    // ── 段 E9 `diff.collect`（R2 段五；内部 5s 超时）──────
+    const diffT0 = Date.now()
+    let diffBlocks: Awaited<ReturnType<typeof collectCommitDiffs>> = null
     try {
-      const blocks = await collectCommitDiffs(triggerMsg.id)
-      if (blocks && blocks.length > 0) {
-        finalMsg.extra = { ...(finalMsg.extra ?? {}), rich: { v: 1, blocks } }
+      diffBlocks = await collectCommitDiffs(triggerMsg.id)
+      if (diffBlocks && diffBlocks.length > 0) {
+        finalMsg.extra = { ...(finalMsg.extra ?? {}), rich: { v: 1, blocks: diffBlocks } }
       }
     } catch (err: any) {
       log.warn('diff collect failed (silent)', {
@@ -1110,6 +1211,17 @@ export async function runAgentReply(
         error: err?.message,
       })
     }
+    // `collectCommitDiffs` **内部吞掉超时并返回 null**（静默语义是本模块的契约），
+    // 外部看不见失败原因 ⇒ 超时判据只能取「本段跑满 `GIT_TIMEOUT_MS`」：`execFile`
+    // 在满 5s 时 kill，故「跑满」与「被超时 kill」在当前实现下等价。等价关系的唯一
+    // 缺口是「多个 git 调用各自不快、累加超 5s」——代价已知，不为此改采集器语义。
+    const diffMs = Date.now() - diffT0
+    trace.recordSpan('diff.collect', {
+      startMs: diffT0,
+      durationMs: diffMs,
+      status: diffMs >= GIT_TIMEOUT_MS ? 'timeout' : 'ok',
+      itemCount: diffBlocks?.length ?? null,
+    })
   }
 
   // extra 落库（push 的 push 字段 + diff 的 rich 块；任一存在即持久化——
