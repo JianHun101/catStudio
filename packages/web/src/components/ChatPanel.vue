@@ -386,11 +386,30 @@ watch(
 // ⚠️ 只作用流式折叠块。历史折叠块（.stored-thinking，MessageItem 渲染）展开后不再增长。
 const FOLD_SCROLL_TOLERANCE = 4
 
+// ⚠️ 「在框底」不能只用几何判据——真机实测（非推演）的冷启动失效：
+// 本容器 max-height:220px。未溢出时 clientHeight 由内容决定，distToBottom 恒 0；而**首次
+// 溢出那一帧** clientHeight 被钳在 219，scrollTop 却仍是 0 ⇒ distToBottom 一跃 7px（实测）
+// ≥4 ⇒ 判定「不在底部」直接 return。此后 scrollTop 恒 0、dist 单调增（7 → 28 → 49 …），
+// **跟随一次都不会触发**，用户看到的仍是「停在最上面、新内容长在框外」。
+// 根因：几何距离把「用户主动滚上去了」与「内容刚长出来」混为一谈，两者的 dist>0 同形。
+// 故拆开两件事：
+//   - 写侧（RO 回调）只认 sticky 位——「用户此刻想不想跟」
+//   - sticky 位只由 scroll 事件按几何距离重算——只有真滚动才会改它
+// 初值 true = 用户要的「默认自动滚到最新」。三不变量语义不变（I1 贴底 / I2 让位 / I3 复位）。
+// 注：增长量子（约一行 21px）恒大于容差 4px，所以纯几何判据在溢出后的每一跳都会失效，
+// 不是只差「第一格」——sticky 位是唯一稳定的判据。
+
+// 每个滚动容器一个 sticky 位：「用户此刻是否想贴底」。RO 回调只看它、不改它。
+// WeakMap 键是 body 元素：折叠体随流式结束被销毁，条目随之回收，无需手工清理。
+const foldSticky = new WeakMap<HTMLElement, boolean>()
+
+function isAtFoldBottom(body: HTMLElement): boolean {
+  return body.scrollHeight - body.scrollTop - body.clientHeight < FOLD_SCROLL_TOLERANCE
+}
+
 function stickFoldToBottom(body: HTMLElement): void {
-  // I2/I3 判据用几何距离而非布尔状态位——与消息区 checkScrollPosition 同一口径，
-  // 免得「跟随开关」与真实位置脱节（用户用滚动条/触控板/键盘都能滚，状态位追不全）。
-  const distToBottom = body.scrollHeight - body.scrollTop - body.clientHeight
-  if (distToBottom >= FOLD_SCROLL_TOLERANCE) return
+  // I2 让位：用户滚上去过（sticky=false）就不抢滚动条，直到他自己滚回框底（I3）。
+  if (!foldSticky.get(body)) return
   // behavior:'auto'——流式期平滑滚动既追不上逐 chunk 的增长，也会与用户手动滚动打架。
   body.scrollTo({ top: body.scrollHeight, behavior: 'auto' })
 }
@@ -411,22 +430,36 @@ function scheduleFoldStick(body: HTMLElement): void {
   })
 }
 
-// 每个折叠体一个 RO，随元素生命周期装卸。用指令而非函数 ref：指令的 mounted/unmounted 与
-// 元素严格配对，卸载时能确切 disconnect（函数 ref 卸载只收到 null，认不出是哪一个元素，
-// 观测集只增不减会随会话时长泄漏——本组件是长驻的）。
-const foldObservers = new Map<HTMLElement, ResizeObserver>()
+// 每个折叠体一个 RO + 一个 scroll 监听，随元素生命周期装卸。用指令而非函数 ref：指令的
+// mounted/unmounted 与元素严格配对，卸载时能确切 cleanup（函数 ref 卸载只收到 null，
+// 认不出是哪一个元素，观测集只增不减会随会话时长泄漏——本组件是长驻的）。
+const foldStickBindings = new Map<
+  HTMLElement,
+  { ro: ResizeObserver; body: HTMLElement; onScroll: () => void }
+>()
 
 const vFoldStick: Directive<HTMLElement> = {
   mounted(el) {
-    const body = el.parentElement
+    // 用 closest 而非 parentElement：中间多包一层时 parentElement 会指错元素且**静默失效**
+    // （不报错，只是永不跟随）；closest 按语义找容器，容忍插入节点。
+    const body = el.closest('.stream-fold-body') as HTMLElement | null
     if (!body) return
+    foldSticky.set(body, true) // 默认跟随——冷启动第一跳就靠它（见上）
+    // sticky 位唯一的更新口：真滚动（用户拖滚动条/触控板/键盘，或本指令自己的贴底写回）
+    // 才重算。内容增长不产生 scroll 事件，故不会把「刚长出来」误读成「用户滚上去了」。
+    const onScroll = () => foldSticky.set(body, isAtFoldBottom(body))
+    body.addEventListener('scroll', onScroll, { passive: true })
     const ro = new ResizeObserver(() => scheduleFoldStick(body))
     ro.observe(el)
-    foldObservers.set(el, ro)
+    foldStickBindings.set(el, { ro, body, onScroll })
   },
   unmounted(el) {
-    foldObservers.get(el)?.disconnect()
-    foldObservers.delete(el)
+    // unmounted 时 el 已被移出 DOM，closest 会失配 ⇒ 必须靠 mounted 时记下的配对来清理。
+    const b = foldStickBindings.get(el)
+    if (!b) return
+    b.ro.disconnect()
+    b.body.removeEventListener('scroll', b.onScroll)
+    foldStickBindings.delete(el)
   },
 }
 

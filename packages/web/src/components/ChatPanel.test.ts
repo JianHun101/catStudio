@@ -507,26 +507,42 @@ describe('ChatPanel 思考框横向溢出（三落点同源：正文 / 流式思
 describe('ChatPanel 思考框内跟进（观测 .stream-fold-inner 尺寸 + 三不变量）', () => {
   it('模板：条目列表外包 .stream-fold-inner 并挂 v-fold-stick（RO 的观测对象）', () => {
     expect(source).toContain('<div v-fold-stick class="stream-fold-inner">')
-    // 包裹层必须在 .stream-fold-body 之内（RO 回调读 parentElement 当滚动容器）
+    // 包裹层必须在 .stream-fold-body 之内（指令用 closest('.stream-fold-body') 找滚动容器）
     expect(source).toMatch(
       /class="stream-fold-body"[\s\S]{0,400}class="stream-fold-inner"[\s\S]{0,400}class="fold-thinking"/
     )
   })
 
-  it('观测接线：指令 mounted 建 RO 观测 inner、卸载 disconnect（随元素生命周期，不泄漏）', () => {
+  it('观测接线：指令 mounted 建 RO 观测 inner、卸载 disconnect 并摘 scroll 监听（随元素生命周期，不泄漏）', () => {
     expect(source).toContain('const vFoldStick: Directive<HTMLElement> = {')
     expect(source).toContain('new ResizeObserver(() => scheduleFoldStick(body))')
     expect(source).toContain('ro.observe(el)')
-    expect(source).toContain('foldObservers.get(el)?.disconnect()')
-    expect(source).toContain('foldObservers.delete(el)')
+    // closest 而非 parentElement：中间插一层时 parentElement 会指错且静默失效
+    expect(source).toContain("el.closest('.stream-fold-body')")
+    expect(source).not.toContain('el.parentElement')
+    expect(source).toContain('b.ro.disconnect()')
+    expect(source).toContain("b.body.removeEventListener('scroll', b.onScroll)")
+    expect(source).toContain('foldStickBindings.delete(el)')
   })
 
-  it('三不变量：几何距离判据（在框底才贴底、滚上去不抢）+ behavior:auto + rAF 节流', () => {
-    // I1/I2/I3 同一套几何判据：距离 ≥ 容差即让位，回到容差内自动恢复跟随
+  it('冷启动不变量：sticky 位初值 true，且只由 scroll 事件重算（纯几何判据实测冷启动失效）', () => {
+    // 首次溢出那一帧 scrollTop 仍是 0（clientHeight 被 max-height 钳住），几何距离一跃 ≥4px；
+    // 纯几何判据会判「不在底部」而 return，此后 dist 单调增、跟随一次都不触发（真机实测
+    // 7 → 28 → 49px，scrollTop 恒 0）。故写侧只认 sticky 位，初值 true = 默认跟随。
+    expect(source).toContain('foldSticky.set(body, true)')
+    expect(source).toContain("body.addEventListener('scroll', onScroll, { passive: true })")
+    expect(source).toContain('foldSticky.set(body, isAtFoldBottom(body))')
+  })
+
+  it('三不变量：sticky 位判据（想跟才贴底、滚上去不抢）+ behavior:auto + rAF 节流', () => {
+    // I1/I2/I3：sticky=true 才贴底；sticky 由 scroll 事件按几何距离翻转（I2 让位 / I3 复位）
+    expect(source).toContain('if (!foldSticky.get(body)) return')
+    expect(source).toContain('function isAtFoldBottom(body: HTMLElement): boolean')
     expect(source).toContain(
-      'const distToBottom = body.scrollHeight - body.scrollTop - body.clientHeight'
+      'body.scrollHeight - body.scrollTop - body.clientHeight < FOLD_SCROLL_TOLERANCE'
     )
-    expect(source).toContain('if (distToBottom >= FOLD_SCROLL_TOLERANCE) return')
+    // 写侧不得再自己算几何距离（那正是冷启动失效的成因）
+    expect(source).not.toContain('const distToBottom = body.scrollHeight')
     // 流式期平滑滚动追不上逐 chunk 增长，且会与用户手动滚动打架
     expect(source).toContain("body.scrollTo({ top: body.scrollHeight, behavior: 'auto' })")
     // rAF 节流：同帧多次触发合并一次，且滚动写推迟到下一帧（避免 RO loop 告警）
