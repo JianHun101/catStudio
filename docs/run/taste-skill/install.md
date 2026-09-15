@@ -1,6 +1,6 @@
 # taste skill 安装（票 A · flash猫）
 
-> 状态：实施完成，待店长投审查。**含一处出派活单文件清单的改动（§3），需店长裁决**。
+> 状态：票 A 已收口（PR #80 → dev `d192df9`）。§3 豁免**已获店长裁决批准**，§7.2 空口径**已随票 C 清除**——本档为在飞留痕，口径已上浮 `skills/BOOTSTRAP.md`「同步溯源」。
 
 ## 0. 结论
 
@@ -73,6 +73,12 @@ skills/design-taste-frontend/
 
 **若店长否决**：改走「归一化」口径——删 ignore 行 → `prettier --write` → lock 的 `computedHash` 改 `a7194e24…`（= prettier(上游) 的 sha256，仍是「同口径」意义上的可对账值）→ 本档 §2 口径改写。
 
+### 裁决（已落）
+
+**店长批准豁免**，且独立复现判据（绕开本仓 ignore，走 `prettier --stdin-filepath`）：产出 `a7194e24…` ≠ 上游原文 `aa194351…`，确认上游正文**不是** prettier 不动点。裁决理由：**判据面必须与被判面同面**——验收判据是「与上游逐字节一致」，存储面就不能再过格式化器；否则等于把「与上游一致」降级成「与 prettier(上游) 一致」，日后跟上游对账得先复现**我们的** prettier 版本 + 配置，成本从一条 `sha256sum` 涨成「跑 prettier 3.9.5」。**不切归一化口径。**
+
+**口径已上浮 `skills/BOOTSTRAP.md`「同步溯源」**（持久约定：逐字 vendor 的外部技能正文目录必须进 `.prettierignore`）。本档不再是口径载体——`docs/run/` 活收口即清，把口径挂在注定被清的档上必烂（这正是 §7.1 的成因）。
+
 ## 4. 白名单改名 + 两条目（含 wayfinder 口径翻转）
 
 `scripts/mcp-server-utils.mjs`：
@@ -117,7 +123,7 @@ skills/design-taste-frontend/
 
 ## 7. 观察项 / OQ（非阻塞，交店长裁）
 
-1. **[需裁决] `.prettierignore` 一行** —— §3 已详述两难与建议；不裁则本单验收口径要改。
-2. **`skills/.sync-provenance.json` 是个空口径** —— `BOOTSTRAP.md:63` 写「新增第三方 skill 准入：无来源登记 → `skills-check-manifest.mjs` 红示拦截」，但实测：① `skills-check-manifest.mjs` 里**没有任何** provenance 校验代码；② 该 json 文件不存在，且全仓 `grep sync-provenance` 只命中 `.gitignore:13` 与 `BOOTSTRAP.md:61/63`，**没有生成器**。也就是说「第三方准入拦截」这条机制**当前不存在**，本单新增 external 技能时它没有、也不可能拦。属既有文档漂移，本单未修（超出票单范围）——建议单独立单：要么补校验+生成器，要么把 BOOTSTRAP 那句删掉。
+1. **[已裁 · 批准豁免]** `.prettierignore` 一行 —— 详见 §3「裁决（已落）」；口径已上浮 `skills/BOOTSTRAP.md`「同步溯源」。
+2. **[已裁 · 删句] `skills/.sync-provenance.json` 是个空口径** —— 改前 `BOOTSTRAP.md:61/63` 写「同步来源/版本记录在 `skills/.sync-provenance.json`」＋「无来源登记 → `skills-check-manifest.mjs` 红示拦截」，但实测两者都不存在：① `skills-check-manifest.mjs` 只校验 `source` 取值合法性，**没有任何** provenance 校验代码；② 该 json 文件不存在，全仓 `grep sync-provenance` 只命中 `.gitignore:13` 与 BOOTSTRAP 自身，**没有生成器**。**店长裁决：不建生成器、不建校验器**——lock 已提供 `source`/`skillPath`/`computedHash` 可对账记录，再引一套运行时 json 就是造出第二个真相源（两份漂移后没有裁决依据）；真要准入闸，正确形态是「check-manifest 校验 lock 条目完整性」，属另一票。已随票 C 删除 BOOTSTRAP 两句、同口径改 `manifest.yaml:12`、删 `.gitignore:13` 占位行——「准入无自动拦截」成为**明示现状**，靠审查人比对 lock 条目。**本档是全仓唯一保留 `sync-provenance` 字样的地方**，它记载的正是该缺口本身。
 3. **许可证未核验** —— §1；如需确证，联网后 `git -C <probe> show HEAD:LICENSE`（或换完整克隆）即可，一次命令的事。
 4. **上游 §0 适配风险留给票 B** —— 正文首行自述「Not dashboards, not data tables, not multi-step product UI」，而评估页/设置页正是产品 UI；harness 假设 React/Tailwind/Motion，本仓是 Vue3 + 手写 CSS。票 B 的「判据适用性映射」是正解，本档不重复论证。

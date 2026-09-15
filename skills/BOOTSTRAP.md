@@ -46,7 +46,8 @@ codebase-design · design-taste-frontend · diagnosing-bugs · domain-modeling �
 git-guardrails-claude-code · grilling · resolving-merge-conflicts · setup-pre-commit · tdd
 
 （`design-taste-frontend` 来源 `Leonxlnx/taste-skill`（非 mattpocock 系）——
-上游 `skills/taste-skill/SKILL.md` 逐字 vendor，版本锚点与口径见 `docs/run/taste-skill/install.md`）
+上游 `skills/taste-skill/SKILL.md` 逐字 vendor；版本锚点见 `skills-lock.json` 该条目
+（`source` / `skillPath` / `computedHash`），vendor 口径见本档「同步溯源」）
 
 ### 项目定制层（catstudy/，2，self）
 
@@ -58,9 +59,18 @@ catstudy-quality-gate · catstudy-receive-review
 
 ## 同步溯源
 
-第三方 skill 的同步来源/版本记录在 `skills/.sync-provenance.json`
-（gitignore 不入库，机器生成：source/commit/secret_scan 结果）。
-新增第三方 skill 准入：无来源登记 → `skills-check-manifest.mjs` 红示拦截。
+第三方 skill 的 provenance 真相源是 **`skills-lock.json`**：`source`（上游仓库）+
+`skillPath`（上游路径）+ `computedHash`（按 LF 归一化内容的 sha256）三字段可对账；
+`manifest.yaml` 的 `source` 字段标来源类别（`self` / `mattpocock` / `external`）。
+
+**新增第三方 skill 准入无自动拦截**：`skills-check-manifest.mjs` 只校验 `source` 取值
+合法性（`self` / `mattpocock` / `external`），**不校验来源真实性**——是否合规靠审查人
+比对 lock 条目。（不另引运行时 provenance json：那会造出第二个真相源，两份漂移后没有
+裁决依据；真要准入闸，正确形态是「check-manifest 校验 lock 条目完整性」，属另一票。）
+
+**逐字 vendor 的外部技能正文目录必须进 `.prettierignore`**：prettier 会重排 markdown
+表层（表格对齐 / `*` 列表符 → `-` / `*强调*` → `_强调_` / 补空行），使内容与上游不再
+逐字节一致——而这类目录的验收判据正是「与上游 sha256 一致」。
 
 本次 v1.1 对齐：上游 `mattpocock/skills` tag `v1.1.0`；丢弃集 17（ask-matt · decision-mapping ·
 edit-article · obsidian-vault · design-an-interface · qa · request-refactor-plan ·

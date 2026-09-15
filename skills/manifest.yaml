@@ -9,7 +9,8 @@
 # v1.1 主线 skill（to-spec/to-tickets/wayfinder/code-review）按来源仓库标 mattpocock——
 # code-review 无 disable-model-invocation 字段仍标 mattpocock（店长裁决，追平 v1.1）；
 # session-summary 已转自研维护（不在 v1.1 树），归 self；
-# 其余无该字段的第三方技能统一标 external（来源待核，列入 .sync-provenance.json 追踪）。
+# 其余无该字段的第三方技能统一标 external（来源待核——provenance 真相源是 skills-lock.json
+# 的 source/skillPath/computedHash；新增准入无自动拦截，靠审查人比对 lock 条目）。
 #
 # 两层机制（勿混）：
 #   · MCP read_skill 白名单（scripts/mcp-server-utils.mjs 的 SKILL_CATALOG）= 猫可自取范围，是访问约束；
