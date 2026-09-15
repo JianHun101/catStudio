@@ -120,6 +120,10 @@ vi.mock('../llm/git-utils.js', () => ({
   ensureSessionWorktree: vi.fn(() => null),
   getSessionWorktreePath: vi.fn(() => null),
   getMainRepoRoot: vi.fn(() => null),
+  // T-1 Phase 2：serial.ts 的清理段改带 `cleanGitEnv()`（与 gitCommit 对称）。
+  // 本工厂是**部分导出**——漏掉这个键时 `serial.ts` 拿到的是 undefined，调用即
+  // TypeError，而清理段自带 `catch {}` 会把它**静默吞掉** ⇒ 表现为「清理莫名没跑」。
+  cleanGitEnv: vi.fn(() => ({ ...process.env })),
 }))
 
 // 对话内 diff 采集：默认返回 null（无 diff，与现网纯讨论/A2A 一致）——
@@ -6032,18 +6036,25 @@ describe('会话 worktree 接线', () => {
   })
 
   it('auto-commit 落会话 worktree：gitCommit 带 cwd（提交到会话分支）', async () => {
-    const { gitCommit, getSessionWorktreePath } = await import('../llm/git-utils.js')
-    vi.mocked(getSessionWorktreePath).mockReturnValue('/tmp/catStudy-sessions/wt-2')
+    // T-1 Phase 2：提交作用域解析从 `getSessionWorktreePath` 换成 `ensureSessionWorktree`
+    // （查 + 建）——本用例跟着改 mock 目标，否则 ① 拿不到路径、压根不调 gitCommit
+    const { gitCommit, ensureSessionWorktree } = await import('../llm/git-utils.js')
+    vi.mocked(ensureSessionWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-2')
     await runReply()
     expect(vi.mocked(gitCommit)).toHaveBeenCalledWith('catstudy [msg-wt]', {
       cwd: '/tmp/catStudy-sessions/wt-2',
     })
   })
 
-  it('降级: 无 worktree → gitCommit 单参数（提交主工作区 dev，行为与现网一致）', async () => {
+  it('降级: 无 worktree ⇒ 不提交（提交作用域绝不落主仓库，T-1 Phase 2）', async () => {
+    // Phase 2 收窄：`ensureSessionWorktree` 返回 null ⇒ ① **不提交** + 显式告警。
+    // 旧行为（`gitCommit('catstudy [msg-wt]')` 单参数 = 提交主工作区 dev，绕过审查链）
+    // 已按票面删除——这条断言就是「它没被删干净」的回归门。
+    // 注：本文件 mock 掉整个 git-utils ⇒ 这里只证得「调用没发生」；「主仓库文件真的
+    // 没动」由 `execution/serial.downgrade.test.ts` 的真 git 仓库夹具证（G7 同面要求）。
     const { gitCommit } = await import('../llm/git-utils.js')
     await runReply()
-    expect(vi.mocked(gitCommit)).toHaveBeenCalledWith('catstudy [msg-wt]')
+    expect(vi.mocked(gitCommit)).not.toHaveBeenCalled()
   })
 })
 

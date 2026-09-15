@@ -29,6 +29,10 @@ vi.mock('../llm/git-utils.js', () => ({
   ensureSessionWorktree: vi.fn(() => null),
   snapshotPackageDeps: vi.fn(() => ({})),
   diffNewPackages: vi.fn(() => []),
+  // T-1 Phase 2：serial.ts 清理段改带 `cleanGitEnv()`（与 gitCommit 对称）。本工厂是
+  // **部分导出**——漏键 ⇒ serial.ts 拿到 undefined、调用即 TypeError，而清理段自带
+  // `catch {}` 会把它静默吞掉（表现为「清理莫名没跑」）
+  cleanGitEnv: vi.fn(() => ({ ...process.env })),
 }))
 
 vi.mock('../summarizer/index.js', () => ({
