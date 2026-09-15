@@ -1,0 +1,1273 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>R3 原型 · 执行 trace 段瀑布（真机数据）</title>
+    <style>
+      /* ═══ 设计令牌：照抄 packages/web/index.html 的暖猫咖主题，原型与应用同色 ═══ */
+      :root {
+        --bg-deep: #14110e;
+        --bg-base: #1b1815;
+        --bg-surface: #231f1b;
+        --bg-hover: #2c2722;
+        --bg-raised: #312b25;
+        --border-subtle: #292420;
+        --border-default: #3a332c;
+        --border-table: #5c4a3b;
+        --text-primary: #e6ddd0;
+        --text-secondary: #a0988e;
+        --text-muted: #6b655c;
+        --accent: #d4a574;
+        --accent-soft: rgba(212, 165, 116, 0.15);
+        --accent-tint: rgba(212, 165, 116, 0.06);
+        --accent-pink: #d4849a;
+        --accent-red: #e0556a;
+        --accent-green: #7eb899;
+        --accent-yellow: #d4a854;
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
+        --font-sans:
+          'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+        --font-mono: 'JetBrains Mono', 'Consolas', 'Cascadia Code', monospace;
+        /* 段相位色——原型提案，按「这段时间在干什么」分五类 */
+        --ph-wait: #d4a854; /* 等待：等锁 / 等 token */
+        --ph-orch: #7d7264; /* 编排：拼上下文 / 压缩 */
+        --ph-retr: #7eb899; /* 检索：记忆 / 知识库 */
+        --ph-llm: #d4a574; /* 模型：llm.chat（主角） */
+        --ph-pers: #d4849a; /* 落库：回复落库 / diff / 自动提交 */
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #0c0a08;
+        color: var(--text-primary);
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.6;
+        padding: 28px 32px 80px;
+      }
+      h1 {
+        font-size: 19px;
+        margin: 0 0 4px;
+        letter-spacing: -0.3px;
+      }
+      h2 {
+        font-size: 14px;
+        margin: 0 0 2px;
+        letter-spacing: -0.2px;
+      }
+      .sub {
+        color: var(--text-secondary);
+        font-size: 12px;
+        margin: 0 0 26px;
+      }
+      .sub code {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--accent);
+      }
+      section {
+        margin: 0 0 38px;
+      }
+      .sec-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin: 0 0 12px;
+      }
+      .sec-no {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--bg-deep);
+        background: var(--accent);
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-weight: 700;
+        flex: none;
+      }
+      .sec-desc {
+        color: var(--text-secondary);
+        font-size: 12px;
+        margin: 0 0 14px;
+        max-width: 900px;
+      }
+      .sec-desc b {
+        color: var(--text-primary);
+        font-weight: 600;
+      }
+      .card {
+        background: var(--bg-base);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-lg);
+        padding: 16px 18px;
+      }
+      .card + .card {
+        margin-top: 14px;
+      }
+      .card-label {
+        font-size: 11px;
+        color: var(--text-muted);
+        letter-spacing: 0.4px;
+        margin: 0 0 10px;
+        text-transform: uppercase;
+      }
+      .card-label b {
+        color: var(--accent);
+        font-weight: 700;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+
+      /* ─── 现仓库已有的「跳展开两段条」（EvaluationView.vue 原样式，逐字照搬以便对照） ─── */
+      .hop-row {
+        margin-bottom: 14px;
+      }
+      .hop-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+        flex-wrap: wrap;
+      }
+      .hop-agent {
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .hop-status {
+        font-size: 11px;
+        color: var(--text-secondary);
+      }
+      .hop-body {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .hop-bar {
+        flex: 1;
+        min-width: 140px;
+        height: 10px;
+        display: flex;
+        border-radius: 999px;
+        overflow: hidden;
+        background: var(--bg-surface);
+      }
+      .hop-seg {
+        height: 100%;
+      }
+      .seg-reply {
+        background: #3ecf8e;
+      }
+      .seg-nonreply {
+        background: #6b7a8f;
+      }
+      .seg-nodata {
+        width: 100%;
+        background: repeating-linear-gradient(
+          45deg,
+          rgba(107, 122, 143, 0.45) 0 4px,
+          rgba(107, 122, 143, 0.15) 4px 8px
+        );
+      }
+      .hop-dur {
+        font-size: 11px;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      /* ─── 新的：段瀑布（宽版） ─── */
+      .wf {
+        --label-w: 132px;
+      }
+      .wf-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        margin: 0 0 14px;
+        font-size: 11px;
+        color: var(--text-secondary);
+      }
+      .wf-legend i {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        margin-right: 5px;
+        vertical-align: -1px;
+      }
+      .wf-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 26px;
+      }
+      .wf-row.phase-gap {
+        height: 18px;
+      } /* 段与段之间的分组留白 */
+      .wf-name {
+        width: var(--label-w);
+        flex: none;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-secondary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .wf-name.root {
+        color: var(--text-primary);
+        font-weight: 700;
+      }
+      .wf-name.child {
+        padding-left: 12px;
+      }
+      .wf-track {
+        flex: 1;
+        position: relative;
+        height: 14px;
+        background: var(--bg-surface);
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .wf-bar {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        border-radius: 2px;
+        min-width: 3px; /* ← 关键：0ms 段也要看得见 */
+        transition: filter 0.12s;
+      }
+      .wf-bar:hover {
+        filter: brightness(1.35);
+      }
+      .wf-ms {
+        width: 74px;
+        flex: none;
+        text-align: right;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        color: var(--text-primary);
+      }
+      .wf-pct {
+        width: 52px;
+        flex: none;
+        text-align: right;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .wf-gap {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        background: repeating-linear-gradient(
+          45deg,
+          rgba(107, 101, 92, 0.35) 0 3px,
+          transparent 3px 6px
+        );
+      }
+      .wf-note {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 12px;
+        padding-left: var(--label-w);
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+
+      /* ─── 新的：右侧面板（300px） ─── */
+      .stage {
+        display: flex;
+        justify-content: center;
+        gap: 18px;
+        align-items: flex-start;
+        background:
+          radial-gradient(ellipse at 50% 0%, rgba(212, 165, 116, 0.05), transparent 60%), #0c0a08;
+        border: 1px dashed var(--border-default);
+        border-radius: var(--radius-lg);
+        padding: 18px;
+      }
+      .phone {
+        width: 300px;
+        flex: none;
+        background: var(--bg-base);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      .phone-cap {
+        font-size: 11px;
+        color: var(--text-muted);
+        text-align: center;
+        margin-top: 8px;
+      }
+
+      /* 面板内的既有区块（会话成员 / 调度队列）——照 SessionAgentsPanel 形态压扁 */
+      .p-section {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .p-title {
+        font-size: 11px;
+        color: var(--text-muted);
+        letter-spacing: 0.5px;
+        margin: 0 0 9px;
+        text-transform: uppercase;
+      }
+      .stat-card {
+        display: flex;
+        background: var(--bg-surface);
+        border-radius: var(--radius-sm);
+        padding: 9px 0;
+        margin-bottom: 4px;
+      }
+      .stat-item {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1px;
+      }
+      .stat-value {
+        font-size: 16px;
+        font-weight: 700;
+        color: var(--accent);
+      }
+      .stat-label {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+      .stat-divider {
+        width: 1px;
+        background: var(--border-subtle);
+      }
+      .member-card {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 7px 9px;
+        border-radius: var(--radius-sm);
+        background: var(--bg-surface);
+        margin-bottom: 5px;
+      }
+      .member-avatar {
+        font-size: 16px;
+      }
+      .member-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .member-top {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .member-name {
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .dot-busy {
+        background: var(--status-busy, #d4a854);
+        box-shadow: 0 0 6px rgba(212, 168, 84, 0.7);
+        animation: pulse 1.6s infinite;
+      }
+      .dot-idle {
+        background: var(--status-idle, #5c5852);
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.45;
+        }
+      }
+      .member-status {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+      .member-meta {
+        font-size: 10px;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .queue-empty {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      /* 面板内的 trace 块（新增） */
+      .trace-block {
+        padding: 12px 14px;
+      }
+      .trace-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 2px;
+      }
+      .trace-title {
+        font-size: 11px;
+        color: var(--text-muted);
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+      }
+      .trace-mode {
+        display: flex;
+        background: var(--bg-surface);
+        border-radius: 999px;
+        padding: 2px;
+        gap: 2px;
+      }
+      .trace-mode button {
+        border: 0;
+        background: none;
+        color: var(--text-muted);
+        font-size: 10px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        cursor: pointer;
+        font-family: var(--font-sans);
+      }
+      .trace-mode button.on {
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+      .trace-run {
+        background: var(--bg-surface);
+        border-radius: var(--radius-sm);
+        padding: 9px 10px;
+        margin-top: 9px;
+      }
+      .trace-run-head {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        margin-bottom: 7px;
+      }
+      .trace-run-agent {
+        font-weight: 600;
+        font-size: 12px;
+      }
+      .trace-run-total {
+        margin-left: auto;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--accent);
+      }
+      .trace-run-time {
+        font-size: 10px;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .badge {
+        font-size: 9px;
+        padding: 1px 5px;
+        border-radius: 999px;
+        border: 1px solid var(--border-default);
+        color: var(--text-muted);
+      }
+      .badge-ok {
+        color: var(--accent-green);
+        border-color: rgba(126, 184, 153, 0.35);
+      }
+      .badge-run {
+        color: var(--accent-yellow);
+        border-color: rgba(212, 168, 84, 0.35);
+      }
+      .badge-llm {
+        color: var(--accent);
+        border-color: rgba(212, 165, 116, 0.35);
+      }
+
+      /* 面板内的「比例条」排行形态（300px 默认） */
+      .rank-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 1px 8px;
+        margin-bottom: 7px;
+      }
+      .rank-name {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-secondary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .rank-ms {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+      }
+      .rank-track {
+        grid-column: 1/-1;
+        height: 5px;
+        background: var(--bg-base);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .rank-bar {
+        display: block;
+        height: 100%;
+        border-radius: 999px;
+        min-width: 2px;
+      } /* display:block —— span 默认 inline，width 不生效 */
+      .rank-dim {
+        opacity: 0.45;
+      }
+
+      /* 面板内的「分段条」形态（300px，堆叠 = 现有两段条的九段版） */
+      .stack-bar {
+        display: flex;
+        height: 11px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: var(--bg-base);
+        margin-bottom: 10px;
+      }
+      .stack-seg {
+        height: 100%;
+        min-width: 2px;
+      }
+      .stack-gap {
+        height: 100%;
+        background: repeating-linear-gradient(
+          45deg,
+          rgba(107, 101, 92, 0.5) 0 3px,
+          transparent 3px 6px
+        );
+      }
+      .stack-li {
+        display: grid;
+        grid-template-columns: 10px 1fr auto;
+        align-items: center;
+        gap: 6px;
+        font-size: 10px;
+        margin-bottom: 4px;
+      }
+      .stack-li i {
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        display: block;
+      }
+      .stack-n {
+        font-family: var(--font-mono);
+        color: var(--text-secondary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .stack-v {
+        font-family: var(--font-mono);
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* 面板内的「真瀑布」形态（300px 展开） */
+      .mini-wf {
+        --label-w: 66px;
+      }
+      .mini-wf .wf-row {
+        height: 19px;
+      }
+      .mini-wf .wf-name {
+        font-size: 9px;
+        width: var(--label-w);
+      }
+      .mini-wf .wf-name.child {
+        padding-left: 7px;
+      }
+      .mini-wf .wf-track {
+        height: 8px;
+      }
+      .mini-wf .wf-ms {
+        width: 52px;
+        font-size: 9px;
+      }
+      .mini-wf .wf-pct {
+        display: none;
+      }
+
+      /* 进行中态 */
+      .pending {
+        background: var(--bg-surface);
+        border-radius: var(--radius-sm);
+        padding: 11px;
+        margin-top: 9px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+      .pending-spin {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        flex: none;
+        border: 2px solid rgba(212, 168, 84, 0.25);
+        border-top-color: var(--accent-yellow);
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .pending-text {
+        font-size: 11px;
+        color: var(--text-secondary);
+      }
+      .pending-text b {
+        color: var(--accent-yellow);
+      }
+      .skeleton {
+        margin-top: 9px;
+      }
+      .sk-row {
+        height: 8px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--bg-surface), var(--bg-hover), var(--bg-surface));
+        background-size: 200% 100%;
+        animation: sk 1.4s infinite;
+        margin-bottom: 5px;
+      }
+      @keyframes sk {
+        0% {
+          background-position: 200% 0;
+        }
+        100% {
+          background-position: -200% 0;
+        }
+      }
+
+      /* 批注 */
+      .calls {
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+        max-width: 340px;
+      }
+      .call {
+        background: var(--bg-base);
+        border-left: 2px solid var(--accent);
+        border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+        padding: 9px 12px;
+        font-size: 11.5px;
+        color: var(--text-secondary);
+      }
+      .call b {
+        color: var(--text-primary);
+      }
+      .call.warn {
+        border-left-color: var(--accent-red);
+      }
+      .call.good {
+        border-left-color: var(--accent-green);
+      }
+      .verdict {
+        background: var(--accent-tint);
+        border: 1px solid var(--accent-soft);
+        border-radius: var(--radius-md);
+        padding: 11px 14px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        margin-top: 12px;
+      }
+      .verdict b {
+        color: var(--accent);
+      }
+      table {
+        border-collapse: collapse;
+        font-size: 11.5px;
+        width: 100%;
+        max-width: 760px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 6px 10px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      th {
+        color: var(--text-muted);
+        font-weight: 500;
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+      }
+      td.mono {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>R3 原型 · 执行 trace 段瀑布</h1>
+    <p class="sub">
+      数据源：<code>cat-study-dev.db</code> → <code>spans</code> /
+      <code>span_llm</code> 表<b>真机实测值</b>（非构造样例）。 配色令牌照抄
+      <code>packages/web/index.html</code>，与应用同色。
+    </p>
+
+    <!-- ══════════ ① 现在有什么 ══════════ -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-no">①</span>
+        <h2>现在：一条跳 = 两根条</h2>
+      </div>
+      <p class="sec-desc">
+        这是仓库里<strong>已经收口</strong>的形态（<code>EvaluationView.vue</code> 链路 tab，PR
+        #73）。一根条两段： <b>回复生成段</b>（绿）= <code>latency_ms</code>；<b>非回复段</b>（灰）=
+        <code>totalMs − replyMs</code>。
+      </p>
+      <div class="card">
+        <div class="card-label">
+          现状 · 一次真实执行（店长 · <span style="font-family: var(--font-mono)">755742f9</span>）
+        </div>
+        <div class="hop-row">
+          <div class="hop-head">
+            <span class="hop-agent">🐱 店长</span><span class="hop-status">已完成</span>
+          </div>
+          <div class="hop-body">
+            <div class="hop-bar">
+              <div class="hop-seg seg-reply" style="width: 99.95%"></div>
+              <div class="hop-seg seg-nonreply" style="width: 0.05%"></div>
+            </div>
+            <span class="hop-dur">总 170.0s · 回复生成段 169.9s · 非回复段 0.1s</span>
+          </div>
+        </div>
+        <div class="verdict">
+          <b>问题：这根条告诉你「99.95% 都在回复生成段」，然后就断了。</b>
+          可你已经知道那是 LLM——<b
+            >你想知道的是这 169.9
+            秒里，记忆检索花了多久？拼上下文花了多久？真正等模型吐字花了多久？</b
+          >
+          两段条答不了，因为那 169.9 秒是<b>一个不透明的桶</b>：R2 的实测显示，桶里同时装着记忆检索
+          1.16s、上下文拼装 66ms 和模型生成 168.6s。
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════ ② 段瀑布 ══════════ -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-no">②</span>
+        <h2>段瀑布：同一跳，拆成 11 段</h2>
+      </div>
+      <p class="sec-desc">
+        <b>「细化为段瀑布」指的就是这个</b>——同一根时间轴，把一次执行拆成 <b>11 个可命名的段</b>（R2
+        已落库）， 每段有自己的起点与时长。<b
+          >横向位置 = 它在执行的哪一刻开始，横向长度 = 它占了多久</b
+        >。 组与组之间的斜纹是<b>编排空档</b>（代码在两个段之间的纯 JS 开销，不归属任何一段）。
+      </p>
+      <div class="card">
+        <div class="card-label">
+          之后 · 同一次执行 <span style="font-family: var(--font-mono)">755742f9</span> · 9
+          段实际落库
+        </div>
+        <div class="wf" id="wf-a"></div>
+        <div class="wf-note">
+          <span>根段 <b>invoke_agent</b> 170.0s 为轴</span>
+          <span>子段加总 169.9s（99.95%）</span>
+          <span>空档 0.08s（0.05%）</span>
+        </div>
+        <div class="verdict">
+          <b>一眼可读的结论：</b><code>llm.chat</code> <b>168.6s / 99.17%</b> ——
+          钱几乎全烧在模型吐字上； <code>memory.retrieval</code>
+          <b>1.16s / 0.68%</b> 是第二名，比第三名大 17 倍； 其余六段加起来 <b>0.17s</b>。
+          <br />而首字延迟 <code>ttft_ms</code> 只有
+          <b>2.98s</b>（1.75%）——<b>不是「等第一个字」慢，是「吐完所有字」慢</b>。
+          这一句在现有两段条下<b>永远算不出来</b>。
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">
+          同形态 · 第二次执行
+          <span style="font-family: var(--font-mono)">f7a2e626</span>（换一段看比例是否稳定）
+        </div>
+        <div class="wf" id="wf-b"></div>
+        <div class="wf-note">
+          <span>根段 178.0s</span><span>llm.chat 176.7s / 99.28%</span
+          ><span>memory 1.05s / 0.59%</span><span>ttft 3.93s</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════ ③ 右侧面板 ══════════ -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-no">③</span>
+        <h2>你点名的落点：右侧面板（300px）</h2>
+      </div>
+      <p class="sec-desc">
+        右侧面板是主界面的 <code>.panel-right</code>（<b>固定 300px</b>，装
+        <code>SessionAgentsPanel</code>：会话成员 + 调度队列）。 <b>300px 放不下真瀑布</b>——9 段里 8
+        段加起来不到 1%，在 300px 里会全挤成看不见的像素。
+        所以这里给<b>三种形态</b>，可当场切换对比。<b
+          >这一屏是原型最有信息量的地方：它顺手证伪了一个想当然的设计。</b
+        >
+      </p>
+
+      <div class="stage">
+        <div>
+          <div class="phone">
+            <div class="p-section">
+              <div class="stat-card">
+                <div class="stat-item">
+                  <span class="stat-value">312</span><span class="stat-label">消息总数</span>
+                </div>
+                <div class="stat-divider"></div>
+                <div class="stat-item">
+                  <span class="stat-value">148</span><span class="stat-label">猫咪回复</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="p-section">
+              <p class="p-title">会话成员</p>
+              <div class="member-card">
+                <span class="member-avatar">🐱</span>
+                <div class="member-info">
+                  <div class="member-top">
+                    <span class="member-name">店长</span><span class="status-dot dot-busy"></span
+                    ><span class="member-status">忙碌</span>
+                  </div>
+                  <div class="member-meta">1.24M tokens</div>
+                </div>
+              </div>
+              <div class="member-card">
+                <span class="member-avatar">😼</span>
+                <div class="member-info">
+                  <div class="member-top">
+                    <span class="member-name">吐槽猫</span><span class="status-dot dot-idle"></span
+                    ><span class="member-status">空闲</span>
+                  </div>
+                  <div class="member-meta">886K tokens</div>
+                </div>
+              </div>
+              <div class="member-card">
+                <span class="member-avatar">🐯</span>
+                <div class="member-info">
+                  <div class="member-top">
+                    <span class="member-name">ds猫</span><span class="status-dot dot-idle"></span
+                    ><span class="member-status">空闲</span>
+                  </div>
+                  <div class="member-meta">2.01M tokens</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ★ 新增区块 -->
+            <div class="trace-block">
+              <div class="trace-head">
+                <span class="trace-title">最近执行 · trace</span>
+                <span class="trace-mode">
+                  <button id="m-stack" class="on" onclick="setMode('stack')">分段条</button>
+                  <button id="m-rank" onclick="setMode('rank')">排行</button>
+                  <button id="m-wf" onclick="setMode('wf')">真瀑布</button>
+                </span>
+              </div>
+
+              <div class="trace-run">
+                <div class="trace-run-head">
+                  <span class="trace-run-agent">🐱 店长</span>
+                  <span class="badge badge-ok">已完成</span>
+                  <span class="trace-run-total">170.0s</span>
+                </div>
+                <div class="trace-run-time">01:24:26 → 01:27:16 · 9 段</div>
+                <div id="panel-a" style="margin-top: 9px"></div>
+              </div>
+
+              <div class="trace-run">
+                <div class="trace-run-head">
+                  <span class="trace-run-agent">🐱 店长</span>
+                  <span class="badge badge-ok">已完成</span>
+                  <span class="trace-run-total">178.0s</span>
+                </div>
+                <div class="trace-run-time">01:34:16 → 01:37:14 · 9 段</div>
+                <div id="panel-b" style="margin-top: 9px"></div>
+              </div>
+            </div>
+          </div>
+          <div class="phone-cap">↑ 右侧面板真实宽度 300px</div>
+        </div>
+
+        <div class="calls">
+          <div class="call good">
+            <b>为什么放这儿合适</b><br />面板已经在显示「谁在忙 / 排了几条队」。trace
+            是同一件事的下钻：<b>这只猫现在到底卡在哪一步</b>。不用跳页。
+          </div>
+          <div class="call">
+            <b>分段条（我推荐）</b><br />就是现有两段条的<b>九段版</b>——一根 100%
+            堆叠条，边界即段界。改动最小、误解最少，而且它<b>保留了「编排挤在开头、落库挤在结尾」这个顺序信息</b>。
+          </div>
+          <div class="call warn">
+            <b>排行条：切换后请看它的失败</b><br />按时长降序 +
+            归一到最大值。看着合理，<b>实测当场破产</b>：<code>llm.chat</code> 168.6s 当分母，第二名
+            1.16s 只有 <b>0.7%</b>，其余全是 0 像素——<b>表里只剩一行</b>。这条已从候选里划掉。
+          </div>
+          <div class="call">
+            <b>真瀑布（切换）</b><br />保留偏移与空档，回答「卡在哪一步」。代价：段名截断成
+            <code>context.as…</code>，8 个小段挤在左边缘。300px 下它<b>能站住但不好读</b>。
+          </div>
+          <div class="call warn">
+            <b>300px 的硬限制</b><br />要舒服地看瀑布，<b>得给它更宽的画布</b>——链路 tab 那根 720px
+            的轴（②），或点开一个抽屉。
+          </div>
+          <div class="call">
+            <b>没画的东西</b><br />这里<b>没有</b>时间轴刻度、没有缩放、没有跨跳叠加、没有 hover
+            详情卡。原型只证明「段数据在 300px 内可读」，不证明它该取代链路 tab。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════ ④ 进行中 ══════════ -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-no">④</span>
+        <h2>正在跑的执行：显示什么（这条必须你拍板）</h2>
+      </div>
+      <p class="sec-desc">
+        R2 的段是<b>一次执行一个事务、在收尾 <code>finalizeRun</code> 才落库</b
+        >。所以<b>执行进行中时，库里一行段都没有</b>。 这引出本原型唯一需要你决策的岔路：
+      </p>
+      <div class="stage">
+        <div>
+          <div class="phone">
+            <div class="trace-block">
+              <div class="trace-head"><span class="trace-title">最近执行 · trace</span></div>
+              <div class="trace-run">
+                <div class="trace-run-head">
+                  <span class="trace-run-agent">🐱 店长</span>
+                  <span class="badge badge-run">进行中</span>
+                  <span class="trace-run-total">—</span>
+                </div>
+                <div class="trace-run-time">01:50:08 → 至今 · 已 4m12s</div>
+                <div class="pending">
+                  <span class="pending-spin"></span>
+                  <span class="pending-text"><b>采集中</b> · 段在本次执行收尾时一次落库</span>
+                </div>
+                <div class="skeleton">
+                  <div class="sk-row" style="width: 100%"></div>
+                  <div class="sk-row" style="width: 72%"></div>
+                  <div class="sk-row" style="width: 38%"></div>
+                </div>
+              </div>
+            </div>
+            <div
+              class="p-section"
+              style="border-bottom: 0; border-top: 1px solid var(--border-subtle)"
+            >
+              <p class="p-title">对照 · 刚跑完的执行</p>
+              <div class="trace-run" style="margin-top: 0">
+                <div class="trace-run-head">
+                  <span class="trace-run-agent">🐱 店长</span>
+                  <span class="badge badge-ok">已完成</span>
+                  <span class="trace-run-total">178.0s</span>
+                </div>
+                <div id="panel-c" style="margin-top: 9px"></div>
+              </div>
+            </div>
+          </div>
+          <div class="phone-cap">↑ 进行中态（左）与完成态（下）</div>
+        </div>
+
+        <div class="calls">
+          <div class="call warn">
+            <b>绝不画成 0 或空白</b><br />P1-B 已为「<code>null</code> ≠
+            <code>0</code
+            >」立过判据：没数据必须<b>显式说「采集中」</b>，不能是一条空条——否则会被读成「这段耗时为
+            0」。
+          </div>
+          <div class="call">
+            <b>值不值得做成实时</b><br />做实时 = server 在每段开始/结束时推 socket 事件。那<b
+              >不是 R2 的现有能力</b
+            >（R2 是收尾一次写库），要动 server 事件面，属新票。
+          </div>
+          <div class="call">
+            <b>实时能买到什么</b><br />一次执行约 3
+            分钟。盯着一根段条从左往右长，能回答「它是不是卡住了」。<b
+              >但「卡住」现在面板上的忙碌态已经说了一半。</b
+            >
+          </div>
+          <div class="call good">
+            <b>原型默认取的立场</b><br />先做<b>后视镜</b>（跑完才看）——零 server
+            改动、马上能用，且已经能回答「170 秒里哪一段吃掉 99%」。实时单独立票。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════ ⑤ 代价与边界 ══════════ -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-no">⑤</span>
+        <h2>口径与代价（要随票带上，否则报表裸奔）</h2>
+      </div>
+      <table>
+        <tr>
+          <th>口径</th>
+          <th>内容</th>
+          <th>为什么</th>
+        </tr>
+        <tr>
+          <td><b>总时长只认根段</b></td>
+          <td class="mono">invoke_agent.duration_ms</td>
+          <td>
+            <code>git.auto_commit</code> 是<b>轮次段</b>，时间窗在根段之外。加总子段会 &gt;100%
+          </td>
+        </tr>
+        <tr>
+          <td><b>空档要显式</b></td>
+          <td class="mono">root − Σchildren</td>
+          <td>0.05% 看着小，但它是<b>唯一能暴露编排开销变大的信号</b>；画满了就永远看不见</td>
+        </tr>
+        <tr>
+          <td><b>短段给最小宽度</b></td>
+          <td class="mono">min-width: 3px</td>
+          <td>
+            <code>dispatch.token_wait</code> 实测 0ms。<b>0ms ≠ 没发生</b>——它有起止时刻，只是取整到
+            0
+          </td>
+        </tr>
+        <tr>
+          <td><b>进行中 ≠ 无数据</b></td>
+          <td class="mono">running → 采集中</td>
+          <td>段在执行收尾才落库，跑的时候库里是真没有</td>
+        </tr>
+        <tr>
+          <td><b>缺段要能看见</b></td>
+          <td class="mono">9 段 / 11 段</td>
+          <td>
+            没跑到的段（无 diff 就没有
+            <code>diff.collect</code>）应该<b>不出现</b>并标注「本次未触发」，不是画个 0
+          </td>
+        </tr>
+      </table>
+    </section>
+
+    <script>
+      /* ═══ 真机数据（dev 库 spans 表，2026-09-15 实测） ═══ */
+      const PHASE = {
+        'dispatch.queue_wait': 'wait',
+        'dispatch.token_wait': 'wait',
+        'context.assemble': 'orch',
+        'context.compress': 'orch',
+        'memory.retrieval': 'retr',
+        'knowledge.retrieval': 'retr',
+        'llm.chat': 'llm',
+        'reply.persist': 'pers',
+        'diff.collect': 'pers',
+        'git.auto_commit': 'pers',
+        invoke_agent: 'root',
+      }
+      const COLOR = {
+        wait: 'var(--ph-wait)',
+        orch: 'var(--ph-orch)',
+        retr: 'var(--ph-retr)',
+        llm: 'var(--ph-llm)',
+        pers: 'var(--ph-pers)',
+        root: '#8a7f72',
+      }
+
+      const RUN_A = {
+        agent: '🐱 店长',
+        root: 170007,
+        spans: [
+          { n: 'dispatch.token_wait', o: 2, d: 0 },
+          { n: 'context.assemble', o: 5, d: 66 },
+          { n: 'context.compress', o: 71, d: 4 },
+          { n: 'memory.retrieval', o: 80, d: 1161 },
+          { n: 'knowledge.retrieval', o: 1295, d: 23 },
+          { n: 'llm.chat', o: 1320, d: 168601 },
+          { n: 'reply.persist', o: 169921, d: 15 },
+          { n: 'diff.collect', o: 169938, d: 59 },
+        ],
+      }
+      const RUN_B = {
+        agent: '🐱 店长',
+        root: 178007,
+        spans: [
+          { n: 'dispatch.token_wait', o: 2, d: 0 },
+          { n: 'context.assemble', o: 3, d: 64 },
+          { n: 'context.compress', o: 67, d: 2 },
+          { n: 'memory.retrieval', o: 73, d: 1049 },
+          { n: 'knowledge.retrieval', o: 1151, d: 44 },
+          { n: 'llm.chat', o: 1196, d: 176719 },
+          { n: 'reply.persist', o: 177915, d: 1 },
+          { n: 'diff.collect', o: 177918, d: 85 },
+        ],
+      }
+
+      const fmt = (ms) =>
+        ms >= 10000
+          ? (ms / 1000).toFixed(1) + 's'
+          : ms >= 1000
+            ? (ms / 1000).toFixed(2) + 's'
+            : ms + 'ms'
+      const pct = (v, base) => (v / base) * 100
+
+      /* ── 宽版段瀑布：根段 + 子段（横向 = 偏移 + 时长；组间留白） ── */
+      function renderWide(el, run) {
+        const { root, spans } = run
+        const kidSum = spans.reduce((s, x) => s + x.d, 0)
+        let html = ''
+
+        html += `<div class="wf-legend">
+    <span><i style="background:var(--ph-wait)"></i>等待</span>
+    <span><i style="background:var(--ph-orch)"></i>编排</span>
+    <span><i style="background:var(--ph-retr)"></i>检索</span>
+    <span><i style="background:var(--ph-llm)"></i>模型</span>
+    <span><i style="background:var(--ph-pers)"></i>落库</span>
+    <span><i style="background:#3a332c"></i>编排空档</span>
+  </div>`
+
+        // 根段
+        html += `<div class="wf-row">
+    <span class="wf-name root">invoke_agent</span>
+    <span class="wf-track"><span class="wf-bar" style="left:0;width:100%;background:${COLOR.root}" title="根段 · 一次执行的总时间轴 ${fmt(root)}"></span></span>
+    <span class="wf-ms">${fmt(root)}</span><span class="wf-pct">100%</span>
+  </div>`
+
+        // 子段（带空档）
+        let prevEnd = 0
+        const groupOf = (n) => PHASE[n] || 'orch'
+        let lastPhase = null
+        spans.forEach((s, i) => {
+          const ph = groupOf(s.n)
+          if (lastPhase && ph !== lastPhase) {
+            /* 相位变化 → 视觉留白，不画空档 */
+          }
+          lastPhase = ph
+
+          const gapMs = s.o - prevEnd
+          const gapW = pct(gapMs, root)
+          const left = pct(s.o, root),
+            w = pct(s.d, root)
+          html += `<div class="wf-row">
+      <span class="wf-name child" title="${s.n}">${s.n}</span>
+      <span class="wf-track">`
+          if (gapMs > 0 && gapW > 0.02)
+            html += `<span class="wf-gap" style="left:${pct(prevEnd, root)}%;width:${gapW}%" title="编排空档 ${fmt(gapMs)}"></span>`
+          html += `<span class="wf-bar" style="left:${left}%;width:${w}%;background:${COLOR[ph]}" title="${s.n} · 起于 +${fmt(s.o)} · 历时 ${fmt(s.d)} · 占根段 ${pct(s.d, root).toFixed(2)}%"></span>
+      </span>
+      <span class="wf-ms" style="${s.d === 0 ? 'color:var(--text-muted)' : ''}">${s.d === 0 ? '0ms <span style="font-size:9px">≠没发生</span>' : fmt(s.d)}</span>
+      <span class="wf-pct">${pct(s.d, root) < 0.01 ? '&lt;0.01' : pct(s.d, root).toFixed(2)}%</span>
+    </div>`
+          prevEnd = s.o + s.d
+        })
+
+        el.innerHTML = html
+      }
+
+      /* ── 300px 面板版：比例条排行（默认） ── */
+      function renderRank(el, run) {
+        const { root, spans } = run
+        const sorted = [...spans].sort((a, b) => b.d - a.d)
+        const max = sorted[0].d || 1
+        el.innerHTML = sorted
+          .map((s) => {
+            const ph = PHASE[s.n] || 'orch'
+            const share = pct(s.d, root)
+            const dim = share < 1 ? ' rank-dim' : ''
+            return `<div class="rank-row">
+      <span class="rank-name" title="${s.n} · 起于 +${fmt(s.o)}">${s.n}</span>
+      <span class="rank-ms">${fmt(s.d)}</span>
+      <span class="rank-track"><span class="rank-bar${dim}" style="width:${((s.d / max) * 100).toFixed(1)}%;background:${COLOR[ph]}"></span></span>
+    </div>`
+          })
+          .join('')
+      }
+
+      /* ── 300px 面板版：分段条（堆叠，现有两段条的九段版） ── */
+      function renderStack(el, run) {
+        const { root, spans } = run
+        const c = (n) => COLOR[PHASE[n] || 'orch']
+        let h = `<div class="stack-bar">`
+        let prevEnd = 0
+        for (const s of spans) {
+          const gap = s.o - prevEnd
+          if (gap > 0)
+            h += `<span class="stack-gap" style="width:${pct(gap, root)}%" title="编排空档 ${fmt(gap)}"></span>`
+          h += `<span class="stack-seg" style="width:${pct(s.d, root)}%;background:${c(s.n)}" title="${s.n} · ${fmt(s.d)} · 占 ${pct(s.d, root).toFixed(2)}%"></span>`
+          prevEnd = s.o + s.d
+        }
+        const tail = root - prevEnd
+        if (tail > 0)
+          h += `<span class="stack-gap" style="width:${pct(tail, root)}%" title="尾部空档 ${fmt(tail)}"></span>`
+        h += `</div>`
+        h += spans
+          .map(
+            (s) => `<div class="stack-li">
+      <i style="background:${c(s.n)}"></i>
+      <span class="stack-n" title="起于 +${fmt(s.o)}">${s.n}</span>
+      <span class="stack-v">${fmt(s.d)}</span>
+    </div>`
+          )
+          .join('')
+        el.innerHTML = h
+      }
+
+      /* ── 300px 面板版：真瀑布 ── */
+      function renderMini(el, run) {
+        const { root, spans } = run
+        let h = `<div class="wf mini-wf">`
+        h += `<div class="wf-row"><span class="wf-name root">invoke_agent</span>
+        <span class="wf-track"><span class="wf-bar" style="left:0;width:100%;background:${COLOR.root}"></span></span>
+        <span class="wf-ms">${fmt(root)}</span></div>`
+        let prevEnd = 0
+        for (const s of spans) {
+          const ph = PHASE[s.n] || 'orch'
+          const gapMs = s.o - prevEnd
+          h += `<div class="wf-row"><span class="wf-name child">${s.n}</span><span class="wf-track">`
+          if (gapMs > 0)
+            h += `<span class="wf-gap" style="left:${pct(prevEnd, root)}%;width:${pct(gapMs, root)}%"></span>`
+          h += `<span class="wf-bar" style="left:${pct(s.o, root)}%;width:${pct(s.d, root)}%;background:${COLOR[ph]}"></span></span>
+          <span class="wf-ms">${fmt(s.d)}</span></div>`
+          prevEnd = s.o + s.d
+        }
+        h += `</div>`
+        el.innerHTML = h
+      }
+
+      let mode = 'stack'
+      function setMode(m) {
+        mode = m
+        ;['stack', 'rank', 'wf'].forEach((k) =>
+          document.getElementById('m-' + k).classList.toggle('on', m === k)
+        )
+        paintPanels()
+      }
+      function paintPanels() {
+        const fn = mode === 'stack' ? renderStack : mode === 'rank' ? renderRank : renderMini
+        fn(document.getElementById('panel-a'), RUN_A)
+        fn(document.getElementById('panel-b'), RUN_B)
+      }
+
+      renderWide(document.getElementById('wf-a'), RUN_A)
+      renderWide(document.getElementById('wf-b'), RUN_B)
+      paintPanels()
+      renderRank(document.getElementById('panel-c'), RUN_B)
+    </script>
+  </body>
+</html>

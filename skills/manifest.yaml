@@ -251,6 +251,10 @@ skills:
     not_for: |
       implementing code or reviewing a finished diff.
     category: '外部技能'
+  # 来源 Leonxlnx/taste-skill（外部设计品味判据，不属 mattpocock 系；provenance 见 skills-lock.json）
+  design-taste-frontend:
+    source: external
+    category: '外部技能'
   diagnosing-bugs:
     source: external
     use_when: |

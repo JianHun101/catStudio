@@ -244,15 +244,31 @@ const LIST_SESSION_MEMBERS_TOOL = {
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/
 
 /**
- * P2=A 流程链技能集合（注入层目录——catalog 嵌进 read_skill 描述、不再注入 prompt）。
- * 判据：开发流程链（wayfinder 起图 → grilling/to-spec → spec-gate → to-tickets → implement
- * → quality-gate → request-review → receive-review） + 会话压缩 session-handoff（handoff 重命名）。
- * request-review 于 2026-09-10 回流（ADR 0014 §5 修订：post-commit hook 不再机械投递，
- * 请求审查改由 Agent 自行发起；范围收窄——技能正文零路由，递送语义仍归状态机
- * FLOW_MAIN_CHAIN，见 execution/flow-state.ts）；wayfinder 排除（disable-model-invocation 是设计）。
- * session-handoff 目录由交付单 B 重命名 handoff 落地——清单先行，readSkill 读缺返回错误文本。
+ * read_skill / list_skills 的技能白名单（注入层目录——catalog 嵌进 read_skill 描述、
+ * 不再注入 prompt）。
+ *
+ * 名字于 2026-09-15 从「流程链技能集合」改为 `SKILL_WHITELIST`（旧常量名见 git 历史；
+ * 本单验收要求旧名在 scripts/ 与 packages/ 下 grep 归零，故此处不复写）：本清单的判据
+ * 是「猫可自取的技能正文范围」（访问约束），不是「流程链有哪些段」。两者此前恰好重合，
+ * 加入 `design-taste-frontend` 后不再重合，旧名名不副实。
+ *
+ * 前 9 条 = 流程链段（顺序即链序）：wayfinder 起图 → grilling/to-spec → spec-gate →
+ * to-tickets → implement → quality-gate → request-review → receive-review，外加会话压缩
+ * session-handoff（目录由交付单 B 从 handoff 重命名落地——清单先行，readSkill 读缺返回
+ * 错误文本）。request-review 于 2026-09-10 回流（ADR 0014 §5 修订：post-commit hook 不再
+ * 机械投递，请求审查改由 Agent 自行发起；范围收窄——技能正文零路由，递送语义仍归状态机
+ * FLOW_MAIN_CHAIN，见 execution/flow-state.ts）。
+ *
+ * 后 2 条 = 非流程链补充（判据只有「猫可自取范围」一条）：
+ * - `wayfinder`——**排除口径翻转**：原按「disable-model-invocation 是设计」排除，与
+ *   `skills/manifest.yaml` 头部与 `skills/BOOTSTRAP.md` 明写的「disable-model-invocation 是
+ *   上游来源标记，本仓库不构成访问约束」自相矛盾（ADR 0014 §6 白名单判据重构：MCP 白名单 =
+ *   访问约束 / 该字段 = 来源标记，两层互不代偿）。本次按后者落到实处，撤销排除——
+ *   该字段只标记「上游不打算被模型自动唤起」，不构成本仓库的可读范围约束。
+ * - `design-taste-frontend`——外部设计品味判据（`Leonxlnx/taste-skill` 逐字 vendor，
+ *   provenance 见 `skills-lock.json`），供前端改动自查取用；与流程链无关。
  */
-export const FLOW_CHAIN_SKILLS = [
+export const SKILL_WHITELIST = [
   'grilling',
   'to-spec',
   'spec-gate',
@@ -262,6 +278,8 @@ export const FLOW_CHAIN_SKILLS = [
   'request-review',
   'receive-review',
   'session-handoff',
+  'wayfinder',
+  'design-taste-frontend',
 ]
 
 /** 技能名 → 一句话说明（catalog 清单，read_skill 描述 + list_skills 共用同一本）。 */
@@ -275,14 +293,17 @@ export const SKILL_CATALOG = {
   'request-review': '发起审查请求前的门槛与轮次规则（BLOCKED 六条 / 同型 audit / ≥3 轮升级）',
   'receive-review': '接收并处理审查反馈（P1/P2/P3 分类）',
   'session-handoff': '会话压缩交接（跨会话把上下文传给下一棒）',
+  wayfinder: '大块模糊工作先起图：勘察拆票成共享地图，逐票收敛到路径清晰',
+  'design-taste-frontend':
+    '前端设计品味判据（排版/间距/动效/状态/AI-tells/pre-flight，外部 vendor）',
 }
 
 const READ_SKILL_TOOL = {
   name: READ_SKILL_TOOL_NAME,
   description:
     '读取猫咖技能正文（按名取 skills/<名>/SKILL.md 全文；懒加载——模型按需自取，不再由 server 全文注入 prompt）。' +
-    'name 必须在技能清单内：' +
-    FLOW_CHAIN_SKILLS.join(' / ') +
+    'name 必须在技能白名单内：' +
+    SKILL_WHITELIST.join(' / ') +
     '。' +
     '技能正文即该技能定义（含使用时机/输出/前置门槛），模型在对应流程阶段按需调用本工具自取。',
   inputSchema: {
@@ -297,7 +318,7 @@ const READ_SKILL_TOOL = {
 const LIST_SKILLS_TOOL = {
   name: LIST_SKILLS_TOOL_NAME,
   description:
-    `列出猫咖技能清单（P2 流程链 ${FLOW_CHAIN_SKILLS.length} 技能 + 一句话说明）。` +
+    `列出猫咖技能清单（技能白名单 ${SKILL_WHITELIST.length} 技能 + 一句话说明）。` +
     'catalog 已内嵌 read_skill 描述，本工具是冗余兜底——模型不确定有哪些技能时可先调本工具。',
   inputSchema: {
     type: 'object',
@@ -570,10 +591,11 @@ export function validateQuerySessionMessagesParams(args) {
 
 /**
  * read_skill 参数校验（纯函数，供单测——scripts/mcp-server.test.js）。
- * 契约：name 必填非空字符串且 ∈ SKILL_CATALOG（P2=A 流程链清单）。
- * 收进 SKILL_CATALOG 即双重作用：一是把模型可自取的范围钉死在流程链（wayfinder 排除），
- * 二是名单内名字全是 kebab-case，天然满足 SKILL_NAME_RE 路径守卫（读盘前 mcp-server.mjs
- * 再以 SKILL_NAME_RE 作第二道防御）。返回 { ok: true, name } 或 { ok: false, reason }。
+ * 契约：name 必填非空字符串且 ∈ SKILL_CATALOG（技能白名单）。
+ * 收进 SKILL_CATALOG 即双重作用：一是把模型可自取的范围钉死在白名单（`SKILL_WHITELIST`，
+ * 与 catalog 键一一对应），二是名单内名字全是 kebab-case，天然满足 SKILL_NAME_RE
+ * 路径守卫（读盘前 mcp-server.mjs 再以 SKILL_NAME_RE 作第二道防御）。
+ * 返回 { ok: true, name } 或 { ok: false, reason }。
  */
 export function validateReadSkillParams(args) {
   const name = args?.name
@@ -587,7 +609,7 @@ export function validateReadSkillParams(args) {
   if (!SKILL_CATALOG[trimmed]) {
     return {
       ok: false,
-      reason: `read_skill 参数无效: name 不在技能清单（${FLOW_CHAIN_SKILLS.join('/')}；当前: ${JSON.stringify(name)}）`,
+      reason: `read_skill 参数无效: name 不在技能白名单（${SKILL_WHITELIST.join('/')}；当前: ${JSON.stringify(name)}）`,
     }
   }
   return { ok: true, name: trimmed }
@@ -652,11 +674,11 @@ export function readSkill(name) {
   }
 }
 
-/** 列技能清单（list_skills 工具实现）——catalog 即 P2=A 流程链技能；数量动态渲染，不在文案写死。 */
+/** 列技能清单（list_skills 工具实现）——catalog 即技能白名单；数量动态渲染，不在文案写死。 */
 export function listSkills() {
   const lines = Object.entries(SKILL_CATALOG).map(([n, desc]) => `- ${n}: ${desc}`)
   return {
     ok: true,
-    text: `技能清单（P2 流程链 ${Object.keys(SKILL_CATALOG).length} 技能）：\n` + lines.join('\n'),
+    text: `技能清单（技能白名单 ${Object.keys(SKILL_CATALOG).length} 技能）：\n` + lines.join('\n'),
   }
 }

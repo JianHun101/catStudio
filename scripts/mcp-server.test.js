@@ -45,7 +45,7 @@ import {
   READ_SKILL_TOOL_NAME,
   LIST_SKILLS_TOOL_NAME,
   SKILL_CATALOG,
-  FLOW_CHAIN_SKILLS,
+  SKILL_WHITELIST,
   findRepoRoot,
   getSkillsRoot,
   readSkill,
@@ -459,8 +459,8 @@ describe('validateReadSkillParams (read_skill)', () => {
     expect(r).toEqual({ ok: true, name: 'quality-gate' })
   })
 
-  it('合法入参：清单内全部技能全放行', () => {
-    for (const name of FLOW_CHAIN_SKILLS) {
+  it('合法入参：白名单内全部技能全放行', () => {
+    for (const name of SKILL_WHITELIST) {
       expect(validateReadSkillParams({ name }).ok).toBe(true)
     }
   })
@@ -478,11 +478,13 @@ describe('validateReadSkillParams (read_skill)', () => {
     }
   })
 
-  it('name 非清单内（wayfinder/code-review/tdd/..）→ 错误文本', () => {
-    for (const bad of ['wayfinder', 'code-review', 'tdd', '..', 'a/b', 'QUALITY-GATE']) {
+  it('name 非白名单内（code-review/tdd/prototype/..）→ 错误文本', () => {
+    // wayfinder 于 2026-09-15 撤销排除（口径翻转，见下方白名单冻结用例），
+    // 故从本反例集移除，改以其他未登记的顶级技能（code-review/prototype）为反例。
+    for (const bad of ['code-review', 'tdd', 'prototype', '..', 'a/b', 'QUALITY-GATE']) {
       const r = validateReadSkillParams({ name: bad })
       expect(r.ok).toBe(false)
-      expect(r.reason).toContain('技能清单')
+      expect(r.reason).toContain('技能白名单')
     }
   })
 })
@@ -633,7 +635,7 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     }
   })
 
-  it('catalog 契约：read_skill 的 name 枚举 = FLOW_CHAIN_SKILLS，description 内嵌清单', () => {
+  it('catalog 契约：read_skill 的 name 枚举 = SKILL_WHITELIST，description 内嵌清单', () => {
     const tool = MCP_TOOLS.find((t) => t.name === READ_SKILL_TOOL_NAME)
     expect(tool).toBeTruthy()
     expect(tool?.inputSchema).toEqual({
@@ -641,16 +643,16 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
       properties: { name: { type: 'string', description: '技能名（技能清单内，kebab-case）' } },
       required: ['name'],
     })
-    // catalog 嵌进工具描述：read_skill description 须包含全部流程链技能名
-    for (const name of FLOW_CHAIN_SKILLS) {
+    // catalog 嵌进工具描述：read_skill description 须包含全部白名单技能名
+    for (const name of SKILL_WHITELIST) {
       expect(tool?.description).toContain(name)
     }
-    // SKILL_CATALOG 键 == FLOW_CHAIN_SKILLS（单本 catalog，两处不漂移）
-    expect(Object.keys(SKILL_CATALOG)).toEqual(FLOW_CHAIN_SKILLS)
+    // SKILL_CATALOG 键 == SKILL_WHITELIST（单本 catalog，两处不漂移）
+    expect(Object.keys(SKILL_CATALOG)).toEqual(SKILL_WHITELIST)
   })
 
-  it('catalog 定死 9 技能、request-review 回流、wayfinder 排除', () => {
-    expect(FLOW_CHAIN_SKILLS).toEqual([
+  it('白名单定死 11 技能、request-review 回流、wayfinder 排除已撤销（口径翻转）', () => {
+    expect(SKILL_WHITELIST).toEqual([
       'grilling',
       'to-spec',
       'spec-gate',
@@ -660,9 +662,15 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
       'request-review',
       'receive-review',
       'session-handoff',
+      'wayfinder',
+      'design-taste-frontend',
     ])
-    expect(FLOW_CHAIN_SKILLS).toContain('request-review')
-    expect(FLOW_CHAIN_SKILLS).not.toContain('wayfinder')
+    expect(SKILL_WHITELIST).toContain('request-review')
+    // 2026-09-15 口径翻转：`disable-model-invocation` 是上游来源标记、本仓不构成访问约束
+    // （ADR 0014 §6 白名单判据重构；manifest.yaml 头部与 BOOTSTRAP.md 同款表述），
+    // 故 wayfinder 撤销排除——原 `not.toContain('wayfinder')` 断言随之删除，改为正向钉死。
+    expect(SKILL_WHITELIST).toContain('wayfinder')
+    expect(SKILL_WHITELIST).toContain('design-taste-frontend')
   })
 
   // T-D 验收「文案指向的技能名真实存在」——铁律文案点名的技能必须真在流程链清单内。
@@ -691,7 +699,7 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     // 铁律至少点名一个技能，否则修成「谁也不提」也算过
     expect(named.length).toBeGreaterThan(0)
     for (const token of named) {
-      expect(FLOW_CHAIN_SKILLS, `铁律点名 ${token}，但它不在技能清单`).toContain(token)
+      expect(SKILL_WHITELIST, `铁律点名 ${token}，但它不在技能白名单`).toContain(token)
     }
   })
 
@@ -824,10 +832,10 @@ describe('技能读盘契约（readSkill / getSkillsRoot / findRepoRoot / listSk
     }
   })
 
-  it('listSkills 返回全量技能清单（catalog 即流程链）', () => {
+  it('listSkills 返回全量技能清单（catalog 即白名单）', () => {
     const r = listSkills()
     expect(r.ok).toBe(true)
-    for (const name of FLOW_CHAIN_SKILLS) {
+    for (const name of SKILL_WHITELIST) {
       expect(r.text).toContain(name)
     }
   })
