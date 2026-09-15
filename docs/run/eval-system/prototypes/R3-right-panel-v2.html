@@ -1,5 +1,8 @@
 <!doctype html>
-<html lang="zh-CN">
+<!-- data-theme='light' 预置在 <html> 上：默认浅色。
+     注意 :root 与 [data-theme='light'] 特异度相同（都是 0,1,0），
+     靠源码顺序决胜负——[data-theme] 块必须在 :root 之后，这个默认才成立。 -->
+<html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <title>R3 原型 v2 — 弱化卡片 + 方案A 内联展开 + 头像设置 + 评估页查询表单</title>
@@ -1063,6 +1066,22 @@
       .qf-w-date .input[type='date'] {
         cursor: pointer;
       }
+      /* 点击不要框选中日期文字（用户：选中态看着难受）——只保留点击效果。
+         ⚠ 别用 user-select: none 当解法：Chromium 那圈「当前字段蓝底」是它自己
+         画的焦点态，不走 ::selection。实测置 user-select:none 后蓝底照旧（有截图）。
+         真开关 = :focus 下把年/月/日三个字段的 background/color 还原。
+         字段本身的焦点仍有输入框边框（--border-focus）兜底，键盘用户不丢指示。 */
+      .qf-w-date .input[type='date']:focus::-webkit-datetime-edit-year-field,
+      .qf-w-date .input[type='date']:focus::-webkit-datetime-edit-month-field,
+      .qf-w-date .input[type='date']:focus::-webkit-datetime-edit-day-field {
+        background-color: transparent;
+        color: inherit;
+      }
+      /* 顺带禁掉鼠标拖选（与上面的焦点态正交，不互相顶） */
+      .qf-w-date .input[type='date'] {
+        -webkit-user-select: none;
+        user-select: none;
+      }
       .qf-w-date .input[type='date']::-webkit-calendar-picker-indicator {
         cursor: pointer;
         opacity: 0.9; /* 不再靠低透明度弱化——深色下那正是「看不见」的成因之一 */
@@ -1355,7 +1374,7 @@
         <button class="nav-btn" data-screen="s5">⑤ 口径与实测数据</button>
         <span class="spacer"></span>
         <button class="tgl-btn" id="btn-dim">显示尺寸标注</button>
-        <button class="tgl-btn" id="btn-theme">切浅色</button>
+        <button class="tgl-btn" id="btn-theme">切深色</button>
       </div>
 
       <!-- ══════════ 屏① 弱化对照 ══════════ -->
@@ -1739,14 +1758,14 @@
         'git.auto_commit':
           '顶层 auto-commit（3 次 execSync，阻塞整个事件循环）。轮次段——时间窗在根段之外，所以不能加总子段。',
       }
+      /* 只列「屏幕上真看得见」的字段（用户：没展示在前端上的字段就不用描述）。
+         已删：offset（只用于定位，界面无读数）、items（只活在数据里，从未渲染）。 */
       const FIELD_DOC = [
-        ['offset', '相对根段起点的毫秒偏移。段条按它定位——<b>所以段条本身就是时间轴</b>。'],
         ['duration', '该段耗时。<b>总时长的权威是根段 invoke_agent</b>，子段之和会超过它。'],
         [
           'status',
           '<code>ok</code> / <code>error</code> / <code>timeout</code>。红块 = 该段失败或超时。',
         ],
-        ['items', '段内条数（拼进 prompt 的消息数 / 检索命中数）。'],
         ['ttft', '首 chunk 延迟。只在 <code>llm.chat</code> / <code>span_llm</code> 上有。'],
       ]
 
@@ -1758,36 +1777,41 @@
         tipEl.innerHTML = html
         tipEl.classList.add('on')
         const t = tipEl.getBoundingClientRect()
-        const r = el.getBoundingClientRect()
+        // 锚点 = 「流程名称」本身，不是整行：段行整行都可触发（命中区大、好指），
+        // 但浮层要贴着段名出现——锚在行上会跑到行的右边缘，离名字一整个面板远。
+        const r = (el.querySelector('.tip-anchor') || el).getBoundingClientRect()
         // 优先放右侧：段清单本身就是要读的东西，弹在上方会盖住它引用的那几行。
-        // 右侧放不下翻左侧；两侧都放不下（窄屏）才回退上/下。
-        let left = r.right + 10
+        // 右侧放不下翻左侧；两侧都放不下（窄屏）才回退上/下。GAP 取小值 = 更贴名字。
+        const GAP = 6
+        let left = r.right + GAP
         let top = r.top + r.height / 2 - t.height / 2
-        if (left + t.width > window.innerWidth - 8) left = r.left - t.width - 10
+        if (left + t.width > window.innerWidth - 8) left = r.left - t.width - GAP
         if (left < 8) {
           left = Math.max(
             8,
             Math.min(r.left + r.width / 2 - t.width / 2, window.innerWidth - t.width - 8)
           )
-          top = r.top - t.height - 10
-          if (top < 8) top = r.bottom + 10
+          top = r.top - t.height - GAP
+          if (top < 8) top = r.bottom + GAP
         }
         tipEl.style.left = left + 'px'
         tipEl.style.top = Math.max(8, Math.min(top, window.innerHeight - t.height - 8)) + 'px'
       }
       function tipHTML(name) {
         if (name === '__fields__') {
+          // 段名列表从本页数据现算：数据里没出现的段名用户根本看不到，
+          // 列出来是噪音（旧版硬列 11 条闭集，含 git.auto_commit / dispatch.queue_wait
+          // 两个本页从不渲染的名字）。闭集总数仍照实说，不谎报。
+          const shown = [...new Set(TRACES.flatMap((t) => t.spans.map((s) => s.n)))]
           return `<div class="tip-h">trace 字段与段名说明</div>
-            <div>段名是<b>闭集 11 条</b>（R2 §五）。鼠标移到任意段名或段条上可看单段说明。</div>
+            <div>段名是<b>闭集 ${Object.keys(SEG_DOC).length} 条</b>（R2 §五），下面只列<b>本页数据里出现的</b>。鼠标停在段名或段条上可看单段说明。</div>
             <div class="tip-sep"></div>
             ${FIELD_DOC.map(
               ([n, d]) =>
                 `<div class="tip-row"><span class="tip-n">${n}</span><span class="tip-d">${d}</span></div>`
             ).join('')}
             <div class="tip-sep"></div>
-            <div class="tip-row"><span class="tip-n">${Object.keys(SEG_DOC).length} 个段名</span><span class="tip-d">${Object.keys(
-              SEG_DOC
-            )
+            <div class="tip-row"><span class="tip-n">本页 ${shown.length} 个段名</span><span class="tip-d">${shown
               .map((k) => `<code>${k}</code>`)
               .join(' · ')}</span></div>`
         }
@@ -2309,7 +2333,7 @@
             const bad = s.s === 'timeout' || s.s === 'error'
             return `<div class="segrow" data-tipseg="${s.n}">
               <span class="swatch ${c}"></span>
-              <span class="segn ${s === leadSeg ? 'lead' : ''}">${s.n}</span>
+              <span class="segn tip-anchor ${s === leadSeg ? 'lead' : ''}">${s.n}</span>
               ${bad ? `<span class="segflag">${s.s}</span>` : ''}
               <span class="segd">${fmt(s.d)}</span>
               <span class="segp">${pct(s.d, R)}</span>
