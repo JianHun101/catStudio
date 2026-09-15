@@ -491,7 +491,7 @@ select.input {
 
 .provider-hint {
   font-size: 11px;
-  color: var(--accent);
+  color: var(--accent-text);
   margin-top: 6px;
   padding: 6px 10px;
   background: var(--accent-tint);
@@ -522,11 +522,11 @@ select.input {
 }
 
 .avatar-option:hover {
-  border-color: var(--accent);
+  border-color: var(--accent-text);
 }
 
 .avatar-option.selected {
-  border-color: var(--accent);
+  border-color: var(--accent-text);
   background: var(--accent-soft);
 }
 
@@ -568,7 +568,7 @@ select.input {
 
 .btn-save {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
   font-weight: 600;
 }
 

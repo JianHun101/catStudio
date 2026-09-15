@@ -1407,7 +1407,7 @@ onUnmounted(() => {
 /* 选中态高亮：浅色块 + 文字加深（参考图1） */
 .nav-item.active {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -1458,7 +1458,7 @@ onUnmounted(() => {
 }
 
 .tab-btn.active {
-  color: var(--accent);
+  color: var(--accent-text);
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
@@ -1527,7 +1527,7 @@ onUnmounted(() => {
   flex-shrink: 0;
   font-size: 10px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-tint);
   border: 1px solid var(--accent-hint-border);
   padding: 1px 6px;
@@ -1760,7 +1760,7 @@ select.input {
 .switch-hint code {
   font-family: var(--font-mono);
   font-size: 10px;
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--bg-hover);
   padding: 1px 5px;
   border-radius: 3px;
@@ -1872,8 +1872,8 @@ select.input {
 }
 
 .btn-save:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent-text);
 }
 
 .btn-save:disabled {
@@ -1911,7 +1911,7 @@ select.input {
 .launch-hint code {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--bg-hover);
   padding: 1px 5px;
   border-radius: 3px;
@@ -1939,7 +1939,7 @@ select.input {
 
 .btn-start {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
 }
 
 .btn-start:hover:not(:disabled) {
@@ -1960,7 +1960,7 @@ select.input {
 
 .btn-create {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
   font-weight: 600;
 }
 
@@ -2113,8 +2113,8 @@ select.input {
 }
 
 .btn-up:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent-text);
 }
 
 .btn-up:disabled {
@@ -2216,7 +2216,7 @@ select.input {
 
 .btn-ok {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
 }
 
 .btn-ok:hover:not(:disabled) {
@@ -2277,8 +2277,8 @@ select.input {
 }
 
 .agent-panel .btn-add:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 
@@ -2340,7 +2340,7 @@ select.input {
 .agent-panel .provider-badge {
   font-size: 10px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   padding: 1px 6px;
   border-radius: 4px;
@@ -2451,10 +2451,10 @@ select.input {
 
 .agent-panel .btn-retry-sm {
   padding: 4px 14px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-text);
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
@@ -2463,7 +2463,7 @@ select.input {
 
 .agent-panel .btn-retry-sm:hover {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
 }
 
 /* Empty */
@@ -2613,7 +2613,7 @@ select.input {
 
 .agent-panel .btn-confirm {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
   font-weight: 600;
 }
 

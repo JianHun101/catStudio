@@ -448,7 +448,7 @@ async function removeAgent(agentId: string): Promise<void> {
 
 .member-tokens-label {
   font-size: 9px;
-  color: var(--text-muted);
+  color: var(--text-muted-frozen);
   opacity: 0.7;
 }
 
@@ -658,8 +658,8 @@ async function removeAgent(agentId: string): Promise<void> {
 }
 
 .btn-add-members:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 
@@ -817,7 +817,7 @@ async function removeAgent(agentId: string): Promise<void> {
 
 .btn-ok {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
   font-weight: 600;
 }
 

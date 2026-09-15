@@ -738,7 +738,7 @@ onUnmounted(() => {
 }
 
 .tab-btn.active {
-  color: var(--accent);
+  color: var(--accent-text);
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
@@ -752,7 +752,7 @@ onUnmounted(() => {
   padding: 0 4px;
   border-radius: 999px;
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -827,10 +827,10 @@ onUnmounted(() => {
 
 .btn-retry-sm {
   padding: 4px 14px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-text);
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
@@ -840,7 +840,7 @@ onUnmounted(() => {
 
 .btn-retry-sm:hover {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
 }
 
 /* ─── 聚合卡片 ──────────────────────────── */
@@ -1111,7 +1111,7 @@ onUnmounted(() => {
 .ctx-role {
   font-size: 10px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   flex-shrink: 0;
   min-width: 28px;
 }
@@ -1161,7 +1161,7 @@ onUnmounted(() => {
 
 .score-btn.active {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
 }
 
 .score-label {
@@ -1193,7 +1193,7 @@ onUnmounted(() => {
   border: none;
   border-radius: var(--radius-sm);
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;

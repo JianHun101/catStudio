@@ -1347,7 +1347,7 @@ const messageViews = computed<MessageView[]>(() => {
 
 .btn-theme-toggle:hover {
   background: var(--bg-hover);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* Connection dot */
@@ -1707,8 +1707,8 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .scroll-down-btn:hover {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent-text);
   background: var(--bg-surface);
   box-shadow: var(--shadow-lg);
 }
@@ -1756,7 +1756,7 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .chat-input::placeholder {
-  color: var(--text-muted);
+  color: var(--text-muted-frozen);
 }
 
 /* ─── Image Attachments ──────────────────── */
@@ -1901,8 +1901,8 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .btn-image:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent-text);
   box-shadow: var(--shadow-sm);
 }
 
@@ -1995,7 +1995,7 @@ const messageViews = computed<MessageView[]>(() => {
   border: none;
   border-radius: var(--radius-md);
   background: var(--accent);
-  color: var(--bg-deep);
+  color: var(--text-on-accent);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -2044,7 +2044,7 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .chat-panel .msg-text a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -2251,7 +2251,7 @@ const messageViews = computed<MessageView[]>(() => {
 .chat-panel .msg-text blockquote {
   margin: 6px 0;
   padding: 4px 0 4px 12px;
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--accent-text);
   opacity: 0.85;
   color: var(--text-secondary);
 }
@@ -2290,7 +2290,7 @@ const messageViews = computed<MessageView[]>(() => {
 .chat-panel .msg-text ul input[type='checkbox']:checked,
 .chat-panel .msg-text ol input[type='checkbox']:checked {
   background: var(--accent);
-  border-color: var(--accent);
+  border-color: var(--accent-text);
 }
 
 .chat-panel .msg-text ul input[type='checkbox']:checked::after,
@@ -2527,7 +2527,7 @@ const messageViews = computed<MessageView[]>(() => {
 .chat-panel .msg-sender {
   font-size: 11px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   margin-bottom: 4px;
   margin-left: 4px;
 }
@@ -2565,7 +2565,6 @@ const messageViews = computed<MessageView[]>(() => {
   display: block;
   font-size: 10px;
   color: var(--text-muted);
-  opacity: 0.6;
   margin-top: 4px;
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -2599,7 +2598,6 @@ const messageViews = computed<MessageView[]>(() => {
 .chat-panel .msg-footer-info {
   font-size: 10px;
   color: var(--text-muted);
-  opacity: 0.75;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2683,7 +2681,7 @@ const messageViews = computed<MessageView[]>(() => {
 /* Typing */
 .chat-panel .typing-cursor {
   font-size: 18px;
-  color: var(--accent);
+  color: var(--accent-text);
   animation: blink 1s step-end infinite;
   margin-top: 12px;
 }
@@ -2702,7 +2700,6 @@ const messageViews = computed<MessageView[]>(() => {
 /* ─── Streaming Message ──────────────────── */
 .chat-panel .message.streaming .msg-bubble {
   border-style: dashed;
-  opacity: 0.92;
 }
 
 /* ─── Thinking Block (collapsible) ────────── */
@@ -2943,7 +2940,7 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .chat-panel .status-name {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 500;
 }
 
@@ -2989,10 +2986,10 @@ const messageViews = computed<MessageView[]>(() => {
 
 .chat-panel .btn-restart {
   padding: 3px 14px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-text);
   border-radius: var(--radius-sm);
   background: rgba(92, 124, 250, 0.12);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;
@@ -3002,7 +2999,7 @@ const messageViews = computed<MessageView[]>(() => {
 
 .chat-panel .btn-restart:hover {
   background: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .chat-panel .btn-restart-cancel {
