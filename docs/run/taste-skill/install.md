@@ -1,6 +1,6 @@
 # taste skill 安装（票 A · flash猫）
 
-> 状态：票 A 已收口（PR #80 → dev `d192df9`）。§3 豁免**已获店长裁决批准**，§7.2 空口径**已随票 C 清除**——本档为在飞留痕，口径已上浮 `skills/BOOTSTRAP.md`「同步溯源」。
+> 状态：票 A 已收口（PR #80 → dev `d192df9`）。§3 豁免**已获店长裁决批准**；§7.2 的 provenance 缺口**已随票 C 删句、随票 E 更正存在性并恢复 ignore 规则**（原判「该文件不存在」经复核有误）——本档为在飞留痕，口径已上浮 `skills/BOOTSTRAP.md`「同步溯源」。
 
 ## 0. 结论
 
@@ -124,6 +124,6 @@ skills/design-taste-frontend/
 ## 7. 观察项 / OQ（非阻塞，交店长裁）
 
 1. **[已裁 · 批准豁免]** `.prettierignore` 一行 —— 详见 §3「裁决（已落）」；口径已上浮 `skills/BOOTSTRAP.md`「同步溯源」。
-2. **[已裁 · 删句] `skills/.sync-provenance.json` 是个空口径** —— 改前 `BOOTSTRAP.md:61/63` 写「同步来源/版本记录在 `skills/.sync-provenance.json`」＋「无来源登记 → `skills-check-manifest.mjs` 红示拦截」，但实测两者都不存在：① `skills-check-manifest.mjs` 只校验 `source` 取值合法性，**没有任何** provenance 校验代码；② 该 json 文件不存在，全仓 `grep sync-provenance` 只命中 `.gitignore:13` 与 BOOTSTRAP 自身，**没有生成器**。**店长裁决：不建生成器、不建校验器**——lock 已提供 `source`/`skillPath`/`computedHash` 可对账记录，再引一套运行时 json 就是造出第二个真相源（两份漂移后没有裁决依据）；真要准入闸，正确形态是「check-manifest 校验 lock 条目完整性」，属另一票。已随票 C 删除 BOOTSTRAP 两句、同口径改 `manifest.yaml:12`、删 `.gitignore:13` 占位行——「准入无自动拦截」成为**明示现状**，靠审查人比对 lock 条目。**本档是全仓唯一保留 `sync-provenance` 字样的地方**，它记载的正是该缺口本身。
+2. **[已裁 · 删句；票 E 更正存在性 + 恢复 ignore]** `skills/.sync-provenance.json` **不是空口径，是一张过期快照** —— 改前 `BOOTSTRAP.md:61/63` 写「同步来源/版本记录在 `skills/.sync-provenance.json`」＋「无来源登记 → `skills-check-manifest.mjs` 红示拦截」，但实测两者都不存在：① `skills-check-manifest.mjs` 只校验 `source` 取值合法性，**没有任何** provenance 校验代码；② 存在性原判「该 json 文件不存在」**有误**——票 E 复核：它**真实存在**于**主仓库工作区**（未跟踪、1742 B、`generated: 2026-08-04`；worktree 内不可见属预期——worktree 只检出已跟踪文件），但**没有生成器、没有消费方**，且内容**已与 manifest 脱节**（`external.count` 记 15 vs 实测 `source: external` 9）⇒ 是一张过期快照，**勿采信**，真相源是 `skills-lock.json` 的 `source`/`skillPath`/`computedHash`。**店长裁决：不建生成器、不建校验器**——lock 已提供 `source`/`skillPath`/`computedHash` 可对账记录，再引一套运行时 json 就是造出第二个真相源（两份漂移后没有裁决依据）；真要准入闸，正确形态是「check-manifest 校验 lock 条目完整性」，属另一票。落地：随票 C 删除 BOOTSTRAP 两句、同口径改 `manifest.yaml:12`；随**票 E 恢复 `.gitignore` 规则**（未跟踪的 `??` 状态即 server auto-commit `git add -A` 的扫走窗口，须挡；**不删文件**——从未入库且无生成器 ⇒ 删了不可重建；**不入库**——入库等于往仓库冻一份已知为假的清单）。「准入无自动拦截」成为**明示现状**，靠审查人比对 lock 条目；全仓保留该字样的地方仅 `.gitignore`（规则及其来龙去脉注释）与本行。
 3. **许可证未核验** —— §1；如需确证，联网后 `git -C <probe> show HEAD:LICENSE`（或换完整克隆）即可，一次命令的事。
 4. **上游 §0 适配风险留给票 B** —— 正文首行自述「Not dashboards, not data tables, not multi-step product UI」，而评估页/设置页正是产品 UI；harness 假设 React/Tailwind/Motion，本仓是 Vue3 + 手写 CSS。票 B 的「判据适用性映射」是正解，本档不重复论证。

@@ -9,6 +9,8 @@ node_modules/
 
 # skill 单源挂载位（skills/ 是唯一真相源；挂载位由 scripts/skills-bootstrap.mjs 重建，不入库）
 .claude/skills
+# 外部 skill 来源登记的过期快照（票 E：该文件真实存在于主仓库工作区、未跟踪，但无生成器无消费方，内容已与 manifest 脱节——external.count 记 15 vs 实测 9——勿采信，真相源是 skills-lock.json；保留本规则仅为防 server auto-commit 的 git add -A 误扫，llm/git-utils.ts 的 base 缺省即主工作区、repo-wide）
+skills/.sync-provenance.json
 
 # 构建产物
 dist/
