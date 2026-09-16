@@ -81,13 +81,16 @@
  *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
  *   CATSTUDY_SESSION_ID   目标会话 ID（人工显式指定，明确意图优先）。
  *                         投递目标选择：
- *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定；同时旁路
- *                            delivered 状态跳过——显式指定即明确意图，如会话重建后重投）
+ *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定）
  *                         2. commit message 的 catstudy [uuid] 反查消息所在会话（自动）
  *                         两者都不可用时**报错不投递**——绝不猜目标。
  *                         曾因反查失败静默降级到环境变量/API 第一个会话，
  *                         把审查文档投到错误会话（"UI优化"打偏、b8b0a6d 跨会话）。
- *   CATSTUDY_FORCE_DELIVER=1  强制投递：跳过 `docs/run/**` 免审豁免（票乙）。
+ *                         **只用于「投给谁」**，不参与任何幂等判据——它在猫的 CLI
+ *                         环境里常驻，当开关用等于把该判据恒真/恒假（见下条）。
+ *   CATSTUDY_FORCE_DELIVER=1  强制投递（**唯一的人工显式意图开关**）：
+ *                         跳过 `docs/run/**` 免审豁免（票乙），并旁路 delivered
+ *                         幂等早退（`deliverSha` / `deliverHeadIfUndelivered`）。
  *                         **钩子永不设**——只有人工在 shell 里显式 export 才为真；
  *                         用 CATSTUDY_SESSION_ID 当这个信号是错的（它常驻，见
  *                         `isForceDeliver` 注释）。
@@ -97,7 +100,7 @@
 import { randomUUID } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, unlinkSync, renameSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // ─── 投递状态文件 ─────────────────────────────────────────
@@ -379,7 +382,9 @@ export function isExemptDelivery(paths) {
 }
 
 /**
- * 强制投递开关（纯函数）：`CATSTUDY_FORCE_DELIVER=1|true` → 跳过免审豁免。
+ * 强制投递开关（纯函数）：`CATSTUDY_FORCE_DELIVER=1|true` → 显式意图。
+ * 两个消费面都靠它（本函数只判值，不管用途）：跳过免审豁免（`deliverSha`）、
+ * 旁路 delivered 幂等早退（`deliverSha` + `deliverHeadIfUndelivered`）。
  *
  * 语义仍是**「显式意图 > 自动豁免」**，但信号源换过了——首版拿
  * `CATSTUDY_SESSION_ID` 当前置，审查回炉实测推翻：
@@ -1481,8 +1486,42 @@ export async function tryPostToCatstudy(content, cwd, opts = {}) {
 
 // ─── 投递状态文件（Fix A+D：按 commit SHA 幂等） ─────────────
 
+/**
+ * 账本落点 = **共享根**（跨 worktree 唯一），不是「当前树」。
+ *
+ * 判据（状态落盘键控约定，AGENTS.md Conventions）：正确性依赖「全仓只有一棵树」
+ * 的状态 → 键 `--git-common-dir` 的父目录；否则键 `--show-toplevel`。账本属前者——
+ * 同一 SHA 在会话 worktree 与本树各记一份 ⇒ 幂等形同虚设（且 `pruneState` 的自愈
+ * 范围各算各的）。主树与全部 worktree 解析到同一处；e2e 的临时仓库是独立主仓，
+ * 解析回它自己 ⇒ 行为与改动前逐字等价。
+ *
+ * 解析失败（非 git 仓 / git 不可用）→ 退回 `cwd`：保持改动前的退化行为，不静默炸，
+ * 也不把账本写到别处。
+ *
+ * 缓存按 `cwd` 键控（每 cwd 至多一次 git 调用），**只缓存成功**——失败不缓存，
+ * 同进程内后续调用仍有机会在仓库就绪后解析成功。
+ */
+const stateRootCache = new Map()
+export function resolveStateRoot(cwd) {
+  const cached = stateRootCache.get(cwd)
+  if (cached !== undefined) return cached
+  try {
+    const commonDir = execSync('git rev-parse --path-format=absolute --git-common-dir', {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim()
+    if (!commonDir) return cwd
+    const root = dirname(commonDir)
+    stateRootCache.set(cwd, root)
+    return root
+  } catch {
+    return cwd
+  }
+}
+
 function statePath(cwd) {
-  return join(cwd, STATE_FILE)
+  return join(resolveStateRoot(cwd), STATE_FILE)
 }
 
 /**
@@ -1580,9 +1619,42 @@ function isAncestorOfHead(cwd, sha) {
 }
 
 /**
- * 历史改写自愈：delivered/pending 中不是当前 HEAD 祖先的 SHA 全部移除。
- * e2e 管道会 reset --hard 改写历史——旧 SHA 已不存在，留着会让状态"超前"、
- * 误跳过新历史中的同内容 commit；清除后按首次投递重新幂等恢复。
+ * SHA 是否仍「活着」——即这个共享仓库里还有某棵树可能需要它。
+ *
+ * 判据 = **被某个 ref 可达**（「本树 HEAD 祖先」只作快路径）。两个更直觉的判据
+ * 都被实测否掉，改前务必先读这段：
+ *
+ *   - ❌「对象存在于对象库」：`reset --hard` 改写历史后旧 commit 只是变**悬空**，
+ *     对象仍在（实测 `git cat-file -e <旧 sha>` 为真）⇒ 按「对象在 = 还活着」判，
+ *     账本历史改写自愈（`pruneState` 的存在理由）**整条失效**。
+ *   - ❌「本树 HEAD 祖先」（本函数引入前的判据）：账本已共享（见
+ *     `resolveStateRoot` / AGENTS.md「状态落盘键控」），三棵会话 worktree 各在
+ *     各的分支，兄弟树的**活** SHA 必然不是本树祖先（实测：B 树视角
+ *     `merge-base --is-ancestor` 为假，而 `for-each-ref --contains` 命中
+ *     `refs/heads/<A 树分支>`）⇒ 按此判死，B 树的任意钩子都会删掉 A 树的
+ *     pending 条目，**被删的条目再没有第二次投递机会**（漏投方向，正是本仓
+ *     「宁可多投不可漏投」的反面）。
+ *
+ * refs 经 `--git-common-dir` 全 worktree 共享，故 B 树看得到 A 树分支 ⇒ 可达性
+ * 判据天然跨树成立。sha 不存在 / 非 commit 时 git 报 `no such commit` 并非零退出
+ * （`safeGit` 得 null）⇒ 判死，老的自愈路径不受影响。
+ *
+ * @param {string} sha — 完整 SHA
+ */
+function isShaAlive(cwd, sha) {
+  if (isAncestorOfHead(cwd, sha)) return true // 快路径：本树历史上就有，省一次 for-each-ref
+  return Boolean(safeGit(cwd, `for-each-ref --contains=${sha} --format=%(refname)`))
+}
+
+/**
+ * 历史改写自愈：delivered/pending 中**已死**（无任何 ref 可达）的 SHA 全部移除。
+ * e2e 管道会 reset --hard 改写历史——旧 SHA 悬空、不再属于任何分支，留着会让状态
+ * "超前"、误跳过新历史中的同内容 commit；清除后按首次投递重新幂等恢复。
+ *
+ * 判据是 `isShaAlive` 不是「本树 HEAD 祖先」：后者在共享账本下会把兄弟 worktree
+ * 的活条目当「已改写」删掉（见 `isShaAlive` 注释）。delivered 侧同样换判据——
+ * 只删多投方向（安全）不足以成为留旧判据的理由：兄弟树的 delivered 被反复误删
+ * 会让它的 HEAD 每次都被重投，共享账本的幂等承诺只兑现一半。
  */
 function pruneState(cwd) {
   const state = readState(cwd)
@@ -1590,12 +1662,12 @@ function pruneState(cwd) {
   if (!headSha) return // 仓库无 commit，不动状态
   let changed = false
   for (const sha of Object.keys(state.delivered)) {
-    if (!isAncestorOfHead(cwd, sha)) {
+    if (!isShaAlive(cwd, sha)) {
       delete state.delivered[sha]
       changed = true
     }
   }
-  const kept = state.pending.filter((entry) => isAncestorOfHead(cwd, entry.sha))
+  const kept = state.pending.filter((entry) => isShaAlive(cwd, entry.sha))
   if (kept.length !== state.pending.length) {
     state.pending = kept
     changed = true
@@ -1615,8 +1687,8 @@ function resolveFullSha(cwd, sha) {
 /**
  * 投递单个 commit 的文档并更新状态（Fix A+D 的单一状态入口）。
  *
- * - delivered 命中 → 跳过（幂等；CATSTUDY_SESSION_ID 显式指定时旁路——明确意图，
- *   如会话重建后重投）
+ * - delivered 命中 → 跳过（幂等；`CATSTUDY_FORCE_DELIVER=1` 时旁路——人工显式
+ *   意图，如会话重建后重投）
  * - ok → 记 delivered、移出 pending
  * - skip（T-A ①：归属判据判静默 / 票乙：改动全在免审前缀内）→ **不记账本、
  *   不记 pending**，原样返回
@@ -1637,7 +1709,7 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
   // 缺省 'legacy'（不判）：漏标来源只会多投一条，不会漏投——安全方向。
   const pendingSrc = opts.pendingSrc || 'legacy'
   if (state.delivered[fullSha]) {
-    if (!process.env.CATSTUDY_SESSION_ID) {
+    if (!isForceDeliver(process.env.CATSTUDY_FORCE_DELIVER)) {
       console.log(`[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 已投递过（状态文件）——跳过，不重复投递`)
       // 顺带清出 pending：delivered 与 pending 不应同时存在（跳过路径也要移，否则
       // 该 SHA 每次投递机会都会被 drainPending 重新处理一遍）
@@ -1648,7 +1720,7 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
       return 'ok'
     }
     console.log(
-      `[handoff-gen] ℹ️  ${fullSha.slice(0, 7)} 已投递过，但 CATSTUDY_SESSION_ID 显式指定——按明确意图重新投递`
+      `[handoff-gen] ℹ️  ${fullSha.slice(0, 7)} 已投递过，但 CATSTUDY_FORCE_DELIVER 显式指定——按明确意图重新投递`
     )
   }
 
@@ -1721,10 +1793,11 @@ async function drainPending(cwd, serverUrl) {
     const { sha } = entry
     // 只有钩子条目需要复判归属；兜底条目连判据都不该问（问了必静默，见函数头注释）
     const judgeAttribution = entry.src === 'hook'
-    if (!isAncestorOfHead(cwd, sha)) {
-      // 历史改写后 SHA 失效（prune 兜底），正常不会走到这里
+    if (!isShaAlive(cwd, sha)) {
+      // 历史改写后 SHA 失效（prune 兜底），正常不会走到这里。
+      // 判据同 pruneState——「不是本树 HEAD 祖先」在共享账本下会误删兄弟树的活条目。
       console.log(
-        `[handoff-gen] ⏭️  pending 中 ${sha.slice(0, 7)} 不是当前 HEAD 祖先（历史已改写）——移除`
+        `[handoff-gen] ⏭️  pending 中 ${sha.slice(0, 7)} 已无任何分支可达（历史已改写）——移除`
       )
       state.pending = state.pending.filter((e) => e.sha !== sha)
       writeState(cwd, state)
@@ -1829,7 +1902,7 @@ async function deliverHeadIfUndelivered(cwd, serverUrl) {
   const headSha = safeGit(cwd, 'rev-parse HEAD')
   if (!headSha) return
   const state = readState(cwd)
-  if (state.delivered[headSha] && !process.env.CATSTUDY_SESSION_ID) return
+  if (state.delivered[headSha] && !isForceDeliver(process.env.CATSTUDY_FORCE_DELIVER)) return
   const doc = generateHandoff({ cwd })
   // pendingSrc: 'gate' ⇒ 同收尾兜底：本入口的 HEAD 已有归属，补投不得重判（见文件头 `src`）
   if (doc) await deliverSha(cwd, serverUrl, 'HEAD', doc, { pendingSrc: 'gate' })

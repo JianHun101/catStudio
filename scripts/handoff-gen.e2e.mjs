@@ -7,7 +7,7 @@
  *   node scripts/handoff-gen.e2e.mjs
  */
 
-import { execSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -25,6 +25,7 @@ import {
   runHandoff,
   readState,
   writeState,
+  resolveStateRoot,
 } from './handoff-gen.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -1510,7 +1511,8 @@ function gitIn(tmp, cmd) {
   console.log('  13c: 落库验证失败 → transient + pending 记录 + 草稿滞留 ✅')
 }
 
-// 13d: 历史改写自愈（prune 非祖先条目）+ --gate-deliver 兜底投 HEAD
+// 13d: 历史改写自愈（prune 已死条目；`bogus` 是**不存在**的 SHA，故两份判据都判死）
+//      + --gate-deliver 兜底投 HEAD
 {
   const uuid1 = '13dd0000-0000-4000-8000-000000000001'
   const uuid2 = '13dd0000-0000-4000-8000-000000000002'
@@ -1530,7 +1532,7 @@ function gitIn(tmp, cmd) {
   const sha2 = gitIn(TMP13D, 'rev-parse HEAD')
   const bogus = 'f'.repeat(40)
 
-  // 手工构造脏状态：delivered 含非祖先 bogus + 有效 sha1；pending 含 bogus + sha1
+  // 手工构造脏状态：delivered 含已死 bogus + 有效 sha1；pending 含 bogus + sha1
   writeFileSync(
     join(TMP13D, STATE_FILE),
     JSON.stringify(
@@ -1575,8 +1577,8 @@ function gitIn(tmp, cmd) {
   await runInProc(TMP13D, url13d, { gateDeliver: true })
 
   const state13d = readStateFile(TMP13D)
-  assert(state13d.delivered[bogus] === undefined, '非祖先 delivered 条目应被 prune')
-  assert(!pendingShas(state13d).includes(bogus), '非祖先 pending 条目应被 prune')
+  assert(state13d.delivered[bogus] === undefined, '已死 delivered 条目应被 prune')
+  assert(!pendingShas(state13d).includes(bogus), '已死 pending 条目应被 prune')
   assert(!pendingShas(state13d).includes(sha1), 'pending 中的有效 SHA 处理完应移除')
   assert(
     state13d.delivered[sha1] !== undefined,
@@ -1586,7 +1588,7 @@ function gitIn(tmp, cmd) {
   assert(postHits === 1, `sha1 已 delivered → 不重复 POST；仅 HEAD 投 1 次（实际 ${postHits}）`)
   server.close()
   rmSync(TMP13D, { recursive: true, force: true })
-  console.log('  13d: 历史改写自愈（prune 非祖先）+ gate-deliver 兜底 HEAD ✅')
+  console.log('  13d: 历史改写自愈（prune 已死）+ gate-deliver 兜底 HEAD ✅')
 }
 
 // 13e: pending 补投（per-SHA 重新生成 + 各自会话反查）
@@ -2756,6 +2758,264 @@ function changedPathsOfHead(tmp) {
   console.log('  16b: 混合改动 → 照常投递（免审判据不是恒真门）✅')
 
   stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+}
+
+console.log('')
+
+// ═══ 测试组 17: 账本共享根 + 幂等旁路信号源（状态落盘键控 / 族修回归） ═══════
+// 两个靶心同源——都是「一棵树、一个 cwd、一个常驻 env 信号」这个被推翻的假设漏出来的：
+//
+//   17a/17b：账本落点键 `cwd` ⇒ 每个会话 worktree 各记一份，同一 SHA 在每棵树各投
+//            一次、`pruneState` 的自愈范围也各算各的，幂等形同虚设。改键
+//            `--git-common-dir` 的父目录（全仓唯一）。
+//   17c/17d：`CATSTUDY_SESSION_ID` 是 server 注入给每只猫 CLI 的**常驻**变量，
+//            钩子（裸 node 调用）全量继承 ⇒ 拿它当幂等旁路的前置 = 旁路恒开 =
+//            账本等于不存在。换钩子永不设的 `CATSTUDY_FORCE_DELIVER`——与免审
+//            豁免同一个开关（「一个人工显式意图开关」而不是两个）。
+//
+// 17c 是**生产形态**用例（同 16d 的形态学）：它红了就说明幂等又被某个常驻变量
+// 短路了——那种失效自己不会显形，样本跑在 `env -u` 下必绿（本仓记过的假绿形态）。
+
+{
+  const mainRepo = makeUuidRepo(
+    '.handoff-test-shared-root',
+    '17aa0000-0000-4000-8000-000000000017',
+    { 'a.txt': '1' }
+  )
+  const sha = gitIn(mainRepo, 'rev-parse HEAD')
+  const wt = join(TEST_BASE, '.handoff-test-shared-root-wt')
+  execFileSync('git', ['worktree', 'add', '-b', 'wt17', wt], { cwd: mainRepo, stdio: 'pipe' })
+  const wtSha = gitIn(wt, 'rev-parse HEAD')
+
+  // 17a: worktree 当 cwd → 账本落**共享根**（主仓），worktree 内不另立
+  assert(
+    resolveStateRoot(wt) === resolveStateRoot(mainRepo),
+    `17a 前置：worktree 与主仓应解析到同一共享根（实际 ${resolveStateRoot(wt)} vs ${resolveStateRoot(mainRepo)}）`
+  )
+  writeState(wt, { delivered: { [wtSha]: 't' }, pending: [], raw: '' })
+  assert(existsSync(join(mainRepo, STATE_FILE)), '17a 从 worktree 写入的账本应落在共享根（主仓根）')
+  assert(!existsSync(join(wt, STATE_FILE)), '17a worktree 内不得另立账本（每树一份即幂等失效）')
+  // 读写同面：写入口在 wt、读出口在 mainRepo——两处必须看到同一条
+  assert(
+    readState(mainRepo).delivered[wtSha] !== undefined,
+    '17a 主树侧应读到 worktree 写入的同一条（跨树可见，读出口与写入口同面）'
+  )
+  console.log('  17a: 账本键共享根（worktree ↔ 主树同一本）✅')
+
+  // 17b: 非 git 目录 → 退回 cwd（改动前的退化行为：不静默炸、也不写到别处）
+  const plain = join(TEST_BASE, '.handoff-test-plain-dir')
+  mkdirSync(plain, { recursive: true })
+  assert(resolveStateRoot(plain) === plain, '17b 非 git 目录应解析回 cwd 自身')
+  writeState(plain, { delivered: { [sha]: 't' }, pending: [], raw: '' })
+  assert(existsSync(join(plain, STATE_FILE)), '17b 非 git 目录应退回 cwd（退化行为保持）')
+  console.log('  17b: 非 git 目录 → 退回 cwd ✅')
+
+  rmSync(wt, { recursive: true, force: true })
+  rmSync(mainRepo, { recursive: true, force: true })
+}
+
+// 17c/17d: 幂等旁路信号源。改动面是**非免审**提交（`packages/server/**`）——
+// 否则两条分支都会被免审豁免先吞掉，用例对账本判据恒不敏感（那正是恒真门）。
+{
+  const uuid = '17cc0000-0000-4000-8000-000000000017'
+  const tmp = makeRepoWithParent(
+    '.handoff-test-idem-signal',
+    { 'README.md': '# base\n' },
+    { 'packages/server/src/x.ts': 'export const x = 1\n' },
+    `catstudy [${uuid}] feat(x): 落盘`
+  )
+  const headSha = gitIn(tmp, 'rev-parse HEAD')
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-17c',
+    updated: 0,
+    executor: 'ok',
+  })
+
+  // 前置：账本里确有一条 HEAD 的 delivered——否则「不 POST」是因为没账本可跳，恒真
+  writeState(tmp, { delivered: { [headSha]: '2026-01-01T00:00:00.000Z' }, pending: [], raw: '' })
+  assert(
+    readState(tmp).delivered[headSha] !== undefined,
+    '17c 前置：账本确含 HEAD 的 delivered（「该跳过」的场景确被构造出来）'
+  )
+
+  // 17c: 生产形态——CATSTUDY_SESSION_ID 常驻（猫的 CLI 环境），无人工开关 ⇒ 仍跳过
+  await runInProcWithEnv(
+    tmp,
+    stub.url,
+    { CATSTUDY_SESSION_ID: 'session-17c', CATSTUDY_FORCE_DELIVER: undefined },
+    { gateDeliver: true }
+  )
+  assert(
+    stub.hits.post === 0,
+    `17c 幂等应生效：已投递过的 HEAD 不得再 POST（实际 ${stub.hits.post} 次）`
+  )
+  console.log('  17c: 生产形态（SESSION_ID 常驻）→ 幂等仍生效 ✅')
+
+  // 17d: **只差这一个 env**——显式意图 → 旁路幂等，照常投递。17c 的 0 才不是恒真门
+  // 断言取**增量**不取累计：`stub.hits.post` 跨 17c/17d 累计，读累计会让 17d 的读数
+  // 依赖「17c 有没有泄漏 POST」——那正是反对照实测到的形态（旧代码下 17c 漏 1，
+  // 17d 读到 2，报的是「17d 投了 2 次」而真因在 17c）。增量让两条断言各自独立。
+  const postBefore17d = stub.hits.post
+  await runInProcWithEnv(
+    tmp,
+    stub.url,
+    { CATSTUDY_SESSION_ID: 'session-17c', CATSTUDY_FORCE_DELIVER: '1' },
+    { gateDeliver: true }
+  )
+  const posted17d = stub.hits.post - postBefore17d
+  assert(posted17d === 1, `17d 显式意图应旁路幂等（本次实际 POST ${posted17d} 次）`)
+  console.log('  17d: CATSTUDY_FORCE_DELIVER=1 → 旁路幂等，重新投递 ✅')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+}
+
+// ═══ 测试组 18: 共享账本下的存活判据（跨树不误删 / 真改写仍自愈） ═══════════════
+// 账本改共享（测试组 17）之后，「不是本树 HEAD 祖先」不再等于「已死」——三棵会话
+// worktree 各在各的分支上，兄弟树的**活** SHA 必然不是本树祖先。本组钉住两个方向：
+//
+//   18a：本树的钩子**不得**删兄弟树的活条目。被删的 pending 没有第二次投递机会
+//        （漏投方向，本仓「宁可多投不可漏投」的反面）；delivered 被误删则让兄弟树
+//        的 HEAD 每次都被重投——共享账本的幂等承诺只兑现一半。
+//   18b：真改写（`reset --hard` 后悬空）**仍须**自愈。它的前置断言同时否掉另一个
+//        直觉修法「对象不存在才删」：悬空 commit 的对象仍在对象库里，`cat-file -e`
+//        为真——按「对象在 = 还活着」判，账本自愈整条失效。
+
+/** 某树视角该 SHA 是否为 HEAD 祖先（仅供「场景确被构造出来」的前置断言） */
+function ancestorOfHeadIn(repo, sha) {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: repo, stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 对象是否还在对象库（18b 前置：悬空 ≠ 对象消失） */
+function objectExistsIn(repo, sha) {
+  try {
+    execFileSync('git', ['cat-file', '-e', sha], { cwd: repo, stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+{
+  const uuid18a = '18aa0000-0000-4000-8000-000000000018'
+  const mainRepo = makeUuidRepo('.handoff-test-alive-cross', uuid18a, { 'a.txt': '1' })
+  const wt = join(TEST_BASE, '.handoff-test-alive-cross-wt')
+  execFileSync('git', ['worktree', 'add', '-b', 'wt18', wt], { cwd: mainRepo, stdio: 'pipe' })
+  const commitInWt = (file, msg) => {
+    writeFileSync(join(wt, file), '1', 'utf-8')
+    execFileSync('git', ['add', '-A'], { cwd: wt, stdio: 'pipe' })
+    execFileSync('git', ['commit', '-m', msg], { cwd: wt, stdio: 'pipe' })
+    return gitIn(wt, 'rev-parse HEAD')
+  }
+  // 兄弟树（wt）上两笔提交：活在 refs/heads/wt18，且都不是 mainRepo HEAD 的祖先
+  const shaW1 = commitInWt('w1.txt', `catstudy [${uuid18a}] w1`)
+  const shaW2 = commitInWt('w2.txt', `catstudy [${uuid18a}] w2`)
+  const headMain = gitIn(mainRepo, 'rev-parse HEAD')
+
+  // 前置：误删的前提真被构造出来了（缺了它，本组对判据恒不敏感 = 恒真门）
+  assert(
+    !ancestorOfHeadIn(mainRepo, shaW1) && !ancestorOfHeadIn(mainRepo, shaW2),
+    '18a 前置：兄弟树两笔提交都不应是 mainRepo HEAD 的祖先'
+  )
+  assert(
+    gitIn(mainRepo, `for-each-ref --contains=${shaW2} --format=%(refname)`).includes('wt18'),
+    '18a 前置：兄弟树提交应仍被 refs/heads/wt18 可达（判据面确为「活着」）'
+  )
+
+  // 共享账本（写在 mainRepo = 共享根）：shaW1 已投 + shaW2 待补投；本树 HEAD 也记 delivered，
+  // 让 gate-deliver 的兜底路径无事可做——本组只关心 prune 对兄弟树条目的处置，不掺投递
+  writeState(mainRepo, {
+    delivered: { [shaW1]: '2026-01-01T00:00:00.000Z', [headMain]: '2026-01-01T00:00:00.000Z' },
+    pending: [{ sha: shaW2, src: 'hook' }],
+    raw: '',
+  })
+  assert(
+    readState(mainRepo).delivered[shaW1] !== undefined &&
+      pendingShas(readState(mainRepo)).includes(shaW2),
+    '18a 前置：共享账本确含兄弟树的两条条目'
+  )
+
+  // 本树跑一次钩子（gate-deliver 形态）。executor=404 = 无归属 → 该投；POST 后连接被
+  // 掐断 + 落库验证不命中 → transient → shaW2 留在 pending（正是「活条目」该有的归宿）
+  const stub18a = await startTransientPostStub({
+    uuid: uuid18a,
+    sessionId: 'session-18a',
+    executor: 404,
+  })
+  await runInProc(mainRepo, stub18a.url, { gateDeliver: true })
+  stub18a.server.close()
+
+  const state18a = readStateFile(mainRepo)
+  assert(
+    state18a.delivered[shaW1] !== undefined,
+    '18a 兄弟树活 SHA 的 delivered 不得被本树 prune 误删（误删 = 该树 HEAD 每次都被重投）'
+  )
+  assert(
+    pendingShas(state18a).includes(shaW2),
+    `18a 兄弟树活 SHA 的 pending 不得被误删（漏投方向：被删条目没有第二次投递机会）——实际 pending=[${pendingShas(state18a).join(',')}]`
+  )
+  console.log('  18a: 跨树活条目不被本树 prune 误删（delivered + pending）✅')
+
+  rmSync(wt, { recursive: true, force: true })
+  rmSync(mainRepo, { recursive: true, force: true })
+}
+
+{
+  const uuid18b = '18bb0000-0000-4000-8000-000000000018'
+  const tmp = makeUuidRepo('.handoff-test-alive-dangling', uuid18b, { 'a.txt': '1' })
+  writeFileSync(join(tmp, 'b.txt'), '1', 'utf-8')
+  execSync('git add -A', { cwd: tmp, stdio: 'pipe' })
+  execSync(`git commit -m "catstudy [${uuid18b}] b"`, { cwd: tmp, stdio: 'pipe' })
+  const shaOld = gitIn(tmp, 'rev-parse HEAD')
+  execSync('git reset --hard HEAD~1', { cwd: tmp, stdio: 'pipe' })
+  const headAfter = gitIn(tmp, 'rev-parse HEAD')
+
+  assert(!ancestorOfHeadIn(tmp, shaOld), '18b 前置：reset --hard 后旧 SHA 应已不是 HEAD 祖先')
+  // 反对照前置：**悬空 ≠ 对象消失**。这条断言红了说明「对象不存在才删」的修法方向
+  // 在本用例上成立——那本用例就不再是否掉它的证据，判据须重新讨论。
+  assert(
+    objectExistsIn(tmp, shaOld),
+    '18b 前置：reset --hard 后旧 commit 对象应仍在对象库（悬空）——按对象存在判活会漏掉本自愈'
+  )
+
+  writeState(tmp, {
+    delivered: { [shaOld]: '2026-01-01T00:00:00.000Z', [headAfter]: '2026-01-01T00:00:00.000Z' },
+    pending: [{ sha: shaOld, src: 'hook' }],
+    raw: '',
+  })
+  // 本用例不该发出任何 POST（死的该被清、活的 HEAD 已 recorded）——stub 只为兜底不挂起
+  const stub18b = await startStubServer((req, res) => {
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+  await runInProc(tmp, stub18b.url, { gateDeliver: true })
+  stub18b.server.close()
+
+  const state18b = readStateFile(tmp)
+  // 判别力在**这一条**：只有 delivered 侧能分开两个候选判据。pending 侧不行——
+  // 条目被判活时 drainPending 仍会处理它（404 → fatal → 移出 pending），两条判据
+  // 下都"被移除"、只是路线不同（自愈 vs 投递失败）。实测对照见交接文档。
+  assert(
+    state18b.delivered[shaOld] === undefined,
+    '18b 悬空（已无 ref 可达）SHA 的 delivered 应被自愈清除'
+  )
+  assert(
+    !pendingShas(state18b).includes(shaOld),
+    '18b 悬空 SHA 的 pending 应被自愈清除（否则每次投递机会都重试一个已改写的提交）'
+  )
+  assert(
+    state18b.delivered[headAfter] !== undefined,
+    '18b 对照：活条目（本树 HEAD）不得被顺手清掉——只清死的'
+  )
+  console.log('  18b: 真改写（悬空对象）仍自愈，活条目不受牵连 ✅')
+
   rmSync(tmp, { recursive: true, force: true })
 }
 
