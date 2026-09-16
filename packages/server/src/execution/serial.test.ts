@@ -30,7 +30,7 @@ import { getAdapterForAgent } from '../llm/registry.js'
 import { createExecutionEngine } from './serial.js'
 import { resolveMentionLimit, DEFAULT_MAX_MENTIONS_PER_AGENT } from './serial.js'
 import { maybeScoreSample } from '../eval/sampler.js'
-import { ensureSessionWorktree, gitCommit } from '../llm/git-utils.js'
+import { ensureAgentWorktree, ensureSessionWorktree, gitCommit } from '../llm/git-utils.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 
@@ -56,9 +56,14 @@ vi.mock('../llm/registry.js', () => ({
 vi.mock('../llm/git-utils.js', () => ({
   gitCommit: vi.fn(),
   getSessionWorktreePath: vi.fn(() => null),
-  // T-1 Phase 2：① 的提交作用域只认 `ensureSessionWorktree`——默认 null ⇒ 不提交。
+  // T-1 Phase 2：① 的提交作用域只认 worktree——默认 null ⇒ 不提交。
   // 需要「真有 commit」的用例（T-M 写回面）自行 mockReturnValue 覆盖。
+  //
+  // T-2 Phase I：解析点由 `ensureSessionWorktree` 换成**按角色分派**的
+  // `ensureAgentWorktree`（store → 会话 worktree / 其余 → 各家猫 worktree）。
+  // 本工厂是**部分导出**——漏键 ⇒ 消费方拿到 undefined、调用即 TypeError。
   ensureSessionWorktree: vi.fn(() => null),
+  ensureAgentWorktree: vi.fn(() => null),
   snapshotPackageDeps: vi.fn(() => ({})),
   diffNewPackages: vi.fn(() => []),
   // T-1 Phase 2：serial.ts 清理段改带 `cleanGitEnv()`（与 gitCommit 对称）。
@@ -1196,7 +1201,7 @@ describe('serial — T-M 自动提交歧义拒写（可观测面）', () => {
     vi.mocked(gitCommit).mockReturnValue('cafe1234567890abcdef')
     // T-1 Phase 2：① 只在 `ensureSessionWorktree` 给出路径时才调 `gitCommit`——
     // 不给路径则「本轮无提交」，下面的写回分支根本走不到，断言会变成空转
-    vi.mocked(ensureSessionWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-tm')
+    vi.mocked(ensureAgentWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-tm')
     const { bus } = createFakeBus()
     const engine = createExecutionEngine(bus)
     // 同一触发消息下已有**另一只猫**的执行行 ⇒ distinctAgentCount=2 ⇒ 消歧失败
@@ -1234,7 +1239,7 @@ describe('serial — T-M 自动提交歧义拒写（可观测面）', () => {
     makeAdapter()
     vi.mocked(gitCommit).mockReturnValue('cafe1234567890abcdef')
     // 同上：① 需 `ensureSessionWorktree` 给出路径才会真提交
-    vi.mocked(ensureSessionWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-tm1')
+    vi.mocked(ensureAgentWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-tm1')
     const { bus } = createFakeBus()
     const engine = createExecutionEngine(bus)
 

@@ -490,3 +490,47 @@ describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
     })
   })
 })
+
+// ══════════════════════════════════════════════════════════════════
+// T-2 Phase I 取数点：本调度树内**实际执行过**的 agent 集合
+// ══════════════════════════════════════════════════════════════════
+describe('execution_logs repo — 按 trace 取「本调度树执行过的 agent」', () => {
+  it('同 trace 的 A2A 子链一并覆盖；不同 trace 不串（去重 + 排序）', () => {
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    // FK：execution_logs.session_id → sessions.id、agent_id → agents.id，先备齐
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 't')").run()
+    for (const a of ['cat-a', 'cat-b', 'cat-c', 'cat-z']) {
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+         VALUES (?, ?, '🐱', 'p', 'claude', 'm', 'k')`
+      ).run(a, a)
+    }
+    // 顶层一批两只猫 + A2A 子链一只（同一 traceId——子链**继承**父 trace）
+    insertLog(db, { id: 'x1', agent: 'cat-a', status: 'completed', startedAt: 't1', traceId: 'TR' })
+    insertLog(db, { id: 'x2', agent: 'cat-b', status: 'completed', startedAt: 't2', traceId: 'TR' })
+    insertLog(db, { id: 'x3', agent: 'cat-c', status: 'completed', startedAt: 't3', traceId: 'TR' })
+    // 同 agent 多行（重试）⇒ 去重
+    insertLog(db, { id: 'x4', agent: 'cat-a', status: 'failed', startedAt: 't4', traceId: 'TR' })
+    // 另一条 trace 的猫不得混入
+    insertLog(db, {
+      id: 'x5',
+      agent: 'cat-z',
+      status: 'completed',
+      startedAt: 't5',
+      traceId: 'OTHER',
+    })
+
+    expect(repo.listExecutorAgentIdsByTrace('TR')).toEqual(['cat-a', 'cat-b', 'cat-c'])
+    expect(repo.listExecutorAgentIdsByTrace('OTHER')).toEqual(['cat-z'])
+  })
+
+  it('空集与空 traceId ⇒ []（合法状态，不抛错）', () => {
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    expect(repo.listExecutorAgentIdsByTrace('nobody')).toEqual([])
+    expect(repo.listExecutorAgentIdsByTrace('')).toEqual([])
+  })
+})

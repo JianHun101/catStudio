@@ -585,12 +585,16 @@ describe('session worktree', () => {
 // ─── 猫 worktree（一猫一 worktree，ADR 0015 D1 / T-2 Phase T）──────────
 // 只测 git-utils 面：命名、分叉点、共存、幂等、失败形态。
 // fan-in（枚举 / 合并 / 守卫 / 回收）在 worktree-fanin.test.ts。
-// 猫 worktree 目录 = `<tmpdir>/catStudy-sessions/<sid8>-<cat8>`（ensureCatWorktree
+// 猫 worktree 目录 = `<tmpdir>/catStudy-sessions/<sid8>-<猫名>`（ensureCatWorktree
 // 的路径公式决定）——落系统 temp，不碰本仓。
 
 describe('cat worktree', () => {
-  /** 真实形态的 agent id（uuid）：cat8 = 前 8 位 `1564934c` */
+  /** 真实形态的 agent id（uuid）——所有权标记（`branch.<branch>.catAgentId`）用 */
   const AGENT = '1564934c-d0b4-55bd-89d1-563753e264c0'
+  /** 另一只猫的 agent id：同名不同 agent 的反向对照用（V8） */
+  const AGENT2 = '9f3ab7c1-0000-4111-8222-333344445555'
+  /** 猫名——`catSlug` 后**原样**进分支/目录名（中文无需转义，命名票 A1–A5 真机实证） */
+  const CAT = '暹罗猫'
   /** 本组创建的猫 worktree 目录（清理用） */
   const catDirs: string[] = []
   /** 本组创建的会话（removeSessionWorktree 清理用） */
@@ -625,13 +629,13 @@ describe('cat worktree', () => {
     }
   })
 
-  it('A1 命名纯度：连字符形；斜杠形在 git 里真的建不出来（E1 回归）', () => {
-    expect(gitUtils.catBranch('abcd1234', AGENT)).toBe('session/abcd1234-1564934c')
-    expect(gitUtils.catWorktreePath(tmp, 'abcd1234', AGENT)).toBe(catPath('abcd1234-1564934c'))
-    // 分隔符断言：叶子名内不得再出现 `/` —— `session/<sid8>` 与 `session/<sid8>/<cat8>`
+  it('A1 命名纯度：连字符形 + 中文猫名原样；斜杠形在 git 里真的建不出来（E1 回归）', () => {
+    expect(gitUtils.catBranch('abcd1234', CAT)).toBe('session/abcd1234-暹罗猫')
+    expect(gitUtils.catWorktreePath(tmp, 'abcd1234', CAT)).toBe(catPath('abcd1234-暹罗猫'))
+    // 分隔符断言：叶子名内不得再出现 `/` —— `session/<sid8>` 与 `session/<sid8>/<猫名>`
     // 在 git ref 树里是「文件 vs 目录」冲突
-    expect(gitUtils.catBranch('abcd1234', AGENT).split('/')).toHaveLength(2)
-    expect(catPath('abcd1234-1564934c').split(/[\\/]/).pop()).toBe('abcd1234-1564934c')
+    expect(gitUtils.catBranch('abcd1234', CAT).split('/')).toHaveLength(2)
+    expect(catPath('abcd1234-暹罗猫').split(/[\\/]/).pop()).toBe('abcd1234-暹罗猫')
 
     // E1 实证：斜杠形确实建不出来（不是风格偏好）。反序（先子后父）同样失败，
     // 此处只验更常见的前序形态。
@@ -647,7 +651,7 @@ describe('cat worktree', () => {
     sessIds.push(sid)
     expect(sessWt).toBeTruthy()
 
-    const catWt = gitUtils.ensureCatWorktree(sid, AGENT)
+    const catWt = gitUtils.ensureCatWorktree(sid, AGENT, CAT)
     expect(catWt).toBeTruthy()
     catDirs.push(catWt!)
 
@@ -659,7 +663,7 @@ describe('cat worktree', () => {
     // 两条分支同时存在
     const branches = git('branch --format=%(refname:short)')
     expect(branches).toContain('session/c1a00002')
-    expect(branches).toContain('session/c1a00002-1564934c')
+    expect(branches).toContain('session/c1a00002-暹罗猫')
   })
 
   it('A3 分叉点：猫分支从集成分支分叉，不是主 HEAD', () => {
@@ -673,11 +677,11 @@ describe('cat worktree', () => {
     const c2 = git('rev-parse HEAD')
     expect(c2).not.toBe(c1)
 
-    const catWt = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT)
+    const catWt = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT, CAT)
     expect(catWt).toBeTruthy()
     catDirs.push(catWt!)
 
-    const catRef = `session/${sid}-1564934c`
+    const catRef = `session/${sid}-暹罗猫`
     expect(git(`rev-parse ${catRef}`)).toBe(c1) // 猫分支 tip == 集成分支 tip
     expect(git(`merge-base ${catRef} session/${sid}`)).toBe(c1)
     expect(git(`merge-base ${catRef} HEAD`)).toBe(c1) // 与主 HEAD 的公共祖先仍是 C1
@@ -687,27 +691,115 @@ describe('cat worktree', () => {
   it('A4 重复建幂等：第二次复用同路径，不重建、不报错', () => {
     const sid = 'c1a00004'
     git(`branch session/${sid}`)
-    const p1 = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT)
+    const p1 = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT, CAT)
     expect(p1).toBeTruthy()
     catDirs.push(p1!)
 
-    const p2 = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT)
+    const p2 = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT, CAT)
     expect(p2).toBe(p1)
     expect(existsSync(resolve(p2!, '.git'))).toBe(true)
   })
 
-  it('A5 失败形态：集成分支不存在 → null（不落主仓库）；空 agent id → null', () => {
+  /**
+   * A5：**「集成分支不存在 ⇒ null」已按店长裁 A 反转**（OQ1，补笔：第 3 笔）——
+   * 集成分支不存在不再是失败形态，猫侧**补建**它（fork 点 = 主仓库 HEAD）。
+   * 「**不落主仓库**」这条红线**保留**，改由仍然存在的失败形态（空 agent id）把守。
+   * 反转的完整三格判据见 `serial.cat-worktree.test.ts` 的 V13/V15 与报告 §三 V14。
+   */
+  it('A5 补建（反转格）：集成分支不存在 ⇒ 补建、fork 点 = 主仓库 HEAD；空 agent id → null', () => {
     const sid = 'c1a00099' // 从不建 session/c1a00099
-    const path = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT)
-    expect(path).toBeNull()
-    // 「不落主仓库」的判据：返回 null，而不是退到主仓库根/任何可用路径
-    expect(path).not.toBe(tmp)
-    expect(path).not.toBe(resolve(tmp))
-    // 猫分支未建、worktree 目录未落盘
-    expect(git('branch --list session/c1a00099-1564934c')).toBe('')
-    expect(existsSync(catPath('c1a00099-1564934c'))).toBe(false)
+    sessIds.push(sid) // 补建会一并建出会话 worktree（单源 `ensureSessionWorktree`）⇒ 纳入清理
+    // 猫 worktree 目录落 `<tmpdir>/catStudy-sessions/`（主仓库**兄弟**目录，不在 tmp 内）
+    // ⇒ 上一次跑崩留下的同 id 残留会走进「已存在 → 复用」并撞上所有权校验。
+    // **实测踩过**（同 serial.cat-worktree.test.ts 的 dropWorktrees 注释）：本格先登记再
+    // 前置清干净，否则断言点一旦在上游失败就永久留下残留、把后续每一次跑都变红。
+    const expectedCat = catPath('c1a00099-暹罗猫')
+    catDirs.push(expectedCat)
+    try {
+      rmSync(expectedCat, { recursive: true, force: true })
+    } catch {
+      /* 不存在 / 占用 → 忽略 */
+    }
+    expect(git('branch --list session/c1a00099')).toBe('') // 前提：集成分支不存在
+    const base = git('rev-parse HEAD')
 
-    // 空 agent id：会造出 `session/<sid8>-` 空后缀分支（枚举侧 S3-5 的过滤同理）⇒ 拒绝
-    expect(gitUtils.ensureCatWorktree(`${sid}-xxxx`, '')).toBeNull()
+    const path = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT, CAT)
+    // 反转格：猫树建得出（旧期望 `toBeNull()`），且补建的集成分支 fork 点 = 调用时的主仓库 HEAD
+    expect(path).toBeTruthy()
+    catDirs.push(path!)
+    expect(existsSync(resolve(path!, '.git'))).toBe(true)
+    expect(git('rev-parse session/c1a00099')).toBe(base)
+    expect(git('branch --list session/c1a00099-暹罗猫')).not.toBe('')
+
+    // 「不落主仓库」的判据：空 agent id ⇒ 返回 null，而不是退到主仓库根/任何可用路径。
+    // 空 agent id：无所有者可写进标记（`branch.<branch>.catAgentId`）⇒ 拒绝。
+    // 保留此格的原始动因（空后缀分支 / 枚举侧 S3-5 同形静默）已由 `catSlug`
+    // 的空结果抛错接管，见 A6。
+    const nullPath = gitUtils.ensureCatWorktree(`${sid}-xxxx`, '', CAT)
+    expect(nullPath).toBeNull()
+    expect(nullPath).not.toBe(tmp)
+    expect(nullPath).not.toBe(resolve(tmp))
+  })
+
+  it('A6 猫名清洗：中文原样产出；含 `/` 或清洗后为空 ⇒ 显式抛错且不产分支/目录（V7）', () => {
+    // 正向：中文**原样**进名字（无转义 / 无 `%` / 无八进制）
+    expect(gitUtils.catSlug(CAT)).toBe('暹罗猫')
+    expect(gitUtils.catBranch('abcd1234', CAT)).not.toMatch(/[%\\]/)
+    expect(gitUtils.catSlug('  暹罗猫  ')).toBe('暹罗猫') // 空白剔除
+    expect(gitUtils.catSlug('a..b')).toBe('ab') // `..` 序列剔除
+    expect(gitUtils.catSlug('.暹罗猫.')).toBe('暹罗猫') // 首尾 `.` 剔除
+    expect(gitUtils.catSlug('a:b*c?d')).toBe('abcd') // 其余 git ref 非法字符剔除
+
+    // 反向对照①：含 `/` ⇒ 抛错。**不是「总是抛」**——同一函数对 CAT 返回正常值。
+    expect(() => gitUtils.catSlug('a/b')).toThrow(/含 '\/'/)
+    expect(() => gitUtils.catBranch('abcd1234', 'a/b')).toThrow()
+    expect(() => gitUtils.catWorktreePath(tmp, 'abcd1234', 'a/b')).toThrow()
+    // 反向对照②：清洗后为空 ⇒ 抛错（`...` 剔 `..` 与首尾 `.` 后为空）
+    expect(() => gitUtils.catSlug('   ')).toThrow(/清洗后为空/)
+    expect(() => gitUtils.catSlug('...')).toThrow(/清洗后为空/)
+
+    // 「不产任何分支 / 目录」：抛错本身证不了这句 —— 用 git 账本与文件系统复核。
+    // 两处病灶各自会造出的名字，逐条确认不存在。
+    const sid = 'c1a00006'
+    git(`branch session/${sid}`) // 集成分支先在（排除「因分支缺失而没建」的假阴性）
+    expect(() => gitUtils.ensureCatWorktree(sid, AGENT, 'a/b')).toThrow()
+    expect(() => gitUtils.ensureCatWorktree(sid, AGENT, '   ')).toThrow()
+    expect(git(`branch --list "session/${sid}-*"`)).toBe('')
+    expect(existsSync(catPath('c1a00006-a'))).toBe(false)
+    expect(existsSync(catPath('c1a00006-'))).toBe(false)
+  })
+
+  it('A7 所有权标记：同名不同 agent ⇒ 显式抛错不共用树；标记落 .git/config 不在工作区（V8）', () => {
+    const sid = 'c1a00007'
+    git(`branch session/${sid}`)
+    const p1 = gitUtils.ensureCatWorktree(sid, AGENT, CAT)
+    expect(p1).toBeTruthy()
+    catDirs.push(p1!)
+
+    // 标记落分支级 git config（不在工作区内 ⇒ 不参与 `git add -A`、不进任何提交）
+    expect(git(`config --get branch.session/${sid}-暹罗猫.catAgentId`)).toBe(AGENT)
+    expect(existsSync(resolve(p1!, '.git'))).toBe(true)
+    expect(existsSync(resolve(p1!, '.git', 'config'))).toBe(false) // worktree 的 .git 是文件指针
+
+    // 反向对照：同名不同 agentId ⇒ 抛错，且路径与树原样（未被改写/未被共用）
+    expect(() => gitUtils.ensureCatWorktree(sid, AGENT2, CAT)).toThrow(/所有权冲突/)
+    expect(git(`config --get branch.session/${sid}-暹罗猫.catAgentId`)).toBe(AGENT)
+    // 同一 agentId 复用 ⇒ 幂等成功——证上一条不是「总是抛」
+    expect(gitUtils.ensureCatWorktree(sid, AGENT, CAT)).toBe(p1)
+  })
+
+  it('A8 复用无标记的树 ⇒ 显式抛错（不静默复用来路不明的树）', () => {
+    const sid = 'c1a00008'
+    git(`branch session/${sid}`)
+    const p1 = gitUtils.ensureCatWorktree(sid, AGENT, CAT)
+    expect(p1).toBeTruthy()
+    catDirs.push(p1!)
+
+    // 抹掉标记 → 模拟「标记缺失」（旧版本建的树 / 写标记失败）
+    git(`config --unset branch.session/${sid}-暹罗猫.catAgentId`)
+    expect(() => gitUtils.ensureCatWorktree(sid, AGENT, CAT)).toThrow(/无所有权标记/)
+    // 对照：标记写回 ⇒ 恢复正常（证上一条不是「树坏了导致恒抛」）
+    git(`config branch.session/${sid}-暹罗猫.catAgentId ${AGENT}`)
+    expect(gitUtils.ensureCatWorktree(sid, AGENT, CAT)).toBe(p1)
   })
 })

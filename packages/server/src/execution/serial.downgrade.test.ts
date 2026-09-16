@@ -310,6 +310,8 @@ const A1: AgentConfig = {
   llmProvider: 'claude',
   llmModel: 'claude-sonnet-5',
   llmApiKey: 'sk-test',
+  // 店长：一猫一 worktree 之后仍持会话 worktree（ADR 0015 D2），本矩阵的判据对象
+  role: 'store',
 }
 
 interface RoundOpts {
@@ -472,9 +474,14 @@ describe('serial × 降级路径（T-1：Phase 1 测试先行 → Phase 2 生产
     // provider 必须是 claude：`execute()` 的 agent 配置取自**这一行**
     // （`agentsRepo.getAgentById` + `rowToAgent`），不是传给 `executeAgentsSerial` 的常量——
     // 这行写 deepseek 则 `anyClaude` 恒 false，② 的清理段永不执行（空断言）
+    // role='store'：**本矩阵的判据对象是「收尾路径上那棵 worktree」**，而一猫一
+    // worktree（T-2 Phase I）之后只有店长还持会话 worktree（ADR 0015 D2）。把夹具钉成
+    // store ⇒ 本文件全部格子的语义与 T-1 Phase 2 收窄时**逐字一致**（改的是归属、
+    // 不是期望）。猫（role 缺失/未知）走各自猫 worktree 的路径见
+    // `serial.cat-worktree.test.ts`——两格都要读数，不能只测一格（票面 V1）。
     db.prepare(
-      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
-       VALUES ('agent-1', 'flash猫', '🐱', 'p', 'claude', 'claude-sonnet-5', 'sk-test')`
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES ('agent-1', 'flash猫', '🐱', 'p', 'claude', 'claude-sonnet-5', 'sk-test', 'store')`
     ).run()
 
     h.retrieveMemoryContext.mockResolvedValue({

@@ -36,7 +36,7 @@ import { ProviderTokenPool } from './token-pool.js'
 import { classifyError } from '../eval/classify-error.js'
 import {
   cleanGitEnv,
-  ensureSessionWorktree,
+  ensureAgentWorktree,
   getSessionWorktreePath,
   gitCommit,
 } from '../llm/git-utils.js'
@@ -1114,6 +1114,75 @@ async function executeOneAgent(
   }
 }
 
+/** 顶层收尾的提交 / 清理目标树（一猫一 worktree，T-2 Phase I §三-3） */
+interface CommitTarget {
+  agentId: string
+  /** 该猫的目标树；null = 建不出（降级：跳过这棵，**绝不落主仓库**） */
+  cwd: string | null
+}
+
+/**
+ * 解析「本调度树内执行过的猫」→ 各自的提交 / 清理目标树。
+ *
+ * **为什么不能只提交一棵树**（票面 §三-3，本票最重的一处）：一猫一 worktree 后
+ * 猫的改动停在**各自的** worktree 里，会话树不再是猫干活的地方 ⇒ 只提交会话树会让
+ * 猫分支恒空、fan-in 合个寂寞（E5 静默丢活）。
+ *
+ * 取数点 = `execution_logs.trace_id`（见 `listExecutorAgentIdsByTrace` 的取舍论证），
+ * 并**防御性并上本次批次**：查询异常 / DB 写失败时至少不丢本轮直接派发的猫。
+ * 多出来的一棵是零代价的 no-op（`gitCommit` 对无改动树返回 null），少一棵却是
+ * 「改动永远没进过任何地方」——两个方向的代价不对称，故并集取宽。
+ *
+ * 本函数**不抛**：顶层收尾之后还有 ② 脏文件清理与增量摘要，单只猫建树失败不该
+ * 带走它们；失败逐条留痕，不静默。
+ */
+function resolveCommitTargets(
+  sessionId: string,
+  traceId: string,
+  batch: AgentConfig[]
+): CommitTarget[] {
+  const out: CommitTarget[] = []
+  try {
+    const ids = new Set<string>(batch.map((a) => a.id))
+    try {
+      for (const id of execLogsRepo.listExecutorAgentIdsByTrace(traceId)) ids.add(id)
+    } catch (err: any) {
+      log.warn('executed-agent lookup failed — falling back to current batch', {
+        traceId,
+        error: err?.message,
+      })
+    }
+
+    const seenCwd = new Set<string>()
+    for (const id of ids) {
+      const row = agentsRepo.getAgentById(id)
+      if (!row) continue
+      const agent = rowToAgent(row)
+      let cwd: string | null = null
+      try {
+        cwd = ensureAgentWorktree(sessionId, agent)
+      } catch (err: any) {
+        // 猫名非法（含 `/` / 清洗后为空）或所有权冲突 ⇒ `ensureCatWorktree` 显式抛错。
+        // 此处不吞成静默：该猫这一轮的改动确实不会被提交，留一条 error 级留痕。
+        log.error('worktree resolve failed — tree skipped', {
+          traceId,
+          agentId: agent.id,
+          agentName: agent.name,
+          error: err.message,
+        })
+      }
+      if (cwd) {
+        if (seenCwd.has(cwd)) continue // 同一棵树只提交 / 清理一次
+        seenCwd.add(cwd)
+      }
+      out.push({ agentId: agent.id, cwd })
+    }
+  } catch (err: any) {
+    log.error('commit target resolution failed', { traceId, error: err?.message })
+  }
+  return out
+}
+
 async function executeAgentsSerialImpl(
   ctx: EngineCtx,
   sessionId: string,
@@ -1147,12 +1216,15 @@ async function executeAgentsSerialImpl(
   // 顶层调度完成后清理 + 自动提交
   if (depth === 0) {
     ctx.state.clearMentionCountsForTrace(traceId)
+    // 目标树在 try 之外解析：② 的脏文件清理要用**同一份**集合，而它在 finally 里。
+    // `resolveCommitTargets` 自身不抛（见其注释），两条路径都拿到稳定读数。
+    const commitTargets = resolveCommitTargets(sessionId, traceId, agents)
     try {
-      // 自动 git commit（忽略非 git 仓库或无改动的情况）。
+      // 自动 git commit —— **逐猫各自那棵树**（T-2 Phase I §三-3，本票最重的一处）。
       //
       // ── T-1 Phase 2：降级路径收窄（①）──────────────────────
-      // 会话 worktree 是**唯一合法**的提交作用域，故此处走 `ensureSessionWorktree`
-      // （查 + 建，幂等）：worktree 建不出来（非 git 仓 / shortId 形态异常 / 自建失败）
+      // worktree 是**唯一合法**的提交作用域（现为一猫一棵，见 `resolveCommitTargets`），
+      // 目标树建不出来（非 git 仓 / shortId 形态异常 / 集成分支不在 / 命名非法 / 自建失败）
       // → **不提交** + 显式告警。
       //
       // 删掉的 `?? process.cwd()` 兜底不是「少了一条降级路」，而是**拆掉一个静默翻译**：
@@ -1161,23 +1233,26 @@ async function executeAgentsSerialImpl(
       // ② 的 `git checkout -- .` 会把同一批改动**静默删除**（内容不在 git 里，比误提交
       // 更不可逆）。故 ①② 同批改，缺一不可（票面 §一 Phase 2）。
       //
-      // 注：`ensureSessionWorktree` 是同步阻塞调用（建分支 + worktree add + junction，
+      // 注：`ensureAgentWorktree` 是同步阻塞调用（建分支 + worktree add + junction，
       // 票面 R1 要求实测耗时）。本段下面的 `git.auto_commit` span 仍**只量 `gitCommit`
       // 本身**，不含建 worktree 的耗时——不悄悄改写 R2 已交付段的口径（是否纳入挂 OQ）。
-      const worktreeCwd = ensureSessionWorktree(sessionId)
       const commitT0 = Date.now()
-      let commitHash: string | null = null
-      if (worktreeCwd) {
-        commitHash = gitCommit(`catstudy [${triggerMsg.id}]`, { cwd: worktreeCwd })
-      } else {
-        // 降级**不静默**：`ensureSessionWorktree` 内部已对具体成因各留一条 warn，此处补的是
-        // 「于是本轮的自动提交被跳过了」这一后果——缺了它，读者只看得到成因、看不到后果。
-        log.warn('auto commit skipped — session worktree unavailable', {
-          traceId,
-          sessionId,
-          triggerMessageId: triggerMsg.id,
-          reason: '会话 worktree 不可用（ensureSessionWorktree 返回 null）⇒ 不提交，绝不落主仓库',
-        })
+      const commits: Array<{ agentId: string; cwd: string; hash: string }> = []
+      for (const target of commitTargets) {
+        if (!target.cwd) {
+          // 降级**不静默**：`ensureAgentWorktree` 内部已对具体成因各留一条 warn，此处补的是
+          // 「于是这棵树的自动提交被跳过了」这一后果——缺了它，读者只看得到成因、看不到后果。
+          log.warn('auto commit skipped — worktree unavailable', {
+            traceId,
+            sessionId,
+            agentId: target.agentId,
+            triggerMessageId: triggerMsg.id,
+            reason: '目标 worktree 不可用（ensureAgentWorktree 返回 null）⇒ 不提交，绝不落主仓库',
+          })
+          continue
+        }
+        const hash = gitCommit(`catstudy [${triggerMsg.id}]`, { cwd: target.cwd })
+        if (hash) commits.push({ agentId: target.agentId, cwd: target.cwd, hash })
       }
       // ── 段 G `git.auto_commit`（R2 段五）─────────────────
       // 这是本票唯一一段**跨执行**的 span：`depth=0` 的自动提交在全部 `execute()`
@@ -1188,7 +1263,7 @@ async function executeAgentsSerialImpl(
       // 之外本段是全票唯一的「跨执行隐藏停顿」，值得留痕。
       // 只为**真产生了 commit** 的轮次留行：无改动时 `gitCommit` 返回 null，
       // 该段缺省（验收 26 明写「无改动时该段可缺」）。
-      if (commitHash) {
+      if (commits.length > 0) {
         // 链锚口径与执行内各段**逐字同源**（`triggerMsg.taskId || traceId`）——
         // 轮次段与执行段必须能串进同一条链，两处各写一份表达式就是下一个漂移源
         recordAutoCommitSpan(
@@ -1201,15 +1276,30 @@ async function executeAgentsSerialImpl(
         // T-M：本轮执行行跨多只猫时这个 sha 指认不出作者 → 写回侧**拒写**（不再给每只猫
         // 都记一笔"我提交了它"，把"指错人"从读侧的猜变成写侧的制造）。拒写可观测：
         // 不静默——静默拦截正是 T-K 治的形态。
-        const written = execLogsRepo.updateExecutionLogCommitHash(triggerMsg.id, commitHash)
-        if (written.skippedAmbiguous) {
-          log.warn('auto-commit hash not written back — executor ambiguous', {
+        //
+        // 一猫一 worktree 后多一种不可消歧形态：**同一轮里多棵树各自提交**（每只猫
+        // 一个 sha）⇒ 单值 `commit_hash` 列装不下，与「跨多只猫」同款处置——不猜、
+        // 不挑一个写进去，缺 ≠ 失败（验收 26）。
+        if (commits.length === 1) {
+          const written = execLogsRepo.updateExecutionLogCommitHash(triggerMsg.id, commits[0].hash)
+          if (written.skippedAmbiguous) {
+            log.warn('auto-commit hash not written back — executor ambiguous', {
+              traceId,
+              triggerMessageId: triggerMsg.id,
+              commitHash: commits[0].hash,
+              distinctAgents: '>1',
+              writtenRows: written.changes,
+              reason: '本轮执行行跨多只猫，自动提交的 sha 无法指认唯一作者（T-M）',
+            })
+          }
+        } else {
+          log.warn('auto-commit hash not written back — multiple trees committed', {
             traceId,
             triggerMessageId: triggerMsg.id,
-            commitHash,
-            distinctAgents: '>1',
-            writtenRows: written.changes,
-            reason: '本轮执行行跨多只猫，自动提交的 sha 无法指认唯一作者（T-M）',
+            commitCount: commits.length,
+            agents: commits.map((c) => c.agentId),
+            reason:
+              '一猫一 worktree ⇒ 本轮多棵树各自提交，单值 commit_hash 列装不下（无唯一值可写）',
           })
         }
       }
@@ -1221,34 +1311,38 @@ async function executeAgentsSerialImpl(
         // 后工作区应为干净状态，此检查为无操作。
         // 锁文件已由各执行体 finally 配对释放（引用计数归零时删除）——
         // 此处不再操作锁（派活单必改点 2：保留会让引用计数变负）
-        try {
-          // 脏文件检查/清理作用到**会话 worktree**——猫的执行环境在 worktree，
-          // 脏文件只在 worktree 里产生；主工作区不受猫影响无需清理。
-          //
-          // ── T-1 Phase 2：与 ① 同批收窄（②）────────────────────
-          // 作用域同样走 `ensureSessionWorktree`（查 + 建）；建不出 → **不清理** +
-          // 显式告警。删掉的 `?? process.cwd()` 兜底会让下面三条命令**作用到主仓库
-          // 整棵树**：`git checkout -- .` 回滚主仓库全部未提交的 tracked 改动（含他人
-          // 在 dev 上的在途工作），`git clean -fd` 删主仓库未跟踪且未忽略的文件。
-          // 这条路径**无回滚**——被删的内容不在 git 里。
-          //
-          // `env: cleanGitEnv()` 与 `git-utils.ts` 的 `gitCommit` 对称：git 跑钩子时向
-          // 子进程注入 `GIT_DIR`，而环境变量优先级高于 `cwd` 探测 ⇒ 不剥就会让清理
-          // **漂移出目标仓库**（本仓被这条坑过：主仓库 `core.bare` 被写成 true）。
-          const cleanCwd = ensureSessionWorktree(sessionId)
-          if (!cleanCwd) {
+        //
+        // 脏文件检查/清理作用到**每只猫各自那棵树**（与 ① 同一份 `commitTargets`）
+        // ——猫的执行环境在 worktree，脏文件只在 worktree 里产生；主工作区不受猫
+        // 影响无需清理。
+        //
+        // ── T-1 Phase 2：与 ① 同批收窄（②）────────────────────
+        // 作用域走 `ensureAgentWorktree`（查 + 建）；建不出 → **不清理** + 显式告警。
+        // 删掉的 `?? process.cwd()` 兜底会让下面三条命令**作用到主仓库整棵树**：
+        // `git checkout -- .` 回滚主仓库全部未提交的 tracked 改动（含他人在 dev 上的
+        // 在途工作），`git clean -fd` 删主仓库未跟踪且未忽略的文件。这条路径**无回滚**
+        // ——被删的内容不在 git 里。
+        //
+        // `env: cleanGitEnv()` 与 `git-utils.ts` 的 `gitCommit` 对称：git 跑钩子时向
+        // 子进程注入 `GIT_DIR`，而环境变量优先级高于 `cwd` 探测 ⇒ 不剥就会让清理
+        // **漂移出目标仓库**（本仓被这条坑过：主仓库 `core.bare` 被写成 true）。
+        for (const target of commitTargets) {
+          if (!target.cwd) {
             // 措辞刻意**不含** `dirty workspace` 子串：`dirty workspace after agent
             // execution, resetting` 是「② 真动手了」的判据，两者的告警文本一旦重叠，
             // 「跳过」与「执行了」在读日志时就再也分不开
-            log.warn('dirty-file cleanup skipped — session worktree unavailable', {
+            log.warn('dirty-file cleanup skipped — worktree unavailable', {
               traceId,
               sessionId,
+              agentId: target.agentId,
               reason:
-                '会话 worktree 不可用（ensureSessionWorktree 返回 null）⇒ 不清理，作用域绝不落主仓库',
+                '目标 worktree 不可用（ensureAgentWorktree 返回 null）⇒ 不清理，作用域绝不落主仓库',
             })
-          } else {
+            continue
+          }
+          try {
             const status = execSync('git status --porcelain', {
-              cwd: cleanCwd,
+              cwd: target.cwd,
               env: cleanGitEnv(),
               encoding: 'utf8',
               stdio: ['ignore', 'pipe', 'ignore'],
@@ -1256,18 +1350,19 @@ async function executeAgentsSerialImpl(
             if (status) {
               log.warn('dirty workspace after agent execution, resetting', {
                 traceId,
-                cwd: cleanCwd,
+                agentId: target.agentId,
+                cwd: target.cwd,
               })
               execSync('git checkout -- .', {
-                cwd: cleanCwd,
+                cwd: target.cwd,
                 env: cleanGitEnv(),
                 stdio: 'ignore',
               })
-              execSync('git clean -fd', { cwd: cleanCwd, env: cleanGitEnv(), stdio: 'ignore' })
+              execSync('git clean -fd', { cwd: target.cwd, env: cleanGitEnv(), stdio: 'ignore' })
             }
+          } catch {
+            // 非 git 仓库 / 该树已不可达，忽略
           }
-        } catch {
-          // 非 git 仓库，忽略
         }
       }
     }

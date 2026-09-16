@@ -54,6 +54,32 @@ export function getLogsByTriggerMessage(triggeredByMessageId: string): Execution
     .all(triggeredByMessageId) as ExecutionLogRow[]
 }
 
+/**
+ * 本 trace 内**实际执行过**的 agent 集合（去重、按 id 排序）。
+ *
+ * 用途（T-2 Phase I）：顶层 `depth === 0` 收尾的 auto-commit / 脏文件清理要从
+ * 「会话一棵树」改成**逐猫各自那棵树**（票面 §三-3），目标集合就是本调度树内
+ * 执行过的猫。取数点选它而不是别的反查列，理由有两条：
+ *
+ * 1. **覆盖面 = 整棵树**：`traceId` 在 A2A 子链上**原样继承**
+ *    （`serial.ts` 的 `executeAgentsSerialImpl(…, traceId, depth + 1)`），队列
+ *    drain 也带命令自持的 trace；两者都在 `executeAgentCommand` 里经
+ *    `insertExecutionLog` 落行 ⇒ 一条按 trace 的查询覆盖整棵树。
+ *    **不能**改用 `triggered_by_message_id`：A2A 子链的触发 id 是**父猫的回复
+ *    消息 id**（不是顶层触发消息），按它查只拿得到顶层那一批。
+ * 2. **不是新状态**：本表本就是「按执行落行」的既有累计结构，此处只加一条只读
+ *    查询——不新增跨执行内存态，故不牵动 `__test_reset*` 复位钩子与并发批语义。
+ *
+ * 空集是合法状态（无执行 / DB 写失败），**不抛错**——调用方自行决定兜底。
+ */
+export function listExecutorAgentIdsByTrace(traceId: string): string[] {
+  if (!traceId) return []
+  const rows = db
+    .prepare('SELECT DISTINCT agent_id FROM execution_logs WHERE trace_id = ? ORDER BY agent_id')
+    .all(traceId) as Array<{ agent_id: string }>
+  return rows.map((r) => r.agent_id)
+}
+
 /** 执行者反查的候选行形状（三个反查函数共用）。 */
 export interface ExecutorLookup {
   agent_id: string

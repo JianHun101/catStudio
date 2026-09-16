@@ -21,7 +21,7 @@ import { __test_reset } from '../dispatch/index.js'
 import { createExecutionEngine } from './serial.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
-import { ensureSessionWorktree } from '../llm/git-utils.js'
+import { ensureAgentWorktree } from '../llm/git-utils.js'
 
 // ═══ 边界 mock（真实 dispatch / SQLite / 采集器 / 写口保留） ═══
 
@@ -47,6 +47,10 @@ vi.mock('../llm/git-utils.js', () => ({
   gitCommit: h.gitCommit,
   getSessionWorktreePath: vi.fn(() => null),
   ensureSessionWorktree: vi.fn(() => null),
+  // T-2 Phase I：提交作用域解析改为按角色分派（store → 会话 worktree / 其余 → 猫
+  // worktree）。**替身必须镜像真模块被消费的导出面**——漏键 ⇒ 消费方拿到 undefined、
+  // 调用即 TypeError（与上面 cleanGitEnv 那条同款，实测踩过）。默认 null ⇒ 不提交。
+  ensureAgentWorktree: vi.fn(() => null),
   snapshotPackageDeps: vi.fn(() => []),
   diffNewPackages: vi.fn(() => []),
   // T-1 Phase 2：serial.ts 清理段改带 `cleanGitEnv()`（与 gitCommit 对称）。
@@ -202,7 +206,7 @@ describe('serial × R2 段五（引擎接线面）', () => {
     // T-1 Phase 2：① 的提交作用域只认 `ensureSessionWorktree`。默认置 null（= 无 worktree
     // ⇒ 不提交），需要「真有 commit」的用例自行覆盖——与 `h.gitCommit` 同款「每用例显式
     // 置默认」：`clearAllMocks` 清调用**不清实现**，上个用例的实现会残留到本用例
-    vi.mocked(ensureSessionWorktree).mockReturnValue(null)
+    vi.mocked(ensureAgentWorktree).mockReturnValue(null)
     h.chatStream.mockImplementation(async function* () {
       yield { content: '收到', kind: 'text' }
     })
@@ -505,7 +509,7 @@ describe('serial × R2 段五（引擎接线面）', () => {
   // ─── 验收 26：轮次自动提交段 ──────────────────────────
   it('验收 26 · 有 commit ⇒ `git.auto_commit` 有行（挂在本次执行的根段下）', async () => {
     // T-1 Phase 2：① 只在 `ensureSessionWorktree` 给出路径时才提交（不再有「无 cwd 兜底」）
-    vi.mocked(ensureSessionWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-spans')
+    vi.mocked(ensureAgentWorktree).mockReturnValue('/tmp/catStudy-sessions/wt-spans')
     h.gitCommit.mockReturnValue('abc1234')
     const engine = createExecutionEngine(createFakeBus())
     await runRound(engine, 'msg-1', 'trace-1')

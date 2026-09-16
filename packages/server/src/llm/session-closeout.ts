@@ -9,9 +9,12 @@
  * 收口器把「顺序 + cwd 安全」收敛进一个函数，店长只调 closeoutSession。
  *
  * 设计：
- * - 4 个 @internal step（mergeSession / removeWorktree / writeGate /
- *   checkoutDev）仅供测试直调断言每步语义；店长禁止乱序调——收口只走
+ * - 6 个 @internal step（fanInCats / mergeSession / removeWorktree / reclaimCats /
+ *   writeGate / checkoutDev）仅供测试直调断言每步语义；店长禁止乱序调——收口只走
  *   closeoutSession（串联全部 step，任一步失败即停，step 字段指出错处）。
+ *   前两者与后两者（T-2 Phase I）分别管「猫分支 → 集成分支」与「集成分支落地后
+ *   回收猫树」——**必须与 CLI cwd 的逐猫分派同批存在**，否则猫的提交会被静默
+ *   连同分支一起删掉（E5）。
  * - 硬约束：每步 git 命令 cwd 固定 mainRoot（主仓库根，绝不依赖 process.cwd()
  *   作为 git 工作目录）。mainRoot 在 preflight 从 git-common-dir 探测**一次**后
  *   显式传给全部 step——自指场景（收口者 cwd 在被收口 worktree 内）下
@@ -33,6 +36,7 @@ import { resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 import {
   cleanGitEnv,
+  ensureSessionWorktree,
   getMainRepoRoot,
   isPathInside,
   removeSessionWorktree,
@@ -40,11 +44,18 @@ import {
   sessionShortId,
   sessionWorktreePath,
 } from './git-utils.js'
+import {
+  fanInCatBranches,
+  hasMergeInProgress,
+  listCatBranches,
+  reclaimCatBranches,
+} from './worktree-fanin.js'
 
 const log = createLogger('session-closeout')
 
 /** 收口失败时定位的步骤（ok:false 时 step 指出失败处；ok:true 时 step=最终完成的步） */
-export type CloseoutStep = 'preflight' | 'merge' | 'worktree' | 'gate' | 'checkout'
+export type CloseoutStep =
+  'preflight' | 'fanin' | 'merge' | 'worktree' | 'reclaim' | 'gate' | 'checkout'
 
 /** closeoutSession 结果——ok:false 时 error 说明失败原因，step 定位失败步骤 */
 export interface CloseoutResult {
@@ -87,6 +98,94 @@ function branchRefExists(mainRoot: string, branch: string): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+/**
+ * @internal step ⓪ 猫分支 fan-in —— 把该会话全部猫分支按序合进**集成分支**
+ * （`session/<sid8>`），跑在 `mergeSession` 之前。
+ *
+ * **与接线必须同批**（票面 §结论-2 / D1）：只把 CLI cwd 分派到猫 worktree 而不接
+ * fan-in，猫的提交就停在猫分支上，而本收口器仍只合 `session/<sid8>`——集成分支停在
+ * 分叉点时 `merge --ff-only` 输出 `Already up to date.` 且**退出码 0**，收口照常删
+ * worktree 与分支 ⇒ 猫的提交**永远没进过任何地方**（E5 静默丢活）。
+ *
+ * cwd = **会话 worktree**（`sessionWorktreePath(mainRoot, shortId)`）：它是**唯一**
+ * checkout 了集成分支的地方，也是唯一能安全承载 fan-in 冲突的地方（ADR 0015 §6.3
+ * 方案 a——主工作区被 preflight 钉死在 dev，冲突没别处可去）。目录不存在则先
+ * `ensureSessionWorktree` 现建。
+ *
+ * 返回 `null` = 本步无需执行（**无猫分支**：存量会话 / 猫没提交过 / 中断重跑时已被
+ * 回收）——空集是合法状态，不抛错。此判据同时避免「为一次空 fan-in 现建一棵会话
+ * worktree」。
+ *
+ * 中止判据（票面 §二-3）：`MERGE_HEAD` 存在或 `FanInResult.conflict` ⇒ `ok:false`
+ * ——**半合并态上绝不能继续 writeGate / checkoutDev**（会把仓库留在不可重跑态）。
+ * `recovered` 只代表回到可重跑态，不代表冲突已解决；冲突仲裁归店长（ADR §5）。
+ */
+export function fanInCats(mainRoot: string, sessionId: string): StepResult {
+  const shortId = sessionShortId(sessionId)
+  if (!shortId) return null
+  if (listCatBranches(shortId, { cwd: mainRoot }).length === 0) return null
+
+  const wtPath = sessionWorktreePath(mainRoot, shortId)
+  const cwd = existsSync(wtPath) ? wtPath : ensureSessionWorktree(sessionId)
+  if (!cwd) {
+    return { ok: false, error: 'fan-in 中止：会话 worktree 不可用（继续收口会丢猫分支的提交）' }
+  }
+  // 判据①（显式前置，且与判据②的**文案**必须分得开）：进 fan-in 之前就在半合并态 ⇒
+  // 立即中止。它和「合并过程撞上冲突」的处置虽同（都停），**成因与残留状态不同**：
+  // 这条什么都没动过（仓库是别人留下的半合并态），那条我们动过并尝试过 abort。
+  // 混成一句话读者就分不出「该去查谁」——`recovered:false` 在两处都成立。
+  if (hasMergeInProgress({ cwd })) {
+    return {
+      ok: false,
+      error: 'fan-in 中止：会话 worktree 处于半合并态（MERGE_HEAD 存在）——收口停在此步，需人工介入',
+    }
+  }
+
+  try {
+    const r = fanInCatBranches(shortId, cwd)
+    if (r.conflict) {
+      return {
+        ok: false,
+        error: r.recovered
+          ? 'fan-in 冲突（已 abort 回可重跑态）——冲突仲裁归店长，收口中止'
+          : 'fan-in 冲突且 abort 未成功（仓库可能仍在半合并态）——需人工介入',
+      }
+    }
+    if (r.merged.length > 0) {
+      log.info('cat branches merged into session', { shortId, merged: r.merged })
+    }
+    return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: `fan-in 抛错: ${err.message}` }
+  }
+}
+
+/**
+ * @internal step ②′ 回收**已合进 dev** 的猫 worktree + 猫分支，跑在 `removeWorktree`
+ * 之后（此时集成分支已 ff 进 dev）。
+ *
+ * `integrationRef` 必须是 **`dev`**，不是 `session/<sid8>`（票面 §二-3 第 3 条）：
+ * 回收的前提是「这批活**已经落进 dev**」。上一步 `mergeSession` 刚把集成分支 ff 进
+ * dev ⇒ 按 dev 判 `isAncestor` 才等价于「真落地了」；按集成分支判会在「猫分支已合进
+ * 集成分支、但集成分支还没落地」时**误删未落地的活**。
+ *
+ * **未合进 dev 的猫分支必须留存**——`reclaimCatBranches` 内部逐条判 `isAncestor`，
+ * 未合的一律 `kept`（本步不越权改判）。
+ */
+export function reclaimCats(mainRoot: string, sessionId: string): StepResult {
+  const shortId = sessionShortId(sessionId)
+  if (!shortId) return null
+  try {
+    const reclaimed = reclaimCatBranches(shortId, 'dev', { cwd: mainRoot })
+    const kept = listCatBranches(shortId, { cwd: mainRoot })
+    if (reclaimed.length > 0) log.info('cat worktrees reclaimed', { shortId, reclaimed })
+    if (kept.length > 0) log.warn('cat branches kept (未合进 dev)', { shortId, kept })
+    return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: `猫 worktree 回收抛错: ${err.message}` }
   }
 }
 
@@ -240,7 +339,8 @@ export function inspectCloseout(sessionId: string): CloseoutState {
   }
 }
 
-/** 一键收口：merge → 删 worktree → 写 gate → checkout dev + cwd 复位。 */
+/** 一键收口：fan-in 猫分支 → merge 会话分支 → 删 worktree → 回收猫树 → 写 gate →
+ *  checkout dev + cwd 复位。（前两步各含中止判据：半合并态 / 冲突一律就地停。） */
 export function closeoutSession(sessionId: string): CloseoutResult {
   // mainRoot 在此探测一次（process.cwd() 此时仍有效——自指场景下后续 git
   // worktree remove 会半删 cwd 所在 worktree 的 .git 指针，再探测必然失败），
@@ -275,11 +375,20 @@ export function closeoutSession(sessionId: string): CloseoutResult {
     }
   }
 
+  // ⓪ fan-in 先于 merge（猫分支 → 集成分支），②′ 回收后于 removeWorktree（集成分支
+  // 已落地 dev 才允许回收猫树）。两条都是 T-2 的必备件：只接线不接它们 ⇒ 猫的提交
+  // 停在猫分支、收口照删（E5 静默丢活）。顺序见票面 §二-3。
+  const f = fanInCats(mainRoot, sessionId)
+  if (f && !f.ok) return { ok: false, step: 'fanin', error: f.error }
+
   const m = mergeSession(mainRoot, sessionId)
   if (m && !m.ok) return { ok: false, step: 'merge', error: m.error }
 
   const w = removeWorktree(mainRoot, sessionId)
   if (w && !w.ok) return { ok: false, step: 'worktree', error: w.error }
+
+  const r = reclaimCats(mainRoot, sessionId)
+  if (r && !r.ok) return { ok: false, step: 'reclaim', error: r.error }
 
   const g = writeGate(mainRoot, sessionId)
   if (g && !g.ok) return { ok: false, step: 'gate', error: g.error }
