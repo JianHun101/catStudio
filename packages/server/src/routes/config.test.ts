@@ -8,12 +8,16 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { buildTestApp } from '../test-helpers.js'
+import { buildTestApp, isolatedTestDir } from '../test-helpers.js'
 import { shouldHandoff } from '../handoff/index.js'
 import type { FastifyInstance } from 'fastify'
 
-/** 独立隔离目录——每个用例前清理，保证「缺文件」前提（与 connectors.test.ts 同款范式） */
-const cfgTmpDir = 'node_modules/.cache/restart-test-context-config'
+/**
+ * 独立隔离目录——每个用例前清理，保证「缺文件」前提（与 connectors.test.ts 同款范式）。
+ * 绝对路径 + 仓库根派生（test-helpers.isolatedTestDir）：相对路径经 worktree 的
+ * node_modules junction 落在主仓库共享面，跨根并发跑批仍互删。
+ */
+const cfgTmpDir = isolatedTestDir('restart-test-context-config')
 const cfgTmpFile = path.join(cfgTmpDir, 'context-config.json')
 
 const getConfig = async (app: FastifyInstance) => {

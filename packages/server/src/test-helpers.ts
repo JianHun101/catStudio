@@ -4,13 +4,55 @@
  * - 创建内存 SQLite 数据库（含完整 schema）
  * - Fastify 测试应用构建
  * - 起 stub 服务时的**端口分配**（避开 WHATWG Fetch 禁用端口黑名单，见 `listenFetchable`）
+ * - 测试隔离目录的绝对路径派生（见 `isolatedTestDir`）
  */
 import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
 import type { FastifyInstance } from 'fastify'
 import Fastify from 'fastify'
+import { createHash } from 'node:crypto'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+/** 本包根目录（`packages/server`）——隔离目录的派生键。`resolve` 抹掉尾部分隔符，与 vitest 配置的 `__dirname` 同形。 */
+const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
+
+/**
+ * 测试隔离根：`os.tmpdir()` 下按**本包目录绝对路径**派生的独立子目录。
+ *
+ * 为什么必须绝对、且必须带仓库键：worktree 的 `node_modules` 是指向主仓库的 junction，
+ * 于是任何相对路径（`node_modules/.cache/xxx`）或 cwd 派生路径，在主仓库、本会话
+ * worktree、以及将来一猫一 worktree 的各根里，**解析到同一批物理文件**。两进程并发跑
+ * 同一批用例时，A 的 `afterEach` 删掉 B 刚 `existsSync` 过的那一个文件 ⇒ 假红。
+ * 派生键取「这是哪个仓库」，故主仓库与各 worktree 各得一份，互不可见。
+ *
+ * 为什么不是 `process.cwd()`：`pnpm test` / `pnpm test:server` / `--root` 三种调用下
+ * cwd 不同，分叉时**静默**（两处算同一个哈希 ⇒ 隔离凭空失效）。派生键要钉在「哪个仓库」
+ * 上，不是「从哪儿敲的命令」。
+ *
+ * 同一派生公式在 `packages/server/vitest.config.ts` 复写一份（配置面不能 import 本文件——
+ * 会把 better-sqlite3 / sqlite-vec 拖进配置加载期）。
+ */
+const ISOLATION_ROOT = resolve(
+  tmpdir(),
+  'cat-study-test-isolation',
+  createHash('sha1').update(PACKAGE_ROOT).digest('hex').slice(0, 12)
+)
+
+/**
+ * 取一个隔离目录的**绝对路径**（离开仓库，见 `ISOLATION_ROOT`）。
+ *
+ * 调用方把它交给 `vi.stubEnv('RESTART_FILES_DIR', …)` / 配置 `test.env` —— 被测模块
+ * 内部是 `resolve(env ?? process.cwd(), '<后缀>')`，喂绝对路径即可短路掉 cwd 那一层。
+ * `name` 保持各处原有的末段（`restart-test-create` / `restart-test-shutdown` / …）：
+ * 同根内不同用例组各占一段，跨根由 `ISOLATION_ROOT` 的仓库键分开。
+ */
+export function isolatedTestDir(name: string): string {
+  return resolve(ISOLATION_ROOT, name)
+}
 
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS agents (

@@ -16,7 +16,7 @@ vi.mock('../execution/registry.js', () => ({
 }))
 
 // 重启请求文件隔离：本文件与 socketio.test.ts 都写/读/删 .restart-request（vitest 全局
-// env 指向共享目录 node_modules/.cache/restart-test）——全量并行时两文件用例交错互删
+// env 指向共享目录 `restart-test`）——全量并行时两文件用例交错互删
 // 同一文件是 6846bb4 文档化的竞态配对（existsSync 通过后文件可能已被对方 afterEach 删掉）。
 // 隔离机制：vi.mock factory 在 restart-request.js 首次导入（messages.js 链）前改写
 // RESTART_FILES_DIR 指向独立目录——importOriginal 返回真实模块（零 mock 语义），只是
@@ -25,8 +25,11 @@ vi.mock('../execution/registry.js', () => ({
 // 的差异：那里被测模块即生产模块本身，重导入即隔离；这里静态导入链在 messages.ts
 // 顶层，resetModules 需整链重导入 + 重建 app + 处理跨 describe 注册表泄漏——factory
 // 方案隔离效果等价且零结构改动。vitest 默认 per-file worker 隔离，env 改写不跨文件泄漏。
+// 目录取 test-helpers.isolatedTestDir 的**绝对**路径：vi.mock factory 被提升到 import 之前，
+// 顶层 import 的绑定此刻未初始化 ⇒ 只能在 factory 内动态 import（见下）。
 vi.mock('../restart-request.js', async (importOriginal) => {
-  process.env.RESTART_FILES_DIR = 'node_modules/.cache/restart-test-messages'
+  const { isolatedTestDir } = await import('../test-helpers.js')
+  process.env.RESTART_FILES_DIR = isolatedTestDir('restart-test-messages')
   return await importOriginal<typeof import('../restart-request.js')>()
 })
 

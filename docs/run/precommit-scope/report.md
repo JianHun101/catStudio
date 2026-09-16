@@ -1,21 +1,29 @@
 # 报告：pre-commit 测试门禁三档收窄
 
 > 票面 `docs/run/precommit-scope/tickets.md`（`89681b0`）。实施 2026-09-16。
-> 交付面 = 票面 §1.1 四文件 + 本报告。验收 = §三 V1–V11 逐条留痕（下）。
+> **本票 = 三笔提交**：`e005954`（报告首版，V1 的钩子读数载体）+ `a534193`（票面 §1.1 四文件：
+> 三档收窄 + 根配置缓存隔离）+ 第三笔（**A′ 扩面**：restart 族 10 处收口 + V14 类级护栏 + 本报告更新）。
+> 验收 = §三 V1–V11（前两笔）+ §三之二 V12–V14（A′ 笔）逐条留痕（下）。
 
 ## 结论先行
 
-1. **交付面 4 文件全部落地，V1–V11 逐条有读数**（§三）。全量入口未改窄：`pnpm test` 仍是
-   **121 文件 / 2463 用例**（= shared 3 + server 88 + web 18 + scripts 12，四个 project 全跑），全绿。
+1. **交付面全部落地，V1–V14 逐条有读数**（§三）。全量入口未改窄：`pnpm test` 仍是
+   **122 文件 / 2473 用例**（= shared 3 + server 88 + web 18 + scripts 13，四个 project 全跑），全绿；
+   `pnpm lint` 3 包绿。
 2. **两条票面契约与实测不符**，均按「不擅改契约、就地补实现层」处理，并在此显式回报（§五）：
    - **① scope 名 ≠ vitest project 名**。票面 §2.2 的 `projects` 形状是仓根相对路径，而
      `vitest --project` 认的是 project 名（实测 `--project packages/server` ⇒ `Startup Error:
 No projects matched the filter`）。CLI 侧加 `projectNameOf()` 映射层消化，`resolveScopes`
      的返回形状**一字未动**。
    - **② 根 `vitest.config.ts` 的 `test.env` 被 `packages/server/vitest.config.ts` 覆盖** ——
-     票面「缓存隔离是本票的硬前提」在 **server 项目上零效果**（实测见 §五-1）。**此处越出票面
-     边界（§派活单「不碰 `packages/**`」）故未自行扩面，请店长裁。**
-3. 生产行为零变化：只碰 `.husky/pre-commit`、`vitest.config.ts`、`scripts/`（新增 1 脚本 + 1 测试）。
+     首版报请裁决 ⇒ **店长裁 A′**：扩面到 restart 族全收（LOG_FILE 两处另立单）。**已按 A′ 落地**（§五-1）。
+3. **一处票面清单外的第 10 处，由 V13 并发实跑抓出并已收口**（`routes/connectors.test.ts` 的
+   `browseTmpDir`，写成 `path.join('node_modules', '.cache', …)`——**字面量被拆成两个实参**，
+   连续形态的静态正则看不见）。见 §三 V13、§四-5。
+4. **一处边界事实（新发现，非本票缺陷，请店长裁）**：A′ 交的是**跨根**隔离（主仓库 ↔ worktree ↔
+   worktree），**不交同根并发隔离**（同一 worktree 内两进程仍共享同一隔离目录）。读数见 §三 V13-补充。
+5. 生产行为零变化：只碰 `.husky/pre-commit`、`vitest.config.ts`、`packages/server/**`（配置 + 测试面）、
+   `scripts/`、本报告。
 
 ---
 
@@ -28,6 +36,12 @@ No projects matched the filter`）。CLI 侧加 `projectNameOf()` 映射层消�
 | `.husky/pre-commit`                  | 修改 | 第三行 `pnpm test` → `node scripts/precommit-scope.mjs`（前两行与 `unset` 行原样） |
 | `vitest.config.ts`                   | 修改 | `cacheDir` / `RESTART_FILES_DIR` → `os.tmpdir()` 下的按仓库根派生绝对路径          |
 | `docs/run/precommit-scope/report.md` | 新建 | 本文件                                                                             |
+
+**A′ 笔追加交付面**（11 文件，见 §三之二表格）：`packages/server/src/test-helpers.ts`（新增
+`isolatedTestDir`）、`packages/server/vitest.config.ts`、6 个测试文件（`restart-request` /
+`shutdown-request` / `routes/messages` / `routes/config` / `routes/config-summary` / `routes/connectors`）、
+`packages/server/src/connectors/socketio.test.ts`（**仅注释与用例名**）、`scripts/graceful-stop.test.js`、
+`scripts/test-isolation-guard.test.js`（新建，V14 护栏）。
 
 ---
 
@@ -86,6 +100,9 @@ $ node node_modules/vitest/vitest.mjs run --project @cat-study/server --reporter
 ```
 
 **唯一前缀 = `|@cat-study/server|`** ⇒ 只有一个 project 被选中（88 = server 全量文件数）。
+
+> 用例名在 A′ 笔改为「…被隔离到**仓库外 tmp 目录**」——首版那名把落点写死成 `node_modules/.cache`，
+> 收口后成错误陈述。本行读数留的是**当时**（`a534193`）的原文，未回改。
 
 ### V3 契约层 ⇒ 全量 4
 
@@ -173,11 +190,12 @@ $ node node_modules/vitest/vitest.mjs run --project @cat-study/server --reporter
 
 ```
 $ pnpm test          # = vitest run，全量入口一字未改
- Test Files  121 passed (121)
-      Tests  2463 passed (2463)
+ Test Files  121 passed (121)          # A′ 笔后：122 passed (122)
+      Tests  2463 passed (2463)       # A′ 笔后：2473 passed (2473)
 ```
 
 **121 = 3(shared) + 88(server) + 18(web) + 12(scripts)** ⇒ 四个 project 全跑、全绿。
+（A′ 笔后 122 = 121 + `scripts/test-isolation-guard.test.js` 1 个文件 / +10 用例。）
 `pnpm lint` 亦绿（`node scripts/lint.js`：shared/server tsc + web vue-tsc，3 包通过）。
 
 ### V11 钩子仍剥 env
@@ -187,6 +205,131 @@ $ pnpm test          # = vitest run，全量入口一字未改
 - `scripts/pre-commit-env.test.js` 单跑：**3 passed**（该用例直接重放钩子里抽出的 `unset` 行 ⇒
   删行必红）；全量跑批中亦绿。
 - `npx lint-staged` / `pnpm lint` 两行**原样保留，含行序**。
+
+---
+
+## 三之二、A′ 扩面验收读数（V12–V14）
+
+> 背景：首版 §五-1 报请裁决 ⇒ 店长裁 **A′**（`packages/server/vitest.config.ts` 的
+> `RESTART_FILES_DIR` 与 7 处测试内 `stubEnv` 相对路径 + `scripts/graceful-stop.test.js` 全收，
+> 全改 `os.tmpdir()` 派生**绝对**路径；`LOG_FILE` 两处另立单）。
+> **实施中清单从 9 处变 10 处**——多出的一处由 V13 实跑抓出，见 V13。
+
+### 交付面（A′ 笔）
+
+| 文件                                                | 动作 | 内容                                                                                               |
+| --------------------------------------------------- | ---- | -------------------------------------------------------------------------------------------------- |
+| `packages/server/src/test-helpers.ts`               | 修改 | 新增 `isolatedTestDir(name)`：`os.tmpdir()/cat-study-test-isolation/<sha1(包目录)>/<name>`         |
+| `packages/server/vitest.config.ts:52`（改前 `:28`） | 修改 | 改**值**（不删行）→ `resolve(ISOLATION_ROOT, 'restart-test')`                                      |
+| `packages/server/src/restart-request.test.ts`       | 修改 | `ISOLATED_DIR = isolatedTestDir('restart-test-create')`                                            |
+| `packages/server/src/shutdown-request.test.ts`      | 修改 | `isolatedTestDir('restart-test-shutdown')`                                                         |
+| `packages/server/src/routes/messages.test.ts`       | 修改 | `vi.mock` factory 内改**动态 import** 取 helper（factory 被提升，顶层绑定此刻未初始化）            |
+| `packages/server/src/routes/config.test.ts`         | 修改 | `isolatedTestDir('restart-test-context-config')`                                                   |
+| `packages/server/src/routes/config-summary.test.ts` | 修改 | `isolatedTestDir('restart-test-env-patch')`                                                        |
+| `packages/server/src/routes/connectors.test.ts`     | 修改 | 3 处：`restart-test-napcat` / `restart-test-napcat-config` / **`restart-test-browse`（第 10 处）** |
+| `packages/server/src/connectors/socketio.test.ts`   | 修改 | 仅**用例名与注释**（原文写死「被隔离到 node_modules/.cache」，改后成错误陈述）；断言一字未动       |
+| `scripts/graceful-stop.test.js`                     | 修改 | `TEST_DIR = isolatedTestDir('graceful-stop-test')`                                                 |
+| `scripts/test-isolation-guard.test.js`              | 新建 | V14 类级护栏（10 用例）                                                                            |
+
+**10 处清单**（票面 9 + V13 抓出的 1）：配置默认值 ×1、测试内 `stubEnv`/`process.env` 赋值 ×7、
+`scripts` 侧绝对但落 junction 共享面 ×1、`join` 拆分形态 ×1。
+
+**为何 `packages/server/vitest.config.ts` 的 `RESTART_FILES_DIR` 只能改值不能删行**：`test:server` =
+`pnpm --filter @cat-study/server test`（cwd = 包目录，**不加载根配置**）⇒ 删行会回落 `process.cwd()`
+⇒ 把 `.restart-request` 写进 `packages/server/`（17:38 那类事故）。
+
+### V12 双模式：standalone 与根模式解析到同一绝对路径、且在仓库外
+
+探针（临时 `zz-probe-isolation.test.ts`，跑完即删；读数落 `os.tmpdir()`）：
+
+| 模式                                                | `process.cwd()`                   | 解析出的 `RESTART_REQUEST_FILE`                                                               |
+| --------------------------------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------- |
+| 根模式 `npx vitest run --project @cat-study/server` | `<会话 worktree>`（仓库根）       | `C:\Users\…\Temp\cat-study-test-isolation\`**`7f9cc2031625`**`\restart-test\.restart-request` |
+| standalone `cd packages/server && npx vitest run`   | `<会话 worktree>\packages\server` | **同一路径**（逐字节相同）                                                                    |
+
+- 两种 cwd 不同、解析值相同 ⇒ **不带 cwd 依赖**（cwd 派生会在两种跑法下分叉，且分叉是静默的）。
+- 绝对路径 + 不含 `node_modules` + 在仓库外 ⇒ V12 判据成立。
+- **两份派生公式同解**：配置面（`packages/server/vitest.config.ts` 的 `__dirname`）与 helper 面
+  （`test-helpers.ts` 的 `import.meta.url`）算出**同一个** `7f9cc2031625`。此等式已由
+  `scripts/test-isolation-guard.test.js` 的「防公式漂移」用例**钉死**（公式改一处不同步 ⇒ 先红）。
+
+### V13 并发实跑 + 反向对照（跨根）
+
+批次 = restart 族的 8 个文件（`socketio.test.ts` 为主犯），两进程**同时**起：
+
+| 态                                                                       | 轮次 | 会话 worktree                          | 主仓库（`bc808c0`，仍是旧相对路径） |
+| ------------------------------------------------------------------------ | ---- | -------------------------------------- | ----------------------------------- |
+| **反向对照**：`browseTmpDir` 改回 `path.join('node_modules','.cache',…)` | 4    | 3 红 / 1 绿（`1 failed \| 49 passed`） | 3 红 / 1 绿                         |
+| **修复后**（browse 也走 `isolatedTestDir`）                              | 4    | **4 轮全绿（318/318）**                | **4 轮全绿（318/318）**             |
+
+反向对照的失败原文（复现的正是票面点名的形态）：
+
+```
+FAIL  … > NapCat 路径浏览… > dir 不存在 → 400 路径不存在；dir 是文件 → 400 不是目录
+AssertionError: expected '路径不存在' to be '不是目录'
+FAIL  … > dir 存在 → 目录优先排序 + executable 标记（.bat 命中、.txt 不命中）
+AssertionError: expected 400 to be 200
+```
+
+（一侧的 `beforeAll` `mkdirSync`/`afterAll` `rmSync` 删掉另一方正在用的同一批物理文件 ⇒ 假红。
+**未复现轮次为 0**：反向对照 4/4 轮里至少一侧红，故不需要写「未复现」。）
+
+**第 10 处的发现过程**：A′ 收口前先跑了一轮跨根并发（browse 尚未改）⇒ round 2 主仓库侧
+`1 failed`，报错正是上表同一形态。定位到 `browseTmpDir` 是**清单外**的第 10 处 ⇒ 先修，
+再跑上表的「修复后」4 轮。**这条是 V13 的净收益**（静态扫漏了它，见 V14）。
+
+### V13-补充：同根并发**不**被本票覆盖（边界事实，请店长裁）
+
+两进程**都**在会话 worktree（同一个根）跑同一批：
+
+| 轮次 | 进程 A                             | 进程 B                             |
+| ---- | ---------------------------------- | ---------------------------------- |
+| 1    | 11 failed / 210 passed             | 6 failed / 215 passed              |
+| 2    | 7 failed / 214 passed              | 10 failed / 211 passed             |
+| 3    | 8 failed / 213 passed              | 10 failed / 211 passed             |
+| 4    | 4 failed / 213 passed（4 skipped） | 5 failed / 212 passed（4 skipped） |
+
+失败原文命中同一批隔离目录：
+
+```
+Error: ENOENT: no such file or directory, open '…\cat-study-test-isolation\7f9cc2031625\restart-test\.restart-request'
+Error: ENOENT: no such file or directory, open '…\cat-study-test-isolation\7f9cc2031625\graceful-stop-test\.shutdown-request'
+AssertionError: expected 'msg-restart' to be 'first-request'  // 请求文件内容被对方覆盖
+SyntaxError: Unexpected end of JSON input                          // 读到对方写了一半的文件
+```
+
+**机制**：派生键 = **仓库根**，同一个 worktree 的两个进程算出同一个哈希 ⇒ 同一批目录。
+**影响的准确边界**：
+
+- **交了的**：主仓库 ↔ worktree ↔ （Phase I 后的）worktree ↔ worktree —— 即** junction 别名面**，
+  也正是票面「依赖」段点名的 T-2 Phase I 目标形态。修复前这三者是同一批物理文件。
+- **没交的**：**同一 worktree 内**两进程并发。票面「依赖」段明写这一形态归 T-2 Phase I
+  （「Phase I 未接线前会话内多猫共用一个 worktree…T-2 落地后此约束自动解除」）——
+  故按票面口径**不属本票交付**，但**店长派活时把「两猫在同一个 worktree 里并发提交不互踩」
+  写成了本票承诺**，两者口径不一致，**如实报出，请店长裁**。
+- **最小修法（若裁「要修」）**：`isolatedTestDir(name)` 的末段再挂 `process.pid`
+  （或一次运行的 nonce）⇒ 隔离粒度从「仓库」降到「进程」，同根并发一并解决；
+  `socketio.test.ts:339-340` 的 `toContain('restart-test')` 仍成立（末段前缀不变）。
+  ⚠️ 派活单写的是 `socketio.test.ts:336`——**行号漂移**，`git grep -n` 复核实为 `:339-340`
+  （A′ 笔只在该文件加了注释与用例名两处文本，断言本体未动）。
+  代价：`os.tmpdir()` 下目录数随运行次数线性增长（现状**本就无回收**，非新增成本）；
+  副作用：跨进程复用同一目录的调试便利消失。**未自行实施**——粒度的语义变更越出派活单钉死的交付面。
+
+### V14 类级护栏（`scripts/test-isolation-guard.test.js`，10 用例）
+
+被判面 = 「`packages/**` + `scripts/**` 源码里不存在把测试隔离文件落到 junction 共享面的写法」。
+三条规则（对**去注释后**的代码逐行判）：R1 连续 `node_modules/.cache` 字面量（含 R1 拆分形态
+`join('node_modules','.cache',…)`）/ R2 隔离键（`RESTART_FILES_DIR`/`LOG_FILE`/`ENV_FILE_PATH`）
+被赋非绝对**字面量** / R3 同行出现隔离键与 `process.cwd()`。
+
+| 判据                                         | 读数                                                                                                                                                                                                                                          |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 检测器**非恒真**（种入违规必须红）           | 临时落 `scripts/tmp-guard-probe.js`（三类各一行）⇒ `1 failed \| 7 passed`，三行分别报 `[R1] [R2] [R3]`；文件已删（`git status` 无残留）                                                                                                       |
+| **真文件反向对照**                           | 把 `connectors.test.ts` 的 `browseTmpDir` 改回 `path.join(` 形态 ⇒ 红并指名 `packages/server/src/routes/connectors.test.ts:882 [R1]`；改回即绿                                                                                                |
+| 全仓扫描零违规（白名单外）                   | 扫 **289** 个源文件（`packages/**` + `scripts/**`，跳 `node_modules`/`dist`/`coverage`/`.cache`/`data`；其中本文件不自扫 ⇒ 实判 288），白名单外违规 **0 条**                                                                                  |
+| 白名单**非死条目**                           | 5 条逐条命中 ≥1 行（有断言钉着）；理由字段必填非空（有断言钉着）                                                                                                                                                                              |
+| 白名单（**按行匹配正则收窄，非整文件豁免**） | `server/vitest.config.ts:57`+`scripts/vitest.config.ts:11`+`logger.test.ts:239/242`（LOG_FILE 族，另立单）；`restart-request.ts:60`+`context-config.ts:29`+`routes/connectors.ts:115/120`（生产侧 `?? process.cwd()` 运行时兜底、非测试隔离） |
+| 两份派生公式同解                             | `serverVitestConfig.test.env.RESTART_FILES_DIR === isolatedTestDir('restart-test')` ⇒ 通过                                                                                                                                                    |
 
 ---
 
@@ -212,48 +355,65 @@ $ pnpm test          # = vitest run，全量入口一字未改
    ⇒ **无任何测试读取真实 `docs/run/**` 的内容**。记忆飞轮白名单（`scan.mjs:48` 注释 + `SCAN_PREFIXES`
    = `docs/adr/`/`docs/lessons/`/`docs/plans/`）也不含 `docs/run/**` ⇒ 「跳过」成立，§2.1 无漏行。
 
-4. **其他落在 junction 共享面的相对路径写点未修**（不在票面交付面）——见 §五-2。
+4. **其他落在 junction 共享面的相对路径写点**（首版列了 9 处）——**已按 A′ 全部收口**，状态见 §五-2。
+5. **`node_modules/.cache` 的「拆分字面量」形态**：`path.join('node_modules', '.cache', …)`
+   不构成连续子串，**R1 的连续形态正则看不见**。第 10 处（`browseTmpDir`）正是此形态，
+   静态扫漏掉、由 V13 实跑抓出。**已补 R1 拆分规则**（同行的 `'node_modules'` 与 `'.cache'`
+   两个字面量同现即红）并加了单测格。**残余边界**：三段以上再拆分（`join('node','_modules',…)`）
+   或经变量中转仍是盲区——未穷举，如实标注。
+6. **`LOG_FILE` 族两处（`packages/server/vitest.config.ts:57`〔改前 `:33`〕、`scripts/vitest.config.ts:11`）未收口**
+   ——店长裁「另立单」。已在 V14 白名单显式列出理由（**不是**「没注意」：`logger.test.ts` 那两行
+   是**故意**用相对路径验 `resolveLogFile()` 纯函数语义、全程不落盘）。后续单立票时移除白名单条目。
 
 ---
 
 ## 五、缺口回报（请店长裁 / 挂后续单）
 
-### 1. 【阻断本票目标】根 `vitest.config.ts` 的 `test.env` 被 `packages/server/vitest.config.ts` 覆盖
+### 1. 【首版阻断项 —— 店长裁 A′，已落地】
 
 **现象（实测，非推演）**：`packages/server/vitest.config.ts:28` 也设了一份
 `RESTART_FILES_DIR: 'node_modules/.cache/restart-test'`（相对路径）。改根配置**对它无效**：
 
 - **探针实验**：把根配置的 `RESTART_FILES_DIR` 临时改成哨兵值
   `node_modules/.cache/ROOT-WINS-PROBE` ⇒ server 项目的用例
-  「重启机制文件路径被隔离到 node_modules/.cache」**仍然通过**（它断言路径含 `restart-test`）
+  「重启机制文件路径被隔离到 …」**仍然通过**（它断言路径含 `restart-test`）
   ⇒ 生效的是 server 包的值，根配置被覆盖。
 - **行为实验**：改后跑 `--project @cat-study/server -t "【重启请求】前缀消息"`（一个真会写请求文件的用例）——
   - 主仓库共享面 `…/catStudy/node_modules/.cache/restart-test` 的 mtime 由 `08:16:42` → `08:26:36`（**被写**）；
   - 本会话 worktree 经新配置派生的隔离目录 `…\Temp\cat-study-vitest\eed1edd5d355\restart-test`
     **未被创建**。
 
-**影响**：票面「结论先行 2」说「缓存隔离是本票的硬前提，不修这条收窄是空转」——这条**在 server
-项目（测试量最大的 88 文件、跨猫冲突的主要来源）上没有达成**：两个 worktree 并行跑 server 测试时，
-`node_modules/.cache/restart-test` 仍是同一批物理文件，而 `socketio.test.ts` 的 `afterEach`
-会 `unlinkSync` 这些文件 ⇒ **会删掉另一个 worktree 正在用的请求文件**（票面点名的正是这个形态）。
+**店长复核后认定缺口比首版报告更宽**（不止配置面那一处默认值：全仓同型写点 9 处，其中
+`scripts/graceful-stop.test.js:20` 虽是绝对路径但经 `__dirname` 落 junction 共享面），
+**裁 A′**：restart 族 9 处全收 + `LOG_FILE` 两处另立单。
 
-**为何未自行修**：派活单边界明写「**不碰 `packages/**`**」，且票面红线 7「改契约先报店长，不自行扩表」。
-最小修法（若裁「扩」）= 把 `packages/server/vitest.config.ts:28` 同款改为从 `os.tmpdir()` 派生的
-绝对路径（末段保留 `restart-test`，`socketio.test.ts:336` 的断言继续成立），交付面由 4 文件变 5 文件。
+**收口状态**：✅ 已按 A′ 落地，**实际收口 10 处**（第 10 处见 §三之二 V13）。
+读数：V12 双模式同解、V13 跨根并发 4 轮双绿（对照 4/4 红）、V14 护栏 10 用例 + 反向对照。
+`pnpm test` 122 文件 / 2473 用例全绿；`pnpm lint` 3 包绿。
 
-**顺带**：`packages/server/vitest.config.ts:33` 与 `scripts/vitest.config.ts:11` 的
-`LOG_FILE: 'node_modules/.cache/test-logs/cat-study-test.log'` 同属这一类（见下条）。
+### 1b. 【新发现·边界事实】同根并发不被 A′ 覆盖
 
-### 2. 其余落在 junction 共享面的写点（同根因，未修）
+**一句话**：A′ 的派生键是**仓库根** ⇒ 同一个 worktree 里的两个 vitest 进程算出**同一个**隔离目录，
+仍互删。读数、机制、准确边界与最小修法见 **§三之二「V13-补充」**。
+**请店长裁**：本票口径（票面「依赖」段把同根并发归 T-2 Phase I）vs 派活单口径
+（「两猫在同一个 worktree 里并发提交不互踩」）不一致，按哪个收口？
 
-| 位置                                                                                                                                                                                            | 值                                                               | 影响                                                                                                |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `packages/server/vitest.config.ts:28`                                                                                                                                                           | `RESTART_FILES_DIR` 相对路径                                     | 见上条（阻断级）                                                                                    |
-| `packages/server/vitest.config.ts:33`、`scripts/vitest.config.ts:11`                                                                                                                            | `LOG_FILE` 相对路径                                              | 两 worktree 测试日志交错于同一文件（`logger.test.ts:242` 断言的是 `path.resolve()` 结果，未受影响） |
-| `restart-request.test.ts:136`、`routes/messages.test.ts:29`、`shutdown-request.test.ts:17`、`routes/config.test.ts:16`、`routes/connectors.test.ts:605/703`、`routes/config-summary.test.ts:14` | 测试内 `stubEnv` 的相对路径                                      | 同型（各自后缀不同 ⇒ 同仓库内不互撞，跨 worktree 仍撞）                                             |
-| `scripts/graceful-stop.test.js:20`                                                                                                                                                              | `resolve(__dirname,'../node_modules/.cache/graceful-stop-test')` | 同上                                                                                                |
+### 2. 其余落在 junction 共享面的写点（**首版状态 → A′ 后状态**）
 
-判据：这些**都不在**票面 §1.1 交付面内，本票按边界不动。是否一并收口请店长裁（可挂后续单）。
+> 行号一律 **`git grep -n` 字节路径复核**；括注「改前 `:N`」的是首版报告里的行号（改动后已漂移）。
+
+| 位置（改后）                                                         | 改前            | 首版值                                                                             | A′ 后状态                                                             |
+| -------------------------------------------------------------------- | --------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `packages/server/vitest.config.ts:52`                                | `:28`           | `RESTART_FILES_DIR` 相对路径                                                       | ✅ **已收口**（改值不删行）→ `resolve(ISOLATION_ROOT,'restart-test')` |
+| `restart-request.test.ts:138`                                        | `:136`          | `stubEnv` 相对路径                                                                 | ✅ **已收口** → `isolatedTestDir('restart-test-create')`              |
+| `shutdown-request.test.ts:20`                                        | `:17`           | 同上                                                                               | ✅ **已收口** → `isolatedTestDir('restart-test-shutdown')`            |
+| `routes/messages.test.ts:32`                                         | `:29`           | 同上（`process.env` 赋值）                                                         | ✅ **已收口**（factory 内动态 import 取 helper）                      |
+| `routes/config.test.ts:20`                                           | `:16`           | 同上                                                                               | ✅ **已收口** → `isolatedTestDir('restart-test-context-config')`      |
+| `routes/config-summary.test.ts:16`                                   | `:14`           | 同上                                                                               | ✅ **已收口** → `isolatedTestDir('restart-test-env-patch')`           |
+| `routes/connectors.test.ts:606` / `:704`                             | `:605` / `:703` | 同上                                                                               | ✅ **已收口** → `isolatedTestDir('restart-test-napcat{,-config}')`    |
+| `routes/connectors.test.ts:882`（`browseTmpDir`）                    | ——              | **首版漏列**：`path.join('node_modules','.cache',…)` 拆成两个字面量                | ✅ **已收口**（**V13 实跑抓出**，静态扫漏）                           |
+| `scripts/graceful-stop.test.js:22`                                   | `:20`           | `resolve(__dirname,'../node_modules/.cache/graceful-stop-test')`（绝对但落共享面） | ✅ **已收口** → `isolatedTestDir('graceful-stop-test')`               |
+| `packages/server/vitest.config.ts:57`、`scripts/vitest.config.ts:11` | 同              | `LOG_FILE` 相对路径                                                                | ⬜ **未收口**（店长裁「另立单」，见 §四-6；V14 白名单已列理由）       |
 
 ### 3. 契约文本与实现的落差（已在实现层消化，无需裁决，仅留痕）
 
@@ -269,12 +429,13 @@ $ pnpm test          # = vitest run，全量入口一字未改
 
 ## 六、红线自查
 
-| 红线                                                                                   | 状态                                                                             |
-| -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| 不 `--no-verify`、不绕门禁                                                             | ✅ 全程未用                                                                      |
-| 不 `git add -A`、限定路径 add + `diff --cached --name-only` 核对、不用 `commit --only` | ✅ 每次提交前核对                                                                |
-| 临时产物落 `os.tmpdir()`                                                               | ✅ V8 探针与副本、V7 对照实验产物均在 `os.tmpdir()`；仓库内零新增未跟踪文件      |
-| 测试出 git 剥注入变量                                                                  | ✅ `precommit-scope.mjs` 的 `git diff --cached` 走 `cleanGitEnv()`；单测不触 git |
-| 不 push                                                                                | ✅ 未 push                                                                       |
-| 缓存路径不落仓库内                                                                     | ✅ 派生自 `os.tmpdir()`                                                          |
-| 改契约先报店长                                                                         | ✅ §五-1 未自行扩表，报请裁决                                                    |
+| 红线                                                                                   | 状态                                                                                                                                                        |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 不 `--no-verify`、不绕门禁                                                             | ✅ 全程未用                                                                                                                                                 |
+| 不 `git add -A`、限定路径 add + `diff --cached --name-only` 核对、不用 `commit --only` | ✅ 每次提交前核对                                                                                                                                           |
+| 临时产物落 `os.tmpdir()`                                                               | ✅ V8 探针与副本、V7 对照产物、V12 双模式探针、V14 种植探针（`scripts/tmp-guard-probe.js`）均在 `os.tmpdir()` 或**跑完即删**；`git status` 无残留未跟踪文件 |
+| 测试出 git 剥注入变量                                                                  | ✅ `precommit-scope.mjs` 的 `git diff --cached` 走 `cleanGitEnv()`；单测不触 git                                                                            |
+| 不 push                                                                                | ✅ 未 push                                                                                                                                                  |
+| 缓存路径不落仓库内                                                                     | ✅ 派生自 `os.tmpdir()`；V14 有静态护栏守着（白名单外违规 0）                                                                                               |
+| 改契约先报店长                                                                         | ✅ 首版 §五-1 报请裁决后再动；A′ 交付面按派活单一字未扩（第 10 处同型、同文件、同病灶，按承诺收口）                                                         |
+| 行号 grep 复核                                                                         | ✅ 本报告所有 `file:line` 均以 `git grep -n` 字节路径核对                                                                                                   |

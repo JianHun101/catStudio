@@ -5,16 +5,19 @@
  * 判定）/ 契约 7②（读后即删、删在回调之前）/ 契约 7③（unlink 失败不阻断关停）/ 契约 8
  * （文件名不得复用 `.restart-request`）。
  *
- * 隔离目录：**不复用** socketio.test.ts 的共享目录（node_modules/.cache/restart-test）——
- * 全量并行时两文件用例交错互删同一文件是竞态根源，restart-request.test.ts 已踩过并留注。
- * 本组用独立目录 + vi.resetModules + vi.stubEnv，每次加载独立模块实例。
+ * 隔离目录：**不复用** socketio.test.ts 的共享目录（`restart-test`）——全量并行时两文件
+ * 用例交错互删同一文件是竞态根源，restart-request.test.ts 已踩过并留注。本组用独立目录
+ * + vi.resetModules + vi.stubEnv，每次加载独立模块实例。
+ * 目录**绝对**且按仓库根派生（test-helpers.isolatedTestDir）——相对路径经 junction 落在
+ * 主仓库 node_modules 共享面，跨 worktree 并发跑批仍互删。
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
+import { isolatedTestDir } from './test-helpers.js'
 
-const ISOLATED_DIR = 'node_modules/.cache/restart-test-shutdown'
+const ISOLATED_DIR = isolatedTestDir('restart-test-shutdown')
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 type ShutdownApi = typeof import('./shutdown-request.js')

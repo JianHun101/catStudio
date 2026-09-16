@@ -8,10 +8,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { buildTestApp } from '../test-helpers.js'
+import { buildTestApp, isolatedTestDir } from '../test-helpers.js'
 import type { FastifyInstance } from 'fastify'
 
-const tmpDir = 'node_modules/.cache/restart-test-env-patch'
+// 绝对路径 + 仓库根派生（test-helpers.isolatedTestDir）：相对路径经 worktree 的
+// node_modules junction 落在主仓库共享面，跨根并发跑批仍互删（ENV_FILE_PATH 隔离目录）。
+const tmpDir = isolatedTestDir('restart-test-env-patch')
 const envFile = path.join(tmpDir, '.env')
 
 /** 初始 .env 副本——含注释、引号值、无关键，验证行级 patch 保真 */

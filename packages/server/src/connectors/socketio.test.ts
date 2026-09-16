@@ -324,7 +324,7 @@ describe('socketio connector', () => {
   afterEach(() => {
     resetDb()
     // 清理重启机制文件（正常用例不产生；重启用例防残留污染下个用例的启动广播/状态推送断言）
-    // 注：路径由 vitest env RESTART_FILES_DIR 隔离到 node_modules/.cache/restart-test——
+    // 注：路径由 vitest env RESTART_FILES_DIR 隔离到仓库外的 tmp 目录（末段 restart-test）——
     // 此清理只碰隔离目录，不再误删运行时真实请求文件（17:38 事故根因）
     try {
       if (existsSync(RESTART_REQUEST_FILE)) unlinkSync(RESTART_REQUEST_FILE)
@@ -332,7 +332,7 @@ describe('socketio connector', () => {
     } catch {}
   })
 
-  it('重启机制文件路径被隔离到 node_modules/.cache（测试跑批不碰运行时真实文件）', () => {
+  it('重启机制文件路径被隔离到仓库外 tmp 目录（测试跑批不碰运行时真实文件）', () => {
     // 防回归：若有人删除 vitest.config.ts 的 RESTART_FILES_DIR env 或该 env 失效，
     // 此断言会失败——afterEach 清理将与运行时 server 共享路径（17:38 事故模式）
     // 用隔离目录名作平台无关标识（Windows 分隔符是反斜杠，不能断言 '/' 拼写的完整路径）
