@@ -31,6 +31,8 @@ import {
   sessionShortId,
   sessionWorktreePath,
 } from '../llm/git-utils.js'
+// 形态 G 的合并入口（**不 mock**：本文件的判据就是「真仓库里真合没合进去」）
+import { mergeCatBranchesIntoOwnBranch } from '../llm/worktree-fanin.js'
 
 const h = vi.hoisted(() => ({
   retrieveMemoryContext: vi.fn(),
@@ -200,6 +202,8 @@ const SESSION_IDS = [
   'scwt0008',
   'scwt0009',
   'scwt0010',
+  'scwt0011',
+  'scwt0012',
 ]
 
 function dropWorktrees(): void {
@@ -621,7 +625,7 @@ describe('serial × 一猫一 worktree（猫路径，T-2 Phase I）', () => {
    * 反向对照见报告 §三：把断言翻成正向（「审查者应看得到」）时本格必红，
    * 两向读数都在 `report-phase-ib.md`；**别把这一格当判据翻转的理由改绿**。
    */
-  it('V16 · 审查面可达性：审查者 cwd=自己的猫树；被审提交不在其中（本票靶心）', async () => {
+  it('V17/V21 · 审查面可达（第 1 笔 V16-b **翻转**）：审查者树含被审改动；集成分支与 dev 零移动', async () => {
     const sid = 'scwt0008'
     const shortId = sessionShortId(sid)
     git(['branch', sessionBranch(shortId)])
@@ -642,35 +646,170 @@ describe('serial × 一猫一 worktree（猫路径，T-2 Phase I）', () => {
     // 前置：集成分支**不含**被审提交（fan-in 尚未发生）——不成立则本格测的不是该形态
     expect(ancestorState(implSha, sessionBranch(shortId))).toBe('not-ancestor')
 
-    // ── 审查方：`role: 'reviewer'` 的猫执行 ──
+    // ── 审查方：`role: 'reviewer'` 的猫执行（形态 G：执行起点把猫分支合进它自己的分支）──
     const callsBefore = h.chatStream.mock.calls.length
     await runRound(sid, 'scwt-rev', REVIEWER, 'trace-scwt-rev')
 
-    // V16-a 分派：审查者拿到的是**它自己的猫 worktree**（不是会话树、不是 `workspace/` 降级）。
+    // 分派：审查者拿到的是**它自己的猫 worktree**（不是会话树、不是 `workspace/` 降级）。
     // 先钉本轮的调用次数：`.at(-1)` 只在「本轮恰好一次 chatStream」时才是那个读数。
     expect(h.chatStream.mock.calls.length - callsBefore).toBe(1)
     const revCwd = h.chatStream.mock.calls.at(-1)?.[1]?.cwd
     expect(revCwd).toBe(catWtFor(sid, REVIEWER.name))
     expect(revCwd).not.toBe(sessionWorktreePath(tmpRepo, shortId))
 
-    // V16-b 陈旧性（**本票靶心**）：审查者树里 `HEAD` **不含**被审 sha
-    expect(ancestorState(implSha, 'HEAD', revCwd!)).toBe('not-ancestor')
-    // 判据非恒真（同格对照两方向）：
-    //   ① 同一探针喂**实施猫自己的树** ⇒ 「已在」。若探针坏了/恒假，这一格不会成立。
-    //   ② 喂**集成分支** ⇒ 「不在」，与 ① 对照 ⇒ 探针确实在分辨两棵树的内容。
+    // **V17（本笔靶心）**：审查者树里 `HEAD` **含**被审 sha。
+    // 第 1 笔这一格断言的是 `'not-ancestor'`（把缺口钉成红格）；形态 G 落地后翻成正向。
+    // ⚠️ 两条对照**必须保留**（票面 §八 V17「只翻期望值，不删格」）——它们是判据非恒真的
+    // 常驻闸，探针坏掉 / 恒假时 ① 会先红：
+    //   ① 同一探针喂**实施猫自己的树** ⇒ 「已在」
+    //   ② 喂**集成分支** ⇒ 「不在」（fan-in 尚未发生 ⇒ 集成分支**仍**不含被审提交）
+    // 一正一反 ⇒ 探针确实在分辨「哪棵树 / 哪条 ref」，而不是恒绿门。
+    expect(ancestorState(implSha, 'HEAD', revCwd!)).toBe('ancestor')
     expect(ancestorState(implSha, 'HEAD', implWt!)).toBe('ancestor')
     expect(ancestorState(implSha, sessionBranch(shortId))).toBe('not-ancestor')
-    // 危险度的**可感知面**读数：审查者 cwd 里这个文件**存在**（路径对）而是**旧版**内容
-    // ——「读不出是旧的」不是修辞，是这两行 it 断言之间的差。
-    expect(readFileSync(resolve(revCwd!, 'tracked.txt'), 'utf-8')).toBe('base\n')
+    // 可感知面：审查者 cwd 里这个文件读到的是**被审版本**（第 1 笔这里读到的还是 `base\n`）
+    expect(readFileSync(resolve(revCwd!, 'tracked.txt'), 'utf-8')).toBe('base 改过\n')
     expect(readFileSync(resolve(implWt!, 'tracked.txt'), 'utf-8')).toBe('base 改过\n')
 
-    // V16-c 隔离性：集成分支 sha 逐字节不变；实施猫的树与分支不受影响；主仓库零改动
+    // **V21 零分支移动**：本笔只动审查者**自己那条**猫分支。
+    // 集成分支与 dev 逐字节不变（契约 1「绝不改集成分支 / dev」的结构性读数，不是约定）；
+    // 实施猫的树与分支不受影响（合的是它的**提交**，不是它的 ref）。
     expect(git(['rev-parse', sessionBranch(shortId)])).toBe(sessionShaBefore)
     expect(fileOnBranch(catBranch(shortId, CAT2.name), 'tracked.txt')).toBe('base 改过\n')
     expect(existsSync(resolve(implWt!, 'tracked.txt'))).toBe(true)
     expect(branchHead('dev')).toBe('init')
     expect(readFileSync(resolve(tmpRepo, 'tracked.txt'), 'utf-8')).toBe('base\n')
+  })
+
+  /**
+   * V19 隔离不被打破（契约 5「只对审查者生效」的反向那一半）。
+   *
+   * 与 V17 是**同一场景下的一对**：审查者 ⇒ `ancestor`，非审查者 ⇒ `not-ancestor`。
+   * 单测 V17 只能证「合并会跑」；不测 V19 的话，把判据写成「对所有猫都合」也能全绿 ——
+   * 而那等于把 Phase I 刚建立的隔离拆掉。
+   */
+  it('V19 · 非审查者执行后其树不含他猫提交（形态 G 的范围限定真生效）', async () => {
+    const sid = 'scwt0006'
+    const shortId = sessionShortId(sid)
+    git(['branch', sessionBranch(shortId)])
+
+    // 他猫（实施猫）先落一笔提交——它**会**被审查者合并，但**不该**进非审查者的树
+    const implWt = ensureCatWorktree(sid, CAT2.id, CAT2.name)
+    registerWorktree(implWt)
+    expect(implWt).toBeTruthy()
+    writeFileSync(resolve(implWt!, 'tracked.txt'), 'base 改过\n', 'utf-8')
+    await runRound(sid, 'scwt-iso-impl', CAT2, 'trace-scwt-iso-impl')
+    const implSha = git(['rev-parse', catBranch(shortId, CAT2.name)])
+    expect(ancestorState(implSha, sessionBranch(shortId))).toBe('not-ancestor')
+
+    // 非审查者（CAT1：`role` 缺失 ⇒ 非 store ⇒ 走猫树，但**不是** reviewer）执行
+    const callsBefore = h.chatStream.mock.calls.length
+    await runRound(sid, 'scwt-iso-other', CAT1, 'trace-scwt-iso-other')
+    expect(h.chatStream.mock.calls.length - callsBefore).toBe(1)
+    const cwd = h.chatStream.mock.calls.at(-1)?.[1]?.cwd
+    expect(cwd).toBe(catWtFor(sid, CAT1.name))
+
+    // **判据（V19）**：他猫提交**不在**它的树里，文件读到的仍是旧版
+    expect(ancestorState(implSha, 'HEAD', cwd!)).toBe('not-ancestor')
+    expect(readFileSync(resolve(cwd!, 'tracked.txt'), 'utf-8')).toBe('base\n')
+    // 反恒真对照：同一条 sha 喂**实施猫自己的树** ⇒ 「已在」（探针没坏、sha 也没写错）
+    expect(ancestorState(implSha, 'HEAD', implWt!)).toBe('ancestor')
+  })
+
+  /**
+   * V20 冲突显式停（票面 §八 契约 4 / §二-3「不静默」）。
+   *
+   * 两段读数：
+   * - **直接读数**：合并入口的返回值 —— `conflict` + `recovered`（abort 回可重跑态）
+   * - **集成读数**：审查者**不开跑** —— 冲突时 `chatStream` 一次都不被调用。这一格是
+   *   「不带着缺内容的工作区产出回执」的可机检形态；只断言返回值不断言行为，
+   *   把「返回 conflict 但照样开跑」的实现放过去就还是假绿。
+   */
+  it('V20 · 与被审同处改动 ⇒ 返回 conflict、树回可重跑态、审查者不开跑', async () => {
+    const sid = 'scwt0011'
+    const shortId = sessionShortId(sid)
+    git(['branch', sessionBranch(shortId)])
+
+    // 审查者侧先在自己的分支上改**同一处**（造出必然冲突的形态：两分支自同一分叉点改同一文件同一行）
+    const revWt = ensureCatWorktree(sid, REVIEWER.id, REVIEWER.name)
+    registerWorktree(revWt)
+    expect(revWt).toBeTruthy()
+    writeFileSync(resolve(revWt!, 'tracked.txt'), 'rev 改过\n', 'utf-8')
+    git(['add', '-A'], revWt!)
+    git(['commit', '-m', 'rev 侧先改'], revWt!)
+    const revShaBefore = git(['rev-parse', catBranch(shortId, REVIEWER.name)])
+
+    const implWt = ensureCatWorktree(sid, CAT2.id, CAT2.name)
+    registerWorktree(implWt)
+    writeFileSync(resolve(implWt!, 'tracked.txt'), 'impl 改过\n', 'utf-8')
+    await runRound(sid, 'scwt-cf-impl', CAT2, 'trace-scwt-cf-impl')
+    const implSha = git(['rev-parse', catBranch(shortId, CAT2.name)])
+    // 前提：两分支确实分叉、互不包含（否则下面根本测不到冲突）
+    expect(ancestorState(implSha, revShaBefore)).toBe('not-ancestor')
+    expect(ancestorState(revShaBefore, implSha)).toBe('not-ancestor')
+
+    // ── 直接读数：合并入口的返回值 ──
+    const r = mergeCatBranchesIntoOwnBranch(shortId, { cwd: revWt!, mainRoot: tmpRepo })
+    expect(r.conflict).toBe(true)
+    expect(r.recovered).toBe(true) // abort 成功 ⇒ 回可重跑态
+    expect(r.merged).toEqual([])
+    // 审查者**自己那条**分支必然进 `skipped`（`isAncestor(自, 自)` 为真）——
+    // 枚举含自身是设计使然（`listCatBranches` 不排除自身），自合是 no-op。
+    // 它排在冲突那条之前（分支名排序：`吐槽猫` < `暹罗猫`）⇒ 断言它是 skipped 的**唯一**成员，
+    // 同时也就证明了「循环停在第二个来源上」（merged 为空）。
+    expect(r.skipped).toEqual([catBranch(shortId, REVIEWER.name)])
+    // 树回可重跑态（三条独立断言，缺一则「recovered」可能只是自报）：
+    expect(git(['rev-parse', catBranch(shortId, REVIEWER.name)])).toBe(revShaBefore)
+    expect(gitOrNull(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], revWt!)).toBeNull()
+    expect(git(['status', '--porcelain'], revWt!)).toBe('')
+
+    // ── 集成读数：审查者**没有开跑** ──
+    const callsBefore = h.chatStream.mock.calls.length
+    await runRound(sid, 'scwt-cf-rev', REVIEWER, 'trace-scwt-cf-rev')
+    expect(h.chatStream.mock.calls.length - callsBefore).toBe(0)
+    // 且**不静默**：冲突有 error 留痕（判据非恒真——下面这条断言在无冲突时不成立）
+    expect(h.logError).toHaveBeenCalledWith(
+      'merge conflict',
+      expect.objectContaining({ label: 'review-view', recovered: true })
+    )
+  })
+
+  /**
+   * V22 幂等（票面 §八 契约 3）：审查者**重复执行**不产生新的 merge commit。
+   *
+   * 末行那条「内容仍在」是必需的：只断言「sha 没变」的话，把 skip 实现成
+   * 「第二次干脆不合并 / 把分支重置回去」也能全绿。
+   */
+  it('V22 · 审查者重复执行 ⇒ 已合即 skip，不产生第二个 merge commit', async () => {
+    const sid = 'scwt0012'
+    const shortId = sessionShortId(sid)
+    git(['branch', sessionBranch(shortId)])
+
+    const implWt = ensureCatWorktree(sid, CAT2.id, CAT2.name)
+    registerWorktree(implWt)
+    writeFileSync(resolve(implWt!, 'tracked.txt'), 'base 改过\n', 'utf-8')
+    await runRound(sid, 'scwt-idem-impl', CAT2, 'trace-scwt-idem-impl')
+    const implSha = git(['rev-parse', catBranch(shortId, CAT2.name)])
+
+    const revBranch = catBranch(shortId, REVIEWER.name)
+    const revWt = catWtFor(sid, REVIEWER.name)
+    const mergeCommits = (): number =>
+      git(['log', '--format=%s', revBranch])
+        .split('\n')
+        .filter((l) => l.startsWith('review-view ')).length
+
+    // 第 1 轮：真合 ⇒ 产生 merge commit
+    await runRound(sid, 'scwt-idem-rev1', REVIEWER, 'trace-scwt-idem-rev1')
+    const afterFirst = git(['rev-parse', revBranch])
+    expect(ancestorState(implSha, 'HEAD', revWt)).toBe('ancestor')
+    expect(mergeCommits()).toBe(1)
+
+    // 第 2 轮：同一会话、同一审查者 ⇒ 已合即 skip，**不造第二个 merge commit**
+    await runRound(sid, 'scwt-idem-rev2', REVIEWER, 'trace-scwt-idem-rev2')
+    expect(git(['rev-parse', revBranch])).toBe(afterFirst)
+    expect(mergeCommits()).toBe(1)
+    // 幂等 ≠ 「什么都没发生」：被审内容仍在树里
+    expect(ancestorState(implSha, 'HEAD', revWt)).toBe('ancestor')
   })
 
   /**

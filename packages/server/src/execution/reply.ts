@@ -34,7 +34,8 @@ import {
   type MemoryContextResult,
 } from '../memory/index.js'
 import { createLogger } from '../logger.js'
-import { snapshotPackageDeps, diffNewPackages, ensureAgentWorktree } from '../llm/git-utils.js'
+import { snapshotPackageDeps, diffNewPackages } from '../llm/git-utils.js'
+import { ensureExecutionWorktree } from '../llm/worktree-fanin.js'
 import { parseJsonArray } from '../utils.js'
 import { collectCommitDiffs, GIT_TIMEOUT_MS } from '../git/diff-collector.js'
 import type { ExecTrace } from './trace.js'
@@ -977,7 +978,12 @@ export async function runAgentReply(
     // 落各自的分支。
     // 建不出（非 git 仓库 / 集成分支不在 / 命名非法）返回 null → **不传 cwd**，
     // 适配器取默认 `workspace/`；**绝不回落主仓库**（T-1 已收窄，不得回退）。
-    cwd: ensureAgentWorktree(sessionId, agent) ?? undefined,
+    // T-2 Phase I-b 形态 G：审查者（`role === 'reviewer'`）额外把本会话全部猫分支
+    // 合进**它自己的猫分支**，否则它的树 fork 自集成分支、读到的是**旧版内容且读不出
+    // 是旧的**（`report-phase-ib.md` §三 V16-b 实测）。合并冲突 ⇒ 显式抛错，审查者
+    // **不开跑**也不产出回执（fail-closed，票面 §二-3）。
+    // 注意这是**同步阻塞调用**（建树 + merge 全是 `execFileSync`），与本行原语义一致。
+    cwd: ensureExecutionWorktree(sessionId, agent) ?? undefined,
     // MCP 结构化路由上下文（契约 3 二次修订——店长裁决）：claude.ts 透传
     // 到 MCP server env；其他适配器忽略 context 零影响。
     // triggerAuthorName 与 :947 合并点同款来源（triggerMsg.authorName）——
