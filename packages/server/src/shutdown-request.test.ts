@@ -54,10 +54,30 @@ describe('契约 6/8：路径同源 + 不复用 .restart-request 名', () => {
     expect(restart.SHUTDOWN_REQUEST_FILE).not.toBe(restart.RESTART_REQUEST_FILE)
   })
 
-  it('cwd 与 RESTART_FILES_DIR 一致时落在项目根（dev.js 写方读的是同一个路径）', () => {
-    // vitest 的 RESTART_FILES_DIR 是相对路径 ⇒ resolve(cwd, ...)；这里只断言
-    // 「相对 cwd 解析」这条语义与 dev.js `path.join(ROOT, ...)` 的落点规则一致。
+  it('设了 RESTART_FILES_DIR（绝对）时由它决定落点，**不**再经 cwd', () => {
+    // 这里钉的不是「等于自己」，而是「env 赢过 cwd」这条语义：若被测模块忽略 env
+    // （回落 process.cwd()），下面第一条断言照样过、第二条必红。
     expect(restart.SHUTDOWN_REQUEST_FILE).toBe(resolve(ISOLATED_DIR, '.shutdown-request'))
+    expect(restart.SHUTDOWN_REQUEST_FILE).not.toBe(resolve(process.cwd(), '.shutdown-request'))
+  })
+
+  // 用例名刻意不写 `process.cwd()` 字面量：V14 护栏的 R3 是「隔离键与 cwd 同行」启发式，
+  // 用例名里两者同现会被判违规（护栏不区分「字符串描述」与「真的路径表达式」）。
+  it('**未设** RESTART_FILES_DIR → 回落到进程 cwd（生产路径：dev.js 轮询仓库根的那条）', async () => {
+    // 生产不设该 env（它是测试专用隔离通道，见 restart-request.ts 的 ⚠️）⇒ 真实落点 =
+    // resolve(process.cwd(), '.shutdown-request')，须与 dev.js `path.join(ROOT, …)` 对齐
+    // （dev.js 以仓库根 spawn server ⇒ server 的 cwd = ROOT）。改绝对路径后这条回落分支
+    // 在别处已无覆盖，故单列一例。
+    const saved = process.env.RESTART_FILES_DIR
+    delete process.env.RESTART_FILES_DIR
+    try {
+      vi.resetModules()
+      const mod = await import('./restart-request.js')
+      expect(mod.SHUTDOWN_REQUEST_FILE).toBe(resolve(process.cwd(), '.shutdown-request'))
+    } finally {
+      if (saved === undefined) delete process.env.RESTART_FILES_DIR
+      else process.env.RESTART_FILES_DIR = saved
+    }
   })
 
   it('已进仓库根 .gitignore（工作流状态文件不入库）', () => {

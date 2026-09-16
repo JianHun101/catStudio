@@ -8,8 +8,10 @@
  *
  * 文件位置与 .agent-busy 锁同款：resolve(dir, ...)，dir = RESTART_FILES_DIR ?? process.cwd()——
  * pnpm dev 时 dev.js 以仓库根 spawn server（cwd=ROOT），两侧路径一致；
- * 测试环境经 vitest env 设 RESTART_FILES_DIR 指向 node_modules/.cache 隔离目录，
- * 防测试跑批的 afterEach 清理误删运行时真实请求文件（17:38 事故根因，实验 100% 复现）。
+ * 测试环境经 vitest env 把 RESTART_FILES_DIR 设成**绝对**路径（`os.tmpdir()` 下按仓库键
+ * 派生的隔离目录，见 `test-helpers.isolatedTestDir`），防测试跑批的 afterEach 清理误删运行时
+ * 真实请求文件（17:38 事故根因，实验 100% 复现）；相对路径会经 worktree 的 node_modules
+ * junction 落回主仓库共享面，跨根并发跑批仍互删，故必须是绝对的。
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'

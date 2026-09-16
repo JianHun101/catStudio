@@ -876,6 +876,9 @@ describe('Message Routes', () => {
       })
 
       expect(res.statusCode).toBe(201)
+      // 隔离**生效**的判据（不只是「文件存在」）：路径须落在本文件专属的隔离目录。
+      // 缺这条时，factory 内动态 import 的时序若出偏差（隔离没生效），测试照绿。
+      expect(RESTART_REQUEST_FILE).toContain('restart-test-messages')
       expect(existsSync(RESTART_REQUEST_FILE)).toBe(true)
       const req = JSON.parse(readFileSync(RESTART_REQUEST_FILE, 'utf-8')) as any
       expect(req.state).toBe('pending')

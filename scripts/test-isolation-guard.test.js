@@ -8,10 +8,19 @@
  * 并发跑同一批用例时，A 的 `afterEach` 删掉 B 刚 `existsSync` 过的那一个文件 ⇒ 假红。
  *
  * 为什么是静态源断言而不是行为断言：行为面（`vi.stubEnv` 的值）**只有跑起来才可见**，
- * 而漏网的形态恰恰是「新写一个测试、顺手敲了个相对路径」——静态扫能在提交口拦下。
+ * 而漏网的形态恰恰是「新写一个测试、顺手敲了个相对路径」——静态扫是唯一能在代码进仓前
+ * 判它的形态。
  *
- * ── 三条规则（对**去注释后**的代码逐行判） ──
- * - **R1**：出现 `node_modules/.cache`（含反斜杠写法）字面量 ⇒ 红。
+ * ⚠️ **执行面（别按「提交口护栏」去信它）**：本文件属 `scripts` project
+ * （`scripts/vitest.config.ts` 的 include 是「任意目录下的 test.js」），`precommit-scope.mjs` 按改动面
+ * 收窄 project（`packages/server/**` ⇒ 只跑 `@cat-study/server`）——故**改 server/web 的提交，
+ * 提交口不跑本护栏**。它实际生效于：审查档全量、落地档全量。让 packages 改动也带上 scripts
+ * project 属 scope 语义变更（`packages/server` scope ⇒ projects 不再一一对应），已报店长裁，
+ * 本文件不擅改（见 report §五-4）。
+ *
+ * ── 三条规则 ──
+ * - **R1**：出现 `node_modules/.cache`（含反斜杠写法）字面量 ⇒ 红。拆成两段字面量
+ *   （`join('node_modules', '.cache')`）同样红——**逐行判 + 3 行滑窗判**（见 R1_WINDOW）。
  * - **R2**：隔离键（`RESTART_FILES_DIR` / `LOG_FILE` / `ENV_FILE_PATH`）被赋一个
  *   **字符串字面量**且该值**不是绝对路径** ⇒ 红。
  * - **R3**：同一行里隔离键与 `process.cwd()` 同现 ⇒ 红（cwd 派生同样落 junction 共享面）。
@@ -25,6 +34,16 @@
  * (d) **本文件自身不自扫**（`SELF_FILE`）——它的存在意义就是包含违规样本（反向对照的夹具），
  *     自扫会把夹具判成真违规。代价：本文件若真写入隔离路径不会被拦下，由「本文件不产生
  *     任何隔离路径」这一人工事实承担，改本文件时须人工复核。
+ * (e) R1 拆分的跨行窗口宽度上限 = `R1_WINDOW`（3 行）。**超过 3 行**才凑齐两段字面量的
+ *     拆分（如中间夹注释/空行把 `'node_modules'` 与 `'.cache'` 推到第 4 行）仍是盲区；
+ *     三段以上再拆（`join('node', '_modules', …)`）与经变量中转同样不红——后者见 (a)。
+ * (f) `stripComments` 的正则字面量态是**启发式**：`/` 左侧不是「表达式起始」的字符时按
+ *     除号处理。判错的后果是**保守**的（该 `/` 当除号 → 后续字符照常判），不会吞代码；
+ *     唯一代价是正则体内若恰好写了隔离路径字样可能误报（未见实际写法）。
+ * (g) 本文件的**执行面**只覆盖审查档 / 落地档全量，不含按改动面收窄的提交口（见上）。
+ * (h) R3 只看「键名与 `process.cwd(` 同行」，**不区分**「真的路径表达式」与「字符串里的
+ *     描述文字」——用例名 / 断言文本里同时提到两者会误报（实测：本次新增的 shutdown 用例名
+ *     即命中，改措辞后消解）。这是向严侧的假阳性，改措辞或按行挂白名单即可，不算漏网。
  *
  * 自指说明：R1 的正则用转义拼接构造，故本文件源码不含该字面量的连续形态（构造残留由 (d) 兜底）。
  */
@@ -69,14 +88,38 @@ const R2_RES = ISOLATION_KEYS.map((k) => ({
 }))
 
 /**
+ * 正则字面量的**起始**判定：`/` 左侧最近的非空白字符若属该集合（或位于文件首），
+ * 此处的 `/` 是正则定界符而非除号。缺了这条判定，字符类里含 `/` 与 `*` 的正则（形如
+ * 「斜杠 方括号 斜杠 星号 方括号 斜杠」）会被当成块注释起始 —— 状态机一路吞到 EOF
+ * （或下一个块注释闭合序列），**其后所有违规行静默消失** ⇒ 护栏恒绿。
+ * 这是自己踩过的坑，不是假想（原实现在本文件旧版 `stripComments` 里）。
+ */
+const REGEX_PRECEDER_CHARS = '([{,;:=!&|?+-*%<>~^}'
+/** 关键字后的 `/` 也是正则（`return /x/`）；普通标识符后是除号（`a / b`） */
+const REGEX_PRECEDER_WORDS =
+  /(?:^|[^\w$])(return|typeof|case|in|of|new|delete|void|do|else|yield|await|instanceof)$/
+
+function isRegexStart(out) {
+  const prev = out.slice(-32).replace(/\s+$/, '')
+  if (prev === '') return true // 文件首
+  const lastCh = prev[prev.length - 1]
+  if (REGEX_PRECEDER_CHARS.includes(lastCh)) return true
+  if (/[A-Za-z0-9_$]/.test(lastCh)) return REGEX_PRECEDER_WORDS.test(prev)
+  return false
+}
+
+/**
  * 去掉注释，**保留换行与行号**（注释内容替换为空白）——保证报出的行号能直接对上源文件。
- * 字符串字面量整体保留（内含 `//` 的 URL 不会被误当行注释截断）。
+ * 字符串字面量整体保留（内含 `//` 的 URL 不会被误当行注释截断）；正则字面量整体替换为
+ * 等长空白（它的**内容**不产生路径，且体内若含 `'`/`"` 不应被当字符串起始）。
  */
 export function stripComments(src) {
-  const out = []
+  let out = ''
   const n = src.length
   let i = 0
-  let state = 'code' // code | line | block | sq | dq | tpl
+  let state = 'code' // code | line | block | sq | dq | tpl | re | reClass
+  /** 正则态的暂存（闭合才写入 `out`；未闭合 = 前面判错了，原样退回） */
+  let reBuf = ''
   while (i < n) {
     const c = src[i]
     const d = src[i + 1]
@@ -86,22 +129,30 @@ export function stripComments(src) {
         i += 2
         continue
       }
+      // ⚠️ 顺序即正确性：`/*` 必须先于正则态判掉（否则真块注释会被当正则），
+      // 正则态又必须先于「默认按字面量输出」判掉（否则 `/[/*]/` 会进块注释态吞代码）。
       if (c === '/' && d === '*') {
         state = 'block'
         i += 2
         continue
       }
+      if (c === '/' && isRegexStart(out)) {
+        state = 're'
+        reBuf = c
+        i++
+        continue
+      }
       if (c === "'") state = 'sq'
       else if (c === '"') state = 'dq'
       else if (c === '`') state = 'tpl'
-      out.push(c)
+      out += c
       i++
       continue
     }
     if (state === 'line') {
       if (c === '\n') {
         state = 'code'
-        out.push(c)
+        out += c
       }
       i++
       continue
@@ -112,14 +163,39 @@ export function stripComments(src) {
         i += 2
         continue
       }
-      out.push(c === '\n' ? '\n' : ' ')
+      out += c === '\n' ? '\n' : ' '
       i++
+      continue
+    }
+    if (state === 're' || state === 'reClass') {
+      // 正则不跨行：换行仍未闭合 ⇒ 前面把除号误判成了正则，原样退回 code 态
+      if (c === '\n') {
+        out += reBuf + c
+        reBuf = ''
+        state = 'code'
+        i++
+        continue
+      }
+      if (c === '\\') {
+        reBuf += c + (d ?? '')
+        i += 2
+        continue
+      }
+      reBuf += c
+      i++
+      if (state === 're' && c === '[') state = 'reClass'
+      else if (state === 'reClass' && c === ']') state = 're'
+      else if (state === 're' && c === '/') {
+        out += ' '.repeat(reBuf.length) // 正则整体占位，不参与路径判定
+        reBuf = ''
+        state = 'code'
+      }
       continue
     }
     // 字符串态：原样保留（转义对整体吞掉，防 `'\''` 提前收尾）
     if (c === '\\') {
-      out.push(c)
-      if (d !== undefined) out.push(d)
+      out += c
+      if (d !== undefined) out += d
       i += 2
       continue
     }
@@ -130,10 +206,24 @@ export function stripComments(src) {
     ) {
       state = 'code'
     }
-    out.push(c)
+    out += c
     i++
   }
-  return out.join('')
+  return out
+}
+
+/**
+ * R1 的**跨行窗口**宽度（行）——覆盖 prettier `printWidth` 把 `join('node_modules',\n'.cache', …)`
+ * 拆到多行的形态。逐行判看不见这种拆分（两段各自是 `null`），而第 10 处（`browseTmpDir`）
+ * 恰恰是拆分写法，靠 V13 实跑才抓出来。窗口只判 R1：R2/R3 的语义是「同一行同现」，
+ * 跨行拼接会把无关的两行凑成命中 ⇒ 假阳性。
+ */
+const R1_WINDOW = 3
+
+/** R1 判据（连续形态 或 拆分形态），供逐行判与跨行窗口判共用 */
+export function detectR1(text) {
+  if (R1_RE.test(text)) return true
+  return R1_SPLIT_NM_RE.test(text) && R1_SPLIT_CACHE_RE.test(text)
 }
 
 /**
@@ -141,8 +231,7 @@ export function stripComments(src) {
  * 一行只报**第一条**命中的规则：R1 与 R2 常同时命中同一条白名单行，重复报会让白名单翻倍。
  */
 export function detect(line) {
-  if (R1_RE.test(line)) return 'R1'
-  if (R1_SPLIT_NM_RE.test(line) && R1_SPLIT_CACHE_RE.test(line)) return 'R1'
+  if (detectR1(line)) return 'R1'
   for (const r of R2_RES) {
     // assign 形态捕获组 =（引号, 值）；stub 形态 =（键引号, 值引号, 值）——
     // 两种形态的**最后一个**捕获组都是值。
@@ -225,7 +314,8 @@ const WHITELIST = [
   },
   {
     file: 'packages/server/src/routes/connectors.ts',
-    lineMatch: /napcat/,
+    // 收窄到**那条兜底写法本身**（原为 /napcat/，会豁免该文件任何含 "napcat" 的行 —— 过宽）
+    lineMatch: /RESTART_FILES_DIR\s*\?\?\s*process\.cwd\(\)/,
     reason:
       '同 restart-request.ts：NapCat 请求/配置文件的生产侧定位（`RESTART_FILES_DIR ?? process.cwd()`）' +
       '——dev.js 轮询的就是仓库根的 `.napcat-request`，落 cwd 是设计意图。测试侧已在' +
@@ -235,18 +325,49 @@ const WHITELIST = [
 
 const rel = (abs) => relative(REPO_ROOT, abs).split('\\').join('/')
 
+/**
+ * 判一个源文件（**已去注释**）的违规行。抽成纯函数是为了让跨行窗口这条判据可做反向对照——
+ * 只跑真仓库的话，「窗口判据坏了」与「仓库里恰好没有跨行形态」在读数上不可区分。
+ *
+ * @returns {{file: string, line: number, rule: string, text: string}[]}
+ */
+export function scanSource(file, code) {
+  const lines = code.split('\n')
+  const raw = []
+  lines.forEach((line, idx) => {
+    const rule = detect(line)
+    if (rule) raw.push({ file, line: idx + 1, rule, text: line.trim() })
+  })
+  // 跨行窗口（只判 R1）：逐行看不见的「两段字面量被 pretty 换行拆开」形态。
+  // 去重：窗口内已有单行命中（逐行 pass 已报）或上一窗口已报同一段 ⇒ 不重复报。
+  for (let i = 0; i + 1 < lines.length; i++) {
+    const win = lines.slice(i, i + R1_WINDOW)
+    if (!detectR1(win.join('\n'))) continue
+    if (win.some((l) => detectR1(l))) continue
+    if (i > 0) {
+      const prevWin = lines.slice(i - 1, i - 1 + R1_WINDOW)
+      if (detectR1(prevWin.join('\n')) && !prevWin.some((l) => detectR1(l))) continue
+    }
+    raw.push({
+      file,
+      line: i + 1,
+      rule: 'R1',
+      text: `[跨行 ${R1_WINDOW} 行窗口] ${win
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .join(' ⏎ ')}`,
+    })
+  }
+  return raw
+}
+
 function scanRepo() {
   const files = SCAN_ROOTS.flatMap((r) => walk(join(REPO_ROOT, r)))
-  /** @type {{file: string, line: number, rule: string, text: string}[]} */
   const raw = []
   for (const abs of files) {
     const file = rel(abs)
     if (file === SELF_FILE) continue
-    const code = stripComments(readFileSync(abs, 'utf-8'))
-    code.split('\n').forEach((line, idx) => {
-      const rule = detect(line)
-      if (rule) raw.push({ file, line: idx + 1, rule, text: line.trim() })
-    })
+    raw.push(...scanSource(file, stripComments(readFileSync(abs, 'utf-8'))))
   }
   return { files, raw }
 }
@@ -267,6 +388,23 @@ describe('检测器非恒真（反向对照：种入违规必须红、合规必�
     // 只出现其一 → 不红（`node_modules` 单独出现是合法依赖引用）
     expect(detect(`import x from 'node_modules/.pnpm/foo'`)).toBe(null)
     expect(detect(`const d = path.join('node_modules', 'x')`)).toBe(null)
+  })
+
+  it('R1 跨行拆分（pretty 换行）→ 也红；窗口只认 R1，不把无关两行凑成 R2/R3', () => {
+    // prettier printWidth=100 下最可能出现的形态：join 的两段各占一行
+    const split = "const d = path.join(\n  'node_modules',\n  '.cache',\n  'restart-test'\n)\n"
+    // 逐行判**看不见**这条 —— 这不是修辞，是加窗口的理由（窗口拿掉 ⇒ 下面那条断言红）
+    expect(split.split('\n').every((l) => !detectR1(l))).toBe(true)
+    expect(scanSource('x.js', split).length).toBe(1)
+    // 同一段只报一次（相邻窗口重叠不得重复计数）
+    expect(scanSource('x.js', "'node_modules'\n'.cache'\n'node_modules'\n").length).toBe(1)
+    // 只有一段 → 不红
+    expect(scanSource('x.js', "const d = path.join(\n  'node_modules',\n  'x'\n)\n").length).toBe(0)
+    // 窗口**不**判 R2/R3：隔离键与相对值分处两行，不是违规（不然假阳性满天飞）
+    expect(scanSource('x.js', 'const KEY = RESTART_FILES_DIR\nconst v = "rel/x"\n').length).toBe(0)
+    expect(
+      scanSource('x.js', 'const KEY = RESTART_FILES_DIR\nconst c = process.cwd()\n').length
+    ).toBe(0)
   })
 
   it('R2：隔离键赋一个非绝对字面量 → 红；赋绝对路径 → 绿', () => {
@@ -293,6 +431,24 @@ describe('检测器非恒真（反向对照：种入违规必须红、合规必�
     const code = stripComments(`const s = 'a\\'b' ; LOG_FILE: 'rel.log'`)
     expect(detect(code)).toBe('R2')
   })
+
+  it('正则字面量不吞后续代码（`/[/*]/` 曾让块注释态吞到 EOF ⇒ 护栏恒绿）', () => {
+    // 这条是**修复的反向对照**：修复前 `/[/*]/` 里第二个 `/`+`*` 被判成块注释起始，
+    // 无闭合则吞到文件尾，第 2 行的违规**根本进不了 detect**。
+    const src = "const re = /[/*]/\nconst LOG_FILE = 'node_modules/.cache/x'\n"
+    const stripped = stripComments(src)
+    expect(stripped.split('\n')[1]).toContain('LOG_FILE') // 第 2 行没被吞
+    expect(detect(stripped.split('\n')[1])).toBe('R1')
+    // 真块注释仍要被剥掉（修复不得反向误伤：`/*` 判定必须排在正则判定之前）
+    const withBlock = "const a = 1 /* LOG_FILE: 'x/y.log' */\nconst b = 2\n"
+    expect(detect(stripComments(withBlock).split('\n')[0])).toBe(null)
+    // 除号不得被误判成正则（`a / b` 后跟字符串，不能吞）
+    const div = "const ratio = a / b ; LOG_FILE: 'rel.log'\n"
+    expect(detect(stripComments(div))).toBe('R2')
+    // `return /re/` 这类关键字后置的正则：不吞后续行
+    const ret = "function f() { return /[/]/.test(s) }\nLOG_FILE: 'rel.log'\n"
+    expect(detect(stripComments(ret).split('\n')[1])).toBe('R2')
+  })
 })
 
 describe('全仓扫描：packages/** + scripts/** 零违规（白名单外）', () => {
@@ -304,11 +460,13 @@ describe('全仓扫描：packages/** + scripts/** 零违规（白名单外）', 
   it('白名单外无违规；白名单内条目**全部**有理由且真正命中（防死条目）', () => {
     const { raw } = scanRepo()
 
-    const hitCount = new Map(WHITELIST.map((w) => [`${w.file}`, 0]))
+    // 计数键是**白名单条目本身**而不是 file —— 同一文件挂两条目时按 file 计数会合并，
+    // 死条目检查随之失效（其中一条从未命中也看不出来）。
+    const hitCount = new Map(WHITELIST.map((w) => [w, 0]))
     const unwhitelisted = []
     for (const v of raw) {
       const w = WHITELIST.find((x) => x.file === v.file && x.lineMatch.test(v.text))
-      if (w) hitCount.set(w.file, hitCount.get(w.file) + 1)
+      if (w) hitCount.set(w, hitCount.get(w) + 1)
       else unwhitelisted.push(v)
     }
 
@@ -316,7 +474,9 @@ describe('全仓扫描：packages/** + scripts/** 零违规（白名单外）', 
     expect(unwhitelisted.map((v) => `${v.file}:${v.line} [${v.rule}] ${v.text}`)).toEqual([])
 
     // 白名单非死条目：每条都必须真的豁免到至少一行
-    const dead = WHITELIST.filter((w) => hitCount.get(w.file) === 0).map((w) => w.file)
+    const dead = WHITELIST.filter((w) => hitCount.get(w) === 0).map(
+      (w) => `${w.file} :: ${w.lineMatch}`
+    )
     expect(dead).toEqual([])
 
     // 理由必填非空
