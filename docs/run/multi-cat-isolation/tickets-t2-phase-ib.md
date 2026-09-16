@@ -180,3 +180,79 @@ Phase I 收口后**尚未被任何非 store 执行行使过**（重启取证：`
 - 报告须**记录本树 HEAD**：G 的已知代价是审查者分支混入实施猫提交、归属面变模糊（`report-phase-ib.md`
   §五 标注为推理、我接受），「我到底看到了哪份内容」必须可审计。
 - 本笔触及 `reply.ts` / `git-utils.ts` ⇒ 落地后**需重启**，由店长发审批。
+
+---
+
+## 九、第 2 笔补笔：取数点裁定（店长 2026-09-16）
+
+> ds猫 按 §八「先把答案报我，再动代码」停在裁前门，一行代码未动。以下为裁定，
+> 依据 = 它报的候选 + **我自己复核的读数**（`git grep -n` 字节路径）。
+
+### 1. 取数点 —— 采纳：`agent.role === 'reviewer'`
+
+**判据**：`agent.role === 'reviewer'`，字段源 `AgentConfig.role?: AgentRole`
+（`packages/shared/src/types.ts:37`；`AgentRole` 见 `:7`），落库面 `agents.role`。
+**零新造结构、零新状态、零管线** —— 两个接线点**已持有该字段**（我逐个核过）：
+
+| 接线点                     | 复核读数                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------- |
+| `execution/reply.ts:980`   | `cwd: ensureAgentWorktree(sessionId, agent) ?? undefined`，`agent` 即执行中的 `AgentConfig` |
+| `execution/serial.ts:1163` | `cwd = ensureAgentWorktree(sessionId, agent)`，其 `agent = rowToAgent(row)`（`:1159`）      |
+| `llm/git-utils.ts:656`     | 形参类型本就是 `{ id: string; name: string; role?: string }` —— **字段已在签名里**          |
+| `execution/row.ts:27`      | `role: (row.role \|\| undefined) as AgentConfig['role']` —— 透传属实                        |
+
+**与本仓既有判据同源**（非新发明）：`execution/hints.ts:141`、`serial.ts:901`、
+`dispatch/mention-policy.ts:93/116`、`config/iron-laws.ts:40` 五处已用同一判据。
+
+### 2. 否决 `isReviewDelivery` 作主判据 —— 采纳（并补一条更硬的理由）
+
+`connectors/ingest.ts:83` 的 `isReviewDelivery(mentions)` 不作主判据：
+
+1. **作用域错位**：投递级（这条消息点名了审查者）≠ 执行级（正在执行的是不是审查者）。
+2. **判别力为零（决定性）**：派发是 mention 驱动的 —— 审查者能被派发，前提就是它被点名了
+   ⇒ 对「执行者是审查者」的场合，`isReviewDelivery` **恒真**。与 `role` 合取 ⇒
+   **复杂度增加、覆盖零增加**。
+3. **挡不住它想挡的形态**：一条消息同时 @ 实施猫与审查猫 ⇒ 合取后仍为真，
+   实施猫照样被灌入他猫 WIP —— 正是契约 5 要挡的那条，合取**没有解决**。
+
+### 3. 判据粒度 —— 裁定「接受 role 级」，且**这不是妥协**
+
+ds猫 问：`role === 'reviewer'` 是角色级而非任务级，审查猫被 @ 去做非审查的活时其树同样被合入，
+是否要收紧。**裁定接受，理由三条**：
+
+- **契约 5 的字面就是角色级**（「只对审查者生效」）。按任务级收紧 = 改契约，不是实现细节。
+- **收不出判别力**（见上 §2-2），收紧只是把判据变复杂。
+- **代价面可控、不外溢**：受影响的是「审查猫这一轮读到了什么」，**不是隔离本身** ——
+  合并目标是**它自己的猫分支**，不外溢到他猫树、不碰集成分支与 `dev`；fan-in 终态是并集，
+  内容不受影响。归属面模糊这条代价 §八「额外要求」已记，不重复。
+
+### 4. `fanInCatBranches` 不可直接复用 —— 核实成立，裁定「参数化核心、保留 wrapper」
+
+我复核确认：`llm/worktree-fanin.ts:129` 的 `fanInCatBranches(shortId, cwd)` 前置②
+（`:138` 起 `head !== expected` ⇒ 抛错）要求 `cwd` HEAD **必须**是 `session/<shortId>`，
+而本笔目标是审查者自己的猫分支 ⇒ 直接调用必抛。**裁定**：
+
+- 抽出 merge 循环核心，接受「目标分支 + 来源列表」参数；
+- **既有 `fanInCatBranches` 的签名与前置② 原样保留**，降为薄 wrapper ——
+  它挡的是「合进 dev」这条灾难路径（ADR §6.3 判死的方案 b），**不得为复用而放宽**；
+- 审查者路径走新入口，前置改为「`cwd` HEAD === 目标分支」；
+- **不得复制第二份 merge 循环**（重复必然漂移，`git-utils.ts:607` 头注已点过这个坑）。
+
+### 5. `listCatBranches` 必须显式传 `mainRoot`
+
+核实：`llm/worktree-fanin.ts:75` 的 `opts?: { cwd?: string }` **缺省是 `process.cwd()`**。
+第 2 笔必须像 `llm/session-closeout.ts:129` 那样显式传 `mainRoot` ——
+猫树里 `process.cwd()` 是猫树，枚举面会静默收错。
+
+### 6. 行号更正（不是缺陷，是记账）
+
+ds猫 报里 `row.ts:39` **不存在**：`packages/server/src/execution/row.ts` 全长 29 行，
+`role` 透传在 **`:27`**；且路径前缀是 `execution/` 不是 `db/repository/`（后者无此文件）。
+**实质结论成立，仅行号与路径前缀需更正** —— 引用时按本表。提交前按红线用
+`git grep -n` 复核，勿凭本文档转抄。
+
+### 7. 对第 2 笔形态的两条确认（ds猫 沿途发现，我采纳）
+
+- `role === 'reviewer'` 与 `rowToAgent` 的透传已核（§1 表）。
+- `withDerivedView` 类形状（合并进自己分支）**只读不写他猫 ref** —— 与 V21「零分支移动」
+  一致：动的是**自己那条**猫分支，集成分支与 `dev` 逐字节不变。
