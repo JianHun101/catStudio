@@ -37,14 +37,19 @@ const h = vi.hoisted(() => ({
   buildKnowledgeContext: vi.fn(),
   chatStream: vi.fn(),
   collectCommitDiffs: vi.fn(),
+  // 日志留痕断言用（P3-c：「error 留痕跳树」是本票明写的验收面，只读行为测不出「留痕」）。
+  // 提到 hoisted 是因为 `serial.ts` 在模块加载时 `createLogger()` **只调一次**——
+  // 工厂里 `vi.fn()` 内联写死的话，句柄随那次调用一起丢掉，事后无从断言。
+  logWarn: vi.fn(),
+  logError: vi.fn(),
 }))
 
 vi.mock('../logger.js', () => ({
   createLogger: () => ({
     debug: vi.fn(),
     info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
+    warn: h.logWarn,
+    error: h.logError,
   }),
   setLogLevel: vi.fn(),
 }))
@@ -144,6 +149,36 @@ function tracked(path: string): boolean {
   return gitOrNull(['ls-files', '--error-unmatch', path]) !== null
 }
 
+/**
+ * 「`sha` 是否已在 `cwd` 的 `HEAD` 里」——V16 判据的唯一探针。
+ *
+ * **三态而非布尔**：`git merge-base --is-ancestor` 退出码 0=是、1=否、**其余=出错**
+ * （未知 ref / 非仓库 / 参数错）。折成布尔会把「探针本身坏了」读成「不包含」——
+ * 而 V16-b 恰恰断言的就是「不包含」，那是本仓反复点名的**假绿门**形态
+ * （判据恒真/恒假都不算读数）。三态让「坏探针」与「真结论」在断言上分得开。
+ */
+function ancestorState(
+  sha: string,
+  ref: string,
+  cwd = tmpRepo
+): 'ancestor' | 'not-ancestor' | 'error' {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', sha, ref], {
+      cwd,
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
+    return 'ancestor'
+  } catch (err: any) {
+    return err?.status === 1 ? 'not-ancestor' : 'error'
+  }
+}
+
+/** 猫 worktree 的所有权标记（`branch.<完整分支名>.catAgentId`，写在 `.git/config`） */
+function catOwnerMarker(branch: string): string | null {
+  return gitOrNull(['config', '--get', `branch.${branch}.catAgentId`])
+}
+
 const catWtFor = (sessionId: string, catName: string): string => {
   const shortId = sessionShortId(sessionId)
   return catWorktreePath(tmpRepo, shortId, catName)
@@ -162,6 +197,9 @@ const SESSION_IDS = [
   'scwt0005',
   'scwt0006',
   'scwt0007',
+  'scwt0008',
+  'scwt0009',
+  'scwt0010',
 ]
 
 function dropWorktrees(): void {
@@ -181,7 +219,7 @@ function dropWorktrees(): void {
   // ——前提成立与否有了读数，不再是「跑绿了就说明前提在」。
   for (const sid of SESSION_IDS) {
     const paths = [sessionWorktreePath(tmpRepo, sessionShortId(sid))]
-    for (const name of [CAT1.name, CAT2.name]) paths.push(catWtFor(sid, name))
+    for (const name of ALL_CAT_NAMES) paths.push(catWtFor(sid, name))
     for (const p of paths) {
       try {
         rmSync(p, { recursive: true, force: true })
@@ -217,7 +255,32 @@ const CAT2: AgentConfig = { ...CAT1, id: 'cat-2', name: '暹罗猫', role: 'impl
 /** 店长（对照组：仍需落会话 worktree） */
 const STORE: AgentConfig = { ...CAT1, id: 'store-1', name: '店长', role: 'store' }
 
-const ALL_AGENTS = [CAT1, CAT2, STORE]
+/**
+ * 审查猫（V16 主角）。`role: 'reviewer'` 是本仓真实存在的角色
+ * （`AgentRole = 'store' | 'implementer' | 'reviewer'`，`packages/shared/src/types.ts:7`）。
+ * **在 cwd 分派上它与其它非 store 猫无差别**——`ensureAgentWorktree` 只判 `=== 'store'`。
+ * 本格刻意用它（而非随便一只猫）来钉住「审查者**确实**拿的是自己的猫树」这个前提，
+ * 免得读者以为下面的陈旧性是「因为用了某只特殊猫」。
+ */
+const REVIEWER: AgentConfig = { ...CAT1, id: 'rev-1', name: '吐槽猫', role: 'reviewer' }
+
+/**
+ * P3-c-2 所有权冲突的**可达**触发形态：**规范化碰撞**。
+ *
+ * 字面的「同名不同 agentId」在今天的 schema 下**不可达**——`agents.name` 是
+ * `UNIQUE`（`db/index.ts:159`），两只猫不可能真的重名。但 `catSlug` 会剥掉空白
+ * （`.replace(/[\s\\~^:?*\["@{]/g, '')`），于是 `甲 猫` 与 `甲猫` 两个**不同的**
+ * DB 值归一到**同一条分支 + 同一棵树 + 同一目录**——DB 的 UNIQUE 拦不住它。
+ * 这正是所有权标记存在的意义：撞车时不静默共用。
+ */
+const DUP_A: AgentConfig = { ...CAT1, id: 'dup-1', name: '甲 猫' }
+/** 与 DUP_A **规范化后**同名（DB 里是另一个字符串，UNIQUE 不冲突） */
+const DUP_B_NAME = '甲猫'
+
+const ALL_AGENTS = [CAT1, CAT2, STORE, REVIEWER, DUP_A]
+
+/** 本文件会建出猫树/猫分支的全部猫名（`dropWorktrees` 清理面） */
+const ALL_CAT_NAMES = [CAT1.name, CAT2.name, REVIEWER.name, DUP_A.name, DUP_B_NAME]
 
 async function runRound(
   sessionId: string,
@@ -543,6 +606,176 @@ describe('serial × 一猫一 worktree（猫路径，T-2 Phase I）', () => {
     // 反转格③：补建走的是 `ensureSessionWorktree`（单源）⇒ 会话 worktree 一并建出；
     // 这是**零额外成本**的：收口时 `fanInCatBranches` 的 cwd 本就是它（票面补笔 §「为什么用 ensureSessionWorktree」）
     expect(existsSync(sessionWorktreePath(tmpRepo, shortId2))).toBe(true)
+  })
+
+  /**
+   * V16（本笔核心读数）· **审查面可达性** —— 审查者执行时，其工作区是否包含被审 sha 的改动。
+   *
+   * **这一格红是本票预期要修的东西，不是 flaky**：Phase I 接线后审查猫也拿自己的猫树，
+   * 该树 fork 自 `session/<sid8>`（= fan-in 前不含任何猫的提交）⇒ 审查者工作区里
+   * 被审提交**不在**。危险度不在「读到旧代码」，在「**读不出是旧的**」——文件都在、
+   * 路径都对，只有内容是旧版；用工作区读文件工具（而非 `git show <sha>:path`）
+   * 会静默审一份不存在的版本。故本格用**两条互补判据**把后果钉死：
+   * `merge-base --is-ancestor`（结构面）+ 直接读文件内容（可感知面）。
+   *
+   * 反向对照见报告 §三：把断言翻成正向（「审查者应看得到」）时本格必红，
+   * 两向读数都在 `report-phase-ib.md`；**别把这一格当判据翻转的理由改绿**。
+   */
+  it('V16 · 审查面可达性：审查者 cwd=自己的猫树；被审提交不在其中（本票靶心）', async () => {
+    const sid = 'scwt0008'
+    const shortId = sessionShortId(sid)
+    git(['branch', sessionBranch(shortId)])
+
+    // ── 被审方：实施猫在自己的树上改一个**已跟踪**文件 → 提交落猫分支 ──
+    // 改已跟踪文件（而不是新建）是刻意的：这才能造出「文件在、内容是旧版」那一格。
+    const implWt = ensureCatWorktree(sid, CAT2.id, CAT2.name)
+    registerWorktree(implWt)
+    expect(implWt).toBeTruthy()
+    writeFileSync(resolve(implWt!, 'tracked.txt'), 'base 改过\n', 'utf-8')
+
+    await runRound(sid, 'scwt-impl', CAT2, 'trace-scwt-impl')
+
+    const implSha = git(['rev-parse', catBranch(shortId, CAT2.name)])
+    const sessionShaBefore = git(['rev-parse', sessionBranch(shortId)])
+    // 被审提交确实产生了（否则下面的「看不到」是空转：没有东西可看）
+    expect(fileOnBranch(catBranch(shortId, CAT2.name), 'tracked.txt')).toBe('base 改过\n')
+    // 前置：集成分支**不含**被审提交（fan-in 尚未发生）——不成立则本格测的不是该形态
+    expect(ancestorState(implSha, sessionBranch(shortId))).toBe('not-ancestor')
+
+    // ── 审查方：`role: 'reviewer'` 的猫执行 ──
+    const callsBefore = h.chatStream.mock.calls.length
+    await runRound(sid, 'scwt-rev', REVIEWER, 'trace-scwt-rev')
+
+    // V16-a 分派：审查者拿到的是**它自己的猫 worktree**（不是会话树、不是 `workspace/` 降级）。
+    // 先钉本轮的调用次数：`.at(-1)` 只在「本轮恰好一次 chatStream」时才是那个读数。
+    expect(h.chatStream.mock.calls.length - callsBefore).toBe(1)
+    const revCwd = h.chatStream.mock.calls.at(-1)?.[1]?.cwd
+    expect(revCwd).toBe(catWtFor(sid, REVIEWER.name))
+    expect(revCwd).not.toBe(sessionWorktreePath(tmpRepo, shortId))
+
+    // V16-b 陈旧性（**本票靶心**）：审查者树里 `HEAD` **不含**被审 sha
+    expect(ancestorState(implSha, 'HEAD', revCwd!)).toBe('not-ancestor')
+    // 判据非恒真（同格对照两方向）：
+    //   ① 同一探针喂**实施猫自己的树** ⇒ 「已在」。若探针坏了/恒假，这一格不会成立。
+    //   ② 喂**集成分支** ⇒ 「不在」，与 ① 对照 ⇒ 探针确实在分辨两棵树的内容。
+    expect(ancestorState(implSha, 'HEAD', implWt!)).toBe('ancestor')
+    expect(ancestorState(implSha, sessionBranch(shortId))).toBe('not-ancestor')
+    // 危险度的**可感知面**读数：审查者 cwd 里这个文件**存在**（路径对）而是**旧版**内容
+    // ——「读不出是旧的」不是修辞，是这两行 it 断言之间的差。
+    expect(readFileSync(resolve(revCwd!, 'tracked.txt'), 'utf-8')).toBe('base\n')
+    expect(readFileSync(resolve(implWt!, 'tracked.txt'), 'utf-8')).toBe('base 改过\n')
+
+    // V16-c 隔离性：集成分支 sha 逐字节不变；实施猫的树与分支不受影响；主仓库零改动
+    expect(git(['rev-parse', sessionBranch(shortId)])).toBe(sessionShaBefore)
+    expect(fileOnBranch(catBranch(shortId, CAT2.name), 'tracked.txt')).toBe('base 改过\n')
+    expect(existsSync(resolve(implWt!, 'tracked.txt'))).toBe(true)
+    expect(branchHead('dev')).toBe('init')
+    expect(readFileSync(resolve(tmpRepo, 'tracked.txt'), 'utf-8')).toBe('base\n')
+  })
+
+  /**
+   * P3-c-1（Phase I 审查遗留）：`ensureCatWorktree` 的**提交期抛错分支**——非法猫名。
+   *
+   * 触发形态 = **快照/现状分歧**：执行期用派发批次里的 agent 配置（合法名），提交期
+   * `resolveCommitTargets` 重新读 **DB 当前行**（`getAgentById`）。`agents` 表可变
+   * （`reply.ts` 已为此把 provider/model 记为快照：「事后 join 拿到的是今天的配置」），
+   * 猫名在两次读之间被改掉即命中本分支（V7 用的同一形态，本格把它测成行级契约）。
+   */
+  it('P3-c-1 · 提交期猫名非法 ⇒ 该猫不提交、不清理、留 error；主仓库零改动', async () => {
+    const sid = 'scwt0009'
+    const shortId = sessionShortId(sid)
+    git(['branch', sessionBranch(shortId)])
+
+    // 猫树先存在（执行期走配置快照的合法名 ⇒ 本轮执行本身照常进行）
+    const catWt = ensureCatWorktree(sid, CAT1.id, CAT1.name)
+    registerWorktree(catWt)
+    expect(catWt).toBeTruthy()
+    // 脏文件（未跟踪）：本格「**不清理**」的行为读数——清理若真执行，`git clean -fd` 会删掉它
+    writeFileSync(resolve(catWt!, 'dirty.txt'), '待清理\n', 'utf-8')
+
+    // 提交期读到的名字变非法（`/` ⇒ `catSlug` 显式抛错，不静默剔除）
+    getDb().prepare(`UPDATE agents SET name = 'a/b' WHERE id = 'cat-1'`).run()
+
+    await runRound(sid, 'scwt-p3c1', CAT1, 'trace-scwt-p3c1')
+
+    // 留 error：显式抛错被收成 error 级留痕（**不吞成静默**——静默正是本仓反复点名的形态）
+    expect(h.logError).toHaveBeenCalledWith(
+      'worktree resolve failed — tree skipped',
+      expect.objectContaining({ agentId: 'cat-1', agentName: 'a/b' })
+    )
+    // 不提交：后果留痕 + 行为读数（该猫分支 sha 逐字节不变）
+    expect(h.logWarn).toHaveBeenCalledWith(
+      'auto commit skipped — worktree unavailable',
+      expect.objectContaining({ agentId: 'cat-1' })
+    )
+    expect(git(['rev-parse', catBranch(shortId, CAT1.name)])).toBe(initSha)
+    // 不清理：后果留痕 + 行为读数。
+    // ⚠ 「文件还在」**单独一条判不出**清理与否——成功路径会把脏文件 `git add -A` 提交掉，
+    // 于是它也「还在」（反向对照实测：见报告 §四 P3-c 控制组）。判据必须配上
+    // 「**不在分支上** + 树**仍是脏的**」才与成功路径分得开。
+    expect(h.logWarn).toHaveBeenCalledWith(
+      'dirty-file cleanup skipped — worktree unavailable',
+      expect.objectContaining({ agentId: 'cat-1' })
+    )
+    expect(existsSync(resolve(catWt!, 'dirty.txt'))).toBe(true)
+    expect(git(['status', '--porcelain'], catWt!)).toContain('dirty.txt')
+    expect(fileOnBranch(catBranch(shortId, CAT1.name), 'dirty.txt')).toBeNull()
+    // 降级绝不落主仓库（T-1 已收窄的红线锚）
+    expect(branchHead('dev')).toBe('init')
+    expect(readFileSync(resolve(tmpRepo, 'tracked.txt'), 'utf-8')).toBe('base\n')
+  })
+
+  /**
+   * P3-c-2（同上）：同一个提交期 catch 的**另一成因**——所有权冲突。
+   *
+   * 触发形态 = **规范化碰撞**：`甲 猫`（dup-1 已占）与 `甲猫`（cat-1 改成）是两个不同的
+   * DB 值（`agents.name` 的 UNIQUE 拦不住），但 `catSlug` 剥空白后归一 ⇒ 同一条分支、
+   * 同一棵树。提交期解析 cat-1 时命中**别人的树** ⇒ 拒绝复用、显式抛错。
+   * 比 P3-c-1 多一条独有断言：**所有权标记不被静默覆写**——覆写 = 两只猫共用一棵树
+   * 且无人察觉，这正是该标记存在的全部理由。
+   */
+  it('P3-c-2 · 提交期所有权冲突（规范化碰撞）⇒ 不提交、不清理、留 error；标记不被覆写', async () => {
+    const sid = 'scwt0010'
+    const shortId = sessionShortId(sid)
+    git(['branch', sessionBranch(shortId)])
+
+    // 前提读数：「两个不同的 DB 名」确实归一到**同一条分支**（碰撞是实测的，不是推演）
+    const shared = catBranch(shortId, DUP_A.name)
+    expect(DUP_A.name).not.toBe(DUP_B_NAME)
+    expect(catBranch(shortId, DUP_B_NAME)).toBe(shared)
+
+    // 该分支/树由 dup-1 占住（分支 + 目录 + 所有权标记三件套一起落）
+    const dupWt = ensureCatWorktree(sid, DUP_A.id, DUP_A.name)
+    registerWorktree(dupWt)
+    expect(dupWt).toBeTruthy()
+    expect(catOwnerMarker(shared)).toBe('dup-1')
+
+    // cat-1 自己的树（执行期走配置快照名 ⇒ 本轮执行照常；脏文件落这里，用于「不清理」读数）
+    const catWt = ensureCatWorktree(sid, CAT1.id, CAT1.name)
+    registerWorktree(catWt)
+    expect(catWt).toBeTruthy()
+    writeFileSync(resolve(catWt!, 'dirty.txt'), '待清理\n', 'utf-8')
+
+    // 提交期：cat-1 的 DB 名改成规范化后与 dup-1 撞车的形态 ⇒ 命中已被占用的分支/树
+    getDb().prepare(`UPDATE agents SET name = ? WHERE id = 'cat-1'`).run(DUP_B_NAME)
+
+    await runRound(sid, 'scwt-p3c2', CAT1, 'trace-scwt-p3c2')
+
+    expect(h.logError).toHaveBeenCalledWith(
+      'worktree resolve failed — tree skipped',
+      expect.objectContaining({ agentId: 'cat-1', agentName: DUP_B_NAME })
+    )
+    // 不提交 / 不清理：行为读数（共享分支 sha 不变、脏文件仍在且**仍是脏的**——
+    // 「文件还在」单独不成判据，理由同 P3-c-1）
+    expect(git(['rev-parse', shared])).toBe(initSha)
+    expect(existsSync(resolve(catWt!, 'dirty.txt'))).toBe(true)
+    expect(git(['status', '--porcelain'], catWt!)).toContain('dirty.txt')
+    expect(fileOnBranch(catBranch(shortId, CAT1.name), 'dirty.txt')).toBeNull()
+    // 该成因独有的安全性质：标记仍是 dup-1（**没被静默覆写成 cat-1**）
+    expect(catOwnerMarker(shared)).toBe('dup-1')
+    expect(branchHead('dev')).toBe('init')
+    // 被占的那棵树没被这轮清理波及（不清理的作用面是「目标树」，不是别人的树）
+    expect(existsSync(dupWt!)).toBe(true)
   })
 })
 
