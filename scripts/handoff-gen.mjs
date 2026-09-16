@@ -1619,9 +1619,42 @@ function isAncestorOfHead(cwd, sha) {
 }
 
 /**
- * 历史改写自愈：delivered/pending 中不是当前 HEAD 祖先的 SHA 全部移除。
- * e2e 管道会 reset --hard 改写历史——旧 SHA 已不存在，留着会让状态"超前"、
- * 误跳过新历史中的同内容 commit；清除后按首次投递重新幂等恢复。
+ * SHA 是否仍「活着」——即这个共享仓库里还有某棵树可能需要它。
+ *
+ * 判据 = **被某个 ref 可达**（「本树 HEAD 祖先」只作快路径）。两个更直觉的判据
+ * 都被实测否掉，改前务必先读这段：
+ *
+ *   - ❌「对象存在于对象库」：`reset --hard` 改写历史后旧 commit 只是变**悬空**，
+ *     对象仍在（实测 `git cat-file -e <旧 sha>` 为真）⇒ 按「对象在 = 还活着」判，
+ *     账本历史改写自愈（`pruneState` 的存在理由）**整条失效**。
+ *   - ❌「本树 HEAD 祖先」（本函数引入前的判据）：账本已共享（见
+ *     `resolveStateRoot` / AGENTS.md「状态落盘键控」），三棵会话 worktree 各在
+ *     各的分支，兄弟树的**活** SHA 必然不是本树祖先（实测：B 树视角
+ *     `merge-base --is-ancestor` 为假，而 `for-each-ref --contains` 命中
+ *     `refs/heads/<A 树分支>`）⇒ 按此判死，B 树的任意钩子都会删掉 A 树的
+ *     pending 条目，**被删的条目再没有第二次投递机会**（漏投方向，正是本仓
+ *     「宁可多投不可漏投」的反面）。
+ *
+ * refs 经 `--git-common-dir` 全 worktree 共享，故 B 树看得到 A 树分支 ⇒ 可达性
+ * 判据天然跨树成立。sha 不存在 / 非 commit 时 git 报 `no such commit` 并非零退出
+ * （`safeGit` 得 null）⇒ 判死，老的自愈路径不受影响。
+ *
+ * @param {string} sha — 完整 SHA
+ */
+function isShaAlive(cwd, sha) {
+  if (isAncestorOfHead(cwd, sha)) return true // 快路径：本树历史上就有，省一次 for-each-ref
+  return Boolean(safeGit(cwd, `for-each-ref --contains=${sha} --format=%(refname)`))
+}
+
+/**
+ * 历史改写自愈：delivered/pending 中**已死**（无任何 ref 可达）的 SHA 全部移除。
+ * e2e 管道会 reset --hard 改写历史——旧 SHA 悬空、不再属于任何分支，留着会让状态
+ * "超前"、误跳过新历史中的同内容 commit；清除后按首次投递重新幂等恢复。
+ *
+ * 判据是 `isShaAlive` 不是「本树 HEAD 祖先」：后者在共享账本下会把兄弟 worktree
+ * 的活条目当「已改写」删掉（见 `isShaAlive` 注释）。delivered 侧同样换判据——
+ * 只删多投方向（安全）不足以成为留旧判据的理由：兄弟树的 delivered 被反复误删
+ * 会让它的 HEAD 每次都被重投，共享账本的幂等承诺只兑现一半。
  */
 function pruneState(cwd) {
   const state = readState(cwd)
@@ -1629,12 +1662,12 @@ function pruneState(cwd) {
   if (!headSha) return // 仓库无 commit，不动状态
   let changed = false
   for (const sha of Object.keys(state.delivered)) {
-    if (!isAncestorOfHead(cwd, sha)) {
+    if (!isShaAlive(cwd, sha)) {
       delete state.delivered[sha]
       changed = true
     }
   }
-  const kept = state.pending.filter((entry) => isAncestorOfHead(cwd, entry.sha))
+  const kept = state.pending.filter((entry) => isShaAlive(cwd, entry.sha))
   if (kept.length !== state.pending.length) {
     state.pending = kept
     changed = true
@@ -1760,10 +1793,11 @@ async function drainPending(cwd, serverUrl) {
     const { sha } = entry
     // 只有钩子条目需要复判归属；兜底条目连判据都不该问（问了必静默，见函数头注释）
     const judgeAttribution = entry.src === 'hook'
-    if (!isAncestorOfHead(cwd, sha)) {
-      // 历史改写后 SHA 失效（prune 兜底），正常不会走到这里
+    if (!isShaAlive(cwd, sha)) {
+      // 历史改写后 SHA 失效（prune 兜底），正常不会走到这里。
+      // 判据同 pruneState——「不是本树 HEAD 祖先」在共享账本下会误删兄弟树的活条目。
       console.log(
-        `[handoff-gen] ⏭️  pending 中 ${sha.slice(0, 7)} 不是当前 HEAD 祖先（历史已改写）——移除`
+        `[handoff-gen] ⏭️  pending 中 ${sha.slice(0, 7)} 已无任何分支可达（历史已改写）——移除`
       )
       state.pending = state.pending.filter((e) => e.sha !== sha)
       writeState(cwd, state)
