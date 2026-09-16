@@ -53,8 +53,15 @@ export default defineConfig({
       // 日志文件隔离（票 F1-c c1）——同一范式、同一病灶：测试与生产原先**写同一个**
       // packages/server/data/cat-study.log（__dirname 恒为 src ⇒ dev/prod/测试三者同路径），
       // 实测测试夹具条目与生产条目逐行交错在同一个文件里 ⇒「生产上嵌入挂没挂过」不可判定。
-      // 重定向到 node_modules/.cache/（构建产物区，不污染仓库）。
-      LOG_FILE: 'node_modules/.cache/test-logs/cat-study-test.log',
+      //
+      // **必须绝对路径**（票 `precommit-scope` 残余收口·单A）：原先写相对路径
+      // `node_modules/.cache/test-logs/…`，由 logger 的 `path.resolve(override)` 按 **cwd**
+      // 解析 ⇒ 与 RESTART_FILES_DIR 同款病灶：worktree 的 node_modules 是指向主仓库的
+      // junction，主仓库与各 worktree 落到**同一批物理文件**（多猫并行时两轮测试日志逐行
+      // 交错，与上面那条「dev/prod/测试交错」是同一个失败形态）。派生法与 ISOLATION_ROOT
+      // 同款、同键（本包目录绝对路径）⇒ 主仓库与每个 worktree 各一份。**不能删这一行**：
+      // 删了回落包内 data/ 目录（见上一段注释）。末段保留 `test-logs/cat-study-test.log`。
+      LOG_FILE: resolve(ISOLATION_ROOT, 'test-logs', 'cat-study-test.log'),
     },
     coverage: {
       thresholds: {
