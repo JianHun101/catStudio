@@ -86,6 +86,53 @@ const SCOPE_PREFIXES = [
 /** 命中即跳过 · 前缀 —— 在飞文档 / 会话产物，无测试消费者（不在记忆白名单内） */
 const SKIP_PREFIXES = ['docs/run/', 'docs/sessions/']
 
+/**
+ * 重活用例清单 —— **仅收窄档**追加到 vitest CLI 的 `--exclude`（票辛，店长裁 B2）。
+ *
+ * ── 判据 = 性质，且必须与「本档的改动面」相交（不是「属于哪个包」）──────
+ * 一条用例该不该在**提交口**跑，问三件事：
+ *   ① **相变性**：它判的面，与「收窄档的改动面」是否相交？不相交 ⇒ 此档里纯冗余。
+ *   ② **判据性质**：它的输赢是否由墙钟/OS 调度主导？是 ⇒ 负载一高就自己红，与改动对错
+ *      无关 —— 同步门禁只该放**确定性**检查，靠墙钟判生死的一律不进来。
+ *   ③ **有无兜底**：排掉它的代价，别的档位能不能兜住？
+ *
+ * ①是这里最容易搞错的一条，两条**故意不列**的用例都是被①挡下的（见下）。
+ *
+ * ── 为什么是「排除清单」而不是「只跑白名单」（B1）──────────────
+ * 两者**清单过期时的失败形态相反**，这是选 B2 的全部理由：
+ *   本形态（排除）漏列一条 ⇒ 该重活用例回来跑 ⇒ **变慢、负载下可能假红 = 吵**；
+ *   白名单形态 漏列一条 ⇒ 该用例**静默不跑**，没有任何人知道。
+ * 选吵，不选静默。
+ *
+ * ── 路径为什么写成「相对 scripts/ 的路径」（实测，勿改形状）──────
+ * vitest 4.1.9 实测：`--exclude` 的 glob 基准是**各 project 自己的 root**（不是仓库根），
+ * 且**跨 project 全局生效**（同一次调用里给的排除项，在 server 上也确实排掉了 server 的文件）。
+ *   `scripts/closeout-dupcheck.test.js` ⇒ **不生效**（证明基准不是仓库根）
+ *   `closeout-dupcheck.test.js`         ⇒ 生效
+ * 故写成相对 `scripts/` 的路径。**刻意不加「双星号斜杠」前缀**：那种形状会在将来
+ * `scripts/<新目录>/同名文件` 出现时**被误排 = 静默少跑**；精确路径失配只会让重活用例
+ * 回来跑（吵）。又是「静默 vs 吵」同一个取舍。
+ *
+ * ── 代价（明写，别让下一个人重新推）────────────────────────
+ * 本清单生效后，一个**改坏了这些用例所覆盖的脚本**的提交，不会在提交口被它们拦下 ——
+ * 它们改由 FULL 档（改 `.husky/**`、契约层、`package.json` / `vitest.config.ts`）与
+ * 全量 `pnpm test` / 审查链兜住。丢的是**档**，不是**岗**。
+ */
+export const HEAVY_CASES = Object.freeze([
+  // 逐个都实跑了单文件耗时（串行、无并发争用），见清单注释：合计占 scripts project 的 98%
+  'closeout-dupcheck.test.js', // 8.8s —— 真 spawn node 跑真脚本 + 真 git 仓
+  'flywheel/scan.test.js', //     5.3s —— 真 git 仓 + 全量扫描
+  'pre-commit-env.test.js', //    1.3s —— 沙箱复刻主仓库/worktree/共享 config + 真 commit
+  'commit-uuid-gate.test.js', //  1.2s —— 真 SQLite + 真 `git commit` 两次
+])
+// ↑ **故意不在清单里**的同类用例，理由都是判据①（与本档改动面不相交的在下面另外写）：
+//   `test-isolation-guard.test.js`（0.9s）—— 它命中「真子进程 + 真 worktree」两条性质，
+//     但判据① 反向成立：它判的正是**改 `packages/**` 的产物**（新写的测试有没有把隔离
+//     路径落到 junction 共享面）。`:148-158` 的追加规则就是为它立的 —— 把它排掉，追加
+//     `scripts` 这个动作本身就空了。**这是本清单唯一的「性质命中但必须留」项**。
+//   `hooks-config.test.js`（44ms）—— 真 spawn git，但成本不在墙钟主导（判据②不过），
+//     且它判 `.husky/hooksPath`（本仓复发 3 次的病）。排它收益为零、风险为正。
+
 const FULL = Symbol('full')
 const SKIP = Symbol('skip')
 
@@ -191,6 +238,42 @@ function gitStagedPaths() {
     .filter(Boolean)
 }
 
+/**
+ * 全量档判据：`decision.projects` 与 `ALL_PROJECTS` **逐元素相等**（含顺序）。
+ *
+ * 用逐元素比较而不是「长度相等 + 集合相等」：`projects` 的契约就是按序子序列
+ * （`resolveScopes` §2.2），顺序错了本身就是坏读数，不该被判成「全量」而放过。
+ * 也不写成 `projects.length === 4`：4 是今天的巧合，`ALL_PROJECTS` 增删一个包时那种写法
+ * 会**静默**把新的全量档误判成收窄档（从而给它加排除项）。
+ */
+export function isFullScope(projects) {
+  return (
+    Array.isArray(projects) &&
+    projects.length === ALL_PROJECTS.length &&
+    projects.every((p, i) => p === ALL_PROJECTS[i])
+  )
+}
+
+/**
+ * 组装传给 vitest 的参数（`run` 之后的全部内容）。
+ *
+ * **分档**：全量档一个字节不加 `--exclude`（`.husky/**` / 契约层 / `packages/shared/**`
+ * 这些入口的重活用例**在它最该在岗的位置不缺岗**）；收窄档才追加 `HEAVY_CASES`。
+ *
+ * 第二个条件 `includes('scripts')` 在当前 `resolveScopes` 下恒被第一条件蕴含（任何
+ * `packages/**` 档都会追加 `scripts`，纯 `scripts` 档本身也含它）—— 留着是因为它把
+ * 「这份清单只对 scripts 的用例有意义」这个前提**写在代码里**，而不是只写在注释里：
+ * 将来若追加规则被改动，这里会退化成「不给无关档位塞无效参数」，方向安全（重活用例回来
+ * 跑 = 吵，不是静默少跑）。
+ */
+export function buildVitestArgs(decision) {
+  const args = decision.projects.flatMap((s) => ['--project', projectNameOf(s)])
+  if (!isFullScope(decision.projects) && decision.projects.includes('scripts')) {
+    for (const c of HEAVY_CASES) args.push('--exclude', c)
+  }
+  return args
+}
+
 function main() {
   let decision
   try {
@@ -205,7 +288,7 @@ function main() {
     return 0
   }
 
-  const args = decision.projects.flatMap((s) => ['--project', projectNameOf(s)])
+  const args = buildVitestArgs(decision)
   const vitest = resolve(ROOT, 'node_modules', 'vitest', 'vitest.mjs')
   console.log(`[precommit-scope] run: node ${vitest} run ${args.join(' ')}`)
   const r = spawnSync(process.execPath, [vitest, 'run', ...args], { cwd: ROOT, stdio: 'inherit' })

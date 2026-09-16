@@ -15,7 +15,16 @@
  * 单靠 `scripts/**` 或纯文档的格子不受影响。
  */
 import { describe, it, expect } from 'vitest'
-import { ALL_PROJECTS, resolveScopes, projectNameOf } from './precommit-scope.mjs'
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
+import {
+  ALL_PROJECTS,
+  HEAVY_CASES,
+  buildVitestArgs,
+  isFullScope,
+  resolveScopes,
+  projectNameOf,
+} from './precommit-scope.mjs'
 
 const ALL = [...ALL_PROJECTS]
 
@@ -298,5 +307,98 @@ describe('projectNameOf · scope → vitest project 名', () => {
   it('映射结果两两不同（撞名 ⇒ 一个 project 被跑两次、另一个被漏掉）', () => {
     const names = ALL.map(projectNameOf)
     expect(new Set(names).size).toBe(names.length)
+  })
+})
+
+/**
+ * 票辛（店长裁 B2）—— 重活用例分档：`buildVitestArgs` 的两档读数。
+ *
+ * 为什么单列一组：上面全部格子测的是 `resolveScopes` 的**判决**（该跑哪些 project），
+ * 本组测的是**同一个判决如何变成 vitest 参数** —— 分档发生在这一层，判决层看不见它。
+ * 不测这组，上面矩阵可以全绿而「全量档也被塞了 `--exclude`」这种坏法无人抓。
+ *
+ * 本组是四类测试里的**纯单元**（无 vitest 子进程），故不断言「vitest 实际跑了几个文件」
+ * —— 那条属于验收探针（手工跑，见交付说明），放进来会把单测变成分钟级。
+ */
+describe('buildVitestArgs · 票辛 B2 —— 重活用例分档', () => {
+  const NAMES = ALL.map(projectNameOf)
+  /** 抽 `--exclude` 的值（CLI 里成对出现：`--exclude <glob>`） */
+  const excludesOf = (args) => args.filter((_, i) => args[i - 1] === '--exclude')
+  const projectsOf = (args) => args.filter((_, i) => args[i - 1] === '--project')
+
+  it('全量档：一个 `--exclude` 都不带（重活用例在它最该在岗的位置不缺岗）', () => {
+    // 三条真实全量入口，分别覆盖「命中 FULL 前缀」「命中 FULL 精确」「fail-closed」
+    const fullInputs = [
+      ['.husky/pre-commit'],
+      ['packages/shared/src/index.ts'],
+      ['foo.unknown'],
+      [],
+    ]
+    for (const staged of fullInputs) {
+      const d = resolveScopes(staged)
+      expect(isFullScope(d.projects), `${staged.join(',') || '(空)'} 应为全量档`).toBe(true)
+      const args = buildVitestArgs(d)
+      expect(excludesOf(args), `全量档不得带排除项：${staged.join(',') || '(空)'}`).toEqual([])
+      expect(projectsOf(args), '全量档仍须选中四个 project').toEqual(NAMES)
+    }
+  })
+
+  it('收窄档（packages + 追加护栏）：带齐清单每一项，顺序与 HEAVY_CASES 一致', () => {
+    const d = resolveScopes(['packages/server/x.ts'])
+    expect(d.projects).toEqual(['packages/server', 'scripts']) // 前提：确为收窄档
+    const args = buildVitestArgs(d)
+    expect(projectsOf(args)).toEqual(['@cat-study/server', 'scripts'])
+    expect(excludesOf(args)).toEqual([...HEAVY_CASES])
+  })
+
+  it('收窄档（仅 scripts）：同样带齐 —— 本文件自己的提交就走这条', () => {
+    const d = resolveScopes(['scripts/precommit-scope.mjs'])
+    expect(d.projects).toEqual(['scripts'])
+    expect(excludesOf(buildVitestArgs(d))).toEqual([...HEAVY_CASES])
+  })
+
+  // 非恒真对照：两档若要相等，只能是实现了「一律加」或「一律不加」——都是坏的
+  it('反向对照：全量档与收窄档的参数读数必须不同', () => {
+    const full = buildVitestArgs(resolveScopes(['.husky/pre-commit']))
+    const scoped = buildVitestArgs(resolveScopes(['scripts/x.mjs']))
+    expect(full.includes('--exclude')).toBe(false)
+    expect(scoped.includes('--exclude')).toBe(true)
+    expect(full).not.toEqual(scoped)
+  })
+
+  it('参数成对且不互相吞：`--exclude` 个数 = 清单长度，`--project` 个数 = project 数', () => {
+    const args = buildVitestArgs(resolveScopes(['scripts/x.mjs']))
+    expect(args.filter((a) => a === '--exclude').length).toBe(HEAVY_CASES.length)
+    expect(args.filter((a) => a === '--project').length).toBe(1)
+    // 无空串 / undefined 混进参数数组（spawnSync 会把它们当真实参数传给 vitest）
+    expect(args.every((a) => typeof a === 'string' && a.length > 0)).toBe(true)
+  })
+
+  // 死条目防线：清单里写错路径 ⇒ 该条**静默失效**（重活用例又跑起来 = 吵，方向安全但仍该抓）。
+  // 这是本组唯一的 I/O（本地文件存在性，微秒级）—— 换来的是一条清单自检。
+  it('清单每一项在 scripts/ 下真实存在（防拼错路径的死条目）', () => {
+    for (const c of HEAVY_CASES) {
+      expect(existsSync(resolve(import.meta.dirname, c)), `清单条目不存在：scripts/${c}`).toBe(true)
+    }
+  })
+})
+
+describe('isFullScope · 判据（逐元素相等，含顺序）', () => {
+  it('四个成员且顺序一致 ⇒ 全量档', () => {
+    expect(isFullScope([...ALL_PROJECTS])).toBe(true)
+  })
+
+  it('顺序不同 / 多一个 / 少一个 / 为空 ⇒ 都不是全量档', () => {
+    // 顺序是契约（§2.2）：顺序坏了本身就是坏读数，不该被当成全量放过
+    expect(isFullScope([...ALL_PROJECTS].reverse())).toBe(false)
+    expect(isFullScope([...ALL_PROJECTS, 'scripts'])).toBe(false)
+    expect(isFullScope(ALL_PROJECTS.slice(0, 3))).toBe(false)
+    expect(isFullScope([])).toBe(false)
+    expect(isFullScope(['scripts'])).toBe(false)
+  })
+
+  it('非数组入参不抛（本函数不负责 fail-closed，但不得炸在判据里）', () => {
+    expect(isFullScope(undefined)).toBe(false)
+    expect(isFullScope(null)).toBe(false)
   })
 })
