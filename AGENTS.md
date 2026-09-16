@@ -73,6 +73,8 @@ pnpm build                # pnpm -r build
 
 **提交**：`git add <paths>` → `git diff --cached --name-only` 核对暂存区 → 裸 `git commit`（裸 commit 提交**整个**暂存区，故核对步是限定路径的替代保证，不是可选礼仪）；**勿用 `git commit --only`**——`.husky/pre-commit` 为挡 git 注入污染会 `unset GIT_INDEX_FILE`，而 `--only` 恰是靠这个变量把临时索引递给钩子的，剥掉后 lint-staged 回落真 index、撞上 git 全程自持的 `index.lock`（实测：`--only` 期 gitdir 内有 `index.lock`，裸 commit 无）；多 Agent 并行时勿 `git add -A`（会扫走别人未提交的文件）。
 
+**状态落盘键控**：新增任何跨进程状态（push gate / 投递账本 / 缓存 / 测试夹具路径）前先答两问，答不出不许落盘——①**共享还是隔离**：正确性依赖「全仓只有一棵树」→ 共享，键 `--git-common-dir` 的父目录（全 worktree 唯一）；否则隔离，键 `--show-toplevel`（每树一份）。②**允不允许依赖某个常驻进程活着**：不允许 → 必须落文件（门禁类只此一条——进程死了会退化成静默放行，正是门禁要防的）；允许 → 进 server/SQLite 管道，不另造一条（单一真相源）。锚点由进程启动时解析一次后经 helper 注入，**use-site 禁止自己拼相对路径或裸 `os.tmpdir()`**——worktree 把每个「碰巧全仓唯一」都变成「每树一份」。
+
 **外部工具形态选型**：任何外部 CLI/工具形态决策必须过 ADR 0007 清单（`docs/adr/0007-external-tool-form-selection-checklist.md`）——能力对账前置 / 假设标红+实测对称 / 简单形态默认+复杂举证倒置 / 决策留痕。
 
 ## Pointers
