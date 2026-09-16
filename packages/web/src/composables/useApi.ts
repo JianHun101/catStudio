@@ -282,6 +282,19 @@ export interface SpanDto extends SpanRow {
   llm: LlmSpanDetail | null
 }
 
+/** 本会话**每只猫的最后一次执行**（R4 §A，右侧面板内联 trace 用）。
+ *  **camelCase**——随 eval 面 chains 面惯例（同构的 `ChainHop` 亦是 camelCase；
+ *  `SpanDto` 走 snake_case 是因为它直接透传 DB 行，两者别混）。 */
+export interface SessionTraceDto {
+  agentId: string
+  executionId: string
+  status: string
+  startedAt: string
+  /** 在飞恒 `null` ⇒ 耗时不可得：前端必须显式显示「采集中」，不是 `0` 也不是空白 */
+  endedAt: string | null
+  totalMs: number | null
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -479,5 +492,15 @@ export const api = {
   getEvalSpans: (executionId: string) =>
     request<{ ok: boolean; spans: SpanDto[] }>(
       `/eval/spans?execution_id=${encodeURIComponent(executionId)}`
+    ),
+
+  /** 本会话**每只有执行的猫的最后一次执行**（R4 §A，右侧面板内联 trace 的入口）。
+   *  契约（派活单钉死）：每猫取 `started_at` 最大的一条、**不看状态**；在飞
+   *  （`endedAt == null`）**照样返回**；本会话零执行的猫**不出现**在数组里
+   *  （不是 `0` 不是空白——前端据此显示「本会话暂无执行」）。
+   *  段数据**不内联**：拿到 `executionId` 后再调 `getEvalSpans` 懒加载。 */
+  getSessionTraces: (sessionId: string) =>
+    request<{ ok: boolean; traces: SessionTraceDto[] }>(
+      `/eval/session-traces?session_id=${encodeURIComponent(sessionId)}`
     ),
 }

@@ -343,3 +343,33 @@ describe('口径常量闭集（与 R2 §五 同源）', () => {
     }
   })
 })
+
+describe('相位配色的跨文件一致性（R4：面板与评估页必须同色）', () => {
+  /** 从 SFC 源码里取 `.ph-<phase> { background: X }` 映射 */
+  function phaseColors(src: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const m of src.matchAll(/\.ph-([a-z]+)\s*\{\s*background:\s*([^;]+);/g)) {
+      out[m[1]] = m[2].trim()
+    }
+    return out
+  }
+
+  it('两侧 .ph-* 色值逐项相等（同一段在两处必须是同一个颜色）', async () => {
+    // 相位色是 CSS（无法从本常量模块生成），故两处各有一份**值拷贝**——
+    // 靠这条对拍把漂移从静默变响亮。跨文件读 `?raw` 是本例的必要手段：
+    // 要断言的是两个组件的**关系**，不是任一组件自身。
+    const panel = (await import('@/components/SessionAgentsPanel.vue?raw')).default
+    const evalView = (await import('@/views/EvaluationView.vue?raw')).default
+
+    const a = phaseColors(panel)
+    const b = phaseColors(evalView)
+
+    // 反例对照：抽取函数真取到了东西（空对象对空对象也会「相等」= 恒真假绿）
+    expect(Object.keys(a).sort()).toEqual(['llm', 'orch', 'pers', 'retr', 'wait'])
+    expect(a).toEqual(b)
+    // 相位色必须覆盖 SPAN_PHASE 的**全部**值域，否则某相位在两处都没有样式
+    for (const ph of new Set(Object.values(SPAN_PHASE))) {
+      expect(a[ph]).toBeTruthy()
+    }
+  })
+})
