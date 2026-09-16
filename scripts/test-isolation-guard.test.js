@@ -11,12 +11,14 @@
  * 而漏网的形态恰恰是「新写一个测试、顺手敲了个相对路径」——静态扫是唯一能在代码进仓前
  * 判它的形态。
  *
- * ⚠️ **执行面（别按「提交口护栏」去信它）**：本文件属 `scripts` project
- * （`scripts/vitest.config.ts` 的 include 是「任意目录下的 test.js」），`precommit-scope.mjs` 按改动面
- * 收窄 project（`packages/server/**` ⇒ 只跑 `@cat-study/server`）——故**改 server/web 的提交，
- * 提交口不跑本护栏**。它实际生效于：审查档全量、落地档全量。让 packages 改动也带上 scripts
- * project 属 scope 语义变更（`packages/server` scope ⇒ projects 不再一一对应），已报店长裁，
- * 本文件不擅改（见 report §五-4）。
+ * **执行面（票 `precommit-scope` 残余收口·单B 后）**：本文件属 `scripts` project
+ * （`scripts/vitest.config.ts` 的 include 是「任意目录下的 test.js」）。原先 `precommit-scope.mjs`
+ * 按改动面收窄 project（`packages/server/**` ⇒ 只跑 `@cat-study/server`）⇒ **改 packages 的提交，
+ * 提交口不跑本护栏**，护栏在它最该拦的位置上不在岗（已报店长，**裁 B**：命中 `packages/**` 时
+ * 追加 `scripts` project，代价 ~4.4s/次提交）。现生效于：**改 `packages/**` 的提交口** +
+ * 改 `scripts/**` 的提交口 + 审查档全量、落地档全量。
+ * （`packages/server` scope ⇒ projects 不再一一对应，这不是契约变更：`packages/shared` 本就
+ * 映射到 4 个 project，scope↔project 一一对应从来就不成立。）
  *
  * ── 三条规则 ──
  * - **R1**：出现 `node_modules/.cache`（含反斜杠写法）字面量 ⇒ 红。拆成两段字面量
@@ -93,11 +95,14 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import serverVitestConfig from '../packages/server/vitest.config.js'
+import scriptsVitestConfig from './vitest.config.js'
 import { isolatedTestDir } from '../packages/server/src/test-helpers.js'
+import { cleanGitEnv, resolveRepoRoot } from './commit-uuid-gate.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -356,18 +361,9 @@ function walk(dir, acc = []) {
  * 每条都要求**实际命中 ≥1 行**（有断言钉着），防白名单腐烂成死条目。
  */
 const WHITELIST = [
-  {
-    file: 'packages/server/vitest.config.ts',
-    lineMatch: /\bLOG_FILE\b/,
-    reason:
-      'LOG_FILE 族不在本票范围（票面明写：restart 族 9 处收口，LOG_FILE 两处另立单）——' +
-      '本行改的是 RESTART_FILES_DIR，LOG_FILE 仍相对路径，待后续单收口',
-  },
-  {
-    file: 'scripts/vitest.config.ts',
-    lineMatch: /\bLOG_FILE\b/,
-    reason: '同上：LOG_FILE 族另立单，本票不碰',
-  },
+  // ⚠️ `packages/server/vitest.config.ts` 与 `scripts/vitest.config.ts` 的 LOG_FILE 两条目
+  // 已于票 `precommit-scope` 残余收口（单A）**随实现改为绝对路径而删除**——它们不再是违规，
+  // 白名单条目若留着即「死条目」（下方 `dead` 断言会红）。这不是判据放宽，是修好之后的应然。
   {
     file: 'packages/server/src/logger.test.ts',
     // 两行：stubEnv 那行含 `LOG_FILE`，断言那行只含路径末段 `test-logs`
@@ -375,7 +371,8 @@ const WHITELIST = [
     reason:
       '**故意**用相对路径：该用例断言的是 resolveLogFile() 这个**纯函数**的返回值语义' +
       '（`path.resolve(相对值)`），全程不写文件、不落盘 ⇒ 不产生任何跨根共享的物理文件，' +
-      '与「隔离目录落共享面」的失败形态无关。LOG_FILE 族另立单时一并评估',
+      '与「隔离目录落共享面」的失败形态无关。残余收口单（单A）已评估并**保持原样**：' +
+      '本文件不写文件，改为绝对路径反而会掩盖 `resolveLogFile` 的相对值语义那条断言。',
   },
   {
     file: 'packages/server/src/restart-request.ts',
@@ -674,3 +671,103 @@ describe('V12 双模式：隔离路径恒为绝对且不落仓库内', () => {
     expect(serverVitestConfig.test.env.RESTART_FILES_DIR).toBe(isolatedTestDir('restart-test'))
   })
 })
+
+/**
+ * V23（票 `docs/run/precommit-scope/tickets-residual.md` §四 · 单A）—— `LOG_FILE` 双模式。
+ *
+ * 被判面 = 「测试跑批的日志文件落在**本仓库之外**、且**随仓库根变化**」。failure 形态同
+ * RESTART_FILES_DIR：相对路径经 `logger.ts` 的 `path.resolve(override)` 按 **cwd** 解析 ⇒
+ * worktree 的 `node_modules` 是指向主仓库的 junction ⇒ 主仓库与各 worktree 写**同一批物理文件**
+ * （多猫并行时两轮测试日志逐行交错，与生产日志被测试条目污染是同一个不可判定问题）。
+ *
+ * 反向对照（报告 §… 有读数）：把任一处改回原来的相对字面量 ⇒ 本节 V23-c 必须变红
+ * （两处变回同一个常量字符串 ⇒ 「随目录变」不成立）。**不做反向对照就不知道这组是不是恒绿。**
+ */
+describe('V23 单A：LOG_FILE 恒为绝对、不落仓库内、随配置目录变化', () => {
+  const LOG_SUFFIX = join('test-logs', 'cat-study-test.log')
+  const CONFIGS = [
+    ['packages/server/vitest.config.ts', serverVitestConfig.test.env.LOG_FILE],
+    ['scripts/vitest.config.ts', scriptsVitestConfig.test.env.LOG_FILE],
+  ]
+
+  it('V23-a 两处都是绝对路径、都不在仓库内、末段保留 test-logs/cat-study-test.log', () => {
+    for (const [file, value] of CONFIGS) {
+      expect(typeof value, `${file} 的 LOG_FILE 必须是字符串`).toBe('string')
+      expect(isAbsolute(value), `${file} 必须是绝对路径（实测 ${value}）`).toBe(true)
+      // 「不在仓库内」——跨盘符时 relative 直接回绝对路径，两种「在外」都认
+      const step = relative(REPO_ROOT, value)
+      expect(step.startsWith('..') || isAbsolute(step), `${file} 落进了仓库：${value}`).toBe(true)
+      expect(value, `${file} 仍落在 junction 共享面（node_modules）`).not.toContain('node_modules')
+      expect(value.endsWith(LOG_SUFFIX), `${file} 末段被改：${value}`).toBe(true)
+    }
+  })
+
+  it('V23-b 派生公式与 RESTART_FILES_DIR 同款同键（server 侧与 test-helpers 同解，防漂移）', () => {
+    // server 侧的键是「本包目录绝对路径」——与 test-helpers 的 ISOLATION_ROOT 同一公式。
+    // scripts 侧没有对应的 test-helpers 面，故只钉 server 侧；两处共用同一公式文本。
+    expect(CONFIGS[0][1]).toBe(isolatedTestDir(LOG_SUFFIX))
+  })
+
+  it('V23-c 值随**配置目录**变化 —— 同一仓库内两个不同配置目录必须给出不同值', () => {
+    // 这条是**恒真性防线**，也是反向对照的落点：改回相对字面量 ⇒ 两处都是同一个常量 ⇒ 本格红。
+    // 用两个**真配置对象**（非测试内复制的公式）比对，故判的是被审面本身。
+    expect(CONFIGS[0][1]).not.toBe(CONFIGS[1][1])
+  })
+
+  /**
+   * V23-d **真跨根读数**：主仓库 vs 本 worktree 各取一次。
+   *
+   * 形态：`resolveRepoRoot()`（既有单源助手，走 `--git-common-dir`）定位主工作区根 ⇒ 用一个
+   * 子进程**真加载那个根里的配置文件**、把 `test.env.LOG_FILE` 打出来比对。
+   *
+   * 为什么不 import `loadConfigFromFile`（vite）：`scripts/` 无 package.json，pnpm 严格隔离下
+   * 从本文件解析不到 `vite`（实测 `Cannot find package 'vite'`）。子进程 `node --input-type=module`
+   * 直接 import 目标 `.ts` 是**零依赖**且更贴近「另一个根自己的人跑了一遍配置」。
+   *
+   * 退化分支（显式，不静默跳过）：本测试若就运行在主仓库内，两根重合 ⇒ 跨根比对不可得，
+   * 此时断言**该退化确实发生**并回落到 V23-c 那条「随目录变」——让「跑的是哪条分支」可见，
+   * 而不是让一条永远为真的断言冒充跨根证据。
+   */
+  it('V23-d 主仓库 ↔ 本 worktree 的真实配置读数不同（退化分支显式断言）', () => {
+    const mainRoot = resolveRepoRoot(REPO_ROOT)
+    expect(mainRoot, '主仓库根解析失败 —— 无法取跨根读数').not.toBe(null)
+    if (resolve(mainRoot) === resolve(REPO_ROOT)) {
+      // 退化：本测试跑在主仓库内。跨根证据由「在主仓库与 worktree 各跑一次」两次执行拼出。
+      expect(resolve(mainRoot)).toBe(resolve(REPO_ROOT))
+      expect(CONFIGS[0][1]).not.toBe(CONFIGS[1][1]) // 见 V23-c 的说明
+      return
+    }
+    for (const [file, hereValue] of CONFIGS) {
+      const thereValue = readLogFileInRoot(mainRoot, file)
+      expect(thereValue, `主仓库侧 ${file} 未取到 LOG_FILE`).not.toBe('')
+      expect(
+        thereValue,
+        `${file} 在主仓库与本 worktree 解析到同一个值（${thereValue}）⇒ 隔离失效`
+      ).not.toBe(hereValue)
+    }
+  })
+})
+
+/**
+ * 在**另一个仓库根**里加载真实 vitest 配置，取回 `test.env.LOG_FILE`。
+ *
+ * 子进程 + `import()` 而非 vitest 的配置加载器：目标是「那个根自己的人跑一遍配置」，不需要
+ * 任何 vitest 语义。`globalThis.__dirname` 是必需的垫片 —— 配置面用 `__dirname` 派生隔离键，
+ * 而 ESM 没有该绑定；Node 对未解析标识符回落到全局对象，故赋值后配置里的 `__dirname` 可解。
+ */
+function readLogFileInRoot(root, relFile) {
+  const abs = resolve(root, relFile)
+  const script = [
+    `globalThis.__dirname = ${JSON.stringify(dirname(abs))}`,
+    `const m = await import(${JSON.stringify(pathToFileURL(abs).href)})`,
+    `process.stdout.write(String(m.default?.test?.env?.LOG_FILE ?? ''))`,
+  ].join('\n')
+  return execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    // 剥 git 注入变量：本文件现在也会在**提交口**被跑到（单B），子进程不该继承钩子的
+    // GIT_DIR/GIT_INDEX_FILE（配置面当前不 shell 出 git，这是便宜保险，不是必需）
+    env: cleanGitEnv(),
+  }).trim()
+}
