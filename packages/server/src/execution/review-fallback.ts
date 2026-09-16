@@ -150,10 +150,10 @@ export function spawnReviewFallback(cwd: string, commitSha: string): SpawnOutcom
   // 残留）。脚本自身所在仓库根才是它的同源工作区，且与 hook 的调用 cwd 一致。
   // 注：修复前该降级分支在 dev:server 形态下不可达（脚本路径先错了），现在可达。
   const workdir = existsSync(cwd) ? cwd : resolve(script, '..', '..')
-  // 清掉 CATSTUDY_SESSION_ID（不继承）：该变量在 handoff-gen 里是「人工显式指定」
-  // 的最高优先目标，且**旁路 delivered 账本**（显式指定即明确意图）。server 侧
-  // 若带着它（注入给 CLI 子进程的那份被误继承/外部 shell 导出），兜底就会投错
-  // 会话并跳过幂等锁。投递目标一律由脚本从 commit uuid 反查——与钩子同源。
+  // 清掉 CATSTUDY_SESSION_ID（不继承）：它在 handoff-gen 里是「投给谁」的最高优先
+  // 信号（显式指定 > commit uuid 反查），server 侧若带着它（注入给 CLI 子进程的
+  // 那份被误继承/外部 shell 导出），兜底就会**改写投递目标**、投到错误的会话。
+  // 它**不参与幂等判据**——旁路 delivered 账本的是 CATSTUDY_FORCE_DELIVER。
   const env = { ...process.env }
   delete env.CATSTUDY_SESSION_ID
   try {
