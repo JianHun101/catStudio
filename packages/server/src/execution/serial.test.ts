@@ -30,7 +30,7 @@ import { getAdapterForAgent } from '../llm/registry.js'
 import { createExecutionEngine } from './serial.js'
 import { resolveMentionLimit, DEFAULT_MAX_MENTIONS_PER_AGENT } from './serial.js'
 import { maybeScoreSample } from '../eval/sampler.js'
-import { ensureAgentWorktree, ensureSessionWorktree, gitCommit } from '../llm/git-utils.js'
+import { ensureAgentWorktree, gitCommit } from '../llm/git-utils.js'
 import type { ExecutionEngine, ExecutionEngineTestHooks } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 
@@ -70,6 +70,16 @@ vi.mock('../llm/git-utils.js', () => ({
   // 本工厂是**部分导出**——漏键 ⇒ serial.ts 拿到 undefined、调用即 TypeError，
   // 而清理段自带 `catch {}` 会把它静默吞掉（表现为「清理莫名没跑」）。
   cleanGitEnv: vi.fn(() => ({ ...process.env })),
+}))
+
+// T-2 Phase I-b 形态 G：`reply.ts` 的 **execution cwd 解析点**从
+// `ensureAgentWorktree`（git-utils）换成了 `ensureExecutionWorktree`（worktree-fanin，
+// 审查者额外做一次分支合并）。**边界 mock 随解析点一起搬**——不搬的话本文件的
+// `ensureAgentWorktree` 桩会漏过去（`vi.clearAllMocks()` 清调用不清 `mockReturnValue`，
+// 见 1204/1242 设过的值），而真 `worktree-fanin` 会对 `/tmp/...` 这种假路径跑真 git。
+// 这是本文件第二次跟着解析点搬家（前一次见下方 git-utils 工厂注释）。
+vi.mock('../llm/worktree-fanin.js', () => ({
+  ensureExecutionWorktree: vi.fn(() => null),
 }))
 
 vi.mock('../summarizer/index.js', () => ({
