@@ -275,27 +275,56 @@ export function sessionWorktreePath(mainRoot: string, shortId: string): string {
   return resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX, shortId)
 }
 
-/** 猫 short id（agent id 前 8 位，分支/目录名用） */
-function catShortId(agentId: string): string {
-  return agentId.slice(0, 8)
+/**
+ * 猫名清洗（分支/目录名用）。
+ *
+ * **绝不复用 `sessionShortId` 的字符过滤正则**（命名票红线 1）：那条
+ * `[^a-zA-Z0-9-]` 会把中文**整串剥成空串** ⇒ 产出 `session/<sid8>-` 空后缀分支，
+ * 失败形态静默（与已固化的 S3-5 同形）。猫名另立清洗，中文/字母/数字**原样保留**
+ * （git 直接接受，命名票 A1–A5 真机实证，无需转义/百分号/八进制）。
+ *
+ * 剔除 git ref 非法字符：`\`、空白、`~ ^ : ? * [ "`、`@{`、`..`、控制字符、首尾 `.`。
+ *
+ * 两类**显式抛错**（不得静默降级为 id 或空串）：
+ * - **含 `/`**：既会把 ref 切成嵌套层级（`session/<sid8>` 与 `session/<sid8>/x`
+ *   在 ref 树里是「文件 vs 目录」冲突，ADR 0015 E1 实跑建不出来），更要紧的是
+ *   **静默剔除会把 `a/b` 折成 `ab`**——与真名 `ab` 归一到同一分支 + **同一棵树**，
+ *   正是本票要消灭的静默共用形态。⇒ 单列为错误而非可剔字符。
+ * - **清洗后为空** ⇒ 造出空后缀分支/目录，失败形态静默。
+ */
+export function catSlug(catName: string): string {
+  if (catName.includes('/')) {
+    throw new Error(
+      `猫名含 '/'，不能用作分支/目录名（静默剔除会把 a/b 折成 ab，与真名 ab 共用同一棵树）：${JSON.stringify(catName)}`
+    )
+  }
+  const slug = catName
+    .replace(/[\u0000-\u001f\u007f]/g, '') // control chars
+    .replace(/[\s\\~^:?*\["@{]/g, '') // git ref 非法字符（含空白）
+    .replace(/\.\./g, '') // `..` 序列
+    .replace(/^\.+|\.+$/g, '') // 首尾 `.`（ref 分量不得以 `.` 开头/结尾）
+  if (!slug) {
+    throw new Error(`猫名清洗后为空，不能用作分支/目录名：${JSON.stringify(catName)}`)
+  }
+  return slug
 }
 
 /**
- * 猫分支名（一猫一工作分支，ADR 0015 D1）。
+ * 猫分支名（一猫一工作分支，ADR 0015 D1）。后缀 = 猫名（`catSlug` 清洗）。
  *
- * **连字符而非斜杠**：`session/<sid8>` 与 `session/<sid8>/<cat8>` 在 git ref 树里
+ * **连字符而非斜杠**：`session/<sid8>` 与 `session/<sid8>/<cat>` 在 git ref 树里
  * 是「目录 vs 文件」冲突——`git branch` 与真实机制 `git worktree add -b` 均报
  * `fatal: cannot lock ref`，`pack-refs --all` 绕不过、反序（先子后父）同样失败
  * （ADR 0015 E1，仓外临时仓实跑）。失败形态是静默的：`git worktree add` 失败走
  * catch → 返回 null，猫拿不到 worktree 而无人察觉。
  */
-export function catBranch(shortId: string, agentId: string): string {
-  return `${sessionBranch(shortId)}-${catShortId(agentId)}`
+export function catBranch(shortId: string, catName: string): string {
+  return `${sessionBranch(shortId)}-${catSlug(catName)}`
 }
 
 /** 猫 worktree 路径（主仓库兄弟目录，与会话 worktree 同层） */
-export function catWorktreePath(mainRoot: string, shortId: string, agentId: string): string {
-  return resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX, `${shortId}-${catShortId(agentId)}`)
+export function catWorktreePath(mainRoot: string, shortId: string, catName: string): string {
+  return resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX, `${shortId}-${catSlug(catName)}`)
 }
 
 /**
@@ -500,29 +529,72 @@ export function ensureSessionWorktree(sessionId: string): string | null {
   return ready.path
 }
 
+/** 猫 worktree 所有权配置键（分支级 git config，落 `.git/config`） */
+function catOwnerConfigKey(branch: string): string {
+  return `branch.${branch}.catAgentId`
+}
+
+/**
+ * 读所有权标记；**未设置**（`git config --get` 退出码 1）或读失败 → null。
+ *
+ * 注意区分「未设置」与「设置为空串」：前者是 `catch → null`，后者是 `''`——
+ * 若把 `''` 也折成 null，同一 agent 的第二次调用会走「无标记 ⇒ 抛错」分支
+ * （写进去的是空串、读回来当没写），同一棵树自己复用不了自己。
+ */
+function readCatOwner(mainRoot: string, branch: string): string | null {
+  try {
+    return execFileSync('git', ['config', '--get', catOwnerConfigKey(branch)], {
+      cwd: mainRoot,
+      env: cleanGitEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+/** 写所有权标记；写失败抛错（不静默留下一棵无主树） */
+function writeCatOwner(mainRoot: string, branch: string, agentId: string): void {
+  execFileSync('git', ['config', catOwnerConfigKey(branch), agentId], {
+    cwd: mainRoot,
+    env: cleanGitEnv(),
+    stdio: 'ignore',
+  })
+}
+
 /**
  * 确保某只猫的 worktree 存在（幂等）——一猫一 worktree（ADR 0015 D1）。
  *
- * 与会话 worktree 同骨架，两处差异：
- * - 分支/目录名带猫后缀（连字符，见 catBranch）
+ * 与会话 worktree 同骨架，三处差异：
+ * - 分支/目录名带**猫名**后缀（连字符，见 catBranch；`catSlug` 清洗）
  * - **从集成分支 `session/<sid8>` 分叉，不是 dev**——猫的工作起点是会话集成分支，
  *   fan-in 再把它合回该分支（ADR 0015 §6.3 方案 a：冲突关在会话 worktree 里，
  *   绝不落 dev 主工作区）
+ * - **所有权标记**（§2.2）：同名不同 agent ⇒ `catBranch`/`catWorktreePath` 产出
+ *   同一个路径 ⇒ 两只猫在**同一棵树**里干活，且**静默**。标记落
+ *   `branch.<完整分支名>.catAgentId`（`.git/config`，**不在工作区内** ⇒ 不参与
+ *   `git add -A`、不进任何提交）。建 → 写；复用 → 读回比对。
  *
  * 集成分支不存在 ⇒ 建分支失败 ⇒ 返回 **null**：降级到哪由调用方决定，
  * 本函数**绝不自行落主仓库**（T-1 已收窄的降级路径，不得回退）。
- * `agentId` 前 8 位为空 ⇒ 返回 null（否则造出 `session/<sid8>-` 空后缀分支，
- * 与枚举侧 S3-5 的过滤同理）。
+ * 猫名含 `/` 或清洗后为空 ⇒ `catSlug` **抛错**（不静默降级为 id/空串，
+ * 否则造出 `session/<sid8>-` 空后缀分支——枚举侧 S3-5 同形静默）。
+ * 复用一棵**无标记**或**标记属他人**的树 ⇒ **显式抛错**（不静默复用别人的树）。
  */
-export function ensureCatWorktree(sessionId: string, agentId: string): string | null {
+export function ensureCatWorktree(
+  sessionId: string,
+  agentId: string,
+  catName: string
+): string | null {
   if (!isGitRepo()) return null
   const mainRoot = getMainRepoRoot()
   if (!mainRoot) return null
   const shortId = sessionShortId(sessionId)
   if (!shortId) return null
-  if (!catShortId(agentId)) return null
-  const branch = catBranch(shortId, agentId)
-  const wtPath = catWorktreePath(mainRoot, shortId, agentId)
+  if (!agentId) return null // 空 agent id 无法持有所有权标记（Phase T A5 契约保留）
+  const branch = catBranch(shortId, catName)
+  const wtPath = catWorktreePath(mainRoot, shortId, catName)
 
   const ready = ensureWorktreeAt({
     mainRoot,
@@ -532,8 +604,49 @@ export function ensureCatWorktree(sessionId: string, agentId: string): string | 
     label: 'cat',
   })
   if (!ready) return null
-  if (ready.created) log.info('cat worktree ready', { sessionId, agentId, branch, wtPath })
+
+  // 所有权：先判「属于别人」（建/复用两路都要挡——分支已存在而目录缺失时
+  // 走的是 created 路径，只判复用侧会让标记被静默改写）
+  const owner = readCatOwner(mainRoot, branch)
+  if (owner !== null && owner !== agentId) {
+    throw new Error(
+      `猫 worktree 所有权冲突：${branch} 的 catAgentId=${owner}，非本次调用者 ${agentId}（同名不同 agent ⇒ 拒绝共用同一棵树）`
+    )
+  }
+  if (owner === null) {
+    if (ready.created) {
+      writeCatOwner(mainRoot, branch, agentId)
+    } else {
+      throw new Error(
+        `猫 worktree 复用被拒：${branch} 无所有权标记（branch.${branch}.catAgentId 缺失）——不静默复用来路不明的树（cat=${wtPath}）`
+      )
+    }
+  }
+
+  if (ready.created) {
+    log.info('cat worktree ready', { sessionId, agentId, catName, branch, wtPath })
+  }
   return ready.path
+}
+
+/**
+ * 按**角色**分派执行/提交目标树——**单源**（reply.ts 的 CLI cwd 与 serial.ts 的
+ * 逐猫提交/清理共用，避免两处各写一份角色判定而漂移）。
+ *
+ * - `role === 'store'`（店长）→ **会话 worktree**：它是**唯一** checkout 了
+ *   `session/<sid8>` 的地方，即 fan-in 的 cwd。店长搬进猫 worktree 会让
+ *   「谁持有集成分支」变成需要额外机制保证的时序问题（ADR 0015 决策留痕）。
+ * - 其余（含 `role` 缺失/未知）→ **各自的猫 worktree**（隔离优先）。
+ *
+ * 建不出 → null：不传 cwd / 跳过该树，**绝不回落主仓库**（T-1 已收窄，不得回退）。
+ */
+export function ensureAgentWorktree(
+  sessionId: string,
+  agent: { id: string; name: string; role?: string }
+): string | null {
+  return agent.role === 'store'
+    ? ensureSessionWorktree(sessionId)
+    : ensureCatWorktree(sessionId, agent.id, agent.name)
 }
 
 /** 查询会话 worktree 路径（目录存在才返回，无则 null——调用方走降级路径） */
