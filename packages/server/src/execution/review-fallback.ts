@@ -22,6 +22,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('review-fallback')
 
@@ -178,6 +179,6 @@ export function spawnReviewFallback(cwd: string, commitSha: string): SpawnOutcom
     child.unref()
     return { spawned: true }
   } catch (err: any) {
-    return { spawned: false, reason: err.message }
+    return { spawned: false, reason: messageOf(err) ?? 'spawn 失败（诊断取不出）' }
   }
 }

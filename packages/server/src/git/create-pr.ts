@@ -21,6 +21,7 @@ import {
 } from 'node:child_process'
 import { getMainRepoRoot, cleanGitEnv } from '../llm/git-utils.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('create-pr')
 
@@ -79,13 +80,15 @@ export type CreatePrResult =
     }
 
 /** 归一 execFile 错误：优先 stderr（gh/git 报错主体在 stderr），
- *  其次 stdout（gh auth status 未登录提示走 stdout），最后 err.message（ENOENT 等） */
+ *  其次 stdout（gh auth status 未登录提示走 stdout），最后取诊断单源（ENOENT 等） */
 function extractErr(err: any): string {
   const stderr = err?.stderr && String(err.stderr).trim()
   if (stderr) return stderr
   const stdout = err?.stdout && String(err.stdout).trim()
   if (stdout) return stdout
-  return err?.message || 'unknown error'
+  // `||` 而非 `??`：本函数契约是「归一成**非空**诊断串」，Error('') 也要走兜底词；
+  // `messageOf` 对空串 Error 原样返回 `''`（它只保证「取不出信息」→ undefined）。
+  return messageOf(err) || 'unknown error'
 }
 
 /**
@@ -118,7 +121,7 @@ export async function createPr(input: CreatePrInput): Promise<CreatePrResult> {
       encoding: 'utf8',
     })
   } catch (err: any) {
-    log.error('gh not authed', { error: err?.message })
+    log.error('gh not authed', { error: messageOf(err) })
     return { ok: false, reason: 'not-authed', error: extractErr(err) }
   }
 
@@ -130,7 +133,7 @@ export async function createPr(input: CreatePrInput): Promise<CreatePrResult> {
       encoding: 'utf8',
     })
   } catch (err: any) {
-    log.error('head branch not pushed', { head, error: err?.message })
+    log.error('head branch not pushed', { head, error: messageOf(err) })
     return { ok: false, reason: 'branch-not-pushed', error: extractErr(err) }
   }
 
@@ -146,7 +149,7 @@ export async function createPr(input: CreatePrInput): Promise<CreatePrResult> {
     })
     stdout = res.stdout
   } catch (err: any) {
-    log.error('gh pr create failed', { base, head, error: err?.message })
+    log.error('gh pr create failed', { base, head, error: messageOf(err) })
     return { ok: false, reason: 'create-failed', error: extractErr(err) }
   }
 

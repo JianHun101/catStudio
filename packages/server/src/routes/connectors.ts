@@ -18,6 +18,7 @@ import {
 import { ingestUserMessage } from '../connectors/ingest.js'
 import { parseOneBotMessage, type OneBotMessageEvent } from '../connectors/onebot.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('connectors')
 
@@ -436,7 +437,7 @@ export async function connectorRoutes(app: FastifyInstance): Promise<void> {
       await handleOneBotEvent(event)
     } catch (err: any) {
       // 处理失败不回 5xx（响应已发）——记录日志，NapCat 侧视为已接收
-      log.error('onebot event processing failed', { error: err.message })
+      log.error('onebot event processing failed', { error: messageOf(err) })
     }
   })
 }

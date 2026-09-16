@@ -30,7 +30,7 @@ import {
 } from '../dispatch/index.js'
 import { createLogger } from '../logger.js'
 import { gitResetHard, gitCleanWorkingTree, npmUninstall } from '../llm/git-utils.js'
-import { parseJsonArray, parseJsonValue } from '../utils.js'
+import { parseJsonArray, parseJsonValue, messageOf } from '../utils.js'
 import { parseMessageExtra } from '../git/diff-collector.js'
 import { ingestUserMessage } from './ingest.js'
 import {
@@ -459,7 +459,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
         log.error('message retraction failed', {
           sessionId: data.sessionId,
           messageId: data.messageId,
-          error: err.message,
+          error: messageOf(err),
         })
       }
 

@@ -28,6 +28,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('memory:embedding-client')
 
@@ -336,7 +337,7 @@ export class EmbeddingClient {
     } catch (err: any) {
       const reason: EmbedFailureReason = err?.embedReason ?? 'request-timeout'
       this.dropSidecar()
-      return this.failAll(texts.length, reason, err?.message)
+      return this.failAll(texts.length, reason, messageOf(err))
     }
 
     if (!res.ok) {
@@ -352,7 +353,11 @@ export class EmbeddingClient {
     try {
       payload = await res.json()
     } catch (err: any) {
-      return this.failAll(texts.length, 'bad-status', `响应非 JSON: ${err?.message}`)
+      return this.failAll(
+        texts.length,
+        'bad-status',
+        `响应非 JSON: ${messageOf(err) ?? '未知错误'}`
+      )
     }
 
     const vectors = extractVectors(payload, texts.length)
@@ -429,7 +434,7 @@ export class EmbeddingClient {
     try {
       child = this.opts.spawnFn(scriptPath)
     } catch (err: any) {
-      throw embedError('spawn-failed', `spawn 失败: ${err?.message}`)
+      throw embedError('spawn-failed', `spawn 失败: ${messageOf(err) ?? '未知错误'}`)
     }
 
     const handshake = await this.awaitHandshake(child).catch((err: any) => {

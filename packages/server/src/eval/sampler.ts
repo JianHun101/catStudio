@@ -14,6 +14,7 @@
 import type { AgentConfig } from '@cat-study/shared'
 import { scoreReply } from './scorer.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('eval-sampler')
 
@@ -52,7 +53,7 @@ export function maybeScoreSample(
         messageId,
         sessionId,
         agentName: agent.name,
-        error: err.message,
+        error: messageOf(err),
       })
     })
   }

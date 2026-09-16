@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository, agents as agentsRepo } from '../db/repository/index.js'
@@ -56,6 +56,25 @@ describe('Agent Routes', () => {
       expect(res.statusCode).toBe(201)
       const body = JSON.parse(res.body)
       expect(body.effortLevel).toBe('high')
+    })
+
+    it('R6 §B2 档3：UNIQUE 违例以非 Error（字符串）抛出 → 同样落 409，不误升 500', async () => {
+      // 判别性（真空性反对照基准）：`err.message?.includes('UNIQUE')` 对字符串抛出物
+      // 恒 undefined ⇒ 旧实现漏判 409 分支、rethrow 后落 500。回退该取值点，本条必红。
+      const spy = vi.spyOn(agentsRepo, 'insertAgent').mockImplementation(() => {
+        throw 'UNIQUE constraint failed: agents.name'
+      })
+      try {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/agents',
+          payload: validAgent,
+        })
+        expect(res.statusCode).toBe(409)
+        expect(JSON.parse(res.body).error).toContain('already exists')
+      } finally {
+        spy.mockRestore()
+      }
     })
 
     it('returns 409 for duplicate name', async () => {

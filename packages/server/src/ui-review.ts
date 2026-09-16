@@ -24,6 +24,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
+import { messageOf } from './utils.js'
 
 const args = process.argv.slice(2)
 const isShotMode = args[0] === '--shot'
@@ -208,6 +209,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(`[ui-review] 失败: ${err.message}`)
+  console.error(`[ui-review] 失败: ${messageOf(err) ?? '未知错误'}`)
   process.exit(1)
 })

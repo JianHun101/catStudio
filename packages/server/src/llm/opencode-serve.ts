@@ -2,6 +2,7 @@ import type { Chunk, ChatOptions, LLMMessage } from '@cat-study/shared'
 import type { LLMAdapter } from './adapter.js'
 import { resolveBin, messagesToPrompt, spawnSupervised, getWorkspaceDir } from './cli-utils.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 import type { ChildProcess } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
 
@@ -459,7 +460,10 @@ export class OpencodeServeAdapter implements LLMAdapter {
       // 根因都在 cause 链上——旧文案只有瘦「fetch failed」，luna猫 故障排查时
       // 无详情可读（店长教训）
       const detail = err?.cause?.message ? `: ${err.cause.message}` : ''
-      yield { content: `opencode serve 调用失败: ${err.message}${detail}`, done: true }
+      yield {
+        content: `opencode serve 调用失败: ${messageOf(err) ?? '未知错误'}${detail}`,
+        done: true,
+      }
       return
     } finally {
       // 清理：未 idle 完成 → POST abort 中断 serve 侧仍在跑的执行（abort 幂等
@@ -569,7 +573,7 @@ export class OpencodeServeAdapter implements LLMAdapter {
       }
     } catch (err: any) {
       // 兜底：异常中断时已产出的内容保留，返回非完成态（finally 走 abort 清理）
-      log.warn('opencode serve 事件流中断', { sessionId, error: err.message })
+      log.warn('opencode serve 事件流中断', { sessionId, error: messageOf(err) })
     } finally {
       signal?.removeEventListener('abort', onAbort)
       cancelSignal?.removeEventListener('abort', onAbort)

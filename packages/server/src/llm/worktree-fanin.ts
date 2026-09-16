@@ -33,6 +33,7 @@
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 import {
   cleanGitEnv,
   cleanupWorktreeResidue,
@@ -182,7 +183,7 @@ function mergeBranchesInto(
       } catch {
         recovered = false
       }
-      log.error('merge conflict', { target, src, label, recovered, error: err.message })
+      log.error('merge conflict', { target, src, label, recovered, error: messageOf(err) })
       return { merged, skipped, conflict: true, recovered }
     }
   }
@@ -373,7 +374,7 @@ export function reclaimCatBranches(
         log.warn('cat worktree remove failed — force cleaning dir', {
           branch: cat,
           wtPath,
-          error: err.message,
+          error: messageOf(err),
         })
       }
       // 自指守卫：cwd 在该 worktree 内 → 跳过物理残留清理（残留交给进程退出后的
@@ -389,7 +390,7 @@ export function reclaimCatBranches(
       runGit(cwd, ['branch', '-D', cat])
       reclaimed.push(cat)
     } catch (err: any) {
-      log.warn('cat branch delete failed — kept', { branch: cat, error: err.message })
+      log.warn('cat branch delete failed — kept', { branch: cat, error: messageOf(err) })
     }
   }
 

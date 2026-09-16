@@ -14,6 +14,7 @@ import { v4 as uuid } from 'uuid'
 import { getDb } from '../db/index.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
 
 const log = createLogger('l1-aggregator')
@@ -208,7 +209,7 @@ function broadcastAlert(bus: EngineBus & HandoffBus, broken: string[]): void {
       log.warn('L1 评估告警已投递', { sessionId: s.id, broken })
     } catch (err: any) {
       // 单会话投递失败只留痕（会话已删等 FK 场景）
-      log.warn('L1 评估告警投递失败（跳过该会话）', { sessionId: s.id, error: err.message })
+      log.warn('L1 评估告警投递失败（跳过该会话）', { sessionId: s.id, error: messageOf(err) })
     }
   }
 }

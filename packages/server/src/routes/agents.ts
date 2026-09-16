@@ -9,6 +9,7 @@ import {
 } from '../db/repository/index.js'
 import type { AgentRow } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('agents')
 
@@ -45,10 +46,11 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       const row = agentsRepo.getAgentById(id)
       return reply.status(201).send(toAgentConfig(row!))
     } catch (err: any) {
-      if (err.message?.includes('UNIQUE')) {
+      const detail = messageOf(err)
+      if (detail?.includes('UNIQUE')) {
         return reply.status(409).send({ error: `Agent "${agent.name}" already exists` })
       }
-      log.error('agent create failed', { name: agent.name, error: err.message, stack: err.stack })
+      log.error('agent create failed', { name: agent.name, error: detail, stack: err.stack })
       throw err
     }
   })

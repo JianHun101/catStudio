@@ -8,6 +8,7 @@ import { OpencodeAdapter } from './opencode.js'
 import { DshAdapter } from './dsh.js'
 import type { AgentConfig } from '@cat-study/shared'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('registry')
 
@@ -27,7 +28,10 @@ function parseEnvExtra(raw: string | undefined): Record<string, string> {
     }
     throw new Error('not an object')
   } catch (err: any) {
-    log.warn('llmEnvExtra 非法 JSON，降级为空对象', { raw: raw.slice(0, 200), error: err.message })
+    log.warn('llmEnvExtra 非法 JSON，降级为空对象', {
+      raw: raw.slice(0, 200),
+      error: messageOf(err),
+    })
     return {}
   }
 }

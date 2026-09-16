@@ -19,6 +19,7 @@
 
 import { chatComplete } from '../llm/complete.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('memory:rewrite')
 
@@ -107,7 +108,7 @@ export async function rewriteRetrievalQueries(original: string): Promise<string[
     }
     return queries
   } catch (err: any) {
-    log.warn('查询改写失败，降级为仅原话检索', { error: err.message })
+    log.warn('查询改写失败，降级为仅原话检索', { error: messageOf(err) })
     return []
   }
 }

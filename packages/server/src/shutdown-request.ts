@@ -21,6 +21,7 @@
 
 import { existsSync, unlinkSync } from 'node:fs'
 import { createLogger } from './logger.js'
+import { messageOf } from './utils.js'
 import { SHUTDOWN_REQUEST_FILE } from './restart-request.js'
 
 const log = createLogger('shutdown-request')
@@ -45,7 +46,7 @@ export function consumeShutdownRequest(): boolean {
   } catch (err: any) {
     // ENOENT = dev.js 兜底清理抢先删了 ⇒ 正常态；其余（EPERM 等）也只记不抛：
     // 关停请求的判定面是「见到过文件」，删不掉不影响这次关停该不该发生。
-    log.warn('删除关停请求文件失败（不阻断关停）', { error: err?.message, code: err?.code })
+    log.warn('删除关停请求文件失败（不阻断关停）', { error: messageOf(err), code: err?.code })
   }
   return true
 }

@@ -15,6 +15,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { resolve } from 'node:path'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 import type { MessageExtra, RichBlock } from '@cat-study/shared'
 
 const log = createLogger('diff-collector')
@@ -145,7 +146,7 @@ export async function collectCommitDiffs(uuid: string): Promise<RichBlock[] | nu
   try {
     shasText = await runGit(['log', '--all', `--grep=${uuid}`, '--pretty=%H'])
   } catch (err: any) {
-    log.warn('git log failed (diff skipped)', { uuid, error: err?.message })
+    log.warn('git log failed (diff skipped)', { uuid, error: messageOf(err) })
     return null
   }
   const shas = shasText
@@ -169,7 +170,7 @@ export async function collectCommitDiffs(uuid: string): Promise<RichBlock[] | nu
       log.warn('git show failed (diff skipped for commit)', {
         uuid,
         sha,
-        error: err?.message,
+        error: messageOf(err),
       })
       continue
     }
