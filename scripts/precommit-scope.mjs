@@ -144,7 +144,20 @@ export function resolveScopes(stagedPaths) {
     }
   }
   const projects = ALL_PROJECTS.filter((s) => scopes.has(s))
-  return { projects, skip: false, reason: `按改动面收窄到 ${projects.join(' + ')}` }
+
+  // ── V14 护栏在岗保证（票 `precommit-scope` 残余收口·单B，店长裁 B）────────────
+  // `scripts/test-isolation-guard.test.js` 属 `scripts` project，判的是「测试隔离路径是否
+  // 落到 junction 共享面」——而该写法**最常出现在改 `packages/**` 的提交里**（新写一个测试、
+  // 顺手敲了个相对路径）。只按改动面收窄 ⇒ 改 packages 时护栏不跑 = **在它最该拦的位置上
+  // 不在岗**。故命中任一 `packages/**` scope 时追加 `scripts`（实测代价 ~4.4s/次提交）。
+  // `scripts` 恒在 `ALL_PROJECTS` 末位（顺序即契约）⇒ **末尾追加即保序**，不排序、不去重重排。
+  let appended = false
+  if (projects.some((s) => s.startsWith('packages/')) && !scopes.has('scripts')) {
+    projects.push('scripts')
+    appended = true
+  }
+  const suffix = appended ? '（含 scripts：V14 护栏随 packages 改动在岗）' : ''
+  return { projects, skip: false, reason: `按改动面收窄到 ${projects.join(' + ')}${suffix}` }
 }
 
 /**

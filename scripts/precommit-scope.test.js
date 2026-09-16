@@ -7,6 +7,12 @@
  *      `ALL_PROJECTS` 的**子序列**。矩阵每格都过一遍这条 ⇒ 单格漏写 `projects` 会被抓。
  *   ② **非恒真对照**：`docs/run/**`（跳过）与 `packages/server/**`（收窄）必须给出**不同**读数
  *      —— 若实现把所有输入都判成同一档，矩阵会全绿而门禁是坏的。
+ *
+ * ⚠️ **残余收口单B 起的语义变更（改本文件期望值前先读这段）**：命中任一 `packages/**` scope 时
+ * 追加 `scripts`（`test-isolation-guard.test.js` 属该 project，护栏须在「改 packages 的提交口」
+ * 在岗）。故本文件里**一切含 packages scope 的期望值都比改前多一个尾项 `scripts`**；
+ * 期望值仍逐格写字面量（不由实现推导——一旦从实现反推，追加规则改了测试会跟着改，等于没测）。
+ * 单靠 `scripts/**` 或纯文档的格子不受影响。
  */
 import { describe, it, expect } from 'vitest'
 import { ALL_PROJECTS, resolveScopes, projectNameOf } from './precommit-scope.mjs'
@@ -69,11 +75,12 @@ describe('resolveScopes · §2.1 映射表逐行', () => {
     ['docs/run/nested/deep/note.md'],
   ])('V1 跳过：%s', (p) => expectSkip([p]))
 
-  // V2 单包
+  // V2 单包（+ 护栏 scripts：`packages/**` 一律追加，见文件头 ⚠️）
   it.each([
-    ['packages/server/src/execution/serial.ts', ['packages/server']],
-    ['packages/server/vitest.config.ts', ['packages/server']],
-    ['packages/web/src/App.vue', ['packages/web']],
+    ['packages/server/src/execution/serial.ts', ['packages/server', 'scripts']],
+    ['packages/server/vitest.config.ts', ['packages/server', 'scripts']],
+    ['packages/web/src/App.vue', ['packages/web', 'scripts']],
+    // scripts 自身的改动**不反向**追加 packages（单B 是单向规则）
     ['scripts/precommit-scope.mjs', ['scripts']],
     ['scripts/precommit-scope.test.js', ['scripts']],
   ])('V2 单包：%s ⇒ %j', (p, projects) => expectScoped([p], projects))
@@ -100,12 +107,17 @@ describe('resolveScopes · §2.1 映射表逐行', () => {
     ['internal/tsconfig.build.json'],
   ])('V4 基础设施全量：%s', (p) => expectFull([p]))
 
-  // V6 记忆面 —— 消费者在 server（scripts/flywheel/scan.mjs 的白名单）
+  // V6 记忆面 —— 消费者在 server（scripts/flywheel/scan.mjs 的白名单）。
+  // ⚠️ 这三格也吃到单B 的追加：映射出的 scope 是 `packages/server`，判据看的是 **scope** 而非
+  // 原始路径 ⇒ 记忆面改动同样带跑护栏。这是判据的**字面后果**（§二-4 写的是「命中任一
+  // `packages/**` scope」），已按实钉在此处，不当意外。
   it.each([
     ['docs/adr/0015-x.md'],
     ['docs/lessons/some-lesson.md'],
     ['docs/plans/review-chain-anchor.md'],
-  ])('V6 记忆面 ⇒ packages/server：%s', (p) => expectScoped([p], ['packages/server']))
+  ])('V6 记忆面 ⇒ packages/server（+ 护栏 scripts）：%s', (p) =>
+    expectScoped([p], ['packages/server', 'scripts'])
+  )
 
   // V7 fail-closed —— 任何无法归类的路径
   it.each([['foo.unknown'], ['src/random.txt'], ['Makefile'], ['docs/mystery.json'], ['']])(
@@ -118,14 +130,14 @@ describe('resolveScopes · §2.1 映射表逐行', () => {
 
 describe('resolveScopes · 并集 / 优先级 / 边界', () => {
   // V5 并集 + 顺序确定
-  it('V5 并集：server + web ⇒ 两个 project，顺序确定（与入参次序无关）', () => {
+  it('V5 并集：server + web ⇒ 两个 project + 护栏 scripts，顺序确定（与入参次序无关）', () => {
     expectScoped(
       ['packages/server/a.ts', 'packages/web/b.vue'],
-      ['packages/server', 'packages/web']
+      ['packages/server', 'packages/web', 'scripts']
     )
     expectScoped(
       ['packages/web/b.vue', 'packages/server/a.ts'],
-      ['packages/server', 'packages/web']
+      ['packages/server', 'packages/web', 'scripts']
     )
   })
 
@@ -134,7 +146,10 @@ describe('resolveScopes · 并集 / 优先级 / 边界', () => {
       ['scripts/x.js', 'packages/web/b.vue', 'packages/server/a.ts'],
       ['packages/server', 'packages/web', 'scripts']
     )
-    expectScoped(['docs/adr/a.md', 'packages/web/b.vue'], ['packages/server', 'packages/web'])
+    expectScoped(
+      ['docs/adr/a.md', 'packages/web/b.vue'],
+      ['packages/server', 'packages/web', 'scripts']
+    )
   })
 
   it('全量优先于并集：收窄项 + 契约层 ⇒ 全量', () => {
@@ -143,17 +158,17 @@ describe('resolveScopes · 并集 / 优先级 / 边界', () => {
   })
 
   it('跳过项与收窄项并存 ⇒ 仍收窄（跳过不吞掉收窄）', () => {
-    expectScoped(['docs/run/a.md', 'README.md', 'packages/web/b.vue'], ['packages/web'])
+    expectScoped(['docs/run/a.md', 'README.md', 'packages/web/b.vue'], ['packages/web', 'scripts'])
   })
 
   it('包前缀优先于 `*.md 跳过`：包内 MD 取本包（向严，宁多跑不漏跑）', () => {
-    expectScoped(['packages/server/README.md'], ['packages/server'])
-    expectScoped(['packages/web/docs/notes.md'], ['packages/web'])
+    expectScoped(['packages/server/README.md'], ['packages/server', 'scripts'])
+    expectScoped(['packages/web/docs/notes.md'], ['packages/web', 'scripts'])
   })
 
   it('归一化：`./` 前缀与反斜杠写法与正斜杠等价', () => {
-    expectScoped(['./packages/server/a.ts'], ['packages/server'])
-    expectScoped(['packages\\server\\a.ts'], ['packages/server'])
+    expectScoped(['./packages/server/a.ts'], ['packages/server', 'scripts'])
+    expectScoped(['packages\\server\\a.ts'], ['packages/server', 'scripts'])
     expectSkip([String('  docs/run/a.md  ')])
   })
 
@@ -172,6 +187,94 @@ describe('resolveScopes · 并集 / 优先级 / 边界', () => {
     expect(skipped).not.toMatchObject({ projects: scoped.projects })
     expect(skipped.skip).toBe(true)
     expect(scoped.skip).toBe(false)
+  })
+})
+
+/**
+ * V21–V22（票 `docs/run/precommit-scope/tickets-residual.md` §四 · 单B）
+ * —— 命中 `packages/**` scope ⇒ 追加 `scripts`（V14 护栏在岗）。
+ *
+ * 为什么不并进上面那张矩阵：上面的格子测的是「逐条路径 → scope」的**映射**，本组测的是
+ * **追加规则本身**及其四个边界（命中 / 本来就全量 / 跳过态不受影响 / 单向不反向）。
+ * V21 认「含」（判据面 = 追加有没有发生），V22 认「按序子序列」（判据面 = 顺序契约没破）——
+ * 两者都**不**要求 `projects` 等于某个字面量，映射表长什么样已由 V2–V7 逐格钉着。
+ */
+describe('resolveScopes · V21/V22 单B —— `packages/**` 追加 `scripts` 护栏', () => {
+  /** V21 四格：`[格名, 暂存路径, 期望 projects]`。期望值逐格写**字面量**，不从实现推导。 */
+  const V21_CELLS = [
+    [
+      'V21-① 暂存 packages/server/x.ts ⇒ 含 packages/server 且含 scripts',
+      ['packages/server/x.ts'],
+      ['packages/server', 'scripts'],
+    ],
+    [
+      'V21-② 暂存 packages/shared/x.ts ⇒ 全量 4 个（本就含 scripts，追加不得去重压扁）',
+      ['packages/shared/x.ts'],
+      ALL,
+    ],
+    [
+      'V21-③ 暂存 docs/run/x.md ⇒ skip: true（追加规则不得把跳过态变成「跑 scripts」）',
+      ['docs/run/x.md'],
+      [],
+    ],
+    [
+      'V21-④ 暂存 scripts/x.mjs ⇒ 只 scripts（单向规则：不反向追加 packages）',
+      ['scripts/x.mjs'],
+      ['scripts'],
+    ],
+    [
+      // 边界外延：**已经**因改动面自带 scripts 的格子，不得被追加成两份
+      'V21-⑤ 暂存 packages/server/x.ts + scripts/x.mjs ⇒ scripts 只出现一次',
+      ['packages/server/x.ts', 'scripts/x.mjs'],
+      ['packages/server', 'scripts'],
+    ],
+  ]
+
+  it.each(V21_CELLS)('%s', (_name, paths, expected) => {
+    const d = resolveScopes(paths)
+    expectContract(d) // V22 也挂在每格上（见下一组：这里是双保险，不是唯一判据）
+    expect(d.projects, `projects 实测：${d.projects.join(' + ') || '(空)'}`).toEqual(expected)
+    // 契约：skip ⇔ projects 空 —— V21-③ 走 skip 分支，其余走收窄/全量分支
+    expect(d.skip).toBe(expected.length === 0)
+  })
+
+  // ── V22 顺序契约：逐格断言 projects 是 `ALL_PROJECTS` 的**按序子序列** ──
+  it.each(V21_CELLS)('V22 按序子序列（非集合比较）：%s', (_name, paths) => {
+    const { projects } = resolveScopes(paths)
+    // ① 成员合法
+    expect(projects.every((p) => ALL.includes(p))).toBe(true)
+    // ② **按序**——不是集合比较：把期望的「正确顺序版」按 ALL_PROJECTS 重排一遍，
+    //    顺序错则两者不等而红（集合比较在这里恒真，正是要避免的那种断言）。
+    expect(projects).toEqual(ALL.filter((s) => projects.includes(s)))
+    // ③ 无重复（追加逻辑写坏时最可能的形态是 push 两遍）
+    expect(new Set(projects).size).toBe(projects.length)
+  })
+
+  it('非恒真对照：① 与 ④ 读数不同 ⇒ 追加是「按 scope 判定」而非无条件加', () => {
+    const withPkg = resolveScopes(['packages/server/x.ts'])
+    const scriptsOnly = resolveScopes(['scripts/x.mjs'])
+    expect(withPkg.projects).toContain('scripts')
+    expect(scriptsOnly.projects).toEqual(['scripts'])
+    // 若实现改成「一律追加」，两条会相等而红
+    expect(withPkg.projects).not.toEqual(scriptsOnly.projects)
+  })
+
+  it('跳过态不受影响：纯 docs/run/** 仍 skip，且口径不泄漏（reason 不得声称跑 scripts）', () => {
+    const d = resolveScopes(['docs/run/precommit-scope/tickets-residual.md'])
+    expect(d).toMatchObject({ skip: true, projects: [] })
+    expect(d.reason).not.toContain('scripts')
+  })
+
+  it('reason 显式标注追加来源（排障时能分清 scripts 是追加的还是改动面自带的）', () => {
+    // 追加发生 ⇒ 标注
+    expect(resolveScopes(['packages/server/x.ts']).reason).toContain('含 scripts')
+    // 自带（未追加）⇒ 不标注：两种来源在 hook 日志里必须可区分
+    expect(resolveScopes(['scripts/x.mjs']).reason).not.toContain('含 scripts')
+    expect(resolveScopes(['packages/server/x.ts', 'scripts/x.mjs']).reason).not.toContain(
+      '含 scripts'
+    )
+    // 全量档也不该标注（它不是「收窄 + 追加」，是四条全跑）
+    expect(resolveScopes(['packages/shared/x.ts']).reason).not.toContain('含 scripts')
   })
 })
 
