@@ -57,6 +57,10 @@ vi.mock('../llm/git-utils.js', () => ({
   gitCommit: vi.fn(),
   getSessionWorktreePath: vi.fn(() => null),
   ensureSessionWorktree: vi.fn(() => null),
+  // T-2 Phase I：提交作用域解析改为按角色分派（store → 会话 worktree / 其余 → 猫
+  // worktree）。**替身必须镜像真模块被消费的导出面**——漏键 ⇒ 消费方拿到 undefined、
+  // 调用即 TypeError（与上面 cleanGitEnv 那条同款，实测踩过）。默认 null ⇒ 不提交。
+  ensureAgentWorktree: vi.fn(() => null),
   snapshotPackageDeps: vi.fn(() => ({})),
   diffNewPackages: vi.fn(() => []),
   // T-1 Phase 2：serial.ts 清理段改带 `cleanGitEnv()`（与 gitCommit 对称）。本工厂是

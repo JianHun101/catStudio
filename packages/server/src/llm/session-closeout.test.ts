@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { execSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -223,6 +223,140 @@ describe('checkoutDev（@internal step ④）', () => {
     } finally {
       process.chdir(orig)
     }
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════
+// T-2 Phase I 新 step：fanInCats（⓪）/ reclaimCats（②′）
+//   接线与 fan-in/回收**必须同批**（票面 §结论-2）：只把 CLI cwd 分派到猫 worktree
+//   而不接 fan-in ⇒ 猫的提交停在猫分支，收口仍只合 `session/<sid8>`（停在分叉点时
+//   `--ff-only` 输出 `Already up to date.` 且**退出码 0**）⇒ 照样删 worktree 与分支
+//   ⇒ 猫的提交**永远没进过任何地方**（E5 静默丢活）。
+// ══════════════════════════════════════════════════════════════════
+
+describe('fanInCats / reclaimCats（T-2 Phase I 新 step）', () => {
+  const CAT_A = { id: 'agent-cat-a', name: '暹罗猫' }
+  const CAT_B = { id: 'agent-cat-b', name: '布偶猫' }
+
+  /** 参数数组走 execFileSync（含中文分支名，不经 shell 引号解析） */
+  function gitArgs(args: string[], cwd = tmp): string {
+    return execFileSync('git', args, {
+      cwd,
+      env: cleanGitEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  }
+
+  /**
+   * 建集成分支 + 一只猫的 worktree，并在猫树上落一笔真提交。
+   *
+   * **沿用 `git branch` 的失败态**（分支已存在 ⇒ 非零退出）：本组各用例的 id 取
+   * **恰好 8 位**（`sessionShortId` 只取前 8 位）且互不相同——这是刻意的，
+   * 两个 id 若前 8 位相同就会共用集成分支，前一格留下的分支会让这一格**在夹具阶段
+   * 就红**（报「Command failed: git branch ...」，看起来像生产 bug，其实是串场）。
+   */
+  function makeCatCommit(id: string, cat: { id: string; name: string }): string {
+    const shortId = gitUtils.sessionShortId(id)
+    gitArgs(['branch', gitUtils.sessionBranch(shortId)])
+    const catWt = gitUtils.ensureCatWorktree(id, cat.id, cat.name)!
+    expect(catWt, '集成分支在 ⇒ 猫 worktree 应建得出').toBeTruthy()
+    wtDirs.push(catWt)
+    // 内容**必须带 id**（与本文件 `makeSessionCommit` 的理由同源）：上一格收口后
+    // dev 已含同名同内容的文件，而本格的集成分支从 dev 分叉 ⇒ 不唯一则「无改动」，
+    // `gitCommit` 返回 null（实测踩过：V5 拿到 V4 的 merge commit 当 HEAD、status 空）
+    writeFileSync(resolve(catWt, `from-${cat.name}.txt`), `${cat.name} 的产出 ${id}\n`, 'utf-8')
+    const hash = gitUtils.gitCommit(`catstudy [${id}]`, { cwd: catWt })
+    // 失败时把现场一并报出来：这个夹具一旦红，症状（`expected null to be truthy`）
+    // 与成因（无改动？树不可达？）离得很远，不带读数会白烧一轮排查
+    expect(
+      hash,
+      `gitCommit 应产生提交；实际 status=${JSON.stringify(gitArgs(['status', '--porcelain'], catWt))} head=${gitArgs(['log', '-1', '--format=%s'], catWt)}`
+    ).toBeTruthy()
+    return catWt
+  }
+
+  it('无猫分支 ⇒ null（空集是合法状态；不为一次空 fan-in 现建会话 worktree）', () => {
+    const id = 'catn0001'
+    const shortId = gitUtils.sessionShortId(id)
+    expect(closeout.fanInCats(mainRoot(), id)).toBeNull()
+    // 「不现建」不是推论——它同时避免了为无事发生的会话造出目录
+    expect(existsSync(gitUtils.sessionWorktreePath(mainRoot(), shortId))).toBe(false)
+  })
+
+  it('V4 · 猫的改动经 fan-in 落到 dev（cat-file 读**实际内容**）+ 猫树与猫分支被回收', () => {
+    const id = 'catf0001'
+    const shortId = gitUtils.sessionShortId(id)
+    const catWt = makeCatCommit(id, CAT_A)
+
+    const r = closeout.closeoutSession(id)
+    expect(r).toEqual({ ok: true, step: 'checkout' })
+
+    // V4：退出码 0 从来不是判据（E5 的教训）——读 blob 本身
+    expect(gitArgs(['cat-file', '-p', `dev:from-${CAT_A.name}.txt`])).toBe(
+      `${CAT_A.name} 的产出 ${id}`
+    )
+    // 回收：猫 worktree 目录与猫分支都不在了（已合进 dev ⇒ 允许回收）
+    expect(existsSync(catWt)).toBe(false)
+    expect(gitArgs(['branch', '--list', gitUtils.catBranch(shortId, CAT_A.name)])).toBe('')
+    expect(gitArgs(['branch', '--list', gitUtils.sessionBranch(shortId)])).toBe('')
+  })
+
+  it('V6 · reclaimCats：未合进 dev 的猫分支**必须留存**（步骤级接 D2）', () => {
+    const id = 'catk0001'
+    const shortId = gitUtils.sessionShortId(id)
+    // 猫分支上必须有**超出 dev 的提交**——否则它本就等于 dev 的祖先，被判「已合」
+    // 而回收掉（那是正确行为，不是本格要证的「未合留存」）
+    const catWt = makeCatCommit(id, CAT_B)
+    const orphan = gitUtils.catBranch(shortId, CAT_B.name)
+
+    expect(closeout.reclaimCats(mainRoot(), id)).toEqual({ ok: true })
+    // 未合 ⇒ 留存（判据是 `isAncestor(cat, dev)`，不是「存在即删」）
+    expect(gitArgs(['branch', '--list', orphan])).not.toBe('')
+    expect(existsSync(catWt)).toBe(true)
+  })
+
+  it('V5 · 中断态守卫：预置 MERGE_HEAD ⇒ 收口停在 fanin，且 merge / writeGate / checkoutDev 三格均未执行', () => {
+    const id = 'catm0001'
+    const shortId = gitUtils.sessionShortId(id)
+    const catWt = makeCatCommit(id, CAT_A)
+
+    // 会话 worktree 现建（fan-in 的 cwd），并在其 gitdir 里预置 MERGE_HEAD（半合并态）
+    const sessWt = gitUtils.ensureSessionWorktree(id)!
+    wtDirs.push(sessWt)
+    const gitDir = gitArgs(['rev-parse', '--absolute-git-dir'], sessWt)
+    const headSha = gitArgs(['rev-parse', 'HEAD'], sessWt)
+    writeFileSync(resolve(gitDir, 'MERGE_HEAD'), `${headSha}\n`, 'utf-8')
+
+    const devBefore = gitArgs(['rev-parse', 'HEAD'])
+    const gatePath = resolve(tmp, '.push-gate')
+    const gateBefore = existsSync(gatePath) ? readFileSync(gatePath, 'utf8') : null
+
+    const orig = process.cwd()
+    let r: { ok: boolean; step: string; error?: string }
+    try {
+      // cwd 落在会话 worktree 内 ⇒ `checkoutDev` 的 cwd 复位**若执行过**必被观测到
+      process.chdir(sessWt)
+      r = closeout.closeoutSession(id)
+      expect(resolve(process.cwd())).toBe(resolve(sessWt)) // 格③：checkoutDev 未执行
+    } finally {
+      process.chdir(orig)
+    }
+
+    expect(r.ok).toBe(false)
+    expect(r.step).toBe('fanin')
+    expect(r.error).toContain('MERGE_HEAD')
+
+    // 三格分别断言（票面 V5：缺一即「中止了但下游仍跑了」这种半吊子形态）
+    expect(gitArgs(['rev-parse', 'HEAD'])).toBe(devBefore) // 格①：merge 未执行
+    expect(existsSync(gatePath) ? readFileSync(gatePath, 'utf8') : null).toBe(gateBefore) // 格②：writeGate 未执行
+    // 半合并态原样留存，没有任何东西被删（可重跑）
+    expect(existsSync(catWt)).toBe(true)
+    expect(gitArgs(['branch', '--list', gitUtils.catBranch(shortId, CAT_A.name)])).not.toBe('')
+
+    // 清掉半合并态与本次产物，不串场到后续用例
+    rmSync(resolve(gitDir, 'MERGE_HEAD'), { force: true })
+    gitUtils.removeSessionWorktree(id)
   })
 })
 

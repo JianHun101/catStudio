@@ -34,7 +34,7 @@ import {
   type MemoryContextResult,
 } from '../memory/index.js'
 import { createLogger } from '../logger.js'
-import { snapshotPackageDeps, diffNewPackages, ensureSessionWorktree } from '../llm/git-utils.js'
+import { snapshotPackageDeps, diffNewPackages, ensureAgentWorktree } from '../llm/git-utils.js'
 import { parseJsonArray } from '../utils.js'
 import { collectCommitDiffs, GIT_TIMEOUT_MS } from '../git/diff-collector.js'
 import type { ExecTrace } from './trace.js'
@@ -970,10 +970,14 @@ export async function runAgentReply(
     // llmMaxTokens 是单次输出上限，与 MAX_CONTEXT_TOKENS（上下文窗口）是两套数字体系
     ...(agent.llmMaxTokens != null ? { maxTokens: agent.llmMaxTokens } : {}),
     ...(agent.llmTemperature != null ? { temperature: agent.llmTemperature } : {}),
-    // 会话隔离：确保会话 worktree 存在（幂等）并把路径传给 CLI 适配器——
-    // 猫在独立目录执行，auto-commit 落会话分支；worktree 不可用（非 git 仓库/
-    // 创建失败）返回 null → 不传 cwd，适配器取默认 workspace（存量行为零变化）
-    cwd: ensureSessionWorktree(sessionId) ?? undefined,
+    // 一猫一 worktree（ADR 0015 D1）：目标树按**角色**分派（`ensureAgentWorktree`
+    // 单源）——店长（`role === 'store'`）走会话 worktree（它是唯一检出
+    // `session/<sid8>` 的地方 = fan-in 的 cwd）；其余猫（含 `role` 缺失/未知、
+    // 含审查猫）走各自的猫 worktree（隔离优先）。猫在独立目录执行，auto-commit
+    // 落各自的分支。
+    // 建不出（非 git 仓库 / 集成分支不在 / 命名非法）返回 null → **不传 cwd**，
+    // 适配器取默认 `workspace/`；**绝不回落主仓库**（T-1 已收窄，不得回退）。
+    cwd: ensureAgentWorktree(sessionId, agent) ?? undefined,
     // MCP 结构化路由上下文（契约 3 二次修订——店长裁决）：claude.ts 透传
     // 到 MCP server env；其他适配器忽略 context 零影响。
     // triggerAuthorName 与 :947 合并点同款来源（triggerMsg.authorName）——
