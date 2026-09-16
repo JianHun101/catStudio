@@ -1,5 +1,8 @@
 # 报告：T-2 Phase I-b 第 1 笔 —— 审查面可达性（取证 + 确定项）
 
+> **本文件现承载本票两笔**（第 1 笔 = §一～§十；第 2 笔 = §十一～§十八）。
+> 第 2 笔的形态 G 实施与 V17–V22 读数从 **§十一** 起。
+
 > 票面：`docs/run/multi-cat-isolation/tickets-t2-phase-ib.md`（`640da4a`）
 > 提交：本笔**一笔**，见**本文件的承载提交**（sha 写不进它自己承载的文件——自指，故以承载关系指认，不用「第 N 笔」占位）。
 > 本笔**不实施形态**（票面 §五红线）：§五 的候选代价表交店长裁，第 2 笔另派。
@@ -97,6 +100,9 @@ Tests  1 failed | 8 passed (9)
 > ⚠️ **给后来者的交代**：这一格在**第 2 笔（形态实施）落地后应当翻绿**。
 > 届时请把那行断言的期望值改成正向、并**同时**保留对照①——
 > 不是删掉这一格。删掉 = 把「本票要修的东西」从回归面上抹掉。
+>
+> **【已兑现 · 第 2 笔】** 期望值已翻正向（`not-ancestor` → `ancestor`）、**两条对照原样保留**、
+> 未删格；该格改名为 `V17/V21`（`serial.cat-worktree.test.ts:628`）。读数见下文 §十三。
 
 ---
 
@@ -323,3 +329,161 @@ fatal: 'C:/Users/肖锦鹏/AppData/Local/Temp/catStudy-sessions/scwt0002'
 - `serial.ts:770` 的 `?? process.cwd()` 降级路径 —— 票面 §六-1 已实测非 Phase I 回归，另立单。
 - 投递契约加 `reviewSha`（候选 X）—— 票面 §六-2，另案。
 - 单A（`LOG_FILE` 两处）/ 单B（V14 护栏进 `packages/**` 提交口）—— 另票，不同批。
+
+---
+
+# 报告：T-2 Phase I-b 第 2 笔 —— 形态 G 实施（审查者树 = 集成分支 ∪ 猫分支）
+
+> 票面：`docs/run/multi-cat-isolation/tickets-t2-phase-ib.md` §八（形态裁 G）+ §九（取数点裁定）
+> 本笔触及 `reply.ts`（生产）⇒ **落地后需重启**（票面 §八 额外要求）。
+
+## 十一、本树 HEAD（§八 额外要求：归属面可审计）
+
+G 的已知代价是审查者分支混入实施猫提交、归属面变模糊 ⇒「我到底看到了哪份内容」**必须可审计**。
+本笔执行环境读数（ds猫，非审查者 ⇒ **本笔的合并逻辑对本树不生效**，下面三个读数是**未合并**的形态）：
+
+| 读数                              | 值                                             |
+| --------------------------------- | ---------------------------------------------- |
+| `pwd`                             | `D:\Game\ai\catStudy-sessions\4c8acf70-ds猫`   |
+| `git rev-parse --abbrev-ref HEAD` | `session/4c8acf70-ds猫`                        |
+| `git rev-parse HEAD`              | `8949e89`（本提交**之前**；fork 点）           |
+| 会话分支 tip                      | `fd119c6`（本猫树落后 3 笔，全在 `docs/run/`） |
+| `dev`                             | `c0383c9`（**零改动**，见 §十六 V21）          |
+
+**审查者落地后的可审计指针**：其树 HEAD = 目标分支上的 merge commit
+（`git log -1 --format=%s session/<sid8>-<猫名>` ⇒ `review-view session/<sid8>-<来源猫分支>`），
+且每次准备成功都留一条 `review view prepared`（info 级，带 `merged` / `skipped` 计数）。
+
+## 十二、改了什么
+
+| 文件                                    | 动作                                                                                     |
+| --------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `llm/worktree-fanin.ts:156`             | **抽出 merge 循环核心** `mergeBranchesInto(target, sources, cwd, label)`（全仓唯一一份） |
+| `llm/worktree-fanin.ts:138`             | 前置①抽成共用 `refuseIfMergeInProgress`（两入口判据必须一致）                            |
+| `llm/worktree-fanin.ts:211`             | `fanInCatBranches` **降为薄 wrapper**：签名与前置②**原样保留**（裁定 §4）                |
+| `llm/worktree-fanin.ts:243`             | **新增** `mergeCatBranchesIntoOwnBranch`（审查面入口，前置 = cwd HEAD 须是本会话猫分支） |
+| `llm/worktree-fanin.ts:283`             | **新增** `ensureExecutionWorktree`（执行 cwd 单源：建树 → 审查者额外合并）               |
+| `execution/reply.ts:986`                | `cwd:` 由 `ensureAgentWorktree` 换成 `ensureExecutionWorktree`（**生产面 1 行**）        |
+| `execution/serial.cat-worktree.test.ts` | V16 格 **翻转**成 V17/V21 + 新增 V19 / V20 / V22 三格                                    |
+| `execution/serial.test.ts`              | **mock 桩搬家**（见 §十四，**被逼出来的第 5 个文件**）                                   |
+
+**`git-utils.ts` 零改动** —— 与派活单「触及 `reply.ts` / `git-utils.ts`」的字面预期不同，理由见 §十四-1。
+
+## 十三、V17 翻转读数（第 1 笔 V16-b 的应然形）
+
+cell：`serial.cat-worktree.test.ts:628`，`V17/V21 · 审查面可达（第 1 笔 V16-b **翻转**）…`
+
+| 判据                                            | 第 1 笔读数            | 本笔读数                   |
+| ----------------------------------------------- | ---------------------- | -------------------------- |
+| 结构面 `ancestorState(implSha, 'HEAD', revCwd)` | `not-ancestor`（缺口） | **`ancestor`** ✅          |
+| 可感知面 `readFileSync(revCwd/'tracked.txt')`   | `base\n`（旧版）       | **`base 改过\n`** ✅       |
+| 对照① `ancestorState(implSha,'HEAD',implWt)`    | `ancestor`             | `ancestor`（**保留**）     |
+| 对照② `ancestorState(implSha, sessionBranch)`   | `not-ancestor`         | `not-ancestor`（**保留**） |
+
+**两条对照按票面 §八「只翻期望值，不删格」原样保留** —— 它们才是判据非恒真的常驻闸：
+对照②证明**集成分支仍不含**被审提交（fan-in 尚未发生），即本笔**没有**偷偷把内容灌进集成分支；
+对照①证明探针没坏。**删掉任一，这格就退化成恒绿门。**
+
+## 十四、V18 反向对照（**先红后绿**）
+
+把 `ensureExecutionWorktree` 里的合并动作去掉（`// V18 REVERSE-CONTROL`，其余一字不动）实跑：
+
+```
+× V17/V21 …  AssertionError: expected 'not-ancestor' to be 'ancestor'
+× V20 …      AssertionError: expected 1 to be +0          ← chatStream 被调了 1 次（审查者照样开跑）
+× V22 …      AssertionError: expected 'not-ancestor' to be 'ancestor'
+Tests  3 failed | 9 passed (12)
+```
+
+**恰好 3 格红、9 格不动**，且红的三格正是「依赖合并」的全部格子；**V19 在红态下仍绿** ——
+这正是它该有的形状：隔离格**不该**依赖合并是否存在，它判的是**范围限定**。
+随后还原 ⇒ `12 passed (12)`。
+
+**V19 自己的反向对照**（去掉 `role !== 'reviewer'` 的范围限定 ⇒ 对所有猫都合）：
+
+```
+× V19 …  AssertionError: expected 'ancestor' to be 'not-ancestor'
+× V2  …  AssertionError: expected 'A\n' to be null          ← 既有 Phase I 格同时被抓红
+Tests  2 failed | 10 passed (12)
+```
+
+**顺带得到一个不在预期内的读数**：V2（Phase I 既有的「两只猫各改各的」格）**也是**同一条边界上的
+独立绊线。⇒ 该边界今天有**两条**互相独立的判据把守，不是孤证。
+
+### 十四-1 五个文件里有一个不是交付面点名过的（**如实自陈**）
+
+派活单预期改 `reply.ts` / `git-utils.ts`；实际 `git-utils.ts` **零改动**，而多出一个 `serial.test.ts`。
+
+1. **为什么不是 `git-utils.ts`**：`git-utils.ts` 的 import 表**只有 node 内置 + `../logger.js`**
+   （零内部依赖）—— 它是底层。合并入口需要 `listCatBranches`，若放进去就形成
+   `git-utils ⇄ worktree-fanin` 双向依赖。裁定 §4 已定「merge 循环放 `worktree-fanin`」，
+   故接线点在 `reply.ts` → `worktree-fanin`，方向单一（`reply → fanin → git-utils`）。
+2. **`serial.test.ts` 是被逼出来的**：`reply.ts` 的 execution cwd 解析点从
+   `ensureAgentWorktree`（git-utils）搬到了 `ensureExecutionWorktree`（worktree-fanin）。
+   该文件的 git-utils 工厂是**部分导出** mock，且 1204/1242 两处 `mockReturnValue` 会**跨用例泄漏**
+   （`vi.clearAllMocks()` **清调用不清实现**）⇒ 从 1204 起 `ensureAgentWorktree` 恒返回
+   `/tmp/catStudy-sessions/wt-tm*`，真 `worktree-fanin` 会拿这个**不存在的路径跑真 git**。
+   实测口径：搬家前 **5 failed**（全是 REVIEWER 为父的格）→ 搬家后 **0 failed**。
+   同一处搬家的**先例就在本文件 62-64 行的注释里**（Phase I 把解析点从 `ensureSessionWorktree`
+   换成 `ensureAgentWorktree`，「同一处跟改」）。**这是第二次跟着解析点搬家。**
+
+## 十五、V19 / V20 / V22 读数
+
+| 格             | 判据                                                                                      | 读数 |
+| -------------- | ----------------------------------------------------------------------------------------- | ---- |
+| **V19** `:691` | 非审查者（`role` 缺失）执行后其树 `not-ancestor` + 文件读到旧版                           | ✅   |
+| **V20** `:728` | 直接读返回值 `conflict:true` / `recovered:true` / `merged:[]`                             | ✅   |
+| 　             | 树回可重跑态**三条独立断言**：分支 sha 未变 + 无 `MERGE_HEAD` + `status --porcelain` 为空 | ✅   |
+| 　             | 集成面：冲突时 `chatStream` **一次都不被调用**（审查者不开跑）                            | ✅   |
+| 　             | 不静默：`log.error('merge conflict', {label:'review-view', recovered:true})`              | ✅   |
+| **V22** `:783` | 两轮审查者执行 ⇒ 分支 sha 与 merge commit 计数均不变，且内容仍在树里                      | ✅   |
+
+**V20 里一条意料外的读数（已写进断言与注释）**：`r.skipped` 的**唯一**成员是
+**审查者自己那条分支** —— `listCatBranches` 不排除自身，而 `isAncestor(自, 自)` 为真 ⇒ 自合是 no-op。
+初稿我写的是 `expect(r.skipped).toEqual([])`，被实测判掉。这条不是噪声：它同时证明了
+**循环停在冲突那个来源上**（`merged` 为空），且排序上 `吐槽猫` 先于 `暹罗猫`
+⇒ skipped 的成员构成本身带信息。
+
+**V22 末行「内容仍在」是必需的**：只断言「sha 没变」的话，把 skip 实现成
+「第二轮干脆不合并 / 把分支重置回去」也能全绿 —— 那正是本仓反复点名的假绿门形态。
+
+## 十六、V21 零分支移动（折进 V17 格，未单列）
+
+票面 §八 V21「本笔跑完，`session/<sid8>` 与 `dev` 逐字节未变」的断言，与第 1 笔 V16-c
+**逐字相同**，已保留在 V17 格内（`:628`）。**折格而非删格**，理由：
+
+- 单列一格只能得到**同一组**读数（集成分支 sha、`dev` 的 `branchHead`、实施猫树与分支、主仓库文件），
+  重跑一遍夹具不增加判据，只增加运行时间（每格 ~2s）。
+- 「绝不改集成分支 / `dev`」在本实现里是**结构性的**而非约定：`mergeCatBranchesIntoOwnBranch`
+  的 merge 目标取自 `symbolic-ref HEAD`（前置②已校验它是本会话猫分支）——
+  集成分支与 `dev` 在该函数内**没有任何写入路径**。
+- 若你认为该单列，我照办（改一行 cell 名即可）。
+
+## 十七、覆盖边界自陈
+
+1. **冲突 ⇒ 审查者不产出回执（fail-closed 换可用性）**。这是本笔**唯一的行为代价**，
+   且是有意选的（票面 §二-3「显式抛错 + error 留痕」+ §八 契约 4「不带着半合并态继续」）。
+   另一条路（冲突时照常开跑）会产出一份「审的是旧版且看不出是旧版」的回执 —— 正是本票要消灭的形态。
+   **代价是真实的**：冲突场景下该轮审查链停在「没有回执」，需人工/店长介入。
+2. **V20 的冲突形态是「审查者自己先改同一处」**，证的是判据在冲突下成立；
+   **不证**「实施猫 A 与实施猫 B 互改同一处时审查者会撞上」这条更常见的形态
+   （G 把两猫的并集压到审查者树上 ⇒ 那条路径**真的存在**，但本笔没为它设格）。
+3. **V22 只跑了两轮**，不证 N 轮的稳定性；也不证「跨进程并发两个审查者」。
+4. **本笔全部读数来自单进程、单会话、`os.tmpdir()` 下的临时真仓库**；不证生产多猫并发。
+5. **`ensureExecutionWorktree` 的抛错路径没有幂等/重入保证**：抛在 `chatStream` 之前，
+   由 `executeAgentsSerial` 的 `Promise.allSettled` 兜住 —— 本笔**没有**为「抛错后本轮的
+   `execution_logs` 落什么状态」设格，那是 serial 的既有语义面，不在交付面内。
+6. **§十一 的三读数只覆盖 ds猫 一只猫一轮执行**，且本猫**非审查者** ⇒ 它证「本笔的合并对本猫不生效」，
+   **不证**审查者路径的活实例形态（那要等下一次真审查者执行，届时看 `review view prepared`）。
+
+## 十八、闸读数
+
+| 闸                             | 读数                                                                             |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| `node scripts/lint.js`         | ✅ **3 包通过**                                                                  |
+| `npx vitest run`（全量）       | ✅ **124 文件 / 2537 用例全绿**                                                  |
+| 本文件单跑                     | ✅ **12 passed (12)**                                                            |
+| 重构后未改测试时的全 server 面 | 1 failed \| 1826 passed（1827）—— **唯一红格即待翻转的 V16**，其余 88 文件零影响 |
+
+**计数口径**：2534（收口基线） + 3（本笔新增 V19/V20/V22） = **2537**。
+V17 是既有 V16 格的**翻转**，**不新增用例数** —— 这也是本仓 D12 那条「计数必须写明单位」的规矩。
