@@ -393,10 +393,6 @@ export async function withFetchablePort(
 
 /** 关掉 server，并**强制断开**已有连接（含 fetch keep-alive 池里的空闲 socket，否则 close 回调可能一直等） */
 export async function closeServer(server: Server): Promise<void> {
-  // 从未 listen 成功的 server（绑定失败后进清理路径）直接返回：`server.close()`
-  // 对未监听的实例走 ERR_SERVER_NOT_RUNNING 且**不调回调**——照原样写会把清理
-  // 步骤吊死，把一次响亮的绑定失败变成 afterAll 超时。
-  if (!server.listening) return
   const closed = new Promise<void>((resolve) => server.close(() => resolve()))
   server.closeAllConnections()
   await closed
