@@ -175,7 +175,14 @@ function brokenResolveEnv() {
   }
 }
 
-/** 真空性对照用：直跑一次解析，回报成败（证明假 git 真的坏了解析那一步）。 */
+/** 真空性对照用：直跑一次解析，回报成败（证明假 git 真的坏了解析那一步）。
+ *
+ *  `code` 用来区分两种「失败」——缺了它，`!ok` 会被**没跑起来**冒充通过：
+ *  子进程真的启动并退出非零（假 git 命中）⇒ `code` = 退出码（数字）；
+ *  压根没 spawn 起来（`sh` 不在 PATH；Windows 下父进程 PATH 含 CJK 条目时
+ *  libuv 解析失败）⇒ `code = null`，此时 `ok=false` **不是**「假 git 坏了解析」，
+ *  真空性对照不成立。（实测：前者 `err.status=129`/`err.code=undefined`，
+ *  后者 `err.status=null`/`err.code='ENOENT'`。） */
 function probeCommonDir(repo, env) {
   try {
     const out = execFileSync(
@@ -188,9 +195,13 @@ function probeCommonDir(repo, env) {
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     )
-    return { ok: true, out: out.trim() }
+    return { ok: true, code: 0, out: out.trim() }
   } catch (err) {
-    return { ok: false, out: String(err.stderr || err.message).trim() }
+    return {
+      ok: false,
+      code: typeof err.status === 'number' ? err.status : null,
+      out: String(err.stderr || err.message).trim(),
+    }
   }
 }
 
@@ -636,19 +647,34 @@ assert(
   probeReal.ok && probeReal.out.endsWith('.git'),
   `真空性对照：真 PATH 下 --git-common-dir 应解析成功，实得 ${JSON.stringify(probeReal)}`
 )
+// 前置：探针必须**真的跑起来**。spawn 就没成功时 ok=false 另有来路，不加这条
+// 下面那条断言会被冒充通过（vacuous）——真空性对照白做，正是本仓反复踩的假绿形态。
+assert(
+  probeBroken.code !== null,
+  `真空性对照前置：探针必须真的 spawn 起来（code=null ⇒ sh 没被找到/未启动，此时 ok=false 不构成证据），实得 ${JSON.stringify(
+    probeBroken
+  )}`
+)
 assert(
   !probeBroken.ok,
   `真空性对照：假 git 下 --git-common-dir 应**失败**（否则场景 16 的拦不是它造成的），实得 ${JSON.stringify(
     probeBroken
   )}`
 )
+// 假 git 那格要能分辨「真被假 git 拦下」与「探针没跑起来」——两者都显示「失败」
+// 的话，红了也看不出是判别力问题还是环境问题。
+const probeBrokenCell = probeBroken.ok
+  ? 'OK'
+  : probeBroken.code === null
+    ? '未启动'
+    : `失败(code=${probeBroken.code})`
 console.log('')
 console.log(
   `  共享根对照：worktree 推已审(13)=${isAllowed(sc13.current) ? '放行' : '拦'}` +
     ` / 推未审(14)=${isBlocked(sc14.current) ? '拦' : '放行'}` +
     ` ｜ 直跑·解析正常(15)=${isAllowed(sc15.current) ? '放行' : '拦'}` +
     ` / 同形·解析坏掉(16)=${isBlocked(sc16.current) ? '拦' : '放行'}` +
-    ` ｜ 解析探针 真PATH=${probeReal.ok ? 'OK' : '失败'} 假git=${probeBroken.ok ? 'OK' : '失败'}`
+    ` ｜ 解析探针 真PATH=${probeReal.ok ? 'OK' : '失败'} 假git=${probeBrokenCell}`
 )
 
 // ─── 对照表 ──────────────────────────────────────────────────

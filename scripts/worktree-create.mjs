@@ -7,12 +7,13 @@
  * 自包含脚本（不 source _/husky.sh shim，自 1e0d812 迁移；husky prepare 已随根修
  * 单删除，由 scripts/hooks-install.mjs 在每次 install 后把 hooksPath 固化回
  * .husky——不再有 prepare:husky 写 .husky/_ 的副作用）。
- * worktree 无 node_modules（.gitignore:2），pre-commit 的 npx lint-staged /
- * pnpm lint / pnpm test 全依赖依赖面。worktree 内 push 仍必被阻断——但理由**不是**
- * 「看不到 .push-gate」（该文件本地不跟踪（.gitignore:59），且门禁按共享根解析，
- * 全 worktree 共用主工作区那一份），而是**分支带着未审 commit**：审查记录是主工作区
- * 的基线，猫分支的新 commit 必然落在它之后 ⇒ 命中「有未审 commit」。这是防御正确的
- * 预期行为，收口归店长。
+ * worktree 无 node_modules（见 .gitignore 的 `node_modules/` 规则），pre-commit 的
+ * npx lint-staged / pnpm lint / pnpm test 全依赖依赖面。worktree 内 push 仍必被阻断
+ * ——但理由**不是**「看不到 .push-gate」（该文件本地不跟踪，见 .gitignore 的
+ * `.push-gate` 规则。此处**只锚内容、不写行号**：该行号随 .gitignore 增长漂过——原写
+ * 54 在当时是对的），且门禁按共享根解析，全 worktree 共用主工作区那一份，而是**分支
+ * 带着未审 commit**：审查记录是主工作区的基线，猫分支的新 commit 必然落在它之后 ⇒
+ * 命中「有未审 commit」。这是防御正确的预期行为，收口归店长。
  *
  * 本脚本做四件事：门禁校验（主工作区干净 + origin/dev 是 dev 祖先）→ 创建 worktree
  * （目录在仓库外）→ hook 引导（复制 .husky/ 整目录——钩子已被跟踪，复制是
