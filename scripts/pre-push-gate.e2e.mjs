@@ -19,7 +19,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
@@ -74,14 +74,14 @@ delete GIT_ENV.GIT_COMMON_DIR
 const NO_HOOKS_DIR = join(TEST_BASE, 'no-hooks')
 mkdirSync(NO_HOOKS_DIR, { recursive: true })
 
-function git(repo, args, { noHooks = true } = {}) {
+function git(repo, args, { noHooks = true, env = GIT_ENV } = {}) {
   const full = noHooks
     ? ['-c', `core.hooksPath=${NO_HOOKS_DIR.replace(/\\/g, '/')}`, ...args]
     : args
   return execFileSync('git', full, {
     cwd: repo,
     encoding: 'utf-8',
-    env: GIT_ENV,
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
 }
@@ -120,6 +120,91 @@ function writeGate(repo, sha) {
   writeFileSync(join(repo, '.push-gate'), `${sha}\n`, 'utf-8')
 }
 
+// ─── 共享根夹具（票乙）：worktree + 「解析坏掉」反例 ──────────────
+//
+// `.push-gate` 改为按 `--git-common-dir` 的父目录解析后，全 worktree 共用主工作区
+// 那一份。注意：**普通仓库里两者等价**（common-dir 的父 = 仓库根），所以场景 1–12
+// 全绿本身就是「主工作区行为不变」的回归证明；分叉只在 worktree 里出现。
+
+let wtSeq = 0
+
+/** 在主体仓库上挂一个 worktree（模拟会话 worktree），返回其路径。 */
+function addWorktree(repo, name) {
+  const wt = join(TEST_BASE, `wt-${name}-${wtSeq++}`)
+  git(repo, ['worktree', 'add', '-q', '-b', name, wt.replace(/\\/g, '/')])
+  // `newRepo` 里那份 handoff-gen stub 是**未跟踪**文件、不会被 checkout 进 worktree，
+  // 补一份让 hook 阻断路径（deliver_pending）的输出确定——同 newRepo 的理由。
+  mkdirSync(join(wt, 'scripts'), { recursive: true })
+  writeFileSync(join(wt, 'scripts', 'handoff-gen.mjs'), 'process.exit(0)\n')
+  // 靶心事实：worktree 里**没有** .push-gate（gitignored、从不被 checkout）。
+  // 这条是夹具前提断言——它塌了，场景 13/15 的区分性就无从谈起。
+  assert(!existsSync(join(wt, '.push-gate')), `夹具前提：worktree 内不应有 .push-gate（${name}）`)
+  return wt
+}
+
+/** 假 git：只让「共享根解析」那一步失败，其余命令转发真 git。
+ *  场景 15 用它验证「解析失败 ⇒ 退回原相对路径」，而不是 fail-open。
+ *  不自递归的关键：转发时用 `CATSTUDY_REAL_PATH`（未污染的原始 PATH）找真 git。 */
+const BROKEN_GIT_BIN = join(TEST_BASE, 'broken-git-bin')
+mkdirSync(BROKEN_GIT_BIN, { recursive: true })
+writeFileSync(
+  join(BROKEN_GIT_BIN, 'git'),
+  [
+    '#!/bin/sh',
+    '# 只坏「共享根解析」：模拟老 git（不认 --path-format）或 cwd 不在仓库内',
+    'for a in "$@"; do',
+    '  case "$a" in --path-format=*|--git-common-dir) exit 129 ;; esac',
+    'done',
+    'PATH="$CATSTUDY_REAL_PATH" exec git "$@"',
+    '',
+  ].join('\n'),
+  { mode: 0o755 }
+)
+
+/** 让 hook 内 `git rev-parse --git-common-dir` 失败的环境（场景 16 用）。
+ *
+ *  ⚠️ 只在**直跑 hook**（`sh <hookPath>`）时有效，真 push 形态下够不着：
+ *  实测 git for Windows 执行 hook 时会把 `/mingw64/libexec/git-core` **顶到 PATH
+ *  首位**（hook 内 `command -v git` → `/mingw64/libexec/git-core/git`），PATH 前置层
+ *  根本没机会被解析到。故「解析坏掉」这条反例只能用直跑形态验——
+ *  被测的解析逻辑在 hook 里、与 stdin 无关，直跑同样到得了那条分支。 */
+function brokenResolveEnv() {
+  return {
+    PATH: `${BROKEN_GIT_BIN}${delimiter}${GIT_ENV.PATH ?? ''}`,
+    CATSTUDY_REAL_PATH: GIT_ENV.PATH ?? '',
+  }
+}
+
+/** 真空性对照用：直跑一次解析，回报成败（证明假 git 真的坏了解析那一步）。
+ *
+ *  `code` 用来区分两种「失败」——缺了它，`!ok` 会被**没跑起来**冒充通过：
+ *  子进程真的启动并退出非零（假 git 命中）⇒ `code` = 退出码（数字）；
+ *  压根没 spawn 起来（`sh` 不在 PATH；Windows 下父进程 PATH 含 CJK 条目时
+ *  libuv 解析失败）⇒ `code = null`，此时 `ok=false` **不是**「假 git 坏了解析」，
+ *  真空性对照不成立。（实测：前者 `err.status=129`/`err.code=undefined`，
+ *  后者 `err.status=null`/`err.code='ENOENT'`。） */
+function probeCommonDir(repo, env) {
+  try {
+    const out = execFileSync(
+      'sh',
+      ['-c', 'git rev-parse --path-format=absolute --git-common-dir'],
+      {
+        cwd: repo,
+        encoding: 'utf-8',
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    )
+    return { ok: true, code: 0, out: out.trim() }
+  } catch (err) {
+    return {
+      ok: false,
+      code: typeof err.status === 'number' ? err.status : null,
+      out: String(err.stderr || err.message).trim(),
+    }
+  }
+}
+
 /** 跑一次真 push，返回 { code, out }（out = stdout+stderr 合并）。 */
 function tryPush(repo, refspecs, opts = {}) {
   const args = ['push']
@@ -127,7 +212,7 @@ function tryPush(repo, refspecs, opts = {}) {
   args.push('origin', ...refspecs)
   try {
     // noHooks:false —— 本 e2e 的被测对象就是钩子本身，这里必须放真钩子上场
-    const out = git(repo, args, { noHooks: false })
+    const out = git(repo, args, { noHooks: false, env: opts.env ?? GIT_ENV })
     return { code: 0, out }
   } catch (err) {
     return {
@@ -138,13 +223,13 @@ function tryPush(repo, refspecs, opts = {}) {
 }
 
 /** 直跑 hook（stdin 关闭）——测「无 refspec 回落 HEAD」那条分支。 */
-function runHookDirect(repo, hooksDir) {
+function runHookDirect(repo, hooksDir, env = GIT_ENV) {
   const hookPath = join(hooksDir, 'pre-push')
   try {
     const out = execFileSync('sh', [hookPath], {
       cwd: repo,
       encoding: 'utf-8',
-      env: GIT_ENV,
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     return { code: 0, out }
@@ -395,6 +480,70 @@ const SCENARIOS = [
       return tryPush(repo, [':refs/heads/feat'])
     },
   },
+  {
+    id: '13',
+    desc: '★区分性：worktree 里推**已审 sha** → 放行（审查记录在共享根可达）',
+    expect: 'allow',
+    discriminator: true,
+    // 旧实现把 `.push-gate` 当**当前 worktree 根**下的文件，而 worktree 里没有
+    // （gitignored、从不被 checkout）⇒ 门禁前置直接拦，推已审 sha 也拦。改按共享根
+    // 解析后全 worktree 看到同一份审查记录。这是「共享根」相对「每树一份」的分叉点。
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      writeGate(repo, c1) // 审查记录写在**主体仓库根**（= 共享根）
+      const wt = addWorktree(repo, 'wt13')
+      return tryPush(wt, ['HEAD:refs/heads/wt13'])
+    },
+  },
+  {
+    id: '14',
+    desc: 'worktree 里推**未审 commit** → 拦（共享后仍拦，只是理由变精确）',
+    expect: 'block',
+    // 结论与旧实现相同（旧：找不到文件拦 / 新：有未审 commit 拦），故是**回归对照**
+    // 而非区分性场景——它证明的是「修完没有顺手把 worktree 的推送放行」。
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      writeGate(repo, c1)
+      const wt = addWorktree(repo, 'wt14')
+      commitFile(wt, 'b.txt', '2', 'c2 未审')
+      return tryPush(wt, ['HEAD:refs/heads/wt14'])
+    },
+  },
+  {
+    id: '15',
+    desc: '阴性对照：worktree 里直跑 hook（解析正常，HEAD 恰为已审）→ 放行',
+    expect: 'allow',
+    discriminator: true,
+    // 16 的同形对照基线。也是「回落 HEAD 那条分支下共享根同样生效」的证明——
+    // 旧实现看不到共享根 ⇒ 前置拦。注意这里**必须直跑**：真 push 形态下 PATH
+    // 劫持够不着（见 brokenResolveEnv 注释）。
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      writeGate(repo, c1)
+      const wt = addWorktree(repo, 'wt15')
+      return runHookDirect(wt, hooks)
+    },
+  },
+  {
+    id: '16',
+    desc: '反例：共享根解析坏掉 → 退回原相对路径（拦），不 fail-open',
+    expect: 'block',
+    // 与 15 严格同形（仓库、gate、HEAD、hook 形态全同），只把「解析那一步」弄坏
+    // （假 git 只坏 --git-common-dir，其余转发）。若实现写成「解析不出来就放行」，
+    // 本条翻红 ⇒ 这是「退回原行为而非 fail-open」的直接证据。
+    // 注：本条在旧实现下同样拦（它本就只看相对路径），故其判别力**只**指向
+    // fail-open，不指向「共享根」——后者由 13 承担。
+    run: (hooks) => {
+      const repo = newRepo(hooks)
+      const c1 = commitFile(repo, 'a.txt', '1', 'c1')
+      writeGate(repo, c1)
+      const wt = addWorktree(repo, 'wt16')
+      return runHookDirect(wt, hooks, { ...GIT_ENV, ...brokenResolveEnv() })
+    },
+  },
 ]
 
 // ─── 跑场景 ──────────────────────────────────────────────────
@@ -464,6 +613,68 @@ console.log(
   `  必改 2 近因对照（删远端 ref + HEAD 未审）：` +
     `T-O 首版(blob ${NEAR_CAUSE_HOOK_BLOB.slice(0, 12)})=${isBlocked(nearCause8) ? '拦' : '放行'}` +
     ` / 本笔=${isAllowed(row8.current) ? '放行' : '拦'}`
+)
+
+// ─── 共享根对照（票乙）：同形相反 + 假 git 真空性 ────────────────
+//
+// 场景 15 与 16 的仓库形态、审查记录、HEAD、hook 形态**完全相同**，唯一变量是
+// 「共享根解析那一步可不可用」。二者结论必须相反——这就是「解析失败退回原行为
+// （拦），而非 fail-open（放行）」的直接证据。缺了这条，场景 16 单独看是恒真门
+// （旧实现下同样拦）。
+
+const sc13 = rows.find((r) => r.id === '13')
+const sc14 = rows.find((r) => r.id === '14')
+const sc15 = rows.find((r) => r.id === '15')
+const sc16 = rows.find((r) => r.id === '16')
+
+assert(
+  isAllowed(sc13.current),
+  '共享根正向：worktree 里推已审 sha 必须放行（否则共享根解析没生效）'
+)
+assert(
+  isBlocked(sc14.current),
+  '共享根回归：worktree 里推未审 commit 必须仍拦（修完不许把 worktree 推送整条放行）'
+)
+assert(
+  isAllowed(sc15.current) && isBlocked(sc16.current),
+  '同形对照：解析可用 ⇒ 放行(15) / 解析坏掉 ⇒ 拦(16)，二者必须相反（否则 fail-open）'
+)
+
+// 真空性对照：假 git 必须**真的**让解析失败，否则场景 16 的「拦」另有来路 = 假绿。
+const probeReal = probeCommonDir(REPO_ROOT, GIT_ENV)
+const probeBroken = probeCommonDir(REPO_ROOT, { ...GIT_ENV, ...brokenResolveEnv() })
+assert(
+  probeReal.ok && probeReal.out.endsWith('.git'),
+  `真空性对照：真 PATH 下 --git-common-dir 应解析成功，实得 ${JSON.stringify(probeReal)}`
+)
+// 前置：探针必须**真的跑起来**。spawn 就没成功时 ok=false 另有来路，不加这条
+// 下面那条断言会被冒充通过（vacuous）——真空性对照白做，正是本仓反复踩的假绿形态。
+assert(
+  probeBroken.code !== null,
+  `真空性对照前置：探针必须真的 spawn 起来（code=null ⇒ sh 没被找到/未启动，此时 ok=false 不构成证据），实得 ${JSON.stringify(
+    probeBroken
+  )}`
+)
+assert(
+  !probeBroken.ok,
+  `真空性对照：假 git 下 --git-common-dir 应**失败**（否则场景 16 的拦不是它造成的），实得 ${JSON.stringify(
+    probeBroken
+  )}`
+)
+// 假 git 那格要能分辨「真被假 git 拦下」与「探针没跑起来」——两者都显示「失败」
+// 的话，红了也看不出是判别力问题还是环境问题。
+const probeBrokenCell = probeBroken.ok
+  ? 'OK'
+  : probeBroken.code === null
+    ? '未启动'
+    : `失败(code=${probeBroken.code})`
+console.log('')
+console.log(
+  `  共享根对照：worktree 推已审(13)=${isAllowed(sc13.current) ? '放行' : '拦'}` +
+    ` / 推未审(14)=${isBlocked(sc14.current) ? '拦' : '放行'}` +
+    ` ｜ 直跑·解析正常(15)=${isAllowed(sc15.current) ? '放行' : '拦'}` +
+    ` / 同形·解析坏掉(16)=${isBlocked(sc16.current) ? '拦' : '放行'}` +
+    ` ｜ 解析探针 真PATH=${probeReal.ok ? 'OK' : '失败'} 假git=${probeBrokenCell}`
 )
 
 // ─── 对照表 ──────────────────────────────────────────────────

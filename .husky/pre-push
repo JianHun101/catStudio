@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 # pre-push 审查门禁：检查**本次推送的每个 sha** 是否已经过 @吐槽猫 review
-# 审查通过后运行: git rev-parse HEAD > .push-gate
+# 审查通过后（**只由店长在主工作区**）运行: git rev-parse HEAD > .push-gate
+#   —— `.push-gate` 落在**共享根**（见下方 GATE_FILE 解析），全 worktree 共用一份。
+#      在会话 worktree 里写相对路径 `> .push-gate` 只会造出一份无人读的副本
+#      （该文件 gitignored、从不被 checkout），门禁读的仍是主工作区那份。
 # 紧急绕过: git push --no-verify
 #
 # T-O：被审对象 = **本次推送的 refspec**，不是 HEAD。
@@ -18,7 +21,28 @@
 # pre-push 会重新生成范围版文档造成双版本重复投递，已随重复投递根治计划
 # Fix C 移除）。
 
-GATE_FILE=".push-gate"
+# ─── 审查记录落点：共享根（全 worktree 唯一）──────────────────
+#
+# `.push-gate` 是「全仓只有一棵树」型状态：它记的是**已审 sha**，语义与「哪棵树
+# 执行推送」无关 ⇒ 按 AGENTS.md「状态落盘键控」键在 `--git-common-dir` 的父目录。
+#
+# 为什么不裸写相对路径：相对路径的解析基准是 hook 的 cwd = **当前 worktree 根**，
+# 而该文件在 .gitignore 里、从不被 checkout ⇒ 每棵 worktree 都看不到它，门禁在
+# worktree 里退化成「找不到文件一律拦」。结论碰巧对（未审确实该拦），但**推已审
+# sha 也被拦**——误拦合法推送的压力把人推向 `--no-verify`，正是本门禁要止住的形态。
+#
+# 实测（本仓 git 2.55）：worktree 里 git 会给 hook 注入
+# `GIT_DIR=<主仓>/.git/worktrees/<名>`，但 `--git-common-dir` 仍返回 `<主仓>/.git`
+# ⇒ 本算式对注入免疫（`--git-dir` 则会被注入带偏，故不用它）。
+#
+# 解析失败（老 git 无 `--path-format` / cwd 不在仓库内）**退回原相对路径**，
+# 保住今天在主工作区的行为——**绝不 fail-open**：解析不出来 ≠ 放行。
+_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+if [ -n "$_COMMON_DIR" ]; then
+  GATE_FILE="$(dirname "$_COMMON_DIR")/.push-gate"
+else
+  GATE_FILE=".push-gate"
+fi
 ZERO_SHA="0000000000000000000000000000000000000000"
 
 # ─── 辅助：补投滞留交接文档（委托 handoff-gen.mjs 单源） ───────
@@ -39,11 +63,11 @@ deliver_pending() {
 
 if [ ! -f "$GATE_FILE" ]; then
   echo ""
-  echo "❌ 推送阻断：未找到审查记录 (.push-gate)"
+  echo "❌ 推送阻断：未找到审查记录 ($GATE_FILE)"
   echo ""
   echo "   当前 HEAD 未经 @吐槽猫 review。请先完成审查流程："
   echo "   1. 出交接文档，@吐槽猫 review"
-  echo "   2. 审查通过后运行: git rev-parse HEAD > .push-gate"
+  echo "   2. 审查通过后由店长在主工作区更新: git rev-parse HEAD > .push-gate"
   echo "   3. 再次 git push"
   echo ""
   echo "   紧急绕过: git push --no-verify"
@@ -63,7 +87,7 @@ if ! echo "$LAST_REVIEWED" | grep -qE '^[0-9a-f]{40}$'; then
   echo "❌ .push-gate 内容无效（需要完整的 40 位 SHA）"
   echo ""
   echo "   当前内容: '${LAST_REVIEWED}'"
-  echo "   审查通过后运行: git rev-parse HEAD > .push-gate"
+  echo "   审查通过后由店长在主工作区更新: git rev-parse HEAD > .push-gate"
   echo ""
   exit 1
 fi
@@ -175,7 +199,7 @@ if [ -n "$ok_list" ]; then
   printf "%b" "$ok_list"
 fi
 echo ""
-echo "   审查通过后运行: git rev-parse HEAD > .push-gate"
+echo "   审查通过后由店长在主工作区更新: git rev-parse HEAD > .push-gate"
 echo "   紧急绕过: git push --no-verify"
 echo ""
 
