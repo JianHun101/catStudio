@@ -12,9 +12,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import {
+  createIsolatedRepoRoot,
+  removeIsolatedRepoRoot,
+  type IsolatedRepoRoot,
+} from '../test-helpers.js'
 import type { AgentConfig } from '@cat-study/shared'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
@@ -92,6 +96,7 @@ vi.mock('../llm/user-request-signals.js', () => ({ consumeUserRequestSignals: vi
 const origCwd = process.cwd()
 const origGitEnv: Record<string, string | undefined> = {}
 
+let repoRoot: IsolatedRepoRoot
 let tmpRepo = ''
 let initSha = ''
 /** 本文件创建的 worktree 目录（清理用；**不**动共享的 catStudy-sessions 父目录） */
@@ -214,13 +219,16 @@ function dropWorktrees(): void {
       /* 兜底清理失败忽略 */
     }
   }
-  // 路径只依赖 `tmpdir()` 与 shortId（**不含**随机仓库名）⇒ 上一次跑崩 / 半途失败
-  // 留下的同 id 目录会让 `ensureCatWorktree` 走进「已存在 → 复用」分支并撞上所有权
-  // 校验。**实测踩过**：一次反向对照留下的 `<tmpdir>/catStudy-sessions/scwt0006-flash猫`
+  // 路径只依赖 mainRoot 的**父目录**与 shortId（**不含**随机仓库名）⇒ 上一次跑崩 /
+  // 半途失败留下的同 id 目录会让 `ensureCatWorktree` 走进「已存在 → 复用」分支并撞上
+  // 所有权校验。**实测踩过**：一次反向对照留下的 `<tmpdir>/catStudy-sessions/scwt0006-flash猫`
   // 让「集成分支不存在」的前提失效（它是上一轮别的配置建出来的）。
-  // 该危害在本笔后**未消失**，只是落点换了：现在由 V13 / V15 各自的**显式前提断言**
-  // （`branch --list` 为空 + 会话 worktree 不存在）把守，而不是靠用例内部的隐式推演
-  // ——前提成立与否有了读数，不再是「跑绿了就说明前提在」。
+  //
+  // 那个父目录的**跨进程**形态已由 `createIsolatedRepoRoot` 消灭（壳目录进程唯一 ⇒
+  // 别人的残留看不见了）；**同一进程内**的残留仍在——本文件多格共用一棵壳树，所以这段
+  // 逐格清扫不能省。同进程残留由 V13 / V15 各自的**显式前提断言**（`branch --list` 为空
+  // + 会话 worktree 不存在）把守，而不是靠用例内部的隐式推演——前提成立与否有了读数，
+  // 不再是「跑绿了就说明前提在」。
   for (const sid of SESSION_IDS) {
     const paths = [sessionWorktreePath(tmpRepo, sessionShortId(sid))]
     for (const name of ALL_CAT_NAMES) paths.push(catWtFor(sid, name))
@@ -331,7 +339,10 @@ beforeAll(() => {
     delete process.env[k]
   }
 
-  tmpRepo = mkdtempSync(join(tmpdir(), 'serial-catwt-repo-'))
+  // 仓库根落在**进程唯一**的壳里（`<壳>/repo`）——`catWorktreePath` 的 `..` 因此
+  // 落到 `<壳>/catStudy-sessions/` 而非共享的 `tmpdir()`，两进程同跑不再对撞。
+  repoRoot = createIsolatedRepoRoot('serial-catwt-')
+  tmpRepo = repoRoot.repo
   execFileSync('git', ['init'], { cwd: tmpRepo, env: cleanGitEnv(), stdio: 'ignore' })
   execFileSync('git', ['config', 'user.name', 'test'], {
     cwd: tmpRepo,
@@ -369,11 +380,9 @@ beforeAll(() => {
 afterAll(() => {
   process.chdir(origCwd)
   dropWorktrees()
-  try {
-    rmSync(tmpRepo, { recursive: true, force: true })
-  } catch {
-    /* 兜底清理失败忽略 */
-  }
+  // 删**壳**（连 `<壳>/catStudy-sessions/*` 一起）——只删 `repo` 会把 worktree 兄弟目录
+  // 与空壳留在 `tmpdir()` 里
+  removeIsolatedRepoRoot(repoRoot)
   for (const [k, v] of Object.entries(origGitEnv)) {
     if (v === undefined) delete process.env[k]
     else process.env[k] = v

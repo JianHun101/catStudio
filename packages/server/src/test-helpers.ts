@@ -11,10 +11,11 @@ import * as sqliteVec from 'sqlite-vec'
 import type { FastifyInstance } from 'fastify'
 import Fastify from 'fastify'
 import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** 本包根目录（`packages/server`）——隔离目录的派生键。`resolve` 抹掉尾部分隔符，与 vitest 配置的 `__dirname` 同形。 */
@@ -52,6 +53,51 @@ const ISOLATION_ROOT = resolve(
  */
 export function isolatedTestDir(name: string): string {
   return resolve(ISOLATION_ROOT, name)
+}
+
+/** `createIsolatedRepoRoot` 的产出：壳（`..` 落点）+ 壳内的仓库根（真 mainRoot） */
+export interface IsolatedRepoRoot {
+  /** 进程唯一壳目录——`catWorktreePath` 的 `..` 落在这里 */
+  shell: string
+  /** 传给路径 helper / `process.chdir` 的仓库根 */
+  repo: string
+}
+
+/**
+ * 进程唯一的「临时主仓库根」夹具 —— worktree 系列路径 helper 的 `mainRoot` 锚点。
+ *
+ * **为什么不能直接 `mkdtempSync(join(tmpdir(), 'x-'))` 当仓库根**：
+ * `catWorktreePath` / `sessionWorktreePath` 都是
+ * `resolve(mainRoot, '..', 'catStudy-sessions', …)` —— 随机仓库名**被那个 `..` 整个丢掉**，
+ * 产物只取决于 `tmpdir()` + shortId + 猫名，**三项全确定性**。于是两进程并发跑同一文件时
+ * 物理路径对撞（A 建出的树被 B 当残留复用/删掉），读数随机红。实测基线
+ * （`serial.cat-worktree.test.ts` 两进程同跑）：A 6 败/6 过、B 8 败/4 过，双双 exit 1。
+ *
+ * 壳目录 `mkdtemp` 是**进程唯一**的那一层 ⇒ `..` 落在 `<壳>` 内，跨进程互不可见。
+ * 仓库根取 `<壳>/repo` 而不是壳本身：让 `..` 的落点还有一层独立名字，壳也不被 git
+ * 当成工作区（`getMainRepoRoot()` 从 cwd 上溯时不会撞见「壳即仓库」）。
+ *
+ * 用法：`repo` 交给 `chdir` / 路径 helper；清理走 `removeIsolatedRepoRoot`（删壳，不是删 repo）。
+ * **同型状态文件（`cat-study-test-isolation`）的判据是「哪个仓库」，本夹具的判据是
+ * 「哪个进程」**——并发跑同一文件的两个进程同仓库，故前者不够用，必须 `mkdtemp` 那一层。
+ */
+export function createIsolatedRepoRoot(prefix = 'cat-study-test-repo-'): IsolatedRepoRoot {
+  const shell = mkdtempSync(join(tmpdir(), prefix))
+  const repo = resolve(shell, 'repo')
+  mkdirSync(repo, { recursive: true })
+  return { shell, repo }
+}
+
+/**
+ * 清理夹具：删**壳**——`<壳>/catStudy-sessions/*` 那些 worktree 目录是 `repo` 的兄弟，
+ * 只删 `repo` 会把它们与空壳一起留在 `tmpdir()` 里（本仓有「临时目录清理不全」的前科）。
+ */
+export function removeIsolatedRepoRoot(root: IsolatedRepoRoot): void {
+  try {
+    rmSync(root.shell, { recursive: true, force: true })
+  } catch {
+    /* 兜底清理失败忽略（Windows 下 cwd 被持有会 EPERM） */
+  }
 }
 
 const SCHEMA_SQL = `

@@ -36,7 +36,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import type { AgentConfig, Message } from '@cat-study/shared'
-import { createTestDb } from '../test-helpers.js'
+import {
+  createIsolatedRepoRoot,
+  createTestDb,
+  removeIsolatedRepoRoot,
+  type IsolatedRepoRoot,
+} from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 import { __test_reset } from '../dispatch/index.js'
@@ -117,9 +122,11 @@ vi.mock('../llm/user-request-signals.js', () => ({ consumeUserRequestSignals: vi
 const origCwd = process.cwd()
 const origGitEnv: Record<string, string | undefined> = {}
 
-/** 临时「主仓库」根（真 git 仓，dev 分支） */
+/** 临时「主仓库」夹具（壳进程唯一，见 `createIsolatedRepoRoot`） */
+let repoRoot: IsolatedRepoRoot
+/** 临时「主仓库」根（真 git 仓，dev 分支）——= `repoRoot.repo` */
 let tmpRepo = ''
-/** 非 git 目录（B1 成因：`getMainRepoRoot()` → null） */
+/** 非 git 目录（B1 成因：`getMainRepoRoot()` → null）；不落 worktree，无对撞面，仍走裸 `mkdtemp` */
 let tmpNoGit = ''
 /** dev 分支的初始 commit（每用例 `reset --hard` 回到它） */
 let initSha = ''
@@ -195,10 +202,10 @@ function serialWarnedDirtyReset(): boolean {
 /**
  * 丢掉本文件建过的 worktree 目录 + `worktree prune`。
  *
- * 为什么必须逐测试做：worktree 路径只依赖 `tmpdir()` 与 shortId（**不含**随机仓库名），
- * 所以上一次跑崩留下的同 id 目录会让 `ensureSessionWorktree` 走进「已存在 → 复用」
- * 分支并指向一个已被删除的仓库。**不整目录清扫**——`tmpdir()/catStudy-sessions` 与
- * 并行 worker 里的同型测试共享，扫它等于误伤别人。
+ * 为什么必须逐测试做：worktree 路径只依赖 mainRoot 的**父目录**与 shortId（**不含**
+ * 随机仓库名），所以上一次跑崩留下的同 id 目录会让 `ensureSessionWorktree` 走进
+ * 「已存在 → 复用」分支并指向一个已被删除的仓库。跨进程那半已由
+ * `createIsolatedRepoRoot` 的壳目录消灭，**同进程**这半（本文件多格共用一棵壳树）仍需逐格扫。
  */
 function dropWorktrees(): void {
   for (const dir of worktrees.splice(0)) {
@@ -219,7 +226,10 @@ beforeAll(() => {
     delete process.env[k]
   }
 
-  tmpRepo = mkdtempSync(join(tmpdir(), 'serial-downgrade-repo-'))
+  // 仓库根落进程唯一的壳里：`sessionWorktreePath` 的 `..` 从此落在 `<壳>` 内，
+  // 不再与并发跑同一文件的另一进程共用 `tmpdir()/catStudy-sessions/`
+  repoRoot = createIsolatedRepoRoot('serial-downgrade-')
+  tmpRepo = repoRoot.repo
   execFileSync('git', ['init'], { cwd: tmpRepo, env: cleanGitEnv(), stdio: 'ignore' })
   execFileSync('git', ['config', 'user.name', 'test'], {
     cwd: tmpRepo,
@@ -266,7 +276,9 @@ beforeAll(() => {
 afterAll(() => {
   process.chdir(origCwd)
   dropWorktrees()
-  for (const dir of [...scratchDirs, tmpRepo, tmpNoGit]) {
+  // 删**壳**（连 `<壳>/catStudy-sessions/*` 一起）；tmpNoGit 在壳外，单独删
+  removeIsolatedRepoRoot(repoRoot)
+  for (const dir of [...scratchDirs, tmpNoGit]) {
     try {
       rmSync(dir, { recursive: true, force: true })
     } catch {
@@ -429,7 +441,9 @@ function makeWorktree(sessionId: string): string {
 function occupySessionBranch(shortId: string): void {
   const branch = `session/${shortId}`
   git(['branch', branch])
-  const holder = join(tmpdir(), `serial-downgrade-holder-${shortId}`)
+  // 占位树落**本进程的壳**里（不是裸 `tmpdir()`）——否则两进程同跑时后到的那个
+  // `git worktree add` 会撞上「目录已存在」，B4 成因在夹具层就被伪造出来
+  const holder = resolve(repoRoot.shell, `holder-${shortId}`)
   scratchDirs.push(holder)
   git(['worktree', 'add', holder, branch])
 }

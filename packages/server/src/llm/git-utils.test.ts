@@ -30,6 +30,11 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import {
+  createIsolatedRepoRoot,
+  removeIsolatedRepoRoot,
+  type IsolatedRepoRoot,
+} from '../test-helpers.js'
 
 // ─── removeSessionWorktree 自指守卫测试专用 mock ──────────
 // 只包两层、其余全走真实：
@@ -65,6 +70,9 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const origCwd = process.cwd()
+/** 临时仓库夹具（壳进程唯一，见 `createIsolatedRepoRoot`） */
+let repoRoot: IsolatedRepoRoot
+/** = `repoRoot.repo`——本文件全部 `resolve(tmp, …)` / `wtPath()` 的锚点 */
 let tmp: string
 let gitUtils: typeof import('./git-utils.js')
 
@@ -93,7 +101,10 @@ function git(cmd: string): string {
 }
 
 beforeAll(async () => {
-  tmp = mkdtempSync(join(tmpdir(), 'git-utils-test-'))
+  // 仓库根落进程唯一的壳里（`<壳>/repo`）：`sessionWorktreePath` 的 `..` 落在 `<壳>` 内，
+  // 不再与并发跑同一文件的另一进程共用 `tmpdir()/catStudy-sessions/`
+  repoRoot = createIsolatedRepoRoot('git-utils-test-')
+  tmp = repoRoot.repo
   execSync('git init', { cwd: tmp, env: cleanGitEnv(), stdio: 'ignore' })
   execSync('git config user.name test', { cwd: tmp, env: cleanGitEnv(), stdio: 'ignore' })
   execSync('git config user.email test@test.local', {
@@ -113,7 +124,9 @@ beforeAll(async () => {
 
 afterAll(() => {
   process.chdir(origCwd)
-  rmSync(tmp, { recursive: true, force: true })
+  // 删**壳**（连 `<壳>/catStudy-sessions/*` 一起）——只删 `repo` 会把 worktree 兄弟目录
+  // 与空壳留在 `tmpdir()` 里
+  removeIsolatedRepoRoot(repoRoot)
 })
 
 describe('gitCommit e2e marker guard', () => {
@@ -145,8 +158,9 @@ describe('gitCommit e2e marker guard', () => {
 
 // ─── 会话 worktree（隔离实证）──────────────────────
 // 临时仓库 chdir 语义：git-utils 的 getCwd() = process.cwd() = tmp（beforeAll
-// 已 chdir）。worktree 目录 = tmp 的兄弟目录 catStudy-sessions/<8位id>——
-// os tmpdir 下可写，测试结束由 removeSessionWorktree + afterAll 兜底清理。
+// 已 chdir）。worktree 目录 = tmp 的兄弟目录 `<壳>/catStudy-sessions/<8位id>`——
+// 壳进程唯一（`createIsolatedRepoRoot`），兄弟目录随之每进程一份、互不可见；
+// 测试结束由 removeSessionWorktree + afterAll（删壳）兜底清理。
 // Windows junction 实测项：mklink /J 不需要管理员权限，CI/本机可跑。
 
 describe('session worktree', () => {
@@ -461,7 +475,10 @@ describe('session worktree', () => {
     // 已被前序用例 git add -A 提交进 git，新 worktree 会真实检出成目录，
     // linkNodeModules 见 dest 已存在而跳过，根链接无从测。子仓库内 node_modules
     // 全部 gitignored → worktree add 不检出 → 4 条链接全部由 linkNodeModules 新建
-    const subRepo = mkdtempSync(join(tmpdir(), 'git-utils-linknm-'))
+    // 本格 chdir 到子仓库后调 `ensureSessionWorktree` ⇒ 它同样是 worktree 路径的锚点，
+    // 必须走壳（否则 `<tmpdir>/catStudy-sessions/wt-linknm` 又是跨进程共享路径）
+    const linkRoot = createIsolatedRepoRoot('git-utils-linknm-')
+    const subRepo = linkRoot.repo
     const sub = (cmd: string): string =>
       execSync(`git ${cmd}`, {
         cwd: subRepo,
@@ -529,7 +546,7 @@ describe('session worktree', () => {
         /* 忽略清理失败 */
       }
       process.chdir(orig)
-      rmSync(subRepo, { recursive: true, force: true })
+      removeIsolatedRepoRoot(linkRoot)
     }
   })
 

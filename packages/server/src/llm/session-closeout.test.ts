@@ -19,11 +19,19 @@ import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import {
+  createIsolatedRepoRoot,
+  removeIsolatedRepoRoot,
+  type IsolatedRepoRoot,
+} from '../test-helpers.js'
 
 let closeout: typeof import('./session-closeout.js')
 let gitUtils: typeof import('./git-utils.js')
 
 const origCwd = process.cwd()
+/** 临时仓库夹具（壳进程唯一，见 `createIsolatedRepoRoot`）——收口器建的会话 worktree
+ *  全落 `<壳>/catStudy-sessions/*`，跨进程不再对撞 */
+let repoRoot: IsolatedRepoRoot
 let tmp: string
 const wtDirs: string[] = []
 
@@ -56,7 +64,8 @@ function mainRoot(): string {
 }
 
 beforeAll(async () => {
-  tmp = mkdtempSync(join(tmpdir(), 'session-closeout-test-'))
+  repoRoot = createIsolatedRepoRoot('session-closeout-test-')
+  tmp = repoRoot.repo
   execSync('git init', { cwd: tmp, env: cleanGitEnv(), stdio: 'ignore' })
   execSync('git config user.name test', { cwd: tmp, env: cleanGitEnv(), stdio: 'ignore' })
   execSync('git config user.email test@test.local', {
@@ -83,7 +92,8 @@ afterAll(() => {
       /* 兜底清理失败忽略 */
     }
   }
-  rmSync(tmp, { recursive: true, force: true })
+  // 删**壳**（连 `<壳>/catStudy-sessions/*` 一起，含未登记进 wtDirs 的）
+  removeIsolatedRepoRoot(repoRoot)
 })
 
 /** 建会话 worktree 并在其中落一个独立 commit（dev 落后于会话分支的通用前置）。
