@@ -36,7 +36,8 @@ import { ProviderTokenPool } from './token-pool.js'
 import { classifyError } from '../eval/classify-error.js'
 // 诊断取值单源（R5 §B）：catch 到的**任何**值都要能落出可辨识信息——`err.message`
 // 对非 Error 抛出物恒为 undefined（诊断当场归零）。注：库内 19 行 `execute crash`
-// **不是**这条路来的（那 19 行的 catch 从未触发过），成因见 `executeRun` finally 段。
+// **不是**这条路来的（那 19 行的 catch 从未触发过），成因是 `executeRun` finally 段
+// 的误收口——R7 已加归属校验除根，该词随之退役；19 行是历史存量，不再新增。
 import { messageOf } from '../utils.js'
 import {
   cleanGitEnv,
@@ -1717,7 +1718,9 @@ export function createExecutionEngine(
       })
     } catch (err: any) {
       execError = err
-      log.error('execute crashed — releasing slot in finally', {
+      // 本行只说「本帧抛了」——槽位收不放，由下面的 finally 按归属判（R7 前这里写
+      // 'releasing slot in finally'，那是承诺了 finally 不一定兑现的事）。
+      log.error('execute crashed', {
         agentId: cmd.agentId,
         traceId: cmd.traceId,
         error: messageOf(err),
@@ -1725,33 +1728,57 @@ export function createExecutionEngine(
       return false
     } finally {
       // 原 S2 手动兜底（ingest .catch 里的槽位释放）移入 execute 的 finally：
-      // executeOneAgent 若逃逸异常未自收口（槽位仍 busy），此处补收口 + 排空
+      // executeOneAgent 若逃逸异常未自收口（槽位仍 busy），此处补收口 + 排空。
       const s = getSlotInternal(cmd.agentId, cmd.sessionId)
       if (s && s.status === 'busy') {
-        const next = await completeExecution(cmd.agentId, cmd.sessionId, false, {
-          // 兜底词只覆盖「取不出信息」（`messageOf` 返回 undefined）。
-          // 两种情形共用本行，必须能分开：
-          //   · `execError` 有值 = 本帧自己抛了（`executeOneAgent` 的 try 之外抛出——
-          //     `:544` 起才有内层 try/catch，之前的状态读写逃得出来）；
-          //   · `execError === undefined` = 本帧**没抛也没崩**，是槽位在收口后被
-          //     **另一笔执行**接管（`:805` 收口后槽位 idle，本帧仍挂在 A2A
-          //     `dispatchP`/`drainP` 上；新触发抢在帧尾前把槽位标 busy）。
-          // 旧词 `'execute crash'` 把后者谎报成崩溃（全库 19 行同源，且每行都被误当
-          // 「真崩」归因）——正名为事实描述：槽位是**别人的**，本帧无权收口。
-          // `??` 而非 `||`：`Error('')` 的零回归（票面：Error 路径 message 原样）。
-          // `messageOf` 自身不抛——本行在 finally 的槽位收口路径上，抛错会毁掉收口。
-          errorMessage: messageOf(execError) ?? 'slot busy after executeOneAgent returned',
-          traceId: cmd.traceId,
-        }).catch(() => undefined)
-        if (next) {
-          try {
-            await drainQueuedCommand(ctx, agent, next, false)
-          } catch (e: any) {
-            log.error('drain failed after execute crash (queue item stuck)', {
-              agentId: cmd.agentId,
-              triggerMessageId: next.triggerMessageId,
-              error: messageOf(e),
-            })
+        // ── 归属校验（R7 甲案）：busy 的必须是**本帧的**槽位，才轮到本帧兜底 ──
+        // 无校验就收正是存量 19 行 `'execute crash'` 的来源，逐环有据：
+        //   ① 本帧正常路径已自收口（`:806` finalizeRun ⇒ 槽位 idle）；
+        //   ② 本帧仍挂在 `:1093` 的 `Promise.all([drainP, dispatchP])` 上
+        //      （A2A 派发子树 / 队列排空子树都还在跑）；
+        //   ③ 该 await 窗口内控制权让出 ⇒ 新触发走 `:1772` 决策段见 idle ⇒ 标 busy 开跑；
+        //   ④ 本帧 await 结束 → return → 本 finally 见 busy —— **那是别人的槽位**。
+        // 收下去 = 释放正在跑的那笔的槽位（单槽位 FIFO 被击穿，同 agent+session 双执行）
+        // + 把 `failed` 写进它的行（`finalizeExecutionLog` 按「agent + 最新 running」
+        // 定位，WHERE 里没有 sessionId ⇒ 跨会话也能命中）。
+        // R7 前这里只有一行注释写着「本帧无权收口」，代码紧接着就收了。
+        if (s.currentTriggerMessageId !== cmd.triggerMessageId) {
+          log.warn('slot busy but owned by another trigger — finalize skipped', {
+            agentId: cmd.agentId,
+            traceId: cmd.traceId,
+            slotOwnerTriggerMessageId: s.currentTriggerMessageId,
+            thisTriggerMessageId: cmd.triggerMessageId,
+          })
+        } else {
+          const next = await completeExecution(cmd.agentId, cmd.sessionId, false, {
+            // 诊断词三选一（票面 §2.1：`execError` 决定词）——三条互斥，不再共用一词：
+            //   · `messageOf(execError)` 有值 ⇒ 逐字原样（`??` 而非 `||`：`Error('')`
+            //     的空串零回归；`messageOf` 自身不抛——本行在 finally 的槽位收口路径上，
+            //     它抛错会毁掉收口）；
+            //   · `execError === undefined` ⇒ 本帧没抛也没崩，却仍占着槽位 = 「正常返回
+            //     但没自收口」。`:806` 那次 completeExecution 自身抛错是唯一可达源
+            //     （`:1096` catch 会补收一次，再失败被 `.catch` 吞掉）——防御分支，
+            //     兜底词即事实描述；
+            //   · 其余 ⇒ 抛了非 Error 且取不出信息（`messageOf` 对 `{}` / 循环引用返回
+            //     undefined）。**不能沿用上一词**：那会把「真抛了」说成「没抛」，
+            //     与旧词 `'execute crash'` 同型的谎报。
+            errorMessage:
+              messageOf(execError) ??
+              (execError === undefined
+                ? 'slot busy after executeOneAgent returned'
+                : 'execute threw a value with no extractable message'),
+            traceId: cmd.traceId,
+          }).catch(() => undefined)
+          if (next) {
+            try {
+              await drainQueuedCommand(ctx, agent, next, false)
+            } catch (e: any) {
+              log.error('drain failed after finally fallback finalize (queue item stuck)', {
+                agentId: cmd.agentId,
+                triggerMessageId: next.triggerMessageId,
+                error: messageOf(e),
+              })
+            }
           }
         }
       }
