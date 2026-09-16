@@ -7,17 +7,19 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { join } from 'node:path'
+import { isolatedTestDir } from '../packages/server/src/test-helpers.js'
 import {
   stopProcessGracefully,
   SHUTDOWN_GRACE_MS,
   SHUTDOWN_REQUEST_FILE_NAME,
 } from './graceful-stop.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-// 落在仓库 node_modules/.cache 下（已 gitignore，不会被 auto-commit 的 git add -A 扫走）
-const TEST_DIR = resolve(__dirname, '../node_modules/.cache/graceful-stop-test')
+// 隔离目录落 os.tmpdir()（绝对、按仓库根派生，见 test-helpers.isolatedTestDir）——
+// 原先是 resolve(__dirname,'../node_modules/.cache/…')：虽已是绝对路径，但 worktree 的
+// node_modules 是指向主仓库的 junction ⇒ 仍与主仓库（及其它 worktree）落到**同一批物理文件**，
+// 跨根并发跑批互删。
+const TEST_DIR = isolatedTestDir('graceful-stop-test')
 const requestFile = join(TEST_DIR, '.shutdown-request')
 
 /** 假子进程：捕获 once 回调，由测试决定何时「退出」 */

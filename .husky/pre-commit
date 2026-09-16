@@ -6,4 +6,7 @@ set -e
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX
 npx lint-staged
 pnpm lint
-pnpm test
+# 测试门禁按暂存区改动面选 project（全量 / 单包 / 跳过）——见 scripts/precommit-scope.mjs。
+# 多猫共用同一个 worktree 时全量跑批会互相拖死；全量语义未变，入口仍是 `pnpm test`
+# （审查者与收口方走全量），本行只是提交口的三档收窄。
+node scripts/precommit-scope.mjs

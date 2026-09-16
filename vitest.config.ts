@@ -1,12 +1,36 @@
 import { defineConfig } from 'vitest/config'
 import { resolve } from 'path'
+import { createHash } from 'crypto'
+import { tmpdir } from 'os'
 // @vitejs/plugin-vue 是 web 包依赖（pnpm 严格隔离，root 不可直接 import）——
 // 经相对路径引用包内真实入口（E4-B 引入首个 import .vue 本体的挂载测试后踩中：
 // workspace 目录型 project 的 plugins 通道在 vitest 4.1.9 实测不生效，根配置是
 // 唯一确认生效的插件注入点；server/shared/scripts 测试不触碰 .vue 与 @ alias，零影响）
 import vue from './packages/web/node_modules/@vitejs/plugin-vue/dist/index.mjs'
 
+/**
+ * 缓存与测试隔离文件的落点必须**离开仓库**。worktree 的 `node_modules` 是指向主仓库的
+ * junction（`ls -l` 实测为链接，本会话 worktree 的 `node_modules` 解析到 `<主仓库>/node_modules`），
+ * 于是 vitest 的 `cacheDir` 默认值（`node_modules/.vite`）与测试隔离目录
+ * （`node_modules/.cache/*`）在**主仓库与每个 worktree 里落到同一批物理文件**：并行跑批 =
+ * 两个 vitest 进程互写同一份转换缓存、互删彼此的 `.restart-request`（`socketio.test.ts` 的
+ * afterEach `unlinkSync` 只碰这个隔离目录 —— 跨 worktree 撞上就是它删别人的）。
+ * 故按**本配置所在仓库根**派生 `os.tmpdir()` 下的独立子目录：主仓库与各 worktree 各一份。
+ *
+ * 派生键取 `__dirname`（配置目录 = 仓库根）而非 `process.cwd()`：两者在 `pnpm test` 下等价，
+ * 但 cwd 会被调用方改（`--root` / 从子目录调），派生键要钉在「这是哪个仓库」上，而不是
+ * 「从哪儿敲的命令」—— 后者分叉时是**静默**的（两处算同一个哈希 ⇒ 隔离凭空失效）。
+ */
+const REPO_ROOT = __dirname
+const CACHE_ROOT = resolve(
+  tmpdir(),
+  'cat-study-vitest',
+  createHash('sha1').update(REPO_ROOT).digest('hex').slice(0, 12)
+)
+
 export default defineConfig({
+  // vitest/vite 的转换与依赖预打包缓存（默认 node_modules/.vite，落在 junction 共享面）
+  cacheDir: resolve(CACHE_ROOT, 'vite'),
   plugins: [vue()],
   resolve: {
     alias: {
@@ -28,7 +52,10 @@ export default defineConfig({
     // 经 resolveDirectoryConfig 加载各包 vitest.config.ts，jsdom 等隔离 env 恢复生效）。
     projects: ['packages/shared', 'packages/server', 'packages/web', 'scripts'],
     env: {
-      RESTART_FILES_DIR: 'node_modules/.cache/restart-test',
+      // 绝对路径（离开仓库，见 CACHE_ROOT 注释）——原先是相对路径 `node_modules/.cache/restart-test`，
+      // 由 `restart-request.ts` 的 `resolve(RESTART_FILES_DIR ?? process.cwd(), …)` 按 cwd 解析 ⇒
+      // 恒落在 junction 共享面。末段保留 `restart-test`：`socketio.test.ts` 有断言钉着这个片段。
+      RESTART_FILES_DIR: resolve(CACHE_ROOT, 'restart-test'),
     },
   },
 })

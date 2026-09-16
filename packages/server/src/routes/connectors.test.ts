@@ -10,7 +10,7 @@ import { createServer, type AddressInfo } from 'node:net'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
-import { createTestDb, buildTestApp } from '../test-helpers.js'
+import { createTestDb, buildTestApp, isolatedTestDir } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository, connectorBindings as bindingsRepo } from '../db/repository/index.js'
 import type { FastifyInstance } from 'fastify'
@@ -601,8 +601,9 @@ describe('Connector Routes', () => {
 
   describe('NapCat 生命周期薄桥（零 spawn：只读探测 + 写请求文件）', () => {
     // 请求文件隔离目录（与 messages.test.ts 的 restart-test-messages 同款范式）：
-    // 全量并行时避免写真实 ROOT/.napcat-request 干扰 dev.js
-    const napcatTmpDir = 'node_modules/.cache/restart-test-napcat'
+    // 全量并行时避免写真实 ROOT/.napcat-request 干扰 dev.js。
+    // 绝对路径 + 仓库根派生（test-helpers.isolatedTestDir）：相对路径经 junction 落共享面。
+    const napcatTmpDir = isolatedTestDir('restart-test-napcat')
     const napcatTmpFile = path.join(napcatTmpDir, '.napcat-request')
 
     afterEach(() => {
@@ -700,7 +701,7 @@ describe('Connector Routes', () => {
   describe('NapCat 启动路径配置（.napcat-config.json 读写 + 存在性校验）', () => {
     // 独立隔离目录（与 control 的 restart-test-napcat 分开——两 describe 并行用例交错
     // 会互删对方文件；路径配置读的是 .napcat-config.json，control 读写 .napcat-request）
-    const cfgTmpDir = 'node_modules/.cache/restart-test-napcat-config'
+    const cfgTmpDir = isolatedTestDir('restart-test-napcat-config')
     const cfgTmpFile = path.join(cfgTmpDir, '.napcat-config.json')
     /** 真实存在的文件——「路径存在」断言用（stat 走真 fs，非 mock） */
     const realExe = path.join(cfgTmpDir, 'NapCat Studio.exe') // 含空格名，顺带验证路径存储不做引号处理
@@ -874,8 +875,11 @@ describe('Connector Routes', () => {
 })
 
 describe('NapCat 路径浏览（只读目录导航，零 spawn）', () => {
-  // 真实文件系统目录（browse 读真实路径；node_modules/.cache 下天然被 gitignore 覆盖）
-  const browseTmpDir = path.join('node_modules', '.cache', 'restart-test-browse')
+  // 真实文件系统目录（browse 读真实路径）。绝对路径 + 仓库根派生（test-helpers.isolatedTestDir）：
+  // 原先是 `path.join('node_modules', '.cache', …)`——已是相对路径，与其它 9 处同病灶，
+  // 但**字面量被拆成两个字符串参数**，静态扫的连续形态漏掉；由 V13 跨根并发实跑抓出
+  // （主仓库侧 `rmSync` 删掉本 worktree 正在用的同一批物理文件 ⇒ 假红）。
+  const browseTmpDir = isolatedTestDir('restart-test-browse')
   let browseApp: FastifyInstance
 
   beforeAll(async () => {

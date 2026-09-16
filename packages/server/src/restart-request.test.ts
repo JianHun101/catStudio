@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest'
 import { writeFileSync } from 'node:fs'
+import { isolatedTestDir } from './test-helpers.js'
 // 纯函数（不碰文件）静态导入；文件操作函数经动态导入拿独立隔离目录实例（见下）
 import { isRestartRequestContent, extractRestartReason } from './restart-request.js'
 import type { RestartRequestFile } from './restart-request.js'
@@ -127,13 +128,14 @@ describe('isRestartRequestContent', () => {
 // ─── createRestartRequest 覆盖判定（TTL 覆盖语义）──────
 // 覆盖判定 = 「不存在（含损坏）或已过期 → 覆盖」；未过期才保留跳过——含未过期
 // pending（同一时间一个生效请求是设计，正在等用户确认的请求不应被新请求顶掉）。
-// 隔离目录：本组用例不复用 socketio.test.ts 的共享目录（node_modules/.cache/
-// restart-test）——全量并行时两文件用例交错互删同一文件是竞态根源（existsSync
-// 通过后文件可能已被对方 afterEach 删掉）。vi.resetModules + vi.stubEnv 让本组
-// 用例每次加载独立目录（node_modules/.cache/restart-test-create）的模块实例，
+// 隔离目录：本组用例不复用 socketio.test.ts 的共享目录（`restart-test`）——全量并行时
+// 两文件用例交错互删同一文件是竞态根源（existsSync 通过后文件可能已被对方 afterEach 删掉）。
+// vi.resetModules + vi.stubEnv 让本组用例每次加载独立目录（`restart-test-create`）的模块实例，
 // 与共享目录物理隔离；纯函数用例（isRestartRequestContent 等）不碰文件，不受影响。
+// 目录**绝对**且按仓库根派生（test-helpers.isolatedTestDir）——相对路径经 junction 落在
+// 主仓库 node_modules 共享面，跨 worktree 并发跑批仍互删。
 
-const ISOLATED_DIR = 'node_modules/.cache/restart-test-create'
+const ISOLATED_DIR = isolatedTestDir('restart-test-create')
 
 function makeRequest(overrides: Partial<RestartRequestFile> = {}): RestartRequestFile {
   const now = Date.now()
