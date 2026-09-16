@@ -1,20 +1,23 @@
 /**
- * serial.ts `executeRun` finally 兜底词测试 — R6 §A（OQ-1：给谎报的标签正名）。
+ * serial.ts `executeRun` finally 兜底词测试 — R6 §A 立词（OQ-1：给谎报的标签正名），
+ * R7 分流（同一行的三条互斥通路各说各的）。
  *
- * 靶心 = `serial.ts:1735`（R6 改点）那行 `messageOf(execError) ?? '<兜底词>'`：
+ * 靶心 = `serial.ts` finally 里 `errorMessage:` 那个三选一表达式
+ * （`messageOf(execError) ?? (execError === undefined ? '<槽位词>' : '<取值词>')`）：
  *
  * - 旧词 `'execute crash'` 同时背负**两种互斥情形**——「真崩」与「没崩、只是槽位
  *   在收口后被别的执行接管了」。全库 19 行 `error_message = 'execute crash'` 里，
  *   `execError` 恒为 undefined（`executeRun` 的 catch 伴生日志 0 条）⇒ 19 行
  *   **没有一行是崩溃**，正名即修谎报。
- * - 本文件把「没崩但那行确实落过兜底词」这条路径**经公开 API 稳定复现**：
- *   frame#1 在 `:805` 收口后槽位 idle，本帧仍挂在 A2A `dispatchP` 上；窗口内新触发
- *   抢下槽位（生产同形：猫还在跑 A2A 子树，用户又发了一条）；frame#1 返回 → 进
- *   finally → `s.status === 'busy'`（**别人的**槽位）→ 落兜底词。
+ * - R7 除根后，「槽位是别人的」那条通路**根本不再进收口**（归属校验拦下，见
+ *   `serial.slot-ownership.test.ts` 的 B1），故本文件只覆盖**归属是自己的**剩下的两条：
+ *   R6 §A 那个「没崩但落词」的竞态用例已随语义搬到 B1，不在此处重复。
  *
- * 两条通路必须能分开（本文件的存在理由）：
- * - `execError === undefined`（A1）= 没崩，槽位是别人的 ⇒ 新词；
- * - `execError` 有值（A2）= 本帧真的抛了 ⇒ `messageOf(execError)` 逐字原样。
+ * 本文件覆盖的互斥通路（存在理由 = 它们不许共用一词）：
+ * - `execError` 有值且 `messageOf` 取得到（A2）= 本帧真的抛了 ⇒ 逐字原样；
+ * - `execError` 有值但 `messageOf` 返回 undefined（A1）= 抛了非 Error 且取不出信息
+ *   ⇒ 取值词，**不得**落成「没抛」的槽位词（那是与旧词同型的谎报）；
+ * - 正常路径（A2b）= 不落任何兜底词。
  *
  * 边界与 `serial.crash-diagnostic.test.ts` 同款：真实 SQLite（`createTestDb()` +
  * `initDb()`）+ 真实 dispatch，只 mock 最外层（LLM registry / git / summarizer /
@@ -32,8 +35,10 @@ import type { ExecutionEngine } from './serial.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 import { ensureAgentWorktree } from '../llm/git-utils.js'
 
-/** 正名后的兜底词（`serial.ts` 改点）——两处引用同一字面量，避免测试内自相矛盾 */
+/** 「正常返回却仍占着槽位」词（`serial.ts` finally 三选一 —— `execError === undefined` 支） */
 const SLOT_BUSY_LITERAL = 'slot busy after executeOneAgent returned'
+/** 「抛了非 Error 且取不出信息」词（`serial.ts` finally 三选一 —— 末支，R7 新增分流） */
+const NO_MESSAGE_LITERAL = 'execute threw a value with no extractable message'
 /** 旧词：本票把它从「兜底」降级为「历史存量标签」，新代码路径不得再落 */
 const LEGACY_LITERAL = 'execute crash'
 
@@ -172,31 +177,10 @@ const logOf = (triggerId: string): any =>
     .prepare('SELECT * FROM execution_logs WHERE triggered_by_message_id = ?')
     .get(triggerId) as any
 
-/** 一次性闸门：撑开并发窗口，让「谁先谁后」由测试显式决定 */
-function gate(): { promise: Promise<void>; open: () => void } {
-  let open!: () => void
-  const promise = new Promise<void>((r) => {
-    open = r
-  })
-  return { promise, open }
-}
-
-/** 真实计时器轮询（执行链全是真 promise + 真 await，不上 fake timers） */
-async function waitFor(pred: () => boolean, label: string, ticks = 500): Promise<void> {
-  for (let i = 0; i < ticks; i++) {
-    if (pred()) return
-    await new Promise((r) => setTimeout(r, 0))
-  }
-  throw new Error(`waitFor 超时：${label}`)
-}
-
-const slotStatus = (agentId = A1): string | undefined =>
-  createEngine.getSlot(agentId, 'session-1')?.status
-
 /** 本文件所有用例共用一个 engine 实例的槽位视图——`beforeEach` 里重建 */
 let createEngine: ExecutionEngine
 
-describe('R6 §A · executeRun finally 兜底词：没崩不许说崩', () => {
+describe('R6 §A 立词 + R7 分流 · executeRun finally 兜底词：三条互斥通路不共用一词', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     notices = []
@@ -237,60 +221,24 @@ describe('R6 §A · executeRun finally 兜底词：没崩不许说崩', () => {
     resetDb()
   })
 
-  it('A1 · executeOneAgent 正常返回但槽位已被新执行接管 ⇒ 落新词', async () => {
-    const childGate = gate() // 撑开 frame#1 的 dispatchP（A2 子链）
-    const nextGate = gate() // 让 frame#1 收尾时 A1 槽位仍 busy（新执行还没跑完）
+  it('A1 · 抛了非 Error 且取不出信息 ⇒ 落取值词（不谎报成「没抛」）', async () => {
+    // `messageOf({})` 恒 undefined（`String` 给 `'[object Object]'`、JSON 给 `'{}'`，
+    // 两条零信息判据都命中）——此刻帧**确实抛了**。若沿用「槽位在返回后仍 busy」那个词，
+    // 就是把「真抛」说成「没抛」，与旧词 `'execute crash'` 同型的谎报，故 R7 分流。
+    noticeThrow = {}
+    insertUserMessage('msg-r6-a1')
 
-    let call = 0
-    h.chatStream.mockImplementation(async function* () {
-      call += 1
-      if (call === 1) {
-        // frame#1：A1 的回复 @ 吐槽猫 ⇒ dispatchP 挂住 frame#1
-        yield { content: '我先把这条转给吐槽猫。\n\n@吐槽猫 请看这条', kind: 'text' }
-        return
-      }
-      if (call === 2) {
-        // A2 子链：被闸门扣住 ⇒ frame#1 一直挂在 :1092 的 Promise.all 上
-        await childGate.promise
-        yield { content: '收到', kind: 'text' }
-        return
-      }
-      // call >= 3：窗口内抢下槽位的那笔执行
-      await nextGate.promise
-      yield { content: '收到', kind: 'text' }
-    })
+    await createEngine.execute(cmd('msg-r6-a1', 'trace-r6-a1', A3))
 
-    insertUserMessage('msg-r6-first')
-    const frame1 = createEngine.execute(cmd('msg-r6-first', 'trace-r6-first'))
-
-    // frame#1 在 :805 收口后槽位已 idle，但本帧仍等 A2 子链——这就是生产窗口
-    await waitFor(() => call >= 2 && slotStatus() === 'idle', 'A1 槽位 idle 且 A2 子链已启动')
-    expect(slotStatus()).toBe('idle') // 判据前置：窗口真的开着
-
-    insertUserMessage('msg-r6-second')
-    const frame2 = createEngine.execute(cmd('msg-r6-second', 'trace-r6-second'))
-    await waitFor(() => call >= 3 && slotStatus() === 'busy', 'A1 第二笔执行接管槽位')
-
-    childGate.open() // frame#1 的 dispatchP 落地 ⇒ executeOneAgent 返回 ⇒ 进 finally
-    await frame1
-
-    // 危害面（A-2 追因的核心结论）：兜底收口释放的是**别人的**槽位——受害执行
-    // （msg-r6-second）此刻仍在跑（nextGate 未开），槽位却已 idle ⇒ 单槽位 FIFO
-    // 保证被击穿，下一笔触发可与它并发（同一 agent+session 双执行）。
-    expect(call).toBe(3)
-    expect(slotStatus()).toBe('idle')
-
-    const row = logOf('msg-r6-second')
+    const row = logOf('msg-r6-a1')
     expect(row.status).toBe('failed')
-    expect(row.error_message).toBe(SLOT_BUSY_LITERAL)
-    // 判别力锚：改点前该列是旧词（「谎报成崩溃」正是本票要拆掉的那一层）
+    expect(row.error_message).toBe(NO_MESSAGE_LITERAL)
+    expect(row.error_message).not.toBe(SLOT_BUSY_LITERAL)
     expect(row.error_message).not.toBe(LEGACY_LITERAL)
-    // 存量 19 行同款签名：兜底路径不传 latency / reply id（这两列必为 NULL）
-    expect(row.latency_ms).toBeNull()
-    expect(row.message_id).toBeNull()
-
-    nextGate.open()
-    await frame2.catch(() => undefined)
+    // 伴生日志佐证「确实走了 catch」（抛的确实是那个取不出信息的对象）
+    const crashLog = h.logError.mock.calls.find((c) => c[0] === 'execute crashed')
+    expect(crashLog).toBeTruthy()
+    expect(crashLog?.[1]?.error).toBeUndefined()
   })
 
   it('A2 · execError 有值时逐字落库（`??` 左值通路零回归）', async () => {
@@ -309,9 +257,7 @@ describe('R6 §A · executeRun finally 兜底词：没崩不许说崩', () => {
     expect(row.error_message).not.toBe(LEGACY_LITERAL)
 
     // 伴生日志佐证「确实走了 catch」：execError 有值这条路真的被点亮了
-    const crashLog = h.logError.mock.calls.find(
-      (c) => c[0] === 'execute crashed — releasing slot in finally'
-    )
+    const crashLog = h.logError.mock.calls.find((c) => c[0] === 'execute crashed')
     expect(crashLog?.[1]?.error).toBe('x')
   })
 
