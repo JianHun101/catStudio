@@ -11,6 +11,12 @@ interface OpencodeServeConfig {
   model: string
   /** 额外环境变量（per-agent 配置，如 HTTPS_PROXY 代理；registry 已宽容解析，此处收对象） */
   envExtra?: Record<string, string>
+  /**
+   * 端口分配器：每次 `startServer` 调一次，返回本次 serve 要绑的端口。
+   * 缺省为进程内递增（见 `NEXT_PORT`）——**指定端口本身是正当生产能力**
+   * （需要固定端口对外、或调用方自管端口池），不是测试专用口子。
+   */
+  allocPort?: () => number
 }
 
 /** opencode CLI 二进制路径（模块加载时解析，与 opencode.ts 同款语义） */
@@ -24,6 +30,14 @@ try {
 
 /** serve 端口分配基准：每实例递增（多 model 实例并行常驻，端口互不冲突） */
 let NEXT_PORT = 4100
+
+/**
+ * 缺省端口分配器：进程内递增。
+ * 构造配置给了 `allocPort` 就用它——分配权归调用方（谁分配谁负责该端口可达）。
+ */
+function defaultAllocPort(): number {
+  return NEXT_PORT++
+}
 
 /** serve 启动就绪探测：总超时与轮询间隔 */
 const READY_TIMEOUT_MS = 30_000
@@ -190,6 +204,8 @@ export class OpencodeServeAdapter implements LLMAdapter {
   readonly provider = 'opencode'
   private model: string
   private envExtra: Record<string, string>
+  /** 端口分配器（构造时定；缺省进程内递增，见 `defaultAllocPort`） */
+  private allocPort: () => number
   private serve: ServeHandle | null = null
   /** 就绪 Promise：并发首次调用共享同一次启动，不重复 spawn */
   private readyPromise: Promise<ServeHandle> | null = null
@@ -197,6 +213,7 @@ export class OpencodeServeAdapter implements LLMAdapter {
   constructor(config: OpencodeServeConfig) {
     this.model = config.model
     this.envExtra = config.envExtra ?? {}
+    this.allocPort = config.allocPort ?? defaultAllocPort
   }
 
   /** 懒启动长驻 serve 进程（进程存活即复用；死亡下次调用重启） */
@@ -222,7 +239,7 @@ export class OpencodeServeAdapter implements LLMAdapter {
   }
 
   private async startServer(): Promise<ServeHandle> {
-    const port = NEXT_PORT++
+    const port = this.allocPort()
     const baseUrl = `http://127.0.0.1:${port}`
     const cwd = getWorkspaceDir()
 

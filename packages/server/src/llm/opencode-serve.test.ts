@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { Readable } from 'node:stream'
 import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import type { Chunk } from '@cat-study/shared'
+import { listenFetchable, closeServer } from '../test-helpers.js'
 
 // Mock cli-utils 以阻止模块加载时的 resolveBin() 调用
 vi.mock('./cli-utils.js', () => ({
@@ -130,13 +132,16 @@ function stubFetch(
 // http server 承接，验证真实 socket 路径：挂起响应（无响应头）不被短超时掐断
 // + abort 中断在途请求。
 //
-// 端口占用说明：共享模块 NEXT_PORT 从 4100 起每次 startServer 递增，而 4100
-// 被生产 serve 长期占用（长驻适配器实例缓存，server 运行期间不释放）。
-// beforeAll 的预热 chatStream（session 500 路径，全 fetch mock 化、零真实
-// 连接）先消耗 4100——测试用例实际从 4101 起。fleet 绑定 4100-4129，已占用
-// 端口 listen 失败静默跳过（CI 无生产 serve 时 4100 也能绑上，无碍）。
-const FLEET_START = 4100
-const FLEET_END = 4129
+// 端口归属（票壬重做）：**夹具自己分配端口**，经 `allocPort` 注入适配器——
+// 生产侧缺省仍走 NEXT_PORT 递增，此处显式接管。旧实现让适配器按模块计数器
+// 递增、夹具再去猜区间（4100-4129）并静默吞掉 EADDRINUSE：只要区间里任一端口
+// 被外部进程占住（实测 steam.exe 占 4103），适配器就会把 message POST 发给那个
+// 第三方，拿到 404 HTML——**用例静默失败在别人的进程上，而夹具这边连一条红灯
+// 都没有**。现在夹具先绑定全部端口，绑不上直接抛错：不再猜、不再吞。
+//
+// 端口一律经 `listenFetchable`（test-helpers）分配——`listen(0)` 可能分到
+// WHATWG Fetch 禁用端口黑名单（服务真在听但 fetch 发请求前就拒，永不恢复）。
+const FLEET_SIZE = 24
 
 /** message POST 的响应配置（beforeEach 重置） */
 const messageServerConfig: { status: number; delayMs: number; hang: boolean } = {
@@ -154,10 +159,69 @@ const messageRequests: { port: number; method: string; url: string; body: string
 
 const fleetServers: ReturnType<typeof createServer>[] = []
 
+/** 夹具接管的端口池（下标 = 分配次序） + 已分配水位 */
+const fleetPorts: number[] = []
+let fleetAllocated = 0
+
+/** 模拟外部进程的 http server（固定 404 HTML） + 它收到的请求——回归用例专用 */
+const thirdPartyRequests: { method: string; url: string }[] = []
+const thirdPartyServer = createServer((req, res) => {
+  thirdPartyRequests.push({ method: req.method ?? '', url: req.url ?? '' })
+  res.writeHead(404, { 'Content-Type': 'text/html' })
+  res.end('<html><body><h1>404 Not Found (third party)</h1></body></html>')
+})
+/** 第三方占住的端口——入池（`listenFetchable` 保证可达），由回归用例注入适配器 */
+let thirdPartyPort = 0
+
+/**
+ * 向夹具申请下一个端口。池耗尽即抛——**不回落**到生产递增计数器：
+ * 回落等于悄悄换一个夹具没监听的端口，正是本票要拆的那类假绿。
+ */
+function allocFleetPort(): number {
+  if (fleetAllocated >= fleetPorts.length) {
+    throw new Error(
+      `夹具端口池已耗尽（容量 ${FLEET_SIZE}）——把 FLEET_SIZE 调大后重跑；` +
+        `生产递增计数器不会被回落到夹具未监听的端口上`
+    )
+  }
+  return fleetPorts[fleetAllocated++]
+}
+
+/** 建适配器并注入夹具端口。等价于原来的 `new OpencodeServeAdapter({ model })`，只多了端口主张。 */
+function mkAdapter(): OpencodeServeAdapter {
+  return new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna', allocPort: allocFleetPort })
+}
+
+/**
+ * 在端口池里绑一个 server（`listenFetchable` 内部经 `listen(0)` 由系统分配，
+ * 避开 WHATWG 禁用端口）。
+ *
+ * `listen` 失败会**响亮抛出**：旧夹具把 `server.on('error')` 吞成静默跳过，
+ * 于是「夹具没在听」和「夹具在听」在用例眼里无法区分——适配器把请求发给
+ * 外部进程，断言仍在读夹具记录，红的是别人的 404。
+ *
+ * 这里自己挂 error 并 race：`listenFetchable` 只等 listen 回调，**不监听
+ * 'error'**（实测：listen 到不可用地址时它的 Promise 永不 settle）。不接住
+ * 这个事件，「绑不上」就退化成挂死或 Node 的未处理 error 崩溃——两种都比
+ * 一条带 errno 的断言失败难查得多。
+ */
+async function bindPoolServer(server: ReturnType<typeof createServer>): Promise<number> {
+  const failed = new Promise<never>((_, reject) => {
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      reject(new Error(`夹具端口绑定失败（${err.code ?? '?'}）: ${err.message}`))
+    })
+  })
+  return Promise.race([listenFetchable(server), failed])
+}
+
 beforeAll(async () => {
-  for (let port = FLEET_START; port <= FLEET_END; port++) {
+  // 先在端口池里绑满 FLEET_SIZE 个 server：绑成功才入池，绑不上立即抛。
+  // 任一端口被外部进程占住都从静默跳过变成响亮失败——旧实现在这里吞掉错误，
+  // 于是适配器把请求发给了那个外部进程，用例却在断言夹具收到的请求。
+  for (let i = 0; i < FLEET_SIZE; i++) {
     const server = createServer((req, res) => {
       let raw = ''
+      const port = (server.address() as AddressInfo).port
       req.on('data', (c) => (raw += c.toString()))
       req.on('end', () => {
         messageRequests.push({ port, method: req.method ?? '', url: req.url ?? '', body: raw })
@@ -177,39 +241,17 @@ beforeAll(async () => {
         else respond()
       })
     })
-    server.on('error', () => {}) // 已占用端口（EADDRINUSE）静默——见端口占用说明
-    await new Promise<void>((resolve) => {
-      server.once('error', resolve) // listen 失败也放行（端口被生产 serve 占用）
-      server.listen(port, '127.0.0.1', resolve)
-    })
+    fleetPorts.push(await bindPoolServer(server))
     fleetServers.push(server)
   }
-
-  // 预热消耗 4100：一次「session 创建失败」的 chatStream——startServer 把
-  // NEXT_PORT 从 4100 推进到 4101（全 fetch mock、无真实连接，不触碰真实 serve）
-  const preheatStream = makeEventStream()
-  stubFetch({ sessionStatus: 500, eventStream: preheatStream.stream })
-  const preheatChild = fakeChild()
-  vi.mocked(spawnSupervised).mockReturnValueOnce(preheatChild as any)
-  const preheatAdapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
-  await collect(
-    preheatAdapter.chatStream([{ role: 'user', content: 'preheat' }], {
-      model: 'opencode-go/gpt-5.6-luna',
-    })
-  )
-  vi.unstubAllGlobals()
+  // 第三方 server 也占池里一个端口——不是「夹具没监听」而是「被别的进程监听」，
+  // 正是旧实现静默 EADDRINUSE 撞上的那类端口
+  thirdPartyPort = await bindPoolServer(thirdPartyServer)
+  fleetServers.push(thirdPartyServer)
 })
 
 afterAll(async () => {
-  await Promise.all(
-    fleetServers.map(
-      (s) =>
-        new Promise<void>((resolve) => {
-          if (!s.listening) return resolve()
-          s.close(() => resolve())
-        })
-    )
-  )
+  await Promise.all(fleetServers.map((s) => closeServer(s)))
 })
 
 describe('OpencodeServeAdapter', () => {
@@ -232,7 +274,7 @@ describe('OpencodeServeAdapter', () => {
   // ─── 构造 ────────────────────────────────────
 
   it('stores provider name', () => {
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     expect(adapter.provider).toBe('opencode')
   })
 
@@ -240,7 +282,7 @@ describe('OpencodeServeAdapter', () => {
 
   it('yields done immediately when signal is already aborted', async () => {
     const { fetchMock } = stubFetch()
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const controller = new AbortController()
     controller.abort()
 
@@ -283,7 +325,7 @@ describe('OpencodeServeAdapter', () => {
   it('streams assistant text deltas and finishes with done on session.idle', async () => {
     const stream = makeEventStream()
     stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -338,7 +380,7 @@ describe('OpencodeServeAdapter', () => {
     messageServerConfig.delayMs = 1500
     const stream = makeEventStream()
     stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -393,7 +435,7 @@ describe('OpencodeServeAdapter', () => {
     messageServerConfig.delayMs = 1500
     const stream = makeEventStream()
     stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -438,7 +480,7 @@ describe('OpencodeServeAdapter', () => {
   it('creates session with split model and permission ruleset (contract)', async () => {
     const stream = makeEventStream()
     const { calls } = stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -482,7 +524,7 @@ describe('OpencodeServeAdapter', () => {
 
   it('sends flattened prompt and image file parts in message (dataURL 直传不落盘)', async () => {
     stubFetch()
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -527,7 +569,7 @@ describe('OpencodeServeAdapter', () => {
     // message.part.updated{part.text='hello'}）——不过滤会把用户输入当回复输出
     const stream = makeEventStream()
     stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -579,7 +621,7 @@ describe('OpencodeServeAdapter', () => {
     // 广播——按 properties.sessionID 过滤是正确性前提（不串会话上下文）
     const stream = makeEventStream()
     stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -633,7 +675,7 @@ describe('OpencodeServeAdapter', () => {
     // updated 快照可能对同一 part 多次推送——按 part.id 去重只发一次
     const stream = makeEventStream()
     stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -692,7 +734,7 @@ describe('OpencodeServeAdapter', () => {
   it('logs tool call for audit and yields kind:tool chunk (语义拆分后 serve 工具过程可见)', async () => {
     const stream = makeEventStream()
     stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -758,7 +800,7 @@ describe('OpencodeServeAdapter', () => {
   it('aborts serve-side session on abort signal (POST abort forwarding)', async () => {
     const stream = makeEventStream()
     const { calls } = stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -808,7 +850,7 @@ describe('OpencodeServeAdapter', () => {
   it('reuses long-lived serve process across calls (spawn once)', async () => {
     const stream1 = makeEventStream()
     const fetchMock1 = stubFetch({ eventStream: stream1.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -874,7 +916,7 @@ describe('OpencodeServeAdapter', () => {
     // 发生（吐槽猫探针实证）。修复：清死亡引用后重新 spawn（新端口新进程）。
     const stream1 = makeEventStream()
     const { calls: calls1 } = stubFetch({ eventStream: stream1.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child1 = fakeChild()
     const child2 = fakeChild()
     vi.mocked(spawnSupervised)
@@ -944,9 +986,45 @@ describe('OpencodeServeAdapter', () => {
 
   // ─── 错误路径 ────────────────────────────────
 
+  it('does not fall back to the incrementing counter when allocPort says a port (票壬回归)', async () => {
+    // 旧实现下夹具用「猜区间 + 静默吞 EADDRINUSE」接管端口：只要区间里某个端口
+    // 被外部进程占住（实测 steam.exe 占 4103），适配器就会把 message POST 发给
+    // 那个外部进程——拿到 404 HTML 算作「消息发送失败」，断言却在读夹具记录。
+    // 本用例把那个前提直接摆出来：**端口主张权在适配器手里**，夹具必须显式主张。
+    const { calls } = stubFetch()
+    const adapter = new OpencodeServeAdapter({
+      model: 'opencode-go/gpt-5.6-luna',
+      allocPort: () => thirdPartyPort,
+    })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+    const fixtureBefore = messageRequests.length
+    const thirdPartyBefore = thirdPartyRequests.length
+
+    const chunks = await collect(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'opencode-go/gpt-5.6-luna',
+      })
+    )
+
+    // ① 请求确实进了「那个端口上的监听者」——不是夹具（增量断言：不依赖
+    //    beforeEach 是否已清空前序用例的记录）
+    expect(thirdPartyRequests.slice(thirdPartyBefore).some((r) => r.url.includes('/message'))).toBe(
+      true
+    )
+    expect(messageRequests.length).toBe(fixtureBefore)
+    // ② 404 被如实转成错误文案（旧实现下用例就红在这里）
+    expect(chunks[0].content).toContain('opencode serve 消息发送失败')
+    expect(chunks[0].content).toContain('404')
+    expect(chunks.at(-1)?.done).toBe(true)
+    // ③ 会话建在主张的端口上（baseUrl 跟随 allocPort，不回落到递增计数器）
+    const sessionCall = calls.find((c) => c.init?.method === 'POST' && c.url.endsWith('/session'))!
+    expect(sessionCall.url).toContain(`:${thirdPartyPort}/`)
+  })
+
   it('yields error message when session creation fails (HTTP 500)', async () => {
     stubFetch({ sessionStatus: 500 })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -970,7 +1048,7 @@ describe('OpencodeServeAdapter', () => {
     messageServerConfig.status = 500
     const stream = makeEventStream()
     const { calls } = stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -996,7 +1074,7 @@ describe('OpencodeServeAdapter', () => {
     // 用例永远等不到结束。
     messageServerConfig.hang = true
     const { calls } = stubFetch()
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -1031,7 +1109,7 @@ describe('OpencodeServeAdapter', () => {
     // 会空转满 30s 就绪超时才报错（文案还误导为「启动超时」）
     // docUnreachable 模拟真实 ENOENT 场景：进程从未启动 → 探测连接拒绝
     stubFetch({ docUnreachable: true })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -1059,7 +1137,7 @@ describe('OpencodeServeAdapter', () => {
     // 不清理会随长驻进程无限积累）
     const stream = makeEventStream()
     const { calls } = stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
@@ -1097,7 +1175,7 @@ describe('OpencodeServeAdapter', () => {
     // 非 idle 终止（SSE 断连）：已产出内容保留 + POST abort 中断仍在跑的执行
     const stream = makeEventStream()
     const { calls } = stubFetch({ eventStream: stream.stream })
-    const adapter = new OpencodeServeAdapter({ model: 'opencode-go/gpt-5.6-luna' })
+    const adapter = mkAdapter()
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
 
