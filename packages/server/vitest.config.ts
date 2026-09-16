@@ -34,8 +34,11 @@ export default defineConfig({
   },
   test: {
     include: ['src/**/*.test.ts'],
-    testTimeout: 10_000,
-    hookTimeout: 10_000,
+    // 死锁探测预算，非性能断言 —— 依据与实测读数见根 vitest.config.ts（**四处独立**：
+    // 根配置的这两个键实测不被目录型 project 采用）。原值 10_000：全量实测最坏单用例
+    // 5.19s 已吃掉其一半余量，承压即翻。
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     env: {
       MEMORY_ENABLED: 'false',
       LOG_LEVEL: 'error',

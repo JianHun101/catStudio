@@ -22,6 +22,10 @@ const ISOLATION_ROOT = resolve(
 export default defineConfig({
   test: {
     include: ['**/*.test.js'],
+    // 死锁探测预算，非性能断言 —— 依据与实测读数见根 vitest.config.ts（**四处独立**：
+    // 根配置的这两个键实测不被目录型 project 采用）。
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     env: {
       // 日志文件隔离（票 F1-c c1）——scripts 侧的测试会**跨包**走到 server 的
       // `memory/embedding-client.ts`（`scan.test.js` 的假 sidecar 回 500 ⇒

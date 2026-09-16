@@ -51,6 +51,16 @@ export default defineConfig({
     // 项目定义统一走根配置 test.projects（vitest 4.1.9 实测：目录型 project 会
     // 经 resolveDirectoryConfig 加载各包 vitest.config.ts，jsdom 等隔离 env 恢复生效）。
     projects: ['packages/shared', 'packages/server', 'packages/web', 'scripts'],
+    // ⚠️ 超时预算**不要**写在这里 —— 目录型 project 实测不采用根配置的这两个键
+    // （vitest 4.1.9 实测：根写 `30_000`，四个 project 一个没变 —— scripts / shared / web
+    //  仍落 vitest 默认 5000、server 仍落其自设 10000。未逐一验根 `test.*` 其余键，已知
+    //  反例是本块 `env` 生效 —— 此处只断言这两个键，勿推广）。四处预算**各自**写在各自包
+    //  的 vitest.config.ts，改一处 ≠ 改全部。
+    //
+    // 取值 30_000 的语义：**死锁探测预算，不是性能断言** —— 进程挂住要的是与负载无关的
+    // 余量倍数；性能退化该由独立断言测，不靠调这个数。依据（本机实测）：全量 2539 用例
+    // 空载跑批最坏单用例 5.19s（server `serial.cat-worktree` V2，已贴破 5s 默认线）
+    // ⇒ 30_000 ≈ 5.8×；4 进程并发承压时最坏 10.49s ⇒ 余量 ≈ 2.9×。
     env: {
       // 绝对路径（离开仓库，见 CACHE_ROOT 注释）——原先是相对路径 `node_modules/.cache/restart-test`，
       // 由 `restart-request.ts` 的 `resolve(RESTART_FILES_DIR ?? process.cwd(), …)` 按 cwd 解析 ⇒
