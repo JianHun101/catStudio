@@ -436,7 +436,11 @@ async function drainQueuedCommand(
  * - 锁引用计数配对：needsLock（Claude）→ acquire，finally release——
  *   并发批内多个 Claude 执行体同时持有（计数 1→2→…），归零才删
  *   .agent-busy（dev.js 重启保护全程有效）
- * - A2A 递归（触发前提是回复已落库）与队列 drain 保持原语义，天然串行
+ * - A2A 递归（触发前提是回复已落库）与队列 drain 保持原语义。**两者在收尾段
+ *   并发、不互为前置**（形态 D，票 docs/run/dispatch-deferral/tickets.md §五-2）——
+ *   原注写「天然串行」已随本笔失效：串行序会把 A2A 派发排在整条 drain 子树之后，
+ *   延迟随嵌套深度叠加（实测最坏 47 / 68 分钟）。并发的前提是**两子树无依赖**，
+ *   该前提的门取证见 report-gate-concurrency.md（Q1–Q4 零推翻）。
  */
 async function executeOneAgent(
   ctx: EngineCtx,
