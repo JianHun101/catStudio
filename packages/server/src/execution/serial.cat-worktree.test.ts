@@ -483,7 +483,11 @@ describe('serial × 一猫一 worktree（猫路径，T-2 Phase I）', () => {
     // 第一轮：不预置任何文件——树必须由**执行链自己**建出来
     await runRound(sid, 'scwt-v13a', CAT1, 'trace-scwt-v13a')
 
-    // ① 拿到猫 worktree —— 读适配器实收的 cwd（`workspace/` 降级会让这里变 undefined）
+    // ① 拿到猫 worktree —— 读适配器实收的 cwd（`workspace/` 降级会让这里变 undefined）。
+    // 先钉调用次数：`.at(-1)` 只在「本轮恰好一次 chatStream」时才是那个读数——不加这一格，
+    // 将来若加入重试/二次调用，断言会**静默**改读另一次调用的 cwd（本仓「声明与实测脱钩」同型）。
+    // `reply.ts` 现只有 `:966` 一个调用点（`git grep` 实测），且 mock 流不含 @ ⇒ 无 A2A 子链。
+    expect(h.chatStream).toHaveBeenCalledTimes(1)
     const passedCwd = h.chatStream.mock.calls.at(-1)?.[1]?.cwd
     expect(passedCwd).toBe(catWtFor(sid, CAT1.name))
     expect(existsSync(catWtFor(sid, CAT1.name))).toBe(true)
