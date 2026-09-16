@@ -37,6 +37,9 @@
  * (e) R1 拆分的跨行窗口宽度上限 = `R1_WINDOW`（3 行）。**超过 3 行**才凑齐两段字面量的
  *     拆分（如中间夹注释/空行把 `'node_modules'` 与 `'.cache'` 推到第 4 行）仍是盲区；
  *     三段以上再拆（`join('node', '_modules', …)`）与经变量中转同样不红——后者见 (a)。
+ *     另：**相邻多处会多报**（实测 2 处相邻 ⇒ 报 3 条——中间那对是「前一处后半 + 后一处
+ *     前半」的跨组合）。方向是 fail-closed（宁可多报不可漏报）；按窗口去重的写法不会多报，
+ *     但会把相邻两处**并成一条**（漏报侧），两害相权取多报。
  * (f) `stripComments` 的正则字面量态是**启发式**：`/` 左侧不是「表达式起始」的字符时按
  *     除号处理。判错的后果是**保守**的（该 `/` 当除号 → 后续字符照常判），不会吞代码；
  *     唯一代价是正则体内若恰好写了隔离路径字样可能误报（未见实际写法）。
@@ -226,6 +229,13 @@ export function detectR1(text) {
   return R1_SPLIT_NM_RE.test(text) && R1_SPLIT_CACHE_RE.test(text)
 }
 
+/** 本行**单独**携带 R1 拆分形态的哪一半（`'nm'` / `'cache'` / `null`），供跨行窗口配对 */
+function halfOf(line) {
+  if (R1_SPLIT_NM_RE.test(line)) return 'nm'
+  if (R1_SPLIT_CACHE_RE.test(line)) return 'cache'
+  return null
+}
+
 /**
  * 判一行代码。返回命中的规则 id（`R1` / `R2` / `R3`）或 `null`。
  * 一行只报**第一条**命中的规则：R1 与 R2 常同时命中同一条白名单行，重复报会让白名单翻倍。
@@ -339,20 +349,23 @@ export function scanSource(file, code) {
     if (rule) raw.push({ file, line: idx + 1, rule, text: line.trim() })
   })
   // 跨行窗口（只判 R1）：逐行看不见的「两段字面量被 pretty 换行拆开」形态。
-  // 去重：窗口内已有单行命中（逐行 pass 已报）或上一窗口已报同一段 ⇒ 不重复报。
+  // 锚点 = **携带前半段字面量**的那一行，判据 = 「本行携带一半 + 其后 R1_WINDOW-1 行内携带另一半」。
+  // ⚠️ 不用「上一窗口是否命中」去重——那种按窗口去重的写法会把**两处相邻的真实违规并成一条**
+  // （实测读数：两处相邻 ⇒ 报 1 条；本实现改为 2 处 ⇒ 报 3 条）。多报在 fail-closed 侧，
+  // 漏报不是；代价与理由见覆盖边界 (e)。
   for (let i = 0; i + 1 < lines.length; i++) {
-    const win = lines.slice(i, i + R1_WINDOW)
-    if (!detectR1(win.join('\n'))) continue
-    if (win.some((l) => detectR1(l))) continue
-    if (i > 0) {
-      const prevWin = lines.slice(i - 1, i - 1 + R1_WINDOW)
-      if (detectR1(prevWin.join('\n')) && !prevWin.some((l) => detectR1(l))) continue
-    }
+    if (detectR1(lines[i])) continue // 本行已完整命中 ⇒ 逐行 pass 报过，不再当锚点
+    const half = halfOf(lines[i])
+    if (!half) continue // 锚点必须自己携带一半
+    const rest = lines.slice(i + 1, i + R1_WINDOW)
+    const other = half === 'nm' ? R1_SPLIT_CACHE_RE : R1_SPLIT_NM_RE
+    if (!rest.some((l) => other.test(l))) continue
     raw.push({
       file,
       line: i + 1,
       rule: 'R1',
-      text: `[跨行 ${R1_WINDOW} 行窗口] ${win
+      text: `[跨行 ${R1_WINDOW} 行窗口] ${lines
+        .slice(i, i + R1_WINDOW)
         .map((l) => l.trim())
         .filter(Boolean)
         .join(' ⏎ ')}`,
@@ -396,8 +409,14 @@ describe('检测器非恒真（反向对照：种入违规必须红、合规必�
     // 逐行判**看不见**这条 —— 这不是修辞，是加窗口的理由（窗口拿掉 ⇒ 下面那条断言红）
     expect(split.split('\n').every((l) => !detectR1(l))).toBe(true)
     expect(scanSource('x.js', split).length).toBe(1)
-    // 同一段只报一次（相邻窗口重叠不得重复计数）
-    expect(scanSource('x.js', "'node_modules'\n'.cache'\n'node_modules'\n").length).toBe(1)
+    // 同一段只报一次（同一对不被重叠窗口重复计数）
+    expect(scanSource('x.js', "'node_modules'\n'.cache'\n").length).toBe(1)
+    // **相邻两处真实违规不得并成一条** —— 按窗口去重的旧写法实测并成 1 条，此为修复的对照。
+    // 报 3 条 > 2 处：中间那对是「第 1 处的后半 + 第 2 处的前半」这一跨组合，属 fail-closed
+    // 侧的多报（宁可多报，不可漏报），已写进覆盖边界 (e)。
+    expect(scanSource('x.js', "'node_modules'\n'.cache'\n'node_modules'\n'.cache'\n").length).toBe(
+      3
+    )
     // 只有一段 → 不红
     expect(scanSource('x.js', "const d = path.join(\n  'node_modules',\n  'x'\n)\n").length).toBe(0)
     // 窗口**不**判 R2/R3：隔离键与相对值分处两行，不是违规（不然假阳性满天飞）
