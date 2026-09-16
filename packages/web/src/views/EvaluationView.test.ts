@@ -73,8 +73,10 @@ describe('EvaluationView 静态结构（?raw）', () => {
     expect(source).not.toContain('等锁段')
     // 孤儿区恒显示（不得静默丢弃 28 行真实数据）
     expect(source).toContain('未归属跳（无链锚）')
-    // 时区：必须显式当 UTC 解析（`new Date(裸串)` 按本地时区解析，差 8 小时）
-    expect(source).toContain("new Date(s.replace(' ', 'T') + 'Z')")
+    // 时区：必须显式当 UTC 解析（`new Date(裸串)` 按本地时区解析，差 8 小时）。
+    // R5 把解析收成单源后，实现字面量已搬进 `utils/time.ts`——本处改钉**委托关系**，
+    // 解析语义的守卫随实现搬到 `utils/time.test.ts`（不削弱，只搬家）。
+    expect(source).toContain("from '@/utils/time'")
   })
 
   it('三态齐全（加载 / 错误 / 空态）——接口失败给提示不白屏', () => {

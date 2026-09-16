@@ -10,6 +10,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
 import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { isAgentStoppable, isToolActive, toolAreaSummary } from '@/utils/tools'
+import { normalizeUtc } from '@/utils/time'
 import { createLogger } from '@/utils/logger'
 import MessageItem from './MessageItem.vue'
 import ToolRow from './ToolRow.vue'
@@ -53,16 +54,13 @@ const { skillActive, detect: detectSkill } = useSkillCommand()
  * - SQLite datetime('now') 格式 "YYYY-MM-DD HH:MM:SS"（无时区）→ 附加 Z
  * - 已含 Z / +HH:MM 时区的 ISO 字符串 → 原样返回
  * - 数字时间戳 → 转为 ISO 8601 UTC 字符串
+ *
+ * 串形态的归一**不在此实现**——唯一真相源在 `utils/time.ts`（同源的解析曾在本文件、
+ * `EvaluationView.vue` 各存一份，R5 收成单源）。本函数只补「数字时间戳」这一 ChatPanel 私有形态。
  */
 function normalizeDateTime(raw: string | number): string {
   if (typeof raw === 'number') return new Date(raw).toISOString()
-  // 已有时区标记则原样返回
-  if (/[Z+\-]\d{2}:\d{2}$/.test(raw) || raw.endsWith('Z')) return raw
-  // SQLite 格式 "YYYY-MM-DD HH:MM:SS" → ISO 8601 UTC
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)) {
-    return raw.replace(' ', 'T') + 'Z'
-  }
-  return raw
+  return normalizeUtc(raw)
 }
 
 function formatTime(isoString: string): string {

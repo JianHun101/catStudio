@@ -22,6 +22,10 @@ import {
   type FieldDoc,
   type Waterfall,
 } from '@/utils/spanLayout'
+// 时间口径——**唯一真相源在 utils/time.ts**。后端透传的是 SQLite `datetime('now')` 的
+// UTC 无后缀串，直接喂 `new Date` 会按本地时区解析（UTC+8 差 8 小时）；解析只此一处，
+// 本文件不再自带副本。新增时间显示（含 `SpanRow.start_at` 那种 ISO 形态）一律从这里取。
+import { fmtUtcShort, fmtUtcFull } from '@/utils/time'
 
 /**
  * 全屏评估中心（E4-B，左侧栏底部入口进入，无 vue-router 的 App 级 view 切换）。
@@ -177,16 +181,6 @@ const l1Cards = computed(() => {
     { label: '基建故障', value: m?.infraFailures ?? null, text: fmtNum(m?.infraFailures) },
   ]
 })
-
-/** SQLite 透传的 UTC 串（无时区后缀）→ 本地时区 `MM-DD HH:mm`。
- *  直接交给 Date 会按**本地时区**解析（差 8 小时），必须显式当 UTC 解析。 */
-function fmtUtcShort(s: string | null | undefined): string {
-  if (!s) return '—'
-  const d = new Date(s.replace(' ', 'T') + 'Z')
-  if (Number.isNaN(d.getTime())) return s
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
 
 /** 该跳仍在飞（无结束时点）→ 耗时不可得，展示 `—` */
 function hopRunning(hop: ChainHop): boolean {
@@ -361,10 +355,6 @@ function scoreLabel(n: number): string {
 function sampleReasonLabel(r: string): string {
   const map: Record<string, string> = { low_score: '低分样本', user_feedback: '已回标' }
   return map[r] || r
-}
-
-function timeShort(ts: string): string {
-  return ts.length >= 16 ? ts.slice(0, 16).replace('T', ' ') : ts
 }
 
 /** 观察 tab 三份数据并行拉取（Promise.all——互不依赖，失败任一 → 整区错误态） */
@@ -553,7 +543,7 @@ onUnmounted(() => {
             <span class="score-name">{{ s.agent_name || '未知猫' }}</span>
             <span class="score-num" :class="{ 'score-low': s.score <= 2 }">{{ s.score }}</span>
             <span class="score-reason">{{ sampleReasonLabel(s.sample_reason) }}</span>
-            <span class="score-time">{{ timeShort(s.created_at) }}</span>
+            <span class="score-time">{{ fmtUtcFull(s.created_at) }}</span>
           </div>
         </div>
       </template>
@@ -576,7 +566,7 @@ onUnmounted(() => {
           <div class="sample-head">
             <span class="score-name">{{ p.agent_name || '未知猫' }}</span>
             <span class="score-num score-low">{{ p.score }} 分</span>
-            <span class="score-time">{{ timeShort(p.reply_created_at) }}</span>
+            <span class="score-time">{{ fmtUtcFull(p.reply_created_at) }}</span>
           </div>
           <div class="sample-reply">{{ p.reply_content }}</div>
           <details class="sample-context">

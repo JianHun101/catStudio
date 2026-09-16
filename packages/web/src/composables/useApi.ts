@@ -188,7 +188,8 @@ export interface ChainHop {
   agentName: string
   status: string
   errorType: string | null
-  /** SQLite 原样 UTC 串（无时区后缀）——转换归前端，见 EvaluationView 的 `fmtUtcShort` */
+  /** SQLite 原样 UTC 串（无时区后缀）——**消费必须走 `utils/time.ts`**（唯一解析入口；
+   *  直喂 `new Date` 会按本地时区解析，差 8 小时） */
   startedAt: string | null
   /** null = 该跳仍在飞（展示「进行中」+ 耗时 `—`） */
   endedAt: string | null
@@ -242,7 +243,9 @@ export interface EvalChainsResponse {
 
 /** 一行段（R2 `spans` 表原样 snake_case）。
  *  ⚠️ `start_at` 是 **ISO 毫秒 UTC**（`2026-09-14T13:20:00.000Z`），与
- *  `execution_logs` 的秒级 `YYYY-MM-DD HH:MM:SS` **不同形**——别套 `fmtUtcShort`。 */
+ *  `execution_logs` 的秒级 `YYYY-MM-DD HH:MM:SS` **不同形**——但 `utils/time.ts`
+ *  两种形态通吃（R5 起：老实现遇到 ISO 串会 `+ 'Z'` 出 `...ZZ` 而原样回显），
+ *  消费一律走它，别再按形态各写一份。 */
 export interface SpanRow {
   id: number
   span_id: string
