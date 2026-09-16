@@ -154,7 +154,15 @@ function registerWorktree(p: string | null): void {
 }
 
 /** 本文件用到的全部会话 id（逐格唯一，前 8 位互不相同）——残留清扫用 */
-const SESSION_IDS = ['scwt0001', 'scwt0002', 'scwt0003', 'scwt0004', 'scwt0005', 'scwt0006']
+const SESSION_IDS = [
+  'scwt0001',
+  'scwt0002',
+  'scwt0003',
+  'scwt0004',
+  'scwt0005',
+  'scwt0006',
+  'scwt0007',
+]
 
 function dropWorktrees(): void {
   for (const dir of worktrees.splice(0)) {
@@ -167,7 +175,10 @@ function dropWorktrees(): void {
   // 路径只依赖 `tmpdir()` 与 shortId（**不含**随机仓库名）⇒ 上一次跑崩 / 半途失败
   // 留下的同 id 目录会让 `ensureCatWorktree` 走进「已存在 → 复用」分支并撞上所有权
   // 校验。**实测踩过**：一次反向对照留下的 `<tmpdir>/catStudy-sessions/scwt0006-flash猫`
-  // 让 V10 的「集成分支不存在 ⇒ 建不出」前提失效（它是上一轮别的配置建出来的）。
+  // 让「集成分支不存在」的前提失效（它是上一轮别的配置建出来的）。
+  // 该危害在本笔后**未消失**，只是落点换了：现在由 V13 / V15 各自的**显式前提断言**
+  // （`branch --list` 为空 + 会话 worktree 不存在）把守，而不是靠用例内部的隐式推演
+  // ——前提成立与否有了读数，不再是「跑绿了就说明前提在」。
   for (const sid of SESSION_IDS) {
     const paths = [sessionWorktreePath(tmpRepo, sessionShortId(sid))]
     for (const name of [CAT1.name, CAT2.name]) paths.push(catWtFor(sid, name))
@@ -452,8 +463,53 @@ describe('serial × 一猫一 worktree（猫路径，T-2 Phase I）', () => {
     expect(fileOnBranch(catBranch(shortId, CAT2.name), 'only-cat2.txt')).toBe('B\n')
   })
 
-  /** 集成分支**不存在** ⇒ 猫 worktree 建不出 ⇒ 不提交、也绝不落主仓库（T-1 降级语义） */
-  it('V10 降级 · 集成分支不存在 ⇒ 猫树建不出、不提交、不落主仓库；存量会话分支不受影响', async () => {
+  /**
+   * V13（本笔新增）：**无 store 会话**——集成分支不存在，且本轮唯一执行者是**非 store** 猫。
+   * 三格分别断言（票面「补笔：第 3 笔」§验收）：
+   * ① 拿到**猫 worktree**（不是 `workspace/` 降级）——直接读 `chatStream` 实收的 `cwd`，
+   *    不是「目录存在」这类旁证；② 集成分支被**补建**、fork 点 = 主仓库 HEAD；
+   * ③ 该猫的改动 `git cat-file` **读得到**（在猫分支上）。
+   *
+   * 接线前这三格全不成立（猫树建不出 ⇒ `cwd: undefined` ⇒ 适配器落 `workspace/`，
+   * 而它 gitignored ⇒ 改动连 `git status` 都看不见）。反向对照 V14 见报告 §三。
+   */
+  it('V13 · 无 store 会话 ⇒ 猫侧补建集成分支：cwd=猫树、fork 点=主仓库 HEAD、改动 git 可见', async () => {
+    const sid = 'scwt0007'
+    const shortId = sessionShortId(sid)
+    // 前提：集成分支**不存在**，也没有任何会话 worktree（不成立则本格测的不是补建路径）
+    expect(gitOrNull(['branch', '--list', sessionBranch(shortId)])).toBe('')
+    expect(existsSync(sessionWorktreePath(tmpRepo, shortId))).toBe(false)
+
+    // 第一轮：不预置任何文件——树必须由**执行链自己**建出来
+    await runRound(sid, 'scwt-v13a', CAT1, 'trace-scwt-v13a')
+
+    // ① 拿到猫 worktree —— 读适配器实收的 cwd（`workspace/` 降级会让这里变 undefined）
+    const passedCwd = h.chatStream.mock.calls.at(-1)?.[1]?.cwd
+    expect(passedCwd).toBe(catWtFor(sid, CAT1.name))
+    expect(existsSync(catWtFor(sid, CAT1.name))).toBe(true)
+    // ② 集成分支被补建，fork 点 = 主仓库 HEAD（不是 dev 的后代、也不是某只猫的分支）
+    expect(git(['rev-parse', sessionBranch(shortId)])).toBe(initSha)
+    // ③ 猫的改动在**猫分支**上 `cat-file` 读得到
+    writeFileSync(resolve(catWtFor(sid, CAT1.name), 'v13.txt'), '补建后有活干\n', 'utf-8')
+    await runRound(sid, 'scwt-v13b', CAT1, 'trace-scwt-v13b')
+
+    expect(fileOnBranch(catBranch(shortId, CAT1.name), 'v13.txt')).toBe('补建后有活干\n')
+    // 猫的提交不直接落集成分支（那是 fan-in 的活）；补建后它仍停在分叉点
+    expect(git(['rev-parse', sessionBranch(shortId)])).toBe(initSha)
+    // 主仓库零改动（红线锚）
+    expect(branchHead('dev')).toBe('init')
+    expect(readFileSync(resolve(tmpRepo, 'tracked.txt'), 'utf-8')).toBe('base\n')
+  })
+
+  /**
+   * V15（**原 V10 降级格**，OQ1 裁 A 后期望反转；用例名同步改——名字里留着「建不出」
+   * 就是本仓点过名的「记录≠真相」）。
+   *
+   * 旧行为：集成分支不存在 ⇒ 猫树建不出、静默降级到 `workspace/`（改动不可见）。
+   * 新行为：猫侧**补建**集成分支（fork = 主仓库 HEAD）⇒ 猫树建得出、改动 `cat-file` 读得到。
+   * 本格**逐字保留**的旧格：主仓库零改动 / 存量集成分支不被误伤 / 通配符同时命中新旧两形态。
+   */
+  it('V15/V10 补建 · 集成分支不存在 ⇒ 猫树建得出、改动可见；存量会话分支与通配符不受影响', async () => {
     const sid = 'scwt0005'
     const shortId = sessionShortId(sid)
     // 存量形态：既有 `session/<sid8>` 分支（老会话的集成分支）不该被误伤
@@ -464,8 +520,11 @@ describe('serial × 一猫一 worktree（猫路径，T-2 Phase I）', () => {
 
     await runRound(sid2, 'scwt-nb', CAT1, 'trace-scwt-nb')
 
-    expect(ensureCatWorktree(sid2, CAT1.id, CAT1.name)).toBeNull()
-    expect(existsSync(catWtFor(sid2, CAT1.name))).toBe(false)
+    // 反转格①：猫树建得出（旧期望 `toBeNull()` / `existsSync === false`）
+    expect(ensureCatWorktree(sid2, CAT1.id, CAT1.name)).toBeTruthy()
+    expect(existsSync(catWtFor(sid2, CAT1.name))).toBe(true)
+    // 反转格②：集成分支被补建、fork 点 = 主仓库 HEAD
+    expect(git(['rev-parse', sessionBranch(shortId2)])).toBe(initSha)
     expect(branchHead('dev')).toBe('init')
     expect(tracked('tracked.txt')).toBe(true)
     expect(readFileSync(resolve(tmpRepo, 'tracked.txt'), 'utf-8')).toBe('base\n')
@@ -477,7 +536,9 @@ describe('serial × 一猫一 worktree（猫路径，T-2 Phase I）', () => {
       .filter(Boolean)
       .sort()
     expect(hits).toEqual([sessionBranch(shortId), catBranch(shortId, CAT1.name)].sort())
-    expect(existsSync(sessionWorktreePath(tmpRepo, shortId2))).toBe(false)
+    // 反转格③：补建走的是 `ensureSessionWorktree`（单源）⇒ 会话 worktree 一并建出；
+    // 这是**零额外成本**的：收口时 `fanInCatBranches` 的 cwd 本就是它（票面补笔 §「为什么用 ensureSessionWorktree」）
+    expect(existsSync(sessionWorktreePath(tmpRepo, shortId2))).toBe(true)
   })
 })
 

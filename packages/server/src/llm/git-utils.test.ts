@@ -700,21 +700,45 @@ describe('cat worktree', () => {
     expect(existsSync(resolve(p2!, '.git'))).toBe(true)
   })
 
-  it('A5 失败形态：集成分支不存在 → null（不落主仓库）；空 agent id → null', () => {
+  /**
+   * A5：**「集成分支不存在 ⇒ null」已按店长裁 A 反转**（OQ1，补笔：第 3 笔）——
+   * 集成分支不存在不再是失败形态，猫侧**补建**它（fork 点 = 主仓库 HEAD）。
+   * 「**不落主仓库**」这条红线**保留**，改由仍然存在的失败形态（空 agent id）把守。
+   * 反转的完整三格判据见 `serial.cat-worktree.test.ts` 的 V13/V15 与报告 §三 V14。
+   */
+  it('A5 补建（反转格）：集成分支不存在 ⇒ 补建、fork 点 = 主仓库 HEAD；空 agent id → null', () => {
     const sid = 'c1a00099' // 从不建 session/c1a00099
-    const path = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT, CAT)
-    expect(path).toBeNull()
-    // 「不落主仓库」的判据：返回 null，而不是退到主仓库根/任何可用路径
-    expect(path).not.toBe(tmp)
-    expect(path).not.toBe(resolve(tmp))
-    // 猫分支未建、worktree 目录未落盘
-    expect(git('branch --list session/c1a00099-暹罗猫')).toBe('')
-    expect(existsSync(catPath('c1a00099-暹罗猫'))).toBe(false)
+    sessIds.push(sid) // 补建会一并建出会话 worktree（单源 `ensureSessionWorktree`）⇒ 纳入清理
+    // 猫 worktree 目录落 `<tmpdir>/catStudy-sessions/`（主仓库**兄弟**目录，不在 tmp 内）
+    // ⇒ 上一次跑崩留下的同 id 残留会走进「已存在 → 复用」并撞上所有权校验。
+    // **实测踩过**（同 serial.cat-worktree.test.ts 的 dropWorktrees 注释）：本格先登记再
+    // 前置清干净，否则断言点一旦在上游失败就永久留下残留、把后续每一次跑都变红。
+    const expectedCat = catPath('c1a00099-暹罗猫')
+    catDirs.push(expectedCat)
+    try {
+      rmSync(expectedCat, { recursive: true, force: true })
+    } catch {
+      /* 不存在 / 占用 → 忽略 */
+    }
+    expect(git('branch --list session/c1a00099')).toBe('') // 前提：集成分支不存在
+    const base = git('rev-parse HEAD')
 
+    const path = gitUtils.ensureCatWorktree(`${sid}-xxxx`, AGENT, CAT)
+    // 反转格：猫树建得出（旧期望 `toBeNull()`），且补建的集成分支 fork 点 = 调用时的主仓库 HEAD
+    expect(path).toBeTruthy()
+    catDirs.push(path!)
+    expect(existsSync(resolve(path!, '.git'))).toBe(true)
+    expect(git('rev-parse session/c1a00099')).toBe(base)
+    expect(git('branch --list session/c1a00099-暹罗猫')).not.toBe('')
+
+    // 「不落主仓库」的判据：空 agent id ⇒ 返回 null，而不是退到主仓库根/任何可用路径。
     // 空 agent id：无所有者可写进标记（`branch.<branch>.catAgentId`）⇒ 拒绝。
     // 保留此格的原始动因（空后缀分支 / 枚举侧 S3-5 同形静默）已由 `catSlug`
     // 的空结果抛错接管，见 A6。
-    expect(gitUtils.ensureCatWorktree(`${sid}-xxxx`, '', CAT)).toBeNull()
+    const nullPath = gitUtils.ensureCatWorktree(`${sid}-xxxx`, '', CAT)
+    expect(nullPath).toBeNull()
+    expect(nullPath).not.toBe(tmp)
+    expect(nullPath).not.toBe(resolve(tmp))
   })
 
   it('A6 猫名清洗：中文原样产出；含 `/` 或清洗后为空 ⇒ 显式抛错且不产分支/目录（V7）', () => {

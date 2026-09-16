@@ -1,8 +1,10 @@
 # 报告：T-2 一猫一 worktree 隔离 —— Phase I 接线
 
 > 票面：`docs/run/multi-cat-isolation/tickets-t2-phase-i.md`
-> 提交：**第 1 笔** `9cd5b28`（前锋笔·命名 + 所有权标记，inert）；**第 2 笔**（接线，见本文件承载提交）
-> 审查按「票 = 两笔」审。
+> 提交：**第 1 笔** `9cd5b28`（前锋笔·命名 + 所有权标记，inert）；**第 2 笔** `ed6a3b0`（接线）；
+> **第 3 笔** —— **OQ1 裁 A·集成分支补建**（票面「补笔：第 3 笔」），见**本文件的承载提交**。
+> （第 3 笔的 sha 写不进它自己承载的文件——自指。不用「第 N 笔」占位，以承载关系指认。）
+> 审查按「票 = 三笔」审。
 
 ---
 
@@ -15,12 +17,14 @@
    （§三-1 逐条排除），故改用既有**持久化**结构上的一条只读查询，**未新增任何跨执行状态**。
 3. **交付面比票面多 6 个文件**（7 → 13），全部是**被逼出来的**，无一是自由发挥（§二）：
    新增取数点需要一条 repo 查询；接线后原有测试的断言对象变了（票面只列了其中 2 个测试文件）。
-4. **两条需要店长裁的事项**（不阻断本轮送审）：
-   - **OQ1（结构风险，最重）**：`session/<sid8>`（集成分支）现在**只有店长**会创建 ⇒
-     若某会话里店长从未跑过，所有猫的 worktree 都建不出（无分叉点）⇒ 全体降级到
-     `workspace/`（**共享目录**），恰好回到本票要消灭的形态。见 §六-1。
-   - **OQ2（票面自相矛盾）**：§2.1 的清洗列表把 `/` 列为「可剔字符」，而 V7 要求
-     「猫名含 `/` ⇒ 显式抛错」。二者不可能同时成立。**我按 V7（验收判据）实现**，见 §六-2。
+4. **两条待裁事项均已裁、均已落地**（第 3 笔）：
+   - **OQ1（结构风险，最重）→ 裁 A（本票内必修）**：`ensureCatWorktree` 在分叉前先
+     `ensureSessionWorktree` 补建集成分支。原风险：`session/<sid8>` 接线后**只有店长**会创建 ⇒
+     店长没跑过的会话里猫树全建不出 ⇒ 全体降级到 `workspace/`（gitignored，**改动连 git 都看不见**）。
+     见 §六-1、§四 V13–V15。
+   - **OQ2（票面自相矛盾）→ 追认实现、改票面字**：§2.1 把 `/` 列为「可剔字符」，而 V7 要求
+     「含 `/` ⇒ 显式抛错」。**按 V7 实现**（静默剔除会把 `a/b` 与 `ab` 归一到同一棵树），
+     店长收口时改票面措辞，实施者不碰。见 §六-2。
 
 ---
 
@@ -104,7 +108,7 @@ worktree」。一猫一 worktree 之后**只有店长**还持会话 worktree（A
 
 ---
 
-## 四、验收 V1–V12 逐条读数
+## 四、验收 V1–V15 逐条读数
 
 | #       | 判据                         | 读数                                                                                                                                                                                                                                                                                                                                   | 载体                                                            |
 | ------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
@@ -117,28 +121,90 @@ worktree」。一猫一 worktree 之后**只有店长**还持会话 worktree（A
 | **V7**  | 命名                         | 中文**原样**产出（`session/abcd1234-暹罗猫`，断言不含 `%` 与 `\`）；`/` 与清洗后为空 ⇒ 抛错且 `branch --list "session/<sid>-*"` 为空、目录不存在                                                                                                                                                                                       | `git-utils.test.ts` A1/A6                                       |
 | **V8**  | 同名不同 agent               | 建树写 `branch.<分支>.catAgentId`；换 agentId 同名 ⇒ 抛「所有权冲突」且标记与树均未被改写；同 agentId 复用幂等。另：抹掉标记后复用 ⇒ 抛「无所有权标记」；写回 ⇒ 恢复正常                                                                                                                                                               | `git-utils.test.ts` A7/A8                                       |
 | **V9**  | `role` 缺失/未知             | 走猫 worktree、不抛错（夹具用 `'unknown'` = 老库迁移默认值，**不在** `AgentRole` 里）                                                                                                                                                                                                                                                  | `serial.cat-worktree.test.ts` V9/V1                             |
-| **V10** | 存量兼容                     | 既有 `session/<sid8>` 与 24 个存量 worktree 不被误伤；`git branch --list 'session/<sid8>*'` **同时命中** `session/<sid8>` 与 `session/<sid8>-<猫名>`；集成分支不存在的会话 ⇒ 猫树建不出、零提交、主仓库零改动                                                                                                                          | `serial.cat-worktree.test.ts` V10 + `worktree-fanin.test.ts` B1 |
-| **V11** | 闸绿                         | `node scripts/lint.js` 3 包通过；`pnpm test` 全量 **124 文件 / 2513 用例全绿**（干净提交态复跑，见提交门禁读数）                                                                                                                                                                                                                       | 见 §五                                                          |
+| **V10** | 存量兼容                     | 既有 `session/<sid8>` 与 24 个存量 worktree 不被误伤；`git branch --list 'session/<sid8>*'` **同时命中** `session/<sid8>` 与 `session/<sid8>-<猫名>`。**末句「集成分支不存在 ⇒ 猫树建不出、零提交」已由 V15 反转**（见下行）                                                                                                           | `serial.cat-worktree.test.ts` V15 + `worktree-fanin.test.ts` B1 |
+| **V11** | 闸绿                         | `node scripts/lint.js` 3 包通过；`pnpm test` 全量**全绿**（第 3 笔读数见 §五）                                                                                                                                                                                                                                                         | 见 §五                                                          |
 | **V12** | 覆盖边界自陈                 | §七                                                                                                                                                                                                                                                                                                                                    | 本文件                                                          |
+
+### 第 3 笔（OQ1 裁 A）新增 / 反转的格子
+
+| #       | 判据                                        | 读数                                                                                                                                                                                                                                                                                                                                                                                                                                                  | 载体                                  |
+| ------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| **V13** | 无 store 会话补建（**新格，三格分别断言**） | 前提：`branch --list session/scwt0007` 为空 **且** 会话 worktree 不存在（两条都显式断言）。触发一次非 store 猫执行后：① 适配器实收 `cwd` **逐字等于**猫 worktree 路径 —— **不是**「目录存在」这类旁证；② `git rev-parse session/scwt0007` == 补建前的 `initSha`（fork 点 = 主仓库 HEAD）；③ 写入 `v13.txt` 后 `git cat-file -p session/scwt0007-flash猫:v13.txt` = `补建后有活干\n`。另：猫的提交**不落集成分支**（它仍停在 `initSha`）、主仓库零改动 | `serial.cat-worktree.test.ts` V13     |
+| **V14** | 反向对照（防恒真）                          | **已跑，先红后绿**：删掉补建那一行 ⇒ **3 格红 / 27 格绿**（V13、V15、`git-utils.test.ts` A5 —— 恰好是断言补建的三格，其余一格不动 ⇒ 判据可分辨、非恒真）。关键读数：V13 红在 `expected undefined to be '<tmp>/catStudy-sessions/scwt0007-flash猫'` —— 那个 **`undefined` 就是 `workspace/` 降级**（`cwd` 没被传），把「静默不可见」的失败形态直接暴露成读数。改回后 30 格全绿                                                                         | 手跑（命令与输见下方「V14 复现」）    |
+| **V15** | V10 期望反转 + 用例名同步改                 | 集成分支不存在的会话 ⇒ **猫树建得出**（原 `toBeNull()` / `existsSync === false` 反转）、集成分支 fork 点 = 主仓库 HEAD、会话 worktree 一并建出（`ensureSessionWorktree` 单源）；**逐字保留**：主仓库零改动 / 存量集成分支不被误伤 / 通配符同时命中新旧两形态。用例名去掉「建不出」                                                                                                                                                                    | `serial.cat-worktree.test.ts` V15/V10 |
+| **A5**  | `git-utils` 面同型反转（票面「（如需）」）  | 同款反转：集成分支不存在 ⇒ 建得出 + fork 点 = 主仓库 HEAD；「不落主仓库」红线**保留**，改由仍存在的失败形态（空 agent id ⇒ `null`）把守                                                                                                                                                                                                                                                                                                               | `git-utils.test.ts` A5                |
+
+**V14 复现**（补建行 = `packages/server/src/llm/git-utils.ts:608`
+`if (!ensureSessionWorktree(sessionId)) return null`）。反例态是**删掉该行**（不是改条件、
+不是改返回），备份 → 删 → 跑 → 还原：
+
+```bash
+cd <worktree>
+cp packages/server/src/llm/git-utils.ts /tmp/git-utils.bak.ts
+node -e "
+const fs=require('fs');const p='packages/server/src/llm/git-utils.ts';
+let s=fs.readFileSync(p,'utf8');
+const old='  if (!ensureSessionWorktree(sessionId)) return null\n\n  const ready = ensureWorktreeAt({';
+const nw='  const ready = ensureWorktreeAt({';
+if(!s.includes(old)){console.error('ANCHOR NOT FOUND');process.exit(1)}
+fs.writeFileSync(p,s.replace(old,nw),'utf8');console.log('REVERTED');"
+cd packages/server && npx vitest run src/execution/serial.cat-worktree.test.ts src/llm/git-utils.test.ts
+#   反例态 → Test Files 2 failed (2) | Tests 3 failed | 27 passed (30)
+cd <worktree> && cp /tmp/git-utils.bak.ts packages/server/src/llm/git-utils.ts
+#   正例态 → Test Files 2 passed (2) | Tests 30 passed (30)
+```
+
+脚本里带 `ANCHOR NOT FOUND` 断言：**锚点不匹配就非零退出**——防「删了个寂寞还报绿」
+（该形态会让反向对照变成恒真的假读数）。
+
+**同轮附带的测试卫生修复（非行为改动）**：`git-utils.test.ts` A5 的猫树目录落
+`<tmpdir>/catStudy-sessions/`（主仓库**兄弟**目录，**不在** `tmp` 内）⇒ 上一轮跑崩的残留会
+走进「已存在 → 复用」并撞所有权校验。**实测踩过**：本次反向对照前的第一轮失败正是被
+`<tmpdir>/catStudy-sessions/c1a00099-暹罗猫` 这个残留打红（断言点在上游失败 ⇒ `catDirs.push`
+没执行到 ⇒ 残留永久留下、之后每次跑都红）。已按 `serial.cat-worktree.test.ts` 的既有做法
+**先登记再前置清理**，使该格不再依赖跑史。
 
 ---
 
 ## 五、闸读数
 
-| 面                                       | 读数                                                          |
-| ---------------------------------------- | ------------------------------------------------------------- |
-| `npx vitest run`（packages/server 全量） | **124 文件 / 2513 用例全绿**                                  |
-| `node scripts/lint.js`                   | **3 包通过**                                                  |
-| 第 1 笔提交门禁（`9cd5b28`）             | 88 文件 / 1812 用例全绿                                       |
-| 第 2 笔提交门禁                          | 见提交输出（本文件由该笔承载，自指 sha 与门禁读数写不进自己） |
+| 面                                        | 读数                                                                     |
+| ----------------------------------------- | ------------------------------------------------------------------------ |
+| `npx vitest run`（**全仓全量**，第 3 笔） | **124 文件 / 2514 用例全绿**（第 2 笔时为 124/2513；+1 = 新增的 V13 格） |
+| `npx vitest run`（packages/server 面）    | **89 文件 / 1824 用例全绿**                                              |
+| `node scripts/lint.js`                    | **3 包通过**                                                             |
+| V14 反向对照（第 3 笔）                   | **3 红 / 27 绿**（先红后绿，命令与输见 §四）                             |
+| 第 1 笔提交门禁（`9cd5b28`）              | 88 文件 / 1812 用例全绿                                                  |
+| 第 2 笔提交门禁（`ed6a3b0`）              | 89 文件 / 1823 用例全绿                                                  |
+| 第 3 笔提交门禁                           | 见提交输出（本文件由该笔承载，自指 sha 与门禁读数写不进自己）            |
 
 ---
 
 ## 六、两条需店长裁
 
-### 6.1 OQ1（结构风险，最重）：集成分支的创建者现在只剩店长
+### 6.1 OQ1（结构风险，最重）：集成分支的创建者现在只剩店长 —— **已裁 A、已落地（第 3 笔）**
 
-**动什么**：无（本轮按票面实现，未擅改）。
+**裁决**：店长独立复核后**采纳 A 并升级为「本票内必修」**（不是「倾向」）。三条理由：
+① 这是**本票引入的回归**（接线前每个 agent 都调 `ensureSessionWorktree`，集成分支总被顺带建出）；
+② 失败**比共享目录更重、且不可见**——降级 cwd = `getWorkspaceDir()` = `path.join(process.cwd(),'workspace')`，
+而 `.gitignore:38` 正是 `workspace/` ⇒ 猫的改动不是「未提交」而是**不可见**（`git status` 干净、
+`git cat-file` 读不到、收口 `listCatBranches` 返 0，全场无人察觉）；
+③ **重启经济**：本票落地本就需要一次重启，推到后续单要多付第二次重启，中间窗口缺口是活的。
+
+**实际动什么（第 3 笔，一行）**：`packages/server/src/llm/git-utils.ts` · `ensureCatWorktree`
+在 `ensureWorktreeAt({ … startPoint: sessionBranch(shortId) })` **之前**补：
+
+```ts
+if (!ensureSessionWorktree(sessionId)) return null
+```
+
+用**单源**而非自写 `git branch`：`ensureWorktreeAt` 的建分支段是与会话路径共享的那一份
+（该函数头注自陈「复制必然漂移」），自写会造出**第二个**集成分支创建点。
+**不违反 ADR D2**：D2 管的是 cwd **持有者**（仍是 store，本笔不改派发逻辑），本笔只让
+集成分支**提前存在**；`ensureAgentWorktree` 对 store 仍走原分支 ⇒ store 路径不重复建（幂等复用）。
+
+**验收读数**：§四 V13（三格）/ V14（反向对照 3 红 27 绿）/ V15（V10 反转）。
+**回滚**：删这一行即回到原行为（V14 的「先红」态就是它）。
 
 **现象**：`ensureCatWorktree` 的分叉点是 `session/<sid8>`（票面 §2.1 钉死，**不是 dev**）。
 旧实现里**任何**猫的 `reply.ts:976` 都会调 `ensureSessionWorktree` 顺带把这条分支建出来；
@@ -161,7 +227,11 @@ worktree」。一猫一 worktree 之后**只有店长**还持会话 worktree（A
 
 **可逆性**：A/B/C 都只动 `ensureCatWorktree` 一处，可单独回滚。
 
-### 6.2 OQ2：§2.1 与 V7 对 `/` 的要求互斥
+### 6.2 OQ2：§2.1 与 V7 对 `/` 的要求互斥 —— **已裁：追认实现、改票面字**
+
+店长裁决：**按 V7 抛错是对的**（静默剔除会把 `a/b` 折成 `ab`、与真名共用同一棵树，正是本票靶心）。
+落法同票2 §2.2 先例：**改票面字、不改实现**（店长在收口时改 §2.1 的清洗列表措辞，实施者**不碰**）。
+以下为送审时的原始分析，保留作决策依据留痕。
 
 **票面 §2.1** 的清洗列表把 `/` 写进「只剔 git ref 非法字符（`/ \ 空格 ~ ^ : ? * [ " .. @{` …）」。
 **票面 V7 / `tickets-cat-naming.md` A4** 都要求「猫名含 `/` ⇒ **显式抛错**」。
@@ -203,6 +273,16 @@ worktree」。一猫一 worktree 之后**只有店长**还持会话 worktree（A
    `SESSION_IDS` 白名单清同 id 残留（路径只依赖 `tmpdir()`+shortId，跨 run 会撞）。
    **不整目录清扫**——`tmpdir()/catStudy-sessions` 与并行 worker 的同型测试共享，
    扫它等于误伤别人。
+8. **第 3 笔的补建不引入并发建树竞态——但这是「进程内」的论证，不是通例**。
+   补建让**每一只非 store 猫**的首次执行都可能去创建**同一棵**会话 worktree
+   （此前只有 store 会），而批次是 `Promise.allSettled` 并发起来的。
+   **证得**：`ensureWorktreeAt` 全程 `execFileSync`（实测 3 处、0 处 `await`/`async`）⇒
+   同一进程内调用是**同步原子**的，`git worktree add` 不会被自己打断。
+   **证不了**：多**进程**并发（同仓库跑两个 server 实例 / 测试与 server 并行）时该竞态成立；
+   本仓是单 server 进程模型（ADR 0015 前提），故不适用。若将来多进程，这一条要重验。
+   **另**：V13 断言的是非 store 猫路径；store 路径（`ensureAgentWorktree` 直接走
+   `ensureSessionWorktree`）在补建前后**逐字未变**，其行为由 `serial.downgrade.test.ts`
+   的 14 例守着（第 3 笔后全绿）。
 
 ---
 
@@ -216,5 +296,5 @@ worktree」。一猫一 worktree 之后**只有店长**还持会话 worktree（A
 | 双跑缺陷                                                 | 用户已裁「挂起」                                  |
 | ADR 0015 转正                                            | T-2 收口动作，由店长执行                          |
 | `worktree-fanin.ts` 注释里的 `<cat8>` 措辞（现已是猫名） | 该文件不在本票交付面 ⇒ **未碰**，留给转正时一并改 |
-| **OQ1（集成分支创建者）**                                | **待店长裁**（§6.1）                              |
-| **OQ2（`/` 的票面自相矛盾）**                            | **待店长确认**（§6.2，已按 V7 实现）              |
+| **OQ1（集成分支创建者）**                                | ✅ **已裁 A、已落地**（第 3 笔，§6.1）            |
+| **OQ2（`/` 的票面自相矛盾）**                            | ✅ **已裁：追认实现、改票面字**（§6.2）           |

@@ -576,7 +576,8 @@ function writeCatOwner(mainRoot: string, branch: string, agentId: string): void 
  *   `branch.<完整分支名>.catAgentId`（`.git/config`，**不在工作区内** ⇒ 不参与
  *   `git add -A`、不进任何提交）。建 → 写；复用 → 读回比对。
  *
- * 集成分支不存在 ⇒ 建分支失败 ⇒ 返回 **null**：降级到哪由调用方决定，
+ * 集成分支不存在 ⇒ **本函数先补建它**（fork 点 = 主仓库 HEAD），猫树照常建得出；
+ * 补建失败（非 git 仓库 / 无法解析主仓库根）⇒ 返回 **null**：降级到哪由调用方决定，
  * 本函数**绝不自行落主仓库**（T-1 已收窄的降级路径，不得回退）。
  * 猫名含 `/` 或清洗后为空 ⇒ `catSlug` **抛错**（不静默降级为 id/空串，
  * 否则造出 `session/<sid8>-` 空后缀分支——枚举侧 S3-5 同形静默）。
@@ -595,6 +596,16 @@ export function ensureCatWorktree(
   if (!agentId) return null // 空 agent id 无法持有所有权标记（Phase T A5 契约保留）
   const branch = catBranch(shortId, catName)
   const wtPath = catWorktreePath(mainRoot, shortId, catName)
+
+  // 分叉点 = 集成分支（`session/<sid8>`）。**它必须先存在**：本会话若从未有 store
+  // 执行过，则无人创建它 ⇒ 猫树全建不出 ⇒ 全体降级到共享 `workspace/`
+  // （`getWorkspaceDir()` 落在 gitignored 目录 ⇒ 猫的改动连 `git status` 都看不见）
+  // ⇒ 收口时 `listCatBranches` 收 0 条 ⇒ **静默丢活**（OQ1，店长裁 A）。
+  // 用 `ensureSessionWorktree` 而不是自写 `git branch`：单源——`ensureWorktreeAt`
+  // 的建分支段是它与会话路径共享的那一份，自写会造出第二个集成分支创建点。
+  // 这不改 ADR D2 的「持有者」（cwd 持有者仍是 store），只让集成分支**提前存在**；
+  // store 路径在 `ensureAgentWorktree` 里仍走 `ensureSessionWorktree`，幂等复用。
+  if (!ensureSessionWorktree(sessionId)) return null
 
   const ready = ensureWorktreeAt({
     mainRoot,
