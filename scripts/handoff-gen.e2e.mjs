@@ -7,7 +7,7 @@
  *   node scripts/handoff-gen.e2e.mjs
  */
 
-import { execSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -25,6 +25,7 @@ import {
   runHandoff,
   readState,
   writeState,
+  resolveStateRoot,
 } from './handoff-gen.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -2754,6 +2755,117 @@ function changedPathsOfHead(tmp) {
     '只要有一条非免审路径，整条提交照常走审查——不得出现「免审」留痕'
   )
   console.log('  16b: 混合改动 → 照常投递（免审判据不是恒真门）✅')
+
+  stub.server.close()
+  rmSync(tmp, { recursive: true, force: true })
+}
+
+console.log('')
+
+// ═══ 测试组 17: 账本共享根 + 幂等旁路信号源（状态落盘键控 / 族修回归） ═══════
+// 两个靶心同源——都是「一棵树、一个 cwd、一个常驻 env 信号」这个被推翻的假设漏出来的：
+//
+//   17a/17b：账本落点键 `cwd` ⇒ 每个会话 worktree 各记一份，同一 SHA 在每棵树各投
+//            一次、`pruneState` 的自愈范围也各算各的，幂等形同虚设。改键
+//            `--git-common-dir` 的父目录（全仓唯一）。
+//   17c/17d：`CATSTUDY_SESSION_ID` 是 server 注入给每只猫 CLI 的**常驻**变量，
+//            钩子（裸 node 调用）全量继承 ⇒ 拿它当幂等旁路的前置 = 旁路恒开 =
+//            账本等于不存在。换钩子永不设的 `CATSTUDY_FORCE_DELIVER`——与免审
+//            豁免同一个开关（「一个人工显式意图开关」而不是两个）。
+//
+// 17c 是**生产形态**用例（同 16d 的形态学）：它红了就说明幂等又被某个常驻变量
+// 短路了——那种失效自己不会显形，样本跑在 `env -u` 下必绿（本仓记过的假绿形态）。
+
+{
+  const mainRepo = makeUuidRepo(
+    '.handoff-test-shared-root',
+    '17aa0000-0000-4000-8000-000000000017',
+    { 'a.txt': '1' }
+  )
+  const sha = gitIn(mainRepo, 'rev-parse HEAD')
+  const wt = join(TEST_BASE, '.handoff-test-shared-root-wt')
+  execFileSync('git', ['worktree', 'add', '-b', 'wt17', wt], { cwd: mainRepo, stdio: 'pipe' })
+  const wtSha = gitIn(wt, 'rev-parse HEAD')
+
+  // 17a: worktree 当 cwd → 账本落**共享根**（主仓），worktree 内不另立
+  assert(
+    resolveStateRoot(wt) === resolveStateRoot(mainRepo),
+    `17a 前置：worktree 与主仓应解析到同一共享根（实际 ${resolveStateRoot(wt)} vs ${resolveStateRoot(mainRepo)}）`
+  )
+  writeState(wt, { delivered: { [wtSha]: 't' }, pending: [], raw: '' })
+  assert(existsSync(join(mainRepo, STATE_FILE)), '17a 从 worktree 写入的账本应落在共享根（主仓根）')
+  assert(!existsSync(join(wt, STATE_FILE)), '17a worktree 内不得另立账本（每树一份即幂等失效）')
+  // 读写同面：写入口在 wt、读出口在 mainRepo——两处必须看到同一条
+  assert(
+    readState(mainRepo).delivered[wtSha] !== undefined,
+    '17a 主树侧应读到 worktree 写入的同一条（跨树可见，读出口与写入口同面）'
+  )
+  console.log('  17a: 账本键共享根（worktree ↔ 主树同一本）✅')
+
+  // 17b: 非 git 目录 → 退回 cwd（改动前的退化行为：不静默炸、也不写到别处）
+  const plain = join(TEST_BASE, '.handoff-test-plain-dir')
+  mkdirSync(plain, { recursive: true })
+  assert(resolveStateRoot(plain) === plain, '17b 非 git 目录应解析回 cwd 自身')
+  writeState(plain, { delivered: { [sha]: 't' }, pending: [], raw: '' })
+  assert(existsSync(join(plain, STATE_FILE)), '17b 非 git 目录应退回 cwd（退化行为保持）')
+  console.log('  17b: 非 git 目录 → 退回 cwd ✅')
+
+  rmSync(wt, { recursive: true, force: true })
+  rmSync(mainRepo, { recursive: true, force: true })
+}
+
+// 17c/17d: 幂等旁路信号源。改动面是**非免审**提交（`packages/server/**`）——
+// 否则两条分支都会被免审豁免先吞掉，用例对账本判据恒不敏感（那正是恒真门）。
+{
+  const uuid = '17cc0000-0000-4000-8000-000000000017'
+  const tmp = makeRepoWithParent(
+    '.handoff-test-idem-signal',
+    { 'README.md': '# base\n' },
+    { 'packages/server/src/x.ts': 'export const x = 1\n' },
+    `catstudy [${uuid}] feat(x): 落盘`
+  )
+  const headSha = gitIn(tmp, 'rev-parse HEAD')
+  const stub = await startAttributionStub({
+    uuid,
+    sessionId: 'session-17c',
+    updated: 0,
+    executor: 'ok',
+  })
+
+  // 前置：账本里确有一条 HEAD 的 delivered——否则「不 POST」是因为没账本可跳，恒真
+  writeState(tmp, { delivered: { [headSha]: '2026-01-01T00:00:00.000Z' }, pending: [], raw: '' })
+  assert(
+    readState(tmp).delivered[headSha] !== undefined,
+    '17c 前置：账本确含 HEAD 的 delivered（「该跳过」的场景确被构造出来）'
+  )
+
+  // 17c: 生产形态——CATSTUDY_SESSION_ID 常驻（猫的 CLI 环境），无人工开关 ⇒ 仍跳过
+  await runInProcWithEnv(
+    tmp,
+    stub.url,
+    { CATSTUDY_SESSION_ID: 'session-17c', CATSTUDY_FORCE_DELIVER: undefined },
+    { gateDeliver: true }
+  )
+  assert(
+    stub.hits.post === 0,
+    `17c 幂等应生效：已投递过的 HEAD 不得再 POST（实际 ${stub.hits.post} 次）`
+  )
+  console.log('  17c: 生产形态（SESSION_ID 常驻）→ 幂等仍生效 ✅')
+
+  // 17d: **只差这一个 env**——显式意图 → 旁路幂等，照常投递。17c 的 0 才不是恒真门
+  // 断言取**增量**不取累计：`stub.hits.post` 跨 17c/17d 累计，读累计会让 17d 的读数
+  // 依赖「17c 有没有泄漏 POST」——那正是反对照实测到的形态（旧代码下 17c 漏 1，
+  // 17d 读到 2，报的是「17d 投了 2 次」而真因在 17c）。增量让两条断言各自独立。
+  const postBefore17d = stub.hits.post
+  await runInProcWithEnv(
+    tmp,
+    stub.url,
+    { CATSTUDY_SESSION_ID: 'session-17c', CATSTUDY_FORCE_DELIVER: '1' },
+    { gateDeliver: true }
+  )
+  const posted17d = stub.hits.post - postBefore17d
+  assert(posted17d === 1, `17d 显式意图应旁路幂等（本次实际 POST ${posted17d} 次）`)
+  console.log('  17d: CATSTUDY_FORCE_DELIVER=1 → 旁路幂等，重新投递 ✅')
 
   stub.server.close()
   rmSync(tmp, { recursive: true, force: true })

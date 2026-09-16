@@ -81,13 +81,16 @@
  *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
  *   CATSTUDY_SESSION_ID   目标会话 ID（人工显式指定，明确意图优先）。
  *                         投递目标选择：
- *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定；同时旁路
- *                            delivered 状态跳过——显式指定即明确意图，如会话重建后重投）
+ *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定）
  *                         2. commit message 的 catstudy [uuid] 反查消息所在会话（自动）
  *                         两者都不可用时**报错不投递**——绝不猜目标。
  *                         曾因反查失败静默降级到环境变量/API 第一个会话，
  *                         把审查文档投到错误会话（"UI优化"打偏、b8b0a6d 跨会话）。
- *   CATSTUDY_FORCE_DELIVER=1  强制投递：跳过 `docs/run/**` 免审豁免（票乙）。
+ *                         **只用于「投给谁」**，不参与任何幂等判据——它在猫的 CLI
+ *                         环境里常驻，当开关用等于把该判据恒真/恒假（见下条）。
+ *   CATSTUDY_FORCE_DELIVER=1  强制投递（**唯一的人工显式意图开关**）：
+ *                         跳过 `docs/run/**` 免审豁免（票乙），并旁路 delivered
+ *                         幂等早退（`deliverSha` / `deliverHeadIfUndelivered`）。
  *                         **钩子永不设**——只有人工在 shell 里显式 export 才为真；
  *                         用 CATSTUDY_SESSION_ID 当这个信号是错的（它常驻，见
  *                         `isForceDeliver` 注释）。
@@ -97,7 +100,7 @@
 import { randomUUID } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, unlinkSync, renameSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // ─── 投递状态文件 ─────────────────────────────────────────
@@ -379,7 +382,9 @@ export function isExemptDelivery(paths) {
 }
 
 /**
- * 强制投递开关（纯函数）：`CATSTUDY_FORCE_DELIVER=1|true` → 跳过免审豁免。
+ * 强制投递开关（纯函数）：`CATSTUDY_FORCE_DELIVER=1|true` → 显式意图。
+ * 两个消费面都靠它（本函数只判值，不管用途）：跳过免审豁免（`deliverSha`）、
+ * 旁路 delivered 幂等早退（`deliverSha` + `deliverHeadIfUndelivered`）。
  *
  * 语义仍是**「显式意图 > 自动豁免」**，但信号源换过了——首版拿
  * `CATSTUDY_SESSION_ID` 当前置，审查回炉实测推翻：
@@ -1481,8 +1486,42 @@ export async function tryPostToCatstudy(content, cwd, opts = {}) {
 
 // ─── 投递状态文件（Fix A+D：按 commit SHA 幂等） ─────────────
 
+/**
+ * 账本落点 = **共享根**（跨 worktree 唯一），不是「当前树」。
+ *
+ * 判据（状态落盘键控约定，AGENTS.md Conventions）：正确性依赖「全仓只有一棵树」
+ * 的状态 → 键 `--git-common-dir` 的父目录；否则键 `--show-toplevel`。账本属前者——
+ * 同一 SHA 在会话 worktree 与本树各记一份 ⇒ 幂等形同虚设（且 `pruneState` 的自愈
+ * 范围各算各的）。主树与全部 worktree 解析到同一处；e2e 的临时仓库是独立主仓，
+ * 解析回它自己 ⇒ 行为与改动前逐字等价。
+ *
+ * 解析失败（非 git 仓 / git 不可用）→ 退回 `cwd`：保持改动前的退化行为，不静默炸，
+ * 也不把账本写到别处。
+ *
+ * 缓存按 `cwd` 键控（每 cwd 至多一次 git 调用），**只缓存成功**——失败不缓存，
+ * 同进程内后续调用仍有机会在仓库就绪后解析成功。
+ */
+const stateRootCache = new Map()
+export function resolveStateRoot(cwd) {
+  const cached = stateRootCache.get(cwd)
+  if (cached !== undefined) return cached
+  try {
+    const commonDir = execSync('git rev-parse --path-format=absolute --git-common-dir', {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim()
+    if (!commonDir) return cwd
+    const root = dirname(commonDir)
+    stateRootCache.set(cwd, root)
+    return root
+  } catch {
+    return cwd
+  }
+}
+
 function statePath(cwd) {
-  return join(cwd, STATE_FILE)
+  return join(resolveStateRoot(cwd), STATE_FILE)
 }
 
 /**
@@ -1615,8 +1654,8 @@ function resolveFullSha(cwd, sha) {
 /**
  * 投递单个 commit 的文档并更新状态（Fix A+D 的单一状态入口）。
  *
- * - delivered 命中 → 跳过（幂等；CATSTUDY_SESSION_ID 显式指定时旁路——明确意图，
- *   如会话重建后重投）
+ * - delivered 命中 → 跳过（幂等；`CATSTUDY_FORCE_DELIVER=1` 时旁路——人工显式
+ *   意图，如会话重建后重投）
  * - ok → 记 delivered、移出 pending
  * - skip（T-A ①：归属判据判静默 / 票乙：改动全在免审前缀内）→ **不记账本、
  *   不记 pending**，原样返回
@@ -1637,7 +1676,7 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
   // 缺省 'legacy'（不判）：漏标来源只会多投一条，不会漏投——安全方向。
   const pendingSrc = opts.pendingSrc || 'legacy'
   if (state.delivered[fullSha]) {
-    if (!process.env.CATSTUDY_SESSION_ID) {
+    if (!isForceDeliver(process.env.CATSTUDY_FORCE_DELIVER)) {
       console.log(`[handoff-gen] ⏭️  ${fullSha.slice(0, 7)} 已投递过（状态文件）——跳过，不重复投递`)
       // 顺带清出 pending：delivered 与 pending 不应同时存在（跳过路径也要移，否则
       // 该 SHA 每次投递机会都会被 drainPending 重新处理一遍）
@@ -1648,7 +1687,7 @@ async function deliverSha(cwd, serverUrl, sha, content, opts = {}) {
       return 'ok'
     }
     console.log(
-      `[handoff-gen] ℹ️  ${fullSha.slice(0, 7)} 已投递过，但 CATSTUDY_SESSION_ID 显式指定——按明确意图重新投递`
+      `[handoff-gen] ℹ️  ${fullSha.slice(0, 7)} 已投递过，但 CATSTUDY_FORCE_DELIVER 显式指定——按明确意图重新投递`
     )
   }
 
@@ -1829,7 +1868,7 @@ async function deliverHeadIfUndelivered(cwd, serverUrl) {
   const headSha = safeGit(cwd, 'rev-parse HEAD')
   if (!headSha) return
   const state = readState(cwd)
-  if (state.delivered[headSha] && !process.env.CATSTUDY_SESSION_ID) return
+  if (state.delivered[headSha] && !isForceDeliver(process.env.CATSTUDY_FORCE_DELIVER)) return
   const doc = generateHandoff({ cwd })
   // pendingSrc: 'gate' ⇒ 同收尾兜底：本入口的 HEAD 已有归属，补投不得重判（见文件头 `src`）
   if (doc) await deliverSha(cwd, serverUrl, 'HEAD', doc, { pendingSrc: 'gate' })
