@@ -34,6 +34,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 import {
   cleanGitEnv,
   ensureSessionWorktree,
@@ -159,7 +160,7 @@ export function fanInCats(mainRoot: string, sessionId: string): StepResult {
     }
     return { ok: true }
   } catch (err: any) {
-    return { ok: false, error: `fan-in 抛错: ${err.message}` }
+    return { ok: false, error: `fan-in 抛错: ${messageOf(err) ?? '未知错误'}` }
   }
 }
 
@@ -185,7 +186,7 @@ export function reclaimCats(mainRoot: string, sessionId: string): StepResult {
     if (kept.length > 0) log.warn('cat branches kept (未合进 dev)', { shortId, kept })
     return { ok: true }
   } catch (err: any) {
-    return { ok: false, error: `猫 worktree 回收抛错: ${err.message}` }
+    return { ok: false, error: `猫 worktree 回收抛错: ${messageOf(err) ?? '未知错误'}` }
   }
 }
 
@@ -205,7 +206,7 @@ export function mergeSession(mainRoot: string, sessionId: string): StepResult {
     log.info('session merged into dev', { sessionId, branch })
     return { ok: true }
   } catch (err: any) {
-    return { ok: false, error: `ff-only merge ${branch} 失败: ${err.message}` }
+    return { ok: false, error: `ff-only merge ${branch} 失败: ${messageOf(err) ?? '未知错误'}` }
   }
 }
 
@@ -251,7 +252,7 @@ export function writeGate(mainRoot: string, sessionId: string): StepResult {
     }
     return { ok: true }
   } catch (err: any) {
-    return { ok: false, error: `writeGate 失败: ${err.message}` }
+    return { ok: false, error: `writeGate 失败: ${messageOf(err) ?? '未知错误'}` }
   }
 }
 
@@ -280,7 +281,7 @@ export function checkoutDev(mainRoot: string, sessionId: string): StepResult {
     }
     return { ok: true }
   } catch (err: any) {
-    return { ok: false, error: `checkout dev 失败: ${err.message}` }
+    return { ok: false, error: `checkout dev 失败: ${messageOf(err) ?? '未知错误'}` }
   }
 }
 

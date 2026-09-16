@@ -24,6 +24,7 @@ import { rowToAgent } from '../execution/row.js'
 import { getExecutionEngine, getExecutionBus } from '../execution/registry.js'
 import { resolveHandoffTarget } from '../handoff/index.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 import {
   RESTART_TTL_MS,
   createRestartRequest,
@@ -99,7 +100,7 @@ export function deriveChainExistence(sessionId: string, anchor?: string): ChainE
     log.warn('chain existence probe failed — 降级为以声明为准', {
       sessionId,
       anchor,
-      error: err?.message,
+      error: messageOf(err),
     })
     return 'unknown'
   }
@@ -272,7 +273,7 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
       sessionId,
       effectiveSessionId,
       traceId,
-      error: err.message,
+      error: messageOf(err),
     })
     return { ok: false, status: 500, error: '消息写入失败，请重试' }
   }
@@ -321,7 +322,7 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
       log.warn('restart request file write failed', {
         sessionId: effectiveSessionId,
         traceId,
-        error: err.message,
+        error: messageOf(err),
       })
     }
   }

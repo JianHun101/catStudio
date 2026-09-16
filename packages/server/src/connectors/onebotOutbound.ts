@@ -15,6 +15,7 @@
 import { onAgentReply, type AgentReplyMessage } from './replyBus.js'
 import { connectorBindings as bindingsRepo } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('onebot-out')
 
@@ -102,7 +103,7 @@ export async function deliverAgentReply(msg: AgentReplyMessage): Promise<number>
       log.warn('onebot send error', {
         endpoint,
         externalId: binding.external_id,
-        error: err.message,
+        error: messageOf(err),
       })
     }
   }

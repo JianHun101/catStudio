@@ -40,6 +40,7 @@ import { startEmbeddingSidecar, stopEmbeddingSidecar } from './memory/embedding.
 import { clearStaleShutdownRequest, startShutdownRequestWatcher } from './shutdown-request.js'
 import { stopOllamaIfSpawned } from './llm/ollama.js'
 import { stopProxyIfSpawned } from './llm/cli-utils.js'
+import { messageOf } from './utils.js'
 
 const log = createLogger('server')
 
@@ -102,7 +103,7 @@ function spawnFlywheelScan(): void {
       })
     })
   } catch (err: any) {
-    log.warn('飞轮扫描器启动失败（不阻塞启动）', { error: err.message })
+    log.warn('飞轮扫描器启动失败（不阻塞启动）', { error: messageOf(err) })
   }
 }
 
@@ -211,16 +212,19 @@ async function main(): Promise<void> {
   // 全局错误处理：记录完整错误并返回结构化响应
   app.setErrorHandler((rawErr, req, reply) => {
     const err = rawErr as any
+    // 诊断取值单源（R6 §B）：框架抛出的未必是 Error（`throw 'x'` 同样合法），
+    // `err.message` 在那种情况下恒 undefined——日志与响应两侧一起归零。
+    const detail = messageOf(err)
     log.error('request error', {
       method: req.method,
       url: req.url,
-      error: err.message,
+      error: detail,
       stack: err.stack,
     })
     const statusCode = err.statusCode || 500
     reply.status(statusCode).send({
-      error: statusCode >= 500 ? 'Internal Server Error' : err.message,
-      message: err.message,
+      error: statusCode >= 500 ? 'Internal Server Error' : detail,
+      message: detail ?? 'Unknown Error',
     })
   })
 

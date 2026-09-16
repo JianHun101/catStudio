@@ -47,7 +47,7 @@ import { filterAllowedMentions } from '../dispatch/mention-policy.js'
 import { embedText } from '../memory/embedding.js'
 import { vectorToBlob } from '../memory/index.js'
 import { createPr } from '../git/create-pr.js'
-import { parseJsonArray, parseJsonValue } from '../utils.js'
+import { parseJsonArray, parseJsonValue, messageOf } from '../utils.js'
 import type { AgentRole, StreamSegment, ToolCallInfo } from '@cat-study/shared'
 
 const log = createLogger('internal')
@@ -337,8 +337,9 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
     try {
       rows = knowledgeRepo.searchKnowledgeByVector(vectorToBlob(vector), topK)
     } catch (err: any) {
-      log.error('knowledge search failed', { error: err.message, sessionId, agentId, msgId })
-      return reply.status(500).send({ ok: false, reason: `知识库检索异常: ${err.message}` })
+      const detail = messageOf(err) ?? '未知错误'
+      log.error('knowledge search failed', { error: detail, sessionId, agentId, msgId })
+      return reply.status(500).send({ ok: false, reason: `知识库检索异常: ${detail}` })
     }
     const results = rows.map((r) => ({
       id: r.id,
@@ -442,8 +443,9 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       })
     } catch (err: any) {
       // 端点已校验过白名单——此处只兜绕过校验的直调（不应发生）
-      log.error('db query failed', { error: err.message, sessionId, agentId, msgId, table })
-      return reply.status(500).send({ ok: false, reason: `数据库查询异常: ${err.message}` })
+      const detail = messageOf(err) ?? '未知错误'
+      log.error('db query failed', { error: detail, sessionId, agentId, msgId, table })
+      return reply.status(500).send({ ok: false, reason: `数据库查询异常: ${detail}` })
     }
     log.info('db query', {
       sessionId,

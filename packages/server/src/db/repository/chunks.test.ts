@@ -412,6 +412,23 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       expect(hits[0].body).toBe('扫描器写入侧的关键词命中用例')
     })
 
+    it('R6 §B2 档3：驱动抛非 Error（字符串）时诊断单源可判「FTS 缺表」⇒ 降级 []，不误上抛', () => {
+      // 判别性（真空性反对照基准）：`err?.message` 对字符串抛出物恒 undefined
+      // ⇒ 旧实现判不出 `no such table` 会走 `throw err`。回退该取值点，本条必红。
+      chunksRepo.setRepoDb({
+        prepare: () => ({
+          all: () => {
+            throw 'no such table: chunks_fts'
+          },
+        }),
+      } as never)
+      try {
+        expect(chunksRepo.searchChunksByKeyword('猫咖', 10)).toEqual([])
+      } finally {
+        chunksRepo.setRepoDb(getDb())
+      }
+    })
+
     it('G3：向量行写入后向量通道能召回该片', () => {
       const { id } = chunksRepo.upsertChunkWithIndexes(chunkInput(), vectorToBlob(oneHot(3)))
       const hits = chunksRepo.searchChunksByVector(vectorToBlob(oneHot(3)), 10, 1.5)

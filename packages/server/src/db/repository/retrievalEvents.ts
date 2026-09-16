@@ -16,6 +16,7 @@
  */
 import type Database from 'better-sqlite3'
 import { createLogger } from '../../logger.js'
+import { messageOf } from '../../utils.js'
 
 const log = createLogger('retrieval-events')
 
@@ -225,7 +226,7 @@ export function insertRetrievalTrace(input: RetrievalEventInput): number | undef
       executionId: input.executionId,
       reason: input.reason,
       candidates: input.candidates.length,
-      error: err?.message,
+      error: messageOf(err),
     })
     return undefined
   }

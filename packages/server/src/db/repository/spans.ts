@@ -19,6 +19,7 @@
  */
 import type Database from 'better-sqlite3'
 import { createLogger } from '../../logger.js'
+import { messageOf } from '../../utils.js'
 
 const log = createLogger('spans')
 
@@ -136,7 +137,7 @@ export function insertExecTrace(spans: SpanInput[]): boolean {
     log.warn('执行时间轴落盘失败（已回滚，不影响本轮执行）', {
       executionId: spans[0]?.executionId,
       spanCount: spans.length,
-      error: err?.message,
+      error: messageOf(err),
     })
     return false
   }

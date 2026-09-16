@@ -3,12 +3,23 @@
  *
  * 只测纯判据：spawn 侧是子进程 I/O（被测边界为文件系统/进程，按约定不在此覆盖）。
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { judgeReviewFallback, resolveHandoffGenScript } from './review-fallback.js'
+import {
+  judgeReviewFallback,
+  resolveHandoffGenScript,
+  spawnReviewFallback,
+} from './review-fallback.js'
+
+// spawn 侧是子进程边界（AGENTS.md 允许 mock 的四类边界之一）——本文件其余用例
+// 不触它；mock 只为构造「spawn 同步抛非 Error」这一条可达路径
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: vi.fn() }
+})
 
 const SHA = 'a'.repeat(40)
 const REVIEWER = '吐槽猫'
@@ -83,5 +94,21 @@ describe('resolveHandoffGenScript — 脚本定位（必改 1：不锚 process.c
   it('cwd 深在子目录内 → 向上走找到仓库根（走的是 walk-up 而非直接命中）', () => {
     const cwd = resolve(REPO_ROOT, 'packages', 'server', 'src')
     expect(resolveHandoffGenScript({ cwd })).toBe(expected)
+  })
+})
+
+describe('spawnReviewFallback — 子进程边界的诊断取值单源（R6 §B2 档1）', () => {
+  it('spawn 同步抛非 Error（字符串）→ reason 落原串，不退化成兜底词', async () => {
+    // 判别性（真空性反对照基准）：`err.message` 对字符串抛出物恒 undefined
+    // ⇒ 旧实现 reason 为 undefined（诊断归零）。回退该取值点，本条必红。
+    const { spawn } = await import('node:child_process')
+    vi.mocked(spawn).mockImplementation(() => {
+      throw 'boom from spawn'
+    })
+
+    const out = spawnReviewFallback(REPO_ROOT, SHA)
+
+    expect(out.spawned).toBe(false)
+    expect(out.reason).toBe('boom from spawn')
   })
 })

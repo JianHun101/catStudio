@@ -36,7 +36,7 @@ import {
 import { createLogger } from '../logger.js'
 import { snapshotPackageDeps, diffNewPackages } from '../llm/git-utils.js'
 import { ensureExecutionWorktree } from '../llm/worktree-fanin.js'
-import { parseJsonArray } from '../utils.js'
+import { parseJsonArray, messageOf } from '../utils.js'
 import { collectCommitDiffs, GIT_TIMEOUT_MS } from '../git/diff-collector.js'
 import type { ExecTrace } from './trace.js'
 import {
@@ -1243,7 +1243,7 @@ export async function runAgentReply(
       log.warn('extra persist failed (silent)', {
         traceId,
         agentId: agent.id,
-        error: err?.message,
+        error: messageOf(err),
       })
     }
   }
@@ -1265,7 +1265,7 @@ export async function runAgentReply(
         traceId,
         agentId: agent.id,
         sessionId,
-        error: err.message,
+        error: messageOf(err),
       })
     }
   }

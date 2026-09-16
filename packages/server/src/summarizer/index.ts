@@ -15,6 +15,7 @@ import {
   agents as agentsRepo,
 } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('summarizer')
 
@@ -149,7 +150,7 @@ export async function updateRunningSummary(sessionId: string): Promise<string | 
   } catch (err: any) {
     log.warn('summary update failed (non-blocking)', {
       sessionId,
-      error: err.message,
+      error: messageOf(err),
     })
     return null
   }

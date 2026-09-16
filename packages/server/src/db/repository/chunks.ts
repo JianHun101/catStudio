@@ -14,6 +14,7 @@
 import type Database from 'better-sqlite3'
 import type { ChunkRow } from './types.js'
 import { buildFtsQuery, bigramTokenize } from './fts.js'
+import { messageOf } from '../../utils.js'
 
 let db: Database.Database
 
@@ -360,7 +361,9 @@ export function searchChunksByKeyword(query: string, topN: number): ChunkKeyword
       )
       .all(matchExpr, topN) as ChunkKeywordSearchResult[]
   } catch (err: any) {
-    if (err?.message && err.message.includes('no such table: chunks_fts')) return []
+    // 判据走取诊断单源：`err.message` 对非 Error 抛出物恒 undefined ⇒ 会把
+    // 「FTS 表未建」误当未知错误上抛（驱动抛字符串时同样可达）。
+    if (messageOf(err)?.includes('no such table: chunks_fts')) return []
     throw err
   }
 }

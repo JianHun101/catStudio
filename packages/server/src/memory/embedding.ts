@@ -16,6 +16,7 @@
 
 import { getDb } from '../db/index.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 import { EmbeddingClient, type EmbedResult, type EmbeddingStatus } from './embedding-client.js'
 
 const log = createLogger('memory:embedding')
@@ -111,7 +112,7 @@ export function resolveStoredVectorDim(): number | null {
       const dim = Number(row?.dim)
       return Number.isFinite(dim) && dim > 0 ? dim : null
     } catch (err: any) {
-      log.warn('读取库内向量维度失败，跳过该来源', { error: err?.message })
+      log.warn('读取库内向量维度失败，跳过该来源', { error: messageOf(err) })
       return null
     }
   }

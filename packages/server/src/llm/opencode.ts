@@ -9,6 +9,7 @@ import {
   getWorkspaceDir,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 import { createInterface } from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
 import { v4 as uuid } from 'uuid'
@@ -142,7 +143,7 @@ async function materializeImages(
     }
     return { dir, fileArgs }
   } catch (err: any) {
-    log.warn('图片落盘失败，降级为仅文字占位', { error: err.message })
+    log.warn('图片落盘失败，降级为仅文字占位', { error: messageOf(err) })
     await rm(dir, { recursive: true, force: true }).catch(() => {})
     return null
   }

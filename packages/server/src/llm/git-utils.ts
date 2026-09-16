@@ -19,6 +19,7 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { createLogger } from '../logger.js'
+import { messageOf } from '../utils.js'
 
 const log = createLogger('git-utils')
 
@@ -193,7 +194,7 @@ export function gitResetHard(): boolean {
     log.info('git reset --hard HEAD~1')
     return true
   } catch (err: any) {
-    log.error('git reset failed', { error: err.message })
+    log.error('git reset failed', { error: messageOf(err) })
     return false
   }
 }
@@ -207,7 +208,7 @@ export function gitCleanWorkingTree(): boolean {
     log.info('git checkout -- . + git clean -fd')
     return true
   } catch (err: any) {
-    log.error('git clean failed', { error: err.message })
+    log.error('git clean failed', { error: messageOf(err) })
     return false
   }
 }
@@ -360,7 +361,7 @@ function linkNodeModules(mainRoot: string, wtPath: string): void {
     } catch (err: any) {
       log.warn('node_modules link failed — worktree 无依赖（测试/lint 不可跑，提交不受影响）', {
         label,
-        error: err.message,
+        error: messageOf(err),
       })
     }
   }
@@ -472,7 +473,7 @@ function ensureWorktreeAt(opts: {
     } catch (err: any) {
       log.warn(`${label} branch create failed — fallback to main workspace`, {
         branch,
-        error: err.message,
+        error: messageOf(err),
       })
       return null
     }
@@ -489,7 +490,7 @@ function ensureWorktreeAt(opts: {
     log.warn('worktree add failed — fallback to main workspace', {
       branch,
       wtPath,
-      error: err.message,
+      error: messageOf(err),
     })
     return null
   }
@@ -730,7 +731,7 @@ function removeLinkOnly(p: string): void {
       unlinkSync(p)
     }
   } catch (err: any) {
-    log.warn('residue link removal failed', { path: p, error: err.message })
+    log.warn('residue link removal failed', { path: p, error: messageOf(err) })
   }
 }
 
@@ -771,7 +772,7 @@ export function cleanupWorktreeResidue(wtPath: string): void {
     }
     log.info('session worktree residue cleaned', { wtPath })
   } catch (err: any) {
-    log.warn('worktree residue cleanup failed', { error: err.message })
+    log.warn('worktree residue cleanup failed', { error: messageOf(err) })
   }
 }
 
@@ -818,7 +819,7 @@ export function removeSessionWorktree(sessionId: string): void {
       })
       log.info('session worktree removed', { sessionId, wtPath })
     } catch (err: any) {
-      log.warn('worktree remove failed — force removing dir', { error: err.message })
+      log.warn('worktree remove failed — force removing dir', { error: messageOf(err) })
     }
     // 自指守卫：cwd 在被收口的 worktree 内 → 物理删除会删掉当前进程正站着的目录树，
     // 跳过（残留交给进程退出后的收口兜底）；否则走既有清理——
