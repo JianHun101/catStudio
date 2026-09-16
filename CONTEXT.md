@@ -121,6 +121,11 @@ _Avoid_: 日志, 请求记录
   - **上链未覆盖的两种情形均为未决项，其完整链序「未定案、需新机制」**——本约定只固化设计态 + session 分支承载，**不在文档里发明未经验证的步骤**：
     - **分叉拓扑（`dev` 已前进、会话分支不再是其后代）**：此时 `ff-only 合并回 dev` 必然失败，承载退化为 GitHub PR 的 merge commit，本地 `ff-only` 只剩「拉回 dev 同步」这一层。已核边界：分叉态下收口器**拒绝而非误删**——`mergeSession` 的 `ff-only` 失败即返回 `step:'merge'`，不进入删 worktree/分支、不写 gate（同上 `closeoutSession`）
     - **隔离 closeout 分支承载（PR 承载分支 ≠ session 分支）——链尾不可直接落 `closeoutSession`**：该函数签名只有 `sessionId`，**没有「合哪个分支」的参数**——step ① 取的 ref 硬编码为 `sessionBranch(shortId)`（`session-closeout.ts` 的 `sessionBranch` → `git-utils.ts` 的 `session/${shortId}`），即合的是**整个 session 分支**。而隔离路径的存在前提恰是 session 分支上**有未审 commit**（没有就不必隔离）→ ff-only 一旦成功，未审 commit **静默进 dev**——**与上行相反：分叉态是拒绝，本态是误合**。该路径的收口落点未定案
+- **docs 单一写入口——判据是「每份文档只有一个写入方」，而非「只有一个写入位置」**（2026-09-16 更正，依据 `docs/run/precommit-scope/closeout.md` §四）：
+  - **病灶**：docs 有过**两个写入口**（主仓库工作区 + 会话 worktree）。两侧改到同一段 ⇒ 两笔**逐字节相同**的 patch，而 3-way merge 对「两侧改成同一内容」解析**干净、不冲突、不报警**——内容确实一致，是 git 的**正确行为**，**没有可改的开关**。故只能**合并前显式对账**（判据面与合并面的错位，不是配置问题）。
+  - **一般 docs**（本文件自身、`docs/adr/`、`docs/plans/`、`docs/run/<slug>/` 的票面与报告、`docs/lessons/`）：写入方 = **会话 worktree**（跟代码同分支那条）；**主仓库工作区不直接编辑 docs**，只做 `ff-only` 合并。
+  - **收口记录**（`docs/run/<slug>/closeout.md`）：写入方 = **收口方、写在 `dev` 上、绝不回写 worktree**——它是 **post-merge 产物**（记录的就是合并本身），物理上不可能先于合并存在于被合并的分支里。**一个写入方 ⇒ 结构上不产生重复落盘**，「只出现在 dev 一侧」不违反本纪律（反例见下方初版约束：写宽了就会长出一条没必要的绕路）。
+- **收口前跑一次 `node scripts/closeout-dupcheck.mjs --a dev --b session/<sid8>`（收口链的前置动作）**：有命中 ⇒ **先裁定保留哪一侧，再合并**（脚本只检测、不修复）。出口三分：`0` 无命中／`1` 有命中／`2` 跑不动（调用方或环境错误）。**当心「判据无面」**：`dev` 是会话分支祖先时两侧无分叉，脚本 `exit 0` 但**必在 stderr 打警示**——那是「无面可查」，**不是**「检查通过」。**有落点 ≠ 会被消费**：纪律靠人记、脚本靠跑，故脚本必须挂进本链，否则它与不存在没有区别。
 - 开发流程 gate 决策点：`spec-gate`（前半个门——需求可证伪/契约钉死，放行才拆票/进 implement）+ `quality-gate`（后半个门——提交前自查）
 - 依赖声明优先：装任何包前先声明 + 审查者批准，声明与安装不同轮
 - 记账类提交（纯文档收口记录）**免完整审查轮，但必过「数字独立抽验」**：收口记录是审计底账，一个错数字会污染此后全部取证——其中每个可被命令复现的数字（sha / parent 序 / diff stat / DB 计数 / 触发 uuid）必须由**第二只猫实测复核**，作者自报不成立。免完整轮与免审前缀是两件事：`scripts/handoff-gen.mjs` 的 `REVIEW_EXEMPT_PREFIXES`（判据为路径 `every` 命中 `docs/run/`）只决定「是否发起审查轮」，不豁免记录可信度——记账提交可静默，静默不等于免抽验
