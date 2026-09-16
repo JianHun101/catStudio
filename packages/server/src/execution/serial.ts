@@ -436,7 +436,11 @@ async function drainQueuedCommand(
  * - 锁引用计数配对：needsLock（Claude）→ acquire，finally release——
  *   并发批内多个 Claude 执行体同时持有（计数 1→2→…），归零才删
  *   .agent-busy（dev.js 重启保护全程有效）
- * - A2A 递归（触发前提是回复已落库）与队列 drain 保持原语义，天然串行
+ * - A2A 递归（触发前提是回复已落库）与队列 drain 保持原语义。**两者在收尾段
+ *   并发、不互为前置**（形态 D，票 docs/run/dispatch-deferral/tickets.md §五-2）——
+ *   原注写「天然串行」已随本笔失效：串行序会把 A2A 派发排在整条 drain 子树之后，
+ *   延迟随嵌套深度叠加（实测最坏 47 / 68 分钟）。并发的前提是**两子树无依赖**，
+ *   该前提的门取证见 report-gate-concurrency.md（Q1–Q4 零推翻）。
  */
 async function executeOneAgent(
   ctx: EngineCtx,
@@ -806,13 +810,23 @@ async function executeOneAgent(
     // 失败静默（内部 catch）。只对 DS 族猫回复采样（ollama 猫不评估）
     maybeScoreSample(agent, sessionId, reply.msgId)
 
-    // 队列命令优先执行（FIFO）：completeExecution 已弹出下一命令并标 busy/running，
-    // 此处立即补执行（drain）——先于下方 A2A 派发，否则弹出命令会干等当前回复的
-    // A2A 嵌套链跑完（d448413a 案例：07:00:02 弹出、07:05:54 才执行——被两层
-    // A2A await 拖 5.9 分钟，'running' 状态干挂 + 槽位"忙碌"假象）
-    if (queuedCmd) {
-      claudeRan = await drainQueuedCommand(ctx, agent, queuedCmd, claudeRan)
-    }
+    // ── 形态 D（票 docs/run/dispatch-deferral/tickets.md §五-2）：drain 子树与下方
+    // A2A 派发子树**并发**，帧尾合并 await。
+    // 原实现把 drain 串在派发之前（为 d448413a「弹出命令干等 A2A 嵌套链 5.9 分钟」
+    // 而设），代价在反方向：A2A 派发要等**整条** drain 子树跑完，而 drain 出的命令
+    // 自己又跑一整条 A2A 嵌套链 ⇒ 派发延迟随嵌套深度叠加、无上界（实测最坏 47 / 68
+    // 分钟，票面 §三-2 / §三-3，两例全为延迟、零丢弃）。
+    // 两子树在同一帧内本无依赖，唯一关系是「都在本帧收尾之后」——谁都不搬：两条
+    // promise 并发启动。这样 V1（派发时点不随 drain 子树漂移）与 V3（排队命令不干等
+    // A2A 嵌套链，d448413a 不回归）**同时**成立，因为没有谁排在谁后面。
+    // 失败路径的不对称（本笔新增边界，见报告 §V6）：任一子树抛错 ⇒ 帧立即进下方
+    // catch（与串行同）；另一子树**不再被帧等待**（串行下它根本不会启动）。其异常
+    // 仍被 Promise.all 订阅，不产生 unhandledRejection，但它的完成不再阻塞帧。
+    const drainP: Promise<boolean> = queuedCmd
+      ? drainQueuedCommand(ctx, agent, queuedCmd, claudeRan)
+      : Promise.resolve(false)
+    /** A2A 派发子树（`:1020` 段赋值）；无目标时保持 false 的已决 promise */
+    let dispatchP: Promise<boolean> = Promise.resolve(false)
 
     // ── 票丑 · 计数点归一：此处原「执行成功后记录 mention 计数」（`depth>0` 时对
     // **执行者自己** +1）已删除，配额改为**单计**。唯一计数点是下方 A2A 调度点的
@@ -1035,15 +1049,16 @@ async function executeOneAgent(
           // C1 v3：槽位由 execute 的决策段 ensureSlot 惰性创建（原 initAgentSlot
           // 显式调用删除——execute 决策段对未知 agent 同样跳过不调度，语义保留）。
           // 子链返回值冒泡：子链若有 Claude 执行，顶层收尾同样需要脏文件清理
-          claudeRan =
-            (await executeAgentsSerialImpl(
-              ctx,
-              sessionId,
-              limitedAgents,
-              { ...agentTrigger, authorName: agent.name },
-              traceId,
-              depth + 1
-            )) || claudeRan
+          // ——形态 D 下改为「并发启动 + 帧尾合并 await」（见上方 drainP 段注释）：
+          // 返回值仍是 `|| claudeRan` 的并集，只是合并点从本行挪到帧尾
+          dispatchP = executeAgentsSerialImpl(
+            ctx,
+            sessionId,
+            limitedAgents,
+            { ...agentTrigger, authorName: agent.name },
+            traceId,
+            depth + 1
+          )
         }
       }
     } else {
@@ -1068,7 +1083,11 @@ async function executeOneAgent(
       }
     }
 
-    return claudeRan
+    // 形态 D 帧尾合并：两子树都 await（`claudeRan` 冒泡通道**逐字保留**——票面 §五-2
+    // 据此弃了候选 A：登记化会让这条返回值无处回传，顶层 anyClaude 脏文件清理判定漏判）。
+    // `Promise.all` 的拒绝语义与串行等价：任一子树抛错即进下方 catch。
+    const [drainedRan, dispatchedRan] = await Promise.all([drainP, dispatchP])
+    return claudeRan || drainedRan || dispatchedRan
   } catch (err: any) {
     // P0-1 修复：外层 try/catch 防止 completeExecution 或 agent-to-agent
     // dispatch 中的任何异常导致执行体崩溃、槽位永久卡死
