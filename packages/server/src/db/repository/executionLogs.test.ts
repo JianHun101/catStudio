@@ -534,3 +534,108 @@ describe('execution_logs repo — 按 trace 取「本调度树执行过的 agent
     expect(repo.listExecutorAgentIdsByTrace('')).toEqual([])
   })
 })
+
+/**
+ * R4 §A：会话内**每只有执行的猫的最后一次执行**——右侧面板展开某猫 trace 前的取数口。
+ *
+ * 路由面（HTTP 契约五格）在 `routes/eval.test.ts`；本段只钉 **SQL 语义**，
+ * 即路由面看不见或看起来恒真的那几条：分区聚合、同秒平局确定性、跨会话隔离、
+ * 返回序。同秒平局那条尤其要在这里钉——它是**唯一**能在两次调用间抖出不同答案的
+ * 面，路由层断言一次结果看不出来。
+ */
+describe('execution_logs repo — 会话内每猫最近一次执行（R4 §A）', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    // execution_logs 的两条 FK（→ sessions / → agents）在测试库里**是真的**，先备父行
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 't')").run()
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s2', 't')").run()
+    for (const id of ['cat-a', 'cat-b']) {
+      db.prepare(
+        `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, ?, 'p', 'k')`
+      ).run(id, `名-${id}`)
+    }
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  /** 落一条执行行。`endedAt` 省略 ⇒ 已完成；显式 null ⇒ 在飞。
+   *  `latencyMs` 缺省 null（诊断数据收口时才写，与真实一致）。 */
+  function put(
+    id: string,
+    over: {
+      agent?: string
+      session?: string
+      status?: string
+      startedAt?: string
+      endedAt?: string | null
+      latencyMs?: number | null
+    } = {}
+  ): void {
+    db.prepare(
+      `INSERT INTO execution_logs
+         (id, session_id, agent_id, triggered_by_message_id, status, trace_id,
+          started_at, ended_at, latency_ms)
+       VALUES (?, ?, ?, 'U', ?, 'tr', ?, ?, ?)`
+    ).run(
+      id,
+      over.session ?? 's1',
+      over.agent ?? 'cat-a',
+      over.status ?? 'completed',
+      over.startedAt ?? '2026-09-15 10:00:00',
+      over.endedAt === undefined ? '2026-09-15 10:00:01' : over.endedAt,
+      over.latencyMs ?? null
+    )
+  }
+
+  it('每猫一条：同猫多行只留 started_at 最大者，且结果按 started_at 倒序（最近在前）', () => {
+    put('a-old', { agent: 'cat-a', startedAt: '2026-09-15 08:00:00' })
+    put('a-new', { agent: 'cat-a', startedAt: '2026-09-15 09:00:00' })
+    put('b-old', { agent: 'cat-b', startedAt: '2026-09-15 07:00:00' })
+
+    const rows = repo.getLatestExecutionPerAgent('s1')
+    expect(rows.map((r) => r.id)).toEqual(['a-new', 'b-old'])
+    expect(rows[0].agent_id).toBe('cat-a')
+  })
+
+  it('同 started_at 平局：仍只出一条，且**两次调用给同一条**（判据稳定，不随查询计划抖）', () => {
+    put('tie-1', { agent: 'cat-a', startedAt: '2026-09-15 10:00:00' })
+    put('tie-2', { agent: 'cat-a', startedAt: '2026-09-15 10:00:00' })
+
+    const first = repo.getLatestExecutionPerAgent('s1')
+    const second = repo.getLatestExecutionPerAgent('s1')
+    expect(first).toHaveLength(1) // 平局不得把两条都放出来
+    expect(second.map((r) => r.id)).toEqual(first.map((r) => r.id))
+  })
+
+  it('跨会话隔离 + 空集：别的会话的执行不混入；无执行的会话 ⇒ []（合法状态，不抛错）', () => {
+    put('a-s1', { agent: 'cat-a', session: 's1' })
+    put('b-s2', { agent: 'cat-b', session: 's2' })
+
+    expect(repo.getLatestExecutionPerAgent('s1').map((r) => r.id)).toEqual(['a-s1'])
+    expect(repo.getLatestExecutionPerAgent('s2').map((r) => r.id)).toEqual(['b-s2'])
+    expect(repo.getLatestExecutionPerAgent('no-such-session')).toEqual([])
+  })
+
+  it('在飞（ended_at / latency_ms 皆 NULL）照样是该猫的最新，且 null 原样出（不回落成 0）', () => {
+    put('done', { agent: 'cat-a', startedAt: '2026-09-15 09:00:00', latencyMs: 60000 })
+    put('inflight', {
+      agent: 'cat-a',
+      status: 'running',
+      startedAt: '2026-09-15 10:00:00',
+      endedAt: null,
+    })
+
+    const rows = repo.getLatestExecutionPerAgent('s1')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].id).toBe('inflight')
+    expect(rows[0].status).toBe('running')
+    expect(rows[0].ended_at).toBeNull()
+    expect(rows[0].latency_ms).toBeNull() // 不是 0
+  })
+})

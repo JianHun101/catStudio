@@ -815,4 +815,267 @@ describe('Eval Routes', () => {
       expect(body.spans[0].span_id).toBe('sp-x-root')
     })
   })
+
+  describe('GET /api/eval/session-traces（R4 §A 面板取数口）', () => {
+    // 同 P1-A 段的告诫：**不能在 describe body 里 `const db = getDb()`**——describe
+    // 回调在收集期跑，早于 beforeEach 的 setDb，会捕到上一个用例的句柄。用时现取。
+    const q = () => getDb()
+
+    /** 落一条执行行。`endedAt` 省略 ⇒ 与 `startedAt` 同值（已完成）；
+     *  显式传 `null` ⇒ 在飞（`ended_at IS NULL` 正是在飞判据）。
+     *  `latencyMs` 缺省 null —— 与真实一致：诊断数据在收口漏斗里才写。 */
+    function seedExec(spec: {
+      id: string
+      sessionId: string
+      agentId: string
+      status: 'running' | 'completed' | 'failed'
+      startedAt: string
+      endedAt?: string | null
+      latencyMs?: number | null
+    }): void {
+      q()
+        .prepare(
+          `INSERT INTO execution_logs
+             (id, session_id, agent_id, triggered_by_message_id, status, trace_id,
+              started_at, ended_at, latency_ms)
+           VALUES (?, ?, ?, 'trig-1', ?, 'tr', ?, ?, ?)`
+        )
+        .run(
+          spec.id,
+          spec.sessionId,
+          spec.agentId,
+          spec.status,
+          spec.startedAt,
+          spec.endedAt === undefined ? spec.startedAt : spec.endedAt,
+          spec.latencyMs ?? null
+        )
+    }
+
+    /** A1-① 每猫取最新——且判据是「最晚**开始**」而非「最晚结束」：
+     *  `a-late-end` 结束最晚（15:00），`a-late-start` 开始最晚（12:00）⇒ 必须给后者。
+     *  两条判据在这份数据上给出**不同**答案，故此用例对「按 started_at 还是按 ended_at」
+     *  有判别力，不是怎么实现都绿。 */
+    it('A1-①：每猫一条、取 started_at 最大者（不是最晚结束、不是最早）', async () => {
+      const a = seedAgent('ds猫')
+      const b = seedAgent('flash猫')
+      const sid = seedSession()
+      seedExec({
+        id: 'a-late-end',
+        sessionId: sid,
+        agentId: a,
+        status: 'completed',
+        startedAt: '2026-09-15 10:00:00',
+        endedAt: '2026-09-15 15:00:00',
+        latencyMs: 1000,
+      })
+      seedExec({
+        id: 'a-late-start',
+        sessionId: sid,
+        agentId: a,
+        status: 'failed',
+        startedAt: '2026-09-15 12:00:00',
+        endedAt: '2026-09-15 12:00:05',
+        latencyMs: 2000,
+      })
+      seedExec({
+        id: 'b-1',
+        sessionId: sid,
+        agentId: b,
+        status: 'completed',
+        startedAt: '2026-09-15 09:00:00',
+        endedAt: '2026-09-15 09:00:01',
+        latencyMs: 4000,
+      })
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/eval/session-traces?session_id=${sid}`,
+      })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      // 每**猫**一条，不是每执行一条
+      expect(body.traces).toHaveLength(2)
+      expect(body.traces.find((t: any) => t.agentId === a).executionId).toBe('a-late-start')
+      expect(body.traces.find((t: any) => t.agentId === b).executionId).toBe('b-1')
+    })
+
+    /** A1-② 在飞照样返回，且**不得回退**到更早那次——回退等于拿旧执行冒充当前状态。 */
+    it('A1-②：在飞（endedAt null）照样返回，不回退到更早的已完成执行', async () => {
+      const a = seedAgent('ds猫')
+      const sid = seedSession()
+      seedExec({
+        id: 'done',
+        sessionId: sid,
+        agentId: a,
+        status: 'completed',
+        startedAt: '2026-09-15 10:00:00',
+        endedAt: '2026-09-15 10:01:00',
+        latencyMs: 60000,
+      })
+      seedExec({
+        id: 'inflight',
+        sessionId: sid,
+        agentId: a,
+        status: 'running',
+        startedAt: '2026-09-15 11:00:00',
+        endedAt: null,
+      })
+
+      const body = JSON.parse(
+        (await app.inject({ method: 'GET', url: `/api/eval/session-traces?session_id=${sid}` }))
+          .body
+      )
+      expect(body.traces).toHaveLength(1)
+      expect(body.traces[0].executionId).toBe('inflight') // 不是 'done'
+      expect(body.traces[0].status).toBe('running')
+      expect(body.traces[0].endedAt).toBeNull()
+      // null ≠ 0：采集中拿不到总时长就如实 null，不回落成「瞬间完成」
+      expect(body.traces[0].totalMs).toBeNull()
+    })
+
+    /** A1-③ 零执行的猫**不出现**（不是补一条 0 / 空对象）。
+     *  含跨会话面：在**别的会话**执行过的猫，在本会话同样是「无执行」。 */
+    it('A1-③：本会话零执行的猫不出现（含「只在别的会话执行过」）', async () => {
+      const a = seedAgent('ds猫')
+      const idle = seedAgent('闲置猫')
+      const elsewhere = seedAgent('别的会话猫')
+      const sid = seedSession()
+      const sid2 = seedSession()
+      seedExec({
+        id: 'a-1',
+        sessionId: sid,
+        agentId: a,
+        status: 'completed',
+        startedAt: '2026-09-15 10:00:00',
+        latencyMs: 1000,
+      })
+      seedExec({
+        id: 'o-1',
+        sessionId: sid2,
+        agentId: elsewhere,
+        status: 'completed',
+        startedAt: '2026-09-15 10:00:00',
+        latencyMs: 1000,
+      })
+
+      const body = JSON.parse(
+        (await app.inject({ method: 'GET', url: `/api/eval/session-traces?session_id=${sid}` }))
+          .body
+      )
+      const ids = body.traces.map((t: any) => t.agentId)
+      expect(ids).toEqual([a])
+      expect(ids).not.toContain(idle)
+      expect(ids).not.toContain(elsewhere)
+    })
+
+    /** A1-④ 缺参 / 空参 → 400；无匹配 → 200 + `[]`（口径与 `/spans` 逐字一致）。 */
+    it('A1-④：缺参 / 空参 → 400；无匹配会话 → 200 + traces: []（不是 404）', async () => {
+      const missing = await app.inject({ method: 'GET', url: '/api/eval/session-traces' })
+      expect(missing.statusCode).toBe(400)
+      expect(JSON.parse(missing.body).error).toBe('session_id is required')
+
+      const empty = await app.inject({ method: 'GET', url: '/api/eval/session-traces?session_id=' })
+      expect(empty.statusCode).toBe(400)
+
+      const unknown = await app.inject({
+        method: 'GET',
+        url: `/api/eval/session-traces?session_id=${uuid()}`,
+      })
+      expect(unknown.statusCode).toBe(200)
+      expect(JSON.parse(unknown.body)).toEqual({ ok: true, traces: [] })
+    })
+
+    it('A1-⑤ 只读：连查两次结果逐字节一致，且执行行不被改写', async () => {
+      const a = seedAgent('ds猫')
+      const sid = seedSession()
+      seedExec({
+        id: 'a-1',
+        sessionId: sid,
+        agentId: a,
+        status: 'completed',
+        startedAt: '2026-09-15 10:00:00',
+        latencyMs: 1000,
+      })
+      const before = q().prepare('SELECT * FROM execution_logs').all()
+
+      const first = await app.inject({
+        method: 'GET',
+        url: `/api/eval/session-traces?session_id=${sid}`,
+      })
+      const second = await app.inject({
+        method: 'GET',
+        url: `/api/eval/session-traces?session_id=${sid}`,
+      })
+      expect(second.body).toBe(first.body)
+      expect(q().prepare('SELECT * FROM execution_logs').all()).toEqual(before)
+    })
+
+    /** A2 段数据**不内联**（契约第 7 条）。
+     *
+     *  这条不能只断「响应里有哪几个键」——那在我全程没 SELECT spans 的前提下是恒真的。
+     *  真正的判别力来自**先让该执行真的落上段**：段表里躺着数据而响应体里一个字都没有，
+     *  才证明「不内联」是行为而非巧合。故本段走真实 additive 迁移建 spans 表
+     *  （同上方 R3 段：`test-helpers.ts` 的 SCHEMA_SQL 不含这两张表）。 */
+    describe('A2：段数据不内联', () => {
+      beforeEach(() => {
+        initDb()
+      })
+
+      it('执行已落段时，响应体仍只有六个契约键、零段数据', async () => {
+        const a = seedAgent('ds猫')
+        const sid = seedSession()
+        seedExec({
+          id: 'exec-with-spans',
+          sessionId: sid,
+          agentId: a,
+          status: 'completed',
+          startedAt: '2026-09-15 10:00:00',
+          latencyMs: 1000,
+        })
+        // 前置断言：段**真的**落进去了——否则下面的「零段」是真空通过
+        // （`insertExecTrace` 吞异常只回 false，故这里必须断 true，不能只 `await` 过去）
+        expect(
+          spansRepo.insertExecTrace([
+            {
+              spanId: 'sp-root',
+              parentSpanId: null,
+              chainId: 'chain-1',
+              executionId: 'exec-with-spans',
+              sessionId: sid,
+              agentId: a,
+              name: 'invoke_agent',
+              operationName: null,
+              startAt: '2026-09-15T10:00:00.000Z',
+              durationMs: 60810,
+              status: 'ok',
+              errorType: null,
+              errorMessage: null,
+              itemCount: null,
+              llm: null,
+            },
+          ])
+        ).toBe(true)
+        expect(q().prepare('SELECT COUNT(*) c FROM spans').get()).toEqual({ c: 1 })
+
+        const body = JSON.parse(
+          (await app.inject({ method: 'GET', url: `/api/eval/session-traces?session_id=${sid}` }))
+            .body
+        )
+        expect(body.traces).toHaveLength(1)
+        // 两条断言管的是**不同的**泄漏面，都要留（各自做过反对照，非装饰）：
+        //  1) 段内容混进了既有字段里（例如有人把段名拼进 status）——键集查不出来
+        expect(JSON.stringify(body)).not.toContain('sp-root')
+        //  2) 多挂了一个键（如 `spans: [...]`）——内容断言在上一条就拦住了，键集是兜底
+        expect(Object.keys(body.traces[0]).sort()).toEqual([
+          'agentId',
+          'endedAt',
+          'executionId',
+          'startedAt',
+          'status',
+          'totalMs',
+        ])
+      })
+    })
+  })
 })

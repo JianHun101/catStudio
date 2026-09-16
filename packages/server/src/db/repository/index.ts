@@ -69,6 +69,7 @@ export * as retrievalEvents from './retrievalEvents.js'
 export * as spans from './spans.js'
 
 export type { SpanInput, SpanRow, LlmSpanDetail } from './spans.js'
+export type { SessionTraceRow } from './executionLogs.js'
 
 // Row 类型也一并导出
 export type {

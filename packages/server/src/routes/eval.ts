@@ -12,9 +12,16 @@
  * - GET /api/eval/chains?limit=&windowDays= 链路查询（P1-A：哪条链最长 / 卡在哪一跳）
  * - GET /api/eval/spans?execution_id=       一次执行的段分解时间轴（R3：卡点从「哪一跳」
  *                                           下沉到「哪一段」；接线 R2 既有读口，不写新 SQL）
+ * - GET /api/eval/session-traces?session_id= 会话内每只有执行的猫的最近一次执行（R4 §A：
+ *                                           右侧面板展开某猫 trace 前的取数口——先拿到
+ *                                           execution_id，再调上面的 /spans 懒加载段）
  *
- * 返回 snake_case 原样出（前端直接消费 DB 行），错误 { error } + 4xx 钉死契约类型。
- * 纯展示 + 回标写入，零 LLM 调用。
+ * **字段名随取数层**：DB 行投影原样 snake_case（`/scores`、`/aggregates`、`/review/pending`、
+ * `/spans` 的段行——前端直接消费 DB 行）；**聚合/派生结构**用 camelCase
+ * （`/chains` 的 `chainId`、`/l1-metrics`、`/episode-stats`、`/spans` 的 `llm`、
+ * `/session-traces`）。此前这里笼统写「返回 snake_case 原样出」，对派生端点本就不成立
+ * （`/chains` 起就已如此），R4 §A 再添一例——按事实改写，不再复述一个反例比正例多的断言。
+ * 错误 { error } + 4xx 钉死契约类型。纯展示 + 回标写入，零 LLM 调用。
  */
 import type { FastifyInstance } from 'fastify'
 import { v4 as uuid } from 'uuid'
@@ -70,6 +77,24 @@ function toLlmDetail(raw: Record<string, unknown>): LlmSpanDetail {
     stream: raw.stream === 1 || raw.stream === true,
     maxTokens: raw.max_tokens == null ? null : Number(raw.max_tokens),
   }
+}
+
+/** 会话内某只猫最近一次执行的**前端契约**（R4 §A）。
+ *
+ *  与 `SpanDto`（DB 行原样 snake_case）刻意不同：本 DTO **没有对应的 DB 行形状**
+ *  ——它是「每猫取最新」聚合后的产物，不是哪一张表的投影，故按本仓对**派生类型**
+ *  的既有惯例用 camelCase（同 `LlmSpanDetail`、`ChainHop`：库里的列名不是它的名字）。
+ *  `totalMs` 尤其如此：库里那列叫 `latency_ms`，这里给的是面板要显示的语义名。
+ *
+ *  `endedAt === null` 是**在飞**的唯一判据（`totalMs` 给不出数时为 null，不回落 0）
+ *  ——前端据此显式渲染「采集中」，而不是显示 0 或空白。 */
+export interface SessionTraceDto {
+  agentId: string
+  executionId: string
+  status: string
+  startedAt: string | null
+  endedAt: string | null
+  totalMs: number | null
 }
 
 export async function evalRoutes(app: FastifyInstance): Promise<void> {
@@ -166,6 +191,49 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
       return { ...row, llm: detail ? toLlmDetail(detail) : null }
     })
     return reply.send({ ok: true, spans })
+  })
+
+  /**
+   * 会话内**每只有执行的猫的最近一次执行**（R4 §A）。
+   *
+   * 存在的理由是一条**缺口**：面板要展开某猫的 trace，得先知道「拉哪次执行」，
+   * 而既有 8 个 eval 端点无一给得出——`/chains` 是链视角（无 session 维度）、
+   * `/spans` 要显式 `execution_id`。本端点补的就是这一跳：**会话 → 每猫的
+   * execution_id**；段数据仍由前端拿 id 去调 `/spans`（契约第 7 条：不内联）。
+   *
+   * **「最近」按 `started_at` 取最大，不看 `status`**（契约第 1 条）：按状态筛会在
+   * 在飞时把该猫整个吞掉——用户点开一只正在干活的猫，看到的却是「暂无执行」。
+   * 在飞行**照样返回**（契约第 2 条），由 `endedAt === null` 让前端渲染「采集中」，
+   * **不回退到更早一次**（拿旧执行冒充当前状态，比空更坏）。
+   *
+   * **零执行的猫不出现在数组里**（契约第 3 条）——前端显示「本会话暂无执行」。
+   * 返回 `0` 或空对象会造成「有过执行但没有数据」的假象。
+   *
+   * **缺参 / 空参 → 400；无匹配 → 200 + `[]`**（契约第 4 条）：口径与
+   * `/spans` 逐字一致——「这个会话没有执行」对用户就是「无数据」，不是错误，
+   * 404 只会诱发一条无意义的错误分支。**缺参**才是调用方写错了。
+   *
+   * **纯读**（契约第 5 条）：只调 `getLatestExecutionPerAgent()`，不写新 SQL 之外的
+   * 东西、零 LLM、不回写任何表。
+   */
+  app.get('/api/eval/session-traces', async (req, reply) => {
+    const { session_id } = req.query as { session_id?: string }
+    if (typeof session_id !== 'string' || session_id === '') {
+      return reply.status(400).send({ error: 'session_id is required' })
+    }
+    // 字段换算只在这里发生一次（repo 出行名，路由出契约名）——与 `toLlmDetail` 同一分工
+    const traces: SessionTraceDto[] = executionLogsRepo
+      .getLatestExecutionPerAgent(session_id)
+      .map((row) => ({
+        agentId: row.agent_id,
+        executionId: row.id,
+        status: row.status,
+        startedAt: row.started_at,
+        endedAt: row.ended_at,
+        // 库里叫 latency_ms，面板要的是「总时长」——**null 原样传**（在飞），不回落成 0
+        totalMs: row.latency_ms,
+      }))
+    return reply.send({ ok: true, traces })
   })
 
   /** 待回标样本：low_score 且无 user_feedback，每条附回复全文 + 前置最近 10 条上下文 */

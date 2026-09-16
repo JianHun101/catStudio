@@ -273,6 +273,62 @@ export function getExecutionsBySession(sessionId: string): Array<{
   }>
 }
 
+/** `getLatestExecutionPerAgent` 的行形状。**DB 列名原样出**——到前端契约
+ *  （`SessionTraceDto` camelCase）的换算只在路由层做一次，与 `SpanRow`/`toLlmDetail`
+ *  同一分工，repo 层不另起一套字段名。 */
+export interface SessionTraceRow {
+  id: string
+  agent_id: string
+  status: string
+  started_at: string | null
+  ended_at: string | null
+  latency_ms: number | null
+}
+
+/** 会话内**每只有执行的猫的最后一次执行**（R4 §A：右侧面板展开某猫 trace 前的取数口）。
+ *
+ *  **「最后」= `started_at` 最大，不看 `status`**（R4 契约第 1、2 条）：这里要回答的是
+ *  「这只猫最近在跑什么」，不是「它跑成了没有」。按状态筛会在**在飞**
+ *  （`status='running'`、`ended_at IS NULL`）这一最该展示的时刻把该猫整个吞掉，
+ *  前端于是显示「本会话暂无执行」——与事实恰好相反，且是静默的。
+ *  **零执行的猫不出现在结果里**（契约第 3 条）：`PARTITION BY` 只对本会话有行的猫分组，
+ *  天然不产出空行，「没执行」与「执行了但时长为空」于是不会被混为一谈。
+ *
+ *  **不复用 `getExecutionsBySession()`**（契约第 6 条，不是重复代码）：那个函数的投影
+ *  里既没有 `id`（前端要拿它去调 `/api/eval/spans?execution_id=`）也没有 `ended_at`
+ *  （在飞判据），且返回**全部**执行行、不带「每猫取最新」聚合——在路由层补齐等于把
+ *  聚合外溢给调用方，多一个调用点就多一份实现。
+ *
+ *  **排序判据 `started_at DESC, id DESC`**：`started_at` 是 `datetime('now')` 写的
+ *  **秒级**精度，同秒两行时若没有第二判据，顺序随查询计划抖——同一段数据两次调用
+ *  可能给出不同的「最后一次」。`id` 只用于**打破平局**，不承诺时间先后
+ *  （同秒下二者本就不可分辨）。
+ *
+ *  **`latency_ms` 在飞时为 NULL**（诊断数据在收口漏斗里才写）——这是契约要的语义：
+ *  「在飞」由 `ended_at IS NULL` 判定，`total_ms` 给不出数就如实为 null，
+ *  **不得回落成 0**（0 是「瞬间完成」，与「还没结束」是两回事）。
+ *
+ *  **纯读**：单条 SELECT，不回写任何表；**不联 `spans`**（契约第 7 条）——段数据由
+ *  前端选中猫之后再调 `/api/eval/spans` 懒加载，避免把一次会话的全部段一次性拖回来。
+ *  空集是合法结果（该会话无执行），不抛错。 */
+export function getLatestExecutionPerAgent(sessionId: string): SessionTraceRow[] {
+  return db
+    .prepare(
+      `SELECT id, agent_id, status, started_at, ended_at, latency_ms
+       FROM (
+         SELECT id, agent_id, status, started_at, ended_at, latency_ms,
+                ROW_NUMBER() OVER (
+                  PARTITION BY agent_id ORDER BY started_at DESC, id DESC
+                ) AS rn
+         FROM execution_logs
+         WHERE session_id = ?
+       )
+       WHERE rn = 1
+       ORDER BY started_at DESC, id DESC`
+    )
+    .all(sessionId) as SessionTraceRow[]
+}
+
 export function getAgentSessionStats(
   agentId: string,
   sessionId: string
