@@ -35,7 +35,8 @@ import { MAX_QUEUE_PER_AGENT, isStaleHandoffRequest } from '../dispatch/index.js
 import { ProviderTokenPool } from './token-pool.js'
 import { classifyError } from '../eval/classify-error.js'
 // 诊断取值单源（R5 §B）：catch 到的**任何**值都要能落出可辨识信息——`err.message`
-// 对非 Error 抛出物恒为 undefined（诊断当场归零，全库 19 次 `execute crash` 同源）。
+// 对非 Error 抛出物恒为 undefined（诊断当场归零）。注：库内 19 行 `execute crash`
+// **不是**这条路来的（那 19 行的 catch 从未触发过），成因见 `executeRun` finally 段。
 import { messageOf } from '../utils.js'
 import {
   cleanGitEnv,
@@ -1728,11 +1729,18 @@ export function createExecutionEngine(
       const s = getSlotInternal(cmd.agentId, cmd.sessionId)
       if (s && s.status === 'busy') {
         const next = await completeExecution(cmd.agentId, cmd.sessionId, false, {
-          // 兜底词只覆盖「取不出信息」（`messageOf` 返回 undefined）——非 Error 抛出物
-          // （`throw 'string'` / reject 非 Error）此前一律压成这个固定词，无值无归因。
+          // 兜底词只覆盖「取不出信息」（`messageOf` 返回 undefined）。
+          // 两种情形共用本行，必须能分开：
+          //   · `execError` 有值 = 本帧自己抛了（`executeOneAgent` 的 try 之外抛出——
+          //     `:544` 起才有内层 try/catch，之前的状态读写逃得出来）；
+          //   · `execError === undefined` = 本帧**没抛也没崩**，是槽位在收口后被
+          //     **另一笔执行**接管（`:805` 收口后槽位 idle，本帧仍挂在 A2A
+          //     `dispatchP`/`drainP` 上；新触发抢在帧尾前把槽位标 busy）。
+          // 旧词 `'execute crash'` 把后者谎报成崩溃（全库 19 行同源，且每行都被误当
+          // 「真崩」归因）——正名为事实描述：槽位是**别人的**，本帧无权收口。
           // `??` 而非 `||`：`Error('')` 的零回归（票面：Error 路径 message 原样）。
           // `messageOf` 自身不抛——本行在 finally 的槽位收口路径上，抛错会毁掉收口。
-          errorMessage: messageOf(execError) ?? 'execute crash',
+          errorMessage: messageOf(execError) ?? 'slot busy after executeOneAgent returned',
           traceId: cmd.traceId,
         }).catch(() => undefined)
         if (next) {
