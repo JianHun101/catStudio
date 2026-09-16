@@ -1641,3 +1641,164 @@ describe('serial — mentions 写回时机（P0：不依赖 drain/A2A await）',
     expect(mentionsOf(REVIEWER.id)).toEqual([IMPL2.name])
   }, 20000)
 })
+
+describe('serial — 形态 D：drain 与 A2A 派发并发（票 dispatch-deferral §五-2）', () => {
+  const REVIEWER: AgentConfig = {
+    id: 'agent-reviewer',
+    name: '吐槽猫',
+    avatar: '🐱',
+    systemPrompt: 'R_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'reviewer',
+  }
+  const IMPL2: AgentConfig = {
+    id: 'agent-impl2',
+    name: 'flash猫',
+    avatar: '🐱',
+    systemPrompt: 'I2_MARK',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'implementer',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    const insert = db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, '🐱', ?, 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
+    )
+    insert.run(REVIEWER.id, REVIEWER.name, REVIEWER.systemPrompt, 'reviewer')
+    insert.run(IMPL2.id, IMPL2.name, IMPL2.systemPrompt, 'implementer')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', ?, 0)`
+    ).run(JSON.stringify([REVIEWER.id, IMPL2.id]))
+    for (const id of ['msg-d1', 'msg-d2']) {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 'session-1', 'user', '请审查', '[]')`
+      ).run(id)
+    }
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.unstubAllEnvs()
+  })
+
+  const cmd = (triggerMessageId: string): DispatchCommand => ({
+    sessionId: 'session-1',
+    agentId: REVIEWER.id,
+    triggerMessageId,
+    triggerContent: '请审查',
+    mentions: [],
+    traceId: 'trace-form-d',
+    depth: 0,
+    pendingTriggers: [],
+  })
+
+  /** 竞速：`p` 决出即 true；超时 false —— 用于「另一侧理应发生」的判定 */
+  const settlesWithin = (p: Promise<void>, ms = 1000): Promise<boolean> =>
+    Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))])
+
+  it('V5 并发（主判据）：drain 子树挂起期间，A2A 目标已开跑（派发不等待 drain）', async () => {
+    // 构造（票面 §四-V1/V5）：执行者（reviewer）本轮回复 @flash猫，同时自己槽位上
+    // 排了第二条命令 ⇒ completeExecution 弹出 → drain。闸门挂住 **drain**，观察 A2A 目标。
+    // 形态 D：两子树并发 ⇒ 闸门未放行时目标已开跑。
+    // 反向对照（串行实现 `claudeRan = await drainQueuedCommand(...)`）：目标在放行前
+    //   **零**次 chatStream 调用 ⇒ 本格变红（读数见报告 §V5「先红后绿」）。
+    vi.stubEnv('PROVIDER_TOKEN_CAP', '4') // 两子树并发各持一 token（默认 2 恰好够，显式抬高防脆）
+    let nestedStarted!: () => void
+    const nestedStartedP = new Promise<void>((r) => (nestedStarted = r))
+    let releaseNested!: () => void
+    const releaseNestedP = new Promise<void>((r) => (releaseNested = r))
+    let targetStarted!: () => void
+    const targetStartedP = new Promise<void>((r) => (targetStarted = r))
+    let parentRuns = 0
+    let targetRuns = 0
+    const chatStream = vi.fn(async function* (messages: Array<{ content?: string }>) {
+      const sys = String(messages?.[0]?.content ?? '')
+      if (sys.includes('I2_MARK')) {
+        targetRuns++
+        targetStarted()
+        yield { content: '收到', kind: 'text' }
+        return
+      }
+      parentRuns++
+      if (parentRuns === 1) {
+        yield { content: '@flash猫 继续', kind: 'text' }
+        return
+      }
+      nestedStarted() // 排队命令（drain）已开跑——闸门在此挂住，直到 releaseNested
+      await releaseNestedP
+      yield { content: '收到', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    const p1 = engine.execute(cmd('msg-d1'))
+    const p2 = engine.execute(cmd('msg-d2')) // 槽位 busy → 入队
+    await nestedStartedP // 父执行已进入 drain，且 drain 被闸门挂住
+
+    // ★ 断言取在闸门内：串行实现此处恒 false（这正是本格要钉的差）
+    expect(await settlesWithin(targetStartedP)).toBe(true)
+    expect(targetRuns).toBe(1)
+
+    releaseNested()
+    await Promise.all([p1, p2])
+    expect(targetRuns).toBe(1) // 放行后不重复派发
+    expect(parentRuns).toBe(2) // 父执行 + 被 drain 的排队命令各一次
+  }, 20000)
+
+  it('V3 不回归：A2A 子树挂起期间，排队命令已开跑（drain 不干等 A2A）', async () => {
+    // 镜像格：闸门改挂 **A2A 目标**，观察排队命令。挡的是候选 B/C 那类「把派发挪到
+    // drain 之前」的反向实现——那种实现下排队命令干等 A2A 嵌套链（d448413a：5.9 分钟干挂）。
+    // ⚠️ 覆盖边界（不许当已证）：**本格不区分 D 与串行原实现**——串行下 drain 本就在前，
+    //    同样绿。它是非回归守卫，判别 D 的是 V5。
+    vi.stubEnv('PROVIDER_TOKEN_CAP', '4')
+    let targetStarted!: () => void
+    const targetStartedP = new Promise<void>((r) => (targetStarted = r))
+    let releaseTarget!: () => void
+    const releaseTargetP = new Promise<void>((r) => (releaseTarget = r))
+    let queuedStarted!: () => void
+    const queuedStartedP = new Promise<void>((r) => (queuedStarted = r))
+    let parentRuns = 0
+    const chatStream = vi.fn(async function* (messages: Array<{ content?: string }>) {
+      const sys = String(messages?.[0]?.content ?? '')
+      if (sys.includes('I2_MARK')) {
+        targetStarted()
+        await releaseTargetP // A2A 目标长跑（模拟 d448413a 的嵌套链）
+        yield { content: '收到', kind: 'text' }
+        return
+      }
+      parentRuns++
+      if (parentRuns === 1) {
+        yield { content: '@flash猫 继续', kind: 'text' }
+        return
+      }
+      queuedStarted() // 排队命令（drain）已开跑
+      yield { content: '收到', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    const p1 = engine.execute(cmd('msg-d1'))
+    const p2 = engine.execute(cmd('msg-d2'))
+    await targetStartedP // A2A 子树已开跑且被闸门挂住
+
+    expect(await settlesWithin(queuedStartedP)).toBe(true)
+
+    releaseTarget()
+    await Promise.all([p1, p2])
+    expect(parentRuns).toBe(2)
+  }, 20000)
+})
