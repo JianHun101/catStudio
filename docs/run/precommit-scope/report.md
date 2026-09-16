@@ -66,9 +66,15 @@ No projects matched the filter`）。CLI 侧加 `projectNameOf()` 映射层消�
 
 单元读数：`resolveScopes(['docs/run/precommit-scope/tickets.md'])` ⇒ `{projects: [], skip: true}`（7 格，含 `docs/sessions/**`、`README.md`、`CONTEXT.md`、`AGENTS.md`、深层嵌套）。
 
-**实跑读数**：本报告的首个提交（commit A，暂存区仅本文件）——
+**实跑读数**：提交 `e005954`（暂存区仅本文件，即纯 `docs/run/**`）。`pre-commit` 第三行起的输出原文：
 
-> **读数见提交 B 的补填**（本节在 commit B 中补上 commit A 的钩子输出原文）。
+```
+[precommit-scope] 跳过 —— 1 条路径全为文档/在飞产物（无测试消费者）
+[precommit-scope] 跳过测试
+```
+
+**无任何 `Test Files` 行 ⇒ vitest 根本没被拉起**；同一次提交里 `npx lint-staged` 与 `pnpm lint`
+照常执行（故这不是「钩子整体没跑」的假阴性），提交成功：`1 file changed, 274 insertions(+)`。
 
 ### V2 单包 ⇒ 只跑该 project
 
