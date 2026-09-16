@@ -56,11 +56,11 @@ live 已被 drop（失败即杀进程）⇒ 退到 lastSuccess 的握手端口�
 
 ## 四、根因已定位（2026-09-16，见 `finding-2026-09-16.md`）
 
-**不是时序竞态，是端口分配的确定性缺陷**：`listen(0)` 偶尔分到 WHATWG Fetch 的**禁用端口黑名单** ⇒ 服务真的在听（裸 TCP `CONNECT-OK`），但 `fetch` 在发请求前就被 undici 拒绝（`cause = "bad port"`，永不恢复）⇒ 重试路径吃满 `PROBE_TIMEOUT_MS` 30s ⇒ **撞穿 harness 10s 预算**。
+**不是时序竞态，是端口分配的确定性缺陷**：`listen(0)` 偶尔分到 WHATWG Fetch 的**禁用端口黑名单** ⇒ 服务真的在听（裸 TCP `CONNECT-OK`），但 `fetch` 在发请求前就被 undici 拒绝（`cause = "bad port"`，永不恢复）⇒ 重试路径吃满 `PROBE_TIMEOUT_MS` 30s ⇒ **撞穿 harness 预算**（当时 server 侧为 10s；现值为 30_000，见下条更正）。
 
 - **现场行号纠正**：真凶是 `:311`「重试有界」，**不是票面 §一 写的 `:864`**（`:864` 行号漂移）。同类失败另打到 `scripts/flywheel/scan.test.js`。
 - **复跑证据**：`node docs/run/flaky-precommit/probe7.mjs`（15 个黑名单端口 `bind: ok` + `bad port`；4 个对照端口 `FETCH-OK`）。
-- **上游触发**：`PROBE_TIMEOUT_MS`(30s) / `REQUEST_TIMEOUT_MS`(10s) **≥** harness 预算（server 10s / scripts 5s）——默认预算驱动重试路径的测试必然先红。
+- **上游触发**：`PROBE_TIMEOUT_MS`(30s) / `REQUEST_TIMEOUT_MS`(10s) 相对 harness 预算偏高——默认预算驱动重试路径的测试先红。**2026-09-16 更正**：原写「**≥** harness 预算（server 10s / scripts 5s）」，那是票庚 `87e812c` 之前的读数；该票后四处预算**各自**抬到 **30_000**（`packages/server`／`packages/shared`／`packages/web`／`scripts` 四份 `vitest.config.ts`，根配置不生效）⇒ `PROBE_TIMEOUT_MS` 与预算**等值**——命中黑名单端口时探活实测吃满 30.01–30.23s（`finding-2026-09-16.md` §二 的 `elapsed` 读数），**本身即越过 30_000**，故仍会撞线；`REQUEST_TIMEOUT_MS` 则已低于预算。
 
 **⚠️ 红线 4 已触发**：生产侧同病 —— `scripts/flywheel/embed-server.mjs:285` `listen(process.env.EMBED_SIDECAR_PORT || '0')` 同款 OS 分配，而主进程经 `fetch` 调用（`embedding-client.ts:554`）⇒ 命中即嵌入功能整体失败。**该修复**含 server 代码，**须另立单并报店长**，不在本票范围。
 

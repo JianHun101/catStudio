@@ -32,7 +32,7 @@
 ### 1.2 明确不做（Out of Scope）
 
 - **不改 `pnpm test`**（`package.json` 的 test 脚本仍是 `vitest run` 全量）。
-- **不加 pre-push 全量**——那里是审查门禁，且 worktree 内 push 本就预期失败。
+- **不加 pre-push 全量**——那里是审查门禁，且 worktree 内 push 本就预期失败（分支带未审 commit，被 pre-push ② 判据拦；不是缺 `.push-gate`——该文件落在共享根，全 worktree 共用一份）。
 - **不引入 `vitest related`**——依赖静态 import 图，见「决策留痕」。
 - **不改 lint 面**（`npx lint-staged` / `pnpm lint` 两行原样保留，含行序）。
 - **不新装依赖**。
