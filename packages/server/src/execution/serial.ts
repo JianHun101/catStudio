@@ -34,6 +34,9 @@ import { createLogger } from '../logger.js'
 import { MAX_QUEUE_PER_AGENT, isStaleHandoffRequest } from '../dispatch/index.js'
 import { ProviderTokenPool } from './token-pool.js'
 import { classifyError } from '../eval/classify-error.js'
+// 诊断取值单源（R5 §B）：catch 到的**任何**值都要能落出可辨识信息——`err.message`
+// 对非 Error 抛出物恒为 undefined（诊断当场归零，全库 19 次 `execute crash` 同源）。
+import { messageOf } from '../utils.js'
 import {
   cleanGitEnv,
   ensureAgentWorktree,
@@ -265,7 +268,7 @@ function recordAutoCommitSpan(
   } catch (err: any) {
     log.warn('auto-commit span failed (non-blocking)', {
       triggerMessageId: triggerMsgId,
-      error: err?.message,
+      error: messageOf(err),
     })
   }
 }
@@ -520,7 +523,7 @@ async function executeOneAgent(
         log.error('drain failed after no-api-key completion (queue item stuck)', {
           agentId: agent.id,
           triggerMessageId: nextCmd.triggerMessageId,
-          error: e.message,
+          error: messageOf(e),
         })
       }
     }
@@ -609,7 +612,7 @@ async function executeOneAgent(
       log.error('agent execution failed', {
         agentId: agent.id,
         agentName: agent.name,
-        error: err.message,
+        error: messageOf(err),
         stack: err.stack,
         traceId,
       })
@@ -617,7 +620,7 @@ async function executeOneAgent(
         id: uuid(),
         sessionId,
         agentId: agent.id,
-        content: `🐱 ${agent.name} 暂时无法回复: ${err.message || '系统错误'}`,
+        content: `🐱 ${agent.name} 暂时无法回复: ${messageOf(err) || '系统错误'}`,
         mentions: [],
         createdAt: new Date().toISOString(),
       })
@@ -630,7 +633,7 @@ async function executeOneAgent(
       // drain 自身失败不掩盖原异常
       const nextCmd = await finalizeRun(ctx, agent.id, sessionId, {
         success: false,
-        errorMessage: err.message || 'unknown error',
+        errorMessage: messageOf(err) || 'unknown error',
         traceId,
         trace,
       })
@@ -641,7 +644,7 @@ async function executeOneAgent(
           log.error('drain failed after execution error (queue item stuck)', {
             agentId: agent.id,
             triggerMessageId: nextCmd.triggerMessageId,
-            error: e.message,
+            error: messageOf(e),
           })
         }
       }
@@ -790,7 +793,7 @@ async function executeOneAgent(
       log.error('review fallback judgement failed — not delivered', {
         traceId,
         agentId: agent.id,
-        error: err.message,
+        error: messageOf(err),
       })
     }
 
@@ -1094,12 +1097,12 @@ async function executeOneAgent(
     log.error('post-execution error — releasing slot', {
       agentId: agent.id,
       agentName: agent.name,
-      error: err.message,
+      error: messageOf(err),
       traceId,
     })
     const nextCmd = await finalizeRun(ctx, agent.id, sessionId, {
       success: false,
-      errorMessage: err.message || 'post-execution error',
+      errorMessage: messageOf(err) || 'post-execution error',
       traceId,
       trace,
     }).catch(() => {
@@ -1123,7 +1126,7 @@ async function executeOneAgent(
         log.error('drain failed after post-execution error (queue item stuck)', {
           agentId: agent.id,
           triggerMessageId: nextCmd.triggerMessageId,
-          error: e.message,
+          error: messageOf(e),
         })
       }
     }
@@ -1168,7 +1171,7 @@ function resolveCommitTargets(
     } catch (err: any) {
       log.warn('executed-agent lookup failed — falling back to current batch', {
         traceId,
-        error: err?.message,
+        error: messageOf(err),
       })
     }
 
@@ -1187,7 +1190,7 @@ function resolveCommitTargets(
           traceId,
           agentId: agent.id,
           agentName: agent.name,
-          error: err.message,
+          error: messageOf(err),
         })
       }
       if (cwd) {
@@ -1197,7 +1200,7 @@ function resolveCommitTargets(
       out.push({ agentId: agent.id, cwd })
     }
   } catch (err: any) {
-    log.error('commit target resolution failed', { traceId, error: err?.message })
+    log.error('commit target resolution failed', { traceId, error: messageOf(err) })
   }
   return out
 }
@@ -1391,7 +1394,7 @@ async function executeAgentsSerialImpl(
       log.warn('incremental summary failed (non-blocking)', {
         traceId,
         sessionId,
-        error: err.message,
+        error: messageOf(err),
       })
     })
   }
@@ -1612,7 +1615,7 @@ export function createExecutionEngine(
     } catch (err: any) {
       log.error('finalizeExecutionLog failed — releasing slot anyway', {
         agentId,
-        error: err.message,
+        error: messageOf(err),
       })
     }
 
@@ -1716,7 +1719,7 @@ export function createExecutionEngine(
       log.error('execute crashed — releasing slot in finally', {
         agentId: cmd.agentId,
         traceId: cmd.traceId,
-        error: err.message,
+        error: messageOf(err),
       })
       return false
     } finally {
@@ -1725,7 +1728,11 @@ export function createExecutionEngine(
       const s = getSlotInternal(cmd.agentId, cmd.sessionId)
       if (s && s.status === 'busy') {
         const next = await completeExecution(cmd.agentId, cmd.sessionId, false, {
-          errorMessage: execError instanceof Error ? execError.message : 'execute crash',
+          // 兜底词只覆盖「取不出信息」（`messageOf` 返回 undefined）——非 Error 抛出物
+          // （`throw 'string'` / reject 非 Error）此前一律压成这个固定词，无值无归因。
+          // `??` 而非 `||`：`Error('')` 的零回归（票面：Error 路径 message 原样）。
+          // `messageOf` 自身不抛——本行在 finally 的槽位收口路径上，抛错会毁掉收口。
+          errorMessage: messageOf(execError) ?? 'execute crash',
           traceId: cmd.traceId,
         }).catch(() => undefined)
         if (next) {
@@ -1735,7 +1742,7 @@ export function createExecutionEngine(
             log.error('drain failed after execute crash (queue item stuck)', {
               agentId: cmd.agentId,
               triggerMessageId: next.triggerMessageId,
-              error: e.message,
+              error: messageOf(e),
             })
           }
         }
@@ -1874,7 +1881,7 @@ export function createExecutionEngine(
               agentId,
               sessionId: sid,
               triggerMessageId: cmd.triggerMessageId,
-              error: err.message,
+              error: messageOf(err),
             })
           }
         }

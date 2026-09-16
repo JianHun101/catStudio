@@ -25,6 +25,10 @@
  */
 import { randomBytes } from 'node:crypto'
 import { classifyError } from '../eval/classify-error.js'
+// 诊断取值单源（R5 §B）：本模块原有一份**局部** `messageOf`，与 serial.ts 的取诊断
+// 需求同义——两份实现即两个真相源。统一到 `utils.js`（并补上 `[object Object]` →
+// `JSON.stringify` 一搏，原局部实现落 `'[object Object]'` 零信息）。
+import { messageOf } from '../utils.js'
 import { spans as spansRepo, type LlmSpanDetail, type SpanInput } from '../db/repository/index.js'
 
 /**
@@ -221,14 +225,6 @@ export function insertDetachedSpan(args: {
       llm: null,
     },
   ])
-}
-
-/** 从抛出物取 message（非 Error 一律 `String(x)`，空值返回 undefined） */
-function messageOf(err: unknown): string | undefined {
-  if (err === null || err === undefined) return undefined
-  if (err instanceof Error) return err.message
-  const s = String(err)
-  return s.length > 0 ? s : undefined
 }
 
 /** 状态 + 消息 → `error_type`（复用 `execution_logs` 的分类口径） */
