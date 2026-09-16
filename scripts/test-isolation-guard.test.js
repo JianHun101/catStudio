@@ -40,9 +40,22 @@
  *     另：**相邻多处会多报**（实测 2 处相邻 ⇒ 报 3 条——中间那对是「前一处后半 + 后一处
  *     前半」的跨组合）。方向是 fail-closed（宁可多报不可漏报）；按窗口去重的写法不会多报，
  *     但会把相邻两处**并成一条**（漏报侧），两害相权取多报。
- * (f) `stripComments` 的正则字面量态是**启发式**：`/` 左侧不是「表达式起始」的字符时按
- *     除号处理。判错的后果是**保守**的（该 `/` 当除号 → 后续字符照常判），不会吞代码；
- *     唯一代价是正则体内若恰好写了隔离路径字样可能误报（未见实际写法）。
+ * (f) `stripComments` 的正则起始判定是**启发式**：`/` 左侧不是「表达式起始」的字符
+ *     （`)` / `]` / 标识符 …）时按除号处理。误判的代价**不是保守的**：该 `/` 照原样输出后，
+ *     紧随的 `[` 也照原样输出，再往后的 `/` + `*` 就构成「注释起始」——**假注释起点，
+ *     正文是真代码** ⇒ 违规被吞、护栏恒绿。
+ *     已收口的口径：与正则态**对称的未闭合兜底**——合法 JS 的块注释必闭合，故**跑到 EOF
+ *     仍在 `block` 态**即判误剥、把缓冲原文写回（实测反例 A–E：`if (x) /[/*]/`、`while`、
+ *     标识符前缀 + 行首正则、`)` 前缀、`arr[0] /` —— 修复前 5/5 吞代码，修复后 5/5 可见）。
+ *     兜底不靠扩前缀集合（把 `)`/`]` 也认成正则前置，会把 `f(x) / 2 / g` 这类除法误判成
+ *     正则，反而新开一条遮蔽路径）。
+ *     ⚠️ **残留洞（已实测复现，非推演）**：误判的「块注释」若中途撞上**其后某处真实的
+ *     块注释闭合符**（`*` 紧跟 `/`）而被提前闭合，则中间那一段仍被吞（EOF 兜底只管
+ *     「到文件尾都没闭合」的形态）——实测：误判起点 + 违规行 + 一条真块注释 ⇒ 违规行**不可见**。
+ *     词法层无法与真块注释区分（真注释正文任意，闭合符之前的内容无判别信号），故显式声明。
+ *     （本段刻意不写闭合符字面量：它会把本 JSDoc 提前收尾 —— 与实际代码同一类坑。）
+ *     触发面：需先有「方括号内含 `/` 与 `*` 的正则字面量」这类写法；仓内当前 0 处
+ *     （`/[/*]/` 仅存在于本文件、已由 (d) 自排除），属**潜伏**而非现网假绿。
  * (g) 本文件的**执行面**只覆盖审查档 / 落地档全量，不含按改动面收窄的提交口（见上）。
  * (h) R3 只看「键名与 `process.cwd(` 同行」，**不区分**「真的路径表达式」与「字符串里的
  *     描述文字」——用例名 / 断言文本里同时提到两者会误报（实测：本次新增的 shutdown 用例名
@@ -123,6 +136,21 @@ export function stripComments(src) {
   let state = 'code' // code | line | block | sq | dq | tpl | re | reClass
   /** 正则态的暂存（闭合才写入 `out`；未闭合 = 前面判错了，原样退回） */
   let reBuf = ''
+  /**
+   * 块注释态的暂存 —— **与正则态同款的「未闭合 ⇒ 原样退回」对称兜底**。
+   *
+   * 为什么需要：`/` 后紧跟 `*` 时优先判块注释（顺序正确，否则真块注释会被当正则），
+   * 但左 `/` 若被正则起始启发式**误判成除号**（前缀是 `)`/`]`/标识符时），这个 `/` 与
+   * 紧随的 `*` 就会被当注释起始 —— 于是**注释起点是假的、正文是真代码**。
+   * 合法 JS 的块注释必闭合 ⇒ **跑到 EOF 仍在 block 态**即为误判的判据 ⇒ 原样写回。
+   * 判据与前缀启发式解耦：不靠「把 `)`/`]` 也认成正则前置」（那会把 `f(x) / 2 / g`
+   * 这类除法误判成正则，反而新开一条遮蔽路径）。
+   *
+   * `buf` 与 `placeholder` 并行累积：闭合才把占位符写进 `out`（保留换行与行号、内容不参与
+   * 路径判定），未闭合则写 `buf` 原文——**两者都只在闭合/EOF 时才落盘**，故行号不会错位。
+   */
+  let blockBuf = ''
+  let blockPlaceholder = ''
   while (i < n) {
     const c = src[i]
     const d = src[i + 1]
@@ -136,6 +164,8 @@ export function stripComments(src) {
       // 正则态又必须先于「默认按字面量输出」判掉（否则 `/[/*]/` 会进块注释态吞代码）。
       if (c === '/' && d === '*') {
         state = 'block'
+        blockBuf = ''
+        blockPlaceholder = ''
         i += 2
         continue
       }
@@ -162,11 +192,16 @@ export function stripComments(src) {
     }
     if (state === 'block') {
       if (c === '*' && d === '/') {
+        // 真块注释闭合：此刻才把占位符写进 `out`（换行保留、行号对齐、内容不参与判定）
+        out += blockPlaceholder
+        blockBuf = ''
+        blockPlaceholder = ''
         state = 'code'
         i += 2
         continue
       }
-      out += c === '\n' ? '\n' : ' '
+      blockBuf += c
+      blockPlaceholder += c === '\n' ? '\n' : ' '
       i++
       continue
     }
@@ -212,6 +247,11 @@ export function stripComments(src) {
     out += c
     i++
   }
+  // 收尾兜底（对称于正则态的「换行未闭合」退回）：跑到 EOF 仍未闭合 = 前面判错了，
+  // 把缓冲的**原文**写回（占位符丢弃）。方向是 fail-closed：只会让更多文本进入判定，
+  // 不会让违规静默消失。残留形态见文件头覆盖边界 (f)。
+  if (state === 'block') out += blockBuf
+  else if (state === 're' || state === 'reClass') out += reBuf
   return out
 }
 
@@ -467,6 +507,49 @@ describe('检测器非恒真（反向对照：种入违规必须红、合规必�
     // `return /re/` 这类关键字后置的正则：不吞后续行
     const ret = "function f() { return /[/]/.test(s) }\nLOG_FILE: 'rel.log'\n"
     expect(detect(stripComments(ret).split('\n')[1])).toBe('R2')
+  })
+
+  it('块注释态未闭合兜底：`)/]`/标识符前缀令 `/` 误判成除号时，EOF 仍在 block 态 ⇒ 原样写回', () => {
+    // 这一格是**上一条只修了半程**的对照：`= /[/*]/` 被正则态接住了，但左 `/` 前缀是
+    // `)` / `]` / 标识符时走的是「除号」分支 ⇒ `/` 与 `[` 原样输出 ⇒ 紧随的 `/`+`*`
+    // 被当注释起始。合法 JS 的块注释必闭合，故 EOF 仍在 block 态即判误剥、**原文写回**。
+    const BAD = "const LOG_FILE = 'node_modules/.cache/x'\n"
+    const cases = [
+      ['if(x) 前缀', `if (x) /[/*]/.test(y)\n${BAD}`],
+      ['while 前缀', `while (a) /[/*]/g.test(b)\n${BAD}`],
+      ['标识符前缀 + 行首正则', `const z = foo\n/[/*]/.test(y)\n${BAD}`],
+      [') 前缀 + 行首正则', `f(x)\n/[/*]/.test(y)\n${BAD}`],
+      ['下标前缀', `arr[0] /[/*]/.test(s)\n${BAD}`],
+    ]
+    for (const [name, src] of cases) {
+      const stripped = stripComments(src)
+      const lines = stripped.split('\n')
+      // 违规行必须**活着**（修复前这 5 格全部输出全空白）
+      expect(
+        lines.filter((l) => l.includes('LOG_FILE')),
+        name
+      ).toHaveLength(1)
+      expect(detect(lines.find((l) => l.includes('LOG_FILE'))), name).toBe('R1')
+      // 行号不得因「缓冲到 EOF 才写回」而错位：违规行在 `out` 里的下标必须与源一致
+      expect(
+        lines.findIndex((l) => l.includes('LOG_FILE')),
+        name
+      ).toBe(src.split('\n').findIndex((l) => l.includes('LOG_FILE')))
+      expect(lines, name).toHaveLength(src.split('\n').length)
+    }
+  })
+
+  it('已声明边界 (f) 的**残留**：误判块被后文真 `*/` 提前闭合 ⇒ 该段仍被吞（钉的是洞，不是期望）', () => {
+    // ⚠️ 本格钉的是**覆盖边界 (f) 明写的已知洞**，不是「期望行为」。EOF 兜底只管
+    // 「到文件尾都没闭合」的形态；误判的假注释若中途撞上其后某处真实 `*/` 而被提前闭合，
+    // 中间那一段仍不可见。词法层无法与真块注释区分（真注释正文任意）。
+    // 将来若真修好（例如换真解析器），本格会红 —— 那正是提醒「把 (f) 的声明同步改掉」。
+    const src = `if (x) /[/*]/.test(y)\nconst LOG_FILE = 'node_modules/.cache/x'\n/* 真注释 */\n`
+    const stripped = stripComments(src)
+    expect(stripped).not.toContain('LOG_FILE') // ← 洞的实测读数
+    // 对照：同一段代码**去掉后文的 `*/`** ⇒ EOF 兜底生效、违规可见（证明上一条不是恒绿）
+    const noCloser = `if (x) /[/*]/.test(y)\nconst LOG_FILE = 'node_modules/.cache/x'\n`
+    expect(stripComments(noCloser)).toContain('LOG_FILE')
   })
 })
 
