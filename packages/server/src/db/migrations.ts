@@ -27,12 +27,15 @@
  * - 探针 `true` ⇒ 效果已成立（或目标对象不存在、无事可做）⇒ **跳过执行**，只登记；
  * - 探针 `false` ⇒ **真执行**（全新库 = 首次落地；老库补登 = 矫正路径）。
  *
- * 全量审计结论（票 1 实施时逐条过了一遍 61 条的压扁源）：
- * - **挂探针 3 条**：`widen review_verdicts …`、`chunk_vectors distance_metric=cosine`、
+ * 全量审计结论（票 1 实施时逐条过了一遍 61 条的压扁源；票 2 追加区新增 1 条）：
+ * - **挂探针 4 条**：`widen review_verdicts …`、`chunk_vectors distance_metric=cosine`、
  *   `drop memories chain tables`——三条都是「效果缺失不报错、只静默劣化」。
  *   前两条是规格点名的候选；第三条是审计新增：`DROP TABLE IF EXISTS` 对缺表是 no-op，
  *   老库若仍留着两张死表，启动**不会有任何提示**，而 `db/index.test.ts` 有用例钉着
  *   「老库跑完 initDb 后两表必须消失」。不挂探针 = 该用例在老库路径上必然静默失效。
+ *   第四条是票 2 的 fix-forward 补建（追加区）：判据同款——`CREATE … IF NOT EXISTS`
+ *   对已存在的物体是 no-op，齐件库上真跑一遍什么都不改也什么都不说；探针把「14 件
+ *   经核对确在」这件事实记进台账，而不是让台账记一句无从验证的「已执行」。
  * - **不挂探针 38 条**：其余 CREATE TABLE / CREATE INDEX / DROP 条目要么是纯新物体
  *   （缺了会在首次使用时响亮报错），要么效果由后续条目独立保证。加列类历史 ALTER 已
  *   并入基线列清单，老库「缺列」这条路径根本不成立（旧机制每次启动全量重跑，缺列会
@@ -621,7 +624,157 @@ const BASELINE_MIGRATIONS: ReadonlyArray<Migration> = [
 // 若某条迁移的效果在个别库上已由手工 SQL 提前成立，给它挂 `verify` 探针（探针 true ⇒
 // 只登记不执行），别用「老库」这个笼统判据去挡。
 
-const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = []
+/** `sqlite_master` 存在性查询（type 精确匹配——`chunks` 的索引与同名虚拟表影子表不混） */
+function objectExists(db: Database.Database, type: 'table' | 'index', name: string): boolean {
+  return (
+    db.prepare(`SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?`).get(type, name) !==
+    undefined
+  )
+}
+
+/** 基线条目名 → 建表/建索引原文。找不到 = 清单里的名字写错了，**模块加载期当场抛**：
+ *  比等到某台老库上静默少建一件强（那正是本票要消灭的失败类）。 */
+function baselineSqlOf(entryName: string): string {
+  const entry = BASELINE_MIGRATIONS.find((m) => m.name === entryName)
+  if (entry === undefined) {
+    throw new Error(`[db] fix-forward 补建清单引用了不存在的基线条目「${entryName}」`)
+  }
+  return entry.sql
+}
+
+/** fix-forward 补建清单的一项：`entry` 是取 DDL 的键，`object` 是它在库里落成的物体名。 */
+export interface FixForwardObject {
+  entry: string
+  object: string
+  type: 'table' | 'index'
+}
+
+/**
+ * OQ1 fix-forward 补建清单（票 2，2026-09-17 店长终裁）——主库实测缺失的 **14 件**物体。
+ *
+ * ## 名单从哪来（不是照抄审查回执）
+ *
+ * 「基线期望物体全集 vs 主库 `sqlite_master` 实测」对账产出：主库 **33/47**，缺的恰好是
+ * 下面这 5 表 + 9 索引（`retrieval_*` 三表 + `spans` 两表 + 它们名下 9 个索引），
+ * 是旧机制 `catch {}` 全吞时代静默失败的残骸。dev 库实测 47/47、全新库基线重放后亦齐件
+ * ⇒ 这条迁移对它们是货真价实的 no-op，靠 `verify` 探针短路掉。
+ *
+ * ## 为什么 DDL 从基线集**取原文**而不是手抄
+ *
+ * 手抄就是第二个真相源：14 段 DDL 抄错任何一处，失败形态是**永久的静默缺件**（`IF NOT
+ * EXISTS` 不报错、探针又是存在性判据，两边一起瞎）。取原文则字节级同源，且基线集是冻结的
+ * 历史（改它必先撞 checksum 拒启）⇒ 本条 checksum 稳定。
+ *
+ * ## 为什么逐条显式列 `object`（条目名 ≠ 物体名）
+ *
+ * 实测陷阱：基线条目 `idx_retrieval_candidates_content_hash` **建出来的索引叫**
+ * `idx_retrieval_candidates_hash`。存在性探针按 `sqlite_master.name` 查，两者不可互相推导，
+ * 故逐条写死，并由测试在齐件库上整表核对。
+ *
+ * **顺序即契约**：表在其索引之前、被引用表在引用表之前（`retrieval_queries` 引用
+ * `retrieval_events`、`retrieval_candidates` 引用 `retrieval_queries`、`span_llm` 引用 `spans`）。
+ */
+export const FIX_FORWARD_OBJECTS: ReadonlyArray<FixForwardObject> = [
+  // ── 段四·记忆检索流水（3 表 + 5 索引）──
+  {
+    entry: 'retrieval_events table (段四检索流水·检索级)',
+    object: 'retrieval_events',
+    type: 'table',
+  },
+  {
+    entry: 'idx_retrieval_events_execution',
+    object: 'idx_retrieval_events_execution',
+    type: 'index',
+  },
+  { entry: 'idx_retrieval_events_created', object: 'idx_retrieval_events_created', type: 'index' },
+  { entry: 'idx_retrieval_events_task', object: 'idx_retrieval_events_task', type: 'index' },
+  {
+    entry: 'retrieval_queries table (段四检索流水·查询级)',
+    object: 'retrieval_queries',
+    type: 'table',
+  },
+  {
+    entry: 'retrieval_candidates table (段四检索流水·候选级)',
+    object: 'retrieval_candidates',
+    type: 'table',
+  },
+  {
+    entry: 'idx_retrieval_candidates_query',
+    object: 'idx_retrieval_candidates_query',
+    type: 'index',
+  },
+  // ⚠️ 条目名（…content_hash）≠ 建出的索引名（…hash）——见上方说明，别「顺手对齐」
+  {
+    entry: 'idx_retrieval_candidates_content_hash',
+    object: 'idx_retrieval_candidates_hash',
+    type: 'index',
+  },
+  // ── 段五·执行时间轴（2 表 + 4 索引）──
+  { entry: 'spans table (段五执行时间轴·骨架)', object: 'spans', type: 'table' },
+  { entry: 'span_llm table (段五执行时间轴·LLM 详情)', object: 'span_llm', type: 'table' },
+  { entry: 'idx_spans_execution', object: 'idx_spans_execution', type: 'index' },
+  { entry: 'idx_spans_chain', object: 'idx_spans_chain', type: 'index' },
+  { entry: 'idx_spans_start', object: 'idx_spans_start', type: 'index' },
+  { entry: 'idx_spans_name', object: 'idx_spans_name', type: 'index' },
+]
+
+/** fix-forward 条目名（导出给测试与派活单引用，避免各处硬编码串漂移）。 */
+export const FIX_FORWARD_MIGRATION_NAME = 'fix-forward 补建 retrieval/spans 缺失物体 (OQ1)'
+
+const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
+  // ── 票 2 · 索引三条（spec §3.2，首批 append 迁移）──────────────────────
+  {
+    // 会话历史拉取 + 翻页游标的 tie-break。服务的查询 `getSessionMessagesRange`
+    // （`repository/messages.ts:149`）：
+    //   WHERE session_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+    //   ORDER BY created_at DESC, id DESC
+    // 两列版（基线里的 `idx_messages_session`）只能服务 `session_id` 等值 + `created_at`
+    // 范围，末列 `id` 的 tie-break 与 ORDER BY 都落不到索引上。
+    //
+    // ⚠️ **必须先 DROP 再建**：留着旧的两列同名索引，`CREATE INDEX IF NOT EXISTS` 会在
+    // 「索引已存在」上静默 no-op（老库、dev 库、全新库三者**全都**命中这条静默路径）
+    // ⇒ 升级压根不会发生。同事务内 DROP + CREATE，中途失败整体回滚。
+    name: 'idx_messages_session upgrade (session_id, created_at, id)',
+    sql: `DROP INDEX IF EXISTS idx_messages_session;
+          CREATE INDEX idx_messages_session ON messages(session_id, created_at, id)`,
+  },
+  {
+    // 会话级日志查询（`getExecutionsBySession`）与恢复路径（`getLatestExecutionPerAgent`）
+    // 的取数面，两条都是 `WHERE session_id = ?`（`repository/executionLogs.ts:250` / `:314`）。
+    // 该表此前零二级索引 ⇒ 会话日志页与右侧 trace 面板每次都全表扫。
+    //
+    // ⚠️ **列名是 `started_at` 不是 spec 写的 `created_at`**：`execution_logs` **没有**
+    // `created_at` 列（本表时间列为 `started_at`/`ended_at`）。spec §3.2 那一行按字面实现
+    // 会当场 `no such column: created_at` → 事务回滚 → **拒启**（实测，不是推断）。
+    // 保持 spec 的**形状与用途**不变（`(session_id, <本表时间列>)`），只把列名落到真实列。
+    // 同口径佐证散在既有代码里：`repository/query.ts:15`「execution_logs 无 created_at 列」、
+    // `eval/l1-aggregator.ts:68` 同、`routes/internal.test.ts:864`「用 started_at DESC 排序」。
+    name: 'idx_execution_logs_session_started',
+    sql: `CREATE INDEX IF NOT EXISTS idx_execution_logs_session_started
+      ON execution_logs(session_id, started_at)`,
+  },
+  {
+    // running 计数（重启判据主查询）。**定形依据 = 实测调用面，不是二选一**（spec §3.2 留的
+    // 判据是「查询总带 session_id 则用复合」）：
+    //   - `scripts/dev.js:183`（重启保护窗主查询，`pollRestart` 用它判「还有执行在跑」）：
+    //     `SELECT COUNT(*) AS cnt FROM execution_logs WHERE status = 'running'` —— 无 session_id
+    //   - `index.ts:136` → `fixStuckExecutionLogs()`（启动自愈 `UPDATE … WHERE status = 'running'`）
+    //   - `repository/executionLogs.ts:18` `getRunningLogs()`：同上，无 session_id
+    // 三条都不带 session_id ⇒ 复合索引 `(session_id, status)` 的前导列不匹配，**一条都服务
+    // 不到**（这正是「对照实际 SQL 定形」要挡的形态：照抄复合版 = 建了个用不上的索引）。
+    name: 'idx_execution_logs_status',
+    sql: `CREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)`,
+  },
+  // ── 票 2 · OQ1 fix-forward 补建（一条，14 件物体）─────────────────────
+  {
+    name: FIX_FORWARD_MIGRATION_NAME,
+    // 14 件 DDL 从基线集对应条目逐字取——条目名与物体名一一对应关系见 FIX_FORWARD_OBJECTS
+    sql: FIX_FORWARD_OBJECTS.map((o) => baselineSqlOf(o.entry)).join(';\n'),
+    // 存在性探针：14 件**全在**才 true。齐件库（dev / 全新库）⇒ 只登记不执行；
+    // 缺件库（主库）⇒ 真执行补建。
+    verify: (db) => FIX_FORWARD_OBJECTS.every((o) => objectExists(db, o.type, o.object)),
+  },
+]
 
 /**
  * runner 的唯一输入 = 基线集（盖 `baseline` 标记）+ 追加区（原样，不带标记）。
