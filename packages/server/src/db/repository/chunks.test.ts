@@ -1,9 +1,13 @@
 /**
  * chunks 索引表 repository 测试（票己 C1–C8）。
  *
- * 测试面 = **真实迁移路径**：`createTestDb()` 造「老库」（只有旧表，无 chunks）→
- * `initDb()` 跑真实 additive 迁移建三表。不用手搓 DDL——手搓等于把「被判面」
- * 换成测试自己写的代理面（票丁 B9 教训）。
+ * 测试面 = **真实迁移路径**：`createTestDb()` 从空库重放基线集建出全量 schema（含
+ * chunks 三表），`initDb()` 再跑一次 = 台账校验 + no-op。不用手搓 DDL——手搓等于把
+ * 「被判面」换成测试自己写的代理面（票丁 B9 教训）。
+ *
+ * ⚠️ 票 `db-schema-governance` 票 1 起，**「老库」（有用户表 + 无台账）走的是「基线
+ * 逐条只登记不执行」**——想测老库上的矫正路径，必须先 `DROP TABLE schema_migrations`
+ * 造出老库判据，否则测的是新库、自己却以为在老库上。
  *
  * 契约期望表（C1/C8 的比对基准）逐列抄自票己正文的契约表，**不是从实现回抄**。
  */
@@ -11,7 +15,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createTestDb } from '../../test-helpers.js'
-import { setDb, resetDb, getDb, initDb, CHUNK_VECTOR_METRIC_FIX_SEQUENCE } from '../index.js'
+import { setDb, resetDb, getDb, initDb, applyMigrations } from '../index.js'
+import { CHUNK_VECTOR_METRIC_FIX_SEQUENCE, MIGRATIONS } from '../migrations.js'
 import { initRepository } from './index.js'
 import { chunks as chunksRepo } from './index.js'
 import { vectorToBlob } from '../../memory/index.js'
@@ -583,6 +588,9 @@ describe('chunks repo（票己 · 段三索引表）', () => {
 
     it('存量库的 L2 量纲在同一次 initDb() 里被校正（且三表同清待重扫）', () => {
       const db = getDb()
+      // 造「老库」判据（有用户表 + 无台账）——否则该条目已登记，runner 只做 checksum
+      // 校验、不会碰它，本用例就成了假绿
+      db.exec(`DROP TABLE schema_migrations`)
       const id = chunksRepo.upsertChunk(chunkInput())
       writeFtsRow(id, '猫咖测试正文')
       writeVectorRow(id, unit45())
@@ -614,51 +622,51 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       expect(countAll()).toEqual([0, 0, 0])
     })
 
-    it('崩溃点穷举：守卫序列每个前缀后重跑 initDb() 都收敛（不残留「满库 + 空向量」）', () => {
-      // 「不可达的状态」没法用一条运行用例覆盖 ⇒ 对崩溃点穷举：逐个前缀模拟
-      // 「崩在第 n 条之后」，再跑一次生产启动链，断言不变式成立。
-      // 判据面 = 守卫自己导出的 sequence，所以**改序即改被测对象**，用例不会假绿。
-      // 反序实现（先 DROP/CREATE 再清数据）在第 1 个前缀就红：DROP 后崩 ⇒
-      // 迁移把空表建回 cosine ⇒ 守卫 no-op ⇒ 留下 chunks 满库 / 向量空的形态。
-      const total = CHUNK_VECTOR_METRIC_FIX_SEQUENCE.length
-      for (let n = 1; n <= total; n++) {
-        const at = `崩溃点 ${n}/${total}`
-        resetDb()
-        setDb(createTestDb())
-        initDb()
-        initRepository(getDb())
-        const db = getDb()
-
-        // 造「老量纲 + 满库」现场（= 存量库首次升级前的状态）
-        const id = chunksRepo.upsertChunk(chunkInput())
-        writeFtsRow(id, '猫咖测试正文')
-        db.exec('DROP TABLE chunk_vectors')
-        db.exec(
-          `CREATE VIRTUAL TABLE chunk_vectors USING vec0(
-             chunk_id INTEGER PRIMARY KEY, embedding float[512]
-           )`
-        )
-        writeVectorRow(id, unit45())
-
-        // 模拟「崩在第 n 条之后」：optional 步骤照守卫口径容忍缺表
-        for (const step of CHUNK_VECTOR_METRIC_FIX_SEQUENCE.slice(0, n)) {
-          try {
-            db.exec(step.sql)
-          } catch {
-            /* 极老库缺表 */
+    it('量纲校正是**一条事务**：中途失败 ⇒ 整体回滚；修好后重跑收敛', () => {
+      // 旧实现靠「顺序 + 每次启动重跑」把崩溃窗口一点点收敛（原用例：逐前缀穷举「崩在
+      // 第 n 条之后」）。票 1 起每条迁移一个 `BEGIN IMMEDIATE` 事务 ⇒ 崩在中间 = **整体
+      // 回滚**，库退回升级前形态，下次启动整条重来——不再存在「半成品」这种可达状态。
+      // 判据面仍是导出的序列本身（改序即改被测对象）：在完整序列后追加一句**必失败**语句。
+      const db = getDb()
+      db.exec(`DROP TABLE schema_migrations`) // 老库判据（有用户表 + 无台账）
+      const id = chunksRepo.upsertChunk(chunkInput())
+      writeFtsRow(id, '猫咖测试正文')
+      db.exec('DROP TABLE chunk_vectors')
+      db.exec(
+        `CREATE VIRTUAL TABLE chunk_vectors USING vec0(
+           chunk_id INTEGER PRIMARY KEY, embedding float[512]
+         )`
+      )
+      writeVectorRow(id, unit45())
+      const vectorSql = () =>
+        (
+          db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chunk_vectors'").get() as {
+            sql: string
           }
-        }
+        ).sql
+      expect(countAll()).toEqual([1, 1, 1])
 
-        initDb()
+      const failing = MIGRATIONS.map((m) =>
+        m.name.includes('distance_metric=cosine')
+          ? {
+              ...m,
+              sql: `${CHUNK_VECTOR_METRIC_FIX_SEQUENCE.join(';\n')};\nSELECT no_such_function()`,
+            }
+          : m
+      )
+      expect(() => applyMigrations(db, failing)).toThrowError(
+        /distance_metric=cosine[\s\S]*no such function/
+      )
 
-        const { sql } = db
-          .prepare("SELECT sql FROM sqlite_master WHERE name = 'chunk_vectors'")
-          .get() as { sql: string }
-        expect(sql, at).toContain('distance_metric=cosine')
-        // 不变式：绝不允许「chunks 有行而向量为空」——那正是扫描器按 origin_id
-        // 永远跳过、永久不可召回的形态（scan.mjs 增量判据只看 chunks 行）
-        expect(countAll(), at).toEqual([0, 0, 0])
-      }
+      // 回滚判据：清表的 DELETE 一行没落地、向量表仍是老量纲（不是「清完了但没重建」）
+      expect(countAll()).toEqual([1, 1, 1])
+      expect(vectorSql()).not.toContain('distance_metric=cosine')
+
+      initDb() // 修好后（原样序列）重跑 ⇒ 收敛
+      expect(vectorSql()).toContain('distance_metric=cosine')
+      // 不变式：绝不允许「chunks 有行而向量为空」——那正是扫描器按 origin_id
+      // 永远跳过、永久不可召回的形态（scan.mjs 增量判据只看 chunks 行）
+      expect(countAll()).toEqual([0, 0, 0])
     })
 
     it('量纲已对的库：重跑 initDb() 不动索引数据（不误清）', () => {

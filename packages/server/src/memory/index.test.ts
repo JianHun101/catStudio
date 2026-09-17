@@ -121,7 +121,11 @@ describe('memory', () => {
 
   beforeEach(() => {
     setDb(createTestDb())
-    // 「老库」先有旧链表，再跑迁移 —— 这样 DROP 条目真的被执行到（不是空跑）
+    // 「老库」先有旧链表，再跑迁移 —— 这样 DROP 条目真的被执行到（不是空跑）。
+    // ⚠️ 必须先删台账：夹具是走真实迁移路径建出来的、台账齐全，而 runner 对已登记条目
+    // 只做 checksum 校验 ⇒ 不删的话 DROP 条目压根不会被碰到，本夹具退化成「新库建旧表」。
+    // 判据与 runner 的 isOldDb 同面：有用户表 + 无台账。
+    getDb().exec(`DROP TABLE schema_migrations`)
     getDb().exec(`
       CREATE TABLE IF NOT EXISTS memories (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, content TEXT NOT NULL,
@@ -475,7 +479,7 @@ describe('memory', () => {
     it('W8 旧链调用面零残留（函数名带括号 + 读写旧表的 SQL 动作）', () => {
       // ⚠️ 判据**不是**票面那句字面 grep（`searchMemoriesHybrid|memories_fts` 零命中）：
       // `DROP TABLE IF EXISTS memories_fts` 必须写出表名才能执行，而落点就在
-      // `db/index.ts` ⇒ 字面 grep **不可能**为零。故判据落在「可执行面」：
+      // `db/migrations.ts`（票 1 前是 `db/index.ts`）⇒ 字面 grep **不可能**为零。故判据落在「可执行面」：
       // 函数调用（带 `(`，把文档里的名字提及排除掉）+ 读写旧表的 SQL 动作。
       // DROP 语句用的是 `DROP TABLE IF EXISTS`，不在下表的动词里。
       const CALLS = [
@@ -501,7 +505,8 @@ describe('memory', () => {
     })
 
     it('W8 旧链表 DROP 确实在迁移里（写出旧表名的唯一合法位置）', () => {
-      const src = fs.readFileSync(path.join(SRC_ROOT, 'db/index.ts'), 'utf8')
+      // 迁移正文的家 = `db/migrations.ts`（票 1 起 `db/index.ts` 里一句 DDL 都不许有）
+      const src = fs.readFileSync(path.join(SRC_ROOT, 'db/migrations.ts'), 'utf8')
       expect(src).toContain('DROP TABLE IF EXISTS memories_fts')
       expect(src).toContain('DROP TABLE IF EXISTS memories')
     })
