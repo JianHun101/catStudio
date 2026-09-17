@@ -1,6 +1,6 @@
 # 票：数据库结构治理 P0（迁移机制立闸 + 索引三条）
 
-> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅）。B 范围：票 3 ✅、票 4 ✅（均入 dev）。D1–D4 已拍板（2026-09-17，用户「按建议走」）→ 票 5（flash猫）/ 票 6（ds猫）已解锁派活，票 7 随 flash猫 票 5 后开工；票 8 blocked by 票 7。**
+> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅）。B 范围：票 3 ✅、票 4 ✅、票 5 ✅（均入 dev）。D1–D4 已拍板（2026-09-17）。票 6 批一（ds猫，`dce2bc9`）在审；批二随票 5 机制入 dev 已解锁；票 7（flash猫）随票 5 收口派活；票 8 blocked by 票 7。**
 > 定稿规格：`docs/plans/db-schema-governance.md`（下称 spec，commit `e5daf7a`）。票单不复制 spec 全文，只钉执行面；与 spec 冲突以 spec 为准。
 > 范围裁决：A——P0 本轮实施，B 范围（FK/CHECK/时间口径/session_agents 拆表）设计已定稿、**票缓拆**，等 P0 落地验证后再拆。
 
@@ -290,6 +290,8 @@ worktree（从 dev `7e5478b` 建分支 `session/54c4de25-flash猫`）；`node no
 **CHECK 值域更正（2026-09-17，票 5 开工前真库读数）**：`dispatch_state` 真实值域 = `'queued' | 'running' | 'done'`（`repository/messages.ts` 类型签名；两库实测 `done` 1079/1342、`completed`/`failed` 零行）——本票面初稿 `completed/failed` 系笔误，照字面落 CHECK 会让 fire-and-forget 的 `setDispatchState` 静默失效。定稿 `CHECK (dispatch_state IN ('queued','running','done'))` + NULL 放行；spec §4.1 已同步更正。
 
 **机制改动并入本票（2026-09-17 店长裁决，方案 A）**：票 5/6 开工前两猫独立发现 runner 恒包事务 × rebuildTable 拒事务内调用的接线缺口（ds猫 实测：三张表现状下要么拒启要么静默清 9723 行）。裁决 = spec §4.4 纪律 7 过程式通道：`Migration` 加可选 `run?: (db, record) => void`，带 `run` 条目 runner 不包事务；`sql` 仍必填 = 新表 DDL（checksum 正文 + `createSql` 源）；静态断言钉「hook 只许调 rebuildTable 且 `createSql === m.sql`」。**本票负责把该机制落地**（`migrations.ts` 接口 + `index.ts` runner 分支 + 测试），票 6 批二与票 8 只做消费方。
+
+**收口（2026-09-18，店长）**：交付 `95e4d4c` + `326e958`（22 文件 +798/−89，全在 `packages/server/src`），复审 **✅可合并**（吐槽猫独立复核：全量 2754 复跑绿 + lint 3 包过 + 行号抽核全真 + 静态断言绕过构造三连未破 + 族修补刀——「第四处跨形态比较点」挑战**扫完无漏网**，生产代码比较点全集 9 处逐一核清）。随收口四件落盘：① spec §4.2 ⑤-c DEFAULT 勘注（OQ1 有条件接受——判据是精度降档，`strftime('%f')` 已消解）；② spec §4.4 已知窗口留痕（OQ3 接受「已知窗 + 重跑幂等自愈」，危害有界）；③ OQ4 留痕——未来某票需求面变化时可补「双路径形态一致（新库产物 == 老库升级产物）」表征，不阻塞本票；④ P3 观察项三条（下轮票面参考）：`review_verdicts` 归一迁移的 `replace(created_at,' ','T')` 无 `Z` 后缀（该表本身秒级，非回归）——**票 6 迁该表时与 `toIsoDb` 合并回单口径**，勿留永久双口径；`sessions.ts:308` `toSessionConfig` 的秒级形态转换（未迁，正确现状）——**票 8 迁 sessions 同批切**；`messages.ts:68-70` 注释「SQLite datetime 是秒级精度」已随本票过时（逻辑本身仍对）——下批碰 messages 顺手改。OQ5 台账名接受（全角字符在 TEXT 主键无解析面风险；**落地后不可改名**）；OQ6 时区偏移透传不补（函数职责 = 统一形态非时区换算，生产面无实证调用方）。
 
 ## 票 6 · 小表重建批（派 ds猫，走 worktree；blocked 已解除 2026-09-17）
 

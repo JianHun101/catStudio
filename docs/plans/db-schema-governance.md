@@ -110,6 +110,7 @@ evidence:
 - **目标口径（⑤-a）**：ISO 8601 UTC 字符串、毫秒精度（`2026-09-17T08:30:00.123Z`）。定宽格式字典序 = 时间序，索引/排序/比较正确；JS 全栈 `new Date().toISOString()` 零转换；SQLite `datetime()` 原生可吃。
 - **存量迁移（⑤-b）**：秒级 → ISO **无损单向**（毫秒位补 `.000`），随 rebuildTable 同批转换，转换后抽样比对。**铁律：同一张表的所有结构变更（FK/CHECK/时间列/删列）一次重建做完**，不重建第二次。前置审计：逐列实测格式分布，转换 SQL 按实测写。
 - **生成纪律（⑤-c 修订版）**：**记录时间**（created_at / updated_at）由 repository 层统一 helper 生成，调用方不许传；**事件时间**（语义是「事情发生时刻」，如 started_at / finished_at）允许调用方显式传入，命名必须体现事件语义，评审检查例外是否名副其实。不使用数据库 DEFAULT 生成（SQLite `datetime('now')` 仅秒级，精度降档）。
+  **DEFAULT 勘注（2026-09-18，票 5 复审 OQ1 有条件接受）**：⑤-c「不使用 DEFAULT」的判据是精度降档，`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` 已消解——**DEFAULT 允许保留，但必须 ISO 毫秒同口径**；承重点仍是 repository 显式传值（调用方不许传），DEFAULT 只兜「未来裸 SQL 写入」的缝。判例：票 5 messages.created_at DEFAULT 保留（`migrations.ts` 重建 DDL）。
 - **连带改造点（读码钉死）**：全仓 SQL 侧 `datetime('now')` 写入口与比较点须随迁移同批切到新格式——已知面：agents / sessions / executionLogs / flowStates / knowledge / sessionReadState / settings 各 repository 的写入，messages 超时窗 `datetime('now', ?)` 与游标比较（`messages.ts:127` 有「时间戳归一」注释依赖秒级格式）。**格式混比会错序，必须同批切换，不留半套。**
 - 现状分布（实测）：DB 记录时间几乎全为 SQL 侧 `datetime('now')`（秒级 UTC）；事件时间 `spans.start_at` 为 ISO 毫秒；文件态 JSON（重启请求等）为 ISO。
 
@@ -141,6 +142,7 @@ CREATE TABLE session_agents (
 5. **chunks ↔ FTS/vec0 rowid 耦合（2026-09-17 票 4 复审实测新发现，重建硬约束）**：`chunks` 表被双重 rowid 依赖——① `chunks_fts.rowid = chunks.rowid`（实测 dev 库 375 行活 JOIN、零孤儿）；② vec0 `chunk_vectors_rowids` 的 BLOB 内嵌 chunks.rowid 映射（`migrations.ts` vec0 声明）。重建任何被 FTS/vec0 虚表引用的表前，先核查 `sqlite_master` 虚表声明与 rowid 耦合面；重建 chunks 必须同批同步重建 FTS 索引与 vec0 映射，否则记忆检索静默断链。
 6. **重建后全库 FK 体检**：rebuildTable 的 FK 体检只查出向约束；重建若动被引用列，子表悬空不拦。每张重建票收尾跑一次全库 `PRAGMA foreign_key_check`，零违规才算验收过（票 8 硬条款，其余重建票同执行）。
 7. **过程式迁移通道（2026-09-17 店长裁决，票 5/6 开工前两猫独立收敛 + 实测证据拍板）**：`Migration` 加可选 `run?: (db, record) => void`；带 `run` 的条目 runner **不包事务**（rebuildTable 自带事务，且 `PRAGMA foreign_keys` 事务内 no-op——事务内 DROP 父表要么拒启要么静默 CASCADE 清子表，实测 dev `retrieval_events` 重建会静默清掉 `retrieval_queries`/`retrieval_candidates` 共 9723 行）。`sql` 仍必填 = 新表 DDL，兼作 checksum 正文与 `createSql` 源；静态断言钉「hook 只许调 rebuildTable 且 `createSql === m.sql`」，防 checksum 只管形状不管 hook。`record()` 供条目在自身事务内写台账（结构变更与台账同生共死）；`verify` 探针对 run 条目跳过（结构已是新形状）。票 5/6/8 重建条目**必须同一形态**——各自发明接线 = 追加区两种机制并存，正是本活要消灭的平行真相源。
+   **已知窗口（2026-09-18，票 5 复审 OQ3 裁决接受）**：存在「rebuildTable 提交后、台账落盘前崩溃」的窄窗——重跑幂等自愈（结构已是新形状，`verify` 跳过；ISO 行再进 `strftime('%f')` 透传不产 NULL，不触发二次语义），危害有界（至多一次多余重建，行数有硬校验）。不修 = 不改 rebuildTable 签名、不翻已收口票 4 产物。
 
 ## 五、测试决策
 
