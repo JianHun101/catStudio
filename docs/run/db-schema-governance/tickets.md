@@ -68,11 +68,11 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 
 **索引三条**（同原票单）：
 
-| 索引                                               | 服务的查询                     | 备注                                                                      |
-| -------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------- |
-| `messages(session_id, created_at, id)`             | 会话历史拉取 + 游标 tie-break  | 现有 `(session_id, created_at)` 两列版升级                                |
-| `execution_logs(session_id, created_at)`           | 会话级日志查询、恢复路径       | 该表当前零二级索引                                                        |
-| `execution_logs(status)` 或 `(session_id, status)` | running 计数（重启判据主查询） | **对照实际 SQL 定形**：查询总带 session_id 则用复合，定形依据写进提交说明 |
+| 索引                                               | 服务的查询                     | 备注                                                                          |
+| -------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------- |
+| `messages(session_id, created_at, id)`             | 会话历史拉取 + 游标 tie-break  | 现有 `(session_id, created_at)` 两列版升级                                    |
+| `execution_logs(session_id, started_at)`           | 会话级日志查询、恢复路径       | 该表当前零二级索引；列名 `started_at`（2026-09-17 笔误勘正，原写 created_at） |
+| `execution_logs(status)` 或 `(session_id, status)` | running 计数（重启判据主查询） | **对照实际 SQL 定形**：查询总带 session_id 则用复合，定形依据写进提交说明     |
 
 - 只建清单内三条；想新增任何一条，先在票单举出查询证据回架。
 - 不动的表：agents / sessions（行数小、主键查询为主）；chunks 三表（sqlite-vec 自有索引，content_hash 唯一键存在性顺手核对即可）。
@@ -150,3 +150,25 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 **OQ1 终裁的执行归属修订**：终裁原文「fix-forward 随票 2 落地」，但 ds猫 已在票 1 分支直接实现并经审 ✅——**改随票 1 收口**：不重复造轮子、主库保护早上船；票 2 相应收窄为索引三条 + OQ4 播报措辞。安全窗口论证（终裁时留下）依旧成立且更优：fix-forward 先于索引上船，主库首启即补建，索引追加随后以普通 append 真执行，两不干扰。
 
 **遗留（不阻塞）**：OQ4 汇总播报在「0 条真执行」时措辞像「什么也没修」（repair 有单列日志兜底）——登记随票 2 顺手改；OQ2（checksum 耦合）审查者已论证不新增失败类（改基线正文会先撞该条目自身 checksum 拒启）；OQ3（note 空分不出补建）够用，显式来源列归票 2+ 台账 schema 变更时再议。
+
+---
+
+## 票 2 审查回执（2026-09-17，吐槽猫 ✅ 可合并，两轮：6bd2c19 → 修正 a2cde1a）
+
+**被审 commit**：`a2cde1a`（修正轮合并提交，取代首轮 `6bd2c19`；首轮被点是重复实现 fix-forward——票 1 裁决二修订后票面收窄，flash猫 让位删净重投）。
+
+**店长独立抽核（不盲信回执）**：
+
+- 拓扑：`dev`（`5bcf8e7`）是 `a2cde1a` 祖先 ✅；diff 面 4 文件（migrations.ts / index.ts / migrations.test.ts / tickets.md），无票外物体 ✅；
+- 基线区段零字节改动：Node 复算 dev 与 `a2cde1a` 的 `BASELINE_MIGRATIONS`→`APPENDED_MIGRATIONS` 切片 sha256 一致（`c483788f1d1e`）✅；
+- 追加区终态 4 条（ds猫 `694a859` 的 fix-forward 原文零改动 + 3 条索引），fix-forward 让位残留 0 ✅；
+- 索引列名按实际代码落 `started_at`——spec §3.2 / 本票单契约表格原写 `created_at` 系笔误（该表无此列，按字面建会拒启），**店长已勘正两文档**。
+
+**审查者要点采信**：测试口径换算（47→49）未降强度，权威判据钉在「空 initDb 净增穷举 = 恰 2 条索引」用例；同名升级 `idx_messages_session` 单列判据；eval/socketio 平局判据修正是「错开秒/显式 created_at」非删断言，同秒平局行为用留痕用例钉住；EXPLAIN 验收测试化且静态断言钉生产 SQL 同句；老库双形态用例（无台账 / 票 1 补登形态 = 主库真实升级路径）；OQ4 两态 + 真空性反对照。独立复跑 16 文件 420 例全绿 + lint 3 包绿。
+
+**遗留两项（均不阻塞，店长处置）**：
+
+1. ~~spec §3.2 列名勘正~~——已随本回执落地（spec + 票单双勘正）；
+2. **同秒平局判据（rowid→UUID 三候选）裁决：不另立单，随 B 范围 ⑤ 走**。理由：现行 `(created_at, id)` tie-break 与 messages 既有查询路径一致、新索引即按此三列建，且留痕用例已钉住现状行为；⑤-a/⑤-b 落地（毫秒精度 + helper 收口）后同秒平局概率近零，属同一改造的连带收敛；UUIDv7 翻案已录 spec（绑定换引擎决策点），不在本轮重复裁决。
+
+**票 2 收口动作**：见店长收口汇报（合入 dev + flash猫 worktree 清理 + 重启判定）。
