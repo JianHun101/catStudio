@@ -1,6 +1,6 @@
 # 票：数据库结构治理 P0（迁移机制立闸 + 索引三条）
 
-> **状态：票 1 三轮审查 ✅ 已收口（`3f7cab1` + `d90ebed` + `694a859` 合入 dev）；票 2 已解锁（索引三条 + OQ4 播报措辞——OQ1 fix-forward 已由 ds猫 以 `694a859` 随票 1 收口，**退出票 2 票面**），在 flash猫 手中。**
+> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅：台账 45 行、追加区 4 条真执行、EXPLAIN 三路径全 SEARCH）。B 范围票 3–8 已拆（2026-09-17 用户拍板「现在拆」），票 3（ds猫）/ 票 4（flash猫）已并行派出。**
 > 定稿规格：`docs/plans/db-schema-governance.md`（下称 spec，commit `e5daf7a`）。票单不复制 spec 全文，只钉执行面；与 spec 冲突以 spec 为准。
 > 范围裁决：A——P0 本轮实施，B 范围（FK/CHECK/时间口径/session_agents 拆表）设计已定稿、**票缓拆**，等 P0 落地验证后再拆。
 
@@ -68,11 +68,11 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 
 **索引三条**（同原票单）：
 
-| 索引                                               | 服务的查询                     | 备注                                                                      |
-| -------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------- |
-| `messages(session_id, created_at, id)`             | 会话历史拉取 + 游标 tie-break  | 现有 `(session_id, created_at)` 两列版升级                                |
-| `execution_logs(session_id, created_at)`           | 会话级日志查询、恢复路径       | 该表当前零二级索引                                                        |
-| `execution_logs(status)` 或 `(session_id, status)` | running 计数（重启判据主查询） | **对照实际 SQL 定形**：查询总带 session_id 则用复合，定形依据写进提交说明 |
+| 索引                                               | 服务的查询                     | 备注                                                                          |
+| -------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------- |
+| `messages(session_id, created_at, id)`             | 会话历史拉取 + 游标 tie-break  | 现有 `(session_id, created_at)` 两列版升级                                    |
+| `execution_logs(session_id, started_at)`           | 会话级日志查询、恢复路径       | 该表当前零二级索引；列名 `started_at`（2026-09-17 笔误勘正，原写 created_at） |
+| `execution_logs(status)` 或 `(session_id, status)` | running 计数（重启判据主查询） | **对照实际 SQL 定形**：查询总带 session_id 则用复合，定形依据写进提交说明     |
 
 - 只建清单内三条；想新增任何一条，先在票单举出查询证据回架。
 - 不动的表：agents / sessions（行数小、主键查询为主）；chunks 三表（sqlite-vec 自有索引，content_hash 唯一键存在性顺手核对即可）。
@@ -153,60 +153,128 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 
 ---
 
-## 票 2 实施回执（2026-09-17，flash猫，**第二轮 · 票面收窄后重做**）—— 待审查
+## 票 2 审查回执（2026-09-17，吐槽猫 ✅ 可合并，两轮：6bd2c19 → 修正 a2cde1a）
 
-**分支**：`session/54c4de25-flash猫`；**被审 commit**：见交接文档。基线 = dev `5bcf8e79`（已含 `694a859`）。
+**被审 commit**：`a2cde1a`（修正轮合并提交，取代首轮 `6bd2c19`；首轮被点是重复实现 fix-forward——票 1 裁决二修订后票面收窄，flash猫 让位删净重投）。
 
-**⚠️ 上一轮 `6bd2c19` 已被本轮取代，不作为交付面**：那一轮按**收窄前**票面实施，除三条索引外自带一条 fix-forward（名 `fix-forward 补建 retrieval/spans 缺失物体 (OQ1)`、带存在性探针、配套 `FIX_FORWARD_OBJECTS` / `baselineSqlOf` / `objectExists`）。收窄后它与 ds猫 的 `694a859`（名 `…五表九索引（票 1 OQ1）`、不带探针）**功能重复且两套 helper 并行**——本轮**让位删除**（条目 + 全部配套符号一并移除），只留 ds猫 那一条。收口时**只 carry 本轮被审 commit**。
+**店长独立抽核（不盲信回执）**：
 
-`APPENDED_MIGRATIONS` 终态 = **4 条**（ds猫 补建 1 + 票 2 索引 3）。
+- 拓扑：`dev`（`5bcf8e7`）是 `a2cde1a` 祖先 ✅；diff 面 4 文件（migrations.ts / index.ts / migrations.test.ts / tickets.md），无票外物体 ✅；
+- 基线区段零字节改动：Node 复算 dev 与 `a2cde1a` 的 `BASELINE_MIGRATIONS`→`APPENDED_MIGRATIONS` 切片 sha256 一致（`c483788f1d1e`）✅；
+- 追加区终态 4 条（ds猫 `694a859` 的 fix-forward 原文零改动 + 3 条索引），fix-forward 让位残留 0 ✅；
+- 索引列名按实际代码落 `started_at`——spec §3.2 / 本票单契约表格原写 `created_at` 系笔误（该表无此列，按字面建会拒启），**店长已勘正两文档**。
+
+**审查者要点采信**：测试口径换算（47→49）未降强度，权威判据钉在「空 initDb 净增穷举 = 恰 2 条索引」用例；同名升级 `idx_messages_session` 单列判据；eval/socketio 平局判据修正是「错开秒/显式 created_at」非删断言，同秒平局行为用留痕用例钉住；EXPLAIN 验收测试化且静态断言钉生产 SQL 同句；老库双形态用例（无台账 / 票 1 补登形态 = 主库真实升级路径）；OQ4 两态 + 真空性反对照。独立复跑 16 文件 420 例全绿 + lint 3 包绿。
+
+**遗留两项（均不阻塞，店长处置）**：
+
+1. ~~spec §3.2 列名勘正~~——已随本回执落地（spec + 票单双勘正）；
+2. **同秒平局判据（rowid→UUID 三候选）裁决：不另立单，随 B 范围 ⑤ 走**。理由：现行 `(created_at, id)` tie-break 与 messages 既有查询路径一致、新索引即按此三列建，且留痕用例已钉住现状行为；⑤-a/⑤-b 落地（毫秒精度 + helper 收口）后同秒平局概率近零，属同一改造的连带收敛；UUIDv7 翻案已录 spec（绑定换引擎决策点），不在本轮重复裁决。
+
+**票 2 收口动作**：见店长收口汇报（合入 dev + flash猫 worktree 清理 + 重启判定）。
+
+---
+
+## 票 2 收口汇报（2026-09-17，店长）
+
+- **文档复审**：`db49cee`（spec §3.2 列名勘正 `created_at`→`started_at`，纯文档 1 文件 5 行，与 session 分支 `aee7821` 同文经吐槽猫 Node 字节级核验）✅ 可合并。
+- **独立核现场**：工作树干净、`db49cee` 为 closeout 分支尖、全 sha `db49ceea1083cfee30f0c181f275d62a608e908d`、diff 面恰 1 文件纯文档（与回执一致）。
+- **收口链**：`.push-gate` 置全 sha → 推 `closeout/db-indexes-t2` → PR [#111](https://github.com/JianHun101/catStudio/pull/111)（base=dev）→ GitHub merge `7e5478b` → 本地 dev ff 同步 → **三方对齐：dev = origin/dev = .push-gate = `7e5478b`**。
+- **清理**：主仓库切回 dev；closeout 分支本地+远端已删（refspec 删 + ls-remote 复核）；ds猫 / flash猫 worktree 已清（工作树干净、无未合入提交——ds猫 分支两笔 docs 提交与 session 分支同尖、无遗失；flash猫 `a2cde1a` 已入 dev；会话无远端分支）。剩余本会话 worktree：会话本体 + 吐槽猫（审查侧，留待 B 范围）。
+- **重启判定：不发**。新索引 / OQ4 播报 / 补建迁移只在下次启动 initDb 时生效，运行中实例不受影响（判定看运行实例而非改动面）。**下次 server 重启时一并激活：票 1 迁移闸 + 主库 14 件缺失物体自动补建 + 票 2 索引三条。**
+- **下一步**：B 范围（④ FK/CHECK、⑤ 时间口径、⑥ 拆表）按 A 范围决策「票缓拆」——待 server 重启后 P0 实机验证（迁移闸首启 + 主库补建播报 + EXPLAIN 无 SCAN 抽查）通过，再拆 B 票。验证清单已备，重启后可直接执行。
+
+---
+
+# B 范围票单（2026-09-17 拆，P0 实机验证 ✅ 后）
+
+> 定稿决策全部在 spec §4，票面只钉执行面。**流程新规则（本轮起）**：实施猫的回执/交接**不进本票单**（防 review-view 快照带进分歧连停审查链——见 09-17 吐槽猫连停 4 轮事件）——报告与回执走投递正文/commit message，票单权威状态由店长统一写。
+> 并行策略：票 3（只读审计）与票 4（helper）**无互赖，同时开工**；票 5–8 等票 3 报告出来、用户拍板孤儿处置后再派。
+
+## 票 3 · 存量审计（只读报告，派 ds猫，无 worktree）
 
 ### 交付物
 
-| #   | 条目                                                        | 说明                                                                                                                                                                   |
-| --- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `idx_messages_session upgrade (session_id, created_at, id)` | `DROP INDEX IF EXISTS` + 同名重建三列。**必须 DROP**：留着两列同名索引，`CREATE INDEX IF NOT EXISTS` 会在老库/dev 库/新库**三者全体**静默 no-op，升级永不发生          |
-| 2   | `idx_execution_logs_session_started`                        | 落 `(session_id, started_at)`，理由见「偏离 1」                                                                                                                        |
-| 3   | `idx_execution_logs_status`                                 | **定形依据 = 实测调用面**：三条 running 判据查询（`scripts/dev.js:183`、`index.ts:136`、`repository/executionLogs.ts:18`）**都不带 session_id** ⇒ 复合版一条都服务不到 |
-| 4   | （ds猫 `694a859`，非本轮新增）                              | 本轮只做合流对账，零改动                                                                                                                                               |
+两份只读审计报告（**主库** `packages/server/data/cat-study.db` + **dev 库** `cat-study-dev.db`，两个库都要出数），投递正文回架，由店长落票单。
 
-`db/index.ts` —— **OQ4**：runner 汇总播报补一行 `[db] 追加区迁移真执行：N 条`（与老库补登那行**并存**；**每次启动都播报**，0 条即 0 条，两种情形措辞均与实际一致；计数含 `IF NOT EXISTS` 的 no-op 条目——它们确实执行过）。
+- **面 A · 孤儿审计**（spec §4.1 前置）：对每条候选 FK 关系跑「子表 LEFT JOIN 父表 WHERE 父 IS NULL」，输出：关系名、库、孤儿行数、样本前 5 行（关键列）。
+  候选链（spec §4.1）：`messages.agent_id→agents`、`review_verdicts` 各引用（逐列查 DDL 定）、`connector_bindings.session_id→sessions`、`episodes` 各引用、`flow_states.session_id`、`flow_state_events.session_id`；已有 FK 的链（messages→sessions、execution_logs 两链、session_read_state）抽样验证即可。
+- **面 B · 时间格式分布**（spec §4.2 前置）：全库每张表每个时间列实测格式分布（秒级 UTC `YYYY-MM-DD HH:MM:SS` vs ISO 毫秒 `...T...Z`），输出：表.列、格式 → 行数分布、异常样本。含 `messages.created_at` 同秒多行的密度（⑤ 改造面大小评估）。
 
-### 验收对账（票面 4 条）
+### 纪律
 
-| #   | 验收项                                               | 结果 | 证据                                                                                                                                                                                                 |
-| --- | ---------------------------------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | 三条索引服务的查询 `EXPLAIN QUERY PLAN` 无 `SCAN`    | ✅   | 真库副本逐条计划见下                                                                                                                                                                                 |
-| 2   | 老库路径 append 真执行                               | ✅   | 真库副本端到端见下（两库 `idx_messages_session` 实升三列、两库台账 4 条普通 append）                                                                                                                 |
-| 3   | ~~fix-forward 双态~~（已随票 1 退出）                | —    | —                                                                                                                                                                                                    |
-| 4   | 既有测试全绿 + 数组既有条目零改动 + OQ4 两态措辞一致 | ✅   | 全 4 project **134 文件 / 2703 用例全绿**；`lint` 绿；`migrations.ts` vs dev 的 diff **仅头部注释 + 3 条追加**（`BASELINE_MIGRATIONS` 与 `694a859` 条目零字节改动）；OQ4 两态各有用例 + 真空性反对照 |
+- **只读铁律**：两库一律 `new Database(path, { readonly: true, fileMustExist: true })`（better-sqlite3 只读模式），库文件绝对路径、绝不可写；不写任何代码进仓库、不动 worktree。
+- 报告可重复跑：SQL 留进投递正文，店长复核可直接重放。
 
-**EXPLAIN QUERY PLAN（在真库副本上读，主库全程只读）**
+### 验收
 
-| 查询                  | 计划                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------- |
-| messages 游标         | `SEARCH messages USING INDEX idx_messages_session (session_id=?)`                     |
-| execution_logs 会话级 | `SEARCH execution_logs USING INDEX idx_execution_logs_session_started (session_id=?)` |
-| running 计数          | `SEARCH execution_logs USING COVERING INDEX idx_execution_logs_status (status=?)`     |
+报告覆盖 spec §4.1 全部候选链 + §4.2 全部时间列，无「假设」式结论——每个数字都有 SQL 可复算。店长复核重放抽样一致即过。
 
-升级前对照：两条 execution_logs 查询均为 `SCAN`；messages 游标查询带 `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`（升级的增量价值 = 末列 `id` 把 tie-break 收进索引）。
+### 完成记录（2026-09-17，✅ 报告已投递，待拍板项 D1–D4）
 
-**真库副本端到端（源库只被 read/copy，`mtime 未变 = true`）**
+店长对账：dev 库 messages 2486（报告 2485，+1 = 审计后活流量新行）、execution_logs 1392（+1 = 本消息派发的 running 行）、sessions 30 ✅——三处一致，报告可信。
 
-| 库               | 物体    | messages 行 | 台账                        | 本轮新增物体                           |
-| ---------------- | ------- | ----------- | --------------------------- | -------------------------------------- |
-| dev（齐件 47）   | 47 → 49 | 2524 → 2524 | 41 baseline + 4 普通 append | **恰 2 件** = 两条 execution_logs 索引 |
-| 主库（缺 14 件） | 33 → 49 | 1825 → 1825 | 41 baseline + 4 普通 append | **16 件** = 14 补建 + 2 索引           |
+**面 A 要点**：核心资产（messages.agent_id、agents、sessions 本体）**零孤儿**。孤儿大头全是「会话/消息被删后的连带残渣」，且父行**两库皆无**（非分叉，是真删除）：episodes 系 3 链（main 249/201/249 行，占 23–29%；dev 203/196/203）、dev `spans.session_id` 480 行（仅涉 1 个父 id）、dev `retrieval_events.session_id` 53、flow 系 41、dev `review_verdicts` message/session 各 26、`review_parse_failures.message_id` 20、dev `episode_attributions.delivery_message_id` 23、dev execution_logs 两列 11/14、`sessions.summary_msg_id` ≤5。
+**面 B 要点**：待转换面 = main 16 列 / dev 19 列（全 `YYYY-MM-DD HH:MM:SS`）；`spans.start_at`、dev `retrieval_events.created_at`、台账 `applied_at` 已 ISO 毫秒（不转）；messages 同秒密度仅 ~1.5%。
 
-### 偏离与待裁
+**三个计划外发现**：
 
-**偏离 1（上一轮实测，未变）**：`execution_logs` **没有 `created_at` 列**（时间列是 `started_at`/`ended_at`），spec §3.2 按字面实现当场 `no such column` → 拒启（实测）。落 `(session_id, started_at)`，形状用途不变。**请求店长收口时更正 spec §3.2 该行**（定稿规格面不由实施猫单方面改）。仓内同口径佐证三处：`repository/query.ts:15`、`eval/l1-aggregator.ts:68`、`routes/internal.test.ts:864`。
+1. **两库 messages 列序不同**（第 7/8 位 `task_id`/`created_at` 互换，老库 ALTER 追加列产物）→ 票 4 helper 硬约束见该票 addendum；
+2. **`review_verdicts.subject_agent_id` 写猫名非 id**（main 6 行 / dev 4 行，可按 `agents.name` 唯一解析还原；写入口 `verdict-parser.ts:50` 注释自称外键语义与实现不符）→ 票 6 重建前需 name→id 归一迁移（D3）；
+3. **只读审计的 WAL 边车副作用**：主库被只读连接生成 `cat-study.db-shm`(32KB) + `cat-study.db-wal`(0 字节)，清理被权限拒、未重试；数据文件 mtime 未变，无害（D4）。
 
-**偏离 2 / OQ（待裁，上一轮实测，未变）**：三列索引把**同秒平局的隐含判据由 `rowid`（插入序）换成 `id`（UUID）**。
+**CHECK 值域读数**（票 5/6 定枚举用）：`messages.role` 三值闭合；`dispatch_state` 含 `running` 中间态 + 大量 NULL（main 746 / dev 1156——SQLite CHECK 对 NULL 放行，语义成立）；`execution_logs.status` 含 `running`（dev 有 2 行 running 脏存量，票 6 处置）；`flow_state_events.to_state` 四值；dev `review_verdicts.verdict` 含 `comment`（widen 成果，归基线集）。
 
-- 影响面 = 7 个按 `created_at` **单列排序**的读口：`getRecentMessages`（猫上下文 `execution/reply.ts:340`）、`getSessionHistory`（UI `socketio.ts:190`）、`getAllSessionMessages`（派发扫描 `dispatch/index.ts:82`）、`getContextBefore`（`routes/eval.ts:243`）、`getTaskHistory`、`getLatestUserMessageId`（撤回判据 `socketio.ts:378`）、`getAgentRepliesAfter`。游标查询不受影响（它显式按 `(created_at, id)` 排序，是受益方）。
-- 量级（两库实测）：平局覆盖 **1.5%** 消息行，位次真变 **0.6%(dev) / 1.1%(主库)**。
-- 候选：①**接受 + 记录**（推荐：旧 rowid 判据本就非契约，`VACUUM` 可能重编 rowid；B 范围 ⑤-a 毫秒时间戳后平局基本消失）；②给上述查询补显式 `, rowid`（保插入序语义，代价是回落临时排序）；③补显式 `, id`（零排序，但同样是 UUID 序）。
-- **本轮处置**：未动任何既有查询（触及共享读层，超票面「只建清单内三条」边界）；押在平局判据上的两处既有用例（`routes/eval.test.ts`、`connectors/socketio.test.ts`）改为**不依赖平局**，另在 `db/migrations.test.ts` 增「行为变更记录」用例把新判据钉住。
+**待拍板**：D1 孤儿处置（店长建议默认删除，依据充分）/ D2 spec 未点名同族链（A-3 九条）是否纳入 FK / D3 subject_agent_id 归一（建议并入票 6）/ D4 WAL 边车（建议不清理）。D1–D2 拍板后派票 5/6；票 8 另有悬空成员引用 4 条（main 2 会话指向 dev 猫 id，建议按 name 归一）随票 8 处置。
 
-**本轮新增偏离（仅测试判据面，未降强度）**：追加区上线使「齐件库物体数」47 → 49，ds猫 侧 3 处硬编码 `BASELINE.length` / `33` 的断言按新口径换算（新增 `APPENDED_NET_OBJECTS` 常量，并注明权威清单在「验收 1 · 空库跑完整 initDb 净增 2 件」那条穷举用例）；全量 dump 逐表比对中 `idx_messages_session` 单列（同名升级，定义本就该变，其升级判据单列断言）。
+---
+
+## 票 4 · rebuildTable 通用 helper（派 flash猫，走 worktree，与票 3 并行）
+
+### 交付物
+
+`packages/server/src/db/rebuild.ts`（+ co-located `rebuild.test.ts`）：通用表重建 helper，B 范围重建批的公共工具（spec §4.4 纪律 2）。
+
+### 契约
+
+- 形状：`rebuildTable(db, { table, createSql, columnMap?, } )`——读 `sqlite_master` 当前形状，单事务执行：建新表 → 按 columnMap 拷数据（缺省同名映射；类型/格式变更显式给转换表达式——时间列秒级→ISO 转换表达式是头号用例）→ 校验行数一致 → 删旧表 → 改名 → 按 createSql 重建索引/约束。
+- **行数一致是硬校验**：拷贝前后计数不符 → ROLLBACK + 抛错，不留半成品。
+- 通用、**不带任何真实表形状**——各表 DDL 在各自重建票里定，helper 只提供机制。
+
+### 契约补充（2026-09-17，票 3 发现①，实施中途追加，属验收的一部分）
+
+两库 `messages` **列序不同**（main：`…created_at,task_id…`；dev：`…task_id,created_at…`，第 7/8 位互换——老库 ALTER 追加列的历史产物；14 列同名同类型）。结论：
+
+- helper 拷贝**必须按列名显式映射，禁 `SELECT *` / 位置对齐**——位置对齐在两库间会**静默错列**，而行数校验查不出来（行数一致）。
+- 建议机制：helper 从 `PRAGMA table_info` 双侧取列名，显式构造 `INSERT INTO new (cols…) SELECT cols… FROM old`；新旧列名交集外的列（旧表有而新表删的列，如票 8 的 `agent_ids`）→ 显式声明丢弃，否则抛错，**不许静默丢数据**。
+- 测试加**双列序用例**：故意以乱序列序建旧表，断言数据按列名落对列。
+
+### 边界
+
+不跑真实迁移、不动 `migrations.ts` 数组（B 重建票才 append）、不动 repository 层、不引入新依赖。
+
+### 验收
+
+`:memory:` 往返：建旧形表 → 插数据 → rebuild（含一次时间列转换 + 一次列改名映射）→ 断言数据原样/格式已转/新约束生效；行数校验注入失败 → 回滚、旧表原样。既有测试全绿。
+
+### 流程
+
+worktree（从 dev `7e5478b` 建分支 `session/54c4de25-flash猫`）；`node node_modules/vitest/vitest.mjs run` 跑测试（pnpm test 会被 junction 拒）；quality-gate → request-review 投吐槽猫；不自行合并、不 push。
+
+---
+
+## 票 5 · messages 重建（blocked by 票 3 拍板 + 票 4）
+
+一次重建合并全部变更（spec §4.2 铁律）：FK `agent_id→agents` RESTRICT、CHECK `dispatch_state`、created_at 秒级→ISO 毫秒、**连带切换**（spec §4.2 连带改造点）：`messages.ts:127` 游标比较逻辑与超时窗 `datetime('now', ?)` 同批切新格式——**格式混比会错序，不留半套**。时间列转换表达式用票 4 helper 的 columnMap 机制。孤儿 messages 按票 3 报告 + 用户拍板处置。
+
+## 票 6 · 小表重建批（blocked by 票 3 + 票 4）
+
+execution_logs / flow_states / flow_state_events / connector_bindings / episodes 系 / review_verdicts 的重建：**逐表先审计留痕**（现有 FK/CHECK/时间列实测 vs spec §4.1 缺口清单，一张表一份结论），时间口径全转 ISO，FK/CHECK 按审计定稿补。清单以审计报告为准，票开时逐表列。
+
+## 票 7 · 归档（轻量 ALTER，可与票 5/6 并行，blocked by 无）
+
+sessions `ADD COLUMN archived_at TEXT`（NULL=活跃）+ 部分索引 `WHERE archived_at IS NULL` + repository 读写 + API + 前端最小入口（归档操作 + 「显示已归档」开关）。**验收（spec §4.1）**：归档后数据全在、列表默认过滤、**归档会话照常可被记忆检索**。
+
+## 票 8 · session_agents 拆表 + sessions 重建（blocked by 票 3 + 票 4 + 票 7）
+
+内部顺序（spec §4.3，不能反）：① 建 `session_agents` + 解析 JSON 灌入（数组下标→position，悬空引用按拍板处置）；② **sessions 一次重建**：时间口径 + 删 `agent_ids` 列 + **保留票 7 的 archived_at** + 约束；③ 读取路径全改走新表（对外 API 形状不变，`agentIds` 按 position 组装）；④ 隐藏行为保留：成员变更仍 touch `sessions.updated_at`（验收项）；⑤ 删 session → CASCADE 成员行；删 agent → RESTRICT + **409 契约**：repository 先查后删、命中抛领域错误带会话清单、API 409 + 结构化错误体（spec §4.1 行为契约）。
