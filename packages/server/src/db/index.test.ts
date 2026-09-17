@@ -130,6 +130,9 @@ describe('db', () => {
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, tokenize='unicode61');
       `)
       expect(tableNames()).toContain('memories')
+      // **「老库」判据 = 有用户表 + 无台账**（runner 同款）：夹具是走真实迁移路径建出来的，
+      // 台账齐全 ⇒ 不删台账的话 DROP 条目已登记，压根不会被碰到（本用例会退化成假绿）
+      getDb().exec(`DROP TABLE schema_migrations`)
 
       initDb()
 
@@ -195,11 +198,11 @@ describe('db', () => {
       }).not.toThrow()
     })
 
-    it('additive migrations 幂等：initDb 重复执行不炸（列已存在则 ALTER 静默跳过）', async () => {
+    it('重复启动幂等：initDb 再跑不炸（台账已登记 ⇒ 零执行）', async () => {
       const { initDb } = await import('./index.js')
       const db = getDb()
-      // 模拟旧库升级：先建好全部新列（含 compressed_summaries），再跑 initDb 迁移数组
-      // → 所有 ALTER/CREATE 在 try/catch 中静默跳过，重复启动零副作用
+      // 夹具 schema 由真实迁移路径建出、台账齐全 ⇒ 再跑 initDb 只是 checksum 校验 + no-op。
+      // （「跳过」如今由台账承担，不再靠 ALTER/CREATE 的 try/catch 静默吞错）
       expect(() => initDb()).not.toThrow()
       const cols = db.pragma('table_info(sessions)') as Array<{ name: string }>
       expect(cols.map((c) => c.name)).toContain('compressed_summaries')
@@ -207,7 +210,13 @@ describe('db', () => {
   })
 
   describe('migration - review_verdicts CHECK 放宽（T-C 💬仅评论）', () => {
-    /** 把 review_verdicts 换成「旧 CHECK」版本，模拟 T-C 之前的存量库 */
+    /**
+     * 把 review_verdicts 换成「旧 CHECK」版本，模拟 T-C 之前的存量库。
+     *
+     * ⚠️ 光换表不够：**「老库」判据 = 有用户表 + 无台账**。台账齐全时该条目已登记，
+     * runner 只会 checksum 校验、不会再去碰它（这正是「台账管历史不管现状」的语义）
+     * ⇒ 用例会退化成假绿。故一并删掉台账，走真正的老库补登路径（探针 false ⇒ 矫正）。
+     */
     function downgradeToOldCheck(): void {
       getDb().exec(`
         DROP TABLE review_verdicts;
@@ -219,6 +228,7 @@ describe('db', () => {
           verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'suggest', 'reject')),
           created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        DROP TABLE schema_migrations;
       `)
     }
 
@@ -247,7 +257,7 @@ describe('db', () => {
       ).not.toThrow()
     })
 
-    it('重建保数据 + 闸门幂等：旧行原样搬过去，第二次 initDb 不再重建', async () => {
+    it('重建保数据 + 台账幂等：旧行原样搬过去，第二次 initDb 不再重建', async () => {
       const { initDb } = await import('./index.js')
       downgradeToOldCheck()
       getDb()
@@ -263,7 +273,7 @@ describe('db', () => {
         .get() as { verdict: string } | undefined
       expect(row?.verdict).toBe('suggest') // 重建不是清库
 
-      initDb() // 闸门命中（sql 已含 comment）→ 跳过重建，数据不动
+      initDb() // 台账已登记 + 探针报效果已成立 → 跳过重建，数据不动
       const count = getDb().prepare(`SELECT COUNT(*) AS n FROM review_verdicts`).get() as {
         n: number
       }

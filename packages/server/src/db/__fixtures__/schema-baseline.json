@@ -1,0 +1,284 @@
+[
+  {
+    "type": "index",
+    "name": "idx_chunks_identity",
+    "tblName": "chunks",
+    "sql": "CREATE UNIQUE INDEX idx_chunks_identity ON chunks(doc_path,section_anchor,content_hash)"
+  },
+  {
+    "type": "index",
+    "name": "idx_chunks_origin",
+    "tblName": "chunks",
+    "sql": "CREATE INDEX idx_chunks_origin ON chunks(origin_id)"
+  },
+  {
+    "type": "index",
+    "name": "idx_chunks_status",
+    "tblName": "chunks",
+    "sql": "CREATE INDEX idx_chunks_status ON chunks(status)"
+  },
+  {
+    "type": "index",
+    "name": "idx_eval_scores_message_id",
+    "tblName": "eval_scores",
+    "sql": "CREATE UNIQUE INDEX idx_eval_scores_message_id ON eval_scores(message_id)"
+  },
+  {
+    "type": "index",
+    "name": "idx_messages_session",
+    "tblName": "messages",
+    "sql": "CREATE INDEX idx_messages_session ON messages(session_id,created_at)"
+  },
+  {
+    "type": "index",
+    "name": "idx_retrieval_candidates_hash",
+    "tblName": "retrieval_candidates",
+    "sql": "CREATE INDEX idx_retrieval_candidates_hash ON retrieval_candidates(content_hash)"
+  },
+  {
+    "type": "index",
+    "name": "idx_retrieval_candidates_query",
+    "tblName": "retrieval_candidates",
+    "sql": "CREATE INDEX idx_retrieval_candidates_query ON retrieval_candidates(query_id)"
+  },
+  {
+    "type": "index",
+    "name": "idx_retrieval_events_created",
+    "tblName": "retrieval_events",
+    "sql": "CREATE INDEX idx_retrieval_events_created ON retrieval_events(created_at)"
+  },
+  {
+    "type": "index",
+    "name": "idx_retrieval_events_execution",
+    "tblName": "retrieval_events",
+    "sql": "CREATE INDEX idx_retrieval_events_execution ON retrieval_events(execution_id)"
+  },
+  {
+    "type": "index",
+    "name": "idx_retrieval_events_task",
+    "tblName": "retrieval_events",
+    "sql": "CREATE INDEX idx_retrieval_events_task ON retrieval_events(task_id)"
+  },
+  {
+    "type": "index",
+    "name": "idx_spans_chain",
+    "tblName": "spans",
+    "sql": "CREATE INDEX idx_spans_chain ON spans(chain_id)"
+  },
+  {
+    "type": "index",
+    "name": "idx_spans_execution",
+    "tblName": "spans",
+    "sql": "CREATE INDEX idx_spans_execution ON spans(execution_id)"
+  },
+  {
+    "type": "index",
+    "name": "idx_spans_name",
+    "tblName": "spans",
+    "sql": "CREATE INDEX idx_spans_name ON spans(name)"
+  },
+  {
+    "type": "index",
+    "name": "idx_spans_start",
+    "tblName": "spans",
+    "sql": "CREATE INDEX idx_spans_start ON spans(start_at)"
+  },
+  {
+    "type": "table",
+    "name": "agents",
+    "tblName": "agents",
+    "sql": "CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,avatar TEXT NOT NULL DEFAULT '🐱',system_prompt TEXT NOT NULL,llm_provider TEXT NOT NULL DEFAULT 'deepseek',llm_model TEXT NOT NULL DEFAULT 'deepseek-v4-pro',llm_api_key TEXT NOT NULL,llm_base_url TEXT,skill_modules TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL DEFAULT(datetime('now')),updated_at TEXT NOT NULL DEFAULT(datetime('now')),effort_level TEXT NOT NULL DEFAULT 'high',role TEXT NOT NULL DEFAULT 'unknown',llm_max_tokens INTEGER NOT NULL DEFAULT 2048,llm_temperature REAL NOT NULL DEFAULT 0.7,llm_env_extra TEXT NOT NULL DEFAULT '{}')"
+  },
+  {
+    "type": "table",
+    "name": "chunk_vectors",
+    "tblName": "chunk_vectors",
+    "sql": "CREATE VIRTUAL TABLE chunk_vectors USING vec0(chunk_id INTEGER PRIMARY KEY,embedding float[512] distance_metric=cosine)"
+  },
+  {
+    "type": "table",
+    "name": "chunk_vectors_chunks",
+    "tblName": "chunk_vectors_chunks",
+    "sql": "CREATE TABLE \"chunk_vectors_chunks\"(chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,size INTEGER NOT NULL,validity BLOB NOT NULL,rowids BLOB NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "chunk_vectors_info",
+    "tblName": "chunk_vectors_info",
+    "sql": "CREATE TABLE \"chunk_vectors_info\"(key text primary key,value any)"
+  },
+  {
+    "type": "table",
+    "name": "chunk_vectors_rowids",
+    "tblName": "chunk_vectors_rowids",
+    "sql": "CREATE TABLE \"chunk_vectors_rowids\"(rowid INTEGER PRIMARY KEY AUTOINCREMENT,id,chunk_id INTEGER,chunk_offset INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "chunk_vectors_vector_chunks00",
+    "tblName": "chunk_vectors_vector_chunks00",
+    "sql": "CREATE TABLE \"chunk_vectors_vector_chunks00\"(rowid PRIMARY KEY,vectors BLOB NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "chunks",
+    "tblName": "chunks",
+    "sql": "CREATE TABLE chunks(id INTEGER PRIMARY KEY AUTOINCREMENT,doc_path TEXT NOT NULL,section_anchor TEXT NOT NULL,content_hash TEXT NOT NULL,origin_id TEXT NOT NULL,type TEXT,status TEXT,date TEXT,evidence TEXT,supersedes TEXT,superseded_by TEXT,valid_from TEXT,valid_to TEXT,part_index INTEGER NOT NULL,part_total INTEGER NOT NULL,hard_cut INTEGER NOT NULL DEFAULT 0,body TEXT NOT NULL,breadcrumb TEXT NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "chunks_fts",
+    "tblName": "chunks_fts",
+    "sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(content,tokenize='unicode61')"
+  },
+  {
+    "type": "table",
+    "name": "chunks_fts_config",
+    "tblName": "chunks_fts_config",
+    "sql": "CREATE TABLE 'chunks_fts_config'(k PRIMARY KEY,v)WITHOUT ROWID"
+  },
+  {
+    "type": "table",
+    "name": "chunks_fts_content",
+    "tblName": "chunks_fts_content",
+    "sql": "CREATE TABLE 'chunks_fts_content'(id INTEGER PRIMARY KEY,c0)"
+  },
+  {
+    "type": "table",
+    "name": "chunks_fts_data",
+    "tblName": "chunks_fts_data",
+    "sql": "CREATE TABLE 'chunks_fts_data'(id INTEGER PRIMARY KEY,block BLOB)"
+  },
+  {
+    "type": "table",
+    "name": "chunks_fts_docsize",
+    "tblName": "chunks_fts_docsize",
+    "sql": "CREATE TABLE 'chunks_fts_docsize'(id INTEGER PRIMARY KEY,sz BLOB)"
+  },
+  {
+    "type": "table",
+    "name": "chunks_fts_idx",
+    "tblName": "chunks_fts_idx",
+    "sql": "CREATE TABLE 'chunks_fts_idx'(segid,term,pgno,PRIMARY KEY(segid,term))WITHOUT ROWID"
+  },
+  {
+    "type": "table",
+    "name": "connector_bindings",
+    "tblName": "connector_bindings",
+    "sql": "CREATE TABLE connector_bindings(id TEXT PRIMARY KEY,platform TEXT NOT NULL,external_type TEXT NOT NULL CHECK(external_type IN('group','private')),external_id TEXT NOT NULL,session_id TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')),UNIQUE(platform,external_type,external_id))"
+  },
+  {
+    "type": "table",
+    "name": "episode_attributions",
+    "tblName": "episode_attributions",
+    "sql": "CREATE TABLE episode_attributions(id TEXT PRIMARY KEY,episode_id TEXT NOT NULL UNIQUE,outcome TEXT NOT NULL,root_cause TEXT,action_type TEXT NOT NULL CHECK(action_type IN('investigation','harness_fix','replay','improvement')),action_detail TEXT,status TEXT NOT NULL DEFAULT 'dispatched' CHECK(status IN('dispatched','resolved')),created_at TEXT NOT NULL DEFAULT(datetime('now')),updated_at TEXT NOT NULL DEFAULT(datetime('now')),delivery_message_id TEXT,FOREIGN KEY(episode_id)REFERENCES episodes(id))"
+  },
+  {
+    "type": "table",
+    "name": "episodes",
+    "tblName": "episodes",
+    "sql": "CREATE TABLE episodes(id TEXT PRIMARY KEY,root_trigger_message_id TEXT NOT NULL UNIQUE,root_triggered_by TEXT NOT NULL CHECK(root_triggered_by IN('U','H')),root_message_id TEXT,task_id TEXT,chain_task_id TEXT,session_id TEXT,outcome TEXT CHECK(outcome IN('success','corrected_success','needs_investigation','harness_fix_needed','routing_failure','abandoned','unclassified')),episode_state TEXT NOT NULL CHECK(episode_state IN('open','classified','closed')),classification_ver TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')),updated_at TEXT NOT NULL DEFAULT(datetime('now')))"
+  },
+  {
+    "type": "table",
+    "name": "eval_scores",
+    "tblName": "eval_scores",
+    "sql": "CREATE TABLE eval_scores(id TEXT PRIMARY KEY,message_id TEXT NOT NULL,session_id TEXT NOT NULL,agent_id TEXT,score REAL NOT NULL,dimensions TEXT,judge_model TEXT NOT NULL,sample_reason TEXT NOT NULL CHECK(sample_reason IN('random','low_score','user_feedback')),created_at TEXT NOT NULL DEFAULT(datetime('now')))"
+  },
+  {
+    "type": "table",
+    "name": "execution_logs",
+    "tblName": "execution_logs",
+    "sql": "CREATE TABLE execution_logs(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,agent_id TEXT NOT NULL,triggered_by_message_id TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN('queued','running','completed','failed')),trace_id TEXT NOT NULL DEFAULT '',started_at TEXT,ended_at TEXT,latency_ms INTEGER,error_message TEXT,message_id TEXT,commit_hash TEXT,packages_installed TEXT,prompt_chars INTEGER,reply_chars INTEGER,prompt_tokens INTEGER,completion_tokens INTEGER,error_type TEXT,FOREIGN KEY(session_id)REFERENCES sessions(id),FOREIGN KEY(agent_id)REFERENCES agents(id))"
+  },
+  {
+    "type": "table",
+    "name": "flow_state_events",
+    "tblName": "flow_state_events",
+    "sql": "CREATE TABLE flow_state_events(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL,commit_sha TEXT NOT NULL,from_state TEXT,to_state TEXT NOT NULL,intent TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')))"
+  },
+  {
+    "type": "table",
+    "name": "flow_states",
+    "tblName": "flow_states",
+    "sql": "CREATE TABLE flow_states(session_id TEXT NOT NULL,commit_sha TEXT NOT NULL,state TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT(datetime('now')),PRIMARY KEY(session_id,commit_sha))"
+  },
+  {
+    "type": "table",
+    "name": "knowledge",
+    "tblName": "knowledge",
+    "sql": "CREATE TABLE knowledge(id TEXT PRIMARY KEY,content TEXT NOT NULL,embedding BLOB,-- 512-dim f32，同 memories.embedding 格式 source TEXT,-- 来源标注（文档名/URL） tags TEXT,-- JSON 字符串数组，检索过滤预留 created_at TEXT NOT NULL DEFAULT(datetime('now')))"
+  },
+  {
+    "type": "table",
+    "name": "messages",
+    "tblName": "messages",
+    "sql": "CREATE TABLE messages(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,agent_id TEXT,role TEXT NOT NULL CHECK(role IN('user','agent','system')),content TEXT NOT NULL,mentions TEXT NOT NULL DEFAULT '[]',task_id TEXT,created_at TEXT NOT NULL DEFAULT(datetime('now')),images TEXT,thinking_content TEXT,tool_content TEXT,segments TEXT,dispatch_state TEXT DEFAULT NULL,extra TEXT DEFAULT NULL,FOREIGN KEY(session_id)REFERENCES sessions(id))"
+  },
+  {
+    "type": "table",
+    "name": "retrieval_candidates",
+    "tblName": "retrieval_candidates",
+    "sql": "CREATE TABLE retrieval_candidates(id INTEGER PRIMARY KEY AUTOINCREMENT,query_id INTEGER NOT NULL REFERENCES retrieval_queries(id)ON DELETE CASCADE,source TEXT NOT NULL,channel TEXT,doc_path TEXT NOT NULL,section_anchor TEXT NOT NULL,content_hash TEXT NOT NULL,chunk_id INTEGER,breadcrumb TEXT,body_head TEXT,status_at_query TEXT,distance REAL,rank INTEGER,rrf_score REAL,final_rank INTEGER,passed_status_filter INTEGER,injected INTEGER NOT NULL,section_rank INTEGER,injected_position INTEGER,dropped_reason TEXT)"
+  },
+  {
+    "type": "table",
+    "name": "retrieval_events",
+    "tblName": "retrieval_events",
+    "sql": "CREATE TABLE retrieval_events(id INTEGER PRIMARY KEY AUTOINCREMENT,execution_id TEXT NOT NULL,session_id TEXT,agent_id TEXT,task_id TEXT,created_at TEXT NOT NULL,threshold_max_distance REAL NOT NULL,param_top_k INTEGER NOT NULL,param_probe_n INTEGER,reason TEXT NOT NULL,retrieval_ms INTEGER,context_tokens INTEGER,budget_tokens INTEGER,truncated INTEGER,param_pool_n INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "retrieval_queries",
+    "tblName": "retrieval_queries",
+    "sql": "CREATE TABLE retrieval_queries(id INTEGER PRIMARY KEY AUTOINCREMENT,retrieval_id INTEGER NOT NULL REFERENCES retrieval_events(id)ON DELETE CASCADE,query_index INTEGER NOT NULL,query_text TEXT NOT NULL,query_embed_ok INTEGER NOT NULL,UNIQUE(retrieval_id,query_index))"
+  },
+  {
+    "type": "table",
+    "name": "review_parse_failures",
+    "tblName": "review_parse_failures",
+    "sql": "CREATE TABLE review_parse_failures(message_id TEXT PRIMARY KEY,reason TEXT NOT NULL CHECK(reason IN('no_subject','bad_verdict')),raw TEXT,created_at TEXT NOT NULL DEFAULT(datetime('now')))"
+  },
+  {
+    "type": "table",
+    "name": "review_verdicts",
+    "tblName": "review_verdicts",
+    "sql": "CREATE TABLE review_verdicts(message_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,reviewer_agent_id TEXT NOT NULL,subject_agent_id TEXT,verdict TEXT NOT NULL CHECK(verdict IN('approve','comment','suggest','reject')),created_at TEXT NOT NULL DEFAULT(datetime('now')))"
+  },
+  {
+    "type": "table",
+    "name": "session_read_state",
+    "tblName": "session_read_state",
+    "sql": "CREATE TABLE session_read_state(session_id TEXT PRIMARY KEY,last_read_at TEXT NOT NULL DEFAULT(datetime('now')),FOREIGN KEY(session_id)REFERENCES sessions(id)ON DELETE CASCADE)"
+  },
+  {
+    "type": "table",
+    "name": "sessions",
+    "tblName": "sessions",
+    "sql": "CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT NOT NULL,agent_ids TEXT NOT NULL DEFAULT '[]',broadcast_mode INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL DEFAULT(datetime('now')),updated_at TEXT NOT NULL DEFAULT(datetime('now')),running_summary TEXT,handoff_from TEXT,summary_msg_id TEXT,compressed_summaries TEXT)"
+  },
+  {
+    "type": "table",
+    "name": "settings",
+    "tblName": "settings",
+    "sql": "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT(datetime('now')))"
+  },
+  {
+    "type": "table",
+    "name": "span_llm",
+    "tblName": "span_llm",
+    "sql": "CREATE TABLE span_llm(id INTEGER PRIMARY KEY AUTOINCREMENT,span_id TEXT NOT NULL UNIQUE REFERENCES spans(span_id)ON DELETE CASCADE,provider TEXT NOT NULL,model TEXT NOT NULL,input_tokens INTEGER,output_tokens INTEGER,ttft_ms INTEGER,stream INTEGER NOT NULL,max_tokens INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "spans",
+    "tblName": "spans",
+    "sql": "CREATE TABLE spans(id INTEGER PRIMARY KEY AUTOINCREMENT,span_id TEXT NOT NULL UNIQUE,parent_span_id TEXT REFERENCES spans(span_id),chain_id TEXT,execution_id TEXT NOT NULL,session_id TEXT,agent_id TEXT,name TEXT NOT NULL,operation_name TEXT,start_at TEXT NOT NULL,duration_ms INTEGER NOT NULL,status TEXT NOT NULL,error_type TEXT,error_message TEXT,item_count INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "user_feedback",
+    "tblName": "user_feedback",
+    "sql": "CREATE TABLE user_feedback(id TEXT PRIMARY KEY,eval_score_id TEXT NOT NULL UNIQUE,message_id TEXT,session_id TEXT,user_score REAL NOT NULL,comment TEXT,created_at TEXT NOT NULL DEFAULT(datetime('now')))"
+  }
+]
