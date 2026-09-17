@@ -1,6 +1,6 @@
 # 票：数据库结构治理 P0（迁移机制立闸 + 索引三条）
 
-> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅）。B 范围：票 3 ✅（`4f05566` 落单）、票 4 ✅（`f167351` 复审可合并，收口中）、票 5–8 等用户对票 3 报告 D1–D4 拍板（票 7 无阻塞可先行）。**
+> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅）。B 范围：票 3 ✅、票 4 ✅、票 5 ✅（均入 dev）。D1–D4 已拍板（2026-09-17）。票 6 批一（ds猫，`dce2bc9`）在审；批二随票 5 机制入 dev 已解锁；票 7（flash猫）随票 5 收口派活；票 8 blocked by 票 7。**
 > 定稿规格：`docs/plans/db-schema-governance.md`（下称 spec，commit `e5daf7a`）。票单不复制 spec 全文，只钉执行面；与 spec 冲突以 spec 为准。
 > 范围裁决：A——P0 本轮实施，B 范围（FK/CHECK/时间口径/session_agents 拆表）设计已定稿、**票缓拆**，等 P0 落地验证后再拆。
 
@@ -225,7 +225,7 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 
 **CHECK 值域读数**（票 5/6 定枚举用）：`messages.role` 三值闭合；`dispatch_state` 含 `running` 中间态 + 大量 NULL（main 746 / dev 1156——SQLite CHECK 对 NULL 放行，语义成立）；`execution_logs.status` 含 `running`（dev 有 2 行 running 脏存量，票 6 处置）；`flow_state_events.to_state` 四值；dev `review_verdicts.verdict` 含 `comment`（widen 成果，归基线集）。
 
-**待拍板**：D1 孤儿处置（店长建议默认删除，依据充分）/ D2 spec 未点名同族链（A-3 九条）是否纳入 FK / D3 subject_agent_id 归一（建议并入票 6）/ D4 WAL 边车（建议不清理）。D1–D2 拍板后派票 5/6；票 8 另有悬空成员引用 4 条（main 2 会话指向 dev 猫 id，建议按 name 归一）随票 8 处置。
+**D1–D4 已拍板（2026-09-17，用户「按建议走」）**：D1 孤儿处置 = **删除**——票 5/6/8 重建迁移逐链带 DELETE，审计 SQL 留痕可复算；D2 九条同族链 = **全部纳 FK**（八条随票 6 逐表清单按需补重建条目，`sessions.summary_msg_id` 随票 8；agent_id 两链零孤儿纯防御）；D3 subject_agent_id 归一 = **并入票 6**（该票约束面③）；D4 WAL 边车 = **不清理**（0 字节，server 停着时想清手删）。票 8 另有悬空成员引用 4 条（main 2 会话指向 dev 猫 id，按 name 归一）随票 8 处置。
 
 ---
 
@@ -281,19 +281,29 @@ worktree（从 dev `7e5478b` 建分支 `session/54c4de25-flash猫`）；`node no
 
 ---
 
-## 票 5 · messages 重建（blocked by 票 3 拍板 + 票 4）
+## 票 5 · messages 重建（派 flash猫，走 worktree；blocked 已解除 2026-09-17）
 
-一次重建合并全部变更（spec §4.2 铁律）：FK `agent_id→agents` RESTRICT、CHECK `dispatch_state`、created_at 秒级→ISO 毫秒、**连带切换**（spec §4.2 连带改造点）：`messages.ts:127` 游标比较逻辑与超时窗 `datetime('now', ?)` 同批切新格式——**格式混比会错序，不留半套**。时间列转换表达式用票 4 helper 的 columnMap 机制。孤儿 messages 按票 3 报告 + 用户拍板处置。
+一次重建合并全部变更（spec §4.2 铁律）：FK `agent_id→agents` RESTRICT、CHECK `dispatch_state`、created_at 秒级→ISO 毫秒、**连带切换**（spec §4.2 连带改造点）：`messages.ts:127` 游标比较逻辑与超时窗 `datetime('now', ?)` 同批切新格式——**格式混比会错序，不留半套**。时间列转换表达式用票 4 helper 的 columnMap 机制，拷贝按列名显式映射（票 4 契约，禁 `SELECT *`）。迁移以 append 身份进 `APPENDED_MIGRATIONS`。孤儿处置按 D1：messages 各链零孤儿（票 3 面 A），FK RESTRICT 直接落，无存量清理。
 
 **约束面（随票 4 复审落盘）**：① 重建后全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6）；② 本票不动 chunks 系——若实施中发现必须动 chunks 投影，先回架（chunks ↔ FTS/vec0 rowid 耦合，spec §4.4 纪律 5）。
 
-## 票 6 · 小表重建批（blocked by 票 3 + 票 4）
+**CHECK 值域更正（2026-09-17，票 5 开工前真库读数）**：`dispatch_state` 真实值域 = `'queued' | 'running' | 'done'`（`repository/messages.ts` 类型签名；两库实测 `done` 1079/1342、`completed`/`failed` 零行）——本票面初稿 `completed/failed` 系笔误，照字面落 CHECK 会让 fire-and-forget 的 `setDispatchState` 静默失效。定稿 `CHECK (dispatch_state IN ('queued','running','done'))` + NULL 放行；spec §4.1 已同步更正。
 
-execution_logs / flow_states / flow_state_events / connector_bindings / episodes 系 / review_verdicts 的重建：**逐表先审计留痕**（现有 FK/CHECK/时间列实测 vs spec §4.1 缺口清单，一张表一份结论），时间口径全转 ISO，FK/CHECK 按审计定稿补。清单以审计报告为准，票开时逐表列。
+**机制改动并入本票（2026-09-17 店长裁决，方案 A）**：票 5/6 开工前两猫独立发现 runner 恒包事务 × rebuildTable 拒事务内调用的接线缺口（ds猫 实测：三张表现状下要么拒启要么静默清 9723 行）。裁决 = spec §4.4 纪律 7 过程式通道：`Migration` 加可选 `run?: (db, record) => void`，带 `run` 条目 runner 不包事务；`sql` 仍必填 = 新表 DDL（checksum 正文 + `createSql` 源）；静态断言钉「hook 只许调 rebuildTable 且 `createSql === m.sql`」。**本票负责把该机制落地**（`migrations.ts` 接口 + `index.ts` runner 分支 + 测试），票 6 批二与票 8 只做消费方。
+
+**收口（2026-09-18，店长）**：交付 `95e4d4c` + `326e958`（22 文件 +798/−89，全在 `packages/server/src`），复审 **✅可合并**（吐槽猫独立复核：全量 2754 复跑绿 + lint 3 包过 + 行号抽核全真 + 静态断言绕过构造三连未破 + 族修补刀——「第四处跨形态比较点」挑战**扫完无漏网**，生产代码比较点全集 9 处逐一核清）。随收口四件落盘：① spec §4.2 ⑤-c DEFAULT 勘注（OQ1 有条件接受——判据是精度降档，`strftime('%f')` 已消解）；② spec §4.4 已知窗口留痕（OQ3 接受「已知窗 + 重跑幂等自愈」，危害有界）；③ OQ4 留痕——未来某票需求面变化时可补「双路径形态一致（新库产物 == 老库升级产物）」表征，不阻塞本票；④ P3 观察项三条（下轮票面参考）：`review_verdicts` 归一迁移的 `replace(created_at,' ','T')` 无 `Z` 后缀（该表本身秒级，非回归）——**票 6 迁该表时与 `toIsoDb` 合并回单口径**，勿留永久双口径；`sessions.ts:308` `toSessionConfig` 的秒级形态转换（未迁，正确现状）——**票 8 迁 sessions 同批切**；`messages.ts:68-70` 注释「SQLite datetime 是秒级精度」已随本票过时（逻辑本身仍对）——下批碰 messages 顺手改。OQ5 台账名接受（全角字符在 TEXT 主键无解析面风险；**落地后不可改名**）；OQ6 时区偏移透传不补（函数职责 = 统一形态非时区换算，生产面无实证调用方）。
+
+## 票 6 · 小表重建批（派 ds猫，走 worktree；blocked 已解除 2026-09-17）
+
+execution_logs / flow_states / flow_state_events / connector_bindings / episodes 系 / review_verdicts 的重建：**逐表先审计留痕**（现有 FK/CHECK/时间列实测 vs spec §4.1 缺口清单——**含 D2 九条同族链**，一张表一份结论），时间口径全转 ISO（`spans.start_at`、dev `retrieval_events.created_at`、台账 `applied_at` 已 ISO 不转，按票 3 面 B 实测），FK/CHECK 按审计定稿补。清单以审计报告为准，票开时逐表列；九链中未列入重建的表按需补重建条目。
+
+**D1/D3 落盘（2026-09-17 拍板）**：D1 孤儿 = 删除——逐链 DELETE 进各自重建迁移，数字与样本见票 3 面 A，审计 SQL 留痕可复算；D3 `review_verdicts.subject_agent_id` 猫名→id 归一迁移（main 6 行 + dev 4 行按 `agents.name` 解析）必须先于此表 FK 重建落地。**D3 范围勘正（ds猫 逐行复核）**：写入口不改——写入路径取 `subject.id`、调用方 `serial.ts` 的 `reviewedTargets` 也取 `a.id`，注释与实现一致，库中猫名是修复前历史行；D3 = 纯数据归一。dev `execution_logs.status` 的 2 行 running 脏存量（重启卡死的 in-flight 残骸）按改判 `failed` 处置，理由留痕进逐表审计。
+
+**拆两批（2026-09-17 店长裁决，方案 A 配套）**：批一（不依赖机制改动，现在开工）= **7 张纯 SQL 表**——execution_logs / flow_states / flow_state_events / connector_bindings / episode_attributions / review_verdicts / review_parse_failures 的重建 + 各自 D1 孤儿 DELETE + D3 归一迁移 + running 脏存量改判。批二（票 5 机制合入 dev 后追加）= **3 张过程式重建**——episodes（子表 episode_attributions 挡 DROP）、retrieval_events（CASCADE 子表，静默清空风险实测）、spans（自引用 + CASCADE 子表），按 spec §4.4 纪律 7 走 `run` 通道消费 rebuildTable。**审计结论照准**：flow_states/flow_state_events 不加 CHECK（`isOnMainChain()` 证明值域非封闭，与 spec「封闭枚举才 CHECK」判据一致）；episodes `task_id`/`chain_task_id` 不加 FK（链锚非唯一列，物理不可行）。顺序无关性：批一先合会带上 FK→messages，但票 5 的 messages 重建走 FK-OFF 通道，无顺序炸弹（纪律 7 裁决的附带效果）。
 
 **约束面（随票 4 复审落盘）**：① 重建后全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6）；② 本票清单不含 chunks 系——逐表审计若论证需动 chunks 投影，先回架等专项设计（FTS/vec0 rowid 耦合须同批重建，spec §4.4 纪律 5）；③ `review_verdicts.subject_agent_id` 猫名→id 归一迁移（票 3 发现②，D3）必须先于此表 FK 重建落地。
 
-## 票 7 · 归档（轻量 ALTER，可与票 5/6 并行，blocked by 无）
+## 票 7 · 归档（派 flash猫，随票 5 后开工；轻量 ALTER，与票 5/6 并行）
 
 sessions `ADD COLUMN archived_at TEXT`（NULL=活跃）+ 部分索引 `WHERE archived_at IS NULL` + repository 读写 + API + 前端最小入口（归档操作 + 「显示已归档」开关）。**验收（spec §4.1）**：归档后数据全在、列表默认过滤、**归档会话照常可被记忆检索**。
 
