@@ -172,3 +172,14 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 2. **同秒平局判据（rowid→UUID 三候选）裁决：不另立单，随 B 范围 ⑤ 走**。理由：现行 `(created_at, id)` tie-break 与 messages 既有查询路径一致、新索引即按此三列建，且留痕用例已钉住现状行为；⑤-a/⑤-b 落地（毫秒精度 + helper 收口）后同秒平局概率近零，属同一改造的连带收敛；UUIDv7 翻案已录 spec（绑定换引擎决策点），不在本轮重复裁决。
 
 **票 2 收口动作**：见店长收口汇报（合入 dev + flash猫 worktree 清理 + 重启判定）。
+
+---
+
+## 票 2 收口汇报（2026-09-17，店长）
+
+- **文档复审**：`db49cee`（spec §3.2 列名勘正 `created_at`→`started_at`，纯文档 1 文件 5 行，与 session 分支 `aee7821` 同文经吐槽猫 Node 字节级核验）✅ 可合并。
+- **独立核现场**：工作树干净、`db49cee` 为 closeout 分支尖、全 sha `db49ceea1083cfee30f0c181f275d62a608e908d`、diff 面恰 1 文件纯文档（与回执一致）。
+- **收口链**：`.push-gate` 置全 sha → 推 `closeout/db-indexes-t2` → PR [#111](https://github.com/JianHun101/catStudio/pull/111)（base=dev）→ GitHub merge `7e5478b` → 本地 dev ff 同步 → **三方对齐：dev = origin/dev = .push-gate = `7e5478b`**。
+- **清理**：主仓库切回 dev；closeout 分支本地+远端已删（refspec 删 + ls-remote 复核）；ds猫 / flash猫 worktree 已清（工作树干净、无未合入提交——ds猫 分支两笔 docs 提交与 session 分支同尖、无遗失；flash猫 `a2cde1a` 已入 dev；会话无远端分支）。剩余本会话 worktree：会话本体 + 吐槽猫（审查侧，留待 B 范围）。
+- **重启判定：不发**。新索引 / OQ4 播报 / 补建迁移只在下次启动 initDb 时生效，运行中实例不受影响（判定看运行实例而非改动面）。**下次 server 重启时一并激活：票 1 迁移闸 + 主库 14 件缺失物体自动补建 + 票 2 索引三条。**
+- **下一步**：B 范围（④ FK/CHECK、⑤ 时间口径、⑥ 拆表）按 A 范围决策「票缓拆」——待 server 重启后 P0 实机验证（迁移闸首启 + 主库补建播报 + EXPLAIN 无 SCAN 抽查）通过，再拆 B 票。验证清单已备，重启后可直接执行。
