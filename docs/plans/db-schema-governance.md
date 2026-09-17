@@ -137,6 +137,8 @@ CREATE TABLE session_agents (
 2. rebuildTable 通用 helper 是 B 范围重建批的前置。
 3. 每张文重建 = 一次事务，含数据拷贝与校验。
 4. 前端归档入口（归档操作 + 显示开关）随 sessions 重建票交付。
+5. **chunks ↔ FTS/vec0 rowid 耦合（2026-09-17 票 4 复审实测新发现，重建硬约束）**：`chunks` 表被双重 rowid 依赖——① `chunks_fts.rowid = chunks.rowid`（实测 dev 库 375 行活 JOIN、零孤儿）；② vec0 `chunk_vectors_rowids` 的 BLOB 内嵌 chunks.rowid 映射（`migrations.ts` vec0 声明）。重建任何被 FTS/vec0 虚表引用的表前，先核查 `sqlite_master` 虚表声明与 rowid 耦合面；重建 chunks 必须同批同步重建 FTS 索引与 vec0 映射，否则记忆检索静默断链。
+6. **重建后全库 FK 体检**：rebuildTable 的 FK 体检只查出向约束；重建若动被引用列，子表悬空不拦。每张重建票收尾跑一次全库 `PRAGMA foreign_key_check`，零违规才算验收过（票 8 硬条款，其余重建票同执行）。
 
 ## 五、测试决策
 
