@@ -14,7 +14,12 @@ import * as sqliteVec from 'sqlite-vec'
 import fs from 'node:fs'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb, applyMigrations } from './index.js'
-import { MIGRATIONS, CHUNK_VECTOR_METRIC_FIX_SEQUENCE, type Migration } from './migrations.js'
+import {
+  MIGRATIONS,
+  CHUNK_VECTOR_METRIC_FIX_SEQUENCE,
+  MAIN_DB_REPAIR_ENTRY_NAMES,
+  type Migration,
+} from './migrations.js'
 
 /**
  * 誊写校验的归一函数：判**词法**，不判排版。空白唯一承载语义的地方是字符串字面量，
@@ -179,7 +184,17 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
 
       const rows = ledger(db)
       expect(rows).toHaveLength(MIGRATIONS.length)
-      expect(rows.every((r) => r.note === 'baseline')).toBe(true)
+      // 只登记不执行**只认基线条目**：基线条目全 `baseline`，追加区条目（补建）当晚真执行
+      const baselineNames = new Set(
+        MIGRATIONS.filter((m) => m.baseline === true).map((m) => m.name)
+      )
+      expect(rows.filter((r) => baselineNames.has(r.name))).toHaveLength(41)
+      expect(
+        rows.filter((r) => baselineNames.has(r.name)).every((r) => r.note === 'baseline')
+      ).toBe(true)
+      expect(rows.filter((r) => !baselineNames.has(r.name)).every((r) => r.note === null)).toBe(
+        true
+      )
       expect(tableNames(db)).not.toContain('chunks') // 基线没执行
       expect(db.prepare(`SELECT COUNT(*) n FROM agents`).get()).toEqual({ n: 1 })
       expect(db.prepare(`SELECT content FROM messages WHERE id = 'm1'`).get()).toEqual({
@@ -326,6 +341,119 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       }
       setDb(db)
       expect(() => applyMigrations(db, [...MIGRATIONS, broken])).toThrowError(/append that fails/)
+    })
+  })
+
+  // ─── 补建迁移 · 主库缺件补回（票 1 OQ1 / 店长裁决 ②）──────────────────
+  describe('补建迁移 · 主库形态（老库 + 缺 14 件物体）', () => {
+    const REPAIR_NAME = 'fix-forward 补建 retrieval_*/spans 五表九索引（票 1 OQ1）'
+    const repairEntry = MIGRATIONS.find((m) => m.name === REPAIR_NAME) as Migration
+
+    /** 补建目标 = 5 表 + 9 索引，**顺序 = 建表依赖序**（FK 目标先建） */
+    const EXPECTED_OBJECTS = [
+      'retrieval_events',
+      'idx_retrieval_events_execution',
+      'idx_retrieval_events_created',
+      'idx_retrieval_events_task',
+      'retrieval_queries',
+      'retrieval_candidates',
+      'idx_retrieval_candidates_query',
+      // ⚠️ 索引名与条目名不同面：条目叫 `…_content_hash`，建出来的索引叫 `…_hash`
+      'idx_retrieval_candidates_hash',
+      'spans',
+      'span_llm',
+      'idx_spans_execution',
+      'idx_spans_chain',
+      'idx_spans_start',
+      'idx_spans_name',
+    ]
+
+    /**
+     * 主库形态的**因果造法**：段四/段五上船前就停机的库 = 那 14 条基线从未执行过。
+     * 故直接从数组里摘掉这些条目跑一遍（而不是建好再 DROP——DROP 是「事后抹掉」，
+     * 摘条目是「从未发生」，与真实来路同面），再摘掉台账（票 1 才有它）。
+     */
+    function makeMainDbLike(): Database.Database {
+      const db = new Database(':memory:')
+      db.pragma('foreign_keys = ON')
+      sqliteVec.load(db)
+      const skip = new Set<string>([...MAIN_DB_REPAIR_ENTRY_NAMES, REPAIR_NAME])
+      applyMigrations(
+        db,
+        MIGRATIONS.filter((m) => !skip.has(m.name))
+      )
+      db.exec(`DROP TABLE schema_migrations`)
+      return db
+    }
+
+    it('造出来的「主库形态」确实是缺这 14 件的老库（防夹具自己失真）', () => {
+      const db = makeMainDbLike()
+      const names = new Set(
+        (
+          db
+            .prepare(`SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
+            .all() as Array<{
+            name: string
+          }>
+        ).map((r) => r.name)
+      )
+      // 缺件面：14 件物体一件都不在；且无台账 ⇒ 命中 isOldDb
+      for (const obj of EXPECTED_OBJECTS) expect(names.has(obj), obj).toBe(false)
+      expect(
+        db.prepare(`SELECT 1 FROM sqlite_master WHERE name = 'schema_migrations'`).get()
+      ).toBeUndefined()
+      // 存量面：其余结构在（33 = 47 − 14，实测主库读数为 33）
+      expect(dumpSchema(db)).toHaveLength(BASELINE.length - EXPECTED_OBJECTS.length)
+    })
+
+    it('主库形态跑 initDb → 14 件全部建回，且形状与基准逐行一致、存量数据原样', () => {
+      const db = makeMainDbLike()
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+         VALUES ('a1', '店长', '🐱', 'p', 'deepseek', 'deepseek-v4-pro', 'sk')`
+      ).run()
+
+      setDb(db)
+      initDb()
+
+      // ① 一件不少：全量 dump 与基准（改动前旧码产物）逐行一致 —— 既证「补回来了」，
+      //    也证「补出来的形状就是基线形状」，不存在第二份 DDL 走样的可能
+      const actual = dumpSchema(db)
+      expect(actual).toHaveLength(BASELINE.length)
+      const byName = new Map(actual.map((r) => [`${r.type}:${r.name}`, r]))
+      for (const expected of BASELINE) {
+        expect(
+          byName.get(`${expected.type}:${expected.name}`),
+          `${expected.type} ${expected.name}`
+        ).toEqual(expected)
+      }
+
+      // ② 台账：41 条补登 + 1 条真执行（补建），补建行**不是**补登
+      const rows = ledger(db)
+      expect(rows).toHaveLength(MIGRATIONS.length)
+      expect(rows.filter((r) => r.note === 'baseline')).toHaveLength(41)
+      expect(rows.find((r) => r.name === REPAIR_NAME)?.note).toBeNull()
+
+      // ③ 手术不动存量数据
+      expect(db.prepare(`SELECT COUNT(*) n FROM agents`).get()).toEqual({ n: 1 })
+    })
+
+    it('补建正文 = 恰好这 14 件物体（防漏防多）、条条 IF NOT EXISTS、顺序 = 依赖序', () => {
+      const stmts = repairEntry.sql.split(';\n')
+      expect(stmts).toHaveLength(EXPECTED_OBJECTS.length)
+      const created = stmts.map((s) => {
+        const m = /^\s*CREATE (?:TABLE|INDEX) IF NOT EXISTS (\w+)/.exec(s)
+        expect(m, `不是 IF NOT EXISTS 建表/建索引：${s}`).not.toBeNull()
+        return (m as RegExpExecArray)[1]
+      })
+      expect(created).toEqual(EXPECTED_OBJECTS)
+    })
+
+    it('已完整的库（全新库 / dev 库）：补建是 no-op，不新增任何物体', () => {
+      setDb(makeFreshDb())
+      initDb()
+      expect(dumpSchema(getDb())).toHaveLength(BASELINE.length)
+      expect(ledger(getDb()).find((r) => r.name === REPAIR_NAME)?.note).toBeNull()
     })
   })
 
