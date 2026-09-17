@@ -82,6 +82,8 @@ export const useChatStore = defineStore('chat', () => {
 
   const sessions = ref<SessionConfig[]>([])
   const activeSessionId = ref<string | null>(null)
+  /** 「显示已归档」开关（spec §4.1）。默认关 = 列表只显活跃会话 */
+  const showArchived = ref(false)
   const messages = ref<Message[]>([])
   const agentStates = ref<Map<string, Map<string, AgentRuntimeState>>>(new Map())
   const agents = ref<AgentConfig[]>([])
@@ -263,7 +265,10 @@ export const useChatStore = defineStore('chat', () => {
 
     // 阶段 2：加载数据
     try {
-      const [agentList, sessionList] = await Promise.all([api.getAgents(), api.getSessions()])
+      const [agentList, sessionList] = await Promise.all([
+        api.getAgents(),
+        api.getSessions(showArchived.value),
+      ])
       agents.value = agentList
       sessions.value = sessionList
       // 拉取各 Agent 的 token 统计 + context 阈值配置
@@ -499,6 +504,75 @@ export const useChatStore = defineStore('chat', () => {
     // 活跃会话删除路径上 joinSession 的切走缓存会把被删会话的数组重新塞回 Map，
     // 若在 joinSession 之前删会被立即撤销（吐槽猫 review 发现的孤儿条目内存泄漏）
     sessionMessages.delete(id)
+  }
+
+  /**
+   * 切换「显示已归档」开关——重拉列表（口径在服务端，本地过滤会与分页/排序口径分叉）。
+   * `force` 必须给：`dataReady` 已就绪时 `fetchData()` 会静默早退。
+   */
+  async function setShowArchived(value: boolean): Promise<void> {
+    if (showArchived.value === value) return
+    showArchived.value = value
+    await fetchData(true)
+  }
+
+  /**
+   * 归档 / 取消归档（用户态「删除」= 归档，spec §4.1）。
+   *
+   * 服务端是唯一真相源，本地只做列表投影：归档且当前不显示已归档 ⇒ 移出列表（与
+   * `deleteSession` 同款地切走当前会话）；否则就地更新/插回并按 `updatedAt` 重排
+   * （与服务端 `ORDER BY updated_at DESC` 同口径）。
+   */
+  async function setArchived(id: string, archived: boolean): Promise<void> {
+    let updated: SessionConfig
+    try {
+      updated = archived ? await api.archiveSession(id) : await api.unarchiveSession(id)
+    } catch (err) {
+      log.error('setArchived API failed', { error: String(err) })
+      throw err
+    }
+    applyArchived(id, updated.archivedAt ?? null, updated)
+  }
+
+  /**
+   * 归档态变化的列表投影——本地动作（有完整配置）与 socket 广播（只有 `{id, archivedAt}`）
+   * 共用，避免两条路径各写一份过滤逻辑而分叉。
+   *
+   * `full` 缺省时（广播路径）只做**不需要新数据**的投影（移出列表 / 就地改字段）；需要
+   * 往列表里插回一条时重拉（口径归服务端，不本地拼一条半吊子配置）。
+   */
+  function applyArchived(id: string, archivedAt: string | null, full?: SessionConfig): void {
+    const idx = sessions.value.findIndex((s) => s.id === id)
+    const hide = archivedAt !== null && !showArchived.value
+
+    if (hide) {
+      sessions.value = sessions.value.filter((s) => s.id !== id)
+      if (activeSessionId.value === id) {
+        const next = sessions.value[0]
+        if (next) {
+          joinSession(next.id)
+        } else {
+          activeSessionId.value = null
+          messages.value = []
+          writeActiveSessionId(null)
+        }
+      }
+      // 消息缓存**不删**（与 deleteSession 不同）：会话还在，取消归档后切回来要能立刻显示
+      return
+    }
+
+    if (idx >= 0) {
+      sessions.value[idx] = { ...sessions.value[idx], ...(full ?? {}), archivedAt }
+      return
+    }
+    // 不在列表里且该显示：取消归档（回到活跃）或开关打开后归档会话首次上屏
+    if (full) {
+      sessions.value = [...sessions.value, full].sort((a, b) =>
+        a.updatedAt < b.updatedAt ? 1 : -1
+      )
+    } else {
+      void fetchData(true)
+    }
   }
 
   /** 删除 Agent */
@@ -765,6 +839,10 @@ export const useChatStore = defineStore('chat', () => {
       }
     })
 
+    socket.on(Events.SESSION_ARCHIVED, (data: { sessionId: string; archivedAt: string | null }) => {
+      applyArchived(data.sessionId, data.archivedAt ?? null)
+    })
+
     socket.on(Events.SESSION_MESSAGES_CLEARED, (data: { sessionId: string }) => {
       if (activeSessionId.value === data.sessionId) {
         messages.value = []
@@ -917,6 +995,9 @@ export const useChatStore = defineStore('chat', () => {
     agentStateList,
     currentStateFor,
     agentInfo,
+    showArchived,
+    setShowArchived,
+    setArchived,
     fetchData,
     joinSession,
     sendMessage,

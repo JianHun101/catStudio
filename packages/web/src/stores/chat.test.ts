@@ -23,6 +23,8 @@ const mockGetAgents = vi.fn()
 const mockGetSessions = vi.fn()
 const mockCreateSession = vi.fn()
 const mockDeleteSession = vi.fn()
+const mockArchiveSession = vi.fn()
+const mockUnarchiveSession = vi.fn()
 const mockDeleteAgent = vi.fn()
 const mockUpdateAgent = vi.fn()
 const mockMarkSessionRead = vi.fn().mockResolvedValue({ ok: true })
@@ -36,6 +38,8 @@ vi.mock('@/composables/useApi', () => ({
     getSessions: mockGetSessions,
     createSession: mockCreateSession,
     deleteSession: mockDeleteSession,
+    archiveSession: mockArchiveSession,
+    unarchiveSession: mockUnarchiveSession,
     deleteAgent: mockDeleteAgent,
     updateAgent: mockUpdateAgent,
     markSessionRead: mockMarkSessionRead,
@@ -669,6 +673,108 @@ describe('chatStore', () => {
 
       expect(store.sessions).toEqual([])
       expect(store.activeSessionId).toBeNull()
+    })
+  })
+
+  // ─── 票 7 · 归档（用户态「删除」= 归档）────────────────────────────
+  describe('setArchived / setShowArchived', () => {
+    const ARCHIVED_AT = '2026-09-18T01:00:00.000Z'
+
+    it('归档当前会话（默认不显示已归档）→ 移出列表并切到下一个', async () => {
+      const s2 = { ...mockSession, id: 's2', title: 'S2' }
+      store.sessions = [mockSession, s2]
+      store.activeSessionId = 's1'
+      mockArchiveSession.mockResolvedValue({ ...mockSession, archivedAt: ARCHIVED_AT })
+
+      await store.setArchived('s1', true)
+
+      expect(store.sessions.map((s) => s.id)).toEqual(['s2'])
+      expect(store.activeSessionId).toBe('s2')
+    })
+
+    it('归档非活跃会话 → 只从列表移出，不动当前会话', async () => {
+      const s2 = { ...mockSession, id: 's2', title: 'S2' }
+      store.sessions = [mockSession, s2]
+      store.activeSessionId = 's1'
+      mockArchiveSession.mockResolvedValue({ ...s2, archivedAt: ARCHIVED_AT })
+
+      await store.setArchived('s2', true)
+
+      expect(store.sessions.map((s) => s.id)).toEqual(['s1'])
+      expect(store.activeSessionId).toBe('s1')
+    })
+
+    it('「显示已归档」开着时归档 → 留在列表里并打上 archivedAt', async () => {
+      store.sessions = [{ ...mockSession }]
+      store.showArchived = true
+      mockArchiveSession.mockResolvedValue({ ...mockSession, archivedAt: ARCHIVED_AT })
+
+      await store.setArchived('s1', true)
+
+      expect(store.sessions).toHaveLength(1)
+      expect(store.sessions[0].archivedAt).toBe(ARCHIVED_AT)
+    })
+
+    it('取消归档 → 回到列表（不在列表时插回并按 updatedAt 重排）', async () => {
+      const older = { ...mockSession, id: 's-old', updatedAt: '2020-01-01T00:00:00.000Z' }
+      const newer = { ...mockSession, id: 's-new', updatedAt: '2026-01-01T00:00:00.000Z' }
+      store.sessions = [newer] // s-old 因归档不在列表
+      store.showArchived = false
+      mockUnarchiveSession.mockResolvedValue({ ...older, archivedAt: null })
+
+      await store.setArchived('s-old', false)
+
+      // 回列表且按 updatedAt DESC 排序（与服务端 ORDER BY 同口径）
+      expect(store.sessions.map((s) => s.id)).toEqual(['s-new', 's-old'])
+      expect(mockUnarchiveSession).toHaveBeenCalledWith('s-old')
+    })
+
+    it('归档**不删消息缓存**：取消归档后切回，消息立刻在（不亮 skeleton）', async () => {
+      const s2 = { ...mockSession, id: 's2', title: 'S2' }
+      store.sessions = [mockSession, s2]
+      store.activeSessionId = 's1'
+      store.messages = [mockMessage]
+      mockArchiveSession.mockResolvedValue({ ...mockSession, archivedAt: ARCHIVED_AT })
+
+      await store.setArchived('s1', true) // 活跃会话被归档 → 切到 s2，s1 的消息进缓存
+
+      // 对照物理删除：`deleteSession` 会 `sessionMessages.delete(id)`，切回只剩空 + skeleton。
+      // 归档是「还在，只是从列表隐藏」，缓存必须留着。
+      store.joinSession('s1')
+      expect(store.messages).toEqual([mockMessage])
+      expect(store.loadingMessages).toBe(false)
+    })
+
+    it('setShowArchived 用 includeArchived 重拉列表（本地过滤会与服务端口径分叉）', async () => {
+      mockGetAgents.mockResolvedValue([])
+      mockGetSessions.mockResolvedValue([])
+      store.dataReady = true
+
+      await store.setShowArchived(true)
+
+      expect(store.showArchived).toBe(true)
+      expect(mockGetSessions).toHaveBeenCalledWith(true)
+
+      // 同值再调是 no-op（不重复打服务端）
+      mockGetSessions.mockClear()
+      await store.setShowArchived(true)
+      expect(mockGetSessions).not.toHaveBeenCalled()
+    })
+
+    it('SESSION_ARCHIVED 广播 → 其他 tab 的列表同步移除（全局事件，非会话房间）', () => {
+      store.sessions = [{ ...mockSession }]
+      const handler = mockOn.mock.calls.find((c) => c[0] === Events.SESSION_ARCHIVED)?.[1] as
+        ((d: { sessionId: string; archivedAt: string | null }) => void) | undefined
+      expect(handler).toBeDefined()
+
+      handler!({ sessionId: 's1', archivedAt: ARCHIVED_AT })
+      expect(store.sessions).toEqual([])
+
+      // 取消归档广播：本地无完整配置 ⇒ 走重拉（服务端口径），不当场拼半吊子配置
+      mockGetAgents.mockResolvedValue([])
+      mockGetSessions.mockResolvedValue([])
+      handler!({ sessionId: 's1', archivedAt: null })
+      expect(mockGetSessions).toHaveBeenCalled()
     })
   })
 

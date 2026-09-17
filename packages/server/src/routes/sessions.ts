@@ -50,10 +50,17 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send(toSessionConfig(row!))
   })
 
-  // ─── GET /api/sessions — 列出所有会话 ───────────────
+  // ─── GET /api/sessions — 列出会话（默认过滤已归档）───
 
-  app.get('/api/sessions', async () => {
-    const rows = sessionsRepo.listAllSessions()
+  app.get('/api/sessions', async (req) => {
+    // 归档默认过滤（spec §4.1「列表默认过滤 + 『显示已归档』开关」）。开关走显式参数：
+    // 任何非空且非 '0'/'false' 的值都算开——前端只传 '1'，宽松解析是为了手工 curl 时不踩坑。
+    const raw = (req.query as any)?.includeArchived
+    const includeArchived =
+      raw !== undefined && raw !== '' && raw !== '0' && raw !== 'false' && raw !== false
+    const rows = includeArchived
+      ? sessionsRepo.listAllSessions()
+      : sessionsRepo.listActiveSessions()
     return rows.map((row) => {
       const session = toSessionConfig(row)
       // Compute unread count: messages created after last_read_at
@@ -142,6 +149,31 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       /* emit 失败不影响响应 */
     }
     return config
+  })
+
+  // ─── POST /api/sessions/:id/archive — 归档 ──────────
+  // 用户态「删除」的替代形态：数据全留（会话 / 消息 / 成员照常可查），只从默认列表隐藏。
+
+  app.post('/api/sessions/:id/archive', async (req, reply) => {
+    const id = (req.params as any).id
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    sessionsRepo.archiveSession(id)
+    return reply.send(emitArchived(id))
+  })
+
+  // ─── POST /api/sessions/:id/unarchive — 取消归档 ────
+
+  app.post('/api/sessions/:id/unarchive', async (req, reply) => {
+    const id = (req.params as any).id
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    sessionsRepo.unarchiveSession(id)
+    return reply.send(emitArchived(id))
   })
 
   // ─── DELETE /api/sessions/:id/messages — 清空消息 ────
@@ -299,6 +331,23 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   })
 }
 
+/** 归档态变化后：全局广播 + 返回新配置（`archivedAt` 一律过归一器——列已是 ISO，但接口
+ *  形态统一走 `toIsoDb` 免得日后有人把这里换成秒级列时静默漂移）。 */
+function emitArchived(id: string): SessionConfig {
+  const row = sessionsRepo.getSessionById(id)!
+  const config = toSessionConfig(row)
+  try {
+    // 全局广播（非会话房间）——归档改的是列表可见性，受影响的是所有看列表的客户端
+    getIO()?.emit(Events.SESSION_ARCHIVED, {
+      sessionId: id,
+      archivedAt: config.archivedAt ?? null,
+    })
+  } catch {
+    /* emit 失败不影响响应 */
+  }
+  return config
+}
+
 function toSessionConfig(row: SessionRow): SessionConfig {
   return {
     id: row.id,
@@ -309,5 +358,6 @@ function toSessionConfig(row: SessionRow): SessionConfig {
     updatedAt: row.updated_at.replace(' ', 'T') + 'Z',
     handoffFrom: row.handoff_from || null,
     runningSummary: row.running_summary || null,
+    archivedAt: row.archived_at ? toIsoDb(row.archived_at) : null,
   }
 }

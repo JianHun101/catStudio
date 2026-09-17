@@ -90,6 +90,22 @@ function makeOldDb(): Database.Database {
   return db
 }
 
+/**
+ * 「台账上船那一刻的老库」= `makeOldDb()` **再退回台账之后追加的结构**。
+ *
+ * 为什么需要单独一个：`createTestDb()` 给的是**当前**全量结构，而真实老库只有**台账上船
+ * 那一刻**的结构——台账之后追加的物体它一概没有。票 2 之前追加区只有 `CREATE INDEX
+ * IF NOT EXISTS`，这个虚构看不出来（真执行也只是 no-op）；票 7 的 `archived_at` 是追加区里
+ * 唯一的**加列**条目，虚构当场显形：夹具「已有该列」⇒ 探针如实报「效果已成立」⇒ 跳过执行。
+ * 要测「追加条目在老库上真执行」，夹具就得真的是老库。
+ */
+function makePreLedgerDb(): Database.Database {
+  const db = makeOldDb()
+  db.exec('DROP INDEX IF EXISTS idx_sessions_active')
+  db.exec('ALTER TABLE sessions DROP COLUMN archived_at')
+  return db
+}
+
 /** 全新库（空库，无任何用户表）。与生产同款：vec0 虚拟表要求扩展先加载。 */
 function makeFreshDb(): Database.Database {
   const db = new Database(':memory:')
@@ -131,22 +147,25 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(actual).toHaveLength(BASELINE.length)
     })
 
-    it('空库跑完整 initDb → 基线 47 件之上追加区净增 2 件，且两列索引已升成三列', () => {
+    it('空库跑完整 initDb → 基线 47 件之上追加区净增 3 件，且两列索引已升成三列', () => {
       setDb(makeFreshDb())
       initDb()
 
       const actual = dumpSchema(getDb())
       const baselineKeys = new Set(BASELINE.map((r) => `${r.type}:${r.name}`))
       const added = actual.filter((r) => !baselineKeys.has(`${r.type}:${r.name}`))
-      // 穷举清单（票 2 追加区三条索引迁移的净产出）：
+      // 穷举清单（票 2 + 票 7 追加区迁移的净产出）：
       //   - `idx_messages_session` 是**同名升级**（DROP 旧两列 + 建新三列）⇒ 物体数不变、定义变；
+      //   - 票 5 的 `messages` 重建是**同名重建** ⇒ 物体数不变（形状变）；
       //   - fix-forward 条目对已齐件的库是 14 个 `IF NOT EXISTS` no-op ⇒ 零产出
       //     （该条**不挂探针**，走的是「真执行 no-op」，见 `migrations.ts` 该条上方注释）；
-      //   - 其余两条各 +1。
+      //   - 票 7 的 `sessions archived_at` 是加列 ⇒ `sqlite_master` 里**不产生物体**（列不是物体）；
+      //   - 其余三条索引各 +1。
       // 将来往追加区加迁移**必须来改这里**——否则新物体静默出现，没人知道结构被谁改了。
       expect(added.map((r) => `${r.type}:${r.name}`)).toEqual([
         'index:idx_execution_logs_session_started',
         'index:idx_execution_logs_status',
+        'index:idx_sessions_active',
       ])
       // 「升级」的判据是定义本身：末列 `id` 是游标 tie-break，两列版里没有
       expect(actual.find((r) => r.name === 'idx_messages_session')?.sql).toContain(
@@ -178,12 +197,23 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(MIGRATIONS.slice(0, baseline.length).every((m) => m.baseline === true)).toBe(true)
     })
 
-    it('探针清单 = 审计定稿的 3 条（重建类静默失败型），多一条少一条都要改审计结论', () => {
-      expect(MIGRATIONS.filter((m) => m.verify !== undefined).map((m) => m.name)).toEqual([
+    it('基线探针清单 = 审计定稿的 3 条（重建类静默失败型），多一条少一条都要改审计结论', () => {
+      expect(
+        MIGRATIONS.filter((m) => m.verify !== undefined && m.baseline === true).map((m) => m.name)
+      ).toEqual([
         'widen review_verdicts verdict CHECK (comment)',
         'chunk_vectors distance_metric=cosine (量纲校正)',
         'drop memories chain tables (票辛 旧链下线)',
       ])
+    })
+
+    // 追加区的探针是**另一类**：不是静默失败型，而是「无 IF NOT EXISTS 的加列」——库里已有
+    // 该列但台账无记录时，它会永久拒启（`duplicate column name`），探针把这条路径收敛成
+    // 「跳过 + 登记」。清单单列一份，别与基线那 3 条混成一锅。
+    it('追加区探针清单 = 1 条（票 7 加列条目），与基线三类失败形态不同', () => {
+      expect(
+        MIGRATIONS.filter((m) => m.verify !== undefined && m.baseline !== true).map((m) => m.name)
+      ).toEqual(['sessions archived_at 列（归档 = 用户态删除）'])
     })
 
     it('量纲校正条目正文 = 导出序列按序拼接（测试判据面 = 生产导出，改序即改被测对象）', () => {
@@ -381,12 +411,13 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
     const repairEntry = MIGRATIONS.find((m) => m.name === REPAIR_NAME) as Migration
 
     /**
-     * 追加区在**齐件库**上的净增物体数（票 2 起 = 2：`idx_execution_logs_session_started` /
-     * `idx_execution_logs_status`；`idx_messages_session` 是同名升级 ⇒ 物体数不变）。
-     * 追加区的**权威清单**在「验收 1 · 空库跑完整 initDb → 净增 2 件」那条穷举用例里；
+     * 追加区在**齐件库**上的净增物体数（票 2 起 = 3：`idx_execution_logs_session_started` /
+     * `idx_execution_logs_status` / 票 7 的 `idx_sessions_active`；`idx_messages_session` 是
+     * 同名升级 ⇒ 物体数不变，票 5 的 `messages` 重建同理，票 7 的加列不是物体）。
+     * 追加区的**权威清单**在「验收 1 · 空库跑完整 initDb → 净增 3 件」那条穷举用例里；
      * 这里只拿它把 ds猫 侧「齐件库 = 47 件」的旧读数换算到追加区上线后的口径。
      */
-    const APPENDED_NET_OBJECTS = 2
+    const APPENDED_NET_OBJECTS = 3
 
     /** 补建目标 = 5 表 + 9 索引，**顺序 = 建表依赖序**（FK 目标先建） */
     const EXPECTED_OBJECTS = [
@@ -463,11 +494,21 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(actual).toHaveLength(BASELINE.length + APPENDED_NET_OBJECTS)
       const byName = new Map(actual.map((r) => [`${r.type}:${r.name}`, r]))
       for (const expected of BASELINE) {
-        // 与基准不同面的两处，都是**追加区对基线的合法演化**（基线集本身一个字节没动）：
+        // 与基准不同面的三处，都是**追加区对基线的合法演化**（基线集本身一个字节没动）：
         //   - `idx_messages_session`：票 2 的同名升级（两列 → 三列）；
-        //   - `messages` 表：票 5 的重建（FK / CHECK / 时间口径）。
-        // 两者的判据各自单列在下面——跳过的是「与冻结基准逐字相等」这一条，不是判据本身。
-        if (expected.name === 'idx_messages_session' || expected.name === 'messages') continue
+        //   - `messages` 表：票 5 的重建（FK / CHECK / 时间口径）；
+        //   - `sessions` 表：票 7 的 `ALTER TABLE ADD COLUMN archived_at`——**SQLite 会把新列
+        //     追加进 `sqlite_master` 里存的建表原文**，故这里必然与冻结基准的文本分叉。
+        //     这是「轻量加列」这条路的固有代价（票 8 重建 sessions 时会把该列并进 DDL，
+        //     届时这条 skip 一并撤掉）；它的判据单列在下面。
+        // 三者的判据各自单列在下面——跳过的是「与冻结基准逐字相等」这一条，不是判据本身。
+        if (
+          expected.name === 'idx_messages_session' ||
+          expected.name === 'messages' ||
+          expected.name === 'sessions'
+        ) {
+          continue
+        }
         expect(
           byName.get(`${expected.type}:${expected.name}`),
           `${expected.type} ${expected.name}`
@@ -486,6 +527,23 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       // 表名被 SQLite 写成带引号形式（RENAME 扶正的固有产物，票 4 OQ4 已留痕）——两条启动
       // 路径（全新库重放 / 老库增量）都经过同一次重建，故终点形状逐字相同。
       expect(messagesSql.startsWith('CREATE TABLE "messages"')).toBe(true)
+
+      // 票 7 加列后的 `sessions` 形状——同样是 append 真执行的结构证据（基线补登不改形状）。
+      // 判据取「列在不在」而不是「文本与基准逐字相等」：`ALTER TABLE ADD COLUMN` 的产物
+      // 就是基线原文 + 追加列，文本必然分叉（见上方 skip 处的理由）。
+      const sessionsSql = byName.get('table:sessions')?.sql ?? ''
+      expect(sessionsSql).toContain('archived_at TEXT')
+      // 归档不重建 old 表 ⇒ 基线的 9 列一列不少（防「加列」误写成「重建丢列」）
+      for (const col of [
+        'agent_ids',
+        'broadcast_mode',
+        'running_summary',
+        'handoff_from',
+        'summary_msg_id',
+        'compressed_summaries',
+      ]) {
+        expect(sessionsSql, col).toContain(col)
+      }
 
       // ② 台账：41 条补登 + 1 条真执行（补建），补建行**不是**补登
       const rows = ledger(db)
@@ -766,7 +824,9 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
         lines.find((l) => l.startsWith('[db] 追加区迁移真执行：'))
 
       it('N 条真执行：老库 + 追加区首次上船 → 播报条数 = 追加区条目数（不是 0）', () => {
-        const db = makeOldDb()
+        // 夹具必须是**台账上船那一刻**的老库：`makeOldDb()` 带的是当前全量结构，票 7 的
+        // 加列条目会因探针报「已成立」而跳过（那是另一条用例的面，见「票 7 · 归档」）。
+        const db = makePreLedgerDb()
         const total = MIGRATIONS.filter((m) => m.baseline !== true).length
         // 真空性反对照：追加区若为空，下面的断言恒等于「0 条」而假绿
         expect(total).toBeGreaterThan(0)
@@ -956,6 +1016,117 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       )
       expect(hook.match(/rebuildTable\(/g)).toHaveLength(1)
       expect(hook).toMatch(/record\(\)/)
+    })
+  })
+
+  // ─── 票 7 · 归档（archived_at 加列 + 活跃列表部分索引）────────────────
+  describe('票 7 · 归档', () => {
+    const COL_ENTRY = 'sessions archived_at 列（归档 = 用户态删除）'
+    const IDX_ENTRY = 'idx_sessions_active（活跃会话列表部分索引）'
+
+    const hasColumn = (db: Database.Database, table: string, col: string): boolean =>
+      (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some(
+        (r) => r.name === col
+      )
+
+    const hasObject = (db: Database.Database, type: string, name: string): boolean =>
+      db.prepare(`SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?`).get(type, name) !==
+      undefined
+
+    it('全新库：列与部分索引都建出来，台账两条 note 全空（走增量路径不是补登）', () => {
+      setDb(makeFreshDb())
+      initDb()
+      const db = getDb()
+      expect(hasColumn(db, 'sessions', 'archived_at')).toBe(true)
+      expect(hasObject(db, 'index', 'idx_sessions_active')).toBe(true)
+      for (const name of [COL_ENTRY, IDX_ENTRY]) {
+        expect(ledger(db).find((r) => r.name === name)?.note, name).toBeNull()
+      }
+    })
+
+    it('老库（台账上船那一刻）：两条都在老库路径上真执行——列建出来、索引建出来', () => {
+      const db = makePreLedgerDb()
+      // 前置：夹具确实是老库（无列、无索引、无台账），否则下面的断言恒真
+      expect(hasColumn(db, 'sessions', 'archived_at')).toBe(false)
+      expect(hasObject(db, 'index', 'idx_sessions_active')).toBe(false)
+
+      setDb(db)
+      initDb()
+
+      expect(hasColumn(db, 'sessions', 'archived_at')).toBe(true)
+      expect(hasObject(db, 'index', 'idx_sessions_active')).toBe(true)
+      // 追加区条目：note 空（补登才写 'baseline'）
+      expect(ledger(db).find((r) => r.name === COL_ENTRY)?.note).toBeNull()
+      expect(ledger(db).find((r) => r.name === IDX_ENTRY)?.note).toBeNull()
+    })
+
+    // 探针的**价值面**：库里已有该列但台账无记录（手工 SQL 补过 / 台账上船前的历史遗留）
+    // ——`ALTER TABLE ADD COLUMN` 没有 `IF NOT EXISTS`，没有探针就是永久拒启。
+    it('探针路径：列已存在（无台账记录）⇒ 跳过执行只登记，**不拒启**；索引条目照常执行', () => {
+      const db = makeOldDb() // 当前全量结构（已含 archived_at）+ 无台账
+      db.prepare(`DELETE FROM sessions WHERE 0`).run() // no-op：仅为表明不动数据面
+      setDb(db)
+
+      expect(() => initDb()).not.toThrow()
+
+      expect(ledger(db).find((r) => r.name === COL_ENTRY)?.note).toBeNull()
+      // 关键：探针只跳**自己那条**，不连带跳过索引条目（否则「列在但索引没建」会静默留坑）
+      expect(hasObject(db, 'index', 'idx_sessions_active')).toBe(true)
+    })
+
+    it('真空性反对照：探针改成恒 true ⇒ 老库上真拒启（探针的结果确实在门控执行）', () => {
+      // 反向锁：若探针是个恒真摆设，下面这次启动会「跳过加列 → 索引条目撞 `no such column`
+      // → 拒启」。这恰好证明两件事，都是设计要的：
+      //   ① 探针返回值真的门控执行（不是装饰）；
+      //   ② 两条条目有**顺序依赖**（索引引用列），跳过前一条不会静默产出半套结构——
+      //      缺列时响亮拒启，而不是留一个「索引没建上」的静默坑。
+      const db = makePreLedgerDb()
+      setDb(db)
+      expect(() =>
+        applyMigrations(
+          db,
+          MIGRATIONS.map((m) => (m.name === COL_ENTRY ? { ...m, verify: () => true } : m))
+        )
+      ).toThrow(/idx_sessions_active.*no such column: archived_at/s)
+      expect(hasColumn(db, 'sessions', 'archived_at')).toBe(false)
+    })
+
+    it('活跃列表查询走部分索引，且临时 B 树排序消失；对照：无过滤查询不变', () => {
+      setDb(makeFreshDb())
+      initDb()
+      const db = getDb()
+
+      // SQL 逐字对应 `repository/sessions.ts` 的 listActiveSessions（下方源断言钉着它没漂）
+      const active = (
+        db
+          .prepare(
+            `EXPLAIN QUERY PLAN SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY updated_at DESC`
+          )
+          .all() as Array<{ detail: string }>
+      ).map((r) => r.detail)
+      expect(active.join('\n')).toContain('idx_sessions_active')
+      // ⚠️ 判据是「临时 B 树消失」，**不是**「SCAN 字样消失」：这条查询没有等值约束
+      // （列表要全量），正确的计划就是「按索引序扫」——`SCAN … USING INDEX` 不是退化。
+      // 这与票 2 三条等值索引的判据形状不同，别照搬 `scansIn()`。
+      expect(active.filter((d) => /TEMP B-TREE/i.test(d))).toEqual([])
+
+      // 反面对照：无过滤的 `listAllSessions` 不该被这条部分索引改变计划（它蕴含不了索引谓词）
+      const all = (
+        db
+          .prepare(`EXPLAIN QUERY PLAN SELECT * FROM sessions ORDER BY updated_at DESC`)
+          .all() as Array<{ detail: string }>
+      ).map((r) => r.detail)
+      expect(all.join('\n')).not.toContain('idx_sessions_active')
+
+      // 源断言：仓库里那句 SQL 与上面被测的正文同形（防测试量了个漂走的副本）
+      const src = fs.readFileSync(new URL('./repository/sessions.ts', import.meta.url), 'utf8')
+      expect(src).toContain(
+        `SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY updated_at DESC`
+      )
+      const mig = fs.readFileSync(new URL('./migrations.ts', import.meta.url), 'utf8')
+      expect(mig).toContain(
+        `CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(updated_at DESC) WHERE archived_at IS NULL`
+      )
     })
   })
 })

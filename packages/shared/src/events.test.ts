@@ -47,7 +47,11 @@ describe('Events', () => {
     expect(Events.HANDOFF_FAILED).toBe('handoff-failed')
   })
 
-  it('has exactly 26 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(26)
+  it('has SESSION_ARCHIVED server→client event（票 7 归档态变化广播）', () => {
+    expect(Events.SESSION_ARCHIVED).toBe('session-archived')
+  })
+
+  it('has exactly 27 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(27)
   })
 })

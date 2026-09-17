@@ -21,8 +21,11 @@
  *
  * ## `verify` 探针（②-b）
  *
- * 只有**静默失败型**条目才挂探针——那些「失败不报错、只在运行时静默劣化」的重建类
- * 迁移。判据是**效果是否已成立**，两条路径同一把尺子：
+ * 挂探针的**判据**是「效果是否已成立」，两条路径同一把尺子（下详）。主要触发场景是
+ * **静默失败型**条目——那些「失败不报错、只在运行时静默劣化」的重建类迁移；另有一类
+ * **无 `IF NOT EXISTS` 的形状**（`ALTER TABLE ADD COLUMN`）：库里已有该列但台账无记录时
+ * 它会**永久拒启**（`duplicate column name`），探针把这条路径收敛成「跳过 + 登记」。
+ * 两类都落在同一判据上，只是失败形态不同（一个静默、一个响亮但无法自愈）。
  *
  * - 探针 `true` ⇒ 效果已成立（或目标对象不存在、无事可做）⇒ **跳过执行**，只登记；
  * - 探针 `false` ⇒ **真执行**（全新库 = 首次落地；老库补登 = 矫正路径）。
@@ -37,15 +40,19 @@
  * ## 追加区（fix-forward）
  *
  * 台账立闸后的一切结构变更都追加到文件末尾的 `APPENDED_MIGRATIONS`，**不带** `baseline`
- * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着五条：补建主库缺失的
+ * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着七条：补建主库缺失的
  * `retrieval_*` / `spans` 五表九索引（票 1 OQ1 实测 + 店长裁决 ②）、票 2 的三条索引
- * （spec §3.2）、票 5 的 `messages` 重建（spec §4.4 纪律 7 过程式通道）——来龙去脉见各条
+ * （spec §3.2）、票 5 的 `messages` 重建（spec §4.4 纪律 7 过程式通道）、票 7 的
+ * `sessions.archived_at` 列与活跃列表部分索引（spec §4.1 归档）——来龙去脉见各条
  * 上方注释。
  *
  * - **不挂探针 38 条**：其余 CREATE TABLE / CREATE INDEX / DROP 条目要么是纯新物体
  *   （缺了会在首次使用时响亮报错），要么效果由后续条目独立保证。加列类历史 ALTER 已
  *   并入基线列清单，老库「缺列」这条路径根本不成立（旧机制每次启动全量重跑，缺列会
- *   以 SELECT 报错的形式当场暴露，不会静默）。
+ *   以 SELECT 报错的形式当场暴露，不会静默）。**基线集里一条 ALTER 都不剩**——`ADD
+ *   COLUMN` 没有 `IF NOT EXISTS`，正因如此压扁时全部并进了建表列清单；追加区新增的
+ *   `sessions.archived_at` 是台账立闸后**唯一**的加列条目，故它挂探针是特例而非常态
+ *   （详见上节第二类触发场景）。
  */
 import type Database from 'better-sqlite3'
 import { rebuildTable, type RebuildColumn } from './rebuild.js'
@@ -109,6 +116,12 @@ function tableSql(db: Database.Database, name: string): string | undefined {
     .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`)
     .get(name) as { sql: string } | undefined
   return row?.sql
+}
+
+/** 某表是否已有某列（表不存在 → `false`）。`ALTER TABLE ADD COLUMN` 的存在性探针用。 */
+function columnExists(db: Database.Database, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  return rows.some((r) => r.name === column)
 }
 
 /**
@@ -847,6 +860,36 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 产物），位置对齐会静默错列，故列名映射是硬契约（票 4 契约补充）。
     columnMap: [{ to: 'created_at', convert: `strftime('%Y-%m-%dT%H:%M:%fZ', created_at)` }],
   }),
+  // ── 票 7 · 归档（spec §4.1「用户态『删除』= 归档」的产品决策）────────────────
+  //
+  // 轻量 ALTER，**不重建 sessions**：归档只加一列，现有行一列不动（票 8 重建 sessions 时
+  // 必须把这一列并进新 DDL，票面已钉）。加列而非重建的另一个理由是它不需要——新增列对
+  // 存量行的值天然是 NULL，正是「活跃」的语义，没有任何数据要改写。
+  //
+  // **挂探针的理由与头注「只给静默失败型挂」不同**，如实记在这里：这条不是静默失败型
+  // （加列失败会响亮报 `duplicate column name`），探针挡的是**另一种**失败——库里已有
+  // 该列但台账无记录（有人手工 SQL 补过、或台账上船前的历史遗留）。`ALTER TABLE ADD
+  // COLUMN` 在 SQLite 里**没有 `IF NOT EXISTS`**，是追加区里唯一会因「状态已正确但未登记」
+  // 而**永久拒启**的形状；探针把这条路径收敛成「跳过 + 登记」。判据仍是「效果是否已成立」，
+  // 与既有探针同一把尺子，只是触发场景多了一种。
+  {
+    name: 'sessions archived_at 列（归档 = 用户态删除）',
+    sql: `ALTER TABLE sessions ADD COLUMN archived_at TEXT`,
+    verify: (db) => columnExists(db, 'sessions', 'archived_at'),
+  },
+  {
+    // 部分索引：只索引**活跃**会话（归档行不进索引，列表默认查询也不需要它们）。
+    // 正文与 `listActiveSessions()` 的 WHERE 逐字对应——部分索引要生效，查询的 WHERE 必须
+    // **蕴含**索引谓词，`archived_at IS NULL` 两边同形是最稳的写法。
+    //
+    // 实测（dev 库副本，30 会话）：加索引前 `SCAN sessions | USE TEMP B-TREE FOR ORDER BY`；
+    // 加索引后 `SCAN sessions USING INDEX idx_sessions_active`——**排序临时 B 树消失**，
+    // 按索引序直出。注意这条查询**没有等值约束**（列表要全量），故计划里的 `SCAN … USING
+    // INDEX` 是「按序扫索引」而非退化——判据是 B 树消失，不是 SCAN 字样消失（与票 2 三条
+    // 等值索引的判据形状不同，别照搬）。`listAllSessions()`（无过滤）计划不变，零回归。
+    name: 'idx_sessions_active（活跃会话列表部分索引）',
+    sql: `CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(updated_at DESC) WHERE archived_at IS NULL`,
+  },
 ]
 
 /**

@@ -41,6 +41,8 @@ export interface SessionRow {
   summary_msg_id: string | null
   created_at: string
   updated_at: string
+  /** ISO 毫秒（归档时刻）；NULL = 活跃（票 7）。归档 = 用户态「删除」的替代形态 */
+  archived_at: string | null
 }
 
 export interface MessageRow {

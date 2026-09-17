@@ -113,6 +113,113 @@ describe('Session Routes', () => {
       expect(res.statusCode).toBe(200)
       expect(JSON.parse(res.body)).toHaveLength(2)
     })
+
+    // ─── 票 7 · 归档默认过滤 ─────────────────────────────
+    const createSession = async (title: string): Promise<string> => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title, agentIds: [agentId1] },
+      })
+      return JSON.parse(res.body).id as string
+    }
+
+    it('默认滤掉已归档会话；?includeArchived=1 全量返回', async () => {
+      const keep = await createSession('留着')
+      const gone = await createSession('归档的')
+
+      const archive = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${gone}/archive`,
+      })
+      expect(archive.statusCode).toBe(200)
+
+      const def = await app.inject({ method: 'GET', url: '/api/sessions' })
+      const defIds = (JSON.parse(def.body) as Array<{ id: string }>).map((s) => s.id)
+      expect(defIds).toContain(keep)
+      expect(defIds).not.toContain(gone)
+
+      const all = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
+      const allIds = (JSON.parse(all.body) as Array<{ id: string }>).map((s) => s.id)
+      expect(allIds).toContain(keep)
+      expect(allIds).toContain(gone)
+    })
+
+    it('includeArchived 的宽松解析：`0`/`false` 视为关（手工 curl 不踩坑）', async () => {
+      const gone = await createSession('归档的-2')
+      await app.inject({ method: 'POST', url: `/api/sessions/${gone}/archive` })
+
+      for (const v of ['0', 'false', '']) {
+        const res = await app.inject({ method: 'GET', url: `/api/sessions?includeArchived=${v}` })
+        const ids = (JSON.parse(res.body) as Array<{ id: string }>).map((s) => s.id)
+        expect(ids, `includeArchived=${v}`).not.toContain(gone)
+      }
+    })
+  })
+
+  describe('POST /api/sessions/:id/archive | /unarchive', () => {
+    const createSession = async (title: string): Promise<string> => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title, agentIds: [agentId1] },
+      })
+      return JSON.parse(res.body).id as string
+    }
+
+    it('归档返回带 archivedAt 的会话配置，并全局广播 SESSION_ARCHIVED', async () => {
+      const id = await createSession('归档广播')
+      const res = await app.inject({ method: 'POST', url: `/api/sessions/${id}/archive` })
+
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.archivedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+
+      const { getIO } = await import('../connectors/socketio.js')
+      const emit = (getIO() as unknown as { emit: ReturnType<typeof vi.fn> }).emit
+      expect(emit).toHaveBeenCalledWith('session-archived', {
+        sessionId: id,
+        archivedAt: body.archivedAt,
+      })
+    })
+
+    it('取消归档返回 archivedAt=null，会话回到默认列表', async () => {
+      const id = await createSession('取消归档')
+      await app.inject({ method: 'POST', url: `/api/sessions/${id}/archive` })
+
+      const res = await app.inject({ method: 'POST', url: `/api/sessions/${id}/unarchive` })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body).archivedAt).toBeNull()
+
+      const list = await app.inject({ method: 'GET', url: '/api/sessions' })
+      const ids = (JSON.parse(list.body) as Array<{ id: string }>).map((s) => s.id)
+      expect(ids).toContain(id)
+    })
+
+    it('归档**不删数据**：会话详情与消息照常可查（用户态删除 = 归档）', async () => {
+      const id = await createSession('数据全留')
+      const db = (await import('../db/index.js')).getDb()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content) VALUES ('m-keep', ?, 'user', '原话')`
+      ).run(id)
+
+      await app.inject({ method: 'POST', url: `/api/sessions/${id}/archive` })
+
+      const detail = await app.inject({ method: 'GET', url: `/api/sessions/${id}` })
+      expect(detail.statusCode).toBe(200)
+      expect(JSON.parse(detail.body).archivedAt).toMatch(/Z$/)
+
+      const msgs = await app.inject({ method: 'GET', url: `/api/sessions/${id}/messages` })
+      expect(msgs.statusCode).toBe(200)
+      expect(JSON.parse(msgs.body)).toHaveLength(1)
+    })
+
+    it('会话不存在 → 404（两个端点都是）', async () => {
+      for (const action of ['archive', 'unarchive']) {
+        const res = await app.inject({ method: 'POST', url: `/api/sessions/nope/${action}` })
+        expect(res.statusCode, action).toBe(404)
+      }
+    })
   })
 
   describe('GET /api/sessions/:id', () => {
