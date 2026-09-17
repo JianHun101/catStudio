@@ -37,9 +37,10 @@
  * ## 追加区（fix-forward）
  *
  * 台账立闸后的一切结构变更都追加到文件末尾的 `APPENDED_MIGRATIONS`，**不带** `baseline`
- * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着四条：补建主库缺失的
- * `retrieval_*` / `spans` 五表九索引（票 1 OQ1 实测 + 店长裁决 ②），外加票 2 的三条索引
- * （spec §3.2）——来龙去脉见各条上方注释。
+ * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着五条：补建主库缺失的
+ * `retrieval_*` / `spans` 五表九索引（票 1 OQ1 实测 + 店长裁决 ②）、票 2 的三条索引
+ * （spec §3.2）、票 5 的 `messages` 重建（spec §4.4 纪律 7 过程式通道）——来龙去脉见各条
+ * 上方注释。
  *
  * - **不挂探针 38 条**：其余 CREATE TABLE / CREATE INDEX / DROP 条目要么是纯新物体
  *   （缺了会在首次使用时响亮报错），要么效果由后续条目独立保证。加列类历史 ALTER 已
@@ -47,12 +48,35 @@
  *   以 SELECT 报错的形式当场暴露，不会静默）。
  */
 import type Database from 'better-sqlite3'
+import { rebuildTable, type RebuildColumn } from './rebuild.js'
 
 /** 一条迁移：`name` 台账主键 / `sql` 正文（checksum 原文）/ `verify` 可选矫正探针 */
 export interface Migration {
   name: string
   sql: string
   verify?: (db: Database.Database) => boolean
+  /**
+   * **过程式通道**（spec §4.4 纪律 7，店长裁决 2026-09-17）——给必须跑 `rebuildTable`
+   * 的重建类条目用。
+   *
+   * 为什么 `sql` 装不下它：runner 对 `sql` 条目一律包 `BEGIN IMMEDIATE`，而重建**必须**
+   * 在事务外发起——`rebuildTable` 自带事务，且 `PRAGMA foreign_keys` 在事务内是 no-op
+   * （关不掉 FK ⇒ `DROP` 旧表要么拒启、要么静默 CASCADE 清空子表，实测 dev
+   * `retrieval_events` 重建会静默清掉 `retrieval_queries`/`retrieval_candidates` 共 9723 行）。
+   * 给了 `run` ⇒ runner **不包事务**，事务归属交给 hook 自己（与 `rebuildTable` 一致）。
+   *
+   * `sql` 仍然**必填**：它是 checksum 正文，也是 hook 里 `createSql` 的唯一来源。本文件的
+   * `rebuildMigration` 工厂把两者钉成**同一个变量**，`createSql === m.sql` 因此是结构性
+   * 成立而不是靠自觉——checksum 只管 `sql` 一个面，管不到 hook 正文，工厂补上这个缺口。
+   *
+   * `record` 由 runner 注入，写的是**本条**的台账行（name / checksum / 时间 / note 全由
+   * runner 绑定，hook 无从写错）。hook 必须在收尾调用它，否则 runner 抛错拒启——漏登记
+   * 会让这条迁移**每次启动都重跑**，是静默劣化，故按硬错误处理。
+   *
+   * `verify` 对 run 条目**跳过**：探针问的是「效果是否已成立」，而 run 条目执行完结构
+   * 必然已是新形状，探针没有可做的事。
+   */
+  run?: (db: Database.Database, record: () => void) => void
   /**
    * **基线标记**（②-a / ②-b 的岔路口）：`true` = 台账上船前「历史已在此库发生」的压扁
    * 条目，老库对它**只登记不执行**（除非探针报效果缺失，走矫正）。
@@ -676,6 +700,91 @@ function baselineEntrySql(name: string): string {
   return entry.sql
 }
 
+/**
+ * `messages` 重建目标形状（票 5；spec §4.1 FK/CHECK + §4.2 时间口径）。
+ *
+ * 换掉的三样，逐条对应决策：
+ *
+ * 1. **`agent_id → agents(id) ON DELETE RESTRICT`**（spec §4.1 已知缺口项）——此前该列
+ *    只受 `session_id` 一条 FK 保护，agent 侧是裸列。RESTRICT 是全仓统一删除策略（物理
+ *    删除一律 RESTRICT，CASCADE 只给纯成员关系行）。删 agent 的接口路径
+ *    （`routes/agents.ts:168`）本就先 `deleteMessagesByAgent` 再删 agent，故这条 FK 不会
+ *    给现有删除路径添新错误；「先查后删 → 409 契约」是票 8 的面。
+ * 2. **`CHECK (dispatch_state IN ('queued','running','done'))`**——值域取**实测**
+ *    （`repository/messages.ts` 的 `setDispatchState` 类型签名；两库读数 `done` 1079/1342
+ *    行、`completed`/`failed` 零行）。派活初稿写的 `completed`/`failed` 属
+ *    `execution_logs.status` 的值域，照字面落会让 fire-and-forget 的 `setDispatchState`
+ *    撞约束 ⇒ **dispatch 队列持久化全静默失效**。NULL 天然放行（`IN` 遇 NULL 得 NULL，
+ *    CHECK 只在 false 时拒绝）——`NULL` 语义是「从未调度」，是合法态。
+ * 3. **`created_at` 秒级 → ISO 毫秒**（⑤-b 无损单向：毫秒位补 `.000`），转换表达式在
+ *    条目 `columnMap` 里（`strftime('%Y-%m-%dT%H:%M:%fZ', created_at)`）——同批一次做完，
+ *    不留第二次重建（§4.2 铁律）。
+ *
+ * `created_at` 的 DEFAULT 保留，但**换成了同口径的 ISO 毫秒**：⑤-c 那句「不使用数据库
+ * DEFAULT 生成」的判据是**精度降档**（`datetime('now')` 只有秒），`strftime('%f')` 已给
+ * 毫秒 ⇒ 判据不成立；而记录时间的**生成者**仍然是 repository 层（三条 INSERT 全部显式
+ * 写 `nowIso()`），DEFAULT 只是裸 SQL 写入的兜底。去掉它的唯一后果是 115 处测试夹具
+ * 补字面量（实测，25 个文件），零生产收益。**这一处按「实测偏离 + 点名」处置，请审查者
+ * 对照 ⑤-c 原文判**。
+ *
+ * 索引正文一并带上：`rebuildTable` 会 `DROP` 旧表（连带 DROP 掉它的索引），`allowDropped`
+ * 守卫按名字对账，丢了没重建的索引一律抛错——故这里以**票 2 升级后的三列版**为准重建。
+ */
+const MESSAGES_TABLE_DDL = `CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      agent_id TEXT REFERENCES agents(id) ON DELETE RESTRICT,
+      role TEXT NOT NULL CHECK (role IN ('user', 'agent', 'system')),
+      content TEXT NOT NULL,
+      mentions TEXT NOT NULL DEFAULT '[]',
+      task_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      images TEXT,
+      thinking_content TEXT,
+      tool_content TEXT,
+      segments TEXT,
+      dispatch_state TEXT DEFAULT NULL CHECK (dispatch_state IN ('queued', 'running', 'done')),
+      extra TEXT DEFAULT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at, id)`
+
+/**
+ * 过程式重建条目工厂 —— **票 5/6/8 的重建条目必须经它构造**（spec §4.4 纪律 7 的
+ * 「同一形态」要求；各自发明接线 = 追加区两种机制并存，正是本活要消灭的平行真相源）。
+ *
+ * 它干的事只有一件但很关键：让 `createSql` 与条目的 `sql` 是**同一个变量**。checksum 只
+ * 认 `sql`，hook 正文它管不到——手工写 `{ sql: A, run: (db) => rebuildTable(db,{createSql: B}) }`
+ * 就能造出「台账指纹对得上、实际建的是另一张形状」的静默分叉。工厂把这个缺口结构性地封死。
+ *
+ * **崩溃窗（已知、可自愈）**：`rebuildTable` 自带事务并先提交，`record()` 在其后单独写台账
+ * ——两者无法同事务（helper 拒绝在事务内被调用）。窗口内崩 ⇒ 结构已新、台账无行 ⇒ 下次
+ * 启动重跑本条目。重跑是幂等的（对已是新形状的表再重建一次得到同一形状），故自愈无损伤，
+ * 代价只是一次多余的重建。想彻底消掉这个窗就得改 `rebuildTable` 的签名（票 4 已审产物），
+ * 不值得——按「已知窗口 + 自愈路径」记录。
+ */
+function rebuildMigration(opts: {
+  name: string
+  table: string
+  ddl: string
+  columnMap?: ReadonlyArray<RebuildColumn>
+  allowDropped?: ReadonlyArray<string>
+}): Migration {
+  return {
+    name: opts.name,
+    sql: opts.ddl,
+    run: (db, record) => {
+      rebuildTable(db, {
+        table: opts.table,
+        createSql: opts.ddl,
+        ...(opts.columnMap === undefined ? {} : { columnMap: opts.columnMap }),
+        ...(opts.allowDropped === undefined ? {} : { allowDropped: opts.allowDropped }),
+      })
+      record()
+    },
+  }
+}
+
 const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
   {
     name: 'fix-forward 补建 retrieval_*/spans 五表九索引（票 1 OQ1）',
@@ -727,6 +836,17 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     name: 'idx_execution_logs_status',
     sql: `CREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)`,
   },
+  // ── 票 5 · messages 重建（spec §4.4 纪律 7 过程式通道的首个消费方）──────────
+  rebuildMigration({
+    name: 'messages rebuild (FK agent_id / CHECK dispatch_state / created_at → ISO 毫秒)',
+    table: 'messages',
+    ddl: MESSAGES_TABLE_DDL,
+    // 时间列转换：秒级 → ISO 毫秒（⑤-b 无损单向）。拷贝清单由 helper 按 `PRAGMA table_info`
+    // 双侧列名构造，`convert` 只覆盖这一列，其余同名列直拷——两库 messages 列序**不同**
+    // （main `…created_at, task_id…` / dev `…task_id, created_at…`，老库 ALTER 追加列的历史
+    // 产物），位置对齐会静默错列，故列名映射是硬契约（票 4 契约补充）。
+    columnMap: [{ to: 'created_at', convert: `strftime('%Y-%m-%dT%H:%M:%fZ', created_at)` }],
+  }),
 ]
 
 /**

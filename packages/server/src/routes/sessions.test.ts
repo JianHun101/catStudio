@@ -423,10 +423,12 @@ describe('Session Routes', () => {
       })
       const { id } = JSON.parse(create.body)
       const db = (await import('../db/index.js')).getDb()
+      // 夹具落库时间戳用 ISO 毫秒——票 5 起 `messages.created_at` 的列口径（迁移把存量
+      // 秒级串全量转成了 ISO）。仍写秒级串的夹具代表不了任何真实行。
       for (const [mid, ts] of [
-        ['m-w1', '2026-09-01 10:00:00'],
-        ['m-w2', '2026-09-01 12:00:00'],
-        ['m-w3', '2026-09-01 14:00:00'],
+        ['m-w1', '2026-09-01T10:00:00.000Z'],
+        ['m-w2', '2026-09-01T12:00:00.000Z'],
+        ['m-w3', '2026-09-01T14:00:00.000Z'],
       ]) {
         db.prepare(
           `INSERT INTO messages (id, session_id, role, content, mentions, created_at)

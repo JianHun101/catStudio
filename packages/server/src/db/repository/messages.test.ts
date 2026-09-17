@@ -26,6 +26,13 @@ describe('messages repo — 队列持久化', () => {
     initRepository(db)
     // 建一个 session，所有消息测试都需要
     db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
+    // 票 5 起 `messages.agent_id` 有 FK → `agents(id)`：夹具里用到的 agent 必须**真实存在**。
+    // 此前该列是裸列，写什么 id 都能落库（悬空引用静默留在库里）——这正是这条 FK 要挡的形态，
+    // 故这里补齐被引用的父行，而不是把断言放宽。
+    const insAgent = db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, ?, 'p', 'sk-test')`
+    )
+    for (const id of ['agent-1', 'agent-a', 'agent-b']) insAgent.run(id, `猫-${id}`)
   })
 
   afterEach(() => {
@@ -292,6 +299,11 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
     setDb(db)
     initRepository(db)
     db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
+    // 票 5 起 `messages.agent_id` 有 FK → `agents(id)`，夹具引用的 agent 必须真实存在
+    const insAgent = db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, ?, 'p', 'sk-test')`
+    )
+    for (const id of ['agent-1', 'agent-a', 'agent-b']) insAgent.run(id, `猫-${id}`)
   })
 
   afterEach(() => {
@@ -313,10 +325,15 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
   }
 
   it('无参数 → 与 getRecentMessages 同口径（role != system，新→旧）', () => {
-    insertMsg({ id: 'm1', content: 'old', createdAt: '2026-09-01 10:00:00' })
-    insertMsg({ id: 'm2', content: 'mid', createdAt: '2026-09-01 12:00:00' })
-    insertMsg({ id: 'm3', content: 'new', createdAt: '2026-09-01 14:00:00' })
-    insertMsg({ id: 'm-sys', role: 'system', content: 'system', createdAt: '2026-09-01 15:00:00' })
+    insertMsg({ id: 'm1', content: 'old', createdAt: '2026-09-01T10:00:00.000Z' })
+    insertMsg({ id: 'm2', content: 'mid', createdAt: '2026-09-01T12:00:00.000Z' })
+    insertMsg({ id: 'm3', content: 'new', createdAt: '2026-09-01T14:00:00.000Z' })
+    insertMsg({
+      id: 'm-sys',
+      role: 'system',
+      content: 'system',
+      createdAt: '2026-09-01T15:00:00.000Z',
+    })
 
     const rows = messagesRepo.getSessionMessagesRange('s1')
     expect(rows.map((r) => r.id)).toEqual(['m3', 'm2', 'm1'])
@@ -327,7 +344,7 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
       insertMsg({
         id: `m${i}`,
         content: `c${i}`,
-        createdAt: `2026-09-01 0${i}:00:00`,
+        createdAt: `2026-09-01T0${i}:00:00.000Z`,
       })
     }
     const rows = messagesRepo.getSessionMessagesRange('s1', { limit: 2 })
@@ -335,9 +352,9 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
   })
 
   it('from/to 时间窗命中（ISO 秒级时间戳归一后比较）', () => {
-    insertMsg({ id: 'm1', content: 'before', createdAt: '2026-09-01 10:00:00' })
-    insertMsg({ id: 'm2', content: 'in-window', createdAt: '2026-09-01 12:00:00' })
-    insertMsg({ id: 'm3', content: 'after', createdAt: '2026-09-01 14:00:00' })
+    insertMsg({ id: 'm1', content: 'before', createdAt: '2026-09-01T10:00:00.000Z' })
+    insertMsg({ id: 'm2', content: 'in-window', createdAt: '2026-09-01T12:00:00.000Z' })
+    insertMsg({ id: 'm3', content: 'after', createdAt: '2026-09-01T14:00:00.000Z' })
 
     const rows = messagesRepo.getSessionMessagesRange('s1', {
       from: '2026-09-01T12:00:00Z',
@@ -347,8 +364,8 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
   })
 
   it('from 下界包含（>=）到窗口——同秒边界不丢', () => {
-    insertMsg({ id: 'm1', content: 'older', createdAt: '2026-09-01 10:00:00' })
-    insertMsg({ id: 'm2', content: 'edge', createdAt: '2026-09-01 12:00:00' })
+    insertMsg({ id: 'm1', content: 'older', createdAt: '2026-09-01T10:00:00.000Z' })
+    insertMsg({ id: 'm2', content: 'edge', createdAt: '2026-09-01T12:00:00.000Z' })
     const rows = messagesRepo.getSessionMessagesRange('s1', { from: '2026-09-01T12:00:00Z' })
     expect(rows.map((r) => r.id)).toEqual(['m2'])
   })
@@ -358,7 +375,7 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
       insertMsg({
         id: `m${i}`,
         content: `c${i}`,
-        createdAt: `2026-09-01 10:0${i}:00`,
+        createdAt: `2026-09-01T10:0${i}:00.000Z`,
       })
     }
     // 时间序 m1(10:01) < m2(10:02) < ... < m5(10:05)；倒序最新在前
@@ -380,7 +397,7 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
   it('同 created_at 多条——(created_at, id) 复合 tie-break 顺序正确、翻页不丢', () => {
     // 同一秒三条，id 字典序 a<b<c → 倒序 c,b,a
     for (const id of ['m-a', 'm-b', 'm-c']) {
-      insertMsg({ id, content: id, createdAt: '2026-09-01 10:00:00' })
+      insertMsg({ id, content: id, createdAt: '2026-09-01T10:00:00.000Z' })
     }
     const page1 = messagesRepo.getSessionMessagesRange('s1', { limit: 2 })
     expect(page1.map((r) => r.id)).toEqual(['m-c', 'm-b'])
@@ -396,33 +413,149 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
   })
 
   it('before 消息不在本会话/不存在 → 空数组（位置不可定，客户端自然停止翻页）', () => {
-    insertMsg({ id: 'm1', content: 'x', createdAt: '2026-09-01 10:00:00' })
+    insertMsg({ id: 'm1', content: 'x', createdAt: '2026-09-01T10:00:00.000Z' })
     expect(messagesRepo.getSessionMessagesRange('s1', { before: 'ghost' })).toEqual([])
   })
 
   it('agentId 过滤 → 只返回该 agent 的消息（B 工具 agentIdFilter 落点）', () => {
-    insertMsg({ id: 'm-user', content: 'u', createdAt: '2026-09-01 10:00:00' })
-    insertMsg({ id: 'm-a', agentId: 'agent-a', content: 'a', createdAt: '2026-09-01 11:00:00' })
-    insertMsg({ id: 'm-b', agentId: 'agent-b', content: 'b', createdAt: '2026-09-01 12:00:00' })
+    insertMsg({ id: 'm-user', content: 'u', createdAt: '2026-09-01T10:00:00.000Z' })
+    insertMsg({
+      id: 'm-a',
+      agentId: 'agent-a',
+      content: 'a',
+      createdAt: '2026-09-01T11:00:00.000Z',
+    })
+    insertMsg({
+      id: 'm-b',
+      agentId: 'agent-b',
+      content: 'b',
+      createdAt: '2026-09-01T12:00:00.000Z',
+    })
 
     const rows = messagesRepo.getSessionMessagesRange('s1', { agentId: 'agent-a' })
     expect(rows.map((r) => r.id)).toEqual(['m-a'])
   })
 
   it('system 消息恒不出现在窗口（limit 内含 system 也被挤出）', () => {
-    insertMsg({ id: 'm1', content: 'normal', createdAt: '2026-09-01 10:00:00' })
-    insertMsg({ id: 'm-sys1', role: 'system', content: 's1', createdAt: '2026-09-01 11:00:00' })
-    insertMsg({ id: 'm-sys2', role: 'system', content: 's2', createdAt: '2026-09-01 12:00:00' })
+    insertMsg({ id: 'm1', content: 'normal', createdAt: '2026-09-01T10:00:00.000Z' })
+    insertMsg({
+      id: 'm-sys1',
+      role: 'system',
+      content: 's1',
+      createdAt: '2026-09-01T11:00:00.000Z',
+    })
+    insertMsg({
+      id: 'm-sys2',
+      role: 'system',
+      content: 's2',
+      createdAt: '2026-09-01T12:00:00.000Z',
+    })
 
     const rows = messagesRepo.getSessionMessagesRange('s1', { limit: 1 })
     expect(rows.map((r) => r.id)).toEqual(['m1'])
   })
 
   it('limit 越界防御性钳制（负数/超大 → 钳到 1/1000，不抛）', () => {
-    insertMsg({ id: 'm1', content: 'x', createdAt: '2026-09-01 10:00:00' })
+    insertMsg({ id: 'm1', content: 'x', createdAt: '2026-09-01T10:00:00.000Z' })
     expect(() => messagesRepo.getSessionMessagesRange('s1', { limit: 2000 })).not.toThrow()
     expect(messagesRepo.getSessionMessagesRange('s1', { limit: 2000 }).length).toBe(1)
     // 负数钳到 1（下界）→ 返回 1 条，不抛
     expect(messagesRepo.getSessionMessagesRange('s1', { limit: -5 }).length).toBe(1)
+  })
+})
+
+describe('messages repo — 时间口径（票 5，spec §4.2 ⑤-a/⑤-c）', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
+    db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES ('agent-1', '猫一', 'p', 'sk-test')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  const createdAtOf = (id: string): string =>
+    (db.prepare('SELECT created_at FROM messages WHERE id = ?').get(id) as { created_at: string })
+      .created_at
+
+  it('三条写入口都写 ISO 毫秒（记录时间由 repository 统一生成，调用方不传）', () => {
+    messagesRepo.insertMessage('m-plain', 's1', 'user', 'a', '[]', null, null)
+    messagesRepo.insertUserMessage('m-user', 's1', 'b', '[]', null)
+    messagesRepo.insertAgentMessage('m-agent', 's1', 'agent-1', 'c', null)
+
+    for (const id of ['m-plain', 'm-user', 'm-agent']) {
+      expect(createdAtOf(id), id).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    }
+  })
+
+  it('countMessagesAfter 吃**秒级**入参（跨表来源：session_read_state / sessions 仍是秒级）', () => {
+    // 跨表混比是这条的头号风险：`' '(0x20) < 'T'(0x54)` ⇒ 不归一的话秒级上界在 ISO 行面前
+    // 恒判小，未读计数**恒等于全量**（不报错，只是每次列表都显示全未读）。
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, created_at)
+       VALUES ('m-old', 's1', 'user', 'old', '2026-09-01T08:00:00.000Z')`
+    ).run()
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, created_at)
+       VALUES ('m-new', 's1', 'user', 'new', '2026-09-01T09:00:00.000Z')`
+    ).run()
+
+    // 秒级入参（未迁移表的真实形态）
+    expect(messagesRepo.countMessagesAfter('s1', '2026-09-01 08:30:00')).toBe(1)
+    // ISO 入参（同样吃）——两种形态必须给出同一个答案
+    expect(messagesRepo.countMessagesAfter('s1', '2026-09-01T08:30:00Z')).toBe(1)
+    // 边界：正好等于 m-new 的时刻 ⇒ `>` 不含
+    expect(messagesRepo.countMessagesAfter('s1', '2026-09-01T09:00:00.000Z')).toBe(0)
+  })
+
+  it("超时窗比较与列同口径：近期消息不入选、超窗消息入选（原句 datetime('now') 会永远空转）", () => {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, created_at)
+       VALUES ('m-recent', 's1', 'user', 'recent', ?)`
+    ).run(new Date(Date.now() - 10 * 60_000).toISOString())
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, created_at)
+       VALUES ('m-stuck', 's1', 'user', 'stuck', ?)`
+    ).run(new Date(Date.now() - 90 * 60_000).toISOString())
+
+    expect(messagesRepo.getUndispatchedUserMessagesOlderThan(60).map((r) => r.id)).toEqual([
+      'm-stuck',
+    ])
+  })
+
+  it('时间窗入参两种形态等价（秒级串与 ISO 串指向同一时刻 ⇒ 同一批结果）', () => {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, created_at)
+       VALUES ('m1', 's1', 'user', 'x', '2026-09-01T12:00:00.000Z')`
+    ).run()
+
+    const iso = messagesRepo.getSessionMessagesRange('s1', {
+      from: '2026-09-01T12:00:00Z',
+      to: '2026-09-01T12:30:00Z',
+    })
+    const secondLevel = messagesRepo.getSessionMessagesRange('s1', {
+      from: '2026-09-01 12:00:00',
+      to: '2026-09-01 12:30:00',
+    })
+    expect(iso.map((r) => r.id)).toEqual(['m1'])
+    expect(secondLevel.map((r) => r.id)).toEqual(['m1'])
+  })
+
+  it('上界**整秒含入**：省略毫秒的 to 不把同一秒里的毫秒行挤出窗口（旧行为逐条对齐）', () => {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, created_at)
+       VALUES ('m-ms', 's1', 'user', 'x', '2026-09-01T12:00:00.500Z')`
+    ).run()
+
+    expect(
+      messagesRepo.getSessionMessagesRange('s1', { to: '2026-09-01T12:00:00Z' }).map((r) => r.id)
+    ).toEqual(['m-ms'])
   })
 })

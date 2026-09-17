@@ -79,9 +79,14 @@ function latestRejectOrSuggest(rootMsg: RootMessageRow, chainTaskId: string | nu
   if (!chainTaskId) return null
   const row = getDb()
     .prepare(
+      // `replace(v.created_at,' ','T')`：**跨表混比**的归一（票 5 连带面）。右侧绑定的是
+      // `messages.created_at`（自票 5 起 ISO 毫秒），左侧 `review_verdicts.created_at` 仍是
+      // 秒级 `datetime('now')`（随票 6 迁移）。`' '`(0x20) < `'T'`(0x54) ⇒ 不折算的话秒级串
+      // 在同一天的 ISO 串面前**一律判小**，`> ?` 恒假 → 「最近一次 reject/suggest」静默恒为
+      // null（不报错，只是归因少一路源）。折算对已是 ISO 的值是 no-op，票 6 落地后无需回改。
       `SELECT v.verdict FROM review_verdicts v
        JOIN messages m ON m.id = v.message_id
-       WHERE m.task_id = ? AND m.session_id = ? AND v.created_at > ?
+       WHERE m.task_id = ? AND m.session_id = ? AND replace(v.created_at, ' ', 'T') > ?
          AND v.verdict IN ('reject', 'suggest')
        ORDER BY v.created_at DESC LIMIT 1`
     )

@@ -3,6 +3,7 @@
  */
 import type Database from 'better-sqlite3'
 import type { MessageRow, MessageWithAgentName } from './types.js'
+import { isoMinutesAgo, nowIso, toIsoDb, toIsoDbUpper } from './time.js'
 
 let db: Database.Database
 
@@ -124,22 +125,16 @@ export function getRecentMessages(sessionId: string, limit: number = 500): Messa
     .all(sessionId, limit) as MessageRow[]
 }
 
-/** 时间戳归一：DB created_at 为 'YYYY-MM-DD HH:MM:SS'（UTC 秒精度，datetime('now')）。
- *  调用方常传 ISO 'YYYY-MM-DDTHH:MM:SSZ'（与 GET 端点返回的 createdAt 同形）——
- *  'T'→空格 + 去尾 Z + 去毫秒，使字符串比较与库值同形（否则 'T' vs ' ' 永远不命中）。 */
-function toDbTs(ts: string): string {
-  return ts
-    .replace('T', ' ')
-    .replace(/\.\d+Z?$/, '')
-    .replace(/Z$/, '')
-}
-
 /** 会话消息读层查询（方案 3 A 地基——前端历史渲染与 agent 回读共用同一查询函数）。
  *
  *  窗口参数（全部可选，逐项 AND）：
  *    limit  — 返回条数上限 1-1000，默认 200（无参数调用行为与 getRecentMessages(id, 200) 一致）
  *    before — messageId 游标：返回「严格早于该消息」的批次（翻更早历史用）
- *    from   — created_at >= from；to — created_at <= to（时间窗；可含 ISO 秒级时间戳）
+ *    from   — created_at >= from；to — created_at <= to（时间窗）
+ *
+ *  窗口入参**两种形态通吃**（秒级 `YYYY-MM-DD HH:MM:SS` 与 ISO）——库里 created_at 自票 5
+ *  起是 ISO 毫秒，而调用方（老前端 / agent 回读）常传秒级串；不归一就是混比：`' '`(0x20)
+ *  < `'T'`(0x54) ⇒ 秒级串在**同一天**的所有 ISO 串面前一律判小，窗口整段失配且不报错。
  *    agentId— 可选：仅返回指定 agent 的消息（B 工具 body 的 agentIdFilter 落点）
  *
  *  排序 created_at DESC, id DESC——SQLite 秒级精度字符串，同秒多条会碰撞，
@@ -172,11 +167,14 @@ export function getSessionMessagesRange(
   }
   if (opts.from !== undefined) {
     where.push('created_at >= ?')
-    params.push(toDbTs(opts.from))
+    params.push(toIsoDb(opts.from))
   }
   if (opts.to !== undefined) {
     where.push('created_at <= ?')
-    params.push(toDbTs(opts.to))
+    // 上界走 `toIsoDbUpper`：省略小数秒的输入按「整秒含入」折算（`.999`），与迁移前
+    // 秒级列的 `<=` 行为逐条对齐——直接折算成 `.000` 会让同一秒里 `.001~.999` 的消息
+    // **静默从结果里消失**（票 5 迁移把列精度抬到毫秒的连带面）。
+    params.push(toIsoDbUpper(opts.to))
   }
   if (opts.agentId !== undefined) {
     where.push('agent_id = ?')
@@ -260,11 +258,17 @@ export function getAllSessionMessages(sessionId: string): MessageRow[] {
     .all(sessionId) as MessageRow[]
 }
 
-/** 获取会话中指定时间之后的消息数（未读计数用） */
+/** 获取会话中指定时间之后的消息数（未读计数用）。
+ *
+ *  ⚠️ `afterTime` 是**跨表**来的（`session_read_state.last_read_at` 或 `sessions.created_at`
+ *  ——两张表都还是秒级的 `datetime('now')`，随各自重建票迁移），而 `messages.created_at`
+ *  自票 5 起是 ISO 毫秒。混比 ⇒ `' '`(0x20) < `'T'`(0x54) ⇒ **未读计数恒等于全量**（不报错，
+ *  只是每次列表都显示全未读）。故入参一律先归一到 ISO（§4.2 连带改造点：比较点与迁移同批切）。
+ *  等那两张表也迁到 ISO 后，这里是幂等的（已是 ISO 原样返回），无需回改。 */
 export function countMessagesAfter(sessionId: string, afterTime: string): number {
   const row = db
     .prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ? AND created_at > ?')
-    .get(sessionId, afterTime) as { cnt: number }
+    .get(sessionId, toIsoDb(afterTime)) as { cnt: number }
   return row?.cnt || 0
 }
 
@@ -298,6 +302,8 @@ export function getMessagesWithAgentName(
 
 // ─── 写入 ──────────────────────────────────────────────
 
+/** 三条写入的 `created_at` 一律由**这里**生成（⑤-c：记录时间 repository 层统一生成，
+ *  调用方不许传）。列上的 DEFAULT 只是裸 SQL 写入的兜底，生产写入全部走这三个函数。 */
 export function insertMessage(
   id: string,
   sessionId: string,
@@ -308,9 +314,9 @@ export function insertMessage(
   taskId: string | null
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, sessionId, agentId, role, content, mentionsJson, taskId)
+    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, sessionId, agentId, role, content, mentionsJson, taskId, nowIso())
 }
 
 export function insertUserMessage(
@@ -322,9 +328,9 @@ export function insertUserMessage(
   imagesJson?: string
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, role, content, mentions, task_id, images)
-     VALUES (?, ?, 'user', ?, ?, ?, ?)`
-  ).run(id, sessionId, content, mentionsJson, taskId, imagesJson || '[]')
+    `INSERT INTO messages (id, session_id, role, content, mentions, task_id, images, created_at)
+     VALUES (?, ?, 'user', ?, ?, ?, ?, ?)`
+  ).run(id, sessionId, content, mentionsJson, taskId, imagesJson || '[]', nowIso())
 }
 
 export function insertAgentMessage(
@@ -339,8 +345,8 @@ export function insertAgentMessage(
   segmentsJson?: string
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content, tool_content, extra, segments)
-     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?, ?, ?, ?)`
+    `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, task_id, thinking_content, tool_content, extra, segments, created_at)
+     VALUES (?, ?, ?, 'agent', ?, '[]', ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     sessionId,
@@ -350,7 +356,8 @@ export function insertAgentMessage(
     thinkingContent ?? null,
     toolContentJson ?? null,
     extraJson ?? null,
-    segmentsJson ?? null
+    segmentsJson ?? null,
+    nowIso()
   )
 }
 
@@ -458,6 +465,10 @@ export function getPendingMessages(): Array<{
  * 队列延迟修复后不存在长窗）。NULL = 从未调度——调度永远不发生的真实静默丢面。
  *
  * @param minutes 超时窗（分钟）——created_at 早于 now - minutes 才补派
+ *
+ * ⚠️ 超时窗比较**必须与列同口径**：原句 `created_at <= datetime('now', ?)` 右侧是**秒级**
+ * 串，而 `created_at` 自票 5 起是 ISO 毫秒——`'T'`(0x54) > `' '`(0x20) ⇒ 同一天的 ISO 行
+ * 恒判大于秒级 now ⇒ 扫描**永远空转**（静默丢重放的兜底整个失效，且不报错）。改用 ISO。
  */
 export function getUndispatchedUserMessagesOlderThan(minutes: number): Array<{
   id: string
@@ -474,13 +485,13 @@ export function getUndispatchedUserMessagesOlderThan(minutes: number): Array<{
        FROM messages
        WHERE role = 'user'
          AND dispatch_state IS NULL
-         AND created_at <= datetime('now', ?)
+         AND created_at <= ?
          AND NOT EXISTS (
            SELECT 1 FROM execution_logs el WHERE el.triggered_by_message_id = messages.id
          )
        ORDER BY created_at ASC`
     )
-    .all(`-${minutes} minutes`) as Array<{
+    .all(isoMinutesAgo(minutes)) as Array<{
     id: string
     session_id: string
     content: string

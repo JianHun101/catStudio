@@ -1498,7 +1498,9 @@ describe('internal route-signals', () => {
           role: 'agent',
           agentId: 'agent-store',
           agentName: '店长', // LEFT JOIN agents.name
-          createdAt: '2026-09-01T10:00:00Z',
+          // 夹具行落库是秒级 `2026-09-01 10:00:00`，出参经 `toIsoDb` 归一为 ISO 毫秒
+          //（票 5 起统一口径；此前是裸 `.replace(' ','T')+'Z'`，出 `…00Z` 无毫秒位）
+          createdAt: '2026-09-01T10:00:00.000Z',
         })
         // 三个块 kind 齐全 + tool 元数据透传
         expect(reply.blocks.map((b: any) => b.kind)).toEqual(['thinking', 'tool', 'text'])

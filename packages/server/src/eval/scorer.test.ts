@@ -52,6 +52,11 @@ function setupDb(): Database.Database {
   const db = createTestDb()
   setDb(db)
   initRepository(db)
+  // 票 5 起 `messages.agent_id` 有 FK → `agents(id)`：被评回复引用的 agent 必须真实存在
+  //（此前是裸列，夹具写个不存在的 id 照样落库 —— 悬空引用正是这条 FK 要挡的形态）
+  db.prepare(
+    `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES ('agent-1', '被评猫', 'p', 'sk-test')`
+  ).run()
   return db
 }
 
@@ -218,9 +223,17 @@ describe('scoreReply（真实 SQLite 集成，只 mock LLM 边界）', () => {
     const sessionId = 's-1'
     db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 't', '[]')`).run(sessionId)
     for (let i = 0; i < 15; i++) {
-      insertMsg(db, `m${i}`, sessionId, 'user', `问题 ${i}`, null, `2026-08-01 00:0${i}:00`)
+      insertMsg(db, `m${i}`, sessionId, 'user', `问题 ${i}`, null, `2026-08-01T00:0${i}:00.000Z`)
     }
-    insertMsg(db, 'target', sessionId, 'agent', '这是被评回复', 'agent-1', '2026-08-01 00:16:00')
+    insertMsg(
+      db,
+      'target',
+      sessionId,
+      'agent',
+      '这是被评回复',
+      'agent-1',
+      '2026-08-01T00:16:00.000Z'
+    )
 
     vi.mocked(getAdapterForAgent).mockReturnValue(
       fakeAdapter(
@@ -244,8 +257,8 @@ describe('scoreReply（真实 SQLite 集成，只 mock LLM 边界）', () => {
     const db = setupDb()
     const sessionId = 's-2'
     db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 't', '[]')`).run(sessionId)
-    insertMsg(db, 'm1', sessionId, 'user', '问题', null, '2026-08-01 00:01:00')
-    insertMsg(db, 'target2', sessionId, 'agent', '差回复', 'agent-1', '2026-08-01 00:02:00')
+    insertMsg(db, 'm1', sessionId, 'user', '问题', null, '2026-08-01T00:01:00.000Z')
+    insertMsg(db, 'target2', sessionId, 'agent', '差回复', 'agent-1', '2026-08-01T00:02:00.000Z')
 
     vi.mocked(getAdapterForAgent).mockReturnValue(
       fakeAdapter('{"score_distribution": {"1": 1, "2": 0, "3": 0, "4": 0, "5": 0}}')
@@ -261,8 +274,8 @@ describe('scoreReply（真实 SQLite 集成，只 mock LLM 边界）', () => {
     const db = setupDb()
     const sessionId = 's-3'
     db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 't', '[]')`).run(sessionId)
-    insertMsg(db, 'm1', sessionId, 'user', '问题', null, '2026-08-01 00:01:00')
-    insertMsg(db, 'target3', sessionId, 'agent', '回复', 'agent-1', '2026-08-01 00:02:00')
+    insertMsg(db, 'm1', sessionId, 'user', '问题', null, '2026-08-01T00:01:00.000Z')
+    insertMsg(db, 'target3', sessionId, 'agent', '回复', 'agent-1', '2026-08-01T00:02:00.000Z')
 
     const adapter = fakeAdapter('{"score": 5}')
     vi.mocked(getAdapterForAgent).mockReturnValue(adapter)
@@ -277,7 +290,7 @@ describe('scoreReply（真实 SQLite 集成，只 mock LLM 边界）', () => {
     const db = setupDb()
     const sessionId = 's-4'
     db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 't', '[]')`).run(sessionId)
-    insertMsg(db, 'm1', sessionId, 'user', '问题', null, '2026-08-01 00:01:00')
+    insertMsg(db, 'm1', sessionId, 'user', '问题', null, '2026-08-01T00:01:00.000Z')
 
     const adapter = fakeAdapter('{"score": 5}')
     vi.mocked(getAdapterForAgent).mockReturnValue(adapter)

@@ -3571,11 +3571,11 @@ describe('socketio connector', () => {
     /** SQLite datetime 格式（YYYY-MM-DD HH:MM:SS，UTC）——bound 参数传
      *  datetime('now',...) 函数表达式会被存成字面量字符串（不执行），
      *  created_at 过滤类测试必须用 JS 预先算好真实时间戳 */
+    /** 「N 分钟前」的 ISO 毫秒串 —— 票 5 起 `messages.created_at` 的列口径。此前刻意裁成
+     *  秒级 `YYYY-MM-DD HH:MM:SS` 去贴旧列；列迁到 ISO 后，秒级串在同一天的 ISO 串面前
+     *  **一律判小**（`' '` < `'T'`）⇒ 「近期消息」会被当成超窗消息补派，夹具反而失真。 */
     function sqliteDatetime(minutesAgo: number): string {
-      return new Date(Date.now() - minutesAgo * 60 * 1000)
-        .toISOString()
-        .replace('T', ' ')
-        .slice(0, 19)
+      return new Date(Date.now() - minutesAgo * 60 * 1000).toISOString()
     }
 
     /** 造数据：一条从未被调度的用户消息（dispatch_state NULL + 无执行行 + 超窗） */

@@ -111,6 +111,62 @@ describe('db', () => {
       const colNames = cols.map((c) => c.name)
       expect(colNames).toContain('extra')
     })
+
+    // ─── 票 5 重建（FK agent_id / CHECK dispatch_state / created_at 口径）────────
+    it('票 5：FK agent_id → agents 悬空引用被拦（此前是裸列，写什么都能落库）', () => {
+      const db = getDb()
+      db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO messages (id, session_id, agent_id, role, content)
+             VALUES ('m-ghost', 's1', 'ghost-agent', 'user', 'x')`
+          )
+          .run()
+      ).toThrowError(/FOREIGN KEY/)
+    })
+
+    it('票 5：CHECK dispatch_state 锁定**实测值域**（queued/running/done + NULL 放行）', () => {
+      const db = getDb()
+      db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
+      const ins = (id: string, st: string | null) =>
+        db
+          .prepare(
+            `INSERT INTO messages (id, session_id, role, content, dispatch_state)
+             VALUES (?, 's1', 'user', 'x', ?)`
+          )
+          .run(id, st)
+
+      for (const st of ['queued', 'running', 'done', null]) {
+        expect(() => ins(`ok-${String(st)}`, st), String(st)).not.toThrow()
+      }
+      // `completed` / `failed` 属 `execution_logs.status` 的值域（派活初稿张冠李戴）——
+      // 照字面落 CHECK 会让 fire-and-forget 的 setDispatchState 撞约束而**静默失效**，
+      // 这里钉住它确实被拒（真实值域见 `repository/messages.ts` 的类型签名）。
+      expect(() => ins('bad-completed', 'completed')).toThrowError(/CHECK/)
+      expect(() => ins('bad-failed', 'failed')).toThrowError(/CHECK/)
+    })
+
+    it('票 5：重建后**全库** foreign_key_check 零违规（spec §4.4 纪律 6 硬条款）', () => {
+      const db = getDb()
+      // 造真实引用链，避免「空库当然零违规」的真空断言
+      db.prepare(
+        `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES ('a1', '猫', 'p', 'sk')`
+      ).run()
+      db.prepare(
+        "INSERT INTO sessions (id, title, agent_ids) VALUES ('s1', 'test', '[\"a1\"]')"
+      ).run()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content, task_id)
+         VALUES ('m1', 's1', 'a1', 'user', 'hi', 'task-1')`
+      ).run()
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, trace_id)
+         VALUES ('e1', 's1', 'a1', 'm1', 'completed', 'task-1')`
+      ).run()
+
+      expect(db.pragma('foreign_key_check')).toEqual([])
+    })
   })
 
   describe('schema - 旧 memories 链已下线（票辛 ⑥）', () => {
