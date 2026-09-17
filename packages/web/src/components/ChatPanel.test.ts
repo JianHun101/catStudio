@@ -104,26 +104,38 @@ describe('ChatPanel markdown table overflow', () => {
 // 重启确认按钮 / 对话内 diff 展示的静态断言已随消息块迁入 MessageItem.test.ts
 // （历史气泡的标记不再在 ChatPanel 模板里）。
 
-describe('ChatPanel skill 提示（SkillLoader 拆除后）', () => {
-  it('提示框展示 CLI 原生触发说明（不再是「未找到匹配的技能」空壳）', () => {
-    // bf5aab5 拆除 SkillLoader：/api/skills 数据源已删，skill 由 CLI 原生消费
-    // （斜杠透传 + 模型自主调用），服务端不再注入——空壳文案改为正确说明
+// 票 J 重建：bf5aab5 拆 SkillLoader 时端点被删、下拉成恒空空壳，07af101 遂剥离补全只留
+// 提示文案。本轮重建数据源（端点见 routes/skills.ts，逻辑见 useSkillCommand.ts）。
+describe('ChatPanel skill 斜杠补全', () => {
+  it('下拉在场：skillSuggestions 驱动 skill-dropdown，项含名字与描述', () => {
+    expect(source).toContain('skill-dropdown')
+    expect(source).toContain('skillSuggestions')
+    expect(source).toContain('selectSkillItem')
+    expect(source).toMatch(/v-for="\(skill, idx\) in skillSuggestions"/)
+  })
+
+  it('Enter 直通：斜杠键盘分支只在「有候选项」时才 preventDefault（07af101 回归闸）', () => {
+    // 旧版无条件 preventDefault 再判断有无候选项，下拉恒空时把斜杠消息的 Enter 一并
+    // 吞掉、消息根本发不出去。这里钉死守卫条件本身：无候选项 → 不进 if → 落到 handleSend。
+    const keydown = source.match(/function onKeydown[\s\S]*?\n\}/)
+    expect(keydown).toBeTruthy()
+    expect(keydown![0]).toContain('skillSuggestions.value.length > 0')
+    expect(keydown![0]).toMatch(
+      /if \(skillActive\.value && \(skillSuggestions\.value\.length > 0 \|\| e\.key === 'Escape'\)\) \{[\s\S]*?e\.preventDefault\(\)/
+    )
+  })
+
+  it('清单不可用时仍回退 CLI 原生触发提示（端点没取到 ≠ 没这个词）', () => {
     expect(source).toContain('skill 由 CLI 原生触发')
     expect(source).toContain('服务端不再注入')
     expect(source).toContain('skill-tip')
+    expect(source).toContain('skillsLoaded')
     expect(source).not.toContain('未找到匹配的技能')
   })
 
-  it('fetchSkills 死调用已清除（端点已删，恒 404 降级空列表）', () => {
+  it('取数走 useApi（不在组件里自造 fetch 死调用）', () => {
     expect(source).not.toContain('fetchSkills')
     expect(source).not.toContain('/api/skills')
-  })
-
-  it('补全机制已剥离：无 skillSuggestions 下拉与键盘拦截分支（斜杠消息 Enter 可直发）', () => {
-    // 数据源恒空时下拉不可达；keydown 拦截分支曾吞掉斜杠消息的 Enter（preventDefault 后
-    // 直达 :493 发送逻辑被短路）——剥离后 Enter 直通 handleSend，CLI 斜杠触发通道保留
-    expect(source).not.toContain('skillSuggestions')
-    expect(source).not.toContain('skill-dropdown')
   })
 })
 

@@ -45,7 +45,16 @@ const {
   navigate,
 } = useMention(() => store.agents)
 
-const { skillActive, detect: detectSkill } = useSkillCommand()
+const {
+  skillActive,
+  skillSuggestions,
+  skillIndex,
+  skillStartIdx,
+  skillsLoaded,
+  detect: detectSkill,
+  select: selectSkill,
+  navigate: navigateSkill,
+} = useSkillCommand()
 
 // ─── Time Formatting ───────────────────────
 
@@ -681,11 +690,46 @@ function onKeydown(e: KeyboardEvent): void {
     }
   }
 
+  // 斜杠补全：**只在真有候选项时**才拦按键（Enter 直通是硬契约——旧版无条件
+  // preventDefault 把斜杠消息的 Enter 一并吞掉，见 useSkillCommand 头注）。
+  // ESC 例外：无候选项时下拉可能正显示「无匹配」空态，ESC 收掉它不吞任何输入。
+  if (skillActive.value && (skillSuggestions.value.length > 0 || e.key === 'Escape')) {
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+      e.preventDefault()
+      const ta = textareaRef.value
+      if (!ta) return
+      const skill = skillSuggestions.value[skillIndex.value]
+      const result = navigateSkill(e.key, ta.value, ta.selectionStart)
+      if (result !== null && skill) {
+        input.value = result
+        nextTick(() => {
+          // 光标放在 /skillName 后面的空格之后
+          ta.selectionStart = ta.selectionEnd = skillStartIdx.value + skill.name.length + 2
+        })
+      }
+      return
+    }
+  }
+
   if (e.key === 'Enter' && !e.shiftKey) {
     if (e.isComposing) return
     e.preventDefault()
     handleSend()
   }
+}
+
+function selectSkillItem(idx: number): void {
+  const skill = skillSuggestions.value[idx]
+  const ta = textareaRef.value
+  if (!skill || !ta) return
+  input.value = selectSkill(skill, input.value, ta.selectionStart)
+  nextTick(() => {
+    if (textareaRef.value) {
+      const pos = skillStartIdx.value + skill.name.length + 2
+      textareaRef.value.selectionStart = textareaRef.value.selectionEnd = pos
+      textareaRef.value.focus()
+    }
+  })
 }
 
 function selectMention(idx: number): void {
@@ -1280,8 +1324,32 @@ const messageViews = computed<MessageView[]>(() => {
           <span>未找到匹配的猫咪</span>
         </div>
 
-        <!-- / 技能提示（SkillLoader 拆除后：skill 由 CLI 原生触发，服务端不再注入） -->
-        <div v-if="skillActive" class="skill-tip">
+        <!-- / 技能补全下拉（数据源见 useSkillCommand；skill 本体仍由 CLI 原生消费） -->
+        <div
+          v-if="skillActive && skillSuggestions.length > 0"
+          class="mention-dropdown skill-dropdown"
+        >
+          <div
+            v-for="(skill, idx) in skillSuggestions"
+            :key="skill.name"
+            class="mention-item"
+            :class="{ active: idx === skillIndex }"
+            @mousedown.prevent="selectSkillItem(idx)"
+            @mouseenter="skillIndex = idx"
+          >
+            <span class="skill-name">/{{ skill.name }}</span>
+            <span class="skill-desc" :title="skill.description">{{ skill.description }}</span>
+            <span class="mention-hint">tab</span>
+          </div>
+        </div>
+        <div
+          v-else-if="skillActive && skillsLoaded"
+          class="mention-dropdown mention-empty skill-dropdown"
+        >
+          <span>无匹配技能（skill 由 CLI 原生触发，可继续输入）</span>
+        </div>
+        <!-- 清单不可用时的兜底提示——「端点没取到」≠「没这个词」，不冒充「无匹配」 -->
+        <div v-else-if="skillActive" class="skill-tip">
           <span>skill 由 CLI 原生触发：输入 /skill-name 或由 agent 自主调用，服务端不再注入</span>
         </div>
       </div>
@@ -2074,7 +2142,33 @@ const messageViews = computed<MessageView[]>(() => {
   color: var(--text-muted);
 }
 
-/* Skill 提示框（CLI 原生触发说明，不再有补全列表） */
+/* Skill 补全下拉（复用 mention 下拉容器样式；多一列 description） */
+.skill-dropdown {
+  min-width: 320px;
+  max-width: 560px;
+}
+
+.skill-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 描述单行省略——frontmatter 自述可达 200+ 字符，换行会把下拉撑成一堵墙；
+   全文走 title 悬停可见 */
+.skill-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Skill 提示框（清单不可用时的兜底：CLI 原生触发说明） */
 .skill-tip {
   position: absolute;
   bottom: calc(100% + 8px);
