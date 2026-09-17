@@ -16,8 +16,10 @@ import { createTestDb } from '../../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../index.js'
 import { initRepository } from './index.js'
 
+// DDL 静态判据的取样面 = 迁移正文的家（票 1 起 `db/index.ts` 里一句 DDL 都不许有，
+// 全量 DDL 搬到 `db/migrations.ts`）
 const SRC = fs.readFileSync(
-  path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.ts'),
+  path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'migrations.ts'),
   'utf8'
 )
 
@@ -65,8 +67,10 @@ describe('db/repository/spans — R2 段五落库面', () => {
   })
 
   // ─── 验收 1：两表四索引 ────────────────────────────────
-  it('验收 1 · 老库（有 schema、无 spans）重跑 initDb ⇒ 建出两表四索引', () => {
-    // createTestDb() 造的就是「老库」：完整旧 schema，不含 R2 两表
+  it('验收 1 · 夹具（空库重放基线集）建出两表四索引', () => {
+    // 夹具 = 真实迁移路径的产物（`createTestDb()` 从空库重放基线集），不再是「手抄旧
+    // schema + initDb 补建」——票 1 起老库（无台账）走的是**只登记不执行**，那条路径
+    // 由 `db/migrations.test.ts` 验收 2 覆盖。本条钉的是「迁移产物里有 R2 两表四索引」。
     expect(tableNames()).toContain('spans')
     expect(tableNames()).toContain('span_llm')
     for (const idx of [

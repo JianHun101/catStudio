@@ -79,8 +79,9 @@ describe('retrievalEvents 写口', () => {
 
   // ─── 验收 1：additive ──────────────────────────────
   describe('验收 1 · 三表 additive 建表', () => {
-    it('老库跑迁移后三表存在，且既有表行数一行不变', () => {
-      // 「老库」先塞几行既有数据，再跑一次迁移——证明 additive 不是空跑
+    it('三表在迁移产物里，且重跑 initDb 时既有表行数一行不变', () => {
+      // 夹具三表来自真实迁移路径（空库重放基线集）；再塞几行数据后重跑一次 initDb
+      // ——证明台账路径**零执行**、既有数据一行不动
       const db = getDb()
       db.prepare(
         `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES ('agent-1', 'flash猫', 'p', 'k')`
