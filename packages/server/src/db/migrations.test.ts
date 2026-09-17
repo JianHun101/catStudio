@@ -8,7 +8,7 @@
  * `createTestDb()` 造好全量结构后 `DROP TABLE schema_migrations`。这样测的确实是
  * 「老库路径」，而不是「全新库被自己当成老库」（`test-helpers.ts` 有同款说明）。
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
 import fs from 'node:fs'
@@ -17,8 +17,7 @@ import { setDb, resetDb, getDb, initDb, applyMigrations } from './index.js'
 import {
   MIGRATIONS,
   CHUNK_VECTOR_METRIC_FIX_SEQUENCE,
-  FIX_FORWARD_MIGRATION_NAME,
-  FIX_FORWARD_OBJECTS,
+  MAIN_DB_REPAIR_ENTRY_NAMES,
   type Migration,
 } from './migrations.js'
 
@@ -141,7 +140,8 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       const added = actual.filter((r) => !baselineKeys.has(`${r.type}:${r.name}`))
       // 穷举清单（票 2 追加区三条索引迁移的净产出）：
       //   - `idx_messages_session` 是**同名升级**（DROP 旧两列 + 建新三列）⇒ 物体数不变、定义变；
-      //   - fix-forward 在齐件库上被探针短路 ⇒ 零产出；
+      //   - fix-forward 条目对已齐件的库是 14 个 `IF NOT EXISTS` no-op ⇒ 零产出
+      //     （该条**不挂探针**，走的是「真执行 no-op」，见 `migrations.ts` 该条上方注释）；
       //   - 其余两条各 +1。
       // 将来往追加区加迁移**必须来改这里**——否则新物体静默出现，没人知道结构被谁改了。
       expect(added.map((r) => `${r.type}:${r.name}`)).toEqual([
@@ -178,15 +178,11 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(MIGRATIONS.slice(0, baseline.length).every((m) => m.baseline === true)).toBe(true)
     })
 
-    it('探针清单 = 审计定稿的 4 条（重建/补建类静默失败型），多一条少一条都要改审计结论', () => {
+    it('探针清单 = 审计定稿的 3 条（重建类静默失败型），多一条少一条都要改审计结论', () => {
       expect(MIGRATIONS.filter((m) => m.verify !== undefined).map((m) => m.name)).toEqual([
         'widen review_verdicts verdict CHECK (comment)',
         'chunk_vectors distance_metric=cosine (量纲校正)',
         'drop memories chain tables (票辛 旧链下线)',
-        // 票 2 新增第 4 条（追加区）：fix-forward 补建。判据同族——`CREATE … IF NOT EXISTS`
-        // 对已存在的物体是 no-op，齐件库上真跑一遍既不报错也不说话；探针把「14 件经核对确在」
-        // 记成**已验证的事实**，而不是让台账记一句无从验证的「已执行」。
-        FIX_FORWARD_MIGRATION_NAME,
       ])
     })
 
@@ -217,11 +213,13 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
 
       const rows = ledger(db)
       expect(rows).toHaveLength(MIGRATIONS.length)
-      // `note` 只标**补登来源**（该行是老库过户产物）⇒ 只有基线条目是 'baseline'；
-      // 追加区条目在任何库上都走增量路径，note 恒空（票 2 起追加区非空，判据必须分面）
+      // 只登记不执行**只认基线条目**：基线条目全 `baseline` ⇒ note='baseline'；
+      // 追加区条目（补建 / 票 2 索引）在任何库上都走增量路径真执行，note 恒空
+      // （票 2 起追加区非空，判据必须分面）
       const baselineNames = new Set(
         MIGRATIONS.filter((m) => m.baseline === true).map((m) => m.name)
       )
+      expect(rows.filter((r) => baselineNames.has(r.name))).toHaveLength(41)
       expect(
         rows.filter((r) => baselineNames.has(r.name)).every((r) => r.note === 'baseline')
       ).toBe(true)
@@ -377,6 +375,133 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
     })
   })
 
+  // ─── 补建迁移 · 主库缺件补回（票 1 OQ1 / 店长裁决 ②）──────────────────
+  describe('补建迁移 · 主库形态（老库 + 缺 14 件物体）', () => {
+    const REPAIR_NAME = 'fix-forward 补建 retrieval_*/spans 五表九索引（票 1 OQ1）'
+    const repairEntry = MIGRATIONS.find((m) => m.name === REPAIR_NAME) as Migration
+
+    /**
+     * 追加区在**齐件库**上的净增物体数（票 2 起 = 2：`idx_execution_logs_session_started` /
+     * `idx_execution_logs_status`；`idx_messages_session` 是同名升级 ⇒ 物体数不变）。
+     * 追加区的**权威清单**在「验收 1 · 空库跑完整 initDb → 净增 2 件」那条穷举用例里；
+     * 这里只拿它把 ds猫 侧「齐件库 = 47 件」的旧读数换算到追加区上线后的口径。
+     */
+    const APPENDED_NET_OBJECTS = 2
+
+    /** 补建目标 = 5 表 + 9 索引，**顺序 = 建表依赖序**（FK 目标先建） */
+    const EXPECTED_OBJECTS = [
+      'retrieval_events',
+      'idx_retrieval_events_execution',
+      'idx_retrieval_events_created',
+      'idx_retrieval_events_task',
+      'retrieval_queries',
+      'retrieval_candidates',
+      'idx_retrieval_candidates_query',
+      // ⚠️ 索引名与条目名不同面：条目叫 `…_content_hash`，建出来的索引叫 `…_hash`
+      'idx_retrieval_candidates_hash',
+      'spans',
+      'span_llm',
+      'idx_spans_execution',
+      'idx_spans_chain',
+      'idx_spans_start',
+      'idx_spans_name',
+    ]
+
+    /**
+     * 主库形态的**因果造法**：段四/段五上船前就停机的库 = 那 14 条基线从未执行过。
+     * 故直接从数组里摘掉这些条目跑一遍（而不是建好再 DROP——DROP 是「事后抹掉」，
+     * 摘条目是「从未发生」，与真实来路同面），再摘掉台账（票 1 才有它）。
+     */
+    function makeMainDbLike(): Database.Database {
+      const db = new Database(':memory:')
+      db.pragma('foreign_keys = ON')
+      sqliteVec.load(db)
+      const skip = new Set<string>([...MAIN_DB_REPAIR_ENTRY_NAMES, REPAIR_NAME])
+      applyMigrations(
+        db,
+        MIGRATIONS.filter((m) => !skip.has(m.name))
+      )
+      db.exec(`DROP TABLE schema_migrations`)
+      return db
+    }
+
+    it('造出来的「主库形态」确实是缺这 14 件的老库（防夹具自己失真）', () => {
+      const db = makeMainDbLike()
+      const names = new Set(
+        (
+          db
+            .prepare(`SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
+            .all() as Array<{
+            name: string
+          }>
+        ).map((r) => r.name)
+      )
+      // 缺件面：14 件物体一件都不在；且无台账 ⇒ 命中 isOldDb
+      for (const obj of EXPECTED_OBJECTS) expect(names.has(obj), obj).toBe(false)
+      expect(
+        db.prepare(`SELECT 1 FROM sqlite_master WHERE name = 'schema_migrations'`).get()
+      ).toBeUndefined()
+      // 存量面：其余结构在（47 − 14 = 33，实测主库读数即 33；追加区两条索引另计）
+      expect(dumpSchema(db)).toHaveLength(
+        BASELINE.length - EXPECTED_OBJECTS.length + APPENDED_NET_OBJECTS
+      )
+    })
+
+    it('主库形态跑 initDb → 14 件全部建回，且形状与基准逐行一致、存量数据原样', () => {
+      const db = makeMainDbLike()
+      db.prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key)
+         VALUES ('a1', '店长', '🐱', 'p', 'deepseek', 'deepseek-v4-pro', 'sk')`
+      ).run()
+
+      setDb(db)
+      initDb()
+
+      // ① 一件不少：全量 dump 与基准（改动前旧码产物）逐行一致 —— 既证「补回来了」，
+      //    也证「补出来的形状就是基线形状」，不存在第二份 DDL 走样的可能
+      const actual = dumpSchema(db)
+      expect(actual).toHaveLength(BASELINE.length + APPENDED_NET_OBJECTS)
+      const byName = new Map(actual.map((r) => [`${r.type}:${r.name}`, r]))
+      for (const expected of BASELINE) {
+        // 唯一与基准不同面的是 `idx_messages_session`：票 2 的**同名升级**（两列 → 三列），
+        // 定义本就该变；其升级判据单列在下面。
+        if (expected.name === 'idx_messages_session') continue
+        expect(
+          byName.get(`${expected.type}:${expected.name}`),
+          `${expected.type} ${expected.name}`
+        ).toEqual(expected)
+      }
+      expect(byName.get('index:idx_messages_session')?.sql).toContain('session_id,created_at,id')
+
+      // ② 台账：41 条补登 + 1 条真执行（补建），补建行**不是**补登
+      const rows = ledger(db)
+      expect(rows).toHaveLength(MIGRATIONS.length)
+      expect(rows.filter((r) => r.note === 'baseline')).toHaveLength(41)
+      expect(rows.find((r) => r.name === REPAIR_NAME)?.note).toBeNull()
+
+      // ③ 手术不动存量数据
+      expect(db.prepare(`SELECT COUNT(*) n FROM agents`).get()).toEqual({ n: 1 })
+    })
+
+    it('补建正文 = 恰好这 14 件物体（防漏防多）、条条 IF NOT EXISTS、顺序 = 依赖序', () => {
+      const stmts = repairEntry.sql.split(';\n')
+      expect(stmts).toHaveLength(EXPECTED_OBJECTS.length)
+      const created = stmts.map((s) => {
+        const m = /^\s*CREATE (?:TABLE|INDEX) IF NOT EXISTS (\w+)/.exec(s)
+        expect(m, `不是 IF NOT EXISTS 建表/建索引：${s}`).not.toBeNull()
+        return (m as RegExpExecArray)[1]
+      })
+      expect(created).toEqual(EXPECTED_OBJECTS)
+    })
+
+    it('已完整的库（全新库 / dev 库）：补建是 no-op，不新增任何物体', () => {
+      setDb(makeFreshDb())
+      initDb()
+      expect(dumpSchema(getDb())).toHaveLength(BASELINE.length + APPENDED_NET_OBJECTS)
+      expect(ledger(getDb()).find((r) => r.name === REPAIR_NAME)?.note).toBeNull()
+    })
+  })
+
   // ─── 验收 3 · 拒启 ──────────────────────────────────────────────────
   describe('验收 3 · 失败拒启 / 篡改拒启', () => {
     it('注入失败迁移 → 抛错带迁移名 + SQLite 原错；整条事务回滚', () => {
@@ -474,8 +599,8 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
     })
   })
 
-  // ─── 票 2 · 索引三条 + fix-forward 补建（追加区首次实战）───────────────
-  describe('票 2 · 索引三条 + fix-forward 补建', () => {
+  // ─── 票 2 · 索引三条（追加区首次实战）─────────────────────────────────
+  describe('票 2 · 索引三条（追加区首次实战）', () => {
     /** 库内是否存在该物体（与 `verify` 探针同面：`sqlite_master` 的 type + name） */
     const has = (db: Database.Database, type: string, name: string): boolean =>
       db.prepare(`SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?`).get(type, name) !==
@@ -486,18 +611,6 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
         db.prepare(`SELECT sql FROM sqlite_master WHERE name = ?`).get(name) as
           { sql: string } | undefined
       )?.sql ?? ''
-
-    /** 干净复现「主库残骸」：14 件 fix-forward 物体一件不留（双态用例的「缺件」侧）。
-     *  **索引先删、表倒序删**——清单是「父表在前」的建表依赖序，删表得反过来，
-     *  否则 FK 打开时先删父表会撞上还在的子表引用。 */
-    function dropFixForwardObjects(db: Database.Database): void {
-      for (const o of FIX_FORWARD_OBJECTS.filter((o) => o.type === 'index')) {
-        db.exec(`DROP INDEX IF EXISTS ${o.object}`)
-      }
-      for (const o of FIX_FORWARD_OBJECTS.filter((o) => o.type === 'table').reverse()) {
-        db.exec(`DROP TABLE IF EXISTS ${o.object}`)
-      }
-    }
 
     /** `EXPLAIN QUERY PLAN` 的 detail 列表（带参绑定，与生产调用同形） */
     function plan(db: Database.Database, sql: string, params: unknown[]): string[] {
@@ -595,63 +708,74 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
           db,
           MIGRATIONS.filter((m) => m.baseline === true)
         )
-        // ② 票 2 上船时，库仍是缺件的（老机制静默失败的残骸）
-        dropFixForwardObjects(db)
+        // ② 票 2 上船时，索引还是旧形态 / 压根没有（老机制静默失败的残骸）
         db.exec(`DROP INDEX IF EXISTS idx_messages_session`)
+        db.exec(`DROP INDEX IF EXISTS idx_execution_logs_session_started`)
+        db.exec(`DROP INDEX IF EXISTS idx_execution_logs_status`)
 
         applyMigrations(db, MIGRATIONS)
 
-        expect(
-          FIX_FORWARD_OBJECTS.filter((o) => !has(db, o.type, o.object)).map((o) => o.object)
-        ).toEqual([])
         expect(sqlOf(db, 'idx_messages_session')).toContain('session_id, created_at, id')
+        expect(has(db, 'index', 'idx_execution_logs_session_started')).toBe(true)
+        expect(has(db, 'index', 'idx_execution_logs_status')).toBe(true)
         const rows = ledger(db)
         expect(rows).toHaveLength(MIGRATIONS.length)
         // baseline 行仍是补登（没被这轮覆盖），追加行 note 全空
         expect(rows.find((r) => r.name === 'chunks table (段三切片索引)')?.note).toBe('baseline')
-        expect(rows.find((r) => r.name === FIX_FORWARD_MIGRATION_NAME)?.note).toBeNull()
+        for (const name of [
+          'idx_messages_session upgrade (session_id, created_at, id)',
+          'idx_execution_logs_session_started',
+          'idx_execution_logs_status',
+        ]) {
+          expect(rows.find((r) => r.name === name)?.note, name).toBeNull()
+        }
       })
     })
 
-    // ─── 验收 3 · fix-forward 双态 ─────────────────────────────────────
-    describe('验收 3 · fix-forward 补建双态', () => {
-      it('探针双态（真空性反对照：探针若恒 true，下面两条用例全成假绿）', () => {
-        const complete = makeOldDb()
-        const missing = makeOldDb()
-        dropFixForwardObjects(missing)
+    // ─── OQ4 · 汇总播报的「追加区真执行」计数 ──────────────────────────
+    describe('OQ4 · 汇总播报「追加区迁移真执行：N 条」与实际一致', () => {
+      /** 抓 `[db]` 播报行（只认这一面，不把其他 console 输出混进来） */
+      function migrationLogs(fn: () => void): string[] {
+        const lines: string[] = []
+        const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+          lines.push(args.map((a) => String(a)).join(' '))
+        })
+        try {
+          fn()
+        } finally {
+          spy.mockRestore()
+        }
+        return lines.filter((l) => l.startsWith('[db]'))
+      }
 
-        const entry = MIGRATIONS.find((m) => m.name === FIX_FORWARD_MIGRATION_NAME)
-        if (entry?.verify === undefined) throw new Error('fix-forward 条目必须挂 verify 探针')
+      const appendedLine = (lines: string[]): string | undefined =>
+        lines.find((l) => l.startsWith('[db] 追加区迁移真执行：'))
 
-        expect(entry.verify(complete)).toBe(true) // 齐件库：效果已成立
-        expect(entry.verify(missing)).toBe(false) // 缺件库：必须报「效果缺失」才会真执行
+      it('N 条真执行：老库 + 追加区首次上船 → 播报条数 = 追加区条目数（不是 0）', () => {
+        const db = makeOldDb()
+        const total = MIGRATIONS.filter((m) => m.baseline !== true).length
+        // 真空性反对照：追加区若为空，下面的断言恒等于「0 条」而假绿
+        expect(total).toBeGreaterThan(0)
+
+        const lines = migrationLogs(() => {
+          setDb(db)
+          initDb()
+        })
+
+        expect(appendedLine(lines)).toBe(`[db] 追加区迁移真执行：${total} 条`)
+        // OQ4 是**补**一行：老库补登那行照旧并存，没被顶掉
+        expect(lines.some((l) => l.startsWith('[db] 老库补登：'))).toBe(true)
       })
 
-      it('缺件库 → 14 件全补建（5 表 + 9 索引），该条登记为普通 append', () => {
-        const db = makeOldDb()
-        dropFixForwardObjects(db)
-        expect(FIX_FORWARD_OBJECTS.filter((o) => has(db, o.type, o.object))).toEqual([])
-
+      it('0 条真执行：库已最新再跑一次 → 播报 0 条，不谎报「修了什么」', () => {
+        const db = makeFreshDb()
         setDb(db)
-        initDb()
+        initDb() // 首次：全部落地
 
-        expect(FIX_FORWARD_OBJECTS.filter((o) => !has(db, o.type, o.object))).toEqual([])
-        const row = ledger(db).find((r) => r.name === FIX_FORWARD_MIGRATION_NAME)
-        expect(row).toBeDefined()
-        expect(row?.note).toBeNull() // 普通 append，**不是** note='baseline'
-      })
+        const lines = migrationLogs(() => applyMigrations(db))
 
-      it('齐件库 → 探针 true 只登记不执行（零产出：结构快照逐行不变）', () => {
-        const db = makeOldDb()
-        const before = dumpSchema(db)
-
-        setDb(db)
-        initDb()
-
-        expect(ledger(db).find((r) => r.name === FIX_FORWARD_MIGRATION_NAME)?.note).toBeNull()
-        // `CREATE … IF NOT EXISTS` 本也不改结构，故这条断言是**弱判据**（「没执行」由上一个
-        // 用例的探针双态钉死）；留着是防「有人把 IF NOT EXISTS 去掉后此处静默破形」。
-        expect(dumpSchema(db)).toEqual(before)
+        expect(appendedLine(lines)).toBe('[db] 追加区迁移真执行：0 条')
+        expect(lines.some((l) => l.startsWith('[db] migrated:'))).toBe(false)
       })
     })
 

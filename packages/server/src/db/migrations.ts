@@ -27,15 +27,20 @@
  * - 探针 `true` ⇒ 效果已成立（或目标对象不存在、无事可做）⇒ **跳过执行**，只登记；
  * - 探针 `false` ⇒ **真执行**（全新库 = 首次落地；老库补登 = 矫正路径）。
  *
- * 全量审计结论（票 1 实施时逐条过了一遍 61 条的压扁源；票 2 追加区新增 1 条）：
- * - **挂探针 4 条**：`widen review_verdicts …`、`chunk_vectors distance_metric=cosine`、
+ * 全量审计结论（票 1 实施时逐条过了一遍 61 条的压扁源）：
+ * - **挂探针 3 条**：`widen review_verdicts …`、`chunk_vectors distance_metric=cosine`、
  *   `drop memories chain tables`——三条都是「效果缺失不报错、只静默劣化」。
  *   前两条是规格点名的候选；第三条是审计新增：`DROP TABLE IF EXISTS` 对缺表是 no-op，
  *   老库若仍留着两张死表，启动**不会有任何提示**，而 `db/index.test.ts` 有用例钉着
  *   「老库跑完 initDb 后两表必须消失」。不挂探针 = 该用例在老库路径上必然静默失效。
- *   第四条是票 2 的 fix-forward 补建（追加区）：判据同款——`CREATE … IF NOT EXISTS`
- *   对已存在的物体是 no-op，齐件库上真跑一遍什么都不改也什么都不说；探针把「14 件
- *   经核对确在」这件事实记进台账，而不是让台账记一句无从验证的「已执行」。
+ *
+ * ## 追加区（fix-forward）
+ *
+ * 台账立闸后的一切结构变更都追加到文件末尾的 `APPENDED_MIGRATIONS`，**不带** `baseline`
+ * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着四条：补建主库缺失的
+ * `retrieval_*` / `spans` 五表九索引（票 1 OQ1 实测 + 店长裁决 ②），外加票 2 的三条索引
+ * （spec §3.2）——来龙去脉见各条上方注释。
+ *
  * - **不挂探针 38 条**：其余 CREATE TABLE / CREATE INDEX / DROP 条目要么是纯新物体
  *   （缺了会在首次使用时响亮报错），要么效果由后续条目独立保证。加列类历史 ALTER 已
  *   并入基线列清单，老库「缺列」这条路径根本不成立（旧机制每次启动全量重跑，缺列会
@@ -624,104 +629,61 @@ const BASELINE_MIGRATIONS: ReadonlyArray<Migration> = [
 // 若某条迁移的效果在个别库上已由手工 SQL 提前成立，给它挂 `verify` 探针（探针 true ⇒
 // 只登记不执行），别用「老库」这个笼统判据去挡。
 
-/** `sqlite_master` 存在性查询（type 精确匹配——`chunks` 的索引与同名虚拟表影子表不混） */
-function objectExists(db: Database.Database, type: 'table' | 'index', name: string): boolean {
-  return (
-    db.prepare(`SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?`).get(type, name) !==
-    undefined
-  )
-}
+/**
+ * 补建迁移要复原的 14 件物体（票 1 OQ1 实测 + 店长裁决 ②）——**顺序 = 建表依赖序**
+ * （FK 目标先建：`retrieval_queries` 引用 `retrieval_events`、`retrieval_candidates` 引用
+ * `retrieval_queries`、`span_llm` 引用 `spans`）。
+ *
+ * 为什么需要补建：本机制上船**之前**，迁移数组是每次启动全量重跑；某台库若在「段四/段五
+ * 条目被加进数组」之前就停机了，它从未执行过这两段。上船**之后**，这种库命中「无台账 +
+ * 有用户表」⇒ 被判老库 ⇒ 基线条目**只登记不执行** ⇒ 这 14 件物体永远不会被建回来，而台账
+ * 却记成「历史已发生」（假历史）。实测：主库 `cat-study.db`（最后一次启动 08-25）正是
+ * 此形态——33 件物体，缺这 14 件；dev 库 47/47 完好。
+ *
+ * 为什么用**名字**而不是把 14 条 DDL 再抄一遍：抄一遍 = 同一批物体两份正文，正是本票要
+ * 消灭的平行真相源。补建的语义本来就是「把这几条基线条目补跑一遍」，故正文直接取自基线
+ * 条目原文（它们在**同一个文件**里，且被 checksum 冻结，两处不可能分叉）。
+ * 引用不存在的名字 = 编程错误 ⇒ 模块加载即抛，不留静默。
+ *
+ * 导出给测试：用来构造「主库形态」（把这些条目从数组里摘掉 = 这两段上船前就停机的库）。
+ */
+export const MAIN_DB_REPAIR_ENTRY_NAMES: ReadonlyArray<string> = [
+  'retrieval_events table (段四检索流水·检索级)',
+  'idx_retrieval_events_execution',
+  'idx_retrieval_events_created',
+  'idx_retrieval_events_task',
+  'retrieval_queries table (段四检索流水·查询级)',
+  'retrieval_candidates table (段四检索流水·候选级)',
+  'idx_retrieval_candidates_query',
+  'idx_retrieval_candidates_content_hash',
+  'spans table (段五执行时间轴·骨架)',
+  'span_llm table (段五执行时间轴·LLM 详情)',
+  'idx_spans_execution',
+  'idx_spans_chain',
+  'idx_spans_start',
+  'idx_spans_name',
+]
 
-/** 基线条目名 → 建表/建索引原文。找不到 = 清单里的名字写错了，**模块加载期当场抛**：
- *  比等到某台老库上静默少建一件强（那正是本票要消灭的失败类）。 */
-function baselineSqlOf(entryName: string): string {
-  const entry = BASELINE_MIGRATIONS.find((m) => m.name === entryName)
+/** 按名取基线条目正文（找不到 ⇒ 抛：名字是冻结契约，改了名就得同步这里） */
+function baselineEntrySql(name: string): string {
+  const entry = BASELINE_MIGRATIONS.find((m) => m.name === name)
   if (entry === undefined) {
-    throw new Error(`[db] fix-forward 补建清单引用了不存在的基线条目「${entryName}」`)
+    throw new Error(
+      `[db] 补建迁移引用了不存在的基线条目「${name}」——基线条目名是 checksum 冻结的契约，` +
+        `改名/删条目都必须同步 MAIN_DB_REPAIR_ENTRY_NAMES。`
+    )
   }
   return entry.sql
 }
 
-/** fix-forward 补建清单的一项：`entry` 是取 DDL 的键，`object` 是它在库里落成的物体名。 */
-export interface FixForwardObject {
-  entry: string
-  object: string
-  type: 'table' | 'index'
-}
-
-/**
- * OQ1 fix-forward 补建清单（票 2，2026-09-17 店长终裁）——主库实测缺失的 **14 件**物体。
- *
- * ## 名单从哪来（不是照抄审查回执）
- *
- * 「基线期望物体全集 vs 主库 `sqlite_master` 实测」对账产出：主库 **33/47**，缺的恰好是
- * 下面这 5 表 + 9 索引（`retrieval_*` 三表 + `spans` 两表 + 它们名下 9 个索引），
- * 是旧机制 `catch {}` 全吞时代静默失败的残骸。dev 库实测 47/47、全新库基线重放后亦齐件
- * ⇒ 这条迁移对它们是货真价实的 no-op，靠 `verify` 探针短路掉。
- *
- * ## 为什么 DDL 从基线集**取原文**而不是手抄
- *
- * 手抄就是第二个真相源：14 段 DDL 抄错任何一处，失败形态是**永久的静默缺件**（`IF NOT
- * EXISTS` 不报错、探针又是存在性判据，两边一起瞎）。取原文则字节级同源，且基线集是冻结的
- * 历史（改它必先撞 checksum 拒启）⇒ 本条 checksum 稳定。
- *
- * ## 为什么逐条显式列 `object`（条目名 ≠ 物体名）
- *
- * 实测陷阱：基线条目 `idx_retrieval_candidates_content_hash` **建出来的索引叫**
- * `idx_retrieval_candidates_hash`。存在性探针按 `sqlite_master.name` 查，两者不可互相推导，
- * 故逐条写死，并由测试在齐件库上整表核对。
- *
- * **顺序即契约**：表在其索引之前、被引用表在引用表之前（`retrieval_queries` 引用
- * `retrieval_events`、`retrieval_candidates` 引用 `retrieval_queries`、`span_llm` 引用 `spans`）。
- */
-export const FIX_FORWARD_OBJECTS: ReadonlyArray<FixForwardObject> = [
-  // ── 段四·记忆检索流水（3 表 + 5 索引）──
-  {
-    entry: 'retrieval_events table (段四检索流水·检索级)',
-    object: 'retrieval_events',
-    type: 'table',
-  },
-  {
-    entry: 'idx_retrieval_events_execution',
-    object: 'idx_retrieval_events_execution',
-    type: 'index',
-  },
-  { entry: 'idx_retrieval_events_created', object: 'idx_retrieval_events_created', type: 'index' },
-  { entry: 'idx_retrieval_events_task', object: 'idx_retrieval_events_task', type: 'index' },
-  {
-    entry: 'retrieval_queries table (段四检索流水·查询级)',
-    object: 'retrieval_queries',
-    type: 'table',
-  },
-  {
-    entry: 'retrieval_candidates table (段四检索流水·候选级)',
-    object: 'retrieval_candidates',
-    type: 'table',
-  },
-  {
-    entry: 'idx_retrieval_candidates_query',
-    object: 'idx_retrieval_candidates_query',
-    type: 'index',
-  },
-  // ⚠️ 条目名（…content_hash）≠ 建出的索引名（…hash）——见上方说明，别「顺手对齐」
-  {
-    entry: 'idx_retrieval_candidates_content_hash',
-    object: 'idx_retrieval_candidates_hash',
-    type: 'index',
-  },
-  // ── 段五·执行时间轴（2 表 + 4 索引）──
-  { entry: 'spans table (段五执行时间轴·骨架)', object: 'spans', type: 'table' },
-  { entry: 'span_llm table (段五执行时间轴·LLM 详情)', object: 'span_llm', type: 'table' },
-  { entry: 'idx_spans_execution', object: 'idx_spans_execution', type: 'index' },
-  { entry: 'idx_spans_chain', object: 'idx_spans_chain', type: 'index' },
-  { entry: 'idx_spans_start', object: 'idx_spans_start', type: 'index' },
-  { entry: 'idx_spans_name', object: 'idx_spans_name', type: 'index' },
-]
-
-/** fix-forward 条目名（导出给测试与派活单引用，避免各处硬编码串漂移）。 */
-export const FIX_FORWARD_MIGRATION_NAME = 'fix-forward 补建 retrieval/spans 缺失物体 (OQ1)'
-
 const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
+  {
+    name: 'fix-forward 补建 retrieval_*/spans 五表九索引（票 1 OQ1）',
+    // 14 条全是 `IF NOT EXISTS` ⇒ 对已完整的库是 no-op，对缺件的库才真建；挂不挂 `verify`
+    // 都改不了这个结果，故按探针审计的判据（只给「失败不报错、只静默劣化」的重建类条目挂）
+    // 不挂——探针清单因此仍等于审计定稿的 3 条。
+    sql: MAIN_DB_REPAIR_ENTRY_NAMES.map(baselineEntrySql).join(';\n'),
+  },
   // ── 票 2 · 索引三条（spec §3.2，首批 append 迁移）──────────────────────
   {
     // 会话历史拉取 + 翻页游标的 tie-break。服务的查询 `getSessionMessagesRange`
@@ -764,15 +726,6 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 不到**（这正是「对照实际 SQL 定形」要挡的形态：照抄复合版 = 建了个用不上的索引）。
     name: 'idx_execution_logs_status',
     sql: `CREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)`,
-  },
-  // ── 票 2 · OQ1 fix-forward 补建（一条，14 件物体）─────────────────────
-  {
-    name: FIX_FORWARD_MIGRATION_NAME,
-    // 14 件 DDL 从基线集对应条目逐字取——条目名与物体名一一对应关系见 FIX_FORWARD_OBJECTS
-    sql: FIX_FORWARD_OBJECTS.map((o) => baselineSqlOf(o.entry)).join(';\n'),
-    // 存在性探针：14 件**全在**才 true。齐件库（dev / 全新库）⇒ 只登记不执行；
-    // 缺件库（主库）⇒ 真执行补建。
-    verify: (db) => FIX_FORWARD_OBJECTS.every((o) => objectExists(db, o.type, o.object)),
   },
 ]
 
