@@ -105,6 +105,7 @@ describe('db/rebuild —— 通用表重建 helper（票 4）', () => {
         table: 's',
         createSql: `CREATE TABLE s (session_id TEXT PRIMARY KEY, note TEXT NOT NULL)`,
         columnMap: [{ to: 'note', from: 'legacy_note' }],
+        allowDroppedColumns: ['legacy_note'], // 改名 = 旧列名在新形状里「消失」，须点名
       })
 
       expect(report.copiedColumns).toEqual(['session_id', 'note'])
@@ -112,18 +113,38 @@ describe('db/rebuild —— 通用表重建 helper（票 4）', () => {
       expect(rows('s')).toEqual([{ session_id: 's1', note: 'hello' }])
     })
 
-    it('增列走 DEFAULT、删列进报告（丢数据这件事必须被看见）', () => {
+    it('增列走 DEFAULT；删列须在 allowDroppedColumns 点名，点了才丢并进报告', () => {
       db.exec(`CREATE TABLE t (id TEXT PRIMARY KEY, dead TEXT)`)
       db.exec(`INSERT INTO t VALUES ('a','x')`)
 
       const report = rebuildTable(db, {
         table: 't',
         createSql: `CREATE TABLE t (id TEXT PRIMARY KEY, added TEXT NOT NULL DEFAULT 'dflt')`,
+        allowDroppedColumns: ['dead'],
       })
 
       expect(report.droppedColumns).toEqual(['dead'])
       expect(report.addedColumns).toEqual(['added'])
       expect(rows('t')).toEqual([{ id: 'a', added: 'dflt' }])
+    })
+
+    it('两库列序不同（票 4 契约补充 · 票 3 发现①）：按列名映射，数据不错列', () => {
+      // main 与 dev 的 messages 实测列序不同（老库 ALTER 追加列的产物），
+      // 按位置拷会静默错列且行数校验查不出来——故这里刻意让新旧列序互不相同。
+      db.exec(
+        `CREATE TABLE m (id TEXT PRIMARY KEY, session_id TEXT, created_at TEXT, task_id TEXT)`
+      )
+      db.exec(`INSERT INTO m VALUES ('m1','s1','2026-09-17 08:30:00','task-1')`)
+
+      const report = rebuildTable(db, {
+        table: 'm',
+        createSql: `CREATE TABLE m (id TEXT PRIMARY KEY, session_id TEXT, task_id TEXT, created_at TEXT)`,
+      })
+
+      expect(report.copiedColumns).toEqual(['id', 'session_id', 'task_id', 'created_at'])
+      expect(rows('m')).toEqual([
+        { id: 'm1', session_id: 's1', task_id: 'task-1', created_at: '2026-09-17 08:30:00' },
+      ])
     })
 
     it('行序按 rowid（插入序）保持——不被索引序顶掉', () => {
@@ -139,6 +160,7 @@ describe('db/rebuild —— 通用表重建 helper（票 4）', () => {
         // 新形状不再有 v；索引照旧重建（索引原样，行序仍必须是插入序）
         createSql: `CREATE TABLE t (id TEXT PRIMARY KEY);
                     CREATE INDEX idx_t_id ON t(id)`,
+        allowDroppedColumns: ['v'],
       })
 
       expect(rows('t', 'rowid')).toEqual([{ id: 'z' }, { id: 'a' }, { id: 'm' }])
@@ -256,6 +278,24 @@ describe('db/rebuild —— 通用表重建 helper（票 4）', () => {
       expect(db.pragma('foreign_keys', { simple: true })).toBe(1)
     })
 
+    it('删列没在 allowDroppedColumns 点名 → 抛 + 回滚（列丢 = 数据丢，不许静默）', () => {
+      db.exec(`CREATE TABLE t (id TEXT PRIMARY KEY, legacy TEXT)`)
+      db.exec(`CREATE INDEX idx_t_legacy ON t(legacy)`)
+      db.exec(`INSERT INTO t VALUES ('a','keep?')`)
+      const beforeSql = tableSql('t')
+
+      expect(() =>
+        rebuildTable(db, {
+          table: 't',
+          createSql: `CREATE TABLE t (id TEXT PRIMARY KEY, note TEXT)`,
+        })
+      ).toThrow(/会丢掉旧表的列：legacy/)
+
+      expect(tableSql('t')).toBe(beforeSql)
+      expect(rows('t')).toEqual([{ id: 'a', legacy: 'keep?' }])
+      expect(indexNames('t')).toEqual(['idx_t_legacy'])
+    })
+
     it('连接本来就关着 FK → 重建后仍关着（不擅自把不变量塞给调用方）', () => {
       db.pragma('foreign_keys = OFF')
       db.exec(`CREATE TABLE t (id TEXT PRIMARY KEY)`)
@@ -363,6 +403,29 @@ describe('db/rebuild —— 通用表重建 helper（票 4）', () => {
           columnMap: [{ to: 'id', from: 'ghost' }],
         })
       ).toThrow(/来源列「ghost」在旧表不存在/)
+    })
+
+    it('convert 写成通配取值（`*` / `t.*`）→ 抛（禁位置对齐的唯一可达入口）', () => {
+      db.exec(`CREATE TABLE t (id TEXT PRIMARY KEY, v TEXT)`)
+      db.exec(`INSERT INTO t VALUES ('a','x')`)
+
+      for (const convert of ['*', ' t.* ']) {
+        expect(() =>
+          rebuildTable(db, {
+            table: 't',
+            createSql: `CREATE TABLE t (id TEXT PRIMARY KEY, v TEXT)`,
+            columnMap: [{ to: 'v', convert }],
+          })
+        ).toThrow(/convert 写成了通配取值/)
+      }
+      // 真空性反对照：表达式里的**引号内星号**不是通配，不许被守卫误伤
+      const report = rebuildTable(db, {
+        table: 't',
+        createSql: `CREATE TABLE t (id TEXT PRIMARY KEY, v TEXT)`,
+        columnMap: [{ to: 'v', convert: `upper(v) || '*'` }],
+      })
+      expect(report.rows).toBe(1)
+      expect(rows('t')).toEqual([{ id: 'a', v: 'X*' }])
     })
   })
 

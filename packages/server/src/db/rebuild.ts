@@ -29,6 +29,17 @@
  * 旧表上「重建后没再出现」的索引/触发器一律**抛错回滚**（`sqlite_autoindex_*` 这类
  * 由约束自动生成的不算，它们随新表约束自动重建）——静默丢一个索引 = 静默的性能回归，
  * 正是重建类改动最容易留下的暗伤。确实要丢的，用 `allowDropped` 明确列名。
+ *
+ * 旧表有、新表没有的**列**同理：数据随列一起没了，必须由调用方在 `allowDroppedColumns`
+ * 里点名确认，否则抛错回滚（票 8 删 `sessions.agent_ids` 是已知意图，仍要显式声明）。
+ *
+ * ## 拷贝一律按列名，禁位置对齐（票 4 契约补充，票 3 发现①）
+ *
+ * 两库 `messages` 的**列序不同**（main `…created_at,task_id…` / dev `…task_id,created_at…`，
+ * 老库 ALTER 追加列的历史产物），而 `INSERT INTO new SELECT * FROM old` 是**按位置**对齐的
+ * ——错列之后行数校验照样通过，属于查不出来的静默事故。故本 helper 的拷贝清单由
+ * `PRAGMA table_info` 双侧取列名构造，每列的取值表达式要么是 `quoteIdent(来源列)`，
+ * 要么是调用方显式给的 `convert`；`convert` 是本文件里**唯一**能引入通配的入口，故在此挡掉。
  */
 import type Database from 'better-sqlite3'
 
@@ -55,10 +66,12 @@ export interface RebuildOptions {
    * 正文按原样建表（`IF NOT EXISTS` 会被 SQLite 自身剥掉，与本仓其它 DDL 同款）。
    */
   createSql: string
-  /** 列映射（缺省 = 新旧同名直拷，仅存于旧表的列丢弃、仅存于新表的列走 DEFAULT/NULL） */
+  /** 列映射（缺省 = 新旧同名直拷，仅存于新表的列走 DEFAULT/NULL） */
   columnMap?: ReadonlyArray<RebuildColumn>
   /** 明确声明要丢弃的旧索引/触发器名（缺省：丢一个没在 `createSql` 里重建的就抛） */
   allowDropped?: ReadonlyArray<string>
+  /** 明确声明要丢弃的旧表列名（缺省：丢一列没在这里点名的就抛——列丢 = 数据丢，不许静默） */
+  allowDroppedColumns?: ReadonlyArray<string>
 }
 
 export interface RebuildReport {
@@ -67,7 +80,7 @@ export interface RebuildReport {
   rows: number
   /** 实际参与拷贝的新表列名 */
   copiedColumns: string[]
-  /** 旧表有、新表没有的列（数据随列丢弃——这是重建的意图，但必须被看见） */
+  /** 旧表有、新表没有的列（数据随列丢弃——必须先在 `allowDroppedColumns` 里点名才走到这里） */
   droppedColumns: string[]
   /** 新表有、旧表没有且未给取值的列（走该列的 DEFAULT / NULL） */
   addedColumns: string[]
@@ -81,6 +94,9 @@ const CREATE_TABLE_RE =
   /^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_$]*))/i
 
 const quoteIdent = (name: string): string => `"${name.replace(/"/g, '""')}"`
+
+/** `convert` 里的通配取值（`*` / `t.*`）——本文件里唯一能写出「按位置拷」的入口 */
+const WILDCARD_EXPR_RE = /^\s*(?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)?\*\s*$/
 
 /** 引号/注释感知的分号切分——DDL 正文里的 `-- 注释；含分号` 不是语句边界 */
 export function splitStatements(sql: string): string[] {
@@ -231,6 +247,12 @@ function planCopy(
     const entry = byTarget.get(col)
     if (entry !== undefined) {
       if (entry.convert !== undefined) {
+        if (WILDCARD_EXPR_RE.test(entry.convert)) {
+          throw new Error(
+            `[db] 重建「${table}」的 columnMap 里「${col}」的 convert 写成了通配取值——` +
+              `拷贝必须按列名显式映射（两库列序可能不同，位置对齐会静默错列且行数校验查不出来）。`
+          )
+        }
         plan.push({ to: col, expr: entry.convert })
         continue
       }
@@ -264,6 +286,7 @@ export function rebuildTable(db: Database.Database, options: RebuildOptions): Re
   const { table, createSql } = options
   const columnMap = options.columnMap ?? []
   const allowDropped = new Set(options.allowDropped ?? [])
+  const allowDroppedColumns = new Set(options.allowDroppedColumns ?? [])
 
   if (db.inTransaction) {
     throw new Error(
@@ -319,6 +342,14 @@ export function rebuildTable(db: Database.Database, options: RebuildOptions): Re
 
         const newColumns = columnNames(db, tmp)
         const { plan, dropped, added } = planCopy(table, oldColumns, newColumns, columnMap)
+
+        const undeclared = dropped.filter((c) => !allowDroppedColumns.has(c))
+        if (undeclared.length > 0) {
+          throw new Error(
+            `[db] 重建「${table}」会丢掉旧表的列：${undeclared.join('、')}（数据随列一起没了）。` +
+              `确认要丢的，在 allowDroppedColumns 里明确列出。已回滚。`
+          )
+        }
 
         const before = countRows(db, table)
         if (plan.length > 0) {
