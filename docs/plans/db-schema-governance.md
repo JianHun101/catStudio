@@ -97,7 +97,7 @@ evidence:
 ### 4.1 FK / 删除策略 / CHECK（④修订版，已拍板）
 
 - **PRAGMA**：`foreign_keys = ON` **已在**（`index.ts:27`）——本项从「新增」更正为「保持」，列为不变量（每个连接路径都须开，含测试注入路径）。
-- **FK 补齐**：核心引用链补齐（已存在：messages→sessions、execution_logs→sessions/agents、session_read_state→sessions CASCADE、episode_attributions→episodes、retrieval 系、spans 系；已知缺口：messages.agent_id→agents、review_verdicts 各引用、connector_bindings.session_id、episodes 各引用、flow_states/flow_state_events.session_id——实施时逐表审计定稿）。**已登记松耦合一律不加**：chunks 派生投影、retrieval_candidates.chunk_id（仅诊断）、eval_scores / user_feedback。
+- **FK 补齐**：核心引用链补齐（已存在：messages→sessions、execution_logs→sessions/agents、session_read_state→sessions CASCADE、episode_attributions→episodes、retrieval 系、spans 系；已知缺口：messages.agent_id→agents、review_verdicts 各引用、connector_bindings.session_id、episodes 各引用、flow_states/flow_state_events.session_id——实施时逐表审计定稿；**票 3 审计补链（D2 拍板 2026-09-17，九条全纳）**：review_parse_failures.message_id、episode_attributions.delivery_message_id、execution_logs.message_id、execution_logs.triggered_by_message_id、sessions.summary_msg_id、retrieval_events.session_id、retrieval_events.agent_id、spans.session_id、spans.agent_id——其中含 DDL 已具 FK 但存量有孤儿的链，孤儿随 D1 删除后约束归位）。**已登记松耦合一律不加**：chunks 派生投影、retrieval_candidates.chunk_id（仅诊断）、eval_scores / user_feedback。
 - **前置孤儿审计**：重建加 FK 会校验存量——先对各候选关系跑「子表 LEFT JOIN 父表 IS NULL」出孤儿报告（量级 + 样本），只读可重复。
 - **孤儿处理（用户拍板）**：审计先行，报告出来用户拍板，**默认倾向删除**（开发阶段、疑似没删干净的残渣）；若量大或涉核心资产（如 messages），回收容所方案（占位父行，一行不丢）。报告留痕。
 - **删除策略**：物理删除全 **RESTRICT**；CASCADE 仅纯成员关系行（session_agents）。**用户态「删除」= 归档**：sessions 加 `archived_at`（NULL=活跃），`ALTER TABLE ADD COLUMN` 轻迁移 + 部分索引；前端列表默认过滤 + 「显示已归档」开关；**归档不动记忆检索**（归档会话照常可被记忆系统检索）。
@@ -171,6 +171,7 @@ CREATE TABLE session_agents (
 - **⑤-a ISO 毫秒 / ⑤-b 无损单向**（7bd79b87 轮同意）+ **⑤-c 修订版**（记录时间收口 / 事件时间例外，用户确认 36ca4f26）。
 - **⑥ 四个子决策 + joined_at + 删除被拦 409 契约**：用户拍板（a65b2697）。
 - **读码校正**（2026-09-17，spec 落笔前）：PRAGMA 已在（④-a 改「保持」）；FK/CHECK 已存在清单与真实缺口如 §4.1；messages 已有两列索引（③第一条为升级）；时间口径真实分布如 §4.2；迁移数组 61 条。以上均收紧事实、不翻任何决策。
+- **D1–D4 拍板**（2026-09-17，票 3 审计报告四项，用户「按建议走」）：**D1 孤儿 = 删除**（重建迁移逐链带 DELETE，审计 SQL 全留痕可复算）；**D2 九条同族链全纳 FK**（八条随票 6 逐表清单、`sessions.summary_msg_id` 随票 8；agent_id 两链零孤儿纯防御）；**D3 subject_agent_id 猫名归一并入票 6**（先于该表 FK 重建落地）；**D4 主库 WAL 边车不清理**（0 字节无信息量，server 停着时想清手删）。
 
 ## 八、架构决策留痕
 
