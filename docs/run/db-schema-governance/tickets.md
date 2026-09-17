@@ -287,11 +287,17 @@ worktree（从 dev `7e5478b` 建分支 `session/54c4de25-flash猫`）；`node no
 
 **约束面（随票 4 复审落盘）**：① 重建后全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6）；② 本票不动 chunks 系——若实施中发现必须动 chunks 投影，先回架（chunks ↔ FTS/vec0 rowid 耦合，spec §4.4 纪律 5）。
 
+**CHECK 值域更正（2026-09-17，票 5 开工前真库读数）**：`dispatch_state` 真实值域 = `'queued' | 'running' | 'done'`（`repository/messages.ts` 类型签名；两库实测 `done` 1079/1342、`completed`/`failed` 零行）——本票面初稿 `completed/failed` 系笔误，照字面落 CHECK 会让 fire-and-forget 的 `setDispatchState` 静默失效。定稿 `CHECK (dispatch_state IN ('queued','running','done'))` + NULL 放行；spec §4.1 已同步更正。
+
+**机制改动并入本票（2026-09-17 店长裁决，方案 A）**：票 5/6 开工前两猫独立发现 runner 恒包事务 × rebuildTable 拒事务内调用的接线缺口（ds猫 实测：三张表现状下要么拒启要么静默清 9723 行）。裁决 = spec §4.4 纪律 7 过程式通道：`Migration` 加可选 `run?: (db, record) => void`，带 `run` 条目 runner 不包事务；`sql` 仍必填 = 新表 DDL（checksum 正文 + `createSql` 源）；静态断言钉「hook 只许调 rebuildTable 且 `createSql === m.sql`」。**本票负责把该机制落地**（`migrations.ts` 接口 + `index.ts` runner 分支 + 测试），票 6 批二与票 8 只做消费方。
+
 ## 票 6 · 小表重建批（派 ds猫，走 worktree；blocked 已解除 2026-09-17）
 
 execution_logs / flow_states / flow_state_events / connector_bindings / episodes 系 / review_verdicts 的重建：**逐表先审计留痕**（现有 FK/CHECK/时间列实测 vs spec §4.1 缺口清单——**含 D2 九条同族链**，一张表一份结论），时间口径全转 ISO（`spans.start_at`、dev `retrieval_events.created_at`、台账 `applied_at` 已 ISO 不转，按票 3 面 B 实测），FK/CHECK 按审计定稿补。清单以审计报告为准，票开时逐表列；九链中未列入重建的表按需补重建条目。
 
-**D1/D3 落盘（2026-09-17 拍板）**：D1 孤儿 = 删除——逐链 DELETE 进各自重建迁移，数字与样本见票 3 面 A，审计 SQL 留痕可复算；D3 `review_verdicts.subject_agent_id` 猫名→id 归一迁移（main 6 行 + dev 4 行按 `agents.name` 解析）必须先于此表 FK 重建落地，写入口 `verdict-parser.ts:50` 一并修。dev `execution_logs.status` 的 2 行 running 脏存量（重启卡死的 in-flight 残骸）按改判 `failed` 处置，理由留痕进逐表审计。
+**D1/D3 落盘（2026-09-17 拍板）**：D1 孤儿 = 删除——逐链 DELETE 进各自重建迁移，数字与样本见票 3 面 A，审计 SQL 留痕可复算；D3 `review_verdicts.subject_agent_id` 猫名→id 归一迁移（main 6 行 + dev 4 行按 `agents.name` 解析）必须先于此表 FK 重建落地。**D3 范围勘正（ds猫 逐行复核）**：写入口不改——写入路径取 `subject.id`、调用方 `serial.ts` 的 `reviewedTargets` 也取 `a.id`，注释与实现一致，库中猫名是修复前历史行；D3 = 纯数据归一。dev `execution_logs.status` 的 2 行 running 脏存量（重启卡死的 in-flight 残骸）按改判 `failed` 处置，理由留痕进逐表审计。
+
+**拆两批（2026-09-17 店长裁决，方案 A 配套）**：批一（不依赖机制改动，现在开工）= **7 张纯 SQL 表**——execution_logs / flow_states / flow_state_events / connector_bindings / episode_attributions / review_verdicts / review_parse_failures 的重建 + 各自 D1 孤儿 DELETE + D3 归一迁移 + running 脏存量改判。批二（票 5 机制合入 dev 后追加）= **3 张过程式重建**——episodes（子表 episode_attributions 挡 DROP）、retrieval_events（CASCADE 子表，静默清空风险实测）、spans（自引用 + CASCADE 子表），按 spec §4.4 纪律 7 走 `run` 通道消费 rebuildTable。**审计结论照准**：flow_states/flow_state_events 不加 CHECK（`isOnMainChain()` 证明值域非封闭，与 spec「封闭枚举才 CHECK」判据一致）；episodes `task_id`/`chain_task_id` 不加 FK（链锚非唯一列，物理不可行）。顺序无关性：批一先合会带上 FK→messages，但票 5 的 messages 重建走 FK-OFF 通道，无顺序炸弹（纪律 7 裁决的附带效果）。
 
 **约束面（随票 4 复审落盘）**：① 重建后全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6）；② 本票清单不含 chunks 系——逐表审计若论证需动 chunks 投影，先回架等专项设计（FTS/vec0 rowid 耦合须同批重建，spec §4.4 纪律 5）；③ `review_verdicts.subject_agent_id` 猫名→id 归一迁移（票 3 发现②，D3）必须先于此表 FK 重建落地。
 

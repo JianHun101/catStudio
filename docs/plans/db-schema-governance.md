@@ -103,6 +103,7 @@ evidence:
 - **删除策略**：物理删除全 **RESTRICT**；CASCADE 仅纯成员关系行（session_agents）。**用户态「删除」= 归档**：sessions 加 `archived_at`（NULL=活跃），`ALTER TABLE ADD COLUMN` 轻迁移 + 部分索引；前端列表默认过滤 + 「显示已归档」开关；**归档不动记忆检索**（归档会话照常可被记忆系统检索）。
 - **删除被拦的行为契约**：删被引用的 agent → repository **先查后删**（先查引用，命中则不执行 DELETE，抛领域错误并携带会话清单）→ API 返回 **409 + 结构化错误体**（非 500）→ 前端引导「先从会话移除，或归档」。验收：删除被引用 agent 返回 409 + 会话清单；无引用时正常成功。
 - **CHECK**：封闭枚举才 CHECK（判据：取值集合封闭、由代码常量定义；代价是扩容须重建表）。已存在：messages.role、execution_logs.status、review_verdicts.verdict、review_parse_failures.reason、eval_scores.sample_reason、connector_bindings.external_type、episodes 三列、episode_attributions 两列；已知缺口：messages.dispatch_state。清单实施时对照代码常量定稿。
+  **值域实测更正（2026-09-17，票 5/6 开工前真库读数）**：`dispatch_state` 真实值域 = `'queued' | 'running' | 'done'`（`repository/messages.ts` 类型签名），两库实测 `done` 1079/1342 行、`NULL` 746/1161——派活初稿写的 `completed/failed` 系笔误（那组值属 `execution_logs.status`），照字面落 CHECK 会让 `setDispatchState` 撞约束而其为 fire-and-forget ⇒ 队列持久化静默失效。定稿：`CHECK (dispatch_state IN ('queued','running','done'))` + NULL 放行。
 
 ### 4.2 时间口径统一（⑤，已拍板）
 
@@ -139,6 +140,7 @@ CREATE TABLE session_agents (
 4. 前端归档入口（归档操作 + 显示开关）随 sessions 重建票交付。
 5. **chunks ↔ FTS/vec0 rowid 耦合（2026-09-17 票 4 复审实测新发现，重建硬约束）**：`chunks` 表被双重 rowid 依赖——① `chunks_fts.rowid = chunks.rowid`（实测 dev 库 375 行活 JOIN、零孤儿）；② vec0 `chunk_vectors_rowids` 的 BLOB 内嵌 chunks.rowid 映射（`migrations.ts` vec0 声明）。重建任何被 FTS/vec0 虚表引用的表前，先核查 `sqlite_master` 虚表声明与 rowid 耦合面；重建 chunks 必须同批同步重建 FTS 索引与 vec0 映射，否则记忆检索静默断链。
 6. **重建后全库 FK 体检**：rebuildTable 的 FK 体检只查出向约束；重建若动被引用列，子表悬空不拦。每张重建票收尾跑一次全库 `PRAGMA foreign_key_check`，零违规才算验收过（票 8 硬条款，其余重建票同执行）。
+7. **过程式迁移通道（2026-09-17 店长裁决，票 5/6 开工前两猫独立收敛 + 实测证据拍板）**：`Migration` 加可选 `run?: (db, record) => void`；带 `run` 的条目 runner **不包事务**（rebuildTable 自带事务，且 `PRAGMA foreign_keys` 事务内 no-op——事务内 DROP 父表要么拒启要么静默 CASCADE 清子表，实测 dev `retrieval_events` 重建会静默清掉 `retrieval_queries`/`retrieval_candidates` 共 9723 行）。`sql` 仍必填 = 新表 DDL，兼作 checksum 正文与 `createSql` 源；静态断言钉「hook 只许调 rebuildTable 且 `createSql === m.sql`」，防 checksum 只管形状不管 hook。`record()` 供条目在自身事务内写台账（结构变更与台账同生共死）；`verify` 探针对 run 条目跳过（结构已是新形状）。票 5/6/8 重建条目**必须同一形态**——各自发明接线 = 追加区两种机制并存，正是本活要消灭的平行真相源。
 
 ## 五、测试决策
 
@@ -172,6 +174,8 @@ CREATE TABLE session_agents (
 - **⑥ 四个子决策 + joined_at + 删除被拦 409 契约**：用户拍板（a65b2697）。
 - **读码校正**（2026-09-17，spec 落笔前）：PRAGMA 已在（④-a 改「保持」）；FK/CHECK 已存在清单与真实缺口如 §4.1；messages 已有两列索引（③第一条为升级）；时间口径真实分布如 §4.2；迁移数组 61 条。以上均收紧事实、不翻任何决策。
 - **D1–D4 拍板**（2026-09-17，票 3 审计报告四项，用户「按建议走」）：**D1 孤儿 = 删除**（重建迁移逐链带 DELETE，审计 SQL 全留痕可复算）；**D2 九条同族链全纳 FK**（八条随票 6 逐表清单、`sessions.summary_msg_id` 随票 8；agent_id 两链零孤儿纯防御）；**D3 subject_agent_id 猫名归一并入票 6**（先于该表 FK 重建落地）；**D4 主库 WAL 边车不清理**（0 字节无信息量，server 停着时想清手删）。
+- **D3 范围勘正**（2026-09-17，ds猫 逐行复核）：票 3 报告「写入口 `verdict-parser.ts` 注释自称外键语义与实现不符」**不成立**——写入路径取 `subject.id`、调用方 `serial.ts` 的 `reviewedTargets` 也取 `a.id`（T-N 修复时已改），注释与实现一致；库中猫名是修复前历史行。D3 实际范围 = **纯数据归一**，不改写入口代码。
+- **过程式迁移通道裁决**（2026-09-17）：票 5/6 开工前两猫独立收敛到同一方案（runner 恒包事务 × rebuildTable 拒事务内调用，ds猫 六项实测：三张表现状下要么拒启要么静默清 9723 行），店长复核代码事实后拍板 **方案 A**——`Migration.run?` 过程式通道，契约全文入 §4.4 纪律 7；B（纯 SQL 分叉）/C（推迟三表）否。
 
 ## 八、架构决策留痕
 
