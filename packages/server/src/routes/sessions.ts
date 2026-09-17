@@ -18,6 +18,7 @@ import {
 import type { SessionRow } from '../db/repository/index.js'
 import { normalizeIsoMs } from '../db/repository/clock.js'
 import { getIO } from '../connectors/socketio.js'
+import { toIsoDb } from '../db/repository/time.js'
 import { getExecutionEngine } from '../execution/registry.js'
 import { createLogger } from '../logger.js'
 import { parseJsonArray, parseJsonValue } from '../utils.js'
@@ -228,7 +229,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         thinkingContent: r.thinking_content || undefined,
         toolContent: parseJsonValue<ToolCallInfo[]>(r.tool_content),
         segments: parseJsonValue<StreamSegment[]>(r.segments),
-        createdAt: r.created_at.replace(' ', 'T') + 'Z',
+        createdAt: toIsoDb(r.created_at),
       }
     })
   })

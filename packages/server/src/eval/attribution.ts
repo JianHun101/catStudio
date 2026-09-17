@@ -80,14 +80,21 @@ function latestRejectOrSuggest(rootMsg: RootMessageRow, chainTaskId: string | nu
   if (!chainTaskId) return null
   const row = getDb()
     .prepare(
+      // `replace(v.created_at,' ','T')`：**跨表混比**的归一兜底。右侧绑定
+      // `messages.created_at`（票 5 起 ISO 毫秒），左侧 `review_verdicts.created_at`
+      // （票 6 批一起 ISO 毫秒）——**今天两侧已同口径**，本条折算对 ISO 值是 no-op。
+      // **仍然保留**：`toIsoMs` 对不匹配实测形态的取值**原样保留**（不落 NULL，见
+      // `db/migrations.ts`）⇒ 列里可能有非 ISO 残值，届时 `' '`(0x20) < `'T'`(0x54) 会让
+      // 判别静默偏向一侧（「最近一次 reject/suggest」恒为 null，或把历史算进来），不报错。
       `SELECT v.verdict FROM review_verdicts v
        JOIN messages m ON m.id = v.message_id
-       WHERE m.task_id = ? AND m.session_id = ? AND v.created_at > ?
+       WHERE m.task_id = ? AND m.session_id = ? AND replace(v.created_at, ' ', 'T') > ?
          AND v.verdict IN ('reject', 'suggest')
        ORDER BY v.created_at DESC LIMIT 1`
     )
-    // since 来自 messages.created_at（秒级串，票 5 才转）；v.created_at 已是 ISO 毫秒
-    // ⇒ 比较前归一，否则「晚于根消息」恒真（见 clock.ts::normalizeIsoMs）
+    // since 来自 messages.created_at、v.created_at 来自 review_verdicts——两列今天**都是
+    // ISO 毫秒**（票 5 / 票 6 批一），故两条折算互为残值兜底、对 ISO 值都是 no-op；
+    // 若只留单边，对侧出现非 ISO 残值时即退回格式混比（见 clock.ts::normalizeIsoMs）
     .get(chainTaskId, rootMsg.session_id, normalizeIsoMs(rootMsg.created_at)) as
     { verdict: string } | undefined
   return row?.verdict ?? null

@@ -83,6 +83,15 @@ function userTableNames(db: Database.Database): string[] {
  *    失败 `ROLLBACK` + 拒启，错误带迁移名 + SQLite 原错。零吞咽、零「预期错误」白名单
  *    ——「跳过」已由台账接管，「老库」已由 baseline 接管，catch 再无合法存在理由。
  *
+ * 第 2 与第 3 条各有一个**过程式**例外（spec §4.4 纪律 7，条目带 `run` 时）：
+ *
+ * - **事务归属反转**：runner 不包事务，由 hook 自己开（重建类必须如此——`rebuildTable`
+ *   自带事务，且 `PRAGMA foreign_keys` 事务内 no-op）。拒启语义不变，错误照样带迁移名。
+ * - **探针跳过**：`verify` 对 `run` 条目无意义（执行完结构必然已是新形状），不调用。
+ *
+ * `note` 语义不变：`run` 条目只出现在追加区，永远不是 `baseline`，故老库上同样**真执行**
+ * ——它们从未在任何老库上发生过。
+ *
  * `list` 只在测试里传（注入失败/篡改条目验拒启），生产恒为 `MIGRATIONS`。
  */
 export function applyMigrations(
@@ -126,7 +135,9 @@ export function applyMigrations(
     const isBaselineEntry = m.baseline === true
     // 探针：true = 效果已成立（或目标对象不存在、无事可做）⇒ 跳过执行只登记。
     // 全新库靠它避开「先建好再白重建一次」；老库靠它走矫正路径。
-    const probeSaysDone = m.verify !== undefined && m.verify(db)
+    // 过程式条目（`run`）**跳过探针**：探针问的是「效果是否已成立」，而 run 执行完结构必然
+    // 已是新形状，探针没有可做的事（spec §4.4 纪律 7）。
+    const probeSaysDone = m.run === undefined && m.verify !== undefined && m.verify(db)
     // 两条路径的**唯一**岔路（②-a vs ②-b），判据面只认基线条目：
     // - 老库 + 基线条目：默认**只登记**——历史已在此库发生（②-b）。带探针的条目探针报
     //   「效果缺失」才破例真执行（矫正）；无探针的条目一律不执行。
@@ -145,12 +156,26 @@ export function applyMigrations(
       continue
     }
 
-    const run = db.transaction(() => {
-      db.exec(m.sql)
-      record.run(m.name, checksumOf(m.sql), new Date().toISOString(), note)
-    })
     try {
-      run.immediate()
+      if (m.run !== undefined) {
+        // **过程式通道**（spec §4.4 纪律 7）：不包事务——`rebuildTable` 自带事务，且
+        // `PRAGMA foreign_keys` 事务内是 no-op（关不掉 FK ⇒ DROP 旧表会静默 CASCADE 清空
+        // 子表，实测 9723 行）。事务归属交给 hook，`record` 由它在自己那侧调用。
+        m.run(db, () => record.run(m.name, checksumOf(m.sql), new Date().toISOString(), note))
+        // 漏登记 = 这条迁移**每次启动都重跑**（静默劣化）⇒ 按硬错误处理，拒启。
+        const recorded2 = db.prepare(`SELECT 1 FROM schema_migrations WHERE name = ?`).get(m.name)
+        if (recorded2 === undefined) {
+          throw new Error(
+            `过程式迁移未登记台账——hook 收尾必须调用 record()（漏调会让它每次启动都重跑）`
+          )
+        }
+      } else {
+        const run = db.transaction(() => {
+          db.exec(m.sql)
+          record.run(m.name, checksumOf(m.sql), new Date().toISOString(), note)
+        })
+        run.immediate()
+      }
     } catch (err) {
       throw new Error(
         `[db] 迁移「${m.name}」执行失败，拒绝启动：${err instanceof Error ? err.message : String(err)}`

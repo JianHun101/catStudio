@@ -67,9 +67,17 @@ export function getLatestChainVerdict(
  * `since` 传根触发消息的 `created_at`——只数「这条链自己产生过的打回」，
  * 不把锚被复用前的历史算进来。
  *
- * ⚠️ **两侧口径不同，必须归一后再比**（票 6 起）：`since` 来自 `messages.created_at`
- * （仍是秒级串，票 5 才转），而 `v.created_at` 已是 ISO 毫秒——直接比就是格式混比，
- * 「严格晚于」恒真。判据同 `db/repository/clock.ts::normalizeIsoMs`。
+ * ⚠️ **两侧口径必须各自折算后再比**（票 5 与票 6 批一的合并态，两侧折算双保留）：
+ *
+ * - `since` 来自 `messages.created_at`（**票 5 起** ISO 毫秒）、`v.created_at` 来自
+ *   `review_verdicts`（**票 6 批一起** ISO 毫秒）——两库两侧今天**已是同口径**，故下面
+ *   两条折算对 ISO 值都是 no-op（`normalizeIsoMs` 的判据正则要求空格分隔、SQL 的
+ *   `replace(…,' ','T')` 对无空格串无操作）。
+ * - 仍然**两条都留**：`toIsoMs` 对不匹配实测形态的取值是**原样保留**（不落 NULL，见
+ *   `db/migrations.ts`）⇒ 列里可能有非 ISO 残值。SQL 侧折算兜 `v.created_at`、JS 侧
+ *   `normalizeIsoMs` 兜 `since`，各管自己那侧的历史形态。只留单边，对侧一旦出现残值就
+ *   退回格式混比：`' '`(0x20) < `'T'`(0x54) ⇒ 判别静默反向（「严格晚于」恒真或恒假），
+ *   不报错、只是归因少一路源或多算一段历史。
  */
 export function getChainRejectionsSince(
   anchor: string | null | undefined,
@@ -83,7 +91,7 @@ export function getChainRejectionsSince(
        FROM review_verdicts v
        JOIN messages m ON m.id = v.message_id
        WHERE m.task_id = ? AND m.session_id = ?
-         AND v.created_at > ?
+         AND replace(v.created_at, ' ', 'T') > ?
          AND v.verdict IN ('reject', 'suggest')
        ORDER BY v.created_at DESC, m.rowid DESC`
     )

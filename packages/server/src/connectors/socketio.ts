@@ -45,6 +45,7 @@ import type { RestartRequestFile } from '../restart-request.js'
 import { getRelevantMessages } from '../execution/context.js'
 import { createExecutionEngine } from '../execution/serial.js'
 import type { StreamState } from '../execution/state.js'
+import { toIsoDb } from '../db/repository/time.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
 import {
   setExecutionEngine,
@@ -224,7 +225,9 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           // 老消息（无 segments 列数据）→ undefined，前端退化 thinking_content+tool_content 两块
           segments: parseJsonValue<StreamSegment[]>(row.segments),
           extra: msgExtra,
-          createdAt: row.created_at.replace(' ', 'T') + 'Z',
+          // 归一而非拼串：created_at 自票 5 起已是 ISO 毫秒，旧写法 `.replace(' ','T')+'Z'`
+          // 会把它拼成 `…123ZZ`（前端 `new Date` → Invalid → 时间列显示「—」）。
+          createdAt: toIsoDb(row.created_at),
           // 历史恢复同样携带重启类型（前端按钮渲染依据；DB 不存类型，请求文件是唯一事实源）
           ...(isRestart
             ? {

@@ -65,13 +65,15 @@ const BASELINE: SchemaRow[] = JSON.parse(
  *
  * - `idx_messages_session`：票 2 的**同名升级**（两列 → 三列），判据单列在该用例组；
  * - 票 6 批一重建的 7 张叶子表：FK 补链 / 时间口径 ISO 毫秒 / 去时间 DEFAULT 是**故意**
- *   改形，各自的形状由「票 6 · B 范围重建批」用例组单独钉死。
+ *   改形，各自的形状由「票 6 · B 范围重建批」用例组单独钉死；
+ * - `messages`：票 5 的重建（FK / CHECK / 时间口径），形状由紧随本用例的那段断言钉死。
  *
  * 写成**显式名单**而不是「跳过这 7 张表」：将来任何一条追加迁移改了别的表，
  * 都会在这里红出来——这正是「新物体/新形状静默出现」的兜底。
  */
 const BASELINE_SHAPE_DIVERGENCE = new Set<string>([
   'index:idx_messages_session',
+  'table:messages',
   'table:execution_logs',
   'table:flow_states',
   'table:flow_state_events',
@@ -505,6 +507,18 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
         expect(byName.get(key), key).toBeDefined()
       }
       expect(byName.get('index:idx_messages_session')?.sql).toContain('session_id,created_at,id')
+
+      // 票 5 重建后的 `messages` 形状 —— 也是**老库路径上 append 真执行**最硬的结构证据：
+      // 基线补登（只登记不执行）不会改形状，这段文字只可能来自重建条目的真执行。
+      const messagesSql = byName.get('table:messages')?.sql ?? ''
+      expect(messagesSql).toContain('agent_id TEXT REFERENCES agents(id)ON DELETE RESTRICT')
+      expect(messagesSql).toContain("CHECK(dispatch_state IN('queued','running','done'))")
+      expect(messagesSql).toContain(
+        "created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+      )
+      // 表名被 SQLite 写成带引号形式（RENAME 扶正的固有产物，票 4 OQ4 已留痕）——两条启动
+      // 路径（全新库重放 / 老库增量）都经过同一次重建，故终点形状逐字相同。
+      expect(messagesSql.startsWith('CREATE TABLE "messages"')).toBe(true)
 
       // ② 台账：41 条补登 + 1 条真执行（补建），补建行**不是**补登
       const rows = ledger(db)
@@ -1203,6 +1217,135 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
           .sort()
       expect(fks('review_verdicts')).toHaveLength(4)
       expect(fks('execution_logs')).toHaveLength(4)
+    })
+  })
+
+  // ─── 票 5 · 过程式迁移通道（spec §4.4 纪律 7）─────────────────────────
+  describe('票 5 · 过程式迁移通道（run 条目）', () => {
+    /** 把基线 + 追加区先跑满，只留注入的那条未登记（注入条目永远是列表末尾） */
+    function primedDb(): Database.Database {
+      setDb(makeFreshDb())
+      const db = getDb()
+      applyMigrations(db, MIGRATIONS)
+      return db
+    }
+
+    it('run 条目在**事务外**执行 + 执行后登记台账（note=null）', () => {
+      const db = primedDb()
+      let inTransaction: boolean | null = null
+      const probe = vi.fn(() => true)
+      const entry: Migration = {
+        name: 'proc ok',
+        sql: `CREATE TABLE proc_ok (id TEXT PRIMARY KEY)`,
+        verify: probe,
+        run: (d, record) => {
+          inTransaction = d.inTransaction
+          d.exec(`CREATE TABLE proc_ok (id TEXT PRIMARY KEY)`)
+          record()
+        },
+      }
+
+      applyMigrations(db, [...MIGRATIONS, entry])
+
+      // 事务外是**硬前提**不是风格：`PRAGMA foreign_keys` 在事务内是 no-op ⇒ 关不掉 FK ⇒
+      // DROP 旧表要么拒启要么静默 CASCADE 清空子表（rebuildTable 因此直接拒事务内调用）。
+      expect(inTransaction).toBe(false)
+      // verify 对 run 条目跳过：执行完结构必然已是新形状，探针没有可做的事
+      expect(probe).not.toHaveBeenCalled()
+      expect(ledger(db).find((r) => r.name === 'proc ok')?.note).toBeNull()
+      expect(tableNames(db)).toContain('proc_ok')
+    })
+
+    it('run 条目抛错 → 拒启（错误带迁移名 + 原错），台账不登记', () => {
+      const db = primedDb()
+      const entry: Migration = {
+        name: 'proc boom',
+        sql: `CREATE TABLE proc_boom (id TEXT PRIMARY KEY)`,
+        run: () => {
+          throw new Error('rebuild exploded')
+        },
+      }
+
+      expect(() => applyMigrations(db, [...MIGRATIONS, entry])).toThrowError(
+        /proc boom[\s\S]*rebuild exploded/
+      )
+      expect(ledger(db).map((r) => r.name)).not.toContain('proc boom')
+    })
+
+    it('run 条目漏调 record() → 拒启（漏登记 = 每次启动都重跑，属静默劣化）', () => {
+      const db = primedDb()
+      const entry: Migration = {
+        name: 'proc forget',
+        sql: `CREATE TABLE proc_forget (id TEXT PRIMARY KEY)`,
+        run: (d) => {
+          d.exec(`CREATE TABLE proc_forget (id TEXT PRIMARY KEY)`)
+          // 故意不调 record()
+        },
+      }
+
+      expect(() => applyMigrations(db, [...MIGRATIONS, entry])).toThrowError(
+        /proc forget[\s\S]*未登记台账/
+      )
+      expect(ledger(db).map((r) => r.name)).not.toContain('proc forget')
+    })
+
+    it('老库路径：追加区的 run 条目**真执行**（不因「无台账」被当成历史跳过）', () => {
+      const db = makeOldDb()
+      db.prepare(`INSERT INTO sessions (id, title) VALUES ('s1', 't')`).run()
+      setDb(db)
+
+      initDb()
+
+      // `messages` 的 FK / CHECK 只可能来自重建条目的**真执行**——基线补登只登记不执行，
+      // 造不出这段文字。这是「新库老库同一条增量路径」在 run 通道上的实证。
+      expect(tableSqlOf(db, 'messages')).toContain('REFERENCES agents(id) ON DELETE RESTRICT')
+      expect(tableSqlOf(db, 'messages')).toContain(
+        "CHECK (dispatch_state IN ('queued', 'running', 'done'))"
+      )
+      expect(ledger(db).find((r) => r.name.startsWith('messages rebuild'))?.note).toBeNull()
+    })
+
+    it('崩溃窗自愈：结构已新但台账无行 → 重跑重建条目不抛、形状与行数不变', () => {
+      // 重现 run 通道的已知窗口：rebuildTable 先提交、record() 后写（两者无法同事务）——
+      // 窗口内崩 ⇒ 结构新 + 台账无行 ⇒ 下次启动重跑。重跑必须幂等。
+      const db = makeOldDb()
+      db.prepare(
+        `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES ('a1', '猫', 'p', 'sk')`
+      ).run()
+      db.prepare(`INSERT INTO sessions (id, title) VALUES ('s1', 't')`).run()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, agent_id, role, content) VALUES ('m1', 's1', 'a1', 'user', 'hi')`
+      ).run()
+      const before = tableSqlOf(db, 'messages')
+      setDb(db)
+
+      initDb()
+
+      expect(tableSqlOf(db, 'messages')).toBe(before)
+      expect(db.prepare(`SELECT COUNT(*) n FROM messages`).get()).toEqual({ n: 1 })
+    })
+
+    it('静态源断言：追加区的 run 条目只能经工厂构造（防 createSql 与 sql 分叉）', () => {
+      const src = fs.readFileSync(new URL('./migrations.ts', import.meta.url), 'utf8')
+      const start = src.indexOf('const APPENDED_MIGRATIONS')
+      const end = src.indexOf('export const MIGRATIONS')
+      expect(start).toBeGreaterThan(-1)
+      expect(end).toBeGreaterThan(start)
+      const body = src.slice(start, end)
+
+      // 数组体里不许出现字面量 `run:` —— 手写 hook 就能造出「台账指纹对得上、实际建的
+      // 是另一张形状」的静默分叉（checksum 只认 sql，管不到 hook 正文）。
+      expect(body).not.toMatch(/\brun\s*:/)
+      // 工厂把 createSql 与 sql 钉成**同一个变量** ⇒ createSql === m.sql 结构性成立
+      expect(src).toMatch(/name: opts\.name,\s*\n\s*sql: opts\.ddl,/)
+      expect(src).toMatch(/createSql: opts\.ddl,/)
+      // hook 正文只做两件事：调 rebuildTable + 收尾 record()
+      const hook = src.slice(
+        src.indexOf('run: (db, record) => {'),
+        src.indexOf('const APPENDED_MIGRATIONS')
+      )
+      expect(hook.match(/rebuildTable\(/g)).toHaveLength(1)
+      expect(hook).toMatch(/record\(\)/)
     })
   })
 })

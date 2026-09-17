@@ -17,6 +17,7 @@
 import { v4 as uuid } from 'uuid'
 import { getDb } from '../db/index.js'
 import type { ExecutionLogRow } from '../db/repository/types.js'
+import { isoMinutesAgo } from '../db/repository/time.js'
 import { getChainRejectionsSince } from './chain-verdicts.js'
 
 /** 判定规则版本号（P5 全量重评承重：规则升级时改此常量，全量 upsert 重评覆盖历史结局） */
@@ -290,11 +291,15 @@ export function upsertEpisode(data: {
  */
 export function scanZeroExecutionEpisodes(): number {
   const db = getDb()
+  // ⚠️ 超时窗必须与列同口径（票 5 连带面）：`messages.created_at` 迁到 ISO 毫秒后，原句右侧的
+  // `datetime('now', '-30 minutes')` 是**秒级**串——`' '`(0x20) < `'T'`(0x54) ⇒ 同一天的 ISO 行
+  // 在它面前**恒判不小于** ⇒ 扫描永远空转、零执行 episode 静默断供（不报错，只是再也不产出）。
+  // 同族修复：`repository/messages.ts` 的 `getUndispatchedUserMessagesOlderThan`（同一条判据）。
   const rows = db
     .prepare(
       `SELECT id, session_id, content, task_id, created_at FROM messages
        WHERE role = 'user'
-         AND created_at < datetime('now', '-${ZERO_EXECUTION_WINDOW_MINUTES} minutes')
+         AND created_at < ?
          AND NOT EXISTS (SELECT 1 FROM execution_logs el WHERE el.triggered_by_message_id = messages.id)
          AND NOT EXISTS (SELECT 1 FROM episodes e WHERE e.root_trigger_message_id = messages.id)
          AND NOT EXISTS (
@@ -304,7 +309,7 @@ export function scanZeroExecutionEpisodes(): number {
              AND r.role = 'agent'
          )`
     )
-    .all() as RootMessageRow[]
+    .all(isoMinutesAgo(ZERO_EXECUTION_WINDOW_MINUTES)) as RootMessageRow[]
 
   let n = 0
   for (const row of rows) {

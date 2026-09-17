@@ -430,14 +430,14 @@ describe('dispatch（C1 v3 引擎决策行为）', () => {
         pendingTriggers: [],
       })
 
-      // session-1 那笔仍压在 gate 上（上面的 busy 断言依赖它）；给 session-2 换一副
-      // **不设闸**的适配器：msg-3 现在真实存在（FK 要求），第二条会话会真的把 LLM 段
-      // 跑完——沿用同一个 gate 会把它一起钉死，本用例就测不到「独立入队」的判定了。
-      // 已建流的 session-1 不受影响（适配器在每次执行开头按 registry 重新取）。
-      makeAdapter({ chunks: ['第二'] })
-
       // 另一会话 A2A 触发（depth=1）→ 队列里没有同 session 命令 → 独立入队（跨会话槽位）
-      await engine.execute({
+      //
+      // **不 await、也不给 session-2 换适配器**：`makeAdapter` 换的是 registry 的 mock 返回
+      // 值，而 session-1 那笔取适配器的时点由事件循环决定（busy 先于取适配器）——中途换会
+      // 把没设闸的那副塞给 session-1，门闸失效 ⇒ 它跑完排空队列，本用例随负载红绿不定。
+      // 判据本来就不需要 session-2 跑完：`ensureSlot` 在 `execute` 的**同步前缀**里跑，
+      // 未 await 时槽位已建、命令已决策（idle → 直跑，故 queueLength 0），断言当场成立。
+      const p2 = engine.execute({
         sessionId: 'session-2',
         agentId: 'agent-1',
         triggerMessageId: 'msg-3',
@@ -452,6 +452,7 @@ describe('dispatch（C1 v3 引擎决策行为）', () => {
 
       release()
       await p1
+      await p2
     })
   })
 

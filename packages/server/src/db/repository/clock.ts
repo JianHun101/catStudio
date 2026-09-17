@@ -23,13 +23,17 @@ export function nowIso(): string {
 /**
  * 把「记录时间」串归一成 ISO 毫秒（**幂等**：已是 ISO 的一律原样返回）。
  *
- * **过渡期专用**，用在**跨表比较的边界**上：`messages.created_at` 目前仍是秒级串
- * （`messages` 表归票 5 重建，尚未转），而 `review_verdicts.created_at` 自票 6 起已是
- * ISO 毫秒——两侧直接比较时，ISO 串首位 `T`(0x54) 恒大于秒级串首位空格(0x20)，
+ * **过渡期专用**，用在**跨表比较的边界**上：每张表是**各自的重建票**把它迁到 ISO 的——
+ * 票 5 = `messages`，票 6 批一 = `execution_logs` / flow 系 / `review_verdicts` 等；
+ * 而 `sessions` / `session_read_state` / `agents` / `episodes` / `knowledge` / `settings`
+ * 的列**仍是秒级** `datetime('now')` 产物（随各自重建票迁移，如 `sessions` 系归票 8）。
+ * 跨表比较时一侧 ISO、一侧秒级 ⇒ ISO 串首位 `T`(0x54) 恒大于秒级串首位空格(0x20)，
  * 「严格晚于 since」于是**恒真**：锚被复用前的历史判词会被算进本条链（判词归属错，
- * 静默）。故比较前把 since 归一，两侧同口径。
+ * 静默）。故比较前把入参归一，两侧同口径。
  *
- * 票 5 落地（messages 也转 ISO）后本函数恒等，无需删除——留着它，新老库的混合态都不会再裂。
+ * **两侧都迁完之后也不要删**：`toIsoMs` 对不匹配实测形态的取值是**原样保留**（不落
+ * NULL，见 `db/migrations.ts`）⇒ 列里可能有非 ISO 残值；老库的混合态也仍在。留着它，
+ * 对已是 ISO 的值恒等，对残值仍兜得住。
  */
 export function normalizeIsoMs(value: string): string {
   return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)

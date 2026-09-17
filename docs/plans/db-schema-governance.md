@@ -97,18 +97,20 @@ evidence:
 ### 4.1 FK / 删除策略 / CHECK（④修订版，已拍板）
 
 - **PRAGMA**：`foreign_keys = ON` **已在**（`index.ts:27`）——本项从「新增」更正为「保持」，列为不变量（每个连接路径都须开，含测试注入路径）。
-- **FK 补齐**：核心引用链补齐（已存在：messages→sessions、execution_logs→sessions/agents、session_read_state→sessions CASCADE、episode_attributions→episodes、retrieval 系、spans 系；已知缺口：messages.agent_id→agents、review_verdicts 各引用、connector_bindings.session_id、episodes 各引用、flow_states/flow_state_events.session_id——实施时逐表审计定稿）。**已登记松耦合一律不加**：chunks 派生投影、retrieval_candidates.chunk_id（仅诊断）、eval_scores / user_feedback。
+- **FK 补齐**：核心引用链补齐（已存在：messages→sessions、execution_logs→sessions/agents、session_read_state→sessions CASCADE、episode_attributions→episodes、retrieval 系、spans 系；已知缺口：messages.agent_id→agents、review_verdicts 各引用、connector_bindings.session_id、episodes 各引用、flow_states/flow_state_events.session_id——实施时逐表审计定稿；**票 3 审计补链（D2 拍板 2026-09-17，九条全纳）**：review_parse_failures.message_id、episode_attributions.delivery_message_id、execution_logs.message_id、execution_logs.triggered_by_message_id、sessions.summary_msg_id、retrieval_events.session_id、retrieval_events.agent_id、spans.session_id、spans.agent_id——其中含 DDL 已具 FK 但存量有孤儿的链，孤儿随 D1 删除后约束归位）。**已登记松耦合一律不加**：chunks 派生投影、retrieval_candidates.chunk_id（仅诊断）、eval_scores / user_feedback。
 - **前置孤儿审计**：重建加 FK 会校验存量——先对各候选关系跑「子表 LEFT JOIN 父表 IS NULL」出孤儿报告（量级 + 样本），只读可重复。
 - **孤儿处理（用户拍板）**：审计先行，报告出来用户拍板，**默认倾向删除**（开发阶段、疑似没删干净的残渣）；若量大或涉核心资产（如 messages），回收容所方案（占位父行，一行不丢）。报告留痕。
 - **删除策略**：物理删除全 **RESTRICT**；CASCADE 仅纯成员关系行（session_agents）。**用户态「删除」= 归档**：sessions 加 `archived_at`（NULL=活跃），`ALTER TABLE ADD COLUMN` 轻迁移 + 部分索引；前端列表默认过滤 + 「显示已归档」开关；**归档不动记忆检索**（归档会话照常可被记忆系统检索）。
 - **删除被拦的行为契约**：删被引用的 agent → repository **先查后删**（先查引用，命中则不执行 DELETE，抛领域错误并携带会话清单）→ API 返回 **409 + 结构化错误体**（非 500）→ 前端引导「先从会话移除，或归档」。验收：删除被引用 agent 返回 409 + 会话清单；无引用时正常成功。
 - **CHECK**：封闭枚举才 CHECK（判据：取值集合封闭、由代码常量定义；代价是扩容须重建表）。已存在：messages.role、execution_logs.status、review_verdicts.verdict、review_parse_failures.reason、eval_scores.sample_reason、connector_bindings.external_type、episodes 三列、episode_attributions 两列；已知缺口：messages.dispatch_state。清单实施时对照代码常量定稿。
+  **值域实测更正（2026-09-17，票 5/6 开工前真库读数）**：`dispatch_state` 真实值域 = `'queued' | 'running' | 'done'`（`repository/messages.ts` 类型签名），两库实测 `done` 1079/1342 行、`NULL` 746/1161——派活初稿写的 `completed/failed` 系笔误（那组值属 `execution_logs.status`），照字面落 CHECK 会让 `setDispatchState` 撞约束而其为 fire-and-forget ⇒ 队列持久化静默失效。定稿：`CHECK (dispatch_state IN ('queued','running','done'))` + NULL 放行。
 
 ### 4.2 时间口径统一（⑤，已拍板）
 
 - **目标口径（⑤-a）**：ISO 8601 UTC 字符串、毫秒精度（`2026-09-17T08:30:00.123Z`）。定宽格式字典序 = 时间序，索引/排序/比较正确；JS 全栈 `new Date().toISOString()` 零转换；SQLite `datetime()` 原生可吃。
 - **存量迁移（⑤-b）**：秒级 → ISO **无损单向**（毫秒位补 `.000`），随 rebuildTable 同批转换，转换后抽样比对。**铁律：同一张表的所有结构变更（FK/CHECK/时间列/删列）一次重建做完**，不重建第二次。前置审计：逐列实测格式分布，转换 SQL 按实测写。
 - **生成纪律（⑤-c 修订版）**：**记录时间**（created_at / updated_at）由 repository 层统一 helper 生成，调用方不许传；**事件时间**（语义是「事情发生时刻」，如 started_at / finished_at）允许调用方显式传入，命名必须体现事件语义，评审检查例外是否名副其实。不使用数据库 DEFAULT 生成（SQLite `datetime('now')` 仅秒级，精度降档）。
+  **DEFAULT 勘注（2026-09-18，票 5 复审 OQ1 有条件接受）**：⑤-c「不使用 DEFAULT」的判据是精度降档，`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` 已消解——**DEFAULT 允许保留，但必须 ISO 毫秒同口径**；承重点仍是 repository 显式传值（调用方不许传），DEFAULT 只兜「未来裸 SQL 写入」的缝。判例：票 5 messages.created_at DEFAULT 保留（`migrations.ts` 重建 DDL）。
 - **连带改造点（读码钉死）**：全仓 SQL 侧 `datetime('now')` 写入口与比较点须随迁移同批切到新格式——已知面：agents / sessions / executionLogs / flowStates / knowledge / sessionReadState / settings 各 repository 的写入，messages 超时窗 `datetime('now', ?)` 与游标比较（`messages.ts:127` 有「时间戳归一」注释依赖秒级格式）。**格式混比会错序，必须同批切换，不留半套。**
 - 现状分布（实测）：DB 记录时间几乎全为 SQL 侧 `datetime('now')`（秒级 UTC）；事件时间 `spans.start_at` 为 ISO 毫秒；文件态 JSON（重启请求等）为 ISO。
 
@@ -139,6 +141,8 @@ CREATE TABLE session_agents (
 4. 前端归档入口（归档操作 + 显示开关）随 sessions 重建票交付。
 5. **chunks ↔ FTS/vec0 rowid 耦合（2026-09-17 票 4 复审实测新发现，重建硬约束）**：`chunks` 表被双重 rowid 依赖——① `chunks_fts.rowid = chunks.rowid`（实测 dev 库 375 行活 JOIN、零孤儿）；② vec0 `chunk_vectors_rowids` 的 BLOB 内嵌 chunks.rowid 映射（`migrations.ts` vec0 声明）。重建任何被 FTS/vec0 虚表引用的表前，先核查 `sqlite_master` 虚表声明与 rowid 耦合面；重建 chunks 必须同批同步重建 FTS 索引与 vec0 映射，否则记忆检索静默断链。
 6. **重建后全库 FK 体检**：rebuildTable 的 FK 体检只查出向约束；重建若动被引用列，子表悬空不拦。每张重建票收尾跑一次全库 `PRAGMA foreign_key_check`，零违规才算验收过（票 8 硬条款，其余重建票同执行）。
+7. **过程式迁移通道（2026-09-17 店长裁决，票 5/6 开工前两猫独立收敛 + 实测证据拍板）**：`Migration` 加可选 `run?: (db, record) => void`；带 `run` 的条目 runner **不包事务**（rebuildTable 自带事务，且 `PRAGMA foreign_keys` 事务内 no-op——事务内 DROP 父表要么拒启要么静默 CASCADE 清子表，实测 dev `retrieval_events` 重建会静默清掉 `retrieval_queries`/`retrieval_candidates` 共 9723 行）。`sql` 仍必填 = 新表 DDL，兼作 checksum 正文与 `createSql` 源；静态断言钉「hook 只许调 rebuildTable 且 `createSql === m.sql`」，防 checksum 只管形状不管 hook。`record()` 供条目在自身事务内写台账（结构变更与台账同生共死）；`verify` 探针对 run 条目跳过（结构已是新形状）。票 5/6/8 重建条目**必须同一形态**——各自发明接线 = 追加区两种机制并存，正是本活要消灭的平行真相源。
+   **已知窗口（2026-09-18，票 5 复审 OQ3 裁决接受）**：存在「rebuildTable 提交后、台账落盘前崩溃」的窄窗——重跑幂等自愈（结构已是新形状，`verify` 跳过；ISO 行再进 `strftime('%f')` 透传不产 NULL，不触发二次语义），危害有界（至多一次多余重建，行数有硬校验）。不修 = 不改 rebuildTable 签名、不翻已收口票 4 产物。
 
 ## 五、测试决策
 
@@ -171,6 +175,9 @@ CREATE TABLE session_agents (
 - **⑤-a ISO 毫秒 / ⑤-b 无损单向**（7bd79b87 轮同意）+ **⑤-c 修订版**（记录时间收口 / 事件时间例外，用户确认 36ca4f26）。
 - **⑥ 四个子决策 + joined_at + 删除被拦 409 契约**：用户拍板（a65b2697）。
 - **读码校正**（2026-09-17，spec 落笔前）：PRAGMA 已在（④-a 改「保持」）；FK/CHECK 已存在清单与真实缺口如 §4.1；messages 已有两列索引（③第一条为升级）；时间口径真实分布如 §4.2；迁移数组 61 条。以上均收紧事实、不翻任何决策。
+- **D1–D4 拍板**（2026-09-17，票 3 审计报告四项，用户「按建议走」）：**D1 孤儿 = 删除**（重建迁移逐链带 DELETE，审计 SQL 全留痕可复算）；**D2 九条同族链全纳 FK**（八条随票 6 逐表清单、`sessions.summary_msg_id` 随票 8；agent_id 两链零孤儿纯防御）；**D3 subject_agent_id 猫名归一并入票 6**（先于该表 FK 重建落地）；**D4 主库 WAL 边车不清理**（0 字节无信息量，server 停着时想清手删）。
+- **D3 范围勘正**（2026-09-17，ds猫 逐行复核）：票 3 报告「写入口 `verdict-parser.ts` 注释自称外键语义与实现不符」**不成立**——写入路径取 `subject.id`、调用方 `serial.ts` 的 `reviewedTargets` 也取 `a.id`（T-N 修复时已改），注释与实现一致；库中猫名是修复前历史行。D3 实际范围 = **纯数据归一**，不改写入口代码。
+- **过程式迁移通道裁决**（2026-09-17）：票 5/6 开工前两猫独立收敛到同一方案（runner 恒包事务 × rebuildTable 拒事务内调用，ds猫 六项实测：三张表现状下要么拒启要么静默清 9723 行），店长复核代码事实后拍板 **方案 A**——`Migration.run?` 过程式通道，契约全文入 §4.4 纪律 7；B（纯 SQL 分叉）/C（推迟三表）否。
 
 ## 八、架构决策留痕
 

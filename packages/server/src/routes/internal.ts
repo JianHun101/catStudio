@@ -46,6 +46,7 @@ import { storeUserRequestSignal } from '../llm/user-request-signals.js'
 import { filterAllowedMentions } from '../dispatch/mention-policy.js'
 import { embedText } from '../memory/embedding.js'
 import { vectorToBlob } from '../memory/index.js'
+import { toIsoDb } from '../db/repository/time.js'
 import { createPr } from '../git/create-pr.js'
 import { parseJsonArray, parseJsonValue, messageOf } from '../utils.js'
 import type { AgentRole, StreamSegment, ToolCallInfo } from '@cat-study/shared'
@@ -762,7 +763,7 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
           role: r.role,
           agentId: r.agent_id || null,
           agentName: r.agent_id ? (nameById.get(r.agent_id) ?? null) : null,
-          createdAt: r.created_at.replace(' ', 'T') + 'Z',
+          createdAt: toIsoDb(r.created_at),
           blocks,
         }
       })
