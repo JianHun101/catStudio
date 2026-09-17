@@ -60,6 +60,27 @@ const BASELINE: SchemaRow[] = JSON.parse(
   fs.readFileSync(new URL('./__fixtures__/schema-baseline.json', import.meta.url), 'utf8')
 )
 
+/**
+ * 与基准 dump **故意不同面**的物体名单 —— 名单之外的任何形状漂移都必须红。
+ *
+ * - `idx_messages_session`：票 2 的**同名升级**（两列 → 三列），判据单列在该用例组；
+ * - 票 6 批一重建的 7 张叶子表：FK 补链 / 时间口径 ISO 毫秒 / 去时间 DEFAULT 是**故意**
+ *   改形，各自的形状由「票 6 · B 范围重建批」用例组单独钉死。
+ *
+ * 写成**显式名单**而不是「跳过这 7 张表」：将来任何一条追加迁移改了别的表，
+ * 都会在这里红出来——这正是「新物体/新形状静默出现」的兜底。
+ */
+const BASELINE_SHAPE_DIVERGENCE = new Set<string>([
+  'index:idx_messages_session',
+  'table:execution_logs',
+  'table:flow_states',
+  'table:flow_state_events',
+  'table:connector_bindings',
+  'table:episode_attributions',
+  'table:review_verdicts',
+  'table:review_parse_failures',
+])
+
 /** 台账全量（name → note） */
 function ledger(db: Database.Database): Array<{ name: string; note: string | null }> {
   return db.prepare(`SELECT name, note FROM schema_migrations ORDER BY rowid`).all() as Array<{
@@ -235,6 +256,15 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
 
     it('探针矫正 · widen：旧 CHECK 的 review_verdicts → 真执行放宽、旧行保住', () => {
       const db = makeOldDb()
+      // 父行前置（票 6 起 review_verdicts 的 message_id/session_id/reviewer_agent_id 都是
+      // RESTRICT 外键）：缺父行的旧行会被重建条目的 D1 孤儿清理删掉，那就测不到「放宽」了。
+      db.exec(`
+        INSERT INTO sessions (id, title, agent_ids) VALUES ('s1', 't', '[]');
+        INSERT INTO agents (id, name, system_prompt, llm_api_key)
+          VALUES ('r1', '吐槽猫', 'p', 'sk');
+        INSERT INTO messages (id, session_id, role, content, mentions)
+          VALUES ('m-old', 's1', 'agent', 'x', '[]'), ('m-new', 's1', 'agent', 'x', '[]');
+      `)
       db.exec(`
         DROP TABLE review_verdicts;
         CREATE TABLE review_verdicts (
@@ -253,14 +283,17 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       initDb()
 
       expect(tableSqlOf(db, 'review_verdicts')).toContain("'comment'")
-      expect(
-        db.prepare(`SELECT verdict FROM review_verdicts WHERE message_id='m-old'`).get()
-      ).toEqual({ verdict: 'suggest' })
+      // 旧行保住，且**时间列随重建条目的无损转换**从秒级变 ISO 毫秒（⑤-b 首段实证）
+      const old = db
+        .prepare(`SELECT verdict, created_at FROM review_verdicts WHERE message_id='m-old'`)
+        .get() as { verdict: string; created_at: string }
+      expect(old.verdict).toBe('suggest')
+      expect(old.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
       expect(() =>
         db
           .prepare(
-            `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict)
-             VALUES ('m-new', 's1', 'r1', 'comment')`
+            `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict, created_at)
+             VALUES ('m-new', 's1', 'r1', 'comment', '2026-09-01T00:00:00.000Z')`
           )
           .run()
       ).not.toThrow()
@@ -462,14 +495,14 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       const actual = dumpSchema(db)
       expect(actual).toHaveLength(BASELINE.length + APPENDED_NET_OBJECTS)
       const byName = new Map(actual.map((r) => [`${r.type}:${r.name}`, r]))
-      for (const expected of BASELINE) {
-        // 唯一与基准不同面的是 `idx_messages_session`：票 2 的**同名升级**（两列 → 三列），
-        // 定义本就该变；其升级判据单列在下面。
-        if (expected.name === 'idx_messages_session') continue
-        expect(
-          byName.get(`${expected.type}:${expected.name}`),
-          `${expected.type} ${expected.name}`
-        ).toEqual(expected)
+      // 名单之外的物体**逐行等于基准**（白名单见 `BASELINE_SHAPE_DIVERGENCE`）
+      const drifted = BASELINE.filter((e) => !BASELINE_SHAPE_DIVERGENCE.has(`${e.type}:${e.name}`))
+        .filter((e) => JSON.stringify(byName.get(`${e.type}:${e.name}`)) !== JSON.stringify(e))
+        .map((e) => `${e.type}:${e.name}`)
+      expect(drifted).toEqual([])
+      // 白名单里的物体必须**在**（只是形状不同）——防「表丢了却因跳过而假绿」
+      for (const key of BASELINE_SHAPE_DIVERGENCE) {
+        expect(byName.get(key), key).toBeDefined()
       }
       expect(byName.get('index:idx_messages_session')?.sql).toContain('session_id,created_at,id')
 
@@ -813,6 +846,363 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
         // id 升序 = zzzz-1…zzzz-4 = 插入序的**反转** ⇒ 按 id 分序得到 msg-4,3,2,1
         expect(rows.map((r) => r.content)).toEqual(['msg-4', 'msg-3', 'msg-2', 'msg-1'])
       })
+    })
+  })
+
+  // ─── 票 6 批一 · B 范围重建批（D3 归一 + 7 张叶子表重建）───────────────────
+  describe('票 6 · B 范围重建批（FK 补链 + 时间口径 ISO + D1 孤儿清理）', () => {
+    /** 票 6 的 8 条条目在数组里的起点（D3 归一打头）—— 用它切出「重建前」的库形态 */
+    const T6_START = MIGRATIONS.findIndex((m) => m.name.startsWith('D3 review_verdicts'))
+    const T6_NAMES = MIGRATIONS.slice(T6_START).map((m) => m.name)
+
+    /** 「重建前」的库 = 只跑到票 2 为止（这 8 条一条都还没上船） */
+    function makePreTicket6Db(): Database.Database {
+      const db = makeFreshDb()
+      applyMigrations(db, MIGRATIONS.slice(0, T6_START))
+      return db
+    }
+
+    /**
+     * 存量夹具：秒级时间 + 各类孤儿 + 猫名 subject。
+     * 父行（sessions / agents）必须真实存在——`execution_logs.session_id/agent_id` 是**旧有**
+     * FK，夹具造不出悬空。
+     */
+    function seedLegacy(db: Database.Database): void {
+      db.exec(`
+        INSERT INTO sessions (id, title, agent_ids) VALUES ('s1', 't', '[]');
+        INSERT INTO agents (id, name, system_prompt, llm_api_key)
+          VALUES ('a1', 'ds猫', 'p', 'sk'), ('a2', '吐槽猫', 'p', 'sk');
+        INSERT INTO messages (id, session_id, role, content, mentions)
+          VALUES ('m1', 's1', 'user', 'x', '[]'), ('m2', 's1', 'agent', 'y', '[]');
+
+        -- ① 正常行：两条引用都指得到
+        INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, ended_at, message_id)
+          VALUES ('e-ok', 's1', 'a1', 'm1', 'completed', '2026-08-13 05:41:29', '2026-08-13 05:42:00', 'm2');
+        -- ② 孤儿：message_id 指向已删消息
+        INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, message_id)
+          VALUES ('e-orphan-reply', 's1', 'a1', 'm1', 'completed', '2026-08-13 05:41:29', 'm-gone');
+        -- ③ 孤儿：triggered_by_message_id 指向已删消息
+        INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+          VALUES ('e-orphan-trigger', 's1', 'a1', 'm-gone', 'completed', '2026-08-13 05:41:29');
+        -- ④ 脏存量：上次进程留下的 running 残骸（ended_at 为 NULL）
+        INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+          VALUES ('e-running', 's1', 'a1', 'm1', 'running', '2026-08-13 05:41:29');
+        -- ⑤ 时间列非实测形态（不该被转换吞成 NULL）
+        INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+          VALUES ('e-weird', 's1', 'a1', 'm1', 'completed', '不是时间');
+        -- ⑥ 时间列本来就 NULL（NULL 必须保持 NULL，不许被转换变成别的东西）
+        INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+          VALUES ('e-null-time', 's1', 'a1', 'm1', 'completed', NULL);
+
+        INSERT INTO flow_states (session_id, commit_sha, state, updated_at)
+          VALUES ('s1', 'sha-ok', 'closed', '2026-08-13 05:41:29'),
+                 ('s-gone', 'sha-orphan', 'closed', '2026-08-13 05:41:29');
+        INSERT INTO flow_state_events (session_id, commit_sha, to_state, intent, created_at)
+          VALUES ('s1', 'sha-ok', 'closed', 'closeout', '2026-08-13 05:41:29');
+
+        INSERT INTO connector_bindings (id, platform, external_type, external_id, session_id, created_at)
+          VALUES ('cb1', 'qq', 'group', 'g1', 's1', '2026-08-13 05:41:29');
+
+        INSERT INTO episodes (id, root_trigger_message_id, root_triggered_by, episode_state, classification_ver)
+          VALUES ('ep1', 'm1', 'U', 'open', 'v1');
+        INSERT INTO episode_attributions (id, episode_id, outcome, action_type, status, delivery_message_id, created_at, updated_at)
+          VALUES ('ea-ok', 'ep1', 'abandoned', 'replay', 'resolved', 'm2', '2026-08-13 05:41:29', '2026-08-13 05:41:29');
+
+        INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
+          VALUES ('m2', 's1', 'a2', 'ds猫', 'suggest', '2026-08-13 05:41:29'),
+                 ('m-gone', 's-gone', 'a2', NULL, 'suggest', '2026-08-13 05:41:29');
+        INSERT INTO review_parse_failures (message_id, reason, raw, created_at)
+          VALUES ('m2', 'bad_verdict', 'r', '2026-08-13 05:41:29'), ('m-gone', 'no_subject', 'r', '2026-08-13 05:41:29');
+      `)
+    }
+
+    it('8 条条目形态 = 1 条 D3 归一 + 7 张重建，且全部落在追加区（不带 baseline 标记）', () => {
+      expect(T6_START).toBeGreaterThan(0)
+      expect(T6_NAMES).toHaveLength(8)
+      expect(T6_NAMES[0]).toContain('D3 review_verdicts.subject_agent_id 猫名→id 归一')
+      expect(T6_NAMES.slice(1).every((n) => n.startsWith('rebuild '))).toBe(true)
+      expect(MIGRATIONS.slice(T6_START).every((m) => m.baseline !== true)).toBe(true)
+    })
+
+    it('形状 · 7 张表：新 FK 全 ON DELETE RESTRICT，CHECK 一个不少，时间列一律无 DEFAULT', () => {
+      setDb(makePreTicket6Db())
+      applyMigrations(getDb())
+      const db = getDb()
+
+      const fks = (t: string): string[] =>
+        (
+          db.pragma(`foreign_key_list(${t})`) as Array<{
+            table: string
+            from: string
+            on_delete: string
+          }>
+        )
+          .map((r) => `${r.from}→${r.table}:${r.on_delete}`)
+          .sort()
+      expect(fks('execution_logs')).toEqual([
+        'agent_id→agents:RESTRICT',
+        'message_id→messages:RESTRICT',
+        'session_id→sessions:RESTRICT',
+        'triggered_by_message_id→messages:RESTRICT',
+      ])
+      expect(fks('flow_states')).toEqual(['session_id→sessions:RESTRICT'])
+      expect(fks('flow_state_events')).toEqual(['session_id→sessions:RESTRICT'])
+      expect(fks('connector_bindings')).toEqual(['session_id→sessions:RESTRICT'])
+      expect(fks('episode_attributions')).toEqual([
+        'delivery_message_id→messages:RESTRICT',
+        'episode_id→episodes:RESTRICT',
+      ])
+      expect(fks('review_verdicts')).toEqual([
+        'message_id→messages:RESTRICT',
+        'reviewer_agent_id→agents:RESTRICT',
+        'session_id→sessions:RESTRICT',
+        'subject_agent_id→agents:RESTRICT',
+      ])
+      expect(fks('review_parse_failures')).toEqual(['message_id→messages:RESTRICT'])
+
+      // 时间列去掉 DEFAULT（⑤-c：漏传 value 撞 NOT NULL，不许静默降级）；CHECK 原样保留
+      for (const t of [
+        'flow_states',
+        'flow_state_events',
+        'connector_bindings',
+        'episode_attributions',
+        'review_verdicts',
+        'review_parse_failures',
+      ]) {
+        const timeCols = (
+          db.pragma(`table_info(${t})`) as Array<{
+            name: string
+            notnull: number
+            dflt_value: string | null
+          }>
+        ).filter((c) => c.name.endsWith('_at'))
+        expect(timeCols.length, t).toBeGreaterThan(0)
+        for (const c of timeCols) {
+          expect(c.notnull, `${t}.${c.name} 应 NOT NULL`).toBe(1)
+          expect(c.dflt_value, `${t}.${c.name} 不该再有 DEFAULT`).toBeNull()
+        }
+      }
+      expect(tableSqlOf(db, 'review_verdicts')).toContain("'comment'")
+      expect(tableSqlOf(db, 'execution_logs')).toContain(
+        "'queued', 'running', 'completed', 'failed'"
+      )
+      expect(tableSqlOf(db, 'episode_attributions')).toContain("'dispatched', 'resolved'")
+      expect(tableSqlOf(db, 'review_parse_failures')).toContain("'no_subject', 'bad_verdict'")
+    })
+
+    it('索引随重建回归：DROP TABLE 连索引一起删，而建索引的迁移已登记不再重跑 ⇒ 重建条目必须自建', () => {
+      setDb(makePreTicket6Db())
+      const before = (
+        getDb()
+          .prepare(
+            `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='execution_logs' AND name LIKE 'idx_%' ORDER BY name`
+          )
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name)
+      expect(before).toEqual(['idx_execution_logs_session_started', 'idx_execution_logs_status'])
+
+      applyMigrations(getDb())
+      const after = (
+        getDb()
+          .prepare(
+            `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='execution_logs' AND name LIKE 'idx_%' ORDER BY name`
+          )
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name)
+      expect(after).toEqual(before)
+      // 定义也要在（不是建了个同名空壳）
+      const sql = (
+        getDb()
+          .prepare(
+            `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_execution_logs_session_started'`
+          )
+          .get() as { sql: string }
+      ).sql
+      expect(sql).toContain('execution_logs(session_id, started_at)')
+    })
+
+    it('D1 孤儿清理：4 类孤儿行被删、正常行与相关表原样（真删，不是空转）', () => {
+      setDb(makePreTicket6Db())
+      seedLegacy(getDb())
+      const db = getDb()
+      const ids = () =>
+        (
+          db.prepare(`SELECT id FROM execution_logs ORDER BY id`).all() as Array<{ id: string }>
+        ).map((r) => r.id)
+      expect(ids()).toEqual([
+        'e-null-time',
+        'e-ok',
+        'e-orphan-reply',
+        'e-orphan-trigger',
+        'e-running',
+        'e-weird',
+      ])
+
+      applyMigrations(db)
+
+      // ②③ 两条执行日志孤儿被删；①④⑤⑥ 完好（⑤ 形态怪但**不是孤儿**，不该被误伤）
+      expect(ids()).toEqual(['e-null-time', 'e-ok', 'e-running', 'e-weird'])
+      expect((db.prepare(`SELECT COUNT(*) n FROM flow_states`).get() as { n: number }).n).toBe(1)
+      expect(
+        (db.prepare(`SELECT session_id FROM flow_states`).get() as { session_id: string })
+          .session_id
+      ).toBe('s1')
+      // review_verdicts / review_parse_failures 的孤儿（'m-gone' / 's-gone'）各删一行
+      expect((db.prepare(`SELECT COUNT(*) n FROM review_verdicts`).get() as { n: number }).n).toBe(
+        1
+      )
+      expect(
+        (db.prepare(`SELECT COUNT(*) n FROM review_parse_failures`).get() as { n: number }).n
+      ).toBe(1)
+    })
+
+    it('时间口径：秒级 → ISO 毫秒；NULL 保持 NULL；**非实测形态原样保留**（不静默抹成 NULL）', () => {
+      setDb(makePreTicket6Db())
+      seedLegacy(getDb())
+      const db = getDb()
+      applyMigrations(db)
+
+      const rows = db
+        .prepare(`SELECT id, started_at, ended_at FROM execution_logs ORDER BY id`)
+        .all() as Array<{ id: string; started_at: string | null; ended_at: string | null }>
+      expect(rows.find((r) => r.id === 'e-ok')).toEqual({
+        id: 'e-ok',
+        started_at: '2026-08-13T05:41:29.000Z',
+        ended_at: '2026-08-13T05:42:00.000Z',
+      })
+      // 秒级 → ISO 毫秒是**无损单向**（⑤-b）：毫秒位补 .000，时刻不变
+      expect(rows.find((r) => r.id === 'e-running')?.started_at).toBe('2026-08-13T05:41:29.000Z')
+      // NULL 保持 NULL
+      expect(rows.find((r) => r.id === 'e-null-time')?.started_at).toBeNull()
+      expect(rows.find((r) => r.id === 'e-null-time')?.ended_at).toBeNull()
+      // 认不出的取值**留着**——strftime 对解析不了的输入返回 NULL，直接套用就是静默丢数据
+      expect(rows.find((r) => r.id === 'e-weird')?.started_at).toBe('不是时间')
+
+      expect(
+        (db.prepare(`SELECT updated_at FROM flow_states`).get() as { updated_at: string })
+          .updated_at
+      ).toBe('2026-08-13T05:41:29.000Z')
+      expect(
+        (db.prepare(`SELECT created_at FROM connector_bindings`).get() as { created_at: string })
+          .created_at
+      ).toBe('2026-08-13T05:41:29.000Z')
+    })
+
+    it('脏存量改判：running 行 → failed + error_type=server_restart + ended_at 补 ISO 毫秒', () => {
+      setDb(makePreTicket6Db())
+      seedLegacy(getDb())
+      applyMigrations(getDb())
+
+      const row = getDb()
+        .prepare(
+          `SELECT status, error_type, error_message, ended_at FROM execution_logs WHERE id='e-running'`
+        )
+        .get() as { status: string; error_type: string; error_message: string; ended_at: string }
+      expect(row.status).toBe('failed')
+      expect(row.error_type).toBe('server_restart')
+      expect(row.error_message).toBe('server_restart')
+      expect(row.ended_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    })
+
+    it('flow_state_events 的 AUTOINCREMENT 不断档：显式 id 拷回 ⇒ sqlite_sequence 跟着走，新行不撞主键', () => {
+      setDb(makePreTicket6Db())
+      seedLegacy(getDb())
+      const db = getDb()
+      const maxBefore = (
+        db.prepare(`SELECT MAX(id) m FROM flow_state_events`).get() as { m: number }
+      ).m
+      applyMigrations(db)
+      expect((db.prepare(`SELECT MAX(id) m FROM flow_state_events`).get() as { m: number }).m).toBe(
+        maxBefore
+      )
+      const seq = (
+        db.prepare(`SELECT seq FROM sqlite_sequence WHERE name='flow_state_events'`).get() as
+          { seq: number } | undefined
+      )?.seq
+      expect(seq).toBe(maxBefore)
+      // 下一条自动 id 必须**严格大于**存量最大值（否则主键撞车）
+      db.prepare(
+        `INSERT INTO flow_state_events (session_id, commit_sha, to_state, intent, created_at)
+         VALUES ('s1', 'sha-new', 'closed', 'closeout', '2026-09-01T00:00:00.000Z')`
+      ).run()
+      const newId = (
+        db.prepare(`SELECT id FROM flow_state_events WHERE commit_sha='sha-new'`).get() as {
+          id: number
+        }
+      ).id
+      expect(newId).toBeGreaterThan(maxBefore)
+    })
+
+    it('D3 归一：猫名按 agents.name 解析成 id（库里存的就是 id 后不再重复解析）', () => {
+      setDb(makePreTicket6Db())
+      seedLegacy(getDb())
+      applyMigrations(getDb())
+
+      const row = getDb()
+        .prepare(`SELECT subject_agent_id FROM review_verdicts WHERE message_id='m2'`)
+        .get() as { subject_agent_id: string | null }
+      expect(row.subject_agent_id).toBe('a1') // 'ds猫' → agents.id
+    })
+
+    it('D3 归一不许静默降级：解析不到的猫名 → **拒启**（而不是悄悄抹成 NULL）', () => {
+      setDb(makePreTicket6Db())
+      seedLegacy(getDb())
+      getDb()
+        .prepare(`UPDATE review_verdicts SET subject_agent_id = '查无此猫' WHERE message_id = 'm2'`)
+        .run()
+
+      // 归一 SQL 的 COALESCE 保留原值 ⇒ 紧随其后的重建条目 FK 校验失败 ⇒ 拒启带迁移名
+      expect(() => applyMigrations(getDb())).toThrowError(/rebuild review_verdicts/)
+    })
+
+    it('FK 真在：插入指向不存在消息的 review_verdicts → 被 RESTRICT 拦下', () => {
+      setDb(makePreTicket6Db())
+      seedLegacy(getDb())
+      applyMigrations(getDb())
+
+      expect(() =>
+        getDb()
+          .prepare(
+            `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict, created_at)
+             VALUES ('m-ghost', 's1', 'a2', 'approve', '2026-09-01T00:00:00.000Z')`
+          )
+          .run()
+      ).toThrowError(/FOREIGN KEY/)
+      // 父行在时同一条写得进（证明上一条红的是 FK、不是别的约束）
+      expect(() =>
+        getDb()
+          .prepare(
+            `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict, created_at)
+             VALUES ('m1', 's1', 'a2', 'approve', '2026-09-01T00:00:00.000Z')`
+          )
+          .run()
+      ).not.toThrow()
+    })
+
+    it('纪律 6 · 全库 foreign_key_check 零违规（重建不动子表，但体检是收尾唯一兜）', () => {
+      setDb(makePreTicket6Db())
+      seedLegacy(getDb())
+      applyMigrations(getDb())
+      expect(getDb().pragma('foreign_key_check')).toEqual([])
+    })
+
+    it('新库路径同款：空库跑完整 initDb 也零违规、7 张表形状与老库路径一致', () => {
+      setDb(makeFreshDb())
+      initDb()
+      const db = getDb()
+      expect(db.pragma('foreign_key_check')).toEqual([])
+      const fks = (t: string): string[] =>
+        (
+          db.pragma(`foreign_key_list(${t})`) as Array<{
+            table: string
+            from: string
+            on_delete: string
+          }>
+        )
+          .map((r) => `${r.from}→${r.table}:${r.on_delete}`)
+          .sort()
+      expect(fks('review_verdicts')).toHaveLength(4)
+      expect(fks('execution_logs')).toHaveLength(4)
     })
   })
 })

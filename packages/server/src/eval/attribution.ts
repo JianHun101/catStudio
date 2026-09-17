@@ -26,6 +26,7 @@
 import { v4 as uuid } from 'uuid'
 import { getDb } from '../db/index.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
+import { normalizeIsoMs, nowIso } from '../db/repository/clock.js'
 import { createLogger } from '../logger.js'
 import { messageOf } from '../utils.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
@@ -85,7 +86,10 @@ function latestRejectOrSuggest(rootMsg: RootMessageRow, chainTaskId: string | nu
          AND v.verdict IN ('reject', 'suggest')
        ORDER BY v.created_at DESC LIMIT 1`
     )
-    .get(chainTaskId, rootMsg.session_id, rootMsg.created_at) as { verdict: string } | undefined
+    // since 来自 messages.created_at（秒级串，票 5 才转）；v.created_at 已是 ISO 毫秒
+    // ⇒ 比较前归一，否则「晚于根消息」恒真（见 clock.ts::normalizeIsoMs）
+    .get(chainTaskId, rootMsg.session_id, normalizeIsoMs(rootMsg.created_at)) as
+    { verdict: string } | undefined
   return row?.verdict ?? null
 }
 
@@ -225,11 +229,12 @@ export function runEpisodeAttribution(bus: EngineBus & HandoffBus): {
     const rootCause = locateRootCause(ep.outcome, chain, rootMsg, ep.chain_task_id)
 
     // OR IGNORE：UNIQUE(episode_id) 双保险幂等（主查询 NOT EXISTS 已排除）
+    const now = nowIso()
     db.prepare(
       `INSERT OR IGNORE INTO episode_attributions
-         (id, episode_id, outcome, root_cause, action_type, action_detail, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'dispatched')`
-    ).run(uuid(), ep.id, ep.outcome, rootCause, action, ACTION_HINTS[action])
+         (id, episode_id, outcome, root_cause, action_type, action_detail, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?, ?)`
+    ).run(uuid(), ep.id, ep.outcome, rootCause, action, ACTION_HINTS[action], now, now)
 
     if (ep.session_id) {
       const msgId = dispatchAction(bus, action, {
@@ -307,8 +312,8 @@ function markResolved(episodeId: string, annotate = true): void {
   const outcome = db.prepare(`SELECT outcome FROM episodes WHERE id = ?`).get(episodeId) as
     { outcome: string } | undefined
   db.prepare(
-    `UPDATE episode_attributions SET status = 'resolved', updated_at = datetime('now') WHERE episode_id = ?`
-  ).run(episodeId)
+    `UPDATE episode_attributions SET status = 'resolved', updated_at = ? WHERE episode_id = ?`
+  ).run(nowIso(), episodeId)
   db.prepare(
     `UPDATE episodes SET episode_state = 'closed', updated_at = datetime('now') WHERE id = ?`
   ).run(episodeId)

@@ -20,12 +20,25 @@ const bus = {
   emitSystemNotice: (n: any) => roomEmit(Events.NEW_MESSAGE, { ...n, role: 'system' }),
 } as any
 
-/** SQLite datetime 格式（UTC 'YYYY-MM-DD HH:MM:SS'）——与 datetime('now') 字符串比较一致 */
+/** SQLite datetime 格式（UTC 'YYYY-MM-DD HH:MM:SS'）——与 datetime('now') 字符串比较一致。
+ *  **仅用于 `messages.created_at`**：messages 表未随票 6 重建，写入口不传该列 ⇒ 落
+ *  `DEFAULT (datetime('now'))`；零执行扫描的 `created_at < datetime('now','-30 minutes')`
+ *  也要求同形串（异形串比较会因 `'T' > ' '` 恒假，窗口内恒判不出来）。 */
 function sqliteNow(offsetMinutes = 0): string {
   return new Date(Date.now() - offsetMinutes * 60000).toISOString().replace('T', ' ').slice(0, 19)
 }
 
-/** FK 基础数据：session s1 + agent agent-1（execution_logs/attributions 外键依赖） */
+/** 重建表时间口径（票 6：ISO 毫秒，仓库层 `nowIso()` 生成）——
+ *  `execution_logs.started_at/ended_at` 与 `review_verdicts.created_at` 用它；
+ *  两者在 `classifyChain` 里互相比较（`doneAt > lastRejectAt`），必须同形。 */
+function isoNow(offsetMinutes = 0): string {
+  return new Date(Date.now() - offsetMinutes * 60000).toISOString()
+}
+
+/** FK 基础数据：session s1 + agent agent-1 + reviewer-1
+ *  （票 6 批一：`execution_logs` / `episode_attributions` / `review_verdicts` 的引用列
+ *   都是 RESTRICT 外键 ⇒ 夹具必须造出真实存在的父行——否则子行插不进，
+ *   归因记录读到 undefined） */
 function seedBase(): void {
   getDb()
     .prepare(`INSERT OR IGNORE INTO sessions (id, title, agent_ids) VALUES ('s1', 't', '[]')`)
@@ -34,6 +47,12 @@ function seedBase(): void {
     .prepare(
       `INSERT OR IGNORE INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
        VALUES ('agent-1', '店长', '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-your-api-key-here', 'store')`
+    )
+    .run()
+  getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES ('reviewer-1', '吐槽猫', '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'reviewer')`
     )
     .run()
 }
@@ -65,7 +84,7 @@ function insertExecution(overrides: Record<string, unknown> = {}): void {
       (overrides.triggered_by as string) ?? 'msg-root',
       (overrides.status as string) ?? 'completed',
       (overrides.trace_id as string) ?? 'trace-1',
-      (overrides.started_at as string) ?? sqliteNow(),
+      (overrides.started_at as string) ?? isoNow(),
       (overrides.ended_at as string | null) ?? null,
       (overrides.error_message as string | null) ?? null,
       (overrides.error_type as string | null) ?? null,
@@ -74,10 +93,13 @@ function insertExecution(overrides: Record<string, unknown> = {}): void {
 }
 
 function insertAttribution(overrides: Record<string, unknown> = {}): void {
+  // created_at / updated_at 无 DEFAULT（票 6 重建时刻意去掉）⇒ 必须显式给值，
+  // 否则撞 NOT NULL（ISO 毫秒口径，与仓库层 nowIso() 同形）
+  const ts = (overrides.created_at as string) ?? isoNow()
   getDb()
     .prepare(
-      `INSERT INTO episode_attributions (id, episode_id, outcome, root_cause, action_type, action_detail, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO episode_attributions (id, episode_id, outcome, root_cause, action_type, action_detail, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       (overrides.id as string) ?? `attr-${Math.random()}`,
@@ -86,7 +108,9 @@ function insertAttribution(overrides: Record<string, unknown> = {}): void {
       (overrides.root_cause as string | null) ?? null,
       (overrides.action_type as string) ?? 'replay',
       (overrides.action_detail as string | null) ?? null,
-      (overrides.status as string) ?? 'dispatched'
+      (overrides.status as string) ?? 'dispatched',
+      ts,
+      (overrides.updated_at as string) ?? ts
     )
 }
 
@@ -157,7 +181,7 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
       status: 'failed',
       error_type: 'timeout',
       error_message: '执行超时',
-      started_at: sqliteNow(50),
+      started_at: isoNow(50),
     })
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('needs_investigation')
@@ -177,7 +201,7 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
       status: 'failed',
       error_type: 'parse_error',
       error_message: '解析失败',
-      started_at: sqliteNow(50),
+      started_at: isoNow(50),
     })
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('harness_fix_needed')
@@ -196,8 +220,8 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      started_at: sqliteNow(50),
-      ended_at: sqliteNow(45),
+      started_at: isoNow(50),
+      ended_at: isoNow(45),
     })
     getDb()
       .prepare(
@@ -210,14 +234,14 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
         `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
          VALUES ('vmsg-1', 's1', 'reviewer-1', NULL, 'reject', ?)`
       )
-      .run(sqliteNow(40))
+      .run(isoNow(40))
     insertExecution({
       id: 'log-redo',
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      started_at: sqliteNow(35),
-      ended_at: sqliteNow(30),
+      started_at: isoNow(35),
+      ended_at: isoNow(30),
     })
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('corrected_success')
@@ -247,7 +271,7 @@ describe('E2 归因分流 — 结局 → 既有动作通道映射', () => {
       triggered_by: rootRunning,
       status: 'running',
       trace_id: 'trace-run',
-      started_at: sqliteNow(50),
+      started_at: isoNow(50),
     })
     // 手插 unclassified episode（判定 5 防御分支的落库形态）
     insertRootMessage({ id: 'msg-unclass', created_at: sqliteNow(60) })
@@ -292,8 +316,8 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-replay',
-      started_at: sqliteNow(20),
-      ended_at: sqliteNow(15),
+      started_at: isoNow(20),
+      ended_at: isoNow(15),
     })
     // 下一轮：判定翻转 success
     classifyEpisodes()
@@ -319,7 +343,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
       status: 'failed',
       error_type: 'timeout',
       error_message: '执行超时',
-      started_at: sqliteNow(50),
+      started_at: isoNow(50),
     })
     classifyEpisodes()
     runEpisodeAttribution(bus)
@@ -342,7 +366,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
       status: 'failed',
       error_type: 'timeout',
       error_message: '执行超时',
-      started_at: sqliteNow(50),
+      started_at: isoNow(50),
     })
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('needs_investigation')
@@ -368,14 +392,14 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
         `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
          VALUES ('vmsg-1', 's1', 'reviewer-1', NULL, 'reject', ?)`
       )
-      .run(sqliteNow(30))
+      .run(isoNow(30))
     insertExecution({
       id: 'log-redo',
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      started_at: sqliteNow(20),
-      ended_at: sqliteNow(15),
+      started_at: isoNow(20),
+      ended_at: isoNow(15),
     })
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('corrected_success')
@@ -397,7 +421,7 @@ describe('E2 closure 复验 — 结局翻转才关闭，不依赖口头确认', 
       triggered_by: rootId,
       status: 'failed',
       error_message: '不明失败',
-      started_at: sqliteNow(50),
+      started_at: isoNow(50),
     })
     classifyEpisodes()
     expect(getEpisode(rootId).outcome).toBe('routing_failure')
@@ -436,8 +460,8 @@ describe('locateRootCause — 根因定位分支', () => {
         id: 'l1',
         status: 'completed',
         trace_id: 'trace-1',
-        started_at: sqliteNow(50),
-        ended_at: sqliteNow(45),
+        started_at: isoNow(50),
+        ended_at: isoNow(45),
         error_type: null,
         error_message: null,
       },
@@ -453,7 +477,7 @@ describe('locateRootCause — 根因定位分支', () => {
         `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
        VALUES ('vmsg-1', 's1', 'reviewer-1', NULL, 'suggest', ?)`
       )
-      .run(sqliteNow(40))
+      .run(isoNow(40))
 
     expect(locateRootCause('needs_investigation', chain, rootMsg, 'trace-1')).toBe(
       '完成被打回（verdict=suggest），未重做'

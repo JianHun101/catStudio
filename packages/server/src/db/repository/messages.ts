@@ -2,6 +2,7 @@
  * Message 表查询函数。
  */
 import type Database from 'better-sqlite3'
+import { purgeMessageDependents } from './dependents.js'
 import type { MessageRow, MessageWithAgentName } from './types.js'
 
 let db: Database.Database
@@ -378,19 +379,26 @@ export function updateMessageContent(messageId: string, content: string): void {
   db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, messageId)
 }
 
+// ↓ 四个删除函数**先清子行再删消息**（票 6：新 FK 全 RESTRICT，不清则既有端点 500）。
+//   清理清单与理由集中在 `dependents.ts` 一处声明，此处只负责在删之前调用。
+
 export function deleteMessageById(id: string): void {
+  purgeMessageDependents({ kind: 'id', id })
   db.prepare('DELETE FROM messages WHERE id = ?').run(id)
 }
 
 export function deleteMessagesBySession(sessionId: string): { changes: number } {
+  purgeMessageDependents({ kind: 'session', sessionId })
   return db.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId)
 }
 
 export function deleteMessagesByAgent(agentId: string): { changes: number } {
+  purgeMessageDependents({ kind: 'agent', agentId })
   return db.prepare('DELETE FROM messages WHERE agent_id = ?').run(agentId)
 }
 
 export function deleteAllMessages(): void {
+  purgeMessageDependents({ kind: 'all' })
   db.exec('DELETE FROM messages')
 }
 

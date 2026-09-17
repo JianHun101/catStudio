@@ -37,9 +37,10 @@
  * ## 追加区（fix-forward）
  *
  * 台账立闸后的一切结构变更都追加到文件末尾的 `APPENDED_MIGRATIONS`，**不带** `baseline`
- * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着四条：补建主库缺失的
- * `retrieval_*` / `spans` 五表九索引（票 1 OQ1 实测 + 店长裁决 ②），外加票 2 的三条索引
- * （spec §3.2）——来龙去脉见各条上方注释。
+ * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着十二条：补建主库缺失的
+ * `retrieval_*` / `spans` 五表九索引（票 1 OQ1 实测 + 店长裁决 ②）、票 2 的三条索引
+ * （spec §3.2）、票 6 批一的 D3 归一 + 7 张叶子表重建（B 范围 FK/CHECK/时间口径）——
+ * 来龙去脉见各条上方注释。
  *
  * - **不挂探针 38 条**：其余 CREATE TABLE / CREATE INDEX / DROP 条目要么是纯新物体
  *   （缺了会在首次使用时响亮报错），要么效果由后续条目独立保证。加列类历史 ALTER 已
@@ -676,6 +677,35 @@ function baselineEntrySql(name: string): string {
   return entry.sql
 }
 
+/**
+ * 秒级 UTC（`YYYY-MM-DD HH:MM:SS`，历史 `datetime('now')` 产物）→ ISO 8601 毫秒（spec §4.2 ⑤-a）。
+ *
+ * `GLOB` 只认**实测形态**（票 3 面 B：两库 16/19 列逐列取值为该形态，无例外）；不匹配的
+ * 取值**原样保留**，不落 NULL——`strftime()` 对解析不了的输入返回 NULL，直接套用会把
+ * 「不认识的取值」静默抹掉。转换必须无损单向（⑤-b）：宁可让后续校验响亮报错，也不许
+ * 悄悄丢一行数据。
+ *
+ * 值本身：`%f` 给 `SS.SSS`；SQLite 把无时区后缀的字符串按 UTC 解释 ⇒ 转换不改时刻。
+ */
+function toIsoMs(col: string): string {
+  return `CASE WHEN ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+              THEN strftime('%Y-%m-%dT%H:%M:%fZ', ${col}) ELSE ${col} END`
+}
+
+/** SQL 侧的 ISO 毫秒「此刻」（迁移内部的时间戳：条目正文被 checksum 冻结，不能插 JS 值） */
+const SQL_NOW_ISO = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+
+// ─── 7 表重建批（票 6 批一）共用的索引正文 ────────────────────────────────
+// 重建 = `DROP TABLE` + `RENAME`，**索引随旧表一起消失**，而建索引的那两条迁移早已
+// 登记（台账说「已发生」）⇒ 不会重跑。故重建条目必须自己把索引建回来。
+// 正文抽成常量、与那两条迁移**共用一份**：抄一份 = 同一批物体两份定义，正是票 1 删掉
+// `test-helpers.ts` 手抄 SCHEMA_SQL 的同一个理由。
+/** `execution_logs` 会话级日志/恢复路径取数面（票 2 · 索引 2） */
+const IDX_EXECUTION_LOGS_SESSION_STARTED = `CREATE INDEX IF NOT EXISTS idx_execution_logs_session_started
+      ON execution_logs(session_id, started_at)`
+/** `execution_logs` running 计数（票 2 · 索引 3） */
+const IDX_EXECUTION_LOGS_STATUS = `CREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)`
+
 const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
   {
     name: 'fix-forward 补建 retrieval_*/spans 五表九索引（票 1 OQ1）',
@@ -712,8 +742,7 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 同口径佐证散在既有代码里：`repository/query.ts:15`「execution_logs 无 created_at 列」、
     // `eval/l1-aggregator.ts:68` 同、`routes/internal.test.ts:864`「用 started_at DESC 排序」。
     name: 'idx_execution_logs_session_started',
-    sql: `CREATE INDEX IF NOT EXISTS idx_execution_logs_session_started
-      ON execution_logs(session_id, started_at)`,
+    sql: IDX_EXECUTION_LOGS_SESSION_STARTED,
   },
   {
     // running 计数（重启判据主查询）。**定形依据 = 实测调用面，不是二选一**（spec §3.2 留的
@@ -725,7 +754,237 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 三条都不带 session_id ⇒ 复合索引 `(session_id, status)` 的前导列不匹配，**一条都服务
     // 不到**（这正是「对照实际 SQL 定形」要挡的形态：照抄复合版 = 建了个用不上的索引）。
     name: 'idx_execution_logs_status',
-    sql: `CREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)`,
+    sql: IDX_EXECUTION_LOGS_STATUS,
+  },
+
+  // ── 票 6 批一 · B 范围重建批（7 张**叶子表**：无子表引用，纯 SQL 即可换形）──────
+  // 每张表一次重建做完该表全部结构变更（spec §4.2 铁律「不重建第二次」）：D1 孤儿清理
+  // → 建新形表 → 按**列名**显式拷贝（时间列走 `toIsoMs` 无损转换）→ 删旧 → 改名 → 建回索引。
+  //
+  // **为什么是纯 SQL 而不是 `rebuildTable` helper**：helper 存在的前提是「DROP 会被子表
+  // 挡」（episodes/spans/retrieval_events 三张，批二走 `run` 通道）；这 7 张**没有子表**，
+  // 且 FK 开关按 SQLite 语义只能在事务外切——纯 SQL 在 runner 的单事务里就是完整语义，
+  // 不必为它引入过程式通道（spec §4.4 纪律 7 的消费方是批二）。
+  //
+  // **FK 动作一律 `ON DELETE RESTRICT`**（spec §4.1 删除策略：物理删除全 RESTRICT）。
+  // 连带影响：删除会话/清空消息/删 agent 时子行会挡路 ⇒ 删除路径已同步扩展为「按外键
+  // 依赖顺序删除」（见 `db/repository` 各 delete* 函数内的 purge 调用）。
+  //
+  // **时间列一律去掉 `DEFAULT (datetime('now'))`**（⑤-c：记录时间归 repository 层生成，
+  // 且秒级 DEFAULT 会把精度降档）——漏传 value 撞 `NOT NULL` 当场报错，不静默降级。
+  {
+    // 票 3 发现② / 店长 D3 拍板。**必须先于 review_verdicts 重建**（否则存量猫名直接
+    // 撞 FK 拒启）。写入口自 T-N 修复起已取 `subject.id`（`eval/verdict-parser.ts:249`
+    // 的 `subject: subject.id`，调用方 `execution/serial.ts` 的 `reviewedTargets` 取
+    // `a.id`）——库里的猫名是**修复前的历史行**，故本条是纯数据归一，不改写入口代码。
+    //
+    // `COALESCE` 而非裸子查询：`agents.name` 有 UNIQUE 约束 ⇒ 至多命中一行；**解析不到
+    // 的名字原样保留**，让紧随其后的重建 FK 响亮拒启（带迁移名）——归一不许有静默降级
+    // （裸子查询解析不到会给 NULL，等于把一条审查结论的「审查对象」悄悄抹掉）。
+    name: 'D3 review_verdicts.subject_agent_id 猫名→id 归一',
+    sql: `UPDATE review_verdicts
+   SET subject_agent_id = COALESCE(
+         (SELECT a.id FROM agents a WHERE a.name = review_verdicts.subject_agent_id),
+         subject_agent_id)
+ WHERE subject_agent_id IS NOT NULL
+   AND subject_agent_id NOT IN (SELECT id FROM agents)`,
+  },
+  {
+    // D2 补链：`message_id`（回复侧）与 `triggered_by_message_id`（触发侧）→ messages。
+    // 第二条是**行为契约面**：任何触发过执行的用户消息从此不可被单独删除——这正是
+    // `DELETE /api/sessions/:id/messages` 必须先删执行日志的原因（该路径早已如此）。
+    //
+    // 脏存量改判：迁移跑在启动链上，此刻的 `running` 行必是上次进程留下的残骸
+    // （与 `fixStuckExecutionLogs()` 同语义：error_type='server_restart' 单独桶、
+    // 不进成功率）。用 SQL 侧 ISO 毫秒补 `ended_at`（条目正文被 checksum 冻结，
+    // 插不了 JS 值；此处是**一次性修复**，不是记录写入，故不走 repository helper）。
+    name: 'rebuild execution_logs（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    sql: `DELETE FROM execution_logs
+ WHERE (message_id IS NOT NULL AND message_id NOT IN (SELECT id FROM messages))
+    OR triggered_by_message_id NOT IN (SELECT id FROM messages);
+UPDATE execution_logs
+   SET status = 'failed', ended_at = ${SQL_NOW_ISO},
+       error_message = 'server_restart', error_type = 'server_restart'
+ WHERE status = 'running';
+CREATE TABLE execution_logs_rebuilt (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      triggered_by_message_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+      trace_id TEXT NOT NULL DEFAULT '',
+      started_at TEXT,
+      ended_at TEXT,
+      latency_ms INTEGER,
+      error_message TEXT,
+      message_id TEXT,
+      commit_hash TEXT,
+      packages_installed TEXT,
+      prompt_chars INTEGER,
+      reply_chars INTEGER,
+      prompt_tokens INTEGER,
+      completion_tokens INTEGER,
+      error_type TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE RESTRICT,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE RESTRICT,
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE RESTRICT,
+      FOREIGN KEY (triggered_by_message_id) REFERENCES messages(id) ON DELETE RESTRICT
+    );
+INSERT INTO execution_logs_rebuilt
+  (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at, ended_at,
+   latency_ms, error_message, message_id, commit_hash, packages_installed, prompt_chars,
+   reply_chars, prompt_tokens, completion_tokens, error_type)
+SELECT id, session_id, agent_id, triggered_by_message_id, status, trace_id,
+       ${toIsoMs('started_at')}, ${toIsoMs('ended_at')},
+       latency_ms, error_message, message_id, commit_hash, packages_installed, prompt_chars,
+       reply_chars, prompt_tokens, completion_tokens, error_type
+FROM execution_logs;
+DROP TABLE execution_logs;
+ALTER TABLE execution_logs_rebuilt RENAME TO execution_logs;
+${IDX_EXECUTION_LOGS_SESSION_STARTED};
+${IDX_EXECUTION_LOGS_STATUS}`,
+  },
+  {
+    // D2 补链：`session_id` → sessions。`updated_at` 去 DEFAULT 改由
+    // `flowStates.ts::recordFlowTransition` 生成（⑤-c：记录时间归 repository 层）。
+    name: 'rebuild flow_states（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    sql: `DELETE FROM flow_states WHERE session_id NOT IN (SELECT id FROM sessions);
+CREATE TABLE flow_states_rebuilt (
+      session_id TEXT NOT NULL,
+      commit_sha TEXT NOT NULL,
+      state TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, commit_sha),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE RESTRICT
+    );
+INSERT INTO flow_states_rebuilt (session_id, commit_sha, state, updated_at)
+SELECT session_id, commit_sha, state, ${toIsoMs('updated_at')} FROM flow_states;
+DROP TABLE flow_states;
+ALTER TABLE flow_states_rebuilt RENAME TO flow_states`,
+  },
+  {
+    // D2 补链：`session_id` → sessions。`AUTOINCREMENT` 保留（主键 id 显式拷贝 ⇒
+    // `sqlite_sequence` 随 `RENAME` 一并改名，`max(id)` 不断档）。
+    // **不加 CHECK**：`to_state` 值域非封闭（`execution/flow-state.ts::isOnMainChain()`
+    // 的存在本身即证明主干道之外还有岔道取值），照 spec「封闭枚举才 CHECK」判据排除。
+    name: 'rebuild flow_state_events（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    sql: `DELETE FROM flow_state_events WHERE session_id NOT IN (SELECT id FROM sessions);
+CREATE TABLE flow_state_events_rebuilt (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      commit_sha TEXT NOT NULL,
+      from_state TEXT,
+      to_state TEXT NOT NULL,
+      intent TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE RESTRICT
+    );
+INSERT INTO flow_state_events_rebuilt
+  (id, session_id, commit_sha, from_state, to_state, intent, created_at)
+SELECT id, session_id, commit_sha, from_state, to_state, intent, ${toIsoMs('created_at')}
+FROM flow_state_events;
+DROP TABLE flow_state_events;
+ALTER TABLE flow_state_events_rebuilt RENAME TO flow_state_events`,
+  },
+  {
+    // D2 补链：`session_id` → sessions。**这条 FK 推翻了本模块原注释的既有边界**——
+    // `connectorBindings.ts` 原写「session_id 无 FK，绑定指向的会话被删除后成为孤儿，
+    // webhook 侧静默忽略」；立闸后改绑语义相反：**删会话前必须先解绑**（删除路径已
+    // 同步清理），webhook 侧再也见不到悬空绑定。
+    name: 'rebuild connector_bindings（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    sql: `DELETE FROM connector_bindings WHERE session_id NOT IN (SELECT id FROM sessions);
+CREATE TABLE connector_bindings_rebuilt (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      external_type TEXT NOT NULL CHECK (external_type IN ('group', 'private')),
+      external_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (platform, external_type, external_id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE RESTRICT
+    );
+INSERT INTO connector_bindings_rebuilt
+  (id, platform, external_type, external_id, session_id, created_at)
+SELECT id, platform, external_type, external_id, session_id, ${toIsoMs('created_at')}
+FROM connector_bindings;
+DROP TABLE connector_bindings;
+ALTER TABLE connector_bindings_rebuilt RENAME TO connector_bindings`,
+  },
+  {
+    // D2 补链：`delivery_message_id` → messages（可空诊断链）。这条列是本批唯一
+    // 非主键/非 NOT NULL 的引用列：孤儿行按 D1 拍板**删行**（与全批同一条规则），
+    // 「删行 vs 把链接置 NULL」的取舍见交接文档 OQ。
+    name: 'rebuild episode_attributions（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    sql: `DELETE FROM episode_attributions
+ WHERE delivery_message_id IS NOT NULL
+   AND delivery_message_id NOT IN (SELECT id FROM messages);
+CREATE TABLE episode_attributions_rebuilt (
+      id TEXT PRIMARY KEY,
+      episode_id TEXT NOT NULL UNIQUE,
+      outcome TEXT NOT NULL,
+      root_cause TEXT,
+      action_type TEXT NOT NULL CHECK (action_type IN ('investigation', 'harness_fix', 'replay', 'improvement')),
+      action_detail TEXT,
+      status TEXT NOT NULL DEFAULT 'dispatched' CHECK (status IN ('dispatched', 'resolved')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      delivery_message_id TEXT,
+      FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE RESTRICT,
+      FOREIGN KEY (delivery_message_id) REFERENCES messages(id) ON DELETE RESTRICT
+    );
+INSERT INTO episode_attributions_rebuilt
+  (id, episode_id, outcome, root_cause, action_type, action_detail, status,
+   created_at, updated_at, delivery_message_id)
+SELECT id, episode_id, outcome, root_cause, action_type, action_detail, status,
+       ${toIsoMs('created_at')}, ${toIsoMs('updated_at')}, delivery_message_id
+FROM episode_attributions;
+DROP TABLE episode_attributions;
+ALTER TABLE episode_attributions_rebuilt RENAME TO episode_attributions`,
+  },
+  {
+    // D2 补链：四条引用各一（`message_id` 主键 / `session_id` / `reviewer_agent_id` /
+    // `subject_agent_id`）。**前置于本条的 D3 归一**已把猫名解析成 id ⇒ 存量不撞 FK。
+    // `verdict` 的 CHECK 值与基线一致（含 T-C 的 'comment'）——基线那条 `widen` 探针
+    // 读的是本表的 `sqlite_master.sql`，重建后含 'comment' 仍然为真，不会被误判成缺失。
+    name: 'rebuild review_verdicts（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    sql: `DELETE FROM review_verdicts
+ WHERE message_id NOT IN (SELECT id FROM messages)
+    OR session_id NOT IN (SELECT id FROM sessions);
+CREATE TABLE review_verdicts_rebuilt (
+      message_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      reviewer_agent_id TEXT NOT NULL,
+      subject_agent_id TEXT,
+      verdict TEXT NOT NULL CHECK (verdict IN ('approve', 'comment', 'suggest', 'reject')),
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE RESTRICT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE RESTRICT,
+      FOREIGN KEY (reviewer_agent_id) REFERENCES agents(id) ON DELETE RESTRICT,
+      FOREIGN KEY (subject_agent_id) REFERENCES agents(id) ON DELETE RESTRICT
+    );
+INSERT INTO review_verdicts_rebuilt
+  (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
+SELECT message_id, session_id, reviewer_agent_id, subject_agent_id, verdict,
+       ${toIsoMs('created_at')}
+FROM review_verdicts;
+DROP TABLE review_verdicts;
+ALTER TABLE review_verdicts_rebuilt RENAME TO review_verdicts`,
+  },
+  {
+    // D2 补链：`message_id` → messages（主键即引用）。`reason` 的 CHECK 保持基线两值。
+    name: 'rebuild review_parse_failures（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    sql: `DELETE FROM review_parse_failures WHERE message_id NOT IN (SELECT id FROM messages);
+CREATE TABLE review_parse_failures_rebuilt (
+      message_id TEXT PRIMARY KEY,
+      reason TEXT NOT NULL CHECK (reason IN ('no_subject', 'bad_verdict')),
+      raw TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE RESTRICT
+    );
+INSERT INTO review_parse_failures_rebuilt (message_id, reason, raw, created_at)
+SELECT message_id, reason, raw, ${toIsoMs('created_at')} FROM review_parse_failures;
+DROP TABLE review_parse_failures;
+ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
   },
 ]
 

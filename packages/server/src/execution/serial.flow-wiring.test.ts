@@ -149,6 +149,12 @@ describe('serial — review 钩子接线（契约③ X2 · 不 mock verdict-pars
       `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
        VALUES ('session-1', '测试会话', '["agent-reviewer","agent-store","agent-impl"]', 0)`
     ).run()
+    // 票 6 批一：execution_logs.triggered_by_message_id 有 FK → messages（NOT NULL）
+    // ⇒ 源链的触发消息 'msg-impl' 必须是真实行（实施猫的落库回复）
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-impl', 'session-1', 'agent', '已实施', '["吐槽猫"]')`
+    ).run()
     // 源链实施行：trace_id = 源链 task_id，commit_hash 已写回（handoff-gen 提交后写回语义）
     db.prepare(
       `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, trace_id, commit_hash)

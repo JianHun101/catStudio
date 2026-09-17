@@ -213,8 +213,18 @@ describe('db/repository/spans — R2 段五落库面', () => {
     expect(cols).not.toContain('trace_id')
     expect(cols).toContain('chain_id')
 
+    // 切片终点**必须钉在本段 DDL 的闭合行**。原先写的是 `ddl.indexOf('`)')`——而
+    // `migrations.ts` 里并不存在「反引号紧跟右括号」这个序列（闭合处是 `)` 在前、反引号在后），
+    // `indexOf` 恒为 -1 ⇒ `slice(0, -1)` 实际切到**文件尾**。该写法一直假绿：旧文件尾部
+    // 恰好不含 `trace_id`，判据在「整份文件的尾巴」上偶然成立。票 6 追加含 `trace_id` 的
+    // 迁移正文（`execution_logs_rebuilt`）后当场翻红——判据面错了一整轮，此处修的是判据。
     const ddl = SRC.slice(SRC.indexOf('CREATE TABLE IF NOT EXISTS spans'))
-    const tableDdl = ddl.slice(0, ddl.indexOf('`)'))
+    const end = ddl.indexOf('\n    )`')
+    expect(
+      end,
+      'spans DDL 闭合行没找到 —— 切片判据失效，别让它退化成「切到文件尾」'
+    ).toBeGreaterThan(0)
+    const tableDdl = ddl.slice(0, end)
     expect(tableDdl).not.toContain('trace_id')
     expect(tableDdl).toContain('chain_id')
   })

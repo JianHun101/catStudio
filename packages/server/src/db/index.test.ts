@@ -239,9 +239,24 @@ describe('db', () => {
           .get() as { sql: string }
       ).sql
 
+    /**
+     * 父行前置（票 6 起 `review_verdicts` 的 message_id / session_id / reviewer_agent_id
+     * 都是 RESTRICT 外键）：缺父行的旧行会被重建条目的 D1 孤儿清理删掉 ⇒ 用例会退化成
+     * 「测了个已被清理的空表」，而不是「旧 CHECK 被放宽」。
+     */
+    function seedParents(): void {
+      getDb().exec(`
+        INSERT INTO sessions (id, title, agent_ids) VALUES ('s1', 't', '[]');
+        INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES ('r1', '吐槽猫', 'p', 'sk');
+        INSERT INTO messages (id, session_id, role, content, mentions)
+          VALUES ('m-old', 's1', 'agent', 'x', '[]'), ('m-comment', 's1', 'agent', 'x', '[]');
+      `)
+    }
+
     it('存量库（旧 CHECK）→ initDb 重建后可落 comment', async () => {
       const { initDb } = await import('./index.js')
       downgradeToOldCheck()
+      seedParents()
       expect(tableSql()).not.toContain("'comment'")
 
       initDb()
@@ -250,8 +265,8 @@ describe('db', () => {
       expect(() =>
         getDb()
           .prepare(
-            `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict)
-             VALUES ('m-comment', 's1', 'r1', 'comment')`
+            `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict, created_at)
+             VALUES ('m-comment', 's1', 'r1', 'comment', '2026-09-01T00:00:00.000Z')`
           )
           .run()
       ).not.toThrow()
@@ -260,6 +275,7 @@ describe('db', () => {
     it('重建保数据 + 台账幂等：旧行原样搬过去，第二次 initDb 不再重建', async () => {
       const { initDb } = await import('./index.js')
       downgradeToOldCheck()
+      seedParents()
       getDb()
         .prepare(
           `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict)

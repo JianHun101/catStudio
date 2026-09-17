@@ -32,6 +32,12 @@ function seedReviewContext(opts: { taskId?: string; commitHash?: string } = {}):
   ).run(msgId, SESSION, taskId)
   // 源链实施行：trace_id = task_id（E3 接线），commit_hash 挂该行
   if (opts.commitHash) {
+    // 票 6 批一：execution_logs.triggered_by_message_id 有 FK → messages（NOT NULL）
+    // ⇒ 'trigger-1' 必须是真实消息行（role='agent' 免得污染各用例的 user 消息计数）。
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('trigger-1', ?, 'agent', '请实施', '[]')`
+    ).run(SESSION)
     db.prepare(
       `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, trace_id, commit_hash)
        VALUES ('exec-1', ?, 'agent-1', 'trigger-1', 'completed', ?, ?)`
@@ -296,9 +302,11 @@ describe('execution/flow-advance — 契约③ X2 闭环', () => {
     // 入口语义：commit 写回时 recordFlowTransition(..., 'quality-gate', 'quality_gate')
     const msgId = seedReviewContext({ taskId: TRACE, commitHash: SHA })
     const db = getDb()
+    // 票 6 批一：flow_states.updated_at 去 DEFAULT → 必须显式给值；口径 ISO 毫秒。
+    // 本用例不依赖「最近」语义 ⇒ 固定字面量。
     db.prepare(
       `INSERT INTO flow_states (session_id, commit_sha, state, updated_at)
-       VALUES (?, ?, 'quality-gate', datetime('now'))`
+       VALUES (?, ?, 'quality-gate', '2026-09-01T00:00:00.000Z')`
     ).run(SESSION, SHA)
 
     advanceFlowAfterVerdict({

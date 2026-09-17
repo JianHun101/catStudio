@@ -4,6 +4,7 @@
 import type Database from 'better-sqlite3'
 import type { ExecutionLogRow } from './types.js'
 import type { ExecHopRow } from '../../eval/chain-query.js'
+import { isoDaysAgo, nowIso } from './clock.js'
 
 let db: Database.Database
 
@@ -299,10 +300,10 @@ export interface SessionTraceRow {
  *  （在飞判据），且返回**全部**执行行、不带「每猫取最新」聚合——在路由层补齐等于把
  *  聚合外溢给调用方，多一个调用点就多一份实现。
  *
- *  **排序判据 `started_at DESC, id DESC`**：`started_at` 是 `datetime('now')` 写的
- *  **秒级**精度，同秒两行时若没有第二判据，顺序随查询计划抖——同一段数据两次调用
- *  可能给出不同的「最后一次」。`id` 只用于**打破平局**，不承诺时间先后
- *  （同秒下二者本就不可分辨）。
+ *  **排序判据 `started_at DESC, id DESC`**：`started_at` 由 repository 层按 ISO 毫秒
+ *  生成（⑤-c），同毫秒两行（同一进程内连开两次执行）时若没有第二判据，顺序随查询计划
+ *  抖——同一段数据两次调用可能给出不同的「最后一次」。`id` 只用于**打破平局**，
+ *  不承诺时间先后（同毫秒下二者本就不可分辨）。
  *
  *  **`latency_ms` 在飞时为 NULL**（诊断数据在收口漏斗里才写）——这是契约要的语义：
  *  「在飞」由 `ended_at IS NULL` 判定，`total_ms` 给不出数就如实为 null，
@@ -352,10 +353,14 @@ export function getAgentSessionStats(
  * 锚为 NULL 的行是**孤儿跳**（dev 库实测 28 行 ≈ 2.6%），由 `buildChains` 归入
  * `orphanChain`——**本函数不筛掉它们**，筛掉等于把卡点静默丢弃。
  *
- * 时间窗口径与 `eval/l1-aggregator.ts` 一致（`started_at >= datetime('now','-N days')`）。
+ * 时间窗口径与 `eval/l1-aggregator.ts` 一致（`started_at >= N 天前的 ISO 毫秒`）。
  * 只取数不做变换——分组/段算/flags/排序/截断全归 `eval/chain-query.ts` 的纯函数。
  *
- * @param windowDays 窗口天数（拼进 `datetime('now', ?)` 的修饰符，非字符串插值）
+ * 窗口下界由 `isoDaysAgo()` 在 JS 侧算成 ISO 毫秒后**绑定传参**（⑤-b 连带改造点）：
+ * 旧写法 `datetime('now', ?)` 产出秒级串，与 ISO 毫秒列比较是**格式混比**——同一天里
+ * ISO 串首位 `T`(0x54) 恒大于秒级串首位空格(0x20) ⇒ 窗口静默放大。
+ *
+ * @param windowDays 窗口天数
  */
 export function getExecutionHopsWithChainAnchor(windowDays: number): ExecHopRow[] {
   return db
@@ -369,9 +374,9 @@ export function getExecutionHopsWithChainAnchor(windowDays: number): ExecHopRow[
        JOIN agents a ON a.id = el.agent_id
        LEFT JOIN messages rm ON rm.id = el.message_id
        LEFT JOIN messages tm ON tm.id = el.triggered_by_message_id
-       WHERE el.started_at >= datetime('now', ?)`
+       WHERE el.started_at >= ?`
     )
-    .all(`-${windowDays} days`) as ExecHopRow[]
+    .all(isoDaysAgo(windowDays)) as ExecHopRow[]
 }
 
 // ─── 写入 ──────────────────────────────────────────────
@@ -385,8 +390,8 @@ export function insertExecutionLog(
 ): void {
   db.prepare(
     `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, trace_id, status, started_at)
-     VALUES (?, ?, ?, ?, ?, 'running', datetime('now'))`
-  ).run(id, sessionId, agentId, triggeredByMessageId, traceId)
+     VALUES (?, ?, ?, ?, ?, 'running', ?)`
+  ).run(id, sessionId, agentId, triggeredByMessageId, traceId, nowIso())
 }
 
 /** 标记执行完成/失败。
@@ -394,8 +399,17 @@ export function insertExecutionLog(
  *  message_id 非空即已回复，不再用时间窗把后续其他回复误判成本次回复）；
  *  失败/中断路径不传保持 NULL，恢复回退时间窗判据。
  *  errorType：L1 错误分类桶（W1 契约）——必须与 status/error_message **同一条
- *  UPDATE** 带走（finalize 按 agent 最新 running 定位、无 id，二次更新在重启
- *  恢复时会把恢复后新执行的错误错配到旧行）。
+ *  UPDATE** 带走（finalize 按定位键找行、无 id，二次更新在重启恢复时会把恢复后
+ *  新执行的错误错配到旧行）。
+ *
+ *  **定位键 = `agent_id + session_id + 最新 running`**（票 6 起，`sessionId` 必填）。
+ *  这里曾是「`agent_id` + 最新 running」——判据面**缺会话维度**，而引擎的槽位本就是
+ *  `(agentId, sessionId)` 键控 ⇒ 同一只猫跨会话并行时是**合法并发**（本仓「OQ3 多会话
+ *  并行」用例即此形态）。秒级时间戳时代两行必然同秒、平局恰好按插入序命中先起的那个
+ *  （**偶然正确**）；⑤-a 切 ISO 毫秒后先后可辨，`ORDER BY started_at DESC LIMIT 1`
+ *  必然选中**后起**那次 ⇒ A 的收口会写到 B 的行上（B 的行被改成 failed、A 的行反被
+ *  B 的收口写成 completed）——静默错挂。加了 session 维度即与槽位键同面：同会话内的
+ *  重试仍是「取最新 running」（语义不变），跨会话不再互相命中。
  *
  *  **latency_ms 用 COALESCE（P1 采集修复）**：成功路径的耗时由
  *  `updateExecutionLogDiagnostics` 先写、`finalizeExecutionLog` 后擦（opts 里没有
@@ -403,11 +417,11 @@ export function insertExecutionLog(
  *  1. **永不擦除已记录的耗时**：传 null + 行内已有值 → 保留 → 传 null + 行内也 null
  *     → 仍 null。**不能写成 0**——0 是「瞬间完成」，与「无数据」是两回事。
  *  2. **不把 latencyMs 穿线到 completeExecution**（架构裁决）：穿线要动
- *     EngineCtx.completeExecution 接口 + finalizeRun opts + 3 个调用点；更糟的是
- *     本函数按 `agent_id + 最新 running` 定位（**WHERE 里没有 sessionId**），同一只猫
- *     跨会话并行时穿线会把 A 执行的耗时刻到 B 行上——COALESCE 只读行内已有值，不会串。 */
+ *     EngineCtx.completeExecution 接口 + finalizeRun opts + 3 个调用点——COALESCE 只
+ *     读行内已有值，本就不需要穿线。 */
 export function finalizeExecutionLog(
   agentId: string,
+  sessionId: string,
   status: 'completed' | 'failed',
   latencyMs: number | null,
   errorMessage: string | null,
@@ -416,16 +430,18 @@ export function finalizeExecutionLog(
 ): void {
   db.prepare(
     `UPDATE execution_logs
-     SET status = ?, ended_at = datetime('now'),
+     SET status = ?, ended_at = ?,
          latency_ms = COALESCE(?, latency_ms), error_message = ?, message_id = ?, error_type = ?
-     WHERE agent_id = ? AND status = 'running'
+     WHERE agent_id = ? AND session_id = ? AND status = 'running'
      ORDER BY started_at DESC LIMIT 1`
-  ).run(status, latencyMs, errorMessage, replyMessageId, errorType, agentId)
+  ).run(status, nowIso(), latencyMs, errorMessage, replyMessageId, errorType, agentId, sessionId)
 }
 
-/** 写回诊断数据（延迟、安装包、token 统计等） */
+/** 写回诊断数据（延迟、安装包、token 统计等）。
+ *  定位同 `finalizeExecutionLog`：`agent_id + session_id + 最新 running`。 */
 export function updateExecutionLogDiagnostics(
   agentId: string,
+  sessionId: string,
   data: {
     latencyMs: number
     packagesInstalled: string
@@ -443,7 +459,7 @@ export function updateExecutionLogDiagnostics(
          reply_chars = ?,
          prompt_tokens = ?,
          completion_tokens = ?
-     WHERE agent_id = ? AND status = 'running'
+     WHERE agent_id = ? AND session_id = ? AND status = 'running'
      ORDER BY started_at DESC LIMIT 1`
   ).run(
     data.latencyMs,
@@ -452,7 +468,8 @@ export function updateExecutionLogDiagnostics(
     data.replyChars,
     data.promptTokens,
     data.completionTokens,
-    agentId
+    agentId,
+    sessionId
   )
 }
 
@@ -541,12 +558,12 @@ export function fixStuckExecutionLogs(): { changes: number } {
     .prepare(
       `UPDATE execution_logs
        SET status = 'failed',
-           ended_at = datetime('now'),
+           ended_at = ?,
            error_message = 'server_restart',
            error_type = 'server_restart'
        WHERE status = 'running'`
     )
-    .run()
+    .run(nowIso())
 }
 
 // ─── 删除 ──────────────────────────────────────────────

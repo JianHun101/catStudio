@@ -2,6 +2,7 @@
  * Agent 表查询函数。
  */
 import type Database from 'better-sqlite3'
+import { purgeAgentDependents } from './dependents.js'
 import type { AgentRow } from './types.js'
 
 let db: Database.Database
@@ -142,10 +143,15 @@ export function updateAgent(id: string, setClauses: string, values: any[]): void
   )
 }
 
+// ↓ 删猫前先清引用它的审查结论（票 6：reviewer/subject 两条 FK 全 RESTRICT）。
+//   过渡语义与「票 8 的 409 契约」的关系见 `dependents.ts::purgeAgentDependents`。
+
 export function deleteAgentById(id: string): void {
+  purgeAgentDependents({ kind: 'id', agentId: id })
   db.prepare('DELETE FROM agents WHERE id = ?').run(id)
 }
 
 export function deleteAllAgents(): void {
+  purgeAgentDependents({ kind: 'all' })
   db.exec('DELETE FROM agents')
 }

@@ -402,6 +402,9 @@ describe('dispatch（C1 v3 引擎决策行为）', () => {
       makeAdapter({ chunks: ['第一'], gate })
       insertUserMsg('msg-1')
       insertUserMsg('msg-2')
+      // 票 6 批一：execution_logs.triggered_by_message_id 有 FK → messages（NOT NULL）
+      // ⇒ 跨会话 A2A 的触发消息 msg-3 必须是真实行（挂 session-2，与命令同会话）。
+      insertUserMsg('msg-3', 'session-2')
 
       const p1 = engine.execute({
         sessionId: 'session-1',
@@ -426,6 +429,12 @@ describe('dispatch（C1 v3 引擎决策行为）', () => {
         depth: 0,
         pendingTriggers: [],
       })
+
+      // session-1 那笔仍压在 gate 上（上面的 busy 断言依赖它）；给 session-2 换一副
+      // **不设闸**的适配器：msg-3 现在真实存在（FK 要求），第二条会话会真的把 LLM 段
+      // 跑完——沿用同一个 gate 会把它一起钉死，本用例就测不到「独立入队」的判定了。
+      // 已建流的 session-1 不受影响（适配器在每次执行开头按 registry 重新取）。
+      makeAdapter({ chunks: ['第二'] })
 
       // 另一会话 A2A 触发（depth=1）→ 队列里没有同 session 命令 → 独立入队（跨会话槽位）
       await engine.execute({

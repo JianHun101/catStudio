@@ -36,6 +36,27 @@ describe('段算', () => {
     expect(hop.totalMs! % 1000).toBe(0)
   })
 
+  // 票 6 起 `execution_logs` 两列是 ISO 毫秒（主路径），存量库仍是空格分隔秒级串——
+  // 两种形态都必须解析得出来。**判别力**：旧实现是无条件 `replace(' ','T') + 'Z'`，
+  // 对 ISO 串会拼出 `…123ZZ` ⇒ Date.parse 返 NaN ⇒ totalMs/nonReplyMs 静默变 null
+  // （面板「耗时全空」但不报错）。
+  it('读侧兼容两种形态：ISO 毫秒行照常算出 totalMs（不是 null）', () => {
+    const [hop] = build([
+      row({ started_at: '2026-09-01T10:00:00.000Z', ended_at: '2026-09-01T10:02:00.500Z' }),
+    ]).chains[0].hops
+    expect(hop.totalMs).toBe(120_500)
+    expect(hop.nonReplyMs).toBe(120_500 - 118_500)
+    // ISO 行原样透出（不被二次拼 Z 成畸形串）
+    expect(hop.startedAt).toBe('2026-09-01T10:00:00.000Z')
+  })
+
+  it('读侧兼容两种形态：存量秒级行仍按 UTC 解析（不差 8 小时）', () => {
+    const [hop] = build([
+      row({ started_at: '2026-09-01 10:00:00', ended_at: '2026-09-01 10:02:00' }),
+    ]).chains[0].hops
+    expect(hop.totalMs).toBe(120_000)
+  })
+
   it('replyMs 取 latency_ms（毫秒精度，非 1000 倍数）', () => {
     const [hop] = build([row({ latency_ms: 118_543 })]).chains[0].hops
     expect(hop.replyMs).toBe(118_543)

@@ -15,6 +15,7 @@
  */
 
 import { getDb } from '../db/index.js'
+import { normalizeIsoMs } from '../db/repository/clock.js'
 import type { ReviewVerdict } from './review-verdict-markers.js'
 
 export interface ChainVerdictRow {
@@ -64,7 +65,11 @@ export function getLatestChainVerdict(
  * 锚名下 `since` 之后（严格晚于）的**打回档**判词（reject / suggest），DESC。
  *
  * `since` 传根触发消息的 `created_at`——只数「这条链自己产生过的打回」，
- * 不把锚被复用前的历史算进来。时间戳同形比较：库内为 `'YYYY-MM-DD HH:MM:SS'`（UTC）。
+ * 不把锚被复用前的历史算进来。
+ *
+ * ⚠️ **两侧口径不同，必须归一后再比**（票 6 起）：`since` 来自 `messages.created_at`
+ * （仍是秒级串，票 5 才转），而 `v.created_at` 已是 ISO 毫秒——直接比就是格式混比，
+ * 「严格晚于」恒真。判据同 `db/repository/clock.ts::normalizeIsoMs`。
  */
 export function getChainRejectionsSince(
   anchor: string | null | undefined,
@@ -82,5 +87,5 @@ export function getChainRejectionsSince(
          AND v.verdict IN ('reject', 'suggest')
        ORDER BY v.created_at DESC, m.rowid DESC`
     )
-    .all(anchor, sessionId, since) as ChainVerdictRow[]
+    .all(anchor, sessionId, normalizeIsoMs(since)) as ChainVerdictRow[]
 }

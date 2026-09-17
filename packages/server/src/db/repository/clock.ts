@@ -1,0 +1,49 @@
+/**
+ * 记录时间的**唯一生成点**（spec §4.2 ⑤-c 修订版）。
+ *
+ * 口径：ISO 8601 UTC 毫秒（`2026-09-17T08:30:00.123Z`）。定宽格式的字典序 = 时间序，
+ * 索引/排序/字符串比较一律正确；JS 全栈 `new Date().toISOString()` 零转换。
+ *
+ * **为什么不在 SQL 里生成**：SQLite 的 `datetime('now')` 只有**秒级**精度，落进本口径
+ * 的列就是把精度降档（同一秒内的两行永远分不出先后）；且它产出的是
+ * `YYYY-MM-DD HH:MM:SS`，与 ISO 字符串**混比会错序**（`'T'` > `' '`，同日 ISO 恒大于
+ * 秒级串）。⑤-b 起全库时间列已是 ISO 毫秒，SQL 侧生成 = 每写一行就埋一个格式混比。
+ *
+ * **为什么不在 DDL 里挂 DEFAULT**：DEFAULT 是「调用方忘了传也照样成功」的静默兜底，
+ * 而漏传恰恰是本口径最该响亮报错的形态——故重建后的表**一律不挂时间 DEFAULT**，
+ * 漏传直接撞 `NOT NULL` 约束。
+ *
+ * **例外（事件时间）**：语义是「事情发生时刻」的列（如 `started_at`/`ended_at`）允许
+ * 调用方显式传入，命名必须体现事件语义——但取值仍必须走本口径。
+ */
+export function nowIso(): string {
+  return new Date().toISOString()
+}
+
+/**
+ * 把「记录时间」串归一成 ISO 毫秒（**幂等**：已是 ISO 的一律原样返回）。
+ *
+ * **过渡期专用**，用在**跨表比较的边界**上：`messages.created_at` 目前仍是秒级串
+ * （`messages` 表归票 5 重建，尚未转），而 `review_verdicts.created_at` 自票 6 起已是
+ * ISO 毫秒——两侧直接比较时，ISO 串首位 `T`(0x54) 恒大于秒级串首位空格(0x20)，
+ * 「严格晚于 since」于是**恒真**：锚被复用前的历史判词会被算进本条链（判词归属错，
+ * 静默）。故比较前把 since 归一，两侧同口径。
+ *
+ * 票 5 落地（messages 也转 ISO）后本函数恒等，无需删除——留着它，新老库的混合态都不会再裂。
+ */
+export function normalizeIsoMs(value: string): string {
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(' ', 'T')}.000Z`
+    : value
+}
+
+/**
+ * `days` 天前的 ISO 毫秒时刻——时间窗比较点的**新口径参数**。
+ *
+ * 旧写法 `col >= datetime('now', '-N days')` 产出秒级串，与 ISO 列比较即格式混比：
+ * 同一天里 ISO 串（首位 `T`）恒大于秒级串（首位空格）⇒ 窗口**静默放大**（把窗口外的
+ * 行算进来）。切口径时这类比较点必须同批换，不能留半套。
+ */
+export function isoDaysAgo(days: number, from: number = Date.now()): string {
+  return new Date(from - days * 86_400_000).toISOString()
+}

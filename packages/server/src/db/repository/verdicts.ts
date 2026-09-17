@@ -7,6 +7,7 @@
  * 静默丢弃，不阻塞审查链主流程。
  */
 import type Database from 'better-sqlite3'
+import { nowIso } from './clock.js'
 import type { ReviewVerdict, VerdictParseFailureReason } from '../../eval/verdict-parser.js'
 
 let db: Database.Database
@@ -27,9 +28,16 @@ export function insertReviewVerdict(data: {
   verdict: ReviewVerdict
 }): void {
   db.prepare(
-    `INSERT OR IGNORE INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(data.messageId, data.sessionId, data.reviewerAgentId, data.subjectAgentId, data.verdict)
+    `INSERT OR IGNORE INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    data.messageId,
+    data.sessionId,
+    data.reviewerAgentId,
+    data.subjectAgentId,
+    data.verdict,
+    nowIso()
+  )
 }
 
 /** 落一条解析失败记录（no_subject / bad_verdict），raw 存回复原文。 */
@@ -39,9 +47,9 @@ export function insertReviewParseFailure(data: {
   raw: string
 }): void {
   db.prepare(
-    `INSERT OR IGNORE INTO review_parse_failures (message_id, reason, raw)
-     VALUES (?, ?, ?)`
-  ).run(data.messageId, data.reason, data.raw)
+    `INSERT OR IGNORE INTO review_parse_failures (message_id, reason, raw, created_at)
+     VALUES (?, ?, ?, ?)`
+  ).run(data.messageId, data.reason, data.raw, nowIso())
 }
 
 /**

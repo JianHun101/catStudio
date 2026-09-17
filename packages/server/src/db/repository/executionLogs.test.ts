@@ -24,6 +24,8 @@ import { executionLogs as repo } from './index.js'
 const U = '4d1e6f22-0000-4000-8000-000000000001'
 /** 链锚（messages.task_id） */
 const ANCHOR = 'aaaa1111-0000-4000-8000-0000000000aa'
+/** 第二个会话的触发消息 id（跨会话并行用例用） */
+const U2 = '4d1e6f22-0000-4000-8000-000000000002'
 const SHA = 'a'.repeat(40)
 const SHA2 = 'b'.repeat(40)
 
@@ -353,13 +355,16 @@ describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
     resetDb()
   })
 
-  /** 起一个 running 行（started_at 取当前，保证落在 30 天窗口内） */
+  /** 起一个 running 行（started_at 取当前，保证落在 30 天窗口内）。
+   *  **ISO 毫秒而非 `datetime('now')`**：窗口下界自 ⑤-b 起由 `isoDaysAgo()` 在 JS 侧
+   *  算成 ISO 毫秒（`getExecutionHopsWithChainAnchor` 的 WHERE 绑定），夹具还写秒级串
+   *  就是格式混比——同一天里 ISO 串首位 `T` 恒大于空格，窗口会静默放大。 */
   function startRun(id: string, agent = 'agent-ds'): void {
     db.prepare(
       `INSERT INTO execution_logs
          (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
-       VALUES (?, 's1', ?, ?, 'running', 'tr', datetime('now'))`
-    ).run(id, agent, U)
+       VALUES (?, 's1', ?, ?, 'running', 'tr', ?)`
+    ).run(id, agent, U, new Date().toISOString())
   }
 
   function latencyOf(id: string): number | null {
@@ -378,34 +383,87 @@ describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
     completionTokens: 4,
   }
 
+  // 票 6 回归：定位键一度只有「agent_id + 最新 running」。秒级时间戳时代，同猫跨会话
+  // 并行的两行必然同秒、平局按插入序恰好命中先起的那个（**偶然正确**）；⑤-a 切 ISO 毫秒
+  // 后先后可辨 ⇒ `ORDER BY started_at DESC LIMIT 1` 必然选中**后起**的那次，A 的收口就
+  // 写到了 B 的行上（B 变 failed、A 反被 B 的收口写成 completed——静默错挂）。
+  describe('finalize / diagnostics 的定位键含 session（跨会话并行不错挂）', () => {
+    beforeEach(() => {
+      db.prepare("INSERT INTO sessions (id, title) VALUES ('s2', 't2')").run()
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions) VALUES (?, 's2', 'agent', '派活', '[]')`
+      ).run(U2)
+      // A（s1）先起、B（s2）后起——毫秒时间戳让 B 严格更晚
+      db.prepare(
+        `INSERT INTO execution_logs
+           (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+         VALUES ('eA', 's1', 'agent-ds', ?, 'running', 'tr', '2026-09-01T10:00:00.000Z')`
+      ).run(U)
+      db.prepare(
+        `INSERT INTO execution_logs
+           (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
+         VALUES ('eB', 's2', 'agent-ds', ?, 'running', 'tr', '2026-09-01T10:00:01.000Z')`
+      ).run(U2)
+    })
+
+    it('finalize(A) 只改 A 的行——B 仍是 running，不被写串', () => {
+      repo.finalizeExecutionLog('agent-ds', 's1', 'failed', null, 'interrupted', null, 'timeout')
+
+      expect(
+        db.prepare(`SELECT status, error_message FROM execution_logs WHERE id='eA'`).get()
+      ).toEqual({ status: 'failed', error_message: 'interrupted' })
+      expect(
+        db.prepare(`SELECT status, error_message FROM execution_logs WHERE id='eB'`).get()
+      ).toEqual({ status: 'running', error_message: null })
+    })
+
+    it('diagnostics(B) 只写 B 的行——A 的 latency 仍为 NULL', () => {
+      repo.updateExecutionLogDiagnostics('agent-ds', 's2', { latencyMs: 4242, ...DIAG })
+
+      expect(latencyOf('eB')).toBe(4242)
+      expect(latencyOf('eA')).toBeNull()
+    })
+  })
+
   describe('finalizeExecutionLog 不擦除耗时', () => {
+    // FK 补链后（票 6 批一）：`finalizeExecutionLog` 写回的 replyMessageId →
+    // `execution_logs.message_id → messages.id` ⇒ 回复行须先落库（生产路径亦然：
+    // 回复先入库、再 finalize 写回）。放在本内层 describe，避免与同层的
+    // `getExecutionHopsWithChainAnchor` 用同一字面量 id 造夹具时撞 PK。
+    beforeEach(() => {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES ('m-reply', 's1', 'agent', 'x', '[]')`
+      ).run()
+    })
+
     it('先写 diagnostics、后 finalize(null) ⇒ 保留 1234（修复前被盖成 NULL）', () => {
       startRun('e1')
-      repo.updateExecutionLogDiagnostics('agent-ds', { latencyMs: 1234, ...DIAG })
+      repo.updateExecutionLogDiagnostics('agent-ds', 's1', { latencyMs: 1234, ...DIAG })
       expect(latencyOf('e1')).toBe(1234)
-      repo.finalizeExecutionLog('agent-ds', 'completed', null, null, 'm-reply', null)
+      repo.finalizeExecutionLog('agent-ds', 's1', 'completed', null, null, 'm-reply', null)
       expect(latencyOf('e1')).toBe(1234)
     })
 
     it('反向用例：没写过 diagnostic 的行 finalize 后仍 NULL——不得变成 0', () => {
       startRun('e2')
-      repo.finalizeExecutionLog('agent-ds', 'failed', null, 'boom', null, 'timeout')
+      repo.finalizeExecutionLog('agent-ds', 's1', 'failed', null, 'boom', null, 'timeout')
       // 0 是「瞬间完成」，与「无数据」是两回事——失败跳就该是 NULL
       expect(latencyOf('e2')).toBeNull()
     })
 
     it('显式传入 latencyMs ⇒ 照写（COALESCE 不吞真值）', () => {
       startRun('e3')
-      repo.finalizeExecutionLog('agent-ds', 'completed', 777, null, 'm-reply', null)
+      repo.finalizeExecutionLog('agent-ds', 's1', 'completed', 777, null, 'm-reply', null)
       expect(latencyOf('e3')).toBe(777)
     })
 
     it('diagnostics 写的值跨多次 finalize 调用仍在（幂等，不被后续调用擦）', () => {
       startRun('e4')
-      repo.updateExecutionLogDiagnostics('agent-ds', { latencyMs: 555, ...DIAG })
-      repo.finalizeExecutionLog('agent-ds', 'completed', null, null, 'm-reply', null)
+      repo.updateExecutionLogDiagnostics('agent-ds', 's1', { latencyMs: 555, ...DIAG })
+      repo.finalizeExecutionLog('agent-ds', 's1', 'completed', null, null, 'm-reply', null)
       // 第二次调用命不中（行已 completed，WHERE status='running'）——但值必须还在
-      repo.finalizeExecutionLog('agent-ds', 'completed', null, null, 'm-reply', null)
+      repo.finalizeExecutionLog('agent-ds', 's1', 'completed', null, null, 'm-reply', null)
       expect(latencyOf('e4')).toBe(555)
     })
   })
@@ -452,8 +510,8 @@ describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
       db.prepare(
         `INSERT INTO execution_logs
            (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
-         VALUES ('e4', 's1', 'agent-ds', 'm-orphan', 'running', 'tr', datetime('now'))`
-      ).run()
+         VALUES ('e4', 's1', 'agent-ds', 'm-orphan', 'running', 'tr', ?)`
+      ).run(new Date().toISOString())
       const rows = repo.getExecutionHopsWithChainAnchor(30)
       expect(rows).toHaveLength(1)
       expect(rows[0].chain_id).toBeNull()
@@ -471,18 +529,20 @@ describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
     })
 
     it('窗口外（started_at 超窗）的行不返回', () => {
+      // 超窗行同样写 ISO 毫秒——与窗口下界（JS 侧 `isoDaysAgo()`）同形才有判别力：
+      // 混比时「超窗」可能只是格式差异造成的假超窗
       db.prepare(
         `INSERT INTO execution_logs
            (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at)
-         VALUES ('old', 's1', 'agent-ds', ?, 'completed', 'tr', datetime('now', '-90 days'))`
-      ).run(U)
+         VALUES ('old', 's1', 'agent-ds', ?, 'completed', 'tr', ?)`
+      ).run(U, new Date(Date.now() - 90 * 86400_000).toISOString())
       expect(repo.getExecutionHopsWithChainAnchor(30)).toHaveLength(0)
       expect(repo.getExecutionHopsWithChainAnchor(365)).toHaveLength(1)
     })
 
     it('取到的 latency_ms / reply_chars 原样带出（供纯函数算段）', () => {
       startRun('e6')
-      repo.updateExecutionLogDiagnostics('agent-ds', { latencyMs: 4242, ...DIAG })
+      repo.updateExecutionLogDiagnostics('agent-ds', 's1', { latencyMs: 4242, ...DIAG })
       const r = repo.getExecutionHopsWithChainAnchor(30)[0]
       expect(r.latency_ms).toBe(4242)
       expect(r.reply_chars).toBe(20)
@@ -507,6 +567,11 @@ describe('execution_logs repo — 按 trace 取「本调度树执行过的 agent
          VALUES (?, ?, '🐱', 'p', 'claude', 'm', 'k')`
       ).run(a, a)
     }
+    // FK 补链后（票 6 批一）：`triggered_by_message_id` → messages.id ⇒ 触发消息先落库
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
+       VALUES (?, 's1', 'agent', '派活', '[]', ?)`
+    ).run(U, ANCHOR)
     // 顶层一批两只猫 + A2A 子链一只（同一 traceId——子链**继承**父 trace）
     insertLog(db, { id: 'x1', agent: 'cat-a', status: 'completed', startedAt: 't1', traceId: 'TR' })
     insertLog(db, { id: 'x2', agent: 'cat-b', status: 'completed', startedAt: 't2', traceId: 'TR' })
@@ -558,6 +623,11 @@ describe('execution_logs repo — 会话内每猫最近一次执行（R4 §A）'
         `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, ?, 'p', 'k')`
       ).run(id, `名-${id}`)
     }
+    // FK 补链后（票 6 批一）：本段 `put()` 用字面量 'U' 当触发消息 id ⇒ 那行必须真的在
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('U', 's1', 'agent', 'x', '[]')`
+    ).run()
   })
 
   afterEach(() => {
