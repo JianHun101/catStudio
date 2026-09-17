@@ -137,6 +137,13 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(new Set(MIGRATIONS.map((m) => m.name)).size).toBe(MIGRATIONS.length)
     })
 
+    it('基线集条数冻结 = 41（压扁产物是封存的历史：往里加条目 = 老库会静默跳过它）', () => {
+      const baseline = MIGRATIONS.filter((m) => m.baseline === true)
+      expect(baseline).toHaveLength(41)
+      // 基线标记是**结构上**盖的（拼接点统一盖），且必须盖在数组前段：追加区在尾巴上
+      expect(MIGRATIONS.slice(0, baseline.length).every((m) => m.baseline === true)).toBe(true)
+    })
+
     it('探针清单 = 实施审计定稿的 3 条（重建类静默失败型），多一条少一条都要改审计结论', () => {
       expect(MIGRATIONS.filter((m) => m.verify !== undefined).map((m) => m.name)).toEqual([
         'widen review_verdicts verdict CHECK (comment)',
@@ -262,6 +269,63 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       // 帮凶判据：探针条目若被误判 false，量纲校正会清 chunks 三表 —— 用行数做探针
       expect(ledger(db)).toHaveLength(MIGRATIONS.length)
       expect(tableSqlOf(db, 'chunk_vectors')).toContain('distance_metric=cosine')
+    })
+  })
+
+  // ─── ②-a × ②-b 岔路 · 「只登记不执行」只认基线条目 ────────────────────
+  describe('②-a × ②-b 岔路 · 老库撞上含有追加条目的数组', () => {
+    /** 一条台账立闸后才追加的迁移（不带 `baseline` 标记 = 从未在任何老库上发生过） */
+    const appended: Migration = {
+      name: 'append fix-forward (跳版本升级)',
+      sql: `CREATE TABLE appended_side_effect (id TEXT PRIMARY KEY)`,
+    }
+
+    it('老库 + 追加条目 → 追加条目真执行；同一次启动里基线条目仍只登记（真伪对照）', () => {
+      const db = makeOldDb()
+      // 对照面：老库缺一张基线表。基线若被误执行，这张表会被建回来
+      db.exec(`DROP TABLE chunks`)
+
+      setDb(db)
+      applyMigrations(db, [...MIGRATIONS, appended])
+
+      // 追加条目：真执行（结构建出来了 + 台账 note 为空 = 不是补登行）
+      expect(tableNames(db)).toContain('appended_side_effect')
+      expect(ledger(db).find((r) => r.name === appended.name)?.note).toBeNull()
+      // 对照组：同一次启动、同一个老库判据下，基线条目照旧不执行
+      expect(tableNames(db)).not.toContain('chunks')
+      expect(ledger(db).find((r) => r.name === 'chunks table (段三切片索引)')?.note).toBe(
+        'baseline'
+      )
+    })
+
+    it('老库 + 追加条目 + 探针报效果已成立 → 只登记不执行（与全新库同一判据，②-a 路径一致）', () => {
+      const db = makeOldDb()
+      // 现实中这条路径怎么发生：该追加迁移的效果被手工 SQL 提前做掉了
+      db.exec(`ALTER TABLE settings ADD COLUMN probe_marker TEXT`)
+      const alreadyApplied: Migration = {
+        name: 'append add column (效果已手工提前成立)',
+        // 真执行必撞 duplicate column name ⇒ 拒启。故「不抛 + 列没有变成两遍」就是
+        // 「没执行」的硬证据——比断言某张表不存在更难自证
+        sql: `ALTER TABLE settings ADD COLUMN probe_marker TEXT`,
+        verify: (d) => tableSqlOf(d, 'settings').includes('probe_marker'),
+      }
+
+      setDb(db)
+      expect(() => applyMigrations(db, [...MIGRATIONS, alreadyApplied])).not.toThrow()
+
+      // 探针 true ⇒ 效果已成立 ⇒ 跳过执行只登记（note 为空：它不是老库过户产物）
+      expect(ledger(db).find((r) => r.name === alreadyApplied.name)?.note).toBeNull()
+      expect(tableSqlOf(db, 'settings').match(/probe_marker/g)).toHaveLength(1)
+    })
+
+    it('追加条目的失败照样拒启：老库路径不是「跳过」的遮阳伞', () => {
+      const db = makeOldDb()
+      const broken: Migration = {
+        name: 'append that fails',
+        sql: `ALTER TABLE no_such_table ADD COLUMN x TEXT`,
+      }
+      setDb(db)
+      expect(() => applyMigrations(db, [...MIGRATIONS, broken])).toThrowError(/append that fails/)
     })
   })
 

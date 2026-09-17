@@ -72,8 +72,13 @@ function userTableNames(db: Database.Database): string[] {
  *    fix-forward 路径。台账管的是「历史已发生」，历史不许被改写——否则「跑过的库」
  *    与「新库」会悄悄长成两个形状。
  * 2. **老库 = 有用户表且无台账**（②-b）：旧机制每次启动全量重跑迁移数组，效果早已
- *    发生（缺了会以故障形式暴露）⇒ 基线**逐条只登记不执行**，`note='baseline'`。
- *    例外只有带 `verify` 探针的条目：探针报「效果缺失」⇒ 该条破例真执行（矫正路径）。
+ *    发生（缺了会以故障形式暴露）⇒ **基线集**（`baseline === true` 的条目）逐条只登记
+ *    不执行，`note='baseline'`。例外只有带 `verify` 探针的条目：探针报「效果缺失」⇒
+ *    该条破例真执行（矫正路径）。
+ *    **只登记不执行只认基线条目**：追加区的条目（`baseline !== true`）今天才第一次上船，
+ *    在任何老库上都从未发生过，「没台账」不构成跳过它们的理由 ⇒ 一律走增量路径
+ *    （②-a「新旧库同一条增量路径」）。把这条判据放宽到整个数组 = 跳版本升级时静默缺表
+ *    却记成「历史已发生」，正是本票要消灭的那类失败。
  * 3. **差集逐条事务**（②-c）：未登记的条目按数组序，每条一个 `BEGIN IMMEDIATE` 事务，
  *    失败 `ROLLBACK` + 拒启，错误带迁移名 + SQLite 原错。零吞咽、零「预期错误」白名单
  *    ——「跳过」已由台账接管，「老库」已由 baseline 接管，catch 再无合法存在理由。
@@ -109,22 +114,31 @@ export function applyMigrations(
   const record = db.prepare(
     `INSERT INTO schema_migrations (name, checksum, applied_at, note) VALUES (?, ?, ?, ?)`
   )
-  const note = isOldDb ? 'baseline' : null
   let registered = 0
   let repaired = 0
 
   for (const m of list) {
     if (applied.has(m.name)) continue
 
+    const isBaselineEntry = m.baseline === true
     // 探针：true = 效果已成立（或目标对象不存在、无事可做）⇒ 跳过执行只登记。
     // 全新库靠它避开「先建好再白重建一次」；老库靠它走矫正路径。
     const probeSaysDone = m.verify !== undefined && m.verify(db)
-    // 老库的默认动作是**只登记**（②-b）：无探针的条目一律不执行；带探针的条目
-    // 只有探针报「效果缺失」才破例真执行。全新库则相反——一律执行，除非探针说已成立。
-    const execute = !probeSaysDone && (!isOldDb || m.verify !== undefined)
+    // 两条路径的**唯一**岔路（②-a vs ②-b），判据面只认基线条目：
+    // - 老库 + 基线条目：默认**只登记**——历史已在此库发生（②-b）。带探针的条目探针报
+    //   「效果缺失」才破例真执行（矫正）；无探针的条目一律不执行。
+    // - 其余（全新库的全部条目 + 老库的追加区条目）：走增量路径——一律执行，除非探针
+    //   说效果已成立（②-a）。追加区条目对老库同样**真执行**：它们从未在老库上发生过，
+    //   「没台账」不构成跳过它们的理由。
+    const baselineRepair = isBaselineEntry && m.verify !== undefined && !probeSaysDone
+    const registerOnly = isOldDb && isBaselineEntry && !baselineRepair
+    const execute = !registerOnly && !probeSaysDone
+    // note 只标**补登来源**（该行是老库过户产物），故同样只认基线条目
+    const note = isOldDb && isBaselineEntry ? 'baseline' : null
+
     if (!execute) {
       record.run(m.name, checksumOf(m.sql), new Date().toISOString(), note)
-      if (isOldDb) registered++
+      if (isOldDb && isBaselineEntry) registered++
       continue
     }
 
@@ -140,7 +154,7 @@ export function applyMigrations(
       )
     }
 
-    if (isOldDb) {
+    if (isOldDb && isBaselineEntry) {
       repaired++
       console.log(`[db] baseline 矫正：${m.name}（探针报效果缺失，已真执行）`)
     } else {

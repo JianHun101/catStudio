@@ -45,6 +45,16 @@ export interface Migration {
   name: string
   sql: string
   verify?: (db: Database.Database) => boolean
+  /**
+   * **基线标记**（②-a / ②-b 的岔路口）：`true` = 台账上船前「历史已在此库发生」的压扁
+   * 条目，老库对它**只登记不执行**（除非探针报效果缺失，走矫正）。
+   *
+   * 台账立闸后追加的迁移**一律不带**这个标记——它们从未在任何老库上发生过，走的是与新库
+   * 同一条增量路径（真执行）。漏带 = 老库静默缺结构 + 台账记假历史，正是本票要消灭的失败类；
+   * 故基线集不靠手写标记，而是由文件末尾的 `BASELINE_MIGRATIONS` 常量**结构性**盖上（见
+   * 那里的纪律说明），测试另钉着「基线集条数冻结」。
+   */
+  baseline?: boolean
 }
 
 /**
@@ -108,8 +118,11 @@ export const CHUNK_VECTOR_METRIC_FIX_SEQUENCE: ReadonlyArray<string> = [
 // 顺序 = 建表依赖序（FK 目标先建）。全新库按序重放；老库逐条**只登记不执行**。
 // 每条 `sql` 的空白排版可读即可——誊写校验比对的是归一化后的词法（见测试文件），
 // 但**任何 token 的增删改序都会被拦下**。
+//
+// ⚠️ **这个常量是封存的历史，不许再往里加东西**（加了 = 老库会静默跳过它）。新迁移一律
+// 追加到文件末尾的 `APPENDED_MIGRATIONS`。
 
-export const MIGRATIONS: ReadonlyArray<Migration> = [
+const BASELINE_MIGRATIONS: ReadonlyArray<Migration> = [
   // ── 会话 / 猫 ────────────────────────────────────────
   {
     name: 'sessions table',
@@ -599,4 +612,25 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
     verify: (db) =>
       tableSql(db, 'memories') === undefined && tableSql(db, 'memories_fts') === undefined,
   },
+]
+
+// ─── 追加区（fix-forward）─────────────────────────────────────────────────
+// **新迁移写在这里**，数组末尾往下追加，写完不许回头改（checksum 会拦）。
+// 这些条目不带 `baseline` 标记 ⇒ runner 对老库也走增量路径**真执行**：
+// 它们从未在任何老库上发生过，「没台账的老库」不构成跳过它们的理由。
+// 若某条迁移的效果在个别库上已由手工 SQL 提前成立，给它挂 `verify` 探针（探针 true ⇒
+// 只登记不执行），别用「老库」这个笼统判据去挡。
+
+const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = []
+
+/**
+ * runner 的唯一输入 = 基线集（盖 `baseline` 标记）+ 追加区（原样，不带标记）。
+ *
+ * 结构上就这么分：基线标记不靠逐条手写（41 条里漏一个就是一处静默跳过），而是由这个
+ * 拼接点统一盖上——加进 `BASELINE_MIGRATIONS` 的必然是历史，加进 `APPENDED_MIGRATIONS`
+ * 的必然走增量路径，没有第三种。
+ */
+export const MIGRATIONS: ReadonlyArray<Migration> = [
+  ...BASELINE_MIGRATIONS.map((m): Migration => ({ ...m, baseline: true })),
+  ...APPENDED_MIGRATIONS,
 ]
