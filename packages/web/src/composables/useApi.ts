@@ -298,9 +298,20 @@ export interface SessionTraceDto {
   totalMs: number | null
 }
 
+/** 技能清单条目（GET /api/skills——成员资格 = skills/ 含 SKILL.md 的目录；
+ *  description 由 manifest 手写优先、缺失回退 SKILL.md frontmatter 自述） */
+export interface SkillEntry {
+  name: string
+  description: string
+  category: string
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
+
+  /** 技能清单（斜杠命令补全数据源；CLI 原生消费 skill，本端点只喂下拉不做注入） */
+  getSkills: () => request<{ ok: boolean; skills: SkillEntry[] }>('/skills'),
 
   createAgent: (data: {
     name: string
