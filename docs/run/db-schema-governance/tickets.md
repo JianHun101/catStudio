@@ -210,6 +210,23 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 
 报告覆盖 spec §4.1 全部候选链 + §4.2 全部时间列，无「假设」式结论——每个数字都有 SQL 可复算。店长复核重放抽样一致即过。
 
+### 完成记录（2026-09-17，✅ 报告已投递，待拍板项 D1–D4）
+
+店长对账：dev 库 messages 2486（报告 2485，+1 = 审计后活流量新行）、execution_logs 1392（+1 = 本消息派发的 running 行）、sessions 30 ✅——三处一致，报告可信。
+
+**面 A 要点**：核心资产（messages.agent_id、agents、sessions 本体）**零孤儿**。孤儿大头全是「会话/消息被删后的连带残渣」，且父行**两库皆无**（非分叉，是真删除）：episodes 系 3 链（main 249/201/249 行，占 23–29%；dev 203/196/203）、dev `spans.session_id` 480 行（仅涉 1 个父 id）、dev `retrieval_events.session_id` 53、flow 系 41、dev `review_verdicts` message/session 各 26、`review_parse_failures.message_id` 20、dev `episode_attributions.delivery_message_id` 23、dev execution_logs 两列 11/14、`sessions.summary_msg_id` ≤5。
+**面 B 要点**：待转换面 = main 16 列 / dev 19 列（全 `YYYY-MM-DD HH:MM:SS`）；`spans.start_at`、dev `retrieval_events.created_at`、台账 `applied_at` 已 ISO 毫秒（不转）；messages 同秒密度仅 ~1.5%。
+
+**三个计划外发现**：
+
+1. **两库 messages 列序不同**（第 7/8 位 `task_id`/`created_at` 互换，老库 ALTER 追加列产物）→ 票 4 helper 硬约束见该票 addendum；
+2. **`review_verdicts.subject_agent_id` 写猫名非 id**（main 6 行 / dev 4 行，可按 `agents.name` 唯一解析还原；写入口 `verdict-parser.ts:50` 注释自称外键语义与实现不符）→ 票 6 重建前需 name→id 归一迁移（D3）；
+3. **只读审计的 WAL 边车副作用**：主库被只读连接生成 `cat-study.db-shm`(32KB) + `cat-study.db-wal`(0 字节)，清理被权限拒、未重试；数据文件 mtime 未变，无害（D4）。
+
+**CHECK 值域读数**（票 5/6 定枚举用）：`messages.role` 三值闭合；`dispatch_state` 含 `running` 中间态 + 大量 NULL（main 746 / dev 1156——SQLite CHECK 对 NULL 放行，语义成立）；`execution_logs.status` 含 `running`（dev 有 2 行 running 脏存量，票 6 处置）；`flow_state_events.to_state` 四值；dev `review_verdicts.verdict` 含 `comment`（widen 成果，归基线集）。
+
+**待拍板**：D1 孤儿处置（店长建议默认删除，依据充分）/ D2 spec 未点名同族链（A-3 九条）是否纳入 FK / D3 subject_agent_id 归一（建议并入票 6）/ D4 WAL 边车（建议不清理）。D1–D2 拍板后派票 5/6；票 8 另有悬空成员引用 4 条（main 2 会话指向 dev 猫 id，建议按 name 归一）随票 8 处置。
+
 ---
 
 ## 票 4 · rebuildTable 通用 helper（派 flash猫，走 worktree，与票 3 并行）
@@ -223,6 +240,14 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 - 形状：`rebuildTable(db, { table, createSql, columnMap?, } )`——读 `sqlite_master` 当前形状，单事务执行：建新表 → 按 columnMap 拷数据（缺省同名映射；类型/格式变更显式给转换表达式——时间列秒级→ISO 转换表达式是头号用例）→ 校验行数一致 → 删旧表 → 改名 → 按 createSql 重建索引/约束。
 - **行数一致是硬校验**：拷贝前后计数不符 → ROLLBACK + 抛错，不留半成品。
 - 通用、**不带任何真实表形状**——各表 DDL 在各自重建票里定，helper 只提供机制。
+
+### 契约补充（2026-09-17，票 3 发现①，实施中途追加，属验收的一部分）
+
+两库 `messages` **列序不同**（main：`…created_at,task_id…`；dev：`…task_id,created_at…`，第 7/8 位互换——老库 ALTER 追加列的历史产物；14 列同名同类型）。结论：
+
+- helper 拷贝**必须按列名显式映射，禁 `SELECT *` / 位置对齐**——位置对齐在两库间会**静默错列**，而行数校验查不出来（行数一致）。
+- 建议机制：helper 从 `PRAGMA table_info` 双侧取列名，显式构造 `INSERT INTO new (cols…) SELECT cols… FROM old`；新旧列名交集外的列（旧表有而新表删的列，如票 8 的 `agent_ids`）→ 显式声明丢弃，否则抛错，**不许静默丢数据**。
+- 测试加**双列序用例**：故意以乱序列序建旧表，断言数据按列名落对列。
 
 ### 边界
 
