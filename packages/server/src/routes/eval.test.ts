@@ -165,17 +165,25 @@ describe('Eval Routes', () => {
       const agentId = seedAgent('店长')
       const sessionId = seedSession()
       // 3 条前置上下文（早时间）+ 1 条待回标回复（晚时间）
-      messagesRepo.insertUserMessage(uuid(), sessionId, 'ctx-1', '[]', null)
-      messagesRepo.insertUserMessage(uuid(), sessionId, 'ctx-2', '[]', null)
+      const ctx1 = uuid()
+      const ctx2 = uuid()
       const ctx3 = uuid()
+      messagesRepo.insertUserMessage(ctx1, sessionId, 'ctx-1', '[]', null)
+      messagesRepo.insertUserMessage(ctx2, sessionId, 'ctx-2', '[]', null)
       messagesRepo.insertUserMessage(ctx3, sessionId, 'ctx-3', '[]', null)
       const replyId = seedReply(sessionId, agentId, '这是低分回复正文')
-      // 错开时间：ctx 在回复之前
+      // 错开时间：ctx 在回复之前。**三条 ctx 必须彼此不同秒**——本用例判的是
+      // 「前置上下文按时间 ASC 返回」，而同秒平局下的次序不属于契约（`messages` 是秒级
+      // `datetime('now')`，平局的隐含判据随索引形状变：三列索引上线后由 rowid 变 id，
+      // 判据记录见 `db/migrations.test.ts`）。让它们同秒 = 把时序断言押在实现细节上。
       const db = getDb()
-      db.prepare(
-        `UPDATE messages SET created_at = '2026-08-01 09:00:00' WHERE session_id = ? AND role = 'user'`
-      ).run(sessionId)
-      db.prepare(`UPDATE messages SET created_at = '2026-08-01 10:00:00' WHERE id = ?`).run(replyId)
+      const stamp = (id: string, at: string): void => {
+        db.prepare(`UPDATE messages SET created_at = ? WHERE id = ?`).run(at, id)
+      }
+      stamp(ctx1, '2026-08-01 09:00:00')
+      stamp(ctx2, '2026-08-01 09:00:01')
+      stamp(ctx3, '2026-08-01 09:00:02')
+      stamp(replyId, '2026-08-01 10:00:00')
       const scoreId = seedScore({ agentId, sessionId, messageId: replyId, score: 1 })
 
       const res = await app.inject({ method: 'GET', url: '/api/eval/review/pending' })

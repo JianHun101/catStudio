@@ -8,7 +8,7 @@
  * `createTestDb()` 造好全量结构后 `DROP TABLE schema_migrations`。这样测的确实是
  * 「老库路径」，而不是「全新库被自己当成老库」（`test-helpers.ts` 有同款说明）。
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
 import fs from 'node:fs'
@@ -109,9 +109,15 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
 
   // ─── 验收 1 · 压扁誊写校验 ───────────────────────────────────────────
   describe('验收 1 · 空库重放基线集 = 改动前产物（压扁誊写校验）', () => {
-    it('空库跑 initDb → sqlite_master 与改动前旧码 dump 逐行一致', () => {
+    it('空库重放基线集 → sqlite_master 与改动前旧码 dump 逐行一致', () => {
       setDb(makeFreshDb())
-      initDb()
+      // ⚠️ 判据面是**基线集**（票 1 的原文就是「空库重放基线集」），故只重放 baseline 条目。
+      // 票 2 起追加区非空，若把追加条目也放进来，基准就不再是「改动前旧码产物」了——
+      // 那不是本用例要判的东西（追加区的产出由下面那条用例单独穷举钉死）。
+      applyMigrations(
+        getDb(),
+        MIGRATIONS.filter((m) => m.baseline === true)
+      )
 
       const actual = dumpSchema(getDb())
       // 逐表比而不是整包比：失败时报出**是哪张表**不一致，而不是一句 toEqual 大 diff
@@ -123,6 +129,29 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
         ).toEqual(expected)
       }
       expect(actual).toHaveLength(BASELINE.length)
+    })
+
+    it('空库跑完整 initDb → 基线 47 件之上追加区净增 2 件，且两列索引已升成三列', () => {
+      setDb(makeFreshDb())
+      initDb()
+
+      const actual = dumpSchema(getDb())
+      const baselineKeys = new Set(BASELINE.map((r) => `${r.type}:${r.name}`))
+      const added = actual.filter((r) => !baselineKeys.has(`${r.type}:${r.name}`))
+      // 穷举清单（票 2 追加区三条索引迁移的净产出）：
+      //   - `idx_messages_session` 是**同名升级**（DROP 旧两列 + 建新三列）⇒ 物体数不变、定义变；
+      //   - fix-forward 条目对已齐件的库是 14 个 `IF NOT EXISTS` no-op ⇒ 零产出
+      //     （该条**不挂探针**，走的是「真执行 no-op」，见 `migrations.ts` 该条上方注释）；
+      //   - 其余两条各 +1。
+      // 将来往追加区加迁移**必须来改这里**——否则新物体静默出现，没人知道结构被谁改了。
+      expect(added.map((r) => `${r.type}:${r.name}`)).toEqual([
+        'index:idx_execution_logs_session_started',
+        'index:idx_execution_logs_status',
+      ])
+      // 「升级」的判据是定义本身：末列 `id` 是游标 tie-break，两列版里没有
+      expect(actual.find((r) => r.name === 'idx_messages_session')?.sql).toContain(
+        'session_id,created_at,id'
+      )
     })
 
     it('基准本身就是 24 表 + 14 索引 + 9 张虚拟表影子表（防基准被误再生成成空壳）', () => {
@@ -149,7 +178,7 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(MIGRATIONS.slice(0, baseline.length).every((m) => m.baseline === true)).toBe(true)
     })
 
-    it('探针清单 = 实施审计定稿的 3 条（重建类静默失败型），多一条少一条都要改审计结论', () => {
+    it('探针清单 = 审计定稿的 3 条（重建类静默失败型），多一条少一条都要改审计结论', () => {
       expect(MIGRATIONS.filter((m) => m.verify !== undefined).map((m) => m.name)).toEqual([
         'widen review_verdicts verdict CHECK (comment)',
         'chunk_vectors distance_metric=cosine (量纲校正)',
@@ -184,7 +213,9 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
 
       const rows = ledger(db)
       expect(rows).toHaveLength(MIGRATIONS.length)
-      // 只登记不执行**只认基线条目**：基线条目全 `baseline`，追加区条目（补建）当晚真执行
+      // 只登记不执行**只认基线条目**：基线条目全 `baseline` ⇒ note='baseline'；
+      // 追加区条目（补建 / 票 2 索引）在任何库上都走增量路径真执行，note 恒空
+      // （票 2 起追加区非空，判据必须分面）
       const baselineNames = new Set(
         MIGRATIONS.filter((m) => m.baseline === true).map((m) => m.name)
       )
@@ -349,6 +380,14 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
     const REPAIR_NAME = 'fix-forward 补建 retrieval_*/spans 五表九索引（票 1 OQ1）'
     const repairEntry = MIGRATIONS.find((m) => m.name === REPAIR_NAME) as Migration
 
+    /**
+     * 追加区在**齐件库**上的净增物体数（票 2 起 = 2：`idx_execution_logs_session_started` /
+     * `idx_execution_logs_status`；`idx_messages_session` 是同名升级 ⇒ 物体数不变）。
+     * 追加区的**权威清单**在「验收 1 · 空库跑完整 initDb → 净增 2 件」那条穷举用例里；
+     * 这里只拿它把 ds猫 侧「齐件库 = 47 件」的旧读数换算到追加区上线后的口径。
+     */
+    const APPENDED_NET_OBJECTS = 2
+
     /** 补建目标 = 5 表 + 9 索引，**顺序 = 建表依赖序**（FK 目标先建） */
     const EXPECTED_OBJECTS = [
       'retrieval_events',
@@ -402,8 +441,10 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(
         db.prepare(`SELECT 1 FROM sqlite_master WHERE name = 'schema_migrations'`).get()
       ).toBeUndefined()
-      // 存量面：其余结构在（33 = 47 − 14，实测主库读数为 33）
-      expect(dumpSchema(db)).toHaveLength(BASELINE.length - EXPECTED_OBJECTS.length)
+      // 存量面：其余结构在（47 − 14 = 33，实测主库读数即 33；追加区两条索引另计）
+      expect(dumpSchema(db)).toHaveLength(
+        BASELINE.length - EXPECTED_OBJECTS.length + APPENDED_NET_OBJECTS
+      )
     })
 
     it('主库形态跑 initDb → 14 件全部建回，且形状与基准逐行一致、存量数据原样', () => {
@@ -419,14 +460,18 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       // ① 一件不少：全量 dump 与基准（改动前旧码产物）逐行一致 —— 既证「补回来了」，
       //    也证「补出来的形状就是基线形状」，不存在第二份 DDL 走样的可能
       const actual = dumpSchema(db)
-      expect(actual).toHaveLength(BASELINE.length)
+      expect(actual).toHaveLength(BASELINE.length + APPENDED_NET_OBJECTS)
       const byName = new Map(actual.map((r) => [`${r.type}:${r.name}`, r]))
       for (const expected of BASELINE) {
+        // 唯一与基准不同面的是 `idx_messages_session`：票 2 的**同名升级**（两列 → 三列），
+        // 定义本就该变；其升级判据单列在下面。
+        if (expected.name === 'idx_messages_session') continue
         expect(
           byName.get(`${expected.type}:${expected.name}`),
           `${expected.type} ${expected.name}`
         ).toEqual(expected)
       }
+      expect(byName.get('index:idx_messages_session')?.sql).toContain('session_id,created_at,id')
 
       // ② 台账：41 条补登 + 1 条真执行（补建），补建行**不是**补登
       const rows = ledger(db)
@@ -452,7 +497,7 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
     it('已完整的库（全新库 / dev 库）：补建是 no-op，不新增任何物体', () => {
       setDb(makeFreshDb())
       initDb()
-      expect(dumpSchema(getDb())).toHaveLength(BASELINE.length)
+      expect(dumpSchema(getDb())).toHaveLength(BASELINE.length + APPENDED_NET_OBJECTS)
       expect(ledger(getDb()).find((r) => r.name === REPAIR_NAME)?.note).toBeNull()
     })
   })
@@ -551,6 +596,223 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
           : `CREATE TABLE IF NOT EXISTS ${table.name} (`
         expect(mig, table.name).toContain(needle)
       }
+    })
+  })
+
+  // ─── 票 2 · 索引三条（追加区首次实战）─────────────────────────────────
+  describe('票 2 · 索引三条（追加区首次实战）', () => {
+    /** 库内是否存在该物体（与 `verify` 探针同面：`sqlite_master` 的 type + name） */
+    const has = (db: Database.Database, type: string, name: string): boolean =>
+      db.prepare(`SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?`).get(type, name) !==
+      undefined
+
+    const sqlOf = (db: Database.Database, name: string): string =>
+      (
+        db.prepare(`SELECT sql FROM sqlite_master WHERE name = ?`).get(name) as
+          { sql: string } | undefined
+      )?.sql ?? ''
+
+    /** `EXPLAIN QUERY PLAN` 的 detail 列表（带参绑定，与生产调用同形） */
+    function plan(db: Database.Database, sql: string, params: unknown[]): string[] {
+      return (
+        db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>
+      ).map((r) => r.detail)
+    }
+
+    /** 全表扫判据：任一 detail 出现 `SCAN` 即红（`SEARCH … USING INDEX` 合格） */
+    const scansIn = (details: string[]): string[] => details.filter((d) => /\bSCAN\b/.test(d))
+
+    // ─── 验收 1 · 三条索引服务的查询无 SCAN ────────────────────────────
+    describe('验收 1 · 三条索引服务的查询 EXPLAIN QUERY PLAN 无 SCAN', () => {
+      it('messages 会话历史 + 游标 tie-break → 走三列索引、无 SCAN、无临时 B 树排序', () => {
+        // SQL 逐字对应 `repository/messages.ts` 的 getSessionMessagesRange（下方源断言钉着它没漂）
+        const details = plan(
+          getDb(),
+          `SELECT * FROM messages
+           WHERE session_id = ? AND role != 'system'
+             AND (created_at < ? OR (created_at = ? AND id < ?))
+           ORDER BY created_at DESC, id DESC LIMIT ?`,
+          ['s1', '2026-01-01 00:00:00', '2026-01-01 00:00:00', 'm0', 200]
+        )
+        expect(scansIn(details)).toEqual([])
+        expect(details.join('\n')).toContain('idx_messages_session')
+        // 三列版的**增量价值**：末列 `id` 进了索引 ⇒ 游标谓词与 ORDER BY 的 tie-break
+        // 都由索引顺序满足，不再需要 `USE TEMP B-TREE FOR ORDER BY`（两列版做不到）
+        expect(details.filter((d) => /TEMP B-TREE/i.test(d))).toEqual([])
+      })
+
+      it('execution_logs 会话级取数 → 走 (session_id, started_at)、无 SCAN', () => {
+        // 对应 `repository/executionLogs.ts` 的 getExecutionsBySession / getLatestExecutionPerAgent
+        const details = plan(
+          getDb(),
+          `SELECT id, agent_id, status, started_at, ended_at, latency_ms
+           FROM execution_logs WHERE session_id = ?`,
+          ['s1']
+        )
+        expect(scansIn(details)).toEqual([])
+        expect(details.join('\n')).toContain('idx_execution_logs_session_started')
+      })
+
+      it('running 计数（重启判据主查询）→ 走 idx_execution_logs_status、无 SCAN', () => {
+        // 逐字对应 `scripts/dev.js` 的重启保护窗查询（下方源断言钉着它没漂）
+        const details = plan(
+          getDb(),
+          `SELECT COUNT(*) AS cnt FROM execution_logs WHERE status = 'running'`,
+          []
+        )
+        expect(scansIn(details)).toEqual([])
+        expect(details.join('\n')).toContain('idx_execution_logs_status')
+      })
+
+      it('三处被判查询在源文件里仍是同一句（防「测试测的是手抄副本」——判据面与被判面同面）', () => {
+        const read = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8')
+        expect(read('./repository/messages.ts')).toContain(
+          '(created_at < ? OR (created_at = ? AND id < ?))'
+        )
+        expect(read('./repository/executionLogs.ts')).toContain('WHERE session_id = ?')
+        expect(read('../../../../scripts/dev.js')).toContain(
+          "SELECT COUNT(*) AS cnt FROM execution_logs WHERE status = 'running'"
+        )
+      })
+    })
+
+    // ─── 验收 2 · 老库路径 append 真执行 ───────────────────────────────
+    describe('验收 2 · 老库路径：追加区条目真执行（append-only 首次实战）', () => {
+      it('无台账老库（三条索引先删掉）→ initDb 真建上、两列版升成三列，登记 note 全空', () => {
+        const db = makeOldDb()
+        // 「真执行」的可证伪现场：索引先删掉，不执行就**不会**存在（存在性即硬证据）
+        db.exec(`DROP INDEX IF EXISTS idx_messages_session`)
+        expect(has(db, 'index', 'idx_messages_session')).toBe(false)
+
+        setDb(db)
+        initDb()
+
+        expect(sqlOf(db, 'idx_messages_session')).toContain('session_id, created_at, id')
+        expect(has(db, 'index', 'idx_execution_logs_session_started')).toBe(true)
+        expect(has(db, 'index', 'idx_execution_logs_status')).toBe(true)
+        // 追加区条目**不是**老库过户产物 ⇒ note 恒空（「只登记不执行」只认基线条目）
+        const rows = ledger(db)
+        for (const name of [
+          'idx_messages_session upgrade (session_id, created_at, id)',
+          'idx_execution_logs_session_started',
+          'idx_execution_logs_status',
+        ]) {
+          expect(rows.find((r) => r.name === name)?.note, name).toBeNull()
+        }
+      })
+
+      it('票 1 已补登过的库（台账只有 baseline 行）→ 追加条目照样真执行（主库真实升级路径）', () => {
+        const db = makeOldDb()
+        // ① 票 1 的代码先跑过一次：基线只登记不执行 —— 这正是主库今天的台账形态
+        applyMigrations(
+          db,
+          MIGRATIONS.filter((m) => m.baseline === true)
+        )
+        // ② 票 2 上船时，索引还是旧形态 / 压根没有（老机制静默失败的残骸）
+        db.exec(`DROP INDEX IF EXISTS idx_messages_session`)
+        db.exec(`DROP INDEX IF EXISTS idx_execution_logs_session_started`)
+        db.exec(`DROP INDEX IF EXISTS idx_execution_logs_status`)
+
+        applyMigrations(db, MIGRATIONS)
+
+        expect(sqlOf(db, 'idx_messages_session')).toContain('session_id, created_at, id')
+        expect(has(db, 'index', 'idx_execution_logs_session_started')).toBe(true)
+        expect(has(db, 'index', 'idx_execution_logs_status')).toBe(true)
+        const rows = ledger(db)
+        expect(rows).toHaveLength(MIGRATIONS.length)
+        // baseline 行仍是补登（没被这轮覆盖），追加行 note 全空
+        expect(rows.find((r) => r.name === 'chunks table (段三切片索引)')?.note).toBe('baseline')
+        for (const name of [
+          'idx_messages_session upgrade (session_id, created_at, id)',
+          'idx_execution_logs_session_started',
+          'idx_execution_logs_status',
+        ]) {
+          expect(rows.find((r) => r.name === name)?.note, name).toBeNull()
+        }
+      })
+    })
+
+    // ─── OQ4 · 汇总播报的「追加区真执行」计数 ──────────────────────────
+    describe('OQ4 · 汇总播报「追加区迁移真执行：N 条」与实际一致', () => {
+      /** 抓 `[db]` 播报行（只认这一面，不把其他 console 输出混进来） */
+      function migrationLogs(fn: () => void): string[] {
+        const lines: string[] = []
+        const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+          lines.push(args.map((a) => String(a)).join(' '))
+        })
+        try {
+          fn()
+        } finally {
+          spy.mockRestore()
+        }
+        return lines.filter((l) => l.startsWith('[db]'))
+      }
+
+      const appendedLine = (lines: string[]): string | undefined =>
+        lines.find((l) => l.startsWith('[db] 追加区迁移真执行：'))
+
+      it('N 条真执行：老库 + 追加区首次上船 → 播报条数 = 追加区条目数（不是 0）', () => {
+        const db = makeOldDb()
+        const total = MIGRATIONS.filter((m) => m.baseline !== true).length
+        // 真空性反对照：追加区若为空，下面的断言恒等于「0 条」而假绿
+        expect(total).toBeGreaterThan(0)
+
+        const lines = migrationLogs(() => {
+          setDb(db)
+          initDb()
+        })
+
+        expect(appendedLine(lines)).toBe(`[db] 追加区迁移真执行：${total} 条`)
+        // OQ4 是**补**一行：老库补登那行照旧并存，没被顶掉
+        expect(lines.some((l) => l.startsWith('[db] 老库补登：'))).toBe(true)
+      })
+
+      it('0 条真执行：库已最新再跑一次 → 播报 0 条，不谎报「修了什么」', () => {
+        const db = makeFreshDb()
+        setDb(db)
+        initDb() // 首次：全部落地
+
+        const lines = migrationLogs(() => applyMigrations(db))
+
+        expect(appendedLine(lines)).toBe('[db] 追加区迁移真执行：0 条')
+        expect(lines.some((l) => l.startsWith('[db] migrated:'))).toBe(false)
+      })
+    })
+
+    // ─── 行为变更记录 · 同秒平局判据（⚠️ 不是「验收」，是留痕）──────────
+    describe('行为变更记录 · 三列索引改了同秒平局的隐含判据', () => {
+      it('ORDER BY created_at（单列）平局时按 id 分序——此前按 rowid（插入序）', () => {
+        // **机制**：`ORDER BY created_at` 是三列索引 `(session_id, created_at, id)` 的**前缀**
+        // ⇒ 排序由索引直接满足 ⇒ 平局由末列 `id`（UUID，随机）分序；两列版
+        // `(session_id, created_at)` 只到 `created_at` 为止 ⇒ 平局落回 rowid（插入序）。
+        //
+        // **影响面** = 一切**按 created_at 单列排序**的既有查询：`getRecentMessages`（猫上下文）、
+        // `getSessionHistory`（UI 历史）、`getAllSessionMessages`（派发扫描）、`getContextBefore`
+        // （评估上下文）、`getTaskHistory`、`getLatestUserMessageId`（撤回判据）、`getAgentRepliesAfter`。
+        // **量级**（dev / 主库实测）：同秒平局覆盖 **1.5%** 消息行，其中位次真会变的 **0.6% / 1.1%**。
+        //
+        // 本用例把现状**钉住**（不判它对错）：谁要改这条——包括「回退成 rowid 序」——
+        // 都得先显式改这里，并回答一次「平局该按谁」。根治方向在 B 范围 ⑤-a（毫秒精度时间戳，
+        // 平局基本消失）。裁决记录见 `docs/run/db-schema-governance/tickets.md`。
+        const db = getDb()
+        db.prepare(`INSERT INTO sessions (id, title) VALUES ('s-tie', '平局')`).run()
+        // id 字典序与插入序**刻意相反**：这样「按 id 分序」与「按 rowid 分序」给出相反结果
+        const ids = ['zzzz-4', 'zzzz-3', 'zzzz-2', 'zzzz-1']
+        ids.forEach((id, i) => {
+          db.prepare(
+            `INSERT INTO messages (id, session_id, role, content, created_at)
+             VALUES (?, 's-tie', 'user', ?, '2026-01-01 00:00:00')`
+          ).run(id, `msg-${i + 1}`)
+        })
+
+        const rows = db
+          .prepare(
+            `SELECT content FROM messages WHERE session_id = 's-tie' ORDER BY created_at ASC`
+          )
+          .all() as Array<{ content: string }>
+        // id 升序 = zzzz-1…zzzz-4 = 插入序的**反转** ⇒ 按 id 分序得到 msg-4,3,2,1
+        expect(rows.map((r) => r.content)).toEqual(['msg-4', 'msg-3', 'msg-2', 'msg-1'])
+      })
     })
   })
 })

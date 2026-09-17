@@ -73,11 +73,11 @@ evidence:
 
 原则：**只补有查询证据的索引，不预防性乱建**——每个索引都是写放大。
 
-| 索引                                               | 服务的查询                     | 备注                                                  |
-| -------------------------------------------------- | ------------------------------ | ----------------------------------------------------- |
-| `messages(session_id, created_at, id)`             | 会话历史拉取 + 游标 tie-break  | 现有 `(session_id, created_at)` 两列版升级            |
-| `execution_logs(session_id, created_at)`           | 会话级日志查询、恢复路径       | 该表当前零二级索引                                    |
-| `execution_logs(status)` 或 `(session_id, status)` | running 计数（重启判据主查询） | 实施时对照实际 SQL 定形：查询总带 session_id 则用复合 |
+| 索引                                               | 服务的查询                     | 备注                                                                          |
+| -------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------- |
+| `messages(session_id, created_at, id)`             | 会话历史拉取 + 游标 tie-break  | 现有 `(session_id, created_at)` 两列版升级                                    |
+| `execution_logs(session_id, started_at)`           | 会话级日志查询、恢复路径       | 该表当前零二级索引；列名 `started_at`（2026-09-17 笔误勘正，原写 created_at） |
+| `execution_logs(status)` 或 `(session_id, status)` | running 计数（重启判据主查询） | 实施时对照实际 SQL 定形：查询总带 session_id 则用复合                         |
 
 不动的表：agents / sessions 行数小、主键查询为主，不补；chunks 三表有 sqlite-vec 自有索引，content_hash 唯一键存在性实施时核对。
 

@@ -33,11 +33,13 @@
  *   前两条是规格点名的候选；第三条是审计新增：`DROP TABLE IF EXISTS` 对缺表是 no-op，
  *   老库若仍留着两张死表，启动**不会有任何提示**，而 `db/index.test.ts` 有用例钉着
  *   「老库跑完 initDb 后两表必须消失」。不挂探针 = 该用例在老库路径上必然静默失效。
+ *
  * ## 追加区（fix-forward）
  *
  * 台账立闸后的一切结构变更都追加到文件末尾的 `APPENDED_MIGRATIONS`，**不带** `baseline`
- * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着一条：补建主库缺失的
- * `retrieval_*` / `spans` 五表九索引（票 1 OQ1 实测 + 店长裁决 ②，来龙去脉见该条上方注释）。
+ * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着四条：补建主库缺失的
+ * `retrieval_*` / `spans` 五表九索引（票 1 OQ1 实测 + 店长裁决 ②），外加票 2 的三条索引
+ * （spec §3.2）——来龙去脉见各条上方注释。
  *
  * - **不挂探针 38 条**：其余 CREATE TABLE / CREATE INDEX / DROP 条目要么是纯新物体
  *   （缺了会在首次使用时响亮报错），要么效果由后续条目独立保证。加列类历史 ALTER 已
@@ -681,6 +683,49 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 都改不了这个结果，故按探针审计的判据（只给「失败不报错、只静默劣化」的重建类条目挂）
     // 不挂——探针清单因此仍等于审计定稿的 3 条。
     sql: MAIN_DB_REPAIR_ENTRY_NAMES.map(baselineEntrySql).join(';\n'),
+  },
+  // ── 票 2 · 索引三条（spec §3.2，首批 append 迁移）──────────────────────
+  {
+    // 会话历史拉取 + 翻页游标的 tie-break。服务的查询 `getSessionMessagesRange`
+    // （`repository/messages.ts:149`）：
+    //   WHERE session_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+    //   ORDER BY created_at DESC, id DESC
+    // 两列版（基线里的 `idx_messages_session`）只能服务 `session_id` 等值 + `created_at`
+    // 范围，末列 `id` 的 tie-break 与 ORDER BY 都落不到索引上。
+    //
+    // ⚠️ **必须先 DROP 再建**：留着旧的两列同名索引，`CREATE INDEX IF NOT EXISTS` 会在
+    // 「索引已存在」上静默 no-op（老库、dev 库、全新库三者**全都**命中这条静默路径）
+    // ⇒ 升级压根不会发生。同事务内 DROP + CREATE，中途失败整体回滚。
+    name: 'idx_messages_session upgrade (session_id, created_at, id)',
+    sql: `DROP INDEX IF EXISTS idx_messages_session;
+          CREATE INDEX idx_messages_session ON messages(session_id, created_at, id)`,
+  },
+  {
+    // 会话级日志查询（`getExecutionsBySession`）与恢复路径（`getLatestExecutionPerAgent`）
+    // 的取数面，两条都是 `WHERE session_id = ?`（`repository/executionLogs.ts:250` / `:314`）。
+    // 该表此前零二级索引 ⇒ 会话日志页与右侧 trace 面板每次都全表扫。
+    //
+    // ⚠️ **列名是 `started_at` 不是 spec 写的 `created_at`**：`execution_logs` **没有**
+    // `created_at` 列（本表时间列为 `started_at`/`ended_at`）。spec §3.2 那一行按字面实现
+    // 会当场 `no such column: created_at` → 事务回滚 → **拒启**（实测，不是推断）。
+    // 保持 spec 的**形状与用途**不变（`(session_id, <本表时间列>)`），只把列名落到真实列。
+    // 同口径佐证散在既有代码里：`repository/query.ts:15`「execution_logs 无 created_at 列」、
+    // `eval/l1-aggregator.ts:68` 同、`routes/internal.test.ts:864`「用 started_at DESC 排序」。
+    name: 'idx_execution_logs_session_started',
+    sql: `CREATE INDEX IF NOT EXISTS idx_execution_logs_session_started
+      ON execution_logs(session_id, started_at)`,
+  },
+  {
+    // running 计数（重启判据主查询）。**定形依据 = 实测调用面，不是二选一**（spec §3.2 留的
+    // 判据是「查询总带 session_id 则用复合」）：
+    //   - `scripts/dev.js:183`（重启保护窗主查询，`pollRestart` 用它判「还有执行在跑」）：
+    //     `SELECT COUNT(*) AS cnt FROM execution_logs WHERE status = 'running'` —— 无 session_id
+    //   - `index.ts:136` → `fixStuckExecutionLogs()`（启动自愈 `UPDATE … WHERE status = 'running'`）
+    //   - `repository/executionLogs.ts:18` `getRunningLogs()`：同上，无 session_id
+    // 三条都不带 session_id ⇒ 复合索引 `(session_id, status)` 的前导列不匹配，**一条都服务
+    // 不到**（这正是「对照实际 SQL 定形」要挡的形态：照抄复合版 = 建了个用不上的索引）。
+    name: 'idx_execution_logs_status',
+    sql: `CREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)`,
   },
 ]
 

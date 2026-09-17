@@ -116,6 +116,9 @@ export function applyMigrations(
   )
   let registered = 0
   let repaired = 0
+  // OQ4：追加区条目**真执行**的条数。基线补登那行只讲基线（老库上「0 条经探针矫正真执行」
+  // 读起来像「这次启动什么都没修」），而追加区恰恰是每次上船必须真跑的那部分——单列一行摊开。
+  let appended = 0
 
   for (const m of list) {
     if (applied.has(m.name)) continue
@@ -158,6 +161,7 @@ export function applyMigrations(
       repaired++
       console.log(`[db] baseline 矫正：${m.name}（探针报效果缺失，已真执行）`)
     } else {
+      if (!isBaselineEntry) appended++
       console.log(`[db] migrated: ${m.name}`)
     }
   }
@@ -167,6 +171,10 @@ export function applyMigrations(
       `[db] 老库补登：${registered} 条基线迁移只登记未执行，${repaired} 条经探针矫正真执行`
     )
   }
+  // OQ4：**每次启动都播报**，两种情形措辞都与实际一致——`0 条` = 本次启动确实没跑追加迁移
+  // （库已是最新）；`N 条` = 真跑了 N 条。计数含 `CREATE … IF NOT EXISTS` 的 no-op 条目：
+  // 它们**确实执行过**，只是没改结构，与「没执行」是两回事。
+  console.log(`[db] 追加区迁移真执行：${appended} 条`)
 }
 
 export function initDb(): void {

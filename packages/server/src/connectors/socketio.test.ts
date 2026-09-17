@@ -967,9 +967,12 @@ describe('socketio connector', () => {
         `INSERT INTO sessions (id, title, agent_ids, handoff_from, running_summary)
          VALUES (?, 'child', '[]', 'session-1', ?)`
       ).run('child-session', JSON.stringify({ text: '总结' }))
+      // `created_at` 显式早一分钟：本用例判的是「新消息落子会话、成为最新一条」，
+      // 而**同秒平局下的次序不属于契约**（秒级 `datetime('now')` 的隐含平局判据随索引
+      // 形状变，判据记录见 `db/migrations.test.ts`）——留同秒 = 断言押在实现细节上。
       db.prepare(
-        `INSERT INTO messages (id, session_id, role, content, mentions)
-         VALUES (?, ?, 'user', 'hello', '[]')`
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES (?, ?, 'user', 'hello', '[]', datetime('now', '-1 minute'))`
       ).run('m-child-1', 'child-session')
 
       // 路由兜底命中：session-1 → child-session
