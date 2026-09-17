@@ -112,6 +112,31 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
     expect(getChainRejectionsSince(null, SESSION, '2026-09-10 00:00:00')).toEqual([])
   })
 
+  // ─── 票 5 连带面：跨形态比较（since 来自 messages = ISO，判词行 = 秒级）──────
+  // 票 5 把 `messages.created_at` 迁到 ISO 毫秒，而 `review_verdicts.created_at` 仍是秒级
+  // `datetime('now')`（随票 6 迁移）。两侧混比时 `' '`(0x20) < `'T'`(0x54) ⇒ 不折算则
+  // 秒级串在 ISO 串面前**恒判小**，`v.created_at > ?` 恒假 ⇒ 打回静默数不到（不报错）。
+
+  it('getChainRejectionsSince：since 是 ISO（messages 口径）+ 判词行是秒级 → 仍能命中', () => {
+    seedVerdict({ msgId: 'v-1', anchor: 'A', verdict: 'approve', createdAt: '2026-09-10 10:00:00' })
+    seedVerdict({ msgId: 'v-2', anchor: 'A', verdict: 'suggest', createdAt: '2026-09-10 11:00:00' })
+    seedVerdict({ msgId: 'v-3', anchor: 'A', verdict: 'reject', createdAt: '2026-09-10 12:00:00' })
+
+    // 根消息 created_at 的真实形态（票 5 起）。旧实现（裸 `v.created_at > ?`）在这里必红：
+    // 三条秒级判词全部判小，返回空数组。
+    const rows = getChainRejectionsSince('A', SESSION, '2026-09-10T10:30:00.000Z')
+    expect(rows.map((r) => r.message_id)).toEqual(['v-3', 'v-2'])
+  })
+
+  it('getChainRejectionsSince：两种形态的 since 指向同一时刻 ⇒ 同一批结果', () => {
+    seedVerdict({ msgId: 'v-1', anchor: 'A', verdict: 'suggest', createdAt: '2026-09-10 11:00:00' })
+
+    const iso = getChainRejectionsSince('A', SESSION, '2026-09-10T10:30:00.000Z')
+    const secondLevel = getChainRejectionsSince('A', SESSION, '2026-09-10 10:30:00')
+    expect(iso.map((r) => r.message_id)).toEqual(['v-1'])
+    expect(secondLevel.map((r) => r.message_id)).toEqual(['v-1'])
+  })
+
   // ─── tie-break：同 created_at 时按**插入序**（T-G 补）─────────────────
   // 原实现 `ORDER BY v.created_at DESC, v.message_id DESC`——message_id 是 uuid，
   // 字典序与时间无关 ⇒ 同秒落库的两条判词谁胜出是随机的。改用 `m.rowid DESC`（插入序）。

@@ -425,7 +425,10 @@ export async function replayStuckUserMessages(bus: EngineBus & HandoffBus): Prom
             row.session_id,
             TASK_HISTORY_PROBE_LIMIT
           )
-          // created_at 同为库内 'YYYY-MM-DD HH:MM:SS'（UTC 秒）⇒ 字符串比较即时间序
+          // created_at 两侧同列同形态（票 5 起均为 ISO 8601 UTC 毫秒，定宽 ⇒ 字典序 = 时间序）
+          // ⇒ 字符串比较即时间序。**别拿它跟别的表的时间列比**：未迁移的表仍是秒级
+          // `datetime('now')`，`' '`(0x20) < `'T'`(0x54) ⇒ 跨形态比较恒判小（详见
+          // `db/repository/time.ts`）。
           const repliedAfter = chain.some(
             (m) => m.role === 'agent' && m.agent_id !== null && m.created_at > row.created_at
           )

@@ -16,6 +16,7 @@ import {
   episodeStats,
   EPISODE_CLASSIFICATION_VER,
 } from './episodes.js'
+import { toIsoDb } from '../db/repository/time.js'
 import type { EpisodeRow } from '../db/repository/types.js'
 
 /** SQLite datetime 格式（UTC 'YYYY-MM-DD HH:MM:SS'）——与 datetime('now') 字符串比较一致 */
@@ -36,6 +37,10 @@ function seedBase(): void {
     .run()
 }
 
+/** 落一条 messages 根消息。`created_at` 入参可给任形态（`sqliteNow(n)` 或 ISO），
+ *  **落库一律归一到 ISO 毫秒** —— 这是票 5 之后 `messages.created_at` 的真实口径。
+ *  此前直接落秒级串：`scanZeroExecutionEpisodes` 的超时窗判据会因此**靠日期碰巧**通过
+ *  （秒级串在同一天的 ISO 串面前恒判小），窗口内/外的用例都失去判别力。 */
 function insertRootMessage(overrides: Record<string, unknown> = {}): string {
   const id = (overrides.id as string) ?? `msg-${Math.random()}`
   getDb()
@@ -47,7 +52,7 @@ function insertRootMessage(overrides: Record<string, unknown> = {}): string {
       id,
       (overrides.content as string) ?? '帮我做个任务',
       (overrides.task_id as string | null) ?? null,
-      (overrides.created_at as string) ?? sqliteNow()
+      toIsoDb((overrides.created_at as string) ?? sqliteNow())
     )
   return id
 }
@@ -71,7 +76,11 @@ function insertExecution(overrides: Record<string, unknown> = {}): void {
     )
 }
 
-/** 插一条审查回复消息 + 对应 verdict（verdict 消息 task_id 可注入——E3 接线后 = 源链 trace_id） */
+/** 插一条审查回复消息 + 对应 verdict（verdict 消息 task_id 可注入——E3 接线后 = 源链 trace_id）。
+ *
+ *  ⚠️ 两侧**刻意不同口径**，这正是票 5 之后的生产形态：`messages.created_at` 已迁 ISO 毫秒，
+ *  `review_verdicts.created_at` 仍是秒级（随票 6 迁移）。`getChainRejectionsSince` 的跨形态
+ *  比较判据（`chain-verdicts.ts`）就靠这个差异才测得到——两侧都归一 = 判据失去判别力。 */
 function insertVerdict(overrides: Record<string, unknown> = {}): void {
   const msgId = (overrides.msg_id as string) ?? `vmsg-${Math.random()}`
   getDb()
@@ -82,7 +91,7 @@ function insertVerdict(overrides: Record<string, unknown> = {}): void {
     .run(
       msgId,
       (overrides.task_id as string | null) ?? null,
-      (overrides.msg_created_at as string) ?? sqliteNow()
+      toIsoDb((overrides.msg_created_at as string) ?? sqliteNow())
     )
   getDb()
     .prepare(
@@ -527,7 +536,7 @@ describe('scanZeroExecutionEpisodes — 零执行路径（G2-N5 + G3 + G5 + N9�
         `INSERT INTO messages (id, session_id, agent_id, role, content, task_id, created_at)
          VALUES (?, 's1', 'agent-1', 'agent', '批量答复', ?, ?)`
       )
-      .run('msg-reply', 'task-batch', sqliteNow(20))
+      .run('msg-reply', 'task-batch', toIsoDb(sqliteNow(20)))
 
     expect(scanZeroExecutionEpisodes()).toBe(0)
     expect(countEpisodes()).toBe(0)
@@ -541,7 +550,7 @@ describe('scanZeroExecutionEpisodes — 零执行路径（G2-N5 + G3 + G5 + N9�
         `INSERT INTO messages (id, session_id, agent_id, role, content, task_id, created_at)
          VALUES (?, 's1', 'agent-1', 'agent', '其他任务回复', ?, ?)`
       )
-      .run('msg-reply-other', 'task-b', sqliteNow(20))
+      .run('msg-reply-other', 'task-b', toIsoDb(sqliteNow(20)))
 
     expect(scanZeroExecutionEpisodes()).toBe(1)
     const ep = getEpisode('msg-root')

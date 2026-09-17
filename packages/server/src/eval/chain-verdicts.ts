@@ -64,7 +64,12 @@ export function getLatestChainVerdict(
  * 锚名下 `since` 之后（严格晚于）的**打回档**判词（reject / suggest），DESC。
  *
  * `since` 传根触发消息的 `created_at`——只数「这条链自己产生过的打回」，
- * 不把锚被复用前的历史算进来。时间戳同形比较：库内为 `'YYYY-MM-DD HH:MM:SS'`（UTC）。
+ * 不把锚被复用前的历史算进来。
+ *
+ * ⚠️ **两侧不同口径**（票 5 连带面）：`since` 来自 `messages`（自票 5 起 ISO 毫秒），而
+ * `v.created_at` 仍是秒级 `datetime('now')`（随票 6 迁移）。`' '`(0x20) < `'T'`(0x54)
+ * ⇒ 不折算则秒级串在同一天的 ISO 串面前**恒判小**，`> ?` 恒假 ⇒ 链内打回**静默数不到**
+ * （不报错，只是归因少一路源）。折算对已是 ISO 的值是 no-op，票 6 落地后无需回改。
  */
 export function getChainRejectionsSince(
   anchor: string | null | undefined,
@@ -78,7 +83,7 @@ export function getChainRejectionsSince(
        FROM review_verdicts v
        JOIN messages m ON m.id = v.message_id
        WHERE m.task_id = ? AND m.session_id = ?
-         AND v.created_at > ?
+         AND replace(v.created_at, ' ', 'T') > ?
          AND v.verdict IN ('reject', 'suggest')
        ORDER BY v.created_at DESC, m.rowid DESC`
     )

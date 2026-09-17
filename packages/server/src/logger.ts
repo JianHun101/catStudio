@@ -114,8 +114,9 @@ interface LogMeta {
 }
 
 /** 本地时区 ISO 时间（带偏移，如 2026-08-06T15:04:49.123+08:00）。
- *  JSON 可解析、可排序；DB 层 datetime('now') 保持 UTC 存储不动（数据层契约，
- *  前端已本地化显示），日志层本地化便于人眼观察（用户需求：日志时间与时区匹配）。 */
+ *  JSON 可解析、可排序；DB 层保持 UTC 存储不动（数据层契约——记录时间由 repository 层
+ *  生成、口径随 `db/repository/time.ts`，前端已本地化显示），日志层本地化便于人眼观察
+ *  （用户需求：日志时间与时区匹配）。 */
 function toLocalIso(date: Date): string {
   const pad = (n: number): string => String(n).padStart(2, '0')
   const offsetMin = -date.getTimezoneOffset()
