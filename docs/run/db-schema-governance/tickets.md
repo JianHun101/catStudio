@@ -1,6 +1,6 @@
 # 票：数据库结构治理 P0（迁移机制立闸 + 索引三条）
 
-> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅：台账 45 行、追加区 4 条真执行、EXPLAIN 三路径全 SEARCH）。B 范围票 3–8 已拆（2026-09-17 用户拍板「现在拆」），票 3（ds猫）/ 票 4（flash猫）已并行派出。**
+> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅）。B 范围：票 3 ✅（`4f05566` 落单）、票 4 ✅（`f167351` 复审可合并，收口中）、票 5–8 等用户对票 3 报告 D1–D4 拍板（票 7 无阻塞可先行）。**
 > 定稿规格：`docs/plans/db-schema-governance.md`（下称 spec，commit `e5daf7a`）。票单不复制 spec 全文，只钉执行面；与 spec 冲突以 spec 为准。
 > 范围裁决：A——P0 本轮实施，B 范围（FK/CHECK/时间口径/session_agents 拆表）设计已定稿、**票缓拆**，等 P0 落地验证后再拆。
 
@@ -261,15 +261,37 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 
 worktree（从 dev `7e5478b` 建分支 `session/54c4de25-flash猫`）；`node node_modules/vitest/vitest.mjs run` 跑测试（pnpm test 会被 junction 拒）；quality-gate → request-review 投吐槽猫；不自行合并、不 push。
 
+### 完成记录（2026-09-17，✅ 复审可合并 → 店长收口）
+
+**实现两笔**：`9f050d3`（helper 本体）+ `2b357ca`（契约补充：丢列须 `allowDroppedColumns` 显式点名否则抛错、通配守卫只锚 convert 唯一入口、双列序用例）；分支尖 `f167351` = `2b357ca` × dev `39cc4b4`（合并拆审查链结构性墙——根因是 dev 基线携带票 2 时代旧票单，仲裁裁 B：店长在 dev 落 `39cc4b4` 同步权威票单）。
+
+**复审（吐槽猫，`ca576c9` review-view）**：净差异恰 2 文件 +870/−0（`repository/` 与 docs 零骑入）；135 文件 / 2726 用例独立复跑全绿 + lint 3 包绿。行序用例判别力经审查者亲手复测成立（无 `ORDER BY rowid` 时连 TEXT PK 的 autoindex 都会顶掉插入序）。**✅可合并**。
+
+**OQ 裁决（随收口落盘）**：
+
+| OQ                                                 | 裁决                                                                                                                                                                                                                                                                                  |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OQ1 allowDroppedColumns 是静默后门？               | **否**——须逐列点名 + `report.droppedColumns` 留痕 + 用例钉放行路径                                                                                                                                                                                                                    |
+| OQ2 FK 体检只查出向 → 重建动被引用列时子表悬空不拦 | **限制成立，不入 helper**（全库体检归属审计面）——**票 8 验收硬条款：重建后全库 `PRAGMA foreign_key_check` 零违规**（已落 spec §4.4 纪律 6，各重建票同执行）                                                                                                                           |
+| OQ3 rowid 隐性依赖                                 | **复审新发现比实施自查深**：`chunks` 双重耦合——`chunks_fts.rowid = chunks.rowid`（dev 375 行活 JOIN 零孤儿）+ vec0 `chunk_vectors_rowids` BLOB 内嵌。chunks 不在票 5/6 清单——审计若论证需动 chunks 投影先回架等专项设计（重建须同批重建 FTS 索引 + vec0 映射），已落 spec §4.4 纪律 5 |
+| OQ4 守卫盲区（CHECK/UNIQUE 来自调用方 createSql）  | 真实但固有，P3 记录——缓解靠调用方比对两侧 `sqlite_master.sql`                                                                                                                                                                                                                         |
+| OQ5 验收第 2 条替代                                | 满足本意：行数校验是防未来改动护栏，函数直测 + UNIQUE 撞数据端到端回滚两路都钉                                                                                                                                                                                                        |
+
+**P3 观察项（不拦，留痕）**：① `convert` 里的标量子查询（如 `(SELECT * FROM other …)`）不在通配正则射程内——调用方显式表达式、作用域非旧表直拷，契约本意未破；② `CODING_STANDARDS.md` §7 幂等迁移与 spec §3.1 零吞咽的张力（flash猫 自曝）——归标准文档更新单。
+
 ---
 
 ## 票 5 · messages 重建（blocked by 票 3 拍板 + 票 4）
 
 一次重建合并全部变更（spec §4.2 铁律）：FK `agent_id→agents` RESTRICT、CHECK `dispatch_state`、created_at 秒级→ISO 毫秒、**连带切换**（spec §4.2 连带改造点）：`messages.ts:127` 游标比较逻辑与超时窗 `datetime('now', ?)` 同批切新格式——**格式混比会错序，不留半套**。时间列转换表达式用票 4 helper 的 columnMap 机制。孤儿 messages 按票 3 报告 + 用户拍板处置。
 
+**约束面（随票 4 复审落盘）**：① 重建后全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6）；② 本票不动 chunks 系——若实施中发现必须动 chunks 投影，先回架（chunks ↔ FTS/vec0 rowid 耦合，spec §4.4 纪律 5）。
+
 ## 票 6 · 小表重建批（blocked by 票 3 + 票 4）
 
 execution_logs / flow_states / flow_state_events / connector_bindings / episodes 系 / review_verdicts 的重建：**逐表先审计留痕**（现有 FK/CHECK/时间列实测 vs spec §4.1 缺口清单，一张表一份结论），时间口径全转 ISO，FK/CHECK 按审计定稿补。清单以审计报告为准，票开时逐表列。
+
+**约束面（随票 4 复审落盘）**：① 重建后全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6）；② 本票清单不含 chunks 系——逐表审计若论证需动 chunks 投影，先回架等专项设计（FTS/vec0 rowid 耦合须同批重建，spec §4.4 纪律 5）；③ `review_verdicts.subject_agent_id` 猫名→id 归一迁移（票 3 发现②，D3）必须先于此表 FK 重建落地。
 
 ## 票 7 · 归档（轻量 ALTER，可与票 5/6 并行，blocked by 无）
 
@@ -278,3 +300,5 @@ sessions `ADD COLUMN archived_at TEXT`（NULL=活跃）+ 部分索引 `WHERE arc
 ## 票 8 · session_agents 拆表 + sessions 重建（blocked by 票 3 + 票 4 + 票 7）
 
 内部顺序（spec §4.3，不能反）：① 建 `session_agents` + 解析 JSON 灌入（数组下标→position，悬空引用按拍板处置）；② **sessions 一次重建**：时间口径 + 删 `agent_ids` 列 + **保留票 7 的 archived_at** + 约束；③ 读取路径全改走新表（对外 API 形状不变，`agentIds` 按 position 组装）；④ 隐藏行为保留：成员变更仍 touch `sessions.updated_at`（验收项）；⑤ 删 session → CASCADE 成员行；删 agent → RESTRICT + **409 契约**：repository 先查后删、命中抛领域错误带会话清单、API 409 + 结构化错误体（spec §4.1 行为契约）。
+
+**验收硬条款（随票 4 复审落盘）**：收尾全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6——sessions 是被引用大父表，重建后体检是防子表悬空的唯一兜）。
