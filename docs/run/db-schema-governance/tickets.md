@@ -1,6 +1,6 @@
 # 票：数据库结构治理 P0（迁移机制立闸 + 索引三条）
 
-> **状态：票 1 三轮审查 ✅ 已收口（`3f7cab1` + `d90ebed` + `694a859` 合入 dev）；票 2 已解锁（索引三条 + OQ4 播报措辞——OQ1 fix-forward 已由 ds猫 以 `694a859` 随票 1 收口，**退出票 2 票面**），在 flash猫 手中。**
+> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅：台账 45 行、追加区 4 条真执行、EXPLAIN 三路径全 SEARCH）。B 范围票 3–8 已拆（2026-09-17 用户拍板「现在拆」），票 3（ds猫）/ 票 4（flash猫）已并行派出。**
 > 定稿规格：`docs/plans/db-schema-governance.md`（下称 spec，commit `e5daf7a`）。票单不复制 spec 全文，只钉执行面；与 spec 冲突以 spec 为准。
 > 范围裁决：A——P0 本轮实施，B 范围（FK/CHECK/时间口径/session_agents 拆表）设计已定稿、**票缓拆**，等 P0 落地验证后再拆。
 
@@ -183,3 +183,73 @@ spec §3.2 三条索引作为 `APPENDED_MIGRATIONS` 追加条目落地（append-
 - **清理**：主仓库切回 dev；closeout 分支本地+远端已删（refspec 删 + ls-remote 复核）；ds猫 / flash猫 worktree 已清（工作树干净、无未合入提交——ds猫 分支两笔 docs 提交与 session 分支同尖、无遗失；flash猫 `a2cde1a` 已入 dev；会话无远端分支）。剩余本会话 worktree：会话本体 + 吐槽猫（审查侧，留待 B 范围）。
 - **重启判定：不发**。新索引 / OQ4 播报 / 补建迁移只在下次启动 initDb 时生效，运行中实例不受影响（判定看运行实例而非改动面）。**下次 server 重启时一并激活：票 1 迁移闸 + 主库 14 件缺失物体自动补建 + 票 2 索引三条。**
 - **下一步**：B 范围（④ FK/CHECK、⑤ 时间口径、⑥ 拆表）按 A 范围决策「票缓拆」——待 server 重启后 P0 实机验证（迁移闸首启 + 主库补建播报 + EXPLAIN 无 SCAN 抽查）通过，再拆 B 票。验证清单已备，重启后可直接执行。
+
+---
+
+# B 范围票单（2026-09-17 拆，P0 实机验证 ✅ 后）
+
+> 定稿决策全部在 spec §4，票面只钉执行面。**流程新规则（本轮起）**：实施猫的回执/交接**不进本票单**（防 review-view 快照带进分歧连停审查链——见 09-17 吐槽猫连停 4 轮事件）——报告与回执走投递正文/commit message，票单权威状态由店长统一写。
+> 并行策略：票 3（只读审计）与票 4（helper）**无互赖，同时开工**；票 5–8 等票 3 报告出来、用户拍板孤儿处置后再派。
+
+## 票 3 · 存量审计（只读报告，派 ds猫，无 worktree）
+
+### 交付物
+
+两份只读审计报告（**主库** `packages/server/data/cat-study.db` + **dev 库** `cat-study-dev.db`，两个库都要出数），投递正文回架，由店长落票单。
+
+- **面 A · 孤儿审计**（spec §4.1 前置）：对每条候选 FK 关系跑「子表 LEFT JOIN 父表 WHERE 父 IS NULL」，输出：关系名、库、孤儿行数、样本前 5 行（关键列）。
+  候选链（spec §4.1）：`messages.agent_id→agents`、`review_verdicts` 各引用（逐列查 DDL 定）、`connector_bindings.session_id→sessions`、`episodes` 各引用、`flow_states.session_id`、`flow_state_events.session_id`；已有 FK 的链（messages→sessions、execution_logs 两链、session_read_state）抽样验证即可。
+- **面 B · 时间格式分布**（spec §4.2 前置）：全库每张表每个时间列实测格式分布（秒级 UTC `YYYY-MM-DD HH:MM:SS` vs ISO 毫秒 `...T...Z`），输出：表.列、格式 → 行数分布、异常样本。含 `messages.created_at` 同秒多行的密度（⑤ 改造面大小评估）。
+
+### 纪律
+
+- **只读铁律**：两库一律 `new Database(path, { readonly: true, fileMustExist: true })`（better-sqlite3 只读模式），库文件绝对路径、绝不可写；不写任何代码进仓库、不动 worktree。
+- 报告可重复跑：SQL 留进投递正文，店长复核可直接重放。
+
+### 验收
+
+报告覆盖 spec §4.1 全部候选链 + §4.2 全部时间列，无「假设」式结论——每个数字都有 SQL 可复算。店长复核重放抽样一致即过。
+
+---
+
+## 票 4 · rebuildTable 通用 helper（派 flash猫，走 worktree，与票 3 并行）
+
+### 交付物
+
+`packages/server/src/db/rebuild.ts`（+ co-located `rebuild.test.ts`）：通用表重建 helper，B 范围重建批的公共工具（spec §4.4 纪律 2）。
+
+### 契约
+
+- 形状：`rebuildTable(db, { table, createSql, columnMap?, } )`——读 `sqlite_master` 当前形状，单事务执行：建新表 → 按 columnMap 拷数据（缺省同名映射；类型/格式变更显式给转换表达式——时间列秒级→ISO 转换表达式是头号用例）→ 校验行数一致 → 删旧表 → 改名 → 按 createSql 重建索引/约束。
+- **行数一致是硬校验**：拷贝前后计数不符 → ROLLBACK + 抛错，不留半成品。
+- 通用、**不带任何真实表形状**——各表 DDL 在各自重建票里定，helper 只提供机制。
+
+### 边界
+
+不跑真实迁移、不动 `migrations.ts` 数组（B 重建票才 append）、不动 repository 层、不引入新依赖。
+
+### 验收
+
+`:memory:` 往返：建旧形表 → 插数据 → rebuild（含一次时间列转换 + 一次列改名映射）→ 断言数据原样/格式已转/新约束生效；行数校验注入失败 → 回滚、旧表原样。既有测试全绿。
+
+### 流程
+
+worktree（从 dev `7e5478b` 建分支 `session/54c4de25-flash猫`）；`node node_modules/vitest/vitest.mjs run` 跑测试（pnpm test 会被 junction 拒）；quality-gate → request-review 投吐槽猫；不自行合并、不 push。
+
+---
+
+## 票 5 · messages 重建（blocked by 票 3 拍板 + 票 4）
+
+一次重建合并全部变更（spec §4.2 铁律）：FK `agent_id→agents` RESTRICT、CHECK `dispatch_state`、created_at 秒级→ISO 毫秒、**连带切换**（spec §4.2 连带改造点）：`messages.ts:127` 游标比较逻辑与超时窗 `datetime('now', ?)` 同批切新格式——**格式混比会错序，不留半套**。时间列转换表达式用票 4 helper 的 columnMap 机制。孤儿 messages 按票 3 报告 + 用户拍板处置。
+
+## 票 6 · 小表重建批（blocked by 票 3 + 票 4）
+
+execution_logs / flow_states / flow_state_events / connector_bindings / episodes 系 / review_verdicts 的重建：**逐表先审计留痕**（现有 FK/CHECK/时间列实测 vs spec §4.1 缺口清单，一张表一份结论），时间口径全转 ISO，FK/CHECK 按审计定稿补。清单以审计报告为准，票开时逐表列。
+
+## 票 7 · 归档（轻量 ALTER，可与票 5/6 并行，blocked by 无）
+
+sessions `ADD COLUMN archived_at TEXT`（NULL=活跃）+ 部分索引 `WHERE archived_at IS NULL` + repository 读写 + API + 前端最小入口（归档操作 + 「显示已归档」开关）。**验收（spec §4.1）**：归档后数据全在、列表默认过滤、**归档会话照常可被记忆检索**。
+
+## 票 8 · session_agents 拆表 + sessions 重建（blocked by 票 3 + 票 4 + 票 7）
+
+内部顺序（spec §4.3，不能反）：① 建 `session_agents` + 解析 JSON 灌入（数组下标→position，悬空引用按拍板处置）；② **sessions 一次重建**：时间口径 + 删 `agent_ids` 列 + **保留票 7 的 archived_at** + 约束；③ 读取路径全改走新表（对外 API 形状不变，`agentIds` 按 position 组装）；④ 隐藏行为保留：成员变更仍 touch `sessions.updated_at`（验收项）；⑤ 删 session → CASCADE 成员行；删 agent → RESTRICT + **409 契约**：repository 先查后删、命中抛领域错误带会话清单、API 409 + 结构化错误体（spec §4.1 行为契约）。
