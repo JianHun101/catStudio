@@ -94,6 +94,60 @@ describe('ClaudeAdapter', () => {
     expect(chunks).toEqual([{ content: '', done: true }])
   })
 
+  // 2026-09-18 修复回归：`child.killed` 的语义是「信号已发出」而非「进程已死」，
+  // 拿它当存活判据 ⇒ 5 秒后的 SIGKILL 升级判断永远过不去（升级链整条失效）。
+  // 本用例的 mock `kill()` 复刻 Node 真实语义（调用即置 `killed=true`，而
+  // `exitCode`/`signalCode` 要等进程真终止才落定）——**旧实现在此必红**（SIGKILL
+  // 永不发出），这是修复的反证，不是同义反复。
+  it('escalates to SIGKILL when child survives the SIGTERM grace period', async () => {
+    vi.useFakeTimers()
+    let release: (() => void) | undefined
+    try {
+      const adapter = new ClaudeAdapter({ apiKey: 'sk-test-key', model: 'claude-sonnet-4-6' })
+      const spawned: any = {
+        on: vi.fn(),
+        stderr: null,
+        kill: vi.fn(() => {
+          spawned.killed = true // Node 语义：信号发出即置位，与进程是否已死无关
+          return true
+        }),
+        exitCode: null,
+        signalCode: null,
+        killed: false,
+      }
+      vi.mocked(spawnSupervised).mockReturnValue(spawned)
+      // 挂住不结束 = 「SIGTERM 之后子进程仍存活」；闸门由测试末尾放行，避免悬挂
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      vi.mocked(parseClaudeCodeOutput).mockImplementation(async function* () {
+        yield { content: 'x', done: false }
+        await gate
+      })
+
+      const controller = new AbortController()
+      const iter = adapter
+        .chatStream([{ role: 'user', content: 'hi' }], {
+          model: 'claude-sonnet-4-6',
+          signal: controller.signal,
+        })
+        [Symbol.asyncIterator]()
+
+      await iter.next() // 推进到首个 yield：此时 onAbort 已注册、子进程仍未死
+      controller.abort()
+      expect(spawned.kill).toHaveBeenCalledWith('SIGTERM')
+      expect(spawned.killed).toBe(true) // 前置：killed 已置真——旧判据正是在此翻车
+
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(spawned.kill).toHaveBeenCalledWith('SIGKILL')
+
+      release!()
+      await iter.return?.()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // ─── buildEnv ─────────────────────────────────
 
   it('buildEnv sets all required environment variables', () => {
