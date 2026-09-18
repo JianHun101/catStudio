@@ -26,12 +26,16 @@ onMounted(() => {
   store.fetchData()
 })
 
-async function handleDelete(id: string): Promise<void> {
-  if (!confirm('确定要删除这个会话吗？消息将被永久删除。')) return
+/**
+ * 归档 / 取消归档（用户态「删除」= 归档，spec §4.1）。
+ * **不要二次确认**：归档是可逆的（数据全留 + 一键取消归档），给可逆操作加确认弹窗
+ * 只会训练用户无脑点「确定」——确认框留给不可逆操作。
+ */
+async function handleArchive(id: string, archived: boolean): Promise<void> {
   try {
-    await store.deleteSession(id)
+    await store.setArchived(id, archived)
   } catch (err) {
-    log.error('删除失败', { error: String(err) })
+    log.error(archived ? '归档失败' : '取消归档失败', { error: String(err) })
   }
 }
 </script>
@@ -88,6 +92,16 @@ async function handleDelete(id: string): Promise<void> {
           <span class="section-count" v-if="store.sessions.length">{{
             store.sessions.length
           }}</span>
+          <!-- 「显示已归档」开关（spec §4.1）：归档会话默认从列表隐藏 -->
+          <button
+            class="btn-toggle-archived"
+            :class="{ active: store.showArchived }"
+            :aria-pressed="store.showArchived"
+            :title="store.showArchived ? '隐藏已归档会话' : '显示已归档会话'"
+            @click="store.setShowArchived(!store.showArchived)"
+          >
+            <span>已归档</span>
+          </button>
           <!-- 新建会话：标题行右侧（图1「添加成员」范式），不再占底部 footer -->
           <button
             class="btn-new-session-header"
@@ -135,12 +149,19 @@ async function handleDelete(id: string): Promise<void> {
         <div v-for="s in store.sessions" :key="s.id" class="session-row">
           <button
             class="session-item"
-            :class="{ active: store.activeSessionId === s.id }"
+            :class="{ active: store.activeSessionId === s.id, archived: !!s.archivedAt }"
             @click="store.joinSession(s.id)"
           >
             <div class="session-body">
               <span class="session-title">{{ s.title }}</span>
-              <span class="session-meta">{{ s.agentIds.length }} 只猫咪</span>
+              <span class="session-meta"
+                >{{ s.agentIds.length }} 只猫咪<span
+                  v-if="s.archivedAt"
+                  class="session-archived-tag"
+                >
+                  · 已归档</span
+                ></span
+              >
             </div>
             <span
               v-if="store.unreadCounts.get(s.id) && store.activeSessionId !== s.id"
@@ -148,10 +169,21 @@ async function handleDelete(id: string): Promise<void> {
               >{{ store.unreadCounts.get(s.id)! > 99 ? '99+' : store.unreadCounts.get(s.id) }}</span
             >
           </button>
-          <button class="session-delete" title="删除会话" tabindex="-1" @click="handleDelete(s.id)">
+          <!-- 归档 / 取消归档：**取代**了原来的 🗑️ 物理删除按钮（spec §4.1 用户故事 7
+               「删除会话 = 归档」，产品决策 = 用户态删除的唯一形态是归档）。
+               `DELETE /api/sessions/:id` 后端照旧（票 8 管它的 RESTRICT/409 契约），只是
+               前端不再提供一键永久删除的入口——要恢复就是把这个按钮换回 delete 那版。
+               归档行在「显示已归档」开启时才上屏，故按钮语义随状态二分。 -->
+          <button
+            class="session-archive"
+            :class="{ archived: !!s.archivedAt }"
+            :title="s.archivedAt ? '取消归档' : '归档会话'"
+            tabindex="-1"
+            @click="handleArchive(s.id, !s.archivedAt)"
+          >
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path
-                d="M2 4h10M5 4V3a1 1 0 011-1h2a1 1 0 011 1v1M11 4v7a1 1 0 01-1 1H4a1 1 0 01-1-1V4"
+                d="M1.5 3.5h11v2h-11zM2.5 5.5v6a1 1 0 001 1h7a1 1 0 001-1v-6M5.5 8h3"
                 stroke="currentColor"
                 stroke-width="1.3"
                 stroke-linecap="round"
@@ -288,7 +320,7 @@ async function handleDelete(id: string): Promise<void> {
   background: var(--bg-hover);
 }
 
-.session-row:hover .session-delete {
+.session-row:hover .session-archive {
   opacity: 1;
 }
 
@@ -367,9 +399,9 @@ async function handleDelete(id: string): Promise<void> {
   white-space: nowrap;
 }
 
-/* ─── Delete Button ─────────────────────── */
+/* ─── Archive Button ────────────────────── */
 
-.session-delete {
+.session-archive {
   flex-shrink: 0;
   width: 32px;
   border: none;
@@ -384,9 +416,50 @@ async function handleDelete(id: string): Promise<void> {
   justify-content: center;
 }
 
-.session-delete:hover {
-  color: var(--accent-red);
-  background: rgba(224, 85, 106, 0.12);
+.session-archive:hover {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+/* 已归档行：取消归档是「把东西拿回来」，用中性色而不是 accent——避免与归档动作抢视线 */
+.session-archive.archived:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* 已归档行的标题压暗：与活跃会话区分开，一眼看出这行不在默认列表里 */
+.session-item.archived .session-title {
+  color: var(--text-muted);
+}
+
+.session-archived-tag {
+  color: var(--text-muted);
+}
+
+/* ─── Archived Toggle（标题行）───────────── */
+
+.btn-toggle-archived {
+  padding: 3px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.btn-toggle-archived:hover {
+  border-color: var(--accent-text);
+  color: var(--accent-text);
+}
+
+.btn-toggle-archived.active {
+  border-color: var(--accent-text);
+  color: var(--accent-text);
+  background: var(--accent-soft);
 }
 
 /* ─── Empty State ───────────────────────── */

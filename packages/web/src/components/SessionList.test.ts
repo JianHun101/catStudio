@@ -40,3 +40,30 @@ describe('SessionList 会话行去云朵 icon', () => {
     expect(source).toContain('class="collapsed-session-icon"')
   })
 })
+
+describe('SessionList 归档入口（票 7，spec §4.1 用户态删除 = 归档）', () => {
+  it('会话行有归档按钮，且物理删除按钮已移除（不再提供一键永久删除入口）', () => {
+    expect(source).toContain('class="session-archive"')
+    expect(source).toContain('handleArchive')
+    expect(source).not.toContain('class="session-delete"')
+    expect(source).not.toContain('handleDelete')
+    // 「永久删除」的措辞随之消失（确认框文案是产品决策最直白的落点）
+    expect(source).not.toContain('消息将被永久删除')
+  })
+
+  it('按钮语义随归档态二分：归档 ↔ 取消归档', () => {
+    expect(source).toContain("s.archivedAt ? '取消归档' : '归档会话'")
+    expect(source).toContain('@click="handleArchive(s.id, !s.archivedAt)"')
+  })
+
+  it('标题行有「已归档」开关，点击切换 store.setShowArchived', () => {
+    expect(source).toContain('class="btn-toggle-archived"')
+    expect(source).toContain('@click="store.setShowArchived(!store.showArchived)"')
+    expect(source).toContain(':aria-pressed="store.showArchived"')
+  })
+
+  it('已归档行有可见标记（不是只靠按钮语义区分）', () => {
+    expect(source).toContain('class="session-archived-tag"')
+    expect(source).toMatch(/v-if="s\.archivedAt"/)
+  })
+})

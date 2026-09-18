@@ -4,6 +4,7 @@
 import type Database from 'better-sqlite3'
 import { purgeSessionDependents } from './dependents.js'
 import type { SessionRow } from './types.js'
+import { nowIso } from './time.js'
 
 let db: Database.Database
 
@@ -126,8 +127,27 @@ export function updateCompressedSummary(
   }
 }
 
+/**
+ * **全量**会话（含已归档），按最近活跃排序。
+ *
+ * 与 `listActiveSessions()` 的分工是刻意的：这个函数是「系统链路」口径——归档只改
+ * **用户态列表可见性**，不动任何系统链路（评估告警播报 `eval/l1-aggregator.ts` 等照常
+ * 覆盖归档会话）。把过滤塞进这里 = 让归档静默改变无关子系统的行为。
+ */
 export function listAllSessions(): SessionRow[] {
   return db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as SessionRow[]
+}
+
+/**
+ * **活跃**会话（`archived_at IS NULL`），按最近活跃排序——用户态列表的默认口径（票 7）。
+ *
+ * WHERE 与部分索引 `idx_sessions_active` 的谓词逐字同形（部分索引要生效，查询的 WHERE
+ * 必须蕴含索引谓词）。改这个 WHERE 前先看那条索引的注释。
+ */
+export function listActiveSessions(): SessionRow[] {
+  return db
+    .prepare('SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY updated_at DESC')
+    .all() as SessionRow[]
 }
 
 /**
@@ -224,6 +244,32 @@ export function updateSessionAgentIds(id: string, agentIdsJson: string): void {
 
 export function updateSessionTimestamp(id: string): void {
   db.prepare(`UPDATE sessions SET updated_at = datetime('now') WHERE id = ?`).run(id)
+}
+
+// ─── 归档（票 7；spec §4.1「用户态『删除』= 归档」）──────────
+//
+// 两条**都不动 `updated_at`**，这是有意的：`updated_at` 是「会话活跃度」（消息进出 /
+// 成员变更），列表按它排序；归档只是可见性开关，不是会话活动。跟着动会让归档的会话在
+// 「显示已归档」列表里凭空跳到最前、取消归档后又赖在顶部——与「最近活跃」的语义打架。
+
+/**
+ * 归档会话（幂等）。**首次归档时刻为准**：对已归档的会话重复调用不改写 `archived_at`
+ * （`AND archived_at IS NULL`），否则一个 UI 重复点击就把原始归档时间冲掉了。
+ *
+ * `archived_at` 是**事件时间**（归档动作发生时刻），但仍由 repository 生成而非调用方传入
+ * ——⑤-c 的例外只对「调用方能说出更准时刻」的事件时间开放，归档没有这种情形，走 `nowIso()`
+ * 与全库记录时间同口径（ISO 毫秒 UTC）。
+ */
+export function archiveSession(id: string): void {
+  db.prepare('UPDATE sessions SET archived_at = ? WHERE id = ? AND archived_at IS NULL').run(
+    nowIso(),
+    id
+  )
+}
+
+/** 取消归档（幂等）——`archived_at` 归 NULL 即回到活跃态，无其他副作用。 */
+export function unarchiveSession(id: string): void {
+  db.prepare('UPDATE sessions SET archived_at = NULL WHERE id = ?').run(id)
 }
 
 export function updateSessionRunningSummary(

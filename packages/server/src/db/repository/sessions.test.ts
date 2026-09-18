@@ -114,4 +114,79 @@ describe('sessions repo — handoff 去重守卫', () => {
       expect(sessionsRepo.getHandoffChild('parent-other')).toEqual({ id: 'child-other-real' })
     })
   })
+
+  // ─── 票 7 · 归档（用户态「删除」= 归档）────────────────────────────
+  describe('sessions repo — 归档', () => {
+    const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+
+    /**
+     * 把 `updated_at` 钉成哨兵值——「归档不动 updated_at」这条断言若不做这件事就是**恒真**的：
+     * 插入与归档发生在同一秒内，`datetime('now')` 前后同值，改了也看不出来。
+     */
+    const pinUpdatedAt = (id: string, ts = '2020-01-01 00:00:00') =>
+      db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(ts, id)
+
+    it('archiveSession 写 ISO 毫秒 archived_at（⑤-c 记录时间口径）', () => {
+      insertSession('s-a1')
+      sessionsRepo.archiveSession('s-a1')
+      const row = sessionsRepo.getSessionById('s-a1')
+      expect(row?.archived_at).toMatch(ISO_MS)
+    })
+
+    it('archiveSession 不动 updated_at（归档是可见性开关，不是会话活动）', () => {
+      insertSession('s-a2')
+      pinUpdatedAt('s-a2')
+      sessionsRepo.archiveSession('s-a2')
+      expect(sessionsRepo.getSessionById('s-a2')?.updated_at).toBe('2020-01-01 00:00:00')
+    })
+
+    it('archiveSession 幂等：重复归档不改写首次归档时刻', () => {
+      insertSession('s-a3')
+      sessionsRepo.archiveSession('s-a3')
+      const first = sessionsRepo.getSessionById('s-a3')?.archived_at
+      // 拉开时间差再归档一次：若实现是「无条件覆盖」，两次读数会不同
+      db.prepare(`UPDATE sessions SET archived_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`).run(
+        's-a3'
+      )
+      sessionsRepo.archiveSession('s-a3')
+      sessionsRepo.archiveSession('s-a3')
+      expect(sessionsRepo.getSessionById('s-a3')?.archived_at).toBe('2000-01-01T00:00:00.000Z')
+      // 反向对照：上面不是「怎么写都行」——首归档确实写过值（哨兵是后来手工改的）
+      expect(first).toMatch(ISO_MS)
+    })
+
+    it('unarchiveSession 归 NULL，且同样不动 updated_at', () => {
+      insertSession('s-a4')
+      sessionsRepo.archiveSession('s-a4')
+      pinUpdatedAt('s-a4')
+      sessionsRepo.unarchiveSession('s-a4')
+      const row = sessionsRepo.getSessionById('s-a4')
+      expect(row?.archived_at).toBeNull()
+      expect(row?.updated_at).toBe('2020-01-01 00:00:00')
+    })
+
+    it('listActiveSessions 滤掉归档；listAllSessions 含归档（系统链路口径不变）', () => {
+      insertSession('s-live')
+      insertSession('s-gone')
+      sessionsRepo.archiveSession('s-gone')
+
+      const activeIds = sessionsRepo.listActiveSessions().map((r) => r.id)
+      expect(activeIds).toContain('s-live')
+      expect(activeIds).not.toContain('s-gone')
+
+      // `listAllSessions` 是**系统链路**口径（评估告警播报靠它），过滤塞进去 = 让归档
+      // 静默改变无关子系统的行为。这条断言就是那个不变量的守卫。
+      const allIds = sessionsRepo.listAllSessions().map((r) => r.id)
+      expect(allIds).toContain('s-live')
+      expect(allIds).toContain('s-gone')
+    })
+
+    it('取消归档后回到活跃列表', () => {
+      insertSession('s-back')
+      sessionsRepo.archiveSession('s-back')
+      expect(sessionsRepo.listActiveSessions().map((r) => r.id)).not.toContain('s-back')
+      sessionsRepo.unarchiveSession('s-back')
+      expect(sessionsRepo.listActiveSessions().map((r) => r.id)).toContain('s-back')
+    })
+  })
 })

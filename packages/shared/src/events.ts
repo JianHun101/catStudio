@@ -20,6 +20,10 @@ export const Events = {
   SESSION_UPDATE: 'session-update',
   BROADCAST_MODE_CHANGED: 'broadcast-mode-changed',
   SESSION_DELETED: 'session-deleted',
+  // 服务器→客户端：会话归档状态变化（payload `{ sessionId, archivedAt }`，`null` = 取消归档）。
+  // 全局广播（与 SESSION_DELETED 同款）而非只发会话房间：归档改的是**列表可见性**，
+  // 受影响的是所有正在看列表的客户端，不只是待在那个会话里的。
+  SESSION_ARCHIVED: 'session-archived',
   SESSION_MESSAGES_CLEARED: 'session-messages-cleared',
   AGENT_TYPING: 'agent-typing', // 流式输出的增量
   ERROR: 'error',

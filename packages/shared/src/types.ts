@@ -61,6 +61,8 @@ export interface SessionConfig {
   handoffFrom?: string | null
   /** 运行中的增量摘要（JSON 字符串，SessionSummary） */
   runningSummary?: string | null
+  /** 归档时刻（ISO 8601）；null/缺省 = 活跃。归档 = 用户态「删除」的替代，数据全留 */
+  archivedAt?: string | null
 }
 
 // ─── Message ────────────────────────────────────────

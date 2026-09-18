@@ -360,7 +360,9 @@ export const api = {
   },
 
   // Sessions
-  getSessions: () => request<any[]>('/sessions'),
+  /** 会话列表（默认只回活跃；`includeArchived` = 「显示已归档」开关，spec §4.1） */
+  getSessions: (includeArchived = false) =>
+    request<any[]>(`/sessions${includeArchived ? '?includeArchived=1' : ''}`),
 
   getSession: (id: string) => request<any>(`/sessions/${id}`),
 
@@ -381,6 +383,11 @@ export const api = {
     }),
 
   deleteSession: (id: string) => request<any>(`/sessions/${id}`, { method: 'DELETE' }),
+
+  // 归档（用户态「删除」的替代形态：数据全留，只从默认列表隐藏）
+  archiveSession: (id: string) => request<any>(`/sessions/${id}/archive`, { method: 'POST' }),
+
+  unarchiveSession: (id: string) => request<any>(`/sessions/${id}/unarchive`, { method: 'POST' }),
 
   clearSessionMessages: (id: string) =>
     request<any>(`/sessions/${id}/messages`, { method: 'DELETE' }),

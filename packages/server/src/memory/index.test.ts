@@ -16,7 +16,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
-import { initRepository, chunks as chunksRepo } from '../db/repository/index.js'
+import {
+  initRepository,
+  chunks as chunksRepo,
+  sessions as sessionsRepo,
+  messages as messagesRepo,
+} from '../db/repository/index.js'
 import { bigramTokenize } from '../db/repository/fts.js'
 import type { EmbedResult } from './embedding-client.js'
 
@@ -517,6 +522,55 @@ describe('memory', () => {
       const chunksSrc = fs.readFileSync(path.join(SRC_ROOT, 'db/repository/chunks.ts'), 'utf8')
       expect(chunksSrc).toContain('embedding MATCH ?')
       expect(chunksSrc).not.toContain('vec_distance_cosine')
+    })
+  })
+
+  // ─── 票 7 · 归档不动记忆检索（spec §4.1 硬条款）──────────
+  describe('票 7 · 归档不动记忆检索', () => {
+    const SRC_ROOT_7 = fileURLToPath(new URL('../', import.meta.url)) // packages/server/src/
+
+    it('会话归档前后：同一查询召回逐字相同；会话数据全留（归档 ≠ 删除）', async () => {
+      seedChunk({ docPath: 'docs/adr/0001-a.md', body: '猫咖测试甲', angle: 0 })
+      // 真库形状的会话 + 一条消息（messages.agent_id 有 FK，故用 NULL 作者避开 agents 夹具）
+      getDb().prepare(`INSERT INTO sessions (id, title) VALUES ('s-arch', '要被归档的会话')`).run()
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content) VALUES ('m-arch', 's-arch', 'user', '原话')`
+        )
+        .run()
+
+      const before = await memoryModule.retrieveMemoryContext('猫咖测试')
+      expect(before.reason).toBe('ok')
+      expect(before.text).toContain('猫咖测试甲')
+
+      sessionsRepo.archiveSession('s-arch')
+
+      const after = await memoryModule.retrieveMemoryContext('猫咖测试')
+      expect(after.text).toBe(before.text)
+      expect(after.reason).toBe('ok')
+      // 数据全留：归档后会话、消息照常可查（对照物理删除：那才是查不到）
+      expect(sessionsRepo.getSessionById('s-arch')?.archived_at).not.toBeNull()
+      expect(messagesRepo.getRecentMessages('s-arch', 10)).toHaveLength(1)
+    })
+
+    it('检索链源码零 `archived_at` 引用（归档是列表概念，不进检索面）', () => {
+      // 判据落在**检索链自己的源码**上：只要这条链不认归档列，「归档会导致检索不到」在结构上
+      // 就不可能发生——比「跑一次发现没坏」更强的保证（后者只覆盖跑过的那条路径）。
+      const CHAIN = [
+        'memory/index.ts',
+        'db/repository/chunks.ts',
+        'db/repository/fts.ts',
+        'db/repository/query.ts',
+      ]
+      for (const f of CHAIN) {
+        const src = fs.readFileSync(path.join(SRC_ROOT_7, f), 'utf8')
+        expect(src, f).not.toContain('archived_at')
+      }
+      // 真空性反对照：换个**确实该提**归档列的文件，同一把尺子必须量得出来——
+      // 否则上面四条「零命中」可能只是 grep 面选错了（恒真的假绿门）。
+      expect(fs.readFileSync(path.join(SRC_ROOT_7, 'db/repository/sessions.ts'), 'utf8')).toContain(
+        'archived_at'
+      )
     })
   })
 
