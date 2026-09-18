@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { nowIso, normalizeIsoMs, isoDaysAgo } from './clock.js'
-import { nowIso as timeNowIso } from './time.js'
+import { nowIso as timeNowIso, toIsoDb } from './time.js'
 
 /**
  * 记录时间口径（spec §4.2 ⑤-c）**只有一个生成点**。
@@ -42,5 +42,28 @@ describe('clock · 记录时间生成点唯一性（⑤-c）', () => {
   it('isoDaysAgo：定宽 ISO 毫秒，且比 from 早整 N 天', () => {
     const from = Date.parse('2026-09-17T08:30:00.123Z')
     expect(isoDaysAgo(30, from)).toBe('2026-08-18T08:30:00.123Z')
+  })
+
+  /**
+   * ⚠️ **特征化测试（characterization test），不是「正确行为」的固化**。
+   *
+   * 审查 P3-2 把「`normalizeIsoMs` 与 `time.ts::toIsoDb` 要不要合并回单口径」挂给票 8 裁决。
+   * 光在票单写「职责相近」不够——两者**对同一输入真的给出不同结果**，这里把它钉成可执行证据：
+   * 票 8 合并时这两条会红，**红的正是需要重新裁决的位置**，而不是让人凭印象判断。
+   *
+   * 分歧的实害：`'Z'`(0x5A) > `'.'`(0x2E) ⇒ 省略毫秒的 ISO 串在字符串比较下**大于**同一时刻的
+   * `.000Z`（边界行判反）。今天两库实测无这两种形态的残值（见 `clock.ts` 头注的形态普查），
+   * 故不阻塞票 6。
+   */
+  it('⚠️ 已知分歧（票 8 裁决项）：normalizeIsoMs 的识别面窄于 toIsoDb，两者不可互换', () => {
+    const cases = ['2026-09-17 08:30:00.500', '2026-09-17T08:30:00Z']
+    for (const c of cases) {
+      // normalizeIsoMs：两种形态都**原样透传**（正则只认空格分隔的整秒）
+      expect(normalizeIsoMs(c), c).toBe(c)
+      // toIsoDb：两种形态都归成定宽 ISO 毫秒——这才是跨表比较要的口径
+      expect(toIsoDb(c), c).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    }
+    // 无分歧面（两种形态都认）作为对照，防上面对照组被写成「永远不等」的假判据
+    expect(normalizeIsoMs('2026-09-17 08:30:00')).toBe(toIsoDb('2026-09-17 08:30:00'))
   })
 })
