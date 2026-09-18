@@ -1305,7 +1305,7 @@ export async function runAgentReply(
   }
 
   // 将延迟 + 包信息 + 诊断数据 + token 统计写回 execution_logs
-  execLogsRepo.updateExecutionLogDiagnostics(agent.id, {
+  execLogsRepo.updateExecutionLogDiagnostics(agent.id, sessionId, {
     latencyMs,
     packagesInstalled: JSON.stringify(newPkgs),
     promptChars: estimatedPromptLen,

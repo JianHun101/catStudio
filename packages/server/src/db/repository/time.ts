@@ -10,8 +10,10 @@
  *   repository 层统一生成，调用方不许传（⑤-c）。事件时间（started_at / ended_at 这类
  *   「事情发生时刻」）允许调用方显式传入，但命名必须体现事件语义。
  * - **归一**（读库 / 比较）：`toIsoDb()` / `toIsoDbUpper()`。库里**同时存在**两种形态——
- *   已迁 ISO 的表（messages，票 5）与仍为秒级 `datetime('now')` 的表（sessions /
- *   review_verdicts 等，随各自重建票迁移）。跨形态比较会静默错序：`' '`(0x20) < `'T'`(0x54)
+ *   已迁 ISO 的表（票 5 = `messages`；票 6 批一 = `execution_logs` / flow 系 /
+ *   `review_verdicts` 等）与仍为秒级 `datetime('now')` 的表（`sessions` /
+ *   `session_read_state` / `episodes` / `agents` 等，随各自重建票迁移）。
+ *   跨形态比较会静默错序：`' '`(0x20) < `'T'`(0x54)
  *   ⇒ 秒级串在**同一天**的所有 ISO 串面前一律判小，区间条件整段失配，且不报错。
  */
 

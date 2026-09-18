@@ -15,6 +15,7 @@
  */
 
 import { getDb } from '../db/index.js'
+import { normalizeIsoMs } from '../db/repository/clock.js'
 import type { ReviewVerdict } from './review-verdict-markers.js'
 
 export interface ChainVerdictRow {
@@ -66,10 +67,17 @@ export function getLatestChainVerdict(
  * `since` 传根触发消息的 `created_at`——只数「这条链自己产生过的打回」，
  * 不把锚被复用前的历史算进来。
  *
- * ⚠️ **两侧不同口径**（票 5 连带面）：`since` 来自 `messages`（自票 5 起 ISO 毫秒），而
- * `v.created_at` 仍是秒级 `datetime('now')`（随票 6 迁移）。`' '`(0x20) < `'T'`(0x54)
- * ⇒ 不折算则秒级串在同一天的 ISO 串面前**恒判小**，`> ?` 恒假 ⇒ 链内打回**静默数不到**
- * （不报错，只是归因少一路源）。折算对已是 ISO 的值是 no-op，票 6 落地后无需回改。
+ * ⚠️ **两侧口径必须各自折算后再比**（票 5 与票 6 批一的合并态，两侧折算双保留）：
+ *
+ * - `since` 来自 `messages.created_at`（**票 5 起** ISO 毫秒）、`v.created_at` 来自
+ *   `review_verdicts`（**票 6 批一起** ISO 毫秒）——两库两侧今天**已是同口径**，故下面
+ *   两条折算对 ISO 值都是 no-op（`normalizeIsoMs` 的判据正则要求空格分隔、SQL 的
+ *   `replace(…,' ','T')` 对无空格串无操作）。
+ * - 仍然**两条都留**：`toIsoMs` 对不匹配实测形态的取值是**原样保留**（不落 NULL，见
+ *   `db/migrations.ts`）⇒ 列里可能有非 ISO 残值。SQL 侧折算兜 `v.created_at`、JS 侧
+ *   `normalizeIsoMs` 兜 `since`，各管自己那侧的历史形态。只留单边，对侧一旦出现残值就
+ *   退回格式混比：`' '`(0x20) < `'T'`(0x54) ⇒ 判别静默反向（「严格晚于」恒真或恒假），
+ *   不报错、只是归因少一路源或多算一段历史。
  */
 export function getChainRejectionsSince(
   anchor: string | null | undefined,
@@ -87,5 +95,5 @@ export function getChainRejectionsSince(
          AND v.verdict IN ('reject', 'suggest')
        ORDER BY v.created_at DESC, m.rowid DESC`
     )
-    .all(anchor, sessionId, since) as ChainVerdictRow[]
+    .all(anchor, sessionId, normalizeIsoMs(since)) as ChainVerdictRow[]
 }

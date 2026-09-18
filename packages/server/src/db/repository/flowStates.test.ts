@@ -20,6 +20,10 @@ describe('db/repository/flowStates — recordFlowTransition / getFlowState', () 
   beforeEach(() => {
     setDb(createTestDb())
     initRepository(getDb())
+    // 父行前置（票 6 起 flow_states / flow_state_events 的 session_id 是 RESTRICT 外键）
+    getDb()
+      .prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 't', '[]')`)
+      .run(SESSION)
   })
 
   afterEach(() => {

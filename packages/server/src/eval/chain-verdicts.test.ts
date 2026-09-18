@@ -14,11 +14,30 @@ import { getLatestChainVerdict, getChainRejectionsSince } from './chain-verdicts
 
 const SESSION = 's1'
 
+/**
+ * FK 基础数据（票 6 批一：`review_verdicts` 的 `reviewer_agent_id` /
+ * `subject_agent_id` 均 RESTRICT 外键 → agents；`session_id` / `message_id` 同理）
+ * ——夹具必须造出真实存在的父行，否则子行插不进去（静默零行 ⇒ 断言假绿）。
+ */
 function seedSession(): void {
   getDb().prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 't', '[]')`).run(SESSION)
+  for (const [id, name] of [
+    ['reviewer-1', '吐槽猫'],
+    ['agent-x', 'ds猫'],
+  ] as const) {
+    getDb()
+      .prepare(
+        `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'reviewer')`
+      )
+      .run(id, name)
+  }
 }
 
-/** 落一条判词（消息 task_id = 锚；`verdict` 行同源） */
+/** 落一条判词（消息 task_id = 锚；`verdict` 行同源）。
+ *  `createdAt` 用 **ISO 毫秒**字面量（票 6 重建后 `review_verdicts.created_at` 的库内口径；
+ *  同一夹具内的比较点 `since` 亦取同形串——异形串比较会因 `'T' > ' '` 恒真，
+ *  「严格晚于 since」的判别力会被抹平）。 */
 function seedVerdict(opts: {
   msgId: string
   anchor: string | null
@@ -52,13 +71,13 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
       msgId: 'v-old',
       anchor: 'A',
       verdict: 'approve',
-      createdAt: '2026-09-10 10:00:00',
+      createdAt: '2026-09-10T10:00:00.000Z',
     })
     seedVerdict({
       msgId: 'v-new',
       anchor: 'A',
       verdict: 'suggest',
-      createdAt: '2026-09-10 11:00:00',
+      createdAt: '2026-09-10T11:00:00.000Z',
     })
 
     const latest = getLatestChainVerdict('A', SESSION)
@@ -68,7 +87,12 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
   })
 
   it('getLatestChainVerdict：别的锚名下的判词不串门', () => {
-    seedVerdict({ msgId: 'v-b', anchor: 'B', verdict: 'reject', createdAt: '2026-09-10 12:00:00' })
+    seedVerdict({
+      msgId: 'v-b',
+      anchor: 'B',
+      verdict: 'reject',
+      createdAt: '2026-09-10T12:00:00.000Z',
+    })
 
     expect(getLatestChainVerdict('A', SESSION)).toBeUndefined()
     expect(getLatestChainVerdict('B', SESSION)?.message_id).toBe('v-b')
@@ -79,7 +103,7 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
       msgId: 'v-null',
       anchor: null,
       verdict: 'approve',
-      createdAt: '2026-09-10 10:00:00',
+      createdAt: '2026-09-10T10:00:00.000Z',
     })
 
     expect(getLatestChainVerdict(null, SESSION)).toBeUndefined()
@@ -91,7 +115,7 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
       msgId: 'v-s1',
       anchor: 'A',
       verdict: 'approve',
-      createdAt: '2026-09-10 10:00:00',
+      createdAt: '2026-09-10T10:00:00.000Z',
     })
 
     expect(getLatestChainVerdict('A', 'other-session')).toBeUndefined()
@@ -99,23 +123,40 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
   })
 
   it('getChainRejectionsSince：只取 reject/suggest 且严格晚于 since，DESC 序', () => {
-    seedVerdict({ msgId: 'v-1', anchor: 'A', verdict: 'approve', createdAt: '2026-09-10 10:00:00' })
-    seedVerdict({ msgId: 'v-2', anchor: 'A', verdict: 'suggest', createdAt: '2026-09-10 11:00:00' })
-    seedVerdict({ msgId: 'v-3', anchor: 'A', verdict: 'reject', createdAt: '2026-09-10 12:00:00' })
+    seedVerdict({
+      msgId: 'v-1',
+      anchor: 'A',
+      verdict: 'approve',
+      createdAt: '2026-09-10T10:00:00.000Z',
+    })
+    seedVerdict({
+      msgId: 'v-2',
+      anchor: 'A',
+      verdict: 'suggest',
+      createdAt: '2026-09-10T11:00:00.000Z',
+    })
+    seedVerdict({
+      msgId: 'v-3',
+      anchor: 'A',
+      verdict: 'reject',
+      createdAt: '2026-09-10T12:00:00.000Z',
+    })
 
-    const rows = getChainRejectionsSince('A', SESSION, '2026-09-10 10:30:00')
+    const rows = getChainRejectionsSince('A', SESSION, '2026-09-10T10:30:00.000Z')
     // approve 不算打回；since 之前的（无）不计；DESC 序 ⇒ v-3 在前
     expect(rows.map((r) => r.message_id)).toEqual(['v-3', 'v-2'])
   })
 
   it('getChainRejectionsSince：无锚 → 空数组（不抛错）', () => {
-    expect(getChainRejectionsSince(null, SESSION, '2026-09-10 00:00:00')).toEqual([])
+    expect(getChainRejectionsSince(null, SESSION, '2026-09-10T00:00:00.000Z')).toEqual([])
   })
 
-  // ─── 票 5 连带面：跨形态比较（since 来自 messages = ISO，判词行 = 秒级）──────
-  // 票 5 把 `messages.created_at` 迁到 ISO 毫秒，而 `review_verdicts.created_at` 仍是秒级
-  // `datetime('now')`（随票 6 迁移）。两侧混比时 `' '`(0x20) < `'T'`(0x54) ⇒ 不折算则
-  // 秒级串在 ISO 串面前**恒判小**，`v.created_at > ?` 恒假 ⇒ 打回静默数不到（不报错）。
+  // ─── 跨形态**残值**兜底（票 5 + 票 6 批一合并态的判据）──────────────────
+  // 两侧列今天都已 ISO（票 5 = messages、票 6 批一 = review_verdicts），生产写入不再产秒级行。
+  // 但 `toIsoMs` 对不匹配实测形态的取值**原样保留**（不落 NULL，见 `db/migrations.ts`）⇒
+  // 存量库仍可能有秒级判词行。以下用例**刻意**喂秒级行，判的就是这条残值兜底：
+  // `' '`(0x20) < `'T'`(0x54) ⇒ 不折算则秒级串在 ISO 串面前**恒判小**，
+  // `v.created_at > ?` 恒假 ⇒ 打回静默数不到（不报错）。
 
   it('getChainRejectionsSince：since 是 ISO（messages 口径）+ 判词行是秒级 → 仍能命中', () => {
     seedVerdict({ msgId: 'v-1', anchor: 'A', verdict: 'approve', createdAt: '2026-09-10 10:00:00' })
@@ -147,13 +188,13 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
       msgId: 'v-zzz',
       anchor: 'A',
       verdict: 'suggest',
-      createdAt: '2026-09-10 10:00:00',
+      createdAt: '2026-09-10T10:00:00.000Z',
     })
     seedVerdict({
       msgId: 'v-aaa',
       anchor: 'A',
       verdict: 'approve',
-      createdAt: '2026-09-10 10:00:00',
+      createdAt: '2026-09-10T10:00:00.000Z',
     })
 
     // 后插入 = 更新的那条 ⇒ 旧实现返回 v-zzz（uuid 字典序更大者）
@@ -165,16 +206,16 @@ describe('eval/chain-verdicts — 按锚查判词', () => {
       msgId: 'v-zzz',
       anchor: 'A',
       verdict: 'suggest',
-      createdAt: '2026-09-10 11:00:00',
+      createdAt: '2026-09-10T11:00:00.000Z',
     })
     seedVerdict({
       msgId: 'v-aaa',
       anchor: 'A',
       verdict: 'reject',
-      createdAt: '2026-09-10 11:00:00',
+      createdAt: '2026-09-10T11:00:00.000Z',
     })
 
-    const rows = getChainRejectionsSince('A', SESSION, '2026-09-10 10:00:00')
+    const rows = getChainRejectionsSince('A', SESSION, '2026-09-10T10:00:00.000Z')
     // [0] 被 episodes 当「最近一次打回」的时间源——但它只取 `.created_at`，同秒并列时
     // 两边同值 ⇒ 这条钉的是**口径一致**，不是「取错条会翻转 corrected_success」。
     // 判别力来自「哪种插入序胜出」：旧实现按 uuid 字典序，胜者必为 v-zzz。

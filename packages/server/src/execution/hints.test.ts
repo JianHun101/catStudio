@@ -282,6 +282,9 @@ describe('hints', () => {
           .run(id, name, role)
       add('agent-2', '吐槽猫', 'reviewer')
       add('agent-3', 'ds猫', 'implementer')
+      // 票 6 批一：review_verdicts.subject_agent_id 有 FK → agents
+      // ⇒「判词对象是他猫」用例里的 agent-9 必须是真实存在的猫（否则 FK 直接拒插）
+      add('agent-9', '别的猫', 'implementer')
     }
 
     /** 落一条判词：消息 task_id = 链锚（T-E 后 agent 回复继承锚），verdict 行同源 */

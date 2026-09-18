@@ -577,10 +577,21 @@ describe('Session Routes', () => {
       const { id } = JSON.parse(create.body)
 
       const db = (await import('../db/index.js')).getDb()
+      // FK 补链后（票 6 批一）：execution_logs 的 `triggered_by_message_id`（触发消息）与
+      // `message_id`（回复消息）双双 → messages.id ⇒ 两个父行都必须真的存在
+      for (const mid of ['trigger-1', 'trigger-2', 'msg-reply-1']) {
+        db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'user', 'x', '[]')`
+        ).run(mid, id)
+      }
+      // 两条行刻意取**两种时间形态**：票 6 起列口径是 ISO 毫秒（主路径），存量库仍是
+      // 空格分隔秒级串（兼容路径）。响应的 `startedAt` 必须两条都归一成 ISO 毫秒——
+      // 旧的 `replace(' ','T') + 'Z'` 对 ISO 行会拼出 `…000ZZ`（前端拿到畸形串）。
       db.prepare(
         `INSERT INTO execution_logs
            (id, session_id, agent_id, triggered_by_message_id, status, trace_id, started_at, latency_ms, message_id, prompt_tokens, completion_tokens)
-         VALUES ('log-ok', ?, ?, 'trigger-1', 'completed', 'trace-1', '2026-09-01 10:00:00', 12300, 'msg-reply-1', 2100, 800)`
+         VALUES ('log-ok', ?, ?, 'trigger-1', 'completed', 'trace-1', '2026-09-01T10:00:00.000Z', 12300, 'msg-reply-1', 2100, 800)`
       ).run(id, agentId1)
       db.prepare(
         `INSERT INTO execution_logs
@@ -600,7 +611,7 @@ describe('Session Routes', () => {
         latencyMs: 12300,
         promptTokens: 2100,
         completionTokens: 800,
-        startedAt: '2026-09-01T10:00:00Z',
+        startedAt: '2026-09-01T10:00:00.000Z', // ISO 行原样透出（不被二次拼 Z）
       })
 
       const failed = executions.find((x: any) => x.agentId === agentId2)
@@ -610,7 +621,7 @@ describe('Session Routes', () => {
         latencyMs: null,
         promptTokens: null,
         completionTokens: null,
-        startedAt: '2026-09-01T11:00:00Z',
+        startedAt: '2026-09-01T11:00:00.000Z', // 存量秒级行被归一成 ISO 毫秒
       })
     })
 

@@ -2,6 +2,7 @@
  * Session 表查询函数。
  */
 import type Database from 'better-sqlite3'
+import { purgeSessionDependents } from './dependents.js'
 import type { SessionRow } from './types.js'
 import { nowIso } from './time.js'
 
@@ -287,10 +288,16 @@ export function updateSessionSummaryOnly(id: string, summary: string): void {
   ).run(summary, id)
 }
 
+// ↓ 删会话前先清挂在它上面的子行（票 6：flow_states / flow_state_events /
+//   review_verdicts.session_id / connector_bindings 四条 FK 全是 RESTRICT）。
+//   消息与执行日志仍由调用方按既有顺序先删（那一步自带消息侧的子行清理）。
+
 export function deleteSession(id: string): void {
+  purgeSessionDependents({ kind: 'id', sessionId: id })
   db.prepare('DELETE FROM sessions WHERE id = ?').run(id)
 }
 
 export function deleteAllSessions(): void {
+  purgeSessionDependents({ kind: 'all' })
   db.exec('DELETE FROM sessions')
 }

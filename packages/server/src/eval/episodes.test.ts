@@ -19,12 +19,24 @@ import {
 import { toIsoDb } from '../db/repository/time.js'
 import type { EpisodeRow } from '../db/repository/types.js'
 
-/** SQLite datetime 格式（UTC 'YYYY-MM-DD HH:MM:SS'）——与 datetime('now') 字符串比较一致 */
+/** SQLite datetime 格式（UTC 'YYYY-MM-DD HH:MM:SS'）——与 datetime('now') 字符串比较一致。
+ *  **仅用于 `messages.created_at`**：messages 表未随票 6 重建，写入口不传该列 ⇒ 落
+ *  `DEFAULT (datetime('now'))`；零执行扫描的 `created_at < datetime('now','-30 minutes')`
+ *  也要求同形串（异形串比较会因 `'T' > ' '` 恒假，窗口内恒判不出来）。 */
 function sqliteNow(offsetMinutes = 0): string {
   return new Date(Date.now() - offsetMinutes * 60000).toISOString().replace('T', ' ').slice(0, 19)
 }
 
-/** FK 基础数据：session s1 + agent agent-1（execution_logs 外键依赖） */
+/** 重建表时间口径（票 6：ISO 毫秒，仓库层 `nowIso()` 生成）——
+ *  `execution_logs.started_at/ended_at` 与 `review_verdicts.created_at` 用它；
+ *  两者在 `classifyCompleted` 里互相比较（`doneAt > lastRejectAt`），必须同形。 */
+function isoNow(offsetMinutes = 0): string {
+  return new Date(Date.now() - offsetMinutes * 60000).toISOString()
+}
+
+/** FK 基础数据：session s1 + agent agent-1 + reviewer-1
+ *  （票 6 批一：`execution_logs` / `review_verdicts` 的引用列都是 RESTRICT 外键 ⇒
+ *   夹具必须造出真实存在的父行——否则子行插不进，断言读到 undefined） */
 function seedBase(): void {
   getDb()
     .prepare(`INSERT OR IGNORE INTO sessions (id, title, agent_ids) VALUES ('s1', 't', '[]')`)
@@ -33,6 +45,12 @@ function seedBase(): void {
     .prepare(
       `INSERT OR IGNORE INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
        VALUES ('agent-1', '店长', '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'store')`
+    )
+    .run()
+  getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES ('reviewer-1', '吐槽猫', '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'reviewer')`
     )
     .run()
 }
@@ -68,7 +86,7 @@ function insertExecution(overrides: Record<string, unknown> = {}): void {
       (overrides.triggered_by as string) ?? 'msg-root',
       (overrides.status as string) ?? 'completed',
       (overrides.trace_id as string) ?? 'trace-1',
-      (overrides.started_at as string) ?? sqliteNow(),
+      (overrides.started_at as string) ?? isoNow(),
       (overrides.ended_at as string | null) ?? null,
       (overrides.error_message as string | null) ?? null,
       (overrides.error_type as string | null) ?? null,
@@ -78,9 +96,11 @@ function insertExecution(overrides: Record<string, unknown> = {}): void {
 
 /** 插一条审查回复消息 + 对应 verdict（verdict 消息 task_id 可注入——E3 接线后 = 源链 trace_id）。
  *
- *  ⚠️ 两侧**刻意不同口径**，这正是票 5 之后的生产形态：`messages.created_at` 已迁 ISO 毫秒，
- *  `review_verdicts.created_at` 仍是秒级（随票 6 迁移）。`getChainRejectionsSince` 的跨形态
- *  比较判据（`chain-verdicts.ts`）就靠这个差异才测得到——两侧都归一 = 判据失去判别力。 */
+ *  ⚠️ 两侧**刻意不同口径**：`messages.created_at` 走 `toIsoDb`（ISO 毫秒），判词行走 `sqliteNow()`
+ *  （秒级 `YYYY-MM-DD HH:MM:SS`）。**注意这只是刻意造的残值形态，不是今天的生产形态**——
+ *  票 5 与票 6 批一之后两列**都已是 ISO**；秒级行只剩 `toIsoMs` 原样保留的存量残值
+ *  （见 `db/migrations.ts`）。造它是因为 `getChainRejectionsSince` 的跨形态兜底判据
+ *  （`chain-verdicts.ts`）只有喂残值才测得到——两侧同形态 = 判据失去判别力。 */
 function insertVerdict(overrides: Record<string, unknown> = {}): void {
   const msgId = (overrides.msg_id as string) ?? `vmsg-${Math.random()}`
   getDb()
@@ -101,7 +121,7 @@ function insertVerdict(overrides: Record<string, unknown> = {}): void {
     .run(
       msgId,
       (overrides.verdict as string) ?? 'reject',
-      (overrides.created_at as string) ?? sqliteNow()
+      (overrides.created_at as string) ?? isoNow()
     )
 }
 
@@ -167,7 +187,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       triggered_by: rootId,
       status: 'running',
       trace_id: 'trace-1',
-      started_at: sqliteNow(9),
+      started_at: isoNow(9),
     })
 
     classifyEpisodes()
@@ -186,14 +206,14 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       trace_id: 'trace-1',
       error_message: 'server_restart',
       error_type: 'server_restart',
-      started_at: sqliteNow(9),
+      started_at: isoNow(9),
     })
     insertExecution({
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      started_at: sqliteNow(5),
-      ended_at: sqliteNow(4),
+      started_at: isoNow(5),
+      ended_at: isoNow(4),
     })
 
     classifyEpisodes()
@@ -209,7 +229,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      ended_at: sqliteNow(8),
+      ended_at: isoNow(8),
     })
 
     classifyEpisodes()
@@ -223,7 +243,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       triggered_by: uRoot,
       status: 'completed',
       trace_id: 'trace-U',
-      ended_at: sqliteNow(8),
+      ended_at: isoNow(8),
     })
     // H 根：交接消息（内容特征前缀），被 agent 补填执行
     const hRoot = insertRootMessage({
@@ -235,7 +255,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       triggered_by: hRoot,
       status: 'completed',
       trace_id: 'trace-H',
-      ended_at: sqliteNow(18),
+      ended_at: isoNow(18),
     })
 
     classifyEpisodes()
@@ -255,11 +275,11 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-A',
-      started_at: sqliteNow(50),
-      ended_at: sqliteNow(45),
+      started_at: isoNow(50),
+      ended_at: isoNow(45),
     })
     // 审查回复消息 task_id = 源链 trace_id（投递带 taskId 机制生效，E3 接线）
-    insertVerdict({ task_id: 'trace-A', verdict: 'reject', created_at: sqliteNow(40) })
+    insertVerdict({ task_id: 'trace-A', verdict: 'reject', created_at: isoNow(40) })
 
     classifyEpisodes()
     expect(getEpisode(rootId)!.outcome).toBe('needs_investigation')
@@ -267,13 +287,13 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
 
   it("②'' 变体：打回后重做完成（completed 晚于最近打回）→ corrected_success 非 success", () => {
     const rootId = insertRootMessage({ id: 'msg-root', created_at: sqliteNow(60) })
-    insertVerdict({ task_id: 'trace-A', verdict: 'reject', created_at: sqliteNow(50) })
+    insertVerdict({ task_id: 'trace-A', verdict: 'reject', created_at: isoNow(50) })
     insertExecution({
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-A',
-      started_at: sqliteNow(40),
-      ended_at: sqliteNow(30),
+      started_at: isoNow(40),
+      ended_at: isoNow(30),
     })
 
     classifyEpisodes()
@@ -294,11 +314,11 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-B', // 当轮追踪 id ≠ 锚（非同一个值，旧实现正是拿它去 JOIN）
-      started_at: sqliteNow(50),
-      ended_at: sqliteNow(45),
+      started_at: isoNow(50),
+      ended_at: isoNow(45),
     })
     // 判词消息 task_id = 链锚（T-E 后 agent 回复继承触发消息的 task_id）
-    insertVerdict({ task_id: 'anchor-A', verdict: 'reject', created_at: sqliteNow(40) })
+    insertVerdict({ task_id: 'anchor-A', verdict: 'reject', created_at: isoNow(40) })
 
     classifyEpisodes()
     const ep = getEpisode(rootId)
@@ -315,10 +335,10 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-legacy',
-      started_at: sqliteNow(50),
-      ended_at: sqliteNow(45),
+      started_at: isoNow(50),
+      ended_at: isoNow(45),
     })
-    insertVerdict({ task_id: 'trace-legacy', verdict: 'suggest', created_at: sqliteNow(40) })
+    insertVerdict({ task_id: 'trace-legacy', verdict: 'suggest', created_at: isoNow(40) })
 
     classifyEpisodes()
     const ep = getEpisode(rootId)
@@ -330,13 +350,13 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
 
   it('③ suggest + completed 晚于最近 suggest → corrected_success', () => {
     const rootId = insertRootMessage({ id: 'msg-root', created_at: sqliteNow(60) })
-    insertVerdict({ task_id: 'trace-1', verdict: 'suggest', created_at: sqliteNow(40) })
+    insertVerdict({ task_id: 'trace-1', verdict: 'suggest', created_at: isoNow(40) })
     insertExecution({
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      started_at: sqliteNow(30),
-      ended_at: sqliteNow(20),
+      started_at: isoNow(30),
+      ended_at: isoNow(20),
     })
 
     classifyEpisodes()
@@ -349,10 +369,10 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      started_at: sqliteNow(50),
-      ended_at: sqliteNow(45),
+      started_at: isoNow(50),
+      ended_at: isoNow(45),
     })
-    insertVerdict({ task_id: 'trace-1', verdict: 'suggest', created_at: sqliteNow(40) })
+    insertVerdict({ task_id: 'trace-1', verdict: 'suggest', created_at: isoNow(40) })
 
     classifyEpisodes()
     expect(getEpisode(rootId)!.outcome).toBe('needs_investigation')
@@ -366,7 +386,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       trace_id: 'trace-1',
       error_message: 'server_restart',
       error_type: 'server_restart',
-      started_at: sqliteNow(9),
+      started_at: isoNow(9),
     })
 
     classifyEpisodes()
@@ -381,7 +401,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       trace_id: 'trace-1',
       error_message: 'server_restart',
       error_type: 'server_restart',
-      started_at: sqliteNow(9),
+      started_at: isoNow(9),
     })
     insertExecution({
       triggered_by: rootId,
@@ -389,7 +409,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       trace_id: 'trace-1',
       error_message: '执行超时',
       error_type: 'timeout',
-      started_at: sqliteNow(5),
+      started_at: isoNow(5),
     })
 
     classifyEpisodes()
@@ -404,7 +424,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       trace_id: 'trace-1',
       error_message: 'boom',
       error_type: null,
-      started_at: sqliteNow(9),
+      started_at: isoNow(9),
     })
     insertExecution({
       triggered_by: rootId,
@@ -412,7 +432,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       trace_id: 'trace-1',
       error_message: 'silent',
       error_type: 'unknown',
-      started_at: sqliteNow(5),
+      started_at: isoNow(5),
     })
 
     classifyEpisodes()
@@ -427,7 +447,7 @@ describe('classifyEpisodes — 判定优先级 1-5', () => {
       trace_id: 'trace-1',
       error_message: 'JSON 解析失败',
       error_type: 'parse_error',
-      started_at: sqliteNow(9),
+      started_at: isoNow(9),
     })
 
     classifyEpisodes()
@@ -470,7 +490,7 @@ describe('scanZeroExecutionEpisodes — 零执行路径（G2-N5 + G3 + G5 + N9�
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      ended_at: sqliteNow(20),
+      ended_at: isoNow(20),
     })
     expect(scanZeroExecutionEpisodes()).toBe(0)
   })
@@ -574,8 +594,8 @@ describe('upsert 幂等（⑥）与重判覆盖', () => {
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      started_at: sqliteNow(50),
-      ended_at: sqliteNow(45),
+      started_at: isoNow(50),
+      ended_at: isoNow(45),
     })
 
     classifyEpisodes()
@@ -583,7 +603,7 @@ describe('upsert 幂等（⑥）与重判覆盖', () => {
     expect(getEpisode(rootId)!.outcome).toBe('success')
 
     // 任务打回 → 重判翻转（review_verdicts 晚于根）
-    insertVerdict({ task_id: 'trace-1', verdict: 'reject', created_at: sqliteNow(40) })
+    insertVerdict({ task_id: 'trace-1', verdict: 'reject', created_at: isoNow(40) })
     classifyEpisodes()
     expect(countEpisodes()).toBe(1) // 不重复
     expect(getEpisode(rootId)!.outcome).toBe('needs_investigation')
@@ -614,8 +634,8 @@ describe('P5 全量重评（classification_ver 驱动，规格 §3 承重假设�
       triggered_by: rootId,
       status: 'completed',
       trace_id: 'trace-1',
-      started_at: sqliteNow(50),
-      ended_at: sqliteNow(45),
+      started_at: isoNow(50),
+      ended_at: isoNow(45),
     })
     // 模拟旧规则（v2.0）已判 abandoned 的存量行——schema 无变化，直接覆盖重评
     getDb()
@@ -643,8 +663,8 @@ describe('P5 全量重评（classification_ver 驱动，规格 §3 承重假设�
       triggered_by: uOk,
       status: 'completed',
       trace_id: 'trace-u',
-      started_at: sqliteNow(50),
-      ended_at: sqliteNow(45),
+      started_at: isoNow(50),
+      ended_at: isoNow(45),
     })
     // U 根 abandoned（零执行超窗——无 @ 闲聊暴露语义）
     insertRootMessage({ id: 'msg-u-drop', created_at: sqliteNow(60) })
@@ -660,7 +680,7 @@ describe('P5 全量重评（classification_ver 驱动，规格 §3 承重假设�
       triggered_by: uRunning,
       status: 'running',
       trace_id: 'trace-run',
-      started_at: sqliteNow(50),
+      started_at: isoNow(50),
     })
 
     classifyEpisodes()

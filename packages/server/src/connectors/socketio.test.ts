@@ -1109,6 +1109,18 @@ describe('socketio connector', () => {
       llmApiKey: 'sk-test',
     }
 
+    /** 触发消息必须真实存在（票 6：`execution_logs.triggered_by_message_id` → messages
+     *  是 RESTRICT 外键）。缺行 = 执行建日志时就撞 FK，用例会以「没有 thinking 事件」
+     *  这种**看不出根因**的形式失败。 */
+    function seedTriggerMessage(id: string): void {
+      getDb()
+        .prepare(
+          `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, 'session-1', 'user', '@店长 派活', '[]')`
+        )
+        .run(id)
+    }
+
     it('agent 正在处理消息 A 时，消息 B 不应立即执行（留在队列等排空）', async () => {
       const mod = await import('./socketio.js')
       const { getAdapterForAgent } = await import('../llm/registry.js')
@@ -1184,6 +1196,8 @@ describe('socketio connector', () => {
       })
       mockRoomEmit.mockClear()
 
+      seedTriggerMessage('msg-B')
+
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [agentCfg as any],
@@ -1210,6 +1224,8 @@ describe('socketio connector', () => {
       })
       mockRoomEmit.mockClear()
       const opencodeCfg = { ...agentCfg, llmProvider: 'opencode', llmApiKey: '' }
+
+      seedTriggerMessage('msg-B')
 
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
@@ -1241,6 +1257,8 @@ describe('socketio connector', () => {
       })
       mockRoomEmit.mockClear()
       const ollamaCfg = { ...agentCfg, llmProvider: 'ollama', llmApiKey: '' }
+
+      seedTriggerMessage('msg-B')
 
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
@@ -1274,6 +1292,8 @@ describe('socketio connector', () => {
       const noKeyCfg = { ...agentCfg, llmApiKey: '' }
       // C1 v3：引擎从 DB 反查 agent——把 DB 行 key 置空才触发 no-key 守卫
       getDb().prepare(`UPDATE agents SET llm_api_key = '' WHERE id = 'agent-1'`).run()
+
+      seedTriggerMessage('msg-B')
 
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
@@ -3151,11 +3171,19 @@ describe('socketio connector', () => {
            VALUES (?, ?, ?, 'agent', ?, '[]', datetime('now', '-1 minute'))`
         ).run('msg-reply', 'session-1', 'agent-1', '已补填')
       }
+      // ⚠️ 「触发消息已被清理、执行日志还留着」这一状态在 FK 立闸（票 6）后**不再可能自然
+      // 产生**：`execution_logs.triggered_by_message_id` 是 RESTRICT 外键（删消息会被拦），
+      // 删除端点也会先清日志。它只剩**存量库残留**一种来路 ⇒ 造它必须临时关 FK。
+      // 这同时说明恢复路径里的 `messageExists` 判据已退化为**防御性兜底**（对存量库仍有效），
+      // 代码保留——与 spec §4.3 对「悬空补 null」降级路径的处置同款。
+      const legacyDangling = opts.triggerExists === false
+      if (legacyDangling) db.pragma('foreign_keys = OFF')
       db.prepare(
         `INSERT INTO execution_logs
            (id, session_id, agent_id, triggered_by_message_id, status, error_message, started_at)
          VALUES (?, ?, ?, ?, 'failed', 'server_restart', datetime('now', '-1 minute'))`
       ).run('exec-1', 'session-1', 'agent-1', 'msg-trigger')
+      if (legacyDangling) db.pragma('foreign_keys = ON')
     }
 
     it('server_restart 记录 + 触发消息存在 + 未回复 → 重新执行该 agent', async () => {
@@ -3208,6 +3236,14 @@ describe('socketio connector', () => {
            VALUES (?, ?, 'user', ?, '["店长"]', datetime('now', '-2 minutes'))`
         )
         .run('msg-trigger', 'session-1', '@店长 请补填交接文档')
+      // 回复行也要真实存在（票 6：`execution_logs.message_id` → messages RESTRICT）；
+      // 本用例的语义正是「message_id 非空 = 该执行已完成并写回过回复」。
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+           VALUES ('msg-reply', 'session-1', 'agent-1', 'agent', '已补填', '[]', datetime('now', '-1 minute'))`
+        )
+        .run()
       getDb()
         .prepare(
           `INSERT INTO execution_logs

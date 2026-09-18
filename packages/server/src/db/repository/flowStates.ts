@@ -15,6 +15,7 @@
  */
 import type Database from 'better-sqlite3'
 import { createLogger } from '../../logger.js'
+import { nowIso } from './clock.js'
 import type { FlowStateRow } from './types.js'
 
 const log = createLogger('flow-state')
@@ -50,18 +51,20 @@ export function recordFlowTransition(
 ): { changes: number } {
   const upsert = db.prepare(
     `INSERT INTO flow_states (session_id, commit_sha, state, updated_at)
-     VALUES (?, ?, ?, datetime('now'))
-     ON CONFLICT(session_id, commit_sha) DO UPDATE SET state = excluded.state, updated_at = datetime('now')`
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(session_id, commit_sha) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at`
   )
   const audit = db.prepare(
-    `INSERT INTO flow_state_events (session_id, commit_sha, from_state, to_state, intent)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO flow_state_events (session_id, commit_sha, from_state, to_state, intent, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
   )
 
+  // 记录时间由本层生成（⑤-c）：状态字段与审计流水同一时刻、同一口径（ISO 毫秒）
+  const now = nowIso()
   const tx = db.transaction((): void => {
     const prev = getFlowState(sessionId, commitSha)
-    upsert.run(sessionId, commitSha, state)
-    audit.run(sessionId, commitSha, prev?.state ?? null, state, intent)
+    upsert.run(sessionId, commitSha, state, now)
+    audit.run(sessionId, commitSha, prev?.state ?? null, state, intent, now)
   })
   tx()
 

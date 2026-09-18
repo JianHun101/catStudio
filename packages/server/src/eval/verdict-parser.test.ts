@@ -395,10 +395,49 @@ describe('parseReviewVerdict — 纯函数', () => {
   })
 })
 
+/**
+ * FK 基础数据（票 6 批一）：`review_verdicts` / `review_parse_failures` 的引用列全是
+ * RESTRICT 外键——`message_id`→messages、`session_id`→sessions、`reviewer_agent_id` /
+ * `subject_agent_id`→agents。夹具缺任一个父行，落库就被拒；而 `recordReviewVerdict`
+ * 的写入包在 try/catch 里（DB 异常静默丢弃，契约如此）⇒ 拒绝不抛错、只表现为
+ * 「表里查不到行」，断言读到 undefined——**故父行必须显式造出来**。
+ */
+function seedBase(): void {
+  getDb()
+    .prepare(`INSERT OR IGNORE INTO sessions (id, title, agent_ids) VALUES ('s1', 't', '[]')`)
+    .run()
+  // id 与 TARGETS 一一对应：'reviewer-1' 是 reviewer_agent_id；'agent-1' / 'agent-3'
+  // 是可能的 subject_agent_id（T-N 后 subject 落 id，故父行 id 必须与断言值同域）
+  for (const [id, name] of [
+    ['reviewer-1', '吐槽猫'],
+    ['agent-1', '店长'],
+    ['agent-3', 'ds猫'],
+  ] as const) {
+    getDb()
+      .prepare(
+        `INSERT OR IGNORE INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+         VALUES (?, ?, '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'reviewer')`
+      )
+      .run(id, name)
+  }
+}
+
+/** 被审查的那条消息（review_verdicts / review_parse_failures 的 message_id 父行）；
+ *  created_at 走表默认值（messages 未随票 6 重建，仍有 DEFAULT） */
+function seedMessage(id: string): void {
+  getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, 's1', 'agent', '审查回复', '[]')`
+    )
+    .run(id)
+}
+
 describe('recordReviewVerdict — 解析 + 落库', () => {
   beforeEach(() => {
     setDb(createTestDb())
     initRepository(getDb())
+    seedBase()
   })
 
   afterEach(() => {
@@ -414,6 +453,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
       Record<string, unknown> | undefined
 
   it('approve → review_verdicts 落库 subject=null，failure 表不写', () => {
+    seedMessage('m-approve')
     recordReviewVerdict({
       messageId: 'm-approve',
       sessionId: 's1',
@@ -430,6 +470,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
   })
 
   it('suggest + 只@店长 → review_verdicts subject=null + failure no_subject 双写', () => {
+    seedMessage('m-nosubject')
     recordReviewVerdict({
       messageId: 'm-nosubject',
       sessionId: 's1',
@@ -446,6 +487,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
   })
 
   it('comment → review_verdicts 落库 verdict=comment，failure 表不写（CHECK 已放宽）', () => {
+    seedMessage('m-comment')
     recordReviewVerdict({
       messageId: 'm-comment',
       sessionId: 's1',
@@ -460,6 +502,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
   })
 
   it('bad_verdict → 只写 failure 表，不写 review_verdicts', () => {
+    seedMessage('m-bad')
     recordReviewVerdict({
       messageId: 'm-bad',
       sessionId: 's1',
@@ -474,6 +517,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
   })
 
   it('装饰 + 标签前缀格式 → review_verdicts 真实落库（旧实现静默 no-marker）', () => {
+    seedMessage('m-decorated')
     recordReviewVerdict({
       messageId: 'm-decorated',
       sessionId: 's1',
@@ -488,6 +532,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
   })
 
   it('no-marker → 两表都不写', () => {
+    seedMessage('m-none')
     recordReviewVerdict({
       messageId: 'm-none',
       sessionId: 's1',
@@ -500,6 +545,7 @@ describe('recordReviewVerdict — 解析 + 落库', () => {
   })
 
   it('同 message_id 重复落库（INSERT OR IGNORE）→ 不抛错不覆盖', () => {
+    seedMessage('m-dupe')
     recordReviewVerdict({
       messageId: 'm-dupe',
       sessionId: 's1',

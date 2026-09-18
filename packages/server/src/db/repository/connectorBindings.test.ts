@@ -16,6 +16,11 @@ describe('connectorBindings repo', () => {
     db = createTestDb()
     setDb(db)
     initRepository(db)
+    // FK 补链后（票 6 批一）：`connector_bindings.session_id` → sessions.id（RESTRICT）
+    // ⇒ 各用例引用的会话必须真的存在（本文件沿用字面量 id 作断言值，故在此整批备齐）
+    for (const sid of ['session-1', 'session-2', 'session-3', 's1', 's2', 's3']) {
+      db.prepare('INSERT INTO sessions (id, title) VALUES (?, ?)').run(sid, sid)
+    }
   })
 
   afterEach(() => {
@@ -87,11 +92,13 @@ describe('connectorBindings repo', () => {
 
   it('DB unique constraint rejects raw duplicate insert', () => {
     bindingsRepo.upsertConnectorBinding('qq', 'group', '1', 's1')
+    // `created_at` 显式给值：重建后该列 NOT NULL 无 DEFAULT —— 不写就是撞 NOT NULL
+    // （抛是抛，但拦下这次插入的是「缺列」而不是本用例要判的 UNIQUE，断言会变成假绿）
     expect(() =>
       db
         .prepare(
-          `INSERT INTO connector_bindings (id, platform, external_type, external_id, session_id)
-           VALUES ('dup', 'qq', 'group', '1', 's2')`
+          `INSERT INTO connector_bindings (id, platform, external_type, external_id, session_id, created_at)
+           VALUES ('dup', 'qq', 'group', '1', 's2', '2026-09-01T00:00:00.000Z')`
         )
         .run()
     ).toThrow()

@@ -282,10 +282,16 @@ describe('Message Routes', () => {
          VALUES ('agent-orphan', '孤猫', '🐈', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
       ).run()
       // 执行行在，但它指向的消息**不在** messages 表（LEFT JOIN 的边界）
+      // —— 票 6 批一给 `triggered_by_message_id` 补了 FK（RESTRICT）后，这个状态
+      // 无法在 FK 打开时造出（同 `db/repository/executionLogs.test.ts` 的
+      // 「执行行指向已不存在的 agent」用例）：临时放开 FK 造「存量行 / 缺 FK 库」的形态，
+      // 造完立刻恢复 —— 本用例判的是 LEFT JOIN 的容错语义，不是 FK 能不能挡。
+      db.pragma('foreign_keys = OFF')
       db.prepare(
         `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, trace_id)
-         VALUES ('log-orphan', 'session-orphan', 'agent-orphan', 'no-such-message', 'completed', datetime('now'), 'trace-orphan')`
+         VALUES ('log-orphan', 'session-orphan', 'agent-orphan', 'no-such-message', 'completed', '2026-09-01T10:00:00.000Z', 'trace-orphan')`
       ).run()
+      db.pragma('foreign_keys = ON')
       const res = await app.inject({
         method: 'GET',
         url: '/api/messages/no-such-message/executor',
@@ -381,14 +387,19 @@ describe('Message Routes', () => {
         `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
          VALUES (?, ?, '😼', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
       ).run('agent-flash', 'flash猫')
+      // FK 补链后（票 6 批一）：triggered_by_message_id → messages.id ⇒ 被触发的消息先落库
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 'session-exec-1', 'user', '派活', '[]')`
+      ).run(uuid)
       // ds猫 已 finalize（completed），flash猫 仍 running——提交者是 flash猫
       db.prepare(
         `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
-         VALUES (?, ?, ?, ?, 'completed', datetime('now'))`
+         VALUES (?, ?, ?, ?, 'completed', '2026-09-01T10:00:00.000Z')`
       ).run('log-done', 'session-exec-1', 'agent-ds', uuid)
       db.prepare(
         `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
-         VALUES (?, ?, ?, ?, 'running', datetime('now'))`
+         VALUES (?, ?, ?, ?, 'running', '2026-09-01T10:00:01.000Z')`
       ).run('log-running', 'session-exec-1', 'agent-flash', uuid)
 
       const res = await app.inject({
@@ -583,10 +594,23 @@ describe('Message Routes', () => {
         `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, llm_base_url, effort_level, skill_modules)
          VALUES (?, ?, '🐯', 'prompt', 'claude', 'model', 'key', '', 'high', '[]')`
       ).run('agent-v', 'v猫')
+      // FK 补链后（票 6 批一）：triggered_by_message_id → messages.id ⇒ 触发消息先落库
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES ('vm-1', 'session-verdict', 'user', '触发审查', '[]')`
+      ).run()
       db.prepare(
         `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at, commit_hash, trace_id)
-         VALUES (?, ?, ?, ?, 'completed', datetime('now'), ?, ?)`
-      ).run('vlog', 'session-verdict', 'agent-v', 'vm-1', opts.sha, opts.taskId)
+         VALUES (?, ?, ?, ?, 'completed', ?, ?, ?)`
+      ).run(
+        'vlog',
+        'session-verdict',
+        'agent-v',
+        'vm-1',
+        '2026-09-01T10:00:00.000Z',
+        opts.sha,
+        opts.taskId
+      )
       // 任务链上的审查结论消息（user role：吐槽猫的审查回复经 ingest 落库带 task_id）
       db.prepare(
         `INSERT INTO messages (id, session_id, role, content, mentions, task_id)
@@ -594,9 +618,9 @@ describe('Message Routes', () => {
       ).run('vmsg-review', 'session-verdict', opts.taskId)
       if (opts.verdict) {
         db.prepare(
-          `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict)
-           VALUES (?, ?, ?, ?)`
-        ).run('vmsg-review', 'session-verdict', 'agent-v', opts.verdict)
+          `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, verdict, created_at)
+           VALUES (?, ?, ?, ?, ?)`
+        ).run('vmsg-review', 'session-verdict', 'agent-v', opts.verdict, '2026-09-01T11:00:00.000Z')
       }
     }
 

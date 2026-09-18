@@ -2,6 +2,7 @@
  * Message 表查询函数。
  */
 import type Database from 'better-sqlite3'
+import { purgeMessageDependents } from './dependents.js'
 import type { MessageRow, MessageWithAgentName } from './types.js'
 import { isoMinutesAgo, nowIso, toIsoDb, toIsoDbUpper } from './time.js'
 
@@ -137,8 +138,9 @@ export function getRecentMessages(sessionId: string, limit: number = 500): Messa
  *  < `'T'`(0x54) ⇒ 秒级串在**同一天**的所有 ISO 串面前一律判小，窗口整段失配且不报错。
  *    agentId— 可选：仅返回指定 agent 的消息（B 工具 body 的 agentIdFilter 落点）
  *
- *  排序 created_at DESC, id DESC——SQLite 秒级精度字符串，同秒多条会碰撞，
- *  只比 created_at 会漏行/重行；before 游标用 (created_at, id) 复合 tie-break。
+ *  排序 created_at DESC, id DESC——**tie-break 仍必需**（票 5 迁毫秒后并未消掉它）：
+ *  ① 并发写会落在同一毫秒；② 老库同秒的行经 `toIsoMs` 一律折成 `…SS.000Z`，
+ *  整秒的行**全部同值**。只比 created_at 会漏行/重行；before 游标用 (created_at, id) 复合。
  *  before 消息不在本会话 → 位置不可定 → 返回空数组（客户端自然停止翻页）。
  */
 export function getSessionMessagesRange(
@@ -385,19 +387,26 @@ export function updateMessageContent(messageId: string, content: string): void {
   db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, messageId)
 }
 
+// ↓ 四个删除函数**先清子行再删消息**（票 6：新 FK 全 RESTRICT，不清则既有端点 500）。
+//   清理清单与理由集中在 `dependents.ts` 一处声明，此处只负责在删之前调用。
+
 export function deleteMessageById(id: string): void {
+  purgeMessageDependents({ kind: 'id', id })
   db.prepare('DELETE FROM messages WHERE id = ?').run(id)
 }
 
 export function deleteMessagesBySession(sessionId: string): { changes: number } {
+  purgeMessageDependents({ kind: 'session', sessionId })
   return db.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId)
 }
 
 export function deleteMessagesByAgent(agentId: string): { changes: number } {
+  purgeMessageDependents({ kind: 'agent', agentId })
   return db.prepare('DELETE FROM messages WHERE agent_id = ?').run(agentId)
 }
 
 export function deleteAllMessages(): void {
+  purgeMessageDependents({ kind: 'all' })
   db.exec('DELETE FROM messages')
 }
 

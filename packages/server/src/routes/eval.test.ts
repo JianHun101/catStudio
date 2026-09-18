@@ -780,6 +780,13 @@ describe('Eval Routes', () => {
     it('B2 续：「执行存在但未落段」（running / 存量行）同样是 200 + []，与「id 不存在」不可区分', async () => {
       const a = seedAgent('店长')
       const sid = seedSession()
+      // FK 补链后（票 6 批一）：triggered_by_message_id → messages.id ⇒ 触发消息先落库
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES ('trig-x', ?, 'user', 'x', '[]')`
+        )
+        .run(sid)
       getDb()
         .prepare(
           `INSERT INTO execution_logs
@@ -841,6 +848,14 @@ describe('Eval Routes', () => {
       endedAt?: string | null
       latencyMs?: number | null
     }): void {
+      // FK 补链后（票 6 批一）：triggered_by_message_id → messages.id ⇒ 触发消息先落库
+      // （`INSERT OR IGNORE`：本段多个用例复用同一字面量 id，PK 全局唯一即可满足 FK）
+      q()
+        .prepare(
+          `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+           VALUES ('trig-1', ?, 'user', 'x', '[]')`
+        )
+        .run(spec.sessionId)
       q()
         .prepare(
           `INSERT INTO execution_logs
@@ -872,8 +887,8 @@ describe('Eval Routes', () => {
         sessionId: sid,
         agentId: a,
         status: 'completed',
-        startedAt: '2026-09-15 10:00:00',
-        endedAt: '2026-09-15 15:00:00',
+        startedAt: '2026-09-15T10:00:00.000Z',
+        endedAt: '2026-09-15T15:00:00.000Z',
         latencyMs: 1000,
       })
       seedExec({
@@ -881,8 +896,8 @@ describe('Eval Routes', () => {
         sessionId: sid,
         agentId: a,
         status: 'failed',
-        startedAt: '2026-09-15 12:00:00',
-        endedAt: '2026-09-15 12:00:05',
+        startedAt: '2026-09-15T12:00:00.000Z',
+        endedAt: '2026-09-15T12:00:05.000Z',
         latencyMs: 2000,
       })
       seedExec({
@@ -890,8 +905,8 @@ describe('Eval Routes', () => {
         sessionId: sid,
         agentId: b,
         status: 'completed',
-        startedAt: '2026-09-15 09:00:00',
-        endedAt: '2026-09-15 09:00:01',
+        startedAt: '2026-09-15T09:00:00.000Z',
+        endedAt: '2026-09-15T09:00:01.000Z',
         latencyMs: 4000,
       })
 
@@ -917,8 +932,8 @@ describe('Eval Routes', () => {
         sessionId: sid,
         agentId: a,
         status: 'completed',
-        startedAt: '2026-09-15 10:00:00',
-        endedAt: '2026-09-15 10:01:00',
+        startedAt: '2026-09-15T10:00:00.000Z',
+        endedAt: '2026-09-15T10:01:00.000Z',
         latencyMs: 60000,
       })
       seedExec({
@@ -926,7 +941,7 @@ describe('Eval Routes', () => {
         sessionId: sid,
         agentId: a,
         status: 'running',
-        startedAt: '2026-09-15 11:00:00',
+        startedAt: '2026-09-15T11:00:00.000Z',
         endedAt: null,
       })
 
@@ -955,7 +970,7 @@ describe('Eval Routes', () => {
         sessionId: sid,
         agentId: a,
         status: 'completed',
-        startedAt: '2026-09-15 10:00:00',
+        startedAt: '2026-09-15T10:00:00.000Z',
         latencyMs: 1000,
       })
       seedExec({
@@ -963,7 +978,7 @@ describe('Eval Routes', () => {
         sessionId: sid2,
         agentId: elsewhere,
         status: 'completed',
-        startedAt: '2026-09-15 10:00:00',
+        startedAt: '2026-09-15T10:00:00.000Z',
         latencyMs: 1000,
       })
 
@@ -1002,7 +1017,7 @@ describe('Eval Routes', () => {
         sessionId: sid,
         agentId: a,
         status: 'completed',
-        startedAt: '2026-09-15 10:00:00',
+        startedAt: '2026-09-15T10:00:00.000Z',
         latencyMs: 1000,
       })
       const before = q().prepare('SELECT * FROM execution_logs').all()
@@ -1038,7 +1053,7 @@ describe('Eval Routes', () => {
           sessionId: sid,
           agentId: a,
           status: 'completed',
-          startedAt: '2026-09-15 10:00:00',
+          startedAt: '2026-09-15T10:00:00.000Z',
           latencyMs: 1000,
         })
         // 前置断言：段**真的**落进去了——否则下面的「零段」是真空通过

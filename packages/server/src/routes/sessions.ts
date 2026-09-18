@@ -16,6 +16,7 @@ import {
   sessionReadState as readStateRepo,
 } from '../db/repository/index.js'
 import type { SessionRow } from '../db/repository/index.js'
+import { normalizeIsoMs } from '../db/repository/clock.js'
 import { getIO } from '../connectors/socketio.js'
 import { toIsoDb } from '../db/repository/time.js'
 import { getExecutionEngine } from '../execution/registry.js'
@@ -284,7 +285,9 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         latencyMs: r.latency_ms,
         promptTokens: r.prompt_tokens,
         completionTokens: r.completion_tokens,
-        startedAt: r.started_at ? r.started_at.replace(' ', 'T') + 'Z' : null,
+        // `normalizeIsoMs` 而非 `replace(' ','T') + 'Z'`：后者对已是 ISO 的串会拼出 `…123ZZ`
+        // （票 6 起 `started_at` 已是 ISO 毫秒）⇒ 前端拿到的 `startedAt` 畸形。
+        startedAt: r.started_at ? normalizeIsoMs(r.started_at) : null,
       })),
     }
   })

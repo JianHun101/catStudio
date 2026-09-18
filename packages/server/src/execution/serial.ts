@@ -1608,6 +1608,7 @@ export function createExecutionEngine(
     try {
       execLogsRepo.finalizeExecutionLog(
         agentId,
+        sessionId,
         success ? 'completed' : 'failed',
         opts?.latencyMs ?? null,
         opts?.errorMessage ?? null,

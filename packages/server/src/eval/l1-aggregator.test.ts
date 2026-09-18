@@ -16,7 +16,9 @@ const bus = {
   emitSystemNotice: (n: any) => roomEmit(Events.NEW_MESSAGE, { ...n, role: 'system' }),
 } as any
 
-/** FK 基础数据：session s1 + agent agent-1（execution_logs/verdicts 外键依赖） */
+/** FK 基础数据：session s1 + agent agent-1 + reviewer-1 + 触发消息 t1
+ *  （票 6 起 execution_logs / review_verdicts / review_parse_failures 的引用列都有
+ *   RESTRICT 外键 ⇒ 夹具必须造出真实存在的父行） */
 function seedBase() {
   getDb()
     .prepare(`INSERT OR IGNORE INTO sessions (id, title, agent_ids) VALUES ('s1', 't', '[]')`)
@@ -27,11 +29,27 @@ function seedBase() {
        VALUES ('agent-1', '店长', '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'store')`
     )
     .run()
+  getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES ('reviewer-1', '吐槽猫', '🐱', 'p', 'deepseek', 'deepseek-v4-flash', 'sk-test', 'reviewer')`
+    )
+    .run()
+  seedMessage('t1')
 }
 
-/** SQLite datetime 格式（UTC 'YYYY-MM-DD HH:MM:SS'）——与 datetime('now') 字符串比较一致 */
-function sqliteNow(offsetDays = 0): string {
-  return new Date(Date.now() - offsetDays * 86400000).toISOString().replace('T', ' ').slice(0, 19)
+function seedMessage(id: string): void {
+  getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, 's1', 'user', 'x', '[]')`
+    )
+    .run(id)
+}
+
+/** ISO 毫秒（⑤-a 目标口径）——判窗比较点与列同口径 */
+function isoNow(offsetDays = 0): string {
+  return new Date(Date.now() - offsetDays * 86400000).toISOString()
 }
 
 function insertExecution(overrides: Record<string, unknown> = {}): void {
@@ -43,7 +61,7 @@ function insertExecution(overrides: Record<string, unknown> = {}): void {
     .run(
       overrides.id ?? `log-${Math.random()}`,
       overrides.status ?? 'completed',
-      overrides.started_at ?? sqliteNow(),
+      overrides.started_at ?? isoNow(),
       overrides.error_message ?? null,
       overrides.error_type ?? null,
       overrides.latency_ms ?? 100,
@@ -53,21 +71,25 @@ function insertExecution(overrides: Record<string, unknown> = {}): void {
 }
 
 function insertVerdict(verdict: string): void {
+  const messageId = `m-${Math.random()}`
+  seedMessage(messageId)
   getDb()
     .prepare(
-      `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict)
-       VALUES (?, 's1', 'reviewer-1', NULL, ?)`
+      `INSERT INTO review_verdicts (message_id, session_id, reviewer_agent_id, subject_agent_id, verdict, created_at)
+       VALUES (?, 's1', 'reviewer-1', NULL, ?, ?)`
     )
-    .run(`m-${Math.random()}`, verdict)
+    .run(messageId, verdict, isoNow())
 }
 
 function insertParseFailure(): void {
+  const messageId = `f-${Math.random()}`
+  seedMessage(messageId)
   getDb()
     .prepare(
-      `INSERT INTO review_parse_failures (message_id, reason, raw)
-       VALUES (?, 'bad_verdict', 'raw')`
+      `INSERT INTO review_parse_failures (message_id, reason, raw, created_at)
+       VALUES (?, 'bad_verdict', 'raw', ?)`
     )
-    .run(`f-${Math.random()}`)
+    .run(messageId, isoNow())
 }
 
 describe('aggregateMetrics — 八口径', () => {

@@ -188,18 +188,19 @@ export interface ChainHop {
   agentName: string
   status: string
   errorType: string | null
-  /** SQLite 原样 UTC 串（无时区后缀）——**消费必须走 `utils/time.ts`**（唯一解析入口；
-   *  直喂 `new Date` 会按本地时区解析，差 8 小时） */
+  /** UTC 串，**两种形态都可能**（票 6 起 `execution_logs` 已是 ISO 毫秒；存量库仍是
+   *  SQLite `datetime('now')` 的空格分隔秒级串）——**消费必须走 `utils/time.ts`**
+   *  （唯一解析入口，两种形态都吃；直喂 `new Date` 会按本地时区解析，差 8 小时） */
   startedAt: string | null
   /** null = 该跳仍在飞（展示「进行中」+ 耗时 `—`） */
   endedAt: string | null
-  /** 秒级精度（`datetime('now')` 写）；`endedAt` 为 null → null */
+  /** 毫秒精度（票 6 起两端均 ISO 毫秒；存量行为秒级）；`endedAt` 为 null → null */
   totalMs: number | null
   /** = `latency_ms`（毫秒精度）。语义 = 上下文过滤 + 记忆检索 + LLM 流式 + 落库（不只是 LLM） */
   replyMs: number | null
   /** = `totalMs − replyMs`。语义 = 等 token 锁 + 编排收尾 + 建行开销——**禁用「等锁」类命名** */
   nonReplyMs: number | null
-  /** true = 秒级舍入导致 `totalMs − replyMs < 0`（已钳位但显式暴露，不静默） */
+  /** true = `totalMs − replyMs < 0`（两端精度已同档，仅剩时钟/口径缝隙）——已钳位但显式暴露，不静默 */
   segmentClamped: boolean
   flags: HopFlag[]
   triggerMessageId: string
@@ -242,9 +243,9 @@ export interface EvalChainsResponse {
 // ─── R3 段分解（GET /eval/spans，契约由 R3 票面 §二 冻结在字段级）──
 
 /** 一行段（R2 `spans` 表原样 snake_case）。
- *  ⚠️ `start_at` 是 **ISO 毫秒 UTC**（`2026-09-14T13:20:00.000Z`），与
- *  `execution_logs` 的秒级 `YYYY-MM-DD HH:MM:SS` **不同形**——但 `utils/time.ts`
- *  两种形态通吃（R5 起：老实现遇到 ISO 串会 `+ 'Z'` 出 `...ZZ` 而原样回显），
+ *  ⚠️ `start_at` 是 **ISO 毫秒 UTC**（`2026-09-14T13:20:00.000Z`）；`execution_logs`
+ *  两列自票 6 起也是 ISO 毫秒（存量库仍是空格分隔秒级串）——**两种形态都可能出现**，
+ *  但 `utils/time.ts` 通吃（老实现遇到 ISO 串会 `+ 'Z'` 出 `...ZZ` 而原样回显），
  *  消费一律走它，别再按形态各写一份。 */
 export interface SpanRow {
   id: number

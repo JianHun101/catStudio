@@ -13,6 +13,7 @@
 import { v4 as uuid } from 'uuid'
 import { getDb } from '../db/index.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
+import { isoDaysAgo } from '../db/repository/clock.js'
 import { createLogger } from '../logger.js'
 import { messageOf } from '../utils.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
@@ -69,8 +70,13 @@ export function aggregateMetrics(): L1Metrics {
   // ——时间窗用 started_at（含 infra 桶：按执行开始时间判窗——重启杀死的残留 running 行
   //    started_at 超窗则不计，infra 为信息性指标不进告警，接受此语义）；review 两表有 created_at，保持不动
   // （e82ff69 事故根因拆分：W1 一手引入夹具 created_at + windowCond 三表共用，致启动聚合必炸）
-  const execWindowCond = `WHERE started_at >= datetime('now', '-${WINDOW_DAYS} days')`
-  const verdictWindowCond = `WHERE created_at >= datetime('now', '-${WINDOW_DAYS} days')`
+  // 窗口下界 = N 天前的 ISO 毫秒（⑤-b 连带改造点）：旧写法 `datetime('now','-N days')`
+  // 产出**秒级**串，与 ISO 毫秒列比较是格式混比——同一天里 ISO 串首位 `T`(0x54) 恒大于
+  // 秒级串首位空格(0x20) ⇒ 窗口静默放大。下界由 JS 侧算好后**内联为字面量**（值来自
+  // `Date.now()`，非用户输入，无注入面）；同一时刻算一次、两处条件共用，防窗沿漂移。
+  const windowStart = isoDaysAgo(WINDOW_DAYS)
+  const execWindowCond = `WHERE started_at >= '${windowStart}'`
+  const verdictWindowCond = `WHERE created_at >= '${windowStart}'`
 
   const execRow = db
     .prepare(

@@ -9,6 +9,7 @@
  * 覆盖率 97.4%）——单用触发侧丢 32.5%、单用回复侧丢 7.5%，**别改回单侧**。
  * 锚为 NULL 的行是**孤儿跳**，只落 `orphanChain`，不进 `chains[]`。
  */
+import { normalizeIsoMs } from '../db/repository/clock.js'
 
 /** repo 产出的原始行（形状与取数 SQL 的 SELECT 别名一一对应） */
 export interface ExecHopRow {
@@ -38,8 +39,8 @@ export interface ChainHop {
   /** SQLite 原样 UTC 字符串（`YYYY-MM-DD HH:MM:SS`），**不做时区转换**——转换归前端 */
   startedAt: string | null
   endedAt: string | null
-  /** `ended_at − started_at`。两列都是 `datetime('now')` 写的 **UTC 字符串、精度 1 秒**
-   *  ⇒ 本值必是 1000 的整数倍，**不是毫秒精度**（对照 `replyMs`）。`ended_at` 为 null → null。 */
+  /** `ended_at − started_at`。两列自票 6 起是 **ISO 毫秒**（⑤-a）⇒ 本值**已是毫秒精度**
+   *  （切口径前是秒级、必为 1000 的整数倍）。`ended_at` 为 null → null。 */
   totalMs: number | null
   /** = `latency_ms`，进程内 `Date.now()` 算的，**毫秒精度**。
    *  语义 = 上下文过滤 + 记忆检索 + LLM 流式 + 落库——**不只是 LLM**。 */
@@ -49,7 +50,7 @@ export interface ChainHop {
    *  `t0` 在 `runAgentReply` **内部**（`reply.ts:207`），而 token 获取在它**之前**，
    *  故残余段 ≠ 等锁。**禁用 `lockWaitMs` 之类命名**——会报假数。 */
   nonReplyMs: number | null
-  /** `totalMs − replyMs < 0`：秒级舍入造成的负值，**钳位但显式暴露**，不静默 */
+  /** `totalMs − replyMs < 0`（两端精度已同档，仅剩时钟/口径缝隙能造出负值）——**钳位但显式暴露**，不静默 */
   segmentClamped: boolean
   flags: HopFlag[]
   triggerMessageId: string
@@ -63,7 +64,7 @@ export interface Chain {
   /** 链内最晚 `ended_at`（原样 UTC 字符串）。
    *  ⚠️ 链内有在飞跳（`ended_at` null）时，本值是**已结束跳的下界**，故 `spanMs` 偏小。 */
   endedAt: string | null
-  /** `endedAt − startedAt`（毫秒，1000 的整数倍）。两端缺一 → null。 */
+  /** `endedAt − startedAt`（毫秒，两端均为 ISO 毫秒）。两端缺一 → null。 */
   spanMs: number | null
   /** 链内跳数，**恒等于 `hops.length`**（截断只截链、不截跳） */
   hopCount: number
@@ -94,12 +95,20 @@ export interface ChainQueryResult {
   orphanChain: { chainId: null; hopCount: number; hops: ChainHop[] }
 }
 
-/** SQLite `datetime('now')` 写的 UTC 字符串 → epoch ms。
- *  必须手动补 `T`/`Z`——JS 把不带 Z 的 `YYYY-MM-DD HH:MM:SS` 当**本地时间**，
- *  直接 `new Date(s)` 会差 8 小时（东八区）。 */
+/**
+ * DB 时间串 → epoch ms（**两种形态都吃**）。
+ *
+ * - 票 6 起 `execution_logs` 两列是 **ISO 毫秒**（`…T…SS.mmmZ`）⇒ 直接 `Date.parse` 即可；
+ * - 存量/未迁表仍是 SQLite `datetime('now')` 的 `YYYY-MM-DD HH:MM:SS`（无时区后缀）⇒
+ *   必须手动补 `T`/`Z`——JS 把裸串当**本地时间**，直接 `new Date(s)` 会差 8 小时（东八区）。
+ *
+ * ⚠️ 归一走 `normalizeIsoMs`（幂等）而**不是**无条件 `replace(' ','T') + 'Z'`：后者对
+ * 已是 ISO 的串会拼出 `…123ZZ`，`Date.parse` 返回 NaN ⇒ `totalMs`/`spanMs` 全部静默变
+ * null（面板上表现为「耗时全空」，不报错）。这是票 6 口径切换的读侧连带改造点。
+ */
 function parseUtcMs(s: string | null): number | null {
   if (!s) return null
-  const ms = Date.parse(`${s.replace(' ', 'T')}Z`)
+  const ms = Date.parse(normalizeIsoMs(s))
   return Number.isNaN(ms) ? null : ms
 }
 
@@ -112,8 +121,9 @@ function toHop(row: ExecHopRow, slowMs: number): ChainHop {
   const totalMs = startedMs !== null && endedMs !== null ? endedMs - startedMs : null
   const replyMs = row.latency_ms
   const nonReplyMs = replyMs === null || totalMs === null ? null : Math.max(0, totalMs - replyMs)
-  // 秒级舍入：ended_at 精度 1 秒、replyMs 毫秒精度 ⇒ 理论上 totalMs 可小于 replyMs。
-  // 钳位但不静默——segmentClamped 把这个事实暴露到响应里。
+  // 负值来源：`totalMs` 取 DB 两列之差（票 6 起毫秒精度），`replyMs` 是进程内 Date.now()
+  // 差值——两者口径不同档时（如存量行）totalMs 可小于 replyMs。钳位但不静默：
+  // segmentClamped 把这个事实暴露到响应里。
   const segmentClamped = replyMs !== null && totalMs !== null && totalMs - replyMs < 0
 
   const flags: HopFlag[] = []

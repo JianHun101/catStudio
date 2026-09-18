@@ -26,6 +26,7 @@
 import { v4 as uuid } from 'uuid'
 import { getDb } from '../db/index.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
+import { normalizeIsoMs, nowIso } from '../db/repository/clock.js'
 import { createLogger } from '../logger.js'
 import { messageOf } from '../utils.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
@@ -79,18 +80,23 @@ function latestRejectOrSuggest(rootMsg: RootMessageRow, chainTaskId: string | nu
   if (!chainTaskId) return null
   const row = getDb()
     .prepare(
-      // `replace(v.created_at,' ','T')`：**跨表混比**的归一（票 5 连带面）。右侧绑定的是
-      // `messages.created_at`（自票 5 起 ISO 毫秒），左侧 `review_verdicts.created_at` 仍是
-      // 秒级 `datetime('now')`（随票 6 迁移）。`' '`(0x20) < `'T'`(0x54) ⇒ 不折算的话秒级串
-      // 在同一天的 ISO 串面前**一律判小**，`> ?` 恒假 → 「最近一次 reject/suggest」静默恒为
-      // null（不报错，只是归因少一路源）。折算对已是 ISO 的值是 no-op，票 6 落地后无需回改。
+      // `replace(v.created_at,' ','T')`：**跨表混比**的归一兜底。右侧绑定
+      // `messages.created_at`（票 5 起 ISO 毫秒），左侧 `review_verdicts.created_at`
+      // （票 6 批一起 ISO 毫秒）——**今天两侧已同口径**，本条折算对 ISO 值是 no-op。
+      // **仍然保留**：`toIsoMs` 对不匹配实测形态的取值**原样保留**（不落 NULL，见
+      // `db/migrations.ts`）⇒ 列里可能有非 ISO 残值，届时 `' '`(0x20) < `'T'`(0x54) 会让
+      // 判别静默偏向一侧（「最近一次 reject/suggest」恒为 null，或把历史算进来），不报错。
       `SELECT v.verdict FROM review_verdicts v
        JOIN messages m ON m.id = v.message_id
        WHERE m.task_id = ? AND m.session_id = ? AND replace(v.created_at, ' ', 'T') > ?
          AND v.verdict IN ('reject', 'suggest')
        ORDER BY v.created_at DESC LIMIT 1`
     )
-    .get(chainTaskId, rootMsg.session_id, rootMsg.created_at) as { verdict: string } | undefined
+    // since 来自 messages.created_at、v.created_at 来自 review_verdicts——两列今天**都是
+    // ISO 毫秒**（票 5 / 票 6 批一），故两条折算互为残值兜底、对 ISO 值都是 no-op；
+    // 若只留单边，对侧出现非 ISO 残值时即退回格式混比（见 clock.ts::normalizeIsoMs）
+    .get(chainTaskId, rootMsg.session_id, normalizeIsoMs(rootMsg.created_at)) as
+    { verdict: string } | undefined
   return row?.verdict ?? null
 }
 
@@ -230,11 +236,12 @@ export function runEpisodeAttribution(bus: EngineBus & HandoffBus): {
     const rootCause = locateRootCause(ep.outcome, chain, rootMsg, ep.chain_task_id)
 
     // OR IGNORE：UNIQUE(episode_id) 双保险幂等（主查询 NOT EXISTS 已排除）
+    const now = nowIso()
     db.prepare(
       `INSERT OR IGNORE INTO episode_attributions
-         (id, episode_id, outcome, root_cause, action_type, action_detail, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'dispatched')`
-    ).run(uuid(), ep.id, ep.outcome, rootCause, action, ACTION_HINTS[action])
+         (id, episode_id, outcome, root_cause, action_type, action_detail, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?, ?)`
+    ).run(uuid(), ep.id, ep.outcome, rootCause, action, ACTION_HINTS[action], now, now)
 
     if (ep.session_id) {
       const msgId = dispatchAction(bus, action, {
@@ -312,8 +319,8 @@ function markResolved(episodeId: string, annotate = true): void {
   const outcome = db.prepare(`SELECT outcome FROM episodes WHERE id = ?`).get(episodeId) as
     { outcome: string } | undefined
   db.prepare(
-    `UPDATE episode_attributions SET status = 'resolved', updated_at = datetime('now') WHERE episode_id = ?`
-  ).run(episodeId)
+    `UPDATE episode_attributions SET status = 'resolved', updated_at = ? WHERE episode_id = ?`
+  ).run(nowIso(), episodeId)
   db.prepare(
     `UPDATE episodes SET episode_state = 'closed', updated_at = datetime('now') WHERE id = ?`
   ).run(episodeId)
