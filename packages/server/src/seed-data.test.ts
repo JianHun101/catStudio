@@ -243,6 +243,19 @@ describe('agent system prompts', () => {
     }
   })
 
+  it('提交标记教学不丢：实施规范段教 catstudy [uuid] 标记格式（S4 重写曾丢过一次）', () => {
+    // 收敛过：commit-msg 门禁对无标记是静默放行 → handoff-gen 判「无归属」→ 退兜底投递
+    // （与猫自投叠加即重复派发）。旧实施规范与「提交规范」知识条目双删后曾全注入面清零。
+    const implementers = agents.filter((a) => a.role === 'implementer')
+    expect(implementers.length).toBeGreaterThanOrEqual(1)
+    for (const agent of implementers) {
+      const section = agent.systemPrompt.slice(agent.systemPrompt.indexOf('---\n实施规范'))
+      expect(section, `${agent.name} 实施规范段未教 catstudy [uuid] 标记格式`).toContain(
+        'catstudy [uuid]'
+      )
+    }
+  })
+
   it('规则语境写死猫名零残留——三猫 prompt 不含 @ 形态的写死名（@审查者/@架构师 角色化）', () => {
     // 身份语境（裸名自我介绍/手下名单）保留；@ 前缀是 mention 形态，属规则语境必须角色化
     for (const name of ['店长', 'ds猫', 'flash猫']) {

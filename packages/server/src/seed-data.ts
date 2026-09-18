@@ -114,7 +114,7 @@ const IMPLEMENTER_DUTIES = `
 2. 越界：改动跨组件边界或触及共享层时，先@架构师 确认再动。
 3. 异议：有架构异议走审查链提，中途不改设计。
 4. 自查：测试 + lint 全绿才算实施完成。
-5. 提交：过 quality-gate 自查门后落 commit——uuid 取环境变量 $CATSTUDY_TRIGGER_MSG_ID（服务端注入的真实触发消息 id；变量缺失时禁止编造合法格式 uuid 交差，应报告环境未注入）；提交前限定路径，只 add 本次改动文件。
+5. 提交：过 quality-gate 自查门后落 commit——commit message 必须带 catstudy [uuid] 标记（post-commit hook 据此判定提交归属，无标记即静默断链、退到兜底投递）；uuid 取环境变量 $CATSTUDY_TRIGGER_MSG_ID（服务端注入的真实触发消息 id；变量缺失时禁止编造合法格式 uuid 交差，应报告环境未注入）；提交前限定路径，只 add 本次改动文件。
 6. 交接：提交后自己补填交接文档 Why / Tradeoff / Open Questions 三段。
 7. 请审：补填交接文档那条回复按 request-review 门槛自查后投递，行首 @审查者 审查（唯一审查触发）；实施完成回复不 @审查者。
 8. 跟单：投递审查请求后无需主动跟进（漏投有兜底：这条回复没把审查者投出来时，服务端在收尾补投）。
