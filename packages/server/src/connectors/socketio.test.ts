@@ -5430,6 +5430,26 @@ describe('runAgentReply — 运行时长心跳', () => {
     )
   }
 
+  /** 筛出所有 status='thinking' 的 MESSAGE_AGENT_STATUS emit（锚点首发点） */
+  function thinkingEmits(): any[] {
+    return mockRoomEmit.mock.calls.filter(
+      (c: any[]) => c[0] === Events.MESSAGE_AGENT_STATUS && c[1]?.status === 'thinking'
+    )
+  }
+
+  /**
+   * fake timer 下推进执行：反复冲洗微任务/零延时定时器直到 `predicate` 成立。
+   * 「等一个 emit 出现」不能直接 await 执行 promise（它会一直挂到流结束），
+   * 而 fake 环境里没有真实时间流逝，只能这样逐步冲洗。
+   */
+  async function flushUntil(predicate: () => boolean, label: string): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      if (predicate()) return
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    throw new Error(`flushUntil 超时：${label} 未出现`)
+  }
+
   /** 构造会话+触发消息并启动一轮 runAgentReply，返回其执行 promise（不自动 await） */
   async function runHeartbeat(chatStream: any): Promise<{ exec: Promise<any> }> {
     const mod = await import('./socketio.js')
@@ -5469,6 +5489,68 @@ describe('runAgentReply — 运行时长心跳', () => {
     )
     return { exec }
   }
+
+  // 票① AC1：锚点前移到执行起点后，'thinking' 首发 / 'replying' 首发 / 心跳重发
+  // 三种事件的 startedAt 必须**全等**（同一次取值）。
+  // 本用例的关键是**在两次 emit 之间拨钟**：'thinking' 发出后把假时钟拨快 5s，
+  // 再让执行走到 'replying'——若 'replying' 处自己重新取 Date.now()（正是本票要
+  // 消灭的写法），两个锚点差 5000ms，断言当场红。
+  // ⚠️ 卡点是必需的：默认替身下记忆检索立即 resolve，一次 flush 就把执行一路推过
+  // 'replying'，拨钟落在事后 ⇒ 断言对上述缺陷恒真（假绿门）。故用一次性替身把执行
+  // 挂在「记忆检索」（'thinking' 之后、'replying' 之前）上，拨钟窗口才是真的。
+  it('AC1：thinking 首发 / replying 首发 / 心跳重发的 startedAt 全等（跨 5s 拨钟）', async () => {
+    const { retrieveMemoryContext } = await import('../memory/index.js')
+    let releaseMemory = () => {}
+    const memoryGate = new Promise((resolve) => {
+      releaseMemory = () => resolve({ text: '', reason: 'no-hit', sections: [], stats: {} })
+    })
+    vi.mocked(retrieveMemoryContext).mockImplementationOnce(() => memoryGate as any)
+
+    let releaseGate = () => {}
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    const chatStream = vi.fn(async function* () {
+      yield { content: '首段', kind: 'text' }
+      await gate
+      yield { content: '尾段', kind: 'text' }
+    })
+
+    const { exec } = await runHeartbeat(chatStream)
+
+    try {
+      // ① 'thinking' 首发：锚点在执行起点（上下文组装之前）就发出，此后执行挂在记忆检索上
+      await flushUntil(() => thinkingEmits().length > 0, "'thinking' 首发")
+      const anchor = thinkingEmits()[0][1].startedAt
+      expect(typeof anchor).toBe('number')
+      expect(replyingEmits().length).toBe(0) // 卡点有效：'replying' 确实还没发
+
+      // ② 拨钟 +5s：用 setSystemTime 而非 advanceTimersByTimeAsync——后者会真的跑掉
+      //    到期回调（记忆/知识检索的 10s 超时线在待定中）
+      vi.setSystemTime(Date.now() + 5_000)
+
+      // ③ 放行记忆检索 → 执行推进到 'replying' 首发：锚点必须还是 ① 那个值
+      releaseMemory()
+      await flushUntil(() => replyingEmits().length > 0, "'replying' 首发")
+      expect(replyingEmits()[0][1].startedAt).toBe(anchor)
+
+      // ④ 心跳重发：再推进两个周期（时钟又走 20s），各次仍是同一锚点
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 2)
+      expect(replyingEmits().length).toBeGreaterThanOrEqual(3)
+
+      const all = [...thinkingEmits(), ...replyingEmits()]
+      expect(all.length).toBeGreaterThanOrEqual(4)
+      for (const c of all) {
+        expect(c[1].startedAt).toBe(anchor)
+      }
+    } finally {
+      // 断言失败也要放行两条闸：否则本轮的执行挂成僵尸（占着同一 agentId 的槽位），
+      // 后面三条用例跟着变红——红要红在根因上（负向对照实测：一跳四红）。
+      releaseMemory()
+      releaseGate()
+      await exec
+    }
+  })
 
   it('stream 未结束时推进 fake timer → 重发 MESSAGE_AGENT_STATUS、各次 startedAt 一致', async () => {
     // 门控流：首个 chunk 产出后挂起，推进 timer 期间流保持"未结束"状态

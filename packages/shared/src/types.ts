@@ -336,14 +336,20 @@ export interface ContextWindowStats {
  *  此联合是消息执行进度（queued/thinking/replying/done） */
 export type MessageAgentStatus = 'queued' | 'thinking' | 'replying' | 'done'
 
-/** MESSAGE_AGENT_STATUS 事件载荷（各构造点统一形状；'replying' 心跳重发同 startedAt） */
+/** MESSAGE_AGENT_STATUS 事件载荷（各构造点统一形状；'thinking'/'replying' 心跳重发同 startedAt） */
 export interface MessageAgentStatusPayload {
   messageId: string
   agentId: string
   agentName: string
   agentAvatar: string
   status: MessageAgentStatus
-  /** 仅 'replying'：开始时间戳（心跳重发同值，前端「回复中 · 已 N 秒」） */
+  /**
+   * 'thinking' / 'replying'：执行起点时间戳——**一次执行内只有一个值**：
+   * 'thinking' 首发即带上（锚点落在执行起点，与 trace 根段 `invoke_agent` 同口径），
+   * 后续 'replying' 首发与 10s 心跳重发沿用同值。前端据此本地 tick 递增
+   * 「回复中 · 已 N 秒」——A2A / headless 等无用户消息状态行可挂的执行同样有锚点。
+   * 'queued' / 'done' 不带。
+   */
   startedAt?: number
 }
 
