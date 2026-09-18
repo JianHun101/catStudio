@@ -51,12 +51,15 @@ vi.mock('@/composables/useApi', () => ({
 
 // ── Mock logger ────────────────────────────────────
 
+// error 需可断言（票②取证面），其余级别保持静默
+const mockLogError = vi.fn()
+
 vi.mock('@/utils/logger', () => ({
   createLogger: () => ({
     debug: () => {},
     info: () => {},
     warn: () => {},
-    error: () => {},
+    error: mockLogError,
   }),
 }))
 
@@ -636,6 +639,46 @@ describe('chatStore', () => {
       await store.fetchData(true) // force → 重拉
       expect(mockGetAgents.mock.calls.length).toBe(agentsCalls + 1)
       expect(mockGetSessions.mock.calls.length).toBe(sessionsCalls + 1)
+    })
+
+    // ── 票①：HTTP 层故障文案 ──────────────────────
+    it('HTTP 接口失败文案标注 HTTP 层、不指控具体端口', async () => {
+      mockGetAgents.mockRejectedValue(new TypeError('Failed to fetch'))
+      mockGetSessions.mockResolvedValue([])
+
+      await store.fetchData()
+
+      expect(store.dataError).toContain('HTTP')
+      expect(store.dataError).not.toContain('3200')
+    })
+
+    it('相邻分支未被误伤：ECONNREFUSED 仍走「尚未就绪」文案', async () => {
+      mockGetAgents.mockRejectedValue(new Error('ECONNREFUSED'))
+      mockGetSessions.mockResolvedValue([])
+
+      await store.fetchData()
+
+      expect(store.dataError).toBe('服务器尚未就绪，请稍后刷新页面')
+    })
+
+    // ── 票②：原始 error 落日志 ─────────────────────
+    it('原始 error 三字段落日志，友好文案保留', async () => {
+      const raw = new TypeError('Failed to fetch')
+      mockGetAgents.mockRejectedValue(raw)
+      mockGetSessions.mockResolvedValue([])
+
+      await store.fetchData()
+
+      expect(mockLogError).toHaveBeenCalledWith(
+        'fetchData failed',
+        expect.objectContaining({
+          // 友好文案保留（与用户所见一致）——文案内容正确性由票①用例覆盖，此处不重复断言
+          error: store.dataError,
+          rawMessage: 'Failed to fetch',
+          rawName: 'TypeError',
+          rawStack: raw.stack,
+        })
+      )
     })
   })
 

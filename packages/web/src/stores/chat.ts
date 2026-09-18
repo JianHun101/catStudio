@@ -25,7 +25,9 @@ function friendlyError(err: any): string {
     return '服务器响应超时，请检查后端是否已启动'
   }
   if (msg.includes('fetch') || msg.includes('NetworkError') || msg.includes('Failed to fetch')) {
-    return '无法连接服务器，请确认后端正在运行 (端口 3200)'
+    // 本分支命中的是 HTTP 接口层失败（原生 `TypeError: Failed to fetch` 或同义措辞）——
+    // 实时推送走独立的 WebSocket 连接，未必同时断开，故不可据此断定后端整体未启动
+    return 'HTTP 接口请求失败，无法连接服务器（实时推送连接可能仍然正常）'
   }
   if (msg.includes('ECONNREFUSED') || msg.includes('Connection refused')) {
     return '服务器尚未就绪，请稍后刷新页面'
@@ -293,7 +295,13 @@ export const useChatStore = defineStore('chat', () => {
         joinSession(target)
       }
     } catch (err: any) {
-      log.error('fetchData failed', { error: friendlyError(err) })
+      // 友好文案只够给用户看，排障需要原始 error 真身——四个字段一并落日志
+      log.error('fetchData failed', {
+        error: friendlyError(err),
+        rawMessage: err?.message,
+        rawName: err?.name,
+        rawStack: err?.stack,
+      })
       dataError.value = friendlyError(err)
     } finally {
       loading.value = false
