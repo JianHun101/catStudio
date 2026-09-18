@@ -9,14 +9,20 @@ import type { Chunk } from '@cat-study/shared'
 const DSH_ENTRY = vi.hoisted(
   () => 'C:/Users/test/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/lib/bin.js'
 )
-vi.mock('./cli-utils.js', () => ({
-  resolveJsEntry: vi.fn(() => DSH_ENTRY),
-  messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
-  messagesToPromptBounded: vi.fn(() => 'User: hello\n\nAssistant: hi'),
-  attachIdleTimeout: vi.fn(() => () => {}),
-  spawnSupervised: vi.fn(),
-  getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
-}))
+// `importOriginal` 展开保留未被覆盖的真实导出：`terminateChild` 走真身（票① 的
+// abort→终止链回归必须穿真实 helper，mock 掉就成了「断言自己调了自己」）。
+vi.mock('./cli-utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./cli-utils.js')>()
+  return {
+    ...actual,
+    resolveJsEntry: vi.fn(() => DSH_ENTRY),
+    messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
+    messagesToPromptBounded: vi.fn(() => 'User: hello\n\nAssistant: hi'),
+    attachIdleTimeout: vi.fn(() => () => {}),
+    spawnSupervised: vi.fn(),
+    getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
+  }
+})
 
 // Logger mock：log 对象用 vi.hoisted 共享
 const logMocks = vi.hoisted(() => ({
@@ -35,6 +41,7 @@ import {
   messagesToPrompt,
   messagesToPromptBounded,
   attachIdleTimeout,
+  __test_setPlatform,
 } from './cli-utils.js'
 
 /** 收集 async generator 的值 */
@@ -59,7 +66,9 @@ function tick(): Promise<void> {
  * 构造 fake CLI 子进程：stdout/stderr 为手工 Readable（时序可控，不自动 end），
  * kill/on/once 为 vi.fn 记录调用；emitClose/emitError 手动派发 close/error 事件。
  */
-function fakeChild(overrides: Partial<{ exitCode: number | null; killed: boolean }> = {}) {
+function fakeChild(
+  overrides: Partial<{ exitCode: number | null; signalCode: string | null; killed: boolean }> = {}
+) {
   const stdout = new Readable({ read() {} })
   const stderr = new Readable({ read() {} })
   const listeners = new Map<string, Set<(...args: any[]) => void>>()
@@ -84,6 +93,10 @@ function fakeChild(overrides: Partial<{ exitCode: number | null; killed: boolean
     emitError,
     exitCode: null,
     killed: false,
+    // 真实 ChildProcess 上 `signalCode` 恒有定义（null | 信号名），存活判据
+    // `exitCode/signalCode 双 null` 依赖它——夹具缺这个字段会让「还活着」恒假，
+    // 终止链静默不发信号（夹具必须忠实于真实对象形状，否则测的是假东西）。
+    signalCode: null,
     ...overrides,
   }
   return child
@@ -103,11 +116,18 @@ function startGen(gen: AsyncIterable<Chunk>) {
 }
 
 describe('DshAdapter', () => {
+  // 平台钉死为 POSIX：`terminateChild`（本文件用真身）在 win32 走 `taskkill /T` 树杀、
+  // 根本不发信号——宿主平台不钉死则「本机 win32 / CI linux」跑的是两个分支。
+  // win32 分支由 cli-utils.test.ts 显式覆盖。
+  let restorePlatform: () => void
+
   beforeEach(() => {
     vi.clearAllMocks()
+    restorePlatform = __test_setPlatform('linux')
   })
 
   afterEach(() => {
+    restorePlatform()
     vi.restoreAllMocks()
   })
 

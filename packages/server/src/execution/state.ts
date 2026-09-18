@@ -183,14 +183,16 @@ export function createEngineState(): EngineState {
       if (sessionId) {
         const entry = bySession.get(sessionId)
         if (!entry?.abort) return false
-        entry.abort.abort()
+        // reason 契约：reply.ts 的 abort 分支按 `signal.reason` 区分「谁中断的」
+        // 落日志（'user-stop' = AGENT_INTERRUPT 用户点停止）
+        entry.abort.abort('user-stop')
         return true
       }
       // 无 sessionId（旧客户端/信息型）：abort 该 agent 全部会话 run
       let aborted = false
       for (const entry of bySession.values()) {
         if (entry.abort) {
-          entry.abort.abort()
+          entry.abort.abort('user-stop')
           aborted = true
         }
       }

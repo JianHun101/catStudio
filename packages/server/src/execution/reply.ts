@@ -1057,10 +1057,12 @@ export async function runAgentReply(
       }
       if (signal?.aborted) {
         // 超时（serial.ts 的 Promise.race 硬上限）与用户主动停止（AGENT_INTERRUPT）
-        // **共用本分支**，故文案不得写死任一方——原因改由 `signal.reason` 承载。
+        // **共用本分支**，故文案不得写死任一方——原因由 `signal.reason` 承载。
         // （旧文案写死超时语义，用户点停止也被记成超时，2026-09-18 排障现场即被带偏。）
-        // ⚠️ 现存两处 `abort()` 调用点均未传 reason ⇒ 实际取值为 AbortError 默认值，
-        // 尚不足以区分两类中断；要落到「谁中断的」需上游补 `abort(reason)`（另议）。
+        // 上游 reason 契约（2026-09-18 补齐）：serial.ts 硬超时 `'timeout'`、执行抛错
+        // `'error'`；state.ts abortAgent（用户点停止）`'user-stop'`。
+        // signal 只能 abort 一次、先到者胜——硬超时已 abort('timeout') 后 catch 再
+        // abort('error') 是 no-op，收尾仍记 'timeout'（正确）。
         log.info('agent reply aborted', {
           traceId,
           agentId: agent.id,

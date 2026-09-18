@@ -372,7 +372,15 @@ export const useChatStore = defineStore('chat', () => {
       }
       sessionExecutions.value = map
     } catch (err: any) {
-      log.error('fetchSessionExecutions failed', { error: friendlyError(err) })
+      // 与 fetchData 逐字同款：友好文案只够给用户看，排障需要原始 error 真身
+      //——fire-and-forget 路径失败只此一处留痕，吞掉 raw 就无从区分
+      // Failed to fetch / HTTP 5xx / 超时（三者排查方向完全不同）
+      log.error('fetchSessionExecutions failed', {
+        error: friendlyError(err),
+        rawMessage: err?.message,
+        rawName: err?.name,
+        rawStack: err?.stack,
+      })
     }
   }
 

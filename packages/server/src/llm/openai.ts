@@ -10,6 +10,7 @@ import {
   attachExitError,
   // Codex 通过 stdin 传 prompt，supervisor 暂不支持 stdin 转发
   // spawnSupervised 用于 Claude 适配器（-p 参数传 prompt）
+  terminateChild,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
 
@@ -110,19 +111,9 @@ export class OpenAIAdapter implements LLMAdapter {
     }
 
     // ─── Abort 处理 ───
-    const GRACE_MS = 5000
-    const onAbort = () => {
-      if (!child.killed && child.exitCode === null) {
-        log.warn('收到取消信号，发送 SIGTERM')
-        child.kill('SIGTERM')
-        setTimeout(() => {
-          if (!child.killed && child.exitCode === null) {
-            log.warn('SIGTERM 未响应，发送 SIGKILL')
-            child.kill('SIGKILL')
-          }
-        }, GRACE_MS)
-      }
-    }
+    // 存活判据与平台分派统一收在 `terminateChild`（cli-utils）——判据禁用 `killed`
+    // （信号发出≠进程已死），win32 走 `taskkill /T` 树杀。详见该函数注释。
+    const onAbort = () => terminateChild(child, { label: 'codex' })
     signal?.addEventListener('abort', onAbort)
 
     const cleanupIdle = attachIdleTimeout(child)

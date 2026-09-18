@@ -67,8 +67,39 @@ process.stdin.on('error', () => {
 
 // 记录启动信息（写入父进程的 stderr，和 CLI 输出混在一起）
 process.stderr.write(
-  `[supervisor] pid=${process.pid} parent=${PARENT_PID} child=${child.pid} cmd=${command}\n`,
+  `[supervisor] pid=${process.pid} parent=${PARENT_PID} child=${child.pid} cmd=${command}\n`
 )
+
+// ─── 终止子进程（存活判据 + 平台分派）────────────
+// 存活判据 = `exitCode`/`signalCode` 双 null，**禁用 `killed`**：它的语义是「信号已
+// 发出」（`kill()` 成功那一刻即置 true），不是「进程已死」——拿它当判据，GRACE_MS
+// 之后的 SIGKILL 升级判断永远过不去、升级链整条失效。
+//
+// 本脚本是纯 .mjs，**不能 import cli-utils.ts 的 `terminateChild`**（TS 不被 node
+// 直接加载），故此处内联同款语义——改动时两处必须同步（claude/dsh/openai/opencode
+// 四个适配器走的是 TS 那份）。
+function terminateChild() {
+  if (child.exitCode !== null || child.signalCode !== null) return
+
+  if (process.platform === 'win32') {
+    // Windows 上 `kill()` 即 TerminateProcess，且**不执行**目标进程的信号监听器
+    // （下方 process.on('SIGTERM') 转发监听器正是被这样绕过的）。taskkill /T 树杀
+    // 覆盖孙辈——supervisor 杀的孙子无更深树，/T 无害。
+    spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+      stdio: 'ignore',
+      shell: false,
+    })
+    return
+  }
+
+  child.kill('SIGTERM')
+  setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      process.stderr.write(`[supervisor] SIGTERM 未响应，SIGKILL 子进程 ${child.pid}\n`)
+      child.kill('SIGKILL')
+    }
+  }, GRACE_MS)
+}
 
 // ─── 父进程存活监控 ─────────────────────────────
 let parentDead = false
@@ -77,18 +108,8 @@ const poller = setInterval(() => {
   if (!isParentAlive()) {
     parentDead = true
     clearInterval(poller)
-    process.stderr.write(
-      `[supervisor] 父进程 ${PARENT_PID} 已退出，终止子进程 ${child.pid}...\n`,
-    )
-    child.kill('SIGTERM')
-    setTimeout(() => {
-      if (!child.killed && child.exitCode === null) {
-        process.stderr.write(
-          `[supervisor] SIGTERM 未响应，SIGKILL 子进程 ${child.pid}\n`,
-        )
-        child.kill('SIGKILL')
-      }
-    }, GRACE_MS)
+    process.stderr.write(`[supervisor] 父进程 ${PARENT_PID} 已退出，终止子进程 ${child.pid}...\n`)
+    terminateChild()
   }
 }, POLL_MS)
 
@@ -96,13 +117,15 @@ const poller = setInterval(() => {
 child.on('close', (code, signal) => {
   clearInterval(poller)
   if (!parentDead) {
-    process.stderr.write(
-      `[supervisor] 子进程 ${child.pid} 退出 code=${code} signal=${signal}\n`,
-    )
+    process.stderr.write(`[supervisor] 子进程 ${child.pid} 退出 code=${code} signal=${signal}\n`)
   }
   process.exit(code || 0)
 })
 
 // ─── 透传自身收到的信号 ─────────────────────────
+// ⚠️ win32 下这两个监听器**不会被调用**：Windows 的 `kill()` 即 TerminateProcess，
+// 根本不投递信号（POSIX 下才走这里）。正因如此，父进程（server）侧的终止不能指望
+// 这一层转发，必须走 `terminateChild` 的 taskkill 树杀——否则杀掉的只是本 supervisor，
+// 真 CLI 成孤儿。
 process.on('SIGTERM', () => child.kill('SIGTERM'))
 process.on('SIGINT', () => child.kill('SIGINT'))
