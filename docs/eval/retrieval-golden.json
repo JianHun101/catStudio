@@ -1,0 +1,800 @@
+{
+  "version": 1,
+  "meta": {
+    "ticket": "docs/run/eval-system/R9-retrieval-golden-dataset.md",
+    "decisions": "D1–D5（grilling 2026-09-18 定稿）",
+    "anchorGranularity": "节（doc_path + section_anchor），不带 content_hash（D1）",
+    "frozenCorpusRef": "44c1d3ba368dc606c908454defa9e6752e2aa763",
+    "rewriteSource": "memory/query-rewrite.ts :: rewriteRetrievalQueries（freeze-rewrite.mjs 产出，禁手写）",
+    "counts": {
+      "real": 12,
+      "constructed": 23,
+      "negative": 5
+    },
+    "selectionGaps": [
+      "docs/lessons/ 零活块：该目录当前只有无 frontmatter 的 README.md，扫描器一行都不写 ⇒ 真实条目的「adr / plans / lessons 各若干」三域分层不可达（见交接文档 OQ-1）。",
+      "真实 12 条的域分布为 adr 1 / plans 11（含 db-schema-governance 4、review-chain-anchor 2、episode-evaluation-v2 2、memory-flywheel 2、knowledge-base-v1 1）——偏斜根源是活语料本身：全池 491 条原话过可答性闸后，能指向 adr 域的仅 1 条。"
+    ],
+    "emptiesAcknowledged": ["G02"],
+    "freezeNotes": [
+      "G02 的 rewritten 为空数组：实测判为「改写器认为原话已足够」而非调用失败——依据 ① 该次调用日志有 completion usage（promptTokens=130 / completionTokens=10，模型确实产出文本）；② 建集这轮 44 次调用里「查询改写失败」零命中。三种成因与判定方式见 scripts/eval/freeze-rewrite.mjs 文件头。",
+      "空数组对跑批是可用形态：它冻的正是生产系统在改写不可用时的降级行为（仅原话这一路查询）。",
+      "G3 两跑差集（2026-09-18 实测，freeze-rewrite.mjs --check）：39 条已冻结条目里 **36 条**两跑文本不同——改写器 temperature=0.3，同义改写不收敛。**D2 的确定性不受影响**（冻下来之后跑批读的是冻结文本，是纯确定函数）；受影响的是「黄金集可复现重建」这一更强的主张：重建一次会得到一份**等价但不同字面**的集子，R10 的读数因此是「对本次冻结」的读数。改写器质量/温度不在本票范围内（票面 §挂账），此处只如实留痕。"
+    ]
+  },
+  "entries": [
+    {
+      "id": "G01",
+      "kind": "real",
+      "query": "安装taste skill用于前端效果评估，开放白名单给该skill 和 wayfinder skill。安装后，使用taste对当前前端页面，包括评估页面 设置页面进行诊断。",
+      "rewritten": [
+        "安装 taste skill 用于前端效果评估",
+        "开放白名单给 taste skill 和 wayfinder skill",
+        "使用 taste 对当前前端页面进行诊断"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0014-skill-delivery-decoupling.md",
+          "section_anchor": "6. 后续项（用户明确要求记录） > 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0014 §6.1——该节把「白名单」拆成两层（MCP read_skill 白名单=访问约束；disable-model-invocation=上游来源标记，不构成访问约束），并给出白名单的落点 `scripts/mcp-server-utils.mjs` 的 SKILL_CATALOG。",
+      "evidence": {
+        "retrieval_query_id": 112,
+        "retrieval_id": 32,
+        "created_at": "2026-09-15T02:50:04.552Z",
+        "rationale": "①有真实命中证据：该 query 当场注入了 ADR 0014 §6.1 与 §3（`retrieval_candidates.injected=1`）；②跨域分层：adr 域，本条是该域唯一入选；③形态多样：88 字的中等长度指令，含两个具体动作约束（装 skill + 开白名单），非碎片也非畸形长文；④时间分散：2026-09-15，全集中部；⑤过可答性闸：白名单两层机制在语料内有权威定义；⑥缺口如实报（见 meta.selectionGaps）。"
+      }
+    },
+    {
+      "id": "G02",
+      "kind": "real",
+      "query": "当前RAG库的向量搜索用的什么算法",
+      "rewritten": [],
+      "expect": [
+        {
+          "doc_path": "docs/plans/memory-flywheel.md",
+          "section_anchor": "2. 主链形态（七段，逐段钉死） > 2.6 检索（`searchChunksHybrid`）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/memory-flywheel.md §2.6——明写「混合召回：向量 + 关键词（chunks_fts）经 RRF k=60 融合」。",
+      "evidence": {
+        "retrieval_query_id": 1364,
+        "retrieval_id": 361,
+        "created_at": "2026-09-17T15:31:36.982Z",
+        "rationale": "①有真实命中证据：当场注入了 memory-flywheel §2.6（同时误中了 db-schema §3.2，本条只认权威节）；②跨域分层：plans 域、memory-flywheel 文件；③形态多样：17 字短问句，与 G01/G12 的长意图互补；④时间分散：2026-09-17，全集靠后；⑤过可答性闸：检索算法在语料内有唯一权威描述；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G03",
+      "kind": "real",
+      "query": "修改你提到的文档改动,票己以及seed data。票戊只并 delivered",
+      "rewritten": ["修改之前提到的文档改动、票己以及 seed data", "修改票戊并标记为 delivered"],
+      "expect": [
+        {
+          "doc_path": "docs/plans/memory-flywheel.md",
+          "section_anchor": "4. 票单全表（14 张，全部收口）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/memory-flywheel.md §4 票单全表——票己（索引表 schema）与票戊（段一回填）各有行。",
+      "evidence": {
+        "retrieval_query_id": 871,
+        "retrieval_id": 229,
+        "created_at": "2026-09-16T09:20:35.487Z",
+        "rationale": "①有真实命中证据：当场注入了 memory-flywheel §8 过程留痕与 §4 票单全表（同文件）；②跨域分层：plans 域、memory-flywheel 文件（该文件第 2 条，未超 4）；③形态多样：39 字的任务指派口吻，含两个并列对象（票己 / 票戊），属「多约束短意图」；④时间分散：2026-09-16；⑤过可答性闸：票号在语料内有唯一定义处；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G04",
+      "kind": "real",
+      "query": "为什么会有initDb()，如果后续不走老的路径 那作为一个新机器跑程序的话 它的数据库要怎么初始化",
+      "rewritten": [
+        "为什么会有 initDb() 函数",
+        "新机器跑程序时数据库如何初始化",
+        "不走老路径的情况下数据库初始化方式"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "三、P0 契约（本轮实施） > 3.1 迁移机制（②四个子决策 + SQL 形态，全部已拍板）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/db-schema-governance.md §3.1——「新库：空库 → 按序重放基线集 → 全部登记。CREATE TABLE 独立块删除，迁移数组成为唯一 schema 真相源」。",
+      "evidence": {
+        "retrieval_query_id": 1181,
+        "retrieval_id": 311,
+        "created_at": "2026-09-17T06:26:00.145Z",
+        "rationale": "①有真实命中证据：当场注入了 db-schema §7 关联与 memory-flywheel §5（本条认 db-schema §3.1 为权威节，是**该条基准的已知弱点**，见 OQ）；②跨域分层：plans 域、db-schema-governance 文件；③形态多样：50 字的「为什么 + 如果……那……」双问句；④时间分散：2026-09-17；⑤过可答性闸：新库初始化路径在语料内有定稿描述；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G05",
+      "kind": "real",
+      "query": "5的前两问我同意，但是C方向由数据库录入时，生成时间会不会准确？因为代码传的时间是更精准的时间。或者说，业界一般采用怎么样的方式去录入时间戳",
+      "rewritten": [
+        "C方向由数据库录入时生成时间是否准确",
+        "代码传入的时间戳与数据库生成时间戳的精度对比",
+        "业界录入时间戳的常用方式"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "四、B 范围决策（设计定稿，实施票缓拆） > 4.2 时间口径统一（⑤，已拍板）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/db-schema-governance.md §4.2——⑤-c 修订版把「记录时间由 repository 统一 helper 生成」与「事件时间允许调用方显式传入」分开，并给出 DEFAULT 勘注（允许保留但必须 ISO 毫秒同口径）。",
+      "evidence": {
+        "retrieval_query_id": 1204,
+        "retrieval_id": 317,
+        "created_at": "2026-09-17T07:06:27.393Z",
+        "rationale": "①有真实命中证据：当场注入了 db-schema §4.2（该条命中的正是权威节本身）；②跨域分层：plans 域、db-schema-governance 文件；③形态多样：70 字的长意图，含引用（「5 的前两问」）+ 观点 + 提问三层；④时间分散：2026-09-17；⑤过可答性闸：时间口径有定稿的五条子决策；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G06",
+      "kind": "real",
+      "query": "删除一只还在会话里的 agent 被拦住之后会怎么处理",
+      "rewritten": [
+        "删除 agent 时如果该 agent 还在会话中会被拦截吗",
+        "删除 agent 被拦截后系统如何处理",
+        "会话中的 agent 删除失败后的处理流程"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "四、B 范围决策（设计定稿，实施票缓拆） > 4.1 FK / 删除策略 / CHECK（④修订版，已拍板）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/db-schema-governance.md §4.1——「删除被拦的行为契约」：repository 先查后删 → 抛领域错误携带会话清单 → API 返 409 + 结构化错误体 → 前端引导「先从会话移除，或归档」。",
+      "evidence": {
+        "retrieval_query_id": 1210,
+        "retrieval_id": 319,
+        "created_at": "2026-09-17T10:42:34.865Z",
+        "rationale": "①有真实命中证据：当场注入了 db-schema §4.1（含 4.1 的多个分片）；②跨域分层：plans 域、db-schema-governance 文件；③形态多样：27 字的短问句，问的是被拦之后的**下游行为**；④时间分散：2026-09-17；⑤过可答性闸：该行为契约在语料内逐条定稿；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G07",
+      "kind": "real",
+      "query": "我看提到了不做向量索引，当前是这样的吗",
+      "rewritten": ["当前是否不做向量索引", "向量索引的当前实现状态"],
+      "expect": [
+        {
+          "doc_path": "docs/plans/knowledge-base-v1.md",
+          "section_anchor": "知识库 Phase 1 落地计划（v4，勘误修订）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/knowledge-base-v1.md 引言块（sectionAnchor 取 H1 回退值）——v4 勘误明写：五·边界原「向量索引」一条与 roadmap 的 A 档术语撞名，易被读成「本计划不做向量检索」，而本计划交付的正是向量检索（searchKnowledgeByVector 走 knowledge 独立表、vec_distance_cosine 扫表）。",
+      "evidence": {
+        "retrieval_query_id": 1644,
+        "retrieval_id": 434,
+        "created_at": "2026-09-18T06:13:36.895Z",
+        "rationale": "①有真实命中证据：当场注入了 db-schema §3.2 与 knowledge-base 的多节（本条认 knowledge-base 引言勘误块为权威节，理由：那句被误读的原文就在本文件里）；②跨域分层：plans 域、knowledge-base-v1 文件；③形态多样：19 字短问句，问的是「文档里的旧说法还成不成立」——全集里唯一一条**纠错型**问句；④时间分散：2026-09-18，全集最新；⑤过可答性闸：勘误块直接给出纠正后的现状描述；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G08",
+      "kind": "real",
+      "query": "还有哪些内容没做，现在能补评估系统前端相关内容了吗",
+      "rewritten": [
+        "还有哪些内容没做",
+        "现在能补评估系统前端相关内容了吗",
+        "评估系统前端相关内容的补充进度"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/episode-evaluation-v2.md",
+          "section_anchor": "6. 实施拆活（审 ✅ 后派）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/episode-evaluation-v2.md §6 实施拆活——E1 已实施、E2/E3 待做，逐条列了剩余内容。",
+      "evidence": {
+        "retrieval_query_id": 100,
+        "retrieval_id": 29,
+        "created_at": "2026-09-15T01:34:17.285Z",
+        "rationale": "①有真实命中证据：当场注入了 episode-evaluation-v2 的标题块与 §2；②跨域分层：plans 域、episode-evaluation-v2 文件；③形态多样：25 字的「进度 + 可否开工」双问；④时间分散：2026-09-15，全集靠前；⑤过可答性闸：剩余拆活清单在语料内逐条列出；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G09",
+      "kind": "real",
+      "query": "现在的评估系统支持我们对系统进行改进吗，如果不够还需要补充哪些内容",
+      "rewritten": [
+        "当前评估系统是否支持对系统进行改进",
+        "现有评估系统需要补充哪些内容才能支持系统改进",
+        "评估系统对系统改进的支持能力评估"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/episode-evaluation-v2.md",
+          "section_anchor": "4. closure 状态机 + 改进闭环"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/episode-evaluation-v2.md §4——closure 状态机把「归因 → 分流到既有动作通道 → 复验确认 → closed」串成改进闭环。",
+      "evidence": {
+        "retrieval_query_id": 1097,
+        "retrieval_id": 288,
+        "created_at": "2026-09-16T16:46:34.265Z",
+        "rationale": "①有真实命中证据：当场注入了 episode-evaluation-v2 标题块、ADR 0008、review-chain §三；②跨域分层：plans 域、episode-evaluation-v2 文件（该文件第 2 条）；③形态多样：33 字的「能不能 + 还缺什么」递进问；④时间分散：2026-09-16；⑤过可答性闸：改进闭环在语料内有定稿的状态机与验收；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G10",
+      "kind": "real",
+      "query": "「每次提交」移到「每次落地」会不会把问题后移，导致改错误的流程变长",
+      "rewritten": [
+        "将「每次提交」改为「每次落地」是否会把问题后移",
+        "将「每次提交」改为「每次落地」是否会导致修复错误流程变长",
+        "修改流程触发时机从每次提交到每次落地对问题发现和修复周期的影响"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/review-chain-anchor.md",
+          "section_anchor": "一、问题陈述 > 一个时序事实（决定了兜底放哪）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/review-chain-anchor.md §一「一个时序事实」——commit 发生在回复落库之前，故「这次执行投递审查请求了没有」在 commit 那一刻物理上还没有答案，兜底判定必须移到执行收尾侧。",
+      "evidence": {
+        "retrieval_query_id": 540,
+        "retrieval_id": 143,
+        "created_at": "2026-09-16T00:07:54.821Z",
+        "rationale": "①有真实命中证据：当场注入了 review-chain §一 时序事实与 §三 用户故事；②跨域分层：plans 域、review-chain-anchor 文件；③形态多样：33 字，问的是**时机后移的副作用**（不是「怎么做」而是「会不会更糟」）；④时间分散：2026-09-16；⑤过可答性闸：该时序事实是语料里的独立小节，直接回答该问；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G11",
+      "kind": "real",
+      "query": "check是用在哪里的？删除策略我倾向用逻辑删除。有些会话数据我可能只是不想在前端看到那么多 但是数据依然是有价值的。然后孤儿数据准备怎么处理",
+      "rewritten": [
+        "check 是用在哪里的",
+        "删除策略倾向使用逻辑删除",
+        "会话数据不想在前端展示但仍有价值如何处理"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "四、B 范围决策（设计定稿，实施票缓拆） > 4.1 FK / 删除策略 / CHECK（④修订版，已拍板）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/db-schema-governance.md §4.1——三问各有落点：CHECK 的判据（封闭枚举才 CHECK）、删除策略（物理删除全 RESTRICT，用户态「删除」= 归档 archived_at）、孤儿处理（审计先行 + 默认倾向删除）。",
+      "evidence": {
+        "retrieval_query_id": 1196,
+        "retrieval_id": 315,
+        "created_at": "2026-09-17T06:52:27.640Z",
+        "rationale": "①有真实命中证据：当场注入了 db-schema §4.1 与 §4.4；②跨域分层：plans 域、db-schema-governance 文件；③形态多样：71 字的**三问并列**长意图（CHECK / 删除策略 / 孤儿），是全集里约束最密的一条；④时间分散：2026-09-17；⑤过可答性闸：三问在语料内各有定稿裁决；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "G12",
+      "kind": "real",
+      "query": "我理解的 work tree 是，它在自己的 work tree 中独立干活，不受影响；提交后由 review 核查，核查通过后交给架构师收口。谁提交 review，审查者就去 review 的分支验证测试。架构师保持在 dev 分支上，对最终结果进行合并，遇到冲突就解决。我想不到问题是由什么引起的。",
+      "rewritten": [
+        "work tree 独立工作流程中提交后由 review 核查的机制",
+        "review 通过后由架构师在 dev 分支收口合并的流程",
+        "架构师在 dev 分支合并时遇到冲突如何解决"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/review-chain-anchor.md",
+          "section_anchor": "三、用户故事"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/review-chain-anchor.md §三 用户故事——用户故事 13/14 钉死「实施猫写完代码要投审查这件事由猫自己按铁律做，而不是由 git 钩子代劳；手动提交时审查环节不会被漏掉」。",
+      "evidence": {
+        "retrieval_query_id": 788,
+        "retrieval_id": 208,
+        "created_at": "2026-09-16T07:12:48.010Z",
+        "rationale": "①有真实命中证据：当场注入了 review-chain §三 用户故事与 §四 D；②跨域分层：plans 域、review-chain-anchor 文件（该文件第 2 条，未超 4）；③形态多样：151 字的长意图，先复述自己的理解再发问，与 G02/G07 的短问句形成对照；④时间分散：2026-09-16；⑤过可答性闸：该理解是否正确，由用户故事 13/14 与 §四 B 的投递归属直接裁定；⑥缺口如实报。"
+      }
+    },
+    {
+      "id": "C01",
+      "kind": "constructed",
+      "query": "选外部 CLI 工具时，立项前必须先过哪几道检查？",
+      "rewritten": [
+        "选择外部 CLI 工具时立项前需要经过哪些检查",
+        "外部 CLI 工具立项前的评估检查清单",
+        "外部命令行工具选型立项前的必查项"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0007-external-tool-form-selection-checklist.md",
+          "section_anchor": "检查单（四条，对治拍板链四环）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0007 §检查单——四条（能力对账前置 / 假设标红+实测对称 / 简单形态默认 / 决策留痕）。"
+    },
+    {
+      "id": "C02",
+      "kind": "constructed",
+      "query": "opencode 的 serve 形态当初为什么被回退？",
+      "rewritten": [
+        "opencode serve 形态被回退的原因",
+        "opencode serve 模式回退的历史决策",
+        "opencode serve 功能为什么被撤销"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0007-external-tool-form-selection-checklist.md",
+          "section_anchor": "ADR 0007: 外部工具形态选型前置检查单"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0007 开头（H1 回退锚）——背景案例：把 run 形态定性成「单轮切片」的前提未经验证即进入路线图，事后实测 run 原生跑得通工具循环。"
+    },
+    {
+      "id": "C03",
+      "kind": "constructed",
+      "query": "多供应商接入为什么选 ACP 而不是各自适配？",
+      "rewritten": [
+        "多供应商接入为什么选择 ACP 协议而不是各自适配",
+        "ACP 协议相比为每个供应商单独适配的优势",
+        "多供应商接入采用 ACP 统一协议的原因"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0008-acp-multi-provider-unification.md",
+          "section_anchor": "决策"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0008 §决策——connector 并存、分步迁移的取舍。"
+    },
+    {
+      "id": "C05",
+      "kind": "constructed",
+      "query": "文本块和图块能塞进同一列向量做检索吗？",
+      "rewritten": [
+        "文本块和图块能否嵌入同一列向量进行检索",
+        "文本块和图块共用同一向量空间做检索的可行性",
+        "多模态检索中文本和图块向量表示方法"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0009-multimodal-knowledge-base.md",
+          "section_anchor": "两条不变量（扩展性论证核心） > 不变量 2：跨模态向量子空间分离"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0009 §不变量 2——禁止把 512/768 异构维度塞同一列做 sqlite-vec 余弦（ill-defined）。"
+    },
+    {
+      "id": "C06",
+      "kind": "constructed",
+      "query": "文档块契约里哪些元数据字段是必填的？",
+      "rewritten": ["文档块契约中必填的元数据字段有哪些", "文档块契约的元数据字段必填要求"],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0009-multimodal-knowledge-base.md",
+          "section_anchor": "两条不变量（扩展性论证核心） > 不变量 1：文档块契约（解析层 → 嵌入层的 ABI）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0009 §不变量 1——核心字段 source/crawledAt required 钉死，page/headingLevel optional，其余 .passthrough() 自由扩展。"
+    },
+    {
+      "id": "C07",
+      "kind": "constructed",
+      "query": "Execution 引擎抽取之后 socketio.ts 计划瘦到多少行、实际收口多少？",
+      "rewritten": [
+        "Execution 引擎抽取后 socketio.ts 计划瘦身到多少行",
+        "Execution 引擎抽取后 socketio.ts 实际收口到多少行",
+        "Execution 引擎抽取后 socketio.ts 计划行数与实际行数对比"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0011-execution-engine-extraction.md",
+          "section_anchor": "决策"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0011 §决策第 1 条——预计 3014 → ~1100 行，实际收口 609 行。"
+    },
+    {
+      "id": "C08",
+      "kind": "constructed",
+      "query": "为什么要做 Execution 引擎抽取，摩擦出在哪？",
+      "rewritten": [
+        "为什么要做 Execution 引擎抽取",
+        "Execution 引擎抽取的动机和原因",
+        "Execution 引擎抽取过程中遇到的摩擦和问题"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0011-execution-engine-extraction.md",
+          "section_anchor": "背景与摩擦（证据段）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0011 §背景与摩擦（证据段）。"
+    },
+    {
+      "id": "C09",
+      "kind": "constructed",
+      "query": "收口器对外暴露哪两个函数，各做什么？",
+      "rewritten": ["收口器对外暴露哪两个函数", "收口器暴露的函数各自的作用是什么"],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0012-session-closeout-and-push-approval.md",
+          "section_anchor": "决策（收口器部分——仍有效）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0012 §决策（收口器部分）——inspectCloseout 只读探针 + closeoutSession 唯一动作入口。"
+    },
+    {
+      "id": "C10",
+      "kind": "constructed",
+      "query": "为什么收口不能手工敲一串裸 git 命令？",
+      "rewritten": [
+        "为什么收口不能手工敲一串裸 git 命令",
+        "收口流程为什么禁止直接使用裸 git 命令",
+        "收口操作必须使用工具而不能手动执行 git 命令的原因"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0012-session-closeout-and-push-approval.md",
+          "section_anchor": "背景与摩擦（证据段）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0012 §背景与摩擦——「删 worktree 拆自己脚下」事故：收口自己会话时 cwd 正落在被收口的 worktree 内。"
+    },
+    {
+      "id": "C11",
+      "kind": "constructed",
+      "query": "C3 为什么从一个待做项变成了不做？",
+      "rewritten": ["C3 待做项为什么变成了不做", "C3 任务从待办状态变更为不做的原因"],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0013-c3-outbound-bus-not-adopted.md",
+          "section_anchor": "决策：C3 降级为不做"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0013 §决策：C3 降级为不做——三处 getIO() 是 HTTP 写操作后的副作用通知，与引擎输出是两类事件。"
+    },
+    {
+      "id": "C12",
+      "kind": "constructed",
+      "query": "为什么把投递规则从 skill 内容里搬出去？",
+      "rewritten": [
+        "投递规则从 skill 内容中移出的原因",
+        "为什么将投递规则从 skill 内容里拆分出去",
+        "投递规则与 skill 内容分离的设计考量"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0014-skill-delivery-decoupling.md",
+          "section_anchor": "3. 决策：投递外移除 skill，作为每次对话收尾/外层"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/adr/0014 §3 决策——投递是每次对话的外层/收尾，不属于领域 skill。"
+    },
+    {
+      "id": "C13",
+      "kind": "constructed",
+      "query": "迁移台账表记哪些列、老库怎么补登？",
+      "rewritten": ["迁移台账表需要记录哪些列", "老库数据如何补登到迁移台账表"],
+      "expect": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "三、P0 契约（本轮实施） > 3.1 迁移机制（②四个子决策 + SQL 形态，全部已拍板）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/db-schema-governance.md §3.1——台账列 + ②-b 老库补登（不真跑）。"
+    },
+    {
+      "id": "C14",
+      "kind": "constructed",
+      "query": "P0 阶段要补哪几条索引，为什么不多补？",
+      "rewritten": ["P0 阶段需要补充哪些索引", "P0 阶段为什么不多补充索引"],
+      "expect": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "三、P0 契约（本轮实施） > 3.2 索引（③三条，已拍板）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/db-schema-governance.md §3.2——三条有查询证据的索引；原则是只补有查询证据的，每个索引都是写放大。"
+    },
+    {
+      "id": "C15",
+      "kind": "constructed",
+      "query": "重建一张表时有什么必须同批处理的东西？",
+      "rewritten": [
+        "重建表时必须同批处理的内容有哪些",
+        "重建表时哪些操作必须与重建表在同一批次执行",
+        "重建表时哪些依赖对象或数据需要一起处理"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "四、B 范围决策（设计定稿，实施票缓拆） > 4.4 B 范围实施纪律（随决策定稿）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/db-schema-governance.md §4.4——chunks 与 FTS/vec0 rowid 耦合，重建必须同批同步重建 FTS 索引与 vec0 映射，否则记忆检索静默断链。"
+    },
+    {
+      "id": "C16",
+      "kind": "constructed",
+      "query": "开发流程里的 gate 链是怎么约定的？",
+      "rewritten": [
+        "开发流程中 gate 链的约定方式",
+        "开发流程里 gate 链的定义和规则",
+        "开发流程中 gate 链的约定"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/dev-process-gate-flow.md",
+          "section_anchor": "三、契约"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/dev-process-gate-flow.md §三 契约。"
+    },
+    {
+      "id": "C18",
+      "kind": "constructed",
+      "query": "一条执行链的 episode 拿什么当锚？",
+      "rewritten": [
+        "执行链的 episode 用什么作为锚点",
+        "episode 在执行链中的锚点选择",
+        "执行链 episode 锚定方式"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/episode-evaluation-v2.md",
+          "section_anchor": "1. 锚定方案（已审定）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/episode-evaluation-v2.md §1 锚定方案（已审定）。"
+    },
+    {
+      "id": "C19",
+      "kind": "constructed",
+      "query": "episodes 表有哪些关键列？",
+      "rewritten": [
+        "episodes 表有哪些关键列",
+        "episodes 表的关键字段有哪些",
+        "episodes 表结构包含哪些重要列"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/episode-evaluation-v2.md",
+          "section_anchor": "3. episodes 表结构"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/episode-evaluation-v2.md §3——含 root_trigger_message_id / chain_task_id / classification_ver 等。"
+    },
+    {
+      "id": "C20",
+      "kind": "constructed",
+      "query": "知识库的表是怎么建的，和记忆侧的 chunks 是一套吗？",
+      "rewritten": [
+        "知识库的表结构是如何设计的",
+        "知识库的表和记忆侧的 chunks 是同一套吗",
+        "记忆侧 chunks 表的结构设计"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/knowledge-base-v1.md",
+          "section_anchor": "三、接口契约 > 3.1 knowledge 表（migrations additive）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/knowledge-base-v1.md §3.1——knowledge 是独立表（migrations additive），与 chunks 三表不是一套。"
+    },
+    {
+      "id": "C21",
+      "kind": "constructed",
+      "query": "知识库检索结果怎么拼进 system prompt？",
+      "rewritten": [
+        "知识库检索结果如何拼接到 system prompt 中",
+        "RAG 检索结果注入 system prompt 的方法",
+        "如何将知识库检索内容整合进 system prompt"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/knowledge-base-v1.md",
+          "section_anchor": "三、接口契约 > 3.3 【知识库】注入区块（system prompt 拼接）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/knowledge-base-v1.md §3.3——【知识库】注入区块的拼接口径。"
+    },
+    {
+      "id": "C23",
+      "kind": "constructed",
+      "query": "记忆切片每片最多多少字，超长内容会被丢掉吗？",
+      "rewritten": [
+        "记忆切片每片最多多少字",
+        "记忆切片超长内容会被丢弃吗",
+        "记忆切片长度限制是多少"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/memory-flywheel.md",
+          "section_anchor": "2. 主链形态（七段，逐段钉死） > 2.2 切片（`packages/server/src/memory/flywheel/segment.ts`）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/memory-flywheel.md §2.2——MAX_TEXT_LENGTH=450，三级确定性回退，不存在不能切的内容。"
+    },
+    {
+      "id": "C24",
+      "kind": "constructed",
+      "query": "扫描器凭什么判断一个 MD 文件变没变？",
+      "rewritten": [
+        "扫描器如何判断 Markdown 文件是否发生变化",
+        "扫描器检测 MD 文件变更的机制",
+        "Markdown 文件变更检测原理"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/memory-flywheel.md",
+          "section_anchor": "2. 主链形态（七段，逐段钉死） > 2.3 扫描器（`scripts/flywheel/scan.mjs`）"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/memory-flywheel.md §2.3——增量判据是 blob SHA（git hash-object），不是 mtime。"
+    },
+    {
+      "id": "C26",
+      "kind": "constructed",
+      "query": "审查链的链锚用哪个字段，为什么不新加一列？",
+      "rewritten": ["审查链的链锚使用哪个字段", "审查链的链锚为什么不新增一列"],
+      "expect": [
+        {
+          "doc_path": "docs/plans/review-chain-anchor.md",
+          "section_anchor": "四、实施决策 > A 链锚域"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/review-chain-anchor.md §四 A——锚沿用 messages.task_id，不新增列、不引入别名。"
+    },
+    {
+      "id": "C27",
+      "kind": "constructed",
+      "query": "提交钩子现在还会自动投递审查请求吗？",
+      "rewritten": ["提交钩子是否会自动投递审查请求", "提交钩子自动投递审查请求的功能现状"],
+      "expect": [
+        {
+          "doc_path": "docs/plans/review-chain-anchor.md",
+          "section_anchor": "四、实施决策 > B 投递与兜底"
+        }
+      ],
+      "forbid": [],
+      "answerability": "答案在 docs/plans/review-chain-anchor.md §四 B1——钩子不再投递，只保留归属写回与「无归属提交（手动提交）补投」。"
+    },
+    {
+      "id": "N01",
+      "kind": "negative",
+      "query": "客户端事件出口要不要收敛成一个单独的 OutboundBus？",
+      "rewritten": [
+        "客户端事件出口是否应该收敛成一个单独的 OutboundBus",
+        "客户端事件出口收敛为单独 OutboundBus 的优缺点",
+        "客户端事件出口设计 OutboundBus 方案"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0013-c3-outbound-bus-not-adopted.md",
+          "section_anchor": "决策：C3 降级为不做"
+        }
+      ],
+      "forbid": [
+        {
+          "doc_path": "docs/adr/0011-execution-engine-extraction.md",
+          "section_anchor": "决策"
+        }
+      ],
+      "answerability": "有解：答案在 docs/adr/0013 §决策——C3 降级为不做。禁止命中的是 docs/adr/0011 §决策：那节通篇讲 EngineBus/HandoffBus 的「引擎出口收敛」，正是 ADR 0013 自己点名的「误读路径（放弃）」——只读它会答成「该做」。"
+    },
+    {
+      "id": "N02",
+      "kind": "negative",
+      "query": "push 审批现在走什么流程？",
+      "rewritten": ["push 审批流程", "push 审批需要经过哪些步骤", "push 审批的当前流程是什么"],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0012-session-closeout-and-push-approval.md",
+          "section_anchor": "退役记录（2026-09-01）"
+        }
+      ],
+      "forbid": [
+        {
+          "doc_path": "docs/adr/0012-session-closeout-and-push-approval.md",
+          "section_anchor": "决策（push 审批部分——已退役 2026-09-01）"
+        }
+      ],
+      "answerability": "有解：答案在 docs/adr/0012 §退役记录（2026-09-01）——push 审批整链退役，发布关载体改 PR。禁止命中的是同文件「决策（push 审批部分——已退役）」：那节描述的是**退役前**的状态机与契约，只读它会照着一个已不存在的机制答。"
+    },
+    {
+      "id": "N03",
+      "kind": "negative",
+      "query": "skill 的 frontmatter 带了 disable-model-invocation，是不是就等于猫读不到它？",
+      "rewritten": [
+        "skill frontmatter 中 disable-model-invocation 的作用是什么",
+        "disable-model-invocation 是否会导致模型无法读取该 skill",
+        "Claude skill 的 disable-model-invocation 配置对模型调用行为的影响"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/adr/0014-skill-delivery-decoupling.md",
+          "section_anchor": "6. 后续项（用户明确要求记录） > 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化"
+        }
+      ],
+      "forbid": [
+        {
+          "doc_path": "docs/adr/0014-skill-delivery-decoupling.md",
+          "section_anchor": "5. Consequences"
+        }
+      ],
+      "answerability": "有解：答案在 docs/adr/0014 §6.1——disable-model-invocation 是上游来源标记，在本仓库**不构成访问约束**；访问约束只由 MCP read_skill 白名单（SKILL_CATALOG）承担。禁止命中的是 §5 Consequences：那节写「wayfinder 按设计排除（disable-model-invocation）」，字面读起来像把该字段当成了访问控制。"
+    },
+    {
+      "id": "N04",
+      "kind": "negative",
+      "query": "这次链锚改造要不要顺手把「全猫带视觉」也一起做了？",
+      "rewritten": [
+        "链锚改造是否需要同时完成全猫带视觉功能",
+        "链锚改造和全猫带视觉一起做的可行性",
+        "全猫带视觉功能是什么"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/review-chain-anchor.md",
+          "section_anchor": "六、不在范围内"
+        }
+      ],
+      "forbid": [
+        {
+          "doc_path": "docs/plans/review-chain-anchor.md",
+          "section_anchor": "三、用户故事"
+        }
+      ],
+      "answerability": "有解：答案在 docs/plans/review-chain-anchor.md §六 不在范围内——视觉统一后置。禁止命中的是 §三 用户故事：用户故事 7（前端改动附真机自证）与 15（vision-retire 已落地）都长在「视觉」这个词上，只读它们会答成「在范围内」。"
+    },
+    {
+      "id": "N05",
+      "kind": "negative",
+      "query": "删掉一只 agent 时，它名下的 messages 会被级联删掉吗？",
+      "rewritten": [
+        "删除 agent 时其名下 messages 是否级联删除",
+        "agent 与 messages 的级联删除关系",
+        "删除 agent 对关联 messages 数据的影响"
+      ],
+      "expect": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "四、B 范围决策（设计定稿，实施票缓拆） > 4.1 FK / 删除策略 / CHECK（④修订版，已拍板）"
+        }
+      ],
+      "forbid": [
+        {
+          "doc_path": "docs/plans/db-schema-governance.md",
+          "section_anchor": "四、B 范围决策（设计定稿，实施票缓拆） > 4.3 sessions.agent_ids 拆表（⑥，已拍板）"
+        }
+      ],
+      "answerability": "有解：答案在 docs/plans/db-schema-governance.md §4.1——物理删除全 RESTRICT，CASCADE 仅纯成员关系行（session_agents）；用户态「删除」= 归档。禁止命中的是 §4.3 sessions.agent_ids 拆表：那节写「删 session → CASCADE 删成员行」，孤立读会给「级联删除是常态」的印象。"
+    }
+  ]
+}
