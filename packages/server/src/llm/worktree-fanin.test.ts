@@ -779,4 +779,33 @@ describe('组 F · 冲突返投失败路径（票 9）', () => {
       expect.objectContaining({ source: catRef(sid, '暹罗猫') })
     )
   })
+
+  /**
+   * F4 `catSlug` 碰撞 ⇒ **判不出收件人，谁都不投**。
+   *
+   * 碰撞形态就是 `serial.cat-worktree.test.ts` P3-c-2 实证过的那个：`甲 猫` 与 `甲猫`
+   * 是两个不同的 DB 值（`agents.name` 的 UNIQUE 拦不住），但 `catSlug` 剥空白后归一
+   * 到**同一个 slug** ⇒ 同一条分支。分支只属于其中一只，而会话成员列表的顺序来自
+   * `agent_ids`、与「谁建的树」无关 ⇒ 取首个匹配就是**可能投给另一只猫**。
+   * 本格钉的是「宁可谁都不投」：投错 = 叫醒无关的猫去改一份不属于它的分支。
+   */
+  it('F4 分支后缀对应多只会话成员（catSlug 碰撞）⇒ 拒投 + log.error（判不出收件人）', () => {
+    const sid = 'f1000004'
+    process.chdir(repo)
+    addConflictPair(sid, '吐槽猫', '甲猫')
+    stubMembers([
+      { id: 'rev-1', name: '吐槽猫' },
+      { id: 'impl-1', name: '甲 猫' }, // slug 后 = '甲猫'
+      { id: 'impl-2', name: '甲猫' }, // 同上 —— 两个不同的 DB 值，同一个 slug
+    ])
+
+    expect(() => ensureExecutionWorktree(sid, REVIEWER_AGENT, 'anchor-f4')).toThrow(
+      /审查面准备中止：把猫分支合进审查者自己的分支时冲突/
+    )
+    expect(h.ingestUserMessage).not.toHaveBeenCalled()
+    expect(h.logError).toHaveBeenCalledWith(
+      'conflict notice skipped — 分支后缀对应多只会话成员（catSlug 碰撞，判不出收件人）',
+      expect.objectContaining({ slug: '甲猫', hits: ['甲 猫', '甲猫'] })
+    )
+  })
 })

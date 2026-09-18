@@ -419,17 +419,27 @@ function conflictNoticeKey(sourceBranch: string, sourceSha: string): string {
 }
 
 /**
- * 分支后缀（= `catSlug(猫名)`）→ 会话成员猫名。
+ * 分支后缀（= `catSlug(猫名)`）→ 会话成员猫名**列表**（调用方判歧义）。
  *
  * 逆推走 **`catSlug` 正着算**（对每个成员算一遍再比），**不做字符串反解析**：
  * 清洗是多字符→少字符的映射，反解析必然有歧义——`甲 猫` 与 `甲猫` 会被归一到
  * 同一个 slug（`serial.cat-worktree.test.ts` P3-c-2 就是这个碰撞的实证）。
  * 正算保证「谁建的这条分支」与「谁是收件人」用的是**同一个函数**。
  *
+ * **返回列表而非首个匹配**：碰撞（两只会话成员归一到同一 slug）时分支只属于其中
+ * 一只，而列表顺序来自 `agent_ids`、**与「谁建的树」无关** ⇒ 取首个 = 可能投给
+ * 另一只猫。让调用方看见「命中几只」才判得了「是不是真知道收件人是谁」。
+ *
+ * 已知残余（见交付说明 OQ-3）：分支的**地面真相**是所有权标记
+ * `branch.<分支名>.catAgentId`（`git-utils.ts` 的 `readCatOwner`，P3-c-2 的对应解）。
+ * 这里没用它，是因为它未被导出——取用要改 `git-utils.ts`，而本票声明的改动面只有
+ * 本文件；在**只差一个导出**的前提下，宁可先按「碰撞即拒投」保守处理。
+ *
  * 单个成员名非法（含 `/` / 清洗后为空）⇒ `catSlug` 抛错：这类猫**建不出分支**，
  * 故不可能是冲突源——跳过它，不中断整个解析。
  */
-function resolveCatNameBySlug(sessionId: string, slug: string): string | null {
+function resolveCatNamesBySlug(sessionId: string, slug: string): string[] {
+  const hits: string[] = []
   for (const id of sessionsRepo.getSessionAgentIds(sessionId)) {
     const row = agentsRepo.getAgentById(id)
     if (!row) continue
@@ -439,9 +449,9 @@ function resolveCatNameBySlug(sessionId: string, slug: string): string | null {
     } catch {
       continue
     }
-    if (s === slug) return row.name
+    if (s === slug) hits.push(row.name)
   }
-  return null
+  return hits
 }
 
 /**
@@ -482,10 +492,26 @@ function notifyConflictSource(opts: {
 
     const prefix = `${sessionBranch(shortId)}-`
     const slug = detail.source.startsWith(prefix) ? detail.source.slice(prefix.length) : ''
-    const catName = slug ? resolveCatNameBySlug(sessionId, slug) : null
+    const hits = slug ? resolveCatNamesBySlug(sessionId, slug) : []
+
+    // **不投比投错好**。两条拒绝路径分开记，因为成因与后续动作不同：
+    // - 多命中（碰撞）：分支确实属于某一只，但这里**判不出是哪只**（列表顺序来自
+    //   `agent_ids`，与「谁建的树」无关）⇒ 宁可不投，也不叫醒无关的猫去改别人的分支。
+    // - 零命中：猫被移出会话 / 分支名不带本会话前缀 / 陈旧分支。
+    if (hits.length > 1) {
+      log.error(
+        'conflict notice skipped — 分支后缀对应多只会话成员（catSlug 碰撞，判不出收件人）',
+        {
+          sessionId,
+          source: detail.source,
+          slug,
+          hits,
+        }
+      )
+      return
+    }
+    const catName = hits[0]
     if (!catName) {
-      // 分支在，但它不对应任何会话成员（猫被移出会话 / 规范化碰撞 / 分支名不带
-      // 本会话前缀）。**不投比投错好**：投错 = 叫醒无关的猫去改一份不属于它的分支。
       log.error('conflict notice skipped — 源分支无对应会话成员', {
         sessionId,
         source: detail.source,
