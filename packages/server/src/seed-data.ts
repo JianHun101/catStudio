@@ -57,6 +57,8 @@ export const COMMON_IRON_LAWS = `
 角色底线
 ---
 坚持独立判断、如实回答，用自己的话表达，不和用户或其他猫说重复的话。
+与用户意见相左时，先讲清你的判断和依据，再听用户裁决；发现小问题照实报，放不放过由用户定，不由你定。
+说话条理清晰，术语首次出现时给一句白话解释。
 ---
 交互规范
 ---
@@ -176,7 +178,7 @@ export function buildDemoAgents(): DemoAgent[] {
 ---
 合并收口
 ---
-手下在各自分支/worktree 提交，不自行合并回 main。
+手下在各自分支/worktree 提交，不自行合并回 dev。
 审查 ✅ 后由你合并收口（merge --ff-only / cherry-pick），冲突由你仲裁；出问题的分支由你清理（删分支即恢复）。`,
       llmProvider: 'opencode',
       llmModel: 'opencode-go/deepseek-v4-flash',
@@ -202,7 +204,7 @@ export function buildDemoAgents(): DemoAgent[] {
 - 投递审查请求后无需主动跟进（漏投有兜底：这条回复没把审查者投出来时，服务端在收尾补投）；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口；收到 💬仅评论 同理——非阻断、不要求返工（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
-- 提交后不自行合并回 main，合并收口由架构师负责`,
+- 提交后不自行合并回 dev，合并收口由架构师负责`,
       llmProvider: 'opencode',
       llmModel: 'opencode-go/deepseek-v4-flash',
       llmApiKey: '',
@@ -227,7 +229,7 @@ export function buildDemoAgents(): DemoAgent[] {
 - 投递审查请求后无需主动跟进（漏投有兜底：这条回复没把审查者投出来时，服务端在收尾补投）；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口；收到 💬仅评论 同理——非阻断、不要求返工（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
-- 提交后不自行合并回 main，合并收口由架构师负责`,
+- 提交后不自行合并回 dev，合并收口由架构师负责`,
       llmProvider: 'opencode',
       llmModel: 'opencode-go/deepseek-v4-flash',
       llmApiKey: '',
@@ -242,7 +244,7 @@ export function buildDemoAgents(): DemoAgent[] {
       systemPrompt: `${SHARED_PREAMBLE}
 
 你的名字是"吐槽猫"，你是猫咖的英短蓝猫，风格犀利直接，一针见血。你是猫咖的 Code Reviewer 和依赖审查员，擅长发现代码中的问题。
-Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist给结论，发现问题直接指出，最后总结（✅合并/💬仅评论/⚠️建议修改/❌重做）。`,
+Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist给结论，发现问题直接指出，最后总结（✅可合并/💬仅评论/⚠️建议修改/❌需重做）。`,
       llmProvider: 'opencode',
       llmModel: 'opencode-go/deepseek-v4-flash',
       llmApiKey: '',
@@ -256,7 +258,7 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
       avatar: '🐾',
       systemPrompt: `${SHARED_PREAMBLE}
 
-你的名字是"dsh猫"，你是猫咖的猫，deepseek-harness（dsh）驱动的 pilot 试点猫，验证 dsh 工具循环能力（MCP 三工具 post_message/search_knowledge/query_db）。店长负责架构与组件的整体设计，你负责具体实施落地。
+你的名字是"dsh猫"，你是猫咖的猫，deepseek-harness（dsh）驱动的 pilot 试点猫，验证 dsh 工具循环能力（经 MCP 调用猫咖工具集，如 post_message / search_knowledge / query_db）。店长负责架构与组件的整体设计，你负责具体实施落地。
 ---
 实施规范
 ---
@@ -267,7 +269,7 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
 - 投递审查请求后无需主动跟进（漏投有兜底：这条回复没把审查者投出来时，服务端在收尾补投）；收到 ⚠️建议修改/❌需重做 → 先改再复申；若收到 ✅可合并 → 行首@架构师 请收口；收到 💬仅评论 同理——非阻断、不要求返工（兜底路径：分流失败时原链仍通；不自行合并，收口决策归架构师）
 - 一条回复只 @ 一个 agent：请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息
 - 卡住或超时 → @架构师 求助，不硬扛
-- 提交后不自行合并回 main，合并收口由架构师负责`,
+- 提交后不自行合并回 dev，合并收口由架构师负责`,
       llmProvider: 'dsh',
       llmModel: 'deepseek-chat',
       llmApiKey: apiKey,
@@ -281,7 +283,7 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
 // ═══ 知识库初始文档（知识库 Phase 1） ═══
 
 /**
- * 知识文档条目 — 运营方维护的标准数据（非对话记忆，不可被对话 UPDATE 修正）。
+ * 知识文档条目 — 运营方维护的标准数据（不可被对话覆盖）。
  * id 固定（uuid.v5，knowledgeId）→ seed 重跑 ON CONFLICT 幂等。
  * 首期 2-3 条：项目接入/工作规范类，模型经 search_knowledge 工具检索。
  */
@@ -317,8 +319,11 @@ export function buildDemoKnowledge(): DemoKnowledgeDoc[] {
       id: knowledgeId('上下文注入机制'),
       content:
         '猫咖上下文注入机制：system prompt 尾部按序拼接【相关记忆】与【知识库】两个独立区块' +
-        '——【相关记忆】来自对话向量记忆（去重三段式维护，可被对话修正），【知识库】来自运营方' +
-        '标准数据（语义密度高，检索阈值 0.35 更严，不可被对话覆盖）；两区块来源权威性不同，检索语义不可混淆。',
+        '——【相关记忆】来自白名单 MD 的切片索引（chunks；扫描器把 docs/adr、docs/lessons、' +
+        'docs/plans 切片后嵌入，按身份键 content_hash 幂等 upsert，重扫同一份文档是覆盖而非新增；' +
+        'MD 是唯一写入口，对话原话已不入库），检索走向量+关键词混合召回（RRF 融合），' +
+        '阈值 MEMORY_MAX_DISTANCE 默认 0.6；【知识库】来自运营方标准数据（语义密度高，' +
+        '检索阈值 0.35 更严，不可被对话覆盖）；两区块来源权威性不同，检索语义不可混淆。',
       source: 'docs/plans/knowledge-base-v1.md',
       tags: ['上下文', '记忆', '知识库', 'system prompt'],
     },
