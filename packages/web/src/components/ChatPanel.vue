@@ -13,6 +13,7 @@ import { isAgentStoppable, isToolActive, toolAreaSummary } from '@/utils/tools'
 import { normalizeUtc } from '@/utils/time'
 import { createLogger } from '@/utils/logger'
 import MessageItem from './MessageItem.vue'
+import ReplyElapsed from './ReplyElapsed.vue'
 import ToolRow from './ToolRow.vue'
 
 const log = createLogger('ChatPanel')
@@ -255,6 +256,33 @@ const activeTypingStates = computed(() => {
     if (activeAgentIds.has(agentId)) filtered.set(agentId, typingView(agentId, v))
   })
   return filtered
+})
+
+/** 取某 agent 的计时锚点（无则 undefined）——气泡 footer 与占位气泡共用 */
+function replyTimerFor(agentId: string): { startedAt: number; lastBeatAt: number } | undefined {
+  return store.replyTimers.get(agentId)
+}
+
+/**
+ * 占位气泡数据源：**有计时锚点、无流式内容**的执行。
+ *
+ * 覆盖三类没有 `AGENT_TYPING` 的窗口：A2A（猫 @ 猫，没有用户消息状态行可挂）、
+ * headless 适配器（整轮不 yield chunk）、首个 chunk 到达前的上下文组装阶段。
+ * 与 `activeTypingStates` 互斥（同一条目不会既流式又占位）——首个 chunk 到达后
+ * `typingStates` 有条目，本 list 自然剔除该 agent，气泡切换但计时同源不重置。
+ *
+ * 会话归属：计时表载荷无 sessionId 维度，只能按 activeSession.agentIds 过滤
+ * （与 activeTypingStates 同口径），切会话时 store 已整体清空。
+ */
+const placeholderTimers = computed(() => {
+  const list: { agentId: string; startedAt: number; lastBeatAt: number }[] = []
+  const activeAgentIds = new Set(store.activeSession?.agentIds ?? [])
+  store.replyTimers.forEach((timer, agentId) => {
+    if (!activeAgentIds.has(agentId)) return
+    if (store.typingStates.has(agentId)) return
+    list.push({ agentId, ...timer })
+  })
+  return list
 })
 
 // 流式结束（typing 条目删除）→ 清理该 agent 的折叠块冻结态，下一条流式从干净状态开始
@@ -1235,7 +1263,49 @@ const messageViews = computed<MessageView[]>(() => {
                   >
                     停止
                   </button>
-                  <span class="streaming-indicator">回复中…</span>
+                  <!-- 计时唯一权威位（A2A / headless 执行没有用户消息状态行可挂）；
+                       锚点缺失（旧 server 不带 startedAt）→ 回退静态「回复中…」 -->
+                  <ReplyElapsed
+                    v-if="replyTimerFor(agentId)"
+                    :started-at="replyTimerFor(agentId)!.startedAt"
+                    :last-beat-at="replyTimerFor(agentId)!.lastBeatAt"
+                  />
+                  <span v-else class="streaming-indicator">回复中…</span>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 占位气泡（无流式内容的执行）：复用 streaming 气泡的虚线视觉语言，正文思考动点、
+             footer 停止按钮 + 计时。首个 chunk 到达后由上方流式气泡接管，计时同源不重置。 -->
+        <div
+          v-for="timer in placeholderTimers"
+          :key="'placeholder-' + timer.agentId"
+          class="message agent streaming"
+        >
+          <div class="msg-avatar">{{ avatarFor('agent', timer.agentId) }}</div>
+          <div class="msg-body">
+            <div class="msg-sender">{{ senderName(timer.agentId) }}</div>
+            <div class="msg-bubble">
+              <div class="placeholder-thinking">
+                <span class="thinking-dots"><i></i><i></i><i></i></span>
+              </div>
+              <div class="msg-footer">
+                <span class="msg-footer-info" :class="contextLevelFor(timer.agentId)">
+                  {{ modelNameFor(timer.agentId) }} · {{ tokensTextFor(timer.agentId) }}
+                </span>
+                <span class="msg-footer-right">
+                  <button
+                    v-if="canStopAgent(timer.agentId)"
+                    class="btn-stop-agent"
+                    title="停止思考并清空队列"
+                    aria-label="停止"
+                    @click.stop="stopAgent(timer.agentId)"
+                  >
+                    停止
+                  </button>
+                  <ReplyElapsed :started-at="timer.startedAt" :last-beat-at="timer.lastBeatAt" />
                 </span>
               </div>
             </div>
@@ -2914,6 +2984,14 @@ const messageViews = computed<MessageView[]>(() => {
 /* ─── Streaming Message ──────────────────── */
 .chat-panel .message.streaming .msg-bubble {
   border-style: dashed;
+}
+
+/* 占位气泡正文：思考动点（与流式思考折叠块 header 同款动点组件）。
+   min-height 对齐一行正文，避免「空气泡只有 footer」的塌陷观感。 */
+.chat-panel .placeholder-thinking {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
 }
 
 /* ─── Thinking Block (collapsible) ────────── */

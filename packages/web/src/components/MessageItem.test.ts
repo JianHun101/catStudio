@@ -205,6 +205,43 @@ describe('MessageItem 用户消息状态行（停止按钮 / 撤回）', () => {
     expect(wrapper.emitted('stopAgent')).toEqual([['a1']])
   })
 
+  it('占位气泡在屏（replyTimers 有条目）→ 状态行停止按钮让位，不出现两个「停止」', async () => {
+    const store = useChatStore()
+    store.activeSessionId = 's1'
+    store.agentStates = new Map([
+      [
+        'a1',
+        new Map([
+          ['s1', { agentId: 'a1', sessionId: 's1', status: 'busy', queueLength: 0 } as never],
+        ]),
+      ],
+    ])
+    const wrapper = mount(MessageItem, {
+      props: baseProps({ msg: USER_MSG, statusEntries: [entry] }),
+    })
+    expect(wrapper.find('.btn-stop-agent').exists()).toBe(true)
+
+    // 无流式执行（A2A / headless / 首 chunk 前）：气泡侧渲染占位气泡承载按钮
+    store.replyTimers = new Map([['a1', { startedAt: Date.now() - 3_000, lastBeatAt: Date.now() }]])
+    await nextTick()
+    expect(wrapper.find('.btn-stop-agent').exists()).toBe(false)
+  })
+
+  it('状态行不显示秒数（计时唯一权威位 = Agent 气泡 footer 的 ReplyElapsed）', () => {
+    // 票②：状态行保留状态文字与停止按钮，秒数上移——A2A / headless 执行没有用户消息
+    // 状态行可挂，秒数留在这里就漏一半。entry 即使带全 startedAt/lastBeatAt 也不出秒。
+    const wrapper = mount(MessageItem, {
+      props: baseProps({
+        msg: USER_MSG,
+        statusEntries: [{ ...entry, startedAt: Date.now() - 30_000, lastBeatAt: Date.now() }],
+      }),
+    })
+    const row = wrapper.find('.agent-status-row')
+    expect(row.text()).toContain('回复中')
+    expect(row.text()).not.toContain('秒')
+    expect(row.find('.status-label').exists()).toBe(true)
+  })
+
   it('撤回按钮仅在 isLatestUser 时出现，点击 emit retract(msgId)', async () => {
     const wrapper = mount(MessageItem, {
       props: baseProps({ msg: USER_MSG, statusEntries: [entry], isLatestUser: true }),
