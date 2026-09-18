@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import type { Message, AgentRuntimeState, SessionConfig, AgentConfig } from '@cat-study/shared'
 import { Events } from '@cat-study/shared'
@@ -1063,6 +1063,157 @@ describe('chatStore', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    // ── 票②：气泡计时表 replyTimers（agentId 键控，A2A / headless 执行的唯一计时来源）──
+    describe('replyTimers（Agent 回复计时）', () => {
+      /** 取最新一处 handler（store 每建一次就重绑一遍，clearAllMocks 后只剩当轮的） */
+      function handlerOf(event: string): (data: any) => void {
+        const h = mockOn.mock.calls.find((call) => call[0] === event)?.[1] as
+          ((data: any) => void) | undefined
+        expect(h).toBeDefined()
+        return h!
+      }
+
+      function statusEvent(over: Record<string, unknown> = {}) {
+        return {
+          messageId: 'm1',
+          agentId: 'a1',
+          agentName: 'ds猫',
+          agentAvatar: '🐱',
+          status: 'replying',
+          ...over,
+        }
+      }
+
+      beforeEach(() => {
+        vi.useFakeTimers()
+        vi.setSystemTime(1_700_000_000_000)
+      })
+      afterEach(() => {
+        vi.useRealTimers()
+      })
+
+      it('thinking 写入锚点：startedAt 取载荷值、lastBeatAt = 接收时刻（A2A / headless 无状态行也计时）', () => {
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(
+          statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 - 20_000 })
+        )
+        expect(store.replyTimers.get('a1')).toEqual({
+          startedAt: 1_700_000_000_000 - 20_000,
+          lastBeatAt: 1_700_000_000_000,
+        })
+      })
+
+      it('心跳重发只刷新 lastBeatAt，startedAt 取新旧较小者（防乱序/中途刷新导致秒数倒退）', () => {
+        const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        handler(statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 - 20_000 }))
+
+        // 中途刷新场景：只在执行中途收到一发 replying，锚点来自载荷而非本地首次渲染时刻
+        vi.setSystemTime(1_700_000_000_000 + 10_000)
+        handler(statusEvent({ startedAt: 1_700_000_000_000 - 20_000 }))
+        expect(store.replyTimers.get('a1')).toEqual({
+          startedAt: 1_700_000_000_000 - 20_000,
+          lastBeatAt: 1_700_000_000_000 + 10_000,
+        })
+
+        // 迟到事件带更早锚点 → 取更早者（不倒退成更晚的起点）
+        handler(statusEvent({ startedAt: 1_700_000_000_000 - 30_000 }))
+        expect(store.replyTimers.get('a1')!.startedAt).toBe(1_700_000_000_000 - 30_000)
+      })
+
+      it('执行 N 失败后队列直转 N+1：thinking 无条件重置锚点，不继承上一轮起点（防跨执行虚高）', () => {
+        const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        // 执行 N 起跑后失败：服务端既不发 done、也不发 AGENT_STATUS idle——serial.ts:1670
+        // 队列有下一条时只发 `busy` 直转 N+1，故 idle 那条清空兜底不会触发，N 的条目留在表里
+        handler(statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 - 20_000 }))
+        handlerOf(Events.AGENT_STATUS)({
+          agentId: 'a1',
+          status: 'busy',
+          sessionId: 's1',
+          queueLength: 1,
+        })
+        expect(store.replyTimers.get('a1')!.startedAt).toBe(1_700_000_000_000 - 20_000)
+
+        // N+1 起跑：thinking 带**更晚**的新锚点 → 必须直接落新值。若与 prev 取小则保留 N 的
+        // 起点，秒数会把两次执行之间的失败间隙一并算进去（虚高到 N+1 done 才自愈）
+        vi.setSystemTime(1_700_000_000_000 + 60_000)
+        handler(statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 + 60_000 }))
+        expect(store.replyTimers.get('a1')).toEqual({
+          startedAt: 1_700_000_000_000 + 60_000,
+          lastBeatAt: 1_700_000_000_000 + 60_000,
+        })
+      })
+
+      it('载荷无 startedAt（旧 server）且本地无存量 → 不建条目（无锚点不显示时长，气泡回退静态文案）', () => {
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(statusEvent({ startedAt: undefined }))
+        expect(store.replyTimers.has('a1')).toBe(false)
+      })
+
+      it('done → 删除计时（含 heartbeat 途中的中途删除，不留残留条目）', () => {
+        const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        handler(statusEvent({ startedAt: 1_700_000_000_000 - 5_000 }))
+        expect(store.replyTimers.has('a1')).toBe(true)
+
+        handler(statusEvent({ status: 'done' }))
+        expect(store.replyTimers.has('a1')).toBe(false)
+      })
+
+      it('NEW_MESSAGE（本猫回复落库）→ 删除计时：服务端 NEW_MESSAGE 先于 done 广播，只靠 done 会闪一帧占位气泡', () => {
+        store.activeSessionId = 's1'
+        const statusHandler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        const newMessageHandler = handlerOf(Events.NEW_MESSAGE)
+        statusHandler(statusEvent({ startedAt: 1_700_000_000_000 - 5_000 }))
+
+        newMessageHandler({ ...mockMessage, id: 'r1', role: 'agent', agentId: 'a1' })
+        expect(store.replyTimers.has('a1')).toBe(false)
+      })
+
+      it('用户消息 NEW_MESSAGE 不清计时（只认 agent 回复落库为执行终点）', () => {
+        store.activeSessionId = 's1'
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(
+          statusEvent({ startedAt: 1_700_000_000_000 - 5_000 })
+        )
+        handlerOf(Events.NEW_MESSAGE)({ ...mockMessage, id: 'u2', role: 'user', agentId: null })
+        expect(store.replyTimers.has('a1')).toBe(true)
+      })
+
+      it('AGENT_STATUS idle → 删除计时（abort/timeout 无 done 事件，只认 idle 终止信号）', () => {
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(
+          statusEvent({ startedAt: 1_700_000_000_000 - 5_000 })
+        )
+
+        handlerOf(Events.AGENT_STATUS)({
+          agentId: 'a1',
+          status: 'idle',
+          sessionId: 's1',
+          queueLength: 0,
+        })
+        expect(store.replyTimers.has('a1')).toBe(false)
+      })
+
+      it('AGENT_STATUS busy 不清计时（只有终止信号才清）', () => {
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(
+          statusEvent({ startedAt: 1_700_000_000_000 - 5_000 })
+        )
+        handlerOf(Events.AGENT_STATUS)({
+          agentId: 'a1',
+          status: 'busy',
+          sessionId: 's1',
+          queueLength: 0,
+        })
+        expect(store.replyTimers.has('a1')).toBe(true)
+      })
+
+      it('切会话 → 清空（载荷无 sessionId 维度，留着会把旧会话计时挂到新会话视图）', () => {
+        store.activeSessionId = 's1'
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(
+          statusEvent({ startedAt: 1_700_000_000_000 - 5_000 })
+        )
+        expect(store.replyTimers.has('a1')).toBe(true)
+
+        store.joinSession('s2')
+        expect(store.replyTimers.size).toBe(0)
+      })
     })
 
     it('SESSION_DELETED removes session from list', () => {

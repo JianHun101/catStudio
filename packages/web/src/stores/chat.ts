@@ -79,6 +79,19 @@ export type AgentStatusEntry = {
   lastBeatAt?: number
 }
 
+/**
+ * 单条「正在执行的回复」的计时态（气泡 footer 计时的唯一数据源）。
+ *
+ * `startedAt` = 服务端执行起点（`MESSAGE_AGENT_STATUS` 载荷，一次执行内 'thinking'
+ * 与 'replying'/心跳同值）；`lastBeatAt` = 最后一次收到该执行事件的**客户端接收时刻**
+ * （liveness 锚点）。秒数由叶子组件本地 tick 自增，本表只提供锚点。
+ *
+ * 键控维度是 **agentId 单键**（不是 messageId）——A2A / headless 执行没有对应的用户
+ * 消息可挂，messageId 键控的 `messageStatus` 覆盖不到它们；单 agent 单槽位串行也保证
+ * 一猫至多一条、无并发冲突。
+ */
+export type ReplyTimerEntry = { startedAt: number; lastBeatAt: number }
+
 export const useChatStore = defineStore('chat', () => {
   // ─── State ────────────────────────────────
 
@@ -100,6 +113,29 @@ export const useChatStore = defineStore('chat', () => {
       }
     >
   >(new Map())
+  /**
+   * Agent 回复计时表（agentId 键控）——气泡 footer「回复中 · 已 N 秒」的唯一数据源。
+   *
+   * 与 `typingStates` 的分工：typing 是**流式内容**通道（无内容即无条目，headless 适配器
+   * 整轮空转），本表是**执行存活性**通道（执行一开跑就有条目）——A2A 与 headless 执行
+   * 靠它在聊天气泡上可见。载荷无 sessionId 维度 ⇒ 切会话时与 typingStates 同点清空，
+   * 不做跨会话保留。
+   */
+  const replyTimers = ref<Map<string, ReplyTimerEntry>>(new Map())
+
+  /** 写计时条目（整 Map 替换——与 messageStatus 同款：Map 原地 set 不触发 ref 依赖） */
+  function setReplyTimer(agentId: string, entry: ReplyTimerEntry): void {
+    replyTimers.value = new Map(replyTimers.value.set(agentId, entry))
+  }
+
+  /** 清计时条目（无条目时不动引用，避免空触发重渲染） */
+  function clearReplyTimer(agentId: string): void {
+    if (!replyTimers.value.has(agentId)) return
+    const next = new Map(replyTimers.value)
+    next.delete(agentId)
+    replyTimers.value = next
+  }
+
   const unreadCounts = ref<Map<string, number>>(new Map()) // sessionId → unread count
   const loading = ref(false)
   const waitingForServer = ref(false) // 等待服务器启动（health check 轮询中）
@@ -336,6 +372,9 @@ export const useChatStore = defineStore('chat', () => {
     }
     // 清除旧会话的打字气泡（切换会话时状态应完全重置）
     typingStates.value.clear()
+    // 计时同点清空：MESSAGE_AGENT_STATUS 载荷不带 sessionId，本表无法按会话隔离——
+    // 切走时若留着，旧会话的计时会挂到新会话视图的占位气泡上
+    replyTimers.value = new Map()
     // 清除旧会话的上下文窗口 token 数据（不同会话的 Agent 上下文不同）
     contextTokens.value.clear()
     // 清除旧会话的执行元数据缓存（messageId 关联的是旧会话的回复气泡）
@@ -710,6 +749,10 @@ export const useChatStore = defineStore('chat', () => {
       // Agent 完成回复后清除打字状态 + 刷新 token 统计
       if (msg.role === 'agent' && msg.agentId) {
         typingStates.value.delete(msg.agentId)
+        // 回复消息落库 = 本次执行结束（服务端顺序：NEW_MESSAGE 先于 done 广播）。
+        // 这里与 typingStates 同点清计时：只靠 done 清会留一个「消息已上屏、占位气泡
+        // 还在」的窗口——两事件分属不同 socket 帧，中间会渲染一帧占位气泡。
+        clearReplyTimer(msg.agentId)
         fetchAgentStats()
       }
     })
@@ -776,6 +819,9 @@ export const useChatStore = defineStore('chat', () => {
       // Agent 空闲时清除打字状态（处理超时/中止等未发 NEW_MESSAGE 的情况）
       if (state.status === 'idle') {
         typingStates.value.delete(state.agentId)
+        // 计时同点清：abort/timeout 路径没有 done 事件，只认 idle 这条终止信号，
+        // 否则气泡会留一个永远「无响应」的占位僵尸
+        clearReplyTimer(state.agentId)
       }
     })
 
@@ -882,16 +928,44 @@ export const useChatStore = defineStore('chat', () => {
           if (data.status === 'replying') setLifecycle(data.messageId, 'agent-processing')
           else if (data.status === 'done') setLifecycle(data.messageId, 'replied')
         }
+        // ── 气泡计时（agentId 键控，独立于下方 messageId 键控的状态行）──────
+        // thinking/replying 写入锚点、done 删除。心跳重发只刷新 lastBeatAt
+        // （10s 一次的 liveness 锚点），秒数由叶子组件本地 1s tick 自增——server 零额外流量。
+        // A2A / headless 执行没有用户消息状态行，这条支路是它们唯一可见的计时来源。
+        if (data.status === 'thinking' || data.status === 'replying') {
+          const prev = replyTimers.value.get(data.agentId)
+          // 锚点缺失（旧 server 的 thinking 不带 startedAt，且本地无存量）→ 不建条目：
+          // 没有执行起点就没有可显示的时长，气泡回退静态「回复中…」而不是从 0 起算
+          const anchor = data.startedAt ?? prev?.startedAt
+          if (anchor != null) {
+            // 'thinking' 是**一轮执行的起点信号**（服务端顺序恒 thinking → replying → 心跳，
+            // 见 reply.ts:331-341，锚点一次取值）——到了就无条件重置，**不与 prev 取小**。
+            // 上一轮失败（LLM 异常 / AGENT_HARD_TIMEOUT_MS 硬超时 / CLI 空闲超时）既不产 done
+            // 也不产 AGENT_STATUS idle：serial.ts:1670 队列有下一条时只发 `busy` 直转 N+1，
+            // 上面的 idle 清空兜底不触发。此时若与 prev 取小，新一轮计时会继承上一轮起点，
+            // 把失败间隙一并算进秒数（跨执行虚高，直到本轮 done 才自愈）。
+            // min 防御只留给 replying / 心跳：那里服务端恒发同值，取小才是在防乱序与中途刷新倒退。
+            const startedAt =
+              data.status === 'thinking' || prev == null ? anchor : Math.min(prev.startedAt, anchor)
+            setReplyTimer(data.agentId, { startedAt, lastBeatAt: Date.now() })
+          }
+        } else if (data.status === 'done') {
+          clearReplyTimer(data.agentId)
+        }
+
         const current = messageStatus.value.get(data.messageId) || []
         const idx = current.findIndex((e) => e.agentId === data.agentId)
-        // replying 心跳：记录客户端接收时间戳（liveness 锚点）。心跳 10s 重发、
-        // 本地 1s tick 平滑秒数；超阈值未收到心跳 → ChatPanel 显示「无响应」
-        // （本地时钟不能把死进程显示成「还在跑」）。
+        // replying 心跳：记录客户端接收时间戳（liveness 锚点）——AgentStatusLabel 据此把
+        // 状态文字翻成「无响应」（超阈值未收到心跳；本地时钟不能把死进程显示成「还在跑」）。
+        // 秒数不在这里——状态行已去秒，时长由气泡 footer 的 ReplyElapsed 消费上方的计时表。
         const entry: AgentStatusEntry =
           data.status === 'replying' ? { ...data, lastBeatAt: Date.now() } : data
-        // 整对象替换：done/queued/thinking 不带 startedAt/lastBeatAt，会抹掉 entry 已有字段——
-        // 当前无害（done 是终态、不显示时长、服务端心跳已在 finally 停）；将来 thinking/done
-        // 要显示时长时注意此隐式前提（须改字段级合并而非整对象替换）。
+        // 整对象替换：载荷未带的字段会被抹掉——'thinking'/'replying' 带 startedAt（票① 起
+        // thinking 也带，锚点=执行起点），但 lastBeatAt 是本地 stamp、不在载荷内，故
+        // thinking→replying 序列里 lastBeatAt 由 replying 那发重新 stamp（服务端顺序
+        // 恒为 thinking 先于 replying，不存在 replying 之后再来 thinking 的倒退）；
+        // 'queued'/'done' 不带 startedAt，终态不显示时长（服务端心跳已在 finally 停）。
+        // 将来若要给 'done' 显示时长，须改字段级合并而非整对象替换。
         if (idx >= 0) {
           current[idx] = entry
         } else {
@@ -995,6 +1069,7 @@ export const useChatStore = defineStore('chat', () => {
     agentStates,
     agents,
     typingStates,
+    replyTimers,
     unreadCounts,
     loading,
     waitingForServer,
