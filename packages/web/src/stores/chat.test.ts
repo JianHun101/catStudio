@@ -1100,6 +1100,29 @@ describe('chatStore', () => {
         expect(store.replyTimers.get('a1')!.startedAt).toBe(1_700_000_000_000 - 30_000)
       })
 
+      it('执行 N 失败后队列直转 N+1：thinking 无条件重置锚点，不继承上一轮起点（防跨执行虚高）', () => {
+        const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        // 执行 N 起跑后失败：服务端既不发 done、也不发 AGENT_STATUS idle——serial.ts:1670
+        // 队列有下一条时只发 `busy` 直转 N+1，故 idle 那条清空兜底不会触发，N 的条目留在表里
+        handler(statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 - 20_000 }))
+        handlerOf(Events.AGENT_STATUS)({
+          agentId: 'a1',
+          status: 'busy',
+          sessionId: 's1',
+          queueLength: 1,
+        })
+        expect(store.replyTimers.get('a1')!.startedAt).toBe(1_700_000_000_000 - 20_000)
+
+        // N+1 起跑：thinking 带**更晚**的新锚点 → 必须直接落新值。若与 prev 取小则保留 N 的
+        // 起点，秒数会把两次执行之间的失败间隙一并算进去（虚高到 N+1 done 才自愈）
+        vi.setSystemTime(1_700_000_000_000 + 60_000)
+        handler(statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 + 60_000 }))
+        expect(store.replyTimers.get('a1')).toEqual({
+          startedAt: 1_700_000_000_000 + 60_000,
+          lastBeatAt: 1_700_000_000_000 + 60_000,
+        })
+      })
+
       it('载荷无 startedAt（旧 server）且本地无存量 → 不建条目（无锚点不显示时长，气泡回退静态文案）', () => {
         handlerOf(Events.MESSAGE_AGENT_STATUS)(statusEvent({ startedAt: undefined }))
         expect(store.replyTimers.has('a1')).toBe(false)
