@@ -36,14 +36,19 @@ import {
 
 // onAny 兜底诊断测试需要断言 warn 日志——logger 模块级 mock（debug/info/error no-op，
 // 不影响既有用例；socketio.ts 内部 createLogger('socketio') 同样吃到这个 mock）
-const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }))
+const { logWarn, logInfo } = vi.hoisted(() => ({ logWarn: vi.fn(), logInfo: vi.fn() }))
 vi.mock('../logger.js', () => ({
   createLogger: () => ({
     debug: vi.fn(),
-    info: vi.fn(),
+    info: logInfo,
     warn: logWarn,
     error: vi.fn(),
   }),
+}))
+
+// 票②心跳 options 断言消费：mock Server 构造捕获 opts（原实现把 _opts 丢掉，无处断言）
+const { serverOpts } = vi.hoisted(() => ({
+  serverOpts: { value: null as Record<string, unknown> | null },
 }))
 
 vi.mock('../dispatch/index.js', () => ({
@@ -276,7 +281,8 @@ const mockIo = {
 // Mock socket.io module itself so createSocketIO returns our mockIo.
 // 注意：不能用箭头函数——`new` 要求 constructor。
 vi.mock('socket.io', () => ({
-  Server: vi.fn().mockImplementation(function (this: any, _httpServer: any, _opts: any) {
+  Server: vi.fn().mockImplementation(function (this: any, _httpServer: any, opts: any) {
+    serverOpts.value = opts
     return mockIo
   }),
 }))
@@ -287,6 +293,7 @@ describe('socketio connector', () => {
     socketHandlers.clear()
     connectionCallback = null
     anyListener = null
+    serverOpts.value = null
     mockSocketEmit.mockClear()
     mockRoomEmit.mockClear()
     mockIoEmit.mockClear()
@@ -396,6 +403,30 @@ describe('socketio connector', () => {
       anyListener!('get-agent-states')
 
       expect(logWarn).not.toHaveBeenCalled()
+    })
+  })
+
+  // ─── 连接生命周期（票②心跳放宽 / 票③断开日志带 reason） ───
+
+  describe('连接生命周期（票②票③）', () => {
+    it('票②：Server options 带放宽后的心跳 60s/120s（容忍冻结标签页）', () => {
+      expect(serverOpts.value).toMatchObject({
+        pingInterval: 60_000,
+        pingTimeout: 120_000,
+      })
+    })
+
+    it('票③：disconnect 日志 payload 带 reason（排障可区分断开原因）', () => {
+      const handlers = socketHandlers.get('disconnect')
+      expect(handlers).toBeDefined()
+      expect(handlers!.length).toBe(1)
+
+      handlers![0]('ping timeout')
+
+      expect(logInfo).toHaveBeenCalledWith('client disconnected', {
+        socketId: 'test-socket-id',
+        reason: 'ping timeout',
+      })
     })
   })
 

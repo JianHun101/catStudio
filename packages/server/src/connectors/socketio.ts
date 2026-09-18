@@ -144,6 +144,15 @@ function createSocketBus(io: SocketServer): EngineBus & HandoffBus {
   }
 }
 
+/**
+ * 心跳放宽（后台标签页冻结根治）：Chrome 冻结后台标签页的计时器 ⇒ 客户端心跳停发，
+ * Socket.IO 默认值（pingInterval 25s / pingTimeout 20s）在 ~45s 就判定断连并杀掉连接。
+ * 放宽到 1/min 心跳以容忍冻结页；代价是真死连接回收延迟到 3 分钟（pingTimeout 到期）——可接受。
+ * 刻意不新增环境变量：该值不随部署环境变化，多一个旋钮只是多一个误配面。
+ */
+const PING_INTERVAL_MS = 60_000
+const PING_TIMEOUT_MS = 120_000
+
 export function createSocketIO(httpServer: HttpServer): SocketServer {
   // 单例 fail-fast（3.5 刀，热重启双注册表防护）：引擎实例持有全量执行态
   // （run 注册表/撤回标记/锁计数/配额），进程内重复创建 = 双注册表双驱动——
@@ -159,6 +168,8 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       origin: [/^http:\/\/(localhost|127\.0\.0\.1):\d+$/],
       methods: ['GET', 'POST'],
     },
+    pingInterval: PING_INTERVAL_MS,
+    pingTimeout: PING_TIMEOUT_MS,
   })
 
   _io = io
@@ -628,8 +639,9 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
 
     // ─── Disconnect ───────────────────────────────
 
-    socket.on('disconnect', () => {
-      log.info('client disconnected', { socketId: socket.id })
+    socket.on('disconnect', (reason: string) => {
+      // reason 纯记录无分支：排障时区分「客户端主动断开 / ping timeout / transport error」
+      log.info('client disconnected', { socketId: socket.id, reason })
     })
   })
 
