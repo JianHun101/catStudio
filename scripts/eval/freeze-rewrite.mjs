@@ -51,11 +51,47 @@
  * 把该条 id 写进黄金集顶层 `meta.emptiesAcknowledged` 数组；脚本据此把退出码
  * 收回 0。**脚本自己永不写这个键**——判定权与实施权分开。
  *
+ * ## 三档语义（**缺省落安全侧**，R11）
+ *
+ * | 档 | 触发 | 调 LLM | 写盘 |
+ * | --- | --- | --- | --- |
+ * | `dry`（缺省） | 裸跑 | 否 | 否 |
+ * | `check` | `--check` | 是 | 否 |
+ * | `write` | `--write` | 是 | 是 |
+ *
+ * `--check` 与 `--write` 互斥（exit 2）——前者验「冻结可复现」，后者改冻结。
+ *
+ * pnpm 入口 `eval:golden:freeze`（`package.json`）**保持裸形**：它与裸跑同语义（只读体检），
+ * 不给「同一条命令、两个入口、两套缺省」留缝。真改写写全为
+ * `pnpm eval:golden:freeze --write`（pnpm 把脚本名之后的参数原样透传，实测
+ * `--check --write` 双双到达 CLI 并落 exit 2）。别名若改带 `--write`，被误触的就不止
+ * 裸脚本，而是这个看起来最无害的入口——与「缺省落破坏性一侧」是同一个错。
+ *
+ * ### 为什么缺省是只读的（事故实证，非理论风险）
+ *
+ * 首版缺省 = **真调 LLM 改写全部条目并 `writeFileSync` 覆写黄金集**。2026-09-18 R9
+ * 审查窗口，审查者为验前置闸 fail-loud，在一棵**有真 DS_KEY 的审查 worktree** 里裸跑
+ * 本脚本，30 秒内踩中——40 次真实 LLM 调用 + 覆写被审文件（已还原零残留）。
+ *
+ * 根因不是「审查态保护」缺失：脚本无法可靠自判跑在谁的树里（判据脆弱，且审查者本就
+ * 在正常 checkout 里跑）。根因是**缺省落在破坏性一侧**——一个只想「看一眼」的动作，
+ * 代价是打 40 次 LLM 并改写被审文件。故缺省收敛为只读体检，破坏性动作必须显式 opt-in。
+ *
+ * ### `dry` 为什么不报「两跑差集」
+ *
+ * 差集 = 重跑一遍再比对，**必然要打 LLM**——与「零 LLM」互斥（票面 §修法 那句
+ * 「只打印差集」按 F1 落地为静态体检）。`dry` 报的是**当前冻结状态**：条目数、
+ * 已冻结数、空改写清单、其中未经人确认的部分。要真差集走 `--check`。
+ *
  * ## 前置闸（fail-loud，不静默降级）
  *
  * 跑之前先证两件事：`MEMORY_QUERY_REWRITE_ENABLED` 不为 `'0'`、`DS_KEY` 非空。
  * 不证的话，整轮 40 条会全部落空数组，看起来像「改写器什么也产不出」——
  * 而那其实是「这一步压根没通电」。
+ *
+ * **只对 `--check` / `--write` 是硬闸**（这两档真要打 LLM，不通即 exit 2）。
+ * `dry` 档**只报告不拦**：它压根不改写，拦了反而会把 worktree 里的「零成本体检」
+ * 变成 exit 2，逼人去配一个本档用不上的 key。
  *
  * ## 环境变量从哪来
  *
@@ -73,8 +109,10 @@
  *
  * ## 退出码
  *
- * `0` 写盘成功且空清单已全部确认 / `1` 有未确认的空改写（含 `--check` 差集非空）/
- * `2` 用法、读盘、前置闸失败。
+ * `0` 空清单已全部确认 / `1` 有未确认的空改写（含 `--check` 差集非空）/
+ * `2` 用法（含 `--check`+`--write` 同给）、读盘、前置闸失败。
+ * `dry` 档同样按 `unacked` 判——它回答的是「黄金集当前状态是否需要人处理」，
+ * 与写不写盘无关。
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -228,9 +266,54 @@ export function unackedEmpties(empty, acked) {
   return empty.filter((id) => !ack.has(id))
 }
 
+/**
+ * `dry` 档的只读体检（见文件头「三档语义」）。
+ *
+ * **不接 `rewrite` 参数**——这不是省略，是结构性保证：本函数在签名上就够不着改写器，
+ * 于是「零 LLM 调用」不靠纪律维持，靠签名面维持。
+ *
+ * @param {object} opts
+ * @param {Array} opts.entries 黄金集条目
+ * @param {string[]} [opts.only] 只跑这些 id（缺省全跑）
+ * @param {unknown} [opts.acked] 黄金集顶层 `meta.emptiesAcknowledged`
+ * @returns `{ total, frozen, empty, unacked, wouldRewrite }`
+ *   `wouldRewrite` = 若改走 `--write` 会重跑的条目数（`--only` 过滤后）
+ */
+export function inspectFrozen({ entries, only, acked }) {
+  const onlySet = only && only.length > 0 ? new Set(only) : null
+  const empty = []
+  let frozen = 0
+  let wouldRewrite = 0
+
+  for (const entry of entries) {
+    const list = Array.isArray(entry.rewritten) ? entry.rewritten : []
+    if (list.length > 0) frozen++
+    else empty.push(entry.id)
+    if (!onlySet || onlySet.has(entry.id)) wouldRewrite++
+  }
+
+  return {
+    total: entries.length,
+    frozen,
+    empty,
+    unacked: unackedEmpties(empty, acked),
+    wouldRewrite,
+  }
+}
+
+/**
+ * 档位判定（见文件头「三档语义」）。
+ * @returns `'dry' | 'check' | 'write'`；`--check` 与 `--write` 同给 ⇒ `null`（用法错，调用方判）
+ */
+export function resolveMode({ check, write }) {
+  if (check && write) return null
+  if (write) return 'write'
+  if (check) return 'check'
+  return 'dry'
+}
+
 /** 一行人类可读汇总（走 stderr） */
-export function summaryLine({ total, frozen, empty, unacked, changed, check }) {
-  const mode = check ? 'check' : 'write'
+export function summaryLine({ total, frozen, empty, unacked, changed, mode }) {
   const parts = [`[eval:golden:freeze] mode=${mode}`, `entries=${total}`, `frozen=${frozen}`]
   if (empty && empty.length > 0) parts.push(`empty=${empty.length}`)
   if (unacked) parts.push(`unacked=${unacked.length}`)
@@ -260,6 +343,7 @@ export function parseArgs(argv) {
     root: null,
     env: null,
     check: false,
+    write: false,
     only: null,
     attempts: null,
     help: false,
@@ -276,6 +360,7 @@ export function parseArgs(argv) {
         .filter(Boolean)
     else if (a === '--attempts') args.attempts = parseInt(argv[++i] ?? '', 10)
     else if (a === '--check') args.check = true
+    else if (a === '--write') args.write = true
     else if (a === '--help' || a === '-h') args.help = true
   }
   return args
@@ -311,10 +396,22 @@ export async function main(argv = process.argv.slice(2)) {
   if (args.help) {
     process.stdout.write(
       '用法: node scripts/eval/freeze-rewrite.mjs [--file <json>] [--root <仓库根>]\n' +
-        '       [--env <外部 .env>] [--only G01,G02] [--attempts N] [--check]\n' +
-        '  缺省 = 调用真实改写器并写回 rewritten；--check = 只重跑比对差集，不写盘。\n'
+        '       [--env <外部 .env>] [--only G01,G02] [--attempts N] [--check | --write]\n' +
+        '  缺省 = 只读体检（**零 LLM、零写盘**）：报条目数 / 已冻结数 / 空改写与未确认清单。\n' +
+        '  --write = 调用真实改写器并写回 rewritten（真改写，会打 LLM；缺省不是它）。\n' +
+        '  --check = 只重跑比对差集、不写盘（会打 LLM，用于验证冻结可复现）。\n' +
+        '  --check 与 --write 互斥。\n'
     )
     return 0
+  }
+
+  const mode = resolveMode(args)
+  if (!mode) {
+    process.stderr.write(
+      '[eval:golden:freeze] --check 与 --write 互斥：前者只比对不写盘，后者真改写并写回。' +
+        '（都不给 = 只读体检，安全）\n'
+    )
+    return 2
   }
 
   const root = args.root ?? REPO_ROOT
@@ -337,7 +434,9 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const pre = checkRewritePreconditions()
-  if (!pre.ok) {
+
+  // dry 档在硬闸**之外**：它压根不改写，前置闸只作为体检项报告（见文件头「前置闸」）。
+  if (mode !== 'dry' && !pre.ok) {
     process.stdout.write(
       JSON.stringify({ ok: false, phase: 'precondition', reason: pre.reason }) + '\n'
     )
@@ -353,6 +452,34 @@ export async function main(argv = process.argv.slice(2)) {
     return 2
   }
   const acked = before.meta ? before.meta[ACK_KEY] : undefined
+
+  // ─── dry：只读体检。**本分支内不得出现任何 LLM import / 写盘** ───
+  // （测试用「假 root 下没有 query-rewrite.ts」来硬证这一点：走岔了会 ERR_MODULE_NOT_FOUND）
+  if (mode === 'dry') {
+    const info = inspectFrozen({ entries: before.entries, only: args.only, acked })
+    process.stdout.write(
+      JSON.stringify({
+        ok: info.unacked.length === 0,
+        mode: 'dry',
+        file,
+        source: FREEZE_SOURCE,
+        llmCalls: 0,
+        wrote: false,
+        precondition: pre,
+        ...info,
+      }) + '\n'
+    )
+    process.stderr.write(summaryLine({ ...info, mode: 'dry' }) + '\n')
+    if (info.unacked.length > 0) {
+      process.stderr.write(`  未确认的空改写：${info.unacked.join(', ')}\n`)
+    }
+    process.stderr.write(
+      '  只读体检：未调用改写器、未写盘。' +
+        `真改写请加 --write（将重跑 ${info.wouldRewrite} 条）；` +
+        '验证冻结可复现请加 --check。\n'
+    )
+    return info.unacked.length === 0 ? 0 : 1
+  }
 
   const { rewriteRetrievalQueries } = await import(
     pathToFileURL(path.join(root, 'packages/server/src/memory/query-rewrite.ts')).href
@@ -370,7 +497,7 @@ export async function main(argv = process.argv.slice(2)) {
   const frozen = entries.length - empty.length
   const unacked = unackedEmpties(empty, acked)
 
-  if (args.check) {
+  if (mode === 'check') {
     const diff = diffRewrites({ before: before.entries, after: entries })
     const diffUnacked = unackedEmpties(diff.empty, acked)
     const ok = diff.changed.length === 0 && diffUnacked.length === 0
@@ -392,7 +519,7 @@ export async function main(argv = process.argv.slice(2)) {
         empty: diff.empty,
         unacked: diffUnacked,
         changed: diff.changed,
-        check: true,
+        mode: 'check',
       }) + '\n'
     )
     return ok ? 0 : 1
@@ -412,7 +539,7 @@ export async function main(argv = process.argv.slice(2)) {
     }) + '\n'
   )
   process.stderr.write(
-    summaryLine({ total: entries.length, frozen, empty, unacked, check: false }) + '\n'
+    summaryLine({ total: entries.length, frozen, empty, unacked, mode: 'write' }) + '\n'
   )
   if (empty.length > 0) {
     process.stderr.write(
