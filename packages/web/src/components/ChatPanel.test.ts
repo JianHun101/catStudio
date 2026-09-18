@@ -284,19 +284,17 @@ describe('ChatPanel 运行时长心跳隔离（1s tick 下沉 AgentStatusLabel �
   })
 })
 
-describe('AgentStatusLabel 运行时长心跳（回复中 · 已 N 秒——4775ac1 行为零回归）', () => {
-  it('replying 带 startedAt → 显示「回复中 · 已 N 秒」递增文案 + 时长计算逻辑（读 now 而非 Date.now()）', () => {
-    // 静态源断言：headless 黑盒适配器整轮不 yield chunk，前端靠本地 1s tick 的 now
-    // 重算累计秒数（服务端 10s 心跳只刷新 liveness 锚点，不再驱动秒数）
-    expect(statusLabelSource).toContain('回复中 · 已 ')
-    expect(statusLabelSource).toContain('Math.floor((now.value - props.entry.startedAt) / 1000)')
-    expect(statusLabelSource).not.toContain(
-      'Math.floor((Date.now() - props.entry.startedAt) / 1000)'
-    )
+describe('AgentStatusLabel 状态行去秒（计时唯一权威位 = 气泡 footer）', () => {
+  it('replying 不再输出秒数——秒数计算逻辑已整体迁出本组件', () => {
+    // 票②：A2A / headless 执行没有用户消息状态行可挂，秒数留在状态行就漏一半——
+    // 计时上移到 Agent 自己的气泡 footer（ReplyElapsed.vue），状态行只留状态文字。
+    expect(statusLabelSource).not.toContain('回复中 · 已 ')
+    expect(statusLabelSource).not.toContain('Math.floor((now.value - props.entry.startedAt)')
+    // 静止「回复中」保留（存量适配器 / 心跳正常时的状态文字）
+    expect(statusLabelSource).toContain("return '回复中'")
   })
 
-  it('本地 1s tick：now = ref(Date.now()) + setInterval(1000) 每秒更新，onUnmounted clearInterval', () => {
-    // 反转上单「省一个 timer」决策的硬风险点：timer 生命周期必须正确管理
+  it('本地 1s tick 保留：驱动「无响应」翻转（事件不再到来，只能本地按秒判定）', () => {
     expect(statusLabelSource).toContain('now = ref(Date.now())')
     expect(statusLabelSource).toMatch(
       /nowTimer = setInterval\(\(\) => \{\s*now\.value = Date\.now\(\)\s*\}, 1000\)/
@@ -304,21 +302,150 @@ describe('AgentStatusLabel 运行时长心跳（回复中 · 已 N 秒——4775
     expect(statusLabelSource).toMatch(/if \(nowTimer\) \{\s*clearInterval\(nowTimer\)/)
   })
 
-  it('心跳失联超阈值 → 停止递增、显示「无响应」（liveness：本地时钟不能掩盖 server 已死）', () => {
+  it('心跳失联超阈值 → 显示「无响应」（liveness：本地时钟不能掩盖 server 已死）', () => {
     expect(statusLabelSource).toContain('HEARTBEAT_STALE_MS = 25_000')
     expect(statusLabelSource).toContain('无响应')
     expect(statusLabelSource).toContain('now.value - props.entry.lastBeatAt > HEARTBEAT_STALE_MS')
     expect(statusLabelSource).toContain('lastBeatAt')
   })
 
-  it('props entry 带 startedAt/lastBeatAt 可选字段（服务端心跳注入，前端据此显示时长/无响应）', () => {
-    expect(statusLabelSource).toContain(
-      'entry: { status: string; startedAt?: number; lastBeatAt?: number }'
+  it('props entry 只留 status/lastBeatAt——startedAt 随秒数迁出（状态行不再消费锚点）', () => {
+    expect(statusLabelSource).toContain('entry: { status: string; lastBeatAt?: number }')
+    expect(statusLabelSource).not.toContain('props.entry.startedAt')
+  })
+})
+
+describe('ChatPanel 计时上气泡 footer + 占位气泡（票②）', () => {
+  it('流式气泡 footer：静态「回复中…」替换为 ReplyElapsed（锚点缺失才回退静态）', () => {
+    expect(source).toContain("import ReplyElapsed from './ReplyElapsed.vue'")
+    expect(source).toMatch(
+      /v-if="replyTimerFor\(agentId\)"[\s\S]{0,160}:started-at="replyTimerFor\(agentId\)!\.startedAt"/
+    )
+    // 旧 server 不带 startedAt → 无锚点可显示，回退静态文案（存量适配器不误伤）
+    expect(source).toContain('<span v-else class="streaming-indicator">回复中…</span>')
+  })
+
+  it('占位气泡：replyTimers 有 / typingStates 无 的 agent 渲染 streaming 同款虚线气泡 + 停止按钮 + 计时', () => {
+    // 数据源判据：有计时锚点（执行在跑）且无流式条目（headless 整轮 / 首 chunk 前 / A2A）
+    expect(source).toContain('const placeholderTimers = computed(')
+    expect(source).toContain('if (store.typingStates.has(agentId)) return')
+    // 复用 .message.streaming 视觉语言（虚线边框）——零新增容器样式
+    expect(source).toMatch(
+      /v-for="timer in placeholderTimers"[\s\S]{0,160}class="message agent streaming"/
+    )
+    expect(source).toContain('class="placeholder-thinking"')
+    expect(source).toContain('<span class="thinking-dots"><i></i><i></i><i></i></span>')
+    expect(source).toContain('v-if="canStopAgent(timer.agentId)"')
+    expect(source).toMatch(
+      /v-if="canStopAgent\(timer\.agentId\)"[\s\S]{0,220}@click\.stop="stopAgent\(timer\.agentId\)"/
     )
   })
 
-  it('无 startedAt → 回退静止「回复中」（存量适配器未带 startedAt 不误伤）', () => {
-    expect(statusLabelSource).toContain("return '回复中'")
+  it('占位气泡与流式气泡互斥：同一 agent 不会两个气泡同时在屏（切流式时计时同源不重置）', () => {
+    // typingStates 有条目即剔除占位；两处 ReplyElapsed 的锚点都取自 store.replyTimers
+    // 的同一条目（startedAt 来自服务端），切换组件实例不重算锚点
+    expect(source).toContain('if (store.typingStates.has(agentId)) return')
+    expect(source).toContain('return store.replyTimers.get(agentId)')
+  })
+
+  describe('占位气泡行为（挂载级：A2A / headless 执行可见性）', () => {
+    const T0 = 1_700_000_000_000
+
+    beforeEach(() => {
+      // jsdom 未实现 Element.scrollTo（ChatPanel 贴底滚动会调）
+      Object.defineProperty(Element.prototype, 'scrollTo', {
+        configurable: true,
+        writable: true,
+        value: vi.fn(),
+      })
+      setActivePinia(createPinia())
+      vi.useFakeTimers()
+      vi.setSystemTime(T0)
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** 会话 s1 + a1 执行中（有计时锚点、无流式内容 = A2A / headless 形态） */
+    function setupRunning(): ReturnType<typeof useChatStore> {
+      const store = useChatStore()
+      store.sessions = [
+        { id: 's1', title: 't', agentIds: ['a1', 'a2'], broadcastMode: false } as never,
+      ]
+      store.activeSessionId = 's1'
+      store.agents = [
+        { id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
+        { id: 'a2', name: 'flash猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
+      ]
+      store.replyTimers = new Map([['a1', { startedAt: T0 - 12_000, lastBeatAt: T0 }]])
+      store.agentStates = new Map([
+        [
+          'a1',
+          new Map([
+            ['s1', { agentId: 'a1', sessionId: 's1', status: 'busy', queueLength: 0 } as never],
+          ]),
+        ],
+      ])
+      return store
+    }
+
+    function mountPanel() {
+      return mount(ChatPanel, {
+        props: { leftSidebarOpen: true },
+        global: { stubs: { Teleport: true } },
+      })
+    }
+
+    it('replyTimers 有 / typingStates 无 → 虚线占位气泡在屏，带逐秒计时 + 停止按钮', async () => {
+      setupRunning()
+      const wrapper = mountPanel()
+      await nextTick()
+
+      const bubbles = wrapper.findAll('.message.agent.streaming')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].find('.placeholder-thinking').exists()).toBe(true)
+      expect(bubbles[0].text()).toContain('回复中 · 已 12 秒')
+      expect(bubbles[0].find('.btn-stop-agent').exists()).toBe(true)
+    })
+
+    it('首 chunk 到达（typingStates 有条目）→ 占位让位流式气泡，秒数锚点同源不重置', async () => {
+      const store = setupRunning()
+      const wrapper = mountPanel()
+      await nextTick()
+      expect(wrapper.findAll('.placeholder-thinking')).toHaveLength(1)
+
+      store.typingStates.set('a1', { messageId: 'm1', content: 'x', sessionId: 's1' })
+      await nextTick()
+
+      const bubbles = wrapper.findAll('.message.agent.streaming')
+      expect(bubbles).toHaveLength(1) // 不是两个气泡叠加
+      expect(bubbles[0].find('.placeholder-thinking').exists()).toBe(false) // 占位已让位
+      // 计时同源：锚点来自 store（服务端 startedAt），组件实例切换不归零
+      expect(bubbles[0].text()).toContain('回复中 · 已 12 秒')
+    })
+
+    it('执行终止清计时 → 占位气泡消失（不留「无响应」僵尸）', async () => {
+      const store = setupRunning()
+      const wrapper = mountPanel()
+      await nextTick()
+      expect(wrapper.findAll('.message.agent.streaming')).toHaveLength(1)
+
+      store.replyTimers = new Map()
+      await nextTick()
+      expect(wrapper.findAll('.message.agent.streaming')).toHaveLength(0)
+    })
+
+    it('无流式期间秒数由本地 tick 递增（server 零额外流量）', async () => {
+      setupRunning()
+      const wrapper = mountPanel()
+      await nextTick()
+      expect(wrapper.text()).toContain('回复中 · 已 12 秒')
+
+      vi.advanceTimersByTime(3000)
+      await nextTick()
+      expect(wrapper.text()).toContain('回复中 · 已 15 秒')
+    })
   })
 })
 

@@ -188,15 +188,22 @@ function statusEmoji(status: string): string {
 
 /**
  * 停止按钮显隐信号（逗号串，primitive——值不变则不触发本组件重渲染）。
- * 这是本组件唯一直接读 store 实时态的地方：判据 `!typingStates.has(agentId)` 逐 chunk 变化，
- * 上移父组件会让所有历史消息随 chunk 重渲染（正是本次要拆掉的劣化链），
- * 故下沉为叶子自持的细粒度依赖——只有带状态行的用户消息会重算，历史气泡零成本。
+ * 这是本组件唯一直接读 store 实时态的地方：判据逐 chunk 变化，上移父组件会让所有历史
+ * 消息随 chunk 重渲染（正是本次要拆掉的劣化链），故下沉为叶子自持的细粒度依赖——
+ * 只有带状态行的用户消息会重算，历史气泡零成本。
+ *
+ * 判据 = **气泡是否覆盖该 agent**（气泡承载按钮，状态行让位）。气泡有两态：
+ * 流式（`typingStates` 有条目）/ 占位（`replyTimers` 有条目——A2A、headless、
+ * 首 chunk 前的窗口）。两态都要让位，漏判 replyTimers 会在无流式执行期间同时冒出
+ * 状态行与占位气泡两个「停止」按钮（同一 agent）。
  */
 const stopSignal = computed(() =>
   props.statusEntries
     .filter(
       (s) =>
-        !store.typingStates.has(s.agentId) && isAgentStoppable(store.currentStateFor(s.agentId))
+        !store.typingStates.has(s.agentId) &&
+        !store.replyTimers.has(s.agentId) &&
+        isAgentStoppable(store.currentStateFor(s.agentId))
     )
     .map((s) => s.agentId)
     .join(',')
