@@ -323,6 +323,13 @@ export async function runAgentReply(
     model: agent.llmModel,
   })
 
+  // 计时锚点：**一次取值**，本函数内唯一来源 = 「这轮执行从什么时候开始跑」。
+  // 取在下方 `context.assemble` 段之前，与 trace 根段 `invoke_agent` 同口径（都是执行入口）。
+  // 'thinking' 就带上它，是为了让 A2A（猫 @ 猫，无用户消息状态行可挂）与 headless
+  // 适配器的执行从第一刻起就有锚点；后面 'replying' 首发与心跳重发**沿用同一常量**
+  // （本函数内搜 `startedAt`），一次执行内三种事件的 startedAt 恒等——前端据此本地 tick 递增。
+  const startedAt = Date.now()
+
   // 状态：思考中
   bus.emitAgentMessageStatus(sessionId, {
     messageId: triggerMsg.id,
@@ -330,6 +337,7 @@ export async function runAgentReply(
     agentName: agent.name,
     agentAvatar: agent.avatar,
     status: 'thinking',
+    startedAt,
   })
 
   // ── 段 E1 `context.assemble`（R2 段五）──────────────────
@@ -928,8 +936,10 @@ export async function runAgentReply(
     token: signalToken,
   })
 
-  // 状态：回复中（带 startedAt——前端据此显示「回复中 · 已 N 秒」递增，替代静止标签）
-  const startedAt = Date.now()
+  // 状态：回复中（带 startedAt——前端据此显示「回复中 · 已 N 秒」递增，替代静止标签）。
+  // 这里**不重新取 Date.now()**：取值点已在执行起点（上下文组装之前），沿用同一常量，
+  // 故 'thinking' / 'replying' / 心跳三者同一个值；重新取值会把锚点挪到「LLM 流开始」，
+  // 既漏掉上下文组装那段、又与已发的 'thinking' 不等（前端会看到秒数倒退）。
   bus.emitAgentMessageStatus(sessionId, {
     messageId: triggerMsg.id,
     agentId: agent.id,
@@ -1209,6 +1219,9 @@ export async function runAgentReply(
     // agent 耗时（C5）：随广播注入，前端气泡展示「耗时 X.X 秒」。瞬态不落库——
     // 落库在 708 行 insertAgentMessage（独立参数，先于 finalMsg 构造），此处仅广播对象；
     // 刷新后历史重放无 durationMs，评估权威数据仍在 execution_logs.latency_ms。
+    // 口径（票① 起）：startedAt 前移到执行起点（上下文组装之前）⇒ 本值 = 整轮执行墙钟
+    // 时长（含上下文组装/记忆检索），与运行计时 chip 同源同口径、与 latencyMs 同起点；
+    // 早于本票的旧值只含「LLM 流 + 落库」段，两者不可直接跨版本比较。
     durationMs: Date.now() - startedAt,
     ...(isRestartRequest ? { messageType: 'restart_request' as const, restartExpiresAt } : {}),
   }
