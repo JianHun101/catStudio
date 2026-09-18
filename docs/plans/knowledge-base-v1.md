@@ -110,9 +110,10 @@ CREATE TABLE IF NOT EXISTS knowledge (
 )
 ```
 
-独立表（不加 type 列混进 memories）：对话记忆可被 UPDATE 修正（去重三段式），
-知识库是运营方维护的标准数据，**不可被对话覆盖**——复用表会让去重/更新语义
-硬分叉（roadmap 已定，保持）。
+独立表（不加 type 列混进 memories）：对话原话实时嵌入层已整体退役（写口与
+`memories` 表双删）——现行记忆写入口是白名单 MD 切片进 `chunks` 三表（按
+`content_hash` 幂等 upsert，MD 是唯一写入口）；知识库是运营方维护的标准数据、
+**不可被对话覆盖**——复用表会让更新语义硬分叉（roadmap 已定，保持）。
 
 ### 3.2 searchKnowledgeByVector
 
@@ -121,9 +122,9 @@ CREATE TABLE IF NOT EXISTS knowledge (
 searchKnowledgeByVector(queryBlob: Buffer, topK: number, maxDistance = 0.35)
 ```
 
-- **阈值语义纠正（吐槽猫问题 4）**：0.35 **不是**「同阈值链」——去重三段式的
-  0.35 是 **UPDATE 阈值**，与检索无关；检索阈值是另一条线（对话记忆
-  `MEMORY_MAX_DISTANCE = 0.6`）。知识库检索用 0.35 是**比对话记忆检索更严**
+- **阈值语义纠正（吐槽猫问题 4）**：0.35 **不是**「同阈值链」——它与对话记忆
+  检索阈值是两条独立线（对话记忆 `MEMORY_MAX_DISTANCE = 0.6`，见
+  `memory/index.ts`）。知识库检索用 0.35 是**比对话记忆检索更严**
   的阈值（知识文档语义密度高、宁缺毋滥），不是沿用任何既有检索值。
 - **表名参数化安全边界（吐槽猫问题 8）**：`table` 参数仅内部字面量——调用点
   写死 `'memories'` / `'knowledge'`，repository 入口白名单校验（非二者抛
@@ -221,8 +222,8 @@ searchKnowledgeByVector(queryBlob: Buffer, topK: number, maxDistance = 0.35)
 - 不做向量索引（A 档另立项，带 metric 决策）
 - 不做 raw SQL 工具（本计划安全裁决）
 - 不做知识库管理端点（导入通道 seed 先行，独立端点记后续）
-- 不改 memories 表语义 / 去重三段式阈值链（0.20/0.35/0.6 不动）——0.35 仅
-  去重 UPDATE 阈值，与知识库检索 maxDistance=0.35（检索值，语义不同）互不干扰
+- 不改记忆侧切片/嵌入契约与检索阈值（`chunks` 三表；`MEMORY_MAX_DISTANCE = 0.6`
+  不动）——知识库检索 maxDistance=0.35 是检索值，与记忆侧参数语义不同、互不干扰
 - 不做对话自动入库（运营方标准数据语义不适用，roadmap 已定）
 - 不碰 MCP v4 既有面：post_message 工具、内部端点校验链、socketio 合并点零改动
 

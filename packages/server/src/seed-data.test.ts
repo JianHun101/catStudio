@@ -9,7 +9,6 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildDemoAgents,
-  buildDemoKnowledge,
   COMMON_IRON_LAWS,
   IRON_LAWS_CODER,
   IRON_LAWS_REVIEWER,
@@ -141,6 +140,10 @@ describe('agent system prompts', () => {
     expect(COMMON_IRON_LAWS).toContain('@引用规则')
     expect(COMMON_IRON_LAWS).toContain('结论先行')
     expect(COMMON_IRON_LAWS).toContain('投递下一棒')
+    // S7 co-location：@ 语义单一表述点——原「交互规范」的投递段与「输出结构」的@引用规则段
+    // 两处重复，合并为一处后路由语义句在共通层只应出现一次
+    expect(COMMON_IRON_LAWS.split('叙述性提及其他猫用名字不用 @').length - 1).toBe(1)
+    expect(COMMON_IRON_LAWS.split('@ 只表示真正的路由投递').length - 1).toBe(1)
     for (const law of [IRON_LAWS_CODER, IRON_LAWS_REVIEWER]) {
       expect(law.split('出口检查').length - 1).toBe(1)
       expect(law.split('重启审批').length - 1).toBe(1)
@@ -186,8 +189,8 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('IRON_LAWS_CODER 常量含 worktree 模式段（禁 --no-verify + 收口归店长 + push 失败预期）', () => {
-    // worktree 定稿后派活规范：实施猫在 worktree 干活时受约束——绕过 .push-gate = 未审查分支上远端
+  it('IRON_LAWS_CODER 常量含 worktree 实施侧约束（禁 --no-verify + 收口归店长 + push 失败预期）', () => {
+    // worktree 定稿后派活规范：实施猫在 worktree 干活时受约束——绕过门禁 = 未审查分支上远端
     expect(IRON_LAWS_CODER).toContain('Worktree 模式')
     expect(IRON_LAWS_CODER).toContain('git -C')
     // 三条核心约束：禁绕过门禁 / 收口归店长 / push 失败是预期
@@ -195,12 +198,48 @@ describe('agent system prompts', () => {
     expect(IRON_LAWS_CODER).toContain('--no-verify')
     expect(IRON_LAWS_CODER).toContain('收口归店长')
     expect(IRON_LAWS_CODER).toContain('必失败是预期')
-    expect(IRON_LAWS_CODER).toContain('多轮审查')
-    expect(IRON_LAWS_CODER).toContain('createPr 开 PR')
-    // seed prompt 不再烘焙 worktree 约束
+  })
+
+  it('S1 案 A：收口链细节 + 唤醒对账是店长独占段——只在店长 prompt，不在开发铁律注入面', () => {
+    // 病灶：收口链与对账 6 行原本躺在 CODER_DUTIES（同时注入 store 与 implementer），
+    // 实施猫每轮读一段与自己无关的店长职责。案 A 把该段迁进店长 seed prompt 的
+    // 「合并收口」段，CODER_DUTIES 只留实施猫所需——本断言双向钉死，防回卷成「删了没迁」。
+    expect(IRON_LAWS_CODER).not.toMatch(/ff-only|push-gate|createPr|对账/)
+    const boss = agents.find((a) => a.name === '店长')!
+    expect(boss.systemPrompt).toContain('ff-only')
+    expect(boss.systemPrompt).toContain('createPr 开 PR')
+    expect(boss.systemPrompt).toContain('.push-gate')
+    expect(boss.systemPrompt).toContain('每次唤醒对账')
+    expect(boss.systemPrompt).toContain('.push-gate 三者对齐')
+    // 迁入的是「合并收口」段内容，不是把整个 Worktree 段搬进 seed——实施侧约束仍走铁律注入
     for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).not.toContain('Worktree 模式')
+    }
+  })
+
+  it('S3a：三只实施猫的「实施规范」段单源——逐字一致，改一处三猫同时生效', () => {
+    // 旧形态是三份约 600 字逐字复制（改一处要同步三处、必漏其一）——抽常量后单源。
+    // 判据用「段内逐字相等」而非「引用同一常量」：断言的是可观察结果，不是实现形状。
+    const implementers = agents.filter((a) => a.role === 'implementer')
+    expect(implementers.length).toBeGreaterThanOrEqual(3)
+    const sections = implementers.map((a) => {
+      const i = a.systemPrompt.indexOf('---\n实施规范')
+      expect(i, `${a.name} 缺实施规范段`).toBeGreaterThan(-1)
+      return a.systemPrompt.slice(i)
+    })
+    for (const s of sections.slice(1)) expect(s).toBe(sections[0])
+  })
+
+  it('S4：实施规范拆编号步骤——箭头链长 bullet 不再存在', () => {
+    // 原六箭头长 bullet 读完才知道要干什么；拆成编号步骤、每步一个可判完成条件。
+    const implementers = agents.filter((a) => a.role === 'implementer')
+    expect(implementers.length).toBeGreaterThanOrEqual(1)
+    for (const agent of implementers) {
+      const section = agent.systemPrompt.slice(agent.systemPrompt.indexOf('---\n实施规范'))
+      expect(section, `${agent.name} 实施规范段仍有箭头`).not.toContain('→')
+      expect(section).toContain('1. 取活')
+      expect(section).toContain('4. 自查')
     }
   })
 
@@ -227,7 +266,7 @@ describe('agent system prompts', () => {
     const tucao = agents.find((a) => a.name === '吐槽猫')!
     // 分流规则在 IRON_LAWS_REVIEWER 铁律层（运行期注入）——base prompt 不再内含
     expect(tucao.systemPrompt).not.toContain('按结论分流')
-    expect(tucao.systemPrompt).not.toContain('✅可合并 → 行首@架构师')
+    expect(tucao.systemPrompt).not.toContain('行首@架构师 请收口')
   })
 
   it('店长 prompt 不再烘焙重启规则为工具教法（共通铁律层承载）', () => {
@@ -263,7 +302,7 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('实施猫 prompt 含收口链指令（✅可合并 → 行首@架构师 请收口）', () => {
+  it('实施猫 prompt 含收口链指令（✅可合并/💬仅评论 行首@架构师 请收口）', () => {
     // 按 role 找而非按名字找——未来新增实施猫自动覆盖；架构师是"被请收口"方不含此指令
     const implementers = agents.filter((a) => a.role === 'implementer')
     expect(implementers.length).toBeGreaterThanOrEqual(1)
@@ -289,7 +328,7 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).toContain('💬仅评论')
       // 兜底路径：若收到 ✅（分流失败时原链仍通）→ 请收口指令保留
       expect(agent.systemPrompt).toContain('兜底路径')
-      expect(agent.systemPrompt).toContain('✅可合并 → 行首@架构师 请收口')
+      expect(agent.systemPrompt).toContain('行首@架构师 请收口')
     }
   })
 
@@ -344,14 +383,6 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).toContain('禁止编造合法格式 uuid 交差')
       expect(agent.systemPrompt).toContain('报告环境未注入')
     }
-  })
-
-  it('知识条目【提交规范】提交 uuid 取环境变量 + 缺失禁止编造（uuid 幻觉根治）', () => {
-    const doc = buildDemoKnowledge().find((d) => d.tags.includes('提交规范'))!
-    expect(doc.content).toContain('$CATSTUDY_TRIGGER_MSG_ID')
-    expect(doc.content).toContain('服务端注入的真实触发消息 id')
-    expect(doc.content).toContain('禁止编造合法格式 uuid 交差')
-    expect(doc.content).toContain('报告环境未注入')
   })
 
   it('IRON_LAWS_REVIEWER 常量仍包含所有审查铁律（运行期注入源）', () => {
