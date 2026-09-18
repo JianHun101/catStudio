@@ -679,7 +679,9 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
   // 逼人显式裁决「这是技能名还是普通术语」，而不是静静地指向一个不存在的技能。
   it('铁律文案点名的 kebab token 要么是技能、要么在非技能白名单里（T-D）', () => {
     const seed = readRepoFile('packages', 'server', 'src', 'seed-data.ts')
-    const laws = ['COMMON_IRON_LAWS', 'CODER_DUTIES', 'REVIEWER_DUTIES']
+    // IMPLEMENTER_DUTIES 随票② 从三份逐字复制的 agent prompt 抽成常量（S3a 单源）——
+    // 它在前的形态根本不进本扫描（内联在 prompt 模板里），抽常量后一并纳入覆盖面。
+    const laws = ['COMMON_IRON_LAWS', 'CODER_DUTIES', 'IMPLEMENTER_DUTIES', 'REVIEWER_DUTIES']
       .map((name) => {
         const body = templateLiteralOf(seed, name)
         expect(body, `seed-data.ts 取不到 ${name} 正文`).not.toBe('')

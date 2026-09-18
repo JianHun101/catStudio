@@ -70,9 +70,13 @@ describe('seed helpers', () => {
   describe('buildDemoKnowledge（知识库 Phase 1）', () => {
     const docs = buildDemoKnowledge()
 
-    it('首期 2-3 条知识文档', () => {
-      expect(docs.length).toBeGreaterThanOrEqual(2)
-      expect(docs.length).toBeLessThanOrEqual(3)
+    it('知识点只收铁律注入面没有的领域数据；复述铁律的条目不复存在', () => {
+      // 「提交规范」「MCP 结构化路由」两条整条复述铁律（每轮强制注入）——检索副本纯重复
+      // load 且两处必漂移，2026-09-18 结构重构票移除。收录判据见 seed-data.ts 注释。
+      expect(docs.length).toBeGreaterThanOrEqual(1)
+      const tags = docs.flatMap((d) => d.tags)
+      expect(tags).not.toContain('提交规范')
+      expect(tags).not.toContain('MCP')
     })
 
     it('每条：确定性 id / 非空 content / source / tags 数组', () => {
@@ -92,8 +96,8 @@ describe('seed helpers', () => {
       const again = buildDemoKnowledge().find((d) => d.id === first.id)!
       expect(again.id).toBe(first.id)
       expect(again.content).toBe(first.content)
-      // 前缀隔离：knowledgeId('提交规范') 与 fixedId('提交规范') 不同
-      expect(knowledgeId('提交规范')).not.toBe(fixedId('提交规范'))
+      // 前缀隔离：knowledgeId 与 fixedId 同命名空间不同前缀（同名不撞 id）
+      expect(knowledgeId('上下文注入机制')).not.toBe(fixedId('上下文注入机制'))
     })
   })
 })
