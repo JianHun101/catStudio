@@ -28,13 +28,24 @@
  * 调用点（**不再是零调用点**，Phase I 起）：
  * - 收口链 `session-closeout.ts` 的 `fanInCats` / `reclaimCats`
  * - 执行起点 `ensureExecutionWorktree`（T-2 Phase I-b 形态 G，`reply.ts` 调用）
+ *
+ * **冲突返投（票 9，2026-09-18 用户拍板）**：审查面 prep 撞冲突时，本模块除了
+ * 抛错中止审查（fail-closed 不变），还向**冲突源分支所属的实施猫**投递一条结构化
+ * 返修消息——「墙 #3 定时器重试死循环」的结构性成因就是这里**只 throw、不通知**
+ * （`refuseIfMergeInProgress` 与 `mergeBranchesInto` 都只写日志，无人被叫醒 ⇒
+ * 审查者静默死掉、实施者不知道要动）。返投把「轮询撞墙」变成**事件驱动**：
+ * 状态变了（源分支新 sha）才重试。投递复用 `ingestUserMessage`（落库 + 广播 +
+ * dispatch），**不新造管道**；这也是本模块唯一的 `db/` 与 `connectors/` 依赖。
  */
 
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { createLogger } from '../logger.js'
 import { messageOf } from '../utils.js'
+import { sessions as sessionsRepo, agents as agentsRepo } from '../db/repository/index.js'
+import { ingestUserMessage } from '../connectors/ingest.js'
 import {
+  catSlug,
   cleanGitEnv,
   cleanupWorktreeResidue,
   ensureAgentWorktree,
@@ -46,6 +57,25 @@ import {
 
 const log = createLogger('worktree-fanin')
 
+/**
+ * 冲突现场（**仅 `conflict` 时有值**）：谁撞的、撞在哪些文件上、撞那一刻它尖在哪。
+ *
+ * 为什么必须由 merge 循环**当场回传**、而不是让调用方事后自己查——三样里有两样
+ * 事后**查不到**：
+ * - ① 未合并路径在 `merge --abort` 之后就从工作区/索引里消失了（票 9 载荷①）；
+ * - ② 「是哪一条来源撞的」只活在循环变量里：冲突那条**`merged` / `skipped` 两个
+ *   数组都不进**，调用方拿返回值根本推不出来。
+ * 让调用方自行推演 = 又造一处平行真相源（同一个事实两个算法，迟早分歧）。
+ */
+export interface ConflictDetail {
+  /** 冲突来源分支短名（`session/<sid8>-<猫名>`） */
+  source: string
+  /** 冲突那一刻来源分支的尖（abort **之前**取的，与去重键同源） */
+  sourceSha: string
+  /** 未合并文件清单（`--diff-filter=U`，已排序；abort 前取自工作区） */
+  files: string[]
+}
+
 /** fan-in 结果。`merged` / `skipped` 均为**分支短名**（`session/<sid8>-<cat8>`） */
 export interface FanInResult {
   /** 本次真合进去的猫分支短名（按合入顺序） */
@@ -56,6 +86,8 @@ export interface FanInResult {
   conflict: boolean
   /** 冲突后是否已 abort 回可重跑态 */
   recovered: boolean
+  /** 冲突现场——冲突返投（票 9）的载荷来源；非冲突态为 `undefined` */
+  conflictDetail?: ConflictDetail
 }
 
 /** 跑一条 git 命令（统一剥 GIT_DIR 等注入变量）；失败抛错，由调用方决定语义 */
@@ -75,6 +107,26 @@ function tryGit(cwd: string, args: string[]): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * 未合并路径清单（**只在半合并态下有输出**）。
+ *
+ * 判据取 `--diff-filter=U`（= "unmerged" 这个**聚合类**），不按冲突码枚举——
+ * 与 S3-2 同一条教训：`UU` / `AA` 可在同一次 merge 内并存，逐个枚举必漏。
+ * 这里 `U` 不是"某一个码"，而是 git 给出的全部未合并状态的合集。
+ *
+ * 读不到（非仓库 / git 失败）返回 `[]`：调用方（冲突返投）据此在载荷里写明
+ * 「未能取得文件清单」而不是编一个空清单充数。排序只为确定性输出。
+ */
+function unmergedFiles(cwd: string): string[] {
+  const out = tryGit(cwd, ['diff', '--name-only', '--diff-filter=U'])
+  if (out === null) return []
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort()
 }
 
 /**
@@ -174,7 +226,15 @@ function mergeBranchesInto(
       runGit(cwd, ['merge', '--no-ff', '-m', `${label} ${src}`, src])
       merged.push(src)
     } catch (err: any) {
-      // 冲突：abort 回可重跑态。abort 失败 ⇒ recovered=false（仓库可能仍是半合并态，
+      // 冲突现场**必须在 abort 之前取**：abort 把工作区/索引回滚到合并前，未合并
+      // 路径随之消失——事后再问「撞在哪些文件上」已无答案（票 9 载荷①）。
+      // sourceSha 同理取在此刻，让去重键「源分支@源分支尖 sha」钉的是**撞的那一下**。
+      const detail: ConflictDetail = {
+        source: src,
+        sourceSha: tryGit(cwd, ['rev-parse', src]) ?? '',
+        files: unmergedFiles(cwd),
+      }
+      // abort 回可重跑态。abort 失败 ⇒ recovered=false（仓库可能仍是半合并态，
       // 上层须以此为准，别假定「失败即已恢复」）。
       let recovered = false
       try {
@@ -183,8 +243,15 @@ function mergeBranchesInto(
       } catch {
         recovered = false
       }
-      log.error('merge conflict', { target, src, label, recovered, error: messageOf(err) })
-      return { merged, skipped, conflict: true, recovered }
+      log.error('merge conflict', {
+        target,
+        src,
+        label,
+        recovered,
+        files: detail.files,
+        error: messageOf(err),
+      })
+      return { merged, skipped, conflict: true, recovered, conflictDetail: detail }
     }
   }
 
@@ -266,6 +333,233 @@ export function mergeCatBranchesIntoOwnBranch(
   return mergeBranchesInto(head, listCatBranches(shortId, { cwd: mainRoot }), cwd, 'review-view')
 }
 
+// ─── 冲突返投（票 9）：撞冲突 ⇒ 带解法回家，别让人轮询撞墙 ─────────────
+
+/** 冲突返投载荷（票 9 契约的**四样**，缺一即返修单不完整）。 */
+export interface ConflictNoticeInput {
+  /** 收件猫名（行首 `@` 与 `mentions` 同源） */
+  catName: string
+  /** ② 对撞两侧 · 审查侧——merge 的**目标**（审查者自己的猫分支） */
+  targetBranch: string
+  targetSha: string
+  /** ② 对撞两侧 · 源侧——merge 的**来源**（实施猫自己的分支） */
+  sourceBranch: string
+  sourceSha: string
+  /** ① 冲突文件清单（abort **之前**取的未合并路径） */
+  conflictFiles: string[]
+  /** 链锚 = `triggerMsg.taskId || traceId`（与执行内各处**逐字同源**） */
+  chainAnchor: string
+}
+
+/** 载荷③：解法指令——**固定模板**，不随冲突内容变形（票 9 契约原文五步）。 */
+const CONFLICT_FIX_STEPS = [
+  '1) 在你自己的 worktree 里：git merge <审查分支>',
+  '2) 解冲突（保留双方语义，别整段覆盖）',
+  '3) 跑测试（node node_modules/vitest/vitest.mjs run）+ lint',
+  '4) 提交（带 catstudy [uuid] 标记）',
+  '5) 重新 request-review（链锚沿用本单给出的锚）',
+] as const
+
+/** 载荷④：验收条件——**预合并干净即放行**，无需回报（票 9 契约原文）。 */
+const CONFLICT_ACCEPTANCE =
+  'prep 能把你的分支干净合进审查分支 ⇒ 自动放行，无需回报；解不了 / 判定是设计冲突 ⇒ 升级店长仲裁（冲突仲裁归店长）。'
+
+/**
+ * 渲染返修单正文（**纯函数**，四样载荷逐样落在固定位置）。
+ *
+ * 抽成纯函数是为了让「四样都在」可被**逐样断言**——只断言「有消息」会把
+ * 「投出去一条空壳」放过去，那正是本票要治的「状态变了但没人知道该干嘛」。
+ */
+export function buildConflictNotice(input: ConflictNoticeInput): string {
+  const short = (sha: string): string => (sha ? sha.slice(0, 7) : '(未知)')
+  // 文件清单为空有两种成因：真无未合并路径（理论不可达——没冲突就不会走到这）
+  // 与「git 读不到」。**不写空清单冒充**：明写「未能取得」让读的人知道要自己查。
+  const fileLines =
+    input.conflictFiles.length > 0
+      ? input.conflictFiles.map((f) => `- ${f}`)
+      : ['- (未能取得文件清单——git 读取失败，请在自己分支上重跑 merge 自查)']
+
+  return [
+    `@${input.catName} 【冲突返投】审查准备（prep）在把你的分支合进审查分支时撞冲突，`,
+    `本轮审查已中止（审查者未开跑）。需要你先与审查分支对齐，再重投审查。`,
+    '',
+    `① 冲突文件（${input.conflictFiles.length} 个）：`,
+    ...fileLines,
+    '',
+    `② 对撞两侧：`,
+    `- 你的分支：${input.sourceBranch} @ ${short(input.sourceSha)}`,
+    `- 审查分支：${input.targetBranch} @ ${short(input.targetSha)}`,
+    '',
+    `③ 解法：`,
+    ...CONFLICT_FIX_STEPS.map((s) => s.replace('<审查分支>', input.targetBranch)),
+    '',
+    `④ 验收条件：${CONFLICT_ACCEPTANCE}`,
+    '',
+    `（链锚：${input.chainAnchor}）`,
+  ].join('\n')
+}
+
+/**
+ * 去重闸：同一「源分支@源分支尖 sha」只投一次，源分支推进出新 sha 后再撞才再投
+ * （防投递风暴）。
+ *
+ * 存放位置选**内存态**（票面允许）。按「状态落盘键控」两问自答：
+ * ① **共享还是隔离**：投递发生在**本进程内的一次调用**里，不存在"全仓只有一棵树"
+ *    那种事实，谈不上共享根键控；
+ * ② **允不允许依赖常驻进程活着**：允许——丢状态的最坏后果是**多投一次**（方向安全）。
+ *    关键判据：本闸**不是门禁**。门禁（push-gate 那类）进程死了会退化成**静默放行**，
+ *    故必须落文件；本闸进程死了只会退化成**重复提醒**，多一条消息而已。
+ * ⇒ 不落文件、不进 DB（进 DB 要配迁移 + 新表，为一个"最多多投一次"的节流不值）。
+ */
+const notifiedConflicts = new Set<string>()
+
+/** 去重键 = 源分支名 + 源分支尖 sha（票 9 契约原文口径） */
+function conflictNoticeKey(sourceBranch: string, sourceSha: string): string {
+  return `${sourceBranch}@${sourceSha}`
+}
+
+/**
+ * 分支后缀（= `catSlug(猫名)`）→ 会话成员猫名。
+ *
+ * 逆推走 **`catSlug` 正着算**（对每个成员算一遍再比），**不做字符串反解析**：
+ * 清洗是多字符→少字符的映射，反解析必然有歧义——`甲 猫` 与 `甲猫` 会被归一到
+ * 同一个 slug（`serial.cat-worktree.test.ts` P3-c-2 就是这个碰撞的实证）。
+ * 正算保证「谁建的这条分支」与「谁是收件人」用的是**同一个函数**。
+ *
+ * 单个成员名非法（含 `/` / 清洗后为空）⇒ `catSlug` 抛错：这类猫**建不出分支**，
+ * 故不可能是冲突源——跳过它，不中断整个解析。
+ */
+function resolveCatNameBySlug(sessionId: string, slug: string): string | null {
+  for (const id of sessionsRepo.getSessionAgentIds(sessionId)) {
+    const row = agentsRepo.getAgentById(id)
+    if (!row) continue
+    let s: string
+    try {
+      s = catSlug(row.name)
+    } catch {
+      continue
+    }
+    if (s === slug) return row.name
+  }
+  return null
+}
+
+/**
+ * 冲突返投**第一响应**（票 9）：把返修单投给冲突源分支所属的实施猫。
+ *
+ * 三条纪律：
+ * - **不改 fail-closed**：本函数只投递，**任何**失败都只留痕，调用方紧接着照常
+ *   `throw` —— 审查者仍然不开跑（票面「throw 语义保留」）。
+ * - **不静默**：拿不到收件人 / 拿不到目标分支 / ingest 拒收 / 投递链抛错，四条
+ *   路径**各自**留 `log.error`。用 error 而非 warn 是有意的：「没人被通知」正是
+ *   墙 #3 的成因，它在日志里必须是显眼的，不能淹在 info 流里。
+ * - **不阻塞**：`ingestUserMessage` 是 async 契约，而 `ensureExecutionWorktree`
+ *   是同步函数（调用它的 `runAgentReply` 在对象字面量里直接取值）——故
+ *   fire-and-forget。**但不 await ≠ 不看结果**：resolve 值照查（`ok:false` 是
+ *   ingest 的正常返回，不是异常，只有 `.catch` 会漏掉它）。
+ *
+ * 仲裁例外不动：返投是**第一响应**，解不了 / 解错仍升级店长（票面原文）。
+ */
+function notifyConflictSource(opts: {
+  sessionId: string
+  shortId: string
+  /** 审查者 worktree（merge 的 cwd）——目标分支名/sha 的地面真相来源 */
+  cwd: string
+  chainAnchor: string
+  detail: ConflictDetail
+}): void {
+  try {
+    const { sessionId, shortId, cwd, chainAnchor, detail } = opts
+
+    const key = conflictNoticeKey(detail.source, detail.sourceSha)
+    if (notifiedConflicts.has(key)) {
+      log.info('conflict notice skipped — 同键已投过', {
+        source: detail.source,
+        sourceSha: detail.sourceSha,
+      })
+      return
+    }
+
+    const prefix = `${sessionBranch(shortId)}-`
+    const slug = detail.source.startsWith(prefix) ? detail.source.slice(prefix.length) : ''
+    const catName = slug ? resolveCatNameBySlug(sessionId, slug) : null
+    if (!catName) {
+      // 分支在，但它不对应任何会话成员（猫被移出会话 / 规范化碰撞 / 分支名不带
+      // 本会话前缀）。**不投比投错好**：投错 = 叫醒无关的猫去改一份不属于它的分支。
+      log.error('conflict notice skipped — 源分支无对应会话成员', {
+        sessionId,
+        source: detail.source,
+        slug,
+      })
+      return
+    }
+
+    // 目标分支取自 cwd 的 HEAD，**不按命名规则重推**：abort 之后 HEAD 已回到审查
+    // 分支尖，这是「刚才到底往哪条分支上合」的唯一地面真相（重推 = 平行真相源）。
+    const targetBranch = tryGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']) ?? ''
+    if (!targetBranch) {
+      log.error('conflict notice skipped — 审查分支名不可得（detached HEAD？）', { cwd })
+      return
+    }
+    const targetSha = tryGit(cwd, ['rev-parse', 'HEAD']) ?? ''
+
+    const content = buildConflictNotice({
+      catName,
+      targetBranch,
+      targetSha,
+      sourceBranch: detail.source,
+      sourceSha: detail.sourceSha,
+      conflictFiles: detail.files,
+      chainAnchor,
+    })
+
+    // **先记账再投**：第二次同键冲突在投出之前就被挡住（「同键只投一次」是字面
+    // 要求）。代价如实记账——投递真失败时同键不再重试，见交付说明 OQ-1。
+    notifiedConflicts.add(key)
+
+    ingestUserMessage({
+      sessionId,
+      content,
+      mentions: [catName],
+      taskId: chainAnchor,
+      // 服务端发起的 agent 入口：入口主闸要求携带锚（上面 taskId 已给）。
+      // 收件人是实施猫 ⇒ isReviewDelivery 为假 ⇒ 不需要 chainType。
+      origin: 'agent',
+    })
+      .then((result) => {
+        if (result.ok) {
+          log.info('conflict notice delivered', {
+            sessionId,
+            target: catName,
+            source: detail.source,
+            messageId: result.messageId,
+          })
+        } else {
+          log.error('conflict notice rejected by ingest', {
+            sessionId,
+            target: catName,
+            source: detail.source,
+            status: result.status,
+            error: result.error,
+          })
+        }
+      })
+      .catch((err: any) => {
+        log.error('conflict notice delivery failed', {
+          sessionId,
+          target: catName,
+          source: detail.source,
+          error: messageOf(err),
+        })
+      })
+  } catch (err: any) {
+    // 兜底：投递链的**同步**异常（DB 句柄坏 / 会话查询抛错）。它若逃逸会**替换掉**
+    // 上层那条「审查面准备中止」错误——日志从此指向错误的方向，而真正的冲突现场
+    // 反而没了。故就地吞下 + 留痕。
+    log.error('conflict notice crashed (non-blocking)', { error: messageOf(err) })
+  }
+}
+
 /**
  * **执行起点**的 cwd 解析（单源）：建/取该 agent 的目标树；审查者额外把本会话全部
  * 猫分支合进**它自己的猫分支**（形态 G）。
@@ -280,10 +574,28 @@ export function mergeCatBranchesIntoOwnBranch(
  * `chatStream` **不会被调用** ⇒ 审查者**不带着缺内容的工作区开跑**，也不会产出一份
  * 「头头是道但审的是旧版」的回执。代价是这一轮审查没有回执（fail-closed 换可用性，
  * 方向与票面 §二-1「纪律会失守，结构不会」一致）。
+ *
+ * **票 9 补的那一步**：抛错**之前**先 `notifyConflictSource` 把返修单投回实施猫。
+ * 原形态「只 throw、不通知」正是墙 #3 定时器重试死循环的成因——审查者静默死掉、
+ * 实施者不知道要动，谁也没变，于是重试永远撞同一堵墙。投递与抛错**互不绑定**：
+ * 投递怎么失败都不改 fail-closed（见 `notifyConflictSource` 的纪律段）。
  */
 export function ensureExecutionWorktree(
   sessionId: string,
-  agent: { id: string; name: string; role?: string }
+  agent: { id: string; name: string; role?: string },
+  /**
+   * **链锚**（票 9 返修消息的投递锚）= `triggerMsg.taskId || traceId`——与执行内
+   * 各处链锚表达式**逐字同源**（`reply.ts:783` / `reply.ts:1127` / `serial.ts:489`）。
+   *
+   * 为什么**必填**而不是可选：返修单经 `ingestUserMessage` 投递，而入口主闸
+   * （`origin: 'agent'`）硬性要求携带锚——可选参数在"忘了传"时会退化成
+   * 「闸门拒收 + 一条日志」，即**这个票要治的静默失效换了个地方复发**。必填 ⇒
+   * 忘传是 `tsc` 编译错误（与 spec D15「忘标变编译错误」同一条判据）。
+   *
+   * 非审查者路径不消费它（不合并 ⇒ 无冲突 ⇒ 无返投），但签名统一——调用点只有
+   * `reply.ts` 一处，多传一个已有的局部量，换调用点形状的单一。
+   */
+  chainAnchor: string
 ): string | null {
   const path = ensureAgentWorktree(sessionId, agent)
   if (!path) return null
@@ -301,6 +613,18 @@ export function ensureExecutionWorktree(
 
   const r = mergeCatBranchesIntoOwnBranch(shortId, { cwd: path, mainRoot })
   if (r.conflict) {
+    // 返投第一响应（票 9）。**放在 throw 之前**：投递链自身是 fire-and-forget 的
+    // 同步段 + 微任务，这里不 await——但 ingest 的落库在同步段内完成，故下面这条
+    // throw 到达上层时，返修单已经在 DB 里了（顺序可观测，见组装式测试）。
+    if (r.conflictDetail) {
+      notifyConflictSource({
+        sessionId,
+        shortId,
+        cwd: path,
+        chainAnchor,
+        detail: r.conflictDetail,
+      })
+    }
     throw new Error(
       `审查面准备中止：把猫分支合进审查者自己的分支时冲突（recovered=${r.recovered}）——` +
         `审查者不带着缺内容的工作区开跑；冲突仲裁归店长`

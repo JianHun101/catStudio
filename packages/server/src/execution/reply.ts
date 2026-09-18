@@ -983,7 +983,10 @@ export async function runAgentReply(
     // 是旧的**（`report-phase-ib.md` §三 V16-b 实测）。合并冲突 ⇒ 显式抛错，审查者
     // **不开跑**也不产出回执（fail-closed，票面 §二-3）。
     // 注意这是**同步阻塞调用**（建树 + merge 全是 `execFileSync`），与本行原语义一致。
-    cwd: ensureExecutionWorktree(sessionId, agent) ?? undefined,
+    // 第三个实参 = **链锚**（票 9）：prep 撞冲突时用它把返修单投回实施猫。取值与
+    // :783 / :1127 同 Expression（`triggerMsg.taskId || traceId`）——投出去的消息
+    // 与「本轮执行属于哪条链」必须同源，否则实施猫的返修工作会挂到另一条链上。
+    cwd: ensureExecutionWorktree(sessionId, agent, triggerMsg.taskId || traceId) ?? undefined,
     // MCP 结构化路由上下文（契约 3 二次修订——店长裁决）：claude.ts 透传
     // 到 MCP server env；其他适配器忽略 context 零影响。
     // triggerAuthorName 与 :947 合并点同款来源（triggerMsg.authorName）——
