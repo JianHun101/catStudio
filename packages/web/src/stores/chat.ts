@@ -926,15 +926,20 @@ export const useChatStore = defineStore('chat', () => {
         // A2A / headless 执行没有用户消息状态行，这条支路是它们唯一可见的计时来源。
         if (data.status === 'thinking' || data.status === 'replying') {
           const prev = replyTimers.value.get(data.agentId)
-          // startedAt 取新旧较小者：一次执行内服务端恒发同值，取小是防乱序/中途刷新的倒退防御
-          const anchor = data.startedAt ?? prev?.startedAt
           // 锚点缺失（旧 server 的 thinking 不带 startedAt，且本地无存量）→ 不建条目：
           // 没有执行起点就没有可显示的时长，气泡回退静态「回复中…」而不是从 0 起算
+          const anchor = data.startedAt ?? prev?.startedAt
           if (anchor != null) {
-            setReplyTimer(data.agentId, {
-              startedAt: prev ? Math.min(prev.startedAt, anchor) : anchor,
-              lastBeatAt: Date.now(),
-            })
+            // 'thinking' 是**一轮执行的起点信号**（服务端顺序恒 thinking → replying → 心跳，
+            // 见 reply.ts:331-341，锚点一次取值）——到了就无条件重置，**不与 prev 取小**。
+            // 上一轮失败（LLM 异常 / AGENT_HARD_TIMEOUT_MS 硬超时 / CLI 空闲超时）既不产 done
+            // 也不产 AGENT_STATUS idle：serial.ts:1670 队列有下一条时只发 `busy` 直转 N+1，
+            // 上面的 idle 清空兜底不触发。此时若与 prev 取小，新一轮计时会继承上一轮起点，
+            // 把失败间隙一并算进秒数（跨执行虚高，直到本轮 done 才自愈）。
+            // min 防御只留给 replying / 心跳：那里服务端恒发同值，取小才是在防乱序与中途刷新倒退。
+            const startedAt =
+              data.status === 'thinking' || prev == null ? anchor : Math.min(prev.startedAt, anchor)
+            setReplyTimer(data.agentId, { startedAt, lastBeatAt: Date.now() })
           }
         } else if (data.status === 'done') {
           clearReplyTimer(data.agentId)
