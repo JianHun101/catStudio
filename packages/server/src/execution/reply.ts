@@ -1046,7 +1046,16 @@ export async function runAgentReply(
         return { content: fullContent || '[消息已撤回]', msgId }
       }
       if (signal?.aborted) {
-        log.info('agent reply aborted (timeout)', { traceId, agentId: agent.id })
+        // 超时（serial.ts 的 Promise.race 硬上限）与用户主动停止（AGENT_INTERRUPT）
+        // **共用本分支**，故文案不得写死任一方——原因改由 `signal.reason` 承载。
+        // （旧文案写死超时语义，用户点停止也被记成超时，2026-09-18 排障现场即被带偏。）
+        // ⚠️ 现存两处 `abort()` 调用点均未传 reason ⇒ 实际取值为 AbortError 默认值，
+        // 尚不足以区分两类中断；要落到「谁中断的」需上游补 `abort(reason)`（另议）。
+        log.info('agent reply aborted', {
+          traceId,
+          agentId: agent.id,
+          reason: String(signal?.reason ?? 'unknown'),
+        })
         state.deleteActiveStream(agent.id, sessionId)
         llmStreamStatus = 'timeout'
         return { content: fullContent, msgId }

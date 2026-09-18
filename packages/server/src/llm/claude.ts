@@ -222,13 +222,19 @@ export class ClaudeAdapter implements LLMAdapter {
     })
 
     // ─── Abort 处理：收到取消信号时 kill 子进程 ───
+    // 存活判据 = `exitCode`/`signalCode` 双 null，**不用 `killed` 标志**：
+    // `killed` 的语义是「信号已发出」（`kill()` 调用成功那一刻即置 true），不是
+    // 「进程已死」——拿它当存活判据，5 秒后的 SIGKILL 升级判断永远过不去
+    // （2026-09-18 探针实测：kill 后 `killed=true` 而 `exitCode/signalCode` 仍为 null）。
+    // `exitCode`/`signalCode` 是进程终止后才落定的字段，二者皆 null 才是「还活着」。
+    const isChildAlive = () => child.exitCode === null && child.signalCode === null
     const GRACE_MS = 5000
     const onAbort = () => {
-      if (!child.killed && child.exitCode === null) {
+      if (isChildAlive()) {
         log.warn('收到取消信号，发送 SIGTERM', { model: options.model || this.model })
         child.kill('SIGTERM')
         setTimeout(() => {
-          if (!child.killed && child.exitCode === null) {
+          if (isChildAlive()) {
             log.warn('SIGTERM 未响应，发送 SIGKILL')
             child.kill('SIGKILL')
           }
