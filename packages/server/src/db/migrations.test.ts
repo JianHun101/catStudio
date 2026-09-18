@@ -225,6 +225,28 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(MIGRATIONS.slice(0, baseline.length).every((m) => m.baseline === true)).toBe(true)
     })
 
+    it('票 10 · ticket 标记：追加区每条必有、基线区一律不补（fail-loud，忘标当场红）', () => {
+      const appended = MIGRATIONS.filter((m) => m.baseline !== true)
+      const baseline = MIGRATIONS.filter((m) => m.baseline === true)
+
+      // 前提：两段都非空 —— 否则下面两条 `every` 恒真（空集上恒真正是本仓点名的假绿门形态）
+      expect(appended.length).toBeGreaterThan(0)
+      expect(baseline.length).toBeGreaterThan(0)
+
+      // 追加区：每条必有非空 ticket。数组形态的断言（而非 every）是为了失败时**列出是谁**——
+      // `every` 只回一句 false，忘标的那条还得自己去数组里数。
+      expect(appended.filter((m) => !m.ticket).map((m) => m.name)).toEqual([])
+      // 票号形态：挡 `t6` / `T6 ` / 全角 `Ｔ6` 这类手滑。拼错的票号不会让上面那条红
+      // （它是「非空」判断），但会让各票自己的 `filter` 静默少收 —— 从这条兜住。
+      expect(
+        [...new Set(appended.map((m) => m.ticket))].filter((t) => !/^T\d+$/.test(t as string))
+      ).toEqual([])
+
+      // 反向对照：基线区**一律不补** —— 若给 41 条基线逐条补票号，等于在「41 条基线」这层
+      // 再造一个逐条手写面（正是本票要拆的那类必撞点）。
+      expect(baseline.filter((m) => m.ticket !== undefined).map((m) => m.name)).toEqual([])
+    })
+
     it('基线探针清单 = 审计定稿的 3 条（重建类静默失败型），多一条少一条都要改审计结论', () => {
       expect(
         MIGRATIONS.filter((m) => m.verify !== undefined && m.baseline === true).map((m) => m.name)
@@ -922,23 +944,45 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
 
   // ─── 票 6 批一 · B 范围重建批（D3 归一 + 7 张叶子表重建）───────────────────
   describe('票 6 · B 范围重建批（FK 补链 + 时间口径 ISO + D1 孤儿清理）', () => {
-    /** 票 6 的 8 条条目在数组里的起点（D3 归一打头）—— 用它切出「重建前」的库形态 */
-    const T6_START = MIGRATIONS.findIndex((m) => m.name.startsWith('D3 review_verdicts'))
     /**
-     * 票 6 区块的**上界**（锚票 7 首条，开区间）。
+     * 票 6 的 8 条条目 —— **按身份认亲**（`ticket`），不按座位（数组下标）。
      *
-     * 必须显式给上界：追加区是「人人往后接」的共享追加点，`slice(T6_START)` 会一路切到
-     * 数组末尾——票 7 的两条接在票 6 后面就多出 2 条，`toHaveLength(8)` 当场红。这一型
-     * **git 不报冲突**（两侧改的是文件不同位置），只有跑测试才露，故上界写在这里而不是
-     * 靠「当前恰好是末尾」。
+     * 票 10 之前这里是 `slice(T6_START, T6_END)`：拿位置表达「属于票 6」。票 7 一接上
+     * 去就切错区间——`slice(T6_START)` 会一路切到数组末尾（实得 10 条 vs 断言 8 条），
+     * 而 **git 不报冲突**（两侧改的是文件不同位置），只有跑测试才露。这正是墙 #2/#3 的
+     * 结构性来源之一。
      */
-    const T6_END = MIGRATIONS.findIndex((m) => m.name.startsWith('sessions archived_at'))
-    const T6_NAMES = MIGRATIONS.slice(T6_START, T6_END).map((m) => m.name)
+    const T6_ENTRIES = MIGRATIONS.filter((m) => m.ticket === 'T6')
+    const T6_NAMES = T6_ENTRIES.map((m) => m.name)
 
-    /** 「重建前」的库 = 只跑到票 5 为止（这 8 条一条都还没上船） */
+    /**
+     * **冻结的名字集合** —— 票 10 改造前的 `T6_NAMES` 逐字抄下来当基准。
+     *
+     * 为什么不拿 `T6_ENTRIES` 自我比对：那是恒真断言（filter 出一堆、再断言它等于自己），
+     * 正是本仓反复点名的假绿门形态。冻结字面量让「少标一条 / 多标一条 / 名字写错」三种
+     * 错都当场红。
+     */
+    const T6_NAMES_FROZEN = [
+      'D3 review_verdicts.subject_agent_id 猫名→id 归一',
+      'rebuild execution_logs（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+      'rebuild flow_states（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+      'rebuild flow_state_events（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+      'rebuild connector_bindings（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+      'rebuild episode_attributions（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+      'rebuild review_verdicts（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+      'rebuild review_parse_failures（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    ]
+
+    /**
+     * 「重建前」的库 = 只跑到票 6 首条为止（这 8 条一条都还没上船）。
+     *
+     * 这里仍用**顺序**切分，是刻意的：「之前」本来就是顺序语义，本票消灭的是拿位置表达
+     * 「属于」。定位起点用身份（`ticket`），切分动作本身仍是 `slice`。
+     */
     function makePreTicket6Db(): Database.Database {
       const db = makeFreshDb()
-      applyMigrations(db, MIGRATIONS.slice(0, T6_START))
+      const start = MIGRATIONS.findIndex((m) => m.ticket === 'T6')
+      applyMigrations(db, MIGRATIONS.slice(0, start))
       return db
     }
 
@@ -997,14 +1041,18 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
     }
 
     it('8 条条目形态 = 1 条 D3 归一 + 7 张重建，且全部落在追加区（不带 baseline 标记）', () => {
-      expect(T6_START).toBeGreaterThan(0)
-      // 上界锚必须落在起点之后（锚串写错 ⇒ findIndex 返 -1 ⇒ 切出空区间，长度断言会一起红）
-      expect(T6_END).toBeGreaterThan(T6_START)
-      expect(MIGRATIONS[T6_END].name).toContain('sessions archived_at')
-      expect(T6_NAMES).toHaveLength(8)
+      // 恰好 8 条 + 名字集合与**冻结基准**逐字一致（票 10 验收 1）。
+      // 判据非恒真：少标一条 ticket ⇒ 7 条；多标一条 ⇒ 9 条；名字被改 ⇒ 逐字不等。
+      expect(T6_ENTRIES).toHaveLength(8)
+      expect(T6_NAMES).toEqual(T6_NAMES_FROZEN)
       expect(T6_NAMES[0]).toContain('D3 review_verdicts.subject_agent_id 猫名→id 归一')
       expect(T6_NAMES.slice(1).every((n) => n.startsWith('rebuild '))).toBe(true)
-      expect(MIGRATIONS.slice(T6_START, T6_END).every((m) => m.baseline !== true)).toBe(true)
+      expect(T6_ENTRIES.every((m) => m.baseline !== true)).toBe(true)
+      // 身份锚（`makePreTicket6Db` 的切分点）必须真落在数组**中段**：`findIndex` 返 -1
+      // ⇒ 切出空集（「重建前」的库变成了全量库，那几格会静默测错东西）；返 0 ⇒ 同上。
+      const start = MIGRATIONS.findIndex((m) => m.ticket === 'T6')
+      expect(start).toBeGreaterThan(0)
+      expect(start).toBeLessThan(MIGRATIONS.length)
     })
 
     it('形状 · 7 张表：新 FK 全 ON DELETE RESTRICT，CHECK 一个不少，时间列一律无 DEFAULT', () => {
@@ -1405,8 +1453,10 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       // 数组体里不许出现字面量 `run:` —— 手写 hook 就能造出「台账指纹对得上、实际建的
       // 是另一张形状」的静默分叉（checksum 只认 sql，管不到 hook 正文）。
       expect(body).not.toMatch(/\brun\s*:/)
-      // 工厂把 createSql 与 sql 钉成**同一个变量** ⇒ createSql === m.sql 结构性成立
-      expect(src).toMatch(/name: opts\.name,\s*\n\s*sql: opts\.ddl,/)
+      // 工厂把 createSql 与 sql 钉成**同一个变量** ⇒ createSql === m.sql 结构性成立。
+      // 票 10 后 `ticket: opts.ticket,` 夹在 name 与 sql 之间 ⇒ 正则同步纳入（族修纪律：
+      // 改了实现/形状就要扫一遍复述它的断言，否则留下的是一条**恒假**的假绿门）。
+      expect(src).toMatch(/name: opts\.name,\s*\n\s*ticket: opts\.ticket,\s*\n\s*sql: opts\.ddl,/)
       expect(src).toMatch(/createSql: opts\.ddl,/)
       // hook 正文只做两件事：调 rebuildTable + 收尾 record()
       const hook = src.slice(

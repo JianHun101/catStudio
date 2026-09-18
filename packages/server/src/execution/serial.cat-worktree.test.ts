@@ -79,6 +79,10 @@ vi.mock('../handoff/index.js', () => ({
   performHandoff: vi.fn().mockResolvedValue(undefined),
   injectSummaryIntoSystem: vi.fn((s: string) => s),
   generateFullSummary: vi.fn(),
+  // `connectors/ingest.js` 的具名导入——票 9 起本文件的冲突路径**真的会走 ingest**
+  // （冲突返投），缺这个导出会在调用点炸 `not a function`。返回 null = 不重定向，
+  // 与「会话未交接」同义，不影响任何既有格。
+  resolveHandoffTarget: vi.fn(() => null),
 }))
 
 vi.mock('../git/diff-collector.js', () => ({
@@ -209,6 +213,7 @@ const SESSION_IDS = [
   'scwt0010',
   'scwt0011',
   'scwt0012',
+  'scwt0013',
 ]
 
 function dropWorktrees(): void {
@@ -781,6 +786,107 @@ describe('serial × 一猫一 worktree（猫路径，T-2 Phase I）', () => {
       'merge conflict',
       expect.objectContaining({ label: 'review-view', recovered: true })
     )
+  })
+
+  /**
+   * V23 冲突返投（票 9）：撞冲突 ⇒ 冲突源**实施猫**收到四样载荷的返修单；同 sha
+   * 不重投、源分支推进新 sha 后再撞**再投**。
+   *
+   * 与 V20 的分工：V20 钉「审查者不开跑」（fail-closed），但**没有下一个人**——
+   * 实施猫不知道要动，重试就永远撞同一堵墙（墙 #3 定时器死循环的结构性成因）。
+   * 本格补的正是「带解法回家」这一跳；**两格必须同时绿**，只有 V20 绿 = 死循环照旧。
+   *
+   * 三段读数，缺一段即退化成假绿：
+   * 1. 四样载荷**逐样**在正文里——只断言「有消息」会放过一条没有清单/没有对撞 sha
+   *    的空壳，收件猫拿到空壳照样动不了手
+   * 2. 收件人是冲突源分支所属的**实施猫**（不是审查者、不是空 mentions 的广播）
+   * 3. 去重闸**两个方向都读**：同 sha 不重投（且冲突真的又发生了 = 反向对照，
+   *    证明「没多投」不是因为「没再撞」）、新 sha 再投（证明闸不是「投过一次就死」）
+   */
+  it('V23 · 冲突返投：实施猫收到四样载荷；同 sha 不重投、新 sha 再投', async () => {
+    const sid = 'scwt0013'
+    const shortId = sessionShortId(sid)
+    git(['branch', sessionBranch(shortId)])
+
+    // 审查者侧先改同一处（同 V20 的冲突造法：两分支自同一分叉点改同一文件同一行）
+    const revWt = ensureCatWorktree(sid, REVIEWER.id, REVIEWER.name)
+    registerWorktree(revWt)
+    writeFileSync(resolve(revWt!, 'tracked.txt'), 'rev 改过\n', 'utf-8')
+    git(['add', '-A'], revWt!)
+    git(['commit', '-m', 'rev 侧先改'], revWt!)
+    const revSha = git(['rev-parse', catBranch(shortId, REVIEWER.name)])
+
+    const implWt = ensureCatWorktree(sid, CAT2.id, CAT2.name)
+    registerWorktree(implWt)
+    writeFileSync(resolve(implWt!, 'tracked.txt'), 'impl 改过\n', 'utf-8')
+    await runRound(sid, 'scwt-t9-impl', CAT2, 'trace-scwt-t9-impl')
+    const implSha = git(['rev-parse', catBranch(shortId, CAT2.name)])
+
+    // 返修单读法：投递走**真 ingest** ⇒ 认消息表里那条 user 消息。这不是「绕过投递
+    // 看内部状态」——`mentions` 列正是 dispatch 的派发依据，落库 + 该列正确 = 「收到」。
+    const notices = (): Array<{ content: string; mentions: string; task_id: string | null }> =>
+      getDb()
+        .prepare(
+          `SELECT content, mentions, task_id FROM messages
+           WHERE session_id = ? AND content LIKE '%【冲突返投】%' ORDER BY rowid`
+        )
+        .all(sid) as any[]
+
+    const errBefore = h.logError.mock.calls.length
+    await runRound(sid, 'scwt-t9-rev1', REVIEWER, 'trace-scwt-t9-rev1')
+
+    // 前提：真撞了冲突（否则下面「收到消息」可能是别的原因凑出来的）
+    expect(h.logError.mock.calls.length).toBeGreaterThan(errBefore)
+    expect(h.logError).toHaveBeenCalledWith(
+      'merge conflict',
+      expect.objectContaining({ label: 'review-view', recovered: true, files: ['tracked.txt'] })
+    )
+
+    const first = notices()
+    expect(first).toHaveLength(1)
+    const text = first[0].content
+    // ① 冲突文件清单（逐条 + 条数）
+    expect(text).toContain('① 冲突文件（1 个）')
+    expect(text).toContain('- tracked.txt')
+    // ② 对撞两侧：源（实施猫分支）与目标（审查分支），各带短 sha
+    expect(text).toContain(`- 你的分支：${catBranch(shortId, CAT2.name)} @ ${implSha.slice(0, 7)}`)
+    expect(text).toContain(
+      `- 审查分支：${catBranch(shortId, REVIEWER.name)} @ ${revSha.slice(0, 7)}`
+    )
+    // ③ 解法指令（固定模板，审查分支名已代入）
+    expect(text).toContain(`git merge ${catBranch(shortId, REVIEWER.name)}`)
+    expect(text).toContain('重新 request-review')
+    // ④ 验收条件
+    expect(text).toContain('④ 验收条件：')
+    expect(text).toContain('干净合进审查分支')
+    // 收件人 = 实施猫（不是审查者、不是空 mentions 的广播）
+    expect(JSON.parse(first[0].mentions)).toEqual([CAT2.name])
+    // 链锚继承：返修单与本轮审查**同一条链**（否则实施猫的返修工作挂到链外）
+    expect(first[0].task_id).toBe('trace-scwt-t9-rev1')
+
+    // ── 去重闸 · 方向一：同 sha 再撞 ⇒ 不重投 ──
+    // 反向对照排在同一段里：先证明「冲突真的又发生了」，再断言「没多投」——
+    // 只断言条数不变的话，把实现改成「第二次干脆不合并」也能全绿。
+    const errBefore2 = h.logError.mock.calls.length
+    await runRound(sid, 'scwt-t9-rev2', REVIEWER, 'trace-scwt-t9-rev2')
+    expect(h.logError.mock.calls.length).toBeGreaterThan(errBefore2)
+    expect(git(['rev-parse', catBranch(shortId, CAT2.name)])).toBe(implSha) // 源分支确实没动
+    expect(notices()).toHaveLength(1)
+
+    // ── 去重闸 · 方向二：源分支推进新 sha 后再撞 ⇒ 再投一次 ──
+    writeFileSync(resolve(implWt!, 'tracked.txt'), 'impl 改过 v2\n', 'utf-8')
+    git(['add', '-A'], implWt!)
+    git(['commit', '-m', 'impl 侧再改'], implWt!)
+    const implSha2 = git(['rev-parse', catBranch(shortId, CAT2.name)])
+    expect(implSha2).not.toBe(implSha) // 前提：sha 真变了
+
+    await runRound(sid, 'scwt-t9-rev3', REVIEWER, 'trace-scwt-t9-rev3')
+    const after = notices()
+    expect(after).toHaveLength(2)
+    expect(after[1].content).toContain(`@ ${implSha2.slice(0, 7)}`)
+    // 第二次投递同样带四样（复位性：不是只有第一条完整）
+    expect(after[1].content).toContain('① 冲突文件（1 个）')
+    expect(after[1].content).toContain('④ 验收条件：')
   })
 
   /**

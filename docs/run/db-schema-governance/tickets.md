@@ -354,3 +354,50 @@ sessions `ADD COLUMN archived_at TEXT`（NULL=活跃）+ 部分索引 `WHERE arc
 内部顺序（spec §4.3，不能反）：① 建 `session_agents` + 解析 JSON 灌入（数组下标→position，悬空引用按拍板处置）；② **sessions 一次重建**：时间口径 + 删 `agent_ids` 列 + **保留票 7 的 archived_at** + 约束；③ 读取路径全改走新表（对外 API 形状不变，`agentIds` 按 position 组装）；④ 隐藏行为保留：成员变更仍 touch `sessions.updated_at`（验收项）；⑤ 删 session → CASCADE 成员行；删 agent → RESTRICT + **409 契约**：repository 先查后删、命中抛领域错误带会话清单、API 409 + 结构化错误体（spec §4.1 行为契约）。
 
 **验收硬条款（随票 4 复审落盘）**：收尾全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6——sessions 是被引用大父表，重建后体检是防子表悬空的唯一兜）。
+
+---
+
+## 票 9 · 冲突返投通道（review-chain 机制小票，派 ds猫，走 worktree）
+
+**背景**：审查面 prep 撞冲突时 `ensureExecutionWorktree`（`packages/server/src/llm/worktree-fanin.ts:288`）直接 throw——审查不跑（fail-closed，方向对），但**没有任何消息发给任何人**，墙 #3 的「定时器重试死循环」（吐槽猫连挂 5 轮）就是这么来的。根治①（用户 2026-09-18 拍板）：冲突带着解法回家——返投实施侧，状态变了才重试，轮询撞墙变事件驱动。
+
+**组件边界**：只动 `packages/server/src/llm/worktree-fanin.ts`（`ensureExecutionWorktree` 冲突分支）+ 其测试 `worktree-fanin.test.ts` / 必要的组装式测试。投递复用现有消息落库 + dispatch 通道，**不新造管道**。**Out of scope**：不解冲突内容本身；不动 `docs/run/**` 免合并（排批二后）；不改判词/审查语义；不动 `fanInCatBranches`（收口面）。
+
+**接口契约**：
+
+- prep 撞冲突 → 保持现状 abort + 不开跑 → **追加一步**：向冲突源分支所属的实施猫投递结构化返修消息，载荷固定四样——① 冲突文件清单（`git diff --name-only` 冲突态可取）② 对撞两侧（源分支名+sha、审查分支名+sha）③ 解法指令（「把审查分支 merge 进你的分支、解冲突、跑测试、提交、重新 request-review」，模板固定文本）④ 验收条件（prep 合并干净即放行）。
+- **去重闸**：同一「源分支@sha」的冲突只投一次——去重键 = 源分支名 + 源分支尖 sha。无新 sha 不再投（防投递风暴）。去重状态的存放位置由实施者查现有结构后定（内存态可接受，重启丢 = 最坏多投一次；若选用 DB 须在票面回报理由）。
+- throw 语义保留：返修消息发出后仍抛错中止本轮（审查者不开跑）——fail-closed 不变。
+- 仲裁例外不动：注释「冲突仲裁归店长」保留——返投是**第一响应**，实施猫解不了/解错仍升级店长。
+
+**验收标准**（行为可验证）：
+
+1. 测试构造冲突场景（参照 `serial.cat-worktree.test.ts` V20 的构造方式）：断言实施猫收到含四样载荷的消息（载荷四字段逐一断言，不只断言「有消息」）。
+2. 同 sha 二次触发不再投（去重断言）；源分支推进新 sha 后再撞 → 再投一次。
+3. 既有测试全绿（`node node_modules/vitest/vitest.mjs run`，pnpm test 会被 junction 拒）+ lint 绿。
+4. 投递失败路径不静默：消息落库失败须 log.error 且不影响 abort/throw 语义。
+
+**流程**：worktree（从 dev `57a5c03` 建 `session/c6e3b9a6-ds猫`）；quality-gate → request-review 投吐槽猫；不自行合并、不 push。
+
+---
+
+## 票 10 · 迁移条目加 ticket 字段取代下标锚点（派 ds猫，走 worktree；与票 9 同分支顺次或分支自裁，但两票各自独立 commit）
+
+**背景**：测试用 `findIndex(name.startsWith(...))` + `slice(T6_START, T6_END)` 表达「票 6 的 8 条」（`migrations.test.ts:926-936`）——拿位置当身份，票 7 一接上去就切错区间（git 不报冲突，测试才红，墙 #2/#3 的结构性来源之一）。根治②（用户 2026-09-18 拍板）：按身份认亲，不按座位认亲。
+
+**组件边界**：只动 `packages/server/src/db/migrations.ts`（`Migration` 接口 + 追加区 15 条标 `ticket`）+ `packages/server/src/db/migrations.test.ts`。**Out of scope**：不改数组顺序；不拆文件（排批二后）；基线区条目**不补** ticket；不删 `toHaveLength` 计数断言（它钉总量，仍有效）；不动 runner 逻辑。
+
+**接口契约**：
+
+- `Migration` 加可选字段 `ticket?: string`（如 `'T5' | 'T6' | 'T7'`），追加区每条**作者写字面量时人工标注**——不是运行时推导。
+- 测试改造：`T6_NAMES` 等改 `MIGRATIONS.filter(m => m.ticket === 'T6').map(m => m.name)`；「票 6 之前的世界」夹具仍可用顺序语义（`slice(0, findIndex(m => m.ticket === 'T6'))`）——「之前」本来就是顺序，被消灭的是用位置表达「属于」。
+- 新增静态断言：追加区每条必有 `ticket`（fail-loud，忘标当场红）。
+- 顺手删 `migrations.ts` 头注里「当前挂着十五条」这类计数行（每次追加都要改它 = 另一个必撞点；数量已被测试断言钉死，纯冗余）——若有多处同类计数注释，全扫全删并在回执报清单。
+
+**验收标准**：
+
+1. `MIGRATIONS.filter(m => m.ticket === 'T6')` 恰好 8 条，名字集合与现 `T6_NAMES` 完全一致（测试断言钉住）。
+2. 删掉任一追加区条目的 `ticket` → 测试红（反向对照，判据不是恒真）。
+3. 全量 server 测试绿 + lint 绿；`pnpm build` 过（接口加字段，tsc 全包核对）。
+
+**流程**：同票 9。两票都小，可同分支顺次两笔 commit（各自带 uuid 标记），审查一并走。

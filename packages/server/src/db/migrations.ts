@@ -40,15 +40,22 @@
  * ## 追加区（fix-forward）
  *
  * 台账立闸后的一切结构变更都追加到文件末尾的 `APPENDED_MIGRATIONS`，**不带** `baseline`
- * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。当前挂着十五条，**按票号序**排列：
+ * 标记 ⇒ 新库老库走**同一条增量路径**（真执行）。**按票号序**排列：
  * 票 1 的 fix-forward 补建（补主库缺失的 `retrieval_*` / `spans` 五表九索引，OQ1 实测 +
  * 店长裁决 ②）、票 2 的三条索引（spec §3.2）、票 5 的 `messages` 重建（spec §4.4 纪律 7
  * 过程式通道）、票 6 批一的 D3 归一 + 7 张叶子表重建（B 范围 FK/CHECK/时间口径）、票 7 的
  * `sessions.archived_at` 列与活跃列表部分索引（spec §4.1 归档）——来龙去脉见各条上方注释。
+ * （上句原以「当前挂着十五条，」开头，票 10 已删——那是**每次追加都要改的计数**，而数量
+ * 早已被 `toHaveLength` 断言钉死，留着只是一处人人要碰的必撞点。）
  *
  * 票号序不是排版洁癖：追加区里**同一条数据的迁移链有先后依赖**（D3 归一必须先于
- * `review_verdicts` 重建），且测试用「票 N 首条」当下标锚点切分数组（`T6_START`/`T6_END`），
- * 乱序会让夹具静默取错区间——两票并行合入时尤其要盯。
+ * `review_verdicts` 重建），乱序会让迁移**按错的顺序落地**。
+ *
+ * （2026-09-18 · 票 10 更正）本段原写「且测试用『票 N 首条』当下标锚点切分数组
+ * （`T6_START`/`T6_END`），乱序会让夹具静默取错区间」——**该机制已退役**：测试改按
+ * `ticket` 字段认亲（`MIGRATIONS.filter(m => m.ticket === 'T6')`）。留此更正痕而非删句，
+ * 是因为下标锚点正是本票要治的病（拿位置当身份），读者在原处看到「它为什么被换掉」
+ * 比看到一句凭空消失的话有用。
  *
  * - **不挂探针 38 条**：其余 CREATE TABLE / CREATE INDEX / DROP 条目要么是纯新物体
  *   （缺了会在首次使用时响亮报错），要么效果由后续条目独立保证。加列类历史 ALTER 已
@@ -98,6 +105,26 @@ export interface Migration {
    * 那里的纪律说明），测试另钉着「基线集条数冻结」。
    */
   baseline?: boolean
+  /**
+   * **身份标记**（票 10，2026-09-18 用户拍板）：这条迁移属于哪张票。
+   *
+   * 为什么不能靠下标：追加区是「人人往后接」的共享追加点，而测试曾用「票 N 首条」当下标
+   * 锚点切区间（`T6_START`/`T6_END`）——那是**拿座位当身份**。票 7 一接上去就切错区间，
+   * git 不报冲突（两侧改的是文件不同位置）、只有跑测试才露；这正是墙 #2/#3 的结构性来源
+   * 之一。按 `ticket` 认亲后，各票条目各自成组，两票并行合入不再抢同一片位置。
+   *
+   * 取值是**票号字面量**（`'T1'` / `'T2'` / `'T5'` / `'T6'` / `'T7'` …），由作者写条目时
+   * **人工标注**、不做运行时推导——任何推导最终都要回到「按位置猜」，正是本条要消灭的东西。
+   *
+   * 刻意**不设成联合类型**（`'T1' | 'T2' | …`）：联合类型本身就是一行「每开一张新票都要改」
+   * 的共享行，等于把刚拆掉的追加点原样搬进类型声明里。代价如实记账——非 T6 票的**拼写
+   * 错误**没有结构性兜底（`filter` 会静默少收），靠「追加区每条必有 ticket」+ 各票自己的
+   * 集合断言（如 T6 的 8 条名字冻结）覆盖，见交付说明 OQ-2。
+   *
+   * **追加区每条必填、基线区一律不补**：基线集是封存的历史（`baseline` 由拼接点统一盖），
+   * 给它补票号既无消费方，又会在「41 条基线」这层再造一个逐条手写面。
+   */
+  ticket?: string
 }
 
 /**
@@ -811,6 +838,12 @@ const MESSAGES_TABLE_DDL = `CREATE TABLE IF NOT EXISTS messages (
  */
 function rebuildMigration(opts: {
   name: string
+  /**
+   * 票号（票 10）。**这里刻意是必填**：工厂的唯一消费方就是追加区（票 5/6/8 的重建条目），
+   * 而追加区每条必须有 `ticket`——必填让「新重建条目忘标」在 `tsc` 就炸，而不是等到
+   * 「追加区每条必有 ticket」那条静态断言在运行期兜。
+   */
+  ticket: string
   table: string
   ddl: string
   columnMap?: ReadonlyArray<RebuildColumn>
@@ -818,6 +851,7 @@ function rebuildMigration(opts: {
 }): Migration {
   return {
     name: opts.name,
+    ticket: opts.ticket,
     sql: opts.ddl,
     run: (db, record) => {
       rebuildTable(db, {
@@ -834,6 +868,7 @@ function rebuildMigration(opts: {
 const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
   {
     name: 'fix-forward 补建 retrieval_*/spans 五表九索引（票 1 OQ1）',
+    ticket: 'T1',
     // 14 条全是 `IF NOT EXISTS` ⇒ 对已完整的库是 no-op，对缺件的库才真建；挂不挂 `verify`
     // 都改不了这个结果，故按探针审计的判据（只给「失败不报错、只静默劣化」的重建类条目挂）
     // 不挂——探针清单因此仍等于审计定稿的 3 条。
@@ -852,6 +887,7 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 「索引已存在」上静默 no-op（老库、dev 库、全新库三者**全都**命中这条静默路径）
     // ⇒ 升级压根不会发生。同事务内 DROP + CREATE，中途失败整体回滚。
     name: 'idx_messages_session upgrade (session_id, created_at, id)',
+    ticket: 'T2',
     sql: `DROP INDEX IF EXISTS idx_messages_session;
           CREATE INDEX idx_messages_session ON messages(session_id, created_at, id)`,
   },
@@ -867,6 +903,7 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 同口径佐证散在既有代码里：`repository/query.ts:15`「execution_logs 无 created_at 列」、
     // `eval/l1-aggregator.ts:68` 同、`routes/internal.test.ts:864`「用 started_at DESC 排序」。
     name: 'idx_execution_logs_session_started',
+    ticket: 'T2',
     sql: IDX_EXECUTION_LOGS_SESSION_STARTED,
   },
   {
@@ -879,11 +916,13 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 三条都不带 session_id ⇒ 复合索引 `(session_id, status)` 的前导列不匹配，**一条都服务
     // 不到**（这正是「对照实际 SQL 定形」要挡的形态：照抄复合版 = 建了个用不上的索引）。
     name: 'idx_execution_logs_status',
+    ticket: 'T2',
     sql: IDX_EXECUTION_LOGS_STATUS,
   },
   // ── 票 5 · messages 重建（spec §4.4 纪律 7 过程式通道的首个消费方）──────────
   rebuildMigration({
     name: 'messages rebuild (FK agent_id / CHECK dispatch_state / created_at → ISO 毫秒)',
+    ticket: 'T5',
     table: 'messages',
     ddl: MESSAGES_TABLE_DDL,
     // 时间列转换：秒级 → ISO 毫秒（⑤-b 无损单向）。拷贝清单由 helper 按 `PRAGMA table_info`
@@ -918,6 +957,7 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 的名字原样保留**，让紧随其后的重建 FK 响亮拒启（带迁移名）——归一不许有静默降级
     // （裸子查询解析不到会给 NULL，等于把一条审查结论的「审查对象」悄悄抹掉）。
     name: 'D3 review_verdicts.subject_agent_id 猫名→id 归一',
+    ticket: 'T6',
     sql: `UPDATE review_verdicts
    SET subject_agent_id = COALESCE(
          (SELECT a.id FROM agents a WHERE a.name = review_verdicts.subject_agent_id),
@@ -935,6 +975,7 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
     // 不进成功率）。用 SQL 侧 ISO 毫秒补 `ended_at`（条目正文被 checksum 冻结，
     // 插不了 JS 值；此处是**一次性修复**，不是记录写入，故不走 repository helper）。
     name: 'rebuild execution_logs（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    ticket: 'T6',
     sql: `DELETE FROM execution_logs
  WHERE (message_id IS NOT NULL AND message_id NOT IN (SELECT id FROM messages))
     OR triggered_by_message_id NOT IN (SELECT id FROM messages);
@@ -984,6 +1025,7 @@ ${IDX_EXECUTION_LOGS_STATUS}`,
     // D2 补链：`session_id` → sessions。`updated_at` 去 DEFAULT 改由
     // `flowStates.ts::recordFlowTransition` 生成（⑤-c：记录时间归 repository 层）。
     name: 'rebuild flow_states（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    ticket: 'T6',
     sql: `DELETE FROM flow_states WHERE session_id NOT IN (SELECT id FROM sessions);
 CREATE TABLE flow_states_rebuilt (
       session_id TEXT NOT NULL,
@@ -1004,6 +1046,7 @@ ALTER TABLE flow_states_rebuilt RENAME TO flow_states`,
     // **不加 CHECK**：`to_state` 值域非封闭（`execution/flow-state.ts::isOnMainChain()`
     // 的存在本身即证明主干道之外还有岔道取值），照 spec「封闭枚举才 CHECK」判据排除。
     name: 'rebuild flow_state_events（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    ticket: 'T6',
     sql: `DELETE FROM flow_state_events WHERE session_id NOT IN (SELECT id FROM sessions);
 CREATE TABLE flow_state_events_rebuilt (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1028,6 +1071,7 @@ ALTER TABLE flow_state_events_rebuilt RENAME TO flow_state_events`,
     // webhook 侧静默忽略」；立闸后改绑语义相反：**删会话前必须先解绑**（删除路径已
     // 同步清理），webhook 侧再也见不到悬空绑定。
     name: 'rebuild connector_bindings（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    ticket: 'T6',
     sql: `DELETE FROM connector_bindings WHERE session_id NOT IN (SELECT id FROM sessions);
 CREATE TABLE connector_bindings_rebuilt (
       id TEXT PRIMARY KEY,
@@ -1051,6 +1095,7 @@ ALTER TABLE connector_bindings_rebuilt RENAME TO connector_bindings`,
     // 非主键/非 NOT NULL 的引用列：孤儿行按 D1 拍板**删行**（与全批同一条规则），
     // 「删行 vs 把链接置 NULL」的取舍见交接文档 OQ。
     name: 'rebuild episode_attributions（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    ticket: 'T6',
     sql: `DELETE FROM episode_attributions
  WHERE delivery_message_id IS NOT NULL
    AND delivery_message_id NOT IN (SELECT id FROM messages);
@@ -1083,6 +1128,7 @@ ALTER TABLE episode_attributions_rebuilt RENAME TO episode_attributions`,
     // `verdict` 的 CHECK 值与基线一致（含 T-C 的 'comment'）——基线那条 `widen` 探针
     // 读的是本表的 `sqlite_master.sql`，重建后含 'comment' 仍然为真，不会被误判成缺失。
     name: 'rebuild review_verdicts（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    ticket: 'T6',
     sql: `DELETE FROM review_verdicts
  WHERE message_id NOT IN (SELECT id FROM messages)
     OR session_id NOT IN (SELECT id FROM sessions);
@@ -1109,6 +1155,7 @@ ALTER TABLE review_verdicts_rebuilt RENAME TO review_verdicts`,
   {
     // D2 补链：`message_id` → messages（主键即引用）。`reason` 的 CHECK 保持基线两值。
     name: 'rebuild review_parse_failures（FK 补链 + 时间口径 ISO + D1 孤儿清理）',
+    ticket: 'T6',
     sql: `DELETE FROM review_parse_failures WHERE message_id NOT IN (SELECT id FROM messages);
 CREATE TABLE review_parse_failures_rebuilt (
       message_id TEXT PRIMARY KEY,
@@ -1137,6 +1184,7 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
   // 与既有探针同一把尺子，只是触发场景多了一种。
   {
     name: 'sessions archived_at 列（归档 = 用户态删除）',
+    ticket: 'T7',
     sql: `ALTER TABLE sessions ADD COLUMN archived_at TEXT`,
     verify: (db) => columnExists(db, 'sessions', 'archived_at'),
   },
@@ -1151,6 +1199,7 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
     // INDEX` 是「按序扫索引」而非退化——判据是 B 树消失，不是 SCAN 字样消失（与票 2 三条
     // 等值索引的判据形状不同，别照搬）。`listAllSessions()`（无过滤）计划不变，零回归。
     name: 'idx_sessions_active（活跃会话列表部分索引）',
+    ticket: 'T7',
     sql: `CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(updated_at DESC) WHERE archived_at IS NULL`,
   },
 ]
