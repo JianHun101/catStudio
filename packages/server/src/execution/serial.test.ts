@@ -38,11 +38,13 @@ import type { EngineBus, HandoffBus } from './bus.js'
 
 // 日志按边界 mock：T-K 的交付面之一是"配额拦截从 info 抬到 warn"，可观测面就是这条
 // warn——不 mock 就只能断言"跳数变少"（那测的是拦截行为，不是**可观测性**那条修复）。
-const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }))
+const { logWarn, logInfo } = vi.hoisted(() => ({ logWarn: vi.fn(), logInfo: vi.fn() }))
 vi.mock('../logger.js', () => ({
   createLogger: () => ({
     debug: vi.fn(),
-    info: vi.fn(),
+    // logInfo 具名化：票② 的交付面是 reply.ts abort 分支的日志 payload（reason 字段），
+    // 不捕获就只剩「行为没变」可断言——那测不到本票真正改的东西。
+    info: logInfo,
     warn: logWarn,
     error: vi.fn(),
   }),
@@ -382,6 +384,70 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     expect(log.status).toBe('failed')
     expect(log.error_message).toBe('interrupted')
     expect(engine.getSlot('agent-1', 'session-1')).toMatchObject({ status: 'idle' })
+  })
+
+  // ─── 票② reason 契约（2026-09-18）──────────────────
+  // reply.ts 的 abort 分支把「谁中断的」落在日志 payload 的 `reason` 上。上游四处
+  // 裸 `abort()`（reason 恒为 AbortError 默认值）⇒ 超时与用户停止在日志里无法区分
+  // ——正是 2026-09-18 排障现场被带偏的那条。本组用例证明 reason 真的传到了。
+
+  it('abort reason 契约：用户停止（AGENT_INTERRUPT）→ reply 日志 reason=user-stop', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    // 两段流：中止落在两段之间，流循环恢复后还会再走一次 `signal.aborted` 检查——
+    // reply.ts 的 abort 分支（reason 的消费点）就在那次检查里。单段流则循环直接
+    // 因生成器结束而退出，压根到不了该分支（只到 serial.ts 的收尾拦截）。
+    makeAdapter({ chunks: ['部分', '后续'], gate })
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    const runP = runPaired(engine, 'msg-reason-user', 'trace-reason-user')
+    await vi.waitFor(() => expect(calls.typing.length).toBeGreaterThan(0))
+    expect(engine.abortAgent('agent-1')).toBe(true)
+    release()
+    await runP
+
+    expect(logInfo).toHaveBeenCalledWith(
+      'agent reply aborted',
+      expect.objectContaining({ reason: 'user-stop' })
+    )
+  })
+
+  it('abort reason 契约：硬超时 → reply 日志 reason=timeout', async () => {
+    vi.useFakeTimers()
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    try {
+      makeAdapter({ chunks: ['部分', '后续'], gate })
+      const { bus, calls } = createFakeBus()
+      const engine = createExecutionEngine(bus)
+
+      const runP = runPaired(engine, 'msg-reason-timeout', 'trace-reason-timeout')
+      // 排空微任务 + 0ms 计时器，让执行推进到流循环挂起点（不依赖真实等待）
+      for (let i = 0; i < 200 && calls.typing.length === 0; i++) {
+        await vi.advanceTimersByTimeAsync(0)
+      }
+      expect(calls.typing.length).toBeGreaterThan(0)
+
+      // 推进到 AGENT_HARD_TIMEOUT_MS（serial.ts 默认 30min）→ Promise.race 超时分支
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
+      release()
+      await runP
+      // race 在超时那刻就已 reject（runP 落定），被挂起的生成器续延晚于此——
+      // 排空微任务让流循环恢复并走到 abort 分支，否则断言跑在日志落定之前
+      for (let i = 0; i < 50; i++) await vi.advanceTimersByTimeAsync(0)
+
+      expect(logInfo).toHaveBeenCalledWith(
+        'agent reply aborted',
+        expect.objectContaining({ reason: 'timeout' })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('MESSAGE_RETRACT 同款：引擎 setRetraction → 流中途退出 → 无回复落库、标记自清理', async () => {

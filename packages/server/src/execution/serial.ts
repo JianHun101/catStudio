@@ -80,7 +80,8 @@ export function agentHasUsableApiKey(
  * Agent 执行超时机制（多层纵深设计）。
  *
  *   层级 1 — CLI idle timeout（cli-utils.ts）:
- *     20 分钟无 stdout 输出 → SIGTERM → SIGKILL
+ *     20 分钟无 stdout 输出 → 终止子进程
+ *     （POSIX: SIGTERM → 5s → SIGKILL；win32: `taskkill /t /f` 树杀）
  *     每次输出重置 timer，持续产出的 agent 不会被误杀
  *
  *   层级 2 — Dispatch hard timeout（此处）:
@@ -599,7 +600,9 @@ async function executeOneAgent(
           ),
           new Promise<never>((_, reject) =>
             setTimeout(() => {
-              abortController.abort()
+              // reason 契约（reply.ts 的 abort 分支按它区分「超时 / 用户停止 / 执行抛错」
+              // 落日志——旧文案写死超时语义，用户点停止也被记成超时，排障被带偏）
+              abortController.abort('timeout')
               reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
             }, AGENT_HARD_TIMEOUT_MS)
           ),
@@ -610,7 +613,9 @@ async function executeOneAgent(
     } catch (err: any) {
       // run 注册表收口由 finalizeRun 的 endRun 统一（此前 abort 注销在 finally、
       // stream 清理在此处、其余失败漏斗不清理——各管各的正是本刀收编对象）
-      abortController.abort()
+      // reason='error'：执行抛错触发的中断。注意 signal 只能被 abort 一次——若上面
+      // 的硬超时已先 abort('timeout')，此处为 no-op、reason 保持 'timeout'（正确）。
+      abortController.abort('error')
       log.error('agent execution failed', {
         agentId: agent.id,
         agentName: agent.name,

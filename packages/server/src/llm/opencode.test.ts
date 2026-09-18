@@ -4,15 +4,21 @@ import { dirname } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
 import type { Chunk } from '@cat-study/shared'
 
-// Mock cli-utils 以阻止模块加载时的 resolveBin() 调用
-vi.mock('./cli-utils.js', () => ({
-  resolveBin: vi.fn(() => 'C:/Users/test/AppData/Roaming/npm/opencode.cmd'),
-  messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
-  messagesToPromptBounded: vi.fn(() => 'User: hello\n\nAssistant: hi'),
-  attachIdleTimeout: vi.fn(() => () => {}),
-  spawnSupervised: vi.fn(),
-  getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
-}))
+// Mock cli-utils 以阻止模块加载时的 resolveBin() 调用。
+// `importOriginal` 展开保留未被覆盖的真实导出：`terminateChild` 走真身（票① 的
+// abort→终止链回归必须穿真实 helper，mock 掉就成了「断言自己调了自己」）。
+vi.mock('./cli-utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./cli-utils.js')>()
+  return {
+    ...actual,
+    resolveBin: vi.fn(() => 'C:/Users/test/AppData/Roaming/npm/opencode.cmd'),
+    messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
+    messagesToPromptBounded: vi.fn(() => 'User: hello\n\nAssistant: hi'),
+    attachIdleTimeout: vi.fn(() => () => {}),
+    spawnSupervised: vi.fn(),
+    getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
+  }
+})
 
 // Logger mock：log 对象用 vi.hoisted 共享——测试用例需断言 log.info 调用参数（日志口径用例）
 const logMocks = vi.hoisted(() => ({
@@ -27,7 +33,12 @@ vi.mock('../logger.js', () => ({
 }))
 
 import { OpencodeAdapter } from './opencode.js'
-import { spawnSupervised, messagesToPrompt, messagesToPromptBounded } from './cli-utils.js'
+import {
+  spawnSupervised,
+  messagesToPrompt,
+  messagesToPromptBounded,
+  __test_setPlatform,
+} from './cli-utils.js'
 
 /** 收集 async generator 的值 */
 async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
@@ -44,7 +55,9 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
  * on/once 同时真实注册事件回调；emitClose/emitError 为测试辅助——手动派发
  * close/error 事件，模拟「close 晚于 stdout EOF」等真实时序（竞态用例依赖）。
  */
-function fakeChild(overrides: Partial<{ exitCode: number | null; killed: boolean }> = {}) {
+function fakeChild(
+  overrides: Partial<{ exitCode: number | null; signalCode: string | null; killed: boolean }> = {}
+) {
   const stdout = new Readable({ read() {} })
   const stderr = new Readable({ read() {} })
   const listeners = new Map<string, Set<(...args: any[]) => void>>()
@@ -69,18 +82,29 @@ function fakeChild(overrides: Partial<{ exitCode: number | null; killed: boolean
     emitError,
     exitCode: null,
     killed: false,
+    // 真实 ChildProcess 上 `signalCode` 恒有定义（null | 信号名），存活判据
+    // `exitCode/signalCode 双 null` 依赖它——夹具缺这个字段会让「还活着」恒假，
+    // 终止链静默不发信号（夹具必须忠实于真实对象形状，否则测的是假东西）。
+    signalCode: null,
     ...overrides,
   }
   return child
 }
 
 describe('OpencodeAdapter', () => {
+  // 平台钉死为 POSIX：`terminateChild`（本文件用真身）在 win32 走 `taskkill /T` 树杀、
+  // 根本不发信号——宿主平台不钉死则「本机 win32 / CI linux」跑的是两个分支。
+  // win32 分支由 cli-utils.test.ts 显式覆盖。
+  let restorePlatform: () => void
+
   beforeEach(() => {
     // 隔离各测试间的 mock 调用历史（not.toHaveBeenCalled / mock.calls.at(-1) 依赖）
     vi.clearAllMocks()
+    restorePlatform = __test_setPlatform('linux')
   })
 
   afterEach(() => {
+    restorePlatform()
     vi.restoreAllMocks()
     vi.useRealTimers()
   })

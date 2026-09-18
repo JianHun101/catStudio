@@ -358,6 +358,27 @@ describe('chatStore', () => {
       expect(store.sessionExecutions.has('old-msg')).toBe(true)
     })
 
+    // ── 票③：原始 error 落日志（与 fetchData 同款取证面）─────
+    it('失败时原始 error 三字段落日志，友好文案保留', async () => {
+      store.activeSessionId = 's1'
+      const raw = new TypeError('Failed to fetch')
+      mockGetSessionExecutions.mockRejectedValue(raw)
+
+      await store.fetchSessionExecutions()
+
+      expect(mockLogError).toHaveBeenCalledWith(
+        'fetchSessionExecutions failed',
+        expect.objectContaining({
+          // 友好文案只断言「在」——其内容正确性由 fetchData 用例覆盖（同一个
+          // friendlyError），此处不重复断言，避免两条用例被同一改动同时拖红、归因不清
+          error: expect.any(String),
+          rawMessage: 'Failed to fetch',
+          rawName: 'TypeError',
+          rawStack: raw.stack,
+        })
+      )
+    })
+
     it('SESSION_HISTORY 权威校正后重拉执行元数据（补切走/刷新期间增量 execution）', async () => {
       store.activeSessionId = 's1'
       mockGetSessionExecutions.mockResolvedValue({

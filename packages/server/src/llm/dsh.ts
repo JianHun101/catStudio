@@ -6,6 +6,7 @@ import {
   messagesToPromptBounded,
   spawnSupervised,
   getWorkspaceDir,
+  terminateChild,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
 import { randomBytes } from 'node:crypto'
@@ -247,20 +248,11 @@ export class DshAdapter implements LLMAdapter {
       cwd: options.cwd ?? getWorkspaceDir(),
     })
 
-    // ─── Abort 处理：收到取消信号时 kill 子进程 ───
-    const GRACE_MS = 5000
-    const onAbort = () => {
-      if (!child.killed && child.exitCode === null) {
-        log.warn('收到取消信号，发送 SIGTERM', { model })
-        child.kill('SIGTERM')
-        setTimeout(() => {
-          if (!child.killed && child.exitCode === null) {
-            log.warn('SIGTERM 未响应，发送 SIGKILL')
-            child.kill('SIGKILL')
-          }
-        }, GRACE_MS)
-      }
-    }
+    // ─── Abort 处理：收到取消信号时终止子进程 ───
+    // 存活判据与平台分派统一收在 `terminateChild`（cli-utils）——判据禁用 `killed`
+    // （信号发出≠进程已死），win32 走 `taskkill /T` 树杀（信号杀不到 supervisor 底下
+    // 的真 CLI）。详见该函数注释。
+    const onAbort = () => terminateChild(child, { label: `dsh(${model})` })
     signal?.addEventListener('abort', onAbort)
 
     // ─── 运行时长遥测（P0）：dsh headless 一次性形态运行期间 stdout/stderr 零输出、
