@@ -1,6 +1,12 @@
 # 票：数据库结构治理 P0（迁移机制立闸 + 索引三条）
 
-> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅）。B 范围：票 3 ✅、票 4 ✅、票 5 ✅（均入 dev）。D1–D4 已拍板（2026-09-17）。票 6 批一（ds猫，`dce2bc9`）在审；批二随票 5 机制入 dev 已解锁；票 7（flash猫）随票 5 收口派活；票 8 blocked by 票 7。**
+> **状态：P0 双票已收口（dev `7e5478b`，重启后实机验证 ✅）。B 范围：票 3 ✅、票 4 ✅、票 5 ✅、**票 6 批一 ✅**、票 7 ✅ —— 五票均入 dev（尖 `d0c7c35`）。D1–D4 已拍板（2026-09-17）。**
+>
+> **待办**：① **重启未获批** —— 票 6 批一 + 票 7 的迁移尚未生效，重启请求已发（`.restart-request`，含真库副本预演读数）；② 票 6 **批二**（episodes / retrieval_events / spans 三张过程式重建）+ **票 8**（拆表 + sessions 重建）均已解锁待派；③ **根治单待用户拍板**（见文末「收口后待裁」）。
+>
+> **审查链三次墙（均已拆，三种根因）**：墙#1 = 实施侧基线带旧票单（`39cc4b4` 修）；墙#2 = 审查侧 review-view 快照陈旧（`3c5815b` 修）；墙#3 = **同一冲突被解两遍**——`734d302`（店长在审查分支手工解）与 `bbc7a8e`（ds猫 在自家分支独立解）互为非祖先，两份「解过的记录」下次合并必撞（`git reset --hard 0cc6b72` 归零审查分支）。**教训：解冲突的产物留在审查分支上，就是下一轮的对撞物**——审查分支必须是纯内容快照。
+>
+> **合并态解法定型（收口第二票时复用）**：票 6 与票 7 都要进 dev，先到者 ff-only 干净，后到者必在追加区撞同一处。店长已在审查分支 `734d302` 预解并验证（全量 2812 例绿），收口时按此复用：① `migrations.ts` 追加区双保留按票号序（票 6 八条在前、票 7 两条接后），头注计数「十五条」；② `migrations.test.ts` 取 `BASELINE_SHAPE_DIVERGENCE` 白名单机制并补 `table:sessions`（票 7 的 `ADD COLUMN` 改形 sessions 建表原文，不收必红）；③ 票 6 测试切片补上界 `T6_END`（锚票 7 首条）——**原 `slice(T6_START)` 切到数组末尾，票 7 接后实得 10 条 vs 断言 8 条**，属叠加冲突的语义残留（git 不报冲突、跑测试才露），该修复只在「两票并存」的树上成立，故只能落在 dev 收口笔或审查分支，**不在任一猫分支内**。
 > 定稿规格：`docs/plans/db-schema-governance.md`（下称 spec，commit `e5daf7a`）。票单不复制 spec 全文，只钉执行面；与 spec 冲突以 spec 为准。
 > 范围裁决：A——P0 本轮实施，B 范围（FK/CHECK/时间口径/session_agents 拆表）设计已定稿、**票缓拆**，等 P0 落地验证后再拆。
 
@@ -295,6 +301,8 @@ worktree（从 dev `7e5478b` 建分支 `session/54c4de25-flash猫`）；`node no
 
 ## 票 6 · 小表重建批（派 ds猫，走 worktree；blocked 已解除 2026-09-17）
 
+**审查链插曲（2026-09-17，店长仲裁）**：批一交付 `dce2bc9` 后审查 prep 撞合并墙未开审——根因是审查分支的 review-view 快照陈旧（不含 `c9c61f4`），与票 4 的墙同型不同根（上次长在实施侧基线，这次长在审查侧快照）。店长已在吐槽猫分支落仲裁笔 `3c5815b`（票单整文件取 session 权威版），实测 flash 分支合入 0 冲突；**但 ds猫 分支合入仍卡 3 处代码冲突**（`migrations.ts` / `migrations.test.ts` / `eval/chain-verdicts.ts`，票 5 代码与批一同改追加区所致）。**返工指令（先于一切）**：ds猫 在自家 worktree merge dev `c9c61f4` → 按「票 5 侧已审权威、批一新增全保留」解三处冲突 → 全量测试复跑 → 以新尖重投吐槽猫审查（ref 换 new tip，旧 ref `dce2bc9` 废弃）。语义拿不准的冲突点回架，不硬解。
+
 execution_logs / flow_states / flow_state_events / connector_bindings / episodes 系 / review_verdicts 的重建：**逐表先审计留痕**（现有 FK/CHECK/时间列实测 vs spec §4.1 缺口清单——**含 D2 九条同族链**，一张表一份结论），时间口径全转 ISO（`spans.start_at`、dev `retrieval_events.created_at`、台账 `applied_at` 已 ISO 不转，按票 3 面 B 实测），FK/CHECK 按审计定稿补。清单以审计报告为准，票开时逐表列；九链中未列入重建的表按需补重建条目。
 
 **D1/D3 落盘（2026-09-17 拍板）**：D1 孤儿 = 删除——逐链 DELETE 进各自重建迁移，数字与样本见票 3 面 A，审计 SQL 留痕可复算；D3 `review_verdicts.subject_agent_id` 猫名→id 归一迁移（main 6 行 + dev 4 行按 `agents.name` 解析）必须先于此表 FK 重建落地。**D3 范围勘正（ds猫 逐行复核）**：写入口不改——写入路径取 `subject.id`、调用方 `serial.ts` 的 `reviewedTargets` 也取 `a.id`，注释与实现一致，库中猫名是修复前历史行；D3 = 纯数据归一。dev `execution_logs.status` 的 2 行 running 脏存量（重启卡死的 in-flight 残骸）按改判 `failed` 处置，理由留痕进逐表审计。
@@ -303,9 +311,43 @@ execution_logs / flow_states / flow_state_events / connector_bindings / episodes
 
 **约束面（随票 4 复审落盘）**：① 重建后全库 `PRAGMA foreign_key_check` 零违规（spec §4.4 纪律 6）；② 本票清单不含 chunks 系——逐表审计若论证需动 chunks 投影，先回架等专项设计（FTS/vec0 rowid 耦合须同批重建，spec §4.4 纪律 5）；③ `review_verdicts.subject_agent_id` 猫名→id 归一迁移（票 3 发现②，D3）必须先于此表 FK 重建落地。
 
-## 票 7 · 归档（派 flash猫，随票 5 后开工；轻量 ALTER，与票 5/6 并行）
+**审查回执（2026-09-18，吐槽猫 ⚠️ 建议修改 —— 墙拆后首轮实审）**：批一 `20b2cfb`（41 文件 +1779/−251）大部分面独立核过并采信：8 条纯 SQL 条目逐条核清（RESTRICT/CHECK 封闭枚举判据/时间列去 DEFAULT 走 `toIsoMs`/D1 孤儿 DELETE/D3 归一用 COALESCE 解析不到**原样保留**让 FK 响亮拒启/running 脏存量改判带 `error_type='server_restart'` 单独桶）；「批一走纯 SQL 而非 `run` 通道」的接线论证成立（7 张叶子表无子表引用，纪律 7 的 `run` 留给批二）；`finalizeExecutionLog` 加 sessionId 维度是真修复（毫秒可辨后旧「agent + 最新 running」跨会话并行会写错行）；dispatch 用例竞态修复正确；族修抽核 5 处全实况；纪律 6 硬验收双路（老库升级 + 新库）有测试兜底；店长仲裁的 `T6_END` 上界修复在位且注释如实。
+
+**⚠️ 必修（P2 一处）——`nowIso()` 双真相源**：`repository/time.ts:36`（票 5，「记录时间生成点」）与 `repository/clock.ts:19`（票 6，「记录时间的**唯一生成点**」）各有一份实现逐字相同的 `new Date().toISOString()`。今天零行为分歧，但：① spec §4.2 ⑤-c 契约措辞就是「由 repository 层**统一 helper** 生成」——两个「唯一生成器」并存本身违反该已定稿契约；② 消费面已分叉（`clock.js` 4 个 repository + eval 侧；`time.js` 服务 messages），票 8 迁 sessions 时「顺手选错」全看运气；③ 正是纪律 7 要消灭的「平行真相源」形态，只是落在 helper 层。**修法**：`clock.ts` 的 `nowIso` 改为 re-export `time.ts` 的（**方向判据：动未审文件**——`time.ts` 是票 5 已收口进 dev 的已审面，改它会把票 6 的 diff 骑进已审代码；`clock.ts` 是票 6 自己的新文件，动它零额外成本），两文件合并后只留一个生成点。
+
+**P3 观察（随本轮回工顺手改，不改不拦但成本极低）**：① `clock.ts` 头注「⑤-b 起**全库**时间列已是 ISO 毫秒」与同文件下一段「sessions / agents 等仍是秒级」自相矛盾——前句改「⑤-b **目标**口径」（「复述文本未经实测就上生产注释」的轻微复发，清单本身经测属实，是总起句写宽了）；② `clock.ts::normalizeIsoMs` 与 `time.ts::toIsoDb` 职责相近——**留票 8 收口时一并审**「要不要合并回单口径」，勿留永久双 helper（本票只在票单留痕，不改代码）。
+
+**返工指令（第二轮，2026-09-18 店长）**：① **先对齐基线**——worktree 内 `git merge dev`（dev 尖 = `15a2efa`，已含票 7）；**预期撞追加区与测试切片，这是已知墙不是新问题**——票 7 已进 dev，与批一的 `migrations.ts` 追加区 + `migrations.test.ts` 的 `T6_START/T6_NAMES` 切片叠加，解法定型**已在店长仲裁笔 `734d302` 上验证过并落票单**：追加区**双保留、按票号序**（票1→票2→票5→票6→票7），测试切片补上界 `T6_END`（锚票 7 首条）——**照抄该定型，不重新发明**；`APPENDED_NET_OBJECTS` 等「落在自动合并区」的常数**必须亲手核**（git 不报冲突 ≠ 值对，跑测试才露）。② 修 P2（`nowIso` re-export）+ 顺手 P3-1 头注。③ 全量测试 + lint 复跑。④ 以**新尖**重投吐槽猫（ref 换 new tip，旧 ref `20b2cfb` 废弃）；交接文档按「fix-forward 一小笔」写，不必重述全部。语义拿不准的冲突点回架，不硬解。
+
+**合并态解法定型（2026-09-18，店长仲裁 `734d302`，供后续所有「票 6 × 票 7 并存」场景复用）**：① `migrations.ts` 追加区——双保留、按票号序；② 头注计数与清单同步（十五条 = 票1 修1 + 票2 三 + 票5 一 + 票6 八 + 票7 二）；③ `migrations.test.ts`——取 `BASELINE_SHAPE_DIVERGENCE` 白名单机制（比内联 `continue` 判据强：表真丢了也不会假绿），补 `table:sessions`（票 7 的 `ADD COLUMN` 会改 sessions 建表原文，白名单必须收它）；④ **语义冲突（git 不报、只有跑测试才露）**：`T6_NAMES = MIGRATIONS.slice(T6_START)` 切到数组末尾——票 7 接在后面就多出 2 条，断言红；补上界 `T6_END`（锚票 7 首条）。这一型是本活第三次拆墙的产物，**第四型根因（追加区共享追加点）**，根治单（`worktree-fanin` prep 对 `docs/run/**` 免合并 + 追加区结构改造）留待 B 范围收口后立票。
+
+**收口（2026-09-18，店长）**：交付 `0cc6b72`（返工轮，47 行：`clock.ts` 改纯 re-export + 特征化测试钉住与 `toIsoDb` 的识别面分歧），复审 **✅可合并**（吐槽猫：nowIso 单实现独立复核——全分支 `function|const nowIso` 仅 `time.ts:36` 一处；批一四表写口同口径；重建 DDL 零时间 DEFAULT；server 2026 用例 + web 438 用例实测全绿）。合入 dev：ff-only `15a2efa..0cc6b72` → PR **#112** 合并 → 尖 `d0c7c35`，被审 sha 未被 rebase 改写（仍是 dev 祖先）。
+
+**店长收口补验（票面「需新环境才验」的硬条款，`:memory:` 单测覆盖不到）**：在**真库副本**上预演了重启后实际会跑的迁移路径（`VACUUM INTO` 副本 → `applyMigrations`），dev 库与 main 库（老库补登 ②-b 路径）**两条都过**：
+
+| 判据                              | dev 库（带台账，46 条）           | main 库（无台账，②-b 补登 41 条） |
+| --------------------------------- | --------------------------------- | --------------------------------- |
+| `applyMigrations` 抛错            | null                              | null                              |
+| 全库 `PRAGMA foreign_key_check`   | 0 → 0（此前无 FK 声明，0 是空真） | 0 → 0                             |
+| D3 猫名残留 → 0                   | 4 → 0                             | 6 → 0                             |
+| `execution_logs.status='running'` | 1 → 0                             | 0 → 0                             |
+| messages / sessions 行数          | 2561/31 **不变**                  | 1825/23 **不变**                  |
+| 追加区真执行 / 台账               | 10 条 / 46→56                     | 15 条 / 0→56                      |
+| 幂等复跑（第二次）                | **真执行 0 条**，数据面无变化     | —                                 |
+
+D1 孤儿删除量级（与票 3 审计面一致）：execution_logs 1440→1417、flow_states 219→208、flow_state_events 415→385、episode_attributions 82→59、review_verdicts 130→104、review_parse_failures 53→33；`connector_bindings` 1→1 无损。**P3 一条**（吐槽猫）：`isoDaysAgo(days, from = Date.now())` 默认参数与 `nowIso()` 是两个取时点，跨毫秒边界可致同写路径内「ended_at 早于 started_at 一毫秒」；窗口比较场景无实害，留观察。
+
+---
+
+## 收口后待裁（2026-09-18，店长提案，**等用户拍板**）
+
+**① 解冲突结果必须回流实施分支**（纪律，改动成本 ≈ 0）：审查分支不得承载独有编辑，永远是纯内容快照。墙#3 之所以循环，根因是「谁解冲突」与「谁承载内容」是两条分支——每解一次就制造一份「只有审查分支有」的文本，供下次对撞。
+
+**② 消灭追加区的争用热点**（结构改造，建议排票 6 批二之后）：给每条迁移加 `ticket` 字段，测试改用 `MIGRATIONS.filter(m => m.ticket === 'T6')` 取代 `T6_START`/`T6_END` 下标锚点；同时删掉头注里「当前挂着十五条」这类**每次追加都要改的计数**（数量已被 `toHaveLength` 断言钉死，纯冗余）。**下标锚点本身就是墙#2/#3 的结构性来源**——两票并行时各加各的条目，不再抢同一片注释。
 
 sessions `ADD COLUMN archived_at TEXT`（NULL=活跃）+ 部分索引 `WHERE archived_at IS NULL` + repository 读写 + API + 前端最小入口（归档操作 + 「显示已归档」开关）。**验收（spec §4.1）**：归档后数据全在、列表默认过滤、**归档会话照常可被记忆检索**。
+
+**收口（2026-09-18，店长）**：交付 `15a2efa`（16 文件 +894/−42），复审 **✅可合并**（吐槽猫独立复核：全量 137 文件 2812 用例复跑绿 + lint 3 包过）。四条验收全过：归档后数据全留 / 列表默认过滤 + 开关 / **归档不动记忆检索**（源码断言 + 行为测试双证）/ 部分索引计划可见（`SCAN sessions USING INDEX idx_sessions_active`）。**OQ1 裁决不退票**：前端 🗑️ 物理删除入口被归档按钮**取代**是用户故事 7 的产品形态（「删除」的唯一用户态形态 = 归档），后端 `DELETE /api/sessions/:id` 未动，RESTRICT/409 契约归票 8。**OQ2 裁决接受并记为第三类失败形态**：`ALTER TABLE ADD COLUMN` 无 `IF NOT EXISTS` ⇒ 「状态已正确但未登记」会永久拒启，加挂 `verify` 探针把该路径收敛为「跳过 + 登记」，与既有探针同一把尺子（`migrations.ts` 头注已如实改写）。已合入 dev（ff-only `c9c61f4..15a2efa`），三方对齐 `15a2efa`。P3 两条（`routes/sessions.ts` includeArchived 解析的 `raw !== false` 永假分支；`onDelete` 内联）无必改项，留档。
 
 ## 票 8 · session_agents 拆表 + sessions 重建（blocked by 票 3 + 票 4 + 票 7）
 
