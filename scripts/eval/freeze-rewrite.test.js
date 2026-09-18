@@ -1,13 +1,17 @@
 /**
- * 冻结改写器测试（R9 G3 / G5）。
+ * 冻结改写器测试（R9 G3 / G5 + R11 三档语义）。
  *
  * **不打真 LLM**：`rewriteRetrievalQueries` 的传输层另有 `complete` 侧测试覆盖；
  * 本文件要验的是「冻结这一步的机器行为」——前置闸、空结果的处置、两跑差集的算法、
- * 环境变量补载的覆盖语义。
+ * 环境变量补载的覆盖语义、以及 R11 的**缺省落安全侧**（`dry` 零 LLM 零写盘 /
+ * `--write` 才真改写）。
  *
- * 全部是纯单元：改写器是注入的假实现，`.env` 用 tempfile，env 变量改完即还原。
+ * 前四组是纯单元（改写器注入假实现）。**末尾三组走 CLI 级** `main()`：跑在一棵
+ * **假仓库根**下——根里只有一枚空壳 `env.js`，`query-rewrite.ts` 按需建或不建。
+ * 于是「`dry` 档够不着改写器」不靠读代码断言：走岔了会当场 `ERR_MODULE_NOT_FOUND`。
+ * 代价是全程零 LLM 调用、零真仓库写入。
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -21,21 +25,34 @@ import {
   freezeRewrites,
   diffRewrites,
   unackedEmpties,
+  inspectFrozen,
+  resolveMode,
   parseArgs,
+  main,
 } from './freeze-rewrite.mjs'
 
 const ENV_KEYS = ['DS_KEY', 'MEMORY_QUERY_REWRITE_ENABLED']
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
 const tmpFiles = []
+const tmpDirs = []
 
 afterEach(() => {
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k]
     else process.env[k] = saved[k]
   }
+  delete globalThis.__freezeProbe
+  delete globalThis.__freezeReply
   while (tmpFiles.length > 0) {
     try {
       fs.unlinkSync(tmpFiles.pop())
+    } catch {
+      /* 已删即忽略 */
+    }
+  }
+  while (tmpDirs.length > 0) {
+    try {
+      fs.rmSync(tmpDirs.pop(), { recursive: true, force: true })
     } catch {
       /* 已删即忽略 */
     }
@@ -60,6 +77,81 @@ const e = (id, over = {}) => ({
   answerability: '略',
   ...over,
 })
+
+// ─── CLI 级夹具（假仓库根：不碰真仓库、不碰真 LLM） ───────
+
+function tmpDir(prefix) {
+  const p = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-${process.pid}-${++tmpSeq}-`))
+  tmpDirs.push(p)
+  return p
+}
+
+/**
+ * 假仓库根。`main()` 会 import `<root>/packages/server/src/env.js`（worktree 里
+ * 该文件本就可能是空壳），故建一枚空的即可。
+ *
+ * **缺省不建 `query-rewrite.ts`** —— 这是 F1 的硬证法：`dry` 档若走岔到改写器，
+ * 会当场 `ERR_MODULE_NOT_FOUND`，而不是静默打真 LLM。`withRewrite` 时才建一枚
+ * 假改写器（把 query 记进 `globalThis.__freezeProbe`，供断言调用次数与入参）。
+ */
+function fakeRoot({ withRewrite = false } = {}) {
+  const root = tmpDir('freeze-root')
+  fs.mkdirSync(path.join(root, 'packages/server/src/memory'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'packages/server/src/env.js'), 'export {}\n', 'utf8')
+  if (withRewrite) {
+    fs.writeFileSync(
+      path.join(root, 'packages/server/src/memory/query-rewrite.ts'),
+      'export async function rewriteRetrievalQueries(query) {\n' +
+        '  globalThis.__freezeProbe.push(query)\n' +
+        "  if (globalThis.__freezeReply === 'empty') return []\n" +
+        "  return [query + ' 的改写']\n" +
+        '}\n',
+      'utf8'
+    )
+  }
+  return root
+}
+
+/** 写一份黄金集到临时目录，返回其路径 */
+function goldenFile(entries, meta = {}) {
+  const file = path.join(tmpDir('freeze-data'), 'retrieval-golden.json')
+  fs.writeFileSync(file, JSON.stringify({ meta, entries }, null, 2) + '\n', 'utf8')
+  return file
+}
+
+/** 拦下 stdout / stderr（`main()` 两个通道都写，直接跑会淹测试输出） */
+function capture() {
+  const out = []
+  const err = []
+  const o = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+    out.push(String(chunk))
+    return true
+  })
+  const r = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+    err.push(String(chunk))
+    return true
+  })
+  return {
+    stdout: () => out.join(''),
+    stderr: () => err.join(''),
+    restore: () => {
+      o.mockRestore()
+      r.mockRestore()
+    },
+  }
+}
+
+/** 跑一次 `main(argv)` 并连同两个通道的文本一起交回 */
+async function runMain(argv) {
+  const cap = capture()
+  let code
+  try {
+    code = await main(argv)
+  } finally {
+    cap.restore()
+  }
+  return { code, stdout: cap.stdout(), stderr: cap.stderr() }
+}
 
 describe('loadEnvFile', () => {
   it('解析 KEY=VALUE、跳过注释空行、去包裹引号', () => {
@@ -216,18 +308,187 @@ describe('unackedEmpties — 人工确认位', () => {
 })
 
 describe('parseArgs', () => {
-  it('缺省全空、--check 是布尔、--only 逗号切分', () => {
-    expect(parseArgs([])).toMatchObject({ file: null, env: null, check: false, only: null })
+  it('缺省全空、--check / --write 是布尔、--only 逗号切分', () => {
+    expect(parseArgs([])).toMatchObject({
+      file: null,
+      env: null,
+      check: false,
+      write: false,
+      only: null,
+    })
     expect(parseArgs(['--check', '--only', 'G01, G02', '--env', 'x.env'])).toMatchObject({
       check: true,
+      write: false,
       only: ['G01', 'G02'],
       env: 'x.env',
     })
+    // 两个开关都能被解析出来（互斥由 resolveMode 判，不在解析层静默吃掉一个）
+    expect(parseArgs(['--write'])).toMatchObject({ write: true, check: false })
   })
 
   it('契约常量可被外部断言（确认位键名与来源串是文档的一部分）', () => {
     expect(ACK_KEY).toBe('emptiesAcknowledged')
     expect(FREEZE_SOURCE).toContain('rewriteRetrievalQueries')
     expect(DEFAULT_ATTEMPTS).toBe(2)
+  })
+})
+
+describe('resolveMode — 三档判定（R11）', () => {
+  it('裸跑 ⇒ dry：**缺省落安全侧**，不是旧版的「真改写 + 写回」', () => {
+    expect(resolveMode({ check: false, write: false })).toBe('dry')
+  })
+
+  it('--check ⇒ check（打 LLM 但不写盘）、--write ⇒ write', () => {
+    expect(resolveMode({ check: true, write: false })).toBe('check')
+    expect(resolveMode({ check: false, write: true })).toBe('write')
+  })
+
+  it('--check 与 --write 同给 ⇒ null（用法错，由调用方落 exit 2）', () => {
+    expect(resolveMode({ check: true, write: true })).toBeNull()
+  })
+})
+
+describe('inspectFrozen — dry 档的只读体检', () => {
+  it('数出已冻结 / 空条目，空条目再按人工确认位分出未确认', () => {
+    const r = inspectFrozen({
+      entries: [e('A', { rewritten: ['x'] }), e('B'), e('C')],
+      acked: ['B'],
+    })
+    expect(r).toEqual({
+      total: 3,
+      frozen: 1,
+      empty: ['B', 'C'],
+      unacked: ['C'],
+      wouldRewrite: 3,
+    })
+  })
+
+  it('--only 只影响 wouldRewrite（体检面始终是全量，否则报出来的状态是残的）', () => {
+    const r = inspectFrozen({ entries: [e('A'), e('B')], only: ['B'], acked: [] })
+    expect(r.total).toBe(2)
+    expect(r.empty).toEqual(['A', 'B'])
+    expect(r.wouldRewrite).toBe(1)
+  })
+})
+
+describe('main — F1 裸跑 = 只读体检（零 LLM、零写盘）', () => {
+  it('假 root 里**没有** query-rewrite.ts 也照样跑通（走岔到改写器会 ERR_MODULE_NOT_FOUND）', async () => {
+    const root = fakeRoot()
+    const file = goldenFile([e('A', { rewritten: ['x'] }), e('B', { rewritten: ['y'] })])
+    const before = fs.readFileSync(file, 'utf8')
+
+    const { code, stdout } = await runMain(['--root', root, '--file', file])
+
+    expect(code).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: true,
+      mode: 'dry',
+      llmCalls: 0,
+      wrote: false,
+      total: 2,
+      frozen: 2,
+      empty: [],
+    })
+    expect(fs.readFileSync(file, 'utf8')).toBe(before)
+  })
+
+  it('空改写未确认 ⇒ exit 1 且**仍然不写盘**（体检不改状态，只报状态）', async () => {
+    const root = fakeRoot()
+    const file = goldenFile([e('A', { rewritten: ['x'] }), e('B')], { emptiesAcknowledged: [] })
+    const before = fs.readFileSync(file, 'utf8')
+
+    const { code, stdout, stderr } = await runMain(['--root', root, '--file', file])
+
+    expect(code).toBe(1)
+    expect(JSON.parse(stdout)).toMatchObject({ ok: false, mode: 'dry', unacked: ['B'] })
+    expect(stderr).toContain('B')
+    expect(fs.readFileSync(file, 'utf8')).toBe(before)
+  })
+
+  it('空改写已确认 ⇒ exit 0（确认位归零的语义在三档下一致）', async () => {
+    const root = fakeRoot()
+    const file = goldenFile([e('A'), e('B')], { emptiesAcknowledged: ['A', 'B'] })
+
+    const { code, stdout } = await runMain(['--root', root, '--file', file])
+
+    expect(code).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({ ok: true, unacked: [], empty: ['A', 'B'] })
+  })
+
+  it('前置闸对 dry **只是体检项**：DS_KEY 缺失 + 开关为 0 也不拦（它压根不改写）', async () => {
+    delete process.env.DS_KEY
+    process.env.MEMORY_QUERY_REWRITE_ENABLED = '0'
+    const root = fakeRoot()
+    const file = goldenFile([e('A', { rewritten: ['x'] })])
+
+    const { code, stdout } = await runMain(['--root', root, '--file', file])
+
+    expect(code).toBe(0)
+    expect(JSON.parse(stdout).precondition).toMatchObject({ ok: false })
+  })
+})
+
+describe('main — 用法闸', () => {
+  it('--check 与 --write 同给 ⇒ exit 2，且在读盘 / 前置闸之前就挡下', async () => {
+    const { code, stderr } = await runMain(['--check', '--write'])
+
+    expect(code).toBe(2)
+    expect(stderr).toContain('互斥')
+  })
+})
+
+describe('main — F2 --write = 真改写 + 写回（旧缺省行为，一字不差地保留）', () => {
+  it('--write 调改写器、写回 rewritten；meta 原样透传（**机器永不自写确认位**）', async () => {
+    process.env.DS_KEY = 'k'
+    globalThis.__freezeProbe = []
+    const root = fakeRoot({ withRewrite: true })
+    const file = goldenFile([e('A'), e('B')], { note: '原样保留' })
+
+    const { code, stdout } = await runMain(['--write', '--root', root, '--file', file])
+
+    expect(code).toBe(0)
+    expect(globalThis.__freezeProbe).toEqual(['问题 A', '问题 B'])
+    expect(JSON.parse(stdout)).toMatchObject({ ok: true, mode: 'write', frozen: 2, empty: [] })
+
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'))
+    expect(written.entries.map((x) => x.rewritten)).toEqual([['问题 A 的改写'], ['问题 B 的改写']])
+    expect(written.meta).toEqual({ note: '原样保留' })
+    expect(written.meta[ACK_KEY]).toBeUndefined()
+  })
+
+  it('改写全空 ⇒ 写回的是**空数组**（不拿原 query 冒充）、exit 1、确认位仍不由机器写', async () => {
+    process.env.DS_KEY = 'k'
+    globalThis.__freezeProbe = []
+    globalThis.__freezeReply = 'empty'
+    const root = fakeRoot({ withRewrite: true })
+    const file = goldenFile([e('A')], { note: '原样保留' })
+
+    const { code, stdout } = await runMain(['--write', '--root', root, '--file', file])
+
+    expect(code).toBe(1)
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      mode: 'write',
+      empty: ['A'],
+      unacked: ['A'],
+    })
+
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'))
+    expect(written.entries[0].rewritten).toEqual([])
+    expect(written.entries[0].rewritten).not.toContain('问题 A')
+    expect(written.meta).toEqual({ note: '原样保留' })
+  })
+
+  it('前置闸未过 ⇒ exit 2 且**不写盘**（--write 才吃这道硬闸）', async () => {
+    delete process.env.DS_KEY
+    const root = fakeRoot({ withRewrite: true })
+    const file = goldenFile([e('A')], { note: '原样保留' })
+    const before = fs.readFileSync(file, 'utf8')
+
+    const { code, stdout } = await runMain(['--write', '--root', root, '--file', file])
+
+    expect(code).toBe(2)
+    expect(JSON.parse(stdout)).toMatchObject({ ok: false, phase: 'precondition' })
+    expect(fs.readFileSync(file, 'utf8')).toBe(before)
   })
 })
