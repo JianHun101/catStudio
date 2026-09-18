@@ -765,7 +765,7 @@ async function executeOneAgent(
     // 仅非空时被 updateMessageMentions 覆盖，故 allowedNames 与落库列恒等。
     // fire-and-forget + 全 catch：兜底是安全网，不能把成功路径拖成异常路径。
     try {
-      const commitSha = execLogsRepo.getRunningExecutionCommitHash(agent.id)
+      const commitSha = execLogsRepo.getRunningExecutionCommitHash(agent.id, sessionId)
       const reviewerName =
         sessionAgentIds
           .map((id: string) => agentsRepo.getAgentById(id))

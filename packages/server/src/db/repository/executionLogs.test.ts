@@ -423,6 +423,25 @@ describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
       expect(latencyOf('eB')).toBe(4242)
       expect(latencyOf('eA')).toBeNull()
     })
+
+    // R8 §A：同一个「agent + 最新 running」洞的**读**侧（T-A ② 收尾兜底判据
+    // `getRunningExecutionCommitHash`）。读侧误命中的危害与写侧不同源——写侧把 B 的**行**
+    // 改坏，读侧把 B 的 **sha 当成 A 的产出**喂给 `judgeReviewFallback`，两种后果：
+    // B 有 sha ⇒ 对别人的 commit 发起审查投递；B 无 sha（执行中途尚未提交）⇒ 读回
+    // `undefined`、判词落「本执行无 commit」而**静默漏投** A 自己的 commit。
+    it('getRunningExecutionCommitHash(A 会话) 取 A 的 sha——不被后起的 B 遮盖', () => {
+      db.prepare("UPDATE execution_logs SET commit_hash='shaA' WHERE id='eA'").run()
+      db.prepare("UPDATE execution_logs SET commit_hash='shaB' WHERE id='eB'").run()
+
+      expect(repo.getRunningExecutionCommitHash('agent-ds', 's1')).toBe('shaA')
+      expect(repo.getRunningExecutionCommitHash('agent-ds', 's2')).toBe('shaB')
+    })
+
+    it('B 行尚无 commit 时，A 会话仍取到自己的 sha（静默漏投面）', () => {
+      db.prepare("UPDATE execution_logs SET commit_hash='shaA' WHERE id='eA'").run()
+
+      expect(repo.getRunningExecutionCommitHash('agent-ds', 's1')).toBe('shaA')
+    })
   })
 
   describe('finalizeExecutionLog 不擦除耗时', () => {

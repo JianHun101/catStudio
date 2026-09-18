@@ -197,18 +197,29 @@ export function getExecutorNameByCommitHash(commitHash: string): ExecutorLookup 
   return pickSingleExecutor(rows)
 }
 
-/** 反查"该 agent 当前 running 执行"的 commit_hash（T-A ② 收尾兜底判据）。
- *  定位口径与 finalizeExecutionLog 完全一致（agent 最新 running）——**必须在
- *  finalizeExecutionLog 之前调用**，否则行已 completed、恒 undefined。
- *  无 commit 链路（纯会话执行/写回未发生）返回 undefined。 */
-export function getRunningExecutionCommitHash(agentId: string): string | undefined {
+/** 反查"该 agent **在该会话**当前 running 执行"的 commit_hash（T-A ② 收尾兜底判据）。
+ *  定位口径与 finalizeExecutionLog 完全一致（`agent_id + session_id + 最新 running`）
+ *  ——**必须在 finalizeExecutionLog 之前调用**，否则行已 completed、恒 undefined。
+ *  无 commit 链路（纯会话执行/写回未发生）返回 undefined。
+ *
+ *  **`sessionId` 必填（R8 §A）**：本判据此前只有 `agent_id` 一维，而同 agent 跨会话
+ *  并行是**合法并发**（槽位按 `(agentId, sessionId)` 二级键控、引擎全局单例）⇒ A 会话
+ *  的执行会读到 **B 会话那行**的 commit_hash，把判定喂给 `judgeReviewFallback`。
+ *  实测存量 18 个受害窗口（有终态行可复算）：17 例读到「B 行无 commit」⇒ 落
+ *  `commitSha=undefined`、判词「本执行无 commit」**静默漏投**（其中 1 例 A 行自有
+ *  commit，即真漏投）；1 例读到 B 的 sha ⇒ 会对**别人的 commit** 发起兜底审查投递。
+ *  加会话维度即与槽位键同面——同会话内的重试仍是「取最新 running」（语义不变）。 */
+export function getRunningExecutionCommitHash(
+  agentId: string,
+  sessionId: string
+): string | undefined {
   const row = db
     .prepare(
       `SELECT commit_hash FROM execution_logs
-       WHERE agent_id = ? AND status = 'running'
+       WHERE agent_id = ? AND session_id = ? AND status = 'running'
        ORDER BY started_at DESC LIMIT 1`
     )
-    .get(agentId) as { commit_hash: string | null } | undefined
+    .get(agentId, sessionId) as { commit_hash: string | null } | undefined
   return row?.commit_hash ?? undefined
 }
 
