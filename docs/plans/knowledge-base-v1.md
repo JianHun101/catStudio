@@ -8,7 +8,7 @@ evidence:
     ref: 12a0a82
 ---
 
-# 知识库 Phase 1 落地计划（v3，审查复核版）
+# 知识库 Phase 1 落地计划（v4，勘误修订）
 
 > 方向基准：docs/roadmap.md 四·知识库。本计划把 roadmap 概要落成可执行规格
 > （组件边界 + 接口契约 + 验收标准），供吐槽猫独立实核审批。审批通过后由
@@ -26,6 +26,10 @@ evidence:
 > 非空）；②验收 #1 补「嵌入成功路径」注明（与 3.5 降级存 NULL 交互，防 CI
 > 误报）；③二·五补「仅 context 时加」条件（claude.test.ts:196-197 基线，
 > 验收 #6 依赖）。
+> v4 勘误：五·边界原「向量索引」一条与 roadmap 的 A 档术语撞名，易被读成「本
+> 计划不做向量检索」——本计划交付的正是向量检索（`searchKnowledgeByVector` 走
+> `knowledge` 独立表、`vec_distance_cosine` 扫表），「不做」的只是其 metric
+> 升级；已改写追平现状。
 
 ---
 
@@ -219,7 +223,10 @@ searchKnowledgeByVector(queryBlob: Buffer, topK: number, maxDistance = 0.35)
 
 ## 五、边界（不做）
 
-- 不做向量索引（A 档另立项，带 metric 决策）
+- 不做向量检索的 metric 升级（保 cosine 阈值语义 vs 换 metric + 阈值数据驱动
+  重调，归 roadmap「向量 A 档」另立项）——向量检索本身已随本计划交付：
+  `searchKnowledgeByVector` 走 `knowledge` 独立表（`embedding BLOB` +
+  `vec_distance_cosine` 扫表），maxDistance=0.35
 - 不做 raw SQL 工具（本计划安全裁决）
 - 不做知识库管理端点（导入通道 seed 先行，独立端点记后续）
 - 不改记忆侧切片/嵌入契约与检索阈值（`chunks` 三表；`MEMORY_MAX_DISTANCE = 0.6`
