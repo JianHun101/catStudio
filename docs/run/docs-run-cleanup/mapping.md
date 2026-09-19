@@ -1,5 +1,9 @@
 # `docs/run/` 活目录清点 + 结论上浮映射
 
+> **【判弃 · 2026-09-19 用户裁决】** 本件为一次性勘察产物，phase-2 从未启动、快照已过时（覆盖率降至 10/19；主结论「无一个目录可无条件直接删」已被时间证伪——19 个目录一个没删）。判据全文见 `docs/run/retired-docs-tombstone/run-inventory.md` §二 C-13；**现行口径以后继盘点 `run-inventory.md` 为准，本文件仅作历史留痕，勿再引用。**
+> **判弃前置已执行**（同批，2026-09-19）：① `flaky-precommit/tickets.md` §5.3 引用已改指 `run-inventory.md`；② §四 登记的 4 条票面冲突——2 条实测已消解（`multi-cat-isolation/adr-0015-draft.md` 两处），2 条已直接修文（`multi-cat-isolation/tickets.md:5`、`line-endings/tickets.md:4`）。
+> **遗留口径**：§三 的 3 条口径问题（观察项判准 / 上浮出口能否是手册 / taste-skill 整改未开票）随判弃转移至 `docs/run/docs-run-status-gate/tickets.md` 前置待裁，不在本件结案。
+
 > 阶段：**勘察**（零删除、零修改——本文件是本阶段唯一新增物）。
 > 落盘 2026-09-15 · ds猫 · 票面：店长派活单（会话 `f3517413`）。
 > 基线：`dev @ 914197b`。
