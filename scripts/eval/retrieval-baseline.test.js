@@ -42,6 +42,7 @@ import {
   missLabel,
   parseArgs,
   renderReport,
+  rescoreWithRecheck,
   scoreEntry,
   summarizeGroup,
   summarizeMissDistances,
@@ -425,6 +426,103 @@ describe('scoreEntry — 重搜把 below_topk 从覆盖洞里拆出来', () => {
   it('重搜判出来的标 `source: recheck`（报告要能说清哪个数是从哪来的）', () => {
     const s = scoreEntry({ entry: entry(), result: result(), recheck: recheckFor(A, rc()) })
     expect(s.details[0].source).toBe('recheck')
+  })
+})
+
+describe('rescoreWithRecheck — 评分接线：重搜**真的被接上**', () => {
+  /**
+   * 这组测的是**接线**，不是纯函数语义（后者在上一组已穷举）。
+   *
+   * 为什么必须测它：整套重搜机制的价值全在接线上——`scoreEntry` 再对，只要 `main`
+   * 没把索引建出来传进去，`below_topk` 就静默退回「覆盖洞」，而报告看起来一切正常。
+   * 抽出函数 + 注入假 `embed`/`search` 后，「有没有真去重搜」是可断言的**行为**，
+   * 不必靠读者去源码里找那一行。
+   */
+  /** `collectRecheckPools` 的 `search` 返回值形状（库层的命中行） */
+  const rawHit = (docPath, sectionAnchor, distance = 0.4, channel = 'vector') => ({
+    row: { doc_path: docPath, section_anchor: sectionAnchor, distance },
+    channel,
+  })
+
+  it('有未注入锚点 ⇒ 真去重搜并改判 below_topk、rechecked=true', async () => {
+    const out = await rescoreWithRecheck({
+      entry: entry(),
+      result: result(),
+      queries: ['q0', 'q1'],
+      embed: async () => ({ ok: true, vector: [1] }),
+      search: (v, q) => (q === 'q1' ? [rawHit(A.doc_path, A.section_anchor, 0.4)] : []),
+    })
+    expect(out.rechecked).toBe(true)
+    expect(out.score.details[0]).toMatchObject({
+      status: 'below_topk', // 不接线的话这里会是 not-recalled（= 上轮那个误判）
+      drop: null,
+      source: 'recheck',
+      distance: 0.4,
+    })
+  })
+
+  it('全注入 ⇒ 原样返回、**连 embed 都不调**（成本闸，也是「重搜不碰已命中语义」的结构保证）', async () => {
+    let embedCalls = 0
+    const out = await rescoreWithRecheck({
+      entry: entry(),
+      result: result({ sections: [sec(A.doc_path, A.section_anchor)] }),
+      queries: ['q0'],
+      embed: async () => {
+        embedCalls += 1
+        return { ok: true, vector: [1] }
+      },
+      search: () => [],
+    })
+    expect(out.rechecked).toBe(false)
+    expect(embedCalls).toBe(0)
+    expect(out.score).toMatchObject({ hit: 1, recall: 1 })
+  })
+
+  it('宽阈值**透到检索层**（接线漏传 maxDistance ⇒ 重搜退回生产窄阈值，「被阈值杀」永远看不见）', async () => {
+    const seen = []
+    await rescoreWithRecheck({
+      entry: entry(),
+      result: result(),
+      queries: ['q0'],
+      embed: async () => ({ ok: true, vector: [1] }),
+      search: (v, q, max) => {
+        seen.push(max)
+        return []
+      },
+    })
+    expect(seen).toEqual([RECHECK_MAX_DISTANCE])
+  })
+
+  it('重搜跑的是**同一条目的同一组查询**（原话 + 全部冻结改写），不是只有原话', async () => {
+    const asked = []
+    await rescoreWithRecheck({
+      entry: entry(),
+      result: result(),
+      queries: ['原话', '改写一', '改写二'],
+      embed: async (q) => {
+        asked.push(q)
+        return { ok: true, vector: [1] }
+      },
+      search: () => [],
+    })
+    expect(asked).toEqual(['原话', '改写一', '改写二'])
+  })
+
+  it('main 的逐条跑批**真接上了这条线**（静态断言：把调用摘掉即红）', () => {
+    const src = readFileSync(
+      path.join(REPO_ROOT, 'scripts', 'eval', 'retrieval-baseline.mjs'),
+      'utf8'
+    )
+    const start = src.indexOf('// ─── 逐条跑批')
+    const end = src.indexOf('// ─── B5 降级硬闸')
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start) // 两个锚点任一改名 ⇒ 空切片会让下面的断言恒真
+    const loop = src.slice(start, end)
+    // 分数必须来自接线函数，且生产的嵌入器真被绑上去（而非另起一个未接线的分叉）
+    expect(loop).toMatch(/=\s*await rescoreWithRecheck\(\{/)
+    expect(loop).toContain('embed: embedText')
+    // 旁路面：循环里不得再**直接**调 scoreEntry 打分——那正是「重搜被静默关掉」的形态
+    expect(loop).not.toContain('scoreEntry(')
   })
 })
 

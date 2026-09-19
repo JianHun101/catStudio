@@ -335,6 +335,37 @@ export function buildRecheckIndex({ perQuery }) {
 }
 
 /**
+ * 一条条目的**评分接线**：先按流水打分；只要有一个未注入锚点，就跑逐查询重搜并重算。
+ *
+ * 为什么单独抽成函数：这套机制的价值**全在接线上**——`scoreEntry` 再对，接线一断就
+ * 静默退回「把 `below_topk` 记成覆盖洞」的旧口径，而报告看上去一切正常（条数、闸、
+ * 格式全绿）。抽出来后 `embed` / `search` 可注入，接线本身就能被单测用假实现钉住，
+ * 不必靠「读源码确认 main 里有这么一行」。
+ *
+ * 全注入 ⇒ **原样返回、不重搜**（连 `embed` 都不调）：这既是成本闸（40 条里大半条
+ * 目一个未命中锚点都没有），也是「重搜不碰已命中语义」的结构保证——`hit` /
+ * `recall` / `forbidHit` 只读 `result.sections`，与 `recheck` 无关。
+ *
+ * `rechecked` 与 `score` **一起返回**：调用方据它累计「跑过重搜的条目」（进报告的自述
+ * 行）。合一返回是为了不让调用方自己再判一遍——两处判据一旦分叉，报告就会说一套、
+ * 实际做另一套。
+ */
+export async function rescoreWithRecheck({ entry, result, queries, embed, search }) {
+  const score = scoreEntry({ entry, result })
+  if (!score.details.some((d) => d.status !== 'injected')) return { score, rechecked: false }
+  const perQuery = await collectRecheckPools({
+    queries,
+    maxDistance: RECHECK_MAX_DISTANCE,
+    embed,
+    search,
+  })
+  return {
+    score: scoreEntry({ entry, result, recheck: buildRecheckIndex({ perQuery }) }),
+    rechecked: true,
+  }
+}
+
+/**
  * **未召回锚点的距离读数**（§二 结论「阈值该不该松」的依据面）——纯函数。
  *
  * 距离有两个来源、合并计：① 流水（probe / final 行自带距离）；② 逐查询重搜
@@ -1066,25 +1097,23 @@ export async function main(argv = process.argv.slice(2)) {
       const queries = [entry.query, ...entry.rewritten]
       const r = await runRetrievalChain(queries, { startedAt: Date.now() })
       results.push({ id: entry.id, result: r })
-      let score = scoreEntry({ entry, result: r })
-      // 只要这条有**任何**未注入锚点就跑重搜：`below_topk` 的判别需要它，§二 的
-      // 「最小距离」读数也需要它（已有归因的锚点虽然不再改判，但读数要换成紧界）。
-      if (score.details.some((d) => d.status !== 'injected')) {
-        const perQuery = await collectRecheckPools({
-          queries,
-          maxDistance: RECHECK_MAX_DISTANCE,
-          embed: embedText,
-          search: (vector, q, maxDistance) =>
-            chunksRepo.searchChunksHybrid(
-              vectorToBlob(vector),
-              q,
-              chunksRepo.HYBRID_POOL_PER_QUERY,
-              maxDistance
-            ),
-        })
-        score = scoreEntry({ entry, result: r, recheck: buildRecheckIndex({ perQuery }) })
-        rechecked.push(entry.id)
-      }
+      // 逐条评分：这条有**任何**未注入锚点就走逐查询重搜——`below_topk` 的判别需要它，
+      // §二 的「最小距离」读数也需要它（已有归因的锚点虽不改判，读数要换成紧界）。
+      // 判据与接线都在 `rescoreWithRecheck` 里（那里可注入假 embed/search 单测）。
+      const { score, rechecked: didRecheck } = await rescoreWithRecheck({
+        entry,
+        result: r,
+        queries,
+        embed: embedText,
+        search: (vector, q, maxDistance) =>
+          chunksRepo.searchChunksHybrid(
+            vectorToBlob(vector),
+            q,
+            chunksRepo.HYBRID_POOL_PER_QUERY,
+            maxDistance
+          ),
+      })
+      if (didRecheck) rechecked.push(entry.id)
       scores.push(score)
     }
 
