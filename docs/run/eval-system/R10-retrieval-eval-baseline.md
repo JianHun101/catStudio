@@ -58,3 +58,26 @@
 - 改写器质量评估（D2 代价面，另立单）
 - bge-m3 切换闸门：本票基线出数后，切换裁决 = 「新模型 recall 不掉点」
 - MRR / 位置效应（注入排序层）、负收益率（注入消费侧）、索引覆盖率读数（扫描器 skipped 汇总出口）——均挂后续，见 grilling 盘点清单
+
+---
+
+## 修订 #1（2026-09-19，店长裁定：解禁 `memory/index.ts` 纯抽取， ds猫 停手报裁的响应）
+
+**缘由**（双方独立核验一致）：票面「从冻结改写出发、跳过改写器」在现有代码**无入口**——`retrieveMemoryContext`（`memory/index.ts:247`）把查询集锁死在内嵌改写器（`:276-277`），导出签名无注入点；改写缓存是模块私有**内存 Map**（`query-rewrite.ts:40`，`clearRewriteCache` 只清不写），外部进程无法预热。基线数字必须真代表生产行为（bge-m3 切换、阈值校准拿它当判据），故采纳 ds猫 甲案：**抽链段**，否乙（复制 ~70 行第二实现会静默漂移）、否丙（改口径则 D1 契约作废）。
+
+**禁入修订**：禁入清单中 `packages/server/src/**` 收窄为「除 `packages/server/src/memory/index.ts` 的**纯抽取**外」。其余禁入不变。
+
+**§A2 接口契约（新增，审查锚点）**：
+
+- 新导出 `runRetrievalChain(queries: string[], opts?: { startedAt?: number }): Promise<MemoryContextResult>`——承载 `:279` 起的全部链段（逐查询嵌入降级 → 混合检索 → 跨查询 RRF 合并 → 阈值过滤 → 节补齐 → 预算截断 → 渲染），参数/threshold/budget 仍读 env，**不加新旋钮**（保生产/跑批口径自动同源）
+- `queries[0]` = 原始查询（探针池「原话优先」语义依赖顺序）；**去重挪进链段入口**（幂等，脚本侧不再自担——漏去重会让重复查询的 RRF 分双倍计）
+- `retrieveMemoryContext` 瘦身为：enabled 闸 → 剥 mention → 空查询闸 → 改写 → 调 `runRetrievalChain`，并把自己的 `t0` 经 `startedAt` 传入——**`retrievalMs` 口径不变**（含改写耗时），这是埋点面零漂移的硬要求
+- 零行为变更举证：纯代码搬移（diff 层面可核）+ 既有 `memory/index.test.ts` 断言**一行不改**全绿（它对 queryTraces/降级/渲染的断言就是回归网）
+
+**验收增补**：
+
+- **B5 降级硬闸**：任一条目 `reason !== 'ok'` 或 `queryTraces[].queryEmbedOk` 不全 true ⇒ **拒绝出报告**（非零退出、不落文件）——ds猫 实测暴露的坑：sidecar 撞端口致部分查询嵌入失败时 `reason` 仍可能 `ok`，向量通道静默缺席 ⇒ 假读数无声产生
+- **B6 空库闸**：跑批启动探针——`chunks` 行数 > 0 且 `doc_path` 去重数 == golden-check 的 `liveDocs`（当前实测 395 行 / 13 份），不符即拒跑。`DB_PATH` 是模块级常量（`db/index.ts:16`）env 覆盖不了，脚本必须 `setDb()` 显式注入真库，否则静默建空库跑全零
+- 嵌入供给形态已实测定案：`EMBED_SIDECAR_PORT=0` 动态端口独立 sidecar（避开活 server 的 3210），跑完 `stopEmbeddingSidecar()` 显式回收——「必判」第一条据此销项
+
+**重启面修订**：基点行「零改动 server 运行路径 ⇒ 无需重启」自此**作废**——本票含 server 源码改动（纯抽取），落地后需重启，归收口链发起。
