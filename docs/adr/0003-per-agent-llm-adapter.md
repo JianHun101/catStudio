@@ -34,4 +34,4 @@ interface LLMAdapter {
 ## Consequences
 
 - 前端 Agent 配置 UI 需暴露供应商选择器、API key 输入、model 名称输入——这些字段不能简化。
-- Embedding 供应商与 LLM 解耦——全局独立配置，不是每 Agent 级别。不同供应商的 embedding 维度不同（DeepSeek 4096 vs OpenAI 1536），统一维度确保记忆库跨 Agent 可检索。
+- Embedding 供应商与 LLM 解耦——全局独立配置，不是每 Agent 级别。所有 Agent 共用同一嵌入模型（现为本地 sidecar `Xenova/bge-small-zh-v1.5`，512 维），维度天然一致，确保记忆库跨 Agent 可检索。
