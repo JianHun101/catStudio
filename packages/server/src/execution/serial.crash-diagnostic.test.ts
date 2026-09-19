@@ -5,9 +5,15 @@
  *
  * 1. `serial.ts` 「agent execution failed」漏斗——LLM 段抛出**任意值**（`throw 'string'`
  *    是合法 JS）时 `err.message` 恒 `undefined`，`error_message` 落成 `'unknown error'`。
- *    本文件用 `chatStream` 抛非 Error 驱动，**这是全库 19 次 `execute crash` 同源族里
- *    可经公开 API 稳定复现的那条**（`executeRun` 的 catch 走不到——`executeOneAgent`
- *    自带外层 try/catch，见交接文档 §可复现性）。
+ *    本文件用 `chatStream` 抛非 Error 驱动，走的就是这条漏斗。
+ *
+ *    **与库内 `execute crash` 行不是一族**（R6 §A 追因 + R7 除根）：那批行是 `executeRun`
+ *    finally **误收口**的历史存量——`catch` 路径**从未触发过**，与「非 Error 抛出物」无关；
+ *    R7 已加槽位归属校验除根、该词退役，不再新增。本文件原有的两句表述（「这是全库 19 次
+ *    `execute crash` 同源族里可经公开 API 稳定复现的那条」+「`executeRun` 的 catch 走不到」）
+ *    **均已失实、已随本笔删除**——后者尤为反：`executeRun` 的 catch 经公开 API **可达**，
+ *    入口就是 `serial.crash-label.test.ts` 的 A2（`serial.ts:503` 无 key 分支在所有 try 之外，
+ *    该分支里 `emitSystemNotice` 抛错即逃出 `executeOneAgent`，落进 `executeRun` 的 catch）。
  * 2. 用户可见的系统通知文案（`暂时无法回复: ${...}`）。
  *
  * 边界与 `serial.spans.test.ts` 同款：真实 SQLite（`createTestDb()` + `initDb()`，两张
