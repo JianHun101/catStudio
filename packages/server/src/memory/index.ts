@@ -36,6 +36,7 @@ import { chunks as chunksRepo, knowledge as knowledgeRepo } from '../db/reposito
 import {
   CANDIDATE_BODY_HEAD_CHARS,
   HYBRID_POOL_PER_QUERY,
+  RETIRED_STATUSES,
   type ChunkVectorSearchResult,
 } from '../db/repository/chunks.js'
 import type {
@@ -75,6 +76,14 @@ export interface RetrievedSection {
   breadcrumb: string
   /** 该节全部片正文，按 `part_index` 升序 */
   parts: string[]
+  /**
+   * 该节所代表的片在库内的 `status`（C4：注入标记由**这一列**驱动）。
+   *
+   * 刻意不在渲染期回库补查：标记必须与「该片为什么被召回」同源——回查等于让
+   * 渲染层与召回层各判一次状态，两者判反时表现为「召回得到、但不带标记」，
+   * 正是用户要防的那种无声误导。
+   */
+  status: string | null
   /** 该节内最相关片的余弦距离（台账列：当前不参与排序，节序由片级累加 RRF 分决定，`bestIndex` 仅作同分 tie-break） */
   distance: number
 }
@@ -502,6 +511,8 @@ export async function runRetrievalChain(
       breadcrumb: chunk.breadcrumb,
       // 节在库内为空（极端：命中后又被并发删）⇒ 退回命中片正文，不注入空条目
       parts: parts.length > 0 ? parts.map((p) => p.body) : [chunk.body],
+      // 代表片的 status（`bySection` 只留首个 = `ordered` 里最靠前的那片）
+      status: chunk.status,
       distance: chunk.distance,
     })
   }
@@ -604,9 +615,26 @@ function renderOrder(n: number): number[] {
 function renderSections(sections: RetrievedSection[]): { text: string; tokens: number } {
   if (sections.length === 0) return { text: '', tokens: 0 }
   const ordered = renderOrder(sections.length).map((i) => sections[i])
-  const lines = ordered.map((s, i) => `${i + 1}. ${s.parts.join('\n')}`)
+  const lines = ordered.map((s, i) => `${i + 1}. ${retiredMark(s)}${s.parts.join('\n')}`)
   const text = `\n\n【相关记忆】\n${lines.join('\n')}`
   return { text, tokens: estimateTokens(text) }
+}
+
+/** C4 注入标记（票面契约字面量，**不许换写法**） */
+const RETIRED_SECTION_PREFIX = '【已废弃·仅留结论】'
+
+/**
+ * 退役节的注入标记（C4）——由**节装配带下来的 `status` 列**驱动。
+ *
+ * 为什么不认正文内容（例如「正文里已有『已废弃』三字」）：正文是退役文档自己写的，
+ * 它没写、或写法不同，标记就消失；而这里的判据是**库里的状态列**，与「为什么它
+ * 被召回」同一个来源。正文不可信、状态列可信，这是标记的全部意义——猫读到这条
+ * 结论时**不可能**把它当成活指导。
+ */
+function retiredMark(section: RetrievedSection): string {
+  return section.status !== null && RETIRED_STATUSES.has(section.status)
+    ? RETIRED_SECTION_PREFIX
+    : ''
 }
 
 // ─── 上下文构建（知识库）───────────────────────────────

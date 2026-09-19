@@ -395,7 +395,10 @@ describe('memory', () => {
 
   // ─── W12 ──────────────────────────────────────────────
   describe('W12 NULL 行真被放行（运行时断言）', () => {
-    it('status IS NULL 与 active 被召回，superseded / deprecated 不召回', async () => {
+    // ⚠️ P1-A 起本用例的成立范围**收窄**了：退役态的放行面只开给墓碑锚
+    // （`#tombstone`）。这四片的锚都是普通节锚，故结论不变——它守的是「C3 改向
+    // **没有**顺手把退役正文片也放进来」这一半。
+    it('status IS NULL 与 active 被召回；退役**正文片**不召回', async () => {
       process.env.MEMORY_MAX_DISTANCE = '1.5'
       process.env.MEMORY_TOP_K = '10'
       seedChunk({
@@ -431,6 +434,65 @@ describe('memory', () => {
       expect(r.text).toContain('猫咖测试在用中')
       expect(r.text).not.toContain('猫咖测试已被取代')
       expect(r.text).not.toContain('猫咖测试已废弃')
+    })
+  })
+
+  // ─── P1-A 墓碑切片（C3 谓词改向 + C4 注入标记）─────────
+  describe('P1-A 退役文档只留结论（墓碑片）', () => {
+    /** 同一份退役文档：正文片 + 墓碑片并存 = ADR 0013 存量的真实形态 */
+    const RETIRED_DOC = 'docs/adr/0013-c3.md'
+
+    function seedRetiredPair(tombstoneStatus: string): void {
+      seedChunk({
+        docPath: RETIRED_DOC,
+        sectionAnchor: '## C3 出方案',
+        body: '猫咖测试退役正文',
+        status: 'superseded',
+        angle: 0,
+      })
+      seedChunk({
+        docPath: RETIRED_DOC,
+        sectionAnchor: '#tombstone',
+        body: '猫咖测试墓碑结论',
+        status: tombstoneStatus,
+        angle: 0,
+      })
+    }
+
+    beforeEach(() => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '10'
+    })
+
+    it('反对照甲：退役正文片召不回、墓碑片召得回（C3 谓词改向）', async () => {
+      seedRetiredPair('superseded')
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      // 放行面：墓碑锚的片**必须**进得来——否则就是把「降级可检索」做成了「降级不可见」
+      expect(r.text).toContain('猫咖测试墓碑结论')
+      // 挡住面：同文档的退役正文片**必须**召不回。这一条破 ⇒ 用户要防的
+      // 「猫读到已废弃方案的原文、当成活指导」当场成立，本票白做。
+      expect(r.text).not.toContain('猫咖测试退役正文')
+    })
+
+    it('反对照乙：C4 标记由 status 驱动——同一行只翻 status 则标记消失', async () => {
+      seedRetiredPair('superseded')
+      const retired = await memoryModule.retrieveMemoryContext(Q)
+      expect(retired.text).toContain('【已废弃·仅留结论】猫咖测试墓碑结论')
+
+      // 对照组 = **同一个变量**：不新建行、不动锚与正文，只把那一行的 status 列翻回
+      // active（`chunks` 行、`chunk_vectors` 行、注入位置全不变）。
+      getDb()
+        .prepare('UPDATE chunks SET status = ? WHERE doc_path = ? AND section_anchor = ?')
+        .run('active', RETIRED_DOC, '#tombstone')
+
+      const active = await memoryModule.retrieveMemoryContext(Q)
+      // 片**照样召得回**（排除「对照组其实没召回到、于是没标记」的假绿）
+      expect(active.text).toContain('猫咖测试墓碑结论')
+      // 判据若写成「认锚（`#tombstone` 恒在）」「认正文（正文一字未变）」
+      // 「认『退役过就永久标记』」，这里**全都红**——只有认 status 列才绿。
+      expect(active.text).not.toContain('【已废弃·仅留结论】')
     })
   })
 

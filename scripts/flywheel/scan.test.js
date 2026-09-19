@@ -20,6 +20,8 @@ import { fileURLToPath } from 'node:url'
 import {
   SCAN_PREFIXES,
   SKIP_REASONS,
+  RETIRED_STATUSES,
+  TOMBSTONE_ANCHOR,
   parseFrontmatter,
   classifyDocument,
   collectCandidatePaths,
@@ -589,6 +591,251 @@ describe('S13 evidence 往返（G4）', () => {
     expect(Array.isArray(parsed)).toBe(true)
     expect(parsed[0].kind).toBe('commit')
     expect(parsed[0].ref).toBe('d555732')
+  })
+})
+
+// ─── P1-A 墓碑切片（C1 闸 / C2 形态 / 自检）──────────────
+
+/** 退役件：`status` + `verdict` 由用例给，其余字段与 `doc()` 同款 */
+function retiredDoc({ status = 'superseded', verdict, ...fields } = {}) {
+  return doc({
+    title: 'C3 出站总线方案',
+    section: '决策',
+    body: '这段正文**不该**进索引——退役件只留结论。',
+    status,
+    verdict,
+    ...fields,
+  })
+}
+
+describe('P1-A C1 写入口闸：退役件缺 verdict 拒入库', () => {
+  it('superseded 无 verdict ⇒ skipped: missing-verdict，库里零行', async () => {
+    writeFiles(root, {
+      'docs/adr/retired-no-verdict.md': retiredDoc(),
+      'docs/adr/ok.md': doc({ title: '合格件' }),
+    })
+    initGitRepo(root)
+
+    // ⚠️ 先按**旧机制**（无 C1 闸时）的样子铺 2 行正文片：跳过件不进 `produced`，
+    // 于是它落进孤儿差集被**物理删**（不是「留着但挡住」）。这是本闸的连带后果，
+    // 与「退役正文片不该被猫读到」同向；P1-B 的 0013 对账据此可预期为「0 行 → 重扫后 1 行」。
+    for (const [i, anchor] of ['## 决策', '## 背景'].entries()) {
+      chunksRepo.upsertChunk({
+        docPath: 'docs/adr/retired-no-verdict.md',
+        sectionAnchor: anchor,
+        contentHash: `old${i}`,
+        originId: 'blob-old',
+        type: 'decision',
+        status: 'superseded',
+        partIndex: 1,
+        partTotal: 1,
+        body: '旧机制切出来的退役正文。',
+        breadcrumb: 'docs/adr/retired-no-verdict.md > C3 出站总线方案 > 决策',
+      })
+    }
+
+    const report = await scan()
+    expect(report.skipped).toContainEqual({
+      path: 'docs/adr/retired-no-verdict.md',
+      reason: SKIP_REASONS.MISSING_VERDICT,
+      detail: 'status=superseded',
+    })
+    // 拒得干净：不是「跳过了但留下半截」，是一个片都没有
+    expect(chunksRepo.getChunksByDocPath('docs/adr/retired-no-verdict.md')).toEqual([])
+    expect(report.orphansDeleted).toBe(2)
+    expect(countOf('SELECT COUNT(*) c FROM chunks_fts')).toBe(
+      countOf('SELECT COUNT(*) c FROM chunks')
+    )
+  })
+
+  it('verdict 为空串 / 纯空白同样拒（与 evidence 同一条「空 = 缺」的判据）', async () => {
+    writeFiles(root, {
+      'docs/adr/blank.md': `---\ntype: decision\ndate: 2026-09-12\nstatus: deprecated\nverdict: "   "\nevidence:\n  - kind: commit\n    ref: abc1234\n---\n\n# 空 verdict\n\n## 一节\n\n正文。\n`,
+    })
+    initGitRepo(root)
+
+    expect(
+      classifyDocument({
+        path: 'docs/adr/blank.md',
+        content: fs.readFileSync(path.join(root, 'docs/adr/blank.md'), 'utf8'),
+      })
+    ).toEqual({ ok: false, reason: SKIP_REASONS.MISSING_VERDICT, detail: 'status=deprecated' })
+  })
+
+  it('非退役件不要求 verdict（闸只对退役态开）', () => {
+    expect(classifyDocument({ path: 'docs/adr/a.md', content: doc() }).ok).toBe(true)
+  })
+})
+
+describe('P1-A C2 扫描形态：退役件只产一个墓碑片', () => {
+  const VERDICT = 'C3 出站总线方案已废弃，2026-09-01 裁定不做'
+
+  it('chunks 行数恒 1、anchor 恒 #tombstone、body == verdict、breadcrumb 指向文档级', async () => {
+    writeFiles(root, { 'docs/adr/retired.md': retiredDoc({ verdict: VERDICT }) })
+    initGitRepo(root)
+
+    const report = await scan()
+    expect(report.errors).toEqual([])
+    expect(report.inserted).toBe(1)
+
+    const rows = chunksRepo.getChunksByDocPath('docs/adr/retired.md')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].section_anchor).toBe(TOMBSTONE_ANCHOR)
+    expect(rows[0].body).toBe(VERDICT)
+    expect(rows[0].status).toBe('superseded')
+    // 文档级面包屑 = `相对路径 > H1`（切片器的面包屑是 `路径 > H1 > H2 > H3`）
+    expect(rows[0].breadcrumb).toBe('docs/adr/retired.md > C3 出站总线方案')
+    // 正文一个字都没切进来（切片器会给 `## 决策` 出一片；墓碑路径不给）
+    expect(rows[0].body).not.toContain('只留结论')
+    expect(rows[0].part_index).toBe(1)
+    expect(rows[0].part_total).toBe(1)
+    // FTS / vec 同样只有一行（三表齐）
+    expect(countOf('SELECT COUNT(*) c FROM chunks_fts')).toBe(1)
+    expect(countOf('SELECT COUNT(*) c FROM chunk_vectors')).toBe(1)
+  })
+
+  it('墓碑片真的进了嵌入面：嵌入调用收到的是 verdict（不是整篇正文）', async () => {
+    const seen = []
+    const embed = {
+      async embedMany(texts) {
+        seen.push(...texts)
+        return texts.map((t) => ({ ok: true, vector: vecFor(t) }))
+      },
+    }
+    writeFiles(root, { 'docs/adr/retired.md': retiredDoc({ verdict: VERDICT }) })
+    initGitRepo(root)
+
+    await scan({ embed })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toBe(`docs/adr/retired.md > C3 出站总线方案\n${VERDICT}`)
+  })
+
+  it('改 verdict（内容变了）⇒ 重切，旧片被陈旧代删除清掉', async () => {
+    writeFiles(root, { 'docs/adr/retired.md': retiredDoc({ verdict: 'C3 方案已废弃（初版）' }) })
+    initGitRepo(root)
+    await scan()
+
+    writeFiles(root, { 'docs/adr/retired.md': retiredDoc({ verdict: 'C3 方案已废弃（改后）' }) })
+    const second = await scan()
+    expect(second.errors).toEqual([])
+    const rows = chunksRepo.getChunksByDocPath('docs/adr/retired.md')
+    expect(rows.map((r) => r.body)).toEqual(['C3 方案已废弃（改后）'])
+  })
+
+  it('自检：库里残留旧正文片（未重切）⇒ 报告报错，不静默', async () => {
+    // 形态 = **本机制上线后最容易出的那一种**：文件内容没变（blob SHA 相同 ⇒ 判
+    // `unchanged` 跳过、重切路径压根不走），但库里躺着按**旧机制**切出来的正文片。
+    // 不变量「恒 == 1」正是为它设的——用「本次刚写进去那行」当判据会看不见它。
+    const content = retiredDoc({ verdict: VERDICT })
+    writeFiles(root, { 'docs/adr/retired.md': content })
+    initGitRepo(root)
+
+    const blob = gitHashObject(root, 'docs/adr/retired.md')
+    chunksRepo.upsertChunk({
+      docPath: 'docs/adr/retired.md',
+      sectionAnchor: '## 决策',
+      contentHash: 'stale-hash',
+      originId: blob, // ← 当前代：增量判据认为「已扫过」，实际却是旧机制的正文片
+      type: 'decision',
+      status: 'superseded',
+      partIndex: 1,
+      partTotal: 1,
+      body: '这段正文不该留在库里。',
+      breadcrumb: 'docs/adr/retired.md > C3 出站总线方案 > 决策',
+    })
+
+    const report = await scan()
+    expect(report.skipped).toEqual([
+      { path: 'docs/adr/retired.md', reason: SKIP_REASONS.UNCHANGED },
+    ])
+    expect(report.errors).toEqual([
+      {
+        path: 'docs/adr/retired.md',
+        reason: 'tombstone-invariant',
+        detail: 'anchor=## 决策',
+      },
+    ])
+    // ⚠️ 报告报错但不是「静默修好」：本函数只读不写，残留照旧躺着等人处置
+    expect(chunksRepo.getChunksByDocPath('docs/adr/retired.md')).toHaveLength(1)
+  })
+
+  /** 预置「当前代」的行：增量判据会判 `unchanged` ⇒ 走自检、不走重切 */
+  async function seedCurrentGenRows(rows) {
+    const blob = gitHashObject(root, 'docs/adr/retired.md')
+    for (const [i, r] of rows.entries()) {
+      chunksRepo.upsertChunk({
+        docPath: 'docs/adr/retired.md',
+        originId: blob,
+        type: 'decision',
+        status: 'superseded',
+        partIndex: 1,
+        partTotal: 1,
+        contentHash: `k${i}`,
+        breadcrumb: 'docs/adr/retired.md > C3 出站总线方案',
+        ...r,
+      })
+    }
+  }
+
+  it('自检：行数 > 1 ⇒ rows=N（多切了或残留没清）', async () => {
+    writeFiles(root, { 'docs/adr/retired.md': retiredDoc({ verdict: VERDICT }) })
+    initGitRepo(root)
+    await seedCurrentGenRows([
+      { sectionAnchor: TOMBSTONE_ANCHOR, body: VERDICT },
+      { sectionAnchor: '## 决策', body: '别的东西' },
+    ])
+
+    const report = await scan()
+    expect(report.errors).toEqual([
+      { path: 'docs/adr/retired.md', reason: 'tombstone-invariant', detail: 'rows=2' },
+    ])
+  })
+
+  it('自检：行数恰好 1 但正文不是 verdict ⇒ body-not-verdict（切了正文）', async () => {
+    writeFiles(root, { 'docs/adr/retired.md': retiredDoc({ verdict: VERDICT }) })
+    initGitRepo(root)
+    await seedCurrentGenRows([{ sectionAnchor: TOMBSTONE_ANCHOR, body: '这段正文不该在库里。' }])
+
+    const report = await scan()
+    expect(report.errors).toEqual([
+      { path: 'docs/adr/retired.md', reason: 'tombstone-invariant', detail: 'body-not-verdict' },
+    ])
+  })
+
+  it('自检通过时 errors 为空（不变量真被守住，不是恒报错）', async () => {
+    writeFiles(root, { 'docs/adr/retired.md': retiredDoc({ verdict: VERDICT }) })
+    initGitRepo(root)
+    await seedCurrentGenRows([{ sectionAnchor: TOMBSTONE_ANCHOR, body: VERDICT }])
+
+    const report = await scan()
+    expect(report.errors).toEqual([])
+    expect(report.skipped).toEqual([
+      { path: 'docs/adr/retired.md', reason: SKIP_REASONS.UNCHANGED },
+    ])
+  })
+})
+
+describe('P1-A 退役集合两侧绑死（扫描器声明 ↔ 服务端 SQL 字面量）', () => {
+  it('RETIRED_STATUSES / TOMBSTONE_ANCHOR 与 chunks.ts 谓词逐字一致', () => {
+    // 判据面与被判面**同面**：读服务端源码里的 SQL 字面量，不是再抄一份常量。
+    // 哪边单方面加了状态值 / 改了锚，这里必红——「谓词挡了但标记不出现」那类
+    // 半截改动在运行时是**静默**的，只有静态断言拦得住。
+    const src = fs.readFileSync(
+      path.join(REPO_ROOT, 'packages/server/src/db/repository/chunks.ts'),
+      'utf8'
+    )
+    const sql = src.match(/NOT IN \(([^)]*)\)/g) ?? []
+    expect(sql.length).toBeGreaterThan(0)
+    const fromSql = new Set(sql.flatMap((s) => [...s.matchAll(/'([^']+)'/g)].map((m) => m[1])))
+    expect([...fromSql].sort()).toEqual([...RETIRED_STATUSES].sort())
+
+    expect(src).toContain(`section_anchor = '${TOMBSTONE_ANCHOR}'`)
+  })
+
+  it('导入侧同名常量真的从 chunks.ts 导出（防两处各写一份字面量）', async () => {
+    const serverChunks = await import('../../packages/server/src/db/repository/chunks.js')
+    expect(serverChunks.TOMBSTONE_ANCHOR).toBe(TOMBSTONE_ANCHOR)
+    expect([...serverChunks.RETIRED_STATUSES].sort()).toEqual([...RETIRED_STATUSES].sort())
   })
 })
 

@@ -263,10 +263,59 @@ export function getChunksByOrigin(originId: string): ChunkRow[] {
     .all(originId) as ChunkRow[]
 }
 
+/**
+ * 按 `doc_path` 取该源文件的**全部**切片行（含退役态、含陈旧代）。
+ *
+ * **不是检索入口**（同样不带 X4 过滤）——它是**对账读口**：C2 的不变量「退役文档在
+ * `chunks` 的行数恒 == 1」需要按 `doc_path` 数行，而这一步**必须看得见陈旧代**
+ * （`origin_id <> 当前代`）。用 `getChunksByOrigin` 代替会漏掉它们——那正是本不变量
+ * 要拦的东西（老正文片没被 `deleteStaleChunkRows` 清掉的形态）。
+ *
+ * 与 `listChunkDocPaths` 一样只读不写：对账方（扫描器自检 / 收口核验）不得顺手改库。
+ */
+export function getChunksByDocPath(docPath: string): ChunkRow[] {
+  return db
+    .prepare(
+      `SELECT id, doc_path, section_anchor, content_hash, origin_id,
+              type, status, date, evidence, supersedes, superseded_by, valid_from, valid_to,
+              part_index, part_total, hard_cut, body, breadcrumb
+       FROM chunks
+       WHERE doc_path = ?
+       ORDER BY section_anchor, part_index`
+    )
+    .all(docPath) as ChunkRow[]
+}
+
 /** 向量通道检索结果 = 整行 + 余弦距离 */
 export interface ChunkVectorSearchResult extends ChunkRow {
   distance: number
 }
+
+// ─── X4 过滤面（退役态）：谓词与语义标记的单一真相源 ───────
+
+/**
+ * **退役状态集合**——落在其中的片按 X4 被挡在召回之外，**唯墓碑锚（`#tombstone`）除外**
+ * （C3 改向：退役件在检索世界里仅结论片可检索）。
+ *
+ * ⚠️ 与下面四个 SQL 里的 `NOT IN ('superseded','deprecated')` **字面量同源**：
+ * 谓词走字面量（票面契约形态，且 `chunks.test.ts` 的静态断言逐函数读它），
+ * 本常量供**非 SQL 消费方**用——`memory/index.ts` 渲染层的 `【已废弃·仅留结论】`
+ * 标记（C4：标记由 status 驱动，不靠正文文本）。两处不绑死的话，将来加一种退役
+ * 状态会**静默只改一半**（谓词挡了、标记不出现），`chunks.test.ts` 有断言绑死。
+ *
+ * 扫描器侧另有一份同名声明（`scripts/flywheel/scan.mjs`）——那不是偷懒：该文件是
+ * `.mjs` 且按自身约定**只做动态 `import()`**（静态 import TS 会在自举判定之前炸），
+ * 拿不到本模块的静态导出。两侧同样由静态源断言绑死（`scan.test.js`）。
+ */
+export const RETIRED_STATUSES: ReadonlySet<string> = new Set(['superseded', 'deprecated'])
+
+/**
+ * 墓碑片（C2）的固定节锚。退役文档在检索世界里**只存在这一个片**。
+ *
+ * 用具名常量而非在各处重打字面量：扫描器写它、谓词放行它、测试断言它——
+ * 三处写法不一致就是「写了却召回不到」的静默断链。
+ */
+export const TOMBSTONE_ANCHOR = '#tombstone'
 
 /**
  * `chunks` 全列清单（带 `c.` 前缀）——检索入口共用一份，防「加了列只改一处」的漂移。
@@ -303,7 +352,7 @@ export function searchChunksByVector(
          LIMIT ?
        ) v
        JOIN chunks c ON c.id = v.chunk_id
-       WHERE (c.status IS NULL OR c.status NOT IN ('superseded','deprecated'))
+       WHERE (c.status IS NULL OR c.status NOT IN ('superseded','deprecated') OR c.section_anchor = '#tombstone')
          AND v.distance < ?
        ORDER BY v.distance`
     )
@@ -324,7 +373,7 @@ export function getChunksBySection(docPath: string, sectionAnchor: string): Chun
       `SELECT ${CHUNK_COLUMNS}
        FROM chunks c
        WHERE c.doc_path = ? AND c.section_anchor = ?
-         AND (c.status IS NULL OR c.status NOT IN ('superseded','deprecated'))
+         AND (c.status IS NULL OR c.status NOT IN ('superseded','deprecated') OR c.section_anchor = '#tombstone')
        ORDER BY c.part_index`
     )
     .all(docPath, sectionAnchor) as ChunkRow[]
@@ -355,7 +404,7 @@ export function searchChunksByKeyword(query: string, topN: number): ChunkKeyword
          FROM chunks_fts f
          JOIN chunks c ON c.rowid = f.rowid
          WHERE chunks_fts MATCH ?
-           AND (c.status IS NULL OR c.status NOT IN ('superseded','deprecated'))
+           AND (c.status IS NULL OR c.status NOT IN ('superseded','deprecated') OR c.section_anchor = '#tombstone')
          ORDER BY bm25(chunks_fts)
          LIMIT ?`
       )
@@ -527,7 +576,7 @@ export interface ChunkVectorCandidate {
   bodyHead: string
   status: string | null
   distance: number
-  /** X4 状态过滤是否放行（false = 该片被 `superseded`/`deprecated` 挡掉） */
+  /** X4 状态过滤是否放行（false = 该片被退役态挡掉；**墓碑片恒放行**，见 C3） */
   passesStatusFilter: boolean
 }
 
@@ -542,7 +591,8 @@ export interface ChunkVectorCandidate {
  *
  * 刻意**不是检索入口**：它返回的是被过滤掉的行，调用方只许读、不许直接注入。
  * 过滤面判据用与检索入口**同向**的写法（`passesStatusFilter` 由含同一字面量的
- * CASE 求值），免得「诊断开关一改就把语义写反」。
+ * CASE 求值），免得「诊断开关一改就把语义写反」。C3 的墓碑放行同样两处都写：
+ * 退役片的墓碑锚在探针里也判「放行」，否则诊断会把「本该召回」记成「被状态挡掉」。
  */
 export function probeChunkVectorCandidates(
   queryBlob: Buffer,
@@ -554,7 +604,7 @@ export function probeChunkVectorCandidates(
               c.content_hash AS content_hash, c.breadcrumb AS breadcrumb,
               substr(c.body, 1, ${CANDIDATE_BODY_HEAD_CHARS}) AS body_head,
               c.status AS status, v.distance AS distance,
-              CASE WHEN (c.status IS NULL OR c.status NOT IN ('superseded','deprecated'))
+              CASE WHEN (c.status IS NULL OR c.status NOT IN ('superseded','deprecated') OR c.section_anchor = '#tombstone')
                    THEN 1 ELSE 0 END AS passes
        FROM (
          SELECT chunk_id, distance
