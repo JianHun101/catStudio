@@ -7,3 +7,10 @@ pnpm-lock.yaml
 # 逐字节一致——而本仓对该目录的验收判据正是「与上游 sha256 一致」。
 # 故本目录不由本仓格式化；要改内容请改上游后重新 vendor（约定见 skills/BOOTSTRAP.md「同步溯源」）。
 skills/design-taste-frontend/
+
+# 跑批报告是 `scripts/eval/retrieval-baseline.mjs` 的**生成物**，且是它 B1 验收的
+# 比对面（同树同库连跑两遍，报告逐字节一致）。prettier 会重排表格对齐（补白），
+# 于是「提交进库的那一份」与「脚本再跑出来的那一份」不再逐字节相同——复跑必然
+# 产生 diff 噪声，而那种噪声的正确处理方式不是「认了」，是让生成物留在格式化面外。
+# 要改报告形态请改渲染函数（`renderReport`），改了重跑脚本即可。
+docs/eval/retrieval-baseline-*.md
