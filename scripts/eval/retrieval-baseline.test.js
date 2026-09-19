@@ -750,7 +750,7 @@ describe('renderReport — 确定性与内容面', () => {
     rotten: 0,
     indexFreshness: { checked: 13, stale: 0 },
     params: { maxDistance: 0.6, topK: 3, probeN: 20 },
-    embed: { model: 'm', dim: 512 },
+    embed: { model: 'm', dim: 512, port: 1660 },
     groups: {
       real: {
         n: 1,
@@ -901,6 +901,16 @@ describe('renderReport — 确定性与内容面', () => {
     expect(renderReport({ ...ctx(), indexFreshness: { checked: 13, stale: 3 } })).toContain(
       '10/13 份同步（stale=3）'
     )
+  })
+
+  it('嵌入供给形态也按**实测**报：没握手到监听端口就打警告（同族：报告里的自述必须来自读数）', () => {
+    const ok = renderReport(ctx())
+    expect(ok).toContain('实测已握手')
+    expect(ok).not.toContain('⚠️ **未见 sidecar 监听端口**')
+    const bad = renderReport({ ...ctx(), embed: { model: 'm', dim: 512, port: undefined } })
+    expect(bad).toContain('⚠️ **未见 sidecar 监听端口**')
+    // 端口号本身不进报告（每跑一个随机值 ⇒ 破 B1）
+    expect(ok).not.toMatch(/端口\D{0,8}\d{2,}/)
   })
 
   it('§二 带未召回锚点读数：最大距离 / 阈值杀几条 / 真覆盖洞三个数都从数据算', () => {

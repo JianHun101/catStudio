@@ -644,8 +644,16 @@ export function renderReport(ctx) {
   L.push(`| MEMORY_TOP_K | ${params.topK} |`)
   L.push(`| 探针池 MAX_PROBE_N | ${params.probeN} |`)
   L.push(`| 嵌入模型 / 维度 | ${embed.model ?? 'n/a'} / ${embed.dim ?? 'n/a'} |`)
+  // 供给形态也按**实测**报（`embed.port` = sidecar 握手回报的真实监听端口）：
+  // 写成恒真的字面量「动态端口」的话，哪天有人把 `EMBED_SIDECAR_PORT=0` 那行删了、
+  // 报告照样声称自己是动态端口——与索引新鲜度那条同一个病（报告里的自述必须来自读数）。
+  // 端口号本身**不进报告**（每跑一个随机值，写进去就破 B1）。
   L.push(
-    '| 嵌入供给形态 | 独立 sidecar、动态端口（`EMBED_SIDECAR_PORT=0`，避开活 server 的固定端口） |'
+    '| 嵌入供给形态 | ' +
+      (typeof embed.port === 'number' && embed.port > 0
+        ? '独立 sidecar、动态端口（`EMBED_SIDECAR_PORT=0`，避开活 server 的固定端口；实测已握手）'
+        : '⚠️ **未见 sidecar 监听端口**（非独立 sidecar 供给 / 未握手）——请核供给形态') +
+      ' |'
   )
   L.push('')
 
@@ -1120,7 +1128,7 @@ export async function main(argv = process.argv.slice(2)) {
       rotten: rotten.length,
       indexFreshness: { checked: freshness.checked, stale: freshness.stale.length },
       params,
-      embed: { model: embedStatus.model, dim: embedStatus.dim },
+      embed: { model: embedStatus.model, dim: embedStatus.dim, port: embedStatus.port },
       groups,
       scores,
       canary: canaryResults,

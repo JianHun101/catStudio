@@ -18,7 +18,7 @@
 | MEMORY_TOP_K | 3 |
 | 探针池 MAX_PROBE_N | 20 |
 | 嵌入模型 / 维度 | Xenova/bge-small-zh-v1.5 / 512 |
-| 嵌入供给形态 | 独立 sidecar、动态端口（`EMBED_SIDECAR_PORT=0`，避开活 server 的固定端口） |
+| 嵌入供给形态 | 独立 sidecar、动态端口（`EMBED_SIDECAR_PORT=0`，避开活 server 的固定端口；实测已握手） |
 
 ## 二、总分（两组分开报，D4）
 
