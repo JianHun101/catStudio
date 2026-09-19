@@ -1,8 +1,22 @@
+---
+type: decision
+date: 2026-07-13
+status: deprecated
+verdict: SQLite + Redis 双存储方案已废弃——Redis 部分整体不做（2026-09-01 拆除），现为 SQLite 单存储
+evidence:
+  - kind: file
+    ref: packages/server/src/db/index.ts
+  - kind: file
+    ref: packages/server/src/connectors/socketio.ts
+  - kind: file
+    ref: packages/server/src/db/migrations.ts
+---
+
 # ADR 0002: SQLite + Redis 双存储
 
 > **实现现状**：Redis 已退役（2026-09-01）——消息总线整体拆除，系统消息分发完全由 Socket.IO 房间广播承担，SQLite 仍是主持久化。本文档 Redis 部分保留作历史记录。
 
-**Status**: accepted
+**Status**: deprecated（Redis 部分已退役 2026-09-01；SQLite 半仍成立、继续在用）
 
 SQLite（better-sqlite3）做主持久化——Agent 配置、对话历史、记忆向量（sqlite-vec 扩展）。Redis（ioredis）做消息总线——Agent 间实时 Pub/Sub 通信和状态广播。
 

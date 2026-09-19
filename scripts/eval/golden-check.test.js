@@ -172,12 +172,20 @@ describe('checkGoldenSet — 锚点存在性（含真空性反对照）', () => 
 
     expect(rotten).toEqual([])
     expect(checked).toBe(45)
-    // 白名单文件里过不了准入的（无 frontmatter 的老 ADR / 非结晶态 plans）——不是活块，
-    // 但要让调用方能把「锚点指着准入不过的文件」与「锚点拼错」分开
-    const skipped = new Set(idx.skipped.map((s) => s.path))
-    expect(skipped.has('docs/adr/0001-pnpm-monorepo.md')).toBe(true)
-    expect(skipped.has('docs/lessons/README.md')).toBe(true)
+    // 白名单文件里过不了准入的——不是活块，但要让调用方能把
+    // 「锚点指着准入不过的文件」与「锚点拼错」分开。
+    //
+    // 本条原先拿 `docs/adr/0001-pnpm-monorepo.md`（无 frontmatter 的老 ADR）当例子；
+    // **P1-B 分级通电后 0001-0006 全部补了 frontmatter 且准入通过，该例子已不成立**。
+    // 换成两个仍然准入不过、且**理由不同**的真身（覆盖两种 skip 分支）：
+    // 门牌 README（无 frontmatter，形态上永久如此）/ 未结晶 plans（evidence 空）。
+    const skipped = new Map(idx.skipped.map((s) => [s.path, s.reason]))
+    expect(skipped.get('docs/lessons/README.md')).toBe('no-frontmatter')
+    expect(skipped.get('docs/plans/agent-reply-elapsed-timer.md')).toBe('empty-evidence')
     expect(idx.skipped.every((s) => typeof s.reason === 'string' && s.reason !== '')).toBe(true)
+    // 反向：通电后的 ADR **不得**再出现在 skippedDocs（否则「通电成功」是假读数）
+    expect(idx.skipped.some((s) => s.path.startsWith('docs/adr/0001'))).toBe(false)
+    expect(idx.skipped.some((s) => s.path.startsWith('docs/adr/0006'))).toBe(false)
   })
 
   it('**真空性反对照**：改坏一条锚点 ⇒ 报该条腐烂，且原因钉在 anchor-not-found', () => {
