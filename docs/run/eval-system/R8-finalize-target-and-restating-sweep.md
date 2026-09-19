@@ -21,6 +21,8 @@ ORDER BY started_at DESC LIMIT 1
 
 **为什么现在要修**：R7 的归属校验挡住了「收错槽位」，但收口落库这一层仍是「agent + 最新 running」——R7 收口后这条路径**成为唯一的错行入口**（R7 之前它被槽位误收口的噪声掩盖）。仓库自己的注释（`executionLogs.ts:404-407`）已明写这个洞存在，只是没治。
 
+> **订正（2026-09-19 R12 收口时，店长）**：本句「收口落库这一层仍是『agent + 最新 running』」**写下时即已失实**——`finalizeExecutionLog` / `updateExecutionLogDiagnostics` 两处的 `session_id` 已由 `dce2bc9`（本票基点 `4ea1a65` 的祖先）补上，立票时真正缺 `session_id` 的只有第三处 `getRunningExecutionCommitHash`（吐槽猫 R12 审查 §四 独立扫出，ds猫 交付时已按此订正执行）。存证加注，不改原句。
+
 **抓手（已核，不必再找）**：`session_id` 列在表内存在；唯一调用点是 `packages/server/src/execution/serial.ts:1608`，位于 `completeExecution` 体内（实现 `serial.ts:1592`），而 `sessionId` 就是该函数的第二个形参（`EngineCtx` 声明在 `serial.ts:197`）⇒ **在作用域内，不需要动接口**。
 
 **改哪**：
