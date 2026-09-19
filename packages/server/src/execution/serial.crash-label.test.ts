@@ -6,8 +6,8 @@
  * （`messageOf(execError) ?? (execError === undefined ? '<槽位词>' : '<取值词>')`）：
  *
  * - 旧词 `'execute crash'` 同时背负**两种互斥情形**——「真崩」与「没崩、只是槽位
- *   在收口后被别的执行接管了」。全库 19 行 `error_message = 'execute crash'` 里，
- *   `execError` 恒为 undefined（`executeRun` 的 catch 伴生日志 0 条）⇒ 19 行
+ *   在收口后被别的执行接管了」。全库那批 `error_message = 'execute crash'` 里，
+ *   `execError` 恒为 undefined（`executeRun` 的 catch 伴生日志 0 条）⇒ 那些行
  *   **没有一行是崩溃**，正名即修谎报。
  * - R7 除根后，「槽位是别人的」那条通路**根本不再进收口**（归属校验拦下，见
  *   `serial.slot-ownership.test.ts` 的 B1），故本文件只覆盖**归属是自己的**剩下的两条：
