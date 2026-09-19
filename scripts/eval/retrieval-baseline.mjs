@@ -9,7 +9,7 @@
  * | 指标 | 定义 |
  * | --- | --- |
  * | recall | 单条 = \|`expect` ∩ `S`\| / \|`expect`\|；集均 = 各条**算术平均** |
- * | 阈值前命中率 | `expect` 里出现在 probe 池、且 `dropped_reason === 'threshold'` 的节占比 |
+ * | 阈值前命中率 | `expect` 里**被距离阈值挡下**的节占比（来源 = probe 池 + 逐查询重搜补测） |
  * | 负例判红 | `forbid` 任一锚点落在 `S` ⇒ 整条判红（不进 recall 均值，单列清单） |
  *
  * 真实组（12）与构造组（23）**各自出分、不合成总分**（D4：两组测的是不同面）。
@@ -25,13 +25,24 @@
  *
  * - **B2 canary 反对照**（测量工具真空性）：必中条目（query 原文照抄某节标题）必须
  *   满分、必不中条目（语料外话题）必须零分。**任一不符 ⇒ 尺子恒绿/恒红 ⇒ 拒出报告**。
- * - **B5 降级硬闸**：任一条目 `queryTraces[].queryEmbedOk` 不全 true 或 `reason !== 'ok'`
- *   ⇒ 拒出报告。这是本仓实测暴露过的坑：sidecar 撞端口致**部分**查询嵌入失败时
- *   `reason` 仍可能是 `ok`，向量通道静默缺席 ⇒ 假读数无声产生。
+ * - **B5 降级硬闸**：任一条目 `queryTraces[].queryEmbedOk` 不全 true，或 `reason` 落在
+ *   **合法空结果白名单**（`LEGIT_EMPTY_REASONS`）之外 ⇒ 拒出报告。这是本仓实测暴露过的坑：
+ *   sidecar 撞端口致**部分**查询嵌入失败时 `reason` 仍可能是 `ok`，向量通道静默缺席
+ *   ⇒ 假读数无声产生。白名单形态的理由见 `checkDegradation`（简言之：`no-hit` 这类是
+ *   **真实结局**不是降级，拿它拒报告等于让一次正常空结果变成拿不到数）。
  * - **B6 空库闸**：`chunks` 行数 > 0 且 `doc_path` 去重数 == golden-check 的 `liveDocs`。
  *   `DB_PATH` 是模块级常量（`db/index.ts:16`）env 覆盖不了，故本脚本**显式** `setDb()`
  *   注入真库，且以 `readonly + fileMustExist` 打开——「静默建一个空库跑出全零」在这条
  *   打开方式下不是纪律问题，是**物理不可达**。
+ *
+ * ## 归因：`below_topk` 与覆盖洞的分野（本脚本唯一自己发起的检索调用）
+ *
+ * 候选流水有两个**结构性盲区**：`probe` 池只取首个嵌入成功的查询、`final` 只留跨查询
+ * 合并后的 topK ⇒「被某条改写查询召回却排不进 topK」与「压根没召回」在流水里同形，
+ * 而两者药方相反。故对**流水两条路都没出现**的锚点补一次**逐查询重搜**
+ * （`collectRecheckPools`，阈值放宽到 `RECHECK_MAX_DISTANCE`）：够得着 ⇒ `below_topk`，
+ * 够不着 ⇒ `not-recalled`（真覆盖洞）。重搜用的是库层现成导出 `searchChunksHybrid`
+ * （与生产同源），**不复制链段**——链段仍只有 `runRetrievalChain` 一个出处。
  *
  * ## 嵌入供给（票面「必判」第一条，已实测定案）
  *
@@ -115,17 +126,23 @@ export function localDate(d = new Date()) {
 /**
  * 给一条黄金集条目打分（**纯函数**：结果对象由调用方给，测试可喂假 result）。
  *
- * 未进注入节集的 `expect` 锚点逐条给出**归因**——四类药方互不相同：
+ * 未进注入节集的 `expect` 锚点逐条给出**归因**——药方互不相同：
  *   - `threshold`    probe 池里、被距离阈值杀 ⇒ 药是「松阈值」
  *   - `status`       probe 池里、被 X4 状态过滤杀 ⇒ 药是「查状态/去死知识」
- *   - `not-topk`     probe 池里、距离也够，但排不进融合 topK ⇒ 药是「调 topK/看排序」
+ *   - `not_topk`     probe 池里、距离也够，但排不进融合 topK ⇒ 药是「调 topK/看排序」
  *   - `budget`       进了融合 topK，但整节放不进预算 ⇒ 药是「加预算」
- *   - `not-recalled` 压根没召回 ⇒ 药是「覆盖洞」
+ *   - `below_topk`   流水两条路都没出现，但**逐查询重搜**能召回且过阈值
+ *                    ⇒ 药是「调 topK/池深」（判别面见 `buildRecheckIndex`）
+ *   - `not-recalled` 重搜（阈值放宽到 1）也够不着 ⇒ 药是「覆盖洞」
  *
  * `section_dup` 不会出现在未命中归因里：同节已有更优片代表时**整节照样注入**
  * （整节返回），故该锚点必落在 `S` 内。
+ *
+ * @param recheck 逐查询重搜索引（`buildRecheckIndex` 产物）。**缺省 `null` = 关掉重搜**，
+ *   此时「流水两条路都没出现」一律落 `not-recalled`——那是分不开 `below_topk` 的旧口径，
+ *   跑批主流程恒传入；缺省值只服务「不关心该子类」的窄用例。
  */
-export function scoreEntry({ entry, result }) {
+export function scoreEntry({ entry, result, recheck = null }) {
   const injected = new Set(result.sections.map((s) => anchorKey(s.docPath, s.sectionAnchor)))
   const probes = new Map()
   const finals = new Map()
@@ -137,13 +154,54 @@ export function scoreEntry({ entry, result }) {
 
   const expect = Array.isArray(entry.expect) ? entry.expect : []
   const forbid = Array.isArray(entry.forbid) ? entry.forbid : []
+  /** 阈值取自**链段自己落的参数快照**（不是脚本另读一遍 env——两处读会各自漂移） */
+  const maxDistance = result.stats?.thresholdMaxDistance ?? null
+  /** 把流水行里的距离/通道一并带进明细：§二 的「未召回锚点距离」读数要用 */
+  const withTrace = (at, c) => ({
+    ...at,
+    source: 'trace',
+    distance: typeof c.distance === 'number' ? c.distance : null,
+    channel: c.channel ?? null,
+  })
 
   const details = expect.map((a) => {
     const k = anchorKey(a.doc_path, a.section_anchor)
     const at = { docPath: a.doc_path, sectionAnchor: a.section_anchor }
     if (injected.has(k)) return { ...at, status: 'injected', drop: null }
-    if (probes.has(k)) return { ...at, status: 'dropped', drop: probes.get(k).droppedReason }
-    if (finals.has(k)) return { ...at, status: 'dropped', drop: finals.get(k).droppedReason }
+    if (probes.has(k))
+      return {
+        ...withTrace(at, probes.get(k)),
+        status: 'dropped',
+        drop: probes.get(k).droppedReason,
+      }
+    if (finals.has(k))
+      return {
+        ...withTrace(at, finals.get(k)),
+        status: 'dropped',
+        drop: finals.get(k).droppedReason,
+      }
+    const rc = recheck?.get(k)
+    if (rc) {
+      const hit = {
+        ...at,
+        source: 'recheck',
+        distance: typeof rc.distance === 'number' ? rc.distance : null,
+        channel: rc.channel,
+        queryIndex: rc.queryIndex,
+        rank: rc.rank,
+      }
+      // 最小距离在阈值内 ⇒ 挡路的是**排序**（它本来过得了闸）；
+      // 最小距离 ≥ 阈值 ⇒ 挡路的是**阈值**（旧探针池结构上看不见这一类）。
+      // 关键词通道捞到过 ⇒ 不可能是阈值杀的（它没有距离概念、生产里也不过闸）。
+      const blockedByThreshold =
+        !rc.keywordHit &&
+        hit.distance !== null &&
+        maxDistance !== null &&
+        hit.distance >= maxDistance
+      return blockedByThreshold
+        ? { ...hit, status: 'dropped', drop: 'threshold' }
+        : { ...hit, status: 'below_topk', drop: null }
+    }
     return { ...at, status: 'not-recalled', drop: null }
   })
 
@@ -188,6 +246,142 @@ export function summarizeGroup(scores) {
   }
 }
 
+// ─── 逐查询重搜（below_topk / 覆盖洞 的判别面） ─────────
+
+/**
+ * 重搜用的**宽阈值**：判别「够不够得着」时把距离闸放开，取 1。
+ *
+ * 为什么不直接用生产的 0.6：那样重搜池与生产池一样窄，**「被阈值杀」这一类就永远
+ * 看不见**——而它恰恰是「阈值该不该松」这个问题唯一的直接证据面。
+ * 为什么不用 `Infinity`：`searchChunksByVector` 的 SQL 里 `distance < ?` 是硬条件，
+ * 给个有限上界才可复现；1 对归一化向量的余弦距离（值域 [0,2]）已足够宽。
+ */
+export const RECHECK_MAX_DISTANCE = 1
+
+/**
+ * 逐查询重搜：把该条目的**每条查询分别**丢进生产同款融合池（`searchChunksHybrid`，
+ * 状态过滤与融合公式都在库层同源），只把距离阈值放宽到 `RECHECK_MAX_DISTANCE`。
+ *
+ * 为什么需要它：链段的候选流水有两个**结构性盲区**——`probe` 池只取自**首个嵌入
+ * 成功的查询**（原话优先），`final` 只留**跨查询合并后的 topK**。于是「被第 3 条
+ * 改写查询召回、但排不进 topK」与「被某条改写查询召回、卡在阈值上」这两类锚点，
+ * 在流水里**两条路都不出现**，与「压根没召回」落成同一个 `not-recalled`——
+ * 而它们与真覆盖洞的药方**完全相反**（调 topK / 松阈值 vs 补语料）。
+ *
+ * `embed` / `search` 由调用方注入（生产接 `embedText` / `searchChunksHybrid`，
+ * 测试喂假实现）：本函数只负责「逐条查询跑一遍」这个骨架。
+ *
+ * @returns `perQuery`：每条查询一个数组（该查询池内的命中，带池内名次与通道）；
+ *   该查询嵌入失败 ⇒ 空数组（**不是** `null`：调用方只 `for..of`，不必防空）。
+ */
+export async function collectRecheckPools({ queries, maxDistance, embed, search }) {
+  const perQuery = []
+  for (const q of queries) {
+    const e = await embed(q)
+    if (!e.ok || e.vector.length === 0) {
+      perQuery.push([])
+      continue
+    }
+    perQuery.push(
+      search(e.vector, q, maxDistance).map((h, rank) => ({
+        docPath: h.row.doc_path,
+        sectionAnchor: h.row.section_anchor,
+        rank,
+        channel: h.channel,
+        // 纯关键词命中带的是 `maxDistance` 哨兵、不是真距离（与链段落库面同款）⇒ 记 null
+        distance: h.channel === 'keyword' ? null : h.row.distance,
+      }))
+    )
+  }
+  return perQuery
+}
+
+/**
+ * 把逐查询池压成查找表 `anchorKey → { queryIndex, rank, channel, distance, keywordHit }`。
+ *
+ * **读数是「该锚点各查询池内的最小向量距离」**——它答的是「它最好的一次机会有多好」，
+ * 而「阈值该不该松」要的正是这个紧界：只要有一趟查询里它的距离在阈值内，那挡路的就
+ * 不是阈值。识别点（queryIndex / rank / channel）**跟着这个最小值走**，明细表里的
+ * 「q? / rank / dist」三者才同源——否则会长出「q0 的名次配 q3 的距离」这种没法核的行。
+ * 同距时保留更早的查询（`<` 而非 `<=`），保证可复现。
+ *
+ * `keywordHit` 单独记：关键词通道**没有距离概念**（库层填的是哨兵值），生产里也不受
+ * 阈值约束 ⇒ 只要它捞到过，这个锚点就不是「阈值杀的」。
+ */
+export function buildRecheckIndex({ perQuery }) {
+  const index = new Map()
+  perQuery.forEach((hits, queryIndex) => {
+    for (const h of hits) {
+      const k = anchorKey(h.docPath, h.sectionAnchor)
+      const vectorHit = h.channel !== 'keyword' && typeof h.distance === 'number'
+      let rec = index.get(k)
+      if (!rec) {
+        rec = { queryIndex, rank: h.rank, channel: h.channel, distance: null, keywordHit: false }
+        index.set(k, rec)
+      }
+      if (!vectorHit) {
+        rec.keywordHit = true
+        continue
+      }
+      if (rec.distance === null || h.distance < rec.distance) {
+        rec.queryIndex = queryIndex
+        rec.rank = h.rank
+        rec.channel = h.channel
+        rec.distance = h.distance
+      }
+    }
+  })
+  return index
+}
+
+/**
+ * **未召回锚点的距离读数**（§二 结论「阈值该不该松」的依据面）——纯函数。
+ *
+ * 距离有两个来源、合并计：① 流水（probe / final 行自带距离）；② 逐查询重搜
+ * （取该锚点**各查询池内的最小**向量距离，见 `buildRecheckIndex`）。两处都是**同一把尺**
+ * （`searchChunksByVector` 的真距离），故可直接取最大值——这个最大值答的是
+ * 「**最好的一次机会**里最差的那个」，它 < 阈值 ⇒ 阈值一条都没杀。
+ *
+ * 三分类互斥且穷尽：`keywordOnly`（只有关键词通道捞到，无距离概念）、`vectorKnown`
+ * （有真距离）、其余 = 连放宽阈值都够不着 = `unreachable`（**真覆盖洞**）。
+ */
+export function summarizeMissDistances({ scores, maxDistance }) {
+  let total = 0
+  let keywordOnly = 0
+  let vectorKnown = 0
+  let fromTrace = 0
+  let fromRecheck = 0
+  let atOrAboveThreshold = 0
+  let max = null
+  for (const s of scores) {
+    for (const d of s.details) {
+      if (d.status === 'injected') continue
+      total += 1
+      if (d.channel === 'keyword') {
+        keywordOnly += 1
+        continue
+      }
+      if (typeof d.distance !== 'number') continue
+      vectorKnown += 1
+      if (d.source === 'recheck') fromRecheck += 1
+      else fromTrace += 1
+      max = max === null ? d.distance : Math.max(max, d.distance)
+      if (maxDistance !== null && d.distance >= maxDistance) atOrAboveThreshold += 1
+    }
+  }
+  // `total` 三分类**互斥且穷尽**：有向量距离 / 仅关键词通道（无距离概念）/ 连重搜都够不着
+  return {
+    total,
+    keywordOnly,
+    vectorKnown,
+    fromTrace,
+    fromRecheck,
+    atOrAboveThreshold,
+    unreachable: total - keywordOnly - vectorKnown,
+    maxDistance: max,
+  }
+}
+
 /**
  * 未召回归因的**值域与药方**。键必须与 `droppedReason` 的原值**逐字一致**
  * （`not_topk` 是下划线，不是 `not-topk`）——首版把键写成 `not-topk`，结果明细表里
@@ -197,11 +391,13 @@ export function summarizeGroup(scores) {
 export const MISS_RX = {
   threshold: '松阈值（MEMORY_MAX_DISTANCE）',
   status: '查该节状态（死知识/废弃）',
-  not_topk: '调 topK 或看排序（过闸了，但没进融合 topK）',
+  not_topk: '调 topK 或看排序（探针池里过闸了，但没进融合 topK）',
   budget: '加注入预算（进了融合 topK，整节放不下）',
   section_dup: '同节已有更优片代表（整节照样注入，属正常）',
+  below_topk:
+    '调 topK 或调池深（被某条查询召回过、也过了阈值，输在跨查询合并后的 topK 截断——与 not_topk 同药方，只是发现路径不同）',
   'not-recalled':
-    '既不在注入集、也不在探针池、也不在融合 topK —— **覆盖洞**，或「只在改写查询里被召回却排不进 topK」（后者因合并后只留 topK 而不可观测）',
+    '**覆盖洞**（任何一条查询的融合池都够不着，阈值放宽到 1 也一样）——先补语料/补锚点，不是调参能救的',
 }
 
 /**
@@ -251,15 +447,32 @@ export function checkEmbedHealth(results) {
 }
 
 /**
- * **B5 降级硬闸**：逐条检查嵌入链是否**完整**工作（票面字面口径 = 钝判据 + 锐判据）。
+ * **合法空结果**的 `reason` 白名单——`runRetrievalChain` 会返回的值的**闭集**里，
+ * 除 `ok` 之外的全部成员（逐一对齐 `memory/index.ts` 的四处 `empty(...)` 调用）。
+ *
+ * 这三个都答得出「为什么没有命中」（没够着 / 被 X4 状态挡光 / 预算放不下），是**真实
+ * 的检索结局**，不是链段降级——拿它们拒报告等于让一次正常的空结果变成「拿不到数」。
+ */
+export const LEGIT_EMPTY_REASONS = new Set(['no-hit', 'filtered-empty', 'budget-exhausted'])
+
+/**
+ * **B5 降级硬闸**：逐条检查嵌入链是否**完整**工作（钝判据 + 锐判据）。
  *
  * 两条判据缺一不可：`queryEmbedOk` 逐趟布尔（锐，见 `checkEmbedHealth`）——它答「这趟
- * 查询的向量通道有没有跑」；`reason === 'ok'`（钝）——整条链若整体降级会落 `embed-failed`。
- * 只留锐的那条会漏「嵌入全好但链段整条没跑」；只留钝的那条会漏**部分**查询嵌入失败。
+ * 查询的向量通道有没有跑」；`reason` 落在**合法空结果白名单**之外（钝）——整条链若整体
+ * 降级会落 `embed-failed`。只留锐的那条会漏「嵌入全好但链段整条没跑」；只留钝的那条会漏
+ * **部分**查询嵌入失败。
+ *
+ * 钝判据为什么是**白名单**而不是 `reason === 'embed-failed'`：这条路径上
+ * （`runRetrievalChain`）`embed-failed` 的必要条件是**没有任何一条查询嵌入成功**，
+ * 而那必然让每趟 `queryEmbedOk` 全 false ⇒ **锐判据已经拦下了**。把钝判据一并收窄到
+ * `embed-failed`，它就退化成锐判据的副本、永远拦不到新东西。留着白名单形态，它的实际
+ * 职责是「**值域外即拒**」：`memory/index.ts` 将来新增一个 reason（无论好坏）都会让报告
+ * 出不来、逼一次显式对齐，而不是静默略过——与 `checkAttributionCoverage` 同一条设计。
  *
  * ⚠️ **本条只适用于黄金集条目**：canary 的必不中条目**按设计就是空结果**
- * （`reason` 恒为 `no-hit`/`filtered-empty`/`budget-exhausted`），拿 `reason !== 'ok'`
- * 卡它等于要求一条恒真判据。canary 侧走 B2 的期望分 + `checkEmbedHealth`。
+ * （`reason` 恒为 `no-hit`/`filtered-empty`/`budget-exhausted`），它会一头撞上白名单
+ * 之外——canary 侧走 B2 的期望分 + `checkEmbedHealth`。
  *
  * @param results `Array<{ id, result }>`
  */
@@ -267,7 +480,7 @@ export function checkDegradation(results) {
   const offenders = [...checkEmbedHealth(results).offenders]
   for (const { id, result } of results) {
     if (result.stats.queryTraces.some((q) => !q.queryEmbedOk)) continue
-    if (result.reason !== 'ok') {
+    if (result.reason !== 'ok' && !LEGIT_EMPTY_REASONS.has(result.reason)) {
       offenders.push({ id, kind: 'reason-not-ok', detail: `reason=${result.reason}` })
     }
   }
@@ -359,6 +572,20 @@ export function evaluateCanary({ canary, result }) {
 // ─── 报告渲染（纯函数，B1 的确定性面） ─────────────────
 
 /**
+ * 明细表里一个未命中锚点的归因标签：`<归因>[ q<查询> rank=<名次>][ dist=<距离>]`。
+ *
+ * **距离对所有未命中锚点都打**（不只是重搜判出来的那些）：§二 的「未召回锚点读数」
+ * 取的就是这批 `distance` 的最大值，不逐行打出的话那个数字在报告里**无处可核**。
+ * `below_topk` 另带「哪条查询捞到的、池内第几名」——它凭什么不是覆盖洞，得看得见。
+ */
+export function missLabel(d) {
+  const key = d.drop ?? d.status
+  const at = key === 'below_topk' ? ` q${d.queryIndex} rank=${d.rank}` : ''
+  const dist = typeof d.distance === 'number' ? ` dist=${fmt4(d.distance)}` : ''
+  return `${key}${at}${dist}`
+}
+
+/**
  * 渲染基线报告（Markdown）。**纯函数、零时间量**——同输入必同输出，这是 B1
  * 「同树同库连跑两遍逐字节一致」的实现面。
  */
@@ -381,6 +608,7 @@ export function renderReport(ctx) {
     canary,
     negatives,
     maxDistance,
+    recheck,
   } = ctx
   const L = []
   const counts = GOLDEN_KINDS.map((k) => `${k}=${goldenCounts[k] ?? 0}`).join(' / ')
@@ -407,8 +635,10 @@ export function renderReport(ctx) {
   )
   L.push(`| 黄金集冻结基点 | \`${goldenData.meta?.frozenCorpusRef ?? 'n/a'}\` |`)
   L.push(`| 语料新鲜度（golden-check） | liveDocs=${liveDocs}，rotten=${rotten} |`)
+  // 三个数全从 `indexFreshness` 算出来：写死 `checked/checked` 与 `stale=0` 的话，
+  // 这条读数就只能反映前置闸拦没拦住，而**闸拦下时本报告根本不会生成**——即恒真字面量。
   L.push(
-    `| 索引新鲜度（\`chunks.origin_id\` vs 工作树 \`git hash-object\`） | ${indexFreshness.checked}/${indexFreshness.checked} 份同步（stale=0） |`
+    `| 索引新鲜度（\`chunks.origin_id\` vs 工作树 \`git hash-object\`） | ${indexFreshness.checked - indexFreshness.stale}/${indexFreshness.checked} 份同步（stale=${indexFreshness.stale}） |`
   )
   L.push(`| MEMORY_MAX_DISTANCE | ${params.maxDistance} |`)
   L.push(`| MEMORY_TOP_K | ${params.topK} |`)
@@ -434,7 +664,26 @@ export function renderReport(ctx) {
   L.push('')
   L.push(
     `> 「集均」= 各条算术平均（票面 §一 口径）；「合计」= 总命中 / 总应命中（micro，防长条目被短条目稀释）。` +
-      `阈值前命中率 = \`expect\` 里出现在探针池、且被距离阈值（${maxDistance}）挡掉的节占比 —— 它答的是「阈值该不该松」。`
+      `阈值前命中率 = \`expect\` 里**被距离阈值（${maxDistance}）挡下**的节占比，来源 = 探针池 + 逐查询重搜补测` +
+      '（探针池只取**首个嵌入成功的查询**，光靠它看不见改写查询那条路上的阈值拦截）。'
+  )
+  L.push('')
+  // §二 结论的证据面：不是「阈值前命中率 = 0」这个指标本身（它有结构性盲区，见上），
+  // 而是「未召回锚点各自的距离」这个更硬的读数。
+  const missDist = summarizeMissDistances({ scores, maxDistance })
+  L.push(
+    `> **未召回锚点读数**（「阈值该不该松」的直接证据；本次逐查询重搜覆盖 **${recheck.entries}** 条条目）：` +
+      `未进注入集 **${missDist.total}** 处，其中 ` +
+      `**${missDist.vectorKnown}** 处取到真实向量距离（流水自带 ${missDist.fromTrace} 处 + 重搜补测 ${missDist.fromRecheck} 处，` +
+      `后者取其各查询池内的**最小**距离 = 它最好的一次机会）、**最大 ${fmt4(missDist.maxDistance)}**（出处见明细行 \`dist=\`）` +
+      (missDist.keywordOnly > 0
+        ? `；另 **${missDist.keywordOnly}** 处仅关键词通道召回（无距离概念）`
+        : '') +
+      `。距离 ≥ 阈值的有 **${missDist.atOrAboveThreshold}** 处 ⇒ ` +
+      (missDist.atOrAboveThreshold === 0
+        ? '**阈值一条都没杀**，松阈值救不回任何一条未召回锚点——瓶颈在融合 topK 排序与真实覆盖洞。'
+        : `松阈值可救回这 ${missDist.atOrAboveThreshold} 处。`) +
+      `连重搜（阈值放宽到 ${RECHECK_MAX_DISTANCE}）都够不着的 **${missDist.unreachable}** 处 = 真覆盖洞。`
   )
   L.push('')
 
@@ -454,7 +703,7 @@ export function renderReport(ctx) {
     for (const s of scores.filter((x) => x.kind === kind)) {
       const miss = s.details
         .filter((d) => d.status !== 'injected')
-        .map((d) => `${d.docPath} :: ${d.sectionAnchor}（${d.drop ?? d.status}）`)
+        .map((d) => `${d.docPath} :: ${d.sectionAnchor}（${missLabel(d)}）`)
         .join('<br>')
       L.push(
         `| ${s.id} | ${s.reason} | ${s.expectTotal} | ${s.hit} | ${fmt4(s.recall)} | ${s.preThreshold} | ${miss || '—'} |`
@@ -508,7 +757,7 @@ export function renderReport(ctx) {
       bucket.set(key, (bucket.get(key) ?? 0) + 1)
     }
   }
-  L.push('| 归因 | 锚点数 | 药方 |')
+  L.push('| 归因 | 处数 | 药方 |')
   L.push('| --- | --- | --- |')
   // 遍历**值域**而不是「数据里出现的键」：漏登记一个键的后果是整类静默消失（首版实测），
   // 故这里以 `MISS_RX` 为准，值域外的键由 `checkAttributionCoverage` 在落盘前拦下。
@@ -521,10 +770,20 @@ export function renderReport(ctx) {
   const totalMiss = [...bucket.values()].reduce((a, b) => a + b, 0)
   if (totalMiss === 0) L.push('| — | 0 | 全部应命中锚点均已注入 |')
   L.push('')
+  // 计数单位是 **(条目, 锚点) 对**，不是锚点：同一节被两条条目标为 `expect` 时算两处
+  // （两条各自独立地没命中）。去重数一并给出，免得读者把「12 处」读成「12 个节」。
+  const distinctMiss = new Set()
+  for (const s of scores) {
+    for (const d of s.details) {
+      if (d.status === 'injected') continue
+      distinctMiss.add(anchorKey(d.docPath, d.sectionAnchor))
+    }
+  }
   L.push(
-    `> 未召回归因合计 ${totalMiss} 个锚点（全部落在已登记值域内）。` +
-      '**口径**：含负例条目的 `expect` 锚点——§ 三 的两张明细表只列 real / constructed，' +
-      '故两张表的未命中数之和会小于本表的合计（差额 = 负例的未命中）。'
+    `> 未召回归因合计 ${totalMiss} **处**（全部落在已登记值域内）。**口径**：含负例条目的 ` +
+      '`expect` 锚点——§ 三 的两张明细表只列 real / constructed，故两张表的未命中数之和会小于' +
+      `本表的合计（差额 = 负例的未命中）。计数单位 = **(条目, 锚点) 对**，去重后 ${distinctMiss.size} 个不同锚点` +
+      (distinctMiss.size === totalMiss ? '。' : '（同一节被多条条目标为 `expect` 时按对计）。')
   )
   L.push('')
 
@@ -656,9 +915,14 @@ export async function main(argv = process.argv.slice(2)) {
     args.db ?? path.join(root, 'packages/server', 'data', 'cat-study-dev.db')
   )
   if (!existsSync(dbPath)) {
+    // 提示语按「缺省」与「显式传了 --db」分叉：对已经传了 --db 的人再讲 worktree 是噪声，
+    // 他此刻要听的是「你给的这个路径不存在」。
     process.stderr.write(
       `[eval:retrieval:baseline] 库不存在：${dbPath}\n` +
-        '  （worktree 内没有 data/*.db——它是未跟踪产物；跑批请显式 --db 指向主仓库的库）\n'
+        (args.db
+          ? '  （--db 指定的路径不存在：核对拼写，或先确认该库已生成）\n'
+          : '  （缺省库路径指向仓库内的 data/*.db——worktree 内没有它，它是未跟踪产物；' +
+            '跑批请显式 --db 指向主仓库的库）\n')
     )
     return 2
   }
@@ -672,18 +936,17 @@ export async function main(argv = process.argv.slice(2)) {
   const { setDb } = await import(
     pathToFileURL(path.join(root, 'packages/server/src/db/index.js')).href
   )
-  const { initRepository } = await import(
+  const { initRepository, chunks: chunksRepo } = await import(
     pathToFileURL(path.join(root, 'packages/server/src/db/repository/index.js')).href
   )
   setDb(db)
   initRepository(db)
 
-  const { runRetrievalChain, currentRetrievalParams } = await import(
+  const { runRetrievalChain, currentRetrievalParams, vectorToBlob } = await import(
     pathToFileURL(path.join(root, 'packages/server/src/memory/index.js')).href
   )
-  const { startEmbeddingSidecar, stopEmbeddingSidecar, getEmbeddingStatus } = await import(
-    pathToFileURL(path.join(root, 'packages/server/src/memory/embedding.js')).href
-  )
+  const { startEmbeddingSidecar, stopEmbeddingSidecar, getEmbeddingStatus, embedText } =
+    await import(pathToFileURL(path.join(root, 'packages/server/src/memory/embedding.js')).href)
 
   try {
     const dbRows = db.prepare('SELECT count(*) AS c FROM chunks').get().c
@@ -790,11 +1053,31 @@ export async function main(argv = process.argv.slice(2)) {
     // ─── 逐条跑批 ───────────────────────────────────────
     const results = []
     const scores = []
+    const rechecked = []
     for (const entry of goldenData.entries) {
       const queries = [entry.query, ...entry.rewritten]
       const r = await runRetrievalChain(queries, { startedAt: Date.now() })
       results.push({ id: entry.id, result: r })
-      scores.push(scoreEntry({ entry, result: r }))
+      let score = scoreEntry({ entry, result: r })
+      // 只要这条有**任何**未注入锚点就跑重搜：`below_topk` 的判别需要它，§二 的
+      // 「最小距离」读数也需要它（已有归因的锚点虽然不再改判，但读数要换成紧界）。
+      if (score.details.some((d) => d.status !== 'injected')) {
+        const perQuery = await collectRecheckPools({
+          queries,
+          maxDistance: RECHECK_MAX_DISTANCE,
+          embed: embedText,
+          search: (vector, q, maxDistance) =>
+            chunksRepo.searchChunksHybrid(
+              vectorToBlob(vector),
+              q,
+              chunksRepo.HYBRID_POOL_PER_QUERY,
+              maxDistance
+            ),
+        })
+        score = scoreEntry({ entry, result: r, recheck: buildRecheckIndex({ perQuery }) })
+        rechecked.push(entry.id)
+      }
+      scores.push(score)
     }
 
     // ─── B5 降级硬闸 ────────────────────────────────────
@@ -843,6 +1126,7 @@ export async function main(argv = process.argv.slice(2)) {
       canary: canaryResults,
       negatives,
       maxDistance: params.maxDistance,
+      recheck: { entries: rechecked.length },
     })
 
     mkdirSync(path.dirname(outFile), { recursive: true })
@@ -872,6 +1156,7 @@ export async function main(argv = process.argv.slice(2)) {
           },
         },
         negatives: { n: negatives.length, red: redCount },
+        rechecked,
         canary: canaryResults.map((c) => ({ id: c.id, recall: c.recall, ok: c.ok })),
       },
       `[eval:retrieval:baseline] entries=${goldenData.entries.length} ` +

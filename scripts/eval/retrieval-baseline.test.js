@@ -23,40 +23,70 @@ import {
   CANARY_HIT_ID,
   CANARY_MISS_ID,
   CANARY_MISS_QUERY,
+  LEGIT_EMPTY_REASONS,
   MISS_RX,
+  RECHECK_MAX_DISTANCE,
   REPO_ROOT,
   anchorKey,
   buildCanaries,
+  buildRecheckIndex,
   checkAttributionCoverage,
   checkCorpusGate,
   checkDegradation,
   checkEmbedHealth,
   checkIndexFreshness,
+  collectRecheckPools,
   evaluateCanary,
   fmt4,
   localDate,
+  missLabel,
   parseArgs,
   renderReport,
   scoreEntry,
   summarizeGroup,
+  summarizeMissDistances,
 } from './retrieval-baseline.mjs'
 
 // ─── 夹具 ─────────────────────────────────────────────
 
 /** 造一个链段结果（只保留评分要读的字段；形状对齐 `MemoryContextResult`） */
-function result({ sections = [], candidates = [], queryTraces = [], reason = 'ok' } = {}) {
-  return { text: '', reason, sections, stats: { candidates, queryTraces } }
+function result({
+  sections = [],
+  candidates = [],
+  queryTraces = [],
+  reason = 'ok',
+  thresholdMaxDistance = 0.6,
+} = {}) {
+  return {
+    text: '',
+    reason,
+    sections,
+    stats: { candidates, queryTraces, thresholdMaxDistance },
+  }
 }
 
 /** 造一个已注入的节 */
 const sec = (docPath, sectionAnchor) => ({ docPath, sectionAnchor })
 
-/** 造一条候选流水（`source` + `droppedReason` 是评分唯一读的两列） */
-const cand = (docPath, sectionAnchor, source, droppedReason) => ({
+/** 造一条候选流水（`source` + `droppedReason` 是评分读的判别列，距离/通道供 §二 读数用） */
+const cand = (docPath, sectionAnchor, source, droppedReason, extra = {}) => ({
   docPath,
   sectionAnchor,
   source,
   droppedReason,
+  distance: 0.3,
+  channel: 'vector',
+  ...extra,
+})
+
+/** 造一条重搜命中（`collectRecheckPools` 的池内元素形状） */
+const poolHit = (docPath, sectionAnchor, rank, extra = {}) => ({
+  docPath,
+  sectionAnchor,
+  rank,
+  channel: 'vector',
+  distance: 0.4,
+  ...extra,
 })
 
 /** 造一个黄金集条目的最小形状 */
@@ -181,6 +211,290 @@ describe('scoreEntry — 单条评分与归因', () => {
   })
 })
 
+// ─── 逐查询重搜（below_topk / 覆盖洞 的判别面） ─────────
+
+describe('collectRecheckPools / buildRecheckIndex — 逐查询重搜', () => {
+  const hit = (docPath, sectionAnchor, distance = 0.4, channel = 'vector') => ({
+    row: { doc_path: docPath, section_anchor: sectionAnchor, distance },
+    channel,
+  })
+
+  it('逐条查询跑一遍，映射成 {docPath, rank, channel, distance}（rank = 池内名次，0 起）', async () => {
+    const perQuery = await collectRecheckPools({
+      queries: ['q0', 'q1'],
+      maxDistance: RECHECK_MAX_DISTANCE,
+      embed: async () => ({ ok: true, vector: [1, 0] }),
+      search: (v, q) => (q === 'q0' ? [hit('a.md', '一节'), hit('b.md', '二节')] : []),
+    })
+    expect(perQuery).toEqual([
+      [
+        { docPath: 'a.md', sectionAnchor: '一节', rank: 0, channel: 'vector', distance: 0.4 },
+        { docPath: 'b.md', sectionAnchor: '二节', rank: 1, channel: 'vector', distance: 0.4 },
+      ],
+      [],
+    ])
+  })
+
+  it('宽阈值是**注入**进去的，且必须比生产缺省阈值松（否则「被阈值杀」这类永远看不见）', async () => {
+    const seen = []
+    await collectRecheckPools({
+      queries: ['q0'],
+      maxDistance: RECHECK_MAX_DISTANCE,
+      embed: async () => ({ ok: true, vector: [1, 0] }),
+      search: (v, q, max) => {
+        seen.push(max)
+        return []
+      },
+    })
+    expect(seen).toEqual([RECHECK_MAX_DISTANCE])
+    expect(RECHECK_MAX_DISTANCE).toBeGreaterThan(0.6)
+  })
+
+  it('该查询嵌入失败 ⇒ 空数组（不抛；调用方只 for..of，不必防空）', async () => {
+    const perQuery = await collectRecheckPools({
+      queries: ['q0', 'q1'],
+      maxDistance: RECHECK_MAX_DISTANCE,
+      embed: async (q) => (q === 'q0' ? { ok: false, reason: 'x' } : { ok: true, vector: [1] }),
+      search: () => [hit('a.md', '一节')],
+    })
+    expect(perQuery[0]).toEqual([])
+    expect(perQuery[1]).toHaveLength(1)
+  })
+
+  it('纯关键词命中记 distance=null（库层填的是 maxDistance 哨兵，不是真距离）', async () => {
+    const perQuery = await collectRecheckPools({
+      queries: ['q0'],
+      maxDistance: RECHECK_MAX_DISTANCE,
+      embed: async () => ({ ok: true, vector: [1] }),
+      search: () => [hit('a.md', '一节', RECHECK_MAX_DISTANCE, 'keyword')],
+    })
+    expect(perQuery[0][0].distance).toBe(null)
+    expect(perQuery[0][0].channel).toBe('keyword')
+  })
+
+  it('buildRecheckIndex 取**最小距离**那次命中，识别点（查询/名次）跟着它走——不许「q0 的名次配 q3 的距离」', () => {
+    const idx = buildRecheckIndex({
+      perQuery: [
+        [poolHit('a.md', '一节', 3, { distance: 0.55 })],
+        [poolHit('a.md', '一节', 0, { distance: 0.3 }), poolHit('b.md', '二节', 2)],
+      ],
+    })
+    expect(idx.get(anchorKey('a.md', '一节'))).toEqual({
+      queryIndex: 1,
+      rank: 0,
+      channel: 'vector',
+      distance: 0.3,
+      keywordHit: false,
+    })
+    expect(idx.get(anchorKey('b.md', '二节'))).toMatchObject({ queryIndex: 1, rank: 2 })
+  })
+
+  it('同距时保留**更早**的查询（tie-break 确定 ⇒ B1 复跑可比）', () => {
+    const idx = buildRecheckIndex({
+      perQuery: [
+        [poolHit('a.md', '一节', 3, { distance: 0.4 })],
+        [poolHit('a.md', '一节', 0, { distance: 0.4 })],
+      ],
+    })
+    expect(idx.get(anchorKey('a.md', '一节'))).toMatchObject({ queryIndex: 0, rank: 3 })
+  })
+
+  it('关键词命中单独记：只被关键词捞到 ⇒ distance 恒 null、keywordHit=true', () => {
+    const idx = buildRecheckIndex({
+      perQuery: [[poolHit('a.md', '一节', 1, { channel: 'keyword', distance: null })]],
+    })
+    expect(idx.get(anchorKey('a.md', '一节'))).toEqual({
+      queryIndex: 0,
+      rank: 1,
+      channel: 'keyword',
+      distance: null,
+      keywordHit: true,
+    })
+  })
+
+  it('先关键词、后向量 ⇒ keywordHit 保留为 true，识别点换成那次向量命中', () => {
+    const idx = buildRecheckIndex({
+      perQuery: [
+        [poolHit('a.md', '一节', 1, { channel: 'keyword', distance: null })],
+        [poolHit('a.md', '一节', 4, { distance: 0.5 })],
+      ],
+    })
+    expect(idx.get(anchorKey('a.md', '一节'))).toEqual({
+      queryIndex: 1,
+      rank: 4,
+      channel: 'vector',
+      distance: 0.5,
+      keywordHit: true,
+    })
+  })
+
+  it('空池 ⇒ 空索引（Map，不是 undefined——调用方零分支）', () => {
+    expect(buildRecheckIndex({ perQuery: [[], []] }).size).toBe(0)
+  })
+})
+
+describe('scoreEntry — 重搜把 below_topk 从覆盖洞里拆出来', () => {
+  /** 造一个重搜索引（只放一条锚点，其余锚点按「重搜也够不着」处理） */
+  const recheckFor = (a, rc) => new Map([[anchorKey(a.doc_path, a.section_anchor), rc]])
+  const rc = (over = {}) => ({
+    queryIndex: 1,
+    rank: 5,
+    channel: 'vector',
+    distance: 0.4,
+    keywordHit: false,
+    ...over,
+  })
+
+  it('流水两条路都没出现、重搜命中且距离在阈值内 ⇒ below_topk（药方是排序，不是补语料）', () => {
+    const s = scoreEntry({ entry: entry(), result: result(), recheck: recheckFor(A, rc()) })
+    expect(s.details[0]).toMatchObject({
+      status: 'below_topk',
+      drop: null,
+      queryIndex: 1,
+      rank: 5,
+      channel: 'vector',
+      distance: 0.4,
+    })
+    expect(s.hit).toBe(0)
+    expect(s.preThreshold).toBe(0) // 它不是被阈值杀的
+  })
+
+  it('重搜命中但真实距离 ≥ 阈值 ⇒ 落 threshold 桶（**旧探针池结构上看不见这一类**）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: recheckFor(A, rc({ distance: 0.75 })),
+    })
+    expect(s.details[0]).toMatchObject({ status: 'dropped', drop: 'threshold', distance: 0.75 })
+    expect(s.preThreshold).toBe(1) // 阈值前命中率把它算进来（它正是「松阈值能救」的那类）
+  })
+
+  it('阈值取自**链段落的参数快照**（不是脚本另读一遍 env——两处读会各自漂移）', () => {
+    const r = result({ thresholdMaxDistance: 0.35 })
+    const s = scoreEntry({
+      entry: entry(),
+      result: r,
+      recheck: recheckFor(A, rc({ distance: 0.5 })),
+    })
+    expect(s.details[0].drop).toBe('threshold') // 0.5 ≥ 0.35 ⇒ 阈值杀的（若读成 0.6 会误判成 below_topk）
+  })
+
+  it('关键词通道命中 ⇒ below_topk（无距离概念，生产里也不受阈值约束）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: recheckFor(A, rc({ channel: 'keyword', distance: null, keywordHit: true })),
+    })
+    expect(s.details[0]).toMatchObject({ status: 'below_topk', distance: null })
+  })
+
+  it('关键词捞到过、但另一次向量命中的距离 ≥ 阈值 ⇒ 仍判 below_topk（关键词通道本就不受阈值约束）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: recheckFor(A, rc({ distance: 0.9, keywordHit: true })),
+    })
+    expect(s.details[0].status).toBe('below_topk')
+  })
+
+  it('重搜也够不着 ⇒ not-recalled（真覆盖洞）', () => {
+    const s = scoreEntry({ entry: entry(), result: result(), recheck: new Map() })
+    expect(s.details[0]).toMatchObject({ status: 'not-recalled', drop: null })
+  })
+
+  it('不传 recheck ⇒ 关掉重搜（旧口径，两条路都没出现即覆盖洞）', () => {
+    const s = scoreEntry({ entry: entry(), result: result() })
+    expect(s.details[0].status).toBe('not-recalled')
+  })
+
+  it('流水行自带距离/通道一并进明细，并标 `source: trace`（§二 读数要按来源分列）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result({
+        candidates: [cand(A.doc_path, A.section_anchor, 'probe', 'threshold', { distance: 0.9 })],
+      }),
+    })
+    expect(s.details[0]).toMatchObject({
+      status: 'dropped',
+      drop: 'threshold',
+      distance: 0.9,
+      source: 'trace',
+    })
+  })
+
+  it('重搜判出来的标 `source: recheck`（报告要能说清哪个数是从哪来的）', () => {
+    const s = scoreEntry({ entry: entry(), result: result(), recheck: recheckFor(A, rc()) })
+    expect(s.details[0].source).toBe('recheck')
+  })
+})
+
+describe('summarizeMissDistances — §二 结论的证据面', () => {
+  const det = (over = {}) => ({
+    docPath: 'd',
+    sectionAnchor: 's',
+    status: 'dropped',
+    drop: 'x',
+    ...over,
+  })
+
+  it('三分类互斥且穷尽：有向量距离 / 仅关键词 / 够不着；距离按来源分列', () => {
+    const r = summarizeMissDistances({
+      scores: [
+        {
+          details: [
+            det({ distance: 0.5, channel: 'vector', source: 'trace' }),
+            det({ distance: 0.9, channel: 'both', source: 'recheck' }),
+            det({ distance: null, channel: 'keyword' }),
+            det({ distance: null, channel: null }), // not-recalled：连重搜都没够着
+            det({ status: 'injected', drop: null }), // 命中的不算
+          ],
+        },
+      ],
+      maxDistance: 0.6,
+    })
+    expect(r).toEqual({
+      total: 4,
+      keywordOnly: 1,
+      vectorKnown: 2,
+      fromTrace: 1,
+      fromRecheck: 1,
+      atOrAboveThreshold: 1,
+      unreachable: 1,
+      maxDistance: 0.9,
+    })
+    // 三分类必须是个划分（否则报告里「合计 N 处」与三个子数对不上账）
+    expect(r.keywordOnly + r.vectorKnown + r.unreachable).toBe(r.total)
+  })
+
+  it('全在阈值内 ⇒ atOrAboveThreshold = 0（报告里那句「阈值一条都没杀」的判据）', () => {
+    const r = summarizeMissDistances({
+      scores: [{ details: [det({ distance: 0.5427, channel: 'vector' })] }],
+      maxDistance: 0.6,
+    })
+    expect(r.atOrAboveThreshold).toBe(0)
+    expect(r.maxDistance).toBe(0.5427)
+  })
+
+  it('一个距离都没有 ⇒ maxDistance = null（不是 -Infinity / NaN）', () => {
+    const r = summarizeMissDistances({ scores: [{ details: [det()] }], maxDistance: 0.6 })
+    expect(r.maxDistance).toBe(null)
+    expect(r.unreachable).toBe(1)
+  })
+
+  it('空集 ⇒ 全零、不抛', () => {
+    expect(summarizeMissDistances({ scores: [], maxDistance: 0.6 })).toEqual({
+      total: 0,
+      keywordOnly: 0,
+      vectorKnown: 0,
+      fromTrace: 0,
+      fromRecheck: 0,
+      atOrAboveThreshold: 0,
+      unreachable: 0,
+      maxDistance: null,
+    })
+  })
+})
+
 // ─── summarizeGroup ───────────────────────────────────
 
 describe('summarizeGroup — 集均 vs 合计', () => {
@@ -233,15 +547,58 @@ describe('checkEmbedHealth / checkDegradation — B5 降级硬闸', () => {
     expect(h.offenders[0]).toMatchObject({ id: 'G01', kind: 'partial-embed-failed' })
   })
 
-  it('嵌入全好但 reason 非 ok ⇒ checkDegradation 也拦（钝判据）', () => {
+  it('**合法空结果**（no-hit / filtered-empty / budget-exhausted）不算降级——拿它拒报告 = 正常空结果变成拿不到数', () => {
+    for (const reason of ['no-hit', 'filtered-empty', 'budget-exhausted']) {
+      const d = checkDegradation([
+        {
+          id: 'G02',
+          result: result({ reason, queryTraces: [{ queryIndex: 0, queryEmbedOk: true }] }),
+        },
+      ])
+      expect(d.ok).toBe(true)
+    }
+  })
+
+  it('整链降级（embed-failed）⇒ 拦（钝判据）', () => {
     const d = checkDegradation([
       {
         id: 'G02',
-        result: result({ reason: 'no-hit', queryTraces: [{ queryIndex: 0, queryEmbedOk: true }] }),
+        result: result({
+          reason: 'embed-failed',
+          queryTraces: [{ queryIndex: 0, queryEmbedOk: true }],
+        }),
       },
     ])
     expect(d.ok).toBe(false)
     expect(d.offenders[0]).toMatchObject({ id: 'G02', kind: 'reason-not-ok' })
+  })
+
+  it('**值域外**的 reason 也拦（白名单形态的意义：新增 reason 必须显式对齐，不许静默放行）', () => {
+    const d = checkDegradation([
+      {
+        id: 'G03',
+        result: result({
+          reason: 'some-new-reason',
+          queryTraces: [{ queryIndex: 0, queryEmbedOk: true }],
+        }),
+      },
+    ])
+    expect(d.ok).toBe(false)
+    expect(d.offenders[0].detail).toContain('some-new-reason')
+  })
+
+  it('白名单与链段实际值域**逐字对齐**（静态断言：链段新增一个 reason 就会红）', () => {
+    const src = readFileSync(
+      path.join(REPO_ROOT, 'packages', 'server', 'src', 'memory', 'index.ts'),
+      'utf8'
+    )
+    const start = src.indexOf('export async function runRetrievalChain(')
+    const end = src.indexOf('function renderOrder(')
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start) // 两个锚点任一改名 ⇒ 空切片会让下面的断言恒真
+    const reasons = [...src.slice(start, end).matchAll(/empty\('([^']+)'/g)].map((m) => m[1])
+    // `runRetrievalChain` 能返回的非 ok reason 是**闭集**：白名单 + embed-failed（后者由锐判据兜）
+    expect(new Set(reasons)).toEqual(new Set([...LEGIT_EMPTY_REASONS, 'embed-failed']))
   })
 
   it('全好 ⇒ 放行', () => {
@@ -319,10 +676,15 @@ describe('checkAttributionCoverage — 归因值域自检', () => {
   })
 
   it('值域表的键与链段实际会产出的值逐字对齐（防未来加值静默）', () => {
-    // droppedReason 的三个 probe 值与一个 final 值 + 本脚本自造的 not-recalled
-    for (const k of ['threshold', 'status', 'not_topk', 'budget', 'not-recalled']) {
+    // droppedReason 的三个 probe 值与一个 final 值 + 本脚本自造的 below_topk / not-recalled
+    for (const k of ['threshold', 'status', 'not_topk', 'budget', 'below_topk', 'not-recalled']) {
       expect(MISS_RX).toHaveProperty(k)
     }
+  })
+
+  it('重搜判出来的 below_topk 也在值域内（它是本脚本自造的状态，最易漏登记）', () => {
+    const c = checkAttributionCoverage([{ details: [{ status: 'below_topk', drop: null }] }])
+    expect(c.ok).toBe(true)
   })
 })
 
@@ -433,7 +795,40 @@ describe('renderReport — 确定性与内容面', () => {
         hit: 0,
         recall: 0,
         preThreshold: 1,
-        details: [{ docPath: 'd2', sectionAnchor: 's2', status: 'dropped', drop: 'threshold' }],
+        details: [
+          {
+            docPath: 'd2',
+            sectionAnchor: 's2',
+            status: 'dropped',
+            drop: 'threshold',
+            distance: 0.75,
+            channel: 'vector',
+          },
+        ],
+        forbidHit: [],
+      },
+      {
+        id: 'C02',
+        kind: 'constructed',
+        reason: 'ok',
+        expectTotal: 2,
+        hit: 0,
+        recall: 0,
+        preThreshold: 0,
+        details: [
+          {
+            docPath: 'd3',
+            sectionAnchor: 's3',
+            status: 'below_topk',
+            drop: null,
+            distance: 0.45,
+            channel: 'vector',
+            queryIndex: 1,
+            rank: 5,
+          },
+          // 覆盖洞：连重搜都够不着 ⇒ 无距离、无通道
+          { docPath: 'd4', sectionAnchor: 's4', status: 'not-recalled', drop: null },
+        ],
         forbidHit: [],
       },
     ],
@@ -471,6 +866,7 @@ describe('renderReport — 确定性与内容面', () => {
       },
     ],
     maxDistance: 0.6,
+    recheck: { entries: 2 },
   })
 
   it('同输入必同输出（B1 的实现面）', () => {
@@ -498,6 +894,71 @@ describe('renderReport — 确定性与内容面', () => {
   it('归因表遍历值域：数据里出现的键必须被列出（不许静默吞）', () => {
     const md = renderReport(ctx())
     expect(md).toContain('| threshold | 1 |')
+    expect(md).toContain('| below_topk | 1 |')
+  })
+
+  it('索引新鲜度读数**随数据变**（不是恒真的 `checked/checked` + `stale=0` 字面量）', () => {
+    expect(renderReport({ ...ctx(), indexFreshness: { checked: 13, stale: 3 } })).toContain(
+      '10/13 份同步（stale=3）'
+    )
+  })
+
+  it('§二 带未召回锚点读数：最大距离 / 阈值杀几条 / 真覆盖洞三个数都从数据算', () => {
+    const md = renderReport(ctx())
+    expect(md).toContain('未召回锚点读数')
+    expect(md).toContain('最大 0.7500')
+    expect(md).toContain('距离 ≥ 阈值的有 **1** 处')
+    expect(md).toContain(
+      `连重搜（阈值放宽到 ${RECHECK_MAX_DISTANCE}）都够不着的 **1** 处 = 真覆盖洞`
+    )
+  })
+
+  it('全在阈值内 ⇒ 报告写「阈值一条都没杀」（判词随数据翻转，不是写死的结论）', () => {
+    const c = ctx()
+    c.scores = [c.scores[2]] // 只留 below_topk(0.45) + 覆盖洞那条
+    const md = renderReport(c)
+    expect(md).toContain('阈值一条都没杀')
+    expect(md).not.toContain('松阈值可救回')
+  })
+
+  it('§七 计数单位 = (条目, 锚点) 对，并给出**去重后**的锚点数', () => {
+    const md = renderReport(ctx())
+    expect(md).toContain('未召回归因合计 3 **处**')
+    expect(md).toContain('去重后 3 个不同锚点')
+  })
+})
+
+describe('missLabel — 明细表的归因标签', () => {
+  it('below_topk 带上「哪条查询、池内第几名、距离」（判它是重搜判出来的，得可复核）', () => {
+    expect(
+      missLabel({
+        status: 'below_topk',
+        drop: null,
+        queryIndex: 2,
+        rank: 16,
+        distance: 0.4724,
+        channel: 'vector',
+      })
+    ).toBe('below_topk q2 rank=16 dist=0.4724')
+  })
+
+  it('关键词通道召回的 below_topk 不带距离（没有距离概念）', () => {
+    expect(
+      missLabel({ status: 'below_topk', drop: null, queryIndex: 0, rank: 3, distance: null })
+    ).toBe('below_topk q0 rank=3')
+  })
+
+  it('其余归因原样输出（dropped 用 drop、无 drop 用 status）+ 距离', () => {
+    expect(missLabel({ status: 'dropped', drop: 'not_topk', distance: 0.4998 })).toBe(
+      'not_topk dist=0.4998'
+    )
+    expect(missLabel({ status: 'not-recalled', drop: null, distance: null })).toBe('not-recalled')
+  })
+
+  it('**每个**带距离的未命中锚点都打出 dist（§二 的最大值要能在表里核到出处）', () => {
+    for (const key of ['threshold', 'status', 'not_topk', 'budget', 'section_dup']) {
+      expect(missLabel({ status: 'dropped', drop: key, distance: 0.5 })).toContain('dist=0.5000')
+    }
   })
 })
 
