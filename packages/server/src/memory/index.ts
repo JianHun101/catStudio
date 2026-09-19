@@ -7,6 +7,9 @@
  *   top-K 命中片 → **按节补齐**（Decisions 14「小块检索、整节返回」）→
  *   按节截断进预算 → 首尾各半排序 → 拼 system prompt。
  *
+ * 入口分工（R10）：`retrieveMemoryContext` = 生产入口（闸 → 剥 mention → 改写），
+ * `runRetrievalChain` = **改写之后**的链段本体（可注入查询集，跑批用；两处口径同源）。
+ *
  * ⚠️ 旧链（`memories` / `memories_fts` 两张表 + `embedding BLOB` 扫表向量检索）
  * 已随票辛 ⑥ **整体下线**（两表 DROP，见 `db/index.ts`）。对话原话不再入库，
  * 索引的唯一来源是飞轮扫描器（`scripts/flywheel/scan.mjs`）。
@@ -243,6 +246,10 @@ function noteEmbeddingDegradation(): void {
  * R1（P2）起 `stats` 额外承载**检索流水**（`queryTraces` / `candidates` / 参数快照
  * / `retrievalMs`）——**只采不改**：检索行为（召回、排序、注入）逐字节不变，
  * 落盘点在 `execution/reply.ts` 的 10s `Promise.race` **之外**。
+ *
+ * R10 起本函数只做**闸 → 剥 mention → 改写**，链段本体搬去 `runRetrievalChain`：
+ * 跑批脚本要喂**冻结改写文本**、跳过改写器（D2 冻结纪律），链段必须可独立调用。
+ * `t0` 仍在这一层取、经 `startedAt` 传下去 ⇒ `retrievalMs` 含改写耗时的口径不变。
  */
 export async function retrieveMemoryContext(triggerContent: string): Promise<MemoryContextResult> {
   const t0 = Date.now()
@@ -268,13 +275,52 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
   const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
   if (!cleanContent) return empty('empty-query')
 
+  const rewrites = await rewriteRetrievalQueries(cleanContent)
+  // 去重（`new Set`）搬进链段入口，它幂等；对本层逐字节等价——原话排在首位，
+  // 改写里若含原话，去重后顺序不变（`queries[0]` 仍是原话，探针池语义不漂）。
+  return runRetrievalChain([cleanContent, ...rewrites], { startedAt: t0 })
+}
+
+/**
+ * 跑**改写之后**的完整链段（R10 契约 §A2）：逐查询嵌入降级 → 混合检索 →
+ * 跨查询 RRF 合并 → 阈值过滤 → 节补齐 → 预算截断 → 渲染。
+ *
+ * 抽出它的唯一理由是**注入查询集**：改写器原先内嵌在 `retrieveMemoryContext` 里，
+ * 导出签名只吃 `triggerContent`，外部无法喂冻结改写（R10 跑批要的正是这个）。
+ * 参数 / 阈值 / 预算仍**只读 env**（`currentRetrievalParams` /
+ * `MEMORY_CONTEXT_TOKEN_BUDGET`），**不为抽取新增任何旋钮**——生产与跑批的口径
+ * 因此自动同源，不会各自漂移。
+ *
+ * @param rawQueries 待检索的查询串。**`rawQueries[0]` 必须是原始查询**——探针池的
+ *   「原话优先」语义（取首个嵌入成功者）依赖顺序。重复项在入口去重（幂等）：同一
+ *   查询在同一趟出现两次，会让同一片被 RRF 计两次分。
+ * @param opts.startedAt 起始时刻（毫秒）。缺省取链段入口时刻；生产侧由
+ *   `retrieveMemoryContext` 传自己的 `t0` 进来，使 `retrievalMs` 含改写耗时。
+ */
+export async function runRetrievalChain(
+  rawQueries: string[],
+  opts: { startedAt?: number } = {}
+): Promise<MemoryContextResult> {
+  const t0 = opts.startedAt ?? Date.now()
+  const params = currentRetrievalParams()
+  /** 见 `retrieveMemoryContext` 同款注释：每条返回路径都带公共 trace */
+  const baseStats = (): Partial<MemoryContextStats> => ({
+    thresholdMaxDistance: params.maxDistance,
+    paramTopK: params.topK,
+    paramProbeN: params.probeN,
+    retrievalMs: Date.now() - t0,
+  })
+  const empty = (
+    reason: MemoryRetrievalReason,
+    stats: Partial<MemoryContextStats> = {}
+  ): MemoryContextResult => emptyResult(reason, { ...baseStats(), ...stats })
+
+  const queries = [...new Set(rawQueries)]
+
   const budgetTokens = parseInt(
     process.env.MEMORY_CONTEXT_TOKEN_BUDGET || String(DEFAULT_CONTEXT_TOKEN_BUDGET),
     10
   )
-
-  const rewrites = await rewriteRetrievalQueries(cleanContent)
-  const queries = [...new Set([cleanContent, ...rewrites])]
 
   // 逐查询检索：嵌入成功走混合（向量 + 关键词 RRF），失败降级为仅关键词通道
   // ——关键词通道正是为短词召回设计，嵌入坏了不该连它一起废掉。
