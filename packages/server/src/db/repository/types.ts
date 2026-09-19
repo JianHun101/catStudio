@@ -89,7 +89,7 @@ export interface ChunkRow {
   /** 扫描时该 MD 的 git blob SHA（`git hash-object <path>`），增量比对键 */
   origin_id: string
   type: string | null
-  /** **节级**（Decisions 24）；硬排除集合 = superseded/deprecated，NULL = 未声明状态（放行） */
+  /** **节级**（Decisions 24）；硬排除集合 = superseded/deprecated，**但墓碑锚（`#tombstone`）放行**（C3 改向：退役件仅结论片可检索）；NULL = 未声明状态（放行） */
   status: string | null
   date: string | null
   /** JSON 数组文本（X2-a：不建关联表） */

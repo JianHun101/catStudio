@@ -19,15 +19,15 @@
 
 **D3 影响面钉死**（用户③，全部已实核行号）：
 
-| 面                      | 位置                                                                                          | 变动                                                                            |
-| ----------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| 查询谓词 ×3 + 诊断 CASE | `db/repository/chunks.ts:306/327/358/557`                                                     | C3 改向                                                                         |
-| 静态断言                | `db/repository/chunks.test.ts:298`（断言 SQL 含 `NOT IN ('superseded','deprecated')` 字面量） | 改断言为新谓词形态                                                              |
-| 状态过滤用例            | `memory/index.test.ts:398` 起（「superseded/deprecated 不召回」）                             | 改向：退役**仅墓碑片**召回、注入带 C4 标记                                      |
-| 扫描准入 + 切片         | `scripts/flywheel/scan.mjs:230`（classifyDocument）+ 切片主循环                               | C1 闸 + C2 形态                                                                 |
-| 存量清理                | 活库 ADR 0013 的 8 行正文片                                                                   | 走既有 `:445-453` 陈旧代删除（加 verdict 即触发重切）+ 扫描后对账核验           |
-| R10 基线                | `docs/eval/retrieval-baseline-*.md`                                                           | 机制落地后**重跑基线**（检索行为已变，旧基线作废）                              |
-| 黄金集 C11/N01          | `docs/eval/retrieval-golden.json`                                                             | expect 重指 0013 **墓碑锚**（曾是恒不可满足，机制落地后变为可答）——归 R9 修集票 |
+| 面                      | 位置                                                                                          | 变动                                                                                                                                     |
+| ----------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| 查询谓词 ×3 + 诊断 CASE | `db/repository/chunks.ts:306/327/358/557`                                                     | C3 改向                                                                                                                                  |
+| 静态断言                | `db/repository/chunks.test.ts:298`（断言 SQL 含 `NOT IN ('superseded','deprecated')` 字面量） | 改断言为新谓词形态                                                                                                                       |
+| 状态过滤用例            | `memory/index.test.ts:398` 起（「superseded/deprecated 不召回」）                             | 改向：退役**仅墓碑片**召回、注入带 C4 标记                                                                                               |
+| 扫描准入 + 切片         | `scripts/flywheel/scan.mjs:230`（classifyDocument）+ 切片主循环                               | C1 闸 + C2 形态                                                                                                                          |
+| 存量清理                | 活库 ADR 0013 的 8 行正文片                                                                   | 退役无 verdict 件**不进 `produced`** ⇒ 落孤儿差集被 `deleteChunksByDocPaths` 物理删；补 verdict 重扫后为该件 1 行墓碑片 + 扫描后对账核验 |
+| R10 基线                | `docs/eval/retrieval-baseline-*.md`                                                           | 机制落地后**重跑基线**（检索行为已变，旧基线作废）                                                                                       |
+| 黄金集 C11/N01          | `docs/eval/retrieval-golden.json`                                                             | expect 重指 0013 **墓碑锚**（曾是恒不可满足，机制落地后变为可答）——归 R9 修集票                                                          |
 
 **D4 定序**：P1-A（机制）→ P1-B（ADR 内容）→ P1-C（R9 修集 + 重跑基线）。P1-D（run 盘点）与 A 并行。
 
@@ -53,7 +53,8 @@
   - (b) 0006：文首加注（主链已换 chunks 飞轮，写明哪部分仍存活）→ 同 (a) 核验 → 通电。
   - (c) 0002/0005：标 `status: deprecated` + 按 C1 补 verdict（只留结论形态，用户钦定）。
   - (d) 0013：补 verdict（「C3 出站总线方案已废弃…」一行，含 C3 关键词）。
-  - (e) 重扫落库 + 对账：退役文档 chunks 行数恒 1（0013 的 8 行旧片须被 `:445-453` 路径清掉）；通电文档可检索性抽验一条。
+  - (e) 重扫落库 + 对账：退役文档 chunks 行数恒 1。**真实机制是孤儿物理删，不是陈旧代路径**（本行原写「走 `:445-453` 陈旧代删除」，已按实测更正）——退役件缺 `verdict` 时 `classifyDocument` 判 `missing-verdict` ⇒ **不进 `produced`** ⇒ 落 `!produced` 孤儿差集被 `deleteChunksByDocPaths` 三表齐删（0013 的 8 行旧片即由此消失）；补 verdict 重扫后为该件 1 行墓碑片。通电文档可检索性抽验一条。
+  - (f) **注销账**（本批不修，登记防丢）：`docs/plans/memory-flywheel.md:81` 的「查询体**必带** `status IS NULL OR status NOT IN ('superseded','deprecated')`（**NULL 放行**）」是 C3 改向前的旧谓词语义复述。定稿规格不抹历史 ⇒ 更正随该族下一票以修订注记形式落，**不在 P1-A 提交里混入 `plans/` 改动**。
 - **验收**：扫描零拒绝零孤儿；`chunks` 按 doc_path 对账（退役=1 行/active=正文切片）；抽验「C3 方案」类查询召回 0013 墓碑片且注入带标记。
 
 ### 票 P1-C · R9 修集 + 重跑基线（依赖 P1-B 落地，届时派 ds猫）

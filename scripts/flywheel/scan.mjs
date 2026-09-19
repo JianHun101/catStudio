@@ -15,6 +15,13 @@
  * 3. **孤儿物理删**（票庚 ⑥ S4）：见下方 `deleteStaleChunkRows` / `deleteChunksByDocPaths`
  *    两处调用点。**中止的轮次绝不删任何行**（`aborted` 时跳过孤儿清理）。
  *
+ * ## 退役文档 = 墓碑片（C1/C2 · 用户裁决「降级可检索」）
+ *
+ * 已退役的件（`status` ∈ `RETIRED_STATUSES`）在检索世界里**只留结论**：不切正文，
+ * 全库只产 1 个墓碑片（锚 `#tombstone`、正文 = frontmatter 的 `verdict`）。缺 `verdict`
+ * 则**拒绝入库**——否则只剩「切正文」与「产空片」两条不合法出路。
+ * 查询侧对应 C3（`db/repository/chunks.ts` 的谓词放行墓碑锚、其余退役片照挡）。
+ *
  * ## 运行形态（为什么有 tsx 自举）
  *
  * 本文件是 `.mjs`（scripts 包按 Conventions 用 JS），但它要调的三件东西都是 TS：
@@ -67,9 +74,27 @@ export const SKIP_REASONS = {
   MISSING_TYPE: 'missing-type',
   EMPTY_EVIDENCE: 'empty-evidence',
   PLAN_NOT_CRYSTALLIZED: 'plans-not-crystallized',
+  MISSING_VERDICT: 'missing-verdict',
   UNCHANGED: 'unchanged',
   NO_SEGMENTS: 'no-segments',
 }
+
+// ─── 墓碑切片（D1 · C1/C2）─────────────────────────────
+
+/**
+ * **退役状态集合**（X4 硬排除集；**查询侧唯墓碑锚放行**，见 C3）——扫描器侧声明
+ * （服务端同名常量在 `db/repository/chunks.ts`）。
+ *
+ * ⚠️ 为什么是**两份**而不是 import 一份：本文件是 `.mjs`，按文件头「运行形态」的
+ * 约定 **TS 依赖一律走动态 `import()`**（静态 import 会在自举判定**之前**求值 ⇒
+ * 原生 node 下照样炸）。而 `classifyDocument` 是同步纯函数，拿不到异步导入的常量。
+ * 于是改为**绑死**：`scan.test.js` 的静态源断言逐字读 `chunks.ts` 的谓词字面量，
+ * 与本集合比对——两侧任改一处而另一处没跟上，测试**必红**。
+ */
+export const RETIRED_STATUSES = new Set(['superseded', 'deprecated'])
+
+/** 墓碑片固定节锚（C2）——与服务端 `TOMBSTONE_ANCHOR` 同字面量 */
+export const TOMBSTONE_ANCHOR = '#tombstone'
 
 // ─── frontmatter 解析（受支持子集）────────────────────
 
@@ -250,6 +275,21 @@ export function classifyDocument({ path: relPath, content }) {
 
   const str = (k) =>
     typeof fm.data[k] === 'string' && fm.data[k].trim() !== '' ? fm.data[k].trim() : null
+
+  // ── C1 写入口闸：退役文档**必须**带 `verdict` ──
+  // 退役文档在检索世界里只剩「结论」这一片（C2），结论就从 `verdict` 来。
+  // 缺了它只有两种收场：切正文（把已废弃的方案原文喂给猫，正是用户要防的）
+  // 或产一个空墓碑片（召回得到一条什么也没说的行）。两者都不合法 ⇒ fail-closed
+  // 拒绝入库，与「frontmatter/type/evidence 三样齐」同型：**跳过且进跳过报告**。
+  const verdict = str('verdict')
+  if (RETIRED_STATUSES.has(status) && verdict === null) {
+    return {
+      ok: false,
+      reason: SKIP_REASONS.MISSING_VERDICT,
+      detail: `status=${status}`,
+    }
+  }
+
   return {
     ok: true,
     meta: {
@@ -261,7 +301,59 @@ export function classifyDocument({ path: relPath, content }) {
       supersededBy: str('superseded_by'),
       validFrom: str('valid_from'),
       validTo: str('valid_to'),
+      verdict,
     },
+  }
+}
+
+// ─── C2 墓碑片构造（纯函数）────────────────────────────
+
+/**
+ * **文档级面包屑**：`相对路径 > H1`（无 H1 则只有路径）。
+ *
+ * 切片器的面包屑是 `相对路径 > H1 > H2 > H3`（缺级则省略）；墓碑片是文档级结论，
+ * 没有节可指 ⇒ 停在第 2 级。与 `parseFrontmatter` 同一条边界规则：**未闭合的
+ * frontmatter 判为不存在**（整份当正文），否则 YAML 注释行会被误当 H1。
+ */
+export function docLevelBreadcrumb(relPath, content) {
+  const lines = content.replace(/\r\n?/g, '\n').split('\n')
+  let start = 0
+  if (lines[0] !== undefined && lines[0].trim() === '---') {
+    for (let i = 1; i < lines.length; i++) {
+      const t = lines[i].trim()
+      if (t === '---' || t === '...') {
+        start = i + 1
+        break
+      }
+    }
+  }
+  for (let i = start; i < lines.length; i++) {
+    const m = /^#\s+(.*)$/.exec(lines[i])
+    if (m) return `${relPath} > ${m[1].trim()}`
+  }
+  return relPath
+}
+
+/**
+ * **墓碑片**（C2）：退役文档**不切正文**，全库只产这一个片。
+ *
+ * 形态与 `segmentDocument` 的产物**逐字段同型**（下游写口只认这一种形状），
+ * 唯一区别是它不经回退链——锚固定、正文就是 `verdict` 一行、`partTotal` 恒 1。
+ *
+ * ⚠️ `text`（嵌入文本）与 `body` 的分工沿用切片器口径：`text = 面包屑 + body`。
+ * 面包屑进嵌入不进正文——路径与标题是检索线索，不是结论的一部分。
+ */
+export function tombstoneSegment({ path: relPath, content, verdict }) {
+  const breadcrumb = docLevelBreadcrumb(relPath, content)
+  return {
+    path: relPath,
+    sectionAnchor: TOMBSTONE_ANCHOR,
+    breadcrumb,
+    body: verdict,
+    text: [breadcrumb, verdict].filter((s) => s.length > 0).join('\n'),
+    partIndex: 1,
+    partTotal: 1,
+    hardCut: false,
   }
 }
 
@@ -335,7 +427,7 @@ export function gitHashObject(root, relPath) {
  *
  * @param {object} opts
  * @param {string} opts.root          仓库根（绝对路径）
- * @param {object} opts.repo          `chunks` 仓储（见下方用到的五个函数）
+ * @param {object} opts.repo          `chunks` 仓储（见下方用到的六个函数，含 C2 自检的 `getChunksByDocPath`）
  * @param {Function} opts.segment     票丙 `segmentDocument`
  * @param {object} opts.embed         票丁 `EmbeddingClient`（只用 `embedMany`）
  * @param {Function} opts.hashObject  `(relPath) => blobSha`
@@ -387,13 +479,22 @@ export async function runScan(opts) {
       continue
     }
 
+    // C2：退役文档**不切正文**——`verdict` 一行即全部内容。此处是「切正文」与
+    // 「墓碑」的分叉点，也是本机制唯一改检索面形态的地方。
+    const retired = RETIRED_STATUSES.has(cls.meta.status ?? '')
+
     // 增量（S2）：blob SHA 相同 ⇒ 跳过。**mtime 不参与任何判定**（S4）。
     if (repo.getChunksByOrigin(originId).some((r) => r.doc_path === rel)) {
       report.skipped.push({ path: rel, reason: SKIP_REASONS.UNCHANGED })
+      // 未重切也照检：不变量是「恒 == 1」，不是「本次写完 == 1」——存量旧片
+      // 恰是**不改文件就永远触发不了重切**的那一类（见 verifyTombstone 注释）。
+      if (retired) verifyTombstone({ report, repo, path: rel, verdict: cls.meta.verdict })
       continue
     }
 
-    const seg = segment({ path: rel, content })
+    const seg = retired
+      ? { segments: [tombstoneSegment({ path: rel, content, verdict: cls.meta.verdict })] }
+      : segment({ path: rel, content })
     if (seg.segments.length === 0) {
       report.skipped.push({ path: rel, reason: SKIP_REASONS.NO_SEGMENTS })
       continue
@@ -445,6 +546,8 @@ export async function runScan(opts) {
       // 同路径陈旧代（该件被改动 ⇒ 旧 content_hash 的行不会撞身份键）：
       // 不删则旧正文永久留在库里并被检索召回
       report.orphansDeleted += repo.deleteStaleChunkRows(rel, originId)
+      // 写成功之后自检（C2）：此刻库里该件**只该剩墓碑那一行**
+      if (retired) verifyTombstone({ report, repo, path: rel, verdict: cls.meta.verdict })
     } catch (err) {
       // 写失败 ⇒ **补偿删除**，回到「该件零行」而不是留半截：
       // 半截件会被下一轮的 `unchanged` 判据误判为「已完成」而永久缺片。
@@ -468,6 +571,36 @@ export async function runScan(opts) {
   }
 
   return report
+}
+
+/**
+ * **C2 自检**：退役文档在 `chunks` 的行数**恒 == 1**，且那一行的锚与正文就是墓碑形态。
+ *
+ * 为什么读**全量行**（`getChunksByDocPath`）而不是「本次刚写进去的那行」：本不变量要
+ * 拦的正是「老正文片没清掉」（0013 那 8 行的形态）。用 `getChunksByOrigin` 只看得见
+ * 当前代——残留行持**旧** `origin_id`，恰好落在它的视野之外，自检就退化成恒真断言。
+ *
+ * 三条各报各的：行数 ≠ 1（有残留或多切了）/ 锚不对（不是墓碑片）/ 正文不是 verdict
+ * （切了正文或写错了件）。报错进 `report.errors` ⇒ `main()` 退出码 1——形态不对意味着
+ * **库里有猫可能读到的正文片**，这是必须有人看的信号，不是可跳过项。
+ */
+function verifyTombstone({ report, repo, path: rel, verdict }) {
+  let rows
+  try {
+    rows = repo.getChunksByDocPath(rel)
+  } catch (err) {
+    report.errors.push(pick({ path: rel, reason: 'tombstone-check-failed', detail: msgOf(err) }))
+    return
+  }
+  const detail =
+    rows.length !== 1
+      ? `rows=${rows.length}`
+      : rows[0].section_anchor !== TOMBSTONE_ANCHOR
+        ? `anchor=${rows[0].section_anchor}`
+        : rows[0].body !== verdict
+          ? 'body-not-verdict'
+          : null
+  if (detail) report.errors.push(pick({ path: rel, reason: 'tombstone-invariant', detail }))
 }
 
 /** 一行人类可读汇总（走 stderr；见文件头「输出通道」） */
