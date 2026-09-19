@@ -35,9 +35,9 @@ import { MAX_QUEUE_PER_AGENT, isStaleHandoffRequest } from '../dispatch/index.js
 import { ProviderTokenPool } from './token-pool.js'
 import { classifyError } from '../eval/classify-error.js'
 // 诊断取值单源（R5 §B）：catch 到的**任何**值都要能落出可辨识信息——`err.message`
-// 对非 Error 抛出物恒为 undefined（诊断当场归零）。注：库内 19 行 `execute crash`
-// **不是**这条路来的（那 19 行的 catch 从未触发过），成因是 `executeRun` finally 段
-// 的误收口——R7 已加归属校验除根，该词随之退役；19 行是历史存量，不再新增。
+// 对非 Error 抛出物恒为 undefined（诊断当场归零）。注：库内那批 `execute crash`
+// **不是**这条路来的（那些行的 catch 从未触发过），成因是 `executeRun` finally 段
+// 的误收口——R7 已加归属校验除根，该词随之退役；那批行是历史存量，不再新增。
 import { messageOf } from '../utils.js'
 import {
   cleanGitEnv,
@@ -1738,15 +1738,15 @@ export function createExecutionEngine(
       const s = getSlotInternal(cmd.agentId, cmd.sessionId)
       if (s && s.status === 'busy') {
         // ── 归属校验（R7 甲案）：busy 的必须是**本帧的**槽位，才轮到本帧兜底 ──
-        // 无校验就收正是存量 19 行 `'execute crash'` 的来源，逐环有据：
-        //   ① 本帧正常路径已自收口（`:806` finalizeRun ⇒ 槽位 idle）；
-        //   ② 本帧仍挂在 `:1093` 的 `Promise.all([drainP, dispatchP])` 上
+        // 无校验就收正是那批 `'execute crash'` 存量的来源，逐环有据：
+        //   ① 本帧正常路径已自收口（`:812` finalizeRun ⇒ 槽位 idle）；
+        //   ② 本帧仍挂在 `:1099` 的 `Promise.all([drainP, dispatchP])` 上
         //      （A2A 派发子树 / 队列排空子树都还在跑）；
-        //   ③ 该 await 窗口内控制权让出 ⇒ 新触发走 `:1772` 决策段见 idle ⇒ 标 busy 开跑；
+        //   ③ 该 await 窗口内控制权让出 ⇒ 新触发走 `:1804` 决策段见 idle ⇒ 标 busy 开跑；
         //   ④ 本帧 await 结束 → return → 本 finally 见 busy —— **那是别人的槽位**。
         // 收下去 = 释放正在跑的那笔的槽位（单槽位 FIFO 被击穿，同 agent+session 双执行）
-        // + 把 `failed` 写进它的行（`finalizeExecutionLog` 按「agent + 最新 running」
-        // 定位，WHERE 里没有 sessionId ⇒ 跨会话也能命中）。
+        // + 把 `failed` 写进它的行（`finalizeExecutionLog` 现按「agent_id + session_id +
+        // 最新 running」定位——R8 §A 后三个定位函数全部含 session 维度）。
         // R7 前这里只有一行注释写着「本帧无权收口」，代码紧接着就收了。
         if (s.currentTriggerMessageId !== cmd.triggerMessageId) {
           log.warn('slot busy but owned by another trigger — finalize skipped', {
@@ -1762,8 +1762,8 @@ export function createExecutionEngine(
             //     的空串零回归；`messageOf` 自身不抛——本行在 finally 的槽位收口路径上，
             //     它抛错会毁掉收口）；
             //   · `execError === undefined` ⇒ 本帧没抛也没崩，却仍占着槽位 = 「正常返回
-            //     但没自收口」。`:806` 那次 completeExecution 自身抛错是唯一可达源
-            //     （`:1096` catch 会补收一次，再失败被 `.catch` 吞掉）——防御分支，
+            //     但没自收口」。`:812` 那次 completeExecution 自身抛错是唯一可达源
+            //     （`:1101` catch 会补收一次，再失败被 `.catch` 吞掉）——防御分支，
             //     兜底词即事实描述；
             //   · 其余 ⇒ 抛了非 Error 且取不出信息（`messageOf` 对 `{}` / 循环引用返回
             //     undefined）。**不能沿用上一词**：那会把「真抛了」说成「没抛」，

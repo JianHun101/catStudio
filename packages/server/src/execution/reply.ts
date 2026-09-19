@@ -205,8 +205,8 @@ function upsertTool(tools: ToolCallInfo[], chunk: Chunk): void {
  *   会恰好在「最慢、最该记」的那一次丢数据。
  * · `executionId`：该 (会话, 猫, 触发消息) 当前 running 的执行行。**不在
  *   serial 里穿线拿 logId**——那要改 4 个签名、把 R1 拖进 `serial.ts` 这个
- *   事故密集区（P2 §八 已把它划给另票）。此处多带 session + trigger 两个条件，
- *   比 `updateExecutionLogDiagnostics` 的「agent + running」窄，错挂面更小。
+ *   事故密集区（P2 §八 已把它划给另票）。此处多带 trigger 一个条件，
+ *   比 `updateExecutionLogDiagnostics` 的「agent_id + session_id + running」窄，错挂面更小。
  *
  * 写失败在写口内部吞掉（硬约束 2），本函数不抛。
  *
