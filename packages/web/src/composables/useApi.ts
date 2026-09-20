@@ -161,6 +161,16 @@ export interface LabelPoolRow {
   content: string
   created_at: string
   agent_name: string | null
+  /** 回复**之前**最近 10 条上下文（E1 契约 D）。没有它标注者只看得到孤零零一句回复，
+   *  「这句答得对不对」在无上下文的条件下根本判不了。与回标 tab 的 `context` 同一份
+   *  取数（`getContextBefore`，同一路由文件里逐字同款）。 */
+  context: Array<{
+    id: string
+    role: string
+    agent_id: string | null
+    content: string
+    created_at: string
+  }>
 }
 
 /** 任务结局分布（E4-B 契约缺口裁决补充的路由）：U 根/H 根 outcome 计数 + open + 版本偏差 */
@@ -169,6 +179,91 @@ export interface EpisodeStats {
   uRoot: Record<string, number>
   hRoot: Record<string, number>
   open: number
+}
+
+// ─── E1 检索跑批报告（GET /eval/retrieval/*）─────────────────────────
+// 报告本体是 `scripts/eval/retrieval-baseline.mjs` 的**手工跑批**产物（跑批要起嵌入
+// sidecar，前端不能触发）⇒ 页面数字永远是「上一次跑批」的快照，不是实时水位。
+
+/** 报告清单一行（日期选择器用）。`writtenAt` 取自**文件 mtime**——报告本体零时间量
+ *  （B1：同树同库两跑逐字节一致，`.md` 与 `.json` 两份产物各自成立），
+ *  所以「生成时刻」只能由文件系统给。 */
+export interface RetrievalReportSummary {
+  date: string
+  file: string
+  writtenAt: string | null
+}
+
+/** 明细里一个未命中锚点的归因行（与跑批脚本的 `scoreEntry.details` 同形，
+ *  snake_case 的 `doc_path` 到这一层已被换成 `docPath`——**报告 json 里就是 camelCase**）。 */
+export interface RetrievalAnchorDetail {
+  docPath: string
+  sectionAnchor: string
+  status: string
+  drop: string | null
+  distance?: number | null
+  channel?: string | null
+  queryIndex?: number
+  rank?: number
+  source?: string
+}
+
+/** 一条黄金集条目的评分（real / constructed / negative 三类同形）。 */
+export interface RetrievalScoreRow {
+  id: string
+  kind: string
+  reason: string
+  expectTotal: number
+  hit: number
+  /** `null` = 该条 `expect` 为空，「没标」与「没命中」不是一回事 */
+  recall: number | null
+  preThreshold: number
+  preThresholdRate: number | null
+  details: RetrievalAnchorDetail[]
+  forbidHit: Array<{ docPath: string; sectionAnchor: string }>
+}
+
+/** 一组条目的汇总（`recallMean` / `preThresholdRateMean` = **集均**；micro 版另列备查） */
+export interface RetrievalGroupSummary {
+  n: number
+  scoredN: number
+  expectTotal: number
+  hit: number
+  recallMean: number | null
+  microRecall: number | null
+  preThreshold: number
+  preThresholdRateMean: number | null
+  microPreThresholdRate: number | null
+}
+
+/** 报告本体 = 跑批脚本喂给 `renderReport` 的**同一份 ctx** + 顶层 `schema`。
+ *  字段名随生产类型（camelCase）——与 md 报告是同一份数据的两种渲染。 */
+export interface RetrievalReport {
+  schema: number
+  date: string
+  dbPath: string
+  dbRows: number
+  dbDocs: number
+  goldenFile: string
+  goldenData: { version: number; entries: unknown[]; meta?: { frozenCorpusRef?: string } }
+  goldenCounts: Record<string, number>
+  liveDocs: number
+  rotten: number
+  indexFreshness: { checked: number; stale: number }
+  params: { topK: number; maxDistance: number; probeN: number }
+  /** `handshaked` 是**加工后的布尔**，不是端口号本身——端口每跑一变，落进产物就破 B1
+   *  （见跑批脚本 `reportCtx.embed` 的注释）。布尔承载「这次跑批有没有握手到 sidecar」
+   *  这个信号（md 侧渲染它）；**界面只消费上面的 `model` / `dim`**，端口号没有消费方。
+   *  `handshaked` **必填**：`reportCtx.embed` 恒产出布尔（由 `port > 0` 推导），
+   *  写成可选只会让消费方多一条「字段可能缺失」的假分支。 */
+  embed: { model?: string | null; dim?: number | null; handshaked: boolean }
+  groups: { real: RetrievalGroupSummary; constructed: RetrievalGroupSummary }
+  scores: RetrievalScoreRow[]
+  /** canary 反对照（测量工具真空性）：必中条目必须满分、必不中必须零分 */
+  canary: Array<RetrievalScoreRow & { query: string; expectKind: string; ok: boolean }>
+  negatives: RetrievalScoreRow[]
+  maxDistance: number
+  recheck: { entries: number }
 }
 
 // ─── P1 链路视图（GET /eval/l1-metrics + GET /eval/chains，契约由 P1-A 冻结在字段级）──
@@ -550,6 +645,18 @@ export const api = {
    *  （`endedAt == null`）**照样返回**；本会话零执行的猫**不出现**在数组里
    *  （不是 `0` 不是空白——前端据此显示「本会话暂无执行」）。
    *  段数据**不内联**：拿到 `executionId` 后再调 `getEvalSpans` 懒加载。 */
+  /** 检索跑批报告清单（E1）。**空数组是合法响应**——报告是手工跑批产物，「还没跑过批」
+   *  就是空，不是错误（后端为此刻意不返 404）。 */
+  getRetrievalReports: () =>
+    request<{ ok: boolean; reports: RetrievalReportSummary[] }>('/eval/retrieval/reports'),
+
+  /** 一份检索跑批报告（E1）。`date` 不传 = **最新那份**；那天没有 → 404（调用方按
+   *  「无数据」处置，与「清单为空」分开）。 */
+  getRetrievalReport: (date?: string) =>
+    request<{ ok: boolean; report: RetrievalReport } & RetrievalReportSummary>(
+      `/eval/retrieval/report${date ? `?date=${encodeURIComponent(date)}` : ''}`
+    ),
+
   getSessionTraces: (sessionId: string) =>
     request<{ ok: boolean; traces: SessionTraceDto[] }>(
       `/eval/session-traces?session_id=${encodeURIComponent(sessionId)}`

@@ -14,8 +14,9 @@
  * 实验库与一个 30s 冷启动的嵌入 sidecar，属于「系统级 e2e，手动跑」那一档。
  * 那三条验收由 T6 实跑记录在交接文档里，不在这里假装绿。
  */
-import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { describe, it, expect, vi } from 'vitest'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
@@ -30,6 +31,7 @@ import {
   anchorKey,
   buildCanaries,
   buildRecheckIndex,
+  buildReportJson,
   checkAttributionCoverage,
   checkCorpusGate,
   checkDegradation,
@@ -39,9 +41,11 @@ import {
   evaluateCanary,
   fmt4,
   localDate,
+  main,
   missLabel,
   parseArgs,
   renderReport,
+  reportJsonPath,
   rescoreWithRecheck,
   scoreEntry,
   summarizeGroup,
@@ -848,7 +852,7 @@ describe('renderReport — 确定性与内容面', () => {
     rotten: 0,
     indexFreshness: { checked: 13, stale: 0 },
     params: { maxDistance: 0.6, topK: 3, probeN: 20 },
-    embed: { model: 'm', dim: 512, port: 1660 },
+    embed: { model: 'm', dim: 512, handshaked: true },
     groups: {
       real: {
         n: 1,
@@ -1005,7 +1009,7 @@ describe('renderReport — 确定性与内容面', () => {
     const ok = renderReport(ctx())
     expect(ok).toContain('实测已握手')
     expect(ok).not.toContain('⚠️ **未见 sidecar 监听端口**')
-    const bad = renderReport({ ...ctx(), embed: { model: 'm', dim: 512, port: undefined } })
+    const bad = renderReport({ ...ctx(), embed: { model: 'm', dim: 512, handshaked: false } })
     expect(bad).toContain('⚠️ **未见 sidecar 监听端口**')
     // 端口号本身不进报告（每跑一个随机值 ⇒ 破 B1）
     expect(ok).not.toMatch(/端口\D{0,8}\d{2,}/)
@@ -1134,5 +1138,116 @@ describe('与链段结果对象的字段名契约（静默全灭面）', () => {
     expect(src).toContain('docPath: s.row.doc_path')
     expect(src).toContain('docPath: c.docPath')
     expect(src).toContain('droppedReason:')
+  })
+})
+
+// ─── E1 契约 A：JSON 副产品 ────────────────────────────
+
+describe('buildReportJson / reportJsonPath — JSON 副产品（E1 契约 A）', () => {
+  const ctxFixture = () => ({
+    date: '2026-01-01',
+    dbRows: 410,
+    groups: { real: { recallMean: 0.5833 }, constructed: { recallMean: 0.8261 } },
+    scores: [{ id: 'G01' }],
+  })
+
+  it('路径：同目录、同基名，只换扩展名', () => {
+    expect(reportJsonPath(path.join('a', 'b', 'retrieval-baseline-2026-01-01.md'))).toBe(
+      path.join('a', 'b', 'retrieval-baseline-2026-01-01.json')
+    )
+  })
+
+  it('路径：`--out` 指到别的扩展名 / 没扩展名 ⇒ 都恒得 `.json`', () => {
+    // `outFile.replace(/\.md$/, '.json')` 那种写法会拼出 `x.txt.json`——同目录多出一份
+    // 没人认得名的文件，而报告清单只认 `retrieval-baseline-<date>.json`
+    expect(reportJsonPath(path.join('a', 'x.txt'))).toBe(path.join('a', 'x.json'))
+    expect(reportJsonPath(path.join('a', 'noext'))).toBe(path.join('a', 'noext.json'))
+  })
+
+  it('内容 = 顶层 `schema` + **同一份** ctx（`toBe` 同引用，不是深拷贝或重拼）', () => {
+    const ctx = ctxFixture()
+    const out = buildReportJson(ctx)
+    expect(out.schema).toBe(BASELINE_REPORT_SCHEMA)
+    // 逐字段**同引用**：两份视图数字对不上是这类「顺手多落一份」最典型的坏法，
+    // 而同引用能从结构上排除「json 那边自己又算了一遍」
+    for (const [k, v] of Object.entries(ctx)) expect(out[k]).toBe(v)
+    expect(Object.keys(out).sort()).toEqual([...Object.keys(ctx), 'schema'].sort())
+  })
+
+  it('B1 的 json 面：产物**不含每跑一变的原始读数**（sidecar 端口）', () => {
+    // E1 首版的实测缺陷：`reportCtx.embed` 透传了 `embedStatus.port`，而 `EMBED_SIDECAR_PORT=0`
+    // ⇒ 每跑一个随机端口。md 侧只取布尔、看不见；json 侧原样落盘 ⇒ 两跑不逐字节一致。
+    // 判据是**形状**：「有没有握手」这个加工后的信号叫 `handshaked`（布尔），
+    // `port` 这个键本身就不该出现在产物里——出现即意味着又透传了原始读数。
+    const out = buildReportJson({
+      ...ctxFixture(),
+      embed: { model: 'm', dim: 512, handshaked: true },
+    })
+    expect(typeof out.embed.handshaked).toBe('boolean')
+    expect(JSON.stringify(out)).not.toMatch(/"port"\s*:/)
+  })
+
+  it('一处算两处渲染（静态）：md 与 json 吃的是**同一个 `reportCtx` 标识符**', () => {
+    const src = readFileSync(
+      path.join(REPO_ROOT, 'scripts', 'eval', 'retrieval-baseline.mjs'),
+      'utf8'
+    )
+    const start = src.indexOf('const reportCtx = {')
+    // 终点取**两笔写之后**的锚（不能取 `writeFileSync(jsonOutFile`——那正是 `buildReportJson`
+    // 调用所在的行，切在它上面会把要断言的调用本身排除在外）
+    const end = src.indexOf('const redCount', start)
+    expect(start).toBeGreaterThan(-1)
+    // 锚点任一改名 ⇒ 空切片会让下面的断言恒真（同「逐条跑批」那条的写法）
+    expect(end).toBeGreaterThan(start)
+    const seg = src.slice(start, end)
+    expect(seg).toContain('renderReport(reportCtx)')
+    expect(seg).toContain('buildReportJson(reportCtx)')
+    // 旁路面：json 那边不得自己再拼一份 ctx
+    expect(seg).not.toMatch(/buildReportJson\(\{/)
+    // ⚠️ ctx 里不得有**原始随机读数**（首版的 `embed.port` 就是这么漏进 json 的）：
+    // 上面 `renderReport` 那条断言管不到它——md 只挑一部分字段渲染，多一个随机值未必看得出来；
+    // `buildReportJson` 原样序列化 ⇒ 一个不落。判据是键名：加工后的信号叫 `handshaked`，
+    // `port` 这个**键**不该出现在 ctx 字面量里（`embedStatus.port` 作为**值来源**出现是对的）。
+    // ⚠️ 断言必须打在**代码**上，不是注释上——这段 ctx 的注释里就写着 `embedStatus.port`
+    // （「这里不得透传 embedStatus.port 原值」），拿整段 `seg` 去 `toContain` 会被注释满足：
+    // 实测把实现改成恒真的 `handshaked: true`，那条断言照样绿（注释替它顶了）。故先去行注释。
+    const code = seg.replace(/\/\/[^\n]*/g, '')
+    expect(code).toContain('handshaked:')
+    expect(code).not.toMatch(/(?:^|[\s{,])port\s*:/)
+    // 只管键名还不够：写成恒真的 `handshaked: true` 同样能过上面两条，
+    // 而「报告里的自述必须来自读数」是本文件的既有纪律（见「嵌入供给形态」那条注释）。
+    expect(code).toContain('embedStatus.port')
+  })
+
+  it('拒出路径 ⇒ md 与 json **都不落**（真跑 `main`，打到 golden-schema 闸）', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'rb-refuse-'))
+    const outFile = path.join(root, 'out', 'retrieval-baseline-2026-01-01.md')
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      // `main` 进 root 后第一件事就是 import 它的 env.js——给个空实现，让流程能走到黄金集闸
+      mkdirSync(path.join(root, 'packages', 'server', 'src'), { recursive: true })
+      writeFileSync(path.join(root, 'packages', 'server', 'src', 'env.js'), '')
+      mkdirSync(path.join(root, 'docs', 'eval'), { recursive: true })
+      // schema 不过的黄金集 ⇒ `refuse('golden-schema')`；这道闸在**碰库、起 sidecar 之前**，
+      // 所以本用例不需要 526MB 实验库与嵌入 sidecar（那是系统级 e2e 那一档）
+      writeFileSync(path.join(root, 'docs', 'eval', 'retrieval-golden.json'), '{"version":1}')
+
+      const code = await main(['--root', root, '--out', outFile])
+
+      expect(code).toBe(1)
+      // 确认打到的**就是** golden-schema 那道闸，而不是某个更早的意外返回（否则这条用例
+      // 会在「什么都没发生」的情况下绿）
+      const emitted = stdout.mock.calls.map((c) => String(c[0])).join('')
+      expect(emitted).toContain('"phase":"golden-schema"')
+      expect(emitted).toContain('"ok":false')
+      // 两份都不落：产一份半截产物会被读成「跑过了，没问题」
+      expect(existsSync(outFile)).toBe(false)
+      expect(existsSync(reportJsonPath(outFile))).toBe(false)
+    } finally {
+      stdout.mockRestore()
+      stderr.mockRestore()
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
