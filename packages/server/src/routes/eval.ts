@@ -35,6 +35,7 @@ import type { SpanRow, LlmSpanDetail } from '../db/repository/index.js'
 import { episodeStats } from '../eval/episodes.js'
 import { aggregateMetrics, WINDOW_DAYS } from '../eval/l1-aggregator.js'
 import { buildChains } from '../eval/chain-query.js'
+import { envNumber } from '../env-number.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('eval-routes')
@@ -152,7 +153,7 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
     // 与 /scores 的 parseLimit 不同：**越界钳位不报错**（契约），limit 只截链不截跳
     const limit = clampInt(rawLimit, 20, 1, 100)
     const windowDays = clampInt(rawWindow, WINDOW_DAYS, 1, 3650)
-    const slowMs = parseFloat(process.env.EVAL_CHAIN_SLOW_MS || '300000')
+    const slowMs = envNumber('EVAL_CHAIN_SLOW_MS', 300000)
     const result = buildChains(executionLogsRepo.getExecutionHopsWithChainAnchor(windowDays), {
       slowMs,
       limit,

@@ -13,6 +13,7 @@ import { estimateTokens } from '@cat-study/shared'
 import { chatComplete } from '../llm/complete.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import { envNumber } from '../env-number.js'
 import { readRawContextConfig } from '../config/context-config.js'
 import type { HandoffBus } from '../execution/bus.js'
 
@@ -279,9 +280,7 @@ export function shouldHandoff(currentTokens: number): boolean {
   // 返回对象但缺 handoffThreshold = 文件无该字段/坏值 → env 同样兜底。
   const fileThreshold = readRawContextConfig()?.handoffThreshold
   const threshold =
-    typeof fileThreshold === 'number'
-      ? fileThreshold
-      : parseFloat(process.env.HANDOFF_THRESHOLD || '0.9')
+    typeof fileThreshold === 'number' ? fileThreshold : envNumber('HANDOFF_THRESHOLD', 0.9)
   return currentTokens >= maxTokens * threshold
 }
 
