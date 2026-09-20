@@ -26,6 +26,7 @@ import {
   fuseChannelHits,
   verifyFuseEquivalence,
   judgeFuseSelfCheck,
+  judgeMergeSelfCheck,
   mergeQueryPools,
   verifyMerge,
   readAnchor,
@@ -270,6 +271,27 @@ describe('judgeFuseSelfCheck — 有样本才有绿；无样本必须拒出报�
   it('部分跳过但有实比样本 ⇒ 仍可 ok（跳过本身不是失败，无样本才是）', () => {
     const r = judgeFuseSelfCheck({ intended: 12, compared: 7, skipped: 5, mismatches: [] })
     expect(r.ok).toBe(true)
+  })
+})
+
+// ─── judgeMergeSelfCheck：与 judgeFuseSelfCheck 同族的第二道（无样本即拒） ────
+
+describe('judgeMergeSelfCheck — 与融合自证同型：无样本的绿不算绿', () => {
+  it('比了 120 行、零不符 ⇒ ok', () => {
+    const r = judgeMergeSelfCheck({ entries: 40, rows: 120, mismatches: [] })
+    expect(r.ok).toBe(true)
+  })
+
+  it('**0 行 final 流水 ⇒ 拒**（原实现只看 mismatches 为空 ⇒ 印「0 行…不符 0 处 ⇒ ✅」）', () => {
+    const r = judgeMergeSelfCheck({ entries: 40, rows: 0, mismatches: [] })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('no-sample')
+  })
+
+  it('有不符 ⇒ 拒，且 reason=mismatch（**优先于** no-sample）', () => {
+    const r = judgeMergeSelfCheck({ entries: 40, rows: 0, mismatches: [{ kind: 'rank' }] })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('mismatch')
   })
 })
 

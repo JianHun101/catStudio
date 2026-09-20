@@ -287,6 +287,35 @@ export function judgeFuseSelfCheck({ intended, compared, skipped = 0, mismatches
 }
 
 /**
+ * 合并序重建自证的**判词**——与 `judgeFuseSelfCheck` **同型**（同一族的第二道）。
+ *
+ * `verifyMerge` 逐条目返回 `checked`（比了几行 final）；聚合层原先只看
+ * `mismatches.length === 0` ⇒ **`finals` 为空时也是 ok**，报告会印
+ * 「40 条条目 / **0 行** final 流水逐行比对，不符 0 处 ⇒ ✅ 重建序 == 链段序」——
+ * 又是一条**无样本的绿**。今日不可达（有注入就有 final 行），但机制上必须堵死：
+ * 「一条都没比」与「比了且全对」不是同一件事。
+ */
+export function judgeMergeSelfCheck({ entries, rows, mismatches }) {
+  if (mismatches.length > 0) {
+    return {
+      ok: false,
+      reason: 'mismatch',
+      message: `合并序重建与链段 self-reported final 流水不符 ${mismatches.length} 条——重建序不自证，名次/分差读数不可信`,
+    }
+  }
+  if (rows === 0) {
+    return {
+      ok: false,
+      reason: 'no-sample',
+      message:
+        `合并序重建自证**一行 final 流水都没比成**（${entries} 条条目，checked rows=0）——` +
+        '「不符 0 处」会变成一条无样本的假绿，名次/分差读数不可采信',
+    }
+  }
+  return { ok: true, reason: '', message: '' }
+}
+
+/**
  * **跨查询合并重建**：把逐查询的融合池按 `memory/index.ts` 的合并规则重排成完整序。
  *
  * 三条规则逐字复刻（`runRetrievalChain` 的 `merged` 循环）：
@@ -785,7 +814,7 @@ export function renderDiagnosis(ctx) {
   L.push('| --- | --- | --- | --- |')
   for (const q of g03.knn) {
     L.push(
-      `| ${q.text} | ${q.distance === null ? '（不在池内）' : fmt4(q.distance)} | ${q.rank === null ? '—' : q.rank} | ${q.channel ?? '—'} |`
+      `| ${q.text} | ${q.embedFailed ? '**（嵌入失败——探针瞎，非「不在池内」）**' : q.distance === null ? '（不在池内）' : fmt4(q.distance)} | ${q.rank === null ? '—' : q.rank} | ${q.channel ?? '—'} |`
     )
   }
   L.push('')
@@ -1351,17 +1380,22 @@ export async function main(argv = process.argv.slice(2)) {
       if (!check.ok) mismatchAll.push({ id: p.entry.id, mismatches: check.mismatches.slice(0, 5) })
       rebuilds.set(p.entry.id, { merged, pools })
     }
+    const mergeVerdict = judgeMergeSelfCheck({
+      entries: perEntry.length,
+      rows: finalRowsChecked,
+      mismatches: mismatchAll,
+    })
     const mergeChecks = {
-      ok: mismatchAll.length === 0,
+      ok: mergeVerdict.ok,
       mismatches: mismatchAll,
       checked: perEntry.length,
       rows: finalRowsChecked,
     }
     if (!mergeChecks.ok) {
       return refuse(
-        'remerge',
-        { offenders: mismatchAll },
-        `合并序重建与链段 self-reported final 流水不符 ${mismatchAll.length} 条——重建序不自证，名次/分差读数不可信`
+        mergeVerdict.reason === 'no-sample' ? 'remerge-no-sample' : 'remerge',
+        { offenders: mismatchAll, rows: finalRowsChecked },
+        mergeVerdict.message
       )
     }
 
@@ -1545,7 +1579,9 @@ export async function main(argv = process.argv.slice(2)) {
     for (const q of g03Entry.queries) {
       const e = await memoEmbed(q)
       if (!e.ok || e.vector.length === 0) {
-        g03Knn.push({ text: q, distance: null, rank: null, channel: null })
+        // ⚠️ 必须与「查了但没找到」区分：两者都是 `distance: null`，若渲染层一视同仁地印
+        // 「（不在池内）」，**探针瞎掉**就会被读成**该锚点不在池内**（同族第三处）。
+        g03Knn.push({ text: q, distance: null, rank: null, channel: null, embedFailed: true })
         continue
       }
       const hits = chunksRepo.searchChunksByVector(
@@ -1563,6 +1599,7 @@ export async function main(argv = process.argv.slice(2)) {
         distance: best ? best.distance : null,
         rank: best ? best.rank : null,
         channel: best ? 'vector' : null,
+        embedFailed: false,
       })
     }
 
@@ -1586,6 +1623,19 @@ export async function main(argv = process.argv.slice(2)) {
           }
         })
       }
+    }
+
+    // ⚠️ 同族的第三处：`sweepN` 只数**嵌入成功**的查询，而失败是**静默** `continue` ⇒
+    // 全失败时 `sweepN === 0`、`sweepBest === null` ⇒ 报告会印出
+    // 「❌ 全黄金集 **0 条**查询里没有一条够得着它 ⇒ 与"覆盖洞"一致」——一句由**瞎掉的探针**
+    // 得出的否定结论，正是本票靶心的形态。无样本必须拒出报告。
+    if (sweepN === 0) {
+      return refuse(
+        'g03-sweep-no-sample',
+        { goldenEntries: goldenData.entries.length },
+        'G03 全黄金集扫描**一条查询都没嵌入成功**（sweepN=0）——「没有一条够得着」会变成' +
+          '探针瞎掉时的假否定，覆盖洞结论不可采信'
+      )
     }
 
     // 生产事件面的判词。三态必须分列——**零行 ≠ 够不着**（见 `summarizeProductionFace` 注释）。
