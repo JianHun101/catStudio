@@ -16,12 +16,17 @@
  *                                           右侧面板展开某猫 trace 前的取数口——先拿到
  *                                           execution_id，再调上面的 /spans 懒加载段）
  * - GET /api/eval/label/pool               待标注候选池（J1 盲标：跨会话分散、排除已标注、
- *                                           **响应不含判官分**）
+ *                                           **响应不含判官分**；E1 起每条附**前置 10 条
+ *                                           上下文**，与 /review/pending 同款取数）
  * - POST /api/eval/label/:messageId        { score: 1-5, comment?, labeler? } 写 human_labels；
  *                                           重复提交同一 message_id → 覆盖 + log 留痕
  * - GET /api/eval/judge-agreement          判官分 × 人工分的一致性读数（J1 形态甲：
  *                                          复用 phase0 的 spearman/agreementRate；空库 →
  *                                          200 + 结构化空态，不是 500）
+ * - GET /api/eval/retrieval/reports        检索跑批报告清单（E1：日期倒序，给日期选择器用。
+ *                                          **空清单是 200 + `[]`**——「还没跑过批」不是错误）
+ * - GET /api/eval/retrieval/report?date=   一份检索跑批报告（E1：缺省 = 最新；没有 → 404
+ *                                          + reason。**纯读文件，绝不触发跑批**）
  *
  * **字段名随取数层**：DB 行投影原样 snake_case（`/scores`、`/aggregates`、`/review/pending`、
  * `/spans` 的段行——前端直接消费 DB 行）；**聚合/派生结构**用 camelCase
@@ -30,6 +35,9 @@
  * （`/chains` 起就已如此），R4 §A 再添一例——按事实改写，不再复述一个反例比正例多的断言。
  * 错误 { error } + 4xx 钉死契约类型。纯展示 + 两处人工写入（回标 / 标注），零 LLM 调用。
  */
+import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { FastifyInstance } from 'fastify'
 import { v4 as uuid } from 'uuid'
 import {
@@ -46,6 +54,7 @@ import { buildChains } from '../eval/chain-query.js'
 import { agreementRate, spearman } from '../eval/phase0.js'
 import { envNumber } from '../env-number.js'
 import { createLogger } from '../logger.js'
+import { findRepoRootFrom } from '../repo-root.js'
 
 const log = createLogger('eval-routes')
 
@@ -117,6 +126,91 @@ export interface SessionTraceDto {
   startedAt: string | null
   endedAt: string | null
   totalMs: number | null
+}
+
+// ─── 检索跑批报告的只读出口（E1）────────────────────────────────────────
+// 报告本体是 `scripts/eval/retrieval-baseline.mjs` 的**手工跑批**产物：跑批要起嵌入
+// sidecar、跑几分钟，**前端不能触发**（会撞活 server 的嵌入端口）。所以这一节只做
+// 「把磁盘上已有的报告读出来」，**零计算、零 LLM、零写**——页面上的数字永远是
+// 「上一次跑批」的快照，不是当前水位。前端在 tab 顶部明写这句话。
+
+/** 报告文件名的契约形状：`retrieval-baseline-<YYYY-MM-DD>.json`（`--out` 换扩展名而来）。 */
+const REPORT_FILE_RE = /^retrieval-baseline-(\d{4}-\d{2}-\d{2})\.json$/
+
+/** `?date=` 的形状闸。**它同时是路径穿越的闸**：date 会拼进文件名，`../../x` 这类
+ *  必须在这条正则上就死掉——别指望「拼出来的文件多半不存在」兜底。 */
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/** 仓库根锚点。黄金集是**已跟踪文件**，源码布局与产物布局下都能由它反查出仓库根；
+ *  用 `findRepoRootFrom` 向上找而**不按固定层级上溯**——产物比源码深两层，
+ *  固定层数必有一边静默指到不存在的路径（理由与实测见 `repo-root.ts` 文件头）。
+ *
+ *  导出是给测试用的：布局无关性要拿**这个** marker 去证伪，测试里再抄一份字面量的话，
+ *  marker 改了测试照绿（而改错 marker = 报告目录整个找不到）。 */
+export const RETRIEVAL_REPO_MARKER = ['docs', 'eval', 'retrieval-golden.json'] as const
+
+/** 测试注入的报告目录。`undefined` = 未注入（走 `import.meta.url` 真解析）。 */
+let reportsDirOverride: string | null | undefined
+
+/**
+ * 测试专用：把报告目录钉到夹具目录（传 `null` = 钉成「解析不到」，`undefined` 复位）。
+ *
+ * 与 `setDb()` 同一分工——**目录是部署事实**，生产侧锚在模块自身位置（`import.meta.url`），
+ * 夹具没有可上溯的祖先链，只能注入。命名带 `__test_` 前缀是让它一眼可见用途
+ * （同 `dispatch/index.ts::__test_reset` 一类）。
+ */
+export function __test_setRetrievalReportsDir(dir: string | null | undefined): void {
+  reportsDirOverride = dir
+}
+
+/** 报告目录 = `<仓库根>/docs/eval`；找不到仓库根返回 `null`（调用方按「无报告」处置）。 */
+function retrievalReportsDir(): string | null {
+  if (reportsDirOverride !== undefined) return reportsDirOverride
+  const root = findRepoRootFrom(dirname(fileURLToPath(import.meta.url)), RETRIEVAL_REPO_MARKER)
+  return root === null ? null : join(root, 'docs', 'eval')
+}
+
+/** 磁盘上一份报告的身份（给日期选择器用）。 */
+export interface RetrievalReportSummary {
+  date: string
+  file: string
+  /** 文件写入时刻（UTC ISO）——**取自 mtime，不是报告内容**：报告本体按 B1 纪律
+   *  零时间量（同树同库两跑逐字节一致），「生成时刻」只能由文件系统给。 */
+  writtenAt: string | null
+}
+
+/**
+ * 列出全部报告，**日期倒序**。
+ *
+ * 目录读不到 ⇒ 空数组：「还没跑过批」是正常状态，不是错误（`docs/eval/` 在产物布局
+ * 或裁剪过的检出里本就可能缺席）。单个文件 `stat` 失败 ⇒ 保留该条、`writtenAt` 给
+ * `null`——手工跑批正在写时可能撞上，丢掉整条会让清单在跑批期间抖动。
+ */
+export function listRetrievalReports(dir: string): RetrievalReportSummary[] {
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return []
+  }
+  const out: RetrievalReportSummary[] = []
+  for (const name of names) {
+    const m = REPORT_FILE_RE.exec(name)
+    if (!m) continue
+    let writtenAt: string | null = null
+    try {
+      writtenAt = statSync(join(dir, name)).mtime.toISOString()
+    } catch {
+      writtenAt = null
+    }
+    out.push({ date: m[1], file: name, writtenAt })
+  }
+  // 同日多份按文件名倒序：**显式 tie-break**，别把 `readdir` 的顺序（文件系统给的，
+  // 不保证稳定）漏进响应——同一目录两次请求给出不同顺序会让日期选择器跳位。
+  return out.sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? 1 : -1
+    return a.file < b.file ? 1 : -1
+  })
 }
 
 export async function evalRoutes(app: FastifyInstance): Promise<void> {
@@ -361,7 +455,17 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
       }
     }
     const agentId = typeof rawAgent === 'string' && rawAgent ? rawAgent : null
-    const pool = humanLabelsRepo.listLabelPool({ limit, perSession, agentId, days })
+    // E1 契约 D：每条附**前置 10 条上下文**，与 `/review/pending`（上方）逐字同款取数。
+    // 没有它，标注者只看得到孤零零一句回复——「这句答得对不对」在无上下文的条件下判不了，
+    // 而盲标测的正是「人读了这句给几分」，上下文缺失会把这个分数变成噪音。
+    //
+    // `getContextBefore` 走**字符串比较** `created_at < ?`：仅当全表时间串格式一致时，
+    // 字典序才等于时间序。当前成立的理由与举证见 `db/repository/messages.ts:307`
+    // （写入恒经 repository 显式生成 ISO 毫秒），`eval.test.ts` 有顺序判据钉死这一条。
+    const pool = humanLabelsRepo.listLabelPool({ limit, perSession, agentId, days }).map((p) => ({
+      ...p,
+      context: evalScoresRepo.getContextBefore(p.session_id, p.created_at, 10),
+    }))
     return reply.send({ ok: true, limit, perSession, days, pool })
   })
 
@@ -470,5 +574,67 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
       gateUnavailableReason:
         'gateVerdict 的族间差子指标（自有族 vs 外部族 ≤15pp）需要「族」这一维度，它是 Phase 0 离线标注文件的样本集元数据，活库无对应列 ⇒ 常驻面不可判。判定请读 sufficient + spearman + agreement。',
     })
+  })
+
+  // ─── E1 · 检索跑批报告（只读）────────────────────────────────────────────
+
+  /**
+   * 报告清单（E1 契约 B 上半）：给前端日期选择器用，**日期倒序**。
+   *
+   * **空清单是 200 + `[]`，不是 404**——口径与 `/spans`（`execution_id` 无段数据）逐字
+   * 一致：「还没有跑过批」对使用者就是「无数据」，不是错误。这一栏今天恰恰很可能就是
+   * 空的（报告是手工跑批产物，`docs/eval/` 里只有两份 md、还没有 json），回 404 会逼
+   * 前端把「空」写成异常分支，而空态文案（「先去跑 scripts/eval/retrieval-baseline.mjs」）
+   * 才是使用者真正需要看到的。**单份报告**取不到才是 404（见下一条）。
+   */
+  app.get('/api/eval/retrieval/reports', async (_req, reply) => {
+    const dir = retrievalReportsDir()
+    return reply.send({ ok: true, reports: dir === null ? [] : listRetrievalReports(dir) })
+  })
+
+  /**
+   * 一份报告（E1 契约 B 下半）。`?date=` 缺省 = **最新那份**。
+   *
+   * 三态刻意分开（与 `/label/pool` 的 `days` 同款取舍）：缺省/空串 ⇒ 取最新；
+   * 形状不对（`?date=abc`、`?date=2026-9-1`）⇒ **400**；形状对但那天没有 ⇒ **404 + reason**。
+   * 400 与 404 不能合并：日期选择器的选项来自上面那个清单，手写畸形值就是调用方写错了，
+   * 回 404 会把它伪装成「那天确实没有报告」——正是本文件 `parseBoundedInt` 注释里说的
+   * 「静默落回默认值 / 静默当不存在」那类掩盖。
+   *
+   * 文件在、内容读不动或不是 JSON ⇒ **500**：这不是调用方的问题，也不该伪装成 404。
+   */
+  app.get('/api/eval/retrieval/report', async (req, reply) => {
+    const { date: rawDate } = req.query as { date?: string }
+    let date: string | null = null
+    if (rawDate !== undefined && rawDate !== '') {
+      if (typeof rawDate !== 'string' || !DATE_RE.test(rawDate)) {
+        return reply.status(400).send({ error: 'date must be YYYY-MM-DD' })
+      }
+      date = rawDate
+    }
+    const dir = retrievalReportsDir()
+    const reports = dir === null ? [] : listRetrievalReports(dir)
+    // 清单已按日期倒序 ⇒ `reports[0]` 即最新那份（「缺省 = 最新」不另写一遍排序）
+    const picked = date === null ? reports[0] : reports.find((r) => r.date === date)
+    if (dir === null || picked === undefined) {
+      return reply.status(404).send({
+        error:
+          reports.length === 0
+            ? 'no retrieval baseline report yet — run scripts/eval/retrieval-baseline.mjs'
+            : `no retrieval baseline report for date ${date}`,
+      })
+    }
+    try {
+      const report: unknown = JSON.parse(readFileSync(join(dir, picked.file), 'utf8'))
+      // 顶层不是对象（`null` / 数组 / 裸标量）等同读不动：契约是 `{schema, ...ctx}`，
+      // 放过去只会让前端在渲染时炸，比在这里 500 难查得多。
+      if (report === null || typeof report !== 'object' || Array.isArray(report)) {
+        throw new Error('报告顶层不是对象')
+      }
+      return reply.send({ ok: true, ...picked, report })
+    } catch (err) {
+      log.warn('retrieval report unreadable', { file: picked.file, error: String(err) })
+      return reply.status(500).send({ error: `retrieval report unreadable: ${picked.file}` })
+    }
   })
 }

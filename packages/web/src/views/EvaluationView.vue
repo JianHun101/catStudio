@@ -12,6 +12,9 @@ import {
   type ChainHop,
   type HopFlag,
   type SpanDto,
+  type RetrievalReport,
+  type RetrievalReportSummary,
+  type RetrievalAnchorDetail,
 } from '@/composables/useApi'
 // 段瀑布口径（几何 / 相位 / 段说明 / 字段说明）——**唯一真相源在 utils/spanLayout.ts**，
 // 会话右侧面板的内联 trace 消费同一份。改动口径请改那里，别在本文件重新内联。
@@ -30,13 +33,16 @@ import { fmtUtcShort, fmtUtcFull } from '@/utils/time'
 
 /**
  * 全屏评估中心（E4-B，左侧栏底部入口进入，无 vue-router 的 App 级 view 切换）。
- * 四 tab（用户看得懂是硬要求）：
+ * 五 tab（用户看得懂是硬要求）：
  *   - 观察：评分列表 + 按猫聚合卡片 + 任务结局分布（episodes 7 类计数 + 办成率）
  *   - 回标：低分样本卡（回复全文 + 上下文折叠 + 1-5 分单选 + 评语）→ 提交移出待回标 + 角标减一
- *   - 标注（J1）：盲标池样本卡（回复**全文** + 1-5 分单选 + 评语）→ 提交移出池子。
+ *   - 标注（J1）：盲标池样本卡（回复**全文** + 上下文折叠 + 1-5 分单选 + 评语）→ 提交移出池子。
  *     **界面绝不显示判官分**——盲标是方法论硬要求（显示了就污染基准），故这一栏
  *     连数据都不取：`/api/eval/label/pool` 的响应里根本没有判官分字段。
  *   - 链路（P1）：L1 八口径 + 链概览 + 每链跳瀑布（回答「哪条链最长 / 卡在哪一跳」）
+ *   - 检索（E1）：检索跑批基线的**快照**视图（两组 recall 分列 / 归因分布 / 逐条明细 /
+ *     canary 与负例 / 日期选择器）。数字永远来自**上一次手工跑批**，页面顶部明写这句——
+ *     跑批要起嵌入 sidecar，前端不能触发。
  * 契约：消费 E4-A 后端四接口 + episode-stats（契约缺口裁决补充的只读路由）
  * + P1-A 的 l1-metrics / chains（平铺响应，无 ok 外壳）+ J1 的 label/pool 与 label/:id；
  * 办成率口径店长钉死：(success + corrected_success) / Σ(uRoot 已分类)，open 不计分母。
@@ -44,7 +50,7 @@ import { fmtUtcShort, fmtUtcFull } from '@/utils/time'
  */
 const emit = defineEmits<{ close: [] }>()
 
-const activeTab = ref<'observe' | 'review' | 'label' | 'chain'>('observe')
+const activeTab = ref<'observe' | 'review' | 'label' | 'chain' | 'retrieval'>('observe')
 
 // ─── 观察 tab ─────────────────────────────
 const scores = ref<EvalScoreRow[]>([])
@@ -88,6 +94,81 @@ const ORPHAN_KEY = '__orphan__'
 const spansByExec = ref<Record<string, SpanDto[]>>({})
 const spanLoading = ref<Record<string, boolean>>({})
 const spanError = ref<Record<string, string>>({})
+
+// ─── 检索 tab（E1：跑批基线的快照视图）──────
+// ⚠️ 这一栏的数字**永远是「上一次跑批」的快照**，不是实时水位：跑批要起嵌入 sidecar、
+// 跑几分钟，前端不能触发（会撞活 server 的嵌入端口）。tab 顶部那句声明是承重件——
+// 去掉它，快照会被读成当前水位。报告本体只落 md 时这一栏拿不到数据，故 E1 同批让
+// 跑批脚本多落一份同基名的 `.json`（契约 A）。
+const retrievalReports = ref<RetrievalReportSummary[]>([])
+const retrievalMeta = ref<RetrievalReportSummary | null>(null)
+const retrievalDate = ref('')
+const retrievalReport = ref<RetrievalReport | null>(null)
+const retrievalLoading = ref(true)
+const retrievalError = ref('')
+/** 逐条明细默认全收起——40 条 × 各自明细全铺开会淹掉整栏 */
+const retrievalOpen = ref<Record<string, boolean>>({})
+
+/** 两组读数**分列**（D4：测的是不同面，不合成总分）。
+ *  真实组的 n 是「标了 expect 的条数」——`recallMean` 为 `null` 表示该组无可评分条目。 */
+const retrievalGroups = computed(() => {
+  const g = retrievalReport.value?.groups
+  if (!g) return []
+  return [
+    { key: 'real', label: '真实组', ...g.real },
+    { key: 'constructed', label: '构造组', ...g.constructed },
+  ]
+})
+
+/** 归因分布：口径与 md 报告「未召回归因汇总」**逐字同源**——遍历全部条目（含负例）、
+ *  跳过已注入，键 = `drop ?? status`，计数单位 = (条目, 锚点) 对。自己另立一套口径
+ *  的话，页面与报告就会对不上账（而两边的数看着都「有理」）。 */
+const retrievalAttribution = computed(() => {
+  const bucket = new Map<string, number>()
+  const anchors = new Set<string>()
+  for (const s of retrievalReport.value?.scores ?? []) {
+    for (const d of s.details) {
+      if (d.status === 'injected') continue
+      const key = d.drop ?? d.status
+      bucket.set(key, (bucket.get(key) ?? 0) + 1)
+      anchors.add(`${d.docPath}\u0000${d.sectionAnchor}`)
+    }
+  }
+  const rows = [...bucket.entries()]
+    .map(([key, n]) => ({ key, n }))
+    .sort((a, b) => b.n - a.n || (a.key < b.key ? -1 : 1))
+  return { rows, total: rows.reduce((a, r) => a + r.n, 0), distinct: anchors.size }
+})
+
+/** 锚点归因标签：与 `retrieval-baseline.mjs::missLabel` 同一口径（`below_topk` 带
+ *  「哪条查询、池内第几名」，有距离就带距离）——md / json / 页面三处读到的必须是同一句话。 */
+function anchorLabel(d: RetrievalAnchorDetail): string {
+  const key = d.drop ?? d.status
+  const at = key === 'below_topk' ? ` q${d.queryIndex} rank=${d.rank}` : ''
+  const dist = typeof d.distance === 'number' ? ` dist=${d.distance.toFixed(4)}` : ''
+  return `${key}${at}${dist}`
+}
+
+/** canary 未通过条数。**它恒为 0 是预期值不是告警位**——任一条不符时脚本在落盘前就拒出
+ *  （B2 硬闸），所以这里读到 0 只说明「那份报告当初过了闸」；非 0 只可能来自被手工改过的
+ *  json。放在页面上是为了让「还是全过吗」一眼可查，不是当报警灯用。 */
+const canaryFailed = computed(
+  () => (retrievalReport.value?.canary ?? []).filter((c) => !c.ok).length
+)
+
+/** 负例判红条数 = `forbid`（刻意标注的「误读路径」节）被注入 prompt 的条数。 */
+const negativeRed = computed(
+  () => (retrievalReport.value?.negatives ?? []).filter((s) => s.forbidHit.length > 0).length
+)
+
+/** canary 一行文案。**拼成单个字符串再输出**——写成跨行的多个插值会把换行带进文本节点，
+ *  `wrapper.text()` 的断言与人的肉眼读法都会跟着对不齐（同一个坑在 `负例判红` 那行是
+ *  单行连续的，故无需此处理）。 */
+const canaryText = computed(() => {
+  const total = retrievalReport.value?.canary.length ?? 0
+  const failed = canaryFailed.value
+  return `${failed === 0 ? '✓' : '✗'} canary ${total - failed}/${total} 通过`
+})
 
 /** 渲染用分组：正文链 + 末尾孤儿组。
  *  归一成同一形状后，孤儿区复用同一套跳渲染（否则要复制一份 ~20 行的跳模板）。
@@ -466,6 +547,42 @@ async function loadLabelPool(): Promise<void> {
   }
 }
 
+/** 检索报告：先拉清单，再拉选中那一份（缺省 = 最新）。
+ *
+ *  **清单为空 ⇒ 空态，不是错误**（还没跑过批就是空，接口为此刻意不返 404）；
+ *  「清单非空但那份拉不到」才走错误分支——两者混成一个分支的话，空跑批历史会被
+ *  显示成「加载失败」，使用者会去查一个根本不存在的故障。
+ */
+async function loadRetrieval(date?: string): Promise<void> {
+  retrievalLoading.value = true
+  retrievalError.value = ''
+  try {
+    const listRes = await api.getRetrievalReports()
+    if (disposed) return
+    retrievalReports.value = listRes.reports
+    const want = date || retrievalDate.value
+    const picked = listRes.reports.find((r) => r.date === want) ?? listRes.reports[0] ?? null
+    retrievalMeta.value = picked
+    retrievalDate.value = picked?.date ?? ''
+    if (!picked) {
+      retrievalReport.value = null
+      return
+    }
+    const res = await api.getRetrievalReport(picked.date)
+    if (disposed) return
+    retrievalReport.value = res.report
+  } catch (err: any) {
+    if (!disposed) retrievalError.value = err.message || '检索报告加载失败'
+  } finally {
+    if (!disposed) retrievalLoading.value = false
+  }
+}
+
+/** 切换报告日期（下拉在模板里就地取值，避免多一个 ref 与列表脱节） */
+function onRetrievalDateChange(e: Event): void {
+  void loadRetrieval((e.target as HTMLSelectElement).value)
+}
+
 /** 提交标注 → 成功即从池中移除（下一次拉取时服务端也会排除它），失败保留样本卡 + 提示 */
 async function submitLabel(id: string): Promise<void> {
   labelSubmitError.value = ''
@@ -490,6 +607,7 @@ onMounted(() => {
   loadPending()
   loadLabelPool()
   loadChains()
+  loadRetrieval()
 })
 onUnmounted(() => {
   disposed = true
@@ -544,6 +662,13 @@ onUnmounted(() => {
         @click="activeTab = 'chain'"
       >
         链路
+      </button>
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'retrieval' }"
+        @click="activeTab = 'retrieval'"
+      >
+        检索
       </button>
     </div>
 
@@ -679,7 +804,8 @@ onUnmounted(() => {
 
     <!-- ─── 标注 tab（J1 盲标）───────────── -->
     <!-- 卡上**没有判官分**——不是省略，是盲标要求（数据里也没有）。回复正文不截断：
-         Phase 0 的采集期砍过 1200 字符，判官与人都只看到残段，那次教训已记账。 -->
+         Phase 0 的采集期砍过 1200 字符，判官与人都只看到残段，那次教训已记账。
+         E1 起每张卡另附**前置 10 条上下文**（契约 D）——盲标要求盲的是判官分，不是上下文。 -->
     <div v-show="activeTab === 'label'" class="eval-pane">
       <div v-if="labelLoading" class="list-hint"><span class="status-spinner"></span> 加载中…</div>
       <div v-else-if="labelError" class="error-msg">
@@ -696,6 +822,16 @@ onUnmounted(() => {
             <span class="score-time">{{ fmtUtcFull(p.created_at) }}</span>
           </div>
           <div class="sample-reply">{{ p.content }}</div>
+          <!-- E1 契约 D：与回标 tab 的上下文块**逐字同款**（同一份 `getContextBefore` 取数）。
+               盲标要求的是「看不到判官分」，**不包括**看不到上下文——没有上下文，标注者判的
+               是「这句话本身像不像好话」，而不是「这个回答对不对」，测出来的分就废了。 -->
+          <details class="sample-context">
+            <summary>查看上下文（{{ p.context.length }} 条）</summary>
+            <div v-for="c in p.context" :key="c.id" class="ctx-line">
+              <span class="ctx-role">{{ c.role === 'user' ? '用户' : '猫' }}</span>
+              <span class="ctx-text">{{ c.content }}</span>
+            </div>
+          </details>
           <div class="sample-actions">
             <div class="score-picker" role="radiogroup" :aria-label="`标注 ${p.id}`">
               <button
@@ -917,6 +1053,210 @@ onUnmounted(() => {
             </template>
           </div>
         </template>
+      </template>
+    </div>
+
+    <!-- ─── 检索 tab（E1：跑批基线的快照视图）─── -->
+    <!-- ⚠️ 顶部那条快照声明是**承重件**，不是装饰：跑批要起嵌入 sidecar、跑几分钟，前端
+         不能触发（会撞活 server 的嵌入端口）⇒ 页面上的数字**永远**是「上一次跑批」的结果。
+         去掉这句话，一份历史报告就会被读成当前水位。 -->
+    <div v-show="activeTab === 'retrieval'" class="eval-pane">
+      <div v-if="retrievalLoading" class="list-hint">
+        <span class="status-spinner"></span> 加载中…
+      </div>
+      <div v-else-if="retrievalError" class="error-msg">
+        {{ retrievalError }}
+        <button class="btn-retry-sm" @click="loadRetrieval()">重试</button>
+      </div>
+      <!-- 空态**不是错误**：报告是手工跑批产物，「还没跑过批」就是空——接口为此刻意不返 404 -->
+      <div v-else-if="!retrievalReport" class="list-hint">
+        还没有检索跑批报告——先在仓库根跑
+        <code class="retrieval-cmd">node scripts/eval/retrieval-baseline.mjs</code>
+        （跑批要起嵌入 sidecar，不能从这里触发）
+      </div>
+
+      <template v-else>
+        <div class="snapshot-bar">
+          <span class="snapshot-tag">快照</span>
+          <span class="snapshot-text">
+            <strong>{{ retrievalMeta?.date }}</strong>
+            那次跑批的结果，<strong>不是当前水位</strong>——跑批是手工的，页面不自动刷新。
+            <span v-if="retrievalMeta?.writtenAt" class="snapshot-at">
+              文件写入于 {{ fmtUtcFull(retrievalMeta.writtenAt) }}
+            </span>
+          </span>
+          <select
+            v-if="retrievalReports.length > 1"
+            class="retrieval-date"
+            :value="retrievalDate"
+            @change="onRetrievalDateChange"
+          >
+            <option v-for="r in retrievalReports" :key="r.date" :value="r.date">
+              {{ r.date }}
+            </option>
+          </select>
+        </div>
+
+        <!-- 两组读数**分列**（D4）：测的是不同面，不合成总分——合成出来的那个数
+             既不能定位问题，也不能比较版本。 -->
+        <div class="section-title">召回（两组分列，不合成总分）</div>
+        <div class="l1-grid">
+          <template v-for="g in retrievalGroups" :key="g.key">
+            <div class="l1-card">
+              <span class="l1-label">{{ g.label }} · recall（集均）</span>
+              <span class="l1-value" :class="{ 'l1-nodata': g.recallMean === null }">
+                {{ fmtRate(g.recallMean) }}
+              </span>
+              <span class="l1-sub"
+                >{{ g.hit }}/{{ g.expectTotal }} 锚点 · {{ g.scoredN }}/{{ g.n }} 条可评</span
+              >
+            </div>
+            <div class="l1-card">
+              <span class="l1-label">{{ g.label }} · 阈值前命中率（集均）</span>
+              <span class="l1-value" :class="{ 'l1-nodata': g.preThresholdRateMean === null }">
+                {{ fmtRate(g.preThresholdRateMean) }}
+              </span>
+              <span class="l1-sub"
+                >被阈值挡下 {{ g.preThreshold }} 处 · 阈值 {{ retrievalReport.maxDistance }}</span
+              >
+            </div>
+          </template>
+        </div>
+        <!-- 术语按报告原文照抄（**不改成「阈值拦截率」之类**）：改名会让页面与 md 报告读的
+             不是同一句话，两边对不上账时无法判断是口径分歧还是数据分歧。 -->
+        <div class="l1-note">
+          <span class="hint">
+            「集均」= 各条算术平均；「阈值前命中率」=
+            <code>expect</code> 里<strong>被距离阈值挡下</strong>的节占比
+            （数值越高越差，不是越高越好）。
+          </span>
+        </div>
+
+        <div class="section-title">语料与跑批快照</div>
+        <div class="l1-note">
+          <span
+            >chunks {{ retrievalReport.dbRows }} 行 / {{ retrievalReport.dbDocs }} 个 doc_path</span
+          >
+          <span
+            >语料新鲜度 live={{ retrievalReport.liveDocs }} rotten={{
+              retrievalReport.rotten
+            }}</span
+          >
+          <span>
+            索引新鲜度
+            {{ retrievalReport.indexFreshness.checked - retrievalReport.indexFreshness.stale }}/{{
+              retrievalReport.indexFreshness.checked
+            }}
+            份同步
+          </span>
+          <span>TOP_K {{ retrievalReport.params.topK }}</span>
+          <span>MAX_DISTANCE {{ retrievalReport.params.maxDistance }}</span>
+          <span
+            >嵌入 {{ retrievalReport.embed.model ?? 'n/a' }}/{{
+              retrievalReport.embed.dim ?? 'n/a'
+            }}
+            维</span
+          >
+        </div>
+        <div class="l1-note">
+          <span>
+            黄金集
+            <code>{{ retrievalReport.goldenFile }}</code>
+            v{{ retrievalReport.goldenData.version }}
+            <span v-for="(n, k) in retrievalReport.goldenCounts" :key="k" class="golden-count">
+              {{ k }}={{ n }}
+            </span>
+          </span>
+          <span class="hint">
+            冻结基点 <code>{{ retrievalReport.goldenData.meta?.frozenCorpusRef ?? 'n/a' }}</code>
+          </span>
+        </div>
+
+        <!-- 归因分布：**一个度量跨类目** ⇒ 单一色相按长度编码，不按类目换色
+             （类目换了颜色，读者会去找一个不存在的分组含义）。类目名是文字标签，
+             不靠颜色表意。 -->
+        <div class="section-title">
+          未召回归因分布（{{ retrievalAttribution.total }} 处 · 去重后
+          {{ retrievalAttribution.distinct }} 个锚点）
+        </div>
+        <div v-if="retrievalAttribution.rows.length === 0" class="list-hint">
+          本次跑批没有未召回的应命中锚点
+        </div>
+        <div v-else class="attr-list">
+          <div
+            v-for="r in retrievalAttribution.rows"
+            :key="r.key"
+            class="attr-row"
+            :title="`${r.key}：${r.n} 处`"
+          >
+            <span class="attr-key">{{ r.key }}</span>
+            <span class="attr-track">
+              <span
+                class="attr-bar"
+                :style="{ width: `${(r.n / retrievalAttribution.rows[0].n) * 100}%` }"
+              ></span>
+            </span>
+            <span class="attr-n">{{ r.n }}</span>
+          </div>
+          <div class="attr-foot">
+            计数单位 = （条目, 锚点）对，不是锚点数：同一节被两条条目标为
+            <code>expect</code> 时算两处。 药方见同批 md 报告的「未召回归因汇总」表。
+          </div>
+        </div>
+
+        <!-- 反对照：canary 与负例判红都是**状态**（通过/判红），按项目状态色 + 文字标签出，
+             不靠颜色单独表意。canary 全绿是预期值而非告警位——任一条不符时脚本根本不出报告。 -->
+        <div class="section-title">反对照与负例</div>
+        <div class="l1-note">
+          <span :class="canaryFailed === 0 ? 'is-ok' : 'is-bad'">{{ canaryText }}</span>
+          <span class="hint">必中条目必须满分、必不中必须零分——测的是测量工具自身的真空性</span>
+        </div>
+        <div class="l1-note">
+          <span :class="negativeRed > 0 ? 'is-bad' : 'is-ok'">
+            负例判红 {{ negativeRed }}/{{ retrievalReport.negatives.length }}
+          </span>
+          <span class="hint">
+            判红 = 刻意标注的「误读路径」节被注入了
+            prompt；应命中数一并在明细里，用来分开「标错了」与「尺子太宽」
+          </span>
+        </div>
+
+        <div class="section-title">逐条明细（{{ retrievalReport.scores.length }} 条）</div>
+        <div class="retrieval-list">
+          <div v-for="s in retrievalReport.scores" :key="s.id" class="retrieval-item">
+            <button
+              class="retrieval-head"
+              :aria-expanded="!!retrievalOpen[s.id]"
+              @click="retrievalOpen[s.id] = !retrievalOpen[s.id]"
+            >
+              <span class="chain-caret">{{ retrievalOpen[s.id] ? '▾' : '▸' }}</span>
+              <span class="retrieval-id">{{ s.id }}</span>
+              <span class="retrieval-kind" :class="`is-${s.kind}`">{{ s.kind }}</span>
+              <span class="retrieval-count">{{ s.hit }}/{{ s.expectTotal }}</span>
+              <span class="retrieval-metric">recall {{ fmtRate(s.recall) }}</span>
+              <span v-if="s.forbidHit.length > 0" class="retrieval-bad">
+                负例命中 {{ s.forbidHit.length }}
+              </span>
+            </button>
+            <div v-if="retrievalOpen[s.id]" class="retrieval-body">
+              <div class="retrieval-reason">{{ s.reason }}</div>
+              <!-- 锚点状态用 ✓/✗ **加**文字色双编码：状态色是保留色，不能单独承载语义 -->
+              <div
+                v-for="(d, i) in s.details"
+                :key="`${d.docPath}#${d.sectionAnchor}#${i}`"
+                class="anchor-row"
+              >
+                <span class="anchor-mark" :class="d.status === 'injected' ? 'is-ok' : 'is-miss'">
+                  {{ d.status === 'injected' ? '✓' : '✗' }}
+                </span>
+                <span class="anchor-path">
+                  {{ d.docPath }}<span class="anchor-sec">#{{ d.sectionAnchor }}</span>
+                </span>
+                <span v-if="d.status !== 'injected'" class="anchor-tag">{{ anchorLabel(d) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </template>
     </div>
 
@@ -1994,5 +2334,258 @@ onUnmounted(() => {
   font-size: 11px;
   line-height: 1.55;
   color: var(--text-secondary);
+}
+
+/* ─── 检索 tab（E1）─────────────────────── */
+
+/* 快照声明条：**承重件**，不是装饰。它要拦的误读代价最高——把一份历史报告当成当前
+   水位去下结论。故做成高对比的一条，而不是一行灰色小字。 */
+.snapshot-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-hint-border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 22px;
+}
+
+.snapshot-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-on-accent);
+  background: var(--accent);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.snapshot-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.snapshot-at {
+  color: var(--text-muted);
+}
+
+/* 日期选择器 = 切快照（报告是手工跑的，不是时间轴缩放） */
+.retrieval-date {
+  margin-left: auto;
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.retrieval-cmd {
+  font-size: 11px;
+  color: var(--accent-text);
+  background: var(--accent-tint);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+
+/* stat tile 的第三行：`l1-value` 给主读数，这里给「它是拿什么算的」（分母 / 口径） */
+.l1-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.golden-count {
+  margin-left: 6px;
+  color: var(--text-muted);
+}
+
+/* ─── 归因分布：单一色相按长度编码 ─────── */
+/* 类目名是文字标签、长度是唯一的视觉编码 ⇒ **不按类目换色**（换了颜色，读者会去找一个
+   并不存在的分组含义）。条形锚在左基线，自由端 4px 圆角；行距即填充间隙。 */
+.attr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 22px;
+}
+
+.attr-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 36px;
+  align-items: center;
+  gap: 10px;
+}
+
+.attr-key {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attr-track {
+  height: 14px;
+  background: var(--bg-surface);
+  border-radius: 0 4px 4px 0;
+  overflow: hidden;
+}
+
+.attr-bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 0 4px 4px 0;
+}
+
+.attr-n {
+  font-size: 11px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.attr-foot {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-top: 2px;
+}
+
+/* 状态色是**保留色**：通过 / 判红一律图标 + 文字双编码，不靠颜色单独表意——绿色与红色
+   在色觉障碍下不可分，而这一栏恰恰是判「尺子还准不准」的地方。 */
+.is-ok {
+  color: var(--accent-green);
+  font-weight: 600;
+}
+
+.is-bad {
+  color: var(--accent-red);
+  font-weight: 600;
+}
+
+/* ─── 逐条明细 ─────────────────────────── */
+
+.retrieval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 22px;
+}
+
+.retrieval-item {
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.retrieval-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background var(--ease-out);
+}
+
+.retrieval-head:hover {
+  background: var(--bg-hover);
+}
+
+.retrieval-id {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+}
+
+.retrieval-kind {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.retrieval-count,
+.retrieval-metric {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.retrieval-bad {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--accent-red);
+  background: rgba(224, 85, 106, 0.1);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.retrieval-body {
+  padding: 0 12px 10px 32px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.retrieval-reason {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 8px 0 4px;
+}
+
+.anchor-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.anchor-mark {
+  flex-shrink: 0;
+  font-size: 10px;
+  width: 12px;
+}
+
+.anchor-mark.is-ok {
+  color: var(--accent-green);
+}
+
+.anchor-mark.is-miss {
+  color: var(--accent-red);
+}
+
+.anchor-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.anchor-sec {
+  color: var(--text-muted);
+}
+
+.anchor-tag {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 </style>

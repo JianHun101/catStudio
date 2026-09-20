@@ -13,15 +13,18 @@ import type {
   EvalChainsResponse,
   EvalL1Metrics,
   LabelPoolRow,
+  RetrievalReport,
+  RetrievalReportSummary,
   SpanDto,
 } from '@/composables/useApi'
 
 /**
  * E4-B 评估中心前端——两层测试：
- * 1. ?raw 静态源断言（照 SettingsView.test.ts 约定）：四 tab 结构 / 三态 / 7 类结局 / 办成率 / 角标
+ * 1. ?raw 静态源断言（照 SettingsView.test.ts 约定）：五 tab 结构 / 三态 / 7 类结局 / 办成率 / 角标
  * 2. 挂载测试（@vue/test-utils + jsdom，mock useApi 边界）：渲染真实数据 + 回标提交闭环
  *    （样本移出 + 角标减一）+ 接口失败错误态 + P1 链路 tab（失败跳可见 / null≠0 / 孤儿区 / 时区）
- *    + J1 标注 tab（盲标：界面**不得**出现判官分 / 提交移出池子）。
+ *    + J1 标注 tab（盲标：界面**不得**出现判官分 / 提交移出池子）
+ *    + E1 检索 tab（快照声明 / 两组读数分列 / 归因分布 / 反对照 / 明细默认收起 / 空态非错误）
  *
  * P1-B：链路 tab 的 mock 数据用 `ChainHop[]` / `EvalChainsResponse` 显式标注——
  * 既喂数据，也顺带把前端 DTO 与冻结契约比对一遍（类型不符编译期就炸）。
@@ -40,6 +43,8 @@ vi.mock('@/composables/useApi', () => ({
     getEvalL1Metrics: vi.fn(),
     getEvalChains: vi.fn(),
     getEvalSpans: vi.fn(),
+    getRetrievalReports: vi.fn(),
+    getRetrievalReport: vi.fn(),
   },
 }))
 
@@ -50,16 +55,24 @@ describe('EvaluationView 静态结构（?raw）', () => {
     expect(source).toContain('@click="emit(\'close\')"')
   })
 
-  it('四 tab：观察 / 回标 / 标注 / 链路，默认观察，回标带待回标角标', () => {
+  it('五 tab：观察 / 回标 / 标注 / 链路 / 检索，默认观察，回标带待回标角标', () => {
     expect(source).toContain(
-      "const activeTab = ref<'observe' | 'review' | 'label' | 'chain'>('observe')"
+      "const activeTab = ref<'observe' | 'review' | 'label' | 'chain' | 'retrieval'>('observe')"
     )
     expect(source).toContain(`v-show="activeTab === 'observe'"`)
     expect(source).toContain(`v-show="activeTab === 'review'"`)
     expect(source).toContain(`v-show="activeTab === 'label'"`)
     expect(source).toContain(`v-show="activeTab === 'chain'"`)
+    expect(source).toContain(`v-show="activeTab === 'retrieval'"`)
     expect(source).toContain('tab-badge')
     expect(source).toContain('pendingBadge')
+    // E1 契约 C：检索 tab 排在「链路」**之后**（按钮序 = 阅读序；插在中间会改既有 tab 的
+    // 肌肉记忆位置）。按**按钮块**切而不是裸切字面量——`:class` 在 tab 栏先出现。
+    const tabBar = source.slice(source.indexOf('eval-tabs'), source.indexOf('<!-- ─── 观察 tab'))
+    const chainAt = tabBar.indexOf('链路')
+    const retrievalAt = tabBar.indexOf('检索')
+    expect(chainAt).toBeGreaterThan(-1)
+    expect(retrievalAt).toBeGreaterThan(chainAt)
   })
 
   it('J1 标注 tab：盲标是硬要求——样本卡**不渲染任何判官分**，且该 tab 的取数面里没有它', () => {
@@ -237,6 +250,9 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
 
   /** 盲标池样本：**类型上就没有判官分字段**（`LabelPoolRow`）——若哪天有人往响应里加
    *  判官分，这里会先编译不过。 */
+  /** 前置上下文（E1 契约 D）：`getContextBefore` 按 **ASC** 返回（最近的一条在最后），
+   *  这里照同序摆——**两条 user** 是为了让「取错那一条」在渲染面上看得出来（取错会显示
+   *  更远的那句）。服务端那条顺序判据在 `routes/eval.test.ts` 用真 SQL 钉。 */
   const labelPoolRows: LabelPoolRow[] = [
     {
       id: 'lb1',
@@ -245,6 +261,29 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
       content: '待标注的猫回复全文 A',
       created_at: '2026-09-02T10:00:00.000Z',
       agent_name: '店长',
+      context: [
+        {
+          id: 'c-lb1-a',
+          role: 'user',
+          agent_id: null,
+          content: '更远的那条 user（取错会显示它）',
+          created_at: '2026-09-02T09:57:00.000Z',
+        },
+        {
+          id: 'c-lb1-b',
+          role: 'agent',
+          agent_id: 'a2',
+          content: '中间夹着的一条猫回复',
+          created_at: '2026-09-02T09:59:00.000Z',
+        },
+        {
+          id: 'c-lb1-c',
+          role: 'user',
+          agent_id: null,
+          content: '之前最近的那条 user',
+          created_at: '2026-09-02T09:59:30.000Z',
+        },
+      ],
     },
     {
       id: 'lb2',
@@ -253,8 +292,141 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
       content: '待标注的猫回复全文 B',
       created_at: '2026-09-02T09:00:00.000Z',
       agent_name: '吐槽猫',
+      context: [],
     },
   ]
+
+  // ─── E1 检索报告数据 ─────────────────────
+  /** 报告清单一行（日期选择器用）。`writtenAt` 由**文件 mtime** 给——报告本体零时间量。 */
+  const retrievalSummary: RetrievalReportSummary = {
+    date: '2026-09-20',
+    file: 'retrieval-baseline-2026-09-20.json',
+    writtenAt: '2026-09-20T06:12:00.000Z',
+  }
+
+  /** 一个未召回的应命中锚点（归因键 = `drop ?? status` = `not-recalled`）。 */
+  const missDetail: RetrievalReport['scores'][number]['details'][number] = {
+    docPath: 'docs/plans/retrieval-eval.md',
+    sectionAnchor: 'tombstone',
+    status: 'not-recalled',
+    drop: null,
+    distance: 0.7123,
+    channel: 'vector',
+    queryIndex: 2,
+    rank: 7,
+    source: 'recheck',
+  }
+
+  const negativeRow: RetrievalReport['scores'][number] = {
+    id: 'N01',
+    kind: 'negative',
+    reason: '负例 · 误读路径被注入',
+    expectTotal: 0,
+    hit: 0,
+    recall: null,
+    preThreshold: 0,
+    preThresholdRate: null,
+    details: [],
+    forbidHit: [{ docPath: 'docs/run/x.md', sectionAnchor: 'sec-3' }],
+  }
+
+  /** 报告快照（形态 = `buildReportJson(ctx)` = `{schema, ...ctx}`）。**两组 recall 刻意取
+   *  md 报告 09-20 的真实值**（real 0.5833 / constructed 0.8261）：页面显示 58% / 83%
+   *  （`fmtRate` 走 `Math.round`）——对不上就说明取错了字段。 */
+  const retrievalReport: RetrievalReport = {
+    schema: 1,
+    date: '2026-09-20',
+    dbPath: '/repo/packages/server/data/cat-study-dev.db',
+    dbRows: 410,
+    dbDocs: 19,
+    goldenFile: 'docs/eval/retrieval-golden.json',
+    goldenData: { version: 1, entries: [], meta: { frozenCorpusRef: '44c1d3ba' } },
+    goldenCounts: { real: 12, constructed: 23, negative: 5 },
+    liveDocs: 19,
+    rotten: 0,
+    indexFreshness: { checked: 19, stale: 0 },
+    params: { topK: 3, maxDistance: 0.6, probeN: 20 },
+    embed: { model: 'Xenova/bge-small-zh-v1.5', dim: 512, port: 54321 },
+    groups: {
+      real: {
+        n: 12,
+        scoredN: 12,
+        expectTotal: 36,
+        hit: 21,
+        recallMean: 0.5833,
+        microRecall: 0.5833,
+        preThreshold: 0,
+        preThresholdRateMean: 0,
+        microPreThresholdRate: 0,
+      },
+      constructed: {
+        n: 23,
+        scoredN: 23,
+        expectTotal: 48,
+        hit: 39,
+        recallMean: 0.8261,
+        microRecall: 0.8125,
+        preThreshold: 2,
+        preThresholdRateMean: 0.04,
+        microPreThresholdRate: 0.0417,
+      },
+    },
+    scores: [
+      {
+        id: 'R01',
+        kind: 'real',
+        reason: '真实问答 · 全中',
+        expectTotal: 3,
+        hit: 3,
+        recall: 1,
+        preThreshold: 0,
+        preThresholdRate: 0,
+        details: [
+          {
+            docPath: 'docs/adr/0007-external-tool-form-selection-checklist.md',
+            sectionAnchor: '决策',
+            status: 'injected',
+            drop: null,
+            distance: 0.312,
+          },
+        ],
+        forbidHit: [],
+      },
+      {
+        id: 'R02',
+        kind: 'real',
+        reason: '真实问答 · 覆盖洞',
+        expectTotal: 3,
+        hit: 1,
+        recall: 0.3333,
+        preThreshold: 0,
+        preThresholdRate: 0,
+        details: [missDetail],
+        forbidHit: [],
+      },
+      negativeRow,
+    ],
+    canary: [
+      {
+        id: 'C01',
+        kind: 'real',
+        reason: '必中 · query 抄某节标题',
+        expectTotal: 1,
+        hit: 1,
+        recall: 1,
+        preThreshold: 0,
+        preThresholdRate: 0,
+        details: [],
+        forbidHit: [],
+        query: '墓碑切片',
+        expectKind: 'must-hit',
+        ok: true,
+      },
+    ],
+    negatives: [negativeRow],
+    maxDistance: 0.6,
+    recheck: { entries: 11 },
+  }
 
   // ─── P1 链路 tab 数据 ────────────────────
   /** 一跳 = 一条 execution_logs。h2 是「失败且无回复消息」的跳——本视图存在的理由。 */
@@ -451,6 +623,12 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     vi.mocked(api.getEvalSpans).mockImplementation(async (execId: string) =>
       execId === 'h1' ? { ok: true, spans: h1Spans } : { ok: true, spans: [] }
     )
+    vi.mocked(api.getRetrievalReports).mockResolvedValue({ ok: true, reports: [retrievalSummary] })
+    vi.mocked(api.getRetrievalReport).mockResolvedValue({
+      ok: true,
+      ...retrievalSummary,
+      report: retrievalReport,
+    })
   })
 
   /** 展开第一条链（正文链），段数据随之拉取 */
@@ -917,6 +1095,78 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     expect(wrapper.text()).toContain('链路查询失败')
     const retries = wrapper.findAll('.btn-retry-sm')
     expect(retries.length).toBeGreaterThan(0)
+    wrapper.unmount()
+  })
+
+  it('E1 检索 tab：快照声明 + 两组读数分列（不合成总分）+ 归因分布 + 反对照', async () => {
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const tab = wrapper.findAll('button').find((b) => b.text() === '检索')
+    expect(tab).toBeTruthy()
+    await tab!.trigger('click')
+    await flushPromises()
+
+    const text = wrapper.text()
+    // ① 快照声明是**承重件**：没有它，一份历史报告会被读成当前水位
+    expect(text).toContain('快照')
+    expect(text).toContain('不是当前水位')
+    expect(text).toContain('2026-09-20')
+    // ② 两组分列（D4）：四个 tile 都在——**没有**任何合成总分读数
+    expect(text).toContain('真实组 · recall（集均）')
+    expect(text).toContain('构造组 · recall（集均）')
+    expect(text).toContain('真实组 · 阈值前命中率（集均）')
+    expect(text).toContain('构造组 · 阈值前命中率（集均）')
+    // 数值必须来自 `groups`（0.5833 → 58%，0.8261 → 83%）——取错字段这里就红
+    expect(text).toContain('58%')
+    expect(text).toContain('83%')
+    expect(text).toContain('36') // 真实组应命中锚点总数
+    // ③ 归因分布：键 = `drop ?? status`，计数单位 =（条目, 锚点）对
+    expect(text).toContain('未召回归因分布')
+    expect(text).toContain('not-recalled')
+    // ④ 反对照（状态双编码：图标 + 文字，不靠颜色单独表意）
+    expect(text).toContain('canary 1/1 通过')
+    expect(text).toContain('负例判红 1/1')
+
+    // ⑤ 逐条明细默认**收起**——40 条全铺开会淹掉整栏；展开后才出锚点与归因标签
+    expect(text).not.toContain('docs/plans/retrieval-eval.md')
+    const head = wrapper.findAll('.retrieval-head').find((h) => h.text().includes('R02'))
+    expect(head).toBeTruthy()
+    await head!.trigger('click')
+    const opened = wrapper.text()
+    expect(opened).toContain('docs/plans/retrieval-eval.md')
+    // 归因标签与脚本 `missLabel` **同一句话**：非 below_topk 不带 `q/rank`，距离恒打
+    expect(opened).toContain('not-recalled dist=0.7123')
+    wrapper.unmount()
+  })
+
+  it('E1：报告清单为空 ⇒ 空态**不是错误**（接口为此刻意不返 404）', async () => {
+    vi.mocked(api.getRetrievalReports).mockResolvedValue({ ok: true, reports: [] })
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('还没有检索跑批报告')
+    // 空 ≠ 错：把「还没跑过批」渲染成「加载失败」，会让人去查一个根本不存在的故障
+    expect(wrapper.find('.error-msg').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('E1 契约 D：标注卡渲染前置上下文，且顺序是后端给的 ASC（最近的一条在最后）', async () => {
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const card = wrapper
+      .findAll('.sample-card')
+      .find((c) => c.text().includes('待标注的猫回复全文 A'))
+    expect(card).toBeTruthy()
+    const ctx = card!.find('.sample-context')
+    expect(ctx.exists()).toBe(true)
+    expect(ctx.text()).toContain('查看上下文（3 条）')
+    // 两条 user 夹具：**取错那条**（更远的）在渲染面上看得出来
+    const ctxText = ctx.text()
+    expect(ctxText).toContain('更远的那条 user（取错会显示它）')
+    expect(ctxText).toContain('之前最近的那条 user')
+    expect(ctxText.indexOf('更远的那条')).toBeLessThan(ctxText.indexOf('之前最近的那条'))
     wrapper.unmount()
   })
 })
