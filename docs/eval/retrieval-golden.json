@@ -461,11 +461,11 @@
       "expect": [
         {
           "doc_path": "docs/adr/0013-c3-outbound-bus-not-adopted.md",
-          "section_anchor": "决策：C3 降级为不做"
+          "section_anchor": "#tombstone"
         }
       ],
       "forbid": [],
-      "answerability": "答案在 docs/adr/0013 §决策：C3 降级为不做——三处 getIO() 是 HTTP 写操作后的副作用通知，与引擎输出是两类事件。"
+      "answerability": "有解：答案在 docs/adr/0013 的**墓碑片**（`#tombstone`，正文=frontmatter `verdict`：『C3 出站总线方案已废弃，不做』）——该 ADR 已 superseded，正文不再进检索面。"
     },
     {
       "id": "C12",
@@ -697,7 +697,7 @@
       "expect": [
         {
           "doc_path": "docs/adr/0013-c3-outbound-bus-not-adopted.md",
-          "section_anchor": "决策：C3 降级为不做"
+          "section_anchor": "#tombstone"
         }
       ],
       "forbid": [
@@ -706,7 +706,7 @@
           "section_anchor": "决策"
         }
       ],
-      "answerability": "有解：答案在 docs/adr/0013 §决策——C3 降级为不做。禁止命中的是 docs/adr/0011 §决策：那节通篇讲 EngineBus/HandoffBus 的「引擎出口收敛」，正是 ADR 0013 自己点名的「误读路径（放弃）」——只读它会答成「该做」。"
+      "answerability": "有解：答案在 docs/adr/0013 的**墓碑片**（`#tombstone`，正文=frontmatter `verdict`：『C3 出站总线方案已废弃，不做』）。禁止命中的是 docs/adr/0011 §决策：那节通篇讲 EngineBus/HandoffBus 的「引擎出口收敛」，正是 ADR 0013 自己点名的「误读路径（放弃）」——只读它会答成「该做」。"
     },
     {
       "id": "N02",

@@ -24,7 +24,13 @@ import {
   summaryLine,
 } from './golden-check.mjs'
 
-import { collectCandidatePaths, classifyDocument } from '../flywheel/scan.mjs'
+import {
+  collectCandidatePaths,
+  classifyDocument,
+  RETIRED_STATUSES,
+  TOMBSTONE_ANCHOR,
+  tombstoneSegment,
+} from '../flywheel/scan.mjs'
 import { segmentDocument } from '../../packages/server/src/memory/flywheel/segment.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -162,7 +168,8 @@ describe('checkGoldenSet — 锚点存在性（含真空性反对照）', () => 
   const index = () =>
     buildLiveAnchorIndex({
       root: REPO_ROOT,
-      scanMod: { collectCandidatePaths, classifyDocument },
+      // 注入面 = `buildLiveAnchorIndex` 实际消费的四个成员（退役分支要后两个）
+      scanMod: { collectCandidatePaths, classifyDocument, RETIRED_STATUSES, tombstoneSegment },
       segment: segmentDocument,
     })
 
@@ -207,6 +214,69 @@ describe('checkGoldenSet — 锚点存在性（含真空性反对照）', () => 
   it('真空性反对照（另一极）：真身**不**变异时上述断言不成立——否则红点恒红、判据无效', () => {
     const { rotten } = checkGoldenSet({ data: goldenRaw, index: index() })
     expect(rotten).toHaveLength(0)
+  })
+
+  it('退役件的活锚集合**恒为墓碑锚**（P1-C：照旧切正文 ⇒ 标尺与检索引擎各说各话）', () => {
+    const idx = index()
+    const retired = [
+      'docs/adr/0002-sqlite-redis-storage.md',
+      'docs/adr/0005-redis-pubsub-message-bus.md',
+      'docs/adr/0013-c3-outbound-bus-not-adopted.md',
+    ]
+    for (const p of retired) {
+      expect(idx.retiredDocs.has(p)).toBe(true)
+      expect([...idx.anchors.get(p)]).toEqual([TOMBSTONE_ANCHOR])
+    }
+    expect(idx.retiredDocs.size).toBe(retired.length)
+    // 反向：活件的活锚集合里**不得**混进墓碑锚——否则「墓碑锚只对退役件成立」是假读数
+    expect(idx.anchors.get('docs/plans/memory-flywheel.md').has(TOMBSTONE_ANCHOR)).toBe(false)
+  })
+
+  it('**反对照甲**：本票改前的两条锚（C11/N01 皆挂 0013 正文锚）在新闸下必报腐烂', () => {
+    const mutated = JSON.parse(JSON.stringify(goldenRaw))
+    for (const id of ['C11', 'N01']) {
+      mutated.entries.find((e) => e.id === id).expect[0].section_anchor = '决策：C3 降级为不做'
+    }
+
+    const { rotten } = checkGoldenSet({ data: mutated, index: index() })
+
+    expect(rotten.map((r) => `${r.id}.${r.field}`).sort()).toEqual(['C11.expect', 'N01.expect'])
+    expect(rotten.every((r) => r.reason === 'anchor-not-found')).toBe(true)
+    // 另一极：真身（改后）零腐烂 —— 否则红点恒红，反对照证不出任何东西
+    expect(checkGoldenSet({ data: goldenRaw, index: index() }).rotten).toEqual([])
+  })
+
+  it('**反对照乙**：退役件挂正文锚 ⇒ 必拒，且 detail 说破「该件已退役」不让人去找章节新名', () => {
+    const mutated = JSON.parse(JSON.stringify(goldenRaw))
+    const c11 = mutated.entries.find((e) => e.id === 'C11')
+    c11.expect[0].section_anchor = '决策：C3 降级为不做'
+
+    const { rotten } = checkGoldenSet({ data: mutated, index: index() })
+
+    expect(rotten).toHaveLength(1)
+    expect(rotten[0]).toMatchObject({
+      id: 'C11',
+      field: 'expect',
+      doc_path: 'docs/adr/0013-c3-outbound-bus-not-adopted.md',
+      section_anchor: '决策：C3 降级为不做',
+      reason: 'anchor-not-found',
+    })
+    expect(rotten[0].detail).toContain('doc-retired')
+  })
+
+  it('**反对照丙**：活件挂墓碑锚 ⇒ 必拒（墓碑锚只对退役件成立）', () => {
+    const data = set([
+      entry({
+        expect: [{ doc_path: 'docs/plans/memory-flywheel.md', section_anchor: TOMBSTONE_ANCHOR }],
+      }),
+    ])
+
+    const { rotten } = checkGoldenSet({ data, index: index() })
+
+    expect(rotten).toHaveLength(1)
+    expect(rotten[0].reason).toBe('anchor-not-found')
+    // 活件不是退役件 ⇒ 不得带退役定向（否则是把人往错方向引）
+    expect(rotten[0].detail).toBeUndefined()
   })
 
   it('doc_path 指向不存在的文件 ⇒ 原因钉在 doc-not-live（与拼错锚点是两副药方）', () => {

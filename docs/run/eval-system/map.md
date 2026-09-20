@@ -30,7 +30,11 @@
 - `chunks` 是可重建派生投影，重扫会换 `content_hash` / chunk id → 标注键必须用身份键 `(doc_path, section_anchor, content_hash)`
 - 免审白名单：`docs/run/**`（含本目录）改动不进审查链
 - **免审批次怎么过 pre-push 门禁**（2026-09-14 实测，此前是隐式习惯）：门禁是**纯 sha 判定**（`git merge-base --is-ancestor $LAST_REVIEWED $local_sha` 为真即判「有未审 commit」），**全文零处解析免审前缀**（`grep -n -E 'docs/run|免审|白名单|前缀' .husky/pre-push` → 0 命中）。所以「日常 docs 提交落 dev、收口时统一 push」这条节奏要能落地，**收口时必须把 gate 推进到批次 tip**（`git rev-parse <tip> > .push-gate`），不能停在最后一个已审 sha。**这是可见动作、不是绕过**——判据是「该面内非免审部分是否全部已审」，需**穷举**证明：`git log --format=%h <gate>..<tip> -- . ':(exclude)docs/run'`。R1-b 批次实测该面 7 笔 = 2 笔已审代码 + 5 笔免审 docs。**`--no-verify` 仍然禁。**
-- 已有基建别重造：L1 八口径已接线（缺端点/时序）、L2 判官打分已通、L4 episode 已通
+- 已有基建别重造：L1 八口径已接线（缺端点/时序）、L2 判官打分**链路已接线但活实例采样率 = 0**、L4 episode 已通
+  - ⚠️ **2026-09-20 订正（店长，用户判据「为真须活实例读数证」）**：本条原写「L2 判官打分**已通**」，
+    **在「链路已接线」义上为真、在「今天在跑」义上为假**。实测：根 `.env:22` `EVAL_SAMPLE_RATE=0`
+    ⇒ `getSampleRate()`（`sampler.ts:23-27`）返 0 ⇒ 活库 `eval_scores` = **0 行**、`user_feedback` = **0 行**
+    （2026-09-20 直读 `cat-study-dev.db`）。**接线 ≠ 在跑**——这正是本仓反复栽的那类假绿。
 - **[已修 · P1-A `51170dc`，2026-09-14 重启生效；存量 1096 行按裁决不回填]** **`execution_logs.latency_ms` 全表 100% NULL**（店长实测 dev 库 1080/1080，completed/failed/running 全中）。不是没采集——同一条 UPDATE 的兄弟列有值（`prompt_tokens` / `reply_chars` 各 1007 行非空，铁证它跑过）；是 `reply.ts:1077` 写入后被 `serial.ts:1261` 的 `finalizeExecutionLog` 以 `opts?.latencyMs ?? null` 覆盖，而调用点（`serial.ts:389` 等）**不传 latencyMs**。连带 L1 `avgLatencyMs` 恒 null（`l1-aggregator.ts:82`）。**修它一行，白得两段耗时**：`replyMs` = `latency_ms`、`nonReplyMs` = `ended_at − started_at − latency_ms`
   - ⚠️ **两段的命名边界（店长 2026-09-13 实测纠正，早先写的「LLM 段 / 前置等锁段」是错的）**：`t0` 在 `reply.ts:207`（`runAgentReply` **内部**），而 token 获取在 `serial.ts:431`，**在 `runAgentReply` 之前** ⇒ `replyMs` = 上下文过滤 + 记忆检索 + LLM 流式 + 落库（**不只是 LLM**）；`nonReplyMs` = **等 token 锁 + 编排收尾 + 建行开销**（等锁是主要成分，**占比未实测**）。**禁用 `lockWaitMs`/「等锁段」这类字段名与文案——会把假数报成真数**；纯等锁数字需新增列 = P2 动表
 - **`/api/eval/aggregates` 已被 L2 按猫评分聚合占用**（`routes/eval.ts:47`）——L1 八口径端点须另起名
@@ -87,7 +91,13 @@
 - ~~**孤儿跳**（28 行 = 2.6%，既无回复、触发消息也无 `task_id`）在链路视图里怎么呈现~~
   → **已做（P1-B `5ec2b3e`）**：孤儿区默认收起、数量恒显示（`28 跳 触发/回复消息均无 task_id，无法归入任何链`）、带解释文案。见 [P1-B](P1-b-web-chain-tab.md)
 - L2 判官自身可不可信——判官分与人工回标的一致性怎么度量
-  → **仍未定，且无人认领**。这是评测体系的**自指环**：判官是 P3 人工标注的替代品，它不可信则 P3 没有退路。真缺口，无票
+  → **选型面已答（2026-08-10 Phase 0）**：kimi-k3 三项闸门全过（Spearman 0.75 / 一致率 97.1% / 族间差 5.6pp），
+  DS 两候选全灭（0.29 / 0.36）——判官**已选定且已校准**。**常驻面仍未定**：Phase 0 是**一次性离线 CLI**
+  （`eval/phase0.ts` 的 `--collect`/`--run`），活链采样率为 0 ⇒ 活库零分母，
+  且 `agreementRate` 的唯一非测试调用点是 `phase0.ts:462`——**全仓无一处**在活数据上算一致性。
+  → ⚠️ **2026-09-20 订正**：本条第 2 行原写「**仍未定**，且无人认领……真缺口，**无票**」，**两处失实**
+  （① 选型面早有答案；② 度量函数早已实现）。原文之所以失真，是因为它由**文档自证**而非活实例读数证——正是 J1 要治的病。
+  → **已立票** [J1](J1-judge-credibility-standing-loop.md)（用户 2026-09-20 裁决「第 4 项立票」）；形态（端点常驻 / 离线复核 / 只留挂载点）**待裁**，未派活
 - 除记忆库外，调度 / token 池 / CLI 适配器要不要各自建口径
   → **已答（2026-09-14，R2 前置勘察）**：**不是三个口径，是同一张表的三种段类型。** 判据两条：① 调度（FIFO 槽位排队）与 token 池等待同属 `gen_ai.*` 的**无标准键区**（规范里的 `queued` 指 provider 侧，与本仓排队无对应概念）；② CLI 适配器是三者里唯一部分有键可对的（子进程生命周期）。差异是「**段名 + 有无标准键**」，不是表结构差异——**分三个口径会造出三张形状相同的表**。落地形态：`spans.operation_name` 为 NULL 即「规范无此概念」。
 - 指标序列的留存策略（保留多久、降采样与否）
