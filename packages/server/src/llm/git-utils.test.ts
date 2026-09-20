@@ -207,6 +207,16 @@ describe('gitCommit 暂存区空短路（T-1 格0）', () => {
 
   const logMsgs = (fn: typeof h.logInfo) => fn.mock.calls.map((c) => String(c[0]))
 
+  /**
+   * 前置「收干净」那次调用**也会落日志**，与被测调用同挤在一个 mock 数组里。
+   * 不清掉的话，断言可能被前置那次满足（`toContain` / `not.toContain` 双向皆然）
+   * ——用例变成「测了前置」的假绿/假红。故每次前置调用后立即清。
+   */
+  const clearLogs = () => {
+    h.logInfo.mockClear()
+    h.logError.mockClear()
+  }
+
   beforeEach(() => {
     h.logInfo.mockClear()
     h.logError.mockClear()
@@ -224,6 +234,7 @@ describe('gitCommit 暂存区空短路（T-1 格0）', () => {
 
   it('暂存区为空 → 不调 git commit（门禁零执行），返回 null 且不产生 commit', () => {
     gitUtils.gitCommit('catstudy [ge0-preclean]') // 前置：把前序用例的残留改动收干净
+    clearLogs()
     rmSync(hookMarker, { force: true })
     const head0 = git('rev-parse HEAD')
 
@@ -269,6 +280,53 @@ describe('gitCommit 暂存区空短路（T-1 格0）', () => {
     expect(logMsgs(h.logError)).toContain('auto commit failed (git diff --cached --quiet)')
     // 反对照：**不许**退化成「没改动」那条 info——那正是格 0 要治的静默（真改动被吞）
     expect(logMsgs(h.logInfo)).not.toContain('auto commit skipped (no changes)')
+  })
+
+  it('merge 进行中 + 暂存区无差异 → 不短路，照常提交出 merge commit（守卫）', () => {
+    gitUtils.gitCommit('catstudy [ge0-preclean-merge]') // 前置：把前序用例的残留改动收干净
+    clearLogs()
+    rmSync(hookMarker, { force: true })
+    const branch = git('rev-parse --abbrev-ref HEAD')
+
+    // 造「真分叉 + 合并结果与 HEAD 无内容差异」：side 的改动**内容**先由另一笔提交搬进
+    // 主分支，于是 `git merge --no-commit --no-ff` 无内容差异 ⇒ 正落在短路的判据区间里，
+    // 而 `MERGE_HEAD` 在场 ⇒ 旧路径的 `git commit` 仍会产出双亲 merge commit。
+    git('checkout -q -b ge0-side')
+    writeFileSync(resolve(tmp, 'ge0-side.txt'), 'side', 'utf-8')
+    git('add -A')
+    git('commit -qm ge0-side-commit')
+    git(`checkout -q ${branch}`)
+    git('checkout ge0-side -- ge0-side.txt') // 只搬内容，不搬提交
+    git('commit -qm ge0-content-carried')
+    const preMerge = git('rev-parse HEAD') // 合并前的 HEAD = 待验的「第一父」
+    git('merge --no-commit --no-ff ge0-side')
+
+    // 前提自检：真的落进了短路判据区间——`index==HEAD`（exit 0）且 `MERGE_HEAD` 在场。
+    // 缺了这段，本用例在「merge 压根没起来」时也会绿（恒真的假绿门）。
+    const stagedExit = (() => {
+      try {
+        git('diff --cached --quiet')
+        return 0
+      } catch (e: any) {
+        return e.status
+      }
+    })()
+    expect(stagedExit).toBe(0)
+    expect(git('rev-parse --verify --quiet MERGE_HEAD')).toBeTruthy()
+
+    const hash = gitUtils.gitCommit('catstudy [ge0-merge-guard]')
+
+    // 承重断言：**没有**被短路，门禁照跑，且产出的是双亲 merge commit——
+    // 这正是短路会吞掉的那个「有拓扑意义的提交」（吞掉 ⇒ 半合并态滞留、日志报「no changes」）
+    expect(hookRan()).toBe(true)
+    expect(hash).toBeTruthy()
+    expect(logMsgs(h.logInfo)).toContain('auto commit')
+    expect(logMsgs(h.logInfo)).not.toContain('auto commit skipped (no changes)')
+    const parents = git('rev-list --parents -1 HEAD').split(' ')
+    expect(parents).toHaveLength(3) // commit + 两个父提交 = 真 merge commit
+    expect(parents[1]).toBe(preMerge) // 第一父 = 合并前的 HEAD
+
+    git('branch -D ge0-side')
   })
 })
 

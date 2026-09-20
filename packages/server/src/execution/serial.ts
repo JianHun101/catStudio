@@ -1353,8 +1353,10 @@ async function executeAgentsSerialImpl(
       // 返回之后跑，收的是整轮改动，不属于任何单次执行。归属判据与下面
       // `updateExecutionLogCommitHash`（T-M）**逐字同源**：执行行跨多只猫时这个 sha
       // 指认不出作者 ⇒ 段也指认不出父 ⇒ **不写**（缺 ≠ 失败，验收 26）。
-      // `gitCommit` 是 3 次连续 `execSync`（阻塞整个 Node 事件循环）——`execLogsRepo`
+      // `gitCommit` 走同步 `execSync`（阻塞整个 Node 事件循环）——`execLogsRepo`
       // 之外本段是全票唯一的「跨执行隐藏停顿」，值得留痕。
+      // **刻意不写死次数**：T-1 格 0 后次数随路径而定（短路 / 真提交不同），
+      // 写死的计数是本仓高发的漂移源（同一句曾在 5 处复述、格 0 一次就全数字失真）。
       // 只为**真产生了 commit** 的轮次留行：无改动时 `gitCommit` 返回 null，
       // 该段缺省（验收 26 明写「无改动时该段可缺」）。
       if (commits.length > 0) {

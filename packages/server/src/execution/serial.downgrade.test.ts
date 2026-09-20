@@ -776,7 +776,7 @@ describe('serial × 降级路径（T-1：Phase 1 测试先行 → Phase 2 生产
       // 真仓库端到端读数（本机 2026-09-15，主仓库 dev@3822b17，474 个 tracked 文件，
       // 会话 worktree 与真 dev 库快照同环境）：**现建 368ms / 复用 51ms**；其中
       // `git worktree add` 单项 = 205ms（夹具没这个量级，故夹具读数是**下界**）。
-      // 结论：新增的阻塞成本落在既有 `gitCommit`（3 次连续 execSync）同一量级，
+      // 结论：新增的阻塞成本落在既有 `gitCommit`（一串同步 execSync）同一量级，
       // 不改变「收尾段是百毫秒级阻塞」的既有形态。
       const tA = Date.now()
       const first = ensureSessionWorktree(sid)
