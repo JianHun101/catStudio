@@ -102,7 +102,11 @@ export const POOL_PER_QUERY_SWEEP = [20, 50, 100]
  *
  * 写进代码而不是靠人眼比：本次实跑的未召回集与它的**差集**由机器算出来并进报告
  * （`diff` 段）——人眼比对两列中文锚点是最容易「看着一样就算一样」的地方。
- * 归因与距离照抄 09-20 报告 §三/§四/§七，仅作对照，**不参与任何判据**。
+ * 归因照抄 09-20 报告 §三/§四/§七，仅作对照，**不参与任何判据**。
+ *
+ * ⚠️ 本表**只留对账用得到的字段**（`id` / `docPath` / `sectionAnchor` / `attribution`）。
+ * 原先还抄了每条的距离，实测**零消费**（判据与渲染都不读它）⇒ 已删；要查 09-20 的
+ * 原始距离见 `docs/eval/retrieval-baseline-2026-09-20.md`。
  */
 export const REPORT_0920_MISSES = [
   {
@@ -110,63 +114,54 @@ export const REPORT_0920_MISSES = [
     docPath: 'docs/plans/memory-flywheel.md',
     sectionAnchor: '2. 主链形态（七段，逐段钉死） > 2.6 检索（`searchChunksHybrid`）',
     attribution: 'not_topk',
-    distance: 0.4998,
   },
   {
     id: 'G03',
     docPath: 'docs/plans/memory-flywheel.md',
     sectionAnchor: '4. 票单全表（14 张，全部收口）',
     attribution: 'not-recalled',
-    distance: null,
   },
   {
     id: 'G08',
     docPath: 'docs/plans/episode-evaluation-v2.md',
     sectionAnchor: '6. 实施拆活（审 ✅ 后派）',
     attribution: 'below_topk',
-    distance: 0.4724,
   },
   {
     id: 'G09',
     docPath: 'docs/plans/episode-evaluation-v2.md',
     sectionAnchor: '4. closure 状态机 + 改进闭环',
     attribution: 'not_topk',
-    distance: 0.4448,
   },
   {
     id: 'G12',
     docPath: 'docs/plans/review-chain-anchor.md',
     sectionAnchor: '三、用户故事',
     attribution: 'not_topk',
-    distance: 0.292,
   },
   {
     id: 'C03',
     docPath: 'docs/adr/0008-acp-multi-provider-unification.md',
     sectionAnchor: '决策',
     attribution: 'not_topk',
-    distance: 0.4356,
   },
   {
     id: 'C05',
     docPath: 'docs/adr/0009-multimodal-knowledge-base.md',
     sectionAnchor: '两条不变量（扩展性论证核心） > 不变量 2：跨模态向量子空间分离',
     attribution: 'not_topk',
-    distance: 0.4657,
   },
   {
     id: 'C19',
     docPath: 'docs/plans/episode-evaluation-v2.md',
     sectionAnchor: '3. episodes 表结构',
     attribution: 'not_topk',
-    distance: 0.4392,
   },
   {
     id: 'C24',
     docPath: 'docs/plans/memory-flywheel.md',
     sectionAnchor: '2. 主链形态（七段，逐段钉死） > 2.3 扫描器（`scripts/flywheel/scan.mjs`）',
     attribution: 'not_topk',
-    distance: 0.461,
   },
   {
     id: 'N03',
@@ -174,14 +169,12 @@ export const REPORT_0920_MISSES = [
     sectionAnchor:
       '6. 后续项（用户明确要求记录） > 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化',
     attribution: 'not_topk',
-    distance: null,
   },
   {
     id: 'N04',
     docPath: 'docs/plans/review-chain-anchor.md',
     sectionAnchor: '六、不在范围内',
     attribution: 'not_topk',
-    distance: null,
   },
 ]
 
@@ -256,6 +249,39 @@ export function verifyFuseEquivalence({ built, native }) {
     }
   })
   return { ok: mismatches.length === 0, mismatches }
+}
+
+/**
+ * 融合等价自证的**判词**（把承重闸的判定从 `main()` 里抽出来，好让它本身可测）。
+ *
+ * 两条判据，**顺序即优先级**：
+ *  1. 有 `mismatch` ⇒ 不等价，`fuse-equivalence`
+ *  2. `compared === 0` ⇒ **无样本**，`fuse-equivalence-no-sample`
+ *
+ * 第 2 条是补的洞：原实现只报「打算比几条」（`fuseProbeQueries.length`），而取数循环里
+ * 的 `if (!e.ok || e.vector.length === 0) continue` 是**静默**跳过 ⇒ 全跳过时
+ * `mismatches` 为空 ⇒ `ok:true` ⇒ 报告照样印「逐行相等 ✅」，而**一条都没比**。
+ * 这与本脚本花整节去防的「否定式读数」是同一个形态：探针瞎了也给出同样的 0。
+ * ⇒ 无样本必须**拒出报告**，不能退化成一条恒真的绿。
+ */
+export function judgeFuseSelfCheck({ intended, compared, skipped = 0, mismatches }) {
+  if (mismatches.length > 0) {
+    return {
+      ok: false,
+      reason: 'mismatch',
+      message: '重建融合公式与库层 searchChunksHybrid 不等价——§6.2 的反事实读数不可信',
+    }
+  }
+  if (compared === 0) {
+    return {
+      ok: false,
+      reason: 'no-sample',
+      message:
+        `融合等价自证**一条都没比成**（候选 ${intended} 条全被跳过，skipped=${skipped}）——` +
+        '「逐行相等」会变成一条无样本的假绿，§6.2 的反事实读数不可采信',
+    }
+  }
+  return { ok: true, reason: '', message: '' }
 }
 
 /**
@@ -373,10 +399,64 @@ export function readAnchor({ sectionChunkIds, merged, maxDistance }) {
     rankGap: best ? best.rank - (topK - 1) : null,
     rrfGap: best && cutoffRrf !== null ? cutoffRrf - best.rrfScore : null,
     tieBroken: best !== null && !injected && cutoffRrf !== null && cutoffRrf - best.rrfScore === 0,
-    /** 同节所有片都进不了池时的原因：阈内片数 / 该节在池内的片数 */
-    poolRows: rows.length,
-    sectionSize: sectionChunkIds.size,
     maxDistance,
+  }
+}
+
+// ─── 纯函数：生产检索事件面（`retrieval_candidates`） ──────────
+
+/**
+ * **生产事件面** —— 与「黄金集面」**并列的另一个面**，不是它的复核。
+ *
+ * 两面答的**不是同一个问题**，故同一锚点在两面读数不同**不构成互相推翻**：
+ *
+ * | | 黄金集面（§4.2/§4.3 主体） | 生产事件面（本函数） |
+ * | --- | --- | --- |
+ * | 数据 | 金标查询，受控复现 | `retrieval_candidates`，历史流水 |
+ * | 答什么 | 「**金标查询**里它排第几、够不够得着」 | 「**真实生产查询**里它有没有被排到最前、有没有真注入」 |
+ *
+ * ⇒ 被推翻的只能是「**同一个面内**前后不一致」；跨面比大小是拿两把尺量两件事。
+ * 本仓为这条栽过一次（把生产面的 `rank=1` 拿去和黄金集面的名次比，判成「推翻」，
+ * 还把结论写进了 `map.md`）——那个判词是错的，面不同而已。
+ *
+ * ⚠️ `rank` **0 基**（写入口 `memory/index.ts` 的 `probe.map((c, rank) => …)` 用数组下标）
+ * ——与黄金集面的 `readAnchor().rank` **同基**。`rank = 0` 才是**最靠前**，别读成 1。
+ *
+ * ⚠️ **零行 ≠ 够不着**：查不到该锚点的生产行，只说明**这个面本次不可测**（流水是历史
+ * 累积，可能压根没跑过含它的查询），**不能**反推「生产面也够不着」。故 `measurable`
+ * 与 `total` 分两格返回，渲染层必须照此分列——这正是本脚本在别处花整节防的
+ * 「否定式读数」（探针瞎了也会给出同样的 0）。
+ */
+export function summarizeProductionFace(rows) {
+  const total = rows.length
+  if (total === 0) {
+    return {
+      available: true,
+      measurable: false,
+      total: 0,
+      queries: 0,
+      topRank: null,
+      topRankChunkId: null,
+      minDistance: null,
+      injectedRows: 0,
+      injectedQueries: 0,
+      rankBase: 0,
+    }
+  }
+  const ranked = rows.filter((r) => typeof r.rank === 'number')
+  const best = ranked.length > 0 ? ranked.reduce((a, b) => (b.rank < a.rank ? b : a)) : null
+  const dists = rows.map((r) => r.distance).filter((d) => typeof d === 'number')
+  return {
+    available: true,
+    measurable: true,
+    total,
+    queries: new Set(rows.map((r) => r.queryId)).size,
+    topRank: best ? best.rank : null,
+    topRankChunkId: best ? best.chunkId : null,
+    minDistance: dists.length > 0 ? Math.min(...dists) : null,
+    injectedRows: rows.filter((r) => r.injected === 1).length,
+    injectedQueries: new Set(rows.filter((r) => r.injected === 1).map((r) => r.queryId)).size,
+    rankBase: 0,
   }
 }
 
@@ -594,8 +674,9 @@ export function renderDiagnosis(ctx) {
       `不符 **${mergeChecks.mismatches.length}** 处 ⇒ ${mergeChecks.ok ? '✅ 重建序 == 链段序' : '❌ 重建序与链段不符，全部名次/分差读数作废'} |`
   )
   L.push(
-    `| **融合公式等价自证** | ${fuseCheck.queries} 条查询：本脚本 \`fuseChannelHits(k=60,N=20)\` vs 库层 \`searchChunksHybrid\` ⇒ ` +
-      `${fuseCheck.ok ? '✅ 逐行相等（顺序 / 分 / 通道身份三项）' : `❌ ${fuseCheck.mismatches.length} 处不符`} |`
+    `| **融合公式等价自证** | **实比 ${fuseCheck.compared}/${fuseCheck.intended} 条**查询${fuseCheck.skipped > 0 ? `（跳过 ${fuseCheck.skipped} 条：嵌入失败/空向量）` : ''}：本脚本 \`fuseChannelHits(k=60,N=20)\` vs 库层 \`searchChunksHybrid\` ⇒ ` +
+      `${fuseCheck.ok ? '✅ 逐行相等（顺序 / 分 / 通道身份三项）' : `❌ ${fuseCheck.mismatches.length} 处不符`}` +
+      `（报的是**实际比成几条**——实比 0 条会直接拒出报告，不会印成 ✅） |`
   )
   L.push(
     `| 预算截断面 | ${
@@ -712,6 +793,22 @@ export function renderDiagnosis(ctx) {
         ? `✅ 够得着——最好一次来自 \`${g03.corpusSweep.best.entryId}\` 的查询「${g03.corpusSweep.best.query}」，` +
           `距离 **${fmt4(g03.corpusSweep.best.distance)}**、KNN 名次 **${g03.corpusSweep.best.rank}**（阈值 ${params.maxDistance} 内 ⇒ 它**过得了距离闸**）。`
         : `❌ 全黄金集 ${g03.corpusSweep.queries} 条查询里**没有一条**够得着它 ⇒ 与"覆盖洞"一致。`)
+  )
+  L.push('')
+  L.push(
+    '> ⚠️ **上面这一行只是「黄金集面」**（金标查询，受控复现）。同一个锚点在**生产事件面**' +
+      '（`retrieval_candidates`，真实生产查询的检索流水）上读数可能完全不同——**两面不构成互相推翻**，' +
+      '详读 §4.3。**生产面**：' +
+      (() => {
+        const pf = g03.productionFace
+        if (!pf || !pf.available) return `该面本次不可测（${(pf && pf.reason) || '未取到'}）`
+        if (!pf.measurable) return '该锚点**零行** ⇒ 本次不可测（零行 ≠ 够不着）'
+        return (
+          `${pf.total} 行 / ${pf.queries} 个查询；最好一次 **名次 ${pf.topRank}**（**0 基**）、` +
+          `最小距离 ${pf.minDistance === null ? '（无）' : fmt4(pf.minDistance)}；` +
+          `\`injected=1\` **${pf.injectedRows} 行 / ${pf.injectedQueries} 个查询**`
+        )
+      })()
   )
   L.push('')
   L.push(`### 4.3 复核结论`)
@@ -1269,9 +1366,18 @@ export async function main(argv = process.argv.slice(2)) {
     // ─── 融合公式等价自证（重建 vs 库层） ────────────────
     const fuseProbeQueries = [...new Set(perEntry.flatMap((p) => p.queries))].slice(0, 12)
     const fuseMismatches = []
+    // ⚠️ 报「**实际比了几条**」而不是「打算比几条」：下面的 `continue` 是**静默**跳过，
+    // 若全跳过则 `fuseMismatches` 为空 ⇒ `ok:true` ⇒ 报告照样印「逐行相等 ✅」，
+    // 而**一条都没比**。这正是本脚本在别处花整节去防的「否定式读数」（探针瞎了也给出 0）。
+    let fuseCompared = 0
+    let fuseSkipped = 0
     for (const q of fuseProbeQueries) {
       const e = await memoEmbed(q)
-      if (!e.ok || e.vector.length === 0) continue
+      if (!e.ok || e.vector.length === 0) {
+        fuseSkipped += 1
+        continue
+      }
+      fuseCompared += 1
       const blob = vectorToBlob(e.vector)
       const native = chunksRepo.searchChunksHybrid(
         blob,
@@ -1289,16 +1395,29 @@ export async function main(argv = process.argv.slice(2)) {
       const eq = verifyFuseEquivalence({ built, native })
       if (!eq.ok) fuseMismatches.push({ query: q, mismatches: eq.mismatches.slice(0, 3) })
     }
-    const fuseCheck = {
-      ok: fuseMismatches.length === 0,
+    const fuseVerdict = judgeFuseSelfCheck({
+      intended: fuseProbeQueries.length,
+      compared: fuseCompared,
+      skipped: fuseSkipped,
       mismatches: fuseMismatches,
-      queries: fuseProbeQueries.length,
+    })
+    const fuseCheck = {
+      ok: fuseVerdict.ok,
+      mismatches: fuseMismatches,
+      intended: fuseProbeQueries.length,
+      compared: fuseCompared,
+      skipped: fuseSkipped,
     }
-    if (!fuseCheck.ok) {
+    if (!fuseVerdict.ok) {
       return refuse(
-        'fuse-equivalence',
-        { offenders: fuseMismatches },
-        '重建融合公式与库层 searchChunksHybrid 不等价——§6.2 的反事实读数不可信'
+        fuseVerdict.reason === 'no-sample' ? 'fuse-equivalence-no-sample' : 'fuse-equivalence',
+        {
+          intended: fuseProbeQueries.length,
+          compared: fuseCompared,
+          skipped: fuseSkipped,
+          offenders: fuseMismatches,
+        },
+        fuseVerdict.message
       )
     }
 
@@ -1376,6 +1495,27 @@ export async function main(argv = process.argv.slice(2)) {
     const g03SectionRows = chunksRepo.getChunksBySection(g03Anchor.docPath, g03Anchor.sectionAnchor)
     const g03SectionIds = new Set(g03SectionRows.map((r) => r.id))
 
+    // 生产事件面：键取**锚点身份**（`doc_path` + `section_anchor`），与黄金集面同键不同面
+    // ——不是 `chunk_id`：同节多片会各算各的，锚点身份才是 `map.md` 措辞里的那个「同一锚点」。
+    const productionFace = (() => {
+      const hasTable = db
+        .prepare(
+          "SELECT count(*) AS c FROM sqlite_master WHERE type = 'table' AND name = 'retrieval_candidates'"
+        )
+        .get().c
+      if (hasTable === 0) {
+        return { available: false, measurable: false, reason: '库内无 retrieval_candidates 表' }
+      }
+      const rows = db
+        .prepare(
+          `SELECT query_id AS queryId, chunk_id AS chunkId, distance, rank, injected
+             FROM retrieval_candidates
+            WHERE doc_path = ? AND section_anchor = ?`
+        )
+        .all(g03Anchor.docPath, g03Anchor.sectionAnchor)
+      return summarizeProductionFace(rows)
+    })()
+
     const countTerm = (term) =>
       db.prepare('SELECT count(*) AS c FROM chunks_fts WHERE chunks_fts MATCH ?').get(`"${term}"`).c
 
@@ -1425,7 +1565,6 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     // 跨全黄金集扫：有没有**任何一条**查询够得着这个锚点
-    const corpusQueries = [...new Set(goldenData.entries.flatMap((e) => [e.query, ...e.rewritten]))]
     let sweepBest = null
     let sweepN = 0
     for (const entry of goldenData.entries) {
@@ -1446,6 +1585,39 @@ export async function main(argv = process.argv.slice(2)) {
         })
       }
     }
+
+    // 生产事件面的判词。三态必须分列——**零行 ≠ 够不着**（见 `summarizeProductionFace` 注释）。
+    const productionFaceText = (() => {
+      if (!productionFace.available) {
+        return (
+          `**生产事件面**（\`retrieval_candidates\`，真实生产查询的检索流水）：${productionFace.reason} ⇒ ` +
+          '**该面本次不可测**。⚠️ 不可测 **≠** 够不着——别把它读成「生产面也够不着」。'
+        )
+      }
+      if (!productionFace.measurable) {
+        return (
+          '**生产事件面**（`retrieval_candidates`，真实生产查询的检索流水）：该锚点**零行** ⇒ **该面本次不可测**' +
+          '（流水是历史累积，零行只说明没跑过含它的查询）。⚠️ 不可测 **≠** 够不着——别把它读成「生产面也够不着」。'
+        )
+      }
+      const d = productionFace.minDistance === null ? '（无）' : fmt4(productionFace.minDistance)
+      const inj =
+        productionFace.injectedRows > 0
+          ? `其中 \`injected=1\` 的 **${productionFace.injectedRows} 行 / ${productionFace.injectedQueries} 个查询** ` +
+            '⇒ 它**在生产上真被排到过最前、也真进过注入集**'
+          : '其中 `injected=1` 的 **0 行** ⇒ 排得靠前但**从未真注入**'
+      return (
+        `**生产事件面**（\`retrieval_candidates\`，真实生产查询的检索流水）：该锚点有 **${productionFace.total} 行 / ${productionFace.queries} 个查询**，` +
+        `最好一次 **名次 ${productionFace.topRank}**（**0 基**，\`0\` 即最靠前；与黄金集面同基）、最小距离 **${d}**；${inj}。\n\n` +
+        '⇒ **两面不矛盾，是两把尺量两件事**：黄金集面（受控复现）说「金标查询里它排不到靠前」，' +
+        '生产事件面（历史流水）说「真实查询里它排到过最前、且真注入过」。' +
+        '此前那句「同一锚点在别的查询下拿到过 `rank=1`、`distance≈0.19`」出自**生产事件面**' +
+        '（`a60e0c1` 自己的置信度声明写死了出处「取自 `retrieval_candidates` 的跨查询汇总」），' +
+        '**在本面上可复现**；把它与黄金集面比大小才是错的——**被推翻的只能是同一个面内的前后不一致**。\n\n' +
+        '⇒ 顺带：生产面这一读数**加强**了本节的结论——它连同「语料里有它」（§4.1/§4.2）一起说明 ' +
+        '`not-recalled` **不是覆盖洞**（真的注入过），要救它得往**排序/融合**面找。'
+      )
+    })()
 
     const g03Verdict = (() => {
       const kwAllDead = g03Queries.every((q) => q.keywordHits === 0)
@@ -1475,19 +1647,22 @@ export async function main(argv = process.argv.slice(2)) {
             `② 但它挂的**药方**（「覆盖洞——先补语料/补锚点，不是调参能救的」）**两条都不成立**：` +
             `内容在语料里（补语料是往已有的东西上再加一份）；` +
             `而「调参救不回」也不能从这个标签推出来——标签只说明它落在**当前机制**的池外，不说明换个机制也够不着。` +
-            `③ 本次实测的**修法边界**：单动任何一类旋钮都救不回它——通道深度提到 200 仍恢复 0（§6.2，它的 RRF 分本就极低）、` +
+            `③ 本次实测的**修法边界**（以下三条均为**黄金集面 + 链段面**的读数）：单动任何一类旋钮都救不回它——通道深度提到 200 仍恢复 0（§6.2，它的 RRF 分本就极低）、` +
             `抬 topK 也无效（它不在榜上）、改写器也没救回（§七）。要救它得**同时**动召回深度与融合权重，或改查询侧。`
         )
         parts.push(
-          `⚠️ **与单点转述不符，如实记录**：本轮之前曾有一个单点读数称该锚点"在别的查询下拿到过 \`rank=1\`、\`distance≈0.19\`"。` +
-            `本次独立实测**复现不出**：全黄金集 ${sweepN} 条查询、KNN 深度 ${KNN_DEPTH} 下，最好一次是 ` +
-            `\`${reach.entryId}\` 的查询给出的 **名次 ${reach.rank} / 距离 ${fmt4(reach.distance)}**。` +
-            `⇒ 「向量通道够得着」这个**方向**成立，「它排得很靠前」不成立。以本次实测为准。`
+          `⚠️ **两个面，别读成互相推翻**：本节的**黄金集面**读数（黄金集 ${sweepN} 条查询、KNN 深度 ${KNN_DEPTH}）给出的是「**在这个面上**它够得着、但排不到靠前」` +
+            `（最好一次是 \`${reach.entryId}\` 的查询给出的 **名次 ${reach.rank} / 距离 ${fmt4(reach.distance)}**）。` +
+            `这个结论**推翻不了另一个面**——两个面答的本来就不是同一个问题：` +
+            '黄金集面答「**金标查询**里它排第几」，生产事件面答「**真实生产查询**里它有没有被排到最前、有没有真注入」。\n\n' +
+            productionFaceText
         )
       } else {
         parts.push(
-          `**且向量通道也够不着**：全黄金集 ${sweepN} 条查询、KNN 深度 ${KNN_DEPTH}、阈值放宽到 ${RECHECK_MAX_DISTANCE}，没有一条召回该锚点 ⇒ \`not-recalled\`（覆盖洞）在这条读数上**成立**。`
+          `**且向量通道也够不着**：全黄金集 ${sweepN} 条查询、KNN 深度 ${KNN_DEPTH}、阈值放宽到 ${RECHECK_MAX_DISTANCE}，没有一条召回该锚点 ⇒ \`not-recalled\`（覆盖洞）在这条读数上**成立**。` +
+            '⚠️ 但这只是**黄金集面**的读数，不足以单独判「覆盖洞」——必须并看下面的生产事件面。'
         )
+        parts.push(productionFaceText)
       }
       return parts.join('\n\n')
     })()
@@ -1501,6 +1676,7 @@ export async function main(argv = process.argv.slice(2)) {
       knn: g03Knn,
       sectionSize: g03SectionRows.length,
       corpusSweep: { queries: sweepN, best: sweepBest },
+      productionFace,
       verdict: g03Verdict,
     }
 
@@ -2120,7 +2296,12 @@ export async function main(argv = process.argv.slice(2)) {
           extraInLive: diff.extraInLive.length,
         },
         mergeSelfCheck: { ok: mergeChecks.ok, rows: mergeChecks.rows },
-        fuseSelfCheck: { ok: fuseCheck.ok, queries: fuseCheck.queries },
+        fuseSelfCheck: {
+          ok: fuseCheck.ok,
+          intended: fuseCheck.intended,
+          compared: fuseCheck.compared,
+          skipped: fuseCheck.skipped,
+        },
         channelHealth,
         g03: {
           keywordAllDead: g03.queries.every((q) => q.keywordHits === 0),
@@ -2132,6 +2313,8 @@ export async function main(argv = process.argv.slice(2)) {
                 rank: g03.corpusSweep.best.rank,
               }
             : null,
+          // 生产事件面：与 `reachableByVector`（黄金集面）**并列**，不是它的结论
+          productionFace: g03.productionFace,
         },
         topkReal,
         knobLab,

@@ -25,9 +25,11 @@ import {
   REPO_ROOT,
   fuseChannelHits,
   verifyFuseEquivalence,
+  judgeFuseSelfCheck,
   mergeQueryPools,
   verifyMerge,
   readAnchor,
+  summarizeProductionFace,
   splitFtsTerms,
   probeFtsTerms,
   judgeThresholdCounterControl,
@@ -239,6 +241,83 @@ describe('verifyFuseEquivalence — 重建 vs 库层的逐行等价自证', () =
   })
 })
 
+// ─── judgeFuseSelfCheck：承重闸的判词（含「无样本」那条硬闸） ────
+
+describe('judgeFuseSelfCheck — 有样本才有绿；无样本必须拒出报告', () => {
+  it('实比 12 条、零不符 ⇒ ok', () => {
+    const r = judgeFuseSelfCheck({ intended: 12, compared: 12, skipped: 0, mismatches: [] })
+    expect(r.ok).toBe(true)
+  })
+
+  it('**实比 0 条 ⇒ 拒**（原实现只报「打算比几条」，全跳过时会印成「✅ 逐行相等」）', () => {
+    const r = judgeFuseSelfCheck({ intended: 12, compared: 0, skipped: 12, mismatches: [] })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('no-sample')
+    expect(r.message).toContain('一条都没比成')
+  })
+
+  it('有样本但不符 ⇒ 拒，且 reason=mismatch（**优先于** no-sample）', () => {
+    const r = judgeFuseSelfCheck({
+      intended: 12,
+      compared: 12,
+      skipped: 0,
+      mismatches: [{ kind: 'order' }],
+    })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('mismatch')
+  })
+
+  it('部分跳过但有实比样本 ⇒ 仍可 ok（跳过本身不是失败，无样本才是）', () => {
+    const r = judgeFuseSelfCheck({ intended: 12, compared: 7, skipped: 5, mismatches: [] })
+    expect(r.ok).toBe(true)
+  })
+})
+
+// ─── summarizeProductionFace：生产事件面（与黄金集面并列的另一个面） ────
+
+describe('summarizeProductionFace — 零行 ≠ 够不着', () => {
+  const row = (o) => ({ queryId: 1, chunkId: 10, distance: 0.2, rank: 0, injected: 0, ...o })
+
+  it('零行 ⇒ measurable=false（**不可测**），不是「够不着」', () => {
+    const r = summarizeProductionFace([])
+    expect(r.measurable).toBe(false)
+    expect(r.total).toBe(0)
+    expect(r.topRank).toBe(null)
+    expect(r.injectedRows).toBe(0)
+  })
+
+  it('rank 是 **0 基**：rank=0 才是最好（别读成 1）', () => {
+    const r = summarizeProductionFace([
+      row({ queryId: 1, rank: 4, distance: 0.5 }),
+      row({ queryId: 2, rank: 0, distance: 0.31 }),
+      row({ queryId: 3, rank: 2, distance: 0.22 }),
+    ])
+    expect(r.topRank).toBe(0)
+    expect(r.rankBase).toBe(0)
+    // 最小距离与最好名次**不是同一行**——两个读数各自独立取，别混成一行
+    expect(r.minDistance).toBe(0.22)
+  })
+
+  it('injected 分别按**行**与按**查询**计数（同一查询多片各算一行）', () => {
+    const r = summarizeProductionFace([
+      row({ queryId: 1, chunkId: 10, injected: 1 }),
+      row({ queryId: 1, chunkId: 11, injected: 1 }),
+      row({ queryId: 2, chunkId: 10, injected: 0 }),
+    ])
+    expect(r.total).toBe(3)
+    expect(r.queries).toBe(2)
+    expect(r.injectedRows).toBe(2)
+    expect(r.injectedQueries).toBe(1)
+  })
+
+  it('全无 rank 值（keyword-only 行）⇒ topRank=null，不猜 0', () => {
+    const r = summarizeProductionFace([row({ rank: null, distance: 0.4 })])
+    expect(r.measurable).toBe(true)
+    expect(r.topRank).toBe(null)
+    expect(r.minDistance).toBe(0.4)
+  })
+})
+
 // ─── mergeQueryPools：跨查询合并重建 ─────────────────
 
 describe('mergeQueryPools — 复刻 memory/index.ts 的三条合并规则', () => {
@@ -425,7 +504,7 @@ describe('readAnchor — 差几名 / 差多少 RRF / 并列判负', () => {
     expect(r.tieBroken).toBe(false)
   })
 
-  it('同节多片 ⇒ 取**最好**的那片（名次最小）；sectionSize 报该节片数', () => {
+  it('同节多片 ⇒ 取**最好**的那片（名次最小）', () => {
     const merged = mergedOf(
       [hit(1, { rrfScore: 0.9 }), hit(7, { rrfScore: 0.2 }), hit(8, { rrfScore: 0.3 })],
       1
@@ -433,8 +512,13 @@ describe('readAnchor — 差几名 / 差多少 RRF / 并列判负', () => {
     const r = readAnchor({ sectionChunkIds: new Set([7, 8]), merged, maxDistance: 0.6 })
     expect(r.chunkId).toBe(8)
     expect(r.rank).toBe(1)
-    expect(r.sectionSize).toBe(2)
-    expect(r.poolRows).toBe(2)
+  })
+
+  it('只出**被消费**的字段——`poolRows` / `sectionSize` 两个死字段已删（实测两出口零消费）', () => {
+    const merged = mergedOf([hit(7, { rrfScore: 0.2 }), hit(8, { rrfScore: 0.3 })], 1)
+    const r = readAnchor({ sectionChunkIds: new Set([7, 8]), merged, maxDistance: 0.6 })
+    expect(Object.keys(r)).not.toContain('poolRows')
+    expect(Object.keys(r)).not.toContain('sectionSize')
   })
 
   it('同节的另一片进了榜 ⇒ 该锚点算 **injected**（注入单位是节不是片）', () => {
