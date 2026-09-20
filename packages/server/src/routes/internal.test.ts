@@ -376,12 +376,13 @@ describe('internal route-signals', () => {
 
     it('验收1d（票乙单目标闸）：reviewer 一次投 2 个合法目标 → 422，不静默剥除', async () => {
       // 文本路径（serial.ts）由白名单按**审查结论**剥到 1 个；MCP 路径没有正文、
-      // 判不出结论，故沿用既有 422 契约把球踢回模型，由它自己收敛到一个目标重投。
+      // 判不出结论，故沿用既有 422 契约把球踢回模型，由它自己收敛到一个目标。
       // 两个目标都在 reviewer 边表内（店长 store / 实施猫 implementer）——422 的
       // 唯一来源是单目标闸，不是角色边表（后者由 1c 覆盖，两者 reason 不同）。
       // 钉**完整串**（审查 ⚠️ P2）：只钉 `toContain('count-limit')` 时，串里的
       // 前导句写错也照样绿——正是本笔要修的那个缺陷能溜过测试的原因。
       // 无 triggerAuthorName ⇒ 结论不可得档 → 保实施侧（剥店长）。
+      // 补救指引 = reviewer 分岔（票丙）：文案与文本路径同源（`mentionLimitRemedy`）。
       await mockActive()
       const res = await app.inject({
         method: 'POST',
@@ -391,7 +392,7 @@ describe('internal route-signals', () => {
       })
       expect(res.statusCode).toBe(422)
       expect(JSON.parse(res.body).reason).toBe(
-        '一条回复最多 @ 1 个目标，请收敛到一个目标重投（店长:count-limit）'
+        '一条回复最多 @ 1 个目标，请只 @ 结论对应的那一个目标（店长:count-limit）'
       )
       // 未入 Map——422 不是「部分成功」
       expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')).toHaveLength(0)
@@ -414,9 +415,29 @@ describe('internal route-signals', () => {
       expect(res.statusCode).toBe(422)
       expect(JSON.parse(res.body).reason).toBe(
         '目标不在角色允许范围内（副审查猫:role-not-allowed）——请改投文本行首 @ 或调整目标；' +
-          '一条回复最多 @ 1 个目标，请收敛到一个目标重投（店长:count-limit）'
+          '一条回复最多 @ 1 个目标，请只 @ 结论对应的那一个目标（店长:count-limit）'
       )
       expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')).toHaveLength(0)
+    })
+
+    it('验收1f（票丙分岔）：implementer 一次投 2 个合法目标 → 422，指引走「拆条分别 @」', async () => {
+      // 与 1d 成对的**另一条岔**：同一段 422 代码，角色不同则补救方向不同。
+      // implementer 边表 = {store, reviewer}，故 @ 店长 + 吐槽猫 两个都合法，
+      // 422 同样只来自单目标闸；保谁走 implementer 旧语义（保审查者 → 吐槽猫）。
+      // 1d/1f 各钉完整串 ⇒ `mentionLimitRemedy` 两条分支都被真的钉住，
+      // 改任一支而忘了另一支时至少有一条红（只钉子串则两支都看不出来）。
+      await mockActive()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/internal/route-signals',
+        payload: { ...goodBody(), targetCats: ['店长', '吐槽猫'] },
+        headers: { 'x-signal-token': VALID_TOKEN },
+      })
+      expect(res.statusCode).toBe(422)
+      expect(JSON.parse(res.body).reason).toBe(
+        '一条回复最多 @ 1 个目标，请拆条分别 @（店长:count-limit）'
+      )
+      expect(consumeRouteSignals('session-1', 'agent-impl', 'msg-1')).toHaveLength(0)
     })
 
     it('triggerAuthorName 非字符串 → 400', async () => {

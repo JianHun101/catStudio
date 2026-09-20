@@ -43,7 +43,11 @@ import { QUERY_TABLE_SCHEMAS, type QueryOp } from '../db/repository/query.js'
 import { getActiveStream } from '../connectors/socketio.js'
 import { storeRouteSignal } from '../llm/route-signals.js'
 import { storeUserRequestSignal } from '../llm/user-request-signals.js'
-import { filterAllowedMentions, MAX_MENTIONS_PER_REPLY } from '../dispatch/mention-policy.js'
+import {
+  filterAllowedMentions,
+  mentionLimitRemedy,
+  MAX_MENTIONS_PER_REPLY,
+} from '../dispatch/mention-policy.js'
 import { embedText } from '../memory/embedding.js'
 import { vectorToBlob } from '../memory/index.js'
 import { toIsoDb } from '../db/repository/time.js'
@@ -262,8 +266,13 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
         parts.push(`目标不在角色允许范围内（${fmt(roleBlocked)}）——请改投文本行首 @ 或调整目标`)
       }
       if (countBlocked.length > 0) {
+        // 补救方向按角色分岔（票丙：原先此处对所有角色写死「请收敛到一个目标
+        // 重投」）——文案单一维护面 = `mentionLimitRemedy`。本路径**首次**按角色
+        // 分岔：reviewer 的目标由审查结论唯一决定，与文本路径给同一句指引。
         parts.push(
-          `一条回复最多 @ ${MAX_MENTIONS_PER_REPLY} 个目标，请收敛到一个目标重投（${fmt(countBlocked)}）`
+          `一条回复最多 @ ${MAX_MENTIONS_PER_REPLY} 个目标，${mentionLimitRemedy(
+            (fromRow?.role as AgentRole | undefined) ?? undefined
+          )}（${fmt(countBlocked)}）`
         )
       }
       return reply.status(422).send({ ok: false, reason: parts.join('；') })
