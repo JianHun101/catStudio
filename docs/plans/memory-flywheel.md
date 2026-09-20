@@ -1,7 +1,7 @@
 ---
 type: plan
 date: 2026-09-13
-status: 已收口
+status: closed
 evidence:
   - kind: commit
     ref: ff97e01

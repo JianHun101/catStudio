@@ -1,7 +1,7 @@
 ---
 type: plan
 date: 2026-09-06
-status: 已定稿
+status: final
 evidence:
   - kind: file
     ref: skills/spec-gate/SKILL.md

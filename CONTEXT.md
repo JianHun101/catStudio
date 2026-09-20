@@ -97,6 +97,15 @@ _Avoid_: 日志, 请求记录
 - `docs/research/` — 勘察报告 / 调研结论 / 执行规格（spec）（如 `clowder-ac-evidence-and-vision-guard.md`、`skill-delivery-decoupling-spec.md`）：一次性调研或某一活的执行规格产出。**随活停更**——活进行中会随实施更新，活一结束即停止维护；属「定稿·随活过期」
 - 过程决策留痕（本会话内：跳 grilling 的为什么、Gate 答案、争议裁决）→ spec 尾部 `## 决策留痕` 固定段，一行一决策、可 grep，不单独建文档
 
+**`status:` 值域（统一英文，2026-09-20）**——理由：值域是**机器判据**（`scripts/flywheel/scan.mjs` 的准入闸、`.husky/pre-push` 的 run 目录闸）而**不是给人读的散词**；中英混用会让「同一个语义两套写法」，闸只能逐个枚举，漏一个就是静默放行。英文为唯一写法，**中文旧词不是兼容别名，是值域外**（出现即拒/即拦）:
+
+| 面                 | 值域                                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| `docs/adr/`        | `proposed` / `accepted` / `superseded` / `deprecated`（**基准面**，本次不动）                       |
+| `docs/lessons/`    | 沿用 ADR 最小口径（见 `docs/lessons/README.md`）                                                    |
+| `docs/plans/`      | `active` / `final` / `closed`——**只有 `final`/`closed` 进检索索引**（`PLAN_STATUS_CRYSTALLIZED`）   |
+| `docs/run/<slug>/` | `active` / `pending-float` / `floated` / `dropped`（硬闸形态，见 `docs/run/docs-run-status-gate/`） |
+
 **开发文档 vs 沉淀文档判据**：
 
 |      | 开发文档 `docs/run/`                | 沉淀文档 `lessons/` `sessions/` `adr/` | 定稿文档 `plans/` `research/`                                                                   |

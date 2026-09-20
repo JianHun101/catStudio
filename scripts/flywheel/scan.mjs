@@ -63,10 +63,13 @@ export const SCAN_PREFIXES = ['docs/adr/', 'docs/lessons/', 'docs/plans/']
 export const SCAN_EXTENSION = '.md'
 
 /**
- * `docs/plans/**` 额外门槛（S1）：只收已结晶的两态。
- * `进行中` 是在飞件，收进来会让「索引 = 冻结的结论」这个前提失守。
+ * `docs/plans/**` 额外门槛（S1）：只收已结晶的两态（`final` / `closed`）。
+ * `active` 是在飞件，收进来会让「索引 = 冻结的结论」这个前提失守。
+ *
+ * ⚠️ 值域为**英文**（2026-09-20 全仓统一，权威表见 `CONTEXT.md` 文档约定段）——
+ * 中文旧词（`已定稿`/`已收口`）已**不再放行**，是值域外，不是兼容别名。
  */
-export const PLAN_STATUS_CRYSTALLIZED = new Set(['已定稿', '已收口'])
+export const PLAN_STATUS_CRYSTALLIZED = new Set(['final', 'closed'])
 
 /** 跳过原因码（报告 `skipped[].reason`；**「跳过」永不是静默的**——契约 ④） */
 export const SKIP_REASONS = {

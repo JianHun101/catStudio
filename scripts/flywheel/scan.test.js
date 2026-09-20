@@ -166,8 +166,8 @@ describe('S1 白名单', () => {
     writeFiles(root, {
       'docs/adr/a.md': doc({ title: 'ADR 甲' }),
       'docs/lessons/b.md': doc({ title: '经验 乙' }),
-      'docs/plans/c.md': doc({ title: '规格 丙', status: '已定稿' }),
-      'docs/plans/d.md': doc({ title: '规格 丁', status: '进行中' }),
+      'docs/plans/c.md': doc({ title: '规格 丙', status: 'final' }),
+      'docs/plans/d.md': doc({ title: '规格 丁', status: 'active' }),
       'docs/run/e.md': doc({ title: '在飞 戊' }),
       'docs/research/f.md': doc({ title: '研究 己' }),
       'docs/sessions/g.md': doc({ title: '会话 庚' }),
@@ -197,19 +197,33 @@ describe('S1 白名单', () => {
         {
           path: 'docs/plans/d.md',
           reason: SKIP_REASONS.PLAN_NOT_CRYSTALLIZED,
-          detail: 'status=进行中',
+          detail: 'status=active',
         },
       ])
     })
   })
 
-  it('docs/plans/ 只放行 已定稿 / 已收口', () => {
+  it('docs/plans/ 只放行 final / closed', () => {
     const ok = (status) =>
       classifyDocument({ path: 'docs/plans/x.md', content: doc({ status }) }).ok
-    expect(ok('已定稿')).toBe(true)
-    expect(ok('已收口')).toBe(true)
-    expect(ok('进行中')).toBe(false)
+    expect(ok('final')).toBe(true)
+    expect(ok('closed')).toBe(true)
+    expect(ok('active')).toBe(false)
     expect(ok('')).toBe(false)
+  })
+
+  it('旧中文态已出值域（反对照：值域不是宽放行）', () => {
+    const ok = (status) =>
+      classifyDocument({ path: 'docs/plans/x.md', content: doc({ status }) }).ok
+    // 改前这四个里前三个曾是「结晶态/合法态」；统一英文后一律拒——
+    // 若哪天有人把中文词加回白名单当兼容别名，本用例必红。
+    expect(ok('已定稿')).toBe(false)
+    expect(ok('已收口')).toBe(false)
+    expect(ok('在飞')).toBe(false)
+    expect(ok('进行中')).toBe(false)
+    // 对照：同批新词必须放行（证本用例不是「恒假门」）
+    expect(ok('final')).toBe(true)
+    expect(ok('closed')).toBe(true)
   })
 })
 

@@ -1,7 +1,7 @@
 ---
 type: plan
 date: 2026-09-17
-status: 已定稿
+status: final
 evidence:
   - kind: file
     ref: packages/server/src/db/index.ts
