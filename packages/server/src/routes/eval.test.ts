@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { v4 as uuid } from 'uuid'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
 import {
@@ -12,7 +16,8 @@ import {
   spans as spansRepo,
 } from '../db/repository/index.js'
 import type { SpanInput } from '../db/repository/index.js'
-import { evalRoutes } from './eval.js'
+import { evalRoutes, __test_setRetrievalReportsDir, RETRIEVAL_REPO_MARKER } from './eval.js'
+import { findRepoRootFrom } from '../repo-root.js'
 import { agreementRate, spearman } from '../eval/phase0.js'
 import { getLogLevel, setLogLevel } from '../logger.js'
 import type { FastifyInstance } from 'fastify'
@@ -1170,6 +1175,72 @@ describe('Eval Routes', () => {
         expect(scoreId).toBeTruthy()
       })
 
+      it('E1 契约 D：每条附前置上下文，取的是**之前最近**的 N 条（不是会话头几条）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        // 12 条 user 排在回复之前，**刻意超过 limit=10**：这样「取最早 10 条」与「取最近
+        // 10 条」返回的是两个不同的集合。只摆两三条的话两种取法结果一样——那是假绿门。
+        for (let i = 0; i < 12; i++) {
+          const id = `u${String(i).padStart(2, '0')}`
+          messagesRepo.insertUserMessage(id, sessionId, `第 ${i} 条 user`, '[]', null)
+          setCreatedAt('messages', id, `2026-09-01T10:${String(i).padStart(2, '0')}:00.000Z`)
+        }
+        messagesRepo.insertAgentMessage('r1', sessionId, agentId, '待标注的猫回复', null)
+        setCreatedAt('messages', 'r1', '2026-09-01T11:00:00.000Z')
+        // 回复**之后**的一条：`created_at < ?` 是严格的，它不得出现在上文里
+        messagesRepo.insertUserMessage('after', sessionId, '回复之后的 user', '[]', null)
+        setCreatedAt('messages', 'after', '2026-09-01T12:00:00.000Z')
+
+        const res = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        const { pool } = JSON.parse(res.body) as {
+          pool: Array<{ id: string; context: Array<{ id: string; content: string }> }>
+        }
+        const sample = pool.find((p) => p.id === 'r1')
+        expect(sample).toBeTruthy()
+        expect(sample!.context.length).toBeGreaterThan(0) // 非空 ⇒ 下面那道键集行走真能下潜
+        // 盲标面（E1 新增字段的 ⑩ 复验）：既有的键集断言跑在 `context` 为空的夹具上，
+        // 递归行走根本进不去新字段——探针宽度 < 判据宽度时，「没测到」会被读成「没问题」。
+        const keys: string[] = []
+        const walk = (v: unknown): void => {
+          if (Array.isArray(v)) return v.forEach(walk)
+          if (v && typeof v === 'object') {
+            for (const [k, sub] of Object.entries(v)) {
+              keys.push(k)
+              walk(sub)
+            }
+          }
+        }
+        walk(JSON.parse(res.body))
+        expect(keys.filter((k) => /score|judge/i.test(k))).toEqual([])
+        expect(res.body).not.toMatch(/score|judge/i)
+        const ids = sample!.context.map((c) => c.id)
+        // 最近 10 条 = u02..u11。「取最早 10 条」会给 u00..u09 ⇒ 首元素不同，必红
+        expect(ids).toEqual(['u02', 'u03', 'u04', 'u05', 'u06', 'u07', 'u08', 'u09', 'u10', 'u11'])
+        expect(ids).not.toContain('after')
+        // ASC 序 = 渲染序（`getContextBefore` 内部 `reverse()` 过）：最近的一条在**最后**
+        // ——前端不做重排，顺序错了在标注界面上就是「倒着读」
+        expect(sample!.context[sample!.context.length - 1].content).toBe('第 11 条 user')
+      })
+
+      it('E1：上文**跨会话不泄漏**（同 agent 在别的会话里的消息不得混进来）', async () => {
+        const agentId = seedAgent('flash猫')
+        const s1 = seedSession()
+        const s2 = seedSession()
+        messagesRepo.insertUserMessage('other', s2, '别的会话里的 user 原话', '[]', null)
+        setCreatedAt('messages', 'other', '2026-09-01T09:00:00.000Z')
+        messagesRepo.insertUserMessage('same', s1, '本会话里的 user 原话', '[]', null)
+        setCreatedAt('messages', 'same', '2026-09-01T09:30:00.000Z')
+        messagesRepo.insertAgentMessage('r1', s1, agentId, '待标注的猫回复', null)
+        setCreatedAt('messages', 'r1', '2026-09-01T10:00:00.000Z')
+
+        const res = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        const { pool } = JSON.parse(res.body) as {
+          pool: Array<{ id: string; context: Array<{ id: string }> }>
+        }
+        const sample = pool.find((p) => p.id === 'r1')
+        expect(sample!.context.map((c) => c.id)).toEqual(['same'])
+      })
+
       it('跨会话分散：默认参数下每会话 ≤3 条，且每个会话都出得来', async () => {
         const agentId = seedAgent('flash猫')
         for (const s of ['s1', 's2', 's3']) {
@@ -1428,6 +1499,161 @@ describe('Eval Routes', () => {
         expect(body.total).toBe(1)
         expect(body.counted).toBe(1)
       })
+    })
+  })
+
+  describe('E1 检索跑批报告（只读出口）', () => {
+    /** 夹具根 = `os.tmpdir()` 下自建目录。**报告目录是它的子目录**——「穿越」那条要往
+     *  上一级写诱饵文件，放在自己根下才收得干净（别往 `tmpdir()` 裸根里扔东西）。 */
+    let base: string
+    let dir: string
+
+    /** 造一份最小但形状真实的报告 JSON（= `buildReportJson(ctx)` = `{schema, ...ctx}`）。 */
+    function reportBody(date: string): string {
+      return JSON.stringify({
+        schema: 1,
+        date,
+        groups: { real: { recallMean: 0.5833 }, constructed: { recallMean: 0.8261 } },
+        scores: [],
+      })
+    }
+
+    beforeEach(() => {
+      base = mkdtempSync(join(tmpdir(), 'eval-retrieval-'))
+      dir = join(base, 'docs-eval')
+      mkdirSync(dir)
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-20.json'), reportBody('2026-09-20'))
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-19.json'), reportBody('2026-09-19'))
+      // 同目录还躺着跑批落的 md 报告与别的 json——**只有契约名算报告**，其余绝不进清单
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-18.md'), '# md 不是报告')
+      writeFileSync(join(dir, 'notes.json'), '{}')
+      __test_setRetrievalReportsDir(dir)
+    })
+
+    afterEach(() => {
+      __test_setRetrievalReportsDir(undefined)
+      rmSync(base, { recursive: true, force: true })
+    })
+
+    it('清单：日期倒序，且只认契约文件名（md 与别的 json 不进）', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/eval/retrieval/reports' })
+      expect(res.statusCode).toBe(200)
+      const { ok, reports } = JSON.parse(res.body) as {
+        ok: boolean
+        reports: Array<{ date: string; file: string; writtenAt: string | null }>
+      }
+      expect(ok).toBe(true)
+      expect(reports.map((r) => r.date)).toEqual(['2026-09-20', '2026-09-19'])
+      expect(reports[0].file).toBe('retrieval-baseline-2026-09-20.json')
+      // `writtenAt` 取自**文件 mtime**（报告本体按 B1 零时间量），必须是可解析的 ISO
+      expect(Number.isFinite(Date.parse(reports[0].writtenAt!))).toBe(true)
+    })
+
+    it('空清单是 200 + `[]`，**不是 404**（「还没跑过批」不是错误）', async () => {
+      __test_setRetrievalReportsDir(null) // 钉成「解析不到仓库根」
+      const res = await app.inject({ method: 'GET', url: '/api/eval/retrieval/reports' })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({ ok: true, reports: [] })
+    })
+
+    it('单份：缺省 = 最新；`?date=` 取指定那份', async () => {
+      const latest = await app.inject({ method: 'GET', url: '/api/eval/retrieval/report' })
+      expect(latest.statusCode).toBe(200)
+      expect(JSON.parse(latest.body).date).toBe('2026-09-20')
+
+      const older = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-19',
+      })
+      expect(older.statusCode).toBe(200)
+      const body = JSON.parse(older.body) as {
+        date: string
+        report: { schema: number; groups: { real: { recallMean: number } } }
+      }
+      expect(body.date).toBe('2026-09-19')
+      // 取的是**那一份的内容**，不是「最新那份换个日期标签」——夹具两天的 recallMean
+      // 刻意不同，张冠李戴这里就红（虽是同一份 body 造的，读的文件名不同即路径错）
+      expect(body.report.groups.real.recallMean).toBe(0.5833)
+      expect(body.report.schema).toBe(1)
+    })
+
+    it('没有报告 ⇒ 404 + reason（不静默给空对象）', async () => {
+      rmSync(join(dir, 'retrieval-baseline-2026-09-20.json'))
+      rmSync(join(dir, 'retrieval-baseline-2026-09-19.json'))
+      const none = await app.inject({ method: 'GET', url: '/api/eval/retrieval/report' })
+      expect(none.statusCode).toBe(404)
+      expect(JSON.parse(none.body).error).toContain('no retrieval baseline report yet')
+
+      // 清单非空但**那天没有** ⇒ 也是 404，但理由不同（否则会去查错方向）
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-20.json'), reportBody('2026-09-20'))
+      const missing = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-01',
+      })
+      expect(missing.statusCode).toBe(404)
+      expect(JSON.parse(missing.body).error).toContain('2026-09-01')
+    })
+
+    it('`?date=` 形状不对 ⇒ 400（与 404 分开：写错的调用方不该被伪装成「那天没有」）', async () => {
+      for (const bad of ['abc', '2026-9-1', '2026-09-20T00:00:00Z', '../../etc/passwd']) {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/eval/retrieval/report?date=${encodeURIComponent(bad)}`,
+        })
+        expect(res.statusCode, `date=${bad}`).toBe(400)
+      }
+    })
+
+    it('穿越防护：date 拼进文件名**之前**就死在形状闸上', async () => {
+      // 上一级真放一个「穿越目标」——证明挡住它的是正则，而不是「那个文件恰好不存在」
+      const bait = join(base, 'retrieval-baseline-1999-01-01.json')
+      writeFileSync(bait, reportBody('1999-01-01'))
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=..%2Fretrieval-baseline-1999-01-01.json',
+      })
+      expect(res.statusCode).toBe(400)
+      expect(existsSync(bait)).toBe(true) // 诱饵仍在 ⇒ 上面不是「读到了才挡」
+    })
+
+    it('读不动 / 顶层不是对象 ⇒ 500（不是调用方写错，不能伪装成 404）', async () => {
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-17.json'), 'not json at all')
+      const broken = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-17',
+      })
+      expect(broken.statusCode).toBe(500)
+
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-16.json'), '[1,2,3]')
+      const arr = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-16',
+      })
+      expect(arr.statusCode).toBe(500)
+    })
+
+    it('契约 B 路径解析：源码布局与产物布局**同解**（负对照：固定层级必有一边红）', () => {
+      const srcStart = dirname(fileURLToPath(import.meta.url))
+      const root = findRepoRootFrom(srcStart, RETRIEVAL_REPO_MARKER)
+      expect(root).not.toBeNull()
+      expect(existsSync(join(root!, 'docs', 'eval', 'retrieval-golden.json'))).toBe(true)
+      // 产物布局：`tsconfig.json` 的 `rootDir: ".."` + `outDir: "./dist"` ⇒ 比源码深两层
+      const distStart = join(root!, 'packages', 'server', 'dist', 'server', 'src', 'routes')
+      expect(findRepoRootFrom(distStart, RETRIEVAL_REPO_MARKER)).toBe(root)
+
+      // 负对照**两条缺一不可**：只断言「产物下错」的话，一个「恒返回垃圾」的实现也绿
+      const fixed4 = (d: string): string => resolve(d, '..', '..', '..', '..')
+      const marker = join('docs', 'eval', 'retrieval-golden.json')
+      expect(existsSync(join(fixed4(srcStart), marker))).toBe(true) // 源码下固定层级确实对
+      expect(existsSync(join(fixed4(distStart), marker))).toBe(false) // 产物下必错
+    })
+
+    it('契约 B：报告目录走 `findRepoRootFrom`，本文件不得再出现固定层级上溯', () => {
+      // 上一条证的是「向上找能同解」，这条证的是**路由真的用了它**——少了这条，
+      // 路由改回固定层级而测试照绿（G5 已把这类写法点名拒绝过一次）。
+      const src = readFileSync(new URL('./eval.ts', import.meta.url), 'utf8')
+      expect(src).toContain('findRepoRootFrom(')
+      expect(src).not.toMatch(/new URL\(\s*['"]\.\.\//)
     })
   })
 })

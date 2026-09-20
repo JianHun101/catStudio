@@ -55,10 +55,22 @@
  * stdout 只出**一行结构化 JSON**（机器通道），人类可读汇总走 stderr——本仓 logger 写
  * stdout，混流会毁掉机器通道。基线报告写文件（缺省 `docs/eval/retrieval-baseline-<date>.md`）。
  *
+ * **落盘同批出两份**：`<outFile>`（给人看的 Markdown）+ **同基名的 `.json` 副产品**
+ * （喂给前端「检索」tab 的取数口，`routes/eval.ts` 的 `/api/eval/retrieval/*` 只读端点）。
+ * 两份吃的是**同一个 ctx 对象**（`reportCtx`）——不是各自重算一遍，见 `buildReportJson`。
+ *
+ * ⚠️ **「同一个 ctx」反过来是 json 的 B1 承重条件**：`buildReportJson` 把 ctx **原样
+ * 序列化**，所以 ctx 里任何一个每跑一变的值都会直接漏进 json。md 侧只挑其中一部分渲染，
+ * **未必看得见**——首版就是这样把 sidecar 端口漏进 json 的（md 确定、json 不确定）。
+ * ⇒ 进 ctx 的必须是**读数加工后的确定值**，原始随机读数不得进 ctx（见 `reportCtx.embed`）。
+ * 报告本体的 B1 确定性（零时间量）对 json 同样成立：**文件写入时刻不进内容**，
+ * 由端点侧读文件 mtime 给出。
+ *
  * ## 确定性（B1）
  *
  * 报告里**没有任何时间量**：`retrievalMs`、sidecar 端口、跑批耗时一律不进报告，日期只在
- * 标题与文件名（且可 `--date` 注入）。同树同库连跑两遍，报告逐字节一致。
+ * 标题与文件名（且可 `--date` 注入）。同树同库连跑两遍，**md 与 json 两份产物各自**
+ * 逐字节一致。
  *
  * ## 退出码
  *
@@ -675,13 +687,15 @@ export function renderReport(ctx) {
   L.push(`| MEMORY_TOP_K | ${params.topK} |`)
   L.push(`| 探针池 MAX_PROBE_N | ${params.probeN} |`)
   L.push(`| 嵌入模型 / 维度 | ${embed.model ?? 'n/a'} / ${embed.dim ?? 'n/a'} |`)
-  // 供给形态也按**实测**报（`embed.port` = sidecar 握手回报的真实监听端口）：
+  // 供给形态也按**实测**报（`embed.handshaked` = sidecar 握手是否回报了监听端口）：
   // 写成恒真的字面量「动态端口」的话，哪天有人把 `EMBED_SIDECAR_PORT=0` 那行删了、
   // 报告照样声称自己是动态端口——与索引新鲜度那条同一个病（报告里的自述必须来自读数）。
-  // 端口号本身**不进报告**（每跑一个随机值，写进去就破 B1）。
+  // 端口号本身**不进报告**（每跑一个随机值，写进去就破 B1）⇒ ctx 里只留这个布尔信号，
+  // 布尔是在 `reportCtx` 里由 `embedStatus.port` **加工后**进来的，不在这里现算：
+  // 两份视图吃同一个 ctx，加工点必须只有一处。
   L.push(
     '| 嵌入供给形态 | ' +
-      (typeof embed.port === 'number' && embed.port > 0
+      (embed.handshaked === true
         ? '独立 sidecar、动态端口（`EMBED_SIDECAR_PORT=0`，避开活 server 的固定端口；实测已握手）'
         : '⚠️ **未见 sidecar 监听端口**（非独立 sidecar 供给 / 未握手）——请核供给形态') +
       ' |'
@@ -829,6 +843,40 @@ export function renderReport(ctx) {
   return L.join('\n')
 }
 
+// ─── JSON 副产品（与 md 同源，评估可视化的取数口） ────────
+
+/**
+ * 报告 JSON 副产品的路径：与 md **同目录、同基名**，只换扩展名（`x.md` → `x.json`）。
+ *
+ * 用 `path.parse` 而不是 `outFile.replace(/\.md$/, '.json')`：`--out` 指到别的扩展名时
+ * 后者会拼出 `x.txt.json`（同目录多出一份没人认得名的文件），前者恒得 `x.json`。
+ */
+export function reportJsonPath(outFile) {
+  const parsed = path.parse(outFile)
+  return path.join(parsed.dir, `${parsed.name}.json`)
+}
+
+/**
+ * JSON 副产品的内容 = **喂给 `renderReport` 的那一份 ctx** + 顶层 `schema`。
+ *
+ * **一处算、两处渲染**：本函数与 `renderReport` 吃的是**同一个对象**，不是各自重算一遍。
+ * 两份视图数字对不上，是这类「顺手多落一份」最典型的坏法——而且只有逐条对表才看得出，
+ * 故 `main` 里那个 ctx 必须是一个 `const`，两边都引用它（`retrieval-baseline.test.js`
+ * 有静态断言钉死这条接线）。
+ *
+ * ⚠️ **本函数原样序列化整个 ctx ⇒「ctx 必须全确定」是 B1 在 json 侧的承重条件。**
+ * md 侧只挑一部分渲染，ctx 里多一个随机值未必看得出来；json 侧则**一个不落地落盘**。
+ * 首版就是这么栽的：`reportCtx.embed` 透传了 `embedStatus.port`（`EMBED_SIDECAR_PORT=0`
+ * ⇒ 每跑一个随机值），md 两跑逐字节一致、json 只有那一处不同。⇒ 原始读数必须先在
+ * `main` 里加工成确定值再进 ctx，本函数不做过滤（过滤会把「ctx 是唯一数字来源」这条毁掉）。
+ *
+ * `schema` 放**顶层**（md 里那一栏在表格中）：消费方要能先判版本再决定怎么读，
+ * 埋在深层字段里等于逼每个消费方自己找。
+ */
+export function buildReportJson(ctx) {
+  return { schema: BASELINE_REPORT_SCHEMA, ...ctx }
+}
+
 // ─── CLI ──────────────────────────────────────────────
 
 const TSX_CLI = path.resolve(
@@ -902,7 +950,8 @@ export async function main(argv = process.argv.slice(2)) {
     process.stdout.write(
       '用法: node scripts/eval/retrieval-baseline.mjs [--root <仓库根>] [--db <sqlite 路径>]\n' +
         '       [--env <外部 .env>] [--date YYYY-MM-DD] [--out <报告路径>]\n' +
-        '  跑 R9 黄金集的检索基线；报告缺省落 docs/eval/retrieval-baseline-<date>.md。\n' +
+        '  跑 R9 黄金集的检索基线；报告缺省落 docs/eval/retrieval-baseline-<date>.md，\n' +
+        '  同批另出同基名的 .json（前端「检索」tab 与 /api/eval/retrieval/* 的取数口）。\n' +
         '  --db 缺省 <root>/packages/server/data/cat-study-dev.db（worktree 内无库 ⇒ 显式传主仓库库路径）。\n' +
         '  --date 可注入（B1 复跑比对用；日期不进数值面）。\n'
     )
@@ -1145,7 +1194,9 @@ export async function main(argv = process.argv.slice(2)) {
     }
     const negatives = scores.filter((s) => s.kind === 'negative')
     const params = currentRetrievalParams()
-    const report = renderReport({
+    // ⚠️ 这一个 `const` 是 md 与 json **两份视图的唯一数字来源**——改成内联字面量、
+    // 或让 json 那边自己再拼一份，两份读数就会各自漂移（且只在逐条对表时看得出来）。
+    const reportCtx = {
       date,
       dbPath,
       dbRows,
@@ -1157,17 +1208,29 @@ export async function main(argv = process.argv.slice(2)) {
       rotten: rotten.length,
       indexFreshness: { checked: freshness.checked, stale: freshness.stale.length },
       params,
-      embed: { model: embedStatus.model, dim: embedStatus.dim, port: embedStatus.port },
+      // ⚠️ 这里**不得**透传 `embedStatus.port` 原值：`EMBED_SIDECAR_PORT=0` ⇒ 每跑一个随机端口，
+      // 而 `buildReportJson` 把 ctx 原样序列化 ⇒ 写进去就破 json 的 B1（md 侧只取下面这个
+      // 布尔、看不见，所以两跑 md 一致而 json 不一致）。**原始读数在此加工成确定值**。
+      embed: {
+        model: embedStatus.model,
+        dim: embedStatus.dim,
+        handshaked: typeof embedStatus.port === 'number' && embedStatus.port > 0,
+      },
       groups,
       scores,
       canary: canaryResults,
       negatives,
       maxDistance: params.maxDistance,
       recheck: { entries: rechecked.length },
-    })
+    }
+    const report = renderReport(reportCtx)
+    const jsonOutFile = reportJsonPath(outFile)
 
+    // 两份**同批**落盘：拒出路径（上面的 `refuse`）在更早处 return，故 md/json 都不落。
+    // 顺序上 md 在前——落到这里已经过了全部硬闸，两笔写不再有分支。
     mkdirSync(path.dirname(outFile), { recursive: true })
     writeFileSync(outFile, report + '\n', 'utf8')
+    writeFileSync(jsonOutFile, JSON.stringify(buildReportJson(reportCtx)) + '\n', 'utf8')
 
     const redCount = negatives.filter((s) => s.forbidHit.length > 0).length
     emit(
@@ -1175,6 +1238,7 @@ export async function main(argv = process.argv.slice(2)) {
         ok: true,
         phase: 'done',
         out: outFile,
+        outJson: jsonOutFile,
         date,
         db: dbPath,
         dbRows,
@@ -1199,7 +1263,7 @@ export async function main(argv = process.argv.slice(2)) {
       `[eval:retrieval:baseline] entries=${goldenData.entries.length} ` +
         `real recall=${fmt4(groups.real.recallMean)} 阈值前=${fmt4(groups.real.preThresholdRateMean)} | ` +
         `constructed recall=${fmt4(groups.constructed.recallMean)} 阈值前=${fmt4(groups.constructed.preThresholdRateMean)} | ` +
-        `negatives red=${redCount}/${negatives.length} | canary ✅ | ⇒ ${outFile}`
+        `negatives red=${redCount}/${negatives.length} | canary ✅ | ⇒ ${outFile} + ${jsonOutFile}`
     )
     return 0
   } finally {
