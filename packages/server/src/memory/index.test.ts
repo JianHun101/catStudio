@@ -1252,17 +1252,26 @@ describe('memory', () => {
       else process.env.MEMORY_A2A_ENABLED = saved
     })
 
-    it('默认关（未设置 / 空串 / 非 "1" 都关），只有 "1" 才开', () => {
+    it('默认关（未设置 / 空串 / "0" / "false" 都关），"1" 与 "true" 都开', () => {
       delete process.env.MEMORY_A2A_ENABLED
       expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
       process.env.MEMORY_A2A_ENABLED = ''
       expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
       process.env.MEMORY_A2A_ENABLED = '0'
       expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
-      process.env.MEMORY_A2A_ENABLED = 'true' // 只认 '1'，不认别的真值写法
+      process.env.MEMORY_A2A_ENABLED = 'false'
       expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
       process.env.MEMORY_A2A_ENABLED = '1'
       expect(memoryModule.isA2aMemoryEnabled()).toBe(true)
+      // F2：同块的 `MEMORY_ENABLED` 写作 `true`，两种真值拼法都收（大小写不敏感）
+      // ——只认 '1' 会把 `=true` 静默读成「关」。
+      process.env.MEMORY_A2A_ENABLED = 'true'
+      expect(memoryModule.isA2aMemoryEnabled()).toBe(true)
+      process.env.MEMORY_A2A_ENABLED = 'True'
+      expect(memoryModule.isA2aMemoryEnabled()).toBe(true)
+      // 认不出的值落默认关（fail-closed），不落「启用」
+      process.env.MEMORY_A2A_ENABLED = 'yes'
+      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
     })
 
     it('跳过结果与其它空结果同构：reason=skipped-a2a、text 空、参数快照非 0 非 undefined', () => {

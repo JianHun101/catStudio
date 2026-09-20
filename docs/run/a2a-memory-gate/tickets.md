@@ -36,7 +36,7 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
 | 文件                                                 | 改动                                                                                 |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `execution/serial.ts::158-188`                       | `AgentTriggerMsg` 加 `fromAgent: boolean`（**必填**）                                |
-| `execution/serial.ts::190`                           | 新增并导出**唯一判据** `isAgentAuthoredTrigger(role)`                                |
+| ~~`execution/serial.ts::190`~~ → `execution/row.ts`  | 新增并导出**唯一判据** `isAgentAuthoredTrigger(role)`（**F1 后搬家**，见 §十）       |
 | `execution/serial.ts::321-337`                       | `buildTriggerMsg` 填 `fromAgent: isAgentAuthoredTrigger(triggerRow?.role)`           |
 | `execution/serial.ts::435-452`                       | `drainQueuedCommand` 的 `queuedTrigger` 同判据填值（**第二权威构造点**，见 §五）     |
 | `execution/serial.ts::1141`                          | A2A 递归 `{ ...agentTrigger, authorName, fromAgent: true }`（类型完整性，非判据）    |
@@ -47,7 +47,7 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
 | `connectors/ingest.ts::301` / `:400`                 | 同上（`msg.role` 恒 `'user'` ⇒ 恒 false）                                            |
 | `db/repository/retrievalEvents.ts::121`              | `reason` 列注释值域 9 → **10**                                                       |
 | `memory/index.ts::105` / `:244` / `:258`             | 枚举加 `'skipped-a2a'`；新增导出 `isA2aMemoryEnabled()` / `skippedRetrievalResult()` |
-| `.env.example`                                       | 加 `MEMORY_A2A_ENABLED`（默认**关**，只有 `'1'` 才开）                               |
+| `.env.example`                                       | 加 `MEMORY_A2A_ENABLED`（默认**关**；读法订正为 `1`/`true` 两种拼法——F2，见 §十）    |
 | `docs/run/eval-system/P2-design-retrieval-events.md` | 值域复述订正（保留 P2 历史读数 + 加 2026-09-20 订正注）                              |
 | 11 个 `.test.ts` 的 `memory/index.js` partial 替身   | 补镜像两个新导出（否则 `fromAgent:true` 时调用点 TypeError）                         |
 | 88 个测试 `triggerMsg` 字面量                        | 补 `fromAgent: false`（验收 9）                                                      |
@@ -122,3 +122,78 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
   本猫不自行改。
 - **OQ-2**：`skipped-a2a` 落进 `retrieval_events` 后，`episodeStats` / 看板类消费面若按
   `reason` 分组统计，需要把这一档与「空手而归」分开读（本单未动任何消费面）。
+
+## 十、审查返工（吐槽猫 ⚠️，F1–F4 逐条处置）
+
+### F1（阻断，已修）· 本笔新引入 2 个模块环
+
+审查者用环检测器实测：父提交 **0 环** → 本分支 **2 环**，两条都经 `ingest.ts` 新增的
+`import { isAgentAuthoredTrigger } from '../execution/serial.js'` 闭合：
+`serial→flow-advance→ingest→serial` 与 `worktree-fanin→ingest→serial→reply→worktree-fanin`。
+
+**修法照审查者给的方案**：函数搬到 `execution/row.ts`（叶模块，只有两个 `import type`）
+——`serial.ts` / `ingest.ts` / `recovery.ts` 三方**本来就都在 import 本文件**，一条新边
+都不用加。`row.ts` / `ingest.ts` 文首都加了「别搬回去 / 别加值导入」的理由，防复发。
+
+**本猫自写检测器三版对称实测**（不转述审查者读数）：
+
+| 版本                      | 值导入边 | 环                  |
+| ------------------------- | -------- | ------------------- |
+| 父提交 `4fc7a5f`（基线）  | 309      | **0**               |
+| 被审 `c94eac8`（F1 未修） | 310      | **1 个 5 节点 SCC** |
+| 工作树（F1 修后）         | **309**  | **0**               |
+
+计数口径要对齐：审查者报的「2 环」是**圈（elementary cycle）**口径，本表是**强连通分量
+（SCC）**口径——同**一处**缺陷，两个单位，不是两个缺陷。被审那 1 个 SCC 的成员 =
+`{serial, flow-advance, ingest, reply, worktree-fanin}`，审查者列的两条圈正是它内部的
+两条回路。值导入边回到**恰好 309**（与父提交同数）——搬走的是一条边、没添新边。
+
+**顺带订正两处被这条改动证伪的复述文本**（验收 7 的同一把尺子）：
+
+- `AgentTriggerMsg.fromAgent` 的类型注原写「**只有一个权威构造点**」——错，drain 是
+  **同权的第二处**；且它列的「不承担判据职责」名单里没有 drain，读者会以为 drain 不权威。
+- `isAgentAuthoredTrigger` 的文档注原写「两个真实构造点（`buildTriggerMsg` 与 **recovery**
+  的恢复路径）」——也错：recovery 走 `executeAgentsSerial` → `execute()` → `executeRun`，
+  reply 侧读到的是 `buildTriggerMsg` 重建的那一份，**recovery 不是构造点**，真第二处是 drain。
+  两处现统一为「判据面恰两条：`buildTriggerMsg` + `drainQueuedCommand` 的 `queuedTrigger`」。
+
+### F2（观察，**已采纳**，改法与审查者预设方向不同）
+
+原实现 `=== '1'`，`MEMORY_A2A_ENABLED=true` 会被静默读成「关」。**没有**改用全仓宽松惯例
+`!== 'false'`——实核发现那条更糟：它会让 `.env.example` 已写明的 `=0`（关闭）**反转为启用**。
+改为收 `1` / `true` 两种拼法（trim + 大小写不敏感），其余一律落默认关（fail-closed）。
+同步改 `.env.example` 行、`memory/index.test.ts` 读法矩阵。
+
+**这个读法不是新造的**：`scripts/handoff-gen.mjs` 的 `isForceDeliver` 逐字同款
+（`String(raw ?? '').trim().toLowerCase()` + `v === '1' || v === 'true'`），连理由都一样
+——该函数注释写着「不做『非空即真』，否则 `CATSTUDY_FORCE_DELIVER=0` 这种手滑会静默变成
+『强制投递』」。同一个失效形状，照抄在仓先例。审查者建议的 `!== 'false'` 那条惯例**不能照抄
+到本处**：本开关的默认侧是「关」且 `.env.example` 明写 `0=关闭`，宽松惯例会把 `=0` 反转成
+启用——惯例要按**默认侧方向**选，不能按字符串长相选。
+
+### F3（观察，**未改**，报判断请裁）
+
+`MEMORY_ENABLED=false` 时 a2a 轮次记成 `skipped-a2a`（未记 `not-enabled`）。判断：**是真
+问题但很窄**——记忆整体关的场景只出现在测试环境（生产 `MEMORY_ENABLED` 为开），该组合下
+`skipped-a2a` 只影响流水口径分析。**不自行改的理由**：① 它落在**契约 3/4 的语义面**（reason
+优先级 / span status），要改得先问店长；② 正确修法要在调用点读全局开关 ⇒ `memory/index.js`
+**新增第三个被消费导出**，正是审查者 OQ-4 点名的 partial 替身镜像面（现 11 个文件手工镜像
+两个导出，加第三个就多 11 处可漏点）。**建议修法**：`a2aMemorySkipped` 加一个
+`isMemoryEnabled()` 合取项，让 `not-enabled` 优先。等裁决。
+
+### F4（建议同批补，**已补**，且第一版是错的——见下）
+
+新增第 8 条用例：三条命令抢同一槽位（head 直跑 + **两条**入队），head 收口时
+`drainQueuedCommand` 补执行第二条、第二条收口时再 drain 第三条。两条被 drain 的触发
+**一 `role='user'`（对照）一 `role='agent'`（判据）**，两组断言因此都打在 drain 这个构造点上。
+另加**结构见证**：`execute` 决策段全同步 ⇒ 三行 `engine.execute(cmd)` 返回时立即断言
+`getSlot().queueLength === 2`，证明后两条真的走了入队→drain，不是三条直跑。
+
+**第一版写错了，探针抓出来的**（留痕，别照旧抄）：初版只放「一条直跑对照 + 一条入队判据」，
+并在文档里断言「两半都断」。**探针 2（把 drain 的 `fromAgent` 写死 `true`）跑出来是绿的**
+——因为直跑的那条走 `execute() → executeRun → buildTriggerMsg`，**根本不经过 drain**，
+它当对照组等于没对照，用例退化成单侧。改成「两条都在 drain 上」后重跑：
+探针 1（写死 `false`）红在判据组（`expected 'embed-failed' to be 'skipped-a2a'`）、
+探针 2（写死 `true`）红在对照组（`expected 'skipped-a2a' not to be 'skipped-a2a'`），
+7 绿 1 红、两侧各中一次。**教训**：写了「两半都断」就**必须两半各探一次**——
+只探一半的探针会把「对照组走的是另一条路径」这种结构性空转放行。

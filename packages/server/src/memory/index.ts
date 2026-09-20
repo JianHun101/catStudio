@@ -239,10 +239,22 @@ function emptyResult(
 // 判据**不在本模块**：本模块只认调用点递进来的布尔，不回头看 `triggerContent`
 // 里有没有 @、也不查 DB——「这条触发是不是 agent 发的」是调度层的知识。
 
-/** a2a 触发时是否仍检索【相关记忆】——默认**关**（`MEMORY_A2A_ENABLED=1` 才开）。
- *  默认关的理由：本门要治的就是「a2a 白跑检索」，默认开等于什么都不治。 */
+/** a2a 触发时是否仍检索【相关记忆】——默认**关**（给真值才开）。
+ *  默认关的理由：本门要治的就是「a2a 白跑检索」，默认开等于什么都不治。
+ *
+ *  真值收 `1` 与 `true` 两种拼法（大小写不敏感）：`.env.example` 记忆块里
+ *  `MEMORY_ENABLED=true` 就是 `true` 拼法，同块两种写法都在用——只认 `'1'` 会把
+ *  `=true` **静默**读成「关」（写的人以为门开了，其实还关着），与本单「不静默」的
+ *  靶心同型（F2 审查项）。
+ *  ⚠️ **不**改用全仓宽松惯例 `!== 'false'`：那条会让已写明的 `=0`（关闭）
+ *  反过来变成**启用**——`.env.example` 同族声明是「1=启用 | 0=关闭」。
+ *  认不出的值一律落默认关（fail-closed：拼错 = 保持默认，不会把门悄悄打开）。
+ *  本读法与 `scripts/handoff-gen.mjs` 的 `isForceDeliver` 逐字同款（同一套容忍度、
+ *  同一条「不做『非空即真』，否则 `=0` 手滑会静默变成启用」的理由）——照抄在仓先例，
+ *  不新造第三种读法。 */
 export function isA2aMemoryEnabled(): boolean {
-  return process.env.MEMORY_A2A_ENABLED === '1'
+  const raw = (process.env.MEMORY_A2A_ENABLED ?? '').trim().toLowerCase()
+  return raw === '1' || raw === 'true'
 }
 
 /**

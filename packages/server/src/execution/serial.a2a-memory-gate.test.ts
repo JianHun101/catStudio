@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import type { AgentConfig, Message } from '@cat-study/shared'
+import type { AgentConfig, DispatchCommand, Message } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
 import { initRepository, spans as spansRepo } from '../db/repository/index.js'
@@ -285,4 +285,60 @@ describe('serial × T-1 a2a 记忆门', () => {
     const names = spansRepo.getSpansByExecution(executionIdOf('msg-agent-kb')).map((r) => r.name)
     expect(names).toContain('knowledge.retrieval')
   })
+
+  // ─── F4（审查返工补网）：drain 那条构造点同判据 ───
+  // 上面 7 条全走 `executeAgentsSerial → makeCmd → buildTriggerMsg`，**没有一条走 drain**。
+  // 而 `drainQueuedCommand` 是判据的**第二构造点**：它直接调 `executeOneAgent`、
+  // 不经 `execute()`，故 `buildTriggerMsg` 在那条路上根本不跑，reply 侧读到的
+  // `fromAgent` 就是 drain 自己反查 DB 算的那一份。缺了这条，等于「单点判据防分叉」
+  // 的设计意图在第二个点上没有回归网（改坏它没有任何用例会红）。
+
+  it('F4 · drain（出队补执行）那条构造点同判据：queued 触发 role=agent ⇒ 同样跳过', async () => {
+    const engine = createExecutionEngine(createFakeBus())
+    const db = getDb()
+    // ⚠️ **两条**被 drain 的命令（一 user 一 agent），不是一条：
+    // 直接跑的第一条走的是 `execute() → executeRun → buildTriggerMsg`，**不经 drain**
+    // ——只放一条对照在首位，断言取到的会是「另一条构造点」，本用例就退化成单侧
+    // （实测：把 drain 的 fromAgent 写死 `true` 时它不会红）。三条命令 = head 直跑 +
+    // 两条入队，drain 链式续排（`executeOneAgent` 收尾段再 drain 下一条）。
+    for (const [id, role] of [
+      ['msg-drain-head', 'user'],
+      ['msg-drain-user', 'user'],
+      ['msg-drain-a2a', 'agent'],
+    ] as const) {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 'session-1', ?, '你好', '[]')`
+      ).run(id, role)
+    }
+    const cmd = (triggerMessageId: string, traceId: string): DispatchCommand => ({
+      sessionId: 'session-1',
+      agentId: A1.id,
+      triggerMessageId,
+      triggerContent: '你好',
+      mentions: [],
+      traceId,
+      depth: 0,
+      pendingTriggers: [],
+    })
+
+    // depth=0：不走 A2A 的「并入 queued 命令」合并分支，确保后两条**真的入队**。
+    // `execute` 的决策段全同步（第一个 await 之前完成标忙/入队）⇒ 三行调用返回时
+    // 槽位已被 head 占住、另两条在队列里。
+    const p1 = engine.execute(cmd('msg-drain-head', 'trace-drain-head'))
+    const p2 = engine.execute(cmd('msg-drain-user', 'trace-drain-user'))
+    const p3 = engine.execute(cmd('msg-drain-a2a', 'trace-drain-a2a'))
+    // **结构见证**（本用例真走在 drain 路径上的凭据，不是靠断言事后猜）：
+    expect(engine.getSlot(A1.id, 'session-1')?.queueLength).toBe(2)
+    // head 的 await 覆盖整条 drain 链（drain 在 `executeOneAgent` 收尾段被 await）
+    await Promise.all([p1, p2, p3])
+
+    // 判据组：被 drain 的那轮按 DB role='agent' 跳过
+    expect(retrievalEvent('msg-drain-a2a').reason).toBe('skipped-a2a')
+    expect(memorySpan('msg-drain-a2a').status).toBe('skipped')
+    // 对照组：**同样被 drain** 的用户轮照常检索 ⇒ 两组断言打在同一个构造点上，
+    // 恒真的门（写死 true / 写死 false）在此必红一半，探针非单侧。
+    expect(retrievalEvent('msg-drain-user').reason).not.toBe('skipped-a2a')
+    expect(memorySpan('msg-drain-user').status).toBe('ok')
+  }, 20000)
 })

@@ -18,8 +18,8 @@ import {
   executionLogs as execLogsRepo,
 } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
-import { rowToAgent } from './row.js'
-import { agentHasUsableApiKey, isAgentAuthoredTrigger } from './serial.js'
+import { rowToAgent, isAgentAuthoredTrigger } from './row.js'
+import { agentHasUsableApiKey } from './serial.js'
 import { getExecutionEngine } from './registry.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 

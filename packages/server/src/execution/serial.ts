@@ -67,7 +67,7 @@ import { maybeScoreSample } from '../eval/sampler.js'
 import { judgeReviewFallback, spawnReviewFallback } from './review-fallback.js'
 import { resolveRolePlaceholders } from './hints.js'
 import { runAgentReply } from './reply.js'
-import { rowToAgent } from './row.js'
+import { rowToAgent, isAgentAuthoredTrigger } from './row.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 import { createEngineState, type EngineState, type StreamState } from './state.js'
 
@@ -167,28 +167,20 @@ export type AgentTriggerMsg = {
    * 行为是「照常注入」，等于新入口忘标就悄悄绕过门（与 D15 `IngestInput.origin`
    * 同款判据：忘标要变成 `tsc` 编译错误，fail-loud）。
    *
-   * 真相源恒为 **DB `messages.role === 'agent'`**，且**只有一个权威构造点**：
-   * `buildTriggerMsg`（执行体每次都重新构造，见 `executeRun`）。其余构造点
-   * （A2A 递归 / 恢复 / ingest 入口）填的是各自触发行的真实 role，语义正确，
-   * 但**不承担判据职责**——`makeCmd` 不搬运本字段，reply 侧读到的永远是
-   * `buildTriggerMsg` 那一份 ⇒ 不存在两处判据打架。
+   * 真相源恒为 **DB `messages.role === 'agent'`**，判据函数 `isAgentAuthoredTrigger`
+   * 定义在 `./row.js`（叶模块——放这儿会闭合出模块环，见该文件文首注）。
+   *
+   * **判据面恰有两条**（`runAgentReply` 全仓唯一调用点 = `executeOneAgent`；
+   * `executeOneAgent` 全仓恰两个调用点 ⇒ 只有这两条路把 trigger 喂到 reply 侧）：
+   *   ① `buildTriggerMsg`（`executeRun`，每次执行体重建）；
+   *   ② `drainQueuedCommand` 的 `queuedTrigger`（**直接**调 `executeOneAgent`，
+   *      不经 `execute()` ⇒ `buildTriggerMsg` 在那条路上根本不跑）。
+   * 其余构造点（A2A 递归 / recovery / ingest 入口）填的是各自触发行的真实 role，
+   * 语义正确，但**不承担判据职责**——它们都经 `execute()` → `executeRun`，
+   * 而 `makeCmd` 不搬运本字段 ⇒ reply 侧读的是 `buildTriggerMsg` 重建的那一份。
+   * ⚠️ 别把「只有一个权威构造点」照旧写回来：drain 那条是**同权的第二处**。
    */
   fromAgent: boolean
-}
-
-/**
- * 触发行是否由 agent 发出——**本判据在全仓只有这一处定义**（T-1）。
- *
- * 为什么不各处直接写 `role === 'agent'`：判据有两个真实构造点（`buildTriggerMsg`
- * 与 `recovery` 的恢复路径），各写一份就是两份判据——今天同形，明天只改一处
- * （例如把 `system` 通告也算进来）就悄悄分叉，而分叉的表现是「同一类触发，两条
- * 路径行为不同」，排查时没有任何报错指向它。
- *
- * 不认 `authorName`（被 `resolveRolePlaceholders` 复用，语义会漂）、不认 content
- * 里的 @（路由元数据答的是「要叫谁」，不是「谁在说」）。
- */
-export function isAgentAuthoredTrigger(role: string | null | undefined): boolean {
-  return role === 'agent'
 }
 
 // ─── C1 v3 调度层重构：槽位（engine 闭包持有，键 agentId+sessionId） ────────────
