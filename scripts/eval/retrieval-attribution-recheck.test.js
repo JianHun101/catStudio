@@ -27,6 +27,8 @@ import {
   verifyFuseEquivalence,
   judgeFuseSelfCheck,
   judgeMergeSelfCheck,
+  judgeEmbedFailureGuard,
+  judgeG03SweepSample,
   mergeQueryPools,
   verifyMerge,
   readAnchor,
@@ -297,46 +299,134 @@ describe('judgeMergeSelfCheck — 与融合自证同型：无样本的绿不算�
 
 // ─── summarizeProductionFace：生产事件面（与黄金集面并列的另一个面） ────
 
-describe('summarizeProductionFace — 零行 ≠ 够不着', () => {
-  const row = (o) => ({ queryId: 1, chunkId: 10, distance: 0.2, rank: 0, injected: 0, ...o })
+describe('summarizeProductionFace — 零行 ≠ 够不着，且两类 source 不合成一把尺', () => {
+  const row = (o) => ({
+    queryId: 1,
+    chunkId: 10,
+    contentHash: 'h10',
+    source: 'probe',
+    distance: 0.2,
+    rank: 0,
+    finalRank: null,
+    injected: 0,
+    paramPoolN: 20,
+    thresholdMaxDistance: 0.6,
+    paramTopK: 3,
+    ...o,
+  })
 
   it('零行 ⇒ measurable=false（**不可测**），不是「够不着」', () => {
     const r = summarizeProductionFace([])
     expect(r.measurable).toBe(false)
-    expect(r.total).toBe(0)
-    expect(r.topRank).toBe(null)
+    expect(r.rows).toBe(0)
+    expect(r.distinctPairs).toBe(0)
     expect(r.injectedRows).toBe(0)
+    expect(r.bySource).toEqual({})
   })
 
-  it('rank 是 **0 基**：rank=0 才是最好（别读成 1）', () => {
+  it('`probe` / `final` 的 rank **分列**——合成一个标量就是跨尺取 min', () => {
     const r = summarizeProductionFace([
-      row({ queryId: 1, rank: 4, distance: 0.5 }),
-      row({ queryId: 2, rank: 0, distance: 0.31 }),
-      row({ queryId: 3, rank: 2, distance: 0.22 }),
+      row({ queryId: 1, chunkId: 10, source: 'probe', rank: 4 }),
+      row({ queryId: 2, chunkId: 11, contentHash: 'h11', source: 'final', rank: 0 }),
     ])
-    expect(r.topRank).toBe(0)
+    expect(r.bySource.probe.topRank).toBe(4)
+    expect(r.bySource.final.topRank).toBe(0)
+    // 结构上**不提供**合成字段：'final' 的 rank 是通道内位次、'probe' 的是池内下标
+    expect(r.topRank).toBeUndefined()
     expect(r.rankBase).toBe(0)
     // 最小距离与最好名次**不是同一行**——两个读数各自独立取，别混成一行
-    expect(r.minDistance).toBe(0.22)
+    expect(r.minDistance).toBe(0.2)
   })
 
-  it('injected 分别按**行**与按**查询**计数（同一查询多片各算一行）', () => {
+  it('证据权重按 `(queryId, contentHash)` 去重：同片同查询落 probe+final 两行只算一组', () => {
     const r = summarizeProductionFace([
-      row({ queryId: 1, chunkId: 10, injected: 1 }),
-      row({ queryId: 1, chunkId: 11, injected: 1 }),
-      row({ queryId: 2, chunkId: 10, injected: 0 }),
+      row({ queryId: 1, chunkId: 10, contentHash: 'h10', source: 'probe' }),
+      row({ queryId: 1, chunkId: 10, contentHash: 'h10', source: 'final' }),
+      row({ queryId: 2, chunkId: 10, contentHash: 'h10', source: 'probe' }),
     ])
-    expect(r.total).toBe(3)
+    expect(r.rows).toBe(3)
     expect(r.queries).toBe(2)
+    // 原始行数把证据量**高估**了 50%——去重数才是权重
+    expect(r.distinctPairs).toBe(2)
+    expect(r.bySource.probe.distinctPairs).toBe(2)
+    expect(r.bySource.final.distinctPairs).toBe(1)
+  })
+
+  it('injected 按 **行 / 组 / 查询** 三格分计（合并成一格就分不清权重与覆盖）', () => {
+    const r = summarizeProductionFace([
+      row({ queryId: 1, chunkId: 10, contentHash: 'h10', injected: 1 }),
+      row({ queryId: 1, chunkId: 11, contentHash: 'h11', injected: 1 }),
+      row({ queryId: 2, chunkId: 10, contentHash: 'h10', injected: 0 }),
+    ])
     expect(r.injectedRows).toBe(2)
+    expect(r.injectedPairs).toBe(2)
     expect(r.injectedQueries).toBe(1)
+  })
+
+  it('`final_rank=0` 只统计 **post-R1-b** 窗口（`paramPoolN !== null`）——该列在那之前同名不同义', () => {
+    const r = summarizeProductionFace([
+      row({ queryId: 1, source: 'final', finalRank: 0, paramPoolN: 20 }),
+      row({ queryId: 2, source: 'final', finalRank: 0, paramPoolN: null }),
+      row({ queryId: 3, source: 'final', finalRank: 3, paramPoolN: 20 }),
+    ])
+    expect(r.finalRank0Queries).toBe(1)
+    expect(r.finalRank0Rows).toBe(1)
+    expect(r.finalRankWindowRows).toBe(2)
+    expect(r.preR1bRows).toBe(1)
+  })
+
+  it('参数快照按**去重值**返回（同质 ⇒ 长度 1；多值 ⇒ 渲染层据此告警跨快照混读）', () => {
+    const same = summarizeProductionFace([row({}), row({ queryId: 2 })])
+    expect(same.paramSnapshot).toEqual({ thresholdMaxDistance: [0.6], topK: [3] })
+    const mixed = summarizeProductionFace([row({}), row({ queryId: 2, paramTopK: 5 })])
+    expect(mixed.paramSnapshot.topK).toEqual([3, 5])
   })
 
   it('全无 rank 值（keyword-only 行）⇒ topRank=null，不猜 0', () => {
     const r = summarizeProductionFace([row({ rank: null, distance: 0.4 })])
     expect(r.measurable).toBe(true)
-    expect(r.topRank).toBe(null)
+    expect(r.bySource.probe.topRank).toBe(null)
     expect(r.minDistance).toBe(0.4)
+  })
+})
+
+// ─── 嵌入失败全局闸（族修第一道） ────────────────────
+
+describe('judgeEmbedFailureGuard — 嵌入失败必须全局可见（假确认比假红更危险）', () => {
+  it('有失败 ⇒ 拒，且报出**调用点**与**分母**（失败方向恰好支持本票结论 ⇒ 没人会去查）', () => {
+    const r = judgeEmbedFailureGuard({ attempted: 40, failed: 1, sites: ['knob-lab'] })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('embed-failure')
+    expect(r.message).toContain('knob-lab')
+    expect(r.message).toContain('1/40')
+  })
+
+  it('零失败 ⇒ 过（本趟报告的常态，`embedHealth` 会如实印出分母）', () => {
+    expect(judgeEmbedFailureGuard({ attempted: 40, failed: 0, sites: [] }).ok).toBe(true)
+  })
+
+  it('一次都没调用 ⇒ 也拒（no-sample，与另两道自证闸同型：「没命中」与「没跑」不可分辨）', () => {
+    const r = judgeEmbedFailureGuard({ attempted: 0, failed: 0, sites: [] })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('no-sample')
+  })
+
+  it('无 site 标签时不印空括号（`sites` 缺省仍要给出可读判词）', () => {
+    const r = judgeEmbedFailureGuard({ attempted: 3, failed: 2 })
+    expect(r.message).toContain('2/3')
+    expect(r.message).not.toContain('调用点：）')
+  })
+})
+
+describe('judgeG03SweepSample — 无样本的否定结论必须拒', () => {
+  it('swept === 0 ⇒ 拒：不能让瞎探针给出「没有一条够得着」', () => {
+    const r = judgeG03SweepSample({ swept: 0 })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('no-sample')
+  })
+
+  it('swept > 0 ⇒ 过（真扫过才允许下否定判词）', () => {
+    expect(judgeG03SweepSample({ swept: 148 }).ok).toBe(true)
   })
 })
 
@@ -755,5 +845,43 @@ describe('静态源断言 — 本脚本对库只读（诊断脚本绝不许写�
   it('来源里是**转义序列** `\\u0000`，不是裸 NUL 字节（裸字节会让 grep 把文件当二进制、定位手段当场失效）', () => {
     const raw = readFileSync(path.join(REPO_ROOT, 'scripts/eval/retrieval-attribution-recheck.mjs'))
     expect(raw.includes(0)).toBe(false)
+  })
+})
+
+describe('静态源断言 — 嵌入失败全局闸的**位置即语义**', () => {
+  const lines = readFileSync(
+    path.join(REPO_ROOT, 'scripts/eval/retrieval-attribution-recheck.mjs'),
+    'utf8'
+  ).split('\n')
+
+  /** `memoEmbed` 的**调用**行（排除定义行与注释行） */
+  const callLines = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => /(await memoEmbed\(|=> memoEmbed\()/.test(l) && !/^\s*(\*|\/\/)/.test(l))
+
+  it('全局闸在**全部** `memoEmbed` 调用点**之后**——加在下面 = 新调用点的失败不进闸，静默退化复活', () => {
+    // 这是本族修的**结构**保证：不靠「记得同步改 N 处」，靠位置。
+    expect(callLines.length).toBeGreaterThanOrEqual(8)
+    const guardCall = lines.findIndex((l) => /=\s*judgeEmbedFailureGuard\(\{/.test(l))
+    expect(guardCall).toBeGreaterThan(-1)
+    expect(guardCall).toBeGreaterThan(Math.max(...callLines.map((c) => c.i)))
+  })
+
+  it('每个调用点都带 **site 标签**（否则失败时报告指不出是哪一段瞎了）', () => {
+    expect(callLines.length).toBeGreaterThanOrEqual(8)
+    const untagged = callLines.filter(({ l }) => !/memoEmbed\([^)]*,\s*'/.test(l))
+    expect(untagged.map((u) => u.l.trim())).toEqual([])
+  })
+
+  it('失败**不缓存**：`embedCache.set` 全局只一处、且在成功判据之后（缓存失败 = 瞬时故障被固化成整趟永久）', () => {
+    const m = lines.join('\n').match(/const memoEmbed = async \([\s\S]*?\n  \}/)
+    expect(m).not.toBe(null)
+    const src = m[0]
+    expect(src.match(/embedCache\.set\(/g)).toHaveLength(1)
+    const okGuard = src.indexOf('r.ok && r.vector && r.vector.length > 0')
+    expect(okGuard).toBeGreaterThan(-1)
+    expect(src.indexOf('embedCache.set(')).toBeGreaterThan(okGuard)
+    // 失败分支必须留痕（否则闸门没有输入）
+    expect(src).toContain('embedTally.failed += 1')
   })
 })

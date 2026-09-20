@@ -316,6 +316,76 @@ export function judgeMergeSelfCheck({ entries, rows, mismatches }) {
 }
 
 /**
+ * **嵌入失败全局守卫**——本族修的第一道，盖住**全部** `memoEmbed` 调用点。
+ *
+ * ## 为什么必须是一道全局闸、而不是逐个调用点补计数
+ *
+ * `memoEmbed` 的失败在**七个**调用点下游全部退化成**与真值同形**的输出：
+ * `if (!e.ok || e.vector.length === 0) { pools.push({ query, hits: [] }); continue }`
+ * ——「探针瞎了」与「嵌进去了、但一条没命中」**逐字同形**。于是：
+ *   - §6.2 旋钮实验台数出 `recovered = 0` ⇒ 报告印「**七档全 0**」（而 §4.3 ③ 的药方边界
+ *     正建立在这行读数上：「单动任何一类旋钮都救不回它」）；
+ *   - §4.3 逐查询表把两种情形同时印成「（不在池内）」。
+ * 而失败方向恰好**支持**本票的推荐结论 ⇒ 是**假确认**，比假红更危险（没人会去查）。
+ *
+ * 逐点补计数修不动根因：任何**新增**调用点都会重新引入同一形态。故：
+ *   ① `memoEmbed` **只缓存成功**（一次瞬时失败不再被固化成整趟永久失败）；
+ *   ② 每次失败在**唯一的**计数器上留痕（带调用点标签）；
+ *   ③ 出口一次判——`failed > 0` 即**拒出报告**。
+ *
+ * ⚠️ `attempted === 0` 也拒：与 `judgeFuseSelfCheck` / `judgeMergeSelfCheck` 同族，
+ * 「一条都没嵌」时下游全部读数是同形的 0，不能放行。
+ */
+export function judgeEmbedFailureGuard({ attempted, failed, sites }) {
+  const where = sites && sites.length > 0 ? `（调用点：${sites.join(' / ')}）` : ''
+  if (failed > 0) {
+    return {
+      ok: false,
+      reason: 'embed-failure',
+      message:
+        `本趟嵌入调用失败 **${failed}/${attempted}** 次${where}——` +
+        '失败点下游一律退化成**与真值同形**的空池/零命中（「一条没命中」与「探针瞎了」不可分辨），' +
+        '而失败方向恰好**支持**本票结论 ⇒ 属**假确认**。拒出报告。',
+    }
+  }
+  if (attempted === 0) {
+    return {
+      ok: false,
+      reason: 'no-sample',
+      message:
+        '本趟**一次嵌入都没调用**（attempted=0）——下游全部读数都是同形的 0，' +
+        '「没命中」与「没跑」不可分辨。拒出报告。',
+    }
+  }
+  return { ok: true, reason: '', message: '' }
+}
+
+/**
+ * G03 全黄金集扫描的**样本闸**（把判定从 `main()` 抽出来，好让它本身可测）。
+ *
+ * 与 `judgeFuseSelfCheck` / `judgeMergeSelfCheck` **同型**：`sweepN` 只数**成功**的
+ * 查询（失败是静默 `continue`）⇒ 全失败时 `sweepN === 0`、`sweepBest === null` ⇒
+ * 报告会印「❌ 全黄金集 **0 条**查询里没有一条够得着 ⇒ 与『覆盖洞』一致」——
+ * 一句由**瞎掉的探针**得出的否定结论。无样本必须拒，不能退化成恒真的否定式读数。
+ *
+ * ⚠️ 自 `judgeEmbedFailureGuard` 落地后本闸的**可达面收窄**（嵌入失败已被上游拦下），
+ * 但它仍守着**另一个**前提：`sweepN === 0` 也可由「黄金集查询集为空」产生——
+ * 那是语料/输入侧的问题，不是嵌入侧。两道闸答的是不同问题，都留。
+ */
+export function judgeG03SweepSample({ swept }) {
+  if (swept === 0) {
+    return {
+      ok: false,
+      reason: 'no-sample',
+      message:
+        'G03 全黄金集扫描**一条查询都没扫成**（sweepN=0）——「没有一条够得着」会变成' +
+        '无样本时的假否定，覆盖洞结论不可采信',
+    }
+  }
+  return { ok: true, reason: '', message: '' }
+}
+
+/**
  * **跨查询合并重建**：把逐查询的融合池按 `memory/index.ts` 的合并规则重排成完整序。
  *
  * 三条规则逐字复刻（`runRetrievalChain` 的 `merged` 循环）：
@@ -450,44 +520,93 @@ export function readAnchor({ sectionChunkIds, merged, maxDistance }) {
  * 本仓为这条栽过一次（把生产面的 `rank=1` 拿去和黄金集面的名次比，判成「推翻」，
  * 还把结论写进了 `map.md`）——那个判词是错的，面不同而已。
  *
- * ⚠️ `rank` **0 基**（写入口 `memory/index.ts` 的 `probe.map((c, rank) => …)` 用数组下标）
- * ——与黄金集面的 `readAnchor().rank` **同基**。`rank = 0` 才是**最靠前**，别读成 1。
- *
  * ⚠️ **零行 ≠ 够不着**：查不到该锚点的生产行，只说明**这个面本次不可测**（流水是历史
  * 累积，可能压根没跑过含它的查询），**不能**反推「生产面也够不着」。故 `measurable`
- * 与 `total` 分两格返回，渲染层必须照此分列——这正是本脚本在别处花整节防的
+ * 与 `rows` 分两格返回，渲染层必须照此分列——这正是本脚本在别处花整节防的
  * 「否定式读数」（探针瞎了也会给出同样的 0）。
+ *
+ * ## 三条口径（都为了「一把尺」这条纪律，不写清就会读错）
+ *
+ * ① **`source` 是两把尺，别取混 min**：候选流水两类行**同表**（`migrations.ts` 的
+ * `source` 列）——`final` 行的 `rank` 是 `bestChannelRank(...)`（**通道**内位次），
+ * `probe` 行的 `rank` 是**阈值前 KNN 池**的数组下标（`memory/index.ts` 的
+ * `probe.map((c, rank) => …)`）。两者都 **0 基**、都答「在它自己那份榜里排第几」，
+ * 但**不是同一份榜** ⇒ 本函数按 `source` **分列**返回，不合成一个 `topRank`
+ * （合成即跨尺取 min，正是本票靶心的那个错法）。
+ *
+ * ② **证据权重按 `(queryId, contentHash)` 去重**：同一片在一趟检索里会同时落
+ * `probe` 与 `final` 两行 ⇒ 原始行数**高估**证据量。去重键取 `contentHash`
+ * （库层身份键；`chunk_id` 是诊断探针、`migrations.ts` 明写「绝不作 join 键」）。
+ *
+ * ③ **`final_rank` 只在 post-R1-b 窗口内可比**：R1-b 之前该列**同名不同义**
+ * （`retrievalEvents.ts` 的 `paramPoolN` 注释：那段窗口该列为 NULL）。故
+ * `finalRank0*` 三格**只统计 `paramPoolN !== null` 的行**，另把 `preR1bRows`
+ * 单列出来——跨窗口混数会把两个口径的「融合序第一」加在一起。
  */
 export function summarizeProductionFace(rows) {
-  const total = rows.length
-  if (total === 0) {
-    return {
-      available: true,
-      measurable: false,
-      total: 0,
-      queries: 0,
-      topRank: null,
-      topRankChunkId: null,
-      minDistance: null,
-      injectedRows: 0,
-      injectedQueries: 0,
-      rankBase: 0,
+  const empty = {
+    available: true,
+    measurable: false,
+    rows: 0,
+    queries: 0,
+    distinctPairs: 0,
+    injectedRows: 0,
+    injectedPairs: 0,
+    injectedQueries: 0,
+    minDistance: null,
+    rankBase: 0,
+    bySource: {},
+    finalRank0Queries: 0,
+    finalRank0Rows: 0,
+    finalRankWindowRows: 0,
+    preR1bRows: 0,
+    paramSnapshot: { thresholdMaxDistance: [], topK: [] },
+  }
+  if (rows.length === 0) return empty
+
+  const pairKey = (r) => `${r.queryId}\u0000${r.contentHash ?? r.chunkId}`
+  const injected = rows.filter((r) => r.injected === 1)
+  const dists = rows.map((r) => r.distance).filter((d) => typeof d === 'number')
+
+  const bySource = {}
+  for (const src of ['probe', 'final']) {
+    const rs = rows.filter((r) => r.source === src)
+    if (rs.length === 0) continue
+    const ranked = rs.filter((r) => typeof r.rank === 'number')
+    bySource[src] = {
+      rows: rs.length,
+      distinctPairs: new Set(rs.map(pairKey)).size,
+      topRank: ranked.length > 0 ? Math.min(...ranked.map((r) => r.rank)) : null,
     }
   }
-  const ranked = rows.filter((r) => typeof r.rank === 'number')
-  const best = ranked.length > 0 ? ranked.reduce((a, b) => (b.rank < a.rank ? b : a)) : null
-  const dists = rows.map((r) => r.distance).filter((d) => typeof d === 'number')
+
+  const frWindow = rows.filter(
+    (r) => r.paramPoolN !== null && r.paramPoolN !== undefined && typeof r.finalRank === 'number'
+  )
+  const fr0 = frWindow.filter((r) => r.finalRank === 0)
+  const uniq = (xs) => [...new Set(xs)]
+
   return {
     available: true,
     measurable: true,
-    total,
+    rows: rows.length,
     queries: new Set(rows.map((r) => r.queryId)).size,
-    topRank: best ? best.rank : null,
-    topRankChunkId: best ? best.chunkId : null,
+    distinctPairs: new Set(rows.map(pairKey)).size,
+    injectedRows: injected.length,
+    injectedPairs: new Set(injected.map(pairKey)).size,
+    injectedQueries: new Set(injected.map((r) => r.queryId)).size,
     minDistance: dists.length > 0 ? Math.min(...dists) : null,
-    injectedRows: rows.filter((r) => r.injected === 1).length,
-    injectedQueries: new Set(rows.filter((r) => r.injected === 1).map((r) => r.queryId)).size,
+    /** `rank` 与 `finalRank` 皆为 **0 基**（`0` = 最靠前）；渲染层读它、不硬编这个数 */
     rankBase: 0,
+    bySource,
+    finalRank0Queries: new Set(fr0.map((r) => r.queryId)).size,
+    finalRank0Rows: fr0.length,
+    finalRankWindowRows: frWindow.length,
+    preR1bRows: rows.filter((r) => r.paramPoolN === null || r.paramPoolN === undefined).length,
+    paramSnapshot: {
+      thresholdMaxDistance: uniq(rows.map((r) => r.thresholdMaxDistance)),
+      topK: uniq(rows.map((r) => r.paramTopK)),
+    },
   }
 }
 
@@ -645,6 +764,7 @@ export function renderDiagnosis(ctx) {
     goldenCounts,
     params,
     embed,
+    embedHealth,
     groups,
     liveMisses,
     diff,
@@ -699,6 +819,15 @@ export function renderDiagnosis(ctx) {
         ? '独立 sidecar、动态端口（`EMBED_SIDECAR_PORT=0`，实测已握手）'
         : '⚠️ **未见 sidecar 监听端口**（非独立 sidecar 供给 / 未握手）') +
       ' |'
+  )
+  // 读数诚实性：这一格答的是「本趟所有嵌入调用有没有失败过」。它**不是**装饰——
+  // `failed > 0` 时脚本根本到不了渲染步（`judgeEmbedFailureGuard` 已 refuse），
+  // 所以能印出来的永远是 `0`；但把 `attempted` 一并印出来，读者才知道**分母**是多少
+  // （0 失败 / 3 次调用 与 0 失败 / 3000 次调用，可信度不是一回事）。
+  L.push(
+    `| **嵌入调用（attempted / failed）** | ${embedHealth.attempted} / ${embedHealth.failed}` +
+      '（出口全局闸：`failed > 0` 或 `attempted === 0` 即**拒出报告**；' +
+      '失败**不缓存**，瞬时失败下次重试） |'
   )
   L.push(
     `| **合并序重建自证** | ${mergeChecks.checked} 条条目 / ${mergeChecks.rows} 行 final 流水逐行比对，` +
@@ -834,10 +963,15 @@ export function renderDiagnosis(ctx) {
         const pf = g03.productionFace
         if (!pf || !pf.available) return `该面本次不可测（${(pf && pf.reason) || '未取到'}）`
         if (!pf.measurable) return '该锚点**零行** ⇒ 本次不可测（零行 ≠ 够不着）'
+        const srcs = Object.entries(pf.bySource)
+          .map(([k, v]) => `\`${k}\` 最好名次 ${v.topRank === null ? '（无）' : v.topRank}`)
+          .join(' / ')
         return (
-          `${pf.total} 行 / ${pf.queries} 个查询；最好一次 **名次 ${pf.topRank}**（**0 基**）、` +
+          `${pf.rows} 行 / ${pf.queries} 个查询（去重后 ${pf.distinctPairs} 组）；` +
+          `${srcs}（皆 **${pf.rankBase} 基**）；` +
+          `**融合序第一** \`final_rank=0\` 有 ${pf.finalRank0Queries} 个查询；` +
           `最小距离 ${pf.minDistance === null ? '（无）' : fmt4(pf.minDistance)}；` +
-          `\`injected=1\` **${pf.injectedRows} 行 / ${pf.injectedQueries} 个查询**`
+          `\`injected=1\` **${pf.injectedRows} 行 / ${pf.injectedPairs} 组 / ${pf.injectedQueries} 个查询**`
         )
       })()
   )
@@ -1242,14 +1376,37 @@ export async function main(argv = process.argv.slice(2)) {
     pathToFileURL(path.join(root, 'packages/server/src/memory/query-rewrite.js')).href
   )
 
-  /** 嵌入 memo：同一查询串在本趟只嵌一次（旋钮实验台会把同一批查询重算很多遍） */
+  /**
+   * 嵌入 memo：同一查询串**成功**后在本趟只嵌一次（旋钮实验台会把同一批查询重算很多遍）。
+   *
+   * ⚠️ **只缓存成功**（族修）：原实现无条件 `set`，一次**瞬时**失败会被固化成整趟的
+   * **永久**失败。而失败的下游读数全是**假确认**（见 `judgeEmbedFailureGuard`）——
+   * 失败方向恰好支持本票推荐结论，没人会去查。故失败不缓存（下次重试），
+   * 并在**唯一**的 `embedTally` 上留痕；出口由 `judgeEmbedFailureGuard` 一次判。
+   *
+   * ⚠️ `embedText` **抛错**仍照旧向上抛（顶层 catch → exit 2、不写报告）：
+   * 那是「响亮地失败」，不是本守卫要堵的静默退化，两者不混。
+   */
   const embedCache = new Map()
-  const memoEmbed = async (text) => {
+  const embedTally = { attempted: 0, failed: 0, sites: new Set() }
+  const memoEmbed = async (text, site = 'unknown') => {
     if (embedCache.has(text)) return embedCache.get(text)
     const r = await embedText(text)
-    embedCache.set(text, r)
+    embedTally.attempted += 1
+    if (r && r.ok && r.vector && r.vector.length > 0) {
+      embedCache.set(text, r)
+    } else {
+      embedTally.failed += 1
+      embedTally.sites.add(site)
+    }
     return r
   }
+  /** 计数器的**可序列化投影**（`sites` 是 Set：进报告/JSON 前转数组，且排好序保证同输入同输出） */
+  const tallyOf = (t) => ({
+    attempted: t.attempted,
+    failed: t.failed,
+    sites: [...t.sites].sort(),
+  })
 
   try {
     const dbRows = db.prepare('SELECT count(*) AS c FROM chunks').get().c
@@ -1317,7 +1474,7 @@ export async function main(argv = process.argv.slice(2)) {
         const relaxedPerQuery = await collectRecheckPools({
           queries,
           maxDistance: RECHECK_MAX_DISTANCE,
-          embed: memoEmbed,
+          embed: (q) => memoEmbed(q, 'recheck-pools'),
           search: (vector, q, md) =>
             chunksRepo.searchChunksHybrid(
               vectorToBlob(vector),
@@ -1360,7 +1517,7 @@ export async function main(argv = process.argv.slice(2)) {
     for (const p of perEntry) {
       const pools = []
       for (const q of p.queries) {
-        const e = await memoEmbed(q)
+        const e = await memoEmbed(q, 'merge-rebuild')
         pools.push({
           query: q,
           hits:
@@ -1408,7 +1565,7 @@ export async function main(argv = process.argv.slice(2)) {
     let fuseCompared = 0
     let fuseSkipped = 0
     for (const q of fuseProbeQueries) {
-      const e = await memoEmbed(q)
+      const e = await memoEmbed(q, 'fuse-equivalence')
       if (!e.ok || e.vector.length === 0) {
         fuseSkipped += 1
         continue
@@ -1542,11 +1699,21 @@ export async function main(argv = process.argv.slice(2)) {
       if (hasTable === 0) {
         return { available: false, measurable: false, reason: '库内无 retrieval_candidates 表' }
       }
+      // join 只为取**参数快照**与 `param_pool_n`（`retrieval_queries.id` /
+      // `retrieval_events.id` 皆 PK ⇒ 不放大行数）；`source` / `content_hash` /
+      // `final_rank` 是同一行上的列，一并取出——少了 `source` 就分不开两把尺。
       const rows = db
         .prepare(
-          `SELECT query_id AS queryId, chunk_id AS chunkId, distance, rank, injected
-             FROM retrieval_candidates
-            WHERE doc_path = ? AND section_anchor = ?`
+          `SELECT c.query_id AS queryId, c.chunk_id AS chunkId, c.content_hash AS contentHash,
+                  c.source AS source, c.distance AS distance, c.rank AS rank,
+                  c.final_rank AS finalRank, c.injected AS injected,
+                  e.param_pool_n AS paramPoolN,
+                  e.threshold_max_distance AS thresholdMaxDistance,
+                  e.param_top_k AS paramTopK
+             FROM retrieval_candidates c
+             JOIN retrieval_queries q ON q.id = c.query_id
+             JOIN retrieval_events  e ON e.id = q.retrieval_id
+            WHERE c.doc_path = ? AND c.section_anchor = ?`
         )
         .all(g03Anchor.docPath, g03Anchor.sectionAnchor)
       return summarizeProductionFace(rows)
@@ -1577,7 +1744,7 @@ export async function main(argv = process.argv.slice(2)) {
     const KNN_DEPTH = 200
     const g03Knn = []
     for (const q of g03Entry.queries) {
-      const e = await memoEmbed(q)
+      const e = await memoEmbed(q, 'g03-knn')
       if (!e.ok || e.vector.length === 0) {
         // ⚠️ 必须与「查了但没找到」区分：两者都是 `distance: null`，若渲染层一视同仁地印
         // 「（不在池内）」，**探针瞎掉**就会被读成**该锚点不在池内**（同族第三处）。
@@ -1608,7 +1775,7 @@ export async function main(argv = process.argv.slice(2)) {
     let sweepN = 0
     for (const entry of goldenData.entries) {
       for (const q of [...new Set([entry.query, ...entry.rewritten])]) {
-        const e = await memoEmbed(q)
+        const e = await memoEmbed(q, 'g03-corpus-sweep')
         if (!e.ok || e.vector.length === 0) continue
         sweepN += 1
         const hits = chunksRepo.searchChunksByVector(
@@ -1625,16 +1792,16 @@ export async function main(argv = process.argv.slice(2)) {
       }
     }
 
-    // ⚠️ 同族的第三处：`sweepN` 只数**嵌入成功**的查询，而失败是**静默** `continue` ⇒
-    // 全失败时 `sweepN === 0`、`sweepBest === null` ⇒ 报告会印出
-    // 「❌ 全黄金集 **0 条**查询里没有一条够得着它 ⇒ 与"覆盖洞"一致」——一句由**瞎掉的探针**
-    // 得出的否定结论，正是本票靶心的形态。无样本必须拒出报告。
-    if (sweepN === 0) {
+    // ⚠️ 同族的第三处（判定抽成 `judgeG03SweepSample`，好让它本身可测）：
+    // `sweepN` 只数**嵌入成功**的查询，而失败是**静默** `continue` ⇒ 全失败时
+    // `sweepN === 0`、`sweepBest === null` ⇒ 报告会印出「❌ 全黄金集 **0 条**查询里
+    // 没有一条够得着它 ⇒ 与"覆盖洞"一致」——一句由**瞎掉的探针**得出的否定结论。
+    const sweepVerdict = judgeG03SweepSample({ swept: sweepN })
+    if (!sweepVerdict.ok) {
       return refuse(
         'g03-sweep-no-sample',
-        { goldenEntries: goldenData.entries.length },
-        'G03 全黄金集扫描**一条查询都没嵌入成功**（sweepN=0）——「没有一条够得着」会变成' +
-          '探针瞎掉时的假否定，覆盖洞结论不可采信'
+        { goldenEntries: goldenData.entries.length, embedTally: tallyOf(embedTally) },
+        sweepVerdict.message
       )
     }
 
@@ -1655,12 +1822,35 @@ export async function main(argv = process.argv.slice(2)) {
       const d = productionFace.minDistance === null ? '（无）' : fmt4(productionFace.minDistance)
       const inj =
         productionFace.injectedRows > 0
-          ? `其中 \`injected=1\` 的 **${productionFace.injectedRows} 行 / ${productionFace.injectedQueries} 个查询** ` +
+          ? `其中 \`injected=1\` 的 **${productionFace.injectedRows} 行 / ${productionFace.injectedPairs} 组 / ${productionFace.injectedQueries} 个查询** ` +
             '⇒ 它**在生产上真被排到过最前、也真进过注入集**'
           : '其中 `injected=1` 的 **0 行** ⇒ 排得靠前但**从未真注入**'
+      // `source` 分列：两类行的 `rank` 是**两把不同的尺**（`final`=通道内位次 /
+      // `probe`=阈值前 KNN 池下标），合成一个 min 就是跨尺取最值 ⇒ 逐类各报各的。
+      const srcLines = Object.entries(productionFace.bySource)
+        .map(
+          ([k, v]) =>
+            `  - \`${k}\`（${k === 'final' ? '跨查询融合 topK，`rank` 是**通道内**位次' : '阈值前 KNN 池，`rank` 是**池内下标**'}）` +
+            `**${v.rows} 行 / ${v.distinctPairs} 组**，最好名次 **${v.topRank === null ? '（无 rank 值）' : v.topRank}**`
+        )
+        .join('\n')
+      const ps = productionFace.paramSnapshot
+      const paramLine =
+        `\`threshold_max_distance\` = ${ps.thresholdMaxDistance.join(' / ') || '（无）'}、` +
+        `\`param_top_k\` = ${ps.topK.join(' / ') || '（无）'}（${productionFace.queries} 个查询` +
+        `${ps.thresholdMaxDistance.length <= 1 && ps.topK.length <= 1 ? '**同质**）⇒ 跨时代池化的口径风险本锚点上不成立' : '**不同质**）⚠️ 极值类读数须按参数快照分组，不可跨快照混读'}`
       return (
-        `**生产事件面**（\`retrieval_candidates\`，真实生产查询的检索流水）：该锚点有 **${productionFace.total} 行 / ${productionFace.queries} 个查询**，` +
-        `最好一次 **名次 ${productionFace.topRank}**（**0 基**，\`0\` 即最靠前；与黄金集面同基）、最小距离 **${d}**；${inj}。\n\n` +
+        `**生产事件面**（\`retrieval_candidates\`，真实生产查询的检索流水）：该锚点有 **${productionFace.rows} 行 / ${productionFace.queries} 个查询**；` +
+        `按 \`(query_id, content_hash)\` 去重后 = **${productionFace.distinctPairs} 组**` +
+        '（同一片在一趟检索里会**同时**落 `probe` 与 `final` 两行 ⇒ **原始行数是高估的证据量**，去重数才是权重）；' +
+        `${inj}。\n\n` +
+        `**两类 \`source\` 是两把尺、分列报**（皆 **${productionFace.rankBase} 基**，\`0\` 即最靠前）：\n${srcLines}\n\n` +
+        `**更强的那把尺——融合序**：\`final_rank\`（跨查询合并后的名次）在该锚点有 **${productionFace.finalRank0Queries} 个查询把它排到 \`final_rank=0\`（融合序第一）**，` +
+        `这是「**它真被排到过最前**」的直接读数，比上面 ` +
+        '`rank`（通道内/池内位次）硬。' +
+        `⚠️ 该列只在 **post-R1-b** 窗口内可比（\`param_pool_n IS NULL\` 那段窗口里同名不同义，见 \`retrievalEvents.ts\` 的 \`paramPoolN\` 注释）` +
+        `——本锚点 ${productionFace.rows} 行里有 **${productionFace.preR1bRows} 行**在窗口之前，上格只统计窗口内 ${productionFace.finalRankWindowRows} 行。\n\n` +
+        `**参数快照**：${paramLine}。最小距离 **${d}**。\n\n` +
         '⇒ **两面不矛盾，是两把尺量两件事**：黄金集面（受控复现）说「金标查询里它排不到靠前」，' +
         '生产事件面（历史流水）说「真实查询里它排到过最前、且真注入过」。' +
         '此前那句「同一锚点在别的查询下拿到过 `rank=1`、`distance≈0.19`」出自**生产事件面**' +
@@ -1872,7 +2062,10 @@ export async function main(argv = process.argv.slice(2)) {
     const buildPoolsFor = async (p, channelTopN, rrfK, poolPerQuery) => {
       const pools = []
       for (const q of p.queries) {
-        const e = await memoEmbed(q)
+        // ⚠️ 这里的 `hits: []` 与「嵌进去了、但阈值内一条没命中」**逐字同形**——
+        // 单看这行读不出「七档全 0」是真 0 还是探针瞎。由 `judgeEmbedFailureGuard`
+        // 在出口统一拦（本行不再自辩，避免**新增调用点**重新引入同型缺口）。
+        const e = await memoEmbed(q, 'knob-lab')
         if (!e.ok || e.vector.length === 0) {
           pools.push({ query: q, hits: [] })
           continue
@@ -2054,7 +2247,7 @@ export async function main(argv = process.argv.slice(2)) {
       // 该节**全部片**在各查询下的最小真实向量距离：收到它之下，向量通道一片都够不着
       let dmin = null
       for (const q of cand.queries) {
-        const e = await memoEmbed(q)
+        const e = await memoEmbed(q, 'threshold-cc')
         if (!e.ok || e.vector.length === 0) continue
         const hits = chunksRepo.searchChunksByVector(
           vectorToBlob(e.vector),
@@ -2116,7 +2309,7 @@ export async function main(argv = process.argv.slice(2)) {
     // 反对照 B：杀区存在性（补强）
     const killZoneHits = []
     for (const q of [...new Set(affected.flatMap((p) => p.queries))]) {
-      const e = await memoEmbed(q)
+      const e = await memoEmbed(q, 'kill-zone')
       if (!e.ok || e.vector.length === 0) continue
       const hits = chunksRepo.searchChunksByVector(
         vectorToBlob(e.vector),
@@ -2294,6 +2487,23 @@ export async function main(argv = process.argv.slice(2)) {
       '',
     ].join('\n')
 
+    // ─── 嵌入失败**全局闸**（族修第一道，必须留在**全部** `memoEmbed` 调用点之后）───
+    // 位置即语义：本闸盖的是「整趟所有嵌入调用」。**新加 `memoEmbed` 调用点请加在它上面**，
+    // 加在下面 = 新调用点的失败不进闸 ⇒ 静默退化复活（这正是本族修要一次性关掉的门）。
+    const embedHealth = tallyOf(embedTally)
+    const embedVerdict = judgeEmbedFailureGuard({
+      attempted: embedHealth.attempted,
+      failed: embedHealth.failed,
+      sites: embedHealth.sites,
+    })
+    if (!embedVerdict.ok) {
+      return refuse(
+        embedVerdict.reason === 'no-sample' ? 'embed-no-sample' : 'embed-failure',
+        { embed: embedHealth },
+        embedVerdict.message
+      )
+    }
+
     // ─── 渲染 + 落盘 ────────────────────────────────────
     const groups = {}
     for (const kind of ['real', 'constructed']) {
@@ -2311,6 +2521,7 @@ export async function main(argv = process.argv.slice(2)) {
       goldenCounts: goldenData.meta?.counts ?? {},
       params,
       embed: { model: embedStatus.model, dim: embedStatus.dim, port: embedStatus.port },
+      embedHealth,
       groups,
       baselineGroups: { real: 0.5833, constructed: 0.8261 },
       liveMisses: liveMissKeys.size,
@@ -2347,6 +2558,7 @@ export async function main(argv = process.argv.slice(2)) {
           missingInLive: diff.missingInLive.length,
           extraInLive: diff.extraInLive.length,
         },
+        embedHealth,
         mergeSelfCheck: { ok: mergeChecks.ok, rows: mergeChecks.rows },
         fuseSelfCheck: {
           ok: fuseCheck.ok,
