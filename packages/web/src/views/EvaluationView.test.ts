@@ -346,7 +346,7 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     rotten: 0,
     indexFreshness: { checked: 19, stale: 0 },
     params: { topK: 3, maxDistance: 0.6, probeN: 20 },
-    embed: { model: 'Xenova/bge-small-zh-v1.5', dim: 512, handshakeOk: true },
+    embed: { model: 'Xenova/bge-small-zh-v1.5', dim: 512, handshaked: true },
     groups: {
       real: {
         n: 12,

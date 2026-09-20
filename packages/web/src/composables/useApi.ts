@@ -251,10 +251,12 @@ export interface RetrievalReport {
   rotten: number
   indexFreshness: { checked: number; stale: number }
   params: { topK: number; maxDistance: number; probeN: number }
-  /** `handshakeOk` 是**加工后的布尔**，不是端口号本身——端口每跑一变，落进产物就破 B1
+  /** `handshaked` 是**加工后的布尔**，不是端口号本身——端口每跑一变，落进产物就破 B1
    *  （见跑批脚本 `reportCtx.embed` 的注释）。布尔承载「这次跑批有没有握手到 sidecar」
-   *  这个信号（md 侧渲染它）；**界面只消费上面的 `model` / `dim`**，端口号没有消费方。 */
-  embed: { model?: string | null; dim?: number | null; handshakeOk?: boolean }
+   *  这个信号（md 侧渲染它）；**界面只消费上面的 `model` / `dim`**，端口号没有消费方。
+   *  `handshaked` **必填**：`reportCtx.embed` 恒产出布尔（由 `port > 0` 推导），
+   *  写成可选只会让消费方多一条「字段可能缺失」的假分支。 */
+  embed: { model?: string | null; dim?: number | null; handshaked: boolean }
   groups: { real: RetrievalGroupSummary; constructed: RetrievalGroupSummary }
   scores: RetrievalScoreRow[]
   /** canary 反对照（测量工具真空性）：必中条目必须满分、必不中必须零分 */
