@@ -1238,10 +1238,11 @@ describe('memory', () => {
 
   // ─── T-1 a2a 门控：开关语义 + 跳过结果形状 ────────────────
   //
-  // 门本身长在 `execution/reply.ts`（调用点），但那两件东西归本模块所有：
-  //  ① `MEMORY_A2A_ENABLED` 的读法（默认**关**——本门要治的就是「a2a 白跑检索」，
-  //     默认开等于什么都不治）；
-  //  ② 跳过结果的形状（`recordRetrievalTrace` / span 都按 `stats?.xxx` 取值，
+  // 门本身长在 `execution/reply.ts`（调用点），但这三件东西归本模块所有：
+  //  ① `MEMORY_A2A_ENABLED` 的读法（默认关门——本门要治的就是「a2a 白跑检索」，
+  //     默认放行等于什么都不治）；
+  //  ② **与记忆总开关的合取**（F3）：总开关关时本门不生效、放行给 `not-enabled`；
+  //  ③ 跳过结果的形状（`recordRetrievalTrace` / span 都按 `stats?.xxx` 取值，
   //     形状分叉 ⇒ 落库一片 null）。
   // 生产路径的接线面（真 DB 触发行 / span status / 流水 reason）在
   // `execution/serial.a2a-memory-gate.test.ts`，本处只钉这两个纯函数。
@@ -1252,26 +1253,42 @@ describe('memory', () => {
       else process.env.MEMORY_A2A_ENABLED = saved
     })
 
-    it('默认关（未设置 / 空串 / "0" / "false" 都关），"1" 与 "true" 都开', () => {
+    // ⚠️ 断言方向：谓词语义 = **是否应当跳过**（不是「env 开没开」）。F3 折进总开关
+    // 合取项后这两件事不再等价，故函数跟着改名 `isA2aMemoryEnabled` → `shouldSkipA2aMemory`
+    // ——留着旧名 + 旧读法会让调用点的 `!` 变成一个读反的哑弹。
+    it('总开关开时：未设置 / 空串 / "0" / "false" / 认不出的值 → 跳过；"1"/"true"/"True" → 放行', () => {
       delete process.env.MEMORY_A2A_ENABLED
-      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
       process.env.MEMORY_A2A_ENABLED = ''
-      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
       process.env.MEMORY_A2A_ENABLED = '0'
-      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
       process.env.MEMORY_A2A_ENABLED = 'false'
-      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
-      process.env.MEMORY_A2A_ENABLED = '1'
-      expect(memoryModule.isA2aMemoryEnabled()).toBe(true)
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
       // F2：同块的 `MEMORY_ENABLED` 写作 `true`，两种真值拼法都收（大小写不敏感）
-      // ——只认 '1' 会把 `=true` 静默读成「关」。
+      // ——只认 '1' 会把 `=true` 静默读成「关」（= 继续跳过，写的人以为门开了）。
+      process.env.MEMORY_A2A_ENABLED = '1'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
       process.env.MEMORY_A2A_ENABLED = 'true'
-      expect(memoryModule.isA2aMemoryEnabled()).toBe(true)
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
       process.env.MEMORY_A2A_ENABLED = 'True'
-      expect(memoryModule.isA2aMemoryEnabled()).toBe(true)
-      // 认不出的值落默认关（fail-closed），不落「启用」
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
+      // 认不出的值落默认关（fail-closed：保持默认=跳过），不落「放行」
       process.env.MEMORY_A2A_ENABLED = 'yes'
-      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
+    })
+
+    it('F3 合取总开关：`MEMORY_ENABLED` 关时本门不生效——env 开或关都不跳过', () => {
+      // 总开关关 ⇒ 放行到正常路径，由 `retrieveMemoryContext` 第一条语句的
+      // `not-enabled` 兜底：门没决定任何事，reason 不许归给门（见函数文档注）。
+      mockIsMemoryEnabled.mockReturnValueOnce(false)
+      delete process.env.MEMORY_A2A_ENABLED
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
+
+      // env 显式开着也一样：合取项不成立就恒放行
+      mockIsMemoryEnabled.mockReturnValueOnce(false)
+      process.env.MEMORY_A2A_ENABLED = '1'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
     })
 
     it('跳过结果与其它空结果同构：reason=skipped-a2a、text 空、参数快照非 0 非 undefined', () => {

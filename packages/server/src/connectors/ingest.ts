@@ -17,6 +17,9 @@
  * （F1 审查实测：原在 serial.ts 时 `serial→flow-advance→ingest→serial` 与
  * `worktree-fanin→ingest→serial→reply→worktree-fanin`，父提交 0 环）。
  * 判据住叶模块 row.js（只有 `import type`）⇒ 谁 import 它都不成环。
+ * ⚠️ 环计数**只认增量不认绝对值**（F8）：绝对边数随检测器口径浮动（同一棵树
+ * 「排除 `*.test.ts`」309 条 /「含 `*.test.ts`」640 条，两套都对）；能复现的是
+ * 本笔引入或消除的那 ±1 条。
  * ⚠️ 本文件的**每一条** execution/* 值导入都受这条约束（取值方必须是叶或下游），
  * 加新边前先跑一遍环检测（本仓 lint 只跑 tsc，没有环守卫）。
  */

@@ -31,7 +31,7 @@ import {
   retrieveMemoryContext,
   buildKnowledgeContext,
   currentRetrievalParams,
-  isA2aMemoryEnabled,
+  shouldSkipA2aMemory,
   skippedRetrievalResult,
   type MemoryContextResult,
 } from '../memory/index.js'
@@ -772,7 +772,10 @@ export async function runAgentReply(
   // **内部**（`memory/index.ts`），门开在调用点，改写（每条新内容一次 LLM 调用）
   // 天然一并省掉——这正是本门要拿掉的那笔 token 税。
   // 【知识库】不走此门（下方 `buildKnowledgeContext` 原样保留）。
-  const a2aMemorySkipped = triggerMsg.fromAgent && !isA2aMemoryEnabled()
+  // 判据是一个谓词而不是两个合的表达式：记忆总开关也在谓词内部合取（F3）——
+  // 总开关关时门不生效、本条走正常路径，由 `retrieveMemoryContext` 的第一条
+  // `not-enabled` 兜底（reason 与 span 都与用户触发同口径）。
+  const a2aMemorySkipped = triggerMsg.fromAgent && shouldSkipA2aMemory()
   let memoryResult: MemoryContextResult | null = null
   let memoryTimeout = false
   if (a2aMemorySkipped) {

@@ -119,7 +119,8 @@ export interface RetrievalEventInput {
    */
   paramPoolN: number | null
   /** 值域 **10**（模块 8 枚举 + `timeout` + `error`，见 P2 §二③；第 8 个是 T-1 的
-   *  `skipped-a2a`——a2a 触发且 `MEMORY_A2A_ENABLED` 关，压根没检索） */
+   *  `skipped-a2a`——a2a 触发、**记忆总开关开**、且 `MEMORY_A2A_ENABLED` 关，压根没检索。
+   *  总开关关时**不用**本档：那时门没决定任何事，一律 `not-enabled`） */
   reason: string
   retrievalMs: number | null
   contextTokens: number | null

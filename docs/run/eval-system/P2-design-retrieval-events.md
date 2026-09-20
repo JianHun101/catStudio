@@ -67,9 +67,9 @@ reply.ts:667    reason: memoryTimeout ? 'timeout' : (memoryResult?.reason ?? 'er
 这条不是文字问题：**超时那一次检索恰是最该记录的一次**（检索最慢），而它发生时 `memoryResult === null`——若 R1 照初版只写 `memoryResult.reason`，超时路径要么写 NULL 要么抛。R1 必须照抄 `reply.ts:667` 的三元式取 reason。
 
 > **【2026-09-20 订正·T-1 `a2a-memory-gate`】** 上文「**值域是 9**」是 P2 当轮的读数，
-> 记录保留不动；**当前值域是 10**——记忆模块新增第 8 个枚举 `skipped-a2a`（a2a 触发
-> 且 `MEMORY_A2A_ENABLED` 关 ⇒ 压根没检索，`execution/reply.ts` 的门在调用点、
-> `rewriteRetrievalQueries` 一并跳过）。**推导规则未变**：落台账的 reason = 模块枚举
+> 记录保留不动；**当前值域是 10**——记忆模块新增第 8 个枚举 `skipped-a2a`（a2a 触发、
+> **记忆总开关开**、且 `MEMORY_A2A_ENABLED` 关 ⇒ 压根没检索，`execution/reply.ts` 的门在
+> 调用点、`rewriteRetrievalQueries` 一并跳过）。**推导规则未变**：落台账的 reason = 模块枚举
 >
 > - `timeout` + `error`，只是模块枚举由 7 变 8。下游两处读数已同步：
 >   `db/repository/retrievalEvents.ts` 的 `reason` 列注释、`execution/reply.ts`

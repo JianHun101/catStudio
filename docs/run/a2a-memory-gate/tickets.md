@@ -20,10 +20,15 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
 
 1. **判据唯一**：`triggerMsg.fromAgent`，来源 = DB `messages.role === 'agent'`。
    **禁止**用 `authorName` 真值推断（该字段被 `resolveRolePlaceholders` 复用，语义会漂）。
-2. **门控行为**：`fromAgent && !MEMORY_A2A_ENABLED` → 跳过检索 + 跳过改写，不写索引。
-3. **不许静默**：跳过必须留痕——`retrieval_events` 落一行 `reason='skipped-a2a'`，
+2. **门控行为**：`fromAgent && shouldSkipA2aMemory()` → 跳过检索 + 跳过改写，不写索引。
+   ⚠️ **F3 裁决修订（店长，第③轮）**：谓词内**合取记忆总开关**——`MEMORY_ENABLED` 关时
+   本门**不生效**（放行给模块自己的 `not-enabled`）。原式 `fromAgent && !MEMORY_A2A_ENABLED`
+   在总开关关时同样成立，会把「这段 prompt 为什么没有记忆」归给一条**没起作用的闸**。
+3. **不许静默**：跳过必须留痕——`retrieval_events` 落一行 `reason='skipped-a2a'`
+   （**仅在总开关为开时使用**；总开关关时一律 `not-enabled`，与用户触发同口径），
    结果形状与其它空结果同构。`retrieval_events.reason` 是 `TEXT NOT NULL` 无 CHECK ⇒ 零迁移。
-4. **span 不许撒谎**：`memory.retrieval` 段 status 必须是 `'skipped'`（不许 `'ok'`／`'error'`）。
+4. **span 不许撒谎**：`memory.retrieval` 段 status 必须是 `'skipped'`（不许 `'ok'`／`'error'`）；
+   总开关关时本门不生效，status 落 `'ok'`——那**不是**谎：`not-enabled` 那条路径真的跑过。
 5. **不加签名参数**：`retrieveMemoryContext` / `buildKnowledgeContext` 签名不动。
 
 ## 三、边界（Out of Scope）
@@ -33,26 +38,26 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
 
 ## 四、改动文件（本分支实测行号）
 
-| 文件                                                 | 改动                                                                                                                |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `execution/serial.ts::158-188`                       | `AgentTriggerMsg` 加 `fromAgent: boolean`（**必填**）                                                               |
-| ~~`execution/serial.ts::190`~~ → `execution/row.ts`  | 新增并导出**唯一判据** `isAgentAuthoredTrigger(role)`（**F1 后搬家**，见 §十）                                      |
-| `execution/serial.ts::321-337`                       | `buildTriggerMsg` 填 `fromAgent: isAgentAuthoredTrigger(triggerRow?.role)`                                          |
-| `execution/serial.ts::435-452`                       | `drainQueuedCommand` 的 `queuedTrigger` 同判据填值（**第二权威构造点**，见 §五）                                    |
-| `execution/serial.ts::1141`                          | A2A 递归 `{ ...agentTrigger, authorName, fromAgent: true }`（类型完整性，非判据）                                   |
-| `execution/reply.ts::302`                            | `runAgentReply` 内联 `triggerMsg` 形状加 `fromAgent: boolean`（必填）                                               |
-| `execution/reply.ts::206` / `:766`                   | 值域注释 9 → **10**；「六种 reason」→ **七种**                                                                      |
-| `execution/reply.ts::770-812`                        | a2a 门 + 跳过走同套 span/落库/日志                                                                                  |
-| `execution/recovery.ts::102` / `:362` / `:509`       | `executeAgentsSerial` 入参补 `fromAgent`（类型必填所致，非判据面）                                                  |
-| `connectors/ingest.ts::301` / `:400`                 | 同上（`msg.role` 恒 `'user'` ⇒ 恒 false）                                                                           |
-| `db/repository/retrievalEvents.ts::121`              | `reason` 列注释值域 9 → **10**                                                                                      |
-| `memory/index.ts::105` / `:244` / `:258`             | 枚举加 `'skipped-a2a'`；新增导出 `isA2aMemoryEnabled()` / `skippedRetrievalResult()`                                |
-| `.env.example`                                       | 加 `MEMORY_A2A_ENABLED`（默认**关**；读法订正为 `1`/`true` 两种拼法——F2，见 §十）                                   |
-| `docs/run/eval-system/P2-design-retrieval-events.md` | 值域复述订正（保留 P2 历史读数 + 加 2026-09-20 订正注）                                                             |
-| 11 个 `.test.ts` 的 `memory/index.js` partial 替身   | 补镜像两个新导出（否则 `fromAgent:true` 时调用点 TypeError）                                                        |
-| 88 个测试 `triggerMsg` 字面量                        | 补 `fromAgent: false`（验收 9）                                                                                     |
-| **新增** `execution/serial.a2a-memory-gate.test.ts`  | **八**条用例：门开合、span status、流水 reason、参数快照、知识库不受波及、drain 构造点（第 8 条为 F4 补网，见 §十） |
-| **新增** `memory/index.test.ts` 末段                 | `MEMORY_A2A_ENABLED` 读法矩阵 + 跳过结果形状                                                                        |
+| 文件                                                 | 改动                                                                                                                                                      |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `execution/serial.ts::158-188`                       | `AgentTriggerMsg` 加 `fromAgent: boolean`（**必填**）                                                                                                     |
+| ~~`execution/serial.ts::190`~~ → `execution/row.ts`  | 新增并导出**唯一判据** `isAgentAuthoredTrigger(role)`（**F1 后搬家**，见 §十）                                                                            |
+| `execution/serial.ts::321-337`                       | `buildTriggerMsg` 填 `fromAgent: isAgentAuthoredTrigger(triggerRow?.role)`                                                                                |
+| `execution/serial.ts::435-452`                       | `drainQueuedCommand` 的 `queuedTrigger` 同判据填值（**第二权威构造点**，见 §五）                                                                          |
+| `execution/serial.ts::1133`                          | A2A 递归 `{ ...agentTrigger, authorName, fromAgent: true }`（类型完整性，非判据）——**F5 订正**：原写 `:1141`，实测 `:1133`（`grep -n "fromAgent: true"`） |
+| `execution/reply.ts::302`                            | `runAgentReply` 内联 `triggerMsg` 形状加 `fromAgent: boolean`（必填）                                                                                     |
+| `execution/reply.ts::206` / `:766`                   | 值域注释 9 → **10**；「六种 reason」→ **七种**                                                                                                            |
+| `execution/reply.ts::769-820`                        | a2a 门 + 跳过走同套 span/落库/日志（F3 后门条件行 `:778`）                                                                                                |
+| `execution/recovery.ts::102` / `:362` / `:509`       | `executeAgentsSerial` 入参补 `fromAgent`（类型必填所致，非判据面）                                                                                        |
+| `connectors/ingest.ts::301` / `:400`                 | 同上（`msg.role` 恒 `'user'` ⇒ 恒 false）                                                                                                                 |
+| `db/repository/retrievalEvents.ts::121`              | `reason` 列注释值域 9 → **10**                                                                                                                            |
+| `memory/index.ts::106` / `:266` / `:283`             | 枚举加 `'skipped-a2a'`；新增导出 `shouldSkipA2aMemory()`（F3 后由 `isA2aMemoryEnabled` **改名**并折入总开关合取项）/ `skippedRetrievalResult()`           |
+| `.env.example`                                       | 加 `MEMORY_A2A_ENABLED`（默认**关**；读法订正为 `1`/`true` 两种拼法——F2，见 §十）                                                                         |
+| `docs/run/eval-system/P2-design-retrieval-events.md` | 值域复述订正（保留 P2 历史读数 + 加 2026-09-20 订正注）                                                                                                   |
+| 11 个 `.test.ts` 的 `memory/index.js` partial 替身   | 补镜像两个新导出（否则 `fromAgent:true` 时调用点 TypeError）；F3 后随改名把 `isA2aMemoryEnabled:` 键改 `shouldSkipA2aMemory:`（值仍 `false`＝永不跳过）   |
+| 88 个测试 `triggerMsg` 字面量                        | 补 `fromAgent: false`（验收 9）                                                                                                                           |
+| **新增** `execution/serial.a2a-memory-gate.test.ts`  | **九**条用例：门开合、span status、流水 reason、参数快照、知识库不受波及、drain 构造点（第 8 条为 F4 补网）、总开关合取（第 9 条为 F3）——见 §十           |
+| **新增** `memory/index.test.ts` 末段                 | `MEMORY_A2A_ENABLED` 读法矩阵（F3 后含**合取面**：总开关关 ⇒ 恒不跳过）+ 跳过结果形状                                                                     |
 
 ## 五、越出票面的两处（均为类型必填的机械后果，非契约变更）
 
@@ -97,7 +102,7 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
 | 5   | 跳过时改写零调用                              | 同文件 验收 1/5（真 `retrieveMemoryContext` + 改写器替身）                                                                                                                                                  |
 | 6   | `buildTriggerMsg` 真 DB 行判据                | **改为经引擎实测**（真落 `role='agent'` / `'user'` 行 → 观察门开合），比直测映射更强；见 §八 偏差 1                                                                                                         |
 | 7   | 扫复述文本                                    | 见 §四 最后三行；另扫到 `scripts/eval/retrieval-baseline.mjs` 的 `LEGIT_EMPTY_REASONS`——**刻意不改**（`skipped-a2a` 不由 `runRetrievalChain` 产出，进不了那条路径；改白名单反而削弱其「值域外即拒」的设计） |
-| 8   | `pnpm test` + `pnpm lint` 全绿                | 笔①（`c94eac8`）151 文件 / **3273** 用例全过；**返工后 `e09bf20` 151 文件 / 3274 用例全过**（+1 = F4 新用例，读取数见 §十）；lint 三包全过                                                                  |
+| 8   | `pnpm test` + `pnpm lint` 全绿                | 笔①（`c94eac8`）151 文件 / **3273** 用例全过；返工后 `e09bf20` 151 / **3274**（+1 = F4 新用例）；**第③轮 151 / 3276 全过**（+2 = F3 新用例 + 读法矩阵拆两条）；lint 三包全过，读数见 §十/§十一              |
 | 9   | 字面量补 `fromAgent: false`，字段不降级为可选 | 88 处补值；字段在 `AgentTriggerMsg` 与 reply 内联形状**两处均为必填**                                                                                                                                       |
 
 ## 八、实施偏差与真空性对照
@@ -106,9 +111,17 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
    未导出（导出要动模块公开面），而经引擎实测覆盖的是**整条生产路径**（DB 行 → 反查 →
    门 → span/流水），严格强于直测映射。同时保留一条反向对照：入参 `fromAgent` 恒 `false`
    而 DB 行 `role='agent'` ⇒ 若实现改成读入参，该用例当场变红。
-2. **真空性反对照（已实测，非断言）**：把门临时改成恒 `false` 后重跑，新文件 **7 过 4 红**
-   —— 红的正是验收 1/4/契约 3/验收 6 四条，绿的正是用户侧 / env 开 / 知识库三条。探针
-   非恒绿。改回后 7/7 全过。
+2. **真空性反对照（已实测，非断言）**——**三轮读数，别把旧数当现值**：
+   - **初版（7 用例）**：把门临时改成恒 `false` 后重跑 ⇒ **7 过 4 红**，红的正是验收 1/4、
+     契约 3、验收 6 四条，绿的正是用户侧 / env 开 / 知识库三条。
+   - **F4 后（8 用例）**：同探针 ⇒ **5 红 3 绿**（F4 那条也在门内，多加一条红的）。
+     ⚠️ **F6 订正**：本段原写「7 过 4 红」是 F4 **之前**的旧读数，已按实测改写。
+   - **F3 后（9 用例，本轮）**：两个方向各打一次——
+     · **探针 A（合取项写死）**：摘掉 `if (!isMemoryEnabled()) return false` ⇒ **1 红 8 绿**，
+     红的恰是新增的 F3 用例（`expected 'skipped-a2a' to be 'not-enabled'`）；
+     · **探针 B（门恒放行）**：`if (true) return false` ⇒ **5 红 4 绿**，红的是门内五条
+     （验收 1/5、验收 4、契约 3、验收 6、F4），绿的含 F3 那条（门死了它本就该绿）。
+     两向都既非恒绿也非恒红。探针撤销后 **9/9 全过**。
 3. **`skippedRetrievalResult()` 的 `retrievalMs` 取 0**（非调用点实测耗时）：那是「检索跑了
    多久」的读数，而这次没有跑；填真实微秒数会把「跳过」渲染成「极快的一次检索」。
    span `duration_ms` 与 `retrieval_events.retrieval_ms` 因此同源为 0（双写同源不破）。
@@ -123,6 +136,12 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
   本猫不自行改。
 - **OQ-2**：`skipped-a2a` 落进 `retrieval_events` 后，`episodeStats` / 看板类消费面若按
   `reason` 分组统计，需要把这一档与「空手而归」分开读（本单未动任何消费面）。
+- **OQ-3（原审查 F7）· 挂账**：审查报的预存 flake，与本笔无关；只观测到 n=2，**不外推比例**
+  （明细见审查回执）。店长裁「挂账」——不在本笔修、也不并票。
+- **OQ-4（原审查 F9）· 立后续票**：把模块环检测做成**守卫**（`pnpm lint` 内联环检测，或独立
+  脚本进 CI）。理由已被本票自己证明：一条新 `import` 就能破掉手维的 0 环基线，而本仓 lint
+  只跑 tsc、**没有环守卫**，破了没人报警。它是独立改动（lint + 检测器脚本），店长裁
+  「不塞进本笔」——立后续票。
 
 ## 十、审查返工（吐槽猫 ⚠️，F1–F4 逐条处置）
 
@@ -198,3 +217,78 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
 探针 2（写死 `true`）红在对照组（`expected 'skipped-a2a' not to be 'skipped-a2a'`），
 7 绿 1 红、两侧各中一次。**教训**：写了「两半都断」就**必须两半各探一次**——
 只探一半的探针会把「对照组走的是另一条路径」这种结构性空转放行。
+
+---
+
+## 十一、第③轮返工（店长裁决 F3 = **改**；附带 F5/F6/F8 文档订正）
+
+### F3（**已改**）· 契约 3 修订：`skipped-a2a` 仅在总开关为开时使用
+
+**店长实核的两条**（抄进票单，免得后来者重新论证一遍）：
+
+1. `retrieveMemoryContext` 的 `if (!isMemoryEnabled()) return empty('not-enabled')` 是**第一条**
+   语句，改写器调用在其后 ⇒ 「总开关关时放行到正常路径」是**零成本落空**（不 spawn sidecar、
+   不打 LLM），不是多跑一趟检索。
+2. `packages/server/vitest.config.ts:43` 全 server 测试 project 的 `test.env.MEMORY_ENABLED = 'false'`
+   ——这恰好解释了为什么此前 8 条用例能测出一条「永不触发的门」：门当时根本不看总开关。
+   **测试环境默认值正落在 F3 的错配区间里，用例绿不代表生产口径对。**
+
+**实现（零新模块边、零新 export）**：合取项折进模块**已导出**的谓词内部，调用点
+`reply.ts` 的 import 列表一个字不加。
+
+- `isA2aMemoryEnabled` → **改名** `shouldSkipA2aMemory`，语义从「env 开没开」变成「是否应当
+  跳过」。**为什么必须改名**：折进合取项后这两件事不再等价，留旧名 + 调用点的 `!` 会变成
+  一个**读反的哑弹**（总开关关时它返回 `true`，读作「a2a 记忆已启用」）。
+- 11 个 partial 替身随改名把键 `isA2aMemoryEnabled:` → `shouldSkipA2aMemory:`（值仍 `false`）。
+  这是**改名**不是新增——被消费导出数仍是 2，镜像面没有变长。
+
+**测试**：
+
+- 门控用例**显式** `MEMORY_ENABLED='true'`（`beforeEach`，`afterEach` 还原）；同时把
+  `memory/embedding.js` 替身的 `isMemoryEnabled` 从恒 `true` 改成**按 env 委托**（逐字同款
+  `EmbeddingClient.isEnabled()`）——否则「显式打开总开关」只是一句装饰，恒 `true` 的替身会
+  让 F3 用例变成**第二条永不触发的门**。
+- 新增第 9 条用例（`F3 · 总开关关 + a2a → not-enabled`）：判据组（a2a 轮）与对照组（同轮
+  用户侧）**同打**，让「与用户触发同口径」可证伪；并断言 `param_top_k` 非 null——走正常
+  路径的空结果同样不静默。
+
+### F5 / F6 / F8 文档订正（并入本轮）
+
+- **F5**：§四 `serial.ts::1141` → 实测 **`:1133`**（`grep -n "fromAgent: true"`；当前 `:1141`
+  是一句无关的注释文本——正是「行号未复核」的典型残留）。§四表格中随 F3 漂移的行号一并按
+  `grep -n` 实测重取：`reply.ts::769-820`（门条件行 `:778`）、`memory/index.ts::106/:266/:283`。
+- **F6**：§八.2 的「7 过 4 红」是 F4 **之前**的旧读数 → 已改为三轮读数（见 §八.2）。
+- **F8**：`row.ts` / `ingest.ts` 的断环注补「**绝对边数随检测器口径浮动，承重读数是增量**」
+  ——本轮同一棵树两套口径实测：**含 `*.test.ts`** 640 / 647 条边，**排除 `*.test.ts`**
+  309 / 310 条边（后者与审查者读数逐字一致）。绝对数不同不是分歧，**增量一致才是**。
+
+### 第③轮环检测器四版对照（自写检测器；排除测试口径 = 审查者口径）
+
+| 版本                      | 值导入边 | SCC(>1)                                                                  |
+| ------------------------- | -------- | ------------------------------------------------------------------------ |
+| 父 `4fc7a5f`              | 309      | 0                                                                        |
+| 被审 `c94eac8`（F1 未修） | 310      | **1 个 5 节点**（`ingest, flow-advance, reply, serial, worktree-fanin`） |
+| 上一轮返工后 `7a056e3`    | 309      | 0                                                                        |
+| **工作树（F3 修后）**     | **309**  | **0**                                                                    |
+
+`c94eac8` 那个 5 节点 SCC 的成员与审查者列的**逐字相同**，即两套检测器口径对齐的凭据。
+F3 这一笔 **边数零变化（309 → 309）**——合取项折在既有模块内部，没新增任何 import。
+
+### 第③轮验收对账（店长派活单七条）
+
+| #   | 验收                                                                  | 读数                                                                                                      |
+| --- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| ①   | 总开关关 + a2a → `not-enabled`（新用例）                              | ✅ 新第 9 条用例判据组；`retrievalEvent.reason === 'not-enabled'`、span `'ok'`                            |
+| ②   | 总开关开 + a2a + env 关 → `skipped-a2a` + span `skipped` + 改写零调用 | ✅ 既有三条（验收 1/5、验收 4、契约 3）**在显式总开关开之下**复绿（此前它们靠替身恒 `true` 蒙对）         |
+| ③   | 用户侧 / env 开 / 知识库三条不受波及                                  | ✅ 验收 2/6、验收 3、边界三条全绿                                                                         |
+| ④   | 写死探针 → 用例①红                                                    | ✅ 探针 A：**1 红 8 绿**，红的正是用例①（`expected 'skipped-a2a' to be 'not-enabled'`）                   |
+| ⑤   | 环检测器三版对照 SCC(>1) 同为 0                                       | ✅ 父 `4fc7a5f` 0 / 被审 `7a056e3` 0 / 工作树 0（另附 F1 缺陷态 `c94eac8` = 1 个 5 节点 SCC，作阳性对照） |
+| ⑥   | `pnpm test`(server) + `pnpm lint` 全绿，报总数与失败数                | ✅ 见下「自检读数」                                                                                       |
+| ⑦   | 票单订正回报**改动行号并 grep 复核**                                  | ✅ §四 三行 + F5 行号，全部 `grep -n` 实测重取（见上 F5/F6/F8 段）                                        |
+
+### 自检读数（第③轮）
+
+- `node node_modules/vitest/vitest.mjs run`（worktree 内 `pnpm test` 会被 junction 拒，
+  见既有纪律）⇒ **151 文件 / 3276 用例全过，0 失败**（较 `7a056e3` 的 3274 **+2**：
+  F3 新用例 1 条 + `memory/index.test.ts` 读法矩阵拆成两条）
+- `node scripts/lint.js` ⇒ **3 个包全过**（tsc ×2 + vue-tsc）
