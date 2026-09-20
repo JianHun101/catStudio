@@ -16,9 +16,11 @@
  * 查了就是误拦）；**不**拿 `$CATSTUDY_TRIGGER_MSG_ID` 当判据（env 只是取证提示，
  * 库才是真相源）。
  *
- * ── 五态判决（C4）────────────────────────────────────────────
- *   ① 无 `catstudy [uuid]` 标记           → 放行（merge / revert / 人工提交不受影响）
- *   ② 有标记，uuid 形状非法（非 8-4-4-4-12 小写 hex） → 阻断 exit 1（形状错 = 手打的高置信信号，无需查库）
+ * ── 五态判决（C4 / 票丁）──────────────────────────────────────
+ *   ① 无 `catstudy [uuid]` 标记；或括号里**不是标记形态**（散文 `catstudy [uuid]`、
+ *      `not-a-uuid`）                      → 放行（merge / revert / 人工提交不受影响）
+ *   ② 有标记，形状非法**但够像 uuid**（hex-dash 且 ≥16 位，非 8-4-4-4-12 小写 hex）
+ *                                         → 阻断 exit 1（长度错 / 大写 / 错分组 = 手打的高置信信号，无需查库）
  *   ③ 有标记，形状合法，两库都查无此 id     → 阻断 exit 1（本门禁要挡的那一类）
  *   ④ 两库文件都不存在                     → **放行 + 显式警示**（判据**无主体**，不是「通过」）；见下
  *   ⑤ 库存在但读取失败（加锁超时 / 表缺失） → 阻断 exit 1（判据有主体却判不动 ⇒ 查不动 ≠ 放行）
@@ -34,16 +36,27 @@
  * 逃生口 `git commit --no-verify`。**不新增第二个逃生开关**（env 白名单之类）——
  * `--no-verify` 已是本仓既有唯一出口，多开一个等于把门禁变成装饰。
  *
- * ── 形态（C1 / C6）──────────────────────────────────────────
+ * ── 形态（C1 / C6 / 票丁）─────────────────────────────────────
  * 逻辑**单源在本文件**：`.husky/commit-msg` 只是把 `$1` 转交过来的 POSIX sh 薄壳
  * （承 `pre-push` → `handoff-gen.mjs`、`post-commit` → `handoff-gen.mjs` 的既有形态）。
- * 标记提取**复用** `handoff-gen.mjs` 的 `extractCommitUuid`（有 `isMain` 守卫，
- * import 安全）——**不改**它的正则/语义，它服务投递面；严格形状校验加在本文件内。
  *
- * ⚠️ **只认小写 hex**（P3-1）：`extractCommitUuid` 的正则不含 `A-F`，message 里写
- * **大写** uuid 时它返回 `null` ⇒ 落进 ① 放行（无归属，与现状一致）。本仓 uuid 出自
- * `crypto.randomUUID()`（全小写），现实无害——但别把「形状非法 ⇒ 阻断」读成已覆盖
- * 大写。**不改**那个正则（C6）。
+ * ⚠️ **标记捕获不复用 `extractCommitUuid`**（票丁起）。C6 的「不改 `handoff-gen.mjs`
+ * 的提取器、它服务投递面」照旧成立；变的是**本门禁不再借它**。两者是**两个谓词**，
+ * 不是同一条规则的两份实现——别来「收敛」：
+ *   - `extractCommitUuid`（窄，定长 `/catstudy\s+\[([0-9a-f-]{36})\]/`）回答
+ *     「**取出一个能用的 uuid** 反查会话」，取不出就该当手动提交；
+ *   - 本门禁（宽，`MARKER_CAPTURE_RE` 抓任意候选串）回答「**有没有写标记、标记长
+ *     什么样**」——畸形标记必须**先被看见**，才谈得上判它。
+ *
+ * 复用引入的实害（票丁靶心，`0b5e9e0` 实证）：39 位畸形标记
+ * `dbb86077-de5e-4506-8f2c-6169d09dce33` 里，定长窗口只能从字面 `catstudy\s+\[`
+ * 之后起算，36 位卡在第 37 位 `e` 上而 `]` 在第 40 位 ⇒ 返回 `null` ⇒ 落 ① 放行。
+ * **它声明要抓的那类，恰是它抓不到的。**
+ *
+ * ⚠️ **大写 uuid 由「放行」翻为「阻断」**（票丁，对既有 **P3-1 的半推翻**）：P3-1
+ * 当初的取舍是「不改**共用**提取器的正则」（**范围**理由），不是「大写无害」（语义
+ * 理由）。门禁有了自己的捕获器后，大写正是它要抓的手打高置信信号 ⇒ 落 ② 阻断。
+ * 被推翻的只有「大写 ⇒ 放行」这一条结论，`handoff-gen.mjs` 一个字未动。
  *
  * ── 根解析（C3，worktree 承重）─────────────────────────────────
  * 钩子常在 worktree 内跑，而 **worktree 的 `packages/server/data/` 里没有 `.db`**
@@ -68,10 +81,28 @@ import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { defaultDbs, BUSY_TIMEOUT_MS } from './flywheel/retire-message-memory.mjs'
-import { extractCommitUuid } from './handoff-gen.mjs'
+
+/**
+ * 标记**捕获**（宽）：`catstudy [...]` 里的整段候选串，形状判断交给下一步。
+ *
+ * 与 `handoff-gen.mjs` 的 `extractCommitUuid` **不是同一条规则的两份实现**（见文件头
+ * 「形态」段）：那个要窄（取不出 = 手动提交），这个要宽（畸形也得先看见）。
+ * 捕获组取 `[^\]]+`——**不**限字符集，任何写歪的内容都留到形状判断里被判。
+ */
+export const MARKER_CAPTURE_RE = /catstudy\s+\[([^\]]+)\]/
 
 /** 严格 UUID 形状：8-4-4-4-12 **小写** hex（OQ-2 裁定：维持严；误拦面实测为空） */
 export const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/**
+ * 「够像 uuid 但形状不过」的判据（票丁新增）：**全 hex-dash 字符集且长度 ≥16**。
+ *
+ * 意义是「手打一个 uuid 却写歪了」的高置信信号——长度错（39/28 位）、大写、错分组
+ * 全落在这里 ⇒ 态 ② 阻断。阈值 16 的取法：真 uuid 36 位、最短的常见截断也远长于 16，
+ * 而散文里偶然出现的 hex-dash 串（如 `deadbeef`、`a-b-c`）够不到，故不会把
+ * 「正文顺口提了一句」误拦成阻断。**误拦面留 OQ，实测后标注。**
+ */
+export const HEX_DASH_SHAPE_RE = /^[0-9a-fA-F-]{16,}$/
 
 /** 出口给猫看的那句（C5 ②，P3-2 更正：A2A 触发的提交也合法） */
 export const UUID_ORIGIN_HINT =
@@ -170,12 +201,20 @@ function hasMessageId(dbFile, uuid) {
 export function evaluateCommitUuid(message, dbs = []) {
   const base = { ok: true, uuid: null, hit: null, candidates: dbs, dbs: [], errors: [] }
 
-  const uuid = extractCommitUuid(message)
-  // 态 ①：无标记 ⇒ 放行（含大写 uuid，见文件头 P3-1）
-  if (!uuid) return { ...base, code: 'no-marker' }
+  // 捕获走**本模块自己的**宽松正则（文件头「形态」段：复用定长提取器正是票丁靶心）
+  const captured = MARKER_CAPTURE_RE.exec(message || '')
+  // 态 ①：无标记 ⇒ 放行（merge / revert / 人工提交不受影响）
+  if (!captured) return { ...base, code: 'no-marker' }
 
-  // 态 ②：形状非法 ⇒ 阻断（不查库——形状错本身就是手打/截断的高置信信号）
-  if (!UUID_SHAPE_RE.test(uuid)) return { ...base, ok: false, code: 'bad-shape', uuid }
+  const uuid = captured[1]
+  if (!UUID_SHAPE_RE.test(uuid)) {
+    // 态 ②：够像 uuid 但形状非法 ⇒ 阻断（不查库——形状错本身就是手打/截断的高置信信号）
+    if (HEX_DASH_SHAPE_RE.test(uuid)) return { ...base, ok: false, code: 'bad-shape', uuid }
+    // 态 ①″：其余（散文 `catstudy [uuid]`、`not-a-uuid`、括号里带空格/汉字）⇒ 与「无标记」同出口。
+    // 这条**必须保持放行**：只加严会把正常提交拦死（见文件头「出口」——多开一个坑就是在
+    // 把人推向 --no-verify）。
+    return { ...base, code: 'no-marker' }
+  }
 
   const present = dbs.filter((d) => existsSync(d.file))
   // 态 ④：两库都不存在 ⇒ 放行 + 警示（判据无主体）
@@ -226,7 +265,14 @@ export function formatWarning(result) {
 export function formatBlockMessage(result) {
   // 首行带 `[commit-uuid-gate]` 前缀：放行有轨迹行、阻断有这行——两个分支都留「钩子
   // 真被 git 调起」的机器证据（B2 的取证面：手工 `sh 钩子 <file>` 不会有 git 侧输出）
-  const lines = ['', '[commit-uuid-gate] ❌ commit-msg 门禁阻断：catstudy [uuid] 校验未过', '']
+  // 首行带判决码（票丁）：放行轨迹行有状态、阻断行原先只有散文 ⇒ 真机验收探针
+  // （「认钩子自打的 `[commit-uuid-gate] bad-shape` 行」）无从下手。码是**机器证据**，
+  // 与 formatPassLine 同面；散文留给下面三行讲原因。
+  const lines = [
+    '',
+    `[commit-uuid-gate] ❌ commit-msg 门禁阻断（${result.code}）：catstudy [uuid] 校验未过`,
+    '',
+  ]
   if (result.code === 'bad-shape') {
     lines.push(`  被拒 uuid: ${result.uuid}`)
     lines.push('  原因: uuid 形状非法——要求 8-4-4-4-12 小写 hex（大写/截断/手打都不认）')
