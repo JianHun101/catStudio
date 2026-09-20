@@ -566,6 +566,52 @@ describe('docs/run 陈旧度可见性（票 G5 · 形态乙）', () => {
     }
   })
 
+  it('脚本定位：源码布局与产物布局**同解**（反对照：固定 4 层上溯在产物布局下必错）', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'g5-layout-'))
+    try {
+      // 夹具 = 一个含标记文件的「仓库根」
+      mkdirSync(resolve(fixture, 'scripts'), { recursive: true })
+      writeFileSync(resolve(fixture, 'scripts', 'run-docs-stale.mjs'), '// fixture\n', 'utf-8')
+
+      // 两种布局的模块目录深度，与真实仓一一对应：
+      //   源码  packages/server/src/llm/
+      //   产物  packages/server/dist/server/src/llm/（tsconfig rootDir:".." + outDir:"./dist"）
+      const srcDepth = resolve(fixture, 'packages', 'server', 'src', 'llm')
+      const distDepth = resolve(fixture, 'packages', 'server', 'dist', 'server', 'src', 'llm')
+      for (const d of [srcDepth, distDepth]) mkdirSync(d, { recursive: true })
+
+      const expected = resolve(fixture, 'scripts', 'run-docs-stale.mjs')
+      expect(closeout.resolveStaleScanScript(srcDepth)).toBe(expected)
+      expect(closeout.resolveStaleScanScript(distDepth)).toBe(expected)
+
+      // 反对照：旧实现（固定 4 层上溯）——**源码下确实是对的**，故缺陷是「布局相关」
+      // 而非「一直坏」；产物布局下它解析到 `packages/server/scripts/...`（不存在）。
+      const fixed4 = (d: string): string =>
+        resolve(d, '..', '..', '..', '..', 'scripts', 'run-docs-stale.mjs')
+      expect(fixed4(srcDepth)).toBe(expected)
+      expect(existsSync(fixed4(distDepth))).toBe(false)
+      expect(closeout.resolveStaleScanScript(distDepth)).not.toBe(fixed4(distDepth))
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
+  })
+
+  it('脚本定位：一路向上都无标记文件 ⇒ null（绝不猜一个路径出来）', () => {
+    const empty = mkdtempSync(join(tmpdir(), 'g5-nomarker-'))
+    try {
+      expect(closeout.resolveStaleScanScript(empty)).toBe(null)
+    } finally {
+      rmSync(empty, { recursive: true, force: true })
+    }
+  })
+
+  it('脚本定位：默认参数走 moduleDir ⇒ 真实树下解析到**存在的**真脚本', () => {
+    const p = closeout.resolveStaleScanScript()
+    expect(p, '真实源码树下必须解析得到（否则收口每次打一条永远为真的 warn）').toBeTruthy()
+    expect(existsSync(p!)).toBe(true)
+    expect(p!.endsWith(join('scripts', 'run-docs-stale.mjs'))).toBe(true)
+  })
+
   it('scanStaleRunDocs 可直调：真 spawn 真脚本，返回结构化报告（非 mock 断言）', () => {
     const r = closeout.scanStaleRunDocs(tmp)
     expect(r.ok).toBe(true)

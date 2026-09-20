@@ -32,7 +32,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '../logger.js'
 import { messageOf } from '../utils.js'
@@ -416,24 +416,51 @@ export function closeoutSession(sessionId: string): CloseoutResult {
 // `docs/run/multi-cat-isolation/adr-0015-draft.md:73/143/153/164`、
 // `docs/run/eval-system/R6-diag-inventory.md:51/114/146`、
 // `docs/run/multi-cat-isolation/report-phase-ib.md:227`、
-// `docs/run/multi-cat-isolation/tickets-t2-phase-ib.md:244`，共 12 处）。在头部插入本节
-// 的 ~95 行会把它们**整批推偏 96 行**（指针从此落进无关函数）；放末尾则零推偏。
-// 残余位移只有 **+1**：新增一行 `import { fileURLToPath } from 'node:url'`。
+// `docs/run/multi-cat-isolation/tickets-t2-phase-ib.md:244`、
+// `docs/run/docs-run-status-gate/tickets.md:47/104`、
+// `docs/run/retired-docs-tombstone/run-inventory.md:190`，共 14 行 / 7 份文件）。
+// 在头部插入本节（138 行）会连同新增那行 import 一起把它们**整批推偏 139 行**
+// （指针从此落进无关函数）；放末尾则零推偏，残余位移只有 **+1**（那行 import）。
 //
-// 调用点在前、定义在后是安全的：函数声明提升，且 `STALE_SCAN_SCRIPT` 等模块级常量
-// 在模块求值期就完成初始化，而 `closeoutSession` 只会在求值结束之后被调用。
+// 调用点在前、定义在后是安全的：函数声明提升，且本节的模块级常量在模块求值期
+// 就完成初始化，而 `closeoutSession` 只会在求值结束之后被调用。
 
-/** 陈旧窗口（天）**不在这里定**——`--days` 缺省由脚本自己持有（6，票面基线口径），
- *  调用侧不传，免得同一口径有两处声明。 */
-const STALE_SCAN_SCRIPT = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..',
-  '..',
-  'scripts',
-  'run-docs-stale.mjs'
-)
+/** 本模块所在目录。`import.meta.url` 是**模块身份**，不是 cwd 探测。 */
+const moduleDir = dirname(fileURLToPath(import.meta.url))
+
+/** 陈旧度脚本相对仓库根的路径——它同时充当「仓库根」的**存在性锚点**。 */
+const STALE_SCAN_REL = ['scripts', 'run-docs-stale.mjs'] as const
+
+/** 从 startDir 向上找**确实含有** `scripts/run-docs-stale.mjs` 的最近祖先（含自身）；
+ *  存在性即自校验，找不到返回 null——绝不猜。 */
+function findRepoRootFrom(startDir: string): string | null {
+  let dir = resolve(startDir)
+  for (;;) {
+    if (existsSync(join(dir, ...STALE_SCAN_REL))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
+/**
+ * 定位陈旧度脚本的绝对路径；找不到返回 null（调用方收敛成 `{ok:false}` 打一条 warn）。
+ *
+ * **为什么不是固定层级**（原实现的缺陷）：源码与构建产物深度**不同**——
+ * `packages/server/tsconfig.json` 是 `rootDir: ".."` + `outDir: "./dist"` ⇒ 产物落在
+ * `packages/server/dist/server/src/llm/`（`package.json` 的 `start`
+ * `node dist/server/src/index.js` 印证这条），比 `src/llm/` **深两层**。固定 4 层上溯
+ * 在源码布局下对、在产物布局下解析出 `packages/server/scripts/run-docs-stale.mjs`
+ * （不存在）⇒ spawn 必 ENOENT ⇒ 每次收口打一条永远为真的 warn，可见性功能全灭。
+ * **存在性锚定的向上找对两种布局都成立**（`execution/review-fallback.ts:81` 与
+ * `routes/skills.ts:58` 是同一形状的仓内先例，各自锚自己的标记文件）。
+ *
+ * `startDir` 可注入**只为测试直接喂两种布局的深度**；生产走默认值。
+ */
+export function resolveStaleScanScript(startDir: string = moduleDir): string | null {
+  const root = findRepoRootFrom(startDir)
+  return root === null ? null : join(root, ...STALE_SCAN_REL)
+}
 
 /** 扫描超时。可见性工具**宁可少报也不拖住收口**：过期就降级成 warn 继续跑。 */
 const STALE_SCAN_TIMEOUT_MS = 10_000
@@ -477,13 +504,18 @@ function execFailureOf(err: unknown): string {
  * 跑一遍 `docs/run` 陈旧度盘点。**一切失败都收敛成 `{ok:false}`，绝不抛**——
  * 脚本缺失 / 非零退出 / 超时 / stdout 不是 JSON，对调用方是**同一种**结局（打 warn）。
  *
- * 位置的分工是刻意的：**工具跟着代码走**（`import.meta.url` 所在的仓库），
+ * 位置的分工是刻意的：**工具跟着代码走**（`import.meta.url` 所在的检出，经
+ * `resolveStaleScanScript()` 存在性向上找——源码/产物两种布局同解），
  * **数据跟着 mainRoot 走**（`--root`）。生产下两者同仓；分开写则夹具仓库不必自带
  * 一份脚本副本，测到的就是**真脚本**（见 `session-closeout.test.ts`）。
  */
 export function scanStaleRunDocs(mainRoot: string): StaleRunDocsResult {
+  const script = resolveStaleScanScript()
+  if (script === null) {
+    return { ok: false, error: `未找到 ${STALE_SCAN_REL.join('/')}（自 ${moduleDir} 向上找）` }
+  }
   try {
-    const stdout = execFileSync(process.execPath, [STALE_SCAN_SCRIPT, '--root', mainRoot], {
+    const stdout = execFileSync(process.execPath, [script, '--root', mainRoot], {
       cwd: mainRoot,
       encoding: 'utf8',
       timeout: STALE_SCAN_TIMEOUT_MS,
