@@ -122,12 +122,16 @@ describe('agent system prompts', () => {
     expect(IRON_LAWS_CODER).toContain('重启审批')
   })
 
-  it('T2 铁律层承载——出口检查段含「未结束必须产出结构化投递信号」（硬信号，非软思考）', () => {
+  it('T2 铁律层承载——出口检查段含「必须把三项投出去」（收尾判断，非正文产出）', () => {
     // 承载物=铁律层出口检查段（ADR 0014 用户拍板取代「结尾思考」软触发）：流程未结束
-    // 必须产出结构化投递信号 {targets,intent,ref} → post_message/行首 @。触发锚点从 skill
-    //（软、字面死）迁移到铁律层（硬、可解析、每回复在场）。
-    expect(COMMON_IRON_LAWS).toContain('未结束必须产出结构化投递信号')
-    expect(COMMON_IRON_LAWS).toContain('{targets, intent, ref}')
+    // 必须把三项（投给谁/要它做什么/凭什么定位）投出去 → post_message/行首 @。触发锚点从 skill
+    //（软、字面死）迁移到铁律层（硬、每回复在场）。
+    // 2026-09-20 修正（票甲）：旧文案把信号形状 {targets,intent,ref} 教成「正文产出物」——
+    // 猫在正文里写信号块而不实际投递，且该形状在回复正文里全仓零消费者。改为三项「决定」
+    // + 反面句（写了没投=等于没投），断言随之改钉新语义（旧字面两条已删）。
+    expect(COMMON_IRON_LAWS).toContain('必须把三项投出去')
+    expect(COMMON_IRON_LAWS).toContain('不是正文产出')
+    expect(COMMON_IRON_LAWS).toContain('等于没投')
     expect(COMMON_IRON_LAWS).toContain('post_message')
     expect(COMMON_IRON_LAWS).toContain('commit_sha')
   })
@@ -158,9 +162,9 @@ describe('agent system prompts', () => {
     expect(IRON_LAWS_CODER).not.toContain('禁止直接安装')
     expect(IRON_LAWS_CODER).not.toContain('严禁声明和安装出现在同一轮回复中')
     expect(IRON_LAWS_CODER).not.toContain('禁止自行 kill 或重启 server')
-    // 「必须」在共通层放宽：单处 T2 规格强制（未结束必须产出结构化投递信号）——是
+    // 「必须」在共通层放宽：单处 T2 规格强制（必须把三项投出去）——是
     // 正向行为指令（必须做 X），非禁令堆砌；严禁/禁止/绝不 仍全查、hard 门禁仍保留
-    expect(COMMON_IRON_LAWS.split('必须').length - 1).toBe(1) // 仅一处强制信号，不堆砌
+    expect(COMMON_IRON_LAWS.split('必须').length - 1).toBe(1) // 仅一处强制，不堆砌
     expect(COMMON_IRON_LAWS).not.toContain('严禁')
     expect(COMMON_IRON_LAWS).not.toContain('禁止')
     expect(COMMON_IRON_LAWS).not.toContain('绝不') // 硬性门禁在 CODER_DUTIES（Worktree 段），不在共通层
