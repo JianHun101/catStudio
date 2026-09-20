@@ -25,19 +25,18 @@
 | ------------------------------ | ---------- | ----------------------------------------- |
 | [Node.js](https://nodejs.org/) | >= 22.18.0 | ✅                                        |
 | [pnpm](https://pnpm.io/)       | >= 8       | ✅                                        |
-| `opencode` CLI                 | 最新       | ✅ 演示角色的默认 provider（5 个里 4 个） |
-| Claude Code CLI / Codex CLI    | 最新       | ❌ 仅使用对应 provider 适配器时需要       |
+| Claude Code CLI                | 最新       | ✅ 演示角色的默认 provider（5 个里 4 个） |
+| Codex CLI                      | 最新       | ❌ 仅使用对应 provider 适配器时需要       |
 
-> `opencode` 是**外部 CLI**，不在 `package.json` 依赖里（`pnpm install` 不会装它），需按下一条命令单独安装并本地登录。
+> Claude Code CLI 是**外部 CLI**，不在 `package.json` 依赖里（`pnpm install` 不会装它），需按下一条命令单独安装。
 
 ```bash
 node --version  # 确认 >= 22.18.0
 pnpm install
 
-npm i -g opencode-ai       # 演示角色默认走 opencode CLI（若尚未安装）
-opencode auth login        # 登录 opencode（若尚未登录）
+npm i -g @anthropic-ai/claude-code   # 演示角色默认走 Claude Code CLI（若尚未安装）
 
-export DS_KEY="sk-..."     # 可选：dsh 试点猫 / 摘要与交接 / 记忆查询改写共用（Git Bash）
+export DS_KEY="sk-..."     # 必填：消费方与不填的后果见 .env.example（Git Bash）
 #   set DS_KEY=sk-...            # Windows CMD
 #   $env:DS_KEY="sk-..."         # PowerShell
 
@@ -45,7 +44,7 @@ pnpm seed   # 灌种子数据（5 个演示角色 + 1 个演示会话）
 pnpm dev    # 启动 server :3200 + web :5173
 ```
 
-> **演示角色的默认供应商是 opencode**：店长 / ds猫 / flash猫 / 吐槽猫 的 `llmProvider` 都是 `opencode`（模型 `opencode-go/deepseek-v4-flash`，走 opencode Go 订阅）；只有 dsh猫 用 `dsh`。`DS_KEY` 与「用哪个 provider」无关——它是 dsh 试点猫的 key（留空则走本地凭证兜底）、摘要 / 交接模型的 key（`SUMMARY_API_KEY` 默认复用它）和记忆查询改写的 key。想换成别的供应商，在界面的 agent 设置里改「供应商」下拉即可——适配器共 7 个，见下「技术栈」。
+> **演示角色的默认供应商是 claude**：店长 / ds猫 / flash猫 / 吐槽猫 的 `llmProvider` 都是 `claude`（模型 `deepseek-flash`），经 Claude Code CLI 打 DeepSeek 的 Anthropic 兼容端点（`llm/claude.ts` 向子进程注入 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`）；只有 dsh猫 用 `dsh`。所以 `DS_KEY` 是**必填**——不填时这 4 个角色会被 no-key 守卫拦下（界面提示「还没有配置 API Key」），不是静默降级。想换成别的供应商，在界面的 agent 设置里改「供应商」下拉即可——适配器共 7 个，见下「技术栈」。
 
 浏览器打开 **http://localhost:5173**，后端在 3200。Vite 端口被占用时自动切换 5174、5175。
 
@@ -101,16 +100,16 @@ pnpm dev    # 启动 server :3200 + web :5173
 
 全部环境变量与默认值见 [`.env.example`](./.env.example)（含逐项注释）。最常用的几项：
 
-| 变量                     | 默认值                     | 说明                                                                                 |
-| ------------------------ | -------------------------- | ------------------------------------------------------------------------------------ |
-| `DS_KEY`                 | —                          | DeepSeek API Key，可选。dsh 试点猫 / 摘要与交接 / 记忆查询改写共用；不填时后两者降级 |
-| `PORT` / `HOST`          | `3200` / `127.0.0.1`       | Server 监听端口与地址                                                                |
-| `LOG_LEVEL`              | `info`                     | `debug` / `info` / `warn` / `error`                                                  |
-| `MEMORY_ENABLED`         | `true`                     | 是否启用向量记忆                                                                     |
-| `MEMORY_EMBEDDING_MODEL` | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型                                                                         |
-| `HANDOFF_THRESHOLD`      | `0.9`                      | 上下文占比达此值触发会话交接                                                         |
-| `ONEBOT_ENABLED`         | `false`                    | 是否启用 QQ 接入                                                                     |
-| `AGENT_HARD_TIMEOUT_MS`  | `1800000`                  | 单次执行硬超时（毫秒，30 分钟）                                                      |
+| 变量                     | 默认值                     | 说明                                                                              |
+| ------------------------ | -------------------------- | --------------------------------------------------------------------------------- |
+| `DS_KEY`                 | —                          | DeepSeek API Key，**必填**。消费方与不填的后果见 [`.env.example`](./.env.example) |
+| `PORT` / `HOST`          | `3200` / `127.0.0.1`       | Server 监听端口与地址                                                             |
+| `LOG_LEVEL`              | `info`                     | `debug` / `info` / `warn` / `error`                                               |
+| `MEMORY_ENABLED`         | `true`                     | 是否启用向量记忆                                                                  |
+| `MEMORY_EMBEDDING_MODEL` | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型                                                                      |
+| `HANDOFF_THRESHOLD`      | `0.9`                      | 上下文占比达此值触发会话交接                                                      |
+| `ONEBOT_ENABLED`         | `false`                    | 是否启用 QQ 接入                                                                  |
+| `AGENT_HARD_TIMEOUT_MS`  | `1800000`                  | 单次执行硬超时（毫秒，30 分钟）                                                   |
 
 ## 文档地图
 
