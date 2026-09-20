@@ -29,7 +29,8 @@
 # 根解析取主仓库（worktree 内 packages/server/data/ 没有 .db），逻辑同源在 JS 侧。
 #
 # `--disable-warning=ExperimentalWarning`：脚本要用 node:sqlite（实验特性）查库，不压掉
-# 的话**每次提交**都先刷两行 ExperimentalWarning。Node ≥ 22.5 才有 node:sqlite，该 flag
-# 同代可用（本仓无 engines 约束，但功能本身已把下限钉在 22.5）。
+# 的话**每次提交**都先刷两行 ExperimentalWarning。node:sqlite 自 Node 22.5 起就有，该 flag
+# 同代可用；本仓下限 Node ≥ 22.18.0（`package.json` 的 `engines.node`，由「裸 node 直跑 .ts
+# 的类型剥离」决定，高于 22.5）⇒ 该 flag 在受支持版本上必然可用。
 set -e
 node --disable-warning=ExperimentalWarning scripts/commit-uuid-gate.mjs "$1"

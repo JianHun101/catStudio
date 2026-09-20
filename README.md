@@ -6,18 +6,18 @@
 
 ## 前置依赖
 
-| 依赖                           | 版本要求 | 用途                     | 必需？                      |
-| ------------------------------ | -------- | ------------------------ | --------------------------- |
-| [Node.js](https://nodejs.org/) | >= 20    | 运行时                   | ✅                          |
-| [pnpm](https://pnpm.io/)       | >= 8     | 包管理 + monorepo        | ✅                          |
-| Claude Code CLI                | 最新     | `claude` provider 适配器 | ❌ 仅使用该 provider 时需要 |
-| Codex CLI + codex-proxy        | 最新     | `openai` provider 适配器 | ❌ 仅使用该 provider 时需要 |
+| 依赖                           | 版本要求   | 用途                     | 必需？                      |
+| ------------------------------ | ---------- | ------------------------ | --------------------------- |
+| [Node.js](https://nodejs.org/) | >= 22.18.0 | 运行时                   | ✅                          |
+| [pnpm](https://pnpm.io/)       | >= 8       | 包管理 + monorepo        | ✅                          |
+| Claude Code CLI                | 最新       | `claude` provider 适配器 | ❌ 仅使用该 provider 时需要 |
+| Codex CLI + codex-proxy        | 最新       | `openai` provider 适配器 | ❌ 仅使用该 provider 时需要 |
 
 ### 安装前置依赖
 
 ```bash
 # Node.js（推荐通过 nvm-windows / fnm / 官网安装）
-node --version  # 确认 >= 20
+node --version  # 确认 >= 22.18.0
 
 # pnpm
 npm install -g pnpm
@@ -400,7 +400,7 @@ pnpm test -- --reporter=verbose  # 逐条显示
 
 | 层       | 技术                                                               |
 | -------- | ------------------------------------------------------------------ |
-| 运行时   | Node.js 20+ / TypeScript 5.5                                       |
+| 运行时   | Node.js 22.18.0+ / TypeScript 5.5                                  |
 | 包管理   | pnpm workspace (monorepo)                                          |
 | 后端框架 | Fastify 5                                                          |
 | 实时通信 | Socket.IO 4                                                        |

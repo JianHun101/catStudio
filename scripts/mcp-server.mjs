@@ -35,18 +35,24 @@
  * 启动仍在「直接运行」guard 内——防御性：任何 import 场景都不挂 stdin。
  */
 
+// ⚠️ 版本守卫必须是**第一条** import：它零依赖（不拉任何 `.ts`），求值时就把
+// 「Node 太低 ⇒ MCP 工具面全哑」直说清楚，而不是让猫吃一坨 ESM loader 堆栈。
+import './node-version-guard.mjs'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
-import {
+// ⚠️ utils 必须走**动态** import，不得改回静态 —— ESM 先把**整个模块图加载完**
+// 再求值，而 utils 静态拉 `packages/shared/src/skill-catalog.ts`，`.ts` 的
+// ERR_UNKNOWN_FILE_EXTENSION 抛在**加载**阶段 ⇒ 改回静态，上面那条守卫的顶层
+// **永远轮不到执行**（接线陷阱的实测订正，A/B 对照见
+// `scripts/node-version-guard.test.js` 的「接线面」用例）。
+const {
   validateSearchParams,
   validateQueryDbParams,
   validateUserRequestParams,
   validateCreatePrParams,
   validateQuerySessionMessagesParams,
   validateReadSkillParams,
-} from './mcp-server-utils.mjs'
-import {
   TOOL_NAME,
   SEARCH_TOOL_NAME,
   QUERY_DB_TOOL_NAME,
@@ -59,7 +65,7 @@ import {
   MCP_TOOLS,
   readSkill,
   listSkills,
-} from './mcp-server-utils.mjs'
+} = await import('./mcp-server-utils.mjs')
 
 const SERVER_INFO = { name: 'catstudy', version: '0.1.0' }
 const PROTOCOL_VERSION = '2025-06-18'

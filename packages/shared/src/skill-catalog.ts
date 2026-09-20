@@ -17,7 +17,7 @@
  * **顺序即目录序**，逐字照搬自 `scripts/mcp-server-utils.mjs`（2026-09-20 搬迁，
  * 零行为变化）。
  *
- * 前 9 条 = 流程链段（顺序即链序）：wayfinder 起图 → grilling/to-spec → spec-gate →
+ * 前 9 条 = 流程链段（顺序即链序）：grilling/to-spec → spec-gate →
  * to-tickets → implement → quality-gate → request-review → receive-review，外加会话压缩
  * session-handoff（目录由交付单 B 从 handoff 重命名落地——清单先行，readSkill 读缺返回
  * 错误文本）。request-review 于 2026-09-10 回流（ADR 0014 §5 修订：post-commit hook 不再
