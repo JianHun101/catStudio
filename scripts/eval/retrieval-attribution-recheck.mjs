@@ -1849,7 +1849,10 @@ export async function main(argv = process.argv.slice(2)) {
         `这是「**它真被排到过最前**」的直接读数，比上面 ` +
         '`rank`（通道内/池内位次）硬。' +
         `⚠️ 该列只在 **post-R1-b** 窗口内可比（\`param_pool_n IS NULL\` 那段窗口里同名不同义，见 \`retrievalEvents.ts\` 的 \`paramPoolN\` 注释）` +
-        `——本锚点 ${productionFace.rows} 行里有 **${productionFace.preR1bRows} 行**在窗口之前，上格只统计窗口内 ${productionFace.finalRankWindowRows} 行。\n\n` +
+        `——本锚点 ${productionFace.rows} 行里有 **${productionFace.preR1bRows} 行**在窗口之前；` +
+        `**窗口内 ${productionFace.rows - productionFace.preR1bRows} 行里带 \`final_rank\` 值的又只有 ${productionFace.finalRankWindowRows} 行**` +
+        '（`probe` 行该列恒 NULL，只有 `source=final` 的行才有融合序名次）⇒ `finalRank0` 的**分母是这 ' +
+        `${productionFace.finalRankWindowRows} 行**，不是窗口行数。\n\n` +
         `**参数快照**：${paramLine}。最小距离 **${d}**。\n\n` +
         '⇒ **两面不矛盾，是两把尺量两件事**：黄金集面（受控复现）说「金标查询里它排不到靠前」，' +
         '生产事件面（历史流水）说「真实查询里它排到过最前、且真注入过」。' +
