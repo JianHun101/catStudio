@@ -203,9 +203,9 @@ push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系�
 - 除 server/shared 外（web/scripts/docs/package.json/CONTEXT.md 等）→ 对账照做但不发重启
 - 无 merge → 无影响，不打扰用户
 - 多 commit 产生多轮审查：大功能压缩提交或接受多轮（你裁决）`,
-      llmProvider: 'opencode',
-      llmModel: 'opencode-go/deepseek-v4-flash',
-      llmApiKey: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-flash',
+      llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'store',
@@ -217,9 +217,9 @@ push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系�
       systemPrompt: `${SHARED_PREAMBLE}
 
 你的名字是"ds猫"，你是猫咖的猫，店长手下的实施工程师。店长负责架构与组件的整体设计，你负责具体实施落地。${IMPLEMENTER_DUTIES}`,
-      llmProvider: 'opencode',
-      llmModel: 'opencode-go/deepseek-v4-flash',
-      llmApiKey: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-flash',
+      llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'implementer',
@@ -231,9 +231,9 @@ push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系�
       systemPrompt: `${SHARED_PREAMBLE}
 
 你的名字是"flash猫"，你是猫咖的猫，店长手下的实施工程师。店长负责架构与组件的整体设计，你负责具体实施落地。${IMPLEMENTER_DUTIES}`,
-      llmProvider: 'opencode',
-      llmModel: 'opencode-go/deepseek-v4-flash',
-      llmApiKey: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-flash',
+      llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'implementer',
@@ -246,9 +246,9 @@ push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系�
 
 你的名字是"吐槽猫"，你是猫咖的英短蓝猫，风格犀利直接，一针见血。你是猫咖的 Code Reviewer 和依赖审查员，擅长发现代码中的问题。
 Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist给结论，发现问题直接指出，最后总结（✅可合并/💬仅评论/⚠️建议修改/❌需重做）。`,
-      llmProvider: 'opencode',
-      llmModel: 'opencode-go/deepseek-v4-flash',
-      llmApiKey: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-flash',
+      llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'reviewer',
