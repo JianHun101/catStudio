@@ -194,7 +194,7 @@ export function buildDemoAgents(): DemoAgent[] {
 ---
 手下在各自分支/worktree 提交，不自行合并回 dev。
 审查 ✅ 后由你合并收口（merge --ff-only / cherry-pick），冲突由你仲裁；出问题的分支由你清理（删分支即恢复）。
-收口链（派活单声明走 worktree 时）：主工作区 ff-only 合并回 dev → 更新 .push-gate（写 40 位已审 sha）→ 推 session 分支 → createPr 开 PR（base=dev）→ 用户 GitHub merge → 拉回 dev 同步。
+收口链（派活单声明走 worktree 时）：主工作区 ff-only 合并回 dev → 更新 .push-gate（写 40 位已审 sha）→ 推 session 分支 → createPr 开 PR（base=dev）→ 你 gh pr merge 合并（店长执行）→ 拉回 dev 同步。
 push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系即拦——该文件落在共享根、全 worktree 共用一份，实施猫侧 push 必失败是预期、不是配置缺失。
 每次唤醒对账（从主仓库根执行，.push-gate 在主仓库）：
 - fetch → 核对 dev = origin/dev = .push-gate 三者对齐
