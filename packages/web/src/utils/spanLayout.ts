@@ -48,7 +48,7 @@ export const SEG_DOC: Record<string, string> = {
   'diff.collect': '采集本轮 commit 的 diff（5s 超时）。在关键路径上 await。',
   'reply.persist': '回复落库。写入 messages 表。',
   'git.auto_commit':
-    '顶层 auto-commit（3 次 execSync，阻塞整个事件循环）。轮次段——时间窗在根段之外。',
+    '顶层 auto-commit（同步 execSync，阻塞整个事件循环）。轮次段——时间窗在根段之外。',
 }
 
 /** 字段说明：**只讲真展示在前端的字段**（用户原话「没有展示在前端上的字段，就不用描述了」）。
