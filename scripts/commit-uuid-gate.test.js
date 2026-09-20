@@ -16,6 +16,10 @@
  *
  * 反例（票丁承重）：把 `HEX_DASH_SHAPE_RE` 那一支改回 `no-marker` ⇒ 畸形标记矩阵
  * （39 / 28 位、大写、错分组）**必红**——实施时实跑过红→绿，见交付说明。
+ *
+ * 反例（P2 承重）：把全候选扫描改回「只抓第一个候选」（`MARKER_CAPTURE_RE.exec(message)`）
+ * ⇒「全候选扫描（P2）」那组的畸形用例与净回归用例**必红**（后者旧行为是 `not-found`、
+ * 首候选实现给 `no-marker`）——实施时实跑过红→绿，见交付说明。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { spawnSync } from 'node:child_process'
@@ -51,6 +55,14 @@ const BAD_SHAPE_28 = 'dbb86077-de5e-4506-8f2c-6169d09'
 const BAD_SHAPE_UPPER = 'ABCDEF01-2345-4678-89AB-CDEF01234567'
 /** 防误拦的反对照：散文里顺口提了标记形状，**不是**在写标记 ⇒ 必须放行 */
 const PROSE_MARKER = 'docs: 说明 catstudy [uuid] 标记规则\n'
+
+/**
+ * P2 骨架：**脏候选（散文）在前、真标记在末尾**——本仓 4 笔真实 commit 的形状
+ * （`40a5b835` / `9c8853a7` / `c37f1881` / `bba06f28`，首个候选全是散文里的
+ * `catstudy [uuid]`，真标记在 message 末尾）。只抓第一个候选的实现会在这里静默放行。
+ */
+const proseThenMarker = (u) =>
+  'docs: 说明 `catstudy [uuid]` 标记规则\n\nfeat(x): 干活\n\ncatstudy [' + u + ']\n'
 
 let dir
 let seq = 0
@@ -216,6 +228,63 @@ describe('evaluateCommitUuid —— C4 五态', () => {
   })
 })
 
+// ─── P2 全候选扫描：脏候选在前时不许静默放行（审查者实证的净回归）─────────────
+
+describe('evaluateCommitUuid —— 全候选扫描（P2）', () => {
+  it('脏候选在前 + 后面是**畸形标记** → 仍阻断（票丁靶心，首个候选非畸形也不放过）', () => {
+    // 库路径故意不存在：若实现仍去查库，落点会变成 no-db 而不是 bad-shape
+    const deadDb = [{ label: 'dev', file: path.join(dir, '不存在.db') }]
+    const res = evaluateCommitUuid(proseThenMarker(BAD_SHAPE_39), deadDb)
+    expect(res.code, '脏候选在前时畸形标记又被静默放行了（票丁靶心未闭合）').toBe('bad-shape')
+    expect(res.ok).toBe(false)
+    expect(res.uuid).toBe(BAD_SHAPE_39) // 被拒的是**畸形原文**，不是前面那个脏候选
+    expect(res.dbs).toEqual([]) // 零查询
+  })
+
+  it('脏候选在前 + 后面是**形状合法但查无此 id** 的真标记 → 阻断（净回归的防线）', () => {
+    // 旧 `extractCommitUuid` 在这里返回 FAKE_UUID（正则内建形状要求 ⇒ 回溯跳过脏候选）
+    // ⇒ 走态③阻断。只抓第一个候选的实现会返回 `no-marker` —— 这就是净回归本身。
+    const res = evaluateCommitUuid(proseThenMarker(FAKE_UUID), dbList([makeDb()]))
+    expect(res.code, '脏候选把后面的真标记挡掉了（旧实现会落 not-found）').toBe('not-found')
+    expect(res.ok).toBe(false)
+    expect(res.uuid).toBe(FAKE_UUID) // 被查的是真标记，不是脏候选
+  })
+
+  it('脏候选在前 + 后面是**库中真值** → 放行（真值不被脏候选挡住）', () => {
+    const res = evaluateCommitUuid(proseThenMarker(REAL_UUID), dbList([makeDb()]))
+    expect(res.code).toBe('found')
+    expect(res.ok).toBe(true)
+    expect(res.uuid).toBe(REAL_UUID)
+    expect(res.hit.label).toBe('dev')
+  })
+
+  it('漏写 `]` 的 `catstudy [` 不吞掉后面的真标记（捕获排除换行）', () => {
+    // 放开换行（`[^\]]+`）时首个候选会一路吞到后面那个 `]`，把真标记整个吃掉 ⇒ no-marker。
+    // 排除换行后该位置失配、引擎继续向后搜 ⇒ 真标记仍被看见。
+    const swallow = 'chore: 手滑写了个 catstudy [oops\n\ncatstudy [' + REAL_UUID + ']\n'
+    const res = evaluateCommitUuid(swallow, dbList([makeDb()]))
+    expect(res.code, '漏写的 `[` 吞掉了后面的真标记').toBe('found')
+    expect(res.uuid).toBe(REAL_UUID)
+  })
+
+  it('多个畸形候选 → 报**第一个**畸形原文（出口亮的是人写歪的那处）', () => {
+    const message =
+      'feat: x\n\ncatstudy [' + BAD_SHAPE_28 + ']\n\ncatstudy [' + BAD_SHAPE_39 + ']\n'
+    const res = evaluateCommitUuid(message, [{ label: 'dev', file: path.join(dir, 'x.db') }])
+    expect(res.code).toBe('bad-shape')
+    expect(res.uuid).toBe(BAD_SHAPE_28)
+  })
+
+  it('脏候选 + 散文候选（无形状合法者、无畸形）→ 放行（态①″ 不受多候选影响）', () => {
+    const res = evaluateCommitUuid(
+      'docs: catstudy [uuid] 与 catstudy [not-a-uuid] 都只是举例\n',
+      dbList([makeDb()])
+    )
+    expect(res.code).toBe('no-marker')
+    expect(res.ok).toBe(true)
+  })
+})
+
 // ─── B2 真机挂钩：临时 git 仓库里真 commit，认钩子自己打印的那行 ─────────────
 
 /** 跑一条 git 命令，**stdout / stderr 都留**（成功时 execFileSync 会丢掉 stderr——
@@ -345,6 +414,19 @@ describe('B2 真机挂钩（临时仓库 · 真 git commit）', () => {
     const prose = commit(repo, env, PROSE_MARKER)
     expect(prose.ok, `散文标记被误拦，输出:\n${prose.output}`).toBe(true)
     expect(commitCount(repo, env)).toBe('1')
+
+    // P2 真机面：**脏候选在前** + 畸形标记在后 ⇒ 必须仍被拦（票丁靶心在真机路径闭合）。
+    // 只抓第一个候选的实现在这里是放行 —— 即失效模式在真机面复发。
+    writeFileSync(path.join(repo, 'work-prose2.txt'), 'z\n')
+    git(repo, ['add', 'work-prose2.txt'], env)
+    const lateBad = commit(repo, env, proseThenMarker(BAD_SHAPE_39))
+    expect(
+      lateBad.ok,
+      `脏候选在前时 39 位畸形标记提交成功了（票丁失效模式在真机面复发），输出:\n${lateBad.output}`
+    ).toBe(false)
+    expect(lateBad.output).toContain('[commit-uuid-gate] ❌ commit-msg 门禁阻断（bad-shape）')
+    expect(lateBad.output).toContain(BAD_SHAPE_39)
+    expect(commitCount(repo, env)).toBe('1') // 被拒 ⇒ 不新增 commit
   }, 60_000)
 })
 

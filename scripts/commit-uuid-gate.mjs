@@ -53,6 +53,17 @@
  * 之后起算，36 位卡在第 37 位 `e` 上而 `]` 在第 40 位 ⇒ 返回 `null` ⇒ 落 ① 放行。
  * **它声明要抓的那类，恰是它抓不到的。**
  *
+ * ⚠️ **必须扫「全部候选」，不能只看第一个**（P2 修正，审查者实证）。「宽捕获」不等于
+ * 「抓第一个就停」——旧提取器的形状要求**内建在正则里**，脏候选匹配失败后引擎会回溯
+ * **继续向后搜**，它的实际语义是「**第一个形状合法的**候选」。只抓第一个任意候选会在
+ * 两种 message 上分叉（实测读数见 `commit-uuid-gate.test.js` 的「全候选」用例组）：
+ *   - 脏候选在前 + 后面是**畸形标记** ⇒ 旧落 ①（真抓不到），新也只抓脏的 ⇒ 靶心失效；
+ *   - 脏候选在前 + 后面是**形状合法但查无此 id** 的真标记 ⇒ 旧落 ③ 阻断，新落 ① 放行
+ *     ⇒ **净回归**（本仓真实存在：`40a5b835` / `9c8853a7` / `c37f1881` / `bba06f28`
+ *     四笔 commit 的第一个候选都是散文里的 `catstudy [uuid]`，真标记在末尾）。
+ * 故次序是：**先找第一个形状合法者**（与旧同序，真值不被脏候选挡住）→ 找不到再看
+ * **任一**候选是否够像 uuid（畸形 ⇒ ② 阻断）→ 都不是才落 ①。
+ *
  * ⚠️ **大写 uuid 由「放行」翻为「阻断」**（票丁，对既有 **P3-1 的半推翻**）：P3-1
  * 当初的取舍是「不改**共用**提取器的正则」（**范围**理由），不是「大写无害」（语义
  * 理由）。门禁有了自己的捕获器后，大写正是它要抓的手打高置信信号 ⇒ 落 ② 阻断。
@@ -87,9 +98,22 @@ import { defaultDbs, BUSY_TIMEOUT_MS } from './flywheel/retire-message-memory.mj
  *
  * 与 `handoff-gen.mjs` 的 `extractCommitUuid` **不是同一条规则的两份实现**（见文件头
  * 「形态」段）：那个要窄（取不出 = 手动提交），这个要宽（畸形也得先看见）。
- * 捕获组取 `[^\]]+`——**不**限字符集，任何写歪的内容都留到形状判断里被判。
+ * 捕获组取 `[^\]\n]+`——**不**限字符集，任何写歪的内容都留到形状判断里被判；
+ * **但排除换行**：标记是单行的，放开换行会让一个漏写 `]` 的 `catstudy [` 一路吞到
+ * 下一个 `]`，把落在中间的**真标记整个吃掉**（实测：`catstudy [oops\n… catstudy
+ * [<真值>]` 会捕成一个候选）。排掉换行后引擎在该位置失配、继续向后搜，真值仍被看见。
  */
-export const MARKER_CAPTURE_RE = /catstudy\s+\[([^\]]+)\]/
+export const MARKER_CAPTURE_RE = /catstudy\s+\[([^\]\n]+)\]/
+
+/**
+ * `g` 版捕获（**不导出**，仅供 `evaluateCommitUuid` 的 `matchAll` 用）。
+ *
+ * 为什么不给 `MARKER_CAPTURE_RE` 直接加 `g`：带 `g` 的正则 `.test()` / `.exec()` 会
+ * 在调用间留 `lastIndex`，把它作为共享导出常量放出去等于泄漏状态给下一个调用点。
+ * `matchAll` 内部克隆正则（不改原件的 `lastIndex`），故导出件保持无状态、`g` 版私有。
+ * 每次判决新建一次（一条 commit 一次，开销可忽略）。
+ */
+const MARKER_CAPTURE_ALL_RE = () => new RegExp(MARKER_CAPTURE_RE.source, 'g')
 
 /** 严格 UUID 形状：8-4-4-4-12 **小写** hex（OQ-2 裁定：维持严；误拦面实测为空） */
 export const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -201,15 +225,19 @@ function hasMessageId(dbFile, uuid) {
 export function evaluateCommitUuid(message, dbs = []) {
   const base = { ok: true, uuid: null, hit: null, candidates: dbs, dbs: [], errors: [] }
 
-  // 捕获走**本模块自己的**宽松正则（文件头「形态」段：复用定长提取器正是票丁靶心）
-  const captured = MARKER_CAPTURE_RE.exec(message || '')
+  // 捕获走**本模块自己的**宽松正则（文件头「形态」段：复用定长提取器正是票丁靶心），
+  // 且扫**全部**候选（文件头 P2 段：只抓第一个会让「脏候选在前」的 message 静默放行）
+  const caps = [...(message || '').matchAll(MARKER_CAPTURE_ALL_RE())].map((m) => m[1])
   // 态 ①：无标记 ⇒ 放行（merge / revert / 人工提交不受影响）
-  if (!captured) return { ...base, code: 'no-marker' }
+  if (caps.length === 0) return { ...base, code: 'no-marker' }
 
-  const uuid = captured[1]
-  if (!UUID_SHAPE_RE.test(uuid)) {
-    // 态 ②：够像 uuid 但形状非法 ⇒ 阻断（不查库——形状错本身就是手打/截断的高置信信号）
-    if (HEX_DASH_SHAPE_RE.test(uuid)) return { ...base, ok: false, code: 'bad-shape', uuid }
+  // 形状合法的候选**优先**：与旧提取器同序（它靠正则回溯拿到「第一个形状合法者」），
+  // 保证前面的脏候选挡不住后面的真值 ⇒ 态③④⑤ 的输入与旧实现逐字相同
+  const uuid = caps.find((c) => UUID_SHAPE_RE.test(c))
+  if (uuid === undefined) {
+    // 态 ②：**任一**候选够像 uuid 但形状非法 ⇒ 阻断（不查库——形状错本身就是手打/截断的高置信信号）
+    const malformed = caps.find((c) => HEX_DASH_SHAPE_RE.test(c))
+    if (malformed !== undefined) return { ...base, ok: false, code: 'bad-shape', uuid: malformed }
     // 态 ①″：其余（散文 `catstudy [uuid]`、`not-a-uuid`、括号里带空格/汉字）⇒ 与「无标记」同出口。
     // 这条**必须保持放行**：只加严会把正常提交拦死（见文件头「出口」——多开一个坑就是在
     // 把人推向 --no-verify）。
