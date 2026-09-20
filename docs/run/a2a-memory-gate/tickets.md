@@ -62,15 +62,16 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
    A2A 递归、`recovery.ts` 恢复路径字面量、`ingest.ts`/`recovery.ts` 三处传 `msg`。
    后四处填值语义正确但**不进 `makeCmd`**，不承担判据职责。
    ⇒ 据此新增 `isAgentAuthoredTrigger()` 单点判据，避免同一条规则写多份而分叉。
-2. **`recovery.ts` / `ingest.ts` 不在票面文件表内**：`fromAgent` 必填 ⇒ 编译器逐点报错
-   （首轮 lint 89 处错，全在测试与这三个生产文件）。按 D15 同款理由（忘标要变成编译错误）
-   全部补实值，未改任何控制流。
+2. **`recovery.ts` / `ingest.ts` 不在票面文件表内**：`fromAgent` 必填 ⇒ 编译器逐点报错。
+   首轮 lint 共 **89 处**（88 处在测试的 `triggerMsg` 字面量、1 处在 `serial.ts::461`
+   的 drain 构造点；`recovery.ts` / `ingest.ts` 的补值先于该次 lint 完成，故不在读数里）。
+   按 D15 同款理由（忘标要变成编译错误）全部补实值，未改任何控制流。
 
 ## 六、实测回报（店长点名要看的那条）
 
 **问**：经 ingest 投递的猫间消息，落库 `role` 是什么？
 
-**答**：`role='user'` —— 与 `origin` 无关。源码单点：`connectors/ingest.ts:300`
+**答**：`role='user'` —— 与 `origin` 无关。源码单点：`connectors/ingest.ts:301`
 `role: 'user' as const`（注释：DB role 有 CHECK 约束，类型不落库）；而
 `routes/messages.ts:233` 对 REST 注入**显式**传 `origin: 'agent'`。
 
