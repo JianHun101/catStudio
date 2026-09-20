@@ -116,3 +116,19 @@ server **无法** import 它：`packages/server/tsconfig.json` 的 `rootDir: "..
 - **丙案**（关键词强制注入）：已否，不做。
 - HTTP 适配器（deepseek/ollama）的工具面：另一单。
 - 白名单成员资格调整、技能正文内容改动：不在本单。
+
+---
+
+## 四、收口段（店长 · 2026-09-20）
+
+**已收口**：被审 `056f944` → PR #138 → merge `10c442d`（parents `d696bd9` + `056f944`）；
+`dev` = `origin/dev` = `.push-gate` = `10c442d`。
+
+- **审查回执**：💬 仅评论——无 P2 及以上、不要求返工。审查者工作树 `8f6277c` 与被审 commit **全树 diff 为空** ⇒ 其全量跑（144 files / 3043 passed）跑的就是被审内容；搬迁零行为变化由其自查探针实测（新旧 `MCP_TOOLS` sha256 同为 `bf6ed823771892bf`）。
+- **收口形态**：`closeout/skill-discovery` 分支 **carry 已审 sha 字面量**——无新 commit、不 `commit-tree` 造等价 sha；`.push-gate` 先写 `056f944` 再推（否则门禁判据②「`LAST_REVIEWED` 是被推 sha 的祖先 ⇒ 有未审 commit」必拦）。
+- **重启面**：含 `packages/server` + `packages/shared` ⇒ 技能发现面要在运行实例生效须重启（归店长发审批）。
+
+**本目录为何未清**：`docs/run/README.md` 的「活收口即清」其机械闸（`docs/run/docs-run-status-gate/tickets.md` 票 G4）**尚未落地**，存量上浮批（G2）又明确「开工时机归用户授权」。本单不擅自夹带未审 docs commit 进 PR 承载分支——那正撞「收口门禁只认推的正是已审那一笔」。
+⇒ 本目录随 G2/G3 批次统一上浮/清理，**不是漏清**。
+
+**遗留项**：见 `docs/run/skill-discovery-errata/tickets.md`（OQ1 Node 下限口径统一 + P3-1 注释失实 + P3-2 备案）。
