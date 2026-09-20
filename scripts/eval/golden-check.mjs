@@ -14,7 +14,12 @@
  *   ② 该文件过 `classifyDocument` 准入（frontmatter / type / evidence / plans 结晶态）
  *      ——**这一条不可省**：白名单内但准入不过的文件一行索引都不会写，
  *      它的锚点永远不可能被检索命中，挂上去就是必然假红；
- *   ③ `segmentDocument` 切出的 `sectionAnchor` 集合里含该锚点。
+ *   ③ 该件切出的 `sectionAnchor` 集合里含该锚点——**退役件走墓碑分支**：
+ *      `status ∈ RETIRED_STATUSES` ⇒ 改调 `tombstoneSegment`，活锚集合**恒为 `{'#tombstone'}`**。
+ *      这一分支不可省——检索谓词（`chunks.ts` 的
+ *      `... OR c.section_anchor = '#tombstone'`）只放行墓碑锚、其余退役片照挡，
+ *      照旧调 `segmentDocument` 切正文就会切出**检索引擎永不返回**的锚：标尺判「锚还在」，
+ *      而引擎一条也召不回（C11/N01 被归因成 `status` 而非 `rotten` 的成因，见 P1-C）。
  *
  * 三者都通过才算「活块」。②③ 合起来就是「扫描器会写出这一片」。
  *
@@ -195,16 +200,21 @@ export function validateGoldenSet(data) {
  *
  * @param {object} opts
  * @param {string} opts.root     仓库根（绝对路径）
- * @param {object} opts.scanMod  `scripts/flywheel/scan.mjs`（要 `collectCandidatePaths` / `classifyDocument`）
- * @param {Function} opts.segment `segmentDocument`
+ * @param {object} opts.scanMod  `scripts/flywheel/scan.mjs`（要 `collectCandidatePaths` /
+ *                               `classifyDocument` / `RETIRED_STATUSES` / `tombstoneSegment`）
+ * @param {Function} opts.segment `segmentDocument`（**非退役件**的切法；退役件走墓碑分支）
  * @param {Function} [opts.readFile] `(relPath) => string`
- * @returns `{ anchors: Map<string, Set<string>>, skipped: Array<{path,reason}> }`
+ * @returns `{ anchors: Map<string, Set<string>>, retiredDocs: Set<string>,
+ *            skipped: Array<{path,reason}> }`
  *          `skipped` = 白名单内**过不了准入**的文件（它们不是活块，但要让调用方
- *          能把「锚点指着一个准入不过的文件」与「锚点拼错」分开）
+ *          能把「锚点指着一个准入不过的文件」与「锚点拼错」分开）；
+ *          `retiredDocs` = 准入通过但已退役的件（活锚集合恒为墓碑锚，供核锚时报出
+ *          「该件只剩墓碑片」而不是误导人去找章节新名）。
  */
 export function buildLiveAnchorIndex({ root, scanMod, segment, readFile }) {
   const read = readFile ?? ((rel) => readFileSync(path.join(root, rel), 'utf8'))
   const anchors = new Map()
+  const retiredDocs = new Set()
   const skipped = []
 
   for (const rel of scanMod.collectCandidatePaths(root)) {
@@ -221,11 +231,21 @@ export function buildLiveAnchorIndex({ root, scanMod, segment, readFile }) {
       continue
     }
     const set = new Set()
-    for (const s of segment({ path: rel, content }).segments) set.add(s.sectionAnchor)
+    // ③ 的分叉点：退役件在检索世界里**只产墓碑片**（C1/C2），活锚集合恒为 `{'#tombstone'}`。
+    // 照旧调 `segmentDocument` 会切出正文锚 —— 那是**检索谓词永不放行**的锚（见文件头 ③），
+    // 闸判「锚还在」而引擎召不回，正是本票要修的「标尺与检索引擎各说各话」。
+    if (scanMod.RETIRED_STATUSES.has(cls.meta.status ?? '')) {
+      retiredDocs.add(rel)
+      set.add(
+        scanMod.tombstoneSegment({ path: rel, content, verdict: cls.meta.verdict }).sectionAnchor
+      )
+    } else {
+      for (const s of segment({ path: rel, content }).segments) set.add(s.sectionAnchor)
+    }
     anchors.set(rel, set)
   }
 
-  return { anchors, skipped }
+  return { anchors, retiredDocs, skipped }
 }
 
 /**
@@ -236,7 +256,11 @@ export function buildLiveAnchorIndex({ root, scanMod, segment, readFile }) {
  *     ⇒ 要么语料被移出白名单，要么条目本来就挂错了对象；
  *   - `anchor-not-found`：文件活着但**切不出这个锚**（章节改名/合并/删除）⇒ 重标该条。
  *
- * @returns `{ rotten: Array<{id,kind,field,doc_path,section_anchor,reason}>, checked: number }`
+ * 退役件挂正文锚**也落在 `anchor-not-found`**（药方同样是「重标该条」，不是另一类腐烂），
+ * 但多带一条 `detail` 把「该件已退役、检索侧只剩墓碑片」说破——否则要人去翻章节新名，
+ * 方向就错了。
+ *
+ * @returns `{ rotten: Array<{id,kind,field,doc_path,section_anchor,reason,detail?}>, checked: number }`
  */
 export function checkGoldenSet({ data, index }) {
   const rotten = []
@@ -249,17 +273,27 @@ export function checkGoldenSet({ data, index }) {
         checked++
         const live = index.anchors.get(a.doc_path)
         let reason = null
+        let detail
         if (!live) reason = 'doc-not-live'
-        else if (!live.has(a.section_anchor)) reason = 'anchor-not-found'
+        else if (!live.has(a.section_anchor)) {
+          reason = 'anchor-not-found'
+          // 退役件：正文锚不可能被检索命中（谓词只放行墓碑锚）⇒ 药方是「改挂墓碑锚」，
+          // 不是「去找章节改名后的新锚」。这一句是给读 stderr 的人的定向。
+          if (index.retiredDocs?.has(a.doc_path)) {
+            detail = 'doc-retired: 该件已退役，检索侧只剩墓碑片一条活锚'
+          }
+        }
         if (reason) {
-          rotten.push({
+          const row = {
             id: entry.id,
             kind: entry.kind,
             field,
             doc_path: a.doc_path,
             section_anchor: a.section_anchor,
             reason,
-          })
+          }
+          if (detail) row.detail = detail
+          rotten.push(row)
         }
       }
     }
@@ -404,7 +438,8 @@ export async function main(argv = process.argv.slice(2)) {
   )
   for (const r of rotten) {
     process.stderr.write(
-      `  - [${r.id}/${r.kind}] ${r.field} ${r.doc_path} :: ${r.section_anchor} (${r.reason})\n`
+      `  - [${r.id}/${r.kind}] ${r.field} ${r.doc_path} :: ${r.section_anchor} ` +
+        `(${r.reason}${r.detail ? ` · ${r.detail}` : ''})\n`
     )
   }
   return report.ok ? 0 : 1
