@@ -579,8 +579,15 @@ export function renderDiagnosis(ctx) {
       .join(' / ')}） |`
   )
   L.push(`| MEMORY_MAX_DISTANCE / MEMORY_TOP_K | ${params.maxDistance} / ${params.topK} |`)
+  // 端口**号**不进报告（每跑一个随机值，写进去就破「同输入同输出」）——与 baseline 同款：
+  // 只报**供给形态**与「有没有真握手」，不报那个数。
   L.push(
-    `| 嵌入模型 / 维度 / 供给 | ${embed.model ?? 'n/a'} / ${embed.dim ?? 'n/a'} / ${embed.port ? `独立 sidecar 动态端口（实测握手 :${embed.port}）` : '⚠️ 未见 sidecar 端口'} |`
+    '| 嵌入模型 / 维度 / 供给 | ' +
+      `${embed.model ?? 'n/a'} / ${embed.dim ?? 'n/a'} / ` +
+      (typeof embed.port === 'number' && embed.port > 0
+        ? '独立 sidecar、动态端口（`EMBED_SIDECAR_PORT=0`，实测已握手）'
+        : '⚠️ **未见 sidecar 监听端口**（非独立 sidecar 供给 / 未握手）') +
+      ' |'
   )
   L.push(
     `| **合并序重建自证** | ${mergeChecks.checked} 条条目 / ${mergeChecks.rows} 行 final 流水逐行比对，` +
@@ -738,7 +745,7 @@ export function renderDiagnosis(ctx) {
       '反向不成立——词项全在语料里、但分散在不同片里，同样会 0 行（AND 要求同一片内全中），' +
       '第三行量的正是这类。第四行的「跨词边界 bigram」是一条**结构性**缺陷面：' +
       '索引侧存的是「bigram 空格 join」的预分词串，`seed data` 切出的 `d␣` / `␣d` 这类 bigram ' +
-      '在存储串里会被 tokenizer 当分隔符切开，**无法还原**。第五行是**修法候选 3a 的读数面**：' +
+      '在存储串里会被 tokenizer 当分隔符切开，**无法还原**。第五行是**修法候选 5 的读数面**：' +
       '把不可命中的词项剔掉重试，能救回多少条查询。'
   )
   L.push('')
@@ -1546,7 +1553,7 @@ export async function main(argv = process.argv.slice(2)) {
       deadWithAbsentTerm: channelRows.filter((r) => r.hits === 0 && r.absent > 0).length,
       anyAbsentTerm: channelRows.filter((r) => r.absent > 0).length,
       anySpacedTerm: channelRows.filter((r) => r.spaced > 0).length,
-      /** 反事实：剔掉不可命中词项后**能**召回的查询数（本报告的修法候选 3a 的读数面） */
+      /** 反事实：剔掉不可命中词项后**能**召回的查询数（本报告的修法候选 5 的读数面） */
       revivedByUsableOnly: channelRows.filter((r) => r.hits === 0 && (r.usableHits ?? 0) > 0)
         .length,
       /** 词项全可用却仍然 0 行（分散在不同片 ⇒ AND 无从满足） */
@@ -1709,7 +1716,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     // 选择器变体（同为重建读数）：**固定条数**（现制，切前 topK 节）vs **分数相对阈值**
-    // （榜首先取齐，凡是分不低过榜首 × alpha 的节全收）。存在的理由见候选 2：
+    // （榜首先取齐，凡是分不低过榜首 × alpha 的节全收）。存在的理由见候选 3：
     // §五 显示 C03/C05/N04/G12 就卡在第 4~5 名、分差 0.0007~0.0140——固定条数在
     // 「一堆几乎同分的片」处切一刀，切掉谁全看 tie-break，而阈值式选择器对此不敏感。
     // 变体 0（**零成本候选**）：现制的 `slice(0, topK)` 切的是**片**，同节多片会占掉
