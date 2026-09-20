@@ -10,7 +10,7 @@
 | 报告 schema | 1 |
 | 库路径 | `D:\Game\ai\catStudy\packages\server\data\cat-study-dev.db` |
 | chunks 行数 / doc_path 数 | 410 / 19 |
-| 黄金集 | `D:\Game\ai\catStudy-sessions\82d58086-ds猫\docs\eval\retrieval-golden.json`（version=1，entries=40：real=12 / constructed=23 / negative=5） |
+| 黄金集 | `D:\Game\ai\catStudy\docs\eval\retrieval-golden.json`（version=1，entries=40：real=12 / constructed=23 / negative=5） |
 | 黄金集冻结基点 | `44c1d3ba368dc606c908454defa9e6752e2aa763` |
 | 语料新鲜度（golden-check） | liveDocs=19，rotten=0 |
 | 索引新鲜度（`chunks.origin_id` vs 工作树 `git hash-object`） | 19/19 份同步（stale=0） |
