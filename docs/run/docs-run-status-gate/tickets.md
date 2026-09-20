@@ -46,7 +46,7 @@ floated_to: docs/plans/xxx.md # status ∈ {pending-float, floated} 时必填
 - `node scripts/run-docs-stale.mjs --days N`：打印「未清 且 末次提交距今 > N 天」的 `docs/run/<slug>/` 清单（含末次提交 sha / 日期 / 距今天数）。
 - **挂载点**：`packages/server/src/llm/session-closeout.ts:351` 的 `closeoutSession` preflight 段（`step:'preflight'`），每次收口打印。
 - **不判 `pending-float`**：待上浮是合法待办，拦它 = 拦合法推送（同 D1③ 的误拦论证）。
-- **它是可见性不是闸**：`CONTEXT.md:120` 定死「清理 commit 必须落在 PR 承载的那个分支上」，而 `closeoutSession` 跑在 PR 合并之后 ⇒ 那时已无法回溯补 commit。价值 = 把积压从「几个月后靠人翻」变成「每次收口都打一次数」。
+- **它是可见性不是闸**：`CONTEXT.md:129` 定死「清理 commit 必须落在 PR 承载的那个分支上」，而 `closeoutSession` 跑在 PR 合并之后 ⇒ 那时已无法回溯补 commit。价值 = 把积压从「几个月后靠人翻」变成「每次收口都打一次数」。
 - 首次基线（P1-D 实测，2026-09-19）：末次提交距今 ≥6 天 6 个、≥4 天 9 个；后三个恰是「判弃候选 + 待上浮」同批——陈旧度与「该清没清」高度重合。
 
 **D3 不采纳的形态**（附理由，§5.3 原文）：
@@ -67,7 +67,7 @@ floated_to: docs/plans/xxx.md # status ∈ {pending-float, floated} 时必填
 ### 票 G1 · 存量前置清理（最小批，可先做）
 
 - (a) ~~判弃 `docs-run-cleanup/`~~ **✅ 已完成 2026-09-19**（mapping.md 标判弃 + `flaky-precommit` §5.3 引用改指 + 2 条票面冲突修文，同批 commit）。
-- (b) `docs-single-writer/` 前置：`CONTEXT.md:124` 的括号引用（现指 `docs/run/precommit-scope/closeout.md` §四）改指上浮后落点，否则清目录时引用悬空。
+- (b) `docs-single-writer/` 前置：`CONTEXT.md:133` 的括号引用（现指 `docs/run/precommit-scope/closeout.md` §四）改指上浮后落点，否则清目录时引用悬空。
 - (c) ~~补一行收口段 + `docs/plans/agent-reply-elapsed-timer.md:3` 的 `status` 改「已收口」~~ **✅ 已完成 2026-09-20**（收口段已补；status 按同日统一后的英文值域落 **`closed`**，非旧词「已收口」）。
   ⚠️ **原句归因错误（2026-09-20 实测更正）**：原写「该 status 触发 `scan.mjs:243` 准入闸 ⇒ 该 plan 进不了检索索引」。实测 `classifyDocument` 的判据**顺序**是 `type` → **`evidence`（`:265`）** → `status`（`:271`）——该 plan **根本没有 `evidence` 字段**，落 `empty-evidence`，**在 status 判据之前就被拒**。故：① 改 status **不会**让它入库（改后仍 `empty-evidence`）；② 它的 `status: 在飞` 出值域是**另一处独立缺陷**，不是索引卡点。补 `evidence` 与否（= 语料 19→20 文档）**超出本票边界，待裁**。
 - **边界**：(b)(c) 触及 `CONTEXT.md` / `docs/plans/`——**不在免审白名单（`docs/run/**`）内，须走审查链**。
@@ -80,7 +80,7 @@ floated_to: docs/plans/xxx.md # status ∈ {pending-float, floated} 时必填
 - **前置待裁口径**（承判弃件 `mapping.md` §三，用户裁，G2 开工前必须到位）：
   - **口径甲 · 「未闭项」判准**：建议 = 「有无钉死的触发条件」，而非「有没有写下来」——带触发条件的观察项可随上浮带走，不带的不行。
   - **口径乙 · 上浮出口能否是手册**：`line-endings`（仓级行尾策略）与 `vision-retire`（角色注册表）的结论天然属 `AGENTS.md`/`CONTEXT.md`；但 `CONTEXT.md:95` 钉死「上浮 = `docs/plans/` 点名，不二选一」。**此口径同时决定形态甲 `floated_to` 的合法值域**（悬空落点检查的白名单），故 G4 开工前也必须到位。
-- **验收**：10 目录各自 frontmatter `status: floated` + `floated_to` 实指存在文件 → 目录物理删除（上浮落点文与删目录同 PR 两笔 commit，`CONTEXT.md:120`）。
+- **验收**：10 目录各自 frontmatter `status: floated` + `floated_to` 实指存在文件 → 目录物理删除（上浮落点文与删目录同 PR 两笔 commit，`CONTEXT.md:129`）。
 
 ### 票 G3 · 回填 status（G2 后存量全目录，诚实四档）
 

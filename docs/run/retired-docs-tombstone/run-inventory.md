@@ -3,7 +3,7 @@
 > 票：P1-D（`docs/run/retired-docs-tombstone/tickets.md:65`）。
 > 作者：flash猫 · 2026-09-19 · 基线 `dev = 5a2beae` · 树干净。
 > 边界（票面 `:69` 红线）：**只读各目录 + 写本报告**。**未删、未改**任何既有目录内容；本报告是本次唯一新增物。
-> 判据锚点：`CONTEXT.md:95`（活收口即清 → 结论上浮 `docs/plans/` → 删 `<slug>/`）、`CONTEXT.md:107`（归宿「收口即清，结论上浮」）、`docs/run/README.md:19-27`（同上，成文于门牌）、`745535c` 先例（**零未闭项才删**；有未闭项则保留并补收口段——清了就成暗知识）。
+> 判据锚点：`CONTEXT.md:95`（活收口即清 → 结论上浮 `docs/plans/` → 删 `<slug>/`）、`CONTEXT.md:116`（归宿「收口即清，结论上浮」）、`docs/run/README.md:19-27`（同上，成文于门牌）、`745535c` 先例（**零未闭项才删**；有未闭项则保留并补收口段——清了就成暗知识）。
 
 ---
 
@@ -20,14 +20,14 @@
 
 1. **无一个目录可「无条件直接清」**。2 个「已上浮可清」各带一个前置（见 §二）；10 个「待上浮」的落点里 **5 个文件根本不存在**（`plans/eval-system-v1.md`、`adr/0015-*.md`、`plans/precommit-gate-scoping.md`、`plans/frontend-render-decoupling.md`、`plans/vision-retire.md`），另 **1 个落点（`plans/review-chain-anchor.md`）存在但零相关内容**——**上浮是净新增工作，不是搬字。**
 2. **票面「现挂 18 个目录」与实测不符**：今日实测 **19 个**（`ls -d docs/run/*/ | wc -l`）。差的那 1 个是票面自己所在的 `retired-docs-tombstone/`（今日 `6076de3` 才提交）。**以后凡引用本数，以 19 为准。**
-3. **系统性漏跑的机制解释**（不是「谁忘了」）：收口链按**会话**组织，run 目录按**活**组织。`CONTEXT.md:119` 的动作对象写作「清 `docs/run/` 中**已收口活**的 `<slug>/`」——但**没有定义「谁、在哪一刻判定某目录属于『已收口活』」**，也没有任何字段承载这个判定。于是一个会话收口时，它对另外 18 个目录**无从判起**，只能不动。**契约缺一个判据位，纪律就在这个空位上退化了。**
+3. **系统性漏跑的机制解释**（不是「谁忘了」）：收口链按**会话**组织，run 目录按**活**组织。`CONTEXT.md:128` 的动作对象写作「清 `docs/run/` 中**已收口活**的 `<slug>/`」——但**没有定义「谁、在哪一刻判定某目录属于『已收口活』」**，也没有任何字段承载这个判定。于是一个会话收口时，它对另外 18 个目录**无从判起**，只能不动。**契约缺一个判据位，纪律就在这个空位上退化了。**
 
 ---
 
 ## 一、判据与取证方法（可复跑）
 
 - **收口证物不采信票面自述**：每条 sha 均经 `git cat-file -t` 确认对象存在 + `git merge-base --is-ancestor <sha> dev` 确认已落 dev；merge 归属按 `git log --format='%p'` 的 parent 序核对，不与票面自称对赌。
-- **行号一律 `git grep -n` 字节路径实测**（本仓 `CONTEXT.md:132` 明令：PS 文本管道在 UTF-8 源码上会给反向错位假读数）。
+- **行号一律 `git grep -n` 字节路径实测**（本仓 `CONTEXT.md:141` 明令：PS 文本管道在 UTF-8 源码上会给反向错位假读数）。
 - **计数一律亲手数**（`ls | wc -l` / `grep -c`），不用档头减法。
 - **正交轴**：19/19 目录的末次提交**均为 dev 祖先**（`git merge-base --is-ancestor` 实测）⇒ **没有「活落在 dev 之外」的孤岛**；问题纯粹是「已落地的活没清目录」，不是「活丢了」。
 
@@ -43,9 +43,9 @@
 
 - **活**：docs 单一写入口纪律（判据=写入方唯一，非写入位置唯一）+ `closeout-dupcheck.mjs` 收口重复落盘检测。
 - **收口**：✅ `closeout.md:11` PR #94 / merge `49a1099`（实测 parents `2b349ef 49e032e`，真 merge）。
-- **上浮**：✅ **已落** `CONTEXT.md:124`（判据）、`:126`/`:127`（两类写入方分列）、`:128`（dupcheck 命令 + 「有落点 ≠ 会被消费」）。脚本本体在 `scripts/`，不受目录删除影响。
+- **上浮**：✅ **已落** `CONTEXT.md:133`（判据）、`:135`/`:136`（两类写入方分列）、`:137`（dupcheck 命令 + 「有落点 ≠ 会被消费」）。脚本本体在 `scripts/`，不受目录删除影响。
 - **未闭**：两条挂账已在 `precommit-scope` 残余票闭合（`closeout.md:114`/`:115`）；`:118` 双跑缺陷用户已裁「挂起」；`:116` 硬前置属别票。
-- **前置（清之前必须做）**：`CONTEXT.md:124` 的括号引用写的是 `docs/run/precommit-scope/closeout.md` §四——**清 `precommit-scope` 前须先把该引用改指向上浮后的落点**，否则引用悬空。
+- **前置（清之前必须做）**：`CONTEXT.md:133` 的括号引用写的是 `docs/run/precommit-scope/closeout.md` §四——**清 `precommit-scope` 前须先把该引用改指向上浮后的落点**，否则引用悬空。
 
 #### 2. `agent-reply-timer/`
 
@@ -68,7 +68,7 @@
 | 9   | `commit-uuid-gate/`          | ✅ PR #66/`ad8d41c`                                                                                                                                         | `docs/plans/review-chain-anchor.md` 或新建                      | **OQ-C**（唯一真未闭）+ 订正 `:101` 的 OQ-D（已闭）                           |
 | 10  | `line-endings/`              | ✅ PR #89/`a037d80`（parents 逐字对上）                                                                                                                     | **`AGENTS.md` Gotchas**（仓级行尾策略天然属手册，非 plans）     | §B 实测两点（剥 CR 后须 `git add` 刷 stat 缓存 / tracked 二进制只对主仓成立） |
 | 11  | `skill-delivery-decoupling/` | **无 PR/无 merge sha**；代码面 T1–T5 已落 dev                                                                                                               | `docs/adr/0014-…md`（已 `accepted`）补实施回执 + 回改票面 T4    | 「哪些核过、哪些没核」+ T6 端到端四条未核                                     |
-| 12  | `vision-retire/`             | ✅ PR #69/`7e7ef65`（parents 逐字对上），9/9 checkbox 全勾                                                                                                  | **新建** `docs/plans/vision-retire.md`，或并入 `CONTEXT.md:113` | `:120` 用户定夺项 + `:126` agents 墓碑行观察项 + `:79` A1 残余四类            |
+| 12  | `vision-retire/`             | ✅ PR #69/`7e7ef65`（parents 逐字对上），9/9 checkbox 全勾                                                                                                  | **新建** `docs/plans/vision-retire.md`，或并入 `CONTEXT.md:122` | `:120` 用户定夺项 + `:126` agents 墓碑行观察项 + `:79` A1 残余四类            |
 
 **逐条要点（只记票面没写清的）**：
 
@@ -149,9 +149,9 @@
 | 先例                            | 挂载点                                                           | 效力                                  |
 | ------------------------------- | ---------------------------------------------------------------- | ------------------------------------- |
 | `scripts/precommit-scope.mjs`   | **`.husky/pre-commit:12`**（`node scripts/precommit-scope.mjs`） | ✅ **活的**——每笔提交都过             |
-| `scripts/closeout-dupcheck.mjs` | **零机械挂载**——全仓只有 `CONTEXT.md:128` 一句「收口前跑一次」   | ❌ **退化成纪律**——没有进程会替你跑它 |
+| `scripts/closeout-dupcheck.mjs` | **零机械挂载**——全仓只有 `CONTEXT.md:137` 一句「收口前跑一次」   | ❌ **退化成纪律**——没有进程会替你跑它 |
 
-⇒ **本仓自己已经把结论写死在 `CONTEXT.md:128` 尾句：「有落点 ≠ 会被消费：纪律靠人记、脚本靠跑，故脚本必须挂进本链，否则它与不存在没有区别。」** 所以下面每一条都点名**挂在哪个文件的哪一行**。
+⇒ **本仓自己已经把结论写死在 `CONTEXT.md:137` 尾句：「有落点 ≠ 会被消费：纪律靠人记、脚本靠跑，故脚本必须挂进本链，否则它与不存在没有区别。」** 所以下面每一条都点名**挂在哪个文件的哪一行**。
 
 ### 5.1 形态甲（推荐）· 声明式状态字段 + pre-push 挂载
 
@@ -189,7 +189,7 @@ floated_to: docs/plans/xxx.md # status ∈ {待上浮, 已上浮} 时必填
 - `node scripts/run-docs-stale.mjs --days N`：打印「未清 且 末次提交距今 > N 天」的 `docs/run/<slug>/` 清单（含末次提交 sha / 日期 / 距今天数）。
 - **挂载点**：`packages/server/src/llm/session-closeout.ts:351` 的 `closeoutSession` preflight 段（`step:'preflight'`），**每次收口打印**。
 - **为什么不判「待上浮」**：`待上浮` 是**合法待办**，拦它 = 拦合法推送（同 5.1 ③ 的误拦论证）。
-- **它是可见性不是闸**：`CONTEXT.md:120` ① 定死「清理 commit 必须落在 PR 承载的那个分支上」，而 `closeoutSession` 跑在 **PR 合并之后** ⇒ 那时已无法回溯补 commit。它的价值是**把积压从「几个月后靠人翻」变成「每次收口都打一次数」**——本次事件的直接成因就是**没有任何时点会打出这个数**。
+- **它是可见性不是闸**：`CONTEXT.md:129` ① 定死「清理 commit 必须落在 PR 承载的那个分支上」，而 `closeoutSession` 跑在 **PR 合并之后** ⇒ 那时已无法回溯补 commit。它的价值是**把积压从「几个月后靠人翻」变成「每次收口都打一次数」**——本次事件的直接成因就是**没有任何时点会打出这个数**。
 
 **实测读数（本报告自带一份，可直接当首次基线）**：以 2026-09-19 计，19 个目录中末次提交距今 **≥6 天的有 6 个**——`skill-delivery-decoupling`/`hook-fallback-delivery`（7 天）、`vision-retire`/`test-git-env-pollution`/`frontend-perf`/`commit-uuid-gate`（6 天）；**≥4 天的有 9 个**（再加 `taste-skill`/`line-endings`/`docs-run-cleanup`，各 4 天）。**后三个恰是「判弃候选 + 待上浮」的同一批**——陈旧度与「该清没清」在这个样本上高度重合。
 
