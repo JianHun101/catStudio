@@ -56,11 +56,13 @@ function messageScopeWhere(scope: MessageScope): { sub: string; args: unknown[] 
 /**
  * 清掉引用「待删消息」的子行——**必须在删消息之前调用**。
  *
- * 覆盖四条依赖（票 6 重建批立的 FK，全 RESTRICT）：
+ * 覆盖五条依赖（票 6 重建批立的 FK + 票 J1 的 `human_labels`，全 RESTRICT）：
  * - `execution_logs.message_id` / `.triggered_by_message_id`（回复侧 + 触发侧）
  * - `review_verdicts.message_id`（主键即被引用消息）
  * - `review_parse_failures.message_id`（同上）
  * - `episode_attributions.delivery_message_id`（可空诊断链）
+ * - `human_labels.message_id`（J1 人工标注；**漏了这条 = 带标注的消息删不掉**——
+ *   删会话/清空消息/seed --reset 会从「删得掉」变成 500，正是本模块存在的理由）
  *
  * 全部在**一个事务**里跑：清理与随后的 `DELETE FROM messages` 之间不留「子行已被清、
  * 父行还在」的中间态（调用方紧接着删父行，失败由调用方那条语句负责回滚语义）。
@@ -78,6 +80,7 @@ export function purgeMessageDependents(scope: MessageScope): void {
     db.prepare(`DELETE FROM episode_attributions WHERE delivery_message_id IN (${sub})`).run(
       ...args
     )
+    db.prepare(`DELETE FROM human_labels WHERE message_id IN (${sub})`).run(...args)
   })
   tx()
 }

@@ -24,6 +24,7 @@ import { setRepoDb as setQueryDb } from './query.js'
 import { setRepoDb as setVerdictsDb } from './verdicts.js'
 import { setRepoDb as setEvalScoresDb } from './evalScores.js'
 import { setRepoDb as setUserFeedbackDb } from './userFeedback.js'
+import { setRepoDb as setHumanLabelsDb } from './humanLabels.js'
 import { setRepoDb as setSettingsDb } from './settings.js'
 import { setRepoDb as setFlowStatesDb } from './flowStates.js'
 import { setRepoDb as setChunksDb } from './chunks.js'
@@ -44,6 +45,7 @@ export function initRepository(db: Database.Database): void {
   setVerdictsDb(db)
   setEvalScoresDb(db)
   setUserFeedbackDb(db)
+  setHumanLabelsDb(db)
   setSettingsDb(db)
   setFlowStatesDb(db)
   setChunksDb(db)
@@ -64,6 +66,7 @@ export * as query from './query.js'
 export * as verdicts from './verdicts.js'
 export * as evalScores from './evalScores.js'
 export * as userFeedback from './userFeedback.js'
+export * as humanLabels from './humanLabels.js'
 export * as settings from './settings.js'
 export * as flowStates from './flowStates.js'
 export * as chunks from './chunks.js'

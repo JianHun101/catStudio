@@ -5,6 +5,7 @@ import {
   type EvalScoreRow,
   type ScoreAggregate,
   type PendingReviewScore,
+  type LabelPoolRow,
   type EpisodeStats,
   type EvalL1Metrics,
   type EvalChainsResponse,
@@ -29,18 +30,21 @@ import { fmtUtcShort, fmtUtcFull } from '@/utils/time'
 
 /**
  * 全屏评估中心（E4-B，左侧栏底部入口进入，无 vue-router 的 App 级 view 切换）。
- * 三 tab（用户看得懂是硬要求）：
+ * 四 tab（用户看得懂是硬要求）：
  *   - 观察：评分列表 + 按猫聚合卡片 + 任务结局分布（episodes 7 类计数 + 办成率）
  *   - 回标：低分样本卡（回复全文 + 上下文折叠 + 1-5 分单选 + 评语）→ 提交移出待回标 + 角标减一
+ *   - 标注（J1）：盲标池样本卡（回复**全文** + 1-5 分单选 + 评语）→ 提交移出池子。
+ *     **界面绝不显示判官分**——盲标是方法论硬要求（显示了就污染基准），故这一栏
+ *     连数据都不取：`/api/eval/label/pool` 的响应里根本没有判官分字段。
  *   - 链路（P1）：L1 八口径 + 链概览 + 每链跳瀑布（回答「哪条链最长 / 卡在哪一跳」）
  * 契约：消费 E4-A 后端四接口 + episode-stats（契约缺口裁决补充的只读路由）
- * + P1-A 的 l1-metrics / chains（平铺响应，无 ok 外壳）；
+ * + P1-A 的 l1-metrics / chains（平铺响应，无 ok 外壳）+ J1 的 label/pool 与 label/:id；
  * 办成率口径店长钉死：(success + corrected_success) / Σ(uRoot 已分类)，open 不计分母。
- * 纯展示 + 回标写入，零 LLM 调用。
+ * 纯展示 + 两处人工写入（回标 / 标注），零 LLM 调用。
  */
 const emit = defineEmits<{ close: [] }>()
 
-const activeTab = ref<'observe' | 'review' | 'chain'>('observe')
+const activeTab = ref<'observe' | 'review' | 'label' | 'chain'>('observe')
 
 // ─── 观察 tab ─────────────────────────────
 const scores = ref<EvalScoreRow[]>([])
@@ -57,6 +61,18 @@ const pendingError = ref('')
 const reviewState = ref<Record<string, { score: number; comment: string }>>({})
 const submittingId = ref<string | null>(null)
 const submitError = ref('')
+
+// ─── 标注 tab（J1 盲标）─────────────────────
+// 与回标 tab 是**两条通道**：回标标的是一条**判官已打过分**的回复（`user_feedback`），
+// 标注标的是判官**没参与挑选**的回复（`human_labels`），后者才是判官分的基准。
+// 界面与回标同形是有意的（标注者不必学两套），但状态、接口、移出语义各自独立。
+const labelPool = ref<LabelPoolRow[]>([])
+const labelLoading = ref(true)
+const labelError = ref('')
+/** 每张样本卡独立的评分/评语状态（共享会串卡——与回标 tab 同款理由） */
+const labelState = ref<Record<string, { score: number; comment: string }>>({})
+const labelingId = ref<string | null>(null)
+const labelSubmitError = ref('')
 
 // ─── 链路 tab（P1：哪条链耗时最长 / 卡在哪一跳）──────────
 const l1 = ref<EvalL1Metrics | null>(null)
@@ -348,6 +364,14 @@ function stateFor(id: string): { score: number; comment: string } {
   return reviewState.value[id]
 }
 
+/** 标注卡独立状态惰性初始化（与 `stateFor` 分开：两张 tab 的卡可能同 id 形态但语义不同） */
+function labelStateFor(id: string): { score: number; comment: string } {
+  if (!labelState.value[id]) {
+    labelState.value[id] = { score: 3, comment: '' }
+  }
+  return labelState.value[id]
+}
+
 function scoreLabel(n: number): string {
   return ['很差', '较差', '一般', '不错', '很好'][n - 1] || String(n)
 }
@@ -427,9 +451,44 @@ async function submitReview(id: string): Promise<void> {
   }
 }
 
+/** 标注池加载。空池是**正常态**（历史回复标完就空），故空态文案不说「出错」。 */
+async function loadLabelPool(): Promise<void> {
+  labelLoading.value = true
+  labelError.value = ''
+  try {
+    const res = await api.getEvalLabelPool()
+    if (disposed) return
+    labelPool.value = res.pool
+  } catch (err: any) {
+    if (!disposed) labelError.value = err.message || '标注样本加载失败'
+  } finally {
+    if (!disposed) labelLoading.value = false
+  }
+}
+
+/** 提交标注 → 成功即从池中移除（下一次拉取时服务端也会排除它），失败保留样本卡 + 提示 */
+async function submitLabel(id: string): Promise<void> {
+  labelSubmitError.value = ''
+  labelingId.value = id
+  try {
+    const st = labelStateFor(id)
+    await api.submitEvalLabel(id, {
+      score: st.score,
+      comment: st.comment.trim() || undefined,
+    })
+    labelPool.value = labelPool.value.filter((p) => p.id !== id)
+    delete labelState.value[id]
+  } catch (err: any) {
+    labelSubmitError.value = err.message || '标注提交失败'
+  } finally {
+    labelingId.value = null
+  }
+}
+
 onMounted(() => {
   loadObserve()
   loadPending()
+  loadLabelPool()
   loadChains()
 })
 onUnmounted(() => {
@@ -471,6 +530,13 @@ onUnmounted(() => {
       >
         回标
         <span v-if="pendingBadge > 0" class="tab-badge">{{ pendingBadge }}</span>
+      </button>
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'label' }"
+        @click="activeTab = 'label'"
+      >
+        标注
       </button>
       <button
         class="tab-btn"
@@ -608,6 +674,56 @@ onUnmounted(() => {
           </div>
         </div>
         <div v-if="submitError" class="error-msg">{{ submitError }}</div>
+      </div>
+    </div>
+
+    <!-- ─── 标注 tab（J1 盲标）───────────── -->
+    <!-- 卡上**没有判官分**——不是省略，是盲标要求（数据里也没有）。回复正文不截断：
+         Phase 0 的采集期砍过 1200 字符，判官与人都只看到残段，那次教训已记账。 -->
+    <div v-show="activeTab === 'label'" class="eval-pane">
+      <div v-if="labelLoading" class="list-hint"><span class="status-spinner"></span> 加载中…</div>
+      <div v-else-if="labelError" class="error-msg">
+        {{ labelError }}
+        <button class="btn-retry-sm" @click="loadLabelPool">重试</button>
+      </div>
+      <div v-else-if="labelPool.length === 0" class="list-hint">
+        没有待标注样本——猫的回复被标注后即移出此列表
+      </div>
+      <div v-else class="pending-list">
+        <div v-for="p in labelPool" :key="p.id" class="sample-card">
+          <div class="sample-head">
+            <span class="score-name">{{ p.agent_name || '未知猫' }}</span>
+            <span class="score-time">{{ fmtUtcFull(p.created_at) }}</span>
+          </div>
+          <div class="sample-reply">{{ p.content }}</div>
+          <div class="sample-actions">
+            <div class="score-picker" role="radiogroup" :aria-label="`标注 ${p.id}`">
+              <button
+                v-for="n in 5"
+                :key="n"
+                type="button"
+                class="score-btn"
+                :class="{ active: labelStateFor(p.id).score === n }"
+                :aria-checked="labelStateFor(p.id).score === n"
+                role="radio"
+                @click="labelStateFor(p.id).score = n"
+              >
+                {{ n }}
+              </button>
+              <span class="score-label">{{ scoreLabel(labelStateFor(p.id).score) }}</span>
+            </div>
+            <input
+              v-model="labelStateFor(p.id).comment"
+              class="input"
+              placeholder="评语（可选）"
+              @keydown.enter="submitLabel(p.id)"
+            />
+            <button class="btn-submit" :disabled="labelingId === p.id" @click="submitLabel(p.id)">
+              {{ labelingId === p.id ? '提交中…' : '提交标注' }}
+            </button>
+          </div>
+        </div>
+        <div v-if="labelSubmitError" class="error-msg">{{ labelSubmitError }}</div>
       </div>
     </div>
 

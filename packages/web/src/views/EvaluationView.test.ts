@@ -8,13 +8,20 @@ import type { VueWrapper, DOMWrapper } from '@vue/test-utils'
 import source from './EvaluationView.vue?raw'
 import EvaluationView from './EvaluationView.vue'
 import { api } from '@/composables/useApi'
-import type { ChainHop, EvalChainsResponse, EvalL1Metrics, SpanDto } from '@/composables/useApi'
+import type {
+  ChainHop,
+  EvalChainsResponse,
+  EvalL1Metrics,
+  LabelPoolRow,
+  SpanDto,
+} from '@/composables/useApi'
 
 /**
  * E4-B 评估中心前端——两层测试：
- * 1. ?raw 静态源断言（照 SettingsView.test.ts 约定）：三 tab 结构 / 三态 / 7 类结局 / 办成率 / 角标
+ * 1. ?raw 静态源断言（照 SettingsView.test.ts 约定）：四 tab 结构 / 三态 / 7 类结局 / 办成率 / 角标
  * 2. 挂载测试（@vue/test-utils + jsdom，mock useApi 边界）：渲染真实数据 + 回标提交闭环
- *    （样本移出 + 角标减一）+ 接口失败错误态 + P1 链路 tab（失败跳可见 / null≠0 / 孤儿区 / 时区）。
+ *    （样本移出 + 角标减一）+ 接口失败错误态 + P1 链路 tab（失败跳可见 / null≠0 / 孤儿区 / 时区）
+ *    + J1 标注 tab（盲标：界面**不得**出现判官分 / 提交移出池子）。
  *
  * P1-B：链路 tab 的 mock 数据用 `ChainHop[]` / `EvalChainsResponse` 显式标注——
  * 既喂数据，也顺带把前端 DTO 与冻结契约比对一遍（类型不符编译期就炸）。
@@ -28,6 +35,8 @@ vi.mock('@/composables/useApi', () => ({
     getEvalPending: vi.fn(),
     getEvalEpisodeStats: vi.fn(),
     submitEvalReview: vi.fn(),
+    getEvalLabelPool: vi.fn(),
+    submitEvalLabel: vi.fn(),
     getEvalL1Metrics: vi.fn(),
     getEvalChains: vi.fn(),
     getEvalSpans: vi.fn(),
@@ -41,13 +50,37 @@ describe('EvaluationView 静态结构（?raw）', () => {
     expect(source).toContain('@click="emit(\'close\')"')
   })
 
-  it('三 tab：观察 / 回标 / 链路，默认观察，回标带待回标角标', () => {
-    expect(source).toContain("const activeTab = ref<'observe' | 'review' | 'chain'>('observe')")
+  it('四 tab：观察 / 回标 / 标注 / 链路，默认观察，回标带待回标角标', () => {
+    expect(source).toContain(
+      "const activeTab = ref<'observe' | 'review' | 'label' | 'chain'>('observe')"
+    )
     expect(source).toContain(`v-show="activeTab === 'observe'"`)
     expect(source).toContain(`v-show="activeTab === 'review'"`)
+    expect(source).toContain(`v-show="activeTab === 'label'"`)
     expect(source).toContain(`v-show="activeTab === 'chain'"`)
     expect(source).toContain('tab-badge')
     expect(source).toContain('pendingBadge')
+  })
+
+  it('J1 标注 tab：盲标是硬要求——样本卡**不渲染任何判官分**，且该 tab 的取数面里没有它', () => {
+    // 结构面：标注 tab 区块整段不得出现判官分读数（`score-num` 是回标/观察 tab 的判官分
+    // 徽章类名，标注卡里出现即泄漏）
+    // 锚点取**面板**（`v-show="activeTab === 'label'"`）而非 tab 按钮上的 `:class` ——
+    // 后者在 tab 栏里先出现，按 `activeTab === 'label'` 裸切会切到按钮那一小段
+    const pane = source.slice(
+      source.indexOf(`v-show="activeTab === 'label'"`),
+      source.indexOf(`v-show="activeTab === 'chain'"`)
+    )
+    expect(pane).toContain('labelStateFor')
+    expect(pane).not.toContain('score-num')
+    expect(pane).not.toContain('judge_model')
+    expect(pane).not.toContain('sample_reason')
+    // 取数面：池子走的是 label/pool，不是 review/pending（后者带判官分）
+    expect(source).toContain('api.getEvalLabelPool')
+    expect(source).toContain('api.submitEvalLabel')
+    // 正文不截断（Phase 0 采集期砍 1200 字符的教训）——直接渲染 `p.content`
+    expect(pane).toContain('{{ p.content }}')
+    expect(pane).not.toContain('slice(0, 1200)')
   })
 
   it('链路 tab（P1）：概览 + 三段耗时 + 四类卡点 + 孤儿区 + 时区显式 UTC', () => {
@@ -199,6 +232,27 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
       reply_content: '这是低分回复全文 B',
       reply_created_at: '2026-08-11T08:00:00',
       context: [],
+    },
+  ]
+
+  /** 盲标池样本：**类型上就没有判官分字段**（`LabelPoolRow`）——若哪天有人往响应里加
+   *  判官分，这里会先编译不过。 */
+  const labelPoolRows: LabelPoolRow[] = [
+    {
+      id: 'lb1',
+      session_id: 'sess1',
+      agent_id: 'a1',
+      content: '待标注的猫回复全文 A',
+      created_at: '2026-09-02T10:00:00.000Z',
+      agent_name: '店长',
+    },
+    {
+      id: 'lb2',
+      session_id: 'sess2',
+      agent_id: 'a2',
+      content: '待标注的猫回复全文 B',
+      created_at: '2026-09-02T09:00:00.000Z',
+      agent_name: '吐槽猫',
     },
   ]
 
@@ -389,6 +443,8 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     vi.mocked(api.getEvalEpisodeStats).mockResolvedValue({ ok: true, stats })
     vi.mocked(api.getEvalPending).mockResolvedValue({ ok: true, pending: pendingRows })
     vi.mocked(api.submitEvalReview).mockResolvedValue({ ok: true, covered: false })
+    vi.mocked(api.getEvalLabelPool).mockResolvedValue({ ok: true, pool: labelPoolRows })
+    vi.mocked(api.submitEvalLabel).mockResolvedValue({ ok: true, covered: false })
     vi.mocked(api.getEvalL1Metrics).mockResolvedValue(l1Metrics)
     vi.mocked(api.getEvalChains).mockResolvedValue(chainsResponse)
     // h1 有段、h2 无段（已结束但零段行 = 存量行形态）
@@ -485,6 +541,65 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     // 样本仍在（提交失败不移出），错误提示可见
     expect(wrapper.text()).toContain('这是低分回复全文 A')
     expect(wrapper.text()).toContain('服务器错误')
+    wrapper.unmount()
+  })
+
+  it('J1 标注闭环：提交成功 → submitEvalLabel 调用 + 样本移出池子', async () => {
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const labelTab = wrapper.findAll('button').find((b) => b.text().includes('标注'))
+    expect(labelTab).toBeTruthy()
+    await labelTab!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('待标注的猫回复全文 A')
+    expect(wrapper.text()).toContain('待标注的猫回复全文 B')
+
+    // 标注 tab 的提交按钮（`.btn-submit` 在回标 tab 里也有，按所在 pane 取，别按全页序号）
+    const labelPane = wrapper.findAll('.eval-pane')[2]
+    await labelPane.findAll('.btn-submit')[0].trigger('click')
+    await flushPromises()
+
+    expect(api.submitEvalLabel).toHaveBeenCalledWith('lb1', { score: 3, comment: undefined })
+    expect(wrapper.text()).not.toContain('待标注的猫回复全文 A')
+    expect(wrapper.text()).toContain('待标注的猫回复全文 B')
+    wrapper.unmount()
+  })
+
+  it('J1 标注：池子界面不出现判官分，取数是 label/pool 而非 review/pending', async () => {
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const labelTab = wrapper.findAll('button').find((b) => b.text().includes('标注'))
+    await labelTab!.trigger('click')
+    await flushPromises()
+
+    const labelPane = wrapper.findAll('.eval-pane')[2]
+    expect(labelPane.text()).toContain('待标注的猫回复全文 A')
+    // 判官分徽章（`.score-num`）不得出现在标注面板里——盲标是方法论硬要求
+    expect(labelPane.find('.score-num').exists()).toBe(false)
+    expect(labelPane.text()).not.toContain('低分样本')
+    expect(api.getEvalLabelPool).toHaveBeenCalled()
+    expect(api.getEvalPending).toHaveBeenCalled() // 回标 tab 照常（两通道并存）
+    wrapper.unmount()
+  })
+
+  it('J1 标注失败 → 样本保留 + 错误提示（不白屏）', async () => {
+    vi.mocked(api.submitEvalLabel).mockRejectedValue(new Error('服务器错误：标注写入失败'))
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const labelTab = wrapper.findAll('button').find((b) => b.text().includes('标注'))
+    await labelTab!.trigger('click')
+    await flushPromises()
+
+    const labelPane = wrapper.findAll('.eval-pane')[2]
+    await labelPane.findAll('.btn-submit')[0].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('待标注的猫回复全文 A')
+    expect(wrapper.text()).toContain('标注写入失败')
     wrapper.unmount()
   })
 
