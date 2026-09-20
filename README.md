@@ -1,329 +1,161 @@
-# CatStudio — 多 Agent 对话系统
+# CatStudio
 
-面向终端用户的本地多 Agent 对话平台。用户创建 Session（会话），与一组具有持久身份和长期记忆的拟人化 AI Agent（猫咪角色）进行群聊，支持 A2A（Agent-to-Agent）协作、代码审查链、评估体系与 QQ 接入。
+本地运行的**多 Agent 对话平台**：你创建会话，和一组有固定身份与长期记忆的 AI 猫咪角色群聊；它们彼此之间也会互相 @ 协作、互相审查代码——还能通过 QQ 跟你对话。
 
-> **内部代号**：开发与代码中沿用「猫咖」作为内部代号（代码字符串、日志、测试断言、角色人设），对外产品名为 **CatStudio**。
+## 这是什么
 
-## 前置依赖
+- **不是「多开几个聊天窗口」**——每只猫有独立人设、独立的 LLM 供应商配置、独立的长期记忆，同一会话内共享上下文。
+- **猫与猫之间真的会对话**——被 @ 的猫会被调度执行并回复，它的回复又能 @ 下一只猫，串成可编排的协作链（A2A）。
+- **除了聊天，还带一套工程化协作能力**——结构化路由投递、代码审查链、增量摘要与上下文交接、执行评估与归因。
 
-| 依赖                           | 版本要求   | 用途                     | 必需？                      |
-| ------------------------------ | ---------- | ------------------------ | --------------------------- |
-| [Node.js](https://nodejs.org/) | >= 22.18.0 | 运行时                   | ✅                          |
-| [pnpm](https://pnpm.io/)       | >= 8       | 包管理 + monorepo        | ✅                          |
-| Claude Code CLI                | 最新       | `claude` provider 适配器 | ❌ 仅使用该 provider 时需要 |
-| Codex CLI + codex-proxy        | 最新       | `openai` provider 适配器 | ❌ 仅使用该 provider 时需要 |
+> 开发与代码里沿用「猫咖」作为内部代号（代码字符串、日志、测试断言、角色人设），对外产品名为 **CatStudio**。
 
-### 安装前置依赖
+## 核心能力
 
-```bash
-# Node.js（推荐通过 nvm-windows / fnm / 官网安装）
-node --version  # 确认 >= 22.18.0
-
-# pnpm
-npm install -g pnpm
-
-# Claude Code CLI（可选——仅使用 claude provider 时）
-npm install -g @anthropic-ai/claude-code
-
-# Codex CLI + codex-proxy（可选——仅使用 openai provider 时）
-npm install -g @openai/codex
-# codex-proxy 需额外配置，参见 packages/server/src/llm/cli-utils.ts 中的 ensureProxy()
-```
+- **多 Agent 群聊** —— 单会话多只猫，按 `@` 精确路由；空闲即执行、忙碌则 FIFO 排队。[`packages/server/src/dispatch/`](./packages/server/src/dispatch/)
+- **A2A 协作** —— Agent 之间行首 `@` 即可互相派活，形成执行链。[`connectors/a2a-mentions.ts`](./packages/server/src/connectors/a2a-mentions.ts)
+- **长期记忆** —— 本地嵌入模型 + sqlite-vec 向量检索，与关键词做 RRF 混合召回后注入上下文。[`packages/server/src/memory/`](./packages/server/src/memory/)
+- **多 LLM 供应商** —— 同一会话内每只猫可用不同 provider，按 `provider + apiKey` 复用适配器实例。[`packages/server/src/llm/`](./packages/server/src/llm/)
+- **上下文治理** —— 增量摘要 + 90% 阈值自动交接新会话，长对话不爆上下文。[`docs/adr/`](./docs/adr/)
+- **QQ 接入** —— OneBot v11 协议，NapCat 等实现以 HTTP 上报，本项目零新增依赖。[`connectors/onebot.ts`](./packages/server/src/connectors/onebot.ts)
 
 ## 快速开始
 
+| 依赖                           | 版本       | 必需？                              |
+| ------------------------------ | ---------- | ----------------------------------- |
+| [Node.js](https://nodejs.org/) | >= 22.18.0 | ✅                                  |
+| [pnpm](https://pnpm.io/)       | >= 8       | ✅                                  |
+| Claude Code CLI / Codex CLI    | 最新       | ❌ 仅使用对应 provider 适配器时需要 |
+
 ```bash
-# 1. 安装依赖
+node --version  # 确认 >= 22.18.0
 pnpm install
 
-# 2. 设置 API Key
-# DeepSeek 是默认 provider，演示角色需要 DS_KEY 环境变量
-set DS_KEY=sk-your-deepseek-api-key    # Windows CMD
-# 或 $env:DS_KEY="sk-..."              # PowerShell
-# 或 export DS_KEY="sk-..."            # Git Bash
+export DS_KEY="sk-your-deepseek-api-key"   # DeepSeek 是默认 provider（Git Bash）
+#   set DS_KEY=sk-...            # Windows CMD
+#   $env:DS_KEY="sk-..."         # PowerShell
 
-# 3. 初始化种子数据（5 个演示角色 + 1 个演示会话）
-npx tsx packages/server/src/seed.ts
-
-# 4. 启动开发环境
-pnpm dev
+pnpm seed   # 灌种子数据（5 个演示角色 + 1 个演示会话）
+pnpm dev    # 启动 server :3200 + web :5173
 ```
 
-启动后打开浏览器访问 **http://localhost:5173**。
+浏览器打开 **http://localhost:5173**，后端在 3200。Vite 端口被占用时自动切换 5174、5175。
 
-> **注意**：首次运行嵌入模型 `Xenova/bge-small-zh-v1.5`（约 100MB）会从 HuggingFace 下载并缓存到 `~/.cache/huggingface/`。下载期间记忆检索静默降级，Agent 正常回复。
+> 首次运行会下载本地嵌入模型 `Xenova/bge-small-zh-v1.5`（约 100MB）到 `~/.cache/huggingface/`；下载期间记忆检索静默降级，Agent 正常回复。中国大陆可设 `HF_ENDPOINT=https://hf-mirror.com`。
 
-## 端口分配
+### 常用脚本
 
-| 端口 | 进程                         | 说明                                   |
-| ---- | ---------------------------- | -------------------------------------- |
-| 3200 | server (Fastify + Socket.IO) | REST API + WebSocket                   |
-| 5173 | web (Vite dev server)        | Vue 3 前端，API/socket 反向代理到 3200 |
+| 命令                               | 作用                                   |
+| ---------------------------------- | -------------------------------------- |
+| `pnpm dev` / `pnpm start`          | 开发模式 / 生产模式（生产模式走主库）  |
+| `pnpm dev:server` / `pnpm dev:web` | 只起 server (:3200) / 只起 web (:5173) |
+| `pnpm seed` / `pnpm seed --reset`  | 灌种子数据（幂等）/ 清空后重建         |
+| `pnpm build`                       | 全仓构建                               |
+| `pnpm test`                        | 跑全部测试（`vitest run`）             |
+| `pnpm lint`                        | 类型检查（各包 tsc / vue-tsc）         |
+| `pnpm stop`                        | 清理 3200 / 5173-5175 端口残留进程     |
 
-Vite 端口冲突时自动切换到 5174、5175……CORS 已配置为 `localhost` 正则匹配，任意端口均可连接。
+## 架构总览
 
-## 项目结构
+| 包 / 目录          | 职责                                                    |
+| ------------------ | ------------------------------------------------------- |
+| `packages/shared/` | 共享类型、Zod schema、Socket.IO 事件常量（无运行逻辑）  |
+| `packages/server/` | Fastify + Socket.IO + SQLite + LLM 适配器 + 调度 + 记忆 |
+| `packages/web/`    | Vue 3 前端（Vite + Pinia + Socket.IO client）           |
+| `scripts/`         | 开发 / 种子 / 停服、MCP server、git 钩子与技能治理      |
+| `skills/`          | 技能活源（`.claude/skills` 是指向此处的链接）           |
+| `docs/`            | 文档：ADR、定稿规格、调研、开发过程记录                 |
 
-```
-catStudy/
-├── packages/
-│   ├── shared/          # 共享类型 + Zod Schema + 事件常量
-│   │   └── src/
-│   │       ├── types.ts        # AgentConfig, SessionConfig, Message, Memory…
-│   │       ├── schemas.ts      # Zod 校验 (AgentCreate, SessionCreate…)
-│   │       ├── events.ts       # Socket.IO 事件名
-│   │       └── token-counter.ts# Token 计数工具（字符估算 + tiktoken）
-│   ├── server/          # 后端 (Fastify + Socket.IO + SQLite)
-│   │   └── src/
-│   │       ├── index.ts        # 服务入口：Fastify → Socket.IO → 优雅关闭
-│   │       ├── db/
-│   │       │   ├── index.ts    # SQLite 初始化 (WAL + sqlite-vec + 迁移)
-│   │       │   └── repository/ # 仓储层（agents/sessions/messages/chunks/knowledge/verdicts…）
-│   │       ├── llm/
-│   │       │   ├── adapter.ts  # LLMAdapter 统一接口
-│   │       │   ├── deepseek.ts # DeepSeek HTTP Chat Completions 适配器
-│   │       │   ├── claude.ts   # Claude Code CLI spawn 适配器
-│   │       │   ├── openai.ts   # Codex CLI spawn 适配器
-│   │       │   ├── ollama.ts   # Ollama 本地模型适配器
-│   │       │   ├── pi.ts       # 推理模型非流式适配（thinking + 半故障重试）
-│   │       │   ├── complete.ts # 非流式补全（摘要/评估用）
-│   │       │   ├── registry.ts # 按 provider + apiKey 路由适配器
-│   │       │   ├── cli-utils.ts# CLI 适配器共享工具（resolveBin, parseOutput）
-│   │       │   ├── git-utils.ts# CLI 适配器 Git workspace 隔离
-│   │       │   ├── cli-supervisor.mjs # CLI 子进程监督（空闲/硬超时）
-│   │       │   ├── route-signals.ts   # MCP 结构化路由信号（post_message）
-│   │       │   └── user-request-signals.ts # MCP 用户请求信号（request_user_action）
-│   │       ├── dispatch/
-│   │       │   ├── index.ts    # 单槽位 FIFO 调度引擎 + 执行恢复
-│   │       │   └── mention-policy.ts # @mention 投递策略
-│   │       ├── summarizer/
-│   │       │   └── index.ts    # 增量摘要引擎（压缩优先 + 达限交接）
-│   │       ├── handoff/
-│   │       │   └── index.ts    # 会话交接（90% token 阈值自动创建新会话）
-│   │       ├── memory/
-│   │       │   ├── index.ts    # 切片检索 + 上下文构建（向量 + 关键词 RRF 混合检索）
-│   │       │   ├── embedding.ts# HuggingFace 本地嵌入模型加载
-│   │       │   └── query-rewrite.ts # 检索 query 改写
-│   │       ├── eval/           # 评估体系（L1/L2/L3 + episodes + Phase 0）
-│   │       │   ├── scorer.ts   # 评分器
-│   │       │   ├── attribution.ts # 归因分析
-│   │       │   ├── episodes.ts # episode 扫描（零执行检测）
-│   │       │   ├── phase0.ts   # 模型选型评估
-│   │       │   ├── verdict-parser.ts # 审查结论解析
-│   │       │   ├── l1-aggregator.ts # L1 汇总
-│   │       │   ├── classify-error.ts / reclassify.ts / sampler.ts
-│   │       ├── connectors/
-│   │       │   ├── socketio.ts     # Socket.IO 消息收发 + 上下文过滤 + MCP 工具
-│   │       │   ├── a2a-mentions.ts # Agent 间 @mention 解析（行首匹配 + 代码块剥离）
-│   │       │   ├── ingest.ts       # 消息入库
-│   │       │   ├── onebot.ts       # QQ 接入（OneBot v11 webhook）
-│   │       │   ├── onebotOutbound.ts # QQ 出站回复
-│   │       │   └── replyBus.ts     # 回复总线
-│   │       ├── routes/         # REST API（8 个资源）
-│   │       │   ├── agents.ts   # Agent CRUD
-│   │       │   ├── sessions.ts # Session CRUD + 广播切换 + 消息清空
-│   │       │   ├── messages.ts # 消息读写 + 补填判定
-│   │       │   ├── config.ts / config-summary.ts # 系统配置
-│   │       │   ├── connectors.ts # 连接器（OneBot 绑定等）
-│   │       │   ├── eval.ts     # 评估端点
-│   │       │   └── internal.ts # 内部端点（含 MCP 工具转发）
-│   │       ├── git/
-│   │       │   └── diff-collector.ts # diff 收集（审查链输入）
-│   │       ├── config/context-config.ts # 上下文配置
-│   │       ├── restart-request.ts # 重启请求（用户批准通道）
-│   │       ├── ui-review.ts   # UI 审查
-│   │       ├── seed.ts        # 种子数据（upsert 模式，幂等运行）
-│   │       └── logger.ts      # 双格式日志：stdout 彩色人读 / 文件 JSON Lines
-│   └── web/             # 前端 (Vue 3 + Pinia + Socket.IO Client)
-│       └── src/
-│           ├── App.vue         # 布局根
-│           ├── main.ts         # 入口：createApp + Pinia
-│           ├── components/
-│           │   ├── ChatPanel.vue       # 聊天面板 + @提及 + 广播/清空
-│           │   ├── SessionList.vue     # 会话列表 + 品牌区
-│           │   ├── SessionAgentsPanel.vue # 会话 Agent 管理
-│           │   ├── AgentEditModal.vue  # Agent 编辑弹窗 + provider 提示
-│           │   ├── SessionCreateModal.vue # 新建会话弹窗
-│           │   └── DiffViewer.vue      # diff 内容展示
-│           ├── views/
-│           │   ├── SettingsView.vue    # 设置页（配置/NapCat/QQ 绑定）
-│           │   └── EvaluationView.vue  # 评估页（L1/L2/L3 结果）
-│           ├── stores/chat.ts  # Pinia 状态管理 + Socket.IO 事件绑定
-│           ├── composables/
-│           │   ├── useApi.ts       # REST API 封装
-│           │   ├── useSocket.ts    # Socket.IO 单例
-│           │   ├── useMention.ts   # @提及自动补全逻辑
-│           │   ├── useSkillCommand.ts # 技能命令
-│           │   └── useTheme.ts     # 主题切换
-│           ├── directives/     # 自定义指令
-│           └── utils/          # diff/markdown/thinking/rolePlaceholders/logger
-├── scripts/
-│   ├── dev.js            # 统一开发启动器（进程树清理 + NapCat 拉起）
-│   ├── stop.js           # 端口强制清理（netstat → taskkill）
-│   ├── seed.js           # 种子脚本转发
-│   ├── mcp-server.mjs    # MCP 服务端（工具暴露给外部）
-│   ├── handoff-gen.mjs   # 会话交接文档生成（commit sha 回写）
-│   ├── restart-gate.js   # 重启门禁
-│   ├── skills-bootstrap.mjs / skills-check-*.mjs # 技能挂载检查
-│   ├── worktree-create.mjs # 会话 worktree 创建
-│   └── a2a-test.mjs / handoff-pipeline.e2e.mjs / handoff-gen.e2e.mjs # e2e
-├── docs/adr/             # 架构决策记录 (7 篇)
-├── docs/                 # 规划/研究/会话记录
-├── CONTEXT.md            # 领域术语表
-├── pnpm-workspace.yaml   # pnpm monorepo 配置
-├── vitest.workspace.ts   # Vitest 工作区（shared/server/web）
-└── tsconfig.base.json    # 共享 TypeScript 编译配置
-```
+`packages/server/src/` 的主要模块：
 
-## 可用脚本
+| 模块          | 职责                                                    |
+| ------------- | ------------------------------------------------------- |
+| `llm/`        | 供应商适配器 + 按 provider/key 的注册表与并发 token 池  |
+| `dispatch/`   | 单槽位 FIFO 调度引擎、`@mention` 投递策略               |
+| `memory/`     | 切片检索与上下文构建（向量 + 关键词 RRF 混合）          |
+| `connectors/` | Socket.IO 收发、OneBot(QQ) 接入、消息入库               |
+| `routes/`     | REST API（agents / sessions / messages / connectors …） |
+| `db/`         | SQLite 初始化（WAL + sqlite-vec + 迁移）与仓储层        |
 
-```bash
-# ─── 开发 ──────────────────────────────────
-pnpm dev              # 启动 server + web（统一进程管理，Ctrl+C 彻底退出）
-pnpm dev:server       # 仅启动 server (3200)
-pnpm dev:web          # 仅启动 web (5173)
-pnpm stop             # 强制清理 3200/5173/5174/5175 端口残留进程
+技术栈：
 
-# ─── 种子数据 ──────────────────────────────
-npx tsx packages/server/src/seed.ts           # upsert 模式：已存在则更新配置
-npx tsx packages/server/src/seed.ts --reset   # 重置模式：清空所有数据后重建
+| 层       | 技术                                                                 |
+| -------- | -------------------------------------------------------------------- |
+| 运行时   | Node.js 22.18.0+ / TypeScript 5.5                                    |
+| 后端     | Fastify 5 + Socket.IO 4 + SQLite (better-sqlite3 + WAL + sqlite-vec) |
+| LLM 推理 | DeepSeek API / Claude Code CLI / Codex CLI / Ollama / Kimi K3        |
+| 嵌入模型 | Xenova/bge-small-zh-v1.5（512 维，跑在独立 sidecar 进程）            |
+| 前端     | Vue 3 + Vite + Pinia ／ 测试 Vitest 4                                |
 
-# ─── 测试 ──────────────────────────────────
-pnpm test             # 运行所有测试（以 pnpm test 实测为准）
-pnpm test:watch       # watch 模式，文件变更自动运行
-pnpm test:coverage    # 运行 + 覆盖率报告
-pnpm test:server      # 仅 server 包测试
-pnpm test:web         # 仅 web 包测试
-pnpm test:shared      # 仅 shared 包测试
+模块职责与目录细节见 [`CONTEXT.md`](./CONTEXT.md)；运行时不变量与边界见 [`AGENTS.md`](./AGENTS.md)。
 
-# ─── 类型检查 ──────────────────────────────
-pnpm lint             # 全项目 TypeScript 类型检查
-```
+## 配置
 
-## 环境变量
+全部环境变量与默认值见 [`.env.example`](./.env.example)（含逐项注释）。最常用的几项：
 
-| 变量                                                                             | 默认值                     | 说明                                                                                             |
-| -------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------ |
-| `DS_KEY`                                                                         | —                          | DeepSeek API Key（种子数据使用，演示角色共用）                                                   |
-| `KIMI_API_KEY`                                                                   | —                          | Kimi K3 API Key（kimi 推理 provider）                                                            |
-| `PORT`                                                                           | `3200`                     | Server 监听端口                                                                                  |
-| `HOST`                                                                           | `127.0.0.1`                | Server 监听地址                                                                                  |
-| `HF_ENDPOINT`                                                                    | `https://huggingface.co`   | HuggingFace 模型下载地址（中国大陆可设为 `https://hf-mirror.com`）                               |
-| `LOG_LEVEL`                                                                      | `info`                     | 日志级别：`debug` / `info` / `warn` / `error`                                                    |
-| `MEMORY_ENABLED`                                                                 | `true`                     | 是否启用向量记忆（`false` 关闭，测试环境建议关闭）                                               |
-| `MEMORY_TOP_K`                                                                   | `3`                        | 检索时返回的相关记忆条数                                                                         |
-| `MEMORY_EMBEDDING_MODEL`                                                         | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型名称                                                                                 |
-| `SUMMARY_ENABLED`                                                                | `true`                     | 是否启用增量摘要                                                                                 |
-| `SUMMARY_MODEL`                                                                  | `deepseek-v4-flash`        | 摘要使用的模型                                                                                   |
-| `SUMMARY_API_KEY`                                                                | 同 `DS_KEY`                | 摘要模型的 API Key                                                                               |
-| `SUMMARY_BASE_URL`                                                               | `https://api.deepseek.com` | 摘要 API 地址                                                                                    |
-| `SUMMARY_INTERVAL`                                                               | `3`                        | 每 N 轮对话触发一次增量摘要                                                                      |
-| `SUMMARY_COMPRESS_LIMIT`                                                         | —                          | 摘要压缩触发阈值（压缩先于截断，达限走 handoff）                                                 |
-| `SUMMARY_REPLACE_HISTORY`                                                        | —                          | 摘要是否替换历史消息                                                                             |
-| `HANDOFF_ENABLED`                                                                | `true`                     | 是否启用 90% 阈值会话交接                                                                        |
-| `HANDOFF_THRESHOLD`                                                              | `0.9`                      | 触交接的上下文 token 占比（可经设置页「系统配置」修改，配置文件优先于 env）                      |
-| `MAX_CONTEXT_TOKENS`                                                             | `128000`                   | 单次 LLM 调用的上下文 token 预算上限                                                             |
-| `TOKEN_COUNT_METHOD`                                                             | `estimate`                 | token 计数方式：`estimate`（字符估算）或 `tiktoken`（精确计数）                                  |
-| `CLI_IDLE_TIMEOUT_MS`                                                            | `1200000`                  | CLI 适配器空闲超时（毫秒，20 分钟）                                                              |
-| `AGENT_HARD_TIMEOUT_MS`                                                          | `1800000`                  | Agent 执行硬超时（毫秒，30 分钟）                                                                |
-| `CLAUDE_CODE_EFFORT_LEVEL`                                                       | `high`                     | Claude Code CLI 推理深度：`low` / `medium` / `high` / `max`                                      |
-| `EVAL_SAMPLE_RATE`                                                               | —                          | 评估采样率                                                                                       |
-| `EVAL_ALERT_SUCCESS_RATE` / `EVAL_ALERT_TIMEOUT_RATE` / `EVAL_ALERT_REWORK_RATE` | —                          | 评估告警阈值（成功率/超时率/返工率）                                                             |
-| `ONEBOT_ENABLED`                                                                 | `false`                    | 是否启用 OneBot webhook（默认 false，关闭时 webhook 返回 503）                                   |
-| `ONEBOT_API_BASE`                                                                | `http://127.0.0.1:3000`    | NapCat HTTP API 地址（出站回复用）                                                               |
-| `ONEBOT_TOKEN`                                                                   | —                          | webhook 鉴权 token（设置后上报须鉴权：Bearer 或 `x-signature`，详见「QQ 接入」章节；留空不校验） |
-| `ONEBOT_ALLOWLIST`                                                               | —                          | QQ 接入白名单（群/私聊）                                                                         |
-| `ONEBOT_FETCH_TIMEOUT_MS`                                                        | —                          | OneBot 出站请求超时（毫秒）                                                                      |
-| `NAPCAT_LAUNCH_CMD`                                                              | —                          | dev.js 拉起 NapCat 的启动命令：完整命令行或 `{NAPCAT_PATH}` 模板（详见下文「QQ 接入」章节）      |
+| 变量                     | 默认值                     | 说明                                |
+| ------------------------ | -------------------------- | ----------------------------------- |
+| `DS_KEY`                 | —                          | DeepSeek API Key（演示角色使用）    |
+| `PORT` / `HOST`          | `3200` / `127.0.0.1`       | Server 监听端口与地址               |
+| `LOG_LEVEL`              | `info`                     | `debug` / `info` / `warn` / `error` |
+| `MEMORY_ENABLED`         | `true`                     | 是否启用向量记忆                    |
+| `MEMORY_EMBEDDING_MODEL` | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型                        |
+| `HANDOFF_THRESHOLD`      | `0.9`                      | 上下文占比达此值触发会话交接        |
+| `ONEBOT_ENABLED`         | `false`                    | 是否启用 QQ 接入                    |
+| `AGENT_HARD_TIMEOUT_MS`  | `1800000`                  | 单次执行硬超时（毫秒，30 分钟）     |
+
+## 文档地图
+
+| 位置                                           | 内容                                       |
+| ---------------------------------------------- | ------------------------------------------ |
+| [`CONTEXT.md`](./CONTEXT.md)                   | 领域术语表、模块目录结构——**先读这个**     |
+| [`AGENTS.md`](./AGENTS.md)                     | 项目操作手册：命令、运行时不变量、边界与坑 |
+| [`CODING_STANDARDS.md`](./CODING_STANDARDS.md) | 编码规范                                   |
+| [`CONTRIBUTING.md`](./CONTRIBUTING.md)         | 开发流程：提交门禁、审查链、测试约定       |
+| [`docs/adr/`](./docs/adr/)                     | 架构决策记录（13 篇）                      |
+| [`docs/plans/`](./docs/plans/)                 | 定稿规格（7 篇）                           |
+| [`docs/lessons/`](./docs/lessons/)             | 踩坑沉淀                                   |
+| [`docs/research/`](./docs/research/)           | 技术调研                                   |
+| [`docs/eval/`](./docs/eval/)                   | 检索质量基线与黄金集                       |
+| [`docs/run/`](./docs/run/)                     | 开发文档·在飞（过程记录）                  |
+| [`docs/sessions/`](./docs/sessions/)           | 会话摘要（过程记录）                       |
 
 ## QQ 接入（OneBot / NapCat）
 
-CatStudio 通过 OneBot v11 协议接入 QQ：NapCat 等实现通过 HTTP 上报消息，系统零新增依赖（webhook 入站 + fetch 出站）。环境变量见上表 `ONEBOT_*` 与 `NAPCAT_LAUNCH_CMD`。
+NapCat 等 OneBot v11 实现以 HTTP 上报消息，本项目零新增依赖（webhook 入站 + fetch 出站）。
 
-### 接入前提
+1. 安装 NapCat，`.env` 设 `ONEBOT_ENABLED=true`
+2. 上报地址指向 `POST http://127.0.0.1:3200/api/connectors/onebot/webhook`
+3. 若设了 `ONEBOT_TOKEN`：NapCat 侧填**上报签名密钥**（它自动带 `x-signature` 头）；用 HTTP 客户端直连才走 `Authorization: Bearer <token>`
+4. 是否让 `pnpm dev` 自动拉起 NapCat，由 `NAPCAT_LAUNCH_CMD` 与设置页开关控制
 
-1. 安装 NapCat（如 `D:\Software\NapCat\shell\napcat.bat`）
-2. `.env` 设置 `ONEBOT_ENABLED=true`
-3. NapCat HTTP 上报配置指向 `POST http://127.0.0.1:3200/api/connectors/onebot/webhook`（若设置了 `ONEBOT_TOKEN`，需在 NapCat 上报配置中填一致的**上报签名密钥**——NapCat 自动带 `x-signature` 头；直接用 HTTP 客户端 POST 才用 `Authorization: Bearer <token>` 头）
+**登录坑**：NapCat 核心进程起来 ≠ OneBot 可用——QQ 未登录时 HTTP（默认 3000）不监听，只有 WebUI（6099）在跑。浏览器打开 `http://127.0.0.1:6099`，token 在 NapCat 安装目录 `shell/napcat/config/webui.json` 的 `webuiToken`。点「快速登录QQ」成功后会自动写 `autoLoginAccount`，之后重启免扫码。
 
-### 启动命令
+**凭证目录**：登录态与消息数据在 `Tencent Files\<QQ号>\nt_qq\`（`nt_db` / `nt_data` / `nt_temp`），**不是** `NapCat\data`——后者为空 ≠ 凭证缺失。
 
-`NAPCAT_LAUNCH_CMD` 两种形态，任选其一：
-
-- **完整命令行**：直接写完整命令（如 napcat.exe 路径），含空格路径直接写不用引号——Node 自动组装加引号
-- **`{NAPCAT_PATH}` 纯占位符模板**：配合配置页面「NapCat 启动路径」——页面保存的路径在启动时替换进命令，换机器/换安装位置只改页面不碰 `.env`，保存后立即生效无需重启
-
-### 自动拉起开关（autoStart）
-
-`dev.js` 启动时是否自动拉起 NapCat，由配置页面「NapCat」的「dev 启动时自动拉起」开关控制（存于 `.napcat-config.json` 的 `autoStart` 字段）。**旧配置无该字段 = 自动拉起（默认开启）**——现有用户升级后行为零变化；在设置页关闭后，`pnpm dev` 不再自动拉起（打印引导日志），手动「启动 NapCat」不受影响。
-
-### 首次使用必须登录 QQ
-
-NapCat 核心进程起来 ≠ OneBot 可用：QQ 未登录时 HTTP（默认 3000）不监听、仅 WebUI（6099）在跑。
-
-1. 浏览器打开 `http://127.0.0.1:6099`
-2. token 在 NapCat 安装目录 `shell\napcat\config\webui.json` 的 `webuiToken`
-
-登录一次不用每次扫码：WebUI「快速登录QQ」成功后自动写 `autoLoginAccount` 到 webui.json，之后重启自动登录。
-
-### 凭证与数据目录
-
-登录态与消息数据在 `Tencent Files\<QQ号>\nt_qq\`（`nt_db` / `nt_data` / `nt_temp`），**不是** `NapCat\data`——该目录为空 ≠ 凭证缺失。
-
-### 排查「操作中」永等翻转
-
-点击启动后面板一直「操作中」时按序排查：
-
-1. 看 `ONEBOT_API_BASE` 端口是否监听——不监听先查 WebUI 登录态（见上）
-2. 再看 dev.js 启动日志警告（见下「已知边界」）
-
-### 已知边界
-
-`{NAPCAT_PATH}` 占位符外不能再带附加内容（如 `{NAPCAT_PATH} --flag`）——路径含空格时 cmd /c 下该组合不可解析，dev.js 启动会打警告。规避：改用无空格目录，或完整命令行形态（不含占位符）。
+**占位符边界**：`NAPCAT_LAUNCH_CMD` 用 `{NAPCAT_PATH}` 模板时，占位符外不能再带附加内容（如 `{NAPCAT_PATH} --flag`）——路径含空格时 `cmd /c` 下不可解析，启动会打警告。规避：改用无空格目录，或写不带占位符的完整命令行。
 
 ## MCP 工具层
 
-LLM 侧通过 MCP 工具与系统交互（`packages/server/src/connectors/socketio.ts` + `llm/route-signals.ts` + `llm/user-request-signals.ts` 实现），当前提供：
+LLM 侧通过 MCP 工具与系统交互，当前 9 个：
 
-| 工具                  | 用途                                                             |
-| --------------------- | ---------------------------------------------------------------- |
-| `post_message`        | 结构化路由投递：把消息投递给会话内下一棒 Agent（替代文本行首 @） |
-| `query_db`            | 排障取证：按白名单表/列查询数据库（messages/execution_logs…）    |
-| `request_user_action` | 用户介入请求：重启 server（需用户批准）等稳定触发通道            |
-| `search_knowledge`    | 检索运营方知识库（项目接入文档/工作规范等标准数据）              |
+| 工具                     | 用途                                      |
+| ------------------------ | ----------------------------------------- |
+| `post_message`           | 结构化路由投递：投给会话内下一棒 Agent    |
+| `query_db`               | 排障取证：按白名单表/列查数据库           |
+| `query_session_messages` | 回读会话历史消息（含 thinking / tool 块） |
+| `list_session_members`   | 列出会话成员（agentId / name / role）     |
+| `request_user_action`    | 请求用户介入（如重启 server，需用户批准） |
+| `search_knowledge`       | 检索运营方知识库                          |
+| `read_skill`             | 按名读取技能正文（懒加载）                |
+| `list_skills`            | 列出技能清单                              |
+| `create_pr`              | 创建 GitHub PR（收口链发布关）            |
 
-设计要点：
-
-- **结构化路由优先**：`post_message` 调用成功后服务端把路由信号合并进回复的 mentions 并触发派发；调用失败时降级为文本行首 @（工具不可用不丢单）
-- **稳定触发通道**：`request_user_action` 替代文本格式匹配（历史文本格式依赖 LLM 精确输出，已堆四层容错仍出事故）
-
-## 代码审查链
-
-审查请求由实施角色自行发起（提交消息需带 `catstudy [uuid]` 标记，uuid = 触发本次执行的那条消息 id（用户消息或别的猫投来的 A2A 消息皆可）；post-commit hook 只在「提交无归属执行」时兜底）：
-
-`catstudy [uuid]` 会被 `.husky/commit-msg` 门禁按 `messages` 表校验存在性（`scripts/commit-uuid-gate.mjs`）——**查无 ⇒ 提交被拒**（手打/杜撰的 uuid 挂在提交那一刻；无标记的 merge / revert / 手动提交照旧放行）。逃生口是本仓既有的 `git commit --no-verify`。
-
-1. 实施角色提交 commit（限定路径：只 add 本次改动文件，禁止 `git add -A`）
-2. 补填交接文档后由实施角色投递 @店长 → @吐槽猫 审查
-3. 审查结论分流：✅可合并 / 💬仅评论（非阻断）→ 店长收口（ff-only 合并 → 更新 `.push-gate` → 发起 push 审批（用户批准才推））；⚠️建议修改 / ❌需重做 → 回到实施角色修改后复申
-4. 会话 worktree 收口：从主仓库根执行（优先 `closeoutSession`）→ `git merge session/<8位id>` 回 dev → `git worktree remove --force` → 删除会话分支 → 标准收口序列
-
-配套：`docs/adr/` 之外还依赖 git 钩子（`git diff-collector` 收集 diff 作为审查输入）。**收口决策归店长（架构师）**，实施角色不自行合并。
-
-## 评估体系
-
-`packages/server/src/eval/` 实现 L1/L2/L3 三级评估 + episodes 扫描：
-
-- **L1**：基础指标聚合（成功率/超时率/返工率，`l1-aggregator.ts`），超阈值触发告警（`EVAL_ALERT_*`）
-- **L2/L3**：评分器（`scorer.ts`）+ 归因分析（`attribution.ts`）+ 审查结论解析（`verdict-parser.ts`）
-- **Episodes**：会话 episode 扫描（`episodes.ts`），零执行检测与已回复判定
-- **Phase 0**：模型选型评估（`phase0.ts`，kimi-k3 已当选，K5 接线中）
-
-前端「评估页」（`views/EvaluationView.vue`）与「设置页」（`views/SettingsView.vue`）提供查看与管理入口。
+工具定义见 [`scripts/mcp-server-utils.mjs`](./scripts/mcp-server-utils.mjs)，服务端实现见 [`connectors/socketio.ts`](./packages/server/src/connectors/socketio.ts)。
 
 ## 演示角色
 
-seed 数据内置 5 个角色（角色类型：store / implementer / reviewer）：
+`pnpm seed` 内置 5 个角色（类型：store / implementer / reviewer）：
 
 | 角色    | 类型        | 职责                         |
 | ------- | ----------- | ---------------------------- |
@@ -333,79 +165,6 @@ seed 数据内置 5 个角色（角色类型：store / implementer / reviewer）
 | dsh猫   | implementer | 实施工程师（dsh 试点）       |
 | 吐槽猫  | reviewer    | 审查者：代码审查             |
 
-## 核心概念
+## License
 
-详见 [`CONTEXT.md`](./CONTEXT.md)。关键术语：
-
-- **Agent** — 具有固定身份和长期记忆的 AI 猫咪角色，每个 Agent 独立配置 LLM 供应商
-- **Session** — 独立的多人对话线程，包含一组 Agent
-- **Slot** — Agent 的执行能力单元，单槽位 + FIFO 队列调度
-- **Mention** — 用户通过 `@猫咪名` 指定回复者，调度系统据此路由（A2A：Agent 间 @ 行首独占一行生效）
-- **Memory** — Agent 对过往对话的向量化持久记录，用户发言后自动检索注入上下文
-- **Broadcast Mode** — 开启后所有 Agent 互相感知对方发言；默认关闭（各 Agent 只看见和自己相关的消息）
-- **Token Budget** — 单次 LLM 调用的上下文 token 预算上限（默认 128K），配合 token 感知软截断和 90% 交接阈值控制上下文膨胀
-- **Summary** — 每 N 轮对话触发的增量摘要，异步更新运行中的会话摘要，压缩优先、达限走 handoff
-- **Handoff** — 当上下文使用率达到 90% 阈值时，自动创建新会话并生成全量总结，前端无缝切换（标题编号递增，支持「续」链收敛）
-- **Verdict** — 审查结论（approve/suggest/reject），驱动补填请求风暴治理与审查链分流
-
-## 架构决策
-
-7 篇 ADR 记录在 [`docs/adr/`](./docs/adr/)：
-
-| ADR  | 决策                                                 |
-| ---- | ---------------------------------------------------- |
-| 0001 | pnpm monorepo (`packages/server` / `web` / `shared`) |
-| 0002 | SQLite 持久化 + Redis 消息总线双存储                 |
-| 0003 | 每 Agent 独立 LLM 适配器（provider + API key）       |
-| 0004 | 单槽位 + FIFO 串行调度                               |
-| 0005 | Redis Pub/Sub 三频道消息总线                         |
-| 0006 | sqlite-vec 向量检索记忆系统                          |
-| 0007 | 外部工具形态选型前置检查单                           |
-
-## 开发工作流
-
-### 种子数据管理
-
-种子数据默认 **upsert 模式**：多次运行幂等，Agent 固定 ID（`uuid.v5`），更新配置不重建。运行配置（`llm_*`/`effort`）仅首次 INSERT 写入、UPDATE 永不覆盖，数据库是运行配置权威。
-
-```bash
-# 正常启动（幂等）
-npx tsx packages/server/src/seed.ts
-
-# 彻底重建（清空数据 + 重新插入）
-npx tsx packages/server/src/seed.ts --reset
-```
-
-### 清空会话消息
-
-前端 ChatPanel 头部提供"清空"按钮（垃圾桶图标），或直接调用 API：
-
-```bash
-curl -X DELETE http://localhost:3200/api/sessions/<session-id>/messages
-```
-
-清空只删除 `messages` 和 `execution_logs`，保留 Session 配置、Agent 设定和向量记忆。
-
-### 运行测试
-
-```bash
-pnpm test             # 全量测试（以 pnpm test 实测为准）
-pnpm test:server      # 仅服务端
-pnpm test -- --reporter=verbose  # 逐条显示
-```
-
-> 注：测试数会随功能演进变化，以 `pnpm test` 实测为准。
-
-## 技术栈
-
-| 层       | 技术                                                               |
-| -------- | ------------------------------------------------------------------ |
-| 运行时   | Node.js 22.18.0+ / TypeScript 5.5                                  |
-| 包管理   | pnpm workspace (monorepo)                                          |
-| 后端框架 | Fastify 5                                                          |
-| 实时通信 | Socket.IO 4                                                        |
-| 数据库   | SQLite (better-sqlite3 + WAL + sqlite-vec 向量扩展)                |
-| LLM 推理 | DeepSeek HTTP API / Claude Code CLI / Codex CLI / Ollama / Kimi K3 |
-| 嵌入模型 | HuggingFace Transformers (Xenova/bge-small-zh-v1.5, 512 维)        |
-| 前端框架 | Vue 3 + Vite + Pinia                                               |
-| 测试     | Vitest 4                                                           |
+[MIT](./LICENSE) © 2026 JianHun101
