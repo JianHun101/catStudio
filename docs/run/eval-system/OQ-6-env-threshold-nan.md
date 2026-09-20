@@ -1,8 +1,8 @@
-# OQ-6：env 阈值解析 NaN 族 —— 5 处 fail-silent
+# OQ-6：env 阈值解析 NaN 族 —— 7 处 fail-silent
 
 <!-- label: wayfinder:ticket -->
-<!-- 来源: P1-A 审查报告 OQ-6（审查者建议「单开一票整族修」）；店长 2026-09-14 实测扩展 -->
-<!-- 状态: 未认领 · 未派活（等与 P2 一并排期） -->
+<!-- 来源: P1-A 审查报告 OQ-6（审查者建议「单开一票整族修」）；店长 2026-09-14 实测扩展 · 2026-09-20 族边界订正 5→7 -->
+<!-- 状态: 已派活（2026-09-20 用户裁决「OQ-6 派」，实施者 ds猫，走 worktree） -->
 
 ## 一、问题
 
@@ -10,20 +10,31 @@
 
 用户配了 env、以为生效了，实际该告警的一条都不告 —— **假绿门**，与本项目「消灭静默通过」的靶心同类。
 
-## 二、实测清单（店长 2026-09-14 grep 全仓非测试源码）
+## 二、实测清单（店长 2026-09-14 grep 全仓非测试源码；**行号与处数于 2026-09-20 订正**）
 
 | #   | 位置                       | env 变量                  | 默认     | NaN 后果                                                                                  | 守卫        |
 | --- | -------------------------- | ------------------------- | -------- | ----------------------------------------------------------------------------------------- | ----------- |
-| 1   | `routes/eval.ts:102`       | `EVAL_CHAIN_SLOW_MS`      | `300000` | `totalMs > slowMs` 恒 false ⇒ **`slow` 徽章全不标**（P1 刚上线的功能静默失效）            | ❌          |
-| 2   | `eval/l1-aggregator.ts:32` | `EVAL_ALERT_SUCCESS_RATE` | `0.8`    | `m.successRate < t` 恒 false ⇒ **成功率告警永不触发**                                     | ❌          |
-| 3   | `eval/l1-aggregator.ts:33` | `EVAL_ALERT_TIMEOUT_RATE` | `0.1`    | 同上 ⇒ **超时告警永不触发**                                                               | ❌          |
-| 4   | `eval/l1-aggregator.ts:34` | `EVAL_ALERT_REWORK_RATE`  | `0.3`    | 同上 ⇒ **返工告警永不触发**                                                               | ❌          |
+| 1   | `routes/eval.ts:155`       | `EVAL_CHAIN_SLOW_MS`      | `300000` | `totalMs > slowMs` 恒 false ⇒ **`slow` 徽章全不标**（P1 刚上线的功能静默失效）            | ❌          |
+| 2   | `eval/l1-aggregator.ts:34` | `EVAL_ALERT_SUCCESS_RATE` | `0.8`    | `m.successRate < t` 恒 false ⇒ **成功率告警永不触发**                                     | ❌          |
+| 3   | `eval/l1-aggregator.ts:35` | `EVAL_ALERT_TIMEOUT_RATE` | `0.1`    | 同上 ⇒ **超时告警永不触发**                                                               | ❌          |
+| 4   | `eval/l1-aggregator.ts:36` | `EVAL_ALERT_REWORK_RATE`  | `0.3`    | 同上 ⇒ **返工告警永不触发**                                                               | ❌          |
 | 5   | `handoff/index.ts:284`     | `HANDOFF_THRESHOLD`       | `0.9`    | `currentTokens >= maxTokens * NaN` 恒 false ⇒ **交接永不触发**（上下文一路涨到 CLI 截断） | ❌          |
-| 6   | `eval/sampler.ts:23`       | `EVAL_SAMPLE_RATE`        | `0.02`   | —— **已有守卫**：`Number.isNaN(raw) \|\| raw <= 0 → return 0`                             | ✅ **样板** |
+| 6   | `eval/sampler.ts:24`       | `EVAL_SAMPLE_RATE`        | `0.02`   | —— **已有守卫**：`Number.isNaN(raw) \|\| raw <= 0 → return 0`                             | ✅ **样板** |
+| 7   | `memory/index.ts:167`      | `MEMORY_TOP_K`            | `3`      | `parseInt` ⇒ `NaN` ⇒ 末次 `.slice(0, NaN)` 得空数组 ⇒ **注入 0 片**                       | ❌          |
+| 8   | `memory/index.ts:168`      | `MEMORY_MAX_DISTANCE`     | `0.6`    | `NaN` 进 SQL 绑定 + 进 `c.distance >= maxDistance` 比较 ⇒ **检索面静默改变**              | ❌          |
 
-**方向统一**：五处全是「静默不触发」（fail-silent），**没有一处会误报**——所以危害是**漏报**而非噪声。
+**方向统一**：七处全是「静默不触发」（fail-silent），**没有一处会误报**——所以危害是**漏报**而非噪声。
 
-**计数更正**：P1-A 审查报告写「既有四处阈值」，实测**五处**（l1-aggregator 三处 + eval.ts 一处 + handoff 一处）；报告同时把 `sampler.ts` 记作同病，实测**它已有守卫，是正面样板**，不是病。
+**计数更正**：P1-A 审查报告写「既有四处阈值」，2026-09-14 实测**五处**（l1-aggregator 三处 + eval.ts 一处 + handoff 一处）；报告同时把 `sampler.ts` 记作同病，实测**它已有守卫，是正面样板**，不是病。
+
+**计数再更正（2026-09-20，店长）**：上表原为 5 处，实测**应为 7 处**——`memory/index.ts` 的 `currentRetrievalParams()`（`:163-170`）两处漏了。
+两条同源同因（裸 parse 无有限数守卫），**且是全族里危害最重的**：前五处失效的是「告警/徽章/交接触发」这类**可见性**面，这两处失效的是**检索本身**——`MEMORY_TOP_K=abc` 会让注入片数静默归零，猫再也检索不到记忆，而日志一片安静。
+
+**漏因未坐实，不硬下结论**：本仓有「GNU grep 静默跳过含 NUL 字节的文件」的先例（`map.md:67` 记 `memory/index.ts` 曾有字面 NUL），一度疑似此因；
+但 2026-09-20 回查 09-14 当时版本（`eb5753c`）**已无 NUL 字节**，且该版本含 `parseInt(process.env.MEMORY_TOP_K`，grep 本应命中 ⇒ **不能归因于 grep 跳过**。
+可复述的教训只有一条：**「整族修」的族边界必须用「同一失效机制」扫，不能用「我上次搜的那个模式」扫**（本次搜的是 `parseFloat`，`parseInt` 天然不在面上）。
+
+**第 8 处的 NaN 实际表现须实测确认**，不得照抄本表推断：`better-sqlite3` 绑定 `NaN` 是抛错还是当 NULL，以及 `c.distance >= NaN` 在各调用点的真实走向（`memory/index.ts:423` / `:473`），**以实测为准并在回报中给出读数**。
 
 ## 三、根因链（为什么熔断没兜住）
 
@@ -50,8 +61,9 @@ EVAL_ALERT_SUCCESS_RATE=abc
 ## 五、边界
 
 - **只改解析与回退**：不改任何阈值语义、不改默认值、不改告警状态机、不改 DDL。
-- 五处消费点**各自独立**，可一笔提交（同族同因）。
+- 七处消费点**各自独立**，可一笔提交（同族同因）。
 - 不动 `env.ts` 的 `??=`（那是「未设置」层的正确兜底，两层各司其职）。
+- **第 7/8 处额外边界**：不改 `currentRetrievalParams()` 的返回结构（`RetrievalParamsSnapshot` 三个字段是检索链与 `reply.ts` 共用的契约快照，只换解析方式，不改形状）。
 
 ## 六、验收标准（行为可验证）
 
@@ -59,9 +71,14 @@ EVAL_ALERT_SUCCESS_RATE=abc
 2. 逐处单测：`X=` （空串）⇒ 默认值（空串是 `||` 已覆盖的旧行为，**不得回归**）。
 3. 逐处单测：合法值仍按原样生效（如 `slowMs='60000'` ⇒ 60000）。
 4. 定点复核：`EVAL_CHAIN_SLOW_MS=abc` 起 server，`/api/eval/chains` 返回的 `slowMs` **必须是 `300000`**（当前会返回 `NaN`，而 `NaN` 经 JSON 序列化变 `null` —— 前端拿到 `null` 会静默当无阈值）。
-5. `pnpm test` + `node scripts/lint.js` 全绿。
+5. **第 7/8 处（2026-09-20 新增）**：`MEMORY_TOP_K=abc` ⇒ `currentRetrievalParams().topK === 3`；`MEMORY_MAX_DISTANCE=abc` ⇒ `.maxDistance === 0.6`；两者各打一条 warn。
+   并**回报改前实测**：在改动前的代码上跑同样输入，记录 `MEMORY_TOP_K=abc` 时实际注入片数、以及 `MEMORY_MAX_DISTANCE=abc` 时 `searchChunksHybrid` 的真实行为（抛错 / 静默空集 / 静默全量），**用读数而非推断填这段**。
+6. `pnpm test` + `node scripts/lint.js` 全绿。
 
 ## 七、决策留痕
 
 - **2026-09-14 店长**：立票但不派活 —— 属 P3（需 env 配错才触发，生产当前未配这五个变量，实际危害为 0）；与 P2 一并排期，避免在用户未授权 P2 时单开并行 slot。
+- **2026-09-20 用户裁决**：「OQ-6 派」——授权派活。
+- **2026-09-20 店长（族边界订正 + 扩面）**：派活前按「派活单字面量须先实核源码」复核，实测三件事：① 票面行号已漂移（`eval.ts:102→:155`、`l1-aggregator:32/33/34→:34/35/36`；`handoff/index.ts:284` 未变）；② 族边界少了 `memory/index.ts:167/168` 两处；③ 两处属检索热路径，危害重于原五处。**据此把票面 5 处订正为 7 处并随派活单一并生效**。
+  扩面理由：本票形态是「整族修」（§五「同族同因，一笔提交」），留两处同因漏网会造出「整族已清」的假读数——正是本票靶心要消灭的静默通过。
 - **不采用**「在 `env.ts` 里加类型校验统一杀」：`env.ts` 管的是「有没有」，管不了「值合不合语义」（如 ratio 类应为 (0,1]）；放消费点才能就近回退到各自默认值。
