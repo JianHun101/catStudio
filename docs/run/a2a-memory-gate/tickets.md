@@ -33,30 +33,31 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
 
 ## 四、改动文件（本分支实测行号）
 
-| 文件                                                 | 改动                                                                                 |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `execution/serial.ts::158-188`                       | `AgentTriggerMsg` 加 `fromAgent: boolean`（**必填**）                                |
-| ~~`execution/serial.ts::190`~~ → `execution/row.ts`  | 新增并导出**唯一判据** `isAgentAuthoredTrigger(role)`（**F1 后搬家**，见 §十）       |
-| `execution/serial.ts::321-337`                       | `buildTriggerMsg` 填 `fromAgent: isAgentAuthoredTrigger(triggerRow?.role)`           |
-| `execution/serial.ts::435-452`                       | `drainQueuedCommand` 的 `queuedTrigger` 同判据填值（**第二权威构造点**，见 §五）     |
-| `execution/serial.ts::1141`                          | A2A 递归 `{ ...agentTrigger, authorName, fromAgent: true }`（类型完整性，非判据）    |
-| `execution/reply.ts::302`                            | `runAgentReply` 内联 `triggerMsg` 形状加 `fromAgent: boolean`（必填）                |
-| `execution/reply.ts::206` / `:766`                   | 值域注释 9 → **10**；「六种 reason」→ **七种**                                       |
-| `execution/reply.ts::770-812`                        | a2a 门 + 跳过走同套 span/落库/日志                                                   |
-| `execution/recovery.ts::102` / `:362` / `:509`       | `executeAgentsSerial` 入参补 `fromAgent`（类型必填所致，非判据面）                   |
-| `connectors/ingest.ts::301` / `:400`                 | 同上（`msg.role` 恒 `'user'` ⇒ 恒 false）                                            |
-| `db/repository/retrievalEvents.ts::121`              | `reason` 列注释值域 9 → **10**                                                       |
-| `memory/index.ts::105` / `:244` / `:258`             | 枚举加 `'skipped-a2a'`；新增导出 `isA2aMemoryEnabled()` / `skippedRetrievalResult()` |
-| `.env.example`                                       | 加 `MEMORY_A2A_ENABLED`（默认**关**；读法订正为 `1`/`true` 两种拼法——F2，见 §十）    |
-| `docs/run/eval-system/P2-design-retrieval-events.md` | 值域复述订正（保留 P2 历史读数 + 加 2026-09-20 订正注）                              |
-| 11 个 `.test.ts` 的 `memory/index.js` partial 替身   | 补镜像两个新导出（否则 `fromAgent:true` 时调用点 TypeError）                         |
-| 88 个测试 `triggerMsg` 字面量                        | 补 `fromAgent: false`（验收 9）                                                      |
-| **新增** `execution/serial.a2a-memory-gate.test.ts`  | 七条用例：门开合、span status、流水 reason、参数快照、知识库不受波及                 |
-| **新增** `memory/index.test.ts` 末段                 | `MEMORY_A2A_ENABLED` 读法矩阵 + 跳过结果形状                                         |
+| 文件                                                 | 改动                                                                                                                |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `execution/serial.ts::158-188`                       | `AgentTriggerMsg` 加 `fromAgent: boolean`（**必填**）                                                               |
+| ~~`execution/serial.ts::190`~~ → `execution/row.ts`  | 新增并导出**唯一判据** `isAgentAuthoredTrigger(role)`（**F1 后搬家**，见 §十）                                      |
+| `execution/serial.ts::321-337`                       | `buildTriggerMsg` 填 `fromAgent: isAgentAuthoredTrigger(triggerRow?.role)`                                          |
+| `execution/serial.ts::435-452`                       | `drainQueuedCommand` 的 `queuedTrigger` 同判据填值（**第二权威构造点**，见 §五）                                    |
+| `execution/serial.ts::1141`                          | A2A 递归 `{ ...agentTrigger, authorName, fromAgent: true }`（类型完整性，非判据）                                   |
+| `execution/reply.ts::302`                            | `runAgentReply` 内联 `triggerMsg` 形状加 `fromAgent: boolean`（必填）                                               |
+| `execution/reply.ts::206` / `:766`                   | 值域注释 9 → **10**；「六种 reason」→ **七种**                                                                      |
+| `execution/reply.ts::770-812`                        | a2a 门 + 跳过走同套 span/落库/日志                                                                                  |
+| `execution/recovery.ts::102` / `:362` / `:509`       | `executeAgentsSerial` 入参补 `fromAgent`（类型必填所致，非判据面）                                                  |
+| `connectors/ingest.ts::301` / `:400`                 | 同上（`msg.role` 恒 `'user'` ⇒ 恒 false）                                                                           |
+| `db/repository/retrievalEvents.ts::121`              | `reason` 列注释值域 9 → **10**                                                                                      |
+| `memory/index.ts::105` / `:244` / `:258`             | 枚举加 `'skipped-a2a'`；新增导出 `isA2aMemoryEnabled()` / `skippedRetrievalResult()`                                |
+| `.env.example`                                       | 加 `MEMORY_A2A_ENABLED`（默认**关**；读法订正为 `1`/`true` 两种拼法——F2，见 §十）                                   |
+| `docs/run/eval-system/P2-design-retrieval-events.md` | 值域复述订正（保留 P2 历史读数 + 加 2026-09-20 订正注）                                                             |
+| 11 个 `.test.ts` 的 `memory/index.js` partial 替身   | 补镜像两个新导出（否则 `fromAgent:true` 时调用点 TypeError）                                                        |
+| 88 个测试 `triggerMsg` 字面量                        | 补 `fromAgent: false`（验收 9）                                                                                     |
+| **新增** `execution/serial.a2a-memory-gate.test.ts`  | **八**条用例：门开合、span status、流水 reason、参数快照、知识库不受波及、drain 构造点（第 8 条为 F4 补网，见 §十） |
+| **新增** `memory/index.test.ts` 末段                 | `MEMORY_A2A_ENABLED` 读法矩阵 + 跳过结果形状                                                                        |
 
 ## 五、越出票面的两处（均为类型必填的机械后果，非契约变更）
 
-1. **`AgentTriggerMsg` 的构造点不止票面说的两处**，实测 **5 处**：
+1. **`AgentTriggerMsg` 的构造点不止票面说的两处**，实测 **5 处**（口径 = **填值点**；
+   与「判据面 2 条」不矛盾——判据面是**能把值喂到 reply 侧**的路径，只有 2 条，见 §十 F1）：
    `buildTriggerMsg`（权威）、`drainQueuedCommand` 的 `queuedTrigger`（**第二权威**——
    drain 直接调 `executeOneAgent`、**不经** `execute()`，reply 侧读到的就是这一份）、
    A2A 递归、`recovery.ts` 恢复路径字面量、`ingest.ts`/`recovery.ts` 三处传 `msg`。
@@ -96,7 +97,7 @@ worktree 实测为准（下表 `::` 后为本分支实测值，非票面原值�
 | 5   | 跳过时改写零调用                              | 同文件 验收 1/5（真 `retrieveMemoryContext` + 改写器替身）                                                                                                                                                  |
 | 6   | `buildTriggerMsg` 真 DB 行判据                | **改为经引擎实测**（真落 `role='agent'` / `'user'` 行 → 观察门开合），比直测映射更强；见 §八 偏差 1                                                                                                         |
 | 7   | 扫复述文本                                    | 见 §四 最后三行；另扫到 `scripts/eval/retrieval-baseline.mjs` 的 `LEGIT_EMPTY_REASONS`——**刻意不改**（`skipped-a2a` 不由 `runRetrievalChain` 产出，进不了那条路径；改白名单反而削弱其「值域外即拒」的设计） |
-| 8   | `pnpm test` + `pnpm lint` 全绿                | 151 文件 / 3273 用例全过；lint 三包全过                                                                                                                                                                     |
+| 8   | `pnpm test` + `pnpm lint` 全绿                | 笔①（`c94eac8`）151 文件 / **3273** 用例全过；**返工后 `e09bf20` 151 文件 / 3274 用例全过**（+1 = F4 新用例，读取数见 §十）；lint 三包全过                                                                  |
 | 9   | 字面量补 `fromAgent: false`，字段不降级为可选 | 88 处补值；字段在 `AgentTriggerMsg` 与 reply 内联形状**两处均为必填**                                                                                                                                       |
 
 ## 八、实施偏差与真空性对照
