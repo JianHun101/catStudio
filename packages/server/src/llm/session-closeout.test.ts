@@ -14,9 +14,17 @@
  * 非 git 仓库 preflight 失败。
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
@@ -24,6 +32,18 @@ import {
   removeIsolatedRepoRoot,
   type IsolatedRepoRoot,
 } from '../test-helpers.js'
+
+// ═══ 边界 mock（真实临时仓库 / 真实 git 全保留，只换日志这一个边界）═══
+//
+// 票 G5 的交付面之一就是「preflight 日志含陈旧清单」——**可观测面就是那条 info/warn**。
+// 不 mock 就只能断言「收口没炸」，那测的是鲁棒性，不是可见性那条交付本身
+// （同 `serial.test.ts` 抬 warn 那条的取法）。
+const { logInfo, logWarn } = vi.hoisted(() => ({ logInfo: vi.fn(), logWarn: vi.fn() }))
+vi.mock('../logger.js', () => ({
+  createLogger: () => ({ debug: vi.fn(), info: logInfo, warn: logWarn, error: vi.fn() }),
+  setLogLevel: vi.fn(),
+  getLogLevel: vi.fn(() => 'error'),
+}))
 
 let closeout: typeof import('./session-closeout.js')
 let gitUtils: typeof import('./git-utils.js')
@@ -456,6 +476,103 @@ describe('closeoutSession（一键收口）', () => {
       expect(git('rev-parse --abbrev-ref HEAD')).toBe('HEAD')
     } finally {
       git('checkout dev')
+    }
+  })
+})
+
+describe('docs/run 陈旧度可见性（票 G5 · 形态乙）', () => {
+  const STALE_SLUG = 'g5-stale-fixture'
+
+  /**
+   * 在夹具仓库落一个「末次提交 N 天前」的 `docs/run/<slug>/`。
+   *
+   * 提交时刻由 `GIT_COMMITTER_DATE` **钉死**（不是等出来）——`%cI` 读的就是它。
+   * 这条夹具是**真目录 + 真提交**：脚本按 `git log -1 -- <路径>` 判龄，时序造不了假。
+   */
+  function commitRunDir(slug: string, days: number): void {
+    const dir = resolve(tmp, 'docs', 'run', slug)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      resolve(dir, 'tickets.md'),
+      '---\ntype: ticket\nstatus: active\n---\n\n# 夹具票\n',
+      'utf-8'
+    )
+    const stamp = new Date(Date.now() - days * 86_400_000).toISOString()
+    execSync('git add -A', { cwd: tmp, env: cleanGitEnv(), stdio: 'ignore' })
+    execSync('git commit -m "g5 stale fixture"', {
+      cwd: tmp,
+      env: { ...cleanGitEnv(), GIT_COMMITTER_DATE: stamp, GIT_AUTHOR_DATE: stamp },
+      stdio: 'ignore',
+    })
+  }
+
+  it('验收：preflight 把**真脚本的真读数**打进 info（不抛错、不静默跳过）', () => {
+    commitRunDir(STALE_SLUG, 20)
+    const id = 'g5-log-00001'
+    makeSessionCommit(id)
+    logInfo.mockClear()
+    logWarn.mockClear()
+
+    const r = closeout.closeoutSession(id)
+    expect(r).toEqual({ ok: true, step: 'checkout' })
+
+    const call = logInfo.mock.calls.find((c) => c[0] === 'docs/run 陈旧清单')
+    expect(call, '必须有陈旧清单那条 info——静默跳过就会找不到它').toBeTruthy()
+    const payload = call![1] as {
+      windowDays: number
+      stale: Array<{ slug: string; daysAgo: number; status: string }>
+    }
+    expect(payload.windowDays).toBe(6)
+    const row = payload.stale.find((s) => s.slug === STALE_SLUG)
+    expect(row, '20 天前的夹具目录必须进清单').toBeTruthy()
+    expect(row!.daysAgo).toBe(20)
+    expect(row!.status).toBe('active')
+    expect(logWarn.mock.calls.some((c) => String(c[0]).includes('陈旧度扫描失败'))).toBe(false)
+  })
+
+  it('反对照丙：脚本真失败（root 无 docs/run ⇒ 脚本退出码 1）⇒ closeout 照常 ok，只多一条 warn', () => {
+    const repo2 = createIsolatedRepoRoot('session-closeout-g5-fail-')
+    const orig = process.cwd()
+    try {
+      const r2 = repo2.repo
+      execSync('git init', { cwd: r2, env: cleanGitEnv(), stdio: 'ignore' })
+      execSync('git config user.name test', { cwd: r2, env: cleanGitEnv(), stdio: 'ignore' })
+      execSync('git config user.email test@test.local', {
+        cwd: r2,
+        env: cleanGitEnv(),
+        stdio: 'ignore',
+      })
+      execSync('git checkout -b dev', { cwd: r2, env: cleanGitEnv(), stdio: 'ignore' })
+      writeFileSync(resolve(r2, 'a.txt'), 'init', 'utf-8')
+      execSync('git add -A', { cwd: r2, env: cleanGitEnv(), stdio: 'ignore' })
+      execSync('git commit -m init', { cwd: r2, env: cleanGitEnv(), stdio: 'ignore' })
+
+      process.chdir(r2)
+      logInfo.mockClear()
+      logWarn.mockClear()
+
+      const r = closeout.closeoutSession('g5-fail-00001')
+      // **不阻断**是这一票的全部意义：脚本退 1，收口照走完
+      expect(r).toEqual({ ok: true, step: 'checkout' })
+      const warn = logWarn.mock.calls.find((c) => String(c[0]).includes('陈旧度扫描失败'))
+      expect(warn, '失败必须留下 warn（跳过永不静默）').toBeTruthy()
+      const payload = warn![1] as { error: string }
+      // 取的是**脚本自家那行**，不是 import 链上 node:sqlite 的 ExperimentalWarning
+      expect(payload.error).toContain('不存在')
+      expect(payload.error).toContain('[run-docs-stale]')
+    } finally {
+      process.chdir(orig)
+      removeIsolatedRepoRoot(repo2)
+    }
+  })
+
+  it('scanStaleRunDocs 可直调：真 spawn 真脚本，返回结构化报告（非 mock 断言）', () => {
+    const r = closeout.scanStaleRunDocs(tmp)
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.report.windowDays).toBe(6)
+      expect(r.report.stale.map((s) => s.slug)).toContain(STALE_SLUG)
+      expect(r.report.failed).toEqual([])
     }
   })
 })

@@ -26,13 +26,14 @@
  *   → 不重写；已在 dev → checkout no-op。
  * - preflight onDev 守卫：主仓库当前 checkout 非 dev（含 detached HEAD）→ 拒绝
  *   收口，防止 merge 把 session 提交合进错分支、随删分支不可逆丢失。
- * - push 不进收口器：收口器只做本地机械步骤（merge/删/写 gate/切分支），
- *   「本地↔共享」的 push 边界属用户决策，走 push 审批节点。
+ * - push 不进收口器：收口器只做本地机械步骤（merge/删/写 gate/切分支 + G5 那次
+ *   **只读**的陈旧度盘点），「本地↔共享」的 push 边界属用户决策，走 push 审批节点。
  */
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createLogger } from '../logger.js'
 import { messageOf } from '../utils.js'
 import {
@@ -376,6 +377,12 @@ export function closeoutSession(sessionId: string): CloseoutResult {
     }
   }
 
+  // ⓪′ docs/run 陈旧度可见性（票 G5 · 形态乙）——**只打印，不参与任何判据**。
+  // 放在 onDev 守卫**之后**：守卫不过时收口根本不会发生，扫了也是白扫；也保证这行
+  // 只在前面的拒绝分支都不成立时才付一次子进程开销。它自己的失败已在 scanStaleRunDocs
+  // 里收敛成一条 warn，绝不影响下面的步骤。
+  reportStaleRunDocs(mainRoot)
+
   // ⓪ fan-in 先于 merge（猫分支 → 集成分支），②′ 回收后于 removeWorktree（集成分支
   // 已落地 dev 才允许回收猫树）。两条都是 T-2 的必备件：只接线不接它们 ⇒ 猫的提交
   // 停在猫分支、收口照删（E5 静默丢活）。顺序见票面 §二-3。
@@ -399,4 +406,111 @@ export function closeoutSession(sessionId: string): CloseoutResult {
 
   log.info('session closed out', { sessionId, shortId })
   return { ok: true, step: 'checkout' }
+}
+
+// ─── docs/run 陈旧度可见性（票 G5 · 形态乙）─────────────────────────────
+//
+// ⚠️ **这一节刻意放在文件末尾，不紧挨 `closeoutSession`。**
+//
+// 原因：本文件的行号被多份文档当作**指针**引用（`llm/worktree-fanin.ts:11/172`、
+// `docs/run/multi-cat-isolation/adr-0015-draft.md:73/143/153/164`、
+// `docs/run/eval-system/R6-diag-inventory.md:51/114/146`、
+// `docs/run/multi-cat-isolation/report-phase-ib.md:227`、
+// `docs/run/multi-cat-isolation/tickets-t2-phase-ib.md:244`，共 12 处）。在头部插入本节
+// 的 ~95 行会把它们**整批推偏 96 行**（指针从此落进无关函数）；放末尾则零推偏。
+// 残余位移只有 **+1**：新增一行 `import { fileURLToPath } from 'node:url'`。
+//
+// 调用点在前、定义在后是安全的：函数声明提升，且 `STALE_SCAN_SCRIPT` 等模块级常量
+// 在模块求值期就完成初始化，而 `closeoutSession` 只会在求值结束之后被调用。
+
+/** 陈旧窗口（天）**不在这里定**——`--days` 缺省由脚本自己持有（6，票面基线口径），
+ *  调用侧不传，免得同一口径有两处声明。 */
+const STALE_SCAN_SCRIPT = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  '..',
+  'scripts',
+  'run-docs-stale.mjs'
+)
+
+/** 扫描超时。可见性工具**宁可少报也不拖住收口**：过期就降级成 warn 继续跑。 */
+const STALE_SCAN_TIMEOUT_MS = 10_000
+
+/** `scripts/run-docs-stale.mjs` 单行 JSON 的形状（只声明本文件消费的字段） */
+export interface StaleRunDocsReport {
+  windowDays: number
+  scanned: number
+  stale: Array<{ slug: string; status: string; sha: string; date: string; daysAgo: number }>
+  freshCount: number
+  untracked: string[]
+  failed: Array<{ slug: string; error: string }>
+}
+
+export type StaleRunDocsResult =
+  { ok: true; report: StaleRunDocsReport } | { ok: false; error: string }
+
+/** 子进程自己写的诊断行前缀（`scripts/run-docs-stale.mjs` 的 stderr 出口） */
+const STALE_SCRIPT_TAG = '[run-docs-stale]'
+
+/**
+ * 从 `execFileSync` 的失败里挖出最有信息量的一句。
+ *
+ * **优先取子进程自己打的那行**（`[run-docs-stale] …`），而不是整段 stderr：脚本 import
+ * 链上有 `node:sqlite`，Node 24 会先往 stderr 打一行 `ExperimentalWarning`；整段带回来
+ * 会让这条 warn 以 Node 的警告开头，把真正的原因（「`docs/run` 不存在」）挤到后面。
+ * 取不到自家那行才退回整段，再退回 `err.message`（spawn 失败 / 超时走这条）。
+ */
+function execFailureOf(err: unknown): string {
+  const e = err as { stderr?: string | Buffer | null } | null
+  const stderr = e?.stderr ? e.stderr.toString() : ''
+  const own = stderr
+    .split('\n')
+    .filter((l) => l.startsWith(STALE_SCRIPT_TAG))
+    .join(' ')
+    .trim()
+  return own || stderr.trim() || messageOf(err) || '未知错误'
+}
+
+/**
+ * 跑一遍 `docs/run` 陈旧度盘点。**一切失败都收敛成 `{ok:false}`，绝不抛**——
+ * 脚本缺失 / 非零退出 / 超时 / stdout 不是 JSON，对调用方是**同一种**结局（打 warn）。
+ *
+ * 位置的分工是刻意的：**工具跟着代码走**（`import.meta.url` 所在的仓库），
+ * **数据跟着 mainRoot 走**（`--root`）。生产下两者同仓；分开写则夹具仓库不必自带
+ * 一份脚本副本，测到的就是**真脚本**（见 `session-closeout.test.ts`）。
+ */
+export function scanStaleRunDocs(mainRoot: string): StaleRunDocsResult {
+  try {
+    const stdout = execFileSync(process.execPath, [STALE_SCAN_SCRIPT, '--root', mainRoot], {
+      cwd: mainRoot,
+      encoding: 'utf8',
+      timeout: STALE_SCAN_TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { ok: true, report: JSON.parse(stdout) as StaleRunDocsReport }
+  } catch (err) {
+    return { ok: false, error: execFailureOf(err) }
+  }
+}
+
+/**
+ * 把盘点结果落成一条日志。**只打印，绝不据其中止收口**（票面 D2：它是可见性不是闸——
+ * 收口在 PR 合并**之后**跑，此刻报出来的陈旧目录补不进 commit 了，拦也拦不住）。
+ */
+function reportStaleRunDocs(mainRoot: string): void {
+  const r = scanStaleRunDocs(mainRoot)
+  if (!r.ok) {
+    log.warn('docs/run 陈旧度扫描失败（可见性工具，不阻断收口）', { error: r.error })
+    return
+  }
+  const { windowDays, scanned, stale, untracked, failed } = r.report
+  const payload = { windowDays, scanned, staleCount: stale.length, stale, untracked, failed }
+  if (failed.length > 0) {
+    // 清单可能不完整 ⇒ 抬成 warn：**不完整的清单被当完整的读**，是可见性工具最坏的假绿
+    log.warn('docs/run 陈旧清单（部分目录查询失败，可能不完整）', payload)
+  } else {
+    log.info('docs/run 陈旧清单', payload)
+  }
 }
