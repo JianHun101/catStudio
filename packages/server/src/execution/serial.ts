@@ -51,9 +51,17 @@ import {
   detectUnknownHandle,
   detectInlineMentions,
 } from '../connectors/a2a-mentions.js'
-import { filterAllowedMentions, allowedTargetsDescription } from '../dispatch/mention-policy.js'
+import {
+  filterAllowedMentions,
+  allowedTargetsDescription,
+  MAX_MENTIONS_PER_REPLY,
+} from '../dispatch/mention-policy.js'
 import { consumeRouteSignals } from '../llm/route-signals.js'
-import { recordReviewVerdict } from '../eval/verdict-parser.js'
+import {
+  parseReviewVerdict,
+  recordReviewVerdict,
+  type ReviewVerdict,
+} from '../eval/verdict-parser.js'
 import { advanceFlowAfterVerdict } from './flow-advance.js'
 import { maybeScoreSample } from '../eval/sampler.js'
 import { judgeReviewFallback, spawnReviewFallback } from './review-fallback.js'
@@ -739,12 +747,26 @@ async function executeOneAgent(
           (a: AgentConfig | null): a is AgentConfig => a !== null && routeNames.includes(a.name)
         )
 
+      // 票乙 reviewer 单目标闸：审查猫双 @ 时留谁由**审查结论**决定（白名单模块
+      // 的优先级表只看这一格）。只读正文、不落库——落库走下方既有钩子
+      // `recordReviewVerdict`，本处仅消费返回值，两条互不影响。
+      // 解析器的另两种 kind（no-marker / failure 格式漂移）一律视为「结论不可得」
+      // → 不传该字段，白名单走兜底优先级。不抛、不改行。
+      let verdict: ReviewVerdict | undefined
+      if (agent.role === 'reviewer') {
+        const parsed = parseReviewVerdict(
+          reply.content,
+          allMentionedAgents.map((a) => ({ id: a.id, name: a.name, isStore: a.role === 'store' }))
+        )
+        if (parsed.kind === 'verdict') verdict = parsed.verdict
+      }
+
       // A2A 风暴治理白名单：按发送者角色剥除违规 mention（执行顺序：白名单→配额→dispatch）。
       // 写回 DB 用允许集合——被拦猫在上下文过滤（getRelevantMessages 基于
       // mentions.includes 判定可见性）里也不可见，语义自洽。
       // 未知/缺失角色 → 放行不拦截（老库零回归，误杀审查链代价远大于漏拦一条 @）
       policy = filterAllowedMentions(
-        { role: agent.role, triggerAuthorName: triggerMsg.authorName },
+        { role: agent.role, triggerAuthorName: triggerMsg.authorName, verdict },
         allMentionedAgents
       )
       allowedNames = policy.allowed.map((a) => a.name)
@@ -861,7 +883,7 @@ async function executeOneAgent(
         })
         // 系统提示：点名违规与正确规则（即时反馈，不持久化进 system_prompt）。
         // 文案按 reason 区分——role-not-allowed 是角色白名单违规；
-        // count-limit 是超上限（≤1 个 @），提示拆条发送而非误报违规
+        // count-limit 是超上限（≤1 个 @），提示补救方向而非误报违规
         const hintParts: string[] = []
         const roleBlocked = policy.blocked.filter((b) => b.reason === 'role-not-allowed')
         if (roleBlocked.length > 0) {
@@ -871,8 +893,14 @@ async function executeOneAgent(
         }
         const countBlocked = policy.blocked.filter((b) => b.reason === 'count-limit')
         if (countBlocked.length > 0) {
+          // 补救指引按角色分岔（票乙）：reviewer 的 @ 目标由审查结论唯一决定，
+          // 「拆条分别 @」会把它引回双 @ 老路——故只描述规则、不复述 verdict→目标
+          // 的映射表（该表已有两处维护面：seed-data 伪铁律 / mention-policy 优先级表）。
+          const remedy = agent.role === 'reviewer' ? '请只 @ 结论对应的那一个目标' : '请拆条分别 @'
           hintParts.push(
-            `一条回复最多 @ 1 个 agent，你 @ 的 ${countBlocked.map((b) => b.name).join('、')} 已忽略，请拆条分别 @`
+            `一条回复最多 @ ${MAX_MENTIONS_PER_REPLY} 个 agent，你 @ 的 ${countBlocked
+              .map((b) => b.name)
+              .join('、')} 已忽略，${remedy}`
           )
         }
         bus.emitSystemNotice({

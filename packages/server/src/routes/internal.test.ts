@@ -369,6 +369,24 @@ describe('internal route-signals', () => {
       expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')).toHaveLength(0)
     })
 
+    it('验收1d（票乙单目标闸）：reviewer 一次投 2 个合法目标 → 422，不静默剥除', async () => {
+      // 文本路径（serial.ts）由白名单按**审查结论**剥到 1 个；MCP 路径没有正文、
+      // 判不出结论，故沿用既有 422 契约把球踢回模型，由它自己收敛到一个目标重投。
+      // 两个目标都在 reviewer 边表内（店长 store / 实施猫 implementer）——422 的
+      // 唯一来源是单目标闸，不是角色边表（后者由 1c 覆盖，两者 reason 不同）。
+      await mockActive()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/internal/route-signals',
+        payload: reviewerBody({ targetCats: ['店长', '实施猫'] }),
+        headers: { 'x-signal-token': VALID_TOKEN },
+      })
+      expect(res.statusCode).toBe(422)
+      expect(JSON.parse(res.body).reason).toContain('count-limit')
+      // 未入 Map——422 不是「部分成功」
+      expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')).toHaveLength(0)
+    })
+
     it('triggerAuthorName 非字符串 → 400', async () => {
       const res = await app.inject({
         method: 'POST',
