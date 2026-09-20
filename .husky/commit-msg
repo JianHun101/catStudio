@@ -11,16 +11,20 @@
 # 当判据（env 只是取证提示，库才是真相源）。
 #
 # ── 五态判决
-#   ① 无 catstudy [uuid] 标记                        → 放行（merge / revert / 手动提交不受影响）
-#   ② 有标记，uuid 形状非法（非 8-4-4-4-12 小写 hex）  → 阻断 exit 1
+#   ① 无标记；或括号里不是标记形态（散文 `catstudy [uuid]`、`not-a-uuid`）→ 放行
+#      （merge / revert / 手动提交不受影响）
+#   ② 有标记，形状非法**但够像 uuid**（hex-dash 且 ≥16 位）              → 阻断 exit 1
 #   ③ 有标记，形状合法，两库都查无此 id                → 阻断 exit 1
 #   ④ 两库文件都不存在                                → 放行 + 显式警示（**走 stderr**）
 #   ⑤ 库存在但读取失败（加锁超时 / 表缺失）            → 阻断 exit 1（查不动 ≠ 放行）
 #
-# ⚠️ 标记提取沿用 handoff-gen.mjs 的 extractCommitUuid，**只认小写 hex**：message 里
-#    写**大写** uuid 时它返回 null ⇒ 视为**无标记**，走 ① 放行（无归属，与现状一致）。
-#    本仓 uuid 出自 crypto.randomUUID()（全小写），现实无害——但别把「形状非法 ⇒ 阻断」
-#    读成已覆盖大写这种形态。
+# ⚠️ 标记捕获在 JS 侧（`MARKER_CAPTURE_RE`），**不再沿用** handoff-gen.mjs 的
+#    extractCommitUuid——那个是定长量词（只认 36 位小写 hex），畸形标记它**返回 null**
+#    ⇒ 曾被当成「无标记」静默放行 39 位畸形 uuid（票丁靶心，0b5e9e0 实证）。
+#    两个谓词不同：那个回答「取出一个能用的 uuid」，本门禁回答「有没有写标记、长什么样」。
+#
+# ⚠️ **大写 uuid 现在阻断**（票丁对 P3-1 的半推翻）：它够像 uuid 却写歪 ⇒ 落 ②。
+#    被推翻的只有「大写 ⇒ 放行」这条结论，handoff-gen.mjs 一个字未动。
 #
 # ── 出口
 # 阻断信息含：被拒 uuid 原文 + 出处提示 + `echo $CATSTUDY_TRIGGER_MSG_ID` + 逃生口

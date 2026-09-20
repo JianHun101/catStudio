@@ -13,6 +13,13 @@
  *
  * 反例（B1′ 承重）：把 `hasMessageId` 的存在性查询改恒真（`SELECT 1 AS hit FROM
  * messages LIMIT 1`）⇒「查无此 id → 阻断」用例必红——实施时实跑过红→绿，见交付说明。
+ *
+ * 反例（票丁承重）：把 `HEX_DASH_SHAPE_RE` 那一支改回 `no-marker` ⇒ 畸形标记矩阵
+ * （39 / 28 位、大写、错分组）**必红**——实施时实跑过红→绿，见交付说明。
+ *
+ * 反例（P2 承重）：把全候选扫描改回「只抓第一个候选」（`MARKER_CAPTURE_RE.exec(message)`）
+ * ⇒「全候选扫描（P2）」那组的畸形用例与净回归用例**必红**（后者旧行为是 `not-found`、
+ * 首候选实现给 `no-marker`）——实施时实跑过红→绿，见交付说明。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { spawnSync } from 'node:child_process'
@@ -38,8 +45,24 @@ const HOOK_SRC = path.join(SCRIPTS_DIR, '..', '.husky', 'commit-msg')
 const REAL_UUID = '11111111-2222-4333-8444-555555555555'
 /** 形状合法、但两库都查无此行（本门禁要挡的那一类） */
 const FAKE_UUID = '99999999-8888-4777-8666-555555555555'
-/** 形状非法：36 位 hex 但**没有 8-4-4-4-12 分段**（extractCommitUuid 认，形状校验不认） */
+/** 形状非法：36 位 hex 但**没有 8-4-4-4-12 分段**（够像 uuid ⇒ 态②） */
 const BAD_SHAPE = '0123456789abcdef0123456789abcdef0123'
+/** 形状非法：**39 位**（票丁靶心，`0b5e9e0` 事故真值——多插了一段 `31-`） */
+const BAD_SHAPE_39 = 'dbb86077-de5e-4506-8f2c-31-6169d09dce33'
+/** 形状非法：**28 位**（截断） */
+const BAD_SHAPE_28 = 'dbb86077-de5e-4506-8f2c-6169d09'
+/** 形状非法：**大写** 36 位（票丁对 P3-1 的半推翻——原先视为无标记放行） */
+const BAD_SHAPE_UPPER = 'ABCDEF01-2345-4678-89AB-CDEF01234567'
+/** 防误拦的反对照：散文里顺口提了标记形状，**不是**在写标记 ⇒ 必须放行 */
+const PROSE_MARKER = 'docs: 说明 catstudy [uuid] 标记规则\n'
+
+/**
+ * P2 骨架：**脏候选（散文）在前、真标记在末尾**——本仓 4 笔真实 commit 的形状
+ * （`40a5b835` / `9c8853a7` / `c37f1881` / `bba06f28`，首个候选全是散文里的
+ * `catstudy [uuid]`，真标记在 message 末尾）。只抓第一个候选的实现会在这里静默放行。
+ */
+const proseThenMarker = (u) =>
+  'docs: 说明 `catstudy [uuid]` 标记规则\n\nfeat(x): 干活\n\ncatstudy [' + u + ']\n'
 
 let dir
 let seq = 0
@@ -81,11 +104,42 @@ describe('evaluateCommitUuid —— C4 五态', () => {
     expect(formatPassLine(res)).toContain('无 catstudy [uuid] 标记')
   })
 
-  it('态①′ 大写 uuid 视为无标记 → 放行（P3-1：extractCommitUuid 只认小写 hex）', () => {
-    // 必须用**带字母**的 uuid：纯数字的 uuid 大写后与自身相同，测不出这条
-    const upper = 'abcdef01-2345-4678-89ab-cdef01234567'.toUpperCase()
-    const res = evaluateCommitUuid(msg(upper), dbList([makeDb()]))
-    // 库里有这个 id（大小写不敏感比对是**另一个问题**）——这里只钉「大写 ⇒ 无标记」
+  it('态② 畸形标记矩阵（39 / 28 位、大写、错分组）→ 全都阻断（票丁靶心）', () => {
+    // 库路径故意不存在：若实现仍去查库，落点会变成 no-db / db-error 而不是 bad-shape
+    const deadDb = [{ label: 'dev', file: path.join(dir, '不存在.db') }]
+    for (const bad of [BAD_SHAPE_39, BAD_SHAPE_28, BAD_SHAPE_UPPER, BAD_SHAPE]) {
+      const res = evaluateCommitUuid(msg(bad), deadDb)
+      // 失败信息带上被拒原文，红了能直接看出是哪一支漏了
+      expect(res.code, `畸形标记 ${bad} 未被阻断（票丁的静默放行复发）`).toBe('bad-shape')
+      expect(res.ok).toBe(false)
+      expect(res.uuid).toBe(bad) // 被拒 uuid 原文
+      expect(res.dbs).toEqual([]) // 零查询
+    }
+    // 事故真值单列断言：出口必须把它**原文**亮出来（否则人看不到自己写歪在哪）
+    const incident = formatBlockMessage(evaluateCommitUuid(msg(BAD_SHAPE_39), deadDb))
+    expect(incident).toContain(BAD_SHAPE_39)
+    expect(incident).toContain('形状非法')
+  })
+
+  it('态①′ 大写 uuid 由「放行」翻为「阻断」（票丁对 P3-1 的半推翻）', () => {
+    // 单列这条（矩阵里已有）是因为它**推翻了一条既有裁定**：P3-1 当初的取舍是
+    // 「不改共用提取器的正则」（范围理由），不是「大写无害」（语义理由）。
+    // 必须用**带字母**的 uuid：纯数字 uuid 大写后与自身相同，测不出这条。
+    const res = evaluateCommitUuid(msg(BAD_SHAPE_UPPER), dbList([makeDb()]))
+    expect(res.code).toBe('bad-shape')
+    expect(res.ok).toBe(false)
+  })
+
+  it('态①″ 散文 `catstudy [uuid]` 不是标记 → 放行（防误拦的反对照，必须有）', () => {
+    // 只加严会把正常提交拦死——正是把人推向 --no-verify 的形态
+    const res = evaluateCommitUuid(PROSE_MARKER, dbList([makeDb()]))
+    expect(res.code).toBe('no-marker')
+    expect(res.ok).toBe(true)
+    expect(res.uuid).toBeNull()
+  })
+
+  it('态①‴ 括号里写非 uuid 词（`not-a-uuid`）→ 放行', () => {
+    const res = evaluateCommitUuid(msg('not-a-uuid'), dbList([makeDb()]))
     expect(res.code).toBe('no-marker')
     expect(res.ok).toBe(true)
   })
@@ -171,6 +225,63 @@ describe('evaluateCommitUuid —— C4 五态', () => {
     expect(res.code).toBe('found')
     expect(res.ok).toBe(true)
     expect(res.hit.label).toBe('prod')
+  })
+})
+
+// ─── P2 全候选扫描：脏候选在前时不许静默放行（审查者实证的净回归）─────────────
+
+describe('evaluateCommitUuid —— 全候选扫描（P2）', () => {
+  it('脏候选在前 + 后面是**畸形标记** → 仍阻断（票丁靶心，首个候选非畸形也不放过）', () => {
+    // 库路径故意不存在：若实现仍去查库，落点会变成 no-db 而不是 bad-shape
+    const deadDb = [{ label: 'dev', file: path.join(dir, '不存在.db') }]
+    const res = evaluateCommitUuid(proseThenMarker(BAD_SHAPE_39), deadDb)
+    expect(res.code, '脏候选在前时畸形标记又被静默放行了（票丁靶心未闭合）').toBe('bad-shape')
+    expect(res.ok).toBe(false)
+    expect(res.uuid).toBe(BAD_SHAPE_39) // 被拒的是**畸形原文**，不是前面那个脏候选
+    expect(res.dbs).toEqual([]) // 零查询
+  })
+
+  it('脏候选在前 + 后面是**形状合法但查无此 id** 的真标记 → 阻断（净回归的防线）', () => {
+    // 旧 `extractCommitUuid` 在这里返回 FAKE_UUID（正则内建形状要求 ⇒ 回溯跳过脏候选）
+    // ⇒ 走态③阻断。只抓第一个候选的实现会返回 `no-marker` —— 这就是净回归本身。
+    const res = evaluateCommitUuid(proseThenMarker(FAKE_UUID), dbList([makeDb()]))
+    expect(res.code, '脏候选把后面的真标记挡掉了（旧实现会落 not-found）').toBe('not-found')
+    expect(res.ok).toBe(false)
+    expect(res.uuid).toBe(FAKE_UUID) // 被查的是真标记，不是脏候选
+  })
+
+  it('脏候选在前 + 后面是**库中真值** → 放行（真值不被脏候选挡住）', () => {
+    const res = evaluateCommitUuid(proseThenMarker(REAL_UUID), dbList([makeDb()]))
+    expect(res.code).toBe('found')
+    expect(res.ok).toBe(true)
+    expect(res.uuid).toBe(REAL_UUID)
+    expect(res.hit.label).toBe('dev')
+  })
+
+  it('漏写 `]` 的 `catstudy [` 不吞掉后面的真标记（捕获排除换行）', () => {
+    // 放开换行（`[^\]]+`）时首个候选会一路吞到后面那个 `]`，把真标记整个吃掉 ⇒ no-marker。
+    // 排除换行后该位置失配、引擎继续向后搜 ⇒ 真标记仍被看见。
+    const swallow = 'chore: 手滑写了个 catstudy [oops\n\ncatstudy [' + REAL_UUID + ']\n'
+    const res = evaluateCommitUuid(swallow, dbList([makeDb()]))
+    expect(res.code, '漏写的 `[` 吞掉了后面的真标记').toBe('found')
+    expect(res.uuid).toBe(REAL_UUID)
+  })
+
+  it('多个畸形候选 → 报**第一个**畸形原文（出口亮的是人写歪的那处）', () => {
+    const message =
+      'feat: x\n\ncatstudy [' + BAD_SHAPE_28 + ']\n\ncatstudy [' + BAD_SHAPE_39 + ']\n'
+    const res = evaluateCommitUuid(message, [{ label: 'dev', file: path.join(dir, 'x.db') }])
+    expect(res.code).toBe('bad-shape')
+    expect(res.uuid).toBe(BAD_SHAPE_28)
+  })
+
+  it('脏候选 + 散文候选（无形状合法者、无畸形）→ 放行（态①″ 不受多候选影响）', () => {
+    const res = evaluateCommitUuid(
+      'docs: catstudy [uuid] 与 catstudy [not-a-uuid] 都只是举例\n',
+      dbList([makeDb()])
+    )
+    expect(res.code).toBe('no-marker')
+    expect(res.ok).toBe(true)
   })
 })
 
@@ -281,6 +392,41 @@ describe('B2 真机挂钩（临时仓库 · 真 git commit）', () => {
     expect(plain.ok, `无标记被误拦，输出:\n${plain.output}`).toBe(true)
     expect(plain.output).toContain('无 catstudy [uuid] 标记')
     expect(commitCount(repo, env)).toBe('2')
+  }, 60_000)
+
+  it('畸形标记（39 位）被拒——认钩子自打的 bad-shape 行（票丁真机取证）', () => {
+    const { repo, env } = makeHookedRepo()
+
+    const r = commit(repo, env, `refactor: 畸形标记\n\ncatstudy [${BAD_SHAPE_39}]\n`)
+    expect(
+      r.ok,
+      `39 位畸形标记竟然提交成功（票丁的失效模式在真机面复发），输出:\n${r.output}`
+    ).toBe(false)
+    // 机器证据：钩子自己打印的判决码行（手工 sh 冒充不会有这条 git 侧输出）
+    expect(r.output).toContain(`[commit-uuid-gate] ❌ commit-msg 门禁阻断（bad-shape）`)
+    expect(r.output).toContain(BAD_SHAPE_39) // 被拒原文
+    expect(commitCount(repo, env)).toBe('0')
+
+    // 反对照（同一条真机路径）：散文提了一句标记形状 ⇒ 不该被这条闸拦
+    // 新开一个文件（work.txt 已被上一次 commit 吃进树，改了它会是「无改动可提交」）
+    writeFileSync(path.join(repo, 'work-prose.txt'), 'y\n')
+    git(repo, ['add', 'work-prose.txt'], env)
+    const prose = commit(repo, env, PROSE_MARKER)
+    expect(prose.ok, `散文标记被误拦，输出:\n${prose.output}`).toBe(true)
+    expect(commitCount(repo, env)).toBe('1')
+
+    // P2 真机面：**脏候选在前** + 畸形标记在后 ⇒ 必须仍被拦（票丁靶心在真机路径闭合）。
+    // 只抓第一个候选的实现在这里是放行 —— 即失效模式在真机面复发。
+    writeFileSync(path.join(repo, 'work-prose2.txt'), 'z\n')
+    git(repo, ['add', 'work-prose2.txt'], env)
+    const lateBad = commit(repo, env, proseThenMarker(BAD_SHAPE_39))
+    expect(
+      lateBad.ok,
+      `脏候选在前时 39 位畸形标记提交成功了（票丁失效模式在真机面复发），输出:\n${lateBad.output}`
+    ).toBe(false)
+    expect(lateBad.output).toContain('[commit-uuid-gate] ❌ commit-msg 门禁阻断（bad-shape）')
+    expect(lateBad.output).toContain(BAD_SHAPE_39)
+    expect(commitCount(repo, env)).toBe('1') // 被拒 ⇒ 不新增 commit
   }, 60_000)
 })
 
