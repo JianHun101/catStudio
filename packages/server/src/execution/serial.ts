@@ -54,6 +54,7 @@ import {
 import {
   filterAllowedMentions,
   allowedTargetsDescription,
+  mentionLimitRemedy,
   MAX_MENTIONS_PER_REPLY,
 } from '../dispatch/mention-policy.js'
 import { consumeRouteSignals } from '../llm/route-signals.js'
@@ -923,10 +924,9 @@ async function executeOneAgent(
         }
         const countBlocked = policy.blocked.filter((b) => b.reason === 'count-limit')
         if (countBlocked.length > 0) {
-          // 补救指引按角色分岔（票乙）：reviewer 的 @ 目标由审查结论唯一决定，
-          // 「拆条分别 @」会把它引回双 @ 老路——故只描述规则、不复述 verdict→目标
-          // 的映射表（该表已有两处维护面：seed-data 伪铁律 / mention-policy 优先级表）。
-          const remedy = agent.role === 'reviewer' ? '请只 @ 结论对应的那一个目标' : '请拆条分别 @'
+          // 补救指引按角色分岔——文案的**单一维护面**是 `mentionLimitRemedy`
+          // （票丙：本处原为内联三元，MCP 路径另写死一句，两处各漂各的）。
+          const remedy = mentionLimitRemedy(agent.role)
           hintParts.push(
             `一条回复最多 @ ${MAX_MENTIONS_PER_REPLY} 个 agent，你 @ 的 ${countBlocked
               .map((b) => b.name)

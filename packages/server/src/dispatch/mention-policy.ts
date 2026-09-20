@@ -166,6 +166,18 @@ const REVIEWER_KEEP_PRIORITY: Record<ReviewerVerdict | 'unknown', TargetMatcher[
   approve: [isStore, isRequester],
   comment: [isStore, isRequester],
   // 要返工 → 回请求人（实施侧）
+  //
+  // ⚠️ 已知局限（票丙挂账转代码记录，**行为不动**）：`@作者` 的运行期定义就是
+  // 「本次触发消息作者」（hints.ts:248/262 的 resolveRolePlaceholders），故保
+  // 「请求人」与 prompt 面的占位符语义逐字一致。但**架构师代发起审查**时请求人
+  // = store，返工结论会落到架构师而不是真实代码作者，下游 verdict-parser 取不到
+  // 非 store 目标 ⇒ `subject=null` + `no_subject`（审查 P3-2 探针实证）。
+  // 这是既有语义、非本笔引入（socketio.test.ts:2075 早已建模该态）。
+  // reopen 条件（满足任一即重裁本格，而不是就地改）：
+  //   ① 实测出现「代发起审查 → 返工」链且架构师未按铁律 `行首@架构师 请收口`
+  //      把链转回作者 —— 即兜底路径被证伪；
+  //   ② `no_subject` 被下游统计（episode 归因 / flow-advance）当失败计入 ——
+  //      该格就从「既有语义」变成了指标污染源。
   suggest: [isRequester, isImplementer],
   reject: [isRequester, isImplementer],
   unknown: [isRequester, isImplementer, isStore],
@@ -218,4 +230,21 @@ export function allowedTargetsDescription(role?: AgentRole): string {
     default:
       return '任意猫'
   }
+}
+
+/**
+ * 超上限（`count-limit`）时给发送者的**补救方向**——单一维护面。
+ *
+ * 两个消费路径（票丙收敛）：文本路径 `execution/serial.ts` 的即时系统提示、
+ * MCP 路径 `routes/internal.ts` 的 422 reason。原先两处各写各的措辞（前者按
+ * 角色内联三元、后者写死「请收敛到一个目标重投」），改一处漂一处。
+ *
+ * **reviewer 与其余角色的补救方向本来就不同**，这不是措辞差异：
+ * reviewer 的 @ 目标由**审查结论唯一决定**（`REVIEWER_KEEP_PRIORITY`），叫它
+ * 「拆条分别 @」等于把它引回双 @ 老路（正是单目标闸要堵的形态）；它该做的是
+ * 回到结论本身。故只描述规则、**不复述** verdict→目标映射表——那张表已有两处
+ * 维护面（seed-data 伪铁律 / 本模块优先级表），第三处必漂。
+ */
+export function mentionLimitRemedy(role?: AgentRole): string {
+  return role === 'reviewer' ? '请只 @ 结论对应的那一个目标' : '请拆条分别 @'
 }
