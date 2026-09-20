@@ -916,7 +916,10 @@ async function executeOneAgent(
         // 另寻他路，被拦的结论就静默停摆（2026-09-09 实证：吐槽猫 的 ⚠️ 被拦，
         // 作者与店长均不知情，卡 10 分钟）。故除提示发送者外，同时告知会话内
         // store 猫（收口决策归店长）。只对 role-not-allowed 发——count-limit 的
-        // 补救路径明确（拆条重发，提示已给发送者），不构成结论悬空。
+        // 补救路径明确（提示已给发送者，方向见上方按角色分岔的 remedy），不构成
+        // 结论悬空。（票乙订正：原写死「拆条重发」，而该指引对 reviewer 是错的、
+        // 会把审查猫引回双 @ 老路；本豁免的守卫本就只认 role-not-allowed，
+        // 行为无影响，漂的只是这句复述。）
         // 目标从 sessionAgentIds 反查（不能复用 allMentionedAgents——那已按
         // routeNames 过滤，正是被剥除后的集合）；发送者本身是 store 时跳过。
         //

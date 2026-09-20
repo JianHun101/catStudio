@@ -364,7 +364,12 @@ describe('internal route-signals', () => {
         headers: { 'x-signal-token': VALID_TOKEN },
       })
       expect(res.statusCode).toBe(422)
-      expect(JSON.parse(res.body).reason).toContain('role-not-allowed')
+      // 钉完整串（票乙 P2 顺带收紧）：本笔把 422 串从「一句拼所有 reason」改成
+      // 「按 reason 分句」，纯 role-not-allowed 时的输出必须与改动前**逐字节恒等**
+      // ——这条断言就是那个「零漂移」声称的探针，`toContain` 证不了它。
+      expect(JSON.parse(res.body).reason).toBe(
+        '目标不在角色允许范围内（副审查猫:role-not-allowed）——请改投文本行首 @ 或调整目标'
+      )
       // 未入 Map
       expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')).toHaveLength(0)
     })
@@ -374,6 +379,9 @@ describe('internal route-signals', () => {
       // 判不出结论，故沿用既有 422 契约把球踢回模型，由它自己收敛到一个目标重投。
       // 两个目标都在 reviewer 边表内（店长 store / 实施猫 implementer）——422 的
       // 唯一来源是单目标闸，不是角色边表（后者由 1c 覆盖，两者 reason 不同）。
+      // 钉**完整串**（审查 ⚠️ P2）：只钉 `toContain('count-limit')` 时，串里的
+      // 前导句写错也照样绿——正是本笔要修的那个缺陷能溜过测试的原因。
+      // 无 triggerAuthorName ⇒ 结论不可得档 → 保实施侧（剥店长）。
       await mockActive()
       const res = await app.inject({
         method: 'POST',
@@ -382,8 +390,32 @@ describe('internal route-signals', () => {
         headers: { 'x-signal-token': VALID_TOKEN },
       })
       expect(res.statusCode).toBe(422)
-      expect(JSON.parse(res.body).reason).toContain('count-limit')
+      expect(JSON.parse(res.body).reason).toBe(
+        '一条回复最多 @ 1 个目标，请收敛到一个目标重投（店长:count-limit）'
+      )
       // 未入 Map——422 不是「部分成功」
+      expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')).toHaveLength(0)
+    })
+
+    it('验收1e（票乙 P2）：role-not-allowed 与 count-limit 同轮 → 两因各说各的，不合并成一句假话', async () => {
+      // 混合态可达：reviewer 边表 = {store, implementer} ∪ 请求人，故 @ 另一位
+      // reviewer 落 role-not-allowed、@ 店长+实施猫落 count-limit。旧实现只有一句
+      // 「目标不在角色允许范围内（…）」把两者并报——对超上限那两个目标是假话。
+      // 本用例钉的是「分句」本身：两段同时在、顺序固定（role 段在前）、
+      // 且 role 段与 1c 的单独串逐字节相同（契约面不因混合态而漂移）。
+      await mockActive()
+      insertSecondReviewerCat()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/internal/route-signals',
+        payload: reviewerBody({ targetCats: ['店长', '实施猫', '副审查猫'] }),
+        headers: { 'x-signal-token': VALID_TOKEN },
+      })
+      expect(res.statusCode).toBe(422)
+      expect(JSON.parse(res.body).reason).toBe(
+        '目标不在角色允许范围内（副审查猫:role-not-allowed）——请改投文本行首 @ 或调整目标；' +
+          '一条回复最多 @ 1 个目标，请收敛到一个目标重投（店长:count-limit）'
+      )
       expect(consumeRouteSignals('session-1', 'agent-reviewer', 'msg-r1')).toHaveLength(0)
     })
 
