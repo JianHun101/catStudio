@@ -226,6 +226,16 @@ describe('agent system prompts', () => {
     }
   })
 
+  it('S1 案 A 续：收口链那一行以「gh pr merge 合并（店长执行）」为准，旧「GitHub merge」不得回归', () => {
+    // 漂移源：`db/repository/agents.ts` 的 upsertAgent 带
+    // `ON CONFLICT(name) DO UPDATE SET system_prompt = excluded.system_prompt`
+    // ⇒ 跑 `pnpm seed` 会把活库那行静默抹回 seed-data.ts 的字面，故两处必须同文案。
+    // 上面那条只钉「收口链段在店长 prompt 里」，不逐字钉这一行的动作主体，本断言补这一格。
+    const boss = agents.find((a) => a.name === '店长')!
+    expect(boss.systemPrompt).toContain('gh pr merge 合并（店长执行）')
+    expect(boss.systemPrompt).not.toContain('GitHub merge')
+  })
+
   it('S3a：三只实施猫的「实施规范」段单源——逐字一致，改一处三猫同时生效', () => {
     // 旧形态是三份约 600 字逐字复制（改一处要同步三处、必漏其一）——抽常量后单源。
     // 判据用「段内逐字相等」而非「引用同一常量」：断言的是可观察结果，不是实现形状。
