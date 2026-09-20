@@ -7,6 +7,7 @@
  * - system prompt 角色占位符解析
  */
 
+import { SKILL_WHITELIST, SKILL_CATALOG } from '@cat-study/shared'
 import { agents as agentsRepo } from '../db/repository/index.js'
 import {
   REVIEW_VERDICT_MARKERS,
@@ -294,6 +295,30 @@ export function buildDynamicHints(
     buildHandoffTriggerHint(triggerContent),
     buildTriggerFocusHint(triggerContent),
   ].filter((h): h is string => h !== null)
+}
+
+/**
+ * 技能目录段（甲案「技能发现面注入」，2026-09-20）。
+ *
+ * 病灶：`SKILL_CATALOG` 只活在 MCP server 进程里、从不进 system prompt——猫对
+ * 技能面是盲的，除非角色 prompt 里逐条写死某阶段用某技能。本函数把**可读面**
+ * （`read_skill` 白名单强校验的范围）原样搬成**常驻发现面**。
+ *
+ * 三条硬约束：
+ * - **注入面 = 可读面**：只列 `SKILL_WHITELIST` 11 条，绝不列 `skills/` 目录全量
+ *   （白名单外点名 = 菜单里点了报错，菜单说谎比没菜单更坏）。
+ * - **单一真相源**：文案逐字取自 `SKILL_CATALOG`（shared 叶子），本函数不另写说明。
+ * - **纯函数、无 I/O**：目录每轮不变，拼进第一条 system message（`finalSystemPrompt`），
+ *   不坐 `dynamicHints` 的位置——后者是场景提示，有「超限被当最旧先丢」的观察项。
+ *
+ * @returns 目录段文本（标题行 + 每条一行 `- <name>: <一句话>` + 一行行为指令）
+ */
+export function buildSkillDirectorySection(): string {
+  return [
+    '【可用技能】以下技能可按需自取正文：',
+    ...SKILL_WHITELIST.map((name) => `- ${name}: ${SKILL_CATALOG[name]}`),
+    '对应场景先调 MCP 工具 read_skill 取正文再动手，正文即该技能定义（含使用时机/输出/前置门槛）。',
+  ].join('\n')
 }
 
 /**

@@ -73,6 +73,7 @@ import {
   formatUserMessage,
   resolveRolePlaceholders,
   buildDynamicHints,
+  buildSkillDirectorySection,
 } from './hints.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 import type { EngineState } from './state.js'
@@ -591,11 +592,21 @@ export async function runAgentReply(
       ? `${agent.systemPrompt}\n\n${ironLaw}`
       : agent.systemPrompt
 
+  // 技能发现面（甲案，2026-09-20）：常驻目录段拼在**替换面内**——与铁律同款理由，
+  // 注入文本若含角色占位符（@作者/@架构师/@审查者）必须一并被替换，否则占位符漏网
+  // ⇒ mention 精确匹配落空 ⇒ 静默不触发。目录段每轮不变，坐的是第一条 system
+  // message（真 system prompt 面），不是 dynamicHints 的位置——后者是场景提示，
+  // 有「超限时被当最旧先丢」的观察项（CLI 截断止血单），常驻菜单不能坐那儿。
+  const systemPromptWithDirectory = `${baseSystemPrompt}\n\n${buildSkillDirectorySection()}`
+
   // 将 system prompt 中的角色占位符（@作者/@架构师/@审查者）替换为实际 agent 名
   // 使 LLM 能正确输出 @店长 等实际 agent 名——mention 解析是严格精确匹配，
   // 占位符不替换 = 解析落空 = 静默不触发（b542d24 分流断链事故根因）。
   // 注入的铁律全文同样含占位符（@作者/@架构师/@审查者）——必须一起替换
-  const finalSystemPrompt = resolveRolePlaceholders(baseSystemPrompt, triggerMsg.authorName)
+  const finalSystemPrompt = resolveRolePlaceholders(
+    systemPromptWithDirectory,
+    triggerMsg.authorName
+  )
 
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
   const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages, {
