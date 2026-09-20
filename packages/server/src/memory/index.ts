@@ -47,6 +47,7 @@ import type {
 import { embedText, getEmbeddingStatus, isMemoryEnabled } from './embedding.js'
 import { rewriteRetrievalQueries } from './query-rewrite.js'
 import { createLogger } from '../logger.js'
+import { envNumber } from '../env-number.js'
 
 const log = createLogger('memory')
 
@@ -164,8 +165,11 @@ export interface RetrievalParamsSnapshot {
  */
 export function currentRetrievalParams(): RetrievalParamsSnapshot {
   return {
-    topK: parseInt(process.env.MEMORY_TOP_K || '3', 10),
-    maxDistance: parseFloat(process.env.MEMORY_MAX_DISTANCE || '0.6'),
+    // topK 保持**整数**语义（原 `parseInt`）：`Math.trunc` 在调用点做，`envNumber`
+    // 形状固定两参不带模式开关。切片点 `slice(0, topK)` 本会自行取整，此处显式化是
+    // 为了 `RetrievalParamsSnapshot` 快照里读到的就是真实生效的整数。
+    topK: Math.trunc(envNumber('MEMORY_TOP_K', 3)),
+    maxDistance: envNumber('MEMORY_MAX_DISTANCE', 0.6),
     probeN: MAX_PROBE_N,
   }
 }

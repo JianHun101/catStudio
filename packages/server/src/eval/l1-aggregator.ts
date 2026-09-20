@@ -15,6 +15,7 @@ import { getDb } from '../db/index.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { isoDaysAgo } from '../db/repository/clock.js'
 import { createLogger } from '../logger.js'
+import { envNumber } from '../env-number.js'
 import { messageOf } from '../utils.js'
 import type { EngineBus, HandoffBus } from '../execution/bus.js'
 
@@ -31,9 +32,9 @@ export function alertThresholds(): {
   reworkRate: number
 } {
   return {
-    successRate: parseFloat(process.env.EVAL_ALERT_SUCCESS_RATE || '0.8'),
-    timeoutRate: parseFloat(process.env.EVAL_ALERT_TIMEOUT_RATE || '0.1'),
-    reworkRate: parseFloat(process.env.EVAL_ALERT_REWORK_RATE || '0.3'),
+    successRate: envNumber('EVAL_ALERT_SUCCESS_RATE', 0.8),
+    timeoutRate: envNumber('EVAL_ALERT_TIMEOUT_RATE', 0.1),
+    reworkRate: envNumber('EVAL_ALERT_REWORK_RATE', 0.3),
   }
 }
 
