@@ -149,7 +149,26 @@ export function getHeadCommit(): string | null {
 }
 
 /**
- * git add -A && git commit。
+ * 暂存区读数：`git diff --cached --quiet` 的退出码。
+ *
+ * 0 = 暂存区与 HEAD 无差异（没有任何东西可提交）；1 = 有差异；**其余 = git 自己出错**。
+ * 用这个读数而不是「`git commit` 是否失败」判「有没有东西可提交」——后者的退出码
+ * 分不清「真没改动」与「钩子拒绝 / `index.lock` 撞车」（四种情况同一条日志）。
+ *
+ * 拿不到退出码（spawn 失败 / 被信号杀）返回 -1，调用方按**出错**处理（fail-closed）：
+ * 不可判定时若当成「没差异」，真改动静默丢失。
+ */
+function stagedDiffStatus(cwd: string): number {
+  try {
+    execSync('git diff --cached --quiet', { cwd, env: cleanGitEnv(), stdio: 'ignore' })
+    return 0
+  } catch (err: any) {
+    return typeof err?.status === 'number' ? err.status : -1
+  }
+}
+
+/**
+ * git add -A &&（暂存区非空时）git commit。
  *
  * opts.cwd 指定提交仓库（会话 worktree 场景——auto-commit 落会话分支）；
  * 缺省提交当前 cwd 的仓库（主工作区，存量会话行为零变化）。
@@ -166,6 +185,32 @@ export function gitCommit(message: string, opts?: { cwd?: string }): string | nu
   }
   try {
     execSync('git add -A', { cwd: base, env: cleanGitEnv(), stdio: 'ignore' })
+
+    // 暂存区为空 ⇒ 整个跳过 `git commit`（T-1 格 0）。
+    //
+    // `git commit` 会连带跑人类提交门禁（`.husky/pre-commit` = lint-staged → 三包 tsc →
+    // `scripts/precommit-scope.mjs`），而后者对**空暂存区**走 fail-closed 全量 4 project
+    // （`precommit-scope.mjs` 的「暂存区为空或不可解析」分支）——于是「根本没法提交」的轮次
+    // 反而触发最贵的分支：实测单次 100–180s，全程同步阻塞事件循环（socket 心跳/HTTP 全僵死）。
+    //
+    // 短路后对外行为与旧路径逐字相同：返回 null + 同一条 `auto commit skipped (no changes)`
+    // 日志（旧路径也是走到 `git commit` 失败才返回 null）——只是不再白跑一遍门禁。
+    const staged = stagedDiffStatus(base)
+    if (staged === 0) {
+      log.info('auto commit skipped (no changes)', { message, cwd: base })
+      return null
+    }
+    if (staged !== 1) {
+      // ≥2 = git 自己出错，-1 = 没拿到退出码。**绝不**当成「没差异」——那会把真改动
+      // 静默吞掉。显式落 error（本仓铁律：不静默），不产生 commit。
+      log.error('auto commit failed (git diff --cached --quiet)', {
+        message,
+        cwd: base,
+        status: staged,
+      })
+      return null
+    }
+
     execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
       cwd: base,
       env: cleanGitEnv(),
@@ -180,7 +225,9 @@ export function gitCommit(message: string, opts?: { cwd?: string }): string | nu
     log.info('auto commit', { message, hash, cwd: base })
     return hash
   } catch (err: any) {
-    // 没有改动时 git commit 会非零退出，这是正常的
+    // 走到这里 = `git add -A` / `git commit` / `git rev-parse` 三者之一出错（暂存区为空
+    // 那条路径已在上面短路返回）。文案仍是历史那句「no changes」——对「钩子拒绝 /
+    // `index.lock` 撞车」是**假读数**，属格 3（仪表）的范围，本格刻意不动文案（C3）。
     log.info('auto commit skipped (no changes)', { message, cwd: base })
     return null
   }

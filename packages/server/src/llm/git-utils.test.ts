@@ -16,7 +16,7 @@
  * 删除标记 → 恢复。验证"文件跨进程"方案，防止回归到环境变量（不跨进程）。
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
 import { execFileSync, execSync, spawn } from 'node:child_process'
 import {
   existsSync,
@@ -45,9 +45,35 @@ import {
 //    全量委托真实实现。两处均为代理而非替换，既有用例行为零变化。
 let mockFailWorktreeRemove = false
 
+/**
+ * 故障注入：true 时 `git diff --cached --quiet` 抛 `status=128`（模拟 git 自身出错）。
+ * 真仓里造不出「`git add` 成功但 `git diff --cached` 出错」的形态，只能从子进程边界注入。
+ */
+let mockFailStagedDiff = false
+
+/**
+ * git-utils 的日志捕获（T-1 格 0 的「不静默」判据）。
+ *
+ * 只换 `git-utils` 这一个模块的 logger——「跳过」与「读数出错」**都返回 null**，
+ * 返回值分不开这两条路，日志内容才是判据。其余模块原样透传，故 `...real` 保留全部方法。
+ */
+const h = vi.hoisted(() => ({ logInfo: vi.fn(), logError: vi.fn() }))
+
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return { ...actual, rmSync: vi.fn(actual.rmSync) }
+})
+
+vi.mock('../logger.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../logger.js')>()
+  return {
+    ...actual,
+    createLogger: (...args: Parameters<typeof actual.createLogger>) => {
+      const real = actual.createLogger(...args)
+      if (args[0] !== 'git-utils') return real
+      return { ...real, info: h.logInfo, error: h.logError }
+    },
+  }
 })
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -66,6 +92,18 @@ vi.mock('node:child_process', async (importOriginal) => {
       }
       return (actual.execFileSync as any)(...args)
     }) as typeof import('node:child_process').execFileSync,
+    execSync: ((...args: any[]) => {
+      if (
+        mockFailStagedDiff &&
+        typeof args[0] === 'string' &&
+        args[0].includes('diff --cached --quiet')
+      ) {
+        const err: any = new Error('simulated git diff --cached --quiet failure')
+        err.status = 128
+        throw err
+      }
+      return (actual.execSync as any)(...args)
+    }) as typeof import('node:child_process').execSync,
   }
 })
 
@@ -153,6 +191,84 @@ describe('gitCommit e2e marker guard', () => {
     const hash = gitUtils.gitCommit('resume commit')
     expect(hash).toBeTruthy()
     expect(git('log -1 --pretty=%B')).toContain('resume commit')
+  })
+})
+
+// ─── T-1 格 0：暂存区为空 ⇒ 跳过 git commit ──────────────
+// 装置：临时仓库里装一个「一跑就留痕」的 pre-commit 钩子。
+// 「没调 git commit」判不了返回值（短路与真失败都返回 null）、也判不了 HEAD（两者都不动）
+// ——钩子留痕是**唯一**能分辨「门禁压根没跑」的观测点；同一组里的有改动用例要求它必须
+// 留痕，即反对照（没有它，这组断言可以被写成「永远跳过」还全绿）。
+describe('gitCommit 暂存区空短路（T-1 格0）', () => {
+  // 落在壳里（repo 的兄弟）——写进 repo 内会被下一次 `git add -A` 当成真改动。
+  // `tmp` 由 beforeAll 赋值（describe 体先于它执行）⇒ 路径也在这里才算。
+  let hookMarker = ''
+  const hookRan = () => existsSync(hookMarker)
+
+  const logMsgs = (fn: typeof h.logInfo) => fn.mock.calls.map((c) => String(c[0]))
+
+  beforeEach(() => {
+    h.logInfo.mockClear()
+    h.logError.mockClear()
+  })
+
+  beforeAll(() => {
+    hookMarker = resolve(tmp, '..', 'ge0-hook-ran.txt')
+    // 路径写进 sh 脚本：反斜杠是转义符 ⇒ 一律正斜杠
+    writeFileSync(
+      resolve(tmp, '.git', 'hooks', 'pre-commit'),
+      `#!/bin/sh\necho ran >> "${hookMarker.replace(/\\/g, '/')}"\n`,
+      { mode: 0o755 }
+    )
+  })
+
+  it('暂存区为空 → 不调 git commit（门禁零执行），返回 null 且不产生 commit', () => {
+    gitUtils.gitCommit('catstudy [ge0-preclean]') // 前置：把前序用例的残留改动收干净
+    rmSync(hookMarker, { force: true })
+    const head0 = git('rev-parse HEAD')
+
+    const hash = gitUtils.gitCommit('catstudy [ge0-noop]')
+
+    expect(hash).toBeNull()
+    expect(git('rev-parse HEAD')).toBe(head0)
+    expect(hookRan()).toBe(false) // ← 承重断言：pre-commit 真的没跑
+    // 短路走的是**既有**那条 info（日志文案零变化）；不落 error——「没改动」不是故障
+    expect(logMsgs(h.logInfo)).toContain('auto commit skipped (no changes)')
+    expect(logMsgs(h.logError)).not.toContain('auto commit failed (git diff --cached --quiet)')
+  })
+
+  it('有改动 → 照常提交，且 pre-commit 真的跑（反对照）', () => {
+    rmSync(hookMarker, { force: true })
+    writeFileSync(resolve(tmp, 'ge0-dirty.txt'), 'dirty', 'utf-8')
+
+    const hash = gitUtils.gitCommit('catstudy [ge0-dirty]')
+
+    expect(hash).toBeTruthy()
+    expect(git('log -1 --pretty=%B')).toContain('ge0-dirty')
+    expect(hookRan()).toBe(true) // ← 装置非恒假：提交路径上门禁照跑（C3 语义零变化）
+    expect(logMsgs(h.logInfo)).toContain('auto commit')
+    expect(logMsgs(h.logInfo)).not.toContain('auto commit skipped (no changes)')
+  })
+
+  it('暂存区读数出错（status≥2）→ 落 error、不落「没改动」，且不产生 commit', () => {
+    writeFileSync(resolve(tmp, 'ge0-diff-error.txt'), 'x', 'utf-8')
+    rmSync(hookMarker, { force: true })
+    const head0 = git('rev-parse HEAD')
+
+    let hash: string | null = 'sentinel'
+    mockFailStagedDiff = true
+    try {
+      hash = gitUtils.gitCommit('catstudy [ge0-diff-error]')
+    } finally {
+      mockFailStagedDiff = false
+    }
+
+    expect(hash).toBeNull()
+    expect(git('rev-parse HEAD')).toBe(head0)
+    expect(hookRan()).toBe(false)
+    expect(logMsgs(h.logError)).toContain('auto commit failed (git diff --cached --quiet)')
+    // 反对照：**不许**退化成「没改动」那条 info——那正是格 0 要治的静默（真改动被吞）
+    expect(logMsgs(h.logInfo)).not.toContain('auto commit skipped (no changes)')
   })
 })
 
