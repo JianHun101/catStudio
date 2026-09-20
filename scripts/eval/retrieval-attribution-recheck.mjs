@@ -105,8 +105,10 @@ export const POOL_PER_QUERY_SWEEP = [20, 50, 100]
  * 归因照抄 09-20 报告 §三/§四/§七，仅作对照，**不参与任何判据**。
  *
  * ⚠️ 本表**只留对账用得到的字段**（`id` / `docPath` / `sectionAnchor` / `attribution`）。
- * 原先还抄了每条的距离，实测**零消费**（判据与渲染都不读它）⇒ 已删；要查 09-20 的
- * 原始距离见 `docs/eval/retrieval-baseline-2026-09-20.md`。
+ * 原先还抄了每条的距离，实测**零消费**（判据与渲染都不读它）⇒ 已删。
+ * 要查 09-20 的原始距离：**带非空距离的那 8 处**（G02/G08/G09/G12/C03/C05/C19/C24）
+ * 在 `docs/eval/retrieval-baseline-2026-09-20.md` §三 逐条可查；其余 3 处
+ * （G03/N03/N04）原值即为 `null`，**没有距离可失**（不是删丢的）。
  */
 export const REPORT_0920_MISSES = [
   {
