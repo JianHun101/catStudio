@@ -1,5 +1,5 @@
 ---
-status: 在飞
+status: active
 ---
 
 # 票：docs/run 状态硬闸（「上浮 or 判弃」钉成收口链机械闸）
@@ -16,24 +16,24 @@ status: 在飞
 
 ```yaml
 ---
-status: 在飞 | 待上浮 | 已上浮 | 判弃
-floated_to: docs/plans/xxx.md # status ∈ {待上浮, 已上浮} 时必填
+status: active | pending-float | floated | dropped
+floated_to: docs/plans/xxx.md # status ∈ {pending-float, floated} 时必填
 ---
 ```
 
-- 沿用既有词汇与既有闸形态，不发明新词：`docs/plans/` 与 `docs/adr/` 已在用 `status:`；`scripts/flywheel/scan.mjs:62` 的 `PLAN_STATUS_CRYSTALLIZED`（`{'已定稿','已收口'}`）在 `:243` 已实施同型 fail-closed 准入闸（status 不达标 ⇒ 拒入库）。
-- 四档必要性：只有「在飞/已上浮」两档时，10 个「已收口但没上浮」的目录没有诚实可填的值——填「在飞」是假话，填「已上浮」会立刻触发门禁。四档让回填第一天就能诚实。
+- 沿用既有闸形态，不发明新词：`docs/plans/` 与 `docs/adr/` 已在用 `status:`；`scripts/flywheel/scan.mjs:72` 的 `PLAN_STATUS_CRYSTALLIZED`（`{'final','closed'}`）在 `:271` 已实施同型 fail-closed 准入闸（status 不达标 ⇒ 拒入库）。**值域为英文**（2026-09-20 全仓统一，权威表见 `CONTEXT.md` 文档约定段）——中文旧词是值域外，不是兼容别名。
+- 四档必要性：只有「`active`/`floated`」两档时，10 个「活已收口但未上浮」的目录没有诚实可填的值——填 `active` 是假话，填 `floated` 会立刻触发门禁。四档让回填第一天就能诚实。
 
 **② 挂载点**——`.husky/pre-push`，与既有审查门禁同一判据面（本次推送的逐行 refspec；判据面 = 执行面，不读 stdin 等于换了判据面）。
 
 判据（对被推的每个 sha，取其 `merge-base(dev, sha)..sha` 的 diff 面）：
 
-| 情形                                                          | 判定                                                    |
-| ------------------------------------------------------------- | ------------------------------------------------------- |
-| 本分支**新建**了 `docs/run/<slug>/` 而 tickets.md 无 `status` | **拦**（fail-closed，与既有门禁「绝不 fail-open」同调） |
-| `status: 已上浮` 或 `判弃`，而该目录**仍在树里**              | **拦**（应清未清——本次事件的直接止血点）                |
-| `status ∈ {待上浮, 已上浮}` 而 `floated_to` 指向的文件不存在  | **拦**（悬空落点）                                      |
-| `status: 在飞` / `待上浮`                                     | **放行**                                                |
+| 情形                                                                 | 判定                                                    |
+| -------------------------------------------------------------------- | ------------------------------------------------------- |
+| 本分支**新建**了 `docs/run/<slug>/` 而 tickets.md 无 `status`        | **拦**（fail-closed，与既有门禁「绝不 fail-open」同调） |
+| `status: floated` 或 `dropped`，而该目录**仍在树里**                 | **拦**（应清未清——本次事件的直接止血点）                |
+| `status ∈ {pending-float, floated}` 而 `floated_to` 指向的文件不存在 | **拦**（悬空落点）                                      |
+| `status: active` / `pending-float`                                   | **放行**                                                |
 
 **③ 判 diff 面而不判全树**（形态能否活的关键）：全树判会把别的会话的存量目录连坐进来——存量目录会让每一次推送全红；门禁一旦常态误拦合法推送，压力就把人推向 `--no-verify`（既有 pre-push 注释里已写明的判断）。diff 面天然限定在「本分支自己动过的目录」。
 
@@ -45,8 +45,8 @@ floated_to: docs/plans/xxx.md # status ∈ {待上浮, 已上浮} 时必填
 
 - `node scripts/run-docs-stale.mjs --days N`：打印「未清 且 末次提交距今 > N 天」的 `docs/run/<slug>/` 清单（含末次提交 sha / 日期 / 距今天数）。
 - **挂载点**：`packages/server/src/llm/session-closeout.ts:351` 的 `closeoutSession` preflight 段（`step:'preflight'`），每次收口打印。
-- **不判「待上浮」**：待上浮是合法待办，拦它 = 拦合法推送（同 D1③ 的误拦论证）。
-- **它是可见性不是闸**：`CONTEXT.md:120` 定死「清理 commit 必须落在 PR 承载的那个分支上」，而 `closeoutSession` 跑在 PR 合并之后 ⇒ 那时已无法回溯补 commit。价值 = 把积压从「几个月后靠人翻」变成「每次收口都打一次数」。
+- **不判 `pending-float`**：待上浮是合法待办，拦它 = 拦合法推送（同 D1③ 的误拦论证）。
+- **它是可见性不是闸**：`CONTEXT.md:129` 定死「清理 commit 必须落在 PR 承载的那个分支上」，而 `closeoutSession` 跑在 PR 合并之后 ⇒ 那时已无法回溯补 commit。价值 = 把积压从「几个月后靠人翻」变成「每次收口都打一次数」。
 - 首次基线（P1-D 实测，2026-09-19）：末次提交距今 ≥6 天 6 个、≥4 天 9 个；后三个恰是「判弃候选 + 待上浮」同批——陈旧度与「该清没清」高度重合。
 
 **D3 不采纳的形态**（附理由，§5.3 原文）：
@@ -67,10 +67,11 @@ floated_to: docs/plans/xxx.md # status ∈ {待上浮, 已上浮} 时必填
 ### 票 G1 · 存量前置清理（最小批，可先做）
 
 - (a) ~~判弃 `docs-run-cleanup/`~~ **✅ 已完成 2026-09-19**（mapping.md 标判弃 + `flaky-precommit` §5.3 引用改指 + 2 条票面冲突修文，同批 commit）。
-- (b) `docs-single-writer/` 前置：`CONTEXT.md:124` 的括号引用（现指 `docs/run/precommit-scope/closeout.md` §四）改指上浮后落点，否则清目录时引用悬空。
-- (c) `agent-reply-timer/` 前置：补一行收口段（代码 `7c5a6fa` + `ReplyElapsed.vue` 已在 dev，票面无收口段）+ `docs/plans/agent-reply-elapsed-timer.md:3` 的 `status: 在飞` 改「已收口」（该 status 触发 `scan.mjs:243` 准入闸 ⇒ 该 plan 当前**进不了检索索引**）。
+- (b) `docs-single-writer/` 前置：`CONTEXT.md:133` 的括号引用（现指 `docs/run/precommit-scope/closeout.md` §四）改指上浮后落点，否则清目录时引用悬空。
+- (c) ~~补一行收口段 + `docs/plans/agent-reply-elapsed-timer.md:3` 的 `status` 改「已收口」~~ **✅ 已完成 2026-09-20**（收口段已补；status 按同日统一后的英文值域落 **`closed`**，非旧词「已收口」）。
+  ⚠️ **原句归因错误（2026-09-20 实测更正）**：原写「该 status 触发 `scan.mjs:243` 准入闸 ⇒ 该 plan 进不了检索索引」。实测 `classifyDocument` 的判据**顺序**是 `type` → **`evidence`（`:265`）** → `status`（`:271`）——该 plan **根本没有 `evidence` 字段**，落 `empty-evidence`，**在 status 判据之前就被拒**。故：① 改 status **不会**让它入库（改后仍 `empty-evidence`）；② 它的 `status: 在飞` 出值域是**另一处独立缺陷**，不是索引卡点。补 `evidence` 与否（= 语料 19→20 文档）**超出本票边界，待裁**。
 - **边界**：(b)(c) 触及 `CONTEXT.md` / `docs/plans/`——**不在免审白名单（`docs/run/**`）内，须走审查链**。
-- **验收**：引用不悬空（grep 目标存在）；plan status 改后重扫可入库；两目录「已上浮可清」前置清零。
+- **验收**：引用不悬空（grep 目标存在）；plan status 改后重扫可入库；两目录 `floated` 可清前置清零。
 
 ### 票 G2 · 待上浮批（10 目录，可再拆子票）
 
@@ -79,12 +80,12 @@ floated_to: docs/plans/xxx.md # status ∈ {待上浮, 已上浮} 时必填
 - **前置待裁口径**（承判弃件 `mapping.md` §三，用户裁，G2 开工前必须到位）：
   - **口径甲 · 「未闭项」判准**：建议 = 「有无钉死的触发条件」，而非「有没有写下来」——带触发条件的观察项可随上浮带走，不带的不行。
   - **口径乙 · 上浮出口能否是手册**：`line-endings`（仓级行尾策略）与 `vision-retire`（角色注册表）的结论天然属 `AGENTS.md`/`CONTEXT.md`；但 `CONTEXT.md:95` 钉死「上浮 = `docs/plans/` 点名，不二选一」。**此口径同时决定形态甲 `floated_to` 的合法值域**（悬空落点检查的白名单），故 G4 开工前也必须到位。
-- **验收**：10 目录各自 frontmatter `status: 已上浮` + `floated_to` 实指存在文件 → 目录物理删除（上浮落点文与删目录同 PR 两笔 commit，`CONTEXT.md:120`）。
+- **验收**：10 目录各自 frontmatter `status: floated` + `floated_to` 实指存在文件 → 目录物理删除（上浮落点文与删目录同 PR 两笔 commit，`CONTEXT.md:129`）。
 
 ### 票 G3 · 回填 status（G2 后存量全目录，诚实四档）
 
-- 对 G2 后仍存的目录逐目录回填 frontmatter（在飞/待上浮/判弃如实填）。
-- **验收**：`ls -d docs/run/*/` 每目录 tickets.md 均有合法 status；`status ∈ {待上浮, 已上浮}` 者 floated_to 无悬空。
+- 对 G2 后仍存的目录逐目录回填 frontmatter（`active`/`pending-float`/`dropped` 如实填）。
+- **验收**：`ls -d docs/run/*/` 每目录 tickets.md 均有合法 status；`status ∈ {pending-float, floated}` 者 floated_to 无悬空。
 
 ### 票 G4 · 形态甲挂闸（`.husky/pre-push`）
 
@@ -92,7 +93,7 @@ floated_to: docs/plans/xxx.md # status ∈ {待上浮, 已上浮} 时必填
 - **契约**：D1 判据表四行逐字即契约；fail-closed（解析失败/缺字段 = 拦）；判据面 = 被推 sha 的 diff 面（`merge-base(dev, sha)..sha`）。
 - **验收**（含反对照）：
   1. 夹具分支新建无 status 的 run 目录 ⇒ push 被拦（报错含目录名）；
-  2. `status: 判弃` 目录未删 ⇒ 拦；删除后 ⇒ 放行；
+  2. `status: dropped` 目录未删 ⇒ 拦；删除后 ⇒ 放行；
   3. `floated_to` 悬空 ⇒ 拦；
   4. **反对照**：不动 `docs/run` 的分支 ⇒ 零拦截（判据面外零效力）；
   5. 存量目录（本分支未动）⇒ 不连坐。
@@ -132,3 +133,4 @@ floated_to: docs/plans/xxx.md # status ∈ {待上浮, 已上浮} 时必填
 - D1 采「声明式 + diff 面 + fail-closed」而非「全树扫描」：防连坐误拦 ⇒ 防 `--no-verify` 逃逸（D1③）。
 - 口径甲/乙不由店长代裁：乙与 `CONTEXT.md:95`（用户级约定）直接冲突；甲影响 `745535c`「零未闭项才删」先例判据 ⇒ 均留用户。
 - G4 与 G5 拆票而非合并：G5 含 server 代码有重启面，G4 没有——拆开则 G4 不被重启排期绑架。
+- **值域统一英文（2026-09-20，用户裁「统一字段规范，都采用英文状态」）**：`docs/plans/` 与 `docs/run/` 的 `status:` 中英混用会让闸只能逐个枚举词形，漏一个即静默放行（`docs/plans/` 侧真实发生过：`在飞` 件因不在白名单而掉出检索索引，见 G1(c)）。权威表落 `CONTEXT.md` 文档约定段；本票全部词形（含 G2/G3/G4 验收里的字面量）同批改完——**迟一步改，这几个闸的验收条件会拿旧词去写新代码**。

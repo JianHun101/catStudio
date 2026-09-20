@@ -1,6 +1,6 @@
 ---
 type: plan
-status: 在飞
+status: closed
 ---
 
 # Agent 回复计时上气泡（v1）

@@ -1,7 +1,7 @@
 ---
 type: plan
 date: 2026-09-10
-status: 已收口
+status: closed
 evidence:
   - kind: commit
     ref: e396aef
