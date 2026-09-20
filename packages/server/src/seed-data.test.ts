@@ -134,6 +134,10 @@ describe('agent system prompts', () => {
     expect(COMMON_IRON_LAWS).toContain('等于没投')
     expect(COMMON_IRON_LAWS).toContain('post_message')
     expect(COMMON_IRON_LAWS).toContain('commit_sha')
+    // 反向断言（P3-3）：防旧形状/旧句式以任何形式回流——本票要杀的是「正文里写出信号块
+    // 就等于已投递」这个假信念，只钉新语义挡不住复读旧字面
+    expect(COMMON_IRON_LAWS).not.toContain('{targets')
+    expect(COMMON_IRON_LAWS).not.toContain('未结束必须产出结构化投递信号')
   })
 
   it('共通铁律层单源——CODER 与 REVIEWER 都注入同一段共通控制流，且不跨角色重复', () => {
@@ -343,7 +347,7 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).toContain('❌需重做')
       // T-C 三档：作者侧也要认 💬（非阻断 → 同走收口，不返工）
       expect(agent.systemPrompt).toContain('💬仅评论')
-      // 兜底路径：若收到 ✅（分流失败时原链仍通）→ 请收口指令保留
+      // 兜底路径：若收到 ✅（分流漏投时原链仍通）→ 请收口指令保留
       expect(agent.systemPrompt).toContain('兜底路径')
       expect(agent.systemPrompt).toContain('行首@架构师 请收口')
     }
