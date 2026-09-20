@@ -27,6 +27,8 @@
 | [pnpm](https://pnpm.io/)       | >= 8       | ✅                                        |
 | Claude Code CLI                | 最新       | ✅ 演示角色的默认 provider（5 个里 4 个） |
 | Codex CLI                      | 最新       | ❌ 仅使用对应 provider 适配器时需要       |
+| dsh CLI                        | 最新       | ❌ 仅 dsh 试点猫（第 5 个演示角色）需要   |
+| opencode CLI                   | 最新       | ❌ 仅使用对应 provider 适配器时需要       |
 
 > Claude Code CLI 是**外部 CLI**，不在 `package.json` 依赖里（`pnpm install` 不会装它），需按下一条命令单独安装。
 

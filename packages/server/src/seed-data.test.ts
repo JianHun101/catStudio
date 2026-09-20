@@ -422,3 +422,36 @@ describe('agent system prompts', () => {
     expect(tucao.systemPrompt).not.toContain('结论清晰吗')
   })
 })
+
+/**
+ * 演示角色的 provider / model / key 三字段联合决定「全新克隆开箱能不能跑」。
+ * seed 字段分离不变量下改 seed 对存量库零作用，作用面就是陌生访客——
+ * 故这里钉的是「新克隆拿到的默认值」，不是运行态。
+ */
+describe('演示角色默认 provider', () => {
+  const agents = buildDemoAgents()
+  const CLAUDE_ROLES = ['店长', 'ds猫', 'flash猫', '吐槽猫']
+
+  it('4 个演示角色的 provider 为 claude、模型 deepseek-flash', () => {
+    for (const name of CLAUDE_ROLES) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.llmProvider).toBe('claude')
+      expect(agent.llmModel).toBe('deepseek-flash')
+    }
+  })
+
+  it('这 4 个角色的 llmApiKey 非空（claude 不在 no-key 白名单，留空会被守卫拦下）', () => {
+    // 不断言具体字面量：测试环境 DS_KEY 未设时 buildDemoAgents 回落哨兵
+    // 'sk-your-api-key-here'，那也是非空串。本断言防的是「被改回空串」。
+    for (const name of CLAUDE_ROLES) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.llmApiKey).toBeTruthy()
+    }
+  })
+
+  it('dsh 试点猫仍是 dsh / deepseek-chat（防误改波及第 5 个角色）', () => {
+    const dsh = agents.find((a) => a.name === 'dsh猫')!
+    expect(dsh.llmProvider).toBe('dsh')
+    expect(dsh.llmModel).toBe('deepseek-chat')
+  })
+})
