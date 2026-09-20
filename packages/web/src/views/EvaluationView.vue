@@ -1231,7 +1231,10 @@ onUnmounted(() => {
             >
               <span class="chain-caret">{{ retrievalOpen[s.id] ? '▾' : '▸' }}</span>
               <span class="retrieval-id">{{ s.id }}</span>
-              <span class="retrieval-kind" :class="`is-${s.kind}`">{{ s.kind }}</span>
+              <!-- kind 是**类目**（real / constructed / negative），不是状态：不给它配色。
+                   状态色是保留色（见下方 `.is-ok` / `.is-bad` 的注释），拿它染类目会让「红=判红」
+                   这条读法失效；类目本身由文字承载。 -->
+              <span class="retrieval-kind">{{ s.kind }}</span>
               <span class="retrieval-count">{{ s.hit }}/{{ s.expectTotal }}</span>
               <span class="retrieval-metric">recall {{ fmtRate(s.recall) }}</span>
               <span v-if="s.forbidHit.length > 0" class="retrieval-bad">

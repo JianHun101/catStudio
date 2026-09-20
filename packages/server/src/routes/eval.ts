@@ -175,7 +175,8 @@ export interface RetrievalReportSummary {
   date: string
   file: string
   /** 文件写入时刻（UTC ISO）——**取自 mtime，不是报告内容**：报告本体按 B1 纪律
-   *  零时间量（同树同库两跑逐字节一致），「生成时刻」只能由文件系统给。 */
+   *  零时间量（同树同库两跑逐字节一致，**`.md` 与 `.json` 两份产物各自成立**），
+   *  「生成时刻」只能由文件系统给。 */
   writtenAt: string | null
 }
 

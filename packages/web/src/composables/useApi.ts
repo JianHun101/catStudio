@@ -186,7 +186,8 @@ export interface EpisodeStats {
 // sidecar，前端不能触发）⇒ 页面数字永远是「上一次跑批」的快照，不是实时水位。
 
 /** 报告清单一行（日期选择器用）。`writtenAt` 取自**文件 mtime**——报告本体零时间量
- *  （B1：同树同库两跑逐字节一致），所以「生成时刻」只能由文件系统给。 */
+ *  （B1：同树同库两跑逐字节一致，`.md` 与 `.json` 两份产物各自成立），
+ *  所以「生成时刻」只能由文件系统给。 */
 export interface RetrievalReportSummary {
   date: string
   file: string
@@ -250,7 +251,9 @@ export interface RetrievalReport {
   rotten: number
   indexFreshness: { checked: number; stale: number }
   params: { topK: number; maxDistance: number; probeN: number }
-  embed: { model?: string | null; dim?: number | null; port?: number }
+  /** `handshakeOk` 是**加工后的布尔**，不是端口号本身——端口每跑一变，落进产物就破 B1
+   *  （见跑批脚本 `reportCtx.embed` 的注释）。界面也只需要「有没有握手」这一个信号。 */
+  embed: { model?: string | null; dim?: number | null; handshakeOk?: boolean }
   groups: { real: RetrievalGroupSummary; constructed: RetrievalGroupSummary }
   scores: RetrievalScoreRow[]
   /** canary 反对照（测量工具真空性）：必中条目必须满分、必不中必须零分 */

@@ -852,7 +852,7 @@ describe('renderReport — 确定性与内容面', () => {
     rotten: 0,
     indexFreshness: { checked: 13, stale: 0 },
     params: { maxDistance: 0.6, topK: 3, probeN: 20 },
-    embed: { model: 'm', dim: 512, port: 1660 },
+    embed: { model: 'm', dim: 512, handshakeOk: true },
     groups: {
       real: {
         n: 1,
@@ -1009,7 +1009,7 @@ describe('renderReport — 确定性与内容面', () => {
     const ok = renderReport(ctx())
     expect(ok).toContain('实测已握手')
     expect(ok).not.toContain('⚠️ **未见 sidecar 监听端口**')
-    const bad = renderReport({ ...ctx(), embed: { model: 'm', dim: 512, port: undefined } })
+    const bad = renderReport({ ...ctx(), embed: { model: 'm', dim: 512, handshakeOk: false } })
     expect(bad).toContain('⚠️ **未见 sidecar 监听端口**')
     // 端口号本身不进报告（每跑一个随机值 ⇒ 破 B1）
     expect(ok).not.toMatch(/端口\D{0,8}\d{2,}/)
@@ -1174,6 +1174,19 @@ describe('buildReportJson / reportJsonPath — JSON 副产品（E1 契约 A）',
     expect(Object.keys(out).sort()).toEqual([...Object.keys(ctx), 'schema'].sort())
   })
 
+  it('B1 的 json 面：产物**不含每跑一变的原始读数**（sidecar 端口）', () => {
+    // E1 首版的实测缺陷：`reportCtx.embed` 透传了 `embedStatus.port`，而 `EMBED_SIDECAR_PORT=0`
+    // ⇒ 每跑一个随机端口。md 侧只取布尔、看不见；json 侧原样落盘 ⇒ 两跑不逐字节一致。
+    // 判据是**形状**：「有没有握手」这个加工后的信号叫 `handshakeOk`（布尔），
+    // `port` 这个键本身就不该出现在产物里——出现即意味着又透传了原始读数。
+    const out = buildReportJson({
+      ...ctxFixture(),
+      embed: { model: 'm', dim: 512, handshakeOk: true },
+    })
+    expect(typeof out.embed.handshakeOk).toBe('boolean')
+    expect(JSON.stringify(out)).not.toMatch(/"port"\s*:/)
+  })
+
   it('一处算两处渲染（静态）：md 与 json 吃的是**同一个 `reportCtx` 标识符**', () => {
     const src = readFileSync(
       path.join(REPO_ROOT, 'scripts', 'eval', 'retrieval-baseline.mjs'),
@@ -1191,6 +1204,19 @@ describe('buildReportJson / reportJsonPath — JSON 副产品（E1 契约 A）',
     expect(seg).toContain('buildReportJson(reportCtx)')
     // 旁路面：json 那边不得自己再拼一份 ctx
     expect(seg).not.toMatch(/buildReportJson\(\{/)
+    // ⚠️ ctx 里不得有**原始随机读数**（首版的 `embed.port` 就是这么漏进 json 的）：
+    // 上面 `renderReport` 那条断言管不到它——md 只挑一部分字段渲染，多一个随机值未必看得出来；
+    // `buildReportJson` 原样序列化 ⇒ 一个不落。判据是键名：加工后的信号叫 `handshakeOk`，
+    // `port` 这个**键**不该出现在 ctx 字面量里（`embedStatus.port` 作为**值来源**出现是对的）。
+    // ⚠️ 断言必须打在**代码**上，不是注释上——这段 ctx 的注释里就写着 `embedStatus.port`
+    // （「这里不得透传 embedStatus.port 原值」），拿整段 `seg` 去 `toContain` 会被注释满足：
+    // 实测把实现改成恒真的 `handshakeOk: true`，那条断言照样绿（注释替它顶了）。故先去行注释。
+    const code = seg.replace(/\/\/[^\n]*/g, '')
+    expect(code).toContain('handshakeOk:')
+    expect(code).not.toMatch(/(?:^|[\s{,])port\s*:/)
+    // 只管键名还不够：写成恒真的 `handshakeOk: true` 同样能过上面两条，
+    // 而「报告里的自述必须来自读数」是本文件的既有纪律（见「嵌入供给形态」那条注释）。
+    expect(code).toContain('embedStatus.port')
   })
 
   it('拒出路径 ⇒ md 与 json **都不落**（真跑 `main`，打到 golden-schema 闸）', async () => {
