@@ -128,9 +128,17 @@ vi.mock('../eval/sampler.js', () => ({
   maybeScoreSample: vi.fn(),
 }))
 
-vi.mock('../eval/verdict-parser.js', () => ({
-  recordReviewVerdict: vi.fn(),
-}))
+// 票乙起 serial.ts 在 reviewer 分支多消费一个导出（`parseReviewVerdict`，白名单
+// 单目标闸的输入）。原替身是**部分工厂**——只列 `recordReviewVerdict`，漏键 ⇒
+// 调用点当场 TypeError（与 memory/index.js 缺 currentRetrievalParams、
+// diff-collector.js 缺 GIT_TIMEOUT_MS 同款，本文件第三次踩）。故改用
+// `importOriginal` 铺开真模块、只覆盖带 I/O 的 `recordReviewVerdict`：
+// `parseReviewVerdict` 是纯函数，按「只在边界 mock」本就该用真的——组装级用例
+// 要的正是「正文 → 真解析 → policy」这条链，桩掉它等于把被测段落挖空。
+vi.mock('../eval/verdict-parser.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../eval/verdict-parser.js')>()
+  return { ...actual, recordReviewVerdict: vi.fn() }
+})
 
 vi.mock('../llm/route-signals.js', () => ({
   consumeRouteSignals: vi.fn(() => []),
@@ -1867,4 +1875,117 @@ describe('serial — 形态 D：drain 与 A2A 派发并发（票 dispatch-deferr
     await Promise.all([p1, p2])
     expect(parentRuns).toBe(2)
   }, 20000)
+})
+
+// ═══ reviewer 单目标闸（票乙，2026-09-20） ═══
+//
+// 白名单矩阵本身在 `dispatch/mention-policy.test.ts` 单测；本块测**接线**——
+// serial.ts 是否真把正文的审查结论喂进了 policy。组装级证据取落库的 mentions 列
+// （路由事实的唯一落点），不是内存态返回值。
+//
+// 两条用例互为**反对照**：正文只差结论标记（✅ vs ⚠️），@ 的两个目标与顺序完全
+// 相同，保留结果却相反（店长 / ds猫）。若 serial.ts 漏传 verdict，两条都会落到
+// 「结论不可得 → 保请求人」，⚠️ 那条仍绿、✅ 那条必红——单看 ✅ 无法区分
+// 「接线生效」与「接线缺失恰好同果」，故两条必须成对保留。
+
+describe('serial — reviewer 单目标闸：双 @ 时按审查结论剥一个', () => {
+  const STORE: AgentConfig = {
+    id: 'agent-store',
+    name: '店长',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'store',
+  }
+  const REVIEWER: AgentConfig = {
+    id: 'agent-reviewer',
+    name: '吐槽猫',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'reviewer',
+  }
+  const IMPL: AgentConfig = {
+    id: 'agent-impl',
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'implementer',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    const insert = db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
+    )
+    insert.run(STORE.id, STORE.name, 'store')
+    insert.run(REVIEWER.id, REVIEWER.name, 'reviewer')
+    insert.run(IMPL.id, IMPL.name, 'implementer')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', ?, 0)`
+    ).run(JSON.stringify([STORE.id, REVIEWER.id, IMPL.id]))
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-1', 'session-1', 'user', '请审查', '[]')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.unstubAllEnvs()
+  })
+
+  /** 吐槽猫最早一条回复的 mentions 列——「这条消息路由给谁」的落库事实 */
+  const reviewerMentions = (): string[] => {
+    const row = getDb()
+      .prepare(`SELECT mentions FROM messages WHERE role='agent' AND agent_id=? ORDER BY rowid`)
+      .get(REVIEWER.id) as any
+    return row ? JSON.parse(row.mentions) : []
+  }
+
+  /**
+   * 跑一次 reviewer 执行：首轮出 reviewBody，其后各轮（A2A 子链唤起的猫）出「收到」。
+   * 触发消息作者 = 实施猫（= 请求人），故「作者」这一格可达。
+   */
+  const runReview = async (reviewBody: string) => {
+    let call = 0
+    const chatStream = vi.fn(async function* () {
+      call++
+      yield { content: call === 1 ? reviewBody : '收到', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { id: 'msg-1', content: '请审查', mentions: [], authorName: IMPL.name },
+      'trace-single-target',
+      0
+    )
+    return chatStream
+  }
+
+  it('✅可合并 + 双 @（店长、ds猫）→ 落库 mentions 只含店长（收口链）', async () => {
+    await runReview('✅可合并\n\n@店长 请收口\n@ds猫 你看下')
+    expect(reviewerMentions()).toEqual([STORE.name])
+  })
+
+  it('⚠️建议修改 + 双 @（店长、ds猫）→ 落库 mentions 只含作者 ds猫（返工链）', async () => {
+    await runReview('⚠️建议修改\n\n@店长 存档\n@ds猫 请返工')
+    expect(reviewerMentions()).toEqual([IMPL.name])
+  })
 })

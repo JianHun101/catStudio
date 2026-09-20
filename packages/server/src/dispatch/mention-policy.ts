@@ -8,14 +8,21 @@
  * @ 任何猫会让触发链失去控制（风暴）。白名单按角色约束 @ 的合法范围：
  * - store（店长）→ 任意：架构裁决者，允许被任何人 @ 也允许 @ 任何人
  * - implementer（实施猫）→ {store, reviewer}：只对店长（求助/汇报）和
- *   审查者（审查链）喊话；且每条回复最多 @ 1 个 agent（防多线触发风暴）
+ *   审查者（审查链）喊话
  * - reviewer（审查猫）→ {store, implementer} ∪ 本次触发消息作者：审查结论分流——
- *   ✅可合并/💬仅评论（非阻断）→ @架构师（收口信号直接到位）；⚠️/❌ → @作者（要改的才回作者）。
+ *   ✅可合并/💬仅评论 → @架构师 请收口（不 @实施猫）；⚠️/❌ → @作者。一条回复只 @ 一个目标，由结论唯一决定。
  *   implementer 边是收口链的必要边：白名单原先只有「触发者」概念、没有「作者」，
  *   而触发者常是用户或店长 → ⚠️/❌ 永远投不回作者（结论静默悬空，2026-09-09 实证）
  * - vision（图测猫）→ {store}：**已于 2026-09-13 退役**（模型已能原生看图，外部视觉
  *   旁路整链删除）——该键已从边表移除，老库残留的 `role='vision'` 行因此落到下面
  *   那条「角色不在边表 → 放行不拦截」兜底上，这与退役前的目标侧行为一致、不倒退。
+ *
+ * 单目标闸（票乙，2026-09-20）：**每条回复最多 @ 1 个 agent**，作用域 = 实施猫
+ * 与审查猫两条边（原先只对 implementer 生效，reviewer 双 @ 零拦截——审查猫一条
+ * 回复同时 @ 架构师与作者会让收口链与返工链**同时**被唤起，正是本闸要堵的形态）。
+ * **store 刻意不在闸内**（见 `COUNT_LIMITED_ROLES` 注释）。「超出时留谁」按角色
+ * 分表：implementer 保审查者（审查链必达），reviewer 保「审查结论对应的那一个」
+ * （见 pickKeepIndex）。
  *
  * 关键语义：角色未知/缺失（老库迁移默认 'unknown'；含已退役的 'vision' 残留行）
  * → 发送者放行不拦截、目标放行——误杀审查链的代价远大于漏拦一条 @（店长边界）。
@@ -23,8 +30,32 @@
 
 import type { AgentRole } from '@cat-study/shared'
 
-/** 实施猫每条回复最多允许的 agent mention 数——超出的剥除（防多线触发） */
-export const IMPLEMENTER_MAX_MENTIONS_PER_REPLY = 1
+/** 每条回复最多允许的 agent mention 数——超出的剥除（防多线触发）。
+ *  原名 `IMPLEMENTER_MAX_MENTIONS_PER_REPLY`：当时只对实施猫生效；票乙把
+ *  reviewer 纳入同一上限后改名——**名字里的角色前缀正是这处遗漏的来源**。
+ *  作用域**不是**「所有角色」：见 COUNT_LIMITED_ROLES。 */
+export const MAX_MENTIONS_PER_REPLY = 1
+
+/**
+ * 单目标闸的作用域——**只有这两条边**受「每条回复 ≤1 个 @」约束。
+ *
+ * store 刻意在外：架构裁决者一条回复合法地要同时 @ 多只猫（派活单一次点名多只
+ * 实施猫、收口时同唤作者与审查者），把它也限成 1 个会直接改掉 `store → 任意`
+ * 这条既有边表的语义。票乙的原话是「计数上限从 implementer **扩到 reviewer**」，
+ * 不是「扩到所有角色」——写成本列表是为了让这个边界在代码里可读，而不是靠
+ * `from.role === 'implementer'` 的一处历史条件留在读者脑补里。
+ */
+const COUNT_LIMITED_ROLES: AgentRole[] = ['implementer', 'reviewer']
+
+/**
+ * 审查结论——reviewer 单目标优先级表的输入。
+ *
+ * **本模块自持联合类型**，不 import `eval/verdict-parser` 的 `ReviewVerdict`：
+ * 后者是落库契约（四档语义定义在那边），而本模块的性质是「零外部依赖纯函数」
+ * （见文件头），一旦 import 就把 eval 整条链拖进 dispatch 层。取值与四档一一
+ * 对应，漂移由接线处（`execution/serial.ts`）的类型检查兜住。
+ */
+export type ReviewerVerdict = 'approve' | 'comment' | 'suggest' | 'reject'
 
 /** 角色 → 允许@的 Agent 角色列表。'any' = 不限制 */
 const ROLE_ALLOWED_MENTIONS: Record<AgentRole, 'any' | AgentRole[]> = {
@@ -40,6 +71,11 @@ export interface MentionPolicyFrom {
   role?: AgentRole
   /** 本次触发消息的作者名（agent 消息时非空）——reviewer 可 @ 回请求人 */
   triggerAuthorName?: string
+  /**
+   * 本次回复的审查结论——**仅 reviewer 有值**，决定超上限时保留哪个目标。
+   * 不可得（非 reviewer / 正文无行首标记 / 格式漂移）时留空，走兜底优先级。
+   */
+  verdict?: ReviewerVerdict
 }
 
 /** 被 @ 的目标（agent） */
@@ -85,13 +121,16 @@ export function filterAllowedMentions<T extends MentionPolicyTarget>(
     }
   }
 
-  // 计数限制：仅实施猫生效——合法目标中最多保留 1 个（每条回复 ≤1 个 agent mention）。
-  // 保留策略：reviewer 必保（审查链是 A2A 生命线——剥掉审核请求会让流程无声卡死，
-  // 比丢一条汇报代价大得多）；无 reviewer 才保传入顺序第一个（parseMentionsFromReply
-  // 的返回顺序是 session 注册顺序，与回复文本里的 @ 书写顺序无关）。
-  if (from.role === 'implementer' && allowed.length > IMPLEMENTER_MAX_MENTIONS_PER_REPLY) {
-    const reviewerIdx = allowed.findIndex((t) => t.role === 'reviewer')
-    const keepIdx = reviewerIdx >= 0 ? reviewerIdx : 0
+  // 单目标闸：合法目标超上限 → 只留一个，其余按 count-limit 剥除（每条回复
+  // ≤1 个 agent mention）。作用域见 COUNT_LIMITED_ROLES——留谁按角色分表
+  // （pickKeepIndex）。未在边表的角色上面已 return，够不到本段。
+  const senderRole = from.role
+  if (
+    senderRole &&
+    COUNT_LIMITED_ROLES.includes(senderRole) &&
+    allowed.length > MAX_MENTIONS_PER_REPLY
+  ) {
+    const keepIdx = pickKeepIndex(from, allowed)
     const keep = [allowed[keepIdx]]
     const extra = allowed.filter((_, i) => i !== keepIdx)
     blocked.push(...extra.map((t) => ({ name: t.name, reason: 'count-limit' as const })))
@@ -99,6 +138,56 @@ export function filterAllowedMentions<T extends MentionPolicyTarget>(
   }
 
   return { allowed, blocked }
+}
+
+/** 目标匹配谓词——优先级表的一格 */
+type TargetMatcher = (from: MentionPolicyFrom, t: MentionPolicyTarget) => boolean
+
+const isStore: TargetMatcher = (_from, t) => t.role === 'store'
+const isImplementer: TargetMatcher = (_from, t) => t.role === 'implementer'
+const isReviewer: TargetMatcher = (_from, t) => t.role === 'reviewer'
+/** 本次触发消息的作者（请求人）。无触发作者（用户触发）时恒不命中 */
+const isRequester: TargetMatcher = (from, t) =>
+  !!from.triggerAuthorName && t.name === from.triggerAuthorName
+
+/**
+ * reviewer 超上限时的保谁优先级——**按审查结论分档**，从左到右取首个命中；
+ * 全不命中则保传入顺序第一个（`parseMentionsFromReply` 的返回顺序是 session
+ * 注册顺序，与文本里的 @ 书写顺序无关）。
+ *
+ * 键含 `'unknown'`：结论不可得（正文无行首标记 / 格式漂移 / 非 reviewer 传了
+ * 该字段）时走它。**不可得档偏实施侧是店长裁决（2026-09-20）**：与「架构类
+ * 问题在实施猫这层出现、由实施猫反馈给架构师」同向——架构师单槽位是瓶颈，
+ * 误落到作者时作者按实施铁律 `行首@架构师 请收口` 能把链补回去（兜底路径已在
+ * 跑）；反之误落架构师就是直接堵派活。
+ */
+const REVIEWER_KEEP_PRIORITY: Record<ReviewerVerdict | 'unknown', TargetMatcher[]> = {
+  // 非阻断结论 = 收口信号 → 直达架构师
+  approve: [isStore, isRequester],
+  comment: [isStore, isRequester],
+  // 要返工 → 回请求人（实施侧）
+  suggest: [isRequester, isImplementer],
+  reject: [isRequester, isImplementer],
+  unknown: [isRequester, isImplementer, isStore],
+}
+
+/**
+ * 超上限时保留哪一个（返回 `allowed` 下标）。
+ *
+ * implementer 的旧语义原样保留：reviewer 必保（审查链是 A2A 生命线——剥掉审核
+ * 请求会让流程无声卡死，比丢一条汇报代价大得多）；无 reviewer 才保顺序第一个。
+ */
+function pickKeepIndex<T extends MentionPolicyTarget>(
+  from: MentionPolicyFrom,
+  allowed: T[]
+): number {
+  const priority: TargetMatcher[] =
+    from.role === 'reviewer' ? REVIEWER_KEEP_PRIORITY[from.verdict ?? 'unknown'] : [isReviewer]
+  for (const matches of priority) {
+    const idx = allowed.findIndex((t) => matches(from, t))
+    if (idx >= 0) return idx
+  }
+  return 0
 }
 
 function isRoleAllowed(
@@ -123,9 +212,9 @@ export function allowedTargetsDescription(role?: AgentRole): string {
     case 'store':
       return '任意猫'
     case 'implementer':
-      return `店长、吐槽猫（每条回复最多 ${IMPLEMENTER_MAX_MENTIONS_PER_REPLY} 个 @）`
+      return `店长、吐槽猫（每条回复最多 ${MAX_MENTIONS_PER_REPLY} 个 @）`
     case 'reviewer':
-      return '店长或实施猫'
+      return `店长或实施猫（每条回复最多 ${MAX_MENTIONS_PER_REPLY} 个 @）`
     default:
       return '任意猫'
   }
