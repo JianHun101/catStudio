@@ -56,6 +56,15 @@ vi.mock('../memory/index.js', () => ({
   // 单一来源）。partial factory 缺它 = 调用点当场 TypeError，回复整条发不出去
   // ——实测踩过。**替身必须镜像真模块被消费的导出面**。
   currentRetrievalParams: vi.fn(() => ({ topK: 3, maxDistance: 0.6, probeN: 20 })),
+  // T-1：a2a 记忆门新增的两个被消费导出——同一条规矩（见上），partial factory
+  // 缺一个就是调用点 TypeError。默认值镜像生产：门**关**、跳过结果形状同构。
+  shouldSkipA2aMemory: vi.fn(() => false),
+  skippedRetrievalResult: vi.fn(() => ({
+    text: '',
+    reason: 'skipped-a2a',
+    sections: [],
+    stats: {},
+  })),
 }))
 
 vi.mock('../handoff/index.js', () => ({
@@ -266,7 +275,7 @@ describe('dispatch（C1 v3 引擎决策行为）', () => {
       await engine.executeAgentsSerial(
         'session-1',
         [DEFAULT_AGENT],
-        { id: 'msg-1', content: '你好', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-1', content: '你好', mentions: ['店长'] },
         'trace-1',
         0
       )

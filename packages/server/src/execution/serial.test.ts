@@ -101,6 +101,15 @@ vi.mock('../memory/index.js', () => ({
   // 单一来源）。partial factory 缺它 = 调用点当场 TypeError，回复整条发不出去
   // ——实测踩过。**替身必须镜像真模块被消费的导出面**。
   currentRetrievalParams: vi.fn(() => ({ topK: 3, maxDistance: 0.6, probeN: 20 })),
+  // T-1：a2a 记忆门新增的两个被消费导出——同一条规矩（见上），partial factory
+  // 缺一个就是调用点 TypeError。默认值镜像生产：门**关**、跳过结果形状同构。
+  shouldSkipA2aMemory: vi.fn(() => false),
+  skippedRetrievalResult: vi.fn(() => ({
+    text: '',
+    reason: 'skipped-a2a',
+    sections: [],
+    stats: {},
+  })),
 }))
 
 vi.mock('../handoff/index.js', () => ({
@@ -242,7 +251,7 @@ async function runPaired(
   return engine.executeAgentsSerial(
     'session-1',
     [DEFAULT_AGENT],
-    { id: triggerId, content: '你好', mentions: [] },
+    { fromAgent: false, id: triggerId, content: '你好', mentions: [] },
     traceId,
     depth
   )
@@ -497,7 +506,7 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [noKeyAgent],
-      { id: 'msg-nokey', content: '你好', mentions: [] },
+      { fromAgent: false, id: 'msg-nokey', content: '你好', mentions: [] },
       'trace-nokey'
     )
 
@@ -542,7 +551,7 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
       return engine.executeAgentsSerial(
         'session-1',
         [DEFAULT_AGENT],
-        { id: triggerId, content: '你好', mentions: [] },
+        { fromAgent: false, id: triggerId, content: '你好', mentions: [] },
         'trace-persist',
         depth
       )
@@ -748,7 +757,7 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-1',
       0
     )
@@ -785,7 +794,7 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-1',
       0
     )
@@ -824,7 +833,7 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-loop',
       0
     )
@@ -933,7 +942,7 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-limit-1',
       1
     )
@@ -1029,7 +1038,7 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
     const busyRun = engine.executeAgentsSerial(
       'session-1',
       [IMPL],
-      { id: 'msg-v7-busy', content: '请处理', mentions: [] },
+      { fromAgent: false, id: 'msg-v7-busy', content: '请处理', mentions: [] },
       'trace-v7',
       1
     )
@@ -1040,7 +1049,7 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-v7-send', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-v7-send', content: '请审查', mentions: [] },
       'trace-v7',
       1
     )
@@ -1127,7 +1136,7 @@ describe('serial — A2A 配额拦截的可见面（票子）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-quota',
       0
     )
@@ -1170,7 +1179,7 @@ describe('serial — A2A 配额拦截的可见面（票子）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-quota-rows',
       0
     )
@@ -1193,7 +1202,7 @@ describe('serial — A2A 配额拦截的可见面（票子）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-quota-nostore',
       0
     )
@@ -1211,7 +1220,7 @@ describe('serial — A2A 配额拦截的可见面（票子）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [STORE],
-      { id: 'msg-1', content: '请继续', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请继续', mentions: [] },
       'trace-quota-self',
       0
     )
@@ -1301,7 +1310,7 @@ describe('serial — T-M 自动提交歧义拒写（可观测面）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [DEFAULT_AGENT],
-      { id: TRIGGER, content: '你好', mentions: [] },
+      { fromAgent: false, id: TRIGGER, content: '你好', mentions: [] },
       TRACE,
       0
     )
@@ -1330,7 +1339,7 @@ describe('serial — T-M 自动提交歧义拒写（可观测面）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [DEFAULT_AGENT],
-      { id: TRIGGER, content: '你好', mentions: [] },
+      { fromAgent: false, id: TRIGGER, content: '你好', mentions: [] },
       TRACE,
       0
     )
@@ -1448,7 +1457,7 @@ describe('serial — token 作用域收窄（A 方案死锁根治）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-deadlock',
       0
     )
@@ -1481,7 +1490,7 @@ describe('serial — token 作用域收窄（A 方案死锁根治）', () => {
       await engine.executeAgentsSerial(
         'session-1',
         [REVIEWER],
-        { id: 'msg-1', content: '请审查', mentions: [] },
+        { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
         'trace-scope',
         0
       )
@@ -1504,7 +1513,7 @@ describe('serial — token 作用域收窄（A 方案死锁根治）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [STORE, REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-multi',
       0
     )
@@ -1707,7 +1716,7 @@ describe('serial — mentions 写回时机（P0：不依赖 drain/A2A await）',
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-p0-ex',
       0
     )
@@ -1972,7 +1981,7 @@ describe('serial — reviewer 单目标闸：双 @ 时按审查结论剥一个',
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [], authorName: IMPL.name },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [], authorName: IMPL.name },
       'trace-single-target',
       0
     )

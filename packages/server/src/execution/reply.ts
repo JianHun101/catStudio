@@ -31,6 +31,8 @@ import {
   retrieveMemoryContext,
   buildKnowledgeContext,
   currentRetrievalParams,
+  shouldSkipA2aMemory,
+  skippedRetrievalResult,
   type MemoryContextResult,
 } from '../memory/index.js'
 import { createLogger } from '../logger.js'
@@ -201,9 +203,9 @@ function upsertTool(tools: ToolCallInfo[], chunk: Chunk): void {
  *   （`insertAgentMessage`，本文件下方「写入完整消息」段）**同一表达式**。链锚口径 = P1 的
  *   `COALESCE(回复.task_id, 触发.task_id)`，而回复侧因这个 `|| traceId` 恒非空
  *   ⇒ 链锚 = 本表达式。写成 `triggerMsg.taskId` 会与 P1 对不上账。
- * · `reason`：照抄下方日志的三元式——值域 **9**（模块 7 枚举 + `timeout` +
- *   `error`）。超时那次 `memoryResult === null`，只读 `memoryResult.reason`
- *   会恰好在「最慢、最该记」的那一次丢数据。
+ * · `reason`：照抄下方日志的三元式——值域 **10**（模块 8 枚举 + `timeout` +
+ *   `error`；第 8 个是 T-1 的 `skipped-a2a`）。超时那次 `memoryResult === null`，
+ *   只读 `memoryResult.reason` 会恰好在「最慢、最该记」的那一次丢数据。
  * · `executionId`：该 (会话, 猫, 触发消息) 当前 running 的执行行。**不在
  *   serial 里穿线拿 logId**——那要改 4 个签名、把 R1 拖进 `serial.ts` 这个
  *   事故密集区（P2 §八 已把它划给另票）。此处多带 trigger 一个条件，
@@ -293,6 +295,11 @@ export async function runAgentReply(
     mentions: string[]
     taskId?: string
     authorName?: string
+    /** 触发消息由 agent 发出（T-1 a2a 记忆门的判据）。**必填**——可选会静默缺省
+     *  成 `false`（= 照常注入），正是门要防的那条静默路径。形状与
+     *  `serial.ts` 的 `AgentTriggerMsg` 同源（本处仍是结构化内联类型，不动 7 参
+     *  签名——见下方 R2 §4.7 形态裁决）。 */
+    fromAgent: boolean
   },
   traceId: string,
   /**
@@ -756,23 +763,39 @@ export async function runAgentReply(
 
   // 检索相关记忆并注入 system prompt（带超时，不阻塞 LLM 调用）。
   // 超时/抛错 → 结果置 null（reason 记 'timeout'/'error'），与记忆模块自己的
-  // 六种 reason 一起构成**穷尽的**空结果台账——不许有「返回空且无痕」的路径。
+  // 七种 reason 一起构成**穷尽的**空结果台账——不许有「返回空且无痕」的路径。
   const MEMORY_TIMEOUT_MS = 10_000
   const memoryT0 = Date.now()
+  // ── a2a 记忆门（T-1）───────────────────────────────────
+  // 触发者是被 @ 的猫（上一条 agent 回复）且开关默认关 ⇒ **整段检索跳过**。
+  // 跳过的不只是召回：`rewriteRetrievalQueries` 在 `retrieveMemoryContext`
+  // **内部**（`memory/index.ts`），门开在调用点，改写（每条新内容一次 LLM 调用）
+  // 天然一并省掉——这正是本门要拿掉的那笔 token 税。
+  // 【知识库】不走此门（下方 `buildKnowledgeContext` 原样保留）。
+  // 判据是一个谓词而不是两个合的表达式：记忆总开关也在谓词内部合取（F3）——
+  // 总开关关时门不生效、本条走正常路径，由 `retrieveMemoryContext` 的第一条
+  // `not-enabled` 兜底（reason 与 span 都与用户触发同口径）。
+  const a2aMemorySkipped = triggerMsg.fromAgent && shouldSkipA2aMemory()
   let memoryResult: MemoryContextResult | null = null
   let memoryTimeout = false
-  try {
-    memoryResult = await Promise.race([
-      retrieveMemoryContext(triggerMsg.content),
-      new Promise<null>((resolve) =>
-        setTimeout(() => {
-          memoryTimeout = true
-          resolve(null)
-        }, MEMORY_TIMEOUT_MS)
-      ),
-    ])
-  } catch (err: any) {
-    log.warn('记忆检索抛错，本轮不注入', { traceId, agentId: agent.id, error: err?.message })
+  if (a2aMemorySkipped) {
+    // 不静默：结果仍是一个**形状同构**的空结果（`skipped-a2a`），下面 span /
+    // 流水落盘 / 日志三条路径照常走，三处各留一条痕。
+    memoryResult = skippedRetrievalResult()
+  } else {
+    try {
+      memoryResult = await Promise.race([
+        retrieveMemoryContext(triggerMsg.content),
+        new Promise<null>((resolve) =>
+          setTimeout(() => {
+            memoryTimeout = true
+            resolve(null)
+          }, MEMORY_TIMEOUT_MS)
+        ),
+      ])
+    } catch (err: any) {
+      log.warn('记忆检索抛错，本轮不注入', { traceId, agentId: agent.id, error: err?.message })
+    }
   }
 
   // ── 段 E3 `memory.retrieval`（R2 段五；详情表 = R1 `retrieval_events`）──
@@ -784,7 +807,14 @@ export async function runAgentReply(
   trace.recordSpan('memory.retrieval', {
     startMs: memoryT0,
     durationMs: memoryResult?.stats?.retrievalMs ?? memoryElapsedMs,
-    status: memoryTimeout ? 'timeout' : memoryResult ? 'ok' : 'error',
+    // 跳过 ≠ ok（那是「跑过且零命中」的假读数）、≠ error（那是「跑挂了」的假读数）。
+    status: a2aMemorySkipped
+      ? 'skipped'
+      : memoryTimeout
+        ? 'timeout'
+        : memoryResult
+          ? 'ok'
+          : 'error',
     // 命中数 = 实际注入的节数（与 retrieval_events 的 sections 同口径）
     itemCount: memoryResult?.stats?.sections ?? null,
   })

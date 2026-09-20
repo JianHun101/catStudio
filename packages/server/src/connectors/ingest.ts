@@ -11,6 +11,17 @@
  * 单例寻址（getExecutionBus / getExecutionEngine，getIO 同款服务定位惯例），
  * rowToAgent 直接取 execution/row.js。bus/engine 未注册（引擎未初始化）时
  * 返回 null → 守卫跳过（与旧 getIO→null 同语义）。
+ *
+ * 断环说明（T-1 增补）：`isAgentAuthoredTrigger` **同样取 execution/row.js**，
+ * 不是 serial.js。判据若从 serial 取值，本文件这条边会当场闭合出两个模块环
+ * （F1 审查实测：原在 serial.ts 时 `serial→flow-advance→ingest→serial` 与
+ * `worktree-fanin→ingest→serial→reply→worktree-fanin`，父提交 0 环）。
+ * 判据住叶模块 row.js（只有 `import type`）⇒ 谁 import 它都不成环。
+ * ⚠️ 环计数**只认增量不认绝对值**（F8）：绝对边数随检测器口径浮动（同一棵树
+ * 「排除 `*.test.ts`」309 条 /「含 `*.test.ts`」640 条，两套都对）；能复现的是
+ * 本笔引入或消除的那 ±1 条。
+ * ⚠️ 本文件的**每一条** execution/* 值导入都受这条约束（取值方必须是叶或下游），
+ * 加新边前先跑一遍环检测（本仓 lint 只跑 tsc，没有环守卫）。
  */
 import { v4 as uuid } from 'uuid'
 import { estimateTokens } from '@cat-study/shared'
@@ -20,7 +31,7 @@ import {
   messages as messagesRepo,
 } from '../db/repository/index.js'
 import type { AgentConfig } from '@cat-study/shared'
-import { rowToAgent } from '../execution/row.js'
+import { rowToAgent, isAgentAuthoredTrigger } from '../execution/row.js'
 import { getExecutionEngine, getExecutionBus } from '../execution/registry.js'
 import { resolveHandoffTarget } from '../handoff/index.js'
 import { createLogger } from '../logger.js'
@@ -390,7 +401,15 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
   // execute 的 finally 已保证槽位收口，此处只记日志防未处理 Promise 拒绝
   if (bus && targets.length > 0) {
     getExecutionEngine()!
-      .executeAgentsSerial(effectiveSessionId, targets as AgentConfig[], msg, traceId)
+      // fromAgent：`msg.role` 恒 'user'（本入口落库即 user，含 `origin:'agent'`
+      // 的猫间投递——见 :300）⇒ 恒 false = 照常注入。**非判据面**（不进 makeCmd，
+      // 执行体重建），填入只为满足 `AgentTriggerMsg.fromAgent` 必填。
+      .executeAgentsSerial(
+        effectiveSessionId,
+        targets as AgentConfig[],
+        { ...msg, fromAgent: isAgentAuthoredTrigger(msg.role) },
+        traceId
+      )
       .catch((err) => {
         log.error('executeAgentsSerial crashed', {
           traceId,

@@ -22,11 +22,14 @@
  *   `filtered-empty` 召回空——候选池被 X4 状态过滤挡光（嵌入是好的）
  *   `no-hit`         召回空——库空 / 候选全被距离阈值挡掉
  *   `budget-exhausted` 召回到片但整节都放不进预算
+ *   `skipped-a2a`    a2a 触发、总开关开、且 `MEMORY_A2A_ENABLED` 关——**压根没检索**（T-1 门控）
+ *                    （总开关关时**不用**本档：那时门没决定任何事，一律 `not-enabled`）
  *
  * 环境变量:
  *   MEMORY_TOP_K                — 检索片数（默认 3）
  *   MEMORY_MAX_DISTANCE         — 检索距离下限（默认 0.6）
  *   MEMORY_CONTEXT_TOKEN_BUDGET — 注入预算硬上限（默认 8000）
+ *   MEMORY_A2A_ENABLED          — a2a 触发时是否仍检索【相关记忆】（默认关），见 shouldSkipA2aMemory
  *   KNOWLEDGE_TOP_K             — 知识库检索数量（默认 3），见 buildKnowledgeContext
  *   MEMORY_QUERY_REWRITE_ENABLED— 查询改写开关（默认 "1"），见 query-rewrite.ts
  */
@@ -98,6 +101,11 @@ export type MemoryRetrievalReason =
   | 'filtered-empty'
   | 'no-hit'
   | 'budget-exhausted'
+  /** T-1 a2a 门控：触发消息来自 agent、**总开关开**、且 `MEMORY_A2A_ENABLED` 关 ⇒
+   *  **没有检索**（区别于 not-enabled——那个是记忆功能整体关，a2a/用户两侧都不跑）。
+   *  总开关关时门**不生效**、恒不落本档（F3 裁决：reason 要回答「为什么没有记忆」，
+   *  总开关关时门没有决定任何事） */
+  | 'skipped-a2a'
 
 // ─── 检索流水（P2 / R1：只采不改，字段口径见 P2 §四）─────
 //
@@ -223,6 +231,64 @@ function emptyResult(
   stats: Partial<MemoryContextStats> = {}
 ): MemoryContextResult {
   return { text: '', reason, sections: [], stats: { ...EMPTY_STATS, ...stats } }
+}
+
+// ─── a2a 门控（T-1）──────────────────────────────────
+// 触发消息来自 **agent**（猫的回复 @ 了下一棒）时，默认不检索【相关记忆】。
+// 依据：a2a 的触发内容本身就是上一只猫已消化的结论，检索拉回来的是白名单文档
+// 里的通用切片——对这一步没有信息增量，是纯 token 税，且带着把结论带偏的风险。
+// 【知识库】不受此门约束（a2a 高频场景正是审查与实施，ADR/规范仍要查）。
+//
+// 判据**不在本模块**：本模块只认调用点递进来的布尔，不回头看 `triggerContent`
+// 里有没有 @、也不查 DB——「这条触发是不是 agent 发的」是调度层的知识。
+
+/** a2a 触发时**是否应当跳过**【相关记忆】检索（= 本门生效）。默认关门
+ *  （`MEMORY_A2A_ENABLED` 给真值才放行）——本门要治的就是「a2a 白跑检索」，
+ *  默认开等于什么都不治。
+ *
+ *  ⚠️ **合取总开关**（F3 裁决）：`MEMORY_ENABLED` 关时本门**不生效**，返回 `false`
+ *  放行到正常路径，由 `retrieveMemoryContext` 第一条语句的 `not-enabled` 兜底。
+ *  理由：`reason` 要回答「这段 prompt 为什么没有记忆」，总开关关时 a2a 门**没有决定
+ *  任何事**——记 `skipped-a2a` 是把原因归给一条没起作用的闸，与本单自己的靶心
+ *  「span 不许撒谎」同型（照 `'ok'`／`'error'` 都是假读数的同一把尺子）。
+ *  放行**零成本**：`not-enabled` 分支在改写器之前 ⇒ 不 spawn sidecar、不打 LLM。
+ *  合取项落在**本函数内部**而不在调用点：调用点多读一个导出 = partial 替身镜像面
+ *  多一处可漏点（`reply.ts` 的 import 列表因此一个字不加）。
+ *
+ *  真值收 `1` 与 `true` 两种拼法（大小写不敏感）：`.env.example` 记忆块里
+ *  `MEMORY_ENABLED=true` 就是 `true` 拼法，同块两种写法都在用——只认 `'1'` 会把
+ *  `=true` **静默**读成「关」（写的人以为门开了，其实还关着），与本单「不静默」的
+ *  靶心同型（F2 审查项）。
+ *  ⚠️ **不**改用全仓宽松惯例 `!== 'false'`：那条会让已写明的 `=0`（关闭）
+ *  反过来变成**启用**——`.env.example` 同族声明是「1=启用 | 0=关闭」。
+ *  认不出的值一律落默认关（fail-closed：拼错 = 保持默认，不会把门悄悄打开）。
+ *  本读法与 `scripts/handoff-gen.mjs` 的 `isForceDeliver` 逐字同款（同一套容忍度、
+ *  同一条「不做『非空即真』，否则 `=0` 手滑会静默变成启用」的理由）——照抄在仓先例，
+ *  不新造第三种读法。 */
+export function shouldSkipA2aMemory(): boolean {
+  // 总开关关：本门不参与决策（见上「合取总开关」），放行给 not-enabled
+  if (!isMemoryEnabled()) return false
+  const raw = (process.env.MEMORY_A2A_ENABLED ?? '').trim().toLowerCase()
+  return !(raw === '1' || raw === 'true')
+}
+
+/**
+ * 门控跳过的空结果工厂。
+ *
+ * 为什么工厂在本模块而不是调用点手搓：`recordRetrievalTrace` 与 span 都按
+ * `stats?.xxx` 取值——形状一旦与其它空结果分叉，落库就是一片 null（`threshold_max_distance`
+ * 等参数快照列全是空），「跳过一次」与「参数没记上」当场不可区分。形状归本模块所有。
+ *
+ * `retrievalMs` 保持 `EMPTY_STATS` 的 0（**不传调用点计时**）：那是「检索跑了多久」
+ * 的读数，而这次**没有跑**——填一个真实的微秒数会把「跳过」渲染成「极快的一次检索」。
+ */
+export function skippedRetrievalResult(): MemoryContextResult {
+  const params = currentRetrievalParams()
+  return emptyResult('skipped-a2a', {
+    thresholdMaxDistance: params.maxDistance,
+    paramTopK: params.topK,
+    paramProbeN: params.probeN,
+  })
 }
 
 // ─── 降级标记（票丁契约 ①-②）─────────────────────────
