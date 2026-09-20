@@ -188,8 +188,20 @@ describe('checkGoldenSet — 锚点存在性（含真空性反对照）', () => 
     // 门牌 README（无 frontmatter，形态上永久如此）/ 未结晶 plans（evidence 空）。
     const skipped = new Map(idx.skipped.map((s) => [s.path, s.reason]))
     expect(skipped.get('docs/lessons/README.md')).toBe('no-frontmatter')
-    expect(skipped.get('docs/plans/agent-reply-elapsed-timer.md')).toBe('empty-evidence')
     expect(idx.skipped.every((s) => typeof s.reason === 'string' && s.reason !== '')).toBe(true)
+    // `empty-evidence` 的真身样本**已随飞轮跳过面收敛票灭绝**：`agent-reply-elapsed-timer.md`
+    // 是仓内最后一份缺 evidence 的 plan，补上 evidence 后 21 件候选全部过准入（除门牌 README）。
+    //
+    // **教训：真身样本不复发**——这条原先绑「仓内恰好有个残废件」，那是**临时状态不是契约**，
+    // 谁补上 evidence 谁就让它失效（P1-B 补 frontmatter 换过一轮，这是第二轮）。
+    // 改测判据本体（同 `scan/flywheel/scan.test.js` 的构造夹具范式）：不绑仓内文件，覆盖不降——
+    //「失败件进 skipped」的链路已由上面 README 那条覆盖，两条 reason 走同一行 push。
+    expect(
+      classifyDocument({
+        path: 'docs/plans/x.md',
+        content: '---\ntype: plan\nstatus: closed\n---\n',
+      })
+    ).toMatchObject({ ok: false, reason: 'empty-evidence' })
     // 反向：通电后的 ADR **不得**再出现在 skippedDocs（否则「通电成功」是假读数）
     expect(idx.skipped.some((s) => s.path.startsWith('docs/adr/0001'))).toBe(false)
     expect(idx.skipped.some((s) => s.path.startsWith('docs/adr/0006'))).toBe(false)

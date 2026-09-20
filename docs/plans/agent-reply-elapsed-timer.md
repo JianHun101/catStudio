@@ -1,6 +1,13 @@
 ---
 type: plan
 status: closed
+evidence:
+  - kind: commit
+    ref: 33b6028
+  - kind: commit
+    ref: 7c5a6fa
+  - kind: commit
+    ref: ac66e6d
 ---
 
 # Agent 回复计时上气泡（v1）

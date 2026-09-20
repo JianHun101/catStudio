@@ -39,6 +39,7 @@ import { findRepoRootFrom } from './repo-root.js'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
 import { stopLlamaServerIfSpawned } from './llm/llama-server.js'
 import { startEmbeddingSidecar, stopEmbeddingSidecar } from './memory/embedding.js'
+import { summarizeSkippedByReason } from './memory/flywheel/scan-report.js'
 import { clearStaleShutdownRequest, startShutdownRequestWatcher } from './shutdown-request.js'
 import { stopOllamaIfSpawned } from './llm/ollama.js'
 import { stopProxyIfSpawned } from './llm/cli-utils.js'
@@ -115,6 +116,9 @@ function spawnFlywheelScan(): void {
         inserted: report.inserted,
         updated: report.updated,
         skipped: report.skipped.length,
+        // 跳过明细按 reason 归桶：`unchanged`（正常增量）与 `empty-evidence` 等
+        // （真缺口）在总数上同形，分开才读得出「谁被跳、为什么」
+        skippedByReason: summarizeSkippedByReason(report.skipped),
         orphansDeleted: report.orphansDeleted,
         errors: report.errors.length,
         // 中止（如嵌入未启用）= 本轮没写索引，不是失败——留痕以便分辨「扫完没变化」与「压根没扫」
