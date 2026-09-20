@@ -28,6 +28,8 @@
 | `opencode` CLI                 | 最新       | ✅ 演示角色的默认 provider（5 个里 4 个） |
 | Claude Code CLI / Codex CLI    | 最新       | ❌ 仅使用对应 provider 适配器时需要       |
 
+> `opencode` 是**外部 CLI**，不在 `package.json` 依赖里（`pnpm install` 不会装它），需按下一条命令单独安装并本地登录。
+
 ```bash
 node --version  # 确认 >= 22.18.0
 pnpm install
