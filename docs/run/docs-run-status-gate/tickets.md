@@ -69,7 +69,7 @@ floated_to: docs/plans/xxx.md # status ∈ {pending-float, floated} 时必填
 - (a) ~~判弃 `docs-run-cleanup/`~~ **✅ 已完成 2026-09-19**（mapping.md 标判弃 + `flaky-precommit` §5.3 引用改指 + 2 条票面冲突修文，同批 commit）。
 - (b) `docs-single-writer/` 前置：`CONTEXT.md:133` 的括号引用（现指 `docs/run/precommit-scope/closeout.md` §四）改指上浮后落点，否则清目录时引用悬空。
 - (c) ~~补一行收口段 + `docs/plans/agent-reply-elapsed-timer.md:3` 的 `status` 改「已收口」~~ **✅ 已完成 2026-09-20**（收口段已补；status 按同日统一后的英文值域落 **`closed`**，非旧词「已收口」）。
-  ⚠️ **原句归因错误（2026-09-20 实测更正）**：原写「该 status 触发 `scan.mjs:243` 准入闸 ⇒ 该 plan 进不了检索索引」。实测 `classifyDocument` 的判据**顺序**是 `type` → **`evidence`（`:265`）** → `status`（`:271`）——该 plan **根本没有 `evidence` 字段**，落 `empty-evidence`，**在 status 判据之前就被拒**。故：① 改 status **不会**让它入库（改后仍 `empty-evidence`）；② 它的 `status: 在飞` 出值域是**另一处独立缺陷**，不是索引卡点。补 `evidence` 与否（= 语料 19→20 文档）**超出本票边界，待裁**。
+  ⚠️ **原句归因错误（2026-09-20 实测更正）**：原写「该 status 触发 `scan.mjs:243` 准入闸 ⇒ 该 plan 进不了检索索引」。实测 `classifyDocument` 的判据**顺序**是 `type` → **`evidence`（`:265`）** → `status`（`:271`）——该 plan **根本没有 `evidence` 字段**，落 `empty-evidence`，**在 status 判据之前就被拒**。故：① 改 status **不会**让它入库（改后仍 `empty-evidence`）；② 它的 `status: 在飞` 出值域是**另一处独立缺陷**，不是索引卡点。补 `evidence` 与否（= 语料 19→20 文档）**✅ 已由「飞轮跳过面收敛」票执行**（2026-09-20，已审 sha `c956c8f`，PR #158 merge `1411983`）：该 plan 补 3 笔 commit evidence ⇒ 分类面实测 **21 候选 / 20 入索引**、`empty-evidence` 归零，本句**不再待裁**。
 - **边界**：(b)(c) 触及 `CONTEXT.md` / `docs/plans/`——**不在免审白名单（`docs/run/**`）内，须走审查链**。
 - **验收**：引用不悬空（grep 目标存在）；plan status 改后重扫可入库；两目录 `floated` 可清前置清零。
 
