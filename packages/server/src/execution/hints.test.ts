@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { SKILL_WHITELIST, SKILL_CATALOG } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
@@ -16,6 +17,7 @@ import {
   buildReviewLoopHint,
   buildHandoffTriggerHint,
   buildTriggerFocusHint,
+  buildSkillDirectorySection,
   resolveRolePlaceholders,
 } from './hints.js'
 
@@ -657,5 +659,40 @@ describe('formatUserMessage', () => {
   it('joins multiple mention names', () => {
     const result = formatUserMessage('帮我看看', ['店长', 'ds猫', '吐槽猫'], '对大家', false)
     expect(result).toBe('用户（@了店长、ds猫、吐槽猫）：帮我看看')
+  })
+})
+
+// ─── 技能目录段（甲案「技能发现面注入」）────────────────────────────────────
+// 纯单元面：目录段本身。**「真的进 prompt」由 socketio.test.ts 的组装式用例钉**
+// （那条走 runAgentReply 真实链路、捕获 chatStream 入参）——本组绿而那条红 = 没接上线。
+describe('buildSkillDirectorySection', () => {
+  /** 从目录段里解析出条目名（按出现顺序） */
+  function entryNames(section: string): string[] {
+    return section
+      .split('\n')
+      .filter((line) => line.startsWith('- '))
+      .map((line) => line.slice(2, line.indexOf(': ')))
+  }
+
+  it('注入面 = 可读面：条目名集合与顺序 === SKILL_WHITELIST（11 条，一条不多一条不少）', () => {
+    const names = entryNames(buildSkillDirectorySection())
+    // 顺序即目录序（toBe 断言序列，非 toContain 式的集合比较）
+    expect(names).toEqual([...SKILL_WHITELIST])
+    expect(names).toHaveLength(11)
+  })
+
+  it('每条格式为 `- <name>: <一句话>`，文案逐字取自 SKILL_CATALOG（无 undefined 空洞）', () => {
+    const section = buildSkillDirectorySection()
+    for (const name of SKILL_WHITELIST) {
+      expect(section).toContain(`- ${name}: ${SKILL_CATALOG[name]}`)
+    }
+    expect(section).not.toContain('undefined')
+  })
+
+  it('含标题行与行为指令行（缺了指令 = 只给菜单不给用法）', () => {
+    const section = buildSkillDirectorySection()
+    const lines = section.split('\n')
+    expect(lines[0]).toBe('【可用技能】以下技能可按需自取正文：')
+    expect(lines[lines.length - 1]).toContain('read_skill')
   })
 })

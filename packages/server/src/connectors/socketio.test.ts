@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createServer } from 'node:http'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { Events, estimateTokens } from '@cat-study/shared'
+import { Events, estimateTokens, SKILL_WHITELIST } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
@@ -5387,6 +5387,104 @@ describe('runAgentReply — 铁律运行期注入（ironLawForRole）', () => {
     // 审查铁律含「行首@架构师 请收口」——注入后 @架构师 → @店长
     expect(sys).toContain('@店长')
     expect(sys).not.toContain('@架构师')
+  })
+})
+
+// ─── 技能发现面注入（甲案：目录段进第一条 system message）────────────────────
+// 验收硬条款：「真的进 prompt」这一面必须被钉住——buildSkillDirectorySection 的纯
+// 单元用例全绿但没接线 = 本单白干，故此处走 runAgentReply 真实链路、捕获 chatStream
+// 入参（组装式模块测试：真实 SQLite + 只 mock 最外层适配器）。
+
+describe('runAgentReply — 技能发现面注入（甲案）', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  /** 跑一轮真实 runAgentReply，回传交给 chatStream 的 messages（第一条即 system） */
+  async function runWithAgent(agent: any): Promise<any[]> {
+    const mod = await import('./socketio.js')
+    // 引擎是 createSocketIO 建立的模块单例（非模块顶层）。全量跑时前序用例已建好；
+    // 单文件 `-t` 过滤跑时前序用例被 skip、引擎仍为 null——按需自建，免用例顺序依赖。
+    if (!getExecutionEngine()) {
+      mod.__test_resetEngine()
+      mod.createSocketIO(createServer())
+    }
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const chatStream = vi.fn(async function* (_m: any[], _o: any) {
+      yield { content: '发现面测试', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+    const sessionId = `session-sd-${agent.id}`
+    const msgId = `msg-sd-${agent.id}`
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: agent.id,
+      sessionId,
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: msgId,
+    } as any)
+
+    insertAgent(agent)
+
+    const db = getDb()
+    db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 'sd', ?)`).run(
+      sessionId,
+      JSON.stringify([agent.id])
+    )
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', '@猫 发现面', '["猫"]')`
+    ).run(msgId, sessionId)
+
+    await getExecutionEngine()!.executeAgentsSerial(
+      sessionId,
+      [agent],
+      { id: msgId, content: '@猫 发现面', mentions: ['猫'] },
+      `trace-sd-${agent.id}`
+    )
+    return chatStream.mock.calls[0][0] as any[]
+  }
+
+  const AGENT = {
+    id: 'agent-sd',
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: '你是实施猫。',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'implementer',
+  }
+
+  it('第一条 system message 含技能目录段，且含全部 11 个技能名', async () => {
+    const msgs = await runWithAgent({ ...AGENT })
+
+    // 「第一条」是硬点：目录段坐真 system prompt 面，不是后续某条 hints
+    expect(msgs[0].role).toBe('system')
+    const sys = String(msgs[0].content)
+
+    expect(sys).toContain('【可用技能】')
+    expect(SKILL_WHITELIST).toHaveLength(11)
+    for (const name of SKILL_WHITELIST) {
+      expect(sys, `目录段缺技能 ${name}`).toContain(`- ${name}: `)
+    }
+  })
+
+  it('目录段坐第一条 system message，不坐 dynamicHints 的位置（超限不被当最旧先丢）', async () => {
+    const msgs = await runWithAgent({ ...AGENT })
+
+    const systemMessages = msgs.filter((m) => m.role === 'system')
+    // 只有第一条 system 含目录段——后续 hints（若有）不得重复携带
+    const carriers = systemMessages.filter((m) => String(m.content).includes('【可用技能】'))
+    expect(carriers).toHaveLength(1)
+    expect(msgs.indexOf(carriers[0])).toBe(0)
   })
 })
 
