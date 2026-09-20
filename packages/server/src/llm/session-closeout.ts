@@ -35,6 +35,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '../logger.js'
+import { findRepoRootFrom } from '../repo-root.js'
 import { messageOf } from '../utils.js'
 import {
   cleanGitEnv,
@@ -431,18 +432,6 @@ const moduleDir = dirname(fileURLToPath(import.meta.url))
 /** 陈旧度脚本相对仓库根的路径——它同时充当「仓库根」的**存在性锚点**。 */
 const STALE_SCAN_REL = ['scripts', 'run-docs-stale.mjs'] as const
 
-/** 从 startDir 向上找**确实含有** `scripts/run-docs-stale.mjs` 的最近祖先（含自身）；
- *  存在性即自校验，找不到返回 null——绝不猜。 */
-function findRepoRootFrom(startDir: string): string | null {
-  let dir = resolve(startDir)
-  for (;;) {
-    if (existsSync(join(dir, ...STALE_SCAN_REL))) return dir
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
-  }
-}
-
 /**
  * 定位陈旧度脚本的绝对路径；找不到返回 null（调用方收敛成 `{ok:false}` 打一条 warn）。
  *
@@ -452,13 +441,13 @@ function findRepoRootFrom(startDir: string): string | null {
  * `node dist/server/src/index.js` 印证这条），比 `src/llm/` **深两层**。固定 4 层上溯
  * 在源码布局下对、在产物布局下解析出 `packages/server/scripts/run-docs-stale.mjs`
  * （不存在）⇒ spawn 必 ENOENT ⇒ 每次收口打一条永远为真的 warn，可见性功能全灭。
- * **存在性锚定的向上找对两种布局都成立**（`execution/review-fallback.ts:81` 与
- * `routes/skills.ts:58` 是同一形状的仓内先例，各自锚自己的标记文件）。
+ * **存在性锚定的向上找对两种布局都成立**——那一步已抽成单源 `../repo-root.ts`
+ * （`findRepoRootFrom`），本模块与 `index.ts` 同款消费，标记文件是**本脚本自身**。
  *
  * `startDir` 可注入**只为测试直接喂两种布局的深度**；生产走默认值。
  */
 export function resolveStaleScanScript(startDir: string = moduleDir): string | null {
-  const root = findRepoRootFrom(startDir)
+  const root = findRepoRootFrom(startDir, STALE_SCAN_REL)
   return root === null ? null : join(root, ...STALE_SCAN_REL)
 }
 
