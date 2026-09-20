@@ -252,7 +252,8 @@ export interface RetrievalReport {
   indexFreshness: { checked: number; stale: number }
   params: { topK: number; maxDistance: number; probeN: number }
   /** `handshakeOk` 是**加工后的布尔**，不是端口号本身——端口每跑一变，落进产物就破 B1
-   *  （见跑批脚本 `reportCtx.embed` 的注释）。界面也只需要「有没有握手」这一个信号。 */
+   *  （见跑批脚本 `reportCtx.embed` 的注释）。布尔承载「这次跑批有没有握手到 sidecar」
+   *  这个信号（md 侧渲染它）；**界面只消费上面的 `model` / `dim`**，端口号没有消费方。 */
   embed: { model?: string | null; dim?: number | null; handshakeOk?: boolean }
   groups: { real: RetrievalGroupSummary; constructed: RetrievalGroupSummary }
   scores: RetrievalScoreRow[]
