@@ -67,6 +67,15 @@ vi.mock('../memory/index.js', () => ({
   retrieveMemoryContext: h.retrieveMemoryContext,
   buildKnowledgeContext: h.buildKnowledgeContext,
   currentRetrievalParams: vi.fn(() => ({ topK: 3, maxDistance: 0.6, probeN: 20 })),
+  // T-1：a2a 记忆门新增的两个被消费导出——同一条规矩（见上），partial factory
+  // 缺一个就是调用点 TypeError。默认值镜像生产：门**关**、跳过结果形状同构。
+  isA2aMemoryEnabled: vi.fn(() => false),
+  skippedRetrievalResult: vi.fn(() => ({
+    text: '',
+    reason: 'skipped-a2a',
+    sections: [],
+    stats: {},
+  })),
 }))
 
 vi.mock('../handoff/index.js', () => ({
@@ -151,6 +160,7 @@ async function runRound(
     'session-1',
     opts?.agents ?? [A1],
     {
+      fromAgent: false,
       id: triggerId,
       content: '你好',
       mentions: [],

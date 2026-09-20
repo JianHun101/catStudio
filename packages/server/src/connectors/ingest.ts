@@ -21,6 +21,7 @@ import {
 } from '../db/repository/index.js'
 import type { AgentConfig } from '@cat-study/shared'
 import { rowToAgent } from '../execution/row.js'
+import { isAgentAuthoredTrigger } from '../execution/serial.js'
 import { getExecutionEngine, getExecutionBus } from '../execution/registry.js'
 import { resolveHandoffTarget } from '../handoff/index.js'
 import { createLogger } from '../logger.js'
@@ -390,7 +391,15 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
   // execute 的 finally 已保证槽位收口，此处只记日志防未处理 Promise 拒绝
   if (bus && targets.length > 0) {
     getExecutionEngine()!
-      .executeAgentsSerial(effectiveSessionId, targets as AgentConfig[], msg, traceId)
+      // fromAgent：`msg.role` 恒 'user'（本入口落库即 user，含 `origin:'agent'`
+      // 的猫间投递——见 :300）⇒ 恒 false = 照常注入。**非判据面**（不进 makeCmd，
+      // 执行体重建），填入只为满足 `AgentTriggerMsg.fromAgent` 必填。
+      .executeAgentsSerial(
+        effectiveSessionId,
+        targets as AgentConfig[],
+        { ...msg, fromAgent: isAgentAuthoredTrigger(msg.role) },
+        traceId
+      )
       .catch((err) => {
         log.error('executeAgentsSerial crashed', {
           traceId,

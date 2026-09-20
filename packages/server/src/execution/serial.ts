@@ -161,6 +161,34 @@ export type AgentTriggerMsg = {
   mentions: string[]
   taskId?: string
   authorName?: string
+  /**
+   * 触发消息是否**由 agent 发出**（T-1：`execution/reply.ts` 据此决定 a2a 是否
+   * 检索【相关记忆】）。**必填**——可选字段漏填即静默 `false`，而 `false` 侧的
+   * 行为是「照常注入」，等于新入口忘标就悄悄绕过门（与 D15 `IngestInput.origin`
+   * 同款判据：忘标要变成 `tsc` 编译错误，fail-loud）。
+   *
+   * 真相源恒为 **DB `messages.role === 'agent'`**，且**只有一个权威构造点**：
+   * `buildTriggerMsg`（执行体每次都重新构造，见 `executeRun`）。其余构造点
+   * （A2A 递归 / 恢复 / ingest 入口）填的是各自触发行的真实 role，语义正确，
+   * 但**不承担判据职责**——`makeCmd` 不搬运本字段，reply 侧读到的永远是
+   * `buildTriggerMsg` 那一份 ⇒ 不存在两处判据打架。
+   */
+  fromAgent: boolean
+}
+
+/**
+ * 触发行是否由 agent 发出——**本判据在全仓只有这一处定义**（T-1）。
+ *
+ * 为什么不各处直接写 `role === 'agent'`：判据有两个真实构造点（`buildTriggerMsg`
+ * 与 `recovery` 的恢复路径），各写一份就是两份判据——今天同形，明天只改一处
+ * （例如把 `system` 通告也算进来）就悄悄分叉，而分叉的表现是「同一类触发，两条
+ * 路径行为不同」，排查时没有任何报错指向它。
+ *
+ * 不认 `authorName`（被 `resolveRolePlaceholders` 复用，语义会漂）、不认 content
+ * 里的 @（路由元数据答的是「要叫谁」，不是「谁在说」）。
+ */
+export function isAgentAuthoredTrigger(role: string | null | undefined): boolean {
+  return role === 'agent'
 }
 
 // ─── C1 v3 调度层重构：槽位（engine 闭包持有，键 agentId+sessionId） ────────────
@@ -289,7 +317,7 @@ function providerKey(agent: AgentConfig): string {
   return `${agent.llmProvider}:${agent.llmApiKey}`
 }
 
-/** 由命令构造触发消息静态形状（A2A authorName 从 DB 反查） */
+/** 由命令构造触发消息静态形状（A2A authorName / fromAgent 从 DB 反查） */
 function buildTriggerMsg(ctx: EngineCtx, cmd: DispatchCommand): AgentTriggerMsg {
   const triggerMeta = messagesRepo.getMessageByIdOnly(cmd.triggerMessageId)
   const triggerRow = triggerMeta
@@ -304,6 +332,11 @@ function buildTriggerMsg(ctx: EngineCtx, cmd: DispatchCommand): AgentTriggerMsg 
       triggerRow?.role === 'agent' && triggerRow.agent_id
         ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
         : undefined,
+    // ── 唯一权威判据（T-1）───────────────────────────
+    // 反查不到行（trigger 消息不在库）⇒ `false` = 照常注入——**fail-open 是有意的**：
+    // 这一侧的失效形态是「多注入一段记忆」，而反向（fail-closed）会把「查库失败」
+    // 静默翻译成「本条是 a2a」从而关掉检索，把一次 DB 抖动变成一次行为改变。
+    fromAgent: isAgentAuthoredTrigger(triggerRow?.role),
   }
 }
 
@@ -413,6 +446,11 @@ async function drainQueuedCommand(
       triggerRow?.role === 'agent' && triggerRow.agent_id
         ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
         : undefined,
+    // ⚠️ 本处是 fromAgent 的**第二权威构造点**（不是 `buildTriggerMsg` 的搬运）：
+    // drain 直接调 `executeOneAgent`、**不经** `execute()`，故 reply 侧读到的就是
+    // 这一个值（`buildTriggerMsg` 在本路径上不执行）。判据与它同源——同为
+    // `isAgentAuthoredTrigger(DB messages.role)`，非 `authorName` 真值推断。
+    fromAgent: isAgentAuthoredTrigger(triggerRow?.role),
   }
   // 直接执行（不走 execute 决策——槽位已被 completeExecution 标 busy，重入会再排队）。
   // token 不在此 acquire：A 方案后 token 由 executeOneAgent 的 LLM 段自行
@@ -1096,7 +1134,11 @@ async function executeOneAgent(
             ctx,
             sessionId,
             limitedAgents,
-            { ...agentTrigger, authorName: agent.name },
+            // `fromAgent: true` 是**语义正确**的填法（触发者就是刚回复的这只猫），但
+            // 不承担判据职责：本对象的 fromAgent 不进 `makeCmd`，reply 侧读的是
+            // `executeRun` 重新 `buildTriggerMsg` 反查出的那一份（`agentTrigger.role
+            // === 'agent'`，同一个值、同一个源）。这里填 true 只为满足必填类型。
+            { ...agentTrigger, authorName: agent.name, fromAgent: true },
             traceId,
             depth + 1
           )

@@ -19,7 +19,7 @@ import {
 } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
 import { rowToAgent } from './row.js'
-import { agentHasUsableApiKey } from './serial.js'
+import { agentHasUsableApiKey, isAgentAuthoredTrigger } from './serial.js'
 import { getExecutionEngine } from './registry.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 
@@ -96,6 +96,10 @@ export async function recoverInterruptedExecutions(bus: EngineBus & HandoffBus):
           content: triggerRow.content,
           mentions,
           taskId: triggerRow.task_id || undefined,
+          // 与 `buildTriggerMsg` 同源同判据（`isAgentAuthoredTrigger`）——恢复路径的
+          // 触发行可能是用户消息也可能是猫的回复，取值照实。注：本对象的 fromAgent
+          // 不进 `makeCmd`，reply 侧读的是执行体重建的那一份，此处只满足必填类型。
+          fromAgent: isAgentAuthoredTrigger(triggerRow.role),
           authorName:
             triggerRow.role === 'agent' && triggerRow.agent_id
               ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
@@ -353,7 +357,9 @@ export async function recoverQueuedMessages(bus: EngineBus & HandoffBus): Promis
         await getExecutionEngine()!.executeAgentsSerial(
           row.session_id,
           dispatchTargets,
-          msg,
+          // fromAgent 照 msg.role 取实（本路径的 role 直读消息行，可能是 agent）——
+          // 非判据面，释义见 `AgentTriggerMsg.fromAgent`
+          { ...msg, fromAgent: isAgentAuthoredTrigger(msg.role) },
           traceId,
           0
         )
@@ -496,7 +502,14 @@ export async function replayStuckUserMessages(bus: EngineBus & HandoffBus): Prom
 
         // C1 v3 单入口：executeAgentsSerial 决策(标 busy/入队)+执行一次搞定——原
         // dispatch + executeAgentsSerial 两步合并（S2 兜底已移入 execute 的 finally）
-        await getExecutionEngine()!.executeAgentsSerial(row.session_id, executable, msg, traceId, 0)
+        await getExecutionEngine()!.executeAgentsSerial(
+          row.session_id,
+          executable,
+          // 本路径 msg.role 恒 'user'——非判据面，释义见 `AgentTriggerMsg.fromAgent`
+          { ...msg, fromAgent: isAgentAuthoredTrigger(msg.role) },
+          traceId,
+          0
+        )
       } catch (err: any) {
         log.error('重放单条消息失败', { messageId: row.id, error: err.message })
       }

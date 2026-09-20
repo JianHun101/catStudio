@@ -1235,4 +1235,52 @@ describe('memory', () => {
       expect(cut.sections.map((s) => `${s.docPath}\0${s.sectionAnchor}`)).toEqual(beforeCut.keys)
     })
   })
+
+  // ─── T-1 a2a 门控：开关语义 + 跳过结果形状 ────────────────
+  //
+  // 门本身长在 `execution/reply.ts`（调用点），但那两件东西归本模块所有：
+  //  ① `MEMORY_A2A_ENABLED` 的读法（默认**关**——本门要治的就是「a2a 白跑检索」，
+  //     默认开等于什么都不治）；
+  //  ② 跳过结果的形状（`recordRetrievalTrace` / span 都按 `stats?.xxx` 取值，
+  //     形状分叉 ⇒ 落库一片 null）。
+  // 生产路径的接线面（真 DB 触发行 / span status / 流水 reason）在
+  // `execution/serial.a2a-memory-gate.test.ts`，本处只钉这两个纯函数。
+  describe('T-1 a2a 门控（env 语义 + 跳过结果形状）', () => {
+    const saved = process.env.MEMORY_A2A_ENABLED
+    afterEach(() => {
+      if (saved === undefined) delete process.env.MEMORY_A2A_ENABLED
+      else process.env.MEMORY_A2A_ENABLED = saved
+    })
+
+    it('默认关（未设置 / 空串 / 非 "1" 都关），只有 "1" 才开', () => {
+      delete process.env.MEMORY_A2A_ENABLED
+      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
+      process.env.MEMORY_A2A_ENABLED = ''
+      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
+      process.env.MEMORY_A2A_ENABLED = '0'
+      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
+      process.env.MEMORY_A2A_ENABLED = 'true' // 只认 '1'，不认别的真值写法
+      expect(memoryModule.isA2aMemoryEnabled()).toBe(false)
+      process.env.MEMORY_A2A_ENABLED = '1'
+      expect(memoryModule.isA2aMemoryEnabled()).toBe(true)
+    })
+
+    it('跳过结果与其它空结果同构：reason=skipped-a2a、text 空、参数快照非 0 非 undefined', () => {
+      process.env.MEMORY_TOP_K = '5'
+      process.env.MEMORY_MAX_DISTANCE = '0.42'
+      const r = memoryModule.skippedRetrievalResult()
+
+      expect(r.reason).toBe('skipped-a2a')
+      expect(r.text).toBe('')
+      expect(r.sections).toEqual([])
+      // 「没跑检索」⇒ 耗时恒 0（不是调用点实测的微秒数——那会把「跳过」渲染成
+      // 「极快的一次检索」）
+      expect(r.stats.retrievalMs).toBe(0)
+      // 参数快照照常填（其它空结果也填）——否则这几列落库全 null
+      expect(r.stats.paramTopK).toBe(5)
+      expect(r.stats.thresholdMaxDistance).toBeCloseTo(0.42, 12)
+      expect(r.stats.paramProbeN).toBeGreaterThan(0)
+      expect(r.stats.sections).toBe(0)
+    })
+  })
 })

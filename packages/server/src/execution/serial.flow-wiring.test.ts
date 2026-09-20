@@ -61,6 +61,15 @@ vi.mock('../memory/index.js', () => ({
   // 单一来源）。partial factory 缺它 = 调用点当场 TypeError，回复整条发不出去
   // ——实测踩过。**替身必须镜像真模块被消费的导出面**。
   currentRetrievalParams: vi.fn(() => ({ topK: 3, maxDistance: 0.6, probeN: 20 })),
+  // T-1：a2a 记忆门新增的两个被消费导出——同一条规矩（见上），partial factory
+  // 缺一个就是调用点 TypeError。默认值镜像生产：门**关**、跳过结果形状同构。
+  isA2aMemoryEnabled: vi.fn(() => false),
+  skippedRetrievalResult: vi.fn(() => ({
+    text: '',
+    reason: 'skipped-a2a',
+    sections: [],
+    stats: {},
+  })),
 }))
 
 vi.mock('../handoff/index.js', () => ({
@@ -191,7 +200,13 @@ describe('serial — review 钩子接线（契约③ X2 · 不 mock verdict-pars
     await engine.executeAgentsSerial(
       SESSION,
       [REVIEWER],
-      { id: 'msg-review-req', content: '请审查', mentions: ['吐槽猫'], taskId: TASK },
+      {
+        fromAgent: false,
+        id: 'msg-review-req',
+        content: '请审查',
+        mentions: ['吐槽猫'],
+        taskId: TASK,
+      },
       EXEC_TRACE,
       0
     )
@@ -236,7 +251,13 @@ describe('serial — review 钩子接线（契约③ X2 · 不 mock verdict-pars
     await engine.executeAgentsSerial(
       SESSION,
       [REVIEWER],
-      { id: 'msg-review-req', content: '请审查', mentions: ['吐槽猫'], taskId: TASK },
+      {
+        fromAgent: false,
+        id: 'msg-review-req',
+        content: '请审查',
+        mentions: ['吐槽猫'],
+        taskId: TASK,
+      },
       EXEC_TRACE,
       0
     )

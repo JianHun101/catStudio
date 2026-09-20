@@ -22,11 +22,13 @@
  *   `filtered-empty` 召回空——候选池被 X4 状态过滤挡光（嵌入是好的）
  *   `no-hit`         召回空——库空 / 候选全被距离阈值挡掉
  *   `budget-exhausted` 召回到片但整节都放不进预算
+ *   `skipped-a2a`    a2a 触发且 `MEMORY_A2A_ENABLED` 关——**压根没检索**（T-1 门控）
  *
  * 环境变量:
  *   MEMORY_TOP_K                — 检索片数（默认 3）
  *   MEMORY_MAX_DISTANCE         — 检索距离下限（默认 0.6）
  *   MEMORY_CONTEXT_TOKEN_BUDGET — 注入预算硬上限（默认 8000）
+ *   MEMORY_A2A_ENABLED          — a2a 触发时是否仍检索【相关记忆】（默认关），见 isA2aMemoryEnabled
  *   KNOWLEDGE_TOP_K             — 知识库检索数量（默认 3），见 buildKnowledgeContext
  *   MEMORY_QUERY_REWRITE_ENABLED— 查询改写开关（默认 "1"），见 query-rewrite.ts
  */
@@ -98,6 +100,9 @@ export type MemoryRetrievalReason =
   | 'filtered-empty'
   | 'no-hit'
   | 'budget-exhausted'
+  /** T-1 a2a 门控：触发消息来自 agent 且开关关 ⇒ **没有检索**（区别于 not-enabled
+   *  ——那个是记忆功能整体关，a2a/用户两侧都不跑） */
+  | 'skipped-a2a'
 
 // ─── 检索流水（P2 / R1：只采不改，字段口径见 P2 §四）─────
 //
@@ -223,6 +228,40 @@ function emptyResult(
   stats: Partial<MemoryContextStats> = {}
 ): MemoryContextResult {
   return { text: '', reason, sections: [], stats: { ...EMPTY_STATS, ...stats } }
+}
+
+// ─── a2a 门控（T-1）──────────────────────────────────
+// 触发消息来自 **agent**（猫的回复 @ 了下一棒）时，默认不检索【相关记忆】。
+// 依据：a2a 的触发内容本身就是上一只猫已消化的结论，检索拉回来的是白名单文档
+// 里的通用切片——对这一步没有信息增量，是纯 token 税，且带着把结论带偏的风险。
+// 【知识库】不受此门约束（a2a 高频场景正是审查与实施，ADR/规范仍要查）。
+//
+// 判据**不在本模块**：本模块只认调用点递进来的布尔，不回头看 `triggerContent`
+// 里有没有 @、也不查 DB——「这条触发是不是 agent 发的」是调度层的知识。
+
+/** a2a 触发时是否仍检索【相关记忆】——默认**关**（`MEMORY_A2A_ENABLED=1` 才开）。
+ *  默认关的理由：本门要治的就是「a2a 白跑检索」，默认开等于什么都不治。 */
+export function isA2aMemoryEnabled(): boolean {
+  return process.env.MEMORY_A2A_ENABLED === '1'
+}
+
+/**
+ * 门控跳过的空结果工厂。
+ *
+ * 为什么工厂在本模块而不是调用点手搓：`recordRetrievalTrace` 与 span 都按
+ * `stats?.xxx` 取值——形状一旦与其它空结果分叉，落库就是一片 null（`threshold_max_distance`
+ * 等参数快照列全是空），「跳过一次」与「参数没记上」当场不可区分。形状归本模块所有。
+ *
+ * `retrievalMs` 保持 `EMPTY_STATS` 的 0（**不传调用点计时**）：那是「检索跑了多久」
+ * 的读数，而这次**没有跑**——填一个真实的微秒数会把「跳过」渲染成「极快的一次检索」。
+ */
+export function skippedRetrievalResult(): MemoryContextResult {
+  const params = currentRetrievalParams()
+  return emptyResult('skipped-a2a', {
+    thresholdMaxDistance: params.maxDistance,
+    paramTopK: params.topK,
+    paramProbeN: params.probeN,
+  })
 }
 
 // ─── 降级标记（票丁契约 ①-②）─────────────────────────

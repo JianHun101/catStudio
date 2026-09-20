@@ -118,7 +118,8 @@ export interface RetrievalEventInput {
    * 严格可比的分析必须按 `created_at` 切窗口或按本列 `IS NULL` 区分（§四 4.2）。
    */
   paramPoolN: number | null
-  /** 值域 **9**（模块 7 枚举 + `timeout` + `error`，见 P2 §二③） */
+  /** 值域 **10**（模块 8 枚举 + `timeout` + `error`，见 P2 §二③；第 8 个是 T-1 的
+   *  `skipped-a2a`——a2a 触发且 `MEMORY_A2A_ENABLED` 关，压根没检索） */
   reason: string
   retrievalMs: number | null
   contextTokens: number | null
