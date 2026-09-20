@@ -176,8 +176,15 @@ const REVIEWER_KEEP_PRIORITY: Record<ReviewerVerdict | 'unknown', TargetMatcher[
   // reopen 条件（满足任一即重裁本格，而不是就地改）：
   //   ① 实测出现「代发起审查 → 返工」链且架构师未按铁律 `行首@架构师 请收口`
   //      把链转回作者 —— 即兜底路径被证伪；
-  //   ② `no_subject` 被下游统计（episode 归因 / flow-advance）当失败计入 ——
-  //      该格就从「既有语义」变成了指标污染源。
+  //   ② `no_subject` 被下游统计当失败计入 —— 该格就从「既有语义」变成了指标污染源。
+  //      **当前即为真**（2026-09-20 实测）。原括注指名的两头都不消费它：
+  //      `execution/flow-advance.ts` grep `failure` 零命中；`eval/attribution.ts:72`
+  //      的 `failures` 是 episode 链的局部变量，与 `review_parse_failures` 表无关。
+  //      唯一读方是 `eval/l1-aggregator.ts:117` 的 `parseFailureRate`（`:135`）——
+  //      窗口条件（`:80`）只按 `created_at` 过滤、**不按 reason 过滤**，
+  //      `no_subject` 与 `bad_verdict` 一视同仁进分子。活库实有 7 行
+  //      （最近 2026-09-12T16:21:22Z，均早于本格引入；`bad_verdict` 27 行）。
+  //      ⇒ 本格已处于「应重裁」态：重裁归架构师，裁决下来前行为不动。
   suggest: [isRequester, isImplementer],
   reject: [isRequester, isImplementer],
   unknown: [isRequester, isImplementer, isStore],
