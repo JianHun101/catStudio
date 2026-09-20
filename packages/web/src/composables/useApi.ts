@@ -151,6 +151,18 @@ export interface PendingReviewScore extends EvalScoreRow {
   }>
 }
 
+/** 盲标池一行（J1）。**刻意没有判官分字段**——不是漏了：盲标是方法论硬要求，
+ *  标注界面显示判官分会把「一致性」测成「锚定后的顺从」。类型层面也不给，加字段
+ *  就得先改这里（契约变更点集中在一处）。 */
+export interface LabelPoolRow {
+  id: string
+  session_id: string
+  agent_id: string | null
+  content: string
+  created_at: string
+  agent_name: string | null
+}
+
 /** 任务结局分布（E4-B 契约缺口裁决补充的路由）：U 根/H 根 outcome 计数 + open + 版本偏差 */
 export interface EpisodeStats {
   versionStale: number
@@ -497,6 +509,23 @@ export const api = {
   /** 提交回标（重复提交同一 eval_score_id → 后端覆盖 + log 留痕，covered=true） */
   submitEvalReview: (evalScoreId: string, data: { score: number; comment?: string }) =>
     request<{ ok: boolean; covered: boolean }>(`/eval/review/${evalScoreId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  /** 盲标池（J1）：跨会话分散、排除已标注、**响应不含判官分**。`days` 不传 = 不限时间窗。 */
+  getEvalLabelPool: (params?: { limit?: number; perSession?: number; days?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.limit) qs.set('limit', String(params.limit))
+    if (params?.perSession) qs.set('perSession', String(params.perSession))
+    if (params?.days) qs.set('days', String(params.days))
+    const q = qs.toString()
+    return request<{ ok: boolean; pool: LabelPoolRow[] }>(`/eval/label/pool${q ? `?${q}` : ''}`)
+  },
+
+  /** 提交人工标注（J1）。重复提交同一 message_id → 后端覆盖 + log 留痕（covered=true）。 */
+  submitEvalLabel: (messageId: string, data: { score: number; comment?: string }) =>
+    request<{ ok: boolean; covered: boolean }>(`/eval/label/${messageId}`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
