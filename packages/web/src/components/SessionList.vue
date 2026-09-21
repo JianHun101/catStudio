@@ -80,7 +80,7 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
       <span class="brand-icon">🐾</span>
       <div class="brand-text">
         <h1>CatStudio</h1>
-        <p>CatStudio 多 Agent 对话</p>
+        <p>多Agent协作平台</p>
       </div>
     </div>
 
