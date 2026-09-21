@@ -15,7 +15,8 @@
  *
  * ## 三类读数（票面「产出」1/3/5）
  *
- * 1. **11 处逐条**：每处给 `finalRank` / `rrfScore` / 最小真实距离 —— 全部**本次实跑**，
+ * 1. **未召回逐处**（T3 时是 11 处；条数随配置与语料变，**不写死**）：每处给 `finalRank` /
+ *    `rrfScore` / 最小真实距离 —— 全部**本次实跑**，
  *    不照抄 09-20 报告。未进注入集的锚点连「差多少名、差多少 RRF 分」一起给——
  *    这是「旋钮能不能救」的直接证据（票面 §3）。
  * 2. **归因口径复核**：`not-recalled`（覆盖洞）那一处（G03）逐通道独立复核。
@@ -393,9 +394,20 @@ export function judgeG03SweepSample({ swept }) {
  *   (a) `rrfScore` **跨查询累加**（同一片被多趟命中 ⇒ 各趟分相加）
  *   (b) `bestIndex` 取 min，仅作同分 tie-break
  *
- * 返回**完整序**（不截断）+ 各行的 0-based `rank` + 注入集（前 `topK` 行）+
- * `cutoffRrf`（第 `topK` 名的分，即「进榜门槛」）。截断放这里做、不在重建里做——
- * 「差多少名」的问法本身就要求知道榜外的名次。
+ * ## 末次截断按**节**（T5 起与生产同步）
+ *
+ * 生产自 W2-c/T4 起按**节**计名额（`memory/index.ts` 的 `takenSections` 循环），片级的
+ * 重建侧衡量的就不是生产了 ⇒ 本函数同步：节的代表 = `order` 里最靠前的那片（与生产的
+ * 「首个胜出」同一条规则）。
+ *
+ * 返回**完整片序**（`order`，不截断、不去重）+ 每行的 0-based `rank` + 注入集（前
+ * `topK` 个**不同节**）+ `cutoffRrf`（第 `topK` 个**节**的代表分，即「进榜门槛」）。
+ * 截断放这里做、不在重建里做——「差多少名」的问法本身就要求知道榜外的名次。
+ *
+ * ⚠️ **`rank` 是「节名次」不是「片名次」**：同节的多片共用同一个 `rank`（= 该节排第几，
+ * 代表片占的那个名次）。这是 `verifyMerge` 逐行核 `finalRank` 的前提——生产的
+ * `finalTraces` 逐节一行、`finalRank` 是**节序**下标。片级时代 `rank` 是 `order` 下标，
+ * 两个口径**不可直接比**（T5 报告 §三 已标口径变更）。
  */
 export function mergeQueryPools({ pools, topK }) {
   const merged = new Map()
@@ -424,15 +436,29 @@ export function mergeQueryPools({ pools, topK }) {
   const order = [...merged.values()].sort(
     (a, b) => b.rrfScore - a.rrfScore || a.bestIndex - b.bestIndex
   )
-  order.forEach((r, i) => {
-    r.rank = i
-  })
-  const injectedIds = new Set(order.slice(0, topK).map((r) => r.chunkId))
+
+  // 节级去重：键走 `anchorKey`（NUL 转义，与生产的 `bySection` 逐字同形——锚点与路径里
+  // 空格 / `::` 都常见，拼错会撞键而**无任何报错**）。
+  const sectionRankByKey = new Map()
+  const sectionOrder = []
+  for (const r of order) {
+    const key = anchorKey(r.docPath, r.sectionAnchor)
+    if (sectionRankByKey.has(key)) continue
+    sectionRankByKey.set(key, sectionOrder.length)
+    sectionOrder.push(r)
+  }
+  for (const r of order) r.rank = sectionRankByKey.get(anchorKey(r.docPath, r.sectionAnchor))
+
+  // `topK <= 0` ⇒ **空注入集**：生产把界判放在 `push` 之前 ⇒ 零节，且 `envNumber` 明写
+  // 「不加区间钳位：`0` / 负数原样生效」⇒ 这条路径走得到。⚠️ **不能**写
+  // `sectionOrder.slice(0, topK)`：负数会被 JS 当**负索引**（保留末尾 n−1 个），那是意外
+  // 语义不是约定；同理 `cutoffRrf` 也不能用 `length >= topK` 判（`topK=0` 时 `[-1]` 崩）。
+  const injected = topK > 0 ? sectionOrder.slice(0, topK) : []
   return {
     order,
     topK,
-    injectedIds,
-    cutoffRrf: order.length >= topK ? order[topK - 1].rrfScore : null,
+    injectedIds: new Set(injected.map((r) => r.chunkId)),
+    cutoffRrf: topK > 0 && sectionOrder.length >= topK ? sectionOrder[topK - 1].rrfScore : null,
   }
 }
 
@@ -476,9 +502,12 @@ export function verifyMerge({ order, result }) {
  *
  * 「能不能救」由两个**同源**的量回答，缺一不可：
  *   - `rankGap`：还差几名才够得着榜尾（`rank - (topK - 1)`，正数 = 差这么多名）
- *   - `rrfGap`：还差多少 RRF 分（榜尾分 − 本片分）
- * 只用其中一个会误判：分差极小而名次差得多 ⇒ 说明它卡在一堆几乎同分的片里，
+ *   - `rrfGap`：还差多少 RRF 分（榜尾分 − 本节代表片分）
+ * 只用其中一个会误判：分差极小而名次差得多 ⇒ 说明它卡在一堆几乎同分的**节**里，
  * 动 RRF 常数比动 topK 更对症。
+ *
+ * ⚠️ `rank` / `rankGap` 自 T5 起是**节名次**（同节多片共用一个名次，见 `mergeQueryPools`）
+ * ——与 T3 报告的片名次**不可直接比**。
  *
  * `tieBroken=true`（`rrfGap === 0` 却没进榜）单列：它是**并列分被 tie-break 判负**，
  * 药方与前两者又不同（改 `bestIndex` 语义，不是改阈值/名次）。
@@ -721,7 +750,7 @@ export function judgeThresholdCounterControl({
  * 的片——即阈值确实有东西可杀。
  *
  * 与 A 的分工：A 证明「链段对阈值敏感」，B 证明「杀区非空」。两者都成立时，
- * 「本次 11 处的真实距离全部 < 阈值」才是一个**内容事实**而不是探针盲区。
+ * 「本次未召回各处的真实距离全部 < 阈值」才是一个**内容事实**而不是探针盲区。
  * B 是**补强**不是硬闸：杀区为空不影响 A 的结论。
  */
 export function judgeKillZoneExistence({ relaxedHits, maxDistance, relaxedMaxDistance }) {
@@ -871,7 +900,7 @@ export function renderDiagnosis(ctx) {
   )
   L.push('')
 
-  // ── §三 11 处逐条读数 ────────────────────────────────
+  // ── §三 未召回锚点逐条读数（条数随配置/语料变，不写死） ──
   L.push('## 三、未召回锚点逐条机制读数（本次实跑）')
   L.push('')
   L.push(
@@ -890,9 +919,13 @@ export function renderDiagnosis(ctx) {
   L.push('')
   L.push(
     '> **列口径**：`finalRank`/`rrfScore`/`榜尾分` 取自**重建的完整合并序**（§一 自证已逐行对上链段）；' +
-      '「差几名」= `rank − (topK−1)`，正数即还差这么多名才够得着榜尾；「差多少 RRF」= 榜尾分 − 本片分，' +
-      '**它与「差几名」不必同向**——分差极小却差很多名，说明该片卡在一堆几乎同分的片里（药方是融合常数，不是 topK）。' +
-      '「池内最小真实距离」= 该锚点**全部片**在**逐查询放宽池**（阈值 1）里的最小向量距离，与基线同法同尺。'
+      '「差几名」= `rank − (topK−1)`，正数即还差这么多名才够得着榜尾；「差多少 RRF」= 榜尾分 − 本节代表片分，' +
+      '**它与「差几名」不必同向**——分差极小却差很多名，说明该节卡在一堆几乎同分的节里（药方是融合常数，不是 topK）。' +
+      '「池内最小真实距离」= 该锚点**全部片**在**逐查询放宽池**（阈值 1）里的最小向量距离，与基线同法同尺。' +
+      '\n>\n> ⚠️ **名次口径已变（T5）**：`finalRank` 与「差几名」现在是**节名次**——同节的多片共用同一个名次' +
+      '（该节在**节序**里排第几，代表片占的那个位置）。生产自 W2-c/T4 起末次截断按**节**计名额，' +
+      '链段落的 `finalRank` 本就是节序下标，重建侧 T5 起同语义。**与 T3 报告的片名次不可直接比**' +
+      '（片级时代同节第 2 片会各占一个名次，本列偏大）。'
   )
   L.push('')
   const absent = anchors.filter((a) => !a.reading.inMergedPool)
@@ -1065,7 +1098,7 @@ export function renderDiagnosis(ctx) {
   L.push(
     '> **代价面**：`MEMORY_TOP_K` 是**全局**旋钮——它同时抬高每一次检索的注入节数，' +
       '而注入预算 `MEMORY_CONTEXT_TOKEN_BUDGET` 是硬上限。' +
-      '「受影响条目平均注入节数」与 §6.3 的选择器变体**同分母**（都只数那 11 条漏检所属的条目），可直接比性价比；' +
+      `「受影响条目平均注入节数」与 §6.3 的选择器变体**同分母**（都只数本次漏检那 ${anchors.length} 条所属的条目），可直接比性价比；` +
       '「全 40 条新增注入节」是全局成本面；**「预算截断条目」逐档实测**——>0 即说明该档的收益开始被预算吃掉' +
       '（生产档是 ' +
       budget.truncatedEntries +
@@ -1089,15 +1122,20 @@ export function renderDiagnosis(ctx) {
   L.push('### 6.3 选择器变体（**重建读数**）')
   L.push('')
   L.push(
-    '**先看现制浪费了多少名额**：链段末次 `slice(0, topK)` 切的是**片**，同节的多片各占一个名额，' +
-      '再经 `bySection` 去重 ⇒ **实际注入节数可以少于 `MEMORY_TOP_K`**。' +
+    '**先看现制有没有浪费名额**：现制末次截断**已按节计名额**（W2-c/T4 起，`memory/index.ts` 取' +
+      '「前 `MEMORY_TOP_K` 个**不同节**」），故「实际注入节数 < `MEMORY_TOP_K`」只可能来自' +
+      `**融合池里不同节本身不足 ${params.topK}**` +
+      '——不再是「同节多片占掉名额」。' +
       `本批 40 条里，注入节数 < ${params.topK} 的有 **${spec.slotWaste.length}** 条` +
       (spec.slotWaste.length > 0
         ? `（${spec.slotWaste.map((w) => `${w.entryId}:${w.sections}`).join(' / ')}）`
         : '')
   )
   L.push('')
-  L.push('**变体 A｜取前 K 个不同节**（不增加注入量，零成本候选）')
+  L.push(
+    '**变体 A｜取前 K 个不同节**（⚠️ **该规则已落地为现制**——W2-c/T4；下表按「若把固定条数档位' +
+      `换成 K」读，K=${params.topK} 即现制，其读数应与 §6.1「生产现值」档逐值一致）`
+  )
   L.push('')
   L.push('| K（不同节） | 恢复的未召回锚点 | 平均注入节数 |')
   L.push('| --- | --- | --- |')
@@ -1119,7 +1157,8 @@ export function renderDiagnosis(ctx) {
   L.push('')
   L.push(
     `> **读法**：现制平均每项注入 ${params.topK} 节。变体 B 的 α 越小、平均节数越高 ⇒ 与「抬 topK」是同一枚硬币的两面；` +
-      '差别在于**它按分数而不是按名次切**，对「一堆几乎同分的片」不敏感（§五 的 C03/C05/N04 正卡在那里）。' +
+      '差别在于**它按分数而不是按名次切**，对「一堆几乎同分的片」不敏感——本批是否真有这类锚点，' +
+      '以 §五 的「判读」列为准（无则两个选择器在**本批**上等价，有则变体 B 相对有利）。' +
       '**两类变体都要与 §6.1 的 `MEMORY_TOP_K` 真跑读数比性价比**（同样的恢复数，谁的注入量更小）。'
   )
   L.push('')
@@ -1191,12 +1230,14 @@ export function renderDiagnosis(ctx) {
   L.push('')
   L.push(
     '- **单点 vs 族级**：§4.1/§4.2 的逐通道复核只针对 **G03 一个锚点**；§4.4 把它放进**全批 148 条查询**的分布里，' +
-      '那一节的读数是**范围读数**（关键词通道在全批查询上命中 0 行的条数），**不是**「该通道失效导致了这 11 处漏检」' +
+      `那一节的读数是**范围读数**（关键词通道在全批查询上命中 0 行的条数），**不是**「该通道失效导致了这 ${anchors.length} 处漏检」` +
       '的因果结论——因果需要单变量对照，本报告没做。'
   )
   L.push(
     '- **重建读数 vs 实测**：§三/§五 的名次与分是**已自证的**重建读数（§一 逐行对上链段）；' +
-      '§6.1 是**真跑链段**的实测；§6.2 / §6.3 是**未自证的**结构推断（旋钮不可改、选择器未落地，无法端到端验证）。三类不混用。'
+      '§6.1 是**真跑链段**的实测；§6.2 与 §6.3 **变体 B** 是**未自证的**结构推断（旋钮不可改 / 选择器未落地，无法端到端验证）。' +
+      '⚠️ **§6.3 变体 A 例外**：那条规则（取前 K 个不同节）自 W2-c/T4 起**已是现制**，故它同时有重建读数（§6.3 表）' +
+      '与真跑读数（§6.1「生产现值」档）两条；两者应逐值一致，不一致即两个口径已经分叉。三类不混用。'
   )
   L.push(
     '- **不改检索**：本票只出诊断，`packages/server/src/memory/**` 与 `retrieval-baseline.mjs` **零改动**。'
@@ -2139,13 +2180,18 @@ export async function main(argv = process.argv.slice(2)) {
       knobLab.push({ label: cfg.label, note: cfg.note, recovered: countRecovered(mergedByEntry) })
     }
 
-    // 选择器变体（同为重建读数）：**固定条数**（现制，切前 topK 节）vs **分数相对阈值**
-    // （榜首先取齐，凡是分不低过榜首 × alpha 的节全收）。存在的理由见候选 3：
-    // §五 显示 C03/C05/N04/G12 就卡在第 4~5 名、分差 0.0007~0.0140——固定条数在
+    // 选择器变体（同为重建读数）：**固定条数**（现制，切前 topK 个**不同节**）vs
+    // **分数相对阈值**（榜首先取齐，凡是分不低过榜首 × alpha 的节全收）。存在的理由见候选 3：
+    // **T3 当时的** §五 显示 C03/C05/N04/G12 就卡在第 4~5 名、分差 0.0007~0.0140（T3 配置下的
+    // 历史读数，本批是否仍有这类锚点以当次 §五「判读」列为准）——固定条数在
     // 「一堆几乎同分的片」处切一刀，切掉谁全看 tie-break，而阈值式选择器对此不敏感。
-    // 变体 0（**零成本候选**）：现制的 `slice(0, topK)` 切的是**片**，同节多片会占掉
-    // 多个名额——切 3 片可能只换来 2 个节。改成「取前 topK 个**不同节**」不增加任何
-    // 注入量，却可能直接救回锚点。先量现制到底浪费了多少名额。
+    //
+    // ⚠️ 本块首版把「取前 topK 个不同节」当**零成本候选**（当时现制切的是**片**，同节多片
+    // 会占掉多个名额）。W2-c/T4 起这条规则**已是现制**，且 T4 真跑**证伪**了「不增加注入量」：
+    // 同 K 下节级恒 ≥ 片级（k=3 → 3.00 节、k=5 → 5.00 节；片级为 2.60 / 3.95）。
+    // 故下面这组 K 档位按「固定条数取 K 个不同节会怎样」读，K=生产档即复现现制
+    // （其读数应与 §6.1「生产现值」档逐值一致）；`sectionSlotWaste` 的语义随之收窄成
+    // 「融合池里不同节本身不足 topK」，不再是「名额被同节重复片占掉」。
     const sectionSlotWaste = []
     for (const p of perEntry) {
       const injectedSections = p.result.sections.length
@@ -2384,6 +2430,15 @@ export async function main(argv = process.argv.slice(2)) {
     const closeGap = anchors.filter(
       (a) => a.reading.rankGap !== null && a.reading.rankGap <= 2
     ).length
+    // 在池内那几处的 RRF 分差区间（**算出来**，不写死——写死的区间会随语料/配置漂移成假话）
+    const inPoolGaps = anchors
+      .map((a) => a.reading.rrfGap)
+      .filter((g) => typeof g === 'number')
+      .sort((a, b) => a - b)
+    const gapRange =
+      inPoolGaps.length > 0
+        ? `${fmt4(inPoolGaps[0])}~${fmt4(inPoolGaps[inPoolGaps.length - 1])}`
+        : '（无）'
     /** 选择器实验台的三块读数（渲染与候选正文同源，避免两处各写一遍数字） */
     const spec = {
       slotWaste: sectionSlotWaste,
@@ -2403,31 +2458,32 @@ export async function main(argv = process.argv.slice(2)) {
       '',
       `**可证伪判据**：① 若某档的 real recall **没有**高于 topK=3，则"抬 topK 有效"被证伪；` +
         `② 若某一档的**平均注入节数**已逼近 \`MEMORY_CONTEXT_TOKEN_BUDGET\` 能容纳的上限，则该档的收益会被预算吃掉（届时以真跑的 \`truncated\` 读数为准）；` +
-        `③ 若候选 2（节级截断）在**同注入量**下恢复数 ≥ 本候选，则本候选被支配 —— 先做零成本的那个。`,
+        `③ 若候选 2（节级截断）在**同注入量**下恢复数 ≥ 本候选，则本候选被支配 —— 先做性价比更高的那个。` +
+        `（首版此处写「零成本的那个」，指候选 2 不增注入量；**T4 已证伪**该前提，见候选 2 的「代价（落地后回填）」。）`,
       '',
-      `### 候选 2｜换选择器：切片级截断 → 节级截断（**重建读数**，零注入增量）`,
+      `### 候选 2｜换选择器：切片级截断 → 节级截断（**⚠️ 已落地**：W2-c/T4 ⇒ 本节转为落地后对照）`,
       '',
       (() => {
-        const k3 = spec.distinctSection.find((r) => r.k === topK)
+        const kK = spec.distinctSection.find((r) => r.k === topK)
         const waste = spec.slotWaste.length
+        const prodAvg = topkReal.find((r) => r.isProduction)?.avgSectionsAffected
         return (
-          `**读数**：现制 \`slice(0, topK)\` 切**片**、同节多片各占名额，实注入节数可少于 ${topK}` +
-          `（本批 40 条里有 **${waste}** 条发生 ⇒ 名额被浪费）。改成「取前 ${topK} 个**不同节**」后：` +
-          (k3
-            ? `恢复 **${k3.recovered}/${anchors.length}**、平均注入 **${k3.avgSections.toFixed(2)}** 节` +
-              `（现制真跑 ${topK} 档平均 ${(topkReal.find((r) => r.isProduction)?.avgSectionsAffected ?? topK).toFixed(2)} 节）——` +
-              '**同样的注入量**。'
-            : '（未测到对应档位）')
+          `**读数**：本条在 T3 时是**重建读数**，现已在生产落地（W2-c/T4，\`memory/index.ts\`）⇒ 本节改读**落地后**。` +
+          `落地后实注入节数 < ${topK} 的只剩 **${waste}** 条（40 条中；成因见 §6.3 首段，已不是「同节多片占名额」）。` +
+          `重建侧同语义（K=${topK}）恢复 **${kK ? kK.recovered : 'n/a'}/${anchors.length}**、平均注入 **${kK ? kK.avgSections.toFixed(2) : 'n/a'}** 节，` +
+          `与 §6.1「生产现值」档真跑（平均 ${typeof prodAvg === 'number' ? prodAvg.toFixed(2) : 'n/a'} 节）**逐值一致**。`
         )
       })(),
       '',
-      '**代价**：只改末次截断的**粒度**（片 → 节），不碰融合公式、不增注入量；' +
-        '风险面是「同一节的多片本可以各占一个名额、把该节的不同片段分别带进来」——' +
-        '但整节返回（Decisions 14）本就意味着同节多片是冗余的，故这个风险面在现设计下不成立。',
+      '**代价（落地后回填）**：只改末次截断的**粒度**（片 → 节），不碰融合公式。' +
+        '⚠️ 首版写「不增注入量」——T4 真跑**证伪**：同 K 下节级恒 ≥ 片级（k=3 → 3.00 节、k=5 → 5.00 节，' +
+        '片级为 2.60 / 3.95；见 T4 §七 三档实测），代价是注入 token 上升。' +
+        '风险面「同一节的多片本可各占一个名额、把该节不同片段分别带进来」在整节返回（Decisions 14）下不成立——**该判断未被证伪**。',
       '',
-      `**可证伪判据**：① 真跑（改截断粒度后重跑 40 条）恢复数若 **少于** 本表重建读数，则重建失真或改动跑偏；` +
-        `② 全量 40 条逐条比对，**不得有任何一组的 recall 下降**（截断粒度变化理论上只增不减——出现下降即实现有误）；` +
-        `③ 若变体 A 在 ${topK} 档恢复 0 处，则本候选作废。`,
+      `**可证伪判据**（T4 已逐条验过）：① 真跑恢复数若 **少于** 重建读数 ⇒ 重建失真或改动跑偏（T4：两侧逐值一致）；` +
+        `② 全量 40 条逐条比对**不得有任何一组的 recall 下降**（T4 实测 200 组 0 下降）；` +
+        `③ 若变体 A 在 ${topK} 档恢复 0 处，则本候选作废 —— ⚠️ **本次读数恰为 0 处**（§6.3 变体 A），` +
+        `按此判据本候选在**本批**上就「救回未召回锚点」这个目的而言收益为 0（与 T4 §七 同向）。`,
       '',
       `### 候选 3｜按**分数相对阈值**收节而不是切固定条数（**重建读数**，需另立票实测）`,
       '',
@@ -2462,8 +2518,8 @@ export async function main(argv = process.argv.slice(2)) {
       '',
       `### 候选 4（**已由读数排除**，列出以防重复立票）｜加深通道 / 池深、改 RRF 常数`,
       '',
-      `**读数**：§6.2 七档全 0。机制解释：这 11 处里 ${anchors.length - inPool} 处**连融合池都进不去**` +
-        `（通道深度 20 × 池截 20 之外），其余的 RRF 分距榜尾 0.0007~0.0334——加深通道只会让它们以**更低的分**进池，` +
+      `**读数**：§6.2 七档全 0。机制解释：这 ${anchors.length} 处里 ${anchors.length - inPool} 处**连融合池都进不去**` +
+        `（通道深度 20 × 池截 20 之外），其余 ${inPool} 处的 RRF 分距榜尾 ${gapRange}——加深通道只会让它们以**更低的分**进池，` +
         `改变不了名次；改 k 只改榜内相对次序，改不动榜的**成员**。`,
       '',
       '**代价**：三者皆模块私有 `const`（无 env 旋钮），落地要改 `db/repository/chunks.ts` 的混合检索核心参数。',
