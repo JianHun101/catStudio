@@ -56,7 +56,7 @@ pnpm dev                 # 启动 server :3200 + web :5173
 
 > **演示角色默认走 Claude Code CLI**：5 个角色里 4 个的 provider 是 `claude`（模型 `deepseek-flash`），经 Claude Code CLI 打 DeepSeek 的 Anthropic 兼容端点；只有 dsh猫 用 `dsh`。所以 `DS_KEY` 是**必填**——不填时这 4 个角色会被 no-key 守卫拦下（界面提示「还没有配置 API Key」），不是静默降级。
 
-> **运行配置以数据库为准**：供应商 / 模型 / API Key 随时能在界面的 agent 设置里换。`.env` 的 `DS_KEY` 只在**首次 seed** 与 **server 运行时**（摘要、记忆查询改写）读取——**改 `.env` 对已存在的猫不生效**，重跑 `pnpm seed` 也不会覆盖它们的运行配置（想回到种子默认值，用 `pnpm seed --reset` 重建）。
+> **运行配置以数据库为准**：供应商 / 模型 / API Key 随时能在界面的 agent 设置里换。`.env` 的 `DS_KEY` 由**首次 seed** 与 **server 运行时**（摘要、记忆查询改写等）读取——**改 `.env` 对已存在的猫不生效**，重跑 `pnpm seed` 也不会覆盖它们的运行配置（想回到种子默认值，用 `pnpm seed --reset` 重建——**注意它会清空全部会话、消息与执行日志**）。
 
 > 首次运行会下载嵌入模型 `Xenova/bge-small-zh-v1.5`（约 90MB）。**它缓存在 `node_modules/.pnpm/@huggingface+transformers@*/node_modules/@huggingface/transformers/.cache/` 内**，`pnpm install` 会清掉、需重新下载；下载期间记忆检索静默降级（服务端记日志），Agent 正常回复。中国大陆可设 `HF_ENDPOINT=https://hf-mirror.com`。
 
