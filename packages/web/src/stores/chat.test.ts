@@ -1065,7 +1065,7 @@ describe('chatStore', () => {
       }
     })
 
-    // ── 票②：气泡计时表 replyTimers（agentId 键控，A2A / headless 执行的唯一计时来源）──
+    // ── 票②/③：气泡计时表 replyTimers（sessionId:agentId 键控，A2A / headless 执行的唯一计时来源）──
     describe('replyTimers（Agent 回复计时）', () => {
       /** 取最新一处 handler（store 每建一次就重绑一遍，clearAllMocks 后只剩当轮的） */
       function handlerOf(event: string): (data: any) => void {
@@ -1077,6 +1077,7 @@ describe('chatStore', () => {
 
       function statusEvent(over: Record<string, unknown> = {}) {
         return {
+          sessionId: 's1',
           messageId: 'm1',
           agentId: 'a1',
           agentName: 'ds猫',
@@ -1089,6 +1090,7 @@ describe('chatStore', () => {
       beforeEach(() => {
         vi.useFakeTimers()
         vi.setSystemTime(1_700_000_000_000)
+        store.activeSessionId = 's1'
       })
       afterEach(() => {
         vi.useRealTimers()
@@ -1098,7 +1100,7 @@ describe('chatStore', () => {
         handlerOf(Events.MESSAGE_AGENT_STATUS)(
           statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 - 20_000 })
         )
-        expect(store.replyTimers.get('a1')).toEqual({
+        expect(store.replyTimers.get('s1:a1')).toEqual({
           startedAt: 1_700_000_000_000 - 20_000,
           lastBeatAt: 1_700_000_000_000,
         })
@@ -1111,14 +1113,14 @@ describe('chatStore', () => {
         // 中途刷新场景：只在执行中途收到一发 replying，锚点来自载荷而非本地首次渲染时刻
         vi.setSystemTime(1_700_000_000_000 + 10_000)
         handler(statusEvent({ startedAt: 1_700_000_000_000 - 20_000 }))
-        expect(store.replyTimers.get('a1')).toEqual({
+        expect(store.replyTimers.get('s1:a1')).toEqual({
           startedAt: 1_700_000_000_000 - 20_000,
           lastBeatAt: 1_700_000_000_000 + 10_000,
         })
 
         // 迟到事件带更早锚点 → 取更早者（不倒退成更晚的起点）
         handler(statusEvent({ startedAt: 1_700_000_000_000 - 30_000 }))
-        expect(store.replyTimers.get('a1')!.startedAt).toBe(1_700_000_000_000 - 30_000)
+        expect(store.replyTimers.get('s1:a1')!.startedAt).toBe(1_700_000_000_000 - 30_000)
       })
 
       it('执行 N 失败后队列直转 N+1：thinking 无条件重置锚点，不继承上一轮起点（防跨执行虚高）', () => {
@@ -1132,13 +1134,13 @@ describe('chatStore', () => {
           sessionId: 's1',
           queueLength: 1,
         })
-        expect(store.replyTimers.get('a1')!.startedAt).toBe(1_700_000_000_000 - 20_000)
+        expect(store.replyTimers.get('s1:a1')!.startedAt).toBe(1_700_000_000_000 - 20_000)
 
         // N+1 起跑：thinking 带**更晚**的新锚点 → 必须直接落新值。若与 prev 取小则保留 N 的
         // 起点，秒数会把两次执行之间的失败间隙一并算进去（虚高到 N+1 done 才自愈）
         vi.setSystemTime(1_700_000_000_000 + 60_000)
         handler(statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 + 60_000 }))
-        expect(store.replyTimers.get('a1')).toEqual({
+        expect(store.replyTimers.get('s1:a1')).toEqual({
           startedAt: 1_700_000_000_000 + 60_000,
           lastBeatAt: 1_700_000_000_000 + 60_000,
         })
@@ -1146,16 +1148,16 @@ describe('chatStore', () => {
 
       it('载荷无 startedAt（旧 server）且本地无存量 → 不建条目（无锚点不显示时长，气泡回退静态文案）', () => {
         handlerOf(Events.MESSAGE_AGENT_STATUS)(statusEvent({ startedAt: undefined }))
-        expect(store.replyTimers.has('a1')).toBe(false)
+        expect(store.replyTimers.has('s1:a1')).toBe(false)
       })
 
       it('done → 删除计时（含 heartbeat 途中的中途删除，不留残留条目）', () => {
         const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
         handler(statusEvent({ startedAt: 1_700_000_000_000 - 5_000 }))
-        expect(store.replyTimers.has('a1')).toBe(true)
+        expect(store.replyTimers.has('s1:a1')).toBe(true)
 
         handler(statusEvent({ status: 'done' }))
-        expect(store.replyTimers.has('a1')).toBe(false)
+        expect(store.replyTimers.has('s1:a1')).toBe(false)
       })
 
       it('NEW_MESSAGE（本猫回复落库）→ 删除计时：服务端 NEW_MESSAGE 先于 done 广播，只靠 done 会闪一帧占位气泡', () => {
@@ -1165,7 +1167,7 @@ describe('chatStore', () => {
         statusHandler(statusEvent({ startedAt: 1_700_000_000_000 - 5_000 }))
 
         newMessageHandler({ ...mockMessage, id: 'r1', role: 'agent', agentId: 'a1' })
-        expect(store.replyTimers.has('a1')).toBe(false)
+        expect(store.replyTimers.has('s1:a1')).toBe(false)
       })
 
       it('用户消息 NEW_MESSAGE 不清计时（只认 agent 回复落库为执行终点）', () => {
@@ -1174,7 +1176,7 @@ describe('chatStore', () => {
           statusEvent({ startedAt: 1_700_000_000_000 - 5_000 })
         )
         handlerOf(Events.NEW_MESSAGE)({ ...mockMessage, id: 'u2', role: 'user', agentId: null })
-        expect(store.replyTimers.has('a1')).toBe(true)
+        expect(store.replyTimers.has('s1:a1')).toBe(true)
       })
 
       it('AGENT_STATUS idle → 删除计时（abort/timeout 无 done 事件，只认 idle 终止信号）', () => {
@@ -1188,7 +1190,7 @@ describe('chatStore', () => {
           sessionId: 's1',
           queueLength: 0,
         })
-        expect(store.replyTimers.has('a1')).toBe(false)
+        expect(store.replyTimers.has('s1:a1')).toBe(false)
       })
 
       it('AGENT_STATUS busy 不清计时（只有终止信号才清）', () => {
@@ -1201,17 +1203,136 @@ describe('chatStore', () => {
           sessionId: 's1',
           queueLength: 0,
         })
-        expect(store.replyTimers.has('a1')).toBe(true)
+        expect(store.replyTimers.has('s1:a1')).toBe(true)
       })
 
-      it('切会话 → 清空（载荷无 sessionId 维度，留着会把旧会话计时挂到新会话视图）', () => {
-        store.activeSessionId = 's1'
+      it('切会话 → 清空（兜底：会话隔离已由键保证，清空只防全局表无界增长）', () => {
         handlerOf(Events.MESSAGE_AGENT_STATUS)(
           statusEvent({ startedAt: 1_700_000_000_000 - 5_000 })
         )
-        expect(store.replyTimers.has('a1')).toBe(true)
+        expect(store.replyTimers.has('s1:a1')).toBe(true)
 
         store.joinSession('s2')
+        expect(store.replyTimers.size).toBe(0)
+      })
+
+      it('切走再切回：只靠心跳（10s 内）重收锚点即恢复原秒数，不归零', () => {
+        const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        handler(statusEvent({ status: 'thinking', startedAt: 1_700_000_000_000 - 40_000 }))
+        store.joinSession('s2')
+        expect(store.replyTimers.size).toBe(0)
+
+        // 心跳重发同 startedAt（服务端一次执行一次取值）⇒ 切回后从原起点续算
+        vi.setSystemTime(1_700_000_000_000 + 10_000)
+        store.joinSession('s1')
+        handler(statusEvent({ startedAt: 1_700_000_000_000 - 40_000 }))
+        expect(store.currentReplyTimerFor('a1')).toEqual({
+          startedAt: 1_700_000_000_000 - 40_000,
+          lastBeatAt: 1_700_000_000_000 + 10_000,
+        })
+      })
+
+      // ── 票③：会话维度（幽灵计时根治）────────────────────────────
+      it('跨会话帧不落当前会话视图：注入 sessionId=s2 的帧 → 当前会话（s1）取不到计时', () => {
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(
+          statusEvent({
+            sessionId: 's2',
+            status: 'thinking',
+            startedAt: 1_700_000_000_000 - 20_000,
+          })
+        )
+        expect(store.replyTimers.has('s2:a1')).toBe(true)
+        expect(store.currentReplyTimerFor('a1')).toBeUndefined()
+
+        // 真空性反对照：同载荷换成本会话 ⇒ 必须取到——证明上一条的「取不到」是被键隔离，
+        // 而不是载荷形状不对 / 守卫误伤（换个假的守卫实现，本断言会红）
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(
+          statusEvent({ sessionId: 's1', status: 'thinking', startedAt: 1_700_000_000_000 - 9_000 })
+        )
+        expect(store.currentReplyTimerFor('a1')).toEqual({
+          startedAt: 1_700_000_000_000 - 9_000,
+          lastBeatAt: 1_700_000_000_000,
+        })
+      })
+
+      it('同一只猫跨会话并行：A/B 两条 entry 并存，B 的 done 不误删 A', () => {
+        const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        handler(
+          statusEvent({
+            sessionId: 's1',
+            status: 'thinking',
+            startedAt: 1_700_000_000_000 - 30_000,
+          })
+        )
+        handler(
+          statusEvent({
+            sessionId: 's2',
+            status: 'thinking',
+            startedAt: 1_700_000_000_000 - 10_000,
+          })
+        )
+        expect(store.replyTimers.size).toBe(2)
+
+        handler(statusEvent({ sessionId: 's2', status: 'done' }))
+        expect(store.replyTimers.has('s2:a1')).toBe(false)
+        expect(store.replyTimers.get('s1:a1')!.startedAt).toBe(1_700_000_000_000 - 30_000)
+      })
+
+      it('同一只猫跨会话并行：B 的 AGENT_STATUS idle 不误删 A（idle 按 state.sessionId 归位）', () => {
+        const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        handler(
+          statusEvent({
+            sessionId: 's1',
+            status: 'thinking',
+            startedAt: 1_700_000_000_000 - 30_000,
+          })
+        )
+        handler(
+          statusEvent({
+            sessionId: 's2',
+            status: 'thinking',
+            startedAt: 1_700_000_000_000 - 10_000,
+          })
+        )
+
+        handlerOf(Events.AGENT_STATUS)({
+          agentId: 'a1',
+          status: 'idle',
+          sessionId: 's2',
+          queueLength: 0,
+        })
+        expect(store.replyTimers.has('s2:a1')).toBe(false)
+        expect(store.replyTimers.has('s1:a1')).toBe(true)
+      })
+
+      it('NEW_MESSAGE 按消息自身 sessionId 清（用户已切走时也要清对格子）', () => {
+        const handler = handlerOf(Events.MESSAGE_AGENT_STATUS)
+        handler(
+          statusEvent({ sessionId: 's1', status: 'thinking', startedAt: 1_700_000_000_000 - 5_000 })
+        )
+        handler(
+          statusEvent({ sessionId: 's2', status: 'thinking', startedAt: 1_700_000_000_000 - 5_000 })
+        )
+        // 当前视图停在 s1，落库的是 s2 的回复 → 清 s2 那条，s1 不受影响
+        handlerOf(Events.NEW_MESSAGE)({
+          ...mockMessage,
+          id: 'r2',
+          sessionId: 's2',
+          role: 'agent',
+          agentId: 'a1',
+        })
+        expect(store.replyTimers.has('s2:a1')).toBe(false)
+        expect(store.replyTimers.has('s1:a1')).toBe(true)
+      })
+
+      it('载荷缺 sessionId（旧 server wire）→ 不建条目（无会话维度即无从键控，宁可不显示）', () => {
+        handlerOf(Events.MESSAGE_AGENT_STATUS)(
+          statusEvent({
+            sessionId: undefined,
+            status: 'thinking',
+            startedAt: 1_700_000_000_000 - 5_000,
+          })
+        )
         expect(store.replyTimers.size).toBe(0)
       })
     })

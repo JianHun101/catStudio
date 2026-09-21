@@ -86,11 +86,23 @@ export type AgentStatusEntry = {
  * 与 'replying'/心跳同值）；`lastBeatAt` = 最后一次收到该执行事件的**客户端接收时刻**
  * （liveness 锚点）。秒数由叶子组件本地 tick 自增，本表只提供锚点。
  *
- * 键控维度是 **agentId 单键**（不是 messageId）——A2A / headless 执行没有对应的用户
- * 消息可挂，messageId 键控的 `messageStatus` 覆盖不到它们；单 agent 单槽位串行也保证
- * 一猫至多一条、无并发冲突。
+ * 键控维度是 **`sessionId:agentId` 二元组**（见 `replyTimerKey`；不是 messageId）——
+ * ①A2A / headless 执行没有对应的用户消息可挂，messageId 键控的 `messageStatus` 覆盖
+ * 不到它们；②同一只猫**可跨会话并行执行**（A 会话在跑的同时 B 会话也可能在跑），只按
+ * agentId 键控会让别的会话的执行帧落进同一格、渲染到当前会话——症状是「气泡计时一直
+ * 在走、右侧成员卡却是空闲」的幽灵计时。会话内单 agent 单槽位串行 ⇒ 同一键至多一条。
  */
 export type ReplyTimerEntry = { startedAt: number; lastBeatAt: number }
+
+/**
+ * 计时表键 = `${sessionId}:${agentId}`。析出为纯函数：读、写、清三面共用同一拼法，
+ * 任何一处手写模板串都会静默漏配（清不掉 → 僵尸条目）。
+ * 空串 sessionId 是合法键（`AGENT_STATUS idle` 的无会话哨兵桶，与 `agentStates`
+ * 的 `sessionId ?? ''` 同口径）。
+ */
+export function replyTimerKey(sessionId: string, agentId: string): string {
+  return `${sessionId}:${agentId}`
+}
 
 export const useChatStore = defineStore('chat', () => {
   // ─── State ────────────────────────────────
@@ -114,26 +126,35 @@ export const useChatStore = defineStore('chat', () => {
     >
   >(new Map())
   /**
-   * Agent 回复计时表（agentId 键控）——气泡 footer「回复中 · 已 N 秒」的唯一数据源。
+   * Agent 回复计时表（`sessionId:agentId` 键控）——气泡 footer「回复中 · 已 N 秒」的唯一数据源。
    *
    * 与 `typingStates` 的分工：typing 是**流式内容**通道（无内容即无条目，headless 适配器
    * 整轮空转），本表是**执行存活性**通道（执行一开跑就有条目）——A2A 与 headless 执行
-   * 靠它在聊天气泡上可见。载荷无 sessionId 维度 ⇒ 切会话时与 typingStates 同点清空，
-   * 不做跨会话保留。
+   * 靠它在聊天气泡上可见。表是**全局**的（含其他会话的并行执行条目），故渲染面一律走
+   * `currentReplyTimerFor`（只认当前会话）而非直接 get。
    */
   const replyTimers = ref<Map<string, ReplyTimerEntry>>(new Map())
 
   /** 写计时条目（整 Map 替换——与 messageStatus 同款：Map 原地 set 不触发 ref 依赖） */
-  function setReplyTimer(agentId: string, entry: ReplyTimerEntry): void {
-    replyTimers.value = new Map(replyTimers.value.set(agentId, entry))
+  function setReplyTimer(sessionId: string, agentId: string, entry: ReplyTimerEntry): void {
+    replyTimers.value = new Map(replyTimers.value.set(replyTimerKey(sessionId, agentId), entry))
   }
 
   /** 清计时条目（无条目时不动引用，避免空触发重渲染） */
-  function clearReplyTimer(agentId: string): void {
-    if (!replyTimers.value.has(agentId)) return
+  function clearReplyTimer(sessionId: string, agentId: string): void {
+    const key = replyTimerKey(sessionId, agentId)
+    if (!replyTimers.value.has(key)) return
     const next = new Map(replyTimers.value)
-    next.delete(agentId)
+    next.delete(key)
     replyTimers.value = next
+  }
+
+  /** 当前会话的计时条目（唯一读取口，与 `currentStateFor` 同口径）。
+   *  直接 `replyTimers.get(agentId)` 会跨会话误命中——同一只猫可跨会话并行执行。 */
+  function currentReplyTimerFor(agentId: string): ReplyTimerEntry | undefined {
+    const sessionId = activeSessionId.value
+    if (!sessionId) return undefined
+    return replyTimers.value.get(replyTimerKey(sessionId, agentId))
   }
 
   const unreadCounts = ref<Map<string, number>>(new Map()) // sessionId → unread count
@@ -372,8 +393,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     // 清除旧会话的打字气泡（切换会话时状态应完全重置）
     typingStates.value.clear()
-    // 计时同点清空：MESSAGE_AGENT_STATUS 载荷不带 sessionId，本表无法按会话隔离——
-    // 切走时若留着，旧会话的计时会挂到新会话视图的占位气泡上
+    // 计时同点清空：计时表已按 `sessionId:agentId` 键控（隔离由键保证），这里只作兜底——
+    // 旧条目不再会被渲染命中，清掉只是不让全局 Map 无限增长
     replyTimers.value = new Map()
     // 清除旧会话的上下文窗口 token 数据（不同会话的 Agent 上下文不同）
     contextTokens.value.clear()
@@ -728,6 +749,12 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(Events.NEW_MESSAGE, (msg: Message) => {
       // 防止重复消息
       if (messages.value.some((m) => m.id === msg.id)) return
+      // 本猫回复落库 = 该执行结束（服务端顺序：NEW_MESSAGE 先于 done 广播）。清计时**按消息
+      // 自身 sessionId**、且**不随「是否当前会话」分叉**：用户已切走时那条执行同样结束了，
+      // 漏清只会在全局表里攒下永不渲染的僵尸条目（键控保证它不会漏进当前视图，但没必要留）。
+      if (msg.role === 'agent' && msg.agentId) {
+        clearReplyTimer(msg.sessionId, msg.agentId)
+      }
       // S6: 非活跃会话的消息不存入数组（避免内存泄漏）——
       // 仅递增未读计数。用户切回该会话时 SESSION_HISTORY 会重新加载。
       if (msg.sessionId !== activeSessionId.value) {
@@ -749,10 +776,8 @@ export const useChatStore = defineStore('chat', () => {
       // Agent 完成回复后清除打字状态 + 刷新 token 统计
       if (msg.role === 'agent' && msg.agentId) {
         typingStates.value.delete(msg.agentId)
-        // 回复消息落库 = 本次执行结束（服务端顺序：NEW_MESSAGE 先于 done 广播）。
-        // 这里与 typingStates 同点清计时：只靠 done 清会留一个「消息已上屏、占位气泡
+        // 计时已在上方（会话分叉之前）同点清：只靠 done 清会留一个「消息已上屏、占位气泡
         // 还在」的窗口——两事件分属不同 socket 帧，中间会渲染一帧占位气泡。
-        clearReplyTimer(msg.agentId)
         fetchAgentStats()
       }
     })
@@ -820,8 +845,9 @@ export const useChatStore = defineStore('chat', () => {
       if (state.status === 'idle') {
         typingStates.value.delete(state.agentId)
         // 计时同点清：abort/timeout 路径没有 done 事件，只认 idle 这条终止信号，
-        // 否则气泡会留一个永远「无响应」的占位僵尸
-        clearReplyTimer(state.agentId)
+        // 否则气泡会留一个永远「无响应」的占位僵尸。会话维度取 state 自带的
+        // （`slotToRuntimeState` 恒带 slot.sessionId；空值落哨兵桶，与 agentStates 同口径）。
+        clearReplyTimer(state.sessionId ?? '', state.agentId)
       }
     })
 
@@ -914,6 +940,7 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(
       Events.MESSAGE_AGENT_STATUS,
       (data: {
+        sessionId: string
         messageId: string
         agentId: string
         agentName: string
@@ -928,12 +955,14 @@ export const useChatStore = defineStore('chat', () => {
           if (data.status === 'replying') setLifecycle(data.messageId, 'agent-processing')
           else if (data.status === 'done') setLifecycle(data.messageId, 'replied')
         }
-        // ── 气泡计时（agentId 键控，独立于下方 messageId 键控的状态行）──────
+        // ── 气泡计时（sessionId:agentId 键控，独立于下方 messageId 键控的状态行）──────
         // thinking/replying 写入锚点、done 删除。心跳重发只刷新 lastBeatAt
         // （10s 一次的 liveness 锚点），秒数由叶子组件本地 1s tick 自增——server 零额外流量。
         // A2A / headless 执行没有用户消息状态行，这条支路是它们唯一可见的计时来源。
-        if (data.status === 'thinking' || data.status === 'replying') {
-          const prev = replyTimers.value.get(data.agentId)
+        // 载荷缺 sessionId（旧 server 的 wire）⇒ 不建条目：没有会话维度就无从键控，
+        // 建了会把别的会话的执行渲染到当前视图——正是本维度要根治的幽灵计时。
+        if ((data.status === 'thinking' || data.status === 'replying') && data.sessionId) {
+          const prev = replyTimers.value.get(replyTimerKey(data.sessionId, data.agentId))
           // 锚点缺失（旧 server 的 thinking 不带 startedAt，且本地无存量）→ 不建条目：
           // 没有执行起点就没有可显示的时长，气泡回退静态「回复中…」而不是从 0 起算
           const anchor = data.startedAt ?? prev?.startedAt
@@ -947,10 +976,10 @@ export const useChatStore = defineStore('chat', () => {
             // min 防御只留给 replying / 心跳：那里服务端恒发同值，取小才是在防乱序与中途刷新倒退。
             const startedAt =
               data.status === 'thinking' || prev == null ? anchor : Math.min(prev.startedAt, anchor)
-            setReplyTimer(data.agentId, { startedAt, lastBeatAt: Date.now() })
+            setReplyTimer(data.sessionId, data.agentId, { startedAt, lastBeatAt: Date.now() })
           }
         } else if (data.status === 'done') {
-          clearReplyTimer(data.agentId)
+          clearReplyTimer(data.sessionId, data.agentId)
         }
 
         const current = messageStatus.value.get(data.messageId) || []
@@ -1070,6 +1099,7 @@ export const useChatStore = defineStore('chat', () => {
     agents,
     typingStates,
     replyTimers,
+    currentReplyTimerFor,
     unreadCounts,
     loading,
     waitingForServer,

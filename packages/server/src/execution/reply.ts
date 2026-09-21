@@ -344,6 +344,7 @@ export async function runAgentReply(
     agentId: agent.id,
     agentName: agent.name,
     agentAvatar: agent.avatar,
+    sessionId,
     status: 'thinking',
     startedAt,
   })
@@ -986,6 +987,7 @@ export async function runAgentReply(
     agentId: agent.id,
     agentName: agent.name,
     agentAvatar: agent.avatar,
+    sessionId,
     status: 'replying',
     startedAt,
   })
@@ -1070,6 +1072,7 @@ export async function runAgentReply(
       agentId: agent.id,
       agentName: agent.name,
       agentAvatar: agent.avatar,
+      sessionId,
       status: 'replying',
       startedAt,
     })
@@ -1358,6 +1361,7 @@ export async function runAgentReply(
     agentId: agent.id,
     agentName: agent.name,
     agentAvatar: agent.avatar,
+    sessionId,
     status: 'done',
   })
 
