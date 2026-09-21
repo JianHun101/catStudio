@@ -9,7 +9,7 @@
  * 本文件每条再叠加 50 的 role 前缀开销 ⇒ n 个汉字的条目 = `ceil(n*1.5) + 50` token。
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -148,6 +148,8 @@ describe('execution/reply — R1 检索流水埋点', () => {
 
   afterEach(() => {
     resetDb()
+    // 参数快照类断言用 `vi.stubEnv` 钉本用例的 env ⇒ 逐用例复位，防泄漏到同块其他用例
+    vi.unstubAllEnvs()
   })
 
   // ─── 验收 2：写入成立 + execution_id 对账 ──────────
@@ -188,6 +190,14 @@ describe('execution/reply — R1 检索流水埋点', () => {
   // ─── 验收 6：超时路径 ──────────────────────────────
   it("验收 6 · 检索超时（memoryResult===null）⇒ reason='timeout'，不 NULL 也不抛", () => {
     const { triggerMessageId, agentId } = seedRunningExecution()
+    // 参数快照这条路径**无 stats 可依** ⇒ 走 `currentRetrievalParams()`（现读 env）。
+    // 故断言必须钉在**本用例自己设的**值上，两重理由：
+    // - 钉回默认值（3 / 0.6）是假绿门——「读 env」与「写死默认值」两种实现都能过；
+    //   钉非默认值（4 / 0.7）才证「快照记的是**当时生效**的参数」。
+    // - 不能依赖外部 env 恰好等于默认值：跑批进程继承服务器加载的 .env（实测
+    //   `MEMORY_TOP_K=5` ⇒ 本用例曾红，且 pre-commit 会跑 server 测试 ⇒ 全仓提交被卡）。
+    vi.stubEnv('MEMORY_TOP_K', '4')
+    vi.stubEnv('MEMORY_MAX_DISTANCE', '0.7')
     expect(() =>
       recordRetrievalTrace({
         sessionId: 'sess-1',
@@ -205,9 +215,9 @@ describe('execution/reply — R1 检索流水埋点', () => {
     // 超时那次没有内测值 ⇒ 落外侧计时；候选/查询为空但**行仍在**（不是无痕）
     expect(ev.retrieval_ms).toBe(10_002)
     expect((getDb().prepare('SELECT COUNT(*) AS n FROM retrieval_queries').get() as any).n).toBe(0)
-    // 参数快照仍带（现读 env，单一来源 currentRetrievalParams）
-    expect(ev.threshold_max_distance).toBe(0.6)
-    expect(ev.param_top_k).toBe(3)
+    // 参数快照仍带（现读 env，单一来源 currentRetrievalParams）——断的正是上面钉的值
+    expect(ev.threshold_max_distance).toBe(0.7)
+    expect(ev.param_top_k).toBe(4)
   })
 
   it("验收 6 · 检索抛错（memoryResult===null 且非超时）⇒ reason='error'", () => {
