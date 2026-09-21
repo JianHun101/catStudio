@@ -107,3 +107,28 @@ Work the **frontier**：票①完成后票②解锁（纯串行链，从上到�
 | 本 run   | **未清**——目录物理清理归 `docs/run/docs-run-status-gate/` 票 G2                                                                  |
 
 **族修边界订正（审查留痕）**：`docs/run/eval-system/R12-dce2bc9-restating-family-sweep.md:52` 把 `bus.ts:30` 归为「**另一语义**（stream/abort 遗留兼容），不属族B」——该归类**自本票起过时**：`bus.ts:30` 恰是本票族修的家族成员之一，现已改为「载荷内另有同值 sessionId 供前端会话键控」。属 R12 那份**历史审计记录**的时点性陈述，不改写历史文档，仅在此留痕；后续同类族修扫描时勿再据该行排除 `bus.ts`。
+
+## 收口（2026-09-21 · A单 / C单：env 派生断言钉值）
+
+同一族的两单，均为**测试文件**改动（无运行时代码，**不需要重启**），修的是「断 env 派生默认值」这种假绿门。
+
+| 项       | A单                                                                                                  | C单                                                     |
+| -------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| 已审 sha | `43b90d5a`（`reply.test.ts` +14/−4）                                                                 | `4d543cd4`（`routes/eval.test.ts` +12/−2）              |
+| 真源     | `memory/index.ts:174 currentRetrievalParams()` 现读 env                                              | `eval.ts:272` / `eval.ts:561` `envNumber(...)` 现读 env |
+| 入库判据 | `git merge-base --is-ancestor 43b90d5a dev` = **YES**                                                | `git merge-base --is-ancestor 4d543cd4 dev` = **YES**   |
+| carrier  | PR **#167** → merge `4d2abb7`（closeout 隔离分支 carry 已审 sha 字面量；dev 已前进，ff-only 不可行） | PR **#170** → merge `13c4c96c`（同范式）                |
+
+**机制订正（审查者点名入账，两种不同巧合，比 A单 更隐蔽）**：
+
+- A单 的失效是「**外部值真偏离默认**」——`.env:50 MEMORY_TOP_K=5` vs 真源默认 `3`，改值即红，**现行红**（一度卡死全仓提交口）。
+- C单 的两处是**潜伏**，且各自靠一种巧合才没红：
+  - `EVAL_LABEL_MIN_COUNT` —— 靠「**未设回落**」（本机未设该变量 ⇒ `envNumber` 回落到与断言相等的默认值 30）；
+  - `EVAL_CHAIN_SLOW_MS` —— 靠「**预设值恰等于默认**」（`env.ts:140` 的 `process.env.EVAL_CHAIN_SLOW_MS ??= '300000'` 预设值刚好等于真源默认 300000）。
+- 共同教训：**「断默认值」在现读 env 的真源面前不是断言，是巧合**。钉**非默认值**（A单 4/0.7、C单 600000/50）才能区分「读 env」与「写死默认」两种实现——审查者以负向对照（临时写死真源 → 必红）逐条复现坐实。
+
+**未改并说明**：`eval.test.ts:1266` `expect(limit).toBe(30)` —— 真源是 `eval.ts:441` `parseBoundedInt(rawLimit, 30, 1, 200)` 的**编译期字面量**，非 env 派生，改 env 打不红 ⇒ 不属本族（店长派活前横扫 `eval.ts` 全部 env 读取点，实核只有 `:272`/`:561` 两处）。
+
+**OQ 裁决（店长）**：两单审查者均提「用例内 `vi.stubEnv` vs 块级 `beforeEach`」——**维持用例内写法**，不立文件内约定：stub 紧贴断言自文档化，且把一个「本用例依赖 env」的事实留在代码里，块级 stub 会把它抹掉。
+
+**给后续的提醒**：`.env.example:97/:106` 恰好注释着 `EVAL_CHAIN_SLOW_MS` / `EVAL_LABEL_MIN_COUNT` 的示例值——下次谁照着解开就是本轮路障的重演；A单/C单 修完后两条通道（普通终端手跑 / 猫链继承 `.env`）均已免疫（审查者以敌意 ambient 实测两单各自全绿）。
