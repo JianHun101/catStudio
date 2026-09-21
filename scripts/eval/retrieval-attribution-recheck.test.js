@@ -818,7 +818,14 @@ describe('静态源断言 — 链段结果对象的字段名（改名即静默�
   // 只断「新写法在」的话，新旧并存的半截改动也会绿。
   it('末次截断按**节**计名额（§6.3 那句「切的是片不是节」的判据面，W2-c 已反转）', () => {
     expect(memorySrc).not.toMatch(/\.slice\(0, params\.topK\)/)
-    expect(memorySrc).toMatch(/if \(ordered\.length >= params\.topK\) break/)
+    // ⚠️ 只断「那行字面量在场」不够——W2-c 首版把界判放在 `push` **之后**，字面量一模一样，
+    // 却把 `MEMORY_TOP_K=0` 的语义从「0 节 + `no-hit`」翻成「1 节 + `ok`」（静默错注入）。
+    // 故这里按**先后次序**断：`break` 必须排在唯一的 `ordered.push(s)` 之前。
+    expect(memorySrc).toMatch(
+      /if \(ordered\.length >= params\.topK\) break[\s\S]*?ordered\.push\(s\)/
+    )
+    // 且名额计的必须是「不同节」不是「片」：去重判同样得排在 push 之前
+    expect(memorySrc).toMatch(/if \(takenSections\.has\(key\)\) continue[\s\S]*?ordered\.push\(s\)/)
   })
 
   it('按节补齐仍走 `bySection`（「切 3 片只换来 2 节」这个名额浪费的机制来源）', () => {

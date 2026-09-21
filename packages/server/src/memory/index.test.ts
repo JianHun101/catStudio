@@ -1158,8 +1158,12 @@ describe('memory', () => {
       restoreEmbedMock()
     })
 
-    // ─── 验收 4：注入片数仍由 MEMORY_TOP_K 决定 ───────────
-    it('验收 4 · 池变大（20/趟）但最终注入片数仍 == MEMORY_TOP_K', async () => {
+    // ─── 验收 4：注入**节数**仍由 MEMORY_TOP_K 决定 ───────────
+    // ⚠️ 措辞订正（W2-c 返工）：名额计的从「片」改成「节」后，本用例断的 `r.sections`
+    // 本来就是**节**、`finalRows` 是**节代表片行**，故断言不变、名字与注释改准。
+    // 另注：本夹具 6 片分落 6 个不同 `doc_path` ⇒ 6 片恰是 6 节，「片/节不可分辨」，
+    // 该用例因此**测不出**粒度差异——粒度由 W2-c 那条用例承担。
+    it('验收 4 · 池变大（20/趟）但最终注入节数仍 == MEMORY_TOP_K', async () => {
       mockEmbedText.mockImplementation(async (): Promise<EmbedResult> => ({
         ok: true,
         vector: vecAt(0),
@@ -1170,10 +1174,44 @@ describe('memory', () => {
         seedChunk({ docPath: `docs/adr/000${i + 1}-r.md`, body: `猫咖测试第${i}片`, angle: i * 10 })
       }
       const r = await memoryModule.retrieveMemoryContext(Q)
-      // 库里有 6 片、池已放到 20/趟（验收 1 守池），但出口仍被 `MEMORY_TOP_K` 切：
-      // `ordered` 与 `finalTraces` 都是切完之后的 3 条（消费面口径不变）
+      // 库里有 6 片（= 6 节）、池已放到 20/趟（验收 1 守池），但出口仍被 `MEMORY_TOP_K`
+      // 切：`ordered` 与 `finalTraces` 都是切完之后的 3 条（消费面口径不变）
       expect(r.sections).toHaveLength(3)
       expect(finalRows(r)).toHaveLength(3)
+    })
+
+    // ─── W2-c 返工：`topK ≤ 0` 必须是空集（旧 `.slice(0, 0)` 语义）────────
+    it('W2-c-2 · topK ≤ 0 ⇒ 零注入且 reason=no-hit（界判在 push 之后 ⇒ 本用例红）', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      mockEmbedText.mockImplementation(async (): Promise<EmbedResult> => ({
+        ok: true,
+        vector: vecAt(0),
+      }))
+      for (let i = 0; i < 3; i++) {
+        seedChunk({ docPath: `docs/adr/000${i + 1}-z.md`, body: `猫咖测试第${i}片`, angle: i * 10 })
+      }
+      // 先证夹具**非空**：topK=3 时确实有得选——否则下面的「0 节」是假绿（池空也会 0 节）
+      process.env.MEMORY_TOP_K = '3'
+      const nonEmpty = await memoryModule.retrieveMemoryContext(Q)
+      expect(nonEmpty.reason).toBe('ok')
+      expect(nonEmpty.sections.length).toBeGreaterThan(0)
+
+      // 旧实现 `.slice(0, 0)` ⇒ 空集；W2-c 首版把界判放在 push 之后 ⇒ 这里会变成
+      // 「1 节 + `ok`」——看着完全正常，实为静默错注入
+      process.env.MEMORY_TOP_K = '0'
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.sections).toHaveLength(0)
+      expect(finalRows(r)).toHaveLength(0)
+      expect(r.reason).toBe('no-hit')
+
+      // 负数同理（`envNumber` 明写不加区间钳位，负数原样生效）。⚠️ 这一档**不是**
+      // 「与 `.slice(0, topK)` 同义」：`.slice(0, -1)` 是负索引 ⇒ 旧行为会保留末尾
+      // n-1 节（3 片库 ⇒ 2 节），本处一律空集 = **有意的行为收紧**。断言钉死新语义，
+      // 防有人「照旧实现回退」把这个意外当规范捡回来。
+      process.env.MEMORY_TOP_K = '-1'
+      const neg = await memoryModule.retrieveMemoryContext(Q)
+      expect(neg.sections).toHaveLength(0)
+      expect(neg.reason).toBe('no-hit')
     })
 
     // ─── W2-c：末次截断按**节**计名额（原先按**片**切）────────

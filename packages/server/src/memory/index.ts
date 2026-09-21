@@ -26,7 +26,7 @@
  *                    （总开关关时**不用**本档：那时门没决定任何事，一律 `not-enabled`）
  *
  * 环境变量:
- *   MEMORY_TOP_K                — 检索片数（默认 3）
+ *   MEMORY_TOP_K                — 末次截断名额，按**节**计（默认 3；W2-c 前按**片**计）
  *   MEMORY_MAX_DISTANCE         — 检索距离下限（默认 0.6）
  *   MEMORY_CONTEXT_TOKEN_BUDGET — 注入预算硬上限（默认 8000）
  *   MEMORY_A2A_ENABLED          — a2a 触发时是否仍检索【相关记忆】（默认关），见 shouldSkipA2aMemory
@@ -174,8 +174,10 @@ export interface RetrievalParamsSnapshot {
 export function currentRetrievalParams(): RetrievalParamsSnapshot {
   return {
     // topK 保持**整数**语义（原 `parseInt`）：`Math.trunc` 在调用点做，`envNumber`
-    // 形状固定两参不带模式开关。切片点 `slice(0, topK)` 本会自行取整，此处显式化是
-    // 为了 `RetrievalParamsSnapshot` 快照里读到的就是真实生效的整数。
+    // 形状固定两参不带模式开关。原先切片点 `slice(0, topK)` 会自行取整，W2-c 改成按
+    // **节**计名额后截断点不再切片 ⇒ 取整改由这里的 `Math.trunc` 独自承担（`topK ≤ 0`
+    // ⇒ 空集，见末次截断那轮循环的界判）。显式化是为了 `RetrievalParamsSnapshot`
+    // 快照里读到的就是真实生效的整数。
     topK: Math.trunc(envNumber('MEMORY_TOP_K', 3)),
     maxDistance: envNumber('MEMORY_MAX_DISTANCE', 0.6),
     probeN: MAX_PROBE_N,
@@ -483,13 +485,13 @@ export async function runRetrievalChain(
     .sort((a, b) => b.rrfScore - a.rrfScore || a.bestIndex - b.bestIndex)
 
   // 末次截断按**节**计名额（W2-c，原为 `.slice(0, topK)` 按**片**切）：`topK` 数的
-  // 从此是「不同节」而不是「片」。按片切时同节的多片各占一个名额，随后 :591 的
+  // 从此是「不同节」而不是「片」。按片切时同节的多片各占一个名额，随后 :606 的
   // `bySection` 再按节去重 ⇒ 实际注入节数可以**少于** `topK`（黄金集 40 条实测：
   // 片级 k=3 下 14 条注入节数 < 3，名额被同节重复片白占）。
   //
   // 节的代表 = `ranked` 里最靠前的那片——与 `bySection` 的「首个胜出」是**同一条**
   // 规则，故下面这轮去重与 `bySection` 那轮的入选集合逐节一致（那轮只是再做一次
-  // 幂等去重）。⚠️ 反过来说：`finalTraces` 从此**每节恒一行** ⇒ :652 的
+  // 幂等去重）。⚠️ 反过来说：`finalTraces` 从此**每节恒一行** ⇒ :664 的
   // `isSectionRepresentative` 恒真、`section_dup` 这个 `droppedReason` 在本路径上
   // **不可达**（枚举值保留，供历史行与 probe 行读；见交接文档「已知副作用」）。
   // ⚠️ 键的拼法必须与 `bySection` 逐字同形（NUL 转义分隔，不是空格/`::`——锚点里
@@ -497,11 +499,21 @@ export async function runRetrievalChain(
   const takenSections = new Set<string>()
   const ordered: Scored[] = []
   for (const s of ranked) {
+    // ⚠️ 界判必须在 push **之前**：放到 push 之后的话，`ordered.length >= params.topK`
+    // 永远在**至少推入 1 条之后**才求值 ⇒ `MEMORY_TOP_K=0` 从「0 节 + `no-hit`」翻成
+    // 「1 节 + `ok`」，下面 :593 的空集分支跟着失效。那是**静默错注入**（看着完全正常），
+    // 不是显式报错。
+    //
+    // 与 W2-c 之前的 `.slice(0, topK)` 的对照（**别读成「逐字同义」**）：
+    //   `topK = 0` ⇒ 两边都是空集（同义）；`topK < 0` ⇒ **有意收紧**：`.slice(0, -1)`
+    //   是数组**负索引**语义（保留末尾 n-1 条，纯属意外），本处一律空集。`envNumber`
+    //   明写「不加区间钳位：`0` / 负数原样生效」⇒ 负数确实走得到这里，这条差异是刻意
+    //   的不是遗漏（用例 `W2-c-2` 把 0 与 -1 两档都钉了）。
+    if (ordered.length >= params.topK) break
     const key = `${s.row.doc_path}\0${s.row.section_anchor}`
     if (takenSections.has(key)) continue
     takenSections.add(key)
     ordered.push(s)
-    if (ordered.length >= params.topK) break
   }
   const orderedRows = ordered.map((s) => s.row)
 
