@@ -4,6 +4,13 @@
  * 默认 upsert 模式：按 agent name 去重，已存在则更新配置。
  * --reset 参数：先清空所有数据再重建。
  *
+ * 覆盖语义（改这条语义请同时扫全仓复述它的文本——本文件 console/log 文案、
+ * `AGENTS.md` 口径、`README`、`CONTRIBUTING.md`、`.env.example` 都复述过）：
+ *   已存在的猫 → 仅同步 头像 / 系统提示词 / 技能模块 / 角色；
+ *   运行配置（provider / model / base_url / effort）以 DB 为权威，seed 不覆盖；
+ *   **llm_api_key 例外**：库里仍是占位符哨兵（从未配过 key）且本次 seed 值够格时补写
+ *   ——空串 '' 是用户显式清空（停跑意图），永不补。
+ *
  * 运行: node scripts/seed.js [--reset]
  *      pnpm seed [--reset]
  */
@@ -34,6 +41,7 @@ import { vectorToBlob } from './memory/index.js'
 import { writeIronLaws } from './config/iron-laws.js'
 import { IRON_LAWS_CODER, IRON_LAWS_REVIEWER } from './seed-data.js'
 import { createLogger } from './logger.js'
+import { PLACEHOLDER_API_KEY } from './constants.js'
 
 const log = createLogger('seed')
 
@@ -67,10 +75,14 @@ async function seed(): Promise<void> {
   const keyMismatchNames: string[] = []
 
   for (const a of agents) {
-    // upsert 之前先读既有行，才能看到「本次不会写进去的那个值」与库里的差异
+    // upsert 之前先读既有行，才能看到「本次不会写进去的那个值」与库里的差异。
+    // 自愈例外：库中为占位符哨兵 + 本次值够格 ⇒ upsertAgent 会补写，不算「不覆盖」差异。
+    // 少了这个排除，会对一行**即将被修好**的数据警告「seed 不会覆盖」= 假话。
     const existing = agentsRepo.getAgentByName(a.name)
     if (existing && existing.llm_api_key !== a.llmApiKey) {
-      keyMismatchNames.push(a.name)
+      const willHeal =
+        existing.llm_api_key === PLACEHOLDER_API_KEY && agentsRepo.isHealableApiKey(a.llmApiKey)
+      if (!willHeal) keyMismatchNames.push(a.name)
     }
 
     const result = agentsRepo.upsertAgent(
@@ -94,7 +106,8 @@ async function seed(): Promise<void> {
   // 常驻说明（每次 seed 都打，不依赖是否真有差异）：说清 upsert 到底同步了什么
   console.log(
     '  ℹ️ 已存在的猫仅同步 头像 / 系统提示词 / 技能模块 / 角色；' +
-      '运行配置（供应商 / 模型 / API Key / base_url / effort）以数据库为准，seed 不覆盖'
+      '运行配置（供应商 / 模型 / API Key / base_url / effort）以数据库为准，seed 不覆盖' +
+      '——唯一例外：API Key 仍是未配置占位符时，会被本次 seed 的真 key 补写'
   )
 
   if (keyMismatchNames.length > 0) {

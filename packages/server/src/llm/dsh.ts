@@ -9,6 +9,7 @@ import {
   terminateChild,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
+import { PLACEHOLDER_API_KEY } from '../constants.js'
 import { randomBytes } from 'node:crypto'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -221,7 +222,7 @@ export class DshAdapter implements LLMAdapter {
     // 占位符守卫（对齐 opencode，72f6e3c 同族回归）：local / sk-your-api-key-here 视为
     // 「未配置真实 key」，fallback 到 .env DS_KEY（真实 key）；空串仍走 credentials 兜底不注入。
     let effectiveKey = this.apiKey
-    if (effectiveKey === 'local' || effectiveKey === 'sk-your-api-key-here') {
+    if (effectiveKey === 'local' || effectiveKey === PLACEHOLDER_API_KEY) {
       effectiveKey = process.env.DS_KEY || ''
     }
     if (effectiveKey) {
