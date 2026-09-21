@@ -224,6 +224,23 @@ async function main(): Promise<void> {
     console.log(`  ✅ Session: ${DEMO_SESSION_TITLE}`)
 
     log.info('种子数据初始化完成', { agents: agents.length })
+  } else {
+    // 2.1 占位符 API Key 自愈 —— **独立于**上面那条「表空才 seed」的路径。
+    //
+    //     为什么不能直接把 `agentCount === 0` 放宽成 `|| 存在占位符`：上面那个块
+    //     尾部还有 upsertDemoSession + 逐只 console.log，放宽会让「没配 key」的
+    //     每一次启动都重跑整个 seed 块。这里只补 `llm_api_key` 一列——
+    //     不碰会话、不重建猫、不覆盖任何其他运行配置。
+    //
+    //     补的是「无 key 首启写了占位符哨兵 → 之后配好 key」这条路径：表已非空，
+    //     启动不再走 seed，若不在此自愈则 key 永远补不上。判据在 repository 内
+    //     （哨兵才补；空串 '' = 用户显式清空，不补）。
+    const healed = agentsRepo.healPlaceholderApiKeys(
+      buildDemoAgents().map((a) => ({ name: a.name, llmApiKey: a.llmApiKey }))
+    )
+    if (healed > 0) {
+      log.info('占位符 API Key 已自愈（原值为未配置哨兵）', { healed })
+    }
   }
 
   // 3. Fastify HTTP 服务器
