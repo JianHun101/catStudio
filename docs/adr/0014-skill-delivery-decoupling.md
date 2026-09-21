@@ -51,7 +51,7 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于注入�
 
 **投递型定制层的去留（用户拍板）**：request-review / handoff 这类以投递路由为核心的定制层，投递外移后路由离开 skill 正文，其存在理由消亡——**作为独立路由层去掉，内容资产并入基础技能，不再建 catstudy 投递定制层**（`handoff` 改名 `session-handoff`；`request-review` 技能层移除、其递送状态仍由状态机保留）。`skills/catstudy/` 仅保留领域型重写（quality-gate、receive-review）与共享 refs（`cat-roles.md`）；refs 资产统一指向共享 `skills/refs/review-request-template.md`（base 版本地 `refs/` 是悬空引用）。
 
-> **修订（2026-09-21）**：本段列明的「共享 refs（`cat-roles.md`）」已随 refs 层收敛退役（refs 层可达性只有「被 SKILL.md 完整路径点名」一条，该文件零可达）。角色词典由运行时 `agents.role` + 各角色 prompt 承接；审查配对规则因审查触发唯一（`seed-data.ts:119`）失去适用面。
+> **修订（2026-09-21）**：本段列明的「共享 refs（`cat-roles.md`）」已随 refs 层收敛退役（refs 层可达性只有「被 SKILL.md 完整路径点名」一条，该文件零可达）。角色词典由运行时 `agents.role` + 各角色 prompt 承接；审查配对规则因审查触发唯一（`seed-data.ts` 的「请审」条目，字面量「唯一审查触发」）失去适用面。
 
 ### 3.1 两套投递通道（不是删一套，是分通道）
 
