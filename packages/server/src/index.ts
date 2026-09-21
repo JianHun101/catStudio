@@ -34,10 +34,12 @@ import { runEpisodeAttribution } from './eval/attribution.js'
 import { existsSync, unlinkSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { findRepoRootFrom } from './repo-root.js'
 import { buildDemoAgents, DEMO_SESSION_ID, DEMO_SESSION_TITLE } from './seed-data.js'
 import { stopLlamaServerIfSpawned } from './llm/llama-server.js'
 import { startEmbeddingSidecar, stopEmbeddingSidecar } from './memory/embedding.js'
+import { summarizeSkippedByReason } from './memory/flywheel/scan-report.js'
 import { clearStaleShutdownRequest, startShutdownRequestWatcher } from './shutdown-request.js'
 import { stopOllamaIfSpawned } from './llm/ollama.js'
 import { stopProxyIfSpawned } from './llm/cli-utils.js'
@@ -50,11 +52,26 @@ const HOST = process.env.HOST || '127.0.0.1'
 
 // ─── 飞轮扫描器接线（票庚 · 契约 ② 自动触发点）─────────────
 
-/** 仓库根：`packages/server/src/` 与打包后 `dist/server/src/` **同为 3 层深** ⇒ 上溯 3 层恒为仓库根 */
-const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url))
+/** 本模块所在目录（源码与构建产物通用——向上找根不依赖层级） */
+const moduleDir = dirname(fileURLToPath(import.meta.url))
 
-/** 飞轮扫描器脚本（`node scripts/flywheel/scan.mjs`；它自己会拉 tsx 跑 TS 依赖） */
-const FLYWHEEL_SCAN_SCRIPT = resolve(REPO_ROOT, 'scripts', 'flywheel', 'scan.mjs')
+/** 飞轮扫描器脚本相对仓库根的路径（它自己会拉 tsx 跑 TS 依赖）——同时充当「仓库根」的**存在性锚点** */
+const FLYWHEEL_SCAN_REL = ['scripts', 'flywheel', 'scan.mjs'] as const
+
+/**
+ * 定位仓库根与扫描器脚本；两者**同生共死**（根靠这个锚找出来），故一起返回，找不到整体 `null`。
+ *
+ * **为什么不是固定层级**（原实现的缺陷）：原注释断言「`packages/server/src/` 与打包后
+ * `dist/server/src/` 同为 3 层深」——被 `tsconfig.json`（`rootDir: ".."` + `outDir: "./dist"`，
+ * 加 `package.json` 的 `"start": "node dist/server/src/index.js"` 独立印证）实测**证伪**：
+ * 产物比源码深**两层**。产物布局下 `REPO_ROOT` 解析成 `packages/server/` ⇒
+ * `FLYWHEEL_SCAN_SCRIPT` 指向不存在的路径 ⇒ 每次启动一条「脚本缺失」warn + 扫描器永不跑。
+ * 走存在性向上找（`repo-root.ts`）后两种布局同解。
+ */
+function resolveFlywheelTarget(): { root: string; script: string } | null {
+  const root = findRepoRootFrom(moduleDir, FLYWHEEL_SCAN_REL)
+  return root === null ? null : { root, script: resolve(root, ...FLYWHEEL_SCAN_REL) }
+}
 
 /**
  * 启动时把扫描器 spawn 一次（**fire-and-forget**）。
@@ -70,12 +87,14 @@ const FLYWHEEL_SCAN_SCRIPT = resolve(REPO_ROOT, 'scripts', 'flywheel', 'scan.mjs
  */
 function spawnFlywheelScan(): void {
   try {
-    if (!existsSync(FLYWHEEL_SCAN_SCRIPT)) {
-      log.warn('飞轮扫描器脚本缺失，跳过本轮扫描', { path: FLYWHEEL_SCAN_SCRIPT })
+    const target = resolveFlywheelTarget()
+    if (target === null) {
+      // 锚文件不在 ⇒ 「脚本缺失」与「找不到仓库根」是同一件事（根就是靠它找出来的）
+      log.warn('飞轮扫描器脚本缺失，跳过本轮扫描', { path: FLYWHEEL_SCAN_REL.join('/') })
       return
     }
-    const child = spawn(process.execPath, [FLYWHEEL_SCAN_SCRIPT, '--root', REPO_ROOT], {
-      cwd: REPO_ROOT,
+    const child = spawn(process.execPath, [target.script, '--root', target.root], {
+      cwd: target.root,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
     })
@@ -97,6 +116,9 @@ function spawnFlywheelScan(): void {
         inserted: report.inserted,
         updated: report.updated,
         skipped: report.skipped.length,
+        // 跳过明细按 reason 归桶：`unchanged`（正常增量）与 `empty-evidence` 等
+        // （真缺口）在总数上同形，分开才读得出「谁被跳、为什么」
+        skippedByReason: summarizeSkippedByReason(report.skipped),
         orphansDeleted: report.orphansDeleted,
         errors: report.errors.length,
         // 中止（如嵌入未启用）= 本轮没写索引，不是失败——留痕以便分辨「扫完没变化」与「压根没扫」
@@ -202,6 +224,23 @@ async function main(): Promise<void> {
     console.log(`  ✅ Session: ${DEMO_SESSION_TITLE}`)
 
     log.info('种子数据初始化完成', { agents: agents.length })
+  } else {
+    // 2.1 占位符 API Key 自愈 —— **独立于**上面那条「表空才 seed」的路径。
+    //
+    //     为什么不能直接把 `agentCount === 0` 放宽成 `|| 存在占位符`：上面那个块
+    //     尾部还有 upsertDemoSession + 逐只 console.log，放宽会让「没配 key」的
+    //     每一次启动都重跑整个 seed 块。这里只补 `llm_api_key` 一列——
+    //     不碰会话、不重建猫、不覆盖任何其他运行配置。
+    //
+    //     补的是「无 key 首启写了占位符哨兵 → 之后配好 key」这条路径：表已非空，
+    //     启动不再走 seed，若不在此自愈则 key 永远补不上。判据在 repository 内
+    //     （哨兵才补；空串 '' = 用户显式清空，不补）。
+    const healed = agentsRepo.healPlaceholderApiKeys(
+      buildDemoAgents().map((a) => ({ name: a.name, llmApiKey: a.llmApiKey }))
+    )
+    if (healed > 0) {
+      log.info('占位符 API Key 已自愈（原值为未配置哨兵）', { healed })
+    }
   }
 
   // 3. Fastify HTTP 服务器

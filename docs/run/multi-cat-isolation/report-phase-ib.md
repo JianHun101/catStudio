@@ -264,7 +264,7 @@ run 4..8: 6 passed
 拿到决定性读数：
 
 ```
-fatal: 'C:/Users/肖锦鹏/AppData/Local/Temp/catStudy-sessions/scwt0002'
+fatal: 'C:/Users/…/AppData/Local/Temp/catStudy-sessions/scwt0002'
        is a missing but already registered worktree;
        use 'add -f' to override, or 'prune' or 'remove' to clear
 ```

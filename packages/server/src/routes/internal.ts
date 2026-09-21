@@ -43,7 +43,11 @@ import { QUERY_TABLE_SCHEMAS, type QueryOp } from '../db/repository/query.js'
 import { getActiveStream } from '../connectors/socketio.js'
 import { storeRouteSignal } from '../llm/route-signals.js'
 import { storeUserRequestSignal } from '../llm/user-request-signals.js'
-import { filterAllowedMentions } from '../dispatch/mention-policy.js'
+import {
+  filterAllowedMentions,
+  mentionLimitRemedy,
+  MAX_MENTIONS_PER_REPLY,
+} from '../dispatch/mention-policy.js'
 import { embedText } from '../memory/embedding.js'
 import { vectorToBlob } from '../memory/index.js'
 import { toIsoDb } from '../db/repository/time.js'
@@ -247,11 +251,31 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       targets
     )
     if (policy.blocked.length > 0) {
-      const reasons = policy.blocked.map((b) => `${b.name}:${b.reason}`).join('、')
-      return reply.status(422).send({
-        ok: false,
-        reason: `目标不在角色允许范围内（${reasons}）——请改投文本行首 @ 或调整目标`,
-      })
+      // 422 串是**回给模型让它自我收敛的唯一输入**（票乙 P2，审查 ⚠️ on 0e5b2c4）。
+      // count-limit 对 reviewer 是票乙才首次可达的 reason，而原串只有一句
+      // 「目标不在角色允许范围内」——纯 count-limit 时那是**假话**（两个目标都在
+      // 边表内，只是超上限），会把模型往「换目标」而不是「收敛到一个」上引。
+      // 故按 reason 分句，两种原因各说各的、可同时出现（role-not-allowed 与
+      // count-limit 同轮可达）。纯 role-not-allowed 时输出与旧串**逐字节恒等**，
+      // 既有 1c 的契约面零漂移。
+      const fmt = (bs: typeof policy.blocked) => bs.map((b) => `${b.name}:${b.reason}`).join('、')
+      const roleBlocked = policy.blocked.filter((b) => b.reason === 'role-not-allowed')
+      const countBlocked = policy.blocked.filter((b) => b.reason === 'count-limit')
+      const parts: string[] = []
+      if (roleBlocked.length > 0) {
+        parts.push(`目标不在角色允许范围内（${fmt(roleBlocked)}）——请改投文本行首 @ 或调整目标`)
+      }
+      if (countBlocked.length > 0) {
+        // 补救方向按角色分岔（票丙：原先此处对所有角色写死「请收敛到一个目标
+        // 重投」）——文案单一维护面 = `mentionLimitRemedy`。本路径**首次**按角色
+        // 分岔：reviewer 的目标由审查结论唯一决定，与文本路径给同一句指引。
+        parts.push(
+          `一条回复最多 @ ${MAX_MENTIONS_PER_REPLY} 个目标，${mentionLimitRemedy(
+            (fromRow?.role as AgentRole | undefined) ?? undefined
+          )}（${fmt(countBlocked)}）`
+        )
+      }
+      return reply.status(422).send({ ok: false, reason: parts.join('；') })
     }
 
     // ── 6. 入 Map（200）──

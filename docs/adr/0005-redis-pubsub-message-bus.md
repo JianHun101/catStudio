@@ -1,3 +1,15 @@
+---
+type: decision
+date: 2026-07-13
+status: deprecated
+verdict: Redis Pub/Sub 消息总线方案已废弃，不做（2026-09-01 整体拆除，改为 Socket.IO 房间广播）
+evidence:
+  - kind: file
+    ref: packages/server/src/connectors/socketio.ts
+  - kind: file
+    ref: docs/adr/0002-sqlite-redis-storage.md
+---
+
 # ADR 0005: Redis Pub/Sub 消息总线
 
 > **已退役（2026-09-01）**：Redis 消息总线已整体拆除（`db/redis.ts` + 发布点 + 状态频道定义全删）——它是只写不读的消息总线（全仓零订阅者），C4 死链拆除。核心消息分发一直由 Socket.IO 房间广播承担，QQ 接入未依赖 Redis（webhook 直收）。本文档保留作历史记录。

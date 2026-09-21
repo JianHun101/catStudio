@@ -1859,7 +1859,8 @@ async function drainPending(cwd, serverUrl) {
  * 与 post-commit 入口共用账本，故两个入口叠加也不会重复投。
  *
  * ⚠️ 覆盖面契约（T-H ② 裁决，有意如此）：本入口只拿到 `execution_logs.commit_hash`
- * 里的**一个** sha（`getRunningExecutionCommitHash` 取该 agent 最新 running 行的单列），
+ * 里的**一个** sha（`getRunningExecutionCommitHash` 取该 agent **在该会话**最新 running
+ * 行的单列——R8 §A 起定位键含 `session_id`，此前只有 `agent_id`，同猫跨会话并行会取错行），
  * 故补投文档的改动面 = 那一个 commit。同一次执行若提交了多个 commit，更早的那些
  * **不在**本请求的改动面内——这是「一次派发 = 一条审查请求」的代价，替代方案
  * （逐 commit 各投 / 按 uuid 回溯成段）均已实测否决，理由与现场证据见文件头 T-H ②。

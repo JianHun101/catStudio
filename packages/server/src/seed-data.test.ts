@@ -122,14 +122,22 @@ describe('agent system prompts', () => {
     expect(IRON_LAWS_CODER).toContain('重启审批')
   })
 
-  it('T2 铁律层承载——出口检查段含「未结束必须产出结构化投递信号」（硬信号，非软思考）', () => {
+  it('T2 铁律层承载——出口检查段含「必须把三项投出去」（收尾判断，非正文产出）', () => {
     // 承载物=铁律层出口检查段（ADR 0014 用户拍板取代「结尾思考」软触发）：流程未结束
-    // 必须产出结构化投递信号 {targets,intent,ref} → post_message/行首 @。触发锚点从 skill
-    //（软、字面死）迁移到铁律层（硬、可解析、每回复在场）。
-    expect(COMMON_IRON_LAWS).toContain('未结束必须产出结构化投递信号')
-    expect(COMMON_IRON_LAWS).toContain('{targets, intent, ref}')
+    // 必须把三项（投给谁/要它做什么/凭什么定位）投出去 → post_message/行首 @。触发锚点从 skill
+    //（软、字面死）迁移到铁律层（硬、每回复在场）。
+    // 2026-09-20 修正（票甲）：旧文案把信号形状 {targets,intent,ref} 教成「正文产出物」——
+    // 猫在正文里写信号块而不实际投递，且该形状在回复正文里全仓零消费者。改为三项「决定」
+    // + 反面句（写了没投=等于没投），断言随之改钉新语义（旧字面两条已删）。
+    expect(COMMON_IRON_LAWS).toContain('必须把三项投出去')
+    expect(COMMON_IRON_LAWS).toContain('不是正文产出')
+    expect(COMMON_IRON_LAWS).toContain('等于没投')
     expect(COMMON_IRON_LAWS).toContain('post_message')
     expect(COMMON_IRON_LAWS).toContain('commit_sha')
+    // 反向断言（P3-3）：防旧形状/旧句式以任何形式回流——本票要杀的是「正文里写出信号块
+    // 就等于已投递」这个假信念，只钉新语义挡不住复读旧字面
+    expect(COMMON_IRON_LAWS).not.toContain('{targets')
+    expect(COMMON_IRON_LAWS).not.toContain('未结束必须产出结构化投递信号')
   })
 
   it('共通铁律层单源——CODER 与 REVIEWER 都注入同一段共通控制流，且不跨角色重复', () => {
@@ -158,9 +166,9 @@ describe('agent system prompts', () => {
     expect(IRON_LAWS_CODER).not.toContain('禁止直接安装')
     expect(IRON_LAWS_CODER).not.toContain('严禁声明和安装出现在同一轮回复中')
     expect(IRON_LAWS_CODER).not.toContain('禁止自行 kill 或重启 server')
-    // 「必须」在共通层放宽：单处 T2 规格强制（未结束必须产出结构化投递信号）——是
+    // 「必须」在共通层放宽：单处 T2 规格强制（必须把三项投出去）——是
     // 正向行为指令（必须做 X），非禁令堆砌；严禁/禁止/绝不 仍全查、hard 门禁仍保留
-    expect(COMMON_IRON_LAWS.split('必须').length - 1).toBe(1) // 仅一处强制信号，不堆砌
+    expect(COMMON_IRON_LAWS.split('必须').length - 1).toBe(1) // 仅一处强制，不堆砌
     expect(COMMON_IRON_LAWS).not.toContain('严禁')
     expect(COMMON_IRON_LAWS).not.toContain('禁止')
     expect(COMMON_IRON_LAWS).not.toContain('绝不') // 硬性门禁在 CODER_DUTIES（Worktree 段），不在共通层
@@ -216,6 +224,16 @@ describe('agent system prompts', () => {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).not.toContain('Worktree 模式')
     }
+  })
+
+  it('S1 案 A 续：收口链那一行以「gh pr merge 合并（店长执行）」为准，旧「GitHub merge」不得回归', () => {
+    // 漂移源：`db/repository/agents.ts` 的 upsertAgent 带
+    // `ON CONFLICT(name) DO UPDATE SET system_prompt = excluded.system_prompt`
+    // ⇒ 跑 `pnpm seed` 会把活库那行静默抹回 seed-data.ts 的字面，故两处必须同文案。
+    // 上面那条只钉「收口链段在店长 prompt 里」，不逐字钉这一行的动作主体，本断言补这一格。
+    const boss = agents.find((a) => a.name === '店长')!
+    expect(boss.systemPrompt).toContain('gh pr merge 合并（店长执行）')
+    expect(boss.systemPrompt).not.toContain('GitHub merge')
   })
 
   it('S3a：三只实施猫的「实施规范」段单源——逐字一致，改一处三猫同时生效', () => {
@@ -339,7 +357,7 @@ describe('agent system prompts', () => {
       expect(agent.systemPrompt).toContain('❌需重做')
       // T-C 三档：作者侧也要认 💬（非阻断 → 同走收口，不返工）
       expect(agent.systemPrompt).toContain('💬仅评论')
-      // 兜底路径：若收到 ✅（分流失败时原链仍通）→ 请收口指令保留
+      // 兜底路径：若收到 ✅（分流漏投时原链仍通）→ 请收口指令保留
       expect(agent.systemPrompt).toContain('兜底路径')
       expect(agent.systemPrompt).toContain('行首@架构师 请收口')
     }
@@ -420,5 +438,38 @@ describe('agent system prompts', () => {
     expect(tucao.systemPrompt).not.toContain('审查维度')
     expect(tucao.systemPrompt).not.toContain('边界与安全')
     expect(tucao.systemPrompt).not.toContain('结论清晰吗')
+  })
+})
+
+/**
+ * 演示角色的 provider / model / key 三字段联合决定「全新克隆开箱能不能跑」。
+ * seed 字段分离不变量下改 seed 对存量库零作用，作用面就是陌生访客——
+ * 故这里钉的是「新克隆拿到的默认值」，不是运行态。
+ */
+describe('演示角色默认 provider', () => {
+  const agents = buildDemoAgents()
+  const CLAUDE_ROLES = ['店长', 'ds猫', 'flash猫', '吐槽猫']
+
+  it('4 个演示角色的 provider 为 claude、模型 deepseek-flash', () => {
+    for (const name of CLAUDE_ROLES) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.llmProvider).toBe('claude')
+      expect(agent.llmModel).toBe('deepseek-flash')
+    }
+  })
+
+  it('这 4 个角色的 llmApiKey 非空（claude 不在 no-key 白名单，留空会被守卫拦下）', () => {
+    // 不断言具体字面量：测试环境 DS_KEY 未设时 buildDemoAgents 回落哨兵
+    // 'sk-your-api-key-here'，那也是非空串。本断言防的是「被改回空串」。
+    for (const name of CLAUDE_ROLES) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.llmApiKey).toBeTruthy()
+    }
+  })
+
+  it('dsh 试点猫仍是 dsh / deepseek-chat（防误改波及第 5 个角色）', () => {
+    const dsh = agents.find((a) => a.name === 'dsh猫')!
+    expect(dsh.llmProvider).toBe('dsh')
+    expect(dsh.llmModel).toBe('deepseek-chat')
   })
 })

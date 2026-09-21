@@ -38,11 +38,13 @@ import type { EngineBus, HandoffBus } from './bus.js'
 
 // 日志按边界 mock：T-K 的交付面之一是"配额拦截从 info 抬到 warn"，可观测面就是这条
 // warn——不 mock 就只能断言"跳数变少"（那测的是拦截行为，不是**可观测性**那条修复）。
-const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }))
+const { logWarn, logInfo } = vi.hoisted(() => ({ logWarn: vi.fn(), logInfo: vi.fn() }))
 vi.mock('../logger.js', () => ({
   createLogger: () => ({
     debug: vi.fn(),
-    info: vi.fn(),
+    // logInfo 具名化：票② 的交付面是 reply.ts abort 分支的日志 payload（reason 字段），
+    // 不捕获就只剩「行为没变」可断言——那测不到本票真正改的东西。
+    info: logInfo,
     warn: logWarn,
     error: vi.fn(),
   }),
@@ -99,6 +101,15 @@ vi.mock('../memory/index.js', () => ({
   // 单一来源）。partial factory 缺它 = 调用点当场 TypeError，回复整条发不出去
   // ——实测踩过。**替身必须镜像真模块被消费的导出面**。
   currentRetrievalParams: vi.fn(() => ({ topK: 3, maxDistance: 0.6, probeN: 20 })),
+  // T-1：a2a 记忆门新增的两个被消费导出——同一条规矩（见上），partial factory
+  // 缺一个就是调用点 TypeError。默认值镜像生产：门**关**、跳过结果形状同构。
+  shouldSkipA2aMemory: vi.fn(() => false),
+  skippedRetrievalResult: vi.fn(() => ({
+    text: '',
+    reason: 'skipped-a2a',
+    sections: [],
+    stats: {},
+  })),
 }))
 
 vi.mock('../handoff/index.js', () => ({
@@ -126,9 +137,17 @@ vi.mock('../eval/sampler.js', () => ({
   maybeScoreSample: vi.fn(),
 }))
 
-vi.mock('../eval/verdict-parser.js', () => ({
-  recordReviewVerdict: vi.fn(),
-}))
+// 票乙起 serial.ts 在 reviewer 分支多消费一个导出（`parseReviewVerdict`，白名单
+// 单目标闸的输入）。原替身是**部分工厂**——只列 `recordReviewVerdict`，漏键 ⇒
+// 调用点当场 TypeError（与 memory/index.js 缺 currentRetrievalParams、
+// diff-collector.js 缺 GIT_TIMEOUT_MS 同款，本文件第三次踩）。故改用
+// `importOriginal` 铺开真模块、只覆盖带 I/O 的 `recordReviewVerdict`：
+// `parseReviewVerdict` 是纯函数，按「只在边界 mock」本就该用真的——组装级用例
+// 要的正是「正文 → 真解析 → policy」这条链，桩掉它等于把被测段落挖空。
+vi.mock('../eval/verdict-parser.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../eval/verdict-parser.js')>()
+  return { ...actual, recordReviewVerdict: vi.fn() }
+})
 
 vi.mock('../llm/route-signals.js', () => ({
   consumeRouteSignals: vi.fn(() => []),
@@ -232,7 +251,7 @@ async function runPaired(
   return engine.executeAgentsSerial(
     'session-1',
     [DEFAULT_AGENT],
-    { id: triggerId, content: '你好', mentions: [] },
+    { fromAgent: false, id: triggerId, content: '你好', mentions: [] },
     traceId,
     depth
   )
@@ -384,6 +403,70 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     expect(engine.getSlot('agent-1', 'session-1')).toMatchObject({ status: 'idle' })
   })
 
+  // ─── 票② reason 契约（2026-09-18）──────────────────
+  // reply.ts 的 abort 分支把「谁中断的」落在日志 payload 的 `reason` 上。上游四处
+  // 裸 `abort()`（reason 恒为 AbortError 默认值）⇒ 超时与用户停止在日志里无法区分
+  // ——正是 2026-09-18 排障现场被带偏的那条。本组用例证明 reason 真的传到了。
+
+  it('abort reason 契约：用户停止（AGENT_INTERRUPT）→ reply 日志 reason=user-stop', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    // 两段流：中止落在两段之间，流循环恢复后还会再走一次 `signal.aborted` 检查——
+    // reply.ts 的 abort 分支（reason 的消费点）就在那次检查里。单段流则循环直接
+    // 因生成器结束而退出，压根到不了该分支（只到 serial.ts 的收尾拦截）。
+    makeAdapter({ chunks: ['部分', '后续'], gate })
+    const { bus, calls } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+
+    const runP = runPaired(engine, 'msg-reason-user', 'trace-reason-user')
+    await vi.waitFor(() => expect(calls.typing.length).toBeGreaterThan(0))
+    expect(engine.abortAgent('agent-1')).toBe(true)
+    release()
+    await runP
+
+    expect(logInfo).toHaveBeenCalledWith(
+      'agent reply aborted',
+      expect.objectContaining({ reason: 'user-stop' })
+    )
+  })
+
+  it('abort reason 契约：硬超时 → reply 日志 reason=timeout', async () => {
+    vi.useFakeTimers()
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    try {
+      makeAdapter({ chunks: ['部分', '后续'], gate })
+      const { bus, calls } = createFakeBus()
+      const engine = createExecutionEngine(bus)
+
+      const runP = runPaired(engine, 'msg-reason-timeout', 'trace-reason-timeout')
+      // 排空微任务 + 0ms 计时器，让执行推进到流循环挂起点（不依赖真实等待）
+      for (let i = 0; i < 200 && calls.typing.length === 0; i++) {
+        await vi.advanceTimersByTimeAsync(0)
+      }
+      expect(calls.typing.length).toBeGreaterThan(0)
+
+      // 推进到 AGENT_HARD_TIMEOUT_MS（serial.ts 默认 30min）→ Promise.race 超时分支
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
+      release()
+      await runP
+      // race 在超时那刻就已 reject（runP 落定），被挂起的生成器续延晚于此——
+      // 排空微任务让流循环恢复并走到 abort 分支，否则断言跑在日志落定之前
+      for (let i = 0; i < 50; i++) await vi.advanceTimersByTimeAsync(0)
+
+      expect(logInfo).toHaveBeenCalledWith(
+        'agent reply aborted',
+        expect.objectContaining({ reason: 'timeout' })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('MESSAGE_RETRACT 同款：引擎 setRetraction → 流中途退出 → 无回复落库、标记自清理', async () => {
     let release!: () => void
     const gate = new Promise<void>((r) => {
@@ -423,7 +506,7 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [noKeyAgent],
-      { id: 'msg-nokey', content: '你好', mentions: [] },
+      { fromAgent: false, id: 'msg-nokey', content: '你好', mentions: [] },
       'trace-nokey'
     )
 
@@ -468,7 +551,7 @@ describe('serial — 假 bus 形态 a（真实 dispatch 配对）', () => {
       return engine.executeAgentsSerial(
         'session-1',
         [DEFAULT_AGENT],
-        { id: triggerId, content: '你好', mentions: [] },
+        { fromAgent: false, id: triggerId, content: '你好', mentions: [] },
         'trace-persist',
         depth
       )
@@ -674,7 +757,7 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-1',
       0
     )
@@ -711,7 +794,7 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-1',
       0
     )
@@ -750,7 +833,7 @@ describe('serial — 被拦 @ 的 store UI 提示（人类可见，不进 agent 
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-loop',
       0
     )
@@ -859,7 +942,7 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-limit-1',
       1
     )
@@ -955,7 +1038,7 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
     const busyRun = engine.executeAgentsSerial(
       'session-1',
       [IMPL],
-      { id: 'msg-v7-busy', content: '请处理', mentions: [] },
+      { fromAgent: false, id: 'msg-v7-busy', content: '请处理', mentions: [] },
       'trace-v7',
       1
     )
@@ -966,7 +1049,7 @@ describe('serial — A2A 配额阈值可配（T-K）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-v7-send', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-v7-send', content: '请审查', mentions: [] },
       'trace-v7',
       1
     )
@@ -1053,7 +1136,7 @@ describe('serial — A2A 配额拦截的可见面（票子）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-quota',
       0
     )
@@ -1096,7 +1179,7 @@ describe('serial — A2A 配额拦截的可见面（票子）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-quota-rows',
       0
     )
@@ -1119,7 +1202,7 @@ describe('serial — A2A 配额拦截的可见面（票子）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-quota-nostore',
       0
     )
@@ -1137,7 +1220,7 @@ describe('serial — A2A 配额拦截的可见面（票子）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [STORE],
-      { id: 'msg-1', content: '请继续', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请继续', mentions: [] },
       'trace-quota-self',
       0
     )
@@ -1227,7 +1310,7 @@ describe('serial — T-M 自动提交歧义拒写（可观测面）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [DEFAULT_AGENT],
-      { id: TRIGGER, content: '你好', mentions: [] },
+      { fromAgent: false, id: TRIGGER, content: '你好', mentions: [] },
       TRACE,
       0
     )
@@ -1256,7 +1339,7 @@ describe('serial — T-M 自动提交歧义拒写（可观测面）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [DEFAULT_AGENT],
-      { id: TRIGGER, content: '你好', mentions: [] },
+      { fromAgent: false, id: TRIGGER, content: '你好', mentions: [] },
       TRACE,
       0
     )
@@ -1374,7 +1457,7 @@ describe('serial — token 作用域收窄（A 方案死锁根治）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-deadlock',
       0
     )
@@ -1407,7 +1490,7 @@ describe('serial — token 作用域收窄（A 方案死锁根治）', () => {
       await engine.executeAgentsSerial(
         'session-1',
         [REVIEWER],
-        { id: 'msg-1', content: '请审查', mentions: [] },
+        { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
         'trace-scope',
         0
       )
@@ -1430,7 +1513,7 @@ describe('serial — token 作用域收窄（A 方案死锁根治）', () => {
     await engine.executeAgentsSerial(
       'session-1',
       [STORE, REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-multi',
       0
     )
@@ -1633,7 +1716,7 @@ describe('serial — mentions 写回时机（P0：不依赖 drain/A2A await）',
     await engine.executeAgentsSerial(
       'session-1',
       [REVIEWER],
-      { id: 'msg-1', content: '请审查', mentions: [] },
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [] },
       'trace-p0-ex',
       0
     )
@@ -1801,4 +1884,117 @@ describe('serial — 形态 D：drain 与 A2A 派发并发（票 dispatch-deferr
     await Promise.all([p1, p2])
     expect(parentRuns).toBe(2)
   }, 20000)
+})
+
+// ═══ reviewer 单目标闸（票乙，2026-09-20） ═══
+//
+// 白名单矩阵本身在 `dispatch/mention-policy.test.ts` 单测；本块测**接线**——
+// serial.ts 是否真把正文的审查结论喂进了 policy。组装级证据取落库的 mentions 列
+// （路由事实的唯一落点），不是内存态返回值。
+//
+// 两条用例互为**反对照**：正文只差结论标记（✅ vs ⚠️），@ 的两个目标与顺序完全
+// 相同，保留结果却相反（店长 / ds猫）。若 serial.ts 漏传 verdict，两条都会落到
+// 「结论不可得 → 保请求人」，⚠️ 那条仍绿、✅ 那条必红——单看 ✅ 无法区分
+// 「接线生效」与「接线缺失恰好同果」，故两条必须成对保留。
+
+describe('serial — reviewer 单目标闸：双 @ 时按审查结论剥一个', () => {
+  const STORE: AgentConfig = {
+    id: 'agent-store',
+    name: '店长',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'store',
+  }
+  const REVIEWER: AgentConfig = {
+    id: 'agent-reviewer',
+    name: '吐槽猫',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'reviewer',
+  }
+  const IMPL: AgentConfig = {
+    id: 'agent-impl',
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: 'You are a cat.',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'implementer',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    __test_reset()
+    const db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    const insert = db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_provider, llm_model, llm_api_key, role)
+       VALUES (?, ?, '🐱', 'You are a cat.', 'deepseek', 'deepseek-v4-pro', 'sk-test', ?)`
+    )
+    insert.run(STORE.id, STORE.name, 'store')
+    insert.run(REVIEWER.id, REVIEWER.name, 'reviewer')
+    insert.run(IMPL.id, IMPL.name, 'implementer')
+    db.prepare(
+      `INSERT INTO sessions (id, title, agent_ids, broadcast_mode)
+       VALUES ('session-1', '测试会话', ?, 0)`
+    ).run(JSON.stringify([STORE.id, REVIEWER.id, IMPL.id]))
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES ('msg-1', 'session-1', 'user', '请审查', '[]')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.unstubAllEnvs()
+  })
+
+  /** 吐槽猫最早一条回复的 mentions 列——「这条消息路由给谁」的落库事实 */
+  const reviewerMentions = (): string[] => {
+    const row = getDb()
+      .prepare(`SELECT mentions FROM messages WHERE role='agent' AND agent_id=? ORDER BY rowid`)
+      .get(REVIEWER.id) as any
+    return row ? JSON.parse(row.mentions) : []
+  }
+
+  /**
+   * 跑一次 reviewer 执行：首轮出 reviewBody，其后各轮（A2A 子链唤起的猫）出「收到」。
+   * 触发消息作者 = 实施猫（= 请求人），故「作者」这一格可达。
+   */
+  const runReview = async (reviewBody: string) => {
+    let call = 0
+    const chatStream = vi.fn(async function* () {
+      call++
+      yield { content: call === 1 ? reviewBody : '收到', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+    const { bus } = createFakeBus()
+    const engine = createExecutionEngine(bus)
+    await engine.executeAgentsSerial(
+      'session-1',
+      [REVIEWER],
+      { fromAgent: false, id: 'msg-1', content: '请审查', mentions: [], authorName: IMPL.name },
+      'trace-single-target',
+      0
+    )
+    return chatStream
+  }
+
+  it('✅可合并 + 双 @（店长、ds猫）→ 落库 mentions 只含店长（收口链）', async () => {
+    await runReview('✅可合并\n\n@店长 请收口\n@ds猫 你看下')
+    expect(reviewerMentions()).toEqual([STORE.name])
+  })
+
+  it('⚠️建议修改 + 双 @（店长、ds猫）→ 落库 mentions 只含作者 ds猫（返工链）', async () => {
+    await runReview('⚠️建议修改\n\n@店长 存档\n@ds猫 请返工')
+    expect(reviewerMentions()).toEqual([IMPL.name])
+  })
 })

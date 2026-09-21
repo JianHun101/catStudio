@@ -395,7 +395,10 @@ describe('memory', () => {
 
   // ─── W12 ──────────────────────────────────────────────
   describe('W12 NULL 行真被放行（运行时断言）', () => {
-    it('status IS NULL 与 active 被召回，superseded / deprecated 不召回', async () => {
+    // ⚠️ P1-A 起本用例的成立范围**收窄**了：退役态的放行面只开给墓碑锚
+    // （`#tombstone`）。这四片的锚都是普通节锚，故结论不变——它守的是「C3 改向
+    // **没有**顺手把退役正文片也放进来」这一半。
+    it('status IS NULL 与 active 被召回；退役**正文片**不召回', async () => {
       process.env.MEMORY_MAX_DISTANCE = '1.5'
       process.env.MEMORY_TOP_K = '10'
       seedChunk({
@@ -431,6 +434,65 @@ describe('memory', () => {
       expect(r.text).toContain('猫咖测试在用中')
       expect(r.text).not.toContain('猫咖测试已被取代')
       expect(r.text).not.toContain('猫咖测试已废弃')
+    })
+  })
+
+  // ─── P1-A 墓碑切片（C3 谓词改向 + C4 注入标记）─────────
+  describe('P1-A 退役文档只留结论（墓碑片）', () => {
+    /** 同一份退役文档：正文片 + 墓碑片并存 = ADR 0013 存量的真实形态 */
+    const RETIRED_DOC = 'docs/adr/0013-c3.md'
+
+    function seedRetiredPair(tombstoneStatus: string): void {
+      seedChunk({
+        docPath: RETIRED_DOC,
+        sectionAnchor: '## C3 出方案',
+        body: '猫咖测试退役正文',
+        status: 'superseded',
+        angle: 0,
+      })
+      seedChunk({
+        docPath: RETIRED_DOC,
+        sectionAnchor: '#tombstone',
+        body: '猫咖测试墓碑结论',
+        status: tombstoneStatus,
+        angle: 0,
+      })
+    }
+
+    beforeEach(() => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '10'
+    })
+
+    it('反对照甲：退役正文片召不回、墓碑片召得回（C3 谓词改向）', async () => {
+      seedRetiredPair('superseded')
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      // 放行面：墓碑锚的片**必须**进得来——否则就是把「降级可检索」做成了「降级不可见」
+      expect(r.text).toContain('猫咖测试墓碑结论')
+      // 挡住面：同文档的退役正文片**必须**召不回。这一条破 ⇒ 用户要防的
+      // 「猫读到已废弃方案的原文、当成活指导」当场成立，本票白做。
+      expect(r.text).not.toContain('猫咖测试退役正文')
+    })
+
+    it('反对照乙：C4 标记由 status 驱动——同一行只翻 status 则标记消失', async () => {
+      seedRetiredPair('superseded')
+      const retired = await memoryModule.retrieveMemoryContext(Q)
+      expect(retired.text).toContain('【已废弃·仅留结论】猫咖测试墓碑结论')
+
+      // 对照组 = **同一个变量**：不新建行、不动锚与正文，只把那一行的 status 列翻回
+      // active（`chunks` 行、`chunk_vectors` 行、注入位置全不变）。
+      getDb()
+        .prepare('UPDATE chunks SET status = ? WHERE doc_path = ? AND section_anchor = ?')
+        .run('active', RETIRED_DOC, '#tombstone')
+
+      const active = await memoryModule.retrieveMemoryContext(Q)
+      // 片**照样召得回**（排除「对照组其实没召回到、于是没标记」的假绿）
+      expect(active.text).toContain('猫咖测试墓碑结论')
+      // 判据若写成「认锚（`#tombstone` 恒在）」「认正文（正文一字未变）」
+      // 「认『退役过就永久标记』」，这里**全都红**——只有认 status 列才绿。
+      expect(active.text).not.toContain('【已废弃·仅留结论】')
     })
   })
 
@@ -1096,8 +1158,12 @@ describe('memory', () => {
       restoreEmbedMock()
     })
 
-    // ─── 验收 4：注入片数仍由 MEMORY_TOP_K 决定 ───────────
-    it('验收 4 · 池变大（20/趟）但最终注入片数仍 == MEMORY_TOP_K', async () => {
+    // ─── 验收 4：注入**节数**仍由 MEMORY_TOP_K 决定 ───────────
+    // ⚠️ 措辞订正（W2-c 返工）：名额计的从「片」改成「节」后，本用例断的 `r.sections`
+    // 本来就是**节**、`finalRows` 是**节代表片行**，故断言不变、名字与注释改准。
+    // 另注：本夹具 6 片分落 6 个不同 `doc_path` ⇒ 6 片恰是 6 节，「片/节不可分辨」，
+    // 该用例因此**测不出**粒度差异——粒度由 W2-c 那条用例承担。
+    it('验收 4 · 池变大（20/趟）但最终注入节数仍 == MEMORY_TOP_K', async () => {
       mockEmbedText.mockImplementation(async (): Promise<EmbedResult> => ({
         ok: true,
         vector: vecAt(0),
@@ -1108,10 +1174,88 @@ describe('memory', () => {
         seedChunk({ docPath: `docs/adr/000${i + 1}-r.md`, body: `猫咖测试第${i}片`, angle: i * 10 })
       }
       const r = await memoryModule.retrieveMemoryContext(Q)
-      // 库里有 6 片、池已放到 20/趟（验收 1 守池），但出口仍被 `MEMORY_TOP_K` 切：
-      // `ordered` 与 `finalTraces` 都是切完之后的 3 条（消费面口径不变）
+      // 库里有 6 片（= 6 节）、池已放到 20/趟（验收 1 守池），但出口仍被 `MEMORY_TOP_K`
+      // 切：`ordered` 与 `finalTraces` 都是切完之后的 3 条（消费面口径不变）
       expect(r.sections).toHaveLength(3)
       expect(finalRows(r)).toHaveLength(3)
+    })
+
+    // ─── W2-c 返工：`topK ≤ 0` 必须是空集（旧 `.slice(0, 0)` 语义）────────
+    it('W2-c-2 · topK ≤ 0 ⇒ 零注入且 reason=no-hit（界判在 push 之后 ⇒ 本用例红）', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      mockEmbedText.mockImplementation(async (): Promise<EmbedResult> => ({
+        ok: true,
+        vector: vecAt(0),
+      }))
+      for (let i = 0; i < 3; i++) {
+        seedChunk({ docPath: `docs/adr/000${i + 1}-z.md`, body: `猫咖测试第${i}片`, angle: i * 10 })
+      }
+      // 先证夹具**非空**：topK=3 时确实有得选——否则下面的「0 节」是假绿（池空也会 0 节）
+      process.env.MEMORY_TOP_K = '3'
+      const nonEmpty = await memoryModule.retrieveMemoryContext(Q)
+      expect(nonEmpty.reason).toBe('ok')
+      expect(nonEmpty.sections.length).toBeGreaterThan(0)
+
+      // 旧实现 `.slice(0, 0)` ⇒ 空集；W2-c 首版把界判放在 push 之后 ⇒ 这里会变成
+      // 「1 节 + `ok`」——看着完全正常，实为静默错注入
+      process.env.MEMORY_TOP_K = '0'
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.sections).toHaveLength(0)
+      expect(finalRows(r)).toHaveLength(0)
+      expect(r.reason).toBe('no-hit')
+
+      // 负数同理（`envNumber` 明写不加区间钳位，负数原样生效）。⚠️ 这一档**不是**
+      // 「与 `.slice(0, topK)` 同义」：`.slice(0, -1)` 是负索引 ⇒ 旧行为会保留末尾
+      // n-1 节（3 片库 ⇒ 2 节），本处一律空集 = **有意的行为收紧**。断言钉死新语义，
+      // 防有人「照旧实现回退」把这个意外当规范捡回来。
+      process.env.MEMORY_TOP_K = '-1'
+      const neg = await memoryModule.retrieveMemoryContext(Q)
+      expect(neg.sections).toHaveLength(0)
+      expect(neg.reason).toBe('no-hit')
+    })
+
+    // ─── W2-c：末次截断按**节**计名额（原先按**片**切）────────
+    it('W2-c · 同节多片只占一个名额：topK=2 注入 2 个不同节，而不是被同节的第 2 片吃掉', async () => {
+      // 纯向量（Q 与正文无 bigram 交集）⇒ 名次只由夹角决定
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '2'
+      // 节甲两片（0° / 5°）、节乙一片（10°）⇒ 片级序 = [甲1, 甲2, 乙1]
+      seedChunk({
+        docPath: 'docs/adr/0001-a.md',
+        body: '猫咖测试片甲上',
+        angle: 0,
+        partIndex: 1,
+        partTotal: 2,
+      })
+      seedChunk({
+        docPath: 'docs/adr/0001-a.md',
+        body: '猫咖测试片甲下',
+        angle: 5,
+        partIndex: 2,
+        partTotal: 2,
+      })
+      seedChunk({
+        docPath: 'docs/adr/0002-b.md',
+        sectionAnchor: '## 乙',
+        body: '猫咖测试片乙',
+        angle: 10,
+      })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      // 判别断言：按片切 ⇒ `ordered` = [甲1, 甲2] ⇒ `bySection` 去重后只剩 **1** 节
+      // （第 2 个名额被同节的片白占）；按节切 ⇒ 甲乙各占一席 ⇒ 2 节
+      expect(r.sections).toHaveLength(2)
+      expect(r.sections.map((s) => s.docPath)).toEqual(['docs/adr/0001-a.md', 'docs/adr/0002-b.md'])
+      // 整节返回（W2 既定语义）不受本改动影响：甲的两片仍然都在
+      expect(r.text).toContain('猫咖测试片甲上')
+      expect(r.text).toContain('猫咖测试片甲下')
+      expect(r.text).toContain('猫咖测试片乙')
+
+      const rows = finalRows(r)
+      // 「每节一行」⇒ 行面与本节的代表片一一对应
+      expect(rows.map((c) => c.finalRank)).toEqual([0, 1])
+      expect(rows.every((c) => c.injected)).toBe(true)
     })
 
     // ─── 验收 5：降级路径有分、且不是 NaN ────────────────
@@ -1171,6 +1315,80 @@ describe('memory', () => {
       const beforeCut = sectionLevelBefore(orderedRowsOf(cut), 60)
       expect(cut.text).toBe(beforeCut.text)
       expect(cut.sections.map((s) => `${s.docPath}\0${s.sectionAnchor}`)).toEqual(beforeCut.keys)
+    })
+  })
+
+  // ─── T-1 a2a 门控：开关语义 + 跳过结果形状 ────────────────
+  //
+  // 门本身长在 `execution/reply.ts`（调用点），但这三件东西归本模块所有：
+  //  ① `MEMORY_A2A_ENABLED` 的读法（默认关门——本门要治的就是「a2a 白跑检索」，
+  //     默认放行等于什么都不治）；
+  //  ② **与记忆总开关的合取**（F3）：总开关关时本门不生效、放行给 `not-enabled`；
+  //  ③ 跳过结果的形状（`recordRetrievalTrace` / span 都按 `stats?.xxx` 取值，
+  //     形状分叉 ⇒ 落库一片 null）。
+  // 生产路径的接线面（真 DB 触发行 / span status / 流水 reason）在
+  // `execution/serial.a2a-memory-gate.test.ts`，本处只钉这两个纯函数。
+  describe('T-1 a2a 门控（env 语义 + 跳过结果形状）', () => {
+    const saved = process.env.MEMORY_A2A_ENABLED
+    afterEach(() => {
+      if (saved === undefined) delete process.env.MEMORY_A2A_ENABLED
+      else process.env.MEMORY_A2A_ENABLED = saved
+    })
+
+    // ⚠️ 断言方向：谓词语义 = **是否应当跳过**（不是「env 开没开」）。F3 折进总开关
+    // 合取项后这两件事不再等价，故函数跟着改名 `isA2aMemoryEnabled` → `shouldSkipA2aMemory`
+    // ——留着旧名 + 旧读法会让调用点的 `!` 变成一个读反的哑弹。
+    it('总开关开时：未设置 / 空串 / "0" / "false" / 认不出的值 → 跳过；"1"/"true"/"True" → 放行', () => {
+      delete process.env.MEMORY_A2A_ENABLED
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
+      process.env.MEMORY_A2A_ENABLED = ''
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
+      process.env.MEMORY_A2A_ENABLED = '0'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
+      process.env.MEMORY_A2A_ENABLED = 'false'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
+      // F2：同块的 `MEMORY_ENABLED` 写作 `true`，两种真值拼法都收（大小写不敏感）
+      // ——只认 '1' 会把 `=true` 静默读成「关」（= 继续跳过，写的人以为门开了）。
+      process.env.MEMORY_A2A_ENABLED = '1'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
+      process.env.MEMORY_A2A_ENABLED = 'true'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
+      process.env.MEMORY_A2A_ENABLED = 'True'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
+      // 认不出的值落默认关（fail-closed：保持默认=跳过），不落「放行」
+      process.env.MEMORY_A2A_ENABLED = 'yes'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(true)
+    })
+
+    it('F3 合取总开关：`MEMORY_ENABLED` 关时本门不生效——env 开或关都不跳过', () => {
+      // 总开关关 ⇒ 放行到正常路径，由 `retrieveMemoryContext` 第一条语句的
+      // `not-enabled` 兜底：门没决定任何事，reason 不许归给门（见函数文档注）。
+      mockIsMemoryEnabled.mockReturnValueOnce(false)
+      delete process.env.MEMORY_A2A_ENABLED
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
+
+      // env 显式开着也一样：合取项不成立就恒放行
+      mockIsMemoryEnabled.mockReturnValueOnce(false)
+      process.env.MEMORY_A2A_ENABLED = '1'
+      expect(memoryModule.shouldSkipA2aMemory()).toBe(false)
+    })
+
+    it('跳过结果与其它空结果同构：reason=skipped-a2a、text 空、参数快照非 0 非 undefined', () => {
+      process.env.MEMORY_TOP_K = '5'
+      process.env.MEMORY_MAX_DISTANCE = '0.42'
+      const r = memoryModule.skippedRetrievalResult()
+
+      expect(r.reason).toBe('skipped-a2a')
+      expect(r.text).toBe('')
+      expect(r.sections).toEqual([])
+      // 「没跑检索」⇒ 耗时恒 0（不是调用点实测的微秒数——那会把「跳过」渲染成
+      // 「极快的一次检索」）
+      expect(r.stats.retrievalMs).toBe(0)
+      // 参数快照照常填（其它空结果也填）——否则这几列落库全 null
+      expect(r.stats.paramTopK).toBe(5)
+      expect(r.stats.thresholdMaxDistance).toBeCloseTo(0.42, 12)
+      expect(r.stats.paramProbeN).toBeGreaterThan(0)
+      expect(r.stats.sections).toBe(0)
     })
   })
 })

@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { v4 as uuid } from 'uuid'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
 import {
@@ -12,7 +16,9 @@ import {
   spans as spansRepo,
 } from '../db/repository/index.js'
 import type { SpanInput } from '../db/repository/index.js'
-import { evalRoutes } from './eval.js'
+import { evalRoutes, __test_setRetrievalReportsDir, RETRIEVAL_REPO_MARKER } from './eval.js'
+import { findRepoRootFrom } from '../repo-root.js'
+import { agreementRate, spearman } from '../eval/phase0.js'
 import { getLogLevel, setLogLevel } from '../logger.js'
 import type { FastifyInstance } from 'fastify'
 
@@ -1099,6 +1105,555 @@ describe('Eval Routes', () => {
           'totalMs',
         ])
       })
+    })
+  })
+
+  // ─── J1 · 人工标注（盲标池 / 提交 / 一致性读数）──────────────────────────
+  describe('J1 人工标注', () => {
+    /** 盲标池 / 标注提交 / 一致性读数共用的造数：n 条猫回复 */
+    function seedReplies(sessionId: string, agentId: string, n: number, prefix: string): string[] {
+      const ids: string[] = []
+      for (let i = 0; i < n; i++) {
+        const id = `${prefix}-${i}`
+        messagesRepo.insertAgentMessage(id, sessionId, agentId, `${prefix} 的回复 ${i}`, null)
+        // 错开时间，让「每会话取最新 perSession 条」可判
+        setCreatedAt('messages', id, `2026-09-0${i + 1}T10:00:00.000Z`)
+        ids.push(id)
+      }
+      return ids
+    }
+
+    /** 人工标注（绕过路由直接写库——用于「已标注不入池」这类取数断言） */
+    function seedHumanLabel(
+      messageId: string,
+      sessionId: string,
+      agentId: string,
+      score: number
+    ): void {
+      const id = uuid()
+      getDb()
+        .prepare(
+          `INSERT INTO human_labels (id, message_id, session_id, agent_id, labeler, score, created_at)
+           VALUES (?, ?, ?, ?, 'user', ?, '2026-09-10T00:00:00.000Z')`
+        )
+        .run(id, messageId, sessionId, agentId, score)
+    }
+
+    describe('GET /api/eval/label/pool', () => {
+      it('**盲标可机验**：池响应里没有判官分（全文 + 键集两道）；反对照——回标端点响应里有', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const [m0] = seedReplies(sessionId, agentId, 1, 'r')
+        // 这条回复**带判官分**：池子若顺手 JOIN 了 eval_scores，下面两道断言会当场炸
+        const scoreId = seedScore({ agentId, sessionId, messageId: m0, score: 1 })
+
+        const poolRes = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        expect(poolRes.statusCode).toBe(200)
+        // 第 1 道：全文（店长派活单写的就是这条）——fixture 文案刻意不含这几个词，
+        // 故全文命中只可能来自**字段名**，不会因回复正文里恰好写了「score」而假红
+        expect(poolRes.body).not.toMatch(/score|judge/i)
+        // 第 2 道：键集（逐行递归——全文 grep 是超集探针，第 1 道过了不代表结构没多挂键）
+        const keys: string[] = []
+        const walk = (v: unknown): void => {
+          if (Array.isArray(v)) return v.forEach(walk)
+          if (v && typeof v === 'object') {
+            for (const [k, sub] of Object.entries(v)) {
+              keys.push(k)
+              walk(sub)
+            }
+          }
+        }
+        walk(JSON.parse(poolRes.body))
+        expect(keys.filter((k) => /score|judge/i.test(k))).toEqual([])
+
+        // 反对照：**同一个 fixture** 走回标端点，响应里必须有判官分 —— 证明上面两条
+        // 不是「夹具本来就什么都没有」的恒真
+        const reviewRes = await app.inject({ method: 'GET', url: '/api/eval/review/pending' })
+        expect(reviewRes.statusCode).toBe(200)
+        expect(reviewRes.body).toMatch(/score/)
+        expect(JSON.parse(reviewRes.body).pending[0].message_id).toBe(m0)
+        expect(scoreId).toBeTruthy()
+      })
+
+      it('E1 契约 D：每条附前置上下文，取的是**之前最近**的 N 条（不是会话头几条）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        // 12 条 user 排在回复之前，**刻意超过 limit=10**：这样「取最早 10 条」与「取最近
+        // 10 条」返回的是两个不同的集合。只摆两三条的话两种取法结果一样——那是假绿门。
+        for (let i = 0; i < 12; i++) {
+          const id = `u${String(i).padStart(2, '0')}`
+          messagesRepo.insertUserMessage(id, sessionId, `第 ${i} 条 user`, '[]', null)
+          setCreatedAt('messages', id, `2026-09-01T10:${String(i).padStart(2, '0')}:00.000Z`)
+        }
+        messagesRepo.insertAgentMessage('r1', sessionId, agentId, '待标注的猫回复', null)
+        setCreatedAt('messages', 'r1', '2026-09-01T11:00:00.000Z')
+        // 回复**之后**的一条：`created_at < ?` 是严格的，它不得出现在上文里
+        messagesRepo.insertUserMessage('after', sessionId, '回复之后的 user', '[]', null)
+        setCreatedAt('messages', 'after', '2026-09-01T12:00:00.000Z')
+
+        const res = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        const { pool } = JSON.parse(res.body) as {
+          pool: Array<{ id: string; context: Array<{ id: string; content: string }> }>
+        }
+        const sample = pool.find((p) => p.id === 'r1')
+        expect(sample).toBeTruthy()
+        expect(sample!.context.length).toBeGreaterThan(0) // 非空 ⇒ 下面那道键集行走真能下潜
+        // 盲标面（E1 新增字段的 ⑩ 复验）：既有的键集断言跑在 `context` 为空的夹具上，
+        // 递归行走根本进不去新字段——探针宽度 < 判据宽度时，「没测到」会被读成「没问题」。
+        const keys: string[] = []
+        const walk = (v: unknown): void => {
+          if (Array.isArray(v)) return v.forEach(walk)
+          if (v && typeof v === 'object') {
+            for (const [k, sub] of Object.entries(v)) {
+              keys.push(k)
+              walk(sub)
+            }
+          }
+        }
+        walk(JSON.parse(res.body))
+        expect(keys.filter((k) => /score|judge/i.test(k))).toEqual([])
+        expect(res.body).not.toMatch(/score|judge/i)
+        const ids = sample!.context.map((c) => c.id)
+        // 最近 10 条 = u02..u11。「取最早 10 条」会给 u00..u09 ⇒ 首元素不同，必红
+        expect(ids).toEqual(['u02', 'u03', 'u04', 'u05', 'u06', 'u07', 'u08', 'u09', 'u10', 'u11'])
+        expect(ids).not.toContain('after')
+        // ASC 序 = 渲染序（`getContextBefore` 内部 `reverse()` 过）：最近的一条在**最后**
+        // ——前端不做重排，顺序错了在标注界面上就是「倒着读」
+        expect(sample!.context[sample!.context.length - 1].content).toBe('第 11 条 user')
+      })
+
+      it('E1：上文**跨会话不泄漏**（同 agent 在别的会话里的消息不得混进来）', async () => {
+        const agentId = seedAgent('flash猫')
+        const s1 = seedSession()
+        const s2 = seedSession()
+        messagesRepo.insertUserMessage('other', s2, '别的会话里的 user 原话', '[]', null)
+        setCreatedAt('messages', 'other', '2026-09-01T09:00:00.000Z')
+        messagesRepo.insertUserMessage('same', s1, '本会话里的 user 原话', '[]', null)
+        setCreatedAt('messages', 'same', '2026-09-01T09:30:00.000Z')
+        messagesRepo.insertAgentMessage('r1', s1, agentId, '待标注的猫回复', null)
+        setCreatedAt('messages', 'r1', '2026-09-01T10:00:00.000Z')
+
+        const res = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        const { pool } = JSON.parse(res.body) as {
+          pool: Array<{ id: string; context: Array<{ id: string }> }>
+        }
+        const sample = pool.find((p) => p.id === 'r1')
+        expect(sample!.context.map((c) => c.id)).toEqual(['same'])
+      })
+
+      it('跨会话分散：默认参数下每会话 ≤3 条，且每个会话都出得来', async () => {
+        const agentId = seedAgent('flash猫')
+        for (const s of ['s1', 's2', 's3']) {
+          const sid = seedSession()
+          void s
+          seedReplies(sid, agentId, 5, `r-${sid}`)
+        }
+        const res = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        const { pool, perSession, limit, days } = JSON.parse(res.body) as {
+          pool: Array<{ session_id: string }>
+          perSession: number
+          limit: number
+          days: number | null
+        }
+        expect(perSession).toBe(3)
+        expect(limit).toBe(30)
+        expect(days).toBeNull() // 不给 days = 不限窗（值本身也要能看见）
+        const bySession = pool.reduce<Record<string, number>>((a, r) => {
+          a[r.session_id] = (a[r.session_id] ?? 0) + 1
+          return a
+        }, {})
+        expect(Object.values(bySession).every((n) => n <= 3)).toBe(true)
+        expect(Object.keys(bySession)).toHaveLength(3)
+        expect(pool).toHaveLength(9)
+      })
+
+      it('已标注的样本不再出现；同会话未标注的照常出现（反例面）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const ids = seedReplies(sessionId, agentId, 3, 'r')
+        seedHumanLabel(ids[2], sessionId, agentId, 5)
+
+        const res = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        const pool = JSON.parse(res.body).pool as Array<{ id: string }>
+        expect(pool.map((p) => p.id)).not.toContain(ids[2])
+        expect(pool).toHaveLength(2)
+      })
+
+      it('非法参数 400（limit / perSession / days 三处，不静默回默认）', async () => {
+        for (const url of [
+          '/api/eval/label/pool?limit=0',
+          '/api/eval/label/pool?limit=abc',
+          '/api/eval/label/pool?limit=201',
+          '/api/eval/label/pool?perSession=0',
+          '/api/eval/label/pool?perSession=abc',
+          '/api/eval/label/pool?perSession=21',
+          '/api/eval/label/pool?days=abc',
+          '/api/eval/label/pool?days=0',
+        ]) {
+          const res = await app.inject({ method: 'GET', url })
+          expect(res.statusCode, url).toBe(400)
+        }
+      })
+
+      it('空库 → 200 + 空数组（不是 404 / 500）', async () => {
+        const res = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body).pool).toEqual([])
+      })
+    })
+
+    describe('POST /api/eval/label/:messageId', () => {
+      it('提交 → 落 human_labels（带会话/猫/标注源），covered=false', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const [m0] = seedReplies(sessionId, agentId, 1, 'r')
+
+        const res = await app.inject({
+          method: 'POST',
+          url: `/api/eval/label/${m0}`,
+          payload: { score: 5, comment: '写得好' },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.covered).toBe(false)
+        expect(body.label.score).toBe(5)
+        expect(body.label.comment).toBe('写得好')
+        expect(body.label.session_id).toBe(sessionId)
+        expect(body.label.agent_id).toBe(agentId)
+        expect(body.label.labeler).toBe('user') // 不传 labeler → 默认单源
+      })
+
+      it('重复提交同一 message → 覆盖 + 留痕（log.warn），**不 409**、不新增行', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const [m0] = seedReplies(sessionId, agentId, 1, 'r')
+
+        await app.inject({
+          method: 'POST',
+          url: `/api/eval/label/${m0}`,
+          payload: { score: 1 },
+        })
+        const res2 = await app.inject({
+          method: 'POST',
+          url: `/api/eval/label/${m0}`,
+          payload: { score: 4, comment: '改判' },
+        })
+        expect(res2.statusCode).toBe(200)
+        const body = JSON.parse(res2.body)
+        expect(body.covered).toBe(true)
+        expect(body.label.score).toBe(4)
+        const n = getDb().prepare('SELECT COUNT(*) AS n FROM human_labels').get() as { n: number }
+        expect(n.n).toBe(1)
+      })
+
+      it('非 1-5 整数 → 400（0 / 6 / 3.5 / "3" 四种；字符串不静默转 number）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const [m0] = seedReplies(sessionId, agentId, 1, 'r')
+        for (const score of [0, 6, 3.5, '3', null, undefined]) {
+          const res = await app.inject({
+            method: 'POST',
+            url: `/api/eval/label/${m0}`,
+            payload: { score },
+          })
+          expect(res.statusCode, String(score)).toBe(400)
+        }
+        const n = getDb().prepare('SELECT COUNT(*) AS n FROM human_labels').get() as { n: number }
+        expect(n.n).toBe(0)
+      })
+
+      it('消息不存在 → 404；**不是猫的回复**（user / system）→ 400（两种失败面分开）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const db = getDb()
+        db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES ('u1', ?, 'user', '用户说的话', '[]')`
+        ).run(sessionId)
+
+        const missing = await app.inject({
+          method: 'POST',
+          url: '/api/eval/label/nope',
+          payload: { score: 3 },
+        })
+        expect(missing.statusCode).toBe(404)
+
+        const notReply = await app.inject({
+          method: 'POST',
+          url: '/api/eval/label/u1',
+          payload: { score: 3 },
+        })
+        expect(notReply.statusCode).toBe(400)
+        expect(JSON.parse(notReply.body).error).toBe('message is not an agent reply')
+        // 反例面：同一条路径喂**猫的回复**必须成功——证明 400 来自角色判定不是路径坏了
+        const [m0] = seedReplies(sessionId, agentId, 1, 'r')
+        const ok = await app.inject({
+          method: 'POST',
+          url: `/api/eval/label/${m0}`,
+          payload: { score: 3 },
+        })
+        expect(ok.statusCode).toBe(200)
+      })
+
+      it('提交后该条移出池子（池子的排除面走服务端真源，不靠前端 filter）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const [m0, m1] = seedReplies(sessionId, agentId, 2, 'r')
+
+        await app.inject({
+          method: 'POST',
+          url: `/api/eval/label/${m0}`,
+          payload: { score: 4 },
+        })
+        const res = await app.inject({ method: 'GET', url: '/api/eval/label/pool' })
+        const pool = JSON.parse(res.body).pool as Array<{ id: string }>
+        expect(pool.map((p) => p.id)).toEqual([m1])
+      })
+    })
+
+    describe('GET /api/eval/judge-agreement', () => {
+      it('空库 → 200 + 结构化空态（**不是 500**）：counted=0、sufficient=false、读数 null 不是 0', async () => {
+        const res = await app.inject({ method: 'GET', url: '/api/eval/judge-agreement' })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.ok).toBe(true)
+        expect(body.total).toBe(0)
+        expect(body.counted).toBe(0)
+        expect(body.sufficient).toBe(false)
+        // null 而不是 0：0 是个合法读数（完全不相关），会把「没数据」画成「完全不相关」
+        expect(body.spearman).toBeNull()
+        expect(body.agreement).toBeNull()
+        expect(body.judgeModels).toEqual([])
+        expect(body.gate).toBeNull()
+        expect(typeof body.gateUnavailableReason).toBe('string')
+      })
+
+      it('读数与 phase0.agreementRate **逐位相同**（防第二条真相源）+ 与手算一致', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const ids = seedReplies(sessionId, agentId, 6, 'r')
+        // 六对：同 pass / 同 fail / 一方 3 不计 / 分歧 —— 四类都覆盖
+        const pairs: Array<[number, number]> = [
+          [5, 4],
+          [5, 5],
+          [2, 1],
+          [1, 2],
+          [4, 3],
+          [2, 5],
+        ]
+        pairs.forEach(([judge, human], i) => {
+          seedScore({ agentId, sessionId, messageId: ids[i], score: judge, sampleReason: 'random' })
+          seedHumanLabel(ids[i], sessionId, agentId, human)
+        })
+
+        const res = await app.inject({ method: 'GET', url: '/api/eval/judge-agreement' })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+
+        const expected = agreementRate(
+          pairs.map((p) => p[0]),
+          pairs.map((p) => p[1])
+        )
+        // 逐位相同（不是 toBeCloseTo）——J1 §六-4 的验收就是这条
+        expect(body.agreement).toBe(expected.rate)
+        expect(body.counted).toBe(expected.counted)
+        expect(body.total).toBe(expected.total)
+        // 手算对照：六对里 [4,3] 出分母（人工 3）⇒ counted=5，其中 [2,5] 分歧 ⇒ 4/5
+        expect(body.counted).toBe(5)
+        expect(body.agreement).toBeCloseTo(0.8, 10)
+        expect(body.spearman).toBeCloseTo(
+          spearman(
+            pairs.map((p) => p[0]),
+            pairs.map((p) => p[1])
+          ),
+          10
+        )
+        expect(body.judgeModels).toEqual(['test-judge'])
+      })
+
+      it('分母下界：counted < minCount ⇒ sufficient=false，**不给判定**（gate 仍为 null）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const [m0] = seedReplies(sessionId, agentId, 1, 'r')
+        seedScore({ agentId, sessionId, messageId: m0, score: 5, sampleReason: 'random' })
+        seedHumanLabel(m0, sessionId, agentId, 5)
+
+        const res = await app.inject({ method: 'GET', url: '/api/eval/judge-agreement' })
+        const body = JSON.parse(res.body)
+        expect(body.counted).toBe(1)
+        expect(body.minCount).toBe(30)
+        expect(body.sufficient).toBe(false)
+        expect(body.gate).toBeNull()
+      })
+
+      it('只有人工分、没有判官分的 message 不进分母（JOIN 是内连接）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const ids = seedReplies(sessionId, agentId, 2, 'r')
+        seedScore({ agentId, sessionId, messageId: ids[0], score: 5, sampleReason: 'random' })
+        seedHumanLabel(ids[0], sessionId, agentId, 5)
+        seedHumanLabel(ids[1], sessionId, agentId, 1) // 无判官分
+
+        const res = await app.inject({ method: 'GET', url: '/api/eval/judge-agreement' })
+        const body = JSON.parse(res.body)
+        expect(body.total).toBe(1)
+        expect(body.counted).toBe(1)
+      })
+    })
+  })
+
+  describe('E1 检索跑批报告（只读出口）', () => {
+    /** 夹具根 = `os.tmpdir()` 下自建目录。**报告目录是它的子目录**——「穿越」那条要往
+     *  上一级写诱饵文件，放在自己根下才收得干净（别往 `tmpdir()` 裸根里扔东西）。 */
+    let base: string
+    let dir: string
+
+    /** 造一份最小但形状真实的报告 JSON（= `buildReportJson(ctx)` = `{schema, ...ctx}`）。 */
+    function reportBody(date: string): string {
+      return JSON.stringify({
+        schema: 1,
+        date,
+        groups: { real: { recallMean: 0.5833 }, constructed: { recallMean: 0.8261 } },
+        scores: [],
+      })
+    }
+
+    beforeEach(() => {
+      base = mkdtempSync(join(tmpdir(), 'eval-retrieval-'))
+      dir = join(base, 'docs-eval')
+      mkdirSync(dir)
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-20.json'), reportBody('2026-09-20'))
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-19.json'), reportBody('2026-09-19'))
+      // 同目录还躺着跑批落的 md 报告与别的 json——**只有契约名算报告**，其余绝不进清单
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-18.md'), '# md 不是报告')
+      writeFileSync(join(dir, 'notes.json'), '{}')
+      __test_setRetrievalReportsDir(dir)
+    })
+
+    afterEach(() => {
+      __test_setRetrievalReportsDir(undefined)
+      rmSync(base, { recursive: true, force: true })
+    })
+
+    it('清单：日期倒序，且只认契约文件名（md 与别的 json 不进）', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/eval/retrieval/reports' })
+      expect(res.statusCode).toBe(200)
+      const { ok, reports } = JSON.parse(res.body) as {
+        ok: boolean
+        reports: Array<{ date: string; file: string; writtenAt: string | null }>
+      }
+      expect(ok).toBe(true)
+      expect(reports.map((r) => r.date)).toEqual(['2026-09-20', '2026-09-19'])
+      expect(reports[0].file).toBe('retrieval-baseline-2026-09-20.json')
+      // `writtenAt` 取自**文件 mtime**（报告本体按 B1 零时间量），必须是可解析的 ISO
+      expect(Number.isFinite(Date.parse(reports[0].writtenAt!))).toBe(true)
+    })
+
+    it('空清单是 200 + `[]`，**不是 404**（「还没跑过批」不是错误）', async () => {
+      __test_setRetrievalReportsDir(null) // 钉成「解析不到仓库根」
+      const res = await app.inject({ method: 'GET', url: '/api/eval/retrieval/reports' })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({ ok: true, reports: [] })
+    })
+
+    it('单份：缺省 = 最新；`?date=` 取指定那份', async () => {
+      const latest = await app.inject({ method: 'GET', url: '/api/eval/retrieval/report' })
+      expect(latest.statusCode).toBe(200)
+      expect(JSON.parse(latest.body).date).toBe('2026-09-20')
+
+      const older = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-19',
+      })
+      expect(older.statusCode).toBe(200)
+      const body = JSON.parse(older.body) as {
+        date: string
+        report: { schema: number; groups: { real: { recallMean: number } } }
+      }
+      expect(body.date).toBe('2026-09-19')
+      // 取的是**那一份的内容**，不是「最新那份换个日期标签」——夹具两天的 recallMean
+      // 刻意不同，张冠李戴这里就红（虽是同一份 body 造的，读的文件名不同即路径错）
+      expect(body.report.groups.real.recallMean).toBe(0.5833)
+      expect(body.report.schema).toBe(1)
+    })
+
+    it('没有报告 ⇒ 404 + reason（不静默给空对象）', async () => {
+      rmSync(join(dir, 'retrieval-baseline-2026-09-20.json'))
+      rmSync(join(dir, 'retrieval-baseline-2026-09-19.json'))
+      const none = await app.inject({ method: 'GET', url: '/api/eval/retrieval/report' })
+      expect(none.statusCode).toBe(404)
+      expect(JSON.parse(none.body).error).toContain('no retrieval baseline report yet')
+
+      // 清单非空但**那天没有** ⇒ 也是 404，但理由不同（否则会去查错方向）
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-20.json'), reportBody('2026-09-20'))
+      const missing = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-01',
+      })
+      expect(missing.statusCode).toBe(404)
+      expect(JSON.parse(missing.body).error).toContain('2026-09-01')
+    })
+
+    it('`?date=` 形状不对 ⇒ 400（与 404 分开：写错的调用方不该被伪装成「那天没有」）', async () => {
+      for (const bad of ['abc', '2026-9-1', '2026-09-20T00:00:00Z', '../../etc/passwd']) {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/eval/retrieval/report?date=${encodeURIComponent(bad)}`,
+        })
+        expect(res.statusCode, `date=${bad}`).toBe(400)
+      }
+    })
+
+    it('穿越防护：date 拼进文件名**之前**就死在形状闸上', async () => {
+      // 上一级真放一个「穿越目标」——证明挡住它的是正则，而不是「那个文件恰好不存在」
+      const bait = join(base, 'retrieval-baseline-1999-01-01.json')
+      writeFileSync(bait, reportBody('1999-01-01'))
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=..%2Fretrieval-baseline-1999-01-01.json',
+      })
+      expect(res.statusCode).toBe(400)
+      expect(existsSync(bait)).toBe(true) // 诱饵仍在 ⇒ 上面不是「读到了才挡」
+    })
+
+    it('读不动 / 顶层不是对象 ⇒ 500（不是调用方写错，不能伪装成 404）', async () => {
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-17.json'), 'not json at all')
+      const broken = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-17',
+      })
+      expect(broken.statusCode).toBe(500)
+
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-16.json'), '[1,2,3]')
+      const arr = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-16',
+      })
+      expect(arr.statusCode).toBe(500)
+    })
+
+    it('契约 B 路径解析：源码布局与产物布局**同解**（负对照：固定层级必有一边红）', () => {
+      const srcStart = dirname(fileURLToPath(import.meta.url))
+      const root = findRepoRootFrom(srcStart, RETRIEVAL_REPO_MARKER)
+      expect(root).not.toBeNull()
+      expect(existsSync(join(root!, 'docs', 'eval', 'retrieval-golden.json'))).toBe(true)
+      // 产物布局：`tsconfig.json` 的 `rootDir: ".."` + `outDir: "./dist"` ⇒ 比源码深两层
+      const distStart = join(root!, 'packages', 'server', 'dist', 'server', 'src', 'routes')
+      expect(findRepoRootFrom(distStart, RETRIEVAL_REPO_MARKER)).toBe(root)
+
+      // 负对照**两条缺一不可**：只断言「产物下错」的话，一个「恒返回垃圾」的实现也绿
+      const fixed4 = (d: string): string => resolve(d, '..', '..', '..', '..')
+      const marker = join('docs', 'eval', 'retrieval-golden.json')
+      expect(existsSync(join(fixed4(srcStart), marker))).toBe(true) // 源码下固定层级确实对
+      expect(existsSync(join(fixed4(distStart), marker))).toBe(false) // 产物下必错
+    })
+
+    it('契约 B：报告目录走 `findRepoRootFrom`，本文件不得再出现固定层级上溯', () => {
+      // 上一条证的是「向上找能同解」，这条证的是**路由真的用了它**——少了这条，
+      // 路由改回固定层级而测试照绿（G5 已把这类写法点名拒绝过一次）。
+      const src = readFileSync(new URL('./eval.ts', import.meta.url), 'utf8')
+      expect(src).toContain('findRepoRootFrom(')
+      expect(src).not.toMatch(/new URL\(\s*['"]\.\.\//)
     })
   })
 })

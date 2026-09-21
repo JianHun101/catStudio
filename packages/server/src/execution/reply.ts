@@ -31,6 +31,8 @@ import {
   retrieveMemoryContext,
   buildKnowledgeContext,
   currentRetrievalParams,
+  shouldSkipA2aMemory,
+  skippedRetrievalResult,
   type MemoryContextResult,
 } from '../memory/index.js'
 import { createLogger } from '../logger.js'
@@ -73,6 +75,7 @@ import {
   formatUserMessage,
   resolveRolePlaceholders,
   buildDynamicHints,
+  buildSkillDirectorySection,
 } from './hints.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 import type { EngineState } from './state.js'
@@ -200,13 +203,13 @@ function upsertTool(tools: ToolCallInfo[], chunk: Chunk): void {
  *   （`insertAgentMessage`，本文件下方「写入完整消息」段）**同一表达式**。链锚口径 = P1 的
  *   `COALESCE(回复.task_id, 触发.task_id)`，而回复侧因这个 `|| traceId` 恒非空
  *   ⇒ 链锚 = 本表达式。写成 `triggerMsg.taskId` 会与 P1 对不上账。
- * · `reason`：照抄下方日志的三元式——值域 **9**（模块 7 枚举 + `timeout` +
- *   `error`）。超时那次 `memoryResult === null`，只读 `memoryResult.reason`
- *   会恰好在「最慢、最该记」的那一次丢数据。
+ * · `reason`：照抄下方日志的三元式——值域 **10**（模块 8 枚举 + `timeout` +
+ *   `error`；第 8 个是 T-1 的 `skipped-a2a`）。超时那次 `memoryResult === null`，
+ *   只读 `memoryResult.reason` 会恰好在「最慢、最该记」的那一次丢数据。
  * · `executionId`：该 (会话, 猫, 触发消息) 当前 running 的执行行。**不在
  *   serial 里穿线拿 logId**——那要改 4 个签名、把 R1 拖进 `serial.ts` 这个
- *   事故密集区（P2 §八 已把它划给另票）。此处多带 session + trigger 两个条件，
- *   比 `updateExecutionLogDiagnostics` 的「agent + running」窄，错挂面更小。
+ *   事故密集区（P2 §八 已把它划给另票）。此处多带 trigger 一个条件，
+ *   比 `updateExecutionLogDiagnostics` 的「agent_id + session_id + running」窄，错挂面更小。
  *
  * 写失败在写口内部吞掉（硬约束 2），本函数不抛。
  *
@@ -292,6 +295,11 @@ export async function runAgentReply(
     mentions: string[]
     taskId?: string
     authorName?: string
+    /** 触发消息由 agent 发出（T-1 a2a 记忆门的判据）。**必填**——可选会静默缺省
+     *  成 `false`（= 照常注入），正是门要防的那条静默路径。形状与
+     *  `serial.ts` 的 `AgentTriggerMsg` 同源（本处仍是结构化内联类型，不动 7 参
+     *  签名——见下方 R2 §4.7 形态裁决）。 */
+    fromAgent: boolean
   },
   traceId: string,
   /**
@@ -591,11 +599,21 @@ export async function runAgentReply(
       ? `${agent.systemPrompt}\n\n${ironLaw}`
       : agent.systemPrompt
 
+  // 技能发现面（甲案，2026-09-20）：常驻目录段拼在**替换面内**——与铁律同款理由，
+  // 注入文本若含角色占位符（@作者/@架构师/@审查者）必须一并被替换，否则占位符漏网
+  // ⇒ mention 精确匹配落空 ⇒ 静默不触发。目录段每轮不变，坐的是第一条 system
+  // message（真 system prompt 面），不是 dynamicHints 的位置——后者是场景提示，
+  // 有「超限时被当最旧先丢」的观察项（CLI 截断止血单），常驻菜单不能坐那儿。
+  const systemPromptWithDirectory = `${baseSystemPrompt}\n\n${buildSkillDirectorySection()}`
+
   // 将 system prompt 中的角色占位符（@作者/@架构师/@审查者）替换为实际 agent 名
   // 使 LLM 能正确输出 @店长 等实际 agent 名——mention 解析是严格精确匹配，
   // 占位符不替换 = 解析落空 = 静默不触发（b542d24 分流断链事故根因）。
   // 注入的铁律全文同样含占位符（@作者/@架构师/@审查者）——必须一起替换
-  const finalSystemPrompt = resolveRolePlaceholders(baseSystemPrompt, triggerMsg.authorName)
+  const finalSystemPrompt = resolveRolePlaceholders(
+    systemPromptWithDirectory,
+    triggerMsg.authorName
+  )
 
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
   const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages, {
@@ -745,23 +763,39 @@ export async function runAgentReply(
 
   // 检索相关记忆并注入 system prompt（带超时，不阻塞 LLM 调用）。
   // 超时/抛错 → 结果置 null（reason 记 'timeout'/'error'），与记忆模块自己的
-  // 六种 reason 一起构成**穷尽的**空结果台账——不许有「返回空且无痕」的路径。
+  // 七种 reason 一起构成**穷尽的**空结果台账——不许有「返回空且无痕」的路径。
   const MEMORY_TIMEOUT_MS = 10_000
   const memoryT0 = Date.now()
+  // ── a2a 记忆门（T-1）───────────────────────────────────
+  // 触发者是被 @ 的猫（上一条 agent 回复）且开关默认关 ⇒ **整段检索跳过**。
+  // 跳过的不只是召回：`rewriteRetrievalQueries` 在 `retrieveMemoryContext`
+  // **内部**（`memory/index.ts`），门开在调用点，改写（每条新内容一次 LLM 调用）
+  // 天然一并省掉——这正是本门要拿掉的那笔 token 税。
+  // 【知识库】不走此门（下方 `buildKnowledgeContext` 原样保留）。
+  // 判据是一个谓词而不是两个合的表达式：记忆总开关也在谓词内部合取（F3）——
+  // 总开关关时门不生效、本条走正常路径，由 `retrieveMemoryContext` 的第一条
+  // `not-enabled` 兜底（reason 与 span 都与用户触发同口径）。
+  const a2aMemorySkipped = triggerMsg.fromAgent && shouldSkipA2aMemory()
   let memoryResult: MemoryContextResult | null = null
   let memoryTimeout = false
-  try {
-    memoryResult = await Promise.race([
-      retrieveMemoryContext(triggerMsg.content),
-      new Promise<null>((resolve) =>
-        setTimeout(() => {
-          memoryTimeout = true
-          resolve(null)
-        }, MEMORY_TIMEOUT_MS)
-      ),
-    ])
-  } catch (err: any) {
-    log.warn('记忆检索抛错，本轮不注入', { traceId, agentId: agent.id, error: err?.message })
+  if (a2aMemorySkipped) {
+    // 不静默：结果仍是一个**形状同构**的空结果（`skipped-a2a`），下面 span /
+    // 流水落盘 / 日志三条路径照常走，三处各留一条痕。
+    memoryResult = skippedRetrievalResult()
+  } else {
+    try {
+      memoryResult = await Promise.race([
+        retrieveMemoryContext(triggerMsg.content),
+        new Promise<null>((resolve) =>
+          setTimeout(() => {
+            memoryTimeout = true
+            resolve(null)
+          }, MEMORY_TIMEOUT_MS)
+        ),
+      ])
+    } catch (err: any) {
+      log.warn('记忆检索抛错，本轮不注入', { traceId, agentId: agent.id, error: err?.message })
+    }
   }
 
   // ── 段 E3 `memory.retrieval`（R2 段五；详情表 = R1 `retrieval_events`）──
@@ -773,7 +807,14 @@ export async function runAgentReply(
   trace.recordSpan('memory.retrieval', {
     startMs: memoryT0,
     durationMs: memoryResult?.stats?.retrievalMs ?? memoryElapsedMs,
-    status: memoryTimeout ? 'timeout' : memoryResult ? 'ok' : 'error',
+    // 跳过 ≠ ok（那是「跑过且零命中」的假读数）、≠ error（那是「跑挂了」的假读数）。
+    status: a2aMemorySkipped
+      ? 'skipped'
+      : memoryTimeout
+        ? 'timeout'
+        : memoryResult
+          ? 'ok'
+          : 'error',
     // 命中数 = 实际注入的节数（与 retrieval_events 的 sections 同口径）
     itemCount: memoryResult?.stats?.sections ?? null,
   })
@@ -1057,10 +1098,12 @@ export async function runAgentReply(
       }
       if (signal?.aborted) {
         // 超时（serial.ts 的 Promise.race 硬上限）与用户主动停止（AGENT_INTERRUPT）
-        // **共用本分支**，故文案不得写死任一方——原因改由 `signal.reason` 承载。
+        // **共用本分支**，故文案不得写死任一方——原因由 `signal.reason` 承载。
         // （旧文案写死超时语义，用户点停止也被记成超时，2026-09-18 排障现场即被带偏。）
-        // ⚠️ 现存两处 `abort()` 调用点均未传 reason ⇒ 实际取值为 AbortError 默认值，
-        // 尚不足以区分两类中断；要落到「谁中断的」需上游补 `abort(reason)`（另议）。
+        // 上游 reason 契约（2026-09-18 补齐）：serial.ts 硬超时 `'timeout'`、执行抛错
+        // `'error'`；state.ts abortAgent（用户点停止）`'user-stop'`。
+        // signal 只能 abort 一次、先到者胜——硬超时已 abort('timeout') 后 catch 再
+        // abort('error') 是 no-op，收尾仍记 'timeout'（正确）。
         log.info('agent reply aborted', {
           traceId,
           agentId: agent.id,

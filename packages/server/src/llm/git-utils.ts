@@ -149,7 +149,69 @@ export function getHeadCommit(): string | null {
 }
 
 /**
- * git add -A && git commit。
+ * 暂存区读数：`git diff --cached --quiet` 的退出码。
+ *
+ * 0 = 暂存区与 HEAD 无差异（没有任何东西可提交）；1 = 有差异；**其余 = git 自己出错**。
+ * 用这个读数而不是「`git commit` 是否失败」判「有没有东西可提交」——后者的退出码
+ * 分不清「真没改动」与「钩子拒绝 / `index.lock` 撞车」（四种情况同一条日志）。
+ *
+ * 拿不到退出码（spawn 失败 / 被信号杀）返回 -1，调用方按**出错**处理（fail-closed）：
+ * 不可判定时若当成「没差异」，真改动静默丢失。
+ */
+function stagedDiffStatus(cwd: string): number {
+  try {
+    execSync('git diff --cached --quiet', { cwd, env: cleanGitEnv(), stdio: 'ignore' })
+    return 0
+  } catch (err: any) {
+    return typeof err?.status === 'number' ? err.status : -1
+  }
+}
+
+/**
+ * 是否有**进行中的 merge**（`MERGE_HEAD` 是否存在）。
+ *
+ * 短路必须看它：merge 进行中时，即使暂存区与 HEAD **无内容差异**（解冲突取了 ours、
+ * 或对方分支的改动已由别的路径进过 ours），`git commit` 仍会产出一个**有拓扑意义的
+ * merge commit**（记录第二父提交）。短路会把它吞掉 ⇒ 半合并态滞留，而之后每一轮
+ * auto-commit 都继续短路、日志每轮报「no changes」——对一个半合并态说「没改动」。
+ * 触发树不是假想的：`worktree-fanin.ts` 的 `CONFLICT_FIX_STEPS` 明文让猫
+ * 「在你自己的 worktree 里 `git merge <审查分支>`」，而那正是 `gitCommit` 的 `cwd`。
+ *
+ * **同族四态逐一实测过，只守 merge 是实测结论、不是省事**（判据统一为
+ * 「`index==HEAD` 时旧路径的 `git commit` 会不会产出提交」）：
+ *
+ * | 进行中 | `git commit` | 结论 |
+ * | --- | --- | --- |
+ * | merge（`MERGE_HEAD`） | 退出 **0**，产出**双亲** merge commit | **回归成立 ⇒ 必守** |
+ * | cherry-pick（`CHERRY_PICK_HEAD`） | 退出 1（提示「now empty」） | 旧路径本就返回 null，等价 |
+ * | revert（`REVERT_HEAD`） | 退出 1 | 同上 |
+ * | rebase（edit 停点） | 退出 1（`nothing to commit`） | 同上 |
+ *
+ * 后三者 git **自己会拒绝**，短路与旧路径同归 null ⇒ 加守卫只是徒增 execSync。
+ *
+ * 为什么不复用 `worktree-fanin.ts` 的同名导出：它 `import` 了 `connectors/ingest.js`，
+ * 从本模块引它会闭合出环（本仓刚因一条新值导入边闭合出 5 节点 SCC）。自持一句 git
+ * 调用，与 `stagedDiffStatus` 同款。
+ *
+ * 判据非恒真：非 merge 态 `rev-parse --verify --quiet MERGE_HEAD` 退出码非 0。
+ * git 自身出错（非仓库等）也走 catch ⇒ 返回 false（不守）——此时上面的暂存区读数
+ * 已经先一步 fail-closed 落 error 返回，到不了这里。
+ */
+function hasMergeInProgress(cwd: string): boolean {
+  try {
+    execSync('git rev-parse --verify --quiet MERGE_HEAD', {
+      cwd,
+      env: cleanGitEnv(),
+      stdio: 'ignore',
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * git add -A &&（暂存区非空时）git commit。
  *
  * opts.cwd 指定提交仓库（会话 worktree 场景——auto-commit 落会话分支）；
  * 缺省提交当前 cwd 的仓库（主工作区，存量会话行为零变化）。
@@ -166,6 +228,37 @@ export function gitCommit(message: string, opts?: { cwd?: string }): string | nu
   }
   try {
     execSync('git add -A', { cwd: base, env: cleanGitEnv(), stdio: 'ignore' })
+
+    // 暂存区为空 ⇒ 整个跳过 `git commit`（T-1 格 0）。
+    //
+    // `git commit` 会连带跑人类提交门禁（`.husky/pre-commit` = lint-staged → 三包 tsc →
+    // `scripts/precommit-scope.mjs`），而后者对**空暂存区**走 fail-closed 全量 4 project
+    // （`precommit-scope.mjs` 的「暂存区为空或不可解析」分支）——于是「根本没法提交」的轮次
+    // 反而触发最贵的分支：实测单次 100–180s，全程同步阻塞事件循环（socket 心跳/HTTP 全僵死）。
+    //
+    // 短路的**唯一**例外是「merge 进行中」：那时 `index==HEAD` 仍能提交出有拓扑意义的
+    // merge commit，短路会吞掉它（见 `hasMergeInProgress` 的注释）。除该例外，短路后对外
+    // 行为与旧路径逐字相同：返回 null + 同一条 `auto commit skipped (no changes)` 日志
+    // （旧路径也是走到 `git commit` 失败才返回 null）——只是不再白跑一遍门禁。
+    //
+    // 判据顺序：先 fail-closed 判「读数是否可信」，再判「要不要短路」。反过来写的话，
+    // 出错态（`staged` 既非 0 也非 1）会被短路分支抢先吃掉、error 分支永不可达。
+    const staged = stagedDiffStatus(base)
+    if (staged !== 0 && staged !== 1) {
+      // ≥2 = git 自己出错，-1 = 没拿到退出码。**绝不**当成「没差异」——那会把真改动
+      // 静默吞掉。显式落 error（本仓铁律：不静默），不产生 commit。
+      log.error('auto commit failed (git diff --cached --quiet)', {
+        message,
+        cwd: base,
+        status: staged,
+      })
+      return null
+    }
+    if (staged === 0 && !hasMergeInProgress(base)) {
+      log.info('auto commit skipped (no changes)', { message, cwd: base })
+      return null
+    }
+
     execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
       cwd: base,
       env: cleanGitEnv(),
@@ -180,7 +273,11 @@ export function gitCommit(message: string, opts?: { cwd?: string }): string | nu
     log.info('auto commit', { message, hash, cwd: base })
     return hash
   } catch (err: any) {
-    // 没有改动时 git commit 会非零退出，这是正常的
+    // 走到这里 = `git add -A` / `git commit` / `git rev-parse` 三者之一出错。
+    // （「暂存区为空」那条路径已在上面短路返回；**例外是 merge 进行中**——那条按设计
+    // 会走到 `git commit`，失败时落到这里，与格 0 之前的旧路径行为一致。）
+    // 文案仍是历史那句「no changes」——对「钩子拒绝 / `index.lock` 撞车」是**假读数**，
+    // 属格 3（仪表）的范围，本格刻意不动文案（C3）。
     log.info('auto commit skipped (no changes)', { message, cwd: base })
     return null
   }

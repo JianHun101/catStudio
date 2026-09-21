@@ -16,6 +16,7 @@
 
 import { execSync } from 'node:child_process'
 import { v4 as uuid } from 'uuid'
+import { PLACEHOLDER_API_KEY } from '../constants.js'
 import {
   type AgentConfig,
   type AgentRuntimeState,
@@ -35,9 +36,9 @@ import { MAX_QUEUE_PER_AGENT, isStaleHandoffRequest } from '../dispatch/index.js
 import { ProviderTokenPool } from './token-pool.js'
 import { classifyError } from '../eval/classify-error.js'
 // 诊断取值单源（R5 §B）：catch 到的**任何**值都要能落出可辨识信息——`err.message`
-// 对非 Error 抛出物恒为 undefined（诊断当场归零）。注：库内 19 行 `execute crash`
-// **不是**这条路来的（那 19 行的 catch 从未触发过），成因是 `executeRun` finally 段
-// 的误收口——R7 已加归属校验除根，该词随之退役；19 行是历史存量，不再新增。
+// 对非 Error 抛出物恒为 undefined（诊断当场归零）。注：库内那批 `execute crash`
+// **不是**这条路来的（那些行的 catch 从未触发过），成因是 `executeRun` finally 段
+// 的误收口——R7 已加归属校验除根，该词随之退役；那批行是历史存量，不再新增。
 import { messageOf } from '../utils.js'
 import {
   cleanGitEnv,
@@ -51,15 +52,24 @@ import {
   detectUnknownHandle,
   detectInlineMentions,
 } from '../connectors/a2a-mentions.js'
-import { filterAllowedMentions, allowedTargetsDescription } from '../dispatch/mention-policy.js'
+import {
+  filterAllowedMentions,
+  allowedTargetsDescription,
+  mentionLimitRemedy,
+  MAX_MENTIONS_PER_REPLY,
+} from '../dispatch/mention-policy.js'
 import { consumeRouteSignals } from '../llm/route-signals.js'
-import { recordReviewVerdict } from '../eval/verdict-parser.js'
+import {
+  parseReviewVerdict,
+  recordReviewVerdict,
+  type ReviewVerdict,
+} from '../eval/verdict-parser.js'
 import { advanceFlowAfterVerdict } from './flow-advance.js'
 import { maybeScoreSample } from '../eval/sampler.js'
 import { judgeReviewFallback, spawnReviewFallback } from './review-fallback.js'
 import { resolveRolePlaceholders } from './hints.js'
 import { runAgentReply } from './reply.js'
-import { rowToAgent } from './row.js'
+import { rowToAgent, isAgentAuthoredTrigger } from './row.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 import { createEngineState, type EngineState, type StreamState } from './state.js'
 
@@ -73,14 +83,15 @@ export function agentHasUsableApiKey(
   agent: Pick<AgentConfig, 'llmProvider' | 'llmApiKey'>
 ): boolean {
   if (NO_API_KEY_PROVIDERS.has(agent.llmProvider)) return true
-  return !!agent.llmApiKey && agent.llmApiKey !== 'sk-your-api-key-here'
+  return !!agent.llmApiKey && agent.llmApiKey !== PLACEHOLDER_API_KEY
 }
 
 /**
  * Agent 执行超时机制（多层纵深设计）。
  *
  *   层级 1 — CLI idle timeout（cli-utils.ts）:
- *     20 分钟无 stdout 输出 → SIGTERM → SIGKILL
+ *     20 分钟无 stdout 输出 → 终止子进程
+ *     （POSIX: SIGTERM → 5s → SIGKILL；win32: `taskkill /t /f` 树杀）
  *     每次输出重置 timer，持续产出的 agent 不会被误杀
  *
  *   层级 2 — Dispatch hard timeout（此处）:
@@ -152,6 +163,26 @@ export type AgentTriggerMsg = {
   mentions: string[]
   taskId?: string
   authorName?: string
+  /**
+   * 触发消息是否**由 agent 发出**（T-1：`execution/reply.ts` 据此决定 a2a 是否
+   * 检索【相关记忆】）。**必填**——可选字段漏填即静默 `false`，而 `false` 侧的
+   * 行为是「照常注入」，等于新入口忘标就悄悄绕过门（与 D15 `IngestInput.origin`
+   * 同款判据：忘标要变成 `tsc` 编译错误，fail-loud）。
+   *
+   * 真相源恒为 **DB `messages.role === 'agent'`**，判据函数 `isAgentAuthoredTrigger`
+   * 定义在 `./row.js`（叶模块——放这儿会闭合出模块环，见该文件文首注）。
+   *
+   * **判据面恰有两条**（`runAgentReply` 全仓唯一调用点 = `executeOneAgent`；
+   * `executeOneAgent` 全仓恰两个调用点 ⇒ 只有这两条路把 trigger 喂到 reply 侧）：
+   *   ① `buildTriggerMsg`（`executeRun`，每次执行体重建）；
+   *   ② `drainQueuedCommand` 的 `queuedTrigger`（**直接**调 `executeOneAgent`，
+   *      不经 `execute()` ⇒ `buildTriggerMsg` 在那条路上根本不跑）。
+   * 其余构造点（A2A 递归 / recovery / ingest 入口）填的是各自触发行的真实 role，
+   * 语义正确，但**不承担判据职责**——它们都经 `execute()` → `executeRun`，
+   * 而 `makeCmd` 不搬运本字段 ⇒ reply 侧读的是 `buildTriggerMsg` 重建的那一份。
+   * ⚠️ 别把「只有一个权威构造点」照旧写回来：drain 那条是**同权的第二处**。
+   */
+  fromAgent: boolean
 }
 
 // ─── C1 v3 调度层重构：槽位（engine 闭包持有，键 agentId+sessionId） ────────────
@@ -280,7 +311,7 @@ function providerKey(agent: AgentConfig): string {
   return `${agent.llmProvider}:${agent.llmApiKey}`
 }
 
-/** 由命令构造触发消息静态形状（A2A authorName 从 DB 反查） */
+/** 由命令构造触发消息静态形状（A2A authorName / fromAgent 从 DB 反查） */
 function buildTriggerMsg(ctx: EngineCtx, cmd: DispatchCommand): AgentTriggerMsg {
   const triggerMeta = messagesRepo.getMessageByIdOnly(cmd.triggerMessageId)
   const triggerRow = triggerMeta
@@ -295,6 +326,11 @@ function buildTriggerMsg(ctx: EngineCtx, cmd: DispatchCommand): AgentTriggerMsg 
       triggerRow?.role === 'agent' && triggerRow.agent_id
         ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
         : undefined,
+    // ── 唯一权威判据（T-1）───────────────────────────
+    // 反查不到行（trigger 消息不在库）⇒ `false` = 照常注入——**fail-open 是有意的**：
+    // 这一侧的失效形态是「多注入一段记忆」，而反向（fail-closed）会把「查库失败」
+    // 静默翻译成「本条是 a2a」从而关掉检索，把一次 DB 抖动变成一次行为改变。
+    fromAgent: isAgentAuthoredTrigger(triggerRow?.role),
   }
 }
 
@@ -404,6 +440,11 @@ async function drainQueuedCommand(
       triggerRow?.role === 'agent' && triggerRow.agent_id
         ? (agentsRepo.getAgentNameById(triggerRow.agent_id) ?? undefined)
         : undefined,
+    // ⚠️ 本处是 fromAgent 的**第二权威构造点**（不是 `buildTriggerMsg` 的搬运）：
+    // drain 直接调 `executeOneAgent`、**不经** `execute()`，故 reply 侧读到的就是
+    // 这一个值（`buildTriggerMsg` 在本路径上不执行）。判据与它同源——同为
+    // `isAgentAuthoredTrigger(DB messages.role)`，非 `authorName` 真值推断。
+    fromAgent: isAgentAuthoredTrigger(triggerRow?.role),
   }
   // 直接执行（不走 execute 决策——槽位已被 completeExecution 标 busy，重入会再排队）。
   // token 不在此 acquire：A 方案后 token 由 executeOneAgent 的 LLM 段自行
@@ -599,7 +640,9 @@ async function executeOneAgent(
           ),
           new Promise<never>((_, reject) =>
             setTimeout(() => {
-              abortController.abort()
+              // reason 契约（reply.ts 的 abort 分支按它区分「超时 / 用户停止 / 执行抛错」
+              // 落日志——旧文案写死超时语义，用户点停止也被记成超时，排障被带偏）
+              abortController.abort('timeout')
               reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
             }, AGENT_HARD_TIMEOUT_MS)
           ),
@@ -610,7 +653,9 @@ async function executeOneAgent(
     } catch (err: any) {
       // run 注册表收口由 finalizeRun 的 endRun 统一（此前 abort 注销在 finally、
       // stream 清理在此处、其余失败漏斗不清理——各管各的正是本刀收编对象）
-      abortController.abort()
+      // reason='error'：执行抛错触发的中断。注意 signal 只能被 abort 一次——若上面
+      // 的硬超时已先 abort('timeout')，此处为 no-op、reason 保持 'timeout'（正确）。
+      abortController.abort('error')
       log.error('agent execution failed', {
         agentId: agent.id,
         agentName: agent.name,
@@ -734,12 +779,26 @@ async function executeOneAgent(
           (a: AgentConfig | null): a is AgentConfig => a !== null && routeNames.includes(a.name)
         )
 
+      // 票乙 reviewer 单目标闸：审查猫双 @ 时留谁由**审查结论**决定（白名单模块
+      // 的优先级表只看这一格）。只读正文、不落库——落库走下方既有钩子
+      // `recordReviewVerdict`，本处仅消费返回值，两条互不影响。
+      // 解析器的另两种 kind（no-marker / failure 格式漂移）一律视为「结论不可得」
+      // → 不传该字段，白名单走兜底优先级。不抛、不改行。
+      let verdict: ReviewVerdict | undefined
+      if (agent.role === 'reviewer') {
+        const parsed = parseReviewVerdict(
+          reply.content,
+          allMentionedAgents.map((a) => ({ id: a.id, name: a.name, isStore: a.role === 'store' }))
+        )
+        if (parsed.kind === 'verdict') verdict = parsed.verdict
+      }
+
       // A2A 风暴治理白名单：按发送者角色剥除违规 mention（执行顺序：白名单→配额→dispatch）。
       // 写回 DB 用允许集合——被拦猫在上下文过滤（getRelevantMessages 基于
       // mentions.includes 判定可见性）里也不可见，语义自洽。
       // 未知/缺失角色 → 放行不拦截（老库零回归，误杀审查链代价远大于漏拦一条 @）
       policy = filterAllowedMentions(
-        { role: agent.role, triggerAuthorName: triggerMsg.authorName },
+        { role: agent.role, triggerAuthorName: triggerMsg.authorName, verdict },
         allMentionedAgents
       )
       allowedNames = policy.allowed.map((a) => a.name)
@@ -760,7 +819,7 @@ async function executeOneAgent(
     // 仅非空时被 updateMessageMentions 覆盖，故 allowedNames 与落库列恒等。
     // fire-and-forget + 全 catch：兜底是安全网，不能把成功路径拖成异常路径。
     try {
-      const commitSha = execLogsRepo.getRunningExecutionCommitHash(agent.id)
+      const commitSha = execLogsRepo.getRunningExecutionCommitHash(agent.id, sessionId)
       const reviewerName =
         sessionAgentIds
           .map((id: string) => agentsRepo.getAgentById(id))
@@ -856,7 +915,7 @@ async function executeOneAgent(
         })
         // 系统提示：点名违规与正确规则（即时反馈，不持久化进 system_prompt）。
         // 文案按 reason 区分——role-not-allowed 是角色白名单违规；
-        // count-limit 是超上限（≤1 个 @），提示拆条发送而非误报违规
+        // count-limit 是超上限（≤1 个 @），提示补救方向而非误报违规
         const hintParts: string[] = []
         const roleBlocked = policy.blocked.filter((b) => b.reason === 'role-not-allowed')
         if (roleBlocked.length > 0) {
@@ -866,8 +925,13 @@ async function executeOneAgent(
         }
         const countBlocked = policy.blocked.filter((b) => b.reason === 'count-limit')
         if (countBlocked.length > 0) {
+          // 补救指引按角色分岔——文案的**单一维护面**是 `mentionLimitRemedy`
+          // （票丙：本处原为内联三元，MCP 路径另写死一句，两处各漂各的）。
+          const remedy = mentionLimitRemedy(agent.role)
           hintParts.push(
-            `一条回复最多 @ 1 个 agent，你 @ 的 ${countBlocked.map((b) => b.name).join('、')} 已忽略，请拆条分别 @`
+            `一条回复最多 @ ${MAX_MENTIONS_PER_REPLY} 个 agent，你 @ 的 ${countBlocked
+              .map((b) => b.name)
+              .join('、')} 已忽略，${remedy}`
           )
         }
         bus.emitSystemNotice({
@@ -883,7 +947,10 @@ async function executeOneAgent(
         // 另寻他路，被拦的结论就静默停摆（2026-09-09 实证：吐槽猫 的 ⚠️ 被拦，
         // 作者与店长均不知情，卡 10 分钟）。故除提示发送者外，同时告知会话内
         // store 猫（收口决策归店长）。只对 role-not-allowed 发——count-limit 的
-        // 补救路径明确（拆条重发，提示已给发送者），不构成结论悬空。
+        // 补救路径明确（提示已给发送者，方向见上方按角色分岔的 remedy），不构成
+        // 结论悬空。（票乙订正：原写死「拆条重发」，而该指引对 reviewer 是错的、
+        // 会把审查猫引回双 @ 老路；本豁免的守卫本就只认 role-not-allowed，
+        // 行为无影响，漂的只是这句复述。）
         // 目标从 sessionAgentIds 反查（不能复用 allMentionedAgents——那已按
         // routeNames 过滤，正是被剥除后的集合）；发送者本身是 store 时跳过。
         //
@@ -1060,7 +1127,11 @@ async function executeOneAgent(
             ctx,
             sessionId,
             limitedAgents,
-            { ...agentTrigger, authorName: agent.name },
+            // `fromAgent: true` 是**语义正确**的填法（触发者就是刚回复的这只猫），但
+            // 不承担判据职责：本对象的 fromAgent 不进 `makeCmd`，reply 侧读的是
+            // `executeRun` 重新 `buildTriggerMsg` 反查出的那一份（`agentTrigger.role
+            // === 'agent'`，同一个值、同一个源）。这里填 true 只为满足必填类型。
+            { ...agentTrigger, authorName: agent.name, fromAgent: true },
             traceId,
             depth + 1
           )
@@ -1283,8 +1354,10 @@ async function executeAgentsSerialImpl(
       // 返回之后跑，收的是整轮改动，不属于任何单次执行。归属判据与下面
       // `updateExecutionLogCommitHash`（T-M）**逐字同源**：执行行跨多只猫时这个 sha
       // 指认不出作者 ⇒ 段也指认不出父 ⇒ **不写**（缺 ≠ 失败，验收 26）。
-      // `gitCommit` 是 3 次连续 `execSync`（阻塞整个 Node 事件循环）——`execLogsRepo`
+      // `gitCommit` 走同步 `execSync`（阻塞整个 Node 事件循环）——`execLogsRepo`
       // 之外本段是全票唯一的「跨执行隐藏停顿」，值得留痕。
+      // **刻意不写死次数**：T-1 格 0 后次数随路径而定（短路 / 真提交不同），
+      // 写死的计数是本仓高发的漂移源（同一句曾在 5 处复述、格 0 一次就全数字失真）。
       // 只为**真产生了 commit** 的轮次留行：无改动时 `gitCommit` 返回 null，
       // 该段缺省（验收 26 明写「无改动时该段可缺」）。
       if (commits.length > 0) {
@@ -1733,15 +1806,15 @@ export function createExecutionEngine(
       const s = getSlotInternal(cmd.agentId, cmd.sessionId)
       if (s && s.status === 'busy') {
         // ── 归属校验（R7 甲案）：busy 的必须是**本帧的**槽位，才轮到本帧兜底 ──
-        // 无校验就收正是存量 19 行 `'execute crash'` 的来源，逐环有据：
-        //   ① 本帧正常路径已自收口（`:806` finalizeRun ⇒ 槽位 idle）；
-        //   ② 本帧仍挂在 `:1093` 的 `Promise.all([drainP, dispatchP])` 上
+        // 无校验就收正是那批 `'execute crash'` 存量的来源，逐环有据：
+        //   ① 本帧正常路径已自收口（`:812` finalizeRun ⇒ 槽位 idle）；
+        //   ② 本帧仍挂在 `:1099` 的 `Promise.all([drainP, dispatchP])` 上
         //      （A2A 派发子树 / 队列排空子树都还在跑）；
-        //   ③ 该 await 窗口内控制权让出 ⇒ 新触发走 `:1772` 决策段见 idle ⇒ 标 busy 开跑；
+        //   ③ 该 await 窗口内控制权让出 ⇒ 新触发走 `:1804` 决策段见 idle ⇒ 标 busy 开跑；
         //   ④ 本帧 await 结束 → return → 本 finally 见 busy —— **那是别人的槽位**。
         // 收下去 = 释放正在跑的那笔的槽位（单槽位 FIFO 被击穿，同 agent+session 双执行）
-        // + 把 `failed` 写进它的行（`finalizeExecutionLog` 按「agent + 最新 running」
-        // 定位，WHERE 里没有 sessionId ⇒ 跨会话也能命中）。
+        // + 把 `failed` 写进它的行（`finalizeExecutionLog` 现按「agent_id + session_id +
+        // 最新 running」定位——R8 §A 后三个定位函数全部含 session 维度）。
         // R7 前这里只有一行注释写着「本帧无权收口」，代码紧接着就收了。
         if (s.currentTriggerMessageId !== cmd.triggerMessageId) {
           log.warn('slot busy but owned by another trigger — finalize skipped', {
@@ -1757,8 +1830,8 @@ export function createExecutionEngine(
             //     的空串零回归；`messageOf` 自身不抛——本行在 finally 的槽位收口路径上，
             //     它抛错会毁掉收口）；
             //   · `execError === undefined` ⇒ 本帧没抛也没崩，却仍占着槽位 = 「正常返回
-            //     但没自收口」。`:806` 那次 completeExecution 自身抛错是唯一可达源
-            //     （`:1096` catch 会补收一次，再失败被 `.catch` 吞掉）——防御分支，
+            //     但没自收口」。`:812` 那次 completeExecution 自身抛错是唯一可达源
+            //     （`:1101` catch 会补收一次，再失败被 `.catch` 吞掉）——防御分支，
             //     兜底词即事实描述；
             //   · 其余 ⇒ 抛了非 Error 且取不出信息（`messageOf` 对 `{}` / 循环引用返回
             //     undefined）。**不能沿用上一词**：那会把「真抛了」说成「没抛」，

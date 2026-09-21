@@ -1,17 +1,24 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { existsSync } from 'node:fs'
-import { parseClaudeCodeOutput, spawnSupervised } from './cli-utils.js'
+import { parseClaudeCodeOutput, spawnSupervised, __test_setPlatform } from './cli-utils.js'
 
-// Mock cli-utils 以阻止模块加载时的 resolveBin() 调用
-vi.mock('./cli-utils.js', () => ({
-  resolveBin: vi.fn(() => '/usr/local/bin/claude'),
-  messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
-  parseClaudeCodeOutput: vi.fn(),
-  attachIdleTimeout: vi.fn(() => () => {}),
-  spawnSupervised: vi.fn(),
-  // MCP_SERVER_PATH 模块级常量依赖（真实路径在测试中不触达——spawn 被 mock）
-  getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
-}))
+// Mock cli-utils 以阻止模块加载时的 resolveBin() 调用。
+// 用 `importOriginal` 展开保留**未被覆盖的**真实导出：`terminateChild` 走真身——
+// 票① 的终止链回归（abort → 真实存活判据 → SIGTERM/SIGKILL）必须穿真实 helper，
+// 把它也 mock 掉就成了「断言自己调了自己」的同义反复。
+vi.mock('./cli-utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./cli-utils.js')>()
+  return {
+    ...actual,
+    resolveBin: vi.fn(() => '/usr/local/bin/claude'),
+    messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
+    parseClaudeCodeOutput: vi.fn(),
+    attachIdleTimeout: vi.fn(() => () => {}),
+    spawnSupervised: vi.fn(),
+    // MCP_SERVER_PATH 模块级常量依赖（真实路径在测试中不触达——spawn 被 mock）
+    getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
+  }
+})
 
 // Mock logger（共享 logMock 实例——claude.ts 模块加载时 createLogger('claude')
 // 捕获同一对象，测试可断言启动日志/告警的参数）
@@ -66,7 +73,17 @@ const EXPECTED_DISALLOWED = [
 ]
 
 describe('ClaudeAdapter', () => {
+  // 平台钉死为 POSIX：`terminateChild`（本文件用真身）在 win32 走 `taskkill /T` 树杀、
+  // 根本不发信号——宿主平台不钉死则「本机 win32 / CI linux」跑的是两个分支，
+  // 断言随环境分叉。win32 分支由 cli-utils.test.ts 显式覆盖。
+  let restorePlatform: () => void
+
+  beforeEach(() => {
+    restorePlatform = __test_setPlatform('linux')
+  })
+
   afterEach(() => {
+    restorePlatform()
     vi.restoreAllMocks()
   })
 
@@ -97,8 +114,10 @@ describe('ClaudeAdapter', () => {
   // 2026-09-18 修复回归：`child.killed` 的语义是「信号已发出」而非「进程已死」，
   // 拿它当存活判据 ⇒ 5 秒后的 SIGKILL 升级判断永远过不去（升级链整条失效）。
   // 本用例的 mock `kill()` 复刻 Node 真实语义（调用即置 `killed=true`，而
-  // `exitCode`/`signalCode` 要等进程真终止才落定）——**旧实现在此必红**（SIGKILL
+  // `exitCode`/`signalCode` 要等进程真终止才落定）——**旧判据在此必红**（SIGKILL
   // 永不发出），这是修复的反证，不是同义反复。
+  // 判据现今收在 `terminateChild`（cli-utils），本文件穿**真实** helper（工厂用
+  // `importOriginal` 保留真身）——故这条仍是端到端回归：abort → 真判据 → 信号序列。
   it('escalates to SIGKILL when child survives the SIGTERM grace period', async () => {
     vi.useFakeTimers()
     let release: (() => void) | undefined

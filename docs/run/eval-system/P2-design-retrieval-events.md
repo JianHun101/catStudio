@@ -66,6 +66,17 @@ reply.ts:667    reason: memoryTimeout ? 'timeout' : (memoryResult?.reason ?? 'er
 
 这条不是文字问题：**超时那一次检索恰是最该记录的一次**（检索最慢），而它发生时 `memoryResult === null`——若 R1 照初版只写 `memoryResult.reason`，超时路径要么写 NULL 要么抛。R1 必须照抄 `reply.ts:667` 的三元式取 reason。
 
+> **【2026-09-20 订正·T-1 `a2a-memory-gate`】** 上文「**值域是 9**」是 P2 当轮的读数，
+> 记录保留不动；**当前值域是 10**——记忆模块新增第 8 个枚举 `skipped-a2a`（a2a 触发、
+> **记忆总开关开**、且 `MEMORY_A2A_ENABLED` 关 ⇒ 压根没检索，`execution/reply.ts` 的门在
+> 调用点、`rewriteRetrievalQueries` 一并跳过）。**推导规则未变**：落台账的 reason = 模块枚举
+>
+> - `timeout` + `error`，只是模块枚举由 7 变 8。下游两处读数已同步：
+>   `db/repository/retrievalEvents.ts` 的 `reason` 列注释、`execution/reply.ts`
+>   的 `recordRetrievalTrace` 注释。`scripts/eval/retrieval-baseline.mjs` 的
+>   `LEGIT_EMPTY_REASONS` 白名单**刻意不动**——它只覆盖 `runRetrievalChain` 的出口，
+>   而 `skipped-a2a` 不由该函数产出（门在调用层），进不了那条路径。
+
 ## 三、实现：数据从哪来、写到哪去
 
 ### 数据流（三段，缺一段就答不了问题）
@@ -126,7 +137,7 @@ reply.ts:667    reason: memoryTimeout ? 'timeout' : (memoryResult?.reason ?? 'er
 | `threshold_max_distance` | REAL NOT NULL            | 参数快照（§一 推论一）                                                                                                              |
 | `param_top_k`            | INTEGER NOT NULL         | 参数快照                                                                                                                            |
 | `param_probe_n`          | INTEGER                  | 参数快照（现为源码常量 `MAX_PROBE_N`，常量也会变）                                                                                  |
-| `reason`                 | TEXT NOT NULL            | 本次检索全局 reason，**值域 9**（7 枚举 + `timeout` + `error`，见 §二③）                                                            |
+| `reason`                 | TEXT NOT NULL            | 本次检索全局 reason，**值域 10**（8 枚举 + `timeout` + `error`，见 §二③ 及文末 2026-09-20 订正）                                    |
 | `retrieval_ms`           | INTEGER                  | 本次检索总耗时。诉求③性能面                                                                                                         |
 | `context_tokens`         | INTEGER                  | 注入文本 token 数                                                                                                                   |
 | `budget_tokens`          | INTEGER                  | 本次预算。与 `context_tokens` 合看答「预算够不够」                                                                                  |

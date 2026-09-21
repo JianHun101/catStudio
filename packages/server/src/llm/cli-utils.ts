@@ -279,6 +279,25 @@ export function __test_reset(): void {
   spawnedProxyChild = null
 }
 
+/**
+ * 测试专用：临时覆盖 `process.platform`，返回恢复函数。
+ *
+ * 为什么不用 `vi.spyOn`：`platform` 在 Node 上是 `writable: false` 的**值属性**
+ * （非 accessor），spyOn 取不到 getter、当场抛错。为什么不能包成一次性回调：
+ * 被测行为跨 `await` 与计时器（SIGTERM → grace → SIGKILL），平台覆盖必须横跨整个
+ * 用例，故返回恢复函数由调用方在 `finally` 里收口。
+ *
+ * 不覆盖则用例结果随宿主平台漂移（本机 win32 / CI linux 走不同分支），
+ * 这正是「测试必须自带平台前提」的原因。
+ */
+export function __test_setPlatform(platform: NodeJS.Platform): () => void {
+  const original = process.platform
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true })
+  return () => {
+    Object.defineProperty(process, 'platform', { value: original, configurable: true })
+  }
+}
+
 // ─── NDJSON Stream Parsing ─────────────────────────────────
 
 /**
@@ -437,13 +456,81 @@ const CLI_IDLE_TIMEOUT_MS = isNaN(_IDLE_TIMEOUT) ? 20 * 60 * 1000 : _IDLE_TIMEOU
 const GRACE_MS = 5000
 
 /**
+ * 子进程存活判据：`exitCode`/`signalCode` **双 null** 才算「还活着」。
+ *
+ * **禁用 `killed` 标志**：它的语义是「信号已发出」（`kill()` 调用成功那一刻即置
+ * true），不是「进程已死」——拿它当存活判据，`GRACE_MS` 之后的 SIGKILL 升级判断
+ * 永远过不去、升级链整条失效（2026-09-18 探针实测：`kill()` 后 `killed=true` 而
+ * `exitCode`/`signalCode` 仍为 null，0.7s 后 `signalCode` 才落定）。
+ * `exitCode`/`signalCode` 是进程真终止后才落定的字段，二者皆 null 才是「还活着」。
+ */
+export function isChildAlive(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null
+}
+
+/**
+ * 终止子进程——存活判据与平台分派**统一入口**（各适配器 onAbort / idle timeout 共用）。
+ *
+ * - **POSIX**：`SIGTERM` → 等 `graceMs` → 仍存活则 `SIGKILL`。
+ * - **win32**：`taskkill /pid <pid> /t /f` **树杀**（`shell: false`），不走信号序列——
+ *   Windows 上 Node 的 `child.kill()` 即 TerminateProcess，目标进程的信号监听器
+ *   **不会执行**。适配器经 `spawnSupervised` 拉起的是 supervisor，而 supervisor 靠
+ *   `process.on('SIGTERM')` 把信号转发给真 CLI（`cli-supervisor.mjs`）——这个监听器
+ *   在 win32 正是被这样绕过的：只发信号会杀掉 supervisor、把真 CLI（孙子进程）留成
+ *   孤儿（实测：SIGTERM 后子进程 62s 才退出）。`/T` 杀整棵进程树才能覆盖
+ *   supervisor → CLI 这一层。
+ *
+ * 失败一律**静默降级**（进程已死 / 取不到 pid / taskkill 退出码非 0），不抛——
+ * 调用点全在 abort / 超时清理路径上，抛错会顶掉正在收口的原始错误。
+ */
+export function terminateChild(
+  child: ChildProcess,
+  opts: { label: string; graceMs?: number }
+): void {
+  const { label, graceMs = GRACE_MS } = opts
+  if (!isChildAlive(child)) return
+
+  if (process.platform === 'win32') {
+    const pid = child.pid
+    if (pid === undefined) return
+    log.warn(`${label} 发送 taskkill 终止进程树`, { pid, mode: 'taskkill' })
+    try {
+      const killer = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
+        stdio: 'ignore',
+        shell: false,
+      })
+      killer.on('error', (err: Error) => {
+        log.warn(`${label} taskkill 启动失败`, { pid, error: err.message })
+      })
+      killer.on('close', (code: number | null) => {
+        if (code !== 0) log.warn(`${label} taskkill 退出码非 0`, { pid, exitCode: code })
+      })
+    } catch (err: any) {
+      log.warn(`${label} taskkill 调用失败`, { pid, error: err?.message })
+    }
+    return
+  }
+
+  log.warn(`${label} 发送 SIGTERM 终止子进程`)
+  child.kill('SIGTERM')
+  setTimeout(() => {
+    if (isChildAlive(child)) {
+      log.warn(`${label} SIGTERM 未响应，发送 SIGKILL`)
+      child.kill('SIGKILL')
+    }
+  }, graceMs)
+}
+
+/**
  * 给子进程挂上空闲超时检测。
  *
  * 每次 stdout/stderr 有数据时重置 timer——跟 clowder-ai 的
  * CLI 进程超时机制一致：持续产出内容的进程不会被误杀，
  * 只有真正无输出的进程才会超时终止。
  *
- * 超时后先 SIGTERM（给进程清理机会），5 秒后若仍存活则 SIGKILL 强杀。
+ * 超时后交给 `terminateChild`：POSIX 先 SIGTERM（给进程清理机会）、5 秒后仍存活则
+ * SIGKILL 强杀；win32 走 `taskkill /t /f` 树杀（信号在 win32 杀不到 supervisor
+ * 底下的真 CLI，见 `terminateChild`）。
  *
  * @returns cleanup 函数，用于提前取消 timer
  */
@@ -462,14 +549,8 @@ export function attachIdleTimeout(child: ChildProcess): () => void {
   const timer = setInterval(() => {
     if (Date.now() - lastActivity > CLI_IDLE_TIMEOUT_MS) {
       const idleSec = Math.round((Date.now() - lastActivity) / 1000)
-      log.error('子进程无输出，发送 SIGTERM', { idleSec, timeoutMs: CLI_IDLE_TIMEOUT_MS })
-      child.kill('SIGTERM')
-      setTimeout(() => {
-        if (!child.killed && child.exitCode === null) {
-          log.error('SIGTERM 未响应，发送 SIGKILL')
-          child.kill('SIGKILL')
-        }
-      }, GRACE_MS)
+      log.error('子进程无输出，终止', { idleSec, timeoutMs: CLI_IDLE_TIMEOUT_MS })
+      terminateChild(child, { label: 'idle-timeout' })
     }
   }, 1000)
 
@@ -515,7 +596,8 @@ const SUPERVISOR_PATH = path.join(
  *
  * 包装方式: server → supervisor.mjs → CLI (Claude Code / Codex)
  * Supervisor 每 1 秒检查父进程是否存活：
- *   父进程死了 → 立即 SIGTERM → 3s → SIGKILL
+ *   父进程死了 → 终止 CLI 子进程（POSIX: SIGTERM → 3s → SIGKILL；
+ *   win32: `taskkill /t /f` 树杀——那边 `kill()` 不投递信号，见 `terminateChild`）
  *
  * @returns supervisor 的 ChildProcess 引用（用于 kill / 监控）
  */

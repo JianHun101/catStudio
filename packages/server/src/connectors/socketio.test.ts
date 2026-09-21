@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createServer } from 'node:http'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { Events, estimateTokens } from '@cat-study/shared'
+import { Events, estimateTokens, SKILL_WHITELIST } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
@@ -86,6 +86,15 @@ vi.mock('../memory/index.js', () => ({
   // 单一来源）。partial factory 缺它 = 调用点当场 TypeError，回复整条发不出去
   // ——实测踩过。**替身必须镜像真模块被消费的导出面**。
   currentRetrievalParams: vi.fn(() => ({ topK: 3, maxDistance: 0.6, probeN: 20 })),
+  // T-1：a2a 记忆门新增的两个被消费导出——同一条规矩（见上），partial factory
+  // 缺一个就是调用点 TypeError。默认值镜像生产：门**关**、跳过结果形状同构。
+  shouldSkipA2aMemory: vi.fn(() => false),
+  skippedRetrievalResult: vi.fn(() => ({
+    text: '',
+    reason: 'skipped-a2a',
+    sections: [],
+    stats: {},
+  })),
 }))
 
 vi.mock('../summarizer/index.js', () => ({
@@ -1187,7 +1196,7 @@ describe('socketio connector', () => {
       const execA = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [agentCfg as any],
-        { id: 'msg-A', content: '@店长 文档', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-A', content: '@店长 文档', mentions: ['店长'] },
         'trace-double-exec'
       )
       await streaming // 等 A 进入流（槽位 busy 确立）
@@ -1196,7 +1205,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [agentCfg as any],
-        { id: 'msg-B', content: '@店长 补填文档', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-B', content: '@店长 补填文档', mentions: ['店长'] },
         'trace-double-exec'
       )
       const bLog = db
@@ -1232,7 +1241,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [agentCfg as any],
-        { id: 'msg-B', content: '@店长 补填文档', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-B', content: '@店长 补填文档', mentions: ['店长'] },
         'trace-double-exec-2'
       )
 
@@ -1261,7 +1270,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [opencodeCfg as any],
-        { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
         'trace-opencode'
       )
 
@@ -1294,7 +1303,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [ollamaCfg as any],
-        { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
         'trace-ollama'
       )
 
@@ -1329,7 +1338,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [noKeyCfg as any],
-        { id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-B', content: '@店长 你好', mentions: ['店长'] },
         'trace-nokey'
       )
 
@@ -1424,7 +1433,7 @@ describe('socketio connector', () => {
       const execA = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-a', content: '@店长 A', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-a', content: '@店长 A', mentions: ['店长'] },
         'trace-quota',
         1
       )
@@ -1434,7 +1443,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-b', content: '@店长 B', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-b', content: '@店长 B', mentions: ['店长'] },
         'trace-quota',
         1
       )
@@ -1493,7 +1502,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-limit-ok'
       )
       // C1 v3：A2A 子链真实递归执行（非 dispatch shim）——吐槽猫计数未达上限 →
@@ -1512,7 +1521,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-limit-full'
       )
       // 计数达上限 → 子链过滤掉 agent-2：无其 execution_log
@@ -1565,7 +1574,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-user', content: '@店长 x', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-user', content: '@店长 x', mentions: ['店长'] },
         'trace-user',
         1
       )
@@ -1579,7 +1588,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-a2a', content: '@店长 x', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-a2a', content: '@店长 x', mentions: ['店长'] },
         'trace-a2a',
         1
       )
@@ -1600,7 +1609,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-cleanup', content: '@店长 x', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-cleanup', content: '@店长 x', mentions: ['店长'] },
         'trace-top',
         0
       )
@@ -1653,7 +1662,7 @@ describe('socketio connector', () => {
         await getExecutionEngine()!.executeAgentsSerial(
           'session-1',
           [execAgentCfg as any],
-          { id: 'msg-a2a-fwd', content: '@店长 派活', mentions: ['店长'] },
+          { fromAgent: false, id: 'msg-a2a-fwd', content: '@店长 派活', mentions: ['店长'] },
           'trace-a2a-fwd',
           1 // depth=1：A2A 链上下文
         )
@@ -1796,7 +1805,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [dsCatCfg],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-policy',
         1
       )
@@ -1849,7 +1858,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [storeCfg],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-store'
       )
 
@@ -1880,7 +1889,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [noRoleCfg],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-no-role'
       )
 
@@ -1983,7 +1992,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg],
-        { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
         'trace-verdict-approve',
         1
       )
@@ -2042,7 +2051,13 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg],
-        { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'], authorName: 'ds猫' },
+        {
+          fromAgent: false,
+          id: 'msg-trigger',
+          content: '@吐槽猫 审查',
+          mentions: ['吐槽猫'],
+          authorName: 'ds猫',
+        },
         'trace-verdict-suggest',
         1
       )
@@ -2068,7 +2083,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg],
-        { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
         'trace-verdict-reject',
         1
       )
@@ -2092,7 +2107,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [implCfg],
-        { id: 'msg-trigger', content: '派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '派活', mentions: ['店长'] },
         'trace-verdict-nonreviewer',
         1
       )
@@ -2112,7 +2127,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg],
-        { id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@吐槽猫 审查', mentions: ['吐槽猫'] },
         'trace-verdict-noroute',
         1
       )
@@ -2230,7 +2245,7 @@ describe('socketio connector', () => {
       const mainExec = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [reviewerCfg as any],
-        { id: 'msg-main', content: '@吐槽猫 处理消息', mentions: ['吐槽猫'] },
+        { fromAgent: false, id: 'msg-main', content: '@吐槽猫 处理消息', mentions: ['吐槽猫'] },
         'trace-main'
       )
       await streaming // 等主执行进入流（槽位 busy 确立）
@@ -2240,6 +2255,7 @@ describe('socketio connector', () => {
         'session-1',
         [reviewerCfg as any],
         {
+          fromAgent: false,
           id: 'msg-queued',
           content: '@吐槽猫 请审查（P3 遗留点收尾）',
           mentions: ['吐槽猫'],
@@ -2338,13 +2354,13 @@ describe('socketio connector', () => {
       const p1 = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [storeCfg as any],
-        { id: 'msg-main', content: '处理消息', mentions: [] },
+        { fromAgent: false, id: 'msg-main', content: '处理消息', mentions: [] },
         'trace-main'
       )
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [storeCfg as any],
-        { id: 'msg-queued2', content: '@店长 排队任务', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-queued2', content: '@店长 排队任务', mentions: ['店长'] },
         'trace-queued2'
       )
       await p1
@@ -2397,13 +2413,13 @@ describe('socketio connector', () => {
       const p1 = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [storeCfg as any],
-        { id: 'msg-main', content: '处理消息', mentions: [] },
+        { fromAgent: false, id: 'msg-main', content: '处理消息', mentions: [] },
         'trace-main'
       )
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [storeCfg as any],
-        { id: 'msg-queued3', content: '@店长 排队任务', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-queued3', content: '@店长 排队任务', mentions: ['店长'] },
         'trace-queued3'
       )
       await p1
@@ -2449,13 +2465,13 @@ describe('socketio connector', () => {
       const p1 = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [noKeyCfg as any],
-        { id: 'msg-main', content: '处理消息', mentions: [] },
+        { fromAgent: false, id: 'msg-main', content: '处理消息', mentions: [] },
         'trace-main'
       )
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [noKeyCfg as any],
-        { id: 'msg-queued4', content: '@店长 排队任务', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-queued4', content: '@店长 排队任务', mentions: ['店长'] },
         'trace-queued4'
       )
       await p1
@@ -2532,13 +2548,13 @@ describe('socketio connector', () => {
       const p1 = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [storeCfg as any],
-        { id: 'msg-main', content: '处理消息', mentions: [] },
+        { fromAgent: false, id: 'msg-main', content: '处理消息', mentions: [] },
         'trace-main'
       )
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [storeCfg as any],
-        { id: 'msg-queued2', content: '@店长 排队任务', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-queued2', content: '@店长 排队任务', mentions: ['店长'] },
         'trace-queued2'
       )
       const result = await p1
@@ -2682,7 +2698,12 @@ describe('socketio connector', () => {
             llmApiKey: 'sk-test',
           } as any,
         ],
-        { id: 'msg-batch', content: '@吐槽猫 @ds猫 处理消息', mentions: ['吐槽猫', 'ds猫'] },
+        {
+          fromAgent: false,
+          id: 'msg-batch',
+          content: '@吐槽猫 @ds猫 处理消息',
+          mentions: ['吐槽猫', 'ds猫'],
+        },
         'trace-parallel'
       )
       try {
@@ -2768,7 +2789,12 @@ describe('socketio connector', () => {
             llmApiKey: 'sk-test',
           } as any,
         ],
-        { id: 'msg-trigger', content: '@吐槽猫 @ds猫 处理消息', mentions: ['吐槽猫', 'ds猫'] },
+        {
+          fromAgent: false,
+          id: 'msg-trigger',
+          content: '@吐槽猫 @ds猫 处理消息',
+          mentions: ['吐槽猫', 'ds猫'],
+        },
         'trace-lock'
       )
       try {
@@ -2858,6 +2884,7 @@ describe('socketio connector', () => {
           cfg('agent-4', 'flash猫'),
         ],
         {
+          fromAgent: false,
           id: 'msg-4',
           content: '@店长 @吐槽猫 @ds猫 @flash猫 处理消息',
           mentions: ['店长', '吐槽猫', 'ds猫', 'flash猫'],
@@ -2950,7 +2977,12 @@ describe('socketio connector', () => {
             role: 'store',
           } as any,
         ],
-        { id: 'msg-batch', content: '@吐槽猫 @店长 处理消息', mentions: ['吐槽猫', '店长'] },
+        {
+          fromAgent: false,
+          id: 'msg-batch',
+          content: '@吐槽猫 @店长 处理消息',
+          mentions: ['吐槽猫', '店长'],
+        },
         'trace-batch'
       )
 
@@ -3117,6 +3149,7 @@ describe('socketio connector', () => {
           } as any,
         ],
         {
+          fromAgent: false,
           id: 'msg-review',
           content: '@吐槽猫 请审查 6846bb4（重启确认机制升级）',
           mentions: ['吐槽猫'],
@@ -4263,7 +4296,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
         'trace-restart-agent'
       )
 
@@ -4289,7 +4322,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
         'trace-restart-agent'
       )
 
@@ -4310,7 +4343,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
         'trace-restart-agent'
       )
 
@@ -4347,7 +4380,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
         'trace-restart-signal'
       )
 
@@ -4382,7 +4415,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
         'trace-restart-dual'
       )
 
@@ -4464,7 +4497,7 @@ describe('socketio connector', () => {
       const execPromise = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
         'trace-interrupt'
       )
 
@@ -4567,13 +4600,13 @@ describe('socketio connector', () => {
       const execA = engine.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 请处理', mentions: ['店长'] },
         'trace-a'
       )
       const execB = engine.executeAgentsSerial(
         'session-2',
         [execAgentCfg as any],
-        { id: 'msg-trigger-b', content: '@店长 请处理B', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger-b', content: '@店长 请处理B', mentions: ['店长'] },
         'trace-b'
       )
 
@@ -4886,7 +4919,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-signal',
         1
       )
@@ -4934,7 +4967,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-dual',
         1
       )
@@ -4983,7 +5016,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-ok'
       )
 
@@ -5022,7 +5055,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-m1'
       )
 
@@ -5042,7 +5075,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活', mentions: ['店长'] },
         'trace-m1-again'
       )
       const news2 = mockRoomEmit.mock.calls
@@ -5093,7 +5126,13 @@ describe('socketio connector', () => {
       const run1 = getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活一', mentions: ['店长'], authorName: '实施猫' },
+        {
+          fromAgent: false,
+          id: 'msg-trigger',
+          content: '@店长 派活一',
+          mentions: ['店长'],
+          authorName: '实施猫',
+        },
         'trace-asmb1',
         1
       )
@@ -5127,7 +5166,7 @@ describe('socketio connector', () => {
       await getExecutionEngine()!.executeAgentsSerial(
         'session-1',
         [execAgentCfg as any],
-        { id: 'msg-trigger', content: '@店长 派活二', mentions: ['店长'] },
+        { fromAgent: false, id: 'msg-trigger', content: '@店长 派活二', mentions: ['店长'] },
         'trace-asmb2',
         1
       )
@@ -5185,7 +5224,7 @@ describe('runAgentReply — per-agent 静态运行配置透传', () => {
     await getExecutionEngine()!.executeAgentsSerial(
       'session-tf',
       [agent],
-      { id: 'msg-tf', content: '@ds猫 透传', mentions: ['ds猫'] },
+      { fromAgent: false, id: 'msg-tf', content: '@ds猫 透传', mentions: ['ds猫'] },
       'trace-tf'
     )
     return chatStream
@@ -5278,7 +5317,7 @@ describe('runAgentReply — 铁律运行期注入（ironLawForRole）', () => {
     await getExecutionEngine()!.executeAgentsSerial(
       sessionId,
       [agent],
-      { id: msgId, content: '@猫 铁律', mentions: ['猫'] },
+      { fromAgent: false, id: msgId, content: '@猫 铁律', mentions: ['猫'] },
       `trace-il-${agent.id}`
     )
     return chatStream.mock.calls[0][0] as any[]
@@ -5390,6 +5429,104 @@ describe('runAgentReply — 铁律运行期注入（ironLawForRole）', () => {
   })
 })
 
+// ─── 技能发现面注入（甲案：目录段进第一条 system message）────────────────────
+// 验收硬条款：「真的进 prompt」这一面必须被钉住——buildSkillDirectorySection 的纯
+// 单元用例全绿但没接线 = 本单白干，故此处走 runAgentReply 真实链路、捕获 chatStream
+// 入参（组装式模块测试：真实 SQLite + 只 mock 最外层适配器）。
+
+describe('runAgentReply — 技能发现面注入（甲案）', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  /** 跑一轮真实 runAgentReply，回传交给 chatStream 的 messages（第一条即 system） */
+  async function runWithAgent(agent: any): Promise<any[]> {
+    const mod = await import('./socketio.js')
+    // 引擎是 createSocketIO 建立的模块单例（非模块顶层）。全量跑时前序用例已建好；
+    // 单文件 `-t` 过滤跑时前序用例被 skip、引擎仍为 null——按需自建，免用例顺序依赖。
+    if (!getExecutionEngine()) {
+      mod.__test_resetEngine()
+      mod.createSocketIO(createServer())
+    }
+    const { getAdapterForAgent } = await import('../llm/registry.js')
+    const { getAgentState } = await import('../dispatch/index.js')
+    const chatStream = vi.fn(async function* (_m: any[], _o: any) {
+      yield { content: '发现面测试', kind: 'text' }
+    })
+    vi.mocked(getAdapterForAgent).mockReturnValue({ chatStream } as any)
+
+    const sessionId = `session-sd-${agent.id}`
+    const msgId = `msg-sd-${agent.id}`
+    vi.mocked(getAgentState).mockReturnValue({
+      agentId: agent.id,
+      sessionId,
+      status: 'busy',
+      queueLength: 0,
+      currentTriggerMessageId: msgId,
+    } as any)
+
+    insertAgent(agent)
+
+    const db = getDb()
+    db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES (?, 'sd', ?)`).run(
+      sessionId,
+      JSON.stringify([agent.id])
+    )
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', '@猫 发现面', '["猫"]')`
+    ).run(msgId, sessionId)
+
+    await getExecutionEngine()!.executeAgentsSerial(
+      sessionId,
+      [agent],
+      { fromAgent: false, id: msgId, content: '@猫 发现面', mentions: ['猫'] },
+      `trace-sd-${agent.id}`
+    )
+    return chatStream.mock.calls[0][0] as any[]
+  }
+
+  const AGENT = {
+    id: 'agent-sd',
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: '你是实施猫。',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+    role: 'implementer',
+  }
+
+  it('第一条 system message 含技能目录段，且含全部 12 个技能名', async () => {
+    const msgs = await runWithAgent({ ...AGENT })
+
+    // 「第一条」是硬点：目录段坐真 system prompt 面，不是后续某条 hints
+    expect(msgs[0].role).toBe('system')
+    const sys = String(msgs[0].content)
+
+    expect(sys).toContain('【可用技能】')
+    expect(SKILL_WHITELIST).toHaveLength(12)
+    for (const name of SKILL_WHITELIST) {
+      expect(sys, `目录段缺技能 ${name}`).toContain(`- ${name}: `)
+    }
+  })
+
+  it('目录段坐第一条 system message，不坐 dynamicHints 的位置（超限不被当最旧先丢）', async () => {
+    const msgs = await runWithAgent({ ...AGENT })
+
+    const systemMessages = msgs.filter((m) => m.role === 'system')
+    // 只有第一条 system 含目录段——后续 hints（若有）不得重复携带
+    const carriers = systemMessages.filter((m) => String(m.content).includes('【可用技能】'))
+    expect(carriers).toHaveLength(1)
+    expect(msgs.indexOf(carriers[0])).toBe(0)
+  })
+})
+
 // ─── 运行时长心跳（headless 黑盒可观测性）────────────────
 // dsh 等 headless 适配器整轮不 yield chunk，前端「回复中」标签静止。心跳周期重发
 // MESSAGE_AGENT_STATUS（status 不变、startedAt 相同），前端显示「回复中 · 已 N 秒」。
@@ -5484,7 +5621,7 @@ describe('runAgentReply — 运行时长心跳', () => {
     const exec = getExecutionEngine()!.executeAgentsSerial(
       'session-hb',
       [hbAgent as any],
-      { id: 'msg-hb', content: '@ds猫 心跳', mentions: ['ds猫'] },
+      { fromAgent: false, id: 'msg-hb', content: '@ds猫 心跳', mentions: ['ds猫'] },
       'trace-hb'
     )
     return { exec }
@@ -5728,7 +5865,12 @@ describe('上下文卫生补测 — 已回复剥离/标注（3738c6a 回修）',
     await getExecutionEngine()!.executeAgentsSerial(
       'session-hy',
       [agent],
-      { id: opts.trigger.id, content: opts.trigger.content, mentions: opts.trigger.mentions },
+      {
+        fromAgent: false,
+        id: opts.trigger.id,
+        content: opts.trigger.content,
+        mentions: opts.trigger.mentions,
+      },
       'trace-hy'
     )
     return chatStream
@@ -5969,7 +6111,7 @@ describe('对话内 diff 展示 — 富文本块通道', () => {
     await getExecutionEngine()!.executeAgentsSerial(
       'session-1',
       [execAgentCfg as any],
-      { id: 'msg-diff-1', content: '改一下 x.ts', mentions: ['店长'] },
+      { fromAgent: false, id: 'msg-diff-1', content: '改一下 x.ts', mentions: ['店长'] },
       'trace-diff-1',
       0
     )
@@ -6019,7 +6161,7 @@ describe('对话内 diff 展示 — 富文本块通道', () => {
     await getExecutionEngine()!.executeAgentsSerial(
       'session-1',
       [execAgentCfg as any],
-      { id: 'msg-nodiff', content: '讨论一下方案', mentions: ['店长'] },
+      { fromAgent: false, id: 'msg-nodiff', content: '讨论一下方案', mentions: ['店长'] },
       'trace-nodiff',
       0
     )
@@ -6069,7 +6211,7 @@ describe('对话内 diff 展示 — 富文本块通道', () => {
     await getExecutionEngine()!.executeAgentsSerial(
       'session-1',
       [execAgentCfg as any],
-      { id: 'msg-iso', content: '继续', mentions: ['店长'] },
+      { fromAgent: false, id: 'msg-iso', content: '继续', mentions: ['店长'] },
       'trace-iso',
       0
     )
@@ -6173,7 +6315,7 @@ describe('会话 worktree 接线', () => {
     await getExecutionEngine()!.executeAgentsSerial(
       'session-wt',
       [wtAgentCfg as any],
-      { id: 'msg-wt', content: '@店长 干活', mentions: ['店长'] },
+      { fromAgent: false, id: 'msg-wt', content: '@店长 干活', mentions: ['店长'] },
       'trace-wt',
       0
     )
@@ -6280,7 +6422,7 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     await getExecutionEngine()!.executeAgentsSerial(
       'session-1',
       [compressAgentCfg as any],
-      { id: msgId, content: '请继续', mentions: ['店长'] },
+      { fromAgent: false, id: msgId, content: '请继续', mentions: ['店长'] },
       `trace-compress-${seq++}`,
       0
     )

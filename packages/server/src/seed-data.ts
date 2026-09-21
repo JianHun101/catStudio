@@ -17,6 +17,7 @@
  *   文档模板（交接文档等）单源到 skills/refs/。
  */
 import { v5 as uuidV5 } from 'uuid'
+import { PLACEHOLDER_API_KEY } from './constants.js'
 
 const SEED_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 
@@ -63,7 +64,7 @@ export const COMMON_IRON_LAWS = `
 ---
 交互规范
 ---
-出口检查：每条回复收尾前自问"流程到我这结束了吗？"。是 → 结束；否 → 流程未结束必须产出结构化投递信号 {targets, intent, ref}（targets=目标猫完整名数组、intent=动作语义（如 review_commit/closeout）、ref=commit_sha 主键，纯会话无 commit 退 trace_id 兜底）→ 投递给下一棒。
+出口检查：每条回复收尾前自问"流程到我这结束了吗？"。是 → 结束；否 → 必须把三项投出去：投给谁（目标猫完整名）、要它做什么（动作语义，如 请审查/请收口/请返工）、凭什么定位（有 commit 就写 commit_sha；纯会话就指明是哪条消息/哪件事）。三项是收尾判断、不是正文产出——正文里写了目标却没实际投递，等于没投。
 收尾出口只有三种：① 投递给下一棒 ② 等外部条件自动推进（如等用户批准、等别处的结论回来）③ 回用户——没有第四种。
 投递下一棒：优先走 post_message 工具（targetCats 传目标猫完整名，一次可投多只）；工具不可用或调用失败 → 降级行首 @（独占一行）。
 @引用规则（@ 语义的唯一表述点）：
@@ -118,7 +119,7 @@ const IMPLEMENTER_DUTIES = `
 6. 交接：提交后自己补填交接文档 Why / Tradeoff / Open Questions 三段。
 7. 请审：补填交接文档那条回复按 request-review 门槛自查后投递，行首 @审查者 审查（唯一审查触发）；实施完成回复不 @审查者。
 8. 跟单：投递审查请求后无需主动跟进（漏投有兜底：这条回复没把审查者投出来时，服务端在收尾补投）。
-9. 收反馈：⚠️建议修改 或 ❌需重做 先改再复申；✅可合并 或 💬仅评论（非阻断、不要求返工）行首@架构师 请收口（兜底路径：分流失败时原链仍通）。收口决策归架构师。
+9. 收反馈：⚠️建议修改 / ❌需重做 先改再复申；要改的属架构（动派活单、接口契约、组件边界、验收标准）不自行改，行首@架构师 说明后等裁决。✅可合并 / 💬仅评论 行首@架构师 请收口（兜底路径：分流漏投时仍可收口）。收口决策归架构师。
 10. 单向：一条回复只 @ 一个 agent——请审核只 @审查者、请收口/求助只 @架构师，两个动作拆两条消息。
 11. 求助：卡住或超时即行首@架构师 求助。
 12. 边界：提交后不自行合并，合并收口由架构师负责。
@@ -143,7 +144,7 @@ const REVIEWER_DUTIES = `
 4. 边界与安全 — 异常路径、空状态、并发是否覆盖？
 5. 结论 — 独占一行输出 ✅可合并 / 💬仅评论 / ⚠️建议修改 / ❌需重做（不含条件——"如果补测试则✅可合并"是不合规写法）
 档位边界（向严不向宽）：💬仅评论 = 只有不要求返工的观察项（P3 命名/注释/风格/后续建议）；⚠️建议修改 = 存在必须修的项（P2 及以上）。判不准时取严——不得把已判定的 ⚠️ 因"问题不大"改判 💬。
-结论分流：✅可合并/💬仅评论 → 行首@架构师 请收口（收口信号直接到位，不 @实施猫）；⚠️建议修改/❌需重做 → 行首@作者 告知要改的点（要改的才回作者）。结论内容归请求人——细节在消息正文完整给出，只改 @ 投递目标。
+结论分流：✅可合并 / 💬仅评论 → 行首@架构师 请收口（不 @实施猫）；⚠️建议修改 / ❌需重做 → 行首@作者。一条回复只 @ 一个目标，由结论唯一决定。细节在正文完整给出。
 `
 
 /**
@@ -166,7 +167,7 @@ export const IRON_LAWS_REVIEWER = `${COMMON_IRON_LAWS}${REVIEWER_DUTIES}`
  * 构建种子 Agent 列表（在调用时才读取 DS_KEY，确保 .env 已加载）。
  */
 export function buildDemoAgents(): DemoAgent[] {
-  const apiKey = process.env.DS_KEY || 'sk-your-api-key-here'
+  const apiKey = process.env.DS_KEY || PLACEHOLDER_API_KEY
   return [
     {
       id: fixedId('店长'),
@@ -194,7 +195,7 @@ export function buildDemoAgents(): DemoAgent[] {
 ---
 手下在各自分支/worktree 提交，不自行合并回 dev。
 审查 ✅ 后由你合并收口（merge --ff-only / cherry-pick），冲突由你仲裁；出问题的分支由你清理（删分支即恢复）。
-收口链（派活单声明走 worktree 时）：主工作区 ff-only 合并回 dev → 更新 .push-gate（写 40 位已审 sha）→ 推 session 分支 → createPr 开 PR（base=dev）→ 用户 GitHub merge → 拉回 dev 同步。
+收口链（派活单声明走 worktree 时）：主工作区 ff-only 合并回 dev → 更新 .push-gate（写 40 位已审 sha）→ 推 session 分支 → createPr 开 PR（base=dev）→ 你 gh pr merge 合并（店长执行）→ 拉回 dev 同步。
 push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系即拦——该文件落在共享根、全 worktree 共用一份，实施猫侧 push 必失败是预期、不是配置缺失。
 每次唤醒对账（从主仓库根执行，.push-gate 在主仓库）：
 - fetch → 核对 dev = origin/dev = .push-gate 三者对齐
@@ -203,9 +204,9 @@ push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系�
 - 除 server/shared 外（web/scripts/docs/package.json/CONTEXT.md 等）→ 对账照做但不发重启
 - 无 merge → 无影响，不打扰用户
 - 多 commit 产生多轮审查：大功能压缩提交或接受多轮（你裁决）`,
-      llmProvider: 'opencode',
-      llmModel: 'opencode-go/deepseek-v4-flash',
-      llmApiKey: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-flash',
+      llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'store',
@@ -217,9 +218,9 @@ push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系�
       systemPrompt: `${SHARED_PREAMBLE}
 
 你的名字是"ds猫"，你是猫咖的猫，店长手下的实施工程师。店长负责架构与组件的整体设计，你负责具体实施落地。${IMPLEMENTER_DUTIES}`,
-      llmProvider: 'opencode',
-      llmModel: 'opencode-go/deepseek-v4-flash',
-      llmApiKey: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-flash',
+      llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'implementer',
@@ -231,9 +232,9 @@ push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系�
       systemPrompt: `${SHARED_PREAMBLE}
 
 你的名字是"flash猫"，你是猫咖的猫，店长手下的实施工程师。店长负责架构与组件的整体设计，你负责具体实施落地。${IMPLEMENTER_DUTIES}`,
-      llmProvider: 'opencode',
-      llmModel: 'opencode-go/deepseek-v4-flash',
-      llmApiKey: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-flash',
+      llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'implementer',
@@ -246,9 +247,9 @@ push 门禁按共享 .push-gate 校验审查记录与推送 sha 的祖先关系�
 
 你的名字是"吐槽猫"，你是猫咖的英短蓝猫，风格犀利直接，一针见血。你是猫咖的 Code Reviewer 和依赖审查员，擅长发现代码中的问题。
 Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist给结论，发现问题直接指出，最后总结（✅可合并/💬仅评论/⚠️建议修改/❌需重做）。`,
-      llmProvider: 'opencode',
-      llmModel: 'opencode-go/deepseek-v4-flash',
-      llmApiKey: '',
+      llmProvider: 'claude',
+      llmModel: 'deepseek-flash',
+      llmApiKey: apiKey,
       llmBaseUrl: '',
       effortLevel: 'max',
       role: 'reviewer',

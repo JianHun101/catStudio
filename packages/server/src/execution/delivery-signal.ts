@@ -22,8 +22,9 @@
  *   inputSchema 结构与瘦身前逐字段零差异，threading intent/ref 会破护栏）。
  * - 判断式投递原链路（agent 自由向 -> post_message / 行首 @）不破坏。
  *
- * 承载物（信号产出动作）在铁律层出口检查段（config/seed-data.ts COMMON_IRON_LAWS，
- * T2 负责）——本模块只定义信号本身，不写产出指令。
+ * 承载物：铁律层出口检查段（packages/server/src/seed-data.ts 的 COMMON_IRON_LAWS）承载
+ * 「投递决定」（投给谁 / 要它做什么 / 凭什么定位），**不承载本形状**——形状由服务端产出
+ * （flow-advance.ts 契约③兜底提醒）。本模块只定义信号本身，不写产出指令。
  */
 
 import { z } from 'zod'

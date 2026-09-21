@@ -2,6 +2,9 @@
   "name": "cat-study",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "dev": "node scripts/dev.js",
     "start": "node scripts/dev.js --mode production",
@@ -10,6 +13,9 @@
     "seed": "node scripts/seed.js",
     "flywheel:scan": "node scripts/flywheel/scan.mjs",
     "flywheel:reindex": "node scripts/flywheel/scan.mjs --reindex",
+    "eval:golden:check": "node scripts/eval/golden-check.mjs",
+    "eval:golden:freeze": "node scripts/eval/freeze-rewrite.mjs",
+    "eval:retrieval:baseline": "node scripts/eval/retrieval-baseline.mjs",
     "build": "pnpm -r build",
     "lint": "node scripts/lint.js",
     "stop": "node scripts/stop.js",

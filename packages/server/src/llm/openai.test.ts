@@ -1,14 +1,20 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 
-// Mock cli-utils 以阻止模块加载时的 resolveBin() 调用
-vi.mock('./cli-utils.js', () => ({
-  resolveBin: vi.fn(() => '/usr/local/bin/codex'),
-  messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
-  parseCodexOutput: vi.fn(),
-  ensureProxy: vi.fn(),
-  attachIdleTimeout: vi.fn(() => () => {}),
-  attachExitError: vi.fn(),
-}))
+// Mock cli-utils 以阻止模块加载时的 resolveBin() 调用。
+// `importOriginal` 展开保留未被覆盖的真实导出（`terminateChild` 走真身）——
+// 部分工厂必须镜像消费方真正 import 的导出面，漏键即「调用点拿到 undefined」。
+vi.mock('./cli-utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./cli-utils.js')>()
+  return {
+    ...actual,
+    resolveBin: vi.fn(() => '/usr/local/bin/codex'),
+    messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
+    parseCodexOutput: vi.fn(),
+    ensureProxy: vi.fn(),
+    attachIdleTimeout: vi.fn(() => () => {}),
+    attachExitError: vi.fn(),
+  }
+})
 
 // Mock logger
 vi.mock('../logger.js', () => ({

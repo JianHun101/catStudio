@@ -6,8 +6,8 @@
  * （`messageOf(execError) ?? (execError === undefined ? '<槽位词>' : '<取值词>')`）：
  *
  * - 旧词 `'execute crash'` 同时背负**两种互斥情形**——「真崩」与「没崩、只是槽位
- *   在收口后被别的执行接管了」。全库 19 行 `error_message = 'execute crash'` 里，
- *   `execError` 恒为 undefined（`executeRun` 的 catch 伴生日志 0 条）⇒ 19 行
+ *   在收口后被别的执行接管了」。全库那批 `error_message = 'execute crash'` 里，
+ *   `execError` 恒为 undefined（`executeRun` 的 catch 伴生日志 0 条）⇒ 那些行
  *   **没有一行是崩溃**，正名即修谎报。
  * - R7 除根后，「槽位是别人的」那条通路**根本不再进收口**（归属校验拦下，见
  *   `serial.slot-ownership.test.ts` 的 B1），故本文件只覆盖**归属是自己的**剩下的两条：
@@ -87,6 +87,15 @@ vi.mock('../memory/index.js', () => ({
   retrieveMemoryContext: h.retrieveMemoryContext,
   buildKnowledgeContext: h.buildKnowledgeContext,
   currentRetrievalParams: vi.fn(() => ({ topK: 3, maxDistance: 0.6, probeN: 20 })),
+  // T-1：a2a 记忆门新增的两个被消费导出——同一条规矩（见上），partial factory
+  // 缺一个就是调用点 TypeError。默认值镜像生产：门**关**、跳过结果形状同构。
+  shouldSkipA2aMemory: vi.fn(() => false),
+  skippedRetrievalResult: vi.fn(() => ({
+    text: '',
+    reason: 'skipped-a2a',
+    sections: [],
+    stats: {},
+  })),
 }))
 
 vi.mock('../handoff/index.js', () => ({

@@ -1,6 +1,6 @@
 ---
 type: plan
-status: 已收口
+status: closed
 evidence:
   - kind: commit
     ref: 391f03e

@@ -38,7 +38,7 @@ evidence:
 
 ## 决策（push 审批部分——已退役 2026-09-01）
 
-> 下为退役前的决策记录。退役后收口链改为「ff-only 合并回 dev → 更新 `.push-gate` → 推 session 分支 → createPr 开 PR（base=dev）→ GitHub merge → 拉回 dev 同步」；PR 的 merge 即发布关，替代「批准推 dev」审批节点。
+> 下为退役前的决策记录。退役后收口链改为「ff-only 合并回 dev → 更新 `.push-gate` → 推 session 分支 → createPr 开 PR（base=dev）→ gh pr merge 合并（店长执行）→ 拉回 dev 同步」；PR 的 merge 即发布关，替代「批准推 dev」审批节点。
 
 5. **push 不进收口器**（退役前语义）：push 是「本地↔共享」不可逆边界，决定权归用户。收口器只做本地机械步骤（merge/删/写 gate/切分支）；push 走审批节点。退役后该边界由 createPr + PR merge 承接。
 6. **push 审批契约**（退役前语义）：`request_user_action` MCP 工具曾新增 push 请求类型（店长收口做完本地机械步骤后发起）→ 服务端实时采集 commits + 合并 diff（复用 diff-collector 管线）→ 消息附加 push 类型 + extra → 前端面板（reason + commit 列表 + 可折叠 diff + V3 按钮）→ 用户点确认 → 执行 `git push origin dev`（cwd mainRoot）。全程无「店长手工塞 diff」路径。

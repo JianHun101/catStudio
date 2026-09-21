@@ -7,6 +7,9 @@
  *   top-K 命中片 → **按节补齐**（Decisions 14「小块检索、整节返回」）→
  *   按节截断进预算 → 首尾各半排序 → 拼 system prompt。
  *
+ * 入口分工（R10）：`retrieveMemoryContext` = 生产入口（闸 → 剥 mention → 改写），
+ * `runRetrievalChain` = **改写之后**的链段本体（可注入查询集，跑批用；两处口径同源）。
+ *
  * ⚠️ 旧链（`memories` / `memories_fts` 两张表 + `embedding BLOB` 扫表向量检索）
  * 已随票辛 ⑥ **整体下线**（两表 DROP，见 `db/index.ts`）。对话原话不再入库，
  * 索引的唯一来源是飞轮扫描器（`scripts/flywheel/scan.mjs`）。
@@ -19,11 +22,14 @@
  *   `filtered-empty` 召回空——候选池被 X4 状态过滤挡光（嵌入是好的）
  *   `no-hit`         召回空——库空 / 候选全被距离阈值挡掉
  *   `budget-exhausted` 召回到片但整节都放不进预算
+ *   `skipped-a2a`    a2a 触发、总开关开、且 `MEMORY_A2A_ENABLED` 关——**压根没检索**（T-1 门控）
+ *                    （总开关关时**不用**本档：那时门没决定任何事，一律 `not-enabled`）
  *
  * 环境变量:
- *   MEMORY_TOP_K                — 检索片数（默认 3）
+ *   MEMORY_TOP_K                — 末次截断名额，按**节**计（默认 3；W2-c 前按**片**计）
  *   MEMORY_MAX_DISTANCE         — 检索距离下限（默认 0.6）
  *   MEMORY_CONTEXT_TOKEN_BUDGET — 注入预算硬上限（默认 8000）
+ *   MEMORY_A2A_ENABLED          — a2a 触发时是否仍检索【相关记忆】（默认关），见 shouldSkipA2aMemory
  *   KNOWLEDGE_TOP_K             — 知识库检索数量（默认 3），见 buildKnowledgeContext
  *   MEMORY_QUERY_REWRITE_ENABLED— 查询改写开关（默认 "1"），见 query-rewrite.ts
  */
@@ -33,6 +39,7 @@ import { chunks as chunksRepo, knowledge as knowledgeRepo } from '../db/reposito
 import {
   CANDIDATE_BODY_HEAD_CHARS,
   HYBRID_POOL_PER_QUERY,
+  RETIRED_STATUSES,
   type ChunkVectorSearchResult,
 } from '../db/repository/chunks.js'
 import type {
@@ -43,6 +50,7 @@ import type {
 import { embedText, getEmbeddingStatus, isMemoryEnabled } from './embedding.js'
 import { rewriteRetrievalQueries } from './query-rewrite.js'
 import { createLogger } from '../logger.js'
+import { envNumber } from '../env-number.js'
 
 const log = createLogger('memory')
 
@@ -72,6 +80,14 @@ export interface RetrievedSection {
   breadcrumb: string
   /** 该节全部片正文，按 `part_index` 升序 */
   parts: string[]
+  /**
+   * 该节所代表的片在库内的 `status`（C4：注入标记由**这一列**驱动）。
+   *
+   * 刻意不在渲染期回库补查：标记必须与「该片为什么被召回」同源——回查等于让
+   * 渲染层与召回层各判一次状态，两者判反时表现为「召回得到、但不带标记」，
+   * 正是用户要防的那种无声误导。
+   */
+  status: string | null
   /** 该节内最相关片的余弦距离（台账列：当前不参与排序，节序由片级累加 RRF 分决定，`bestIndex` 仅作同分 tie-break） */
   distance: number
 }
@@ -85,6 +101,11 @@ export type MemoryRetrievalReason =
   | 'filtered-empty'
   | 'no-hit'
   | 'budget-exhausted'
+  /** T-1 a2a 门控：触发消息来自 agent、**总开关开**、且 `MEMORY_A2A_ENABLED` 关 ⇒
+   *  **没有检索**（区别于 not-enabled——那个是记忆功能整体关，a2a/用户两侧都不跑）。
+   *  总开关关时门**不生效**、恒不落本档（F3 裁决：reason 要回答「为什么没有记忆」，
+   *  总开关关时门没有决定任何事） */
+  | 'skipped-a2a'
 
 // ─── 检索流水（P2 / R1：只采不改，字段口径见 P2 §四）─────
 //
@@ -152,8 +173,13 @@ export interface RetrievalParamsSnapshot {
  */
 export function currentRetrievalParams(): RetrievalParamsSnapshot {
   return {
-    topK: parseInt(process.env.MEMORY_TOP_K || '3', 10),
-    maxDistance: parseFloat(process.env.MEMORY_MAX_DISTANCE || '0.6'),
+    // topK 保持**整数**语义（原 `parseInt`）：`Math.trunc` 在调用点做，`envNumber`
+    // 形状固定两参不带模式开关。原先切片点 `slice(0, topK)` 会自行取整，W2-c 改成按
+    // **节**计名额后截断点不再切片 ⇒ 取整改由这里的 `Math.trunc` 独自承担（`topK ≤ 0`
+    // ⇒ 空集，见末次截断那轮循环的界判）。显式化是为了 `RetrievalParamsSnapshot`
+    // 快照里读到的就是真实生效的整数。
+    topK: Math.trunc(envNumber('MEMORY_TOP_K', 3)),
+    maxDistance: envNumber('MEMORY_MAX_DISTANCE', 0.6),
     probeN: MAX_PROBE_N,
   }
 }
@@ -209,6 +235,64 @@ function emptyResult(
   return { text: '', reason, sections: [], stats: { ...EMPTY_STATS, ...stats } }
 }
 
+// ─── a2a 门控（T-1）──────────────────────────────────
+// 触发消息来自 **agent**（猫的回复 @ 了下一棒）时，默认不检索【相关记忆】。
+// 依据：a2a 的触发内容本身就是上一只猫已消化的结论，检索拉回来的是白名单文档
+// 里的通用切片——对这一步没有信息增量，是纯 token 税，且带着把结论带偏的风险。
+// 【知识库】不受此门约束（a2a 高频场景正是审查与实施，ADR/规范仍要查）。
+//
+// 判据**不在本模块**：本模块只认调用点递进来的布尔，不回头看 `triggerContent`
+// 里有没有 @、也不查 DB——「这条触发是不是 agent 发的」是调度层的知识。
+
+/** a2a 触发时**是否应当跳过**【相关记忆】检索（= 本门生效）。默认关门
+ *  （`MEMORY_A2A_ENABLED` 给真值才放行）——本门要治的就是「a2a 白跑检索」，
+ *  默认开等于什么都不治。
+ *
+ *  ⚠️ **合取总开关**（F3 裁决）：`MEMORY_ENABLED` 关时本门**不生效**，返回 `false`
+ *  放行到正常路径，由 `retrieveMemoryContext` 第一条语句的 `not-enabled` 兜底。
+ *  理由：`reason` 要回答「这段 prompt 为什么没有记忆」，总开关关时 a2a 门**没有决定
+ *  任何事**——记 `skipped-a2a` 是把原因归给一条没起作用的闸，与本单自己的靶心
+ *  「span 不许撒谎」同型（照 `'ok'`／`'error'` 都是假读数的同一把尺子）。
+ *  放行**零成本**：`not-enabled` 分支在改写器之前 ⇒ 不 spawn sidecar、不打 LLM。
+ *  合取项落在**本函数内部**而不在调用点：调用点多读一个导出 = partial 替身镜像面
+ *  多一处可漏点（`reply.ts` 的 import 列表因此一个字不加）。
+ *
+ *  真值收 `1` 与 `true` 两种拼法（大小写不敏感）：`.env.example` 记忆块里
+ *  `MEMORY_ENABLED=true` 就是 `true` 拼法，同块两种写法都在用——只认 `'1'` 会把
+ *  `=true` **静默**读成「关」（写的人以为门开了，其实还关着），与本单「不静默」的
+ *  靶心同型（F2 审查项）。
+ *  ⚠️ **不**改用全仓宽松惯例 `!== 'false'`：那条会让已写明的 `=0`（关闭）
+ *  反过来变成**启用**——`.env.example` 同族声明是「1=启用 | 0=关闭」。
+ *  认不出的值一律落默认关（fail-closed：拼错 = 保持默认，不会把门悄悄打开）。
+ *  本读法与 `scripts/handoff-gen.mjs` 的 `isForceDeliver` 逐字同款（同一套容忍度、
+ *  同一条「不做『非空即真』，否则 `=0` 手滑会静默变成启用」的理由）——照抄在仓先例，
+ *  不新造第三种读法。 */
+export function shouldSkipA2aMemory(): boolean {
+  // 总开关关：本门不参与决策（见上「合取总开关」），放行给 not-enabled
+  if (!isMemoryEnabled()) return false
+  const raw = (process.env.MEMORY_A2A_ENABLED ?? '').trim().toLowerCase()
+  return !(raw === '1' || raw === 'true')
+}
+
+/**
+ * 门控跳过的空结果工厂。
+ *
+ * 为什么工厂在本模块而不是调用点手搓：`recordRetrievalTrace` 与 span 都按
+ * `stats?.xxx` 取值——形状一旦与其它空结果分叉，落库就是一片 null（`threshold_max_distance`
+ * 等参数快照列全是空），「跳过一次」与「参数没记上」当场不可区分。形状归本模块所有。
+ *
+ * `retrievalMs` 保持 `EMPTY_STATS` 的 0（**不传调用点计时**）：那是「检索跑了多久」
+ * 的读数，而这次**没有跑**——填一个真实的微秒数会把「跳过」渲染成「极快的一次检索」。
+ */
+export function skippedRetrievalResult(): MemoryContextResult {
+  const params = currentRetrievalParams()
+  return emptyResult('skipped-a2a', {
+    thresholdMaxDistance: params.maxDistance,
+    paramTopK: params.topK,
+    paramProbeN: params.probeN,
+  })
+}
+
 // ─── 降级标记（票丁契约 ①-②）─────────────────────────
 // 嵌入链不可用时，检索会静默变空。此处**每条失败链只留一条痕**：
 // 首次在检索面记 warn（带 reason），此后静默——避免每轮刷日志。
@@ -243,6 +327,10 @@ function noteEmbeddingDegradation(): void {
  * R1（P2）起 `stats` 额外承载**检索流水**（`queryTraces` / `candidates` / 参数快照
  * / `retrievalMs`）——**只采不改**：检索行为（召回、排序、注入）逐字节不变，
  * 落盘点在 `execution/reply.ts` 的 10s `Promise.race` **之外**。
+ *
+ * R10 起本函数只做**闸 → 剥 mention → 改写**，链段本体搬去 `runRetrievalChain`：
+ * 跑批脚本要喂**冻结改写文本**、跳过改写器（D2 冻结纪律），链段必须可独立调用。
+ * `t0` 仍在这一层取、经 `startedAt` 传下去 ⇒ `retrievalMs` 含改写耗时的口径不变。
  */
 export async function retrieveMemoryContext(triggerContent: string): Promise<MemoryContextResult> {
   const t0 = Date.now()
@@ -268,13 +356,52 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
   const cleanContent = triggerContent.replace(/@\S+\s*/g, '').trim()
   if (!cleanContent) return empty('empty-query')
 
+  const rewrites = await rewriteRetrievalQueries(cleanContent)
+  // 去重（`new Set`）搬进链段入口，它幂等；对本层逐字节等价——原话排在首位，
+  // 改写里若含原话，去重后顺序不变（`queries[0]` 仍是原话，探针池语义不漂）。
+  return runRetrievalChain([cleanContent, ...rewrites], { startedAt: t0 })
+}
+
+/**
+ * 跑**改写之后**的完整链段（R10 契约 §A2）：逐查询嵌入降级 → 混合检索 →
+ * 跨查询 RRF 合并 → 阈值过滤 → 节补齐 → 预算截断 → 渲染。
+ *
+ * 抽出它的唯一理由是**注入查询集**：改写器原先内嵌在 `retrieveMemoryContext` 里，
+ * 导出签名只吃 `triggerContent`，外部无法喂冻结改写（R10 跑批要的正是这个）。
+ * 参数 / 阈值 / 预算仍**只读 env**（`currentRetrievalParams` /
+ * `MEMORY_CONTEXT_TOKEN_BUDGET`），**不为抽取新增任何旋钮**——生产与跑批的口径
+ * 因此自动同源，不会各自漂移。
+ *
+ * @param rawQueries 待检索的查询串。**`rawQueries[0]` 必须是原始查询**——探针池的
+ *   「原话优先」语义（取首个嵌入成功者）依赖顺序。重复项在入口去重（幂等）：同一
+ *   查询在同一趟出现两次，会让同一片被 RRF 计两次分。
+ * @param opts.startedAt 起始时刻（毫秒）。缺省取链段入口时刻；生产侧由
+ *   `retrieveMemoryContext` 传自己的 `t0` 进来，使 `retrievalMs` 含改写耗时。
+ */
+export async function runRetrievalChain(
+  rawQueries: string[],
+  opts: { startedAt?: number } = {}
+): Promise<MemoryContextResult> {
+  const t0 = opts.startedAt ?? Date.now()
+  const params = currentRetrievalParams()
+  /** 见 `retrieveMemoryContext` 同款注释：每条返回路径都带公共 trace */
+  const baseStats = (): Partial<MemoryContextStats> => ({
+    thresholdMaxDistance: params.maxDistance,
+    paramTopK: params.topK,
+    paramProbeN: params.probeN,
+    retrievalMs: Date.now() - t0,
+  })
+  const empty = (
+    reason: MemoryRetrievalReason,
+    stats: Partial<MemoryContextStats> = {}
+  ): MemoryContextResult => emptyResult(reason, { ...baseStats(), ...stats })
+
+  const queries = [...new Set(rawQueries)]
+
   const budgetTokens = parseInt(
     process.env.MEMORY_CONTEXT_TOKEN_BUDGET || String(DEFAULT_CONTEXT_TOKEN_BUDGET),
     10
   )
-
-  const rewrites = await rewriteRetrievalQueries(cleanContent)
-  const queries = [...new Set([cleanContent, ...rewrites])]
 
   // 逐查询检索：嵌入成功走混合（向量 + 关键词 RRF），失败降级为仅关键词通道
   // ——关键词通道正是为短词召回设计，嵌入坏了不该连它一起废掉。
@@ -352,11 +479,42 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
     })
   }
 
-  const ordered = [...merged.values()]
+  const ranked = [...merged.values()]
     // 排序主键 = **跨查询累加 RRF 分降序**；同分按 `bestIndex` 升序 tie-break
     // （R1-b §二 改动 4：口径从「哪趟名次最小」变成「跨查询累计得分最大」）
     .sort((a, b) => b.rrfScore - a.rrfScore || a.bestIndex - b.bestIndex)
-    .slice(0, params.topK)
+
+  // 末次截断按**节**计名额（W2-c，原为 `.slice(0, topK)` 按**片**切）：`topK` 数的
+  // 从此是「不同节」而不是「片」。按片切时同节的多片各占一个名额，随后 :606 的
+  // `bySection` 再按节去重 ⇒ 实际注入节数可以**少于** `topK`（黄金集 40 条实测：
+  // 片级 k=3 下 14 条注入节数 < 3，名额被同节重复片白占）。
+  //
+  // 节的代表 = `ranked` 里最靠前的那片——与 `bySection` 的「首个胜出」是**同一条**
+  // 规则，故下面这轮去重与 `bySection` 那轮的入选集合逐节一致（那轮只是再做一次
+  // 幂等去重）。⚠️ 反过来说：`finalTraces` 从此**每节恒一行** ⇒ :664 的
+  // `isSectionRepresentative` 恒真、`section_dup` 这个 `droppedReason` 在本路径上
+  // **不可达**（枚举值保留，供历史行与 probe 行读；见交接文档「已知副作用」）。
+  // ⚠️ 键的拼法必须与 `bySection` 逐字同形（NUL 转义分隔，不是空格/`::`——锚点里
+  // 两者都常见，拼错会撞键而**无任何报错**）。
+  const takenSections = new Set<string>()
+  const ordered: Scored[] = []
+  for (const s of ranked) {
+    // ⚠️ 界判必须在 push **之前**：放到 push 之后的话，`ordered.length >= params.topK`
+    // 永远在**至少推入 1 条之后**才求值 ⇒ `MEMORY_TOP_K=0` 从「0 节 + `no-hit`」翻成
+    // 「1 节 + `ok`」，下面 :593 的空集分支跟着失效。那是**静默错注入**（看着完全正常），
+    // 不是显式报错。
+    //
+    // 与 W2-c 之前的 `.slice(0, topK)` 的对照（**别读成「逐字同义」**）：
+    //   `topK = 0` ⇒ 两边都是空集（同义）；`topK < 0` ⇒ **有意收紧**：`.slice(0, -1)`
+    //   是数组**负索引**语义（保留末尾 n-1 条，纯属意外），本处一律空集。`envNumber`
+    //   明写「不加区间钳位：`0` / 负数原样生效」⇒ 负数确实走得到这里，这条差异是刻意
+    //   的不是遗漏（用例 `W2-c-2` 把 0 与 -1 两档都钉了）。
+    if (ordered.length >= params.topK) break
+    const key = `${s.row.doc_path}\0${s.row.section_anchor}`
+    if (takenSections.has(key)) continue
+    takenSections.add(key)
+    ordered.push(s)
+  }
   const orderedRows = ordered.map((s) => s.row)
 
   // X5 埋点 + W11 判据：候选池探针取**首个嵌入成功的查询**（原话优先）。
@@ -456,6 +614,8 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
       breadcrumb: chunk.breadcrumb,
       // 节在库内为空（极端：命中后又被并发删）⇒ 退回命中片正文，不注入空条目
       parts: parts.length > 0 ? parts.map((p) => p.body) : [chunk.body],
+      // 代表片的 status（`bySection` 只留首个 = `ordered` 里最靠前的那片）
+      status: chunk.status,
       distance: chunk.distance,
     })
   }
@@ -558,9 +718,26 @@ function renderOrder(n: number): number[] {
 function renderSections(sections: RetrievedSection[]): { text: string; tokens: number } {
   if (sections.length === 0) return { text: '', tokens: 0 }
   const ordered = renderOrder(sections.length).map((i) => sections[i])
-  const lines = ordered.map((s, i) => `${i + 1}. ${s.parts.join('\n')}`)
+  const lines = ordered.map((s, i) => `${i + 1}. ${retiredMark(s)}${s.parts.join('\n')}`)
   const text = `\n\n【相关记忆】\n${lines.join('\n')}`
   return { text, tokens: estimateTokens(text) }
+}
+
+/** C4 注入标记（票面契约字面量，**不许换写法**） */
+const RETIRED_SECTION_PREFIX = '【已废弃·仅留结论】'
+
+/**
+ * 退役节的注入标记（C4）——由**节装配带下来的 `status` 列**驱动。
+ *
+ * 为什么不认正文内容（例如「正文里已有『已废弃』三字」）：正文是退役文档自己写的，
+ * 它没写、或写法不同，标记就消失；而这里的判据是**库里的状态列**，与「为什么它
+ * 被召回」同一个来源。正文不可信、状态列可信，这是标记的全部意义——猫读到这条
+ * 结论时**不可能**把它当成活指导。
+ */
+function retiredMark(section: RetrievedSection): string {
+  return section.status !== null && RETIRED_STATUSES.has(section.status)
+    ? RETIRED_SECTION_PREFIX
+    : ''
 }
 
 // ─── 上下文构建（知识库）───────────────────────────────

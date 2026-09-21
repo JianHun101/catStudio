@@ -10,6 +10,8 @@ import {
   stopProxyIfSpawned,
   __test_reset,
   parseClaudeCodeOutput,
+  terminateChild,
+  __test_setPlatform,
 } from './cli-utils.js'
 import type { Chunk, LLMMessage } from '@cat-study/shared'
 
@@ -352,7 +354,9 @@ describe('parseClaudeCodeOutput tool_use→tool_result 跨事件解析（工具�
     const chunks = await collect([
       JSON.stringify({
         type: 'assistant',
-        message: { content: [{ type: 'tool_use', id: 't2', name: 'Read', input: { path: 'f.ts' } }] },
+        message: {
+          content: [{ type: 'tool_use', id: 't2', name: 'Read', input: { path: 'f.ts' } }],
+        },
       }),
       JSON.stringify({
         type: 'user',
@@ -383,9 +387,7 @@ describe('parseClaudeCodeOutput tool_use→tool_result 跨事件解析（工具�
       JSON.stringify({
         type: 'user',
         message: {
-          content: [
-            { type: 'tool_result', tool_use_id: 't3', content: 'exit 1', is_error: true },
-          ],
+          content: [{ type: 'tool_result', tool_use_id: 't3', content: 'exit 1', is_error: true }],
         },
       }),
     ])
@@ -437,5 +439,125 @@ describe('parseClaudeCodeOutput tool_use→tool_result 跨事件解析（工具�
         tool: { id: 't9', name: 'bash', status: 'running', input: {} },
       },
     ])
+  })
+})
+
+// ─── terminateChild（票①：存活判据 + 平台分派）────────────
+//
+// 靶心是**判据语义**：`child.killed` 是「信号已发出」而非「进程已死」，拿它当存活
+// 判据 ⇒ 宽限期后的 SIGKILL 升级判断永远过不去（升级链整条失效）。本组用例的 mock
+// `kill()` 复刻 Node 真实语义（调用即置 `killed=true`，`exitCode`/`signalCode` 要等
+// 进程真终止才落定）——**旧判据在此必红**，是反证而非同义反复。
+describe('terminateChild（存活判据 + 平台分派）', () => {
+  let restorePlatform: (() => void) | undefined
+
+  afterEach(() => {
+    restorePlatform?.()
+    restorePlatform = undefined
+    vi.clearAllMocks()
+  })
+
+  /** mock 子进程：`kill()` 复刻 Node 语义（置 `killed=true`，不动 exit/signal 字段） */
+  function aliveChild(pid = 4242) {
+    const child: any = {
+      pid,
+      kill: vi.fn(() => {
+        child.killed = true
+      }),
+      exitCode: null,
+      signalCode: null,
+      killed: false,
+    }
+    return child
+  }
+
+  it('POSIX：宽限期内仍存活 → 升级 SIGKILL（`killed` 置真不构成存活判据）', () => {
+    vi.useFakeTimers()
+    try {
+      restorePlatform = __test_setPlatform('linux')
+      const child = aliveChild()
+
+      terminateChild(child, { label: 'test', graceMs: 5000 })
+
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+      // 前置：killed 已置真——旧判据正是在此翻车（升级判断恒假）
+      expect(child.killed).toBe(true)
+      expect(child.kill).not.toHaveBeenCalledWith('SIGKILL')
+
+      vi.advanceTimersByTime(5000)
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('POSIX：宽限期内进程已死（exitCode 落定）→ 不发 SIGKILL', () => {
+    vi.useFakeTimers()
+    try {
+      restorePlatform = __test_setPlatform('linux')
+      const child = aliveChild()
+      // 进程在宽限期内正常退出——kill 后 exitCode 落定
+      child.kill.mockImplementation(() => {
+        child.exitCode = 0
+      })
+
+      terminateChild(child, { label: 'test', graceMs: 5000 })
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+
+      vi.advanceTimersByTime(5000)
+      expect(child.kill).not.toHaveBeenCalledWith('SIGKILL')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('win32：走 `taskkill /pid <pid> /t /f` 树杀，不发任何信号', () => {
+    restorePlatform = __test_setPlatform('win32')
+    spawnMock.mockReturnValue(fakeSpawnedChild())
+    const child = aliveChild(4242)
+
+    terminateChild(child, { label: 'test' })
+
+    // 信号在 win32 是 TerminateProcess：杀得掉 supervisor、杀不到它底下的真 CLI
+    expect(child.kill).not.toHaveBeenCalled()
+    const call = spawnMock.mock.calls.find((c: any[]) => c[0] === 'taskkill')
+    expect(call).toBeDefined()
+    expect(call![1]).toEqual(['/pid', '4242', '/t', '/f'])
+    expect(call![2]).toMatchObject({ shell: false })
+  })
+
+  it('win32：取不到 pid → 静默降级，不 spawn taskkill', () => {
+    restorePlatform = __test_setPlatform('win32')
+    spawnMock.mockReturnValue(fakeSpawnedChild())
+    const child = aliveChild()
+    child.pid = undefined // spawn 失败的真实形状：无 pid 可树杀
+
+    terminateChild(child, { label: 'test' })
+
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(child.kill).not.toHaveBeenCalled()
+  })
+
+  it('进程已死（exitCode / signalCode 已落定）→ 静默降级，不发信号也不树杀', () => {
+    for (const dead of [
+      { exitCode: 0, signalCode: null },
+      { exitCode: null, signalCode: 'SIGTERM' },
+    ]) {
+      spawnMock.mockReturnValue(fakeSpawnedChild())
+      const child: any = { pid: 4242, kill: vi.fn(), killed: false, ...dead }
+
+      restorePlatform = __test_setPlatform('win32')
+      terminateChild(child, { label: 'test' })
+      restorePlatform()
+      restorePlatform = undefined
+
+      restorePlatform = __test_setPlatform('linux')
+      terminateChild(child, { label: 'test' })
+      restorePlatform()
+      restorePlatform = undefined
+
+      expect(child.kill).not.toHaveBeenCalled()
+      expect(spawnMock).not.toHaveBeenCalled()
+    }
   })
 })

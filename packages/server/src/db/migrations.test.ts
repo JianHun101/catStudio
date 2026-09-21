@@ -175,7 +175,7 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(actual).toHaveLength(BASELINE.length)
     })
 
-    it('空库跑完整 initDb → 基线 47 件之上追加区净增 3 件，且两列索引已升成三列', () => {
+    it('空库跑完整 initDb → 基线 47 件之上追加区净增 4 件，且两列索引已升成三列', () => {
       setDb(makeFreshDb())
       initDb()
 
@@ -188,12 +188,17 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       //   - fix-forward 条目对已齐件的库是 14 个 `IF NOT EXISTS` no-op ⇒ 零产出
       //     （该条**不挂探针**，走的是「真执行 no-op」，见 `migrations.ts` 该条上方注释）；
       //   - 票 7 的 `sessions archived_at` 是加列 ⇒ `sqlite_master` 里**不产生物体**（列不是物体）；
-      //   - 其余三条索引各 +1。
+      //   - 其余三条索引各 +1；
+      //   - 票 J1 的 `human_labels` 是**新表** ⇒ +1 张表（表带 UNIQUE(message_id) 会在
+      //     `sqlite_master` 里生成一条 `sqlite_autoindex_*` 索引行——`dumpSchema` 按
+      //     `name NOT LIKE 'sqlite_%'` 过滤，自动索引名恰好命中该前缀，故不计入）。
       // 将来往追加区加迁移**必须来改这里**——否则新物体静默出现，没人知道结构被谁改了。
+      // 次序 = `dumpSchema` 的 `ORDER BY type, name`（`'index' < 'table'` ⇒ 索引段在前）
       expect(added.map((r) => `${r.type}:${r.name}`)).toEqual([
         'index:idx_execution_logs_session_started',
         'index:idx_execution_logs_status',
         'index:idx_sessions_active',
+        'table:human_labels',
       ])
       // 「升级」的判据是定义本身：末列 `id` 是游标 tie-break，两列版里没有
       expect(actual.find((r) => r.name === 'idx_messages_session')?.sql).toContain(
@@ -238,9 +243,23 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(appended.filter((m) => !m.ticket).map((m) => m.name)).toEqual([])
       // 票号形态：挡 `t6` / `T6 ` / 全角 `Ｔ6` 这类手滑。拼错的票号不会让上面那条红
       // （它是「非空」判断），但会让各票自己的 `filter` 静默少收 —— 从这条兜住。
+      //
+      // **形态放宽（2026-09-20，票 J1）**：原为 `/^T\d+$/`，只认 db-schema-governance
+      // 那一族的 `T<n>`。但本字段的语义是「这条迁移属于**哪张票**」，不是「属于 T 族」——
+      // 票 J1（`docs/run/eval-system/J1-judge-credibility-standing-loop.md`）是它的第一张
+      // 非 T 族迁移。把它硬编成 `'T8'` 是**假话**：T 族是 db-schema-governance 的编号空间，
+      // 占一个号会与将来那张真票撞名。故放宽为「大写字母（可带连字符）+ 数字」——
+      // 覆盖面 = 仓内真实出现过的票号形态（`T6` / `J1` / `OQ-6` / `R9` / `C1` / `F1`）。
+      // 放宽是否削弱了这道闸：**下面那条反对照把三类手滑逐个喂进正则**，证明它一个都没漏
+      // ——放宽的是「认哪些族」，不是「认不认得出写错」。
+      const TICKET_SHAPE = /^[A-Z]{1,4}-?\d+$/
       expect(
-        [...new Set(appended.map((m) => m.ticket))].filter((t) => !/^T\d+$/.test(t as string))
+        [...new Set(appended.map((m) => m.ticket))].filter((t) => !TICKET_SHAPE.test(t as string))
       ).toEqual([])
+      // 反对照（真空性）：三类手滑必须**全部**被拒 —— 否则上面那条 green 只是「正则恒真」
+      for (const typo of ['t6', 'T6 ', 'Ｔ6', '', 'T', '6']) {
+        expect(TICKET_SHAPE.test(typo), `应拒: ${JSON.stringify(typo)}`).toBe(false)
+      }
 
       // 反向对照：基线区**一律不补** —— 若给 41 条基线逐条补票号，等于在「41 条基线」这层
       // 再造一个逐条手写面（正是本票要拆的那类必撞点）。
@@ -474,13 +493,14 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
     const repairEntry = MIGRATIONS.find((m) => m.name === REPAIR_NAME) as Migration
 
     /**
-     * 追加区在**齐件库**上的净增物体数（票 2 起 = 3：`idx_execution_logs_session_started` /
-     * `idx_execution_logs_status` / 票 7 的 `idx_sessions_active`；`idx_messages_session` 是
-     * 同名升级 ⇒ 物体数不变，票 5 的 `messages` 重建同理，票 7 的加列不是物体）。
-     * 追加区的**权威清单**在「验收 1 · 空库跑完整 initDb → 净增 3 件」那条穷举用例里；
+     * 追加区在**齐件库**上的净增物体数（票 2 起 = 4：`idx_execution_logs_session_started` /
+     * `idx_execution_logs_status` / 票 7 的 `idx_sessions_active` / 票 J1 新增的
+     * `human_labels` 表；`idx_messages_session` 是同名升级 ⇒ 物体数不变，票 5 的
+     * `messages` 重建同理，票 7 的加列不是物体）。
+     * 追加区的**权威清单**在「验收 1 · 空库跑完整 initDb → 净增 4 件」那条穷举用例里；
      * 这里只拿它把 ds猫 侧「齐件库 = 47 件」的旧读数换算到追加区上线后的口径。
      */
-    const APPENDED_NET_OBJECTS = 3
+    const APPENDED_NET_OBJECTS = 4
 
     /** 补建目标 = 5 表 + 9 索引，**顺序 = 建表依赖序**（FK 目标先建） */
     const EXPECTED_OBJECTS = [

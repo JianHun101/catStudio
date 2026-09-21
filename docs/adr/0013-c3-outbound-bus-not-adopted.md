@@ -2,6 +2,7 @@
 type: decision
 date: 2026-09-01
 status: superseded
+verdict: C3 出站总线方案已废弃，不做
 evidence:
   - kind: file
     ref: packages/server/src/routes/sessions.ts

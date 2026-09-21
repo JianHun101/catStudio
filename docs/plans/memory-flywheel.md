@@ -1,7 +1,7 @@
 ---
 type: plan
 date: 2026-09-13
-status: 已收口
+status: closed
 evidence:
   - kind: commit
     ref: ff97e01
@@ -41,14 +41,14 @@ system prompt；检索命中与现实矛盾时走既有审查链改 MD、重扫�
 
 ### 2.1 源与准入
 
-| 项          | 契约                                                                                                      |
-| ----------- | --------------------------------------------------------------------------------------------------------- |
-| 白名单前缀  | `docs/adr/` `docs/lessons/` `docs/plans/`（`scan.mjs` `SCAN_PREFIXES`，**必须带尾斜杠**）                 |
-| 额外门槛    | `docs/plans/` **仅收** `status ∈ {已定稿, 已收口}`（`PLAN_STATUS_CRYSTALLIZED`）；其余态 fail-closed 跳过 |
-| 元数据载体  | **YAML frontmatter**（`type` / `date` / `status` / `evidence` / `supersedes`）                            |
-| 判定分工    | 机器**只校存在性**，语义归审查链；ADR 侧附加规则落 `docs/adr/README.md` 门牌                              |
-| `date` 口径 | **写入即冻结、扫描器只补缺**（不随每次提交漂移）                                                          |
-| 存量策略    | 存量不收；规范化前置（位置一次性归位 + 门牌补齐；内容只复核在飞件与近期件），**过闸准入**                 |
+| 项          | 契约                                                                                                     |
+| ----------- | -------------------------------------------------------------------------------------------------------- |
+| 白名单前缀  | `docs/adr/` `docs/lessons/` `docs/plans/`（`scan.mjs` `SCAN_PREFIXES`，**必须带尾斜杠**）                |
+| 额外门槛    | `docs/plans/` **仅收** `status ∈ {final, closed}`（`PLAN_STATUS_CRYSTALLIZED`）；其余态 fail-closed 跳过 |
+| 元数据载体  | **YAML frontmatter**（`type` / `date` / `status` / `evidence` / `supersedes`）                           |
+| 判定分工    | 机器**只校存在性**，语义归审查链；ADR 侧附加规则落 `docs/adr/README.md` 门牌                             |
+| `date` 口径 | **写入即冻结、扫描器只补缺**（不随每次提交漂移）                                                         |
+| 存量策略    | 存量不收；规范化前置（位置一次性归位 + 门牌补齐；内容只复核在飞件与近期件），**过闸准入**                |
 
 ### 2.2 切片（`packages/server/src/memory/flywheel/segment.ts`）
 

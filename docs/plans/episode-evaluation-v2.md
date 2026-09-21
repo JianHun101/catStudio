@@ -1,7 +1,7 @@
 ---
 type: plan
 date: 2026-08-11
-status: 已定稿
+status: final
 evidence:
   - kind: commit
     ref: 8352116

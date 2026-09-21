@@ -51,6 +51,8 @@ function seedGraph(): void {
       VALUES ('m1', '${SESSION}', '${REVIEWER}', '${AGENT}', 'suggest', '2026-09-01T00:00:00.000Z');
     INSERT INTO review_parse_failures (message_id, reason, raw, created_at)
       VALUES ('m1', 'bad_verdict', 'r', '2026-09-01T00:00:00.000Z');
+    INSERT INTO human_labels (id, message_id, session_id, agent_id, labeler, score, created_at)
+      VALUES ('hl1', 'm1', '${SESSION}', '${AGENT}', 'user', 4, '2026-09-01T00:00:00.000Z');
   `)
 }
 
@@ -69,7 +71,7 @@ describe('db/repository/dependents —— 删除依赖清理（票 6 RESTRICT �
   })
 
   describe('真空性反对照：不清理就删不掉（证明约束真在、清理真承重）', () => {
-    it('裸 DELETE messages → 被 review_verdicts / review_parse_failures / episode_attributions / execution_logs 拦下', () => {
+    it('裸 DELETE messages → 被 review_verdicts / review_parse_failures / episode_attributions / execution_logs / human_labels 拦下', () => {
       seedGraph()
       expect(() =>
         getDb().exec(`DELETE FROM messages WHERE session_id = '${SESSION}'`)
@@ -108,6 +110,7 @@ describe('db/repository/dependents —— 删除依赖清理（票 6 RESTRICT �
       expect(count('review_verdicts')).toBe(0)
       expect(count('review_parse_failures')).toBe(0)
       expect(count('episode_attributions')).toBe(0) // delivery_message_id 指向被删消息
+      expect(count('human_labels')).toBe(0) // J1：漏了这条 = 带标注的消息删不掉（500）
       // 会话本体与成员不动（那两条链由 session/agent 侧负责）
       expect(count('sessions')).toBe(1)
       expect(count('agents')).toBe(2)

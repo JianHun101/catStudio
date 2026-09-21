@@ -45,3 +45,16 @@ Work the **frontier**：票①完成后票②解锁（纯串行链，从上到�
 - [ ] AC8：刷新/切会话后，执行中的计时在下一个 10s 心跳到达时恢复且不归零（`startedAt` 来自 server 载荷而非本地计时——store 测试模拟「中途收到首个 replying」断言 `startedAt` 取载荷值）
 - [ ] AC9：`ChatPanel` 顶层无每秒变化的 ref/reactive（静态断言）；tick 只在 `ReplyElapsed`（与既有 `AgentStatusLabel`）内
 - [ ] AC10：`pnpm test:web`、`pnpm test:shared`、`pnpm lint` 全绿
+
+## 收口（2026-09-20 补记 · 店长票 A G1(c)）
+
+> 本段为**事后补记**：票①② 落地时代码已进 dev，但票面缺收口段（`docs/run/docs-run-status-gate/tickets.md` G1(c) 点名此缺）。只登记**可实测**的事实；审查结论原文不在本票面，未转述。
+
+| 项       | 值                                                                                                       |
+| -------- | -------------------------------------------------------------------------------------------------------- |
+| 票① 代码 | `663f9b3`（server：`thinking` 事件补 `startedAt`，计时锚点前移到执行起点）                               |
+| 票② 代码 | `7c5a6fa`（web：气泡 footer 计时 + 占位气泡 + 状态行去秒；含 `ReplyElapsed.vue`）                        |
+| 入库判据 | 两笔均为 `dev` 祖先（`git merge-base --is-ancestor <sha> dev` = YES）；`ReplyElapsed.vue` 在 `dev` 树    |
+| carrier  | PR **#124** → merge `44c1d3b`                                                                            |
+| 上浮落点 | `docs/plans/agent-reply-elapsed-timer.md`（`status: closed`——2026-09-20 由旧词「在飞」改为统一英文值域） |
+| 本 run   | **未清**——G1(c) 只补收口段；目录物理清理归 `docs/run/docs-run-status-gate/` 票 G2                        |

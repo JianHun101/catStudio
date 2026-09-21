@@ -1202,6 +1202,41 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
     ticket: 'T7',
     sql: `CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(updated_at DESC) WHERE archived_at IS NULL`,
   },
+
+  // ── 票 J1 · 人工标注独立表（盲标池落点 + 判官一致性度量的基准面）──────────────
+  {
+    // **为什么另立一张表、不动 `user_feedback`**（店长派活单拍板，理由一句话）：
+    // `user_feedback` 的语义是「对**判官分**的回标」——`eval_score_id NOT NULL UNIQUE`
+    // （基线段 `user_feedback table`）意味着**判官先打分，人工分才挂得上去**。而 J1 要建的
+    // 是判官分的**基准**，样本选择权不能先交给被判定的对象：照那条链，只有判官自己判低分
+    // 的样本才进得了队列，测出来的是「判官像不像它自己」，测不出判别力。
+    // 分工：`user_feedback` = 对判官分的回标（**保留原样**）；`human_labels` = 独立人工
+    // 标注（判官分不参与抽样）。同一 message 两表可各有行，J1 的一致性只用本表。
+    //
+    // **FK 口径照现行约定**（票 6 批一：物理删除全 `ON DELETE RESTRICT`）：`message_id`
+    // 挂 RESTRICT，配套清理加在 `repository/dependents.ts::purgeMessageDependents`——那里
+    // 是「删消息前先清子行」的集中落点，散在各调用点就是「谁忘了谁 500」。
+    // `session_id` / `agent_id` **刻意不挂 FK**：它们是查询便利列（同 `user_feedback` 既有
+    // 形态），挂上会多出两条与消息删除正交的阻塞边，而它们的父行删除路径已由消息删除覆盖。
+    //
+    // **`created_at` 不带 `DEFAULT (datetime('now'))`**（spec §4.2 ⑤-c：记录时间归
+    // repository 层生成，秒级 DEFAULT 会把精度降档）——生成点见 `repository/time.ts::nowIso()`。
+    //
+    // `labeler` 是**标注源**（J1 §三-4 待钉：单源 vs 多源）：今天只有用户一人，列先落上，
+    // 多源那天不必再动结构。
+    name: 'human_labels table (J1 人工标注 / 判官一致性基准面)',
+    ticket: 'J1',
+    sql: `CREATE TABLE IF NOT EXISTS human_labels (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE RESTRICT,
+      session_id TEXT,
+      agent_id TEXT,
+      labeler TEXT NOT NULL,
+      score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
+      comment TEXT,
+      created_at TEXT NOT NULL
+    )`,
+  },
 ]
 
 /**

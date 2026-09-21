@@ -244,6 +244,8 @@ describe('chunks repo（票己 · 段三索引表）', () => {
     /**
      * 非检索导出：`setRepoDb` 配置 / `upsertChunk` 身份键裸写口 /
      * `getChunksByOrigin` 扫描器增量比对（**必须见全量行含 superseded**，否则孤儿物理删会漏）/
+     * `getChunksByDocPath`（P1-A）**按 doc_path 的对账读口**——C2 不变量「退役文档行数恒 == 1」
+     * 靠它数行，且必须看得见**陈旧代**（`origin_id` 不等的残留行），故不能带任何过滤/取当前代/
      * 票庚 写侧四件（三表同步写口 + 全量路径枚举 + 两处物理删）——**写入与删除，不是检索面**，
      * 故不受 X4 过滤面约束（过滤面管的是「召回」，不是「落库」与「物理删」）/
      * `probeChunkVectorCandidates`（票辛）诊断探针——**刻意返回被过滤掉的行**
@@ -257,6 +259,7 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       'upsertChunk',
       'upsertChunkWithIndexes',
       'getChunksByOrigin',
+      'getChunksByDocPath',
       'listChunkDocPaths',
       'deleteChunksByDocPaths',
       'deleteStaleChunkRows',
@@ -292,11 +295,40 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       )
     })
 
-    it.each(RETRIEVAL_FUNCS)('%s 函数体含硬排除集合 + NULL 放行', (fn) => {
+    /**
+     * C3 的谓词**整段字面量**（P1-A）。刻意不拆成「含 NOT IN」「含 '#tombstone'」两条
+     * 子串断言：两条各自成立而拼起来是别的形态（例如 `OR section_anchor = …` 挂在括号
+     * **外**、或挂到 `AND v.distance < ?` 之后）时，子串断言照样全绿，语义却已经变了。
+     */
+    const X4_PREDICATE =
+      "(c.status IS NULL OR c.status NOT IN ('superseded','deprecated') OR c.section_anchor = '#tombstone')"
+
+    it.each(RETRIEVAL_FUNCS)('%s 函数体含 C3 整段谓词（退役排除 + 墓碑放行）', (fn) => {
       const body = bodies.get(fn)
       expect(body, `${fn} 未找到`).toBeTruthy()
-      expect(body).toContain("NOT IN ('superseded','deprecated')")
+      expect(body).toContain(X4_PREDICATE)
+      // NULL 放行是谓词的第一支，单独点名：`IS NULL` 被删掉时上面那条也会红，
+      // 但红在这里更能说明「哪里错了」（诊断探针同款写法要求）。
       expect(body).toContain('status IS NULL')
+    })
+
+    it('诊断 CASE 与检索入口同谓词（同字面量，不各写一份）', () => {
+      expect(bodies.get('probeChunkVectorCandidates')).toContain(X4_PREDICATE)
+    })
+
+    it('RETIRED_STATUSES 与 SQL 谓词字面量同源（加状态只改一半即红）', () => {
+      // 判据面**必须与被判面同面**：这里读的是源码 SQL 里的字面量，不是常量自己
+      // ——断言常量等于常量是恒真断言，什么也守不住。
+      const list = /NOT IN \(([^)]*)\)/.exec(X4_PREDICATE)
+      expect(list, '谓词里没有 NOT IN 列表').toBeTruthy()
+      const fromSql = [...list![1].matchAll(/'([^']+)'/g)].map((m) => m[1]).sort()
+      // 常量走仓储桶取（`chunksRepo.`）：顺带证明它真的从 `./index.js` 导出到消费面
+      expect(fromSql).toEqual([...chunksRepo.RETIRED_STATUSES].sort())
+    })
+
+    it('TOMBSTONE_ANCHOR 与谓词字面量同源', () => {
+      expect(X4_PREDICATE).toContain(`'${chunksRepo.TOMBSTONE_ANCHOR}'`)
+      expect(chunksRepo.TOMBSTONE_ANCHOR).toBe('#tombstone')
     })
 
     it.each(COMPOSED_RETRIEVAL_FUNCS)('%s 只编排原子检索入口（过滤面由被调用者承担）', (fn) => {
@@ -306,17 +338,22 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       expect(delegated.length, `${fn} 未调用任何原子检索入口`).toBeGreaterThan(0)
     })
 
-    it('运行时：四态各一条 ⇒ 只召回 NULL 与 active', () => {
-      const fixtures: Array<{ status: string | null; text: string }> = [
-        { status: 'superseded', text: '猫咖测试甲' },
-        { status: 'deprecated', text: '猫咖测试乙' },
-        { status: null, text: '猫咖测试丙' },
-        { status: 'active', text: '猫咖测试丁' },
-      ]
+    it('运行时：四态 + 墓碑两态 ⇒ 退役正文片不召回、墓碑片放行（C3 改向）', () => {
+      // `hit` = 谓词是否放行。前四条 = 原「四态」面（**未改**：退役仍挡，
+      // 因为它们的锚是普通节锚）；后两条 = C3 新增的墓碑放行面。
+      const fixtures: Array<{ anchor: string; status: string | null; text: string; hit: boolean }> =
+        [
+          { anchor: '## S0', status: 'superseded', text: '猫咖测试甲', hit: false },
+          { anchor: '## S1', status: 'deprecated', text: '猫咖测试乙', hit: false },
+          { anchor: '## S2', status: null, text: '猫咖测试丙', hit: true },
+          { anchor: '## S3', status: 'active', text: '猫咖测试丁', hit: true },
+          { anchor: '#tombstone', status: 'superseded', text: '猫咖测试戊', hit: true },
+          { anchor: '#tombstone', status: 'deprecated', text: '猫咖测试己', hit: true },
+        ]
       const ids = fixtures.map((f, i) => {
         const id = chunksRepo.upsertChunk(
           chunkInput({
-            sectionAnchor: `## S${i}`,
+            sectionAnchor: f.anchor,
             contentHash: `h${i}`,
             status: f.status,
             body: f.text,
@@ -326,13 +363,20 @@ describe('chunks repo（票己 · 段三索引表）', () => {
         writeVectorRow(id, oneHot(0))
         return id
       })
-      const expected = [ids[2], ids[3]]
+      const expected = ids.filter((_, i) => fixtures[i].hit)
 
       const byVector = chunksRepo.searchChunksByVector(vectorToBlob(oneHot(0)), 10, 1.5)
-      expect(byVector.map((r) => r.id).sort()).toEqual(expected)
+      expect(byVector.map((r) => r.id).sort()).toEqual([...expected].sort())
 
       const byKeyword = chunksRepo.searchChunksByKeyword('猫咖', 10)
-      expect(byKeyword.map((r) => r.id).sort()).toEqual(expected)
+      expect(byKeyword.map((r) => r.id).sort()).toEqual([...expected].sort())
+
+      // 按节补齐走的是另一条 SQL（`getChunksBySection`）——**同谓词不同站点**，
+      // 漏改它 = 「召回不到了但补节补得出来」的左兜右漏，故单独打一次。
+      const tomb = chunksRepo.getChunksBySection('docs/adr/0001-a.md', '#tombstone')
+      expect(tomb.map((r) => r.id).sort()).toEqual([ids[4], ids[5]].sort())
+      const body = chunksRepo.getChunksBySection('docs/adr/0001-a.md', '## S0')
+      expect(body).toEqual([])
     })
   })
 
@@ -371,6 +415,41 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       expect(rows.map((r) => r.content_hash).sort()).toEqual(['x1', 'x2'])
       expect(rows.some((r) => r.status === 'superseded')).toBe(true)
       expect(rows[0].id).toBe(a)
+    })
+  })
+
+  // ─── getChunksByDocPath（P1-A · C2 自检的对账读口） ────
+  describe('getChunksByDocPath', () => {
+    it('按 doc_path 取全量行：跨代际、跨状态、跨节锚，一条不漏', () => {
+      chunksRepo.upsertChunk(chunkInput({ originId: 'sha-old', contentHash: 'x1' }))
+      chunksRepo.upsertChunk(
+        chunkInput({
+          originId: 'sha-old',
+          contentHash: 'x2',
+          sectionAnchor: '## 旧节',
+          status: 'superseded',
+        })
+      )
+      // 新一代的墓碑片（同路径、不同 origin_id 与锚）
+      chunksRepo.upsertChunk(
+        chunkInput({
+          originId: 'sha-new',
+          contentHash: 'x3',
+          sectionAnchor: '#tombstone',
+          status: 'superseded',
+        })
+      )
+      // 别的文件：不得串味
+      chunksRepo.upsertChunk(
+        chunkInput({ docPath: 'docs/adr/0002-b.md', contentHash: 'x4', originId: 'sha-new' })
+      )
+
+      const rows = chunksRepo.getChunksByDocPath('docs/adr/0001-a.md')
+      expect(rows.map((r) => r.content_hash).sort()).toEqual(['x1', 'x2', 'x3'])
+      // ⚠️ 本读口的**要害**：陈旧代（`origin_id` 不是当前代）必须看得见——
+      // 「退役文档行数恒 == 1」要拦的正是它们；用 getChunksByOrigin 会漏。
+      expect(rows.filter((r) => r.origin_id === 'sha-old')).toHaveLength(2)
+      expect(chunksRepo.getChunksByDocPath('docs/adr/0009-none.md')).toEqual([])
     })
   })
 
