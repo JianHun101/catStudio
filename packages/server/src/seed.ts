@@ -1,5 +1,5 @@
 /**
- * 种子数据：创建 3 只演示 Agent + 1 个演示会话。
+ * 种子数据：创建 5 只演示 Agent + 1 个演示会话。
  *
  * 默认 upsert 模式：按 agent name 去重，已存在则更新配置。
  * --reset 参数：先清空所有数据再重建。
@@ -7,6 +7,10 @@
  * 运行: node scripts/seed.js [--reset]
  *      pnpm seed [--reset]
  */
+// env 必须在任何模块初始化之前加载（`seed` 是独立进程入口——`scripts/seed.js`
+// spawn tsx 直接跑本文件，不经过 `index.ts`），否则 `seed-data.ts` 的
+// `buildDemoAgents()` 读不到 `.env` 里的 `DS_KEY`，写库的是占位符。与 `index.ts:2` 同理。
+import './env.js'
 import { initDb, getDb } from './db/index.js'
 import {
   initRepository,
@@ -53,7 +57,19 @@ async function seed(): Promise<void> {
 
   const agents = buildDemoAgents()
 
+  // 运行配置的差异可见性：已存在的猫，其运行配置由 DB 权威持有（upsertAgent 的
+  // ON CONFLICT 不更新 llm_*）——静默会让用户误以为「改了 .env 就生效」，正是踩过的坑。
+  // 这里只收集**猫名**，循环结束后统一 warn 一次。
+  // 安全红线：warn 只输出猫名——不得打印 key 的明文 / 前缀 / 长度 / hash 或任何可推断值。
+  const keyMismatchNames: string[] = []
+
   for (const a of agents) {
+    // upsert 之前先读既有行，才能看到「本次不会写进去的那个值」与库里的差异
+    const existing = agentsRepo.getAgentByName(a.name)
+    if (existing && existing.llm_api_key !== a.llmApiKey) {
+      keyMismatchNames.push(a.name)
+    }
+
     const result = agentsRepo.upsertAgent(
       a.id,
       a.name,
@@ -70,6 +86,20 @@ async function seed(): Promise<void> {
     )
     const verb = result.changes === 1 ? '✅' : '🔄'
     console.log(`  ${verb} ${a.avatar} ${a.name} (${a.id})`)
+  }
+
+  // 常驻说明（每次 seed 都打，不依赖是否真有差异）：说清 upsert 到底同步了什么
+  console.log(
+    '  ℹ️ 已存在的猫仅同步 头像 / 系统提示词 / 技能模块 / 角色；' +
+      '运行配置（供应商 / 模型 / API Key / base_url / effort）以数据库为准，seed 不覆盖'
+  )
+
+  if (keyMismatchNames.length > 0) {
+    log.warn(
+      '以下猫的数据库 API Key 与本次 seed 值不同，seed 不会覆盖——' +
+        '要同步请在界面的 agent 设置里改，或用 pnpm seed --reset 重建：' +
+        keyMismatchNames.join('、')
+    )
   }
 
   // ── Upsert demo session ──────────────────────────────
