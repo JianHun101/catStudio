@@ -17,6 +17,7 @@
  *   文档模板（交接文档等）单源到 skills/refs/。
  */
 import { v5 as uuidV5 } from 'uuid'
+import { PLACEHOLDER_API_KEY } from './constants.js'
 
 const SEED_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 
@@ -166,7 +167,7 @@ export const IRON_LAWS_REVIEWER = `${COMMON_IRON_LAWS}${REVIEWER_DUTIES}`
  * 构建种子 Agent 列表（在调用时才读取 DS_KEY，确保 .env 已加载）。
  */
 export function buildDemoAgents(): DemoAgent[] {
-  const apiKey = process.env.DS_KEY || 'sk-your-api-key-here'
+  const apiKey = process.env.DS_KEY || PLACEHOLDER_API_KEY
   return [
     {
       id: fixedId('店长'),

@@ -3,6 +3,7 @@
  */
 import type Database from 'better-sqlite3'
 import { purgeAgentDependents } from './dependents.js'
+import { PLACEHOLDER_API_KEY } from '../../constants.js'
 import type { AgentRow } from './types.js'
 
 let db: Database.Database
@@ -93,6 +94,21 @@ export function insertAgent(
   )
 }
 
+/**
+ * 这条值是否够格作为 **llm_api_key 自愈的目标值**：非空、且不是占位符哨兵。
+ *
+ * 两个方向都由本谓词统一定义（`upsertAgent` 的条件补写与 `healPlaceholderApiKeys`
+ * 共用，勿各写各的）：
+ *   - 空串 `''` = 用户**显式清空**（主库 luna猫 即此态 = 停跑意图）⇒ 不够格，绝不自愈
+ *   - 占位符哨兵 = 本次 seed 自己也没拿到真 key ⇒ 不够格，补了等于没补
+ *
+ * 注意方向：本谓词判的是**新值**；是否补写还要另判**旧值**恰为哨兵（见 `healPlaceholderApiKeys`
+ * 的 WHERE 与 `upsertAgent` 的 CASE）。
+ */
+export function isHealableApiKey(value: string): boolean {
+  return value !== '' && value !== PLACEHOLDER_API_KEY
+}
+
 export function upsertAgent(
   id: string,
   name: string,
@@ -114,8 +130,21 @@ export function upsertAgent(
     ON CONFLICT(name) DO UPDATE SET
       avatar = excluded.avatar,
       system_prompt = excluded.system_prompt,
-      -- 运行配置（llm_*/effort_level）仅首次初始化写入，UPDATE 不覆盖：
-      -- DB 是运行配置的权威（用户直改库永久有效），seed 重跑不得把 5 猫 key 覆盖回 seed 默认值
+      -- 运行配置（llm_provider / llm_model / llm_base_url / effort_level）仅首次初始化写入，
+      -- UPDATE 不覆盖：DB 是运行配置的权威（用户直改库永久有效），seed 重跑不得把 5 猫
+      -- 运行配置覆盖回 seed 默认值。
+      -- 唯一例外 = llm_api_key 的**占位符自愈**：库里仍是占位符哨兵（= 从未配过 key，
+      -- 见 constants.ts 语义）且本次 seed 值够格（isHealableApiKey）时补写。
+      -- 成立场景：无 DS_KEY 的首次启动写了哨兵 → 之后配好 key 重启，表已非空故
+      -- index.ts 不再走 seed 块 —— 本分支让「重跑 seed」这条路径也能补上。
+      -- 绑定参数顺序：问号按**文本出现顺序**绑定，而 ON CONFLICT 段在 VALUES 之后
+      -- ⇒ 这两个 ? 排在 11 个 VALUES 参数**之后**（放在前面会把 healFlag 绑到 id 列，
+      -- 且 SQLite 动态类型不报错——静默错位）。
+      llm_api_key = CASE
+        WHEN ? = 1 AND agents.llm_api_key = ?
+        THEN excluded.llm_api_key
+        ELSE agents.llm_api_key
+      END,
       skill_modules = excluded.skill_modules,
       role = excluded.role,
       updated_at = datetime('now')
@@ -132,8 +161,53 @@ export function upsertAgent(
       llmBaseUrl,
       effortLevel,
       skillModules ?? '[]',
-      role
+      role,
+      // ↓ ON CONFLICT 段（文本在 VALUES 之后）的两个 ?：(healFlag, 占位符哨兵)
+      isHealableApiKey(llmApiKey) ? 1 : 0,
+      PLACEHOLDER_API_KEY
     ) as { changes: number }
+}
+
+/** `healPlaceholderApiKeys` 的入参条目：seed 定义的角色名 + 本次可用的 key 值 */
+export interface PlaceholderHealEntry {
+  name: string
+  llmApiKey: string
+}
+
+/**
+ * 占位符 API Key 自愈：把库里 `llm_api_key` 仍是占位符哨兵的行，补写成**本次**可用的真值。
+ *
+ * 与 `upsertAgent` 的分工：那条走 upsert（`ON CONFLICT`）且只在 seed 链上；
+ * 本函数是**纯 UPDATE**，供 server 启动路径（`index.ts`）独立调用 —— 那条路径
+ * 表已非空、根本不进 seed 块，但「无 key 首启写了哨兵 → 之后配好 key」的库同样要能补上。
+ *
+ * 判据（两侧都收口在 SQL 的 WHERE 里，不做读-改-写，故并发下不会误伤）：
+ *   - 旧值 `= PLACEHOLDER_API_KEY`（只有哨兵才补；空串 `''` 是用户停跑意图，不补；
+ *     真 key 更不补）
+ *   - 新值过 `isHealableApiKey`（空串 / 哨兵一律在进 SQL 前就被滤掉）
+ *
+ * @param entries seed 定义的角色条目（`buildDemoAgents()` 投影即可）
+ * @returns 实际补写的行数（0 = 无需补）
+ */
+export function healPlaceholderApiKeys(entries: PlaceholderHealEntry[]): number {
+  const healable = entries.filter((e) => isHealableApiKey(e.llmApiKey))
+  if (healable.length === 0) return 0
+
+  // 键用 name：与 upsertAgent 的冲突键同源（seed 定义的「角色」身份），
+  // 且 seed 的 id 本就是 fixedId(name)，两者一一对应。
+  const stmt = db.prepare(
+    `UPDATE agents SET llm_api_key = ?, updated_at = datetime('now')
+     WHERE name = ? AND llm_api_key = ?`
+  )
+
+  let healed = 0
+  db.transaction(() => {
+    for (const e of healable) {
+      healed += stmt.run(e.llmApiKey, e.name, PLACEHOLDER_API_KEY).changes
+    }
+  })()
+
+  return healed
 }
 
 export function updateAgent(id: string, setClauses: string, values: any[]): void {

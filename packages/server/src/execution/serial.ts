@@ -16,6 +16,7 @@
 
 import { execSync } from 'node:child_process'
 import { v4 as uuid } from 'uuid'
+import { PLACEHOLDER_API_KEY } from '../constants.js'
 import {
   type AgentConfig,
   type AgentRuntimeState,
@@ -82,7 +83,7 @@ export function agentHasUsableApiKey(
   agent: Pick<AgentConfig, 'llmProvider' | 'llmApiKey'>
 ): boolean {
   if (NO_API_KEY_PROVIDERS.has(agent.llmProvider)) return true
-  return !!agent.llmApiKey && agent.llmApiKey !== 'sk-your-api-key-here'
+  return !!agent.llmApiKey && agent.llmApiKey !== PLACEHOLDER_API_KEY
 }
 
 /**

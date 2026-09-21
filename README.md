@@ -31,22 +31,18 @@ CatStudio 补的就是这一层：每只猫有固定身份和自己的上下文�
 | ------------------------------ | ---------- | -------------------------------- |
 | [Node.js](https://nodejs.org/) | >= 22.18.0 | 必需                             |
 | [pnpm](https://pnpm.io/)       | >= 8       | 必需                             |
-| Claude Code CLI                | 最新       | 必需（演示角色默认 provider）    |
+| Claude Code CLI                | 最新       | 可选（演示角色出厂默认走它）     |
 | Codex CLI                      | 最新       | 可选（仅用 `openai` 适配器时）   |
 | dsh CLI                        | 最新       | 可选（仅用 `dsh` 适配器时）      |
 | opencode CLI                   | 最新       | 可选（仅用 `opencode` 适配器时） |
 
-四个 CLI 都是**外部 CLI**，不在 `package.json` 依赖里 —— `pnpm install` 不会装它们，用到哪个装哪个。
+**平台本身不依赖任何 Agent CLI**：这些 CLI 是「外部程序」，不在 `package.json` 依赖里 —— `pnpm install` 不会装它们，选中哪个 provider 才需要装哪个。演示角色那行是**种子数据的默认值**，不是平台约束。
 
 ### 跑起来
 
 ```bash
 node --version  # 确认 >= 22.18.0
 pnpm install
-npm i -g @anthropic-ai/claude-code   # 演示角色默认走 Claude Code CLI
-
-export DS_KEY="sk-..."   # 必填；Git Bash。CMD 用 set，PowerShell 用 $env:
-                         # CMD 的 set 只在当前窗口有效，须与 pnpm seed 同一个窗口、且先于它
 pnpm seed                # 首次初始化：灌种子数据（5 个演示角色 + 1 个演示会话）
                          # 幂等，重跑不会覆盖已存在猫的运行配置
 pnpm dev                 # 启动 server :3200 + web :5173
@@ -54,9 +50,23 @@ pnpm dev                 # 启动 server :3200 + web :5173
 
 浏览器打开 **http://localhost:5173**，后端在 3200（Vite 端口被占用时自动切 5174、5175）。
 
-> **演示角色默认走 Claude Code CLI**：5 个角色里 4 个的 provider 是 `claude`（模型 `deepseek-flash`），经 Claude Code CLI 打 DeepSeek 的 Anthropic 兼容端点；只有 dsh猫 用 `dsh`。所以 `DS_KEY` 是**必填**——不填时这 4 个角色会被 no-key 守卫拦下（界面提示「还没有配置 API Key」），不是静默降级。
+以上三步**不需要任何 API Key**：界面、会话、记忆索引都照常工作，只是演示角色会因缺 Key 被 no-key 守卫拦下（提示「还没有配置 API Key」），不是静默降级。
+
+> **想让演示角色开箱即用**：5 个演示角色里 4 个的 provider 是 `claude`（模型 `deepseek-flash`），经 Claude Code CLI 打 DeepSeek 的 Anthropic 兼容端点；只有 dsh猫 用 `dsh`。这套默认组合还需要两样：
+>
+> ```bash
+> npm i -g @anthropic-ai/claude-code
+> export DS_KEY="sk-..."   # Git Bash。CMD 用 set，PowerShell 用 $env:
+>                          # CMD 的 set 只在当前窗口有效，须与 pnpm seed 同一个窗口、且先于它
+> ```
+>
+> 这两项是**演示角色的出厂默认设置，不是平台前提**——`DS_KEY` 只被这套默认组合消费，换成别的 provider 就不需要它。
+
+> **不想用这套怎么办？** 在界面的 agent 设置里把任一只猫的 provider 换成 `opencode` 或 `ollama`（两者免 Key），或把 `claude` 的 Base URL 指向任意 Anthropic 兼容端点、Key 换成对应厂商的——`claude` 里的「Claude Code CLI」只是执行壳，模型来自 Base URL 指的端点（项目内已有实证：填 Kimi 端点即接 Kimi K3）。详见[支持的模型供应商](#支持的模型供应商)。
 
 > **运行配置以数据库为准**：供应商 / 模型 / API Key 随时能在界面的 agent 设置里换。`.env` 的 `DS_KEY` 由**首次 seed** 与 **server 运行时**（摘要、记忆查询改写等）读取——**改 `.env` 对已存在的猫不生效**，重跑 `pnpm seed` 也不会覆盖它们的运行配置（想回到种子默认值，用 `pnpm seed --reset` 重建——**注意它会清空全部会话、消息与执行日志**）。
+>
+> **唯一例外是出厂占位符**：某只猫的 Key 仍是出厂占位符 `sk-your-api-key-here` 时，配好 `DS_KEY` 后**重跑 `pnpm seed` 或重启 server** 都会把它补写成真 Key——这条自愈是为了兜住「先 `pnpm dev` 起了服务、之后才配 Key」那一步留下的空跑角色。**显式清空成空串不算占位符**：那是你要这只猫停跑的意图，不会被自动补写。
 
 > 首次运行会下载嵌入模型 `Xenova/bge-small-zh-v1.5`（约 90MB）。**它缓存在 `node_modules/.pnpm/@huggingface+transformers@*/node_modules/@huggingface/transformers/.cache/` 内**，`pnpm install` 会清掉、需重新下载；下载期间记忆检索静默降级（服务端记日志），Agent 正常回复。中国大陆可设 `HF_ENDPOINT=https://hf-mirror.com`。
 
@@ -93,17 +103,25 @@ pnpm dev                 # 启动 server :3200 + web :5173
 - **自动阈值交接**：用量到默认阈值（90%）即全量总结、另开新会话，前端无感切换，用户不必手动开新窗口。
 - **主动交接文档**：猫把当前上下文压成交接文档（落 OS 临时目录、附建议技能），交给另一个会话的猫接手——见 [`skills/session-handoff/`](./skills/session-handoff/)。
 
-## 支持的 Agent CLI
+## 支持的模型供应商
 
-| CLI / 服务      | 对应 provider | 免 key | 说明                            |
-| --------------- | ------------- | ------ | ------------------------------- |
-| Claude Code CLI | `claude`      | 否     | 演示角色默认（5 个里 4 个走它） |
-| dsh CLI         | `dsh`         | 否     | 演示角色（dsh 猫）              |
-| Codex CLI       | `openai`      | 否     | 适配器支持                      |
-| opencode CLI    | `opencode`    | 是     | 适配器支持，可零 key 跑         |
-| Ollama          | `ollama`      | 是     | 本地模型，可零 key 跑           |
+**选 provider = 选协议 / 选执行壳，不是选厂商。** 适配器决定「用哪种协议、拉起哪个 CLI」，**模型来自哪家由 Base URL 决定**——所以 `claude` 适配器既能打 DeepSeek，也能打 Kimi、也能打本地 llama.cpp；`deepseek` 适配器走标准 OpenAI Chat Completions 协议，可指向任意兼容端点。
 
-另有 `deepseek`（直连 API）与 `pi` 两个适配器不走 CLI —— 共 **7 个** provider 适配器。
+| provider   | 形态                        | 端点是否可控                                      | 需要 key | 说明                                       |
+| ---------- | --------------------------- | ------------------------------------------------- | -------- | ------------------------------------------ |
+| `claude`   | Claude Code CLI（执行壳）   | ✅ Base URL 可填任意 Anthropic 兼容端点           | 是       | 演示角色出厂默认（5 个里 4 个走它）        |
+| `deepseek` | HTTP 直连                   | ✅ Base URL 可填任意 OpenAI Chat Completions 端点 | 是       | 走标准协议，不绑定 DeepSeek 一家           |
+| `opencode` | CLI，自带多 provider        | 由 opencode 自身配置                              | 否       | `opencode auth login` 后本地认证，可零 key |
+| `ollama`   | 本地 HTTP 服务              | ✅ Base URL 可填（默认本机 11434）                | 否       | 跑本地模型，可零 key                       |
+| `dsh`      | deepseek-harness CLI        | ❌ 无自定义端点，由 dsh 自身配置管理              | 是       | 演示角色之一（dsh猫）                      |
+| `pi`       | pi coding agent SDK         | ❌ **上游同样写死 DeepSeek**，不可配置            | 是       | 见下方提示                                 |
+| `openai`   | Codex CLI（经 codex-proxy） | ❌ **上游同样写死 DeepSeek**，不可配置            | 是       | 见下方提示                                 |
+
+共 **7 个** provider 适配器。
+
+> **有两个适配器的上游是写死的**：`openai`（Codex CLI 经 codex-proxy 转发）与 `pi`（pi coding agent SDK）都把上游地址写死为 `https://api.deepseek.com`，**没有配置入口**——所以它们接不了 GPT 等原厂模型，实际跑的仍是 DeepSeek。要用它们接别的厂商，得自己改代理脚本或适配器源码。
+
+> **「能接」不等于「已适配」**：上表是平台内置的适配器形态。不在表内的厂商，走「挑一个端点可控的适配器 + 填它的 Base URL」接入，需自行验证，不保证开箱即用。
 
 ## 架构
 

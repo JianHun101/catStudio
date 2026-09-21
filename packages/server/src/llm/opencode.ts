@@ -10,6 +10,7 @@ import {
   terminateChild,
 } from './cli-utils.js'
 import { createLogger } from '../logger.js'
+import { PLACEHOLDER_API_KEY } from '../constants.js'
 import { messageOf } from '../utils.js'
 import { createInterface } from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
@@ -261,7 +262,7 @@ export class OpencodeAdapter implements LLMAdapter {
     // 非空就注入会把占位符当真 key 注入（flash猫 local → DEEPSEEK_API_KEY=local → auth 失败
     // 实锤）。占位符 fallback 到 .env DS_KEY（真实 key）；空串仍走「本地 credentials 兜底」不注入。
     let effectiveKey = this.apiKey
-    if (effectiveKey === 'local' || effectiveKey === 'sk-your-api-key-here') {
+    if (effectiveKey === 'local' || effectiveKey === PLACEHOLDER_API_KEY) {
       effectiveKey = process.env.DS_KEY || ''
     }
     if (effectiveKey) {
