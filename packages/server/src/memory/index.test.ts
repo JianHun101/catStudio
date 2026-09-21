@@ -1176,6 +1176,50 @@ describe('memory', () => {
       expect(finalRows(r)).toHaveLength(3)
     })
 
+    // ─── W2-c：末次截断按**节**计名额（原先按**片**切）────────
+    it('W2-c · 同节多片只占一个名额：topK=2 注入 2 个不同节，而不是被同节的第 2 片吃掉', async () => {
+      // 纯向量（Q 与正文无 bigram 交集）⇒ 名次只由夹角决定
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '2'
+      // 节甲两片（0° / 5°）、节乙一片（10°）⇒ 片级序 = [甲1, 甲2, 乙1]
+      seedChunk({
+        docPath: 'docs/adr/0001-a.md',
+        body: '猫咖测试片甲上',
+        angle: 0,
+        partIndex: 1,
+        partTotal: 2,
+      })
+      seedChunk({
+        docPath: 'docs/adr/0001-a.md',
+        body: '猫咖测试片甲下',
+        angle: 5,
+        partIndex: 2,
+        partTotal: 2,
+      })
+      seedChunk({
+        docPath: 'docs/adr/0002-b.md',
+        sectionAnchor: '## 乙',
+        body: '猫咖测试片乙',
+        angle: 10,
+      })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      // 判别断言：按片切 ⇒ `ordered` = [甲1, 甲2] ⇒ `bySection` 去重后只剩 **1** 节
+      // （第 2 个名额被同节的片白占）；按节切 ⇒ 甲乙各占一席 ⇒ 2 节
+      expect(r.sections).toHaveLength(2)
+      expect(r.sections.map((s) => s.docPath)).toEqual(['docs/adr/0001-a.md', 'docs/adr/0002-b.md'])
+      // 整节返回（W2 既定语义）不受本改动影响：甲的两片仍然都在
+      expect(r.text).toContain('猫咖测试片甲上')
+      expect(r.text).toContain('猫咖测试片甲下')
+      expect(r.text).toContain('猫咖测试片乙')
+
+      const rows = finalRows(r)
+      // 「每节一行」⇒ 行面与本节的代表片一一对应
+      expect(rows.map((c) => c.finalRank)).toEqual([0, 1])
+      expect(rows.every((c) => c.injected)).toBe(true)
+    })
+
     // ─── 验收 5：降级路径有分、且不是 NaN ────────────────
     it('验收 5 · 整趟嵌入挂了 ⇒ 关键词路径候选仍有有限正分，finalRank 序列无 NaN', async () => {
       // 显式钉死替身（不靠 `embedOk` + 还原钩子的时序，避免用例结果随执行序漂移）

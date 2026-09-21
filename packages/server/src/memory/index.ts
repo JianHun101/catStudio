@@ -477,11 +477,32 @@ export async function runRetrievalChain(
     })
   }
 
-  const ordered = [...merged.values()]
+  const ranked = [...merged.values()]
     // 排序主键 = **跨查询累加 RRF 分降序**；同分按 `bestIndex` 升序 tie-break
     // （R1-b §二 改动 4：口径从「哪趟名次最小」变成「跨查询累计得分最大」）
     .sort((a, b) => b.rrfScore - a.rrfScore || a.bestIndex - b.bestIndex)
-    .slice(0, params.topK)
+
+  // 末次截断按**节**计名额（W2-c，原为 `.slice(0, topK)` 按**片**切）：`topK` 数的
+  // 从此是「不同节」而不是「片」。按片切时同节的多片各占一个名额，随后 :591 的
+  // `bySection` 再按节去重 ⇒ 实际注入节数可以**少于** `topK`（黄金集 40 条实测：
+  // 片级 k=3 下 14 条注入节数 < 3，名额被同节重复片白占）。
+  //
+  // 节的代表 = `ranked` 里最靠前的那片——与 `bySection` 的「首个胜出」是**同一条**
+  // 规则，故下面这轮去重与 `bySection` 那轮的入选集合逐节一致（那轮只是再做一次
+  // 幂等去重）。⚠️ 反过来说：`finalTraces` 从此**每节恒一行** ⇒ :652 的
+  // `isSectionRepresentative` 恒真、`section_dup` 这个 `droppedReason` 在本路径上
+  // **不可达**（枚举值保留，供历史行与 probe 行读；见交接文档「已知副作用」）。
+  // ⚠️ 键的拼法必须与 `bySection` 逐字同形（NUL 转义分隔，不是空格/`::`——锚点里
+  // 两者都常见，拼错会撞键而**无任何报错**）。
+  const takenSections = new Set<string>()
+  const ordered: Scored[] = []
+  for (const s of ranked) {
+    const key = `${s.row.doc_path}\0${s.row.section_anchor}`
+    if (takenSections.has(key)) continue
+    takenSections.add(key)
+    ordered.push(s)
+    if (ordered.length >= params.topK) break
+  }
   const orderedRows = ordered.map((s) => s.row)
 
   // X5 埋点 + W11 判据：候选池探针取**首个嵌入成功的查询**（原话优先）。

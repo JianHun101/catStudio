@@ -813,8 +813,12 @@ describe('静态源断言 — 链段结果对象的字段名（改名即静默�
     expect(memorySrc).toMatch(/source: 'final'/)
   })
 
-  it('末次截断仍是 `slice(0, params.topK)`（§6.3 那句「切的是片不是节」的判据面）', () => {
-    expect(memorySrc).toMatch(/\.slice\(0, params\.topK\)/)
+  // ⚠️ 本条**已被 W2-c 反转**（T4）：末次截断从「切片」改成「按节计名额」。
+  // 反转判据必须**两条一起断**——只断「老写法没了」的话，整段删除也会绿（无样本的假绿）；
+  // 只断「新写法在」的话，新旧并存的半截改动也会绿。
+  it('末次截断按**节**计名额（§6.3 那句「切的是片不是节」的判据面，W2-c 已反转）', () => {
+    expect(memorySrc).not.toMatch(/\.slice\(0, params\.topK\)/)
+    expect(memorySrc).toMatch(/if \(ordered\.length >= params\.topK\) break/)
   })
 
   it('按节补齐仍走 `bySection`（「切 3 片只换来 2 节」这个名额浪费的机制来源）', () => {
