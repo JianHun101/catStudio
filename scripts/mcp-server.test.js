@@ -651,7 +651,7 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     expect(Object.keys(SKILL_CATALOG)).toEqual(SKILL_WHITELIST)
   })
 
-  it('白名单定死 11 技能、request-review 回流、wayfinder 排除已撤销（口径翻转）', () => {
+  it('白名单定死 12 技能、request-review 回流、wayfinder 排除已撤销（口径翻转）', () => {
     expect(SKILL_WHITELIST).toEqual([
       'grilling',
       'to-spec',
@@ -664,6 +664,7 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
       'session-handoff',
       'wayfinder',
       'design-taste-frontend',
+      'writing-for-agents',
     ])
     expect(SKILL_WHITELIST).toContain('request-review')
     // 2026-09-15 口径翻转：`disable-model-invocation` 是上游来源标记、本仓不构成访问约束
@@ -671,6 +672,9 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     // 故 wayfinder 撤销排除——原 `not.toContain('wayfinder')` 断言随之删除，改为正向钉死。
     expect(SKILL_WHITELIST).toContain('wayfinder')
     expect(SKILL_WHITELIST).toContain('design-taste-frontend')
+    // 2026-09-21 纳入：判据同「猫可自取范围」（非流程链补充）；
+    // 它正文原带的 `SKILL-MECHANICS.md` 兄弟指针猫读不到，已按该技能自己的判据 inline。
+    expect(SKILL_WHITELIST).toContain('writing-for-agents')
   })
 
   // T-D 验收「文案指向的技能名真实存在」——铁律文案点名的技能必须真在流程链清单内。
@@ -722,7 +726,8 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
   // 于是「正文换引另一个 ref」= 守卫静默漏守（旧断言照绿，新 ref 零覆盖）。
   // 现在改从 SKILL.md 正文解析引用清单——正文换引用即自动纳入。
   // 边界：只取**一级**引用（技能正文直接点名的）。ref 之间再互相引用不在本守卫范围
-  // （如模板引 shared-rules.md，那是共享规则层、按设计带路由，不在 §3 技能正文约束内）。
+  // （ref→ref 的二级引用属共享规则层、按设计带路由，不在 §3 技能正文约束内）。
+  // refs 收敛（2026-09-21）后该层只剩「被 SKILL.md 完整路径点名」的 2 份，无 ref 再引 ref。
   it('每个技能引用的共享 ref 无 @ 行 / 无中文路由黑名单（F1 回归守卫·枚举派生·全技能）', () => {
     // T-H④（原 T-D N7）：原先只枚举 `request-review` **一个**技能的引用清单，于是
     // 另一个引 refs 的技能（`receive-review` → `refs/review-standards.md`）**零覆盖**

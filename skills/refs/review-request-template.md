@@ -1,6 +1,6 @@
 # 审查请求模板
 
-发送审查请求时，使用以下格式。这是 `skills/refs/shared-rules.md` 中"工作交接铁律"的标准模板。
+发送审查请求时，使用以下格式。本模板是审查请求的**格式契约**——入口在 `skills/request-review/SKILL.md`（第 5 块）；「补填交接文档后由作者发起审查」这一动作的活载体是 `packages/server/src/seed-data.ts` 的角色职责常量（`CODER_DUTIES` / `IMPLEMENTER_DUTIES`）。
 
 ---
 

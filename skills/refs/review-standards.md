@@ -97,4 +97,4 @@
 
 ## cat-study 项目特有 Diff 检查点
 
-通用坏味道基线之上，cat-study 有一套**项目特有 diff 检查点**（CJK 正则边界、`skill_modules` 清空、`retractionRequests`/`activeStreams` 清理配对、`agentSlots.currentTriggerMessageId`、`.push-gate` 拦截、`parseInt('0')` 零值吞、`seed.ts --reset` FK 顺序、Socket.IO room 前缀一致性、Window ② 撤回保护等）。审查扫描 diff 时按改动范围选择性套用，完整清单见 **`catstudy-review-checklist.md`**（本文档与清单同处 `skills/refs/` 目录；本文件聚焦审查标准定义，逐条清单独立存放，避免两份内容漂移）。
+通用坏味道基线之上，cat-study 有一套**项目特有 diff 检查点**（CJK 正则边界、`skill_modules` 清空、`retractionRequests`/`activeStreams` 清理配对、`agentSlots.currentTriggerMessageId`、`.push-gate` 拦截、`parseInt('0')` 零值吞、`seed.ts --reset` FK 顺序、Socket.IO room 前缀一致性、Window ② 撤回保护等）。审查扫描 diff 时按改动范围选择性套用——**逐条清单的活载体是 `scripts/handoff-gen.mjs` 的 `buildChecklistSection(changeTypes)`**：它按实际 diff 的改动类型动态生成检查项，写进交接文档 `## 5. Reviewer Checklist` 投给审查者。本文件聚焦审查标准定义，不另存逐条清单（静态清单副本已随 refs 层收敛删除——一份会漂移的副本只会让「按哪个为准」无解）。
