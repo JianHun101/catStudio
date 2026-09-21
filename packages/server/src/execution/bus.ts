@@ -27,7 +27,7 @@ export interface EngineBus {
   emitSystemNotice(n: SystemNoticePayload): void
   /** AGENT_TYPING — 流式增量 */
   emitTyping(u: TypingUpdatePayload): void
-  /** MESSAGE_AGENT_STATUS — 执行进度（显式首参：载荷无 sessionId） */
+  /** MESSAGE_AGENT_STATUS — 执行进度（首参 = 房间路由；载荷内另有同值 sessionId 供前端会话键控） */
   emitAgentMessageStatus(sessionId: string, s: MessageAgentStatusPayload): void
   /** MESSAGE_UPDATED — A2A mentions 写回通知 */
   emitMessageUpdated(sessionId: string, u: MessageUpdatedPayload): void

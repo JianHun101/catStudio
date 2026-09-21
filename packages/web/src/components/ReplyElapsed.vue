@@ -9,8 +9,9 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
  * markdown 全部重算。把每秒变化的 `now` 收敛进本组件后，tick 只重渲这一个 span。
  * `ChatPanel.test.ts` 有静态断言守门（顶层不得出现每秒变化的 ref）。
  *
- * 数据来源：`store.replyTimers`（agentId 键控）——`startedAt` 是**服务端**给的执行起点，
- * 不是本地首次渲染时刻。因此刷新页面 / 切会话回来时，下一个心跳（10s 内）到达即恢复
+ * 数据来源：`store.replyTimers`（`sessionId:agentId` 键控，消费面走 `currentReplyTimerFor`
+ * 取当前会话的条目）——`startedAt` 是**服务端**给的执行起点，不是本地首次渲染时刻。
+ * 因此刷新页面 / 切会话回来时，下一个心跳（10s 内）到达即恢复
  * 原秒数，不会归零。
  *
  * liveness 语义照抄 `AgentStatusLabel`：心跳（10s 一跳）失联超阈值 → 停走并显示

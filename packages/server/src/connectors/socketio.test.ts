@@ -916,6 +916,7 @@ describe('socketio connector', () => {
       expect(statusCalls[0][1]).toMatchObject({
         agentName: '店长',
         status: 'queued',
+        sessionId: 'session-1',
       })
     })
 
@@ -5679,6 +5680,8 @@ describe('runAgentReply — 运行时长心跳', () => {
       expect(all.length).toBeGreaterThanOrEqual(4)
       for (const c of all) {
         expect(c[1].startedAt).toBe(anchor)
+        // 载荷自描述会话（前端按 `sessionId:agentId` 键控计时表，缺它就无法隔离跨会话执行）
+        expect(c[1].sessionId).toBe('session-hb')
       }
     } finally {
       // 断言失败也要放行两条闸：否则本轮的执行挂成僵尸（占着同一 agentId 的槽位），
