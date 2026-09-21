@@ -4,7 +4,7 @@
 
 **多 Agent 协作平台 —— 把孤立的 Agent CLI 变成一支有纪律的团队**
 
-_每只猫有独立身份、独立记忆、独立供应商；它们互相 @ 派活、互相审查、跨会话交接。_
+_每只猫有独立身份、独立上下文、独立供应商，共享同一份记忆索引；它们互相 @ 派活、互相审查、跨会话交接。_
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -54,7 +54,7 @@ pnpm dev                 # 启动 server :3200 + web :5173
 
 > **演示角色默认走 Claude Code CLI**：5 个角色里 4 个的 provider 是 `claude`（模型 `deepseek-flash`），经 Claude Code CLI 打 DeepSeek 的 Anthropic 兼容端点；只有 dsh猫 用 `dsh`。所以 `DS_KEY` 是**必填**——不填时这 4 个角色会被 no-key 守卫拦下（界面提示「还没有配置 API Key」），不是静默降级。想换供应商，在界面的 agent 设置里改「供应商」下拉即可。
 
-> 首次运行会下载嵌入模型 `Xenova/bge-small-zh-v1.5`（约 90MB）。**它缓存在 `node_modules/.pnpm/@huggingface+transformers@*/.cache/` 内**，`pnpm install` 会清掉、需重新下载；下载期间记忆检索静默降级，Agent 正常回复。中国大陆可设 `HF_ENDPOINT=https://hf-mirror.com`。
+> 首次运行会下载嵌入模型 `Xenova/bge-small-zh-v1.5`（约 90MB）。**它缓存在 `node_modules/.pnpm/@huggingface+transformers@*/node_modules/@huggingface/transformers/.cache/` 内**，`pnpm install` 会清掉、需重新下载；下载期间记忆检索静默降级（服务端记日志），Agent 正常回复。中国大陆可设 `HF_ENDPOINT=https://hf-mirror.com`。
 
 ### 试用还是日常自用
 
