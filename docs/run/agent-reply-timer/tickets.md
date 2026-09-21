@@ -94,3 +94,16 @@ Work the **frontier**：票①完成后票②解锁（纯串行链，从上到�
 - [ ] AC7（店长收口验证，实施者不做）：真机 Playwright 合成注入跨会话帧 → 当前会话 0 计时；同帧换本会话 → 计时出现。
 
 **提交**：`catstudy [<40 位真 uuid>] fix(timer): ...`；提交后按 `request-review` 发起审查，收口归店长。
+
+## 收口（2026-09-21 · 票③）
+
+| 项       | 值                                                                                                                               |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 票③ 代码 | `6d22560`（基点 `4d2abb72`；13 文件 +256/−65——`shared` 载荷补 `sessionId` + server 五处发射点 + web 键控改 `${sid}:${agentId}`） |
+| 入库判据 | `git merge-base --is-ancestor 6d22560 dev` = **YES**；`replyTimerKey` 在 `dev` 树（`stores/chat.ts:103`）                        |
+| carrier  | PR **#169** → merge `30599dbc`（closeout 隔离分支 carry 已审 sha 字面量，dev 已前进故 ff-only 不可行）                           |
+| 上浮落点 | `docs/plans/agent-reply-elapsed-timer.md`（本票新增**决策 9**：计时键 = `sessionId:agentId` 二元组）                             |
+| AC7 状态 | **未验**——本票含 `shared`/`server` 改动，须重启运行实例后才可做真机合成注入验证；归收口重启后由店长补做                          |
+| 本 run   | **未清**——目录物理清理归 `docs/run/docs-run-status-gate/` 票 G2                                                                  |
+
+**族修边界订正（审查留痕）**：`docs/run/eval-system/R12-dce2bc9-restating-family-sweep.md:52` 把 `bus.ts:30` 归为「**另一语义**（stream/abort 遗留兼容），不属族B」——该归类**自本票起过时**：`bus.ts:30` 恰是本票族修的家族成员之一，现已改为「载荷内另有同值 sessionId 供前端会话键控」。属 R12 那份**历史审计记录**的时点性陈述，不改写历史文档，仅在此留痕；后续同类族修扫描时勿再据该行排除 `bus.ts`。
