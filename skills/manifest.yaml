@@ -132,7 +132,6 @@ skills:
     next: 'receive-review'
     refs:
       - 'refs/review-request-template.md'
-      - 'refs/shared-rules.md'
 
   receive-review:
     source: self
@@ -153,7 +152,6 @@ skills:
     next: 'implement (❌打回重做)'
     refs:
       - 'refs/review-standards.md'
-      - 'refs/shared-rules.md'
 
   session-summary:
     source: self
