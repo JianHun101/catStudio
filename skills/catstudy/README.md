@@ -9,13 +9,12 @@ catstudy/
 ├── README.md                    # 本文件 — 架构说明 + 索引
 ├── quality-gate/                # 质量门 — 开发完成后的自检
 │   └── SKILL.md
-├── receive-review/              # 接收审查 — 处理审查者的反馈
-│   └── SKILL.md
-└── refs/                        # 共享参考文件
-    └── cat-roles.md             # 猫角色定义 + 审查配对规则（角色词典）
-    # shared-rules / review-standards / review-request-template 已随 refs 双套合并
-    # 迁至顶级 skills/refs/（单源，此处不维护副本）
-    # 投递型定制层（handoff/request-review）已按 ADR-0014 §3 移除，内容并入基础技能
+└── receive-review/              # 接收审查 — 处理审查者的反馈
+    └── SKILL.md
+    # 本目录不再有 refs/：共享参考统一在顶级 skills/refs/（单源，此处不维护副本）；
+    # 原角色词典文件已随 refs 层收敛退役，由运行时 agents.role + 各角色 prompt 承接
+    # （退役记录与判据见 docs/adr/0014-skill-delivery-decoupling.md §3 修订注）。
+    # 投递型定制层（handoff/request-review）已按 ADR-0014 §3 移除，内容并入基础技能。
 ```
 
 ## 工作流
