@@ -5463,7 +5463,7 @@ describe('runAgentReply — 技能发现面注入（甲案）', () => {
     role: 'implementer',
   }
 
-  it('第一条 system message 含技能目录段，且含全部 11 个技能名', async () => {
+  it('第一条 system message 含技能目录段，且含全部 12 个技能名', async () => {
     const msgs = await runWithAgent({ ...AGENT })
 
     // 「第一条」是硬点：目录段坐真 system prompt 面，不是后续某条 hints
@@ -5471,7 +5471,7 @@ describe('runAgentReply — 技能发现面注入（甲案）', () => {
     const sys = String(msgs[0].content)
 
     expect(sys).toContain('【可用技能】')
-    expect(SKILL_WHITELIST).toHaveLength(11)
+    expect(SKILL_WHITELIST).toHaveLength(12)
     for (const name of SKILL_WHITELIST) {
       expect(sys, `目录段缺技能 ${name}`).toContain(`- ${name}: `)
     }
