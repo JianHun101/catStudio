@@ -232,6 +232,18 @@ export function scoreEntry({ entry, result, recheck = null }) {
     recall: expect.length > 0 ? hit / expect.length : null,
     preThreshold,
     preThresholdRate: expect.length > 0 ? preThreshold / expect.length : null,
+    /**
+     * 本条**实际注入的节数**与**是否发生预算截断**——链段自己落的读数，原样带出。
+     *
+     * 这两个是**加法读数**（W2-c 起片级/节级两种截断口径要比「同注入量下谁的恢复数高」，
+     * 而 `recall` 面答不了「代价是多少」）。它们**不参与任何判据**：`hit` / `recall` /
+     * `preThreshold` / `forbidHit` 仍只由 `result.sections` + 流水决定，本行不动那些口径。
+     *
+     * 缺读数（测试喂的假 result 没有 `stats.sections`）时**留 null 而不是 0**——
+     * 「没测」与「测到 0 节」不是一回事，写成 0 会让空夹具静默变成一节都没注入的假读数。
+     */
+    injectedSections: typeof result.stats?.sections === 'number' ? result.stats.sections : null,
+    truncated: typeof result.stats?.truncated === 'boolean' ? result.stats.truncated : null,
     details,
     forbidHit,
   }
