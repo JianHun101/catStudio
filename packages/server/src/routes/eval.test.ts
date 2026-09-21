@@ -35,6 +35,8 @@ describe('Eval Routes', () => {
   afterEach(async () => {
     await app.close()
     resetDb()
+    // env 派生断言用 `vi.stubEnv` 钉本用例的 env ⇒ 逐用例复位，防泄漏到同块其他用例
+    vi.unstubAllEnvs()
   })
 
   /** 插一个 agent，返回 id */
@@ -484,12 +486,17 @@ describe('Eval Routes', () => {
       seedExec({ id: 'x3', agentId: a, triggerMsgId: t2, status: 'completed', latencyMs: 3000 })
       seedExec({ id: 'x4', agentId: a, triggerMsgId: t3, status: 'failed', latencyMs: null })
 
+      // `slowMs` 现读 env（`eval.ts:272` `envNumber('EVAL_CHAIN_SLOW_MS', 300000)`）⇒ 断言
+      // 钉**本用例自己设的**非默认值：钉回 300000 是假绿门——「读 env」与「写死默认值」
+      // 两种实现都能过；钉 600000 才证「返回的是**当时生效**的阈值」。同理不可依赖外部
+      // env 恰好等于默认值：跑批进程继承 server 加载的 .env。
+      vi.stubEnv('EVAL_CHAIN_SLOW_MS', '600000')
       const res = await app.inject({ method: 'GET', url: '/api/eval/chains' })
       expect(res.statusCode).toBe(200)
       const body = JSON.parse(res.body)
       expect(body.windowDays).toBe(30)
       expect(body.anchor).toBe('coalesce(reply.task_id, trigger.task_id)')
-      expect(body.slowMs).toBe(300000)
+      expect(body.slowMs).toBe(600000)
 
       // 手工 SQL 对照（验证面与被判面同面）
       const expected = q()
@@ -1478,10 +1485,13 @@ describe('Eval Routes', () => {
         seedScore({ agentId, sessionId, messageId: m0, score: 5, sampleReason: 'random' })
         seedHumanLabel(m0, sessionId, agentId, 5)
 
+        // 同 `slowMs`：`minCount` 现读 env（`eval.ts:561` `envNumber('EVAL_LABEL_MIN_COUNT', 30)`）。
+        // 钉非默认值 50——它仍 > counted=1，本用例的判据（counted < minCount ⇒ 不给判定）不变。
+        vi.stubEnv('EVAL_LABEL_MIN_COUNT', '50')
         const res = await app.inject({ method: 'GET', url: '/api/eval/judge-agreement' })
         const body = JSON.parse(res.body)
         expect(body.counted).toBe(1)
-        expect(body.minCount).toBe(30)
+        expect(body.minCount).toBe(50)
         expect(body.sufficient).toBe(false)
         expect(body.gate).toBeNull()
       })
