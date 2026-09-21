@@ -58,3 +58,39 @@ Work the **frontier**：票①完成后票②解锁（纯串行链，从上到�
 | carrier  | PR **#124** → merge `44c1d3b`                                                                            |
 | 上浮落点 | `docs/plans/agent-reply-elapsed-timer.md`（`status: closed`——2026-09-20 由旧词「在飞」改为统一英文值域） |
 | 本 run   | **未清**——G1(c) 只补收口段；目录物理清理归 `docs/run/docs-run-status-gate/` 票 G2                        |
+
+## 票③ fix：计时表补会话维度（跨会话幽灵计时）
+
+**症状（用户实报 2026-09-21 22:45，附真机截图）**：在会话「简历更新」视图里出现一枚**不属于本会话**的占位气泡——店长头像、footer「回复中 · 已 23 秒」逐秒递增；同一时刻右侧成员卡该猫**无橙灯**、队列「暂无排队任务」。用户补充：「一直在走，右侧没灯」「也是偶尔才会触发」，并要求「计时的维度问题也一起修下」。
+
+**取证（店长，活库 + 源码）**：
+
+- 截图归属核对：截图内已完成的店长消息 = `messages.id 0909e164`（`created_at 07:09:47Z`），其 `session_id = b0be526e`（简历更新）。该会话**自 07:09:47 起无任何执行**（`execution_logs` 最后一行 completed），即那枚计时不可能来自本会话。
+- 同时段 `execution_logs` 有**跨会话并行执行**：店长 `11bbf854` 在 `afe16ea2`（14:39:39→14:46:53）、ds猫 `1564934c` 在 `c625465e`（14:42:16→running）、吐槽猫 `e0764bc7` 在 `afe16ea2`（14:46:53→running）。同一只猫跨会话并行是本系统的常态，不是异常场景。
+- 根因链：`replyTimers` 是 **agentId 单键表**（`chat.ts:124`），载荷 `MessageAgentStatusPayload` **不带 sessionId**（`bus.ts:30` 自述「载荷无 sessionId」；`types.ts:340-354` 字段清单确认），渲染侧唯一过滤是 `activeSession.agentIds`（`ChatPanel.vue:279`）——**每会话成员恒为同样 5 只猫 ⇒ 该过滤恒真，等于没有**。唯一防线是切会话时整体清空（`chat.ts:377`），而清空是同步动作、心跳帧是异步到达：**在途帧在清空之后落表即重新写入条目** ⇒ 幽灵计时。这正是票② 审查留痕的「切会话竞态」观察项，本次取证把它的**结构面**(少一维) 与**触发面**(在途帧) 分开了。
+- 对照面：右侧成员面板早已按 (agent, session) 收敛——`storeAgentState` 键为 `sessionId ?? ''`（`chat.ts:239-247`）、读取走 `currentStateFor(agentId)`（`chat.ts:251`），所以面板**正确地**显示空闲（=用户说的「右侧没灯」）。计时表是唯一漏掉这一维的消费面。
+- 附带后果：幽灵气泡上的停止按钮走的是**当前会话**（`AGENT_INTERRUPT` 带 `sessionId` = 你正在看的会话），`socketio.ts:584-589` 找不到该 (agent, session) 槽位即幂等 no-op——用户点它停不掉任何东西。
+
+**What to build:** 给计时表补上会话维度，使「当前会话视图里渲染出别的会话的执行计时」在结构上不可能；幽灵气泡与「右侧没灯」的不一致随之消失。
+
+**改动面（契约级）**：
+
+1. `packages/shared/src/types.ts`：`MessageAgentStatusPayload` 补 **`sessionId: string`（必填）**——全部发射点都已握有该值（`bus.ts:31` 是显式首参），加字段向后兼容。`AgentRuntimeState.sessionId` 已存在（`types.ts:43`），不动。
+2. server 发射点补齐 `sessionId`：`execution/reply.ts` 四处（`:342` thinking / `:984` replying / `:1068` 心跳 / `:1356` done，函数内已有 `sessionId` 形参）+ `connectors/ingest.ts:390`（queued，用 `effectiveSessionId`）。`bus.ts:30` 的「载荷无 sessionId」注释改为如实描述。
+3. web `stores/chat.ts`：`replyTimers` 键改 **`${sessionId}:${agentId}`**（导出/私有 helper `replyTimerKey(sessionId, agentId)`，读写只走它）。写入用 `data.sessionId`；**载荷缺 `sessionId`（旧 server / 乱序）⇒ 不建条目**（宁可无计时，不可错位）。清理三路各用其 sessionId：`done` → `data.sessionId`；`AGENT_STATUS` idle → `state.sessionId ?? ''`；`NEW_MESSAGE` agent 回复 → `msg.sessionId`。切会话整体清空**保留**为兜底（不再承担隔离职责）。
+4. web `components/ChatPanel.vue`：`replyTimerFor(agentId)` 改为按 `store.activeSessionId` 取键；`placeholderTimers` 从「遍历全表 + `agentIds` 过滤」改为按当前会话取（**不得再遍历全表渲染**）。
+5. **族修扫复述文本**（本单硬要求）：全仓扫「载荷无 sessionId」「无 sessionId 维度」「切会话与 typingStates 同点清空（因载荷无维度）」等**复述该断言的注释/文档**并逐条更新。已知点（不限于）：`execution/bus.ts:30`、`stores/chat.ts:121-122`、`stores/chat.ts:375-376`、`components/ChatPanel.vue:274-275`、`components/ReplyElapsed.vue:12`、`docs/plans/agent-reply-elapsed-timer.md` 实现决策 3/6。
+
+**Out of Scope（不做的）**：不改广播房间路由（`room(sessionId)` 本身是对的）；不给 `AGENT_STATUS`/成员卡加计时；不加新 socket 事件；不改「在途帧」竞态本身（清空保留兜底）；不动 DB/调度。
+
+**验收**：
+
+- [ ] AC1：store 层——注入 `sessionId` ≠ `activeSessionId` 的 `thinking`（带 `startedAt`）帧：`replyTimers` 不产生**当前会话键**的条目，且渲染面 0 个 `.reply-elapsed` / 0 个占位气泡。**须做真空性反对照**：同载荷仅把 `sessionId` 换成当前会话 → 必须渲染（证明断言测的是维度而非「什么都不渲染」）。
+- [ ] AC2：store 层——会话 A 与 B 的**同一 agent** 两条 entry 并存；B 的 `done` / `AGENT_STATUS idle` **不删** A 的 entry（跨会话清理不误伤）。
+- [ ] AC3：载荷缺 `sessionId` 时不建条目（用 `as` 构造缺字段载荷断言 `replyTimers.has(...) === false`），注释写明理由。
+- [ ] AC4：既有 6 条 replyTimers 路径测试（A2A 计时 / m:ss / 无响应 / 切会话清空 / done 删 / idle 删）在改键后**全部更新且全绿**；「切回会话后 ≤10s 心跳恢复原秒数不归零」不回归。
+- [ ] AC5：复述文本清单——回执里给出**扫到的文件:行号 + 改后措辞**（店长逐条核对）。
+- [ ] AC6：`pnpm test`（全量）+ `pnpm lint` 全绿；`git diff --stat` 自证改动面仅在 shared/server/web 三包 **+ `docs/plans/agent-reply-elapsed-timer.md`**（族修第 5 条要求的规格面订正，属本单应改面）内，无其他越界。〔2026-09-21 订正：原措辞「仅三包内」与族修第 5 条自相矛盾——spec 在记忆白名单里会切片注入每只猫的 prompt，改断言必须连带改文档，否则等于留一份假话在检索面；实施猫按族修优先执行，此处补正票面〕
+- [ ] AC7（店长收口验证，实施者不做）：真机 Playwright 合成注入跨会话帧 → 当前会话 0 计时；同帧换本会话 → 计时出现。
+
+**提交**：`catstudy [<40 位真 uuid>] fix(timer): ...`；提交后按 `request-review` 发起审查，收口归店长。

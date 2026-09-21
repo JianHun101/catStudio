@@ -258,9 +258,10 @@ const activeTypingStates = computed(() => {
   return filtered
 })
 
-/** 取某 agent 的计时锚点（无则 undefined）——气泡 footer 与占位气泡共用 */
+/** 取某 agent 在**当前会话**的计时锚点（无则 undefined）——气泡 footer 与占位气泡共用。
+ *  走 `currentReplyTimerFor`：计时表是全局表，直接 get(agentId) 会跨会话误命中。 */
 function replyTimerFor(agentId: string): { startedAt: number; lastBeatAt: number } | undefined {
-  return store.replyTimers.get(agentId)
+  return store.currentReplyTimerFor(agentId)
 }
 
 /**
@@ -271,17 +272,18 @@ function replyTimerFor(agentId: string): { startedAt: number; lastBeatAt: number
  * 与 `activeTypingStates` 互斥（同一条目不会既流式又占位）——首个 chunk 到达后
  * `typingStates` 有条目，本 list 自然剔除该 agent，气泡切换但计时同源不重置。
  *
- * 会话归属：计时表载荷无 sessionId 维度，只能按 activeSession.agentIds 过滤
- * （与 activeTypingStates 同口径），切会话时 store 已整体清空。
+ * 会话归属由**键**保证：只对本会话成员逐个取键（`currentReplyTimerFor`），不再遍历
+ * 全局表——「遍历全表 + agentIds 过滤」在「同一只猫跨会话并行执行」时会漏进别的会话
+ * 的条目（各会话成员恒为同样几只猫 ⇒ 成员过滤恒真、等于没有过滤）。
  */
 const placeholderTimers = computed(() => {
   const list: { agentId: string; startedAt: number; lastBeatAt: number }[] = []
-  const activeAgentIds = new Set(store.activeSession?.agentIds ?? [])
-  store.replyTimers.forEach((timer, agentId) => {
-    if (!activeAgentIds.has(agentId)) return
-    if (store.typingStates.has(agentId)) return
+  for (const agentId of store.activeSession?.agentIds ?? []) {
+    const timer = store.currentReplyTimerFor(agentId)
+    if (!timer) continue
+    if (store.typingStates.has(agentId)) continue
     list.push({ agentId, ...timer })
-  })
+  }
   return list
 })
 

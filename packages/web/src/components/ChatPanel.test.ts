@@ -328,7 +328,7 @@ describe('ChatPanel 计时上气泡 footer + 占位气泡（票②）', () => {
   it('占位气泡：replyTimers 有 / typingStates 无 的 agent 渲染 streaming 同款虚线气泡 + 停止按钮 + 计时', () => {
     // 数据源判据：有计时锚点（执行在跑）且无流式条目（headless 整轮 / 首 chunk 前 / A2A）
     expect(source).toContain('const placeholderTimers = computed(')
-    expect(source).toContain('if (store.typingStates.has(agentId)) return')
+    expect(source).toContain('if (store.typingStates.has(agentId)) continue')
     // 复用 .message.streaming 视觉语言（虚线边框）——零新增容器样式
     expect(source).toMatch(
       /v-for="timer in placeholderTimers"[\s\S]{0,160}class="message agent streaming"/
@@ -344,8 +344,8 @@ describe('ChatPanel 计时上气泡 footer + 占位气泡（票②）', () => {
   it('占位气泡与流式气泡互斥：同一 agent 不会两个气泡同时在屏（切流式时计时同源不重置）', () => {
     // typingStates 有条目即剔除占位；两处 ReplyElapsed 的锚点都取自 store.replyTimers
     // 的同一条目（startedAt 来自服务端），切换组件实例不重算锚点
-    expect(source).toContain('if (store.typingStates.has(agentId)) return')
-    expect(source).toContain('return store.replyTimers.get(agentId)')
+    expect(source).toContain('if (store.typingStates.has(agentId)) continue')
+    expect(source).toContain('return store.currentReplyTimerFor(agentId)')
   })
 
   describe('占位气泡行为（挂载级：A2A / headless 执行可见性）', () => {
@@ -378,7 +378,8 @@ describe('ChatPanel 计时上气泡 footer + 占位气泡（票②）', () => {
         { id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
         { id: 'a2', name: 'flash猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
       ]
-      store.replyTimers = new Map([['a1', { startedAt: T0 - 12_000, lastBeatAt: T0 }]])
+      // 键 = `${sessionId}:${agentId}`——本会话（s1）的条目才参与渲染
+      store.replyTimers = new Map([['s1:a1', { startedAt: T0 - 12_000, lastBeatAt: T0 }]])
       store.agentStates = new Map([
         [
           'a1',
@@ -423,6 +424,23 @@ describe('ChatPanel 计时上气泡 footer + 占位气泡（票②）', () => {
       expect(bubbles[0].find('.placeholder-thinking').exists()).toBe(false) // 占位已让位
       // 计时同源：锚点来自 store（服务端 startedAt），组件实例切换不归零
       expect(bubbles[0].text()).toContain('回复中 · 已 12 秒')
+    })
+
+    it('别的会话的执行帧不渲染到本会话（幽灵计时：秒数在走、成员卡却空闲）', async () => {
+      const store = setupRunning()
+      // 同一只猫在**另一个会话**并行执行——s1 视图上不得出现它的占位气泡
+      store.replyTimers = new Map([
+        ['s1:a1', { startedAt: T0 - 12_000, lastBeatAt: T0 }],
+        ['s2:a1', { startedAt: T0 - 90_000, lastBeatAt: T0 }],
+      ])
+      const wrapper = mountPanel()
+      await nextTick()
+
+      const bubbles = wrapper.findAll('.message.agent.streaming')
+      expect(bubbles).toHaveLength(1)
+      // 取的是 s1 那条（12 秒）而非 s2 那条（90 秒）——键控隔离的直接读数
+      expect(bubbles[0].text()).toContain('回复中 · 已 12 秒')
+      expect(wrapper.text()).not.toContain('已 1:30')
     })
 
     it('执行终止清计时 → 占位气泡消失（不留「无响应」僵尸）', async () => {

@@ -338,6 +338,12 @@ export type MessageAgentStatus = 'queued' | 'thinking' | 'replying' | 'done'
 
 /** MESSAGE_AGENT_STATUS 事件载荷（各构造点统一形状；'thinking'/'replying' 心跳重发同 startedAt） */
 export interface MessageAgentStatusPayload {
+  /**
+   * 执行所在会话 id——与 `emitAgentMessageStatus` 首参（房间路由）恒同值，随载荷一起
+   * 下发是为了让前端**自描述地**键控：同一只猫可跨会话并行执行，只按 agentId 键控会
+   * 把别的会话的执行帧渲染到当前会话（幽灵计时：秒数在走、右侧成员卡却空闲）。
+   */
+  sessionId: string
   messageId: string
   agentId: string
   agentName: string

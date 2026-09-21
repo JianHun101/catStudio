@@ -392,6 +392,7 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
         agentId: a.id,
         agentName: a.name,
         agentAvatar: a.avatar,
+        sessionId: effectiveSessionId,
         status: 'queued',
       })
     }

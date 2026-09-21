@@ -222,7 +222,9 @@ describe('MessageItem 用户消息状态行（停止按钮 / 撤回）', () => {
     expect(wrapper.find('.btn-stop-agent').exists()).toBe(true)
 
     // 无流式执行（A2A / headless / 首 chunk 前）：气泡侧渲染占位气泡承载按钮
-    store.replyTimers = new Map([['a1', { startedAt: Date.now() - 3_000, lastBeatAt: Date.now() }]])
+    store.replyTimers = new Map([
+      ['s1:a1', { startedAt: Date.now() - 3_000, lastBeatAt: Date.now() }],
+    ])
     await nextTick()
     expect(wrapper.find('.btn-stop-agent').exists()).toBe(false)
   })

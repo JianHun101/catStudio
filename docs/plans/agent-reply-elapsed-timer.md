@@ -26,7 +26,7 @@ Agent 回复计时目前挂在**触发它的用户消息**的状态行上（`Mes
 
 - 流式气泡现有的静态「回复中…」指示升级为「回复中 · 已 N 秒」，逐秒递增；
 - 无流式期间（headless 适配器整轮 / 首个 chunk 前 / A2A 触发）补同款**虚线占位气泡**：正文思考动点，footer 带计时与停止按钮；
-- 数据源**复用现有 `MESSAGE_AGENT_STATUS`**（按 agentId 键控消费），server 仅把 `startedAt` 锚点从「replying 才带」提前到「thinking 也带」；
+- 数据源**复用现有 `MESSAGE_AGENT_STATUS`**（按 `sessionId:agentId` 键控消费），server 把 `startedAt` 锚点从「replying 才带」提前到「thinking 也带」、并给载荷补上 `sessionId`；
 - 秒数由 web 叶子组件本地 1s tick 自增，server 零额外流量（既有 10s 心跳只做 liveness 锚点 + 刷新自愈）；
 - 用户消息状态行**保留状态文字与停止按钮，不再显示秒数**（计时唯一权威位 = 气泡 footer）。
 
@@ -46,18 +46,21 @@ Agent 回复计时目前挂在**触发它的用户消息**的状态行上（`Mes
 
 1. **数据源复用 `MESSAGE_AGENT_STATUS`，不改 `AgentRuntimeState`、不加新事件。** 原方案是给 `AgentRuntimeState` 加 `startedAt`/`lastBeatAt` 走 `AGENT_STATUS` 通道；实读后发现 `MESSAGE_AGENT_STATUS` 已对**全部执行（含 A2A）**广播 `replying` + `startedAt`（`reply.ts` 执行入口一次取值），且自带 10s 心跳重发同 `startedAt`——心跳同时解决 liveness 与刷新自愈（刷新后 ≤10s 重收锚点，秒数不归零）。改走 `AGENT_STATUS` 反而要新搭 per-agent 心跳通道，改动更大收益为零。
 2. **计时锚点 = 执行起点（thinking 时刻）。** server 把 `startedAt` 提前：`thinking` 事件（执行入口，上下文组装前）与后续 `replying`/心跳共享同一次 `Date.now()` 取值（hoist 到函数前部）。与 trace 根段 `invoke_agent` 起点同口径。shared 类型 `MessageAgentStatusPayload.startedAt` 的注释从「仅 replying」改为「thinking/replying」——纯注释，wire 形状不变。
-3. **web store 新增 agentId 键控计时表** `replyTimers: Map<agentId, { startedAt, lastBeatAt }>`，在现有 `MESSAGE_AGENT_STATUS` handler 内维护：`thinking`/`replying` → 写入（`startedAt` 取新旧较小者做防御，`lastBeatAt` = 客户端接收时刻）；`done` → 删除；`AGENT_STATUS` `idle` → 删除（覆盖 abort/timeout 等无 `done` 的终止路径）；切会话时与 `typingStates` 同点清空。单 agent 单槽位串行 ⇒ 一猫至多一条，无并发冲突。
+3. **web store 新增 `sessionId:agentId` 键控计时表** `replyTimers: Map<键, { startedAt, lastBeatAt }>`（键由 `replyTimerKey(sessionId, agentId)` 单点拼装，读/写/清三面共用），在现有 `MESSAGE_AGENT_STATUS` handler 内维护：`thinking`/`replying` → 写入（`lastBeatAt` = 客户端接收时刻；`startedAt` 取值见决策 9）；`done` → 删除；`AGENT_STATUS` `idle` → 删除（覆盖 abort/timeout 等无 `done` 的终止路径，键取 `state.sessionId ?? ''`）；`NEW_MESSAGE` → 删除（按消息自身 `sessionId`，用户已切走时也要清对格子）；切会话时与 `typingStates` 同点清空——**兜底**，会话隔离已由键保证。会话内单 agent 单槽位串行 ⇒ 同一键至多一条。
 4. **新叶子组件 `ReplyElapsed.vue`**：props `{ startedAt, lastBeatAt }`；本地 1s tick 驱动重算（`onUnmounted` 必 clear）；文案 `回复中 · 已 N 秒`（N<60）/ `回复中 · 已 M:SS`（≥60s，用户拍板）；`lastBeatAt` 距今 >25s（`HEARTBEAT_STALE_MS` 同值）→ 红字「无响应」停走。liveness 语义照抄 `AgentStatusLabel.vue` 既有实现。
-5. **ChatPanel 流式气泡 footer**：静态「回复中…」替换为 `ReplyElapsed`（数据 `replyTimers.get(agentId)`）。停止按钮不动。
-6. **占位气泡**：对「`replyTimers` 有、`typingStates` 无」的 agent 渲染 streaming 同款气泡（虚线边框 = 现有 `.message.streaming` 视觉语言，零新增容器样式）；正文 = 思考动点（与流式思考折叠块 header 动点同款，用户拍板）；footer = 停止按钮（`canStopAgent`）+ `ReplyElapsed`。首个 chunk 到达（`typingStates` 有条目）后自然切换为流式气泡——计时同源不重置。
+5. **ChatPanel 流式气泡 footer**：静态「回复中…」替换为 `ReplyElapsed`（数据 `store.currentReplyTimerFor(agentId)`——只认当前会话的条目）。停止按钮不动。
+6. **占位气泡**：对「**当前会话**的 `replyTimers` 有条目、`typingStates` 无」的 agent 渲染 streaming 同款气泡（按本会话成员逐个取键，不遍历全局表）（虚线边框 = 现有 `.message.streaming` 视觉语言，零新增容器样式）；正文 = 思考动点（与流式思考折叠块 header 动点同款，用户拍板）；footer = 停止按钮（`canStopAgent`）+ `ReplyElapsed`。首个 chunk 到达（`typingStates` 有条目）后自然切换为流式气泡——计时同源不重置。
 7. **用户消息状态行去秒**：`AgentStatusLabel` 的 `replying` 分支不再输出「· 已 N 秒」，保留 已收到/思考中/回复中/完成/无响应 与停止按钮。组件内 1s tick 保留（驱动「无响应」翻转），但不再驱动秒数。
 8. **渲染纪律**：每秒变化的响应式状态只允许存在于叶子组件（`ReplyElapsed` / `AgentStatusLabel`）；ChatPanel 顶层不得引入任何每秒变化的 ref（`ChatPanel.test.ts` 既有静态断言守门，新增断言覆盖本单）。
+9. **会话维度（幽灵计时根治，2026-09-21 追加）**：`MessageAgentStatusPayload` 补 **`sessionId: string`（必填）**，server 五处发射点（`reply.ts` 的 thinking / replying / 心跳 / done + `ingest.ts` 的 queued）随载荷下发；web 计时表键由 agentId 单键改 **`sessionId:agentId`**（`replyTimerKey` 单点拼装），渲染面一律走 `currentReplyTimerFor`（只认当前会话）。起因 = 真机取证（用户截图 + 活库 `execution_logs` 对账）：同一只猫**可跨会话并行执行**，右侧成员卡早已按 `(agent, session)` 收敛，只按 agentId 键控的计时表是唯一漏掉这一维的消费面——症状即「气泡计时一直在走、右侧成员卡却空闲」的幽灵计时；又因切会话清空是**同步**动作而在途帧**异步**到达，表现为**偶发**。
+   - 同轮锚点语义：`thinking` 是轮次起点信号（服务端恒 thinking → replying → 心跳），到即**无条件落新锚点**；`min` 防御只留 `replying`/心跳（那里服务端恒发同值，取小才是在防乱序与中途刷新倒退）。依据 = 上一轮失败（LLM 异常 / `AGENT_HARD_TIMEOUT_MS` 硬超时 / CLI 空闲超时）既无 `done` 也无 `AGENT_STATUS idle`（`serial.ts` 队列有下一条时只发 `busy` 直转 N+1），残留锚点若与新一轮取小，秒数会把失败间隙一并算进去。
+   - **载荷缺 `sessionId` ⇒ 不建条目**（旧 server wire 下无会话维度即无从键控）：宁可不显示时长，也不跨会话误渲染。
 
 ## Testing Decisions
 
 - 只测外部行为，不测实现细节；co-located 测试跟随被测模块。
 - server：扩展现有 heartbeat 测试块（`connectors/socketio.test.ts`「stream 未结束时推进 fake timer」一带）——断言 `thinking` 事件带 `startedAt` 且与 `replying`/心跳同值。
-- web store：`chat.test.ts` —— `replyTimers` 写入 / 较早 `startedAt` 保留 / `lastBeatAt` 刷新 / `done` 删除 / `AGENT_STATUS idle` 删除 / 切会话清空。
+- web store：`chat.test.ts` —— `replyTimers` 写入 / 较早 `startedAt` 保留 / `lastBeatAt` 刷新 / `done` 删除 / `AGENT_STATUS idle` 删除 / 切会话清空 / 切回心跳恢复不归零 / **跨会话帧不落当前视图（带真空性反对照：同载荷换本会话必须取到）** / **跨会话并行两条 entry 互不误删（done 与 idle 各一条）** / **缺 `sessionId` 不建条目**。
 - web 组件：静态源断言（`?raw`，`ChatPanel.test.ts` 范式）——tick 只在 `ReplyElapsed`；ChatPanel 顶层无每秒 ref；`MessageItem` 状态行文案无秒数。`ReplyElapsed` 行为测试用 fake timer 断言 N 秒 / m:ss / 无响应 三态。
 - prior art：`AgentStatusLabel` 的 tick + liveness 实现、`ChatPanel.test.ts` 顶层 tick 静态断言、`socketio.test.ts` 心跳 fake timer 块。
 
@@ -71,11 +74,11 @@ Agent 回复计时目前挂在**触发它的用户消息**的状态行上（`Mes
 ## Further Notes
 
 - 设计原型：高保真 HTML 原型（真实主题变量 + 卡片/气泡样式取自源码），一次性产物放 TEMP 目录，不落仓库；用户已按原型拍板形态。
-- 桌面端既有行为不变：`MESSAGE_AGENT_STATUS` 的 messageId 键控消费（`messageStatus` Map、消息 lifecycle 推进）原样保留，本单只是**新增**一条 agentId 键控的消费支路。
+- 桌面端既有行为不变：`MESSAGE_AGENT_STATUS` 的 messageId 键控消费（`messageStatus` Map、消息 lifecycle 推进）原样保留，本单只是**新增**一条 `sessionId:agentId` 键控的消费支路。
 
 ## 决策留痕
 
 - 跳 grilling：需求经会话内逐轮拷问成型（展示位两轮评审：成员卡方案被用户否决；「排队中」展示位被用户指出与成员卡序号冗余后由店长主动撤回；trace 复用方向经实码证伪后改道），全部拍板项已落地 → 故本单不单跑 grill。
-- Gate B 契约：[边界 = 见 Out of Scope ／ 契约 = `MESSAGE_AGENT_STATUS` 按 agentId 键控复用 + `thinking` 补 `startedAt`（与 `replying` 同值）+ `ReplyElapsed` props 形状 ／ 验收 = User Stories 1-9 ↔ tickets 验收项] 已钉死。
+- Gate B 契约：[边界 = 见 Out of Scope ／ 契约 = `MESSAGE_AGENT_STATUS` 按 `sessionId:agentId` 键控复用 + 载荷补 `sessionId`（必填）+ `thinking` 补 `startedAt`（与 `replying` 同值）+ `ReplyElapsed` props 形状 ／ 验收 = User Stories 1-9 ↔ tickets 验收项] 已钉死。
 - 用户拍板记录：①展示位 = Agent 聊天气泡 footer（否决成员卡）；②超 60s 转 m:ss = 采纳；③占位气泡正文 = 思考动点 = 采纳；④用户消息状态行 = 保留状态与停止按钮、不显示时间；⑤计时锚点 = 执行起点（与 trace 根段 `invoke_agent` 同口径）。
 - 数据源改道留痕：原方案（`AgentRuntimeState` 加字段走 `AGENT_STATUS`）在实读 `reply.ts` 心跳实现后被「复用 `MESSAGE_AGENT_STATUS`」替代——依据 = 既有心跳已覆盖 liveness + 刷新自愈，`AGENT_STATUS` 路径需新建 per-agent 心跳，改动更大收益为零。

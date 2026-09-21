@@ -193,7 +193,7 @@ function statusEmoji(status: string): string {
  * 只有带状态行的用户消息会重算，历史气泡零成本。
  *
  * 判据 = **气泡是否覆盖该 agent**（气泡承载按钮，状态行让位）。气泡有两态：
- * 流式（`typingStates` 有条目）/ 占位（`replyTimers` 有条目——A2A、headless、
+ * 流式（`typingStates` 有条目）/ 占位（`replyTimers` 在当前会话有条目——A2A、headless、
  * 首 chunk 前的窗口）。两态都要让位，漏判 replyTimers 会在无流式执行期间同时冒出
  * 状态行与占位气泡两个「停止」按钮（同一 agent）。
  */
@@ -202,7 +202,7 @@ const stopSignal = computed(() =>
     .filter(
       (s) =>
         !store.typingStates.has(s.agentId) &&
-        !store.replyTimers.has(s.agentId) &&
+        !store.currentReplyTimerFor(s.agentId) &&
         isAgentStoppable(store.currentStateFor(s.agentId))
     )
     .map((s) => s.agentId)
