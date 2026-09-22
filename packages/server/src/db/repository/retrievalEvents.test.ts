@@ -336,6 +336,176 @@ describe('retrievalEvents 写口', () => {
     })
   })
 
+  // ─── M1 读侧：按 message_id 批量取已注入节 ─────────
+  // 判据面在**关联链**（execution_logs.message_id → retrieval_events.execution_id →
+  // queries → candidates）与**按节去重**两处——两处写错都不会抛，只会静默多算/漏算，
+  // 而 UI 上的「记忆 3 条」正是拿这个数跟用户对账的。
+  describe('M1 · getInjectedRefsByMessageIds', () => {
+    /** 造「触发消息 + 回复消息 + 一条 running 执行行」，返回执行行 id */
+    function seedExecution(opts: {
+      sessionId: string
+      replyMessageId: string
+      execId: string
+    }): string {
+      const db = getDb()
+      db.prepare(
+        `INSERT OR IGNORE INTO agents (id, name, system_prompt, llm_api_key)
+         VALUES ('agent-1', 'flash猫', 'p', 'k')`
+      ).run()
+      db.prepare(`INSERT OR IGNORE INTO sessions (id, title) VALUES (?, 't')`).run(opts.sessionId)
+      for (const mid of [`trigger-${opts.execId}`, opts.replyMessageId]) {
+        db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES (?, ?, 'agent', 'x', '[]')`
+        ).run(mid, opts.sessionId)
+      }
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, trace_id, message_id)
+         VALUES (?, ?, 'agent-1', ?, 'completed', 'trace-1', ?)`
+      ).run(opts.execId, opts.sessionId, `trigger-${opts.execId}`, opts.replyMessageId)
+      return opts.execId
+    }
+
+    /** 一次注入的候选行（默认 = 已注入的 final 行） */
+    function cand(over: Record<string, unknown> = {}) {
+      return { ...makeEvent().candidates[0], ...over }
+    }
+
+    it('按节去重：同节的 final 与 probe 行合成 1 条，代表行取 final（片正文来自 final 那片）', () => {
+      const execId = seedExecution({
+        sessionId: 'sess-1',
+        replyMessageId: 'reply-1',
+        execId: 'exec-m1-a',
+      })
+      repo.insertRetrievalTrace(
+        makeEvent({
+          executionId: execId,
+          candidates: [
+            cand({ source: 'final', bodyHead: 'final 那片正文' }),
+            // 同节的 probe 行（同 doc/anchor，不同片）：写侧口径下 probe 的 injected 也可能为 true
+            cand({
+              source: 'probe',
+              contentHash: 'h-probe',
+              bodyHead: 'probe 那片正文',
+              injected: true,
+            }),
+          ],
+        })
+      )
+
+      const got = repo.getInjectedRefsByMessageIds(['reply-1'], 'sess-1')
+      const entry = got.get('reply-1')!
+      expect(entry.sections).toHaveLength(1)
+      expect(entry.sections[0].bodyHead).toBe('final 那片正文')
+      expect(entry.reason).toBe('ok')
+    })
+
+    it('只取 injected = 1：未注入的 final 行（budget 丢弃）不进结果', () => {
+      const execId = seedExecution({
+        sessionId: 'sess-1',
+        replyMessageId: 'reply-2',
+        execId: 'exec-m1-b',
+      })
+      repo.insertRetrievalTrace(
+        makeEvent({
+          executionId: execId,
+          candidates: [
+            cand({ contentHash: 'h-in', injected: true }),
+            cand({
+              contentHash: 'h-out',
+              injected: false,
+              sectionRank: null,
+              injectedPosition: null,
+              droppedReason: 'budget',
+              sectionAnchor: '## 没进去的那节',
+            }),
+          ],
+        })
+      )
+
+      const sections = repo
+        .getInjectedRefsByMessageIds(['reply-2'], 'sess-1')
+        .get('reply-2')!.sections
+      expect(sections.map((s) => s.sectionAnchor)).toEqual(['## 决策'])
+    })
+
+    it('有 event 无注入 → 条目在（sections 空、reason 保留）；无 event 的消息 → 键不在', () => {
+      const execId = seedExecution({
+        sessionId: 'sess-1',
+        replyMessageId: 'reply-3',
+        execId: 'exec-m1-c',
+      })
+      repo.insertRetrievalTrace(
+        makeEvent({ executionId: execId, reason: 'no-hit', candidates: [] })
+      )
+      // 同会话但压根没有执行行的消息：只建消息、不建 execution
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions)
+           VALUES ('reply-no-trace', 'sess-1', 'agent', 'x', '[]')`
+        )
+        .run()
+
+      const got = repo.getInjectedRefsByMessageIds(['reply-3', 'reply-no-trace'], 'sess-1')
+      expect(got.get('reply-3')).toEqual({ reason: 'no-hit', sections: [] })
+      expect(got.has('reply-no-trace')).toBe(false)
+    })
+
+    it('批量不串台：两条回复各取各的节；跨会话的执行行不进（sessionId 双条件）', () => {
+      const execA = seedExecution({
+        sessionId: 'sess-1',
+        replyMessageId: 'reply-a',
+        execId: 'exec-m1-d',
+      })
+      const execB = seedExecution({
+        sessionId: 'sess-2',
+        replyMessageId: 'reply-b',
+        execId: 'exec-m1-e',
+      })
+      repo.insertRetrievalTrace(
+        makeEvent({
+          executionId: execA,
+          sessionId: 'sess-1',
+          candidates: [cand({ sectionAnchor: '## A 的节' })],
+        })
+      )
+      repo.insertRetrievalTrace(
+        makeEvent({
+          executionId: execB,
+          sessionId: 'sess-2',
+          candidates: [cand({ sectionAnchor: '## B 的节' })],
+        })
+      )
+
+      const got = repo.getInjectedRefsByMessageIds(['reply-a', 'reply-b'], 'sess-1')
+      expect(got.get('reply-a')!.sections.map((s) => s.sectionAnchor)).toEqual(['## A 的节'])
+      // 跨会话：B 的执行行不因「消息 id 被请求了」而漏进来
+      expect(got.get('reply-b')?.sections ?? []).toEqual([])
+    })
+
+    it('节序按注入位置（renderSections 首尾重排后的 1..n），不是按候选自增 id', () => {
+      const execId = seedExecution({
+        sessionId: 'sess-1',
+        replyMessageId: 'reply-ord',
+        execId: 'exec-m1-f',
+      })
+      repo.insertRetrievalTrace(
+        makeEvent({
+          executionId: execId,
+          candidates: [
+            // 先写入的是「渲染位置 2」（末位），后写入的是「渲染位置 1」
+            cand({ contentHash: 'h-p2', sectionAnchor: '## 位置二', injectedPosition: 2 }),
+            cand({ contentHash: 'h-p1', sectionAnchor: '## 位置一', injectedPosition: 1 }),
+          ],
+        })
+      )
+      const sections = repo
+        .getInjectedRefsByMessageIds(['reply-ord'], 'sess-1')
+        .get('reply-ord')!.sections
+      expect(sections.map((s) => s.injectedPosition)).toEqual([1, 2])
+    })
+  })
+
   // ─── R1-b：param_pool_n（验收 7 / 8）─────────────────
   // 判据面在**写口**：值的正确性（== 当时的池常数）由 `execution/reply.test.ts`
   // 从消费侧取，这里只判「列在、存得住、老行是 NULL」。

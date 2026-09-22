@@ -888,3 +888,148 @@ describe('A1 渲染边界：单次 chunk 不按 N 触发 markdown 重算', () =>
     wrapper.unmount()
   })
 })
+
+// ─── M1 记忆引用（批量口 / 抽屉 / 渲染边界）──────────────────
+describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
+  /** 合并窗口（ChatPanel 的 MEMORY_REFS_DEBOUNCE_MS=50）留足裕度 */
+  const SETTLE_MS = 160
+
+  function setupSession(messageCount: number) {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'M1', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [
+      { id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
+    ]
+    store.messages = Array.from({ length: messageCount }, (_, i) => ({
+      id: `m${i}`,
+      sessionId: 's1',
+      agentId: i % 2 === 0 ? 'a1' : null,
+      role: i % 2 === 0 ? 'agent' : 'user',
+      content: `正文 ${i}`,
+      mentions: [],
+      createdAt: '2026-09-22T00:00:00Z',
+    })) as never
+    return store
+  }
+
+  /** 记录所有请求 URL 的 fetch 桩；`body` 决定响应形状 */
+  function stubFetch(handler: (url: string) => unknown): string[] {
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        urls.push(String(url))
+        return Promise.resolve(
+          new Response(JSON.stringify(handler(String(url))), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      })
+    )
+    return urls
+  }
+
+  beforeEach(() => {
+    Object.defineProperty(Element.prototype, 'scrollTo', {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    })
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('A4 · 一页 50 条消息只发 1 次 memory-refs 请求，且请求里带齐这 50 个 id', async () => {
+    setupSession(50)
+    const urls = stubFetch(() => ({}))
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+
+    const memCalls = urls.filter((u) => u.includes('/memory-refs'))
+    // 判据是「按消息各拉一次」vs「批量一次」——50 条消息下前者是 50 次
+    expect(memCalls).toHaveLength(1)
+    for (let i = 0; i < 50; i++) expect(memCalls[0]).toContain(`m${i}`)
+    wrapper.unmount()
+  })
+
+  it('A4 · 服务端只对部分消息有记录时，不会为「没有记录的消息」补请求', async () => {
+    setupSession(50)
+    const urls = stubFetch((u) =>
+      u.includes('/memory-refs') ? { m0: { state: 'injected', reason: 'ok', refs: [] } } : {}
+    )
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+    expect(urls.filter((u) => u.includes('/memory-refs'))).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('端到端（挂载级）：批量口返回的节 → 气泡 footer 出「📎 记忆 1 条」；点开 → 抽屉显示片段', async () => {
+    setupSession(4)
+    const ref = {
+      docPath: 'docs/adr/0002-b.md',
+      sectionAnchor: '## 决策',
+      breadcrumb: 'docs/adr/0002-b.md > 决策',
+      sectionRank: 0,
+      injectedPosition: 1,
+      bodyHead: '命中片正文全文',
+    }
+    stubFetch((u) => {
+      if (u.includes('/memory-refs')) {
+        return {
+          m0: { state: 'injected', reason: 'ok', refs: [ref] },
+          m2: { state: 'none', reason: 'no-hit', refs: [] },
+        }
+      }
+      return { path: 'docs/adr/0002-b.md', content: '# 当前文档正文' }
+    })
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+    await nextTick()
+
+    // 三态在**真实渲染**里也分开：m0 有注入、m2 无注入、m1 用户消息不渲染该行
+    const rows = wrapper.findAll('.msg-memory-refs')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].text()).toContain('记忆 1 条')
+    expect(rows[1].text()).toContain('未使用记忆')
+
+    // 点条目 → 抽屉（片段来自批量口，不再发请求）
+    await wrapper.find('.mem-link').trigger('click')
+    await nextTick()
+    const drawer = wrapper.find('.memory-drawer')
+    expect(drawer.exists()).toBe(true)
+    expect(drawer.text()).toContain('命中片正文全文')
+    expect(wrapper.find('.memory-drawer-caption').text()).toContain('整节')
+
+    // 次级链接 → 才发第二次请求（且只打 /memory/doc）
+    await wrapper.find('.memory-drawer-open').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
+    expect(wrapper.find('.memory-drawer-doc').text()).toContain('当前文档正文')
+    wrapper.unmount()
+  })
+
+  it('A6 · 渲染契约：记忆行走 messageViews 标量 prop，模板不碰会话级集合', () => {
+    // 父组件把判定算完、以 prop 传下去（子组件的 O(1) 重渲染靠这条）
+    expect(source).toContain(':memory-refs="view.memoryRefs"')
+    expect(source).toContain('memoryRefs: memoryRefViewFor(msg),')
+    // 视图对象按「原始条目引用」缓存——不缓存就是每次重算新建对象，等于白拆
+    expect(source).toContain('cached.raw === raw')
+    // 模板里不许直接读记忆 Map（判定必须留在 script 的 messageViews 里）
+    const template = source.slice(source.indexOf('<template>'), source.indexOf('</template>'))
+    expect(template).not.toContain('memoryRefsByMessage')
+  })
+})
