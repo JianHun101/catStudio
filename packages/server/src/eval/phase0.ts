@@ -113,9 +113,62 @@ export function agreementRate(
   return { rate: counted > 0 ? agree / counted : NaN, counted, total: judgeScores.length }
 }
 
+/**
+ * Cohen's κ——**扣掉「碰巧一致」之后**的一致率（票「一致性口径补 κ」· 2026-09-22）。
+ *
+ * 与 `agreementRate` **共用同一套三值口径**（`verdictOf`；任一方 `ignore` 不入分母），
+ * 因而 `counted` / `total` 逐字同值，两个数可以并列渲染。差别只在分母里减掉了
+ * 「按各自边际分布本来就会撞上」的那部分：
+ *
+ *     κ = (po − pe) / (1 − pe)，po = 观测一致率，pe = 期望巧合率
+ *
+ * **为什么非要有它**：本仓自己的 `research-rag-eval.md:161` 记了原始一致率「会掩盖
+ * 分歧」。两边边际分布一边倒时（例如绝大多数样本都是 pass），一致率会虚高到接近 1
+ * ——可那正是判官**没有分辨力**的形态（两人都只会说 pass，当然一致）。κ 在这个极限下
+ * 趋近 0。Phase 0 的「一致率 97.1%」正是这种读数，故它需要一个不随一边倒而虚高的伴生指标。
+ *
+ * 退化情形一律返回 `NaN`（与 `agreementRate` 空分母同约定）：
+ *   · 有效样本为 0；· `pe === 1`（双方各自只出现一种判定 ⇒ 分母 1−pe = 0，κ 无定义）。
+ * **不返回 0 或 1**——那两个都是「有读数」的假象，会把「测不了」伪装成「分歧大/完全一致」。
+ *
+ * ⚠️ 本函数**只产读数、不参与 `gateVerdict`**：改判定口径 = 改 Phase 0 的结论面，属
+ * 架构决策（票面边界：边界与验收标准归店长）。是否把 κ 接进闸门请单独立票。
+ */
+export function cohenKappa(
+  judgeScores: number[],
+  humanScores: number[]
+): { kappa: number; counted: number; total: number } {
+  let counted = 0
+  let agree = 0
+  // 两类（pass / fail）各自的边际计数——`ignore` 在下面的 continue 里出清
+  let judgePass = 0
+  let humanPass = 0
+  for (let i = 0; i < judgeScores.length; i++) {
+    const jv = verdictOf(judgeScores[i])
+    const hv = verdictOf(humanScores[i])
+    if (jv === 'ignore' || hv === 'ignore') continue
+    counted++
+    if (jv === hv) agree++
+    if (jv === 'pass') judgePass++
+    if (hv === 'pass') humanPass++
+  }
+  const total = judgeScores.length
+  if (counted === 0) return { kappa: NaN, counted, total }
+  const po = agree / counted
+  const pJudgePass = judgePass / counted
+  const pHumanPass = humanPass / counted
+  const pe = pJudgePass * pHumanPass + (1 - pJudgePass) * (1 - pHumanPass)
+  return { kappa: pe === 1 ? NaN : (po - pe) / (1 - pe), counted, total }
+}
+
 export interface Phase0Metrics {
   spearman: number
   agreement: number
+  /**
+   * Cohen's κ（`cohenKappa`）。与 `agreement` **同口径同分母**，并排读才看得出分歧：
+   * 一致率高而 κ 低 = 样本一边倒、判官无分辨力（Phase 0 的病）。**不进闸门**。
+   */
+  kappa: number
   selfAgreement: number
   externalAgreement: number
   counted: number
@@ -460,6 +513,7 @@ export async function runCandidate(
   const metrics: Phase0Metrics = {
     spearman: spearman(judgeScores, humanScores),
     agreement: agreementRate(judgeScores, humanScores).rate,
+    kappa: cohenKappa(judgeScores, humanScores).kappa,
     selfAgreement: agreementRate(
       realIdx.map((i) => judged[i] as number),
       realIdx.map((i) => samples[i].humanScore as number)
@@ -520,6 +574,7 @@ async function cliRun(): Promise<void> {
     }
     console.log(
       `\n[${c.name}] Spearman=${r.metrics.spearman.toFixed(2)} 一致率=${(r.metrics.agreement * 100).toFixed(1)}% ` +
+        `κ=${Number.isFinite(r.metrics.kappa) ? r.metrics.kappa.toFixed(3) : 'NaN'} ` +
         `自有=${(r.metrics.selfAgreement * 100).toFixed(1)}% 外部=${(r.metrics.externalAgreement * 100).toFixed(1)}% ` +
         `(${r.metrics.counted}/${r.metrics.total}) → ${r.pass ? '✅ 通过' : '❌ ' + r.reasons.join('; ')}`
     )

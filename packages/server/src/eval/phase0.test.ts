@@ -7,6 +7,7 @@ import {
   spearman,
   verdictOf,
   agreementRate,
+  cohenKappa,
   gateVerdict,
   pickWinner,
   selectCandidates,
@@ -18,6 +19,7 @@ import type { Phase0Metrics } from './phase0.js'
 const mkMetrics = (over: Partial<Phase0Metrics>): Phase0Metrics => ({
   spearman: 0.85,
   agreement: 0.88,
+  kappa: 0.8,
   selfAgreement: 0.9,
   externalAgreement: 0.8,
   counted: 40,
@@ -67,6 +69,45 @@ describe('verdictOf / agreementRate', () => {
     const r = agreementRate([5, 1, 3, 4], [5, 2, 3, 2])
     expect(r.counted).toBe(3)
     expect(r.rate).toBeCloseTo(2 / 3, 5)
+  })
+})
+
+describe('cohenKappa / 扣掉碰巧一致', () => {
+  it('分母口径与 agreementRate 逐字一致（同一套 verdictOf + ignore 出清）', () => {
+    const j = [5, 1, 3, 4]
+    const h = [5, 2, 3, 2]
+    const a = agreementRate(j, h)
+    const k = cohenKappa(j, h)
+    expect(k.counted).toBe(a.counted)
+    expect(k.total).toBe(a.total)
+  })
+
+  it('完全一致且两类都出现 ⇒ κ = 1', () => {
+    // judge 2 pass + 2 fail，human 同 ⇒ po = 1，pe = 0.5 ⇒ κ = 1
+    const k = cohenKappa([5, 5, 1, 1], [4, 4, 2, 2])
+    expect(k.kappa).toBe(1)
+  })
+
+  it('**本函数存在的理由**：一边倒时一致率虚高，κ 报「测不了」而不是虚高', () => {
+    // 双方全判 pass：agreementRate = 1.0（看着完美），
+    // 但 pe = 1 ⇒ κ 无定义——判官只会说 pass 时「一致」不含任何分辨力信息
+    const j = [5, 5, 5, 5]
+    const h = [4, 4, 4, 4]
+    expect(agreementRate(j, h).rate).toBe(1)
+    expect(Number.isNaN(cohenKappa(j, h).kappa)).toBe(true)
+  })
+
+  it('纯巧合一致 ⇒ κ = 0（一致率 0.5 但零信息）', () => {
+    // judge 全 pass；human 2 pass + 2 fail ⇒ po = 0.5，pe = 1×0.5 + 0×0.5 = 0.5
+    const k = cohenKappa([5, 5, 5, 5], [5, 5, 1, 1])
+    expect(k.kappa).toBeCloseTo(0, 12)
+    expect(agreementRate([5, 5, 5, 5], [5, 5, 1, 1]).rate).toBe(0.5)
+  })
+
+  it('有效样本为 0 ⇒ NaN（与 agreementRate 空分母同约定，不返回 0）', () => {
+    const k = cohenKappa([3, 3], [3, 3])
+    expect(k.counted).toBe(0)
+    expect(Number.isNaN(k.kappa)).toBe(true)
   })
 })
 
