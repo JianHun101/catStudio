@@ -37,7 +37,6 @@
 import { estimateTokens } from '@cat-study/shared'
 import { chunks as chunksRepo, knowledge as knowledgeRepo } from '../db/repository/index.js'
 import {
-  CANDIDATE_BODY_HEAD_CHARS,
   HYBRID_POOL_PER_QUERY,
   RETIRED_STATUSES,
   type ChunkVectorSearchResult,
@@ -536,7 +535,8 @@ export async function runRetrievalChain(
     contentHash: s.row.content_hash,
     chunkId: s.row.id,
     breadcrumb: s.row.breadcrumb,
-    bodyHead: s.row.body.slice(0, CANDIDATE_BODY_HEAD_CHARS),
+    // 落**全文**（2026-09-22 起；此前截前 120 字，判官据此判不了编造）
+    bodyHead: s.row.body,
     statusAtQuery: s.row.status,
     // 纯关键词命中写 NULL，**不写 maxDistance 哨兵**（P2 §二①）
     distance: s.channel === 'keyword' ? null : s.row.distance,

@@ -711,6 +711,36 @@ describe('memory', () => {
       expect(r.stats.queryTraces).toEqual([{ queryIndex: 0, queryText: Q, queryEmbedOk: true }])
     })
 
+    // ─── 全文落库（票「注入正文全文落库」· 2026-09-22）──────
+    it('全文落库 · 两条写口都存正文全文，长度与 chunks.body 逐条相等', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+      process.env.MEMORY_TOP_K = '3'
+      // ⚠️ 正文**必须长于原截断长度**：否则旧实现（截 120 字）下本用例照样全绿，
+      // 退化成一条恒真的自证门——判据必须与「截了没截」同面才有效。
+      const LONG = `猫咖测试长正文：${'填'.repeat(200)}`
+      expect(LONG.length).toBeGreaterThan(120)
+      seedChunk({ docPath: 'docs/adr/0002-b.md', body: LONG, angle: 0 })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+
+      // 真分母：`final`（融合写口）与 `probe`（SQL 写口）都得被采到，
+      // 否则下面那句「逐条」在空集上恒真
+      expect(new Set(r.stats.candidates.map((c) => c.source))).toEqual(new Set(['final', 'probe']))
+
+      const lenOf = getDb().prepare(`SELECT length(body) AS n FROM chunks WHERE content_hash = ?`)
+      for (const c of r.stats.candidates) {
+        // 列本身可空，但两条写口都必须填——先钉「非空」再比长度，免得 null 被静默跳过
+        expect(c.bodyHead, `候选 ${c.contentHash} 未带正文`).not.toBeNull()
+        const row = lenOf.get(c.contentHash) as { n: number } | undefined
+        expect(row, `候选 ${c.contentHash} 在 chunks 表里查不到`).toBeTruthy()
+        // 验收 ①：逐条相等。落库面只要还截一刀，这里必红
+        expect(c.bodyHead!.length).toBe(row!.n)
+      }
+      // 非平凡性由本行给定：上式在「两边都是 120」时也成立，这句把那个世界排除掉
+      expect(r.stats.candidates.every((c) => (c.bodyHead ?? '').length > 120)).toBe(true)
+    })
+
     // ─── 验收 16：channel 三值判定（both）──────────────
     it('验收 16 · 同片被两通道命中 ⇒ channel=both，且两位次都带出', async () => {
       process.env.MEMORY_MAX_DISTANCE = '0.6'
@@ -970,15 +1000,14 @@ describe('memory', () => {
      * 抄它是为了**差分**：把**实跑出来的** `ordered` 喂进来，与模块真实输出逐字节比
      * （验收 9b），而不是重抄一遍公式自证。
      *
-     * ⚠️ **与真实现唯一的一处差异，且是有意的**：真实现取不到同节片时退回**命中片的
-     * `body`**；而 `ordered` 是从 `stats.candidates`（流水）还原的，流水不携带完整正文
-     * （只有 120 字的 `bodyHead` 截断快照）⇒ 这里退回 `chunk.doc_path`（`parts` 恒非空时
-     * 该兜底不可达，故不追求与真实现同值，只求分支可达性声明属实）。该分支只有在
-     * 「命中后该节被并发删空」时才可达，本组夹具下 `parts` 恒非空 ⇒ **不影响判定力**，
-     * 但**不假装它逐字等价**。
+     * （2026-09-22 · 票「注入正文全文落库」）本函数**与真实现逐字等价**，无保留差异：
+     * 此前它有一处有意分叉——真实现取不到同节片时退回**命中片的 `body`**，而流水只带
+     * 120 字 `bodyHead`、还原不出全文，故这里退回 `chunk.doc_path`。该票落库改存**全文**
+     * 后，`orderedRowsOf` 能取到 `body`，分叉消失（兜底分支本组夹具下恒不可达，故这
+     * 一改对读数零影响，只把「不假装等价」升级成「就是等价」）。
      */
     function sectionLevelBefore(
-      ordered: Array<{ doc_path: string; section_anchor: string }>,
+      ordered: Array<{ doc_path: string; section_anchor: string; body: string }>,
       budgetTokens: number
     ): { text: string; keys: string[] } {
       const bySection = new Map<
@@ -992,7 +1021,7 @@ describe('memory', () => {
         bySection.set(key, {
           docPath: chunk.doc_path,
           sectionAnchor: chunk.section_anchor,
-          parts: parts.length > 0 ? parts.map((p) => p.body) : [chunk.doc_path],
+          parts: parts.length > 0 ? parts.map((p) => p.body) : [chunk.body],
         })
       }
       const kept: Array<{ docPath: string; sectionAnchor: string; parts: string[] }> = []
@@ -1006,15 +1035,20 @@ describe('memory', () => {
       }
     }
 
-    /** 实跑的 `ordered`——只取节级段消费的三个字段（seq 由 `finalRank` 还原） */
+    /**
+     * 实跑的 `ordered`——取节级段消费的字段（seq 由 `finalRank` 还原）。
+     * `body` 取自流水的 `bodyHead`：2026-09-22 起该列存**全文**，与命中片的 `row.body`
+     * 同值——这是 `sectionLevelBefore` 能与真实现逐字等价的前提（此前只有 120 字头）。
+     */
     function orderedRowsOf(r: { stats: { candidates: any[] } }): Array<{
       doc_path: string
       section_anchor: string
+      body: string
     }> {
       return r.stats.candidates
         .filter((c) => c.source === 'final')
         .sort((a, b) => a.finalRank - b.finalRank)
-        .map((c) => ({ doc_path: c.docPath, section_anchor: c.sectionAnchor }))
+        .map((c) => ({ doc_path: c.docPath, section_anchor: c.sectionAnchor, body: c.bodyHead }))
     }
 
     const finalRows = (r: { stats: { candidates: any[] } }) =>

@@ -100,7 +100,7 @@ describe('execution/reply — R1 检索流水埋点', () => {
             contentHash: 'h1',
             chunkId: 7,
             breadcrumb: 'b',
-            bodyHead: '正文前 120 字',
+            bodyHead: '候选片正文全文',
             statusAtQuery: null,
             distance: 0.293,
             rank: 0,
