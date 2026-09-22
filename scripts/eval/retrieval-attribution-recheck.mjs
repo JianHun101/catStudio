@@ -410,6 +410,17 @@ export function judgeG03SweepSample({ swept }) {
  * 两个口径**不可直接比**（T5 报告 §三 已标口径变更）。
  */
 export function mergeQueryPools({ pools, topK }) {
+  const order = mergePoolsToOrder({ pools })
+  return injectBySection({ order, topK })
+}
+
+/**
+ * 跨查询合并的**排序段**（不含按节去重/截断）——`mergeQueryPools` 的第一半，抽出来是因为
+ * R13a 的臂③ 要在**同一份合并序**上换一把尺子重排（重排只改序、不改成员），若排序与去重
+ * 拧在一个函数里，臂③ 就只能**另抄一份去重规则**——而那正是「同一规则两处措辞分叉」的
+ * 温床（本仓 R12 票的靶心）。
+ */
+export function mergePoolsToOrder({ pools }) {
   const merged = new Map()
   pools.forEach((p, queryIndex) => {
     p.hits.forEach((hit, i) => {
@@ -433,12 +444,19 @@ export function mergeQueryPools({ pools, topK }) {
     })
   })
 
-  const order = [...merged.values()].sort(
-    (a, b) => b.rrfScore - a.rrfScore || a.bestIndex - b.bestIndex
-  )
+  return [...merged.values()].sort((a, b) => b.rrfScore - a.rrfScore || a.bestIndex - b.bestIndex)
+}
 
-  // 节级去重：键走 `anchorKey`（NUL 转义，与生产的 `bySection` 逐字同形——锚点与路径里
-  // 空格 / `::` 都常见，拼错会撞键而**无任何报错**）。
+/**
+ * 按**节**去重 + 取前 `topK` 个不同节作为注入集 —— `mergeQueryPools` 的第二半。
+ *
+ * 抽出来的理由同 `mergePoolsToOrder`：R13a 臂③ 拿重排后的序调**同一个**函数，
+ * 「按节不是按片计名额」这条规则才只有一个真相源。
+ *
+ * 节级去重：键走 `anchorKey`（NUL 转义，与生产的 `bySection` 逐字同形——锚点与路径里
+ * 空格 / `::` 都常见，拼错会撞键而**无任何报错**）。
+ */
+export function injectBySection({ order, topK }) {
   const sectionRankByKey = new Map()
   const sectionOrder = []
   for (const r of order) {
