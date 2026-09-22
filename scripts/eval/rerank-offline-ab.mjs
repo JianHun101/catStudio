@@ -34,6 +34,11 @@
  * 算一份**（`argmaxContributionIndex`，纯附加、不改那个函数）。两者在「一片只被一趟命中」
  * 时相同，多趟命中时可能不同。
  *
+ * 另一条：**嵌入失败**。生产侧单趟查询嵌入挂 ⇒ 降级为仅关键词通道、检索继续
+ * （`searchChunksKeywordScored`）；本脚本同一情形 ⇒ `refuse('degradation')` 整批拒出报告。
+ * 本脚本刻意更严（缺向量通道时三臂读数不可解释），故**本脚本读数不能外推到生产的嵌入故障期**。
+ * 两条分叉都逐条写进报告的 §五。
+ *
  * ## 不截池（票面 §五 明令）
  *
  * 全序一条不砍送打分。截池会让 `finalRank=44` 那类锚点**永远救不回**，与 R13 的立项理由
@@ -52,6 +57,7 @@
  * stdout 只出**一行结构化 JSON**（机器通道），人类汇总走 stderr；报告写文件。
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -291,7 +297,10 @@ export function judgeArmVerdict({ arm1Hit, arm2Hit, arm3Hit }) {
   if (arm3Hit <= arm1Hit) {
     return {
       verdict: 'close-ticket',
-      message: `臂③(${arm3Hit}) ≤ 臂①(${arm1Hit})：重排没拿回任何东西 ⇒ **据实关票**，结论写「瓶颈在池的成员，不在序」`,
+      message:
+        `臂③(${arm3Hit}) ≤ 臂①(${arm1Hit})：重排净差为负 ⇒ **据实关票**；` +
+        `但结论**不是**「序无用」（票面 §二 的预置句已作废，见 §一 订正块）——` +
+        `它在动序、且救回过锚点，真正不足的是这把 cross-encoder 在 ${ARM3_TOPK} 节注入预算下的精度`,
     }
   }
   if (arm3Hit > arm2Hit) {
@@ -495,21 +504,53 @@ export function renderReport(ctx) {
   L.push(
     `- **臂③ 相对臂① 的增量**：${arms[2].hit - arms[0].hit} 个锚点（${arms[2].hit} vs ${arms[0].hit}）`
   )
+  // ⚠️ 这条必须紧跟增量行：读者最先看到的是「臂③ vs 臂②」的负差，会误以为差距来自
+  // 注入预算（臂② 注入 5 节）。**臂① 才是同预算对照**（两者都 ≤3 节）。
+  L.push(
+    `- ⚠️ **臂① 与臂③ 是「同预算」对照**（都 ≤${ARM3_TOPK} 节）：${arms[2].hit} vs ${arms[0].hit}。`
+  )
+  L.push(
+    `  故本批结论**不是**「重排打不过 topK=${ARM2_TOPK}」，而是**在同一个 ${ARM3_TOPK} 节预算下，` +
+      '重排连 RRF 原序都没打过**。臂② 注入 ' +
+      `${ARM2_TOPK} 节、是**跨预算**对照，**不能当同预算的基线**。`
+  )
   L.push(`- **判词**：${ctx.verdict.verdict} —— ${ctx.verdict.message}`)
   L.push('')
-  L.push('> ⚠️ **票面预置的结论句与实测有出入，据实订正**。票面 §二 把「臂③ = 臂① 或 < 臂②」')
-  L.push('> 的结论写死为「**瓶颈在池的成员，不在序**」。**净差成立**（臂③ 23 < 臂① 26 < 臂② 29），')
-  L.push('> 但那个结论句**与 §一之二 的得失清单矛盾**：重排确实在动序，而且动得对——')
-  L.push('> G02 从第 12 节拉到第 0、C24 从第 11 拉到第 0、N03 从第 7 拉到第 0，共救回 5 处。')
-  L.push('> 它的净差为负是因为**同时丢了 8 处**（重排把 RRF 排得靠前的节压了下去）。')
-  L.push('')
-  L.push('> ⇒ 诚实结论不是「序没用」，而是「**这把 cross-encoder 在 top-3 这个预算下的精度不够**：')
-  L.push(
-    '> 它在少数锚点上判得很准（分差 0.34 / 0.51 / 0.96），在多片节上判错（见 §七 开放问题）」。'
-  )
-  L.push('> 关票的动作不变，但**别把「序无用」写进归档结论**——那会让下次立票的人跳过一条本票')
-  L.push('> 已有的证据。')
-  L.push('')
+  // 订正块**只在臂③ 未胜出时渲染**：票面 §二 的预置句只在那时被触发（effective 时票面判据是对的，
+  // 无「订正」可言）。订正块里的名字与计数**一律动态取**——硬编码的是上一批的观测，
+  // 库一长就成假话源（本仓栽过：改实现没改复述）。
+  if (ctx.verdict.verdict !== 'effective') {
+    const gain13 = ctx.flips.arm1ToArm3.filter((x) => x.dir === 'gain')
+    const loss13 = ctx.flips.arm1ToArm3.filter((x) => x.dir === 'loss')
+    const gainEg = ctx.anchors
+      .filter((a) => !a.arm1 && a.arm3 && a.rrfRank !== null && a.rerankRank !== null)
+      .slice(0, 3)
+      .map((a) => `${a.id} 从第 ${a.rrfRank} 节拉到第 ${a.rerankRank}`)
+    L.push('> ⚠️ **票面预置的结论句与实测有出入，据实订正**。票面 §二 把「臂③ = 臂① 或 < 臂②」')
+    L.push(
+      '> 的结论写死为「**瓶颈在池的成员，不在序**」。**净差成立**' +
+        `（臂③ ${arms[2].hit}、臂① ${arms[0].hit}、臂② ${arms[1].hit}），`
+    )
+    L.push('> 但那个结论句**与 §一之二 的得失清单矛盾**：重排确实在动序，而且动得对——')
+    L.push(
+      gainEg.length > 0
+        ? `> ${gainEg.join('、')}，共救回 ${gain13.length} 处。`
+        : `> 本批救回 ${gain13.length} 处（逐条见 §一之二）。`
+    )
+    L.push(
+      `> 它的净差为负是因为**同时丢了 ${loss13.length} 处**（重排把 RRF 排得靠前的节压了下去）。`
+    )
+    L.push('')
+    L.push(
+      '> ⇒ 诚实结论不是「序没用」，而是「**这把 cross-encoder 在 top-3 这个预算下的精度不够**：'
+    )
+    L.push(
+      '> 它在少数锚点上判得很准（分差 0.34 / 0.51 / 0.96），在多片节上判错（见 §七 开放问题）」。'
+    )
+    L.push('> 关票的动作不变，但**别把「序无用」写进归档结论**——那会让下次立票的人跳过一条本票')
+    L.push('> 已有的证据。')
+    L.push('')
+  }
   L.push('## 一之二、臂间得失清单（状态翻转的条目）')
   L.push('')
   L.push('> **净差会把两种相反的情形抹成同一个数**：救 8 处又丢 10 处（重排有信号但不稳）与')
@@ -567,6 +608,28 @@ export function renderReport(ctx) {
   L.push(
     '> 现制基线 = **4/5**（`docs/eval/retrieval-baseline-2026-09-20.md` §五）。任一拳升 ⇒ A2 不过。'
   )
+  L.push('>')
+  // ⚠️ 基线取谁：**臂①（同预算）**，不是臂②。臂② 注入 5 节、臂①③ 注入 ≤3 节——
+  // 预算不同，判红数本来就不可比，拿臂② 当负例基线是**跨预算比**。
+  L.push(
+    `> ⚠️ **负例基线取臂①（同预算 ≤${ARM3_TOPK} 节），不是臂②**：臂② 注入 ≤${ARM2_TOPK} 节，` +
+      '预算不同 ⇒ 与它比判红数是**跨预算比**，不成立。'
+  )
+  L.push(
+    `> 臂① ${arms[0].negativeFlagged}/${arms[0].negativeTotal} vs 臂③ ${arms[2].negativeFlagged}/${arms[2].negativeTotal}`
+  )
+  L.push(
+    `> ⇒ **臂③ 相对同预算基线${arms[2].negativeFlagged > arms[0].negativeFlagged ? '**上升 ❌**' : '未上升 ✅'}**。`
+  )
+  L.push('>')
+  // 方向必须点出来：判红 = 负例**被召回并注入**，越高越差。只并列数会让读者把 5/5 当好事。
+  L.push(
+    `> 📌 **臂②（现行配置 ${ARM2_TOPK} 节）判红 ${arms[1].negativeFlagged}/${arms[1].negativeTotal}**——` +
+      '**方向要读对：判红越高越差**（A2 防的就是「多注几节把噪声也带进来」）。'
+  )
+  L.push(
+    `> 这是 topK=${ARM2_TOPK} 的**成本面**：多注的 2 节换来的不只是更多锚点，还有更多负例被注入。`
+  )
   L.push('')
   L.push('## 四、尺子自证（A5，承重）')
   L.push('')
@@ -591,7 +654,18 @@ export function renderReport(ctx) {
   L.push(
     '- **配对规则**：本脚本用 **argmax 贡献趟**（`argmaxContributionIndex`），生产重建侧只记**首趟命中**。'
   )
-  L.push('  两者在「一片只被一趟命中」时相同；多趟命中时可能不同。这是本票**唯一**的重建侧分叉。')
+  L.push('  两者在「一片只被一趟命中」时相同；多趟命中时可能不同。')
+  L.push(
+    '- **嵌入失败**：生产侧单趟查询嵌入挂 ⇒ **降级为仅关键词通道、检索继续**' +
+      '（`memory/index.ts` 的 `searchChunksKeywordScored` 按同一条 RRF 公式补分，不是假值）；'
+  )
+  L.push(`  本脚本同一情形 ⇒ \`refuse('degradation')\` **整批拒出报告**（与 recheck 同一条硬闸）。`)
+  L.push(
+    '  本脚本刻意更严：缺向量通道时三臂读数不可解释，宁可不出报告，也不出一份「向量通道静默缺席」的读数。'
+  )
+  L.push(
+    '  ⚠️ 故**本脚本的读数不能外推到生产在嵌入故障期的行为**——那是 `index.ts` 的降级路径，本票没测。'
+  )
   L.push(
     '- 其余（检索本体 / 融合公式 / 跨查询合并 / 按节去重与 topK 截断）**同源复用**，见文件头。'
   )
@@ -625,12 +699,26 @@ export function renderReport(ctx) {
   L.push('   **不足以当结论**。若将来重立票，这是第一个该查的地方。')
   if (ctx.quantCrosscheck) {
     // 触发条件（臂③ 增量 ≤ 0）已满足 ⇒ 按跑批前定死的条件跑了。**据实渲染，不预置结论**：
-    // hitDelta ≠ 0 时判词本身就该被推翻，写死「已排除」会把一次该翻的结论粉饰成绿的。
+    // 写死「已排除」会把一次该翻的结论粉饰成绿的。
     const q = ctx.quantCrosscheck
+    // ⚠️ 判据是**判词是否变**，不是「命中数是否有差」：命中差 1 条但 verdict 不变，
+    // 结论照样站得住（本批实测：q8=23 → fp32=24，两者都 ≤ 臂① ⇒ 同为 close-ticket）。
+    // 拿 hitDelta 当判据会把「有噪声但不动结论」误报成「不可采信」——那是**过强的判词**。
+    const vQ8 = judgeArmVerdict({
+      arm1Hit: arms[0].hit,
+      arm2Hit: arms[1].hit,
+      arm3Hit: q.hitQ8,
+    })
+    const vRef = judgeArmVerdict({
+      arm1Hit: arms[0].hit,
+      arm2Hit: arms[1].hit,
+      arm3Hit: q.hitRef,
+    })
     const quantRead =
-      q.hitDelta === 0
-        ? '命中数不变 ⇒ 量化**不改结论**，「重排无效」不是量化造出来的（量化作为替代解释被排除）。'
-        : `命中差 ${q.hitDelta} 条 ⇒ 量化**会改结论**，q8 下的判词不可直接采信。`
+      vQ8.verdict === vRef.verdict
+        ? `q8 与 ${q.refDtype} 的**判词相同**（都是 \`${vQ8.verdict}\`）⇒ 量化不改结论；` +
+          `命中差 ${q.hitDelta} 条是噪声，不动方向（但见上面的节集/argmax 一致率——**名次**面另有读数）。`
+        : `**判词会变**（q8 \`${vQ8.verdict}\` → ${q.refDtype} \`${vRef.verdict}\`）⇒ q8 下的结论不可直接采信。`
     L.push('2. **量化（q8）已交叉核对** —— 触发条件（臂③ 增量 ≤ 0）已满足，按跑批前定死的条件跑。')
     L.push(
       `   读数见 \`...latency.md\` §三：臂③ 命中 q8 ${q.hitQ8} / ${q.refDtype} ${q.hitRef}（Δ=${q.hitDelta}）、`
@@ -764,10 +852,15 @@ export function renderLatencyReport(ctx) {
   }
   L.push('## 四、逐条原始计时')
   L.push('')
-  L.push('| 条目 | 检索 ms | 重排 ms | 对数 |')
-  L.push('| --- | --- | --- | --- |')
+  L.push('| 条目 | 检索 ms | 重排 ms | 对数 | passage 字符数 | ms/对 | ms/千字 |')
+  L.push('| --- | --- | --- | --- | --- | --- | --- |')
   for (const t of ctx.timings) {
-    L.push(`| ${t.id} | ${t.retrievalMs} | ${t.rerankMs} | ${t.pairs} |`)
+    const perPair = t.pairs > 0 ? t.rerankMs / t.pairs : null
+    const perKChar = t.chars > 0 ? (t.rerankMs / t.chars) * 1000 : null
+    L.push(
+      `| ${t.id} | ${t.retrievalMs} | ${t.rerankMs} | ${t.pairs} | ${t.chars} | ` +
+        `${perPair === null ? '—' : perPair.toFixed(1)} | ${perKChar === null ? '—' : perKChar.toFixed(1)} |`
+    )
   }
   L.push('')
   return L.join('\n') + '\n'
@@ -1095,6 +1188,10 @@ export async function main(argv = process.argv.slice(2)) {
         retrievalMs,
         rerankMs,
         pairs: pairs.length,
+        // 归因用：本条全部 pairs 的 **passage 字符总数**。S0 曲线是 450 字合成件上测的，
+        // 本批 per-pair 高出 5 倍——若不记长度，「切片更长」就只是个**未经检验的假设**。
+        // §四 的 `ms/千字` 列稳定 ⇒ 长度归因成立；乱 ⇒ 另有他因（批大小 / 负载）。
+        chars: pairs.reduce((a, p) => a + p.passage.length, 0),
       })
     }
 
@@ -1407,6 +1504,11 @@ export async function main(argv = process.argv.slice(2)) {
     )
     writeFileSync(latencyMdFile, renderLatencyReport({ ...ctx, timings }), 'utf-8')
 
+    // A4：确定性面的 sha256 **打进运行日志**——下批复核直接从两遍日志里对读，
+    // 不必再靠人工声明「我这两遍是同一份输入」。**不写进产物自身**（产物含自己的 sha 会自我指涉）。
+    const shaOf = (f) => createHash('sha256').update(readFileSync(f)).digest('hex')
+    const sha256Pair = { md: shaOf(outFile), json: shaOf(jsonFile) }
+
     const human = [
       `[eval:rerank-ab] 三臂（命中/应中）：`,
       ...arms.map(
@@ -1417,9 +1519,14 @@ export async function main(argv = process.argv.slice(2)) {
       `  负例判红: ${arms.map((a) => a.negativeFlagged).join(' / ')}（基线 4/5）`,
       `  重排段 p50=${latency.rerankP50}ms p95=${latency.rerankP95}ms per-pair=${latency.perPairMs}ms`,
       `  报告: ${outFile}`,
+      `  A4 sha256: md=${sha256Pair.md}`,
+      `             json=${sha256Pair.json}`,
     ].join('\n')
 
-    emit({ ...reportJson, outFile, jsonFile, latencyFile, latencyMdFile }, human)
+    emit(
+      { ...reportJson, outFile, jsonFile, latencyFile, latencyMdFile, sha256: sha256Pair },
+      human
+    )
     return 0
   } finally {
     stopEmbeddingSidecar()

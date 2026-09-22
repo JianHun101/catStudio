@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-09-22",
-  "dbPath": "D:\\Game\\ai\\catStudy\\packages\\server\\data\\cat-study-dev.db",
+  "dbPath": "D:\\Game\\ai\\catStudy-sessions\\fa165f65-ds猫\\workspace\\r13a-crosscheck\\cat-study-dev.db",
   "goldenVersion": 1,
   "params": {
     "liveTopK": 5,
@@ -15,9 +15,9 @@
       },
       {
         "k": 5,
-        "n": 109,
+        "n": 114,
         "fromAt": "2026-09-21T08:57:22.426Z",
-        "toAt": "2026-09-22T15:36:50.582Z"
+        "toAt": "2026-09-22T16:28:53.517Z"
       }
     ]
   },
@@ -398,7 +398,7 @@
   },
   "verdict": {
     "verdict": "close-ticket",
-    "message": "臂③(23) ≤ 臂①(26)：重排没拿回任何东西 ⇒ **据实关票**，结论写「瓶颈在池的成员，不在序」"
+    "message": "臂③(23) ≤ 臂①(26)：重排净差为负 ⇒ **据实关票**；但结论**不是**「序无用」（票面 §二 的预置句已作废，见 §一 订正块）——它在动序、且救回过锚点，真正不足的是这把 cross-encoder 在 3 节注入预算下的精度"
   },
   "ok": true
 }

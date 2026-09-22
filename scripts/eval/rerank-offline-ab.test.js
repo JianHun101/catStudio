@@ -260,6 +260,25 @@ describe('judgeArmVerdict（判词优先级）', () => {
   it('臂③ > 臂② > 臂① ⇒ 有效（增量方向对就得判有效，不论幅度）', () => {
     expect(judgeArmVerdict({ arm1Hit: 1, arm2Hit: 2, arm3Hit: 3 }).verdict).toBe('effective')
   })
+
+  // 假话源守卫：票面 §二 那句「结论写瓶颈在池的成员，不在序」**已被实测证伪**
+  // （重排确实在动序、且救回过锚点，见报告 §一 订正块）。判词不许再复述它——
+  // 复述面一旦留旧句，归档 json 是会被 grep 的面，读的人会当结论采信。
+  it('close-ticket 的判词**不复述**已作废的「瓶颈在池的成员，不在序」', () => {
+    for (const c of [
+      { arm1Hit: 9, arm2Hit: 9, arm3Hit: 3 }, // 臂③ < 臂①
+      { arm1Hit: 4, arm2Hit: 9, arm3Hit: 4 }, // 臂③ = 臂①
+      { arm1Hit: 0, arm2Hit: 0, arm3Hit: 0 }, // 全等
+      { arm1Hit: 2, arm2Hit: 9, arm3Hit: 5 }, // 夹在中间（第四个分支）
+    ]) {
+      const v = judgeArmVerdict(c)
+      expect(v.verdict).toBe('close-ticket')
+      // 守卫：**任何** close-ticket 变体都不许复述那句已被实测证伪的预置结论
+      expect(v.message).not.toContain('瓶颈在池的成员')
+    }
+    // 臂③ ≤ 臂① 那一支（被预置句直接覆盖的情形）额外要把「不是序无用」点出来
+    expect(judgeArmVerdict({ arm1Hit: 0, arm2Hit: 0, arm3Hit: 0 }).message).toContain('不是')
+  })
 })
 
 describe('quantile（最近秩法）', () => {

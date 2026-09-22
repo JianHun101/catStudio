@@ -5,271 +5,295 @@
   "timings": [
     {
       "id": "G01",
-      "retrievalMs": 86,
-      "rerankMs": 1485,
+      "retrievalMs": 82,
+      "rerankMs": 1453,
       "pairs": 47
     },
     {
       "id": "G02",
-      "retrievalMs": 16,
-      "rerankMs": 779,
+      "retrievalMs": 63,
+      "rerankMs": 6719,
       "pairs": 20
     },
     {
       "id": "G03",
-      "retrievalMs": 41,
-      "rerankMs": 1603,
+      "retrievalMs": 356,
+      "rerankMs": 12387,
       "pairs": 42
     },
     {
       "id": "G04",
-      "retrievalMs": 62,
-      "rerankMs": 2150,
+      "retrievalMs": 635,
+      "rerankMs": 16068,
       "pairs": 63
     },
     {
       "id": "G05",
-      "retrievalMs": 45,
-      "rerankMs": 1830,
+      "retrievalMs": 557,
+      "rerankMs": 13421,
       "pairs": 52
     },
     {
       "id": "G06",
-      "retrievalMs": 39,
-      "rerankMs": 1533,
+      "retrievalMs": 453,
+      "rerankMs": 11780,
       "pairs": 41
     },
     {
       "id": "G07",
-      "retrievalMs": 79,
-      "rerankMs": 1308,
+      "retrievalMs": 258,
+      "rerankMs": 10348,
       "pairs": 35
     },
     {
       "id": "G08",
-      "retrievalMs": 63,
-      "rerankMs": 1869,
+      "retrievalMs": 358,
+      "rerankMs": 14141,
       "pairs": 54
     },
     {
       "id": "G09",
-      "retrievalMs": 62,
-      "rerankMs": 1390,
+      "retrievalMs": 535,
+      "rerankMs": 10705,
       "pairs": 40
     },
     {
       "id": "G10",
-      "retrievalMs": 37,
-      "rerankMs": 1634,
+      "retrievalMs": 553,
+      "rerankMs": 12131,
       "pairs": 43
     },
     {
       "id": "G11",
-      "retrievalMs": 35,
-      "rerankMs": 2226,
+      "retrievalMs": 547,
+      "rerankMs": 16082,
       "pairs": 65
     },
     {
       "id": "G12",
-      "retrievalMs": 58,
-      "rerankMs": 2311,
+      "retrievalMs": 720,
+      "rerankMs": 16183,
       "pairs": 56
     },
     {
       "id": "C01",
-      "retrievalMs": 33,
-      "rerankMs": 1501,
+      "retrievalMs": 380,
+      "rerankMs": 11649,
       "pairs": 44
     },
     {
       "id": "C02",
-      "retrievalMs": 65,
-      "rerankMs": 1217,
+      "retrievalMs": 322,
+      "rerankMs": 9813,
       "pairs": 38
     },
     {
       "id": "C03",
-      "retrievalMs": 29,
-      "rerankMs": 970,
+      "retrievalMs": 408,
+      "rerankMs": 8427,
       "pairs": 29
     },
     {
       "id": "C05",
-      "retrievalMs": 34,
-      "rerankMs": 993,
+      "retrievalMs": 409,
+      "rerankMs": 8236,
       "pairs": 28
     },
     {
       "id": "C06",
-      "retrievalMs": 56,
-      "rerankMs": 874,
+      "retrievalMs": 345,
+      "rerankMs": 7568,
       "pairs": 26
     },
     {
       "id": "C07",
-      "retrievalMs": 65,
-      "rerankMs": 1161,
+      "retrievalMs": 422,
+      "rerankMs": 9580,
       "pairs": 36
     },
     {
       "id": "C08",
-      "retrievalMs": 31,
-      "rerankMs": 1144,
+      "retrievalMs": 416,
+      "rerankMs": 9403,
       "pairs": 36
     },
     {
       "id": "C09",
-      "retrievalMs": 22,
-      "rerankMs": 1019,
+      "retrievalMs": 276,
+      "rerankMs": 8307,
       "pairs": 25
     },
     {
       "id": "C10",
-      "retrievalMs": 33,
-      "rerankMs": 1344,
+      "retrievalMs": 450,
+      "rerankMs": 10415,
       "pairs": 35
     },
     {
       "id": "C11",
-      "retrievalMs": 21,
-      "rerankMs": 1446,
+      "retrievalMs": 325,
+      "rerankMs": 11518,
       "pairs": 42
     },
     {
       "id": "C12",
-      "retrievalMs": 27,
-      "rerankMs": 845,
+      "retrievalMs": 425,
+      "rerankMs": 7381,
       "pairs": 25
     },
     {
       "id": "C13",
-      "retrievalMs": 21,
-      "rerankMs": 1010,
+      "retrievalMs": 311,
+      "rerankMs": 8166,
       "pairs": 27
     },
     {
       "id": "C14",
-      "retrievalMs": 20,
-      "rerankMs": 962,
+      "retrievalMs": 247,
+      "rerankMs": 7927,
       "pairs": 28
     },
     {
       "id": "C15",
-      "retrievalMs": 26,
-      "rerankMs": 1644,
+      "retrievalMs": 311,
+      "rerankMs": 12453,
       "pairs": 49
     },
     {
       "id": "C16",
-      "retrievalMs": 30,
-      "rerankMs": 1083,
+      "retrievalMs": 355,
+      "rerankMs": 8386,
       "pairs": 26
     },
     {
       "id": "C18",
-      "retrievalMs": 27,
-      "rerankMs": 910,
+      "retrievalMs": 331,
+      "rerankMs": 7502,
       "pairs": 28
     },
     {
       "id": "C19",
-      "retrievalMs": 26,
-      "rerankMs": 984,
+      "retrievalMs": 373,
+      "rerankMs": 5211,
       "pairs": 36
     },
     {
       "id": "C20",
-      "retrievalMs": 27,
-      "rerankMs": 1581,
+      "retrievalMs": 39,
+      "rerankMs": 3789,
       "pairs": 49
     },
     {
       "id": "C21",
-      "retrievalMs": 32,
-      "rerankMs": 1374,
+      "retrievalMs": 449,
+      "rerankMs": 10883,
       "pairs": 42
     },
     {
       "id": "C23",
-      "retrievalMs": 26,
-      "rerankMs": 1483,
+      "retrievalMs": 337,
+      "rerankMs": 11304,
       "pairs": 40
     },
     {
       "id": "C24",
-      "retrievalMs": 44,
-      "rerankMs": 1481,
+      "retrievalMs": 331,
+      "rerankMs": 11244,
       "pairs": 47
     },
     {
       "id": "C26",
-      "retrievalMs": 20,
-      "rerankMs": 1004,
+      "retrievalMs": 334,
+      "rerankMs": 8243,
       "pairs": 25
     },
     {
       "id": "C27",
-      "retrievalMs": 19,
-      "rerankMs": 983,
+      "retrievalMs": 378,
+      "rerankMs": 7985,
       "pairs": 24
     },
     {
       "id": "N01",
-      "retrievalMs": 28,
-      "rerankMs": 1219,
+      "retrievalMs": 358,
+      "rerankMs": 9835,
       "pairs": 37
     },
     {
       "id": "N02",
-      "retrievalMs": 28,
-      "rerankMs": 1088,
+      "retrievalMs": 339,
+      "rerankMs": 9078,
       "pairs": 30
     },
     {
       "id": "N03",
-      "retrievalMs": 38,
-      "rerankMs": 1308,
+      "retrievalMs": 528,
+      "rerankMs": 10859,
       "pairs": 51
     },
     {
       "id": "N04",
-      "retrievalMs": 28,
-      "rerankMs": 1021,
+      "retrievalMs": 337,
+      "rerankMs": 8242,
       "pairs": 25
     },
     {
       "id": "N05",
-      "retrievalMs": 29,
-      "rerankMs": 971,
+      "retrievalMs": 425,
+      "rerankMs": 8072,
       "pairs": 33
     }
   ],
   "latency": {
-    "rerankP50": 1219,
-    "rerankP95": 2150,
-    "rerankMax": 2311,
-    "perPairMs": 34.719,
+    "rerankP50": 9580,
+    "rerankP95": 16068,
+    "rerankMax": 16183,
+    "perPairMs": 258.653,
     "meanPairsPerEntry": 37.98,
-    "retrievalP50": 31,
-    "totalP50": 1282,
-    "totalP95": 2212,
+    "retrievalP50": 358,
+    "totalP50": 10002,
+    "totalP95": 16629,
     "thresholdMs": 10000,
-    "overGateInGolden": 0,
+    "timeoutBaseline": {
+      "denom": 847,
+      "timeout": 8,
+      "rate": "8/847",
+      "pct": 0.945,
+      "denomAllReasons": 940,
+      "pctAllReasons": 0.851,
+      "slowestNonTimeout": 9836
+    },
+    "headroomMs": 164,
+    "overGateInGolden": 21,
     "pairsTotal": 1519,
     "degradation": [
       {
         "face": "黄金集（实测 retrievalMs + 实测 rerankMs）",
         "denom": 40,
-        "added": 0,
-        "rate": "0/40"
+        "added": 21,
+        "rate": "21/40"
       },
       {
-        "face": "活库全量（推演：+38.0 对 × 34.7ms）",
-        "denom": 846,
-        "added": 9,
-        "rate": "9/846"
+        "face": "活库全量（推演：+38.0 对 × 258.7ms）",
+        "denom": 847,
+        "added": 837,
+        "rate": "837/847",
+        "alreadyOver": 8,
+        "overAfter": 845
       }
     ]
   },
-  "quantCrosscheck": null
+  "quantCrosscheck": {
+    "model": "Xenova/bge-reranker-base",
+    "dtypes": ["q8", "fp32"],
+    "refDtype": "fp32",
+    "hitQ8": 23,
+    "hitRef": 24,
+    "hitDelta": 1,
+    "top3SameEntries": 25,
+    "argmaxSameEntries": 30,
+    "entries": 40,
+    "maxAbsScoreDelta": 0.3806634247303009,
+    "note": "hitRef（fp32）与 hitQ8 的差 = 量化对**结论**的影响；top3SameEntries = 量化对**名次**的影响。两者都小 ⇒ 「重排无效」不是量化造出来的（量化作为替代解释被排除）。"
+  }
 }
