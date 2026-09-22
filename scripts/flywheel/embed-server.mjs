@@ -12,6 +12,8 @@
  *   GET  /health          → { ok, ready, model, dim }        （就绪前 ready:false）
  *   POST /v1/embeddings   → { model, dim, data:[{index, embedding}] }
  *                           body: { input: string | string[] }（≤ MAX_BATCH）
+ *   POST /v1/rerank       → { model, scores: number[] }      （R13a；见下「重排口」）
+ *                           body: { pairs: [{ query, passage }] }（≤ MAX_RERANK_PAIRS）
  *   只监听本机回环（createEmbedServer 的 host 默认值，不放宽到全网卡）
  *
  * 环境变量:
@@ -20,10 +22,15 @@
  *   EMBED_SIDECAR_PORT     — 监听端口（默认 0 = 由 OS 分配，端口经 stdout 握手回报；
  *                            显式指定的值若落在 fetch 禁用端口黑名单里 ⇒ 启动即报错，
  *                            不静默换端口）
+ *   （重排模型名与 dtype **刻意不做 env 旋钮** —— 见「重排口」；冻结值走模块常量）
  *
  * 设计要点:
  * - **import 期不加载模型**：`@huggingface/transformers` 在 modelLoader 内动态 import，
  *   故单测可直接 import 本模块的 createEmbedServer 而不触发 ~100MB 模型加载。
+ * - **重排口（R13a）不接生产链路**：`/v1/rerank` 是给**离线跑批**用的口，`memory/index.ts`
+ *   与 `reply.ts` 一行未接（那是 R13b）。更关键的是**它的模型只在该口首次被调时才加载**
+ *   —— 生产 server spawn 的 sidecar 若从不发重排请求，就永不背这 266MB（见
+ *   `createTransformersReranker` 的懒加载）。
  * - **端口握手**：监听成功后向 stdout 打印 `EMBED_SIDECAR_READY {"port":N}` ——
  *   spawn 方据此获知实际端口（OS 分配，避免并行测试/多实例撞端口）。
  * - **端口必须对 `fetch` 可达**：OS 分配的端口可能落在 WHATWG Fetch 禁用端口黑名单
@@ -41,6 +48,30 @@ export const MAX_BATCH = 64
 
 /** 请求体上限（防超大 body 打爆 sidecar；单条 450 字 × 64 远小于此值） */
 export const MAX_BODY_BYTES = 4 * 1024 * 1024
+
+// ─── 重排口（R13a）─────────────────────────────────────────
+
+/**
+ * 重排模型与 dtype —— **冻结的模块常量，刻意不做 env 旋钮**。
+ *
+ * 为什么不做旋钮（R13a 票面 §三 明写）：① 选型已由用户拍板 + S0 实测锁定；② dtype 若
+ * 可被 env 改，离线跑批读数与 R13b 生产就可能不是同一个模型，票面「离线读数不可迁移
+ * ⇒ 作废重跑」的护栏会被一个环境变量静默绕过。冻结成常量 = 两侧引用同一处真相源。
+ *
+ * q8（266MB）是 S0 实测档位：fp32 1061MB / fp16 531MB / q8 266MB。
+ */
+export const RERANK_MODEL = 'Xenova/bge-reranker-base'
+export const RERANK_DTYPE = 'q8'
+
+/**
+ * 重排请求的成对上限。
+ *
+ * 与嵌入的 `MAX_BATCH`(=64) **分开定**：嵌入的上限是「一侧契约」的产物，而重排要吃的
+ * 是**跨查询合并后的全序**（≤ 4 趟查询 × 每趟 20 = 80）——用 64 当上限会把全序**截断**，
+ * 正是票面 §五 明令禁止的「截池」（截池 ⇒ `finalRank=44` 那类锚点永远救不回，
+ * 与立项理由直接冲突）。256 给足余量，同时仍能挡住失控请求。
+ */
+export const MAX_RERANK_PAIRS = 256
 
 /** 端口不可被 fetch 触达时的重取上限（仅 OS 分配态）——命中黑名单概率约 15/13977，5 次已足够 */
 const LISTEN_ATTEMPTS = 5
@@ -169,6 +200,104 @@ export function createTransformersEmbedder(
 }
 
 /**
+ * 重排实现：`AutoModelForSequenceClassification` + **显式 sigmoid**（R13a / S0 冻结路径）。
+ *
+ * ## 为什么不用 `pipeline('text-classification')` —— 那会得到一把**恒绿的假尺**
+ *
+ * S0 实测（`workspace/r13a-s0/`，票面 §三 已固化）：
+ *   - `text-ranking` **不是** `@huggingface/transformers@4.2.0` 的合法任务（完整任务表 25 项
+ *     无它）——模型卡上的 `pipeline_tag: text-ranking` 是 **hub 侧标签**，与 js 任务表不是
+ *     同一回事，照抄会拿到「任务不存在」。
+ *   - `text-classification` 更隐蔽：本模型 `config.problem_type` 为 `null` ⇒ pipeline 走
+ *     softmax 分支 ⇒ `softmax([x]) ≡ 1` ⇒ **恒返回 `score: 1`**，相关/不相关不可分。
+ *     后果不是报错，是**顺序不变 ⇒ 臂③ ≡ 臂① ⇒ 报告得出「重排无效」把票关错**，而所有
+ *     探针都显示「跑通了」。这正是本仓反复栽的「探针瞎了也给同样的 0」。
+ *
+ * 故这里走**第三条路**：直接加载序列分类模型 + 对单 logit 显式 `.sigmoid()`。S0 实测
+ * 相关 **0.9979** / 不相关 **0.0000889**，可分。
+ *
+ * ## 懒加载
+ *
+ * 与嵌入器同款：`import` 期与构造期都**不碰模型**，首次 `rerank()` 才加载。生产 server
+ * spawn 的 sidecar 从不发重排请求 ⇒ 永不加载这 266MB —— 这是「R13a 零生产影响」的机制
+ * 保证，不是靠约定。
+ */
+export function createTransformersReranker(modelName = RERANK_MODEL, dtype = RERANK_DTYPE) {
+  const state = { promise: null, ready: false, lastError: null }
+
+  function getContext() {
+    if (!state.promise) {
+      state.promise = (async () => {
+        const { env, AutoTokenizer, AutoModelForSequenceClassification } = await import(
+          resolveTransformersEntry()
+        )
+        // 仅显式设了 HF_ENDPOINT 时切镜像（与嵌入器同一条判据，避免两处漂移）
+        const mirror = process.env.HF_ENDPOINT
+        if (mirror && mirror !== 'https://huggingface.co') {
+          env.remoteHost = mirror.replace(/\/+$/, '') + '/'
+          env.remotePathTemplate = '{model}/resolve/{revision}/'
+        }
+        const tokenizer = await AutoTokenizer.from_pretrained(modelName)
+        const model = await AutoModelForSequenceClassification.from_pretrained(modelName, { dtype })
+        state.ready = true
+        return { tokenizer, model }
+      })().catch((err) => {
+        state.lastError = err?.message || String(err)
+        state.promise = null // 失败不固化：下次调用重试（与 memoEmbed「只缓存成功」同一条纪律）
+        throw err
+      })
+    }
+    return state.promise
+  }
+
+  return {
+    model: modelName,
+    dtype,
+    getReady: () => state.ready,
+    getError: () => state.lastError,
+    /**
+     * 成对打分 —— **返回顺序与入参逐位对齐**（调用方按下标回填，不做 key 匹配）。
+     *
+     * `padding`/`truncation` 都开：一个批次里对与对的长度差极大（40 字 query × 450 字
+     * passage 实测 373 token，而短对可能只有几十），不 padding 无法成批。`truncation`
+     * 以 tokenizer 的 `model_max_length`(=512) 为界 —— 超长片被截尾**而不是报错**，
+     * 这是与生产嵌入口径一致的取舍（S0 ② 已验真实对不触界）。
+     */
+    async rerank(pairs) {
+      let ctx
+      try {
+        ctx = await getContext()
+      } catch (err) {
+        const e = new Error(state.lastError || String(err))
+        e.code = 'MODEL_LOAD_FAILED'
+        throw e
+      }
+      const inputs = ctx.tokenizer(
+        pairs.map((p) => p.query),
+        {
+          text_pair: pairs.map((p) => p.passage),
+          padding: true,
+          truncation: true,
+        }
+      )
+      const out = await ctx.model(inputs)
+      return out.logits
+        .sigmoid()
+        .tolist()
+        .map((row) => row[0])
+    },
+    /** 供 main 预触发加载（失败由 /v1/rerank 的响应呈现，不抛） */
+    async warmup() {
+      try {
+        await getContext()
+      } catch {
+        /* 错误已存 lastError */
+      }
+    },
+  }
+}
+
+/**
  * 构造嵌入 HTTP 服务（不含模型加载 —— embed 由调用方注入，单测传假实现）。
  *
  * @param {object} opts
@@ -177,6 +306,11 @@ export function createTransformersEmbedder(
  * @param {() => number|null} [opts.getDim]
  * @param {() => boolean} [opts.getReady]
  * @param {() => string|null} [opts.getError]
+ * @param {(pairs: {query: string, passage: string}[]) => Promise<number[]>} [opts.rerank]
+ *   重排实现（R13a）。**缺省即不提供该能力** ⇒ `/v1/rerank` 回 503 `rerank-unavailable`，
+ *   而不是 404 ——「路由存在、能力缺席」与「无此路由」是两件事，混起来会让调用方
+ *   把「没接线」读成「路径写错」。
+ * @param {() => string} [opts.getRerankModel]
  * @param {string} [opts.host] 默认 127.0.0.1（**不得**放宽到 0.0.0.0）
  */
 export function createEmbedServer(opts) {
@@ -185,6 +319,7 @@ export function createEmbedServer(opts) {
   const getDim = opts.getDim ?? (() => null)
   const getReady = opts.getReady ?? (() => true)
   const getError = opts.getError ?? (() => null)
+  const getRerankModel = opts.getRerankModel ?? (() => RERANK_MODEL)
 
   const server = createServer((req, res) => {
     handle(req, res).catch((err) => {
@@ -241,6 +376,59 @@ export function createEmbedServer(opts) {
       })
     }
 
+    if (req.method === 'POST' && url.pathname === '/v1/rerank') {
+      if (!opts.rerank) {
+        return sendJson(res, 503, { ok: false, reason: 'rerank-unavailable' })
+      }
+
+      let body
+      try {
+        body = await readJson(req)
+      } catch (err) {
+        const tooLarge = err?.code === 'BODY_TOO_LARGE'
+        return sendJson(res, tooLarge ? 413 : 400, {
+          ok: false,
+          reason: tooLarge ? 'body-too-large' : 'bad-json',
+        })
+      }
+
+      const pairs = normalizePairs(body?.pairs)
+      if (!pairs) {
+        return sendJson(res, 400, { ok: false, reason: 'bad-input' })
+      }
+      if (pairs.length > MAX_RERANK_PAIRS) {
+        return sendJson(res, 400, {
+          ok: false,
+          reason: 'batch-too-large',
+          limit: MAX_RERANK_PAIRS,
+          got: pairs.length,
+        })
+      }
+
+      // ⚠️ **不设 `getReady()` 前置门**（与 /v1/embeddings 的分叉，刻意）：重排模型是
+      // 懒加载的，就绪态由**本次调用**推动。若照嵌入那样先判就绪，首次请求必然 503，
+      // 而它恰恰是唯一能把模型加载起来的那次 —— 门会把功能锁死在「永远不就绪」。
+      let scores
+      try {
+        scores = await opts.rerank(pairs)
+      } catch (err) {
+        const loadFailed = err?.code === 'MODEL_LOAD_FAILED'
+        return sendJson(res, 503, {
+          ok: false,
+          reason: loadFailed ? 'model-not-ready' : 'rerank-failed',
+          detail: err?.message || String(err),
+        })
+      }
+      if (!Array.isArray(scores) || scores.length !== pairs.length) {
+        return sendJson(res, 500, {
+          ok: false,
+          reason: 'shape-mismatch',
+          detail: `返回 ${Array.isArray(scores) ? scores.length : '非数组'} 条 ≠ 请求 ${pairs.length} 条`,
+        })
+      }
+      return sendJson(res, 200, { model: getRerankModel(), scores })
+    }
+
     return sendJson(res, 404, { ok: false, reason: 'not-found' })
   }
 
@@ -294,6 +482,25 @@ export function createEmbedServer(opts) {
   }
 }
 
+/**
+ * pairs 归一化：`[{query, passage}]` → 原样（结构不符 / 任一字段非非空字符串 / 空数组 → null 拒绝）。
+ *
+ * **整批拒**而不是「跳过坏的那条」：与 `normalizeInput` 同一条纪律 —— 跳过会让调用方
+ * 拿到**短一截**的 scores 数组，而它按下标回填 ⇒ 分数整体错位，且**无任何报错**。
+ * 宁可不给，不给错位。
+ */
+function normalizePairs(input) {
+  if (!Array.isArray(input) || input.length === 0) return null
+  const out = []
+  for (const p of input) {
+    if (!p || typeof p !== 'object') return null
+    if (typeof p.query !== 'string' || p.query.length === 0) return null
+    if (typeof p.passage !== 'string' || p.passage.length === 0) return null
+    out.push({ query: p.query, passage: p.passage })
+  }
+  return out
+}
+
 /** input 归一化：string → [string]；string[] → 原样（空串/非字符串/空数组 → null 拒绝） */
 function normalizeInput(input) {
   const arr = typeof input === 'string' ? [input] : Array.isArray(input) ? input : null
@@ -336,12 +543,18 @@ function readJson(req) {
 
 async function main() {
   const embedder = createTransformersEmbedder()
+  // 构造重排器是**零成本**的（懒加载，不碰模型）；这里接线不等于加载 —— 见
+  // `createTransformersReranker` 的懒加载段。故生产 server spawn 的 sidecar 也多
+  // 不背那 266MB。
+  const reranker = createTransformersReranker()
   const app = createEmbedServer({
     embed: (texts) => embedder.embed(texts),
     getModel: () => embedder.model,
     getDim: () => embedder.getDim(),
     getReady: () => embedder.getReady(),
     getError: () => embedder.getError(),
+    rerank: (pairs) => reranker.rerank(pairs),
+    getRerankModel: () => reranker.model,
   })
 
   const port = await app.listen(parseInt(process.env.EMBED_SIDECAR_PORT || '0', 10))
