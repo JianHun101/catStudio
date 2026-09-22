@@ -27,6 +27,7 @@ import { internalRoutes } from './routes/internal.js'
 import { evalRoutes } from './routes/eval.js'
 import { ironLawRoutes } from './routes/iron-laws.js'
 import { skillRoutes } from './routes/skills.js'
+import { memoryRoutes } from './routes/memory.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
 import { runL1Aggregation } from './eval/l1-aggregator.js'
 import { classifyEpisodes, ZERO_EXECUTION_WINDOW_MINUTES } from './eval/episodes.js'
@@ -282,6 +283,7 @@ async function main(): Promise<void> {
   await app.register(evalRoutes)
   await app.register(ironLawRoutes)
   await app.register(skillRoutes)
+  await app.register(memoryRoutes)
 
   // 4. 启动 Fastify → 拿到 HTTP Server → attach Socket.IO
   await app.listen({ port: PORT, host: HOST })

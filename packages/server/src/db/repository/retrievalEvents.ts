@@ -238,6 +238,136 @@ export function insertRetrievalTrace(input: RetrievalEventInput): number | undef
   }
 }
 
+// ─── 读侧（M1：回复下方「本条回复用了哪些记忆」出口）──────
+
+/**
+ * 一次回复注入的**节**（M1 出口投影）。
+ *
+ * ⚠️ **口径不可含糊**：`bodyHead` 是**命中片**的正文全文，而真正注入 prompt 的是
+ * `getChunksBySection()` 补齐的**整节**（`memory/index.ts` 的「按节补齐」段）。
+ * 二者**不等价**——同节其余 part 不在本行的 `bodyHead` 里。UI 文案与展开内容
+ * 都不得声称「猫当时读到的就是这段」。
+ */
+export interface InjectedMemoryRef {
+  docPath: string
+  sectionAnchor: string
+  /** 人类可读路径快照（`chunks` 重扫后会被覆盖，故冗余在流水行上） */
+  breadcrumb: string | null
+  /** 该节在注入序列（相关度序）中的下标（0-based） */
+  sectionRank: number | null
+  /** 渲染后编号 **1..n**（`renderSections` 会做首尾重排——这是位置效应的直接变量） */
+  injectedPosition: number | null
+  /** **命中片**正文全文（不是整节——见上 ⚠️） */
+  bodyHead: string | null
+}
+
+/**
+ * 一条回复的记忆引用读侧结果。
+ *
+ * `reason === null` = **该回复没有检索流水行**（压根没走检索落盘路径）；
+ * 非 null 即 `retrieval_events.reason` 原值（值域见 `memory/index.ts` 的
+ * `MemoryRetrievalReason`，另有写口补的 `timeout` / `error` 两档）。
+ *
+ * ⚠️ 本函数**只取 `injected = 1` 的行**——probe 行与未注入的 final 行不进本条出口
+ * （数据仍在库，聚合看板是另票）。
+ */
+export interface MessageMemoryRefs {
+  reason: string | null
+  sections: InjectedMemoryRef[]
+}
+
+/**
+ * 按 **message_id 列表**批量取「本条回复注入了哪些节」（M1 出口，防 N+1）。
+ *
+ * 关联链：`execution_logs.message_id`（= 回复消息 id）→ `retrieval_events.execution_id`
+ * → `retrieval_queries` → `retrieval_candidates`。**不用 `retrieval_events.task_id`
+ * 兜底**：那是链锚，一条链上的多次执行共用一个锚，拿它反查会把同链别轮的注入算进本条。
+ *
+ * 三处口径：
+ * · **按节去重**：一次注入的单位是节（Decisions 14），而候选行是**片**——同节的
+ *   `final` 行与 `probe` 行（甚至多个 probe 片）会各占一行。去重键 = 身份三元组里的
+ *   `(doc_path, section_anchor)`，代表行优先取 `source = 'final'`（`final` 行即
+ *   `ordered` 里那一节被选中的那片，`probe` 行可能落在同节另一个 part 上）。
+ * · **只取 `injected = 1`**：probe 行**也会**带 `injected = 1`（写侧口径统一为
+ *   「该片正文有没有进 prompt」，见 `memory/index.ts` 注入面回填段）⇒ 不靠
+ *   `source` 过滤，靠 `injected`；不去重就会被同节多片撑大条数。
+ * · **`sessionId` 双条件**：调用方（路由）已校验消息属于该会话，这里再窄一层是
+ *   纵深防御——本仓有跨会话越权前科。
+ *
+ * 无流水行的 message id **不出现在返回的 Map 里**（调用方据此判「未检索」，
+ * 与「检索了但没节入选」两态分开）。
+ */
+export function getInjectedRefsByMessageIds(
+  messageIds: readonly string[],
+  sessionId: string
+): Map<string, MessageMemoryRefs> {
+  const result = new Map<string, MessageMemoryRefs>()
+  if (messageIds.length === 0) return result
+
+  const placeholders = messageIds.map(() => '?').join(', ')
+  // `LEFT JOIN` 到 candidates：**没有注入候选**的执行（空手而归/超时/未检索）也要出一行
+  // （`c.*` 全 NULL），否则「有 event 无注入」与「无 event」在结果面上同形——正是要分开的两态。
+  const rows = db
+    .prepare(
+      `SELECT el.message_id      AS messageId,
+              e.reason           AS reason,
+              c.doc_path         AS docPath,
+              c.section_anchor   AS sectionAnchor,
+              c.breadcrumb       AS breadcrumb,
+              c.body_head        AS bodyHead,
+              c.section_rank     AS sectionRank,
+              c.injected_position AS injectedPosition,
+              c.source           AS source
+       FROM execution_logs el
+       JOIN retrieval_events e ON e.execution_id = el.id
+       LEFT JOIN retrieval_queries q ON q.retrieval_id = e.id
+       LEFT JOIN retrieval_candidates c ON c.query_id = q.id AND c.injected = 1
+       WHERE el.message_id IN (${placeholders}) AND el.session_id = ?
+       ORDER BY el.message_id, e.id, c.injected_position, c.source`
+    )
+    .all(...messageIds, sessionId) as Array<{
+    messageId: string
+    reason: string | null
+    docPath: string | null
+    sectionAnchor: string | null
+    breadcrumb: string | null
+    bodyHead: string | null
+    sectionRank: number | null
+    injectedPosition: number | null
+    source: string | null
+  }>
+
+  // 节去重键里的 NUL 分隔符与写侧 `bySection` 同款（锚点里 `.` / `:` 常见，拼错会撞键而无报错）
+  const pickedSource = new Map<string, string>()
+  for (const row of rows) {
+    let entry = result.get(row.messageId)
+    if (!entry) {
+      entry = { reason: row.reason, sections: [] }
+      result.set(row.messageId, entry)
+    }
+    // LEFT JOIN 未命中候选：本条只贡献「有 event、没注入」这一事实
+    if (row.docPath === null || row.sectionAnchor === null) continue
+    const key = `${row.messageId}\0${row.docPath}\0${row.sectionAnchor}`
+    const prevSource = pickedSource.get(key)
+    if (prevSource !== undefined && !(prevSource === 'probe' && row.source === 'final')) continue
+    pickedSource.set(key, row.source ?? '')
+    const section: InjectedMemoryRef = {
+      docPath: row.docPath,
+      sectionAnchor: row.sectionAnchor,
+      breadcrumb: row.breadcrumb,
+      sectionRank: row.sectionRank,
+      injectedPosition: row.injectedPosition,
+      bodyHead: row.bodyHead,
+    }
+    const at = entry.sections.findIndex(
+      (s) => s.docPath === row.docPath && s.sectionAnchor === row.sectionAnchor
+    )
+    if (at >= 0) entry.sections[at] = section
+    else entry.sections.push(section)
+  }
+  return result
+}
+
 // ─── 读侧（最小面：仅供测试与后续看板取数）─────────────
 
 /** 一条 event 的查询行（按 `query_index` 升序） */
