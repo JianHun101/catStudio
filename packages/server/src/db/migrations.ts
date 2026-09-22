@@ -781,7 +781,7 @@ const IDX_EXECUTION_LOGS_STATUS = `CREATE INDEX IF NOT EXISTS idx_execution_logs
  * 1. **`agent_id → agents(id) ON DELETE RESTRICT`**（spec §4.1 已知缺口项）——此前该列
  *    只受 `session_id` 一条 FK 保护，agent 侧是裸列。RESTRICT 是全仓统一删除策略（物理
  *    删除一律 RESTRICT，CASCADE 只给纯成员关系行）。删 agent 的接口路径
- *    （`routes/agents.ts:168`）本就先 `deleteMessagesByAgent` 再删 agent，故这条 FK 不会
+ *    （`routes/agents.ts` 的 `deleteMessagesByAgent` 调用处）本就先删消息再删 agent，故这条 FK 不会
  *    给现有删除路径添新错误；「先查后删 → 409 契约」是票 8 的面。
  * 2. **`CHECK (dispatch_state IN ('queued','running','done'))`**——值域取**实测**
  *    （`repository/messages.ts` 的 `setDispatchState` 类型签名；两库读数 `done` 1079/1342
@@ -877,7 +877,7 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
   // ── 票 2 · 索引三条（spec §3.2，首批 append 迁移）──────────────────────
   {
     // 会话历史拉取 + 翻页游标的 tie-break。服务的查询 `getSessionMessagesRange`
-    // （`repository/messages.ts:149`）：
+    // （`repository/messages.ts` 的会话范围游标）：
     //   WHERE session_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
     //   ORDER BY created_at DESC, id DESC
     // 两列版（基线里的 `idx_messages_session`）只能服务 `session_id` 等值 + `created_at`
@@ -893,15 +893,15 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
   },
   {
     // 会话级日志查询（`getExecutionsBySession`）与恢复路径（`getLatestExecutionPerAgent`）
-    // 的取数面，两条都是 `WHERE session_id = ?`（`repository/executionLogs.ts:250` / `:314`）。
+    // 的取数面，两条都是 `WHERE session_id = ?`（两条都在 `repository/executionLogs.ts`）。
     // 该表此前零二级索引 ⇒ 会话日志页与右侧 trace 面板每次都全表扫。
     //
     // ⚠️ **列名是 `started_at` 不是 spec 写的 `created_at`**：`execution_logs` **没有**
     // `created_at` 列（本表时间列为 `started_at`/`ended_at`）。spec §3.2 那一行按字面实现
     // 会当场 `no such column: created_at` → 事务回滚 → **拒启**（实测，不是推断）。
     // 保持 spec 的**形状与用途**不变（`(session_id, <本表时间列>)`），只把列名落到真实列。
-    // 同口径佐证散在既有代码里：`repository/query.ts:15`「execution_logs 无 created_at 列」、
-    // `eval/l1-aggregator.ts:68` 同、`routes/internal.test.ts:864`「用 started_at DESC 排序」。
+    // 同口径佐证散在既有代码里：`repository/query.ts` 的「execution_logs 无 created_at 列」注、
+    // `eval/l1-aggregator.ts` 的同句注、`routes/internal.test.ts`「用 started_at DESC 排序」。
     name: 'idx_execution_logs_session_started',
     ticket: 'T2',
     sql: IDX_EXECUTION_LOGS_SESSION_STARTED,
@@ -909,10 +909,10 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
   {
     // running 计数（重启判据主查询）。**定形依据 = 实测调用面，不是二选一**（spec §3.2 留的
     // 判据是「查询总带 session_id 则用复合」）：
-    //   - `scripts/dev.js:183`（重启保护窗主查询，`pollRestart` 用它判「还有执行在跑」）：
+    //   - `scripts/dev.js` 的 `pollRestart` 主查询（用它判「还有执行在跑」）：
     //     `SELECT COUNT(*) AS cnt FROM execution_logs WHERE status = 'running'` —— 无 session_id
-    //   - `index.ts:136` → `fixStuckExecutionLogs()`（启动自愈 `UPDATE … WHERE status = 'running'`）
-    //   - `repository/executionLogs.ts:18` `getRunningLogs()`：同上，无 session_id
+    //   - `src/index.ts` 的 `fixStuckExecutionLogs()` 调用处（启动自愈 `UPDATE … WHERE status = 'running'`）
+    //   - `repository/executionLogs.ts` 的 `getRunningLogs()`：同上，无 session_id
     // 三条都不带 session_id ⇒ 复合索引 `(session_id, status)` 的前导列不匹配，**一条都服务
     // 不到**（这正是「对照实际 SQL 定形」要挡的形态：照抄复合版 = 建了个用不上的索引）。
     name: 'idx_execution_logs_status',
@@ -949,7 +949,7 @@ const APPENDED_MIGRATIONS: ReadonlyArray<Migration> = [
   // 且秒级 DEFAULT 会把精度降档）——漏传 value 撞 `NOT NULL` 当场报错，不静默降级。
   {
     // 票 3 发现② / 店长 D3 拍板。**必须先于 review_verdicts 重建**（否则存量猫名直接
-    // 撞 FK 拒启）。写入口自 T-N 修复起已取 `subject.id`（`eval/verdict-parser.ts:249`
+    // 撞 FK 拒启）。写入口自 T-N 修复起已取 `subject.id`（`eval/verdict-parser.ts`
     // 的 `subject: subject.id`，调用方 `execution/serial.ts` 的 `reviewedTargets` 取
     // `a.id`）——库里的猫名是**修复前的历史行**，故本条是纯数据归一，不改写入口代码。
     //

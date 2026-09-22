@@ -30,7 +30,7 @@ export interface ChainVerdictRow {
  * 锚名下**最新一条**判词（四档全取，不筛 verdict）。
  *
  * 为什么是「最新」而不是「曾出现闭环档」：`hasClosedVerdictByTaskId`
- * （`db/repository/verdicts.ts:60`）是链级 `LIMIT 1` 存在性——「先 ✅ 后新 commit 再 ⚠️」
+ * （`db/repository/verdicts.ts`）是链级 `LIMIT 1` 存在性——「先 ✅ 后新 commit 再 ⚠️」
  * 的链上它恒真。判「这条链现在还有没有待处理的返工」必须看**最新那条**。
  *
  * 无锚（空/未定义）→ undefined（无锚即无链，不猜）；有锚无判词 → undefined。
@@ -41,7 +41,7 @@ export interface ChainVerdictRow {
  *
  * **承重面只有 `getLatestChainVerdict`**：`LIMIT 1` 下胜者的 `verdict` 不同，选错就是
  * 「该返工的判成通过」。`getChainRejectionsSince` 沿用同一 ORDER BY 只为**口径一致**，
- * 它的 `[0]` 只被 `episodes.ts:175` 取 `.created_at` 用——同秒并列时两边**同值**，
+ * 它的 `[0]` 只被 `episodes.ts` 的 `classifyCompleted` 取 `.created_at` 用——同秒并列时两边**同值**，
  * `classifyCompleted` 结局逐字不变（理由别讲过头：改这里不是为修 corrected_success）。
  */
 export function getLatestChainVerdict(

@@ -8,7 +8,7 @@
  *
  * 背景（ADR 0015 §6.2，E5 实测）：一猫一 worktree 落地后 `session/<sid8>` 不再收到
  * 提交（猫只在自己的分支提交），而 `closeoutSession` 只合这一条分支
- * （`session-closeout.ts:102`）。会话分支停在分叉点时 `merge --ff-only` 输出
+ * （`session-closeout.ts` 的 `mergeSession`）。会话分支停在分叉点时 `merge --ff-only` 输出
  * `Already up to date.` 且**退出码 0** ⇒ 收口器返回 ok → 写 gate → 删掉会话
  * worktree 与会话分支，而猫的分支与 worktree 全部留在原地、从未进过任何地方。
  * 失效形态是**静默的**。⇒ 本模块是 T-2 的必备件，不是后继。
@@ -169,7 +169,7 @@ export function hasMergeInProgress(opts?: { cwd?: string }): boolean {
   return tryGit(cwd, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']) !== null
 }
 
-/** 幂等判据：ancestor 是否已是 descendant 的祖先（原语仓里已有，`session-closeout.ts:209` 在用） */
+/** 幂等判据：ancestor 是否已是 descendant 的祖先（原语仓里已有，本模块 `mergeBranchesInto` 的跳过判据在用） */
 export function isAncestor(ancestor: string, descendant: string, opts?: { cwd?: string }): boolean {
   const cwd = opts?.cwd ?? process.cwd()
   try {
@@ -611,7 +611,7 @@ export function ensureExecutionWorktree(
   agent: { id: string; name: string; role?: string },
   /**
    * **链锚**（票 9 返修消息的投递锚）= `triggerMsg.taskId || traceId`——与执行内
-   * 各处链锚表达式**逐字同源**（`reply.ts:783` / `reply.ts:1127` / `serial.ts:489`）。
+   * 各处链锚表达式**逐字同源**（`execution/reply.ts` / `execution/serial.ts` 的同名表达式）。
    *
    * 为什么**必填**而不是可选：返修单经 `ingestUserMessage` 投递，而入口主闸
    * （`origin: 'agent'`）硬性要求携带锚——可选参数在"忘了传"时会退化成
@@ -695,7 +695,7 @@ function worktreeMap(cwd: string): Map<string, string> {
  *    回收**，否则删掉未合的活。判据向保守偏：集成分支尚未 ff 进 dev 时按
  *    `integrationRef` 判，不会误删。
  * 2. **自指守卫**：不得清理当前进程 cwd 所在的 worktree（既有机制先例
- *    `git-utils.ts:587` `isPathInside(wtPath, process.cwd())`——收口者正站在被
+ *    `git-utils.ts` 的 `isPathInside(wtPath, resolve(process.cwd()))`——收口者正站在被
  *    回收的 worktree 里时，物理删除会删掉当前进程正站着的目录树，Windows cwd
  *    句柄无 FILE_SHARE_DELETE，删后进程不抛错但一切 IO 悬空）。
  *

@@ -977,8 +977,8 @@ async function executeOneAgent(
         //
         // ⚠️ 触达边界（裁决 (a)，2026-09-09 实测）：本通知是 **UI 提示（人类可见）**，
         // **不触达 store agent 上下文**——emitSystemNotice 只做房间广播、不落库
-        // （socketio.ts:134），而 agent 上下文由 getRecentMessages 过滤
-        // role != 'system'（routes/messages.ts:120）→ 店长 agent 永远看不到它，
+        // （`connectors/socketio.ts`），而 agent 上下文由 `getRecentMessages` 过滤
+        // `role != 'system'`（`db/repository/messages.ts`）→ 店长 agent 永远看不到它，
         // 包括「下次执行」时。真正的 agent 级触达需落库 + 定向 dispatch 唤醒店长，
         // 属新的自动唤醒链（要过 ADR-0007 + 风暴护栏评估），另单评估。
         // 所以本通知的作用是「给人看、别让结论无声消失」，**不是「叫醒店长」**。

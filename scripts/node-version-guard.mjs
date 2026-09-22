@@ -6,8 +6,8 @@
  * （技能白名单 / 目录的唯一真相源），依赖 Node 原生 TypeScript 类型剥离——该特性
  * 22.6 起需 `--experimental-strip-types`，**22.18.0 起默认开启**（已回移植到 22.x LTS）。
  * 低于该版本时那条 import 抛 `ERR_UNKNOWN_FILE_EXTENSION`，MCP server 直接起不来。
- * 而 harness 是用**裸 `node`** 拉起它的（`packages/server/src/llm/claude.ts:23`、
- * `dsh.ts:38`、`opencode.ts:25` 三处 `command: ['node', …]`），**不经 pnpm**
+ * 而 harness 是用**裸 `node`** 拉起它的（`packages/server/src/llm/claude.ts` 的
+ * `MCP_SERVER_PATH`，与 `dsh.ts` / `opencode.ts` 同款 cwd 假设的三处挂载点），**不经 pnpm**
  * ⇒ `pnpm-workspace.yaml` 的 `engineStrict` 拦不到这条路径（票 §2-订正 2 实测）。
  * 本模块就是覆盖该路径的那道闸：与其让猫吃一坨 ESM loader 堆栈，不如直说
  * 「要哪个版本 / 当前哪个 / 哪些工具面会死」。

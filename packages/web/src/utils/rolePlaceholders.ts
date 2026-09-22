@@ -3,7 +3,7 @@ import type { AgentConfig } from '@cat-study/shared'
 /**
  * 渲染层角色占位符 → 真名（纯显示层，零数据写入）。
  *
- * 与 server resolveRolePlaceholders（socketio.ts:1466-1481）逐规则对齐——
+ * 与 server resolveRolePlaceholders（`execution/hints.ts`）逐规则对齐——
  * 渲染层只读副本，规则变更需双处同步（防漂移）：
  * - @架构师 → store 角色 agent 名（角色存在才替换，缺失保留字面）
  * - @审查者 → reviewer 角色 agent 名（同上）

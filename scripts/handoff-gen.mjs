@@ -390,9 +390,9 @@ export function isExemptDelivery(paths) {
  * `CATSTUDY_SESSION_ID` 当前置，审查回炉实测推翻：
  *
  * - 它**不是**「人工显式指定」的标记，而是 server 给每只猫的 CLI 子进程注入的
- *   **常驻变量**（`llm/claude.ts:361`、`llm/opencode.ts:91`、`llm/dsh.ts:94`）；
+ *   **常驻变量**（`llm/claude.ts`、`llm/opencode.ts`、`llm/dsh.ts` 三处注入）；
  * - `.husky/post-commit` 与 `.husky/pre-push` 是裸 `node` 调用，**全量继承**该 env
- *   （`execution/review-fallback.ts:153-158` 正因知道这点才显式 `delete` 它）；
+ *   （`execution/review-fallback.ts` 正因知道这点才显式 `delete env.CATSTUDY_SESSION_ID`）；
  * - ⇒ 在猫驱动的每次提交/推送上它都为真，做前置等于**把免审豁免整个关死**——
  *   纯 `docs/run/**` 提交照发审查请求，本票的可证伪目标在真实环境下不成立。
  *

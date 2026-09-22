@@ -461,8 +461,8 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
     // 而盲标测的正是「人读了这句给几分」，上下文缺失会把这个分数变成噪音。
     //
     // `getContextBefore` 走**字符串比较** `created_at < ?`：仅当全表时间串格式一致时，
-    // 字典序才等于时间序。当前成立的理由与举证见 `db/repository/messages.ts:307`
-    // （写入恒经 repository 显式生成 ISO 毫秒），`eval.test.ts` 有顺序判据钉死这一条。
+    // 字典序才等于时间序。当前成立的理由与举证见 `db/repository/messages.ts` 的
+    // 「created_at 一律由这里生成」注（写入恒经 repository 显式生成 ISO 毫秒），`eval.test.ts` 有顺序判据。
     const pool = humanLabelsRepo.listLabelPool({ limit, perSession, agentId, days }).map((p) => ({
       ...p,
       context: evalScoresRepo.getContextBefore(p.session_id, p.created_at, 10),

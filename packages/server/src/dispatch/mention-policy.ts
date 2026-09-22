@@ -168,7 +168,7 @@ const REVIEWER_KEEP_PRIORITY: Record<ReviewerVerdict | 'unknown', TargetMatcher[
   // 要返工 → 回请求人（实施侧）
   //
   // ⚠️ 已知局限（票丙挂账转代码记录，**行为不动**）：`@作者` 的运行期定义就是
-  // 「本次触发消息作者」（hints.ts:248/262 的 resolveRolePlaceholders），故保
+  // 「本次触发消息作者」（`execution/hints.ts` 的 `resolveRolePlaceholders`），故保
   // 「请求人」与 prompt 面的占位符语义逐字一致。但**架构师代发起审查**时请求人
   // = store，返工结论会落到架构师而不是真实代码作者，下游 verdict-parser 取不到
   // 非 store 目标 ⇒ `subject=null` + `no_subject`（审查 P3-2 探针实证）。
@@ -178,10 +178,10 @@ const REVIEWER_KEEP_PRIORITY: Record<ReviewerVerdict | 'unknown', TargetMatcher[
   //      把链转回作者 —— 即兜底路径被证伪；
   //   ② `no_subject` 被下游统计当失败计入 —— 该格就从「既有语义」变成了指标污染源。
   //      **当前即为真**（2026-09-20 实测）。原括注指名的两头都不消费它：
-  //      `execution/flow-advance.ts` grep `failure` 零命中；`eval/attribution.ts:72`
-  //      的 `failures` 是 episode 链的局部变量，与 `review_parse_failures` 表无关。
-  //      唯一读方是 `eval/l1-aggregator.ts:117` 的 `parseFailureRate`（`:135`）——
-  //      窗口条件（`:80`）只按 `created_at` 过滤、**不按 reason 过滤**，
+  //      `execution/flow-advance.ts` grep `failure` 零命中；`eval/attribution.ts` 的
+  //      `failures` 是 episode 链的局部变量。唯一读方是 `eval/l1-aggregator.ts` 的
+  //      `aggregateMetrics`（`parseFailureRate` 的取数查询）——其窗口条件
+  //      `verdictWindowCond` 只按 `created_at` 过滤、**不按 reason 过滤**，
   //      `no_subject` 与 `bad_verdict` 一视同仁进分子。活库实有 7 行
   //      （最近 2026-09-12T16:21:22Z，均早于本格引入；`bad_verdict` 27 行）。
   //      ⇒ 本格已处于「应重裁」态：重裁归架构师，裁决下来前行为不动。

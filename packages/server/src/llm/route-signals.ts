@@ -4,7 +4,7 @@
  * 模型通过 post_message 工具（scripts/mcp-server.mjs）把「投递下一棒」的
  * 意图声明为结构化信号；本模块是信号的内存存储（路由信号 Map）：
  *   - internal.ts 预校验通过后 storeRouteSignal 入 Map
- *   - socketio.ts:870 合并点 consumeRouteSignals 按 messageId 标签取走
+ *   - `execution/serial.ts` 的 `consumeRouteSignals` 合并点按 messageId 标签取走
  *
  * messageId 标签语义（审查裁决）：只消费 signal.msgId === 当前流 msgId 的
  * 信号——abort 残留信号天然失效（残留信号属于旧流 msgId，与新流不匹配），

@@ -968,9 +968,9 @@ export const useChatStore = defineStore('chat', () => {
           const anchor = data.startedAt ?? prev?.startedAt
           if (anchor != null) {
             // 'thinking' 是**一轮执行的起点信号**（服务端顺序恒 thinking → replying → 心跳，
-            // 见 reply.ts:331-341，锚点一次取值）——到了就无条件重置，**不与 prev 取小**。
+            // 见 `execution/reply.ts` 的 `emitAgentMessageStatus`，锚点一次取值）——到了就无条件重置，**不与 prev 取小**。
             // 上一轮失败（LLM 异常 / AGENT_HARD_TIMEOUT_MS 硬超时 / CLI 空闲超时）既不产 done
-            // 也不产 AGENT_STATUS idle：serial.ts:1670 队列有下一条时只发 `busy` 直转 N+1，
+            // 也不产 AGENT_STATUS idle：`execution/serial.ts` 的 `executeAgentCommand` 起始段只发 `busy` 直转 N+1，
             // 上面的 idle 清空兜底不触发。此时若与 prev 取小，新一轮计时会继承上一轮起点，
             // 把失败间隙一并算进秒数（跨执行虚高，直到本轮 done 才自愈）。
             // min 防御只留给 replying / 心跳：那里服务端恒发同值，取小才是在防乱序与中途刷新倒退。
