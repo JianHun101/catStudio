@@ -433,10 +433,19 @@ const HYBRID_CHANNEL_TOP_N = 20
  */
 export const HYBRID_POOL_PER_QUERY = 20
 /**
- * 检索流水里 `body_head` 的截断长度（P2 §四 表 3：片段正文前 120 字，**截断快照非全文**）。
- * 探针侧在 SQL 里 `substr` 截断（不把整篇正文拉进内存），融合侧由调用方按同一常数截断。
+ * （2026-09-22 · 票「注入正文全文落库」）**这里原有 `CANDIDATE_BODY_HEAD_CHARS = 120`
+ * 的截断常数，已删——落库改存正文全文。**
+ *
+ * 理由是判官要判「回复有没有编造记忆库没给的内容」，而 120 字头只覆盖片正文约 55%
+ * （片均 217 字），判不了；语料全库仅 436 片 / 95KB，省这点字符从来不是真约束。
+ * 两条写口都改：探针侧 SQL 直接取 `c.body`，融合侧由调用方取 `row.body`。
+ *
+ * ⚠️ **列名 `body_head` 保留未改**（票面裁决规则：读方 >3 处则保留原名）——实测读方
+ * 6 处：本文件探针 SELECT + 行类型 + 映射，`retrievalEvents.ts` 读侧 SELECT + 两处行
+ * 类型。**列名里的 `head` 是原名残留，它现在存全文**。改名需追加 `ALTER TABLE …
+ * RENAME COLUMN` 并动 `migrations.test.ts` 的 `BASELINE_SHAPE_DIVERGENCE` 白名单
+ * （会削掉「任何形状漂移必须红」那道闸），收益不抵——要改请单独立票。
  */
-export const CANDIDATE_BODY_HEAD_CHARS = 120
 /** RRF 融合常数 k（控制排名分衰减速度） */
 const RRF_K = 60
 
@@ -573,7 +582,7 @@ export interface ChunkVectorCandidate {
   contentHash: string
   /** ✅ 历史行自解释（`chunks` 重扫后该列会被覆盖） */
   breadcrumb: string
-  /** ✅ 正文前 120 字（**截断快照**——探针不该把整篇正文拉进内存） */
+  /** ✅ 该片正文**全文**（字段名是原名残留，见文件内 `body_head` 列名说明） */
   bodyHead: string
   status: string | null
   distance: number
@@ -603,7 +612,7 @@ export function probeChunkVectorCandidates(
     .prepare(
       `SELECT c.id AS id, c.doc_path AS doc_path, c.section_anchor AS section_anchor,
               c.content_hash AS content_hash, c.breadcrumb AS breadcrumb,
-              substr(c.body, 1, ${CANDIDATE_BODY_HEAD_CHARS}) AS body_head,
+              c.body AS body_head,
               c.status AS status, v.distance AS distance,
               CASE WHEN (c.status IS NULL OR c.status NOT IN ('superseded','deprecated') OR c.section_anchor = '#tombstone')
                    THEN 1 ELSE 0 END AS passes

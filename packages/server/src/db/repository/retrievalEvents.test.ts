@@ -45,7 +45,7 @@ function makeEvent(over: Partial<RetrievalEventInput> = {}): RetrievalEventInput
         contentHash: 'h1',
         chunkId: 7,
         breadcrumb: 'docs/adr/0002-b.md > 决策',
-        bodyHead: '正文前 120 字',
+        bodyHead: '候选片正文全文',
         statusAtQuery: null,
         distance: 0.293,
         rank: 0,

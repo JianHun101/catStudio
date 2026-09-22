@@ -69,7 +69,11 @@ export interface RetrievalCandidateInput {
   chunkId: number | null
   /** ✅ 让历史行自解释（`chunks` 重扫后该列会被覆盖） */
   breadcrumb: string | null
-  /** ✅ 片段正文前 120 字（截断快照，非全文）。回答「这条召回到底是什么」 */
+  /**
+   * ✅ 片段正文**全文**。回答「这条召回到底是什么」，且是判官判「回复有没有编造
+   * 记忆库没给的内容」的**唯一上下文来源**（2026-09-22 前只存前 120 字，判不了）。
+   * 字段名 `bodyHead` / 列名 `body_head` 是**原名残留**（见 `chunks.ts` 同名说明）。
+   */
   bodyHead: string | null
   /** ✅ 该片**当时**的 status（不冗余则「`superseded` 是不是在挡活片」在重扫后无解） */
   statusAtQuery: string | null
