@@ -59,6 +59,8 @@ function baseProps(over: Record<string, unknown> = {}) {
     restartState: 'none' as const,
     restartConfirming: false,
     retractConfirming: false,
+    // M1：默认不渲染记忆行（父组件拿不到数据时的真实形态）；要测该行的用例显式覆盖
+    memoryRefs: null,
     ...over,
   }
 }
@@ -405,5 +407,93 @@ describe('MessageItem 结构契约（静态源）', () => {
     expect(propsBlock).not.toContain('Message[]')
     // 数组 prop 只有「本条消息自带的状态行」（切片，不是全会话数组）
     expect(propsBlock).toContain('statusEntries: AgentStatusEntry[]')
+  })
+})
+
+// ─── M1 记忆引用行 ────────────────────────────────────
+describe('MessageItem 记忆引用行（M1）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  function memRef(over: Record<string, unknown> = {}) {
+    return {
+      docPath: 'docs/adr/0002-b.md',
+      sectionAnchor: '## 决策',
+      breadcrumb: 'docs/adr/0002-b.md > 决策',
+      sectionRank: 0,
+      injectedPosition: 1,
+      bodyHead: '片段正文',
+      ...over,
+    }
+  }
+
+  function view(over: Record<string, unknown> = {}) {
+    return { state: 'injected', items: [{ label: '0002-b', title: 'T', ref: memRef() }], ...over }
+  }
+
+  it('memoryRefs=null → 不渲染记忆行（父组件还没拿到数据时的真实形态）', () => {
+    const wrapper = mount(MessageItem, { props: baseProps({ memoryRefs: null }) })
+    expect(wrapper.find('.msg-memory-refs').exists()).toBe(false)
+  })
+
+  it('有注入 → footer 内一行「📎 记忆 N 条：」+ N 个可点条目', () => {
+    const items = [
+      { label: '0002-b', title: 't1', ref: memRef() },
+      { label: '0007-c', title: 't2', ref: memRef({ docPath: 'docs/adr/0007-c.md' }) },
+      { label: '0009-d', title: 't3', ref: memRef({ docPath: 'docs/adr/0009-d.md' }) },
+    ]
+    const wrapper = mount(MessageItem, { props: baseProps({ memoryRefs: view({ items }) }) })
+    const row = wrapper.find('.msg-memory-refs')
+    expect(row.exists()).toBe(true)
+    // 落在 footer 内（票面 §三：msg-footer 内新增一行）
+    expect(wrapper.find('.msg-footer .msg-memory-refs').exists()).toBe(true)
+    expect(row.text()).toContain('记忆 3 条')
+    const links = row.findAll('.mem-link')
+    expect(links).toHaveLength(3)
+    expect(links.map((l) => l.text())).toEqual(['0002-b', '0007-c', '0009-d'])
+    // 三态只有 injected 才有链接（下两条用例判另两态）
+    expect(row.findAll('.mem-muted')).toHaveLength(0)
+  })
+
+  it('三态之二「无注入」与之三「未检索」**措辞不同**（使用率的分母口径）', () => {
+    const none = mount(MessageItem, {
+      props: baseProps({ memoryRefs: { state: 'none', items: [] } }),
+    })
+    expect(none.find('.msg-memory-refs').text()).toContain('未使用记忆')
+    expect(none.find('.mem-link').exists()).toBe(false)
+
+    const notRetrieved = mount(MessageItem, {
+      props: baseProps({ memoryRefs: { state: 'not-retrieved', items: [] } }),
+    })
+    expect(notRetrieved.find('.msg-memory-refs').text()).toContain('未检索记忆')
+    expect(notRetrieved.find('.msg-memory-refs').text()).not.toContain('未使用记忆')
+  })
+
+  it('用户消息不渲染记忆行（记忆只挂在 agent 回复上，即使父组件误传了视图）', () => {
+    const wrapper = mount(MessageItem, { props: baseProps({ msg: USER_MSG, memoryRefs: view() }) })
+    expect(wrapper.find('.msg-memory-refs').exists()).toBe(false)
+  })
+
+  it('点条目 → emit openMemoryRef（带原始 ref；抽屉归父组件，本组件不碰网络）', async () => {
+    const wrapper = mount(MessageItem, { props: baseProps({ memoryRefs: view() }) })
+    await wrapper.find('.mem-link').trigger('click')
+    const emitted = wrapper.emitted('openMemoryRef') as unknown[][]
+    expect(emitted).toHaveLength(1)
+    expect((emitted[0][0] as { docPath: string }).docPath).toBe('docs/adr/0002-b.md')
+  })
+
+  it('静态源：记忆行只遍历本 prop 内的数组，未新增任何会话级集合遍历（O(1) 契约）', () => {
+    const rowBlock = source.slice(
+      source.indexOf('class="msg-memory-refs"'),
+      source.indexOf('</div>', source.indexOf('class="msg-memory-refs"'))
+    )
+    expect(rowBlock).toContain('v-for="(item, mi) in memoryRefs.items"')
+    expect(rowBlock).not.toContain('activeMessages')
+    expect(rowBlock).not.toContain('memoryRefsByMessage')
+    // **模板**里不许出现会话级集合（头注里讨论这条契约的那句话不算——判据取模板切片）
+    const template = source.slice(source.indexOf('<template>'), source.indexOf('</template>'))
+    expect(template).not.toContain('activeMessages')
+    expect(template).not.toContain('memoryRefsByMessage')
   })
 })

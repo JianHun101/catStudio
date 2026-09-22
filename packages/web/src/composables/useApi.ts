@@ -41,6 +41,42 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
   }
 }
 
+/**
+ * 一条回复注入的**一节**记忆（服务端 `InjectedMemoryRef` 的投影，camelCase 由 server 出）。
+ *
+ * ⚠️ `bodyHead` 是**命中片**的正文全文，而注入进 prompt 的是 `getChunksBySection()`
+ * 补齐的**整节**——二者不等价。抽屉文案与展开内容都**不得**声称「猫当时读到的就是这段」。
+ */
+export interface MemoryRef {
+  docPath: string
+  sectionAnchor: string
+  breadcrumb: string | null
+  sectionRank: number | null
+  injectedPosition: number | null
+  bodyHead: string | null
+}
+
+/**
+ * 三态（**承重**）：混在一起会把「压根没查」算成「查了没用」，使用率的分母当场失真。
+ * - `injected` 有节进 prompt
+ * - `none` 检索跑了、一节没入选（`no-hit` / `filtered-empty` / `budget-exhausted` / `embed-failed` / `timeout` / `error`）
+ * - `not-retrieved` **压根没检索**（无流水行，或 `reason ∈ {not-enabled, empty-query, skipped-a2a}`）
+ */
+export type MemoryRefState = 'injected' | 'none' | 'not-retrieved'
+
+/**
+ * 一条回复的记忆引用条目（`GET /api/sessions/:id/memory-refs` 的值）。
+ *
+ * 值**不是**裸 `MemoryRef[]`：裸数组装不下 `reason`，三态就分不开
+ * （票面 §三 与 §四 A2 的冲突，取舍见 `routes/memory.ts` 头注）。
+ */
+export interface MemoryRefsEntry {
+  state: MemoryRefState
+  /** `retrieval_events.reason` 原值；`null` = 该消息没有检索流水行 */
+  reason: string | null
+  refs: MemoryRef[]
+}
+
 /** 连接器绑定行——后端 snake_case 原样返回（routes/connectors.ts，无 camelCase 转换） */
 export interface ConnectorBinding {
   id: string
@@ -506,6 +542,19 @@ export const api = {
   // GET /api/sessions/:id/executions，camelCase 由 server 转换；空 session 返回 { executions: [] }）
   getSessionExecutions: (id: string) =>
     request<{ executions: ExecutionMeta[] }>(`/sessions/${id}/executions`),
+
+  // 记忆引用（M1）：一条回复用了哪些记忆。**批量口**——一页 N 条消息发 1 次请求（防 N+1）。
+  // 响应是 `{ [messageId]: MemoryRefsEntry }`：请求中每个属于该会话的消息都有键。
+  // 越权（请求了不属于该会话的消息 id）→ server 端 400，不静默返回空。
+  getSessionMemoryRefs: (id: string, messageIds: string[]) =>
+    request<Record<string, MemoryRefsEntry>>(
+      `/sessions/${id}/memory-refs?messageIds=${encodeURIComponent(messageIds.join(','))}`
+    ),
+
+  // 形态乙的次级链接：抽屉里「打开当前文档」。**返回当前检出上的文档，不是当时的快照**。
+  // server 端白名单锁死扫描器前缀，越界一律 400（不是 404——见 routes/memory.ts）。
+  getMemoryDoc: (path: string) =>
+    request<{ path: string; content: string }>(`/memory/doc?path=${encodeURIComponent(path)}`),
 
   // Connector bindings (QQ / OneBot)
   getConnectorBindings: (platform?: string) => {

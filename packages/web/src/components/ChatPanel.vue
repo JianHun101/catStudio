@@ -12,6 +12,8 @@ import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { isAgentStoppable, isToolActive, toolAreaSummary } from '@/utils/tools'
 import { normalizeUtc } from '@/utils/time'
 import { createLogger } from '@/utils/logger'
+import { api, type MemoryRef, type MemoryRefsEntry } from '@/composables/useApi'
+import { buildMemoryRefView, type MemoryRefView } from '@/utils/memoryRefs'
 import MessageItem from './MessageItem.vue'
 import ReplyElapsed from './ReplyElapsed.vue'
 import ToolRow from './ToolRow.vue'
@@ -516,6 +518,11 @@ onUnmounted(() => {
     foldStickRaf = 0
   }
   pendingFoldBodies.clear()
+  // 在途的记忆引用合并窗口：卸载后不许再发请求（回调持的是已卸载组件的闭包）
+  if (memoryRefsTimer) {
+    clearTimeout(memoryRefsTimer)
+    memoryRefsTimer = undefined
+  }
 })
 
 // ─── Image preview (lightbox) ─────────────
@@ -540,9 +547,12 @@ function previewStep(dir: 1 | -1): void {
   previewIndex.value = (previewIndex.value + dir + len) % len
 }
 
-/** 预览打开时：Esc 关闭、←/→ 切换（多图） */
+/** 预览打开时：Esc 关闭、←/→ 切换（多图）；记忆抽屉只吃 Esc（无翻页语义） */
 function onPreviewKeydown(e: KeyboardEvent): void {
-  if (!previewVisible.value) return
+  if (!previewVisible.value) {
+    if (activeMemoryRef.value && e.key === 'Escape') closeMemoryRef()
+    return
+  }
   if (e.key === 'Escape') closePreview()
   else if (e.key === 'ArrowLeft') previewStep(-1)
   else if (e.key === 'ArrowRight') previewStep(1)
@@ -909,6 +919,117 @@ const warnedAgentsText = computed(() => {
     .join('、')
 })
 
+// ─── 记忆引用（M1：回复下方「这条回复用了哪些记忆」）──────────────
+//
+// 数据源 = `GET /api/sessions/:id/memory-refs`（**批量口**：一页 N 条消息发 1 次请求）。
+// 三个不变量：
+//   ① **不按消息发请求**——批量拉一次进 Map，`messageViews` 从 Map 取（A4 的判据）；
+//   ② **拍平到父组件**——`MessageItem` 不得为此遍历消息集合（O(1) 重渲染硬契约）；
+//   ③ **三态分开**——有注入 / 未使用（查了没选中）/ 未检索（压根没查），
+//      见 `utils/memoryRefs.ts`。三者混一句，使用率的分母就没了。
+
+/** 批量口结果：messageId → 条目（会话切换时整体替换） */
+const memoryRefsByMessage = ref<Map<string, MemoryRefsEntry>>(new Map())
+
+/**
+ * 合并窗口：会话切换 / 历史批量到达会让触发源连跳几次（空列表 → 缓存/全量），
+ * 不合并就是一串请求。50ms 足够吃掉同一次加载里的连跳，又短到用户无感。
+ */
+const MEMORY_REFS_DEBOUNCE_MS = 50
+let memoryRefsTimer: ReturnType<typeof setTimeout> | undefined
+/** 请求序号：乱序回来的旧响应不许覆盖新会话的结果（切会话竞态） */
+let memoryRefsSeq = 0
+
+/**
+ * 单次批量口的 id 上限，**必须与 server 的 `MAX_MESSAGE_IDS`（`routes/memory.ts`）同值**——
+ * 超限 server 端是一整条 400（不静默截断），那会让整个会话的记忆行全灭。
+ * 会话历史本身上限 200（`getSessionHistory` 默认 limit），故只有「长驻会话持续追加到
+ * 200 条以上」才触发；触发时**取最近 200 条并留痕**（不静默丢）。
+ */
+const MEMORY_REFS_MAX_IDS = 200
+
+async function fetchMemoryRefs(): Promise<void> {
+  const sessionId = store.activeSessionId
+  const all = store.activeMessages.map((m) => m.id)
+  if (!sessionId || all.length === 0) {
+    memoryRefsByMessage.value = new Map()
+    return
+  }
+  const ids = all.length > MEMORY_REFS_MAX_IDS ? all.slice(-MEMORY_REFS_MAX_IDS) : all
+  if (ids.length !== all.length) {
+    log.error('记忆引用：消息数超单次批量上限，只取最近一批', {
+      total: all.length,
+      requested: ids.length,
+    })
+  }
+  const seq = ++memoryRefsSeq
+  try {
+    const res = await api.getSessionMemoryRefs(sessionId, ids)
+    if (seq !== memoryRefsSeq || store.activeSessionId !== sessionId) return
+    memoryRefsByMessage.value = new Map(Object.entries(res))
+  } catch (err) {
+    // fire-and-forget：失败只留痕，不清空已加载的部分（与 fetchSessionExecutions 同款）
+    log.error('fetchMemoryRefs failed', { error: String(err) })
+  }
+}
+
+function scheduleFetchMemoryRefs(): void {
+  if (memoryRefsTimer) clearTimeout(memoryRefsTimer)
+  memoryRefsTimer = setTimeout(() => {
+    memoryRefsTimer = undefined
+    void fetchMemoryRefs()
+  }, MEMORY_REFS_DEBOUNCE_MS)
+}
+
+// 触发源 = 「会话 + 消息条数 + 末条 id」三者的标量签名：
+// 流式期间消息数组不变（增量在 typingStates 里），故流式 chunk **不触发**重拉；
+// 新回复落库（末条 id 变）才拉一次。
+watch(
+  () =>
+    `${store.activeSessionId ?? ''}|${store.activeMessages.length}|${lastMessageId.value ?? ''}`,
+  () => scheduleFetchMemoryRefs(),
+  { immediate: true }
+)
+
+// ─── 记忆抽屉（形态乙：库内看片段 + 次级链接开当前文档）────────────
+
+/** 当前抽屉里的片段（null = 抽屉关着）；数据来自批量口，**不再发请求** */
+const activeMemoryRef = ref<MemoryRef | null>(null)
+/** 次级链接的目标文档正文（点「打开当前文档」才加载） */
+const docPreview = ref<{ loading: boolean; content: string | null; error: string | null }>({
+  loading: false,
+  content: null,
+  error: null,
+})
+
+function openMemoryRef(ref: MemoryRef): void {
+  activeMemoryRef.value = ref
+  docPreview.value = { loading: false, content: null, error: null }
+}
+
+function closeMemoryRef(): void {
+  activeMemoryRef.value = null
+  docPreview.value = { loading: false, content: null, error: null }
+}
+
+/**
+ * 「打开当前文档」——**当前检出上的文档，不是当时的快照**（形态丙外链被否正是因为
+ * 这一点）。按钮文案与抽屉标题都写「当前文档」，不写「猫当时读到的」。
+ */
+async function loadCurrentDoc(): Promise<void> {
+  const ref = activeMemoryRef.value
+  if (!ref || docPreview.value.loading) return
+  docPreview.value = { loading: true, content: null, error: null }
+  try {
+    const res = await api.getMemoryDoc(ref.docPath)
+    if (activeMemoryRef.value !== ref) return
+    docPreview.value = { loading: false, content: res.content, error: null }
+  } catch (err) {
+    if (activeMemoryRef.value !== ref) return
+    docPreview.value = { loading: false, content: null, error: String(err) }
+  }
+}
+
 // ─── 消息视图模型（渲染边界的承重件）──────────────────────────
 // 抽取 MessageItem 只完成一半：Vue 的更新传播是组件粒度，**前提是 props 引用不变**。
 // 若父组件每次重渲染都现算一遍并把新对象/新数组塞下去，子组件照样全部重渲染——白抽。
@@ -945,6 +1066,8 @@ type MessageView = {
   restartState: 'pending' | 'confirmed' | 'none'
   restartConfirming: boolean
   retractConfirming: boolean
+  /** footer 记忆引用行（M1）——引用稳定（按 messageId 缓存），null = 不渲染该行 */
+  memoryRefs: MemoryRefView | null
 }
 
 /** 逐字段相等判定（引用类型只比引用：msg/statusEntries 都是稳定引用） */
@@ -966,12 +1089,38 @@ function isSameView(a: MessageView, b: MessageView): boolean {
     a.statusEntries === b.statusEntries &&
     a.restartState === b.restartState &&
     a.restartConfirming === b.restartConfirming &&
-    a.retractConfirming === b.retractConfirming
+    a.retractConfirming === b.retractConfirming &&
+    // 记忆行按**引用**比：`memoryRefViewFor` 保证同一份原始条目（引用不变）产出同一个视图对象
+    a.memoryRefs === b.memoryRefs
   )
 }
 
 /** 上一轮视图对象（messageId → view），用于身份复用；随 computed 重算整体替换 */
 const viewCache = new Map<string, MessageView>()
+
+/**
+ * 记忆行视图缓存（messageId → { raw, view }）。
+ *
+ * 原始条目（`memoryRefsByMessage` 里的对象）在两次重拉之间是**同一引用**，故同一原始
+ * 条目必然产出同一个 view 对象——`isSameView` 的 `a.memoryRefs === b.memoryRefs` 才成立。
+ * 没有这层缓存的话，每次重算都新建对象 ⇒ 所有带记忆行的气泡在任意无关更新（含流式
+ * chunk 触发的 messageViews 重算）时全部重渲染——正是抽取 MessageItem 要拆掉的那条链。
+ */
+const memoryViewCache = new Map<
+  string,
+  { raw: MemoryRefsEntry | undefined; view: MemoryRefView | null }
+>()
+
+/** 取正文段最后一个 text 段之外，本函数只看 role 与 id —— user/system 不渲染记忆行 */
+function memoryRefViewFor(msg: Message): MemoryRefView | null {
+  if (msg.role !== 'agent') return null
+  const raw = memoryRefsByMessage.value.get(msg.id)
+  const cached = memoryViewCache.get(msg.id)
+  if (cached && cached.raw === raw) return cached.view
+  const view = buildMemoryRefView(raw)
+  memoryViewCache.set(msg.id, { raw, view })
+  return view
+}
 
 const messageViews = computed<MessageView[]>(() => {
   const msgs = store.activeMessages
@@ -1000,6 +1149,7 @@ const messageViews = computed<MessageView[]>(() => {
       restartState: restartStateFor(msg),
       restartConfirming: store.confirmingRestartMessageId === msg.id,
       retractConfirming: retractConfirm.value === msg.id,
+      memoryRefs: memoryRefViewFor(msg),
     }
     const cached = viewCache.get(msg.id)
     const view = cached && isSameView(cached, fresh) ? cached : fresh
@@ -1008,6 +1158,11 @@ const messageViews = computed<MessageView[]>(() => {
   }
   viewCache.clear()
   next.forEach((v, id) => viewCache.set(id, v))
+  // 记忆行视图缓存的淘汰与 viewCache 同点：已被删掉的消息不留缓存（本组件长驻，
+  // 只增不减的 Map 会随会话时长泄漏）
+  for (const id of Array.from(memoryViewCache.keys())) {
+    if (!next.has(id)) memoryViewCache.delete(id)
+  }
   return views
 })
 </script>
@@ -1170,6 +1325,8 @@ const messageViews = computed<MessageView[]>(() => {
               :restart-state="view.restartState"
               :restart-confirming="view.restartConfirming"
               :retract-confirming="view.retractConfirming"
+              :memory-refs="view.memoryRefs"
+              @open-memory-ref="openMemoryRef"
               @preview-images="openPreview"
               @retract="handleRetract"
               @stop-agent="stopAgent"
@@ -1510,6 +1667,55 @@ const messageViews = computed<MessageView[]>(() => {
         </button>
         <div v-if="previewImages.length > 1" class="lightbox-counter">
           {{ previewIndex + 1 }} / {{ previewImages.length }}
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- 记忆引用抽屉（M1 形态乙）：命中片段全文（来自库，不再发请求）+ 次级链接开当前文档。
+         两处措辞是**口径**不是文案偏好：① 片段是「命中片」，注入进 prompt 的是补齐后的
+         整节；② 「打开当前文档」拿到的是当前检出上的文档，不是当时的快照。 -->
+    <Teleport to="body">
+      <div
+        v-if="activeMemoryRef"
+        class="memory-drawer-mask"
+        role="dialog"
+        aria-modal="true"
+        aria-label="记忆片段"
+        @click.self="closeMemoryRef"
+      >
+        <div class="memory-drawer">
+          <div class="memory-drawer-head">
+            <div class="memory-drawer-title">
+              <span class="memory-drawer-name">{{ activeMemoryRef.docPath }}</span>
+              <span class="memory-drawer-anchor">{{ activeMemoryRef.sectionAnchor }}</span>
+            </div>
+            <button class="memory-drawer-close" aria-label="关闭" @click="closeMemoryRef">✕</button>
+          </div>
+          <div class="memory-drawer-body">
+            <div class="memory-drawer-caption">
+              命中片段全文（检索当时落库）。注意：注入进 prompt
+              的是按节补齐后的整节，与这段话不等价。
+            </div>
+            <pre class="memory-drawer-snippet">{{
+              activeMemoryRef.bodyHead ?? '（这一行没有落片段正文）'
+            }}</pre>
+            <div class="memory-drawer-actions">
+              <button
+                class="memory-drawer-open"
+                :disabled="docPreview.loading"
+                @click="loadCurrentDoc"
+              >
+                {{ docPreview.loading ? '加载中…' : '打开当前文档' }}
+              </button>
+              <span class="memory-drawer-hint">打开的是当前检出上的文档，不是当时的快照</span>
+            </div>
+            <div v-if="docPreview.error" class="memory-drawer-error">
+              读取失败：{{ docPreview.error }}
+            </div>
+            <pre v-else-if="docPreview.content !== null" class="memory-drawer-doc">{{
+              docPreview.content
+            }}</pre>
+          </div>
         </div>
       </div>
     </Teleport>
@@ -2867,6 +3073,201 @@ const messageViews = computed<MessageView[]>(() => {
   justify-content: space-between;
   gap: 8px;
   margin-top: 6px;
+  /* 记忆行（.msg-memory-refs，flex-basis:100% + order:-1）独占第一行；
+     模型/用量与时间仍在第二行两端对齐——加行不改既有两端的布局 */
+  flex-wrap: wrap;
+}
+
+/* ─── 记忆引用行（M1）────────────────────────── */
+.chat-panel .msg-memory-refs {
+  flex-basis: 100%;
+  order: -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.chat-panel .msg-memory-refs .mem-icon {
+  opacity: 0.75;
+}
+
+.chat-panel .msg-memory-refs .mem-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-panel .msg-memory-refs .mem-sep {
+  opacity: 0.45;
+}
+
+/* 条目 = 按钮而非 <a>：它开的是**站内抽屉**，不是链接（用 <a> 会带上浏览器的
+   链接语义与默认样式，还得 preventDefault 拦导航）。 */
+.chat-panel .msg-memory-refs .mem-link {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--accent-text);
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-panel .msg-memory-refs .mem-link:hover {
+  opacity: 0.8;
+}
+
+/* 三态里「没注入」的两档弱化为纯文本：不点、不抢注意力，但仍占位可读 */
+.chat-panel .msg-memory-refs .mem-muted {
+  opacity: 0.7;
+}
+
+/* ─── 记忆抽屉（M1 形态乙）────────────────────── */
+.memory-drawer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.memory-drawer {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  max-height: 80vh;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.memory-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.memory-drawer-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.memory-drawer-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.memory-drawer-anchor {
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.memory-drawer-close {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.memory-drawer-close:hover {
+  color: var(--text-primary);
+}
+
+.memory-drawer-body {
+  padding: 12px 16px 16px;
+  overflow-y: auto;
+}
+
+.memory-drawer-caption {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.memory-drawer-snippet,
+.memory-drawer-doc {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-drawer-doc {
+  margin-top: 10px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.memory-drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.memory-drawer-open {
+  padding: 5px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.memory-drawer-open:hover:not(:disabled) {
+  color: var(--accent-text);
+  border-color: var(--accent-text);
+}
+
+.memory-drawer-open:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.memory-drawer-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.memory-drawer-error {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--accent-red);
 }
 
 .chat-panel .msg-footer .msg-time {

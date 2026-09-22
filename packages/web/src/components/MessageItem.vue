@@ -20,6 +20,8 @@ import { useChatStore, type AgentStatusEntry } from '@/stores/chat'
 import { renderMarkdown } from '@/utils/markdown'
 import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { isAgentStoppable, toolAreaSummary } from '@/utils/tools'
+import type { MemoryRefView } from '@/utils/memoryRefs'
+import type { MemoryRef } from '@/composables/useApi'
 import DiffViewer from './DiffViewer.vue'
 import AgentStatusLabel from './AgentStatusLabel.vue'
 import ToolRow from './ToolRow.vue'
@@ -48,6 +50,13 @@ const props = defineProps<{
   restartState: 'pending' | 'confirmed' | 'none'
   restartConfirming: boolean
   retractConfirming: boolean
+  /**
+   * footer 的记忆引用行（M1）：**父组件算好并做引用缓存**（`utils/memoryRefs.ts` 构造），
+   * `null` = 本条不渲染该行（用户/系统消息，或批量口尚未返回）。
+   *
+   * 硬契约同上：本组件不得为此遍历任何消息集合——一行 `v-for` 只遍历**本 prop 内的数组**。
+   */
+  memoryRefs: MemoryRefView | null
 }>()
 
 const emit = defineEmits<{
@@ -56,6 +65,8 @@ const emit = defineEmits<{
   stopAgent: [agentId: string]
   confirmRestart: [msgId: string]
   cancelRestart: [msgId: string]
+  /** 点记忆条目 → 父组件开抽屉（本组件不碰网络、不持有抽屉态） */
+  openMemoryRef: [ref: MemoryRef]
 }>()
 
 const store = useChatStore()
@@ -299,6 +310,38 @@ function canStop(agentId: string): boolean {
              分组消息同样渲染（用户要求同 agent 连续回复每条都有模型与用量）；
              停止按钮不在此处（B2 重定位：streaming 气泡 / 用户消息状态行） -->
         <div v-if="msg.role !== 'system'" class="msg-footer">
+          <!-- 记忆引用行（M1）：三态**分开措辞**——「未使用记忆」（查了没用）与
+               「未检索记忆」（压根没查）混成一句，使用率的分母就没了。 -->
+          <div
+            v-if="msg.role === 'agent' && memoryRefs"
+            class="msg-memory-refs"
+            :class="`mem-${memoryRefs.state}`"
+          >
+            <template v-if="memoryRefs.state === 'injected'">
+              <span class="mem-icon">📎</span>
+              <span class="mem-count">记忆 {{ memoryRefs.items.length }} 条：</span>
+              <template v-for="(item, mi) in memoryRefs.items" :key="mi">
+                <span v-if="mi > 0" class="mem-sep">/</span>
+                <button
+                  class="mem-link"
+                  :title="item.title"
+                  @click="emit('openMemoryRef', item.ref)"
+                >
+                  {{ item.label }}
+                </button>
+              </template>
+            </template>
+            <span
+              v-else-if="memoryRefs.state === 'none'"
+              class="mem-muted"
+              title="检索跑了，但没有节入选"
+            >
+              未使用记忆
+            </span>
+            <span v-else class="mem-muted" title="本轮压根没有检索（功能关 / 无查询 / a2a 门控）">
+              未检索记忆
+            </span>
+          </div>
           <span
             v-if="msg.role === 'agent' && msg.agentId"
             class="msg-footer-info"
