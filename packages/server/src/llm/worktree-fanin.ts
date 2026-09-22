@@ -169,7 +169,7 @@ export function hasMergeInProgress(opts?: { cwd?: string }): boolean {
   return tryGit(cwd, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']) !== null
 }
 
-/** 幂等判据：ancestor 是否已是 descendant 的祖先（原语仓里已有，本模块 `mergeBranchesInto` / `reclaimCats` 在用） */
+/** 幂等判据：ancestor 是否已是 descendant 的祖先（原语仓里已有，本模块 `mergeBranchesInto` / `reclaimCatBranches` 在用） */
 export function isAncestor(ancestor: string, descendant: string, opts?: { cwd?: string }): boolean {
   const cwd = opts?.cwd ?? process.cwd()
   try {

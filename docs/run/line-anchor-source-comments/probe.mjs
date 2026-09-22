@@ -10,6 +10,14 @@
 //   - 判据不按扩展名枚举（票面 §2.1）：凡 `<路径>:<行号>` 且该路径能后缀匹配到
 //     `git ls-files` 里的真文件，即属本族。这天然排除 IP:端口 / 模型 tag / URL。
 //   - 引用方排除测试文件（`.test.` / `.spec.`）；引用**目标**不设限。
+//   - **C 档（目标已删）单独出口**（审查 P2-2）：目标文件已删时，「真文件」这道门必然
+//     匹配不到 ⇒ 若只判这一道，C 档就**构造上不可达**（判据恰好排除掉它要处理的东西）。
+//     故第二道门用**机制级判据**补：该路径是否出现在 git 历史的删除记录里
+//     （`git log --all --diff-filter=D`）。命中 ⇒ C 档候选；不命中 ⇒ 面外
+//     （IP:端口 / 模型 tag / 对比度比值的同形异义）。
+//   - 探针基名字符类**允许内嵌点号**（审查 P2-1）：旧版 `[A-Za-z0-9_-]+` 把
+//     `socketio.test.ts:2075` 拆成 `test.ts:2075` → 后缀匹配不到真文件 → 静默丢弃。
+//     承重过滤是「真文件门」而不是字符类宽度，放宽安全。
 
 import { execSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -24,11 +32,18 @@ const linesOf = (p) => {
   return lineCache.get(p)
 }
 
-const ANCHOR = /((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,6}):(\d+)(?:-(\d+))?/g
+// 基名字符类含 `.`（旧版不含 ⇒ `socketio.test.ts:2075` 被拆成 `test.ts:2075` 后丢弃）
+const ANCHOR = /((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,6}):(\d+)(?:-(\d+))?/g
 
 const grepOut = run('git grep -nE "[A-Za-z0-9_./-]+\\.[A-Za-z0-9]{1,6}:[0-9]+" -- packages scripts')
 
+// C 档出口的第二道门：历史中被删过的路径（机制级判据，非扩展名枚举）
+const deletedPaths = run('git log --all --diff-filter=D --name-only --format=')
+  .split('\n')
+  .filter(Boolean)
+
 const rows = []
+const cRows = [] // 目标已删（C 档候选）
 for (const line of grepOut.split('\n')) {
   if (!line) continue
   const m = line.match(/^([^:]+):(\d+):(.*)$/)
@@ -40,7 +55,12 @@ for (const line of grepOut.split('\n')) {
     const [anchor, refPath, from, to] = a
     if (text.slice(Math.max(0, (a.index ?? 0) - 2), a.index ?? 0) === '//') continue // URL
     const cands = files.filter((c) => c === refPath || c.endsWith('/' + refPath))
-    if (!cands.length) continue // 不是文件路径（IP / 模型 tag / 已删文件）
+    if (!cands.length) {
+      // 第二道门：解析不到真文件 ⇒ 要么是 C 档（目标已删），要么是面外同形异义
+      const gone = deletedPaths.filter((d) => d === refPath || d.endsWith('/' + refPath))
+      if (gone.length) cRows.push({ src: `${srcFile}:${srcLine}`, anchor, was: gone.join(' | ') })
+      continue
+    }
     const resolved = cands.length === 1 ? cands[0] : null
     const n = Number(from)
     let target = 'AMBIGUOUS: ' + cands.map((c) => c.split('/').slice(-2).join('/')).join(' | ')
@@ -65,4 +85,10 @@ console.log(`源码注释面「路径:行号」锚 —— ${rows.length} 条（�
 console.log('判定方式：逐条读下方「目标行原文」，自己在上下文里判 MATCH / ROTATED / WRONG-FILE。\n')
 for (const r of rows) {
   console.log(`${r.src}\n  锚 → ${r.anchor}\n  目标行原文: ${r.target}\n`)
+}
+
+// C 档单独出口：目标文件已删 ⇒ 「真文件门」结构上取不到它，须另判
+console.log(`\n== C 档（目标文件已删，须按 §2.5「先判声称性质」处置）—— ${cRows.length} 条 ==`)
+for (const r of cRows) {
+  console.log(`${r.src}\n  锚 → ${r.anchor}\n  已删路径: ${r.was}\n`)
 }

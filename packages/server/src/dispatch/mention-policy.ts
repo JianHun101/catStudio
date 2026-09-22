@@ -172,7 +172,7 @@ const REVIEWER_KEEP_PRIORITY: Record<ReviewerVerdict | 'unknown', TargetMatcher[
   // 「请求人」与 prompt 面的占位符语义逐字一致。但**架构师代发起审查**时请求人
   // = store，返工结论会落到架构师而不是真实代码作者，下游 verdict-parser 取不到
   // 非 store 目标 ⇒ `subject=null` + `no_subject`（审查 P3-2 探针实证）。
-  // 这是既有语义、非本笔引入（socketio.test.ts:2075 早已建模该态）。
+  // 这是既有语义、非本笔引入（`socketio.test.ts` 的「reviewer 输出 ❌需重做」用例早已建模该态）。
   // reopen 条件（满足任一即重裁本格，而不是就地改）：
   //   ① 实测出现「代发起审查 → 返工」链且架构师未按铁律 `行首@架构师 请收口`
   //      把链转回作者 —— 即兜底路径被证伪；
