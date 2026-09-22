@@ -8,6 +8,7 @@
  *   - `injectedSections` 的序（错了 ⇒ 注入集顺序错位）
  *   - `judgeRerankNonDegenerate` 的退化检测（**承重**：S0 实测的 softmax-of-one 恒 1）
  *   - `judgeArmVerdict` 的判词优先级（错了 ⇒ 零增量被写成「等价但更省」的收益）
+ *   - `computeDegradation` 的「新增」口径（错了 ⇒ 降级率虚高 9 倍，把覆盖率读数读反）
  *
  * 组装式（真实 DB + 真跑链段）不在此处——那是 `rerank-offline-ab.mjs` 主流程，
  * 由跑批本身 + 报告里的自证闸覆盖。
@@ -23,6 +24,7 @@ import {
   applyRerankScores,
   argmaxContributionIndex,
   buildRerankPairs,
+  computeDegradation,
   injectedSections,
   judgeArmVerdict,
   judgeRerankNonDegenerate,
@@ -279,6 +281,47 @@ describe('quantile（最近秩法）', () => {
 
   it('乱序输入先排序（不假设调用方给的是有序的）', () => {
     expect(quantile([50, 10, 30], 0.5)).toBe(30)
+  })
+})
+
+describe('computeDegradation（A3 ③ 的「新增」口径）', () => {
+  const row = (reason, ms) => ({ reason, ms })
+
+  it('本来就闸外的行不计入「新增」（9 vs 真值 1 的那条）', () => {
+    const live = [
+      row('ok', 9836), // 加 1319ms ⇒ 11155，翻线
+      row('ok', 5240), // 加 1319ms ⇒ 6559，不翻
+      row('timeout', 12000), // 本来就闸外
+    ]
+    const d = computeDegradation(live, 1319, 10000)
+    expect(d.overAfter).toBe(2) // 闸外总数：2（含本来就闸外的那条）
+    expect(d.alreadyOver).toBe(1)
+    expect(d.added).toBe(1) // 「新增」只数翻线的那条
+    expect(d.rate).toBe('1/3')
+  })
+
+  it('先剔再算 ≠ overAfter − alreadyOver（后者靠数据现状成立）', () => {
+    // 构造一条「reason=timeout 但 ms < 闸值」的行（被中止的执行）。
+    // 减法则会把它当成「本来就闸外」从分子里减掉 ⇒ 漏报一条真翻线。
+    const live = [row('timeout', 500), row('ok', 9900)]
+    const d = computeDegradation(live, 200, 10000)
+    expect(d.overAfter).toBe(1)
+    expect(d.added).toBe(1) // 减法会给 max(0, 1-1) = 0
+  })
+
+  it('恰好等于闸值算过闸（>= 不是 >）', () => {
+    expect(computeDegradation([row('ok', 9000)], 1000, 10000).added).toBe(1)
+    expect(computeDegradation([row('ok', 8999)], 1000, 10000).added).toBe(0)
+  })
+
+  it('空输入给 0/0，不抛也不编分母', () => {
+    expect(computeDegradation([], 1319, 10000)).toEqual({
+      denom: 0,
+      alreadyOver: 0,
+      overAfter: 0,
+      added: 0,
+      rate: '0/0',
+    })
   })
 })
 

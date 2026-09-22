@@ -90,6 +90,21 @@ export const ARM2_TOPK = 5
 /** 臂③ 重排后仍取现状注入量——「同样 ≤3 节」是票面的对照前提 */
 export const ARM3_TOPK = 3
 
+/**
+ * 量化交叉核对的**参考档**（比对 q8 的这把尺）。
+ *
+ * 取 `fp32` 而非 `fp16`——**不是偏好，是实测**：本机 onnxruntime 初始化
+ * `model_fp16.onnx` 时直接抛
+ * `GetIndexFromName ... does not exist: InsertedPrecisionFreeCast_/roberta/.../LayerNorm/Constant_output_0
+ * for node: .../SimplifiedLayerNormFusion/`，
+ * 即图优化 pass 在这种 fp16 图上出 bug；关 `graphOptimizationLevel` 才加载得起来。
+ * `model.onnx`（fp32）默认档直接可用，且**不需要给 sidecar 加任何旋钮**。
+ *
+ * 实测两档同分（同一对：fp32 0.962977 / fp16 关优化 0.962865）⇒ 取 fp32 不损判别力，
+ * 还省掉一条「诊断路径与生产路径加载参数不同」的解释负担。
+ */
+export const QUANT_REF_DTYPE = 'fp32'
+
 /** 单次重排请求的超时。**不是生产值**——生产子预算由 R13b 定，见票面 A3 ②。 */
 export const RERANK_REQUEST_TIMEOUT_MS = 10 * 60 * 1000
 
@@ -295,6 +310,31 @@ export function judgeArmVerdict({ arm1Hit, arm2Hit, arm3Hit }) {
     verdict: 'close-ticket',
     message: `臂③(${arm3Hit}) < 臂②(${arm2Hit})：重排不及一行配置 ⇒ **据实关票**`,
   }
+}
+
+/**
+ * A3 ③ 降级率：给定重排的固定开销，**有多少行是「新增」闸外**。
+ *
+ * 「新增」= 判据是 `reason !== 'timeout'` 且加开销后过闸——**不是**「加开销后过闸的行数」。
+ * 两者差在那批 `reason='timeout'` 的行上：它们**本来就闸外**（实测 ms 区间 [10002, 22011]，
+ * 全 ≥ 闸值），加一笔固定开销会把它们原地重复计一遍。实测差：后者报 9，真值 1——
+ * 而这一条正是「降级率」作为**特性覆盖率**读数的承重处，虚高 9 倍会把结论读反。
+ *
+ * 先剔再算（而不是 `overAfter - alreadyOver`）：减法默认了「本来就闸外的行必然仍在 overAfter 里」，
+ * 那是**靠数据现状成立**的假设；先剔只依赖 `reason` 字段本身。
+ *
+ * @param {{ reason: string | null, ms: number }[]} liveRows 已剔 `skipped-a2a` 的行
+ * @param {number} addedCostMs 重排固定开销（均对数 × per-pair）
+ * @param {number} thresholdMs 闸值
+ */
+export function computeDegradation(liveRows, addedCostMs, thresholdMs) {
+  const denom = liveRows.length
+  const alreadyOver = liveRows.filter((r) => r.reason === 'timeout').length
+  const overAfter = liveRows.filter((r) => r.ms + addedCostMs >= thresholdMs).length
+  const added = liveRows.filter(
+    (r) => r.reason !== 'timeout' && r.ms + addedCostMs >= thresholdMs
+  ).length
+  return { denom, alreadyOver, overAfter, added, rate: `${added}/${denom}` }
 }
 
 /** 分位数（最近秩法，`q∈[0,1]`）。空数组 ⇒ null（**不返回 0**：「没测」≠「测到 0」） */
@@ -583,8 +623,26 @@ export function renderReport(ctx) {
     '   救回组 2/5 是多片节、丢掉组 **6/8** 是多片节 —— **方向性提示明显，但 n=13、未做检验**，'
   )
   L.push('   **不足以当结论**。若将来重立票，这是第一个该查的地方。')
-  L.push('2. **量化（q8）未排除** —— 见 `...latency.md` §三（`--quant-crosscheck`）。触发条件')
-  L.push('   （臂③ 增量 ≤ 0）已满足，该核对**必须跑**才算把「重排无效」这条结论锁死。')
+  if (ctx.quantCrosscheck) {
+    // 触发条件（臂③ 增量 ≤ 0）已满足 ⇒ 按跑批前定死的条件跑了。**据实渲染，不预置结论**：
+    // hitDelta ≠ 0 时判词本身就该被推翻，写死「已排除」会把一次该翻的结论粉饰成绿的。
+    const q = ctx.quantCrosscheck
+    const quantRead =
+      q.hitDelta === 0
+        ? '命中数不变 ⇒ 量化**不改结论**，「重排无效」不是量化造出来的（量化作为替代解释被排除）。'
+        : `命中差 ${q.hitDelta} 条 ⇒ 量化**会改结论**，q8 下的判词不可直接采信。`
+    L.push('2. **量化（q8）已交叉核对** —— 触发条件（臂③ 增量 ≤ 0）已满足，按跑批前定死的条件跑。')
+    L.push(
+      `   读数见 \`...latency.md\` §三：臂③ 命中 q8 ${q.hitQ8} / ${q.refDtype} ${q.hitRef}（Δ=${q.hitDelta}）、`
+    )
+    L.push(
+      `   top-3 节集全同 ${q.top3SameEntries}/${q.entries} 条、argmax 片全同 ${q.argmaxSameEntries}/${q.entries} 条。`
+    )
+    L.push(`   ${quantRead}`)
+  } else {
+    L.push('2. **量化（q8）未排除** —— 见 `...latency.md` §三（`--quant-crosscheck`）。触发条件')
+    L.push('   （臂③ 增量 ≤ 0）已满足，该核对**必须跑**才算把「重排无效」这条结论锁死。')
+  }
   L.push(
     '3. **「现状 topK」的口径在票面与活库之间漂移** —— 见 §零。本条影响的是**归档结论的可读性**，'
   )
@@ -631,16 +689,54 @@ export function renderLatencyReport(ctx) {
   L.push('> 本批是**真实切片**（长度不一，短的几十字）⇒ 单对成本随序列长度走。')
   L.push('> 凡把这个数从 S0 曲线线性外推的做法，都会高估。')
   L.push('')
-  L.push('## 二、降级率推演（A3 ③）')
+  L.push('## 二、A3 ① timeout 基线 + ③ 降级率推演')
   L.push('')
-  L.push('| 面 | 分母 | 新增降级 | 降级率 |')
-  L.push('| --- | --- | --- | --- |')
+  L.push('### A3 ① timeout 基线（**实施者独立复核**，票面明令不采信店长给的数）')
+  L.push('')
+  const tb = latency.timeoutBaseline
+  L.push('| 读数 | 值 |')
+  L.push('| --- | --- |')
+  L.push(`| 分母（reason ≠ \`skipped-a2a\`） | ${tb.denom} |`)
+  L.push(`| 分子（reason = \`timeout\`） | ${tb.timeout} |`)
+  L.push(`| **基线** | **${tb.rate} = ${tb.pct}%** |`)
+  L.push(`| 对照：不剔 \`skipped-a2a\` 的分母 | ${tb.denomAllReasons} ⇒ ${tb.pctAllReasons}% |`)
+  L.push(`| \`skipped-a2a\` 行数（全部 \`retrieval_ms = 0\`） | ${tb.denomAllReasons - tb.denom} |`)
+  L.push(
+    `| 非 timeout 行的最慢一条 | ${tb.slowestNonTimeout} ms（距闸余量 ${latency.headroomMs} ms） |`
+  )
+  L.push('')
+  L.push(
+    `> 余量的意义：翻线所需的最小池深 N = ceil(${latency.headroomMs} / ${latency.perPairMs}) = ` +
+      `${Math.ceil(latency.headroomMs / latency.perPairMs)} 对。⚠️ 这是**当前活库快照**上的读数，` +
+      '活库每条新检索都会移动这条最慢行 ⇒ 余量是**会变的**。'
+  )
+  L.push('')
+  L.push('### A3 ③ 降级率推演')
+  L.push('')
+  L.push('| 面 | 分母 | **新增**降级 | 降级率 | 闸外总数 |')
+  L.push('| --- | --- | --- | --- | --- |')
   for (const d of latency.degradation) {
-    L.push(`| ${d.face} | ${d.denom} | ${d.added} | ${d.rate} |`)
+    L.push(
+      `| ${d.face} | ${d.denom} | ${d.added} | ${d.rate} | ${
+        d.overAfter === undefined ? '—' : d.overAfter
+      } |`
+    )
   }
+  L.push('')
+  const live = latency.degradation[1]
+  L.push(
+    `> 「新增」= 闸外总数 − **本来就闸外**的行。活库那 ${live.denom} 行里已有 **${live.alreadyOver}** 行是` +
+      ` \`reason=timeout\`（ms 本就 ≥ ${latency.thresholdMs}）—— 不剔掉的话，加一笔固定开销会把它们` +
+      '原地重复计一遍，「新增」当场虚高。'
+  )
   L.push('')
   L.push('> 生产侧**尚未接重排**，「跳过重排」在今天是结构性条款（票面 A3 ②），不是既存行为。')
   L.push('> 本表是「若接上、给定子预算」的推演，**不作 R13a 的判据**。')
+  L.push('>')
+  L.push(
+    `> ⚠️ 活库面用的是**均对数**（${latency.meanPairsPerEntry} 对/条）——那 40 条金标查询的池深` +
+      '**不代表真实流量**的池深分布。要精确推演得先采真实流量的池深，本票没采。'
+  )
   L.push('')
   L.push('## 三、量化交叉核对（可选诊断 `--quant-crosscheck`）')
   L.push('')
@@ -649,12 +745,15 @@ export function renderLatencyReport(ctx) {
     L.push('')
   } else {
     const q = ctx.quantCrosscheck
-    L.push(`> 模型 \`${q.model}\`，比 q8 与 fp16 两把尺在**同一批 pairs** 上的读数。`)
+    L.push(`> 模型 \`${q.model}\`，比 q8 与 ${q.refDtype} 两把尺在**同一批 pairs** 上的读数。`)
+    L.push(
+      `> 参考档取 \`${q.refDtype}\` 的理由（fp16 在本机 onnxruntime 上初始化即抛）见脚本的 \`QUANT_REF_DTYPE\`。`
+    )
     L.push('')
     L.push('| 读数 | 值 |')
     L.push('| --- | --- |')
     L.push(`| 臂③ 命中（q8） | ${q.hitQ8} |`)
-    L.push(`| 臂③ 命中（fp16） | ${q.hitFp16} |`)
+    L.push(`| 臂③ 命中（${q.refDtype}） | ${q.hitRef} |`)
     L.push(`| **命中差** | **${q.hitDelta}** |`)
     L.push(`| top-3 节集完全相同的条目 | ${q.top3SameEntries} / ${q.entries} |`)
     L.push(`| argmax 片相同的条目 | ${q.argmaxSameEntries} / ${q.entries} |`)
@@ -685,7 +784,7 @@ export async function main(argv = process.argv.slice(2)) {
         '  R13a 离线三臂对照（topK=3 / topK=5 / topK=3+重排）。**生产链路零改动**。\n' +
         '  报告缺省落 docs/eval/rerank-offline-ab-<date>.md，同批另出 .json（均确定性）\n' +
         '  与 .latency.md / .latency.json（计时面，不可复现）。\n' +
-        '  --quant-crosscheck  追加 q8-vs-fp16 排序一致性核对（诊断，默认关）。\n' +
+        `  --quant-crosscheck  追加 q8-vs-${QUANT_REF_DTYPE} 排序一致性核对（诊断，默认关）。\n` +
         '                      触发条件是跑批前定死的：臂③ 增量 ≈0 或为负时才跑。\n'
     )
     return 0
@@ -1129,26 +1228,49 @@ export async function main(argv = process.argv.slice(2)) {
     const THRESHOLD_MS = 10000
 
     // 降级率两面：① 黄金集实测面；② 活库分布面（用**真实池深**推固定开销）
-    const liveMs = db
+    const liveRows = db
       .prepare(
-        "SELECT retrieval_ms AS ms FROM retrieval_events WHERE reason <> 'skipped-a2a' AND retrieval_ms IS NOT NULL"
+        "SELECT retrieval_ms AS ms, reason FROM retrieval_events WHERE reason <> 'skipped-a2a' AND retrieval_ms IS NOT NULL"
       )
       .all()
-      .map((r) => r.ms)
     const meanPairs = totalPairs / Math.max(1, timings.length)
-    const addedLive = liveMs.filter((ms) => ms + meanPairs * perPairMs >= THRESHOLD_MS).length
+    /** A3 ①：timeout 基线。**分母剔 `skipped-a2a`**（那些行 `retrieval_ms` 恒 0，永不可能 timeout
+     *  ⇒ 计入分母属稀释）。票面明令实施者独立复核，故这里**自己算一遍**并把对照分母一并报出。 */
+    const denomAllReasons = db
+      .prepare('SELECT COUNT(*) AS n FROM retrieval_events WHERE retrieval_ms IS NOT NULL')
+      .get().n
+    const timeoutCount = liveRows.filter((r) => r.reason === 'timeout').length
+    const okOnly = liveRows.filter((r) => r.reason !== 'timeout').map((r) => r.ms)
+    const timeoutBaseline = {
+      denom: liveRows.length,
+      timeout: timeoutCount,
+      rate: `${timeoutCount}/${liveRows.length}`,
+      pct: liveRows.length ? +((timeoutCount / liveRows.length) * 100).toFixed(3) : null,
+      denomAllReasons,
+      pctAllReasons:
+        denomAllReasons > 0 ? +((timeoutCount / denomAllReasons) * 100).toFixed(3) : null,
+      slowestNonTimeout: okOnly.length ? Math.max(...okOnly) : null,
+    }
+    const headroomMs =
+      timeoutBaseline.slowestNonTimeout === null
+        ? null
+        : THRESHOLD_MS - timeoutBaseline.slowestNonTimeout
+    const liveDeg = computeDegradation(liveRows, meanPairs * perPairMs, THRESHOLD_MS)
+    const overGolden = totalMsList.filter((ms) => ms >= THRESHOLD_MS).length
     const degradation = [
       {
         face: '黄金集（实测 retrievalMs + 实测 rerankMs）',
         denom: timings.length,
-        added: totalMsList.filter((ms) => ms >= THRESHOLD_MS).length,
-        rate: `${totalMsList.filter((ms) => ms >= THRESHOLD_MS).length}/${timings.length}`,
+        added: overGolden,
+        rate: `${overGolden}/${timings.length}`,
       },
       {
         face: `活库全量（推演：+${meanPairs.toFixed(1)} 对 × ${perPairMs.toFixed(1)}ms）`,
-        denom: liveMs.length,
-        added: addedLive,
-        rate: `${addedLive}/${liveMs.length}`,
+        denom: liveDeg.denom,
+        added: liveDeg.added,
+        rate: liveDeg.rate,
+        alreadyOver: liveDeg.alreadyOver,
+        overAfter: liveDeg.overAfter,
       },
     ]
     const latency = {
@@ -1161,6 +1283,8 @@ export async function main(argv = process.argv.slice(2)) {
       totalP50: quantile(totalMsList, 0.5),
       totalP95: quantile(totalMsList, 0.95),
       thresholdMs: THRESHOLD_MS,
+      timeoutBaseline,
+      headroomMs,
       overGateInGolden: totalMsList.filter((ms) => ms >= THRESHOLD_MS).length,
       pairsTotal: totalPairs,
       degradation,
@@ -1169,7 +1293,7 @@ export async function main(argv = process.argv.slice(2)) {
     // ─── 量化交叉核对（**可选诊断，默认关**；触发条件见下）───
     //
     // 触发条件是**跑批前就定死的**（店长裁决）：「仅当臂③ 相对臂② 增量 ≈ 0 或为负时才跑
-    // q8-vs-fp16 一致性」——只有结论是「重排无效」时，量化误差才是必须排除的替代解释。
+    // q8-vs-<参考档> 一致性」——只有结论是「重排无效」时，量化误差才是必须排除的替代解释。
     // 先定条件再跑批，防出数后挪判据。
     //
     // 它**不改任何已报的臂**：只拿同一批 `pairs` 换一把 dtype 的尺子再算一遍臂③，
@@ -1179,45 +1303,47 @@ export async function main(argv = process.argv.slice(2)) {
       const { createTransformersReranker, RERANK_MODEL } = await import(
         pathToFileURL(path.join(root, 'scripts/flywheel/embed-server.mjs')).href
       )
-      const fp16 = createTransformersReranker(RERANK_MODEL, 'fp16')
+      const ref = createTransformersReranker(RERANK_MODEL, QUANT_REF_DTYPE)
       const rows = []
-      let hitFp16 = 0
+      let hitRef = 0
       for (const p of perEntry) {
-        const scores = await fp16.rerank(p.pairs.map(({ query, passage }) => ({ query, passage })))
-        const order16 = applyRerankScores({ order: p.order, pairs: p.pairs, scores })
-        const merged16 = injectBySection({ order: order16, topK: ARM3_TOPK })
+        const scores = await ref.rerank(p.pairs.map(({ query, passage }) => ({ query, passage })))
+        const refOrder = applyRerankScores({ order: p.order, pairs: p.pairs, scores })
+        const refMerged = injectBySection({ order: refOrder, topK: ARM3_TOPK })
         const sections = injectedSections({
-          order: merged16.order,
-          injectedIds: merged16.injectedIds,
+          order: refMerged.order,
+          injectedIds: refMerged.injectedIds,
         })
         const s = scoreEntry({ entry: p.entry, result: { ...p.result, sections } })
-        if (p.entry.kind !== 'negative') hitFp16 += s.hit
+        if (p.entry.kind !== 'negative') hitRef += s.hit
         const keysOf = (secs) => secs.map((x) => anchorKey(x.docPath, x.sectionAnchor)).sort()
         const a = keysOf(p.top3Sections)
         const b = keysOf(sections)
         rows.push({
           id: p.entry.id,
           top3Same: a.length === b.length && a.every((x, i) => x === b[i]),
-          argmaxSame: p.rerankOrder[0].chunkId === order16[0].chunkId,
+          argmaxSame: p.rerankOrder[0].chunkId === refOrder[0].chunkId,
           maxAbsScoreDelta: Math.max(...scores.map((v, i) => Math.abs(v - p.rerankScores[i]))),
         })
       }
       quantCrosscheck = {
         model: RERANK_MODEL,
-        dtypes: ['q8', 'fp16'],
+        dtypes: ['q8', QUANT_REF_DTYPE],
+        refDtype: QUANT_REF_DTYPE,
         hitQ8: arms[2].hit,
-        hitFp16,
-        hitDelta: hitFp16 - arms[2].hit,
+        hitRef,
+        hitDelta: hitRef - arms[2].hit,
         top3SameEntries: rows.filter((r) => r.top3Same).length,
         argmaxSameEntries: rows.filter((r) => r.argmaxSame).length,
         entries: rows.length,
         maxAbsScoreDelta: Math.max(...rows.map((r) => r.maxAbsScoreDelta)),
         note:
-          'hitFp16 与 hitQ8 的差 = 量化对**结论**的影响；top3SameEntries = 量化对**名次**的影响。' +
+          `hitRef（${QUANT_REF_DTYPE}）与 hitQ8 的差 = 量化对**结论**的影响；` +
+          'top3SameEntries = 量化对**名次**的影响。' +
           '两者都小 ⇒ 「重排无效」不是量化造出来的（量化作为替代解释被排除）。',
       }
       process.stderr.write(
-        `[eval:rerank-ab] 量化交叉核对：q8 命中 ${arms[2].hit} / fp16 命中 ${hitFp16}` +
+        `[eval:rerank-ab] 量化交叉核对：q8 命中 ${arms[2].hit} / ${QUANT_REF_DTYPE} 命中 ${hitRef}` +
           `（Δ=${quantCrosscheck.hitDelta}）；top-3 节集全同 ${quantCrosscheck.top3SameEntries}/${rows.length} 条；` +
           `argmax 全同 ${quantCrosscheck.argmaxSameEntries}/${rows.length} 条；` +
           `最大分数差 ${quantCrosscheck.maxAbsScoreDelta.toExponential(3)}\n`
