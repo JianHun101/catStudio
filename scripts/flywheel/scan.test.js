@@ -592,12 +592,21 @@ function walkMdFiles(dir) {
   return out
 }
 
-/** 扫 `prefixes` 下全部 MD（任意扩展名的**目标路径**都算），返回命中清单 */
+/**
+ * 扫 `prefixes` 下全部 MD（任意扩展名的**目标路径**都算），返回命中清单。
+ *
+ * **前缀目录不存在也计入命中**——静默 `continue` 会让「前缀名写错 / 目录还没建」
+ * 退化成「零扫描 ⇒ 报绿」，正是本仓栽过的「门禁退化成静默放行」。守卫要 fail-loud，
+ * 就不能有这个口子。
+ */
 function findLineAnchors(prefixes, repoRoot) {
   const hits = []
   for (const prefix of prefixes) {
     const abs = path.join(repoRoot, prefix)
-    if (!fs.existsSync(abs)) continue
+    if (!fs.existsSync(abs)) {
+      hits.push(`前缀目录不存在：${prefix}`)
+      continue
+    }
     for (const file of walkMdFiles(abs)) {
       const rel = path.relative(repoRoot, file).split(path.sep).join('/')
       fs.readFileSync(file, 'utf8')
@@ -649,11 +658,19 @@ describe('行号锚守卫 检索面零行号锚', () => {
     )
   })
 
-  it('覆盖面派生自常量（非硬编码三目录）：prefixes 加一个目录 ⇒ 守卫自动覆盖', () => {
-    withTmpTree({ 'docs/zzz/x.md': '# 甲\n\n见 `reply.ts:417`。\n' }, (tmp) => {
-      expect(findLineAnchors(['docs/adr/'], tmp)).toEqual([]) // 不在传入面内 ⇒ 不抓
-      expect(findLineAnchors(['docs/adr/', 'docs/zzz/'], tmp)).toHaveLength(1) // 进面 ⇒ 抓
-    })
+  it('覆盖面派生自常量（非硬编码三目录）＋前缀缺席 fail-loud', () => {
+    withTmpTree(
+      {
+        'docs/adr/x.md': '# 甲\n\n见 `reply.ts` 的 `resolveRolePlaceholders`。\n',
+        'docs/zzz/x.md': '# 甲\n\n见 `reply.ts:417`。\n',
+      },
+      (tmp) => {
+        expect(findLineAnchors(['docs/adr/'], tmp)).toEqual([]) // 面内干净 ⇒ 不抓
+        expect(findLineAnchors(['docs/adr/', 'docs/zzz/'], tmp)).toHaveLength(1) // 加进面 ⇒ 抓
+        // 前缀指向不存在的目录 = 守卫面缺一块 ⇒ 必须报，不许静默绿（假绿门）
+        expect(findLineAnchors(['docs/nope/'], tmp)).toEqual(['前缀目录不存在：docs/nope/'])
+      }
+    )
   })
 
   it('判据不误伤（反对照）：IP:端口 / URL:端口 / 纯行数 / 时刻 都不算锚', () => {
