@@ -559,6 +559,122 @@ describe('S12 向量行真写进去了（G3）', () => {
   })
 })
 
+// ─── 行号锚守卫（行号锚去行号化票） ─────────────────────
+// 不蹭 S1–S13 编号：那组是票庚 spec 的编号面，本组是本票新增的机制守卫。
+// 唯一可 grep 的名 = `行号锚守卫`。
+
+/**
+ * **守卫面 ≡ 检索面**：`SCAN_PREFIXES` 下的 MD 会被切片、嵌入、注入每只猫的
+ * system prompt。行号是源码的**易变投影**——一次插行就失效，且失效**不报错**。
+ * 本组守卫把「文档引源码一律锚符号名/字面量，不锚行号」钉在提交期。
+ *
+ * **判据从 `SCAN_PREFIXES` 派生**（不硬编码三目录）：将来谁往白名单加目录，
+ * 守卫自动覆盖 ⇒ 覆盖面永远等于检索面（用例三即此性质的反对照）。
+ *
+ * **形态**：`<带扩展名的路径>:<行号>`（含 `-<行号>` 区间）＋同机制的中文记号
+ * `<路径> 第 N 行`。**不按扩展名枚举**——族边界按失效机制划：本票立项时的
+ * 反面教材正是初版判据只认 `.ts/.mjs/.js/.vue/.json`，漏掉 `manifest.yaml`。
+ */
+const LINE_ANCHOR_PATTERNS = [
+  // 前置边界 `(?<![\w/\\])` 排除词内与 URL（`//host:port` 的 host 段前是 `/`）。
+  // 扩展名须**以字母开头**——`127.0.0.1:3200` 的尾段是数字、不是扩展名，故不误伤。
+  /(?<![\w/\\])[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z][A-Za-z0-9]*:[0-9]+(?:-[0-9]+)?/g,
+  /(?<![\w/\\])[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z][A-Za-z0-9]*\s*第\s*[0-9]+\s*行/g,
+]
+
+function walkMdFiles(dir) {
+  const out = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...walkMdFiles(abs))
+    else if (entry.isFile() && entry.name.endsWith('.md')) out.push(abs)
+  }
+  return out
+}
+
+/** 扫 `prefixes` 下全部 MD（任意扩展名的**目标路径**都算），返回命中清单 */
+function findLineAnchors(prefixes, repoRoot) {
+  const hits = []
+  for (const prefix of prefixes) {
+    const abs = path.join(repoRoot, prefix)
+    if (!fs.existsSync(abs)) continue
+    for (const file of walkMdFiles(abs)) {
+      const rel = path.relative(repoRoot, file).split(path.sep).join('/')
+      fs.readFileSync(file, 'utf8')
+        .split('\n')
+        .forEach((line, i) => {
+          for (const re of LINE_ANCHOR_PATTERNS) {
+            re.lastIndex = 0
+            for (const m of line.matchAll(re)) hits.push(`${rel}:${i + 1} → ${m[0]}`)
+          }
+        })
+    }
+  }
+  return hits
+}
+
+/** 临时树夹具（与 beforeEach 的 root 无关——本组要能自造任意 prefixes 面） */
+function withTmpTree(files, fn) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fw-anchor-'))
+  try {
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = path.join(tmp, rel)
+      fs.mkdirSync(path.dirname(abs), { recursive: true })
+      fs.writeFileSync(abs, content, 'utf8')
+    }
+    return fn(tmp)
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+describe('行号锚守卫 检索面零行号锚', () => {
+  it('SCAN_PREFIXES 下全部 MD 零行号锚（fail-loud：命中即红，无白名单豁免、无 ratchet）', () => {
+    const hits = findLineAnchors(SCAN_PREFIXES, REPO_ROOT)
+    expect(hits, `检索面残留行号锚（去行号化：锚符号名/字面量）：\n${hits.join('\n')}`).toEqual([])
+  })
+
+  it('真空性反对照：塞锚 ⇒ 红；删掉 ⇒ 转绿（证明判据能被触发，不是恒真门）', () => {
+    // 两种记号各塞一次——只跑绿的一次不算验证
+    for (const planted of ['见 `reply.ts:417` 的解析调用。', '见 wayfinder/SKILL.md 第 13 行。']) {
+      withTmpTree({ 'docs/adr/x.md': `# 甲\n\n${planted}\n` }, (tmp) => {
+        expect(findLineAnchors(['docs/adr/'], tmp)).toHaveLength(1)
+      })
+    }
+    withTmpTree(
+      { 'docs/adr/x.md': '# 甲\n\n见 `reply.ts` 的 `resolveRolePlaceholders`。\n' },
+      (tmp) => {
+        expect(findLineAnchors(['docs/adr/'], tmp)).toEqual([])
+      }
+    )
+  })
+
+  it('覆盖面派生自常量（非硬编码三目录）：prefixes 加一个目录 ⇒ 守卫自动覆盖', () => {
+    withTmpTree({ 'docs/zzz/x.md': '# 甲\n\n见 `reply.ts:417`。\n' }, (tmp) => {
+      expect(findLineAnchors(['docs/adr/'], tmp)).toEqual([]) // 不在传入面内 ⇒ 不抓
+      expect(findLineAnchors(['docs/adr/', 'docs/zzz/'], tmp)).toHaveLength(1) // 进面 ⇒ 抓
+    })
+  })
+
+  it('判据不误伤（反对照）：IP:端口 / URL:端口 / 纯行数 / 时刻 都不算锚', () => {
+    withTmpTree(
+      {
+        'docs/adr/x.md': [
+          '# 甲',
+          '',
+          '服务监听 `127.0.0.1:3200`，Vite 代理 `http://127.0.0.1:5173`。',
+          '截图 609 行、迁移 9723 行、`done` 1079/1342 行。',
+          '时段 16:09 / 02:24 各一次。',
+          '',
+        ].join('\n'),
+      },
+      (tmp) => {
+        expect(findLineAnchors(['docs/adr/'], tmp)).toEqual([])
+      }
+    )
+  })
+})
+
 // ─── C3 扫描器端口隔离（票辰） ─────────────────────────
 
 describe('C3 扫描器端口隔离可证伪', () => {

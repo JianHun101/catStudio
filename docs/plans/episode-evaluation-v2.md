@@ -21,7 +21,7 @@ evidence:
   - **U 根**：用户原始任务消息（真实用户任务锚点）。
   - **H 根**：交接审查链根（A2A 交接文档投递链锚点）。
   - 两者都是合法 episode 根，各自独立成 episode；`root_triggered_by` 列区分。
-- **辅助键**：`task_id`（U 根自身值，客户端传入，可为 NULL——ingest.ts:102 `taskId || null`）仅作 episode 归组辅助键，**不作结局判定的承重键**（覆盖率不足已降级）。结局判定的关联键是**执行链 trace_id 抄录的 chain_task_id**（锚定源钉死见 G2 第六轮：取 execution_logs.trace_id，不取 messages.task_id）。
+- **辅助键**：`task_id`（U 根自身值，客户端传入，可为 NULL——见 `connectors/ingest.ts` 的 `IngestInput.taskId`）仅作 episode 归组辅助键，**不作结局判定的承重键**（覆盖率不足已降级）。结局判定的关联键是**执行链 trace_id 抄录的 chain_task_id**（锚定源钉死见 G2 第六轮：取 execution_logs.trace_id，不取 messages.task_id）。
 
 ## 2. 结局分类：7 类 + 判定优先级（含第四轮修正）
 
@@ -51,7 +51,7 @@ evidence:
 
 > N3 口径（第五轮修）：error_type 裸比较遇 NULL 存量行（pre-migration failed 行）
 > SQL 中 `NULL != 'server_restart'` 为假 → 既不算非重启失败也不算重启失败 → 落
-> unclassified。改用 COALESCE 对齐 L1 既有契约（l1-aggregator.ts:80
+> unclassified。改用 COALESCE 对齐 L1 既有契约（`eval/l1-aggregator.ts` 的 `failed_non_infra` 聚合项
 > `COALESCE(error_type, 'unknown') != 'server_restart'`）：NULL 存量行 → 'unknown'
 > → 属非重启失败 → 走判定 3 needs_investigation，不再落 unclassified。
 
@@ -64,8 +64,8 @@ evidence:
 
 **修正后**：`无 running 行 且 无 completed 行 且 无非重启失败行 且（存在 failed(error_type='server_restart') 行 或 卡态超 30min）→ abandoned`
 
-- **反例场景**：重启打断首跑 → fixStuck 标 `failed/server_restart`（executionLogs.ts:237，双写 error_message + error_type）→ 恢复重跑成功插 `completed` 新行（dispatch/index.ts:181 恢复路径 insertExecutionLog）。修正前「存在 failed(server_restart)」即判 abandoned，**办成的任务误判放弃**。
-- **正确语义来源**：镜像 socketio.ts:1512 恢复机制的「仅 server_restart 记录」判据（`serverRestartLogs` 只筛 `failed && error_message === 'server_restart'` 且不混入其他状态行）。
+- **反例场景**：重启打断首跑 → fixStuck 标 `failed/server_restart`（`db/repository/executionLogs.ts` 的 `fixStuckExecutionLogs`，双写 error_message + error_type）→ 恢复重跑成功插 `completed` 新行（`execution/serial.ts` 的执行收尾 `insertExecutionLog` 调用处——恢复重跑走同一条收尾路径）。修正前「存在 failed(server_restart)」即判 abandoned，**办成的任务误判放弃**。
+- **正确语义来源**：镜像 `execution/recovery.ts` 恢复机制的「仅 server_restart 记录」判据（`serverRestartLogs` 只筛 `failed && error_message === 'server_restart'` 且不混入其他状态行）。
 - **N2 覆盖**：`[failed(server_restart), failed(timeout)]` 混合失败因含非重启失败行（timeout），走判定 3 归因，不再被「存在 server_restart」吸进 abandoned——守卫自然覆盖，无需额外规则。
 
 ### G2 拍板（第五轮重写）：U 根 episode 的 success 跨链范围——执行链 task_id 关联
@@ -77,11 +77,11 @@ evidence:
 1. v2 核心指标是「真实用户任务办成率」，U 根是用户任务锚点。若 U 不参与 success 计数（方案 A），无审查链的日常任务（绝大多数）结局全落 unclassified，主指标口径塌。
 2. 双计消除：**任务结局（success/corrected_success 等 7 类）只统计在 U 根 episode 上**；H 根（审查链）episode 只统计审查链元指标（verdict 分布、审查轮数、打回率），不参与任务结局计数。
 
-**关联机制重写**（第四轮方案有洞，吐槽猫复核实锤：① review_verdicts 无 task_id 列（db/index.ts:242-249），「同 task_id」须经 join 且路径未写；② U 根 task_id 可为 NULL（ingest.ts:102 `taskId || null`），直接比 U 根 task_id 时 `task_id = NULL` 永不匹配 →「无后序 reject/suggest」恒真 → **被 reject 的任务误判 success**，正砸在 G2 想防的核心指标错误上。第六轮再修两个残留洞，见 G2-残留 A/B）：
+**关联机制重写**（第四轮方案有洞，吐槽猫复核实锤：① review_verdicts 无 task_id 列（见 `db/migrations.ts` 的 `review_verdicts` 表建表 DDL），「同 task_id」须经 join 且路径未写；② U 根 task_id 可为 NULL（见 `connectors/ingest.ts` 的 `IngestInput.taskId`），直接比 U 根 task_id 时 `task_id = NULL` 永不匹配 →「无后序 reject/suggest」恒真 → **被 reject 的任务误判 success**，正砸在 G2 想防的核心指标错误上。第六轮再修两个残留洞，见 G2-残留 A/B）：
 
-- **关联键 = chain_task_id，锚定源钉死 = 链末 execution_log.trace_id（G2-残留 A 修）**：不取 messages.task_id——`messages.task_id` 与 `execution_logs.trace_id` 是两个值不同的列：用户自带 taskId 的链（如 `task-123`）链内消息 task_id = 用户值，而 E3 反查（commit_hash → execution_logs → trace_id）与审查链投递拿到的都是 trace_id。若从 messages.task_id 抄录 → JOIN `m.task_id = chain_task_id` 永不匹配 → 被 reject 的任务误判 success（G2-B 原 bug 复现）。**从 execution_logs.trace_id 抄录（insertExecutionLog 每行写 traceId，db/index.ts:113）与 E3 反查同源，两值必一致**。
+- **关联键 = chain_task_id，锚定源钉死 = 链末 execution_log.trace_id（G2-残留 A 修）**：不取 messages.task_id——`messages.task_id` 与 `execution_logs.trace_id` 是两个值不同的列：用户自带 taskId 的链（如 `task-123`）链内消息 task_id = 用户值，而 E3 反查（commit_hash → execution_logs → trace_id）与审查链投递拿到的都是 trace_id。若从 messages.task_id 抄录 → JOIN `m.task_id = chain_task_id` 永不匹配 → 被 reject 的任务误判 success（G2-B 原 bug 复现）。**从 execution_logs.trace_id 抄录（`db/repository/executionLogs.ts` 的 `insertExecutionLog` 每行写 traceId）与 E3 反查同源，两值必一致**。
 - **episodes 表新增列 `chain_task_id TEXT`（允许 NULL，仅零执行场景，见 G2-N5）**：锚定时从链末 execution_log.trace_id 抄录。
-- **G2-残留 B 修：持久化层接线小改（E3 项）**：socketio.ts:2297 agent 回复落库 `insertAgentMessage(..., triggerMsg.taskId || null, ...)` 改为 `|| traceId`（与瞬态层 1060 `taskId = triggerMsg.taskId || traceId` 同构，一行）。原因：1060 只出现在 A2A 递归派发的瞬态 agentTrigger 上，真正落库路径是 2297 且为 `|| null`（messages 表无 trace_id 列可兜底，db/index.ts:70-78）——第五轮「链内 agent 回复 100% 非空」依据有误。补 `|| traceId` 后：投递带 taskId → 审查回复落库 = 源链 trace_id，JOIN 匹配；投递缺失（老版本已知噪声）→ 落库 = 审查链自身 trace_id，仍关联不到任务链，噪声记录在案。
+- **G2-残留 B 修：持久化层接线小改（E3 项）**：agent 回复落库点（`execution/reply.ts` 的 `insertAgentMessage` 调用处） `insertAgentMessage(..., triggerMsg.taskId || null, ...)` 改为 `|| traceId`（与瞬态层 `taskId = triggerMsg.taskId || traceId` 同构，一行）。原因：1060 只出现在 A2A 递归派发的瞬态 agentTrigger 上，真正落库路径是 `insertAgentMessage` 且为 `|| null`（messages 表无 trace_id 列可兜底，见 `db/migrations.ts` 的 messages 建表 DDL）——第五轮「链内 agent 回复 100% 非空」依据有误。补 `|| traceId` 后：投递带 taskId → 审查回复落库 = 源链 trace_id，JOIN 匹配；投递缺失（老版本已知噪声）→ 落库 = 审查链自身 trace_id，仍关联不到任务链，噪声记录在案。
 
 U 根 success 判定规格：
 
@@ -106,7 +106,7 @@ U 根 episode 结局 = success
 
 > **G4 已知局限（第八轮明写）**：session 限定是双刃剑——跨会话审查（交接后新会话里 review 旧任务链，verdict 经 E3 payload 带同 chain_task_id）的 verdict 会被 session 过滤排除 →「无后序 reject/suggest」恒真 → 被 reject 的任务误判 success（G2 原 bug 在跨会话场景复现）。取舍：agent 互 @ 依赖会话成员，审查通常同会话、跨会话低频；而跨会话 task_id 复用泄漏是更高频脏数据——**保留 session 限定，明写局限：跨会话审查的 verdict 不参与 U episode 判定，统计口径显式声明该局限，记观察项**（待实际出现跨会话审查场景再评估放宽，不阻塞本期）。
 
-**前置保证（E3 接线项，机制小改 ×2）**：审查请求 / 交接文档的投递消息必须携带源链 task_id——post-commit hook 投递 payload 加 `taskId`（经 commit_hash → execution_logs → trace_id 反查被提交消息的链 task_id，与 chain_task_id 锚定同源）、handoff-gen 投递同样携带。ingest 已支持 taskId 字段（ingest.ts:39 `taskId?: string`）；审查回复经 socketio.ts:1060 继承、落库经 socketio.ts:2297（E3 补 `|| traceId` 后）持久化，verdict 消息与任务链共享 task_id，JOIN 匹配成立。
+**前置保证（E3 接线项，机制小改 ×2）**：审查请求 / 交接文档的投递消息必须携带源链 task_id——post-commit hook 投递 payload 加 `taskId`（经 commit_hash → execution_logs → trace_id 反查被提交消息的链 task_id，与 chain_task_id 锚定同源）、handoff-gen 投递同样携带。ingest 已支持 taskId 字段（`connectors/ingest.ts` 的 `IngestInput.taskId`）；审查回复经 `taskId = triggerMsg.taskId || traceId` 继承、落库经 `insertAgentMessage`（E3 补 `|| traceId` 后）持久化，verdict 消息与任务链共享 task_id，JOIN 匹配成立。
 
 - **缺失时的已知噪声（明写承重）**：投递未带 taskId（老版本行为）→ verdict 消息 task_id = 新 traceId，关联不到任务链 → 该 U episode 按「无后序打回」计 success，噪声记录在案（与 P5 承重假设同款显式声明）。
 - **U/H 同任务共享 task_id 时的语义**：H 链 verdict 与 U 链 verdict 同属本任务审查结论，U 的检查看到全部审查结论——本应如此；H episode 不参与任务结局计数（计数归属不变），无双计。
@@ -121,9 +121,9 @@ approve（审查 ✅）与 U 判定的关系：approve 落地 = 无后序 reject
 
 - **chain_task_id 允许 NULL**，仅零执行场景可达。有执行行的 episode（判定 2/3 能到达的）必有 execution_log 且每行写 traceId → 抄录必非空；判定 4 的 abandoned 不依赖 verdict JOIN——NULL 分支与判定逻辑自洽，无二义。
 - **零执行 episode 产生路径**（E1 实现）：周期性扫描 `messages` 中 `role='user'` 且 `created_at` 距今 > 30min、且无任何 `execution_log.triggered_by_message_id` 引用其 id 的消息 → 生成 episode（`chain_task_id=NULL`）。此路径独立于执行链上溯，专门兜「落库未调度」静默丢。
-- **H 根判定（G3 第八轮修）**：零执行扫描命中消息一律标 `root_triggered_by='U'` 有洞——H 根（交接消息）也走 ingestUserMessage（routes/messages.ts:98）同为 role='user'，被静默丢的交接消息若生成 U 根 episode 判 abandoned，计入「真实用户任务办成率」旗舰指标失败 → **核心指标被假失败污染**（正是 16:09 / 02:24 同款静默丢缺口）。判定顺序：
+- **H 根判定（G3 第八轮修）**：零执行扫描命中消息一律标 `root_triggered_by='U'` 有洞——H 根（交接消息）也走 `ingestUserMessage`（`connectors/ingest.ts`）同为 role='user'，被静默丢的交接消息若生成 U 根 episode 判 abandoned，计入「真实用户任务办成率」旗舰指标失败 → **核心指标被假失败污染**（正是 16:09 / 02:24 同款静默丢缺口）。判定顺序：
   1. 命中消息 task_id 非 NULL 且已有 episode 的 chain_task_id = 该 task_id（交接延续：交接投递携带源链 task_id，E3 接线后与既有 episode 匹配）→ `root_triggered_by='H'`
-  2. 命中消息带交接文档内容特征（N9 第九轮钉死 = handoff-gen 精确前缀 `@<猫名> 请补填以下交接文档`，buildHandoffMessage 唯一生成源 handoff-gen.mjs:765，e2e 断言形态 `@ds猫 请补填以下交接文档`；role='user' 的 H 根仅此一种来源——审查请求是 agent 回复非 user 消息、performHandoff 会话交接不插消息表；socketio.ts:1740 既有 `startsWith('@店长 请补填以下交接文档')` 先例）→ `root_triggered_by='H'`
+  2. 命中消息带交接文档内容特征（N9 第九轮钉死 = handoff-gen 精确前缀 `@<猫名> 请补填以下交接文档`，buildHandoffMessage 唯一生成源 `scripts/handoff-gen.mjs`，e2e 断言形态 `@ds猫 请补填以下交接文档`；role='user' 的 H 根仅此一种来源——审查请求是 agent 回复非 user 消息、performHandoff 会话交接不插消息表；`HANDOFF_FILL_REQUEST_PREFIX`（`dispatch/index.ts`）既有 `startsWith('@店长 请补填以下交接文档')` 先例）→ `root_triggered_by='H'`
   3. 无法区分（G5 第九轮修：task_id **为空或无匹配 episode** 且无内容特征）→ 记已知噪声（与存量空串 trace_id 同款显式声明），按 `root_triggered_by='U'` 生成，统计口径显式声明含该噪声
      - 原「task_id NULL」字面有洞：task_id 非 NULL 但无匹配 episode（用户带 task_id 新任务被静默丢）时判定 1 不成立（无匹配 episode）、判定 2 不成立（无内容特征）、判定 3 原字面也不成立 → 漏出判定阶梯**不生成 episode**，旗舰指标漏记 abandoned——这正是零执行扫描的核心目标场景
 - **存量空串 trace_id**（P0 之前，`DEFAULT ''`）：锚定抄录时按已知噪声记案，不参与 verdict 关联（与 P5 承重假设同款显式声明）。
@@ -145,7 +145,7 @@ episodes:
   created_at / updated_at     TEXT           -- ISO 8601 UTC
 ```
 
-- **UNIQUE(root_trigger_message_id) + ON CONFLICT DO UPDATE upsert**：项目成熟模式，五处先例（agents.ts:111 / knowledge.ts:69 / sessionReadState.ts:24 / connectorBindings.ts:36 / sessions.ts:128）。
+- **UNIQUE(root_trigger_message_id) + ON CONFLICT DO UPDATE upsert**：项目成熟模式，五处先例（`repository/agents.ts` / `repository/knowledge.ts` / `repository/sessionReadState.ts` / `repository/connectorBindings.ts` / `repository/sessions.ts` 各自的 upsert）。
 - **P5 全量重评承重**：schema/判定规则升级时带新 `classification_ver` 全量 upsert 重评，幂等；重评期间旧值被覆盖，显式声明「重评结果覆盖历史结局」承重假设。
 
 ## 4. closure 状态机 + 改进闭环
@@ -185,19 +185,19 @@ open（在途/未定）--归因--> classified（结局落定 + 失败归因）--
 
 - **E1**：episodes 表迁移 + closure 状态机 + 判定优先级实现（含 ①'②'②''②'''②''''②'''''②''''''②'''''''③'④' 测试）+ 零执行 episode 扫描路径（G2-N5 + G3 H 根判定 + G5 判定 3 补全「task_id 为空或无匹配 episode」+ N9 内容特征钉死精确前缀）——**✅ 已实施（a0ade7d，25 测试全绿）**
 - **E2**：归因 → 分流到既有动作通道 + closure 复验闭环
-- **E3**：P5 全量重评脚本（classification_ver 驱动）+ 双根语义接线（root_triggered_by 落位）+ 投递消息携带源链 task_id（post-commit hook / handoff-gen payload 加 taskId，与 chain_task_id 同源反查）+ socketio.ts:2297 补 `|| traceId`（持久化层与瞬态 1060 同构，一行）
+- **E3**：P5 全量重评脚本（classification_ver 驱动）+ 双根语义接线（root_triggered_by 落位）+ 投递消息携带源链 task_id（post-commit hook / handoff-gen payload 加 taskId，与 chain_task_id 同源反查）+ agent 回复落库点补 `|| traceId`（持久化层与瞬态 `anchor = taskId || traceId` 同构，一行）
 
 ## 7. 关联
 
-- 判定用到的执行状态四态：`CHECK (status IN ('queued','running','completed','failed'))`（db/index.ts:112）
-- 交接消息走 ingestUserMessage（routes/messages.ts:98），H 根是 role='user' 消息
-- 恢复重跑插 completed 新行：dispatch/index.ts:181（P0 队列持久化 insertExecutionLog）
-- 「仅 server_restart」恢复判据：socketio.ts:1512（`serverRestartLogs` 只筛 `failed && error_message === 'server_restart'`）
-- fixStuck 双写 failed/server_restart：executionLogs.ts:237-248（error_message + error_type 同 UPDATE）
-- A2A 瞬态 agentTrigger taskId 继承（traceId 兜底，不落库）：socketio.ts:1060（`taskId = triggerMsg.taskId || traceId`）
-- agent 回复落库 task_id（`|| null`，E3 改 `|| traceId`）：socketio.ts:2297（insertAgentMessage）；messages 表无 trace_id 列：db/index.ts:70-78
-- chain_task_id 锚定源：execution_logs.trace_id（insertExecutionLog 每行写 traceId）：db/index.ts:113；零执行 episode 扫描依赖 execution_logs.triggered_by_message_id
-- U 根 task_id 可 NULL：ingest.ts:102（`taskId || null`）
-- 用户消息 taskId 字段入口：ingest.ts:39
-- 交接文档内容特征（判定 2 钉死，N9）：buildHandoffMessage 精确前缀 `@<猫名> 请补填以下交接文档`（handoff-gen.mjs:765）；socketio.ts:1740 既有 `startsWith('@店长 请补填以下交接文档')` 先例
-- handoff-gen 投递 POST body 当前不含 taskId（handoff-gen.mjs:933-941 仅 sessionId/content/mentions），E3 接线项（②''''''' 依赖 E3 后判定 1，E3 前走判定 2 内容特征）
+- 判定用到的执行状态四态：`CHECK (status IN ('queued','running','completed','failed'))`（见 `db/migrations.ts` 的 `execution_logs` 建表 DDL）
+- 交接消息走 `ingestUserMessage`（`connectors/ingest.ts`），H 根是 role='user' 消息
+- 恢复重跑插 completed 新行：`execution/serial.ts` 的执行收尾 `insertExecutionLog` 调用处（P0 队列持久化）
+- 「仅 server_restart」恢复判据：`execution/recovery.ts`（`serverRestartLogs` 只筛 `failed && error_message === 'server_restart'`）
+- fixStuck 双写 failed/server_restart：`db/repository/executionLogs.ts` 的 `fixStuckExecutionLogs`（error_message + error_type 同 UPDATE）
+- A2A 瞬态 agentTrigger taskId 继承（traceId 兜底，不落库）：`taskId = triggerMsg.taskId || traceId`（瞬态继承，不落库）
+- agent 回复落库 task_id（`|| null`，E3 改 `|| traceId`）：`execution/reply.ts` 的 `insertAgentMessage` 调用处；messages 表无 trace_id 列（见 `db/migrations.ts` 的 messages 建表 DDL）
+- chain_task_id 锚定源：execution_logs.trace_id（`db/repository/executionLogs.ts` 的 `insertExecutionLog` 每行写 traceId）；零执行 episode 扫描依赖 execution_logs.triggered_by_message_id
+- U 根 task_id 可 NULL：见 `connectors/ingest.ts` 的 `IngestInput.taskId`
+- 用户消息 taskId 字段入口：`connectors/ingest.ts` 的 `IngestInput.taskId`
+- 交接文档内容特征（判定 2 钉死，N9）：buildHandoffMessage 精确前缀 `@<猫名> 请补填以下交接文档`（`scripts/handoff-gen.mjs`）；`HANDOFF_FILL_REQUEST_PREFIX`（`dispatch/index.ts`）既有 `startsWith('@店长 请补填以下交接文档')` 先例
+- handoff-gen 投递 POST body 当前不含 taskId（`scripts/handoff-gen.mjs` 的投递 `fetch` body），E3 接线项（②''''''' 依赖 E3 后判定 1，E3 前走判定 2 内容特征）

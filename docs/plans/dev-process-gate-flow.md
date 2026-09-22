@@ -29,18 +29,18 @@ evidence:
    - Gate C · 反向证明：验收通过了，能否反向证明 Gate A 满足？
 2. **manifest.yaml**：登记 `spec-gate` 条目（source self / category 需求流程 / use_when / prev grilling/to-spec / next to-tickets/implement / preconditions）；`pipeline:` 加前端链（现在只有 review）；`implement` 条目补 preconditions。
 3. **implement/SKILL.md**：加前置门槛段——spec 在场 + 每条需求可证伪 + 跳 grilling 留痕。
-4. **wayfinder/SKILL.md** 第 13 行：补「build 冲动 + 手上无 grilled spec/工单 = 地图画早了不是画完了」。
+4. **wayfinder/SKILL.md**（「Plan, don't do」段）：补「build 冲动 + 手上无 grilled spec/工单 = 地图画早了不是画完了」。
 5. **docs/requirements/ + 首份样例**：一个活 = 一个语义命名 MD，六段生命周期写全。
 6. **CONTEXT.md 翻新**：保留术语表，补判据线 + 四节稳定地图（模块目录结构 / 文档位置约定 / 补全术语 / 流程约定）。
 
 ## 三、契约
 
-| 边界       | 契约                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 改哪些文件 | `skills/spec-gate/SKILL.md`（新）、`skills/manifest.yaml`、`skills/implement/SKILL.md`、`skills/wayfinder/SKILL.md`（第 13 行）、`docs/requirements/2026-09-06-dev-process-gate-flow.md`（新）、`CONTEXT.md`                                                                                                                                                                                                             |
-| 不改什么   | server/shared/web 代码；`.agents/skills/`（已删死目录）；`claude.ts`/opencode/dsh 等 harness 侧                                                                                                                                                                                                                                                                                                                          |
-| 验收标准   | ① spec-gate/SKILL.md 存在含 Gate A/B/C + Gate Report 输出格式；② manifest spec-gate 条目齐 + pipeline 加前端链 + implement 补 preconditions，且 `skills-check-manifest.mjs` 三方一致通过（28/28）；③ implement 前置门槛段在；④ wayfinder 第 13 行补句在；⑤ requirements 样例六段写全；⑥ CONTEXT.md 术语表保留 + 四节稳定地图 + 判据线 + 无易变项；⑦ 纯 docs/流程件不涉 app 代码 → 不要求跑全量测试，但 manifest 校验必过 |
-| 留痕判据   | 没留就会被抓到（机械可查），不是「我会记住」                                                                                                                                                                                                                                                                                                                                                                             |
+| 边界       | 契约                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 改哪些文件 | `skills/spec-gate/SKILL.md`（新）、`skills/manifest.yaml`、`skills/implement/SKILL.md`、`skills/wayfinder/SKILL.md`（「Plan, don't do」段）、`docs/requirements/2026-09-06-dev-process-gate-flow.md`（新）、`CONTEXT.md`                                                                                                                                                                                                            |
+| 不改什么   | server/shared/web 代码；`.agents/skills/`（已删死目录）；`claude.ts`/opencode/dsh 等 harness 侧                                                                                                                                                                                                                                                                                                                                     |
+| 验收标准   | ① spec-gate/SKILL.md 存在含 Gate A/B/C + Gate Report 输出格式；② manifest spec-gate 条目齐 + pipeline 加前端链 + implement 补 preconditions，且 `skills-check-manifest.mjs` 三方一致通过（28/28）；③ implement 前置门槛段在；④ wayfinder「Plan, don't do」段补句在；⑤ requirements 样例六段写全；⑥ CONTEXT.md 术语表保留 + 四节稳定地图 + 判据线 + 无易变项；⑦ 纯 docs/流程件不涉 app 代码 → 不要求跑全量测试，但 manifest 校验必过 |
+| 留痕判据   | 没留就会被抓到（机械可查），不是「我会记住」                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ## 四、过程决策留痕
 
@@ -63,7 +63,7 @@ evidence:
 - [ ] spec-gate/SKILL.md 存在，含 Gate A/B/C + `## Gate Report` 格式
 - [ ] manifest.yaml：spec-gate 条目齐；`pipeline.dev` 前端链 + `pipeline.review` 并存；implement 补 preconditions
 - [ ] implement/SKILL.md 前置门槛段在（spec 在场 + 可证伪 + 跳 grilling 留痕）
-- [ ] wayfinder/SKILL.md 第 13 行补句在
+- [ ] wayfinder/SKILL.md「Plan, don't do」段补句在
 - [ ] 本文件六段写全
 - [ ] CONTEXT.md 术语表保留 + 四节稳定地图 + 判据线，无易变项
 - [ ] `skills-check-manifest.mjs` 三方一致通过

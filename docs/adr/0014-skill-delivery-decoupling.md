@@ -29,8 +29,8 @@ evidence:
 
 焊合招来的两层麻烦，都被实测钉死过：
 
-1. **与铁律一冲突**：铁律一（`manifest.yaml:353`）「审查由 post-commit hook 机械触发、agent 只补填不自行发起」，skill 却说「作者自己 @审查者」——内容自打架。
-2. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（旧注入层 skill 注入晚于 `reply.ts:417` 的 `resolveRolePlaceholders`），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 修复停止 request-review 信号的直接原因）。
+1. **与铁律一冲突**：铁律一（`skills/manifest.yaml` 的 `iron_laws`）「审查由 post-commit hook 机械触发、agent 只补填不自行发起」，skill 却说「作者自己 @审查者」——内容自打架。
+2. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（旧注入层 skill 注入晚于 `execution/reply.ts` 的 `resolveRolePlaceholders`），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 修复停止 request-review 信号的直接原因）。
 
 **这证明方向错了**：把路由写死在内容里，必然在某个环节解析炸、静默丢单（P1）或双触发（DS 自发 + hook 重复）。修 P1（标注 TODO 停用）是止血，不是根治。
 
@@ -46,7 +46,7 @@ skill 依赖：离线、可版本化、可按 role 注入（已实现于注入�
 ## 3. 决策：投递外移除 skill，作为每次对话收尾/外层
 
 - **skill 只管领域**：负责把活做对，内容里**不再含任何 `@谁`/`请谁审查`/`投给谁` 的指令**。
-- **投递外移为「铁律层出口检查段」**（用户拍板，取代原「结尾思考」）：「投递给谁」从 skill 内容移入**铁律层出口检查段**——每条回复收尾的强制动作。铁律拼入 `baseSystemPrompt`（`execution/reply.ts:407-410`）、经过 `resolveRolePlaceholders`（`reply.ts:417`）可被解析；产出投递信号 → 调 `post_message`（结构化路由）/ 行首 `@`（fallback）。触发锚点从 skill（软、且字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
+- **投递外移为「铁律层出口检查段」**（用户拍板，取代原「结尾思考」）：「投递给谁」从 skill 内容移入**铁律层出口检查段**——每条回复收尾的强制动作。铁律拼入 `baseSystemPrompt`（`execution/reply.ts` 定义处）、经过 `resolveRolePlaceholders`（同文件调用处）可被解析；产出投递信号 → 调 `post_message`（结构化路由）/ 行首 `@`（fallback）。触发锚点从 skill（软、且字面死）**迁移到铁律层**（硬、可解析、每回复在场）。
 - **猫咖定制层分化（非近乎消失）**：`skills/catstudy/` 的「定制增量」按份区分——handoff/request-review 偏投递规则（铁律一、A2A 审查链、收口链），但 quality-gate 与 receive-review 是**实质领域重写**：quality-gate 重写为猫咖特有门禁判据（「两条铁律合一」= 与需求对齐 + 承诺需要证据；`NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE`；凡声称完成必须附本次真实运行输出），receive-review 重写为被审者行为准则（Red→Green 修复、禁止表演性同意、技术正确性 > 社交舒适、VERIFY 三道门）。这两份领域知识并**非**继承 mattpocock 通用版。拆出投递后，定制层**部分技能（投递型）存在必要性大减、领域型保留**——剩「基础 skill（通用版领域内容）+ 猫咖领域型定制 + 投递策略（外层）」。
 
 **投递型定制层的去留（用户拍板）**：request-review / handoff 这类以投递路由为核心的定制层，投递外移后路由离开 skill 正文，其存在理由消亡——**作为独立路由层去掉，内容资产并入基础技能，不再建 catstudy 投递定制层**（`handoff` 改名 `session-handoff`；`request-review` 技能层移除、其递送状态仍由状态机保留）。`skills/catstudy/` 仅保留领域型重写（quality-gate、receive-review）与共享 refs（`cat-roles.md`）；refs 资产统一指向共享 `skills/refs/review-request-template.md`（base 版本地 `refs/` 是悬空引用）。

@@ -96,7 +96,7 @@ evidence:
 
 ### 4.1 FK / 删除策略 / CHECK（④修订版，已拍板）
 
-- **PRAGMA**：`foreign_keys = ON` **已在**（`index.ts:27`）——本项从「新增」更正为「保持」，列为不变量（每个连接路径都须开，含测试注入路径）。
+- **PRAGMA**：`foreign_keys = ON` **已在**（`db/index.ts` 的 `foreign_keys` pragma）——本项从「新增」更正为「保持」，列为不变量（每个连接路径都须开，含测试注入路径）。
 - **FK 补齐**：核心引用链补齐（已存在：messages→sessions、execution_logs→sessions/agents、session_read_state→sessions CASCADE、episode_attributions→episodes、retrieval 系、spans 系；已知缺口：messages.agent_id→agents、review_verdicts 各引用、connector_bindings.session_id、episodes 各引用、flow_states/flow_state_events.session_id——实施时逐表审计定稿；**票 3 审计补链（D2 拍板 2026-09-17，九条全纳）**：review_parse_failures.message_id、episode_attributions.delivery_message_id、execution_logs.message_id、execution_logs.triggered_by_message_id、sessions.summary_msg_id、retrieval_events.session_id、retrieval_events.agent_id、spans.session_id、spans.agent_id——其中含 DDL 已具 FK 但存量有孤儿的链，孤儿随 D1 删除后约束归位）。**已登记松耦合一律不加**：chunks 派生投影、retrieval_candidates.chunk_id（仅诊断）、eval_scores / user_feedback。
 - **前置孤儿审计**：重建加 FK 会校验存量——先对各候选关系跑「子表 LEFT JOIN 父表 IS NULL」出孤儿报告（量级 + 样本），只读可重复。
 - **孤儿处理（用户拍板）**：审计先行，报告出来用户拍板，**默认倾向删除**（开发阶段、疑似没删干净的残渣）；若量大或涉核心资产（如 messages），回收容所方案（占位父行，一行不丢）。报告留痕。
@@ -111,7 +111,7 @@ evidence:
 - **存量迁移（⑤-b）**：秒级 → ISO **无损单向**（毫秒位补 `.000`），随 rebuildTable 同批转换，转换后抽样比对。**铁律：同一张表的所有结构变更（FK/CHECK/时间列/删列）一次重建做完**，不重建第二次。前置审计：逐列实测格式分布，转换 SQL 按实测写。
 - **生成纪律（⑤-c 修订版）**：**记录时间**（created_at / updated_at）由 repository 层统一 helper 生成，调用方不许传；**事件时间**（语义是「事情发生时刻」，如 started_at / finished_at）允许调用方显式传入，命名必须体现事件语义，评审检查例外是否名副其实。不使用数据库 DEFAULT 生成（SQLite `datetime('now')` 仅秒级，精度降档）。
   **DEFAULT 勘注（2026-09-18，票 5 复审 OQ1 有条件接受）**：⑤-c「不使用 DEFAULT」的判据是精度降档，`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` 已消解——**DEFAULT 允许保留，但必须 ISO 毫秒同口径**；承重点仍是 repository 显式传值（调用方不许传），DEFAULT 只兜「未来裸 SQL 写入」的缝。判例：票 5 messages.created_at DEFAULT 保留（`migrations.ts` 重建 DDL）。
-- **连带改造点（读码钉死）**：全仓 SQL 侧 `datetime('now')` 写入口与比较点须随迁移同批切到新格式——已知面：agents / sessions / executionLogs / flowStates / knowledge / sessionReadState / settings 各 repository 的写入，messages 超时窗 `datetime('now', ?)` 与游标比较（`messages.ts:127` 有「时间戳归一」注释依赖秒级格式）。**格式混比会错序，必须同批切换，不留半套。**
+- **连带改造点（读码钉死）**：全仓 SQL 侧 `datetime('now')` 写入口与比较点须随迁移同批切到新格式——已知面：agents / sessions / executionLogs / flowStates / knowledge / sessionReadState / settings 各 repository 的写入，messages 超时窗 `datetime('now', ?)` 与游标比较（`repository/messages.ts` 的游标窗口归一注释——见 `getSessionMessagesRange` 的 docblock）。**格式混比会错序，必须同批切换，不留半套。**
 - 现状分布（实测）：DB 记录时间几乎全为 SQL 侧 `datetime('now')`（秒级 UTC）；事件时间 `spans.start_at` 为 ISO 毫秒；文件态 JSON（重启请求等）为 ISO。
 
 ### 4.3 sessions.agent_ids 拆表（⑥，已拍板）
@@ -127,7 +127,7 @@ CREATE TABLE session_agents (
 -- agent_id 单列索引（FK 子表索引纪律：按猫反查会话）
 ```
 
-- **position 不可省**：`internal.ts:820` 注释钉死「JSON 数组顺序 = 注册序」被成员解析端点消费；迁移时数组下标直接落为 position，信息零损失。复合主键数据库层防重复成员。
+- **position 不可省**：`routes/internal.ts` 的注释钉死「JSON 数组顺序 = 注册序」被成员解析端点消费；迁移时数组下标直接落为 position，信息零损失。复合主键数据库层防重复成员。
 - **迁移路径（顺序不能反）**：① 建 session_agents + 遍历 sessions 解析 JSON 灌入；② 重建 sessions（删 agent_ids 列 + 时间口径 + 约束，同批一次）。悬空引用（JSON 引用已删 agent）灌入时被 FK 拦住 → 先进孤儿审计清单，随 ④ 流程用户拍板。
 - **读取路径**：全部改走新表，对外 API 形状不变（`agentIds: string[]` 按 position 序组装），前端零感知。
 - **隐藏行为保留（验收项）**：`updateSessionAgentIds` 整组替换时仍 touch `sessions.updated_at`——成员变更影响会话列表「最近活跃」排序，丢了就是静默回归。

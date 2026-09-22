@@ -15,7 +15,7 @@ evidence:
 
 > **实现现状**：槽位实际状态仅 `idle` / `busy`（`dispatch/index.ts`）。`thinking` 仅在 TypeScript 类型定义中存在，前端通过连接器层 `MESSAGE_AGENT_STATUS` 事件独立展示"思考中"。超时采用两层防御：CLI 空闲超时 20 分钟 + Dispatch 硬超时 30 分钟（通过 `AGENT_HARD_TIMEOUT_MS` 环境变量配置）。
 >
-> **实现现状（续 · 2026-09-19 核验，**本条改写了正文的粒度声称**）**：槽位键已从「agentId」扩为 **`(agentId, sessionId)`**（`execution/serial.ts:185` `slots: Map<string, Map<string, Slot>>`）——多会话并行落地后**同一 Agent 可同时持多个槽位**（每会话一个），正文「每个 Agent 只有一个执行槽位。同时最多处理一件事。」在**跨会话**维度上已不成立。**保留下来的不变量**是**同会话同 Agent** 的那一条：自带 FIFO 队列、串行执行、不并发（`serial.ts:162-163`）——即「对话内不被并行打断」的决策意图原样存活，变的是槽位粒度。读本 ADR 时请以本注的粒度理解正文。
+> **实现现状（续 · 2026-09-19 核验，**本条改写了正文的粒度声称**）**：槽位键已从「agentId」扩为 **`(agentId, sessionId)`**（`execution/serial.ts` 的 `slots` 字段，类型 `Map<string, Map<string, Slot>>`）——多会话并行落地后**同一 Agent 可同时持多个槽位**（每会话一个），正文「每个 Agent 只有一个执行槽位。同时最多处理一件事。」在**跨会话**维度上已不成立。**保留下来的不变量**是**同会话同 Agent** 的那一条：自带 FIFO 队列、串行执行、不并发（`execution/serial.ts` 的 `Slot.queue` 定义处）——即「对话内不被并行打断」的决策意图原样存活，变的是槽位粒度。读本 ADR 时请以本注的粒度理解正文。
 > **C1 v3 补充**：槽位与其 FIFO 队列已收进 `createExecutionEngine` 闭包（原 `dispatch/` 模块级 `agentSlots` + `agentQueues`），`dispatch/index.ts` 只留兼容 shim 与只读 accessor。
 
 每个 Agent 只有一个执行槽位。同时最多处理一件事。槽位忙时新请求进入该 Agent 私有的 FIFO 队列。Agent 回复是 FIFO 串行的——先被 @ 的 Agent 先回复，后者看到前者的回复后再回应，保证对话连贯性。
