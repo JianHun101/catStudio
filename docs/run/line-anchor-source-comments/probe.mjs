@@ -66,10 +66,12 @@ for (const line of grepOut.split('\n')) {
     let target = 'AMBIGUOUS: ' + cands.map((c) => c.split('/').slice(-2).join('/')).join(' | ')
     if (resolved) {
       const tl = linesOf(resolved)
+      // 空白行必须**显式标注**：旧版直接印空串，与「没什么可看」同形（本族）
+      const raw = (tl[n - 1] ?? '').trim()
       target =
         n > tl.length
           ? `OUT-OF-RANGE（该文件仅 ${tl.length} 行）`
-          : (tl[n - 1] ?? '').trim().slice(0, 76)
+          : raw.slice(0, 76) || '（该行为空白 —— 锚落在空行上，非「无内容可看」）'
     }
     rows.push({
       src: `${srcFile}:${srcLine}`,
