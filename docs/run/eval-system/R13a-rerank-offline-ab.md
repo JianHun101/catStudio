@@ -1,8 +1,8 @@
-# R13a 票：cross-encoder 离线三臂对照（**先证有效，再谈接入**·待派）
+# R13a 票：cross-encoder 离线三臂对照（**先证有效，再谈接入**·已收口 2026-09-23）
 
 > 来源：R13 票 §五 S0–S4 的**前置拆分**。用户 2026-09-22 拍板：① reranker 用主流模型；② 先把这几条跑完再看。
 > 拆分理由：R13 原票 S2（接入生产链）改的是**猫实际读到的记忆**（行为变更）；而 S0/S1 + 离线跑批**不改任何生产行为**就能拿到全部读数。**先出数、后接链**——三臂读数若证明增量不足以覆盖新增固定开销，S2/S3 整段不必开工。
-> 状态：**未开工 · 待派**。R13b（接入 + 降级 + 生产 A/B）= 原票 S2/S3/S4，**等本票读数出来由用户拍**。
+> 状态：**已收口（2026-09-23）** —— 已审 sha `ab4a193f` → PR #174 → dev `75f05c2b`。**R13b 关票**，理由见文末「收口记录」。
 > 行号基线：`dev` 当轮 HEAD。**实施者落笔前按自己那棵树重取一遍**。
 
 ## 一、要回答的唯一问题
@@ -123,3 +123,21 @@ node scripts/eval/retrieval-baseline.mjs --db "<主仓库>/packages/server/data/
 - 母票：`R13-cross-encoder-rerank.md`（§四 三决策 / §七 风险 / §九 明写不做）
 - 归因与修法候选：`T3-retrieval-optimization-diagnosis.md`（§五 差几名 / §6.2 已排除项 / §九 候选 1-5）
 - 末次截断节级语义：`T4-section-truncation-resweep.md`、`T5-recheck-section-adapt.md`
+
+## 九、收口记录（2026-09-23）
+
+**收口链**：已审 sha `ab4a193f`（吐槽猫 ✅可合并）→ carrier `closeout/r13a-rerank-offline-ab`（carry 已审 sha **字面量**，未做等价重建）→ PR #174 → dev `75f05c2b`（merge commit）。合并前实测：dev 侧 `ad7a9fd0` 与本分支**零文件交集**，合并为并集、无冲突。
+
+**判词**：close-ticket。三臂 27 / 29 / **23**（35 锚点）；臂①↔臂③ 是**同 3 节预算**对照，23 < 27 ⇒ 重排在同预算下净增量为负。⇒ **R13b（接入生产链）关票**，结论上浮至 `docs/plans/memory-flywheel.md` §6。
+
+**两条审查 P1 的销项（均已实证，非采信自述）**：
+
+1. **降级率双计**：`computeDegradation`（`scripts/eval/rerank-offline-ab.mjs`）改「先剔 `reason='timeout'` 再算」，并配**反对照单测**——构造 `reason='timeout'` 但耗时 < 闸值的行，减法口径会漏报。A3① 独立基线落产物 8/849 = 0.942%。
+2. **`--quant-crosscheck` 补跑**：q8 23 / fp32 24 / Δ1，两档判词同为 close-ticket ⇒ 量化作为「重排无效」的替代解释被排除。后续批次走**证据迁移**（`QUANT_CROSSCHECK_EVIDENCE` 常量 + `batchSha`，产物内明标「非本批实测」）。
+
+**两条 P3（非阻塞，挂账不修）**：
+
+- **A4 sha 的 provenance 陷阱**：pre-commit 的 prettier 会重排 det md 的表格 padding ⇒ 运行日志里的 `A4 sha256:` 与**落库文件**的 sha 对不上（两遍互相全等这一语义**未破**——prettier 是确定性变换，对两遍施加同一变换）。后来者拿落库文件重算 sha 会对不上日志。**建议下批把 post-hook 的 sha 另记一行，或给 `docs/eval/` 摘出 prettier。**
+- **检索段 p50 的「轻载档」口径**：轻载档实测 31ms，与 dev 库 `retrieval_events.retrieval_ms` 的 p50（1820ms）量级差大，疑似该档只计了部分段。两档对照表已自洽，**仅记不究**。
+
+**重启判定**：**不发重启**。本票只碰 `scripts/` + `docs/eval/`（不在 server/shared 面）；且 `scripts/flywheel/embed-server.mjs` 的改动经实测为**纯新增、零删除行** ⇒ 既有 `/v1/embeddings` 面未触碰，生产 sidecar 行为不变、`/v1/rerank` 无生产消费者。
