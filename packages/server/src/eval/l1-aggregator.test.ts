@@ -8,7 +8,13 @@ import { Events } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
-import { aggregateMetrics, runL1Aggregation, __test_resetAlertState } from './l1-aggregator.js'
+import { getLogLevel, setLogLevel } from '../logger.js'
+import {
+  aggregateMetrics,
+  alertThresholds,
+  runL1Aggregation,
+  __test_resetAlertState,
+} from './l1-aggregator.js'
 
 /** 假 bus：镜像 createSocketBus 的 emitSystemNotice——roomEmit 捕获 NEW_MESSAGE 载荷 */
 const roomEmit = vi.fn()
@@ -285,4 +291,107 @@ describe('runL1Aggregation — 滞回告警', () => {
     expect(r.recovered).toBe(false)
     expect(roomEmit).not.toHaveBeenCalled()
   })
+})
+
+// ─── env 坏值回归（票 env-number-guards · 组件 B）─────────────────────
+/**
+ * 三个 `EVAL_ALERT_*` 键在立票读数里**连一处 env 级测试都没有**（本仓此前唯一有
+ * 坏值守卫的是 `AGENT_HARD_TIMEOUT_MS`，见 `serial.hard-timeout-disabled.test.ts` A1）。
+ *
+ * 断言打在**真接线点**：`alertThresholds()` 是这三个键的唯一 env 读取点，
+ * `runL1Aggregation` 是阈值的真消费函数（滞回状态机的破线判定）。两者都断——
+ * 只断前者的话，「值对了但没进状态机」不会红。
+ */
+describe('env 坏值回归：EVAL_ALERT_* 三键', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+    seedBase()
+    roomEmit.mockClear()
+    __test_resetAlertState()
+  })
+
+  afterEach(() => {
+    resetDb()
+    __test_resetAlertState()
+    vi.unstubAllEnvs()
+  })
+
+  /**
+   * 每键一组，`seed` 造的**只有本键会破线**的数据。另两键在用例里显式钉默认值
+   * ——不钉的话告警可能是被别的键打破的，本键的断言就测不到本键（假绿）。
+   */
+  const CASES = [
+    {
+      key: 'EVAL_ALERT_SUCCESS_RATE',
+      field: 'successRate',
+      fallback: 0.8,
+      seed: () => {
+        // 成功率 1/2 = 50% < 80%；超时率 0、返工率 0 都不破
+        insertExecution({ status: 'completed' })
+        insertExecution({ status: 'failed', error_message: 'x', error_type: 'parse_error' })
+      },
+    },
+    {
+      key: 'EVAL_ALERT_TIMEOUT_RATE',
+      field: 'timeoutRate',
+      fallback: 0.1,
+      seed: () => {
+        // 超时率 1/9 ≈ 11.1% > 10%；成功率 8/9 ≈ 88.9% ≥ 80%、返工率 0 都不破
+        for (let i = 0; i < 8; i++) insertExecution({ status: 'completed' })
+        insertExecution({ status: 'failed', error_message: '执行超时', error_type: 'timeout' })
+      },
+    },
+    {
+      key: 'EVAL_ALERT_REWORK_RATE',
+      field: 'reworkRate',
+      fallback: 0.3,
+      seed: () => {
+        // 返工率 (1 suggest + 1 reject) / 2 个结论 = 100% > 30%；
+        // 成功率 100%、超时率 0 都不破
+        insertExecution({ status: 'completed' })
+        insertVerdict('suggest')
+        insertVerdict('reject')
+      },
+    },
+  ] as const
+
+  for (const c of CASES) {
+    it(`${c.key} 坏值/空串 ⇒ ${c.field} 回退 ${c.fallback}（不是 null/NaN）且真破线告警`, () => {
+      vi.stubEnv('EVAL_ALERT_SUCCESS_RATE', '0.8')
+      vi.stubEnv('EVAL_ALERT_TIMEOUT_RATE', '0.1')
+      vi.stubEnv('EVAL_ALERT_REWORK_RATE', '0.3')
+      c.seed()
+
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      const prevLevel = getLogLevel()
+      setLogLevel('warn') // 断言走真 logger ⇒ 级别不放 warn，「坏值出声」会退化成恒真
+      try {
+        // stdout 行形如 `WARN <ts> env-number <msg> <meta>`——按模块名 + 变量名双筛
+        const warns = (): string[] =>
+          stdoutSpy.mock.calls
+            .map((x) => String(x[0]))
+            .filter((l) => l.includes('env-number') && l.includes(c.key))
+
+        vi.stubEnv(c.key, 'abc')
+        expect(alertThresholds()[c.field]).toBe(c.fallback)
+        // 承重面：坏值若解析成 NaN，`m.successRate < NaN` / `m.timeoutRate > NaN` 一类
+        // 比较恒假 ⇒ 破线判定静默失效、告警永不触发。这条把「值对了」推到「状态机真破线」。
+        expect(runL1Aggregation(bus).alert).toBe(true)
+        // 正对照：坏值必须出声（否则下面的「不新增」恒真）。条数 = 读取次数，不作断言。
+        expect(warns().length).toBeGreaterThan(0)
+        const afterBad = warns().length
+
+        __test_resetAlertState() // 上一轮已进 alerting；不复位则第二轮无转换沿、断言恒假
+        roomEmit.mockClear()
+        vi.stubEnv(c.key, '')
+        expect(alertThresholds()[c.field]).toBe(c.fallback)
+        expect(runL1Aggregation(bus).alert).toBe(true)
+        expect(warns().length).toBe(afterBad) // 空串：调用次数可变，warn 一条都不许新增
+      } finally {
+        stdoutSpy.mockRestore()
+        setLogLevel(prevLevel)
+      }
+    })
+  }
 })

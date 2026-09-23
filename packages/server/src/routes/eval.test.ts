@@ -525,6 +525,44 @@ describe('Eval Routes', () => {
       expect((body.orphanChain.hops as ChainHopBody[]).map((h) => h.executionLogId)).toEqual(['x4'])
     })
 
+    // ─── env 坏值回归（票 env-number-guards · 组件 B）───────────────
+    // 上面那条钉的是**合法值**（'600000'）——它证「读 env」，证不了「坏值不静默穿透」。
+    // 本条补的是后者：改前表达式 `parseFloat(process.env.X || '300000')` 对 'abc' 得 NaN，
+    // 序列化成 JSON 就是 `"slowMs":null`（OQ-6 实测读数），前端读不出「配置写错了」。
+    it('env 坏值回归：EVAL_CHAIN_SLOW_MS 坏值/空串 ⇒ slowMs 回退 300000（不是 null/NaN）', async () => {
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      // 本用例断言的 warn 走**真 logger** ⇒ 必须自己把级别放到 warn：测试进程真吃
+      // `LOG_LEVEL=error`（packages/server/vitest.config.ts 的 test.env），不声明这个前置
+      // 条件的话 warn 被级别静默掉，「坏值出声」会退化成恒真的假绿门。
+      const prevLevel = getLogLevel()
+      setLogLevel('warn')
+      try {
+        // stdout 行形如 `WARN <ts> env-number <msg> <meta>`——按模块名 + 变量名双筛
+        const warns = (): string[] =>
+          stdoutSpy.mock.calls
+            .map((c) => String(c[0]))
+            .filter((l) => l.includes('env-number') && l.includes('EVAL_CHAIN_SLOW_MS'))
+
+        vi.stubEnv('EVAL_CHAIN_SLOW_MS', 'abc')
+        const bad = JSON.parse((await app.inject({ method: 'GET', url: '/api/eval/chains' })).body)
+        expect(bad.slowMs).toBe(300000) // 读到 fallback：不是 NaN、不是 0、不是 null
+        // 正对照：坏值必须**出声**（否则下面的「不新增」是恒真的假绿门）。只断「至少一条」
+        // ——确切条数 = 该键在一次请求里被读几次（实现细节），钉死它会在无关重构时假红。
+        expect(warns().length).toBeGreaterThan(0)
+        const afterBad = warns().length
+
+        vi.stubEnv('EVAL_CHAIN_SLOW_MS', '')
+        const empty = JSON.parse(
+          (await app.inject({ method: 'GET', url: '/api/eval/chains' })).body
+        )
+        expect(empty.slowMs).toBe(300000)
+        expect(warns().length).toBe(afterBad) // 空串：调用次数可变，warn 一条都不许新增
+      } finally {
+        stdoutSpy.mockRestore()
+        setLogLevel(prevLevel)
+      }
+    })
+
     it('orphanChain 恒在：无孤儿时 hopCount 0 / hops []（字段不省略）', async () => {
       const a = seedAgent('店长')
       const sid = seedSession()
@@ -1494,6 +1532,46 @@ describe('Eval Routes', () => {
         expect(body.minCount).toBe(50)
         expect(body.sufficient).toBe(false)
         expect(body.gate).toBeNull()
+      })
+
+      // ─── env 坏值回归（票 env-number-guards · 组件 B）─────────────
+      // 上面那条钉合法值 50——证「读 env」；本条钉坏值 ⇒ 回退：改前表达式得 NaN，
+      // `Math.trunc(NaN)` 仍是 NaN ⇒ JSON 出 `"minCount":null`，「样本够不够」当场不可判。
+      it('env 坏值回归：EVAL_LABEL_MIN_COUNT 坏值/空串 ⇒ minCount 回退 30（不是 null/NaN）', async () => {
+        const agentId = seedAgent('flash猫')
+        const sessionId = seedSession()
+        const [m0] = seedReplies(sessionId, agentId, 1, 'r')
+        seedScore({ agentId, sessionId, messageId: m0, score: 5, sampleReason: 'random' })
+        seedHumanLabel(m0, sessionId, agentId, 5)
+
+        const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+        const prevLevel = getLogLevel()
+        setLogLevel('warn') // 同 slowMs：走真 logger，级别不放 warn 则断言恒真
+        try {
+          const warns = (): string[] =>
+            stdoutSpy.mock.calls
+              .map((c) => String(c[0]))
+              .filter((l) => l.includes('env-number') && l.includes('EVAL_LABEL_MIN_COUNT'))
+
+          vi.stubEnv('EVAL_LABEL_MIN_COUNT', 'abc')
+          const bad = JSON.parse(
+            (await app.inject({ method: 'GET', url: '/api/eval/judge-agreement' })).body
+          )
+          expect(bad.minCount).toBe(30) // 读到 fallback：不是 NaN、不是 0、不是 null
+          // 正对照：坏值必须出声（否则下面的「不新增」恒真）。条数 = 读取次数，不作断言。
+          expect(warns().length).toBeGreaterThan(0)
+          const afterBad = warns().length
+
+          vi.stubEnv('EVAL_LABEL_MIN_COUNT', '')
+          const empty = JSON.parse(
+            (await app.inject({ method: 'GET', url: '/api/eval/judge-agreement' })).body
+          )
+          expect(empty.minCount).toBe(30)
+          expect(warns().length).toBe(afterBad) // 空串：调用次数可变，warn 一条都不许新增
+        } finally {
+          stdoutSpy.mockRestore()
+          setLogLevel(prevLevel)
+        }
       })
 
       it('只有人工分、没有判官分的 message 不进分母（JOIN 是内连接）', async () => {
