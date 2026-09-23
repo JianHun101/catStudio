@@ -5,295 +5,323 @@
   "timings": [
     {
       "id": "G01",
-      "retrievalMs": 82,
-      "rerankMs": 1453,
-      "pairs": 47
+      "retrievalMs": 71,
+      "rerankMs": 1394,
+      "pairs": 47,
+      "chars": 9610
     },
     {
       "id": "G02",
-      "retrievalMs": 63,
-      "rerankMs": 6719,
-      "pairs": 20
+      "retrievalMs": 12,
+      "rerankMs": 4534,
+      "pairs": 20,
+      "chars": 4707
     },
     {
       "id": "G03",
-      "retrievalMs": 356,
-      "rerankMs": 12387,
-      "pairs": 42
+      "retrievalMs": 439,
+      "rerankMs": 12148,
+      "pairs": 42,
+      "chars": 8614
     },
     {
       "id": "G04",
-      "retrievalMs": 635,
-      "rerankMs": 16068,
-      "pairs": 63
+      "retrievalMs": 675,
+      "rerankMs": 15484,
+      "pairs": 63,
+      "chars": 14671
     },
     {
       "id": "G05",
-      "retrievalMs": 557,
-      "rerankMs": 13421,
-      "pairs": 52
+      "retrievalMs": 676,
+      "rerankMs": 13253,
+      "pairs": 52,
+      "chars": 10640
     },
     {
       "id": "G06",
-      "retrievalMs": 453,
-      "rerankMs": 11780,
-      "pairs": 41
+      "retrievalMs": 440,
+      "rerankMs": 11893,
+      "pairs": 41,
+      "chars": 8524
     },
     {
       "id": "G07",
-      "retrievalMs": 258,
-      "rerankMs": 10348,
-      "pairs": 35
+      "retrievalMs": 282,
+      "rerankMs": 10134,
+      "pairs": 35,
+      "chars": 7877
     },
     {
       "id": "G08",
-      "retrievalMs": 358,
-      "rerankMs": 14141,
-      "pairs": 54
+      "retrievalMs": 417,
+      "rerankMs": 13765,
+      "pairs": 54,
+      "chars": 11610
     },
     {
       "id": "G09",
-      "retrievalMs": 535,
-      "rerankMs": 10705,
-      "pairs": 40
+      "retrievalMs": 507,
+      "rerankMs": 10338,
+      "pairs": 40,
+      "chars": 6694
     },
     {
       "id": "G10",
-      "retrievalMs": 553,
-      "rerankMs": 12131,
-      "pairs": 43
+      "retrievalMs": 558,
+      "rerankMs": 11450,
+      "pairs": 44,
+      "chars": 9849
     },
     {
       "id": "G11",
-      "retrievalMs": 547,
-      "rerankMs": 16082,
-      "pairs": 65
+      "retrievalMs": 503,
+      "rerankMs": 14545,
+      "pairs": 65,
+      "chars": 13970
     },
     {
       "id": "G12",
-      "retrievalMs": 720,
-      "rerankMs": 16183,
-      "pairs": 56
+      "retrievalMs": 609,
+      "rerankMs": 14632,
+      "pairs": 56,
+      "chars": 10506
     },
     {
       "id": "C01",
-      "retrievalMs": 380,
-      "rerankMs": 11649,
-      "pairs": 44
+      "retrievalMs": 342,
+      "rerankMs": 10609,
+      "pairs": 45,
+      "chars": 8209
     },
     {
       "id": "C02",
-      "retrievalMs": 322,
-      "rerankMs": 9813,
-      "pairs": 38
+      "retrievalMs": 355,
+      "rerankMs": 9269,
+      "pairs": 38,
+      "chars": 8559
     },
     {
       "id": "C03",
-      "retrievalMs": 408,
-      "rerankMs": 8427,
-      "pairs": 29
+      "retrievalMs": 382,
+      "rerankMs": 7560,
+      "pairs": 29,
+      "chars": 6096
     },
     {
       "id": "C05",
-      "retrievalMs": 409,
-      "rerankMs": 8236,
-      "pairs": 28
+      "retrievalMs": 429,
+      "rerankMs": 7677,
+      "pairs": 29,
+      "chars": 6211
     },
     {
       "id": "C06",
-      "retrievalMs": 345,
-      "rerankMs": 7568,
-      "pairs": 26
+      "retrievalMs": 305,
+      "rerankMs": 6823,
+      "pairs": 26,
+      "chars": 5754
     },
     {
       "id": "C07",
-      "retrievalMs": 422,
-      "rerankMs": 9580,
-      "pairs": 36
+      "retrievalMs": 458,
+      "rerankMs": 8817,
+      "pairs": 36,
+      "chars": 8909
     },
     {
       "id": "C08",
-      "retrievalMs": 416,
-      "rerankMs": 9403,
-      "pairs": 36
+      "retrievalMs": 342,
+      "rerankMs": 8287,
+      "pairs": 35,
+      "chars": 7871
     },
     {
       "id": "C09",
-      "retrievalMs": 276,
-      "rerankMs": 8307,
-      "pairs": 25
+      "retrievalMs": 254,
+      "rerankMs": 7419,
+      "pairs": 25,
+      "chars": 6221
     },
     {
       "id": "C10",
-      "retrievalMs": 450,
-      "rerankMs": 10415,
-      "pairs": 35
+      "retrievalMs": 452,
+      "rerankMs": 9285,
+      "pairs": 35,
+      "chars": 8875
     },
     {
       "id": "C11",
-      "retrievalMs": 325,
-      "rerankMs": 11518,
-      "pairs": 42
+      "retrievalMs": 294,
+      "rerankMs": 10557,
+      "pairs": 42,
+      "chars": 8585
     },
     {
       "id": "C12",
-      "retrievalMs": 425,
-      "rerankMs": 7381,
-      "pairs": 25
+      "retrievalMs": 359,
+      "rerankMs": 6609,
+      "pairs": 25,
+      "chars": 4919
     },
     {
       "id": "C13",
-      "retrievalMs": 311,
-      "rerankMs": 8166,
-      "pairs": 27
+      "retrievalMs": 294,
+      "rerankMs": 7440,
+      "pairs": 27,
+      "chars": 6058
     },
     {
       "id": "C14",
-      "retrievalMs": 247,
-      "rerankMs": 7927,
-      "pairs": 28
+      "retrievalMs": 232,
+      "rerankMs": 7269,
+      "pairs": 28,
+      "chars": 6179
     },
     {
       "id": "C15",
-      "retrievalMs": 311,
-      "rerankMs": 12453,
-      "pairs": 49
+      "retrievalMs": 473,
+      "rerankMs": 11286,
+      "pairs": 49,
+      "chars": 10839
     },
     {
       "id": "C16",
-      "retrievalMs": 355,
-      "rerankMs": 8386,
-      "pairs": 26
+      "retrievalMs": 375,
+      "rerankMs": 7657,
+      "pairs": 26,
+      "chars": 5579
     },
     {
       "id": "C18",
-      "retrievalMs": 331,
-      "rerankMs": 7502,
-      "pairs": 28
+      "retrievalMs": 264,
+      "rerankMs": 7024,
+      "pairs": 28,
+      "chars": 3687
     },
     {
       "id": "C19",
-      "retrievalMs": 373,
-      "rerankMs": 5211,
-      "pairs": 36
+      "retrievalMs": 264,
+      "rerankMs": 7429,
+      "pairs": 36,
+      "chars": 5423
     },
     {
       "id": "C20",
-      "retrievalMs": 39,
-      "rerankMs": 3789,
-      "pairs": 49
+      "retrievalMs": 413,
+      "rerankMs": 10971,
+      "pairs": 49,
+      "chars": 10631
     },
     {
       "id": "C21",
-      "retrievalMs": 449,
-      "rerankMs": 10883,
-      "pairs": 42
+      "retrievalMs": 411,
+      "rerankMs": 9794,
+      "pairs": 42,
+      "chars": 8568
     },
     {
       "id": "C23",
-      "retrievalMs": 337,
-      "rerankMs": 11304,
-      "pairs": 40
+      "retrievalMs": 385,
+      "rerankMs": 10192,
+      "pairs": 40,
+      "chars": 8621
     },
     {
       "id": "C24",
-      "retrievalMs": 331,
-      "rerankMs": 11244,
-      "pairs": 47
+      "retrievalMs": 370,
+      "rerankMs": 10383,
+      "pairs": 47,
+      "chars": 8960
     },
     {
       "id": "C26",
-      "retrievalMs": 334,
-      "rerankMs": 8243,
-      "pairs": 25
+      "retrievalMs": 296,
+      "rerankMs": 7571,
+      "pairs": 25,
+      "chars": 6078
     },
     {
       "id": "C27",
-      "retrievalMs": 378,
-      "rerankMs": 7985,
-      "pairs": 24
+      "retrievalMs": 236,
+      "rerankMs": 7503,
+      "pairs": 24,
+      "chars": 6063
     },
     {
       "id": "N01",
-      "retrievalMs": 358,
-      "rerankMs": 9835,
-      "pairs": 37
+      "retrievalMs": 447,
+      "rerankMs": 8933,
+      "pairs": 37,
+      "chars": 8718
     },
     {
       "id": "N02",
-      "retrievalMs": 339,
-      "rerankMs": 9078,
-      "pairs": 30
+      "retrievalMs": 323,
+      "rerankMs": 8105,
+      "pairs": 30,
+      "chars": 7075
     },
     {
       "id": "N03",
-      "retrievalMs": 528,
-      "rerankMs": 10859,
-      "pairs": 51
+      "retrievalMs": 452,
+      "rerankMs": 10048,
+      "pairs": 51,
+      "chars": 9674
     },
     {
       "id": "N04",
-      "retrievalMs": 337,
-      "rerankMs": 8242,
-      "pairs": 25
+      "retrievalMs": 451,
+      "rerankMs": 7633,
+      "pairs": 25,
+      "chars": 6107
     },
     {
       "id": "N05",
-      "retrievalMs": 425,
-      "rerankMs": 8072,
-      "pairs": 33
+      "retrievalMs": 412,
+      "rerankMs": 7397,
+      "pairs": 33,
+      "chars": 6372
     }
   ],
   "latency": {
-    "rerankP50": 9580,
-    "rerankP95": 16068,
-    "rerankMax": 16183,
-    "perPairMs": 258.653,
-    "meanPairsPerEntry": 37.98,
-    "retrievalP50": 358,
-    "totalP50": 10002,
-    "totalP95": 16629,
+    "rerankP50": 8933,
+    "rerankP95": 14545,
+    "rerankMax": 15484,
+    "perPairMs": 245.31,
+    "meanPairsPerEntry": 38.02,
+    "retrievalP50": 382,
+    "totalP50": 9380,
+    "totalP95": 15048,
     "thresholdMs": 10000,
     "timeoutBaseline": {
-      "denom": 847,
+      "denom": 849,
       "timeout": 8,
-      "rate": "8/847",
-      "pct": 0.945,
-      "denomAllReasons": 940,
-      "pctAllReasons": 0.851,
+      "rate": "8/849",
+      "pct": 0.942,
+      "denomAllReasons": 945,
+      "pctAllReasons": 0.847,
       "slowestNonTimeout": 9836
     },
     "headroomMs": 164,
-    "overGateInGolden": 21,
-    "pairsTotal": 1519,
+    "overGateInGolden": 18,
+    "pairsTotal": 1521,
     "degradation": [
       {
         "face": "黄金集（实测 retrievalMs + 实测 rerankMs）",
         "denom": 40,
-        "added": 21,
-        "rate": "21/40"
+        "added": 18,
+        "rate": "18/40"
       },
       {
-        "face": "活库全量（推演：+38.0 对 × 258.7ms）",
-        "denom": 847,
-        "added": 837,
-        "rate": "837/847",
+        "face": "活库全量（推演：+38.0 对 × 245.3ms）",
+        "denom": 849,
+        "added": 808,
+        "rate": "808/849",
         "alreadyOver": 8,
-        "overAfter": 845
+        "overAfter": 816
       }
     ]
   },
-  "quantCrosscheck": {
-    "model": "Xenova/bge-reranker-base",
-    "dtypes": ["q8", "fp32"],
-    "refDtype": "fp32",
-    "hitQ8": 23,
-    "hitRef": 24,
-    "hitDelta": 1,
-    "top3SameEntries": 25,
-    "argmaxSameEntries": 30,
-    "entries": 40,
-    "maxAbsScoreDelta": 0.3806634247303009,
-    "note": "hitRef（fp32）与 hitQ8 的差 = 量化对**结论**的影响；top3SameEntries = 量化对**名次**的影响。两者都小 ⇒ 「重排无效」不是量化造出来的（量化作为替代解释被排除）。"
-  }
+  "quantCrosscheck": null
 }
