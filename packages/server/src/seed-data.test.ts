@@ -236,11 +236,13 @@ describe('agent system prompts', () => {
     expect(boss.systemPrompt).not.toContain('GitHub merge')
   })
 
-  it('S3a：三只实施猫的「实施规范」段单源——逐字一致，改一处三猫同时生效', () => {
+  it('S3a：全部实施猫的「实施规范」段单源——逐字一致，改一处全体同时生效', () => {
     // 旧形态是三份约 600 字逐字复制（改一处要同步三处、必漏其一）——抽常量后单源。
     // 判据用「段内逐字相等」而非「引用同一常量」：断言的是可观察结果，不是实现形状。
+    // 下限取 2 而非某个具体猫数：只有 1 只时「逐字一致」恒真、比对退化，2 只起才成立；
+    // 猫数随票单增删（dsh 试点猫下线即由 3 变 2），写死数字必烂。
     const implementers = agents.filter((a) => a.role === 'implementer')
-    expect(implementers.length).toBeGreaterThanOrEqual(3)
+    expect(implementers.length).toBeGreaterThanOrEqual(2)
     const sections = implementers.map((a) => {
       const i = a.systemPrompt.indexOf('---\n实施规范')
       expect(i, `${a.name} 缺实施规范段`).toBeGreaterThan(-1)
@@ -465,11 +467,5 @@ describe('演示角色默认 provider', () => {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.llmApiKey).toBeTruthy()
     }
-  })
-
-  it('dsh 试点猫仍是 dsh / deepseek-chat（防误改波及第 5 个角色）', () => {
-    const dsh = agents.find((a) => a.name === 'dsh猫')!
-    expect(dsh.llmProvider).toBe('dsh')
-    expect(dsh.llmModel).toBe('deepseek-chat')
   })
 })

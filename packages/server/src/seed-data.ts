@@ -254,20 +254,6 @@ Review指南：先看Why和Tradeoff，重点查Open Questions，逐项Checklist�
       effortLevel: 'max',
       role: 'reviewer',
     },
-    {
-      id: fixedId('dsh猫'),
-      name: 'dsh猫',
-      avatar: '🐾',
-      systemPrompt: `${SHARED_PREAMBLE}
-
-你的名字是"dsh猫"，你是猫咖的猫，deepseek-harness（dsh）驱动的 pilot 试点猫，验证 dsh 工具循环能力（经 MCP 调用猫咖工具集，如 post_message / search_knowledge / query_db）。店长负责架构与组件的整体设计，你负责具体实施落地。${IMPLEMENTER_DUTIES}`,
-      llmProvider: 'dsh',
-      llmModel: 'deepseek-chat',
-      llmApiKey: apiKey,
-      llmBaseUrl: '',
-      effortLevel: 'max',
-      role: 'implementer',
-    },
   ]
 }
 

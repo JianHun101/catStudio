@@ -43,7 +43,7 @@ CatStudio 补的就是这一层：每只猫有固定身份和自己的上下文�
 ```bash
 node --version  # 确认 >= 22.18.0
 pnpm install
-pnpm seed                # 首次初始化：灌种子数据（5 个演示角色 + 1 个演示会话）
+pnpm seed                # 首次初始化：灌种子数据（4 个演示角色 + 1 个演示会话）
                          # 幂等，重跑不会覆盖已存在猫的运行配置
 pnpm dev                 # 启动 server :3200 + web :5173
 ```
@@ -52,7 +52,7 @@ pnpm dev                 # 启动 server :3200 + web :5173
 
 以上三步**不需要任何 API Key**：界面、会话、记忆索引都照常工作，只是演示角色会因缺 Key 被 no-key 守卫拦下（提示「还没有配置 API Key」），不是静默降级。
 
-> **想让演示角色开箱即用**：5 个演示角色里 4 个的 provider 是 `claude`（模型 `deepseek-flash`），经 Claude Code CLI 打 DeepSeek 的 Anthropic 兼容端点；只有 dsh猫 用 `dsh`。这套默认组合还需要两样：
+> **想让演示角色开箱即用**：4 个演示角色的 provider 全是 `claude`（模型 `deepseek-flash`），经 Claude Code CLI 打 DeepSeek 的 Anthropic 兼容端点。这套默认组合还需要两样：
 >
 > ```bash
 > npm i -g @anthropic-ai/claude-code
@@ -109,11 +109,11 @@ pnpm dev                 # 启动 server :3200 + web :5173
 
 | provider   | 形态                        | 端点是否可控                                      | 需要 key | 说明                                       |
 | ---------- | --------------------------- | ------------------------------------------------- | -------- | ------------------------------------------ |
-| `claude`   | Claude Code CLI（执行壳）   | ✅ Base URL 可填任意 Anthropic 兼容端点           | 是       | 演示角色出厂默认（5 个里 4 个走它）        |
+| `claude`   | Claude Code CLI（执行壳）   | ✅ Base URL 可填任意 Anthropic 兼容端点           | 是       | 演示角色出厂默认（4 个全走它）             |
 | `deepseek` | HTTP 直连                   | ✅ Base URL 可填任意 OpenAI Chat Completions 端点 | 是       | 走标准协议，不绑定 DeepSeek 一家           |
 | `opencode` | CLI，自带多 provider        | 由 opencode 自身配置                              | 否       | `opencode auth login` 后本地认证，可零 key |
 | `ollama`   | 本地 HTTP 服务              | ✅ Base URL 可填（默认本机 11434）                | 否       | 跑本地模型，可零 key                       |
-| `dsh`      | deepseek-harness CLI        | ❌ 无自定义端点，由 dsh 自身配置管理              | 是       | 演示角色之一（dsh猫）                      |
+| `dsh`      | deepseek-harness CLI        | ❌ 无自定义端点，由 dsh 自身配置管理              | 是       | —                                          |
 | `pi`       | pi coding agent SDK         | ❌ **上游同样写死 DeepSeek**，不可配置            | 是       | 见下方提示                                 |
 | `openai`   | Codex CLI（经 codex-proxy） | ❌ **上游同样写死 DeepSeek**，不可配置            | 是       | 见下方提示                                 |
 
@@ -160,7 +160,7 @@ pnpm dev                 # 启动 server :3200 + web :5173
 
 LLM 侧通过 9 个 MCP 工具与系统交互：`post_message`（结构化路由投递）、`query_db`（排障取证）、`query_session_messages`（回读历史）、`list_session_members`、`request_user_action`（请求用户介入，如重启 server）、`search_knowledge`、`read_skill` / `list_skills`（技能懒加载）、`create_pr`（创建 GitHub PR）。
 
-`pnpm seed` 内置 5 个演示角色：店长（store，架构师）/ ds猫、flash猫、dsh猫（implementer，实施）/ 吐槽猫（reviewer，审查）。
+`pnpm seed` 内置 4 个演示角色：店长（store，架构师）/ ds猫、flash猫（implementer，实施）/ 吐槽猫（reviewer，审查）。
 
 ## QQ 接入（OneBot / NapCat）
 

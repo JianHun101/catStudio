@@ -150,9 +150,10 @@ async function callWithTransientRetry(fn, attempts = 3, delayMs = 100) {
  *  两处 `socket.destroy()` 永不返回）。
  *
  *  规则 B（审查类投递缺 chainType）在本 e2e 里**当前不可达**：handoff-gen 只发补填
- *  请求，载荷 `mentions:[fillerName]` 且 filler ∈ {store, implementer}——实测 agents
- *  表：店长=store，ds猫/flash猫/dsh猫=implementer，reviewer 只有吐槽猫 ⇒
- *  `isReviewDelivery` 恒 false。仍然实现它（要的是闸门的**忠实镜像**，不是现状快照），
+ *  请求，载荷 `mentions:[fillerName]`，filler 取自**执行该 commit 的猫**（反查不中则
+ *  兜底店长），两者都不在 reviewer 角色上；而 reviewer 仅吐槽猫 ⇒ `isReviewDelivery`
+ *  恒 false（store / implementer 具体有哪些猫**不逐个列名**——清单随票单增删，列名必烂）。
+ *  仍然实现它（要的是闸门的**忠实镜像**，不是现状快照），
  *  并另加一条诊断断言钉住「放行载荷不得点名 reviewer」——改 filler 或加 mentions 的
  *  人会在那里立刻看到指向上游的红。
  */

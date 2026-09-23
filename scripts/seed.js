@@ -1,7 +1,7 @@
 /**
  * CatStudy 种子数据脚本。
  *
- * 创建 5 只演示 Agent + 1 个演示会话。
+ * 创建 4 只演示 Agent + 1 个演示会话。
  * 用法: node scripts/seed.js        (upsert 模式)
  *       node scripts/seed.js --reset (先清空再重建)
  *       pnpm seed                    (同上)

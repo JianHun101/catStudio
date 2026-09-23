@@ -20,8 +20,8 @@ function fixedId(name: string): string {
 describe('seed agents', () => {
   const agents = buildDemoAgents()
 
-  it('种子包含 5 只猫（店长/ds猫/flash猫/吐槽猫/dsh猫）——图测猫已随 vision 角色退役', () => {
-    expect(agents.map((a) => a.name).sort()).toEqual(['dsh猫', 'ds猫', 'flash猫', '吐槽猫', '店长'])
+  it('种子包含 4 只猫（店长/ds猫/flash猫/吐槽猫）——图测猫随 vision 角色退役、dsh 试点猫已下线', () => {
+    expect(agents.map((a) => a.name).sort()).toEqual(['ds猫', 'flash猫', '吐槽猫', '店长'])
   })
 
   it('seed 不再产出任何已退役角色（vision）条目', () => {
