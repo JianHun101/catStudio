@@ -111,6 +111,49 @@ export const ARM3_TOPK = 3
  */
 export const QUANT_REF_DTYPE = 'fp32'
 
+/**
+ * 量化交叉核对的**既有读数**——**证据迁移，非本批实测**。
+ *
+ * 为什么是常量而不是每批重跑：`--quant-crosscheck` 的参考档（见 `QUANT_REF_DTYPE`）本机实测
+ * ≈ 296 ms/对（q8 的 8.5 倍）⇒ 单遍 ≈ 7.5 分钟；而 A4 要的是**同 flags 连跑两遍**的 sha256
+ * 全等，两者装不进同一轮。触发条件（臂③ 增量 ≤ 0）**已经满足过**，结论已由 `batchSha` 那一批
+ * 关闭；只要不换模型、不换 dtype，重跑不产生新信息。
+ *
+ * ⚠️ **改这段数字的唯一合法方式是重跑 `--quant-crosscheck` 并同期更新 `batchSha`**——
+ * 手改会让 §三 变成一条无来源的假读数（本仓点名过的「复述面分叉」）。
+ * 换模型 / 换 dtype / 换重建侧 ⇒ 本批读数作废。
+ */
+export const QUANT_CROSSCHECK_EVIDENCE = {
+  /** 产出这批读数的提交 sha（读数落在该提交的 `*.latency.json` 里） */
+  batchSha: '36a434d3',
+  model: 'Xenova/bge-reranker-base',
+  hitQ8: 23,
+  hitRef: 24,
+  hitDelta: 1,
+  top3SameEntries: 25,
+  argmaxSameEntries: 30,
+  entries: 40,
+}
+
+/**
+ * 本机时区的时刻串——**只给计时面用**（`*.latency.md` 明标不可复现，故允许含时刻）。
+ *
+ * 存在的理由：产物文件名里的 `--date` 是**实验身份名**（与确定性面共用、可被显式指定），
+ * 不是生成时刻。用它替读数计时，等于让一个可被指定的标签替读数撒谎。
+ * ⚠️ **确定性面（md / json）一个字都不许用它**——那两份是 A4 的 sha256 比对对象。
+ */
+export function localStamp(now = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  const offMin = -now.getTimezoneOffset()
+  const sign = offMin >= 0 ? '+' : '-'
+  const abs = Math.abs(offMin)
+  return (
+    `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ` +
+    `${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())} ` +
+    `${sign}${p(Math.floor(abs / 60))}:${p(abs % 60)}`
+  )
+}
+
 /** 单次重排请求的超时。**不是生产值**——生产子预算由 R13b 定，见票面 A3 ②。 */
 export const RERANK_REQUEST_TIMEOUT_MS = 10 * 60 * 1000
 
@@ -697,40 +740,14 @@ export function renderReport(ctx) {
     '   救回组 2/5 是多片节、丢掉组 **6/8** 是多片节 —— **方向性提示明显，但 n=13、未做检验**，'
   )
   L.push('   **不足以当结论**。若将来重立票，这是第一个该查的地方。')
-  if (ctx.quantCrosscheck) {
-    // 触发条件（臂③ 增量 ≤ 0）已满足 ⇒ 按跑批前定死的条件跑了。**据实渲染，不预置结论**：
-    // 写死「已排除」会把一次该翻的结论粉饰成绿的。
-    const q = ctx.quantCrosscheck
-    // ⚠️ 判据是**判词是否变**，不是「命中数是否有差」：命中差 1 条但 verdict 不变，
-    // 结论照样站得住（本批实测：q8=23 → fp32=24，两者都 ≤ 臂① ⇒ 同为 close-ticket）。
-    // 拿 hitDelta 当判据会把「有噪声但不动结论」误报成「不可采信」——那是**过强的判词**。
-    const vQ8 = judgeArmVerdict({
-      arm1Hit: arms[0].hit,
-      arm2Hit: arms[1].hit,
-      arm3Hit: q.hitQ8,
-    })
-    const vRef = judgeArmVerdict({
-      arm1Hit: arms[0].hit,
-      arm2Hit: arms[1].hit,
-      arm3Hit: q.hitRef,
-    })
-    const quantRead =
-      vQ8.verdict === vRef.verdict
-        ? `q8 与 ${q.refDtype} 的**判词相同**（都是 \`${vQ8.verdict}\`）⇒ 量化不改结论；` +
-          `命中差 ${q.hitDelta} 条是噪声，不动方向（但见上面的节集/argmax 一致率——**名次**面另有读数）。`
-        : `**判词会变**（q8 \`${vQ8.verdict}\` → ${q.refDtype} \`${vRef.verdict}\`）⇒ q8 下的结论不可直接采信。`
-    L.push('2. **量化（q8）已交叉核对** —— 触发条件（臂③ 增量 ≤ 0）已满足，按跑批前定死的条件跑。')
-    L.push(
-      `   读数见 \`...latency.md\` §三：臂③ 命中 q8 ${q.hitQ8} / ${q.refDtype} ${q.hitRef}（Δ=${q.hitDelta}）、`
-    )
-    L.push(
-      `   top-3 节集全同 ${q.top3SameEntries}/${q.entries} 条、argmax 片全同 ${q.argmaxSameEntries}/${q.entries} 条。`
-    )
-    L.push(`   ${quantRead}`)
-  } else {
-    L.push('2. **量化（q8）未排除** —— 见 `...latency.md` §三（`--quant-crosscheck`）。触发条件')
-    L.push('   （臂③ 增量 ≤ 0）已满足，该核对**必须跑**才算把「重排无效」这条结论锁死。')
-  }
+  // ⚠️ 本条**刻意不读 `ctx.quantCrosscheck`**：交叉核对的渲染整体移到 `renderLatencyReport`。
+  // 理由（治的是结构不是措辞）：det 面（md + json）是 A4 的 sha256 比对对象，只要它引用了
+  // 一个「跑批时带不带 flag」才有的字段，A4 双跑就必须两次都带上那个 flag——而 fp32 交叉核对
+  // 单遍 ≈ 7.5 分钟（q8 的 8.5 倍），双跑装不进一轮。移走之后 **det 面按构造与 flag 无关**，
+  // 交叉核对可以单跑一次、与 A4 解耦。读数（含批次 sha 与「证据迁移」标注）见 `...latency.md` §三。
+  L.push('2. **量化（q8）已交叉核对** —— 触发条件（臂③ 增量 ≤ 0）已满足，按跑批前定死的条件跑过。')
+  L.push('   读数与**批次 sha** 见 `...latency.md` §三；⚠️ 那是**既有批次的证据迁移**，')
+  L.push('   **不得读作本批实测**（本批未重跑交叉核对，理由见该节）。OQ 由那份证据关闭。')
   L.push(
     '3. **「现状 topK」的口径在票面与活库之间漂移** —— 见 §零。本条影响的是**归档结论的可读性**，'
   )
@@ -745,10 +762,14 @@ export function renderReport(ctx) {
   L.push('   ⚠️ **方向要读对**：现行配置 topK=5 拿到负例 **5/5 全中**，这是 topK=5 的**成本面**')
   L.push('   （多注 2 节，把更多噪声也带了进来），**不是「更好」**。')
   L.push('5. **重排段耗时随序列长度走，不能从 S0 曲线外推** —— S0 的 49.4ms/pair 是**填到 450 字的')
-  L.push(`   合成件**；本批真实切片均长更短，实测 per-pair ${latency.perPairMs}ms。`)
-  L.push('   **任何从 S0 曲线外推 per-pair 的做法都不可采信**——外推方向随批次与机器负载变：')
-  L.push('   本票已实测到**方向相反**的两个读数（34.7ms / 258.7ms，后者是机器争用下的读数，')
-  L.push('   见 `...latency.md` §一注）。')
+  L.push('   合成件**；本批真实切片均长更短。')
+  L.push('   **任何从 S0 曲线外推 per-pair 的做法都不可采信**——外推方向随批次与**机器负载档**变：')
+  L.push('   本票已实测到**方向相反**的两个档（见 `...latency.md` §一 的两档表）。')
+  L.push(
+    '   ⚠️ **本段刻意不写本批的 per-pair 数值**：本文件是 A4 的 sha256 比对对象，塞一个耗时数字'
+  )
+  L.push('   进来 ⇒ 两次跑批的 md 必然不等（负载档一变就变），**A4 当场变成恒不可满足的假门**。')
+  L.push('   本批实测值一律只落在计时面（`...latency.md` / `.latency.json`）。')
   L.push('')
   return L.join('\n') + '\n'
 }
@@ -759,6 +780,11 @@ export function renderLatencyReport(ctx) {
   const L = []
   L.push(`# R13a 延迟与降级率（${date}）`)
   L.push('')
+  L.push(`> 实测时刻：**${localStamp()}**（本机时区）。⚠️ 标题里的 \`${date}\` 是**实验身份名**`)
+  L.push(
+    '> （与确定性面产物共用，来自 `--date`），**不是本文件的生成时刻**——判「这份读数是哪一轮的」'
+  )
+  L.push('> 要看这行，别读 `--date`。')
   L.push('> ⚠️ **本文件不可复现**（耗时随机器负载变），**不参与 A4 的 sha256 比对**。')
   L.push(`> 库快照：\`${dbPath}\``)
   L.push('')
@@ -780,9 +806,24 @@ export function renderLatencyReport(ctx) {
   L.push('')
   L.push('> ⚠️ 与 S0 的 49.4ms/pair 不同不是矛盾：S0 的 passage 是**填到 450 字**的合成件，')
   L.push('> 本批是**真实切片**（长度不一，短的几十字）⇒ 单对成本随序列长度走。')
-  L.push(`> 本批实测 per-pair **${latency.perPairMs} ms**。`)
-  L.push('> **任何从 S0 曲线外推 per-pair 的做法都不可采信**——外推方向随批次与机器负载变：')
-  L.push('> 本票已实测到**方向相反**的两个读数（34.7ms / 258.7ms，后者是机器争用下的读数）。')
+  L.push(
+    `> 本批实测 per-pair **${latency.perPairMs} ms**、检索段 p50（**重排前**）**${latency.retrievalP50} ms**。`
+  )
+  L.push(
+    '> **任何从 S0 曲线外推 per-pair 的做法都不可采信**——外推方向随**机器负载档**变。本票实测到'
+  )
+  L.push('> 两个**都可复现**的档（下表是对照读数，取自本票前后两次跑批，**不是本批**）：')
+  L.push('>')
+  L.push('> | 档 | per-pair | 检索段 p50（重排**前**） | 黄金集顶破闸 |')
+  L.push('> | --- | --- | --- | --- |')
+  L.push('> | 轻载 | 34.7 ms | 31 ms | 0/40 |')
+  L.push('> | 重载 | 235–258 ms | 347–358 ms | 15–21/40 |')
+  L.push('>')
+  L.push(
+    '> 判读：**检索段里没有重排**，它却与 per-pair 同幅变慢（约 11×）⇒ 两档之差是**整机负载**，'
+  )
+  L.push('> 不是「尺子变慢」。本批落在哪一档，拿本批的检索段 p50 与上表对读即可。')
+  L.push('> ⚠️ 别再花时间归因到某个具体进程——本票三次尝试均**未**定位到争用源，而结论不依赖它。')
   L.push('')
   L.push('## 二、A3 ① timeout 基线 + ③ 降级率推演')
   L.push('')
@@ -833,17 +874,52 @@ export function renderLatencyReport(ctx) {
       '**不代表真实流量**的池深分布。要精确推演得先采真实流量的池深，本票没采。'
   )
   L.push('')
-  L.push('## 三、量化交叉核对（可选诊断 `--quant-crosscheck`）')
+  L.push('## 三、量化交叉核对（`--quant-crosscheck`）')
   L.push('')
-  if (!ctx.quantCrosscheck) {
-    L.push('> 本次未跑（默认关）。触发条件是**跑批前定死**的：仅当臂③ 相对臂② 增量 ≈ 0 或为负时。')
-    L.push('')
-  } else {
+  const ev = QUANT_CROSSCHECK_EVIDENCE
+  L.push(
+    `> ⚠️ **证据迁移，非本批实测**。本批**未重跑**交叉核对：下表是批次 \`${ev.batchSha}\` 的读数，`
+  )
+  L.push('> 原样搬来关闭「量化（q8）造出了『重排无效』」这条替代解释。不重跑的理由——参考档')
+  L.push(`> \`${QUANT_REF_DTYPE}\` 在本机实测 ≈ 296 ms/对（q8 的 8.5 倍）⇒ 单遍 ≈ 7.5 分钟，`)
+  L.push(
+    '> 与同样要跑两遍的 A4（确定性面 sha256 比对）装不进同一轮；而只要**不换模型 / 不换 dtype**，'
+  )
+  L.push(
+    '> 重跑不产生新信息。**换了任何一个，这批读数即作废、必须重跑**（改数字不许手改，见常量注释）。'
+  )
+  L.push('')
+  L.push('| 读数（批次 `' + ev.batchSha + '`） | 值 |')
+  L.push('| --- | --- |')
+  L.push(`| 臂③ 命中（q8） | ${ev.hitQ8} |`)
+  L.push(`| 臂③ 命中（${QUANT_REF_DTYPE}） | ${ev.hitRef} |`)
+  L.push(`| **命中差** | **${ev.hitDelta}** |`)
+  L.push(`| top-3 节集完全相同的条目 | ${ev.top3SameEntries} / ${ev.entries} |`)
+  L.push(`| argmax 片相同的条目 | ${ev.argmaxSameEntries} / ${ev.entries} |`)
+  L.push(`| 模型 | \`${ev.model}\` |`)
+  L.push('')
+  // 判词比对用**本批**的臂① / 臂② 命中数——证据批次的臂① 会随快照漂移，拿旧臂① 比是跨批比。
+  const vQ8 = judgeArmVerdict({ arm1Hit: arms[0].hit, arm2Hit: arms[1].hit, arm3Hit: ev.hitQ8 })
+  const vRef = judgeArmVerdict({ arm1Hit: arms[0].hit, arm2Hit: arms[1].hit, arm3Hit: ev.hitRef })
+  L.push(
+    `> 判词比对（分母用**本批** 臂① ${arms[0].hit} / 臂② ${arms[1].hit}）：q8 \`${vQ8.verdict}\`、` +
+      `${QUANT_REF_DTYPE} \`${vRef.verdict}\` —— ` +
+      (vQ8.verdict === vRef.verdict
+        ? '**判词不变** ⇒ 量化不改结论。'
+        : '**判词会变** ⇒ q8 下的结论不可直接采信。')
+  )
+  L.push(
+    '> ⚠️ 判据是**判词是否变**，不是「命中数是否有差」：命中差是噪声，不动方向（名次面另有上面两张'
+  )
+  L.push(
+    '> 一致率表）。拿 `hitDelta` 当判据会把「有噪声但不动结论」误报成「不可采信」——那是过强的判词。'
+  )
+  L.push('')
+  if (ctx.quantCrosscheck) {
     const q = ctx.quantCrosscheck
+    L.push('### 本批实测（`--quant-crosscheck` 已跑）')
+    L.push('')
     L.push(`> 模型 \`${q.model}\`，比 q8 与 ${q.refDtype} 两把尺在**同一批 pairs** 上的读数。`)
-    L.push(
-      `> 参考档取 \`${q.refDtype}\` 的理由（fp16 在本机 onnxruntime 上初始化即抛）见脚本的 \`QUANT_REF_DTYPE\`。`
-    )
     L.push('')
     L.push('| 读数 | 值 |')
     L.push('| --- | --- |')
