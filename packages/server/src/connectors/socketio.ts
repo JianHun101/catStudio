@@ -507,7 +507,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
             sessionId: req.sessionId,
           })
           // 文案不写分钟数：pending(10min) 与 confirmed(35min) 走同一分支，
-          // 写死任一方都会在另一方路径上失真（web chat.ts:434 同句待后续单收口）
+          // 写死任一方都会在另一方路径上失真（web `stores/chat.ts` 的过期文案同句待后续单收口）
           socket.emit(Events.ERROR, { message: '重启请求已过期，请店长重新发起' })
           socket.emit(Events.RESTART_STATUS, {
             sessionId: req.sessionId,

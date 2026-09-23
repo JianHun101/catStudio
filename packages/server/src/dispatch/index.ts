@@ -34,8 +34,8 @@ const HANDOFF_FILL_REQUEST_PREFIX = '请补填以下交接文档'
  *  - 只要注释形态、不要行首锚定**同样拦不住实测样本**：`0319b7f3`（len 6757）的
  *    引用里**就带** `<!--`（注释符偏移 799、裸串 804），且落在**过程叙述行的行中**
  *    （列 804，不顶行）——救下它的只有"行首锚定"那半。
- *  - 范围：**只覆盖 §2–§4** 的模板占位（`handoff-gen.mjs:192/197/202`，行首）；
- *    **不含** §5 的 `buildChecklistSection` 降级文案（`handoff-gen.mjs:658`）。
+ *  - 范围：**只覆盖 §2–§4** 的模板占位（`handoff-gen.mjs` 的 `TODO: 补填` 模板串，行首）；
+ *    **不含** §5 的 `buildChecklistSection` 降级文案。
  *    「改动类型未匹配」是**正常降级**，把降级当「未补填」会让它触发补填——
  *    正是本 spec 要治的无效消耗。 */
 const HANDOFF_TODO_MARKER_RE = /^\s*<!-- TODO: 补填/m

@@ -205,8 +205,8 @@ export async function ingestUserMessage(input: IngestInput): Promise<IngestResul
   // 旧实现落的是调用方的 `taskId || null`：traceId 早在上一行就生成了却没落列，
   // 于是链首锚恒为空，而 episodes / flow-advance / recovery / reply 四处消费方
   // 全按 messages.task_id 查——空锚即静默失配（不是报错，是查不到）。
-  // 锚同时进广播 msg（与落库同源）：下游 reply.ts:822 / serial.ts:790 继承读的
-  // 就是触发消息的 taskId，两处 `|| traceId` 从此只对存量空锚降级，不再是逃生舱。
+  // 锚同时进广播 msg（与落库同源）：下游 `execution/reply.ts` / `execution/serial.ts` 的
+  // `triggerMsg.taskId || traceId` 继承读的就是触发消息的 taskId，只对存量空锚降级、不再是逃生舱。
   const anchor = taskId || traceId
 
   log.info('message received', {

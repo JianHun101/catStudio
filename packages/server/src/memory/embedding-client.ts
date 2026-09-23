@@ -610,7 +610,7 @@ const STDERR_MAX = 500
 /**
  * sidecar 的 stderr 单块 → 日志（**截断 + 分级**，形态照 `llm/cli-utils.ts`）。
  *
- * 分级判据沿用 `cli-utils.ts:496`：含 `Warning`/`info` 视为噪声记 `debug`，其余记 `error`。
+ * 分级判据沿用 `llm/cli-utils.ts` 的 `attachExitError`：含 `Warning`/`info` 视为噪声记 `debug`，其余记 `error`。
  * 每块只落**一行**（cli-utils 那版同块 debug+error 各写一次，在默认 `LOG_LEVEL=debug`
  * 下等于每块两行；同信息不重复落，可读性按排查场景优先）。
  */

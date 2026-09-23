@@ -1,8 +1,8 @@
-# M1 票：回复下方展示所用记忆（**读侧 + 出口，零模型**·待派）
+# M1 票：回复下方展示所用记忆（**读侧 + 出口，零模型**·已收口）
 
 > 来源：用户 2026-09-22。原话「索引是想记录回复用到了哪些检索到的记忆文档，方便判断使用率，以及方便用户判断真实性」→ 用户拍板：**不再手写引用面**（店长自述不可验证），改为**产品功能**；展开形态选**乙**（库内看片段 + 次级链接开当前文档）。
 > 定位：**独立票**——零模型、不动检索行为，只补读口与出口。
-> 状态：**未开工 · 待派**。
+> 状态：**已收口** —— 已审 sha `bdee856c` 经 PR #173 入 dev（merge commit `aa2541ba`）。
 > 行号基线：`dev` 当轮 HEAD。**实施者落笔前按自己那棵树重取一遍**。
 
 ## 一、数据面已经端到端通了（本票不重做）
@@ -32,9 +32,12 @@
 
 ### 服务端 2｜REST 路由
 
-- `GET /api/sessions/:id/memory-refs?messageIds=1,2,3` → `{ [messageId]: MemoryRef[] }`
-  - 空数组与「消息不存在」要可区分
-  - **必须校验消息属于该 session**（本仓已有跨会话越权前科）
+- `GET /api/sessions/:id/memory-refs?messageIds=1,2,3` → `{ [messageId]: { state, reason, refs } }`
+  - **订正记录（2026-09-22，架构师裁定）**：本节原写 `{ [messageId]: MemoryRef[] }`，与 §四 A2「三态可分」**自相矛盾**——裸数组装不下 `reason`，「无注入」与「未检索」都退化成 `[]`。裁定**取 A2**，值从 `MemoryRef[]` 升为 `{ state, reason, refs }`（`refs` 即原数组，顶层 Map 形状不变）。偏离的实施依据见 `routes/memory.ts` 头注。
+  - `state` 三值：`injected`（有 `injected=1` 的节）/ `none`（检索跑了、一节没入选）/ `not-retrieved`（压根没检索，`reason ∈ {not-enabled, empty-query, skipped-a2a}`）
+  - `reason` = `retrieval_events.reason` 原值，`null` = 该消息无检索流水行
+  - 空数组与「消息不存在」要可区分 —— 实现取**整条 400**（见下条），不靠空数组兜
+  - **必须校验消息属于该 session**（本仓已有跨会话越权前科）：请求里任一消息不属于该会话 / 不存在 ⇒ **整条 400 并点出该 id**，不得静默返回空
 - `GET /api/memory/doc?path=docs/adr/xxx.md` → 文档正文（形态乙的次级链接）
   - **白名单锁死 `SCAN_PREFIXES`**（`scripts/flywheel/scan.mjs` 导出，值 = `['docs/adr/', 'docs/lessons/', 'docs/plans/']`）——**从该常量导入，禁止在路由里另抄一份字面量**（同一规则两处措辞 = 本仓明令的假绿源）
   - 路径穿越守卫：`path.resolve` 后校验仍在白名单前缀内，拒 `..` / 绝对路径 / 盘符 / 反斜杠变体
@@ -76,3 +79,17 @@
 - 看板方向（本票不做）：`E1-retrieval-eval-visualization.md`
 - 白名单常量：`scripts/flywheel/scan.mjs` 的 `SCAN_PREFIXES`
 - 渲染契约说明：`packages/web/src/components/ChatPanel.vue` 里 `MessageItem` 调用处注释
+
+## 七、收口记录（2026-09-22）
+
+- **实施**：flash猫。**已审 sha** `bdee856c`；审查结论 ✅（吐槽猫，独立复跑 vitest 全量 156 文件 / 3382 用例全绿 + lint 三包过，非采信作者自述）。经 **PR #173** 入 dev，merge commit `aa2541ba`。
+- **架构师裁定（值形状偏离）**：**接受**。票面 §三 与 §四 A2 自相矛盾（裸数组装不下 `reason`），只能二选一，取 A2——三态可分是用户原话「方便判断使用率」的承重面。被否的第三条路 = `{ [messageId]: MemoryRef[] | null }`（可同时字面满足 §三 与 A2，但丢 `reason`，排查使用率时「为什么没查」变盲）。订正已回写 §三，**票面与实现现已同面**。
+- **实施对票面的两处必要收窄**（非偏离，是票面字面不可执行处的落地口径）：
+  1. 读口出参在票面五字段外**增 `bodyHead`** —— 「抽屉显示该片当时全文」需要；票面 §三 前端段已要求，属实现追平需求。
+  2. 「只取 `injected = 1` 的行」须**再按 `(doc_path, section_anchor)` 按节去重、代表行优先 `source='final'`** —— 写侧口径下 **`probe` 行的 `injected` 也可能为 `1`**，照字面直取会被 probe 行污染条数，A1 当场对不上。
+- **遗留观察项（非阻塞，不随本票）**：
+  1. `messagesRepo.messageExists` 逐 id 点查（≤200 次）→ 可收成一条 `IN` 查询
+  2. **啮合常量无守卫**：`routes/memory.ts` 的 `MAX_MESSAGE_IDS` = 200 ↔ `ChatPanel.vue` 的 `MEMORY_REFS_MAX_IDS` 跨包同值，只靠注释约束。两边不同值时超限是**整条 400**，前端按更大上限发会让整个会话的记忆行一起灭。本仓已有 web `?raw` 静态源断言范式，可补一条跨包断言
+  3. 前端对 user 消息也发请求键（不产生额外请求，仅键冗余）
+  4. 同一 message 有多条 retrieval event 时去重保住了条数，但 `reason` 取首行（标签瑕疵）
+- **射程外（另一票）**：聚合看板（按文档 / 节的注入次数、五种丢弃原因分布）归 `E1-retrieval-eval-visualization.md`。

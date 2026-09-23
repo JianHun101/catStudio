@@ -8,6 +8,9 @@
  *   - `injectedSections` 的序（错了 ⇒ 注入集顺序错位）
  *   - `judgeRerankNonDegenerate` 的退化检测（**承重**：S0 实测的 softmax-of-one 恒 1）
  *   - `judgeArmVerdict` 的判词优先级（错了 ⇒ 零增量被写成「等价但更省」的收益）
+ *   - `computeDegradation` 的「新增」口径（错了 ⇒ 降级率虚高 9 倍，把覆盖率读数读反）
+ *   - `renderReport` 与 `--quant-crosscheck` 的**解耦**（错了 ⇒ A4 双跑被迫都带上 7.5 分钟的交叉核对）
+ *   - `renderLatencyReport` 的交叉核对**证据迁移**标注（错了 ⇒ 替代解释看着像关了其实没关）
  *
  * 组装式（真实 DB + 真跑链段）不在此处——那是 `rerank-offline-ab.mjs` 主流程，
  * 由跑批本身 + 报告里的自证闸覆盖。
@@ -18,16 +21,20 @@ import {
   ARM1_TOPK,
   ARM2_TOPK,
   ARM3_TOPK,
+  QUANT_CROSSCHECK_EVIDENCE,
   RERANK_IRRELEVANT_MAX,
   RERANK_RELEVANT_MIN,
   applyRerankScores,
   argmaxContributionIndex,
   buildRerankPairs,
+  computeDegradation,
   injectedSections,
   judgeArmVerdict,
   judgeRerankNonDegenerate,
   parseArgs,
   quantile,
+  renderLatencyReport,
+  renderReport,
 } from './rerank-offline-ab.mjs'
 
 /** 造一条池内命中（只带本文件用得到的字段） */
@@ -258,6 +265,25 @@ describe('judgeArmVerdict（判词优先级）', () => {
   it('臂③ > 臂② > 臂① ⇒ 有效（增量方向对就得判有效，不论幅度）', () => {
     expect(judgeArmVerdict({ arm1Hit: 1, arm2Hit: 2, arm3Hit: 3 }).verdict).toBe('effective')
   })
+
+  // 假话源守卫：票面 §二 那句「结论写瓶颈在池的成员，不在序」**已被实测证伪**
+  // （重排确实在动序、且救回过锚点，见报告 §一 订正块）。判词不许再复述它——
+  // 复述面一旦留旧句，归档 json 是会被 grep 的面，读的人会当结论采信。
+  it('close-ticket 的判词**不复述**已作废的「瓶颈在池的成员，不在序」', () => {
+    for (const c of [
+      { arm1Hit: 9, arm2Hit: 9, arm3Hit: 3 }, // 臂③ < 臂①
+      { arm1Hit: 4, arm2Hit: 9, arm3Hit: 4 }, // 臂③ = 臂①
+      { arm1Hit: 0, arm2Hit: 0, arm3Hit: 0 }, // 全等
+      { arm1Hit: 2, arm2Hit: 9, arm3Hit: 5 }, // 夹在中间（第四个分支）
+    ]) {
+      const v = judgeArmVerdict(c)
+      expect(v.verdict).toBe('close-ticket')
+      // 守卫：**任何** close-ticket 变体都不许复述那句已被实测证伪的预置结论
+      expect(v.message).not.toContain('瓶颈在池的成员')
+    }
+    // 臂③ ≤ 臂① 那一支（被预置句直接覆盖的情形）额外要把「不是序无用」点出来
+    expect(judgeArmVerdict({ arm1Hit: 0, arm2Hit: 0, arm3Hit: 0 }).message).toContain('不是')
+  })
 })
 
 describe('quantile（最近秩法）', () => {
@@ -279,6 +305,216 @@ describe('quantile（最近秩法）', () => {
 
   it('乱序输入先排序（不假设调用方给的是有序的）', () => {
     expect(quantile([50, 10, 30], 0.5)).toBe(30)
+  })
+})
+
+describe('computeDegradation（A3 ③ 的「新增」口径）', () => {
+  const row = (reason, ms) => ({ reason, ms })
+
+  it('本来就闸外的行不计入「新增」（9 vs 真值 1 的那条）', () => {
+    const live = [
+      row('ok', 9836), // 加 1319ms ⇒ 11155，翻线
+      row('ok', 5240), // 加 1319ms ⇒ 6559，不翻
+      row('timeout', 12000), // 本来就闸外
+    ]
+    const d = computeDegradation(live, 1319, 10000)
+    expect(d.overAfter).toBe(2) // 闸外总数：2（含本来就闸外的那条）
+    expect(d.alreadyOver).toBe(1)
+    expect(d.added).toBe(1) // 「新增」只数翻线的那条
+    expect(d.rate).toBe('1/3')
+  })
+
+  it('先剔再算 ≠ overAfter − alreadyOver（后者靠数据现状成立）', () => {
+    // 构造一条「reason=timeout 但 ms < 闸值」的行（被中止的执行）。
+    // 减法则会把它当成「本来就闸外」从分子里减掉 ⇒ 漏报一条真翻线。
+    const live = [row('timeout', 500), row('ok', 9900)]
+    const d = computeDegradation(live, 200, 10000)
+    expect(d.overAfter).toBe(1)
+    expect(d.added).toBe(1) // 减法会给 max(0, 1-1) = 0
+  })
+
+  it('恰好等于闸值算过闸（>= 不是 >）', () => {
+    expect(computeDegradation([row('ok', 9000)], 1000, 10000).added).toBe(1)
+    expect(computeDegradation([row('ok', 8999)], 1000, 10000).added).toBe(0)
+  })
+
+  it('空输入给 0/0，不抛也不编分母', () => {
+    expect(computeDegradation([], 1319, 10000)).toEqual({
+      denom: 0,
+      alreadyOver: 0,
+      overAfter: 0,
+      added: 0,
+      rate: '0/0',
+    })
+  })
+})
+
+/** 一份最小可渲染 ctx（只带 `renderReport` 真读的字段）——两个 describe 共用 */
+const detCtx = (extra = {}) => ({
+  date: '2026-09-22',
+  dbPath: 'D:\\x\\snap.db',
+  goldenVersion: 1,
+  params: {
+    maxDistance: 0.6,
+    liveTopK: 5,
+    liveTopKRows: [{ k: 5, n: 119, fromAt: 'a', toAt: 'b' }],
+  },
+  arms: [
+    {
+      label: '①',
+      how: 'RRF',
+      meanInjectedSections: 3,
+      hit: 27,
+      expectTotal: 35,
+      recallMean: 0.77,
+      microRecall: 0.77,
+      negativeFlagged: 4,
+      negativeTotal: 5,
+      negativeIds: [],
+    },
+    {
+      label: '②',
+      how: 'RRF',
+      meanInjectedSections: 5,
+      hit: 29,
+      expectTotal: 35,
+      recallMean: 0.82,
+      microRecall: 0.82,
+      negativeFlagged: 5,
+      negativeTotal: 5,
+      negativeIds: [],
+    },
+    {
+      label: '③',
+      how: 'rerank',
+      meanInjectedSections: 3,
+      hit: 23,
+      expectTotal: 35,
+      recallMean: 0.65,
+      microRecall: 0.65,
+      negativeFlagged: 4,
+      negativeTotal: 5,
+      negativeIds: [],
+    },
+  ],
+  anchors: [],
+  canary: [{ id: 'CANARY-HIT', ok: true }],
+  rerankSelfCheck: { ok: true, reason: '', relevant: 0.98, irrelevant: 0.02 },
+  mergeCheck: { ok: true, mismatches: [], rows: 200, entries: 40 },
+  latency: { perPairMs: 34.719 },
+  verdict: { verdict: 'close-ticket', message: '据实关票' },
+  flips: { arm1ToArm3: [], arm2ToArm3: [] },
+  ...extra,
+})
+
+describe('renderReport —— 确定性面与 --quant-crosscheck 解耦（A4 的构造保证）', () => {
+  it('带 / 不带 quantCrosscheck，renderReport 输出**逐字节相同**', () => {
+    // 承重：det 面（md + json）是 A4 的 sha256 比对对象。**只要它读了一个「跑批时带不带 flag」
+    // 才有的字段，A4 双跑就必须两次都带上那个 flag**——而交叉核对单遍 ≈7.5 分钟，双跑装不进一轮。
+    // 这条测试钉的是**构造**（不是「跑两遍比 sha」的运气）：解耦失效当场红。
+    const qc = {
+      model: 'Xenova/bge-reranker-base',
+      refDtype: 'fp32',
+      hitQ8: 23,
+      hitRef: 24,
+      hitDelta: 1,
+      top3SameEntries: 25,
+      argmaxSameEntries: 30,
+      entries: 40,
+      maxAbsScoreDelta: 0.38,
+      note: 'n',
+    }
+    expect(renderReport(detCtx({ quantCrosscheck: qc }))).toBe(renderReport(detCtx()))
+  })
+
+  it('计时数字**不得进 det 面**：只改 latency.perPairMs，renderReport 输出逐字节不变', () => {
+    // 承重（本轮实测踩到）：det md 里塞一个耗时数字 ⇒ 两次跑批的 md 必然不等（负载档一变就变）
+    // ⇒ **A4（两遍 sha256 全等）当场变成恒不可满足的假门**。且失败形态是「有时过有时不过」，
+    // 正是本仓点名的「偶发假红的假门」。计时数字只许落在计时面。
+    const a = renderReport(detCtx({ latency: { perPairMs: 34.719 } }))
+    const b = renderReport(detCtx({ latency: { perPairMs: 249.513 } }))
+    expect(a).toBe(b)
+    expect(a).not.toContain('249.513')
+    expect(a).toContain('latency.md')
+  })
+
+  it('§七.2 指向 latency.md，不再自渲染交叉核对读数（防复述面分叉）', () => {
+    const md = renderReport(detCtx())
+    expect(md).toContain('量化（q8）已交叉核对')
+    expect(md).toContain('latency.md')
+    expect(md).toContain('不得读作本批实测')
+    // 本批读数不许出现在 det 面（出现即意味着 det 面又开始依赖 flag）
+    expect(md).not.toContain('top-3 节集全同')
+  })
+})
+
+describe('renderLatencyReport —— 交叉核对证据迁移', () => {
+  const base = {
+    date: '2026-09-22',
+    dbPath: 'D:\\x\\snap.db',
+    arms: [{ hit: 27 }, { hit: 29 }, { hit: 23 }],
+    latency: {
+      rerankP50: 1,
+      rerankP95: 2,
+      rerankMax: 3,
+      perPairMs: 34.719,
+      meanPairsPerEntry: 37.98,
+      retrievalP50: 31,
+      totalP50: 4,
+      totalP95: 5,
+      thresholdMs: 10000,
+      overGateInGolden: 0,
+      headroomMs: 164,
+      degradation: [
+        { face: 'golden', denom: 40, added: 0, rate: '0/40', overAfter: 0, alreadyOver: 0 },
+        { face: 'live', denom: 846, added: 1, rate: '1/846', overAfter: 1, alreadyOver: 0 },
+      ],
+      timeoutBaseline: {
+        denom: 846,
+        timeout: 8,
+        rate: '8/846',
+        pct: 0.945,
+        denomAllReasons: 933,
+        pctAllReasons: 0.859,
+        slowestNonTimeout: 9836,
+      },
+    },
+    timings: [],
+  }
+
+  it('未跑交叉核对时也渲染证据块，且**明标「证据迁移」+ 批次 sha**', () => {
+    // 承重：没有这块，「量化造出了『重排无效』」这条替代解释就**没有关闭证据**却会被读成已关。
+    const md = renderLatencyReport(base)
+    expect(md).toContain(QUANT_CROSSCHECK_EVIDENCE.batchSha)
+    expect(md).toContain('证据迁移')
+    expect(md).toContain('非本批实测')
+    expect(md).toContain(`| ${QUANT_CROSSCHECK_EVIDENCE.hitQ8} |`)
+    expect(md).toContain(`| ${QUANT_CROSSCHECK_EVIDENCE.hitRef} |`)
+  })
+
+  it('证据读数 + 本批臂① ⇒ 判词比对写进产物（证据批次的旧臂① 不作分母）', () => {
+    const md = renderLatencyReport(base)
+    expect(md).toMatch(/判词比对（分母用\*\*本批\*\* 臂① 27/)
+  })
+
+  it('latency md 头带实测时刻，且点名 --date 不是时刻（不让实验身份名替读数计时）', () => {
+    const md = renderLatencyReport(base)
+    expect(md).toMatch(/实测时刻：\*\*\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}\*\*/)
+    expect(md).toContain('不是本文件的生成时刻')
+  })
+
+  it('§一 同时给 per-pair 与检索段 p50（重排前），并列出两个负载档', () => {
+    const md = renderLatencyReport(base)
+    expect(md).toContain('检索段 p50（**重排前**）**31 ms**')
+    expect(md).toContain('轻载')
+    expect(md).toContain('重载')
+    expect(md).toContain('检索段里没有重排')
+  })
+
+  it('latency md 含时刻 ⇒ 它**只能**是不可复现面（不进 A4 的那份）', () => {
+    // 反向锁：有人把 localStamp 挪进 renderReport，这条与上面那条「逐字节相同」会一起红。
+    expect(renderLatencyReport(base)).toMatch(/实测时刻：/)
+    expect(renderReport(detCtx())).not.toMatch(/实测时刻：/)
   })
 })
 

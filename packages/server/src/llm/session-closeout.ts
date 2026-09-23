@@ -413,15 +413,15 @@ export function closeoutSession(sessionId: string): CloseoutResult {
 //
 // ⚠️ **这一节刻意放在文件末尾，不紧挨 `closeoutSession`。**
 //
-// 原因：本文件的行号被多份文档当作**指针**引用（`llm/worktree-fanin.ts:11/172`、
-// `docs/run/multi-cat-isolation/adr-0015-draft.md:73/143/153/164`、
-// `docs/run/eval-system/R6-diag-inventory.md:51/114/146`、
-// `docs/run/multi-cat-isolation/report-phase-ib.md:227`、
-// `docs/run/multi-cat-isolation/tickets-t2-phase-ib.md:244`、
-// `docs/run/docs-run-status-gate/tickets.md:47/104`、
-// `docs/run/retired-docs-tombstone/run-inventory.md:190`，共 14 行 / 7 份文件）。
-// 在头部插入本节（138 行）会连同新增那行 import 一起把它们**整批推偏 139 行**
-// （指针从此落进无关函数）；放末尾则零推偏，残余位移只有 **+1**（那行 import）。
+// 原因：**历史遗留约束**——`docs/run/**` 下若干在飞文档仍以**行号**引用本文件的
+// 若干位置（那些票面已裁「不修」，随各自收口即清）。把本节合并回
+// `closeoutSession` 附近（更别说在头部插入）会连着新增的 import 一起把那些行号
+// 整批推偏，指针从此落进无关函数。
+//
+// 历史上这里登记过一份「N 行 / M 份文件」的引用清单——那种计数是每次增删都要改的
+// 东西，与本节要防的漂移同源（本仓认过同类账），故已删除，只留上面这条定性约束。
+//
+// 待那些在飞文档随票清理后，本节即可合并回 `closeoutSession` 附近，本条约束一并失效。
 //
 // 调用点在前、定义在后是安全的：函数声明提升，且本节的模块级常量在模块求值期
 // 就完成初始化，而 `closeoutSession` 只会在求值结束之后被调用。

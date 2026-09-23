@@ -140,7 +140,7 @@ async function callWithTransientRetry(fn, attempts = 3, delayMs = 100) {
 // ─── 入口主闸镜像（T-O 并入）────────────────────────────────
 
 /** 真实 REST 通道上的两个 400 条件，逐字对齐 `connectors/ingest.ts:buildDeliveryGateError`。
- *  handoff-gen 的投递固定 `origin:'agent'`（`routes/messages.ts:173` 硬编码），
+ *  handoff-gen 的投递固定 `origin:'agent'`（`routes/messages.ts` 的 `origin: 'agent'` 硬编码），
  *  故「缺锚即 400」对**每一次**投递都适用。
  *
  *  为什么必须镜像：inline stub 原先一律无条件 201 ⇒「载荷无锚」这个缺口在 e2e 里
@@ -2525,8 +2525,8 @@ console.log('')
 // stub 没接上 / 会话反查失败 / 判据恒真时同样绿，那是本仓踩过的假绿形态。
 //
 // 16d 是**审查回炉补的**（P2 实害）：首版判据带 `!process.env.CATSTUDY_SESSION_ID`
-// 前置，而该 env 是 server 注入给每只猫 CLI 的**常驻变量**（`llm/claude.ts:361` /
-// `llm/opencode.ts:91` / `llm/dsh.ts:94`），钩子（裸 node 调用）全量继承它 ⇒ 前置在
+// 前置，而该 env 是 server 注入给每只猫 CLI 的**常驻变量**（`llm/claude.ts` /
+// `llm/opencode.ts` / `llm/dsh.ts` 三处注入），钩子（裸 node 调用）全量继承它 ⇒ 前置在
 // 产品路径上恒为假，免审豁免等于不存在。首版之所以全绿：样本跑在
 // `env -u CATSTUDY_SESSION_ID` 下——**验证面不是被判面**（本仓记过的假绿形态）。
 // 16d 把「猫的真实环境」钉成用例。四条用例各用独立临时仓库（账本按仓库隔离）。
@@ -2640,7 +2640,7 @@ function changedPathsOfHead(tmp) {
   }
 
   // 16d（回归·本轮新增）：**生产环境形态** —— CATSTUDY_SESSION_ID 由 server 注入给猫的
-  //      CLI（llm/claude.ts:361），`.husky/post-commit` 是裸 node 调用、全量继承它。
+  //      CLI（`llm/claude.ts` 的 `env.CATSTUDY_SESSION_ID = context.sessionId`），`.husky/post-commit` 全量继承它。
   //      首版判据「该 env 未设 且 全免审」在此形态下恒假 ⇒ 纯 docs 提交照发审查请求。
   //      与 16a **同 sha 形态、只差这一个 env**：任何差异只能归因于它。
   {

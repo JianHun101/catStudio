@@ -851,7 +851,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- Edit Modal（与 AgentPanel.vue:385 同款挂载——editingAgent 状态必须有弹窗消费，
+          <!-- Edit Modal（与已删的 AgentPanel.vue 编辑弹窗同款挂载——editingAgent 状态必须有弹窗消费，
                否则卡片点击静默失效；测试锚定 SettingsView.test.ts 挂载断言） -->
           <AgentEditModal :agent="editingAgent" @close="closeEdit" />
         </div>

@@ -98,8 +98,8 @@ function findRepoRootFrom(startDir: string): string | null {
  * `pnpm dev:server`（AGENTS.md 明列的单包启动）= `pnpm --filter @cat-study/server dev`
  * = `tsx watch src/index.ts`，cwd = `packages/server` → 原实现解析出
  * `packages/server/scripts/handoff-gen.mjs`，existsSync false → ② 整条兜底链**静默
- * 失效**（只留一条 error 日志）。dev.js:252-253 把 cwd 设成 ROOT 只是那一种启动形态
- * 的巧合，不是契约。
+ * 失效**（只留一条 error 日志）。`dev.js` 以 `cwd: ROOT` spawn server 只是那一种启动
+ * 形态的巧合，不是契约。
  *
  * 为什么不是固定层级 `new URL('../../../..', import.meta.url)`：源码与构建产物深度
  * 不同——tsconfig `rootDir: ".."` + `outDir: "./dist"`，产物落在 `dist/server/src/

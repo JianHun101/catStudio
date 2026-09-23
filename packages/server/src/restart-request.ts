@@ -31,8 +31,8 @@ export const RESTART_TTL_MS = 10 * 60 * 1000
  * - 本值管 confirmed：用户已明确点确认，此后唯一风险是 dev.js 的执行保护窗
  *   （`.agent-busy` 锁 / execution_logs 有 running）尚未释放。
  *
- * 为什么必须续期：dev.js `pollRestart`（scripts/dev.js:632）**先判过期、再判保护窗**
- * （:644）。confirmed 若沿用 createdAt 起算的 10 分钟，一次长执行就能把 TTL 吃光
+ * 为什么必须续期：`scripts/dev.js` 的 `pollRestart` **先判过期、再判保护窗**。
+ * confirmed 若沿用 createdAt 起算的 10 分钟，一次长执行就能把 TTL 吃光
  * → 超时 `unlink` + 仅 dev 终端一行日志（UI 零提示）→ 用户视角「点了没反应」。
  * 实证：2026-09-09 本会话请求剩 2.9 分钟余量，靠店长手工续期才保住。
  *
@@ -40,8 +40,8 @@ export const RESTART_TTL_MS = 10 * 60 * 1000
  * （轮询间隔与收尾）。注意该推导是**单次**口径，保护窗的真实上界见残余。
  *
  * 已知残余（可达，非极小面）：忙碌窗上界不是单次执行上限，而是**连续忙碌链的累计时长**。
- * 执行可串接（completeExecution 出队即起下一个，serial.ts:227-273），而 dev.js 的等待判据
- * 是「`.agent-busy` 锁在 或 execution_logs 有 running」（dev.js:644 / :169）——只要还有执行
+ * 执行可串接（`execution/serial.ts` 的 `completeExecution` 出队即起下一个），而 `dev.js` 的
+ * 等待判据是「`.agent-busy` 锁在 或 `hasRunningExecutions()`」（`pollRestart` 内）——只要还有执行
  * 在跑就继续等，与单次时长无关。⇒ 忙碌链累计 > 35min 时请求仍会过期掉单。
  * 根治方向（未做，需架构裁决）：server 侧在存在未执行 confirmed 请求时拒绝新派发，
  * 或 dev.js 按「已等待时长」而非固定 TTL 判新鲜度。本注释只描述现状，不构成「禁止修复」。
@@ -54,8 +54,8 @@ export const RESTART_CONFIRMED_TTL_MS = 35 * 60 * 1000
  * ⚠️ **勿在 `.env` 设置 `RESTART_FILES_DIR`**。它是**测试专用**隔离通道（来源 =
  * `vitest.config.ts` 的 `test.env`），生产侧的路径对齐靠一条**隐式契约**撑着：
  * dev.js 以仓库根 spawn server（`cwd: ROOT`）⇒ server 的 `process.cwd()` = ROOT。
- * 而 dev.js 侧是**硬编码** `path.join(ROOT, ...)`（scripts/dev.js:82 / :91）、**不读这个 env**，
- * 且 `env.ts` 会把 `.env` 的键写进 `process.env`（env.ts:50）——真在 `.env` 里设了它，
+ * 而 dev.js 侧是**硬编码** `path.join(ROOT, ...)`（`RESTART_REQUEST_FILE` / `SHUTDOWN_REQUEST_FILE`）、
+ * **不读这个 env**，且 `env.ts` 会把 `.env` 的键写进 `process.env`——真在 `.env` 里设了它，
  * 两端路径当场分叉，而失败形态是**静默**的：server 写的文件 dev.js 永远轮询不到
  * ⇒ 用户视角「点了按钮没反应」，零报错。故该键只应存在于测试配置。
  */
