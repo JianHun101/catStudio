@@ -28,7 +28,7 @@
 
 - 臂③ ≥ 臂② ⇒ **有效**
 - 臂③ ≈ 臂② 且注入量明显更少 ⇒ **「等价但更省注入」**，这是可写的收益，不是零
-- 臂③ = 臂① 或 < 臂② ⇒ **据实关票**，结论写「瓶颈在池的成员，不在序」
+- 臂③ = 臂① 或 < 臂② ⇒ **据实关票**，~~结论写「瓶颈在池的成员，不在序」~~ ← ⚠️ **这半句是预注册时写死的结论句，已被实测证伪，别引用**：净差成立（23 < 27），但成因**不是**「序无用」——重排确实动对了 4 处、同时丢了 8 处 ⇒ 是**这把 cross-encoder 在 top-3 预算下精度不够**。订正后口径见报告 §一 与 §九 收口记录；`rerank-offline-ab.mjs` 的 `verdict.message` 有单测钉住不复述这句。
 
 ⚠️ **臂② 没有 CLI 旋钮**：`retrieval-baseline.mjs` 的 CLI 只有 `--root/--db/--env/--date/--out`（见 `main()` 里 `bootstrap(process.argv.slice(2))` 的参数解析），topK 由 `MEMORY_TOP_K` 决定 ⇒ 走 `--env <临时 .env>` 面注入，**不要改脚本加旋钮**（那会把跑批工具变成被测对象）。
 
@@ -141,3 +141,5 @@ node scripts/eval/retrieval-baseline.mjs --db "<主仓库>/packages/server/data/
 - **检索段 p50 的「轻载档」口径**：轻载档实测 31ms，与 dev 库 `retrieval_events.retrieval_ms` 的 p50（1820ms）量级差大，疑似该档只计了部分段。两档对照表已自洽，**仅记不究**。
 
 **重启判定**：**不发重启**。本票只碰 `scripts/` + `docs/eval/`（不在 server/shared 面）；且 `scripts/flywheel/embed-server.mjs` 的改动经实测为**纯新增、零删除行** ⇒ 既有 `/v1/embeddings` 面未触碰，生产 sidecar 行为不变、`/v1/rerank` 无生产消费者。
+
+**本票面保留不删（店长裁决）**：AGENTS.md 写「`docs/run/` 活收口即清」，但**本目录（`eval-system/`）的实际实践是保留已关票**——同目录 T1–T5 / R1–R12 / C1 等 20+ 张已关票均未删，`map.md` 的对应条目划线或标 ✅ 即可（`git log --diff-filter=D -- docs/run/` 显示被清的只有带独立子目录的 run：`memory-flywheel/` / `review-chain-anchor/` / `dead-module-filter/`）。本票的证据链（S0 四项读数、三臂逐锚点、A3 口径重定）与母票 `R13-cross-encoder-rerank.md`、`map.md`、`docs/plans/memory-flywheel.md` §6 三处**互相引用**，删它会把这三处变成死链。⇒ **保留，不删**。若要把「保留」变成显式规则而非约定俗成，那要另改 AGENTS.md 措辞，属另一票。
