@@ -8,9 +8,10 @@ import {
   performHandoff,
   resolveHandoffTarget,
 } from './index.js'
-import { createTestDb } from '../test-helpers.js'
+import { createTestDb, isolatedTestDir } from '../test-helpers.js'
 import { setDb, resetDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
+import { getLogLevel, setLogLevel } from '../logger.js'
 import { chatComplete } from '../llm/complete.js'
 
 // performHandoff 的 generateFullSummary 调 chatComplete → mock 掉，避免真实 LLM 调用
@@ -77,6 +78,57 @@ describe('handoff', () => {
       expect(shouldHandoff(115200)).toBe(true)
       // 差 1 token 不应触发
       expect(shouldHandoff(115199)).toBe(false)
+    })
+  })
+
+  // ─── env 坏值回归（票 env-number-guards · 组件 B）─────────────
+  /**
+   * `HANDOFF_THRESHOLD` 此前被 stub 到的取值只有 `'0.9'` / `'0.8'`（都是合法值）
+   * ——那些证「读 env」，证不了「坏值不静默穿透」。
+   */
+  describe('shouldHandoff · HANDOFF_THRESHOLD 坏值回归', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs()
+    })
+
+    it('HANDOFF_THRESHOLD 坏值/空串 ⇒ 回退 0.9（不是 NaN ⇒ 交接永不触发）', () => {
+      // 隔离上下文配置文件：`shouldHandoff` 是「文件优先、env 兜底」，`HANDOFF_THRESHOLD`
+      // 只在文件**无该字段**时才被读到。不隔离的话，这条断言测的是「隔离目录里恰好没有
+      // context-config.json」这一环境事实，而不是 env 坏值语义。
+      vi.stubEnv('RESTART_FILES_DIR', isolatedTestDir('env-number-guards-handoff'))
+      vi.stubEnv('HANDOFF_ENABLED', 'true')
+      vi.stubEnv('MAX_CONTEXT_TOKENS', '6000')
+
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      // 断言走**真 logger** ⇒ 必须自己把级别放到 warn：测试进程真吃 `LOG_LEVEL=error`
+      // （packages/server/vitest.config.ts 的 test.env），不放级别的话「坏值出声」恒真。
+      const prevLevel = getLogLevel()
+      setLogLevel('warn')
+      try {
+        // stdout 行形如 `WARN <ts> env-number <msg> <meta>`——按模块名 + 变量名双筛
+        const warns = (): string[] =>
+          stdoutSpy.mock.calls
+            .map((c) => String(c[0]))
+            .filter((l) => l.includes('env-number') && l.includes('HANDOFF_THRESHOLD'))
+
+        // 坏值：改前表达式 `parseFloat(process.env.X || '0.9')` 得 NaN ⇒
+        // `5400 >= 6000 * NaN` 恒假 ⇒ 交接**永不触发**（上下文撑爆也不交接）
+        vi.stubEnv('HANDOFF_THRESHOLD', 'abc')
+        expect(shouldHandoff(5400)).toBe(true) // 6000 * 0.9 = 5400，恰好压线
+        expect(shouldHandoff(5399)).toBe(false) // 差 1 token 不触发：阈值真在用
+        // 正对照：坏值必须出声（否则下面的「不新增」恒真）。条数 = 读取次数，不作断言。
+        expect(warns().length).toBeGreaterThan(0)
+        const afterBad = warns().length
+
+        // 空串：`env.ts ??=` 的正常兜底面，静默回落同一阈值
+        vi.stubEnv('HANDOFF_THRESHOLD', '')
+        expect(shouldHandoff(5400)).toBe(true)
+        expect(shouldHandoff(5399)).toBe(false)
+        expect(warns().length).toBe(afterBad) // 调用次数可变，warn 一条都不许新增
+      } finally {
+        stdoutSpy.mockRestore()
+        setLogLevel(prevLevel)
+      }
     })
   })
 

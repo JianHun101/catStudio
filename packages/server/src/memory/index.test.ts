@@ -23,6 +23,7 @@ import {
   messages as messagesRepo,
 } from '../db/repository/index.js'
 import { bigramTokenize } from '../db/repository/fts.js'
+import { getLogLevel, setLogLevel } from '../logger.js'
 import type { EmbedResult } from './embedding-client.js'
 
 // 扫描器白名单前缀（真源 = scripts/flywheel/scan.mjs；import 而非手抄，防漂移）
@@ -1423,6 +1424,103 @@ describe('memory', () => {
       expect(r.stats.thresholdMaxDistance).toBeCloseTo(0.42, 12)
       expect(r.stats.paramProbeN).toBeGreaterThan(0)
       expect(r.stats.sections).toBe(0)
+    })
+  })
+
+  // ─── env 坏值回归（票 env-number-guards · 组件 B）───────────────
+  /**
+   * `MEMORY_TOP_K` / `MEMORY_MAX_DISTANCE` 此前被 stub 到的取值只有合法值
+   * （`'4'` / `'0.7'` / `'5'` / `'0.42'`）——那些证「读 env」，证不了「坏值不静默穿透」。
+   *
+   * 断言打在**真接线点**：`currentRetrievalParams()` 是这两个键的唯一 env 读取点，
+   * `retrieveMemoryContext` 是它的真消费面（注入的节数 / 过阈值的片）。两者都断——
+   * 只断前者的话，「参数对了但没进检索链」不会红。
+   */
+  describe('env 坏值回归：MEMORY_TOP_K / MEMORY_MAX_DISTANCE', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs()
+      delete process.env.MEMORY_TOP_K
+      delete process.env.MEMORY_MAX_DISTANCE
+    })
+
+    it('MEMORY_TOP_K 坏值/空串 ⇒ topK 回退 3（不是 NaN ⇒ 注入 0 片）', async () => {
+      // 5 个**互不同节**的小片，距离全 0（必然过阈值）⇒ 注入几个只由 topK 决定
+      for (let i = 1; i <= 5; i++) {
+        seedChunk({ docPath: `docs/adr/000${i}-s.md`, body: `猫咖测试${i}`, angle: 0 })
+      }
+
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      // 断言走**真 logger** ⇒ 必须自己把级别放到 warn：测试进程真吃 `LOG_LEVEL=error`
+      // （packages/server/vitest.config.ts 的 test.env），不放级别则「坏值出声」恒真。
+      const prevLevel = getLogLevel()
+      setLogLevel('warn')
+      try {
+        // stdout 行形如 `WARN <ts> env-number <msg> <meta>`——按模块名 + 变量名双筛
+        const warns = (): string[] =>
+          stdoutSpy.mock.calls
+            .map((c) => String(c[0]))
+            .filter((l) => l.includes('env-number') && l.includes('MEMORY_TOP_K'))
+
+        vi.stubEnv('MEMORY_MAX_DISTANCE', '0.6') // 另一键钉默认值：本用例只让 topK 坏
+        // 坏值：改前表达式 `parseInt(process.env.X || '3', 10)` 得 NaN，`Math.trunc(NaN)`
+        // 仍是 NaN ⇒ 按节计名额的截断当场空集，reason=no-hit、注入 0 片（OQ-6 实测读数）
+        vi.stubEnv('MEMORY_TOP_K', 'abc')
+        expect(memoryModule.currentRetrievalParams().topK).toBe(3)
+        const bad = await memoryModule.retrieveMemoryContext(Q)
+        expect(bad.reason).toBe('ok')
+        expect(bad.sections).toHaveLength(3) // 名额 = 回退的 3，不是 NaN 造成的 0
+        // 正对照：坏值必须出声（否则下面的「不新增」是恒真的假绿门）。只断「至少一条」
+        // ——确切条数 = 该键在一次检索里被读几次（实现细节），钉死它会在无关重构时假红。
+        expect(warns().length).toBeGreaterThan(0)
+        const afterBad = warns().length
+
+        // 空串：`env.ts ??=` 的正常兜底面，静默回落同一名额
+        vi.stubEnv('MEMORY_TOP_K', '')
+        expect(memoryModule.currentRetrievalParams().topK).toBe(3)
+        const empty = await memoryModule.retrieveMemoryContext(Q)
+        expect(empty.reason).toBe('ok')
+        expect(empty.sections).toHaveLength(3)
+        expect(warns().length).toBe(afterBad) // 调用次数可变，warn 一条都不许新增
+      } finally {
+        stdoutSpy.mockRestore()
+        setLogLevel(prevLevel)
+      }
+    })
+
+    it('MEMORY_MAX_DISTANCE 坏值/空串 ⇒ maxDistance 回退 0.6（不是 NaN ⇒ 全挡成 no-hit）', async () => {
+      // angle 45 ⇒ 余弦距离 ≈0.293（见本文件 W5 用例的实测口径）：过得了 0.6，
+      // 过不了 NaN（`0.293 <= NaN` 恒假 ⇒ 全被当「超阈值」挡掉）
+      seedChunk({ docPath: 'docs/adr/0001-a.md', body: '猫咖测试甲', angle: 45 })
+
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      const prevLevel = getLogLevel()
+      setLogLevel('warn')
+      try {
+        const warns = (): string[] =>
+          stdoutSpy.mock.calls
+            .map((c) => String(c[0]))
+            .filter((l) => l.includes('env-number') && l.includes('MEMORY_MAX_DISTANCE'))
+
+        vi.stubEnv('MEMORY_TOP_K', '3') // 另一键钉默认值：本用例只让 maxDistance 坏
+        vi.stubEnv('MEMORY_MAX_DISTANCE', 'abc')
+        expect(memoryModule.currentRetrievalParams().maxDistance).toBe(0.6)
+        const bad = await memoryModule.retrieveMemoryContext(Q)
+        expect(bad.reason).toBe('ok')
+        expect(bad.text).toContain('猫咖测试甲')
+        // 正对照：坏值必须出声（否则下面的「不新增」恒真）。条数 = 读取次数，不作断言。
+        expect(warns().length).toBeGreaterThan(0)
+        const afterBad = warns().length
+
+        vi.stubEnv('MEMORY_MAX_DISTANCE', '')
+        expect(memoryModule.currentRetrievalParams().maxDistance).toBe(0.6)
+        const empty = await memoryModule.retrieveMemoryContext(Q)
+        expect(empty.reason).toBe('ok')
+        expect(empty.text).toContain('猫咖测试甲')
+        expect(warns().length).toBe(afterBad) // 调用次数可变，warn 一条都不许新增
+      } finally {
+        stdoutSpy.mockRestore()
+        setLogLevel(prevLevel)
+      }
     })
   })
 })
