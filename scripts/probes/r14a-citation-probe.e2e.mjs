@@ -18,7 +18,7 @@
  *   dsh 走全局安装，静态检查会误判）。不可达记「未测」+ 原因，**不许拿别的
  *   provider 的数顶替**。
  * - `--mode s1`：`claude` 单 provider × 甲/乙两版 × N 遍 ⇒ 挑胜者。
- * - `--mode s2`：4 provider（可达者）× 胜出版本 × N 遍。
+ * - `--mode s2`：4 provider（可达者）× **胜出版本** × N 遍（`--winner jia|yi`）。
  *
  * ## 三分判据（票面 §三：**不许并成一个「遵循率」**）
  *
@@ -29,9 +29,20 @@
  * | 标不存在号 | 只注入 3 节却写 `[4]`            | 后端降级（R14b） |
  *
  * 并成一个比率会分不清「不会标」和「标错」——而这两者**修法相反**。
+ * 四格**各自成列**（不互斥）：混标（既有合法号又有越界号）时不得互相掩盖。
+ *
+ * ## 判据面两条（票面 §四，否则读数被假阳性污染）
+ *
+ * - **围栏代码块内的 `[n]` 不计入**（猫举代码例时会写出 `[1]`）
+ * - **猫复读指示语 ≠ 标了**：甲版指示语**自身含字面量 `[1]`**，猫转述/解释该指示语
+ *   时会产生 `[1]`。判据取「正文里指向某节内容的标注」，复述区段内的标注单独计数
+ *   并剔除（见 `instructionEchoRanges`，判据是「与指示语有 ≥ ECHO_NGRAM 的公共子串」）。
+ *   原始与剔除后两份都进报告，人工可复核。
  *
  * 用法:
  *   node scripts/probes/r14a-citation-probe.e2e.mjs --mode s0 [--db <sqlite>] [--out <json>]
+ *   node scripts/probes/r14a-citation-probe.e2e.mjs --mode s1 [--n 5] [--out <json>]
+ *   node scripts/probes/r14a-citation-probe.e2e.mjs --mode s2 --winner jia [--n 5] [--out <json>]
  *
  * 退出码：0 = 读到结果（含「不可达」这类结论）；1 = 环境/自举失败；2 = 用法错误。
  */
@@ -80,31 +91,213 @@ export function withInstruction(sections, instruction) {
   return `${MEMORY_BLOCK_PREFIX}${MEMORY_BLOCK_HEADER}\n${instruction}\n${lines.join('\n')}`
 }
 
-// ─── 三分判据解析 ─────────────────────────────────────
+// ─── 问题集（票面 §七）：答案锚点 `expectSection` 是**必需项**──────────
+//
+// 「标错号」= 标了 `[2]` 但内容其实来自第 3 节——**正则算不出来**，它要的是
+// 内容与节的对应关系。没有答案锚点，报告里的那一格只能编。
+//
+// ⚠️ 故每题带 `answerTokens`：出题时钉死「答案出自哪一节」，且**运行时机械校验**
+// （`verifyQuestionAnchor`）——全部答案词只出现在该节、别节零命中。校验不过 ⇒
+// `refuse`，不落报告。这把「只有一个承载节」从人工声称变成可证伪断言。
 
-/** 回复里出现的全部 `[n]` 编号（去重、升序） */
-export function parseMarkers(text) {
-  const found = new Set()
-  for (const m of text.matchAll(/\[(\d+)\]/g)) found.add(Number(m[1]))
-  return [...found].sort((a, b) => a - b)
+/** 每题 3 节，答案节的位次轮转（不总是第 1 节——位次本身是待观察量之外的噪声源） */
+export const QUESTIONS = [
+  {
+    id: 'q1-closeout-module',
+    question: '收口器被拆成了哪个独立模块文件（完整路径）？它的只读探针函数叫什么名字？',
+    answerSection: {
+      docPath: 'docs/adr/0012-session-closeout-and-push-approval.md',
+      anchor: '决策（收口器部分——仍有效）',
+    },
+    answerTokens: ['session-closeout.ts', 'inspectCloseout'],
+    answerPosition: 1,
+    distractors: [
+      {
+        docPath: 'docs/adr/0009-multimodal-knowledge-base.md',
+        anchor: '两条不变量（扩展性论证核心） > 不变量 2：跨模态向量子空间分离',
+      },
+      {
+        docPath: 'docs/plans/db-schema-governance.md',
+        anchor: '三、P0 契约（本轮实施） > 3.2 索引（③三条，已拍板）',
+      },
+    ],
+  },
+  {
+    id: 'q2-visual-subspace',
+    question: '视觉子空间用的是哪个模型、多少维、落在哪张表？',
+    answerSection: {
+      docPath: 'docs/adr/0009-multimodal-knowledge-base.md',
+      anchor: '两条不变量（扩展性论证核心） > 不变量 2：跨模态向量子空间分离',
+    },
+    answerTokens: ['SigLIP', '768', 'image_embeddings'],
+    answerPosition: 2,
+    distractors: [
+      {
+        docPath: 'docs/adr/0012-session-closeout-and-push-approval.md',
+        anchor: '决策（收口器部分——仍有效）',
+      },
+      {
+        docPath: 'docs/plans/db-schema-governance.md',
+        anchor: '三、P0 契约（本轮实施） > 3.2 索引（③三条，已拍板）',
+      },
+    ],
+  },
+  {
+    id: 'q3-execution-logs-index',
+    question: 'P0 这批迁移里给 execution_logs 表补的第二条索引是哪两列？',
+    answerSection: {
+      docPath: 'docs/plans/db-schema-governance.md',
+      anchor: '三、P0 契约（本轮实施） > 3.2 索引（③三条，已拍板）',
+    },
+    answerTokens: ['execution_logs(session_id, started_at)'],
+    answerPosition: 3,
+    distractors: [
+      {
+        docPath: 'docs/adr/0012-session-closeout-and-push-approval.md',
+        anchor: '决策（收口器部分——仍有效）',
+      },
+      {
+        docPath: 'docs/adr/0009-multimodal-knowledge-base.md',
+        anchor: '两条不变量（扩展性论证核心） > 不变量 2：跨模态向量子空间分离',
+      },
+    ],
+  },
+]
+
+/**
+ * 从库里取一节（该节可能被切成多片，按 `part_index` 拼回整节）。
+ * 拼法与生产 `renderSections` 的「按节补齐整节」同口径。
+ */
+export function loadSection(db, ref) {
+  const rows = db
+    .prepare(
+      'SELECT body FROM chunks WHERE doc_path = ? AND section_anchor = ? ORDER BY part_index'
+    )
+    .all(ref.docPath, ref.anchor)
+  return rows.map((r) => r.body).join('\n')
 }
 
 /**
- * 按三分判据归类一条回复。
- *
- * @param text        回复正文
- * @param sectionCount 本次注入的节数（编号 1..sectionCount）
- * @returns `{ markers, outOfRange, marked }`
- *   - `outOfRange` = 标了 `> sectionCount` 的号（**非措辞问题**，R14b 后端降级面）
- *   - `marked` = 至少标了一个**合法**号
- *   - `notMarked` = 一个号都没标（「不标」）——**注意**：这只说明没标，
- *     是否「用了却没标」要配合 `--expect` 的答案锚点判定
+ * 按 `answerPosition` 把答案节与干扰节拼成最终的**注入顺序**。
+ * @returns `{ sections: [{docPath, anchor, isAnswer, text}], expectSection }`
  */
-export function classify(text, sectionCount) {
-  const markers = parseMarkers(text)
-  const outOfRange = markers.filter((n) => n < 1 || n > sectionCount)
+export function buildQuestionInjection(db, q) {
+  const total = q.distractors.length + 1
+  const sections = []
+  let di = 0
+  for (let pos = 1; pos <= total; pos++) {
+    if (pos === q.answerPosition) {
+      sections.push({ ...q.answerSection, isAnswer: true, text: loadSection(db, q.answerSection) })
+    } else {
+      const ref = q.distractors[di++]
+      sections.push({ ...ref, isAnswer: false, text: loadSection(db, ref) })
+    }
+  }
+  return { sections, expectSection: q.answerPosition }
+}
+
+/**
+ * 机械校验答案锚点：**全部 `answerTokens` 只出现在答案节，别节零命中**。
+ *
+ * 这是「只有一个承载节」的可证伪断言——校验不过说明问题集本身坏了（干扰节也
+ * 答得上，或答案节根本没有这个词），此时读数对「标错号」那一格**毫无信息量**。
+ */
+export function verifyQuestionAnchor(sections, answerTokens) {
+  const hitsPerSection = sections.map((s) => answerTokens.filter((t) => s.text.includes(t)).length)
+  const full = hitsPerSection.filter((h) => h === answerTokens.length).length
+  const any = hitsPerSection.filter((h) => h > 0).length
+  const problems = []
+  if (full === 0) problems.push('没有任何一节含全部答案词——答案词写错了或该节没被索引')
+  if (any > 1) problems.push(`答案词出现在 ${any} 节——「只有一个承载节」不成立，干扰节也答得上`)
+  return { ok: problems.length === 0, hitsPerSection, problems }
+}
+
+// ─── 判据面（票面 §四两条 + §八 四格口径）─────────────────
+
+/** 围栏代码块区间（``` … ```）。票面 §四：围栏内的 `[n]` **不计入** */
+export function fenceRanges(text) {
+  const ranges = []
+  for (const m of text.matchAll(/```[\s\S]*?```/g)) ranges.push([m.index, m.index + m[0].length])
+  return ranges
+}
+
+/**
+ * 与指示语有长公共子串的区段——**复述指示语**的载体。
+ *
+ * 判据：文本中任一 `ECHO_NGRAM` 长的子串也是指示语的子串 ⇒ 该区段是复述。
+ * 甲版指示语**自身含字面量 `[1]`**，猫转述它时产生的 `[1]` 不是「标了」。
+ * 取 8 字：短于它会把「标注」这类常用词误判成复述，长于它则漏掉「如 [1]」这种短引。
+ */
+export const ECHO_NGRAM = 8
+
+export function instructionEchoRanges(text, instruction) {
+  const grams = new Set()
+  for (let i = 0; i + ECHO_NGRAM <= instruction.length; i++) {
+    grams.add(instruction.slice(i, i + ECHO_NGRAM))
+  }
+  const raw = []
+  for (let i = 0; i + ECHO_NGRAM <= text.length; i++) {
+    if (grams.has(text.slice(i, i + ECHO_NGRAM))) raw.push([i, i + ECHO_NGRAM])
+  }
+  // 合并相邻/重叠区段（连同紧邻的 2 字，覆盖「如 [1]」里那个紧跟在复述后面的标注）
+  const merged = []
+  for (const [s, e] of raw) {
+    const last = merged[merged.length - 1]
+    if (last && s <= last[1] + 2) last[1] = Math.max(last[1], e)
+    else merged.push([s, e])
+  }
+  return merged
+}
+
+function inRanges(index, ranges) {
+  return ranges.some(([s, e]) => index >= s && index <= e)
+}
+
+/**
+ * 抽出回复里的全部 `[n]` 标注，**按来源分列**。
+ *
+ * @returns `{ raw, effective, inFence, inEcho }`——各为去重升序的编号数组：
+ *   - `raw`       = 全部 `[n]`（未过滤）
+ *   - `effective` = **判据用**：剔除围栏内 + 复述指示语处
+ *   - `inFence` / `inEcho` = 被剔除的那些（原样列出，人工可复核）
+ */
+export function extractMarkers(text, instruction = '') {
+  const fences = fenceRanges(text)
+  const echoes = instruction ? instructionEchoRanges(text, instruction) : []
+  const raw = new Set()
+  const effective = new Set()
+  const inFence = new Set()
+  const inEcho = new Set()
+  for (const m of text.matchAll(/\[(\d+)\]/g)) {
+    const n = Number(m[1])
+    raw.add(n)
+    if (inRanges(m.index, fences)) inFence.add(n)
+    else if (inRanges(m.index, echoes)) inEcho.add(n)
+    else effective.add(n)
+  }
+  const asc = (s) => [...s].sort((a, b) => a - b)
+  return { raw: asc(raw), effective: asc(effective), inFence: asc(inFence), inEcho: asc(inEcho) }
+}
+
+/**
+ * 按 §八 四格口径归类一条回复（**四格各自成列、不互斥**）。
+ *
+ * - `correct`     标对 = 合法号集合含 `expectSection`
+ * - `wrongNumber` 标错号 = 标了合法号，但**不含** `expectSection`
+ * - `phantom`     标不存在号 = 出现 `> 节数` 或 `< 1` 的号（**单列**，不计入标错号）
+ * - `notMarked`   不标 = 一个号都没出现
+ */
+export function classifyReply(markers, sectionCount, expectSection) {
   const inRange = markers.filter((n) => n >= 1 && n <= sectionCount)
-  return { markers, inRange, outOfRange, marked: inRange.length > 0 }
+  const outOfRange = markers.filter((n) => n < 1 || n > sectionCount)
+  return {
+    inRange,
+    outOfRange,
+    correct: inRange.includes(expectSection),
+    wrongNumber: inRange.length > 0 && !inRange.includes(expectSection),
+    phantom: outOfRange.length > 0,
+    notMarked: markers.length === 0,
+  }
 }
 
 // ─── 自举：原生 node 跑 `.mjs` 无法 import `.ts`（adapter 工厂是 TS）───
@@ -146,14 +339,25 @@ function bootstrap(argv) {
 // ─── CLI ──────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const args = { mode: null, db: null, out: null, provider: null, n: 5, help: false }
+  const args = {
+    mode: null,
+    db: null,
+    out: null,
+    provider: null,
+    winner: null,
+    n: 5,
+    concurrency: 2,
+    help: false,
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--mode') args.mode = argv[++i] ?? null
     else if (a === '--db') args.db = argv[++i] ?? null
     else if (a === '--out') args.out = argv[++i] ?? null
     else if (a === '--provider') args.provider = argv[++i] ?? null
+    else if (a === '--winner') args.winner = argv[++i] ?? null
     else if (a === '--n') args.n = Number(argv[++i] ?? 5)
+    else if (a === '--concurrency') args.concurrency = Number(argv[++i] ?? 2)
     else if (a === '--help' || a === '-h') args.help = true
   }
   return args
@@ -165,11 +369,21 @@ const SMOKE_PROMPT = '请只回复两个字：收到'
 /** S0 逐 provider 超时（ms）。CLI 型适配器起进程慢，给宽些；总时长由并发封顶 */
 const SMOKE_TIMEOUT_MS = 150_000
 
+/** S1/S2 单次调用超时（ms）——比 S0 宽：要真答一道题 */
+const ANSWER_TIMEOUT_MS = 240_000
+
+/** S1/S2 回复的 token 预算（够写短答 + 标注；不给思考留无限空间） */
+const ANSWER_MAX_TOKENS = 2048
+
 const USAGE =
-  '用法: node scripts/probes/r14a-citation-probe.e2e.mjs --mode <s0|s1|s2> [--db <sqlite>] [--out <json>]\n' +
+  '用法: node scripts/probes/r14a-citation-probe.e2e.mjs --mode <s0|s1|s2> [选项]\n' +
   '  --mode s0  4 条链路可达性（停损点）：每 provider 一次极短真实调用\n' +
   '  --mode s1  claude 单 provider × 甲/乙两版 × N 遍\n' +
-  '  --mode s2  4 provider（可达者）× 胜出版本 × N 遍\n' +
+  '  --mode s2  4 provider（可达者）× 胜出版本 × N 遍（需 --winner jia|yi）\n' +
+  '  --n <N>            每格重复遍数（默认 5，票面 §六 要求 N ≥ 5）\n' +
+  '  --winner <jia|yi>  s2 的胜出版本\n' +
+  '  --concurrency <k>  并发上限（默认 2——本地模型并发过高会争用）\n' +
+  '  --out <json>       落盘路径（票面 §八.7：docs/eval/r14a-citation-probe-<date>.json）\n' +
   '  --db 缺省 <root>/packages/server/data/cat-study-dev.db（worktree 内无库 ⇒ 显式传主仓库库路径）\n'
 
 export async function main(argv = process.argv.slice(2)) {
@@ -203,15 +417,103 @@ export async function main(argv = process.argv.slice(2)) {
        FROM agents ORDER BY name`
     )
     .all()
-  db.close()
 
   const { getAdapterForAgent } = await import(
     pathToFileURL(path.join(root, 'packages/server/src/llm/registry.js')).href
   )
 
-  if (args.mode === 's0') return await runS0(agents, getAdapterForAgent, args)
-  process.stderr.write(`[r14a] --mode ${args.mode} 尚未实施（本轮只落 S0）\n`)
-  return 1
+  try {
+    if (args.mode === 's0') return await runS0(agents, getAdapterForAgent, args)
+    if (args.mode === 's1')
+      return await runAnswering(db, agents, getAdapterForAgent, args, ['jia', 'yi'])
+    if (args.mode === 's2') {
+      if (args.winner !== 'jia' && args.winner !== 'yi') {
+        process.stderr.write('[r14a] --mode s2 需要 --winner <jia|yi>（胜出版本由 S1 定）\n')
+        return 2
+      }
+      return await runAnswering(db, agents, getAdapterForAgent, args, [args.winner])
+    }
+  } finally {
+    db.close()
+  }
+  process.stderr.write(`[r14a] 未知 mode: ${args.mode}\n`)
+  return 2
+}
+
+// ─── 共用：跑一次真实调用并判形（**验收 6：形状漂移必须报错**）──────────
+
+/**
+ * 流式收一轮回复，并**区分三种「没有正文」**——票面 §八.6 承重项：
+ *
+ * | status              | 判据                                        |
+ * | ------------------- | ------------------------------------------- |
+ * | `ok`                | 有正文                                      |
+ * | `empty-reply`       | **见到带 `content` 的 chunk**，但正文为空   |
+ * | `shape-mismatch`    | 见到 chunk，但**无一条**带可识别 `content`  |
+ * | `no-chunks`         | 流结束，一个 chunk 都没见到                 |
+ *
+ * 后两条**不得**并入 `empty-reply`：空回复是本仓实测过的真实形态，混同 = 拿假读数
+ * 当结论。本仓已踩过一次（`chunk.text` vs `Chunk.content` ⇒ 四只同形假读数）。
+ * **仅写注释不算**——故这里是**返回状态**，调用方据此拒出结论。
+ *
+ * ⚠️ 字段名是 **`content`**（`Chunk.content`，`packages/shared/src/types.ts`），
+ * 不是 `text`。`kind === 'thinking' | 'tool'` 的 chunk 也带 `content`，但**不是
+ * 回复正文**——只有 `kind` 缺省或 `'text'` 的计入正文。
+ */
+export async function collectReply(adapter, messages, options) {
+  let text = ''
+  let thinkingChars = 0
+  let sawDone = false
+  let chunksSeen = 0
+  let contentChunks = 0
+  let shapeSample = null
+  for await (const chunk of adapter.chatStream(messages, options)) {
+    if (!chunk || typeof chunk !== 'object') continue
+    chunksSeen++
+    if (shapeSample === null) shapeSample = Object.keys(chunk).sort()
+    if (typeof chunk.content === 'string') {
+      contentChunks++
+      if (chunk.kind === undefined || chunk.kind === 'text') text += chunk.content
+      else thinkingChars += chunk.content.length
+    }
+    if (chunk.done) {
+      sawDone = true
+      break
+    }
+  }
+  let status
+  if (text.trim().length > 0) status = 'ok'
+  else if (chunksSeen === 0) status = 'no-chunks'
+  else if (contentChunks === 0) status = 'shape-mismatch'
+  else status = 'empty-reply'
+  return { status, text, thinkingChars, sawDone, chunksSeen, contentChunks, shapeSample }
+}
+
+/** 逐行拼 system prompt 尾部的记忆块（**生产同位置**：system prompt 末尾追加） */
+export function buildMessages(agent, question, sections, instruction) {
+  const block = withInstruction(
+    sections.map((s) => s.text),
+    instruction
+  )
+  return [
+    { role: 'system', content: `${agent.system_prompt ?? ''}${block}` },
+    { role: 'user', content: question },
+  ]
+}
+
+/** 并发闸（默认 2）——本地模型并发过高会争用，且失败读数难归因 */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i], i)
+    }
+  })
+  await Promise.all(workers)
+  return out
 }
 
 // ─── S0：链路可达性 ───────────────────────────────────
@@ -239,13 +541,6 @@ export function rowToAgentConfig(row) {
  *
  * **可达判据**：`chatStream` 至少 yield 一个非空**文本** chunk 且最终 `done`。
  * 只验链路——不看回复内容对不对（那是 S1 的事）。
- *
- * ⚠️ 字段名是 **`content`**（`Chunk.content`，`packages/shared/src/types.ts`），
- * 不是 `text`。读错字段会让**每一条**都报「done 但无文本」——探针恒定给同一个
- * 假读数，且看起来像「4 个 provider 全不可达」这种合理解论。本仓反复栽的
- * 「探针瞎了也给同样的 0」正是这个形态（S0 的 `text-classification` 那次）。
- * ⚠️ `kind === 'thinking' | 'tool'` 的 chunk 也带 `content`，但**不是回复正文**——
- * 只有 `kind` 缺省或 `'text'` 的才计入。
  */
 async function smokeOne(agent, getAdapterForAgent) {
   const startedAt = Date.now()
@@ -254,43 +549,31 @@ async function smokeOne(agent, getAdapterForAgent) {
     agent: agent.name,
     model: agent.llm_model,
     reachable: false,
+    status: null,
     reason: null,
     replyChars: 0,
     thinkingChars: 0,
+    shapeSample: null,
     replyPreview: null,
     elapsedMs: 0,
   }
   try {
     const adapter = getAdapterForAgent(rowToAgentConfig(agent))
-    let text = ''
-    let thinkingChars = 0
-    let sawDone = false
-    const iter = adapter.chatStream([{ role: 'user', content: SMOKE_PROMPT }], {
+    const r = await collectReply(adapter, [{ role: 'user', content: SMOKE_PROMPT }], {
       model: agent.llm_model,
       maxTokens: 64,
       timeoutMs: SMOKE_TIMEOUT_MS,
     })
-    for await (const chunk of iter) {
-      if (chunk && typeof chunk.content === 'string') {
-        // thinking / tool 段不是回复正文——只计数、不计入可达判据
-        if (chunk.kind === undefined || chunk.kind === 'text') text += chunk.content
-        else thinkingChars += chunk.content.length
-      }
-      if (chunk && chunk.done) {
-        sawDone = true
-        break
-      }
-    }
-    result.replyChars = text.length
-    result.thinkingChars = thinkingChars
-    result.replyPreview = text.slice(0, 80)
-    if (sawDone && text.trim().length > 0) {
-      result.reachable = true
-    } else {
-      // 「exit 0 无输出」是本仓实测过的形态（空 done 掩盖偶发故障）——
-      // 归因不明时**不写成不可达**，写成可达性未确认，附读数
-      result.reason = sawDone ? 'done 但无文本（空回复形态）' : '流结束但未见 done'
-    }
+    result.status = r.status
+    result.replyChars = r.text.length
+    result.thinkingChars = r.thinkingChars
+    result.shapeSample = r.shapeSample
+    result.replyPreview = r.text.slice(0, 80)
+    if (r.status === 'ok' && r.sawDone) result.reachable = true
+    else if (r.status === 'shape-mismatch')
+      result.reason = `形状漂移：见到 ${r.chunksSeen} 个 chunk 但无一带 content 字段（keys=${JSON.stringify(r.shapeSample)}）`
+    else if (r.status === 'no-chunks') result.reason = '流结束但未见任何 chunk'
+    else result.reason = r.sawDone ? 'done 但无文本（空回复形态）' : '流结束但未见 done'
   } catch (err) {
     result.reason = err && err.message ? err.message : String(err)
   }
@@ -339,12 +622,218 @@ async function runS0(agents, getAdapterForAgent, args) {
   }
   process.stdout.write(JSON.stringify(report) + '\n')
 
-  if (args.out) {
-    mkdirSync(path.dirname(path.resolve(args.out)), { recursive: true })
-    writeFileSync(path.resolve(args.out), JSON.stringify(report, null, 2))
-    process.stderr.write(`[r14a] 报告落 ${path.resolve(args.out)}\n`)
-  }
+  if (args.out) writeReport(args.out, report)
   return 0
+}
+
+// ─── S1 / S2：真答题 + 标注判据 ─────────────────────────
+
+async function answerOne(agent, getAdapterForAgent, q, injected, variant) {
+  const instruction = VARIANTS[variant]
+  const startedAt = Date.now()
+  const base = {
+    provider: agent.llm_provider,
+    agent: agent.name,
+    model: agent.llm_model,
+    questionId: q.id,
+    variant,
+    expectSection: injected.expectSection,
+    sectionCount: injected.sections.length,
+    status: null,
+    replyChars: 0,
+    shapeSample: null,
+    elapsedMs: 0,
+  }
+  try {
+    const adapter = getAdapterForAgent(rowToAgentConfig(agent))
+    const messages = buildMessages(agent, q.question, injected.sections, instruction)
+    const r = await collectReply(adapter, messages, {
+      model: agent.llm_model,
+      maxTokens: ANSWER_MAX_TOKENS,
+      temperature: agent.llm_temperature ?? undefined,
+      timeoutMs: ANSWER_TIMEOUT_MS,
+    })
+    const m = extractMarkers(r.text, instruction)
+    const cls = classifyReply(m.effective, injected.sections.length, injected.expectSection)
+    return {
+      ...base,
+      status: r.status,
+      replyChars: r.text.length,
+      thinkingChars: r.thinkingChars,
+      shapeSample: r.shapeSample,
+      // 原始标注原样列出（§八.1：混标时不得互相掩盖）
+      markersRaw: m.raw,
+      markers: m.effective,
+      markersInFence: m.inFence,
+      markersInEcho: m.inEcho,
+      ...cls,
+      reply: r.text,
+      elapsedMs: Date.now() - startedAt,
+    }
+  } catch (err) {
+    return {
+      ...base,
+      status: 'error',
+      error: err && err.message ? err.message : String(err),
+      markersRaw: [],
+      markers: [],
+      markersInFence: [],
+      markersInEcho: [],
+      inRange: [],
+      outOfRange: [],
+      correct: false,
+      wrongNumber: false,
+      phantom: false,
+      notMarked: false,
+      reply: '',
+      elapsedMs: Date.now() - startedAt,
+    }
+  }
+}
+
+/** 按 provider → 代表猫（字典序第一个，与 S0 同口径） */
+export function pickRepresentatives(agents) {
+  const byProvider = new Map()
+  for (const a of agents) if (!byProvider.has(a.llm_provider)) byProvider.set(a.llm_provider, a)
+  return byProvider
+}
+
+function cellKey(provider, variant) {
+  return `${provider}|${variant}`
+}
+
+/** 汇总：**四格各自成列**，分母显式写（§六 分母口径） */
+export function summarize(runs) {
+  const byCell = {}
+  for (const r of runs) {
+    const k = cellKey(r.provider, r.variant)
+    const c = (byCell[k] ??= {
+      n: 0,
+      ok: 0,
+      correct: 0,
+      wrongNumber: 0,
+      phantom: 0,
+      notMarked: 0,
+      shapeMismatch: 0,
+      emptyReply: 0,
+      noChunks: 0,
+      error: 0,
+    })
+    c.n++
+    if (r.status === 'ok') c.ok++
+    if (r.status === 'shape-mismatch') c.shapeMismatch++
+    if (r.status === 'empty-reply') c.emptyReply++
+    if (r.status === 'no-chunks') c.noChunks++
+    if (r.status === 'error') c.error++
+    if (r.correct) c.correct++
+    if (r.wrongNumber) c.wrongNumber++
+    if (r.phantom) c.phantom++
+    if (r.notMarked) c.notMarked++
+  }
+  return byCell
+}
+
+async function runAnswering(db, agents, getAdapterForAgent, args, variants) {
+  const byProvider = pickRepresentatives(agents)
+  // S1 单 provider；S2 全 provider（可达性由 S0 结论给定，不可达者仍跑、由 status 显式分列）
+  const providers = args.provider
+    ? [args.provider]
+    : variants.length === 1 && args.mode === 's2'
+      ? [...byProvider.keys()]
+      : ['claude']
+  const pickedAgents = providers.map((p) => {
+    const a = byProvider.get(p)
+    if (!a) throw new Error(`agents 表里没有 provider=${p} 的猫`)
+    return a
+  })
+
+  // 问题集 + 机械校验答案锚点（校验不过 ⇒ refuse，不落报告）
+  const questionSet = []
+  for (const q of QUESTIONS) {
+    const injected = buildQuestionInjection(db, q)
+    const check = verifyQuestionAnchor(injected.sections, q.answerTokens)
+    if (!check.ok) {
+      process.stderr.write(
+        `[r14a] ❌ 答案锚点校验不过（${q.id}）：${check.problems.join('；')}\n` +
+          `  逐节命中数=${JSON.stringify(check.hitsPerSection)}\n` +
+          '  ⇒ 问题集本身坏了，「标错号」那一格对本票零信息量。不落报告。\n'
+      )
+      return 1
+    }
+    questionSet.push({
+      id: q.id,
+      question: q.question,
+      expectSection: injected.expectSection,
+      answerTokens: q.answerTokens,
+      anchorCheck: check,
+      sections: injected.sections,
+    })
+  }
+
+  const n = Math.max(1, args.n)
+  const tasks = []
+  for (const agent of pickedAgents) {
+    for (const variant of variants) {
+      for (const qs of questionSet) {
+        for (let rep = 1; rep <= n; rep++) {
+          tasks.push({ agent, variant, qs, rep })
+        }
+      }
+    }
+  }
+
+  process.stderr.write(
+    `[r14a] ${args.mode.toUpperCase()}：${pickedAgents.length} provider × ${variants.length} 版本 × ` +
+      `${questionSet.length} 题 × N=${n} = **${tasks.length} 次真实调用**（并发 ${args.concurrency}）\n`
+  )
+
+  const runs = await mapLimit(tasks, args.concurrency, async (t) => {
+    const r = await answerOne(
+      t.agent,
+      getAdapterForAgent,
+      { id: t.qs.id, question: t.qs.question },
+      t.qs,
+      t.variant
+    )
+    r.repeat = t.rep
+    process.stderr.write(
+      `[r14a]   ${r.provider}/${r.variant}/${r.questionId}#${t.rep}: ${r.status} ` +
+        `markers=${JSON.stringify(r.markers)} 标对=${r.correct ? 'Y' : 'n'} ` +
+        `标错=${r.wrongNumber ? 'Y' : 'n'} 越界=${r.phantom ? 'Y' : 'n'} ` +
+        `未标=${r.notMarked ? 'Y' : 'n'} ${r.elapsedMs}ms\n`
+    )
+    return r
+  })
+
+  const report = {
+    ok: true,
+    mode: args.mode,
+    ranAt: new Date().toISOString(),
+    n,
+    concurrency: args.concurrency,
+    variants,
+    providers: pickedAgents.map((a) => ({
+      provider: a.llm_provider,
+      agent: a.name,
+      model: a.llm_model,
+    })),
+    // 指示语全文进报告：措辞是本票的**唯一自变量**，不复述它读数不可复核
+    instructions: Object.fromEntries(variants.map((v) => [v, VARIANTS[v]])),
+    questionSet,
+    runs,
+    summary: summarize(runs),
+  }
+  process.stdout.write(JSON.stringify(report) + '\n')
+
+  if (args.out) writeReport(args.out, report)
+  return 0
+}
+
+function writeReport(out, report) {
+  const abs = path.resolve(out)
+  mkdirSync(path.dirname(abs), { recursive: true })
+  writeFileSync(abs, JSON.stringify(report, null, 2))
+  process.stderr.write(`[r14a] 报告落 ${abs}\n`)
 }
 
 // ─── 入口 ─────────────────────────────────────────────
