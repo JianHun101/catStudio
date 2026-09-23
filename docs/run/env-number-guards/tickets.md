@@ -1,5 +1,6 @@
 ---
-status: active
+status: pending-float
+floated_to: CODING_STANDARDS.md
 ---
 
 # 票：env 数值读取 —— 回归守卫补齐 + 规范立条
@@ -80,3 +81,61 @@ OQ-6 消灭的是**运行时**的坏值静默；**回归面**的同类静默原�
 
 - **2026-09-23 店长（立票，用户授权「1 补」+ 第 2 问）**：组件 A 正文由店长拍板（实施者逐字落盘、不得改形状）；组件 B 为纯测试补齐，零生产代码改动。
 - **本票不含**：`parseInt` 族收敛（未授权，见 OQ-1）、`envNumber` 本体改动、阈值语义改动、重启审批（无 server 行为变更）。
+
+## 七、收口记录（2026-09-23）
+
+**实施** ds猫 `e58b67ec`（父 `4b50c64c` = 派活时 dev HEAD，单笔 linear commit）· **审查** 吐槽猫 ✅ 可合并（零 P1/P2）· **收口** 店长 · **PR** base=`dev` ← `closeout/env-number-guards`。
+
+**店长独立复跑**（审查回执本身不是证据，收口读数自己取）：
+
+| 探测     | 读数                                                                                             |
+| -------- | ------------------------------------------------------------------------------------------------ |
+| 全量测试 | `pnpm test` → **157 files / 3449 passed / 0 failed**（39.7s，主仓库 dev）                        |
+| 类型检查 | `pnpm lint` → 三包（shared / server / web）全绿                                                  |
+| 改动面   | `git diff --name-status 4b50c64c e58b67ec` = 5 文件                                              |
+| 生产代码 | `--numstat` 去 `*.test.ts` + `CODING_STANDARDS.md` 后 → **0 行**（承重：票面「零生产代码改动」） |
+
+**重启面**：**无**。改动面虽落在 `packages/server/` 下，但**全部是 `.test.ts`**（不被运行实例 import）+ 文档 —— 按「重启判定看运行实例而非改动面」，运行实例不受影响，不发重启审批。
+
+**票面 §四 验收逐条对账**：
+
+| #   | 验收                                           | 结论          | 依据                                                                                                         |
+| --- | ---------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------ |
+| 1   | 逐键坏值断言（8 对）                           | ✅            | 4 个 co-located 测试文件 diff；审查者逐条核「真键名 + 真消费链」                                             |
+| 2   | **反对照（承重）**：接线点换回改前表达式须能红 | ✅ **凭读数** | 一次性实跑（8 条全红、其余 151 不动），读数载 `e58b67ec` commit message；**无仓库载体** —— 见 OQ-5 裁定      |
+| 3   | 断言打在真实面上（非 helper 假键名）           | ✅            | 8 对全走 HTTP 端点 / `alertThresholds()` / `shouldHandoff()` / `currentRetrievalParams()`                    |
+| 4   | `pnpm test` + `pnpm lint` 全绿                 | ✅            | 店长独立复跑（上表），非转抄                                                                                 |
+| 5   | 组件 A 逐字对账                                | ✅            | 审查者独立 node 脚本逐字节比对票面 §三 vs 提交后 blob → `BYTE-IDENTICAL: true`（提交后 prettier 跑过仍逐字） |
+| 6   | 必审 + 提交流程                                | ✅            | 本票不在免审前缀 ⇒ 审查链已走；提交走暂存区核对 + 裸 commit                                                  |
+
+**OQ-5 裁定（店长）**：**不要求「反对照」有仓库内可复现载体。**
+理由：反对照的本质是「临时把生产代码改坏 → 证明断言能红 → 还原」；把它固化成仓库里的可执行物，等于常态化「改生产代码来测试测试」，代价大于收益，且会被后续读者误当正式用例。替代口径：**同类票把反对照读数留在 commit message**（不可变载体）—— 本票已做到。
+
+**OQ-4 复核（店长独立复跑；读数与 ds猫 部分不一致，如实两存）**：
+
+| 口径                           | ds猫 读数                      | 店长 读数                                            |
+| ------------------------------ | ------------------------------ | ---------------------------------------------------- |
+| 整文件单跑 `socketio.test.ts`  | 「去掉 `-t` 单跑整文件同样红」 | **167/167 全绿**（**未复现**）                       |
+| `-t "验收9"` 筛选单跑          | 稳定红 3/3                     | **红，复现**（报错见下）                             |
+| 干净树对照（stash 掉本票改动） | 同样红 ⇒ 与本票无关            | 本票**未触碰**该文件（`--name-status` 实测）⇒ 同结论 |
+
+筛选口径实跑报错：`TypeError: Cannot read properties of null (reading 'executeAgentsSerial')` —— `getExecutionEngine()!` 返回 `null`。根因是**同文件用例次序耦合**（执行引擎由**前序用例的钩子**注册，`-t` 过滤后那些钩子被跳过），不是产品缺陷。影响面：全量与整文件单跑均绿 ⇒ **不进 CI**；只影响「用 `-t` 定位单条用例」这一开发动作（调试时拿到误导性的 null 报错）。挂 §八。
+
+## 八、未闭项（本票已收口，但目录**不清** —— 判据「零未闭项才删」）
+
+| #   | 未闭项                                                                                  | 钉死的触发条件                     | 落点                                                              |
+| --- | --------------------------------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------- |
+| 1   | `parseInt` 族非测试面 **21 处 / 13 键**：逐键裁「保留 fail-loud」vs「并轨 `envNumber`」 | **用户授权开工**                   | 另立票；键面见下方抄录                                            |
+| 2   | `socketio.test.ts`「验收9」**用例次序耦合**（`-t` 筛选即可复现）                        | 顺手搭下次该文件改动，或单独立小票 | ——                                                                |
+| 3   | 上浮出口**口径乙**（能否是手册）未裁 —— 本页 `floated_to` 即按用户指令填了手册          | 用户裁决                           | `docs/run/docs-run-status-gate/tickets.md` §二 G2「前置待裁口径」 |
+
+**`parseInt` 族键面抄录**（口径 `git grep -n "parseInt(process.env" -- packages scripts` 去 `*.test.*`；2026-09-23 店长独立重跑，与 ds猫/审查者读数**三方一致** = 21 处 / 13 键）：
+
+`MAX_CONTEXT_TOKENS`×8（`execution/reply.ts`×4 / `routes/config.ts` / `routes/agents.ts` / `handoff/index.ts` / `connectors/socketio.ts`）、`PORT`×2（`packages/server/src/index.ts` / `scripts/dev.js`）、`LLAMA_SERVER_PORT`、`LLAMA_SERVER_PROBE_INTERVAL_MS`、`LLAMA_SERVER_READY_TIMEOUT_MS`、`CLI_IDLE_TIMEOUT_MS`、`CATSTUDY_SUPERVISOR_PARENT_PID`、`SUMMARY_INTERVAL`、`SUMMARY_COMPRESS_LIMIT`、`MEMORY_QUERY_REWRITE_TIMEOUT_MS`、`KNOWLEDGE_TOP_K`、`ONEBOT_FETCH_TIMEOUT_MS`、`EMBED_SIDECAR_PORT`。
+
+**逐键判定不得机械并轨**（票面 OQ-1 原话）：`PORT=abc` ⇒ `parseInt` 得 `NaN` ⇒ `listen(NaN)` **抛 `ERR_SOCKET_BAD_PORT`**，现行语义是 **fail-loud**；并轨到 `envNumber` 会把它**降级**成 warn + 回落 3200。
+
+**上浮检查**（用户指令「收口同时检查是否有可上浮信息」）：
+
+- **`docs/plans/` 面：无新增上浮内容。** 本票的规范结论已落在其自然载体 `CODING_STANDARDS.md` §9（用户指令指定落点），不构成规格。
+- **`docs/lessons/` 面：1 条候选** —— 「**定族必须按失效机制扫，不按模式扫**」（§二 根因 3：OQ-6 按 `parseFloat` 扫 ⇒ 同机制的 `parseInt` 站点全留在族外）。属 `docs/run/lessons-first-batch/` §D1 明写允许增补的「新近收口票的教训段」；**该票已立·未派活，故此处不擅自写入**。
