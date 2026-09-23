@@ -55,6 +55,20 @@ describe('mergeShards —— runs 拼接', () => {
   })
 })
 
+describe('mergeShards —— 溯源继承（验收 9：分辨「跑出来的」与「重算出来的」）', () => {
+  it('分片是重算件 ⇒ 合并件显式继承这条事实', () => {
+    const s = shard('claude', [run('claude', 'jia', 'q1')])
+    s.report.reclassified = { at: 'T1', from: 'old.json', by: 'probe --mode reclassify' }
+    const merged = mergeShards([s])
+    expect(merged.reclassifiedShards).toEqual([{ provider: 'claude', at: 'T1' }])
+  })
+
+  it('分片是原始跑批件 ⇒ 空数组（不许无中生有）', () => {
+    const merged = mergeShards([shard('claude', [run('claude', 'jia', 'q1')])])
+    expect(merged.reclassifiedShards).toEqual([])
+  })
+})
+
 describe('mergeShards —— summary 重算（票面 §八.8 禁止手抄）', () => {
   it('summary 由 runs 重算，分片自带的假 summary 不被采信', () => {
     const merged = mergeShards([

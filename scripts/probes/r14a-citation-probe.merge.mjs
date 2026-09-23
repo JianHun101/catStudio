@@ -82,6 +82,12 @@ export function mergeShards(shards) {
     mode: 's2',
     merged: true,
     ranAt: new Date().toISOString(),
+    // 溯源继承：分片若是**重算件**（判据面改过、派生字段重算），合并件必须
+    // **显式继承这条事实**——否则合并件看起来像「跑出来的」，而它的数据其实是
+    // 重算的（验收 9 要求「让人能分辨跑出来的和重算出来的」；合并件是读者最先看的那份）。
+    reclassifiedShards: present
+      .filter((s) => s.report.reclassified)
+      .map((s) => ({ provider: s.provider, at: s.report.reclassified.at ?? null })),
     n,
     variants,
     instructions: present[0].report.instructions,

@@ -135,7 +135,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "收口器独立模块文件为 `packages/server/src/llm/session-closeout.ts` [1]，其只读探针函数名为 **`inspectCloseout(sessionId)`**，返回 `CloseoutState`（含 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev 五项状态）。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -161,7 +162,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "根据记忆 [1]：\n\n- **独立模块文件**：`packages/server/src/llm/session-closeout.ts`（从 619 行的 `git-utils.ts` 中拆出）\n- **只读探针函数**：`inspectCloseout(sessionId)`，返回 `CloseoutState`，包含 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev 五个字段，供\"店长先看后动\"。",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -187,7 +189,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "收口器被拆成了独立模块 **`packages/server/src/llm/session-closeout.ts`**，其只读探针函数叫 **`inspectCloseout(sessionId)`**，返回 `CloseoutState`（含 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev 等字段），供店长\"先看后动\"。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -213,7 +216,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "收口器独立模块的完整路径是 `packages/server/src/llm/session-closeout.ts` [1]。它的只读探针函数叫 **`inspectCloseout(sessionId)`**，返回 `CloseoutState`（含 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev 五项），供店长\"先看后动\"[1]。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -239,7 +243,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "收口器独立模块文件完整路径是 **`packages/server/src/llm/session-closeout.ts`** [1]。它的只读探针函数叫 **`inspectCloseout(sessionId)`**，返回 `CloseoutState`（含 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev 五个字段），供店长\"先看后动\" [1]。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -265,7 +270,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "视觉子空间用的是 **SigLIP**，**768 维**，落在独立的 **`image_embeddings`** 表里（与文本侧 bge 512 维的 `memories`/`knowledge` 表严格分离，不混列）。[2]",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -291,7 +297,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "视觉子空间用的是 **SigLIP**，embedding 维度 **768**，落在独立的 `image_embeddings` 表里，与文本侧的 bge 512 维 `memories`/`knowledge` 表物理隔离。[2]",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -317,7 +324,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "SigLIP，768 维，独立落在 `image_embeddings` 表。[2]",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -343,7 +351,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "视觉子空间用的是 **SigLIP**，输出 **768 维** embedding，独立落在 **`image_embeddings`** 表里（与文本侧 bge 512 维的 `memories`/`knowledge` 表完全分离，不混列）。[2]",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -369,7 +378,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "视觉子空间用的是 **SigLIP**，嵌入 **768 维**，落在独立的 `image_embeddings` 表里（与文本侧 bge 512 维的 `memories`/`knowledge` 表完全分离，不混列）。[2]",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -395,7 +405,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "根据记忆 [3]，execution_logs 的第二条索引是 **`status`**（单列）或 **`session_id, status`**（复合），具体形态标注为\"实施时对照实际 SQL 定形：查询总带 session_id 则用复合\"——所以如果你问的\"两列\"版本，就是 `session_id` + `status`。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -421,7 +432,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "`session_id` 和 `status`（备注里写的是实施时对照实际 SQL 定形：若查询总带 `session_id` 则用复合 `(session_id, status)`，否则退化为单列 `(status)`）。[3]",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -447,7 +459,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "按记忆 [3]，`execution_logs` 表上的第二条索引是 **`(status)`** 或 **`(session_id, status)`**——原文标注\"实施时对照实际 SQL 定形：查询总带 `session_id` 则用复合\"，也就是说最终落哪一列组合取决于重启判据那条 running 计数查询是否恒定携带 `session_id`，当时还没有拍死。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -473,7 +486,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "根据记忆 [3]，`execution_logs` 表补的第二条索引候选是 **`(session_id, status)`**（复合）或 **`(status)`**（单列），备注写明\"实施时对照实际 SQL 定形：查询总带 `session_id` 则用复合\"——所以若最终落成两列，就是 `session_id` + `status`。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "ollama",
@@ -499,7 +513,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "根据记忆 [3]，给 `execution_logs` 表补的第二条索引是 **`(session_id, status)`** 复合索引（备注里也提到若查询总带 `session_id` 则用复合形；单列 `(status)` 是备选）。两列即 **session_id** 和 **status**。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     }
   ],
   "summary": {
@@ -510,10 +525,21 @@
       "wrongNumber": 0,
       "phantom": 0,
       "notMarked": 1,
+      "withMarkersInCode": 0,
       "shapeMismatch": 0,
       "emptyReply": 0,
       "noChunks": 0,
       "error": 0
     }
+  },
+  "reclassified": {
+    "by": "scripts/probes/r14a-citation-probe.e2e.mjs --mode reclassify",
+    "at": "2026-09-23T11:35:20.641Z",
+    "from": "docs/eval/r14a-citation-probe-2026-09-23-s2-ollama.json",
+    "fromReclassifiedAt": null,
+    "runs": 15,
+    "skipped": 0,
+    "skippedRuns": [],
+    "markersInCodeRuns": 0
   }
 }

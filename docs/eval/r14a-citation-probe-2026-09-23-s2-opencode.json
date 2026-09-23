@@ -135,7 +135,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "`packages/server/src/llm/session-closeout.ts`——git-utils.ts 已经 619 行了，收口器独立成模块。\n\n只读探针叫 `inspectCloseout(sessionId): CloseoutState`，返回 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev 五个状态——店长先看后动，别不摸底就动手。\n\n这种一眼就能从记忆 [1] 里翻出来的问题，建议下次自己先查。还有别的要审的没有？",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -161,7 +162,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**模块文件**：`packages/server/src/llm/session-closeout.ts` [1]\n\n**只读探针函数**：`inspectCloseout(sessionId): CloseoutState` — `session-closeout.ts:291`，返回 `branchExists` / `worktreeExists` / `mergedIntoDev` / `gateSynced` / `onDev` 五个只读读数 [1]。两者均已 grep 实证在场，配套动作入口是同文件 `closeoutSession`。",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -187,7 +189,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "`packages/server/src/llm/session-closeout.ts`，只读探针叫 `inspectCloseout`（记忆 [1]）。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -213,7 +216,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "根据记忆 [1]：\n\n- **独立模块文件**：`packages/server/src/llm/session-closeout.ts`（因 git-utils.ts 已 619 行才拆出，复用其 `getMainRepoRoot` / `removeSessionWorktree` / `cleanGitEnv`）\n- **只读探针函数**：`inspectCloseout(sessionId): CloseoutState`——返回 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev，店长先看后动",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -239,7 +243,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "模块在 `packages/server/src/llm/session-closeout.ts`（从 619 行的 git-utils.ts 里拆出来的）[1]，只读探针叫 `inspectCloseout(sessionId): CloseoutState`——店长先看后动用的就是它，只读不动手 [1]。\n\n— 吐槽猫",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -265,7 +270,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "SigLIP **文本+图像双塔**，768 维，独立落在 **`image_embeddings` 表**——跟文本那套 bge 512 维的 `memories`/`knowledge` 表是分家的 [2]。\n\n别问为什么分表，问就是有人会手痒把 512/768 塞同一列玩余弦相似度——异构维度塞一个 vec 列是 ill-defined，语义上根本没定义，塌缩出来的相似度数值纯属行为艺术 [2]。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -291,7 +297,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "SigLIP，768 维，独立落在 `image_embeddings` 表 [2]。\n\n注意别踩坑：这 768 维跟文本子空间 bge 的 512 维是异构的，禁止塞同一列做 sqlite-vec 余弦——ill-defined [2]。",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -317,7 +324,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "喵，这题翻记忆就能答，[2] 写得明明白白：\n\n- **模型**：SigLIP（跨模态图文对齐模型）\n- **维度**：768 维\n- **落表**：独立 `image_embeddings` 表\n\n顺手敲个重点：文本子空间是 bge 512 维走 `memories`/`knowledge` 表，两条子空间**物理隔离**，禁止把 512/768 异构维度塞同一列玩 sqlite-vec 余弦——那是 ill-defined 的糊弄账。跨模态召回靠查询路由器选索引（图找图走图像塔；文本找图走文本塔，[2] 里那条标了 🔴 待验证，别当成已实锤）。这设计还有个好处：视觉模型升级只重建 `image_embeddings` 一张表，文本表零触碰。\n\n有疑问就问，别自己脑补维度数喵。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -343,7 +351,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "SigLIP，768 维，落在独立的 `image_embeddings` 表里——跟 bge 的 512 维文本子空间（`memories`/`knowledge` 表）是分开的，两套异构维度禁止塞同一列做 sqlite-vec 余弦。\n\n顺带一提，这个子空间分离还有个好处：以后视觉模型升级（比如换 siglip-so400m 的 1024 维）只需要重建 `image_embeddings` 这一张表，文本表零触碰。要是哪天有人图省事把两个维度混进一张表，那才是真该被吐槽的事。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -369,7 +378,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "SigLIP，768 维，落在独立的 `image_embeddings` 表——和 bge 那个 512 维文本子空间完全分开，维度塞一列做余弦这种事想都别想 [2]。所以将来要升级成 so400m 也只重建这一张表，文本表一根毛都不会动 [2]。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -395,7 +405,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "第二条是 `execution_logs(session_id, status)`——服务 running 计数（重启判据主查询），实施时按实际 SQL 定形：查询总带 session_id 就用复合，否则单列 `execution_logs(status)` 也行。别记成 created_at，那列是第一条索引的（`session_id, started_at`，列名 started_at 是勘正过的，别再写错）。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -421,7 +432,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "第二条就是 `execution_logs(session_id, started_at)`——列是 **`session_id` + `started_at`**，服务会话级日志查询和恢复路径，这表之前零二级索引。[3]\n\n顺带扎一针：列名是 `started_at`，不是 `created_at`——原稿 2026-09-17 就勘正过这个笔误，谁再照旧文写 created_at 就是没看勘误。[3]\n\n另外别把概念搞混：如果你问的是 execution_logs 表自己的第二条索引，那才是 `execution_logs(status)` 或 `(session_id, status)`（running 计数用），而且实施时要对照实际 SQL 定形——查询总带 session_id 才用复合，不能拍脑袋。",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -447,7 +459,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "第二条索引是给 running 计数（重启判据主查询）用的，形态实施时对照实际 SQL 定：查询总带 session_id 就建 `(session_id, status)` 复合，否则单列 `(status)` [3]。\n\n顺带一提，第一条是 `execution_logs(session_id, started_at)`——注意是 `started_at`，别学某些笔记笔误写成 created_at [3]。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -473,7 +486,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "喵，先抓个语病再回答——你问“第二条是**哪两列**”，但这题的陷阱就在这：**第二条索引不是两列，是一列**。\n\nP0 票 2 给 `execution_logs` 补的两条索引（`migrations.ts`）：\n\n1. 第一条 `idx_execution_logs_session_started` — 两列 `(session_id, started_at)`，服务会话级日志取数。注意列名是 `started_at`，spec 初稿笔误写成 `created_at` 已勘正——这张表压根没有 `created_at` 列 [记忆中的勘正条目]。\n2. 第二条 `idx_execution_logs_status` — **单列 `status`**，不是两列。服务的查询是重启判据 `SELECT COUNT(*) WHERE status = 'running'`，查询不带 `session_id`，所以照字面落成 `(session_id, status)` 复合索引反而用不上，单列才是对的形。\n\n下次提问前先核对前提，别让索引列数都被预设了。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "opencode",
@@ -499,7 +513,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "`(session_id, status)` [3]——running 计数（重启判据主查询）用；但记忆里也写了，具体定形要实施时对照实际 SQL：查询总带 session_id 就用这个复合，否则才单列 `status`。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     }
   ],
   "summary": {
@@ -510,10 +525,21 @@
       "wrongNumber": 0,
       "phantom": 0,
       "notMarked": 3,
+      "withMarkersInCode": 0,
       "shapeMismatch": 0,
       "emptyReply": 0,
       "noChunks": 0,
       "error": 0
     }
+  },
+  "reclassified": {
+    "by": "scripts/probes/r14a-citation-probe.e2e.mjs --mode reclassify",
+    "at": "2026-09-23T11:35:20.903Z",
+    "from": "docs/eval/r14a-citation-probe-2026-09-23-s2-opencode.json",
+    "fromReclassifiedAt": null,
+    "runs": 15,
+    "skipped": 0,
+    "skippedRuns": [],
+    "markersInCodeRuns": 0
   }
 }

@@ -2,7 +2,8 @@
  * R14a 角标引用探针测试。
  *
  * 三层：
- *   - **纯单元**：注入串拼装 / 指示语插入位置 / `[n]` 解析（含判据面两条）/ 四格归类
+ *   - **纯单元**：注入串拼装 / 指示语插入位置 / `[n]` 解析（判据面三条：代码字面量
+ *     [围栏 + 内联码] / 复述指示语）/ 四格归类 / reclassify 重算（幂等 + 透传）
  *     ——喂手搓输入，可穷举、不碰库不碰 LLM；
  *   - **非退化单元**（票面 §八.6 承重）：形状漂移必须**返回显式状态**，不许静默返回
  *     0 字。喂假 adapter 造出「见 chunk 但无 `content`」这种形态，钉住它落
@@ -33,7 +34,9 @@ import {
   collectReply,
   extractMarkers,
   fenceRanges,
+  inlineCodeRanges,
   instructionEchoRanges,
+  reclassifyReport,
   renderMemoryBlock,
   rowToAgentConfig,
   summarize,
@@ -112,9 +115,12 @@ describe('buildMessages —— 记忆块接在 system prompt 尾部（生产同�
   })
 })
 
-// ─── 判据面（票面 §四两条）────────────────────────────
+// ─── 判据面（票面 §四三条：代码字面量 / 内联码 / 复述指示语）─────────
+//
+// 判据按**机制**定义——「**代码字面量不是引用**」，不是按模式名（旧票面写「围栏
+// 代码块」，那是模式名）。围栏与内联码是同一机制的两种形态。
 
-describe('围栏代码块内的 [n] 不计入', () => {
+describe('代码字面量内的 [n] 不计入（围栏形态）', () => {
   it('围栏区间可被识别（``` 配对）', () => {
     expect(fenceRanges('前 ```js\nlet a=[1]\n``` 后')).toHaveLength(1)
     expect(fenceRanges('无围栏 [1]')).toHaveLength(0)
@@ -125,6 +131,63 @@ describe('围栏代码块内的 [n] 不计入', () => {
     expect(r.effective).toEqual([2])
     expect(r.inFence).toEqual([1])
     expect(r.raw).toEqual([1, 2])
+  })
+
+  it('围栏**先于**内联码判：单行围栏 ```[1]``` 落 inFence，不落 inCode', () => {
+    // 承重：内联正则 `[^`\n]*` 会匹配到 ``` 的前两个反引号。若先判内联码，
+    // 这里的 `[1]` 会被 "`[1]`" 这个伪 span 吃掉、记成 inCode ⇒ 判据面串味。
+    const r = extractMarkers('```[1]```')
+    expect(r.inFence).toEqual([1])
+    expect(r.inCode).toEqual([])
+    expect(r.effective).toEqual([])
+  })
+})
+
+describe('代码字面量内的 [n] 不计入（内联码形态）', () => {
+  it('内联码区间可被识别，且不把围栏定界符当成内联码', () => {
+    expect(inlineCodeRanges('见 `a[1]` 与 [2]')).toHaveLength(1)
+    // 围栏定界符的伪匹配必须整条丢弃（否则区间会覆盖 `[1]`）
+    expect(inlineCodeRanges('```\ncode\n```')).toEqual([])
+  })
+
+  it('内联码内的编号单列 inCode，不进 effective', () => {
+    const r = extractMarkers('见 `a[1]` 与 [2]')
+    expect(r.inCode).toEqual([1])
+    expect(r.effective).toEqual([2])
+    expect(r.raw).toEqual([1, 2])
+  })
+
+  it('引入注目的实测形态：引用注入原文的 `float[512]` 是内联码，不是越界角标', () => {
+    // S2 实测：claude / dsh 各有一只在 q2 输出 `chunk_vectors USING vec0(... float[512])`，
+    // `[512]` 出自注入原文（`docs/plans/memory-flywheel.md`，sqlite-vec 列类型）。
+    // 这不是「标不存在号」——是**引用原文**。这条钉住它不再被算成 phantom。
+    const reply = '全库唯一命中在新表里的是 `chunk_vectors USING vec0(embedding float[512])`。'
+    const r = extractMarkers(reply)
+    expect(r.inCode).toEqual([512])
+    expect(r.effective).toEqual([])
+    expect(classifyReply(r.effective, 3, 1).phantom).toBe(false)
+    // 但 raw 必须原样留着——真值没有被扫掉，只是分了列
+    expect(r.raw).toEqual([512])
+  })
+
+  it('真引用写进反引号 ⇒ 仍进 inCode 可见（与 float[512] 不同源，不许静默剔除）', () => {
+    const r = extractMarkers('我的答案见 `[2]`。')
+    expect(r.inCode).toEqual([2])
+    expect(r.effective).toEqual([])
+  })
+
+  it('围栏与内联码混排：三类各归各位', () => {
+    const text = [
+      '先看这条：',
+      '```sql',
+      'CREATE VIRTUAL TABLE v USING vec0(embedding float[512])',
+      '```',
+      '再 `见 [1]`，正文见 [2]',
+    ].join('\n')
+    const r = extractMarkers(text)
+    expect(r.inFence).toEqual([512])
+    expect(r.inCode).toEqual([1])
+    expect(r.effective).toEqual([2])
   })
 })
 
@@ -413,6 +476,123 @@ describe('summarize —— 四格各自成列 + 分母', () => {
     expect(s['claude|jia'].correct).toBe(1)
     expect(s['claude|yi'].notMarked).toBe(1)
     expect(s['claude|yi'].correct).toBe(0)
+  })
+
+  it('含代码字面量角标的行**成列计数**（不是被过滤掉的垃圾）', () => {
+    const s = summarize([run({ markersInCode: [512] }), run({ markersInCode: [] }), run({})])
+    expect(s['claude|jia'].withMarkersInCode).toBe(1)
+  })
+})
+
+// ─── reclassify：判据面变了，派生字段重算（票面 §八 验收 9）──────────
+
+describe('reclassifyReport —— 用同一个 classifyReply 重算，零 LLM 调用', () => {
+  const instructions = { jia: VARIANTS.jia, yi: VARIANTS.yi }
+
+  const baseRun = (over) => ({
+    provider: 'claude',
+    agent: 'ds猫',
+    model: 'deepseek-flash',
+    questionId: 'q2-visual-subspace',
+    variant: 'jia',
+    expectSection: 1,
+    sectionCount: 3,
+    status: 'ok',
+    replyChars: 0,
+    shapeSample: null,
+    elapsedMs: 1234,
+    markersRaw: [],
+    markers: [],
+    markersInFence: [],
+    markersInEcho: [],
+    inRange: [],
+    outOfRange: [],
+    correct: false,
+    wrongNumber: false,
+    phantom: false,
+    notMarked: false,
+    reply: '',
+    repeat: 1,
+    ...over,
+  })
+
+  const wrap = (runs) => ({
+    ok: true,
+    mode: 's2',
+    ranAt: '2026-09-23T00:00:00.000Z',
+    n: 5,
+    variants: ['jia'],
+    instructions,
+    questionSet: [],
+    providers: [],
+    runs,
+    summary: summarize(runs),
+  })
+
+  it('把「标不存在号」订正成「代码字面量」：真值不经 LLM 重跑即改判', () => {
+    const stale = baseRun({
+      reply: '全库唯一命中在 `chunk_vectors USING vec0(embedding float[512])`。',
+      markersRaw: [512],
+      markers: [512],
+      outOfRange: [512],
+      phantom: true,
+    })
+    const next = reclassifyReport(wrap([stale]), { from: 'old.json', at: 'T1' })
+    const r = next.runs[0]
+    expect(r.markersInCode).toEqual([512])
+    expect(r.markers).toEqual([])
+    expect(r.phantom).toBe(false)
+    expect(r.markersRaw).toEqual([512]) // 原始读数原样留着，只是分了列
+    expect(next.summary['claude|jia'].phantom).toBe(0)
+    expect(next.summary['claude|jia'].withMarkersInCode).toBe(1)
+  })
+
+  it('幂等：对已重算的产物再重算 ⇒ runs 与 summary 逐字段相等（连 JSON 文本都同）', () => {
+    const once = reclassifyReport(wrap([baseRun({ reply: '见 `[1]` 与 [2]', notMarked: true })]), {
+      from: 'a.json',
+      at: 'T1',
+    })
+    const twice = reclassifyReport(once, { from: 'b.json', at: 'T2' })
+    expect(twice.runs).toEqual(once.runs)
+    expect(twice.summary).toEqual(once.summary)
+    expect(JSON.stringify(twice.runs)).toBe(JSON.stringify(once.runs))
+    // 戳记的 `at` 是重算时刻，本就该变——不纳入幂等判据；来源链则必须留住
+    expect(twice.reclassified.fromReclassifiedAt).toBe('T1')
+  })
+
+  it('不碰非派生字段：reply / elapsedMs / status / 报告级 ranAt 原样', () => {
+    const stale = baseRun({ reply: '见 [1]', elapsedMs: 4321, status: 'ok' })
+    const next = reclassifyReport(wrap([stale]), { from: 'x', at: 'T1' })
+    expect(next.runs[0].reply).toBe('见 [1]')
+    expect(next.runs[0].elapsedMs).toBe(4321)
+    expect(next.runs[0].status).toBe('ok')
+    expect(next.ranAt).toBe('2026-09-23T00:00:00.000Z')
+  })
+
+  it('error 行整行透传（其派生字段非 classifyReply 产出，重算会把 notMarked 翻真）', () => {
+    const err = baseRun({ status: 'error', reply: '', notMarked: false, error: 'boom' })
+    const next = reclassifyReport(wrap([err]), { from: 'x', at: 'T1' })
+    expect(next.runs[0]).toEqual(err)
+    expect(next.reclassified.skipped).toBe(1)
+    expect(next.reclassified.skippedRuns[0]).toMatchObject({
+      status: 'error',
+      questionId: 'q2-visual-subspace',
+    })
+  })
+
+  it('戳记写明「本件系重算」：来源 + 时刻 + 命中行数', () => {
+    const next = reclassifyReport(wrap([baseRun({ reply: '见 [1]' })]), {
+      from: 'old.json',
+      at: 'T1',
+    })
+    expect(next.reclassified).toMatchObject({
+      from: 'old.json',
+      at: 'T1',
+      runs: 1,
+      skipped: 0,
+      markersInCodeRuns: 0,
+    })
+    expect(next.reclassified.by).toContain('--mode reclassify')
   })
 })
 

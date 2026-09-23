@@ -136,7 +136,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**完整路径**：`packages/server/src/llm/session-closeout.ts`\n（磁盘绝对路径：`D:\\Game\\ai\\catStudy-sessions\\fa165f65-ds猫\\packages\\server\\src\\llm\\session-closeout.ts`）\n\n**只读探针函数**：`inspectCloseout(sessionId: string): CloseoutState`（`session-closeout.ts:291`），返回 `CloseoutState` 五个字段：`branchExists` / `worktreeExists` / `mergedIntoDev` / `gateSynced` / `onDev` — 语义是「从 git 现状推导，绝不改任何东西」，店长先看后动 [1]。\n\n顺带一条与记忆 [1] 的**实测差异**（记忆是当时的快照，现已扩展）：文件里除记忆记的 `closeoutSession` + 4 个 step 外，还导出了 `fanInCats`（step ⓪，`:129`）和 `reclaimCats`（`:181`），以及 `resolveStaleScanScript` / `scanStaleRunDocs`。即当前是 **6 个 `@internal` step**，fan-in 跑在 `mergeSession` 之前，cwd 固定为会话 worktree（非 mainRoot）。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -162,7 +163,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "实测确认（文件 25225 字节，9月23 00:31）：\n\n- **模块路径**：`packages/server/src/llm/session-closeout.ts`（收口器从 `git-utils.ts` 拆出，后两者 `removeSessionWorktree` / `cleanGitEnv` 本轮从 git-utils 导出复用）\n- **只读探针函数**：`inspectCloseout(sessionId): CloseoutState`，在 `session-closeout.ts:291`\n- 配套的动作入口是同文件 `:347` 的 `closeoutSession(sessionId): CloseoutResult`（店长只调这个，不手工敲裸命令）\n\n探针返回 `CloseoutState`，字段为 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev —— 供先看后动。（此条来自相关记忆 1，已按源码实核，未改动任何文件。）",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -188,7 +190,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "收口器独立模块：`packages/server/src/llm/session-closeout.ts`（主仓库绝对路径 `D:\\Game\\ai\\catStudy\\packages\\server\\src\\llm\\session-closeout.ts`）。\n\n只读探针函数：`inspectCloseout(sessionId): CloseoutState`（同文件 :291；写操作入口是 `closeoutSession(sessionId): CloseoutResult`，:347）。已实核源码，两处 export 均在场 [1]。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -214,7 +217,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "实测核对如下（源码当面核过，非凭记忆）：\n\n**模块文件**：`packages/server/src/llm/session-closeout.ts`\n（完整绝对路径：`D:\\Game\\ai\\catStudy-sessions\\fa165f65-ds猫\\packages\\server\\src\\llm\\session-closeout.ts`）\n\n**只读探针函数**：`inspectCloseout(sessionId: string): CloseoutState` —— `session-closeout.ts:291`，返回 `CloseoutState`（`session-closeout.ts:71` 定义，含 branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev）；对应的写入口是 `closeoutSession`（`session-closeout.ts:347`）。\n\n补一句实测出入：该模块后来长胖了，除收口四步（`mergeSession`/`removeWorktree`/`writeGate`/`checkoutDev`，:201/:221/:246/:268）外，还并入了 `fanInCats`(:129)、`reclaimCats`(:181) 与 `scanStaleRunDocs`(:501)——历史结论里那份「只有收口器」的清单已过期 [1]。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -240,7 +244,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**模块文件**：`packages/server/src/llm/session-closeout.ts`\n（绝对路径 `D:\\Game\\ai\\catStudy-sessions\\fa165f65-ds猫\\packages\\server\\src\\llm\\session-closeout.ts`）\n\n**只读探针函数**：`inspectCloseout(sessionId: string): CloseoutState` — `session-closeout.ts:291`，返回 `CloseoutState` 接口（同文件 `:71` 定义）[1]\n\n实测复核时发现与记忆 [1] 的一处漂移：记忆记的是「4 个 `@internal` step」，当前文件里已导出 6 个 step — 除 `mergeSession` / `removeWorktree` / `writeGate` / `checkoutDev` 外，另有 `fanInCats`（`:129`）和 `reclaimCats`（`:181`）。记忆里的 4 个 step 是当时快照，后续扩展过。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -266,7 +271,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "我先核实一下活代码，别直接背记忆（[2] 是历史结论，可能滞后）。`image_embeddings` 在 `packages/server/src` 里零命中——只在 experiments/docs 里。这是关键分歧，我读一下两处。核实完了，分**设计契约**和**实现现状**两层答：\n\n## 设计面（ADR 0009 已钉）\n\n| 项 | 值 |\n|---|---|\n| 模型 | `Xenova/siglip-base-patch16-224`（SigLIP base，ONNX 转换版） |\n| 维度 | **768** |\n| 表 | `image_embeddings`（独立表，不与文本向量同列） |\n\n依据 `docs/adr/0009-multimodal-knowledge-base.md:55-56`：不变量 2 要求子空间分离——文本 bge 512 维落 `memories`/`knowledge`，视觉 SigLIP 768 维落 `image_embeddings`，**禁止**把 512/768 异构维度塞同一列做 sqlite-vec 余弦（ill-defined）[2]。选型表在 `:64`，DINOv2 被judged死（无文本塔做不了跨模态）。\n\n## 实现面：表还没建\n\n这是要点——我在 `packages/server/src` 全目录 grep `image_embeddings`/`siglip`，**零命中**。只有 4 处提到：\n\n- `docs/adr/0009-multimodal-knowledge-base.md` — 设计\n- `packages/server/experiments/siglip-pipeline.e2e.mjs` — 可行性实验脚本\n- `packages/server/experiments/phash.e2e.mjs` — 精确去重实验\n- `scripts/probes/r14a-citation-probe.e2e.mjs` — 无关（另一件事）\n\n也就是说 `migrations.ts` 里没有这张表，`embedImage` 接口也不存在。ADR `:29` 写的是「**一期**：视觉分支（`embedImage` + `image_embeddings` 表）」——那是待落地计划，不是现状。\n\n实验脚本已经把嵌入本身跑通了（`siglip-pipeline.e2e.mjs:166` 断言 `dim === 768 && 非零 === dim && NaN === 0`），对应 ADR 🔴#1 假设的验证方式。但脚本是一次性的，未进 src、未进单测。\n\n## 两个已知坑\n\n1. **必须 `pool: true`** — 默认输出是 patch embeddings，`dim=150528`（196×768）不是图像级向量（`siglip-pipeline.e2e.mjs:192-201`）。\n2. **文本塔不可用** — 官方 `image-feature-extraction` 只挂 `SiglipVisionModel`，text↔image 需另接文本塔+联合投影，ADR 🔴#2 未验证，所以**一期只承诺图↔图**（ADR `:73`）。\n\n需要我确认那个实验脚本当前是否还能跑通（要联网拉 ONNX 权重），可以派给我。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -292,7 +298,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "【实测核对】视觉子空间的三个读数（源：`docs/adr/0009-multimodal-knowledge-base.md:55,64`、`packages/server/experiments/siglip-pipeline.e2e.mjs:23,166`）：\n\n| 项 | 值 |\n| --- | --- |\n| 模型 | `Xenova/siglip-base-patch16-224`（现成 ONNX，官方管线） |\n| 维度 | **768** |\n| 表 | `image_embeddings`（768 维，独立于文本子空间） |\n\n采纳记忆条目 [2]，但有一条实测订正要说清楚：\n\n**这张表和模型目前只到「契约 + 实验」层，尚未落地进 src。** 证据：\n- `packages/server/src/db/migrations.ts` 里 `image_embeddings` 零命中（只建了 `chunk_vectors` 的 vec0 表）；\n- `packages/server/src` 全目录 `embedImage` / `image_embeddings` 零命中；\n- `schema-baseline.json` 也不含该表。\n\n现存痕迹只有两处：ADR 0009 的一期承诺，和 `experiments/siglip-pipeline.e2e.mjs`（E1 已实测三路输入产出 768 维非全零无 NaN，`:166`；注意默认无 `pool:true` 会得到 `[1,196,768]` 的 patch embeddings，不是图像级向量）。\n\n两个维度上的边界，别当既成事实用：\n1. 「文本 query 找图」走 SigLIP **文本塔**仍是 ADR 里的 🔴 待验证假设（ADR:57,73），一期只承诺图↔图；\n2. 异构维度禁同列 —— 512(bge) 与 768(SigLIP) 不得塞进同一 vec0 列。\n\n需要我把一期落地（`embedImage` + 建表迁移）拉一张票吗？那是跨组件边界的改动，得店长派单。",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -318,7 +325,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "视觉子空间（据 ADR 0009 与实验脚本实测）：\n\n| 项 | 值 |\n|---|---|\n| 模型 | `Xenova/siglip-base-patch16-224`（transformers.js ONNX，`image-feature-extraction` 管线） |\n| 维度 | 768 |\n| 表 | `image_embeddings`（独立表，与文本子空间 bge-small-zh-v1.5 / 512 维分开） |\n\n出处：\n- `docs/adr/0009-multimodal-knowledge-base.md:55`（子空间定义）、`:64`（选型表，备选 `Xenova/clip-vit-large-patch14` 同为 768 维，未选）\n- `packages/server/experiments/siglip-pipeline.e2e.mjs:23,166` —— 实测断言 `dim === 768 && 非零 && 无 NaN`；另 `:192` 记录默认无 `pool` 时输出是 patch embeddings `[1,196,768]`，必须 `{ pool: true }` 才收敛到图像级 768 维\n\n一处需要提醒的实况：**`image_embeddings` 目前全仓只在文档和实验脚本里出现，`packages/` 下零命中**——没有迁移、没有 `embedImage` 实现。ADR 0009 §9 把它列为「一期落地」（`embedImage` 接口 + `image_embeddings` 表 + 查询路由器 + pHash 去重），所以现在准确说法是「**设计已定、尚未落地**」，不是「线上在用」。另外那条「文本 query 找图 → SigLIP 文本塔」在 ADR 里本身标着 🔴 待验证。\n\n（另：本轮 `git status` 显示 `scripts/probes/r14a-citation-probe.*` 两文件有未提交改动，与本次提问无关，我没动。）",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -344,7 +352,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**答：SigLIP 768 维，落在独立的 `image_embeddings` 表** [2]\n\n具体三条，均出自我刚才实核过的源码：\n\n| 面 | 值 | 出处 |\n|---|---|---|\n| 模型 | `Xenova/siglip-base-patch16-224` | `docs/adr/0009-multimodal-knowledge-base.md:64`（选型表裁决「**选中**」） |\n| 维度 | 768 | 同上 `:64` 维度列；`:55` 不变量 2 复述 |\n| 表 | `image_embeddings`（独立表） | `:55`、`:84`（一期落地项） |\n\n要连带说清的两点：\n\n1. **它和文本子空间是物理分离的**——文本走 bge 512 维落 `memories`/`knowledge`，视觉走 SigLIP 768 维落 `image_embeddings`；ADR 明令禁止把 512/768 塞同一列做 sqlite-vec 余弦（ill-defined）。分离的收益写在 `:58`/`:86`：换视觉模型（如 768→1024 的 siglip-so400m）只重建这一张表，文本表零触碰。\n\n2. **⚠️ 这是 ADR 契约，不是已落地实现**。我在主仓库根（`D:\\Game\\ai\\catStudy`）全仓 grep `image_embeddings|embedImage`，**只命中 `docs/adr/0009` 自身一处**——没有 schema、没有迁移、没有 `embedImage` 源码。ADR `:84` 把「`embedImage` 接口 + `image_embeddings` 表 + 查询路由器 + pHash 去重」列为**一期落地**项（且标注需新增图像解码依赖、走安装审批），目前尚未开工。所以问「落在哪张表」的准确口径是：**契约上落 `image_embeddings`，物理上这张表还不存在**。\n\n另附一条相关读数：`scripts/probes/r14a-citation-probe.e2e.mjs:132` 把 `answerTokens` 定为 `['SigLIP', '768', 'image_embeddings']`，与我上面三格一致。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -370,7 +379,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**结论（按 ADR 0009，status: accepted，2026-08-20）** [2]\n\n| 项 | 值 |\n|---|---|\n| 模型 | `Xenova/siglip-base-patch16-224`（SigLIP base，patch16 / 224×224） |\n| 维度 | **768** |\n| 落表 | **`image_embeddings`**（独立表，与文本子空间物理隔离） |\n\n选型对账：备选 `Xenova/clip-vit-large-patch14`（同 768 维）；DINOv2 判死——纯图像模型无文本塔，做不了 text↔image 跨模态。\n\n隔离理由：文本子空间是 bge-small-zh-v1.5 **512 维**，落在 `memories`/`knowledge`/`chunk_vectors`；512 与 768 异构维度塞同一 vec0 列做余弦是 ill-defined，故分表。收益是「换模型 ≠ 换架构」——将来升 siglip-so400m（1024 维）只重建 `image_embeddings` 一张表。\n\n**一个必须点破的现状**：这是**已决策、未落地**。我刚在 HEAD (`7fcd04db`) 全仓扫了 `image_embeddings` / `embedImage`：\n\n- `docs/adr/0009-multimodal-knowledge-base.md` — 只有决策文本\n- `scripts/probes/r14a-citation-probe.e2e.mjs:132` — 只在探针的期望答案 token 列表里\n\n`packages/server/src/db/migrations.ts` 里没有建 `image_embeddings` 的迁移（全表清单止于 `human_labels`），`packages/server/src/memory/embedding.ts` 里也没有 `embedImage`。**生产代码尚无视觉分支**——ADR 把它列在「一期落地」，不是「已落地」。\n\n唯一有实测数的是 `packages/server/experiments/siglip-pipeline.e2e.mjs`（一次性实验脚本，非 `src/`）：E1 走 `RawImage.fromBlob(new Blob([buf])) + {pool:true}` 断言 **dim=768、非全零、无 NaN** 通过；同脚本还实测了 raw buffer / base64 dataURL 直喂会抛错（4.2.0 `RawImage.read` 输入白名单边界），以及不传 `pool` 时输出是 196×768 patch embeddings（150528）而非图像级向量。\n\n另外两条 🔴 未验证项仍挂着：SigLIP **文本塔**在 transformers.js 是否可用（决定 text→image 能不能做，一期只承诺图↔图），以及 SigLIP 检索质量是否满足「精确识别」。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -396,7 +406,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "我先去仓库里实核，不凭记忆答。`execution_logs` 的第二条索引**不是两列**——是单列 `status`。\n\n- **第一条**（两列的在这）：`idx_execution_logs_session_started ON execution_logs(session_id, started_at)` — migrations.ts:905-908，SQL 常量在 :771-772\n- **第二条**：`idx_execution_logs_status ON execution_logs(status)` — migrations.ts:918-921，SQL 常量在 :774\n\n设计稿里那条 `execution_logs(status) 或 (session_id, status)` 的「实施时对照实际 SQL 定形」，落地结果是**否掉了复合版**。判据写在 :910-917 的注释里：三个消费查询一个都不带 `session_id`——\n\n- `scripts/dev.js` 的 `pollRestart`：`SELECT COUNT(*) FROM execution_logs WHERE status = 'running'`\n- `src/index.ts` 的 `fixStuckExecutionLogs()`：`UPDATE … WHERE status = 'running'`\n- `repository/executionLogs.ts` 的 `getRunningLogs()`\n\n复合索引 `(session_id, status)` 前导列不匹配，三条一条都服务不到。所以「哪两列」这个问法本身踩在坑上：真照设计稿写复合版，就是建了个用不上的索引。\n\n（另附一条同批的勘误：`idx_execution_logs_session_started` 的列名是 `started_at` 不是 spec 写的 `created_at`——该表根本没有 `created_at` 列，按字面实现会当场 `no such column` 拒启，migrations.ts:899-901）",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -422,7 +433,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "第一条（见 `packages/server/src/db/migrations.ts:905`）是 `(session_id, started_at)`；**第二条不是两列，是单列 `status`** —— `idx_execution_logs_status ON execution_logs(status)`（`migrations.ts:918`、正文常量在 `:774`）。\n\n票面（spec §3.2）原本留的是二选一「`status` 或 `(session_id, status)`，按实际 SQL 定形」，落库时按三个真实调用面定成了单列：\n\n- `scripts/dev.js` 的 `pollRestart`：`SELECT COUNT(*) FROM execution_logs WHERE status = 'running'` —— 无 session_id\n- `src/index.ts` 的 `fixStuckExecutionLogs()`：`UPDATE … WHERE status = 'running'`\n- `repository/executionLogs.ts` 的 `getRunningLogs()`：同上\n\n三条都不带 `session_id`，复合索引 `(session_id, status)` 前导列不匹配，一条都服务不到 —— 所以「两列」那版是被实测否决的候选，不是落库形状。你记忆里 [3] 把两个候选并列记着，实施结论已经收窄到单列。\n\n（顺带：`messages` 那条升级倒是三列 —— `(session_id, created_at, id)`，`migrations.ts:891`。如果「哪两列」是从那儿串行的，对的也是 `(session_id, started_at)`。）",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -448,7 +460,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "`(session_id, started_at)` —— 索引名 `idx_execution_logs_session_started` [3]。\n\n实测落点 `packages/server/src/db/migrations.ts:771-772`：\n\n```sql\nCREATE INDEX IF NOT EXISTS idx_execution_logs_session_started\n      ON execution_logs(session_id, started_at)\n```\n\n配套纠正一处：计划文档 `docs/plans/db-schema-governance.md:80` 把第三条索引写成「`execution_logs(status)` 或 `(session_id, status)`，实施时对照实际 SQL 定形」——实施后定形为**单列** `(status)`，即 `migrations.ts:774` 的 `idx_execution_logs_status ON execution_logs(status)`。所以 execution_logs 上两条索引里，两列版的只有第一条 `(session_id, started_at)`；第三条最终没走复合。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -474,7 +487,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "**`(session_id, started_at)`** —— 索引名 `idx_execution_logs_session_started`。\n\n出处（已实核，非按记忆转述）：\n- 正文 `packages/server/src/db/migrations.ts:771-772` —— `CREATE INDEX IF NOT EXISTS idx_execution_logs_session_started ON execution_logs(session_id, started_at)`\n- 条目登记 `migrations.ts:905-907`，`ticket: 'T2'`，注释自带编号「票 2 · 索引 2」\n\n顺带钉一个口径，因为这问题两种读法会给出不同答案：\n\n| 口径 | 第二条是 | 列 |\n|---|---|---|\n| 票 2 三条索引里的第 2 条（全局编号，源码注释用法） | `idx_execution_logs_session_started` | `(session_id, started_at)` **两列** |\n| 「给 execution_logs 表补的索引」中的第 2 条 | `idx_execution_logs_status` (`migrations.ts:774`/`918-920`) | `(status)` **单列** |\n\n你问句里「第二条」+「哪两列」同时成立只在第一种读法下，所以我按第一种答。\n\n值得一提的两处源码留痕：这条的列名是**勘正过**的——spec §3.2 原写 `created_at`，而 `execution_logs` 根本没有该列（本表时间列是 `started_at`/`ended_at`），照字面落会当场 `no such column` → 事务回滚拒启；保持 spec 的形状与用途不变，只把列名落到真实列。另外第三条没做成复合 `(session_id, status)`，是因为三条消费查询（`scripts/dev.js` 的 `pollRestart`、`src/index.ts` 的 `fixStuckExecutionLogs`、`repository/executionLogs.ts` 的 `getRunningLogs`）**都不带 session_id**，前导列不匹配 ⇒ 复合版一条都服务不到。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -500,7 +514,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "**不是两列 —— 第二条索引是单列 `status`。**\n\n```\nidx_execution_logs_status  ON execution_logs(status)\n```\n定义在 `packages/server/src/db/migrations.ts:774`，迁移条目在 `migrations.ts:918`（ticket: T2）。\n\n两列那条是**第一条**：`idx_execution_logs_session_started ON execution_logs(session_id, started_at)`（`migrations.ts:771`）。回答这句时列名值得一起钉住——是 `started_at` 不是 spec 写的 `created_at`，该表根本没有 `created_at` 列。\n\n第二条之所以没做成复合 `(session_id, status)`：spec §3.2 留的判据是「查询总带 session_id 则用复合」，实测三条调用面**都不带** session_id，复合版前导列不匹配、一条都服务不到（`migrations.ts:910-917` 逐条列了）：\n\n- `scripts/dev.js` 的 `pollRestart`：`SELECT COUNT(*) … WHERE status = 'running'`\n- `src/index.ts` 的 `fixStuckExecutionLogs()`：`UPDATE … WHERE status = 'running'`\n- `repository/executionLogs.ts` 的 `getRunningLogs()`\n\n另注：这两条索引在 rebuild 迁移里被复用为常量（`migrations.ts:1021-1022`），因为 `DROP TABLE` 会连索引一起带走而建索引的迁移已登记不会再跑——所以以后改任何一个定义，都是**一处改动、两个消费点**。\n\n（读数取自源码；我没开活库核对索引实体，若需要「库里真建上了」的读数，得在停机窗跑一次 `PRAGMA index_list(execution_logs)`。）",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -526,7 +541,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "[1] 核实无误：\n\n- **模块文件**（仓库相对路径）：`packages/server/src/llm/session-closeout.ts`（绝对路径 `D:\\Game\\ai\\catStudy\\packages\\server\\src\\llm\\session-closeout.ts`）——从 619 行的 `git-utils.ts` 里拆出来的独立收口器。\n- **只读探针函数**：`inspectCloseout(sessionId): CloseoutState`，定义在 `packages/server/src/llm/session-closeout.ts:291`，返回 `branchExists / worktreeExists / mergedIntoDev / gateSynced / onDev`，只从 git 现状推导、不改任何东西（`CloseoutState` 类型注释在同文件 :70）。\n\n配套的动作入口是同文件 :347 的 `closeoutSession(sessionId): CloseoutResult`（内部串联 `mergeSession / removeWorktree / writeGate / checkoutDev` 四个 `@internal` step，失败时用 `step` 字段定位哪一步断的）。测试在 `session-closeout.test.ts:131` 起有独立的「只读探针」describe 块，两边对得上。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -552,7 +568,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**模块文件**：`packages/server/src/llm/session-closeout.ts`（相对仓库根，完整路径 `D:\\Game\\ai\\catStudy\\packages\\server\\src\\llm\\session-closeout.ts`）—— [1]\n\n**只读探针函数**：`inspectCloseout(sessionId: string): CloseoutState`，位于该文件 `session-closeout.ts:291` [1]\n\n（顺带核对：同文件的写入口 `closeoutSession(sessionId): CloseoutResult` 在同文件 `session-closeout.ts:347`，也是导出函数——按记忆 [1] 的契约，店长只调这一个。）",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -578,7 +595,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**模块文件**：`packages/server/src/llm/session-closeout.ts`\n（实测存在，另有同目录 `session-closeout.test.ts`）\n\n**只读探针函数**：`inspectCloseout(sessionId: string): CloseoutState`\n（`packages/server/src/llm/session-closeout.ts:291`，导出符号已 grep 实证）\n\n对照记忆 [1]：拆出该模块的动因是 `git-utils.ts` 已 619 行；模块对外只有两个入口 —— 只读探针 `inspectCloseout`（供店长先看后动）与执行器 `closeoutSession`，四个 `@internal` step（`mergeSession` / `removeWorktree` / `writeGate` / `checkoutDev`）仅供测试直调。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -604,7 +622,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**独立模块**：`packages/server/src/llm/session-closeout.ts`\n\n**只读探针**：`inspectCloseout(sessionId): CloseoutState`（该文件 `session-closeout.ts:291`）\n\n两者均已在仓库实测核对，非仅凭记忆：\n\n- 文件存在，完整路径 `D:\\Game\\ai\\catStudy-sessions\\fa165f65-ds猫\\packages\\server\\src\\llm\\session-closeout.ts`\n- 同文件导出的动作入口是 `closeoutSession(sessionId)`（`:347`），与探针配套——先 `inspectCloseout` 看、再 `closeoutSession` 动；另有 4 个 `@internal` step：`mergeSession` / `removeWorktree` / `writeGate` / `checkoutDev`（`:201`/`:221`/`:246`/`:268`），签名均已带上 `mainRoot` 显式传参（对应记忆 [1] 的硬约束已落地）。\n\n补充一点记忆里没提的：该模块后来还长出了两处不在原契约里的导出——`fanInCats`/`reclaimCats`（`:129`/`:181`，多猫 fan-in）和 `scanStaleRunDocs` 一族（`:449`–`:501`，docs/run 陈旧扫描）。如果你问的是「收口器本该只干收口」，这两块属于后来的扩容，值得留意是否该再拆。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -630,7 +649,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**文件**：`packages/server/src/llm/session-closeout.ts`\n**只读探针**：`inspectCloseout(sessionId): CloseoutState`\n\n刚在会话树里实测确认（非仅凭记忆）：\n- `session-closeout.ts:291` — `export function inspectCloseout(...)`，上方注释标「只读探针：从 git 现状推导会话收口进度（店长先看后动）。绝不修改任何状态。」\n- 同文件 `:347` — `export function closeoutSession(sessionId): CloseoutResult`，即店长唯一该调用的收口入口。\n\n探针返回的 `CloseoutState` 五个只读读数：`branchExists` / `worktreeExists` / `mergedIntoDev` / `gateSynced` / `onDev`（`:292-294` 起可见 `none` 兜底常量）。\n\n即记忆 [1] 的描述与当前树一致，未过时。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -656,7 +676,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "**SigLIP，768 维，落在独立的 `image_embeddings` 表。**\n\n具体出处（`docs/adr/0009-multimodal-knowledge-base.md`）：\n\n- `:55` — 「视觉子空间：SigLIP 768 维，独立 `image_embeddings` 表」\n- `:64` — 选型表选中行：`Xenova/siglip-base-patch16-224`，768 维，ONNX 现成（21.4 万下载）；备选是 `Xenova/clip-vit-large-patch14`\n- `:56` — 硬约束：禁止把 512（bge 文本）/ 768（SigLIP 视觉）异构维度塞同一列做 sqlite-vec 余弦\n\n三点补充，免得只记结论：\n\n1. **独立表的目的是「换模型 ≠ 换架构」**——升级到 768→1024 的 siglip-so400m 只重建 `image_embeddings` 一张表，文本表零触碰。\n2. **一期只承诺图↔图**。`image_embeddings` 收的是向量+pHash，文本 query 找图走「SigLIP 文本塔」在 ADR 里标着 🔴 待验证（官方 `image-feature-extraction` 只挂 VisionModel，text↔image 需另接文本塔+联合投影），二期实测通过才解锁。\n3. **现状是设计未落地**。全仓 `git grep image_embeddings` 只命中 ADR 和 `scripts/probes/r14a-citation-probe.e2e.mjs:132`（探针的 answerTokens），`packages/server/src` 与迁移里零命中——`embedImage` 接口和这张表都还没实装；目前只有 `packages/server/experiments/siglip-pipeline.e2e.mjs` 的实测脚本（E1 断言 768 维非全零无 NaN，主路径是 `RawImage.fromBlob` + `{pool:true}`，不 pool 会得到 196×768 的 patch embeddings）。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -682,7 +703,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "我去代码里核实,不凭记忆作答。核实完毕。这个问题要分两层答,因为**设计已钉死、实现尚未落地**——只答一层会误导。\n\n## 设计层（ADR 0009，`status: accepted`）\n\n`docs/adr/0009-multimodal-knowledge-base.md:55`\n\n| 项 | 值 |\n|---|---|\n| 模型 | `Xenova/siglip-base-patch16-224` |\n| 维度 | 768 |\n| 表 | `image_embeddings`（独立表） |\n\n同节还钉了三条约束：\n- **禁止**把 512(bge 文本) / 768(SigLIP 视觉) 塞进同一列做 sqlite-vec 余弦（ill-defined）；\n- 视觉模型升级（如 → `siglip-so400m` 1024 维）只重建 `image_embeddings` 一张表，文本表零触碰；\n- 跨模态召回走查询路由器：图找图 → SigLIP 图像塔；**文本找图 → SigLIP 文本塔（🔴 待验证，ADR 待验证项 #2，二期实测通过才解锁，一期不承诺）**。\n\n选型理由在 `:60-66`：DINOv2 判死的原因是纯图像模型无文本塔，做不了 text↔image 跨模态。\n\n## 实现层：**生产代码里不存在**\n\n我这轮实测的读数：\n\n- `packages/**/src/**` 下 `embedImage` / `image_embeddings` / `pHash` —— **零命中**；\n- 全仓 `siglip|image_embeddings` 命中 4 个文件，除 ADR 外只有两个非生产件：\n  - `packages/server/experiments/siglip-pipeline.e2e.mjs` —— 一次性可行性实验，文件头自述「不改 src/ 生产代码」；\n  - `scripts/probes/r14a-citation-probe.e2e.mjs` —— 引用探针。\n\n也就是说：**`image_embeddings` 表没建、`embedImage` 接口不存在、查询路由器不存在**。ADR 里 `Consequences` 写的「一期落地」是计划，不是现状。\n\n## 一处口径纠偏\n\n我收到的相关记忆 [2] 里写的是「视觉子空间：SigLIP 768 维，独立 `image_embeddings` 表」，陈述语气与现状无法区分 —— 这正是本轮我要澄清的点：**768 这个数有实测支撑**（`siglip-pipeline.e2e.mjs` 的 E1 断言 `dim === 768`、非全零、无 NaN，走 `RawImage.fromBlob` + `{pool: true}`，默认无 `pool` 会得到 `[1,196,768]` 的 patch embeddings），但**「落在 image_embeddings 表」目前只是契约，表尚未存在**。另外 ADR 待验证项 #1 有实测结论落在那个实验脚本里，而 #2（文本塔）/#3（检索质量）尚未有实测记录 —— 这两条是一期「只承诺图↔图」的边界所在。\n\n需要我把这几条按「设计 vs 已实现」重新落一遍记忆，或者去核 #2/#3 有没有别处的实测记录吗？",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -708,7 +730,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "## 答案\n\n**模型** `Xenova/siglip-base-patch16-224`　**维度** 768　**表** `image_embeddings`（独立表，与文本 `memories`/`knowledge` 的 bge 512 维物理分离）\n\n但有一步要如实说清楚 —— **这三样目前只存在于设计面，源码里还没有**：\n\n| 面 | 位置 | 状态 |\n|---|---|---|\n| 设计 | `docs/adr/0009-multimodal-knowledge-base.md:55,64`（status: accepted） | 已裁 |\n| 契约 | `packages/shared/src/schemas.ts:63-102` `DocumentBlockSchema`（含 image 分支） | 已落 |\n| 探针 | `packages/server/experiments/siglip-pipeline.e2e.mjs:23` | 已实测 |\n| **实现** | `packages/server/src/**` 搜 `image_embeddings` / `embedImage` / `siglip` → **零命中** | ❌ 未落地 |\n\nADR 里它挂的是「**一期**」（`0009:29`），一期本身还没开工——没有 `embedImage`、没有建表迁移、没有查询路由器。\n\n## 探针已钉死的实施细节（commit `512f0d23` 实测，落地时必须照办）\n\n- **必须 `{ pool: true }`**：`ImageFeatureExtractionPipeline` 默认吐 `[1,196,768]` patch embeddings（150528 维），走 pooler 才收敛到 768\n- **唯一有效输入路径**：`RawImage.fromBlob(new Blob([buf]))`。raw buffer 直喂抛 `Unsupported input type`，base64 dataURL 直喂 `fromURL` 抛错（node fetch 不认 `data:`）——`siglip-pipeline.e2e.mjs` 头部注释已按此订正\n- **pooler 输出范数 15.83，需显式 normalize**，否则余弦失真\n- 内存：bge 增量 128.7MB、SigLIP 增量 368.4MB、同驻稳态 879MB\n\n## 一个仍未验证的红点\n\n`0009:57,73` 假设 2：**SigLIP 文本塔**在 transformers.js 可用（官方 `image-feature-extraction` 只挂 `SiglipVisionModel` 视觉塔，text↔image 需另接文本塔 + 联合投影）。所以「文本 query 找图」这条跨模态路由**一期不承诺**，只承诺图↔图。\n\n---\n\n顺带纠一条：本次注入的「相关记忆」[2] 把「SigLIP 768 维 / `image_embeddings` 表」写成了现状陈述。它是 ADR 的**目标态**，不是已实现态——按现状源码核，该表尚不存在。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -734,7 +757,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "视觉子空间的口径如下（出处已实核）：\n\n| 项 | 值 |\n|---|---|\n| 模型 | `Xenova/siglip-base-patch16-224`（SigLIP base / patch16 / 224） |\n| 维度 | 768 |\n| 表 | `image_embeddings`（独立表，与文本子空间分离） |\n\n出处：\n- `docs/adr/0009-multimodal-knowledge-base.md:55` — 「视觉子空间：SigLIP 768 维，独立 `image_embeddings` 表」\n- `docs/adr/0009-multimodal-knowledge-base.md:64` — 模型选型矩阵里这一行中标（对 CLIP 等）\n- `docs/adr/0009-multimodal-knowledge-base.md:84` — 一期落地项：`embedImage` 接口 + `image_embeddings` 表（768 维）+ 查询路由器 + pHash 去重\n\n**一个必须同时说的限定**：以上是 ADR 0009（status: accepted，2026-08-20）的**设计口径，尚未落地**。我在 `packages/**/src` 下 grep `image_embeddings` / `embedImage` / `siglip` 零命中，全仓范围内这些字面量只出现在两个地方：ADR 0009 本文，以及 `packages/server/experiments/siglip-pipeline.e2e.mjs`（选型期做的管线可行性实验，非生产代码）。库侧也没有对应的迁移 —— 任何 `.sql` 里都查不到 `image_embeddings`。\n\n所以准确说法是「**计划**用 SigLIP 768 维落 `image_embeddings` 表」，而不是「现在有这个子空间」。当前实际在跑的是文本单模态：bge 512 维，落 `memories` / `knowledge` 表。\n\n若你要的是「现在库里到底有没有这张表」的确认，我可以去活库 `-dev` 直接查 table 清单，说一声就查。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -760,7 +784,8 @@
       "phantom": false,
       "notMarked": false,
       "reply": "**设计中已钉死，但尚未落地。** 两者要分开说。\n\n## 契约（ADR 0009，status: accepted）\n\n| 项 | 值 |\n|---|---|\n| 模型 | `Xenova/siglip-base-patch16-224` |\n| 维度 | **768** |\n| 表 | 独立 `image_embeddings` 表 |\n\n出处 `docs/adr/0009-multimodal-knowledge-base.md:55`（不变量 2）与 `:64`（选型表）。选型理由：现成 ONNX、有官方管线；同表竞品 `Xenova/clip-vit-large-patch14`（也是 768）列备选；DINOv2 判死——纯图像模型无文本塔，做不了跨模态。\n\n**子空间分离是硬约束**：文本 bge 512 维落 `memories`/`knowledge`，视觉 SigLIP 768 维落 `image_embeddings`，两个异构维度**禁止**塞同一列做 sqlite-vec 余弦（ill-defined）。跨模态召回由查询路由器按意图选索引。\n\n## 落地状态：没有实现\n\n我实核了 `packages/` 全目录（排除 node_modules）：`image_embeddings` 和 `embedImage` 在 `src/` 生产代码里**零命中**，只出现在两处——\n\n- `docs/adr/0009-multimodal-knowledge-base.md`（契约本身）\n- `packages/server/experiments/siglip-pipeline.e2e.mjs`（一次性可行性脚本，文件头自注「不改 src/ 生产代码」）\n\n没有建表迁移、没有 `embedImage` 接口、没有路由实现。ADR 的 `Consequences` 段写的是「一期落地：…」——那是承诺清单，不是完成记录。所以记忆 [2] 那条读起来像既成事实，实际是设计契约；用之前建议按此校正。\n\n## 两个会影响「怎么用」的待验证项（ADR `:70-74`）\n\n1. **🔴#2 文本塔未验证**—— transformers.js 官方 `image-feature-extraction` 只挂 `SiglipVisionModel` 视觉塔。**text→image 检索一期不承诺**，一期只承诺图↔图；文本查图要等二期小样实测（接文本塔 + 联合投影）通过才解锁。\n2. **🔴#3 检索质量未验证**—— 下载热度 21.4 万 ≠ 质量。不达标回退 CLIP ViT-L/14 或重评估，不硬上。\n\n另外实验脚本已经实测确认了一件事：`siglip-pipeline.e2e.mjs:166` 断言 `dim === 768`，且 4.2.0 版本下 raw buffer / base64 dataURL **不能直接喂**，唯一有效路径是 `RawImage.fromBlob(new Blob([buf]))` + `{ pool: true }`。将来真接线时这个边界要照抄。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -786,7 +811,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "核过源码，票面这个前提得纠正一下：**execution_logs 第二条索引只有一列，没有两列。**\n\nP0（票 2）给 `execution_logs` 补的两条索引是：\n\n| # | 索引名 | 列 | 服务的查询 |\n|---|---|---|---|\n| 1 | `idx_execution_logs_session_started` | `(session_id, started_at)` — **两列在这条上** | `getExecutionsBySession` / `getLatestExecutionPerAgent`，都是 `WHERE session_id = ?` |\n| 2 | `idx_execution_logs_status` | `(status)` — **一列** | running 计数（重启判据主查询） |\n\n定义在 `packages/server/src/db/migrations.ts:771-774`，两条追加区条目在 `migrations.ts:894-921`。\n\n补两点容易混的：\n\n- **两列的那条是第一索引，不是第二。** 你问的「哪两列」如果指 `(session_id, started_at)`，那对应的是第一条；这里还踩了个坑——spec §3.2 原文写的是 `created_at`，但该表根本没有 `created_at` 列（本表时间列是 `started_at`/`ended_at`），照字面实现会当场 `no such column` 拒启，所以按同一形状只换了列名（`migrations.ts:899-904`）。\n- **第二索引 spec 留了个二选一：`(status)` 还是 `(session_id, status)`，实施时按实测调用面定形，结论是单选 `status`。** 三个消费点 `scripts/dev.js` 的 `pollRestart`、`src/index.ts` 的 `fixStuckExecutionLogs()`、`repository/executionLogs.ts` 的 `getRunningLogs()` 全都不带 `session_id`，复合版前导列不匹配，一条都服务不到（`migrations.ts:910-917`）。所以「第二条是两列」这个说法恰好是被实测否掉的那个方案。\n\n顺带一句防串行：三列版的索引在 `messages` 上——`idx_messages_session(session_id, created_at, id)`（`migrations.ts:889-892`），跟 `execution_logs` 不是一张表。",
-      "repeat": 1
+      "repeat": 1,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -812,7 +838,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "**第二条索引是单列的 `status`，不是两列。**\n\n`packages/server/src/db/migrations.ts:774`（登记项在同文件 `:918`）：\n\n```sql\nCREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)\n```\n\n两列的那个是**第一条**：`idx_execution_logs_session_started ON execution_logs(session_id, started_at)`（`migrations.ts:771`）。\n\n票面原本留了二选一——`docs/run/db-schema-governance/tickets.md:81` 写的是「`execution_logs(status)` 或 `(session_id, status)`，**对照实际 SQL 定形**」。实施时定形为单列，理由是三条真实查询（`scripts/dev.js:183` 的 running 计数、`src/index.ts` 的 `fixStuckExecutionLogs()`、`repository/executionLogs.ts` 的 `getRunningLogs()`）**全都不带 session_id**，复合索引 `(session_id, status)` 前导列不匹配，一条都服务不到——照抄复合版等于建了个用不上的索引（`migrations.ts:914-917`）。\n\n索引消费者是 `scripts/dev.js:183` 的 `SELECT COUNT(*) FROM execution_logs WHERE status = 'running'`（重启判据主查询）。",
-      "repeat": 2
+      "repeat": 2,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -838,7 +865,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "**不是两列 —— 落地形态是单列 `status`。**\n\n```\nCREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)\n```\n（`packages/server/src/db/migrations.ts:774` 定义，`:918-921` 注册进迁移数组）\n\nspec 那一行（`docs/plans/db-schema-governance.md:80`）留的是二选一：`execution_logs(status)` **或** `(session_id, status)`，判据写作「查询总带 session_id 则用复合」。实施时按实测调用面定形，结论是走单列：\n\n- `scripts/dev.js` 的 `pollRestart`：`SELECT COUNT(*) … WHERE status = 'running'` —— 无 session_id\n- `src/index.ts` 的 `fixStuckExecutionLogs()`：`UPDATE … WHERE status = 'running'` —— 无 session_id\n- `repository/executionLogs.ts` 的 `getRunningLogs()`：同上\n\n三条都不带 session_id ⇒ 复合索引前导列不匹配，一条都服务不到。所以照抄 `(session_id, status)` 等于建了个用不上的索引。逐字理由在 `migrations.ts:910-917`。\n\n顺带两条容易记串的：execution_logs 的**第一条**索引才是两列 —— `(session_id, started_at)`（`migrations.ts:771-772`），列名是 `started_at` 不是 spec 字面写的 `created_at`（该表没有 created_at 列，照字面实现会当场 no such column 并回滚拒启，`migrations.ts:899-902`）。",
-      "repeat": 3
+      "repeat": 3,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -864,7 +892,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "我先查实际迁移文件，不凭记忆答。**不是两列——落定的是单列 `status`。**\n\n`packages/server/src/db/migrations.ts:774`：\n\n```ts\n/** `execution_logs` running 计数（票 2 · 索引 3） */\nconst IDX_EXECUTION_LOGS_STATUS = `CREATE INDEX IF NOT EXISTS idx_execution_logs_status\n      ON execution_logs(status)`\n```\n\n对照第一条（票 2 · 索引 2，`migrations.ts:771`）才是两列：`idx_execution_logs_session_started ON execution_logs(session_id, started_at)`。\n\n**为什么没取复合版 `(session_id, status)`**（票面 spec §3.2 留的就是这个二选一，判据「查询总带 session_id 则用复合」）——`migrations.ts:910-917` 记的实测定形依据是三条调用面**全都不带 session_id**：\n\n| 调用面 | 实际 SQL |\n|---|---|\n| `scripts/dev.js` `pollRestart`（重启判据主查询） | `SELECT COUNT(*) FROM execution_logs WHERE status = 'running'` |\n| `src/index.ts` `fixStuckExecutionLogs()` | `UPDATE … WHERE status = 'running'` |\n| `repository/executionLogs.ts` `getRunningLogs()` | 同上，无 session_id |\n\n三条都用不上复合索引的前导列，照抄复合版等于建了个零命中的索引。\n\n另外一处易踩的坑顺带记下：这条索引的**列名**在 spec 里写的是 `created_at`，而 `execution_logs` 表根本没有 `created_at` 列（本表时间列是 `started_at`/`ended_at`），按字面落会 `no such column` → 事务回滚 → 拒启；索引 2 已订正为 `started_at`（`migrations.ts:899-902`）。",
-      "repeat": 4
+      "repeat": 4,
+      "markersInCode": []
     },
     {
       "provider": "claude",
@@ -890,7 +919,8 @@
       "phantom": false,
       "notMarked": true,
       "reply": "前提有个错位：execution_logs 在 P0/T2 批里补的第二条索引**不是两列的**。\n\n实测（`packages/server/src/db/migrations.ts`）：\n\n| # | 索引名 | 列 | 用途 |\n|---|---|---|---|\n| 1 | `idx_execution_logs_session_started` | `(session_id, started_at)` ← 两列的是这条 | 会话日志/恢复路径 |\n| 2 | `idx_execution_logs_status` | `(status)` **单列** | running 计数（重启判据主查询） |\n\n`migrations.ts:774` 的 SQL 字面量：\n\n```sql\nCREATE INDEX IF NOT EXISTS idx_execution_logs_status ON execution_logs(status)\n```\n\n定形过程也在注释里（`migrations.ts:910-917`）：spec §3.2 留的判据是「查询总带 session_id 就用复合 `(session_id, status)`」，但实测定形走了单列——`scripts/dev.js` 的 `pollRestart`、`src/index.ts` 的 `fixStuckExecutionLogs()`、`repository/executionLogs.ts` 的 `getRunningLogs()` 三条调用面**都不带 session_id**，复合索引前导列不匹配，一条都服务不到。所以那两列组合是被实测否掉的选项，不是落地的形态。\n\n顺带一提，第一条索引的列名也不是 spec 写的 `created_at`：`execution_logs` 没有该列（本表时间列是 `started_at`/`ended_at`），照 spec 字面实现会 `no such column` 当场拒启（`migrations.ts:899-902`，实测非推断）。",
-      "repeat": 5
+      "repeat": 5,
+      "markersInCode": []
     }
   ],
   "summary": {
@@ -901,6 +931,7 @@
       "wrongNumber": 0,
       "phantom": 0,
       "notMarked": 5,
+      "withMarkersInCode": 0,
       "shapeMismatch": 0,
       "emptyReply": 0,
       "noChunks": 0,
@@ -913,10 +944,21 @@
       "wrongNumber": 0,
       "phantom": 0,
       "notMarked": 7,
+      "withMarkersInCode": 0,
       "shapeMismatch": 0,
       "emptyReply": 0,
       "noChunks": 0,
       "error": 0
     }
+  },
+  "reclassified": {
+    "by": "scripts/probes/r14a-citation-probe.e2e.mjs --mode reclassify",
+    "at": "2026-09-23T11:35:19.830Z",
+    "from": "docs/eval/r14a-citation-probe-2026-09-23-s1.json",
+    "fromReclassifiedAt": null,
+    "runs": 30,
+    "skipped": 0,
+    "skippedRuns": [],
+    "markersInCodeRuns": 0
   }
 }

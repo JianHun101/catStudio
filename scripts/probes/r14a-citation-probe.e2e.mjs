@@ -31,23 +31,38 @@
  * 并成一个比率会分不清「不会标」和「标错」——而这两者**修法相反**。
  * 四格**各自成列**（不互斥）：混标（既有合法号又有越界号）时不得互相掩盖。
  *
- * ## 判据面两条（票面 §四，否则读数被假阳性污染）
+ * ## 判据面三条（票面 §四，否则读数被假阳性污染）
  *
- * - **围栏代码块内的 `[n]` 不计入**（猫举代码例时会写出 `[1]`）
+ * 判据是「**代码字面量不是引用**」——**按机制定义，不按模式定义**：
+ *
+ * - **代码字面量内的 `[n]` 不计入**。机制有二形态：围栏块（``` … ```）与内联码
+ *   （`` `…` ``）。猫举代码例时会写出 `[1]`；引用注入原文里的 `float[512]`
+ *   （sqlite-vec 列类型）是**同一机制**的另一副面孔——S2 实测两处「标不存在号」
+ *   正是它（claude / dsh 各一、同题同因）。
+ *   本批 90 份回复实测：围栏 9 份 / 内联码 90 份 / **缩进代码块 0 份**；换语料即失效，
+ *   见到第三种形态时同批纳入（见 `inlineCodeRanges`）。
  * - **猫复读指示语 ≠ 标了**：甲版指示语**自身含字面量 `[1]`**，猫转述/解释该指示语
  *   时会产生 `[1]`。判据取「正文里指向某节内容的标注」，复述区段内的标注单独计数
  *   并剔除（见 `instructionEchoRanges`，判据是「与指示语有 ≥ ECHO_NGRAM 的公共子串」）。
- *   原始与剔除后两份都进报告，人工可复核。
+ *
+ * 被剔除的三类**各自成列**进产物（`markersInFence` / `markersInCode` / `markersInEcho`），
+ * **不许静默剔除**——静默剔除会让「判据面把真值扫掉」变成假绿。
+ *
+ * ## `--mode reclassify`（票面 §八 验收 9）
+ *
+ * 判据面变了 ⇒ 已跑产物的派生字段用**同一个 `classifyReply`** 重算（`reclassifyReport`）。
+ * 零 LLM 调用、**不换样本**（重跑 = 另一次抽样，会把 S1/S2 对比的证据换掉）。
  *
  * 用法:
  *   node scripts/probes/r14a-citation-probe.e2e.mjs --mode s0 [--db <sqlite>] [--out <json>]
  *   node scripts/probes/r14a-citation-probe.e2e.mjs --mode s1 [--n 5] [--out <json>]
  *   node scripts/probes/r14a-citation-probe.e2e.mjs --mode s2 --winner jia [--n 5] [--out <json>]
+ *   node scripts/probes/r14a-citation-probe.e2e.mjs --mode reclassify --in <旧产物> --out <新产物>
  *
  * 退出码：0 = 读到结果（含「不可达」这类结论）；1 = 环境/自举失败；2 = 用法错误。
  */
 
-import { existsSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -222,6 +237,44 @@ export function fenceRanges(text) {
 }
 
 /**
+ * 内联代码区间（`` `…` ``）——票面 §四 判据面的**第三类区间**。
+ *
+ * ## 为什么判据是「代码字面量」而不是「围栏块」
+ *
+ * 票面原写「**围栏**代码块内不计入」——那是**模式名**。真正的判据是
+ * 「**代码字面量不是引用**」：猫引用注入原文里的 `float[512]`（sqlite-vec 列类型）
+ * 与它自己举代码例，是**同一个机制**，不是两件事。S2 实测两处 `[512]`
+ * （claude / dsh 各一，同题同因）正落在内联码里 ⇒ 按旧口径被记成「标不存在号」。
+ *
+ * ## 与围栏的先后（承重）
+ *
+ * **必须先算围栏、再算内联**：内联正则 `` `[^`\n]*` `` 会匹配到 ``` 的**前两个反引号**
+ * （空 span），若不排除就会把围栏定界符当内联码。
+ * 此处用**重叠即丢**实现该顺序——落在围栏区间内的伪匹配整条丢弃。
+ *
+ * ## 形态清单（本仓实测，非假设）
+ *
+ * 90 份回复（S1 30 + S2 60）全量扫描：围栏 9 份、内联码 90 份、**缩进代码块 0 份**。
+ * markdown 的第三种代码形态（行首四空格 / tab）在本批语料里**不存在**——
+ * 换语料即失效，见到第三种时同批纳入，别假设只有这两种。
+ *
+ * @param {string} text
+ * @param {Array<[number, number]>} fences 先用 `fenceRanges(text)` 算好；缺省自算（便于单测单独调用）
+ * @returns {Array<[number, number]>} 升序不重叠的区间
+ */
+export function inlineCodeRanges(text, fences = fenceRanges(text)) {
+  const ranges = []
+  for (const m of text.matchAll(/`[^`\n]*`/g)) {
+    const s = m.index
+    const e = s + m[0].length - 1
+    // 与任一围栏区间重叠 ⇒ 是围栏定界符的伪匹配（不是内联码）
+    if (fences.some(([fs, fe]) => s <= fe && e >= fs)) continue
+    ranges.push([s, e])
+  }
+  return ranges
+}
+
+/**
  * 与指示语有长公共子串的区段——**复述指示语**的载体。
  *
  * 判据：文本中任一 `ECHO_NGRAM` 长的子串也是指示语的子串 ⇒ 该区段是复述。
@@ -256,27 +309,43 @@ function inRanges(index, ranges) {
 /**
  * 抽出回复里的全部 `[n]` 标注，**按来源分列**。
  *
- * @returns `{ raw, effective, inFence, inEcho }`——各为去重升序的编号数组：
+ * 区间判定的**顺序是语义的一部分**（重叠时先命中者定名）：
+ * 围栏 → 内联码 → 复述指示语 → 正文。围栏必须先于内联码（见 `inlineCodeRanges`）。
+ *
+ * @returns `{ raw, effective, inFence, inEcho, inCode }`——各为去重升序的编号数组：
  *   - `raw`       = 全部 `[n]`（未过滤）
- *   - `effective` = **判据用**：剔除围栏内 + 复述指示语处
- *   - `inFence` / `inEcho` = 被剔除的那些（原样列出，人工可复核）
+ *   - `effective` = **判据用**：剔除围栏内 + 内联码内 + 复述指示语处
+ *   - `inFence` / `inEcho` / `inCode` = 被剔除的那些（**各自成列**，人工可复核）
+ *
+ * ⚠️ `inCode` **必须成列进产物**（run 的 `markersInCode`），**不许静默剔除**：
+ * 本批真值是那 2 处 `float[512]`，但若哪天猫把真引用写进反引号（`` `[1]` ``），
+ * 它与 `float[512]` **不同源**，必须看得见——静默剔除 = 又一支「判据面把真值扫掉」的假绿。
  */
 export function extractMarkers(text, instruction = '') {
   const fences = fenceRanges(text)
+  const codes = inlineCodeRanges(text, fences)
   const echoes = instruction ? instructionEchoRanges(text, instruction) : []
   const raw = new Set()
   const effective = new Set()
   const inFence = new Set()
   const inEcho = new Set()
+  const inCode = new Set()
   for (const m of text.matchAll(/\[(\d+)\]/g)) {
     const n = Number(m[1])
     raw.add(n)
     if (inRanges(m.index, fences)) inFence.add(n)
+    else if (inRanges(m.index, codes)) inCode.add(n)
     else if (inRanges(m.index, echoes)) inEcho.add(n)
     else effective.add(n)
   }
   const asc = (s) => [...s].sort((a, b) => a - b)
-  return { raw: asc(raw), effective: asc(effective), inFence: asc(inFence), inEcho: asc(inEcho) }
+  return {
+    raw: asc(raw),
+    effective: asc(effective),
+    inFence: asc(inFence),
+    inEcho: asc(inEcho),
+    inCode: asc(inCode),
+  }
 }
 
 /**
@@ -343,6 +412,7 @@ function parseArgs(argv) {
     mode: null,
     db: null,
     out: null,
+    in: null,
     provider: null,
     winner: null,
     n: 5,
@@ -354,6 +424,7 @@ function parseArgs(argv) {
     if (a === '--mode') args.mode = argv[++i] ?? null
     else if (a === '--db') args.db = argv[++i] ?? null
     else if (a === '--out') args.out = argv[++i] ?? null
+    else if (a === '--in') args.in = argv[++i] ?? null
     else if (a === '--provider') args.provider = argv[++i] ?? null
     else if (a === '--winner') args.winner = argv[++i] ?? null
     else if (a === '--n') args.n = Number(argv[++i] ?? 5)
@@ -376,13 +447,15 @@ const ANSWER_TIMEOUT_MS = 240_000
 const ANSWER_MAX_TOKENS = 2048
 
 const USAGE =
-  '用法: node scripts/probes/r14a-citation-probe.e2e.mjs --mode <s0|s1|s2> [选项]\n' +
+  '用法: node scripts/probes/r14a-citation-probe.e2e.mjs --mode <s0|s1|s2|reclassify> [选项]\n' +
   '  --mode s0  4 条链路可达性（停损点）：每 provider 一次极短真实调用\n' +
   '  --mode s1  claude 单 provider × 甲/乙两版 × N 遍\n' +
   '  --mode s2  4 provider（可达者）× 胜出版本 × N 遍（需 --winner jia|yi）\n' +
+  '  --mode reclassify  重算已有产物的派生字段（**零 LLM 调用、不换样本**，需 --in）\n' +
   '  --n <N>            每格重复遍数（默认 5，票面 §六 要求 N ≥ 5）\n' +
   '  --winner <jia|yi>  s2 的胜出版本\n' +
   '  --concurrency <k>  并发上限（默认 2——本地模型并发过高会争用）\n' +
+  '  --in <json>        reclassify 的源产物（其上 runs 会被重算）\n' +
   '  --out <json>       落盘路径（票面 §八.7：docs/eval/r14a-citation-probe-<date>.json）\n' +
   '  --db 缺省 <root>/packages/server/data/cat-study-dev.db（worktree 内无库 ⇒ 显式传主仓库库路径）\n'
 
@@ -392,6 +465,11 @@ export async function main(argv = process.argv.slice(2)) {
     process.stdout.write(USAGE)
     return args.help ? 0 : 2
   }
+
+  // reclassify 在**开库与 import adapter 之前**分流：它是派生数据的重算，
+  // 零 LLM 调用、不需要 `agents` 表、也不需要 sidecar —— 走 DB 前置检查会让
+  // 「worktree 里没有库」这种无关条件把它挡死。
+  if (args.mode === 'reclassify') return reclassifyMode(args)
 
   const root = REPO_ROOT
   const dbPath = path.resolve(
@@ -666,6 +744,7 @@ async function answerOne(agent, getAdapterForAgent, q, injected, variant) {
       markers: m.effective,
       markersInFence: m.inFence,
       markersInEcho: m.inEcho,
+      markersInCode: m.inCode,
       ...cls,
       reply: r.text,
       elapsedMs: Date.now() - startedAt,
@@ -679,6 +758,7 @@ async function answerOne(agent, getAdapterForAgent, q, injected, variant) {
       markers: [],
       markersInFence: [],
       markersInEcho: [],
+      markersInCode: [],
       inRange: [],
       outOfRange: [],
       correct: false,
@@ -714,6 +794,7 @@ export function summarize(runs) {
       wrongNumber: 0,
       phantom: 0,
       notMarked: 0,
+      withMarkersInCode: 0,
       shapeMismatch: 0,
       emptyReply: 0,
       noChunks: 0,
@@ -729,6 +810,8 @@ export function summarize(runs) {
     if (r.wrongNumber) c.wrongNumber++
     if (r.phantom) c.phantom++
     if (r.notMarked) c.notMarked++
+    // 代码字面量里的 `[n]`：**成列计数**（不是过滤掉的垃圾，是判据面的一格读数）
+    if ((r.markersInCode ?? []).length > 0) c.withMarkersInCode++
   }
   return byCell
 }
@@ -834,6 +917,120 @@ function writeReport(out, report) {
   mkdirSync(path.dirname(abs), { recursive: true })
   writeFileSync(abs, JSON.stringify(report, null, 2))
   process.stderr.write(`[r14a] 报告落 ${abs}\n`)
+}
+
+// ─── reclassify：判据面改了，派生字段重算（票面 §八 验收 9）─────────
+
+/**
+ * 用**当前的判据面**重算一份已有产物的派生字段。纯函数（不读盘），便于单测。
+ *
+ * ## 为什么不重跑
+ *
+ * ① 重跑 = **换样本**：LLM 随机，重跑是另一次抽样；S1/S2 对比与位次分析都锚在这
+ * 90 份回复上，换样本 = 换证据。② 分类是**派生数据**：`reply` / `instruction` /
+ * `sectionCount` / `expectSection` 全在产物里 ⇒ 重算**精确且零 LLM 调用**。
+ *
+ * ## 复用同一个 `classifyReply`（承重）
+ *
+ * 判据面**只此一份**。此处若另写一份分类逻辑，就是真相源分叉——正是本票立票时
+ * 反对的形态（分片产物不手抄汇总，同一条理由）。
+ *
+ * ## 幂等
+ *
+ * 判据 = `runs` 与 `summary` **逐字段相等**（对已重算的产物再重算 = no-op）。
+ * 戳记 `reclassified.at` 是重算时刻，**本就该变**，不纳入幂等判据。
+ * key 顺序亦稳定（对象展开保序、新键位置在二次重算时不再变），故 `runs` 部分
+ * 连 JSON 文本都逐字节相同。
+ *
+ * ## `error` 行**跳过**（不是漏掉）
+ *
+ * `answerOne` 的 catch 分支把派生字段**硬编码**成 `[]`/`false`（含 `notMarked: false`），
+ * 那些值**不是 `classifyReply` 产出的**。重算会把 `notMarked` 从 `false` 翻成 `true`
+ * ——那是**改语义**，不是改判据。故按 `status === 'error'` 整行透传，并把跳过的
+ * 行**记进戳记**（`skipped` / `skippedRuns`），不许静默。
+ *
+ * @param {object} report 源产物（`runs` + `instructions`）
+ * @param {{from?: string|null, at?: string}} [opts] `from` = 源产物标识，进戳记
+ * @returns {object} 新产物（不修改入参）
+ */
+export function reclassifyReport(report, opts = {}) {
+  const instructions = report.instructions ?? {}
+  const skippedRuns = []
+  const runs = (report.runs ?? []).map((run) => {
+    if (run.status === 'error' || typeof run.reply !== 'string') {
+      skippedRuns.push({
+        provider: run.provider ?? null,
+        variant: run.variant ?? null,
+        questionId: run.questionId ?? null,
+        repeat: run.repeat ?? null,
+        status: run.status ?? null,
+        why: 'error 行的派生字段非 classifyReply 产出（硬编码），重算会改语义',
+      })
+      return run
+    }
+    const m = extractMarkers(run.reply, instructions[run.variant] ?? '')
+    const cls = classifyReply(m.effective, run.sectionCount, run.expectSection)
+    return {
+      ...run,
+      markersRaw: m.raw,
+      markers: m.effective,
+      markersInFence: m.inFence,
+      markersInEcho: m.inEcho,
+      markersInCode: m.inCode,
+      ...cls,
+    }
+  })
+
+  return {
+    ...report,
+    runs,
+    summary: summarize(runs),
+    reclassified: {
+      by: 'scripts/probes/r14a-citation-probe.e2e.mjs --mode reclassify',
+      at: opts.at ?? new Date().toISOString(),
+      // 「本件系重算」的判据：源产物 + 重算时刻（让人能分辨**跑出来的**与**重算出来的**）
+      from: opts.from ?? null,
+      // 若源产物**本身就是重算件**，把它的戳记链过来（二次重算不丢来源）
+      fromReclassifiedAt: report.reclassified?.at ?? null,
+      runs: runs.length,
+      skipped: skippedRuns.length,
+      skippedRuns,
+      markersInCodeRuns: runs.filter((r) => (r.markersInCode ?? []).length > 0).length,
+    },
+  }
+}
+
+/** `--mode reclassify` 的 CLI 面：读源产物 → 重算 → 出 stdout + 可选落盘 */
+export function reclassifyMode(args) {
+  if (!args.in) {
+    process.stderr.write('[r14a] --mode reclassify 需要 --in <源产物.json>\n')
+    return 2
+  }
+  const inAbs = path.resolve(args.in)
+  if (!existsSync(inAbs)) {
+    process.stderr.write(`[r14a] 源产物不存在：${inAbs}\n`)
+    return 1
+  }
+  let report
+  try {
+    report = JSON.parse(readFileSync(inAbs, 'utf8'))
+  } catch (err) {
+    process.stderr.write(`[r14a] 源产物解析失败：${err && err.message}\n`)
+    return 1
+  }
+  if (!Array.isArray(report.runs)) {
+    process.stderr.write('[r14a] 源产物没有 runs 数组——重算无对象\n')
+    return 1
+  }
+
+  const next = reclassifyReport(report, { from: args.in })
+  process.stdout.write(JSON.stringify(next) + '\n')
+  if (args.out) writeReport(args.out, next)
+  process.stderr.write(
+    `[r14a] 重算 ${next.reclassified.runs} 行（跳过 ${next.reclassified.skipped} 行 error）；` +
+      `含代码字面量角标 ${next.reclassified.markersInCodeRuns} 行；零 LLM 调用\n`
+  )
+  return 0
 }
 
 // ─── 入口 ─────────────────────────────────────────────
