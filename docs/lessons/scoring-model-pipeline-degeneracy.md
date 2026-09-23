@@ -49,7 +49,7 @@ pipeline('text-classification', <模型>)
 
 不满足 ⇒ 判**测量失败**，不是判**模型无效**。这两者药方相反：前者去修测量，后者去换模型。
 
-已固化为代码：`scripts/eval/rerank-offline-ab.mjs` 的 `judgeRerankNonDegenerate`（五种拒绝理由：`constant` / `not-separated` / `not-number` 等），配 5 条单测。
+已固化为代码：`scripts/eval/rerank-offline-ab.mjs` 的 `judgeRerankNonDegenerate`（**三种**拒绝理由，穷尽枚举、无「等」：`not-number` / `constant` / `not-separated`），配 5 条单测。
 
 ## 更一般的形态
 
