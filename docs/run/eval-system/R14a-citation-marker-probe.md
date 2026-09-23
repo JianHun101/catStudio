@@ -222,3 +222,18 @@ node scripts/probes/r14a-citation-probe.e2e.mjs --mode s2 --winner jia \
 ### 下一步
 
 R14b（接入生产链）是否开工 → 店长裁决。**开工前须先过一轮审查**（本票探针 + 产物 + 重算模式）。
+
+### OQ-5（2026-09-23 店长仲裁落：prep 连败两轮的墙不在内容面）
+
+**现象**：`275a5b33` 相对审查分支 `b54d67c1` 是**快进**（`merge-base --is-ancestor` 实测通过、`merge-tree --write-tree` 结果树 = `275a5b33` 的树），但 review-view prep 在 19:39:54 / 19:46:00 两次失败，日志 `files: []` / `recovered: false`。
+
+**真因（店长独立复现，非转述）**：审查者 worktree 的**暂存面**压着 16 个未提交的 R13a scratch 文件。`git merge --no-ff` 遇到「索引里有、HEAD 里没有」的路径会**直接拒合**——临时仓实测：`error: Your local changes to the following files would be overwritten by merge`，`exit=2`；紧接着 `git merge --abort` 因无 `MERGE_HEAD` 再抛一次（`There is no merge to abort`）。三个签名逐条对上日志：`exit≠0` → 进 catch、`unmergedFiles()` 空 → `files: []`、abort 抛错 → `recovered: false`。**正对照**：同一临时仓 `git reset` 后原样重跑，`Merge made by the 'ort' strategy`，`exit=0`。
+
+**已执行（店长兜底接管）**：对审查者 worktree 执行 `git reset`（**仅移出索引、不删文件**）——16 个文件逐一核过**全部保留在盘上、内容未动**，reviewer HEAD 未动（仍是 `b54d67c1`）。选这条而非「叫审查者自己清」：索引位移**不丢任何信息**（重新 `git add` 即还原），且 ds猫 侧本无可对齐的内容，等一轮只是空转。
+
+**两条挂账（建议立票，票面由店长补）**：
+
+1. **诊断盲区**：`worktree-fanin.ts` 的 `runGit` 用 `stdio: ['ignore','pipe','ignore']` ⇒ **git 的 stderr 被丢弃**，日志里的 `error` 永远只有命令行，真实报错（`would be overwritten by merge`）进不了任何日志。本轮真因只能靠隔离复现反推，不能直读。
+2. **误分类 + 误路由**：任何 `merge --no-ff` 失败都被记成 `merge conflict`，冲突返投也**一律投给 src 侧**。而本例的墙在 **target 侧**（审查者自己的暂存面），src 侧没有可对齐的内容——ds猫 因此空转两轮。判据应改成：**只有 `unmergedFiles()` 非空才叫 conflict**；为空则另立一类（target 侧阻塞，附 stderr 摘录 + 阻塞路径），**投给 target 侧**。
+
+**给审查者的遗留风险（请 吐槽猫 处置）**：那 16 个文件现在是**未跟踪**、且**未被 `.gitignore` 覆盖**——该 worktree 内任何 `git add -A` 都会把它们重新扫进索引，**prep 会以完全相同的形态第三次失败**。清单：`.tmp-r13a-diff.txt`、`committed_det.md`、`d1_det.md`、`lat_36a.json`、`lat_f31.json`、`lat_final.json`、`latmd_final.txt`、`p11_lat.ok`、`p11_lat2.diff`、`p11_lat3.diff`、`p11_latency.diff`、`p11_latency_md.diff`、`script_final.mjs`、`tmp-r13a-diff.txt`、`tmp-r13a-eval.json`、`tmp-r13a-lat.json`。（R13a 票已收口，这些是当时的过期 scratch。）
