@@ -261,7 +261,7 @@ export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/
  * 重写，且 `schemas.js` 会拉进 zod ⇒ 经门面必炸。本文件被 Node 原生类型剥离加载
  * （纯 `export const` 可擦除）。
  *
- * 白名单成员资格与顺序的说明（为何是这 12 条、顺序语义）随定义一并搬到叶子文件。
+ * 白名单成员资格与顺序的说明（为何是这 13 条、顺序语义）随定义一并搬到叶子文件。
  */
 export { SKILL_WHITELIST, SKILL_CATALOG }
 

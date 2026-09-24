@@ -305,7 +305,7 @@ export function buildDynamicHints(
  * （`read_skill` 白名单强校验的范围）原样搬成**常驻发现面**。
  *
  * 三条硬约束：
- * - **注入面 = 可读面**：只列 `SKILL_WHITELIST` 12 条，绝不列 `skills/` 目录全量
+ * - **注入面 = 可读面**：只列 `SKILL_WHITELIST` 13 条，绝不列 `skills/` 目录全量
  *   （白名单外点名 = 菜单里点了报错，菜单说谎比没菜单更坏）。
  * - **单一真相源**：文案逐字取自 `SKILL_CATALOG`（shared 叶子），本函数不另写说明。
  * - **纯函数、无 I/O**：目录每轮不变，拼进第一条 system message（`finalSystemPrompt`），

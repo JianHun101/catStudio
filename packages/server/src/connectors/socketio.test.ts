@@ -111,6 +111,13 @@ vi.mock('../handoff/index.js', () => ({
   generateFullSummary: vi.fn(),
 }))
 
+// 评估采样是 fire-and-forget 旁路：不 mock 的话判官评分会经同一 mocked
+// getAdapterForAgent 边界打进 chatStream.mock.calls，与「调用序号」断言抢事件循环
+// （低概率潜伏 flake，实测 EVAL_SAMPLE_RATE=0.9 时 5 跑约 1 败）。旁路不进主链断言面。
+vi.mock('../eval/sampler.js', () => ({
+  maybeScoreSample: vi.fn(),
+}))
+
 // 包装 insertUserMessage 为可注入失败的 spy——默认走真实实现（现有测试零影响），
 // 审查反馈 #1 的用例里 mockImplementationOnce 模拟 FK 异常
 vi.mock('../db/repository/messages.js', async (importOriginal) => {
@@ -5503,7 +5510,7 @@ describe('runAgentReply — 技能发现面注入（甲案）', () => {
     role: 'implementer',
   }
 
-  it('第一条 system message 含技能目录段，且含全部 12 个技能名', async () => {
+  it('第一条 system message 含技能目录段，且含全部 13 个技能名', async () => {
     const msgs = await runWithAgent({ ...AGENT })
 
     // 「第一条」是硬点：目录段坐真 system prompt 面，不是后续某条 hints
@@ -5511,7 +5518,7 @@ describe('runAgentReply — 技能发现面注入（甲案）', () => {
     const sys = String(msgs[0].content)
 
     expect(sys).toContain('【可用技能】')
-    expect(SKILL_WHITELIST).toHaveLength(12)
+    expect(SKILL_WHITELIST).toHaveLength(13)
     for (const name of SKILL_WHITELIST) {
       expect(sys, `目录段缺技能 ${name}`).toContain(`- ${name}: `)
     }
