@@ -1088,158 +1088,167 @@ onUnmounted(() => {
 
         <!-- 系统配置：context 阈值（80% 告警 / 90% 交接） -->
         <div v-show="activeCategory === 'system'" class="system-pane">
-          <div class="section-title">上下文阈值配置</div>
-          <div class="ctx-card">
-            <div class="ctx-info">
-              上下文窗口用量达到「告警阈值」时页面顶部横幅提示；达到「交接阈值」时自动交接到新会话。
-              两个阈值同时作用于 token 用量条色阶（告警起黄色、交接起红色）。
+          <section class="config-section">
+            <div class="section-title">上下文阈值配置</div>
+            <div class="ctx-card">
+              <div class="ctx-info">
+                上下文窗口用量达到「告警阈值」时页面顶部横幅提示；达到「交接阈值」时自动交接到新会话。
+                两个阈值同时作用于 token 用量条色阶（告警起黄色、交接起红色）。
+              </div>
+
+              <div v-if="ctxLoading" class="list-hint">加载中…</div>
+
+              <template v-else>
+                <div class="config-item">
+                  <span class="label">告警阈值（warn）</span>
+                  <input
+                    v-model.number="warnThreshold"
+                    type="number"
+                    min="0.01"
+                    max="0.99"
+                    step="0.05"
+                    class="input input-ctx"
+                    :disabled="ctxSaving"
+                  />
+                </div>
+                <div class="config-item">
+                  <span class="label">交接阈值（handoff）</span>
+                  <input
+                    v-model.number="handoffThreshold"
+                    type="number"
+                    min="0.01"
+                    max="0.99"
+                    step="0.05"
+                    class="input input-ctx"
+                    :disabled="ctxSaving"
+                  />
+                </div>
+                <div class="config-item">
+                  <span class="label">上下文窗口上限</span>
+                  <span class="value mono">{{ ctxMaxDisplay() }}</span>
+                </div>
+
+                <div class="ctx-hint">
+                  取值 0~1 之间的小数（如 0.8 = 80%），且告警阈值 ≤ 交接阈值。「窗口上限」由服务端
+                  env 决定，只读回显；保存后立即生效，重启后仍保持。
+                </div>
+
+                <div v-if="ctxFormError" class="error-msg">{{ ctxFormError }}</div>
+                <div v-if="ctxSaved" class="ok-msg">{{ ctxSaved }}</div>
+
+                <div class="form-actions">
+                  <button class="btn btn-create" :disabled="ctxSaving" @click="saveCtxConfig">
+                    {{ ctxSaving ? '保存中…' : '保存阈值' }}
+                  </button>
+                </div>
+              </template>
             </div>
+          </section>
 
-            <div v-if="ctxLoading" class="list-hint">加载中…</div>
-
-            <template v-else>
-              <div class="config-item">
-                <span class="label">告警阈值（warn）</span>
-                <input
-                  v-model.number="warnThreshold"
-                  type="number"
-                  min="0.01"
-                  max="0.99"
-                  step="0.05"
-                  class="input input-ctx"
-                  :disabled="ctxSaving"
-                />
-              </div>
-              <div class="config-item">
-                <span class="label">交接阈值（handoff）</span>
-                <input
-                  v-model.number="handoffThreshold"
-                  type="number"
-                  min="0.01"
-                  max="0.99"
-                  step="0.05"
-                  class="input input-ctx"
-                  :disabled="ctxSaving"
-                />
-              </div>
-              <div class="config-item">
-                <span class="label">上下文窗口上限</span>
-                <span class="value mono">{{ ctxMaxDisplay() }}</span>
+          <section class="config-section">
+            <div class="section-title">摘要配置</div>
+            <!-- 摘要配置：交接摘要/记忆改写模型（SUMMARY_MODEL/SUMMARY_API_KEY 写 .env，重启生效） -->
+            <div class="ctx-card">
+              <div class="ctx-info">
+                交接摘要与记忆查询改写使用独立模型配置（写 .env 的 SUMMARY_MODEL /
+                SUMMARY_API_KEY）。 密钥留空 = 保持现状（未配置时默认复用 DS_KEY）；填写新值 =
+                覆盖。保存后重启生效。
               </div>
 
-              <div class="ctx-hint">
-                取值 0~1 之间的小数（如 0.8 = 80%），且告警阈值 ≤ 交接阈值。「窗口上限」由服务端 env
-                决定，只读回显；保存后立即生效，重启后仍保持。
-              </div>
+              <div v-if="sumLoading" class="list-hint">加载中…</div>
 
-              <div v-if="ctxFormError" class="error-msg">{{ ctxFormError }}</div>
-              <div v-if="ctxSaved" class="ok-msg">{{ ctxSaved }}</div>
+              <template v-else>
+                <div class="config-item">
+                  <span class="label">摘要模型</span>
+                  <input
+                    v-model="summaryModel"
+                    type="text"
+                    class="input input-ctx"
+                    :disabled="sumDisabled || sumSaving"
+                  />
+                </div>
+                <div class="config-item">
+                  <span class="label">摘要 API Key</span>
+                  <input
+                    v-model="summaryApiKey"
+                    type="password"
+                    class="input input-ctx"
+                    :disabled="sumDisabled || sumSaving"
+                    :placeholder="summaryKeyPlaceholder"
+                  />
+                </div>
 
-              <div class="form-actions">
-                <button class="btn btn-create" :disabled="ctxSaving" @click="saveCtxConfig">
-                  {{ ctxSaving ? '保存中…' : '保存阈值' }}
-                </button>
-              </div>
-            </template>
-          </div>
+                <div class="ctx-hint">
+                  密钥只在此回显掩码（{{
+                    summaryMasked || '—'
+                  }}），完整密钥不出服务器。模型变更重启后生效。
+                </div>
 
-          <!-- 摘要配置：交接摘要/记忆改写模型（SUMMARY_MODEL/SUMMARY_API_KEY 写 .env，重启生效） -->
-          <div class="ctx-card">
-            <div class="ctx-info">
-              交接摘要与记忆查询改写使用独立模型配置（写 .env 的 SUMMARY_MODEL / SUMMARY_API_KEY）。
-              密钥留空 = 保持现状（未配置时默认复用 DS_KEY）；填写新值 = 覆盖。保存后重启生效。
+                <div v-if="sumError" class="error-msg">{{ sumError }}</div>
+                <div v-if="sumSaved" class="ok-msg">{{ sumSaved }}</div>
+
+                <div class="form-actions">
+                  <button
+                    class="btn btn-create"
+                    :disabled="sumDisabled || sumSaving"
+                    @click="saveSummaryConfig"
+                  >
+                    {{ sumSaving ? '保存中…' : '保存摘要配置' }}
+                  </button>
+                </div>
+              </template>
             </div>
+          </section>
 
-            <div v-if="sumLoading" class="list-hint">加载中…</div>
-
-            <template v-else>
-              <div class="config-item">
-                <span class="label">摘要模型</span>
-                <input
-                  v-model="summaryModel"
-                  type="text"
-                  class="input input-ctx"
-                  :disabled="sumDisabled || sumSaving"
-                />
-              </div>
-              <div class="config-item">
-                <span class="label">摘要 API Key</span>
-                <input
-                  v-model="summaryApiKey"
-                  type="password"
-                  class="input input-ctx"
-                  :disabled="sumDisabled || sumSaving"
-                  :placeholder="summaryKeyPlaceholder"
-                />
+          <section class="config-section">
+            <div class="section-title">铁律</div>
+            <!-- 铁律编辑：开发铁律 + 审查铁律（运行期注入——settings 表优先、常量兜底） -->
+            <div class="ctx-card">
+              <div class="ctx-info">
+                铁律是全局共享的运营规则（运行期注入到各猫 systemPrompt，settings 表优先、seed
+                常量兜底）。保存后下一轮回复即生效，无需重启；需填非空内容（空串保存会报错）。
               </div>
 
-              <div class="ctx-hint">
-                密钥只在此回显掩码（{{
-                  summaryMasked || '—'
-                }}），完整密钥不出服务器。模型变更重启后生效。
-              </div>
+              <div v-if="ironLawsLoading" class="list-hint">加载中…</div>
+              <div v-else-if="ironLawsError" class="error-msg">{{ ironLawsError }}</div>
+              <template v-else-if="ironLaws">
+                <div class="config-item iron-law-block">
+                  <span class="label">开发铁律</span>
+                  <textarea
+                    v-model="ironLawsCoder"
+                    class="input iron-law-textarea"
+                    rows="8"
+                    :disabled="ironLawsSaving"
+                    spellcheck="false"
+                  ></textarea>
+                </div>
+                <div class="config-item iron-law-block">
+                  <span class="label">审查铁律</span>
+                  <textarea
+                    v-model="ironLawsReviewer"
+                    class="input iron-law-textarea"
+                    rows="8"
+                    :disabled="ironLawsSaving"
+                    spellcheck="false"
+                  ></textarea>
+                </div>
 
-              <div v-if="sumError" class="error-msg">{{ sumError }}</div>
-              <div v-if="sumSaved" class="ok-msg">{{ sumSaved }}</div>
+                <div class="iron-law-hint">
+                  若需恢复 seed 默认内容，请到 <code>packages/server/src/seed-data.ts</code> 查 看
+                  IRON_LAWS_CODER / IRON_LAWS_REVIEWER 常量原文后手动粘贴覆盖。
+                </div>
 
-              <div class="form-actions">
-                <button
-                  class="btn btn-create"
-                  :disabled="sumDisabled || sumSaving"
-                  @click="saveSummaryConfig"
-                >
-                  {{ sumSaving ? '保存中…' : '保存摘要配置' }}
-                </button>
-              </div>
-            </template>
-          </div>
+                <div v-if="ironLawsFormError" class="error-msg">{{ ironLawsFormError }}</div>
+                <div v-if="ironLawsSaved" class="ok-msg">{{ ironLawsSaved }}</div>
 
-          <!-- 铁律编辑：开发铁律 + 审查铁律（运行期注入——settings 表优先、常量兜底） -->
-          <div class="ctx-card">
-            <div class="ctx-info">
-              铁律是全局共享的运营规则（运行期注入到各猫 systemPrompt，settings 表优先、seed
-              常量兜底）。保存后下一轮回复即生效，无需重启；需填非空内容（空串保存会报错）。
+                <div class="form-actions">
+                  <button class="btn btn-create" :disabled="ironLawsSaving" @click="saveIronLaws">
+                    {{ ironLawsSaving ? '保存中…' : '保存铁律' }}
+                  </button>
+                </div>
+              </template>
             </div>
-
-            <div v-if="ironLawsLoading" class="list-hint">加载中…</div>
-            <div v-else-if="ironLawsError" class="error-msg">{{ ironLawsError }}</div>
-            <template v-else-if="ironLaws">
-              <div class="config-item iron-law-block">
-                <span class="label">开发铁律</span>
-                <textarea
-                  v-model="ironLawsCoder"
-                  class="input iron-law-textarea"
-                  rows="8"
-                  :disabled="ironLawsSaving"
-                  spellcheck="false"
-                ></textarea>
-              </div>
-              <div class="config-item iron-law-block">
-                <span class="label">审查铁律</span>
-                <textarea
-                  v-model="ironLawsReviewer"
-                  class="input iron-law-textarea"
-                  rows="8"
-                  :disabled="ironLawsSaving"
-                  spellcheck="false"
-                ></textarea>
-              </div>
-
-              <div class="iron-law-hint">
-                若需恢复 seed 默认内容，请到 <code>packages/server/src/seed-data.ts</code> 查 看
-                IRON_LAWS_CODER / IRON_LAWS_REVIEWER 常量原文后手动粘贴覆盖。
-              </div>
-
-              <div v-if="ironLawsFormError" class="error-msg">{{ ironLawsFormError }}</div>
-              <div v-if="ironLawsSaved" class="ok-msg">{{ ironLawsSaved }}</div>
-
-              <div class="form-actions">
-                <button class="btn btn-create" :disabled="ironLawsSaving" @click="saveIronLaws">
-                  {{ ironLawsSaving ? '保存中…' : '保存铁律' }}
-                </button>
-              </div>
-            </template>
-          </div>
+          </section>
         </div>
       </div>
     </div>
@@ -1428,6 +1437,23 @@ onUnmounted(() => {
 .system-pane {
   max-width: 680px;
   margin: 0 auto;
+}
+
+/* 系统配置：三张卡片统一间距（每卡一个 config-section，标题贴近所属卡） */
+.system-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+
+.config-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.config-section .section-title {
+  margin-bottom: 0;
 }
 
 /* ─── IM 接入子 Tab ─────────────────────── */
