@@ -197,14 +197,14 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('IRON_LAWS_CODER 常量含 worktree 实施侧约束（禁 --no-verify + 收口归店长 + push 失败预期）', () => {
+  it('IRON_LAWS_CODER 常量含 worktree 实施侧约束（禁 --no-verify + 收口归架构师 + push 失败预期）', () => {
     // worktree 定稿后派活规范：实施猫在 worktree 干活时受约束——绕过门禁 = 未审查分支上远端
     expect(IRON_LAWS_CODER).toContain('Worktree 模式')
     expect(IRON_LAWS_CODER).toContain('git -C')
-    // 三条核心约束：禁绕过门禁 / 收口归店长 / push 失败是预期
+    // 三条核心约束：禁绕过门禁 / 收口归架构师 / push 失败是预期
     expect(IRON_LAWS_CODER).toContain('绝不')
     expect(IRON_LAWS_CODER).toContain('--no-verify')
-    expect(IRON_LAWS_CODER).toContain('收口归店长')
+    expect(IRON_LAWS_CODER).toContain('收口归架构师')
     expect(IRON_LAWS_CODER).toContain('必失败是预期')
   })
 
@@ -226,13 +226,13 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('S1 案 A 续：收口链那一行以「gh pr merge 合并（店长执行）」为准，旧「GitHub merge」不得回归', () => {
+  it('S1 案 A 续：收口链那一行以「gh pr merge 合并（由你执行）」为准，旧「GitHub merge」不得回归', () => {
     // 漂移源：`db/repository/agents.ts` 的 upsertAgent 带
     // `ON CONFLICT(name) DO UPDATE SET system_prompt = excluded.system_prompt`
     // ⇒ 跑 `pnpm seed` 会把活库那行静默抹回 seed-data.ts 的字面，故两处必须同文案。
     // 上面那条只钉「收口链段在店长 prompt 里」，不逐字钉这一行的动作主体，本断言补这一格。
     const boss = agents.find((a) => a.name === '店长')!
-    expect(boss.systemPrompt).toContain('gh pr merge 合并（店长执行）')
+    expect(boss.systemPrompt).toContain('gh pr merge 合并（由你执行）')
     expect(boss.systemPrompt).not.toContain('GitHub merge')
   })
 
@@ -277,13 +277,39 @@ describe('agent system prompts', () => {
   })
 
   it('规则语境写死猫名零残留——三猫 prompt 不含 @ 形态的写死名（@审查者/@架构师 角色化）', () => {
-    // 身份语境（裸名自我介绍/手下名单）保留；@ 前缀是 mention 形态，属规则语境必须角色化
+    // 身份语境（裸名自我介绍）保留；@ 前缀是 mention 形态，属规则语境必须角色化
     for (const name of ['店长', 'ds猫', 'flash猫']) {
       const agent = agents.find((a) => a.name === name)!
       expect(agent.systemPrompt).not.toContain('@吐槽猫')
       expect(agent.systemPrompt).not.toContain('@店长')
       expect(agent.systemPrompt).not.toContain('@ds猫')
       expect(agent.systemPrompt).not.toContain('@flash猫')
+    }
+  })
+
+  it('写死猫名角色化零残留——`（店长执行）`/`@实施猫`/`"ds猫"和"flash猫"` 不再出现，动作主体改角色指称', () => {
+    // 病灶一：`@实施猫` 是**未注册的伪占位符**——`resolveRolePlaceholders` 只认
+    // @作者/@架构师/@审查者，模型照抄 `@实施猫` 即静默丢单（解析层不认，不报错）。
+    // 病灶二：`（店长执行）` 把动作主体钉死在一个具体名字上，猫改名即漂移。
+    // 正负断言成对：只钉「旧的没了」不钉「新的在场」的话，整句删掉也能绿。
+    const boss = agents.find((a) => a.name === '店长')!
+    expect(boss.systemPrompt).not.toContain('（店长执行）')
+    expect(boss.systemPrompt).toContain('（由你执行）')
+    expect(boss.systemPrompt).not.toContain('@实施猫')
+    expect(boss.systemPrompt).toContain('行首@它的名字 派活')
+    expect(boss.systemPrompt).not.toContain('"ds猫"和"flash猫"')
+    expect(boss.systemPrompt).toContain('具体名单以会话成员为准')
+    // 审查铁律结论分流：伪占位符退场，改说「不分流给实施猫」
+    expect(IRON_LAWS_REVIEWER).not.toContain('@实施猫')
+    expect(IRON_LAWS_REVIEWER).toContain('不分流给实施猫')
+    // 实施铁律收口归属：改角色指称（改名不再需要同步改铁律）
+    expect(IRON_LAWS_CODER).not.toContain('收口归店长')
+    expect(IRON_LAWS_CODER).toContain('收口归架构师')
+    // implementer 段不再把上级钉成某个名字
+    for (const name of ['ds猫', 'flash猫']) {
+      const agent = agents.find((a) => a.name === name)!
+      expect(agent.systemPrompt).not.toContain('店长手下')
+      expect(agent.systemPrompt).toContain('架构师手下')
     }
   })
 
