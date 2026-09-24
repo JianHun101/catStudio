@@ -111,7 +111,7 @@ describe('agent system prompts', () => {
   // ═══ 精简后 prompt 关键规则完整性 ═══
 
   it('共通铁律层随 IRON_LAWS_CODER 注入——出口检查/投递/依赖安装/@引用/重启/结论先行齐全', () => {
-    // 共通铁律层单源定义、组合进开发铁律（运行期注入源缺省后备）——内容完整性仍须保证
+    // 共通铁律层单源定义、组合进开发铁律（运行期注入源缺省兜底）——内容完整性仍须保证
     expect(IRON_LAWS_CODER).toContain('出口检查')
     expect(IRON_LAWS_CODER).toContain('自问')
     expect(IRON_LAWS_CODER).toContain('投递下一棒')
@@ -244,7 +244,7 @@ describe('agent system prompts', () => {
     const implementers = agents.filter((a) => a.role === 'implementer')
     expect(implementers.length).toBeGreaterThanOrEqual(2)
     const sections = implementers.map((a) => {
-      const i = a.systemPrompt.indexOf('---\n实施规范')
+      const i = a.systemPrompt.indexOf('## 实施规范')
       expect(i, `${a.name} 缺实施规范段`).toBeGreaterThan(-1)
       return a.systemPrompt.slice(i)
     })
@@ -256,7 +256,7 @@ describe('agent system prompts', () => {
     const implementers = agents.filter((a) => a.role === 'implementer')
     expect(implementers.length).toBeGreaterThanOrEqual(1)
     for (const agent of implementers) {
-      const section = agent.systemPrompt.slice(agent.systemPrompt.indexOf('---\n实施规范'))
+      const section = agent.systemPrompt.slice(agent.systemPrompt.indexOf('## 实施规范'))
       expect(section, `${agent.name} 实施规范段仍有箭头`).not.toContain('→')
       expect(section).toContain('1. 取活')
       expect(section).toContain('4. 自查')
@@ -269,7 +269,7 @@ describe('agent system prompts', () => {
     const implementers = agents.filter((a) => a.role === 'implementer')
     expect(implementers.length).toBeGreaterThanOrEqual(1)
     for (const agent of implementers) {
-      const section = agent.systemPrompt.slice(agent.systemPrompt.indexOf('---\n实施规范'))
+      const section = agent.systemPrompt.slice(agent.systemPrompt.indexOf('## 实施规范'))
       expect(section, `${agent.name} 实施规范段未教 catstudy [uuid] 标记格式`).toContain(
         'catstudy [uuid]'
       )
@@ -348,19 +348,19 @@ describe('agent system prompts', () => {
     }
   })
 
-  it('实施猫 prompt 含审查链条件化措辞（无需主动跟进 + 收到✅后备请收口）', () => {
+  it('实施猫 prompt 含审查链条件化措辞（无需主动跟进 + 收到✅兜底请收口）', () => {
     // 分流后实施猫不再被 ✅ 通知——条件化防「分流后永不触发的指令」认知悬置
     const implementers = agents.filter((a) => a.role === 'implementer')
     expect(implementers.length).toBeGreaterThanOrEqual(1)
     for (const agent of implementers) {
-      // 主路径：投递审查请求后无需主动跟进（漏投有后备：回复没投出审查者时服务端在收尾补投）
+      // 主路径：投递审查请求后无需主动跟进（漏投有兜底：回复没投出审查者时服务端在收尾补投）
       expect(agent.systemPrompt).toContain('无需主动跟进')
       expect(agent.systemPrompt).toContain('先改再复申')
       expect(agent.systemPrompt).toContain('❌需重做')
       // T-C 三档：作者侧也要认 💬（非阻断 → 同走收口，不返工）
       expect(agent.systemPrompt).toContain('💬仅评论')
-      // 后备路径：若收到 ✅（分流漏投时原链仍通）→ 请收口指令保留
-      expect(agent.systemPrompt).toContain('后备路径')
+      // 兜底路径：若收到 ✅（分流漏投时原链仍通）→ 请收口指令保留
+      expect(agent.systemPrompt).toContain('兜底路径')
       expect(agent.systemPrompt).toContain('行首@架构师 请收口')
     }
   })
@@ -419,7 +419,7 @@ describe('agent system prompts', () => {
   })
 
   it('IRON_LAWS_REVIEWER 常量仍包含所有审查铁律（运行期注入源）', () => {
-    // 常量是运行期注入源（getIronLaws 缺省后备）——内容完整性仍须保证
+    // 常量是运行期注入源（getIronLaws 缺省兜底）——内容完整性仍须保证
     expect(IRON_LAWS_REVIEWER).toContain('出口检查')
     expect(IRON_LAWS_REVIEWER).toContain('结论清晰吗')
     expect(IRON_LAWS_REVIEWER).toContain('代码审查')
