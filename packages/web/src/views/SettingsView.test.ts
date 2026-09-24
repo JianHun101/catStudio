@@ -461,3 +461,105 @@ describe('SettingsView 系统配置（铁律可编辑——GET/POST /api/iron-la
     expect(taBlock![0]).toContain('font-family: var(--font-mono)')
   })
 })
+
+describe('SettingsView 系统配置区布局（三卡统一间距 + 每卡统一标题）', () => {
+  // 病灶（用户反馈「观感割裂」）：三张 .ctx-card 无间距、后两张紧贴，且只有第一张有
+  // .section-title——另外两张卡片看起来「挂」在上一张下面。修法为每卡包一层
+  // .config-section（标题 + 卡片），间距由 .system-pane 的 flex gap 统一给。
+
+  /** 系统配置区模板切片（pane 起点到 <style> 之间） */
+  function systemPaneTemplate(): string {
+    const start = source.indexOf('class="system-pane"')
+    const end = source.indexOf('<style')
+    expect(start, '未定位到 .system-pane 模板').toBeGreaterThan(-1)
+    expect(end, '未定位到 <style> 起点').toBeGreaterThan(start)
+    return source.slice(start, end)
+  }
+
+  /**
+   * 取 CSS 规则（选择器文本 + 规则体），用 feature 在候选里二次筛选。
+   * 同一选择器可能出现在多条规则中——`.system-pane` 既有 `.im-pane,` 并列的限宽规则，
+   * 又有独立的 flex 布局规则，只按选择器取会命中错误的一条。
+   */
+  function cssRule(
+    selector: string,
+    feature: string
+  ): { selectorText: string; body: string } | null {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`([^{}]*${escaped}[^{}]*)\\{([^{}]*)\\}`, 'g')
+    const hit = [...source.matchAll(re)].find((m) => m[2].includes(feature))
+    return hit ? { selectorText: hit[1], body: hit[2] } : null
+  }
+
+  it('三张卡片各包一层 config-section——标题与卡片一一对应，数量不匹配即布局回退', () => {
+    const pane = systemPaneTemplate()
+    // 三者必须同数：任一为 0 或数量不等，说明有卡片漏包 / 有标题游离在层外
+    expect(pane.match(/class="config-section"/g)).toHaveLength(3)
+    expect(pane.match(/class="ctx-card"/g)).toHaveLength(3)
+    expect(pane.match(/class="section-title"/g)).toHaveLength(3)
+  })
+
+  it('每层的标题先于卡片且文本对应（上下文阈值配置 / 摘要配置 / 铁律）', () => {
+    const chunks = systemPaneTemplate().split('class="config-section"').slice(1)
+    expect(chunks).toHaveLength(3)
+    const expectedTitles = ['上下文阈值配置', '摘要配置', '铁律']
+    chunks.forEach((chunk, i) => {
+      const titleIdx = chunk.indexOf('class="section-title"')
+      const cardIdx = chunk.indexOf('class="ctx-card"')
+      // 标题与卡片必须同层且标题在前——标题挂错层（游离在层外）正是原病灶
+      expect(titleIdx, `第 ${i + 1} 层未见标题`).toBeGreaterThan(-1)
+      expect(cardIdx, `第 ${i + 1} 层未见卡片`).toBeGreaterThan(-1)
+      expect(titleIdx, `第 ${i + 1} 层标题未在卡片之前`).toBeLessThan(cardIdx)
+      expect(chunk.slice(titleIdx, chunk.indexOf('</div>', titleIdx))).toContain(expectedTitles[i])
+      // 每层恰一标题一卡片，不多不少
+      expect(chunk.match(/class="section-title"/g)).toHaveLength(1)
+      expect(chunk.match(/class="ctx-card"/g)).toHaveLength(1)
+    })
+  })
+
+  it('三卡间距来自 .system-pane 的 flex gap 26px', () => {
+    const paneLayout = cssRule('.system-pane', 'flex-direction')
+    expect(paneLayout, '.system-pane 未见 flex 布局规则').not.toBeNull()
+    expect(paneLayout!.body).toContain('display: flex')
+    expect(paneLayout!.body).toContain('flex-direction: column')
+    expect(paneLayout!.body).toContain('gap: 26px')
+  })
+
+  it('flex 布局只作用于 .system-pane，未并入 .im-pane 并列选择器（IM 接入区布局不受影响）', () => {
+    const paneLayout = cssRule('.system-pane', 'flex-direction')
+    expect(paneLayout).not.toBeNull()
+    expect(paneLayout!.selectorText).not.toContain('.im-pane')
+    // 限宽规则仍是 .im-pane / .system-pane 并列，且没被塞进 flex 属性
+    const shared = source.match(/\.im-pane\s*,[\s\S]*?\.system-pane\s*\{([^{}]*)\}/)
+    expect(shared, '未找到 .im-pane, .system-pane 并列的限宽规则').not.toBeNull()
+    expect(shared![1]).toContain('max-width: 680px')
+    expect(shared![1]).not.toContain('flex-direction')
+  })
+
+  it('标题间距归零限定在 .config-section 内——裸 .section-title 覆盖会波及 IM 接入区三个标题', () => {
+    const scoped = cssRule('.config-section .section-title', 'margin-bottom: 0')
+    expect(scoped, '未见 .config-section .section-title 规则').not.toBeNull()
+    // 基础 .section-title 仍是 0 0 10px（IM 接入区「入站状态 / QQ 绑定 / 添加绑定」依赖它）
+    const base = cssRule('.section-title', 'margin: 0 0 10px')
+    expect(base, '基础 .section-title 规则被改动').not.toBeNull()
+    expect(base!.selectorText.trim()).toBe('.section-title')
+    expect(base!.body).not.toContain('margin-bottom: 0')
+    // 多个标题相邻时的分隔规则保留（IM 接入区内同层多标题靠它撑开）
+    expect(source).toContain('.section-title + .section-title')
+  })
+
+  it('OQ-2 证伪：既有 pin 与 IM 接入区锚点均在场', () => {
+    // 改为 section 包裹后，QQ 接入区三个标题 + 入站卡仍在
+    expect(systemPaneTemplate()).not.toContain('inbound-card')
+    expect(source).toContain('inbound-card')
+    expect(source).toContain('QQ 绑定')
+    expect(source).toContain('添加绑定')
+    // 既有 pin（另有两个 describe 各自独立断言）：居中 + textarea 可调整
+    const configItem = cssRule('.config-item', 'justify-content: center')
+    expect(configItem, '.config-item 居中 pin 被破坏').not.toBeNull()
+    expect(configItem!.selectorText.trim()).toBe('.config-item')
+    const textarea = cssRule('.iron-law-textarea', 'resize: vertical')
+    expect(textarea, '.iron-law-textarea pin 被破坏').not.toBeNull()
+    expect(textarea!.body).toContain('font-family: var(--font-mono)')
+  })
+})
