@@ -674,11 +674,11 @@ describe('buildSkillDirectorySection', () => {
       .map((line) => line.slice(2, line.indexOf(': ')))
   }
 
-  it('注入面 = 可读面：条目名集合与顺序 === SKILL_WHITELIST（12 条，一条不多一条不少）', () => {
+  it('注入面 = 可读面：条目名集合与顺序 === SKILL_WHITELIST（13 条，一条不多一条不少）', () => {
     const names = entryNames(buildSkillDirectorySection())
     // 顺序即目录序（toBe 断言序列，非 toContain 式的集合比较）
     expect(names).toEqual([...SKILL_WHITELIST])
-    expect(names).toHaveLength(12)
+    expect(names).toHaveLength(13)
   })
 
   it('每条格式为 `- <name>: <一句话>`，文案逐字取自 SKILL_CATALOG（无 undefined 空洞）', () => {

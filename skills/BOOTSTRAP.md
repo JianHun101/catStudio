@@ -16,7 +16,7 @@ skills/（唯一真相源）
 - 三方一致校验（阻塞）：`node scripts/skills-check-manifest.mjs`
 - 失效链接清理：`node scripts/skills-clean-stale.mjs`
 
-## 注册表（28 顶级 + 2 定制层）
+## 注册表（29 顶级 + 2 定制层）
 
 来源：`self` = 猫咖自研 / `mattpocock` = mattpocock 系 / `external` = 其他第三方（provenance 追踪）
 
@@ -40,10 +40,18 @@ prototype · to-spec · to-tickets · triage · wayfinder · writing-for-agents 
 （v1.1 主线：`grill-with-docs → to-spec → to-tickets → implement → code-review`；
 `to-spec`=旧 `to-prd` 改名、`to-tickets`=旧 `to-issues` 改名+并 `to-plan`、`wayfinder` 全新、`code-review` 取代旧 `review`）
 
-### 其他第三方（external，9）
+### 其他第三方（external，10）
 
 codebase-design · design-taste-frontend · diagnosing-bugs · domain-modeling ·
-git-guardrails-claude-code · grilling · resolving-merge-conflicts · setup-pre-commit · tdd
+git-guardrails-claude-code · grilling · resolving-merge-conflicts · setup-pre-commit · tdd · unslop
+
+（`design-taste-frontend` 来源 `Leonxlnx/taste-skill`（非 mattpocock 系）——
+上游 `skills/taste-skill/SKILL.md` 逐字 vendor；版本锚点见 `skills-lock.json` 该条目
+（`source` / `skillPath` / `computedHash`），vendor 口径见本档「同步溯源」）
+
+（`unslop` 来源 `cursor/plugins` 的 `pstack/skills/unslop`（frontmatter 逐字一致，
+2026-09-24 登记；非 mattpocock 系——来源仓库判定优先于标志性字段）；正文为中文
+翻译非逐字 vendor，不锁字节一致性，故不进 `.prettierignore`；锚点见 `skills-lock.json`）
 
 （`design-taste-frontend` 来源 `Leonxlnx/taste-skill`（非 mattpocock 系）——
 上游 `skills/taste-skill/SKILL.md` 逐字 vendor；版本锚点见 `skills-lock.json` 该条目
