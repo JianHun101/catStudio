@@ -5,6 +5,11 @@
  * `GIT_COMMITTER_DATE` 钉死、`nowMs` 显式注入 —— 天数读数**确定**，不靠 sleep、
  * 不靠真实时钟（真实时钟会让「正好第 6 天」这类边界随跑批时刻翻转）。
  *
+ * **两口钟，各配各的沙箱**：函数面锚固定 `NOW`（上句的判据）；CLI 面真 spawn、
+ * `nowMs` 注入口在进程边界外够不着，只能锚真实跑批时刻 ⇒ 另起 `cliSandbox`。
+ * 两沙箱同构、只换天数零点；**夹具的钟与判据的钟必须同一口**——错开就是一颗
+ * 按日历引爆的炸弹（成因与实证见 `CLI_BASE` 的注释）。
+ *
  * 三条防「矩阵退化成测了个常量」的结构性断言：
  *   ① **反对照乙**（不是恒全门）：1 天前的目录**必须不在** `--days 6` 清单里；
  *   ② **反对照甲**（不是恒空门）：`--days 0` 必须**扩到**全部有提交的目录；
@@ -27,12 +32,18 @@ import { cleanGitEnv } from './commit-uuid-gate.mjs'
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'run-docs-stale.mjs')
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-/** 固定「现在」——所有天数读数相对它算 */
+/**
+ * 固定「现在」——**函数面**的天数读数相对它算。
+ *
+ * 只对 `collectStale({ nowMs })` 这条注入面成立：`nowMs` 是显式参数，测试传得进去。
+ * CLI 面（真 spawn）在进程边界之外，`main()` 的 `nowMs` 够不着 ⇒ 它读真实时钟，
+ * 那边另起基准 `CLI_BASE`（理由见该常量）。
+ */
 const NOW = Date.parse('2026-09-20T12:00:00+08:00')
 const DAY = 86_400_000
-/** 相对 NOW 的 ISO 时刻（带 +08:00，与 `git log --format=%cI` 同排版） */
-function agoIso(days) {
-  return new Date(NOW - days * DAY).toISOString().replace('Z', '+00:00')
+/** 相对某基准的 ISO 时刻（带偏移，与 `git log --format=%cI` 同排版） */
+function agoIso(days, baseMs) {
+  return new Date(baseMs - days * DAY).toISOString().replace('Z', '+00:00')
 }
 
 const sandboxes = []
@@ -62,33 +73,65 @@ function initRepo(dir) {
   gitIn(dir, 'commit -m init')
 }
 
-/** 只碰一个目录的一次提交：`git log -1 -- <该目录>` 的读数即 `days` 天前 */
-function commitDir(dir, slug, files, days, message) {
+/**
+ * 只碰一个目录的一次提交：`git log -1 -- <该目录>` 的读数即 `days` 天前。
+ * `baseMs` = 天数零点，缺省 `NOW`（函数面）；CLI 面传真实跑批时刻。
+ */
+function commitDir(dir, slug, files, days, message, baseMs = NOW) {
   const abs = path.join(dir, 'docs', 'run', slug)
   mkdirSync(abs, { recursive: true })
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(path.join(abs, name), content, 'utf-8')
   }
   gitIn(dir, 'add -A')
-  const stamp = agoIso(days)
+  const stamp = agoIso(days, baseMs)
   gitIn(dir, `commit -m "${message}"`, { GIT_COMMITTER_DATE: stamp, GIT_AUTHOR_DATE: stamp })
 }
 
 const FM = (status) => `---\ntype: ticket\nstatus: ${status}\n---\n\n# 票\n`
 
+/**
+ * 铺一套夹具。两个沙箱**同构**，差别只在 `baseMs` —— 即天数读数锚在哪口钟上。
+ */
+function seedSandbox(dir, baseMs) {
+  initRepo(dir)
+  commitDir(dir, 'older', { 'tickets.md': FM('active') }, 10, 'older', baseMs)
+  commitDir(dir, 'no-fm', { 'tickets.md': '# 没有 frontmatter\n' }, 8, 'no-fm', baseMs)
+  commitDir(dir, 'no-tickets', { 'README.md': '无 tickets.md\n' }, 8, 'no-tickets', baseMs)
+  commitDir(dir, 'fresh', { 'tickets.md': FM('pending-float') }, 1, 'fresh', baseMs)
+  // 有目录、无任何提交（untracked）——**最后建**，避免被上面的 git add -A 收走
+  mkdirSync(path.join(dir, 'docs', 'run', 'brand-new'), { recursive: true })
+}
+
+/** 函数面沙箱（基准 = 固定 `NOW`），以及下面 CLI 档沙箱的基准 */
 let sandbox
+/**
+ * CLI 档沙箱：基准 **必须**是跑批时刻，不能是常量。
+ *
+ * 机制：CLI 档 `spawnSync` 真起进程，`main()` 读的是 `Date.now()`，函数面的
+ * `nowMs` 注入口够不着。夹具戳若锚在固定常量上，真实时钟每过一天就把「窗口内」
+ * 的那条往窗口外推一格，跨过 `常量 + 窗口天数` 那天**永久变红**——实测：
+ * `NOW = 2026-09-20T12:00+08` 的夹具自 2026-09-26T12:00+08 起恒红，且经
+ * `precommit-scope` 的 V14 护栏（任何 `packages/**` 改动都追加 `scripts` project）
+ * 挡死全仓每一次代码提交。
+ *
+ * 锚在跑批时刻则天数读数**恒定**：提交戳与判据时钟同步位移，不随日历漂移。
+ * 不靠"留够余量"——余量是用完就爆的，同步位移不是。
+ */
+let CLI_BASE
+/** CLI 档沙箱（与 `sandbox` 同构，只换时间基准） */
+let cliSandbox
+
 beforeAll(() => {
   sandbox = mkSandbox('run-docs-stale-')
   if (path.resolve(sandbox).startsWith(path.resolve(REPO_ROOT) + path.sep)) {
     throw new Error(`沙箱落在仓库内（违反隔离）：${sandbox}`)
   }
-  initRepo(sandbox)
-  commitDir(sandbox, 'older', { 'tickets.md': FM('active') }, 10, 'older')
-  commitDir(sandbox, 'no-fm', { 'tickets.md': '# 没有 frontmatter\n' }, 8, 'no-fm')
-  commitDir(sandbox, 'no-tickets', { 'README.md': '无 tickets.md\n' }, 8, 'no-tickets')
-  commitDir(sandbox, 'fresh', { 'tickets.md': FM('pending-float') }, 1, 'fresh')
-  // 有目录、无任何提交（untracked）——**最后建**，避免被上面的 git add -A 收走
-  mkdirSync(path.join(sandbox, 'docs', 'run', 'brand-new'), { recursive: true })
+  seedSandbox(sandbox, NOW)
+
+  cliSandbox = mkSandbox('run-docs-stale-cli-')
+  CLI_BASE = Date.now()
+  seedSandbox(cliSandbox, CLI_BASE)
 })
 
 afterAll(() => {
@@ -217,7 +260,9 @@ describe('parseArgs', () => {
 
 describe('CLI 端到端（真 spawn）', () => {
   it('stdout 单行 JSON 可 parse、stderr 是人类清单、退出码 0', () => {
-    const r = spawnSync(process.execPath, [SCRIPT, '--root', sandbox], {
+    // 扫 `cliSandbox`（夹具戳锚真实时钟），**不是**函数面那个锚固定 `NOW` 的
+    // `sandbox` —— 详见 `CLI_BASE`。
+    const r = spawnSync(process.execPath, [SCRIPT, '--root', cliSandbox], {
       encoding: 'utf8',
       env: cleanGitEnv(),
     })
@@ -306,6 +351,14 @@ describe('沙箱卫生', () => {
       expect(path.resolve(dir).startsWith(path.resolve(REPO_ROOT) + path.sep)).toBe(false)
       expect(path.resolve(dir).startsWith(path.resolve(tmpdir()))).toBe(true)
     }
+  })
+
+  it('CLI 档夹具基准是跑批时刻，不是写死的常量', () => {
+    // 守的正是本用例组栽过的那个机制：**夹具的钟与判据的钟错开**。
+    // 换回固定常量 ⇒ 这条**当场**红；没有它，同类改动要等真实时钟跨过窗口才炸，
+    // 而那时红的是别人单上的 pre-commit（本次实证：挡死全仓代码提交）。
+    expect(Math.abs(Date.now() - CLI_BASE)).toBeLessThan(60_000)
+    expect(cliSandbox).not.toBe(sandbox)
   })
 
   it('夹具不是仓库本身：扫的是临时仓，读数与本仓 docs/run 无关', () => {
