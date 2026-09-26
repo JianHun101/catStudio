@@ -405,6 +405,31 @@ export function insertExecutionLog(
   ).run(id, sessionId, agentId, triggeredByMessageId, traceId, nowIso())
 }
 
+/** 回复落库后**立即**把 `message_id` 连上（M1 缺陷修复，方案甲）。
+ *
+ *  **为什么需要一条独立写口**：连线原本只发生在 `finalizeExecutionLog`（`serial.ts`
+ *  的收口漏斗），而 `runAgentReply` 的 `bus.emitMessage` 广播**早于**收口——前端收到
+ *  NEW_MESSAGE 立刻批量拉 `/memory-refs`，此刻 `message_id` 还是 NULL ⇒ 读口查无流水
+ *  ⇒ 渲染「未检索」，且前端不再重查 ⇒ 假态一直挂到刷新。本函数把连线提到广播之前，
+ *  把那个约 100ms 的窗口关死。
+ *
+ *  **调用点必须在回复行落库之后**：`message_id` 带 FK
+ *  （`REFERENCES messages(id) ON DELETE RESTRICT`），先连线后落库当场违反约束。这条 FK
+ *  顺带把「`message_id` 非空 ⇒ 回复行已存在」钉在 DDL 层——`execution/recovery.ts` 的重启
+ *  恢复判据（`rec.message_id !== null` = 已完成 ⇒ 跳过重跑）依赖它，不得在本函数里放宽。
+ *
+ *  **按 `id` 精确更新，不重跑定位**：定位谓词（触发消息 + 猫 + 会话 + running）由调用方
+ *  用**与 `recordRetrievalTrace` 同源**的那一份查好后把 id 传进来——两个调用点各写一份
+ *  谓词就是本仓反复吃过的「同一规则两处措辞 = 假绿源」。
+ *
+ *  `changes` 交回调用方：`0` 表示 id 不存在（正常不可达），由调用方决定是否留痕；
+ *  本函数不抛、不自行 warn。 */
+export function linkReplyMessage(executionId: string, messageId: string): { changes: number } {
+  return db
+    .prepare('UPDATE execution_logs SET message_id = ? WHERE id = ?')
+    .run(messageId, executionId)
+}
+
 /** 标记执行完成/失败。
  *  replyMessageId：成功路径写回本次回复的消息 id（洞 A 精确判据——重启恢复时
  *  message_id 非空即已回复，不再用时间窗把后续其他回复误判成本次回复）；
@@ -429,7 +454,13 @@ export function insertExecutionLog(
  *     → 仍 null。**不能写成 0**——0 是「瞬间完成」，与「无数据」是两回事。
  *  2. **不把 latencyMs 穿线到 completeExecution**（架构裁决）：穿线要动
  *     EngineCtx.completeExecution 接口 + finalizeRun opts + 3 个调用点——COALESCE 只
- *     读行内已有值，本就不需要穿线。 */
+ *     读行内已有值，本就不需要穿线。
+ *
+ *  **message_id 同样用 COALESCE（M1 缺陷修复，与 latency_ms 同一条理由）**：连线已提前到
+ *  广播之前（`linkReplyMessage`），本函数在成功路径上写的是**同一个值**（幂等）；防的是
+ *  「广播后异常走 failed 收口」把已连的线擦回 NULL——那会让一条**已发出**的回复在引用面上
+ *  倒退成「未检索」。失败路径（回复未落库 ⇒ 从未连线）传 null 仍落 NULL，语义不变
+ *  ——`execution/recovery.ts` 的「非空即已回复」判据不受影响。 */
 export function finalizeExecutionLog(
   agentId: string,
   sessionId: string,
@@ -442,7 +473,8 @@ export function finalizeExecutionLog(
   db.prepare(
     `UPDATE execution_logs
      SET status = ?, ended_at = ?,
-         latency_ms = COALESCE(?, latency_ms), error_message = ?, message_id = ?, error_type = ?
+         latency_ms = COALESCE(?, latency_ms), error_message = ?,
+         message_id = COALESCE(?, message_id), error_type = ?
      WHERE agent_id = ? AND session_id = ? AND status = 'running'
      ORDER BY started_at DESC LIMIT 1`
   ).run(status, nowIso(), latencyMs, errorMessage, replyMessageId, errorType, agentId, sessionId)
