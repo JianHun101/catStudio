@@ -3130,6 +3130,55 @@ const messageViews = computed<MessageView[]>(() => {
   opacity: 0.7;
 }
 
+/* ─── 角标引用（R14b）──────────────────────────
+   正文里的 `[n]`（猫采纳了第 n 节）渲染成上标角标；样式刻意**轻**——角标是
+   正文的附属信息，读正文时不该被它打断。hover 才展开卡片。 */
+.chat-panel .msg-text sup.mem-citation {
+  font-size: 0.68em;
+  line-height: 0;
+  vertical-align: super;
+  color: var(--accent-text);
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  padding: 0 2px;
+  margin-left: 1px;
+  cursor: help;
+  font-variant-numeric: tabular-nums;
+}
+
+/* hover 卡片：单浮层元素（`position: fixed` + 视口坐标，由 MessageItem 定位），
+   内容 = 节标题 + 命中片开头。`pointer-events: none` —— 卡片本身不可交互，
+   否则鼠标移出角标时会被卡片「接住」，mouseout 不触发、卡片关不掉 */
+.chat-panel .mem-citation-card {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+  max-width: 340px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.chat-panel .mem-citation-card .mem-card-title {
+  color: var(--text-primary);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+/* 正文只露开头：`bodyHead` 是命中片**全文**（2026-09-22 起落全文），
+   整段铺开会盖住半屏——限高 8 行，多出来的裁掉（卡片是提示，不是阅读器） */
+.chat-panel .mem-citation-card .mem-card-body {
+  color: var(--text-secondary);
+  max-height: 8.5em;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ─── 记忆抽屉（M1 形态乙）────────────────────── */
 .memory-drawer-mask {
   position: fixed;

@@ -65,19 +65,32 @@ function makeEvent(over: Partial<RetrievalEventInput> = {}): RetrievalEventInput
   }
 }
 
-/** 造「会话 + 触发/回复消息 + running 执行行」，返回执行行 id */
-function seedReply(sessionId: string, replyMessageId: string, executionId: string): string {
+/**
+ * 造「会话 + 触发/回复消息 + running 执行行」，返回执行行 id。
+ *
+ * `replyContent` 缺省 `'x'`——R14b 的角标用例靠它把带 `[n]` 的正文落进**回复**那条
+ * （触发消息保持无号，免得判据面把两侧的号混起来）。
+ */
+function seedReply(
+  sessionId: string,
+  replyMessageId: string,
+  executionId: string,
+  replyContent = 'x'
+): string {
   const db = getDb()
   db.prepare(
     `INSERT OR IGNORE INTO agents (id, name, system_prompt, llm_api_key)
      VALUES ('agent-1', 'flash猫', 'p', 'k')`
   ).run()
   db.prepare(`INSERT OR IGNORE INTO sessions (id, title) VALUES (?, 't')`).run(sessionId)
-  for (const mid of [`trigger-${executionId}`, replyMessageId]) {
+  for (const [mid, content] of [
+    [`trigger-${executionId}`, 'x'],
+    [replyMessageId, replyContent],
+  ] as const) {
     db.prepare(
       `INSERT INTO messages (id, session_id, role, content, mentions)
-       VALUES (?, ?, 'agent', 'x', '[]')`
-    ).run(mid, sessionId)
+       VALUES (?, ?, 'agent', ?, '[]')`
+    ).run(mid, sessionId, content)
   }
   db.prepare(
     `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, trace_id, message_id)
@@ -234,6 +247,107 @@ describe('M1 记忆引用路由', () => {
         state: 'not-retrieved',
         reason: null,
         refs: [],
+      })
+    })
+
+    // ─── R14b：角标两列（**读口派生、不落库**）──────────────────────
+    //
+    // 组装式：真 DB + 真路由，正文由 `seedReply` 的 `replyContent` 落进**回复**那条消息。
+    // 判据面（`extractCitationMarkers`）本身的边界在 `memory/citationMarkers.test.ts`，
+    // 本组判「路由把它投影成了什么」——合法号域取自**该消息实际注入的节数**。
+    describe('角标两列（R14b）', () => {
+      /** 造 N 节注入（位置 1..N）+ 指定回复正文，返回执行行 id */
+      function seedInjected(
+        replyId: string,
+        execId: string,
+        sections: number,
+        replyContent: string
+      ): string {
+        const exec = seedReply('sess-1', replyId, execId, replyContent)
+        const base = makeEvent().candidates[0]
+        retrievalRepo.insertRetrievalTrace(
+          makeEvent({
+            executionId: exec,
+            candidates: Array.from({ length: sections }, (_, i) => ({
+              ...base,
+              contentHash: `h${i + 1}`,
+              sectionAnchor: `## S${i + 1}`,
+              sectionRank: i,
+              injectedPosition: i + 1,
+            })),
+          })
+        )
+        return exec
+      }
+
+      async function fetchRefs(ids: string[]): Promise<Record<string, any>> {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/sessions/sess-1/memory-refs?messageIds=${ids.join(',')}`,
+        })
+        expect(res.statusCode).toBe(200)
+        return JSON.parse(res.body)
+      }
+
+      it('验收 5a · 回复含 [2]、注入 3 节 ⇒ markers=[2]，且号按 injectedPosition 对到那节', async () => {
+        seedInjected('reply-mark', 'exec-m1', 3, '我采纳了 [2] 这条。')
+        const body = await fetchRefs(['reply-mark'])
+        expect(body['reply-mark'].state).toBe('injected')
+        expect(body['reply-mark'].markers).toEqual([2])
+        expect(body['reply-mark'].markersInCode).toEqual([])
+        // 映射契约：`[2]` 指向的必须是 `injectedPosition === 2` 的那节（不是数组下标 2）
+        const target = body['reply-mark'].refs.find(
+          (r: { injectedPosition: number }) => r.injectedPosition === 2
+        )
+        expect(target.sectionAnchor).toBe('## S2')
+      })
+
+      it('验收 5b · 越界号（注入 3 节、回复含 [7]）⇒ markers=[]，不报错、不最近邻猜测', async () => {
+        seedInjected('reply-oob', 'exec-m2', 3, '另见 [7]。')
+        const body = await fetchRefs(['reply-oob'])
+        expect(body['reply-oob'].state).toBe('injected')
+        expect(body['reply-oob'].markers).toEqual([])
+        // 节照旧全在——角标越界不影响注入面
+        expect(body['reply-oob'].refs).toHaveLength(3)
+      })
+
+      it('验收 5c · 回复无号 ⇒ markers=[]', async () => {
+        seedInjected('reply-none', 'exec-m3', 3, '这条回复一个号都没标。')
+        const body = await fetchRefs(['reply-none'])
+        expect(body['reply-none'].markers).toEqual([])
+      })
+
+      it('验收 5d · 代码字面量内的号进 markersInCode、不进 markers（成列可见，不静默剔除）', async () => {
+        seedInjected('reply-code', 'exec-m4', 3, '见 [1]。举例如下：\n```js\nconst a = b[2]\n```\n')
+        const body = await fetchRefs(['reply-code'])
+        expect(body['reply-code'].markers).toEqual([1])
+        expect(body['reply-code'].markersInCode).toEqual([2])
+      })
+
+      it('验收 5e · 非 injected 的两态：两列是**空数组**（不是 undefined、不是漏字段）', async () => {
+        const execNone = seedReply('sess-1', 'reply-x-none', 'exec-m5')
+        retrievalRepo.insertRetrievalTrace(
+          makeEvent({ executionId: execNone, reason: 'no-hit', candidates: [] })
+        )
+        getDb()
+          .prepare(
+            `INSERT INTO messages (id, session_id, role, content, mentions)
+             VALUES ('reply-x-notrace', 'sess-1', 'agent', '正文里就算写了 [1] 也不算数', '[]')`
+          )
+          .run()
+
+        const body = await fetchRefs(['reply-x-none', 'reply-x-notrace'])
+        expect(body['reply-x-none']).toMatchObject({
+          state: 'none',
+          markers: [],
+          markersInCode: [],
+        })
+        // 无流水行 ⇒ 压根没有「注入了哪几节」这回事，正文里的号无号域可对 ⇒ 空
+        expect(body['reply-x-notrace']).toMatchObject({
+          state: 'not-retrieved',
+          markers: [],
+          markersInCode: [],
+        })
       })
     })
 
