@@ -928,6 +928,19 @@ const warnedAgentsText = computed(() => {
 //   ③ **三态分开**——有注入 / 未使用（查了没选中）/ 未检索（压根没查），
 //      见 `utils/memoryRefs.ts`。三者混一句，使用率的分母就没了。
 
+/**
+ * 记忆面只认 agent 消息——**请求面与渲染面必须同尺**：`fetchMemoryRefs` 发哪些 id、
+ * `memoryRefViewFor` 给谁渲染记忆行，判的是同一件事。
+ *
+ * 两处各写一份 `role === 'agent'` 就是「同一规则两处措辞 = 假绿源」：判据一分叉，
+ * 请求就会带上不该带的 id。会话历史里有一条 server 合成的 welcome 伪消息
+ * （`welcome-<sessionId>`，role=system，**不落 messages 表**），
+ * server 的越权守卫查不到它 ⇒ **整条 400**（不是跳过该 id）⇒ 全会话记忆行 + 角标全灭。
+ */
+function isMemoryRefMessage(msg: Message): boolean {
+  return msg.role === 'agent'
+}
+
 /** 批量口结果：messageId → 条目（会话切换时整体替换） */
 const memoryRefsByMessage = ref<Map<string, MemoryRefsEntry>>(new Map())
 
@@ -950,7 +963,9 @@ const MEMORY_REFS_MAX_IDS = 200
 
 async function fetchMemoryRefs(): Promise<void> {
   const sessionId = store.activeSessionId
-  const all = store.activeMessages.map((m) => m.id)
+  // 只发 agent 消息的 id（`isMemoryRefMessage`）——非 agent（user / welcome 伪消息）
+  // 既不会渲染记忆行也不会渲染角标，发过去只会让 server 整条 400（见该函数注）。
+  const all = store.activeMessages.filter((m) => isMemoryRefMessage(m)).map((m) => m.id)
   if (!sessionId || all.length === 0) {
     memoryRefsByMessage.value = new Map()
     return
@@ -1111,9 +1126,9 @@ const memoryViewCache = new Map<
   { raw: MemoryRefsEntry | undefined; view: MemoryRefView | null }
 >()
 
-/** 取正文段最后一个 text 段之外，本函数只看 role 与 id —— user/system 不渲染记忆行 */
+/** 取正文段最后一个 text 段之外，本函数只看 role 与 id —— 非 agent 不渲染记忆行 */
 function memoryRefViewFor(msg: Message): MemoryRefView | null {
-  if (msg.role !== 'agent') return null
+  if (!isMemoryRefMessage(msg)) return null
   const raw = memoryRefsByMessage.value.get(msg.id)
   const cached = memoryViewCache.get(msg.id)
   if (cached && cached.raw === raw) return cached.view
