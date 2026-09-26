@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import source from './ChatPanel.vue?raw'
@@ -67,8 +67,12 @@ describe('ChatPanel markdown table overflow', () => {
     // 行分隔线右侧断裂空白带（表格右缘 x=868、行线只到 x=761）——改 table-layout:fixed
     // （width:100% 硬约束的正规实现）+ max-width；超宽内容由 overflow-wrap:anywhere 断行吸收，
     // 不可断内容（nowrap 内联块/pre）刺出容器，滚动需外层包裹容器（table 自身 overflow-x 不建滚动容器）
-    const tableBlock = source.match(/\.chat-panel \.msg-text table\s*\{[^}]*\}/s)
+    // M3 起该规则是「正文 + 记忆抽屉」并列组，故选择器后允许并列项，锚点仍是首条
+    // `.msg-text table` 规则块——断言意图不变（表格自身的溢出逃生通道）
+    const tableBlock = source.match(/\.chat-panel \.msg-text table[^{]*\{[^}]*\}/s)
     expect(tableBlock).toBeTruthy()
+    // 并列的抽屉落点在**同一组**内（抽屉也是窄容器，超宽表格同样靠这条规则消化，票 OQ-3）
+    expect(tableBlock![0]).toContain('.memory-drawer-md table')
     // 根因双锁：正向锁 table-layout:fixed（width:100% 从建议值变硬约束）、
     // 反向锁 display:block 不复辟（重加 display:block 会复发空白带而正向锁全绿）——
     // 只锁正向表征拦不住删 fixed 后回退 display:block（同 10070d1 黑名单断言教训）
@@ -88,16 +92,16 @@ describe('ChatPanel markdown table overflow', () => {
     const msgTextBlock = source.match(/\.msg-text\s*\{[^}]*\}/s)
     expect(msgTextBlock).toBeTruthy()
     expect(msgTextBlock![0]).toContain('overflow-wrap: anywhere')
-    // pre 规则现为三落点并列组（正文 + 流式思考框 + 历史思考框），故选择器后允许并列项，
-    // 锚点仍是「首条 .msg-text pre 规则块」——断言意图不变（代码块覆盖回 normal）
+    // pre 规则现为四落点并列组（正文 + 流式思考框 + 历史思考框 + 记忆抽屉，M3 加入），
+    // 故选择器后允许并列项，锚点仍是「首条 .msg-text pre 规则块」——断言意图不变
     const preBlock = source.match(/\.chat-panel \.msg-text pre[^{]*\{[^}]*\}/s)
     expect(preBlock).toBeTruthy()
     expect(preBlock![0]).toContain('overflow-wrap: normal')
-    const tdBlock = source.match(
-      /\.chat-panel \.msg-text th,\s*\n\s*\.chat-panel \.msg-text td\s*\{[^}]*\}/s
-    )
+    expect(preBlock![0]).toContain('.memory-drawer-md pre')
+    const tdBlock = source.match(/\.chat-panel \.msg-text th,[^{]*\{[^}]*\}/s)
     expect(tdBlock).toBeTruthy()
     expect(tdBlock![0]).toContain('overflow-wrap: anywhere')
+    expect(tdBlock![0]).toContain('.memory-drawer-md th')
   })
 })
 
@@ -608,45 +612,48 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
   // ToolRow 行级渲染的单源断言在 ToolRow.test.ts 已覆盖，不重复。
 })
 
-// ─── 思考框横向溢出（正文/流式思考框/历史思考框三落点同源）────────────────────
+// ─── 思考框横向溢出（正文/流式思考框/历史思考框/记忆抽屉 四落点同源）──────────
 // 病灶：思考框里渲染出的 markdown（代码块 white-space:pre 永不折行、行内 code 掉进 UA
 // 默认的 word-break:normal）没有任何专属规则，溢出冒到最近的滚动容器 .stream-fold-body
 // （overflow-y:auto 会令未声明的 overflow-x 强制计算成 auto），有 1px 就冒横条。
-// 本组断言锁住「三组规则各自并列三个落点」——新增落点漏一个就红。
+// 本组断言锁住「每组规则并列列出全部落点」——新增落点漏一个就红（M3 按本条把记忆抽屉
+// 补进四组；抽屉的下一条机械守卫是文末「落点覆盖」用例，覆盖面是全量 .msg-text 规则）。
 
-describe('ChatPanel 思考框横向溢出（三落点同源：正文 / 流式思考框 / 历史思考框）', () => {
-  it('行内 code：三落点并列 + word-break:break-all（无空格长路径可折行）', () => {
+describe('ChatPanel markdown 落点组（四落点同源：正文 / 流式思考框 / 历史思考框 / 记忆抽屉）', () => {
+  it('行内 code：四落点并列 + word-break:break-all（无空格长路径可折行）', () => {
     expect(source).toContain(
-      '.chat-panel .msg-text code,\n.chat-panel .fold-thinking code,\n.chat-panel .thinking-content code {'
+      '.chat-panel .msg-text code,\n.chat-panel .fold-thinking code,\n.chat-panel .thinking-content code,\n.memory-drawer-md code {'
     )
-    const block = source.match(/\.chat-panel \.thinking-content code\s*\{[^}]*\}/s)
+    // 断言落在**抽屉那一支**的规则体上：既证并列、又证这条规则真管抽屉
+    const block = source.match(/\.memory-drawer-md code\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toContain('word-break: break-all')
   })
 
-  it('代码块：三落点并列 + overflow-x:auto（长行由 pre 自己滚，不外溢到容器）', () => {
+  it('代码块：四落点并列 + overflow-x:auto（长行由 pre 自己滚，不外溢到容器）', () => {
     expect(source).toContain(
-      '.chat-panel .msg-text pre,\n.chat-panel .fold-thinking pre,\n.chat-panel .thinking-content pre {'
+      '.chat-panel .msg-text pre,\n.chat-panel .fold-thinking pre,\n.chat-panel .thinking-content pre,\n.memory-drawer-md pre {'
     )
-    const block = source.match(/\.chat-panel \.thinking-content pre\s*\{[^}]*\}/s)
+    const block = source.match(/\.memory-drawer-md pre\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toContain('overflow-x: auto')
     expect(block![0]).toContain('overflow-wrap: normal')
   })
 
-  it('块内 code：三落点并列 + white-space:pre（块内保持原样换行语义）', () => {
+  it('块内 code：四落点并列 + white-space:pre（块内保持原样换行语义）', () => {
     expect(source).toContain(
-      '.chat-panel .msg-text pre code,\n.chat-panel .fold-thinking pre code,\n.chat-panel .thinking-content pre code {'
+      '.chat-panel .msg-text pre code,\n.chat-panel .fold-thinking pre code,\n.chat-panel .thinking-content pre code,\n.memory-drawer-md pre code {'
     )
-    const block = source.match(/\.chat-panel \.thinking-content pre code\s*\{[^}]*\}/s)
+    const block = source.match(/\.memory-drawer-md pre code\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toContain('white-space: pre')
   })
 
-  it('亮色主题的 pre 覆盖同样并列三落点（否则思考框代码块在浅底上留白边）', () => {
+  it('亮色主题的 pre 覆盖同样并列四落点（否则思考框/抽屉代码块在浅底上留白边）', () => {
     expect(source).toContain("[data-theme='light'] .chat-panel .fold-thinking pre,")
-    expect(source).toContain("[data-theme='light'] .chat-panel .thinking-content pre {")
-    expect(source).toContain("[data-theme='light'] .chat-panel .thinking-content pre code {")
+    expect(source).toContain("[data-theme='light'] .chat-panel .thinking-content pre,")
+    expect(source).toContain("[data-theme='light'] .memory-drawer-md pre {")
+    expect(source).toContain("[data-theme='light'] .memory-drawer-md pre code {")
   })
 
   it('兜底：.stream-fold-body 显式 overflow-x:hidden（防止漏网内容顶出横条；注释写明不是主修）', () => {
@@ -889,6 +896,56 @@ describe('A1 渲染边界：单次 chunk 不按 N 触发 markdown 重算', () =>
   })
 })
 
+// ─── renderMarkdown 的两个面：计数桩（A1）/ 真管线（抽屉）──────────────────
+// 文件头的 vi.mock 把 renderMarkdown 换成计数桩（A1 数「一个 chunk 触发多少条历史消息
+// 重算 markdown」，返回值是什么无所谓）。而抽屉（M1 的端到端、M3 的承重/安全面）断言落在
+// **真 HTML 产物**上，故这些用例先把真实现装回去；每个用例后统一还原成桩。
+let realRenderMarkdown: typeof renderMarkdown | null = null
+
+async function useRealRenderMarkdown(): Promise<void> {
+  realRenderMarkdown ??= (
+    await vi.importActual<typeof import('@/utils/markdown')>('@/utils/markdown')
+  ).renderMarkdown
+  vi.mocked(renderMarkdown).mockImplementation(realRenderMarkdown)
+}
+
+/** 还原文件头那个计数桩（A1 的面；桩的返回值本身不被断言依赖） */
+function restoreRenderMarkdownStub(): void {
+  vi.mocked(renderMarkdown).mockImplementation(() => '<p>stub</p>')
+}
+
+afterEach(() => {
+  restoreRenderMarkdownStub()
+})
+
+/** 挂载级用例的共用前置：jsdom 未实现 Element.scrollTo（贴底滚动会调）+ 新 pinia 实例 */
+beforeEach(() => {
+  Object.defineProperty(Element.prototype, 'scrollTo', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(),
+  })
+  setActivePinia(createPinia())
+})
+
+/** 记录所有请求 URL 的 fetch 桩；`handler` 决定响应形状（M1 与 M3 两组共用） */
+function stubFetch(handler: (url: string) => unknown): string[] {
+  const urls: string[] = []
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) => {
+      urls.push(String(url))
+      return Promise.resolve(
+        new Response(JSON.stringify(handler(String(url))), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    })
+  )
+  return urls
+}
+
 // ─── M1 记忆引用（批量口 / 抽屉 / 渲染边界）──────────────────
 describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
   /** 合并窗口（ChatPanel 的 MEMORY_REFS_DEBOUNCE_MS=50）留足裕度 */
@@ -952,32 +1009,7 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     return store
   }
 
-  /** 记录所有请求 URL 的 fetch 桩；`body` 决定响应形状 */
-  function stubFetch(handler: (url: string) => unknown): string[] {
-    const urls: string[] = []
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((url: string) => {
-        urls.push(String(url))
-        return Promise.resolve(
-          new Response(JSON.stringify(handler(String(url))), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          })
-        )
-      })
-    )
-    return urls
-  }
-
-  beforeEach(() => {
-    Object.defineProperty(Element.prototype, 'scrollTo', {
-      configurable: true,
-      writable: true,
-      value: vi.fn(),
-    })
-    setActivePinia(createPinia())
-  })
+  // 共用前置（scrollTo 桩 + pinia）已提到本文件模块级 beforeEach
 
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -1038,6 +1070,8 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
   })
 
   it('端到端（挂载级）：批量口返回的节 → 气泡 footer 出「📎 记忆 1 条」；点开 → 抽屉显示片段', async () => {
+    // 抽屉自 M3 起走真 markdown 管线——本用例断言抽屉文本，故先装回真实现
+    await useRealRenderMarkdown()
     setupSession(4)
     const ref = {
       docPath: 'docs/adr/0002-b.md',
@@ -1085,6 +1119,14 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     wrapper.unmount()
   })
 
+  it('M3 · 渲染契约：抽屉内容区走 v-html + computed（现算 = 每次重渲染重跑 marked + DOMPurify）', () => {
+    expect(source).toContain('v-html="drawerSnippetHtml"')
+    expect(source).toContain('v-html="drawerDocHtml"')
+    // 抽屉内容区的渲染产物必须是 computed（每次重渲染现算 = 每次重跑 marked + DOMPurify）
+    expect(source).toContain('const drawerSnippetHtml = computed(')
+    expect(source).toContain('const drawerDocHtml = computed(')
+  })
+
   it('A6 · 渲染契约：记忆行走 messageViews 标量 prop，模板不碰会话级集合', () => {
     // 父组件把判定算完、以 prop 传下去（子组件的 O(1) 重渲染靠这条）
     expect(source).toContain(':memory-refs="view.memoryRefs"')
@@ -1094,5 +1136,173 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     // 模板里不许直接读记忆 Map（判定必须留在 script 的 messageViews 里）
     const template = source.slice(source.indexOf('<template>'), source.indexOf('</template>'))
     expect(template).not.toContain('memoryRefsByMessage')
+  })
+})
+
+// ─── M3 记忆抽屉 MD 化（两处内容区：命中片 / 当前文档）──────────────────────
+describe('M3 记忆抽屉 MD 化（两处内容区按 markdown 渲染）', () => {
+  const SETTLE_MS = 160
+
+  /** 夹具：命中片带标题 / 列表 / 粗体 / 行内码——必须渲成元素，否则是 M3 之前的字面量 */
+  const SNIPPET_MD = '# 片段标题\n\n- 列表项一\n- 列表项二\n\n**粗体** 与 `行内码`'
+  const DOC_MD = '# 文档标题\n\n正文里的 **粗体**'
+
+  /** 挂载 + 等批量口回包 + 点开抽屉（`.mem-link` 来自气泡 footer 的「📎 记忆」行） */
+  async function mountDrawer(opts: { bodyHead?: string; docContent?: string } = {}) {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'M3', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [
+      { id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
+    ]
+    store.messages = [
+      {
+        id: 'm0',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: '正文 0',
+        mentions: [],
+        createdAt: '2026-09-27T00:00:00Z',
+      },
+    ] as never
+    stubFetch((u) => {
+      if (u.includes('/memory-refs')) {
+        return {
+          m0: {
+            state: 'injected',
+            reason: 'ok',
+            refs: [
+              {
+                docPath: 'docs/adr/0002-b.md',
+                sectionAnchor: '## 决策',
+                breadcrumb: 'docs/adr/0002-b.md > 决策',
+                sectionRank: 0,
+                injectedPosition: 1,
+                bodyHead: opts.bodyHead ?? SNIPPET_MD,
+              },
+            ],
+          },
+        }
+      }
+      return { path: 'docs/adr/0002-b.md', content: opts.docContent ?? DOC_MD }
+    })
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+    await nextTick()
+    await wrapper.find('.mem-link').trigger('click')
+    await nextTick()
+    return wrapper
+  }
+
+  /** 次级链接：「打开当前文档」→ 等 /memory/doc 回包 */
+  async function openCurrentDoc(wrapper: VueWrapper): Promise<void> {
+    await wrapper.find('.memory-drawer-open').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
+  }
+
+  it('承重：两处内容区渲成 markdown 元素（标题 / 列表 / 粗体 / 行内码），不再是纯文本字面量', async () => {
+    await useRealRenderMarkdown()
+    const wrapper = await mountDrawer()
+
+    const snippet = wrapper.find('.memory-drawer-snippet')
+    expect(snippet.exists()).toBe(true)
+    expect(snippet.find('h1').exists()).toBe(true)
+    expect(snippet.findAll('li')).toHaveLength(2)
+    expect(snippet.find('strong').exists()).toBe(true)
+    expect(snippet.find('code').exists()).toBe(true)
+    // 反向：markdown 记号不再当字面量露出（改回 <pre> 时这两条必红）
+    expect(snippet.text()).not.toContain('#')
+    expect(snippet.text()).not.toContain('**')
+
+    await openCurrentDoc(wrapper)
+    const doc = wrapper.find('.memory-drawer-doc')
+    expect(doc.exists()).toBe(true)
+    expect(doc.html()).toContain('<h1>')
+    expect(doc.find('strong').exists()).toBe(true)
+    expect(doc.text()).not.toContain('#')
+    wrapper.unmount()
+  })
+
+  it('跨节切剩的未闭合围栏：不抛错、不裸出原始 HTML（切成代码文本）', async () => {
+    await useRealRenderMarkdown()
+    // chunk 按节切，围栏可能被切断——marked 宽容降级；此处钉「不炸 + 不泄漏」
+    const wrapper = await mountDrawer({
+      bodyHead: '前文一段\n\n```html\n<img src=x onerror="window.__pwned = 1">\n',
+    })
+
+    const snippet = wrapper.find('.memory-drawer-snippet')
+    expect(snippet.exists()).toBe(true)
+    // 原始标签若**未转义**漏出，会真的注入一个 img 元素（不是文本）
+    expect(snippet.find('img').exists()).toBe(false)
+    expect(snippet.find('[onerror]').exists()).toBe(false)
+    // 作为**代码文本**被转义保留（hljs 会把 `<` 包进 span，故断言落在文本面而非 HTML 串面）
+    expect(snippet.find('pre code').exists()).toBe(true)
+    expect(snippet.text()).toContain('<img src=x onerror=')
+    wrapper.unmount()
+  })
+
+  it('安全面：<script> / onerror / javascript: 被剥离（真管线实测，非假设）', async () => {
+    await useRealRenderMarkdown()
+    const wrapper = await mountDrawer({
+      bodyHead:
+        '# 标题\n\n<script>window.__pwned = 1</script>\n\n' +
+        '<img src=x onerror="window.__pwned = 1">\n\n[点我](javascript:window.__pwned=1)',
+    })
+
+    const snippet = wrapper.find('.memory-drawer-snippet')
+    expect(snippet.find('script').exists()).toBe(false)
+    expect(snippet.find('img').exists()).toBe(false)
+    expect(snippet.find('[onerror]').exists()).toBe(false)
+    // `javascript:` 链接：href 被 DOMPurify 摘掉（元素可能留下，可执行 URL 不留）
+    expect(snippet.html()).not.toContain('javascript:')
+    expect(
+      snippet.find('a[href]').exists() ? snippet.find('a').attributes('href') : ''
+    ).not.toContain('javascript:')
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('两条口径文案逐字保留（MD 化只换渲染器，不动文案纪律）', async () => {
+    // 源码面：两句原文逐字在场
+    expect(source).toContain('命中片段全文（检索当时落库）')
+    expect(source).toContain('与这段话不等价')
+    expect(source).toContain('打开的是当前检出上的文档，不是当时的快照')
+
+    const wrapper = await mountDrawer()
+    const caption = wrapper.find('.memory-drawer-caption').text()
+    expect(caption).toContain('命中片段全文')
+    expect(caption).toContain('与这段话不等价')
+    expect(wrapper.find('.memory-drawer-hint').text()).toContain('不是当时的快照')
+    wrapper.unmount()
+  })
+
+  it('落点覆盖：每条 `.chat-panel .msg-text` markdown 规则都并列了抽屉落点（唯一豁免 = 基础尺度规则）', () => {
+    // 机械守卫，替代人工核 80 条规则：新渲染路径漏并一组，这里就红。
+    // 豁免只有一条——`.chat-panel .msg-text` 基础规则（16px 字号）：票 §二.3 明写抽屉
+    // 不裸继承气泡尺寸，它的尺度由 `.memory-drawer-snippet/.memory-drawer-doc` 自己声明。
+    const styleStart = source.indexOf('<style>', source.indexOf('</template>'))
+    const styleBlock = source.slice(styleStart, source.lastIndexOf('</style>'))
+    const withoutLanding: string[] = []
+    let scanned = 0
+    styleBlock.replace(/([^{}]+)\{([^{}]*)\}/g, (m, head: string) => {
+      const sel = head
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean)
+      if (!sel.some((x) => x.includes('.chat-panel .msg-text'))) return m
+      scanned++
+      if (sel.length === 1 && sel[0] === '.chat-panel .msg-text') return m
+      if (!sel.some((x) => x.includes('.memory-drawer-md'))) withoutLanding.push(sel.join(' | '))
+      return m
+    })
+    // 探针非真空：真扫到了规则面（对不上就说明扫描口径坏了，而不是「全绿」）
+    expect(scanned).toBeGreaterThan(50)
+    expect(withoutLanding).toEqual([])
   })
 })
