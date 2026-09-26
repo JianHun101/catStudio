@@ -302,6 +302,32 @@ export function getMessagesWithAgentName(
     .all(sessionId, limit) as MessageWithAgentName[]
 }
 
+/**
+ * 按 **id 列表**批量取消息正文（R14b 读口用：解析角标要拿原文）。
+ *
+ * 批量是**防 N+1** 的要求：一页 50 条消息，逐条取就是 50 次查询。
+ * 调用方（`routes/memory.ts`）只对**有注入节**的消息取内容——三态里的
+ * `not-retrieved` / `none` 没有号可解析，不该为此多查一次。
+ *
+ * 返回 Map（调用方按 id 取，不必再 find）；不存在的 id 不出现在 Map 里。
+ */
+export function getMessageContentsByIds(
+  ids: readonly string[],
+  sessionId: string
+): Map<string, string> {
+  const result = new Map<string, string>()
+  if (ids.length === 0) return result
+  const placeholders = ids.map(() => '?').join(', ')
+  const rows = db
+    .prepare(
+      `SELECT id, content FROM messages
+       WHERE id IN (${placeholders}) AND session_id = ?`
+    )
+    .all(...ids, sessionId) as Array<{ id: string; content: string }>
+  for (const row of rows) result.set(row.id, row.content)
+  return result
+}
+
 // ─── 写入 ──────────────────────────────────────────────
 
 /** 三条写入的 `created_at` 一律由**这里**生成（⑤-c：记录时间 repository 层统一生成，

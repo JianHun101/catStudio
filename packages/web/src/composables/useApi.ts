@@ -75,6 +75,13 @@ export interface MemoryRefsEntry {
   /** `retrieval_events.reason` 原值；`null` = 该消息没有检索流水行 */
   reason: string | null
   refs: MemoryRef[]
+  /**
+   * 回复正文里采纳的角标号（R14b，**读口派生、不落库**）；`state='injected'` 之外恒空。
+   * 号 ↔ 节的映射按 `ref.injectedPosition` 匹配（不是 `refs` 的数组下标）。
+   */
+  markers: number[]
+  /** 代码字面量（围栏 / 内联码）内的号——诊断列，**前端不渲染**（见 server `citationMarkers.ts`） */
+  markersInCode: number[]
 }
 
 /** 连接器绑定行——后端 snake_case 原样返回（routes/connectors.ts，无 camelCase 转换） */

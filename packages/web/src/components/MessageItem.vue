@@ -20,7 +20,7 @@ import { useChatStore, type AgentStatusEntry } from '@/stores/chat'
 import { renderMarkdown } from '@/utils/markdown'
 import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { isAgentStoppable, toolAreaSummary } from '@/utils/tools'
-import type { MemoryRefView } from '@/utils/memoryRefs'
+import type { MemoryRefItemView, MemoryRefView } from '@/utils/memoryRefs'
 import type { MemoryRef } from '@/composables/useApi'
 import DiffViewer from './DiffViewer.vue'
 import AgentStatusLabel from './AgentStatusLabel.vue'
@@ -94,10 +94,67 @@ function finalTextContent(msg: Message): string {
   return msg.content
 }
 
-/** 正文 html——内容或 store/reviewer 角色名变化才重算（占位符替换依赖后者） */
+/**
+ * 正文 html——内容、store/reviewer 角色名、或**角标号**变化才重算
+ * （占位符替换依赖角色名；角标号依赖父组件拉回的 `memory-refs`）。
+ *
+ * 角标只传正文：思考块 / 折叠块 / 流式中间段不传（`renderMarkdown` 的可选参数缺省
+ * = 没有角标），那里的 `[n]` 保持字面——它们不是「回复采纳了某节」的载体。
+ */
 const bodyHtml = computed(() =>
-  renderMarkdown(resolveDisplayPlaceholders(finalTextContent(props.msg), store.agents))
+  renderMarkdown(
+    resolveDisplayPlaceholders(finalTextContent(props.msg), store.agents),
+    props.memoryRefs?.markers
+  )
 )
+
+// ─── 角标 hover 卡片（R14b）──────────────────────────────
+//
+// 角标是 `renderMarkdown` 的 v-html 产物——**Vue 不管理它**，故事件走**委托**：
+// 在 `.msg-text` 上听一次 mouseover/mouseout，按事件目标里的 `sup[data-marker]` 定位。
+// 卡片只渲染一张（单浮层元素），数据全部来自 `props.memoryRefs`（既有批量口），
+// **不发任何新请求**——这正是本票「hover 卡片」的验收 7。
+
+/** 当前悬停的角标号（`null` = 无卡片） */
+const hoverMarker = ref<number | null>(null)
+/** 卡片锚点（视口坐标；`position: fixed` 直接消费） */
+const hoverAt = ref<{ top: number; left: number }>({ top: 0, left: 0 })
+
+/**
+ * 角标号 → 展示条目。匹配键是 `injectedPosition`（**不是数组下标**）——
+ * 与后端 `markers` 的口径同源（编号的唯一真相源是注入时的渲染序）。
+ */
+function markerItemFor(n: number): MemoryRefItemView | null {
+  return props.memoryRefs?.items.find((item) => item.ref.injectedPosition === n) ?? null
+}
+
+/** 悬停中的条目（`computed` ⇒ 模板直接判空；无对应节时保持 `null`，不弹空卡片） */
+const hoverItem = computed(() =>
+  hoverMarker.value === null ? null : markerItemFor(hoverMarker.value)
+)
+
+/** 事件目标里最近的角标元素（不是角标 / 已离开就 null） */
+function citationTargetOf(e: Event): Element | null {
+  const target = e.target
+  if (!(target instanceof Element)) return null
+  return target.closest('sup[data-marker]')
+}
+
+/** 委托：鼠标移入角标 → 记号 + 以角标矩形为锚点（卡片落其正下方） */
+function onBodyPointerOver(e: Event): void {
+  const el = citationTargetOf(e)
+  if (!el) return
+  const n = Number(el.getAttribute('data-marker'))
+  if (!Number.isInteger(n) || !markerItemFor(n)) return
+  hoverMarker.value = n
+  const rect = el.getBoundingClientRect()
+  hoverAt.value = { top: rect.bottom, left: rect.left }
+}
+
+/** 委托：移出角标即收起（卡片本身不可交互，故不必判「是否移进卡片」） */
+function onBodyPointerOut(e: Event): void {
+  if (citationTargetOf(e)) hoverMarker.value = null
+}
 
 /** 老消息退化路径的思考 blob html（[思考] 前缀仅旧库数据带，含前缀才剥） */
 const thinkingHtml = computed(() => {
@@ -289,7 +346,25 @@ function canStop(agentId: string): boolean {
             @click="emit('previewImages', msg.images!, i)"
           />
         </div>
-        <div class="msg-text" v-html="bodyHtml"></div>
+        <!-- 正文：角标（R14b）由 renderMarkdown 渲染成 <sup data-marker>，
+             鼠标事件在此**委托**（v-html 的内容 Vue 不管理，绑不到元素上） -->
+        <div
+          class="msg-text"
+          v-html="bodyHtml"
+          @mouseover="onBodyPointerOver"
+          @mouseout="onBodyPointerOut"
+        ></div>
+        <!-- 角标 hover 卡片：单浮层元素、内容来自既有 memory-refs 数据（零新请求）。
+             标题 = 该节 breadcrumb，正文 = 命中片开头（`.mem-card-body` 行数截断） -->
+        <div
+          v-if="hoverItem"
+          class="mem-citation-card"
+          role="tooltip"
+          :style="{ top: `${hoverAt.top}px`, left: `${hoverAt.left}px` }"
+        >
+          <div class="mem-card-title">{{ hoverItem.title }}</div>
+          <div class="mem-card-body">{{ hoverItem.ref.bodyHead }}</div>
+        </div>
         <!-- 对话内 diff 展示：extra.rich.blocks 存在才渲染（服务端采集附加，
              永不进 LLM 上下文）；旧消息/无 extra → 纯文本回退与现网一致 -->
         <DiffViewer v-if="msg.extra?.rich?.blocks?.length" :blocks="msg.extra.rich.blocks" />

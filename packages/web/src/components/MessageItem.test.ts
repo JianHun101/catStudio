@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
@@ -358,9 +358,12 @@ describe('MessageItem 结构契约（静态源）', () => {
 
   it('正文走 computed 记忆化：内容 + 相关 agent 名变化才重算（占位符替换依赖 store/reviewer 角色名）', () => {
     expect(source).toContain('const bodyHtml = computed')
+    // R14b 起多传一个 markers 实参（角标号），故拆成两条锚——断言面从「整条调用串」
+    // 变成「两个实参各自在场」，措辞变了但守的是同一件事
     expect(source).toContain(
-      'renderMarkdown(resolveDisplayPlaceholders(finalTextContent(props.msg), store.agents))'
+      'resolveDisplayPlaceholders(finalTextContent(props.msg), store.agents)'
     )
+    expect(source).toContain('props.memoryRefs?.markers')
     expect(source).toContain('function finalTextContent(msg: Message): string')
     expect(source).toContain("if (s.kind === 'text') return s.content")
     expect(source).toContain('const thinkingHtml = computed')
@@ -407,6 +410,125 @@ describe('MessageItem 结构契约（静态源）', () => {
     expect(propsBlock).not.toContain('Message[]')
     // 数组 prop 只有「本条消息自带的状态行」（切片，不是全会话数组）
     expect(propsBlock).toContain('statusEntries: AgentStatusEntry[]')
+  })
+})
+
+// ─── R14b 角标 + hover 卡片 ───────────────────────────
+describe('MessageItem 角标与 hover 卡片（R14b）', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  // 本组会把 renderMarkdown 换成「产出角标」的替身（真渲染路径已在
+  // `utils/markdown.test.ts` 验过），收尾还原成文件级替身的默认形态，
+  // 免得串到其它用例（`mockClear` 只清调用不清实现）
+  afterEach(() => {
+    vi.mocked(renderMarkdown).mockImplementation((text: string) => `<p>${text}</p>`)
+    vi.unstubAllGlobals()
+  })
+
+  function memRef(over: Record<string, unknown> = {}) {
+    return {
+      docPath: 'docs/adr/0002-b.md',
+      sectionAnchor: '## 决策',
+      breadcrumb: 'docs/adr/0002-b.md > 决策',
+      sectionRank: 0,
+      injectedPosition: 1,
+      bodyHead: '命中片正文开头',
+      ...over,
+    }
+  }
+
+  /** 两个可引节 + 只采纳了第 1 号（`markers` 是父组件按入口过滤后的结果） */
+  function view(over: Record<string, unknown> = {}) {
+    return {
+      state: 'injected',
+      items: [
+        { label: '0002-b', title: 'docs/adr/0002-b.md > 决策', ref: memRef() },
+        {
+          label: '0007-c',
+          title: 'docs/adr/0007-c.md > 时间线',
+          ref: memRef({
+            docPath: 'docs/adr/0007-c.md',
+            injectedPosition: 2,
+            bodyHead: '第二节正文',
+          }),
+        },
+      ],
+      markers: [1],
+      ...over,
+    }
+  }
+
+  /** 让 `renderMarkdown` 产出真正的角标元素（组件侧的 hover 判据要它落进 DOM） */
+  function stubCitationMarkup(): void {
+    vi.mocked(renderMarkdown).mockImplementation(
+      () => '<p>见 <sup class="mem-citation" data-marker="1">[1]</sup></p>'
+    )
+  }
+
+  it('markers 透传给 renderMarkdown（正文）；无 memoryRefs 时传 undefined（`[n]` 全字面）', async () => {
+    const mounted = mount(MessageItem, { props: baseProps({ memoryRefs: view() }) })
+    expect(vi.mocked(renderMarkdown).mock.calls.at(-1)?.[1]).toEqual([1])
+    expect(mounted.find('.msg-text').exists()).toBe(true)
+
+    vi.mocked(renderMarkdown).mockClear()
+    mount(MessageItem, { props: baseProps({ memoryRefs: null }) })
+    expect(vi.mocked(renderMarkdown).mock.calls.at(-1)?.[1]).toBeUndefined()
+  })
+
+  it('悬停角标 → 出卡片，内容 = 该节的标题（breadcrumb）+ 正文开头（bodyHead）', async () => {
+    stubCitationMarkup()
+    const wrapper = mount(MessageItem, { props: baseProps({ memoryRefs: view() }) })
+    expect(wrapper.find('.mem-citation-card').exists()).toBe(false)
+
+    await wrapper.find('.msg-text sup.mem-citation').trigger('mouseover')
+    const card = wrapper.find('.mem-citation-card')
+    expect(card.exists()).toBe(true)
+    expect(card.attributes('role')).toBe('tooltip')
+    expect(card.find('.mem-card-title').text()).toBe('docs/adr/0002-b.md > 决策')
+    expect(card.find('.mem-card-body').text()).toBe('命中片正文开头')
+
+    await wrapper.find('.msg-text sup.mem-citation').trigger('mouseout')
+    expect(wrapper.find('.mem-citation-card').exists()).toBe(false)
+  })
+
+  it('号在本视图里找不到对应节 ⇒ 不弹空卡片（「有角标 ⟺ 悬停有卡片」）', async () => {
+    // data-marker=9：视图里没有 injectedPosition===9 的节
+    vi.mocked(renderMarkdown).mockImplementation(
+      () => '<p>见 <sup class="mem-citation" data-marker="9">[9]</sup></p>'
+    )
+    const wrapper = mount(MessageItem, { props: baseProps({ memoryRefs: view() }) })
+    await wrapper.find('.msg-text sup.mem-citation').trigger('mouseover')
+    expect(wrapper.find('.mem-citation-card').exists()).toBe(false)
+  })
+
+  it('memoryRefs=null（父组件还没拉回数据）⇒ 悬停也不出卡片', async () => {
+    stubCitationMarkup()
+    const wrapper = mount(MessageItem, { props: baseProps({ memoryRefs: null }) })
+    await wrapper.find('.msg-text sup.mem-citation').trigger('mouseover')
+    expect(wrapper.find('.mem-citation-card').exists()).toBe(false)
+  })
+
+  it('验收 7 · hover **不发任何网络请求**（数据源 = 既有 memoryRefs 数据）', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    stubCitationMarkup()
+    const wrapper = mount(MessageItem, { props: baseProps({ memoryRefs: view() }) })
+    await wrapper.find('.msg-text sup.mem-citation').trigger('mouseover')
+    expect(wrapper.find('.mem-citation-card').exists()).toBe(true)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('静态源：卡片数据源只有 memoryRefs —— 本组件不 import api、不发请求、不做会话级遍历', () => {
+    expect(source).toContain('class="mem-citation-card"')
+    expect(source).toContain('function markerItemFor(n: number)')
+    // 匹配键是 injectedPosition（编号的真相源），不是数组下标
+    expect(source).toContain('item.ref.injectedPosition === n')
+    // 与 `useApi` 的关系只有**类型**（`MemoryRef` 是 ref 的形状）；网络客户端不进本组件
+    expect(source).toContain("import type { MemoryRef } from '@/composables/useApi'")
+    expect(source).not.toMatch(/\bapi\.\w+\(/)
+    expect(source).not.toContain('fetch(')
+    expect(source).not.toContain('getSessionMemoryRefs')
+    expect(source).not.toContain('memoryRefsByMessage')
   })
 })
 
