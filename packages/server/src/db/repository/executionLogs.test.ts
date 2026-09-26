@@ -487,6 +487,65 @@ describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
     })
   })
 
+  describe('linkReplyMessage 与 finalize 不擦连线（M1 缺陷修复）', () => {
+    // 同款 FK 要求（理由见上组）：连线写的是 `messages.id`，回复行须先落库。
+    beforeEach(() => {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES ('m-link', 's1', 'agent', 'x', '[]')`
+      ).run()
+    })
+
+    function msgIdOf(id: string): string | null {
+      return (
+        db.prepare('SELECT message_id FROM execution_logs WHERE id = ?').get(id) as {
+          message_id: string | null
+        }
+      ).message_id
+    }
+
+    it('连线后 `finalizeExecutionLog(replyMessageId=null)` ⇒ 值保留（不擦回 NULL）', () => {
+      startRun('k1')
+      expect(repo.linkReplyMessage('k1', 'm-link').changes).toBe(1)
+      expect(msgIdOf('k1')).toBe('m-link')
+      // 「广播后异常走 failed 收口」：已发出的回复不得在引用面上倒退成「未检索」
+      repo.finalizeExecutionLog('agent-ds', 's1', 'failed', null, 'boom', null, 'timeout')
+      expect(msgIdOf('k1')).toBe('m-link')
+    })
+
+    it('成功路径写同值（幂等）：连线 + finalize 传同一 replyMessageId ⇒ 仍是它', () => {
+      startRun('k2')
+      repo.linkReplyMessage('k2', 'm-link')
+      repo.finalizeExecutionLog('agent-ds', 's1', 'completed', null, null, 'm-link', null)
+      expect(msgIdOf('k2')).toBe('m-link')
+    })
+
+    it('反向用例：从未连线的失败跳 finalize(null) ⇒ 仍 NULL（不编一个值出来）', () => {
+      startRun('k3')
+      repo.finalizeExecutionLog('agent-ds', 's1', 'failed', null, 'boom', null, 'timeout')
+      // 恢复语义依赖这条：NULL = 未回复 ⇒ 重启恢复走重跑，不得被 COALESCE 蒙成「已回复」
+      expect(msgIdOf('k3')).toBeNull()
+    })
+
+    it('显式传入 replyMessageId ⇒ 照写（COALESCE 不吞真值）', () => {
+      startRun('k4')
+      repo.finalizeExecutionLog('agent-ds', 's1', 'completed', null, null, 'm-link', null)
+      expect(msgIdOf('k4')).toBe('m-link')
+    })
+
+    it('按 id 精确更新：同触发消息的另一条执行行不受影响', () => {
+      startRun('k5')
+      startRun('k6')
+      repo.linkReplyMessage('k6', 'm-link')
+      expect(msgIdOf('k5')).toBeNull()
+      expect(msgIdOf('k6')).toBe('m-link')
+    })
+
+    it('executionId 不存在 ⇒ changes=0（调用方据此留痕，不抛）', () => {
+      expect(repo.linkReplyMessage('no-such-exec', 'm-link').changes).toBe(0)
+    })
+  })
+
   describe('getExecutionHopsWithChainAnchor', () => {
     /** 插一条 messages 行并返回 id（role=agent，task_id 可 null） */
     function msg(id: string, taskId: string | null): string {

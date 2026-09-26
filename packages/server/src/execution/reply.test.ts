@@ -13,17 +13,113 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import Fastify from 'fastify'
 import {
+  runAgentReply,
   selectTaskHistory,
   recordRetrievalTrace,
   TASK_HISTORY_MAX_MESSAGES,
   TASK_HISTORY_BUDGET_TOKENS,
 } from './reply.js'
+import { createEngineState } from './state.js'
+import { createExecTrace } from './trace.js'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
-import { initRepository, executionLogs as execLogsRepo } from '../db/repository/index.js'
+import {
+  initRepository,
+  executionLogs as execLogsRepo,
+  retrievalEvents as retrievalRepo,
+} from '../db/repository/index.js'
 import { HYBRID_POOL_PER_QUERY } from '../db/repository/chunks.js'
+import { memoryRoutes } from '../routes/memory.js'
+import { getAdapterForAgent } from '../llm/registry.js'
+import { retrieveMemoryContext, buildKnowledgeContext } from '../memory/index.js'
 import type { MemoryContextResult } from '../memory/index.js'
+
+// ─── 协作者 mock（只 mock 边界：LLM 适配器 / 子进程 / 外部 HTTP）──────────────
+// 组装式用例（下方「M1 广播前连线」）要跑**真** `runAgentReply`：DB、仓储、bus 捕获、
+// 上下文组装全是真的，只有「会 spawn 子进程 / 连外部服务」的协作者被换掉——
+// 与 `connectors/socketio.test.ts` 同款边界。
+vi.mock('../llm/registry.js', () => ({ getAdapterForAgent: vi.fn() }))
+// 建 worktree 是 `execFileSync` 起 git 的同步阻塞调用，测试里不建树 ⇒ 返回 null
+// （生产语义：null = 不传 cwd，适配器落 workspace/，见 reply.ts 调用点注释）
+vi.mock('../llm/worktree-fanin.js', () => ({ ensureExecutionWorktree: vi.fn(() => null) }))
+vi.mock('../llm/git-utils.js', () => ({
+  snapshotPackageDeps: vi.fn(() => ({})),
+  diffNewPackages: vi.fn(() => []),
+}))
+// diff 采集：内部 `execFile` 起 git（最长 5s）；本组不验它，返回 null = 「没采到」
+vi.mock('../git/diff-collector.js', () => ({
+  collectCommitDiffs: vi.fn(async () => null),
+  GIT_TIMEOUT_MS: 5000,
+}))
+vi.mock('../llm/user-request-signals.js', () => ({ consumeUserRequestSignals: vi.fn(() => []) }))
+vi.mock('../connectors/replyBus.js', () => ({ emitAgentReply: vi.fn() }))
+vi.mock('../handoff/index.js', () => ({
+  shouldHandoff: vi.fn(() => false),
+  performHandoff: vi.fn(async () => {}),
+  injectSummaryIntoSystem: vi.fn((s: string) => s),
+  generateFullSummary: vi.fn(async () => null),
+}))
+// **partial factory**：`currentRetrievalParams` / `skippedRetrievalResult` 等导出必须留真
+// ——`recordRetrievalTrace` 消费前者，整包替换会让同文件的 R1 用例当场 TypeError。
+vi.mock('../memory/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../memory/index.js')>()
+  return {
+    ...actual,
+    retrieveMemoryContext: vi.fn(),
+    buildKnowledgeContext: vi.fn(async () => ''),
+  }
+})
+
+/** 一条可落盘的检索结果（够跑通组装，字段值本身由 memory 侧用例保真） */
+function makeResult(over: Partial<MemoryContextResult> = {}): MemoryContextResult {
+  return {
+    text: '\n\n【相关记忆】\n1. 正文',
+    reason: 'ok',
+    sections: [],
+    stats: {
+      queries: 1,
+      candidateChunks: 1,
+      sections: 1,
+      droppedSections: 0,
+      contextTokens: 12,
+      budgetTokens: 8000,
+      truncated: false,
+      retrievalMs: 37,
+      thresholdMaxDistance: 0.6,
+      paramTopK: 3,
+      paramProbeN: 20,
+      queryTraces: [{ queryIndex: 0, queryText: '原话', queryEmbedOk: true }],
+      candidates: [
+        {
+          queryIndex: 0,
+          source: 'final',
+          channel: 'vector',
+          docPath: 'docs/adr/0002-b.md',
+          sectionAnchor: '## 决策',
+          contentHash: 'h1',
+          chunkId: 7,
+          breadcrumb: 'b',
+          bodyHead: '候选片正文全文',
+          statusAtQuery: null,
+          distance: 0.293,
+          rank: 0,
+          rrfScore: 0.016,
+          finalRank: 0,
+          passedStatusFilter: null,
+          injected: true,
+          sectionRank: 0,
+          injectedPosition: 1,
+          droppedReason: null,
+        },
+      ],
+      blockedByStatus: 0,
+      droppedByThreshold: 0,
+    },
+    ...over,
+  }
+}
 
 /** 生成一条同锚历史（数组下标越小越旧） */
 function msg(i: number, hanChars: number): { id: string; content: string } {
@@ -71,54 +167,7 @@ describe('execution/reply — selectTaskHistory（T-G 验收④ 回捞上界）'
 // 拆成两段证据：**组装口径**在这里直测（`recordRetrievalTrace` 只依赖 db），
 // **调用点位置**由文件尾的静态源断言守——位置正是票面点名的硬要求。
 describe('execution/reply — R1 检索流水埋点', () => {
-  /** 一条可落盘的检索结果（够跑通组装，字段值本身由 memory 侧用例保真） */
-  function makeResult(over: Partial<MemoryContextResult> = {}): MemoryContextResult {
-    return {
-      text: '\n\n【相关记忆】\n1. 正文',
-      reason: 'ok',
-      sections: [],
-      stats: {
-        queries: 1,
-        candidateChunks: 1,
-        sections: 1,
-        droppedSections: 0,
-        contextTokens: 12,
-        budgetTokens: 8000,
-        truncated: false,
-        retrievalMs: 37,
-        thresholdMaxDistance: 0.6,
-        paramTopK: 3,
-        paramProbeN: 20,
-        queryTraces: [{ queryIndex: 0, queryText: '原话', queryEmbedOk: true }],
-        candidates: [
-          {
-            queryIndex: 0,
-            source: 'final',
-            channel: 'vector',
-            docPath: 'docs/adr/0002-b.md',
-            sectionAnchor: '## 决策',
-            contentHash: 'h1',
-            chunkId: 7,
-            breadcrumb: 'b',
-            bodyHead: '候选片正文全文',
-            statusAtQuery: null,
-            distance: 0.293,
-            rank: 0,
-            rrfScore: 0.016,
-            finalRank: 0,
-            passedStatusFilter: null,
-            injected: true,
-            sectionRank: 0,
-            injectedPosition: 1,
-            droppedReason: null,
-          },
-        ],
-        blockedByStatus: 0,
-        droppedByThreshold: 0,
-      },
-      ...over,
-    }
-  }
+  // `makeResult` 已提到模块级（组装式用例与本组共用同一份夹具，避免两处形状漂移）
 
   /** 造「本轮执行已开始」的最小现场：1 猫 + 1 会话 + 1 触发消息 + 1 条 running 执行行 */
   function seedRunningExecution(opts?: { triggerMessageId?: string; agentId?: string }) {
@@ -395,6 +444,221 @@ describe('execution/reply — R1 检索流水埋点', () => {
       const raceBody = SRC.slice(start, end)
       expect(raceBody).not.toContain('recordRetrievalTrace')
       expect(raceBody).toContain('retrieveMemoryContext')
+    })
+  })
+})
+
+// ═══ M1 缺陷修复：连线提前到广播之前（方案甲）═══════════════
+//
+// 病灶：`bus.emitMessage`（NEW_MESSAGE 广播）跑在「回复 ↔ 检索流水关联环」落库之前
+// ——前端收到广播立刻批量拉 `/memory-refs`，读口第一环 JOIN（`getInjectedRefsByMessageIds`
+// 的 `execution_logs.message_id`）此刻仍是 NULL ⇒ 最新一条回复渲染「未检索」，且前端
+// 不再重查 ⇒ 假态一直挂到刷新（约 100ms 窗口，`docs/run/m1-refs-link-timing/tickets.md`）。
+//
+// 两段证据，缺一不可：
+//  · **行为**（组装式：真 `runAgentReply` + 真 DB + 捕获 bus）：在 NEW_MESSAGE 那一刻
+//    **同步**读 DB、并打真 HTTP 读口。这是承重判据——连线若留在广播之后，第一条断言必红。
+//  · **位置**（静态源断言）：连线块夹在 `insertAgentMessage` 与 `bus.emitMessage` 之间，
+//    且定位谓词单源（不许在调用点再写第二份）。
+describe('execution/reply — M1 广播前连线', () => {
+  const AGENT_ID = 'agent-m1'
+  const SESSION_ID = 'sess-m1'
+  const TRIGGER_ID = 'm-trigger-m1'
+  const EXEC_ID = 'log-m1'
+
+  /** 造「本轮执行已开始」的现场（回复行由 runAgentReply 自己落） */
+  function seedM1(opts: { withExecutionRow?: boolean } = {}): void {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, 'ds猫', 'p', 'k')`
+    ).run(AGENT_ID)
+    db.prepare(`INSERT INTO sessions (id, title) VALUES (?, 't')`).run(SESSION_ID)
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', '@ds猫 干活', '["ds猫"]')`
+    ).run(TRIGGER_ID, SESSION_ID)
+    if (opts.withExecutionRow !== false) {
+      execLogsRepo.insertExecutionLog(EXEC_ID, SESSION_ID, AGENT_ID, TRIGGER_ID, 'trace-m1')
+    }
+  }
+
+  const agent = {
+    id: AGENT_ID,
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: '你是测试猫',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+  } as any
+
+  /** 捕获型 bus（EngineBus & HandoffBus 八个方法齐全）；`emitMessage` 回调 = 被测时点 */
+  function makeBus(onMessage?: (msg: any) => void) {
+    return {
+      emitMessage: vi.fn((msg: any) => onMessage?.(msg)),
+      emitSystemNotice: vi.fn(),
+      emitTyping: vi.fn(),
+      emitAgentMessageStatus: vi.fn(),
+      emitMessageUpdated: vi.fn(),
+      emitContextWindowStats: vi.fn(),
+      emitSessionHandoff: vi.fn(),
+      emitHandoffFailed: vi.fn(),
+    } as any
+  }
+
+  /** 该执行行当前的 `message_id`（`undefined` = 行都不存在） */
+  function linkedMessageId(): string | null | undefined {
+    const row = getDb()
+      .prepare('SELECT message_id FROM execution_logs WHERE id = ?')
+      .get(EXEC_ID) as { message_id: string | null } | undefined
+    return row?.message_id
+  }
+
+  function traceFor() {
+    return createExecTrace({
+      executionId: EXEC_ID,
+      chainId: null,
+      sessionId: SESSION_ID,
+      agentId: AGENT_ID,
+    })
+  }
+
+  function trigger() {
+    return { id: TRIGGER_ID, content: '@ds猫 干活', mentions: ['ds猫'], fromAgent: false }
+  }
+
+  beforeEach(() => {
+    setDb(createTestDb())
+    initDb()
+    initRepository(getDb())
+    vi.mocked(retrieveMemoryContext).mockResolvedValue(makeResult())
+    vi.mocked(getAdapterForAgent).mockReturnValue({
+      chatStream: vi.fn(async function* () {
+        yield { content: '收到，M1 验证', kind: 'text' }
+      }),
+    } as any)
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.clearAllMocks()
+  })
+
+  it('验收 1+3 · NEW_MESSAGE 那一刻：连线已在场，且真 HTTP 读口返回 injected（非 not-retrieved）', async () => {
+    seedM1()
+    const app = Fastify({ logger: false })
+    await app.register(memoryRoutes)
+    await app.ready()
+
+    let atEmit: { dbValue: string | null | undefined; http: Promise<any> } | undefined
+    const bus = makeBus((msg) => {
+      // 承重读数：**同步**查 DB——emit 回调就是被测时刻本身，不是「之后某一刻」
+      atEmit = {
+        dbValue: linkedMessageId(),
+        // 端到端形态：那一刻发起真 HTTP 读口（Fastify inject 立即排队处理）
+        http: app.inject({
+          method: 'GET',
+          url: `/api/sessions/${SESSION_ID}/memory-refs?messageIds=${msg.id}`,
+        }),
+      }
+    })
+
+    const res = await runAgentReply(
+      createEngineState(),
+      bus,
+      SESSION_ID,
+      agent,
+      trigger(),
+      'trace-m1',
+      undefined,
+      traceFor()
+    )
+
+    expect(res.content).toBe('收到，M1 验证')
+    // ★ 承重断言：广播那一刻 `execution_logs.message_id` 已等于回复 id
+    //（修复前该值恒为 null ⇒ 前端当场拉读口拿不到流水）
+    expect(atEmit!.dbValue).toBe(res.msgId)
+
+    const resp = await atEmit!.http
+    expect(resp.statusCode).toBe(200)
+    const payload = resp.json()
+    expect(payload[res.msgId].state).toBe('injected')
+    expect(payload[res.msgId].refs[0].docPath).toBe('docs/adr/0002-b.md')
+    await app.close()
+  })
+
+  it('验收 4 · abort 提前返回（无回复产出）⇒ 不连线，message_id 仍 NULL', async () => {
+    seedM1()
+    let emitted = false
+    const bus = makeBus(() => {
+      emitted = true
+    })
+    const controller = new AbortController()
+    controller.abort('timeout')
+
+    const res = await runAgentReply(
+      createEngineState(),
+      bus,
+      SESSION_ID,
+      agent,
+      trigger(),
+      'trace-m1',
+      controller.signal,
+      traceFor()
+    )
+
+    expect(res.content).toBe('') // 流循环在累积首个 chunk 之前就退出
+    expect(emitted).toBe(false) // 没广播 ⇒ 前端也不会去拉读口
+    expect(linkedMessageId()).toBeNull() // 连线只在回复落库后发生
+  })
+
+  it('OQ-1 · 找不到本轮 running 执行行 ⇒ 连线 no-op（不抛、回复照发）', async () => {
+    seedM1({ withExecutionRow: false })
+    const bus = makeBus()
+
+    const res = await runAgentReply(
+      createEngineState(),
+      bus,
+      SESSION_ID,
+      agent,
+      trigger(),
+      'trace-m1',
+      undefined,
+      traceFor()
+    )
+
+    // 生产路径不可达（executeAgentCommand 先落 running 行）；真出现时也**不阻塞回复**
+    expect(res.content).toBe('收到，M1 验证')
+    expect(bus.emitMessage).toHaveBeenCalledTimes(1)
+  })
+
+  describe('落点硬点（静态源断言）', () => {
+    const SRC = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), 'reply.ts'),
+      'utf8'
+    )
+
+    it('连线块夹在 `insertAgentMessage` 之后、`bus.emitMessage` 之前', () => {
+      // 三个锚都必须**全文件唯一**：`indexOf` 命中处若落在注释或别处，顺序断言会
+      // 指向错误的面（本组首跑即被自己注释里的 `bus.emitMessage(finalMsg)` 骗过一次）
+      for (const anchor of [
+        'messagesRepo.insertAgentMessage(',
+        'execLogsRepo.linkReplyMessage(',
+        'bus.emitMessage(finalMsg)',
+      ]) {
+        expect(SRC.split(anchor).length - 1, `锚不唯一：${anchor}`).toBe(1)
+      }
+      const insert = SRC.indexOf('messagesRepo.insertAgentMessage(')
+      const link = SRC.indexOf('execLogsRepo.linkReplyMessage(')
+      const emit = SRC.indexOf('bus.emitMessage(finalMsg)')
+      // 之后：`message_id` 有 FK 指 messages(id)，先连线后落库当场违反约束
+      expect(link).toBeGreaterThan(insert)
+      // 之前：连线晚于广播正是本票要关死的窗口（把 `link` 挪到 `emit` 之后本断言即红）
+      expect(emit).toBeGreaterThan(link)
+    })
+
+    it('定位谓词单源：`getLogsByTriggerMessage` 在 reply.ts 内只出现一次（埋点与连线共用）', () => {
+      expect(SRC.split('getLogsByTriggerMessage').length - 1).toBe(1)
     })
   })
 })

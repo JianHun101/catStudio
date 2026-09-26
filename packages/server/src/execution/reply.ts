@@ -197,6 +197,28 @@ function upsertTool(tools: ToolCallInfo[], chunk: Chunk): void {
 }
 
 /**
+ * 本轮执行行定位（**口径单源**）——`recordRetrievalTrace` 与本文件下方的「连线提前」
+ * 共用同一谓词：触发消息 + 本猫 + 本会话 + `status = 'running'`。
+ *
+ * 按 `triggered_by_message_id` 起手，而不是复用 `finalizeExecutionLog` /
+ * `updateExecutionLogDiagnostics` 的 `agent_id + session_id + 最新 running` 键：后者在
+ * 「同一条触发消息派了多只猫」时对每只猫都能命中，而本函数的两个调用方手里**正好有**
+ * 触发消息 id，多带这一个条件把错挂面收窄（P2 §八 的原始理由，不是新推导）。
+ *
+ * **零行是合法结果**（历史上「找不到本轮 running 执行行」被记过 warn）：调用方各自决定
+ * no-op 还是报错，本函数不抛、不打日志。
+ */
+function findRunningExecutionId(
+  sessionId: string,
+  agentId: string,
+  triggerMessageId: string
+): string | undefined {
+  return execLogsRepo
+    .getLogsByTriggerMessage(triggerMessageId)
+    .find((r) => r.agent_id === agentId && r.session_id === sessionId && r.status === 'running')?.id
+}
+
+/**
  * 检索流水落盘（P2 / R1）——**三处口径与既有代码逐字同源**，不是重新推导：
  *
  * · `taskId` = `triggerMsg.taskId || traceId`：与写回复消息那一行
@@ -232,13 +254,8 @@ export function recordRetrievalTrace(args: {
   // 它们任一段抛（实测过的例子：`../memory/index.js` 被测试替身换成 partial
   // factory ⇒ `currentRetrievalParams` 是 undefined），回复就整条发不出去。
   try {
-    const logRow = execLogsRepo
-      .getLogsByTriggerMessage(args.triggerMessageId)
-      .find(
-        (r) =>
-          r.agent_id === args.agentId && r.session_id === args.sessionId && r.status === 'running'
-      )
-    if (!logRow) {
+    const executionId = findRunningExecutionId(args.sessionId, args.agentId, args.triggerMessageId)
+    if (!executionId) {
       // 生产路径不可达：`execute()` 先 executeAgentCommand（落 running 行）再 executeRun。
       // 不写 = 不留一行挂不上执行的账；但不静默（本模块不允许「返回空且无痕」）。
       log.warn('检索流水：找不到本轮 running 执行行，跳过落盘', {
@@ -252,7 +269,7 @@ export function recordRetrievalTrace(args: {
     const stats = args.memoryResult?.stats
     const params = currentRetrievalParams()
     retrievalRepo.insertRetrievalTrace({
-      executionId: logRow.id,
+      executionId,
       sessionId: args.sessionId,
       agentId: args.agentId,
       taskId: args.taskId,
@@ -1339,6 +1356,47 @@ export async function runAgentReply(
         error: messageOf(err),
       })
     }
+  }
+
+  // ── 连线提前（M1 缺陷修复，方案甲）──────────────────────
+  // 把 `execution_logs.message_id`（回复 ↔ 检索流水的关联环）在**广播之前**写掉。
+  // 位置两条都是硬要求：
+  //  ① 在上方 `insertAgentMessage` **之后**——该列有 FK 指 `messages(id)`，先连线
+  //     后落库当场违反约束（DDL 顺带把「message_id 非空 ⇒ 回复行已存在」钉死，
+  //     `execution/recovery.ts` 的重启恢复判据依赖它）；
+  //  ② 在下方 `bus.emitMessage` **之前**——前端收到 NEW_MESSAGE 立刻批量
+  //     拉 `/memory-refs`，读口第一环 JOIN 就是这列（`getInjectedRefsByMessageIds`），
+  //     连线晚一步 ⇒ 查无流水 ⇒ 最新一条回复渲染「未检索」，且前端不再重查 ⇒
+  //     假态一直挂到刷新（本票要关死的就是这个约 100ms 窗口）。
+  // 定位口径与 `recordRetrievalTrace` 同源（`findRunningExecutionId` 单源），不另写谓词。
+  // 失败只 warn（硬约束 2：记忆面故障不杀回复）——退化态即修复前的假态，票 OQ-2 判可接受。
+  try {
+    const executionId = findRunningExecutionId(sessionId, agent.id, triggerMsg.id)
+    if (!executionId) {
+      log.warn('连线：找不到本轮 running 执行行，跳过（本条引用面会退化成未检索）', {
+        traceId,
+        agentId: agent.id,
+        sessionId,
+        replyMessageId: msgId,
+      })
+    } else if (execLogsRepo.linkReplyMessage(executionId, msgId).changes === 0) {
+      // 理论上不可达（id 刚查到）；不静默——「连线没连上」是本票唯一的静默失败面
+      log.warn('连线：UPDATE 未命中执行行', {
+        traceId,
+        agentId: agent.id,
+        sessionId,
+        executionId,
+        replyMessageId: msgId,
+      })
+    }
+  } catch (err: any) {
+    log.warn('连线失败（已跳过，不影响本轮回复）', {
+      traceId,
+      agentId: agent.id,
+      sessionId,
+      replyMessageId: msgId,
+      error: err?.message,
+    })
   }
 
   bus.emitMessage(finalMsg)
