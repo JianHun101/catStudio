@@ -22,6 +22,13 @@
  *
  * 三态都带上 `reason` 原值（`null` = 压根没有流水行），UI 据此措辞。
  *
+ * ## 角标两列（R14b）：`markers` / `markersInCode`
+ *
+ * 值里另有两列**读口派生**的角标号（`state='injected'` 之外恒空）：正文里猫标注的
+ * `[n]` 经 `extractCitationMarkers` 解析成号，`markers` 供前端渲染上标 + hover 卡片，
+ * `markersInCode` 是**诊断列**（代码字面量里出现的号，不渲染——见该函数头注）。
+ * 判据面刻意**不落库**：`messages.content` 是已落盘证据，解析是派生数据。
+ *
  * ## 为什么值不是裸数组（对票面 `{ [messageId]: MemoryRef[] }` 的**一处显式偏离**）
  *
  * 票面 §三 钉的顶层形状是 `{ [messageId]: MemoryRef[] }`，而 §四 A2 又要求三态可分——
@@ -45,6 +52,7 @@ import {
   sessions as sessionsRepo,
 } from '../db/repository/index.js'
 import type { InjectedMemoryRef } from '../db/repository/retrievalEvents.js'
+import { extractCitationMarkers } from '../memory/citationMarkers.js'
 import { findRepoRootFrom } from '../repo-root.js'
 import { createLogger } from '../logger.js'
 
@@ -95,6 +103,20 @@ export interface MemoryRefsEntry {
   reason: string | null
   /** **只含 `injected = 1` 的节**（票面 §三 的那个数组） */
   refs: InjectedMemoryRef[]
+  /**
+   * 回复正文里采纳的角标号（R14b）——**读口派生，不落库**，`state='injected'`
+   * 之外恒为空数组。
+   *
+   * 判据面（`extractCitationMarkers`）是会改的，而 `messages.content` 是已落盘证据：
+   * 落库 = 把判据固化成第二真相源（R14a 验收 9 刚换来的教训——判据面改一次就得重算
+   * 一遍历史行）。派生则改判据零成本、零回填。
+   *
+   * 映射契约：`[n]` ↔ `refs` 里 `injectedPosition === n` 的那节（**按位置值匹配，
+   * 不按数组下标**——编号的唯一真相源是 `renderOrder`，两边同取它）。
+   */
+  markers: number[]
+  /** 代码字面量（围栏 / 内联码）内的号——**诊断列**，前端不渲染（见 `citationMarkers.ts`） */
+  markersInCode: number[]
 }
 
 /** 解析 `?messageIds=a,b,c`：去空白、丢空段、保序去重；无有效项返回 null（调用方 400） */
@@ -201,22 +223,42 @@ export async function memoryRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const found = retrievalRepo.getInjectedRefsByMessageIds(messageIds, sessionId)
+
+    // 角标解析要读回复正文，而正文只在**有注入节**的消息上才有意义（其余三态没有号可解析）
+    // ⇒ 先筛出这些 id 再一次批量取，既不 N+1、也不为 `not-retrieved` 多查一次内容。
+    const injectedIds = messageIds.filter((id) => (found.get(id)?.sections.length ?? 0) > 0)
+    const contents = messagesRepo.getMessageContentsByIds(injectedIds, sessionId)
+
     const payload: Record<string, MemoryRefsEntry> = {}
     for (const id of messageIds) {
       const hit = found.get(id)
       // 无流水行 = 压根没检索（三态里的第三态），**不是**「检索了没注入」
       if (!hit) {
-        payload[id] = { state: 'not-retrieved', reason: null, refs: [] }
+        payload[id] = {
+          state: 'not-retrieved',
+          reason: null,
+          refs: [],
+          markers: [],
+          markersInCode: [],
+        }
         continue
       }
+      const state: MemoryRefState = hit.sections.length
+        ? 'injected'
+        : NOT_RETRIEVED_REASONS.has(hit.reason ?? '')
+          ? 'not-retrieved'
+          : 'none'
+      // 合法号域 = **本条实际注入的节数**（与 `renderSections` 编出的 1..n 同源）
+      const scan =
+        state === 'injected'
+          ? extractCitationMarkers(contents.get(id) ?? '', hit.sections.length)
+          : { markers: [], markersInCode: [] }
       payload[id] = {
-        state: hit.sections.length
-          ? 'injected'
-          : NOT_RETRIEVED_REASONS.has(hit.reason ?? '')
-            ? 'not-retrieved'
-            : 'none',
+        state,
         reason: hit.reason,
         refs: hit.sections,
+        markers: scan.markers,
+        markersInCode: scan.markersInCode,
       }
     }
     return reply.send(payload)

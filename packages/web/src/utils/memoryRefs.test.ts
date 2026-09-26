@@ -21,7 +21,8 @@ function ref(over: Partial<MemoryRef> = {}): MemoryRef {
 }
 
 function entry(over: Partial<MemoryRefsEntry> = {}): MemoryRefsEntry {
-  return { state: 'injected', reason: 'ok', refs: [ref()], ...over }
+  // R14b 两列给显式缺省：`Partial` 展开出来的属性是可选，不补会让返回类型对不上
+  return { state: 'injected', reason: 'ok', refs: [ref()], markers: [], markersInCode: [], ...over }
 }
 
 describe('buildMemoryRefView', () => {
@@ -68,6 +69,46 @@ describe('buildMemoryRefView', () => {
   it('refs 缺失（老 server / 字段缺省）不抛，按空列表处理', () => {
     const view = buildMemoryRefView({ state: 'none', reason: null } as MemoryRefsEntry)!
     expect(view.items).toEqual([])
+    // R14b：markers 同样按缺省空处理，且两列都是**空数组**（不是 undefined）
+    expect(view.markers).toEqual([])
+  })
+
+  // ─── R14b 角标号 ───────────────────────────────────
+  describe('markers（角标号，R14b）', () => {
+    it('只留下能在本视图里找到对应节的号（保「有角标 ⟺ 悬停有卡片」）', () => {
+      const view = buildMemoryRefView(
+        entry({
+          refs: [
+            ref({ injectedPosition: 1 }),
+            ref({ docPath: 'docs/adr/0007-c.md', injectedPosition: 2 }),
+          ],
+          markers: [1, 2, 9],
+        })
+      )!
+      // 9 号在 refs 里没有对应节 ⇒ 不留（否则会渲染出点不出卡片的死角标）
+      expect(view.markers).toEqual([1, 2])
+    })
+
+    it('按 injectedPosition 匹配，**不是按数组下标**（读口返回序不是渲染序）', () => {
+      const view = buildMemoryRefView(
+        entry({
+          // refs 的数组序与 injectedPosition 刻意错开：位置 2 排在位置 1 前面
+          refs: [
+            ref({ docPath: 'docs/adr/0007-c.md', injectedPosition: 2 }),
+            ref({ injectedPosition: 1 }),
+          ],
+          markers: [2],
+        })
+      )!
+      expect(view.markers).toEqual([2])
+    })
+
+    it('非 injected 态（读口两列恒空）⇒ 空数组', () => {
+      const view = buildMemoryRefView(
+        entry({ state: 'none', reason: 'no-hit', refs: [], markers: [] })
+      )!
+      expect(view.markers).toEqual([])
+    })
   })
 })
 
