@@ -4,6 +4,8 @@ date: 2026-09-26
 status: proposed
 evidence:
   - kind: file
+    ref: packages/server/src/memory/index.test.ts
+  - kind: file
     ref: packages/server/src/db/repository/chunks.ts
 ---
 
@@ -66,3 +68,8 @@ evidence:
 （在 `docs/run/**`，活收口即清；正文已自包含）。
 被断言的分值公式真源在 `packages/server/src/db/repository/chunks.ts`
 （`RRF_K = 60`、`HYBRID_POOL_PER_QUERY = 20`，片分 = `1 / (RRF_K + i + 1)`）。
+
+本卡引的三组读数（穷举 **8855** 个四元多重集 / 有理值 **3** 组 / 逐位相等 **2** 组 /
+口径限定后 **1** 组）在仓内有**持久落点**：`packages/server/src/memory/index.test.ts`
+的 tie-break 用例头注逐条记了值域（`0..19`）、三组构型字面量与两种口径的读数，
+不必回会话 scratch 取。
