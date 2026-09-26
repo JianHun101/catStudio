@@ -913,6 +913,45 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     return store
   }
 
+  /**
+   * 从批量口 URL 里取出**真正发出去的 id 集**。
+   *
+   * 不用 `toContain` 判 id：那是子串匹配，`'m1'` 会被 `'m10'` 满足——否定断言
+   * （「不含 welcome id」）在子串口径下等于没断言。故按 `messageIds=` 参数解析。
+   */
+  function memoryRefIds(url: string): string[] {
+    const key = 'messageIds='
+    const raw = url.slice(url.indexOf(key) + key.length)
+    return decodeURIComponent(raw).split(',').filter(Boolean)
+  }
+
+  /**
+   * 生产形态的会话历史：server 合成的 welcome 伪消息（`role='system'`、
+   * `id='welcome-<sid>'`、**不落 messages 表**，见 `connectors/socketio.ts` 的
+   * `welcomeMsg`）+ 用户消息 + agent 回复，交错排列。
+   */
+  function setupSessionWithWelcome() {
+    const store = setupSession(0)
+    let seq = 0
+    const mk = (id: string, role: Message['role'], agentId: string | null) => ({
+      id,
+      sessionId: 's1',
+      agentId,
+      role,
+      content: `正文 ${id}`,
+      mentions: [],
+      createdAt: `2026-09-26T00:00:0${seq++}Z`,
+    })
+    store.messages = [
+      mk('welcome-s1', 'system', null),
+      mk('u1', 'user', null),
+      mk('a-msg-1', 'agent', 'a1'),
+      mk('u2', 'user', null),
+      mk('a-msg-2', 'agent', 'a1'),
+    ] as never
+    return store
+  }
+
   /** 记录所有请求 URL 的 fetch 桩；`body` 决定响应形状 */
   function stubFetch(handler: (url: string) => unknown): string[] {
     const urls: string[] = []
@@ -944,7 +983,7 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     vi.unstubAllGlobals()
   })
 
-  it('A4 · 一页 50 条消息只发 1 次 memory-refs 请求，且请求里带齐这 50 个 id', async () => {
+  it('A4 · 一页 50 条消息只发 1 次 memory-refs 请求，且请求里带齐这 50 条里的全部 agent 消息 id', async () => {
     setupSession(50)
     const urls = stubFetch(() => ({}))
     const wrapper = mount(ChatPanel, {
@@ -956,8 +995,32 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     const memCalls = urls.filter((u) => u.includes('/memory-refs'))
     // 判据是「按消息各拉一次」vs「批量一次」——50 条消息下前者是 50 次
     expect(memCalls).toHaveLength(1)
-    for (let i = 0; i < 50; i++) expect(memCalls[0]).toContain(`m${i}`)
+    // `setupSession` 里偶数下标是 agent、奇数是 user——只有 agent 侧该进请求
+    expect(memoryRefIds(memCalls[0])).toEqual(Array.from({ length: 25 }, (_, i) => `m${i * 2}`))
     wrapper.unmount()
+  })
+
+  it('M2 · 请求面只发 agent 消息 id：welcome 伪消息与 user 消息不进批量口', async () => {
+    setupSessionWithWelcome()
+    const urls = stubFetch(() => ({}))
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+
+    const memCalls = urls.filter((u) => u.includes('/memory-refs'))
+    expect(memCalls).toHaveLength(1)
+    // 全等而不是「不含这三个」：多带任何 id 同样是 400 风险面，必须一并钉住
+    expect(memoryRefIds(memCalls[0])).toEqual(['a-msg-1', 'a-msg-2'])
+    wrapper.unmount()
+  })
+
+  it('M2 · 判据单源：请求面与渲染面共用 isMemoryRefMessage（分叉即假绿）', () => {
+    // 两条调用路径都必须走同一个判据函数——本仓吃过「同一规则两处措辞」
+    expect(source).toContain('store.activeMessages.filter((m) => isMemoryRefMessage(m))')
+    expect(source).toContain('if (!isMemoryRefMessage(msg)) return null')
+    expect(source.match(/function isMemoryRefMessage/g)).toHaveLength(1)
   })
 
   it('A4 · 服务端只对部分消息有记录时，不会为「没有记录的消息」补请求', async () => {
