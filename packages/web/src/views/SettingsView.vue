@@ -685,21 +685,71 @@ onUnmounted(() => {
           :class="{ active: activeCategory === 'cats' }"
           @click="activeCategory = 'cats'"
         >
-          <span class="nav-icon">🐱</span> 猫咪管理
+          <svg
+            class="nav-icon"
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="9" cy="8" r="3" />
+            <path
+              d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 4.5a3 3 0 0 1 0 7M21 20c0-2.8-1.9-5.1-4.5-5.8"
+            />
+          </svg>
+          猫咪管理
         </button>
         <button
           class="nav-item"
           :class="{ active: activeCategory === 'im' }"
           @click="activeCategory = 'im'"
         >
-          <span class="nav-icon">🔌</span> IM 接入
+          <svg
+            class="nav-icon"
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.7-1.7"
+            />
+          </svg>
+          IM 接入
         </button>
         <button
           class="nav-item"
           :class="{ active: activeCategory === 'system' }"
           @click="activeCategory = 'system'"
         >
-          <span class="nav-icon">⚙️</span> 系统配置
+          <svg
+            class="nav-icon"
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
+            />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+          系统配置
         </button>
       </nav>
 
@@ -816,31 +866,54 @@ onUnmounted(() => {
               </button>
             </div>
             <div class="create-body">
-              <input v-model="newAgentForm.name" class="input" placeholder="猫咪名字" v-focus />
-              <div class="create-provider-row">
-                <select v-model="newAgentForm.llmProvider" class="input">
-                  <option v-for="p in providerOptions" :key="p.value" :value="p.value">
-                    {{ p.label }}
-                  </option>
-                </select>
-                <input
-                  v-model="newAgentForm.llmModel"
-                  class="input input-mono"
-                  placeholder="模型（如 deepseek-v4-pro）"
-                />
+              <div class="frow">
+                <label class="label">名字</label>
+                <div class="ctl">
+                  <input v-model="newAgentForm.name" class="input" placeholder="猫咪名字" v-focus />
+                </div>
               </div>
-              <input
-                v-model="newAgentForm.llmApiKey"
-                class="input input-mono"
-                type="password"
-                placeholder="API Key (sk-…，OpenCode 本地认证可留空)"
-              />
-              <textarea
-                v-model="newAgentForm.systemPrompt"
-                class="input"
-                rows="3"
-                placeholder="角色设定…"
-              ></textarea>
+              <div class="frow">
+                <label class="label">Provider</label>
+                <div class="ctl">
+                  <select v-model="newAgentForm.llmProvider" class="input">
+                    <option v-for="p in providerOptions" :key="p.value" :value="p.value">
+                      {{ p.label }}
+                    </option>
+                  </select>
+                </div>
+              </div>
+              <div class="frow">
+                <label class="label">模型</label>
+                <div class="ctl">
+                  <input
+                    v-model="newAgentForm.llmModel"
+                    class="input input-mono"
+                    placeholder="模型（如 deepseek-v4-pro）"
+                  />
+                </div>
+              </div>
+              <div class="frow">
+                <label class="label">API Key</label>
+                <div class="ctl">
+                  <input
+                    v-model="newAgentForm.llmApiKey"
+                    class="input input-mono"
+                    type="password"
+                    placeholder="API Key (sk-…，OpenCode 本地认证可留空)"
+                  />
+                </div>
+              </div>
+              <div class="frow frow-top">
+                <label class="label">角色设定</label>
+                <div class="ctl">
+                  <textarea
+                    v-model="newAgentForm.systemPrompt"
+                    class="input"
+                    rows="3"
+                    placeholder="角色设定…"
+                  ></textarea>
+                </div>
+              </div>
             </div>
             <div class="create-footer">
               <span v-if="createError" class="error-text">{{ createError }}</span>
@@ -879,19 +952,22 @@ onUnmounted(() => {
           <div v-show="activeTab === 'qq'">
             <div class="section-title">入站状态</div>
             <div class="inbound-card">
-              <div class="config-item">
-                <span class="label">入站启用</span>
-                <span class="value">{{ status?.enabled ? '是' : '否' }}</span>
+              <div class="kv">
+                <span class="k">入站启用</span>
+                <span class="v">{{ status?.enabled ? '是' : '否' }}</span>
+                <span class="src">env</span>
               </div>
-              <div class="config-item">
-                <span class="label">API 地址</span>
-                <span class="value mono">{{ status?.apiBase || '—' }}</span>
+              <div class="kv">
+                <span class="k">API 地址</span>
+                <span class="v">{{ status?.apiBase || '—' }}</span>
+                <span class="src">env</span>
               </div>
-              <div class="config-item">
-                <span class="label">鉴权 Token</span>
-                <span class="value mono">{{
+              <div class="kv">
+                <span class="k">鉴权 Token</span>
+                <span class="v">{{
                   status?.tokenConfigured ? status?.tokenMasked : '未配置'
                 }}</span>
+                <span class="src">env</span>
               </div>
             </div>
 
@@ -926,54 +1002,63 @@ onUnmounted(() => {
             </div>
 
             <div class="section-title">添加绑定</div>
-            <div class="form-group">
-              <label>平台</label>
-              <select v-model="platform" class="input">
-                <option v-for="p in platformOptions" :key="p.value" :value="p.value">
-                  {{ p.label }}
-                </option>
-              </select>
-            </div>
-
-            <div class="form-row">
-              <div class="form-group flex-1">
-                <label>类型</label>
-                <select v-model="externalType" class="input">
-                  <option v-for="t in typeOptions" :key="t.value" :value="t.value">
-                    {{ t.label }}
-                  </option>
-                </select>
+            <div class="form-card">
+              <div class="frow">
+                <label class="label">平台</label>
+                <div class="ctl">
+                  <select v-model="platform" class="input">
+                    <option v-for="p in platformOptions" :key="p.value" :value="p.value">
+                      {{ p.label }}
+                    </option>
+                  </select>
+                </div>
               </div>
-              <div class="form-group flex-1">
-                <label>QQ 号/群号</label>
-                <input
-                  v-model="externalId"
-                  type="text"
-                  inputmode="numeric"
-                  class="input input-mono"
-                  placeholder="纯数字"
-                  v-focus
-                  @keydown.enter="handleAdd"
-                />
+
+              <div class="frow">
+                <label class="label">类型</label>
+                <div class="ctl">
+                  <select v-model="externalType" class="input">
+                    <option v-for="t in typeOptions" :key="t.value" :value="t.value">
+                      {{ t.label }}
+                    </option>
+                  </select>
+                </div>
               </div>
-            </div>
 
-            <div class="form-group">
-              <label>绑定会话</label>
-              <select v-model="sessionId" class="input">
-                <option value="" disabled>选择会话…</option>
-                <option v-for="s in store.sessions" :key="s.id" :value="s.id">
-                  {{ s.title }}
-                </option>
-              </select>
-            </div>
+              <div class="frow">
+                <label class="label">QQ 号/群号</label>
+                <div class="ctl">
+                  <input
+                    v-model="externalId"
+                    type="text"
+                    inputmode="numeric"
+                    class="input input-mono"
+                    placeholder="纯数字"
+                    v-focus
+                    @keydown.enter="handleAdd"
+                  />
+                </div>
+              </div>
 
-            <div v-if="formError" class="error-msg">{{ formError }}</div>
+              <div class="frow">
+                <label class="label">绑定会话</label>
+                <div class="ctl">
+                  <select v-model="sessionId" class="input">
+                    <option value="" disabled>选择会话…</option>
+                    <option v-for="s in store.sessions" :key="s.id" :value="s.id">
+                      {{ s.title }}
+                    </option>
+                  </select>
+                </div>
+              </div>
 
-            <div class="form-actions">
-              <button class="btn btn-create" :disabled="saving" @click="handleAdd">
-                {{ saving ? '添加中…' : '添加绑定' }}
-              </button>
+              <div v-if="formError" class="error-msg">{{ formError }}</div>
+
+              <div class="form-actions">
+                <button class="btn btn-create" :disabled="saving" @click="handleAdd">
+                  {{ saving ? '添加中…' : '添加绑定' }}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -988,41 +1073,46 @@ onUnmounted(() => {
                 <span class="status-text">OneBot v11 HTTP 服务（NapCat）</span>
               </div>
               <div class="config-grid">
-                <div class="config-item">
-                  <span class="label">API 地址</span>
-                  <span class="value mono">{{ status?.apiBase || '—' }}</span>
+                <div class="kv">
+                  <span class="k">API 地址</span>
+                  <span class="v">{{ status?.apiBase || '—' }}</span>
+                  <span class="src">env</span>
                 </div>
-                <div class="config-item">
-                  <span class="label">入站启用</span>
-                  <span class="value">{{ status?.enabled ? '是' : '否' }}</span>
+                <div class="kv">
+                  <span class="k">入站启用</span>
+                  <span class="v">{{ status?.enabled ? '是' : '否' }}</span>
+                  <span class="src">env</span>
                 </div>
-                <div class="config-item">
-                  <span class="label">鉴权 Token</span>
-                  <span class="value mono">{{
+                <div class="kv">
+                  <span class="k">鉴权 Token</span>
+                  <span class="v">{{
                     status?.tokenConfigured ? status?.tokenMasked : '未配置'
                   }}</span>
+                  <span class="src">env</span>
                 </div>
               </div>
             </div>
 
             <!-- autoStart 开关：dev 启动时自动拉起 NapCat（缺省 true——旧配置无字段行为不变） -->
-            <div class="switch-card">
-              <div class="switch-info">
-                <div class="switch-title">dev 启动时自动拉起</div>
-                <div class="switch-hint">
-                  开启后 <code>pnpm dev</code> 会自动启动 NapCat；关闭后需手动点「启动 NapCat」。
-                  旧配置无该字段 = 默认开启（可在设置页关闭）
+            <div class="form-card">
+              <div class="frow frow-top">
+                <span class="label">dev 启动时自动拉起</span>
+                <div class="ctl ctl-top">
+                  <label class="switch">
+                    <input
+                      type="checkbox"
+                      v-model="autoStart"
+                      :disabled="savingPath"
+                      @change="saveAutoStart"
+                    />
+                    <span class="switch-slider"></span>
+                  </label>
+                  <span class="hint-wrap">
+                    开启后 <code>pnpm dev</code> 会自动启动 NapCat；关闭后需手动点「启动 NapCat」。
+                    旧配置无该字段 = 默认开启（可在设置页关闭）
+                  </span>
                 </div>
               </div>
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  v-model="autoStart"
-                  :disabled="savingPath"
-                  @change="saveAutoStart"
-                />
-                <span class="switch-slider"></span>
-              </label>
             </div>
 
             <div v-if="loading" class="list-hint">加载中…</div>
@@ -1043,19 +1133,21 @@ onUnmounted(() => {
             </div>
 
             <div class="path-card">
-              <div class="path-title">NapCat 启动路径</div>
-              <div class="path-row">
-                <input
-                  v-model="napcatPath"
-                  class="path-input mono"
-                  placeholder="C:\NapCat\napcat.exe"
-                  :disabled="savingPath"
-                  spellcheck="false"
-                />
-                <button class="btn-save" :disabled="savingPath" @click="openPicker">浏览…</button>
-                <button class="btn-save" :disabled="savingPath" @click="savePath">
-                  {{ savingPath ? '保存中…' : '保存' }}
-                </button>
+              <div class="frow">
+                <span class="label">NapCat 启动路径</span>
+                <div class="ctl">
+                  <input
+                    v-model="napcatPath"
+                    class="path-input mono"
+                    placeholder="C:\NapCat\napcat.exe"
+                    :disabled="savingPath"
+                    spellcheck="false"
+                  />
+                  <button class="btn-save" :disabled="savingPath" @click="openPicker">浏览…</button>
+                  <button class="btn-save" :disabled="savingPath" @click="savePath">
+                    {{ savingPath ? '保存中…' : '保存' }}
+                  </button>
+                </div>
               </div>
               <div class="path-hint">
                 浏览器无法直接选择本地文件路径——点「浏览…」逐层选择，或手动填写完整路径（.exe /
@@ -1090,6 +1182,7 @@ onUnmounted(() => {
         <div v-show="activeCategory === 'system'" class="system-pane">
           <section class="config-section">
             <div class="section-title">上下文阈值配置</div>
+            <div class="card-sub">保存后立即生效，重启后仍保持。</div>
             <div class="ctx-card">
               <div class="ctx-info">
                 上下文窗口用量达到「告警阈值」时页面顶部横幅提示；达到「交接阈值」时自动交接到新会话。
@@ -1099,33 +1192,38 @@ onUnmounted(() => {
               <div v-if="ctxLoading" class="list-hint">加载中…</div>
 
               <template v-else>
-                <div class="config-item">
+                <div class="frow">
                   <span class="label">告警阈值（warn）</span>
-                  <input
-                    v-model.number="warnThreshold"
-                    type="number"
-                    min="0.01"
-                    max="0.99"
-                    step="0.05"
-                    class="input input-ctx"
-                    :disabled="ctxSaving"
-                  />
+                  <div class="ctl">
+                    <input
+                      v-model.number="warnThreshold"
+                      type="number"
+                      min="0.01"
+                      max="0.99"
+                      step="0.05"
+                      class="input input-ctx"
+                      :disabled="ctxSaving"
+                    />
+                  </div>
                 </div>
-                <div class="config-item">
+                <div class="frow">
                   <span class="label">交接阈值（handoff）</span>
-                  <input
-                    v-model.number="handoffThreshold"
-                    type="number"
-                    min="0.01"
-                    max="0.99"
-                    step="0.05"
-                    class="input input-ctx"
-                    :disabled="ctxSaving"
-                  />
+                  <div class="ctl">
+                    <input
+                      v-model.number="handoffThreshold"
+                      type="number"
+                      min="0.01"
+                      max="0.99"
+                      step="0.05"
+                      class="input input-ctx"
+                      :disabled="ctxSaving"
+                    />
+                  </div>
                 </div>
-                <div class="config-item">
-                  <span class="label">上下文窗口上限</span>
-                  <span class="value mono">{{ ctxMaxDisplay() }}</span>
+                <div class="kv">
+                  <span class="k">上下文窗口上限</span>
+                  <span class="v">{{ ctxMaxDisplay() }}</span>
+                  <span class="src">env</span>
                 </div>
 
                 <div class="ctx-hint">
@@ -1147,6 +1245,7 @@ onUnmounted(() => {
 
           <section class="config-section">
             <div class="section-title">摘要配置</div>
+            <div class="card-sub">保存后需重启 server 才生效（写 .env）。</div>
             <!-- 摘要配置：交接摘要/记忆改写模型（SUMMARY_MODEL/SUMMARY_API_KEY 写 .env，重启生效） -->
             <div class="ctx-card">
               <div class="ctx-info">
@@ -1158,24 +1257,28 @@ onUnmounted(() => {
               <div v-if="sumLoading" class="list-hint">加载中…</div>
 
               <template v-else>
-                <div class="config-item">
+                <div class="frow">
                   <span class="label">摘要模型</span>
-                  <input
-                    v-model="summaryModel"
-                    type="text"
-                    class="input input-ctx"
-                    :disabled="sumDisabled || sumSaving"
-                  />
+                  <div class="ctl">
+                    <input
+                      v-model="summaryModel"
+                      type="text"
+                      class="input input-ctx"
+                      :disabled="sumDisabled || sumSaving"
+                    />
+                  </div>
                 </div>
-                <div class="config-item">
+                <div class="frow">
                   <span class="label">摘要 API Key</span>
-                  <input
-                    v-model="summaryApiKey"
-                    type="password"
-                    class="input input-ctx"
-                    :disabled="sumDisabled || sumSaving"
-                    :placeholder="summaryKeyPlaceholder"
-                  />
+                  <div class="ctl">
+                    <input
+                      v-model="summaryApiKey"
+                      type="password"
+                      class="input input-ctx"
+                      :disabled="sumDisabled || sumSaving"
+                      :placeholder="summaryKeyPlaceholder"
+                    />
+                  </div>
                 </div>
 
                 <div class="ctx-hint">
@@ -1202,6 +1305,7 @@ onUnmounted(() => {
 
           <section class="config-section">
             <div class="section-title">铁律</div>
+            <div class="card-sub">保存后下一轮回复即生效，无需重启。</div>
             <!-- 铁律编辑：开发铁律 + 审查铁律（运行期注入——settings 表优先、常量兜底） -->
             <div class="ctx-card">
               <div class="ctx-info">
@@ -1212,25 +1316,29 @@ onUnmounted(() => {
               <div v-if="ironLawsLoading" class="list-hint">加载中…</div>
               <div v-else-if="ironLawsError" class="error-msg">{{ ironLawsError }}</div>
               <template v-else-if="ironLaws">
-                <div class="config-item iron-law-block">
+                <div class="frow frow-top iron-law-block">
                   <span class="label">开发铁律</span>
-                  <textarea
-                    v-model="ironLawsCoder"
-                    class="input iron-law-textarea"
-                    rows="8"
-                    :disabled="ironLawsSaving"
-                    spellcheck="false"
-                  ></textarea>
+                  <div class="ctl">
+                    <textarea
+                      v-model="ironLawsCoder"
+                      class="input iron-law-textarea"
+                      rows="8"
+                      :disabled="ironLawsSaving"
+                      spellcheck="false"
+                    ></textarea>
+                  </div>
                 </div>
-                <div class="config-item iron-law-block">
+                <div class="frow frow-top iron-law-block">
                   <span class="label">审查铁律</span>
-                  <textarea
-                    v-model="ironLawsReviewer"
-                    class="input iron-law-textarea"
-                    rows="8"
-                    :disabled="ironLawsSaving"
-                    spellcheck="false"
-                  ></textarea>
+                  <div class="ctl">
+                    <textarea
+                      v-model="ironLawsReviewer"
+                      class="input iron-law-textarea"
+                      rows="8"
+                      :disabled="ironLawsSaving"
+                      spellcheck="false"
+                    ></textarea>
+                  </div>
                 </div>
 
                 <div class="iron-law-hint">
@@ -1381,23 +1489,24 @@ onUnmounted(() => {
 }
 
 .settings-nav {
-  width: 168px;
+  /* T3：188px 图标导航（原型 v6 .set-nav 比例）——宽度是「图标 + 文案」一行放得下的下限 */
+  width: 188px;
   flex-shrink: 0;
-  padding: 16px 10px;
+  padding: 18px 10px;
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   overflow-y: auto;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 12px;
+  gap: 9px;
+  padding: 8px 10px;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
   font-size: 13px;
@@ -1421,8 +1530,9 @@ onUnmounted(() => {
 }
 
 .nav-icon {
-  font-size: 14px;
+  /* T3：线框 SVG 图标（原型 v6 成品）——尺寸写在图标自身上，此处只钉不参与收缩 */
   flex-shrink: 0;
+  display: block;
 }
 
 .settings-content {
@@ -1430,12 +1540,19 @@ onUnmounted(() => {
   min-width: 0;
   overflow-y: auto;
   padding: 20px 28px 32px;
+  /* T3：滚动条槽常驻——三个 pane 内容长短不一，滚动条时有时无会让限宽内容区的
+     可用宽度跳变，居中后 frow 左缘随之漂移（实测约 5px）。预留槽位后恒定。 */
+  scrollbar-gutter: stable;
 }
 
-/* IM 接入 / 系统配置详情区限宽居中（表单行不长，避免贴满整行） */
+/* 详情区限宽居中（表单行不长，避免贴满整行）——T3：680 → 720px 卡片列（票面 §二）。
+   三个 pane 同宽同左缘是验收 2「所有 .frow 控件左缘 x 全等」的前提：
+   任一 pane 漏掉限宽，它的表单行就从另一个 x 起跑。 */
 .im-pane,
-.system-pane {
-  max-width: 680px;
+.system-pane,
+.agent-panel {
+  width: 100%;
+  max-width: 720px;
   margin: 0 auto;
 }
 
@@ -1610,32 +1727,13 @@ onUnmounted(() => {
 
 /* ─── Form ─────────────────────────────── */
 
-.form-row {
-  display: flex;
-  gap: 14px;
-}
-
-.form-group {
-  margin-bottom: 14px;
-}
-
-.form-group label {
-  display: block;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  margin-bottom: 5px;
-}
-
-.flex-1 {
-  flex: 1;
-}
-
 .input {
+  /* T3：box-sizing 是「莫名换行」的根治之一——content-box 下 width:100% 会叠上
+     padding+border 溢出 flex 容器，把同行后续元素挤下去 */
+  box-sizing: border-box;
   width: 100%;
-  padding: 8px 11px;
+  height: 34px;
+  padding: 0 11px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-base);
@@ -1643,11 +1741,21 @@ onUnmounted(() => {
   font-size: 13px;
   font-family: inherit;
   outline: none;
-  transition: border-color var(--ease-out);
+  transition:
+    border-color var(--ease-out),
+    box-shadow var(--ease-out);
+}
+
+/* 多行控件不吃 34px 定高（rows 属性说了算）——否则 textarea 被压成一行 */
+textarea.input {
+  height: auto;
+  min-height: 34px;
+  padding: 8px 11px;
 }
 
 .input:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .input-mono {
@@ -1724,28 +1832,125 @@ select.input {
   gap: 8px;
 }
 
-.config-item {
+/* ─── T3 表单行网格（票面 §二）─────────────────────────
+   病灶（用户反馈「有些框都没对齐 / 莫名的换行文字」）两个根因：
+     ① 原 .config-item 是 flex + justify-content:center——label 宽度随文案长短变化、
+        整行又居中 ⇒ 每行控件左缘各不相同，视觉上就是「框没对齐」；
+     ② 全局无 box-sizing:border-box，.input 的 width:100% 叠加 padding+border 后
+        溢出 flex 容器 ⇒ 把同行后续元素挤到下一行，即「莫名的换行」。
+   修法：定宽网格（label 148px 右对齐 + 控件列 1fr）+ .ctl 弹性容器（nowrap）+
+   控件 border-box。三点缺一，上面两个症状就会回来。 */
+.frow {
+  display: grid;
+  grid-template-columns: 148px 1fr;
+  gap: 14px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.frow:last-child {
+  border-bottom: none;
+}
+
+/* 块级控件行（铁律 textarea）：label 与内容顶部对齐——textarea 高 180px+，
+   沿用 center 会让 label 悬在正中间 */
+.frow-top {
+  align-items: start;
+}
+
+.frow .label {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: right;
+  line-height: 1.4;
+}
+
+/* 顶部对齐变体才需要把 label 压下来，与 textarea 首行文字对齐 */
+.frow-top .label {
+  padding-top: 8px;
+}
+
+/* 控件弹性容器：nowrap 是「莫名换行」的正面判据——控件与提示文字永远同行 */
+.frow .ctl {
   display: flex;
-  align-items: baseline;
-  /* 居中显示（用户需求）：label 与值/输入框整体居中对齐，替代两端撑满的割裂观感 */
-  justify-content: center;
-  gap: 12px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: nowrap;
 }
 
-.config-item .label {
-  font-size: 11px;
-  font-weight: 600;
+.frow .hint {
+  font-size: 11.5px;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  flex-shrink: 0;
+  white-space: nowrap;
 }
 
-.config-item .value {
+/* 顶部对齐的弹性容器：控件与多行说明并排时，控件贴首行 */
+.frow .ctl-top {
+  align-items: flex-start;
+}
+
+/* 长文案提示：允许文字内部折行——.frow .hint 的 nowrap 只适合短语，长句会溢出卡片。
+   换行只发生在文字内部，仍在 .ctl 内与控件同行（不把控件挤到下一行）。 */
+.frow .hint-wrap {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  white-space: normal;
+  min-width: 0;
+}
+
+.frow .hint-wrap code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* ─── 只读 kv 行（票面 §二）：右对齐键 + mono 值 + 来源徽章 ───
+   与可编辑表单行同网格，故左缘天然对齐；第三列 auto 放来源徽章。 */
+.kv {
+  display: grid;
+  grid-template-columns: 148px 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.kv:last-child {
+  border-bottom: none;
+}
+
+.kv .k {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.kv .v {
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
-  text-align: right;
   word-break: break-all;
+  min-width: 0;
+}
+
+/* 来源徽章：值从哪来（常量 / env / 活库）——只读项的必要元信息 */
+.kv .src {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: var(--bg-base);
+  padding: 1px 7px;
+  border-radius: 99px;
+  border: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+/* 卡片副标题：一句「这页改了什么时候生效」——紧贴卡片标题 */
+.card-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 
 .mono {
@@ -1753,44 +1958,7 @@ select.input {
   font-size: 11px;
 }
 
-/* ─── autoStart 开关卡 ─────────────────── */
-
-.switch-card {
-  background: var(--bg-base);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: 14px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.switch-info {
-  min-width: 0;
-}
-
-.switch-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.switch-hint {
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1.6;
-  margin-top: 3px;
-}
-
-.switch-hint code {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--accent-text);
-  background: var(--bg-hover);
-  padding: 1px 5px;
-  border-radius: 3px;
-}
+/* ─── 开关（autoStart 等；T3 起嵌在 .frow 的控件列里，不再自带卡片）─────── */
 
 .switch {
   position: relative;
@@ -1852,32 +2020,25 @@ select.input {
   gap: 10px;
 }
 
-.path-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-}
-
-.path-row {
-  display: flex;
-  gap: 8px;
-}
-
 .path-input {
   flex: 1;
-  padding: 8px 12px;
+  box-sizing: border-box;
+  height: 34px;
+  padding: 0 12px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
   color: var(--text-primary);
   font-size: 12px;
   outline: none;
+  transition:
+    border-color var(--ease-out),
+    box-shadow var(--ease-out);
 }
 
 .path-input:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .path-input:disabled {
@@ -1885,7 +2046,9 @@ select.input {
 }
 
 .btn-save {
-  padding: 8px 18px;
+  box-sizing: border-box;
+  height: 34px;
+  padding: 0 18px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-hover);
@@ -1949,7 +2112,11 @@ select.input {
 }
 
 .btn {
-  padding: 8px 22px;
+  /* T3：统一 34px——与同行 input/select 等高。border-box 让 .btn-stop 这类带边框的
+     变体与 .btn-start 这类不带边框的等高（content-box 下两者差 2px） */
+  box-sizing: border-box;
+  height: 34px;
+  padding: 0 22px;
   border: none;
   border-radius: var(--radius-sm);
   font-size: 13px;
@@ -2013,7 +2180,11 @@ select.input {
 
 /* ─── 系统配置：context 阈值卡 ────────────── */
 
-.ctx-card {
+/* .form-card = 无标题的通用表单卡（表单行的容器）。与 .ctx-card 同规格：
+   border 1px + padding 16px 是「卡片内 frow 左缘」的固定内缩量，也是验收 2 里
+   所有 pane 的表单行能对齐到同一条垂直线的依据——裸放在 pane 上的行会少这 17px。 */
+.ctx-card,
+.form-card {
   background: var(--bg-base);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
@@ -2044,14 +2215,17 @@ select.input {
 
 /* ─── 铁律编辑块（textarea 全文——settings 表优先、seed 常量兜底） ─── */
 
-.iron-law-block {
-  /* 覆盖 .config-item 的 baseline 居中 flex——<textarea> 全文块不适合行内基线对齐 */
-  display: block;
+/* 铁律全文块：T3 起与其它表单行同网格（label 148px 右对齐 + textarea 占满控件列），
+   故左缘与上方所有控件对齐；垂直方向走 .frow-top 顶部对齐变体。
+   注意别再给这里加 display —— 它会盖掉 .frow 的 grid（两者特异性相同，靠源码顺序决胜）。 */
+.iron-law-block .ctl {
+  align-items: flex-start;
 }
 
-.iron-law-block .label {
-  display: inline-block;
-  margin-bottom: 6px;
+/* 多行控件在弹性容器里撑满控件列（textarea 的 width:100% 在 flex 项上会被 shrink 吃掉） */
+.frow .ctl > textarea {
+  flex: 1;
+  min-width: 0;
 }
 
 .iron-law-textarea {
@@ -2127,7 +2301,9 @@ select.input {
 }
 
 .btn-up {
-  padding: 5px 12px;
+  box-sizing: border-box;
+  height: 34px;
+  padding: 0 12px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-hover);
@@ -2519,7 +2695,9 @@ select.input {
 /* ─── Quick Create ──────────────────────── */
 
 .agent-panel .create-section {
-  margin: 0 12px 12px;
+  /* T3：水平 margin 归零 + 内容 padding 对齐 16px——本卡片的 .frow 要与另两个 pane 的
+     表单行从同一条垂直线起跑（验收 2）。原 margin:0 12px 会让它整列右移 11px */
+  margin: 0 0 12px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
@@ -2530,7 +2708,7 @@ select.input {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 14px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -2555,15 +2733,18 @@ select.input {
 }
 
 .agent-panel .create-body {
-  padding: 12px 14px;
+  /* 水平 16px 与 .ctx-card / .inbound-card / .status-card / .path-card 同口径 */
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
 }
 
 .agent-panel .create-body .input {
+  box-sizing: border-box;
   width: 100%;
-  padding: 7px 10px;
+  height: 34px;
+  padding: 0 10px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-base);
@@ -2571,30 +2752,26 @@ select.input {
   font-size: 12px;
   font-family: inherit;
   outline: none;
-  transition: border-color var(--ease-out);
+  transition:
+    border-color var(--ease-out),
+    box-shadow var(--ease-out);
+}
+
+/* 多行控件不吃 34px 定高（与 .input 同口径） */
+.agent-panel .create-body textarea.input {
+  height: auto;
+  min-height: 34px;
+  padding: 7px 10px;
 }
 
 .agent-panel .create-body .input:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .agent-panel .create-body textarea.input {
   resize: vertical;
   line-height: 1.5;
-}
-
-.agent-panel .create-provider-row {
-  display: flex;
-  gap: 8px;
-}
-
-.agent-panel .create-provider-row select.input {
-  flex: 1;
-  cursor: pointer;
-}
-
-.agent-panel .create-provider-row .input-mono {
-  flex: 1;
 }
 
 .agent-panel .input-mono {
@@ -2607,7 +2784,7 @@ select.input {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 10px 16px;
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -2618,7 +2795,9 @@ select.input {
 }
 
 .agent-panel .btn {
-  padding: 6px 16px;
+  box-sizing: border-box;
+  height: 34px;
+  padding: 0 16px;
   border: none;
   border-radius: var(--radius-sm);
   font-size: 12px;
