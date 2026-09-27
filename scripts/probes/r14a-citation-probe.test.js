@@ -612,8 +612,32 @@ describe('形状规格守卫（生产 renderSections ↔ 探针拼装）', () =>
     return src.slice(start, end)
   }
 
-  it('头字面量 `【相关记忆】` 仍在前缀 `\\n\\n` 之后', () => {
-    expect(renderSectionsBody()).toContain('`\\n\\n【相关记忆】\\n${')
+  /**
+   * 取生产 `CITATION_MARKER_INSTRUCTION` 的字面量（R14b）。
+   *
+   * 静态源断言而非 import：本文件在 scripts 包（无 TS 构建），拿不到 server 的 TS 模块。
+   * **不引用探针常量**比对（那会让「探针改错」跟着改对），只从源码里抠出字面量。
+   */
+  function instructionLiteralFromSource() {
+    const m = src.match(/export const CITATION_MARKER_INSTRUCTION =\s*'([^']*)'/)
+    expect(
+      m,
+      'CITATION_MARKER_INSTRUCTION 不在 memory/index.ts 里了——守卫失效，先修守卫'
+    ).not.toBeNull()
+    return m[1]
+  }
+
+  it('头字面量 `【相关记忆】` 仍在前缀 `\\n\\n` 之后，指示语紧随其后、在 `1.` 之前', () => {
+    const body = renderSectionsBody()
+    expect(body).toContain('`\\n\\n【相关记忆】\\n${')
+    expect(body).toContain('【相关记忆】\\n${CITATION_MARKER_INSTRUCTION}\\n')
+    // R14b 之前的形状（头后直接接 `lines.join`）必须已不存在——
+    // 形状如果改回去，这条先红（承重断言，别删）
+    expect(body).not.toContain('【相关记忆】\\n${lines.join')
+  })
+
+  it('生产指示语与探针夹具 VARIANTS.jia 逐字节相等（措辞是实测过的自变量，漂移即失据）', () => {
+    expect(instructionLiteralFromSource()).toBe(VARIANTS.jia)
   })
 
   it('逐行格式仍是 `${i + 1}. `（序号 = 最终位置，从 1 起）', () => {

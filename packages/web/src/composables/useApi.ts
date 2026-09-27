@@ -75,6 +75,13 @@ export interface MemoryRefsEntry {
   /** `retrieval_events.reason` 原值；`null` = 该消息没有检索流水行 */
   reason: string | null
   refs: MemoryRef[]
+  /**
+   * 回复正文里采纳的角标号（R14b，**读口派生、不落库**）；`state='injected'` 之外恒空。
+   * 号 ↔ 节的映射按 `ref.injectedPosition` 匹配（不是 `refs` 的数组下标）。
+   */
+  markers: number[]
+  /** 代码字面量（围栏 / 内联码）内的号——诊断列，**前端不渲染**（见 server `citationMarkers.ts`） */
+  markersInCode: number[]
 }
 
 /** 连接器绑定行——后端 snake_case 原样返回（routes/connectors.ts，无 camelCase 转换） */
@@ -534,6 +541,14 @@ export const api = {
 
   clearSessionMessages: (id: string) =>
     request<any>(`/sessions/${id}/messages`, { method: 'DELETE' }),
+
+  // 同会话回退（T1）：删掉 `messageId` 之后的全部消息，会话从该节点继续（目标本身保留）。
+  // 只传目标——删除范围由服务端按 (created_at, id) 定序算，前端不重复这份判据。
+  rollbackSession: (id: string, messageId: string) =>
+    request<{ ok: boolean; messageId: string; removedIds: string[]; removedCount: number }>(
+      `/sessions/${id}/rollback`,
+      { method: 'POST', body: JSON.stringify({ messageId }) }
+    ),
 
   markSessionRead: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}/read`, { method: 'POST' }),

@@ -33,6 +33,14 @@ export function getMessageById(
     .get(id, sessionId, role) as MessageRow | undefined
 }
 
+/** 按 (id, sessionId) 取消息，**不限 role**——回退目标可以是任意角色（用户/猫/系统）。
+ *  与 `getMessageById` 只差那一维：那个判的是「这条**用户**消息在不在」，回退判的是
+ *  「这条消息在不在这个会话里」，判据不同故不复用（复用要传个假 role，更糟）。 */
+export function getMessageInSession(id: string, sessionId: string): MessageRow | undefined {
+  return db.prepare('SELECT * FROM messages WHERE id = ? AND session_id = ?').get(id, sessionId) as
+    MessageRow | undefined
+}
+
 /** 仅按消息 id 查询所属会话（不限定 session/role）。
  *  供 handoff 从 commit message 的 catstudy [uuid] 反查投递目标会话——
  *  getMessageById 必须带 session_id 才能查（鸡生蛋），故拆出此函数。 */
@@ -300,6 +308,81 @@ export function getMessagesWithAgentName(
        LIMIT ?`
     )
     .all(sessionId, limit) as MessageWithAgentName[]
+}
+
+/**
+ * 按 **id 列表**批量取消息正文（R14b 读口用：解析角标要拿原文）。
+ *
+ * 批量是**防 N+1** 的要求：一页 50 条消息，逐条取就是 50 次查询。
+ * 调用方（`routes/memory.ts`）只对**有注入节**的消息取内容——三态里的
+ * `not-retrieved` / `none` 没有号可解析，不该为此多查一次。
+ *
+ * 返回 Map（调用方按 id 取，不必再 find）；不存在的 id 不出现在 Map 里。
+ */
+export function getMessageContentsByIds(
+  ids: readonly string[],
+  sessionId: string
+): Map<string, string> {
+  const result = new Map<string, string>()
+  if (ids.length === 0) return result
+  const placeholders = ids.map(() => '?').join(', ')
+  const rows = db
+    .prepare(
+      `SELECT id, content FROM messages
+       WHERE id IN (${placeholders}) AND session_id = ?`
+    )
+    .all(...ids, sessionId) as Array<{ id: string; content: string }>
+  for (const row of rows) result.set(row.id, row.content)
+  return result
+}
+
+// ─── 同会话回退（T1）────────────────────────────────────
+
+/**
+ * 回退删除集：取**严格晚于**目标消息的本会话消息 id（含 system）。
+ *
+ * **排序键 `(created_at, id)` 与读层同源**（`getSessionMessagesRange` 是
+ * `created_at DESC, id DESC`，此处反向取正序）。单比 `created_at` 不够，理由与那里
+ * 头注写的是同一条：并发写会同毫秒，且老库整秒行经 `toIsoMs` 一律折成 `…SS.000Z`
+ * 而全同值——只比时间会漏行/重行。索引 `idx_messages_session` 也建的同一组列。
+ *
+ * 目标不在本会话（或不存在）→ 空数组（子查询取不到行 ⇒ 行值比较为 NULL ⇒ 恒不成立）。
+ * 「目标不存在」与「目标已是末尾」都给空集，调用方**必须先自行判目标存在**再据此分流。
+ */
+export function getMessageIdsAfter(sessionId: string, messageId: string): string[] {
+  const rows = db
+    .prepare(
+      `SELECT id FROM messages
+       WHERE session_id = ?
+         AND (created_at, id) > (
+           SELECT created_at, id FROM messages WHERE id = ? AND session_id = ?
+         )
+       ORDER BY created_at ASC, id ASC`
+    )
+    .all(sessionId, messageId, sessionId) as Array<{ id: string }>
+  return rows.map((r) => r.id)
+}
+
+/**
+ * 按 id 集删除消息（回退用）——**单事务**，删除顺序由 `purgeMessageDependents` 内部保证
+ * （先 execution_logs 等 RESTRICT 子行，后 messages）。
+ *
+ * 事务是硬要求，不是风格：清理与删父行分开跑，中间失败会留下「子行已清、父行还在」的
+ * 中间态。既有 `deleteMessagesBySession` 接受这个残余（它的调用方紧接着就删父行、只此
+ * 一句），回退这里两个动作必须同生共死。
+ *
+ * 入参由调用方经 `getMessageIdsAfter` 取得——**定序判据单源**在那个函数里，本函数只负责
+ * 原子地删掉给定集合。空集是合法输入（目标已是末尾）：零删除、不开事务。
+ */
+export function deleteMessagesByIds(ids: readonly string[]): { changes: number } {
+  if (ids.length === 0) return { changes: 0 }
+  const placeholders = ids.map(() => '?').join(', ')
+  const tx = db.transaction((): void => {
+    purgeMessageDependents({ kind: 'ids', ids })
+    db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids)
+  })
+  tx()
+  return { changes: ids.length }
 }
 
 // ─── 写入 ──────────────────────────────────────────────

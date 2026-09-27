@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import source from './ChatPanel.vue?raw'
@@ -67,8 +67,12 @@ describe('ChatPanel markdown table overflow', () => {
     // 行分隔线右侧断裂空白带（表格右缘 x=868、行线只到 x=761）——改 table-layout:fixed
     // （width:100% 硬约束的正规实现）+ max-width；超宽内容由 overflow-wrap:anywhere 断行吸收，
     // 不可断内容（nowrap 内联块/pre）刺出容器，滚动需外层包裹容器（table 自身 overflow-x 不建滚动容器）
-    const tableBlock = source.match(/\.chat-panel \.msg-text table\s*\{[^}]*\}/s)
+    // M3 起该规则是「正文 + 记忆抽屉」并列组，故选择器后允许并列项，锚点仍是首条
+    // `.msg-text table` 规则块——断言意图不变（表格自身的溢出逃生通道）
+    const tableBlock = source.match(/\.chat-panel \.msg-text table[^{]*\{[^}]*\}/s)
     expect(tableBlock).toBeTruthy()
+    // 并列的抽屉落点在**同一组**内（抽屉也是窄容器，超宽表格同样靠这条规则消化，票 OQ-3）
+    expect(tableBlock![0]).toContain('.memory-drawer-md table')
     // 根因双锁：正向锁 table-layout:fixed（width:100% 从建议值变硬约束）、
     // 反向锁 display:block 不复辟（重加 display:block 会复发空白带而正向锁全绿）——
     // 只锁正向表征拦不住删 fixed 后回退 display:block（同 10070d1 黑名单断言教训）
@@ -88,16 +92,16 @@ describe('ChatPanel markdown table overflow', () => {
     const msgTextBlock = source.match(/\.msg-text\s*\{[^}]*\}/s)
     expect(msgTextBlock).toBeTruthy()
     expect(msgTextBlock![0]).toContain('overflow-wrap: anywhere')
-    // pre 规则现为三落点并列组（正文 + 流式思考框 + 历史思考框），故选择器后允许并列项，
-    // 锚点仍是「首条 .msg-text pre 规则块」——断言意图不变（代码块覆盖回 normal）
+    // pre 规则现为四落点并列组（正文 + 流式思考框 + 历史思考框 + 记忆抽屉，M3 加入），
+    // 故选择器后允许并列项，锚点仍是「首条 .msg-text pre 规则块」——断言意图不变
     const preBlock = source.match(/\.chat-panel \.msg-text pre[^{]*\{[^}]*\}/s)
     expect(preBlock).toBeTruthy()
     expect(preBlock![0]).toContain('overflow-wrap: normal')
-    const tdBlock = source.match(
-      /\.chat-panel \.msg-text th,\s*\n\s*\.chat-panel \.msg-text td\s*\{[^}]*\}/s
-    )
+    expect(preBlock![0]).toContain('.memory-drawer-md pre')
+    const tdBlock = source.match(/\.chat-panel \.msg-text th,[^{]*\{[^}]*\}/s)
     expect(tdBlock).toBeTruthy()
     expect(tdBlock![0]).toContain('overflow-wrap: anywhere')
+    expect(tdBlock![0]).toContain('.memory-drawer-md th')
   })
 })
 
@@ -147,22 +151,43 @@ describe('ChatPanel 右栏 props 清理（B2 删右栏）', () => {
   })
 })
 
-describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）', () => {
+describe('ChatPanel 气泡 footer（CLI 徽章 + 模型 + 单次 tok——T1 改版）', () => {
   // footer 标记本体已随消息块迁入 MessageItem.vue（静态断言见 MessageItem.test.ts）；
-  // 这里保留的是 footer 数据源（模型/tokens/execMeta 文案）在父组件的口径。
+  // 这里保留的是 footer 数据源（徽章/模型/execMeta 文案）在父组件的口径。
 
-  it('tokens 文案：m = maxContextTokens（上下文窗口数，非 llm_max_tokens 单次输出上限）', () => {
-    expect(source).toContain('function tokensTextFor(agentId: string): string')
+  it('累计窗口用量已从气泡 footer 移除——`tokensTextFor` 退役，窗口读数不再三处重复', () => {
+    // 三处重复：右栏成员卡（保留）/ 历史气泡 footer / 流式气泡 footer。后两处本票砍掉。
+    expect(source).not.toContain('function tokensTextFor')
+    expect(source).not.toContain('tokensText')
+    // 窗口**色阶**仍在（它判的是「离交接线多远」，与读数是两件事），故 maxTokensFor 保留
+    expect(source).toContain('function maxTokensFor(agentId: string): number')
     expect(source).toContain('store.contextTokens.get(agentId) ?? 0')
-    expect(source).toContain('maxTokensFor(agentId)')
-    expect(source).toContain('tokens')
-    expect(source).toContain('不是 llm_max_tokens（单次输出上限 2048）')
     // 旧措辞「窗口 {pct}%」已移除
     expect(source).not.toContain('窗口 {{ contextPctFor(msg.agentId) }}%')
   })
 
+  it('CLI 徽章：文字 = llmProvider，配色按前缀归族（opencode-go 这类带路由后缀的归 opencode）', () => {
+    expect(source).toContain('function cliNameFor(agentId: string): string')
+    expect(source).toContain('?.llmProvider || ')
+    expect(source).toContain('function cliBadgeClass(provider: string): string')
+    expect(source).toContain("if (p.startsWith('claude')) return 'cli-claude'")
+    expect(source).toContain("if (p.startsWith('opencode')) return 'cli-opencode'")
+    // 配色表没收录的 provider 回落中性色，不把工具名藏起来
+    expect(source).toContain("return 'cli-other'")
+    // 徽章文字 + 配色类在视图模型里各算一次（MessageItem 只贴 class），且只查一次 agents
+    expect(source).toContain('const cliName = agentId ? cliNameFor(agentId) : ')
+    expect(source).toContain('cliClass: cliName ? cliBadgeClass(cliName) : ')
+  })
+
   it('旧版停止按钮已从历史气泡 footer 移除（B2 重定位到 streaming/状态行）', () => {
     expect(source).not.toContain('stopAgent(msg.agentId)')
+  })
+
+  it('hover 操作条样式门控：默认 opacity:0，hover 气泡浮现；键盘 focus-within 也显形', () => {
+    expect(source).toMatch(/\.chat-panel \.msg-acts \{[\s\S]{0,200}opacity: 0/)
+    expect(source).toContain('.chat-panel .message:hover .msg-acts,')
+    // 纯 opacity 门控会把按钮留在 tab 序里却看不见——focus-within 补上键盘可达
+    expect(source).toContain('.chat-panel .msg-acts:focus-within')
   })
 
   it('执行元数据（execution_logs 落库稳定耗时/token）优先展示，durationMs 降为无 meta 时兜底', () => {
@@ -171,13 +196,17 @@ describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）'
     expect(source).toContain('store.sessionExecutions.get(msg.id)')
     expect(source).toContain('function execMetaTextFor(msg')
     expect(source).toContain('meta.latencyMs != null')
-    expect(source).toContain('fmtTokens(inTok ?? 0)')
+    // 单次 in/out：`{in}k/{out}k tok`——**不写 "in"/"out" 字样**（用户裁决「放在 / 两边自然就清楚了」）
+    expect(source).toContain('${fmtTokens(inTok ?? 0)}/${fmtTokens(outTok ?? 0)} tok')
+    expect(source).not.toContain('in ${fmtTokens')
     // 两条分支的文案各算一次后随视图模型下发（MessageItem 只做展示）
     expect(source).toContain('execMetaText: execMetaTextFor(msg)')
     expect(source).toContain(
-      'durationText: msg.durationMs != null ? `耗时 ${formatDuration(msg.durationMs)}` : null'
+      'durationText: msg.durationMs != null ? formatDuration(msg.durationMs) : null'
     )
+    // 耗时统一带 ⏱ 前缀（footer 单行里与 tok 并列，没前缀分不清哪个是时间）
     expect(source).toContain('function formatDuration(ms: number): string')
+    expect(source).toContain('return `⏱ ${s >= 10')
   })
 })
 
@@ -608,45 +637,48 @@ describe('ChatPanel 思考+工具单折叠（工具嵌思考框内——对齐�
   // ToolRow 行级渲染的单源断言在 ToolRow.test.ts 已覆盖，不重复。
 })
 
-// ─── 思考框横向溢出（正文/流式思考框/历史思考框三落点同源）────────────────────
+// ─── 思考框横向溢出（正文/流式思考框/历史思考框/记忆抽屉 四落点同源）──────────
 // 病灶：思考框里渲染出的 markdown（代码块 white-space:pre 永不折行、行内 code 掉进 UA
 // 默认的 word-break:normal）没有任何专属规则，溢出冒到最近的滚动容器 .stream-fold-body
 // （overflow-y:auto 会令未声明的 overflow-x 强制计算成 auto），有 1px 就冒横条。
-// 本组断言锁住「三组规则各自并列三个落点」——新增落点漏一个就红。
+// 本组断言锁住「每组规则并列列出全部落点」——新增落点漏一个就红（M3 按本条把记忆抽屉
+// 补进四组；抽屉的下一条机械守卫是文末「落点覆盖」用例，覆盖面是全量 .msg-text 规则）。
 
-describe('ChatPanel 思考框横向溢出（三落点同源：正文 / 流式思考框 / 历史思考框）', () => {
-  it('行内 code：三落点并列 + word-break:break-all（无空格长路径可折行）', () => {
+describe('ChatPanel markdown 落点组（四落点同源：正文 / 流式思考框 / 历史思考框 / 记忆抽屉）', () => {
+  it('行内 code：四落点并列 + word-break:break-all（无空格长路径可折行）', () => {
     expect(source).toContain(
-      '.chat-panel .msg-text code,\n.chat-panel .fold-thinking code,\n.chat-panel .thinking-content code {'
+      '.chat-panel .msg-text code,\n.chat-panel .fold-thinking code,\n.chat-panel .thinking-content code,\n.memory-drawer-md code {'
     )
-    const block = source.match(/\.chat-panel \.thinking-content code\s*\{[^}]*\}/s)
+    // 断言落在**抽屉那一支**的规则体上：既证并列、又证这条规则真管抽屉
+    const block = source.match(/\.memory-drawer-md code\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toContain('word-break: break-all')
   })
 
-  it('代码块：三落点并列 + overflow-x:auto（长行由 pre 自己滚，不外溢到容器）', () => {
+  it('代码块：四落点并列 + overflow-x:auto（长行由 pre 自己滚，不外溢到容器）', () => {
     expect(source).toContain(
-      '.chat-panel .msg-text pre,\n.chat-panel .fold-thinking pre,\n.chat-panel .thinking-content pre {'
+      '.chat-panel .msg-text pre,\n.chat-panel .fold-thinking pre,\n.chat-panel .thinking-content pre,\n.memory-drawer-md pre {'
     )
-    const block = source.match(/\.chat-panel \.thinking-content pre\s*\{[^}]*\}/s)
+    const block = source.match(/\.memory-drawer-md pre\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toContain('overflow-x: auto')
     expect(block![0]).toContain('overflow-wrap: normal')
   })
 
-  it('块内 code：三落点并列 + white-space:pre（块内保持原样换行语义）', () => {
+  it('块内 code：四落点并列 + white-space:pre（块内保持原样换行语义）', () => {
     expect(source).toContain(
-      '.chat-panel .msg-text pre code,\n.chat-panel .fold-thinking pre code,\n.chat-panel .thinking-content pre code {'
+      '.chat-panel .msg-text pre code,\n.chat-panel .fold-thinking pre code,\n.chat-panel .thinking-content pre code,\n.memory-drawer-md pre code {'
     )
-    const block = source.match(/\.chat-panel \.thinking-content pre code\s*\{[^}]*\}/s)
+    const block = source.match(/\.memory-drawer-md pre code\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toContain('white-space: pre')
   })
 
-  it('亮色主题的 pre 覆盖同样并列三落点（否则思考框代码块在浅底上留白边）', () => {
+  it('亮色主题的 pre 覆盖同样并列四落点（否则思考框/抽屉代码块在浅底上留白边）', () => {
     expect(source).toContain("[data-theme='light'] .chat-panel .fold-thinking pre,")
-    expect(source).toContain("[data-theme='light'] .chat-panel .thinking-content pre {")
-    expect(source).toContain("[data-theme='light'] .chat-panel .thinking-content pre code {")
+    expect(source).toContain("[data-theme='light'] .chat-panel .thinking-content pre,")
+    expect(source).toContain("[data-theme='light'] .memory-drawer-md pre {")
+    expect(source).toContain("[data-theme='light'] .memory-drawer-md pre code {")
   })
 
   it('兜底：.stream-fold-body 显式 overflow-x:hidden（防止漏网内容顶出横条；注释写明不是主修）', () => {
@@ -889,6 +921,56 @@ describe('A1 渲染边界：单次 chunk 不按 N 触发 markdown 重算', () =>
   })
 })
 
+// ─── renderMarkdown 的两个面：计数桩（A1）/ 真管线（抽屉）──────────────────
+// 文件头的 vi.mock 把 renderMarkdown 换成计数桩（A1 数「一个 chunk 触发多少条历史消息
+// 重算 markdown」，返回值是什么无所谓）。而抽屉（M1 的端到端、M3 的承重/安全面）断言落在
+// **真 HTML 产物**上，故这些用例先把真实现装回去；每个用例后统一还原成桩。
+let realRenderMarkdown: typeof renderMarkdown | null = null
+
+async function useRealRenderMarkdown(): Promise<void> {
+  realRenderMarkdown ??= (
+    await vi.importActual<typeof import('@/utils/markdown')>('@/utils/markdown')
+  ).renderMarkdown
+  vi.mocked(renderMarkdown).mockImplementation(realRenderMarkdown)
+}
+
+/** 还原文件头那个计数桩（A1 的面；桩的返回值本身不被断言依赖） */
+function restoreRenderMarkdownStub(): void {
+  vi.mocked(renderMarkdown).mockImplementation(() => '<p>stub</p>')
+}
+
+afterEach(() => {
+  restoreRenderMarkdownStub()
+})
+
+/** 挂载级用例的共用前置：jsdom 未实现 Element.scrollTo（贴底滚动会调）+ 新 pinia 实例 */
+beforeEach(() => {
+  Object.defineProperty(Element.prototype, 'scrollTo', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(),
+  })
+  setActivePinia(createPinia())
+})
+
+/** 记录所有请求 URL 的 fetch 桩；`handler` 决定响应形状（M1 与 M3 两组共用） */
+function stubFetch(handler: (url: string) => unknown): string[] {
+  const urls: string[] = []
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) => {
+      urls.push(String(url))
+      return Promise.resolve(
+        new Response(JSON.stringify(handler(String(url))), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    })
+  )
+  return urls
+}
+
 // ─── M1 记忆引用（批量口 / 抽屉 / 渲染边界）──────────────────
 describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
   /** 合并窗口（ChatPanel 的 MEMORY_REFS_DEBOUNCE_MS=50）留足裕度 */
@@ -913,38 +995,52 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     return store
   }
 
-  /** 记录所有请求 URL 的 fetch 桩；`body` 决定响应形状 */
-  function stubFetch(handler: (url: string) => unknown): string[] {
-    const urls: string[] = []
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((url: string) => {
-        urls.push(String(url))
-        return Promise.resolve(
-          new Response(JSON.stringify(handler(String(url))), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          })
-        )
-      })
-    )
-    return urls
+  /**
+   * 从批量口 URL 里取出**真正发出去的 id 集**。
+   *
+   * 不用 `toContain` 判 id：那是子串匹配，`'m1'` 会被 `'m10'` 满足——否定断言
+   * （「不含 welcome id」）在子串口径下等于没断言。故按 `messageIds=` 参数解析。
+   */
+  function memoryRefIds(url: string): string[] {
+    const key = 'messageIds='
+    const raw = url.slice(url.indexOf(key) + key.length)
+    return decodeURIComponent(raw).split(',').filter(Boolean)
   }
 
-  beforeEach(() => {
-    Object.defineProperty(Element.prototype, 'scrollTo', {
-      configurable: true,
-      writable: true,
-      value: vi.fn(),
+  /**
+   * 生产形态的会话历史：server 合成的 welcome 伪消息（`role='system'`、
+   * `id='welcome-<sid>'`、**不落 messages 表**，见 `connectors/socketio.ts` 的
+   * `welcomeMsg`）+ 用户消息 + agent 回复，交错排列。
+   */
+  function setupSessionWithWelcome() {
+    const store = setupSession(0)
+    let seq = 0
+    const mk = (id: string, role: Message['role'], agentId: string | null) => ({
+      id,
+      sessionId: 's1',
+      agentId,
+      role,
+      content: `正文 ${id}`,
+      mentions: [],
+      createdAt: `2026-09-26T00:00:0${seq++}Z`,
     })
-    setActivePinia(createPinia())
-  })
+    store.messages = [
+      mk('welcome-s1', 'system', null),
+      mk('u1', 'user', null),
+      mk('a-msg-1', 'agent', 'a1'),
+      mk('u2', 'user', null),
+      mk('a-msg-2', 'agent', 'a1'),
+    ] as never
+    return store
+  }
+
+  // 共用前置（scrollTo 桩 + pinia）已提到本文件模块级 beforeEach
 
   afterEach(() => {
     vi.unstubAllGlobals()
   })
 
-  it('A4 · 一页 50 条消息只发 1 次 memory-refs 请求，且请求里带齐这 50 个 id', async () => {
+  it('A4 · 一页 50 条消息只发 1 次 memory-refs 请求，且请求里带齐这 50 条里的全部 agent 消息 id', async () => {
     setupSession(50)
     const urls = stubFetch(() => ({}))
     const wrapper = mount(ChatPanel, {
@@ -956,8 +1052,32 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     const memCalls = urls.filter((u) => u.includes('/memory-refs'))
     // 判据是「按消息各拉一次」vs「批量一次」——50 条消息下前者是 50 次
     expect(memCalls).toHaveLength(1)
-    for (let i = 0; i < 50; i++) expect(memCalls[0]).toContain(`m${i}`)
+    // `setupSession` 里偶数下标是 agent、奇数是 user——只有 agent 侧该进请求
+    expect(memoryRefIds(memCalls[0])).toEqual(Array.from({ length: 25 }, (_, i) => `m${i * 2}`))
     wrapper.unmount()
+  })
+
+  it('M2 · 请求面只发 agent 消息 id：welcome 伪消息与 user 消息不进批量口', async () => {
+    setupSessionWithWelcome()
+    const urls = stubFetch(() => ({}))
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+
+    const memCalls = urls.filter((u) => u.includes('/memory-refs'))
+    expect(memCalls).toHaveLength(1)
+    // 全等而不是「不含这三个」：多带任何 id 同样是 400 风险面，必须一并钉住
+    expect(memoryRefIds(memCalls[0])).toEqual(['a-msg-1', 'a-msg-2'])
+    wrapper.unmount()
+  })
+
+  it('M2 · 判据单源：请求面与渲染面共用 isMemoryRefMessage（分叉即假绿）', () => {
+    // 两条调用路径都必须走同一个判据函数——本仓吃过「同一规则两处措辞」
+    expect(source).toContain('store.activeMessages.filter((m) => isMemoryRefMessage(m))')
+    expect(source).toContain('if (!isMemoryRefMessage(msg)) return null')
+    expect(source.match(/function isMemoryRefMessage/g)).toHaveLength(1)
   })
 
   it('A4 · 服务端只对部分消息有记录时，不会为「没有记录的消息」补请求', async () => {
@@ -975,6 +1095,8 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
   })
 
   it('端到端（挂载级）：批量口返回的节 → 气泡 footer 出「📎 记忆 1 条」；点开 → 抽屉显示片段', async () => {
+    // 抽屉自 M3 起走真 markdown 管线——本用例断言抽屉文本，故先装回真实现
+    await useRealRenderMarkdown()
     setupSession(4)
     const ref = {
       docPath: 'docs/adr/0002-b.md',
@@ -1022,6 +1144,14 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     wrapper.unmount()
   })
 
+  it('M3 · 渲染契约：抽屉内容区走 v-html + computed（现算 = 每次重渲染重跑 marked + DOMPurify）', () => {
+    expect(source).toContain('v-html="drawerSnippetHtml"')
+    expect(source).toContain('v-html="drawerDocHtml"')
+    // 抽屉内容区的渲染产物必须是 computed（每次重渲染现算 = 每次重跑 marked + DOMPurify）
+    expect(source).toContain('const drawerSnippetHtml = computed(')
+    expect(source).toContain('const drawerDocHtml = computed(')
+  })
+
   it('A6 · 渲染契约：记忆行走 messageViews 标量 prop，模板不碰会话级集合', () => {
     // 父组件把判定算完、以 prop 传下去（子组件的 O(1) 重渲染靠这条）
     expect(source).toContain(':memory-refs="view.memoryRefs"')
@@ -1031,5 +1161,335 @@ describe('M1 记忆引用（回复下方「用了哪些记忆」）', () => {
     // 模板里不许直接读记忆 Map（判定必须留在 script 的 messageViews 里）
     const template = source.slice(source.indexOf('<template>'), source.indexOf('</template>'))
     expect(template).not.toContain('memoryRefsByMessage')
+  })
+})
+
+// ─── M3 记忆抽屉 MD 化（两处内容区：命中片 / 当前文档）──────────────────────
+describe('M3 记忆抽屉 MD 化（两处内容区按 markdown 渲染）', () => {
+  const SETTLE_MS = 160
+
+  /** 夹具：命中片带标题 / 列表 / 粗体 / 行内码——必须渲成元素，否则是 M3 之前的字面量 */
+  const SNIPPET_MD = '# 片段标题\n\n- 列表项一\n- 列表项二\n\n**粗体** 与 `行内码`'
+  const DOC_MD = '# 文档标题\n\n正文里的 **粗体**'
+
+  /** 挂载 + 等批量口回包 + 点开抽屉（`.mem-link` 来自气泡 footer 的「📎 记忆」行） */
+  async function mountDrawer(opts: { bodyHead?: string; docContent?: string } = {}) {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'M3', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [
+      { id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
+    ]
+    store.messages = [
+      {
+        id: 'm0',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: '正文 0',
+        mentions: [],
+        createdAt: '2026-09-27T00:00:00Z',
+      },
+    ] as never
+    stubFetch((u) => {
+      if (u.includes('/memory-refs')) {
+        return {
+          m0: {
+            state: 'injected',
+            reason: 'ok',
+            refs: [
+              {
+                docPath: 'docs/adr/0002-b.md',
+                sectionAnchor: '## 决策',
+                breadcrumb: 'docs/adr/0002-b.md > 决策',
+                sectionRank: 0,
+                injectedPosition: 1,
+                bodyHead: opts.bodyHead ?? SNIPPET_MD,
+              },
+            ],
+          },
+        }
+      }
+      return { path: 'docs/adr/0002-b.md', content: opts.docContent ?? DOC_MD }
+    })
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+    await nextTick()
+    await wrapper.find('.mem-link').trigger('click')
+    await nextTick()
+    return wrapper
+  }
+
+  /** 次级链接：「打开当前文档」→ 等 /memory/doc 回包 */
+  async function openCurrentDoc(wrapper: VueWrapper): Promise<void> {
+    await wrapper.find('.memory-drawer-open').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
+  }
+
+  it('承重：两处内容区渲成 markdown 元素（标题 / 列表 / 粗体 / 行内码），不再是纯文本字面量', async () => {
+    await useRealRenderMarkdown()
+    const wrapper = await mountDrawer()
+
+    const snippet = wrapper.find('.memory-drawer-snippet')
+    expect(snippet.exists()).toBe(true)
+    expect(snippet.find('h1').exists()).toBe(true)
+    expect(snippet.findAll('li')).toHaveLength(2)
+    expect(snippet.find('strong').exists()).toBe(true)
+    expect(snippet.find('code').exists()).toBe(true)
+    // 反向：markdown 记号不再当字面量露出（改回 <pre> 时这两条必红）
+    expect(snippet.text()).not.toContain('#')
+    expect(snippet.text()).not.toContain('**')
+
+    await openCurrentDoc(wrapper)
+    const doc = wrapper.find('.memory-drawer-doc')
+    expect(doc.exists()).toBe(true)
+    expect(doc.html()).toContain('<h1>')
+    expect(doc.find('strong').exists()).toBe(true)
+    expect(doc.text()).not.toContain('#')
+    wrapper.unmount()
+  })
+
+  it('跨节切剩的未闭合围栏：不抛错、不裸出原始 HTML（切成代码文本）', async () => {
+    await useRealRenderMarkdown()
+    // chunk 按节切，围栏可能被切断——marked 宽容降级；此处钉「不炸 + 不泄漏」
+    const wrapper = await mountDrawer({
+      bodyHead: '前文一段\n\n```html\n<img src=x onerror="window.__pwned = 1">\n',
+    })
+
+    const snippet = wrapper.find('.memory-drawer-snippet')
+    expect(snippet.exists()).toBe(true)
+    // 原始标签若**未转义**漏出，会真的注入一个 img 元素（不是文本）
+    expect(snippet.find('img').exists()).toBe(false)
+    expect(snippet.find('[onerror]').exists()).toBe(false)
+    // 作为**代码文本**被转义保留（hljs 会把 `<` 包进 span，故断言落在文本面而非 HTML 串面）
+    expect(snippet.find('pre code').exists()).toBe(true)
+    expect(snippet.text()).toContain('<img src=x onerror=')
+    wrapper.unmount()
+  })
+
+  it('安全面：<script> / onerror / javascript: 被剥离（真管线实测，非假设）', async () => {
+    await useRealRenderMarkdown()
+    const wrapper = await mountDrawer({
+      bodyHead:
+        '# 标题\n\n<script>window.__pwned = 1</script>\n\n' +
+        '<img src=x onerror="window.__pwned = 1">\n\n[点我](javascript:window.__pwned=1)',
+    })
+
+    const snippet = wrapper.find('.memory-drawer-snippet')
+    expect(snippet.find('script').exists()).toBe(false)
+    expect(snippet.find('img').exists()).toBe(false)
+    expect(snippet.find('[onerror]').exists()).toBe(false)
+    // `javascript:` 链接：href 被 DOMPurify 摘掉（元素可能留下，可执行 URL 不留）
+    expect(snippet.html()).not.toContain('javascript:')
+    expect(
+      snippet.find('a[href]').exists() ? snippet.find('a').attributes('href') : ''
+    ).not.toContain('javascript:')
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('两条口径文案逐字保留（MD 化只换渲染器，不动文案纪律）', async () => {
+    // 源码面：两句原文逐字在场
+    expect(source).toContain('命中片段全文（检索当时落库）')
+    expect(source).toContain('与这段话不等价')
+    expect(source).toContain('打开的是当前检出上的文档，不是当时的快照')
+
+    const wrapper = await mountDrawer()
+    const caption = wrapper.find('.memory-drawer-caption').text()
+    expect(caption).toContain('命中片段全文')
+    expect(caption).toContain('与这段话不等价')
+    expect(wrapper.find('.memory-drawer-hint').text()).toContain('不是当时的快照')
+    wrapper.unmount()
+  })
+
+  it('落点覆盖：每条 `.chat-panel .msg-text` markdown 规则都并列了抽屉落点（唯一豁免 = 基础尺度规则）', () => {
+    // 机械守卫，替代人工核 80 条规则：新渲染路径漏并一组，这里就红。
+    // 豁免只有一条——`.chat-panel .msg-text` 基础规则（16px 字号）：票 §二.3 明写抽屉
+    // 不裸继承气泡尺寸，它的尺度由 `.memory-drawer-snippet/.memory-drawer-doc` 自己声明。
+    const styleStart = source.indexOf('<style>', source.indexOf('</template>'))
+    const styleBlock = source.slice(styleStart, source.lastIndexOf('</style>'))
+    const withoutLanding: string[] = []
+    let scanned = 0
+    styleBlock.replace(/([^{}]+)\{([^{}]*)\}/g, (m, head: string) => {
+      const sel = head
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean)
+      if (!sel.some((x) => x.includes('.chat-panel .msg-text'))) return m
+      scanned++
+      if (sel.length === 1 && sel[0] === '.chat-panel .msg-text') return m
+      if (!sel.some((x) => x.includes('.memory-drawer-md'))) withoutLanding.push(sel.join(' | '))
+      return m
+    })
+    // 探针非真空：真扫到了规则面（对不上就说明扫描口径坏了，而不是「全绿」）
+    expect(scanned).toBeGreaterThan(50)
+    expect(withoutLanding).toEqual([])
+  })
+})
+
+// ─── T1 同会话回退（hover 操作条 → 确认弹窗 → 分隔线）────────────
+describe('T1 同会话回退', () => {
+  /** 记忆行批量口的合并窗口（MEMORY_REFS_DEBOUNCE_MS=50）留足裕度 */
+  const SETTLE_MS = 160
+
+  function setup() {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'T1', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [
+      {
+        id: 'a1',
+        name: 'ds猫',
+        avatar: '🐱',
+        role: 'implementer',
+        llmModel: 'deepseek-flash',
+        llmProvider: 'claude',
+      } as never,
+    ]
+    store.messages = [
+      {
+        id: 'm1',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '一',
+        mentions: [],
+        createdAt: '2026-09-22T00:00:00Z',
+      },
+      {
+        id: 'm2',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: '二',
+        mentions: [],
+        createdAt: '2026-09-22T00:01:00Z',
+      },
+      {
+        id: 'm3',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '三',
+        mentions: [],
+        createdAt: '2026-09-22T00:02:00Z',
+      },
+      {
+        id: 'm4',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: '四',
+        mentions: [],
+        createdAt: '2026-09-22T00:03:00Z',
+      },
+    ] as never
+    return store
+  }
+
+  function mountPanel() {
+    return mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+  }
+
+  // SESSION_ROLLED_BACK 的处理面在 store（多端同步），用例在 `stores/chat.test.ts`
+  // ——本文件不 mock useSocket，发不出真事件。这里只测 UI 链。
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('每条消息都有 ↩ 回退（用户与 agent 消息都算非 welcome 消息）', async () => {
+    setup()
+    const wrapper = mountPanel()
+    await nextTick()
+    expect(wrapper.findAll('.btn-rollback')).toHaveLength(4)
+  })
+
+  it('点 ↩ → 确认弹窗，N = 该消息之后的条数（渲染列表口径）', async () => {
+    setup()
+    const wrapper = mountPanel()
+    await nextTick()
+
+    await wrapper.findAll('.btn-rollback')[1].trigger('click') // m2 之后剩 m3/m4
+    await nextTick()
+
+    const modal = wrapper.find('.rollback-modal')
+    expect(modal.exists()).toBe(true)
+    expect(modal.find('b').text()).toBe('2')
+    expect(modal.text()).toContain('不可恢复')
+  })
+
+  it('取消 → 弹窗关闭且零请求（不误触端点）', async () => {
+    setup()
+    const urls = stubFetch(() => ({}))
+    const wrapper = mountPanel()
+    await nextTick()
+
+    await wrapper.findAll('.btn-rollback')[1].trigger('click')
+    await nextTick()
+    await wrapper.find('.rollback-cancel').trigger('click')
+    await nextTick()
+
+    expect(wrapper.find('.rollback-modal').exists()).toBe(false)
+    expect(urls.filter((u) => u.includes('/rollback'))).toHaveLength(0)
+  })
+
+  it('确认 → 按服务端回执的 removedIds 删消息 + 分隔线出现（剩余消息记忆行照常渲染）', async () => {
+    const store = setup()
+    const urls = stubFetch((url) => {
+      if (url.includes('/rollback')) {
+        return { ok: true, messageId: 'm2', removedIds: ['m3', 'm4'], removedCount: 2 }
+      }
+      // 记忆引用批量口：给存活的 agent 消息 m2 一条命中
+      return {
+        m2: {
+          state: 'injected',
+          items: [
+            {
+              docPath: 'docs/lessons/a.md',
+              sectionAnchor: 'A',
+              contentHash: 'h',
+              breadcrumb: 'A',
+              bodyHead: '片段',
+              injectedPosition: 1,
+              finalRank: 1,
+            },
+          ],
+        },
+      }
+    })
+
+    const wrapper = mountPanel()
+    await nextTick()
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+
+    await wrapper.findAll('.btn-rollback')[1].trigger('click')
+    await nextTick()
+    await wrapper.find('.rollback-ok').trigger('click')
+    // 确认走真异步链（fetch → store → 标记），两个 nextTick 不够；TransitionGroup 的
+    // **离场元素**还要等 rAF 驱动的 transitionend 才摘除，故按既有 SETTLE_MS 口径再等一拍
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+
+    // 请求确实发到了回退端点（不是前端自己删的）
+    expect(urls.some((u) => u.includes('/sessions/s1/rollback'))).toBe(true)
+    // 消息：只剩目标及之前（DOM 也只剩两条——离场元素已摘）
+    expect(store.messages.map((m) => m.id)).toEqual(['m1', 'm2'])
+    expect(wrapper.findAll('.message')).toHaveLength(2)
+    // 分隔线出现，文案带删除条数
+    const line = wrapper.find('.rollback-line')
+    expect(line.exists()).toBe(true)
+    expect(line.text()).toContain('已回退')
+    expect(line.text()).toContain('2')
+    // 弹窗关闭
+    expect(wrapper.find('.rollback-modal').exists()).toBe(false)
+    // 剩余消息的记忆行不受影响（验收 5 第三条）
+    expect(wrapper.find('.msg-memory-refs').exists()).toBe(true)
   })
 })
