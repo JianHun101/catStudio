@@ -51,7 +51,11 @@ describe('Events', () => {
     expect(Events.SESSION_ARCHIVED).toBe('session-archived')
   })
 
-  it('has exactly 27 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(27)
+  it('has SESSION_ROLLED_BACK server→client event（T1 同会话回退）', () => {
+    expect(Events.SESSION_ROLLED_BACK).toBe('session-rolled-back')
+  })
+
+  it('has exactly 28 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(28)
   })
 })

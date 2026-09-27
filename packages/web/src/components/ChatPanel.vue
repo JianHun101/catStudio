@@ -33,8 +33,6 @@ const { isDark, toggle: toggleTheme } = useTheme()
 const input = ref('')
 const chatContainer = ref<HTMLDivElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
-const clearingMessages = ref(false)
-const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次执行
 const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 const sending = ref(false)
 
@@ -574,25 +572,9 @@ function restartStateFor(msg: Message): 'pending' | 'confirmed' | 'none' {
 
 // ─── Existing helpers ──────────────────────
 
-async function handleClearMessages(): Promise<void> {
-  if (!store.activeSessionId) return
-  if (!clearConfirm.value) {
-    clearConfirm.value = true
-    setTimeout(() => {
-      clearConfirm.value = false
-    }, 3000)
-    return
-  }
-  clearingMessages.value = true
-  try {
-    await store.clearSessionMessages(store.activeSessionId)
-    clearConfirm.value = false
-  } catch (err) {
-    log.error('clear messages failed', { error: String(err) })
-  } finally {
-    clearingMessages.value = false
-  }
-}
+// 顶栏「清空」按钮已移除（T1 用户裁决：去掉清空，改为同会话回退）。
+// `store.clearSessionMessages` / `api.clearSessionMessages` 作为**运维口**保留在
+// store 与 API 层——UI 不再暴露，但链路不拆（验收：源码/API 仍在）。
 
 function onInput(e: Event): void {
   if ((e as InputEvent).isComposing) return
@@ -816,6 +798,45 @@ async function handleRetract(msgId: string): Promise<void> {
   await store.retractMessage(store.activeSessionId, msgId)
 }
 
+// ─── 同会话回退（T1）─────────────────────────────
+
+/** 待确认的回退目标（`null` = 弹窗关闭）；`count` = 目标之后的条数 */
+const rollbackTarget = ref<{ msgId: string; count: number } | null>(null)
+const rollingBack = ref(false)
+
+/**
+ * 打开回退确认弹窗。
+ *
+ * `count` 取**当前渲染列表**里该消息之后的条数——弹窗问的是「你看到的这些要删掉，确定吗」，
+ * 判据就该是用户看到的那一份。服务端另有自己的 `(created_at, id)` 删除集（并发同毫秒时
+ * 可能与渲染序差一条），届时以服务端广播回执为准：列表按 `removedIds` 删，不会删错。
+ */
+function requestRollback(msgId: string): void {
+  const idx = store.activeMessages.findIndex((m) => m.id === msgId)
+  if (idx < 0) return
+  rollbackTarget.value = { msgId, count: store.activeMessages.length - idx - 1 }
+}
+
+function cancelRollback(): void {
+  rollbackTarget.value = null
+}
+
+/** 确认回退：调端点 → store 按服务端回执的 removedIds 移除并落分隔线标记 */
+async function confirmRollback(): Promise<void> {
+  const target = rollbackTarget.value
+  if (!target || !store.activeSessionId || rollingBack.value) return
+  rollingBack.value = true
+  try {
+    await store.rollbackSession(store.activeSessionId, target.msgId)
+    rollbackTarget.value = null
+  } catch (err) {
+    // 失败保持弹窗开启：让用户看到没成功，而不是弹窗消失、消息还在（误以为成功）
+    log.error('rollback failed', { error: String(err) })
+  } finally {
+    rollingBack.value = false
+  }
+}
+
 // ─── Bubble Footer (模型 + 窗口用量 + 停止按钮) ───────
 
 /** Agent 模型名（agents 表 llm_model，缺失返回空串隐藏） */
@@ -843,16 +864,28 @@ function fmtTokens(n: number): string {
   return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
 }
 
-/** 气泡 footer tokens 文案：{用量}k/{上限}k tokens——m = maxContextTokens（上下文窗口数），
- *  不是 llm_max_tokens（单次输出上限 2048）——两个数字体系严防混淆 */
-function tokensTextFor(agentId: string): string {
-  return `${fmtTokens(store.contextTokens.get(agentId) ?? 0)}/${fmtTokens(maxTokensFor(agentId))} tokens`
+/** Agent 的 CLI 工具名（= `llmProvider`，徽章文字）。缺失返回空串隐藏徽章。 */
+function cliNameFor(agentId: string): string {
+  return store.agents.find((a) => a.id === agentId)?.llmProvider || ''
 }
 
-/** agent 回复耗时徽标文案：{秒数} 秒（服务端随广播注入 durationMs，瞬态不落库） */
+/** CLI 徽章配色类（用户裁决：工具名用颜色区分，一眼分清谁在说话）。
+ *  provider 值域见 shared `Agent.llmProvider`；`opencode-go` 这类带路由后缀的按**前缀**
+ *  归族——后缀是模型路由不是另一个工具。未知 provider 回落 `cli-other`（中性色）：
+ *  徽章本身照常显示，不因配色表没收录就把工具名藏起来。 */
+function cliBadgeClass(provider: string): string {
+  const p = provider.toLowerCase()
+  if (p.startsWith('claude')) return 'cli-claude'
+  if (p.startsWith('deepseek')) return 'cli-deepseek'
+  if (p.startsWith('opencode')) return 'cli-opencode'
+  return 'cli-other'
+}
+
+/** agent 回复耗时徽标文案：⏱ {秒数} 秒（服务端随广播注入 durationMs，瞬态不落库）。
+ *  统一带 ⏱ 前缀——footer 单行里它与「单次 tok」并列，没有前缀分不清哪个是时间。 */
 function formatDuration(ms: number): string {
   const s = ms / 1000
-  return `${s >= 10 ? s.toFixed(0) : s.toFixed(1)} 秒`
+  return `⏱ ${s >= 10 ? s.toFixed(0) : s.toFixed(1)} 秒`
 }
 
 /** 执行元数据（execution_logs.message_id 精确关联回复气泡——成功路径 1:1；落库稳定值）。
@@ -867,11 +900,14 @@ function execMetaTextFor(msg: { id: string }): string | null {
   const meta = execMetaFor(msg)
   if (!meta) return null
   const parts: string[] = []
-  if (meta.latencyMs != null) parts.push(`耗时 ${formatDuration(meta.latencyMs)}`)
+  if (meta.latencyMs != null) parts.push(formatDuration(meta.latencyMs))
   const inTok = meta.promptTokens
   const outTok = meta.completionTokens
   if (inTok != null || outTok != null) {
-    parts.push(`in ${fmtTokens(inTok ?? 0)} / out ${fmtTokens(outTok ?? 0)} tok`)
+    // 单次调用的 in/out——**不写 "in"/"out" 字样**（用户裁决：「放在 / 两边自然就清楚了」）。
+    // 与已砍掉的累计窗口用量（`{用量}k/{上限}k tokens`）区分：那串带 "tokens" 字样，
+    // 这串带 "tok"；两者都在 footer 会让人分不清哪个是窗口。
+    parts.push(`${fmtTokens(inTok ?? 0)}/${fmtTokens(outTok ?? 0)} tok`)
   }
   return parts.length > 0 ? parts.join(' · ') : null
 }
@@ -1095,7 +1131,10 @@ type MessageView = {
   avatar: string
   senderName: string
   modelName: string
-  tokensText: string
+  /** CLI 工具名（徽章文字，空串 = 不渲染徽章） */
+  cliName: string
+  /** CLI 徽章配色类（父组件按 provider 算一次，MessageItem 只贴 class） */
+  cliClass: string
   contextLevel: 'critical' | 'warn' | ''
   execMetaText: string | null
   durationText: string | null
@@ -1106,6 +1145,9 @@ type MessageView = {
   retractConfirming: boolean
   /** footer 记忆引用行（M1）——引用稳定（按 messageId 缓存），null = 不渲染该行 */
   memoryRefs: MemoryRefView | null
+  /** 回退分隔线（T1）：本条是最近一次回退的锚点时，在其**之后**渲染一条分隔线 */
+  showRollbackLine: boolean
+  rollbackLineText: string
 }
 
 /** 逐字段相等判定（引用类型只比引用：msg/statusEntries 都是稳定引用） */
@@ -1119,7 +1161,8 @@ function isSameView(a: MessageView, b: MessageView): boolean {
     a.avatar === b.avatar &&
     a.senderName === b.senderName &&
     a.modelName === b.modelName &&
-    a.tokensText === b.tokensText &&
+    a.cliName === b.cliName &&
+    a.cliClass === b.cliClass &&
     a.contextLevel === b.contextLevel &&
     a.execMetaText === b.execMetaText &&
     a.durationText === b.durationText &&
@@ -1129,7 +1172,9 @@ function isSameView(a: MessageView, b: MessageView): boolean {
     a.restartConfirming === b.restartConfirming &&
     a.retractConfirming === b.retractConfirming &&
     // 记忆行按**引用**比：`memoryRefViewFor` 保证同一份原始条目（引用不变）产出同一个视图对象
-    a.memoryRefs === b.memoryRefs
+    a.memoryRefs === b.memoryRefs &&
+    a.showRollbackLine === b.showRollbackLine &&
+    a.rollbackLineText === b.rollbackLineText
   )
 }
 
@@ -1164,11 +1209,17 @@ const messageViews = computed<MessageView[]>(() => {
   const msgs = store.activeMessages
   const lastUserId = lastUserMessageId.value
   const sepIndices = dateSepIndices.value
+  // 本会话的回退标记（锚点消息 id + 删除条数）；无标记/锚点已被后续回退删掉 ⇒ undefined
+  const rollbackMark = store.rollbackMarks.get(store.activeSessionId ?? '')
   const views: MessageView[] = []
   const next = new Map<string, MessageView>()
   for (let i = 0; i < msgs.length; i++) {
     const msg = msgs[i]
     const agentId = msg.agentId
+    // 查一次库出两个标量（徽章文字 + 配色类）——`store.agents.find` 别走两遍
+    const cliName = agentId ? cliNameFor(agentId) : ''
+    // 回退分隔线锚在本条之后（不是之前）：用户心智是「从这条往下被删了」
+    const isRollbackAnchor = rollbackMark !== undefined && rollbackMark.afterMessageId === msg.id
     const fresh: MessageView = {
       msg,
       showDateSep: sepIndices.has(i),
@@ -1178,16 +1229,21 @@ const messageViews = computed<MessageView[]>(() => {
       avatar: avatarFor(msg.role, agentId),
       senderName: senderName(agentId),
       modelName: agentId ? modelNameFor(agentId) : '',
-      tokensText: agentId ? tokensTextFor(agentId) : '',
+      cliName,
+      cliClass: cliName ? cliBadgeClass(cliName) : '',
       contextLevel: agentId ? contextLevelFor(agentId) : '',
       execMetaText: execMetaTextFor(msg),
-      durationText: msg.durationMs != null ? `耗时 ${formatDuration(msg.durationMs)}` : null,
+      durationText: msg.durationMs != null ? formatDuration(msg.durationMs) : null,
       timeText: formatTime(msg.createdAt),
       statusEntries: store.messageStatus.get(msg.id) ?? EMPTY_STATUS,
       restartState: restartStateFor(msg),
       restartConfirming: store.confirmingRestartMessageId === msg.id,
       retractConfirming: retractConfirm.value === msg.id,
       memoryRefs: memoryRefViewFor(msg),
+      showRollbackLine: isRollbackAnchor,
+      rollbackLineText: isRollbackAnchor
+        ? `已回退 · 删除了 ${rollbackMark.removedCount} 条消息`
+        : '',
     }
     const cached = viewCache.get(msg.id)
     const view = cached && isSameView(cached, fresh) ? cached : fresh
@@ -1263,28 +1319,6 @@ const messageViews = computed<MessageView[]>(() => {
           </svg>
         </button>
       </div>
-
-      <div v-if="store.activeSessionId" class="chat-header-actions">
-        <button
-          class="btn-clear"
-          :class="{ 'btn-clear-confirm': clearConfirm }"
-          :title="clearConfirm ? '确认清空所有消息' : '清空所有消息'"
-          :aria-label="clearConfirm ? '确认清空所有消息' : '清空所有消息'"
-          :disabled="clearingMessages"
-          @click="handleClearMessages"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M2 4h12M5.5 4V2.5h5V4M6.5 7v5M9.5 7v5M3.5 4l.7 9.1a1 1 0 001 .9h5.6a1 1 0 001-.9l.7-9.1"
-              stroke="currentColor"
-              stroke-width="1.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-          {{ clearingMessages ? '…' : clearConfirm ? '确认清空？' : '清空' }}
-        </button>
-      </div>
     </div>
 
     <!-- Messages -->
@@ -1354,7 +1388,8 @@ const messageViews = computed<MessageView[]>(() => {
               :avatar="view.avatar"
               :sender-name="view.senderName"
               :model-name="view.modelName"
-              :tokens-text="view.tokensText"
+              :cli-name="view.cliName"
+              :cli-class="view.cliClass"
               :context-level="view.contextLevel"
               :exec-meta-text="view.execMetaText"
               :duration-text="view.durationText"
@@ -1367,10 +1402,23 @@ const messageViews = computed<MessageView[]>(() => {
               @open-memory-ref="openMemoryRef"
               @preview-images="openPreview"
               @retract="handleRetract"
+              @rollback="requestRollback"
               @stop-agent="stopAgent"
               @confirm-restart="store.confirmRestart"
               @cancel-restart="store.cancelRestart"
             />
+
+            <!-- 回退分隔线（T1）：锚在本条之后——「从这条往下被删了 N 条」。
+                 前端渲染态不落库（store.rollbackMarks），刷新即消失；锚点被后续回退
+                 一并删掉时本行自然不再渲染（自愈，无需清理标记）。 -->
+            <div
+              v-if="view.showRollbackLine"
+              :key="`rb-${view.msg.id}`"
+              class="rollback-line"
+              role="separator"
+            >
+              <span>{{ view.rollbackLineText }}</span>
+            </div>
           </template>
         </TransitionGroup>
 
@@ -1447,8 +1495,16 @@ const messageViews = computed<MessageView[]>(() => {
               <!-- streaming 气泡 footer：正在思考时的停止按钮落点（B2 重定位——
                    每 agent 唯一气泡，无分组问题；canStopAgent 保守覆盖排队场景） -->
               <div class="msg-footer">
+                <!-- 流式气泡 footer 与历史气泡同口径：CLI 徽章 + 模型名，**不带**累计窗口用量
+                     （改版砍掉 n/m tokens——右栏成员卡已有同一读数，三处重复） -->
                 <span class="msg-footer-info" :class="contextLevelFor(agentId)">
-                  {{ modelNameFor(agentId) }} · {{ tokensTextFor(agentId) }}
+                  <span
+                    v-if="cliNameFor(agentId)"
+                    class="cli-badge"
+                    :class="cliBadgeClass(cliNameFor(agentId))"
+                    >{{ cliNameFor(agentId) }}</span
+                  >
+                  <span class="msg-model">{{ modelNameFor(agentId) }}</span>
                 </span>
                 <span class="msg-footer-right">
                   <button
@@ -1489,8 +1545,15 @@ const messageViews = computed<MessageView[]>(() => {
                 <span class="thinking-dots"><i></i><i></i><i></i></span>
               </div>
               <div class="msg-footer">
+                <!-- 占位气泡同口径（见上方流式气泡注释） -->
                 <span class="msg-footer-info" :class="contextLevelFor(timer.agentId)">
-                  {{ modelNameFor(timer.agentId) }} · {{ tokensTextFor(timer.agentId) }}
+                  <span
+                    v-if="cliNameFor(timer.agentId)"
+                    class="cli-badge"
+                    :class="cliBadgeClass(cliNameFor(timer.agentId))"
+                    >{{ cliNameFor(timer.agentId) }}</span
+                  >
+                  <span class="msg-model">{{ modelNameFor(timer.agentId) }}</span>
                 </span>
                 <span class="msg-footer-right">
                   <button
@@ -1534,139 +1597,141 @@ const messageViews = computed<MessageView[]>(() => {
       </div>
     </div>
 
-    <!-- Input -->
+    <!-- Input：外层铺满主区（边框/底色通栏），内层 840px 居中——与聊天列同列宽 -->
     <div class="chat-input-area">
-      <div class="input-wrapper">
-        <!-- 待发送图片预览 -->
-        <div v-if="pastedImages.length" class="image-preview-row">
-          <div v-for="(src, idx) in pastedImages" :key="idx" class="image-preview-item">
-            <img :src="src" :alt="`待发送图片${idx + 1}`" />
-            <button
-              class="image-preview-remove"
-              :aria-label="`移除图片${idx + 1}`"
-              @click="removeImage(idx)"
+      <div class="chat-input-box">
+        <div class="input-wrapper">
+          <!-- 待发送图片预览 -->
+          <div v-if="pastedImages.length" class="image-preview-row">
+            <div v-for="(src, idx) in pastedImages" :key="idx" class="image-preview-item">
+              <img :src="src" :alt="`待发送图片${idx + 1}`" />
+              <button
+                class="image-preview-remove"
+                :aria-label="`移除图片${idx + 1}`"
+                @click="removeImage(idx)"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            ref="textareaRef"
+            v-model="input"
+            class="chat-input"
+            :placeholder="
+              store.activeSessionId
+                ? '输入消息… @猫咪名 提及  /技能名 触发  （可直接粘贴图片）'
+                : '请先选择会话'
+            "
+            :disabled="!store.activeSessionId"
+            rows="2"
+            @input="onInput"
+            @keydown="onKeydown"
+            @paste="onPaste"
+          ></textarea>
+
+          <div
+            v-if="mentionActive && !skillActive && mentionSuggestions.length > 0"
+            class="mention-dropdown"
+          >
+            <div
+              v-for="(agent, idx) in mentionSuggestions"
+              :key="agent.id"
+              class="mention-item"
+              :class="{ active: idx === mentionIndex }"
+              @mousedown.prevent="selectMention(idx)"
+              @mouseenter="mentionIndex = idx"
             >
-              ×
-            </button>
+              <span class="mention-avatar">{{ agent.avatar }}</span>
+              <span class="mention-name">{{ agent.name }}</span>
+              <span class="mention-hint">tab</span>
+            </div>
+          </div>
+          <div
+            v-if="mentionActive && !skillActive && mentionSuggestions.length === 0"
+            class="mention-dropdown mention-empty"
+          >
+            <span>未找到匹配的猫咪</span>
+          </div>
+
+          <!-- / 技能补全下拉（数据源见 useSkillCommand；skill 本体仍由 CLI 原生消费） -->
+          <div
+            v-if="skillActive && skillSuggestions.length > 0"
+            class="mention-dropdown skill-dropdown"
+          >
+            <div
+              v-for="(skill, idx) in skillSuggestions"
+              :key="skill.name"
+              class="mention-item"
+              :class="{ active: idx === skillIndex }"
+              @mousedown.prevent="selectSkillItem(idx)"
+              @mouseenter="skillIndex = idx"
+            >
+              <span class="skill-name">/{{ skill.name }}</span>
+              <span class="skill-desc" :title="skill.description">{{ skill.description }}</span>
+              <span class="mention-hint">tab</span>
+            </div>
+          </div>
+          <div
+            v-else-if="skillActive && skillsLoaded"
+            class="mention-dropdown mention-empty skill-dropdown"
+          >
+            <span>无匹配技能（skill 由 CLI 原生触发，可继续输入）</span>
+          </div>
+          <!-- 清单不可用时的兜底提示——「端点没取到」≠「没这个词」，不冒充「无匹配」 -->
+          <div v-else-if="skillActive" class="skill-tip">
+            <span>skill 由 CLI 原生触发：输入 /skill-name 或由 agent 自主调用，服务端不再注入</span>
           </div>
         </div>
 
-        <textarea
-          ref="textareaRef"
-          v-model="input"
-          class="chat-input"
-          :placeholder="
-            store.activeSessionId
-              ? '输入消息… @猫咪名 提及  /技能名 触发  （可直接粘贴图片）'
-              : '请先选择会话'
+        <button
+          class="btn-image"
+          :disabled="!store.activeSessionId || sending || pastedImages.length >= MAX_IMAGES"
+          aria-label="添加图片"
+          title="添加图片（或直接 Ctrl+V 粘贴，最多 4 张）"
+          @click="fileInputRef?.click()"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <rect
+              x="1.5"
+              y="2.5"
+              width="13"
+              height="11"
+              rx="1.5"
+              stroke="currentColor"
+              stroke-width="1.3"
+            />
+            <circle cx="5.5" cy="6" r="1.3" stroke="currentColor" stroke-width="1.2" />
+            <path
+              d="M2.5 12.5l3.5-3.5 2.5 2.5 2-2 3 3"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <input
+          ref="fileInputRef"
+          type="file"
+          accept="image/*"
+          multiple
+          class="hidden-file-input"
+          @change="onFileSelect"
+        />
+
+        <button
+          class="btn-send"
+          :disabled="
+            (!input.trim() && pastedImages.length === 0) || !store.activeSessionId || sending
           "
-          :disabled="!store.activeSessionId"
-          rows="2"
-          @input="onInput"
-          @keydown="onKeydown"
-          @paste="onPaste"
-        ></textarea>
-
-        <div
-          v-if="mentionActive && !skillActive && mentionSuggestions.length > 0"
-          class="mention-dropdown"
+          aria-label="发送消息"
+          @click="handleSend"
         >
-          <div
-            v-for="(agent, idx) in mentionSuggestions"
-            :key="agent.id"
-            class="mention-item"
-            :class="{ active: idx === mentionIndex }"
-            @mousedown.prevent="selectMention(idx)"
-            @mouseenter="mentionIndex = idx"
-          >
-            <span class="mention-avatar">{{ agent.avatar }}</span>
-            <span class="mention-name">{{ agent.name }}</span>
-            <span class="mention-hint">tab</span>
-          </div>
-        </div>
-        <div
-          v-if="mentionActive && !skillActive && mentionSuggestions.length === 0"
-          class="mention-dropdown mention-empty"
-        >
-          <span>未找到匹配的猫咪</span>
-        </div>
-
-        <!-- / 技能补全下拉（数据源见 useSkillCommand；skill 本体仍由 CLI 原生消费） -->
-        <div
-          v-if="skillActive && skillSuggestions.length > 0"
-          class="mention-dropdown skill-dropdown"
-        >
-          <div
-            v-for="(skill, idx) in skillSuggestions"
-            :key="skill.name"
-            class="mention-item"
-            :class="{ active: idx === skillIndex }"
-            @mousedown.prevent="selectSkillItem(idx)"
-            @mouseenter="skillIndex = idx"
-          >
-            <span class="skill-name">/{{ skill.name }}</span>
-            <span class="skill-desc" :title="skill.description">{{ skill.description }}</span>
-            <span class="mention-hint">tab</span>
-          </div>
-        </div>
-        <div
-          v-else-if="skillActive && skillsLoaded"
-          class="mention-dropdown mention-empty skill-dropdown"
-        >
-          <span>无匹配技能（skill 由 CLI 原生触发，可继续输入）</span>
-        </div>
-        <!-- 清单不可用时的兜底提示——「端点没取到」≠「没这个词」，不冒充「无匹配」 -->
-        <div v-else-if="skillActive" class="skill-tip">
-          <span>skill 由 CLI 原生触发：输入 /skill-name 或由 agent 自主调用，服务端不再注入</span>
-        </div>
+          {{ sending ? '…' : '发送' }}
+        </button>
       </div>
-
-      <button
-        class="btn-image"
-        :disabled="!store.activeSessionId || sending || pastedImages.length >= MAX_IMAGES"
-        aria-label="添加图片"
-        title="添加图片（或直接 Ctrl+V 粘贴，最多 4 张）"
-        @click="fileInputRef?.click()"
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <rect
-            x="1.5"
-            y="2.5"
-            width="13"
-            height="11"
-            rx="1.5"
-            stroke="currentColor"
-            stroke-width="1.3"
-          />
-          <circle cx="5.5" cy="6" r="1.3" stroke="currentColor" stroke-width="1.2" />
-          <path
-            d="M2.5 12.5l3.5-3.5 2.5 2.5 2-2 3 3"
-            stroke="currentColor"
-            stroke-width="1.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-      </button>
-      <input
-        ref="fileInputRef"
-        type="file"
-        accept="image/*"
-        multiple
-        class="hidden-file-input"
-        @change="onFileSelect"
-      />
-
-      <button
-        class="btn-send"
-        :disabled="
-          (!input.trim() && pastedImages.length === 0) || !store.activeSessionId || sending
-        "
-        aria-label="发送消息"
-        @click="handleSend"
-      >
-        {{ sending ? '…' : '发送' }}
-      </button>
     </div>
 
     <!-- 图片大图预览（lightbox） -->
@@ -1705,6 +1770,34 @@ const messageViews = computed<MessageView[]>(() => {
         </button>
         <div v-if="previewImages.length > 1" class="lightbox-counter">
           {{ previewIndex + 1 }} / {{ previewImages.length }}
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- 回退确认弹窗（T1）：`removedCount` 由服务端回执，但**弹窗里的 N 用渲染列表口径**
+         （见 requestRollback）——问的是「你看到的这些要删掉，确定吗」。
+         确认键走危险色，取消键中性——不可逆操作不该有视觉上等价的两个键。 -->
+    <Teleport to="body">
+      <div
+        v-if="rollbackTarget"
+        class="rollback-mask"
+        role="dialog"
+        aria-modal="true"
+        aria-label="确认回退"
+        @click.self="cancelRollback"
+      >
+        <div class="rollback-modal">
+          <h3>回退到此处？</h3>
+          <p>
+            将删除此消息之后的 <b>{{ rollbackTarget.count }}</b> 条消息，会话从这里继续。
+          </p>
+          <div class="rollback-warn">此操作不可恢复。被删消息的执行记录与记忆引用一并清除。</div>
+          <div class="rollback-btns">
+            <button class="rollback-cancel" @click="cancelRollback">取消</button>
+            <button class="rollback-ok" :disabled="rollingBack" @click="confirmRollback">
+              {{ rollingBack ? '回退中…' : '确认回退' }}
+            </button>
+          </div>
         </div>
       </div>
     </Teleport>
@@ -1770,13 +1863,18 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Header ────────────────────────────── */
 
+/* 主区顶栏：48px 定高 + 下边框——与会话栏头行、右栏「成员 · N」同一水平线。
+   旧值（padding 16px 20px + 两端对齐的 actions 区）随「清空」按钮移除一并收敛。 */
 .chat-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  height: 48px;
+  flex: none;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-deep);
+  background: var(--bg-base);
+  white-space: nowrap;
 }
 
 .chat-header-left h2 {
@@ -1855,48 +1953,6 @@ const messageViews = computed<MessageView[]>(() => {
   font-weight: 400;
 }
 
-/* ─── Header Actions ───────────────────── */
-
-.chat-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.btn-clear {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all var(--ease-out);
-}
-
-.btn-clear:hover:not(:disabled) {
-  color: var(--accent-red);
-  border-color: var(--accent-red);
-  background: rgba(224, 85, 106, 0.06);
-}
-
-.btn-clear-confirm {
-  color: var(--accent-red) !important;
-  border-color: var(--accent-red) !important;
-  background: rgba(224, 85, 106, 0.12) !important;
-  font-weight: 600;
-}
-
-.btn-clear:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
 /* ─── Messages ──────────────────────────── */
 
 .chat-messages-wrapper {
@@ -1906,8 +1962,10 @@ const messageViews = computed<MessageView[]>(() => {
   width: 100%;
 }
 
+/* 主区内容列：840px 居中。与下方 `.chat-input-box` 同宽——聊天列与输入框同列宽，
+   两者左缘对齐（改版前是 800px，且输入区边框只在列内、不铺满主区）。 */
 .chat-messages-inner {
-  max-width: 800px;
+  max-width: 840px;
   margin: 0 auto;
   padding: 20px 24px;
   display: flex;
@@ -2156,6 +2214,114 @@ const messageViews = computed<MessageView[]>(() => {
   background: transparent;
 }
 
+/* ─── 回退分隔线（T1）───────────────────── */
+
+/* 两侧各一条横线夹住文案（::before/::after 各 flex:1）——与日期分隔线同一「分隔」语义，
+   但用线条而非色块，因为它是**操作痕迹**不是时间标记 */
+.rollback-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.rollback-line::before,
+.rollback-line::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+/* ─── 回退确认弹窗（T1）──────────────────── */
+
+.rollback-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 700; /* 高于设置/评估页(600)，低于 error-toast(9999) */
+  display: grid;
+  place-items: center;
+  background: rgba(10, 8, 6, 0.55);
+}
+
+.rollback-modal {
+  width: 400px;
+  max-width: calc(100vw - 40px);
+  padding: 20px 22px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rollback-modal h3 {
+  margin-bottom: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.rollback-modal p {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.rollback-modal p b {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.rollback-warn {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(224, 85, 106, 0.25);
+  border-radius: var(--radius-sm);
+  background: rgba(224, 85, 106, 0.08);
+  font-size: 12.5px;
+  color: var(--accent-red);
+}
+
+.rollback-btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.rollback-btns button {
+  padding: 7px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.rollback-cancel {
+  border-color: var(--border-default);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.rollback-cancel:hover {
+  background: var(--bg-hover);
+}
+
+/* 不可逆操作的主键：危险色实底（与取消键视觉不等价） */
+.rollback-ok {
+  background: var(--accent-red);
+  color: #fff;
+  font-weight: 600;
+}
+
+.rollback-ok:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ─── Scroll-to-bottom Button ───────────── */
 
 .scroll-down-btn {
@@ -2201,14 +2367,23 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Input Area ────────────────────────── */
 
+/* 外层：铺满主区宽度，边框与底色通栏（改版前 max-width 直接落在此层，
+   边框只画到 800px，主区两侧露出断口） */
 .chat-input-area {
-  display: flex;
-  gap: 10px;
-  padding: 14px 20px;
-  max-width: 800px;
-  margin: 0 auto;
+  flex: none;
   width: 100%;
   border-top: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+}
+
+/* 内层：840px 居中，与 `.chat-messages-inner` 同宽同 padding——输入框与聊天列左缘对齐 */
+.chat-input-box {
+  display: flex;
+  gap: 10px;
+  padding: 14px 24px;
+  max-width: 840px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .input-wrapper {
@@ -3513,6 +3688,85 @@ const messageViews = computed<MessageView[]>(() => {
   font-variant-numeric: tabular-nums;
 }
 
+/* ─── CLI 徽章（T1：工具名按颜色区分）────────────── */
+
+.chat-panel .cli-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 7px;
+  border: 1px solid var(--border-default);
+  border-radius: 99px;
+  background: var(--bg-deep);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* 三色分工：claude 橙 / deepseek 蓝 / opencode 绿。留 `cli-other` 中性兜底——
+   配色表没收录的 provider 照常显示工具名（藏起来比配色不对更糟） */
+.chat-panel .cli-badge.cli-claude {
+  color: var(--accent-text);
+  border-color: rgba(212, 165, 116, 0.45);
+}
+
+.chat-panel .cli-badge.cli-deepseek {
+  color: #8fb8e8;
+  border-color: rgba(110, 168, 216, 0.35);
+}
+
+.chat-panel .cli-badge.cli-opencode {
+  color: #9ec7a8;
+  border-color: rgba(126, 184, 153, 0.35);
+}
+
+.chat-panel .msg-footer-info .msg-model {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+/* ─── 气泡 hover 操作条 ──────────────────── */
+
+/* 默认不可见（opacity:0 仍占位 ⇒ 浮现/隐去不改 footer 布局，不推挤时间戳）。
+   `:focus-within` 让键盘 Tab 到按钮时同样显形——纯 opacity 门控会把按钮
+   留在 tab 序里却看不见，那是「键盘能到达但读不到」的坏态。 */
+.chat-panel .msg-acts {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity var(--ease-out);
+}
+
+.chat-panel .message:hover .msg-acts,
+.chat-panel .msg-acts:focus-within {
+  opacity: 1;
+}
+
+.chat-panel .act-btn {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.chat-panel .act-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.chat-panel .act-btn.act-btn-danger:hover {
+  color: var(--accent-red);
+}
+
 /* 停止按钮：小号（AgentPanel btn-stop 同款），visibility 切换不改变布局 */
 .chat-panel .btn-stop-agent {
   flex-shrink: 0;
@@ -3877,28 +4131,19 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 /* ─── Retract Button ───────────────────── */
+/* 撤回按钮（T1 改版后落点 = 气泡 hover 操作条，不再是状态行内）。
+   旧样式带 margin-top 与描边，那是为「贴在状态行下方」定的；进操作条后与
+   ⧉/⚙/↩ 同为裸图标钮，靠 `.act-btn` 的基样式，这里只覆盖语义色。 */
 .chat-panel .btn-retract {
-  margin-top: 4px;
-  padding: 2px 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all var(--ease-out);
+  font-size: 11.5px;
 }
 
 .chat-panel .btn-retract:hover {
   color: var(--accent-red);
-  border-color: var(--accent-red);
 }
 
 .chat-panel .btn-retract-confirm {
   color: var(--accent-red) !important;
-  border-color: var(--accent-red) !important;
-  background: rgba(224, 85, 106, 0.1) !important;
   font-weight: 600;
 }
 

@@ -79,48 +79,55 @@ onUnmounted(() => {
   <!-- app-layout 用 v-show 保活：切设置/评估页不卸载、切回零重建（SessionList 不重跑 onMounted、ChatPanel 不重建）；
        设置/评估页仍 v-if/v-else-if 互斥。副作用是设计内收益：设置页打开期间 socket 事件仍进 store（消息实时进缓存）。 -->
   <div v-show="!showSettings && !showEval" class="app-layout" :class="{ 'left-closed': !leftOpen }">
+    <!-- 52px 图标轨道（改版新增，最左）：logo + 会话/追踪/评估 + 底部设置。
+         全局入口从旧「会话栏底部 footer」上移到此处——会话栏可整栏收起，轨道不能，
+         故入口放轨道才「收起后仍在」。 -->
+    <nav class="app-rail" aria-label="主导航">
+      <div class="rail-logo" title="CatStudio" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <ellipse cx="12" cy="16.6" rx="4.7" ry="3.7" />
+          <ellipse cx="5.6" cy="11.2" rx="1.9" ry="2.5" />
+          <ellipse cx="9.5" cy="8" rx="2" ry="2.7" />
+          <ellipse cx="14.5" cy="8" rx="2" ry="2.7" />
+          <ellipse cx="18.4" cy="11.2" rx="1.9" ry="2.5" />
+        </svg>
+      </div>
+      <button class="rail-btn on" title="对话" aria-label="对话" aria-current="page">💬</button>
+      <!-- 执行追踪：T2 页面的展示位（本票只留 seam，不接行为） -->
+      <button
+        class="rail-btn"
+        disabled
+        title="执行追踪（随 T2 落地）"
+        aria-label="执行追踪（随 T2 落地）"
+      >
+        ⚙
+      </button>
+      <button class="rail-btn" title="评估中心" aria-label="评估中心" @click="showEval = true">
+        📊
+      </button>
+      <div class="rail-sp"></div>
+      <button class="rail-btn" title="设置" aria-label="设置" @click="showSettings = true">
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path
+            d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
+          />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      </button>
+    </nav>
+
     <aside class="panel-left">
       <div class="panel-inner">
         <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />
-      </div>
-      <!-- 全局入口（Claude Desktop 图标条模式）：评估中心（E4-B）+ 设置——均为全局视图，
-           严禁放会话区（ChatPanel）——会话区入口会被误解为单会话配置 -->
-      <div class="left-sidebar-footer">
-        <button
-          class="settings-entry"
-          :class="{ 'settings-entry-collapsed': !leftOpen }"
-          title="评估中心"
-          aria-label="评估中心"
-          @click="showEval = true"
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M2.5 13.5V9M6 13.5V6M9.5 13.5v-5M13 13.5V3"
-              stroke="currentColor"
-              stroke-width="1.6"
-              stroke-linecap="round"
-            />
-          </svg>
-          <span v-if="leftOpen" class="settings-entry-text">评估</span>
-        </button>
-        <button
-          class="settings-entry"
-          :class="{ 'settings-entry-collapsed': !leftOpen }"
-          title="设置"
-          aria-label="设置"
-          @click="showSettings = true"
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.3" />
-            <path
-              d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"
-              stroke="currentColor"
-              stroke-width="1.3"
-              stroke-linecap="round"
-            />
-          </svg>
-          <span v-if="leftOpen" class="settings-entry-text">设置</span>
-        </button>
       </div>
     </aside>
 
@@ -214,7 +221,9 @@ onUnmounted(() => {
 
 .app-layout {
   display: grid;
-  grid-template-columns: 260px 1fr 300px;
+  /* 四栏：52px 图标轨道 | 236px 会话栏 | 主区 | 300px 成员栏。
+     轨道恒在（全局入口落点），会话栏才是可收起的「第二级」。 */
+  grid-template-columns: 52px 236px 1fr 300px;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
@@ -226,19 +235,25 @@ onUnmounted(() => {
  * compositor without triggering layout. */
 }
 
-/* Collapsed: 56px icon column（参考 Claude Desktop 图标条）——右栏保持 */
+/* 收起会话栏：轨道保留、会话栏整栏收起（只剩轨道）。
+ * 轨道 0 宽 + display:none 双管——display:none 的 item 不参与布局，但显式 track 仍占位
+ * （下方窄窗注释同款理由），故 track 必须同步归零，否则聊天区被无形压缩。 */
 .app-layout.left-closed {
-  grid-template-columns: 56px 1fr 300px;
+  grid-template-columns: 52px 0 1fr 300px;
+}
+
+.app-layout.left-closed .panel-left {
+  display: none;
 }
 
 /* 窄窗（<1000px）右栏自动隐藏时同步收窄列——display:none 的 item 不参与布局，
  * 但显式 300px track 仍占位，若不收窄则聊天区被无形压缩（与 narrowMq 同断点） */
 @media (max-width: 1000px) {
   .app-layout {
-    grid-template-columns: 260px 1fr;
+    grid-template-columns: 52px 236px 1fr;
   }
   .app-layout.left-closed {
-    grid-template-columns: 56px 1fr;
+    grid-template-columns: 52px 0 1fr;
   }
 }
 
@@ -290,45 +305,84 @@ onUnmounted(() => {
   overflow-x: hidden;
 }
 
-/* ─── 左侧栏底部设置入口 ─────────────────── */
+/* ─── 52px 图标轨道 ──────────────────────── */
 
-.left-sidebar-footer {
-  flex-shrink: 0;
-  padding: 10px 12px;
-  border-top: 1px solid var(--border-subtle);
-  /* 评估中心 + 设置两个入口纵向排列 */
+.app-rail {
+  background: var(--bg-base);
+  border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  padding: 10px 0 12px;
+  gap: 6px;
+  overflow: hidden;
 }
 
-.settings-entry {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+/* logo：极简平涂爪印——accent 实底圆角块 + 深色剪影（单边两色，不拟物） */
+.rail-logo {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 10px;
+  background: var(--accent);
+  color: var(--bg-deep);
+}
+
+.rail-logo svg {
+  width: 19px;
+  height: 19px;
+}
+
+.rail-btn {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  /* ::before 的 3px 激活竖条要贴轨道左缘——定位锚点 */
+  position: relative;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: 9px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 16px;
   font-family: inherit;
   cursor: pointer;
+  display: grid;
+  place-items: center;
   transition: all var(--ease-out);
 }
 
-.settings-entry:hover {
+.rail-btn:hover:not(:disabled) {
   background: var(--bg-hover);
-  color: var(--text-primary);
+  color: var(--text-secondary);
 }
 
-/* 折叠态（56px 图标条）：仅图标居中（Claude Desktop 模式） */
-.settings-entry-collapsed {
-  width: 40px;
-  margin: 0 auto;
-  justify-content: center;
-  padding: 8px 0;
+/* 激活态：accent-soft 高亮块 + 左缘 3px 竖条 */
+.rail-btn.on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.rail-btn.on::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.rail-btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* 撑开中段：底部设置按钮沉到轨道底 */
+.rail-sp {
+  flex: 1;
 }
 </style>

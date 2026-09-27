@@ -542,6 +542,14 @@ export const api = {
   clearSessionMessages: (id: string) =>
     request<any>(`/sessions/${id}/messages`, { method: 'DELETE' }),
 
+  // 同会话回退（T1）：删掉 `messageId` 之后的全部消息，会话从该节点继续（目标本身保留）。
+  // 只传目标——删除范围由服务端按 (created_at, id) 定序算，前端不重复这份判据。
+  rollbackSession: (id: string, messageId: string) =>
+    request<{ ok: boolean; messageId: string; removedIds: string[]; removedCount: number }>(
+      `/sessions/${id}/rollback`,
+      { method: 'POST', body: JSON.stringify({ messageId }) }
+    ),
+
   markSessionRead: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}/read`, { method: 'POST' }),
 

@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid'
 import {
   SessionCreateSchema,
   SessionUpdateSchema,
+  SessionRollbackSchema,
   Events,
   type SessionConfig,
   type ToolCallInfo,
@@ -210,6 +211,85 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       messagesRemoved: msgResult.changes,
       executionLogsRemoved: elogResult.changes,
     }
+  })
+
+  // ─── POST /api/sessions/:id/rollback — 同会话回退（T1）──
+  //
+  // 语义：删掉目标消息**之后**的全部消息，会话从该节点继续（目标本身保留）。
+  // 与「撤回」的分工：撤回是「这条我发错了」（只允许最新一条用户消息，且连带回滚文件与
+  // 依赖包）；回退是「从某个节点重来」（任意消息、只动消息与执行记录，**不碰工作区**）。
+  // 两者混用会让「回退到十轮前」顺带 `git reset --hard` 掉之后所有工作——故回退不做
+  // git/npm 回滚，这是有意的边界，不是漏实现。
+  //
+  // 顺序硬约束：**先停后删**。正在跑/排队的命令持有即将被删的触发消息，先删会让 run 收尾
+  // 往已删的触发消息上写回复（或落出孤儿 execution_logs）。
+
+  app.post('/api/sessions/:id/rollback', async (req, reply) => {
+    const id = (req.params as any).id
+
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    const parsed = SessionRollbackSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() })
+    }
+    const { messageId } = parsed.data
+
+    // 目标必须是**落库**的消息。会话欢迎消息（`welcome-<sessionId>`）是 SESSION_HISTORY 的
+    // 合成字段、从不落库，故在这里落到 404——这正是票面要的 4xx，且「库里查不到」与
+    // 「不是可回退的目标」在这个判据下是同一件事，不必再按 id 前缀特判（那会把 `welcome-`
+    // 字面量复制到第二处，正是本仓反复吃过的「同一规则两处措辞」）。
+    const target = messagesRepo.getMessageInSession(messageId, id)
+    if (!target) {
+      return reply.status(404).send({ error: 'Message not found in session' })
+    }
+
+    // 删除集只算一次：先停（要它）、后删（要它）——定序判据单源在 getMessageIdsAfter
+    const doomed = messagesRepo.getMessageIdsAfter(id, messageId)
+
+    const engine = getExecutionEngine()
+    const stoppedAgents: string[] = []
+    if (engine) {
+      const doomedSet = new Set(doomed)
+      for (const slot of engine.snapshot()) {
+        if (slot.sessionId !== id) continue
+        const trigger = slot.currentTriggerMessageId
+        if (trigger && doomedSet.has(trigger) && engine.abortAgent(slot.agentId, id)) {
+          stoppedAgents.push(slot.agentId)
+        }
+      }
+      for (const mid of doomed) engine.cancelQueuedCommand(mid)
+    }
+
+    const result = messagesRepo.deleteMessagesByIds(doomed)
+
+    sessionsRepo.updateSessionTimestamp(id)
+
+    // 广播给**会话房间**（不是全局）：回退只影响待在该会话里的客户端。payload 带权威
+    // `removedIds`，前端按 id 删——不自己按时间戳重算删除集（两处各算一次必然分叉）。
+    // try 包住：删除已提交，广播只是让别的端同步；发不出去不该把成功的回退变成 500
+    // （与本文件 PATCH 的房间广播同款护栏）。
+    try {
+      getIO()?.to(`session:${id}`).emit(Events.SESSION_ROLLED_BACK, {
+        sessionId: id,
+        messageId,
+        removedIds: doomed,
+        removedCount: result.changes,
+      })
+    } catch {
+      /* emit 失败不影响响应 */
+    }
+
+    log.info('session rolled back', {
+      sessionId: id,
+      messageId,
+      removedCount: result.changes,
+      stoppedAgents: stoppedAgents.length,
+    })
+
+    return { ok: true, messageId, removedIds: doomed, removedCount: result.changes }
   })
 
   // ─── GET /api/sessions/:id/messages — 获取消息列表 ──

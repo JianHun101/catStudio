@@ -14,7 +14,7 @@
  * · **markdown 走 computed**（依赖追踪自带缓存）——取代父组件过去手写的
  *   `markdownCache` Map（键拼整条正文、无淘汰、无界增长）。
  */
-import { computed, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import type { Message, ToolCallInfo } from '@cat-study/shared'
 import { useChatStore, type AgentStatusEntry } from '@/stores/chat'
 import { renderMarkdown } from '@/utils/markdown'
@@ -34,9 +34,12 @@ const props = defineProps<{
   isLatestUser: boolean
   avatar: string
   senderName: string
-  /** footer：{模型} · {n}k/{m}k tokens 文案（父组件已格式化） */
+  /** footer：模型名（CLI 徽章右侧的 mono 文字，父组件已格式化） */
   modelName: string
-  tokensText: string
+  /** footer：CLI 工具名（徽章文字，空串 = 不渲染徽章） */
+  cliName: string
+  /** footer：CLI 徽章配色类（父组件按 provider 判定） */
+  cliClass: string
   /** footer 用量色阶（阈值来自配置，父组件判定） */
   contextLevel: 'critical' | 'warn' | ''
   /** footer 执行元数据文案（execution_logs 落库稳定值；无则 null） */
@@ -67,6 +70,8 @@ const emit = defineEmits<{
   cancelRestart: [msgId: string]
   /** 点记忆条目 → 父组件开抽屉（本组件不碰网络、不持有抽屉态） */
   openMemoryRef: [ref: MemoryRef]
+  /** hover 操作条「↩ 回退」→ 父组件开确认弹窗并调端点（本组件不碰网络） */
+  rollback: [msgId: string]
 }>()
 
 const store = useChatStore()
@@ -280,6 +285,39 @@ const stopSignal = computed(() =>
 function canStop(agentId: string): boolean {
   return stopSignal.value.split(',').includes(agentId)
 }
+
+// ─── hover 操作条：复制（T1 改版）────────────────────────
+//
+// `copied` 是**叶子自持**的瞬时态：它不跨消息、不参与任何父级判定，上抛只会把一次
+// 点击变成整列重算——正是本组件抽取时要拆掉的那条链。故留在组件内。
+
+/** 复制成功态（按钮短暂变 ✓） */
+const copied = ref(false)
+let copyTimer: ReturnType<typeof setTimeout> | undefined
+
+/**
+ * 复制正文纯文本。
+ *
+ * 取的是**渲染层看到的同一串**（`finalTextContent` + 占位符解析）——复制出去的正文必须
+ * 与气泡里读到的一致。思考块/折叠块不进正文（它们不是「回复正文」），角标号也不带
+ * （`[n]` 是注入序的引用，脱离记忆行没有意义）。
+ */
+async function copyBody(): Promise<void> {
+  const text = resolveDisplayPlaceholders(finalTextContent(props.msg), store.agents)
+  try {
+    await navigator.clipboard.writeText(text)
+    copied.value = true
+    clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => {
+      copied.value = false
+    }, 1200)
+  } catch {
+    // 剪贴板不可用（非安全上下文 / 无权限 / 用户拒绝）时静默：复制失败对正文零破坏，
+    // 而弹一条错误会打断阅读。按钮不变 ✓ 即是反馈。
+  }
+}
+
+onUnmounted(() => clearTimeout(copyTimer))
 </script>
 
 <template>
@@ -417,16 +455,56 @@ function canStop(agentId: string): boolean {
               未检索记忆
             </span>
           </div>
+          <!-- 信息面：CLI 徽章 + 模型名 + 耗时 / 单次 in·out tok——**恒显**，不受 hover 门控。
+               改版砍掉了累计窗口用量（`{用量}k/{上限}k tokens`）：右栏成员卡已有同一读数，
+               三处重复；单次调用量由 execMetaText 承担。 -->
           <span
             v-if="msg.role === 'agent' && msg.agentId"
             class="msg-footer-info"
             :class="contextLevel"
           >
-            {{ modelName }} · {{ tokensText
-            }}<span v-if="execMetaText" class="msg-duration"> · {{ execMetaText }}</span
-            ><span v-else-if="durationText" class="msg-duration"> · {{ durationText }}</span>
+            <span v-if="cliName" class="cli-badge" :class="cliClass">{{ cliName }}</span>
+            <span class="msg-model">{{ modelName }}</span>
+            <span v-if="execMetaText" class="msg-duration"> · {{ execMetaText }}</span>
+            <span v-else-if="durationText" class="msg-duration"> · {{ durationText }}</span>
           </span>
           <span class="msg-footer-right">
+            <!-- 操作面：默认 opacity:0，hover 气泡浮现、移出即隐（CSS 门控，无 JS 状态）。
+                 只有**动作**进操作条；记忆行/模型/耗时/时间那些是读数，不进 hover 门控——
+                 把它们藏起来等于让人 hover 才看得见信息。 -->
+            <span class="msg-acts">
+              <button
+                class="act-btn"
+                :title="copied ? '已复制' : '复制正文'"
+                :aria-label="copied ? '已复制' : '复制正文'"
+                @click="copyBody"
+              >
+                {{ copied ? '✓' : '⧉' }}
+              </button>
+              <!-- ⚙ trace：本票只做展示位 + seam（T2 接线跳页），故**有意不绑 @click** -->
+              <button v-if="msg.role === 'agent'" class="act-btn" title="trace 页随 T2 落地">
+                ⚙ trace
+              </button>
+              <!-- 撤回（既有机制）：落点从用户消息状态行迁到 hover 操作条。
+                   判据仍是 isLatestUser——服务端只允许撤回最新一条用户消息 -->
+              <button
+                v-if="msg.role === 'user' && isLatestUser"
+                class="act-btn btn-retract"
+                :class="{ 'btn-retract-confirm': retractConfirming }"
+                :aria-label="retractConfirming ? '确认撤回消息' : '撤回消息'"
+                @click="emit('retract', msg.id)"
+              >
+                {{ retractConfirming ? '确认撤回？' : '撤回' }}
+              </button>
+              <button
+                class="act-btn act-btn-danger btn-rollback"
+                title="回退到此处（删除此消息之后的全部消息）"
+                aria-label="回退到此处"
+                @click="emit('rollback', msg.id)"
+              >
+                ↩ 回退
+              </button>
+            </span>
             <time class="msg-time" :datetime="msg.createdAt">{{ timeText }}</time>
           </span>
         </div>
@@ -455,15 +533,7 @@ function canStop(agentId: string): boolean {
           停止
         </button>
       </div>
-      <button
-        v-if="isLatestUser"
-        class="btn-retract"
-        :class="{ 'btn-retract-confirm': retractConfirming }"
-        :aria-label="retractConfirming ? '确认撤回消息' : '撤回消息'"
-        @click="emit('retract', msg.id)"
-      >
-        {{ retractConfirming ? '确认撤回？' : '撤回' }}
-      </button>
+      <!-- 撤回按钮已迁到气泡 hover 操作条（.msg-acts）——状态行只留状态与停止按钮 -->
     </div>
   </div>
 </template>

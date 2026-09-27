@@ -50,7 +50,9 @@ function baseProps(over: Record<string, unknown> = {}) {
     avatar: '🐱',
     senderName: 'ds猫',
     modelName: 'deepseek-flash',
-    tokensText: '12k/128k tokens',
+    // T1：累计窗口用量 `{n}k/{m}k tokens` 已从 footer 砍掉，换成 CLI 徽章
+    cliName: 'claude',
+    cliClass: 'cli-claude',
     contextLevel: '' as const,
     execMetaText: null,
     durationText: null,
@@ -127,7 +129,8 @@ describe('MessageItem 折叠块（L2：收起不渲染内容体）', () => {
       .mock.calls.filter((c) => c[0] === '历史思考正文').length
     expect(afterExpand).toBe(1)
     await wrapper.setProps({ grouped: true })
-    await wrapper.setProps({ tokensText: '13k/128k tokens' })
+    // 无关 prop（footer 徽章）churn —— 换的是哪个 prop 不影响本用例要守的事
+    await wrapper.setProps({ cliName: 'opencode' })
     const afterPropChurn = vi
       .mocked(renderMarkdown)
       .mock.calls.filter((c) => c[0] === '历史思考正文').length
@@ -371,13 +374,28 @@ describe('MessageItem 结构契约（静态源）', () => {
     expect(source).toContain("tc.replace(/\\[思考\\]\\s*/g, '')")
   })
 
-  it('footer：{模型} · {n}k/{m}k tokens（分组消息同样渲染）+ 耗时/execMeta 兜底链', () => {
+  it('footer 信息面：CLI 徽章 + 模型名 + 耗时/execMeta 兜底链（分组消息同样渲染）', () => {
     expect(source).toContain('class="msg-footer"')
     expect(source).toMatch(/v-if="msg\.role === 'agent' && msg\.agentId"/)
-    expect(source).toMatch(/modelName \}\} · \{\{ tokensText/)
+    // T1：`{模型} · {n}k/{m}k tokens` 换成「CLI 徽章 + 模型名」——累计窗口用量整条砍掉
+    expect(source).toContain('class="cli-badge" :class="cliClass"')
+    expect(source).toContain('class="msg-model"')
+    expect(source).not.toContain('tokensText')
     expect(source).toContain('v-if="execMetaText" class="msg-duration"')
     expect(source).toContain('v-else-if="durationText" class="msg-duration"')
     expect(source).not.toContain('stopAgent(msg.agentId)')
+  })
+
+  it('hover 操作条：默认不可见由 CSS 门控，agent = ⧉/⚙(seam)/↩，用户消息含撤回', () => {
+    expect(source).toContain('class="msg-acts"')
+    // ⚙ trace 本票只是展示位：有 title 说明 T2 落地，**有意不绑 @click**
+    expect(source).toContain('title="trace 页随 T2 落地"')
+    expect(source).toContain('@click="emit(\'rollback\', msg.id)"')
+    // 撤回判据仍是 isLatestUser（服务端只允许撤最新一条用户消息）
+    expect(source).toMatch(/v-if="msg\.role === 'user' && isLatestUser"/)
+    expect(source).toContain('@click="emit(\'retract\', msg.id)"')
+    // 信息面（记忆行）不进操作条——藏起来等于让人 hover 才看得见读数
+    expect(source).not.toMatch(/class="msg-acts"[\s\S]{0,400}class="msg-memory-refs"/)
   })
 
   it('system 消息保持原 msg-time 结构（无 footer 行）+ 色阶 class 走标量 prop', () => {

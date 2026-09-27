@@ -75,53 +75,45 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
 
   <!-- Expanded: full session list -->
   <div v-else class="session-list">
-    <!-- Brand -->
-    <div class="brand">
-      <span class="brand-icon">🐾</span>
-      <div class="brand-text">
-        <h1>CatStudio</h1>
-        <p>多Agent协作平台</p>
-      </div>
+    <!-- 会话栏头行：48px，与主区顶栏、右栏「成员 · N」同一水平线（治「左右侧面板上方空缺」）。
+         品牌块（logo + CatStudio 字样）已上移到 52px 图标轨道——logo 唯一归属轨道，
+         会话栏只留本区自身的标题与操作；此处若再放一块品牌，头行就会被顶下去。 -->
+    <div class="section-header">
+      <span class="section-header-label">会话</span>
+      <span class="section-header-right">
+        <span class="section-count" v-if="store.sessions.length">{{ store.sessions.length }}</span>
+        <!-- 「显示已归档」开关（spec §4.1）：归档会话默认从列表隐藏 -->
+        <button
+          class="btn-toggle-archived"
+          :class="{ active: store.showArchived }"
+          :aria-pressed="store.showArchived"
+          :title="store.showArchived ? '隐藏已归档会话' : '显示已归档会话'"
+          @click="store.setShowArchived(!store.showArchived)"
+        >
+          <span>已归档</span>
+        </button>
+        <!-- 新建会话：头行右侧（图1「添加成员」范式），不再占底部 footer -->
+        <button
+          class="btn-new-session-header"
+          title="新建会话"
+          aria-label="新建会话"
+          @click="showCreate = true"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M8 3v10M3 8h10"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span>新建</span>
+        </button>
+      </span>
     </div>
 
     <!-- Sessions -->
     <div class="section">
-      <div class="section-header">
-        <span>会话</span>
-        <span class="section-header-right">
-          <span class="section-count" v-if="store.sessions.length">{{
-            store.sessions.length
-          }}</span>
-          <!-- 「显示已归档」开关（spec §4.1）：归档会话默认从列表隐藏 -->
-          <button
-            class="btn-toggle-archived"
-            :class="{ active: store.showArchived }"
-            :aria-pressed="store.showArchived"
-            :title="store.showArchived ? '隐藏已归档会话' : '显示已归档会话'"
-            @click="store.setShowArchived(!store.showArchived)"
-          >
-            <span>已归档</span>
-          </button>
-          <!-- 新建会话：标题行右侧（图1「添加成员」范式），不再占底部 footer -->
-          <button
-            class="btn-new-session-header"
-            title="新建会话"
-            aria-label="新建会话"
-            @click="showCreate = true"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M8 3v10M3 8h10"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-              />
-            </svg>
-            <span>新建</span>
-          </button>
-        </span>
-      </div>
-
       <!-- 等待服务器启动（health check 轮询中） -->
       <div v-if="store.waitingForServer" class="status-box">
         <span class="status-spinner"></span>
@@ -211,34 +203,6 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   height: 100%;
 }
 
-/* ─── Brand ─────────────────────────────── */
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 20px 18px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.brand-icon {
-  font-size: 28px;
-  line-height: 1;
-}
-
-.brand-text h1 {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.3px;
-}
-
-.brand-text p {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 1px;
-}
-
 /* ─── Section ───────────────────────────── */
 
 .section {
@@ -249,16 +213,27 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   padding: 12px 10px;
 }
 
+/* 头行：48px 定高 + 下边框——与主区顶栏、右栏「成员 · N」同一水平线。
+   nowrap 保 236px 窄栏内不折行（折行会把 48px 撑破、三条头行错位）。 */
 .section-header {
+  height: 48px;
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 8px 8px;
+  gap: 8px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+
+.section-header-label {
+  flex: none;
 }
 
 .section-count {
