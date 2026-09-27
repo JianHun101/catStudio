@@ -42,9 +42,12 @@ function citationMarkersFromLexer(lexer: unknown): readonly number[] {
  *
  * · **非本次合法号一律 `return undefined`**：交回默认 tokenizer，`[7]` 越界号与
  *   未注入位置的号原样保持字面文本（`renderMarkdown` 无 markers 时即全字面）。
- * · **`[n](` / `[n][` / `[n]:` 不认**：那是行内链接 / 引用式链接 / 链接定义，
- *   `[1]` 只是链接文本。本条与后端 `citationMarkers.ts` 的 `CITATION_PATTERN`
- *   是**同一条排除式**——两侧判据面必须一致，否则后端说有角标、前端渲染不出来。
+ * · **markdown 链接三形态不认**：`[n](url)` 行内链接 / `[n][ref]` 引用式链接 /
+ *   `[n]:` 链接定义，`[n]` 在那里只是链接文本。本条与后端 `citationMarkers.ts`
+ *   的 `CITATION_PATTERN` 是**同一条排除式**——两侧判据面必须一致，否则后端说
+ *   有角标、前端渲染不出来。
+ *   **引用式链接那一支只看「非纯数字 ref」**（M4）：`[1][2]` 是相邻两条引用、
+ *   两个号都成角标，`[1][foo]` / `[1][]` 才是链接。**改动此式必须与后端同批改。**
  */
 marked.use({
   extensions: [
@@ -58,7 +61,9 @@ marked.use({
         this: unknown,
         src: string
       ): { type: string; raw: string; marker: number } | undefined {
-        const m = /^\[(\d+)\](?![([:])/.exec(src)
+        // 排除式与后端 `CITATION_PATTERN` 逐字同段：`(` 行内链接 / `:` 链接定义 /
+        // `[` 且括号内纯数字（`\d+]`）引用式链接——`[1][2]` 是两条相邻引用（M4）
+        const m = /^\[(\d+)\](?!\(|\[(?!\d+\])|:)/.exec(src)
         if (!m) return undefined
         const marker = Number(m[1])
         const allowed = citationMarkersFromLexer((this as { lexer?: unknown }).lexer)
