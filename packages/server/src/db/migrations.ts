@@ -1237,6 +1237,57 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
       created_at TEXT NOT NULL
     )`,
   },
+
+  // ── 票 T2 · 执行追踪查询页两表（上下文决策明细 + prompt 分节快照）────────────
+  // **为什么另立表而不给 `execution_logs` 挂 JSON 列**（店长派活单裁 OQ-1）：
+  // ① 快照含 system prompt 全文，单行可到数十 KB——挂列会让 `execution_logs` 每次
+  //    列表查询（trace 页主区、`/session-traces`）都被迫拖上这坨；② 分节是**一对多**，
+  //    挂 JSON 就得在应用层反序列化 + 过滤，SQL 面再也问不出「哪节的字符数最大」。
+  // 形态照 `retrieval_*` 三表先例（同族流水表，键同为 `execution_id`）。
+  //
+  // **FK 取 `ON DELETE CASCADE`，与 `retrieval_events` 的不挂 FK 刻意不同**：
+  // `purgeMessageDependents` 删消息时会连带删 `execution_logs` 行（回退 / 清空 / seed
+  // --reset 三条路径都走它）。`retrieval_events` 不挂 FK ⇒ 那批行会**静默变孤儿**，
+  // 本表若照抄就是**再添一个**孤儿源。CASCADE 不是 RESTRICT——它不新增删除阻塞边，
+  // 父行一删子行随删，正是这里要的语义。
+  {
+    name: 'context_decisions table (T2 上下文决策明细·逐条消息)',
+    ticket: 'T2',
+    sql: `CREATE TABLE IF NOT EXISTS context_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      execution_id TEXT NOT NULL REFERENCES execution_logs(id) ON DELETE CASCADE,
+      session_id TEXT,
+      message_id TEXT,
+      ordinal INTEGER NOT NULL,
+      stage TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL
+    )`,
+  },
+  {
+    name: 'idx_context_decisions_execution',
+    ticket: 'T2',
+    sql: `CREATE INDEX IF NOT EXISTS idx_context_decisions_execution
+        ON context_decisions(execution_id)`,
+  },
+  {
+    // 主键取 `(execution_id, section_key)`：一次执行的同名节唯一（写口恒为「先删后插」
+    // 的幂等 upsert 语义，重跑同一 execution_id 不会留两行「系统提示」）。
+    name: 'prompt_snapshots table (T2 prompt 分节快照·逐节全文)',
+    ticket: 'T2',
+    sql: `CREATE TABLE IF NOT EXISTS prompt_snapshots (
+      execution_id TEXT NOT NULL REFERENCES execution_logs(id) ON DELETE CASCADE,
+      section_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      status TEXT NOT NULL,
+      char_count INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (execution_id, section_key)
+    )`,
+  },
 ]
 
 /**

@@ -359,6 +359,11 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
     return {
       executions: rows.map((r) => ({
+        // T2：气泡 footer 的 ⚙trace 点开就要 executionId。本投影是**前端本来就拉**的
+        // （ChatPanel 进会话即批量取、按 messageId 缓存），带上它 = 点 ⚙ 零往返。
+        // 独立的 `/api/eval/execution-by-message` 仍在——它是**权威回退**：缓存未就绪
+        // （老消息、刷新后 store 还没回、或该执行行已被回退删掉）时由它给准话。
+        executionId: r.id,
         messageId: r.message_id,
         agentId: r.agent_id,
         status: r.status,

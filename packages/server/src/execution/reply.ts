@@ -24,7 +24,9 @@ import {
   agents as agentsRepo,
   executionLogs as execLogsRepo,
   retrievalEvents as retrievalRepo,
+  traceDetails as traceDetailsRepo,
 } from '../db/repository/index.js'
+import type { PromptSectionInput, ContextDecisionInput } from '../db/repository/traceDetails.js'
 import { HYBRID_POOL_PER_QUERY } from '../db/repository/chunks.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import {
@@ -294,6 +296,171 @@ export function recordRetrievalTrace(args: {
     })
   } catch (err: any) {
     log.warn('检索流水埋点异常（已跳过，不影响本轮回复）', {
+      agentId: args.agentId,
+      sessionId: args.sessionId,
+      error: err?.message,
+    })
+  }
+}
+
+// ─── T2 执行追踪详情：上下文决策明细 + prompt 分节快照 ──────────────
+
+/**
+ * prompt 快照的**节键**（值域闭集）——前端按它逐节拉正文
+ * （`GET /api/eval/prompt-section?key=`），故键一旦发布就是契约，改键 = 改 API。
+ *
+ * 分节口径 = **注入面的一次切分**，八节互不重叠、并集 = `llmMessages[0].content`
+ * 的构成成分 + 若干独立 system/消息块。刻意**不含对话消息**：正文即对话区，
+ * 再快照一份是纯冗余（消息面由 `context_decisions` 逐条承载）。
+ */
+export const TRACE_SECTION_KEYS = {
+  systemPrompt: 'system_prompt',
+  ironLaw: 'iron_law',
+  skillDirectory: 'skill_directory',
+  dynamicHints: 'dynamic_hints',
+  summaryBlock: 'summary_block',
+  runningSummary: 'running_summary',
+  memory: 'memory',
+  knowledge: 'knowledge',
+} as const
+
+/** 节键 → 展示名。前端不硬编码中文（改文案不必动前端），由读口随清单下发 */
+const TRACE_SECTION_LABELS: Record<string, string> = {
+  [TRACE_SECTION_KEYS.systemPrompt]: '系统提示（本猫人格）',
+  [TRACE_SECTION_KEYS.ironLaw]: '铁律（按角色注入）',
+  [TRACE_SECTION_KEYS.skillDirectory]: '技能目录',
+  [TRACE_SECTION_KEYS.dynamicHints]: '动态上下文指令',
+  [TRACE_SECTION_KEYS.summaryBlock]: '摘要块（压缩后替代旧消息）',
+  [TRACE_SECTION_KEYS.runningSummary]: '增量摘要（交接续跑）',
+  [TRACE_SECTION_KEYS.memory]: '相关记忆',
+  [TRACE_SECTION_KEYS.knowledge]: '知识库',
+}
+
+/** 节键的**展示序**（= 它在 prompt 里的位置序，非字母序） */
+const TRACE_SECTION_ORDER: string[] = [
+  TRACE_SECTION_KEYS.systemPrompt,
+  TRACE_SECTION_KEYS.ironLaw,
+  TRACE_SECTION_KEYS.skillDirectory,
+  TRACE_SECTION_KEYS.dynamicHints,
+  TRACE_SECTION_KEYS.summaryBlock,
+  TRACE_SECTION_KEYS.runningSummary,
+  TRACE_SECTION_KEYS.memory,
+  TRACE_SECTION_KEYS.knowledge,
+]
+
+/** 组装一节的写口输入（空串 → `empty`，调用方只需给原文） */
+export function traceSection(
+  key: string,
+  content: string,
+  status?: 'truncated'
+): PromptSectionInput {
+  return {
+    sectionKey: key,
+    label: TRACE_SECTION_LABELS[key] ?? key,
+    status: content === '' ? 'empty' : (status ?? 'injected'),
+    content,
+    ordinal: TRACE_SECTION_ORDER.indexOf(key),
+  }
+}
+
+/**
+ * 上下文决策明细的**纯组装**（导出供直测：口径最容易写错的一处，与
+ * `selectTaskHistory` / `recordRetrievalTrace` 同款「必须能独立断言」理由）。
+ *
+ * 四级漏斗逐级判定，每条消息**恰好落一档**：
+ * `combinedMessages`（全量，含回捞的同锚历史）
+ *   → `relevantMessages`（可见性过滤）
+ *   → `messagesForTruncation`（摘要替代）
+ *   → `truncatedMessages`（token 预算）
+ *
+ * **身份用 `Map<id, ordinal>` 不靠数组下标**：`messagesForTruncation` / `truncatedMessages`
+ * 都是**原对象引用**的子集（`getRelevantMessages` 只 filter 不 clone，截断只 push 引用），
+ * 故按 id 找 ordinal 是精确的；按下标推理会在「同锚历史与窗口消息 id 重复」时错位。
+ *
+ * `repliedOrdinals` 是 `truncatedMessages` 的下标集（调用方在截断后算出），
+ * 映射回 `combinedMessages` 的 ordinal 后作为 `kept` 行的 `detail`。
+ */
+export function buildContextDecisions(args: {
+  combinedMessages: ReadonlyArray<{ id: string }>
+  relevantMessages: ReadonlyArray<{ id: string }>
+  messagesForTruncation: ReadonlyArray<{ id: string }>
+  truncatedMessages: ReadonlyArray<{ id: string }>
+  repliedOrdinals: ReadonlySet<number>
+}): ContextDecisionInput[] {
+  const ordinalOf = new Map<string, number>()
+  args.combinedMessages.forEach((m, i) => ordinalOf.set(m.id, i))
+  const relevantIds = new Set(args.relevantMessages.map((m) => m.id))
+  const compressIds = new Set(args.messagesForTruncation.map((m) => m.id))
+  const keptIds = new Set(args.truncatedMessages.map((m) => m.id))
+  // 被标注「已回复」的消息 id 集：`truncatedMessages` 的下标 → 消息 id
+  const repliedIds = new Set<string>()
+  args.repliedOrdinals.forEach((idx) => {
+    const m = args.truncatedMessages[idx]
+    if (m) repliedIds.add(m.id)
+  })
+
+  const out: ContextDecisionInput[] = []
+  for (const m of args.combinedMessages) {
+    const ordinal = ordinalOf.get(m.id)
+    if (ordinal === undefined) continue
+    if (!relevantIds.has(m.id)) {
+      out.push({ messageId: m.id, ordinal, stage: 'assemble', decision: 'invisible', detail: null })
+    } else if (!compressIds.has(m.id)) {
+      out.push({
+        messageId: m.id,
+        ordinal,
+        stage: 'compress',
+        decision: 'summary_replaced',
+        detail: null,
+      })
+    } else if (!keptIds.has(m.id)) {
+      out.push({ messageId: m.id, ordinal, stage: 'truncate', decision: 'budget', detail: null })
+    } else {
+      out.push({
+        messageId: m.id,
+        ordinal,
+        stage: 'truncate',
+        decision: 'kept',
+        detail: repliedIds.has(m.id) ? 'replied' : null,
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * 执行追踪详情落盘（T2）——定位口径与 `recordRetrievalTrace` **同一个谓词**
+ * （`findRunningExecutionId` 单源），不另写一份「触发消息 + 本猫 + running」。
+ *
+ * 写失败在写口内部吞掉（同 `retrievalEvents` 硬约束 2），本函数不抛；
+ * 这里再包一层 try 防的是**写口之外**的两段（查执行行、组装），与
+ * `recordRetrievalTrace` 的兜底形状逐字同源。
+ */
+export function recordTraceDetails(args: {
+  sessionId: string
+  agentId: string
+  triggerMessageId: string
+  decisions: ContextDecisionInput[]
+  sections: PromptSectionInput[]
+}): void {
+  try {
+    const executionId = findRunningExecutionId(args.sessionId, args.agentId, args.triggerMessageId)
+    if (!executionId) {
+      log.warn('执行追踪详情：找不到本轮 running 执行行，跳过落盘', {
+        agentId: args.agentId,
+        sessionId: args.sessionId,
+        triggerMessageId: args.triggerMessageId,
+      })
+      return
+    }
+    traceDetailsRepo.insertTraceDetails({
+      executionId,
+      sessionId: args.sessionId,
+      decisions: args.decisions,
+      sections: args.sections,
+    })
+  } catch (err: any) {
+    log.warn('执行追踪详情埋点异常（已跳过，不影响本轮回复）', {
       agentId: args.agentId,
       sessionId: args.sessionId,
       error: err?.message,
@@ -622,7 +789,10 @@ export async function runAgentReply(
   // ⇒ mention 精确匹配落空 ⇒ 静默不触发。目录段每轮不变，坐的是第一条 system
   // message（真 system prompt 面），不是 dynamicHints 的位置——后者是场景提示，
   // 有「超限时被当最旧先丢」的观察项（CLI 截断止血单），常驻菜单不能坐那儿。
-  const systemPromptWithDirectory = `${baseSystemPrompt}\n\n${buildSkillDirectorySection()}`
+  // 抽成具名常量而非内联进模板串：T2 的 prompt 快照要取到**同一串**（内联就得重算一遍，
+  // 而「重算一遍」正是快照与真值分叉的起点）。
+  const skillDirectorySection = buildSkillDirectorySection()
+  const systemPromptWithDirectory = `${baseSystemPrompt}\n\n${skillDirectorySection}`
 
   // 将 system prompt 中的角色占位符（@作者/@架构师/@审查者）替换为实际 agent 名
   // 使 LLM 能正确输出 @店长 等实际 agent 名——mention 解析是严格精确匹配，
@@ -659,6 +829,19 @@ export async function runAgentReply(
       }
     }
   }
+
+  // ── T2 上下文决策明细（组装在此，落盘在下方 llm.chat 之前）──────────
+  // 四级漏斗的全量账。**不在此处写库**：落盘要等 running summary / memory / knowledge
+  // 注入完（快照要的是最终那串），两块合并成一次事务写（`recordTraceDetails`）。
+  // 已知边界：被 `selectTaskHistory` 在合并**之前**丢掉的同锚历史不在本账内——
+  // 它们从未进入 `combinedMessages`，收进决策表就得先伪造一个 ordinal。
+  const contextDecisions = buildContextDecisions({
+    combinedMessages,
+    relevantMessages,
+    messagesForTruncation,
+    truncatedMessages,
+    repliedOrdinals: repliedUserIndexes,
+  })
 
   const llmMessages: LLMMessage[] = [
     { role: 'system', content: finalSystemPrompt },
@@ -760,9 +943,14 @@ export async function runAgentReply(
   // ── 注入增量摘要到 system prompt ──────────────────
   // 从当前会话读取运行中的摘要，注入到 system prompt 顶部
   const runningSummary = sessionsRepo.getSessionRunningSummary(sessionId)
+  // T2 快照：增量摘要**当次注入的那一段原文**。取「增强后的串减原串」而非重跑
+  // `parseSummaryText`——`injectSummaryIntoSystem` 是纯前缀拼接（原串恒为前缀），
+  // 减法得到的就是逐字节真值；重跑一遍解析器则是「同规则两处措辞」的又一处。
+  let runningSummaryInjected = ''
   if (runningSummary) {
     const enhancedPrompt = injectSummaryIntoSystem(llmMessages[0].content, runningSummary)
     if (enhancedPrompt !== llmMessages[0].content) {
+      runningSummaryInjected = enhancedPrompt.slice(llmMessages[0].content.length)
       llmMessages[0] = { ...llmMessages[0], content: enhancedPrompt }
       const summaryLen = (() => {
         try {
@@ -1020,6 +1208,48 @@ export async function runAgentReply(
     state.deleteActiveStream(agent.id, sessionId)
     return { content: '[消息已撤回]', msgId }
   }
+
+  // ── T2 执行追踪详情落盘（上下文决策 + prompt 分节快照）──────────
+  // **位置是硬要求**：在 memory / knowledge 注入**之后**（早一步写就会漏掉后注入的两块，
+  // 快照与真进模型的串不等），在 `llm.chat` **之前**（那段是 LLM 调用本体，写库耗时
+  // 不该混进 TTFT 的分母）。写失败只 warn（写口内部吞），不阻塞回复。
+  recordTraceDetails({
+    sessionId,
+    agentId: agent.id,
+    triggerMessageId: triggerMsg.id,
+    decisions: contextDecisions,
+    sections: [
+      // 三节取**占位符已替换**的形态：真进 prompt 的就是替换后的串，记原始串会在
+      // 「agent.systemPrompt 含 @作者 一类占位符」时与注入面不等（本仓有占位符漏网
+      // 致 mention 落空的前科）。`resolveRolePlaceholders` 是纯函数，分片调用与
+      // 整串调用结果一致（替换逐处发生，与上下文无关）。
+      traceSection(
+        TRACE_SECTION_KEYS.systemPrompt,
+        resolveRolePlaceholders(agent.systemPrompt, triggerMsg.authorName)
+      ),
+      traceSection(
+        TRACE_SECTION_KEYS.ironLaw,
+        ironLaw ? resolveRolePlaceholders(ironLaw, triggerMsg.authorName) : ''
+      ),
+      traceSection(
+        TRACE_SECTION_KEYS.skillDirectory,
+        resolveRolePlaceholders(skillDirectorySection, triggerMsg.authorName)
+      ),
+      // 动态提示是**多条独立 system 消息**（不是拼成一条），此处按 `\n\n` 汇总展示；
+      // 逐条原文仍可在展开内容里分清（各段自带标题）。
+      traceSection(TRACE_SECTION_KEYS.dynamicHints, dynamicHints.join('\n\n')),
+      traceSection(TRACE_SECTION_KEYS.summaryBlock, summaryBlockMsg?.content ?? ''),
+      traceSection(TRACE_SECTION_KEYS.runningSummary, runningSummaryInjected),
+      // 记忆节的 `truncated` 与 `retrieval_events.truncated` **同源同值**（同一趟的
+      // stats）——两处各判一次会造出「流水说截断了、快照说没截断」的第三个混淆面。
+      traceSection(
+        TRACE_SECTION_KEYS.memory,
+        memoryContext,
+        memoryResult?.stats?.truncated ? 'truncated' : undefined
+      ),
+      traceSection(TRACE_SECTION_KEYS.knowledge, knowledgeContext),
+    ],
+  })
 
   // ── 段 E7 `llm.chat`（R2 段五；详情表 = `span_llm`）─────
   // **硬点 3**：`start_at` 取 `chatStream` 调用**前一刻**，不是 `for await` 进入时刻——

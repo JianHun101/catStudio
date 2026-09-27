@@ -260,6 +260,7 @@ export function getAgentStats(agentId: string): {
  *  多个 agent → N:1），关联回复气泡会混淆（店长裁决，别踩反）。
  *  只投影展示所需列，避免整行含 error_message 等无关字段。 */
 export function getExecutionsBySession(sessionId: string): Array<{
+  id: string
   message_id: string | null
   agent_id: string
   status: string
@@ -270,11 +271,12 @@ export function getExecutionsBySession(sessionId: string): Array<{
 }> {
   return db
     .prepare(
-      `SELECT message_id, agent_id, status, latency_ms, prompt_tokens, completion_tokens, started_at
+      `SELECT id, message_id, agent_id, status, latency_ms, prompt_tokens, completion_tokens, started_at
        FROM execution_logs
        WHERE session_id = ?`
     )
     .all(sessionId) as Array<{
+    id: string
     message_id: string | null
     agent_id: string
     status: string
@@ -283,6 +285,182 @@ export function getExecutionsBySession(sessionId: string): Array<{
     completion_tokens: number | null
     started_at: string | null
   }>
+}
+
+/** T2 执行追踪列表的过滤条件（全可选；`undefined` = 该维不限） */
+export interface ExecutionListFilter {
+  sessionId?: string
+  agentId?: string
+  /** 单值精确匹配（`'running'` / `'completed'` / `'failed'`）；与 `errorsOnly` 不叠加使用 */
+  status?: string
+  /** 只留 `latency_ms >=` 该值（毫秒）；NULL 耗时的行（在飞）**一律排除**——
+   *  「耗时 > N 秒」对一行没有耗时的执行是无意义的真，放它进来就是假命中 */
+  minLatencyMs?: number
+  limit: number
+  offset: number
+}
+
+/**
+ * T2 执行追踪列表（T2）：一行一次执行，带猫名、会话名、触发/回复摘要、检索漏斗。
+ *
+ * **为什么另写一条而不是扩 `getExecutionsBySession`**：那条是**气泡 footer 的展示投影**
+ * （按会话、无过滤、只出耗时与 token），本条的消费面是排障列表（跨会话、五维过滤、
+ * 带报错类型与检索漏斗）。合并两者会让 footer 那条被迫背上 join 与子查询的代价，
+ * 而它每条消息都要跑一次。
+ *
+ * 三个子查询各自独立取数（**不 join 后去重计数**）：`retrieval_candidates` 一行一片，
+ * 与 `retrieval_queries`、`retrieval_events` 是三层一对多——join 成一张大表再
+ * `COUNT(DISTINCT)` 会把行数乘起来（一次检索 3 查 × 20 候选 = 60 行），
+ * 而列表一次要出 50 行，乘完就是 3000 行的中间表。
+ *
+ * **触发正文截前 200 字，回复正文取全文**——这个不对称是有意的：
+ * · 两者都只为列表摘要显示，截断够用；
+ * · 但回复正文还要**数角标**（`citationCount`），而角标可以出现在正文任意位置。
+ *   截断后再数 = 系统性少算（长回复里的号全丢），且**不报错**——正是本仓反复吃过的
+ *   「判据面与被判面不同面」。全文只在 server 进程内过一遍，回传的仍只是计数。
+ */
+export function listExecutionRows(filter: ExecutionListFilter): Array<{
+  id: string
+  session_id: string
+  agent_id: string
+  status: string
+  started_at: string | null
+  ended_at: string | null
+  latency_ms: number | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  message_id: string | null
+  triggered_by_message_id: string
+  trace_id: string
+  error_type: string | null
+  error_message: string | null
+  agent_name: string | null
+  agent_avatar: string | null
+  session_name: string | null
+  trigger_head: string | null
+  reply_content: string | null
+  injected_sections: number
+  retrieval_reason: string | null
+}> {
+  const where: string[] = []
+  const args: unknown[] = []
+  if (filter.sessionId) {
+    where.push('el.session_id = ?')
+    args.push(filter.sessionId)
+  }
+  if (filter.agentId) {
+    where.push('el.agent_id = ?')
+    args.push(filter.agentId)
+  }
+  if (filter.status) {
+    where.push('el.status = ?')
+    args.push(filter.status)
+  }
+  if (filter.minLatencyMs !== undefined) {
+    where.push('el.latency_ms IS NOT NULL AND el.latency_ms >= ?')
+    args.push(filter.minLatencyMs)
+  }
+
+  return db
+    .prepare(
+      `SELECT el.id, el.session_id, el.agent_id, el.status, el.started_at, el.ended_at,
+              el.latency_ms, el.prompt_tokens, el.completion_tokens, el.message_id,
+              el.triggered_by_message_id, el.trace_id, el.error_type, el.error_message,
+              a.name AS agent_name, a.avatar AS agent_avatar, s.title AS session_name,
+              substr(tm.content, 1, 200) AS trigger_head,
+              rm.content AS reply_content,
+              (SELECT COUNT(DISTINCT c.doc_path || char(0) || c.section_anchor)
+                 FROM retrieval_candidates c
+                 JOIN retrieval_queries q ON q.id = c.query_id
+                 JOIN retrieval_events e ON e.id = q.retrieval_id
+                WHERE e.execution_id = el.id AND c.injected = 1) AS injected_sections,
+              (SELECT e2.reason FROM retrieval_events e2
+                WHERE e2.execution_id = el.id ORDER BY e2.id LIMIT 1) AS retrieval_reason
+       FROM execution_logs el
+       LEFT JOIN agents a ON a.id = el.agent_id
+       LEFT JOIN sessions s ON s.id = el.session_id
+       LEFT JOIN messages tm ON tm.id = el.triggered_by_message_id
+       LEFT JOIN messages rm ON rm.id = el.message_id
+       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY el.started_at DESC, el.id DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...args, filter.limit, filter.offset) as Array<{
+    id: string
+    session_id: string
+    agent_id: string
+    status: string
+    started_at: string | null
+    ended_at: string | null
+    latency_ms: number | null
+    prompt_tokens: number | null
+    completion_tokens: number | null
+    message_id: string | null
+    triggered_by_message_id: string
+    trace_id: string
+    error_type: string | null
+    error_message: string | null
+    agent_name: string | null
+    agent_avatar: string | null
+    session_name: string | null
+    trigger_head: string | null
+    reply_content: string | null
+    injected_sections: number
+    retrieval_reason: string | null
+  }>
+}
+
+/** 同过滤条件下的总条数（分页要「共 N 条」，不能靠「本页满不满」猜末页） */
+export function countExecutionRows(filter: Omit<ExecutionListFilter, 'limit' | 'offset'>): number {
+  const where: string[] = []
+  const args: unknown[] = []
+  if (filter.sessionId) {
+    where.push('session_id = ?')
+    args.push(filter.sessionId)
+  }
+  if (filter.agentId) {
+    where.push('agent_id = ?')
+    args.push(filter.agentId)
+  }
+  if (filter.status) {
+    where.push('status = ?')
+    args.push(filter.status)
+  }
+  if (filter.minLatencyMs !== undefined) {
+    where.push('latency_ms IS NOT NULL AND latency_ms >= ?')
+    args.push(filter.minLatencyMs)
+  }
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM execution_logs
+       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}`
+    )
+    .get(...args) as { n: number }
+  return row.n
+}
+
+/** 单次执行的完整行（T2 详情页头部 + `messageId → executionId` 关联口的按 id 取数） */
+export function getExecutionById(executionId: string): ExecutionLogRow | undefined {
+  return db.prepare(`SELECT * FROM execution_logs WHERE id = ?`).get(executionId) as
+    ExecutionLogRow | undefined
+}
+
+/** 按**回复消息 id** 反查执行行（T2 气泡 ⚙trace 跳页预选）。
+ *
+ *  与 `getInjectedRefsByMessageIds` 同一条关联边（`execution_logs.message_id`）——
+ *  不用 `triggered_by_message_id`：那是触发侧，一条 @ 可触发多只猫（N:1），
+ *  拿它反查会把同一条触发消息派出去的其他猫的执行也算进来（`getExecutionsBySession`
+ *  的头注已就此踩过坑，同款理由）。
+ *
+ *  `sessionId` 是**硬约束**（纵深防御，本仓有跨会话越权前科）：越权 id 直接查不到，
+ *  调用方据此回 404 而不是把别会话的执行吐出去。 */
+export function getExecutionByReplyMessageId(
+  messageId: string,
+  sessionId: string
+): ExecutionLogRow | undefined {
+  return db
+    .prepare(`SELECT * FROM execution_logs WHERE message_id = ? AND session_id = ?`)
+    .get(messageId, sessionId) as ExecutionLogRow | undefined
 }
 
 /** `getLatestExecutionPerAgent` 的行形状。**DB 列名原样出**——到前端契约

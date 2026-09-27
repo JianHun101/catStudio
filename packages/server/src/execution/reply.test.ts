@@ -18,6 +18,7 @@ import {
   runAgentReply,
   selectTaskHistory,
   recordRetrievalTrace,
+  buildContextDecisions,
   TASK_HISTORY_MAX_MESSAGES,
   TASK_HISTORY_BUDGET_TOKENS,
 } from './reply.js'
@@ -29,6 +30,7 @@ import {
   initRepository,
   executionLogs as execLogsRepo,
   retrievalEvents as retrievalRepo,
+  traceDetails as traceDetailsRepo,
 } from '../db/repository/index.js'
 import { HYBRID_POOL_PER_QUERY } from '../db/repository/chunks.js'
 import { memoryRoutes } from '../routes/memory.js'
@@ -659,6 +661,278 @@ describe('execution/reply — M1 广播前连线', () => {
 
     it('定位谓词单源：`getLogsByTriggerMessage` 在 reply.ts 内只出现一次（埋点与连线共用）', () => {
       expect(SRC.split('getLogsByTriggerMessage').length - 1).toBe(1)
+    })
+  })
+})
+
+// ─── T2 执行追踪详情（上下文决策明细 + prompt 分节快照）──────────────────────
+
+describe('execution/reply — T2 执行追踪详情', () => {
+  const AGENT_ID = 'agent-t2'
+  const SESSION_ID = 'sess-t2'
+  const TRIGGER_ID = 'm-trigger-t2'
+  const EXEC_ID = 'log-t2'
+
+  function seedT2(opts: { withExecutionRow?: boolean } = {}): void {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, 'ds猫', 'p', 'k')`
+    ).run(AGENT_ID)
+    db.prepare(`INSERT INTO sessions (id, title) VALUES (?, 't')`).run(SESSION_ID)
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', '@ds猫 干活', '["ds猫"]')`
+    ).run(TRIGGER_ID, SESSION_ID)
+    if (opts.withExecutionRow !== false) {
+      execLogsRepo.insertExecutionLog(EXEC_ID, SESSION_ID, AGENT_ID, TRIGGER_ID, 'trace-t2')
+    }
+  }
+
+  const agent = {
+    id: AGENT_ID,
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: '你是测试猫',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+  } as any
+
+  function makeBus() {
+    return {
+      emitMessage: vi.fn(),
+      emitSystemNotice: vi.fn(),
+      emitTyping: vi.fn(),
+      emitAgentMessageStatus: vi.fn(),
+      emitMessageUpdated: vi.fn(),
+      emitContextWindowStats: vi.fn(),
+      emitSessionHandoff: vi.fn(),
+      emitHandoffFailed: vi.fn(),
+    } as any
+  }
+
+  /** 捕获**真送进适配器**的那串 llmMessages——快照「逐字节一致」只能对着它判 */
+  let captured: Array<{ role: string; content: string }> = []
+
+  beforeEach(() => {
+    setDb(createTestDb())
+    initDb()
+    initRepository(getDb())
+    captured = []
+    vi.mocked(retrieveMemoryContext).mockResolvedValue(makeResult())
+    vi.mocked(buildKnowledgeContext).mockResolvedValue('\n\n【知识库】\n1. 条目')
+    vi.mocked(getAdapterForAgent).mockReturnValue({
+      chatStream: vi.fn(async function* (messages: any[]) {
+        captured = messages.map((m) => ({ role: m.role, content: m.content }))
+        yield { content: '收到，T2 验证', kind: 'text' }
+      }),
+    } as any)
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.clearAllMocks()
+  })
+
+  async function run() {
+    return runAgentReply(
+      createEngineState(),
+      makeBus(),
+      SESSION_ID,
+      agent,
+      { id: TRIGGER_ID, content: '@ds猫 干活', mentions: ['ds猫'], fromAgent: false },
+      'trace-t2',
+      undefined,
+      createExecTrace({
+        executionId: EXEC_ID,
+        chainId: null,
+        sessionId: SESSION_ID,
+        agentId: AGENT_ID,
+      })
+    )
+  }
+
+  describe('buildContextDecisions（纯函数 · 四级漏斗口径）', () => {
+    const m = (id: string) => ({ id })
+
+    it('每条消息恰好落一档，四档各自判对', () => {
+      const decisions = buildContextDecisions({
+        combinedMessages: [m('a'), m('b'), m('c'), m('d')],
+        relevantMessages: [m('b'), m('c'), m('d')], // a 不可见
+        messagesForTruncation: [m('c'), m('d')], // b 被摘要替代
+        truncatedMessages: [m('d')], // c 被预算截断
+        repliedOrdinals: new Set(),
+      })
+      expect(decisions.map((d) => [d.messageId, d.decision])).toEqual([
+        ['a', 'invisible'],
+        ['b', 'summary_replaced'],
+        ['c', 'budget'],
+        ['d', 'kept'],
+      ])
+      expect(decisions.map((d) => d.stage)).toEqual([
+        'assemble',
+        'compress',
+        'truncate',
+        'truncate',
+      ])
+    })
+
+    it('`repliedOrdinals` 下标是 `truncatedMessages` 的（不是 combined 的）——映射错会标错行', () => {
+      // combined 有 4 条，truncated 只剩后 2 条；下标 1 指的是 combined 里的 'd'
+      const decisions = buildContextDecisions({
+        combinedMessages: [m('a'), m('b'), m('c'), m('d')],
+        relevantMessages: [m('a'), m('b'), m('c'), m('d')],
+        messagesForTruncation: [m('a'), m('b'), m('c'), m('d')],
+        truncatedMessages: [m('c'), m('d')],
+        repliedOrdinals: new Set([1]),
+      })
+      expect(decisions.find((d) => d.messageId === 'd')?.detail).toBe('replied')
+      expect(decisions.find((d) => d.messageId === 'c')?.detail).toBeNull()
+    })
+
+    it('ordinal = 在 `combinedMessages` 里的下标（时间正序），与去向无关', () => {
+      const decisions = buildContextDecisions({
+        combinedMessages: [m('a'), m('b'), m('c')],
+        relevantMessages: [m('c')],
+        messagesForTruncation: [m('c')],
+        truncatedMessages: [m('c')],
+        repliedOrdinals: new Set(),
+      })
+      expect(decisions.map((d) => d.ordinal)).toEqual([0, 1, 2])
+    })
+
+    it('全量都进 prompt：零个筛出档（不是「没写」而是「真没有」）', () => {
+      const decisions = buildContextDecisions({
+        combinedMessages: [m('a')],
+        relevantMessages: [m('a')],
+        messagesForTruncation: [m('a')],
+        truncatedMessages: [m('a')],
+        repliedOrdinals: new Set(),
+      })
+      expect(decisions).toHaveLength(1)
+      expect(decisions[0].decision).toBe('kept')
+    })
+  })
+
+  describe('组装式 · 真跑 runAgentReply', () => {
+    it('决策明细落库：触发消息落 `kept`（它是唯一进 prompt 的那条）', async () => {
+      seedT2()
+      await run()
+      const rows = traceDetailsRepo.getContextDecisions(EXEC_ID)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({
+        message_id: TRIGGER_ID,
+        decision: 'kept',
+        stage: 'truncate',
+      })
+    })
+
+    it('★承重★ 八节落库，且每节内容**真出现在送进适配器的那串 prompt 里**', async () => {
+      seedT2()
+      await run()
+
+      const metas = traceDetailsRepo.getPromptSectionMetas(EXEC_ID)
+      expect(metas.map((m) => m.section_key)).toEqual([
+        'system_prompt',
+        'iron_law',
+        'skill_directory',
+        'dynamic_hints',
+        'summary_block',
+        'running_summary',
+        'memory',
+        'knowledge',
+      ])
+
+      const read = (k: string) => traceDetailsRepo.getPromptSection(EXEC_ID, k) ?? ''
+      const systemContents = captured
+        .filter((m) => m.role === 'system')
+        .map((m) => m.content)
+        .join('\n\n@@@\n\n')
+
+      // ★ 这一组是本票「快照不是重算的」唯一的承重判据：快照里记的串必须**逐字节**
+      //   出现在真送进模型的那串里。把 `traceSection(...)` 的入参换成任何「重算一遍」
+      //   的表达式（或换个变量）都会在这里红。
+      for (const key of [
+        'system_prompt',
+        'iron_law',
+        'skill_directory',
+        'running_summary',
+        'memory',
+        'knowledge',
+      ]) {
+        const content = read(key)
+        if (content !== '') {
+          expect(systemContents, `${key} 的内容不在真注入串里`).toContain(content)
+        }
+      }
+
+      // 记忆与知识库两节**非空**（mock 分别给了正文）——否则上面那圈 `if` 会全空转，
+      // 变成一个恒真的假绿门（本仓栽过：判据面扫不到东西时静默全绿）
+      expect(read('memory')).toBe('\n\n【相关记忆】\n1. 正文')
+      expect(read('knowledge')).toBe('\n\n【知识库】\n1. 条目')
+      // 系统提示节 = 猫自己的人格的**占位符已替换**形态
+      expect(read('system_prompt')).toBe('你是测试猫')
+
+      // 动态提示是独立 system 消息，逐条比对（拼串比对会把「缺一条」判成通过）
+      const hints = read('dynamic_hints')
+      for (const h of hints ? hints.split('\n\n') : []) {
+        expect(systemContents).toContain(h)
+      }
+
+      // 节状态与字符数自洽
+      const metaByKey = new Map(metas.map((m) => [m.section_key, m]))
+      expect(metaByKey.get('memory')!.status).toBe('injected')
+      expect(metaByKey.get('memory')!.char_count).toBe(read('memory').length)
+      // 本夹具没走摘要（`shouldHandoff` 恒 false、`summaryBlockMsg` 恒 null）⇒ 两节 empty
+      expect(metaByKey.get('summary_block')!.status).toBe('empty')
+      expect(metaByKey.get('running_summary')!.status).toBe('empty')
+    })
+
+    it('读口与执行行对得上：`hasTraceDetails` 为真、节清单不带正文', async () => {
+      seedT2()
+      await run()
+      expect(traceDetailsRepo.hasTraceDetails(EXEC_ID)).toBe(true)
+      // 判据是**键集**（不是「序列化后 grep 不到 content」——那种判据在语料恰好
+      // 不含该词时恒真，本仓栽过「探针宽度大于判据宽度」）
+      const metas = traceDetailsRepo.getPromptSectionMetas(EXEC_ID)
+      expect(metas.every((m) => !Object.keys(m).includes('content'))).toBe(true)
+    })
+
+    it('找不到 running 执行行 ⇒ 两表零行、回复照发（关键路径不阻塞）', async () => {
+      seedT2({ withExecutionRow: false })
+      const res = await run()
+      expect(res.content).toBe('收到，T2 验证')
+      expect((getDb().prepare('SELECT COUNT(*) AS n FROM context_decisions').get() as any).n).toBe(
+        0
+      )
+      expect((getDb().prepare('SELECT COUNT(*) AS n FROM prompt_snapshots').get() as any).n).toBe(0)
+    })
+  })
+
+  describe('落点硬点（静态源断言）', () => {
+    const SRC = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), 'reply.ts'),
+      'utf8'
+    )
+
+    it('写口调用点在 memory / knowledge 注入**之后**、`llm.chat` 段**之前**', () => {
+      for (const anchor of [
+        'recordTraceDetails({',
+        "trace.startSpan('llm.chat'",
+        'llmMessages[0].content + knowledgeContext',
+      ]) {
+        expect(SRC.split(anchor).length - 1, `锚不唯一：${anchor}`).toBe(1)
+      }
+      const call = SRC.indexOf('recordTraceDetails({')
+      // 之后：早一步写就会漏掉后注入的记忆/知识库两块 ⇒ 快照与真进模型的串不等
+      expect(call).toBeGreaterThan(SRC.indexOf('llmMessages[0].content + knowledgeContext'))
+      // 之前：写库耗时不该混进 `llm.chat` 段（那段的 duration 是 TTFT 的分母）
+      expect(call).toBeLessThan(SRC.indexOf("trace.startSpan('llm.chat'"))
+    })
+
+    it('技能目录段是**具名常量**（快照取到同一串，不是重算一遍）', () => {
+      expect(SRC.split('buildSkillDirectorySection()').length - 1).toBe(1)
+      expect(SRC.split('const skillDirectorySection =').length - 1).toBe(1)
     })
   })
 })

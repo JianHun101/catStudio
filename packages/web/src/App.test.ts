@@ -30,8 +30,10 @@ describe('App.vue 设置入口（全局位置）', () => {
     expect(appSource).toContain('@click="showSettings = true"')
     expect(appSource).toContain('title="设置"')
     expect(appSource).toContain('aria-label="设置"')
-    // 设置页与三栏布局互斥：app-layout 用 v-show 保活（切回零重建），设置/评估页仍 v-if/v-else-if 互斥
-    expect(appSource).toMatch(/<div v-show="!showSettings && !showEval" class="app-layout"/)
+    // 全屏页与三栏布局互斥：app-layout 用 v-show 保活（切回零重建），三个全屏页
+    // 走同一条 v-if/v-else-if 链。判据绑 `anyOverlayOpen` 单源——逐个列布尔的话
+    // 加第四个 view 时这里仍是绿的（漏改不报错），正是复述面分叉的老形态。
+    expect(appSource).toMatch(/<div v-show="!anyOverlayOpen" class="app-layout"/)
   })
 
   it('轨道恒在——会话栏收起（left-closed）只收会话栏，轨道不受影响', () => {
@@ -98,12 +100,32 @@ describe('App.vue 布局骨架（T1：52px 轨道 + 会话栏 + 主区 + 右栏�
     expect(appSource).toContain('max-width: 650px')
   })
 
-  it('轨道内容：logo 爪印 + 对话/追踪/评估 + 底部齿轮；执行追踪是 T2 的展示位', () => {
+  it('轨道内容：logo 爪印 + 对话/追踪/评估 + 底部齿轮；执行追踪已接线（T2）', () => {
     expect(appSource).toContain('class="rail-logo"')
     expect(appSource).toContain('aria-label="主导航"')
-    // 执行追踪按钮本票不接行为（T2 落地）——disabled + 说明性 title
-    expect(appSource).toContain('aria-label="执行追踪（随 T2 落地）"')
+    // 执行追踪入口（T2 起**接行为**）：轨道按钮开追踪页，不预选任何一条执行
+    expect(appSource).toContain('aria-label="执行追踪"')
+    expect(appSource).toContain('@click="openTrace()"')
     expect(appSource).toContain('<div class="rail-sp"></div>')
+  })
+
+  it('三个全屏 view 互斥且底层布局保活（T2 的追踪页并入同一条 v-else-if 链）', () => {
+    // 互斥：后开的那个把前面两个关掉（openTrace 显式清另外两个）
+    expect(appSource).toMatch(/function openTrace[\s\S]*?showSettings\.value = false/)
+    expect(appSource).toMatch(/function openTrace[\s\S]*?showEval\.value = false/)
+    // 保活：底层三栏用 v-show 且以 `anyOverlayOpen` 为准（少一个 view 就会在追踪页
+    // 打开时露出底下的聊天区——三个 view 是同一个布尔面的三个分支）
+    expect(appSource).toContain('const anyOverlayOpen = computed(')
+    expect(appSource).toContain('v-show="!anyOverlayOpen"')
+    expect(appSource).toMatch(
+      /anyOverlayOpen = computed\(\s*\(\) => showSettings\.value \|\| showEval\.value \|\| showTrace\.value/
+    )
+  })
+
+  it('气泡 ⚙ 跳回时：关追踪页 + 必要时切会话 + 把焦点交给 ChatPanel', () => {
+    expect(appSource).toMatch(/function onTraceJump[\s\S]*?showTrace\.value = false/)
+    expect(appSource).toContain('store.joinSession(sessionId)')
+    expect(appSource).toContain('store.requestFocusMessage(messageId)')
   })
 })
 

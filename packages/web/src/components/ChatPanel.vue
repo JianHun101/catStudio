@@ -26,6 +26,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   toggleLeftSidebar: []
+  /** ⚙ trace（T2）→ 上抛给 App 打开执行追踪页并预选该执行 */
+  openTrace: [executionId: string]
 }>()
 
 const store = useChatStore()
@@ -1087,6 +1089,61 @@ function closeMemoryRef(): void {
   docPreview.value = { loading: false, content: null, error: null }
 }
 
+// ─── T2：气泡 ⚙ trace 跳页 + 「跳到该回复气泡 ↗」回滚 ──────────────
+
+/**
+ * 气泡 ⚙ → 追踪页预选。
+ *
+ * 两条取 id 的路**按快慢分工**，不是重复实现：
+ * · **快路** = `store.sessionExecutions`（进会话时已批量拉过的 `messageId → 执行` 投影，
+ *   本票给它加了 `executionId`）⇒ 绝大多数点击零往返；
+ * · **慢路** = `/eval/execution-by-message`（权威回退）。缓存未就绪的三种真实场景：
+ *   刷新后 store 还没回、该会话的执行元数据拉取失败过、消息是刚推送进来还没进缓存。
+ *
+ * 两条都拿不到 ⇒ **不静默**：气泡上弹一句实话（该消息没有执行行——回退删过、或它本来
+ * 就不是猫的回复产物），而不是打开一个空追踪页让用户自己猜。
+ */
+async function openTraceFor(messageId: string): Promise<void> {
+  const cached = store.sessionExecutions.get(messageId)?.executionId
+  if (cached) {
+    emit('openTrace', cached)
+    return
+  }
+  const sessionId = store.activeSessionId
+  if (!sessionId) return
+  try {
+    const res = await api.getExecutionByMessage(messageId, sessionId)
+    emit('openTrace', res.executionId)
+  } catch {
+    store.showError('这条回复没有执行记录（可能已被回退删除），无法打开追踪')
+  }
+}
+
+/**
+ * 从追踪页「跳到该回复气泡 ↗」回来时的滚动定位。
+ *
+ * `focusNonce` 一并进依赖：连点两次同一条气泡也要各滚一次——只 watch id 时
+ * 第二次赋同值不触发（Vue 的依赖比较是值相等），症状是「第二次点了没反应」。
+ * 滚动时机取 `nextTick` 之后：切会话时消息是异步拉回来的，此刻 DOM 里可能还没这条。
+ */
+watch(
+  () => [store.focusMessageId, store.focusNonce] as const,
+  async ([id]) => {
+    if (!id) return
+    await nextTick()
+    // `CSS.escape` 在 jsdom 里可能缺席；id 是 uuid 形态（安全字符），回落原样拼即可
+    const sel = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '')
+    const el = chatContainer.value?.querySelector(`[data-msg-id="${sel}"]`)
+    if (el) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      ;(el as HTMLElement).classList.add('msg-focus-flash')
+      setTimeout(() => (el as HTMLElement).classList.remove('msg-focus-flash'), 1200)
+    }
+    // 消费即清位：不清的话下次切会话回来会凭空再滚一次
+    store.clearFocusMessage()
+  }
+)
+
 /**
  * 「打开当前文档」——**当前检出上的文档，不是当时的快照**（形态丙外链被否正是因为
  * 这一点）。按钮文案与抽屉标题都写「当前文档」，不写「猫当时读到的」。
@@ -1407,6 +1464,7 @@ const messageViews = computed<MessageView[]>(() => {
               @stop-agent="stopAgent"
               @confirm-restart="store.confirmRestart"
               @cancel-restart="store.cancelRestart"
+              @open-trace="openTraceFor"
             />
 
             <!-- 回退分隔线（T1）：锚在本条之后——「从这条往下被删了 N 条」。
@@ -1973,6 +2031,24 @@ const messageViews = computed<MessageView[]>(() => {
   flex-direction: column;
   gap: 6px;
   min-height: 100%;
+}
+
+/* 「跳到该回复气泡 ↗」的落点高亮（T2）：闪一下让用户知道**滚到了哪一条**。
+   本类由 `openTraceFor` 的 watch 用 classList 加上、1.2s 后撤掉；写在本组件的
+   scoped 样式里能命中 MessageItem 的根元素——Vue 会把父组件的 scopeId 一并打在
+   子组件根节点上（这也是为什么这里不用 `:deep`）。 */
+.message.msg-focus-flash {
+  animation: msg-focus-pulse 1.2s var(--ease-out);
+}
+
+@keyframes msg-focus-pulse {
+  0%,
+  100% {
+    background: transparent;
+  }
+  25% {
+    background: var(--accent-tint, rgba(120, 160, 220, 0.18));
+  }
 }
 
 /* Empty State */
