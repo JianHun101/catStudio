@@ -206,6 +206,26 @@ export const useChatStore = defineStore('chat', () => {
 
   const messageStatus = ref<Map<string, AgentStatusEntry[]>>(new Map())
 
+  // ─── 同会话回退标记（T1）─────────────────────
+  //
+  // 分隔线「已回退 · 删除了 N 条消息」的**前端渲染态**，按 sessionId 存。
+  // 不落库的理由（票 OQ-1 的裁决）：落库要么开新消息类型（要迁移 + 全渲染面适配），
+  // 要么借 system role（那是给「重启完成」这类**服务端事实**用的，回退是**用户动作**，
+  // 借道会让 agent 回读面多出一类需要解释的消息）。代价是刷新后分隔线消失——
+  // 消息确实是被删了，刷新后看到的就是「这个会话只有这些」，是真相不是故障。
+  //
+  // 键是**锚点消息 id**：锚点若被后续回退一并删掉，分隔线自动不再渲染（自愈，无需清理）。
+  const rollbackMarks = ref<Map<string, { afterMessageId: string; removedCount: number }>>(
+    new Map()
+  )
+
+  function setRollbackMark(sessionId: string, afterMessageId: string, removedCount: number): void {
+    rollbackMarks.value = new Map(rollbackMarks.value).set(sessionId, {
+      afterMessageId,
+      removedCount,
+    })
+  }
+
   // ─── Message lifecycle (C5) ─────────────────
   // 用户消息发送生命周期：store 独占状态机，key=server 生成的 messageId（ack 回传后进入）。
   // 客户端只消费不生成 id（安全性第一）；瞬态不占 Message。终态保留供只读查询，
@@ -554,6 +574,33 @@ export const useChatStore = defineStore('chat', () => {
     if (activeSessionId.value === id) {
       messages.value = []
     }
+  }
+
+  /**
+   * 同会话回退（T1）：删掉 `messageId` 之后的全部消息，会话从该节点继续（目标本身保留）。
+   *
+   * 本地移除按服务端回传的 **`removedIds`**（权威删除集），不按时间戳自己重算——
+   * 两处各算一次排序必然分叉（同毫秒并发写 + 老库整秒行折成同值）。
+   * SESSION_ROLLED_BACK 广播随后到达，按同一 id 集再滤一次是幂等的。
+   */
+  async function rollbackSession(id: string, messageId: string): Promise<number> {
+    let res: { removedIds: string[]; removedCount: number }
+    try {
+      res = await api.rollbackSession(id, messageId)
+    } catch (err) {
+      log.error('rollbackSession API failed', { error: String(err) })
+      throw err
+    }
+    if (activeSessionId.value === id) {
+      const removed = new Set(res.removedIds)
+      messages.value = messages.value.filter((m) => !removed.has(m.id))
+      // 状态行一并清：留下来的话 statusEntries 会指向已不存在的消息（悬空行）
+      const nextStatus = new Map(messageStatus.value)
+      for (const mid of res.removedIds) nextStatus.delete(mid)
+      messageStatus.value = nextStatus
+      setRollbackMark(id, messageId, res.removedCount)
+    }
+    return res.removedCount
   }
 
   /** 删除会话 */
@@ -937,6 +984,26 @@ export const useChatStore = defineStore('chat', () => {
       }
     })
 
+    // 同会话回退（T1）：多 tab / 他人触发时同步移除。删的是服务端给的权威 id 集，
+    // 与本端发起路径（rollbackSession 动作）同一判据——同一 id 集滤两遍是幂等的。
+    socket.on(
+      Events.SESSION_ROLLED_BACK,
+      (data: {
+        sessionId: string
+        messageId: string
+        removedIds: string[]
+        removedCount: number
+      }) => {
+        if (activeSessionId.value !== data.sessionId) return
+        const removed = new Set(data.removedIds ?? [])
+        messages.value = messages.value.filter((m) => !removed.has(m.id))
+        const nextStatus = new Map(messageStatus.value)
+        for (const mid of removed) nextStatus.delete(mid)
+        messageStatus.value = nextStatus
+        setRollbackMark(data.sessionId, data.messageId, data.removedCount)
+      }
+    )
+
     socket.on(
       Events.MESSAGE_AGENT_STATUS,
       (data: {
@@ -1128,6 +1195,8 @@ export const useChatStore = defineStore('chat', () => {
     deleteAgent,
     deleteSession,
     clearSessionMessages,
+    rollbackSession,
+    rollbackMarks,
     retractMessage,
     restartStates,
     confirmingRestartMessageId,
