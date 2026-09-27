@@ -894,7 +894,8 @@ function execMetaFor(msg: { id: string }): ExecutionMeta | undefined {
   return store.sessionExecutions.get(msg.id)
 }
 
-/** 气泡 footer 执行元数据文案：{耗时} · in {prompt}k / out {completion}k tok。
+/** 气泡 footer 执行元数据文案：`{⏱ 耗时} · {prompt}k/{completion}k tok`（形态与「不写
+ *  "in"/"out" 字样」的理由见函数内注释）。
  *  取代 durationMs 瞬态展示（durationMs 保留兜底——execution 拉取未到时新回复短暂可显）。 */
 function execMetaTextFor(msg: { id: string }): string | null {
   const meta = execMetaFor(msg)
