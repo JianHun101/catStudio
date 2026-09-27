@@ -50,10 +50,33 @@ describe('extractCitationMarkers（R14b 角标解析）', () => {
     expect(extractCitationMarkers('[3] [1] [3] [2]', 3).markers).toEqual([1, 2, 3])
   })
 
-  it('行内链接 / 引用式链接 / 链接定义里的号不算角标（markdown 语法，不是引用）', () => {
+  it('行内链接 / 引用式链接（非纯数字 ref）/ 链接定义里的号不算角标（markdown 语法，不是引用）', () => {
     // 三条都是 markdown 链接语法的一部分；前端若把 `[1]` 消费成上标，链接会当场被拆散
     const text = '[1](https://example.com) 与 [2][ref] 与\n\n[3]: https://example.com\n'
     expect(extractCitationMarkers(text, 3)).toEqual({ markers: [], markersInCode: [] })
+  })
+
+  // ─── M4：相邻引用被引用式链接排除式误伤（票 §五 验收 1）──────────────
+  it('验收 1 · 相邻引用 `[1][2]` 两个号都计入（收窄点在引用式链接那一支）', () => {
+    expect(extractCitationMarkers('注入的 [1][2] 是谁', 2)).toEqual({
+      markers: [1, 2],
+      markersInCode: [],
+    })
+    // 旧排除式（`]` 后跟 `[` 一律排除）下三连只剩 `[3]`——连吞两个号，比票面单例更重
+    expect(extractCitationMarkers('三连 [1][2][3]', 3).markers).toEqual([1, 2, 3])
+  })
+
+  it('验收 1 · 链接三形态的正常排除保持（回归面，逐形态点名）', () => {
+    expect(extractCitationMarkers('[1](http://x)', 3).markers).toEqual([])
+    expect(extractCitationMarkers('[1][foo]', 3).markers).toEqual([])
+    expect(extractCitationMarkers('[1][]', 3).markers).toEqual([])
+    expect(extractCitationMarkers('[1]: http://x', 3).markers).toEqual([])
+  })
+
+  it('验收 1 · 已知边角：`[1][2foo]` 的 `[1]` 不计入（票面裁决接受，不修）', () => {
+    // 「纯数字 ref」才算引用式链接；`2foo` 数字开头但非纯数字 ⇒ 走链接排除那一支。
+    // 钉住它是让将来改判据的人过一次意识——不是断言这是理想行为（真语料未见）。
+    expect(extractCitationMarkers('[1][2foo]', 3).markers).toEqual([])
   })
 
   it('围栏定界符不会被误判成内联码（先算围栏、再算内联，重叠即丢）', () => {

@@ -211,6 +211,28 @@ describe('renderMarkdown 角标引用（R14b 验收 6）', () => {
     expect(html).toContain('href="https://example.com"')
   })
 
+  // ─── M4：相邻引用被引用式链接排除式误伤（票 §五 验收 2）───────────────
+  it('M4 · 相邻引用 [1][2] 两个都渲染成角标（旧式下 [1] 被当引用式链接吞掉）', () => {
+    const html = renderMarkdown('注入的 [1][2] 是谁', [1, 2])
+    expect(html).toContain('<sup class="mem-citation" data-marker="1">[1]</sup>')
+    expect(html).toContain('<sup class="mem-citation" data-marker="2">[2]</sup>')
+    // 计数口径：恰好两个，不多不少
+    expect(html.match(/<sup class="mem-citation"/g) ?? []).toHaveLength(2)
+  })
+
+  it('M4 · 引用式链接 [1][foo] 不吃角标、链接结构不拆散（回归面）', () => {
+    const html = renderMarkdown('[1][foo]\n\n[foo]: https://example.com', [1])
+    expect(html).not.toContain('<sup')
+    expect(html).toContain('href="https://example.com"')
+    // 承重点：链接文本仍是 `1` ⇒ `[1]` 被链接分词器消费，没被角标抢走
+    expect(html).toMatch(/<a [^>]*>1<\/a>/)
+  })
+
+  it('M4 · 空 ref 与链接定义里的号同样不吃（回归面）', () => {
+    expect(renderMarkdown('[1][]', [1])).not.toContain('<sup')
+    expect(renderMarkdown('[1]: https://example.com', [1])).not.toContain('<sup')
+  })
+
   it('多个号各渲染各的，且 data-marker 原样通过 DOMPurify（hover 取数键）', () => {
     const html = renderMarkdown('[1] 与 [3] 都采纳了。', [1, 2, 3])
     expect(html).toContain('data-marker="1"')
