@@ -27,6 +27,18 @@
  *                                          **空清单是 200 + `[]`**——「还没跑过批」不是错误）
  * - GET /api/eval/retrieval/report?date=   一份检索跑批报告（E1：缺省 = 最新；没有 → 404
  *                                          + reason。**纯读文件，绝不触发跑批**）
+ * - GET /api/eval/executions                执行列表（T2 §三A 过滤栏数据面：五维过滤
+ *                                           + 偏移分页 + 检索漏斗；缺省 = 跨会话近 50 条）
+ * - GET /api/eval/execution-detail?execution_id=  一次执行的展开详情（T2：执行行 +
+ *                                           上下文决策逐条 + prompt 节清单**无正文**；
+ *                                           `execution_id` 不存在 → 404，与 /spans 刻意不同）
+ * - GET /api/eval/prompt-section?execution_id=&key=  单节快照**当次注入原文**（T2 懒加载；
+ *                                           节不存在 → 404，与「合法的 empty 节」分开）
+ * - GET /api/eval/retrieval-detail?execution_id=  检索明细（T2 懒加载：复用既有
+ *                                           `getRetrievalQueries`/`getRetrievalCandidates`，
+ *                                           **不过滤 injected**——本节正是要看没进的那些）
+ * - GET /api/eval/execution-by-message?message_id=&session_id=  messageId → executionId
+ *                                           （T2 气泡 ⚙ 跳页预选；`session_id` 必填是越权约束）
  *
  * **字段名随取数层**：DB 行投影原样 snake_case（`/scores`、`/aggregates`、`/review/pending`、
  * `/spans` 的段行——前端直接消费 DB 行）；**聚合/派生结构**用 camelCase
@@ -45,9 +57,12 @@ import {
   userFeedback as userFeedbackRepo,
   humanLabels as humanLabelsRepo,
   executionLogs as executionLogsRepo,
+  retrievalEvents as retrievalRepo,
+  traceDetails as traceDetailsRepo,
   spans as spansRepo,
 } from '../db/repository/index.js'
 import type { SpanRow, LlmSpanDetail } from '../db/repository/index.js'
+import { extractCitationMarkers } from '../memory/citationMarkers.js'
 import { episodeStats } from '../eval/episodes.js'
 import { aggregateMetrics, WINDOW_DAYS } from '../eval/l1-aggregator.js'
 import { buildChains } from '../eval/chain-query.js'
@@ -351,6 +366,300 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
         totalMs: row.latency_ms,
       }))
     return reply.send({ ok: true, traces })
+  })
+
+  // ─── T2 执行追踪查询页（票 docs/run/ui-redesign/T2-trace-page.md）─────────────
+  //
+  // 五个口分成**两种取数时机**，这是刻意的：
+  // · 列表 + `execution-detail` 是「行一展开就要」的（决策明细与节清单都很小），随展开一次拉全；
+  // · `prompt-section` / `retrieval-detail` 是「三小节**再**点开才要」的（单节全文可达数十 KB、
+  //   候选行一次几十条），故各自独立成口懒加载——把详情页首屏绑在最大 payload 上是不划算的。
+
+  /** 列表行（`ExecutionTraceRowDto`）——**派生类型，故 camelCase**（与 `SessionTraceDto` 同惯例：
+   *  它没有对应的 DB 行形状，是「execution_logs 行 + 五处 join + 两个子查询」的聚合产物）。 */
+  interface ExecutionTraceRowDto {
+    executionId: string
+    sessionId: string
+    sessionName: string | null
+    agentId: string
+    agentName: string | null
+    agentAvatar: string | null
+    status: string
+    startedAt: string | null
+    endedAt: string | null
+    /** 总耗时（库里叫 `latency_ms`）；`null` = 在飞或失败未收口，**不回落 0** */
+    totalMs: number | null
+    promptTokens: number | null
+    completionTokens: number | null
+    /** 回复消息 id（成功路径才有）；气泡跳转据此反查 */
+    messageId: string | null
+    /** 触发消息 id——没生成回复的执行（failed）只有这个，列表摘要取它 */
+    triggerMessageId: string
+    traceId: string
+    errorType: string | null
+    errorMessage: string | null
+    /** 列表摘要：优先回复正文，无回复则退回触发正文。已截前 200 字 */
+    summary: string
+    /** 检索漏斗：注入节数（按 `doc_path + section_anchor` 去重，与 memory-refs 同口径） */
+    injectedSections: number
+    /** 引用数：回复正文里的角标号个数（与 R14b 角标同一条判据函数，两侧不各写一份） */
+    citationCount: number
+    /** `skipped-a2a` ⇒ 列表行显示「未检索（A2A）」；`null` = 无检索流水行 */
+    retrievalReason: string | null
+  }
+
+  /**
+   * 执行列表（T2 §三A 过滤栏的数据面）。
+   *
+   * 五维过滤（会话 / 猫 / 状态 / 耗时阈值 / 仅看报错）+ 偏移分页（店长裁 OQ-3：50/页，
+   * 不做无限滚动——与票面默认「近 50 条」一致）。
+   *
+   * **缺省不报错**（与 `/chains` 的钳位同档，非 `/spans` 的 400 档）：列表页是「一进来
+   * 就要出东西」的界面，没给 `session_id` 就是「跨会话看全部」，是合法诉求不是调用方写错。
+   * 只有**给了非法值**才 400（`?limit=abc` 静默落回 50 会让使用者以为自己的约束生效了）。
+   */
+  app.get('/api/eval/executions', async (req, reply) => {
+    const q = req.query as Record<string, string | undefined>
+    const limit = parseLimit(q.limit)
+    if (limit === null) return reply.status(400).send({ error: 'limit must be an integer 1-200' })
+    const offset = parseBoundedInt(q.offset, 0, 0, 100000)
+    if (offset === null) return reply.status(400).send({ error: 'offset must be an integer >= 0' })
+
+    // 「仅看报错」= status 锁 failed。与显式 status 同时给时**前者优先**——
+    // 勾选复选框是更具体的意图，静默取交集会得到空列表（用户看到的是「没报错」）。
+    const errorsOnly = q.errors_only === '1' || q.errors_only === 'true'
+    const status = errorsOnly ? 'failed' : q.status || undefined
+    if (status !== undefined && !['queued', 'running', 'completed', 'failed'].includes(status)) {
+      return reply
+        .status(400)
+        .send({ error: 'status must be one of queued|running|completed|failed' })
+    }
+
+    const minLatencyMs =
+      q.min_latency_ms === undefined || q.min_latency_ms === ''
+        ? undefined
+        : (parseBoundedInt(q.min_latency_ms, 0, 0, 86_400_000) ?? null)
+    if (minLatencyMs === null) {
+      return reply.status(400).send({ error: 'min_latency_ms must be an integer >= 0' })
+    }
+
+    const filter = {
+      sessionId: q.session_id || undefined,
+      agentId: q.agent_id || undefined,
+      status,
+      minLatencyMs,
+    }
+    const rows = executionLogsRepo.listExecutionRows({ ...filter, limit, offset })
+    const total = executionLogsRepo.countExecutionRows(filter)
+
+    const executions: ExecutionTraceRowDto[] = rows.map((r) => ({
+      executionId: r.id,
+      sessionId: r.session_id,
+      sessionName: r.session_name,
+      agentId: r.agent_id,
+      agentName: r.agent_name,
+      agentAvatar: r.agent_avatar,
+      status: r.status,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      totalMs: r.latency_ms,
+      promptTokens: r.prompt_tokens,
+      completionTokens: r.completion_tokens,
+      messageId: r.message_id,
+      triggerMessageId: r.triggered_by_message_id,
+      traceId: r.trace_id,
+      errorType: r.error_type,
+      errorMessage: r.error_message,
+      summary: (r.reply_content ?? r.trigger_head ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      injectedSections: r.injected_sections,
+      // 引用数与角标渲染**同一个函数**（`extractCitationMarkers`）：各写一份就是
+      // 「同一规则两处措辞」，改一处漏一处会造出「角标显示了 2 个、列表说 3 个」。
+      // 只数**散文中**的号（`markersInCode` 是诊断列、前端不渲染角标）——
+      // 两处口径若不同，列表会说「引 3」而气泡上只出现 2 个角标。
+      //
+      // **喂全文不喂摘要**：角标可在正文任意位置，拿 200 字摘要去数会系统性少算
+      // 且不报错（判据面 ≠ 被判面）。全文只在进程内过一遍，回传的只是计数。
+      citationCount: r.reply_content
+        ? extractCitationMarkers(r.reply_content, r.injected_sections).markers.length
+        : 0,
+      retrievalReason: r.retrieval_reason,
+    }))
+    return reply.send({ ok: true, total, limit, offset, executions })
+  })
+
+  /**
+   * 一次执行的详情（T2 §三A 展开区）：执行行 + 上下文决策逐条 + prompt 节清单（无正文）。
+   *
+   * **不内联节正文**（见上方两档取数时机）：节清单只给 `sectionKey / label / status /
+   * charCount`，正文走 `/prompt-section`。
+   *
+   * `hasDetails === false` ⇒ 存量行（本票之前的所有执行都没有这两张表的行）。前端据此
+   * 渲染「无段数据（存量行）」占位——**不能靠「数组为空」判**：真跑过但两表为空是另一态。
+   *
+   * **`execution_id` 不存在 → 404**（与 `/spans` 的「空数组是合法响应」刻意不同）：
+   * `/spans` 的消费面是「某个确实存在的执行的段」，缺段是常态；本口的消费面是
+   * 「列表点进来的这一行」，`execution_id` 查不到只可能是传错了 id 或行已被删
+   * （回退删消息会连带删 `execution_logs`）——静默给一个空壳页会让用户以为执行没数据。
+   */
+  app.get('/api/eval/execution-detail', async (req, reply) => {
+    const { execution_id } = req.query as { execution_id?: string }
+    if (typeof execution_id !== 'string' || execution_id === '') {
+      return reply.status(400).send({ error: 'execution_id is required' })
+    }
+    const row = executionLogsRepo.getExecutionById(execution_id)
+    if (!row) return reply.status(404).send({ error: 'execution not found' })
+
+    const decisions = traceDetailsRepo.getContextDecisions(execution_id)
+    const sections = traceDetailsRepo.getPromptSectionMetas(execution_id)
+    const event = retrievalRepo.getRetrievalEventByExecution(execution_id)
+
+    // 决策面聚合读数（前端过滤栏/摘要行直接用，免得在渲染层再遍历一遍——
+    // 而遍历就会在「什么算筛出」上再分一次叉）
+    const counts = { kept: 0, invisible: 0, summary_replaced: 0, budget: 0 }
+    let replied = 0
+    for (const d of decisions) {
+      if (d.decision in counts) counts[d.decision as keyof typeof counts]++
+      if (d.detail === 'replied') replied++
+    }
+
+    return reply.send({
+      ok: true,
+      hasDetails: traceDetailsRepo.hasTraceDetails(execution_id),
+      execution: {
+        executionId: row.id,
+        sessionId: row.session_id,
+        agentId: row.agent_id,
+        status: row.status,
+        startedAt: row.started_at,
+        endedAt: row.ended_at,
+        totalMs: row.latency_ms,
+        promptTokens: row.prompt_tokens,
+        completionTokens: row.completion_tokens,
+        messageId: row.message_id,
+        triggerMessageId: row.triggered_by_message_id,
+        traceId: row.trace_id,
+        errorType: row.error_type,
+        errorMessage: row.error_message,
+      },
+      context: {
+        /** 四级漏斗的四档计数 + 已回复标注数。`kept` 应与 `context.compress` 段的
+         *  `item_count` 相等（两者都是「实际进 prompt 的消息条数」） */
+        counts,
+        repliedCount: replied,
+        total: decisions.length,
+        decisions,
+      },
+      promptSections: sections.map((s) => ({
+        sectionKey: s.section_key,
+        label: s.label,
+        status: s.status,
+        charCount: s.char_count,
+      })),
+      retrieval: event
+        ? {
+            reason: event.reason,
+            retrievalMs: event.retrieval_ms,
+            contextTokens: event.context_tokens,
+            budgetTokens: event.budget_tokens,
+            truncated: event.truncated === 1,
+            thresholdMaxDistance: event.threshold_max_distance,
+            paramTopK: event.param_top_k,
+            paramProbeN: event.param_probe_n,
+            paramPoolN: event.param_pool_n,
+            taskId: event.task_id,
+          }
+        : null,
+    })
+  })
+
+  /**
+   * 单节 prompt 快照正文（T2 §三A「点开展开当次实际注入的完整原文」）。
+   *
+   * **节不存在 → 404**（不是空串）：`empty` 是**合法的节状态**（本轮该节没内容，
+   * 例如没注入铁律），空串是它的真值；而「这一节压根没记」是另一回事，混成空串
+   * 会让前端把「存量行没有快照」渲染成「这节内容为空」。
+   */
+  app.get('/api/eval/prompt-section', async (req, reply) => {
+    const { execution_id, key } = req.query as { execution_id?: string; key?: string }
+    if (typeof execution_id !== 'string' || execution_id === '') {
+      return reply.status(400).send({ error: 'execution_id is required' })
+    }
+    if (typeof key !== 'string' || key === '') {
+      return reply.status(400).send({ error: 'key is required' })
+    }
+    const content = traceDetailsRepo.getPromptSection(execution_id, key)
+    if (content === null) return reply.status(404).send({ error: 'prompt section not found' })
+    return reply.send({ ok: true, key, content, charCount: content.length })
+  })
+
+  /**
+   * 检索明细（T2 §三A 三折叠小节的第二块，懒加载）。
+   *
+   * 直接复用 `getRetrievalQueries` / `getRetrievalCandidates` 两个**既有**读函数
+   * （票 §二 缺口 4：它们在库里但从来没被任何 HTTP 出口暴露过）——不写新 SQL，
+   * 也不在这里过滤 `injected = 1`：本小节的用途正是「看**没**进 prompt 的那些为什么
+   * 没进」（`dropped_reason` 分布），只出注入行等于把这块的面砍掉一半。
+   *
+   * 无检索事件 → `{ queries: [], candidates: [] }` + `reason: null`（前端显示
+   * 「本轮未检索」，与存量行同款占位，不报错）。
+   */
+  app.get('/api/eval/retrieval-detail', async (req, reply) => {
+    const { execution_id } = req.query as { execution_id?: string }
+    if (typeof execution_id !== 'string' || execution_id === '') {
+      return reply.status(400).send({ error: 'execution_id is required' })
+    }
+    const event = retrievalRepo.getRetrievalEventByExecution(execution_id)
+    if (!event) {
+      return reply.send({ ok: true, reason: null, queries: [], candidates: [] })
+    }
+    // 丢弃原因分布在这算一次（同一份候选数组上遍历一次，前端不必再遍历——
+    // 也就不会出现「前端按另一套规则统计」的第二把尺子）
+    const candidates = retrievalRepo.getRetrievalCandidates(event.id)
+    const dropped: Record<string, number> = {}
+    for (const c of candidates) {
+      if (c.dropped_reason) dropped[c.dropped_reason] = (dropped[c.dropped_reason] ?? 0) + 1
+    }
+    return reply.send({
+      ok: true,
+      reason: event.reason,
+      queries: retrievalRepo.getRetrievalQueries(event.id),
+      candidates,
+      droppedReasons: dropped,
+    })
+  })
+
+  /**
+   * `messageId → executionId` 关联口（T2 §二 缺口 3：气泡 footer 的 ⚙trace 跳页预选）。
+   *
+   * `session_id` **必填**：这是把内部 id 换成另一个内部 id 的口，没有会话约束就等于
+   * 给了一个「拿任意 messageId 探任意会话执行」的探针（本仓有跨会话越权前科，
+   * `getInjectedRefsByMessageIds` 的同名约束是同一把尺子）。
+   *
+   * **查不到 → 404**（不是 200 + null）：点 ⚙ 的前提是「这条气泡有对应执行」，
+   * 查不到说明该气泡的执行行已被删（回退/清空）或它根本不是猫的回复——
+   * 两种都该让前端弹一句实话，而不是打开一个空追踪页。
+   */
+  app.get('/api/eval/execution-by-message', async (req, reply) => {
+    const { message_id, session_id } = req.query as {
+      message_id?: string
+      session_id?: string
+    }
+    if (typeof message_id !== 'string' || message_id === '') {
+      return reply.status(400).send({ error: 'message_id is required' })
+    }
+    if (typeof session_id !== 'string' || session_id === '') {
+      return reply.status(400).send({ error: 'session_id is required' })
+    }
+    const row = executionLogsRepo.getExecutionByReplyMessageId(message_id, session_id)
+    if (!row) return reply.status(404).send({ error: 'execution not found for this message' })
+    return reply.send({
+      ok: true,
+      executionId: row.id,
+      agentId: row.agent_id,
+      status: row.status,
+      startedAt: row.started_at,
+      totalMs: row.latency_ms,
+    })
   })
 
   /** 待回标样本：low_score 且无 user_feedback，每条附回复全文 + 前置最近 10 条上下文 */

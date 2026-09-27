@@ -162,6 +162,9 @@ export interface ExecutionLog {
  *  多个 agent → N:1），关联回复气泡会混淆。独立于 Message 主接口：塞进 message 会让
  *  messages 接口膨胀，前端按 messageId 单独 join。 */
 export interface ExecutionMeta {
+  /** 执行行 id（T2 起带上）：气泡 footer 的 ⚙trace 点开即用，不必再发一次关联查询。
+   *  前端缓存未就绪时的权威回退是 `GET /api/eval/execution-by-message`。 */
+  executionId: string
   messageId: string | null
   agentId: string
   status: string

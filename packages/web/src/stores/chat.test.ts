@@ -344,6 +344,7 @@ describe('chatStore', () => {
         [
           'old-msg',
           {
+            executionId: 'exec-old',
             messageId: 'old-msg',
             agentId: 'a1',
             status: 'completed',
@@ -414,6 +415,7 @@ describe('chatStore', () => {
         [
           's1-msg',
           {
+            executionId: 'exec-s1',
             messageId: 's1-msg',
             agentId: 'a1',
             status: 'completed',

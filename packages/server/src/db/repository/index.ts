@@ -29,6 +29,7 @@ import { setRepoDb as setSettingsDb } from './settings.js'
 import { setRepoDb as setFlowStatesDb } from './flowStates.js'
 import { setRepoDb as setChunksDb } from './chunks.js'
 import { setRepoDb as setRetrievalEventsDb } from './retrievalEvents.js'
+import { setRepoDb as setTraceDetailsDb } from './traceDetails.js'
 import { setRepoDb as setSpansDb } from './spans.js'
 import { setRepoDb as setDependentsDb } from './dependents.js'
 
@@ -50,6 +51,7 @@ export function initRepository(db: Database.Database): void {
   setFlowStatesDb(db)
   setChunksDb(db)
   setRetrievalEventsDb(db)
+  setTraceDetailsDb(db)
   setSpansDb(db)
   setDependentsDb(db)
 }
@@ -71,9 +73,16 @@ export * as settings from './settings.js'
 export * as flowStates from './flowStates.js'
 export * as chunks from './chunks.js'
 export * as retrievalEvents from './retrievalEvents.js'
+export * as traceDetails from './traceDetails.js'
 export * as spans from './spans.js'
 
 export type { SpanInput, SpanRow, LlmSpanDetail } from './spans.js'
+export type {
+  ContextDecision,
+  ContextDecisionStage,
+  ContextDecisionDetail,
+  PromptSectionMeta,
+} from './traceDetails.js'
 export type { SessionTraceRow } from './executionLogs.js'
 
 // Row 类型也一并导出

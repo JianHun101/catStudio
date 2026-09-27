@@ -368,6 +368,43 @@ export function getInjectedRefsByMessageIds(
   return result
 }
 
+// ─── 读侧（T2 执行追踪检索明细出口）─────────────────────
+
+/** 一次执行的检索级事件（T2 详情页「检索明细」小节的头部读数） */
+export interface RetrievalEventRow {
+  id: number
+  reason: string
+  retrieval_ms: number | null
+  context_tokens: number | null
+  budget_tokens: number | null
+  truncated: number | null
+  threshold_max_distance: number
+  param_top_k: number
+  param_probe_n: number | null
+  param_pool_n: number | null
+  task_id: string | null
+}
+
+/**
+ * 按 `execution_id` 取检索事件行。
+ *
+ * 取**最新一条**（`ORDER BY id DESC LIMIT 1`）而非全部：`execution_id` 在一次执行里
+ * 只该有一条（`recordRetrievalTrace` 每次执行走一次），但**重跑/重试**会追加第二条
+ * ——详情页要显示的是「这一轮实际发生了什么」，取最新与 span 面「同一执行多段取全部」
+ * 的差异是有意的：段可以天然多条，检索事件多条只意味着一件事做重了。
+ *
+ * 无行 → `undefined`（前端渲染「未检索」，与「检索了空手而归」由 `reason` 分开）。
+ */
+export function getRetrievalEventByExecution(executionId: string): RetrievalEventRow | undefined {
+  return db
+    .prepare(
+      `SELECT id, reason, retrieval_ms, context_tokens, budget_tokens, truncated,
+              threshold_max_distance, param_top_k, param_probe_n, param_pool_n, task_id
+       FROM retrieval_events WHERE execution_id = ? ORDER BY id DESC LIMIT 1`
+    )
+    .get(executionId) as RetrievalEventRow | undefined
+}
+
 // ─── 读侧（最小面：仅供测试与后续看板取数）─────────────
 
 /** 一条 event 的查询行（按 `query_index` 升序） */
