@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import SessionList from './components/SessionList.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import SessionAgentsPanel from './components/SessionAgentsPanel.vue'
 import SettingsView from './views/SettingsView.vue'
 import EvaluationView from './views/EvaluationView.vue'
+import TraceView from './views/TraceView.vue'
 import { useChatStore } from '@/stores/chat'
 
 const store = useChatStore()
@@ -14,6 +15,31 @@ const showSettings = ref(false)
 
 /** 全屏评估中心 view 切换（E4-B，照 SettingsView 同款模式）——入口在左侧栏底部（设置上方） */
 const showEval = ref(false)
+
+/** 全屏执行追踪 view 切换（T2）——入口在轨道 ⚙，另有气泡 footer ⚙ 带预选进入 */
+const showTrace = ref(false)
+
+/** 气泡 ⚙ 进来时预选的执行 id（轨道直接进来为 null = 只看列表不预选） */
+const tracePreselect = ref<string | null>(null)
+
+/** 打开执行追踪。三个全屏 view 互斥（同款语义：`v-else-if` 链 + `app-layout` 的 v-show） */
+function openTrace(executionId: string | null = null): void {
+  tracePreselect.value = executionId
+  showTrace.value = true
+  showSettings.value = false
+  showEval.value = false
+}
+
+/** 「跳到该回复气泡 ↗」：关掉追踪页、必要时切到该会话、把焦点消息交给 ChatPanel 滚动。
+ *  切会话走 store 既有动作（它会拉数据），滚动由 `focusMessageId` 这条单向信号驱动。 */
+function onTraceJump(messageId: string, sessionId: string): void {
+  showTrace.value = false
+  if (sessionId && sessionId !== store.activeSessionId) store.joinSession(sessionId)
+  store.requestFocusMessage(messageId)
+}
+
+/** 任何全屏 view 开着时，底层三栏布局不显示（保活靠 v-show——切回来零重建） */
+const anyOverlayOpen = computed(() => showSettings.value || showEval.value || showTrace.value)
 
 /** User manually toggled the left sidebar — once set, auto-hide on narrow windows
  *  respects explicit choice and won't auto-show when the window widens again. */
@@ -76,9 +102,19 @@ onUnmounted(() => {
 
   <EvaluationView v-else-if="showEval" @close="showEval = false" />
 
-  <!-- app-layout 用 v-show 保活：切设置/评估页不卸载、切回零重建（SessionList 不重跑 onMounted、ChatPanel 不重建）；
-       设置/评估页仍 v-if/v-else-if 互斥。副作用是设计内收益：设置页打开期间 socket 事件仍进 store（消息实时进缓存）。 -->
-  <div v-show="!showSettings && !showEval" class="app-layout" :class="{ 'left-closed': !leftOpen }">
+  <!-- `:key` 绑预选 id：同一次会话里连点两条气泡的 ⚙ 要重新挂载，否则
+       `onMounted` 只跑一次、第二次预选不生效（症状是「点了没反应」）。 -->
+  <TraceView
+    v-else-if="showTrace"
+    :key="tracePreselect ?? 'trace'"
+    :preselect-execution-id="tracePreselect"
+    @close="showTrace = false"
+    @jump-to-message="onTraceJump"
+  />
+
+  <!-- app-layout 用 v-show 保活：切设置/评估/追踪页不卸载、切回零重建（SessionList 不重跑 onMounted、ChatPanel 不重建）；
+       三个全屏页仍 v-if/v-else-if 互斥。副作用是设计内收益：追踪页打开期间 socket 事件仍进 store（消息实时进缓存）。 -->
+  <div v-show="!anyOverlayOpen" class="app-layout" :class="{ 'left-closed': !leftOpen }">
     <!-- 52px 图标轨道（改版新增，最左）：logo + 会话/追踪/评估 + 底部设置。
          全局入口从旧「会话栏底部 footer」上移到此处——会话栏可整栏收起，轨道不能，
          故入口放轨道才「收起后仍在」。 -->
@@ -93,13 +129,8 @@ onUnmounted(() => {
         </svg>
       </div>
       <button class="rail-btn on" title="对话" aria-label="对话" aria-current="page">💬</button>
-      <!-- 执行追踪：T2 页面的展示位（本票只留 seam，不接行为） -->
-      <button
-        class="rail-btn"
-        disabled
-        title="执行追踪（随 T2 落地）"
-        aria-label="执行追踪（随 T2 落地）"
-      >
+      <!-- 执行追踪（T2）：从轨道直接进来 = 只看列表，不预选任何一条执行 -->
+      <button class="rail-btn" title="执行追踪" aria-label="执行追踪" @click="openTrace()">
         ⚙
       </button>
       <button class="rail-btn" title="评估中心" aria-label="评估中心" @click="showEval = true">
@@ -133,7 +164,11 @@ onUnmounted(() => {
 
     <main class="panel-center">
       <div class="center-content">
-        <ChatPanel :left-sidebar-open="leftOpen" @toggle-left-sidebar="toggleLeft" />
+        <ChatPanel
+          :left-sidebar-open="leftOpen"
+          @toggle-left-sidebar="toggleLeft"
+          @open-trace="openTrace"
+        />
       </div>
     </main>
 

@@ -72,6 +72,8 @@ const emit = defineEmits<{
   openMemoryRef: [ref: MemoryRef]
   /** hover 操作条「↩ 回退」→ 父组件开确认弹窗并调端点（本组件不碰网络） */
   rollback: [msgId: string]
+  /** hover 操作条「⚙ trace」（T2）→ 父组件反查 executionId 后开追踪页并预选（本组件不碰网络） */
+  openTrace: [msgId: string]
 }>()
 
 const store = useChatStore()
@@ -321,7 +323,10 @@ onUnmounted(() => clearTimeout(copyTimer))
 </script>
 
 <template>
-  <div class="message" :class="[msg.role, { grouped }]">
+  <!-- `data-msg-id` = 「滚到这条消息」的定位锚（T2 从追踪页跳回气泡用）。
+       用 DOM 属性而非 ref 表：消息是 v-for 出来的，父组件拿不到稳定的元素引用表，
+       而 `querySelector` 在这个规模（一屏几十条）完全不值得为它建索引。 -->
+  <div class="message" :class="[msg.role, { grouped }]" :data-msg-id="msg.id">
     <div v-if="!grouped" class="msg-avatar">{{ avatar }}</div>
     <div v-else class="msg-avatar msg-avatar-hidden">{{ avatar }}</div>
 
@@ -481,8 +486,15 @@ onUnmounted(() => clearTimeout(copyTimer))
               >
                 {{ copied ? '✓' : '⧉' }}
               </button>
-              <!-- ⚙ trace：本票只做展示位 + seam（T2 接线跳页），故**有意不绑 @click** -->
-              <button v-if="msg.role === 'agent'" class="act-btn" title="trace 页随 T2 落地">
+              <!-- ⚙ trace（T2 接线）：带 messageId 上抛，由 ChatPanel 反查 executionId 后跳页预选。
+                   查不到（该气泡没有执行行：回退删过 / 非本执行产出）由 ChatPanel 弹一句实话 -->
+              <button
+                v-if="msg.role === 'agent'"
+                class="act-btn"
+                title="查看这次执行的追踪"
+                aria-label="查看这次执行的追踪"
+                @click="emit('openTrace', msg.id)"
+              >
                 ⚙ trace
               </button>
               <!-- 撤回（既有机制）：落点从用户消息状态行迁到 hover 操作条。

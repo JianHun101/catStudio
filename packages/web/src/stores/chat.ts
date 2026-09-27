@@ -112,6 +112,26 @@ export const useChatStore = defineStore('chat', () => {
   /** 「显示已归档」开关（spec §4.1）。默认关 = 列表只显活跃会话 */
   const showArchived = ref(false)
   const messages = ref<Message[]>([])
+  /**
+   * 「滚到这条消息」的一次性信号（T2 的「跳到该回复气泡 ↗」用）。
+   *
+   * 形态是**值 + 序号**而非裸 id：连点两次同一条气泡也要各触发一次滚动，而裸 id 在
+   * 第二次赋同值时**不触发 watch**（Vue 的依赖比较是值相等）——症状是「第二次点了没反应」。
+   * 序号在 `requestFocusMessage` 里自增，消费方 watch 两者。
+   */
+  const focusMessageId = ref<string | null>(null)
+  const focusNonce = ref(0)
+
+  /** 请求把某条消息滚进视野（消费方 = ChatPanel；它自己负责清位，见 `clearFocusMessage`） */
+  function requestFocusMessage(messageId: string): void {
+    focusMessageId.value = messageId
+    focusNonce.value++
+  }
+
+  /** 消费完毕清位——不清的话下次切会话回来会**凭空再滚一次** */
+  function clearFocusMessage(): void {
+    focusMessageId.value = null
+  }
   const agentStates = ref<Map<string, Map<string, AgentRuntimeState>>>(new Map())
   const agents = ref<AgentConfig[]>([])
   const typingStates = ref<
@@ -1162,6 +1182,10 @@ export const useChatStore = defineStore('chat', () => {
     sessions,
     activeSessionId,
     messages,
+    focusMessageId,
+    focusNonce,
+    requestFocusMessage,
+    clearFocusMessage,
     agentStates,
     agents,
     typingStates,

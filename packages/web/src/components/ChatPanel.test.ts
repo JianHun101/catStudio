@@ -1493,3 +1493,141 @@ describe('T1 同会话回退', () => {
     expect(wrapper.find('.msg-memory-refs').exists()).toBe(true)
   })
 })
+
+// ─── T2 ⚙ trace 跳页 + 跳回气泡定位 ──────────────────────────
+describe('T2 气泡 ⚙ trace（跳页预选 / 权威回退 / 找不到就不静默）', () => {
+  function setupTraceSession() {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'T2', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [
+      { id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
+    ]
+    store.messages = [
+      {
+        id: 'm-reply',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: '回复正文',
+        mentions: [],
+        createdAt: '2026-09-27T00:00:00Z',
+      },
+    ] as never
+    return store
+  }
+
+  function mountPanel() {
+    return mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+  }
+
+  /** 点该气泡 footer 的 ⚙ trace 按钮 */
+  async function clickTrace(wrapper: VueWrapper<any>): Promise<void> {
+    const btn = wrapper.findAll('.act-btn').find((b) => b.text().includes('trace'))
+    expect(btn, '⚙ trace 按钮不在场').toBeTruthy()
+    await btn!.trigger('click')
+    await nextTick()
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+  })
+
+  it('快路：store 缓存命中 ⇒ 直接用 executionId 上抛，**零网络请求**', async () => {
+    const store = setupTraceSession()
+    store.sessionExecutions = new Map([
+      ['m-reply', { executionId: 'exec-cached', messageId: 'm-reply', agentId: 'a1' } as never],
+    ])
+    const urls = stubFetch(() => ({}))
+    const wrapper = mountPanel()
+    await nextTick()
+
+    await clickTrace(wrapper)
+
+    expect(wrapper.emitted('openTrace')?.[0]).toEqual(['exec-cached'])
+    // 本票给 ExecutionMeta 加 executionId 的全部意义就在这里：点 ⚙ 不发请求
+    expect(urls.some((u) => u.includes('execution-by-message'))).toBe(false)
+  })
+
+  it('慢路：缓存未命中 ⇒ 走 /eval/execution-by-message 权威回退，拿到 id 再上抛', async () => {
+    setupTraceSession() // 不设 sessionExecutions ⇒ 缓存空
+    const urls = stubFetch((u) =>
+      u.includes('execution-by-message') ? { ok: true, executionId: 'exec-api' } : {}
+    )
+    const wrapper = mountPanel()
+    await nextTick()
+
+    await clickTrace(wrapper)
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(urls.some((u) => u.includes('execution-by-message'))).toBe(true)
+    // 越权约束：session_id 必填（本仓有跨会话越权前科）
+    expect(urls.some((u) => u.includes('session_id=s1'))).toBe(true)
+    expect(wrapper.emitted('openTrace')?.[0]).toEqual(['exec-api'])
+  })
+
+  it('两条路都拿不到 ⇒ **不静默**：弹错误提示，且不上抛（不开空追踪页）', async () => {
+    const store = setupTraceSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ error: 'execution not found for this message' }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    )
+    const wrapper = mountPanel()
+    await nextTick()
+
+    await clickTrace(wrapper)
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(wrapper.emitted('openTrace')).toBeUndefined()
+    expect(store.errorMessage).toContain('没有执行记录')
+  })
+
+  it('「跳到该回复气泡 ↗」回来：按 data-msg-id 滚动到该条，并把焦点信号消费掉', async () => {
+    const store = setupTraceSession()
+    const scrollIntoView = vi.fn()
+    // jsdom 没有 scrollIntoView，补个桩（这是被测行为本身，不是规避）
+    Element.prototype.scrollIntoView = scrollIntoView
+    const wrapper = mountPanel()
+    await nextTick()
+
+    // 气泡根元素带定位锚——滚动靠它，不靠 ref 表（v-for 出不来稳定引用）
+    expect(wrapper.find('[data-msg-id="m-reply"]').exists()).toBe(true)
+
+    store.requestFocusMessage('m-reply')
+    await nextTick()
+    await nextTick()
+    await nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalled()
+    // 消费即清位：不清的话下次切会话回来会凭空再滚一次
+    expect(store.focusMessageId).toBeNull()
+  })
+
+  it('连点两次同一条也各滚一次（nonce 进依赖——只 watch id 时同值不触发）', async () => {
+    const store = setupTraceSession()
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    mountPanel()
+    await nextTick()
+
+    store.requestFocusMessage('m-reply')
+    await nextTick()
+    await nextTick()
+    store.requestFocusMessage('m-reply')
+    await nextTick()
+    await nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+  })
+})

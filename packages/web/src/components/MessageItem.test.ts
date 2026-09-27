@@ -386,10 +386,10 @@ describe('MessageItem 结构契约（静态源）', () => {
     expect(source).not.toContain('stopAgent(msg.agentId)')
   })
 
-  it('hover 操作条：默认不可见由 CSS 门控，agent = ⧉/⚙(seam)/↩，用户消息含撤回', () => {
+  it('hover 操作条：默认不可见由 CSS 门控，agent = ⧉/⚙(已接线)/↩，用户消息含撤回', () => {
     expect(source).toContain('class="msg-acts"')
-    // ⚙ trace 本票只是展示位：有 title 说明 T2 落地，**有意不绑 @click**
-    expect(source).toContain('title="trace 页随 T2 落地"')
+    // ⚙ trace（T2 起**已接线**）：带 messageId 上抛，由 ChatPanel 反查 executionId 后跳页
+    expect(source).toContain('@click="emit(\'openTrace\', msg.id)"')
     expect(source).toContain('@click="emit(\'rollback\', msg.id)"')
     // 撤回判据仍是 isLatestUser（服务端只允许撤最新一条用户消息）
     expect(source).toMatch(/v-if="msg\.role === 'user' && isLatestUser"/)
