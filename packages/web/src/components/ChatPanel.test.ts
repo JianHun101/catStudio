@@ -151,22 +151,43 @@ describe('ChatPanel 右栏 props 清理（B2 删右栏）', () => {
   })
 })
 
-describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）', () => {
+describe('ChatPanel 气泡 footer（CLI 徽章 + 模型 + 单次 tok——T1 改版）', () => {
   // footer 标记本体已随消息块迁入 MessageItem.vue（静态断言见 MessageItem.test.ts）；
-  // 这里保留的是 footer 数据源（模型/tokens/execMeta 文案）在父组件的口径。
+  // 这里保留的是 footer 数据源（徽章/模型/execMeta 文案）在父组件的口径。
 
-  it('tokens 文案：m = maxContextTokens（上下文窗口数，非 llm_max_tokens 单次输出上限）', () => {
-    expect(source).toContain('function tokensTextFor(agentId: string): string')
+  it('累计窗口用量已从气泡 footer 移除——`tokensTextFor` 退役，窗口读数不再三处重复', () => {
+    // 三处重复：右栏成员卡（保留）/ 历史气泡 footer / 流式气泡 footer。后两处本票砍掉。
+    expect(source).not.toContain('function tokensTextFor')
+    expect(source).not.toContain('tokensText')
+    // 窗口**色阶**仍在（它判的是「离交接线多远」，与读数是两件事），故 maxTokensFor 保留
+    expect(source).toContain('function maxTokensFor(agentId: string): number')
     expect(source).toContain('store.contextTokens.get(agentId) ?? 0')
-    expect(source).toContain('maxTokensFor(agentId)')
-    expect(source).toContain('tokens')
-    expect(source).toContain('不是 llm_max_tokens（单次输出上限 2048）')
     // 旧措辞「窗口 {pct}%」已移除
     expect(source).not.toContain('窗口 {{ contextPctFor(msg.agentId) }}%')
   })
 
+  it('CLI 徽章：文字 = llmProvider，配色按前缀归族（opencode-go 这类带路由后缀的归 opencode）', () => {
+    expect(source).toContain('function cliNameFor(agentId: string): string')
+    expect(source).toContain('?.llmProvider || ')
+    expect(source).toContain('function cliBadgeClass(provider: string): string')
+    expect(source).toContain("if (p.startsWith('claude')) return 'cli-claude'")
+    expect(source).toContain("if (p.startsWith('opencode')) return 'cli-opencode'")
+    // 配色表没收录的 provider 回落中性色，不把工具名藏起来
+    expect(source).toContain("return 'cli-other'")
+    // 徽章文字 + 配色类在视图模型里各算一次（MessageItem 只贴 class），且只查一次 agents
+    expect(source).toContain('const cliName = agentId ? cliNameFor(agentId) : ')
+    expect(source).toContain('cliClass: cliName ? cliBadgeClass(cliName) : ')
+  })
+
   it('旧版停止按钮已从历史气泡 footer 移除（B2 重定位到 streaming/状态行）', () => {
     expect(source).not.toContain('stopAgent(msg.agentId)')
+  })
+
+  it('hover 操作条样式门控：默认 opacity:0，hover 气泡浮现；键盘 focus-within 也显形', () => {
+    expect(source).toMatch(/\.chat-panel \.msg-acts \{[\s\S]{0,200}opacity: 0/)
+    expect(source).toContain('.chat-panel .message:hover .msg-acts,')
+    // 纯 opacity 门控会把按钮留在 tab 序里却看不见——focus-within 补上键盘可达
+    expect(source).toContain('.chat-panel .msg-acts:focus-within')
   })
 
   it('执行元数据（execution_logs 落库稳定耗时/token）优先展示，durationMs 降为无 meta 时兜底', () => {
@@ -175,13 +196,17 @@ describe('ChatPanel 气泡 footer（模型 + tokens 用量——B2 措辞改）'
     expect(source).toContain('store.sessionExecutions.get(msg.id)')
     expect(source).toContain('function execMetaTextFor(msg')
     expect(source).toContain('meta.latencyMs != null')
-    expect(source).toContain('fmtTokens(inTok ?? 0)')
+    // 单次 in/out：`{in}k/{out}k tok`——**不写 "in"/"out" 字样**（用户裁决「放在 / 两边自然就清楚了」）
+    expect(source).toContain('${fmtTokens(inTok ?? 0)}/${fmtTokens(outTok ?? 0)} tok')
+    expect(source).not.toContain('in ${fmtTokens')
     // 两条分支的文案各算一次后随视图模型下发（MessageItem 只做展示）
     expect(source).toContain('execMetaText: execMetaTextFor(msg)')
     expect(source).toContain(
-      'durationText: msg.durationMs != null ? `耗时 ${formatDuration(msg.durationMs)}` : null'
+      'durationText: msg.durationMs != null ? formatDuration(msg.durationMs) : null'
     )
+    // 耗时统一带 ⏱ 前缀（footer 单行里与 tok 并列，没前缀分不清哪个是时间）
     expect(source).toContain('function formatDuration(ms: number): string')
+    expect(source).toContain('return `⏱ ${s >= 10')
   })
 })
 
@@ -1304,5 +1329,167 @@ describe('M3 记忆抽屉 MD 化（两处内容区按 markdown 渲染）', () =>
     // 探针非真空：真扫到了规则面（对不上就说明扫描口径坏了，而不是「全绿」）
     expect(scanned).toBeGreaterThan(50)
     expect(withoutLanding).toEqual([])
+  })
+})
+
+// ─── T1 同会话回退（hover 操作条 → 确认弹窗 → 分隔线）────────────
+describe('T1 同会话回退', () => {
+  /** 记忆行批量口的合并窗口（MEMORY_REFS_DEBOUNCE_MS=50）留足裕度 */
+  const SETTLE_MS = 160
+
+  function setup() {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'T1', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [
+      {
+        id: 'a1',
+        name: 'ds猫',
+        avatar: '🐱',
+        role: 'implementer',
+        llmModel: 'deepseek-flash',
+        llmProvider: 'claude',
+      } as never,
+    ]
+    store.messages = [
+      {
+        id: 'm1',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '一',
+        mentions: [],
+        createdAt: '2026-09-22T00:00:00Z',
+      },
+      {
+        id: 'm2',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: '二',
+        mentions: [],
+        createdAt: '2026-09-22T00:01:00Z',
+      },
+      {
+        id: 'm3',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '三',
+        mentions: [],
+        createdAt: '2026-09-22T00:02:00Z',
+      },
+      {
+        id: 'm4',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: '四',
+        mentions: [],
+        createdAt: '2026-09-22T00:03:00Z',
+      },
+    ] as never
+    return store
+  }
+
+  function mountPanel() {
+    return mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+  }
+
+  // SESSION_ROLLED_BACK 的处理面在 store（多端同步），用例在 `stores/chat.test.ts`
+  // ——本文件不 mock useSocket，发不出真事件。这里只测 UI 链。
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('每条消息都有 ↩ 回退（用户与 agent 消息都算非 welcome 消息）', async () => {
+    setup()
+    const wrapper = mountPanel()
+    await nextTick()
+    expect(wrapper.findAll('.btn-rollback')).toHaveLength(4)
+  })
+
+  it('点 ↩ → 确认弹窗，N = 该消息之后的条数（渲染列表口径）', async () => {
+    setup()
+    const wrapper = mountPanel()
+    await nextTick()
+
+    await wrapper.findAll('.btn-rollback')[1].trigger('click') // m2 之后剩 m3/m4
+    await nextTick()
+
+    const modal = wrapper.find('.rollback-modal')
+    expect(modal.exists()).toBe(true)
+    expect(modal.find('b').text()).toBe('2')
+    expect(modal.text()).toContain('不可恢复')
+  })
+
+  it('取消 → 弹窗关闭且零请求（不误触端点）', async () => {
+    setup()
+    const urls = stubFetch(() => ({}))
+    const wrapper = mountPanel()
+    await nextTick()
+
+    await wrapper.findAll('.btn-rollback')[1].trigger('click')
+    await nextTick()
+    await wrapper.find('.rollback-cancel').trigger('click')
+    await nextTick()
+
+    expect(wrapper.find('.rollback-modal').exists()).toBe(false)
+    expect(urls.filter((u) => u.includes('/rollback'))).toHaveLength(0)
+  })
+
+  it('确认 → 按服务端回执的 removedIds 删消息 + 分隔线出现（剩余消息记忆行照常渲染）', async () => {
+    const store = setup()
+    const urls = stubFetch((url) => {
+      if (url.includes('/rollback')) {
+        return { ok: true, messageId: 'm2', removedIds: ['m3', 'm4'], removedCount: 2 }
+      }
+      // 记忆引用批量口：给存活的 agent 消息 m2 一条命中
+      return {
+        m2: {
+          state: 'injected',
+          items: [
+            {
+              docPath: 'docs/lessons/a.md',
+              sectionAnchor: 'A',
+              contentHash: 'h',
+              breadcrumb: 'A',
+              bodyHead: '片段',
+              injectedPosition: 1,
+              finalRank: 1,
+            },
+          ],
+        },
+      }
+    })
+
+    const wrapper = mountPanel()
+    await nextTick()
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+
+    await wrapper.findAll('.btn-rollback')[1].trigger('click')
+    await nextTick()
+    await wrapper.find('.rollback-ok').trigger('click')
+    // 确认走真异步链（fetch → store → 标记），两个 nextTick 不够；TransitionGroup 的
+    // **离场元素**还要等 rAF 驱动的 transitionend 才摘除，故按既有 SETTLE_MS 口径再等一拍
+    await new Promise((r) => setTimeout(r, SETTLE_MS))
+
+    // 请求确实发到了回退端点（不是前端自己删的）
+    expect(urls.some((u) => u.includes('/sessions/s1/rollback'))).toBe(true)
+    // 消息：只剩目标及之前（DOM 也只剩两条——离场元素已摘）
+    expect(store.messages.map((m) => m.id)).toEqual(['m1', 'm2'])
+    expect(wrapper.findAll('.message')).toHaveLength(2)
+    // 分隔线出现，文案带删除条数
+    const line = wrapper.find('.rollback-line')
+    expect(line.exists()).toBe(true)
+    expect(line.text()).toContain('已回退')
+    expect(line.text()).toContain('2')
+    // 弹窗关闭
+    expect(wrapper.find('.rollback-modal').exists()).toBe(false)
+    // 剩余消息的记忆行不受影响（验收 5 第三条）
+    expect(wrapper.find('.msg-memory-refs').exists()).toBe(true)
   })
 })
