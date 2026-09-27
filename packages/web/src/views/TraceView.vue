@@ -438,7 +438,16 @@ onMounted(async () => {
                   时间轴
                   <span class="dsec-note">段是嵌套的，总时长只认根段 invoke_agent</span>
                 </div>
-                <div v-if="!waterfall" class="dsec-empty">无段数据（存量行）</div>
+                <!-- 在飞执行**必然**没有段（`ExecTrace` 内存累积、`finish()` 才落库），
+                     那不是「存量行」——把它显示成存量行会让用户以为这条老数据没采集。
+                     两态必须分开说，否则下次有人排障会把「还在跑」读成「没采到」。 -->
+                <div v-if="!waterfall" class="dsec-empty">
+                  {{
+                    detail.execution.status === 'running'
+                      ? '段数据在本次执行收尾时一次性落库——它还在跑，此刻库里确实一行段都没有'
+                      : '无段数据（存量行）'
+                  }}
+                </div>
                 <template v-else>
                   <div class="segbar">
                     <span

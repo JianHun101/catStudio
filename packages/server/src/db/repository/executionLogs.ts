@@ -366,7 +366,7 @@ export function listExecutionRows(filter: ExecutionListFilter): Array<{
       `SELECT el.id, el.session_id, el.agent_id, el.status, el.started_at, el.ended_at,
               el.latency_ms, el.prompt_tokens, el.completion_tokens, el.message_id,
               el.triggered_by_message_id, el.trace_id, el.error_type, el.error_message,
-              a.name AS agent_name, a.avatar AS agent_avatar, s.name AS session_name,
+              a.name AS agent_name, a.avatar AS agent_avatar, s.title AS session_name,
               substr(tm.content, 1, 200) AS trigger_head,
               rm.content AS reply_content,
               (SELECT COUNT(DISTINCT c.doc_path || char(0) || c.section_anchor)

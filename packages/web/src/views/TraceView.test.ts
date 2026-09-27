@@ -468,6 +468,30 @@ describe('TraceView 行为（挂载）', () => {
     expect(wrapper.find('.tv-err').exists()).toBe(false)
   })
 
+  it('在飞执行无段：显示「还在跑」而**不是**「存量行」（两态混说会让人把没采到读成在跑）', async () => {
+    mocked.getTraceExecutions.mockResolvedValue({
+      ok: true,
+      total: 1,
+      limit: 50,
+      offset: 0,
+      executions: [row({ status: 'running', endedAt: null, totalMs: null })],
+    })
+    mocked.getExecutionDetail.mockResolvedValue(
+      detail({
+        execution: { ...detail().execution, status: 'running', endedAt: null, totalMs: null },
+      })
+    )
+    mocked.getEvalSpans.mockResolvedValue({ ok: true, spans: [] } as any)
+    wrapper = await mountView()
+    await wrapper.find('.row-head').trigger('click')
+    await flush()
+
+    expect(wrapper.text()).toContain('段数据在本次执行收尾时一次性落库')
+    expect(wrapper.text()).not.toContain('无段数据（存量行）')
+    // totalMs 为 null ⇒ 「—」而不是 0
+    expect(wrapper.find('.rh-ms').text()).toBe('—')
+  })
+
   it('failed 执行：错误框默认展开，内容 = errorMessage，并给出处置提示', async () => {
     mocked.getTraceExecutions.mockResolvedValue({
       ok: true,
