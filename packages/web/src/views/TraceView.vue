@@ -52,11 +52,24 @@ const store = useChatStore()
 const fSessionId = ref<string>(store.activeSessionId ?? '')
 const fAgentId = ref<string>('')
 const fStatus = ref<string>('')
-/** 单位**秒**（UI 是秒），发请求时换算成毫秒——两侧口径不同面，换算只在这一处 */
-const fMinLatencySec = ref<number | null>(null)
+/** 单位**秒**（UI 是秒），发请求时换算成毫秒——两侧口径不同面，换算只在这一处。
+ *  运行时类型含 `string`：`<input type="number">` 被清空时，`v-model.number` 经 Vue 的
+ *  `looseToNumber`（`parseFloat('')=NaN` ⇒ **原样返回入参**）写回的是**空串**，不是 `null`。 */
+const fMinLatencySec = ref<number | string | null>(null)
 const fErrorsOnly = ref(false)
 const PAGE_SIZE = 50
 const offset = ref(0)
+
+/** 耗时阈值的**唯一**取值判据：只认「真拿到一个有限数」这一个正向条件。
+ *  反例是两个都要防的坏值面——`null`（从未填）与**空串**（填过又清空）。
+ *  尤其不能写成 `Number.isNaN(v)` 兜底：它**不做类型强转**，`Number.isNaN('')` 为 `false`
+ *  ⇒ 空串漏过去算出 `0` ⇒ 服务端 `latency_ms IS NOT NULL AND latency_ms >= 0` 把
+ *  **全部 `latency_ms` 为 NULL 的行**静默吞掉：在飞（running）/未收口 failed 之外，
+ *  还有存量行——而「无段数据（存量行）」占位正是本票的验收项，它们会连同一起消失。 */
+function minLatencyMsParam(v: number | string | null): number | undefined {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return undefined
+  return Math.max(0, Math.round(v * 1000))
+}
 
 const total = ref(0)
 const rows = ref<ExecutionTraceRow[]>([])
@@ -79,10 +92,7 @@ async function load(): Promise<void> {
       sessionId: fSessionId.value || undefined,
       agentId: fAgentId.value || undefined,
       status: fStatus.value || undefined,
-      minLatencyMs:
-        fMinLatencySec.value === null || Number.isNaN(fMinLatencySec.value)
-          ? undefined
-          : Math.max(0, Math.round(fMinLatencySec.value * 1000)),
+      minLatencyMs: minLatencyMsParam(fMinLatencySec.value),
       errorsOnly: fErrorsOnly.value,
       limit: PAGE_SIZE,
       offset: offset.value,

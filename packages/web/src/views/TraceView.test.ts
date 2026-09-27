@@ -215,9 +215,13 @@ describe('TraceView 静态结构（?raw）', () => {
     expect(source).toMatch(/offset\.value = 0\s*\n\s*void load\(\)/)
   })
 
-  it('耗时阈值 UI 是秒、请求是毫秒——换算只在取值那一处', () => {
+  it('耗时阈值 UI 是秒、请求是毫秒——换算只在那一个取值判据里', () => {
     expect(source).toContain('fMinLatencySec')
-    expect(source).toContain('Math.round(fMinLatencySec.value * 1000)')
+    // 换算只此一处（调用点直接传函数结果，模板里没有任何算术语）
+    expect(source.match(/Math\.round\(/g)?.length).toBe(1)
+    expect(source).toContain('minLatencyMs: minLatencyMsParam(fMinLatencySec.value)')
+    // 判据必须是「正向只认真数」，不是枚举坏值——枚举漏掉空串是本例守的那个缺陷
+    expect(source).toContain("typeof v !== 'number' || !Number.isFinite(v)")
   })
 
   it('token 读数一律带「估」标（适配器不回流真实 usage，R2 边界）', () => {
@@ -533,6 +537,26 @@ describe('TraceView 行为（挂载）', () => {
     expect(arg.errorsOnly).toBe(true)
     expect(arg.offset).toBe(0)
     expect(arg.sessionId).toBe('s1') // 默认口径 = 当前会话
+  })
+
+  it('耗时阈值：填数带换算值；**清空** = 不限 ⇒ 请求不带 min_latency_ms（不是 0）', async () => {
+    wrapper = await mountView()
+    const input = wrapper.find('.tf input[type="number"]')
+    const lastArg = () => mocked.getTraceExecutions.mock.calls.at(-1)![0] as any
+
+    // 正向：填 5 秒 ⇒ 换算成 5000ms
+    mocked.getTraceExecutions.mockClear()
+    await input.setValue('5')
+    await flush()
+    expect(lastArg().minLatencyMs).toBe(5000)
+
+    // 反向（承重）：填过再清空 ⇒ `v-model.number` 经 Vue 的 `looseToNumber` 写回的是**空串**
+    // （`parseFloat('')=NaN` ⇒ 原样返回）。判据若只防 `null`/`NaN`，空串会漏过去算出 0
+    // ⇒ 服务端 `latency_ms IS NOT NULL AND >= 0` 把所有 latency_ms 为 NULL 的行静默吞掉。
+    mocked.getTraceExecutions.mockClear()
+    await input.setValue('')
+    await flush()
+    expect(lastArg().minLatencyMs).toBeUndefined()
   })
 
   it('预选（气泡 ⚙ 进来）：自动展开该行', async () => {
