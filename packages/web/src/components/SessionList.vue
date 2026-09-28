@@ -6,14 +6,6 @@ import { createLogger } from '@/utils/logger'
 
 const log = createLogger('SessionList')
 
-defineProps<{
-  collapsed?: boolean
-}>()
-
-const emit = defineEmits<{
-  expand: []
-}>()
-
 const store = useChatStore()
 const showCreate = ref(false)
 
@@ -41,40 +33,10 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
 </script>
 
 <template>
-  <!-- Collapsed: icon column（参考 Claude Desktop） -->
-  <div v-if="collapsed" class="session-list-collapsed">
-    <button class="collapsed-icon collapsed-brand" title="展开会话列表" @click="emit('expand')">
-      🐾
-    </button>
-
-    <div class="collapsed-sessions">
-      <button
-        v-for="s in store.sessions"
-        :key="s.id"
-        class="collapsed-session-btn"
-        :class="{ active: store.activeSessionId === s.id }"
-        :title="s.title"
-        @click="store.joinSession(s.id)"
-      >
-        <span class="collapsed-session-icon">💬</span>
-        <span
-          v-if="store.unreadCounts.get(s.id) && store.activeSessionId !== s.id"
-          class="collapsed-unread"
-        ></span>
-      </button>
-    </div>
-
-    <button class="collapsed-icon collapsed-add" title="新建会话" @click="showCreate = true">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-      </svg>
-    </button>
-
-    <SessionCreateModal v-if="showCreate" @close="closeCreate" />
-  </div>
-
-  <!-- Expanded: full session list -->
-  <div v-else class="session-list">
+  <!-- 会话列表**唯一形态**。折叠态图标列已整支删除（含 prop/emit 传递链）：
+       左栏收起时 `.panel-left` 整块 `display:none`（App.vue），该分支 DOM 永不可见 = 死代码。
+       产品上若要恢复「窄条收起态」，需另立票——收起态交互不在本组件现状内。 -->
+  <div class="session-list">
     <!-- 会话栏头行：48px，与主区顶栏、右栏「成员 · N」同一水平线（治「左右侧面板上方空缺」）。
          品牌块（logo + CatStudio 字样）已上移到 52px 图标轨道——logo 唯一归属轨道，
          会话栏只留本区自身的标题与操作；此处若再放一块品牌，头行就会被顶下去。 -->
@@ -523,106 +485,5 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   padding: 24px;
   color: var(--text-muted);
   font-size: 12px;
-}
-
-/* ─── Collapsed Icon Column ──────────────── */
-
-.session-list-collapsed {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  height: 100%;
-  padding: 8px 0;
-  gap: 4px;
-}
-
-.collapsed-icon {
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all var(--ease-out);
-}
-
-.collapsed-icon:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.collapsed-brand {
-  font-size: 22px;
-  margin-bottom: 8px;
-}
-
-.collapsed-sessions {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  width: 100%;
-  padding: 0 4px;
-}
-
-.collapsed-session-btn {
-  position: relative;
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all var(--ease-out);
-}
-
-.collapsed-session-btn:hover {
-  background: var(--bg-hover);
-}
-
-.collapsed-session-btn.active {
-  background: var(--bg-surface);
-}
-
-.collapsed-session-btn.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  background: var(--accent);
-  border-radius: 0 2px 2px 0;
-}
-
-.collapsed-session-icon {
-  font-size: 16px;
-  opacity: 0.7;
-}
-
-.collapsed-unread {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent-red);
-}
-
-.collapsed-add {
-  margin-top: auto;
-  margin-bottom: 0;
 }
 </style>

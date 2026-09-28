@@ -30,14 +30,13 @@ describe('SessionList 新建会话按钮上移（标题行右侧）', () => {
 })
 
 describe('SessionList 会话行去云朵 icon', () => {
-  it('展开态会话行无 💬 图标（session-icon 类与 emoji 已删），标题占满行宽', () => {
+  it('会话行无 💬 图标（session-icon 类与 emoji 已删），标题占满行宽', () => {
     expect(source).not.toContain('class="session-icon"')
-    // 展开态会话行按钮内不再有 emoji 图标（折叠态 collapsed-session-icon 保留——Claude Desktop 图标列模式）
     expect(source).not.toMatch(/session-item[\s\S]{0,200}💬/)
   })
 
-  it('折叠态图标列保留会话 icon（56px 图标条模式，Claude Desktop 范式）', () => {
-    expect(source).toContain('class="collapsed-session-icon"')
+  it('折叠态图标列已整支删除（与 .panel-left 的 display:none 同条件 ⇒ DOM 永不可见）', () => {
+    expect(source).not.toContain('collapsed')
   })
 })
 
