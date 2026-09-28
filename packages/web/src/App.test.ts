@@ -108,6 +108,30 @@ describe('App.vue 布局骨架（T1：52px 轨道 + 会话栏 + 主区 + 右栏�
     expect(appSource).toContain('grid-template-columns: 0 1fr;')
   })
 
+  it('三栏列位显式钉死——不依赖自动放置（left-closed 会话栏 display:none 会让后继栏整体前移一格）', () => {
+    // 病灶（票 docs/run/left-closed-collapse/ticket.md）：`.panel-left` 在 left-closed 态
+    // `display:none` ⇒ 不再是 grid item ⇒ 自动放置把 `.panel-center` 放进 0 宽首列，主区塌 0；
+    // 且塌陷后 ChatPanel 的展开按钮被挤到 52px 轨道底下（真机 elementFromPoint 命中轨道），
+    // 用户点不回去 = 单向死锁。修法是把「哪一栏在哪一列」从自动放置改成显式声明。
+    //
+    // 判据绑**三栏各自的 grid-column** 这条不变量，而不是绑某个具体态的读数或列宽：
+    // 逐态列宽是复述面——再加一个隐藏态时，逐态断言仍会绿而塌陷复发。
+    for (const [sel, col] of [
+      ['.panel-left', 1],
+      ['.panel-center', 2],
+      ['.panel-right', 3],
+    ] as const) {
+      const rule = appSource.match(new RegExp(`\\n\\${sel}\\s*\\{[^}]*\\}`))
+      expect(
+        rule,
+        `未找到 ${sel} 的独立规则（须行首起，排除 .app-layout.left-closed .panel-left 这类复合选择器）`
+      ).toBeTruthy()
+      expect(rule![0], `${sel} 未显式钉死列位——自动放置会随隐藏态错位`).toContain(
+        `grid-column: ${col}`
+      )
+    }
+  })
+
   it('左折叠状态/媒体查询保留', () => {
     expect(appSource).toContain('const leftOpen = ref(true)')
     expect(appSource).toContain('left-closed')
