@@ -229,7 +229,7 @@ onUnmounted(() => {
       <div v-show="!anyOverlayOpen" class="app-layout" :class="{ 'left-closed': !leftOpen }">
         <aside class="panel-left">
           <div class="panel-inner">
-            <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />
+            <SessionList />
           </div>
         </aside>
 
@@ -451,7 +451,8 @@ onUnmounted(() => {
   display: none;
 }
 
-/* Panel inner — always flex, collapsed mode handled by child component */
+/* Panel inner — always flex；左栏收起由 `.panel-left` 的 display:none 承担，
+   子组件（SessionList）不再有折叠态分支 */
 .panel-inner {
   flex: 1;
   display: flex;
