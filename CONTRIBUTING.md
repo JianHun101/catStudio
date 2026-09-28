@@ -29,6 +29,8 @@ catstudy [<uuid>]
 ```
 
 - `uuid` 是触发本次改动的那条消息 id（本仓的调度系统会给每次执行注入 `CATSTUDY_TRIGGER_MSG_ID`），`.husky/commit-msg` 会拿它去 `messages` 表校验存在性（[`scripts/commit-uuid-gate.mjs`](./scripts/commit-uuid-gate.mjs)）——**查无即拒**。手打或杜撰的 uuid 会挂在提交那一刻；无标记的 merge / revert / 手动提交照旧放行。
+- **前缀别写错**：`catstance [<uuid>]` 这类把 `catstudy` 拼歪的写法同样**当场拒**（`99cee01b` 事故形态——拼错会被当成「无标记」静默放行，审查链断在那里且不报错）。大小写写歪（`Catstudy`）也算。前 5 个字符与 uuid 都必须对得上正文要求，写歪了 git 会直接把正确写法打给你看。
+- **`pre-push` 还会回扫一遍推送栈**：栈顶已审 ≠ 栈内每一笔标记都写对——中间某笔拼错的会随栈顶一起搭车上远端。被拦时按提示 `git rebase -i` / `--amend` 改好 message 再推。只扫「写歪的前缀」，**不扫无标记**（merge / revert / 手工提交是合法形态）。
 - **提交前限定路径**：`git add <paths>` → `git diff --cached --name-only` 核对暂存区 → 裸 `git commit`。裸 commit 提交**整个**暂存区，所以核对步是限定路径的替代保证。多人在同一工作区并行时**不要** `git add -A`。
 - 不要用 `git commit --only`：`.husky/pre-commit` 为挡 git 注入污染会 `unset GIT_INDEX_FILE`，而 `--only` 正是靠这个变量把临时索引递给钩子的。
 - 逃生口是 `git commit --no-verify`。它存在，但只用于已知的钩子误报（例如 CI 注入的环境变量导致夹具假红）；绕过门禁推未审分支是不行的——`pre-push` 还有一道。

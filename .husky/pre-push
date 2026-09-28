@@ -14,6 +14,14 @@
 #   回落 HEAD 只在「一行 refspec 都没解析出」（人工直跑 / 无 stdin）时生效——
 #   删除 ref（local sha 全 0）是一行合法的 refspec，无对象可审 ⇒ 放行，不回落。
 #
+# 近 miss 扫描（票 hook-marker-fail-open）：sha 判据只认**栈顶身份**，认不出栈内某
+# 一笔的 commit message 把标记写歪（`catstance [<uuid>]`）。实测事故 `99cee01b` 就是
+# 这么上到 origin/dev 的——父提交标记正常、tip 也审过，唯独它自己是拼错的，于是它
+# 从未触发过审查却随 tip 一起放行。本层对**已放行**的 refspec 扫「本次推送新引入该
+# 远端」的 commit（范围口径见 scripts/commit-uuid-gate.mjs 的 scanPushRange），命中即拒。
+# 只扫「写歪的前缀」，**不扫「无标记」**——无标记是本仓合法形态（merge / revert /
+# 用户手工提交），拦它等于造误拦机器（理由同 T-O 段末）。
+#
 # 自动补投：调用 handoff-gen.mjs --gate-deliver 补投滞留的交接文档
 # （pending 队列按 SHA 补投 + 兜底投递 HEAD）。
 # 投递逻辑全部在 JS 单源——shell 不再重复实现投递（曾有两套投递实现：
@@ -103,6 +111,17 @@ blocked=0
 saw_refspec=0
 blocked_list=""
 ok_list=""
+# 已放行、但还需过近 miss 扫描的 `<sha> <base>` 对（票 hook-marker-fail-open）。
+# 为什么不能就地扫：本循环的放行分支是 `continue`，就地扫要么重复三段代码、
+# 要么把 continue 全改成标志位——后者动的是 T-O 刚钉死的判据顺序（见文件头 T-O 段）。
+# 收集到循环外统一扫，判据顺序一字不动。
+#
+# ⚠️ 这里的换行是**真换行**，不是上面 blocked_list / ok_list 用的字面量 `\n`——那两个
+# 是喂给 `printf "%b"` 让 printf 解转义的；scan_list 喂的是 **here-doc + read**，字面量
+# `\n` 会被当成两个普通字符 ⇒ 所有 refspec 挤成一行、`read` 只转一圈、base 尾巴上还挂着
+# 一个 `\`n` ⇒ `rev-list <40个0>\n..tip` 整条失败 ⇒ 扫描**静默不生效**（实施时首版即
+# 栽在这，靠真 push 夹具复现，读代码看不出来）。
+scan_list=""
 
 while read -r local_ref local_sha remote_ref remote_sha; do
   # 空行 / 字段不全的行跳过（git 不会传这种行；人工直跑 hook 时压根没有 stdin）
@@ -138,6 +157,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   # ① 推的正是审查记录那一笔 ⇒ 已审
   if [ "$LAST_REVIEWED" = "$local_sha" ]; then
     ok_list="${ok_list}   - ${remote_ref:-?} $(echo "$local_sha" | cut -c1-7)（== .push-gate）\n"
+    scan_list="${scan_list}${local_sha} ${remote_sha}
+"
     continue
   fi
 
@@ -155,6 +176,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   #    而误拦合法推送的压力会把人推向 `--no-verify`——正是本票要止住的形态。
   if git merge-base --is-ancestor "$local_sha" "$LAST_REVIEWED" 2>/dev/null; then
     ok_list="${ok_list}   - ${remote_ref:-?} $(echo "$local_sha" | cut -c1-7)（位于已审历史内）\n"
+    scan_list="${scan_list}${local_sha} ${remote_sha}
+"
     continue
   fi
 
@@ -173,13 +196,59 @@ EOF
 if [ "$saw_refspec" -eq 0 ]; then
   HEAD_SHA=$(git rev-parse HEAD)
   if [ "$LAST_REVIEWED" = "$HEAD_SHA" ]; then
-    exit 0
-  fi
-  blocked=1
-  if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
-    blocked_list="${blocked_list}   - (HEAD 回落) $(echo "$HEAD_SHA" | cut -c1-7)（有未审 commit）\n"
+    # 放行延后到扫描之后（原为就地 `exit 0`）——HEAD 正是最常见的「推已审 tip」形态，
+    # 就地 exit 会让本层在人工直跑钩子时整条失效。base 留空 ⇒ 走「新分支」口径。
+    scan_list="${scan_list}${HEAD_SHA}
+"
   else
-    blocked_list="${blocked_list}   - (HEAD 回落) $(echo "$HEAD_SHA" | cut -c1-7)（与审查记录无祖先关系）\n"
+    blocked=1
+    if git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_SHA" 2>/dev/null; then
+      blocked_list="${blocked_list}   - (HEAD 回落) $(echo "$HEAD_SHA" | cut -c1-7)（有未审 commit）\n"
+    else
+      blocked_list="${blocked_list}   - (HEAD 回落) $(echo "$HEAD_SHA" | cut -c1-7)（与审查记录无祖先关系）\n"
+    fi
+  fi
+fi
+
+# ─── 近 miss 扫描（票 hook-marker-fail-open）────────────────────
+#
+# 挡的是 sha 判据**看不见**的那一面：栈顶已审 ≠ 栈内每一笔的标记都写对了。实测
+# （`99cee01b`）：父提交标记正常、tip 也审过，唯独中间一笔是 `catstance [...]`——
+# sha 判据是「栈顶身份」判据，于是它搭着 tip 一起上了 origin/dev。
+#
+# 只对**已放行**的 refspec 扫（被 sha 判据拦下的那些本来就推不出去，多扫只是噪音）。
+# 扫描范围见 commit-uuid-gate.mjs 的 scanPushRange 头注释（= 本次推送新引入该远端的 commit，
+# 避开历史存量——票面「历史误拼数据不回填」）。
+#
+# node 不可用 ⇒ 显式警示 + 不阻断：与 commit-msg 态④「判据无主体 ≠ 通过」同口径
+# （砸掉每一次推送比漏一次更贵，且压力会把人推向 --no-verify）。
+if [ "$blocked" -eq 0 ] && [ -n "$scan_list" ]; then
+  if command -v node >/dev/null 2>&1; then
+    scan_hits=""
+    while read -r scan_sha scan_base; do
+      [ -z "$scan_sha" ] && continue
+      # 退出码三档（常量见 commit-uuid-gate.mjs 的 SCAN_EXIT_*）：
+      #   3 = 命中 ⇒ 并进 blocked_list；2 = 本层没跑成 ⇒ 警示透传、不阻断；
+      #   0 = 干净 ⇒ 丢弃输出（每 refspec 一行成功轨迹会把推送输出刷满）。
+      # ⚠️ **只有 3 算命中**：`*` 兜底那支连着 node 自己的失败码（1 = 找不到模块 /
+      # 未捕获异常）一起走「警示不阻断」——把 1 也当命中，等于让「scripts 没搬过来」
+      # 的环境把每一次合法推送都拦死（实测误伤 6 个应放行场景）。
+      scan_out=$(node scripts/commit-uuid-gate.mjs --scan-push "$scan_sha" "$scan_base" 2>&1)
+      scan_rc=$?
+      case "$scan_rc" in
+        0) : ;;
+        3) scan_hits="${scan_hits}${scan_out}\n" ;;
+        *) echo "$scan_out" >&2 ;;
+      esac
+    done <<EOF
+$scan_list
+EOF
+    if [ -n "$scan_hits" ]; then
+      blocked=1
+      blocked_list="${blocked_list}${scan_hits}"
+    fi
+  else
+    echo "⚠️  node 不可用，跳过推送栈近 miss 扫描（本层未生效，不阻断）" >&2
   fi
 fi
 

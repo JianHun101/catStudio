@@ -31,10 +31,15 @@ import { DatabaseSync } from 'node:sqlite'
 import {
   cleanGitEnv,
   evaluateCommitUuid,
+  findNearMissMarkers,
   formatBlockMessage,
   formatPassLine,
+  formatScanReport,
   formatWarning,
   resolveRepoRoot,
+  scanPushRange,
+  SCAN_EXIT_HIT,
+  SCAN_EXIT_NOT_RUN,
 } from './commit-uuid-gate.mjs'
 
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -285,6 +290,125 @@ describe('evaluateCommitUuid —— 全候选扫描（P2）', () => {
   })
 })
 
+// ─── 态②′ 近 miss 前缀（票 hook-marker-fail-open）──────────────────────────
+//
+// 靶心：**标记意图 + uuid 形**都在，就是 `catstudy` 没写对 ⇒ 原先落 ①「无标记」
+// 静默放行（`99cee01b` = `catstance [bdbf52de-…]` 实证落在 origin/dev 上）。
+//
+// 反例（承重）：把态②′ 那一段挪回「有候选但都不合法」那一支（即首版实现），
+// 下方「无 `catstudy` 候选」用例组**必红**——实施时实跑过红→绿，见交付说明。
+
+describe('evaluateCommitUuid —— 态②′ 近 miss 前缀', () => {
+  /** 库路径故意不存在：若实现去查库，落点会变成 no-db 而不是 near-miss */
+  const deadDb = () => [{ label: 'dev', file: path.join(dir, '不存在.db') }]
+
+  it('误拼矩阵（前缀写歪的各种写法）→ 全阻断，且**零查库**', () => {
+    const matrix = [
+      ['事故原文 catstance', `catstance [${REAL_UUID}]`],
+      ['少字母 catsudy', `catsudy [${REAL_UUID}]`],
+      ['多字母 catstuddy', `catstuddy [${REAL_UUID}]`],
+      ['首字母大写 Catstudy', `Catstudy [${REAL_UUID}]`],
+      ['全大写 CATSTUDY', `CATSTUDY [${REAL_UUID}]`],
+      ['无空格 catstance[', `catstance[${REAL_UUID}]`],
+      ['夹在正文里', `docs: 见 catstance [${REAL_UUID}] 一段`],
+      // 前缀对了但**大小写**歪的也算写歪：主捕获正则是小写敏感，认不出它 ⇒ 同族缺口
+      ['uuid 也写歪（39 位）', `catstance [${BAD_SHAPE_39}]`],
+    ]
+    for (const [name, body] of matrix) {
+      const res = evaluateCommitUuid(`feat(x): 干活\n\n${body}\n`, deadDb())
+      expect(res.code, `${name} 未被阻断（fail-open 复发）`).toBe('near-miss')
+      expect(res.ok).toBe(false)
+      expect(res.dbs).toEqual([]) // 零查询：拼错本身就是高置信信号，不必查库
+    }
+  })
+
+  it('出口点名「写歪在哪、应该写成什么」（只说「没有标记」正是要止住的那句假话）', () => {
+    const res = evaluateCommitUuid(`feat: x\n\ncatstance [${REAL_UUID}]\n`, deadDb())
+    const out = formatBlockMessage(res)
+    expect(out).toContain('[commit-uuid-gate] ❌ commit-msg 门禁阻断（near-miss）')
+    expect(out).toContain(`catstance [${REAL_UUID}]`) // 被拒标记原文
+    expect(out).toContain('catstance') // 写歪的前缀
+    expect(out).toContain('catstudy') // 正确前缀
+    expect(out).toContain('git commit --no-verify') // 逃生口照旧
+  })
+
+  it('反对照：散文 / 裸词 / 非 uuid 括号 —— 都不许被这条闸碰到', () => {
+    // 只加严会把正常提交拦死，而误拦的压力正是把人推向 --no-verify 的形态
+    const passing = [
+      ['散文里的标记形状', 'docs: 说明 catstudy [uuid] 标记规则\n'],
+      ['散文里的近 miss 词但括号非 uuid 形', 'docs: catstance [见附录] 是个拼错的例子\n'],
+      [
+        '裸词 cat（长度 3 够不到 {2,} 下限）',
+        'docs: the cat [deadbeef-cafe-1234-5678-90abcdef1234]\n',
+      ],
+      ['别的词', 'docs: catalog [abcdef0123456789abcdef] 已更新\n'],
+      ['完全无标记', 'Merge branch "dev"\n'],
+    ]
+    for (const [name, message] of passing) {
+      const res = evaluateCommitUuid(message, dbList([makeDb()]))
+      expect(res.code, `${name} 被误拦`).toBe('no-marker')
+      expect(res.ok).toBe(true)
+    }
+  })
+
+  it('有真标记时顺口提一句写歪的 → 不额外阻断（归属面已成立，边界有意为之）', () => {
+    const res = evaluateCommitUuid(
+      `feat: x\n\n以前写成 catstance [${FAKE_UUID}] 是错的\n\ncatstudy [${REAL_UUID}]\n`,
+      dbList([makeDb()])
+    )
+    expect(res.code).toBe('found')
+    expect(res.ok).toBe(true)
+    expect(res.uuid).toBe(REAL_UUID)
+  })
+
+  it('前缀对、uuid 歪 → 仍报 ②bad-shape（更贴靶心的措辞优先于 ②′）', () => {
+    const res = evaluateCommitUuid(`feat: x\n\ncatstudy [${BAD_SHAPE_39}]\n`, deadDb())
+    expect(res.code).toBe('bad-shape')
+    expect(res.uuid).toBe(BAD_SHAPE_39)
+  })
+
+  it('findNearMissMarkers 逐字剔 `catstudy`（大小写不同即算写歪）', () => {
+    expect(
+      findNearMissMarkers('feat: x\n\ncatstudy [11111111-2222-4333-8444-555555555555]\n')
+    ).toEqual([])
+    expect(
+      findNearMissMarkers('feat: x\n\nCatstudy [11111111-2222-4333-8444-555555555555]\n').map(
+        (h) => h.word
+      )
+    ).toEqual(['Catstudy'])
+  })
+
+  it('误拦面回放：全仓历史里本判据不得大面积翻案（放宽守卫）', () => {
+    // 实测基线（2026-09-28，`--all --no-merges` 1192 笔、其中「今天放行」175 笔）：
+    // 命中 **1** 笔，就是事故笔 `99cee01b`（word=catstance）。这里卡一个上界当
+    // **放宽守卫**：判据要是哪天宽到开始吃正常散文，命中数会直接跳上去。
+    // 上界取 2 而不是 1：同一族再复发一笔不该让本用例红（那是业务信号不是回归）。
+    const out = spawnSync('git', ['log', '--all', '--no-merges', '--format=%H%x01%B%x02'], {
+      cwd: SCRIPTS_DIR,
+      encoding: 'utf8',
+      maxBuffer: 1 << 28,
+      env: cleanGitEnv(),
+    })
+    if (out.status !== 0) return // 非仓库 / 浅克隆：回放无意义，不假绿也不假红
+    const commits = String(out.stdout || '')
+      .split('\x02')
+      .filter((s) => s.trim())
+      .map((s) => s.slice(s.indexOf('\x01') + 1))
+    if (commits.length < 100) return // 浅克隆：分母太小，回放没有判别力
+
+    const flips = []
+    for (const msg of commits) {
+      // 只回放「今天会放行」的那批：无标记 / 散文（有形状合法标记的走查库，不受本判据影响）
+      if (evaluateCommitUuid(msg, []).code !== 'no-marker') continue
+      for (const nm of findNearMissMarkers(msg)) flips.push(nm.word)
+    }
+    expect(
+      flips.length,
+      `历史回放命中 ${flips.length} 笔：${flips.join('、')}`
+    ).toBeLessThanOrEqual(2)
+  })
+})
+
 // ─── B2 真机挂钩：临时 git 仓库里真 commit，认钩子自己打印的那行 ─────────────
 
 /** 跑一条 git 命令，**stdout / stderr 都留**（成功时 execFileSync 会丢掉 stderr——
@@ -427,6 +551,154 @@ describe('B2 真机挂钩（临时仓库 · 真 git commit）', () => {
     expect(lateBad.output).toContain('[commit-uuid-gate] ❌ commit-msg 门禁阻断（bad-shape）')
     expect(lateBad.output).toContain(BAD_SHAPE_39)
     expect(commitCount(repo, env)).toBe('1') // 被拒 ⇒ 不新增 commit
+  }, 60_000)
+})
+
+describe('B2′ 真机挂钩 —— 近 miss 标记被 git 挡住（票 hook-marker-fail-open）', () => {
+  it('`catstance [真 uuid]` 在 commit 那一刻被拒，附正常标记的反对照', () => {
+    const { repo, env } = makeHookedRepo()
+
+    const bad = commit(repo, env, `feat: 误拼标记\n\ncatstance [${REAL_UUID}]\n`)
+    expect(bad.ok, `误拼标记竟然提交成功（fail-open 在真机面复发），输出:\n${bad.output}`).toBe(
+      false
+    )
+    // 机器证据：钩子自己打印的判决码行（不含则说明这条闸压根没跑到）
+    expect(bad.output).toContain('[commit-uuid-gate] ❌ commit-msg 门禁阻断（near-miss）')
+    expect(bad.output).toContain('catstance')
+    expect(commitCount(repo, env)).toBe('0')
+
+    // 反对照 1：同一路径下正常标记照常放行
+    const good = commit(repo, env, `feat: 正常标记\n\ncatstudy [${REAL_UUID}]\n`)
+    expect(good.ok, `正常标记被误拦，输出:\n${good.output}`).toBe(true)
+    expect(commitCount(repo, env)).toBe('1')
+
+    // 反对照 2：无标记（merge / 手动提交形态）照常放行
+    writeFileSync(path.join(repo, 'work2.txt'), 'y\n')
+    git(repo, ['add', 'work2.txt'], env)
+    const plain = commit(repo, env, 'chore: 无标记\n')
+    expect(plain.ok, `无标记被误拦，输出:\n${plain.output}`).toBe(true)
+    expect(commitCount(repo, env)).toBe('2')
+  }, 60_000)
+})
+
+// ─── 推送栈近 miss 扫描（态②′ 的兜底面：搭车形态）──────────────────────────
+//
+// 靶心是 sha 判据**看不见**的那一面：栈顶已审 ≠ 栈内每一笔标记都写对。实测事故
+// `99cee01b` 就是这么上到 origin/dev 的（父提交标记正常、tip 也审过，唯独它拼错）。
+// 这里用**真仓库 + 真 refspec 范围**测扫描器本身；钩子接线由 e2e 面覆盖。
+
+/** 造一个「有远端」的仓库：返回 {repo, bare, env, commitFile} */
+function makePushRepo() {
+  const root = mkdtempSync(path.join(tmpdir(), 'marker-scan-'))
+  tmpDirs.push(root)
+  const bare = path.join(root, 'origin.git')
+  const repo = path.join(root, 'work')
+  mkdirSync(repo, { recursive: true })
+  const env = {
+    GIT_CONFIG_NOSYSTEM: '1',
+    HOME: repo,
+    USERPROFILE: repo,
+    XDG_CONFIG_HOME: repo,
+  }
+  git(root, ['init', '-q', '--bare', '--initial-branch=main', bare], env)
+  git(repo, ['init', '-q', '--initial-branch=main'], env)
+  git(repo, ['config', 'user.email', 'scan@test.local'], env)
+  git(repo, ['config', 'user.name', 'scan-test'], env)
+  git(repo, ['config', 'commit.gpgsign', 'false'], env)
+  git(repo, ['remote', 'add', 'origin', bare], env)
+  const commitFile = (name, message) => {
+    writeFileSync(path.join(repo, name), `${name}\n`)
+    git(repo, ['add', name], env)
+    git(repo, ['commit', '-q', '-m', message], env)
+    return git(repo, ['rev-parse', 'HEAD'], env).trim()
+  }
+  return { repo, bare, env, commitFile }
+}
+
+describe('scanPushRange —— 推送栈近 miss 扫描', () => {
+  it('新分支口径：扫出远端还没有的 commit，命中误拼笔', () => {
+    const { repo, env, commitFile } = makePushRepo()
+    commitFile('a.txt', 'chore: 基线')
+    git(repo, ['push', '-q', 'origin', 'main'], env)
+    commitFile('b.txt', 'fix: 正常\n\ncatstudy [11111111-2222-4333-8444-555555555555]')
+    const c = commitFile('c.txt', 'docs: 误拼\n\ncatstance [11111111-2222-4333-8444-555555555555]')
+    commitFile('d.txt', 'fix: 后续\n\ncatstudy [11111111-2222-4333-8444-555555555555]')
+
+    // base 传全 0（新分支）⇒ 走 `--not --remotes`：基线已在 origin/main 上，被排除
+    const res = scanPushRange({ cwd: repo, tip: 'HEAD', base: '0'.repeat(40) })
+    expect(res.error).toBeNull()
+    expect(res.scanned).toBe(3) // b / c / d，不含已在远端的基线
+    expect(res.hits.map((h) => h.sha)).toEqual([c])
+    expect(res.hits[0].word).toBe('catstance')
+    expect(formatScanReport(res)).toContain('写成 `catstance`')
+
+    // 反对照：干净栈 ⇒ 零命中（本层不许误拦）
+    git(repo, ['checkout', '-q', '-b', 'clean', 'HEAD~2']) // d→c→b：退两笔才甩掉误拼笔 c
+    const clean = scanPushRange({ cwd: repo, tip: 'HEAD', base: '0'.repeat(40) })
+    expect(clean.hits).toEqual([])
+    expect(formatScanReport(clean)).toContain('无写歪的标记')
+  }, 60_000)
+
+  it('范围口径：base..tip 只扫本次新增的那几笔', () => {
+    const { repo, env, commitFile } = makePushRepo()
+    const a = commitFile('a.txt', 'chore: 基线')
+    git(repo, ['push', '-q', 'origin', 'main'], env)
+    commitFile('b.txt', 'docs: 误拼\n\ncatstance [11111111-2222-4333-8444-555555555555]')
+    const c = commitFile('c.txt', 'fix: 后续\n\ncatstudy [11111111-2222-4333-8444-555555555555]')
+
+    // base = a ⇒ 只扫 b..c 两笔（b 命中）
+    const res = scanPushRange({ cwd: repo, tip: c, base: a })
+    expect(res.scanned).toBe(2)
+    expect(res.hits.map((h) => h.sha.slice(0, 7))).toEqual([res.hits[0].sha.slice(0, 7)])
+    expect(res.hits).toHaveLength(1)
+
+    // 反对照：base = c（不带任何新 commit）⇒ 零命中
+    const none = scanPushRange({ cwd: repo, tip: c, base: c })
+    expect(none.scanned).toBe(0)
+    expect(none.hits).toEqual([])
+  }, 60_000)
+
+  // 退出码是**跨进程契约**（`.husky/pre-push` 按它分流），所以钉在 CLI 面而不是函数面。
+  // 靶心：命中码**不能是 1**——1 是 node 自己的失败码（`Cannot find module` / 未捕获
+  // 异常），拿它当命中会让「scripts 没搬过来」的仓库把每次合法推送都拦死。
+  // 实测：`pre-push-gate.e2e.mjs` 的 6 个「应当放行」场景被这条重载全数误伤。
+  it('CLI 退出码契约：命中=3、跑不动=2，**都不许是 1**（node 自己的失败码）', () => {
+    expect(SCAN_EXIT_HIT).not.toBe(1)
+    expect(SCAN_EXIT_NOT_RUN).not.toBe(1)
+    expect(SCAN_EXIT_HIT).not.toBe(SCAN_EXIT_NOT_RUN)
+
+    const { repo, env, commitFile } = makePushRepo()
+    commitFile('a.txt', 'chore: 基线')
+    git(repo, ['push', '-q', 'origin', 'main'], env)
+    commitFile('b.txt', 'docs: 误拼\n\ncatstance [11111111-2222-4333-8444-555555555555]')
+    const hit = spawnSync(process.execPath, [GATE_SRC, '--scan-push', 'HEAD', '0'.repeat(40)], {
+      cwd: repo,
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+    })
+    expect(hit.status, `命中应退 ${SCAN_EXIT_HIT}，实得 ${hit.status}`).toBe(SCAN_EXIT_HIT)
+    expect(hit.stdout).toContain('写成 `catstance`')
+
+    // 非 git 目录 ⇒ 2（跑不动），警示走 stderr，**不当成命中**
+    const outside = mkdtempSync(path.join(tmpdir(), 'marker-scan-cli-'))
+    tmpDirs.push(outside)
+    const notRun = spawnSync(process.execPath, [GATE_SRC, '--scan-push', 'HEAD'], {
+      cwd: outside,
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+    })
+    expect(notRun.status).toBe(SCAN_EXIT_NOT_RUN)
+    expect(notRun.stderr).toContain('未跑成')
+  }, 60_000)
+
+  it('扫描跑不动（非 git 目录）⇒ error 非空、**不抛**（调用方警示后放行，不阻断）', () => {
+    const outside = mkdtempSync(path.join(tmpdir(), 'marker-scan-nogit-'))
+    tmpDirs.push(outside)
+    const res = scanPushRange({ cwd: outside, tip: 'HEAD' })
+    expect(res.error).toBeTruthy()
+    expect(res.hits).toEqual([])
+    // 报告走的是「未跑成」那一支，措辞不能是「干净」（否则判据无主体被当成通过）
+    expect(formatScanReport(res)).toContain('未跑成')
   }, 60_000)
 })
 
