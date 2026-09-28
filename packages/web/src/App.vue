@@ -366,14 +366,40 @@ onUnmounted(() => {
 }
 
 /* 收起会话栏：轨道保留、会话栏整栏收起。
- * 会话栏 0 宽 + display:none 双管——display:none 的 item 不参与布局，但显式 track 仍占位
- * （下方窄窗注释同款理由），故 track 必须同步归零，否则聊天区被无形压缩。 */
+ * 「不占位」的全部机制是 track 归零——显式 track 照常占位，与 item 可不可见无关；
+ * 故收起态必须把首列也写成 0，否则聊天区被无形压缩。
+ * `display:none` 是另加的：它顺带把收起态内容移出 a11y 树与 Tab 序。但它同时把
+ * item 移出了 grid，自动放置因而错位——列位显式钉死见下。 */
 .app-layout.left-closed {
   grid-template-columns: 0 1fr 300px;
 }
 
 .app-layout.left-closed .panel-left {
   display: none;
+}
+
+/* 三栏列位一律**显式钉死**，不依赖 grid 自动放置。
+ *
+ * 病灶：`display:none` 的 item 不再是 grid item，自动放置会把后继 item 整体前移一格——
+ * left-closed 态下 `.panel-center` 被放进 0 宽首列，主区塌 0。塌陷后 ChatPanel 的
+ * 展开按钮跟着挤到 0 宽，中心点落到邻近元素上 ⇒ **点不回去**，是单向死锁不只是难看。
+ * （真机读数：1440 宽收起态 center=0 / 右栏吃掉整条 1fr=1088 / 展开钮中心点命中
+ * `.panel-head`；窄窗 900 更彻底——center=right=0，整屏空白。）
+ * 位移只在**消失的不是末栏**时发生：右栏 `right-closed` 消失的是末栏，自动放置不位移，
+ * 它留下的是另一形态——`grid-template-columns` 里那条 300px track 照旧占位成空列。
+ * 那条当前不可达（右栏只能被窄窗媒体查询关掉，而该断点只有两条 track），故本笔不动它。
+ *
+ * 钉死列位后「哪一栏在哪一列」与该态下有几栏可见解耦——不必给每个隐藏态各写一份列位。
+ * 窄窗断点（两条 track）同理成立：右栏在该断点恒为 `right-closed`（`display:none`），
+ * `grid-column: 3` 落在不存在的 track 上对不可见元素无副作用，不会生成隐式列。 */
+.panel-left {
+  grid-column: 1;
+}
+.panel-center {
+  grid-column: 2;
+}
+.panel-right {
+  grid-column: 3;
 }
 
 /* 窄窗（<1000px）右栏自动隐藏时同步收窄列——display:none 的 item 不参与布局，
