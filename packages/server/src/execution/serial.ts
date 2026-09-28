@@ -12,6 +12,11 @@
  * executeOneAgent / executeAgentsSerial / drainQueuedCommand + 执行常量与
  * no-key 守卫。输出经注入 bus（EngineBus & HandoffBus），状态经注入 state。
  * 日志通道沿用 'socketio'（零可观测行为变化）。
+ *
+ * **探针闸**（票 `docs/run/probe-no-resume/`，判据见 `probe-mode.ts`）：两个执行
+ * 入口（`executeAgentsSerial` / `execute`）各自在函数首部拒绝执行。这是仓内
+ * 「零 spawn」的承重面——所有 CLI 与常驻子进程的 spawn 都在适配器内、只经这两个
+ * 入口到达，故不必逐 adapter 复述判据。
  */
 
 import { execSync } from 'node:child_process'
@@ -33,6 +38,7 @@ import {
 import { createExecTrace, insertDetachedSpan, type ExecTrace } from './trace.js'
 import { createLogger } from '../logger.js'
 import { envNumber } from '../env-number.js'
+import { isProbeMode } from '../probe-mode.js'
 import { MAX_QUEUE_PER_AGENT, isStaleHandoffRequest } from '../dispatch/index.js'
 import { ProviderTokenPool } from './token-pool.js'
 import { classifyError } from '../eval/classify-error.js'
@@ -1307,6 +1313,26 @@ async function executeAgentsSerialImpl(
   traceId: string,
   depth: number = 0
 ): Promise<boolean> {
+  // 探针模式：整轮拒绝（票 `docs/run/probe-no-resume/` 契约 ②「不 spawn CLI 执行」）。
+  //
+  // **闸在这里而不是调用点**：轮级副作用不止 CLI 一项——本函数尾部的 depth=0 收尾
+  // 会 `gitCommit` 逐树自动提交 + `git checkout -- .` 清脏文件。只闸 `execute()` 的话，
+  // 执行体虽不跑，收尾段照样会把探针工作树里的在途改动**提交掉**。闸在轮首，三类
+  // 副作用（CLI spawn / 自动提交 / 脏文件清理）一并挡住。
+  //
+  // 覆盖面：仓内所有 CLI 执行与常驻子进程（llama-server / ollama serve /
+  // codex-proxy）的 spawn 都在适配器内、只经本入口与 `execute()` 到达 ⇒ 两闸合起来
+  // 即「零 spawn」，无需逐 adapter 复述同一个判据。
+  if (isProbeMode()) {
+    log.warn('探针模式：拒绝执行整轮（不 spawn CLI、不自动提交）', {
+      traceId,
+      sessionId,
+      triggerMessageId: triggerMsg.id,
+      agents: agents.map((a) => a.name),
+    })
+    return false
+  }
+
   // 深度限制：防止 Agent 间无限循环
   if (depth >= MAX_AGENT_DISPATCH_DEPTH) {
     log.warn('agent dispatch depth limit reached', { traceId, depth })
@@ -1882,6 +1908,19 @@ export function createExecutionEngine(
 
   /** C1 v3 顶层单入口：决策(直跑/入队) → 执行 → finally{收口+排空} */
   async function execute(cmd: DispatchCommand): Promise<boolean> {
+    // 探针模式：拒绝（票 `docs/run/probe-no-resume/`）。本入口是单条命令的公开入口
+    // （`dispatch/index.ts` 的兼容 shim 与槽位排空都走它），**不是**轮级入口的重复闸：
+    // 轮级闸拦的是 `executeAgentsSerial`，直调 `engine.execute` 的路径只经这里。
+    // 闸在**决策段之前**——置后会让探针实例仍把消息标 busy/入队、状态桥照常广播，
+    // 探针 UI 上就会出现「排队中」这种永不落地的假状态。
+    if (isProbeMode()) {
+      log.warn('探针模式：拒绝执行单条命令（不 spawn CLI）', {
+        traceId: cmd.traceId,
+        agentId: cmd.agentId,
+        triggerMessageId: cmd.triggerMessageId,
+      })
+      return false
+    }
     const agent = agentsRepo.getAgentById(cmd.agentId)
     if (!agent) {
       log.warn('unknown agent in execute', { agentId: cmd.agentId, traceId: cmd.traceId })

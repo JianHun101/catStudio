@@ -56,6 +56,7 @@ pnpm build                # pnpm -r build
 - server 测试用 `:memory:` SQLite（`setDb()`/`resetDb()` 钩子，无磁盘、FK 生效）并设 `MEMORY_ENABLED=false`；内存态用例间用 `__test_reset*` 钩子复位（`execution/registry.ts`、`execution/serial.ts`）
 - worktree 内 git 操作一律 `git -C <worktree> <cmd>`；别在即将删除的目录里驻留进程——Windows 下持 cwd 会让目录删除 EPERM 留空壳
 - Vite dev 代理：`/api` + `/socket.io` → `http://127.0.0.1:3200`
+- **真机自证的探针实例（worktree 自起 server + 无头浏览器量 DOM）必须带 `CATSTUDY_PROBE_MODE=1` 启动**——不带则该实例并不只读：启动序列会捡起副本库里的 in-flight 执行（`server_restart` / `running` 行）真实恢复执行，spawn 真 CLI、cwd 落在工作树里。带开关时三条恢复路径 + `fixStuckExecutionLogs` + 飞轮扫描器 spawn + 两个执行入口（`executeAgentsSerial` / `execute`）全跳过，**唯一豁免 = 嵌入 sidecar**（判据与豁免面见 `packages/server/src/probe-mode.ts`）。**别再用「副本库摘行 + 清 API key」手工压制**——漏一步就出事，那正是本开关要取代的
 - 会话 worktree 不可用时 CLI cwd 落 `workspace/` 子目录，此时 `CLAUDE.md` 的 `@AGENTS.md` 不展开（CLI 只展开 cwd 子树内的 import，父目录相对路径与绝对路径均不展开）——本手册在该路径下不加载
 
 ## Conventions

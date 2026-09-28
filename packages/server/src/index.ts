@@ -29,6 +29,7 @@ import { ironLawRoutes } from './routes/iron-laws.js'
 import { skillRoutes } from './routes/skills.js'
 import { memoryRoutes } from './routes/memory.js'
 import { createLogger, setLogLevel, type LogLevel } from './logger.js'
+import { isProbeMode } from './probe-mode.js'
 import { runL1Aggregation } from './eval/l1-aggregator.js'
 import { classifyEpisodes, ZERO_EXECUTION_WINDOW_MINUTES } from './eval/episodes.js'
 import { runEpisodeAttribution } from './eval/attribution.js'
@@ -87,6 +88,14 @@ function resolveFlywheelTarget(): { root: string; script: string } | null {
  * 拉进能跑 TS 的运行时。
  */
 function spawnFlywheelScan(): void {
+  // 探针模式跳过（票 `docs/run/probe-no-resume/` 契约 ②「除嵌入 sidecar 外不 spawn」）：
+  // 它是**启动期唯一的非嵌入 spawn**，且形态与票面点名的危害同款——spawn 子进程 +
+  // `cwd` 落在本工作树 + 写库（chunks 索引），只是不落 CLI 执行那一类。探针实例上
+  // 索引无人消费（执行面已闸），留着它只换来「启动多拉一个 tsx + 一次嵌入」。
+  if (isProbeMode()) {
+    log.warn('探针模式：跳过飞轮扫描器 spawn（不建索引、不起 tsx）')
+    return
+  }
   try {
     const target = resolveFlywheelTarget()
     if (target === null) {
@@ -156,9 +165,19 @@ async function main(): Promise<void> {
 
   // 1.5 启动时修复：将上一次异常退出遗留的 running 状态标记为 failed
   //     （参照 clowder-ai StartupReconciler）
-  const stuckResult = execLogsRepo.fixStuckExecutionLogs()
-  if (stuckResult.changes > 0) {
-    log.warn('启动时修复 stuck execution_logs', { count: stuckResult.changes })
+  //
+  //     探针模式跳过（票 `docs/run/probe-no-resume/`）：这一步是恢复链的**前置**——
+  //     它把 `running` 改写成 `failed/server_restart`，而那条记录正是
+  //     `getInterruptedExecutions()` 的捞取面。恢复面整体已闸（见 `probe-mode.ts`），
+  //     此处再闸一次是为了让探针实例**不动副本库这一行**：只闸恢复、不闸改写的话，
+  //     探针启动仍会静默改写副本数据，「只读意图」就只剩一半。
+  if (isProbeMode()) {
+    log.warn('探针模式：跳过启动修复 stuck execution_logs（不改写副本库 in-flight 行）')
+  } else {
+    const stuckResult = execLogsRepo.fixStuckExecutionLogs()
+    if (stuckResult.changes > 0) {
+      log.warn('启动时修复 stuck execution_logs', { count: stuckResult.changes })
+    }
   }
 
   // 1.6 启动时清理残留的 Agent 执行锁文件
