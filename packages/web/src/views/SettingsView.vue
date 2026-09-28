@@ -676,7 +676,7 @@ onUnmounted(() => {
   <div class="settings-view" aria-label="设置">
     <div class="settings-layout">
       <!-- 左侧大类导航（T5：SubNav 共享组件 148px；图标走 #icon slot 供线框 SVG） -->
-      <SubNav v-model="activeCategory" :items="settingsNavItems" label="设置大类">
+      <SubNav v-model="activeCategory" :items="settingsNavItems" label="设置大类" title="设置">
         <template #icon="{ item }">
           <svg
             v-if="item.key === 'cats'"
@@ -1445,12 +1445,17 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   width: 100%;
-  max-width: 1100px;
   /* T5：贴左（原先左右各一个 auto 边距，把整页推向居中）——整页居中是
      「导航左边空出数百 px」的根因：轨道 52px 与导航之间那条空白随视口变宽而变宽
      （1920 屏约 380px）。贴左后导航锚定轨道；卡片列仍在剩余区内居中（见下方 720px 列）。
      注：本注释不写那条旧声明的字面量——下方测试用**全串否定断言**钉它，
-     写了就会被自己的注释喂成假红（本仓复发过的坑）。 */
+     写了就会被自己的注释喂成假红（本仓复发过的坑）。
+     T6：整页宽度帽已摘除（内容居中诉求）——贴左裁决不回退，变的只是卡片列的居中
+     参照系：从「帽内那个固定宽的内容区」变为「导航右缘 → 视口右缘」的整个剩余区
+     （即 `.settings-content` 本身）。摘帽后不需要任何新居中机制：下方 720px 列自带的
+     水平自动边距在新参照系里自行居中。实测 1920 视口：卡片列中心 1055 vs 内容区中心
+     1060，偏 5px（半个滚动条宽，见下条注释）。
+     注：这里同样不复述那条自动边距的字面量——理由同上一条，写了会被同一条断言命中。 */
   margin: 0;
 }
 
@@ -1470,7 +1475,10 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: 20px 28px 32px;
   /* T3：滚动条槽常驻——三个 pane 内容长短不一，滚动条时有时无会让限宽内容区的
-     可用宽度跳变，居中后 frow 左缘随之漂移（实测约 5px）。预留槽位后恒定。 */
+     可用宽度跳变，居中后 frow 左缘随之漂移（实测约 5px）。预留槽位后恒定。
+     T6：摘掉整页宽度帽后本元素成为唯一的居中容器，槽位常驻的代价显形为「居中轴
+     偏半个滚动条宽（约 8px）」——原型 v6 的 `.set-body` 同形态，接受；验收 1 的
+     ≤10px 容差正是为它留的。 */
   scrollbar-gutter: stable;
 }
 
