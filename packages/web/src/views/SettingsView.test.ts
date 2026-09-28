@@ -36,16 +36,18 @@ describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配
 
   it('左侧大类导航：三大类文案 + 选中态高亮 + 点击切换', () => {
     expect(source).toContain("const activeCategory = ref<'cats' | 'im' | 'system'>('im')")
-    expect(source).toContain('settings-nav')
+    // T5 改锚：导航壳换成共享组件 SubNav（148px 竖排）。激活态高亮与点击切换由它承担
+    // （见 SubNav.test.ts），本视图的契约是「三个大类绑上它的 items + v-model 写回」。
+    expect(source).toContain('<SubNav')
+    expect(source).toContain('v-model="activeCategory"')
+    expect(source).toContain(':items="settingsNavItems"')
     expect(source).toContain('猫咪管理')
     expect(source).toContain('IM 接入')
     expect(source).toContain('系统配置')
-    expect(source).toContain(':class="{ active: activeCategory === \'cats\' }"')
-    expect(source).toContain(':class="{ active: activeCategory === \'im\' }"')
-    expect(source).toContain(':class="{ active: activeCategory === \'system\' }"')
-    expect(source).toContain("activeCategory = 'cats'")
-    expect(source).toContain("activeCategory = 'im'")
-    expect(source).toContain("activeCategory = 'system'")
+    // 三个 item 的 key 与 activeCategory 的值域一一对应——点击切换就是拿 key 写回这个 ref
+    for (const key of ['cats', 'im', 'system']) {
+      expect(source, key).toContain(`key: '${key}'`)
+    }
   })
 
   it('默认大类 = IM 接入（子 Tab QQ 接入）——打开设置页行为与迁移前一致', () => {
@@ -594,13 +596,24 @@ describe('SettingsView T3 设置页对齐改版（票面 §二 规格）', () =>
   // 用户原话病灶两条：「有些框都没对齐」「莫名的换行文字」——下面每条都钉住
   // 一个防复发点，摘掉任一条，对应症状就会回来。
 
-  it('左侧导航 188px 图标列 + 线框 SVG 图标（不再是 emoji）', () => {
-    const nav = source.match(/\.settings-nav\s*\{[\s\S]*?\}/)
-    expect(nav, '未找到 .settings-nav 规则').toBeTruthy()
-    expect(nav![0]).toContain('width: 188px')
-    // 三个导航项都换成线框 SVG：nav-icon 从 <span> 改为 <svg>
+  it('左侧导航图标列：线框 SVG 图标（不再是 emoji），宽度单源在 SubNav', () => {
+    // T5 改锚：`188px` 那条规则随导航迁进 components/SubNav.vue（票面 §二A 收窄到 148px），
+    // 宽度断言改在 SubNav.test.ts 钉。本用例保留 T3 的防复发意图——导航图标是线框 SVG，不是 emoji。
     expect(source).toContain('class="nav-icon"')
     expect(source).not.toContain('<span class="nav-icon">')
+    // 图标经 SubNav 的具名 slot 传入（不是把 SVG 塞进 props 字符串——那得走 v-html）
+    expect(source).toContain('<template #icon="{ item }">')
+    // 图标尺寸 14px（票面 §二A）写在 svg 自身属性上
+    expect(source).toContain('width="14"')
+  })
+
+  it('T5 贴左：.settings-layout 不再居中（宽屏左空白的根因）', () => {
+    // 病灶：`margin: 0 auto` 让整页（导航 + 内容）在轨道右侧居中 ⇒ 轨道与导航之间
+    // 随视口变宽空出数百 px。贴左后导航锚定 52px 轨道。
+    const layout = source.match(/\.settings-layout\s*\{[\s\S]*?\}/)
+    expect(layout, '未找到 .settings-layout 规则').toBeTruthy()
+    expect(layout![0]).not.toContain('margin: 0 auto')
+    expect(layout![0]).toContain('margin: 0;')
   })
 
   it('控件统一 34px 高 + border-box：治「莫名换行」的溢出根因', () => {

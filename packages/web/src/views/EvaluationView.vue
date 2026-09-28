@@ -30,6 +30,7 @@ import {
 // UTC 无后缀串，直接喂 `new Date` 会按本地时区解析（UTC+8 差 8 小时）；解析只此一处，
 // 本文件不再自带副本。新增时间显示（含 `SpanRow.start_at` 那种 ISO 形态）一律从这里取。
 import { fmtUtcShort, fmtUtcFull } from '@/utils/time'
+import SubNav from '../components/SubNav.vue'
 
 /**
  * 全屏评估中心（E4-B，左侧栏底部入口进入，无 vue-router 的 App 级 view 切换）。
@@ -437,6 +438,18 @@ function outcomePct(key: string): string {
 
 const pendingBadge = computed(() => pending.value.length)
 
+/**
+ * T5：五个 tab 搬进 SubNav 的 items——文案与顺序的**唯一表述点**（原 `.eval-tabs` 横向栏）。
+ * badge 跟随「待回标」数：0 时 SubNav 不渲染角标，与原 `v-if="pendingBadge > 0"` 同口径。
+ */
+const evalNavItems = computed(() => [
+  { key: 'observe', label: '观察' },
+  { key: 'review', label: '回标', badge: pendingBadge.value },
+  { key: 'label', label: '标注' },
+  { key: 'chain', label: '链路' },
+  { key: 'retrieval', label: '检索' },
+])
+
 /** 样本卡独立状态惰性初始化 */
 function stateFor(id: string): { score: number; comment: string } {
   if (!reviewState.value[id]) {
@@ -624,44 +637,9 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <div class="eval-tabs">
-      <button
-        class="tab-btn"
-        :class="{ active: activeTab === 'observe' }"
-        @click="activeTab = 'observe'"
-      >
-        观察
-      </button>
-      <button
-        class="tab-btn"
-        :class="{ active: activeTab === 'review' }"
-        @click="activeTab = 'review'"
-      >
-        回标
-        <span v-if="pendingBadge > 0" class="tab-badge">{{ pendingBadge }}</span>
-      </button>
-      <button
-        class="tab-btn"
-        :class="{ active: activeTab === 'label' }"
-        @click="activeTab = 'label'"
-      >
-        标注
-      </button>
-      <button
-        class="tab-btn"
-        :class="{ active: activeTab === 'chain' }"
-        @click="activeTab = 'chain'"
-      >
-        链路
-      </button>
-      <button
-        class="tab-btn"
-        :class="{ active: activeTab === 'retrieval' }"
-        @click="activeTab = 'retrieval'"
-      >
-        检索
-      </button>
-    </div>
+    <!-- T5：横向 tab 退役 → 左侧二级导航（与设置页共用 SubNav，148px）。
+         五个 pane 的取数/渲染逻辑一行未动，只换导航壳。 -->
+    <SubNav v-model="activeTab" :items="evalNavItems" label="评估分类" class="eval-subnav" />
 
     <!-- ─── 观察 tab ─────────────────────── -->
     <div v-show="activeTab === 'observe'" class="eval-pane">
@@ -1275,22 +1253,35 @@ onUnmounted(() => {
 
 .eval-view {
   /* T4：内容区弹性块（原 `position: fixed; inset: 0; z-index: 600`）——
-     轨道提为根级常驻后，fixed inset 0 会盖住轨道。 */
+     轨道提为根级常驻后，fixed inset 0 会盖住轨道。
+     T5：改 grid —— 横向 tab 换成左侧二级导航后，本视图是「标题栏独占首行 +
+     [导航 | 内容] 第二行」。不给五个 pane 各包一层 wrapper：`v-show` 互斥，
+     它们本就共用同一格，包 wrapper 要把五个 pane 整体重排缩进（几百行噪声 diff）。 */
   flex: 1;
   min-width: 0;
   min-height: 0;
   background: var(--bg-deep);
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto 1fr;
 }
 
 /* ✕ 退役后标题栏只剩标题一个孩子，`space-between` 随之失去分流对象，一并摘掉 */
 .eval-header {
+  /* T5：标题栏横跨整行——导航与内容都排在它下面 */
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   padding: 16px 24px;
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
+}
+
+/* T5：二级导航落第二行第一列。列宽走 `auto`——148px 的唯一表述点在 SubNav 自身，
+   本文件不复述那个数（复述两处就是「同一规则两处措辞」）。 */
+.eval-subnav {
+  grid-column: 1;
+  grid-row: 2;
 }
 
 .eval-title {
@@ -1310,60 +1301,16 @@ onUnmounted(() => {
   font-size: 18px;
 }
 
-/* ─── Tab 栏 ────────────────────────────── */
-
-.eval-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 0 24px;
-  border-bottom: 1px solid var(--border-subtle);
-  flex-shrink: 0;
-}
-
-.tab-btn {
-  position: relative;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 500;
-  font-family: inherit;
-  padding: 10px 14px;
-  cursor: pointer;
-  transition: all var(--ease-out);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.tab-btn:hover {
-  color: var(--text-primary);
-}
-
-.tab-btn.active {
-  color: var(--accent-text);
-  border-bottom-color: var(--accent);
-  font-weight: 600;
-}
-
-/* 待回标角标（提交成功样本移出 → 角标减一） */
-.tab-badge {
-  font-size: 10px;
-  font-weight: 700;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--text-on-accent);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
+/* ─── 导航与内容列 ──────────────────────── */
+/* T5：横向 tab 的 `.eval-tabs` / `.tab-btn` / `.tab-badge` 三段样式随导航迁入
+   components/SubNav.vue（角标即 `.sub-nav-badge`）——此处不留空壳规则。 */
 
 .eval-pane {
-  flex: 1;
+  /* T5：五个 pane 同落第二行第二列（`v-show` 互斥 ⇒ 同时只有一个参与布局）。
+     `width: 100%` 不能省：grid item 的 auto margin 会让 `stretch` 失效，不钉死
+     交叉尺寸就退化成内容宽，860px 居中随之失效。 */
+  grid-column: 2;
+  grid-row: 2;
   min-height: 0;
   overflow-y: auto;
   box-sizing: border-box;

@@ -207,6 +207,18 @@ describe('TraceView 静态结构（?raw）', () => {
     expect(source).toContain("emit('jumpToMessage'")
   })
 
+  it('T5：过滤栏与列表同收进 1100px 内容列（票面 §二D）', () => {
+    // 实现走**对称内边距**而不是给内容再包一层 div：包 wrapper 要把列表与详情的几百行
+    // 整体重排缩进。判据因此钉在「列宽单源 + 两个元素都消费它」上。
+    expect(source).toContain('--tv-col: 1100px')
+    const filters = source.match(/\.tv-filters\s*\{[\s\S]*?\}/)
+    expect(filters, '未找到 .tv-filters 规则').toBeTruthy()
+    expect(filters![0]).toContain('var(--tv-col-pad)')
+    const list = source.match(/\.tv-list\s*\{[\s\S]*?\}/)
+    expect(list, '未找到 .tv-list 规则').toBeTruthy()
+    expect(list![0]).toContain('var(--tv-col-pad)')
+  })
+
   it('过滤栏五件套齐：会话 / 猫 / 状态 / 耗时阈值 / 仅看报错', () => {
     for (const anchor of ['fSessionId', 'fAgentId', 'fStatus', 'fMinLatencySec', 'fErrorsOnly']) {
       expect(source, anchor).toContain(anchor)
