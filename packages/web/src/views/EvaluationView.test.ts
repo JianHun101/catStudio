@@ -49,10 +49,15 @@ vi.mock('@/composables/useApi', () => ({
 }))
 
 describe('EvaluationView 静态结构（?raw）', () => {
-  it('全屏视图 + 关闭按钮 emit close（照 SettingsView 模式）', () => {
-    expect(source).toContain('role="dialog"')
-    expect(source).toContain('aria-label="评估中心"')
-    expect(source).toContain('@click="emit(\'close\')"')
+  it('评估视图 + 标题栏保留 / ✕ 退役（T4：对齐追踪页形态，轨道即导航）', () => {
+    // T4 改锚：不再是模态覆盖层——`role="dialog"`/`aria-modal`/`close` emit 与 ✕ 同批退役
+    expect(source).toContain('class="eval-view" aria-label="评估中心"')
+    expect(source).not.toContain('role="dialog"')
+    expect(source).not.toContain('aria-modal')
+    expect(source).not.toContain('btn-close')
+    expect(source).not.toContain("emit('close')")
+    expect(source).toContain('class="eval-header"')
+    expect(source).toContain('<h2>评估中心</h2>')
   })
 
   it('五 tab：观察 / 回标 / 标注 / 链路 / 检索，默认观察，回标带待回标角标', () => {

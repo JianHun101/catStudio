@@ -38,8 +38,8 @@ const props = defineProps<{
   preselectExecutionId?: string | null
 }>()
 
+// T4：`close` emit 已退役——本视图不再是模态覆盖层，回聊天由根级轨道 💬 承担。
 const emit = defineEmits<{
-  close: []
   jumpToMessage: [messageId: string, sessionId: string]
 }>()
 
@@ -345,22 +345,13 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="trace-view" role="dialog" aria-modal="true" aria-label="执行追踪">
+  <div class="trace-view" aria-label="执行追踪">
+    <!-- T4：标题栏保留、✕ 退役（原型 v6 的 .trace-hd 无关闭按钮——轨道即导航） -->
     <header class="tv-header">
       <div class="tv-title">
         <span class="tv-icon">⚙</span>
         <h2>执行追踪</h2>
       </div>
-      <button class="btn-close" title="关闭" aria-label="关闭" @click="emit('close')">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-          <path
-            d="M4 4l10 10M14 4l-10 10"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-          />
-        </svg>
-      </button>
     </header>
 
     <!-- ─── 过滤栏 ─────────────────────────────── -->
@@ -686,18 +677,20 @@ onMounted(async () => {
 /* ─── 全屏执行追踪 ──────────────────────── */
 
 .trace-view {
-  position: fixed;
-  inset: 0;
-  z-index: 600; /* 低于 error-toast(9999)，与设置/评估页同层 */
+  /* T4：内容区弹性块（原 `position: fixed; inset: 0; z-index: 600`）——
+     轨道提为根级常驻后，fixed inset 0 会盖住轨道。 */
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   background: var(--bg-deep);
   display: flex;
   flex-direction: column;
 }
 
+/* ✕ 退役后标题栏只剩标题一个孩子，`space-between` 随之失去分流对象，一并摘掉 */
 .tv-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 16px 24px;
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
@@ -718,24 +711,6 @@ onMounted(async () => {
 
 .tv-icon {
   font-size: 18px;
-}
-
-.btn-close {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 6px;
-  border-radius: var(--radius-sm);
-  transition: all var(--ease-out);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.btn-close:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
 }
 
 /* ─── 过滤栏 ────────────────────────────── */

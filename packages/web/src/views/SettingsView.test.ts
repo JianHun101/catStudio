@@ -13,11 +13,25 @@ import designTokens from '../../index.html?raw'
  */
 
 describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配置）', () => {
-  it('全屏设置中心：fixed inset 0 + 关闭按钮 → emit close', () => {
-    expect(source).toContain('settings-view')
-    expect(source).toContain('position: fixed')
-    expect(source).toContain('inset: 0')
-    expect(source).toContain('@click="emit(\'close\')"')
+  it('设置视图 = 内容区弹性块（T4：不再是 fixed 全屏模态），页头/✕ 退役', () => {
+    // T4 改锚：轨道提到根级常驻后本视图从 `position: fixed; inset: 0` 改为内容区里的
+    // 弹性块——仍是 fixed inset 0 的话会把常驻轨道整条盖住（用户报的「设置页导航栏
+    // 跟原型不一样」，原型 v6 是轨道 + 大类导航 + 卡片列三层）。仍是全屏视图语义。
+    const root = source.match(/\.settings-view\s*\{[\s\S]*?\}/)
+    expect(root, '未找到 .settings-view 规则').toBeTruthy()
+    expect(source).toContain('class="settings-view" aria-label="设置"')
+    expect(root![0]).toContain('flex: 1')
+    expect(root![0]).not.toContain('position: fixed')
+    expect(root![0]).not.toContain('inset: 0')
+    // 页头（标题 + ✕）整体退役 + `close` emit 退役；死 CSS 同批删除（留着会让后人
+    // 以为页头仍在）。注意：弹窗级 `.btn-close`（浏览 NapCat 路径）保留——
+    // 「✕ 清零」清的是视图级页头，不是模态弹窗的关闭手段。
+    expect(source).not.toContain('settings-header')
+    expect(source).not.toContain('settings-title')
+    expect(source).not.toContain('settings-icon')
+    expect(source).not.toContain('defineEmits')
+    expect(source).not.toContain("emit('close')")
+    expect(source).toContain('@click="closePicker"')
   })
 
   it('左侧大类导航：三大类文案 + 选中态高亮 + 点击切换', () => {

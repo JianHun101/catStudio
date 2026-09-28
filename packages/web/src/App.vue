@@ -10,24 +10,60 @@ import { useChatStore } from '@/stores/chat'
 
 const store = useChatStore()
 
-/** 全屏设置页 view 切换（无 vue-router，App 级布尔状态）——入口在左侧栏底部齿轮 */
+/** 全屏设置页 view 切换（无 vue-router，App 级布尔状态）——入口在根级轨道齿轮 */
 const showSettings = ref(false)
 
-/** 全屏评估中心 view 切换（E4-B，照 SettingsView 同款模式）——入口在左侧栏底部（设置上方） */
+/** 全屏评估中心 view 切换（E4-B，照 SettingsView 同款模式）——入口在根级轨道（设置上方） */
 const showEval = ref(false)
 
-/** 全屏执行追踪 view 切换（T2）——入口在轨道 ⚙，另有气泡 footer ⚙ 带预选进入 */
+/** 全屏执行追踪 view 切换（T2）——入口在根级轨道 ⚙，另有气泡 footer ⚙ 带预选进入 */
 const showTrace = ref(false)
 
 /** 气泡 ⚙ 进来时预选的执行 id（轨道直接进来为 null = 只看列表不预选） */
 const tracePreselect = ref<string | null>(null)
 
-/** 打开执行追踪。三个全屏 view 互斥（同款语义：`v-else-if` 链 + `app-layout` 的 v-show） */
+/** 轨道四按钮的激活态单源：无覆盖层 = 聊天。`.on` 与 `aria-current` 都读它——
+ *  两处各判一次的话，加第五个视图时必有一处漏改且不报错（复述面分叉老形态）。 */
+const currentView = computed<'chat' | 'trace' | 'eval' | 'settings'>(() => {
+  if (showSettings.value) return 'settings'
+  if (showEval.value) return 'eval'
+  if (showTrace.value) return 'trace'
+  return 'chat'
+})
+
+/** 打开执行追踪。三个全屏 view 互斥（同款语义：`v-else-if` 链 + `app-layout` 的 v-show）。
+ *  T4：已在追踪页且无新预选 = 无操作——轨道 ⚙ 必须幂等，否则点一下会把气泡带来的预选清掉。 */
 function openTrace(executionId: string | null = null): void {
+  if (showTrace.value && executionId === null) return
   tracePreselect.value = executionId
   showTrace.value = true
   showSettings.value = false
   showEval.value = false
+}
+
+/** 打开设置页（T4：轨道齿轮）。互斥与幂等同 `openTrace`。 */
+function openSettings(): void {
+  if (showSettings.value) return
+  showSettings.value = true
+  showEval.value = false
+  showTrace.value = false
+}
+
+/** 打开评估中心（T4：轨道 📊）。 */
+function openEval(): void {
+  if (showEval.value) return
+  showEval.value = true
+  showSettings.value = false
+  showTrace.value = false
+}
+
+/** 回聊天（轨道 💬）：关掉全部覆盖层——这就是「轨道即导航」的返回手段（✕ 已退役）。
+ *  `app-layout` 是 v-show ⇒ 切回零重建；顺带清预选，使「轨道进追踪页」恒为只看列表。 */
+function openChat(): void {
+  showSettings.value = false
+  showEval.value = false
+  showTrace.value = false
+  tracePreselect.value = null
 }
 
 /** 「跳到该回复气泡 ↗」：关掉追踪页、必要时切到该会话、把焦点消息交给 ChatPanel 滚动。
@@ -98,26 +134,11 @@ onUnmounted(() => {
     </div>
   </Transition>
 
-  <SettingsView v-if="showSettings" @close="showSettings = false" />
-
-  <EvaluationView v-else-if="showEval" @close="showEval = false" />
-
-  <!-- `:key` 绑预选 id：同一次会话里连点两条气泡的 ⚙ 要重新挂载，否则
-       `onMounted` 只跑一次、第二次预选不生效（症状是「点了没反应」）。 -->
-  <TraceView
-    v-else-if="showTrace"
-    :key="tracePreselect ?? 'trace'"
-    :preselect-execution-id="tracePreselect"
-    @close="showTrace = false"
-    @jump-to-message="onTraceJump"
-  />
-
-  <!-- app-layout 用 v-show 保活：切设置/评估/追踪页不卸载、切回零重建（SessionList 不重跑 onMounted、ChatPanel 不重建）；
-       三个全屏页仍 v-if/v-else-if 互斥。副作用是设计内收益：追踪页打开期间 socket 事件仍进 store（消息实时进缓存）。 -->
-  <div v-show="!anyOverlayOpen" class="app-layout" :class="{ 'left-closed': !leftOpen }">
-    <!-- 52px 图标轨道（改版新增，最左）：logo + 会话/追踪/评估 + 底部设置。
-         全局入口从旧「会话栏底部 footer」上移到此处——会话栏可整栏收起，轨道不能，
-         故入口放轨道才「收起后仍在」。 -->
+  <div class="app-root">
+    <!-- 52px 图标轨道（T4：从 .app-layout 内部提到根级常驻）：logo + 会话/追踪/评估 + 底部设置。
+         全局入口从旧「会话栏底部 footer」上移到此处——会话栏可整栏收起，轨道不能；
+         T4 起设置/追踪/评估打开时轨道同样常驻（原型 v6：**轨道就是导航**，故 ✕ 关闭按钮已退役）。
+         当前视图的按钮挂 `.on`（accent-soft 底 + 左缘 3px 竖条）。 -->
     <nav class="app-rail" aria-label="主导航">
       <div class="rail-logo" title="CatStudio" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="currentColor">
@@ -128,16 +149,46 @@ onUnmounted(() => {
           <ellipse cx="18.4" cy="11.2" rx="1.9" ry="2.5" />
         </svg>
       </div>
-      <button class="rail-btn on" title="对话" aria-label="对话" aria-current="page">💬</button>
+      <button
+        class="rail-btn"
+        :class="{ on: currentView === 'chat' }"
+        :aria-current="currentView === 'chat' ? 'page' : undefined"
+        title="对话"
+        aria-label="对话"
+        @click="openChat()"
+      >
+        💬
+      </button>
       <!-- 执行追踪（T2）：从轨道直接进来 = 只看列表，不预选任何一条执行 -->
-      <button class="rail-btn" title="执行追踪" aria-label="执行追踪" @click="openTrace()">
+      <button
+        class="rail-btn"
+        :class="{ on: currentView === 'trace' }"
+        :aria-current="currentView === 'trace' ? 'page' : undefined"
+        title="执行追踪"
+        aria-label="执行追踪"
+        @click="openTrace()"
+      >
         ⚙
       </button>
-      <button class="rail-btn" title="评估中心" aria-label="评估中心" @click="showEval = true">
+      <button
+        class="rail-btn"
+        :class="{ on: currentView === 'eval' }"
+        :aria-current="currentView === 'eval' ? 'page' : undefined"
+        title="评估中心"
+        aria-label="评估中心"
+        @click="openEval()"
+      >
         📊
       </button>
       <div class="rail-sp"></div>
-      <button class="rail-btn" title="设置" aria-label="设置" @click="showSettings = true">
+      <button
+        class="rail-btn"
+        :class="{ on: currentView === 'settings' }"
+        :aria-current="currentView === 'settings' ? 'page' : undefined"
+        title="设置"
+        aria-label="设置"
+        @click="openSettings()"
+      >
         <svg
           width="18"
           height="18"
@@ -156,26 +207,48 @@ onUnmounted(() => {
       </button>
     </nav>
 
-    <aside class="panel-left">
-      <div class="panel-inner">
-        <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />
-      </div>
-    </aside>
+    <!-- 内容区：三个覆盖层与三栏布局同处此列（v-if/v-else-if 链 + app-layout 的 v-show 互斥）。
+         轨道在这一层**之外** ⇒ 打开覆盖层不再吃掉轨道（T4 病灶）。
+         覆盖层从 fixed inset 0 改为本列的弹性块（各自根元素 flex:1），故它们不再盖住轨道。 -->
+    <div class="app-main">
+      <SettingsView v-if="showSettings" />
 
-    <main class="panel-center">
-      <div class="center-content">
-        <ChatPanel
-          :left-sidebar-open="leftOpen"
-          @toggle-left-sidebar="toggleLeft"
-          @open-trace="openTrace"
-        />
-      </div>
-    </main>
+      <EvaluationView v-else-if="showEval" />
 
-    <!-- 右侧评估面板（clowder-ai 精简模式——会话成员/tokens/统计/队列/配置，非旧版运行控制台） -->
-    <aside class="panel-right" :class="{ 'right-closed': !rightOpen }">
-      <SessionAgentsPanel />
-    </aside>
+      <!-- `:key` 绑预选 id：同一次会话里连点两条气泡的 ⚙ 要重新挂载，否则
+           `onMounted` 只跑一次、第二次预选不生效（症状是「点了没反应」）。 -->
+      <TraceView
+        v-else-if="showTrace"
+        :key="tracePreselect ?? 'trace'"
+        :preselect-execution-id="tracePreselect"
+        @jump-to-message="onTraceJump"
+      />
+
+      <!-- app-layout 用 v-show 保活：切设置/评估/追踪页不卸载、切回零重建（SessionList 不重跑 onMounted、ChatPanel 不重建）；
+           三个全屏页仍 v-if/v-else-if 互斥。副作用是设计内收益：追踪页打开期间 socket 事件仍进 store（消息实时进缓存）。 -->
+      <div v-show="!anyOverlayOpen" class="app-layout" :class="{ 'left-closed': !leftOpen }">
+        <aside class="panel-left">
+          <div class="panel-inner">
+            <SessionList :collapsed="!leftOpen" @expand="leftOpen = true" />
+          </div>
+        </aside>
+
+        <main class="panel-center">
+          <div class="center-content">
+            <ChatPanel
+              :left-sidebar-open="leftOpen"
+              @toggle-left-sidebar="toggleLeft"
+              @open-trace="openTrace"
+            />
+          </div>
+        </main>
+
+        <!-- 右侧评估面板（clowder-ai 精简模式——会话成员/tokens/统计/队列/配置，非旧版运行控制台） -->
+        <aside class="panel-right" :class="{ 'right-closed': !rightOpen }">
+          <SessionAgentsPanel />
+        </aside>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -252,15 +325,37 @@ onUnmounted(() => {
   transform: translateX(-50%) translateY(-8px);
 }
 
+/* ─── 根级：轨道常驻 + 内容区（T4） ──────── */
+
+/* 根容器 = 52px 轨道（常驻，不吃 v-show）+ 内容区。轨道在这一层定宽，
+   故设置/追踪/评估打开时它仍在——覆盖层只是内容区里换一个孩子。 */
+.app-root {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 内容区：覆盖层（v-if/v-else-if）与三栏布局（v-show）同处此列、互斥显示。
+   min-width:0 防长内容把这一列撑破（flex item 默认 min-width:auto）。 */
+.app-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 /* ─── Layout Grid ────────────────────────── */
 
 .app-layout {
   display: grid;
-  /* 四栏：52px 图标轨道 | 236px 会话栏 | 主区 | 300px 成员栏。
-     轨道恒在（全局入口落点），会话栏才是可收起的「第二级」。 */
-  grid-template-columns: 52px 236px 1fr 300px;
-  width: 100vw;
-  height: 100vh;
+  /* 三栏：236px 会话栏 | 主区 | 300px 成员栏。
+     T4：52px 轨道已提到根级 `.app-rail`，不再占这里的 track——视觉列宽与 T1 的四栏
+     完全一致（轨道 + 会话栏 + 主区 + 右栏），只是轨道归根级管。 */
+  grid-template-columns: 236px 1fr 300px;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   /* grid-template-columns animation disabled —
  * browsers step integer track sizes, causing layout recalc on every frame
@@ -270,11 +365,11 @@ onUnmounted(() => {
  * compositor without triggering layout. */
 }
 
-/* 收起会话栏：轨道保留、会话栏整栏收起（只剩轨道）。
- * 轨道 0 宽 + display:none 双管——display:none 的 item 不参与布局，但显式 track 仍占位
+/* 收起会话栏：轨道保留、会话栏整栏收起。
+ * 会话栏 0 宽 + display:none 双管——display:none 的 item 不参与布局，但显式 track 仍占位
  * （下方窄窗注释同款理由），故 track 必须同步归零，否则聊天区被无形压缩。 */
 .app-layout.left-closed {
-  grid-template-columns: 52px 0 1fr 300px;
+  grid-template-columns: 0 1fr 300px;
 }
 
 .app-layout.left-closed .panel-left {
@@ -285,10 +380,10 @@ onUnmounted(() => {
  * 但显式 300px track 仍占位，若不收窄则聊天区被无形压缩（与 narrowMq 同断点） */
 @media (max-width: 1000px) {
   .app-layout {
-    grid-template-columns: 52px 236px 1fr;
+    grid-template-columns: 236px 1fr;
   }
   .app-layout.left-closed {
-    grid-template-columns: 52px 0 1fr;
+    grid-template-columns: 0 1fr;
   }
 }
 
@@ -340,9 +435,13 @@ onUnmounted(() => {
   overflow-x: hidden;
 }
 
-/* ─── 52px 图标轨道 ──────────────────────── */
+/* ─── 52px 图标轨道（根级常驻）──────────── */
 
 .app-rail {
+  /* 定宽不吃 flex 伸缩：`flex: none` + 显式宽度。box-sizing 全局 border-box，
+     故 1px 右边框含在 52px 内——与 T1 grid track 的列宽逐像素一致。 */
+  flex: none;
+  width: 52px;
   background: var(--bg-base);
   border-right: 1px solid var(--border-subtle);
   display: flex;
