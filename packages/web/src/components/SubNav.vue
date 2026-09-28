@@ -25,6 +25,14 @@ defineProps<{
   modelValue: string
   /** 导航地标名——屏幕阅读器用它区分页面里的多个 nav */
   label?: string
+  /**
+   * 导航顶部父标题（T6：原型 v6 `.nav-t` 形态）。
+   *
+   * 可选、缺省与空串都不渲染——评估中心的五 tab 本轮不传，prop 一加即零影响零 diff。
+   * 为什么不写死成常驻元素：设置页的 IA 是三个平级大类、无分组语义，父标题取单标题
+   * 「设置」作视觉锚；评估页没有对应诉求，写死会让它凭空多一行（票面 §三 边界）。
+   */
+  title?: string
 }>()
 
 const emit = defineEmits<{ 'update:modelValue': [key: string] }>()
@@ -32,6 +40,7 @@ const emit = defineEmits<{ 'update:modelValue': [key: string] }>()
 
 <template>
   <nav class="sub-nav" :aria-label="label">
+    <div v-if="title" class="sub-nav-title">{{ title }}</div>
     <button
       v-for="it in items"
       :key="it.key"
@@ -58,6 +67,25 @@ const emit = defineEmits<{ 'update:modelValue': [key: string] }>()
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
+}
+
+/* 父标题（T6）——原型 v6 `.set-nav .nav-t` 规格：11px / 700 / letter-spacing .08em /
+   padding 10px 10px 6px。那个内边距不是随手值：`.sub-nav` 自带 10px 横向内边距，
+   标题再加自身的 10px ⇒ 标题文字左缘 = 容器 10 + 10 = 20px；`.sub-nav-item` 的内容盒
+   左缘同理（容器 10 + item `padding: 8px 10px` 的 10px）= 20px。**两者对齐的是内容盒
+   左缘**——也就是导航项**图标**的左缘；带图标时文案还要再被 `图标 14px + gap 9px`
+   推到 43px 处，标题不与文案齐平（原型 v6 同形态，非缺陷）。
+   任一处的横向内边距改动都会让这条对齐错开，故把关系写在这里。
+
+   色值走 `--text-muted`：原型用的是 `--text-faint`，本仓 index.html **无此变量**，
+   照抄不报错不告警、只静默失效（颜色回落继承值，与相邻元素同色 ⇒ 父标题形同消失）。
+   `--text-muted` 是本仓色板里语义等价的最暗文字位。详见测试里的色板守卫。 */
+.sub-nav-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  padding: 10px 10px 6px;
 }
 
 .sub-nav-item {

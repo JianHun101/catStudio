@@ -616,6 +616,31 @@ describe('SettingsView T3 设置页对齐改版（票面 §二 规格）', () =>
     expect(layout![0]).toContain('margin: 0;')
   })
 
+  it('T6 摘帽：.settings-layout 不得再有限宽（内容居中的参照系 = 轨道右侧整个剩余区）', () => {
+    // 病灶：整页宽度帽把「导航 148 + 内容区」钉死在轨道右侧的固定宽度内 ⇒ 720 卡片列
+    // 只在帽内居中，1920 屏下视觉重心偏左数百 px、右侧留大片空白。摘帽后卡片列的
+    // `margin: 0 auto` 直接在「轨道右缘 → 视口右缘」里居中，不需要新居中机制。
+    // 本断言同时是**防回退否定断言**：把宽度帽加回来即红。
+    const layout = source.match(/\.settings-layout\s*\{[\s\S]*?\}/)
+    expect(layout, '未找到 .settings-layout 规则').toBeTruthy()
+    expect(layout![0], '整页宽度帽不得回潮').not.toContain('max-width')
+    // 贴左裁决（T5）不因摘帽回退：仍是 `margin: 0`，不是 `margin: 0 auto`
+    expect(layout![0]).toContain('margin: 0;')
+    // 承载 720 卡片列的元素仍是唯一居中容器（三个 pane 同一条规则）
+    const col = source.match(/\.im-pane,\s*\.system-pane,\s*\.agent-panel\s*\{[\s\S]*?\}/)
+    expect(col, '未找到卡片列限宽规则').toBeTruthy()
+    expect(col![0]).toContain('margin: 0 auto')
+  })
+
+  it('T6 父标题：设置页给 SubNav 传 title="设置"（评估页不传，见 SubNav.test.ts）', () => {
+    // 设置页三个大类是平级结构、无分组语义，故取单父标题作视觉锚（票面 OQ-1）。
+    // 断言钉在「本视图传了这个 prop」上——渲染三态归 SubNav.test.ts。
+    expect(source).toContain('title="设置"')
+    const subnav = source.match(/<SubNav[\s\S]*?>/)
+    expect(subnav, '未找到 SubNav 标签').toBeTruthy()
+    expect(subnav![0]).toContain('title="设置"')
+  })
+
   it('控件统一 34px 高 + border-box：治「莫名换行」的溢出根因', () => {
     // content-box 下 .input 的 width:100% 会叠加 padding+border 溢出 flex 容器，
     // 把同行后续元素挤到下一行——这是「莫名的换行文字」的机制，不是文案问题。
