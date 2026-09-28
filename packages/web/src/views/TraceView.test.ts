@@ -193,10 +193,18 @@ async function flush(): Promise<void> {
 }
 
 describe('TraceView 静态结构（?raw）', () => {
-  it('全屏视图 + 关闭按钮 emit close（照 EvaluationView 模式）', () => {
-    expect(source).toContain('role="dialog"')
-    expect(source).toContain('aria-label="执行追踪"')
-    expect(source).toContain("emit('close')")
+  it('执行追踪视图 + 标题栏保留 / ✕ 退役（T4：轨道即导航，原型 v6 的 .trace-hd 无关闭按钮）', () => {
+    // T4 改锚：本视图不再是模态覆盖层——`role="dialog"`/`aria-modal`/`close` emit
+    // 与 ✕ 同批退役，回聊天由根级轨道 💬 承担。标题栏按原型保留。
+    expect(source).toContain('class="trace-view" aria-label="执行追踪"')
+    expect(source).not.toContain('role="dialog"')
+    expect(source).not.toContain('aria-modal')
+    expect(source).not.toContain('btn-close')
+    expect(source).not.toContain("emit('close')")
+    expect(source).toContain('class="tv-header"')
+    expect(source).toContain('<h2>执行追踪</h2>')
+    // 跳转消息的 emit 是另一件事，✕ 退役不该误伤它
+    expect(source).toContain("emit('jumpToMessage'")
   })
 
   it('过滤栏五件套齐：会话 / 猫 / 状态 / 耗时阈值 / 仅看报错', () => {

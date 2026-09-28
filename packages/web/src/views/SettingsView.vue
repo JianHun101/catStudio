@@ -19,8 +19,10 @@ import { createLogger } from '@/utils/logger'
  *   - 系统配置：context 阈值（80% 告警 / 90% 交接，GET/POST /api/config/context）
  * 契约（店长钉死）：autoStart 缺省 true——旧配置无字段 = 自动拉起；开关初始态跟随
  * GET 响应，保存时 POST 全量带 { napcatPath, autoStart }。
+ *
+ * T4：页头（标题 + ✕）整体退役——轨道在全视图常驻后，「回聊天」由轨道 💬 承担，
+ * 本视图不再有 `close` emit，也不再是模态（`role="dialog"`/`aria-modal` 已摘）。
  */
-const emit = defineEmits<{ close: [] }>()
 const log = createLogger('SettingsView')
 const store = useChatStore()
 
@@ -659,24 +661,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="settings-view" role="dialog" aria-modal="true" aria-label="设置">
-    <header class="settings-header">
-      <div class="settings-title">
-        <span class="settings-icon">⚙️</span>
-        <h2>设置</h2>
-      </div>
-      <button class="btn-close" @click="emit('close')">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-          <path
-            d="M4 4l10 10M14 4l-10 10"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-          />
-        </svg>
-      </button>
-    </header>
-
+  <div class="settings-view" aria-label="设置">
     <div class="settings-layout">
       <!-- 左侧大类导航（参考图1：窄条 + 选中态高亮浅色块） -->
       <nav class="settings-nav" aria-label="设置大类">
@@ -1422,43 +1407,23 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-/* ─── 全屏设置中心 ──────────────────────── */
+/* ─── 设置视图（内容区里的普通视图）────────── */
 
 .settings-view {
-  position: fixed;
-  inset: 0;
-  z-index: 600; /* 低于 error-toast(9999)，高于三栏布局 */
+  /* T4：从「根级固定定位铺满视口」改为内容区弹性块——轨道在内容区之外常驻，
+     若仍铺满视口会把轨道整条盖住（这正是「设置页导航栏跟原型不一样」的机制）。
+     原先的高 z-index 与三栏布局争层叠，现在同处内容区已不需要，故一并摘除。 */
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   background: var(--bg-deep);
   display: flex;
   flex-direction: column;
 }
 
-.settings-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 24px;
-  border-bottom: 1px solid var(--border-subtle);
-  flex-shrink: 0;
-}
-
-.settings-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.settings-title h2 {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.3px;
-}
-
-.settings-icon {
-  font-size: 18px;
-}
-
+/* 页头（图标 + 标题 + ✕）已随 T4 整体退役，其三条样式规则同批删除——
+   留着会让后人以为页头仍在。下面的 `.btn-close` 仍被「浏览 NapCat 路径」弹窗
+   （模态级）消费，故保留：清的是视图级页头，不是弹窗的关闭手段。 */
 .btn-close {
   background: none;
   border: none;
