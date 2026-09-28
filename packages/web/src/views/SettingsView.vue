@@ -9,6 +9,7 @@ import {
   type OneBotStatus,
 } from '@/composables/useApi'
 import AgentEditModal from '../components/AgentEditModal.vue'
+import SubNav from '../components/SubNav.vue'
 import { createLogger } from '@/utils/logger'
 
 /**
@@ -29,6 +30,17 @@ const store = useChatStore()
 // ─── 左右分栏：左侧大类 + 右侧详情 ─────────────────
 // 默认大类 = IM 接入（子 Tab QQ 接入）——打开设置页显示 QQ 接入，与迁移前行为一致
 const activeCategory = ref<'cats' | 'im' | 'system'>('im')
+
+/**
+ * T5：三个大类搬进 SubNav 的 items——文案/顺序的**唯一表述点**。
+ * 图标不进这里：它们是多元素 SVG（circle + path），走 SubNav 的 `#icon` slot
+ * （传字符串就得 v-html，是新的注入面）。
+ */
+const settingsNavItems = [
+  { key: 'cats', label: '猫咪管理' },
+  { key: 'im', label: 'IM 接入' },
+  { key: 'system', label: '系统配置' },
+]
 
 // ─── IM 接入子 tab：QQ 接入 / NapCat ─────────────────
 const activeTab = ref<'qq' | 'napcat'>('qq')
@@ -663,17 +675,14 @@ onUnmounted(() => {
 <template>
   <div class="settings-view" aria-label="设置">
     <div class="settings-layout">
-      <!-- 左侧大类导航（参考图1：窄条 + 选中态高亮浅色块） -->
-      <nav class="settings-nav" aria-label="设置大类">
-        <button
-          class="nav-item"
-          :class="{ active: activeCategory === 'cats' }"
-          @click="activeCategory = 'cats'"
-        >
+      <!-- 左侧大类导航（T5：SubNav 共享组件 148px；图标走 #icon slot 供线框 SVG） -->
+      <SubNav v-model="activeCategory" :items="settingsNavItems" label="设置大类">
+        <template #icon="{ item }">
           <svg
+            v-if="item.key === 'cats'"
             class="nav-icon"
-            width="15"
-            height="15"
+            width="14"
+            height="14"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -687,17 +696,11 @@ onUnmounted(() => {
               d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 4.5a3 3 0 0 1 0 7M21 20c0-2.8-1.9-5.1-4.5-5.8"
             />
           </svg>
-          猫咪管理
-        </button>
-        <button
-          class="nav-item"
-          :class="{ active: activeCategory === 'im' }"
-          @click="activeCategory = 'im'"
-        >
           <svg
+            v-else-if="item.key === 'im'"
             class="nav-icon"
-            width="15"
-            height="15"
+            width="14"
+            height="14"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -710,17 +713,11 @@ onUnmounted(() => {
               d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.7-1.7"
             />
           </svg>
-          IM 接入
-        </button>
-        <button
-          class="nav-item"
-          :class="{ active: activeCategory === 'system' }"
-          @click="activeCategory = 'system'"
-        >
           <svg
+            v-else
             class="nav-icon"
-            width="15"
-            height="15"
+            width="14"
+            height="14"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -734,9 +731,8 @@ onUnmounted(() => {
             />
             <circle cx="12" cy="12" r="3" />
           </svg>
-          系统配置
-        </button>
-      </nav>
+        </template>
+      </SubNav>
 
       <!-- 右侧详情区 -->
       <div class="settings-content">
@@ -1450,52 +1446,20 @@ onUnmounted(() => {
   display: flex;
   width: 100%;
   max-width: 1100px;
-  margin: 0 auto;
+  /* T5：贴左（原先左右各一个 auto 边距，把整页推向居中）——整页居中是
+     「导航左边空出数百 px」的根因：轨道 52px 与导航之间那条空白随视口变宽而变宽
+     （1920 屏约 380px）。贴左后导航锚定轨道；卡片列仍在剩余区内居中（见下方 720px 列）。
+     注：本注释不写那条旧声明的字面量——下方测试用**全串否定断言**钉它，
+     写了就会被自己的注释喂成假红（本仓复发过的坑）。 */
+  margin: 0;
 }
 
-.settings-nav {
-  /* T3：188px 图标导航（原型 v6 .set-nav 比例）——宽度是「图标 + 文案」一行放得下的下限 */
-  width: 188px;
-  flex-shrink: 0;
-  padding: 18px 10px;
-  border-right: 1px solid var(--border-subtle);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow-y: auto;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 8px 10px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  font-family: inherit;
-  cursor: pointer;
-  text-align: left;
-  transition: all var(--ease-out);
-}
-
-.nav-item:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-/* 选中态高亮：浅色块 + 文字加深（参考图1） */
-.nav-item.active {
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  font-weight: 600;
-}
+/* 导航本体（148px / 图标列 / 激活态高亮）见 components/SubNav.vue —— T5 起设置与评估
+   共用同一份规则；本视图只负责把它放进分栏并钉住图标行为。 */
 
 .nav-icon {
-  /* T3：线框 SVG 图标（原型 v6 成品）——尺寸写在图标自身上，此处只钉不参与收缩 */
+  /* 线框 SVG 图标（原型 v6 成品）——尺寸写在图标自身上，此处只钉不参与收缩。
+     T5：本规则命中 SubNav `#icon` slot 传入的 svg（slot 内容带本组件的 scope id）。 */
   flex-shrink: 0;
   display: block;
 }

@@ -678,7 +678,14 @@ onMounted(async () => {
 
 .trace-view {
   /* T4：内容区弹性块（原 `position: fixed; inset: 0; z-index: 600`）——
-     轨道提为根级常驻后，fixed inset 0 会盖住轨道。 */
+     轨道提为根级常驻后，fixed inset 0 会盖住轨道。
+     T5：过滤栏/列表行/展开详情统一收进 1100px 内容列（票面 §二D「与设置容器同宽」）。
+     实现走**对称内边距**而不是给内容再包一层 div：包 wrapper 要把列表与详情的几百行
+     整体重排缩进，diff 里只剩空白噪声，真变化反而难找。
+     `--tv-col-pad` 里的 `100%` 是 token、在使用处才解析 ⇒ 相对**用它的元素**的包含块
+     （两个元素同宽，故读数一致）；窄屏下 max() 兜到最小内边距 24px。 */
+  --tv-col: 1100px;
+  --tv-col-pad: max(24px, calc((100% - var(--tv-col)) / 2));
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -719,7 +726,8 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 12px 24px;
+  /* T5：左右内边距即内容列的收口（分隔线保持全宽，与 .tv-header 的横线同长） */
+  padding: 12px var(--tv-col-pad);
   border-bottom: 1px solid var(--border-subtle);
   flex-wrap: wrap;
   flex-shrink: 0;
@@ -797,7 +805,9 @@ onMounted(async () => {
 .tv-list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 24px 24px;
+  /* T5：同一条内容列（行与展开详情都在 1100px 内）；滚动条留在全宽元素的右缘，
+     与聊天区 `.col` 的形态同节奏 */
+  padding: 8px var(--tv-col-pad) 24px;
 }
 
 .tv-hint {
