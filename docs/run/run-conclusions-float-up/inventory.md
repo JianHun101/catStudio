@@ -21,7 +21,7 @@
 
 1. **本活与三张已在飞的票大面积重叠，不是从零开始。** 段 3 开工前必须先裁这层关系，否则会造出第二份平行真相源（判据 3 禁止的东西）：
    - `docs/run/docs-run-status-gate/`（`status: active`，Gate PASS，2026-09-19 立）——它的 **G2「待上浮批」** 已经点名 10 个目录、**G3** 是「存量全目录回填 status」、**G4** 是 pre-push 硬闸。**本活的段 1 与 G2/G3 是同一件事的两个版本**（G2 的清单基于 09-19 基线，仅覆盖今日 37 个中的 10 个）。
-   - `docs/run/lessons-first-batch/`（`status: active`）——**lessons 侧的上浮批**，其 D2 明写「**本票须排在 G2 之前执行**」，且 §二 已抄录 8 条待落卡素材。今日 `docs/lessons/` 的 10 张卡就是它的产物（首批已落，见 §二 第 21 行）。**本活的 lessons 分支与它同构**。
+   - `docs/run/lessons-first-batch/`（`status: active`）——**lessons 侧的上浮批**，其 D2 明写「**本票须排在 G2 之前执行**」，且 §二 已抄录 8 条待落卡素材。今日 `docs/lessons/` 的 10 张卡就是它的产物（首批已落，见 §二 `lessons-first-batch` 行）。**本活的 lessons 分支与它同构**。
    - `docs/run/hook-p3-followups/`（挂账票）——其 **F3/F4 两项本身就是上浮动作**（落 `docs/lessons/` 与 `AGENTS.md`）。
      ⇒ **建议**：段 2 先把「本票是取代 G2/G3、还是作为它们的执行面」裁掉，再逐目录拍板。三张票的边界不厘清，段 3 会产生重复落点或互相覆盖。
 
@@ -191,7 +191,7 @@
 
 ### 2. 上浮出口的合法值域（「口径乙」，`docs-run-status-gate` 已登记未裁）
 
-卡点：实测**多数「已收口可清」目录的结论落在白名单之外**——手册（`CONTEXT.md` ×2、`CODING_STANDARDS.md`、`CONTRIBUTING.md`、`AGENTS.md`）与代码注释面。而 `CONTEXT.md`「文档位置约定」段钉死「结论上浮到 `docs/plans/`（点名，**不二选一**）」，本票判据 4 却写**四落点分流**（plans / lessons / adr + 三不沾清）。二者**语义冲突**，且本票复述面**已实测 5 处**：`AGENTS.md` Pointers 段、`CONTEXT.md` 文档位置约定段 / 判据表「归宿」行 / 收口链段、`docs/run/README.md`「什么时候清」段。
+卡点：实测**多数「已收口可清」目录的结论落在白名单之外**——手册（`CONTEXT.md` ×2、`CODING_STANDARDS.md`、`CONTRIBUTING.md`、`AGENTS.md`）与代码注释面。而 `CONTEXT.md`「文档位置约定」段钉死「结论上浮到 `docs/plans/`（点名，**不二选一**）」，本票判据 4 却写**四落点分流**（plans / lessons / adr + 三不沾清）。二者**语义冲突**，且「上浮」约定的复述面**实测 5 处**：`AGENTS.md` Pointers 段、`CONTEXT.md` 文档位置约定段 / 判据表「归宿」行 / 收口链段、`docs/run/README.md`「什么时候清」段——**其中 4 处明写 `docs/plans/`，判据表「归宿」行只写「收口即清，结论上浮」（未点名落点）**。
 ⇒ 这一裁**同时决定**：`floated_to` 的合法值域（G4 悬空落点检查的白名单）、`env-number-guards` 已填的 `floated_to: CODING_STANDARDS.md` 是否合法、以及 §三-D 那条「重启判据落 AGENTS.md」能否成立。
 
 ### 3. `eval-system/` 目录去留（**已有店长保留裁决**）
