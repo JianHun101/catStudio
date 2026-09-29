@@ -1,4 +1,4 @@
-# 票：eval 产物目录整理 —— docs/eval 15 个快照无索引，scripts/eval 5 脚本无导览
+# 票：eval 产物目录整理 —— docs/eval 14 个快照无索引，scripts/eval 5 脚本无导览
 
 > 状态：已立票 · 未派
 > 来源：用户原话「我发现 eval 下有很多混乱的文件，是干什么的」（2026-09-28）；店长答复 = 已收口检索评估线的跑批快照，不是垃圾、别删，立小票整理
@@ -6,7 +6,7 @@
 
 ## 现状
 
-- `docs/eval/`：15 个文件平铺——R14a 引用探针 6 个（2026-09-23，s1/s2/四 provider 对照）、rerank 离线 A/B 4 个（2026-09-22，md/json/latency 双格式）、检索基线 3 个（09-19 md、09-20 md+json）、黄金集 `retrieval-golden.json`。无索引页，看不出批次与用途。
+- `docs/eval/`：14 个文件平铺——R14a 引用探针 6 个（2026-09-23，s1/s2/四 provider 对照）、rerank 离线 A/B 4 个（2026-09-22，md/json/latency 双格式）、检索基线 3 个（09-19 md、09-20 md+json）、黄金集 `retrieval-golden.json`。无索引页，看不出批次与用途。
 - `scripts/eval/`：5 个跑批脚本 + 各自测试（`retrieval-baseline` / `golden-check` / `freeze-rewrite` / `rerank-offline-ab` / `retrieval-attribution-recheck`），无 README。
 
 ## 任务
