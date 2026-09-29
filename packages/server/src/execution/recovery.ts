@@ -9,8 +9,9 @@
  * 服务定位）；日志通道沿用 'socketio'（零可观测行为变化）。
  *
  * **三条各自带探针闸**（票 `docs/run/probe-no-resume/`，判据见 `probe-mode.ts`）：
- * 闸开在**函数体内**而不是调用点——本模块的三个函数共有四个调用方（socketio 启动链、
- * index.ts 的 episode/replay 定时器与首轮），闸在调用点会漏掉后来新增的那一个。
+ * 闸开在**函数体内**而不是调用点——本模块的三个函数在启动链上共有 **6 个调用点**
+ * （`connectors/socketio.ts` 2 处：interrupted / queued 各一；`index.ts` 4 处：
+ * episode 定时器与首轮的 replay 分支、replay 定时器与首轮），闸在调用点会漏掉后来新增的那一个。
  * 判据是「谁捡行」而不是「谁调用」，故与捡行逻辑同址。
  */
 
