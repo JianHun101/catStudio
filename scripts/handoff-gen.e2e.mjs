@@ -7,8 +7,17 @@
  *   node scripts/handoff-gen.e2e.mjs
  */
 
-import { execFileSync, execSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { execFileSync, execSync, spawn } from 'node:child_process'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
@@ -220,6 +229,31 @@ process.on('exit', () => {
     rmSync(TEST_BASE, { recursive: true, force: true })
   } catch {}
 })
+
+/**
+ * 把临时仓库「过继」给一个会话——**身份面票（夹具仓库钩子泄漏活会话）的夹具前提**。
+ *
+ * 造一个**真 worktree** 挂在 `<TEST_BASE>/catStudy-sessions/<sessionId>[-<slug>]` 并
+ * 登记进该仓库，形态与生产里 server 的 `ensureSessionWorktree` / `ensureCatWorktree`
+ * 逐字同源（都是 `git worktree add <主仓>/../catStudy-sessions/<shortId>[-<猫名>]`）。
+ *
+ * 为什么必须 `git worktree add` 而不是 `mkdirSync`：身份判据（`judgeRepoOwnership`）
+ * 读的是 `git worktree list`——**登记表**，不是目录存在性。只建目录的夹具过不了这道
+ * 门，而这正是判据要的性质：残留目录不该冒充会话工作区。
+ *
+ * 目录名用**会话 ID 全串**（short id 是其前 8 位 ⇒ 天然满足前缀匹配）——多组共用
+ * 同一个 `TEST_BASE`（⇒ 同一个 `catStudy-sessions`），故同会话的多次过继要用 `slug`
+ * 区分（一个路径只能是一个仓库的 worktree）。
+ *
+ * @returns {string} 该 worktree 的路径（= 会话工作区形态的 cwd）
+ */
+function entitleRepo(repo, sessionId, slug) {
+  const name = slug ? `${sessionId}-${slug}` : sessionId
+  const dir = join(TEST_BASE, 'catStudy-sessions', name)
+  mkdirSync(dirname(dir), { recursive: true })
+  execSync(`git worktree add "${dir}" -b "wt/${name}"`, { cwd: repo, stdio: 'pipe' })
+  return dir
+}
 
 const TMP = join(TEST_BASE, 'tmp')
 mkdirSync(TMP, { recursive: true })
@@ -940,6 +974,9 @@ console.log('📦 测试组 11: 投递瞬态重试')
   writeFileSync(join(RETRY_TMP, 'a.txt'), '1', 'utf-8')
   execSync('git add -A', { cwd: RETRY_TMP, stdio: 'pipe' })
   execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: RETRY_TMP, stdio: 'pipe' })
+  // 本组 11b–11e 走的是 `CATSTUDY_SESSION_ID` 那一支 ⇒ 必须先让仓库自证属于该会话
+  // （身份面判据，见 entitleRepo）。11a 不走这一支（走 uuid 反查），故不受影响。
+  entitleRepo(RETRY_TMP, 'session-debug-1', 'g11')
 
   // 11a: 瞬态失败（socket destroy）→ 2s 重试 → 第三次成功
   let postHits = 0
@@ -1147,6 +1184,9 @@ console.log('📦 测试组 12: 投递去重')
   writeFileSync(join(DEDUP_TMP, 'a.txt'), '1', 'utf-8')
   execSync('git add -A', { cwd: DEDUP_TMP, stdio: 'pipe' })
   execSync(`git commit -m "catstudy [${uuid}]"`, { cwd: DEDUP_TMP, stdio: 'pipe' })
+  // 12a–12c 全走 `CATSTUDY_SESSION_ID` 那一支 ⇒ 过继（见 entitleRepo）。slug 用 g12：
+  // 组 11 已把 `session-debug-1` 登记给了它自己的仓库，同一路径不能是两个仓库的 worktree。
+  entitleRepo(DEDUP_TMP, 'session-debug-1', 'g12')
 
   // 12a: 目标会话已有相同内容（包裹消息）→ 跳过 POST（视为成功，草稿可清理）
   let postHitsDup = 0
@@ -1309,6 +1349,27 @@ async function captureLogs(fn) {
     await fn()
   } finally {
     console.log = orig
+  }
+  return lines
+}
+
+/**
+ * 捕获 **stderr** 的孪生助手（`captureLogs` 只挂 `console.log`）。
+ *
+ * 身份面告警刻意走 stderr（`process.stderr.write`）——它是「拒绝投递」唯一可观测面，
+ * 断言必须打在**它真正落地的那一面**上；用 `captureLogs` 去捞等于验证面不是被判面。
+ */
+async function captureStderr(fn) {
+  const lines = []
+  const orig = process.stderr.write
+  process.stderr.write = (chunk, ...rest) => {
+    lines.push(String(chunk))
+    return orig.call(process.stderr, chunk, ...rest)
+  }
+  try {
+    await fn()
+  } finally {
+    process.stderr.write = orig
   }
   return lines
 }
@@ -2367,6 +2428,9 @@ async function startTransientPostStub({ uuid, sessionId, executor = 500 }) {
     { 'a.txt': '1' },
     'chore: 手动提交'
   )
+  // 无 uuid ⇒ 反查不出会话 ⇒ 目标只能由 CATSTUDY_SESSION_ID 指定（本用例钉的就是
+  // 这条契约）⇒ 该支要求仓库自证归属，先过继（见 entitleRepo）。
+  entitleRepo(tmp, 'session-14e', 'g14e')
   const stub = await startAttributionStub({
     uuid: 'unused-no-uuid',
     sessionId: 'session-14e',
@@ -2707,6 +2771,9 @@ function changedPathsOfHead(tmp) {
   // 16e: 生产形态 + 强制开关并存 → 仍照常投递（两个信号不得互相污染）
   {
     const tmp = mkExemptRepo('.handoff-test-exempt-prodenv-force')
+    // 本用例的形状就是「生产形态」（CATSTUDY_SESSION_ID 常驻）⇒ 走环境变量那一支
+    // ⇒ 先过继，否则被身份面判据拒在门外（拒了也 POST 0 次，用例会以假理由变绿）。
+    entitleRepo(tmp, 'session-16e', 'g16e')
     const headSha = gitIn(tmp, 'rev-parse HEAD')
     const post0 = stub.hits.post
     await runInProcWithEnv(
@@ -2833,6 +2900,9 @@ console.log('')
     updated: 0,
     executor: 'ok',
   })
+  // 17d 走 `CATSTUDY_FORCE_DELIVER=1` 旁路幂等后**直抵投递**⇒ 环境变量那一支要做
+  // 身份校验，先过继。17c 不在此列：幂等早退发生在投递尝试**之前**，判据跑不到。
+  entitleRepo(tmp, 'session-17c', 'g17c')
 
   // 前置：账本里确有一条 HEAD 的 delivered——否则「不 POST」是因为没账本可跳，恒真
   writeState(tmp, { delivered: { [headSha]: '2026-01-01T00:00:00.000Z' }, pending: [], raw: '' })
@@ -3040,6 +3110,266 @@ assert(
   gatedPostBodies.every((b) => !(b?.mentions ?? []).some((n) => STUB_REVIEWER_NAMES.includes(n))),
   '放行载荷不应点名 reviewer——真机上那会触发「审查类投递缺 chainType」400（handoff-gen 从不发 chainType）'
 )
+
+// ═══ 测试组 19: 仓库身份校验（夹具仓库钩子泄漏活会话） ═══════════════
+//
+// 实证形态（2026-09-28 两次：`e09340a` / `3f8047c`）：在 `/tmp` 造的夹具仓库复制了真
+// `.husky` + `scripts/handoff-gen.mjs`，又继承了猫 CLI 环境里常驻的 `CATSTUDY_SESSION_ID`
+// ⇒ 一次普通 `git commit` 就把补填请求灌进了**活会话**（伪 uuid → 兜底 @店长）。
+//
+// 判据：`CATSTUDY_SESSION_ID` 是**环境态**，不是意图——它谁都继承得到，故只有「提交
+// 仓库自证属于该会话的工作区」时才认。本组双向钉死，缺一不可：
+//   ① 夹具形态 → 拒投 + **显式告警**（静默拒绝等于把噪声换成隐身）
+//   ② 合法形态（主仓库根 / 会话 worktree）→ 照常投
+//   ③ 判别力自证：同一仓库、同一 commit，**只换会话 id** → 拒（证明判据钉的是
+//      「会话绑定」，不是「是不是 git 仓库 / 有没有 worktree」这类恒真条件）
+console.log('📦 测试组 19: 仓库身份校验（夹具泄漏）')
+
+/** 组 19 共用 stub：POST 载荷收进 `posts`（入口主闸镜像由 handleMessagePost 接） */
+async function startIdentStub(posts) {
+  return startStubServer((req, res) => {
+    if (req.url.startsWith('/api/sessions/') && req.url.includes('/messages')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify([]))
+      return
+    }
+    if (req.url === '/api/messages' && req.method === 'POST') {
+      return handleMessagePost(req, res, (body) => {
+        posts.push(body)
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, messageId: 'm-ident' }))
+      })
+    }
+    // verdict / executor / commit-hash 一律 404：本组不关心它们，且 404 对
+    // probeAttribution 是**确定答案**（无执行行 ⇒ 该投），不会退化成「查不动」。
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+}
+
+{
+  const uuid = '19aa0000-0000-4000-8000-000000000019'
+  const SID = 'session-19'
+  // 夹具形态：独立仓库——`catStudy-sessions` 兄弟目录里**没有登记过**它的任何 worktree
+  // （commit 带伪 uuid，与泄漏现场同款）
+  const fixture = makeUuidRepo(
+    '.handoff-test-ident-fixture',
+    '11111111-2222-4333-8444-555555555555',
+    { 'a.txt': '1' }
+  )
+  // 合法形态：同一份判据必须能认出「会话工作区」——先过继一个真 worktree。
+  // **每个反例各用独立仓库**：账本键是「mainRoot + SHA」，同一仓库连跑两种形态会让
+  // 第二跑被幂等早退挡在投递之外（`3c41652 已投递过（状态文件）`）——那时「0 次 POST」
+  // 是账本造成的，不是判据造成的（假绿）。
+  const legit = makeUuidRepo('.handoff-test-ident-legit', uuid, { 'a.txt': '1' })
+  // 主仓库根形态**同样**要求「该会话的工作区已登记在这个仓库里」——收口链在主仓提交时，
+  // 会话 worktree 正是在册的（`git worktree list` 读得到）。
+  entitleRepo(legit, SID, 'g19main')
+  const legitWtRepo = makeUuidRepo(
+    '.handoff-test-ident-wt',
+    '19bb0000-0000-4000-8000-000000000019',
+    {
+      'a.txt': '1',
+    }
+  )
+  const legitWt = entitleRepo(legitWtRepo, SID, 'g19wt')
+  // 19d 的判别力自证也要独立仓库：同一仓库、同一 commit，**只换会话 id**
+  const legitDisc = makeUuidRepo(
+    '.handoff-test-ident-disc',
+    '19cc0000-0000-4000-8000-000000000019',
+    {
+      'a.txt': '1',
+    }
+  )
+  entitleRepo(legitDisc, SID, 'g19disc')
+
+  const posts = []
+  const { server, port } = await startIdentStub(posts)
+  const url = `http://127.0.0.1:${port}`
+
+  // 19a: 夹具形态 → 拒投 + 告警面（判据 + 读数 + 后果）
+  const err19a = await captureStderr(() =>
+    runInProcWithEnv(fixture, url, { CATSTUDY_SESSION_ID: SID })
+  )
+  assert(posts.length === 0, `夹具仓库不得投递（实际 ${posts.length} 次 POST）`)
+  assert(
+    err19a.some((l) => l.includes('身份校验未通过')),
+    '拒投必须走显式告警——静默拒绝 = 把噪声换成隐身'
+  )
+  assert(
+    err19a.some((l) => l.includes('没有登记过这个会话的工作区')),
+    '告警要给出**判据读数**（为什么拒），不是只喊一句「拒绝」'
+  )
+  assert(
+    existsSync(join(fixture, '.handoff-draft.md')),
+    '拒投时草稿必须保留（可诊断；只有投递成功才清理草稿）'
+  )
+  console.log('  19a: 夹具仓库 → 拒投 + 显式告警 + 草稿保留 ✅')
+
+  // 19b: 反对照①——主仓库根形态（收口链正是在主仓库里 ff-only 合并并提交）
+  const before19b = posts.length
+  await runInProcWithEnv(legit, url, { CATSTUDY_SESSION_ID: SID })
+  assert(
+    posts.length === before19b + 1,
+    `主仓库根形态应照常投递（实际 +${posts.length - before19b}）`
+  )
+  console.log('  19b: 反对照 · 主仓库根 → 照常投递 ✅')
+
+  // 19c: 反对照②——会话 worktree 形态（cwd 落在 worktree 里）
+  const before19c = posts.length
+  await runInProcWithEnv(legitWt, url, { CATSTUDY_SESSION_ID: SID })
+  assert(
+    posts.length === before19c + 1,
+    `会话 worktree 形态应照常投递（实际 +${posts.length - before19c}）`
+  )
+  console.log('  19c: 反对照 · 会话 worktree → 照常投递 ✅')
+
+  // 19d: 判别力自证——同一仓库、同一 commit，**只换会话 id**（换成工作区没登记过的那个）
+  const before19d = posts.length
+  const err19d = await captureStderr(() =>
+    runInProcWithEnv(legitDisc, url, {
+      CATSTUDY_SESSION_ID: 'deadbeef-0000-4000-8000-000000000000',
+    })
+  )
+  assert(
+    posts.length === before19d,
+    `会话 id 与仓库对不上时必须拒投（实际 +${posts.length - before19d}）`
+  )
+  assert(
+    err19d.some((l) => l.includes('身份校验未通过')),
+    '19d 也应出告警'
+  )
+  console.log('  19d: 判别力自证（只换会话 id）→ 拒投 ✅')
+
+  // 19d′: 19d 的配对反证——**同一个仓库、同一个 commit**，只把会话 id 换回来 → 投出去。
+  // 没有这一条，19d 的「0 次」可能只是这个仓库本身投不出去（恒真门）。
+  const before19d2 = posts.length
+  await runInProcWithEnv(legitDisc, url, { CATSTUDY_SESSION_ID: SID })
+  assert(
+    posts.length === before19d2 + 1,
+    `19d′ 配对反证：同一仓库换回正确会话 id 应照常投递（实际 +${posts.length - before19d2}）`
+  )
+  console.log('  19d′: 配对反证（同一仓库换回正确 id）→ 照常投递 ✅')
+
+  // 19e: fail-closed——非 git 目录（判不出归属）+ 会话 id → 拒
+  // 走 `tryPostToCatstudy` 直调：`runHandoff` 在非 git 目录会先因生成不出草稿而早退，
+  // 那样「0 次 POST」是别的原因造成的，测不到身份判据（假绿）。
+  const notRepo = join(TEST_BASE, 'not-a-repo-19e')
+  mkdirSync(notRepo, { recursive: true })
+  const prevSid19e = process.env.CATSTUDY_SESSION_ID
+  const prevUrl19e = process.env.CATSTUDY_URL
+  process.env.CATSTUDY_URL = url
+  process.env.CATSTUDY_SESSION_ID = SID
+  const before19e = posts.length
+  let err19e = []
+  try {
+    err19e = await captureStderr(() => tryPostToCatstudy('# 身份面探针', notRepo))
+  } finally {
+    if (prevSid19e === undefined) delete process.env.CATSTUDY_SESSION_ID
+    else process.env.CATSTUDY_SESSION_ID = prevSid19e
+    if (prevUrl19e === undefined) delete process.env.CATSTUDY_URL
+    else process.env.CATSTUDY_URL = prevUrl19e
+  }
+  assert(posts.length === before19e, '判不出归属时不得投递（fail-closed）')
+  assert(
+    err19e.some((l) => l.includes('身份校验未通过')),
+    '19e 也应出告警'
+  )
+  console.log('  19e: 非 git 目录 → 拒投（fail-closed）✅')
+
+  server.close()
+}
+
+// 19f/19g: **真机形态**——夹具复制真 `.husky/post-commit` + 真 `scripts/handoff-gen.mjs`，
+// `core.hooksPath` 指过去，真 `git commit` 走钩子。不靠读代码推断，也不走进程内调用：
+// 泄漏现场就是「钩子把活会话当成了投递目标」，只有跑真钩子才复现得到。
+{
+  const SID = 'session-19real'
+  const posts = []
+  const { server, port } = await startIdentStub(posts)
+  const url = `http://127.0.0.1:${port}`
+
+  /**
+   * 造「像真仓」的夹具（泄漏现场的构造）：复制真钩子 + 真脚本。
+   * 基础提交在**设 hooksPath 之前**做——否则它自己也会触发钩子，把计数搅浑。
+   */
+  // 拷贝源锚在**本文件所在目录**（`__dirname`），不锚 `ROOT`：要拷的是「真钩子 / 真脚本」
+  // 这两份具体文件，而不是「仓库根下的某个东西」。顺带避开 e2e 的 `join(ROOT, …)`
+  // 静态守卫——那条守卫禁的是**把临时仓库建在仓库树内**（本处只读不建，临时仓库仍挂
+  // `TEST_BASE`），改锚点不改变它的判据面，也不靠改守卫放行自己。
+  const POST_COMMIT_SRC = resolve(__dirname, '..', '.husky', 'post-commit')
+  const makeLookalike = (dirName) => {
+    const dir = join(TEST_BASE, dirName)
+    rmSync(dir, { recursive: true, force: true })
+    mkdirSync(join(dir, '.husky'), { recursive: true })
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    for (const [src, dest] of [
+      [POST_COMMIT_SRC, join(dir, '.husky', 'post-commit')],
+      [HANDOFF_SCRIPT, join(dir, 'scripts', 'handoff-gen.mjs')],
+    ]) {
+      copyFileSync(src, dest)
+      chmodSync(dest, 0o755)
+    }
+    execSync('git init', { cwd: dir, stdio: 'pipe' })
+    execSync('git config user.email "fixture@catstudy.local"', { cwd: dir, stdio: 'pipe' })
+    execSync('git config user.name "Fixture Cat"', { cwd: dir, stdio: 'pipe' })
+    writeFileSync(join(dir, 'base.txt'), 'base', 'utf-8')
+    execSync('git add base.txt', { cwd: dir, stdio: 'pipe' })
+    execSync('git commit -m "chore: base"', { cwd: dir, stdio: 'pipe' })
+    // 到这里才「继承」真钩子——对应现实中夹具复制 `.husky` + `core.hooksPath`
+    execSync('git config core.hooksPath .husky', { cwd: dir, stdio: 'pipe' })
+    return dir
+  }
+
+  /**
+   * 跑一次真提交，回收 stdout+stderr。
+   *
+   * 必须**异步** spawn（不能用 `spawnSync`）：stub server 就跑在本进程的事件循环里，
+   * 而 `spawnSync` 会把该循环整个阻塞——钩子子进程的 fetch 于是永远等不到应答，
+   * 读数变成「server 不可达」（实测踩过：19g 因此报 0 次 POST，真因不是网络被禁）。
+   * stderr 也要收：身份面告警走 stderr，只收 stdout 等于验证面不是被判面。
+   */
+  const realCommit = (dir, msg) =>
+    new Promise((resolve) => {
+      const child = spawn('git', ['commit', '-m', msg], {
+        cwd: dir,
+        env: { ...process.env, CATSTUDY_URL: url, CATSTUDY_SESSION_ID: SID },
+      })
+      let out = ''
+      child.stdout.on('data', (d) => (out += d))
+      child.stderr.on('data', (d) => (out += d))
+      child.on('close', () => resolve(out))
+    })
+
+  // 19f: 夹具形态经真钩子 → 拒投 + 告警
+  const lookalike = makeLookalike('.handoff-test-ident-lookalike')
+  mkdirSync(join(lookalike, 'x'), { recursive: true })
+  writeFileSync(join(lookalike, 'x', 'a.txt'), '1', 'utf-8')
+  execSync('git add x/a.txt', { cwd: lookalike, stdio: 'pipe' })
+  const out19f = await realCommit(lookalike, 'fix(x): 夹具笔')
+  assert(posts.length === 0, `夹具仓库经真钩子不得投递（实际 ${posts.length} 次 POST）`)
+  assert(
+    out19f.includes('身份校验未通过'),
+    `真钩子路径也要出告警（实际钩子输出：${JSON.stringify(out19f.slice(0, 300))}）`
+  )
+  console.log('  19f: 真钩子 · 夹具形态 → 拒投 + 告警 ✅')
+
+  // 19g: 反对照——同一夹具形态，**只多登记一个会话 worktree** → 照常投
+  const lookalikeOk = makeLookalike('.handoff-test-ident-lookalike-ok')
+  entitleRepo(lookalikeOk, SID, 'g19real')
+  mkdirSync(join(lookalikeOk, 'y'), { recursive: true })
+  writeFileSync(join(lookalikeOk, 'y', 'a.txt'), '1', 'utf-8')
+  execSync('git add y/a.txt', { cwd: lookalikeOk, stdio: 'pipe' })
+  const before19g = posts.length
+  const out19g = await realCommit(lookalikeOk, 'feat(y): 合法笔')
+  assert(
+    posts.length === before19g + 1,
+    `合法形态经真钩子应照常投递（实际 +${posts.length - before19g}；钩子输出：${JSON.stringify(out19g.slice(0, 600))}）`
+  )
+  console.log('  19g: 反对照 · 真钩子 + 会话 worktree → 照常投递 ✅')
+
+  server.close()
+}
 
 // ─── Cleanup ────────────────────────────────────────────────
 
