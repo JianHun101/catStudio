@@ -47,10 +47,10 @@ evidence:
 
 ### D3 · 注入位置 = `finalSystemPrompt`，不做独立 system 消息
 
-落点在 `packages/server/src/execution/reply.ts` 组装系统提示处（`buildSkillDirectorySection()` 的调用点），在角色占位符替换**之后**拼入。两条理由：
+落点在 `packages/server/src/execution/reply.ts` 组装系统提示处（`buildSkillDirectorySection()` 的调用点），**拼在替换面内**——即先拼进 `resolveRolePlaceholders()` 的**输入串**（实现里的 `systemPromptWithDirectory`），替换是跑在这条**已含目录段**的串上；不是拼在替换**输出**（`finalSystemPrompt`）上。两条理由：
 
-1. **语义不混**：目录是「常驻发现面」（每轮不变），`dynamicHints` 是「场景提示」（每轮变）。后者已有「超限时被当最旧先丢」的观察项——**常驻菜单不能坐在会被丢的位置**；`finalSystemPrompt` 才是 harness 认的真 system prompt 面。
-2. **不变量不破**：所有注入文本都必须在占位符替换之后拼，保证替换覆盖全部注入内容（含目录段里可能出现的 `@` 字样）。
+1. **语义不混**：目录是「常驻发现面」（每轮不变），`dynamicHints` 是「场景提示」（每轮变）。后者已有「超限时被当最旧先丢」的观察项——**常驻菜单不能坐在会被丢的位置**；这条已替换的串才是 harness 认的真 system prompt 面。
+2. **不变量不破**：所有注入文本都必须在**替换面内**（`resolveRolePlaceholders` 的输入串上），保证替换覆盖全部注入内容（含目录段里可能出现的 `@` 字样）。**次序是承重的**：拼在替换之后 = 拼在替换输出上 ⇒ 替换覆盖不到它 ⇒ 目录段里的 `@作者` / `@架构师` / `@审查者` 漏网 ⇒ mention 精确匹配落空 ⇒ **静默不触发**（b542d24 分流断链事故形态）。
 
 ### D4 · 全 agent 一律注入，不做 provider 分流
 
