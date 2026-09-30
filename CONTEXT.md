@@ -92,7 +92,7 @@ _Avoid_: 日志, 请求记录
 - `docs/adr/` — 架构决策留痕（跨会话，给下个会话重建「为什么这么设计」的地图）
 - `docs/lessons/` — 无取舍的经验（教训 / 可复用做法），跨活复用；**一份一个家**：全程住 `docs/lessons/<slug>.md`，卡片形态与状态字段见该目录门牌 `README.md`。写者不限，但落此即**必审**
 - `docs/sessions/` — 会话总结（session-summary skill 产出）
-- `docs/run/` — 开发文档（在飞）：to-tickets 切出的票单，落 `docs/run/<work-slug>/tickets.md`，**一事一目录**（并行会话 worktree 下扁平单文件必撞名互覆）。写者是本轮实施猫；落点由调用方指定，不写死在 skill 正文。**活收口即清**——结论上浮到 **`docs/plans/`**（点名，不二选一；`docs/sessions/` 归 session-summary skill 另产，不是 run 收口的上浮出口），本目录对应子目录删除
+- `docs/run/` — 开发文档（在飞）：to-tickets 切出的票单，落 `docs/run/<work-slug>/tickets.md`，**一事一目录**（并行会话 worktree 下扁平单文件必撞名互覆）。写者是本轮实施猫；落点由调用方指定，不写死在 skill 正文。**活收口即清**——结论**按落点分流上浮**（点名，不二选一；`docs/sessions/` 归 session-summary skill 另产，不是 run 收口的上浮出口）：定稿规格 → `docs/plans/`、经验教训 → `docs/lessons/`、架构取舍 → `docs/adr/`、操作规则 → 手册面（`AGENTS.md` / `CONTEXT.md` / `CODING_STANDARDS.md` / `CONTRIBUTING.md`），本目录对应子目录删除
 - `docs/plans/` — 定稿规格（to-spec 产物，如 `episode-evaluation-v2.md`、`knowledge-base-v1.md`）：活还在时就已**定稿**，活一结束即停止维护。它不承诺「仍然有效」——读者须自行判时效
 - `docs/research/` — 勘察报告 / 调研结论 / 执行规格（spec）（如 `clowder-ac-evidence-and-vision-guard.md`、`skill-delivery-decoupling-spec.md`）：一次性调研或某一活的执行规格产出。**随活停更**——活进行中会随实施更新，活一结束即停止维护；属「定稿·随活过期」
 - 过程决策留痕（本会话内：跳 grilling 的为什么、Gate 答案、争议裁决）→ spec 尾部 `## 决策留痕` 固定段，一行一决策、可 grep，不单独建文档
@@ -108,12 +108,12 @@ _Avoid_: 日志, 请求记录
 
 **开发文档 vs 沉淀文档判据**：
 
-|      | 开发文档 `docs/run/`                | 沉淀文档 `lessons/` `sessions/` `adr/` | 定稿文档 `plans/` `research/`                                                                   |
-| ---- | ----------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| 时效 | 在飞，活结束即失效                  | 跨会话长期有效，随架构演进而更新       | `plans/`：活中即定稿、之后冻结 ／ `research/`：随活停更（活中随实施更新）；两者活结束即停止维护 |
-| 读者 | 本轮实施猫 / 审查猫                 | 下个会话的猫                           | 需要「当时那份定稿规格」的人                                                                    |
-| 形态 | tracer-bullet 票单 + blocking edges | 状态字段 / 决策留痕 / 会话总结         | to-spec 定稿规格 / 勘察报告 / 执行规格                                                          |
-| 归宿 | 收口即清，结论上浮                  | 长期保留，持续维护                     | 原地保留，不再维护（读者自行判时效）                                                            |
+|      | 开发文档 `docs/run/`                                                 | 沉淀文档 `lessons/` `sessions/` `adr/` | 定稿文档 `plans/` `research/`                                                                   |
+| ---- | -------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 时效 | 在飞，活结束即失效                                                   | 跨会话长期有效，随架构演进而更新       | `plans/`：活中即定稿、之后冻结 ／ `research/`：随活停更（活中随实施更新）；两者活结束即停止维护 |
+| 读者 | 本轮实施猫 / 审查猫                                                  | 下个会话的猫                           | 需要「当时那份定稿规格」的人                                                                    |
+| 形态 | tracer-bullet 票单 + blocking edges                                  | 状态字段 / 决策留痕 / 会话总结         | to-spec 定稿规格 / 勘察报告 / 执行规格                                                          |
+| 归宿 | 收口即清，结论**按四落点分流上浮**（plans / lessons / adr / 手册面） | 长期保留，持续维护                     | 原地保留，不再维护（读者自行判时效）                                                            |
 
 ## 术语补全
 
@@ -125,7 +125,7 @@ _Avoid_: 日志, 请求记录
 ## 流程约定
 
 - 审查链（后半个门）：`quality-gate → request-review → receive-review`；收口归店长；提交后由作者按 `request-review` 自行发起审查（post-commit hook 仅对「无归属执行」的提交兜底）
-- 收口链（**设计态 + PR 承载分支即 session 分支**——会话分支是 `dev` 的后代，`ff-only` 必然可合，该前提见 `scripts/worktree-create.mjs` 的 worktree 基线门禁说明；另两种情形见下方未决项条）：确认审查结论 → **清 `docs/run/` 中已收口活的 `<slug>/` 并提交到「要进 PR 的那个分支」**（本链下即 session 分支；在会话 worktree 内提交，早于主工作区的收口机械步骤；先把结论上浮到 `docs/plans/`（点名）；删除动的是已跟踪文件，必须落成 commit）→ **主工作区（检出 `dev`）`ff-only` 合并回 dev** → 更新 `.push-gate` → 推该分支 → createPr（base=dev）→ gh pr merge 合并（架构师执行）→ 主工作区 `ff-only` 拉回 `dev` 同步 → **主工作区收口机械步骤整体落位（`closeoutSession`：merge／删 worktree + 分支／写 `.push-gate`／checkout）——必须排在「推该分支」+ PR 合并之后**（幂等性与覆盖面见 ⑤）
+- 收口链（**设计态 + PR 承载分支即 session 分支**——会话分支是 `dev` 的后代，`ff-only` 必然可合，该前提见 `scripts/worktree-create.mjs` 的 worktree 基线门禁说明；另两种情形见下方未决项条）：确认审查结论 → **清 `docs/run/` 中已收口活的 `<slug>/` 并提交到「要进 PR 的那个分支」**（本链下即 session 分支；在会话 worktree 内提交，早于主工作区的收口机械步骤；先把结论按落点分流上浮（plans / lessons / adr / 手册面四者，点名）；删除动的是已跟踪文件，必须落成 commit）→ **主工作区（检出 `dev`）`ff-only` 合并回 dev** → 更新 `.push-gate` → 推该分支 → createPr（base=dev）→ gh pr merge 合并（架构师执行）→ 主工作区 `ff-only` 拉回 `dev` 同步 → **主工作区收口机械步骤整体落位（`closeoutSession`：merge／删 worktree + 分支／写 `.push-gate`／checkout）——必须排在「推该分支」+ PR 合并之后**（幂等性与覆盖面见 ⑤）
   - **清理 commit 必须落在 PR 承载的那个分支上、且早于 `ff-only` 合并回 dev；`.push-gate` 只在主工作区写**。五条机制约束：① 清理 commit 落在 `dev` 上就**进不了 PR**——远端永远清不掉 `<slug>/`；② `.push-gate` 是 gitignored 文件、落在**共享根**（`.husky/pre-push` 按 `git rev-parse --path-format=absolute --git-common-dir` 的父目录解析 `GATE_FILE`），**全 worktree 共用一份**；**写**路径仍只主工作区（`writeGate` 硬编码 `mainRoot`，见 `packages/server/src/llm/session-closeout.ts`）——会话 worktree 内 **push 必失败是预期行为，绝不 `--no-verify` 绕过**，但**理由不是缺这个文件**：猫分支带着 gate 之后的未审 commit，落 pre-push 的 ② 判据（审查记录是本次推送 sha 的祖先 ⇒ 有未审 commit）被拦——分叉 / `reset` 等与 gate **无**祖先关系的形态落 ④（两边祖先关系都不成立 ⇒ 拒），判据不同、结论同为拦；③ `ff-only` 合并回 dev 必须**先于**写 gate、也先于 push：`writeGate` 写的是**主工作区 HEAD**，`ff-only` 后 `dev` HEAD 恰等于待推分支 tip ⇒ gate 值恰等于被推 sha，门禁校验的才正是你要推的东西（判据面 = **本次推送的逐行 refspec**，不读 stdin 等于换了判据面——T-O 已修掉「只读 `git rev-parse HEAD`」，故「推非检出分支时校验空转」**不再成立**；`git rev-parse HEAD` 只在「一行 refspec 都没解析出」时回落）；④ `.push-gate` 必须指向**最终** HEAD，否则 `merge-base --is-ancestor` 会把新 commit 判成「未经 review」而阻断推送。即「更新 `.push-gate` 是 push 前的最后一步」——但这半句须从 `scripts/worktree-create.mjs` 的收口说明中**单独摘出**：该说明整体是**推 `dev` 的审批制旧序**（`ff-only` 合并 → **删分支** → 写 gate → push），删分支排在 push 前在旧序里成立（推的是仍在的 `dev`），整句搬进 PR 流会把待推的 session 分支带走（见 ⑤）；⑤ **主工作区的收口机械步骤（`closeoutSession`，见 `packages/server/src/llm/session-closeout.ts`）必须排在「推该分支」+ PR 合并之后**——它含 step ②「删 worktree + 分支」（`removeSessionWorktree` 内的 `git branch -D`），排在 push 前则分支已删 → `src refspec does not match any`，PR 发不起来。其 `merge`/`writeGate` 均幂等——分支已合 → `ff-only` 走 `Already up to date`（幂等**成功**，非跳过）、分支已删 → `branchRefExists` 假返回 `null` 跳过、gate 值相同不重写；故链尾无需再单列「写一次 gate」，由本步覆盖
   - **上链未覆盖的两种情形均为未决项，其完整链序「未定案、需新机制」**——本约定只固化设计态 + session 分支承载，**不在文档里发明未经验证的步骤**：
     - **分叉拓扑（`dev` 已前进、会话分支不再是其后代）**：此时 `ff-only 合并回 dev` 必然失败，承载退化为 GitHub PR 的 merge commit，本地 `ff-only` 只剩「拉回 dev 同步」这一层。已核边界：分叉态下收口器**拒绝而非误删**——`mergeSession` 的 `ff-only` 失败即返回 `step:'merge'`，不进入删 worktree/分支、不写 gate（同上 `closeoutSession`）
