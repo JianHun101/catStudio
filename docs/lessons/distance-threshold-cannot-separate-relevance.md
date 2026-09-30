@@ -61,7 +61,9 @@ evidence:
 
 ## 正解
 
-**两个旋钮都不动**（`MEMORY_MAX_DISTANCE` 保持 0.6、`MEMORY_TOP_K` 维持 5）。
+**两个旋钮都不动**（`MEMORY_MAX_DISTANCE` 保持 0.6；`MEMORY_TOP_K` 维持 5——**5 是活库 `.env` 的取值**，
+**代码默认是 3**（`packages/server/src/memory/index.ts` 的 `envNumber('MEMORY_TOP_K', 3)`，
+`.env.example` 也写 3），引用时别把 5 读成默认值）。
 真因是**语料覆盖**：47 条空手事件里，28 条（60%）主题属本仓、但真实规格落在白名单扫描面
 （`SCAN_PREFIXES` 只扫 `docs/adr` `docs/lessons` `docs/plans`）之外；13 条（28%）是无主题
 协调语（纯确认/指令，检索无从对齐）；6 条（13%）语料域外。
