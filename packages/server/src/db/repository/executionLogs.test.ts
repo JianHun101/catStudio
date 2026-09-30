@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { createTestDb } from '../../test-helpers.js'
-import { setDb, resetDb } from '../index.js'
+import { setDb, resetDb, getDb } from '../index.js'
 import { initRepository } from './index.js'
 import { executionLogs as repo } from './index.js'
 
@@ -487,6 +487,65 @@ describe('execution_logs repo — P1-A 耗时保留与链路取数', () => {
     })
   })
 
+  describe('linkReplyMessage 与 finalize 不擦连线（M1 缺陷修复）', () => {
+    // 同款 FK 要求（理由见上组）：连线写的是 `messages.id`，回复行须先落库。
+    beforeEach(() => {
+      db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions)
+         VALUES ('m-link', 's1', 'agent', 'x', '[]')`
+      ).run()
+    })
+
+    function msgIdOf(id: string): string | null {
+      return (
+        db.prepare('SELECT message_id FROM execution_logs WHERE id = ?').get(id) as {
+          message_id: string | null
+        }
+      ).message_id
+    }
+
+    it('连线后 `finalizeExecutionLog(replyMessageId=null)` ⇒ 值保留（不擦回 NULL）', () => {
+      startRun('k1')
+      expect(repo.linkReplyMessage('k1', 'm-link').changes).toBe(1)
+      expect(msgIdOf('k1')).toBe('m-link')
+      // 「广播后异常走 failed 收口」：已发出的回复不得在引用面上倒退成「未检索」
+      repo.finalizeExecutionLog('agent-ds', 's1', 'failed', null, 'boom', null, 'timeout')
+      expect(msgIdOf('k1')).toBe('m-link')
+    })
+
+    it('成功路径写同值（幂等）：连线 + finalize 传同一 replyMessageId ⇒ 仍是它', () => {
+      startRun('k2')
+      repo.linkReplyMessage('k2', 'm-link')
+      repo.finalizeExecutionLog('agent-ds', 's1', 'completed', null, null, 'm-link', null)
+      expect(msgIdOf('k2')).toBe('m-link')
+    })
+
+    it('反向用例：从未连线的失败跳 finalize(null) ⇒ 仍 NULL（不编一个值出来）', () => {
+      startRun('k3')
+      repo.finalizeExecutionLog('agent-ds', 's1', 'failed', null, 'boom', null, 'timeout')
+      // 恢复语义依赖这条：NULL = 未回复 ⇒ 重启恢复走重跑，不得被 COALESCE 蒙成「已回复」
+      expect(msgIdOf('k3')).toBeNull()
+    })
+
+    it('显式传入 replyMessageId ⇒ 照写（COALESCE 不吞真值）', () => {
+      startRun('k4')
+      repo.finalizeExecutionLog('agent-ds', 's1', 'completed', null, null, 'm-link', null)
+      expect(msgIdOf('k4')).toBe('m-link')
+    })
+
+    it('按 id 精确更新：同触发消息的另一条执行行不受影响', () => {
+      startRun('k5')
+      startRun('k6')
+      repo.linkReplyMessage('k6', 'm-link')
+      expect(msgIdOf('k5')).toBeNull()
+      expect(msgIdOf('k6')).toBe('m-link')
+    })
+
+    it('executionId 不存在 ⇒ changes=0（调用方据此留痕，不抛）', () => {
+      expect(repo.linkReplyMessage('no-such-exec', 'm-link').changes).toBe(0)
+    })
+  })
+
   describe('getExecutionHopsWithChainAnchor', () => {
     /** 插一条 messages 行并返回 id（role=agent，task_id 可 null） */
     function msg(id: string, taskId: string | null): string {
@@ -726,5 +785,143 @@ describe('execution_logs repo — 会话内每猫最近一次执行（R4 §A）'
     expect(rows[0].status).toBe('running')
     expect(rows[0].ended_at).toBeNull()
     expect(rows[0].latency_ms).toBeNull() // 不是 0
+  })
+})
+
+// ─── T2 执行追踪列表读口（listExecutionRows / countExecutionRows）──────────
+//
+// **这一组的由来**：本票首轮真机自证时 `GET /api/eval/executions` 直接 500
+// （`no such column: s.name`——`sessions` 表的标题列叫 `title`）。列表 SQL 当时
+// 零测试覆盖，纯靠真机跑才暴露。故这里的用例**走真 schema**（`createTestDb()` +
+// 真迁移建表），而不是拿手抄 DDL 的夹具——手抄正是「验证面与被判面不同面」。
+describe('T2 执行追踪列表读口', () => {
+  const SESSION = 's-t2'
+  const AGENT = 'agent-t2'
+
+  function seed(): Database.Database {
+    const db = createTestDb()
+    setDb(db)
+    db.prepare(
+      `INSERT INTO agents (id, name, avatar, system_prompt, llm_api_key)
+       VALUES (?, 'ds猫', '🐱', 'p', 'k')`
+    ).run(AGENT)
+    db.prepare(`INSERT INTO sessions (id, title) VALUES (?, '本会话')`).run(SESSION)
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content) VALUES ('m-trig', ?, 'user', '@ds猫 干活')`
+    ).run(SESSION)
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, agent_id)
+       VALUES ('m-reply', ?, 'agent', '回复正文 [1][2]', ?)`
+    ).run(SESSION, AGENT)
+    // 一条 completed（有回复 id）+ 一条 failed（无回复 id、有报错类型）
+    db.prepare(
+      `INSERT INTO execution_logs
+         (id, session_id, agent_id, triggered_by_message_id, status, trace_id,
+          started_at, ended_at, latency_ms, message_id)
+       VALUES ('ex-ok', ?, ?, 'm-trig', 'completed', 'tr-1',
+               '2026-09-27T06:00:00.000Z', '2026-09-27T06:00:08.400Z', 8400, 'm-reply')`
+    ).run(SESSION, AGENT)
+    db.prepare(
+      `INSERT INTO execution_logs
+         (id, session_id, agent_id, triggered_by_message_id, status, trace_id,
+          started_at, ended_at, latency_ms, error_type, error_message)
+       VALUES ('ex-bad', ?, ?, 'm-trig', 'failed', 'tr-2',
+               '2026-09-27T06:02:00.000Z', '2026-09-27T06:32:00.000Z', 1800000, 'timeout', '执行超时 (1800s)')`
+    ).run(SESSION, AGENT)
+    return db
+  }
+
+  beforeEach(() => {
+    initRepository(seed())
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  it('★ 真 schema：join sessions/agents/messages 全部解析得开（列名写错当场 500）', () => {
+    const rows = repo.listExecutionRows({ limit: 10, offset: 0 })
+    expect(rows).toHaveLength(2)
+    const ok = rows.find((r) => r.id === 'ex-ok')!
+    expect(ok.agent_name).toBe('ds猫')
+    // `sessions` 的标题列叫 `title`（不是 `name`）——此处即首轮真机上 500 的那一处
+    expect(ok.session_name).toBe('本会话')
+    expect(ok.reply_content).toBe('回复正文 [1][2]')
+    expect(ok.trigger_head).toBe('@ds猫 干活')
+  })
+
+  it('排序按 started_at 倒序（列表默认「最近的在最上」）', () => {
+    expect(repo.listExecutionRows({ limit: 10, offset: 0 }).map((r) => r.id)).toEqual([
+      'ex-bad',
+      'ex-ok',
+    ])
+  })
+
+  it('失败行带 error_type / error_message（列表层就能显示「为什么挂的」）', () => {
+    const bad = repo.listExecutionRows({ limit: 10, offset: 0 }).find((r) => r.id === 'ex-bad')!
+    expect(bad.error_type).toBe('timeout')
+    expect(bad.error_message).toBe('执行超时 (1800s)')
+    // message_id 为 NULL（没产出回复）——前端据此退回触发消息 id
+    expect(bad.message_id).toBeNull()
+  })
+
+  it('检索漏斗：注入节数按 (doc_path, section_anchor) 去重，同节多片只算一节', () => {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO retrieval_events (execution_id, created_at, threshold_max_distance, param_top_k, reason)
+       VALUES ('ex-ok', '2026-09-27T06:00:00.000Z', 0.6, 3, 'ok')`
+    ).run()
+    const rid = (db.prepare('SELECT id FROM retrieval_events').get() as { id: number }).id
+    db.prepare(
+      `INSERT INTO retrieval_queries (retrieval_id, query_index, query_text, query_embed_ok)
+       VALUES (?, 0, '原话', 1)`
+    ).run(rid)
+    const qid = (db.prepare('SELECT id FROM retrieval_queries').get() as { id: number }).id
+    const ins = db.prepare(
+      `INSERT INTO retrieval_candidates
+         (query_id, source, channel, doc_path, section_anchor, content_hash, injected, injected_position)
+       VALUES (?, ?, 'vector', ?, ?, ?, ?, ?)`
+    )
+    // 同节两片（final + probe，都 injected=1）+ 另一节一片 ⇒ 去重后 **2 节**
+    ins.run(qid, 'final', 'docs/a.md', '## 一', 'h1', 1, 1)
+    ins.run(qid, 'probe', 'docs/a.md', '## 一', 'h2', 1, 1)
+    ins.run(qid, 'final', 'docs/b.md', '## 二', 'h3', 1, 2)
+    // 未注入的候选不进漏斗
+    ins.run(qid, 'final', 'docs/c.md', '## 三', 'h4', 0, null)
+
+    const ok = repo.listExecutionRows({ limit: 10, offset: 0 }).find((r) => r.id === 'ex-ok')!
+    expect(ok.injected_sections).toBe(2)
+    expect(ok.retrieval_reason).toBe('ok')
+  })
+
+  it('无检索流水行的执行：reason 为 null（前端据此显示「未检索」而非「注入了 0 节」）', () => {
+    const rows = repo.listExecutionRows({ limit: 10, offset: 0 })
+    expect(rows.find((r) => r.id === 'ex-bad')!.retrieval_reason).toBeNull()
+  })
+
+  it('过滤：状态 / 耗时阈值（阈值过滤掉没有耗时的行——「> N 秒」对 NULL 是无意义的真）', () => {
+    expect(repo.listExecutionRows({ status: 'failed', limit: 10, offset: 0 })).toHaveLength(1)
+    expect(
+      repo.listExecutionRows({ minLatencyMs: 600_000, limit: 10, offset: 0 }).map((r) => r.id)
+    ).toEqual(['ex-bad'])
+    expect(repo.listExecutionRows({ minLatencyMs: 1, limit: 10, offset: 0 })).toHaveLength(2)
+  })
+
+  it('`countExecutionRows` 与列表同过滤面（分页要「共 N 条」不能靠「本页满不满」猜）', () => {
+    expect(repo.countExecutionRows({})).toBe(2)
+    expect(repo.countExecutionRows({ status: 'failed' })).toBe(1)
+    expect(repo.countExecutionRows({ sessionId: 'no-such' })).toBe(0)
+    // 分页：limit 1 时两页各一条，总数不变
+    expect(repo.listExecutionRows({ limit: 1, offset: 0 })).toHaveLength(1)
+    expect(repo.listExecutionRows({ limit: 1, offset: 1 })).toHaveLength(1)
+    expect(repo.countExecutionRows({})).toBe(2)
+  })
+
+  it('按回复消息 id 反查执行（气泡 ⚙ 的快路/慢路同一条边），且会话隔离是硬约束', () => {
+    expect(repo.getExecutionByReplyMessageId('m-reply', SESSION)?.id).toBe('ex-ok')
+    // 越权：换一个会话 id 查同一条消息 → 查不到（纵深防御）
+    expect(repo.getExecutionByReplyMessageId('m-reply', 'other-session')).toBeUndefined()
+    // 触发消息 id 不是回复 id——反查面刻意不含它（一条 @ 可触发多只猫）
+    expect(repo.getExecutionByReplyMessageId('m-trig', SESSION)).toBeUndefined()
   })
 })

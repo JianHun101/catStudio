@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import {
   MAX_BATCH,
+  MAX_RERANK_PAIRS,
+  RERANK_MODEL,
   createEmbedServer,
   isFetchReachable,
   resolveTransformersEntry,
@@ -157,6 +159,187 @@ describe('embed-server', () => {
       expect((await fetch(`${base}/health`, { method: 'POST' })).status).toBe(404)
       expect((await fetch(`${base}/v1/embeddings`)).status).toBe(404) // GET ≠ POST
     })
+  })
+
+  // ─── 重排口（R13a）──────────────────────────────────────
+  describe('POST /v1/rerank', () => {
+    /** 假重排：分数 = 首个 passage 的长度（可断言**顺序与对齐**，与假嵌入同款手法） */
+    const fakeRerank = async (pairs) => pairs.map((p) => p.passage.length / 1000)
+
+    /** 起一只带重排能力的 server，用完即关（避免污染共享的 `app`） */
+    const withRerank = async (overrides, fn) => {
+      const s = createEmbedServer({
+        embed: fakeEmbed,
+        getModel: () => 'fake-model',
+        rerank: fakeRerank,
+        ...overrides,
+      })
+      const port = await s.listen(0)
+      try {
+        return await fn(`http://127.0.0.1:${port}`)
+      } finally {
+        await s.close()
+      }
+    }
+
+    const postRerank = (b, body) =>
+      fetch(`${b}/v1/rerank`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      })
+
+    it('pairs ⇒ scores 按 index 逐位对齐', async () => {
+      await withRerank({}, async (b) => {
+        const res = await postRerank(b, {
+          pairs: [
+            { query: 'q1', passage: 'aaa' },
+            { query: 'q2', passage: 'aaaaa' },
+          ],
+        })
+        expect(res.status).toBe(200)
+        const body = await res.json()
+        expect(body.model).toBe(RERANK_MODEL)
+        expect(body.scores).toEqual([0.003, 0.005])
+      })
+    })
+
+    it('未注入 rerank ⇒ 503 rerank-unavailable（不是 404：路由在、能力不在）', async () => {
+      const res = await postRerank(base, { pairs: [{ query: 'q', passage: 'p' }] })
+      expect(res.status).toBe(503)
+      expect((await res.json()).reason).toBe('rerank-unavailable')
+    })
+
+    it(`恰好 ${MAX_RERANK_PAIRS} 对 ⇒ 200（不截池的边界）；超一对 ⇒ 400 batch-too-large`, async () => {
+      await withRerank({}, async (b) => {
+        const pair = { query: 'q', passage: 'p' }
+        const ok = await postRerank(b, {
+          pairs: Array.from({ length: MAX_RERANK_PAIRS }, () => pair),
+        })
+        expect(ok.status).toBe(200)
+        expect((await ok.json()).scores).toHaveLength(MAX_RERANK_PAIRS)
+
+        const over = await postRerank(b, {
+          pairs: Array.from({ length: MAX_RERANK_PAIRS + 1 }, () => pair),
+        })
+        expect(over.status).toBe(400)
+        expect(await over.json()).toMatchObject({
+          reason: 'batch-too-large',
+          limit: MAX_RERANK_PAIRS,
+        })
+      })
+    })
+
+    it('坏 pairs ⇒ 400 bad-input（整批拒，不静默跳过坏条）', async () => {
+      await withRerank({}, async (b) => {
+        for (const pairs of [
+          [],
+          undefined,
+          'notarray',
+          [{ query: 'q' }],
+          [{ passage: 'p' }],
+          [{ query: '', passage: 'p' }],
+          [{ query: 'q', passage: '' }],
+          [{ query: 1, passage: 'p' }],
+          ['string'],
+        ]) {
+          const res = await postRerank(b, { pairs })
+          expect(res.status, `pairs=${JSON.stringify(pairs)}`).toBe(400)
+          expect((await res.json()).reason).toBe('bad-input')
+        }
+      })
+    })
+
+    it('非 JSON body ⇒ 400 bad-json（不 500）', async () => {
+      await withRerank({}, async (b) => {
+        const res = await postRerank(b, '{not json')
+        expect(res.status).toBe(400)
+        expect((await res.json()).reason).toBe('bad-json')
+      })
+    })
+
+    it('**首调即加载**：就绪态为 false 时仍必须放行（不设前置就绪门）', async () => {
+      // 与 /v1/embeddings 的刻意分叉：重排模型懒加载，就绪由**本次调用**推动。
+      // 若照嵌入那样先判 getReady()，首次请求必然 503，而它正是唯一能加载起模型的那次
+      // ⇒ 功能被锁死在「永远不就绪」。这条钉住那个分叉。
+      await withRerank({ getReady: () => false }, async (b) => {
+        const res = await postRerank(b, { pairs: [{ query: 'q', passage: 'pp' }] })
+        expect(res.status).toBe(200)
+        expect((await res.json()).scores).toEqual([0.002])
+      })
+    })
+
+    it('模型加载失败 ⇒ 503 model-not-ready；推理失败 ⇒ 503 rerank-failed', async () => {
+      const loadFail = async () => {
+        const e = new Error('权重拿不到')
+        e.code = 'MODEL_LOAD_FAILED'
+        throw e
+      }
+      await withRerank({ rerank: loadFail }, async (b) => {
+        const res = await postRerank(b, { pairs: [{ query: 'q', passage: 'p' }] })
+        expect(res.status).toBe(503)
+        expect(await res.json()).toMatchObject({ reason: 'model-not-ready', detail: '权重拿不到' })
+      })
+      await withRerank(
+        {
+          rerank: async () => {
+            throw new Error('ONNX 崩了')
+          },
+        },
+        async (b) => {
+          const res = await postRerank(b, { pairs: [{ query: 'q', passage: 'p' }] })
+          expect(res.status).toBe(503)
+          expect((await res.json()).reason).toBe('rerank-failed')
+        }
+      )
+    })
+
+    it('返回条数 ≠ 请求条数 ⇒ 500 shape-mismatch（不给错位的 scores）', async () => {
+      await withRerank({ rerank: async () => [0.5] }, async (b) => {
+        const res = await postRerank(b, {
+          pairs: [
+            { query: 'q', passage: 'p' },
+            { query: 'q', passage: 'p' },
+          ],
+        })
+        expect(res.status).toBe(500)
+        expect((await res.json()).reason).toBe('shape-mismatch')
+      })
+    })
+
+    it('GET ⇒ 404（方法不对）', async () => {
+      expect((await fetch(`${base}/v1/rerank`)).status).toBe(404)
+    })
+  })
+})
+
+// ─── S0 教训固化成守卫（R13a §三 / §六 A5）──────────────────────
+// S0 实测：pipeline('text-classification') 对本模型恒返回 score:1（softmax-of-one），
+// 后果不是报错而是**臂③ ≡ 臂① ⇒ 报告「重排无效」⇒ 票被关错**。这条守卫钉住可用路径，
+// 防止后来者「简化」回 pipeline —— 那会静默把尺子变成恒绿。
+describe('重排加载路径守卫（S0 教训）', () => {
+  const sidecarSrc = readFileSync(SIDECAR_SRC_PATH, 'utf8')
+  /** 只取重排器一节：全文搜会误命中文件头注释里**解释为何弃用**的那几行 */
+  const rerankerSrc = squash(
+    sidecarSrc.slice(
+      sidecarSrc.indexOf('export function createTransformersReranker'),
+      sidecarSrc.indexOf('export function createEmbedServer')
+    )
+  )
+
+  it('用 AutoModelForSequenceClassification，不用 text-classification pipeline', () => {
+    expect(rerankerSrc).toContain('AutoModelForSequenceClassification.from_pretrained')
+    expect(rerankerSrc).not.toContain("pipeline('text-classification'")
+    expect(rerankerSrc).not.toContain("pipeline('text-ranking'")
+  })
+
+  it('显式 sigmoid（单 logit 相关度）——缺它即退化成 softmax ≡ 1', () => {
+    expect(rerankerSrc).toContain('.sigmoid()')
+  })
+
+  it('模型名与 dtype 是模块常量，**无 env 旋钮**（离线与生产必须同模型）', () => {
+    expect(rerankerSrc).toContain('dtype = RERANK_DTYPE')
+    expect(rerankerSrc).not.toMatch(/process\.env\.RERANK/)
   })
 })
 

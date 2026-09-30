@@ -7,6 +7,12 @@
  *
  * 输出经注入 bus（EngineBus），执行经注册表单例引擎（getExecutionEngine——ingest 同款
  * 服务定位）；日志通道沿用 'socketio'（零可观测行为变化）。
+ *
+ * **三条各自带探针闸**（票 `docs/run/probe-no-resume/`，判据见 `probe-mode.ts`）：
+ * 闸开在**函数体内**而不是调用点——本模块的三个函数在启动链上共有 **6 个调用点**
+ * （`connectors/socketio.ts` 2 处：interrupted / queued 各一；`index.ts` 4 处：
+ * episode 定时器与首轮的 replay 分支、replay 定时器与首轮），闸在调用点会漏掉后来新增的那一个。
+ * 判据是「谁捡行」而不是「谁调用」，故与捡行逻辑同址。
  */
 
 import { v4 as uuid } from 'uuid'
@@ -18,6 +24,7 @@ import {
   executionLogs as execLogsRepo,
 } from '../db/repository/index.js'
 import { createLogger } from '../logger.js'
+import { isProbeMode } from '../probe-mode.js'
 import { rowToAgent, isAgentAuthoredTrigger } from './row.js'
 import { agentHasUsableApiKey } from './serial.js'
 import { getExecutionEngine } from './registry.js'
@@ -39,6 +46,10 @@ const log = createLogger('socketio')
  *    避免同消息下已完成的 agent 被再次调度（@多个 agent 时只有被打断的重跑）
  */
 export async function recoverInterruptedExecutions(bus: EngineBus & HandoffBus): Promise<void> {
+  if (isProbeMode()) {
+    log.warn('探针模式：跳过启动恢复（不捡被打断的执行）', { path: 'recoverInterruptedExecutions' })
+    return
+  }
   try {
     const interrupted = execLogsRepo.getInterruptedExecutions()
     if (interrupted.length === 0) return
@@ -205,6 +216,10 @@ export async function recoverInterruptedExecutions(bus: EngineBus & HandoffBus):
  * 同款补 executeAgentsSerial 配对调用，否则恢复的消息永久卡 busy 不回复。
  */
 export async function recoverQueuedMessages(bus: EngineBus & HandoffBus): Promise<void> {
+  if (isProbeMode()) {
+    log.warn('探针模式：跳过启动恢复（不捡队列中的待处理消息）', { path: 'recoverQueuedMessages' })
+    return
+  }
   try {
     const pending = messagesRepo.getPendingMessages()
     if (pending.length === 0) return
@@ -400,6 +415,10 @@ export const TASK_HISTORY_PROBE_LIMIT = 200
  * done（terminal：处理已终结，防每轮空转重复补派——recoverQueuedMessages 同款）。
  */
 export async function replayStuckUserMessages(bus: EngineBus & HandoffBus): Promise<void> {
+  if (isProbeMode()) {
+    log.warn('探针模式：跳过静默丢重放扫描', { path: 'replayStuckUserMessages' })
+    return
+  }
   try {
     const stuck = messagesRepo.getUndispatchedUserMessagesOlderThan(REPLAY_STUCK_WINDOW_MINUTES)
     if (stuck.length === 0) return

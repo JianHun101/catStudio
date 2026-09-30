@@ -75,6 +75,13 @@ export interface MemoryRefsEntry {
   /** `retrieval_events.reason` 原值；`null` = 该消息没有检索流水行 */
   reason: string | null
   refs: MemoryRef[]
+  /**
+   * 回复正文里采纳的角标号（R14b，**读口派生、不落库**）；`state='injected'` 之外恒空。
+   * 号 ↔ 节的映射按 `ref.injectedPosition` 匹配（不是 `refs` 的数组下标）。
+   */
+  markers: number[]
+  /** 代码字面量（围栏 / 内联码）内的号——诊断列，**前端不渲染**（见 server `citationMarkers.ts`） */
+  markersInCode: number[]
 }
 
 /** 连接器绑定行——后端 snake_case 原样返回（routes/connectors.ts，无 camelCase 转换） */
@@ -450,6 +457,147 @@ export interface SkillEntry {
   category: string
 }
 
+// ─── T2 执行追踪查询页的契约类型（服务端 `routes/eval.ts` 的 DTO 投影）─────────
+
+/** 列表过滤条件。**全是可选的**：不给 = 该维不限（与「给空串」不同面）。 */
+export interface TraceExecutionsQuery {
+  sessionId?: string
+  agentId?: string
+  /** `running` / `completed` / `failed`；不给 = 全部 */
+  status?: string
+  /** 只留耗时 ≥ 该值（毫秒）。服务端**排除耗时为空的行**（「耗时 > N」对无耗时行无意义） */
+  minLatencyMs?: number
+  /** 勾选「仅看报错」= status 锁 failed（服务端让前者优先，不取交集——取交集会得空列表） */
+  errorsOnly?: boolean
+  limit?: number
+  offset?: number
+}
+
+/** 列表行。`summary` / `injectedSections` / `citationCount` 回答「这条回复经历了什么」——
+ *  「猫没动静」类问题在**列表层**就能看到答案（`errorType` 直接写在行上）。 */
+export interface ExecutionTraceRow {
+  executionId: string
+  sessionId: string
+  sessionName: string | null
+  agentId: string
+  agentName: string | null
+  agentAvatar: string | null
+  status: string
+  startedAt: string | null
+  endedAt: string | null
+  /** 总耗时；`null` = 在飞或失败未收口，**不回落 0**（回落会把「没数」显示成「0ms」） */
+  totalMs: number | null
+  promptTokens: number | null
+  completionTokens: number | null
+  messageId: string | null
+  triggerMessageId: string
+  traceId: string
+  errorType: string | null
+  errorMessage: string | null
+  summary: string
+  /** 检索漏斗：注入节数（与「📎 记忆」行同口径） */
+  injectedSections: number
+  /** 该回复里的角标号个数（与气泡角标同一判据函数） */
+  citationCount: number
+  /** `skipped-a2a` ⇒ 行显示「未检索（A2A）」；`null` = 无检索流水行 */
+  retrievalReason: string | null
+}
+
+/** 一条上下文去向（详情页「上下文决策」小节的一行）。
+ *  `decision` 四档互斥且穷尽——见服务端 `traceDetails.ts` 的 `ContextDecision` 头注。 */
+export interface ContextDecisionRow {
+  ordinal: number
+  message_id: string | null
+  stage: string
+  decision: 'kept' | 'invisible' | 'summary_replaced' | 'budget'
+  detail: string | null
+  agent_id: string | null
+  role: string | null
+  content_head: string | null
+}
+
+/** prompt 快照的一节**元数据**（无正文——正文走 `getPromptSection` 懒加载） */
+export interface PromptSectionMeta {
+  sectionKey: string
+  label: string
+  status: 'injected' | 'empty' | 'truncated'
+  charCount: number
+}
+
+/** 检索流水的一趟查询 / 一片候选（DB 行原样 snake_case——与 `/spans` 段行同款，
+ *  服务端对本组**不做 camelCase 换算**） */
+export interface RetrievalQueryRow {
+  id: number
+  query_index: number
+  query_text: string
+  query_embed_ok: number
+}
+
+export interface RetrievalCandidateRow {
+  id: number
+  query_id: number
+  source: string
+  channel: string | null
+  doc_path: string
+  section_anchor: string
+  distance: number | null
+  rank: number | null
+  rrf_score: number | null
+  final_rank: number | null
+  passed_status_filter: number | null
+  injected: number
+  section_rank: number | null
+  injected_position: number | null
+  dropped_reason: string | null
+  body_head: string | null
+  breadcrumb: string | null
+}
+
+/** `/eval/execution-detail` 的完整响应 */
+export interface ExecutionDetailResponse {
+  ok: boolean
+  /** `false` = 存量行（T2 之前的所有执行都没这两张表的行）。
+   *  **不能靠「数组为空」判**——真跑过但两表为空是另一态。 */
+  hasDetails: boolean
+  execution: {
+    executionId: string
+    sessionId: string
+    agentId: string
+    status: string
+    startedAt: string | null
+    endedAt: string | null
+    totalMs: number | null
+    promptTokens: number | null
+    completionTokens: number | null
+    messageId: string | null
+    triggerMessageId: string
+    traceId: string
+    errorType: string | null
+    errorMessage: string | null
+  }
+  context: {
+    /** 四档计数 + 已回复标注数。`kept` 应与 `context.compress` 段的 `item_count` 相等 */
+    counts: { kept: number; invisible: number; summary_replaced: number; budget: number }
+    repliedCount: number
+    total: number
+    decisions: ContextDecisionRow[]
+  }
+  promptSections: PromptSectionMeta[]
+  /** `null` = 本轮没有检索流水行（与「检索了但空手而归」由 `reason` 分开） */
+  retrieval: {
+    reason: string
+    retrievalMs: number | null
+    contextTokens: number | null
+    budgetTokens: number | null
+    truncated: boolean
+    thresholdMaxDistance: number
+    paramTopK: number
+    paramProbeN: number | null
+    paramPoolN: number | null
+    taskId: string | null
+  } | null
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -534,6 +682,14 @@ export const api = {
 
   clearSessionMessages: (id: string) =>
     request<any>(`/sessions/${id}/messages`, { method: 'DELETE' }),
+
+  // 同会话回退（T1）：删掉 `messageId` 之后的全部消息，会话从该节点继续（目标本身保留）。
+  // 只传目标——删除范围由服务端按 (created_at, id) 定序算，前端不重复这份判据。
+  rollbackSession: (id: string, messageId: string) =>
+    request<{ ok: boolean; messageId: string; removedIds: string[]; removedCount: number }>(
+      `/sessions/${id}/rollback`,
+      { method: 'POST', body: JSON.stringify({ messageId }) }
+    ),
 
   markSessionRead: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}/read`, { method: 'POST' }),
@@ -710,4 +866,72 @@ export const api = {
     request<{ ok: boolean; traces: SessionTraceDto[] }>(
       `/eval/session-traces?session_id=${encodeURIComponent(sessionId)}`
     ),
+
+  // ─── T2 执行追踪查询页 ────────────────────────────────────────────────
+
+  /** 执行列表（T2 过滤栏数据面）。**没给的过滤维 = 不限**（不是「用默认值」）——
+   *  `sessionId` 不传就是跨会话看全部，这是合法诉求。 */
+  getTraceExecutions: (q: TraceExecutionsQuery = {}) =>
+    request<{
+      ok: boolean
+      total: number
+      limit: number
+      offset: number
+      executions: ExecutionTraceRow[]
+    }>(`/eval/executions${buildTraceQuery(q)}`),
+
+  /** 一次执行的展开详情（执行行 + 决策逐条 + 节清单无正文）。**行已被删 → 404**
+   *  （回退删消息会连带删 execution_logs 行），调用方按「该执行已不存在」处置。 */
+  getExecutionDetail: (executionId: string) =>
+    request<ExecutionDetailResponse>(
+      `/eval/execution-detail?execution_id=${encodeURIComponent(executionId)}`
+    ),
+
+  /** 单节快照**当次注入原文**（懒加载）。节不存在 → 404（「这一节没记」与
+   *  「这一节内容为空」是两态，后者是 200 + `content: ''`）。 */
+  getPromptSection: (executionId: string, key: string) =>
+    request<{ ok: boolean; key: string; content: string; charCount: number }>(
+      `/eval/prompt-section?execution_id=${encodeURIComponent(executionId)}&key=${encodeURIComponent(key)}`
+    ),
+
+  /** 检索明细（懒加载）。**无检索事件不是错误**：`reason: null` + 空数组。 */
+  getRetrievalDetail: (executionId: string) =>
+    request<{
+      ok: boolean
+      reason: string | null
+      queries: RetrievalQueryRow[]
+      candidates: RetrievalCandidateRow[]
+      droppedReasons?: Record<string, number>
+    }>(`/eval/retrieval-detail?execution_id=${encodeURIComponent(executionId)}`),
+
+  /** messageId → executionId（气泡 ⚙ 的**权威回退**：store 缓存未就绪时用它）。
+   *  `session_id` 必填是服务端越权约束。查不到 → 404（该气泡没有执行行）。 */
+  getExecutionByMessage: (messageId: string, sessionId: string) =>
+    request<{
+      ok: boolean
+      executionId: string
+      agentId: string
+      status: string
+      startedAt: string | null
+      totalMs: number | null
+    }>(
+      `/eval/execution-by-message?message_id=${encodeURIComponent(messageId)}&session_id=${encodeURIComponent(sessionId)}`
+    ),
+}
+
+/** 拼 T2 列表的查询串：只拼**给了值**的维（空串/undefined 一律不拼——
+ *  拼成 `?status=` 会让服务端拿到空串，那与「不限」不是一回事）。 */
+function buildTraceQuery(q: TraceExecutionsQuery): string {
+  const parts: string[] = []
+  const push = (k: string, v: string | number | undefined) => {
+    if (v !== undefined && v !== '') parts.push(`${k}=${encodeURIComponent(String(v))}`)
+  }
+  push('session_id', q.sessionId)
+  push('agent_id', q.agentId)
+  push('status', q.status)
+  push('min_latency_ms', q.minLatencyMs)
+  push('limit', q.limit)
+  push('offset', q.offset)
+  if (q.errorsOnly) parts.push('errors_only=1')
+  return parts.length > 0 ? `?${parts.join('&')}` : ''
 }

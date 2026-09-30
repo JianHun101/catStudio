@@ -58,3 +58,12 @@
 - [ ] **新文件**：放在正确的包目录下（shared/server/web/scripts）
 - [ ] **种子数据**：Demo 数据定义在 `packages/server/src/seed-data.ts`
 - [ ] **环境变量**：`.env.example` 同步更新，敏感信息不入库
+
+## 9. 环境变量
+
+- [ ] **数值读取唯一入口**：数值型环境变量一律经 `envNumber(name, fallback)`（`packages/server/src/env-number.ts`）读取，不得在调用点裸用 `parseInt` / `parseFloat` / `Number(process.env.X)` 自行解析
+- [ ] **坏值语义**：未设置 / 空串 / 纯空白 ⇒ 静默回退 `fallback`（那是 `env.ts` `??=` 的正常兜底面）；解析后**非有限数**（`NaN` / `±Infinity`）⇒ 打一条 warn（变量名 + 原始串 + 回退值）+ 回退 `fallback`
+- [ ] **禁用「部分可解析」形态**：`parseInt` / `parseFloat` 对 `5abc` 静默取前缀值（`parseInt('5abc', 10) === 5`），**不产生 NaN** ⇒ 永远走不到 warn 分支。严格解析归 `Number()`
+- [ ] **不在入口加区间钳位**：`0` / 负数原样生效；需要钳制的调用点在**调用点**显式做（如 `Math.trunc`）——钳位本身会改语义
+- [ ] **每个数值键至少一条坏值回归断言**：断言须打在**真实接线点**（真键名 + 消费函数），`X=abc` ⇒ 消费点读到 `fallback`。在 helper 本体用**假键名**做单测**不构成**这些键的守卫
+- [ ] **存量**：改动触碰到的裸解析点同批处置——并轨到 `envNumber`，或显式保留并在注释写明理由（部分站点现行语义是 fail-loud，并轨反而降级）

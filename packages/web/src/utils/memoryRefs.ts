@@ -26,6 +26,15 @@ export interface MemoryRefView {
   state: MemoryRefState
   /** 仅 `injected` 非空 */
   items: MemoryRefItemView[]
+  /**
+   * 正文里可渲染成角标的号（R14b）——**已按 `items` 过滤**：只有能在本视图里
+   * 找到对应节（`injectedPosition === n`）的号才留下。
+   *
+   * 保的是「**有角标 ⟺ 悬停有卡片**」这条不变量：渲染了上标却悬停不出内容，
+   * 是比不渲染更坏的形态（用户会以为卡片坏了）。读口的两列与 `refs` 同源，
+   * 正常情况本就一一对应，这层过滤防的是两侧口径将来分叉。
+   */
+  markers: number[]
 }
 
 /** 文件名（去目录、去 `.md`）；路径异常时原样回退 */
@@ -56,16 +65,23 @@ export function buildMemoryRefView(
     const n = docBaseName(r.docPath)
     nameCount.set(n, (nameCount.get(n) ?? 0) + 1)
   }
+  const items = refs.map((r) => {
+    const base = docBaseName(r.docPath)
+    const dup = (nameCount.get(base) ?? 0) > 1
+    return {
+      label: dup ? `${base} · ${sectionTitle(r.sectionAnchor)}` : base,
+      title: r.breadcrumb ?? `${r.docPath} > ${sectionTitle(r.sectionAnchor)}`,
+      ref: r,
+    }
+  })
   return {
     state: entry.state,
-    items: refs.map((r) => {
-      const base = docBaseName(r.docPath)
-      const dup = (nameCount.get(base) ?? 0) > 1
-      return {
-        label: dup ? `${base} · ${sectionTitle(r.sectionAnchor)}` : base,
-        title: r.breadcrumb ?? `${r.docPath} > ${sectionTitle(r.sectionAnchor)}`,
-        ref: r,
-      }
-    }),
+    items,
+    // 「有角标 ⟺ 悬停有卡片」（见 `MemoryRefView.markers`）——按 `injectedPosition`
+    // 匹配，**不按数组下标**：编号的唯一真相源是注入时的渲染序，items 的序只是读口
+    // 的返回序，两者不是一回事。
+    markers: (entry.markers ?? []).filter((n) =>
+      items.some((item) => item.ref.injectedPosition === n)
+    ),
   }
 }

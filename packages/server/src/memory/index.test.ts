@@ -23,6 +23,7 @@ import {
   messages as messagesRepo,
 } from '../db/repository/index.js'
 import { bigramTokenize } from '../db/repository/fts.js'
+import { getLogLevel, setLogLevel } from '../logger.js'
 import type { EmbedResult } from './embedding-client.js'
 
 // 扫描器白名单前缀（真源 = scripts/flywheel/scan.mjs；import 而非手抄，防漂移）
@@ -349,6 +350,81 @@ describe('memory', () => {
       expect(r.text).toBe('')
       expect(r.reason).toBe('budget-exhausted')
       expect(r.stats.droppedSections).toBe(1)
+    })
+  })
+
+  // ═══ R14b：角标引用指示语进注入串（**行为变更**）═══════════
+  //
+  // 本票改的是**猫实际读到的 system prompt**——审查重心在读数与措辞逐字，不在代码形状。
+  // 本组钉三件事：① 指示语**逐字**（甲版是 R14a 实测过的自变量，改一字即失据）
+  // ② 位置（`【相关记忆】` 头之后、`1.` 之前，独占一行）
+  // ③ token 同源（预算试渲染与实际注入同一个函数 ⇒ 指示语进核算）
+  // 复述面（探针夹具 `VARIANTS.jia` / 形状规格守卫）见
+  // `scripts/probes/r14a-citation-probe.test.js`，与本组同批更新。
+  describe('R14b 角标引用指示语', () => {
+    /**
+     * 甲版逐字。**在这里写死**、不引用 `memoryModule.CITATION_MARKER_INSTRUCTION`：
+     * 这条断言的全部价值就是「改一字即红」——引用常量的话，常量改了断言跟着改，等于没守。
+     */
+    const JIA =
+      '（以下为检索到的历史结论。若你采纳了其中某条，请在该处标注其编号，如 [1]；没有采纳的条目不标。）'
+
+    /** 本节夹具的注入串（单节、无退役标记）：头 + 指示语 + 一节一行 */
+    const oneSectionText = (body: string): string => `\n\n【相关记忆】\n${JIA}\n1. ${body}`
+
+    it('验收 1 · 指示语逐字，位置在【相关记忆】头之后、`1.` 之前', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '2'
+      seedChunk({ docPath: 'docs/adr/0001-a.md', body: '猫咖测试甲', angle: 0 })
+      seedChunk({ docPath: 'docs/adr/0002-b.md', body: '猫咖测试乙', angle: 30 })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      expect(r.text).toBe(`\n\n【相关记忆】\n${JIA}\n1. 猫咖测试甲\n2. 猫咖测试乙`)
+      // 生产常量与写死的字面量同源（探针夹具比对的是那个常量，不是这句话）
+      expect(memoryModule.CITATION_MARKER_INSTRUCTION).toBe(JIA)
+    })
+
+    it('验收 1b · 零节仍返回空串：无头、**无指示语**（位置契约的边界）', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.text).toBe('')
+      expect(r.reason).toBe('no-hit')
+      expect(r.text).not.toContain(JIA)
+    })
+
+    it('验收 2 · token 同源：contextTokens 含指示语（剥掉它同串必然更小）', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '1'
+      seedChunk({ docPath: 'docs/adr/0001-a.md', body: '猫咖测试甲', angle: 0 })
+
+      const r = await memoryModule.retrieveMemoryContext(Q)
+      expect(r.reason).toBe('ok')
+      expect(r.stats.contextTokens).toBe(estimateTokens(r.text))
+      // 差分：把指示语那一行剥掉，同一节的串必然更短 ⇒ 指示语确实进了核算，
+      // 不是「恰好相等」（`contextTokens` 若按不含指示语的串算，这条必红）
+      const stripped = r.text.replace(`\n${JIA}\n`, '\n')
+      expect(stripped).not.toContain(JIA)
+      expect(r.stats.contextTokens).toBeGreaterThan(estimateTokens(stripped))
+    })
+
+    it('验收 2b · 预算边界按「含指示语」判：旧形状装得下、新形状装不下 ⇒ budget-exhausted', async () => {
+      process.env.MEMORY_MAX_DISTANCE = '1.5'
+      process.env.MEMORY_TOP_K = '1'
+      seedChunk({ docPath: 'docs/adr/0001-a.md', body: '猫咖测试甲', angle: 0 })
+
+      // 预算取**旧形状**（无指示语）的串长：指示语若没进核算，这一节该被留下
+      const oldShape = '\n\n【相关记忆】\n1. 猫咖测试甲'
+      process.env.MEMORY_CONTEXT_TOKEN_BUDGET = String(estimateTokens(oldShape))
+      const blocked = await memoryModule.retrieveMemoryContext(Q)
+      expect(blocked.reason).toBe('budget-exhausted')
+      expect(blocked.text).toBe('')
+
+      // 同一节，预算放到新形状的串长 ⇒ 留下且逐字相等（两个边界的差 = 那行指示语）
+      process.env.MEMORY_CONTEXT_TOKEN_BUDGET = String(estimateTokens(oneSectionText('猫咖测试甲')))
+      const kept = await memoryModule.retrieveMemoryContext(Q)
+      expect(kept.reason).toBe('ok')
+      expect(kept.text).toBe(oneSectionText('猫咖测试甲'))
     })
   })
 
@@ -889,6 +965,10 @@ describe('memory', () => {
        * 改动**前**的 `renderSections`——逐字抄自
        * `git show 18f0fcd:packages/server/src/memory/index.ts`（该行区间未变）。
        * 只取 `text`：旧实现的 `tokens` 也是 `estimateTokens(text)`，同源。
+       *
+       * ⚠️ R14b 起它**不再是生产的输出形状**（头与首节之间多一行指示语）。本组守的
+       * 是**节序与编号**——那部分逐字节未变；新形状 = 旧输出做同一处插入，见
+       * `withCitationInstruction`。指示语本身的措辞与位置由「R14b 角标引用」组独立钉。
        */
       function renderSectionsBefore(sections: Array<{ parts: string[] }>): string {
         if (sections.length === 0) return ''
@@ -896,6 +976,18 @@ describe('memory', () => {
         const ordered = [...sections.slice(0, half), ...sections.slice(half).reverse()]
         const lines = ordered.map((s, i) => `${i + 1}. ${s.parts.join('\n')}`)
         return `\n\n【相关记忆】\n${lines.join('\n')}`
+      }
+
+      /**
+       * 旧输出 → R14b 的生产形状（头之后、首节之前插一行指示语）。
+       *
+       * 插的是**模块导出的那个常量**而不是重抄一遍字面量：两侧各写一份的话，
+       * 常量改了这里不会红（本仓反复吃过的「同一规则两处措辞」）。零节（空串）保持空串。
+       */
+      function withCitationInstruction(oldText: string): string {
+        const head = '\n\n【相关记忆】\n'
+        if (!oldText.startsWith(head)) return oldText
+        return `${head}${memoryModule.CITATION_MARKER_INSTRUCTION}\n${oldText.slice(head.length)}`
       }
 
       it('真实检索下逐窗口对账：n=1..5 的注入串与改动前旧算法逐字节一致', async () => {
@@ -913,7 +1005,8 @@ describe('memory', () => {
           expect(r.reason).toBe('ok')
           expect(r.sections).toHaveLength(n)
           // 差分：**实际** sections 喂旧算法，与模块实际输出比——不是重抄一遍公式自证
-          expect(r.text).toBe(renderSectionsBefore(r.sections))
+          // （旧算法产出的是「R14b 之前的形状」，故比对面补同一处指示语插入）
+          expect(r.text).toBe(withCitationInstruction(renderSectionsBefore(r.sections)))
           expect(r.stats.contextTokens).toBe(estimateTokens(r.text))
           // 改动前该字段就存在且语义未变
           expect(r.stats.truncated).toBe(false)
@@ -923,7 +1016,9 @@ describe('memory', () => {
       it('空召回路径的输出与改动前一致（空串，零 token）', async () => {
         process.env.MEMORY_MAX_DISTANCE = '0.6'
         const r = await memoryModule.retrieveMemoryContext(Q)
+        // 零节：旧算法与现实现都返回空串——**指示语也随之不出现**（R14b 位置契约）
         expect(r.text).toBe(renderSectionsBefore([]))
+        expect(r.text).toBe('')
         expect(r.stats.contextTokens).toBe(0)
       })
 
@@ -984,13 +1079,20 @@ describe('memory', () => {
       )
     }
 
-    /** `renderSections` 的渲染序部分——与模块同序（首尾各半），只取 text/tokens */
+    /**
+     * `renderSections` 的渲染序部分——与模块同序（首尾各半），只取 text/tokens。
+     *
+     * ⚠️ **必须与生产逐字节同形状**（含 R14b 的指示语行）：本函数的 `tokens` 是
+     * `sectionLevelBefore` 里预算 `break` 判据的输入，与生产的 `renderSections` 分叉
+     * 就会让「哪个节进预算」这个**被判行为**当场错位（差一句指示语的 token 足以把
+     * 边界上的那节翻过来）。指示语取模块导出常量，不重抄字面量。
+     */
     function renderBefore(sections: Array<{ parts: string[] }>): { text: string; tokens: number } {
       if (sections.length === 0) return { text: '', tokens: 0 }
       const half = Math.ceil(sections.length / 2)
       const ordered = [...sections.slice(0, half), ...sections.slice(half).reverse()]
       const lines = ordered.map((s, i) => `${i + 1}. ${s.parts.join('\n')}`)
-      const text = `\n\n【相关记忆】\n${lines.join('\n')}`
+      const text = `\n\n【相关记忆】\n${memoryModule.CITATION_MARKER_INSTRUCTION}\n${lines.join('\n')}`
       return { text, tokens: estimateTokens(text) }
     }
 
@@ -1341,12 +1443,18 @@ describe('memory', () => {
       expect(full.sections.map((s) => `${s.docPath}\0${s.sectionAnchor}`)).toEqual(beforeFull.keys)
 
       // 第二组：预算把节集合裁掉一部分（`break` 起停路径也走一遍）
-      process.env.MEMORY_CONTEXT_TOKEN_BUDGET = '60'
+      //
+      // ⚠️ 这个数随 R14b 从 60 调到 120，**不是放宽阈值转绿**：指示语进 token 核算
+      // （同源，票面验收 2）后，本夹具的固定串多了 70 token，60 已落到「一节都放不下」
+      // ——那是 `budget-exhausted` 路径，`cut.reason === 'ok'` 的断言当场不成立，本组
+      // 要走的「裁掉一部分」路径反而没被走到。120 是重标定后的同一区间：单节串
+      // ≈80(头+指示语)+10(节行)，装得下 1 节、装不下 6 节（6 节 ≈142）。
+      process.env.MEMORY_CONTEXT_TOKEN_BUDGET = '120'
       process.env.MEMORY_TOP_K = '6'
       const cut = await memoryModule.retrieveMemoryContext(Q)
       expect(cut.reason).toBe('ok')
       expect(cut.sections.length).toBeLessThan(6) // 夹具非退化：真的发生了预算截断
-      const beforeCut = sectionLevelBefore(orderedRowsOf(cut), 60)
+      const beforeCut = sectionLevelBefore(orderedRowsOf(cut), 120)
       expect(cut.text).toBe(beforeCut.text)
       expect(cut.sections.map((s) => `${s.docPath}\0${s.sectionAnchor}`)).toEqual(beforeCut.keys)
     })
@@ -1423,6 +1531,103 @@ describe('memory', () => {
       expect(r.stats.thresholdMaxDistance).toBeCloseTo(0.42, 12)
       expect(r.stats.paramProbeN).toBeGreaterThan(0)
       expect(r.stats.sections).toBe(0)
+    })
+  })
+
+  // ─── env 坏值回归（票 env-number-guards · 组件 B）───────────────
+  /**
+   * `MEMORY_TOP_K` / `MEMORY_MAX_DISTANCE` 此前被 stub 到的取值只有合法值
+   * （`'4'` / `'0.7'` / `'5'` / `'0.42'`）——那些证「读 env」，证不了「坏值不静默穿透」。
+   *
+   * 断言打在**真接线点**：`currentRetrievalParams()` 是这两个键的唯一 env 读取点，
+   * `retrieveMemoryContext` 是它的真消费面（注入的节数 / 过阈值的片）。两者都断——
+   * 只断前者的话，「参数对了但没进检索链」不会红。
+   */
+  describe('env 坏值回归：MEMORY_TOP_K / MEMORY_MAX_DISTANCE', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs()
+      delete process.env.MEMORY_TOP_K
+      delete process.env.MEMORY_MAX_DISTANCE
+    })
+
+    it('MEMORY_TOP_K 坏值/空串 ⇒ topK 回退 3（不是 NaN ⇒ 注入 0 片）', async () => {
+      // 5 个**互不同节**的小片，距离全 0（必然过阈值）⇒ 注入几个只由 topK 决定
+      for (let i = 1; i <= 5; i++) {
+        seedChunk({ docPath: `docs/adr/000${i}-s.md`, body: `猫咖测试${i}`, angle: 0 })
+      }
+
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      // 断言走**真 logger** ⇒ 必须自己把级别放到 warn：测试进程真吃 `LOG_LEVEL=error`
+      // （packages/server/vitest.config.ts 的 test.env），不放级别则「坏值出声」恒真。
+      const prevLevel = getLogLevel()
+      setLogLevel('warn')
+      try {
+        // stdout 行形如 `WARN <ts> env-number <msg> <meta>`——按模块名 + 变量名双筛
+        const warns = (): string[] =>
+          stdoutSpy.mock.calls
+            .map((c) => String(c[0]))
+            .filter((l) => l.includes('env-number') && l.includes('MEMORY_TOP_K'))
+
+        vi.stubEnv('MEMORY_MAX_DISTANCE', '0.6') // 另一键钉默认值：本用例只让 topK 坏
+        // 坏值：改前表达式 `parseInt(process.env.X || '3', 10)` 得 NaN，`Math.trunc(NaN)`
+        // 仍是 NaN ⇒ 按节计名额的截断当场空集，reason=no-hit、注入 0 片（OQ-6 实测读数）
+        vi.stubEnv('MEMORY_TOP_K', 'abc')
+        expect(memoryModule.currentRetrievalParams().topK).toBe(3)
+        const bad = await memoryModule.retrieveMemoryContext(Q)
+        expect(bad.reason).toBe('ok')
+        expect(bad.sections).toHaveLength(3) // 名额 = 回退的 3，不是 NaN 造成的 0
+        // 正对照：坏值必须出声（否则下面的「不新增」是恒真的假绿门）。只断「至少一条」
+        // ——确切条数 = 该键在一次检索里被读几次（实现细节），钉死它会在无关重构时假红。
+        expect(warns().length).toBeGreaterThan(0)
+        const afterBad = warns().length
+
+        // 空串：`env.ts ??=` 的正常兜底面，静默回落同一名额
+        vi.stubEnv('MEMORY_TOP_K', '')
+        expect(memoryModule.currentRetrievalParams().topK).toBe(3)
+        const empty = await memoryModule.retrieveMemoryContext(Q)
+        expect(empty.reason).toBe('ok')
+        expect(empty.sections).toHaveLength(3)
+        expect(warns().length).toBe(afterBad) // 调用次数可变，warn 一条都不许新增
+      } finally {
+        stdoutSpy.mockRestore()
+        setLogLevel(prevLevel)
+      }
+    })
+
+    it('MEMORY_MAX_DISTANCE 坏值/空串 ⇒ maxDistance 回退 0.6（不是 NaN ⇒ 全挡成 no-hit）', async () => {
+      // angle 45 ⇒ 余弦距离 ≈0.293（见本文件 W5 用例的实测口径）：过得了 0.6，
+      // 过不了 NaN（`0.293 <= NaN` 恒假 ⇒ 全被当「超阈值」挡掉）
+      seedChunk({ docPath: 'docs/adr/0001-a.md', body: '猫咖测试甲', angle: 45 })
+
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      const prevLevel = getLogLevel()
+      setLogLevel('warn')
+      try {
+        const warns = (): string[] =>
+          stdoutSpy.mock.calls
+            .map((c) => String(c[0]))
+            .filter((l) => l.includes('env-number') && l.includes('MEMORY_MAX_DISTANCE'))
+
+        vi.stubEnv('MEMORY_TOP_K', '3') // 另一键钉默认值：本用例只让 maxDistance 坏
+        vi.stubEnv('MEMORY_MAX_DISTANCE', 'abc')
+        expect(memoryModule.currentRetrievalParams().maxDistance).toBe(0.6)
+        const bad = await memoryModule.retrieveMemoryContext(Q)
+        expect(bad.reason).toBe('ok')
+        expect(bad.text).toContain('猫咖测试甲')
+        // 正对照：坏值必须出声（否则下面的「不新增」恒真）。条数 = 读取次数，不作断言。
+        expect(warns().length).toBeGreaterThan(0)
+        const afterBad = warns().length
+
+        vi.stubEnv('MEMORY_MAX_DISTANCE', '')
+        expect(memoryModule.currentRetrievalParams().maxDistance).toBe(0.6)
+        const empty = await memoryModule.retrieveMemoryContext(Q)
+        expect(empty.reason).toBe('ok')
+        expect(empty.text).toContain('猫咖测试甲')
+        expect(warns().length).toBe(afterBad) // 调用次数可变，warn 一条都不许新增
+      } finally {
+        stdoutSpy.mockRestore()
+        setLogLevel(prevLevel)
+      }
     })
   })
 })

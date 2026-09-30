@@ -22,7 +22,7 @@
  * 12 格实跑），不是推演：
  * - S3-1（阻断级）枚举必须带 `*`——裸前缀命中 0 条且**全链静默**
  * - S3-2 冲突码不止 `UU`（`AA`/`UU` 可并存）⇒ 守卫判 `MERGE_HEAD`，不按码枚举
- * - S3-5 `*` 可匹配空串 ⇒ 枚举侧过滤空 cat8
+ * - S3-5 `*` 可匹配空串 ⇒ 枚举侧过滤空后缀（裸前缀那条）
  * - E3 `merge --no-ff` 重跑同一条已合分支是 no-op（`Already up to date`，HEAD 不变）
  *
  * 调用点（**不再是零调用点**，Phase I 起）：
@@ -76,7 +76,7 @@ export interface ConflictDetail {
   files: string[]
 }
 
-/** fan-in 结果。`merged` / `skipped` 均为**分支短名**（`session/<sid8>-<cat8>`） */
+/** fan-in 结果。`merged` / `skipped` 均为**分支短名**（`session/<sid8>-<猫名>`） */
 export interface FanInResult {
   /** 本次真合进去的猫分支短名（按合入顺序） */
   merged: string[]
@@ -150,7 +150,7 @@ export function listCatBranches(shortId: string, opts?: { cwd?: string }): strin
       .map((line) => line.trim())
       .filter(Boolean)
       .map((ref) => (ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref))
-      // S3-5：`*` 可匹配空串 ⇒ 分支 `session/<sid8>-`（cat8 为空）会被命中，过滤掉
+      // S3-5：`*` 可匹配空串 ⇒ 分支 `session/<sid8>-`（后缀为空）会被命中，过滤掉
       .filter((name) => name.length > prefix.length)
       .sort()
   )
@@ -668,7 +668,7 @@ export function ensureExecutionWorktree(
 /**
  * `git worktree list --porcelain` → 分支短名 → worktree 绝对路径。
  *
- * 用 git 自己的账本做映射，**不做字符串推导**（`session/<sid8>-<cat8>` 反推目录名
+ * 用 git 自己的账本做映射，**不做字符串推导**（`session/<sid8>-<猫名>` 反推目录名
  * 在命名规则变动时会静默指错路径——而下游是删除操作）。
  * detached worktree 只有 `detached` 行、无 `branch` 行 ⇒ 天然不进映射，不会误删。
  */

@@ -80,8 +80,12 @@
  * 环境变量:
  *   CATSTUDY_URL          服务器地址（默认 http://127.0.0.1:3200）
  *   CATSTUDY_SESSION_ID   目标会话 ID（人工显式指定，明确意图优先）。
+ *                         **前置：提交仓库须自证属于该会话的工作区**
+ *                         （`judgeRepoOwnership`：会话/猫 worktree 或主仓库根，且登记在
+ *                         `git worktree list` 里）——它由 server 注入给每只猫的 CLI，
+ *                         会被夹具仓库全量继承，故单凭它不足以决定「投给谁」。
  *                         投递目标选择：
- *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定）
+ *                         1. CATSTUDY_SESSION_ID 环境变量（人工指定，**且归属已验**）
  *                         2. commit message 的 catstudy [uuid] 反查消息所在会话（自动）
  *                         两者都不可用时**报错不投递**——绝不猜目标。
  *                         曾因反查失败静默降级到环境变量/API 第一个会话，
@@ -100,7 +104,7 @@
 import { randomUUID } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, unlinkSync, renameSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // ─── 投递状态文件 ─────────────────────────────────────────
@@ -1181,6 +1185,185 @@ export function decideHookDelivery(attributed) {
   }
 }
 
+// ─── 仓库身份校验（身份面票：夹具仓库钩子泄漏活会话）──────────────
+//
+// 堵的洞：`CATSTUDY_SESSION_ID` 由 server 注入给每只猫的 CLI（`llm/claude.ts`），
+// 于是它在**猫的任何子进程里都常驻**——包括在 `/tmp` 造的夹具仓库。夹具复制了真
+// `.husky` + `scripts/` 后，一次普通 `git commit` 就能以**活会话身份**把交接补填
+// 请求灌进真实会话（2026-09-28 两次实证：`e09340a` / `3f8047c`）。真实侧当时零污染
+// 纯属侥幸（兜底路径只投消息、不写账本），机制面**身份零防线**。
+//
+// 判据：环境变量是**环境态**、不是意图——它在猫的 CLI 里常驻，所以「设了它就投给它」
+// 等于把「我是谁」交给一个谁都继承得到的字符串。本函数回答的是另一个问题：
+// **这个仓库自证属于该会话吗**（会话 worktree / 猫 worktree / 其主仓库三种形态）。
+// 只有自证属实，「人工显式指定」这句话才成立。
+//
+// 为什么按**路径族**判而不是按「仓库内容」判：夹具是仓库的**忠实拷贝**（`.husky`、
+// `scripts/`、`packages/` 一应俱全），任何内容指纹都拦不住它；而会话工作区族的位置由
+// server 的 `ensureSessionWorktree` / `ensureCatWorktree` 决定，夹具落不进去。
+
+/**
+ * 会话 worktree 目录前缀——**必须与 `packages/server/src/llm/git-utils.ts` 的
+ * `SESSION_WORKTREE_PREFIX` 逐字一致**（本脚本是裸 node 子进程，不引 server 包，
+ * 两处只能靠这条注释 + 测试对齐）。
+ */
+const SESSION_WORKTREE_PREFIX = 'catStudy-sessions'
+
+/**
+ * 会话 short id——**必须与 `git-utils.ts` 的 `sessionShortId` 同一表达式**
+ * （剔除非法字符后取前 8 位；worktree 目录名与分支名的后缀源）。
+ * 「同一」由 `handoff-gen.test.js` 的同源断言钉（折白比对字符类与截断长度），
+ * 不靠这条注释——注释会漂，断言不会。
+ */
+export function sessionShortId(sessionId) {
+  return String(sessionId)
+    .replace(/[^a-zA-Z0-9-]/g, '')
+    .slice(0, 8)
+}
+
+/** 路径归一（比较用）：绝对化 + 正斜杠；win32 折大小写（盘符与大小写不敏感） */
+function normPath(p) {
+  const abs = resolve(String(p)).replace(/\\/g, '/')
+  return process.platform === 'win32' ? abs.toLowerCase() : abs
+}
+
+/** child 是否落在 parent 内（含 parent 自身） */
+export function isPathInside(parent, child) {
+  const p = normPath(parent)
+  const c = normPath(child)
+  return c === p || c.startsWith(`${p}/`)
+}
+
+/**
+ * 剥掉 git 注入给钩子的 `GIT_*` 再跑 git。
+ *
+ * **为什么必须剥**：`GIT_DIR` 的优先级**高于 `-C`**——带着钩子注入的它去跑
+ * `git -C <别处>`，读到的仍是**当前仓库**，跨仓库查询会静默答错（本仓记过同源事故：
+ * 测试 shell 带 `GIT_DIR` 出 git，把主仓 `core.bare` 写成了 true）。身份校验要的
+ * 恰恰是「别处」，故本模块的 git 调用一律用剥净后的环境。
+ */
+function gitEnvClean() {
+  const env = { ...process.env }
+  for (const k of [
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_INDEX_FILE',
+    'GIT_PREFIX',
+    'GIT_COMMON_DIR',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  ]) {
+    delete env[k]
+  }
+  return env
+}
+
+/** 跑一条 git 命令；失败返回 null（调用方据此判「查不动」，绝不猜） */
+function gitOut(cwd, cmd) {
+  try {
+    return execSync(`git ${cmd}`, {
+      cwd,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      env: gitEnvClean(),
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 判定「cwd 所属仓库」是否属于 `sessionId` 的工作区族。
+ *
+ * 三种合法形态（全部要求**登记在册**——`git worktree list` 是「会话 worktree 登记表」
+ * 的权威读数，路径存在但未登记不算数）：
+ *   ① 会话 worktree：`<主仓>/../catStudy-sessions/<shortId>`（店长/会话级）
+ *   ② 猫 worktree：  `<主仓>/../catStudy-sessions/<shortId>-<猫名>`（实施猫）
+ *   ③ 主仓库根本身： 收口链在 `D:/Game/ai/catStudy` 里 ff-only 合并并提交，
+ *                    此时 cwd 是主仓、但会话的 worktree 仍登记在册 → 认
+ *
+ * `reason` 是机器可读的判定码，供告警面渲染；**判不出（git 失败）= 不认**
+ * （fail-closed：身份面查不动时投出去，正是本票要堵的那条路）。
+ *
+ * @returns {{owned: boolean, reason: string, top: string|null, mainRoot: string|null,
+ *            sessionsDir: string|null, family: string[], shortId: string}}
+ */
+export function judgeRepoOwnership(cwd, sessionId) {
+  const base = {
+    owned: false,
+    reason: '',
+    top: null,
+    mainRoot: null,
+    sessionsDir: null,
+    family: [],
+    shortId: sessionShortId(sessionId),
+  }
+  if (!base.shortId) return { ...base, reason: 'short-id-empty' }
+
+  const top = gitOut(cwd, 'rev-parse --show-toplevel')
+  const commonDir = gitOut(cwd, 'rev-parse --path-format=absolute --git-common-dir')
+  if (!top || !commonDir) return { ...base, reason: 'not-a-repo' }
+
+  // 主仓库根 = git-common-dir 的父目录（server 侧 `getMainRepoRoot` 同一口径）：
+  // worktree 里 `--git-common-dir` 指向主仓的 `.git`，故主仓根对 worktree 与主仓一致。
+  const mainRoot = dirname(resolve(cwd, commonDir))
+  const sessionsDir = resolve(mainRoot, '..', SESSION_WORKTREE_PREFIX)
+
+  const rawList = gitOut(mainRoot, 'worktree list --porcelain')
+  if (rawList === null) {
+    return { ...base, top, mainRoot, sessionsDir, reason: 'worktree-list-unavailable' }
+  }
+  const worktrees = rawList
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length).trim())
+    .filter(Boolean)
+
+  const family = worktrees.filter(
+    (w) => isPathInside(sessionsDir, w) && basename(w).startsWith(base.shortId)
+  )
+  const out = { ...base, top, mainRoot, sessionsDir, family }
+  if (!family.length) return { ...out, reason: 'no-session-worktree' }
+  if (normPath(top) === normPath(mainRoot) || family.some((w) => normPath(w) === normPath(top))) {
+    return { ...out, owned: true, reason: 'owned' }
+  }
+  return { ...out, reason: 'top-not-in-session-family' }
+}
+
+/** 判定码 → 人话（告警面渲染用） */
+const OWNERSHIP_REASONS = {
+  'short-id-empty': '会话 ID 取不出 short id（清洗后为空）',
+  'not-a-repo': 'cwd 不是 git 仓库（或 git 命令查不动）',
+  'worktree-list-unavailable': '读不到该仓库的 worktree 登记表（git worktree list 失败）',
+  'no-session-worktree': '该仓库下没有登记过这个会话的工作区（无 catStudy-sessions/<shortId>*）',
+  'top-not-in-session-family': '提交仓库既不是主仓库根、也不在该会话登记的工作区里（路径对不上）',
+}
+
+/**
+ * 「拒绝投递」的可观测面（票面验收 3）。
+ *
+ * 静默拒绝 = 把噪声换成隐身：夹具作者会以为投递成功，而活会话那边什么都没有——
+ * 比泄漏更难查。故这里把**判据、读数、后果、补救**四件事一次打全，走 stderr
+ * （钩子在用户终端里跑；猫经由 Bash 工具跑时也会落到工具输出里）。
+ */
+export function formatOwnershipRefusal(cwd, sessionId, judge) {
+  const reason = OWNERSHIP_REASONS[judge.reason] || judge.reason
+  return [
+    '',
+    '❌ [handoff-gen] 拒绝投递——提交仓库不属于该会话的工作区（身份校验未通过）',
+    `   目标会话 : ${sessionId}（来自环境变量 CATSTUDY_SESSION_ID）`,
+    `   提交仓库 : ${judge.top || cwd}`,
+    `   会话 short id : ${judge.shortId || '(空)'}`,
+    `   期望目录 : ${judge.sessionsDir || '(未知)'}${process.platform === 'win32' ? '\\' : '/'}<shortId> 或 <shortId>-<猫名>`,
+    `   判定     : ${reason}`,
+    `   登记表   : ${judge.family.length} 条匹配（0 = 这个仓库从没登记过该会话的工作区）`,
+    '   后果     : .handoff-draft.md 已生成但**未投递**（草稿保留）；该 commit 不进本会话的审查链',
+    '   处置     : 在会话自己的 worktree 内提交；或在夹具/临时仓库里剥掉 CATSTUDY_* 环境变量',
+    '              （它会被子进程全量继承，把临时提交按活会话身份灌进来）',
+    '',
+  ].join('\n')
+}
+
 /**
  * 单次投递尝试：确定目标会话 + POST 交接文档。
  *
@@ -1202,9 +1385,22 @@ async function attemptDeliver(content, cwd, serverUrl, opts = {}) {
   // 原则：两者都不可用时**报错不投递**——绝不猜目标。曾因反查失败静默降级到
   // 环境变量/含店长会话/API 第一个，把审查文档投到错误会话（"UI优化"打偏、
   // b8b0a6d 跨会话事故），错误的投递比不投递更糟。
+  //
+  // 身份校验只挂在**环境变量这一支**（本票）：环境变量是环境态、会被夹具仓库全量
+  // 继承 ⇒ 必须由仓库自证归属才认。反查支不校验——目标由服务端按 commit 锚权威给出
+  // （夹具造的伪 uuid 在那里天然查不到），且收尾兜底 `review-fallback.ts` 是先
+  // `delete env.CATSTUDY_SESSION_ID` 再走反查。给它也加仓库校验只会凭空制造
+  // 「会话 worktree 已被收口清理 → 安全网自锁」的误拒。
   let sessionId = process.env.CATSTUDY_SESSION_ID
   if (sessionId) {
-    console.log(`[handoff-gen] 目标会话: ${sessionId}（CATSTUDY_SESSION_ID 人工显式指定）`)
+    const ownership = judgeRepoOwnership(cwd, sessionId)
+    if (!ownership.owned) {
+      process.stderr.write(formatOwnershipRefusal(cwd, sessionId, ownership))
+      return 'fatal'
+    }
+    console.log(
+      `[handoff-gen] 目标会话: ${sessionId}（CATSTUDY_SESSION_ID 人工显式指定，仓库归属已验）`
+    )
   } else {
     try {
       sessionId = await resolveCommitSessionId(cwd, serverUrl, opts.sha)

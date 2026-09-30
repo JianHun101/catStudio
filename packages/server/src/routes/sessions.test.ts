@@ -3,15 +3,24 @@ import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
 import { initRepository } from '../db/repository/index.js'
 import type { FastifyInstance } from 'fastify'
+import { Events } from '@cat-study/shared'
+import { setExecutionEngine, __test_reset as __resetEngine } from '../execution/registry.js'
+import type { ExecutionEngine, ExecutionEngineTestHooks } from '../execution/serial.js'
 
 // Mock getIO from socketio connector (used by session DELETE)
-vi.mock('../connectors/socketio.js', () => {
-  const mockEmit = vi.fn()
-  return {
-    getIO: vi.fn(() => ({ emit: mockEmit })),
-    createSocketIO: vi.fn(),
-  }
-})
+//
+// `emit` = 全局广播（SESSION_DELETED / SESSION_MESSAGES_CLEARED）；`roomEmit` = 房间广播
+// （`io.to('session:<id>').emit(...)`，PATCH 的 SESSION_UPDATE 与回退的 SESSION_ROLLED_BACK）。
+// 两个分开记，回退用例才能断言「发给了这个会话房间」而不是「随便发了一条」。
+const { mockEmit, mockRoomEmit } = vi.hoisted(() => ({
+  mockEmit: vi.fn(),
+  mockRoomEmit: vi.fn(),
+}))
+
+vi.mock('../connectors/socketio.js', () => ({
+  getIO: vi.fn(() => ({ emit: mockEmit, to: vi.fn(() => ({ emit: mockRoomEmit })) })),
+  createSocketIO: vi.fn(),
+}))
 
 describe('Session Routes', () => {
   let app: FastifyInstance
@@ -641,6 +650,242 @@ describe('Session Routes', () => {
     it('返回 404 for nonexistent session', async () => {
       const res = await app.inject({ method: 'GET', url: '/api/sessions/nonexistent/executions' })
       expect(res.statusCode).toBe(404)
+    })
+  })
+
+  // ─── T1 同会话回退 ─────────────────────────────────
+  //
+  // 组装式：真 SQLite（FK 生效，见 test-helpers 的 createTestDb）+ 真 Fastify handler。
+  // 引擎是**桩**（回退只消费 snapshot/abortAgent/cancelQueuedCommand 三个面，起真引擎
+  // 要拉 LLM 适配器与槽位工厂，与本票判据无关）。
+  describe('POST /api/sessions/:id/rollback（T1 同会话回退）', () => {
+    const T = (n: number) => `2026-09-01T10:00:${String(n).padStart(2, '0')}.000Z`
+
+    /** 直插消息（绕开 socket 发送链——本组只测回退的删除语义，不测写入路径） */
+    function seedMessage(id: string, sessionId: string, role: string, sec: number): void {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(id, sessionId, role === 'agent' ? agentId1 : null, role, `内容 ${id}`, T(sec))
+    }
+
+    async function newSession(title: string): Promise<string> {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title, agentIds: [agentId1] },
+      })
+      return JSON.parse(res.body).id
+    }
+
+    /** 最小引擎桩：只实现回退会碰的三个方法，其余留给 as unknown 断言 */
+    function stubEngine(slots: Array<Record<string, unknown>>) {
+      return {
+        snapshot: () => slots,
+        abortAgent: vi.fn(() => true),
+        cancelQueuedCommand: vi.fn(() => 0),
+      } as unknown as ExecutionEngine & ExecutionEngineTestHooks
+    }
+
+    afterEach(() => {
+      __resetEngine()
+    })
+
+    it('回退后 messages 只剩目标及之前——目标本身保留', async () => {
+      const sid = await newSession('回退-只剩目标及之前')
+      seedMessage('m1', sid, 'user', 0)
+      seedMessage('m2', sid, 'agent', 1)
+      seedMessage('m3', sid, 'user', 2)
+      seedMessage('m4', sid, 'agent', 3)
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: { messageId: 'm2' },
+      })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.removedIds).toEqual(['m3', 'm4'])
+      expect(body.removedCount).toBe(2)
+
+      const left = getDb()
+        .prepare('SELECT id FROM messages WHERE session_id = ? ORDER BY created_at ASC')
+        .all(sid) as Array<{ id: string }>
+      expect(left.map((r) => r.id)).toEqual(['m1', 'm2'])
+    })
+
+    it('关联 execution_logs 一并清理——只清被删消息引用到的那些（存活侧不动）', async () => {
+      const sid = await newSession('回退-执行日志')
+      seedMessage('m1', sid, 'user', 0)
+      seedMessage('m2', sid, 'agent', 1)
+      seedMessage('m3', sid, 'user', 2)
+      seedMessage('m4', sid, 'agent', 3)
+      const db = getDb()
+      const insLog = db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, message_id)
+         VALUES (?, ?, ?, ?, 'completed', ?)`
+      )
+      insLog.run('log-survives', sid, agentId1, 'm1', 'm2')
+      insLog.run('log-doomed', sid, agentId1, 'm3', 'm4')
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: { messageId: 'm2' },
+      })
+      expect(res.statusCode).toBe(200)
+
+      const logs = db
+        .prepare('SELECT id FROM execution_logs WHERE session_id = ?')
+        .all(sid) as Array<{ id: string }>
+      expect(logs.map((r) => r.id)).toEqual(['log-survives'])
+    })
+
+    it('welcome 伪消息（welcome-<sessionId>，从不落库）作为目标 → 4xx', async () => {
+      const sid = await newSession('回退-welcome')
+      seedMessage('m1', sid, 'user', 0)
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: { messageId: `welcome-${sid}` },
+      })
+      // 4xx 即可（票面口径）：它不在 messages 表里，404 与「不是可回退目标」同判据
+      expect(res.statusCode).toBeGreaterThanOrEqual(400)
+      expect(res.statusCode).toBeLessThan(500)
+      // 未误删任何东西
+      const left = getDb().prepare('SELECT id FROM messages WHERE session_id = ?').all(sid)
+      expect(left).toHaveLength(1)
+    })
+
+    it('running 执行先停再删：abortAgent 带 sessionId，排队命令按 doomed 逐条取消', async () => {
+      const sid = await newSession('回退-先停')
+      seedMessage('m1', sid, 'user', 0)
+      seedMessage('m2', sid, 'agent', 1)
+      seedMessage('m3', sid, 'user', 2)
+      const engine = stubEngine([
+        // 正在跑「即将被删」的 m3 → 必须 abort
+        {
+          agentId: agentId1,
+          sessionId: sid,
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'm3',
+        },
+        // 别的会话在跑 → 不受影响
+        {
+          agentId: agentId2,
+          sessionId: 'other-session',
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'm3',
+        },
+        // 本会话但跑的是存活消息 → 不停
+        {
+          agentId: agentId2,
+          sessionId: sid,
+          status: 'busy',
+          queueLength: 0,
+          currentTriggerMessageId: 'm1',
+        },
+      ])
+      setExecutionEngine(engine)
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: { messageId: 'm2' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(engine.abortAgent).toHaveBeenCalledTimes(1)
+      expect(engine.abortAgent).toHaveBeenCalledWith(agentId1, sid)
+      expect(engine.cancelQueuedCommand).toHaveBeenCalledWith('m3')
+    })
+
+    it('目标是末尾 → 0 删除、仍然 200（空集不开事务也不报错）', async () => {
+      const sid = await newSession('回退-末尾')
+      seedMessage('m1', sid, 'user', 0)
+      seedMessage('m2', sid, 'agent', 1)
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: { messageId: 'm2' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body).removedCount).toBe(0)
+      const left = getDb().prepare('SELECT id FROM messages WHERE session_id = ?').all(sid)
+      expect(left).toHaveLength(2)
+    })
+
+    it('目标不存在 → 404；目标属于别的会话 → 404（不跨会话删）', async () => {
+      const sid = await newSession('回退-A')
+      const other = await newSession('回退-B')
+      seedMessage('m1', sid, 'user', 0)
+      seedMessage('x1', other, 'user', 0)
+      seedMessage('x2', other, 'agent', 1)
+
+      const missing = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: { messageId: 'nope' },
+      })
+      expect(missing.statusCode).toBe(404)
+
+      const cross = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: { messageId: 'x1' },
+      })
+      expect(cross.statusCode).toBe(404)
+      // 别的会话一行没少
+      const otherLeft = getDb().prepare('SELECT id FROM messages WHERE session_id = ?').all(other)
+      expect(otherLeft).toHaveLength(2)
+    })
+
+    it('会话不存在 → 404；body 缺 messageId → 400', async () => {
+      const sid = await newSession('回退-参数')
+      seedMessage('m1', sid, 'user', 0)
+
+      const noSession = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/nonexistent/rollback',
+        payload: { messageId: 'm1' },
+      })
+      expect(noSession.statusCode).toBe(404)
+
+      const noBody = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: {},
+      })
+      expect(noBody.statusCode).toBe(400)
+    })
+
+    it('广播发到**会话房间**且带权威 removedIds（前端按 id 删，不自己重算）', async () => {
+      const sid = await newSession('回退-广播')
+      seedMessage('m1', sid, 'user', 0)
+      seedMessage('m2', sid, 'agent', 1)
+      seedMessage('m3', sid, 'user', 2)
+      mockRoomEmit.mockClear()
+
+      await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/rollback`,
+        payload: { messageId: 'm1' },
+      })
+
+      expect(mockRoomEmit).toHaveBeenCalledTimes(1)
+      const [event, payload] = mockRoomEmit.mock.calls[0] as [string, Record<string, unknown>]
+      expect(event).toBe(Events.SESSION_ROLLED_BACK)
+      expect(payload).toMatchObject({
+        sessionId: sid,
+        messageId: 'm1',
+        removedIds: ['m2', 'm3'],
+        removedCount: 2,
+      })
     })
   })
 })

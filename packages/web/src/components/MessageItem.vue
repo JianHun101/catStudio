@@ -14,13 +14,13 @@
  * · **markdown 走 computed**（依赖追踪自带缓存）——取代父组件过去手写的
  *   `markdownCache` Map（键拼整条正文、无淘汰、无界增长）。
  */
-import { computed, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import type { Message, ToolCallInfo } from '@cat-study/shared'
 import { useChatStore, type AgentStatusEntry } from '@/stores/chat'
 import { renderMarkdown } from '@/utils/markdown'
 import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { isAgentStoppable, toolAreaSummary } from '@/utils/tools'
-import type { MemoryRefView } from '@/utils/memoryRefs'
+import type { MemoryRefItemView, MemoryRefView } from '@/utils/memoryRefs'
 import type { MemoryRef } from '@/composables/useApi'
 import DiffViewer from './DiffViewer.vue'
 import AgentStatusLabel from './AgentStatusLabel.vue'
@@ -34,9 +34,12 @@ const props = defineProps<{
   isLatestUser: boolean
   avatar: string
   senderName: string
-  /** footer：{模型} · {n}k/{m}k tokens 文案（父组件已格式化） */
+  /** footer：模型名（CLI 徽章右侧的 mono 文字，父组件已格式化） */
   modelName: string
-  tokensText: string
+  /** footer：CLI 工具名（徽章文字，空串 = 不渲染徽章） */
+  cliName: string
+  /** footer：CLI 徽章配色类（父组件按 provider 判定） */
+  cliClass: string
   /** footer 用量色阶（阈值来自配置，父组件判定） */
   contextLevel: 'critical' | 'warn' | ''
   /** footer 执行元数据文案（execution_logs 落库稳定值；无则 null） */
@@ -67,6 +70,10 @@ const emit = defineEmits<{
   cancelRestart: [msgId: string]
   /** 点记忆条目 → 父组件开抽屉（本组件不碰网络、不持有抽屉态） */
   openMemoryRef: [ref: MemoryRef]
+  /** hover 操作条「↩ 回退」→ 父组件开确认弹窗并调端点（本组件不碰网络） */
+  rollback: [msgId: string]
+  /** hover 操作条「⚙ trace」（T2）→ 父组件反查 executionId 后开追踪页并预选（本组件不碰网络） */
+  openTrace: [msgId: string]
 }>()
 
 const store = useChatStore()
@@ -94,10 +101,67 @@ function finalTextContent(msg: Message): string {
   return msg.content
 }
 
-/** 正文 html——内容或 store/reviewer 角色名变化才重算（占位符替换依赖后者） */
+/**
+ * 正文 html——内容、store/reviewer 角色名、或**角标号**变化才重算
+ * （占位符替换依赖角色名；角标号依赖父组件拉回的 `memory-refs`）。
+ *
+ * 角标只传正文：思考块 / 折叠块 / 流式中间段不传（`renderMarkdown` 的可选参数缺省
+ * = 没有角标），那里的 `[n]` 保持字面——它们不是「回复采纳了某节」的载体。
+ */
 const bodyHtml = computed(() =>
-  renderMarkdown(resolveDisplayPlaceholders(finalTextContent(props.msg), store.agents))
+  renderMarkdown(
+    resolveDisplayPlaceholders(finalTextContent(props.msg), store.agents),
+    props.memoryRefs?.markers
+  )
 )
+
+// ─── 角标 hover 卡片（R14b）──────────────────────────────
+//
+// 角标是 `renderMarkdown` 的 v-html 产物——**Vue 不管理它**，故事件走**委托**：
+// 在 `.msg-text` 上听一次 mouseover/mouseout，按事件目标里的 `sup[data-marker]` 定位。
+// 卡片只渲染一张（单浮层元素），数据全部来自 `props.memoryRefs`（既有批量口），
+// **不发任何新请求**——这正是本票「hover 卡片」的验收 7。
+
+/** 当前悬停的角标号（`null` = 无卡片） */
+const hoverMarker = ref<number | null>(null)
+/** 卡片锚点（视口坐标；`position: fixed` 直接消费） */
+const hoverAt = ref<{ top: number; left: number }>({ top: 0, left: 0 })
+
+/**
+ * 角标号 → 展示条目。匹配键是 `injectedPosition`（**不是数组下标**）——
+ * 与后端 `markers` 的口径同源（编号的唯一真相源是注入时的渲染序）。
+ */
+function markerItemFor(n: number): MemoryRefItemView | null {
+  return props.memoryRefs?.items.find((item) => item.ref.injectedPosition === n) ?? null
+}
+
+/** 悬停中的条目（`computed` ⇒ 模板直接判空；无对应节时保持 `null`，不弹空卡片） */
+const hoverItem = computed(() =>
+  hoverMarker.value === null ? null : markerItemFor(hoverMarker.value)
+)
+
+/** 事件目标里最近的角标元素（不是角标 / 已离开就 null） */
+function citationTargetOf(e: Event): Element | null {
+  const target = e.target
+  if (!(target instanceof Element)) return null
+  return target.closest('sup[data-marker]')
+}
+
+/** 委托：鼠标移入角标 → 记号 + 以角标矩形为锚点（卡片落其正下方） */
+function onBodyPointerOver(e: Event): void {
+  const el = citationTargetOf(e)
+  if (!el) return
+  const n = Number(el.getAttribute('data-marker'))
+  if (!Number.isInteger(n) || !markerItemFor(n)) return
+  hoverMarker.value = n
+  const rect = el.getBoundingClientRect()
+  hoverAt.value = { top: rect.bottom, left: rect.left }
+}
+
+/** 委托：移出角标即收起（卡片本身不可交互，故不必判「是否移进卡片」） */
+function onBodyPointerOut(e: Event): void {
+  if (citationTargetOf(e)) hoverMarker.value = null
+}
 
 /** 老消息退化路径的思考 blob html（[思考] 前缀仅旧库数据带，含前缀才剥） */
 const thinkingHtml = computed(() => {
@@ -223,10 +287,46 @@ const stopSignal = computed(() =>
 function canStop(agentId: string): boolean {
   return stopSignal.value.split(',').includes(agentId)
 }
+
+// ─── hover 操作条：复制（T1 改版）────────────────────────
+//
+// `copied` 是**叶子自持**的瞬时态：它不跨消息、不参与任何父级判定，上抛只会把一次
+// 点击变成整列重算——正是本组件抽取时要拆掉的那条链。故留在组件内。
+
+/** 复制成功态（按钮短暂变 ✓） */
+const copied = ref(false)
+let copyTimer: ReturnType<typeof setTimeout> | undefined
+
+/**
+ * 复制正文纯文本。
+ *
+ * 取的是**渲染层看到的同一串**（`finalTextContent` + 占位符解析）——复制出去的正文必须
+ * 与气泡里读到的一致。思考块/折叠块不进正文（它们不是「回复正文」），角标号也不带
+ * （`[n]` 是注入序的引用，脱离记忆行没有意义）。
+ */
+async function copyBody(): Promise<void> {
+  const text = resolveDisplayPlaceholders(finalTextContent(props.msg), store.agents)
+  try {
+    await navigator.clipboard.writeText(text)
+    copied.value = true
+    clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => {
+      copied.value = false
+    }, 1200)
+  } catch {
+    // 剪贴板不可用（非安全上下文 / 无权限 / 用户拒绝）时静默：复制失败对正文零破坏，
+    // 而弹一条错误会打断阅读。按钮不变 ✓ 即是反馈。
+  }
+}
+
+onUnmounted(() => clearTimeout(copyTimer))
 </script>
 
 <template>
-  <div class="message" :class="[msg.role, { grouped }]">
+  <!-- `data-msg-id` = 「滚到这条消息」的定位锚（T2 从追踪页跳回气泡用）。
+       用 DOM 属性而非 ref 表：消息是 v-for 出来的，父组件拿不到稳定的元素引用表，
+       而 `querySelector` 在这个规模（一屏几十条）完全不值得为它建索引。 -->
+  <div class="message" :class="[msg.role, { grouped }]" :data-msg-id="msg.id">
     <div v-if="!grouped" class="msg-avatar">{{ avatar }}</div>
     <div v-else class="msg-avatar msg-avatar-hidden">{{ avatar }}</div>
 
@@ -289,7 +389,25 @@ function canStop(agentId: string): boolean {
             @click="emit('previewImages', msg.images!, i)"
           />
         </div>
-        <div class="msg-text" v-html="bodyHtml"></div>
+        <!-- 正文：角标（R14b）由 renderMarkdown 渲染成 <sup data-marker>，
+             鼠标事件在此**委托**（v-html 的内容 Vue 不管理，绑不到元素上） -->
+        <div
+          class="msg-text"
+          v-html="bodyHtml"
+          @mouseover="onBodyPointerOver"
+          @mouseout="onBodyPointerOut"
+        ></div>
+        <!-- 角标 hover 卡片：单浮层元素、内容来自既有 memory-refs 数据（零新请求）。
+             标题 = 该节 breadcrumb，正文 = 命中片开头（`.mem-card-body` 行数截断） -->
+        <div
+          v-if="hoverItem"
+          class="mem-citation-card"
+          role="tooltip"
+          :style="{ top: `${hoverAt.top}px`, left: `${hoverAt.left}px` }"
+        >
+          <div class="mem-card-title">{{ hoverItem.title }}</div>
+          <div class="mem-card-body">{{ hoverItem.ref.bodyHead }}</div>
+        </div>
         <!-- 对话内 diff 展示：extra.rich.blocks 存在才渲染（服务端采集附加，
              永不进 LLM 上下文）；旧消息/无 extra → 纯文本回退与现网一致 -->
         <DiffViewer v-if="msg.extra?.rich?.blocks?.length" :blocks="msg.extra.rich.blocks" />
@@ -342,16 +460,63 @@ function canStop(agentId: string): boolean {
               未检索记忆
             </span>
           </div>
+          <!-- 信息面：CLI 徽章 + 模型名 + 耗时 / 单次 in·out tok——**恒显**，不受 hover 门控。
+               改版砍掉了累计窗口用量（`{用量}k/{上限}k tokens`）：右栏成员卡已有同一读数，
+               三处重复；单次调用量由 execMetaText 承担。 -->
           <span
             v-if="msg.role === 'agent' && msg.agentId"
             class="msg-footer-info"
             :class="contextLevel"
           >
-            {{ modelName }} · {{ tokensText
-            }}<span v-if="execMetaText" class="msg-duration"> · {{ execMetaText }}</span
-            ><span v-else-if="durationText" class="msg-duration"> · {{ durationText }}</span>
+            <span v-if="cliName" class="cli-badge" :class="cliClass">{{ cliName }}</span>
+            <span class="msg-model">{{ modelName }}</span>
+            <span v-if="execMetaText" class="msg-duration"> · {{ execMetaText }}</span>
+            <span v-else-if="durationText" class="msg-duration"> · {{ durationText }}</span>
           </span>
           <span class="msg-footer-right">
+            <!-- 操作面：默认 opacity:0，hover 气泡浮现、移出即隐（CSS 门控，无 JS 状态）。
+                 只有**动作**进操作条；记忆行/模型/耗时/时间那些是读数，不进 hover 门控——
+                 把它们藏起来等于让人 hover 才看得见信息。 -->
+            <span class="msg-acts">
+              <button
+                class="act-btn"
+                :title="copied ? '已复制' : '复制正文'"
+                :aria-label="copied ? '已复制' : '复制正文'"
+                @click="copyBody"
+              >
+                {{ copied ? '✓' : '⧉' }}
+              </button>
+              <!-- ⚙ trace（T2 接线）：带 messageId 上抛，由 ChatPanel 反查 executionId 后跳页预选。
+                   查不到（该气泡没有执行行：回退删过 / 非本执行产出）由 ChatPanel 弹一句实话 -->
+              <button
+                v-if="msg.role === 'agent'"
+                class="act-btn"
+                title="查看这次执行的追踪"
+                aria-label="查看这次执行的追踪"
+                @click="emit('openTrace', msg.id)"
+              >
+                ⚙ trace
+              </button>
+              <!-- 撤回（既有机制）：落点从用户消息状态行迁到 hover 操作条。
+                   判据仍是 isLatestUser——服务端只允许撤回最新一条用户消息 -->
+              <button
+                v-if="msg.role === 'user' && isLatestUser"
+                class="act-btn btn-retract"
+                :class="{ 'btn-retract-confirm': retractConfirming }"
+                :aria-label="retractConfirming ? '确认撤回消息' : '撤回消息'"
+                @click="emit('retract', msg.id)"
+              >
+                {{ retractConfirming ? '确认撤回？' : '撤回' }}
+              </button>
+              <button
+                class="act-btn act-btn-danger btn-rollback"
+                title="回退到此处（删除此消息之后的全部消息）"
+                aria-label="回退到此处"
+                @click="emit('rollback', msg.id)"
+              >
+                ↩ 回退
+              </button>
+            </span>
             <time class="msg-time" :datetime="msg.createdAt">{{ timeText }}</time>
           </span>
         </div>
@@ -380,15 +545,7 @@ function canStop(agentId: string): boolean {
           停止
         </button>
       </div>
-      <button
-        v-if="isLatestUser"
-        class="btn-retract"
-        :class="{ 'btn-retract-confirm': retractConfirming }"
-        :aria-label="retractConfirming ? '确认撤回消息' : '撤回消息'"
-        @click="emit('retract', msg.id)"
-      >
-        {{ retractConfirming ? '确认撤回？' : '撤回' }}
-      </button>
+      <!-- 撤回按钮已迁到气泡 hover 操作条（.msg-acts）——状态行只留状态与停止按钮 -->
     </div>
   </div>
 </template>

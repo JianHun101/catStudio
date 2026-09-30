@@ -26,6 +26,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   toggleLeftSidebar: []
+  /** ⚙ trace（T2）→ 上抛给 App 打开执行追踪页并预选该执行 */
+  openTrace: [executionId: string]
 }>()
 
 const store = useChatStore()
@@ -33,8 +35,6 @@ const { isDark, toggle: toggleTheme } = useTheme()
 const input = ref('')
 const chatContainer = ref<HTMLDivElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
-const clearingMessages = ref(false)
-const clearConfirm = ref(false) // 两步确认：第一次点变红，第二次执行
 const retractConfirm = ref<string | null>(null) // 撤回确认：存 messageId
 const sending = ref(false)
 
@@ -574,25 +574,9 @@ function restartStateFor(msg: Message): 'pending' | 'confirmed' | 'none' {
 
 // ─── Existing helpers ──────────────────────
 
-async function handleClearMessages(): Promise<void> {
-  if (!store.activeSessionId) return
-  if (!clearConfirm.value) {
-    clearConfirm.value = true
-    setTimeout(() => {
-      clearConfirm.value = false
-    }, 3000)
-    return
-  }
-  clearingMessages.value = true
-  try {
-    await store.clearSessionMessages(store.activeSessionId)
-    clearConfirm.value = false
-  } catch (err) {
-    log.error('clear messages failed', { error: String(err) })
-  } finally {
-    clearingMessages.value = false
-  }
-}
+// 顶栏「清空」按钮已移除（T1 用户裁决：去掉清空，改为同会话回退）。
+// `store.clearSessionMessages` / `api.clearSessionMessages` 作为**运维口**保留在
+// store 与 API 层——UI 不再暴露，但链路不拆（验收：源码/API 仍在）。
 
 function onInput(e: Event): void {
   if ((e as InputEvent).isComposing) return
@@ -816,6 +800,45 @@ async function handleRetract(msgId: string): Promise<void> {
   await store.retractMessage(store.activeSessionId, msgId)
 }
 
+// ─── 同会话回退（T1）─────────────────────────────
+
+/** 待确认的回退目标（`null` = 弹窗关闭）；`count` = 目标之后的条数 */
+const rollbackTarget = ref<{ msgId: string; count: number } | null>(null)
+const rollingBack = ref(false)
+
+/**
+ * 打开回退确认弹窗。
+ *
+ * `count` 取**当前渲染列表**里该消息之后的条数——弹窗问的是「你看到的这些要删掉，确定吗」，
+ * 判据就该是用户看到的那一份。服务端另有自己的 `(created_at, id)` 删除集（并发同毫秒时
+ * 可能与渲染序差一条），届时以服务端广播回执为准：列表按 `removedIds` 删，不会删错。
+ */
+function requestRollback(msgId: string): void {
+  const idx = store.activeMessages.findIndex((m) => m.id === msgId)
+  if (idx < 0) return
+  rollbackTarget.value = { msgId, count: store.activeMessages.length - idx - 1 }
+}
+
+function cancelRollback(): void {
+  rollbackTarget.value = null
+}
+
+/** 确认回退：调端点 → store 按服务端回执的 removedIds 移除并落分隔线标记 */
+async function confirmRollback(): Promise<void> {
+  const target = rollbackTarget.value
+  if (!target || !store.activeSessionId || rollingBack.value) return
+  rollingBack.value = true
+  try {
+    await store.rollbackSession(store.activeSessionId, target.msgId)
+    rollbackTarget.value = null
+  } catch (err) {
+    // 失败保持弹窗开启：让用户看到没成功，而不是弹窗消失、消息还在（误以为成功）
+    log.error('rollback failed', { error: String(err) })
+  } finally {
+    rollingBack.value = false
+  }
+}
+
 // ─── Bubble Footer (模型 + 窗口用量 + 停止按钮) ───────
 
 /** Agent 模型名（agents 表 llm_model，缺失返回空串隐藏） */
@@ -843,16 +866,28 @@ function fmtTokens(n: number): string {
   return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
 }
 
-/** 气泡 footer tokens 文案：{用量}k/{上限}k tokens——m = maxContextTokens（上下文窗口数），
- *  不是 llm_max_tokens（单次输出上限 2048）——两个数字体系严防混淆 */
-function tokensTextFor(agentId: string): string {
-  return `${fmtTokens(store.contextTokens.get(agentId) ?? 0)}/${fmtTokens(maxTokensFor(agentId))} tokens`
+/** Agent 的 CLI 工具名（= `llmProvider`，徽章文字）。缺失返回空串隐藏徽章。 */
+function cliNameFor(agentId: string): string {
+  return store.agents.find((a) => a.id === agentId)?.llmProvider || ''
 }
 
-/** agent 回复耗时徽标文案：{秒数} 秒（服务端随广播注入 durationMs，瞬态不落库） */
+/** CLI 徽章配色类（用户裁决：工具名用颜色区分，一眼分清谁在说话）。
+ *  provider 值域见 shared `Agent.llmProvider`；`opencode-go` 这类带路由后缀的按**前缀**
+ *  归族——后缀是模型路由不是另一个工具。未知 provider 回落 `cli-other`（中性色）：
+ *  徽章本身照常显示，不因配色表没收录就把工具名藏起来。 */
+function cliBadgeClass(provider: string): string {
+  const p = provider.toLowerCase()
+  if (p.startsWith('claude')) return 'cli-claude'
+  if (p.startsWith('deepseek')) return 'cli-deepseek'
+  if (p.startsWith('opencode')) return 'cli-opencode'
+  return 'cli-other'
+}
+
+/** agent 回复耗时徽标文案：⏱ {秒数} 秒（服务端随广播注入 durationMs，瞬态不落库）。
+ *  统一带 ⏱ 前缀——footer 单行里它与「单次 tok」并列，没有前缀分不清哪个是时间。 */
 function formatDuration(ms: number): string {
   const s = ms / 1000
-  return `${s >= 10 ? s.toFixed(0) : s.toFixed(1)} 秒`
+  return `⏱ ${s >= 10 ? s.toFixed(0) : s.toFixed(1)} 秒`
 }
 
 /** 执行元数据（execution_logs.message_id 精确关联回复气泡——成功路径 1:1；落库稳定值）。
@@ -861,17 +896,21 @@ function execMetaFor(msg: { id: string }): ExecutionMeta | undefined {
   return store.sessionExecutions.get(msg.id)
 }
 
-/** 气泡 footer 执行元数据文案：{耗时} · in {prompt}k / out {completion}k tok。
+/** 气泡 footer 执行元数据文案：`{⏱ 耗时} · {prompt}k/{completion}k tok`（形态与「不写
+ *  "in"/"out" 字样」的理由见函数内注释）。
  *  取代 durationMs 瞬态展示（durationMs 保留兜底——execution 拉取未到时新回复短暂可显）。 */
 function execMetaTextFor(msg: { id: string }): string | null {
   const meta = execMetaFor(msg)
   if (!meta) return null
   const parts: string[] = []
-  if (meta.latencyMs != null) parts.push(`耗时 ${formatDuration(meta.latencyMs)}`)
+  if (meta.latencyMs != null) parts.push(formatDuration(meta.latencyMs))
   const inTok = meta.promptTokens
   const outTok = meta.completionTokens
   if (inTok != null || outTok != null) {
-    parts.push(`in ${fmtTokens(inTok ?? 0)} / out ${fmtTokens(outTok ?? 0)} tok`)
+    // 单次调用的 in/out——**不写 "in"/"out" 字样**（用户裁决：「放在 / 两边自然就清楚了」）。
+    // 与已砍掉的累计窗口用量（`{用量}k/{上限}k tokens`）区分：那串带 "tokens" 字样，
+    // 这串带 "tok"；两者都在 footer 会让人分不清哪个是窗口。
+    parts.push(`${fmtTokens(inTok ?? 0)}/${fmtTokens(outTok ?? 0)} tok`)
   }
   return parts.length > 0 ? parts.join(' · ') : null
 }
@@ -928,6 +967,19 @@ const warnedAgentsText = computed(() => {
 //   ③ **三态分开**——有注入 / 未使用（查了没选中）/ 未检索（压根没查），
 //      见 `utils/memoryRefs.ts`。三者混一句，使用率的分母就没了。
 
+/**
+ * 记忆面只认 agent 消息——**请求面与渲染面必须同尺**：`fetchMemoryRefs` 发哪些 id、
+ * `memoryRefViewFor` 给谁渲染记忆行，判的是同一件事。
+ *
+ * 两处各写一份 `role === 'agent'` 就是「同一规则两处措辞 = 假绿源」：判据一分叉，
+ * 请求就会带上不该带的 id。会话历史里有一条 server 合成的 welcome 伪消息
+ * （`welcome-<sessionId>`，role=system，**不落 messages 表**），
+ * server 的越权守卫查不到它 ⇒ **整条 400**（不是跳过该 id）⇒ 全会话记忆行 + 角标全灭。
+ */
+function isMemoryRefMessage(msg: Message): boolean {
+  return msg.role === 'agent'
+}
+
 /** 批量口结果：messageId → 条目（会话切换时整体替换） */
 const memoryRefsByMessage = ref<Map<string, MemoryRefsEntry>>(new Map())
 
@@ -950,7 +1002,9 @@ const MEMORY_REFS_MAX_IDS = 200
 
 async function fetchMemoryRefs(): Promise<void> {
   const sessionId = store.activeSessionId
-  const all = store.activeMessages.map((m) => m.id)
+  // 只发 agent 消息的 id（`isMemoryRefMessage`）——非 agent（user / welcome 伪消息）
+  // 既不会渲染记忆行也不会渲染角标，发过去只会让 server 整条 400（见该函数注）。
+  const all = store.activeMessages.filter((m) => isMemoryRefMessage(m)).map((m) => m.id)
   if (!sessionId || all.length === 0) {
     memoryRefsByMessage.value = new Map()
     return
@@ -1002,6 +1056,29 @@ const docPreview = ref<{ loading: boolean; content: string | null; error: string
   error: null,
 })
 
+/** 片段正文缺失时的占位文案（M3 前是 `<pre>` 里的一条内联兜底，现提为常量给渲染用） */
+const DRAWER_SNIPPET_EMPTY = '（这一行没有落片段正文）'
+
+/**
+ * 抽屉两处内容区的渲染产物（M3：记忆抽屉 MD 化）。
+ *
+ * 走正文气泡**同一条管线** `renderMarkdown`（marked + DOMPurify）——故 `v-html` 的输入
+ * 是**已消毒**的 HTML，安全面与正文同源、不重开。`markers` 缺省不传：抽屉不是回复正文，
+ * 切片里的 `[n]` 保持字面（角标面不动，票 §三）。
+ *
+ * 注意渲染层**不管**两条口径纪律——「bodyHead 是命中片 ≠ 猫当时读到的整节」「打开的是
+ * 当前检出、不是当时快照」由下方 caption / hint 文案逐字承担，MD 化只是换渲染器。
+ */
+const drawerSnippetHtml = computed(() =>
+  renderMarkdown(activeMemoryRef.value?.bodyHead ?? DRAWER_SNIPPET_EMPTY)
+)
+
+/** 当前文档正文的渲染产物（抽屉关着 / 未加载 / 加载失败时不跑重管线） */
+const drawerDocHtml = computed(() => {
+  const content = docPreview.value.content
+  return content === null ? '' : renderMarkdown(content)
+})
+
 function openMemoryRef(ref: MemoryRef): void {
   activeMemoryRef.value = ref
   docPreview.value = { loading: false, content: null, error: null }
@@ -1011,6 +1088,61 @@ function closeMemoryRef(): void {
   activeMemoryRef.value = null
   docPreview.value = { loading: false, content: null, error: null }
 }
+
+// ─── T2：气泡 ⚙ trace 跳页 + 「跳到该回复气泡 ↗」回滚 ──────────────
+
+/**
+ * 气泡 ⚙ → 追踪页预选。
+ *
+ * 两条取 id 的路**按快慢分工**，不是重复实现：
+ * · **快路** = `store.sessionExecutions`（进会话时已批量拉过的 `messageId → 执行` 投影，
+ *   本票给它加了 `executionId`）⇒ 绝大多数点击零往返；
+ * · **慢路** = `/eval/execution-by-message`（权威回退）。缓存未就绪的三种真实场景：
+ *   刷新后 store 还没回、该会话的执行元数据拉取失败过、消息是刚推送进来还没进缓存。
+ *
+ * 两条都拿不到 ⇒ **不静默**：气泡上弹一句实话（该消息没有执行行——回退删过、或它本来
+ * 就不是猫的回复产物），而不是打开一个空追踪页让用户自己猜。
+ */
+async function openTraceFor(messageId: string): Promise<void> {
+  const cached = store.sessionExecutions.get(messageId)?.executionId
+  if (cached) {
+    emit('openTrace', cached)
+    return
+  }
+  const sessionId = store.activeSessionId
+  if (!sessionId) return
+  try {
+    const res = await api.getExecutionByMessage(messageId, sessionId)
+    emit('openTrace', res.executionId)
+  } catch {
+    store.showError('这条回复没有执行记录（可能已被回退删除），无法打开追踪')
+  }
+}
+
+/**
+ * 从追踪页「跳到该回复气泡 ↗」回来时的滚动定位。
+ *
+ * `focusNonce` 一并进依赖：连点两次同一条气泡也要各滚一次——只 watch id 时
+ * 第二次赋同值不触发（Vue 的依赖比较是值相等），症状是「第二次点了没反应」。
+ * 滚动时机取 `nextTick` 之后：切会话时消息是异步拉回来的，此刻 DOM 里可能还没这条。
+ */
+watch(
+  () => [store.focusMessageId, store.focusNonce] as const,
+  async ([id]) => {
+    if (!id) return
+    await nextTick()
+    // `CSS.escape` 在 jsdom 里可能缺席；id 是 uuid 形态（安全字符），回落原样拼即可
+    const sel = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '')
+    const el = chatContainer.value?.querySelector(`[data-msg-id="${sel}"]`)
+    if (el) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      ;(el as HTMLElement).classList.add('msg-focus-flash')
+      setTimeout(() => (el as HTMLElement).classList.remove('msg-focus-flash'), 1200)
+    }
+    // 消费即清位：不清的话下次切会话回来会凭空再滚一次
+    store.clearFocusMessage()
+  }
+)
 
 /**
  * 「打开当前文档」——**当前检出上的文档，不是当时的快照**（形态丙外链被否正是因为
@@ -1057,7 +1189,10 @@ type MessageView = {
   avatar: string
   senderName: string
   modelName: string
-  tokensText: string
+  /** CLI 工具名（徽章文字，空串 = 不渲染徽章） */
+  cliName: string
+  /** CLI 徽章配色类（父组件按 provider 算一次，MessageItem 只贴 class） */
+  cliClass: string
   contextLevel: 'critical' | 'warn' | ''
   execMetaText: string | null
   durationText: string | null
@@ -1068,6 +1203,9 @@ type MessageView = {
   retractConfirming: boolean
   /** footer 记忆引用行（M1）——引用稳定（按 messageId 缓存），null = 不渲染该行 */
   memoryRefs: MemoryRefView | null
+  /** 回退分隔线（T1）：本条是最近一次回退的锚点时，在其**之后**渲染一条分隔线 */
+  showRollbackLine: boolean
+  rollbackLineText: string
 }
 
 /** 逐字段相等判定（引用类型只比引用：msg/statusEntries 都是稳定引用） */
@@ -1081,7 +1219,8 @@ function isSameView(a: MessageView, b: MessageView): boolean {
     a.avatar === b.avatar &&
     a.senderName === b.senderName &&
     a.modelName === b.modelName &&
-    a.tokensText === b.tokensText &&
+    a.cliName === b.cliName &&
+    a.cliClass === b.cliClass &&
     a.contextLevel === b.contextLevel &&
     a.execMetaText === b.execMetaText &&
     a.durationText === b.durationText &&
@@ -1091,7 +1230,9 @@ function isSameView(a: MessageView, b: MessageView): boolean {
     a.restartConfirming === b.restartConfirming &&
     a.retractConfirming === b.retractConfirming &&
     // 记忆行按**引用**比：`memoryRefViewFor` 保证同一份原始条目（引用不变）产出同一个视图对象
-    a.memoryRefs === b.memoryRefs
+    a.memoryRefs === b.memoryRefs &&
+    a.showRollbackLine === b.showRollbackLine &&
+    a.rollbackLineText === b.rollbackLineText
   )
 }
 
@@ -1111,9 +1252,9 @@ const memoryViewCache = new Map<
   { raw: MemoryRefsEntry | undefined; view: MemoryRefView | null }
 >()
 
-/** 取正文段最后一个 text 段之外，本函数只看 role 与 id —— user/system 不渲染记忆行 */
+/** 取正文段最后一个 text 段之外，本函数只看 role 与 id —— 非 agent 不渲染记忆行 */
 function memoryRefViewFor(msg: Message): MemoryRefView | null {
-  if (msg.role !== 'agent') return null
+  if (!isMemoryRefMessage(msg)) return null
   const raw = memoryRefsByMessage.value.get(msg.id)
   const cached = memoryViewCache.get(msg.id)
   if (cached && cached.raw === raw) return cached.view
@@ -1126,11 +1267,17 @@ const messageViews = computed<MessageView[]>(() => {
   const msgs = store.activeMessages
   const lastUserId = lastUserMessageId.value
   const sepIndices = dateSepIndices.value
+  // 本会话的回退标记（锚点消息 id + 删除条数）；无标记/锚点已被后续回退删掉 ⇒ undefined
+  const rollbackMark = store.rollbackMarks.get(store.activeSessionId ?? '')
   const views: MessageView[] = []
   const next = new Map<string, MessageView>()
   for (let i = 0; i < msgs.length; i++) {
     const msg = msgs[i]
     const agentId = msg.agentId
+    // 查一次库出两个标量（徽章文字 + 配色类）——`store.agents.find` 别走两遍
+    const cliName = agentId ? cliNameFor(agentId) : ''
+    // 回退分隔线锚在本条之后（不是之前）：用户心智是「从这条往下被删了」
+    const isRollbackAnchor = rollbackMark !== undefined && rollbackMark.afterMessageId === msg.id
     const fresh: MessageView = {
       msg,
       showDateSep: sepIndices.has(i),
@@ -1140,16 +1287,21 @@ const messageViews = computed<MessageView[]>(() => {
       avatar: avatarFor(msg.role, agentId),
       senderName: senderName(agentId),
       modelName: agentId ? modelNameFor(agentId) : '',
-      tokensText: agentId ? tokensTextFor(agentId) : '',
+      cliName,
+      cliClass: cliName ? cliBadgeClass(cliName) : '',
       contextLevel: agentId ? contextLevelFor(agentId) : '',
       execMetaText: execMetaTextFor(msg),
-      durationText: msg.durationMs != null ? `耗时 ${formatDuration(msg.durationMs)}` : null,
+      durationText: msg.durationMs != null ? formatDuration(msg.durationMs) : null,
       timeText: formatTime(msg.createdAt),
       statusEntries: store.messageStatus.get(msg.id) ?? EMPTY_STATUS,
       restartState: restartStateFor(msg),
       restartConfirming: store.confirmingRestartMessageId === msg.id,
       retractConfirming: retractConfirm.value === msg.id,
       memoryRefs: memoryRefViewFor(msg),
+      showRollbackLine: isRollbackAnchor,
+      rollbackLineText: isRollbackAnchor
+        ? `已回退 · 删除了 ${rollbackMark.removedCount} 条消息`
+        : '',
     }
     const cached = viewCache.get(msg.id)
     const view = cached && isSameView(cached, fresh) ? cached : fresh
@@ -1225,28 +1377,6 @@ const messageViews = computed<MessageView[]>(() => {
           </svg>
         </button>
       </div>
-
-      <div v-if="store.activeSessionId" class="chat-header-actions">
-        <button
-          class="btn-clear"
-          :class="{ 'btn-clear-confirm': clearConfirm }"
-          :title="clearConfirm ? '确认清空所有消息' : '清空所有消息'"
-          :aria-label="clearConfirm ? '确认清空所有消息' : '清空所有消息'"
-          :disabled="clearingMessages"
-          @click="handleClearMessages"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M2 4h12M5.5 4V2.5h5V4M6.5 7v5M9.5 7v5M3.5 4l.7 9.1a1 1 0 001 .9h5.6a1 1 0 001-.9l.7-9.1"
-              stroke="currentColor"
-              stroke-width="1.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-          {{ clearingMessages ? '…' : clearConfirm ? '确认清空？' : '清空' }}
-        </button>
-      </div>
     </div>
 
     <!-- Messages -->
@@ -1316,7 +1446,8 @@ const messageViews = computed<MessageView[]>(() => {
               :avatar="view.avatar"
               :sender-name="view.senderName"
               :model-name="view.modelName"
-              :tokens-text="view.tokensText"
+              :cli-name="view.cliName"
+              :cli-class="view.cliClass"
               :context-level="view.contextLevel"
               :exec-meta-text="view.execMetaText"
               :duration-text="view.durationText"
@@ -1329,10 +1460,24 @@ const messageViews = computed<MessageView[]>(() => {
               @open-memory-ref="openMemoryRef"
               @preview-images="openPreview"
               @retract="handleRetract"
+              @rollback="requestRollback"
               @stop-agent="stopAgent"
               @confirm-restart="store.confirmRestart"
               @cancel-restart="store.cancelRestart"
+              @open-trace="openTraceFor"
             />
+
+            <!-- 回退分隔线（T1）：锚在本条之后——「从这条往下被删了 N 条」。
+                 前端渲染态不落库（store.rollbackMarks），刷新即消失；锚点被后续回退
+                 一并删掉时本行自然不再渲染（自愈，无需清理标记）。 -->
+            <div
+              v-if="view.showRollbackLine"
+              :key="`rb-${view.msg.id}`"
+              class="rollback-line"
+              role="separator"
+            >
+              <span>{{ view.rollbackLineText }}</span>
+            </div>
           </template>
         </TransitionGroup>
 
@@ -1409,8 +1554,16 @@ const messageViews = computed<MessageView[]>(() => {
               <!-- streaming 气泡 footer：正在思考时的停止按钮落点（B2 重定位——
                    每 agent 唯一气泡，无分组问题；canStopAgent 保守覆盖排队场景） -->
               <div class="msg-footer">
+                <!-- 流式气泡 footer 与历史气泡同口径：CLI 徽章 + 模型名，**不带**累计窗口用量
+                     （改版砍掉 n/m tokens——右栏成员卡已有同一读数，三处重复） -->
                 <span class="msg-footer-info" :class="contextLevelFor(agentId)">
-                  {{ modelNameFor(agentId) }} · {{ tokensTextFor(agentId) }}
+                  <span
+                    v-if="cliNameFor(agentId)"
+                    class="cli-badge"
+                    :class="cliBadgeClass(cliNameFor(agentId))"
+                    >{{ cliNameFor(agentId) }}</span
+                  >
+                  <span class="msg-model">{{ modelNameFor(agentId) }}</span>
                 </span>
                 <span class="msg-footer-right">
                   <button
@@ -1451,8 +1604,15 @@ const messageViews = computed<MessageView[]>(() => {
                 <span class="thinking-dots"><i></i><i></i><i></i></span>
               </div>
               <div class="msg-footer">
+                <!-- 占位气泡同口径（见上方流式气泡注释） -->
                 <span class="msg-footer-info" :class="contextLevelFor(timer.agentId)">
-                  {{ modelNameFor(timer.agentId) }} · {{ tokensTextFor(timer.agentId) }}
+                  <span
+                    v-if="cliNameFor(timer.agentId)"
+                    class="cli-badge"
+                    :class="cliBadgeClass(cliNameFor(timer.agentId))"
+                    >{{ cliNameFor(timer.agentId) }}</span
+                  >
+                  <span class="msg-model">{{ modelNameFor(timer.agentId) }}</span>
                 </span>
                 <span class="msg-footer-right">
                   <button
@@ -1496,139 +1656,141 @@ const messageViews = computed<MessageView[]>(() => {
       </div>
     </div>
 
-    <!-- Input -->
+    <!-- Input：外层铺满主区（边框/底色通栏），内层 840px 居中——与聊天列同列宽 -->
     <div class="chat-input-area">
-      <div class="input-wrapper">
-        <!-- 待发送图片预览 -->
-        <div v-if="pastedImages.length" class="image-preview-row">
-          <div v-for="(src, idx) in pastedImages" :key="idx" class="image-preview-item">
-            <img :src="src" :alt="`待发送图片${idx + 1}`" />
-            <button
-              class="image-preview-remove"
-              :aria-label="`移除图片${idx + 1}`"
-              @click="removeImage(idx)"
+      <div class="chat-input-box">
+        <div class="input-wrapper">
+          <!-- 待发送图片预览 -->
+          <div v-if="pastedImages.length" class="image-preview-row">
+            <div v-for="(src, idx) in pastedImages" :key="idx" class="image-preview-item">
+              <img :src="src" :alt="`待发送图片${idx + 1}`" />
+              <button
+                class="image-preview-remove"
+                :aria-label="`移除图片${idx + 1}`"
+                @click="removeImage(idx)"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            ref="textareaRef"
+            v-model="input"
+            class="chat-input"
+            :placeholder="
+              store.activeSessionId
+                ? '输入消息… @猫咪名 提及  /技能名 触发  （可直接粘贴图片）'
+                : '请先选择会话'
+            "
+            :disabled="!store.activeSessionId"
+            rows="2"
+            @input="onInput"
+            @keydown="onKeydown"
+            @paste="onPaste"
+          ></textarea>
+
+          <div
+            v-if="mentionActive && !skillActive && mentionSuggestions.length > 0"
+            class="mention-dropdown"
+          >
+            <div
+              v-for="(agent, idx) in mentionSuggestions"
+              :key="agent.id"
+              class="mention-item"
+              :class="{ active: idx === mentionIndex }"
+              @mousedown.prevent="selectMention(idx)"
+              @mouseenter="mentionIndex = idx"
             >
-              ×
-            </button>
+              <span class="mention-avatar">{{ agent.avatar }}</span>
+              <span class="mention-name">{{ agent.name }}</span>
+              <span class="mention-hint">tab</span>
+            </div>
+          </div>
+          <div
+            v-if="mentionActive && !skillActive && mentionSuggestions.length === 0"
+            class="mention-dropdown mention-empty"
+          >
+            <span>未找到匹配的猫咪</span>
+          </div>
+
+          <!-- / 技能补全下拉（数据源见 useSkillCommand；skill 本体仍由 CLI 原生消费） -->
+          <div
+            v-if="skillActive && skillSuggestions.length > 0"
+            class="mention-dropdown skill-dropdown"
+          >
+            <div
+              v-for="(skill, idx) in skillSuggestions"
+              :key="skill.name"
+              class="mention-item"
+              :class="{ active: idx === skillIndex }"
+              @mousedown.prevent="selectSkillItem(idx)"
+              @mouseenter="skillIndex = idx"
+            >
+              <span class="skill-name">/{{ skill.name }}</span>
+              <span class="skill-desc" :title="skill.description">{{ skill.description }}</span>
+              <span class="mention-hint">tab</span>
+            </div>
+          </div>
+          <div
+            v-else-if="skillActive && skillsLoaded"
+            class="mention-dropdown mention-empty skill-dropdown"
+          >
+            <span>无匹配技能（skill 由 CLI 原生触发，可继续输入）</span>
+          </div>
+          <!-- 清单不可用时的兜底提示——「端点没取到」≠「没这个词」，不冒充「无匹配」 -->
+          <div v-else-if="skillActive" class="skill-tip">
+            <span>skill 由 CLI 原生触发：输入 /skill-name 或由 agent 自主调用，服务端不再注入</span>
           </div>
         </div>
 
-        <textarea
-          ref="textareaRef"
-          v-model="input"
-          class="chat-input"
-          :placeholder="
-            store.activeSessionId
-              ? '输入消息… @猫咪名 提及  /技能名 触发  （可直接粘贴图片）'
-              : '请先选择会话'
+        <button
+          class="btn-image"
+          :disabled="!store.activeSessionId || sending || pastedImages.length >= MAX_IMAGES"
+          aria-label="添加图片"
+          title="添加图片（或直接 Ctrl+V 粘贴，最多 4 张）"
+          @click="fileInputRef?.click()"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <rect
+              x="1.5"
+              y="2.5"
+              width="13"
+              height="11"
+              rx="1.5"
+              stroke="currentColor"
+              stroke-width="1.3"
+            />
+            <circle cx="5.5" cy="6" r="1.3" stroke="currentColor" stroke-width="1.2" />
+            <path
+              d="M2.5 12.5l3.5-3.5 2.5 2.5 2-2 3 3"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <input
+          ref="fileInputRef"
+          type="file"
+          accept="image/*"
+          multiple
+          class="hidden-file-input"
+          @change="onFileSelect"
+        />
+
+        <button
+          class="btn-send"
+          :disabled="
+            (!input.trim() && pastedImages.length === 0) || !store.activeSessionId || sending
           "
-          :disabled="!store.activeSessionId"
-          rows="2"
-          @input="onInput"
-          @keydown="onKeydown"
-          @paste="onPaste"
-        ></textarea>
-
-        <div
-          v-if="mentionActive && !skillActive && mentionSuggestions.length > 0"
-          class="mention-dropdown"
+          aria-label="发送消息"
+          @click="handleSend"
         >
-          <div
-            v-for="(agent, idx) in mentionSuggestions"
-            :key="agent.id"
-            class="mention-item"
-            :class="{ active: idx === mentionIndex }"
-            @mousedown.prevent="selectMention(idx)"
-            @mouseenter="mentionIndex = idx"
-          >
-            <span class="mention-avatar">{{ agent.avatar }}</span>
-            <span class="mention-name">{{ agent.name }}</span>
-            <span class="mention-hint">tab</span>
-          </div>
-        </div>
-        <div
-          v-if="mentionActive && !skillActive && mentionSuggestions.length === 0"
-          class="mention-dropdown mention-empty"
-        >
-          <span>未找到匹配的猫咪</span>
-        </div>
-
-        <!-- / 技能补全下拉（数据源见 useSkillCommand；skill 本体仍由 CLI 原生消费） -->
-        <div
-          v-if="skillActive && skillSuggestions.length > 0"
-          class="mention-dropdown skill-dropdown"
-        >
-          <div
-            v-for="(skill, idx) in skillSuggestions"
-            :key="skill.name"
-            class="mention-item"
-            :class="{ active: idx === skillIndex }"
-            @mousedown.prevent="selectSkillItem(idx)"
-            @mouseenter="skillIndex = idx"
-          >
-            <span class="skill-name">/{{ skill.name }}</span>
-            <span class="skill-desc" :title="skill.description">{{ skill.description }}</span>
-            <span class="mention-hint">tab</span>
-          </div>
-        </div>
-        <div
-          v-else-if="skillActive && skillsLoaded"
-          class="mention-dropdown mention-empty skill-dropdown"
-        >
-          <span>无匹配技能（skill 由 CLI 原生触发，可继续输入）</span>
-        </div>
-        <!-- 清单不可用时的兜底提示——「端点没取到」≠「没这个词」，不冒充「无匹配」 -->
-        <div v-else-if="skillActive" class="skill-tip">
-          <span>skill 由 CLI 原生触发：输入 /skill-name 或由 agent 自主调用，服务端不再注入</span>
-        </div>
+          {{ sending ? '…' : '发送' }}
+        </button>
       </div>
-
-      <button
-        class="btn-image"
-        :disabled="!store.activeSessionId || sending || pastedImages.length >= MAX_IMAGES"
-        aria-label="添加图片"
-        title="添加图片（或直接 Ctrl+V 粘贴，最多 4 张）"
-        @click="fileInputRef?.click()"
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <rect
-            x="1.5"
-            y="2.5"
-            width="13"
-            height="11"
-            rx="1.5"
-            stroke="currentColor"
-            stroke-width="1.3"
-          />
-          <circle cx="5.5" cy="6" r="1.3" stroke="currentColor" stroke-width="1.2" />
-          <path
-            d="M2.5 12.5l3.5-3.5 2.5 2.5 2-2 3 3"
-            stroke="currentColor"
-            stroke-width="1.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-      </button>
-      <input
-        ref="fileInputRef"
-        type="file"
-        accept="image/*"
-        multiple
-        class="hidden-file-input"
-        @change="onFileSelect"
-      />
-
-      <button
-        class="btn-send"
-        :disabled="
-          (!input.trim() && pastedImages.length === 0) || !store.activeSessionId || sending
-        "
-        aria-label="发送消息"
-        @click="handleSend"
-      >
-        {{ sending ? '…' : '发送' }}
-      </button>
     </div>
 
     <!-- 图片大图预览（lightbox） -->
@@ -1671,6 +1833,34 @@ const messageViews = computed<MessageView[]>(() => {
       </div>
     </Teleport>
 
+    <!-- 回退确认弹窗（T1）：`removedCount` 由服务端回执，但**弹窗里的 N 用渲染列表口径**
+         （见 requestRollback）——问的是「你看到的这些要删掉，确定吗」。
+         确认键走危险色，取消键中性——不可逆操作不该有视觉上等价的两个键。 -->
+    <Teleport to="body">
+      <div
+        v-if="rollbackTarget"
+        class="rollback-mask"
+        role="dialog"
+        aria-modal="true"
+        aria-label="确认回退"
+        @click.self="cancelRollback"
+      >
+        <div class="rollback-modal">
+          <h3>回退到此处？</h3>
+          <p>
+            将删除此消息之后的 <b>{{ rollbackTarget.count }}</b> 条消息，会话从这里继续。
+          </p>
+          <div class="rollback-warn">此操作不可恢复。被删消息的执行记录与记忆引用一并清除。</div>
+          <div class="rollback-btns">
+            <button class="rollback-cancel" @click="cancelRollback">取消</button>
+            <button class="rollback-ok" :disabled="rollingBack" @click="confirmRollback">
+              {{ rollingBack ? '回退中…' : '确认回退' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- 记忆引用抽屉（M1 形态乙）：命中片段全文（来自库，不再发请求）+ 次级链接开当前文档。
          两处措辞是**口径**不是文案偏好：① 片段是「命中片」，注入进 prompt 的是补齐后的
          整节；② 「打开当前文档」拿到的是当前检出上的文档，不是当时的快照。 -->
@@ -1696,9 +1886,8 @@ const messageViews = computed<MessageView[]>(() => {
               命中片段全文（检索当时落库）。注意：注入进 prompt
               的是按节补齐后的整节，与这段话不等价。
             </div>
-            <pre class="memory-drawer-snippet">{{
-              activeMemoryRef.bodyHead ?? '（这一行没有落片段正文）'
-            }}</pre>
+            <!-- M3：命中片按 markdown 渲染（`.memory-drawer-md` = 抽屉这个 markdown 落点） -->
+            <div v-html="drawerSnippetHtml" class="memory-drawer-snippet memory-drawer-md"></div>
             <div class="memory-drawer-actions">
               <button
                 class="memory-drawer-open"
@@ -1712,9 +1901,11 @@ const messageViews = computed<MessageView[]>(() => {
             <div v-if="docPreview.error" class="memory-drawer-error">
               读取失败：{{ docPreview.error }}
             </div>
-            <pre v-else-if="docPreview.content !== null" class="memory-drawer-doc">{{
-              docPreview.content
-            }}</pre>
+            <div
+              v-else-if="docPreview.content !== null"
+              v-html="drawerDocHtml"
+              class="memory-drawer-doc memory-drawer-md"
+            ></div>
           </div>
         </div>
       </div>
@@ -1731,13 +1922,18 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Header ────────────────────────────── */
 
+/* 主区顶栏：48px 定高 + 下边框——与会话栏头行、右栏「成员 · N」同一水平线。
+   旧值（padding 16px 20px + 两端对齐的 actions 区）随「清空」按钮移除一并收敛。 */
 .chat-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  height: 48px;
+  flex: none;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-deep);
+  background: var(--bg-base);
+  white-space: nowrap;
 }
 
 .chat-header-left h2 {
@@ -1816,48 +2012,6 @@ const messageViews = computed<MessageView[]>(() => {
   font-weight: 400;
 }
 
-/* ─── Header Actions ───────────────────── */
-
-.chat-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.btn-clear {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all var(--ease-out);
-}
-
-.btn-clear:hover:not(:disabled) {
-  color: var(--accent-red);
-  border-color: var(--accent-red);
-  background: rgba(224, 85, 106, 0.06);
-}
-
-.btn-clear-confirm {
-  color: var(--accent-red) !important;
-  border-color: var(--accent-red) !important;
-  background: rgba(224, 85, 106, 0.12) !important;
-  font-weight: 600;
-}
-
-.btn-clear:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
 /* ─── Messages ──────────────────────────── */
 
 .chat-messages-wrapper {
@@ -1867,14 +2021,34 @@ const messageViews = computed<MessageView[]>(() => {
   width: 100%;
 }
 
+/* 主区内容列：840px 居中。与下方 `.chat-input-box` 同宽——聊天列与输入框同列宽，
+   两者左缘对齐（改版前是 800px，且输入区边框只在列内、不铺满主区）。 */
 .chat-messages-inner {
-  max-width: 800px;
+  max-width: 840px;
   margin: 0 auto;
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
   gap: 6px;
   min-height: 100%;
+}
+
+/* 「跳到该回复气泡 ↗」的落点高亮（T2）：闪一下让用户知道**滚到了哪一条**。
+   本类由 `openTraceFor` 的 watch 用 classList 加上、1.2s 后撤掉；写在本组件的
+   scoped 样式里能命中 MessageItem 的根元素——Vue 会把父组件的 scopeId 一并打在
+   子组件根节点上（这也是为什么这里不用 `:deep`）。 */
+.message.msg-focus-flash {
+  animation: msg-focus-pulse 1.2s var(--ease-out);
+}
+
+@keyframes msg-focus-pulse {
+  0%,
+  100% {
+    background: transparent;
+  }
+  25% {
+    background: var(--accent-tint, rgba(120, 160, 220, 0.18));
+  }
 }
 
 /* Empty State */
@@ -2117,6 +2291,114 @@ const messageViews = computed<MessageView[]>(() => {
   background: transparent;
 }
 
+/* ─── 回退分隔线（T1）───────────────────── */
+
+/* 两侧各一条横线夹住文案（::before/::after 各 flex:1）——与日期分隔线同一「分隔」语义，
+   但用线条而非色块，因为它是**操作痕迹**不是时间标记 */
+.rollback-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.rollback-line::before,
+.rollback-line::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+/* ─── 回退确认弹窗（T1）──────────────────── */
+
+.rollback-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 700; /* 高于设置/评估页(600)，低于 error-toast(9999) */
+  display: grid;
+  place-items: center;
+  background: rgba(10, 8, 6, 0.55);
+}
+
+.rollback-modal {
+  width: 400px;
+  max-width: calc(100vw - 40px);
+  padding: 20px 22px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rollback-modal h3 {
+  margin-bottom: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.rollback-modal p {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.rollback-modal p b {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.rollback-warn {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(224, 85, 106, 0.25);
+  border-radius: var(--radius-sm);
+  background: rgba(224, 85, 106, 0.08);
+  font-size: 12.5px;
+  color: var(--accent-red);
+}
+
+.rollback-btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.rollback-btns button {
+  padding: 7px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.rollback-cancel {
+  border-color: var(--border-default);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.rollback-cancel:hover {
+  background: var(--bg-hover);
+}
+
+/* 不可逆操作的主键：危险色实底（与取消键视觉不等价） */
+.rollback-ok {
+  background: var(--accent-red);
+  color: #fff;
+  font-weight: 600;
+}
+
+.rollback-ok:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ─── Scroll-to-bottom Button ───────────── */
 
 .scroll-down-btn {
@@ -2162,14 +2444,23 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Input Area ────────────────────────── */
 
+/* 外层：铺满主区宽度，边框与底色通栏（改版前 max-width 直接落在此层，
+   边框只画到 800px，主区两侧露出断口） */
 .chat-input-area {
-  display: flex;
-  gap: 10px;
-  padding: 14px 20px;
-  max-width: 800px;
-  margin: 0 auto;
+  flex: none;
   width: 100%;
   border-top: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+}
+
+/* 内层：840px 居中，与 `.chat-messages-inner` 同宽同 padding——输入框与聊天列左缘对齐 */
+.chat-input-box {
+  display: flex;
+  gap: 10px;
+  padding: 14px 24px;
+  max-width: 840px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .input-wrapper {
@@ -2500,40 +2791,50 @@ const messageViews = computed<MessageView[]>(() => {
 /* ─── Inline formatting ────────────────── */
 
 .chat-panel .msg-text strong,
-.chat-panel .msg-text b {
+.chat-panel .msg-text b,
+.memory-drawer-md strong,
+.memory-drawer-md b {
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .chat-panel .msg-text em,
-.chat-panel .msg-text i {
+.chat-panel .msg-text i,
+.memory-drawer-md em,
+.memory-drawer-md i {
   font-style: italic;
 }
 
 .chat-panel .msg-text del,
-.chat-panel .msg-text s {
+.chat-panel .msg-text s,
+.memory-drawer-md del,
+.memory-drawer-md s {
   text-decoration: line-through;
   opacity: 0.7;
 }
 
-.chat-panel .msg-text a {
+.chat-panel .msg-text a,
+.memory-drawer-md a {
   color: var(--accent-text);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.chat-panel .msg-text a:hover {
+.chat-panel .msg-text a:hover,
+.memory-drawer-md a:hover {
   opacity: 0.8;
 }
 
 /* ─── Inline code ───────────────────────── */
 
-/* 三个落点同源——正文（.msg-text）、流式思考框（.fold-thinking）、历史思考框
-   （.thinking-content）都渲染 markdown 产出的 code。此前只写正文一处，思考框里的
-   行内 code 掉进 UA 默认（word-break: normal）：无空格长路径（实测 120 字符）不折行，
-   顶出容器横向溢出（overRight=79.7px）。三组规则一一并列，新增落点不再各写一份。 */
+/* 四个落点同源——正文（.msg-text）、流式思考框（.fold-thinking）、历史思考框
+   （.thinking-content）、记忆抽屉（.memory-drawer-md，M3 加入）都渲染 markdown 产出的
+   code。此前只写正文一处，思考框里的行内 code 掉进 UA 默认（word-break: normal）：
+   无空格长路径（实测 120 字符）不折行，顶出容器横向溢出（overRight=79.7px）。
+   规则一一并列，新增落点不再各写一份——落点组的机械守卫在 ChatPanel.test.ts。 */
 .chat-panel .msg-text code,
 .chat-panel .fold-thinking code,
-.chat-panel .thinking-content code {
+.chat-panel .thinking-content code,
+.memory-drawer-md code {
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', 'Monaco', monospace;
   font-size: 0.9em;
   background: rgba(127, 127, 127, 0.12);
@@ -2550,7 +2851,8 @@ const messageViews = computed<MessageView[]>(() => {
    溢出，最严重 17.5 倍）。本组规则让思考框代码块与正文同款：自己滚，不外溢。 */
 .chat-panel .msg-text pre,
 .chat-panel .fold-thinking pre,
-.chat-panel .thinking-content pre {
+.chat-panel .thinking-content pre,
+.memory-drawer-md pre {
   background: var(--syntax-bg);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
@@ -2564,7 +2866,8 @@ const messageViews = computed<MessageView[]>(() => {
 /* 特异性说明：本组 (0,2,2) 高于上面行内 code 组的 (0,2,1)，块内 code 恒走本组。 */
 .chat-panel .msg-text pre code,
 .chat-panel .fold-thinking pre code,
-.chat-panel .thinking-content pre code {
+.chat-panel .thinking-content pre code,
+.memory-drawer-md pre code {
   background: none;
   padding: 0;
   font-size: 0.85em;
@@ -2577,53 +2880,69 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── hljs classes (highlight.js injected by marked) ─── */
 
-.chat-panel .msg-text pre code .hljs-keyword {
+.chat-panel .msg-text pre code .hljs-keyword,
+.memory-drawer-md pre code .hljs-keyword {
   color: var(--syntax-keyword);
 }
-.chat-panel .msg-text pre code .hljs-string {
+.chat-panel .msg-text pre code .hljs-string,
+.memory-drawer-md pre code .hljs-string {
   color: var(--syntax-string);
 }
-.chat-panel .msg-text pre code .hljs-number {
+.chat-panel .msg-text pre code .hljs-number,
+.memory-drawer-md pre code .hljs-number {
   color: var(--syntax-number);
 }
-.chat-panel .msg-text pre code .hljs-comment {
+.chat-panel .msg-text pre code .hljs-comment,
+.memory-drawer-md pre code .hljs-comment {
   color: var(--syntax-comment);
   font-style: italic;
 }
-.chat-panel .msg-text pre code .hljs-function {
+.chat-panel .msg-text pre code .hljs-function,
+.memory-drawer-md pre code .hljs-function {
   color: var(--syntax-function);
 }
-.chat-panel .msg-text pre code .hljs-title {
+.chat-panel .msg-text pre code .hljs-title,
+.memory-drawer-md pre code .hljs-title {
   color: var(--syntax-function);
 }
-.chat-panel .msg-text pre code .hljs-type {
+.chat-panel .msg-text pre code .hljs-type,
+.memory-drawer-md pre code .hljs-type {
   color: var(--syntax-type);
 }
-.chat-panel .msg-text pre code .hljs-attr {
+.chat-panel .msg-text pre code .hljs-attr,
+.memory-drawer-md pre code .hljs-attr {
   color: var(--syntax-attr);
 }
-.chat-panel .msg-text pre code .hljs-built_in {
+.chat-panel .msg-text pre code .hljs-built_in,
+.memory-drawer-md pre code .hljs-built_in {
   color: var(--syntax-builtin);
 }
-.chat-panel .msg-text pre code .hljs-literal {
+.chat-panel .msg-text pre code .hljs-literal,
+.memory-drawer-md pre code .hljs-literal {
   color: var(--syntax-number);
 }
-.chat-panel .msg-text pre code .hljs-params {
+.chat-panel .msg-text pre code .hljs-params,
+.memory-drawer-md pre code .hljs-params {
   color: var(--syntax-params);
 }
-.chat-panel .msg-text pre code .hljs-property {
+.chat-panel .msg-text pre code .hljs-property,
+.memory-drawer-md pre code .hljs-property {
   color: var(--syntax-attr);
 }
-.chat-panel .msg-text pre code .hljs-punctuation {
+.chat-panel .msg-text pre code .hljs-punctuation,
+.memory-drawer-md pre code .hljs-punctuation {
   color: var(--syntax-punctuation);
 }
-.chat-panel .msg-text pre code .hljs-regexp {
+.chat-panel .msg-text pre code .hljs-regexp,
+.memory-drawer-md pre code .hljs-regexp {
   color: var(--syntax-builtin);
 }
-.chat-panel .msg-text pre code .hljs-meta {
+.chat-panel .msg-text pre code .hljs-meta,
+.memory-drawer-md pre code .hljs-meta {
   color: var(--syntax-type);
 }
-.chat-panel .msg-text pre code .hljs-selector-class {
+.chat-panel .msg-text pre code .hljs-selector-class,
+.memory-drawer-md pre code .hljs-selector-class {
   color: var(--syntax-string);
 }
 
@@ -2631,61 +2950,79 @@ const messageViews = computed<MessageView[]>(() => {
 
 [data-theme='light'] .chat-panel .msg-text pre,
 [data-theme='light'] .chat-panel .fold-thinking pre,
-[data-theme='light'] .chat-panel .thinking-content pre {
+[data-theme='light'] .chat-panel .thinking-content pre,
+[data-theme='light'] .memory-drawer-md pre {
   background: var(--syntax-bg);
   border-color: rgba(0, 0, 0, 0.08);
 }
 
 [data-theme='light'] .chat-panel .msg-text pre code,
 [data-theme='light'] .chat-panel .fold-thinking pre code,
-[data-theme='light'] .chat-panel .thinking-content pre code {
+[data-theme='light'] .chat-panel .thinking-content pre code,
+[data-theme='light'] .memory-drawer-md pre code {
   color: var(--syntax-text);
 }
 
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-keyword {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-keyword,
+[data-theme='light'] .memory-drawer-md pre code .hljs-keyword {
   color: var(--syntax-keyword);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-string {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-string,
+[data-theme='light'] .memory-drawer-md pre code .hljs-string {
   color: var(--syntax-string);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-number {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-number,
+[data-theme='light'] .memory-drawer-md pre code .hljs-number {
   color: var(--syntax-number);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-comment {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-comment,
+[data-theme='light'] .memory-drawer-md pre code .hljs-comment {
   color: var(--syntax-comment);
 }
 [data-theme='light'] .chat-panel .msg-text pre code .hljs-function,
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-title {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-title,
+[data-theme='light'] .memory-drawer-md pre code .hljs-function,
+[data-theme='light'] .memory-drawer-md pre code .hljs-title {
   color: var(--syntax-function);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-type {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-type,
+[data-theme='light'] .memory-drawer-md pre code .hljs-type {
   color: var(--syntax-type);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-attr {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-attr,
+[data-theme='light'] .memory-drawer-md pre code .hljs-attr {
   color: var(--syntax-attr);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-built_in {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-built_in,
+[data-theme='light'] .memory-drawer-md pre code .hljs-built_in {
   color: var(--syntax-builtin);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-literal {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-literal,
+[data-theme='light'] .memory-drawer-md pre code .hljs-literal {
   color: var(--syntax-number);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-params {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-params,
+[data-theme='light'] .memory-drawer-md pre code .hljs-params {
   color: var(--syntax-params);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-property {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-property,
+[data-theme='light'] .memory-drawer-md pre code .hljs-property {
   color: var(--syntax-attr);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-punctuation {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-punctuation,
+[data-theme='light'] .memory-drawer-md pre code .hljs-punctuation {
   color: var(--syntax-punctuation);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-regexp {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-regexp,
+[data-theme='light'] .memory-drawer-md pre code .hljs-regexp {
   color: var(--syntax-builtin);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-meta {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-meta,
+[data-theme='light'] .memory-drawer-md pre code .hljs-meta {
   color: var(--syntax-type);
 }
-[data-theme='light'] .chat-panel .msg-text pre code .hljs-selector-class {
+[data-theme='light'] .chat-panel .msg-text pre code .hljs-selector-class,
+[data-theme='light'] .memory-drawer-md pre code .hljs-selector-class {
   color: var(--syntax-string);
 }
 
@@ -2696,7 +3033,13 @@ const messageViews = computed<MessageView[]>(() => {
 .chat-panel .msg-text h3,
 .chat-panel .msg-text h4,
 .chat-panel .msg-text h5,
-.chat-panel .msg-text h6 {
+.chat-panel .msg-text h6,
+.memory-drawer-md h1,
+.memory-drawer-md h2,
+.memory-drawer-md h3,
+.memory-drawer-md h4,
+.memory-drawer-md h5,
+.memory-drawer-md h6 {
   margin: 0.8em 0 0.4em;
   font-weight: 600;
   line-height: 1.3;
@@ -2705,42 +3048,54 @@ const messageViews = computed<MessageView[]>(() => {
 
 .chat-panel .msg-text h1:first-child,
 .chat-panel .msg-text h2:first-child,
-.chat-panel .msg-text h3:first-child {
+.chat-panel .msg-text h3:first-child,
+.memory-drawer-md h1:first-child,
+.memory-drawer-md h2:first-child,
+.memory-drawer-md h3:first-child {
   margin-top: 0;
 }
 
-.chat-panel .msg-text h1 {
+.chat-panel .msg-text h1,
+.memory-drawer-md h1 {
   font-size: 1.3em;
 }
-.chat-panel .msg-text h2 {
+.chat-panel .msg-text h2,
+.memory-drawer-md h2 {
   font-size: 1.15em;
 }
-.chat-panel .msg-text h3 {
+.chat-panel .msg-text h3,
+.memory-drawer-md h3 {
   font-size: 1.05em;
 }
 
 /* ─── Lists ─────────────────────────────── */
 
 .chat-panel .msg-text ul,
-.chat-panel .msg-text ol {
+.chat-panel .msg-text ol,
+.memory-drawer-md ul,
+.memory-drawer-md ol {
   margin: 4px 0;
   padding-left: 1.6em;
 }
 
-.chat-panel .msg-text li {
+.chat-panel .msg-text li,
+.memory-drawer-md li {
   margin: 2px 0;
 }
 
-.chat-panel .msg-text ul {
+.chat-panel .msg-text ul,
+.memory-drawer-md ul {
   list-style: disc;
 }
-.chat-panel .msg-text ol {
+.chat-panel .msg-text ol,
+.memory-drawer-md ol {
   list-style: decimal;
 }
 
 /* ─── Blockquote ────────────────────────── */
 
-.chat-panel .msg-text blockquote {
+.chat-panel .msg-text blockquote,
+.memory-drawer-md blockquote {
   margin: 6px 0;
   padding: 4px 0 4px 12px;
   border-left: 3px solid var(--accent-text);
@@ -2748,13 +3103,15 @@ const messageViews = computed<MessageView[]>(() => {
   color: var(--text-secondary);
 }
 
-.chat-panel .msg-text blockquote p {
+.chat-panel .msg-text blockquote p,
+.memory-drawer-md blockquote p {
   margin: 0;
 }
 
 /* ─── Horizontal rule ───────────────────── */
 
-.chat-panel .msg-text hr {
+.chat-panel .msg-text hr,
+.memory-drawer-md hr {
   border: none;
   border-top: 1px solid var(--border-default);
   margin: 12px 0;
@@ -2763,7 +3120,9 @@ const messageViews = computed<MessageView[]>(() => {
 /* ─── Task list (GFM) ──────────────────── */
 
 .chat-panel .msg-text ul input[type='checkbox'],
-.chat-panel .msg-text ol input[type='checkbox'] {
+.chat-panel .msg-text ol input[type='checkbox'],
+.memory-drawer-md ul input[type='checkbox'],
+.memory-drawer-md ol input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;
   width: 15px;
@@ -2780,13 +3139,17 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .chat-panel .msg-text ul input[type='checkbox']:checked,
-.chat-panel .msg-text ol input[type='checkbox']:checked {
+.chat-panel .msg-text ol input[type='checkbox']:checked,
+.memory-drawer-md ul input[type='checkbox']:checked,
+.memory-drawer-md ol input[type='checkbox']:checked {
   background: var(--accent);
   border-color: var(--accent-text);
 }
 
 .chat-panel .msg-text ul input[type='checkbox']:checked::after,
-.chat-panel .msg-text ol input[type='checkbox']:checked::after {
+.chat-panel .msg-text ol input[type='checkbox']:checked::after,
+.memory-drawer-md ul input[type='checkbox']:checked::after,
+.memory-drawer-md ol input[type='checkbox']:checked::after {
   content: '';
   position: absolute;
   left: 3.5px;
@@ -2798,21 +3161,25 @@ const messageViews = computed<MessageView[]>(() => {
   transform: rotate(45deg);
 }
 
-.chat-panel .msg-text li:has(input[type='checkbox']:checked) {
+.chat-panel .msg-text li:has(input[type='checkbox']:checked),
+.memory-drawer-md li:has(input[type='checkbox']:checked) {
   text-decoration: line-through;
   opacity: 0.6;
 }
 
 /* Fix list items containing checkboxes */
 .chat-panel .msg-text ul:has(input[type='checkbox']),
-.chat-panel .msg-text ol:has(input[type='checkbox']) {
+.chat-panel .msg-text ol:has(input[type='checkbox']),
+.memory-drawer-md ul:has(input[type='checkbox']),
+.memory-drawer-md ol:has(input[type='checkbox']) {
   list-style: none;
   padding-left: 0.4em;
 }
 
 /* ─── Keyboard / kbd ────────────────────── */
 
-.chat-panel .msg-text kbd {
+.chat-panel .msg-text kbd,
+.memory-drawer-md kbd {
   display: inline-block;
   padding: 1px 6px;
   font-family: var(--font-mono);
@@ -2827,17 +3194,20 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Definition Lists ──────────────────── */
 
-.chat-panel .msg-text dl {
+.chat-panel .msg-text dl,
+.memory-drawer-md dl {
   margin: 6px 0;
 }
 
-.chat-panel .msg-text dt {
+.chat-panel .msg-text dt,
+.memory-drawer-md dt {
   font-weight: 600;
   color: var(--text-primary);
   margin-top: 6px;
 }
 
-.chat-panel .msg-text dd {
+.chat-panel .msg-text dd,
+.memory-drawer-md dd {
   margin-left: 1.2em;
   color: var(--text-secondary);
   font-size: 0.95em;
@@ -2845,7 +3215,8 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Abbreviation ──────────────────────── */
 
-.chat-panel .msg-text abbr {
+.chat-panel .msg-text abbr,
+.memory-drawer-md abbr {
   text-decoration: underline dotted;
   text-underline-offset: 3px;
   cursor: help;
@@ -2855,21 +3226,26 @@ const messageViews = computed<MessageView[]>(() => {
 /* ─── Superscript / Subscript ───────────── */
 
 .chat-panel .msg-text sup,
-.chat-panel .msg-text sub {
+.chat-panel .msg-text sub,
+.memory-drawer-md sup,
+.memory-drawer-md sub {
   font-size: 0.78em;
 }
 
-.chat-panel .msg-text sup {
+.chat-panel .msg-text sup,
+.memory-drawer-md sup {
   vertical-align: super;
 }
 
-.chat-panel .msg-text sub {
+.chat-panel .msg-text sub,
+.memory-drawer-md sub {
   vertical-align: sub;
 }
 
 /* ─── Images (if allowed in future) ─────── */
 
-.chat-panel .msg-text img {
+.chat-panel .msg-text img,
+.memory-drawer-md img {
   max-width: 100%;
   height: auto;
   border-radius: var(--radius-sm);
@@ -2878,7 +3254,8 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Tables ────────────────────────────── */
 
-.chat-panel .msg-text table {
+.chat-panel .msg-text table,
+.memory-drawer-md table {
   /* 表格溢出逃生通道：table-layout:fixed 使 width:100% 成为硬约束（table 布局下只是建议值，
      长单元格 min-content 会撑破气泡）；max-width 双保险。fixed 下超宽内容由
      overflow-wrap:anywhere 断行吸收；不可断内容（nowrap 内联块/pre）将刺出容器，
@@ -2904,7 +3281,9 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .chat-panel .msg-text th,
-.chat-panel .msg-text td {
+.chat-panel .msg-text td,
+.memory-drawer-md th,
+.memory-drawer-md td {
   border-right: 1px solid var(--border-table);
   border-bottom: 1px solid var(--border-table);
   padding: 8px 12px;
@@ -2915,25 +3294,33 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .chat-panel .msg-text th:last-child,
-.chat-panel .msg-text td:last-child {
+.chat-panel .msg-text td:last-child,
+.memory-drawer-md th:last-child,
+.memory-drawer-md td:last-child {
   border-right: none;
 }
 
-.chat-panel .msg-text tr:last-child td {
+.chat-panel .msg-text tr:last-child td,
+.memory-drawer-md tr:last-child td {
   border-bottom: none;
 }
 
 .chat-panel .msg-text th[align='center'],
-.chat-panel .msg-text td[align='center'] {
+.chat-panel .msg-text td[align='center'],
+.memory-drawer-md th[align='center'],
+.memory-drawer-md td[align='center'] {
   text-align: center;
 }
 
 .chat-panel .msg-text th[align='right'],
-.chat-panel .msg-text td[align='right'] {
+.chat-panel .msg-text td[align='right'],
+.memory-drawer-md th[align='right'],
+.memory-drawer-md td[align='right'] {
   text-align: right;
 }
 
-.chat-panel .msg-text thead th {
+.chat-panel .msg-text thead th,
+.memory-drawer-md thead th {
   background: var(--bg-hover);
   font-weight: 600;
   color: var(--text-primary);
@@ -2941,15 +3328,18 @@ const messageViews = computed<MessageView[]>(() => {
   border-bottom: 2px solid var(--border-focus);
 }
 
-.chat-panel .msg-text tbody tr:nth-child(even) {
+.chat-panel .msg-text tbody tr:nth-child(even),
+.memory-drawer-md tbody tr:nth-child(even) {
   background: rgba(127, 127, 127, 0.08);
 }
 
-.chat-panel .msg-text tbody tr:hover {
+.chat-panel .msg-text tbody tr:hover,
+.memory-drawer-md tbody tr:hover {
   background: var(--accent-row-hover);
 }
 
-.chat-panel .msg-text tbody tr:first-child td {
+.chat-panel .msg-text tbody tr:first-child td,
+.memory-drawer-md tbody tr:first-child td {
   padding-top: 10px;
 }
 
@@ -3130,6 +3520,56 @@ const messageViews = computed<MessageView[]>(() => {
   opacity: 0.7;
 }
 
+/* ─── 角标引用（R14b）──────────────────────────
+   正文里的 `[n]`（猫采纳了第 n 节）渲染成上标角标；样式刻意**轻**——角标是
+   正文的附属信息，读正文时不该被它打断。hover 才展开卡片。 */
+.chat-panel .msg-text sup.mem-citation,
+.memory-drawer-md sup.mem-citation {
+  font-size: 0.68em;
+  line-height: 0;
+  vertical-align: super;
+  color: var(--accent-text);
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  padding: 0 2px;
+  margin-left: 1px;
+  cursor: help;
+  font-variant-numeric: tabular-nums;
+}
+
+/* hover 卡片：单浮层元素（`position: fixed` + 视口坐标，由 MessageItem 定位），
+   内容 = 节标题 + 命中片开头。`pointer-events: none` —— 卡片本身不可交互，
+   否则鼠标移出角标时会被卡片「接住」，mouseout 不触发、卡片关不掉 */
+.chat-panel .mem-citation-card {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+  max-width: 340px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.chat-panel .mem-citation-card .mem-card-title {
+  color: var(--text-primary);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+/* 正文只露开头：`bodyHead` 是命中片**全文**（2026-09-22 起落全文），
+   整段铺开会盖住半屏——限高 8 行，多出来的裁掉（卡片是提示，不是阅读器） */
+.chat-panel .mem-citation-card .mem-card-body {
+  color: var(--text-secondary);
+  max-height: 8.5em;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ─── 记忆抽屉（M1 形态乙）────────────────────── */
 .memory-drawer-mask {
   position: fixed;
@@ -3209,6 +3649,13 @@ const messageViews = computed<MessageView[]>(() => {
   margin-bottom: 8px;
 }
 
+/* ─── 抽屉内 markdown（M3：`.memory-drawer-md` 是抽屉这个 markdown 落点）────────
+   **本块只声明「尺度」**——基础字号及其派生的行高。票 §二.3 明写「抽屉罩局部样式、
+   不裸继承正文气泡尺寸」，故基础字号不并入正文组（那是气泡的 16px）。
+   其余**全部并入上方与正文并列的共享选择器组**：排版（标题层级 / 列表 / 引用 / 表格）
+   与机制（行内 code 折行、代码块自滚、hljs token 色）都走同一份规则——共享组里的字号
+   都是 em，随下面这个 font-size 自动缩一号；在抽屉里另写一份就是本仓反复吃过的
+   「同一规则两处措辞」，改一处漏一处还全绿。落点组的机械守卫在 ChatPanel.test.ts。 */
 .memory-drawer-snippet,
 .memory-drawer-doc {
   margin: 0;
@@ -3216,17 +3663,29 @@ const messageViews = computed<MessageView[]>(() => {
   border-radius: var(--radius-md);
   background: var(--bg-surface);
   color: var(--text-secondary);
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', 'Monaco', monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
+  font-size: 12.5px;
+  line-height: 1.65;
+  /* 容器是**块级**而不是 <pre>：`white-space: pre-wrap` 会把 marked 产出里标签之间的
+     换行当可见空白渲染（每个块级元素之间多出一行空行）。故显式 normal——代码块的原样
+     换行语义由块内 `pre` 自己声明（共享组的 `white-space: pre`）。 */
+  white-space: normal;
+  /* 裸长串（路径 / hash / 工具名）在段落里折行；`pre` 由共享组覆盖回 normal */
+  overflow-wrap: anywhere;
 }
 
 .memory-drawer-doc {
   margin-top: 10px;
   max-height: 40vh;
   overflow-y: auto;
+}
+
+/* 容器自带 padding，首末块再叠一重 margin 会顶出一段空白。共享组只归零了
+   `h1~h3:first-child` 与 `p:last-child`，表格 / 引用 / 分隔线没有——本条补全。 */
+.memory-drawer-md > :first-child {
+  margin-top: 0;
+}
+.memory-drawer-md > :last-child {
+  margin-bottom: 0;
 }
 
 .memory-drawer-actions {
@@ -3306,6 +3765,85 @@ const messageViews = computed<MessageView[]>(() => {
   font-variant-numeric: tabular-nums;
 }
 
+/* ─── CLI 徽章（T1：工具名按颜色区分）────────────── */
+
+.chat-panel .cli-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 7px;
+  border: 1px solid var(--border-default);
+  border-radius: 99px;
+  background: var(--bg-deep);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* 三色分工：claude 橙 / deepseek 蓝 / opencode 绿。留 `cli-other` 中性兜底——
+   配色表没收录的 provider 照常显示工具名（藏起来比配色不对更糟） */
+.chat-panel .cli-badge.cli-claude {
+  color: var(--accent-text);
+  border-color: rgba(212, 165, 116, 0.45);
+}
+
+.chat-panel .cli-badge.cli-deepseek {
+  color: #8fb8e8;
+  border-color: rgba(110, 168, 216, 0.35);
+}
+
+.chat-panel .cli-badge.cli-opencode {
+  color: #9ec7a8;
+  border-color: rgba(126, 184, 153, 0.35);
+}
+
+.chat-panel .msg-footer-info .msg-model {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+/* ─── 气泡 hover 操作条 ──────────────────── */
+
+/* 默认不可见（opacity:0 仍占位 ⇒ 浮现/隐去不改 footer 布局，不推挤时间戳）。
+   `:focus-within` 让键盘 Tab 到按钮时同样显形——纯 opacity 门控会把按钮
+   留在 tab 序里却看不见，那是「键盘能到达但读不到」的坏态。 */
+.chat-panel .msg-acts {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity var(--ease-out);
+}
+
+.chat-panel .message:hover .msg-acts,
+.chat-panel .msg-acts:focus-within {
+  opacity: 1;
+}
+
+.chat-panel .act-btn {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.chat-panel .act-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.chat-panel .act-btn.act-btn-danger:hover {
+  color: var(--accent-red);
+}
+
 /* 停止按钮：小号（AgentPanel btn-stop 同款），visibility 切换不改变布局 */
 .chat-panel .btn-stop-agent {
   flex-shrink: 0;
@@ -3357,11 +3895,13 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 /* first/last paragraph margins */
-.chat-panel .msg-text p {
+.chat-panel .msg-text p,
+.memory-drawer-md p {
   margin: 0 0 0.6em;
 }
 
-.chat-panel .msg-text p:last-child {
+.chat-panel .msg-text p:last-child,
+.memory-drawer-md p:last-child {
   margin-bottom: 0;
 }
 
@@ -3668,28 +4208,19 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 /* ─── Retract Button ───────────────────── */
+/* 撤回按钮（T1 改版后落点 = 气泡 hover 操作条，不再是状态行内）。
+   旧样式带 margin-top 与描边，那是为「贴在状态行下方」定的；进操作条后与
+   ⧉/⚙/↩ 同为裸图标钮，靠 `.act-btn` 的基样式，这里只覆盖语义色。 */
 .chat-panel .btn-retract {
-  margin-top: 4px;
-  padding: 2px 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all var(--ease-out);
+  font-size: 11.5px;
 }
 
 .chat-panel .btn-retract:hover {
   color: var(--accent-red);
-  border-color: var(--accent-red);
 }
 
 .chat-panel .btn-retract-confirm {
   color: var(--accent-red) !important;
-  border-color: var(--accent-red) !important;
-  background: rgba(224, 85, 106, 0.1) !important;
   font-weight: 600;
 }
 

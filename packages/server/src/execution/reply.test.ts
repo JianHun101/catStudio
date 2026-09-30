@@ -13,17 +13,115 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import Fastify from 'fastify'
 import {
+  runAgentReply,
   selectTaskHistory,
   recordRetrievalTrace,
+  buildContextDecisions,
   TASK_HISTORY_MAX_MESSAGES,
   TASK_HISTORY_BUDGET_TOKENS,
 } from './reply.js'
+import { createEngineState } from './state.js'
+import { createExecTrace } from './trace.js'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../db/index.js'
-import { initRepository, executionLogs as execLogsRepo } from '../db/repository/index.js'
+import {
+  initRepository,
+  executionLogs as execLogsRepo,
+  retrievalEvents as retrievalRepo,
+  traceDetails as traceDetailsRepo,
+} from '../db/repository/index.js'
 import { HYBRID_POOL_PER_QUERY } from '../db/repository/chunks.js'
+import { memoryRoutes } from '../routes/memory.js'
+import { getAdapterForAgent } from '../llm/registry.js'
+import { retrieveMemoryContext, buildKnowledgeContext } from '../memory/index.js'
 import type { MemoryContextResult } from '../memory/index.js'
+
+// ─── 协作者 mock（只 mock 边界：LLM 适配器 / 子进程 / 外部 HTTP）──────────────
+// 组装式用例（下方「M1 广播前连线」）要跑**真** `runAgentReply`：DB、仓储、bus 捕获、
+// 上下文组装全是真的，只有「会 spawn 子进程 / 连外部服务」的协作者被换掉——
+// 与 `connectors/socketio.test.ts` 同款边界。
+vi.mock('../llm/registry.js', () => ({ getAdapterForAgent: vi.fn() }))
+// 建 worktree 是 `execFileSync` 起 git 的同步阻塞调用，测试里不建树 ⇒ 返回 null
+// （生产语义：null = 不传 cwd，适配器落 workspace/，见 reply.ts 调用点注释）
+vi.mock('../llm/worktree-fanin.js', () => ({ ensureExecutionWorktree: vi.fn(() => null) }))
+vi.mock('../llm/git-utils.js', () => ({
+  snapshotPackageDeps: vi.fn(() => ({})),
+  diffNewPackages: vi.fn(() => []),
+}))
+// diff 采集：内部 `execFile` 起 git（最长 5s）；本组不验它，返回 null = 「没采到」
+vi.mock('../git/diff-collector.js', () => ({
+  collectCommitDiffs: vi.fn(async () => null),
+  GIT_TIMEOUT_MS: 5000,
+}))
+vi.mock('../llm/user-request-signals.js', () => ({ consumeUserRequestSignals: vi.fn(() => []) }))
+vi.mock('../connectors/replyBus.js', () => ({ emitAgentReply: vi.fn() }))
+vi.mock('../handoff/index.js', () => ({
+  shouldHandoff: vi.fn(() => false),
+  performHandoff: vi.fn(async () => {}),
+  injectSummaryIntoSystem: vi.fn((s: string) => s),
+  generateFullSummary: vi.fn(async () => null),
+}))
+// **partial factory**：`currentRetrievalParams` / `skippedRetrievalResult` 等导出必须留真
+// ——`recordRetrievalTrace` 消费前者，整包替换会让同文件的 R1 用例当场 TypeError。
+vi.mock('../memory/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../memory/index.js')>()
+  return {
+    ...actual,
+    retrieveMemoryContext: vi.fn(),
+    buildKnowledgeContext: vi.fn(async () => ''),
+  }
+})
+
+/** 一条可落盘的检索结果（够跑通组装，字段值本身由 memory 侧用例保真） */
+function makeResult(over: Partial<MemoryContextResult> = {}): MemoryContextResult {
+  return {
+    text: '\n\n【相关记忆】\n1. 正文',
+    reason: 'ok',
+    sections: [],
+    stats: {
+      queries: 1,
+      candidateChunks: 1,
+      sections: 1,
+      droppedSections: 0,
+      contextTokens: 12,
+      budgetTokens: 8000,
+      truncated: false,
+      retrievalMs: 37,
+      thresholdMaxDistance: 0.6,
+      paramTopK: 3,
+      paramProbeN: 20,
+      queryTraces: [{ queryIndex: 0, queryText: '原话', queryEmbedOk: true }],
+      candidates: [
+        {
+          queryIndex: 0,
+          source: 'final',
+          channel: 'vector',
+          docPath: 'docs/adr/0002-b.md',
+          sectionAnchor: '## 决策',
+          contentHash: 'h1',
+          chunkId: 7,
+          breadcrumb: 'b',
+          bodyHead: '候选片正文全文',
+          statusAtQuery: null,
+          distance: 0.293,
+          rank: 0,
+          rrfScore: 0.016,
+          finalRank: 0,
+          passedStatusFilter: null,
+          injected: true,
+          sectionRank: 0,
+          injectedPosition: 1,
+          droppedReason: null,
+        },
+      ],
+      blockedByStatus: 0,
+      droppedByThreshold: 0,
+    },
+    ...over,
+  }
+}
 
 /** 生成一条同锚历史（数组下标越小越旧） */
 function msg(i: number, hanChars: number): { id: string; content: string } {
@@ -71,54 +169,7 @@ describe('execution/reply — selectTaskHistory（T-G 验收④ 回捞上界）'
 // 拆成两段证据：**组装口径**在这里直测（`recordRetrievalTrace` 只依赖 db），
 // **调用点位置**由文件尾的静态源断言守——位置正是票面点名的硬要求。
 describe('execution/reply — R1 检索流水埋点', () => {
-  /** 一条可落盘的检索结果（够跑通组装，字段值本身由 memory 侧用例保真） */
-  function makeResult(over: Partial<MemoryContextResult> = {}): MemoryContextResult {
-    return {
-      text: '\n\n【相关记忆】\n1. 正文',
-      reason: 'ok',
-      sections: [],
-      stats: {
-        queries: 1,
-        candidateChunks: 1,
-        sections: 1,
-        droppedSections: 0,
-        contextTokens: 12,
-        budgetTokens: 8000,
-        truncated: false,
-        retrievalMs: 37,
-        thresholdMaxDistance: 0.6,
-        paramTopK: 3,
-        paramProbeN: 20,
-        queryTraces: [{ queryIndex: 0, queryText: '原话', queryEmbedOk: true }],
-        candidates: [
-          {
-            queryIndex: 0,
-            source: 'final',
-            channel: 'vector',
-            docPath: 'docs/adr/0002-b.md',
-            sectionAnchor: '## 决策',
-            contentHash: 'h1',
-            chunkId: 7,
-            breadcrumb: 'b',
-            bodyHead: '候选片正文全文',
-            statusAtQuery: null,
-            distance: 0.293,
-            rank: 0,
-            rrfScore: 0.016,
-            finalRank: 0,
-            passedStatusFilter: null,
-            injected: true,
-            sectionRank: 0,
-            injectedPosition: 1,
-            droppedReason: null,
-          },
-        ],
-        blockedByStatus: 0,
-        droppedByThreshold: 0,
-      },
-      ...over,
-    }
-  }
+  // `makeResult` 已提到模块级（组装式用例与本组共用同一份夹具，避免两处形状漂移）
 
   /** 造「本轮执行已开始」的最小现场：1 猫 + 1 会话 + 1 触发消息 + 1 条 running 执行行 */
   function seedRunningExecution(opts?: { triggerMessageId?: string; agentId?: string }) {
@@ -395,6 +446,493 @@ describe('execution/reply — R1 检索流水埋点', () => {
       const raceBody = SRC.slice(start, end)
       expect(raceBody).not.toContain('recordRetrievalTrace')
       expect(raceBody).toContain('retrieveMemoryContext')
+    })
+  })
+})
+
+// ═══ M1 缺陷修复：连线提前到广播之前（方案甲）═══════════════
+//
+// 病灶：`bus.emitMessage`（NEW_MESSAGE 广播）跑在「回复 ↔ 检索流水关联环」落库之前
+// ——前端收到广播立刻批量拉 `/memory-refs`，读口第一环 JOIN（`getInjectedRefsByMessageIds`
+// 的 `execution_logs.message_id`）此刻仍是 NULL ⇒ 最新一条回复渲染「未检索」，且前端
+// 不再重查 ⇒ 假态一直挂到刷新（约 100ms 窗口，`docs/run/m1-refs-link-timing/tickets.md`）。
+//
+// 两段证据，缺一不可：
+//  · **行为**（组装式：真 `runAgentReply` + 真 DB + 捕获 bus）：在 NEW_MESSAGE 那一刻
+//    **同步**读 DB、并打真 HTTP 读口。这是承重判据——连线若留在广播之后，第一条断言必红。
+//  · **位置**（静态源断言）：连线块夹在 `insertAgentMessage` 与 `bus.emitMessage` 之间，
+//    且定位谓词单源（不许在调用点再写第二份）。
+describe('execution/reply — M1 广播前连线', () => {
+  const AGENT_ID = 'agent-m1'
+  const SESSION_ID = 'sess-m1'
+  const TRIGGER_ID = 'm-trigger-m1'
+  const EXEC_ID = 'log-m1'
+
+  /** 造「本轮执行已开始」的现场（回复行由 runAgentReply 自己落） */
+  function seedM1(opts: { withExecutionRow?: boolean } = {}): void {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, 'ds猫', 'p', 'k')`
+    ).run(AGENT_ID)
+    db.prepare(`INSERT INTO sessions (id, title) VALUES (?, 't')`).run(SESSION_ID)
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', '@ds猫 干活', '["ds猫"]')`
+    ).run(TRIGGER_ID, SESSION_ID)
+    if (opts.withExecutionRow !== false) {
+      execLogsRepo.insertExecutionLog(EXEC_ID, SESSION_ID, AGENT_ID, TRIGGER_ID, 'trace-m1')
+    }
+  }
+
+  const agent = {
+    id: AGENT_ID,
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: '你是测试猫',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+  } as any
+
+  /** 捕获型 bus（EngineBus & HandoffBus 八个方法齐全）；`emitMessage` 回调 = 被测时点 */
+  function makeBus(onMessage?: (msg: any) => void) {
+    return {
+      emitMessage: vi.fn((msg: any) => onMessage?.(msg)),
+      emitSystemNotice: vi.fn(),
+      emitTyping: vi.fn(),
+      emitAgentMessageStatus: vi.fn(),
+      emitMessageUpdated: vi.fn(),
+      emitContextWindowStats: vi.fn(),
+      emitSessionHandoff: vi.fn(),
+      emitHandoffFailed: vi.fn(),
+    } as any
+  }
+
+  /** 该执行行当前的 `message_id`（`undefined` = 行都不存在） */
+  function linkedMessageId(): string | null | undefined {
+    const row = getDb()
+      .prepare('SELECT message_id FROM execution_logs WHERE id = ?')
+      .get(EXEC_ID) as { message_id: string | null } | undefined
+    return row?.message_id
+  }
+
+  function traceFor() {
+    return createExecTrace({
+      executionId: EXEC_ID,
+      chainId: null,
+      sessionId: SESSION_ID,
+      agentId: AGENT_ID,
+    })
+  }
+
+  function trigger() {
+    return { id: TRIGGER_ID, content: '@ds猫 干活', mentions: ['ds猫'], fromAgent: false }
+  }
+
+  beforeEach(() => {
+    setDb(createTestDb())
+    initDb()
+    initRepository(getDb())
+    vi.mocked(retrieveMemoryContext).mockResolvedValue(makeResult())
+    vi.mocked(getAdapterForAgent).mockReturnValue({
+      chatStream: vi.fn(async function* () {
+        yield { content: '收到，M1 验证', kind: 'text' }
+      }),
+    } as any)
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.clearAllMocks()
+  })
+
+  it('验收 1+3 · NEW_MESSAGE 那一刻：连线已在场，且真 HTTP 读口返回 injected（非 not-retrieved）', async () => {
+    seedM1()
+    const app = Fastify({ logger: false })
+    await app.register(memoryRoutes)
+    await app.ready()
+
+    let atEmit: { dbValue: string | null | undefined; http: Promise<any> } | undefined
+    const bus = makeBus((msg) => {
+      // 承重读数：**同步**查 DB——emit 回调就是被测时刻本身，不是「之后某一刻」
+      atEmit = {
+        dbValue: linkedMessageId(),
+        // 端到端形态：那一刻发起真 HTTP 读口（Fastify inject 立即排队处理）
+        http: app.inject({
+          method: 'GET',
+          url: `/api/sessions/${SESSION_ID}/memory-refs?messageIds=${msg.id}`,
+        }),
+      }
+    })
+
+    const res = await runAgentReply(
+      createEngineState(),
+      bus,
+      SESSION_ID,
+      agent,
+      trigger(),
+      'trace-m1',
+      undefined,
+      traceFor()
+    )
+
+    expect(res.content).toBe('收到，M1 验证')
+    // ★ 承重断言：广播那一刻 `execution_logs.message_id` 已等于回复 id
+    //（修复前该值恒为 null ⇒ 前端当场拉读口拿不到流水）
+    expect(atEmit!.dbValue).toBe(res.msgId)
+
+    const resp = await atEmit!.http
+    expect(resp.statusCode).toBe(200)
+    const payload = resp.json()
+    expect(payload[res.msgId].state).toBe('injected')
+    expect(payload[res.msgId].refs[0].docPath).toBe('docs/adr/0002-b.md')
+    await app.close()
+  })
+
+  it('验收 4 · abort 提前返回（无回复产出）⇒ 不连线，message_id 仍 NULL', async () => {
+    seedM1()
+    let emitted = false
+    const bus = makeBus(() => {
+      emitted = true
+    })
+    const controller = new AbortController()
+    controller.abort('timeout')
+
+    const res = await runAgentReply(
+      createEngineState(),
+      bus,
+      SESSION_ID,
+      agent,
+      trigger(),
+      'trace-m1',
+      controller.signal,
+      traceFor()
+    )
+
+    expect(res.content).toBe('') // 流循环在累积首个 chunk 之前就退出
+    expect(emitted).toBe(false) // 没广播 ⇒ 前端也不会去拉读口
+    expect(linkedMessageId()).toBeNull() // 连线只在回复落库后发生
+  })
+
+  it('OQ-1 · 找不到本轮 running 执行行 ⇒ 连线 no-op（不抛、回复照发）', async () => {
+    seedM1({ withExecutionRow: false })
+    const bus = makeBus()
+
+    const res = await runAgentReply(
+      createEngineState(),
+      bus,
+      SESSION_ID,
+      agent,
+      trigger(),
+      'trace-m1',
+      undefined,
+      traceFor()
+    )
+
+    // 生产路径不可达（executeAgentCommand 先落 running 行）；真出现时也**不阻塞回复**
+    expect(res.content).toBe('收到，M1 验证')
+    expect(bus.emitMessage).toHaveBeenCalledTimes(1)
+  })
+
+  describe('落点硬点（静态源断言）', () => {
+    const SRC = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), 'reply.ts'),
+      'utf8'
+    )
+
+    it('连线块夹在 `insertAgentMessage` 之后、`bus.emitMessage` 之前', () => {
+      // 三个锚都必须**全文件唯一**：`indexOf` 命中处若落在注释或别处，顺序断言会
+      // 指向错误的面（本组首跑即被自己注释里的 `bus.emitMessage(finalMsg)` 骗过一次）
+      for (const anchor of [
+        'messagesRepo.insertAgentMessage(',
+        'execLogsRepo.linkReplyMessage(',
+        'bus.emitMessage(finalMsg)',
+      ]) {
+        expect(SRC.split(anchor).length - 1, `锚不唯一：${anchor}`).toBe(1)
+      }
+      const insert = SRC.indexOf('messagesRepo.insertAgentMessage(')
+      const link = SRC.indexOf('execLogsRepo.linkReplyMessage(')
+      const emit = SRC.indexOf('bus.emitMessage(finalMsg)')
+      // 之后：`message_id` 有 FK 指 messages(id)，先连线后落库当场违反约束
+      expect(link).toBeGreaterThan(insert)
+      // 之前：连线晚于广播正是本票要关死的窗口（把 `link` 挪到 `emit` 之后本断言即红）
+      expect(emit).toBeGreaterThan(link)
+    })
+
+    it('定位谓词单源：`getLogsByTriggerMessage` 在 reply.ts 内只出现一次（埋点与连线共用）', () => {
+      expect(SRC.split('getLogsByTriggerMessage').length - 1).toBe(1)
+    })
+  })
+})
+
+// ─── T2 执行追踪详情（上下文决策明细 + prompt 分节快照）──────────────────────
+
+describe('execution/reply — T2 执行追踪详情', () => {
+  const AGENT_ID = 'agent-t2'
+  const SESSION_ID = 'sess-t2'
+  const TRIGGER_ID = 'm-trigger-t2'
+  const EXEC_ID = 'log-t2'
+
+  function seedT2(opts: { withExecutionRow?: boolean } = {}): void {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, 'ds猫', 'p', 'k')`
+    ).run(AGENT_ID)
+    db.prepare(`INSERT INTO sessions (id, title) VALUES (?, 't')`).run(SESSION_ID)
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', '@ds猫 干活', '["ds猫"]')`
+    ).run(TRIGGER_ID, SESSION_ID)
+    if (opts.withExecutionRow !== false) {
+      execLogsRepo.insertExecutionLog(EXEC_ID, SESSION_ID, AGENT_ID, TRIGGER_ID, 'trace-t2')
+    }
+  }
+
+  const agent = {
+    id: AGENT_ID,
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: '你是测试猫',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+  } as any
+
+  function makeBus() {
+    return {
+      emitMessage: vi.fn(),
+      emitSystemNotice: vi.fn(),
+      emitTyping: vi.fn(),
+      emitAgentMessageStatus: vi.fn(),
+      emitMessageUpdated: vi.fn(),
+      emitContextWindowStats: vi.fn(),
+      emitSessionHandoff: vi.fn(),
+      emitHandoffFailed: vi.fn(),
+    } as any
+  }
+
+  /** 捕获**真送进适配器**的那串 llmMessages——快照「逐字节一致」只能对着它判 */
+  let captured: Array<{ role: string; content: string }> = []
+
+  beforeEach(() => {
+    setDb(createTestDb())
+    initDb()
+    initRepository(getDb())
+    captured = []
+    vi.mocked(retrieveMemoryContext).mockResolvedValue(makeResult())
+    vi.mocked(buildKnowledgeContext).mockResolvedValue('\n\n【知识库】\n1. 条目')
+    vi.mocked(getAdapterForAgent).mockReturnValue({
+      chatStream: vi.fn(async function* (messages: any[]) {
+        captured = messages.map((m) => ({ role: m.role, content: m.content }))
+        yield { content: '收到，T2 验证', kind: 'text' }
+      }),
+    } as any)
+  })
+
+  afterEach(() => {
+    resetDb()
+    vi.clearAllMocks()
+  })
+
+  async function run() {
+    return runAgentReply(
+      createEngineState(),
+      makeBus(),
+      SESSION_ID,
+      agent,
+      { id: TRIGGER_ID, content: '@ds猫 干活', mentions: ['ds猫'], fromAgent: false },
+      'trace-t2',
+      undefined,
+      createExecTrace({
+        executionId: EXEC_ID,
+        chainId: null,
+        sessionId: SESSION_ID,
+        agentId: AGENT_ID,
+      })
+    )
+  }
+
+  describe('buildContextDecisions（纯函数 · 四级漏斗口径）', () => {
+    const m = (id: string) => ({ id })
+
+    it('每条消息恰好落一档，四档各自判对', () => {
+      const decisions = buildContextDecisions({
+        combinedMessages: [m('a'), m('b'), m('c'), m('d')],
+        relevantMessages: [m('b'), m('c'), m('d')], // a 不可见
+        messagesForTruncation: [m('c'), m('d')], // b 被摘要替代
+        truncatedMessages: [m('d')], // c 被预算截断
+        repliedOrdinals: new Set(),
+      })
+      expect(decisions.map((d) => [d.messageId, d.decision])).toEqual([
+        ['a', 'invisible'],
+        ['b', 'summary_replaced'],
+        ['c', 'budget'],
+        ['d', 'kept'],
+      ])
+      expect(decisions.map((d) => d.stage)).toEqual([
+        'assemble',
+        'compress',
+        'truncate',
+        'truncate',
+      ])
+    })
+
+    it('`repliedOrdinals` 下标是 `truncatedMessages` 的（不是 combined 的）——映射错会标错行', () => {
+      // combined 有 4 条，truncated 只剩后 2 条；下标 1 指的是 combined 里的 'd'
+      const decisions = buildContextDecisions({
+        combinedMessages: [m('a'), m('b'), m('c'), m('d')],
+        relevantMessages: [m('a'), m('b'), m('c'), m('d')],
+        messagesForTruncation: [m('a'), m('b'), m('c'), m('d')],
+        truncatedMessages: [m('c'), m('d')],
+        repliedOrdinals: new Set([1]),
+      })
+      expect(decisions.find((d) => d.messageId === 'd')?.detail).toBe('replied')
+      expect(decisions.find((d) => d.messageId === 'c')?.detail).toBeNull()
+    })
+
+    it('ordinal = 在 `combinedMessages` 里的下标（时间正序），与去向无关', () => {
+      const decisions = buildContextDecisions({
+        combinedMessages: [m('a'), m('b'), m('c')],
+        relevantMessages: [m('c')],
+        messagesForTruncation: [m('c')],
+        truncatedMessages: [m('c')],
+        repliedOrdinals: new Set(),
+      })
+      expect(decisions.map((d) => d.ordinal)).toEqual([0, 1, 2])
+    })
+
+    it('全量都进 prompt：零个筛出档（不是「没写」而是「真没有」）', () => {
+      const decisions = buildContextDecisions({
+        combinedMessages: [m('a')],
+        relevantMessages: [m('a')],
+        messagesForTruncation: [m('a')],
+        truncatedMessages: [m('a')],
+        repliedOrdinals: new Set(),
+      })
+      expect(decisions).toHaveLength(1)
+      expect(decisions[0].decision).toBe('kept')
+    })
+  })
+
+  describe('组装式 · 真跑 runAgentReply', () => {
+    it('决策明细落库：触发消息落 `kept`（它是唯一进 prompt 的那条）', async () => {
+      seedT2()
+      await run()
+      const rows = traceDetailsRepo.getContextDecisions(EXEC_ID)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({
+        message_id: TRIGGER_ID,
+        decision: 'kept',
+        stage: 'truncate',
+      })
+    })
+
+    it('★承重★ 八节落库，且每节内容**真出现在送进适配器的那串 prompt 里**', async () => {
+      seedT2()
+      await run()
+
+      const metas = traceDetailsRepo.getPromptSectionMetas(EXEC_ID)
+      expect(metas.map((m) => m.section_key)).toEqual([
+        'system_prompt',
+        'iron_law',
+        'skill_directory',
+        'dynamic_hints',
+        'summary_block',
+        'running_summary',
+        'memory',
+        'knowledge',
+      ])
+
+      const read = (k: string) => traceDetailsRepo.getPromptSection(EXEC_ID, k) ?? ''
+      const systemContents = captured
+        .filter((m) => m.role === 'system')
+        .map((m) => m.content)
+        .join('\n\n@@@\n\n')
+
+      // ★ 这一组是本票「快照不是重算的」唯一的承重判据：快照里记的串必须**逐字节**
+      //   出现在真送进模型的那串里。把 `traceSection(...)` 的入参换成任何「重算一遍」
+      //   的表达式（或换个变量）都会在这里红。
+      for (const key of [
+        'system_prompt',
+        'iron_law',
+        'skill_directory',
+        'running_summary',
+        'memory',
+        'knowledge',
+      ]) {
+        const content = read(key)
+        if (content !== '') {
+          expect(systemContents, `${key} 的内容不在真注入串里`).toContain(content)
+        }
+      }
+
+      // 记忆与知识库两节**非空**（mock 分别给了正文）——否则上面那圈 `if` 会全空转，
+      // 变成一个恒真的假绿门（本仓栽过：判据面扫不到东西时静默全绿）
+      expect(read('memory')).toBe('\n\n【相关记忆】\n1. 正文')
+      expect(read('knowledge')).toBe('\n\n【知识库】\n1. 条目')
+      // 系统提示节 = 猫自己的人格的**占位符已替换**形态
+      expect(read('system_prompt')).toBe('你是测试猫')
+
+      // 动态提示是独立 system 消息，逐条比对（拼串比对会把「缺一条」判成通过）
+      const hints = read('dynamic_hints')
+      for (const h of hints ? hints.split('\n\n') : []) {
+        expect(systemContents).toContain(h)
+      }
+
+      // 节状态与字符数自洽
+      const metaByKey = new Map(metas.map((m) => [m.section_key, m]))
+      expect(metaByKey.get('memory')!.status).toBe('injected')
+      expect(metaByKey.get('memory')!.char_count).toBe(read('memory').length)
+      // 本夹具没走摘要（`shouldHandoff` 恒 false、`summaryBlockMsg` 恒 null）⇒ 两节 empty
+      expect(metaByKey.get('summary_block')!.status).toBe('empty')
+      expect(metaByKey.get('running_summary')!.status).toBe('empty')
+    })
+
+    it('读口与执行行对得上：`hasTraceDetails` 为真、节清单不带正文', async () => {
+      seedT2()
+      await run()
+      expect(traceDetailsRepo.hasTraceDetails(EXEC_ID)).toBe(true)
+      // 判据是**键集**（不是「序列化后 grep 不到 content」——那种判据在语料恰好
+      // 不含该词时恒真，本仓栽过「探针宽度大于判据宽度」）
+      const metas = traceDetailsRepo.getPromptSectionMetas(EXEC_ID)
+      expect(metas.every((m) => !Object.keys(m).includes('content'))).toBe(true)
+    })
+
+    it('找不到 running 执行行 ⇒ 两表零行、回复照发（关键路径不阻塞）', async () => {
+      seedT2({ withExecutionRow: false })
+      const res = await run()
+      expect(res.content).toBe('收到，T2 验证')
+      expect((getDb().prepare('SELECT COUNT(*) AS n FROM context_decisions').get() as any).n).toBe(
+        0
+      )
+      expect((getDb().prepare('SELECT COUNT(*) AS n FROM prompt_snapshots').get() as any).n).toBe(0)
+    })
+  })
+
+  describe('落点硬点（静态源断言）', () => {
+    const SRC = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), 'reply.ts'),
+      'utf8'
+    )
+
+    it('写口调用点在 memory / knowledge 注入**之后**、`llm.chat` 段**之前**', () => {
+      for (const anchor of [
+        'recordTraceDetails({',
+        "trace.startSpan('llm.chat'",
+        'llmMessages[0].content + knowledgeContext',
+      ]) {
+        expect(SRC.split(anchor).length - 1, `锚不唯一：${anchor}`).toBe(1)
+      }
+      const call = SRC.indexOf('recordTraceDetails({')
+      // 之后：早一步写就会漏掉后注入的记忆/知识库两块 ⇒ 快照与真进模型的串不等
+      expect(call).toBeGreaterThan(SRC.indexOf('llmMessages[0].content + knowledgeContext'))
+      // 之前：写库耗时不该混进 `llm.chat` 段（那段的 duration 是 TTFT 的分母）
+      expect(call).toBeLessThan(SRC.indexOf("trace.startSpan('llm.chat'"))
+    })
+
+    it('技能目录段是**具名常量**（快照取到同一串，不是重算一遍）', () => {
+      expect(SRC.split('buildSkillDirectorySection()').length - 1).toBe(1)
+      expect(SRC.split('const skillDirectorySection =').length - 1).toBe(1)
     })
   })
 })

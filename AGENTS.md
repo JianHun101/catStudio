@@ -56,7 +56,10 @@ pnpm build                # pnpm -r build
 - server 测试用 `:memory:` SQLite（`setDb()`/`resetDb()` 钩子，无磁盘、FK 生效）并设 `MEMORY_ENABLED=false`；内存态用例间用 `__test_reset*` 钩子复位（`execution/registry.ts`、`execution/serial.ts`）
 - worktree 内 git 操作一律 `git -C <worktree> <cmd>`；别在即将删除的目录里驻留进程——Windows 下持 cwd 会让目录删除 EPERM 留空壳
 - Vite dev 代理：`/api` + `/socket.io` → `http://127.0.0.1:3200`
+- **真机自证的探针实例（worktree 自起 server + 无头浏览器量 DOM）必须带 `CATSTUDY_PROBE_MODE=1` 启动**——不带则该实例并不只读：启动序列会捡起副本库里的 in-flight 执行（`server_restart` / `running` 行）真实恢复执行，spawn 真 CLI、cwd 落在工作树里。带开关时三条恢复路径 + `fixStuckExecutionLogs` + 飞轮扫描器 spawn + 两个执行入口（`executeAgentsSerial` / `execute`）全跳过，**唯一豁免 = 嵌入 sidecar**（判据与豁免面见 `packages/server/src/probe-mode.ts`）。**别再用「副本库摘行 + 清 API key」手工压制**——漏一步就出事，那正是本开关要取代的
 - 会话 worktree 不可用时 CLI cwd 落 `workspace/` 子目录，此时 `CLAUDE.md` 的 `@AGENTS.md` 不展开（CLI 只展开 cwd 子树内的 import，父目录相对路径与绝对路径均不展开）——本手册在该路径下不加载
+- **判「要不要重启 server」看跑着的那个进程行为会不会变，不看文件名/目录名归类——「含 server 文件 ≠ 要重启」**（每张票收口都要判一次）。先取改动面读数（`git diff --name-only <base> <tip>`），**不先按目录名下结论**；粗筛可用 `-- 'packages/*/src/**' | grep -v '\.test\.'`（空 ⇒ **该范围内**不需重启——**这条 pathspec 只覆盖 `packages/*/src/**`**：`scripts/**`（钩子依赖的脚本、`scripts/flywheel/**` 里被启动期 spawn 的 sidecar 与扫描器）与 `.env`（gitignored，`git diff` 根本不显示）都在范围外，须另判），非空则上**行级三列**逐文件数「新增行 / 其中非空 / **其中非注释**」——判 `//` `/*` `*` 前缀前**必须去缩进**，非注释列 > 0 才要重启。再判**改动到达不到运行实例**：`import` 进主进程的模块（执行引擎/路由/调度）⇒ 须重载进程；**启动期 spawn 的长驻子进程**（嵌入 sidecar `scripts/flywheel/embed-server.mjs`，随 server 启停）⇒ 运行实例**永远跑旧代码**，不重启改动永远到不了；钩子（每提交新起进程）⇒ 下次运行自生效；**启动期 spawn 的一次性子进程**（飞轮扫描器 `scripts/flywheel/scan.mjs`——**只在 server 启动时跑**，另有 `pnpm flywheel:scan` 手动通道）与启动期 `initDb` 路径（迁移/建索引）⇒ 下次启动生效；只被 `*.test.ts` 消费的模块 ⇒ 运行实例行为不变。有运行实例可探时改用**健康探针 + 反对照**（探一个只属于运行实例的活口，同时探一个已知不该通的对照口）。**不自 kill、不自重启——重启审批归用户**。完整判据与两处样本措辞见 `docs/lessons/restart-verdict-by-live-instance.md`
+- **临时仓库夹具真造 commit 测钩子前，先剥 `CATSTUDY_*` 环境变量**（`CATSTUDY_SESSION_ID` / `CATSTUDY_AGENT_ID` / `CATSTUDY_TRIGGER_MSG_ID` / `CATSTUDY_SIGNAL_TOKEN` 等，以 `scripts/` 与 `packages/server/src/` 里的实际读点为准）——`/tmp` 一类夹具会继承 `hooksPath` 与活会话身份，夹具里的提交会触发**真实会话**的 handoff 投递请求（已两次实证）。与「钩子里剥 `GIT_DIR` 等定位类变量」同族：判据是**别让夹具继承外层的仓库定位与活会话身份**（后半条见 `docs/lessons/hook-inherits-git-dir-hijack.md`）
 
 ## Conventions
 
@@ -87,7 +90,8 @@ pnpm build                # pnpm -r build
 
 - `CONTEXT.md` — 术语表、模块目录结构、文档位置约定、流程约定
 - `docs/adr/` — 架构决策记录（新增前先读既有编号）
-- `docs/run/` — 开发文档·在飞（本轮票单）；活收口即清，**结论上浮到 `docs/plans/`**（定稿规格，点名，不二选一）
+- `docs/run/` — 开发文档·在飞（本轮票单）；活收口即清，**结论按落点分流上浮**（定稿规格 → `docs/plans/`、经验教训 → `docs/lessons/`、架构取舍 → `docs/adr/`、操作规则 → 手册面；四者点名，不二选一）
 - `CODING_STANDARDS.md` — 编码规范
+- `CONTRIBUTING.md` — 开发流程：提交规范、代码审查链、测试约定、分支与 worktree
 - `.env.example` — 全部环境变量与默认值
 - `README.md` — 面向用户的项目说明

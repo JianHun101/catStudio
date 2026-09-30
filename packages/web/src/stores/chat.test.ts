@@ -31,6 +31,7 @@ const mockMarkSessionRead = vi.fn().mockResolvedValue({ ok: true })
 const mockGetContextConfig = vi.fn()
 const mockSaveContextConfig = vi.fn()
 const mockGetSessionExecutions = vi.fn().mockResolvedValue({ executions: [] })
+const mockRollbackSession = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -46,6 +47,7 @@ vi.mock('@/composables/useApi', () => ({
     getContextConfig: mockGetContextConfig,
     saveContextConfig: mockSaveContextConfig,
     getSessionExecutions: mockGetSessionExecutions,
+    rollbackSession: mockRollbackSession,
   },
 }))
 
@@ -342,6 +344,7 @@ describe('chatStore', () => {
         [
           'old-msg',
           {
+            executionId: 'exec-old',
             messageId: 'old-msg',
             agentId: 'a1',
             status: 'completed',
@@ -412,6 +415,7 @@ describe('chatStore', () => {
         [
           's1-msg',
           {
+            executionId: 'exec-s1',
             messageId: 's1-msg',
             agentId: 'a1',
             status: 'completed',
@@ -1349,6 +1353,42 @@ describe('chatStore', () => {
       expect(store.sessions[0].id).toBe('s2')
     })
 
+    // ─── T1 同会话回退 ─────────────────────────────
+    it('SESSION_ROLLED_BACK 按权威 removedIds 移除消息 + 状态行 + 落分隔线标记', () => {
+      store.activeSessionId = 's1'
+      store.messages = [
+        { id: 'm1', sessionId: 's1', role: 'user', content: '一' },
+        { id: 'm2', sessionId: 's1', role: 'agent', content: '二' },
+        { id: 'm3', sessionId: 's1', role: 'user', content: '三' },
+      ] as never
+      store.messageStatus = new Map([['m3', [{ agentId: 'a1' } as never]]])
+
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.SESSION_ROLLED_BACK
+      )?.[1] as ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+
+      handler!({ sessionId: 's1', messageId: 'm1', removedIds: ['m2', 'm3'], removedCount: 2 })
+
+      expect(store.messages.map((m) => m.id)).toEqual(['m1'])
+      // 状态行一并清（否则 statusEntries 挂在已不存在的消息上）
+      expect(store.messageStatus.has('m3')).toBe(false)
+      expect(store.rollbackMarks.get('s1')).toEqual({ afterMessageId: 'm1', removedCount: 2 })
+    })
+
+    it('SESSION_ROLLED_BACK 非当前会话不落本地（别的会话被回退不该动这棵树）', () => {
+      store.activeSessionId = 's2'
+      store.messages = [{ id: 'm1', sessionId: 's2', role: 'user', content: '一' }] as never
+
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.SESSION_ROLLED_BACK
+      )?.[1] as ((data: any) => void) | undefined
+      handler!({ sessionId: 's1', messageId: 'x', removedIds: ['m1'], removedCount: 1 })
+
+      expect(store.messages.map((m) => m.id)).toEqual(['m1'])
+      expect(store.rollbackMarks.get('s1')).toBeUndefined()
+    })
+
     it('RESTART_STATUS pending → 按钮保持 pending（join 广播的当前状态不被当 none 打掉）', () => {
       const handler = mockOn.mock.calls.find((call) => call[0] === Events.RESTART_STATUS)?.[1] as
         ((data: any) => void) | undefined
@@ -1460,6 +1500,46 @@ describe('chatStore', () => {
       await store.fetchData()
 
       expect(store.activeSessionId).toBe('s1')
+    })
+
+    it('rollbackSession 按服务端回执的 removedIds 本地移除 + 落分隔线标记', async () => {
+      store.activeSessionId = 's1'
+      store.messages = [
+        { id: 'm1', sessionId: 's1', role: 'user', content: '一' },
+        { id: 'm2', sessionId: 's1', role: 'agent', content: '二' },
+        { id: 'm3', sessionId: 's1', role: 'user', content: '三' },
+      ] as never
+      store.messageStatus = new Map([['m2', [{ agentId: 'a1' } as never]]])
+      // 服务端说删 m3（不是前端自己按时间戳算的 m2/m3）——回执就是权威
+      mockRollbackSession.mockResolvedValueOnce({
+        ok: true,
+        messageId: 'm1',
+        removedIds: ['m3'],
+        removedCount: 1,
+      })
+
+      const count = await store.rollbackSession('s1', 'm1')
+
+      expect(mockRollbackSession).toHaveBeenCalledWith('s1', 'm1')
+      expect(count).toBe(1)
+      expect(store.messages.map((m) => m.id)).toEqual(['m1', 'm2'])
+      expect(store.rollbackMarks.get('s1')).toEqual({ afterMessageId: 'm1', removedCount: 1 })
+    })
+
+    it('rollbackSession 非当前会话只调端点、不动本地树', async () => {
+      store.activeSessionId = 's2'
+      store.messages = [{ id: 'keep', sessionId: 's2', role: 'user', content: 'x' }] as never
+      mockRollbackSession.mockResolvedValueOnce({
+        ok: true,
+        messageId: 'm1',
+        removedIds: ['m9'],
+        removedCount: 1,
+      })
+
+      await store.rollbackSession('s1', 'm1')
+
+      expect(store.messages.map((m) => m.id)).toEqual(['keep'])
+      expect(store.rollbackMarks.get('s1')).toBeUndefined()
     })
 
     it('deleteSession 删除当前活跃会话（无后继）→ 清除 localStorage 记忆', async () => {

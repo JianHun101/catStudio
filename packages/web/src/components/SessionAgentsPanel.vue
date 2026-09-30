@@ -382,6 +382,11 @@ async function removeAgent(agentId: string): Promise<void> {
 
 <template>
   <div class="session-agents-panel">
+    <!-- 头行：48px，与主区顶栏、会话栏头行同一水平线（治「左右侧面板上方空缺」）。
+         会话无关（空态也渲染，读数 0）——头行恒在，三条头行才在任何状态下都对得齐。
+         margin 抵消父级左右 padding，让下边框通栏（内部卡片仍保持缩进）。 -->
+    <div class="panel-head">成员 · {{ memberAgents.length }}</div>
+
     <!-- 无会话空态（不报错，静默提示） -->
     <div v-if="!store.activeSessionId" class="panel-empty">
       <span class="empty-icon">🐾</span>
@@ -663,7 +668,30 @@ async function removeAgent(agentId: string): Promise<void> {
   gap: 12px;
   height: 100%;
   overflow-y: auto;
-  padding: 14px 12px 16px;
+  /* 顶 padding 归零：头行必须贴面板顶缘，否则 48px 头行被 14px padding 顶下去，
+     与主区顶栏 / 会话栏头行错位（验收：三条头行 getBoundingClientRect().top 相等）。 */
+  padding: 0 12px 16px;
+}
+
+/* 头行：定高 48px + sticky——面板自身是滚动容器，头行不随成员列表滚走。
+   margin 负值抵消父级左右 padding，使下边框通栏。 */
+.panel-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex: none;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  margin: 0 -12px;
+  padding: 0 14px;
+  background: var(--bg-base);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.6px;
+  white-space: nowrap;
 }
 
 .panel-empty {

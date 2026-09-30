@@ -6,14 +6,6 @@ import { createLogger } from '@/utils/logger'
 
 const log = createLogger('SessionList')
 
-defineProps<{
-  collapsed?: boolean
-}>()
-
-const emit = defineEmits<{
-  expand: []
-}>()
-
 const store = useChatStore()
 const showCreate = ref(false)
 
@@ -41,87 +33,49 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
 </script>
 
 <template>
-  <!-- Collapsed: icon column（参考 Claude Desktop） -->
-  <div v-if="collapsed" class="session-list-collapsed">
-    <button class="collapsed-icon collapsed-brand" title="展开会话列表" @click="emit('expand')">
-      🐾
-    </button>
-
-    <div class="collapsed-sessions">
-      <button
-        v-for="s in store.sessions"
-        :key="s.id"
-        class="collapsed-session-btn"
-        :class="{ active: store.activeSessionId === s.id }"
-        :title="s.title"
-        @click="store.joinSession(s.id)"
-      >
-        <span class="collapsed-session-icon">💬</span>
-        <span
-          v-if="store.unreadCounts.get(s.id) && store.activeSessionId !== s.id"
-          class="collapsed-unread"
-        ></span>
-      </button>
-    </div>
-
-    <button class="collapsed-icon collapsed-add" title="新建会话" @click="showCreate = true">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-      </svg>
-    </button>
-
-    <SessionCreateModal v-if="showCreate" @close="closeCreate" />
-  </div>
-
-  <!-- Expanded: full session list -->
-  <div v-else class="session-list">
-    <!-- Brand -->
-    <div class="brand">
-      <span class="brand-icon">🐾</span>
-      <div class="brand-text">
-        <h1>CatStudio</h1>
-        <p>多Agent协作平台</p>
-      </div>
+  <!-- 会话列表**唯一形态**。折叠态图标列已整支删除（含 prop/emit 传递链）：
+       左栏收起时 `.panel-left` 整块 `display:none`（App.vue），该分支 DOM 永不可见 = 死代码。
+       产品上若要恢复「窄条收起态」，需另立票——收起态交互不在本组件现状内。 -->
+  <div class="session-list">
+    <!-- 会话栏头行：48px，与主区顶栏、右栏「成员 · N」同一水平线（治「左右侧面板上方空缺」）。
+         品牌块（logo + CatStudio 字样）已上移到 52px 图标轨道——logo 唯一归属轨道，
+         会话栏只留本区自身的标题与操作；此处若再放一块品牌，头行就会被顶下去。 -->
+    <div class="section-header">
+      <span class="section-header-label">会话</span>
+      <span class="section-header-right">
+        <span class="section-count" v-if="store.sessions.length">{{ store.sessions.length }}</span>
+        <!-- 「显示已归档」开关（spec §4.1）：归档会话默认从列表隐藏 -->
+        <button
+          class="btn-toggle-archived"
+          :class="{ active: store.showArchived }"
+          :aria-pressed="store.showArchived"
+          :title="store.showArchived ? '隐藏已归档会话' : '显示已归档会话'"
+          @click="store.setShowArchived(!store.showArchived)"
+        >
+          <span>已归档</span>
+        </button>
+        <!-- 新建会话：头行右侧（图1「添加成员」范式），不再占底部 footer -->
+        <button
+          class="btn-new-session-header"
+          title="新建会话"
+          aria-label="新建会话"
+          @click="showCreate = true"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M8 3v10M3 8h10"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span>新建</span>
+        </button>
+      </span>
     </div>
 
     <!-- Sessions -->
     <div class="section">
-      <div class="section-header">
-        <span>会话</span>
-        <span class="section-header-right">
-          <span class="section-count" v-if="store.sessions.length">{{
-            store.sessions.length
-          }}</span>
-          <!-- 「显示已归档」开关（spec §4.1）：归档会话默认从列表隐藏 -->
-          <button
-            class="btn-toggle-archived"
-            :class="{ active: store.showArchived }"
-            :aria-pressed="store.showArchived"
-            :title="store.showArchived ? '隐藏已归档会话' : '显示已归档会话'"
-            @click="store.setShowArchived(!store.showArchived)"
-          >
-            <span>已归档</span>
-          </button>
-          <!-- 新建会话：标题行右侧（图1「添加成员」范式），不再占底部 footer -->
-          <button
-            class="btn-new-session-header"
-            title="新建会话"
-            aria-label="新建会话"
-            @click="showCreate = true"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M8 3v10M3 8h10"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-              />
-            </svg>
-            <span>新建</span>
-          </button>
-        </span>
-      </div>
-
       <!-- 等待服务器启动（health check 轮询中） -->
       <div v-if="store.waitingForServer" class="status-box">
         <span class="status-spinner"></span>
@@ -211,34 +165,6 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   height: 100%;
 }
 
-/* ─── Brand ─────────────────────────────── */
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 20px 18px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.brand-icon {
-  font-size: 28px;
-  line-height: 1;
-}
-
-.brand-text h1 {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.3px;
-}
-
-.brand-text p {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 1px;
-}
-
 /* ─── Section ───────────────────────────── */
 
 .section {
@@ -249,16 +175,27 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   padding: 12px 10px;
 }
 
+/* 头行：48px 定高 + 下边框——与主区顶栏、右栏「成员 · N」同一水平线。
+   nowrap 保 236px 窄栏内不折行（折行会把 48px 撑破、三条头行错位）。 */
 .section-header {
+  height: 48px;
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 8px 8px;
+  gap: 8px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+
+.section-header-label {
+  flex: none;
 }
 
 .section-count {
@@ -548,106 +485,5 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   padding: 24px;
   color: var(--text-muted);
   font-size: 12px;
-}
-
-/* ─── Collapsed Icon Column ──────────────── */
-
-.session-list-collapsed {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  height: 100%;
-  padding: 8px 0;
-  gap: 4px;
-}
-
-.collapsed-icon {
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all var(--ease-out);
-}
-
-.collapsed-icon:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.collapsed-brand {
-  font-size: 22px;
-  margin-bottom: 8px;
-}
-
-.collapsed-sessions {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  width: 100%;
-  padding: 0 4px;
-}
-
-.collapsed-session-btn {
-  position: relative;
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all var(--ease-out);
-}
-
-.collapsed-session-btn:hover {
-  background: var(--bg-hover);
-}
-
-.collapsed-session-btn.active {
-  background: var(--bg-surface);
-}
-
-.collapsed-session-btn.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  background: var(--accent);
-  border-radius: 0 2px 2px 0;
-}
-
-.collapsed-session-icon {
-  font-size: 16px;
-  opacity: 0.7;
-}
-
-.collapsed-unread {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent-red);
-}
-
-.collapsed-add {
-  margin-top: auto;
-  margin-bottom: 0;
 }
 </style>

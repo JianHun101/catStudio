@@ -155,6 +155,12 @@ export function spawnReviewFallback(cwd: string, commitSha: string): SpawnOutcom
   // 信号（显式指定 > commit uuid 反查），server 侧若带着它（注入给 CLI 子进程的
   // 那份被误继承/外部 shell 导出），兜底就会**改写投递目标**、投到错误的会话。
   // 它**不参与幂等判据**——旁路 delivered 账本的是 CATSTUDY_FORCE_DELIVER。
+  //
+  // 注：handoff-gen 现已给该信号加**仓库归属前置**（`judgeRepoOwnership`：仓库须
+  // 自证属于该会话的工作区族才认），但那条判据**不替代本处的 delete**——两者问的
+  // 不是同一个问题：「仓库属于 X」不等于「X 是本次该投的会话」。本兜底的工作目录
+  // 恰好会回落到**脚本所属仓库根**（= 主仓库，归属校验必过），继承该变量照样会把
+  // 目标改写成会话环境里的那一个、而不是 commit 锚反查出来的那一个。
   const env = { ...process.env }
   delete env.CATSTUDY_SESSION_ID
   try {

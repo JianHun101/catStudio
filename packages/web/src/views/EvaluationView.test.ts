@@ -49,10 +49,15 @@ vi.mock('@/composables/useApi', () => ({
 }))
 
 describe('EvaluationView 静态结构（?raw）', () => {
-  it('全屏视图 + 关闭按钮 emit close（照 SettingsView 模式）', () => {
-    expect(source).toContain('role="dialog"')
-    expect(source).toContain('aria-label="评估中心"')
-    expect(source).toContain('@click="emit(\'close\')"')
+  it('评估视图 + 标题栏保留 / ✕ 退役（T4：对齐追踪页形态，轨道即导航）', () => {
+    // T4 改锚：不再是模态覆盖层——`role="dialog"`/`aria-modal`/`close` emit 与 ✕ 同批退役
+    expect(source).toContain('class="eval-view" aria-label="评估中心"')
+    expect(source).not.toContain('role="dialog"')
+    expect(source).not.toContain('aria-modal')
+    expect(source).not.toContain('btn-close')
+    expect(source).not.toContain("emit('close')")
+    expect(source).toContain('class="eval-header"')
+    expect(source).toContain('<h2>评估中心</h2>')
   })
 
   it('五 tab：观察 / 回标 / 标注 / 链路 / 检索，默认观察，回标带待回标角标', () => {
@@ -64,15 +69,41 @@ describe('EvaluationView 静态结构（?raw）', () => {
     expect(source).toContain(`v-show="activeTab === 'label'"`)
     expect(source).toContain(`v-show="activeTab === 'chain'"`)
     expect(source).toContain(`v-show="activeTab === 'retrieval'"`)
-    expect(source).toContain('tab-badge')
+    // T5 改锚：横向 tab 栏退役 → 左侧二级导航（角标类名 .sub-nav-badge 在 SubNav 内，
+    // 见 SubNav.test.ts）。本视图的契约 = 五个 key 喂给 items + badge 跟随待回标数。
+    expect(source).toContain('badge: pendingBadge.value')
     expect(source).toContain('pendingBadge')
-    // E1 契约 C：检索 tab 排在「链路」**之后**（按钮序 = 阅读序；插在中间会改既有 tab 的
-    // 肌肉记忆位置）。按**按钮块**切而不是裸切字面量——`:class` 在 tab 栏先出现。
-    const tabBar = source.slice(source.indexOf('eval-tabs'), source.indexOf('<!-- ─── 观察 tab'))
-    const chainAt = tabBar.indexOf('链路')
-    const retrievalAt = tabBar.indexOf('检索')
+    expect(source).toContain(':items="evalNavItems"')
+    // E1 契约 C：检索排在「链路」**之后**（顺序 = 阅读序；插在中间会改既有 tab 的
+    // 肌肉记忆位置）。T5 改锚到 items 数组内部——横排按钮没了，顺序契约不变。
+    const items = source.slice(
+      source.indexOf('const evalNavItems'),
+      source.indexOf('])', source.indexOf('const evalNavItems'))
+    )
+    const chainAt = items.indexOf('链路')
+    const retrievalAt = items.indexOf('检索')
     expect(chainAt).toBeGreaterThan(-1)
     expect(retrievalAt).toBeGreaterThan(chainAt)
+    // T5：横向 tab 零残留（票面 §四 验收 3）。判据取**开标签**而不是裸类名——
+    // 样式迁出的注释里会提到旧类名，裸串判据会被自己的注释喂成假绿。
+    expect(source).not.toContain('<div class="eval-tabs">')
+    expect(source).not.toContain('class="tab-btn"')
+  })
+
+  it('T5：导航与内容并排（grid 第二行 [auto | 1fr]），标题栏横跨整行', () => {
+    // 为什么用 grid 而不是给五个 pane 各包一层 wrapper：`v-show` 互斥，它们本就共用
+    // 同一格；包 wrapper 要把五个 pane 整体重排缩进（几百行噪声 diff，真变化反而难找）。
+    const view = source.match(/\.eval-view\s*\{[\s\S]*?\}/)
+    expect(view, '未找到 .eval-view 规则').toBeTruthy()
+    expect(view![0]).toContain('grid-template-columns: auto 1fr')
+    // 列宽走 auto —— 148px 的唯一表述点在 SubNav 自身，本视图不复述那个数
+    expect(view![0]).not.toContain('148px')
+    expect(source).toContain('grid-column: 1 / -1')
+    // 五个 pane 同落第二行第二列
+    const pane = source.match(/\.eval-pane\s*\{[\s\S]*?\}/)
+    expect(pane, '未找到 .eval-pane 规则').toBeTruthy()
+    expect(pane![0]).toContain('grid-column: 2')
+    expect(pane![0]).toContain('width: 100%')
   })
 
   it('J1 标注 tab：盲标是硬要求——样本卡**不渲染任何判官分**，且该 tab 的取数面里没有它', () => {
@@ -687,7 +718,8 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     // 两条样本卡 + 角标 2
     expect(wrapper.text()).toContain('这是低分回复全文 A')
     expect(wrapper.text()).toContain('这是低分回复全文 B')
-    const badgeBefore = wrapper.find('.tab-badge')
+    // T5 改锚：角标随导航迁到 SubNav（`.sub-nav-badge`），读数与减一行为不变
+    const badgeBefore = wrapper.find('.sub-nav-badge')
     expect(badgeBefore.exists()).toBe(true)
     expect(badgeBefore.text()).toBe('2')
 
@@ -700,7 +732,7 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     // 样本 A 移出、B 保留；角标 2 → 1
     expect(wrapper.text()).not.toContain('这是低分回复全文 A')
     expect(wrapper.text()).toContain('这是低分回复全文 B')
-    expect(wrapper.find('.tab-badge').text()).toBe('1')
+    expect(wrapper.find('.sub-nav-badge').text()).toBe('1')
     wrapper.unmount()
   })
 
@@ -799,7 +831,8 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     expect(chainTab).toBeTruthy()
     await chainTab!.trigger('click')
     await flushPromises()
-    expect(wrapper.find('.tab-btn.active').text()).toContain('链路')
+    // T5 改锚：激活态落在 SubNav 的导航项上（用例意图不变——切到哪个 tab，哪个高亮）
+    expect(wrapper.find('.sub-nav-item.active').text()).toContain('链路')
 
     // 概览条：逐项按名取值断言（整条 toContain('2') 会被 482/1084 蒙混过关）
     const ov = (label: string) =>

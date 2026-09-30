@@ -175,7 +175,7 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(actual).toHaveLength(BASELINE.length)
     })
 
-    it('空库跑完整 initDb → 基线 47 件之上追加区净增 4 件，且两列索引已升成三列', () => {
+    it('空库跑完整 initDb → 基线 47 件之上追加区净增 7 件，且两列索引已升成三列', () => {
       setDb(makeFreshDb())
       initDb()
 
@@ -192,13 +192,19 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       //   - 票 J1 的 `human_labels` 是**新表** ⇒ +1 张表（表带 UNIQUE(message_id) 会在
       //     `sqlite_master` 里生成一条 `sqlite_autoindex_*` 索引行——`dumpSchema` 按
       //     `name NOT LIKE 'sqlite_%'` 过滤，自动索引名恰好命中该前缀，故不计入）。
+      //   - 票 T2 的 `context_decisions` / `prompt_snapshots` 是**两张新表** + 一条新索引
+      //     ⇒ +3 件（`prompt_snapshots` 的复合主键同样只生 `sqlite_autoindex_*`，不计入；
+      //     `context_decisions` 是 `INTEGER PRIMARY KEY AUTOINCREMENT`，不生成自动索引）。
       // 将来往追加区加迁移**必须来改这里**——否则新物体静默出现，没人知道结构被谁改了。
       // 次序 = `dumpSchema` 的 `ORDER BY type, name`（`'index' < 'table'` ⇒ 索引段在前）
       expect(added.map((r) => `${r.type}:${r.name}`)).toEqual([
+        'index:idx_context_decisions_execution',
         'index:idx_execution_logs_session_started',
         'index:idx_execution_logs_status',
         'index:idx_sessions_active',
+        'table:context_decisions',
         'table:human_labels',
+        'table:prompt_snapshots',
       ])
       // 「升级」的判据是定义本身：末列 `id` 是游标 tie-break，两列版里没有
       expect(actual.find((r) => r.name === 'idx_messages_session')?.sql).toContain(
@@ -493,14 +499,16 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
     const repairEntry = MIGRATIONS.find((m) => m.name === REPAIR_NAME) as Migration
 
     /**
-     * 追加区在**齐件库**上的净增物体数（票 2 起 = 4：`idx_execution_logs_session_started` /
+     * 追加区在**齐件库**上的净增物体数（票 2 起 = 7：`idx_execution_logs_session_started` /
      * `idx_execution_logs_status` / 票 7 的 `idx_sessions_active` / 票 J1 新增的
-     * `human_labels` 表；`idx_messages_session` 是同名升级 ⇒ 物体数不变，票 5 的
-     * `messages` 重建同理，票 7 的加列不是物体）。
-     * 追加区的**权威清单**在「验收 1 · 空库跑完整 initDb → 净增 4 件」那条穷举用例里；
+     * `human_labels` 表 / 票 T2 的 `context_decisions` 表 +
+     * `idx_context_decisions_execution` 索引 + `prompt_snapshots` 表；
+     * `idx_messages_session` 是同名升级 ⇒ 物体数不变，票 5 的 `messages` 重建同理，
+     * 票 7 的加列不是物体）。
+     * 追加区的**权威清单**在「验收 1 · 空库跑完整 initDb → 净增 7 件」那条穷举用例里；
      * 这里只拿它把 ds猫 侧「齐件库 = 47 件」的旧读数换算到追加区上线后的口径。
      */
-    const APPENDED_NET_OBJECTS = 4
+    const APPENDED_NET_OBJECTS = 7
 
     /** 补建目标 = 5 表 + 9 索引，**顺序 = 建表依赖序**（FK 目标先建） */
     const EXPECTED_OBJECTS = [

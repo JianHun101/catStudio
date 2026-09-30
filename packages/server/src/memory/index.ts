@@ -710,16 +710,37 @@ function renderOrder(n: number): number[] {
 }
 
 /**
+ * 角标引用指示语（R14b）——**甲版逐字**，一字不动。
+ *
+ * ⚠️ 这不是随手写的文案，是 **R14a 实测过的自变量**：60 次真实调用（4 provider）
+ * 下「标对 54 / 标错号 0 / 不标 6」，改动措辞即失去那批读数对它的支撑
+ * （S1 甲乙两版 p = 0.688 分不出胜负 ⇒ 甲版是**默认值**而非胜者，但没有换掉它的证据）。
+ * 措辞同步守卫见 `scripts/probes/r14a-citation-probe.test.js` 的「形状规格守卫」组
+ * ——探针夹具 `VARIANTS.jia` 与本常量必须逐字节相等，任一侧漂移即红。
+ *
+ * 位置契约：`【相关记忆】` 头**之后**、`1.` **之前**，独占一行——与探针注入串同形
+ * （探针 `withInstruction` 的插入位）。零节时整块不出现（函数首行的早退），
+ * 自然也不出现指示语；a2a 跳过【相关记忆】时同理，不做特判。
+ */
+export const CITATION_MARKER_INSTRUCTION =
+  '（以下为检索到的历史结论。若你采纳了其中某条，请在该处标注其编号，如 [1]；没有采纳的条目不标。）'
+
+/**
  * 把若干节渲染成注入块（重排见 `renderOrder`）。
  *
  * 序号按**最终位置**编（猫读到的是连续 1..n），故本函数的输出即最终注入串，
  * token 核算与实际注入逐字节同源（预算判据不会与注入面脱钩）。
+ *
+ * ⚠️ 指示语必须落**本函数内部**、不能落在调用方：本函数同时服务预算试渲染
+ * （`renderSections([...kept, section])` 的调用处）与最终注入，两处同源才能保证
+ * token 核算把指示语一并算进去——落调用方的话，预算判据按「不含指示语」的串核算、
+ * 实际注入的串却带着它，两者相差一句指示语的 token。
  */
 function renderSections(sections: RetrievedSection[]): { text: string; tokens: number } {
   if (sections.length === 0) return { text: '', tokens: 0 }
   const ordered = renderOrder(sections.length).map((i) => sections[i])
   const lines = ordered.map((s, i) => `${i + 1}. ${retiredMark(s)}${s.parts.join('\n')}`)
-  const text = `\n\n【相关记忆】\n${lines.join('\n')}`
+  const text = `\n\n【相关记忆】\n${CITATION_MARKER_INSTRUCTION}\n${lines.join('\n')}`
   return { text, tokens: estimateTokens(text) }
 }
 
