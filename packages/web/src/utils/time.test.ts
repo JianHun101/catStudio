@@ -18,6 +18,13 @@ import timeSource from './time.ts?raw'
  * 肉眼看不出来，只有拿跨时区的期望值才测得出。
  */
 
+/** 剥掉注释后的源码——**静态源断言的判据面只应是代码**。
+ *  `?raw` 会把 JSDoc 一并喂进来：注释里的散文示例会污染「构造点清单」这类**计数/枚举**断言
+ *  （改一句文档即假红），反过来，注释里写一句被正面锚找的字面量又能让它**假绿**。
+ *  本文件两条静态源守卫一律跑在它上面。（`time.ts` 内无含 `//` 的字符串/正则字面量，已实读。） */
+const codeOnly = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+const codeSource = codeOnly(timeSource)
+
 const p2 = (n: number) => String(n).padStart(2, '0')
 
 /** 独立构造「同一 UTC 时刻」的本地读数期望——不经过被测函数，避免自证 */
@@ -102,22 +109,23 @@ describe('两个格式化函数：形状不变、值按时区换算', () => {
 })
 
 describe('静态源：解析必须显式当 UTC（守卫随实现搬家的落点）', () => {
-  it('串必须经 normalizeUtc 归一后才进 Date 构造（没有裸 new Date(串变量)）', () => {
-    expect(timeSource).toContain("replace(' ', 'T') + 'Z'")
-    expect(timeSource).toContain('new Date(normalizeUtc(raw))')
+  it('串分支必须委托唯一解析入口（没有裸 new Date(串变量)）', () => {
+    expect(codeSource).toContain("replace(' ', 'T') + 'Z'")
+    expect(codeSource).toContain('new Date(normalizeUtc(raw))')
+    // 正面锚住**串分支**：`toLocalDate` 的串路径必须委托 `parseUtc`（全文件唯一命中）。
+    // 把它换成裸构造——本守卫要防的那件事——本行即红，且下面清单同时多出一个 `raw`。
+    // （行为用例「吃 SQLite 无后缀串」也能抓，但它只在非 UTC 机器上有分辨力：输入串由本机
+    //   `toISOString()` 派生，UTC 机器上串本地读数与 UTC 读数重合 ⇒ 该回归行为上不可见。）
+    expect(codeSource).toContain('return parseUtc(raw)')
     // 裸构造的形态是 `new Date(<标识符>)`——数字分支走 `new Date(raw)` 是**合法**的
-    // （数字无时区语义），故这里只钉串路径：`normalizeUtc` 的产物必须出现在构造入参位置。
-    // 不写 `not.toContain('new Date(raw)')`：那会被注释里的示例文本误伤（本文件初版踩过）。
-    // 全文件的裸标识符构造点只有三处，逐一说明为何合法：
+    // （数字无时区语义），故清单只钉「有哪些」，合法性逐条说明：
     //   raw  —— `toLocalDate` 的**数字**分支（数字无时区语义，不该走串归一）
-    //   n    —— 同上，`fmtMsgTime` 数字入参用例外的同义写法，同属数字面
     //   now  —— `dayBucket` 里 `new Date(now)` 的全日期拷贝（不是解析，是复制）
-    // 字符串解析路径**只有**一处，且必须带 `normalizeUtc`——新增裸构造会打红此断言。
-    const dateCtors = [...timeSource.matchAll(/new Date\(([^)]*)\)/g)]
+    const dateCtors = [...codeSource.matchAll(/new Date\(([^)]*)\)/g)]
       .map((m) => m[1].trim())
       .filter((arg) => /^\w+$/.test(arg))
       .sort()
-    expect(dateCtors).toEqual(['n', 'now', 'raw'])
+    expect(dateCtors).toEqual(['now', 'raw'])
   })
 })
 
@@ -223,8 +231,10 @@ describe('fmtDateSep：分档与 fmtMsgTime 同源，只是不带时刻', () => 
 describe('静态源：分档顺序不能重排（昨天必须先于跨年判定）', () => {
   it('两函数共用同一个 dayBucket，且「昨天」以 setDate(-1) 表达', () => {
     // 「昨天优先跨年」是语义的一部分，重排顺序即回归——本断言把顺序钉在源码上
-    expect(timeSource).toContain('function dayBucket(')
-    expect(timeSource.match(/dayBucket\(/g)!.length).toBeGreaterThanOrEqual(3) // 定义 + 两处消费
-    expect(timeSource).toContain('yesterday.setDate(yesterday.getDate() - 1)')
+    // 计数跑在 codeSource 上：注释里提一次 `dayBucket(` 就能给这条 `>= 3` 添余量、
+    // 掩掉真删一处消费——与上一条守卫同一失效机制（判据面混入注释），故同批收掉。
+    expect(codeSource).toContain('function dayBucket(')
+    expect(codeSource.match(/dayBucket\(/g)!.length).toBeGreaterThanOrEqual(3) // 定义 + 两处消费
+    expect(codeSource).toContain('yesterday.setDate(yesterday.getDate() - 1)')
   })
 })
