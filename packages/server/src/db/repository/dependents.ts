@@ -26,12 +26,15 @@ export function setRepoDb(dbInst: Database.Database): void {
   db = dbInst
 }
 
-/** 待删**消息**的选取范围——四种调用形态（单条 / 按会话 / 按猫 / 全清）共用一个实现 */
+/** 待删**消息**的选取范围——五种调用形态（单条 / 按会话 / 按猫 / 全清 / 显式 id 集）共用一个实现 */
 export type MessageScope =
   | { kind: 'id'; id: string }
   | { kind: 'session'; sessionId: string }
   | { kind: 'agent'; agentId: string }
   | { kind: 'all' }
+  /** 显式 id 集：调用方已算好待删集合（如回退的「目标之后的全部消息」）。
+   *  空数组是**合法输入**（回退到末尾 = 没有消息要删），由 `messageScopeWhere` 短路成恒假。 */
+  | { kind: 'ids'; ids: readonly string[] }
 
 /** 待删**会话**的选取范围 */
 export type SessionScope = { kind: 'id'; sessionId: string } | { kind: 'all' }
@@ -50,6 +53,16 @@ function messageScopeWhere(scope: MessageScope): { sub: string; args: unknown[] 
       return { sub: 'SELECT id FROM messages WHERE agent_id = ?', args: [scope.agentId] }
     case 'all':
       return { sub: 'SELECT id FROM messages', args: [] }
+    case 'ids':
+      // 空集不能拼成 `IN ()`——SQLite 会当语法错误抛。用恒假子查询短路：
+      // 五条 DELETE 全部命中零行，语义与「无可删」一致。
+      if (scope.ids.length === 0) {
+        return { sub: 'SELECT id FROM messages WHERE 1 = 0', args: [] }
+      }
+      return {
+        sub: `SELECT id FROM messages WHERE id IN (${scope.ids.map(() => '?').join(', ')})`,
+        args: [...scope.ids],
+      }
   }
 }
 

@@ -2,19 +2,19 @@
 
 ## 1. What — 具体改动
 
-| 文件 | 改动 |
-|------|------|
-| `packages/shared/src/types.ts` | 已存在 — `MemoryEntry` 接口（`id`, `agentId`, `content`, `embedding: number[]`, `sourceMessageId`, `createdAt`），本次未修改 |
-| `packages/shared/src/schemas.ts` | 已存在 — `EmbeddingConfigSchema`（`provider`, `model`, `apiKey`, `baseUrl`），本次未修改 |
-| `packages/server/src/db/index.ts` | 修改，导入 `sqlite-vec` 并在 `initDb()` 中调用 `sqliteVec.load(db)` 注册向量函数（`vec_distance_cosine` 等） |
-| `packages/server/src/memory/embedding.ts` | 新建，本地嵌入模块。动态 import `@huggingface/transformers` → `pipeline('feature-extraction')` 加载 `Xenova/bge-small-zh-v1.5`（512 维中文模型），惰性单例 + 首次下载后缓存。暴露 `embedText(text: string): Promise<number[]>` 和 `isMemoryEnabled()` |
-| `packages/server/src/memory/index.ts` | 新建，记忆服务。`saveMessageMemory()`（用户消息 → 嵌入 → BLOB 写入 `memories` 表，每 Agent 一行）、`searchMemories()`（sqlite-vec `vec_distance_cosine` 余弦相似度搜索 top-K）、`buildMemoryContext()`（检索结果格式化为 system prompt 文本块）。辅助函数 `vectorToBlob()`/`blobToVector()`（number[] ↔ Float32Array ↔ Buffer） |
-| `packages/server/src/llm/openai.ts` | 修改，Codex CLI 适配器编码修复。Windows 下 PowerShell 管道中文 UTF-8 编码问题经多种方案尝试（临时文件 + `Get-Content -Encoding UTF8`、`cmd.exe type` 管道、直接传参），最终还原为原始方案 |
-| `packages/server/src/connectors/socketio.ts` | 修改，两处注入 + 超时保护。注入点 A（第 128 行后）：用户消息写入后调用 `saveMessageMemory()`，异步不阻塞；注入点 B（`runAgentReply` 中 `llmMessages` 构建后）：`Promise.race(buildMemoryContext(), 10s timeout)` → 匹配记忆注入 `llmMessages[0].content`。超时或失败时静默跳过，不影响 LLM 回复 |
-| `packages/server/src/index.ts` | 修改，入口处设置 `process.env.HF_ENDPOINT = 'https://hf-mirror.com'`（HuggingFace 镜像，解决中国大陆模型下载问题） |
-| `packages/server/package.json` | 修改，新增 `sqlite-vec`、`@huggingface/transformers`、`sharp` 三个依赖 |
-| `pnpm-workspace.yaml` | 修改，`allowBuilds` 新增 `sqlite-vec: true`、`protobufjs: true`、`sharp: true`、`onnxruntime-node: true` |
-| `CONTEXT.md` | 修改，领域模型整理。Memory 定义收紧（移除实现细节）、Memory Retrieval 移除（合并进 Memory）、Embedding（嵌入向量）新增为独立术语 |
+| 文件                                         | 改动                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/shared/src/types.ts`               | 已存在 — `MemoryEntry` 接口（`id`, `agentId`, `content`, `embedding: number[]`, `sourceMessageId`, `createdAt`），本次未修改                                                                                                                                                                                                    |
+| `packages/shared/src/schemas.ts`             | 已存在 — `EmbeddingConfigSchema`（`provider`, `model`, `apiKey`, `baseUrl`），本次未修改                                                                                                                                                                                                                                        |
+| `packages/server/src/db/index.ts`            | 修改，导入 `sqlite-vec` 并在 `initDb()` 中调用 `sqliteVec.load(db)` 注册向量函数（`vec_distance_cosine` 等）                                                                                                                                                                                                                    |
+| `packages/server/src/memory/embedding.ts`    | 新建，本地嵌入模块。动态 import `@huggingface/transformers` → `pipeline('feature-extraction')` 加载 `Xenova/bge-small-zh-v1.5`（512 维中文模型），惰性单例 + 首次下载后缓存。暴露 `embedText(text: string): Promise<number[]>` 和 `isMemoryEnabled()`                                                                           |
+| `packages/server/src/memory/index.ts`        | 新建，记忆服务。`saveMessageMemory()`（用户消息 → 嵌入 → BLOB 写入 `memories` 表，每 Agent 一行）、`searchMemories()`（sqlite-vec `vec_distance_cosine` 余弦相似度搜索 top-K）、`buildMemoryContext()`（检索结果格式化为 system prompt 文本块）。辅助函数 `vectorToBlob()`/`blobToVector()`（number[] ↔ Float32Array ↔ Buffer） |
+| `packages/server/src/llm/openai.ts`          | 修改，Codex CLI 适配器编码修复。Windows 下 PowerShell 管道中文 UTF-8 编码问题经多种方案尝试（临时文件 + `Get-Content -Encoding UTF8`、`cmd.exe type` 管道、直接传参），最终还原为原始方案                                                                                                                                       |
+| `packages/server/src/connectors/socketio.ts` | 修改，两处注入 + 超时保护。注入点 A（第 128 行后）：用户消息写入后调用 `saveMessageMemory()`，异步不阻塞；注入点 B（`runAgentReply` 中 `llmMessages` 构建后）：`Promise.race(buildMemoryContext(), 10s timeout)` → 匹配记忆注入 `llmMessages[0].content`。超时或失败时静默跳过，不影响 LLM 回复                                 |
+| `packages/server/src/index.ts`               | 修改，入口处设置 `process.env.HF_ENDPOINT = 'https://hf-mirror.com'`（HuggingFace 镜像，解决中国大陆模型下载问题）                                                                                                                                                                                                              |
+| `packages/server/package.json`               | 修改，新增 `sqlite-vec`、`@huggingface/transformers`、`sharp` 三个依赖                                                                                                                                                                                                                                                          |
+| `pnpm-workspace.yaml`                        | 修改，`allowBuilds` 新增 `sqlite-vec: true`、`protobufjs: true`、`sharp: true`、`onnxruntime-node: true`                                                                                                                                                                                                                        |
+| `CONTEXT.md`                                 | 修改，领域模型整理。Memory 定义收紧（移除实现细节）、Memory Retrieval 移除（合并进 Memory）、Embedding（嵌入向量）新增为独立术语                                                                                                                                                                                                |
 
 ## 2. Why — 为什么这样做
 
@@ -44,6 +44,7 @@ GET  https://api.deepseek.com/v1/models      → 只有 deepseek-v4-pro/flash
 DeepSeek 不提供 embedding 端点。转而尝试 `@xenova/transformers` v2.17.2 → sharp@0.32.0 原生二进制缺失 → 升级到 `@huggingface/transformers` v4.2.0 + sharp@0.33.5 + onnxruntime-node，所有原生模块安装成功。模型选用 `Xenova/bge-small-zh-v1.5`（512 维，中文优化，~100MB 首次下载后缓存），比通用英文模型（`all-MiniLM-L6-v2` 384 维）更适合本项目的中文对话场景。
 
 核心设计决策：
+
 - **本地模型而非 API**：零网络成本、离线可用、无 rate limit
 - **全局独立配置**：Embedding 模型与 LLM 供应商解耦（ADR 0006），所有 Agent 共享同一向量空间
 - **惰性加载 + 单例**：模型只在首次 `embedText()` 调用时下载加载，不阻塞服务启动；pipeline 实例全局复用
@@ -61,7 +62,7 @@ DeepSeek 不提供 embedding 端点。转而尝试 `@xenova/transformers` v2.17.
               ├─ buildMemoryContext() — 10s 超时
               │     → embedText(triggerMsg.content)
               │     → vec_distance_cosine(embedding, query_blob) → top-3
-              │     → 格式化为 【相关记忆】\n1. xxx\n2. yyy
+              │     → 格式化为 【相关记忆】\n{CITATION_MARKER_INSTRUCTION}\n1. xxx\n2. yyy
               │
               ├─ llmMessages[0].content += memoryContext  (注入 system prompt)
               └─ adapter.chatStream(llmMessages)
@@ -72,6 +73,7 @@ DeepSeek 不提供 embedding 端点。转而尝试 `@xenova/transformers` v2.17.
 ### 记忆上下文注入位置
 
 将检索到的记忆拼接到 system prompt（而非 user/assistant 消息）的理由：
+
 - System prompt 是 Agent 的"背景知识"，记忆本质上是 Agent 对过往对话的认知
 - 不改变对话结构——Agent 仍然看到"用户说 X → 我回复 Y"，不会把记忆误认为对话内容
 - 与 broadcast 模式下的 `【名字】说：` 格式隔离——记忆是 agent 自己的认知，不是其他猫的发言
@@ -79,21 +81,22 @@ DeepSeek 不提供 embedding 端点。转而尝试 `@xenova/transformers` v2.17.
 ### 领域模型整理
 
 Memory 和 Memory Retrieval 两个条目严重重叠——前者描述"是什么"的同时混入了检索流程，后者完全重复了检索逻辑。本轮：
+
 - Memory 收紧为："一条持久化记录，以嵌入向量形式存储"——只定义是什么
 - Memory Retrieval 移除——检索过程是 Memory 的固有行为，不是独立概念
 - Embedding 新增——"全局独立配置的本地模型生成，与 LLM 供应商解耦"是该项目的关键设计特征
 
 ## 3. Tradeoff — 放弃了什么方案
 
-| 放弃 | 原因 |
-|------|------|
-| DeepSeek embedding API（`/v1/embeddings`） | 返回 404，DeepSeek 只提供 chat 模型无 embedding 端点 |
-| `@xenova/transformers` v2.x | 依赖 sharp@0.32.0，该版本在 Windows 中文用户路径下原生二进制构建失败。v4.2.0 + sharp@0.33.5 预构建二进制正常 |
-| Codex CLI 中文编码全面修复 | 三种方案（PowerShell UTF-8 编码设置、临时文件 + `Get-Content`、`cmd.exe type` 管道）均未完全解决。根因是 Windows 下 `codex.cmd` 的 stdin 管道编码行为不稳定，保留为已知限制 |
-| 记忆检索用 FTS5 全文搜索替代向量 | ADR 0006 已排除——FTS5 缺乏语义理解（"寿司"匹配不到"生鱼片"），对中文自然语言效果差 |
-| 嵌入模型用 `all-MiniLM-L6-v2`（英文） | 384 维英文模型对中文语义匹配效果弱。`bge-small-zh-v1.5` 512 维专门为中文优化 |
-| 记忆上下文注入 user 消息而非 system prompt | 会改变对话结构，Agent 可能把记忆误认为用户发言。system prompt 是语义上正确的"背景知识"位置 |
-| 不设检索超时 | 嵌入模型首次下载 ~100MB 可能耗时数分钟，无限等待会阻塞所有 Agent 回复 |
+| 放弃                                       | 原因                                                                                                                                                                        |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DeepSeek embedding API（`/v1/embeddings`） | 返回 404，DeepSeek 只提供 chat 模型无 embedding 端点                                                                                                                        |
+| `@xenova/transformers` v2.x                | 依赖 sharp@0.32.0，该版本在 Windows 中文用户路径下原生二进制构建失败。v4.2.0 + sharp@0.33.5 预构建二进制正常                                                                |
+| Codex CLI 中文编码全面修复                 | 三种方案（PowerShell UTF-8 编码设置、临时文件 + `Get-Content`、`cmd.exe type` 管道）均未完全解决。根因是 Windows 下 `codex.cmd` 的 stdin 管道编码行为不稳定，保留为已知限制 |
+| 记忆检索用 FTS5 全文搜索替代向量           | ADR 0006 已排除——FTS5 缺乏语义理解（"寿司"匹配不到"生鱼片"），对中文自然语言效果差                                                                                          |
+| 嵌入模型用 `all-MiniLM-L6-v2`（英文）      | 384 维英文模型对中文语义匹配效果弱。`bge-small-zh-v1.5` 512 维专门为中文优化                                                                                                |
+| 记忆上下文注入 user 消息而非 system prompt | 会改变对话结构，Agent 可能把记忆误认为用户发言。system prompt 是语义上正确的"背景知识"位置                                                                                  |
+| 不设检索超时                               | 嵌入模型首次下载 ~100MB 可能耗时数分钟，无限等待会阻塞所有 Agent 回复                                                                                                       |
 
 ## 4. Open Questions — 不确定的点
 

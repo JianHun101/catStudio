@@ -23,8 +23,8 @@ evidence:
 
 - **C3 报告诉求**：客户端事件出口收敛进单一 Outbound bus，`getIO()` 服务定位让位——抽象壳（EngineBus/HandoffBus）长出后，REST 出口仍裸用 `getIO()`。
 - **我的初步（误）判推荐**：把 C3 当「半成品收个尾」，即把剩余 `getIO()` 挪进 EngineBus/HandoffBus。grilling 后判为**读错了书**。
-- **剩余 `getIO()` 三处（全在 `routes/sessions.ts`）**：`:137` `SESSION_UPDATE`（PUT 改会话猫咪后房间广播）、`:161` `SESSION_MESSAGES_CLEARED`（DELETE 清空消息后全局广播，多 tab 同步）、`:244` `SESSION_DELETED`（DELETE 删会话后全局广播）。
-- **EngineBus/HandoffBus 的语义**（`execution/bus.ts:22`）：引擎/交接模块的**输出窄化视图**——「引擎物理上发不出未类型化事件（无逃生口）」。它只承载引擎/交接的输出，是类型安全闸。
+- **剩余 `getIO()` 三处（全在 `routes/sessions.ts`）**：`SESSION_UPDATE`（PUT 改会话猫咪后房间广播）、`SESSION_MESSAGES_CLEARED`（DELETE 清空消息后全局广播，多 tab 同步）、`SESSION_DELETED`（DELETE 删会话后全局广播）。
+- **EngineBus/HandoffBus 的语义**（`execution/bus.ts` 的 `EngineBus` 接口定义处）：引擎/交接模块的**输出窄化视图**——「引擎物理上发不出未类型化事件（无逃生口）」。它只承载引擎/交接的输出，是类型安全闸。
 
 ## 决策：C3 降级为不做
 

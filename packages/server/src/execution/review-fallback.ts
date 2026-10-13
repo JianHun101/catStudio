@@ -98,8 +98,8 @@ function findRepoRootFrom(startDir: string): string | null {
  * `pnpm dev:server`（AGENTS.md 明列的单包启动）= `pnpm --filter @cat-study/server dev`
  * = `tsx watch src/index.ts`，cwd = `packages/server` → 原实现解析出
  * `packages/server/scripts/handoff-gen.mjs`，existsSync false → ② 整条兜底链**静默
- * 失效**（只留一条 error 日志）。dev.js:252-253 把 cwd 设成 ROOT 只是那一种启动形态
- * 的巧合，不是契约。
+ * 失效**（只留一条 error 日志）。`dev.js` 以 `cwd: ROOT` spawn server 只是那一种启动
+ * 形态的巧合，不是契约。
  *
  * 为什么不是固定层级 `new URL('../../../..', import.meta.url)`：源码与构建产物深度
  * 不同——tsconfig `rootDir: ".."` + `outDir: "./dist"`，产物落在 `dist/server/src/
@@ -155,6 +155,12 @@ export function spawnReviewFallback(cwd: string, commitSha: string): SpawnOutcom
   // 信号（显式指定 > commit uuid 反查），server 侧若带着它（注入给 CLI 子进程的
   // 那份被误继承/外部 shell 导出），兜底就会**改写投递目标**、投到错误的会话。
   // 它**不参与幂等判据**——旁路 delivered 账本的是 CATSTUDY_FORCE_DELIVER。
+  //
+  // 注：handoff-gen 现已给该信号加**仓库归属前置**（`judgeRepoOwnership`：仓库须
+  // 自证属于该会话的工作区族才认），但那条判据**不替代本处的 delete**——两者问的
+  // 不是同一个问题：「仓库属于 X」不等于「X 是本次该投的会话」。本兜底的工作目录
+  // 恰好会回落到**脚本所属仓库根**（= 主仓库，归属校验必过），继承该变量照样会把
+  // 目标改写成会话环境里的那一个、而不是 commit 锚反查出来的那一个。
   const env = { ...process.env }
   delete env.CATSTUDY_SESSION_ID
   try {

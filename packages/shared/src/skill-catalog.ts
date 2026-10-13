@@ -24,7 +24,7 @@
  * 机械投递，请求审查改由 Agent 自行发起；范围收窄——技能正文零路由，递送语义仍归状态机
  * FLOW_MAIN_CHAIN，见 execution/flow-state.ts）。
  *
- * 后 3 条 = 非流程链补充（判据只有「猫可自取范围」一条）：
+ * 后 4 条 = 非流程链补充（判据只有「猫可自取范围」一条）：
  * - `wayfinder`——**排除口径翻转**：原按「disable-model-invocation 是设计」排除，与
  *   `skills/manifest.yaml` 头部与 `skills/BOOTSTRAP.md` 明写的「disable-model-invocation 是
  *   上游来源标记，本仓库不构成访问约束」自相矛盾（ADR 0014 §6 白名单判据重构：MCP 白名单 =
@@ -37,6 +37,8 @@
  *   2026-09-21 纳入：该技能正文原本自己就带一处「猫读不到的兄弟文件指针」
  *   （`SKILL-MECHANICS.md`——`readSkill` 只读 `SKILL.md`），而它自己的判据写明这种情形
  *   正解是 inline；本条落地时把该兄弟文件并进 `SKILL.md`（见该目录）。
+ * - `unslop`——去 AI 味判据（`cursor/plugins` 的 `pstack/skills/unslop` 中文翻译，
+ *   provenance 见 `skills-lock.json`）：任何产出文本的改写自查取用；与流程链无关。
  */
 export const SKILL_WHITELIST: readonly string[] = [
   'grilling',
@@ -51,6 +53,7 @@ export const SKILL_WHITELIST: readonly string[] = [
   'wayfinder',
   'design-taste-frontend',
   'writing-for-agents',
+  'unslop',
 ]
 
 /** 技能名 → 一句话说明（catalog 清单，read_skill 描述 + list_skills 共用同一本）。 */
@@ -69,4 +72,5 @@ export const SKILL_CATALOG: Record<string, string> = {
     '前端设计品味判据（排版/间距/动效/状态/AI-tells/pre-flight，外部 vendor）',
   'writing-for-agents':
     '为 agent 写文档的元参考（指针措辞/信息层级/剪枝；写技能与 AGENTS.md 时取用）',
+  unslop: '去 AI 味判据（AI 痕迹清单/改写自查；任何产出文本取用，外部 vendor 中文翻译）',
 }

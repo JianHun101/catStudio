@@ -132,8 +132,8 @@ export interface LabelPoolRow {
  *
  * 1. `role = 'agent'` —— 只抽**猫的回复**。⚠️ 本仓 `messages.role` 的闭集是
  *    `('user','agent','system')`（`MESSAGES_TABLE_DDL`），**没有 `'assistant'`**；
- *    「猫的回复」在这一列上的字面量就是 `'agent'`（`repository/messages.ts:80/110/205`
- *    同口径）。
+ *    「猫的回复」在这一列上的字面量就是 `'agent'`（`repository/messages.ts` 的
+ *    `role = 'agent'` 取数处同口径）。
  * 2. **跨会话分散**：`ROW_NUMBER() OVER (PARTITION BY session_id …) <= perSession`。
  *    不分散的话，池子会被最近活跃的那一个会话吃满——而判官可信度要测的恰恰是
  *    **跨语境**的稳定性（样本集中在一个会话 = 一个语境）。

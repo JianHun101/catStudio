@@ -40,6 +40,16 @@ export const SessionUpdateSchema = z.object({
   broadcastMode: z.boolean().optional(),
 })
 
+/**
+ * 同会话回退（T1）：`POST /api/sessions/:id/rollback` 的 body。
+ *
+ * 只收一个 id——**删除范围由服务端算**（目标消息之后的全部消息）。前端传「要删哪些」
+ * 会让排序键在两个进程里各算一次；传目标、服务端定序，是「判据单源」的落法。
+ */
+export const SessionRollbackSchema = z.object({
+  messageId: z.string().min(1),
+})
+
 // ─── Message ────────────────────────────────────────
 
 export const MessageSendSchema = z.object({

@@ -1,5 +1,5 @@
 /**
- * 种子数据：创建 5 只演示 Agent + 1 个演示会话。
+ * 种子数据：创建 4 只演示 Agent + 1 个演示会话。
  *
  * 默认 upsert 模式：按 agent name 去重，已存在则更新配置。
  * --reset 参数：先清空所有数据再重建。
@@ -18,8 +18,8 @@
 // spawn tsx 直接跑本文件，不经过 `index.ts`）。两件事都靠它：
 // ① 不加载 = 整份 `.env` 无人解析 ⇒ `buildDemoAgents()` 拿到的 `DS_KEY` 是 undefined，
 //    写库落成占位符（该函数在调用时才读 env，故承重的是「加载与否」而非加载位置）；
-// ② 加载的**位置**也要紧——`db/index.ts:15` 在模块顶层读 `NODE_ENV` 选库名，
-//    `env.js` 排在它之后，`.env` 里写 `NODE_ENV` 就是白写。与 `index.ts:2` 同理。
+// ② 加载的**位置**也要紧——`db/index.ts` 在模块顶层读 `NODE_ENV` 选库名，`env.js`
+//    排在它之后，`.env` 里写 `NODE_ENV` 就是白写。与 `src/index.ts` 的 `import './env.js'` 同理。
 import './env.js'
 import { initDb, getDb } from './db/index.js'
 import {

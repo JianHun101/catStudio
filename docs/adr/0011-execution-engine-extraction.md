@@ -29,8 +29,8 @@ evidence:
 
 - **契约 vs 现实**：CONTEXT.md 规定 Connector「只做消息格式转换和路由，不包含业务逻辑」——实际 `connectors/socketio.ts` 3014 行承载全部回复管线（上下文过滤、摘要压缩、记忆注入、handoff、重启检测、A2A 策略、三条恢复路径）。
 - **两份独立走查收敛**：本审查候选 1 与 opencode 独立报告 #1 同题同结论（拆 socketio god-module）；opencode #3/#5/#7 分别对应本审查候选 2/3/8——独立收敛是方向正确的强信号。
-- **事故史**：卡死 busy Slot、幽灵 running 状态——「dispatch 标 busy → connector 执行」的配对仅靠三条「配对执行」注释维持（socketio.ts:255、1720、1837），注释契约已反复失效。
-- **测试盲区**：socketio.test.ts（5902 行）mock 掉 dispatch/memory/summarizer/handoff 全部边界——真实接线从未被测；代码内自认「mock 泄漏盲区」（socketio.ts:1029）。
+- **事故史**：卡死 busy Slot、幽灵 running 状态——「dispatch 标 busy → connector 执行」的配对仅靠三条「配对执行」注释维持（原 `connectors/socketio.ts` 三处「配对执行」注释——该注释已随本 ADR 的抽取移除，现存同族说明见 `execution/recovery.ts` 的「执行配对」段），注释契约已反复失效。
+- **测试盲区**：socketio.test.ts（5902 行）mock 掉 dispatch/memory/summarizer/handoff 全部边界——真实接线从未被测；代码内自认「mock 泄漏盲区」（`execution/serial.ts` 的「mock 泄漏盲区」注释）。
 - **先例**：dispatch 的 `setAgentStateBridge`/`setSystemMessageBridge`（注入式 seam）与 `getIO`（服务定位）——本 ADR 沿用同款习惯，非新发明。
 - **emit 点清点**（design-it-twice 实测）：引擎侧 17 处 io 引用、5 个事件族（NEW_MESSAGE ×9+、AGENT_TYPING ×2、MESSAGE_AGENT_STATUS ×4 形态、MESSAGE_UPDATED ×1、CONTEXT_WINDOW_STATS ×1）；connector 独占事件（RESTART_STATUS/ERROR/SESSION_HISTORY 等）不进引擎。
 
@@ -58,10 +58,10 @@ evidence:
 
 ## Consequences
 
-- **涟漪清单**：handoff `performHandoff(sessionId, io)` → `performHandoff(sessionId, handoffBus)`（1 文件 2 调用点）；attribution 返回 `needReplay`；ingest 改从 execution/ 导入（顺带解开自认的 ESM 循环，ingest.ts:8-10 注释）；internal.ts 经委托函数零改动；index.ts 恢复/重放定时器改调引擎。
+- **涟漪清单**：handoff `performHandoff(sessionId, io)` → `performHandoff(sessionId, handoffBus)`（1 文件 2 调用点）；attribution 返回 `needReplay`；ingest 改从 execution/ 导入（顺带解开自认的 ESM 循环，`connectors/ingest.ts` 的「断环说明」注释）；internal.ts 经委托函数零改动；index.ts 恢复/重放定时器改调引擎。
 - **后续挂靠**：候选 2（dispatch 配对结构化 + 实例态深化）、候选 8（schema 派生 + 测试库文件化）、候选池新增 opencode #2（LLM adapter spawn 生命周期）与 #4（行映射收口）。
 - **风险点**：3.5 刀区域（失败漏斗/run 注册表）是事故史最密集处——独立刀 + 专门测试；tsx watch 热重启需引擎单例 fail-fast 断言（双注册表是仓库没吃过的新失败类）。
-- **已知观察项**：SESSION_HANDOFF 全局广播 vs 房间广播不对称（handoff/index.ts:222 `io.emit` vs ingest 房间）——✅ 已裁决并落地（ADR 0011）：统一单一方法 `emitSessionHandoff`，房间路由从 `e.oldSessionId` 取，修全局广播泄漏。
+- **已知观察项**：SESSION_HANDOFF 全局广播 vs 房间广播不对称（`handoff/index.ts` 原 `io.emit`、现 `emitSessionHandoff` vs ingest 房间）——✅ 已裁决并落地（ADR 0011）：统一单一方法 `emitSessionHandoff`，房间路由从 `e.oldSessionId` 取，修全局广播泄漏。
 
 ## 待确认
 

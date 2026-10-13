@@ -53,8 +53,8 @@ export interface RootMessageRow {
 // ─── H 根内容特征（N9 第九轮钉死）───────────────────
 
 /**
- * handoff-gen 精确前缀 `@<猫名> 请补填以下交接文档`（buildHandoffMessage 唯一生成源，
- * handoff-gen.mjs:765；socketio.ts:1740 既有 startsWith 先例）。role='user' 的 H 根
+ * handoff-gen 精确前缀 `@<猫名> 请补填以下交接文档`（`buildHandoffMessage` 唯一生成源；
+ * `execution/hints.ts` 的 `triggerContent.startsWith(...)` 既有先例）。role='user' 的 H 根
  * 仅此一种来源——审查请求是 agent 回复、performHandoff 不插消息表。
  */
 const HANDOFF_CONTENT_PREFIX = /^@[^\s@]+ 请补填以下交接文档/
@@ -214,7 +214,7 @@ export function classifyChain(
     return { outcome: classifyCompleted(chain, rootMsg), state: 'classified' }
   }
 
-  // 判定 3：无非重启失败行 → 归因（N3 口径：COALESCE(error_type,'unknown')，对齐 l1-aggregator.ts:80）
+  // 判定 3：无非重启失败行 → 归因（N3 口径：COALESCE(error_type,'unknown')，对齐 `failed_non_infra` 分桶）
   const hasNonInfraFailure = chain.some(
     (l) => l.status === 'failed' && (l.error_type ?? 'unknown') !== 'server_restart'
   )

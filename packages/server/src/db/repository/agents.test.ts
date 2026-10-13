@@ -269,7 +269,7 @@ describe('llm_env_extra 列默认回填（per-agent 额外环境变量）', () =
 
 // ═══ 占位符 API Key 自愈 ═══
 //
-// 病灶路径：无 DS_KEY 时首次启动 → 自动 seed 把 5 只猫全写成占位符哨兵 → 之后配好
+// 病灶路径：无 DS_KEY 时首次启动 → 自动 seed 把 4 只猫全写成占位符哨兵 → 之后配好
 // key 重启，表已非空 → 启动不再走 seed → 哨兵**永不补写**（旧 upsert 的 DO UPDATE
 // 不碰 llm_*）。两条自愈路径分别覆盖两个触发面：重跑 seed（upsertAgent 条件补写）
 // 与仅重启（healPlaceholderApiKeys，见下个 describe）。

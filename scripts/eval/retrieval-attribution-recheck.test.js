@@ -42,10 +42,31 @@ import {
 
 // ─── 手搓夹具 ─────────────────────────────────────────
 
-/** 一个融合命中行（形状对齐库层 `ChunkHybridHit`） */
-function hit(id, { rrfScore = 0, vectorRank = null, keywordRank = null, channel = 'vector' } = {}) {
+/**
+ * 一个融合命中行（形状对齐库层 `ChunkHybridHit`）。
+ *
+ * ⚠️ 默认**每片独占一节**（`docs/x<id>.md :: S<id>`）——W2-c/T4/T5 之后「片」与「节」
+ * 是两个口径，默认夹具有节级去重**恒为空操作**的性质。要测节级语义必须显式用
+ * `docPath` / `sectionAnchor` 把两片放进同一节，否则用例是**假绿**（测不出粒度）。
+ */
+function hit(
+  id,
+  {
+    rrfScore = 0,
+    vectorRank = null,
+    keywordRank = null,
+    channel = 'vector',
+    docPath,
+    sectionAnchor,
+  } = {}
+) {
   return {
-    row: { id, doc_path: `docs/x${id}.md`, section_anchor: `S${id}`, distance: 0.3 },
+    row: {
+      id,
+      doc_path: docPath ?? `docs/x${id}.md`,
+      section_anchor: sectionAnchor ?? `S${id}`,
+      distance: 0.3,
+    },
     rrfScore,
     vectorRank,
     keywordRank,
@@ -471,7 +492,7 @@ describe('mergeQueryPools — 复刻 memory/index.ts 的三条合并规则', () 
     expect(order.map((r) => r.chunkId)).toEqual([2, 1])
   })
 
-  it('rank 是**完整序**的 0 起名次（不随 topK 截断）', () => {
+  it('rank 是**完整序**的 0 起名次（不随 topK 截断；夹具每片独占一节 ⇒ 与节名次同形）', () => {
     const { order } = mergeQueryPools({
       pools: [
         pool(
@@ -487,7 +508,7 @@ describe('mergeQueryPools — 复刻 memory/index.ts 的三条合并规则', () 
     expect(order.map((r) => r.rank)).toEqual([0, 1, 2, 3])
   })
 
-  it('injectedIds 只含前 topK 行；cutoffRrf = 第 topK 名的分（进榜门槛）', () => {
+  it('injectedIds 只含前 topK 个**不同节**的代表片；cutoffRrf = 第 topK 个节的分（进榜门槛）', () => {
     const { injectedIds, cutoffRrf } = mergeQueryPools({
       pools: [
         pool(hit(1, { rrfScore: 0.5 }), hit(2, { rrfScore: 0.4 }), hit(3, { rrfScore: 0.3 })),
@@ -501,6 +522,53 @@ describe('mergeQueryPools — 复刻 memory/index.ts 的三条合并规则', () 
   it('池内不足 topK 行 ⇒ cutoffRrf = null（不是 undefined / 末位的分）', () => {
     const { cutoffRrf } = mergeQueryPools({ pools: [pool(hit(1, { rrfScore: 0.5 }))], topK: 3 })
     expect(cutoffRrf).toBe(null)
+  })
+
+  // ── T5 承重语义：注入集按**节**算，不按片算 ──────────
+  // 这是 `scripts` 侧对 `memory/index.ts` 末次截断的复刻；**反对照**见用例自身的读法：
+  // 把 `mergeQueryPools` 换回 `order.slice(0, topK)`，下面两条当场红。
+  it('**同节多片只占一个名额**（注入集取的是不同节的代表片，不是前 topK 片）', () => {
+    const { order, injectedIds } = mergeQueryPools({
+      pools: [
+        pool(
+          hit(1, { rrfScore: 0.5, docPath: 'docs/a.md', sectionAnchor: 'S1' }),
+          hit(2, { rrfScore: 0.4, docPath: 'docs/a.md', sectionAnchor: 'S1' }),
+          hit(3, { rrfScore: 0.3, docPath: 'docs/b.md', sectionAnchor: 'S2' })
+        ),
+      ],
+      topK: 2,
+    })
+    // 片序仍是完整三片（不截断、不去重）
+    expect(order.map((r) => r.chunkId)).toEqual([1, 2, 3])
+    // 但注入集是「前 2 个不同节」的代表片：S1→1、S2→3。**片级写法这里会得到 {1,2}**
+    expect([...injectedIds].sort((a, b) => a - b)).toEqual([1, 3])
+  })
+
+  it('`rank` 是**节名次**：同节多片共用一个名次（T5 口径变更，片名次会是 0/1/2）', () => {
+    const { order } = mergeQueryPools({
+      pools: [
+        pool(
+          hit(1, { rrfScore: 0.5, docPath: 'docs/a.md', sectionAnchor: 'S1' }),
+          hit(2, { rrfScore: 0.4, docPath: 'docs/a.md', sectionAnchor: 'S1' }),
+          hit(3, { rrfScore: 0.3, docPath: 'docs/b.md', sectionAnchor: 'S2' })
+        ),
+      ],
+      topK: 3,
+    })
+    expect(order.map((r) => r.chunkId)).toEqual([1, 2, 3])
+    expect(order.map((r) => r.rank)).toEqual([0, 0, 1])
+  })
+
+  // 生产把界判放在 `push` 之前 ⇒ `MEMORY_TOP_K <= 0` 是**空集**；旧的 `.slice(0, topK)`
+  // 在 `0` 上会取 `order[-1]`（崩），在负数上是 JS **负索引**（保留末尾 n−1 个，意外语义）。
+  it('`topK <= 0` ⇒ **空注入集** + `cutoffRrf === null`（跟生产走，不是 slice 的负索引语义）', () => {
+    const hits = [hit(1, { rrfScore: 0.5 }), hit(2, { rrfScore: 0.4 }), hit(3, { rrfScore: 0.3 })]
+    const zero = mergeQueryPools({ pools: [pool(...hits)], topK: 0 })
+    expect(zero.injectedIds.size).toBe(0)
+    expect(zero.cutoffRrf).toBe(null)
+    const neg = mergeQueryPools({ pools: [pool(...hits)], topK: -1 })
+    expect(neg.injectedIds.size).toBe(0)
+    expect(neg.cutoffRrf).toBe(null)
   })
 
   it('空池 ⇒ 空序 + 空注入集（调用方零分支）', () => {
@@ -637,6 +705,27 @@ describe('readAnchor — 差几名 / 差多少 RRF / 并列判负', () => {
     const merged = mergedOf([hit(8, { rrfScore: 0.9 }), hit(1, { rrfScore: 0.1 })], 1)
     const r = readAnchor({ sectionChunkIds: new Set([7, 8]), merged, maxDistance: 0.6 })
     expect(r.injected).toBe(true)
+  })
+
+  // ⚠️ 上面两条的夹具每片独占一节 ⇒ 节级与片级**同形**，测不出 T5 改的粒度。本条把两片
+  // 放进**同一节**，让两个口径分叉：片序 [1, 7, 8, 9]、7/8 同节 ⇒ 9 的**节名次 = 2**（片名次
+  // 是 3）⇒ 既进注入集、`rankGap` 也不同。换回片级写法本条当场红。
+  it('同节多片共用**节名次** ⇒ `rank` / `rankGap` / `injected` 三项都按节算（T5 口径）', () => {
+    const merged = mergeQueryPools({
+      pools: [
+        pool(
+          hit(1, { rrfScore: 0.5 }),
+          hit(7, { rrfScore: 0.4, docPath: 'docs/shared.md', sectionAnchor: 'SA' }),
+          hit(8, { rrfScore: 0.3, docPath: 'docs/shared.md', sectionAnchor: 'SA' }),
+          hit(9, { rrfScore: 0.2 })
+        ),
+      ],
+      topK: 3,
+    })
+    const r = readAnchor({ sectionChunkIds: new Set([9]), merged, maxDistance: 0.6 })
+    expect(r.rank).toBe(2) // 片名次会是 3
+    expect(r.rankGap).toBe(0) // 2 − (3 − 1)
+    expect(r.injected).toBe(true) // 片级写法下前 3 片是 {1,7,8} ⇒ 9 进不了榜
   })
 })
 
@@ -828,8 +917,34 @@ describe('静态源断言 — 链段结果对象的字段名（改名即静默�
     expect(memorySrc).toMatch(/if \(takenSections\.has\(key\)\) continue[\s\S]*?ordered\.push\(s\)/)
   })
 
-  it('按节补齐仍走 `bySection`（「切 3 片只换来 2 节」这个名额浪费的机制来源）', () => {
+  it('按节补齐仍走 `bySection`（W2-c 后它只做**幂等**重去重，节集已由 :512 那轮定死）', () => {
     expect(memorySrc).toContain('bySection')
+  })
+})
+
+describe('静态源断言 — `mergeQueryPools` 的两条调用路径**逐字同源**（T5 逐路验的结构保证）', () => {
+  const selfSrc = readFileSync(
+    path.join(REPO_ROOT, 'scripts/eval/retrieval-attribution-recheck.mjs'),
+    'utf8'
+  )
+  const calls = selfSrc
+    .split('\n')
+    .map((l, i) => ({ l: l.trim(), i: i + 1 }))
+    .filter(({ l }) => /mergeQueryPools\(\{/.test(l) && !/^export function/.test(l))
+
+  // 末次截断的粒度只由 `mergeQueryPools` 决定 ⇒ 只要两路都调它、都不自己再切一刀，
+  // 「只在一路生效」在结构上不可能。真跑读数对粒度不敏感时（本批 §6.2 七档全 0），
+  // 这条结构保证就是逐路验唯一撑得住的判据面。
+  it('恰好 2 个调用点（主路 + 变体扫档），且两处**逐字**为 `mergeQueryPools({ pools, topK })`', () => {
+    expect(calls).toHaveLength(2)
+    for (const c of calls) expect(c.l).toContain('mergeQueryPools({ pools, topK })')
+  })
+
+  it('两路都**没有**自己再切一刀（片级回归最可能的落点：`topK:` 传别的值、或调用点自己 `.slice(`）', () => {
+    for (const c of calls) {
+      expect(c.l).not.toMatch(/topK:\s*[^,)]/)
+      expect(c.l).not.toMatch(/\.slice\(/)
+    }
   })
 })
 

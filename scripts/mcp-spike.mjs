@@ -3,7 +3,7 @@
  * MCP 结构化路由 Phase 0 spike 驱动
  *
  * 验证目标（roadmap Phase 0）：
- *   1. claude.ts:83-93 同款 spawn 参数 + --mcp-config 后，DeepSeek 代理端点上
+ *   1. `llm/claude.ts` 的 `writeMcpConfig` 同款 spawn 参数 + --mcp-config 后，DeepSeek 代理端点上
  *      stream-json 是否出 tool_use 块、CLI 是否执行工具、tool_result 后是否续流
  *   2. --allowedTools 白名单语法是否被接受（被拒则试 --disallowedTools 黑名单兜底）
  *   3. ENABLE_TOOL_SEARCH 与 MCP 工具面交互（有干扰则 DeepSeek 端点也设 false）

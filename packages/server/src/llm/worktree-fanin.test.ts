@@ -241,7 +241,7 @@ describe('组 B · 猫分支枚举', () => {
     expect(got).not.toContain(`${sessionBranch(sid)}catC`)
   })
 
-  it('B5 过滤空 cat8：`session/<sid8>-` 不在结果里（S3-5）', () => {
+  it('B5 过滤空后缀：`session/<sid8>-` 不在结果里（S3-5）', () => {
     const sid = 'b0000005'
     git(['branch', sessionBranch(sid)])
     git(['branch', `${sessionBranch(sid)}-`]) // 空后缀：`*` 可匹配空串 ⇒ 会被前缀命中

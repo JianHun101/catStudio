@@ -1,0 +1,398 @@
+{
+  "schema": 1,
+  "date": "2026-09-22",
+  "dbPath": "D:\\Game\\ai\\catStudy-sessions\\fa165f65-ds猫\\workspace\\r13a-rerun\\snap.db",
+  "goldenVersion": 1,
+  "params": {
+    "liveTopK": 5,
+    "maxDistance": 0.6,
+    "liveTopKRows": [
+      {
+        "k": 3,
+        "n": 826,
+        "fromAt": "2026-09-14T10:14:32.311Z",
+        "toAt": "2026-09-21T08:38:53.619Z"
+      },
+      {
+        "k": 5,
+        "n": 119,
+        "fromAt": "2026-09-21T08:57:22.426Z",
+        "toAt": "2026-09-23T01:52:31.668Z"
+      }
+    ]
+  },
+  "armTopK": [3, 5, 3],
+  "arms": [
+    {
+      "label": "① 现状 topK=3",
+      "how": "RRF 序",
+      "hit": 27,
+      "expectTotal": 35,
+      "recallMean": 0.7714285714285715,
+      "microRecall": 0.7714285714285715,
+      "meanInjectedSections": 3,
+      "negativeFlagged": 4,
+      "negativeTotal": 5,
+      "negativeIds": ["N01", "N02", "N04", "N05"]
+    },
+    {
+      "label": "② topK=5",
+      "how": "RRF 序（一行配置）",
+      "hit": 29,
+      "expectTotal": 35,
+      "recallMean": 0.8285714285714286,
+      "microRecall": 0.8285714285714286,
+      "meanInjectedSections": 5,
+      "negativeFlagged": 5,
+      "negativeTotal": 5,
+      "negativeIds": ["N01", "N02", "N03", "N04", "N05"]
+    },
+    {
+      "label": "③ topK=3 + 重排",
+      "how": "cross-encoder 全序重排",
+      "hit": 23,
+      "expectTotal": 35,
+      "recallMean": 0.6571428571428571,
+      "microRecall": 0.6571428571428571,
+      "meanInjectedSections": 3,
+      "negativeFlagged": 4,
+      "negativeTotal": 5,
+      "negativeIds": ["N01", "N03", "N04", "N05"]
+    }
+  ],
+  "anchors": [
+    {
+      "id": "G02",
+      "docPath": "docs/plans/memory-flywheel.md",
+      "sectionAnchor": "2. 主链形态（七段，逐段钉死） > 2.6 检索（`searchChunksHybrid`）",
+      "rrfRank": 12,
+      "rrfScore": 0.012658227848101266,
+      "rerankRank": 0,
+      "rerankScore": 0.3403806984424591,
+      "rerankQueryIndex": 0,
+      "attribution0920": "not_topk",
+      "arm1": false,
+      "arm2": false,
+      "arm3": true
+    },
+    {
+      "id": "G03",
+      "docPath": "docs/plans/memory-flywheel.md",
+      "sectionAnchor": "4. 票单全表（14 张，全部收口）",
+      "rrfRank": null,
+      "rrfScore": null,
+      "rerankRank": null,
+      "rerankScore": null,
+      "rerankQueryIndex": null,
+      "attribution0920": "not-recalled",
+      "arm1": false,
+      "arm2": false,
+      "arm3": false
+    },
+    {
+      "id": "G08",
+      "docPath": "docs/plans/episode-evaluation-v2.md",
+      "sectionAnchor": "6. 实施拆活（审 ✅ 后派）",
+      "rrfRank": null,
+      "rrfScore": null,
+      "rerankRank": null,
+      "rerankScore": null,
+      "rerankQueryIndex": null,
+      "attribution0920": "below_topk",
+      "arm1": false,
+      "arm2": false,
+      "arm3": false
+    },
+    {
+      "id": "G09",
+      "docPath": "docs/plans/episode-evaluation-v2.md",
+      "sectionAnchor": "4. closure 状态机 + 改进闭环",
+      "rrfRank": 16,
+      "rrfScore": 0.026153846153846153,
+      "rerankRank": 21,
+      "rerankScore": 0.00044268619967624545,
+      "rerankQueryIndex": 0,
+      "attribution0920": "not_topk",
+      "arm1": false,
+      "arm2": false,
+      "arm3": false
+    },
+    {
+      "id": "G12",
+      "docPath": "docs/plans/review-chain-anchor.md",
+      "sectionAnchor": "三、用户故事",
+      "rrfRank": 5,
+      "rrfScore": 0.031754032258064516,
+      "rerankRank": 30,
+      "rerankScore": 0.0020963477436453104,
+      "rerankQueryIndex": 0,
+      "attribution0920": "not_topk",
+      "arm1": false,
+      "arm2": false,
+      "arm3": false
+    },
+    {
+      "id": "C03",
+      "docPath": "docs/adr/0008-acp-multi-provider-unification.md",
+      "sectionAnchor": "决策",
+      "rrfRank": 4,
+      "rrfScore": 0.06184452999562108,
+      "rerankRank": 0,
+      "rerankScore": 0.9732903838157654,
+      "rerankQueryIndex": 3,
+      "attribution0920": "not_topk",
+      "arm1": false,
+      "arm2": true,
+      "arm3": true
+    },
+    {
+      "id": "C05",
+      "docPath": "docs/adr/0009-multimodal-knowledge-base.md",
+      "sectionAnchor": "两条不变量（扩展性论证核心） > 不变量 2：跨模态向量子空间分离",
+      "rrfRank": 3,
+      "rrfScore": 0.05947141180415828,
+      "rerankRank": 10,
+      "rerankScore": 0.052724678069353104,
+      "rerankQueryIndex": 3,
+      "attribution0920": "not_topk",
+      "arm1": false,
+      "arm2": true,
+      "arm3": false
+    },
+    {
+      "id": "C19",
+      "docPath": "docs/plans/episode-evaluation-v2.md",
+      "sectionAnchor": "3. episodes 表结构",
+      "rrfRank": 2,
+      "rrfScore": 0.04627081163075461,
+      "rerankRank": 3,
+      "rerankScore": 0.20151610672473907,
+      "rerankQueryIndex": 2,
+      "attribution0920": "not_topk",
+      "arm1": true,
+      "arm2": true,
+      "arm3": false
+    },
+    {
+      "id": "C24",
+      "docPath": "docs/plans/memory-flywheel.md",
+      "sectionAnchor": "2. 主链形态（七段，逐段钉死） > 2.3 扫描器（`scripts/flywheel/scan.mjs`）",
+      "rrfRank": 11,
+      "rrfScore": 0.029957522915269395,
+      "rerankRank": 0,
+      "rerankScore": 0.5071669816970825,
+      "rerankQueryIndex": 1,
+      "attribution0920": "not_topk",
+      "arm1": false,
+      "arm2": false,
+      "arm3": true
+    },
+    {
+      "id": "N03",
+      "docPath": "docs/adr/0014-skill-delivery-decoupling.md",
+      "sectionAnchor": "6. 后续项（用户明确要求记录） > 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化",
+      "rrfRank": 7,
+      "rrfScore": 0.02862400327131466,
+      "rerankRank": 0,
+      "rerankScore": 0.9639406204223633,
+      "rerankQueryIndex": 0,
+      "attribution0920": "not_topk",
+      "arm1": false,
+      "arm2": false,
+      "arm3": true
+    },
+    {
+      "id": "N04",
+      "docPath": "docs/plans/review-chain-anchor.md",
+      "sectionAnchor": "六、不在范围内",
+      "rrfRank": 1,
+      "rrfScore": 0.060726753684500166,
+      "rerankRank": 1,
+      "rerankScore": 0.34110257029533386,
+      "rerankQueryIndex": 3,
+      "attribution0920": "not_topk",
+      "arm1": true,
+      "arm2": true,
+      "arm3": true
+    }
+  ],
+  "flips": {
+    "arm1ToArm3": [
+      {
+        "id": "G01",
+        "kind": "real",
+        "dir": "loss",
+        "anchor": "docs/adr/0014-skill-delivery-decoupling.md :: 6. 后续项（用户明确要求记录） > 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化"
+      },
+      {
+        "id": "G02",
+        "kind": "real",
+        "dir": "gain",
+        "anchor": "docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.6 检索（`searchChunksHybrid`）"
+      },
+      {
+        "id": "C01",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/adr/0007-external-tool-form-selection-checklist.md :: 检查单（四条，对治拍板链四环）"
+      },
+      {
+        "id": "C03",
+        "kind": "constructed",
+        "dir": "gain",
+        "anchor": "docs/adr/0008-acp-multi-provider-unification.md :: 决策"
+      },
+      {
+        "id": "C16",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/dev-process-gate-flow.md :: 三、契约"
+      },
+      {
+        "id": "C19",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/episode-evaluation-v2.md :: 3. episodes 表结构"
+      },
+      {
+        "id": "C20",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/knowledge-base-v1.md :: 三、接口契约 > 3.1 knowledge 表（migrations additive）"
+      },
+      {
+        "id": "C23",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.2 切片（`packages/server/src/memory/flywheel/segment.ts`）"
+      },
+      {
+        "id": "C24",
+        "kind": "constructed",
+        "dir": "gain",
+        "anchor": "docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.3 扫描器（`scripts/flywheel/scan.mjs`）"
+      },
+      {
+        "id": "C26",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/review-chain-anchor.md :: 四、实施决策 > A 链锚域"
+      },
+      {
+        "id": "N01",
+        "kind": "negative",
+        "dir": "loss",
+        "anchor": "docs/adr/0013-c3-outbound-bus-not-adopted.md :: #tombstone"
+      },
+      {
+        "id": "N03",
+        "kind": "negative",
+        "dir": "gain",
+        "anchor": "docs/adr/0014-skill-delivery-decoupling.md :: 6. 后续项（用户明确要求记录） > 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化"
+      }
+    ],
+    "arm2ToArm3": [
+      {
+        "id": "G01",
+        "kind": "real",
+        "dir": "loss",
+        "anchor": "docs/adr/0014-skill-delivery-decoupling.md :: 6. 后续项（用户明确要求记录） > 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化"
+      },
+      {
+        "id": "G02",
+        "kind": "real",
+        "dir": "gain",
+        "anchor": "docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.6 检索（`searchChunksHybrid`）"
+      },
+      {
+        "id": "C01",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/adr/0007-external-tool-form-selection-checklist.md :: 检查单（四条，对治拍板链四环）"
+      },
+      {
+        "id": "C05",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/adr/0009-multimodal-knowledge-base.md :: 两条不变量（扩展性论证核心） > 不变量 2：跨模态向量子空间分离"
+      },
+      {
+        "id": "C16",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/dev-process-gate-flow.md :: 三、契约"
+      },
+      {
+        "id": "C19",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/episode-evaluation-v2.md :: 3. episodes 表结构"
+      },
+      {
+        "id": "C20",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/knowledge-base-v1.md :: 三、接口契约 > 3.1 knowledge 表（migrations additive）"
+      },
+      {
+        "id": "C23",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.2 切片（`packages/server/src/memory/flywheel/segment.ts`）"
+      },
+      {
+        "id": "C24",
+        "kind": "constructed",
+        "dir": "gain",
+        "anchor": "docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.3 扫描器（`scripts/flywheel/scan.mjs`）"
+      },
+      {
+        "id": "C26",
+        "kind": "constructed",
+        "dir": "loss",
+        "anchor": "docs/plans/review-chain-anchor.md :: 四、实施决策 > A 链锚域"
+      },
+      {
+        "id": "N01",
+        "kind": "negative",
+        "dir": "loss",
+        "anchor": "docs/adr/0013-c3-outbound-bus-not-adopted.md :: #tombstone"
+      },
+      {
+        "id": "N03",
+        "kind": "negative",
+        "dir": "gain",
+        "anchor": "docs/adr/0014-skill-delivery-decoupling.md :: 6. 后续项（用户明确要求记录） > 6.1 收口留痕：白名单两层机制 + to-spec/to-tickets 去 matt 化"
+      }
+    ]
+  },
+  "canary": [
+    {
+      "id": "CANARY-HIT",
+      "ok": true
+    },
+    {
+      "id": "CANARY-MISS",
+      "ok": true
+    }
+  ],
+  "rerankSelfCheck": {
+    "ok": true,
+    "reason": "",
+    "message": "",
+    "relevant": 0.9807700514793396,
+    "irrelevant": 0.023859703913331032,
+    "model": "Xenova/bge-reranker-base"
+  },
+  "mergeCheck": {
+    "ok": true,
+    "mismatches": [],
+    "rows": 200,
+    "entries": 40
+  },
+  "verdict": {
+    "verdict": "close-ticket",
+    "message": "臂③(23) ≤ 臂①(27)：重排净差为负 ⇒ **据实关票**；但结论**不是**「序无用」（票面 §二 的预置句已作废，见 §一 订正块）——它在动序、且救回过锚点，真正不足的是这把 cross-encoder 在 3 节注入预算下的精度"
+  },
+  "ok": true
+}

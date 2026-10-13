@@ -65,7 +65,7 @@ function parseLogLevel(raw: string | undefined): LogLevel {
 /**
  * 最低输出级别，低于此级别的日志静默丢弃。
  *
- * 票 F1-c c2：**模块初始化时读一次 env**。原先只有 `index.ts:122` 调 `setLogLevel`，
+ * 票 F1-c c2：**模块初始化时读一次 env**。原先只有 `src/index.ts` 调 `setLogLevel`，
  * 而测试**不 import `index.ts`**（直接 import 被测模块）⇒ `minLevel` 恒停在 `'debug'`，
  * vitest 配置里写的 `LOG_LEVEL: 'error'` **从未生效**（实测硬证据：配置写着 error 的那轮
  * 仍落了一条 `"level":"debug"`）。生产语义不变——`index.ts` 仍会再设一次。

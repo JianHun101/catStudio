@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import source from './SettingsView.vue?raw'
+import designTokens from '../../index.html?raw'
 
 /**
  * Verify SettingsView.vue — 全屏设置中心（左侧栏底部齿轮进入，左右分栏经典结构）。
@@ -12,25 +13,41 @@ import source from './SettingsView.vue?raw'
  */
 
 describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配置）', () => {
-  it('全屏设置中心：fixed inset 0 + 关闭按钮 → emit close', () => {
-    expect(source).toContain('settings-view')
-    expect(source).toContain('position: fixed')
-    expect(source).toContain('inset: 0')
-    expect(source).toContain('@click="emit(\'close\')"')
+  it('设置视图 = 内容区弹性块（T4：不再是 fixed 全屏模态），页头/✕ 退役', () => {
+    // T4 改锚：轨道提到根级常驻后本视图从 `position: fixed; inset: 0` 改为内容区里的
+    // 弹性块——仍是 fixed inset 0 的话会把常驻轨道整条盖住（用户报的「设置页导航栏
+    // 跟原型不一样」，原型 v6 是轨道 + 大类导航 + 卡片列三层）。仍是全屏视图语义。
+    const root = source.match(/\.settings-view\s*\{[\s\S]*?\}/)
+    expect(root, '未找到 .settings-view 规则').toBeTruthy()
+    expect(source).toContain('class="settings-view" aria-label="设置"')
+    expect(root![0]).toContain('flex: 1')
+    expect(root![0]).not.toContain('position: fixed')
+    expect(root![0]).not.toContain('inset: 0')
+    // 页头（标题 + ✕）整体退役 + `close` emit 退役；死 CSS 同批删除（留着会让后人
+    // 以为页头仍在）。注意：弹窗级 `.btn-close`（浏览 NapCat 路径）保留——
+    // 「✕ 清零」清的是视图级页头，不是模态弹窗的关闭手段。
+    expect(source).not.toContain('settings-header')
+    expect(source).not.toContain('settings-title')
+    expect(source).not.toContain('settings-icon')
+    expect(source).not.toContain('defineEmits')
+    expect(source).not.toContain("emit('close')")
+    expect(source).toContain('@click="closePicker"')
   })
 
   it('左侧大类导航：三大类文案 + 选中态高亮 + 点击切换', () => {
     expect(source).toContain("const activeCategory = ref<'cats' | 'im' | 'system'>('im')")
-    expect(source).toContain('settings-nav')
+    // T5 改锚：导航壳换成共享组件 SubNav（148px 竖排）。激活态高亮与点击切换由它承担
+    // （见 SubNav.test.ts），本视图的契约是「三个大类绑上它的 items + v-model 写回」。
+    expect(source).toContain('<SubNav')
+    expect(source).toContain('v-model="activeCategory"')
+    expect(source).toContain(':items="settingsNavItems"')
     expect(source).toContain('猫咪管理')
     expect(source).toContain('IM 接入')
     expect(source).toContain('系统配置')
-    expect(source).toContain(':class="{ active: activeCategory === \'cats\' }"')
-    expect(source).toContain(':class="{ active: activeCategory === \'im\' }"')
-    expect(source).toContain(':class="{ active: activeCategory === \'system\' }"')
-    expect(source).toContain("activeCategory = 'cats'")
-    expect(source).toContain("activeCategory = 'im'")
-    expect(source).toContain("activeCategory = 'system'")
+    // 三个 item 的 key 与 activeCategory 的值域一一对应——点击切换就是拿 key 写回这个 ref
+    for (const key of ['cats', 'im', 'system']) {
+      expect(source, key).toContain(`key: '${key}'`)
+    }
   })
 
   it('默认大类 = IM 接入（子 Tab QQ 接入）——打开设置页行为与迁移前一致', () => {
@@ -409,13 +426,20 @@ describe('SettingsView 系统配置（摘要配置——单 A 契约 GET/POST /a
     expect(source).toContain("summaryApiKey.value = ''")
   })
 
-  it('config-item 居中显示：justify-content: center（QQ 接入与系统配置区同一 class 一处生效）', () => {
-    // 用户需求：配置页详情居中显示，替代 space-between 两端撑满的割裂观感；
-    // 块内负向断言——space-between 在 SettingsView 其他选择器仍存在（6 处），不能全文件断言
-    const configItemBlock = source.match(/\.config-item\s*\{[\s\S]*?\}/)
-    expect(configItemBlock).toBeTruthy()
-    expect(configItemBlock![0]).toContain('justify-content: center')
-    expect(configItemBlock![0]).not.toContain('space-between')
+  it('表单行对齐：.frow 定宽网格（148px 右对齐 label + 1fr 控件列）', () => {
+    // T3（票面 §二）**推翻了本文件旧 pin**：原 `.config-item` 的 justify-content:center
+    // 是用户报的「有些框都没对齐」的根因——label 宽度随文案长短变化、整行又居中，
+    // 于是每行控件的左缘各不相同。新规格 = label 定宽 148px 右对齐，所有控件从同一条
+    // 垂直线起跑（验收 2「控件左缘 x 全等」的判据来源）。
+    // 旧 pin 的另一半意图（不做两端撑满）继续保留为负向断言。
+    const frowBlock = source.match(/\.frow\s*\{[\s\S]*?\}/)
+    expect(frowBlock).toBeTruthy()
+    expect(frowBlock![0]).toContain('display: grid')
+    expect(frowBlock![0]).toContain('grid-template-columns: 148px 1fr')
+    expect(frowBlock![0]).not.toContain('space-between')
+    // 居中的 flex 布局不得回潮到表单行（另有两处 justify-content:center 属其他组件，
+    // 故只钉 .frow 块内）
+    expect(frowBlock![0]).not.toContain('justify-content: center')
   })
 })
 
@@ -459,5 +483,235 @@ describe('SettingsView 系统配置（铁律可编辑——GET/POST /api/iron-la
     expect(taBlock).toBeTruthy()
     expect(taBlock![0]).toContain('resize: vertical')
     expect(taBlock![0]).toContain('font-family: var(--font-mono)')
+  })
+})
+
+describe('SettingsView 系统配置区布局（三卡统一间距 + 每卡统一标题）', () => {
+  // 病灶（用户反馈「观感割裂」）：三张 .ctx-card 无间距、后两张紧贴，且只有第一张有
+  // .section-title——另外两张卡片看起来「挂」在上一张下面。修法为每卡包一层
+  // .config-section（标题 + 卡片），间距由 .system-pane 的 flex gap 统一给。
+
+  /** 系统配置区模板切片（pane 起点到 <style> 之间） */
+  function systemPaneTemplate(): string {
+    const start = source.indexOf('class="system-pane"')
+    const end = source.indexOf('<style')
+    expect(start, '未定位到 .system-pane 模板').toBeGreaterThan(-1)
+    expect(end, '未定位到 <style> 起点').toBeGreaterThan(start)
+    return source.slice(start, end)
+  }
+
+  /**
+   * 取 CSS 规则（选择器文本 + 规则体），用 feature 在候选里二次筛选。
+   * 同一选择器可能出现在多条规则中——`.system-pane` 既有 `.im-pane,` 并列的限宽规则，
+   * 又有独立的 flex 布局规则，只按选择器取会命中错误的一条。
+   */
+  function cssRule(
+    selector: string,
+    feature: string
+  ): { selectorText: string; body: string } | null {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`([^{}]*${escaped}[^{}]*)\\{([^{}]*)\\}`, 'g')
+    const hit = [...source.matchAll(re)].find((m) => m[2].includes(feature))
+    return hit ? { selectorText: hit[1], body: hit[2] } : null
+  }
+
+  it('三张卡片各包一层 config-section——标题与卡片一一对应，数量不匹配即布局回退', () => {
+    const pane = systemPaneTemplate()
+    // 三者必须同数：任一为 0 或数量不等，说明有卡片漏包 / 有标题游离在层外
+    expect(pane.match(/class="config-section"/g)).toHaveLength(3)
+    expect(pane.match(/class="ctx-card"/g)).toHaveLength(3)
+    expect(pane.match(/class="section-title"/g)).toHaveLength(3)
+  })
+
+  it('每层的标题先于卡片且文本对应（上下文阈值配置 / 摘要配置 / 铁律）', () => {
+    const chunks = systemPaneTemplate().split('class="config-section"').slice(1)
+    expect(chunks).toHaveLength(3)
+    const expectedTitles = ['上下文阈值配置', '摘要配置', '铁律']
+    chunks.forEach((chunk, i) => {
+      const titleIdx = chunk.indexOf('class="section-title"')
+      const cardIdx = chunk.indexOf('class="ctx-card"')
+      // 标题与卡片必须同层且标题在前——标题挂错层（游离在层外）正是原病灶
+      expect(titleIdx, `第 ${i + 1} 层未见标题`).toBeGreaterThan(-1)
+      expect(cardIdx, `第 ${i + 1} 层未见卡片`).toBeGreaterThan(-1)
+      expect(titleIdx, `第 ${i + 1} 层标题未在卡片之前`).toBeLessThan(cardIdx)
+      expect(chunk.slice(titleIdx, chunk.indexOf('</div>', titleIdx))).toContain(expectedTitles[i])
+      // 每层恰一标题一卡片，不多不少
+      expect(chunk.match(/class="section-title"/g)).toHaveLength(1)
+      expect(chunk.match(/class="ctx-card"/g)).toHaveLength(1)
+    })
+  })
+
+  it('三卡间距来自 .system-pane 的 flex gap 26px', () => {
+    const paneLayout = cssRule('.system-pane', 'flex-direction')
+    expect(paneLayout, '.system-pane 未见 flex 布局规则').not.toBeNull()
+    expect(paneLayout!.body).toContain('display: flex')
+    expect(paneLayout!.body).toContain('flex-direction: column')
+    expect(paneLayout!.body).toContain('gap: 26px')
+  })
+
+  it('flex 布局只作用于 .system-pane，未并入 pane 并列选择器（IM 接入区布局不受影响）', () => {
+    const paneLayout = cssRule('.system-pane', 'flex-direction')
+    expect(paneLayout).not.toBeNull()
+    expect(paneLayout!.selectorText).not.toContain('.im-pane')
+    // T3：限宽规则从 680px 提到 720px（票面 §二「右侧 720px 卡片列」），且并列面从
+    // 两个 pane 扩到三个——.agent-panel 也要同宽同左缘，否则它的表单行从另一个 x 起跑
+    // （验收 2 是全页判据，不是单 pane 判据）。flex 属性仍不在这条并列规则里。
+    const shared = source.match(/(\.im-pane\s*,[^{}]*)\{([^{}]*)\}/)
+    expect(shared, '未找到 pane 并列的限宽规则').not.toBeNull()
+    expect(shared![1], '并列面应含 .agent-panel').toContain('.agent-panel')
+    expect(shared![2]).toContain('max-width: 720px')
+    expect(shared![2]).not.toContain('flex-direction')
+  })
+
+  it('标题间距归零限定在 .config-section 内——裸 .section-title 覆盖会波及 IM 接入区三个标题', () => {
+    const scoped = cssRule('.config-section .section-title', 'margin-bottom: 0')
+    expect(scoped, '未见 .config-section .section-title 规则').not.toBeNull()
+    // 基础 .section-title 仍是 0 0 10px（IM 接入区「入站状态 / QQ 绑定 / 添加绑定」依赖它）
+    const base = cssRule('.section-title', 'margin: 0 0 10px')
+    expect(base, '基础 .section-title 规则被改动').not.toBeNull()
+    expect(base!.selectorText.trim()).toBe('.section-title')
+    expect(base!.body).not.toContain('margin-bottom: 0')
+    // 多个标题相邻时的分隔规则保留（IM 接入区内同层多标题靠它撑开）
+    expect(source).toContain('.section-title + .section-title')
+  })
+
+  it('OQ-2 证伪：既有 pin 与 IM 接入区锚点均在场', () => {
+    // 改为 section 包裹后，QQ 接入区三个标题 + 入站卡仍在
+    expect(systemPaneTemplate()).not.toContain('inbound-card')
+    expect(source).toContain('inbound-card')
+    expect(source).toContain('QQ 绑定')
+    expect(source).toContain('添加绑定')
+    // 既有 pin（另有两个 describe 各自独立断言）：块级行的顶部对齐变体 + textarea 可调整。
+    // T3 起 `.config-item` 的居中 pin 已由 `对齐` 规格取代（见上一条 it），此处改钉新形态。
+    const frowTop = cssRule('.frow-top', 'align-items: start')
+    expect(frowTop, '.frow-top 顶部对齐变体缺失').not.toBeNull()
+    const textarea = cssRule('.iron-law-textarea', 'resize: vertical')
+    expect(textarea, '.iron-law-textarea pin 被破坏').not.toBeNull()
+    expect(textarea!.body).toContain('font-family: var(--font-mono)')
+  })
+})
+
+describe('SettingsView T3 设置页对齐改版（票面 §二 规格）', () => {
+  // 票面：docs/run/ui-redesign/T3-settings-alignment.md
+  // 用户原话病灶两条：「有些框都没对齐」「莫名的换行文字」——下面每条都钉住
+  // 一个防复发点，摘掉任一条，对应症状就会回来。
+
+  it('左侧导航图标列：线框 SVG 图标（不再是 emoji），宽度单源在 SubNav', () => {
+    // T5 改锚：`188px` 那条规则随导航迁进 components/SubNav.vue（票面 §二A 收窄到 148px），
+    // 宽度断言改在 SubNav.test.ts 钉。本用例保留 T3 的防复发意图——导航图标是线框 SVG，不是 emoji。
+    expect(source).toContain('class="nav-icon"')
+    expect(source).not.toContain('<span class="nav-icon">')
+    // 图标经 SubNav 的具名 slot 传入（不是把 SVG 塞进 props 字符串——那得走 v-html）
+    expect(source).toContain('<template #icon="{ item }">')
+    // 图标尺寸 14px（票面 §二A）写在 svg 自身属性上
+    expect(source).toContain('width="14"')
+  })
+
+  it('T5 贴左：.settings-layout 不再居中（宽屏左空白的根因）', () => {
+    // 病灶：`margin: 0 auto` 让整页（导航 + 内容）在轨道右侧居中 ⇒ 轨道与导航之间
+    // 随视口变宽空出数百 px。贴左后导航锚定 52px 轨道。
+    const layout = source.match(/\.settings-layout\s*\{[\s\S]*?\}/)
+    expect(layout, '未找到 .settings-layout 规则').toBeTruthy()
+    expect(layout![0]).not.toContain('margin: 0 auto')
+    expect(layout![0]).toContain('margin: 0;')
+  })
+
+  it('T6 摘帽：.settings-layout 不得再有限宽（内容居中的参照系 = 轨道右侧整个剩余区）', () => {
+    // 病灶：整页宽度帽把「导航 148 + 内容区」钉死在轨道右侧的固定宽度内 ⇒ 720 卡片列
+    // 只在帽内居中，1920 屏下视觉重心偏左数百 px、右侧留大片空白。摘帽后卡片列的
+    // `margin: 0 auto` 直接在「轨道右缘 → 视口右缘」里居中，不需要新居中机制。
+    // 本断言同时是**防回退否定断言**：把宽度帽加回来即红。
+    const layout = source.match(/\.settings-layout\s*\{[\s\S]*?\}/)
+    expect(layout, '未找到 .settings-layout 规则').toBeTruthy()
+    expect(layout![0], '整页宽度帽不得回潮').not.toContain('max-width')
+    // 贴左裁决（T5）不因摘帽回退：仍是 `margin: 0`，不是 `margin: 0 auto`
+    expect(layout![0]).toContain('margin: 0;')
+    // 承载 720 卡片列的元素仍是唯一居中容器（三个 pane 同一条规则）
+    const col = source.match(/\.im-pane,\s*\.system-pane,\s*\.agent-panel\s*\{[\s\S]*?\}/)
+    expect(col, '未找到卡片列限宽规则').toBeTruthy()
+    expect(col![0]).toContain('margin: 0 auto')
+  })
+
+  it('T6 父标题：设置页给 SubNav 传 title="设置"（评估页不传，见 SubNav.test.ts）', () => {
+    // 设置页三个大类是平级结构、无分组语义，故取单父标题作视觉锚（票面 OQ-1）。
+    // 断言钉在「本视图传了这个 prop」上——渲染三态归 SubNav.test.ts。
+    expect(source).toContain('title="设置"')
+    const subnav = source.match(/<SubNav[\s\S]*?>/)
+    expect(subnav, '未找到 SubNav 标签').toBeTruthy()
+    expect(subnav![0]).toContain('title="设置"')
+  })
+
+  it('控件统一 34px 高 + border-box：治「莫名换行」的溢出根因', () => {
+    // content-box 下 .input 的 width:100% 会叠加 padding+border 溢出 flex 容器，
+    // 把同行后续元素挤到下一行——这是「莫名的换行文字」的机制，不是文案问题。
+    const input = source.match(/\.input\s*\{[\s\S]*?\}/)
+    expect(input, '未找到 .input 规则').toBeTruthy()
+    expect(input![0]).toContain('height: 34px')
+    expect(input![0]).toContain('box-sizing: border-box')
+    // 多行控件不吃定高，否则 textarea 被压成一行
+    expect(source).toContain('textarea.input')
+    // 同一控件规格在本文件被复述了三遍（.input / .path-input / create-body .input），
+    // 只改其中一处 = 换行与高矮不齐换个地方复发
+    const pathInput = source.match(/\.path-input\s*\{[\s\S]*?\}/)
+    expect(pathInput![0], '.path-input 未同口径').toContain('height: 34px')
+    const createInput = source.match(/\.agent-panel \.create-body \.input\s*\{[\s\S]*?\}/)
+    expect(createInput![0], 'create-body .input 未同口径').toContain('height: 34px')
+  })
+
+  it('focus 态 = border-focus 边框 + 3px accent-glow 光晕', () => {
+    const focus = source.match(/\.input:focus\s*\{[\s\S]*?\}/)
+    expect(focus).toBeTruthy()
+    expect(focus![0]).toContain('border-color: var(--border-focus)')
+    expect(focus![0]).toContain('box-shadow: 0 0 0 3px var(--accent-glow)')
+  })
+
+  it('.ctl 弹性容器 nowrap：控件与提示文字永远同行（不折到下一行）', () => {
+    const ctl = source.match(/\.frow \.ctl\s*\{[\s\S]*?\}/)
+    expect(ctl, '未找到 .frow .ctl 规则').toBeTruthy()
+    expect(ctl![0]).toContain('display: flex')
+    expect(ctl![0]).toContain('flex-wrap: nowrap')
+    expect(source).toContain('class="ctl"')
+    // 长文案不能塞进 nowrap 的 .hint（会溢出卡片），走可折行的 .hint-wrap
+    const hintWrap = source.match(/\.frow \.hint-wrap\s*\{[\s\S]*?\}/)
+    expect(hintWrap, '未找到 .hint-wrap 规则').toBeTruthy()
+    expect(hintWrap![0]).toContain('white-space: normal')
+  })
+
+  it('只读项走 kv 行（右对齐键 + mono 值 + 来源徽章），不与可编辑表单混排', () => {
+    const kv = source.match(/\.kv\s*\{[\s\S]*?\}/)
+    expect(kv, '未找到 .kv 规则').toBeTruthy()
+    expect(kv![0]).toContain('grid-template-columns: 148px 1fr auto')
+    expect(source).toContain('class="kv"')
+    expect(source).toContain('class="src"')
+  })
+
+  it('每张配置卡带「什么时候生效」副标题（三卡各一条）', () => {
+    expect(source.match(/class="card-sub"/g)).toHaveLength(3)
+    expect(source).toContain('保存后立即生效，重启后仍保持。')
+    expect(source).toContain('保存后需重启 server 才生效（写 .env）。')
+    expect(source).toContain('保存后下一轮回复即生效，无需重启。')
+  })
+
+  it('验收 2 的结构前提：卡片内缩量统一 + 滚动条槽常驻', () => {
+    // 前提一：表单行都得在卡片容器里——卡片自带 border 1px + padding 16px（=17px 内缩）。
+    // 裸放在 pane 上的行会少这 17px，左缘就与卡片内的行对不齐（实测 536 vs 553）。
+    const card = source.match(/\.ctx-card,\s*\.form-card\s*\{[\s\S]*?\}/)
+    expect(card, '.form-card 未与 .ctx-card 同规格').toBeTruthy()
+    expect(card![0]).toContain('padding: 14px 16px')
+    expect(card![0]).toContain('border: 1px solid var(--border-subtle)')
+    // 前提二：滚动条槽常驻——三个 pane 内容长短不一，滚动条时有时无会让限宽内容区的
+    // 可用宽度跳变，居中后左缘随之漂移（实测约 5px）
+    expect(source).toContain('scrollbar-gutter: stable')
+    // 「添加绑定」与 autoStart 两组表单行已包进卡片
+    expect(source.match(/class="form-card"/g)?.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('色板零新增：引用的 CSS 变量都在 index.html 有定义', () => {
+    // 原型 v6 用 --text-faint，本仓 index.html 没有这个变量——引用它不报错、不告警，
+    // 只静默失效（颜色回落继承值）。照抄原型最易踩的暗坑，故做通用守卫。
+    const defined = new Set([...designTokens.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]))
+    const used = new Set([...source.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]))
+    const missing = [...used].filter((v) => !defined.has(v))
+    expect(missing, `引用了 index.html 未定义的 CSS 变量：${missing.join(', ')}`).toEqual([])
   })
 })

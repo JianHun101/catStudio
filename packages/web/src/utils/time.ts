@@ -52,3 +52,76 @@ export function fmtUtcFull(s: string | null | undefined): string {
   if (!d) return s
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
 }
+
+// ─── 消息时间戳按日分级 ───────────────────────
+//
+// 分档**只看自然日**（`getFullYear`/`getMonth`/`getDate` 的本地读数），不看秒级间隔：
+// 今天 00:00 的消息在 23:59 看仍是「今天」。
+// `now` 是**显式入参**——纯函数不碰 `Date.now()`，测试不需要 fake timer。
+//
+// ⚠️ **「昨天」必须优先于「跨年」判定**：12-31 的消息在 01-01 看要显示「昨天」，
+//    不是「2025年12月31日」。先判年会把这一档吃掉——顺序是语义的一部分，别重排。
+
+/** 入参两种形态 → **本地读数**的 `Date`。数字走 `new Date(n)`，串走 `parseUtc`（唯一解析入口）。 */
+function toLocalDate(raw: string | number): Date | null {
+  if (typeof raw === 'number') {
+    const d = new Date(raw)
+    return Number.isNaN(d.getTime()) ? null : d
+  }
+  return parseUtc(raw)
+}
+
+/** 消息日期相对 `now` 的分档（自然日）：`0` = 今天，`1` = 昨天，`2` = 更早。 */
+function dayBucket(d: Date, now: Date): 0 | 1 | 2 {
+  if (d.toDateString() === now.toDateString()) return 0
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (d.toDateString() === yesterday.toDateString()) return 1
+  return 2
+}
+
+/** **消息时间戳**按日分级（本地时区，`now` 为参照时刻）：
+ *
+ *  | 相对 `now` | 产物 |
+ *  | --- | --- |
+ *  | 今天 | `HH:mm` |
+ *  | 昨天 | `昨天 HH:mm` |
+ *  | 更早、当年内 | `M月D日 HH:mm` |
+ *  | 跨年 | `YYYY年M月D日 HH:mm` |
+ *
+ * 解析失败 / 空值 → `''`（该条消息只是不显示时间，不静默回显原始串）。 */
+export function fmtMsgTime(raw: string | number, now: Date): string {
+  const d = toLocalDate(raw)
+  if (!d) return ''
+  const hm = `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  switch (dayBucket(d, now)) {
+    case 0:
+      return hm
+    case 1:
+      return `昨天 ${hm}`
+    default:
+      return d.getFullYear() === now.getFullYear()
+        ? `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
+        : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
+  }
+}
+
+/** **日期分隔线**文案，分档与 `fmtMsgTime` 同源（同一 `dayBucket`），只是不带时刻：
+ *  今天/`今天`、昨天/`昨天`、当年内/`M月D日`、跨年/`YYYY年M月D日`。
+ *
+ *  跨年档补年份是**既有缺陷的修复点**——旧 `formatDate` 只到 `M月D日`，去年 12 月
+ *  与上个月在分隔线上同形、分不出来。 */
+export function fmtDateSep(raw: string | number, now: Date): string {
+  const d = toLocalDate(raw)
+  if (!d) return ''
+  switch (dayBucket(d, now)) {
+    case 0:
+      return '今天'
+    case 1:
+      return '昨天'
+    default:
+      return d.getFullYear() === now.getFullYear()
+        ? `${d.getMonth() + 1}月${d.getDate()}日`
+        : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
+  }
+}

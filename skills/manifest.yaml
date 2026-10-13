@@ -303,6 +303,12 @@ skills:
     not_for: |
       debugging existing failures (use diagnosing-bugs), or adding tests after the fact.
     category: '外部技能'
+  # 来源 cursor/plugins（pstack/skills/unslop，frontmatter 逐字一致；非 mattpocock 系——
+  # disable-model-invocation 是标志性字段但来源仓库判定优先）。正文为中文翻译（非逐字
+  # vendor，不锁字节一致性，故不进 .prettierignore）；provenance 见 skills-lock.json。
+  unslop:
+    source: external
+    category: '外部技能'
 
 # ── 项目定制层（catstudy/，随迁保留，一期不切路由）──
 # 2 个 catstudy-* 定制 skill 与顶级同名 skill 是两套不同定义：

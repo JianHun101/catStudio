@@ -170,7 +170,7 @@ export class ClaudeAdapter implements LLMAdapter {
 
     const prompt = messagesToPrompt(messages)
     // options.model 优先（调用方每轮传当轮 agent 的 llmModel，reply.ts 契约），
-    // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（opencode.ts:301 同款惯例）
+    // 构造 model 兜底——同一缓存实例可服务不同 model 的猫（`llm/opencode.ts` 同款惯例）
     const env = this.buildEnv(options.context, options.model)
 
     log.info('启动 Claude Code CLI', {
@@ -304,7 +304,7 @@ export class ClaudeAdapter implements LLMAdapter {
 
   private buildEnv(context?: ChatOptions['context'], model?: string): Record<string, string> {
     // 每轮 model 优先（chatStream 从 options.model 透传），构造 model 兜底——同一缓存
-    // 实例可服务不同 model 的猫（opencode.ts:301 同款惯例）。baseUrl 留空默认 DeepSeek
+    // 实例可服务不同 model 的猫（`llm/opencode.ts` 同款惯例）。baseUrl 留空默认 DeepSeek
     // Anthropic 兼容端点；填其他端点（如 Kimi: https://api.moonshot.ai/anthropic）走对应服务
     const effectiveModel = model || this.model
     const baseUrl = this.baseUrl || 'https://api.deepseek.com/anthropic'

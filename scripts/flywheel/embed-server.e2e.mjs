@@ -9,8 +9,11 @@
  * 覆盖:
  *   B1  同文本 → sidecar 向量 与 进程内（同一 ESM 入口、同选项）向量 **逐位相同**
  *   B1' 同文本两次 → 向量相同（无随机性）
+ *   R1-R5 R13a 重排口（R1 首调即加载 / R2 分**非退化** / R3 80 对不截池 / R4 条数 / R5 逐位对齐）
  *   B9  sidecar 是**独立 pid**；杀掉它本进程仍存活，且该端口不再可连
  *   B10 孤儿自退（票巳 (c)）：**只杀父进程、不杀 sidecar** ⇒ sidecar 收 stdin EOF 自退
+ *
+ * ⚠️ 首次运行会下载**两个**模型：嵌入 ~100MB + 重排 266MB（R13a 起）。
  *
  * 不覆盖（另有人管）：B8 真机 `pnpm start`（占端口 + 主库，按票面约定由店长协调时间窗）。
  *
@@ -188,6 +191,11 @@ async function main() {
   const child = spawn(process.execPath, [SIDECAR], {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
+    // ⚠️ **必须钉动态端口**：主仓 `.env` 里有 `EMBED_SIDECAR_PORT=3210`，而日常在跑的
+    // dev server 正占着它 ⇒ 继承环境会让本 e2e 直接 `EADDRINUSE` 起不来。这不是新问题：
+    // `checkOrphanSelfExit` 早就为同一条因由显式传了 `'0'`，唯独 `main()` 漏了 ——
+    // 于是「有 dev server 在跑时 e2e 必红」，而红的原因与 E2E 要测的任何东西都无关。
+    env: { ...process.env, EMBED_SIDECAR_PORT: '0' },
   })
   const stderr = []
   child.stderr.on('data', (c) => stderr.push(c.toString()))
@@ -249,6 +257,67 @@ async function main() {
     const diffs = v1.filter((n, i) => n !== local[i]).length
     const maxDelta = Math.max(...v1.map((n, i) => Math.abs(n - local[i])))
     check(diffs === 0, '逐位相同（换壳不换语义）', `diffs=${diffs} maxDelta=${maxDelta}`)
+
+    // ── 4b. R13a：重排口真模型 ──────────────────────────
+    // 单测用假 rerank 只证明**路由**；这里证明**模型路径**。且 R1/R2 钉的正是 S0 那个
+    // 「假读数」陷阱：按票面原字面用 text-classification 会恒返回 1，臂③ ≡ 臂①，
+    // 报告得出「重排无效」把票关错——而所有探针都显示「跑通了」。
+    console.log('\n[4b] R13a /v1/rerank（真模型；首次含 266MB 重排权重下载）')
+    const postRerank = async (pairs) => {
+      const res = await fetch(`${base}/v1/rerank`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pairs }),
+        signal: AbortSignal.timeout(10 * 60 * 1000),
+      })
+      const body = await res.json().catch(() => null)
+      return { status: res.status, body }
+    }
+    const Q = '记忆检索的 top-K 截断应该按什么粒度去重，节级还是片级？'
+    const REL =
+      '节级去重与片级去重的差别在于：片级会把同一节的多个切片都算进 top-K，导致注入量被单节吃满；' +
+      '节级去重按 doc_path 与 section_anchor 组合成键，同一个节的多个命中只占一个名额。'
+    const IRR =
+      '本仓库的停服脚本会顺序释放三个端口，并在释放前检查端口占用者是不是本进程自己 spawn 的子进程。'
+
+    const first = await postRerank([
+      { query: Q, passage: IRR },
+      { query: Q, passage: REL },
+    ])
+    check(
+      first.status === 200,
+      'R1 **首调即加载**：就绪态 false 时仍放行（不设前置就绪门 —— 设了会把功能锁死在「永远不就绪」）',
+      `HTTP ${first.status} model=${first.body?.model}`
+    )
+    if (first.status === 200) {
+      const [irr, rel] = first.body.scores
+      check(
+        Number.isFinite(rel) && Number.isFinite(irr) && rel !== irr,
+        'R2a 重排分**不是常数**（排除 softmax-of-one 恒 1 的退化尺）',
+        `相关=${rel} 不相关=${irr}`
+      )
+      check(
+        rel > 0.5 && irr < 0.5,
+        'R2b 相关 > 0.5 且不相关 < 0.5（可分）',
+        `相关=${rel} 不相关=${irr}`
+      )
+    }
+
+    // 顺序对齐：相关对排在**末位**，argmax 必须跟着走（否则是按下标回填错了）
+    const wide = await postRerank(
+      Array.from({ length: 80 }, (_, i) => ({ query: Q, passage: i === 79 ? REL : IRR }))
+    )
+    check(
+      wide.status === 200,
+      'R3 80 对一次请求 ⇒ 200（跨过嵌入侧的 MAX_BATCH=64；截池会让高名次锚点永远救不回）',
+      `HTTP ${wide.status}`
+    )
+    if (wide.status === 200) {
+      const scores = wide.body.scores
+      const argmax = scores.indexOf(Math.max(...scores))
+      check(scores.length === 80, 'R4 scores 条数 == 请求条数', `len=${scores.length}`)
+      check(argmax === 79, 'R5 scores 与入参**逐位对齐**', `argmax=${argmax}（期望 79）`)
+    }
 
     // ── 5. B9：杀进程后主进程存活 + 端口不可用 ───────────
     console.log('\n[5] 停 sidecar')

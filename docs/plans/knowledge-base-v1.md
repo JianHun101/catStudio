@@ -18,13 +18,13 @@ evidence:
 >
 > 修订记录：v1 经吐槽猫实核 ⚠️建议修改（1 关键裁决 + 2 事实性错误 + 3 规格
 > 缺口）；v2 逐项修正——①黑名单恢复裁决（问题 1，见组件边界后裁决段）；
-> ②#3 路径改 db/index.ts（问题 2）；③3.3 调用点改 socketio.ts:2103（问题 3）；
+> ②#3 路径改 db/index.ts（问题 2）；③3.3 调用点改 `execution/reply.ts` 的 `runAgentReply`（问题 3）；
 > ④3.2 阈值语义纠正（问题 4）；⑤3.5 seed 异步化规格（问题 5）；⑥3.4 测试
 > 策略补齐（问题 6）；⑦3.3 检索通道与 3.2 表名安全边界（问题 7/8）。
 > v3 复核修订（吐槽猫 v2 复核）——①验收 #8 升级为 28 工具全列精确比对
 > （原「含 Bash 且非空」判据拦不住删减：10070d1 删到剩 25 个时同含 Bash 且
 > 非空）；②验收 #1 补「嵌入成功路径」注明（与 3.5 降级存 NULL 交互，防 CI
-> 误报）；③二·五补「仅 context 时加」条件（claude.test.ts:196-197 基线，
+> 误报）；③二·五补「仅 context 时加」条件（`claude.test.ts` 的基线断言，
 > 验收 #6 依赖）。
 > v4 勘误：五·边界原「向量索引」一条与 roadmap 的 A 档术语撞名，易被读成「本
 > 计划不做向量检索」——本计划交付的正是向量检索（`searchKnowledgeByVector` 走
@@ -55,17 +55,17 @@ Node 直连 SQLite，参数化查询）。
 
 ## 二、组件边界
 
-| #   | 组件                                                  | 动作     | 说明                                                                                                                                                                          |
-| --- | ----------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `packages/server/src/db/repository/knowledge.ts`      | **新建** | knowledge 表仓库：insertKnowledge（含向量）、searchKnowledgeByVector                                                                                                          |
-| 2   | `packages/server/src/db/repository/memories.ts:76-95` | 修改     | `searchMemoriesByVector` 加可选 `table = 'memories'` 参数（默认零行为变化）；knowledge.ts 复用同一查询体                                                                      |
-| 3   | `packages/server/src/db/index.ts`                     | 修改     | initDb() 的 CREATE TABLE 块新增 knowledge 表 + migrations 数组加迁移（additive，try/catch 幂等）——**本项目无 db/migrations.ts，建表与迁移全在 db/index.ts**（吐槽猫实核纠正） |
-| 4   | `packages/server/src/memory/index.ts:235`             | 修改     | `buildKnowledgeContext(triggerContent)` 独立函数：检索知识库 → 输出独立【知识库】区块；`buildMemoryContext` 不动（【相关记忆】零污染）                                        |
-| 5   | `packages/server/src/llm/claude.ts:137-138`           | 修改     | `--allowedTools` 白名单扩为 `mcp__catstudy__post_message, mcp__catstudy__search_knowledge`（白名单加一，仍是收窄安全面）                                                      |
-| 6   | `scripts/mcp-server.mjs`                              | 修改     | 新增 `search_knowledge` 工具（复用现有 MCP 子集协议与 stdio 通道）                                                                                                            |
-| 7   | `packages/server/src/routes/internal.ts`              | 修改     | 新增 `POST /api/internal/knowledge-search`（复用 SIGNAL_TOKEN 鉴权链）                                                                                                        |
-| 8   | `packages/server/src/seed.ts` / `scripts/seed.js`     | 修改     | 知识库初始文档导入（seed 通道；独立端点管理面记后续）                                                                                                                         |
-| 9   | `packages/server/src/llm/claude.ts:32`                | 修改     | `BUILTIN_TOOLS_DISALLOWED` 恢复 e5aa54d 的 28 工具全列（当前为空串 `[].join(',')`，10070d1/00a9a95 裸提交静默清空）——见下方关键裁决                                           |
+| #   | 组件                                                                                                             | 动作     | 说明                                                                                                                                                                          |
+| --- | ---------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `packages/server/src/db/repository/knowledge.ts`                                                                 | **新建** | knowledge 表仓库：insertKnowledge（含向量）、searchKnowledgeByVector                                                                                                          |
+| 2   | ~~`packages/server/src/db/repository/memories.ts`~~（**退役**：该文件随对话原话实时嵌入层整体退役被删，见 §3.1） | 退役     | `searchMemoriesByVector` 加可选 `table = 'memories'` 参数（默认零行为变化）；knowledge.ts 复用同一查询体                                                                      |
+| 3   | `packages/server/src/db/index.ts`                                                                                | 修改     | initDb() 的 CREATE TABLE 块新增 knowledge 表 + migrations 数组加迁移（additive，try/catch 幂等）——**本项目无 db/migrations.ts，建表与迁移全在 db/index.ts**（吐槽猫实核纠正） |
+| 4   | `packages/server/src/memory/index.ts`                                                                            | 修改     | `buildKnowledgeContext(triggerContent)` 独立函数：检索知识库 → 输出独立【知识库】区块；`buildMemoryContext` 不动（【相关记忆】零污染）                                        |
+| 5   | `packages/server/src/llm/claude.ts`                                                                              | 修改     | `--allowedTools` 白名单扩为 `mcp__catstudy__post_message, mcp__catstudy__search_knowledge`（白名单加一，仍是收窄安全面）                                                      |
+| 6   | `scripts/mcp-server.mjs`                                                                                         | 修改     | 新增 `search_knowledge` 工具（复用现有 MCP 子集协议与 stdio 通道）                                                                                                            |
+| 7   | `packages/server/src/routes/internal.ts`                                                                         | 修改     | 新增 `POST /api/internal/knowledge-search`（复用 SIGNAL_TOKEN 鉴权链）                                                                                                        |
+| 8   | `packages/server/src/seed.ts` / `scripts/seed.js`                                                                | 修改     | 知识库初始文档导入（seed 通道；独立端点管理面记后续）                                                                                                                         |
+| 9   | `packages/server/src/llm/claude.ts`                                                                              | 修改     | `BUILTIN_TOOLS_DISALLOWED` 恢复 e5aa54d 的 28 工具全列（当前为空串 `[].join(',')`，10070d1/00a9a95 裸提交静默清空）——见下方关键裁决                                           |
 
 **谁不动**：dispatch / socketio.ts 合并点 / route-signals / mention-policy /
 deepseek.ts / openai.ts / web。知识库是「读增强」，不进 A2A 链路。
@@ -93,7 +93,7 @@ OQ① 已记录的另立项路径，不在本单放开。黑名单恢复与 sear
 是同一安全目标的两半，必须同批落地。
 
 **加注条件（吐槽猫复核补）**：黑名单保持**仅 context 分支加**（`--disallowedTools`
-参数只在 context 存在时拼入 args，claude.test.ts:196-197 有基线断言「无 context
+参数只在 context 存在时拼入 args，`claude.test.ts` 有基线断言「无 context
 参数不在」）——恢复动作不改变加注条件，无 context 调用路径零参数变化
 （验收 #6 依赖此条件）；实施时禁止顺手重构为无条件加。
 
@@ -146,7 +146,7 @@ searchKnowledgeByVector(queryBlob: Buffer, topK: number, maxDistance = 0.35)
 与【相关记忆】并列独立区块——来源权威性不同（运营方标准数据 vs 对话记忆），
 检索语义不可混淆。
 
-- **调用点（吐槽猫问题 3 纠正）**：**socketio.ts:2103**（runAgentReply 组装处，
+- **调用点（吐槽猫问题 3 纠正）**：**`execution/reply.ts` 的 `runAgentReply`**（prompt 组装处，
   buildMemoryContext 同款位置）——claude.ts 是 spawn 参数面，不是 prompt 组装
   面。实现与 buildMemoryContext 相同防护形态：`Promise.race([buildKnowledgeContext(...),
 超时])` 超时降级空串 + catch 空串（MEMORY_TIMEOUT_MS 同款），结果拼进
@@ -217,7 +217,7 @@ searchKnowledgeByVector(queryBlob: Buffer, topK: number, maxDistance = 0.35)
    ——「含 Bash 且非空」判据拦不住删减（10070d1 删到剩 25 个时同样含 Bash 且
    非空，历史实证），全列比对才是防静默清空/删减再犯的完整闭环；同时保持
    **仅 context 分支加**（无 context 分支既有基线断言参数不在，
-   claude.test.ts:196-197，与验收 #6 同源）
+   `claude.test.ts` 的基线断言，与验收 #6 同源）
 
 ---
 

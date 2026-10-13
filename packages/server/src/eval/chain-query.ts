@@ -47,7 +47,7 @@ export interface ChainHop {
   replyMs: number | null
   /** = `totalMs − replyMs`（钳到 ≥0）。语义 = 等 token 锁 + 编排收尾 + 建行开销
    *  ——等锁是主要成分，**占比未实测**。字段名刻意用中性词：
-   *  `t0` 在 `runAgentReply` **内部**（`reply.ts:207`），而 token 获取在它**之前**，
+   *  `t0` 在 `runAgentReply` **内部**（`execution/reply.ts` 的 `const t0`），而 token 获取在它**之前**，
    *  故残余段 ≠ 等锁。**禁用 `lockWaitMs` 之类命名**——会报假数。 */
   nonReplyMs: number | null
   /** `totalMs − replyMs < 0`（两端精度已同档，仅剩时钟/口径缝隙能造出负值）——**钳位但显式暴露**，不静默 */

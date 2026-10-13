@@ -31,7 +31,7 @@
  *   ⇒ 假读数无声产生。白名单形态的理由见 `checkDegradation`（简言之：`no-hit` 这类是
  *   **真实结局**不是降级，拿它拒报告等于让一次正常空结果变成拿不到数）。
  * - **B6 空库闸**：`chunks` 行数 > 0 且 `doc_path` 去重数 == golden-check 的 `liveDocs`。
- *   `DB_PATH` 是模块级常量（`db/index.ts:16`）env 覆盖不了，故本脚本**显式** `setDb()`
+ *   `DB_PATH` 是模块级常量（`db/index.ts`）env 覆盖不了，故本脚本**显式** `setDb()`
  *   注入真库，且以 `readonly + fileMustExist` 打开——「静默建一个空库跑出全零」在这条
  *   打开方式下不是纪律问题，是**物理不可达**。
  *

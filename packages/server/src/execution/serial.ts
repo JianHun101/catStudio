@@ -12,6 +12,11 @@
  * executeOneAgent / executeAgentsSerial / drainQueuedCommand + 执行常量与
  * no-key 守卫。输出经注入 bus（EngineBus & HandoffBus），状态经注入 state。
  * 日志通道沿用 'socketio'（零可观测行为变化）。
+ *
+ * **探针闸**（票 `docs/run/probe-no-resume/`，判据见 `probe-mode.ts`）：两个执行
+ * 入口（`executeAgentsSerial` / `execute`）各自在函数首部拒绝执行。这是仓内
+ * 「零 spawn」的承重面——所有 CLI 与常驻子进程的 spawn 都在适配器内、只经这两个
+ * 入口到达，故不必逐 adapter 复述判据。
  */
 
 import { execSync } from 'node:child_process'
@@ -32,6 +37,8 @@ import {
 } from '../db/repository/index.js'
 import { createExecTrace, insertDetachedSpan, type ExecTrace } from './trace.js'
 import { createLogger } from '../logger.js'
+import { envNumber } from '../env-number.js'
+import { isProbeMode } from '../probe-mode.js'
 import { MAX_QUEUE_PER_AGENT, isStaleHandoffRequest } from '../dispatch/index.js'
 import { ProviderTokenPool } from './token-pool.js'
 import { classifyError } from '../eval/classify-error.js'
@@ -100,9 +107,19 @@ export function agentHasUsableApiKey(
  *
  *   比例: hard = 1.5x idle，idle 先触发，hard 是最终防线。
  *
- * 可通过 AGENT_HARD_TIMEOUT_MS 环境变量覆盖（设为 0 禁用）。 */
-const _HARD_TIMEOUT = parseInt(process.env.AGENT_HARD_TIMEOUT_MS || '')
-const AGENT_HARD_TIMEOUT_MS = isNaN(_HARD_TIMEOUT) ? 30 * 60 * 1000 : _HARD_TIMEOUT // 30 分钟
+ * 可通过 AGENT_HARD_TIMEOUT_MS 环境变量覆盖。**取值 `<= 0`（`0` 与负数同义）禁用
+ * 本层**——超时成员不再挂进 `Promise.race`，单次执行只受层级 1 约束。
+ *
+ * 禁用的**后果**：本层是「最终防线」，撤掉后若层级 1 也被禁用（`CLI_IDLE_TIMEOUT_MS
+ * <= 0`），挂死的执行将**永久占用该 agent 的槽位**，其后所有消息只能排队。本常量
+ * 只负责兑现「禁用」这句承诺，不为该后果补护栏（另一个设计问题）。
+ *
+ * 取值走 `env-number.ts` 唯一入口：未设 / 空串回默认且不出声，坏值 warn + 回默认
+ * （原手搓 `parseInt(... || '')` 只挡 NaN，`0` / 负数原样通过 ⇒ 文档承诺的「0 禁用」
+ * 兑现成「0 = 下一宏任务 abort」，且 abort reason 标 `timeout` 把排障带偏）。 */
+const AGENT_HARD_TIMEOUT_MS = envNumber('AGENT_HARD_TIMEOUT_MS', 30 * 60 * 1000)
+/** 硬超时是否启用（`<= 0` ⇒ 禁用）。模块加载时定值，与上方环境变量语义同批。 */
+const HARD_TIMEOUT_ENABLED = AGENT_HARD_TIMEOUT_MS > 0
 
 /** Agent 间调度的最大递归深度（防止无限循环） */
 const MAX_AGENT_DISPATCH_DEPTH = 10
@@ -627,6 +644,23 @@ async function executeOneAgent(
       try {
         // 用 Promise.race 防止单个 Agent 的 LLM 调用挂起阻塞后续 Agent
         // AbortController 确保超时后子进程被 kill（P0-1 修复）
+        //
+        // 超时成员**仅当启用时挂载**（`AGENT_HARD_TIMEOUT_MS <= 0` ⇒ 禁用，语义见
+        // 文件头层级 2 注释）。禁用时 race 只剩 runAgentReply 一个成员、等价于直接
+        // await；不写成「挂一个永不落定的 promise」——那会白留一个 timer 句柄。
+        const hardTimeoutMembers = HARD_TIMEOUT_ENABLED
+          ? [
+              new Promise<never>((_, reject) =>
+                setTimeout(() => {
+                  // reason 契约（reply.ts 的 abort 分支按它区分「超时 / 用户停止 / 执行抛错」
+                  // 落日志——旧文案写死超时语义，用户点停止也被记成超时，排障被带偏）
+                  abortController.abort('timeout')
+                  reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
+                }, AGENT_HARD_TIMEOUT_MS)
+              ),
+            ]
+          : []
+
         reply = await Promise.race([
           runAgentReply(
             state,
@@ -638,14 +672,7 @@ async function executeOneAgent(
             abortController.signal,
             trace
           ),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => {
-              // reason 契约（reply.ts 的 abort 分支按它区分「超时 / 用户停止 / 执行抛错」
-              // 落日志——旧文案写死超时语义，用户点停止也被记成超时，排障被带偏）
-              abortController.abort('timeout')
-              reject(new Error(`执行超时 (${AGENT_HARD_TIMEOUT_MS / 1000}s)`))
-            }, AGENT_HARD_TIMEOUT_MS)
-          ),
+          ...hardTimeoutMembers,
         ])
       } finally {
         releaseToken()
@@ -956,8 +983,8 @@ async function executeOneAgent(
         //
         // ⚠️ 触达边界（裁决 (a)，2026-09-09 实测）：本通知是 **UI 提示（人类可见）**，
         // **不触达 store agent 上下文**——emitSystemNotice 只做房间广播、不落库
-        // （socketio.ts:134），而 agent 上下文由 getRecentMessages 过滤
-        // role != 'system'（routes/messages.ts:120）→ 店长 agent 永远看不到它，
+        // （`connectors/socketio.ts`），而 agent 上下文由 `getRecentMessages` 过滤
+        // `role != 'system'`（`db/repository/messages.ts`）→ 店长 agent 永远看不到它，
         // 包括「下次执行」时。真正的 agent 级触达需落库 + 定向 dispatch 唤醒店长，
         // 属新的自动唤醒链（要过 ADR-0007 + 风暴护栏评估），另单评估。
         // 所以本通知的作用是「给人看、别让结论无声消失」，**不是「叫醒店长」**。
@@ -1286,6 +1313,26 @@ async function executeAgentsSerialImpl(
   traceId: string,
   depth: number = 0
 ): Promise<boolean> {
+  // 探针模式：整轮拒绝（票 `docs/run/probe-no-resume/` 契约 ②「不 spawn CLI 执行」）。
+  //
+  // **闸在这里而不是调用点**：轮级副作用不止 CLI 一项——本函数尾部的 depth=0 收尾
+  // 会 `gitCommit` 逐树自动提交 + `git checkout -- .` 清脏文件。只闸 `execute()` 的话，
+  // 执行体虽不跑，收尾段照样会把探针工作树里的在途改动**提交掉**。闸在轮首，三类
+  // 副作用（CLI spawn / 自动提交 / 脏文件清理）一并挡住。
+  //
+  // 覆盖面：仓内所有 CLI 执行与常驻子进程（llama-server / ollama serve /
+  // codex-proxy）的 spawn 都在适配器内、只经本入口与 `execute()` 到达 ⇒ 两闸合起来
+  // 即「零 spawn」，无需逐 adapter 复述同一个判据。
+  if (isProbeMode()) {
+    log.warn('探针模式：拒绝执行整轮（不 spawn CLI、不自动提交）', {
+      traceId,
+      sessionId,
+      triggerMessageId: triggerMsg.id,
+      agents: agents.map((a) => a.name),
+    })
+    return false
+  }
+
   // 深度限制：防止 Agent 间无限循环
   if (depth >= MAX_AGENT_DISPATCH_DEPTH) {
     log.warn('agent dispatch depth limit reached', { traceId, depth })
@@ -1861,6 +1908,19 @@ export function createExecutionEngine(
 
   /** C1 v3 顶层单入口：决策(直跑/入队) → 执行 → finally{收口+排空} */
   async function execute(cmd: DispatchCommand): Promise<boolean> {
+    // 探针模式：拒绝（票 `docs/run/probe-no-resume/`）。本入口是单条命令的公开入口
+    // （`dispatch/index.ts` 的兼容 shim 与槽位排空都走它），**不是**轮级入口的重复闸：
+    // 轮级闸拦的是 `executeAgentsSerial`，直调 `engine.execute` 的路径只经这里。
+    // 闸在**决策段之前**——置后会让探针实例仍把消息标 busy/入队、状态桥照常广播，
+    // 探针 UI 上就会出现「排队中」这种永不落地的假状态。
+    if (isProbeMode()) {
+      log.warn('探针模式：拒绝执行单条命令（不 spawn CLI）', {
+        traceId: cmd.traceId,
+        agentId: cmd.agentId,
+        triggerMessageId: cmd.triggerMessageId,
+      })
+      return false
+    }
     const agent = agentsRepo.getAgentById(cmd.agentId)
     if (!agent) {
       log.warn('unknown agent in execute', { agentId: cmd.agentId, traceId: cmd.traceId })

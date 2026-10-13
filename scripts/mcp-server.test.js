@@ -651,7 +651,7 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     expect(Object.keys(SKILL_CATALOG)).toEqual(SKILL_WHITELIST)
   })
 
-  it('白名单定死 12 技能、request-review 回流、wayfinder 排除已撤销（口径翻转）', () => {
+  it('白名单定死 13 技能、request-review 回流、wayfinder 排除已撤销（口径翻转）', () => {
     expect(SKILL_WHITELIST).toEqual([
       'grilling',
       'to-spec',
@@ -665,6 +665,7 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
       'wayfinder',
       'design-taste-frontend',
       'writing-for-agents',
+      'unslop',
     ])
     expect(SKILL_WHITELIST).toContain('request-review')
     // 2026-09-15 口径翻转：`disable-model-invocation` 是上游来源标记、本仓不构成访问约束
@@ -675,6 +676,8 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     // 2026-09-21 纳入：判据同「猫可自取范围」（非流程链补充）；
     // 它正文原带的 `SKILL-MECHANICS.md` 兄弟指针猫读不到，已按该技能自己的判据 inline。
     expect(SKILL_WHITELIST).toContain('writing-for-agents')
+    // 2026-09-24 纳入：去 AI 味判据（非流程链补充，外部 vendor 中文翻译，provenance 见 lock）。
+    expect(SKILL_WHITELIST).toContain('unslop')
   })
 
   // T-D 验收「文案指向的技能名真实存在」——铁律文案点名的技能必须真在流程链清单内。

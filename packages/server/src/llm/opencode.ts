@@ -76,8 +76,8 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
  * environment 六变量（对齐 dsh writePatchConfig envLines，ADR 0008 通道准则）：
  *   五固定 + 可选 triggerAuthorName——MCP server（工具面路由）消费这些字段。
  *   ⚠️ triggerMsgId 的消费者是猫自己（提交 commit 的 catstudy [uuid]），走进程 env
- *   单字段注入（chatStream 内，见下），**不进** MCP environment（对齐 dsh.ts:85-88
- *   OQ1 硬伤修复——MCP 子进程 env ≠ agent 进程 env）。
+ *   单字段注入（chatStream 内，见下），**不进** MCP environment（对齐 `dsh.ts` 的
+ *   `writePatchConfig` 通道边界注——MCP 子进程 env ≠ agent 进程 env）。
  *
  * 配置仅走每轮临时文件，不进全局/项目静态 opencode.json（OPENCODE_CONFIG 是
  * 追加合并，不改用户本地配置）。文件名带 pid + uuid——同一进程并发多个 spawn 不冲突。
@@ -251,7 +251,7 @@ export class OpencodeAdapter implements LLMAdapter {
       })
     }
 
-    // 凭证条件注入（DS_KEY 复用，对齐 dsh.ts:202-205）：仅非空才写 DEEPSEEK_API_KEY，
+    // 凭证条件注入（DS_KEY 复用，对齐 `dsh.ts` 的 `DEEPSEEK_API_KEY` 条件注入）：仅非空才写 `DEEPSEEK_API_KEY`，
     // 空串会覆盖 opencode 本地 credentials 兜底（有凭证的安装失效）。opencode 的
     // deepseek provider 消费 DEEPSEEK_API_KEY 且 env 优先级高于 auth.json（真机验收点）
     const env = {
@@ -269,7 +269,7 @@ export class OpencodeAdapter implements LLMAdapter {
       env.DEEPSEEK_API_KEY = effectiveKey
     }
 
-    // 边界红线（对齐 dsh.ts:234-239）：只读 context.triggerMsgId 单字段注入进程 env
+    // 边界红线（对齐 `dsh.ts` 的同名注）：只读 context.triggerMsgId 单字段注入进程 env
     // （猫提交 commit 的 catstudy [uuid] 来源）——消费者是猫自己的 shell/工具（继承
     // opencode 进程 env），**不是** MCP server（不可写回 MCP environment，对齐 ADR
     // 0008 通道准则 / dsh OQ1 硬伤修复：MCP 子进程 env ≠ agent 进程 env）

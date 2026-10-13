@@ -4,9 +4,11 @@
 # 不阻断 commit——失败只告警，不影响工作流
 
 # 投递目标由 handoff-gen 自动选择：
-#   1. 环境变量 CATSTUDY_SESSION_ID（人工显式指定）
+#   1. 环境变量 CATSTUDY_SESSION_ID（人工显式指定，**且提交仓库自证属于该会话**）
 #   2. commit message 的 catstudy [uuid] 反查触发消息所在会话（自动）
 # 两者都不可用时**报错不投递**（草稿滞留）——绝不猜目标。
+# 第 1 条的身份前置是必需的：该变量由 server 注入给每只猫的 CLI、会被夹具/临时
+# 仓库全量继承，只认它等于让任何仓库都能以活会话身份投递（2026-09-28 两次实证）。
 # 曾因反查失败静默降级到硬编码会话，把审查文档投到错误会话（b8b0a6d 跨会话）。
 # 如确需人工指定目标：export CATSTUDY_SESSION_ID=<会话ID> 后重跑
 #   node scripts/handoff-gen.mjs
