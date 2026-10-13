@@ -80,6 +80,17 @@ export type HandoffTarget = HandoffResult
 /** 沿 handoff_from 链追真实子会话的最大深度（防循环/无限链） */
 const HANDOFF_CHAIN_LIMIT = 5
 
+/**
+ * 空壳子会话的宽限期（秒）：窗内的 0 消息子会话按「刚交接建出、前端尚未切过去」对待。
+ *
+ * 固定常量——**不进 env、不进 settings 表**（env/settings 都有 seed-shadow 那类
+ * 「改了不生效」的坑，且这是实现细节而非用户旋钮）。
+ *
+ * 取值依据：交接后前端从收到 SESSION_HANDOFF 到实际发消息之间有一段用户阅读/切换时间，
+ * 生产实证里两次误杀间隔 10 分钟上下（14:13:29 与 14:22:12 各删掉一个刚建的新壳）。
+ */
+const HANDOFF_EMPTY_SHELL_GRACE_SECONDS = 600
+
 /** 解析 running_summary JSON 提取 text 字段；无/解析失败返回 null */
 function parseSummaryText(runningSummary: string | null): string | null {
   if (!runningSummary) return null
@@ -143,9 +154,13 @@ export function nextHandoffTitle(title: string): string {
 /**
  * 执行会话交接。
  *
- * 1. 生成全量总结
- * 2. 创建新会话（标题按 nextHandoffTitle 编号递增，如（1）（2），继承原会话的 agents 和 broadcast 设置）
- * 3. 通知前端
+ * 顺序（任一「已交接」分支都返回 null，调用方对 null 一律无副作用）：
+ * 1. 读原会话
+ * 2. 按年龄清理**陈旧**空壳子会话 + 逐个广播 SESSION_DELETED
+ * 3. 窗内仍有空壳 ⇒ 复用早退（不生成摘要、不重建、不 emit）
+ * 4. 已有真实子会话（≥1 消息）⇒ 早退
+ * 5. 生成全量总结 → 6. 建新会话（标题按 nextHandoffTitle 编号递增，继承 agents 与 broadcast）
+ *    → 7. 通知前端
  *
  * @returns 交接结果，失败返回 null
  */
@@ -168,21 +183,54 @@ export async function performHandoff(
     const oldSession = sessionsRepo.getSessionById(sessionId)
     if (!oldSession) return null
 
-    // 2. 清理历史空壳子会话（前端切换失败留下的孤儿，0 条消息）——
-    //    不删它们会占住去重守卫，旧会话永不二次交接。删完再查真实交接。
-    const removed = sessionsRepo.deleteEmptyHandoffChildren(sessionId)
-    if (removed > 0) {
-      log.info('removed empty handoff children before re-handoff', { sessionId, removed })
+    // 2. 清理**陈旧**空壳子会话（前端切换失败留下的孤儿，0 条消息且早于宽限期）——
+    //    不删它们会占住去重守卫，旧会话永不二次交接。刚建出的新壳落在窗内、不清（step 2.5 复用）。
+    //    每个被删 id 逐个广播 SESSION_DELETED：纯 DB DELETE 无广播时，前端那条框会成幽灵框。
+    const removedIds = sessionsRepo.deleteEmptyHandoffChildren(
+      sessionId,
+      HANDOFF_EMPTY_SHELL_GRACE_SECONDS
+    )
+    if (removedIds.length > 0) {
+      log.info('removed empty handoff children before re-handoff', {
+        sessionId,
+        removed: removedIds.length,
+      })
+      for (const removedId of removedIds) {
+        try {
+          bus.emitSessionDeleted(removedId)
+        } catch (emitErr: any) {
+          // 广播失败只记录不抛出：清理本身已完成，不能让通知失败倒灌成交接失败
+          log.warn('emit session-deleted for removed shell failed', {
+            sessionId,
+            removedId,
+            error: emitErr.message,
+          })
+        }
+      }
     }
 
-    // 3. 检查是否已被真实交接（子会话有 ≥1 条消息才算）
+    // 2.5 新鲜空壳复用（本单核心）：窗内仍有 0 消息子会话 ⇒ 它是上一次交接刚建出的新会话，
+    //     前端可能还没切过去。此刻再交接一次只会（a）白花一次摘要 LLM 调用、（b）杀掉新壳
+    //     再重建、（c）前端多出一条同名框。故直接早退——返回 null 与 step 3「已交接」同语义，
+    //     调用方（reply.ts / ingest.ts）对二者都是 fire-and-forget，无差别。
+    const freshShell = sessionsRepo.getEmptyHandoffChild(sessionId)
+    if (freshShell) {
+      log.info('handoff dedup: reusing fresh empty child', {
+        sessionId,
+        existingChildId: freshShell.id,
+        graceSeconds: HANDOFF_EMPTY_SHELL_GRACE_SECONDS,
+      })
+      return null
+    }
+
+    // 4. 检查是否已被真实交接（子会话有 ≥1 条消息才算）
     const existingHandoff = sessionsRepo.getHandoffChild(sessionId)
     if (existingHandoff) {
       log.debug('session already handed off', { sessionId, handoffTo: existingHandoff.id })
       return null
     }
 
-    // 3. 生成全量总结
+    // 5. 生成全量总结
     log.info('generating full summary for handoff', { sessionId })
     const summary = await generateFullSummary(sessionId)
     if (!summary) {
@@ -192,7 +240,7 @@ export async function performHandoff(
       return null
     }
 
-    // 4. 创建新会话
+    // 6. 创建新会话
     const newSessionId = uuid()
     const newTitle = nextHandoffTitle(oldSession.title)
     const oldAgentIds = JSON.parse(oldSession.agent_ids || '[]') as string[]
@@ -218,7 +266,7 @@ export async function performHandoff(
       summaryTokens: estimateTokens(summary),
     })
 
-    // 5. 通知前端（emit 失败时回滚新会话，避免孤儿会话）
+    // 7. 通知前端（emit 失败时回滚新会话，避免孤儿会话）
     try {
       bus.emitSessionHandoff({
         oldSessionId: sessionId,

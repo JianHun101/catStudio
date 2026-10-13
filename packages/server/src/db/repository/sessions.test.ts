@@ -4,7 +4,8 @@
  * 覆盖：
  *   - getHandoffChild 新语义：仅当子会话有 ≥1 条消息才算真实交接
  *     （空壳子会话 = 0 条消息，前端切换失败产物，不挡二次交接）
- *   - deleteEmptyHandoffChildren：删空壳保真实，返回删除数
+ *   - getEmptyHandoffChild：0 消息子会话（窗内空壳复用判据）
+ *   - deleteEmptyHandoffChildren：按年龄删**陈旧**空壳保真实，返回被删 id 列表
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
@@ -25,6 +26,18 @@ describe('sessions repo — handoff 去重守卫', () => {
       `INSERT INTO sessions (id, title, handoff_from, running_summary)
        VALUES (?, 'test', ?, ?)`
     ).run(id, opts.handoffFrom ?? null, opts.runningSummary ?? null)
+  }
+
+  /**
+   * 插入会话并**显式钉住 created_at**（相对当前的秒级偏移）——年龄谓词的用例必须钉，
+   * 否则「插入时刻」与「清理时刻」同秒 ⇒ 窗边界两分支都落同一侧，断言恒真。
+   * 口径与列一致：秒级 `datetime('now')` 产物（不带 `T`/`Z`）。
+   */
+  const insertSessionAged = (id: string, ageSeconds: number, handoffFrom?: string) => {
+    db.prepare(
+      `INSERT INTO sessions (id, title, handoff_from, created_at)
+       VALUES (?, 'test', ?, datetime('now', ?))`
+    ).run(id, handoffFrom ?? null, `-${ageSeconds} seconds`)
   }
 
   /** 向会话插入一条用户消息 */
@@ -74,44 +87,96 @@ describe('sessions repo — handoff 去重守卫', () => {
     })
   })
 
-  describe('deleteEmptyHandoffChildren — 空壳清理', () => {
-    it('删除所有空壳子会话，保留真实子会话，返回删除数', () => {
+  describe('getEmptyHandoffChild — 窗内空壳（复用判据）', () => {
+    it('0 消息子会话命中（不限年龄）', () => {
+      insertSession('parent-e1')
+      insertSession('child-empty', { handoffFrom: 'parent-e1' })
+      expect(sessionsRepo.getEmptyHandoffChild('parent-e1')).toEqual({ id: 'child-empty' })
+    })
+
+    it('陈旧空壳同样命中——年龄过滤归 deleteEmptyHandoffChildren，本函数不管', () => {
+      insertSession('parent-e2')
+      insertSessionAged('child-old-empty', 3600, 'parent-e2')
+      expect(sessionsRepo.getEmptyHandoffChild('parent-e2')).toEqual({ id: 'child-old-empty' })
+    })
+
+    it('有消息的子会话不算空壳 → undefined', () => {
+      insertSession('parent-e3')
+      insertSession('child-real', { handoffFrom: 'parent-e3' })
+      insertMessage('m-e1', 'child-real')
+      expect(sessionsRepo.getEmptyHandoffChild('parent-e3')).toBeUndefined()
+    })
+
+    it('无子会话 → undefined', () => {
+      insertSession('parent-e4')
+      expect(sessionsRepo.getEmptyHandoffChild('parent-e4')).toBeUndefined()
+    })
+
+    it('多个空壳取 created_at 最新的一个（结果确定，不依赖行序）', () => {
+      insertSession('parent-e5')
+      insertSessionAged('child-older', 300, 'parent-e5')
+      insertSessionAged('child-newer', 10, 'parent-e5')
+      expect(sessionsRepo.getEmptyHandoffChild('parent-e5')).toEqual({ id: 'child-newer' })
+    })
+  })
+
+  describe('deleteEmptyHandoffChildren — 陈旧空壳清理（按年龄）', () => {
+    const GRACE = 600
+
+    it('删窗外空壳、留窗内空壳与真实子会话，返回被删 id 列表', () => {
       insertSession('parent-5')
-      insertSession('child-empty-a', { handoffFrom: 'parent-5' })
-      insertSession('child-empty-b', { handoffFrom: 'parent-5' })
+      insertSessionAged('child-old-empty', 3600, 'parent-5')
+      insertSessionAged('child-fresh-empty', 30, 'parent-5')
       insertSession('child-real', { handoffFrom: 'parent-5' })
       insertMessage('m-3', 'child-real')
 
-      const removed = sessionsRepo.deleteEmptyHandoffChildren('parent-5')
+      const removed = sessionsRepo.deleteEmptyHandoffChildren('parent-5', GRACE)
 
-      expect(removed).toBe(2)
+      expect(removed).toEqual(['child-old-empty'])
       expect(
-        getDb().prepare('SELECT id FROM sessions WHERE handoff_from = ?').all('parent-5')
-      ).toEqual([{ id: 'child-real' }])
+        getDb()
+          .prepare('SELECT id FROM sessions WHERE handoff_from = ? ORDER BY id')
+          .all('parent-5')
+      ).toEqual([{ id: 'child-fresh-empty' }, { id: 'child-real' }])
     })
 
-    it('无空壳子会话时返回 0', () => {
+    it('窗边界：窗外 1s 删、窗内 1s 留', () => {
+      insertSession('parent-b1')
+      insertSessionAged('child-just-out', GRACE + 1, 'parent-b1')
+      insertSession('parent-b2')
+      insertSessionAged('child-just-in', GRACE - 1, 'parent-b2')
+
+      expect(sessionsRepo.deleteEmptyHandoffChildren('parent-b1', GRACE)).toEqual([
+        'child-just-out',
+      ])
+      expect(sessionsRepo.deleteEmptyHandoffChildren('parent-b2', GRACE)).toEqual([])
+      expect(sessionsRepo.getSessionById('child-just-in')).toBeDefined()
+    })
+
+    it('无空壳子会话时返回空数组', () => {
       insertSession('parent-6')
       insertSession('child-real', { handoffFrom: 'parent-6' })
       insertMessage('m-4', 'child-real')
 
-      expect(sessionsRepo.deleteEmptyHandoffChildren('parent-6')).toBe(0)
+      expect(sessionsRepo.deleteEmptyHandoffChildren('parent-6', GRACE)).toEqual([])
+      expect(sessionsRepo.getSessionById('child-real')).toBeDefined()
     })
 
-    it('无任何子会话时返回 0', () => {
+    it('无任何子会话时返回空数组', () => {
       insertSession('parent-7')
-      expect(sessionsRepo.deleteEmptyHandoffChildren('parent-7')).toBe(0)
+      expect(sessionsRepo.deleteEmptyHandoffChildren('parent-7', GRACE)).toEqual([])
     })
 
     it('只删目标父会话的空壳，不影响其他父会话', () => {
       insertSession('parent-8')
       insertSession('parent-other')
-      insertSession('child-empty', { handoffFrom: 'parent-8' })
-      insertSession('child-other-real', { handoffFrom: 'parent-other' })
-      insertMessage('m-5', 'child-other-real')
+      insertSessionAged('child-old-empty', 3600, 'parent-8')
+      insertSessionAged('child-other-old-empty', 3600, 'parent-other')
 
-      expect(sessionsRepo.deleteEmptyHandoffChildren('parent-8')).toBe(1)
-      expect(sessionsRepo.getHandoffChild('parent-other')).toEqual({ id: 'child-other-real' })
+      expect(sessionsRepo.deleteEmptyHandoffChildren('parent-8', GRACE)).toEqual([
+        'child-old-empty',
+      ])
+      expect(sessionsRepo.getSessionById('child-other-old-empty')).toBeDefined()
     })
   })
 

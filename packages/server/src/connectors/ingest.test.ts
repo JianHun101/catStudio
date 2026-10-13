@@ -148,6 +148,7 @@ function createFakeBus(): { bus: EngineBus & HandoffBus; broadcast: Message[] } 
     emitContextWindowStats: noop,
     emitSessionHandoff: noop,
     emitHandoffFailed: noop,
+    emitSessionDeleted: noop,
   }
   return { bus, broadcast }
 }

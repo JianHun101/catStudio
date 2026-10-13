@@ -1155,6 +1155,12 @@ export const useChatStore = defineStore('chat', () => {
         api
           .getSession(data.newSessionId)
           .then((newSession) => {
+            // 陈旧条目剔除（幂等）：同一 oldSessionId 的历史交接产物先摘掉——重复交接事件
+            // 的 newSessionId 每次不同，只按 id 判重会漏（列表里并排两条同名框）。
+            // handoffFrom 由 GET /api/sessions/:id 透传（toSessionConfig）。
+            sessions.value = sessions.value.filter(
+              (s) => !(s.handoffFrom === data.oldSessionId && s.id !== newSession.id)
+            )
             // 添加到会话列表
             const exists = sessions.value.some((s) => s.id === newSession.id)
             if (!exists) {

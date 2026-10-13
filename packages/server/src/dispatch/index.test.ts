@@ -131,6 +131,7 @@ function createFakeBus(): { bus: EngineBus & HandoffBus; calls: { agentMessages:
     emitContextWindowStats: () => {},
     emitSessionHandoff: () => {},
     emitHandoffFailed: () => {},
+    emitSessionDeleted: () => {},
   }
   return { bus, calls }
 }

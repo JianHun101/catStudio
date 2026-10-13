@@ -154,8 +154,8 @@ export function listActiveSessions(): SessionRow[] {
  * 查找父会话的"真实交接"子会话（handoff 去重守卫）。
  *
  * 语义：仅当子会话有 ≥1 条消息时才算真实交接——空壳子会话
- * （0 条消息，前端切换失败产物）不挡二次交接，旧会话才能再次触发
- * performHandoff 并重建子会话。
+ * （0 条消息）不挡二次交接。二次交接**不重建**：`performHandoff` 先按年龄清理陈旧空壳，
+ * 再对窗内新壳走 `getEmptyHandoffChild` 复用早退（见 handoff/index.ts step2/2.5）。
  */
 export function getHandoffChild(parentSessionId: string): { id: string } | undefined {
   return db
@@ -168,19 +168,60 @@ export function getHandoffChild(parentSessionId: string): { id: string } | undef
 }
 
 /**
- * 删除父会话下所有空壳子会话（0 条消息，前端切换失败留下的孤儿）。
- * 空壳子会话无消息 → 无执行记录，不存在 FK 阻碍；session_read_state 有 CASCADE。
- * @returns 删除数
+ * 查找父会话下的**空壳**子会话（0 条消息）。
+ *
+ * 与 `getHandoffChild`（≥1 消息才算真实交接）互补：调用点在「按年龄清理空壳」**之后**
+ * ⇒ 幸存者必落在宽限期内，即「刚交接建出来、前端还没切过去」的那一个。
+ *
+ * 多个空壳时取 `created_at` 最新的一个（窗内正常只有一个；取最新是为了结果确定，
+ * 不依赖 SQLite 未定义的行序）。
  */
-export function deleteEmptyHandoffChildren(parentSessionId: string): number {
-  const result = db
+export function getEmptyHandoffChild(parentSessionId: string): { id: string } | undefined {
+  return db
     .prepare(
-      `DELETE FROM sessions
-       WHERE handoff_from = ?
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sessions.id)`
+      `SELECT s.id FROM sessions s
+       WHERE s.handoff_from = ?
+         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+       ORDER BY s.created_at DESC
+       LIMIT 1`
     )
-    .run(parentSessionId)
-  return result.changes
+    .get(parentSessionId) as { id: string } | undefined
+}
+
+/**
+ * 删除父会话下的**陈旧**空壳子会话（0 条消息，且创建时间早于宽限期）。
+ *
+ * 空壳子会话无消息 → 无执行记录，不存在 FK 阻碍；session_read_state 有 CASCADE。
+ *
+ * **年龄谓词是必须的**：刚交接建出的新壳同样 0 消息，无差别清理会把它当「前端切换
+ * 失败的孤儿」误杀（用户报的「交接后出现两个同名框、刷新后变一个」根因）。
+ *
+ * 时间口径：`sessions.created_at` 仍是秒级 `datetime('now')` 产物（迁 ISO 归票 8），
+ * 故比较必须用**同口径**的 `datetime('now', ?)`，禁止拿 JS ISO 串去比——ISO 首位 `T`
+ * 恒大于秒级串首位空格，同日比较会整片判反。
+ *
+ * @param olderThanSeconds - 宽限期（秒）；创建时间早于 `now - olderThanSeconds` 的才删
+ * @returns 被删会话 id 列表（调用方逐个广播 SESSION_DELETED，消除前端幽灵框）
+ */
+export function deleteEmptyHandoffChildren(
+  parentSessionId: string,
+  olderThanSeconds: number
+): string[] {
+  const ids = (
+    db
+      .prepare(
+        `SELECT s.id FROM sessions s
+         WHERE s.handoff_from = ?
+           AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+           AND s.created_at < datetime('now', ?)`
+      )
+      .all(parentSessionId, `-${olderThanSeconds} seconds`) as Array<{ id: string }>
+  ).map((r) => r.id)
+  if (ids.length === 0) return []
+
+  const placeholders = ids.map(() => '?').join(', ')
+  db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids)
+  return ids
 }
 
 // ─── 写入 ──────────────────────────────────────────────
