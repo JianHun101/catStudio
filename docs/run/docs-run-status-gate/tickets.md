@@ -91,12 +91,26 @@ floated_to: docs/plans/xxx.md # status ∈ {pending-float, floated} 时必填
 ### 票 G3 · 回填 status（G2 后存量全目录，诚实四档）
 
 - 对 G2 后仍存的目录逐目录回填 frontmatter（`active`/`pending-float`/`dropped` 如实填）。
-- **验收**：`ls -d docs/run/*/` 每目录 tickets.md 均有合法 status；`status ∈ {pending-float, floated}` 者 floated_to 无悬空。
+- **验收**：`ls -d docs/run/*/` 每目录**主票面文件**（定义见下 G4 的契约订正）均有合法 status；`status ∈ {pending-float, floated}` 者 floated_to 无悬空。
+
+> **⚠️ G4 契约面订正：取字段的判据面 = 「目录内主票面文件」，不得硬编 `tickets.md`（2026-10-13 · 段 3c 审查 P2-2）**
+>
+> **触发事实**：G3 验收原文写「每目录 **`tickets.md`** 均有合法 status」，D1① 同样写「给 `docs/run/<slug>/tickets.md` 加 frontmatter 状态位」。实测 17 个目录里 **5 个的主票面文件不叫 `tickets.md`**：`ticket.md` ×4（`hook-p3-followups` / `run-conclusions-float-up` / `memory-retrieval-improvement` / `summary-inject-outside-replace`）、`install.md` ×1（`taste-skill`）。⇒ **照字面实施的话，G4 落地当天这 5 个目录正好落进「新建目录无 status ⇒ fail-closed」，即 §二 开头自己警告的「全仓每一次推送都被拦」。**
+>
+> **订正（实施 G4 时按此，不按 D1① 字面）**：
+>
+> - **判据面 = 目录内主票面文件**，**不得硬编 `tickets.md`**。
+> - **解析规则（须确定性，否则同目录多名时判定不确定）**：`docs/run/<slug>/*.md` 中**头部带 `status:` frontmatter 的那一个**。段 3c 实测 **17/17 目录恰有且仅有 1 个**这样的文件（`tickets.md` 12 · `ticket.md` 4 · `install.md` 1）⇒ 该规则在现存量上无歧义，且**与文件名无关**（新目录起什么名都成立，不靠约定面自觉——本批自己就新造了 2 个 `ticket.md`，说明约定面单靠自觉会漂）。
+> - **同目录 0 个或 ≥2 个带 `status:` 的 `.md` ⇒ fail-closed 拦**（与 D1④「解析失败 / 缺字段 = 拦」同调）。
+> - G3 验收里那句 `tickets.md` 的字面，按同口径读作「主票面文件」。
+>
+> **同一断言的两个域外载体（本票边界外，登记备查，G4 落地同批对齐）**：① `CONTEXT.md`「文档位置约定」段仍写「落 `docs/run/<work-slug>/tickets.md`」——它是**约定面**不是闸，可保留，但须显式声明 **G4 比约定宽**（否则读手册的人会把异名目录当非法态）；② **G5 已落**（`e4ac0418`）的 `scripts/run-docs-stale.mjs` 有 `export const TICKETS_NAME = 'tickets.md'`——同一份单名硬编，缺 `tickets.md` 时该目录 status 显示 `-`。G5 是**可见性不是闸**（不拦，故无阻塞），但两处域不同源，随 G4 同批对齐。
 
 ### 票 G4 · 形态甲挂闸（`.husky/pre-push`）
 
 - **边界**：新增 `scripts/run-docs-gate.mjs`（判据实现 + 测试）+ `.husky/pre-push` 挂载一行。**不改**会话侧代码。
-- **契约**：D1 判据表四行逐字即契约；fail-closed（解析失败/缺字段 = 拦）；判据面 = 被推 sha 的 diff 面（`merge-base(dev, sha)..sha`）。
+- **契约**：D1 判据表四行逐字即契约（取字段的**判据面订正**见上）；fail-closed（解析失败/缺字段 = 拦）；判据面 = 被推 sha 的 diff 面（`merge-base(dev, sha)..sha`）。
+- **存量样本登记（2026-10-13 段 3c 后实测 · 事实登记，不动判据）**：`docs/run/*/` 17 个目录**全部 `status: active`** ⇒ 四档里除 `active` 外**树上零天然样本**。故**验收 1（新建无 status）、验收 2（`dropped` 未删）、验收 3（`floated_to` 悬空）三者只能靠夹具构造**，树上取不到反例；验收 4/5（反对照、不连坐存量）不受影响。这不影响四档成立——它们是**闸的触发值域**，不是现状分类；但「树上无天然样本」意味着 G4 的验收**全押在夹具上**，夹具若写歪没有第二条腿兜底，实施时须按验收 4/5 的反对照自证夹具真的打到了判据面。
 - **验收**（含反对照）：
   1. 夹具分支新建无 status 的 run 目录 ⇒ push 被拦（报错含目录名）；
   2. `status: dropped` 目录未删 ⇒ 拦；删除后 ⇒ 放行；
@@ -115,6 +129,15 @@ floated_to: docs/plans/xxx.md # status ∈ {pending-float, floated} 时必填
 
 - P1-C（R9 修集 + 重跑基线）按用户 2026-09-19 裁决「3 等硬闸票定了再动」——**本票定稿（Gate PASS）即 P1-C 开工前提**，不依赖 G1–G5 落地。
 - 生命周期警告已兑现：`run-inventory.md` §五 全文已抄入本票，`retired-docs-tombstone/` 收口清理不丢判据。
+
+## 四、登记项（父票遗留的邻接面，**不属 G4 判据**）
+
+**收口链的「反向分支」缺失**（2026-10-13 登记 · 承父票 `run-conclusions-float-up` 的「段 3 · 流程补丁」）
+
+- **父票原文**：「流程补丁：AGENTS.md Pointers 段收口链补「上浮 / **判不上浮 + 理由**」显式步骤；同批扫复述面（店长 prompt 收口段、相关 skills 正文）并回报清单。」
+- **实测（2026-10-13）**：`CONTEXT.md` 收口链段**前半已落**（「先把结论按落点分流上浮（plans/lessons/adr/手册面四者，点名）」——段 3b 写的），**反向分支零承载**：`判不上浮` / `不上浮` 在白名单三目录 + `AGENTS.md` + `CONTEXT.md` 里**零命中**（全仓唯一命中在父票自己的 `inventory.md`，随该目录收口即清）。
+- **为什么登记在本票**：父票随本活收口即清 ⇒ 这条现在**唯一的载体**是父票里那一行；**登记在此防再丢一次**。语义同源——本票的题目就是「『上浮 or 判弃』钉成收口链机械闸」。
+- **它改的是什么**：收口链**语义本身**（`CONTEXT.md` 手册面 + 店长 prompt 收口段 + 相关 skills 正文），**不是 G4 判据**，故不写进上面 G4 的边界。`CONTEXT.md` 与 prompt 常量（`seed-data.ts`）**都不在免审白名单**（白名单只有 `docs/run/**`）⇒ 落地须走审查链。**本票只登记，不动手。**
 
 ## Gate Report
 
