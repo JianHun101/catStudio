@@ -43,3 +43,17 @@
 
 - 走 worktree；`catstudy [0443c12c-a0de-4123-8bb6-e42e9bbbc1d1] fix(web): …`（40 位真 uuid，即本票触发消息）。
 - 提交后按 `request-review` 发起审查；收口归店长。
+
+---
+
+## 收口留痕（2026-10-13，店长）
+
+- **审查**：吐槽猫 R1 ✅可合并（独立复证：三处真空性变异逐个实测精确判红、全量 165 files/3776 + lint 复跑全绿、diff = 2 文件 265/1 纯插入）。
+- **收编**：closeout 隔离分支 carry 已审 sha `5f140900` 字面量直推（门禁放行）→ PR #211 MERGED → dev `2b7fe03a`；隔离分支本地+远端已清理（ls-remote 复核 0）；三方对账 dev = origin/dev = `.push-gate`。
+- **AC5 真机复验（店长 Playwright/msedge 对活实例 :5173）PASS**：长会话（1178 气泡、scrollHeight ≈ 9.7 万 px）切进落定 dist=0；贴底注入 1500px 增长 → dist=0（跟随）；滚到顶后注入 2000px → scrollTop 0→0 不动（让位）；滚回底再注入 → dist=0（复位）。如实标注：让位段判别力弱（增长在底部、scrollTop 在 0 时本就不动），承重判别面是跟随段 + ds猫 真机 no-op 猴补反对照（审查者已采信）。
+- **票面勘误**：改动面 5 的「模板 v-if 分支实测」为未测假事实——审查者实读模板三层直嵌、中间无 v-if（v-if 全在 inner 子节点）。实施防御性覆盖保留无误，但「实测」字样不实，在此订正。
+- **P3 留痕 ×4（不单开）**：
+  1. OQ1 残留假设：`.chat-messages-wrapper` 未设 `overflow-anchor`，浏览器默认 scroll anchoring 调 scrollTop 会派发 scroll 事件 ⇒ 可把 `isAtBottom` 翻假致跟随停摆（新注释「内容增长不产生 scroll 事件」的反例形态；该假设承自折叠块已上线范式，非本单新引入）。复验判据：`checkScrollPosition` 入口记 `isAtBottom` 翻转日志，若再现「悬半截」且伴随无用户操作的 scroll 事件 → 另立一单。
+  2. `stickMessagesToBottom` 与 `scrollToBottom` 重复同一句 scrollTo（前者少指示器复位，当前不可达）——漂移点，下次触碰该区域时收敛。
+  3. 新增否定锚 `not.toContain('observe(chatContainer')` 跑在 `?raw` 注释+代码混合面，与假红只差一个 `observe(`——`criterion-blind-spot-looks-like-truth` §同族② 同族，失效方向是响的假红，留观。
+  4. ds猫 `replace_all` 误伤 9 处无关 unmount（已自报+完整复原）——经验「批量替换须限定上下文 + 核 diff 删除面」在此留痕；店长裁：与既有「提交前核 diff」惯例重叠，不另上浮 lessons。
