@@ -1,3 +1,7 @@
+---
+status: active
+---
+
 # Tickets: git 向钩子注入的 env 劫持测试内的 git 操作 —— 污染真实仓库 config
 
 用户 2026-09-13 裁「②立」。来源：`0d45e03`（T1 commit-msg 门禁）实施期实证咬人（店长收口时复原过一次被污染的主仓 config）；`docs/run/commit-uuid-gate/tickets.md` 的 OQ-D 判该立票。

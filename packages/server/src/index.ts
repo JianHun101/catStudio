@@ -88,7 +88,7 @@ function resolveFlywheelTarget(): { root: string; script: string } | null {
  * 拉进能跑 TS 的运行时。
  */
 function spawnFlywheelScan(): void {
-  // 探针模式跳过（票 `docs/run/probe-no-resume/` 契约 ②「除嵌入 sidecar 外不 spawn」）：
+  // 探针模式跳过（票 `probe-no-resume` 契约 ②「除嵌入 sidecar 外不 spawn」）：
   // 它是**启动期唯一的非嵌入 spawn**，且形态与票面点名的危害同款——spawn 子进程 +
   // `cwd` 落在本工作树 + 写库（chunks 索引），只是不落 CLI 执行那一类。探针实例上
   // 索引无人消费（执行面已闸），留着它只换来「启动多拉一个 tsx + 一次嵌入」。
@@ -166,7 +166,7 @@ async function main(): Promise<void> {
   // 1.5 启动时修复：将上一次异常退出遗留的 running 状态标记为 failed
   //     （参照 clowder-ai StartupReconciler）
   //
-  //     探针模式跳过（票 `docs/run/probe-no-resume/`）：这一步是恢复链的**前置**——
+  //     探针模式跳过（票 `probe-no-resume`）：这一步是恢复链的**前置**——
   //     它把 `running` 改写成 `failed/server_restart`，而那条记录正是
   //     `getInterruptedExecutions()` 的捞取面。恢复面整体已闸（见 `probe-mode.ts`），
   //     此处再闸一次是为了让探针实例**不动副本库这一行**：只闸恢复、不闸改写的话，

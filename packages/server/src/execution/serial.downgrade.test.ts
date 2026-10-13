@@ -1,6 +1,6 @@
 /**
  * serial.ts × 降级路径（T-1 · Phase 1 测试先行 → Phase 2 生产改动）。
- * 票面：`docs/run/multi-cat-isolation/tickets.md`。
+ * 票面：`multi-cat-isolation`（隔离模型见 `docs/adr/0015-per-cat-worktree-isolation.md`）。
  *
  * **被测面**：`executeAgentsSerial` 顶层收尾（`depth === 0`）的两处「worktree 不可用」
  * 处置——

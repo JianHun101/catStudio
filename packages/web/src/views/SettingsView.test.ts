@@ -592,7 +592,7 @@ describe('SettingsView 系统配置区布局（三卡统一间距 + 每卡统一
 })
 
 describe('SettingsView T3 设置页对齐改版（票面 §二 规格）', () => {
-  // 票面：docs/run/ui-redesign/T3-settings-alignment.md
+  // 票面：ui-redesign T3 设置页对齐
   // 用户原话病灶两条：「有些框都没对齐」「莫名的换行文字」——下面每条都钉住
   // 一个防复发点，摘掉任一条，对应症状就会回来。
 

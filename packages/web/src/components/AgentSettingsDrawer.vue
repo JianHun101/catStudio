@@ -5,7 +5,7 @@ import { useChatStore } from '@/stores/chat'
 
 /**
  * 猫咪设置抽屉（R4 屏③）——从右边缘滑出 360px，改完立刻在右侧面板看到效果
- * （形态参考 docs/run/eval-system/prototypes/R3-right-panel-v2.html 屏③，照形态不照代码）。
+ * （形态参考 eval-system 原型 R3 右栏屏③，照形态不照代码）。
  *
  * ⚠️ 字段与分组**逐项对齐 AgentEditModal.vue**（同一批配置项，未新造字段）。
  *

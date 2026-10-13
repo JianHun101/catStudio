@@ -1,7 +1,7 @@
 /**
  * R14a 角标引用遵循度离线探针（**不碰生产链**）
  *
- * 票面：docs/run/eval-system/R14a-citation-marker-probe.md
+ * 票面：eval-system R14a 引文标记探针
  *
  * 要回答的唯一问题：**给定指示语，猫在回复里会不会标 `[n]`？标得对不对？**
  *

@@ -13,7 +13,7 @@
  * no-key 守卫。输出经注入 bus（EngineBus & HandoffBus），状态经注入 state。
  * 日志通道沿用 'socketio'（零可观测行为变化）。
  *
- * **探针闸**（票 `docs/run/probe-no-resume/`，判据见 `probe-mode.ts`）：两个执行
+ * **探针闸**（票 `probe-no-resume`，判据见 `probe-mode.ts`）：两个执行
  * 入口（`executeAgentsSerial` / `execute`）各自在函数首部拒绝执行。这是仓内
  * 「零 spawn」的承重面——所有 CLI 与常驻子进程的 spawn 都在适配器内、只经这两个
  * 入口到达，故不必逐 adapter 复述判据。
@@ -1313,7 +1313,7 @@ async function executeAgentsSerialImpl(
   traceId: string,
   depth: number = 0
 ): Promise<boolean> {
-  // 探针模式：整轮拒绝（票 `docs/run/probe-no-resume/` 契约 ②「不 spawn CLI 执行」）。
+  // 探针模式：整轮拒绝（票 `probe-no-resume` 契约 ②「不 spawn CLI 执行」）。
   //
   // **闸在这里而不是调用点**：轮级副作用不止 CLI 一项——本函数尾部的 depth=0 收尾
   // 会 `gitCommit` 逐树自动提交 + `git checkout -- .` 清脏文件。只闸 `execute()` 的话，
@@ -1908,7 +1908,7 @@ export function createExecutionEngine(
 
   /** C1 v3 顶层单入口：决策(直跑/入队) → 执行 → finally{收口+排空} */
   async function execute(cmd: DispatchCommand): Promise<boolean> {
-    // 探针模式：拒绝（票 `docs/run/probe-no-resume/`）。本入口是单条命令的公开入口
+    // 探针模式：拒绝（票 `probe-no-resume`）。本入口是单条命令的公开入口
     // （`dispatch/index.ts` 的兼容 shim 与槽位排空都走它），**不是**轮级入口的重复闸：
     // 轮级闸拦的是 `executeAgentsSerial`，直调 `engine.execute` 的路径只经这里。
     // 闸在**决策段之前**——置后会让探针实例仍把消息标 busy/入队、状态桥照常广播，

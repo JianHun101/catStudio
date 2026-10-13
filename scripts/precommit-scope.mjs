@@ -1,7 +1,7 @@
 /**
  * pre-commit 测试门禁 —— 按暂存区改动面选 vitest project（三档：跳过 / 单包 / 全量）。
  *
- * 由来（票 `docs/run/precommit-scope/tickets.md`）：`.husky/pre-commit` 原先第三行直接
+ * 由来（票 `precommit-scope`；三档判据见 `docs/plans/precommit-gate-scoping.md`）：`.husky/pre-commit` 原先第三行直接
  * `pnpm test`（全量 4 project）。而 T-2 Phase I 未接线前，会话内多猫**共用一个 worktree**
  * （`llm/git-utils.ts` `ensureSessionWorktree` 按 `sessionId` 取路径），任一只猫提交都要跑
  * 全量 ⇒ 并行的结局是互相拖死（R3 实证：某猫连试 8 次全废）。收窄判据 = **改动面**：改了哪个

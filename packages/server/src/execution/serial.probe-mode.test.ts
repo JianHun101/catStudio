@@ -1,5 +1,5 @@
 /**
- * serial.ts 探针模式闸测试（票 `docs/run/probe-no-resume/`，判据见 `probe-mode.ts`）。
+ * serial.ts 探针模式闸测试（票 `probe-no-resume`，判据见 `probe-mode.ts`）。
  *
  * 靶心 = 探针实例**零 CLI spawn**。判据选三层同面读数，任何一层单独绿都不够：
  * ①适配器没被调（`chatStream` 零调用）②执行审计没落（`execution_logs` 零行）

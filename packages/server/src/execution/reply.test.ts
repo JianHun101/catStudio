@@ -455,7 +455,7 @@ describe('execution/reply — R1 检索流水埋点', () => {
 // 病灶：`bus.emitMessage`（NEW_MESSAGE 广播）跑在「回复 ↔ 检索流水关联环」落库之前
 // ——前端收到广播立刻批量拉 `/memory-refs`，读口第一环 JOIN（`getInjectedRefsByMessageIds`
 // 的 `execution_logs.message_id`）此刻仍是 NULL ⇒ 最新一条回复渲染「未检索」，且前端
-// 不再重查 ⇒ 假态一直挂到刷新（约 100ms 窗口，`docs/run/m1-refs-link-timing/tickets.md`）。
+// 不再重查 ⇒ 假态一直挂到刷新（约 100ms 窗口，票 `m1-refs-link-timing`）。
 //
 // 两段证据，缺一不可：
 //  · **行为**（组装式：真 `runAgentReply` + 真 DB + 捕获 bus）：在 NEW_MESSAGE 那一刻
