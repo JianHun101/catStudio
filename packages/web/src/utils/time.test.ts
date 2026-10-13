@@ -102,22 +102,27 @@ describe('两个格式化函数：形状不变、值按时区换算', () => {
 })
 
 describe('静态源：解析必须显式当 UTC（守卫随实现搬家的落点）', () => {
-  it('串必须经 normalizeUtc 归一后才进 Date 构造（没有裸 new Date(串变量)）', () => {
-    expect(timeSource).toContain("replace(' ', 'T') + 'Z'")
-    expect(timeSource).toContain('new Date(normalizeUtc(raw))')
+  it('串分支必须委托唯一解析入口（没有裸 new Date(串变量)）', () => {
+    // 断言一律跑在**剥注释后**的源码上：`?raw` 会把 JSDoc 一并喂进来——注释里的散文示例
+    // （如 `time.ts` 的「数字走 `new Date(n)`」）会混进下面的构造点清单，改一句文档就假红；
+    // 反过来，注释里写一句 `return parseUtc(raw)` 又能让正面锚假绿。剥注释让三类断言只反映**代码**。
+    const code = timeSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+    expect(code).toContain("replace(' ', 'T') + 'Z'")
+    expect(code).toContain('new Date(normalizeUtc(raw))')
+    // 正面锚住**串分支**：`toLocalDate` 的串路径必须委托 `parseUtc`（全文件唯一命中）。
+    // 把它换成裸构造——本守卫要防的那件事——本行即红，且下面清单同时多出一个 `raw`。
+    // （行为用例「吃 SQLite 无后缀串」也能抓，但它只在非 UTC 机器上有分辨力：输入串由本机
+    //   `toISOString()` 派生，UTC 机器上串本地读数与 UTC 读数重合 ⇒ 该回归行为上不可见。）
+    expect(code).toContain('return parseUtc(raw)')
     // 裸构造的形态是 `new Date(<标识符>)`——数字分支走 `new Date(raw)` 是**合法**的
-    // （数字无时区语义），故这里只钉串路径：`normalizeUtc` 的产物必须出现在构造入参位置。
-    // 不写 `not.toContain('new Date(raw)')`：那会被注释里的示例文本误伤（本文件初版踩过）。
-    // 全文件的裸标识符构造点只有三处，逐一说明为何合法：
+    // （数字无时区语义），故清单只钉「有哪些」，合法性逐条说明：
     //   raw  —— `toLocalDate` 的**数字**分支（数字无时区语义，不该走串归一）
-    //   n    —— 同上，`fmtMsgTime` 数字入参用例外的同义写法，同属数字面
     //   now  —— `dayBucket` 里 `new Date(now)` 的全日期拷贝（不是解析，是复制）
-    // 字符串解析路径**只有**一处，且必须带 `normalizeUtc`——新增裸构造会打红此断言。
-    const dateCtors = [...timeSource.matchAll(/new Date\(([^)]*)\)/g)]
+    const dateCtors = [...code.matchAll(/new Date\(([^)]*)\)/g)]
       .map((m) => m[1].trim())
       .filter((arg) => /^\w+$/.test(arg))
       .sort()
-    expect(dateCtors).toEqual(['n', 'now', 'raw'])
+    expect(dateCtors).toEqual(['now', 'raw'])
   })
 })
 
