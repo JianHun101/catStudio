@@ -307,11 +307,18 @@ describe('handoff', () => {
     })
   })
 
-  // ─── performHandoff — 空壳清理 + 去重守卫（方案 C） ──────────
-  describe('performHandoff — 去重守卫修复', () => {
+  // ─── performHandoff — 空壳按年龄清理 + 窗内复用（双框修复票） ──────────
+  describe('performHandoff — 空壳年龄窗 + 窗内复用', () => {
     let db: Database.Database
+    /** 捕获 stdout 的 info 行（`log.warn`/`info` 走 process.stdout.write）——AC1 要断 dedup 行 */
+    let captured: string[] = []
+    let stdoutSpy: ReturnType<typeof vi.spyOn>
     // 假 HandoffBus（第 2 刀：performHandoff 从 io 收窄为 bus）
-    const mockBus = { emitSessionHandoff: vi.fn(), emitHandoffFailed: vi.fn() } as any
+    const mockBus = {
+      emitSessionHandoff: vi.fn(),
+      emitHandoffFailed: vi.fn(),
+      emitSessionDeleted: vi.fn(),
+    } as any
 
     const insertSession = (
       id: string,
@@ -323,11 +330,39 @@ describe('handoff', () => {
       ).run(id, opts.handoffFrom ?? null, opts.runningSummary ?? null)
     }
 
+    /**
+     * 插入**钉住年龄**的会话——年龄窗用例必须钉：不钉则插入与清理同秒，
+     * 窗内/窗外两分支落到同一侧，断言恒真（假绿门）。
+     * 口径与列一致：秒级 `datetime('now')` 产物。
+     */
+    const insertSessionAged = (id: string, ageSeconds: number, handoffFrom?: string) => {
+      db.prepare(
+        `INSERT INTO sessions (id, title, handoff_from, created_at)
+         VALUES (?, 'test', ?, datetime('now', ?))`
+      ).run(id, handoffFrom ?? null, `-${ageSeconds} seconds`)
+    }
+
+    const childrenOf = (parentId: string) =>
+      db.prepare('SELECT id FROM sessions WHERE handoff_from = ?').all(parentId) as Array<{
+        id: string
+      }>
+
     const insertMessage = (id: string, sessionId: string) => {
       db.prepare(
         `INSERT INTO messages (id, session_id, role, content, mentions)
          VALUES (?, ?, 'user', 'hello', '[]')`
       ).run(id, sessionId)
+    }
+
+    /** 在指定级别下跑体，跑完复位（vitest 配置把 LOG_LEVEL 设成 error，info 行默认被丢） */
+    const withLogLevel = async <T>(level: 'info', fn: () => Promise<T>): Promise<T> => {
+      const prev = getLogLevel()
+      setLogLevel(level)
+      try {
+        return await fn()
+      } finally {
+        setLogLevel(prev)
+      }
     }
 
     beforeEach(() => {
@@ -336,50 +371,95 @@ describe('handoff', () => {
       initRepository(db)
       process.env.SUMMARY_API_KEY = 'test-key'
       process.env.HANDOFF_ENABLED = 'true'
+      captured = []
+      stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: any) => {
+        captured.push(String(chunk))
+        return true
+      })
     })
 
     afterEach(() => {
+      stdoutSpy.mockRestore()
       resetDb()
       delete process.env.SUMMARY_API_KEY
       vi.clearAllMocks()
     })
 
-    it('AC1: 只有空壳子会话 → 再次交接成功，空壳先删，sessions 只剩 1 个子会话', async () => {
-      insertSession('parent-a')
-      insertSession('child-shell', { handoffFrom: 'parent-a' }) // 0 条消息空壳
+    it('AC1: 窗内 0 消息空壳 → 复用早退：不删不建不 emit、不生成摘要、返回 null、日志留 dedup 行', async () => {
+      insertSession('parent-fresh')
+      insertSessionAged('child-fresh', 30, 'parent-fresh') // 窗内空壳 = 刚交接出的新会话
 
-      const result = await performHandoff('parent-a', mockBus)
+      const result = await withLogLevel('info', () => performHandoff('parent-fresh', mockBus))
+
+      expect(result).toBeNull()
+      // 子会话行仍在，且没有多出第二条
+      expect(childrenOf('parent-fresh')).toEqual([{ id: 'child-fresh' }])
+      expect(mockBus.emitSessionHandoff).not.toHaveBeenCalled()
+      expect(mockBus.emitSessionDeleted).not.toHaveBeenCalled()
+      // 摘要 LLM 调用被省掉（重复交接白花钱的那一笔）
+      expect(chatComplete).not.toHaveBeenCalled()
+      expect(captured.join('')).toContain('handoff dedup: reusing fresh empty child')
+    })
+
+    it('AC2: 窗外空壳 → 删除 + emitSessionDeleted 一次 + 随后全流程重建', async () => {
+      insertSession('parent-stale')
+      insertSessionAged('child-stale', 3600, 'parent-stale') // 窗外空壳 = 真孤儿
+
+      const result = await performHandoff('parent-stale', mockBus)
 
       expect(result).not.toBeNull()
-      expect(result!.oldSessionId).toBe('parent-a')
-      // 空壳被删 + 新子会话创建 → 只剩 1 个
-      const children = db
-        .prepare('SELECT id FROM sessions WHERE handoff_from = ?')
-        .all('parent-a') as Array<{ id: string }>
+      expect(result!.oldSessionId).toBe('parent-stale')
+      expect(mockBus.emitSessionDeleted).toHaveBeenCalledTimes(1)
+      expect(mockBus.emitSessionDeleted).toHaveBeenCalledWith('child-stale')
+      // 旧壳被删 + 新会话创建 → 只剩重建出的那一个
+      const children = childrenOf('parent-stale')
       expect(children).toHaveLength(1)
       expect(children[0].id).toBe(result!.newSessionId)
-      // 前端收到切换通知
       expect(mockBus.emitSessionHandoff).toHaveBeenCalledWith({
-        oldSessionId: 'parent-a',
+        oldSessionId: 'parent-stale',
         newSessionId: result!.newSessionId,
         summary: '测试总结内容',
       })
     })
 
-    it('AC2: 已有真实子会话（≥1 条消息）→ 去重保护，返回 null，不新建', async () => {
-      insertSession('parent-b')
-      insertSession('child-real', { handoffFrom: 'parent-b' })
-      insertMessage('m-1', 'child-real')
+    it('AC3: 子会话 ≥1 消息 → 两个 repo 函数均不碰它（窗外也不删），走「已交接」早退', async () => {
+      insertSession('parent-real')
+      insertSessionAged('child-real', 3600, 'parent-real') // 年龄在窗外，但有消息 ⇒ 不是空壳
+      insertMessage('m-real', 'child-real')
 
-      const result = await performHandoff('parent-b', mockBus)
+      const result = await performHandoff('parent-real', mockBus)
 
       expect(result).toBeNull()
-      const children = db
-        .prepare('SELECT id FROM sessions WHERE handoff_from = ?')
-        .all('parent-b') as Array<{ id: string }>
-      expect(children).toHaveLength(1)
-      expect(children[0].id).toBe('child-real')
+      expect(childrenOf('parent-real')).toEqual([{ id: 'child-real' }])
+      expect(mockBus.emitSessionDeleted).not.toHaveBeenCalled()
       expect(mockBus.emitSessionHandoff).not.toHaveBeenCalled()
+      expect(chatComplete).not.toHaveBeenCalled()
+    })
+
+    it('窗内空壳 + 同父真实子会话并存 → 真实交接优先，空壳不动、零 emit', async () => {
+      insertSession('parent-mixed')
+      insertSessionAged('child-real', 3600, 'parent-mixed')
+      insertMessage('m-mixed', 'child-real')
+      insertSessionAged('child-fresh', 5, 'parent-mixed')
+
+      const result = await performHandoff('parent-mixed', mockBus)
+
+      expect(result).toBeNull()
+      expect(childrenOf('parent-mixed')).toHaveLength(2)
+      expect(mockBus.emitSessionDeleted).not.toHaveBeenCalled()
+      expect(mockBus.emitSessionHandoff).not.toHaveBeenCalled()
+    })
+
+    it('重复交接：连续两次都不产生第二条子会话（同一父会话只留一条）', async () => {
+      insertSession('parent-twice')
+      insertSessionAged('child-stale', 3600, 'parent-twice')
+
+      const first = await performHandoff('parent-twice', mockBus)
+      const second = await performHandoff('parent-twice', mockBus)
+
+      expect(first).not.toBeNull()
+      expect(second).toBeNull() // 第二次：新壳在窗内 → 复用早退
+      expect(childrenOf('parent-twice')).toEqual([{ id: first!.newSessionId }])
     })
   })
 
@@ -388,7 +468,11 @@ describe('handoff', () => {
     let db: Database.Database
     // 假 HandoffBus（第 2 刀：房间路由归 adapter，此处只断言 payload）
     const handoffFailed = vi.fn()
-    const mockBus = { emitSessionHandoff: vi.fn(), emitHandoffFailed: handoffFailed } as any
+    const mockBus = {
+      emitSessionHandoff: vi.fn(),
+      emitHandoffFailed: handoffFailed,
+      emitSessionDeleted: vi.fn(),
+    } as any
 
     const insertSession = (id: string) => {
       db.prepare(

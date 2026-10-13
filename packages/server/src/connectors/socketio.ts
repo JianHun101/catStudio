@@ -141,6 +141,9 @@ function createSocketBus(io: SocketServer): EngineBus & HandoffBus {
       room(stats.sessionId).emit(Events.CONTEXT_WINDOW_STATS, stats),
     emitSessionHandoff: (e) => room(e.oldSessionId).emit(Events.SESSION_HANDOFF, e),
     emitHandoffFailed: (p) => room(p.sessionId).emit(Events.HANDOFF_FAILED, p),
+    // 全局广播（非房间）：与 routes/sessions.ts 的删除端点同语义——会话列表是所有客户端
+    // 的全局 UI 态，漏播会让被清理的空壳在前端留成幽灵框
+    emitSessionDeleted: (sessionId) => io.emit(Events.SESSION_DELETED, { sessionId }),
   }
 }
 

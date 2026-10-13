@@ -494,7 +494,7 @@ describe('execution/reply — M1 广播前连线', () => {
     llmApiKey: 'sk-test',
   } as any
 
-  /** 捕获型 bus（EngineBus & HandoffBus 八个方法齐全）；`emitMessage` 回调 = 被测时点 */
+  /** 捕获型 bus（EngineBus & HandoffBus 九个方法齐全）；`emitMessage` 回调 = 被测时点 */
   function makeBus(onMessage?: (msg: any) => void) {
     return {
       emitMessage: vi.fn((msg: any) => onMessage?.(msg)),
@@ -505,6 +505,7 @@ describe('execution/reply — M1 广播前连线', () => {
       emitContextWindowStats: vi.fn(),
       emitSessionHandoff: vi.fn(),
       emitHandoffFailed: vi.fn(),
+      emitSessionDeleted: vi.fn(),
     } as any
   }
 
@@ -708,6 +709,7 @@ describe('execution/reply — T2 执行追踪详情', () => {
       emitContextWindowStats: vi.fn(),
       emitSessionHandoff: vi.fn(),
       emitHandoffFailed: vi.fn(),
+      emitSessionDeleted: vi.fn(),
     } as any
   }
 

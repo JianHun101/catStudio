@@ -32,6 +32,8 @@ const mockGetContextConfig = vi.fn()
 const mockSaveContextConfig = vi.fn()
 const mockGetSessionExecutions = vi.fn().mockResolvedValue({ executions: [] })
 const mockRollbackSession = vi.fn()
+/** SESSION_HANDOFF handler 拉新会话详情用（双框幂等用例） */
+const mockGetSession = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -48,6 +50,7 @@ vi.mock('@/composables/useApi', () => ({
     saveContextConfig: mockSaveContextConfig,
     getSessionExecutions: mockGetSessionExecutions,
     rollbackSession: mockRollbackSession,
+    getSession: mockGetSession,
   },
 }))
 
@@ -1351,6 +1354,59 @@ describe('chatStore', () => {
       handler!({ sessionId: 's1' })
       expect(store.sessions).toHaveLength(1)
       expect(store.sessions[0].id).toBe('s2')
+    })
+
+    // ─── 双框：SESSION_HANDOFF 幂等（同一父会话只留最新一条）──────────
+    /** handler 内的 api.getSession 是异步链——等一拍让 .then 落表 */
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+    const handoffHandler = () =>
+      mockOn.mock.calls.find((call) => call[0] === Events.SESSION_HANDOFF)?.[1] as
+        ((data: any) => void) | undefined
+
+    it('SESSION_HANDOFF 剔除同一父会话的陈旧交接条目（重复交接不再并排两个同名框）', async () => {
+      store.sessions = [
+        { ...mockSession, id: 'child-old', title: '测试会话（1）', handoffFrom: 'old-1' },
+        { ...mockSession, id: 'old-1', title: '测试会话' },
+      ]
+      store.activeSessionId = 'old-1'
+      mockGetSession.mockResolvedValue({
+        ...mockSession,
+        id: 'child-new',
+        title: '测试会话（1）',
+        handoffFrom: 'old-1',
+      })
+
+      handoffHandler()!({
+        oldSessionId: 'old-1',
+        newSessionId: 'child-new',
+        summary: '摘要',
+      })
+      await flush()
+
+      expect(store.sessions.map((s) => s.id)).toEqual(['child-new', 'old-1'])
+    })
+
+    it('真空性反对照：父会话不匹配的条目不被误剔（探针能区分新旧，非恒真门）', async () => {
+      store.sessions = [
+        { ...mockSession, id: 'other-child', title: '别的会话（1）', handoffFrom: 'other-parent' },
+        { ...mockSession, id: 'old-1', title: '测试会话' },
+      ]
+      store.activeSessionId = 'old-1'
+      mockGetSession.mockResolvedValue({
+        ...mockSession,
+        id: 'child-new',
+        title: '测试会话（1）',
+        handoffFrom: 'old-1',
+      })
+
+      handoffHandler()!({
+        oldSessionId: 'old-1',
+        newSessionId: 'child-new',
+        summary: '摘要',
+      })
+      await flush()
+
+      expect(store.sessions.map((s) => s.id)).toEqual(['child-new', 'other-child', 'old-1'])
     })
 
     // ─── T1 同会话回退 ─────────────────────────────

@@ -168,6 +168,7 @@ interface BusCalls {
   contextStats: ContextWindowStats[]
   handoffs: HandoffEvent[]
   handoffFailed: HandoffFailedPayload[]
+  sessionDeleted: string[]
 }
 
 /** 假 bus 形态 a：类型化方法收集调用（引擎物理上发不出未类型化事件） */
@@ -181,6 +182,7 @@ function createFakeBus(): { bus: EngineBus & HandoffBus; calls: BusCalls } {
     contextStats: [],
     handoffs: [],
     handoffFailed: [],
+    sessionDeleted: [],
   }
   const bus: EngineBus & HandoffBus = {
     emitMessage: (m) => calls.agentMessages.push(m),
@@ -191,6 +193,7 @@ function createFakeBus(): { bus: EngineBus & HandoffBus; calls: BusCalls } {
     emitContextWindowStats: (s) => calls.contextStats.push(s),
     emitSessionHandoff: (e) => calls.handoffs.push(e),
     emitHandoffFailed: (p) => calls.handoffFailed.push(p),
+    emitSessionDeleted: (id) => calls.sessionDeleted.push(id),
   }
   return { bus, calls }
 }
