@@ -66,3 +66,13 @@
   - AC5 挂载级：ChatPanel 挂混合日期消息，DOM 中旧消息时间戳含日期、今天消息仅 `HH:mm`。
   - AC6 `pnpm test:web` + `node scripts/lint.js` 全绿；`git diff --stat` 仅 `packages/web`。
 - **提交**：走 worktree（基点对齐 dev 最新），`catstudy [a3c144ea-999a-4b41-9d8f-6d5e980d4d5a] feat(web): ...`，提交后按 `request-review` 发起审查，收口归店长。
+
+## 收口（2026-10-13）
+
+- **票① ✅ 已收口**：PR #209 MERGED → dev `08f90eb5`。对象面 `c79e197..8e1eb38b`（3 笔：`2be78816` 实现 + `5773c93`/`8e1eb38b` 守卫返工）。审查链：吐槽猫 R1 ⚠️（静态守卫注释字面量假红/假绿两方向缺口）→ ds猫 返工（判据面 `codeOnly` 剥注释 + 正面锚）→ R2 ✅（两方向变异审查者独立复现闭合，全量 3767 测试 + lint 独立复跑绿）。
+- **carrier**：closeout 隔离分支 carry 已审 sha `8e1eb38b` 字面量直推，merge commit 由 GitHub 侧生成；隔离分支本地+远端已清理。
+- **重启**：无需（纯 `packages/web`，Vite HMR 覆盖）。
+- **观察项（P3，均不另开单）**：
+  1. `codeOnly` 残口：`time.ts` 日后新增含 `//` 的字符串字面量（URL 一类）时，该行后半截代码会被静默剥掉 ⇒ 反向假绿。已同步写进 lessons 卡。
+  2. 残留逃逸类：`new Date(<非简单标识符>)`（如 `new Date(s.trim())` / `new Date(props.createdAt)`）同时绕过守卫的清单与锚（`/^\w+$/` filter 所致）。**店长裁：留痕不单开**——旧版同漏、非本票回归，修法（断未过滤实参多重集）让断言显著变丑，收益不抵。
+- **lessons 卡订正**：`docs/lessons/criterion-blind-spot-looks-like-truth.md` §同族② 补第 3 次复发 + `codeOnly` 结构性解法（该卡在 prompt 注入白名单，审查者点名收口必落）——lessons 不在免审面，单独走审查链（详见该笔提交）。
