@@ -136,6 +136,7 @@ function createFakeBus(): EngineBus & HandoffBus {
     emitContextWindowStats: () => {},
     emitSessionHandoff: () => {},
     emitHandoffFailed: () => {},
+    emitSessionDeleted: () => {},
   }
 }
 
