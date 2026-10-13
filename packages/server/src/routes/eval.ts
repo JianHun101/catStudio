@@ -274,7 +274,7 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
    * 回答「哪条链耗时最长 / 卡在哪一跳」。
    *
    * 取数归 repo、变换归 `eval/chain-query.ts` 纯函数，本路由只做「取数 → 调纯函数 → 返回」。
-   * 字段级契约见 `docs/run/eval-system/P1-a-backend-chain-query.md`（P1-B 前端按此消费）。
+   * 字段级契约见 `docs/plans/eval-system.md`（P1-B 前端按此消费）。
    */
   app.get('/api/eval/chains', async (req, reply) => {
     const { limit: rawLimit, windowDays: rawWindow } = req.query as {
@@ -368,7 +368,7 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ ok: true, traces })
   })
 
-  // ─── T2 执行追踪查询页（票 docs/run/ui-redesign/T2-trace-page.md）─────────────
+  // ─── T2 执行追踪查询页（票 ui-redesign T2）─────────────
   //
   // 五个口分成**两种取数时机**，这是刻意的：
   // · 列表 + `execution-detail` 是「行一展开就要」的（决策明细与节清单都很小），随展开一次拉全；

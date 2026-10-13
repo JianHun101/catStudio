@@ -64,6 +64,12 @@ floated_to: docs/plans/xxx.md # status ∈ {pending-float, floated} 时必填
 
 **硬闸不能先于上浮落地**：形态甲对「无 status」fail-closed ⇒ 回填（G3）之前挂闸，全仓每一次推送都被拦。故 G1/G2/G3 是 G4 的硬前置。
 
+> **G2/G3 的承接登记（2026-10-13 · 段 2 卡点 1 裁决 → 段 3c 执行）**
+>
+> 本票的 **G2（待上浮批）** 与 **G3（存量回填 status）** 已由 `docs/run/run-conclusions-float-up/` 承接并**执行完毕**——那活用全量新鲜盘点取代了 G2 基于 09-19 基线的 10 目录清单，并在段 3c 完成了 25 个目录的清理与其余目录的 `status` 回填（清点与留存理由见 `docs/run/README.md` 的「存量挂账登记」）。
+> **本票还剩的独立活 = G4（pre-push 硬闸，未派未落）**；G5（陈旧度可见性）已落。G2/G3 不再另派。
+> 连带消解：`docs/run/lessons-first-batch/` 的「本票须排在 G2 之前执行」约束随该票目录收口一并失效。
+
 ### 票 G1 · 存量前置清理（最小批，可先做）
 
 - (a) ~~判弃 `docs-run-cleanup/`~~ **✅ 已完成 2026-09-19**（mapping.md 标判弃 + `flaky-precommit` §5.3 引用改指 + 2 条票面冲突修文，同批 commit）。

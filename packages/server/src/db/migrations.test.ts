@@ -252,7 +252,7 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       //
       // **形态放宽（2026-09-20，票 J1）**：原为 `/^T\d+$/`，只认 db-schema-governance
       // 那一族的 `T<n>`。但本字段的语义是「这条迁移属于**哪张票**」，不是「属于 T 族」——
-      // 票 J1（`docs/run/eval-system/J1-judge-credibility-standing-loop.md`）是它的第一张
+      // 票 J1（见 `docs/plans/eval-system.md` §7 判官与人的可信度）是它的第一张
       // 非 T 族迁移。把它硬编成 `'T8'` 是**假话**：T 族是 db-schema-governance 的编号空间，
       // 占一个号会与将来那张真票撞名。故放宽为「大写字母（可带连字符）+ 数字」——
       // 覆盖面 = 仓内真实出现过的票号形态（`T6` / `J1` / `OQ-6` / `R9` / `C1` / `F1`）。

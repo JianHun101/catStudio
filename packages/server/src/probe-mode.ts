@@ -1,5 +1,5 @@
 /**
- * 探针实例禁恢复开关（票 `docs/run/probe-no-resume/`）。
+ * 探针实例禁恢复开关（票 `probe-no-resume`；判据见本文件与 `AGENTS.md` Gotchas）。
  *
  * ## 为什么需要它
  *

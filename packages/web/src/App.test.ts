@@ -109,7 +109,7 @@ describe('App.vue 布局骨架（T1：52px 轨道 + 会话栏 + 主区 + 右栏�
   })
 
   it('三栏列位显式钉死——不依赖自动放置（left-closed 会话栏 display:none 会让后继栏整体前移一格）', () => {
-    // 病灶（票 docs/run/left-closed-collapse/ticket.md）：`.panel-left` 在 left-closed 态
+    // 病灶（票 left-closed-collapse；见 `docs/lessons/display-none-grid-item-breaks-autoplacement.md`）：`.panel-left` 在 left-closed 态
     // `display:none` ⇒ 不再是 grid item ⇒ 自动放置把 `.panel-center` 放进 0 宽首列，主区塌 0；
     // 且塌陷后 ChatPanel 的展开按钮被挤到 52px 轨道底下（真机 elementFromPoint 命中轨道），
     // 用户点不回去 = 单向死锁。修法是把「哪一栏在哪一列」从自动放置改成显式声明。
@@ -167,7 +167,7 @@ describe('App.vue 布局骨架（T1：52px 轨道 + 会话栏 + 主区 + 右栏�
   })
 })
 
-describe('App.vue T4 全局轨道统一（票面 docs/run/ui-redesign/T4-global-rail.md）', () => {
+describe('App.vue T4 全局轨道统一（票面 ui-redesign T4）', () => {
   // 病灶：T1 把 52px 轨道做进了 `.app-layout` **内部**，而三个覆盖层是 `fixed inset 0`
   // 的全屏模态——打开设置/追踪/评估时 `.app-layout` 被 v-show 隐藏，整条轨道随之消失，
   // 三个视图各自靠「页头 + ✕」返回（用户原话：「设置页左侧导航栏跟原型不一样」）。

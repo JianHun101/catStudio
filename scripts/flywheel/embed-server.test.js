@@ -376,7 +376,7 @@ describe('关停自检（票巳 (c)：父子配对，缺一侧即死代码）', 
 })
 
 // ─── 端口可达性（F5 反向对照）──────────────────────────────────
-// 根因（`docs/run/flaky-precommit/finding-2026-09-16.md`）：`listen(0)` 偶尔分到
+// 根因（见 `docs/lessons/listen0-can-land-on-fetch-blocked-ports.md`）：`listen(0)` 偶尔分到
 // **WHATWG Fetch 禁用端口黑名单**里的端口 —— 服务真在听（裸 TCP 连得通），`fetch` 却在
 // 发请求前就拒（`bad port`）且**永不恢复** ⇒ 主进程嵌入链静默失败。
 //

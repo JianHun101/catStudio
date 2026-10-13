@@ -1,3 +1,7 @@
+---
+status: active
+---
+
 # Tickets: commit-msg 门禁 —— `catstudy [uuid]` 必须真实存在
 
 用户 2026-09-13 裁「派② pre-commit 校验 uuid」。来源：`452dbfd` 事故（店长手打杜撰 uuid）+ `76dddf4` 复审 ✅ 时入池。

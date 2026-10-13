@@ -4,7 +4,7 @@
  * 测试面 = **真实迁移路径**（与 `retrievalEvents.test.ts` 同款范式）：`createTestDb()`
  * 造无此二表的老库 → `initDb()` 跑生产同一条 additive 迁移建表。不手搓 DDL。
  *
- * 覆盖票 `docs/run/ui-redesign/T2-trace-page.md` 中**写口侧可独立判定**的判据：
+ * 覆盖票 `ui-redesign` T2（执行追踪查询页）中**写口侧可独立判定**的判据：
  * additive 建表 / 两表同事务 / 幂等（同名节先删后插）/ 读口投影 / 存量行判据 /
  * CASCADE（父执行行删则子行随删，不阻塞父删除）。
  *
