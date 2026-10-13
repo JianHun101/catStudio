@@ -60,3 +60,24 @@
 
 - 走 worktree；`catstudy [0443c12c-a0de-4123-8bb6-e42e9bbbc1d1] fix(server): …`（40 位真 uuid，即本票触发消息）。
 - 提交后按 `request-review` 发起审查；收口归店长。
+
+---
+
+## 收口留痕（2026-10-13，店长）
+
+**状态：✅ 已入 dev**——PR #212（closeout/handoff-double-frame，载体 = 已审 sha `1ff5588c` 字面量）→ merge commit `01a59424`。三方对账齐：dev = origin/dev = `.push-gate` = `01a59424`。
+
+**审查链**：吐槽猫 R1 ✅可合并——五条真空性对照（4 条变异 + 1 条 tsc）逐条亲手复现零附带红；全量 3 轮独立复跑 `165 files / 3778 passed, 0 failed`；`HandoffBus` 17 个站点用兄弟成员扫面独立验证无遗漏；年龄谓词承重前提（`sessions.created_at` 秒级空格分隔）在活库实测成立。
+
+**AC7（真机）**：约定为重启后叠「可构造读数」（dev 库阈值调低 → 触发一次真交接 → 看 dedup 日志行 + 浏览器单框），随重启审批窗一并做。
+
+**P3 ×6 留痕（均不阻断，归后续裁量）**：
+
+1. 交接文档自报计数两处与实测不符（`execution/*.test.ts` 10→实 12；「15 处」实为文件数、§6 清单 17 行）——§6 权威清单本身完整正确。
+2. 「新增 `any` ×0」不实：新增 5 处（4 测试 + 1 生产 `handoff/index.ts` 的 `catch (emitErr: any)`，与文件既有 3 处同款 ⇒ 非缺陷）。
+3. `getEmptyHandoffChild` docstring 的确定性声称过头：`created_at` 秒级，同秒并列时行序仍不定（真要严格得 `ORDER BY s.created_at DESC, s.id DESC`；实际影响≈0）。
+4. web 剔除分支缺「被剔的正是当前活跃会话」的兜底（可达性极窄：须列表已有同父两条且活跃的是被顶替那条）。
+5. OQ6：删的壳可能正是用户眼前会话 → 前端跳 `sessions[0]`——本单**新引入可达**的用户可见行为变更（旧代码删壳无广播，用户留在幽灵框；判可接受，触发需「停在壳里 10 分钟不说话 + 期间旧会话再触发交接」）。
+6. flash猫 实施中 `replace_all` 误删原有 9 处 `unmount`（已完整复原，绿测试曾掩盖）——经验「批量替换须限定上下文 + 核 diff 删除面」建议上浮 lessons，待裁。
+
+**重启**：含 server 代码（`handoff/index.ts` / `sessions.ts` / `bus.ts` / `socketio.ts` 均在主进程 import 面），需重启审批生效。
