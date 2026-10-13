@@ -75,4 +75,4 @@
 - **观察项（P3，均不另开单）**：
   1. `codeOnly` 残口：`time.ts` 日后新增含 `//` 的字符串字面量（URL 一类）时，该行后半截代码会被静默剥掉 ⇒ 反向假绿。已同步写进 lessons 卡。
   2. 残留逃逸类：`new Date(<非简单标识符>)`（如 `new Date(s.trim())` / `new Date(props.createdAt)`）同时绕过守卫的清单与锚（`/^\w+$/` filter 所致）。**店长裁：留痕不单开**——旧版同漏、非本票回归，修法（断未过滤实参多重集）让断言显著变丑，收益不抵。
-- **lessons 卡订正**：`docs/lessons/criterion-blind-spot-looks-like-truth.md` §同族② 补第 3 次复发 + `codeOnly` 结构性解法（该卡在 prompt 注入白名单，审查者点名收口必落）——lessons 不在免审面，单独走审查链（详见该笔提交）。
+- **lessons 卡订正**：`docs/lessons/criterion-blind-spot-looks-like-truth.md` §同族② 补复发实例（终稿口径「四例、按票计」——复审中将票 I 补计、T5/T6 分计，明细见卡内溯源行） + `codeOnly` 结构性解法（该卡在 prompt 注入白名单，审查者点名收口必落）——lessons 不在免审面，单独走审查链（详见该笔提交）。
