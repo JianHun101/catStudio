@@ -10,7 +10,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import { parseThinkingBlocks } from '@/utils/thinking'
 import { resolveDisplayPlaceholders } from '@/utils/rolePlaceholders'
 import { isAgentStoppable, isToolActive, toolAreaSummary } from '@/utils/tools'
-import { normalizeUtc } from '@/utils/time'
+import { normalizeUtc, fmtMsgTime, fmtDateSep } from '@/utils/time'
 import { createLogger } from '@/utils/logger'
 import { api, type MemoryRef, type MemoryRefsEntry } from '@/composables/useApi'
 import { buildMemoryRefView, type MemoryRefView } from '@/utils/memoryRefs'
@@ -75,31 +75,9 @@ function normalizeDateTime(raw: string | number): string {
   return normalizeUtc(raw)
 }
 
-function formatTime(isoString: string): string {
-  try {
-    const d = new Date(normalizeDateTime(isoString))
-    if (isNaN(d.getTime())) return ''
-    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  } catch {
-    return ''
-  }
-}
-
-function formatDate(isoString: string): string {
-  try {
-    const d = new Date(normalizeDateTime(isoString))
-    if (isNaN(d.getTime())) return ''
-    const now = new Date()
-    const isToday = d.toDateString() === now.toDateString()
-    if (isToday) return '今天'
-    const yesterday = new Date(now)
-    yesterday.setDate(yesterday.getDate() - 1)
-    if (d.toDateString() === yesterday.toDateString()) return '昨天'
-    return `${d.getMonth() + 1}月${d.getDate()}日`
-  } catch {
-    return ''
-  }
-}
+// 消息时间戳 / 分隔线的格式逻辑**不在此实现**——唯一真相源是 `utils/time.ts` 的
+// `fmtMsgTime` / `fmtDateSep`（同源的格式化曾在本文件与 `EvaluationView.vue` 各存一份，
+// R5 起逐块收成单源）。本文件只负责「取一次 `now` 并下发到视图模型」。
 
 /** 哪些下标需要显示日期分隔线 */
 const dateSepIndices = computed(() => {
@@ -1271,6 +1249,9 @@ const messageViews = computed<MessageView[]>(() => {
   const rollbackMark = store.rollbackMarks.get(store.activeSessionId ?? '')
   const views: MessageView[] = []
   const next = new Map<string, MessageView>()
+  // 分档参照时刻：整轮取一次，同屏所有消息用同一把尺子（逐条取 `new Date()` 会让
+  // 跨午夜瞬间同一屏出现两个基准）
+  const now = new Date()
   for (let i = 0; i < msgs.length; i++) {
     const msg = msgs[i]
     const agentId = msg.agentId
@@ -1281,7 +1262,7 @@ const messageViews = computed<MessageView[]>(() => {
     const fresh: MessageView = {
       msg,
       showDateSep: sepIndices.has(i),
-      dateText: formatDate(msg.createdAt),
+      dateText: fmtDateSep(msg.createdAt, now),
       grouped: isGrouped(i),
       isLatestUser: msg.role === 'user' && msg.id === lastUserId,
       avatar: avatarFor(msg.role, agentId),
@@ -1292,7 +1273,7 @@ const messageViews = computed<MessageView[]>(() => {
       contextLevel: agentId ? contextLevelFor(agentId) : '',
       execMetaText: execMetaTextFor(msg),
       durationText: msg.durationMs != null ? formatDuration(msg.durationMs) : null,
-      timeText: formatTime(msg.createdAt),
+      timeText: fmtMsgTime(msg.createdAt, now),
       statusEntries: store.messageStatus.get(msg.id) ?? EMPTY_STATUS,
       restartState: restartStateFor(msg),
       restartConfirming: store.confirmingRestartMessageId === msg.id,

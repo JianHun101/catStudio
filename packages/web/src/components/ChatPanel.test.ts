@@ -1631,3 +1631,139 @@ describe('T2 气泡 ⚙ trace（跳页预选 / 权威回退 / 找不到就不静
     expect(scrollIntoView).toHaveBeenCalledTimes(2)
   })
 })
+
+// ─── 消息时间戳按日分级（格式逻辑已收成 utils/time.ts 单源）───────────────────
+describe('消息时间戳按日分级（fmtMsgTime / fmtDateSep 单源）', () => {
+  /** 本地时刻 → 「服务端存的 UTC 串」形态（与 `time.test.ts` 同款构造：从本地 Date 派生） */
+  const isoAt = (y: number, mo: number, d: number, h: number, mi: number) =>
+    new Date(y, mo - 1, d, h, mi).toISOString()
+
+  it('AC4 · 格式化逻辑不在本组件：无本地 function formatTime( / formatDate(', () => {
+    // R5 起「时间口径唯一真相源 = utils/time.ts」；重新内联一份即分叉（同规则两处措辞，
+    // 改一处漏一处）——本断言防的就是那次回退。
+    expect(source).not.toMatch(/function\s+formatTime\s*\(/)
+    expect(source).not.toMatch(/function\s+formatDate\s*\(/)
+    expect(source).toContain("from '@/utils/time'")
+  })
+
+  it('分档参照时刻整轮取一次（不逐条 new Date()，防同一屏出现两个基准）', () => {
+    expect(source).toContain('const now = new Date()')
+    expect(source).toContain('fmtMsgTime(msg.createdAt, now)')
+    expect(source).toContain('fmtDateSep(msg.createdAt, now)')
+  })
+
+  describe('AC5 · 挂载级：混合日期消息的 DOM 读数', () => {
+    const T0 = (() => {
+      const d = new Date(2026, 9, 13, 12, 0)
+      return d.getTime()
+    })()
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(T0)
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() =>
+          Promise.resolve(
+            new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+          )
+        )
+      )
+      setActivePinia(createPinia())
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    })
+
+    it('今天 → 仅 `HH:mm`；昨天 → `昨天 HH:mm`；跨年 → `YYYY年M月D日 HH:mm`', async () => {
+      const store = useChatStore()
+      store.sessions = [{ id: 's1', title: 'ts', agentIds: ['a1'], broadcastMode: false } as never]
+      store.activeSessionId = 's1'
+      store.agents = [{ id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer' } as never]
+      store.messages = [
+        {
+          id: 'today',
+          sessionId: 's1',
+          agentId: 'a1',
+          role: 'agent',
+          content: '今天',
+          mentions: [],
+          createdAt: isoAt(2026, 10, 13, 9, 5),
+        },
+        {
+          id: 'yest',
+          sessionId: 's1',
+          agentId: null,
+          role: 'user',
+          content: '昨天',
+          mentions: [],
+          createdAt: isoAt(2026, 10, 12, 23, 59),
+        },
+        {
+          id: 'old',
+          sessionId: 's1',
+          agentId: 'a1',
+          role: 'agent',
+          content: '跨年',
+          mentions: [],
+          createdAt: isoAt(2025, 6, 15, 10, 0),
+        },
+      ] as never
+
+      const wrapper = mount(ChatPanel, {
+        props: { leftSidebarOpen: true },
+        global: { stubs: { Teleport: true } },
+      })
+      await nextTick()
+
+      // 顺序断言（不是集合断言）：今天那条**不带任何日期前缀**是本票的核心可证伪点
+      expect(wrapper.findAll('.msg-time').map((t) => t.text())).toEqual([
+        '09:05',
+        '昨天 23:59',
+        '2025年6月15日 10:00',
+      ])
+      wrapper.unmount()
+    })
+
+    it('分隔线同日同修：跨年那条的分隔线带年份（旧 formatDate 只到 `M月D日`）', async () => {
+      const store = useChatStore()
+      store.sessions = [{ id: 's1', title: 'ts', agentIds: ['a1'], broadcastMode: false } as never]
+      store.activeSessionId = 's1'
+      store.agents = [{ id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer' } as never]
+      store.messages = [
+        {
+          id: 'old1',
+          sessionId: 's1',
+          agentId: null,
+          role: 'user',
+          content: '一',
+          mentions: [],
+          createdAt: isoAt(2025, 6, 15, 10, 0),
+        },
+        {
+          id: 'old2',
+          sessionId: 's1',
+          agentId: null,
+          role: 'user',
+          content: '二',
+          mentions: [],
+          createdAt: isoAt(2025, 6, 15, 11, 0),
+        },
+      ] as never
+
+      const wrapper = mount(ChatPanel, {
+        props: { leftSidebarOpen: true },
+        global: { stubs: { Teleport: true } },
+      })
+      await nextTick()
+
+      // 首条必出分隔线；同日第二条不再出 ⇒ 恰一条，且带年份
+      const seps = wrapper.findAll('.date-separator')
+      expect(seps).toHaveLength(1)
+      expect(seps[0].text()).toBe('2025年6月15日')
+      wrapper.unmount()
+    })
+  })
+})

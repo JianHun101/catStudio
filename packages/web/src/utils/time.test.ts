@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { normalizeUtc, parseUtc, fmtUtcShort, fmtUtcFull } from './time'
+import { normalizeUtc, parseUtc, fmtUtcShort, fmtUtcFull, fmtMsgTime, fmtDateSep } from './time'
 import timeSource from './time.ts?raw'
 
 /**
@@ -17,6 +17,13 @@ import timeSource from './time.ts?raw'
  * 把 UTC 串当本地时间显示 —— 评分时间与待回标时间**整整早 8 小时**。形状对、值错，
  * 肉眼看不出来，只有拿跨时区的期望值才测得出。
  */
+
+/** 剥掉注释后的源码——**静态源断言的判据面只应是代码**。
+ *  `?raw` 会把 JSDoc 一并喂进来：注释里的散文示例会污染「构造点清单」这类**计数/枚举**断言
+ *  （改一句文档即假红），反过来，注释里写一句被正面锚找的字面量又能让它**假绿**。
+ *  本文件两条静态源守卫一律跑在它上面。（`time.ts` 内无含 `//` 的字符串/正则字面量，已实读。） */
+const codeOnly = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+const codeSource = codeOnly(timeSource)
 
 const p2 = (n: number) => String(n).padStart(2, '0')
 
@@ -102,8 +109,132 @@ describe('两个格式化函数：形状不变、值按时区换算', () => {
 })
 
 describe('静态源：解析必须显式当 UTC（守卫随实现搬家的落点）', () => {
-  it('有显式 UTC 归一，没有裸 `new Date(raw)`', () => {
-    expect(timeSource).toContain("replace(' ', 'T') + 'Z'")
-    expect(timeSource).not.toContain('new Date(raw)')
+  it('串分支必须委托唯一解析入口（没有裸 new Date(串变量)）', () => {
+    expect(codeSource).toContain("replace(' ', 'T') + 'Z'")
+    expect(codeSource).toContain('new Date(normalizeUtc(raw))')
+    // 正面锚住**串分支**：`toLocalDate` 的串路径必须委托 `parseUtc`（全文件唯一命中）。
+    // 把它换成裸构造——本守卫要防的那件事——本行即红，且下面清单同时多出一个 `raw`。
+    // （行为用例「吃 SQLite 无后缀串」也能抓，但它只在非 UTC 机器上有分辨力：输入串由本机
+    //   `toISOString()` 派生，UTC 机器上串本地读数与 UTC 读数重合 ⇒ 该回归行为上不可见。）
+    expect(codeSource).toContain('return parseUtc(raw)')
+    // 裸构造的形态是 `new Date(<标识符>)`——数字分支走 `new Date(raw)` 是**合法**的
+    // （数字无时区语义），故清单只钉「有哪些」，合法性逐条说明：
+    //   raw  —— `toLocalDate` 的**数字**分支（数字无时区语义，不该走串归一）
+    //   now  —— `dayBucket` 里 `new Date(now)` 的全日期拷贝（不是解析，是复制）
+    const dateCtors = [...codeSource.matchAll(/new Date\(([^)]*)\)/g)]
+      .map((m) => m[1].trim())
+      .filter((arg) => /^\w+$/.test(arg))
+      .sort()
+    expect(dateCtors).toEqual(['now', 'raw'])
+  })
+})
+
+// ─── 消息时间戳按日分级（fmtMsgTime / fmtDateSep） ───────────────────────
+//
+// **时区无关的构造法**：`now` 与消息戳都从**同一个本地 `Date`** 派生——
+// 消息戳取 `d.toISOString()`（模拟服务端存的 UTC 串），被测函数解析回来仍是同一时刻、
+// 同一本地读数；换机器时区时两者**同步平移**，自然日关系与时钟读数都不变。
+//
+// ⚠️ 反面构造（本文件初版踩过）：用 `Date.UTC(...)` 同时造消息戳与 `now` 是**错的**
+//    ——`now` 是直接用的本地 `Date` 对象，而消息戳要经 `parseUtc` 走一遍本地换算，
+//    两者在非 UTC 机器上异位（UTC+8 下整整差 8 小时，日期档位跟着错）。
+
+/** 本地时刻 → 服务端形态的 ISO 串（模拟 DB 里存的 `createdAt`） */
+const iso = (d: Date) => d.toISOString()
+/** 本地时刻构造 + 序列化一步到位 */
+const isoAt = (y: number, mo: number, d: number, h: number, mi: number) =>
+  new Date(y, mo - 1, d, h, mi).toISOString()
+/** 本地时刻构造（当 `now` 用；直接是 `Date`，不经解析） */
+const at = (y: number, mo: number, d: number, h: number, mi: number) =>
+  new Date(y, mo - 1, d, h, mi)
+
+describe('fmtMsgTime：按自然日分五档', () => {
+  it('今天 → `HH:mm`（无任何日期前缀——用户原话「当天不展示月份和日期」）', () => {
+    // 今天 00:00 的消息在 23:59 看仍是今天：分档只看自然日，不看秒级间隔
+    expect(fmtMsgTime(isoAt(2026, 10, 13, 0, 0), at(2026, 10, 13, 23, 59))).toBe('00:00')
+  })
+
+  it('昨天 → `昨天 HH:mm`（昨天 23:59 的消息在今天 00:01 看）', () => {
+    expect(fmtMsgTime(isoAt(2026, 10, 12, 23, 59), at(2026, 10, 13, 0, 1))).toBe('昨天 23:59')
+  })
+
+  it('更早、当年内 → `M月D日 HH:mm`（月日不补零，与旧 formatDate 同形）', () => {
+    const msg = at(2026, 10, 11, 10, 0)
+    expect(fmtMsgTime(iso(msg), at(2026, 10, 13, 12, 0))).toBe(
+      `${msg.getMonth() + 1}月${msg.getDate()}日 10:00`
+    )
+  })
+
+  it('跨年边界：「昨天」优先于「跨年」——12-31 的消息在 01-01 看是「昨天」不是年份档', () => {
+    // 本票钉死的口径之一。反过来（先判年）这一档会被吃掉，本断言即红。
+    expect(fmtMsgTime(isoAt(2025, 12, 31, 22, 30), at(2026, 1, 1, 8, 0))).toBe('昨天 22:30')
+  })
+
+  it('跨年且非昨天 → `YYYY年M月D日 HH:mm`', () => {
+    const msg = at(2025, 6, 15, 10, 0)
+    expect(fmtMsgTime(iso(msg), at(2026, 10, 13, 12, 0))).toBe(
+      `${msg.getFullYear()}年${msg.getMonth() + 1}月${msg.getDate()}日 10:00`
+    )
+  })
+
+  it('吃 SQLite 无后缀串（与 ISO 串同源，走 parseUtc 唯一入口）', () => {
+    const msg = at(2026, 10, 11, 10, 0)
+    // 串面口径：DB 存的 UTC 串要在**本地**渲染 ⇒ 反向补 Z 造出与 msg 同一时刻的串
+    const sqlite = msg.toISOString().replace('T', ' ').slice(0, 19)
+    expect(fmtMsgTime(sqlite, at(2026, 10, 13, 12, 0))).toBe(
+      `${msg.getMonth() + 1}月${msg.getDate()}日 10:00`
+    )
+  })
+
+  it('吃数字时间戳（ChatPanel 的私有形态；数字直接 new Date(n)，不做串归一）', () => {
+    expect(fmtMsgTime(at(2026, 10, 13, 10, 0).getTime(), at(2026, 10, 13, 12, 0))).toBe('10:00')
+  })
+
+  it('解析失败 / 空值 → 空串（该条消息只是不显示时间，不静默回显原始串）', () => {
+    const now = at(2026, 10, 13, 12, 0)
+    expect(fmtMsgTime('不是时间', now)).toBe('')
+    expect(fmtMsgTime('', now)).toBe('')
+    expect(fmtMsgTime(Number.NaN, now)).toBe('')
+  })
+})
+
+describe('fmtDateSep：分档与 fmtMsgTime 同源，只是不带时刻', () => {
+  const now = at(2026, 10, 13, 12, 0)
+
+  it('今天 / 昨天 两档是字面量', () => {
+    expect(fmtDateSep(isoAt(2026, 10, 13, 9, 0), now)).toBe('今天')
+    expect(fmtDateSep(isoAt(2026, 10, 12, 9, 0), now)).toBe('昨天')
+  })
+
+  it('更早、当年内 → `M月D日`', () => {
+    const msg = at(2026, 10, 11, 10, 0)
+    expect(fmtDateSep(iso(msg), now)).toBe(`${msg.getMonth() + 1}月${msg.getDate()}日`)
+  })
+
+  it('跨年 → `YYYY年M月D日`（既有缺陷修复点：旧 formatDate 只到 `M月D日`，去年 12 月与上个月同形）', () => {
+    const msg = at(2025, 6, 15, 10, 0)
+    expect(fmtDateSep(iso(msg), now)).toBe(
+      `${msg.getFullYear()}年${msg.getMonth() + 1}月${msg.getDate()}日`
+    )
+  })
+
+  it('跨年边界同样「昨天」优先（与 fmtMsgTime 同一 dayBucket，不分叉）', () => {
+    expect(fmtDateSep(isoAt(2025, 12, 31, 22, 30), at(2026, 1, 1, 8, 0))).toBe('昨天')
+  })
+
+  it('解析失败 / 空值 → 空串', () => {
+    expect(fmtDateSep('不是时间', now)).toBe('')
+    expect(fmtDateSep('', now)).toBe('')
+  })
+})
+
+describe('静态源：分档顺序不能重排（昨天必须先于跨年判定）', () => {
+  it('两函数共用同一个 dayBucket，且「昨天」以 setDate(-1) 表达', () => {
+    // 「昨天优先跨年」是语义的一部分，重排顺序即回归——本断言把顺序钉在源码上
+    // 计数跑在 codeSource 上：注释里提一次 `dayBucket(` 就能给这条 `>= 3` 添余量、
+    // 掩掉真删一处消费——与上一条守卫同一失效机制（判据面混入注释），故同批收掉。
+    expect(codeSource).toContain('function dayBucket(')
+    expect(codeSource.match(/dayBucket\(/g)!.length).toBeGreaterThanOrEqual(3) // 定义 + 两处消费
+    expect(codeSource).toContain('yesterday.setDate(yesterday.getDate() - 1)')
   })
 })
