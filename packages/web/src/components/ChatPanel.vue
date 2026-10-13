@@ -390,6 +390,57 @@ watch(
   }
 )
 
+// ─── 主消息区贴底的尺寸观测（RO）─────────────
+// 上面四个 watch 是「事件源穷举」写法：每新增一条会让内容长高的渲染路径都得记得补一个
+// watch，漏一个就静默失效。实测漏掉的是三个**迟到**来源——SESSION_HISTORY 权威校正
+// （messages 整体替换且末条 id 不变时 lastMessageId watch 不触发）、执行元数据回填
+// （执行回来给气泡补 footer，每个长高一截）、图片解码（dataURL 撑开）。尺寸观测一个点
+// 天然覆盖全部来源，判据与折叠块那节完全相同（见下）。既有四个 watch **全保留**：
+// 新消息指示器（newMessageCount/showScrollDown）语义归它们，RO 只补「尺寸增长时维持贴底」。
+//
+// ⚠️ 观测目标是**内容元素** `.chat-messages-inner`，**不是**滚动容器 `chatContainer`：
+// 容器的 clientHeight 被视口钉死，观测它 RO 永不触发（本单最易踩的陷阱）。
+//
+// ⚠️ 写侧只读 sticky 位、不写：`isAtBottom` 的唯一更新口仍是真滚动
+// （`checkScrollPosition`）。内容增长不产生 scroll 事件，故不会把「刚长出来」误读成
+// 「用户滚上去了」——这正是折叠块那节记录的冷启动失效（纯几何判据会把「内容刚溢出」
+// 判成「用户滚上去了」，此后跟随一次都不触发）。
+function stickMessagesToBottom(): void {
+  // I2 让位：用户滚上去过就不抢滚动条，直到他自己滚回底部（I3，由 checkScrollPosition 复位）。
+  if (!isAtBottom.value) return
+  const el = chatContainer.value
+  if (!el) return
+  // behavior:'auto'——迟到增长往往是整列平移，平滑滚动既追不上也会与用户手动滚动打架。
+  el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
+}
+
+// rAF 节流：合并同帧内多次触发起见，并把滚动写推迟到下一帧——滚动条出现/消失会改
+// clientWidth 进而又改内容尺寸，同帧内回写会触发 ResizeObserver loop 告警（与折叠块同因）。
+let msgStickRaf = 0
+
+function scheduleMsgStick(): void {
+  if (msgStickRaf) return
+  msgStickRaf = requestAnimationFrame(() => {
+    msgStickRaf = 0
+    stickMessagesToBottom()
+  })
+}
+
+// 观测的建立/拆除跟随元素生命周期。用 watch 模板 ref 而非指令：折叠块的 Map+配对机制是
+// 为「1 个容器 : N 个折叠体、且折叠体随流式结束被销毁」设计的；主区是 1:1 且元素稳定
+// （`chat-messages-inner` 不在任何 v-if 分支下），一次 watch 就够，且同样覆盖元素被重建的
+// 路径（ref 变 null → 拆旧；ref 变新元素 → 挂新）。组件整体卸载的拆除另在 onUnmounted。
+const messagesInner = ref<HTMLElement>()
+let msgStickRo: ResizeObserver | null = null
+
+watch(messagesInner, (el) => {
+  msgStickRo?.disconnect()
+  msgStickRo = null
+  if (!el) return
+  msgStickRo = new ResizeObserver(() => scheduleMsgStick())
+  msgStickRo.observe(el)
+})
+
 // ─── 思考框内跟进（stick-to-bottom，框内滚动）─────────
 // 流式思考框自己就是有界滚动容器（.stream-fold .stream-fold-body：max-height:220px +
 // overflow-y:auto），思考/工具在框内滚。三不变量与消息区同构：
@@ -496,6 +547,14 @@ onUnmounted(() => {
     foldStickRaf = 0
   }
   pendingFoldBodies.clear()
+  // 主消息区 RO 随组件整体卸载拆除：不能只靠 messagesInner 的 watch（ref 归 null 时那条
+  // 回调可能已被 scope.stop() 丢弃），此处显式兜底。
+  msgStickRo?.disconnect()
+  msgStickRo = null
+  if (msgStickRaf) {
+    cancelAnimationFrame(msgStickRaf)
+    msgStickRaf = 0
+  }
   // 在途的记忆引用合并窗口：卸载后不许再发请求（回调持的是已卸载组件的闭包）
   if (memoryRefsTimer) {
     clearTimeout(memoryRefsTimer)
@@ -1362,7 +1421,7 @@ const messageViews = computed<MessageView[]>(() => {
 
     <!-- Messages -->
     <div ref="chatContainer" class="chat-messages-wrapper" @scroll.passive="checkScrollPosition">
-      <div class="chat-messages-inner" aria-live="polite">
+      <div ref="messagesInner" class="chat-messages-inner" aria-live="polite">
         <!-- 80% 告警横幅：任一 agent 上下文超过告警线（实时数据驱动，阈值来自配置） -->
         <div v-if="warnedAgents.length" class="context-warning-banner" role="alert">
           ⚠️ {{ warnedAgentsText }}
