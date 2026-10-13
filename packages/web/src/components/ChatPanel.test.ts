@@ -758,6 +758,211 @@ describe('ChatPanel 思考框内跟进（观测 .stream-fold-inner 尺寸 + 三�
   })
 })
 
+// ─── 主消息区贴底（尺寸观测：覆盖迟到增长，不再穷举事件源）────────────────────
+describe('ChatPanel 主消息区贴底（观测 .chat-messages-inner 尺寸 + 三不变量）', () => {
+  // 观测**定点**记录：本组承重的一条正是「RO observe 的是内容元素而非滚动容器」
+  // （容器 clientHeight 被视口钉死，观测它 RO 永不触发）
+  const observed: Element[] = []
+  const roCallbacks: ResizeObserverCallback[] = []
+  const rafQueue: FrameRequestCallback[] = []
+
+  class RecordingRO {
+    constructor(cb: ResizeObserverCallback) {
+      roCallbacks.push(cb)
+    }
+    observe(el: Element): void {
+      observed.push(el)
+    }
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+
+  // 模块级 beforeEach 已装 scrollTo 桩 + pinia；本组再补可控 RO / 可控 rAF。
+  // rAF 用**队列**而非「同步执行回调」：同步执行会让组件的
+  // `msgStickRaf = requestAnimationFrame(...)` 在回调把 msgStickRaf 归零**之后**才赋值，
+  // 节流位卡死、其后每次触发都被误吞。
+  beforeEach(() => {
+    observed.length = 0
+    roCallbacks.length = 0
+    rafQueue.length = 0
+    vi.stubGlobal('ResizeObserver', RecordingRO)
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      rafQueue.push(cb)
+      return rafQueue.length
+    })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+  })
+
+  // 卸载放 afterEach、不放用例末尾：用例中途断言失败会跳过尾部 unmount，泄漏的组件实例
+  // 会在后续**无关**的 describe 里继续跑 watcher/timer（实测：让位用例失败即级联打红
+  // M1 的 A4 记忆引用批量口）。清理必须走「失败路径也执行」的那条。
+  let activeWrapper: VueWrapper | null = null
+
+  afterEach(() => {
+    activeWrapper?.unmount()
+    activeWrapper = null
+    vi.unstubAllGlobals()
+  })
+
+  /** 排空 rAF 队列——写侧把滚动写推迟到下一帧（避免 RO loop 告警），故断言前须显式推进 */
+  function flushRaf(): void {
+    rafQueue.splice(0).forEach((cb) => cb(0))
+  }
+
+  function setupSession(): void {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 't', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [
+      { id: 'a1', name: 'ds猫', avatar: '🐱', role: 'implementer', llmModel: 'm' } as never,
+    ]
+    store.messages = [
+      {
+        id: 'm1',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '正文 1',
+        mentions: [],
+        createdAt: '2026-09-22T00:00:00Z',
+      },
+      {
+        id: 'm2',
+        sessionId: 's1',
+        agentId: 'a1',
+        role: 'agent',
+        content: '正文 2',
+        mentions: [],
+        createdAt: '2026-09-22T00:00:01Z',
+      },
+    ] as never
+  }
+
+  async function mountPanel(): Promise<VueWrapper> {
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    activeWrapper = wrapper
+    await nextTick()
+    return wrapper
+  }
+
+  /**
+   * jsdom 无布局：scrollHeight/clientHeight 恒 0 ⇒ distToBottom 恒 0、判据恒「在底部」，
+   * 「让位」分支根本到不了。故按用例把几何读数显式钉到实例上（getter 可重定义）。
+   */
+  function pinGeometry(
+    wrapper: VueWrapper,
+    scrollHeight: number,
+    clientHeight: number
+  ): HTMLElement {
+    const el = wrapper.find('.chat-messages-wrapper').element as HTMLElement
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: scrollHeight })
+    Object.defineProperty(el, 'clientHeight', { configurable: true, value: clientHeight })
+    return el
+  }
+
+  function scrollToSpy(): ReturnType<typeof vi.fn> {
+    return Element.prototype.scrollTo as unknown as ReturnType<typeof vi.fn>
+  }
+
+  it('AC2 观测接线（行为）：RO observe 的是内层内容元素，不是滚动容器', async () => {
+    setupSession()
+    const wrapper = await mountPanel()
+    expect(observed).toContain(wrapper.find('.chat-messages-inner').element)
+    expect(observed).not.toContain(wrapper.find('.chat-messages-wrapper').element)
+  })
+
+  it('AC2 观测接线（静态源）：ref 挂内层 + 观测随元素生命周期建立/拆除', () => {
+    expect(source).toContain('const messagesInner = ref<HTMLElement>()')
+    expect(source).toContain(
+      '<div ref="messagesInner" class="chat-messages-inner" aria-live="polite">'
+    )
+    expect(source).toContain('msgStickRo = new ResizeObserver(() => scheduleMsgStick())')
+    expect(source).toContain('msgStickRo.observe(el)')
+    // 反向锚：不得观测滚动容器（容器 clientHeight 被视口钉死 ⇒ RO 永不触发）
+    expect(source).not.toContain('observe(chatContainer')
+  })
+
+  it('写侧只读 sticky 位：RO 路径不改写滚动位置判据（唯一更新口仍是真滚动）', () => {
+    const block = source.match(/function stickMessagesToBottom\(\): void \{[\s\S]*?\n\}/)
+    expect(block).toBeTruthy()
+    expect(block![0]).not.toContain('isAtBottom.value =')
+    expect(block![0]).toContain('if (!isAtBottom.value) return')
+    expect(block![0]).toContain("el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })")
+  })
+
+  it('AC1 跟随：在底部时内容元素尺寸增长 → 贴底写回（且不阻塞 RO 回调）', async () => {
+    setupSession()
+    const wrapper = await mountPanel()
+    pinGeometry(wrapper, 300, 300) // dist 0 < 40 ⇒ sticky 位保持「在底部」
+    const scrollTo = scrollToSpy()
+    scrollTo.mockClear()
+
+    roCallbacks[0]([], {} as ResizeObserver)
+    // 写侧推迟到下一帧：RO 回调本身不写滚动（同帧回写会触发 RO loop 告警）
+    expect(scrollTo).not.toHaveBeenCalled()
+    flushRaf()
+    expect(scrollTo).toHaveBeenCalledWith({ top: 300, behavior: 'auto' })
+  })
+
+  it('AC1 让位：用户滚上去后尺寸再增长 → 不抢滚动条', async () => {
+    setupSession()
+    const wrapper = await mountPanel()
+    pinGeometry(wrapper, 1000, 300) // dist 700 ≥ 40
+    await wrapper.find('.chat-messages-wrapper').trigger('scroll') // 真滚动是 sticky 位唯一更新口
+    const scrollTo = scrollToSpy()
+    scrollTo.mockClear()
+
+    roCallbacks[0]([], {} as ResizeObserver)
+    flushRaf()
+    expect(scrollTo).not.toHaveBeenCalled()
+  })
+
+  it('AC1 复位：滚回底部后尺寸再增长 → 恢复跟随', async () => {
+    setupSession()
+    const wrapper = await mountPanel()
+    pinGeometry(wrapper, 1000, 300)
+    await wrapper.find('.chat-messages-wrapper').trigger('scroll') // I2 让位
+    pinGeometry(wrapper, 300, 300)
+    await wrapper.find('.chat-messages-wrapper').trigger('scroll') // I3 复位
+    const scrollTo = scrollToSpy()
+    scrollTo.mockClear()
+
+    roCallbacks[0]([], {} as ResizeObserver)
+    flushRaf()
+    expect(scrollTo).toHaveBeenCalledWith({ top: 300, behavior: 'auto' })
+  })
+
+  it('rAF 节流（行为）：同帧内多次尺寸触发只写一次滚动（迟到增长常成簇到达）', async () => {
+    setupSession()
+    const wrapper = await mountPanel()
+    pinGeometry(wrapper, 300, 300)
+    const scrollTo = scrollToSpy()
+    scrollTo.mockClear()
+
+    roCallbacks[0]([], {} as ResizeObserver)
+    roCallbacks[0]([], {} as ResizeObserver)
+    roCallbacks[0]([], {} as ResizeObserver)
+    flushRaf()
+    expect(scrollTo).toHaveBeenCalledTimes(1)
+  })
+
+  it('rAF 节流与卸载清理的接线（静态源）：节流位 + 组件卸载时取消在途 rAF、断观测', () => {
+    expect(source).toContain('let msgStickRaf = 0')
+    expect(source).toContain('msgStickRaf = requestAnimationFrame(')
+    expect(source).toContain('cancelAnimationFrame(msgStickRaf)')
+    expect(source).toContain('msgStickRo?.disconnect()')
+  })
+
+  it('AC3 既有事件源 watch 全保留：RO 只补尺寸增长，指示器语义不迁移', () => {
+    expect(source).toContain('watch(lastMessageId, async () => {')
+    expect(source).toContain('newMessageCount.value++')
+    expect(source).toContain('setTimeout(() => scrollToBottom(), 50)')
+  })
+})
+
 describe('ChatPanel 历史消息 segments 交错还原（segments 落库后时间序优先 + 老消息退化）', () => {
   it('父组件不再持有历史折叠块逻辑（函数与模板标记整体迁入 MessageItem）', () => {
     expect(source).not.toContain('storedFoldEntries')
