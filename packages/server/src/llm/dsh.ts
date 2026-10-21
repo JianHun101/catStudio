@@ -234,6 +234,17 @@ export class DshAdapter implements LLMAdapter {
       input: fullPrompt,
     })
 
+    // stdin 写入守卫（P2）：spawnSupervised 在返回前同步 write(input) + end()，但
+    // 错误是异步派发的。CLI 在消费完 stdin 前早退（patch 读不到 / profile 名漂移 /
+    // 启动即报错）时，pending write 会以 EOF/EPIPE 触发 child.stdin 的 'error'；本进程
+    // 无 uncaughtException 兜底，无监听即**整个 server 退出**。此处立即挂监听兜住
+    // （write 已同步完成、错误异步到达，故返回后挂仍能捕获）。
+    // 不改变主判定：退出码仍是权威，stdin 错误只记 debug。
+    // TODO(另票): 守卫应下沉到 spawnSupervised + cli-supervisor.mjs（claude/openai 同族）。
+    child.stdin?.on('error', (err: NodeJS.ErrnoException) => {
+      log.debug('dsh stdin 写入失败', { code: err.code ?? 'unknown', error: err.message })
+    })
+
     // ─── Abort 处理：收到取消信号时终止子进程 ───
     // 存活判据与平台分派统一收在 `terminateChild`（cli-utils）——判据禁用 `killed`
     // （信号发出≠进程已死），win32 走 `taskkill /T` 树杀（信号杀不到 supervisor 底下
@@ -292,7 +303,10 @@ export class DshAdapter implements LLMAdapter {
         const detail = stripSupervisorLines()
         log.error('dsh 退出', { exitCode: code, stderr: detail.slice(0, 500) })
       } else if (stderr) {
-        log.debug('dsh stderr (exit 0)', { bytes: stderr.length, head: stderr.slice(0, 500) })
+        log.debug('dsh stderr (exit 0)', {
+          bytes: Buffer.byteLength(stderr),
+          head: stderr.slice(0, 500),
+        })
       }
     })
 

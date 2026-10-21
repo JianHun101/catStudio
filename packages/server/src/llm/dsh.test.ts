@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { Readable } from 'node:stream'
+import { EventEmitter } from 'node:events'
 import { readFileSync, existsSync } from 'node:fs'
 import type { Chunk } from '@cat-study/shared'
 
@@ -70,6 +71,10 @@ function fakeChild(
 ) {
   const stdout = new Readable({ read() {} })
   const stderr = new Readable({ read() {} })
+  // stdin 用 EventEmitter 忠实模拟可写流的错误面：真实 ChildProcess 上 stdin 是
+  // stream.Writable，CLI 早退时 pending write 以 EOF/EPIPE 派发 'error'；无监听则
+  // 抛成 uncaughtException（server 直接退出）。夹具必须能派发该事件才测得到守卫。
+  const stdin = new EventEmitter()
   const listeners = new Map<string, Set<(...args: any[]) => void>>()
   const register = (event: string, cb: (...args: any[]) => void) => {
     if (!listeners.has(event)) listeners.set(event, new Set())
@@ -85,6 +90,7 @@ function fakeChild(
   const child = {
     stdout,
     stderr,
+    stdin,
     kill: vi.fn(),
     on: vi.fn(register),
     once: vi.fn(register),
@@ -229,7 +235,8 @@ describe('DshAdapter', () => {
     // 降级为一条 debug，带字节数 + 截断 head（供排障，不打扰运行面）
     expect(logMocks.debug).toHaveBeenCalledTimes(1)
     expect(logMocks.debug).toHaveBeenCalledWith('dsh stderr (exit 0)', {
-      bytes: stderrText.length,
+      // UTF-8 字节数，不是 UTF-16 code unit（中文 reasoning 下 length 会低报约 3×）
+      bytes: Buffer.byteLength(stderrText),
       head: stderrText.slice(0, 500),
     })
   })
@@ -279,6 +286,34 @@ describe('DshAdapter', () => {
 
     const r = await pending
     expect(r.value).toEqual({ content: 'dsh CLI 无法启动: ENOENT', done: true })
+  })
+
+  // ─── stdin 错误守卫（P2：CLI 早退 EPIPE/EOF 不得崩 server）────
+
+  it('registers stdin error guard: early CLI exit (EPIPE/EOF) does not crash the process', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = adapter.chatStream([{ role: 'user', content: 'hi' }], {
+      model: 'deepseek-chat',
+    })
+    const pending = startGen(gen)
+
+    // 守卫在 spawn 返回后立即注册——真实进程里 write 已在 spawnSupervised 内同步完成、
+    // 错误异步派发；无监听时 EventEmitter 的 'error' 直接抛成 uncaughtException。
+    expect(child.stdin.listenerCount('error')).toBe(1)
+    const stdinErr = Object.assign(new Error('write EOF'), { code: 'EPIPE' })
+    expect(() => child.stdin.emit('error', stdinErr)).not.toThrow()
+    expect(logMocks.debug).toHaveBeenCalledWith('dsh stdin 写入失败', {
+      code: 'EPIPE',
+      error: 'write EOF',
+    })
+
+    // 主判定不变：退出码仍是权威 → 非零退出照常产出启动失败 chunk
+    child.emitClose(1)
+    const r = await pending
+    expect(r.value).toEqual({ content: 'dsh CLI 启动失败 (exit code 1)', done: true })
   })
 
   // ─── 超时/取消（运行中 abort → kill 子进程 + done）────
