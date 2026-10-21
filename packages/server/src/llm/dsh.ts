@@ -1,4 +1,4 @@
-import type { Chunk, ChatOptions, LLMMessage } from '@cat-study/shared'
+import type { Chunk, ChatOptions, LLMMessage, ToolCallInfo } from '@cat-study/shared'
 import type { LLMAdapter } from './adapter.js'
 import {
   resolveJsEntry,
@@ -13,6 +13,26 @@ import { randomBytes } from 'node:crypto'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { createInterface } from 'node:readline'
+
+/**
+ * `--json` 事件的最小形状（防御式解析：上游字段缺失/类型漂移时不炸，未知 type 忽略）。
+ * 只声明本适配器消费的字段；其余原样忽略。
+ */
+interface DshEvent {
+  type?: unknown
+  text?: unknown
+  callId?: unknown
+  tool?: unknown
+  input?: unknown
+  result?: unknown
+  status?: unknown
+  isError?: unknown
+  truncated?: unknown
+  message?: unknown
+  phase?: unknown
+  reason?: { kind?: unknown; message?: unknown; error?: unknown }
+}
 
 const log = createLogger('dsh')
 
@@ -122,21 +142,36 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
 /**
  * dsh（deepseek-harness）CLI 适配器。
  *
- * 通过 spawn node dsh-entry 子进程（`--profile headless` + 题面走 stdin 的一次性形态）→
- * 收集 stdout → 输出最终答案 Chunk。与 claude.ts 同为 CLI 子进程形态，复用 cli-utils 公共设施
- * （resolveJsEntry / messagesToPrompt / spawnSupervised；不挂 idle timeout——
- * headless 全程无输出，idle 语义不适用，见 chatStream 内运行时长遥测注释）。
+ * 通过 spawn node dsh-entry 子进程（`--profile headless --json` + 题面走 stdin）→
+ * 逐行解析 stdout NDJSON 事件 → 边到边 yield Chunk（thinking / text / tool 三通道）。
+ * 与 claude.ts 同为 CLI 子进程形态，复用 cli-utils 公共设施（resolveJsEntry /
+ * messagesToPrompt / spawnSupervised；不挂 idle timeout——idle 语义不适用，
+ * wall-clock 由 dispatch 层 30min hard timeout 兜底，见 chatStream 内遥测注释）。
  *
  * 纯 JS CLI 用 `node <entry>` 执行（spawn(process.execPath, [DSH_ENTRY, ...])）——
  * 避免 .cmd 包装（resolveBin 在 win32 落 .cmd，supervisor spawn('.cmd', shell:false) 在
  * Node 24 同步 EINVAL，bde908e ❌ 审查阻塞项；node.exe 是原生 exe 无此问题）。
  *
- * 形态差异（headless 无流式）：整轮 agent 循环完成后一次性打印最终答案到 stdout
- * （exit 0 = completed，stderr 可能带 `dsh: reasoning:` 推理增量；非 0 退出 stderr
- * 带错误码+消息）。所以本适配器
- * 不解析事件流——收集全量 stdout，close 后按 exit code 判定产出。长思考/工具循环期间
- * 用户看到静默（headless 形态固有，无中间事件可转发），与 opencode run 的实时工具
- * 事件不同——这是形态取舍，OQ 记录。
+ * `--json` 事件契约（0.2.1-rc.2 实证，实包源码 + 真机双证）：
+ *  - `thinking` / `text`：逐条产出。`thinking` 可能是空串（跳过空串）。
+ *  - `tool_call`：`{ callId, tool, input }` → 产出 running chunk，并建 callId→tool 映射。
+ *  - `tool_result`：只带 `callId`（**不带工具名**）→ 按映射补名，缺失退化 'unknown'；
+ *    `status=error`/`isError` → status='error'。
+ *  - `final`：**不是全文**，是最后一条非空 text 的复述（源码 summarize()），且按
+ *    `projection.finish()` 直写、**不经 8KB 截断**（完整答案）。已产出文本以它结尾时
+ *    不重复补；最后一条 text 被 8KB 截断时，其尾部只是 final 的前缀（`endsWith` 恒
+ *    false），按前缀对账**只补余量**，否则已上屏的前缀会整段重复；两者都不成立才整条补
+ *    （防未来只有 final 的形态）。
+ *  - `status` / `session` / 未知 type：不产出；`turn_end.reason.kind='error'` 存为诊断兜底。
+ *  - 运行期错误没有 `error` 事件（`error` 只由 CLI 用法错误产生）——运行失败走
+ *    `turn_end.reason` + stderr + exit code。
+ *  - 每条字符串 8KB 截断并标 `truncated:true`（`final` 豁免）；事件行上限 32KB。
+ *  - `--json` 与 stderr 推理流互斥（源码 projection 分支）：exit 0 的 stderr 只剩
+ *    `[supervisor]` 行，故 exit 0 一律降 debug 的既有分流继续成立。
+ *  - ⚠️ **位置红线**：`--json` 必须排在 `--patch` 之后。实测
+ *    `--profile headless --json --patch X` 会把 patch 当 app 参数 →
+ *    `unknown option '--patch'`，工具面整块消失。正确顺序：
+ *    `--profile headless [--patch <path>] --json`。
  *
  * 凭证：dsh 解析顺序为 继承 env → $DSH_HOME/.credentials.yaml → 调用目录 .env →
  * $DSH_HOME/.env；本适配器把 apiKey（DS_KEY 复用）以 DEEPSEEK_API_KEY 注入 spawn env
@@ -186,13 +221,16 @@ export class DshAdapter implements LLMAdapter {
     const model = options.model || this.model
 
     // MCP 结构化路由（context 存在时挂工具面）：per-spawn 临时 patch overlay。
-    // 参数面只留 flags（--profile / --patch）；题面经 spawnSupervised 的 input 写 stdin。
+    // 参数面只留 flags（--profile / --patch / --json）；题面经 spawnSupervised 的 input 写 stdin。
+    // ⚠️ `--json` 必须最后：放 `--patch` 之前会让 patch 被当成 app 参数
+    // （unknown option '--patch'，工具面整块消失——实机撞过，勿调序）。
     let patchPath: string | null = null
     const args = ['--profile', 'headless']
     if (options.context) {
       patchPath = writePatchConfig(options.context, model)
       args.push('--patch', patchPath)
     }
+    args.push('--json')
 
     log.info('启动 dsh CLI', { model, promptLen: fullPrompt.length })
 
@@ -252,14 +290,12 @@ export class DshAdapter implements LLMAdapter {
     const onAbort = () => terminateChild(child, { label: `dsh(${model})` })
     signal?.addEventListener('abort', onAbort)
 
-    // ─── 运行时长遥测（P0）：dsh headless 一次性形态，适配器运行期间不转发任何中间
-    // 事件（0.2.1 的推理增量虽写 stderr，也只在 close 后整体消费）、close 前无任何
-    // 周期信号——30s 周期日志让 server 日志/execution_logs 能看到「dsh 跑到第几秒了」
+    // ─── 运行时长遥测：事件虽已边到边上屏，但长思考/长工具调用期间可能长时间没有
+    // 任何事件；30s 周期日志让 server 日志/execution_logs 能看到「dsh 跑到第几秒了」
     // （与前端「回复中 · 已 N 秒」互补：一个子进程存活遥测，一个回复状态计时）。
-    // ⚠️ 不挂 idle timeout（P1）：dsh 无「idle」概念——headless 全程无输出，
-    // 「按输出重置 timer」的 bump 永不触发 → idle timeout 退化为 wall-clock 强杀
-    // （20min 必杀，曾 SIGTERM 在 commit 前）；wall-clock 上限由 dispatch 层已有
-    // 30min hard timeout（AbortSignal → 上方 onAbort kill 子进程）兜底，不新增超时层。
+    // ⚠️ 不挂 idle timeout（P1）：本单只改 stdout 形态、不改超时策略——wall-clock
+    // 上限由 dispatch 层已有 30min hard timeout（AbortSignal → 上方 onAbort kill
+    // 子进程）兜底。事件流让「按输出重置 timer」技术上可行，但属另一张票，不在本单扩。
     const PROGRESS_INTERVAL_MS = 30_000
     const startedAt = Date.now()
     const elapsedSec = () => Math.floor((Date.now() - startedAt) / 1000)
@@ -267,12 +303,8 @@ export class DshAdapter implements LLMAdapter {
       log.info('dsh 运行中', { elapsedSec: elapsedSec() })
     }, PROGRESS_INTERVAL_MS)
 
-    // headless 一次性输出：收集全量 stdout（最终答案）与 stderr（推理增量 / 错误诊断）
-    let stdout = ''
+    // stderr 只收诊断（`[supervisor]` 管道行 / 错误）；stdout 走下方 readline 事件流。
     let stderr = ''
-    child.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString()
-    })
     child.stderr?.on('data', (data: Buffer) => {
       stderr += data.toString()
     })
@@ -288,7 +320,7 @@ export class DshAdapter implements LLMAdapter {
 
     // stderr 分流：exit code 是唯一权威判据。
     // - cli-supervisor 每次启动都会往 stderr 写 `[supervisor] pid=…`，且与 CLI 共用同一
-    //   管道；0.2.1 起推理增量（`dsh: reasoning:`）也写 stderr——按内容前缀做行级过滤
+    //   管道；`--json` 模式下推理流与事件流互斥，但管道噪声仍在——按内容前缀做行级过滤
     //   必然漏，故 exit 0 不按内容判定，**全量降 debug**（字节数 + 截断 head）。
     // - exit != 0 时先剥掉 `[supervisor]` 开头的启动行，再取真实错误作 detail，避免
     //   管道噪声把诊断挤出截断窗口。
@@ -310,54 +342,237 @@ export class DshAdapter implements LLMAdapter {
       }
     })
 
-    // 等 close（进程退出后派发；spawn error 也会触发 close）——先等再判 exitCode，
-    // 免 stdout EOF/close 竞态（opencode WAIT_CLOSE_MS 处理的是先查后等，这里先等）
-    const exitCode = await new Promise<number | null>((res) => {
+    // close promise 在迭代 stdout 之前注册：readline 可能先于 close 结束（正常时序），
+    // 晚注册会漏掉已派发的 close 事件而永久挂起。
+    const exitCodePromise = new Promise<number | null>((res) => {
       child.once('close', (code) => res(code))
     })
 
-    signal?.removeEventListener('abort', onAbort)
-    // 三路径（正常 close / abort / spawn-error）都汇到此处统一清理，不留泄漏 timer
-    clearInterval(progressTimer)
-    log.info('dsh 完成', { totalSec: elapsedSec(), exitCode })
-    // 清理临时 patch（正常/异常/abort 路径都走 finally）
-    if (patchPath) {
-      try {
-        unlinkSync(patchPath)
-      } catch {
-        /* 已被外部清理则忽略 */
+    // ─── stdout NDJSON 事件流：逐行解析、边到边 yield ───
+    // 事件映射见类头注释。诊断兜底三源（优先级）：剥 supervisor 的 stderr >
+    // turn_end.reason 错误 > CLI 用法错误事件 message。
+    const pendingTools = new Map<string, string>() // callId → 工具名（tool_result 不带名）
+    let allText = '' // 已产出的 text 累积（final 去重判据）
+    let lastText = '' // 最后一条 text 事件原文（final 截断对账用）
+    let finalText = ''
+    let turnEndError = ''
+    let errorEventMessage = ''
+    let productiveEvents = 0 // text/thinking/tool/final 事件数（纯文本兜底判据）
+    let invalidLines = 0
+    const rawLines: string[] = [] // 非 JSON 行（格式漂移时的纯文本兜底）
+
+    // 幂等清理：正常路径在 close 后立即执行（与原时序一致），提前 return 由 finally
+    // 兜住——两条路径只生效一次。
+    let cleaned = false
+    const cleanup = () => {
+      if (cleaned) return
+      cleaned = true
+      signal?.removeEventListener('abort', onAbort)
+      clearInterval(progressTimer)
+      // 清理临时 patch（正常/异常/abort/提前 return 路径都走这里）
+      if (patchPath) {
+        try {
+          unlinkSync(patchPath)
+        } catch {
+          /* 已被外部清理则忽略 */
+        }
       }
     }
 
-    // 被取消时不产出后续错误信息
-    if (signal?.aborted) {
+    // ⚠️ 清理必须在 finally：本单起每个 chunk 都是挂起点，消费方（reply.ts 撤回 /
+    // abort）可能在任何 yield 处直接 `.return()`；async generator 在 yield 处被 return
+    // 后会跳过循环之后的**线性**清理代码，导致 30s progressTimer、abort 监听与
+    // per-spawn patch 文件永久泄漏（claude.ts / opencode.ts 同族形态）。
+    try {
+      if (child.stdout) {
+        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity })
+        try {
+          for await (const line of rl) {
+            const trimmed = line.trim()
+            if (!trimmed) continue
+            let event: DshEvent
+            try {
+              event = JSON.parse(trimmed) as DshEvent
+            } catch {
+              invalidLines++
+              rawLines.push(trimmed)
+              continue
+            }
+            // JSON.parse('null') / 标量 / 数组不抛：不挡住的话 event.type 的 TypeError
+            // 会被外层 catch 吞掉，**剩余事件全部丢失**（上游不会发标量，防御式解析兜住）。
+            if (!event || typeof event !== 'object' || Array.isArray(event)) {
+              invalidLines++
+              continue
+            }
+            const type = typeof event.type === 'string' ? event.type : ''
+
+            if (type === 'thinking') {
+              const text = typeof event.text === 'string' ? event.text : ''
+              if (!text) continue // 第二步可能是空串（实证）
+              if (event.truncated === true) {
+                log.debug('dsh thinking 事件被截断', { bytes: Buffer.byteLength(text) })
+              }
+              productiveEvents++
+              yield { content: text, done: false, kind: 'thinking' }
+              continue
+            }
+
+            if (type === 'text') {
+              const text = typeof event.text === 'string' ? event.text : ''
+              if (!text) continue
+              if (event.truncated === true) {
+                log.debug('dsh text 事件被截断', { bytes: Buffer.byteLength(text) })
+              }
+              allText += text
+              lastText = text
+              productiveEvents++
+              yield { content: text, done: false, kind: 'text' }
+              continue
+            }
+
+            if (type === 'tool_call') {
+              const id = typeof event.callId === 'string' ? event.callId : undefined
+              const name = typeof event.tool === 'string' && event.tool ? event.tool : 'unknown'
+              if (id) pendingTools.set(id, name)
+              productiveEvents++
+              yield {
+                content: name,
+                done: false,
+                kind: 'tool',
+                tool: { id, name, status: 'running', input: event.input },
+              }
+              continue
+            }
+
+            if (type === 'tool_result') {
+              const id = typeof event.callId === 'string' ? event.callId : undefined
+              // tool_result 不带工具名——按 callId 从 tool_call 建映射补；缺失退化 unknown
+              const name = (id && pendingTools.get(id)) || 'unknown'
+              if (id) pendingTools.delete(id)
+              const isError = event.status === 'error' || event.isError === true
+              const tool: ToolCallInfo = {
+                id,
+                name,
+                status: isError ? 'error' : 'completed',
+                output: event.result,
+                isError,
+              }
+              if (event.truncated === true) tool.truncated = true
+              productiveEvents++
+              yield { content: name, done: false, kind: 'tool', tool }
+              continue
+            }
+
+            if (type === 'final') {
+              // final 是「最后一条非空 text」的复述，不是全文——收下，流结束后判重再补
+              finalText = typeof event.text === 'string' ? event.text : ''
+              if (finalText) productiveEvents++
+              continue
+            }
+
+            if (type === 'error') {
+              // 仅 CLI 用法错误（运行期失败没有 error 事件）
+              errorEventMessage = typeof event.message === 'string' ? event.message : ''
+              continue
+            }
+
+            if (type === 'status') {
+              const reason = event.reason
+              if (event.phase === 'turn_end' && reason?.kind === 'error') {
+                // 真实形状：{ kind:'error', error:{ code, message } }（dsh-agent-loop 源码实证）；
+                // 兼容历史合成形状（reason.message / error 字符串）作降级。
+                const nested = reason.error
+                turnEndError =
+                  nested &&
+                  typeof nested === 'object' &&
+                  typeof (nested as any).message === 'string'
+                    ? (nested as any).message
+                    : typeof nested === 'string'
+                      ? nested
+                      : typeof reason.message === 'string'
+                        ? reason.message
+                        : JSON.stringify(reason)
+              }
+              continue
+            }
+            // session / 未知 type：不产出（格式漂移由「零 productive 事件 + 纯文本兜底」兜底）
+          }
+        } catch (err: any) {
+          // stdout 流错误不得崩掉整轮：落错误日志，交给 exit code 判定
+          log.error('dsh stdout 读取失败', { error: err.message })
+        }
+      }
+
+      // 等 close（进程退出后派发；spawn error 也会触发 close）——先等再判 exitCode，
+      // 免 stdout EOF/close 竞态（opencode WAIT_CLOSE_MS 处理的是先查后等，这里先等）
+      const exitCode = await exitCodePromise
+
+      log.info('dsh 完成', { totalSec: elapsedSec(), exitCode })
+      cleanup() // 正常路径立即清理（提前 return 的路径由 finally 兜底）
+
+      // 被取消时不产出后续错误信息
+      if (signal?.aborted) {
+        yield { content: '', done: true }
+        return
+      }
+
+      // 文案归位（与进程真实状态一一对应）：
+      // 「无法启动」仅指 spawn 失败（进程从未启动，ENOENT 类）；
+      // 「启动失败 (exit code N)」指进程启动但非零退出；
+      // exit 0 = completed：事件已边到边产出，此处只做 final 去重 / 纯文本兜底，空则空响应。
+      if (spawnFailed) {
+        yield {
+          content: `dsh CLI 无法启动: ${spawnError}`,
+          done: true,
+        }
+        return
+      }
+      if (exitCode !== null && exitCode !== 0) {
+        // 诊断兜底优先级：剥 supervisor 的 stderr > turn_end 错误 > CLI 用法错误事件
+        const detailText = stripSupervisorLines() || turnEndError || errorEventMessage
+        const detail = detailText ? `: ${detailText.slice(0, 300)}` : ''
+        yield {
+          content: `dsh CLI 启动失败 (exit code ${exitCode})${detail}`,
+          done: true,
+        }
+        return
+      }
+      if (invalidLines > 0) {
+        log.debug('dsh stdout 含无法解析的行', { lines: invalidLines })
+      }
+      if (productiveEvents === 0 && rawLines.length > 0) {
+        // 格式漂移防护：exit 0 却一个可产出 chunk 的事件都没有 → 不静默空回复，
+        // 按纯文本兜底。判据是 productive 事件（而非「任意 JSON 行」）：只发未知 type
+        // 的漂移形态也必须触发兜底。
+        log.warn('dsh stdout 不是可解析的事件流，按纯文本兜底', {
+          lines: rawLines.length,
+          head: rawLines.join('\n').slice(0, 500),
+        })
+        const raw = rawLines.join('\n').trim()
+        if (raw) yield { content: raw, done: false, kind: 'text' }
+      } else if (finalText.trimEnd()) {
+        // final 是最后一条 text 的完整复述，但 text 事件可能被上游 8KB 截断
+        // （truncated:true）——此时 allText 尾段只是 final 的**前缀**，endsWith 恒 false；
+        // 直接补 final 会把已上屏的前缀再吐一遍。按前缀对账只补余量。
+        if (!allText.trimEnd().endsWith(finalText.trimEnd())) {
+          let remainder = ''
+          if (allText && finalText.startsWith(allText)) {
+            remainder = finalText.slice(allText.length)
+          } else if (lastText && finalText.startsWith(lastText)) {
+            remainder = finalText.slice(lastText.length)
+          }
+          if (remainder) {
+            if (remainder.trimEnd()) yield { content: remainder, done: false, kind: 'text' }
+          } else {
+            yield { content: finalText, done: false, kind: 'text' }
+          }
+        }
+      }
       yield { content: '', done: true }
-      return
+    } finally {
+      // 三路径（正常 close / abort / 消费方提前 return）都汇到此处统一清理；
+      // cleanup() 幂等，正常路径已执行过则为 no-op。
+      cleanup()
     }
-
-    // 文案归位（与进程真实状态一一对应）：
-    // 「无法启动」仅指 spawn 失败（进程从未启动，ENOENT 类）；
-    // 「启动失败 (exit code N)」指进程启动但非零退出（headless 非 completed 即 exit 1）；
-    // exit 0 = completed：stdout 有内容则产出最终答案，空则空响应（不报错）。
-    if (spawnFailed) {
-      yield {
-        content: `dsh CLI 无法启动: ${spawnError}`,
-        done: true,
-      }
-      return
-    }
-    if (exitCode !== null && exitCode !== 0) {
-      const detailText = stripSupervisorLines()
-      const detail = detailText ? `: ${detailText.slice(0, 300)}` : ''
-      yield {
-        content: `dsh CLI 启动失败 (exit code ${exitCode})${detail}`,
-        done: true,
-      }
-      return
-    }
-    if (stdout.trim()) {
-      yield { content: stdout.trim(), done: false, kind: 'text' }
-    }
-    yield { content: '', done: true }
   }
 }

@@ -82,6 +82,10 @@ function fakeChild(
   }
   const emitClose = (code: number | null) => {
     child.exitCode = code
+    // 真实进程退出时 stdout/stderr 必然 end；readline 事件流迭代依赖 stdout EOF，
+    // 夹具在派发 close 前一并结束两条流（否则迭代器永久挂起）。
+    stdout.push(null)
+    stderr.push(null)
     for (const cb of listeners.get('close') ?? []) cb(code)
   }
   const emitError = (err: Error) => {
@@ -118,6 +122,34 @@ function drive<T>(gen: AsyncIterable<T>): AsyncGenerator<T> {
 /** 启动 generator 并在 close await 处挂起（spawn 同步执行完毕，可查 spawn 参数） */
 function startGen(gen: AsyncIterable<Chunk>) {
   return drive(gen).next()
+}
+
+/**
+ * 驱动一次完整事件流：先启动 generator（保证 close / stdout EOF 监听在 emitClose
+ * 前注册），再灌 stdout NDJSON 与 stderr、派发 close，最后收齐全部非 done chunk。
+ */
+async function runToCompletion(
+  gen: AsyncIterable<Chunk>,
+  child: ReturnType<typeof fakeChild>,
+  stdoutText: string,
+  exitCode: number | null,
+  stderrText = ''
+): Promise<Chunk[]> {
+  const driven = drive(gen)
+  const first = driven.next()
+  if (stdoutText) child.stdout.push(stdoutText)
+  if (stderrText) child.stderr.push(stderrText)
+  await tick()
+  child.emitClose(exitCode)
+  const chunks: Chunk[] = []
+  let r = await first
+  while (!r.done) {
+    // Chunk.done 是载荷字段（generator 仍以 value 产出后才真正 return）——
+    // 只滤掉终态空 done chunk；错误 chunk（done:true 但有正文）必须保留
+    if (!(r.value.done && r.value.content === '')) chunks.push(r.value)
+    r = await driven.next()
+  }
+  return chunks
 }
 
 describe('DshAdapter', () => {
@@ -161,9 +193,9 @@ describe('DshAdapter', () => {
     expect(spawnSupervised).not.toHaveBeenCalled()
   })
 
-  // ─── 成功路径（headless 一次性 stdout → 最终答案 chunk）────
+  // ─── 成功路径（NDJSON 事件流 → 逐条 chunk）────
 
-  it('yields final answer chunk from stdout on exit 0', async () => {
+  it('yields text chunk from NDJSON event on exit 0', async () => {
     const adapter = new DshAdapter({ model: 'deepseek-chat', apiKey: 'sk-key' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -174,7 +206,7 @@ describe('DshAdapter', () => {
       })
     )
     const pending = startGen(gen)
-    child.stdout.push('这是最终答案\n')
+    child.stdout.push(JSON.stringify({ type: 'text', text: '这是最终答案' }) + '\n')
     await tick() // data 事件派发后再 close（见 tick 注释）
     child.emitClose(0)
 
@@ -183,6 +215,267 @@ describe('DshAdapter', () => {
       { content: '这是最终答案', done: false, kind: 'text' },
       { content: '', done: true },
     ])
+  })
+
+  // ─── A1：事件映射（权威断言）──────────────────
+
+  it('A1: maps thinking/text/tool_call/tool_result in order and dedupes final', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const events = [
+      { type: 'session', sessionId: 'session-1', cwd: '/tmp' },
+      { type: 'status', phase: 'turn_start', turn: 1 },
+      { type: 'status', phase: 'step_start', turn: 1, step: 1 },
+      { type: 'thinking', text: '先想一下' },
+      { type: 'text', text: '我先执行命令。' },
+      { type: 'tool_call', callId: 'call_1', tool: 'pwsh', input: { command: 'echo hi' } },
+      { type: 'tool_result', callId: 'call_1', status: 'completed', result: 'hi\r\n' },
+      { type: 'status', phase: 'step_end', turn: 1, step: 1, usage: {} },
+      { type: 'status', phase: 'step_start', turn: 1, step: 2 },
+      { type: 'thinking', text: '' }, // 空串 thinking（实机第二步实证）→ 跳过
+      { type: 'text', text: '完成' },
+      { type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } },
+      { type: 'final', text: '完成' }, // 与最后一条 text 重复 → 不得重复产出
+    ]
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      0
+    )
+
+    expect(chunks.map((c) => c.kind)).toEqual(['thinking', 'text', 'tool', 'tool', 'text'])
+    expect(chunks[0].content).toBe('先想一下')
+    expect(chunks[1].content).toBe('我先执行命令。')
+    // running / completed 两 chunk 共用同一 callId（下游按 id 合并单条记录）
+    expect(chunks[2].tool).toEqual({
+      id: 'call_1',
+      name: 'pwsh',
+      status: 'running',
+      input: { command: 'echo hi' },
+    })
+    expect(chunks[3].tool).toEqual({
+      id: 'call_1',
+      name: 'pwsh',
+      status: 'completed',
+      output: 'hi\r\n',
+      isError: false,
+    })
+    // final 去重：'完成' 只出现一次（来自 text 事件，不是 final）
+    expect(chunks.filter((c) => c.content === '完成')).toHaveLength(1)
+    expect(chunks[4]).toEqual({ content: '完成', done: false, kind: 'text' })
+  })
+
+  it('A1b: yields text from a lone final event (no text event)', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      JSON.stringify({ type: 'final', text: '答案' }) + '\n',
+      0
+    )
+
+    expect(chunks).toEqual([{ content: '答案', done: false, kind: 'text' }])
+  })
+
+  // ─── A3：退出码权威 + 诊断兜底优先级 ───────────
+
+  it('A3: exit != 0 uses CLI error event message when stderr has only supervisor lines', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      JSON.stringify({ type: 'error', message: "unknown option '--patch'" }) + '\n',
+      1,
+      '[supervisor] pid=1234\n[supervisor] spawn ok\n'
+    )
+
+    expect(chunks).toEqual([
+      { content: "dsh CLI 启动失败 (exit code 1): unknown option '--patch'", done: true },
+    ])
+    expect(chunks[0].content).not.toContain('[supervisor]')
+  })
+
+  it('A3b: exit != 0 falls back to turn_end reason message when stderr is empty', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const events = [
+      { type: 'text', text: '部分输出' },
+      {
+        type: 'status',
+        phase: 'turn_end',
+        turn: 1,
+        // 真实形状（dsh-agent-loop 源码）：{ kind:'error', error:{ code, message } }
+        reason: { kind: 'error', error: { code: 'server_error', message: 'model overloaded' } },
+      },
+    ]
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      1
+    )
+
+    // 流式语义：已产出的 text 不能撤回；错误 chunk 收尾并使用 turn_end 诊断
+    expect(chunks.at(-1)).toEqual({
+      content: 'dsh CLI 启动失败 (exit code 1): model overloaded',
+      done: true,
+    })
+  })
+
+  // ─── A4：解析容错 ─────────────────────────────
+
+  it('A4: tolerates non-JSON/blank/unknown lines and still yields valid events', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const stdout =
+      [
+        'not json',
+        '',
+        JSON.stringify({ type: 'text', text: 'ok' }),
+        JSON.stringify({ type: 'mystery', foo: 1 }),
+      ].join('\n') + '\n'
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      stdout,
+      0
+    )
+
+    expect(chunks).toEqual([{ content: 'ok', done: false, kind: 'text' }])
+    // 非法行计数一次落到 debug；合法事件照常产出、未知 type 静默忽略
+    expect(logMocks.debug).toHaveBeenCalledWith('dsh stdout 含无法解析的行', { lines: 1 })
+    expect(logMocks.warn).not.toHaveBeenCalled()
+  })
+
+  it('exit 0 + 全非 JSON stdout → warn + 纯文本兜底（防格式漂移静默空回复）', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      '纯文本答案\n',
+      0
+    )
+
+    expect(chunks).toEqual([{ content: '纯文本答案', done: false, kind: 'text' }])
+    expect(logMocks.warn).toHaveBeenCalledWith(
+      'dsh stdout 不是可解析的事件流，按纯文本兜底',
+      expect.objectContaining({ lines: 1 })
+    )
+  })
+
+  it('A4b: unknown event types only + raw line still falls back to plain text', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const stdout = ['纯文本兜底', JSON.stringify({ type: 'mystery', foo: 1 })].join('\n') + '\n'
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      stdout,
+      0
+    )
+
+    // productive 事件（text/thinking/tool/final）为 0——未知 type 不算，必须兜底，
+    // 否则「只发未知 type」的格式漂移会静默空回复
+    expect(chunks).toEqual([{ content: '纯文本兜底', done: false, kind: 'text' }])
+    expect(logMocks.warn).toHaveBeenCalledWith(
+      'dsh stdout 不是可解析的事件流，按纯文本兜底',
+      expect.objectContaining({ lines: 1 })
+    )
+  })
+
+  it('P3-1: a bare null line does not abort the remaining event stream', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    // JSON.parse('null') 返回 null：未挡住时 event.type 抛 TypeError 被外层 catch
+    // 吞掉，'after-null' 会整条丢失
+    const stdout = ['null', JSON.stringify({ type: 'text', text: 'after-null' })].join('\n') + '\n'
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      stdout,
+      0
+    )
+
+    expect(chunks).toEqual([{ content: 'after-null', done: false, kind: 'text' }])
+    expect(logMocks.debug).toHaveBeenCalledWith('dsh stdout 含无法解析的行', { lines: 1 })
+  })
+
+  // ─── A5：截断保真 ─────────────────────────────
+
+  it('A5: propagates truncated flag on tool_result and logs truncated thinking/text', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const events = [
+      { type: 'thinking', text: '想', truncated: true },
+      { type: 'text', text: '答', truncated: true },
+      { type: 'tool_call', callId: 'c1', tool: 'bash', input: {} },
+      { type: 'tool_result', callId: 'c1', status: 'completed', result: 'out', truncated: true },
+    ]
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      0
+    )
+
+    expect(chunks.map((c) => c.kind)).toEqual(['thinking', 'text', 'tool', 'tool'])
+    expect(chunks[3].tool?.truncated).toBe(true)
+    expect(logMocks.debug).toHaveBeenCalledWith('dsh thinking 事件被截断', {
+      bytes: Buffer.byteLength('想'),
+    })
+    expect(logMocks.debug).toHaveBeenCalledWith('dsh text 事件被截断', {
+      bytes: Buffer.byteLength('答'),
+    })
+  })
+
+  it('A5b: truncated text + complete final yields only the missing remainder (no duplicate prefix)', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    // 上游 8KB 截断后的 text 事件只是 final 的前缀（真实事件形状）；final 不截断
+    const prefix = '猫'.repeat(3000)
+    const remainder = '尾巴'.repeat(1500)
+    const full = prefix + remainder // 6000 字符完整答案
+    const events = [
+      { type: 'text', text: prefix, truncated: true },
+      { type: 'final', text: full },
+    ]
+    const chunks = await runToCompletion(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], { model: 'deepseek-chat' }),
+      child,
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      0
+    )
+
+    const texts = chunks.filter((c) => c.kind === 'text').map((c) => c.content)
+    // 总量必须等于完整答案：旧判据（endsWith）会产出 prefix + full = 9000（重复前缀）
+    expect(texts.join('')).toBe(full)
+    expect(texts[0]).toBe(prefix)
+    expect(texts[1]).toBe(remainder)
+    expect(texts.join('').length).toBe(6000)
   })
 
   it('yields empty done on exit 0 with empty stdout (空响应不报错)', async () => {
@@ -222,7 +515,7 @@ describe('DshAdapter', () => {
       'dsh: reasoning: 先想想\n' +
       'dsh: reasoning: 再想想\n' +
       'some non-fatal warning\n'
-    child.stdout.push('最终答案')
+    child.stdout.push(JSON.stringify({ type: 'text', text: '最终答案' }) + '\n')
     child.stderr.push(stderrText)
     await tick()
     child.emitClose(0)
@@ -337,6 +630,51 @@ describe('DshAdapter', () => {
     expect(r.value).toEqual({ content: '', done: true })
   })
 
+  // ─── 消费方提前退出：清理必须走 finally（P2-2）────
+
+  it('P2-2: consumer early return cleans up timer / abort listener / patch file', async () => {
+    const setSpy = vi.spyOn(globalThis, 'setInterval')
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval')
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+    const controller = new AbortController()
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener')
+
+    const gen = drive(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'deepseek-chat',
+        signal: controller.signal,
+        context: {
+          sessionId: 's1',
+          agentId: 'a1',
+          msgId: 'm1',
+          token: 'tok123',
+        },
+      })
+    )
+    const pending = gen.next()
+
+    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
+    const patchPath = args[args.indexOf('--patch') + 1]
+    expect(existsSync(patchPath)).toBe(true)
+    const timerId = setSpy.mock.results[0]?.value
+
+    child.stdout.push(JSON.stringify({ type: 'text', text: '第一段' }) + '\n')
+    await tick()
+    const first = await pending
+    expect(first.value).toEqual({ content: '第一段', done: false, kind: 'text' })
+
+    // 消费方（reply.ts 撤回/abort）在 yield 处直接 return——async generator 会跳过
+    // 循环之后的线性代码，以下三项必须由 finally 兜住
+    await gen.return({ content: '', done: true })
+
+    expect(timerId).toBeDefined()
+    expect(clearSpy).toHaveBeenCalledWith(timerId)
+    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function))
+    expect(existsSync(patchPath)).toBe(false)
+  })
+
   // ─── 运行时长遥测（P0）+ idle timeout 移除（P1）────
 
   it('logs periodic "dsh 运行中" progress every 30s and clears the timer on close', async () => {
@@ -393,7 +731,7 @@ describe('DshAdapter', () => {
     expect(completion![1]).toMatchObject({ totalSec: expect.any(Number), exitCode: 0 })
   })
 
-  it('no longer attaches idle timeout (headless 无输出, idle 语义不适用; wall-clock 由 30min hard timeout 兜底)', async () => {
+  it('no longer attaches idle timeout (超时策略不变; wall-clock 由 30min hard timeout 兜底)', async () => {
     const adapter = new DshAdapter({ model: 'deepseek-chat' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -413,7 +751,7 @@ describe('DshAdapter', () => {
 
   // ─── spawn 参数形态 ───────────────────────────
 
-  it('spawns node <dsh-entry> --profile headless, prompt via stdin (no positional, no context)', async () => {
+  it('spawns node <dsh-entry> --profile headless --json, prompt via stdin (no positional, no context)', async () => {
     const adapter = new DshAdapter({ model: 'deepseek-chat', apiKey: 'sk-key' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -430,7 +768,8 @@ describe('DshAdapter', () => {
     expect(bin).toBe(process.execPath)
     expect(args[0]).toBe(DSH_ENTRY)
     // 命令行只留 flags：无 positional（题面不占命令行，Windows 32K 限制解除）
-    expect(args.slice(1)).toEqual(['--profile', 'headless'])
+    expect(args.slice(1)).toEqual(['--profile', 'headless', '--json'])
+    expect(args.at(-1)).toBe('--json')
     expect(args).not.toContain('--patch')
     // 题面唯一传输通道 = stdin（spawnSupervised.input）
     expect(opts.input).toBe('User: hello\n\nAssistant: hi')
@@ -464,7 +803,7 @@ describe('DshAdapter', () => {
     const [bin, args, opts] = vi.mocked(spawnSupervised).mock.calls.at(-1)!
     expect(bin).toBe(process.execPath)
     // 命令行只有 flags，超长题面一个字符都不进 args
-    expect(args.slice(1)).toEqual(['--profile', 'headless'])
+    expect(args.slice(1)).toEqual(['--profile', 'headless', '--json'])
     expect(opts.input).toBe(hugePrompt)
     expect(opts.input!.length).toBe(40000)
     expect(opts.input!.startsWith('头')).toBe(true)
@@ -559,8 +898,11 @@ describe('DshAdapter', () => {
     const patchIdx = args.indexOf('--patch')
     expect(patchIdx).toBeGreaterThan(-1)
     const patchPath = args[patchIdx + 1]
-    // 命令行只留 flags（--profile/--patch），题面走 stdin
-    expect(args).toEqual([DSH_ENTRY, '--profile', 'headless', '--patch', patchPath])
+    // 命令行只留 flags（--profile/--patch/--json），题面走 stdin
+    expect(args).toEqual([DSH_ENTRY, '--profile', 'headless', '--patch', patchPath, '--json'])
+    // ⚠️ 位置红线：--json 必须在 --patch 之后（提前会让 patch 被当 app 参数）
+    expect(args.indexOf('--patch')).toBeLessThan(args.indexOf('--json'))
+    expect(args.at(-1)).toBe('--json')
     expect(opts.input).toBe('User: hello\n\nAssistant: hi')
 
     const content = readFileSync(patchPath, 'utf8')
@@ -642,12 +984,19 @@ describe('DshAdapter', () => {
     }
   })
 
-  // ─── A8：静态守卫——截断逻辑不得回流 ─────────────
+  // ─── A8：静态守卫——事件流在位、截断逻辑不得回流 ─────────────
 
-  it('A8: dsh.ts 不再引用 messagesToPromptBounded / PROMPT_ARG_MAX（题面全量走 stdin）', () => {
+  it('A8: dsh.ts 走 --json 事件流，且不含截断 helper / 全量 stdout 拼接', () => {
     const source = readFileSync(new URL('./dsh.ts', import.meta.url), 'utf8')
+    // 事件流形态在位（--json flag + 四类事件分支）
+    expect(source).toContain("'--json'")
+    for (const type of ['thinking', 'tool_call', 'tool_result', 'final']) {
+      expect(source).toContain(`'${type}'`)
+    }
+    // 题面全量走 stdin：截断 helper 不得回流；stdout 不得再全量拼接
     expect(source).not.toContain('messagesToPromptBounded')
     expect(source).not.toContain('PROMPT_ARG_MAX')
+    expect(source).not.toContain('stdout +=')
   })
 
   it('does not pass --patch when context is absent', async () => {
