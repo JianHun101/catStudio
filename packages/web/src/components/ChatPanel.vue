@@ -248,7 +248,7 @@ function replyTimerFor(agentId: string): { startedAt: number; lastBeatAt: number
  * 占位气泡数据源：**有计时锚点、无流式内容**的执行。
  *
  * 覆盖三类没有 `AGENT_TYPING` 的窗口：A2A（猫 @ 猫，没有用户消息状态行可挂）、
- * headless 适配器（整轮不 yield chunk）、首个 chunk 到达前的上下文组装阶段。
+ * 首个 chunk 到达前的上下文组装与整步思考阶段、非流式路径（全程不产出流式内容）。
  * 与 `activeTypingStates` 互斥（同一条目不会既流式又占位）——首个 chunk 到达后
  * `typingStates` 有条目，本 list 自然剔除该 agent，气泡切换但计时同源不重置。
  *
