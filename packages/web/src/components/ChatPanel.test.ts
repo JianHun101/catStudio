@@ -355,7 +355,7 @@ describe('ChatPanel 计时上气泡 footer + 占位气泡（票②）', () => {
   })
 
   it('占位气泡：replyTimers 有 / typingStates 无 的 agent 渲染 streaming 同款虚线气泡 + 停止按钮 + 计时', () => {
-    // 数据源判据：有计时锚点（执行在跑）且无流式条目（headless 整轮 / 首 chunk 前 / A2A）
+    // 数据源判据：有计时锚点（执行在跑）且无流式条目（首个 chunk 前 / A2A）
     expect(source).toContain('const placeholderTimers = computed(')
     expect(source).toContain('if (store.typingStates.has(agentId)) continue')
     // 复用 .message.streaming 视觉语言（虚线边框）——零新增容器样式
