@@ -17,7 +17,6 @@ vi.mock('./cli-utils.js', async (importOriginal) => {
     ...actual,
     resolveJsEntry: vi.fn(() => DSH_ENTRY),
     messagesToPrompt: vi.fn(() => 'User: hello\n\nAssistant: hi'),
-    messagesToPromptBounded: vi.fn(() => 'User: hello\n\nAssistant: hi'),
     attachIdleTimeout: vi.fn(() => () => {}),
     spawnSupervised: vi.fn(),
     getWorkspaceDir: vi.fn(() => '/tmp/workspace'),
@@ -27,6 +26,7 @@ vi.mock('./cli-utils.js', async (importOriginal) => {
 // Logger mock：log 对象用 vi.hoisted 共享
 const logMocks = vi.hoisted(() => ({
   info: vi.fn(),
+  debug: vi.fn(),
   warn: vi.fn(),
   error: vi.fn(),
 }))
@@ -39,7 +39,6 @@ import { DshAdapter } from './dsh.js'
 import {
   spawnSupervised,
   messagesToPrompt,
-  messagesToPromptBounded,
   attachIdleTimeout,
   __test_setPlatform,
 } from './cli-utils.js'
@@ -199,9 +198,45 @@ describe('DshAdapter', () => {
     expect((await gen.next()).done).toBe(true)
   })
 
+  // ─── stderr 分流（exit code 才是权威判据）────
+
+  it('does not warn on exit 0; degrades supervisor + reasoning + warning stderr to debug', async () => {
+    const adapter = new DshAdapter({ model: 'deepseek-chat' })
+    const child = fakeChild()
+    vi.mocked(spawnSupervised).mockReturnValue(child as any)
+
+    const gen = drive(
+      adapter.chatStream([{ role: 'user', content: 'hi' }], {
+        model: 'deepseek-chat',
+      })
+    )
+    const pending = startGen(gen)
+    const stderrText =
+      '[supervisor] pid=1234\n' +
+      'dsh: reasoning: 先想想\n' +
+      'dsh: reasoning: 再想想\n' +
+      'some non-fatal warning\n'
+    child.stdout.push('最终答案')
+    child.stderr.push(stderrText)
+    await tick()
+    child.emitClose(0)
+
+    const r = await pending
+    expect(r.value).toEqual({ content: '最终答案', done: false, kind: 'text' })
+    await gen.next()
+    // exit 0 = 权威的 completed：supervisor 管道行 / 推理增量 / 非致命 warning 一律不进 warn
+    expect(logMocks.warn).not.toHaveBeenCalled()
+    // 降级为一条 debug，带字节数 + 截断 head（供排障，不打扰运行面）
+    expect(logMocks.debug).toHaveBeenCalledTimes(1)
+    expect(logMocks.debug).toHaveBeenCalledWith('dsh stderr (exit 0)', {
+      bytes: stderrText.length,
+      head: stderrText.slice(0, 500),
+    })
+  })
+
   // ─── 失败路径 ─────────────────────────────────
 
-  it('yields error chunk on non-zero exit with stderr detail', async () => {
+  it('yields error chunk on non-zero exit with supervisor lines stripped from detail', async () => {
     const adapter = new DshAdapter({ model: 'deepseek-chat' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -210,7 +245,9 @@ describe('DshAdapter', () => {
       model: 'deepseek-chat',
     })
     const pending = startGen(gen)
-    child.stderr.push('Model returned an error: boom')
+    child.stderr.push(
+      '[supervisor] pid=1234\n[supervisor] spawn ok\nModel returned an error: boom\n'
+    )
     await tick() // data 事件派发后再 close
     child.emitClose(1)
 
@@ -218,6 +255,13 @@ describe('DshAdapter', () => {
     expect(r.value).toEqual({
       content: 'dsh CLI 启动失败 (exit code 1): Model returned an error: boom',
       done: true,
+    })
+    // supervisor 启动行是管道噪声，不得出现在用户可见错误文案里
+    expect((r.value as Chunk).content).not.toContain('[supervisor]')
+    // error 日志同样用剥后文本（真实错误不被噪声挤出截断窗口）
+    expect(logMocks.error).toHaveBeenCalledWith('dsh 退出', {
+      exitCode: 1,
+      stderr: 'Model returned an error: boom',
     })
   })
 
@@ -334,7 +378,7 @@ describe('DshAdapter', () => {
 
   // ─── spawn 参数形态 ───────────────────────────
 
-  it('spawns node <dsh-entry> --profile headless with task as positional (no context)', async () => {
+  it('spawns node <dsh-entry> --profile headless, prompt via stdin (no positional, no context)', async () => {
     const adapter = new DshAdapter({ model: 'deepseek-chat', apiKey: 'sk-key' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -350,8 +394,11 @@ describe('DshAdapter', () => {
     // 纯 JS CLI 用 node.exe spawn（避免 .cmd 包装 EINVAL，CLAUDE.md「node path/to/cli.mjs」）
     expect(bin).toBe(process.execPath)
     expect(args[0]).toBe(DSH_ENTRY)
-    expect(args.slice(1)).toEqual(['--profile', 'headless', 'User: hello\n\nAssistant: hi'])
+    // 命令行只留 flags：无 positional（题面不占命令行，Windows 32K 限制解除）
+    expect(args.slice(1)).toEqual(['--profile', 'headless'])
     expect(args).not.toContain('--patch')
+    // 题面唯一传输通道 = stdin（spawnSupervised.input）
+    expect(opts.input).toBe('User: hello\n\nAssistant: hi')
     // 凭证注入：apiKey 以 DEEPSEEK_API_KEY 进 spawn env（DS_KEY 复用）
     expect(opts.env!.DEEPSEEK_API_KEY).toBe('sk-key')
     // 官方 seam：headless 确定性放行（unconditional，适配器钉死）
@@ -362,9 +409,12 @@ describe('DshAdapter', () => {
     await gen.next()
   })
 
-  it('truncates prompt via messagesToPromptBounded (保尾砍旧历史, 32K 命令行保护)', async () => {
-    vi.mocked(messagesToPrompt).mockReturnValueOnce('x'.repeat(40000))
-    vi.mocked(messagesToPromptBounded).mockReturnValueOnce('bounded-prompt')
+  it('passes >32K prompt through stdin in full (no truncation, Windows 32K 限制解除)', async () => {
+    // 40000 个中文字符（~120KB UTF-8）——旧 positional 形态必超 Windows CreateProcess
+    // 32K 命令行限制；stdin 通道下必须原样全量进 input，且不得再走 messagesToPromptBounded。
+    // 首尾哨兵 + 长度断言：只测长度会漏「中间被替换/保尾砍头」，只测首尾会漏中段丢失。
+    const hugePrompt = '头' + '猫'.repeat(39998) + '尾'
+    vi.mocked(messagesToPrompt).mockReturnValueOnce(hugePrompt)
     const adapter = new DshAdapter({ model: 'deepseek-chat' })
     const child = fakeChild()
     vi.mocked(spawnSupervised).mockReturnValue(child as any)
@@ -376,13 +426,18 @@ describe('DshAdapter', () => {
     )
     const pending = startGen(gen)
 
-    // 超限时 promptArg 由 messagesToPromptBounded 产出（不再是 slice 保头砍尾）
-    const args = vi.mocked(spawnSupervised).mock.calls.at(-1)![1]
-    expect(args.at(-1)).toBe('bounded-prompt')
-    // warn 记录完整 promptLen（40000）而非截断后长度
-    expect(logMocks.warn).toHaveBeenCalledWith(
-      'prompt 超过命令行长度阈值，已按消息粒度截断（保尾砍旧历史）',
-      expect.objectContaining({ promptLen: 40000, max: 30000 })
+    const [bin, args, opts] = vi.mocked(spawnSupervised).mock.calls.at(-1)!
+    expect(bin).toBe(process.execPath)
+    // 命令行只有 flags，超长题面一个字符都不进 args
+    expect(args.slice(1)).toEqual(['--profile', 'headless'])
+    expect(opts.input).toBe(hugePrompt)
+    expect(opts.input!.length).toBe(40000)
+    expect(opts.input!.startsWith('头')).toBe(true)
+    expect(opts.input!.endsWith('尾')).toBe(true)
+    // 截断告警已随 positional 形态一并退役
+    expect(logMocks.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('命令行长度'),
+      expect.anything()
     )
 
     child.emitClose(0)
@@ -468,9 +523,10 @@ describe('DshAdapter', () => {
     const opts = vi.mocked(spawnSupervised).mock.calls.at(-1)![2]
     const patchIdx = args.indexOf('--patch')
     expect(patchIdx).toBeGreaterThan(-1)
-    // launcher flags 在前，task 最后
-    expect(args[patchIdx + 2]).toBe('User: hello\n\nAssistant: hi')
     const patchPath = args[patchIdx + 1]
+    // 命令行只留 flags（--profile/--patch），题面走 stdin
+    expect(args).toEqual([DSH_ENTRY, '--profile', 'headless', '--patch', patchPath])
+    expect(opts.input).toBe('User: hello\n\nAssistant: hi')
 
     const content = readFileSync(patchPath, 'utf8')
     // MCP client 行（官方实证 schema：mcp__<serverName>__* 工具面）
@@ -549,6 +605,14 @@ describe('DshAdapter', () => {
     } finally {
       if (saved !== undefined) process.env.CATSTUDY_TRIGGER_MSG_ID = saved
     }
+  })
+
+  // ─── A8：静态守卫——截断逻辑不得回流 ─────────────
+
+  it('A8: dsh.ts 不再引用 messagesToPromptBounded / PROMPT_ARG_MAX（题面全量走 stdin）', () => {
+    const source = readFileSync(new URL('./dsh.ts', import.meta.url), 'utf8')
+    expect(source).not.toContain('messagesToPromptBounded')
+    expect(source).not.toContain('PROMPT_ARG_MAX')
   })
 
   it('does not pass --patch when context is absent', async () => {
