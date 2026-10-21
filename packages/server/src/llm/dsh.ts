@@ -3,7 +3,6 @@ import type { LLMAdapter } from './adapter.js'
 import {
   resolveJsEntry,
   messagesToPrompt,
-  messagesToPromptBounded,
   spawnSupervised,
   getWorkspaceDir,
   terminateChild,
@@ -38,11 +37,6 @@ try {
  *  与 cli-utils getWorkspaceDir 同款 cwd 假设） */
 const MCP_SERVER_PATH = resolve(getWorkspaceDir(), '..', 'scripts', 'mcp-server.mjs')
 
-/** Windows 命令行长度限制防御阈值。headless task 以 positional 传入
- *  （dsh --profile headless "task"），命令行总长受 CreateProcess
- *  32K 限制——超阈值截断兜底，防止 spawn ENOENT。 */
-const PROMPT_ARG_MAX = 30000
-
 /** YAML 单引号标量：单引号翻倍转义（YAML 语义），路径反斜杠在单引号内保持字面量 */
 function yamlScalar(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
@@ -51,14 +45,15 @@ function yamlScalar(value: string): string {
 /**
  * 生成 per-spawn 临时 cordis.patch.yml（--patch overlay，finally 清理）。
  *
- * ⚠️ 版本 pinned：@deepseek-ai/dsh 锁 0.1.0-rc.6（店长拍板「绑死版本、升大版本再议」）。
+ * ⚠️ 版本 pinned：@deepseek-ai/dsh 锁 0.2.1-rc.2（升级前已逐项对账，见下）。
  *   本文件**关键**硬编码契约（**非穷尽**）——patch row id（agent-default-model /
  *   mcp-catstudy）、DSH_PERMISSION_MODE=danger-full-access seam、provider: deepseek-official
- *   ——均为针对 rc.6 实证的形态；升大版本前先对账这几处再动，避免 rc.7+ 静默背刺。
- *   另有散落同文件的 rc.6 契约未在此穷尽：mcp-client 插件名
+ *   ——均为针对 rc.2 实证的形态；再升版本前先对账这几处再动，避免静默背刺。
+ *   另有散落同文件的契约未在此穷尽：mcp-client 插件名
  *   `@deepseek-ai/dsh-mcp-client`（writePatchConfig 内）、`--profile headless` profile 名
- *   （chatStream 内）、bin 名 `resolveJsEntry('@deepseek-ai/dsh', 'dsh')`（模块顶部）——
- *   升版本时须一并核对，避免「对完此列表就安全」的虚假信心。
+ *   （chatStream 内）、bin 名 `resolveJsEntry('@deepseek-ai/dsh', 'dsh')`（模块顶部）、
+ *   headless 的 stdin 任务输入契约（无 positional 或传 `-` 时读 stdin 到 EOF；
+ *   空白 positional 仍报错）——升版本时须一并核对，避免「对完此列表就安全」的虚假信心。
  *
  * 内容两行：
  *  1. mcp-catstudy（@deepseek-ai/dsh-mcp-client）——`insert` 新增 loader entry
@@ -127,8 +122,8 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
 /**
  * dsh（deepseek-harness）CLI 适配器。
  *
- * 通过 spawn node dsh-entry 子进程（`--profile headless "task"` 一次性形态）→ 收集 stdout →
- * 输出最终答案 Chunk。与 claude.ts 同为 CLI 子进程形态，复用 cli-utils 公共设施
+ * 通过 spawn node dsh-entry 子进程（`--profile headless` + 题面走 stdin 的一次性形态）→
+ * 收集 stdout → 输出最终答案 Chunk。与 claude.ts 同为 CLI 子进程形态，复用 cli-utils 公共设施
  * （resolveJsEntry / messagesToPrompt / spawnSupervised；不挂 idle timeout——
  * headless 全程无输出，idle 语义不适用，见 chatStream 内运行时长遥测注释）。
  *
@@ -137,7 +132,8 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
  * Node 24 同步 EINVAL，bde908e ❌ 审查阻塞项；node.exe 是原生 exe 无此问题）。
  *
  * 形态差异（headless 无流式）：整轮 agent 循环完成后一次性打印最终答案到 stdout
- * （exit 0 = completed，stderr 保持空；非 0 退出 stderr 带错误码+消息）。所以本适配器
+ * （exit 0 = completed，stderr 可能带 `dsh: reasoning:` 推理增量；非 0 退出 stderr
+ * 带错误码+消息）。所以本适配器
  * 不解析事件流——收集全量 stdout，close 后按 exit code 判定产出。长思考/工具循环期间
  * 用户看到静默（headless 形态固有，无中间事件可转发），与 opencode run 的实时工具
  * 事件不同——这是形态取舍，OQ 记录。
@@ -147,7 +143,7 @@ ${envLines.map((l) => `          ${l}`).join('\n')}
  * （继承 env 优先级最高，覆盖 credentials 落盘——不落盘任何密钥）。apiKey 为空时**不注入**
  * （条件注入）——空串会覆盖 dsh credentials 落盘兜底，让有凭证的安装失效。
  *
- * 前置要求: npm i -g @deepseek-ai/dsh@0.1.0-rc.6
+ * 前置要求: npm i -g @deepseek-ai/dsh@0.2.1-rc.2
  */
 export class DshAdapter implements LLMAdapter {
   readonly provider = 'dsh'
@@ -176,40 +172,27 @@ export class DshAdapter implements LLMAdapter {
 
     if (!DSH_ENTRY) {
       yield {
-        content: 'dsh CLI 未安装。请先运行: npm i -g @deepseek-ai/dsh@0.1.0-rc.6',
+        content: 'dsh CLI 未安装。请先运行: npm i -g @deepseek-ai/dsh@0.2.1-rc.2',
         done: true,
       }
       return
     }
 
+    // 题面全量走 stdin（与 claude.ts 同构）：headless 无 positional 时读 stdin 到 EOF，
+    // 不再受 Windows CreateProcess 32K 命令行限制，也不再需要按消息粒度截断。
+    // 静态守卫见 dsh.test.ts A8：本文件不得再引用按长度截断的 helper。
     const fullPrompt = messagesToPrompt(messages)
-    // headless task 以 positional 传入（launcher flags 之后的首个未识别 token 起为
-    // app 参数）——同 opencode 受 32K 限制；超阈值按消息粒度「保尾砍旧历史」
-    // （messagesToPromptBounded：保 system + 末尾「【当前待回复】」触发消息，
-    // 从最旧历史整条丢弃），不再 slice 保头砍尾（会砍掉最该保留的当前任务，
-    // 抵消 1cdbea9 锚定成果）
-    const promptArg =
-      fullPrompt.length > PROMPT_ARG_MAX
-        ? messagesToPromptBounded(messages, PROMPT_ARG_MAX)
-        : fullPrompt
-    if (fullPrompt.length > PROMPT_ARG_MAX) {
-      log.warn('prompt 超过命令行长度阈值，已按消息粒度截断（保尾砍旧历史）', {
-        promptLen: fullPrompt.length,
-        max: PROMPT_ARG_MAX,
-      })
-    }
 
     const model = options.model || this.model
 
     // MCP 结构化路由（context 存在时挂工具面）：per-spawn 临时 patch overlay。
-    // 参数序：launcher flags（--profile/--patch）在前，task 最后。
+    // 参数面只留 flags（--profile / --patch）；题面经 spawnSupervised 的 input 写 stdin。
     let patchPath: string | null = null
     const args = ['--profile', 'headless']
     if (options.context) {
       patchPath = writePatchConfig(options.context, model)
       args.push('--patch', patchPath)
     }
-    args.push(promptArg)
 
     log.info('启动 dsh CLI', { model, promptLen: fullPrompt.length })
 
@@ -247,6 +230,19 @@ export class DshAdapter implements LLMAdapter {
       label: 'dsh',
       // cwd 透传会话 worktree 路径（会话隔离）——缺省默认 workspace（存量行为零变化）
       cwd: options.cwd ?? getWorkspaceDir(),
+      // 题面唯一传输通道：cli-utils 写 stdin + end()，supervisor 透传给 CLI 子进程
+      input: fullPrompt,
+    })
+
+    // stdin 写入守卫（P2）：spawnSupervised 在返回前同步 write(input) + end()，但
+    // 错误是异步派发的。CLI 在消费完 stdin 前早退（patch 读不到 / profile 名漂移 /
+    // 启动即报错）时，pending write 会以 EOF/EPIPE 触发 child.stdin 的 'error'；本进程
+    // 无 uncaughtException 兜底，无监听即**整个 server 退出**。此处立即挂监听兜住
+    // （write 已同步完成、错误异步到达，故返回后挂仍能捕获）。
+    // 不改变主判定：退出码仍是权威，stdin 错误只记 debug。
+    // TODO(另票): 守卫应下沉到 spawnSupervised + cli-supervisor.mjs（claude/openai 同族）。
+    child.stdin?.on('error', (err: NodeJS.ErrnoException) => {
+      log.debug('dsh stdin 写入失败', { code: err.code ?? 'unknown', error: err.message })
     })
 
     // ─── Abort 处理：收到取消信号时终止子进程 ───
@@ -256,10 +252,10 @@ export class DshAdapter implements LLMAdapter {
     const onAbort = () => terminateChild(child, { label: `dsh(${model})` })
     signal?.addEventListener('abort', onAbort)
 
-    // ─── 运行时长遥测（P0）：dsh headless 一次性形态运行期间 stdout/stderr 零输出、
-    // close 前无任何周期信号——30s 周期日志让 server 日志/execution_logs 能看到
-    // 「dsh 跑到第几秒了」（与前端「回复中 · 已 N 秒」互补：一个子进程存活遥测，
-    // 一个回复状态计时）。
+    // ─── 运行时长遥测（P0）：dsh headless 一次性形态，适配器运行期间不转发任何中间
+    // 事件（0.2.1 的推理增量虽写 stderr，也只在 close 后整体消费）、close 前无任何
+    // 周期信号——30s 周期日志让 server 日志/execution_logs 能看到「dsh 跑到第几秒了」
+    // （与前端「回复中 · 已 N 秒」互补：一个子进程存活遥测，一个回复状态计时）。
     // ⚠️ 不挂 idle timeout（P1）：dsh 无「idle」概念——headless 全程无输出，
     // 「按输出重置 timer」的 bump 永不触发 → idle timeout 退化为 wall-clock 强杀
     // （20min 必杀，曾 SIGTERM 在 commit 前）；wall-clock 上限由 dispatch 层已有
@@ -271,7 +267,7 @@ export class DshAdapter implements LLMAdapter {
       log.info('dsh 运行中', { elapsedSec: elapsedSec() })
     }, PROGRESS_INTERVAL_MS)
 
-    // headless 一次性输出：收集全量 stdout（最终答案）与 stderr（错误诊断）
+    // headless 一次性输出：收集全量 stdout（最终答案）与 stderr（推理增量 / 错误诊断）
     let stdout = ''
     let stderr = ''
     child.stdout?.on('data', (data: Buffer) => {
@@ -290,12 +286,27 @@ export class DshAdapter implements LLMAdapter {
       log.error('spawn 失败', { error: err.message })
     })
 
+    // stderr 分流：exit code 是唯一权威判据。
+    // - cli-supervisor 每次启动都会往 stderr 写 `[supervisor] pid=…`，且与 CLI 共用同一
+    //   管道；0.2.1 起推理增量（`dsh: reasoning:`）也写 stderr——按内容前缀做行级过滤
+    //   必然漏，故 exit 0 不按内容判定，**全量降 debug**（字节数 + 截断 head）。
+    // - exit != 0 时先剥掉 `[supervisor]` 开头的启动行，再取真实错误作 detail，避免
+    //   管道噪声把诊断挤出截断窗口。
+    const stripSupervisorLines = () =>
+      stderr
+        .split(/\r?\n/)
+        .filter((line) => !line.trimStart().startsWith('[supervisor]'))
+        .join('\n')
+        .trim()
     child.on('close', (code) => {
       if (code !== 0 && code !== null) {
-        log.error('dsh 退出', { exitCode: code, stderr: stderr.slice(0, 500) })
-      } else if (stderr.trim()) {
-        // exit 0 但 stderr 非空 → 可能包含诊断信息
-        log.warn('dsh stderr (exit 0)', { stderr: stderr.slice(0, 500) })
+        const detail = stripSupervisorLines()
+        log.error('dsh 退出', { exitCode: code, stderr: detail.slice(0, 500) })
+      } else if (stderr) {
+        log.debug('dsh stderr (exit 0)', {
+          bytes: Buffer.byteLength(stderr),
+          head: stderr.slice(0, 500),
+        })
       }
     })
 
@@ -336,7 +347,8 @@ export class DshAdapter implements LLMAdapter {
       return
     }
     if (exitCode !== null && exitCode !== 0) {
-      const detail = stderr.trim() ? `: ${stderr.trim().slice(0, 300)}` : ''
+      const detailText = stripSupervisorLines()
+      const detail = detailText ? `: ${detailText.slice(0, 300)}` : ''
       yield {
         content: `dsh CLI 启动失败 (exit code ${exitCode})${detail}`,
         done: true,
