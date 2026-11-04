@@ -569,7 +569,8 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
         properties: {
           table: {
             type: 'string',
-            enum: ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge'],
+            // 票 A：`server_boots` 进白名单 ⇒ 冻结基线同步（快照跟随真实载荷，不是放宽断言）
+            enum: ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge', 'server_boots'],
           },
           conditions: {
             type: 'array',

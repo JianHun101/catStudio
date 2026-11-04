@@ -32,6 +32,7 @@ import { setRepoDb as setRetrievalEventsDb } from './retrievalEvents.js'
 import { setRepoDb as setTraceDetailsDb } from './traceDetails.js'
 import { setRepoDb as setSpansDb } from './spans.js'
 import { setRepoDb as setDependentsDb } from './dependents.js'
+import { setRepoDb as setServerBootsDb } from './serverBoots.js'
 
 /** 初始化所有 repository 模块的 db 实例（在 initDb() 之后调用） */
 export function initRepository(db: Database.Database): void {
@@ -54,6 +55,7 @@ export function initRepository(db: Database.Database): void {
   setTraceDetailsDb(db)
   setSpansDb(db)
   setDependentsDb(db)
+  setServerBootsDb(db)
 }
 
 // 按实体分组导出，调用方用 repo.agents.xxx / repo.sessions.xxx 等
@@ -75,6 +77,7 @@ export * as chunks from './chunks.js'
 export * as retrievalEvents from './retrievalEvents.js'
 export * as traceDetails from './traceDetails.js'
 export * as spans from './spans.js'
+export * as serverBoots from './serverBoots.js'
 
 export type { SpanInput, SpanRow, LlmSpanDetail } from './spans.js'
 export type {
