@@ -71,6 +71,12 @@ describe('SKILL_CATALOG — 生成值形态', () => {
     }
   })
 
+  it('13 行渲染结果总长 ≤ 3000 字符（注入体积预算守卫）', () => {
+    const entries = buildCatalogEntries()
+    const total = entries.reduce((sum, { name, value }) => sum + `- ${name}: ${value}`.length, 0)
+    expect(total, `实际 ${total} 字符（预算 3000）`).toBeLessThanOrEqual(3000)
+  })
+
   it('生成块在 skill-catalog.ts 中恰好一对标记（BEGIN/END）', () => {
     const source = readFileSync(CATALOG_FILE, 'utf8')
     const begins = source.match(/^\/\/ ── BEGIN GENERATED SKILL_CATALOG/gm) ?? []
