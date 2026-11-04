@@ -1,6 +1,17 @@
 ---
 name: wayfinder
-description: Plan a huge chunk of work — more than one agent session can hold — as a shared map of investigation tickets on your issue tracker, and resolve them one at a time until the way to the destination is clear.
+description: >
+  大块模糊工作先起图：勘察拆票成共享地图，逐票收敛到路径清晰
+  Use when: a chunk of work is too large for one agent session and the route to the destination is still foggy.
+  Not for: work with a settled spec and a single ticket that is ready to implement (use implement).
+  Output: a shared map of investigation tickets and a clear route to the destination.
+# prettier-ignore
+triggers:
+  - "模糊需求"
+  - "大块工作"
+  - "勘察拆票"
+  - "路线图"
+  - "逐票收敛"
 disable-model-invocation: true
 ---
 

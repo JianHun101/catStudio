@@ -1,6 +1,17 @@
 ---
 name: writing-for-agents
-description: Reference for writing any document an agent consumes — a skill, an AGENTS.md/CLAUDE.md, or a doc reached by a pointer. Use when creating or editing a skill, or modifying AGENTS.md or CLAUDE.md. Not for writing human-facing prose (READMEs, articles, release notes) or invoking other skills. Output tightened agent-facing documents — sharper pointers, disclosed reference, pruned duplication.
+description: >
+  为 agent 写文档的元参考（指针措辞/信息层级/剪枝；写技能与 AGENTS.md 时取用）
+  Use when: creating or editing a skill, or modifying AGENTS.md or CLAUDE.md.
+  Not for: writing human-facing prose (READMEs, articles, release notes) or invoking other skills.
+  Output: tightened agent-facing documents — sharper pointers, disclosed reference, pruned duplication.
+# prettier-ignore
+triggers:
+  - "写给智能体"
+  - "文档规范"
+  - "技能编写"
+  - "指针措辞"
+  - "信息层级"
 disable-model-invocation: true
 ---
 

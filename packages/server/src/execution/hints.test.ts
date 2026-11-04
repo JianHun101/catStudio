@@ -695,4 +695,21 @@ describe('buildSkillDirectorySection', () => {
     expect(lines[0]).toBe('【可用技能】以下技能可按需自取正文：')
     expect(lines[lines.length - 1]).toContain('read_skill')
   })
+
+  it('每条渲染为 `- <name>: <是什么>｜何时：...｜触发：...`（A3 注入真值格式）', () => {
+    const lines = buildSkillDirectorySection()
+      .split('\n')
+      .filter((line) => line.startsWith('- '))
+    expect(lines).toHaveLength(13)
+    for (const line of lines) {
+      // 行首名字 + 三段（是什么 / 何时 / 触发）；CJK 分隔符与 frontmatter 生成口径同源
+      expect(line).toMatch(/^- [a-z-]+: .+｜何时：.+｜触发：.+$/)
+      const triggers = line
+        .split('｜')[2]
+        .replace(/^触发：/, '')
+        .split('、')
+      expect(triggers.length).toBeGreaterThanOrEqual(3)
+      expect(triggers.length).toBeLessThanOrEqual(6)
+    }
+  })
 })

@@ -147,7 +147,9 @@ export function parseManifestSkills(
 }
 
 /**
- * 取 SKILL.md frontmatter 的 `description`（首个 `---` 块内的单行标量）。
+ * 取 SKILL.md frontmatter 的 `description`（首个 `---` 块内）。
+ * 支持单行标量与 folded `>` / literal `|` 块（2026-11 起 13 个白名单技能统一用 `>`，
+ * 四段各占一行；旧实现只认单行，会把 `>` 原样当下拉描述）。
  * 非 frontmatter 开头 / 无该字段 → ''（由调用方回退，不抛）。
  */
 export function parseFrontmatterDescription(markdown: string): string {
@@ -156,8 +158,22 @@ export function parseFrontmatterDescription(markdown: string): string {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i]
     if (line.trim() === '---') return ''
-    const m = line.match(/^description:\s*(.+?)\s*$/)
-    if (m) return unquote(m[1])
+    const m = line.match(/^description:\s*(.*?)\s*$/)
+    if (!m) continue
+    const raw = m[1]
+    if (raw === '>' || raw === '>-' || raw === '|' || raw === '|-') {
+      const folded = raw.startsWith('>')
+      const parts: string[] = []
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j]
+        if (next.trim() === '') continue
+        if (next.trim() === '---') break
+        if (!/^\s/.test(next)) break // 缩进结束 = 块结束
+        parts.push(next.trim())
+      }
+      return parts.join(folded ? ' ' : '\n')
+    }
+    return unquote(raw)
   }
   return ''
 }
