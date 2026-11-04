@@ -1288,6 +1288,38 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
       PRIMARY KEY (execution_id, section_key)
     )`,
   },
+
+  // ── 票 A · 启动账本（server_boots）──────────────────────────────────────
+  // 每次 server 启动追加一行进程身份，补上「重启了没有」之外的另一半：**换成了哪一版
+  // 代码**。只追加、不更新/删除；消费面是 `query_db(table='server_boots')`。
+  //
+  // 类型口径：`git_dirty` 存 INTEGER 0/1（不存布尔文本），判据里的 `= 0` 才不会踩
+  // 类型；探测失败写 NULL（未知 ≠ 干净）。`started_at` 由写入层生成 ISO 毫秒 UTC
+  // （`repository/time.ts::nowIso`），故本表不带 `DEFAULT (datetime('now'))`（⑤-c）。
+  //
+  // 票号：店长派活单写的是 `ticket: 'A'`，但既有闸的票号形态是
+  // `^[A-Z]{1,4}-?\d+$`（`migrations.test.ts`），`'A'` 会被当场拒。按「不放宽断言」
+  // 的票面纪律，这里取 `'A-1'`（票 A 的第 1 条迁移），已在交付说明点名。
+  {
+    name: 'server_boots table (A 票启动账本)',
+    ticket: 'A-1',
+    sql: `CREATE TABLE IF NOT EXISTS server_boots (
+      boot_id TEXT PRIMARY KEY,
+      started_at TEXT NOT NULL,
+      pid INTEGER NOT NULL,
+      port INTEGER,
+      cwd TEXT,
+      module_file TEXT,
+      mode TEXT,
+      probe_mode INTEGER NOT NULL DEFAULT 0,
+      git_root TEXT,
+      git_sha TEXT,
+      git_dirty INTEGER,
+      dirty_summary TEXT,
+      db_file TEXT,
+      node_version TEXT
+    )`,
+  },
 ]
 
 /**

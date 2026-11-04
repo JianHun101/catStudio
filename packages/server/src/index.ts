@@ -12,6 +12,7 @@ import {
   agents as agentsRepo,
   sessions as sessionsRepo,
   executionLogs as execLogsRepo,
+  serverBoots as serverBootsRepo,
 } from './db/repository/index.js'
 import { createSocketIO } from './connectors/socketio.js'
 import { replayStuckUserMessages, REPLAY_STUCK_WINDOW_MINUTES } from './execution/recovery.js'
@@ -46,6 +47,7 @@ import { clearStaleShutdownRequest, startShutdownRequestWatcher } from './shutdo
 import { stopOllamaIfSpawned } from './llm/ollama.js'
 import { stopProxyIfSpawned } from './llm/cli-utils.js'
 import { messageOf } from './utils.js'
+import { collectBootInfo } from './boot-info.js'
 
 const log = createLogger('server')
 
@@ -162,6 +164,22 @@ async function main(): Promise<void> {
   initDb()
   initRepository(getDb())
   log.info('database ready')
+
+  // 1.1 启动账本身份行（票 A · `server_boots`）
+  //
+  // 位置钉在 `initDb()` + `initRepository()` 之后、`listen` 之前：库与仓储都已就绪，
+  // 且「server 活着」与「账本可读」是同一件事（查询经运行中的 server 回传）。
+  //
+  // **探测/写入都不阻塞启动**：git 不可用由 `collectBootInfo` 内部 fail-soft 成 null；
+  // 入库失败只记 warn——账本是观测面，不该成为新的启动失败源。
+  // `module_file` 传 `import.meta.url` 反推的**真实模块路径**（不是 cwd）。
+  try {
+    const bootInfo = collectBootInfo(fileURLToPath(import.meta.url), { port: PORT })
+    const bootId = serverBootsRepo.insertServerBoot(bootInfo)
+    log.info('server boot', { boot_id: bootId, ...bootInfo })
+  } catch (err: any) {
+    log.warn('启动账本写入失败（不阻塞启动）', { error: messageOf(err) })
+  }
 
   // 1.5 启动时修复：将上一次异常退出遗留的 running 状态标记为 failed
   //     （参照 clowder-ai StartupReconciler）
