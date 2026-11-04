@@ -115,7 +115,7 @@ function unquote(value) {
   return value
 }
 
-/** 读取 SKILL.md frontmatter：{ name?, description? } */
+/** 读取 SKILL.md frontmatter：{ name?, description? }（description 支持 `>` / `|` 块） */
 function parseFrontmatter(file) {
   const text = readFileSync(file, 'utf8')
   if (!text.startsWith('---')) return {}
@@ -123,15 +123,38 @@ function parseFrontmatter(file) {
   if (end === -1) return {}
   const fm = text.slice(3, end)
   const name = fm.match(/^name:\s*(\S+)/m)?.[1]
-  const description = fm.match(/^description:\s*(.+)$/m)?.[1]?.trim()
+  const description = parseDescription(fm)
   return { name, description }
 }
 
-/** 从 description 提取 Use when / Not for 段内容（三件套）；缺段返回 null */
+/** 从 frontmatter 文本取 description：单行标量或 folded `>` / literal `|` 块。 */
+function parseDescription(fm) {
+  const lines = fm.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^description:\s*(.*?)\s*$/)
+    if (!m) continue
+    const raw = m[1]
+    if (raw === '>' || raw === '>-' || raw === '|' || raw === '|-') {
+      const folded = raw.startsWith('>')
+      const parts = []
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j]
+        if (next.trim() === '') continue
+        if (!/^\s/.test(next)) break // 缩进结束 = 块结束
+        parts.push(next.trim())
+      }
+      return parts.join(folded ? ' ' : '\n')
+    }
+    return unquote(raw)
+  }
+  return undefined
+}
+
+/** 从 description 提取 Use when / Not for 段内容（三件套）；缺段返回 null（冒号可选） */
 function extractUseNotFor(desc) {
   return {
-    uw: desc.match(/Use when (.+?) Not for /)?.[1] ?? null,
-    nf: desc.match(/Not for (.+?) Output /)?.[1] ?? null,
+    uw: desc.match(/Use when:?\s+(.+?)\s+Not for:?\s+/)?.[1] ?? null,
+    nf: desc.match(/Not for:?\s+(.+?)\s+Output:?\s+/)?.[1] ?? null,
   }
 }
 

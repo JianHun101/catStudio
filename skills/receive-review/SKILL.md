@@ -1,6 +1,17 @@
 ---
 name: receive-review
-description: 接收并处理审查反馈。逐项核实审查发现，按严重度分类处理，拒绝表演性同意。Use when another agent's review feedback arrives after a code review. Not for review conclusions that are mergeable (nothing to fix), or when you are the reviewer. Output a fix confirmation table with per-item status and test results.
+description: >
+  接收并处理审查反馈（P1/P2/P3 分类）
+  Use when: another agent's review feedback arrives after a code review.
+  Not for: review conclusions that are mergeable (nothing to fix), or when you are the reviewer.
+  Output: a fix confirmation table with per-item status and test results.
+# prettier-ignore
+triggers:
+  - "处理反馈"
+  - "审查反馈"
+  - "返工"
+  - "修复确认"
+  - "逐项回应"
 ---
 
 # receive-review
@@ -100,7 +111,7 @@ description: 接收并处理审查反馈。逐项核实审查发现，按严重�
 
 ## 衔接
 
-- 修复完成 → 通知审查者确认
+- 修复完成 → 复核确认
 - 审查者确认 ✅ → 可以合并
 - 审查者仍不满意 → 回到步骤 1（新一轮）
 - 3 轮未收敛 → 升级到设计重新评估

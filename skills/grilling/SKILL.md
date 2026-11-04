@@ -1,6 +1,17 @@
 ---
 name: grilling
-description: Interview the user relentlessly about a plan or design. Use when the user wants to stress-test a plan before building, or uses any 'grill' trigger phrases. Not for plans already settled, or interviews that must also produce docs (use grill-with-docs). Output the plan's weak points and hardened decisions.
+description: >
+  压测计划/需求：用提问把粗糙计划压出可证伪需求理解
+  Use when: the user wants to stress-test a plan before building, or uses any 'grill' trigger phrases.
+  Not for: plans already settled, or interviews that must also produce docs (use grill-with-docs).
+  Output: the plan's weak points and hardened decisions.
+# prettier-ignore
+triggers:
+  - "压测需求"
+  - "质疑计划"
+  - "层层追问"
+  - "方案评审"
+  - "需求澄清"
 ---
 
 Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.

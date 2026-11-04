@@ -36,7 +36,7 @@ evidence:
 
 ### D2 · 单一真相源落在叶子文件
 
-目录数据的唯一定义点是 `packages/shared/src/skill-catalog.ts`——**零 import 的叶子**，只放 `SKILL_WHITELIST`（顺序即目录序）与 `SKILL_CATALOG`（一句话文案）两个字面量。
+目录数据的唯一定义点是 `packages/shared/src/skill-catalog.ts`——**零 import 的叶子**，只放 `SKILL_WHITELIST`（顺序即目录序）与 `SKILL_CATALOG`（由 13 份 `SKILL.md` frontmatter 生成，BEGIN/END 标记块；手写只留白名单与架构注释）。
 
 - server 侧经 `@cat-study/shared` 门面取用；
 - `scripts/mcp-server-utils.mjs` **静态 import 该叶子 `.ts` 文件**（靠 Node 原生类型剥离；纯 `export const` 可擦除），本文件只做取值与 re-export，**无手抄字面量**。
@@ -58,13 +58,13 @@ evidence:
 
 ### D5 · 文案逐字复用，不另写
 
-形态 = 标题行 + 每条一行 `- <name>: <一句话>` + 一行行为指令（「对应场景先 `read_skill` 取正文再动手」）。**文案逐字取自 `SKILL_CATALOG`**，注入函数不另写说明——另写就是第二份真相。
+形态 = 标题行 + 每条一行 `- <name>: <是什么>｜何时：<Use when>｜触发：<triggers>` + 一行行为指令（「对应场景先 `read_skill` 取正文再动手」）。**文案由 13 份 `SKILL.md` 的 frontmatter 生成**（`scripts/skills-gen-catalog.mjs` 写回 BEGIN/END 标记块，`--check` 是幂等门），注入函数不另写说明——另写就是第二份真相。
 
 ## 3. 实现形态
 
 | 层     | 落点                                     | 职责                                                             |
 | ------ | ---------------------------------------- | ---------------------------------------------------------------- |
-| 真相源 | `packages/shared/src/skill-catalog.ts`   | 两个字面量；**零 import 叶子**（自身注释即契约）                 |
+| 真相源 | `packages/shared/src/skill-catalog.ts`   | 白名单 + 生成块；**零 import 叶子**（自身注释即契约）            |
 | 纯函数 | `packages/server/src/execution/hints.ts` | `buildSkillDirectorySection()`：纯函数、无 I/O ⇒ 可纯单元测      |
 | 接线   | `packages/server/src/execution/reply.ts` | 组装系统提示时拼入（单点）                                       |
 | MCP 侧 | `scripts/mcp-server-utils.mjs`           | 静态 import 叶子 + re-export；白名单强校验与工具描述文案取自同源 |
@@ -73,12 +73,12 @@ evidence:
 
 1. **搬迁零行为变化**（实测，非读码）：真跑一次 MCP `tools/list`，`read_skill` 描述里的白名单串与搬迁前**逐字一致**——**不做前后对照不算过**。
 2. **打在「真的进 prompt」这一面**：组装式模块测试断言组装出的**第一条 system message** 含该目录段且含全部白名单名字。**只测纯函数不算**——纯函数绿 + 没接上线 = 本活白干。
-3. **纯函数格**：输出含全部名字、格式为 `- <name>: <一句话>`、名字集合 === `SKILL_WHITELIST`（无 `undefined` 空洞）。
+3. **纯函数格**：输出含全部名字、格式为 `- <name>: <是什么>｜何时：<Use when>｜触发：<t1>、<t2>…`、名字集合 === `SKILL_WHITELIST`（无 `undefined` 空洞）。
 4. **静态源断言**：全仓证明定义点唯一（只有 `skill-catalog.ts` 持有字面量），`scripts/mcp-server-utils.mjs` 内只剩取值 / re-export。
 
 ## 5. 已知边界与挂账
 
-- **常驻成本**：约 13 行（~400–600 token），每轮在场。这是**用常驻上下文换发现能力**的自觉取舍。
+- **常驻成本**：约 13 行（约 2269 字符 / 3723 字节），每轮在场。这是**用常驻上下文换发现能力**的自觉取舍。
 - **无工具面的 provider 收不到自取能力**（见 D4），注入的那段目录对它们只是噪声。
 - **乙案（事件级动态提示）与丙案（关键词强制注入）不做**：丙案已否；乙案等甲案生效后另立单评估。
 - **白名单成员资格调整、技能正文内容改动不属本规格**：那是访问约束与领域内容面。

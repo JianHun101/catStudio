@@ -82,6 +82,27 @@ describe('parseFrontmatterDescription', () => {
     )
   })
 
+  it('取 folded `>` 块（四段各占一行）→ 折成单空格文本', () => {
+    const md = [
+      '---',
+      'name: x',
+      'description: >',
+      '  是什么。',
+      '  Use when: 何时。',
+      '  Not for: 不用于。',
+      '  Output: 产物。',
+      '# prettier-ignore',
+      'triggers:',
+      '  - "触发"',
+      '---',
+      '',
+      '正文',
+    ].join('\n')
+    expect(parseFrontmatterDescription(md)).toBe(
+      '是什么。 Use when: 何时。 Not for: 不用于。 Output: 产物。'
+    )
+  })
+
   it('无 frontmatter / 块内无该字段 → 空串（不抛）', () => {
     expect(parseFrontmatterDescription('# 没有 frontmatter')).toBe('')
     expect(parseFrontmatterDescription('---\nname: x\n---\n')).toBe('')
@@ -108,6 +129,8 @@ describe('listSkills', () => {
     for (const s of skills) {
       expect(existsSync(join(root!, s.name, 'SKILL.md'))).toBe(true)
       expect(s.description.length).toBeGreaterThan(0)
+      // folded `>` 不能被原样当下拉描述（2026-11 前的单行解析器会留下这个符号）
+      expect(s.description).not.toBe('>')
     }
     // 抽样：自研与三方的条目都在场（防「只扫到一半目录」退化）
     const names = skills.map((s) => s.name)

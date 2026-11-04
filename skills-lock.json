@@ -17,7 +17,8 @@
       "source": "Leonxlnx/taste-skill",
       "sourceType": "github",
       "skillPath": "skills/taste-skill/SKILL.md",
-      "computedHash": "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89"
+      "computedHash": "bc0b67f98b0a2ca5f1c0e8b03e349f46fa40b84f2c7a173ad87f89261595cc48",
+      "frontmatterAdapted": true
     },
     "diagnosing-bugs": {
       "source": "mattpocock/skills",
@@ -53,7 +54,8 @@
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/productivity/grilling/SKILL.md",
-      "computedHash": "3625da2407536b6c79f7f9a7fe3ab1534e36a2cec32a8e933340dbab8d99ab79"
+      "computedHash": "38236379bc58220833316968c0ad4193a54f98934ba5912ae26d28d39defa10f",
+      "frontmatterAdapted": true
     },
     "handoff": {
       "source": "mattpocock/skills",
@@ -65,7 +67,8 @@
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/implement/SKILL.md",
-      "computedHash": "9e492a68e6ecd414302221920cafb916401a93260e8d07818a377ac9fc93b40e"
+      "computedHash": "4180b2a05fa6683447605068087eb8543bbc4b11af2e1b9a7a9b314caab940af",
+      "frontmatterAdapted": true
     },
     "improve-codebase-architecture": {
       "source": "mattpocock/skills",
@@ -101,13 +104,15 @@
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/to-spec/SKILL.md",
-      "computedHash": "267638edd513b5918de626ad5605d261952abb7428cb308869c663ca924e93e7"
+      "computedHash": "1f4128b7e612bb19c54c86f69d9d6248c71184af6f35645be3e7cad9fe0b5789",
+      "frontmatterAdapted": true
     },
     "to-tickets": {
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/to-tickets/SKILL.md",
-      "computedHash": "918bdefab9313100cb1f7ccb412e2a773fe2f2801dd20d44f6b2acf7a42ca456"
+      "computedHash": "5ac2d1e7408d753755ee3aa0afa173245ca6e77e94d7789acfca602845b2b81c",
+      "frontmatterAdapted": true
     },
     "triage": {
       "source": "mattpocock/skills",
@@ -119,20 +124,23 @@
       "source": "cursor/plugins",
       "sourceType": "github",
       "skillPath": "pstack/skills/unslop/SKILL.md",
-      "computedHash": "c422e38db689a98e8ec4af62402d896c7563641447412da660533fb2b6bab8f1"
+      "computedHash": "cd3cdfc09fb684f187849f125ea0dadfde5e4336536ba78d0f5bc7cb5a6087bc",
+      "frontmatterAdapted": true
     },
     "wayfinder": {
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/wayfinder/SKILL.md",
-      "computedHash": "51423ea3aa642c3d105545a2a6f5211d5205e71b27d80ee6a73ce3fc6e9944de"
+      "computedHash": "9872be02181e07b585d429db62a7e3c6067b1610f609f970781f8c3cd2a5703e",
+      "frontmatterAdapted": true
     },
     "writing-for-agents": {
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/productivity/writing-for-agents/SKILL.md",
-      "computedHash": "cf4d39fd5b74508c2aeb5ce3b3e2c2d674c70d4cb7c88895b51e5bb3d27a7064"
+      "computedHash": "da6154ecde2fa5191cff6201b7620bb1f111f8e5bef5e25bbfdde813944feb6c",
+      "frontmatterAdapted": true
     }
   },
-  "hashSemantics": "sha256 of this skill's SKILL.md blob as committed (git cat-file blob HEAD:skills/<name>/SKILL.md). NOT the upstream file hash — vendor content may differ after project prettier normalization (markdown emphasis *_* vs *_*) and git core.autocrlf line-ending conversion."
+  "hashSemantics": "sha256 of this skill's SKILL.md blob as committed (git cat-file blob HEAD:skills/<name>/SKILL.md). NOT the upstream file hash — vendor content may differ after project prettier normalization (markdown emphasis *_* vs *_*) and git core.autocrlf line-ending conversion. frontmatterAdapted: true 的条目，hash 指本地已提交 blob（含本地 frontmatter 改造），不代表与上游逐字一致。"
 }

@@ -1,4 +1,4 @@
 {
   "*": "prettier --ignore-unknown --write",
-  "skills/**": "node scripts/skills-check-manifest.mjs && node scripts/skills-check-mount.mjs --check"
+  "skills/**": "node scripts/skills-check-manifest.mjs && node scripts/skills-check-mount.mjs --check && node scripts/skills-gen-catalog.mjs --check"
 }

@@ -1,6 +1,17 @@
 ---
 name: spec-gate
-description: 需求/规格进入实施前的自查门（前半个门，对称后端 quality-gate）。检查需求可证伪性、验收信号、边界/契约/验收是否钉死，通过后才能拆票/实施。Use when requirements or a spec is ready and needs a falsifiability + contract-lock check before tickets are cut or code is built. Not for code that is already being implemented or reviewed (use quality-gate), or fuzzy ideas that still need grilling (use grilling/to-spec). Output a Gate Report (PASS/FAIL with per-item results).
+description: >
+  需求进实施前的自查门（可证伪性/契约/验收，前半个门）
+  Use when: requirements or a spec is ready and needs a falsifiability + contract-lock check before tickets are cut or code is built.
+  Not for: code that is already being implemented or reviewed (use quality-gate), or fuzzy ideas that still need grilling (use grilling/to-spec).
+  Output: a Gate Report (PASS/FAIL with per-item results).
+# prettier-ignore
+triggers:
+  - "需求自查"
+  - "规格检查"
+  - "开工前检查"
+  - "可证伪性"
+  - "契约锁定"
 ---
 
 # spec-gate

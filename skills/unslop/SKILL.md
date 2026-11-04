@@ -1,6 +1,17 @@
 ---
 name: unslop
-description: Cut AI tells from any writing. Must always apply.
+description: >
+  去 AI 味判据（AI 痕迹清单/改写自查；任何产出文本取用，外部 vendor 中文翻译）
+  Use when: any text is about to be delivered and must be checked for AI writing tells. Must always apply.
+  Not for: source code, structured data, or text where no editorial pass is wanted.
+  Output: rewritten text with AI tells removed and the original meaning preserved.
+# prettier-ignore
+triggers:
+  - "去 AI 味"
+  - "文本改写"
+  - "痕迹清理"
+  - "自然表达"
+  - "润色"
 disable-model-invocation: true
 ---
 

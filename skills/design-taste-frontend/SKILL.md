@@ -1,6 +1,17 @@
 ---
 name: design-taste-frontend
-description: Anti-slop frontend skill for landing pages, portfolios, and redesigns. The agent reads the brief, infers the right design direction, and ships interfaces that do not look templated. Real design systems when applicable, audit-first on redesigns, strict pre-flight check.
+description: >
+  前端设计品味判据（排版/间距/动效/状态/AI-tells/pre-flight，外部 vendor）
+  Use when: building or redesigning a landing page, portfolio, or visual frontend and the result must not look templated.
+  Not for: dashboard, data-table, or multi-step product UI work that needs information density over visual direction.
+  Output: an interface with an inferred design direction and a completed pre-flight check.
+# prettier-ignore
+triggers:
+  - "前端设计"
+  - "界面品味"
+  - "视觉打磨"
+  - "排版间距"
+  - "改版评审"
 ---
 
 # tasteskill: Anti-Slop Frontend Skill

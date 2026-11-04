@@ -1,6 +1,17 @@
 ---
 name: to-tickets
-description: Break a plan, spec, or the current conversation into a set of tracer-bullet tickets, each declaring its blocking edges, published to the destination the calling context designates — edges as text in a local file, or native blocking links on a real tracker.
+description: >
+  把 spec 拆成工单
+  Use when: a spec or plan is settled and needs to be broken into tracer-bullet tickets with blocking edges.
+  Not for: work that still needs requirements clarification (use grilling/to-spec), or executing the work (use implement).
+  Output: a set of tickets, each declaring what blocks it.
+# prettier-ignore
+triggers:
+  - "拆票"
+  - "工单拆分"
+  - "任务切分"
+  - "依赖排序"
+  - "实施计划"
 disable-model-invocation: true
 ---
 
