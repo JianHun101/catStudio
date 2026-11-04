@@ -127,6 +127,30 @@ describe('boot-info · collectGitInfo', () => {
     expect(dirty.git_dirty).toBe(1)
     expect(dirty.dirty_summary).toContain('untracked.txt')
   })
+
+  it('未暂存修改 ⇒ 摘要保留 porcelain 行首 X 位空格（` M` ≠ `M `）', () => {
+    const dir = mkTmp()
+    gitRun(dir, ['init', '-q'])
+    writeFileSync(join(dir, 'a.txt'), 'a')
+    gitRun(dir, ['add', 'a.txt'])
+    gitRun(dir, [
+      '-c',
+      'user.name=test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'init',
+    ])
+    // 改文件但不暂存：porcelain 原始输出首行为 " M a.txt"（X=空格）。
+    // 无条件 trim 会变成 "M a.txt"，读成「已暂存修改」——状态位语义反转。
+    writeFileSync(join(dir, 'a.txt'), 'b')
+
+    const info = collectGitInfo(join(dir, 'module.mjs'))
+    expect(info.git_dirty).toBe(1)
+    expect(info.dirty_summary).toMatch(/^ M a\.txt$/)
+  })
 })
 
 describe('boot-info · collectBootInfo', () => {

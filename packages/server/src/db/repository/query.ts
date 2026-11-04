@@ -27,10 +27,12 @@ export function setRepoDb(dbInst: Database.Database): void {
   db = dbInst
 }
 
-/** 单表定义：可查列白名单（= 返回列白名单）+ 表级排序列 */
+/** 单表定义：可查列白名单（= 返回列白名单）+ 表级排序列（+ 可选 tie-break） */
 export interface QueryTableSchema {
   columns: readonly string[]
   orderBy: string
+  /** 复合排序键（可选）：仅当同序时间戳会撞值时使用；`rowid` 只参与 ORDER BY、不进投影列 */
+  tiebreak?: string
 }
 
 /**
@@ -126,11 +128,10 @@ const QUERY_TABLE_SCHEMAS_DEF = {
     orderBy: 'started_at',
   },
   // 启动账本（票 A）：只追加的进程身份流水。`started_at` 是 ISO 毫秒，快速连启会撞
-  // 同一值 ⇒ 复合排序键 `started_at DESC, rowid DESC` 保证「后插入的先返回」。tie-break
-  // 列放在下面的 `QUERY_TABLE_TIEBREAK` 单独 map（不塞进本常量的对象形状）：本常量是
-  // `as const` 的异构字面量联合，多出一个字段会让 `routes/internal.ts` 里
-  // `schema.columns.includes(...)` 的联合签名退化成 `never`（tsc 实测），而那张文件
-  // 不在本票改动边界内。`rowid` 只参与 ORDER BY、不进投影列，故列白名单里不需要它。
+  // 同一值 ⇒ 复合排序键 `started_at DESC, rowid DESC` 保证「后插入的先返回」。
+  // tie-break 与 orderBy 一样登记在同一表定义内（`tiebreak` 可选，其余 5 张表不写
+  // ⇒ 它们的 ORDER BY 文本逐字不变）。`rowid` 只参与 ORDER BY、不进投影列，故列
+  // 白名单里不需要它。
   server_boots: {
     columns: [
       'boot_id',
@@ -149,6 +150,7 @@ const QUERY_TABLE_SCHEMAS_DEF = {
       'node_version',
     ],
     orderBy: 'started_at',
+    tiebreak: 'rowid',
   },
 } as const
 
@@ -157,18 +159,6 @@ export const QUERY_TABLE_SCHEMAS: Record<keyof typeof QUERY_TABLE_SCHEMAS_DEF, Q
   QUERY_TABLE_SCHEMAS_DEF
 
 export type QueryTableName = keyof typeof QUERY_TABLE_SCHEMAS
-
-/**
- * 复合排序键（可选）：仅当「同序时间戳会撞值」时使用。
- *
- * 与 `QUERY_TABLE_SCHEMAS` 分开一份而不是塞第二个字段，是为了保住那张常量表的
- * 异构字面量联合形状——`routes/internal.ts` 直接把查表结果当联合访问
- * `schema.columns`，多一个字段会让它的 `.includes()` 参数退化成 `never`（tsc 实测）。
- * 其余 5 张表不在此 map 里 ⇒ 查询语句与原行为逐字相同。
- */
-export const QUERY_TABLE_TIEBREAK: Partial<Record<QueryTableName, string>> = {
-  server_boots: 'rowid',
-}
 
 export type QueryOp = '=' | '>' | '<' | 'LIKE'
 
@@ -199,12 +189,12 @@ export interface QueryTableResult {
  */
 export function queryTable(params: QueryTableParams): QueryTableResult {
   // as const 常量是只读字面量元组——宽化为 readonly string[] 供 includes/join 使用
-  const schema: { columns: readonly string[]; orderBy: string } = QUERY_TABLE_SCHEMAS[params.table]
-  // 复合 tie-break 键（可选）：未登记的表 ⇒ undefined ⇒ ORDER BY 与原行为逐字相同
-  const tiebreak = QUERY_TABLE_TIEBREAK[params.table]
+  const schema: QueryTableSchema = QUERY_TABLE_SCHEMAS[params.table]
   if (!schema) {
     throw new Error(`query_db 表名不在白名单: ${params.table}`)
   }
+  // 复合 tie-break 键（可选）：未登记的表 ⇒ undefined ⇒ ORDER BY 与原行为逐字相同
+  const { tiebreak } = schema
   const conditions = params.conditions ?? []
   for (const c of conditions) {
     if (!schema.columns.includes(c.column)) {

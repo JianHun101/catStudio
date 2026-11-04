@@ -76,12 +76,24 @@ function sanitizedGitEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * 输出修剪模式。
+ *
+ * - `'trim'`（默认）：两端都剥。`rev-parse` 一类单行值里，行尾换行与可能的行首空白
+ *   都不是信息。
+ * - `'stripEol'`：只剥行尾一个换行，**不碰行首**（`status --porcelain` 专用）。
+ *   porcelain 的状态两字符是信息：未暂存修改的行首是 `" M a.txt"`（X 位=空格，
+ *   读作「工作树改了、暂存区没改」）。无条件 `trim()` 会把它变成 `"M a.txt"`
+ *   （X 位=M，读作「已暂存修改」），摘要语义当场反转。
+ */
+type TrimMode = 'trim' | 'stripEol'
+
+/**
  * 跑一条 git 子命令；任何失败（非零退出 / 超时 / git 不存在）⇒ `null`。
  *
  * `--no-optional-locks` 放在子命令之前（git 全局选项位）：避免探测动作去抢
  * `index.lock`，与正在跑的 git 进程互相阻塞。
  */
-function runGit(cwd: string, args: readonly string[]): string | null {
+function runGit(cwd: string, args: readonly string[], trim: TrimMode = 'trim'): string | null {
   try {
     const out = execFileSync('git', ['--no-optional-locks', ...args], {
       cwd,
@@ -92,7 +104,7 @@ function runGit(cwd: string, args: readonly string[]): string | null {
       windowsHide: true,
       env: sanitizedGitEnv(),
     })
-    return out.trim()
+    return trim === 'stripEol' ? out.replace(/\r?\n$/, '') : out.trim()
   } catch {
     return null
   }
@@ -123,7 +135,8 @@ export function collectGitInfo(moduleFile: string): GitInfo {
   }
 
   const sha = runGit(gitRoot, ['rev-parse', 'HEAD'])
-  const status = runGit(gitRoot, ['status', '--porcelain'])
+  // 只剥行尾换行：porcelain 行首的状态字符（含空格）是信息，见 `TrimMode`
+  const status = runGit(gitRoot, ['status', '--porcelain'], 'stripEol')
   return {
     git_root: gitRoot,
     git_sha: sha === null || sha === '' ? null : sha,
