@@ -130,9 +130,14 @@ process.env.EVAL_SAMPLE_RATE ??= '0.02'
 // ─── L1 聚合告警阈值（W1，滞回状态机破线判定）──────
 // 破线方向：success_rate 低于阈值 / timeout_rate、rework_rate 高于阈值。
 // 30 天窗口聚合，未来切 p95 只改配置不改代码
+// 这五项均可在设置页「系统配置 · 评估告警」覆盖：settings 表优先、env 兜底，
+// 改完下一轮聚合（最长 1 小时）生效，无需重启
 process.env.EVAL_ALERT_SUCCESS_RATE ??= '0.8'
 process.env.EVAL_ALERT_TIMEOUT_RATE ??= '0.1'
 process.env.EVAL_ALERT_REWORK_RATE ??= '0.3'
+// 样本门限（条）：执行样本不足时成功率/超时率不判；判词样本不足时返工率不判
+process.env.EVAL_ALERT_MIN_EXECUTIONS ??= '20'
+process.env.EVAL_ALERT_MIN_VERDICTS ??= '30'
 
 // EVAL_CHAIN_SLOW_MS — 链路查询的「慢跳」判据阈值（毫秒，默认 5 分钟）：
 // 跳的 totalMs 严格大于此值即标 slow flag。P1 裁决 = 四类卡点标记全标不筛选

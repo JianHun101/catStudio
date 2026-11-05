@@ -6,6 +6,7 @@ import SessionAgentsPanel from './components/SessionAgentsPanel.vue'
 import SettingsView from './views/SettingsView.vue'
 import EvaluationView from './views/EvaluationView.vue'
 import TraceView from './views/TraceView.vue'
+import EvalAlertBanner from './components/EvalAlertBanner.vue'
 import { useChatStore } from '@/stores/chat'
 
 const store = useChatStore()
@@ -133,6 +134,9 @@ onUnmounted(() => {
       <button class="error-toast-close" @click="store.dismissError" title="关闭">✕</button>
     </div>
   </Transition>
+
+  <!-- 全局评估告警横幅（自包含：自己拉 l1-metrics；破线才渲染） -->
+  <EvalAlertBanner @open-eval="openEval" />
 
   <div class="app-root">
     <!-- 52px 图标轨道（T4：从 .app-layout 内部提到根级常驻）：logo + 会话/追踪/评估 + 底部设置。

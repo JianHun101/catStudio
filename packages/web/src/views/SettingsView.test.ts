@@ -1,6 +1,27 @@
-import { describe, it, expect } from 'vitest'
+// @vitest-environment jsdom
+// 静态源断言之外新增挂载级用例（P2-1：只提交实际改动字段）——文件级声明 DOM 环境，
+// 与 EvaluationView.test.ts / EvalAlertBanner.test.ts 同款（根配置 environment 默认 node）。
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import source from './SettingsView.vue?raw'
+import SettingsView from './SettingsView.vue'
+import { api } from '@/composables/useApi'
 import designTokens from '../../index.html?raw'
+
+// mock useApi 边界：挂载时 onMounted 拉齐六份数据，全部给最小合法回包。
+vi.mock('@/composables/useApi', () => ({
+  api: {
+    getConnectorBindings: vi.fn(),
+    getOneBotStatus: vi.fn(),
+    getNapcatConfig: vi.fn(),
+    getContextConfig: vi.fn(),
+    getSummaryConfig: vi.fn(),
+    getIronLaws: vi.fn(),
+    getEvalAlertConfig: vi.fn(),
+    saveEvalAlertConfig: vi.fn(),
+  },
+}))
 
 /**
  * Verify SettingsView.vue — 全屏设置中心（左侧栏底部齿轮进入，左右分栏经典结构）。
@@ -72,6 +93,137 @@ describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配
     expect(source).toContain('loadConfig()')
     expect(source).toContain('initCtxConfig()')
     expect(source).toContain('loadSummaryConfig()')
+    expect(source).toContain('loadEvalAlertConfig()')
+  })
+})
+
+describe('SettingsView 系统配置（评估告警——GET/POST /api/config/eval-alert）', () => {
+  it('第 4 张卡：5 个数字输入（三条告警线 + 两个门限）+ 保存按钮', () => {
+    expect(source).toContain('getEvalAlertConfig()')
+    expect(source).toContain('loadEvalAlertConfig()')
+    expect(source).toContain('v-model.number="evalAlertRate.successRate"')
+    expect(source).toContain('v-model.number="evalAlertRate.timeoutRate"')
+    expect(source).toContain('v-model.number="evalAlertRate.reworkRate"')
+    expect(source).toContain('v-model.number="evalAlertMinExecutions"')
+    expect(source).toContain('v-model.number="evalAlertMinVerdicts"')
+    expect(source).toContain('保存评估告警')
+  })
+
+  it('副标题写清生效时机：下一轮聚合（最长 1 小时）生效，无需重启', () => {
+    expect(source).toContain('下一轮聚合（最长 1 小时）生效，无需重启')
+  })
+
+  it('保存只提交与基线不同的字段（百分比换算成小数）', () => {
+    // P2-1：无条件下发五字段会把 env 兜底整片冻结成保存那刻的值。
+    // 保存前与加载时基线比差，只拼实际改动字段。
+    expect(source).toContain('buildEvalAlertPatch')
+    expect(source).toContain('evalAlertBaseline')
+    expect(source).toContain('api.saveEvalAlertConfig(patch)')
+    expect(source).toContain('patch.successRate = next.successRate / 100')
+    expect(source).toContain('patch.timeoutRate = next.timeoutRate / 100')
+    expect(source).toContain('patch.reworkRate = next.reworkRate / 100')
+    expect(source).toContain('patch.minExecutions = next.minExecutions')
+    expect(source).toContain('patch.minVerdicts = next.minVerdicts')
+  })
+
+  it('来源小标：source 为 settings 的字段才显示「已自定义」', () => {
+    expect(source).toContain("evalAlertSource?.successRate === 'settings'")
+    expect(source).toContain("evalAlertSource?.minVerdicts === 'settings'")
+    expect(source).toContain('已自定义')
+  })
+
+  // ─── 挂载级：保存只提交实际改动字段（P2-1 回归门）───
+  const evalAlertConfig = {
+    successRate: 0.8,
+    timeoutRate: 0.1,
+    reworkRate: 0.3,
+    minExecutions: 20,
+    minVerdicts: 30,
+  }
+  const evalAlertSource = {
+    successRate: 'env',
+    timeoutRate: 'env',
+    reworkRate: 'env',
+    minExecutions: 'env',
+    minVerdicts: 'env',
+  } as const
+
+  beforeEach(() => {
+    // 挂载即拉齐六份数据——全部给最小合法回包，避免未处理 rejection 污染用例。
+    vi.mocked(api.getConnectorBindings).mockResolvedValue({ ok: true, bindings: [] })
+    vi.mocked(api.getOneBotStatus).mockResolvedValue({
+      ok: true,
+      enabled: false,
+      apiBase: '',
+      running: false,
+      autoStart: false,
+      launchCmdConfigured: false,
+      launchReady: false,
+      tokenConfigured: false,
+      tokenMasked: '',
+    })
+    vi.mocked(api.getNapcatConfig).mockResolvedValue({
+      ok: true,
+      napcatPath: '',
+      pathExists: null,
+      autoStart: false,
+    })
+    vi.mocked(api.getContextConfig).mockResolvedValue({
+      warnThreshold: 0.8,
+      handoffThreshold: 0.9,
+      maxContextTokens: 128000,
+    })
+    vi.mocked(api.getSummaryConfig).mockResolvedValue({
+      summaryModel: 'deepseek-v4-flash',
+      summaryBaseUrl: '',
+      summaryApiKeyMasked: '',
+      hasKey: false,
+      needsRestart: false,
+    })
+    vi.mocked(api.getIronLaws).mockResolvedValue({ coder: 'coder', reviewer: 'reviewer' })
+    vi.mocked(api.getEvalAlertConfig).mockResolvedValue({
+      ok: true,
+      config: { ...evalAlertConfig },
+      source: { ...evalAlertSource },
+    })
+    vi.mocked(api.saveEvalAlertConfig).mockReset()
+    vi.mocked(api.saveEvalAlertConfig).mockResolvedValue({
+      ok: true,
+      config: { ...evalAlertConfig },
+      source: { ...evalAlertSource },
+    })
+  })
+
+  it('只改审查判词门限 → POST 请求体只有 minVerdicts 一个键', async () => {
+    const wrapper = mount(SettingsView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+
+    // 按 label 文本定位（input-ctx 类名被 context 阈值卡共用，不能靠序号）
+    const row = wrapper.findAll('.frow').find((r) => r.text().includes('审查判词门限'))
+    expect(row, '未找到审查判词门限输入行').toBeTruthy()
+    await row!.find('input.input-ctx').setValue(45)
+
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存评估告警'))
+    expect(saveBtn, '未找到保存评估告警按钮').toBeTruthy()
+    await saveBtn!.trigger('click')
+    await flushPromises()
+
+    expect(api.saveEvalAlertConfig).toHaveBeenCalledTimes(1)
+    expect(api.saveEvalAlertConfig).toHaveBeenCalledWith({ minVerdicts: 45 })
+    wrapper.unmount()
+  })
+
+  it('无改动时不发请求（空保存不能把 env 兜底字段写进 settings）', async () => {
+    const wrapper = mount(SettingsView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存评估告警'))
+    await saveBtn!.trigger('click')
+    await flushPromises()
+
+    expect(api.saveEvalAlertConfig).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('没有改动需要保存')
+    wrapper.unmount()
   })
 })
 
@@ -515,18 +667,18 @@ describe('SettingsView 系统配置区布局（三卡统一间距 + 每卡统一
     return hit ? { selectorText: hit[1], body: hit[2] } : null
   }
 
-  it('三张卡片各包一层 config-section——标题与卡片一一对应，数量不匹配即布局回退', () => {
+  it('四张卡片各包一层 config-section——标题与卡片一一对应，数量不匹配即布局回退', () => {
     const pane = systemPaneTemplate()
     // 三者必须同数：任一为 0 或数量不等，说明有卡片漏包 / 有标题游离在层外
-    expect(pane.match(/class="config-section"/g)).toHaveLength(3)
-    expect(pane.match(/class="ctx-card"/g)).toHaveLength(3)
-    expect(pane.match(/class="section-title"/g)).toHaveLength(3)
+    expect(pane.match(/class="config-section"/g)).toHaveLength(4)
+    expect(pane.match(/class="ctx-card"/g)).toHaveLength(4)
+    expect(pane.match(/class="section-title"/g)).toHaveLength(4)
   })
 
-  it('每层的标题先于卡片且文本对应（上下文阈值配置 / 摘要配置 / 铁律）', () => {
+  it('每层的标题先于卡片且文本对应（上下文阈值配置 / 摘要配置 / 铁律 / 评估告警）', () => {
     const chunks = systemPaneTemplate().split('class="config-section"').slice(1)
-    expect(chunks).toHaveLength(3)
-    const expectedTitles = ['上下文阈值配置', '摘要配置', '铁律']
+    expect(chunks).toHaveLength(4)
+    const expectedTitles = ['上下文阈值配置', '摘要配置', '铁律', '评估告警']
     chunks.forEach((chunk, i) => {
       const titleIdx = chunk.indexOf('class="section-title"')
       const cardIdx = chunk.indexOf('class="ctx-card"')
@@ -685,11 +837,12 @@ describe('SettingsView T3 设置页对齐改版（票面 §二 规格）', () =>
     expect(source).toContain('class="src"')
   })
 
-  it('每张配置卡带「什么时候生效」副标题（三卡各一条）', () => {
-    expect(source.match(/class="card-sub"/g)).toHaveLength(3)
+  it('每张配置卡带「什么时候生效」副标题（四卡各一条）', () => {
+    expect(source.match(/class="card-sub"/g)).toHaveLength(4)
     expect(source).toContain('保存后立即生效，重启后仍保持。')
     expect(source).toContain('保存后需重启 server 才生效（写 .env）。')
     expect(source).toContain('保存后下一轮回复即生效，无需重启。')
+    expect(source).toContain('下一轮聚合（最长 1 小时）生效，无需重启。')
   })
 
   it('验收 2 的结构前提：卡片内缩量统一 + 滚动条槽常驻', () => {

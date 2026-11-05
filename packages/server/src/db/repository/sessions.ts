@@ -131,8 +131,9 @@ export function updateCompressedSummary(
  * **全量**会话（含已归档），按最近活跃排序。
  *
  * 与 `listActiveSessions()` 的分工是刻意的：这个函数是「系统链路」口径——归档只改
- * **用户态列表可见性**，不动任何系统链路（评估告警播报 `eval/l1-aggregator.ts` 等照常
- * 覆盖归档会话）。把过滤塞进这里 = 让归档静默改变无关子系统的行为。
+ * **用户态列表可见性**，不动任何系统链路（系统链路的覆盖面仍含归档会话；评估告警
+ * 已改由 `/api/eval/l1-metrics` 供横幅与评估中心读取，不再经 `messages`）。把过滤
+ * 塞进这里 = 让归档静默改变无关子系统的行为。
  */
 export function listAllSessions(): SessionRow[] {
   return db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as SessionRow[]

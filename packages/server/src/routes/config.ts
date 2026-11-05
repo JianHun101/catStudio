@@ -1,12 +1,16 @@
 /**
- * 上下文阈值配置 API — 80% 告警线 / 90% 交接触发线的读写入口。
+ * 运行期配置 API — 上下文阈值 + 评估告警阈值。
  *
- * 配置落 context-config.json（项目根，dev.js 不消费——无跨包读点，见 config/context-config.ts）：
+ * 上下文阈值（context-config.json，项目根，dev.js 不消费——无跨包读点）：
  * - GET  — 返回 { warnThreshold, handoffThreshold, maxContextTokens }；缺文件返回默认 0.8/0.9
  * - POST — 收 { warnThreshold?, handoffThreshold? }（至少一个），校验 0<t<1 且 warn≤handoff，
  *          原子写文件，返回最新全量
- *
  * maxContextTokens 从 env MAX_CONTEXT_TOKENS 读、不回写（.env 可写管理留二期，既定契约）。
+ *
+ * 评估告警阈值（settings 表 key `eval_alert_config`，settings 优先、env 兜底）：
+ * - GET  — { ok, config: { successRate, timeoutRate, reworkRate, minExecutions, minVerdicts }, source }
+ * - POST — 收任意显式子集，逐字段严格校验（告警线为 (0,1) 小数、门限为 1..10000 整数）；
+ *          传 80 而不是 0.8 必须 400，不做隐式换算。写后下一轮聚合生效，无需重启。
  */
 import type { FastifyInstance } from 'fastify'
 import {
@@ -14,6 +18,11 @@ import {
   writeContextConfig,
   type ContextConfig,
 } from '../config/context-config.js'
+import {
+  getEvalAlertConfig,
+  validateEvalAlertPatch,
+  writeEvalAlertConfig,
+} from '../config/eval-alert-config.js'
 
 /** 阈值合法性：number、有限、开区间 (0,1)——写侧 400 判定（与读侧同源同义） */
 function validThreshold(v: unknown): v is number {
@@ -68,5 +77,20 @@ export async function configRoutes(app: FastifyInstance): Promise<void> {
     // 先校验后写盘——校验失败路径零副作用（不落盘）
     const saved = writeContextConfig(next)
     return reply.send(toResponseBody(saved))
+  })
+
+  /** 评估告警阈值：settings 表优先、env 兜底；source 逐字段回报生效来源 */
+  app.get('/api/config/eval-alert', async (_req, reply) => {
+    const { config, source } = getEvalAlertConfig()
+    return reply.send({ ok: true, config, source })
+  })
+
+  app.post('/api/config/eval-alert', async (req, reply) => {
+    const patch = validateEvalAlertPatch(req.body)
+    if (!patch.ok) {
+      return reply.status(400).send({ error: patch.error })
+    }
+    const { config, source } = writeEvalAlertConfig(patch.value)
+    return reply.send({ ok: true, config, source })
   })
 }

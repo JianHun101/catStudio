@@ -1,41 +1,42 @@
 /**
- * W1 L1 聚合器 — 八口径指标聚合 + 滞回告警状态机 + 告警投递。
+ * W1 L1 聚合器 — 八口径指标聚合 + 滞回告警状态机。
  *
  * 契约要点：
  * - 八口径：执行成功率 / 超时率 / 平均耗时 / token / suggest_rate / reject_rate /
  *   解析失败率 / infra 失败数（server_restart 桶单独报，不进成功率不进告警）
- * - 告警：滞回状态机 normal→alerting→normal，仅转换沿发「📊评估告警」（行首@店长，
- *   走既有消息通道：落库 + 房间广播 + mentions 写回）；恢复只记报告一行（log）
+ * - **投递形态（2026-11 起）**：告警**不落会话、不广播**。聚合结果由
+ *   `GET /api/eval/l1-metrics` 供评估中心与全局横幅（`EvalAlertBanner.vue`）读取；
+ *   定时器只负责滞回状态机与日志留痕。旧「每会话落一条 system 消息」已整体退役。
+ * - **样本门**：成功率/超时率需 ≥ `minExecutions` 条执行样本、返工率需 ≥ `minVerdicts`
+ *   条判词样本才参与判定；不足时进 `insufficient`（只记 debug，不告警、不改状态机）。
+ * - 告警：滞回状态机 normal→alerting→normal，转换沿只记日志；恢复只记报告一行
  * - 重启清空状态机（模块级内存态，重启后最多多发一条，接受）
- * - 阈值 env 化（env.ts ??= 默认值），30 天窗口聚合（未来切 p95 只改配置）
+ * - 阈值 settings 表优先、env 兜底（`config/eval-alert-config.ts`），改完下一轮聚合
+ *   生效，无需重启；30 天窗口聚合（未来切 p95 只改配置）
  */
 
-import { v4 as uuid } from 'uuid'
 import { getDb } from '../db/index.js'
-import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
 import { isoDaysAgo } from '../db/repository/clock.js'
 import { createLogger } from '../logger.js'
-import { envNumber } from '../env-number.js'
-import { messageOf } from '../utils.js'
-import type { EngineBus, HandoffBus } from '../execution/bus.js'
+import { getEvalAlertConfig } from '../config/eval-alert-config.js'
 
 const log = createLogger('l1-aggregator')
 
 /** 聚合窗口（天）——告警口径基于近 30 天执行数据 */
 export const WINDOW_DAYS = 30
 
-// ─── 阈值（env.ts 已 ??= 默认值）───────────────────
+// ─── 阈值（settings 优先、env 兜底）────────────────
 
-export function alertThresholds(): {
+export interface AlertThresholds {
   successRate: number
   timeoutRate: number
   reworkRate: number
-} {
-  return {
-    successRate: envNumber('EVAL_ALERT_SUCCESS_RATE', 0.8),
-    timeoutRate: envNumber('EVAL_ALERT_TIMEOUT_RATE', 0.1),
-    reworkRate: envNumber('EVAL_ALERT_REWORK_RATE', 0.3),
-  }
+  minExecutions: number
+  minVerdicts: number
+}
+
+export function alertThresholds(): AlertThresholds {
+  return getEvalAlertConfig().config
 }
 
 // ─── 聚合 ──────────────────────────────────────────
@@ -57,8 +58,10 @@ export interface L1Metrics {
   parseFailureRate: number
   /** infra 失败数（server_restart 桶，单独报不进成功率） */
   infraFailures: number
-  /** 样本量（successRate 分母）——空窗口时无意义，报出来供报告行使用 */
+  /** 执行样本量（successRate 分母）——空窗口时无意义，报出来供报告行使用 */
   sampleTotal: number
+  /** 审查判词样本量（返工率分母）——样本门的第二个分母 */
+  verdictTotal: number
 }
 
 /**
@@ -135,6 +138,7 @@ export function aggregateMetrics(): L1Metrics {
     parseFailureRate: parseTotal > 0 ? failures / parseTotal : 0,
     infraFailures: execRow.infra_failures,
     sampleTotal,
+    verdictTotal: verdicts,
   }
 }
 
@@ -150,24 +154,87 @@ export function __test_resetAlertState(): void {
   alertState = 'normal'
 }
 
-/** 破线判定结果：broken 非空 = 需告警 */
-function evaluateBreaches(m: L1Metrics, t: ReturnType<typeof alertThresholds>): string[] {
-  const broken: string[] = []
-  if (m.successRate < t.successRate) {
-    broken.push(
-      `执行成功率 ${(m.successRate * 100).toFixed(1)}%（< ${(t.successRate * 100).toFixed(0)}%）`
+export type ThresholdKey = 'successRate' | 'timeoutRate' | 'reworkRate'
+
+/** 一条破线 / 样本不足读数——text 直接供横幅与评估中心展示 */
+export interface ThresholdBreach {
+  key: ThresholdKey
+  value: number
+  threshold: number
+  text: string
+}
+
+export interface BreachEvaluation {
+  /** 够格且破线——驱动状态机与告警 */
+  broken: ThresholdBreach[]
+  /** 样本不足——只记 debug，不告警、不改状态机 */
+  insufficient: ThresholdBreach[]
+}
+
+/**
+ * 破线判定 + 样本门。
+ *
+ * 成功率/超时率共用一个执行分母 `sampleTotal`，返工率用审查分母 `verdictTotal`；
+ * 分母不足时对应告警线一律进 `insufficient`，**不参与比较**——16 条判词算出的
+ * 37.5% 与 30 条判词算出的 37.5% 不是同一个量级的证据，混在一起会让告警在
+ * 小样本上反复翻转。
+ */
+export function evaluateBreaches(m: L1Metrics, t: AlertThresholds): BreachEvaluation {
+  const broken: ThresholdBreach[] = []
+  const insufficient: ThresholdBreach[] = []
+
+  if (m.sampleTotal < t.minExecutions) {
+    insufficient.push(
+      {
+        key: 'successRate',
+        value: m.sampleTotal,
+        threshold: t.minExecutions,
+        text: `执行成功率样本不足（${m.sampleTotal} < ${t.minExecutions} 条执行）`,
+      },
+      {
+        key: 'timeoutRate',
+        value: m.sampleTotal,
+        threshold: t.minExecutions,
+        text: `超时率样本不足（${m.sampleTotal} < ${t.minExecutions} 条执行）`,
+      }
     )
+  } else {
+    if (m.successRate < t.successRate) {
+      broken.push({
+        key: 'successRate',
+        value: m.successRate,
+        threshold: t.successRate,
+        text: `执行成功率 ${(m.successRate * 100).toFixed(1)}%（< ${(t.successRate * 100).toFixed(0)}%）`,
+      })
+    }
+    if (m.timeoutRate > t.timeoutRate) {
+      broken.push({
+        key: 'timeoutRate',
+        value: m.timeoutRate,
+        threshold: t.timeoutRate,
+        text: `超时率 ${(m.timeoutRate * 100).toFixed(1)}%（> ${(t.timeoutRate * 100).toFixed(0)}%）`,
+      })
+    }
   }
-  if (m.timeoutRate > t.timeoutRate) {
-    broken.push(
-      `超时率 ${(m.timeoutRate * 100).toFixed(1)}%（> ${(t.timeoutRate * 100).toFixed(0)}%）`
-    )
-  }
+
   const reworkRate = m.suggestRate + m.rejectRate
-  if (reworkRate > t.reworkRate) {
-    broken.push(`返工率 ${(reworkRate * 100).toFixed(1)}%（> ${(t.reworkRate * 100).toFixed(0)}%）`)
+  if (m.verdictTotal < t.minVerdicts) {
+    insufficient.push({
+      key: 'reworkRate',
+      value: m.verdictTotal,
+      threshold: t.minVerdicts,
+      text: `返工率样本不足（${m.verdictTotal} < ${t.minVerdicts} 条判词）`,
+    })
+  } else if (reworkRate > t.reworkRate) {
+    broken.push({
+      key: 'reworkRate',
+      value: reworkRate,
+      threshold: t.reworkRate,
+      text: `返工率 ${(reworkRate * 100).toFixed(1)}%（> ${(t.reworkRate * 100).toFixed(0)}%）`,
+    })
   }
-  return broken
+
+  return { broken, insufficient }
 }
 
 /** 格式化为报告行（恢复/调试用，只记 log 不投递） */
@@ -181,77 +248,48 @@ function formatReportLine(m: L1Metrics): string {
     `reject ${(m.rejectRate * 100).toFixed(1)}%`,
     `解析失败率 ${(m.parseFailureRate * 100).toFixed(1)}%`,
     `infra 失败 ${m.infraFailures}`,
-    `样本 ${m.sampleTotal}`,
+    `执行样本 ${m.sampleTotal}`,
+    `判词样本 ${m.verdictTotal}`,
   ].join(' / ')
-}
-
-/**
- * 告警投递：对每个存在的会话落库 + 房间广播（system 消息，mentions=['店长'] 写回——
- * 上下文过滤只对店长可见；与 agent 回复的落库后写回不同，系统告警一次落库带全）。
- * per-session 防御：单会话 FK 失败（会话并发删除）不 abort 其余会话。
- */
-function broadcastAlert(bus: EngineBus & HandoffBus, broken: string[]): void {
-  const content = `@店长 📊评估告警（近 ${WINDOW_DAYS} 天）：${broken.join('、')}，请关注猫咖运行状态`
-  const sessions = sessionsRepo.listAllSessions()
-  for (const s of sessions) {
-    try {
-      const msgId = uuid()
-      messagesRepo.insertMessage(
-        msgId,
-        s.id,
-        'system',
-        content,
-        JSON.stringify(['店长']),
-        null,
-        null
-      )
-      bus.emitSystemNotice({
-        id: msgId,
-        sessionId: s.id,
-        agentId: null,
-        content,
-        mentions: ['店长'],
-        createdAt: new Date().toISOString(),
-      })
-      log.warn('L1 评估告警已投递', { sessionId: s.id, broken })
-    } catch (err: any) {
-      // 单会话投递失败只留痕（会话已删等 FK 场景）
-      log.warn('L1 评估告警投递失败（跳过该会话）', { sessionId: s.id, error: messageOf(err) })
-    }
-  }
 }
 
 /**
  * 执行一轮 L1 聚合 + 滞回判定。
  * 定时器（index.ts 每小时）调用；也可测试直接调用。
- * 返回值供测试断言：本次是否触发告警/恢复。
+ * **不落库、不广播**——结果由 `/api/eval/l1-metrics` 读，返回值供测试断言。
  */
-export function runL1Aggregation(bus: EngineBus & HandoffBus): {
+export function runL1Aggregation(): {
   alert: boolean
   recovered: boolean
+  broken: ThresholdBreach[]
+  insufficient: ThresholdBreach[]
 } {
   const metrics = aggregateMetrics()
   const thresholds = alertThresholds()
-  const broken = evaluateBreaches(metrics, thresholds)
+  const { broken, insufficient } = evaluateBreaches(metrics, thresholds)
+
+  // 样本不足只留 debug：它不改变状态机，但排障时要能看出「为什么没告警」
+  if (insufficient.length > 0) {
+    log.debug('L1 告警样本不足（不判定）', { insufficient: insufficient.map((b) => b.text) })
+  }
 
   if (alertState === 'normal' && broken.length > 0) {
-    // normal → alerting：转换沿发告警
+    // normal → alerting：转换沿记日志（告警面由 l1-metrics 读出）
     alertState = 'alerting'
-    broadcastAlert(bus, broken)
-    log.warn('L1 告警进入 alerting', { broken })
-    return { alert: true, recovered: false }
+    log.warn('L1 告警进入 alerting', { broken: broken.map((b) => b.text) })
+    return { alert: true, recovered: false, broken, insufficient }
   }
 
   if (alertState === 'alerting' && broken.length === 0) {
-    // alerting → normal：恢复只记报告一行（不投递）
+    // alerting → normal：恢复只记报告一行
     alertState = 'normal'
     log.info('L1 评估指标恢复', { report: formatReportLine(metrics) })
-    return { alert: false, recovered: true }
+    return { alert: false, recovered: true, broken, insufficient }
   }
 
   // 无转换沿：alerting 持续破线（滞回去重，不刷屏）/ normal 健康（静默）
   if (alertState === 'alerting') {
-    log.warn('L1 告警持续中（滞回不重复投递）', { broken })
+    log.warn('L1 告警持续中（滞回不重复告警）', { broken: broken.map((b) => b.text) })
   }
-  return { alert: false, recovered: false }
+  return { alert: false, recovered: false, broken, insufficient }
 }

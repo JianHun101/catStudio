@@ -540,6 +540,16 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     parseFailureRate: 0.01,
     infraFailures: 3,
     sampleTotal: 1010,
+    verdictTotal: 220,
+    thresholds: {
+      successRate: 0.8,
+      timeoutRate: 0.1,
+      reworkRate: 0.3,
+      minExecutions: 20,
+      minVerdicts: 30,
+    },
+    breaches: [],
+    insufficient: [],
   }
   /** totals 是窗口全量口径，`chains[]` 被 limit 截断——故 totals 与 chains.length 不必相等；
    *  但 `orphanChain.hopCount` 与 `totals.orphanHops` 在后端同源（`buildChains` 同一数组长度），
@@ -1068,6 +1078,74 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     expect(card!.text()).toContain('—')
     expect(card!.text()).not.toContain('0ms')
     expect(card!.find('.l1-value').classes()).toContain('l1-nodata')
+    wrapper.unmount()
+  })
+
+  it('L1 note 拆两数：执行 / 审查（sampleTotal / verdictTotal）', async () => {
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const note = wrapper.find('.l1-note').text()
+    expect(note).toContain('执行 1010')
+    expect(note).toContain('审查 220')
+    wrapper.unmount()
+  })
+
+  it('样本不足卡片：灰显 + 角标「需 ≥ N 条执行」', async () => {
+    vi.mocked(api.getEvalL1Metrics).mockResolvedValue({
+      ...l1Metrics,
+      breaches: [],
+      insufficient: [
+        {
+          key: 'successRate',
+          value: 16,
+          threshold: 20,
+          text: '执行成功率样本不足（16 < 20 条执行）',
+        },
+        { key: 'timeoutRate', value: 16, threshold: 20, text: '超时率样本不足（16 < 20 条执行）' },
+      ],
+    })
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const card = wrapper.findAll('.l1-card').find((c) => c.text().includes('成功率'))
+    expect(card).toBeTruthy()
+    expect(card!.classes()).toContain('l1-insufficient')
+    expect(card!.text()).toContain('需 ≥ 20 条执行')
+    wrapper.unmount()
+  })
+
+  it('破线卡片：红字类（breach）', async () => {
+    vi.mocked(api.getEvalL1Metrics).mockResolvedValue({
+      ...l1Metrics,
+      breaches: [{ key: 'reworkRate', value: 0.4, threshold: 0.3, text: '返工率 40.0%（> 30%）' }],
+      insufficient: [],
+    })
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const suggest = wrapper.findAll('.l1-card').find((c) => c.text().includes('建议率'))
+    const reject = wrapper.findAll('.l1-card').find((c) => c.text().includes('驳回率'))
+    expect(suggest!.classes()).toContain('l1-breach')
+    // 建议率/驳回率共用合并后的返工率门——两张卡同态
+    expect(reject!.classes()).toContain('l1-breach')
+    wrapper.unmount()
+  })
+
+  it('判词样本不足：建议率/驳回率角标「需 ≥ N 条判词」', async () => {
+    vi.mocked(api.getEvalL1Metrics).mockResolvedValue({
+      ...l1Metrics,
+      breaches: [],
+      insufficient: [
+        { key: 'reworkRate', value: 16, threshold: 30, text: '返工率样本不足（16 < 30 条判词）' },
+      ],
+    })
+    const wrapper = mount(EvaluationView)
+    await flushPromises()
+
+    const suggest = wrapper.findAll('.l1-card').find((c) => c.text().includes('建议率'))
+    expect(suggest!.classes()).toContain('l1-insufficient')
+    expect(suggest!.text()).toContain('需 ≥ 30 条判词')
     wrapper.unmount()
   })
 
