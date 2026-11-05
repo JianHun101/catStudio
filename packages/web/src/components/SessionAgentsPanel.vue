@@ -103,10 +103,18 @@ const messageStats = computed(() => {
   return { total: msgs.length, agent: msgs.filter((m) => m.role === 'agent').length }
 })
 
-/** 有排队任务的会话成员（调度队列信息——从 B2 迁出后此处承接） */
-const queuedMembers = computed(() => {
+/**
+ * 本会话排队总数（头行 `队列 N` chip 的唯一数据源）。
+ *
+ * B·改删掉了「调度队列」分区：队列信息只剩两处表达——成员行徽章（per-agent）与
+ * 头行这一枚 chip（本会话合计，**仅当存在排队时出现**）。`queueLength === 0` 时
+ * 该数字不渲染，也就不需要「暂无排队任务」这类零信息占位。
+ */
+const totalQueued = computed(() => {
   const ids = new Set(store.activeSession?.agentIds ?? [])
-  return store.agentStateList.filter((s) => s.queueLength > 0 && ids.has(s.agentId))
+  return store.agentStateList
+    .filter((s) => s.queueLength > 0 && ids.has(s.agentId))
+    .reduce((n, s) => n + s.queueLength, 0)
 })
 
 // ─── R4 屏②：成员卡内联 trace（点卡片体展开 / 点头像开设置）───
@@ -384,8 +392,14 @@ async function removeAgent(agentId: string): Promise<void> {
   <div class="session-agents-panel">
     <!-- 头行：48px，与主区顶栏、会话栏头行同一水平线（治「左右侧面板上方空缺」）。
          会话无关（空态也渲染，读数 0）——头行恒在，三条头行才在任何状态下都对得齐。
-         margin 抵消父级左右 padding，让下边框通栏（内部卡片仍保持缩进）。 -->
-    <div class="panel-head">成员 · {{ memberAgents.length }}</div>
+         B·改：统计卡退役，数字并入本行；队列 chip 仅当存在排队时出现（0 排队不占位）。 -->
+    <div class="panel-head">
+      <span class="head-title">成员 · {{ memberAgents.length }}</span>
+      <span v-if="store.activeSessionId" class="inline-stats">
+        消息 {{ messageStats.total }} · 回复 {{ messageStats.agent }}
+        <span v-if="totalQueued > 0" class="head-queue-chip">队列 {{ totalQueued }}</span>
+      </span>
+    </div>
 
     <!-- 无会话空态（不报错，静默提示） -->
     <div v-if="!store.activeSessionId" class="panel-empty">
@@ -394,215 +408,191 @@ async function removeAgent(agentId: string): Promise<void> {
     </div>
 
     <template v-else>
-      <!-- 统计计数卡（clowder-ai 低密度评估：纯数字 + 标签） -->
-      <div class="stat-card">
-        <div class="stat-item">
-          <span class="stat-value">{{ messageStats.total }}</span>
-          <span class="stat-label">消息总数</span>
-        </div>
-        <div class="stat-divider"></div>
-        <div class="stat-item">
-          <span class="stat-value">{{ messageStats.agent }}</span>
-          <span class="stat-label">猫咪回复</span>
-        </div>
-      </div>
-
-      <!-- 会话成员卡列表（R4 弱化卡：一行、头像独立热区、状态收成色点） -->
-      <div class="section-title">会话成员</div>
-      <div class="member-list">
-        <div v-for="agent in memberAgents" :key="agent.id" class="member-item">
-          <!-- 整卡是展开热区；头像按钮 @click.stop 独占自己的热区（两者互不触发）。
+      <!-- 成员区：本面板唯一的滚动容器。页脚在它外面 ⇒ 不随列表滚走（固定态）。 -->
+      <div class="right-body">
+        <!-- 会话成员卡列表（R4 弱化卡：一行、头像独立热区、状态收成色点） -->
+        <div class="member-list">
+          <div v-for="agent in memberAgents" :key="agent.id" class="member-item">
+            <!-- 整卡是展开热区；头像按钮 @click.stop 独占自己的热区（两者互不触发）。
                键盘可达：头像与移除都是真 button，卡片体是 Enter/Space 可触发。 -->
-          <div
-            class="member-card slim"
-            :class="{ expanded: isTraceExpanded(agent.id) }"
-            role="button"
-            tabindex="0"
-            :aria-expanded="isTraceExpanded(agent.id)"
-            @click="toggleExpand(agent.id)"
-            @keydown.enter.prevent="toggleExpand(agent.id)"
-            @keydown.space.prevent="toggleExpand(agent.id)"
-          >
-            <button
-              class="avatar-btn"
-              :title="`打开 ${agent.name} 的设置`"
-              :aria-label="`打开 ${agent.name} 的设置`"
-              @click.stop="openDrawer(agent.id)"
+            <div
+              class="member-card slim"
+              :class="{ expanded: isTraceExpanded(agent.id) }"
+              role="button"
+              tabindex="0"
+              :aria-expanded="isTraceExpanded(agent.id)"
+              @click="toggleExpand(agent.id)"
+              @keydown.enter.prevent="toggleExpand(agent.id)"
+              @keydown.space.prevent="toggleExpand(agent.id)"
             >
-              {{ agent.avatar }}
-            </button>
-            <span class="member-name">{{ agent.name }}</span>
-            <div class="slim-right">
-              <span v-if="queueFor(agent.id) > 0" class="queue-badge"
-                >队列 {{ queueFor(agent.id) }}</span
-              >
-              <!-- 状态中文 label 收成 7px 色点（色义不变）；语义走 aria-label，屏幕阅读器仍读得出 -->
-              <span
-                class="status-dot"
-                :class="statusFor(agent.id) === 'idle' ? 'dot-idle' : 'dot-busy'"
-                :aria-label="statusLabel(statusFor(agent.id))"
-                role="img"
-              ></span>
-              <span class="member-tokens">{{ tokensText(agent.id) }}</span>
               <button
-                class="btn-remove"
-                title="从会话移除"
-                aria-label="移除"
-                @click.stop="removeAgent(agent.id)"
+                class="avatar-btn"
+                :title="`打开 ${agent.name} 的设置`"
+                :aria-label="`打开 ${agent.name} 的设置`"
+                @click.stop="openDrawer(agent.id)"
               >
-                ✕
+                {{ agent.avatar }}
               </button>
-              <span class="slim-chev">▸</span>
-            </div>
-          </div>
-
-          <!-- 内联 trace（屏②）：按时间顺序、默认全列、段名悬浮出说明 -->
-          <div v-if="isTraceExpanded(agent.id)" class="trace-inline">
-            <div class="ti-head">
-              <span class="ti-title"
-                >执行 trace<button
-                  class="info-btn"
-                  aria-label="字段说明"
-                  @click.stop="toggleFields(agent.id)"
+              <span class="member-name">{{ agent.name }}</span>
+              <div class="slim-right">
+                <span v-if="queueFor(agent.id) > 0" class="queue-badge"
+                  >队列 {{ queueFor(agent.id) }}</span
                 >
-                  !
-                </button></span
-              >
-              <span class="ti-status" :class="traceStatusClass(agent.id)">{{
-                traceStatusText(agent.id)
-              }}</span>
-              <span v-if="traceTotalText(agent.id)" class="ti-total">{{
-                traceTotalText(agent.id)
-              }}</span>
-            </div>
-
-            <!-- 字段总说明（`!` 点开；内容来自 spanLayout 的 FIELD_DOCS 单源） -->
-            <div v-if="fieldsOpenAgentId === agent.id" class="ti-fields">
-              <div v-for="d in FIELD_DOCS" :key="d.key" class="ti-field">
-                <span class="ti-fname">{{ d.name }}</span>
-                <span class="ti-fdesc">{{ d.desc }}</span>
-              </div>
-            </div>
-
-            <div v-if="traceLoading" class="ti-nodata">执行记录加载中…</div>
-            <div v-else-if="traceError" class="ti-err">{{ traceError }}</div>
-            <div v-else-if="!traceByAgent.get(agent.id)" class="ti-nodata">本会话暂无执行</div>
-
-            <!-- 在飞：段在执行收尾才一次性落库 ⇒ 此刻库里一行段都没有。
-                 这不是「0ms」也不是「空白」——必须显式说明。 -->
-            <template v-else-if="traceRunning(agent.id)">
-              <div class="ti-nodata">采集中 · 段未落库</div>
-              <div class="ti-foot">
-                段在一次执行<b>收尾时</b>才一次性落库 ⇒ 正在跑的执行此刻<b>库里一行段都没有</b>。
-              </div>
-            </template>
-
-            <div v-else-if="spanLoading[agent.id]" class="ti-nodata">段数据加载中…</div>
-            <div v-else-if="spanError[agent.id]" class="ti-err">
-              段数据加载失败：{{ spanError[agent.id] }}
-            </div>
-            <div v-else-if="!waterfalls[agent.id]" class="ti-nodata">无段数据（存量行）</div>
-
-            <template v-else>
-              <!-- 段条本身即时间轴（left/width 全部来自 spanLayout 的几何量） -->
-              <div class="segbar">
+                <!-- 状态中文 label 收成 7px 色点（色义不变）；语义走 aria-label，屏幕阅读器仍读得出 -->
                 <span
-                  v-for="r in visibleRows(agent.id).shown"
-                  :key="r.key"
-                  class="seg"
-                  :class="[`ph-${r.phase}`, { 'seg-err': r.bad }]"
-                  :style="{ left: `${r.leftPct}%`, width: `${r.widthPct}%` }"
+                  class="status-dot"
+                  :class="statusFor(agent.id) === 'idle' ? 'dot-idle' : 'dot-busy'"
+                  :aria-label="statusLabel(statusFor(agent.id))"
+                  role="img"
                 ></span>
+                <span class="member-tokens">{{ tokensText(agent.id) }}</span>
+                <button
+                  class="btn-remove"
+                  title="从会话移除"
+                  aria-label="移除"
+                  @click.stop="removeAgent(agent.id)"
+                >
+                  ✕
+                </button>
+                <span class="slim-chev">▸</span>
               </div>
-
-              <!-- 段清单：**按时间顺序**（上→下 = 执行先后）；默认全列 -->
-              <div class="seglist">
-                <div v-for="r in visibleRows(agent.id).shown" :key="r.key" class="segrow">
-                  <span class="swatch" :class="[`ph-${r.phase}`, { 'sw-err': r.bad }]"></span>
-                  <span
-                    class="segn"
-                    @mouseenter="onSegTip(r.name, $event)"
-                    @mouseleave="hideTip()"
-                    >{{ r.name }}</span
-                  >
-                  <span v-if="r.bad" class="segflag">{{ r.status }}</span>
-                  <span v-if="r.ttftText" class="segttft">首字 {{ r.ttftText }}</span>
-                  <span class="segd">{{ fmtMs(r.durationMs) }}</span>
-                  <span class="segp">{{ r.sharePct }}</span>
-                </div>
-                <div v-if="microSummary(agent.id)" class="segrow rest">
-                  <span class="swatch sw-rest"></span>
-                  <span class="segn">已折叠 {{ microSummary(agent.id)!.count }} 个微段</span>
-                  <span class="segd">{{ microSummary(agent.id)!.text }}</span>
-                  <span class="segp">{{ microSummary(agent.id)!.pct }}</span>
-                </div>
-              </div>
-              <button class="ti-more" @click.stop="toggleCompact(agent.id)">
-                {{
-                  compactAgents[agent.id]
-                    ? `展开全部 ${kidRows(agent.id).length} 段（时间序）`
-                    : '折叠微段'
-                }}
-              </button>
-
-              <!-- 轴外段：不进瀑布、不计总时长，只作单行标注（文案由 spanLayout 组装） -->
-              <div v-for="o in waterfalls[agent.id].outside" :key="o.key" class="ti-outside">
-                {{ o.text }}
-              </div>
-
-              <div class="ti-foot">总时长只认根段 invoke_agent；段是嵌套的，子段之和会超过它。</div>
-            </template>
-          </div>
-        </div>
-        <div v-if="memberAgents.length === 0" class="member-empty">
-          会话暂无猫咪——点下方「添加猫咪」
-        </div>
-      </div>
-
-      <!-- 调度队列信息（排队中的成员，agentStates 实时） -->
-      <div class="section-title">调度队列</div>
-      <div v-if="queuedMembers.length === 0" class="queue-empty">暂无排队任务</div>
-      <div v-else class="queue-list">
-        <div v-for="s in queuedMembers" :key="s.agentId" class="queue-row">
-          <span class="queue-dot"></span>
-          <span class="queue-name">{{ store.agentInfo(s.agentId)?.name || s.agentId }}</span>
-          <span class="queue-count">{{ s.queueLength }} 条</span>
-        </div>
-      </div>
-
-      <!-- 折叠配置层级（clowder-ai 折叠风格） -->
-      <details class="config-section">
-        <summary class="config-summary">
-          <span>会话配置</span>
-          <span class="summary-chevron">▸</span>
-        </summary>
-        <div class="config-body">
-          <div class="config-row">
-            <div class="config-info">
-              <span class="config-title">广播模式</span>
-              <span class="config-hint"
-                >关闭时仅被 @ 的 Agent 可见（agent 间 @ 始终生效）；开启后所有 Agent
-                的回复互相可见，无需 @ 即可相互响应</span
-              >
             </div>
-            <button
-              class="toggle-switch"
-              :class="{ on: store.broadcastMode }"
-              role="switch"
-              :aria-checked="store.broadcastMode"
-              @click="store.toggleBroadcast()"
-            >
-              <span class="toggle-knob"></span>
-            </button>
+
+            <!-- 内联 trace（屏②）：按时间顺序、默认全列、段名悬浮出说明 -->
+            <div v-if="isTraceExpanded(agent.id)" class="trace-inline">
+              <div class="ti-head">
+                <span class="ti-title"
+                  >执行 trace<button
+                    class="info-btn"
+                    aria-label="字段说明"
+                    @click.stop="toggleFields(agent.id)"
+                  >
+                    !
+                  </button></span
+                >
+                <span class="ti-status" :class="traceStatusClass(agent.id)">{{
+                  traceStatusText(agent.id)
+                }}</span>
+                <span v-if="traceTotalText(agent.id)" class="ti-total">{{
+                  traceTotalText(agent.id)
+                }}</span>
+              </div>
+
+              <!-- 字段总说明（`!` 点开；内容来自 spanLayout 的 FIELD_DOCS 单源） -->
+              <div v-if="fieldsOpenAgentId === agent.id" class="ti-fields">
+                <div v-for="d in FIELD_DOCS" :key="d.key" class="ti-field">
+                  <span class="ti-fname">{{ d.name }}</span>
+                  <span class="ti-fdesc">{{ d.desc }}</span>
+                </div>
+              </div>
+
+              <div v-if="traceLoading" class="ti-nodata">执行记录加载中…</div>
+              <div v-else-if="traceError" class="ti-err">{{ traceError }}</div>
+              <div v-else-if="!traceByAgent.get(agent.id)" class="ti-nodata">本会话暂无执行</div>
+
+              <!-- 在飞：段在执行收尾才一次性落库 ⇒ 此刻库里一行段都没有。
+                 这不是「0ms」也不是「空白」——必须显式说明。 -->
+              <template v-else-if="traceRunning(agent.id)">
+                <div class="ti-nodata">采集中 · 段未落库</div>
+                <div class="ti-foot">
+                  段在一次执行<b>收尾时</b>才一次性落库 ⇒ 正在跑的执行此刻<b>库里一行段都没有</b>。
+                </div>
+              </template>
+
+              <div v-else-if="spanLoading[agent.id]" class="ti-nodata">段数据加载中…</div>
+              <div v-else-if="spanError[agent.id]" class="ti-err">
+                段数据加载失败：{{ spanError[agent.id] }}
+              </div>
+              <div v-else-if="!waterfalls[agent.id]" class="ti-nodata">无段数据（存量行）</div>
+
+              <template v-else>
+                <!-- 段条本身即时间轴（left/width 全部来自 spanLayout 的几何量） -->
+                <div class="segbar">
+                  <span
+                    v-for="r in visibleRows(agent.id).shown"
+                    :key="r.key"
+                    class="seg"
+                    :class="[`ph-${r.phase}`, { 'seg-err': r.bad }]"
+                    :style="{ left: `${r.leftPct}%`, width: `${r.widthPct}%` }"
+                  ></span>
+                </div>
+
+                <!-- 段清单：**按时间顺序**（上→下 = 执行先后）；默认全列 -->
+                <div class="seglist">
+                  <div v-for="r in visibleRows(agent.id).shown" :key="r.key" class="segrow">
+                    <span class="swatch" :class="[`ph-${r.phase}`, { 'sw-err': r.bad }]"></span>
+                    <span
+                      class="segn"
+                      @mouseenter="onSegTip(r.name, $event)"
+                      @mouseleave="hideTip()"
+                      >{{ r.name }}</span
+                    >
+                    <span v-if="r.bad" class="segflag">{{ r.status }}</span>
+                    <span v-if="r.ttftText" class="segttft">首字 {{ r.ttftText }}</span>
+                    <span class="segd">{{ fmtMs(r.durationMs) }}</span>
+                    <span class="segp">{{ r.sharePct }}</span>
+                  </div>
+                  <div v-if="microSummary(agent.id)" class="segrow rest">
+                    <span class="swatch sw-rest"></span>
+                    <span class="segn">已折叠 {{ microSummary(agent.id)!.count }} 个微段</span>
+                    <span class="segd">{{ microSummary(agent.id)!.text }}</span>
+                    <span class="segp">{{ microSummary(agent.id)!.pct }}</span>
+                  </div>
+                </div>
+                <button class="ti-more" @click.stop="toggleCompact(agent.id)">
+                  {{
+                    compactAgents[agent.id]
+                      ? `展开全部 ${kidRows(agent.id).length} 段（时间序）`
+                      : '折叠微段'
+                  }}
+                </button>
+
+                <!-- 轴外段：不进瀑布、不计总时长，只作单行标注（文案由 spanLayout 组装） -->
+                <div v-for="o in waterfalls[agent.id].outside" :key="o.key" class="ti-outside">
+                  {{ o.text }}
+                </div>
+
+                <div class="ti-foot">
+                  总时长只认根段 invoke_agent；段是嵌套的，子段之和会超过它。
+                </div>
+              </template>
+            </div>
+          </div>
+          <div v-if="memberAgents.length === 0" class="member-empty">
+            会话暂无猫咪——点下方「添加猫咪」
           </div>
         </div>
-      </details>
+        <div v-if="actionError" class="error-msg">{{ actionError }}</div>
+      </div>
 
-      <!-- 添加猫咪入口（排除已在会话的，多选 → PATCH addAgentIds） -->
-      <button class="btn-add-members" @click="openPicker" :disabled="addableAgents.length === 0">
-        ＋ 添加猫咪
-      </button>
-      <div v-if="actionError" class="error-msg">{{ actionError }}</div>
+      <!-- 固定页脚：广播开关 + 添加猫咪（从退役的「会话配置」折叠卡与虚线大按钮迁来）。
+           页脚在滚动容器之外 ⇒ 成员列表滚 500px 它也纹丝不动。 -->
+      <div class="panel-footer">
+        <div class="foot-row">
+          <div class="foot-grow">
+            <div class="foot-title">广播模式</div>
+            <div class="foot-hint">关闭时仅被 @ 的 Agent 可见</div>
+          </div>
+          <button
+            class="foot-add"
+            @click="openPicker"
+            :disabled="addableAgents.length === 0"
+            title="添加猫咪到会话"
+          >
+            ＋ 添加猫咪
+          </button>
+          <button
+            class="toggle-switch"
+            :class="{ on: store.broadcastMode }"
+            role="switch"
+            :aria-checked="store.broadcastMode"
+            :title="store.broadcastMode ? '关闭广播模式' : '开启广播模式'"
+            @click="store.toggleBroadcast()"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+      </div>
 
       <!-- 多选弹层 -->
       <div v-if="pickerOpen" class="picker-overlay" @click.self="closePicker">
@@ -662,31 +652,43 @@ async function removeAgent(agentId: string): Promise<void> {
 <style scoped>
 /* ─── 右栏面板骨架（低密度评估面板，非运行控制台） ─── */
 
+/* 面板骨架：头行 / 滚动成员区 / 固定页脚三段。
+   **本面板自身不再滚动**——滚动交给中间那段，页脚才能真的固定住（AC2）。 */
 .session-agents-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
   height: 100%;
-  overflow-y: auto;
+  overflow: hidden;
   /* 顶 padding 归零：头行必须贴面板顶缘，否则 48px 头行被 14px padding 顶下去，
      与主区顶栏 / 会话栏头行错位（验收：三条头行 getBoundingClientRect().top 相等）。 */
-  padding: 0 12px 16px;
+  padding: 0 12px;
+  /* B·改 的三档中性面/线：组件内只引用语义名，浅/深主题各一套值。
+     不占 index.html 的全局 token（票① 正在并行改那批），也不复用 --bg-deep/--bg-base
+     ——它们被全站多处消费，改值会牵连别处。 */
+  --panel-tint-1: rgba(60, 48, 40, 0.035);
+  --panel-tint-2: rgba(60, 48, 40, 0.055);
+  --panel-line-weak: rgba(60, 48, 40, 0.09);
+  --panel-expand-bg: rgba(200, 144, 96, 0.1);
 }
 
-/* 头行：定高 48px + sticky——面板自身是滚动容器，头行不随成员列表滚走。
-   margin 负值抵消父级左右 padding，使下边框通栏。 */
+[data-theme='dark'] .session-agents-panel {
+  --panel-tint-1: rgba(230, 221, 208, 0.045);
+  --panel-tint-2: rgba(230, 221, 208, 0.07);
+  --panel-line-weak: rgba(230, 221, 208, 0.1);
+  --panel-expand-bg: rgba(212, 165, 116, 0.09);
+}
+
+/* 头行：定高 48px——面板自身不滚，无需 sticky；三条头行靠同一 48px 对齐。
+   margin 负值抵消父级左右 padding，让底色通栏。B·改：去下边框（结构线 0 条）。 */
 .panel-head {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   flex: none;
   height: 48px;
   display: flex;
   align-items: center;
+  gap: 8px;
   margin: 0 -12px;
   padding: 0 14px;
-  background: var(--bg-base);
-  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
@@ -694,7 +696,44 @@ async function removeAgent(agentId: string): Promise<void> {
   white-space: nowrap;
 }
 
+.head-title {
+  flex: none;
+}
+
+/* 内联统计：统计卡退役后数字的落点（右对齐、弱化、等宽数字） */
+.inline-stats {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.head-queue-chip {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(200, 152, 64, 0.14);
+  color: var(--accent-yellow);
+  font-weight: 600;
+}
+
+/* 成员区 = 本面板的唯一滚动容器（页脚在它外面） */
+.right-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 12px;
+}
+
 .panel-empty {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -712,57 +751,7 @@ async function removeAgent(agentId: string): Promise<void> {
   opacity: 0.5;
 }
 
-/* ─── 统计计数卡 ─────────────────────── */
-
-.stat-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-around;
-  padding: 12px 8px;
-  background: var(--bg-base);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-}
-
-.stat-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  flex: 1;
-}
-
-.stat-value {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.2;
-}
-
-.stat-label {
-  font-size: 10px;
-  color: var(--text-muted);
-}
-
-.stat-divider {
-  width: 1px;
-  height: 28px;
-  background: var(--border-subtle);
-}
-
-/* ─── 分区标题 ─────────────────────── */
-
-.section-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  padding: 4px 2px 0;
-}
-
-/* ─── 成员卡（R4 弱化：两行 → 一行，8×10 内边距） ─── */
+/* ─── 成员卡（R4 弱化：两行 → 一行；B·改再降一档：去盒化） ─── */
 
 .member-list {
   display: flex;
@@ -776,34 +765,37 @@ async function removeAgent(agentId: string): Promise<void> {
   flex-direction: column;
 }
 
+/* 成员卡：从白底盒降为「贴着桌面」的淡面——容器退后，内容上前。
+   **无边框**：这一档层级靠底色差承担，不用线。 */
 .member-card {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  padding: 7px 9px;
+  background: var(--panel-tint-1);
+  border: none;
+  border-radius: 8px;
 }
 
 .member-card.slim {
   cursor: pointer;
-  transition:
-    border-color var(--ease-out),
-    background var(--ease-out);
+  transition: background var(--ease-out);
 }
 
 .member-card.slim:hover {
-  border-color: var(--border-default);
+  background: var(--panel-tint-2);
 }
 
-/* 展开态：卡与下方 trace 连成一块（下圆角交给 trace 收口） */
+/* 展开态：卡与下方 trace 连成一整块——同一块底色、中间零缝隙零线；
+   上圆角只归成员行，下圆角只归 trace（AC3）。 */
 .member-card.slim.expanded {
-  border-color: var(--accent);
-  background: var(--accent-tint);
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-  border-bottom-color: transparent;
+  background: var(--panel-expand-bg);
+  border-radius: 10px 10px 0 0;
+  padding-bottom: 7px;
+}
+
+.member-card.slim.expanded:hover {
+  background: var(--panel-expand-bg);
 }
 
 /* 头像 = **独立热区**（点它开设置，不触发展开）：30px 方形，字形 22px 居中。
@@ -887,8 +879,8 @@ async function removeAgent(agentId: string): Promise<void> {
   font-size: 10px;
   font-weight: 600;
   color: var(--accent-yellow);
-  background: rgba(212, 168, 84, 0.1);
-  border: 1px solid rgba(212, 168, 84, 0.3);
+  background: rgba(200, 152, 64, 0.14);
+  border: none;
   padding: 1px 7px;
   border-radius: 999px;
   white-space: nowrap;
@@ -945,12 +937,14 @@ async function removeAgent(agentId: string): Promise<void> {
 
 /* ─── 内联 trace（屏②） ─────────────── */
 
+/* 与展开态成员行连成一块：同底色、零间隙、无边框；
+   上缘不再收圆（上圆角在成员行上），下缘收口并留一点点与下一行的呼吸。 */
 .trace-inline {
-  border: 1px solid var(--accent);
-  border-top: none;
-  border-radius: 0 0 var(--radius-md) var(--radius-md);
-  background: var(--bg-base);
-  padding: 8px 10px 10px;
+  border: none;
+  border-radius: 0 0 10px 10px;
+  background: var(--panel-expand-bg);
+  padding: 0 10px 10px 46px;
+  margin-bottom: 6px;
 }
 
 .ti-head {
@@ -1018,8 +1012,8 @@ async function removeAgent(agentId: string): Promise<void> {
 }
 
 .ti-fields {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
+  background: var(--panel-tint-1);
+  border: none;
   border-radius: var(--radius-sm);
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -1186,8 +1180,6 @@ async function removeAgent(agentId: string): Promise<void> {
 
 .ti-foot {
   margin-top: 6px;
-  padding-top: 5px;
-  border-top: 1px solid var(--border-subtle);
   font-size: 10px;
   color: var(--text-muted);
   line-height: 1.5;
@@ -1245,120 +1237,73 @@ async function removeAgent(agentId: string): Promise<void> {
   color: var(--text-secondary);
 }
 
-/* ─── 调度队列 ─────────────────────── */
+/* ─── 固定页脚（广播模式 + 添加猫咪） ─── */
 
-.queue-empty {
-  font-size: 11px;
-  color: var(--text-muted);
-  text-align: center;
-  padding: 8px 0;
+/* 页脚在滚动容器之外，固定在面板底部（AC2：列表滚 500px 页脚 top 不变）。 */
+.panel-footer {
+  flex: none;
+  position: relative;
+  margin: 0 -12px;
+  padding: 10px 12px 12px;
 }
 
-.queue-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+/* 全右栏**唯一允许**的一条线：成员区 ↔ 页脚的分区线。
+   低对比、两端各缩进 12px；不承担任何其他语义。 */
+.panel-footer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 1px;
+  background: var(--panel-line-weak);
 }
 
-.queue-row {
+.foot-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-surface);
+  gap: 10px;
+  padding: 4px 2px;
 }
 
-.queue-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent-yellow);
-  flex-shrink: 0;
-}
-
-.queue-name {
+.foot-grow {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.foot-title {
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
-.queue-count {
-  color: var(--accent-yellow);
-  font-weight: 500;
-  font-size: 11px;
-}
-
-/* ─── 折叠配置层级（clowder-ai 折叠风格） ─── */
-
-.config-section {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--bg-base);
-}
-
-.config-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  cursor: pointer;
-  user-select: none;
-  list-style: none;
-}
-
-.config-summary::-webkit-details-marker {
-  display: none;
-}
-
-.config-summary:hover {
-  color: var(--text-primary);
-}
-
-.summary-chevron {
-  font-size: 10px;
-  transition: transform var(--ease-out);
-  opacity: 0.6;
-}
-
-.config-section[open] .summary-chevron {
-  transform: rotate(90deg);
-}
-
-.config-body {
-  padding: 4px 12px 12px;
-}
-
-.config-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.config-info {
-  min-width: 0;
-}
-
-.config-title {
-  display: block;
-  font-size: 12px;
-  color: var(--text-primary);
-}
-
-.config-hint {
-  display: block;
+.foot-hint {
   font-size: 10px;
   color: var(--text-muted);
   margin-top: 2px;
   line-height: 1.5;
+}
+
+.foot-add {
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: all var(--ease-out);
+}
+
+.foot-add:hover:not(:disabled) {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.foot-add:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .toggle-switch {
@@ -1393,33 +1338,6 @@ async function removeAgent(agentId: string): Promise<void> {
 
 .toggle-switch.on .toggle-knob {
   transform: translateX(14px);
-}
-
-/* ─── 添加猫咪 ─────────────────────── */
-
-.btn-add-members {
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px dashed var(--border-default);
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 500;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all var(--ease-out);
-}
-
-.btn-add-members:hover:not(:disabled) {
-  border-color: var(--accent-text);
-  color: var(--accent-text);
-  background: var(--accent-soft);
-}
-
-.btn-add-members:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 .error-msg {
