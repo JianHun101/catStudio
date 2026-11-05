@@ -40,6 +40,23 @@ describe('SessionList 会话行去云朵 icon', () => {
   })
 })
 
+describe('SessionList B·改全局框架：选中态=底色、头行无线', () => {
+  it('会话项选中态用 accent 淡底，不再生成左缘竖条 pseudo', () => {
+    const activeRule = source.match(/\.session-item\.active\s*\{[\s\S]*?\}/)
+    expect(activeRule, '未找到 .session-item.active 规则').toBeTruthy()
+    expect(activeRule![0]).toContain('background: var(--accent-soft)')
+    expect(source).not.toContain('.session-item.active::before')
+  })
+
+  it('会话栏头行不画 border-bottom，改同底色 + sticky（结构线 0 条）', () => {
+    const headerRule = source.match(/\.section-header\s*\{[\s\S]*?\}/)
+    expect(headerRule, '未找到 .section-header 规则').toBeTruthy()
+    expect(headerRule![0]).toContain('position: sticky')
+    expect(headerRule![0]).toContain('background: var(--bg-session)')
+    expect(headerRule![0]).not.toContain('border-bottom')
+  })
+})
+
 describe('SessionList 归档入口（票 7，spec §4.1 用户态删除 = 归档）', () => {
   it('会话行有归档按钮，且物理删除按钮已移除（不再提供一键永久删除入口）', () => {
     expect(source).toContain('class="session-archive"')

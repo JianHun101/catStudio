@@ -138,7 +138,7 @@ onUnmounted(() => {
     <!-- 52px 图标轨道（T4：从 .app-layout 内部提到根级常驻）：logo + 会话/追踪/评估 + 底部设置。
          全局入口从旧「会话栏底部 footer」上移到此处——会话栏可整栏收起，轨道不能；
          T4 起设置/追踪/评估打开时轨道同样常驻（原型 v6：**轨道就是导航**，故 ✕ 关闭按钮已退役）。
-         当前视图的按钮挂 `.on`（accent-soft 底 + 左缘 3px 竖条）。 -->
+         当前视图的按钮挂 `.on`（B·改：accent-soft 淡底 + 文字加深，无左缘竖条）。 -->
     <nav class="app-rail" aria-label="主导航">
       <div class="rail-logo" title="CatStudio" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="currentColor">
@@ -415,19 +415,20 @@ onUnmounted(() => {
 
 /* ─── Panels ─────────────────────────────── */
 
+/* B·改：三栏靠底色分层（轨道 --bg-menu → 会话栏 --bg-session → 主区 --bg-paper），
+   栏与栏之间**不画任何结构线**（border = 0）——边界由色差承担。 */
 .panel-left {
-  background: var(--bg-base);
+  background: var(--bg-session);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-right: 1px solid var(--border-subtle);
 }
 
 .panel-center {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bg-deep);
+  background: var(--bg-paper);
 }
 
 .center-content {
@@ -438,13 +439,13 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 右侧评估面板（300px 低密度分区——clowder-ai 精简模式） */
+/* 右侧评估面板（300px 低密度分区——clowder-ai 精简模式）。
+   B·改：沿用 --bg-base（≈ 原型 --desk），与主区 --bg-paper 靠色差分层；无 border-left。 */
 .panel-right {
   display: flex;
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-base);
-  border-left: 1px solid var(--border-subtle);
 }
 
 .panel-right.right-closed {
@@ -465,12 +466,11 @@ onUnmounted(() => {
 /* ─── 52px 图标轨道（根级常驻）──────────── */
 
 .app-rail {
-  /* 定宽不吃 flex 伸缩：`flex: none` + 显式宽度。box-sizing 全局 border-box，
-     故 1px 右边框含在 52px 内——与 T1 grid track 的列宽逐像素一致。 */
+  /* 定宽不吃 flex 伸缩：`flex: none` + 显式宽度——与 T1 grid track 的列宽逐像素一致。
+     B·改：轨道用最暗一档底色与相邻会话栏分层，不再画 border-right。 */
   flex: none;
   width: 52px;
-  background: var(--bg-base);
-  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-menu);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -501,8 +501,6 @@ onUnmounted(() => {
   width: 36px;
   height: 36px;
   flex: none;
-  /* ::before 的 3px 激活竖条要贴轨道左缘——定位锚点 */
-  position: relative;
   border: none;
   border-radius: 9px;
   background: transparent;
@@ -520,21 +518,10 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-/* 激活态：accent-soft 高亮块 + 左缘 3px 竖条 */
+/* 激活态：只留 accent 淡底 + 文字加深（左缘 3px 竖条已随 B·改退役） */
 .rail-btn.on {
   background: var(--accent-soft);
   color: var(--accent-text);
-}
-
-.rail-btn.on::before {
-  content: '';
-  position: absolute;
-  left: -8px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--accent);
 }
 
 .rail-btn:disabled {
