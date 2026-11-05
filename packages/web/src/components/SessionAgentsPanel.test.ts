@@ -36,14 +36,17 @@ describe('SessionAgentsPanel 精简面板结构（clowder-ai 模式）', () => {
     expect(source).toContain('选择会话后展示成员与用量')
   })
 
-  it('统计计数卡：消息总数 / 猫咪回复数（从 store 消息列表计数，零额外请求）', () => {
-    expect(source).toContain('stat-card')
+  it('统计数字并入头行（B·改统计卡退役）：消息 N · 回复 M 仍从 store 消息列表计数', () => {
+    // 「不许净删」——旧统计卡断言改钉到新落点，不删数据来源与口径
+    expect(source).toContain('inline-stats')
     expect(source).toContain('messageStats.total')
     expect(source).toContain('messageStats.agent')
     expect(source).toContain('store.activeMessages')
     expect(source).toContain("m.role === 'agent'")
-    expect(source).toContain('消息总数')
-    expect(source).toContain('猫咪回复')
+    expect(source).toContain('消息 {{ messageStats.total }} · 回复 {{ messageStats.agent }}')
+    // 统计卡本尊退役
+    expect(source).not.toContain('class="stat-card"')
+    expect(source).not.toContain('stat-divider')
   })
 
   it('会话成员卡：头像/名/状态点/状态文字 + 排队数徽章（agentStates 实时）', () => {
@@ -68,19 +71,27 @@ describe('SessionAgentsPanel 精简面板结构（clowder-ai 模式）', () => {
     expect(source).not.toContain('progress')
   })
 
-  it('调度队列信息：agentStateList 过滤会话成员 + 排队数', () => {
-    expect(source).toContain('store.agentStateList.filter')
-    expect(source).toContain('s.queueLength > 0')
-    expect(source).toContain('调度队列')
-    expect(source).toContain('暂无排队任务')
+  it('调度队列分区退役：队列只剩头行 chip（仅排队时出现）+ 成员行徽章', () => {
+    // 「不许净删」——旧队列分区断言改钉到新落点：数据源与过滤口径逐条保留
+    expect(source).toContain('store.agentStateList')
+    expect(source).toContain('.filter((s) => s.queueLength > 0')
+    expect(source).toContain('totalQueued')
+    expect(source).toContain('v-if="totalQueued > 0"')
+    expect(source).toContain('队列 {{ totalQueued }}')
+    // 零排队不再写一行「暂无」，分区标题也不再渲染（注释里的历史叙述不算）
+    expect(source).not.toContain('<div class="section-title">调度队列')
+    expect(source).not.toContain('class="queue-empty"')
+    expect(source).not.toContain('>暂无排队任务<')
   })
 
-  it('折叠配置层级（clowder-ai 折叠风格）：广播模式开关走 store.toggleBroadcast', () => {
-    expect(source).toContain('class="config-section"')
-    expect(source).toContain('config-summary')
+  it('页脚固定：广播开关迁到固定页脚，仍走 store.toggleBroadcast', () => {
+    expect(source).toContain('class="panel-footer"')
     expect(source).toContain('store.broadcastMode')
     expect(source).toContain('store.toggleBroadcast()')
     expect(source).toContain('role="switch"')
+    // 折叠配置卡退役（功能迁页脚，不是丢掉）
+    expect(source).not.toContain('class="config-section"')
+    expect(source).not.toContain('config-summary')
   })
 
   it('成员卡不装停止按钮（归 ChatPanel 气泡，避免双实现）', () => {
@@ -473,10 +484,94 @@ describe('SessionAgentsPanel R4 · 弱化卡与内联 trace', () => {
       const re = new RegExp(`\\${sel}\\s*\\{([^}]*)\\}`)
       return re.exec(source)?.[1] ?? ''
     }
-    // 屏①：内边距 10×12 → 8×10、色点 7px
-    expect(block('.member-card')).toMatch(/padding:\s*8px 10px/)
+    // B·改：成员行降为淡面（无边框），内边距收到 7×9、色点仍 7px
+    expect(block('.member-card')).toMatch(/padding:\s*7px 9px/)
+    expect(block('.member-card')).toMatch(/border:\s*none/)
+    expect(block('.member-card')).toMatch(/background:\s*var\(--panel-tint-1\)/)
     expect(block('.status-dot')).toMatch(/width:\s*7px/)
     // 屏③：抽屉 360px（在抽屉组件里，见 AgentSettingsDrawer.test.ts）
     expect(source).toContain('AgentSettingsDrawer')
+  })
+
+  it('B·改 AC4 队列 chip 条件渲染：有排队（fixture a2 = 2 条）时头行出现「队列 2」', async () => {
+    const wrapper = await mountPanel()
+    const chip = wrapper.find('.head-queue-chip')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toBe('队列 2')
+    // 成员行徽章同时在（两处并存，不是二选一）
+    expect(cardOf(wrapper, 'ds猫').find('.queue-badge').text()).toContain('队列 2')
+
+    wrapper.unmount()
+  })
+
+  it('B·改 AC4 队列为 0：头行无 chip、不留「暂无排队任务」占位', async () => {
+    const store = useChatStore()
+    store.agentStates = new Map([
+      [
+        'a1',
+        new Map([
+          ['s1', { agentId: 'a1', sessionId: 's1', status: 'idle', queueLength: 0 } as never],
+        ]),
+      ],
+      [
+        'a2',
+        new Map([
+          ['s1', { agentId: 'a2', sessionId: 's1', status: 'idle', queueLength: 0 } as never],
+        ]),
+      ],
+    ])
+    const wrapper = await mountPanel()
+    expect(wrapper.find('.head-queue-chip').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('暂无排队任务')
+    expect(wrapper.find('.queue-list').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('B·改 AC2 页脚固定：页脚在滚动容器之外（right-body 是唯一滚动区）', async () => {
+    const wrapper = await mountPanel()
+    // 结构：页脚不是滚动容器的后代 ⇒ 列表怎么滚它都不动
+    expect(wrapper.find('.right-body .panel-footer').exists()).toBe(false)
+    expect(wrapper.find('.right-body').exists()).toBe(true)
+    expect(wrapper.find('.panel-footer').exists()).toBe(true)
+    // 静态：滚动交给 right-body，页脚 flex:none
+    const bodyBlock = /\.right-body\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(bodyBlock).toMatch(/overflow-y:\s*auto/)
+    const footerBlock = /\.panel-footer\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(footerBlock).toMatch(/flex:\s*none/)
+    // 面板自身不再滚动
+    const panelBlock = /\.session-agents-panel\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(panelBlock).toMatch(/overflow:\s*hidden/)
+
+    wrapper.unmount()
+  })
+
+  it('B·改 AC3 trace 与成员行连块：同底色、零间隙、无边框（上圆角归卡、下圆角归 trace）', async () => {
+    const wrapper = await mountPanel()
+    await cardOf(wrapper, '店长').find('.member-name').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.member-card.expanded').exists()).toBe(true)
+    expect(wrapper.find('.trace-inline').exists()).toBe(true)
+
+    const expandedCard = /\.member-card\.slim\.expanded\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    const trace = /\.trace-inline\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    // 同一块底色（同一个语义变量，不是两个近似值）
+    expect(expandedCard).toContain('background: var(--panel-expand-bg)')
+    expect(trace).toContain('background: var(--panel-expand-bg)')
+    // 无边框、无中缝：卡只收上圆角，trace 只收下圆角
+    expect(expandedCard).toContain('border-radius: 10px 10px 0 0')
+    expect(trace).toContain('border: none')
+    expect(trace).toContain('border-radius: 0 0 10px 10px')
+    // 卡与 trace 之间没有 gap 参与（member-item 是纯 column 容器）
+    const itemBlock = /\.member-item\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(itemBlock).not.toMatch(/gap:/)
+
+    wrapper.unmount()
+  })
+
+  it('B·改 AC8 emoji 零替换：面板不新增 SVG，头像仍读 agent.avatar', () => {
+    expect(source).not.toContain('<svg')
+    expect(source).toContain('{{ agent.avatar }}')
   })
 })

@@ -748,13 +748,14 @@ describe('ChatPanel 思考框内跟进（观测 .stream-fold-inner 尺寸 + 三�
     const innerBlock = source.match(/\.stream-fold-inner \{[\s\S]*?\n\}/)
     expect(innerBlock).toBeTruthy()
     expect(innerBlock![0]).toContain('flex-direction: column')
-    expect(innerBlock![0]).toContain('gap: 5px')
+    // B·改：条目间隙统一收到 4px（工具行靠色块边界分开，不靠线）
+    expect(innerBlock![0]).toContain('gap: 4px')
     const innerChild = source.match(/\.stream-fold-inner > \* \{[\s\S]*?\n\}/)
     expect(innerChild).toBeTruthy()
     expect(innerChild![0]).toContain('flex-shrink: 0')
-    // base 的 gap 仍是历史路径（不套包裹层）的承重项，不能顺手删
+    // base 的 gap 仍是历史路径（不套包裹层）的承重项，不能顺手删（值随 B·改同为 4px）
     const baseBlock = source.match(/\.stream-fold-body \{[\s\S]*?\n\}/)
-    expect(baseBlock![0]).toContain('gap: 5px')
+    expect(baseBlock![0]).toContain('gap: 4px')
   })
 })
 
@@ -1970,5 +1971,67 @@ describe('消息时间戳按日分级（fmtMsgTime / fmtDateSep 单源）', () =
       expect(seps[0].text()).toBe('2025年6月15日')
       wrapper.unmount()
     })
+  })
+})
+
+// ─── B·改 面板层 · 中栏线纪律（票② 2.2 / AC6）────────────────────────────
+describe('ChatPanel B·改 中栏：线降级为色带/淡底，输入板是唯一保留线框的交互面', () => {
+  it('AC6 输入板：保留线框（交互线）+ 默认约 3 行高 + 随内容长高', () => {
+    // 结构：textarea 与按钮同属一块输入板（不再是 textarea 与按钮并排的裸行）
+    expect(source).toContain('class="input-plate"')
+    const plate = /\.input-plate\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(plate).toMatch(/border:\s*1px solid var\(--ui-line-mid\)/)
+    expect(plate).toMatch(/min-height:\s*124px/)
+    expect(plate).toMatch(/padding:\s*13px 14px 10px/)
+    // 聚焦有可辨环（暖色环，不是另一条灰线）
+    expect(source).toContain('.input-plate:focus-within')
+    expect(source).toContain('box-shadow: 0 0 0 3px rgba(180, 130, 80, 0.1)')
+
+    // 默认 3 行、可长高：rows=3 + autoGrow 归零重读 scrollHeight
+    expect(source).toContain('rows="3"')
+    expect(source).toContain('function autoGrow')
+    expect(source).toContain("ta.style.height = 'auto'")
+    expect(source).toContain('ta.style.height = `${ta.scrollHeight}px`')
+    // textarea 自身无边框（线框归整块板，不出现两个同心矩形）
+    const ta = /\.chat-input \s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(ta).toMatch(/border:\s*none/)
+    expect(ta).toMatch(/min-height:\s*64px/)
+  })
+
+  it('AC6 发送按钮移到输入板右下角（板内 input-bar 之后）', () => {
+    const bar = source.indexOf('class="input-bar"')
+    const send = source.indexOf('class="btn-send"')
+    expect(bar).toBeGreaterThan(-1)
+    expect(send).toBeGreaterThan(bar)
+    expect(source).toContain('class="input-bar-spacer"')
+  })
+
+  it('气泡去边框：agent 白底 + 极轻阴影、user 暖底；流式/占位虚线保留', () => {
+    const bubble = /\.chat-panel \.msg-bubble\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(bubble).toMatch(/border:\s*none/)
+    expect(bubble).toMatch(/box-shadow: var\(--ui-shadow-card\)/)
+    const userBubble =
+      /\.chat-panel \.message\.user \.msg-bubble\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(userBubble).toMatch(/border:\s*none/)
+    expect(userBubble).toContain('var(--accent-msg-bg)')
+    // 流式/占位气泡是运行态标识，虚线视觉语言保留（不是结构分割线）
+    expect(source).toContain('.chat-panel .message.streaming .msg-bubble')
+    expect(source).toContain('1px dashed')
+  })
+
+  it('头行与输入区上方无硬切线（结构线 0 条）', () => {
+    const header = /\.chat-header\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(header).toMatch(/border-bottom:\s*none/)
+    const inputArea = /\.chat-input-area\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(inputArea).toMatch(/border-top:\s*none/)
+    expect(inputArea).toContain('linear-gradient')
+  })
+
+  it('思考块：去重描边改极淡底（0.06–0.08 档）', () => {
+    const thinking = /\.chat-panel \.thinking-block\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(thinking).toMatch(/border:\s*1px solid var\(--ui-line-weak\)/)
+    expect(thinking).toContain('background: var(--ui-accent-wash)')
+    // 旧的重描边值退役
+    expect(thinking).not.toContain('rgba(180, 160, 140, 0.3)')
   })
 })

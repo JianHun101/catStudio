@@ -63,6 +63,30 @@ function toolRowClass(t: ToolCallInfo): string {
   if (t.status === 'error') return 'tool-row-error'
   return ''
 }
+
+/**
+ * 工具类型 → 色带档位（B·改：边框退场，左缘 3px 圆头色带 + 同色相淡底承担类型编码）。
+ *
+ * 四档对应原型：读=蓝灰 / 搜=紫 / 执行=琥珀 / 编辑=绿；其余工具落到中性色带
+ * （CSS 里的 `--tk` 缺省值）。匹配按小写子串，大小写与命名风格（Read / read_file /
+ * NotebookEdit）都能归到同一档。
+ */
+function toolKindClass(t: ToolCallInfo): string {
+  const n = (t.name || '').toLowerCase()
+  if (n.includes('grep') || n.includes('search') || n.includes('glob') || n.includes('fetch')) {
+    return 'tk-search'
+  }
+  if (n.includes('bash') || n.includes('shell') || n.includes('terminal') || n.includes('task')) {
+    return 'tk-run'
+  }
+  if (n.includes('edit') || n.includes('write') || n.includes('patch')) {
+    return 'tk-write'
+  }
+  if (n.includes('read') || n.includes('view') || n === 'ls' || n.endsWith('_ls')) {
+    return 'tk-read'
+  }
+  return ''
+}
 </script>
 
 <template>
@@ -70,7 +94,7 @@ function toolRowClass(t: ToolCallInfo): string {
   <details
     v-if="!plain && toolHasIo(tool)"
     class="tool-row"
-    :class="toolRowClass(tool)"
+    :class="[toolRowClass(tool), toolKindClass(tool)]"
     :title="toolLabel(tool)"
     v-bind="$attrs"
   >
@@ -106,7 +130,13 @@ function toolRowClass(t: ToolCallInfo): string {
     </div>
   </details>
   <!-- 无 io（或 plain 强制）→ 纯 name/status 行（tool-row-head-plain，无 chevron 不可展开） -->
-  <div v-else class="tool-row" :class="toolRowClass(tool)" :title="toolLabel(tool)" v-bind="$attrs">
+  <div
+    v-else
+    class="tool-row"
+    :class="[toolRowClass(tool), toolKindClass(tool)]"
+    :title="toolLabel(tool)"
+    v-bind="$attrs"
+  >
     <div class="tool-row-head tool-row-head-plain">
       <span class="tool-status-glyph" :class="`tool-status-${tool.status}`">
         <span v-if="tool.status === 'running'" class="tool-spinner"></span>
@@ -127,22 +157,98 @@ function toolRowClass(t: ToolCallInfo): string {
 </template>
 
 <style scoped>
-/* 工具行：浅蓝卡片；推进中左缘高亮（当前活工具）、失败左缘标红 */
+/* 工具行（B·改）：边框退场，改「类型色带 + 同色相淡底」。
+   行与行之间靠色块边界分开（容器 gap 4px），不靠线；颜色同时承担类型编码。
+   `--tk` 是色带色，`--tk-bg` / `--tk-bg-hover` 是同色相淡底（8% / 14%）。 */
 .tool-row {
-  border: 1px solid rgba(130, 170, 220, 0.22);
-  border-radius: var(--radius-sm);
-  background: rgba(130, 170, 220, 0.07);
+  position: relative;
+  border: none;
+  border-radius: 6px;
+  background: var(--tk-bg, rgba(60, 48, 40, 0.035));
+  padding: 5px 8px 5px 11px;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-secondary);
   overflow: hidden;
 }
-.tool-row-active {
-  border-left: 2px solid #4a9eff;
-  background: rgba(130, 170, 220, 0.12);
+
+/* 左缘 3px 圆头色带（上下各内缩 4px）——类型的视觉编码位 */
+.tool-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--tk, #8f887c);
 }
-.tool-row-error {
-  border-left: 2px solid #ff6b6b;
+
+.tool-row:hover {
+  background: var(--tk-bg-hover, rgba(60, 48, 40, 0.055));
+}
+
+/* 四档类型色（浅色主题） */
+.tool-row.tk-read {
+  --tk: #6b7fa8;
+  --tk-bg: rgba(107, 127, 168, 0.08);
+  --tk-bg-hover: rgba(107, 127, 168, 0.14);
+}
+.tool-row.tk-search {
+  --tk: #8a7bd8;
+  --tk-bg: rgba(138, 123, 216, 0.08);
+  --tk-bg-hover: rgba(138, 123, 216, 0.14);
+}
+.tool-row.tk-run {
+  --tk: #c89840;
+  --tk-bg: rgba(200, 152, 64, 0.09);
+  --tk-bg-hover: rgba(200, 152, 64, 0.16);
+}
+.tool-row.tk-write {
+  --tk: #5a8f6e;
+  --tk-bg: rgba(90, 143, 110, 0.08);
+  --tk-bg-hover: rgba(90, 143, 110, 0.14);
+}
+
+/* 深色主题：同一套层级，色带提亮、淡底加深（与原型深色态一致） */
+[data-theme='dark'] .tool-row.tk-read {
+  --tk: #8fa3cc;
+  --tk-bg: rgba(143, 163, 204, 0.12);
+  --tk-bg-hover: rgba(143, 163, 204, 0.18);
+}
+[data-theme='dark'] .tool-row.tk-search {
+  --tk: #a99ce8;
+  --tk-bg: rgba(169, 156, 232, 0.12);
+  --tk-bg-hover: rgba(169, 156, 232, 0.18);
+}
+[data-theme='dark'] .tool-row.tk-run {
+  --tk: #d9b062;
+  --tk-bg: rgba(217, 176, 98, 0.12);
+  --tk-bg-hover: rgba(217, 176, 98, 0.18);
+}
+[data-theme='dark'] .tool-row.tk-write {
+  --tk: #7fb894;
+  --tk-bg: rgba(127, 184, 148, 0.12);
+  --tk-bg-hover: rgba(127, 184, 148, 0.18);
+}
+[data-theme='dark'] .tool-row {
+  --tk-bg: rgba(230, 221, 208, 0.045);
+  --tk-bg-hover: rgba(230, 221, 208, 0.07);
+}
+
+/* 状态压过类型色：推进中蓝、失败红（色带同一位置表达）。
+   双类选择器 + 深色同名规则，确保压得住类型档（含 0,3,0 的深色规则）。 */
+.tool-row.tool-row-active {
+  --tk: #4a9eff;
+}
+.tool-row.tool-row-error {
+  --tk: #ff6b6b;
+}
+[data-theme='dark'] .tool-row.tool-row-active {
+  --tk: #4a9eff;
+}
+[data-theme='dark'] .tool-row.tool-row-error {
+  --tk: #ff6b6b;
 }
 
 .tool-row-head {

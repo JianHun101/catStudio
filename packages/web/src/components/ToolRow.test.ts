@@ -48,3 +48,49 @@ describe('ToolRow 工具行共享 partial', () => {
     expect(source).toContain('v-bind="$attrs"')
   })
 })
+
+// ─── B·改：工具行线退场，改「类型色带 + 同色相淡底」（票② 2.2 / AC5）──────────
+describe('ToolRow B·改 类型色带', () => {
+  it('AC5 四档类型映射：Read/Grep/Bash/Edit 各归一类（大小写与命名风格无关）', () => {
+    expect(source).toContain('function toolKindClass(t: ToolCallInfo): string')
+    // 搜索档：grep / search / glob / fetch
+    expect(source).toContain("n.includes('grep')")
+    expect(source).toContain("n.includes('search')")
+    // 执行档：bash / shell / terminal / task
+    expect(source).toContain("n.includes('bash')")
+    expect(source).toContain("n.includes('shell')")
+    // 编辑档：edit / write / patch
+    expect(source).toContain("n.includes('edit')")
+    expect(source).toContain("n.includes('write')")
+    // 读取档：read / view / ls
+    expect(source).toContain("n.includes('read')")
+    // 两处根节点（details / div）都挂类型类
+    expect(source.match(/:class="\[toolRowClass\(tool\), toolKindClass\(tool\)\]"/g)).toHaveLength(
+      2
+    )
+  })
+
+  it('AC5 色带形态与四档色值：左缘 3px 圆头带（上下内缩 4px）+ 8% 淡底', () => {
+    expect(source).toContain('.tool-row::before')
+    const band = /\.tool-row::before\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(band).toMatch(/width:\s*3px/)
+    expect(band).toMatch(/border-radius:\s*999px/)
+    expect(band).toMatch(/left:\s*0/)
+    expect(band).toMatch(/top:\s*4px/)
+    expect(band).toMatch(/bottom:\s*4px/)
+
+    // 四档色值（原型实测）
+    const read = /\.tool-row\.tk-read\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(read).toContain('--tk: #6b7fa8')
+    expect(read).toContain('--tk-bg: rgba(107, 127, 168, 0.08)')
+    const search = /\.tool-row\.tk-search\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(search).toContain('--tk: #8a7bd8')
+    const run = /\.tool-row\.tk-run\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(run).toContain('--tk: #c89840')
+    const write = /\.tool-row\.tk-write\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(write).toContain('--tk: #5a8f6e')
+
+    // 旧的蓝卡边框退役
+    expect(source).not.toContain('border: 1px solid rgba(130, 170, 220, 0.22)')
+  })
+})
