@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 ---
 
 # 票单：输入板默认 2 行 + 8 行封顶滚动
