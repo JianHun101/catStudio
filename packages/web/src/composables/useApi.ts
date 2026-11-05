@@ -312,8 +312,37 @@ export interface RetrievalReport {
 // ─── P1 链路视图（GET /eval/l1-metrics + GET /eval/chains，契约由 P1-A 冻结在字段级）──
 // 两条响应均为**平铺**（无 `ok` 外壳）——与上方 E4-A 的 `{ ok, … }` 不同，照契约读顶层字段。
 
+/** 评估告警字段（settings 表 `eval_alert_config` 的 key 集合） */
+export type EvalAlertField =
+  'successRate' | 'timeoutRate' | 'reworkRate' | 'minExecutions' | 'minVerdicts'
+
+/** 评估告警配置（三条告警线是小数，0.3 = 30%；两个门限是条数整数） */
+export interface EvalAlertConfig {
+  successRate: number
+  timeoutRate: number
+  reworkRate: number
+  minExecutions: number
+  minVerdicts: number
+}
+
+/** GET/POST /api/config/eval-alert 响应：source 是每字段生效来源（settings 优先、env 兜底） */
+export interface EvalAlertConfigResponse {
+  ok: boolean
+  config: EvalAlertConfig
+  source: Record<EvalAlertField, 'settings' | 'env'>
+}
+
+/** 一条破线 / 样本不足读数（服务端 `ThresholdBreach` 原样） */
+export interface ThresholdBreach {
+  key: 'successRate' | 'timeoutRate' | 'reworkRate'
+  value: number
+  threshold: number
+  text: string
+}
+
 /** L1 八口径（服务端 `aggregateMetrics()` 原样）。`avgLatencyMs` 为 null = 窗口内无 completed
- *  样本（或 latency 采集修复前的存量窗口）。「无数据」≠「0」，展示端必须区分。 */
+ *  样本（或 latency 采集修复前的存量窗口）。「无数据」≠「0」，展示端必须区分。
+ *  `breaches` / `insufficient` 由服务端分档，前端不重算。 */
 export interface EvalL1Metrics {
   windowDays: number
   successRate: number
@@ -325,6 +354,11 @@ export interface EvalL1Metrics {
   parseFailureRate: number
   infraFailures: number
   sampleTotal: number
+  /** 审查判词样本量（返工率分母） */
+  verdictTotal: number
+  thresholds: EvalAlertConfig
+  breaches: ThresholdBreach[]
+  insufficient: ThresholdBreach[]
 }
 
 /** 卡点标记（P1 裁决：四值互不排斥、全标不筛选——先看到真实分布再定阈值） */
@@ -780,6 +814,16 @@ export const api = {
     request<SummaryConfig>('/config/summary', {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+
+  // 评估告警阈值（GET/POST /api/config/eval-alert——settings 表优先、env 兜底；
+  // 保存后下一轮聚合生效，无需重启。告警线传小数，不做隐式百分比换算）
+  getEvalAlertConfig: () => request<EvalAlertConfigResponse>('/config/eval-alert'),
+
+  saveEvalAlertConfig: (partial: Partial<EvalAlertConfig>) =>
+    request<EvalAlertConfigResponse>('/config/eval-alert', {
+      method: 'POST',
+      body: JSON.stringify(partial),
     }),
 
   // 铁律读写（GET/POST /api/iron-laws——settings 表优先、常量兜底；编辑后下一轮回复立即生效）

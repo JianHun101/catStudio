@@ -448,7 +448,14 @@ describe('Eval Routes', () => {
       q().prepare("INSERT OR IGNORE INTO sessions (id, title) VALUES ('s1', 't')").run()
     })
 
-    it('GET /api/eval/l1-metrics：200 且 avgLatencyMs 非 null（有 completed 样本时）', async () => {
+    it('GET /api/eval/l1-metrics：200 且 avgLatencyMs 非 null（有 completed 样本时）+ 四新字段形状', async () => {
+      // 钉死阈值（防 .env 泄漏进断言）；本用例只有 1 条执行样本 → 样本门不达标
+      vi.stubEnv('EVAL_ALERT_SUCCESS_RATE', '0.8')
+      vi.stubEnv('EVAL_ALERT_TIMEOUT_RATE', '0.1')
+      vi.stubEnv('EVAL_ALERT_REWORK_RATE', '0.3')
+      vi.stubEnv('EVAL_ALERT_MIN_EXECUTIONS', '20')
+      vi.stubEnv('EVAL_ALERT_MIN_VERDICTS', '30')
+
       const a = seedAgent('店长')
       const sid = seedSession()
       const trig = seedMsg(sid, 'trig-1', 'anchor-1')
@@ -460,6 +467,44 @@ describe('Eval Routes', () => {
       expect(body.windowDays).toBe(30)
       expect(body.avgLatencyMs).toBe(1200)
       expect(body.sampleTotal).toBe(1)
+      // 四新字段：verdictTotal / thresholds / breaches / insufficient
+      expect(body.verdictTotal).toBe(0)
+      expect(body.thresholds).toEqual({
+        successRate: 0.8,
+        timeoutRate: 0.1,
+        reworkRate: 0.3,
+        minExecutions: 20,
+        minVerdicts: 30,
+      })
+      expect(body.breaches).toEqual([])
+      expect(body.insufficient.map((b: any) => b.key)).toEqual([
+        'successRate',
+        'timeoutRate',
+        'reworkRate',
+      ])
+      expect(body.insufficient[0]).toMatchObject({
+        key: 'successRate',
+        value: 1,
+        threshold: 20,
+      })
+    })
+
+    it('GET /api/eval/l1-metrics：破线项进 breaches（样本够格时）', async () => {
+      vi.stubEnv('EVAL_ALERT_MIN_EXECUTIONS', '2')
+      vi.stubEnv('EVAL_ALERT_MIN_VERDICTS', '30')
+      vi.stubEnv('EVAL_ALERT_SUCCESS_RATE', '0.8')
+
+      const a = seedAgent('店长')
+      const sid = seedSession()
+      const trig = seedMsg(sid, 'trig-1', 'anchor-1')
+      seedExec({ id: 'x1', agentId: a, triggerMsgId: trig, status: 'completed', latencyMs: 100 })
+      seedExec({ id: 'x2', agentId: a, triggerMsgId: trig, status: 'failed', latencyMs: null })
+
+      const res = await app.inject({ method: 'GET', url: '/api/eval/l1-metrics' })
+      const body = JSON.parse(res.body)
+      expect(body.breaches.map((b: any) => b.key)).toEqual(['successRate'])
+      expect(body.breaches[0].text).toContain('执行成功率 50.0%')
+      expect(body.insufficient.map((b: any) => b.key)).toEqual(['reworkRate'])
     })
 
     it('GET /api/eval/l1-metrics 是纯读：不落任何告警消息', async () => {

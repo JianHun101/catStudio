@@ -72,6 +72,39 @@ describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配
     expect(source).toContain('loadConfig()')
     expect(source).toContain('initCtxConfig()')
     expect(source).toContain('loadSummaryConfig()')
+    expect(source).toContain('loadEvalAlertConfig()')
+  })
+})
+
+describe('SettingsView 系统配置（评估告警——GET/POST /api/config/eval-alert）', () => {
+  it('第 4 张卡：5 个数字输入（三条告警线 + 两个门限）+ 保存按钮', () => {
+    expect(source).toContain('getEvalAlertConfig()')
+    expect(source).toContain('loadEvalAlertConfig()')
+    expect(source).toContain('v-model.number="evalAlertRate.successRate"')
+    expect(source).toContain('v-model.number="evalAlertRate.timeoutRate"')
+    expect(source).toContain('v-model.number="evalAlertRate.reworkRate"')
+    expect(source).toContain('v-model.number="evalAlertMinExecutions"')
+    expect(source).toContain('v-model.number="evalAlertMinVerdicts"')
+    expect(source).toContain('保存评估告警')
+  })
+
+  it('副标题写清生效时机：下一轮聚合（最长 1 小时）生效，无需重启', () => {
+    expect(source).toContain('下一轮聚合（最长 1 小时）生效，无需重启')
+  })
+
+  it('保存走 saveEvalAlertConfig，百分比换算成小数后再提交', () => {
+    expect(source).toContain('api.saveEvalAlertConfig({')
+    expect(source).toContain('successRate: evalAlertRate.value.successRate / 100')
+    expect(source).toContain('timeoutRate: evalAlertRate.value.timeoutRate / 100')
+    expect(source).toContain('reworkRate: evalAlertRate.value.reworkRate / 100')
+    expect(source).toContain('minExecutions: evalAlertMinExecutions.value')
+    expect(source).toContain('minVerdicts: evalAlertMinVerdicts.value')
+  })
+
+  it('来源小标：source 为 settings 的字段才显示「已自定义」', () => {
+    expect(source).toContain("evalAlertSource?.successRate === 'settings'")
+    expect(source).toContain("evalAlertSource?.minVerdicts === 'settings'")
+    expect(source).toContain('已自定义')
   })
 })
 
@@ -515,18 +548,18 @@ describe('SettingsView 系统配置区布局（三卡统一间距 + 每卡统一
     return hit ? { selectorText: hit[1], body: hit[2] } : null
   }
 
-  it('三张卡片各包一层 config-section——标题与卡片一一对应，数量不匹配即布局回退', () => {
+  it('四张卡片各包一层 config-section——标题与卡片一一对应，数量不匹配即布局回退', () => {
     const pane = systemPaneTemplate()
     // 三者必须同数：任一为 0 或数量不等，说明有卡片漏包 / 有标题游离在层外
-    expect(pane.match(/class="config-section"/g)).toHaveLength(3)
-    expect(pane.match(/class="ctx-card"/g)).toHaveLength(3)
-    expect(pane.match(/class="section-title"/g)).toHaveLength(3)
+    expect(pane.match(/class="config-section"/g)).toHaveLength(4)
+    expect(pane.match(/class="ctx-card"/g)).toHaveLength(4)
+    expect(pane.match(/class="section-title"/g)).toHaveLength(4)
   })
 
-  it('每层的标题先于卡片且文本对应（上下文阈值配置 / 摘要配置 / 铁律）', () => {
+  it('每层的标题先于卡片且文本对应（上下文阈值配置 / 摘要配置 / 铁律 / 评估告警）', () => {
     const chunks = systemPaneTemplate().split('class="config-section"').slice(1)
-    expect(chunks).toHaveLength(3)
-    const expectedTitles = ['上下文阈值配置', '摘要配置', '铁律']
+    expect(chunks).toHaveLength(4)
+    const expectedTitles = ['上下文阈值配置', '摘要配置', '铁律', '评估告警']
     chunks.forEach((chunk, i) => {
       const titleIdx = chunk.indexOf('class="section-title"')
       const cardIdx = chunk.indexOf('class="ctx-card"')
@@ -685,11 +718,12 @@ describe('SettingsView T3 设置页对齐改版（票面 §二 规格）', () =>
     expect(source).toContain('class="src"')
   })
 
-  it('每张配置卡带「什么时候生效」副标题（三卡各一条）', () => {
-    expect(source.match(/class="card-sub"/g)).toHaveLength(3)
+  it('每张配置卡带「什么时候生效」副标题（四卡各一条）', () => {
+    expect(source.match(/class="card-sub"/g)).toHaveLength(4)
     expect(source).toContain('保存后立即生效，重启后仍保持。')
     expect(source).toContain('保存后需重启 server 才生效（写 .env）。')
     expect(source).toContain('保存后下一轮回复即生效，无需重启。')
+    expect(source).toContain('下一轮聚合（最长 1 小时）生效，无需重启。')
   })
 
   it('验收 2 的结构前提：卡片内缩量统一 + 滚动条槽常驻', () => {

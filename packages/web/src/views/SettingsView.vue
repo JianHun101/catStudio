@@ -5,6 +5,8 @@ import { useChatStore } from '@/stores/chat'
 import {
   api,
   type ConnectorBinding,
+  type EvalAlertConfig,
+  type EvalAlertField,
   type NapcatBrowseEntry,
   type OneBotStatus,
 } from '@/composables/useApi'
@@ -658,14 +660,106 @@ async function saveIronLaws(): Promise<void> {
   }
 }
 
+// ─── 系统配置：评估告警（GET/POST /api/config/eval-alert——settings 优先、env 兜底）──
+// 三条告警线在设置页用百分比输入（0.3 显示 30），提交前换算回小数；
+// 两个门限是条数整数。保存后下一轮聚合（最长 1 小时）生效，无需重启。
+const evalAlertRate = ref({ successRate: 80, timeoutRate: 10, reworkRate: 30 })
+const evalAlertMinExecutions = ref(20)
+const evalAlertMinVerdicts = ref(30)
+const evalAlertSource = ref<Record<EvalAlertField, 'settings' | 'env'> | null>(null)
+const evalAlertLoading = ref(true)
+const evalAlertSaving = ref(false)
+const evalAlertError = ref('')
+const evalAlertSaved = ref('')
+const evalAlertFormError = ref('')
+
+/** 小数 → 百分比（两位小数，避免 0.3*100 的浮点尾巴） */
+function pctOf(rate: number): number {
+  return Number((rate * 100).toFixed(2))
+}
+
+function applyEvalAlertConfig(cfg: EvalAlertConfig): void {
+  evalAlertRate.value = {
+    successRate: pctOf(cfg.successRate),
+    timeoutRate: pctOf(cfg.timeoutRate),
+    reworkRate: pctOf(cfg.reworkRate),
+  }
+  evalAlertMinExecutions.value = cfg.minExecutions
+  evalAlertMinVerdicts.value = cfg.minVerdicts
+}
+
+async function loadEvalAlertConfig(): Promise<void> {
+  evalAlertLoading.value = true
+  evalAlertError.value = ''
+  try {
+    const res = await api.getEvalAlertConfig()
+    if (disposed) return
+    applyEvalAlertConfig(res.config)
+    evalAlertSource.value = res.source
+  } catch (err: any) {
+    if (!disposed) evalAlertError.value = err.message || '评估告警配置读取失败'
+  } finally {
+    if (!disposed) evalAlertLoading.value = false
+  }
+}
+
+/** 前端校验对齐后端契约：百分比 (0,100)，门限 1..10000 整数——不通过不发请求 */
+function validateEvalAlertForm(): boolean {
+  const rates: Array<[string, number]> = [
+    ['成功率告警线', evalAlertRate.value.successRate],
+    ['超时率告警线', evalAlertRate.value.timeoutRate],
+    ['返工率告警线', evalAlertRate.value.reworkRate],
+  ]
+  for (const [label, v] of rates) {
+    if (!(typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 100)) {
+      evalAlertFormError.value = `${label}必须是 0~100 之间的百分比`
+      return false
+    }
+  }
+  for (const [label, v] of [
+    ['执行样本门限', evalAlertMinExecutions.value],
+    ['审查判词门限', evalAlertMinVerdicts.value],
+  ] as Array<[string, number]>) {
+    if (!(typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 10000)) {
+      evalAlertFormError.value = `${label}必须是 1~10000 的整数`
+      return false
+    }
+  }
+  return true
+}
+
+async function saveEvalAlertConfig(): Promise<void> {
+  evalAlertFormError.value = ''
+  evalAlertSaved.value = ''
+  if (!validateEvalAlertForm()) return
+  evalAlertSaving.value = true
+  try {
+    const res = await api.saveEvalAlertConfig({
+      successRate: evalAlertRate.value.successRate / 100,
+      timeoutRate: evalAlertRate.value.timeoutRate / 100,
+      reworkRate: evalAlertRate.value.reworkRate / 100,
+      minExecutions: evalAlertMinExecutions.value,
+      minVerdicts: evalAlertMinVerdicts.value,
+    })
+    applyEvalAlertConfig(res.config)
+    evalAlertSource.value = res.source
+    evalAlertSaved.value = '已保存——下一轮聚合（最长 1 小时）生效，无需重启'
+  } catch (err: any) {
+    evalAlertFormError.value = err.message || '保存失败'
+  } finally {
+    evalAlertSaving.value = false
+  }
+}
+
 onMounted(() => {
-  // 设置页为常驻视图（v-show 切类保持挂载）——一次拉齐五份数据
+  // 设置页为常驻视图（v-show 切类保持挂载）——一次拉齐六份数据
   loadBindings()
   refresh()
   loadConfig()
   initCtxConfig()
   loadSummaryConfig()
   loadIronLaws()
+  loadEvalAlertConfig()
 })
 onUnmounted(() => {
   disposed = true
@@ -1333,6 +1427,142 @@ onUnmounted(() => {
                 <div class="form-actions">
                   <button class="btn btn-create" :disabled="ironLawsSaving" @click="saveIronLaws">
                     {{ ironLawsSaving ? '保存中…' : '保存铁律' }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="config-section">
+            <div class="section-title">评估告警</div>
+            <div class="card-sub">下一轮聚合（最长 1 小时）生效，无需重启。</div>
+            <!-- 评估告警阈值（三条告警线 + 两个样本门限；settings 表优先、env 兜底） -->
+            <div class="ctx-card">
+              <div class="ctx-info">
+                评估中心与页面顶部横幅按这里的阈值判定告警。三条告警线用百分比填写（30 =
+                30%）；两个门限是样本条数——样本不足时对应指标不判定、不告警。 保存后下一轮聚合
+                （最长 1 小时）生效，无需重启。
+              </div>
+
+              <div v-if="evalAlertLoading" class="list-hint">加载中…</div>
+              <div v-else-if="evalAlertError" class="error-msg">{{ evalAlertError }}</div>
+              <template v-else>
+                <div class="frow">
+                  <span class="label">
+                    成功率告警线
+                    <span v-if="evalAlertSource?.successRate === 'settings'" class="src-tag"
+                      >已自定义</span
+                    >
+                  </span>
+                  <div class="ctl">
+                    <input
+                      v-model.number="evalAlertRate.successRate"
+                      type="number"
+                      min="0.01"
+                      max="99.99"
+                      step="1"
+                      class="input input-ctx"
+                      :disabled="evalAlertSaving"
+                    />
+                    <span class="pct-suffix">%</span>
+                  </div>
+                </div>
+                <div class="frow">
+                  <span class="label">
+                    超时率告警线
+                    <span v-if="evalAlertSource?.timeoutRate === 'settings'" class="src-tag"
+                      >已自定义</span
+                    >
+                  </span>
+                  <div class="ctl">
+                    <input
+                      v-model.number="evalAlertRate.timeoutRate"
+                      type="number"
+                      min="0.01"
+                      max="99.99"
+                      step="1"
+                      class="input input-ctx"
+                      :disabled="evalAlertSaving"
+                    />
+                    <span class="pct-suffix">%</span>
+                  </div>
+                </div>
+                <div class="frow">
+                  <span class="label">
+                    返工率告警线
+                    <span v-if="evalAlertSource?.reworkRate === 'settings'" class="src-tag"
+                      >已自定义</span
+                    >
+                  </span>
+                  <div class="ctl">
+                    <input
+                      v-model.number="evalAlertRate.reworkRate"
+                      type="number"
+                      min="0.01"
+                      max="99.99"
+                      step="1"
+                      class="input input-ctx"
+                      :disabled="evalAlertSaving"
+                    />
+                    <span class="pct-suffix">%</span>
+                  </div>
+                </div>
+                <div class="frow">
+                  <span class="label">
+                    执行样本门限
+                    <span v-if="evalAlertSource?.minExecutions === 'settings'" class="src-tag"
+                      >已自定义</span
+                    >
+                  </span>
+                  <div class="ctl">
+                    <input
+                      v-model.number="evalAlertMinExecutions"
+                      type="number"
+                      min="1"
+                      max="10000"
+                      step="1"
+                      class="input input-ctx"
+                      :disabled="evalAlertSaving"
+                    />
+                    <span class="pct-suffix">条</span>
+                  </div>
+                </div>
+                <div class="frow">
+                  <span class="label">
+                    审查判词门限
+                    <span v-if="evalAlertSource?.minVerdicts === 'settings'" class="src-tag"
+                      >已自定义</span
+                    >
+                  </span>
+                  <div class="ctl">
+                    <input
+                      v-model.number="evalAlertMinVerdicts"
+                      type="number"
+                      min="1"
+                      max="10000"
+                      step="1"
+                      class="input input-ctx"
+                      :disabled="evalAlertSaving"
+                    />
+                    <span class="pct-suffix">条</span>
+                  </div>
+                </div>
+
+                <div class="ctx-hint">
+                  成功率/超时率需达到「执行样本门限」才判定；返工率（建议率 + 驳回率）需达到
+                  「审查判词门限」才判定。样本不足时评估中心对应卡片灰显并标注「需 ≥ N」。
+                </div>
+
+                <div v-if="evalAlertFormError" class="error-msg">{{ evalAlertFormError }}</div>
+                <div v-if="evalAlertSaved" class="ok-msg">{{ evalAlertSaved }}</div>
+
+                <div class="form-actions">
+                  <button
+                    class="btn btn-create"
+                    :disabled="evalAlertSaving"
+                    @click="saveEvalAlertConfig"
+                  >
+                    {{ evalAlertSaving ? '保存中…' : '保存评估告警' }}
                   </button>
                 </div>
               </template>
@@ -2148,6 +2378,23 @@ select.input {
   font-family: var(--font-mono);
   font-size: 12px;
   flex-shrink: 0;
+}
+
+/* 评估告警卡：百分比/条数单位后缀 + 「已自定义」来源小标 */
+.pct-suffix {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.src-tag {
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  background: var(--accent-soft);
+  white-space: nowrap;
 }
 
 /* ─── 铁律编辑块（textarea 全文——settings 表优先、seed 常量兜底） ─── */

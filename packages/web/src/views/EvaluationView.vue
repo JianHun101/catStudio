@@ -266,17 +266,86 @@ function fmtNum(n: number | null | undefined): string {
 
 /** L1 八口径卡片：`value` 留原始值供「无数据」样式判定（任一口径为 null 都置灰），
  *  `text` 是展示串——两者分开，避免用展示串反推「是不是没有数据」。 */
+type L1CardState = 'normal' | 'breach' | 'insufficient'
+
+/**
+ * L1 八口径卡片：`value` 留原始值供「无数据」样式判定，`text` 是展示串。
+ * 告警分档**直接用服务端算好的** `breaches` / `insufficient`，前端不重算阈值——
+ * 否则同一规则会在前后端各写一份，改一处漏一处就会造出「横幅说破线、卡片说正常」。
+ * 建议率/驳回率共用合并后的返工率门（`reworkRate`），两张卡同态。
+ */
 const l1Cards = computed(() => {
   const m = l1.value
+  const breachKeys = new Set((m?.breaches ?? []).map((b) => b.key))
+  const insufficientKeys = new Set((m?.insufficient ?? []).map((b) => b.key))
+
+  function stateOf(
+    key: 'successRate' | 'timeoutRate' | 'reworkRate' | null,
+    sample: 'executions' | 'verdicts' | null
+  ): { state: L1CardState; badge: string } {
+    if (!m || key === null) return { state: 'normal', badge: '' }
+    if (insufficientKeys.has(key)) {
+      const need = sample === 'executions' ? m.thresholds.minExecutions : m.thresholds.minVerdicts
+      const unit = sample === 'executions' ? '条执行' : '条判词'
+      return { state: 'insufficient', badge: `需 ≥ ${need} ${unit}` }
+    }
+    if (breachKeys.has(key)) return { state: 'breach', badge: '' }
+    return { state: 'normal', badge: '' }
+  }
+
   return [
-    { label: '成功率', value: m?.successRate ?? null, text: fmtRate(m?.successRate) },
-    { label: '超时率', value: m?.timeoutRate ?? null, text: fmtRate(m?.timeoutRate) },
-    { label: '平均耗时', value: m?.avgLatencyMs ?? null, text: fmtMs(m?.avgLatencyMs) },
-    { label: '总 token', value: m?.totalTokens ?? null, text: fmtNum(m?.totalTokens) },
-    { label: '建议率', value: m?.suggestRate ?? null, text: fmtRate(m?.suggestRate) },
-    { label: '驳回率', value: m?.rejectRate ?? null, text: fmtRate(m?.rejectRate) },
-    { label: '解析失败率', value: m?.parseFailureRate ?? null, text: fmtRate(m?.parseFailureRate) },
-    { label: '基建故障', value: m?.infraFailures ?? null, text: fmtNum(m?.infraFailures) },
+    {
+      label: '成功率',
+      value: m?.successRate ?? null,
+      text: fmtRate(m?.successRate),
+      ...stateOf('successRate', 'executions'),
+    },
+    {
+      label: '超时率',
+      value: m?.timeoutRate ?? null,
+      text: fmtRate(m?.timeoutRate),
+      ...stateOf('timeoutRate', 'executions'),
+    },
+    {
+      label: '平均耗时',
+      value: m?.avgLatencyMs ?? null,
+      text: fmtMs(m?.avgLatencyMs),
+      state: 'normal' as const,
+      badge: '',
+    },
+    {
+      label: '总 token',
+      value: m?.totalTokens ?? null,
+      text: fmtNum(m?.totalTokens),
+      state: 'normal' as const,
+      badge: '',
+    },
+    {
+      label: '建议率',
+      value: m?.suggestRate ?? null,
+      text: fmtRate(m?.suggestRate),
+      ...stateOf('reworkRate', 'verdicts'),
+    },
+    {
+      label: '驳回率',
+      value: m?.rejectRate ?? null,
+      text: fmtRate(m?.rejectRate),
+      ...stateOf('reworkRate', 'verdicts'),
+    },
+    {
+      label: '解析失败率',
+      value: m?.parseFailureRate ?? null,
+      text: fmtRate(m?.parseFailureRate),
+      state: 'normal' as const,
+      badge: '',
+    },
+    {
+      label: '基建故障',
+      value: m?.infraFailures ?? null,
+      text: fmtNum(m?.infraFailures),
+      state: 'normal' as const,
+      badge: '',
+    },
   ]
 })
 
@@ -842,14 +911,24 @@ onUnmounted(() => {
       <template v-else>
         <div class="section-title">L1 指标</div>
         <div class="l1-grid">
-          <div v-for="c in l1Cards" :key="c.label" class="l1-card">
+          <div
+            v-for="c in l1Cards"
+            :key="c.label"
+            class="l1-card"
+            :class="{
+              'l1-breach': c.state === 'breach',
+              'l1-insufficient': c.state === 'insufficient',
+            }"
+            :data-state="c.state"
+          >
             <span class="l1-label">{{ c.label }}</span>
             <span class="l1-value" :class="{ 'l1-nodata': c.value === null }">{{ c.text }}</span>
+            <span v-if="c.badge" class="l1-badge">{{ c.badge }}</span>
           </div>
         </div>
         <div class="l1-note">
           <span>窗口 {{ l1?.windowDays ?? '—' }} 天</span>
-          <span>样本 {{ fmtNum(l1?.sampleTotal) }}</span>
+          <span>执行 {{ fmtNum(l1?.sampleTotal) }} / 审查 {{ fmtNum(l1?.verdictTotal) }}</span>
           <span class="hint">平均耗时只算 completed 执行；无样本时为 —</span>
         </div>
 
@@ -1796,6 +1875,27 @@ onUnmounted(() => {
 .l1-nodata {
   color: var(--text-muted);
   font-weight: 500;
+}
+
+/* 破线：文字变红（只改颜色，卡片仍可读） */
+.l1-breach .l1-value,
+.l1-breach .l1-label {
+  color: var(--status-danger, #c62828);
+}
+
+/* 样本不足：整卡灰显 + 角标「需 ≥ N」——不参与判定，别让它看起来像正常 */
+.l1-insufficient {
+  opacity: 0.55;
+}
+
+.l1-badge {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-surface, rgb(0 0 0 / 6%));
+  white-space: nowrap;
 }
 
 .l1-note {

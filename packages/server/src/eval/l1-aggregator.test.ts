@@ -1,13 +1,17 @@
 /**
  * l1-aggregator 测试 — W1 L1 契约。
- * 真实 SQLite :memory: + mock io（只 mock 最外层投递）。覆盖：
- * 八口径聚合（分母排除 server_restart）/ 破线告警 / 滞回去重 / 恢复 / 重启清空。
+ * 真实 SQLite :memory:。覆盖：
+ * 八口径聚合（分母排除 server_restart）/ 破线告警 / 滞回去重 / 恢复 / 重启清空 /
+ * 样本门（insufficient）/ settings 阈值真驱动。
+ *
+ * 2026-11 起告警**不再落会话**——旧「广播 + 落库」断言改为「messages 表零新增」，
+ * 破线内容改由返回值的 `broken` / `insufficient` 断言。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { Events } from '@cat-study/shared'
 import { createTestDb } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
-import { initRepository } from '../db/repository/index.js'
+import { initRepository, settings as settingsRepo } from '../db/repository/index.js'
+import { writeEvalAlertConfig } from '../config/eval-alert-config.js'
 import { getLogLevel, setLogLevel } from '../logger.js'
 import {
   aggregateMetrics,
@@ -15,12 +19,6 @@ import {
   runL1Aggregation,
   __test_resetAlertState,
 } from './l1-aggregator.js'
-
-/** 假 bus：镜像 createSocketBus 的 emitSystemNotice——roomEmit 捕获 NEW_MESSAGE 载荷 */
-const roomEmit = vi.fn()
-const bus = {
-  emitSystemNotice: (n: any) => roomEmit(Events.NEW_MESSAGE, { ...n, role: 'system' }),
-} as any
 
 /** FK 基础数据：session s1 + agent agent-1 + reviewer-1 + 触发消息 t1
  *  （票 6 起 execution_logs / review_verdicts / review_parse_failures 的引用列都有
@@ -98,6 +96,21 @@ function insertParseFailure(): void {
     .run(messageId, isoNow())
 }
 
+/** 钉死五条环境阈值——防跑批进程继承 .env 造成假读数 */
+function stubAlertEnv(overrides: Partial<Record<string, string>> = {}): void {
+  vi.stubEnv('EVAL_ALERT_SUCCESS_RATE', '0.8')
+  vi.stubEnv('EVAL_ALERT_TIMEOUT_RATE', '0.1')
+  vi.stubEnv('EVAL_ALERT_REWORK_RATE', '0.3')
+  vi.stubEnv('EVAL_ALERT_MIN_EXECUTIONS', '20')
+  vi.stubEnv('EVAL_ALERT_MIN_VERDICTS', '30')
+  for (const [k, v] of Object.entries(overrides)) vi.stubEnv(k, v as string)
+}
+
+/** 旧告警用例的判别力：把样本门降到 1，只让原破线条件起作用 */
+function stubSampleGateOpen(): void {
+  stubAlertEnv({ EVAL_ALERT_MIN_EXECUTIONS: '1', EVAL_ALERT_MIN_VERDICTS: '1' })
+}
+
 describe('aggregateMetrics — 八口径', () => {
   beforeEach(() => {
     setDb(createTestDb())
@@ -108,6 +121,7 @@ describe('aggregateMetrics — 八口径', () => {
   afterEach(() => {
     resetDb()
     __test_resetAlertState()
+    vi.unstubAllEnvs()
   })
 
   it('分母排除 server_restart：completed + 普通 failed 参与成功率，infra 单独计数', () => {
@@ -137,13 +151,14 @@ describe('aggregateMetrics — 八口径', () => {
     expect(m.infraFailures).toBe(0)
   })
 
-  it('空窗口 → 成功率 1、各率 0、avg null', () => {
+  it('空窗口 → 成功率 1、各率 0、avg null、两分母 0', () => {
     const m = aggregateMetrics()
     expect(m.successRate).toBe(1)
     expect(m.timeoutRate).toBe(0)
     expect(m.suggestRate).toBe(0)
     expect(m.avgLatencyMs).toBeNull()
     expect(m.sampleTotal).toBe(0)
+    expect(m.verdictTotal).toBe(0)
   })
 
   it('30 天窗口：窗口外记录不计数（execution_logs 用 started_at 判窗）', () => {
@@ -171,7 +186,7 @@ describe('aggregateMetrics — 八口径', () => {
     expect(m.successRate).toBeCloseTo(0.5, 5)
   })
 
-  it('suggest/reject/解析失败率：verdicts 与 failures 口径', () => {
+  it('suggest/reject/解析失败率：verdicts 与 failures 口径（verdictTotal 同步）', () => {
     insertExecution({ status: 'completed' })
     insertVerdict('approve')
     insertVerdict('suggest')
@@ -182,21 +197,24 @@ describe('aggregateMetrics — 八口径', () => {
     expect(m.rejectRate).toBeCloseTo(1 / 3, 5)
     // 解析失败率 = failures/(verdicts+failures) = 1/4
     expect(m.parseFailureRate).toBeCloseTo(0.25, 5)
+    // 返工率分母 = 判词条数，不含解析失败
+    expect(m.verdictTotal).toBe(3)
   })
 })
 
-describe('runL1Aggregation — 滞回告警', () => {
+describe('runL1Aggregation — 滞回告警（样本门打开以保留原判别力）', () => {
   beforeEach(() => {
     setDb(createTestDb())
     initRepository(getDb())
     seedBase()
-    roomEmit.mockClear()
     __test_resetAlertState()
+    stubSampleGateOpen()
   })
 
   afterEach(() => {
     resetDb()
     __test_resetAlertState()
+    vi.unstubAllEnvs()
   })
 
   /** 插 4 条执行 + 3 条结论，构造成功率 50%（4 条中 2 完成）破线 */
@@ -207,89 +225,162 @@ describe('runL1Aggregation — 滞回告警', () => {
     insertExecution({ status: 'failed', error_message: '执行超时', error_type: 'timeout' })
   }
 
-  it('破线 → alert:true + 告警落库 + 房间广播（mentions 写回店长）', () => {
+  it('破线 → alert:true + broken 含成功率，且不再落任何会话消息', () => {
     seedBrokenSuccess()
-    const r = runL1Aggregation(bus)
+    const before = (getDb().prepare('SELECT COUNT(*) AS c FROM messages').get() as { c: number }).c
+    const r = runL1Aggregation()
     expect(r.alert).toBe(true)
     expect(r.recovered).toBe(false)
+    expect(r.broken.map((b) => b.key)).toContain('successRate')
+    expect(r.broken.find((b) => b.key === 'successRate')!.text).toContain('执行成功率 50.0%')
 
-    // 广播
-    expect(roomEmit.mock.calls[0][1].sessionId).toBe('s1')
-    expect(roomEmit).toHaveBeenCalledTimes(1)
-    const msg = roomEmit.mock.calls[0][1] as any
-    expect(msg.role).toBe('system')
-    expect(msg.mentions).toEqual(['店长'])
-    expect(msg.content).toContain('📊评估告警')
-    expect(msg.content).toContain('执行成功率 50.0%')
-
-    // 落库
-    const row = getDb()
-      .prepare(`SELECT * FROM messages WHERE session_id = 's1' AND role = 'system'`)
-      .get() as any
-    expect(row).toBeDefined()
-    expect(JSON.parse(row.mentions)).toEqual(['店长'])
+    // 广播退场：告警不再写 messages（旧「每会话一条 system 消息」已删）
+    const after = (getDb().prepare('SELECT COUNT(*) AS c FROM messages').get() as { c: number }).c
+    expect(after).toBe(before)
+    expect(
+      (
+        getDb().prepare(`SELECT COUNT(*) AS c FROM messages WHERE role = 'system'`).get() as {
+          c: number
+        }
+      ).c
+    ).toBe(0)
   })
 
-  it('滞回去重：alerting 持续破线不重复投递', () => {
+  it('滞回去重：alerting 持续破线不重复告警', () => {
     seedBrokenSuccess()
 
-    expect(runL1Aggregation(bus).alert).toBe(true)
-    expect(roomEmit).toHaveBeenCalledTimes(1)
-
-    // 数据未变（仍破线）→ 第二轮不投递
-    const r2 = runL1Aggregation(bus)
+    expect(runL1Aggregation().alert).toBe(true)
+    // 数据未变（仍破线）→ 第二轮不告警
+    const r2 = runL1Aggregation()
     expect(r2.alert).toBe(false)
-    expect(roomEmit).toHaveBeenCalledTimes(1)
+    expect(r2.broken.length).toBeGreaterThan(0)
   })
 
-  it('恢复：alerting → 全部指标正常 → recovered:true 且不投递', () => {
+  it('恢复：alerting → 全部指标正常 → recovered:true', () => {
     seedBrokenSuccess()
-    expect(runL1Aggregation(bus).alert).toBe(true)
+    expect(runL1Aggregation().alert).toBe(true)
 
     // 修复：清空失败记录 → 全部 completed
     getDb().prepare(`DELETE FROM execution_logs WHERE status = 'failed'`).run()
-    const r = runL1Aggregation(bus)
+    const r = runL1Aggregation()
     expect(r.recovered).toBe(true)
     expect(r.alert).toBe(false)
-    expect(roomEmit).toHaveBeenCalledTimes(1) // 恢复不投递
   })
 
   it('重启清空状态机：__test_resetAlertState 后破线重新告警', () => {
     seedBrokenSuccess()
-    expect(runL1Aggregation(bus).alert).toBe(true)
+    expect(runL1Aggregation().alert).toBe(true)
 
     __test_resetAlertState() // 模拟重启（模块级状态清空）
-    roomEmit.mockClear()
-    const r = runL1Aggregation(bus)
+    const r = runL1Aggregation()
     expect(r.alert).toBe(true) // 重启后最多多发一条，接受
   })
 
-  it('阈值 env 覆盖：EVAL_ALERT_SUCCESS_RATE 提高后原数据破线', () => {
+  it('阈值 env 覆盖：EVAL_ALERT_SUCCESS_RATE 放宽后原数据不破线', () => {
     insertExecution({ status: 'completed' })
     insertExecution({ status: 'completed' })
     insertExecution({ status: 'failed', error_message: 'x', error_type: 'unknown' })
 
     // 默认 0.8：成功率 2/3 ≈ 66.7% < 80% → 破线
-    expect(runL1Aggregation(bus).alert).toBe(true)
+    expect(runL1Aggregation().alert).toBe(true)
     __test_resetAlertState()
-    roomEmit.mockClear()
 
     // 阈值放宽到 0.5 → 66.7% > 50% 不破线
-    process.env.EVAL_ALERT_SUCCESS_RATE = '0.5'
-    try {
-      expect(runL1Aggregation(bus).alert).toBe(false)
-    } finally {
-      delete process.env.EVAL_ALERT_SUCCESS_RATE
-    }
+    vi.stubEnv('EVAL_ALERT_SUCCESS_RATE', '0.5')
+    expect(runL1Aggregation().alert).toBe(false)
   })
 
   it('healthy 稳态：normal 且不破线 → 静默无动作', () => {
     insertExecution({ status: 'completed' })
     insertExecution({ status: 'completed' })
-    const r = runL1Aggregation(bus)
+    const r = runL1Aggregation()
     expect(r.alert).toBe(false)
     expect(r.recovered).toBe(false)
-    expect(roomEmit).not.toHaveBeenCalled()
+    expect(r.broken).toHaveLength(0)
+  })
+})
+
+describe('runL1Aggregation — 样本门（默认门限，不打开）', () => {
+  beforeEach(() => {
+    setDb(createTestDb())
+    initRepository(getDb())
+    seedBase()
+    __test_resetAlertState()
+    stubAlertEnv() // 0.8 / 0.1 / 0.3 / 20 / 30
+  })
+
+  afterEach(() => {
+    resetDb()
+    __test_resetAlertState()
+    vi.unstubAllEnvs()
+  })
+
+  it('① 6 suggest / 16 判词（37.5% > 30%）→ 样本不足，不告警', () => {
+    insertExecution({ status: 'completed' })
+    for (let i = 0; i < 6; i++) insertVerdict('suggest')
+    for (let i = 0; i < 10; i++) insertVerdict('approve')
+
+    const r = runL1Aggregation()
+    expect(r.alert).toBe(false)
+    expect(r.broken).toHaveLength(0)
+    expect(r.insufficient.map((b) => b.key)).toContain('reworkRate')
+    expect(r.insufficient.find((b) => b.key === 'reworkRate')!.text).toContain('16 < 30 条判词')
+  })
+
+  it('② 30 判词 12 suggest（40%）→ 分母够，alert:true', () => {
+    insertExecution({ status: 'completed' })
+    for (let i = 0; i < 12; i++) insertVerdict('suggest')
+    for (let i = 0; i < 18; i++) insertVerdict('approve')
+
+    const r = runL1Aggregation()
+    expect(r.alert).toBe(true)
+    expect(r.broken.map((b) => b.key)).toContain('reworkRate')
+  })
+
+  it('③ 30 判词 11 suggest（36.7%）→ 仍 alert:true（一条判词不再翻转状态）', () => {
+    insertExecution({ status: 'completed' })
+    for (let i = 0; i < 11; i++) insertVerdict('suggest')
+    for (let i = 0; i < 19; i++) insertVerdict('approve')
+
+    const r = runL1Aggregation()
+    expect(r.alert).toBe(true)
+    expect(r.broken.map((b) => b.key)).toContain('reworkRate')
+  })
+
+  it('④ 20 条执行里 10 条失败 → 执行样本够，successRate 破线', () => {
+    for (let i = 0; i < 10; i++) insertExecution({ status: 'completed' })
+    for (let i = 0; i < 10; i++)
+      insertExecution({ status: 'failed', error_message: 'x', error_type: 'parse_error' })
+
+    const r = runL1Aggregation()
+    expect(r.alert).toBe(true)
+    expect(r.broken.map((b) => b.key)).toContain('successRate')
+    // 审查样本 0 → 返工率仍记录为样本不足，但不影响 alert
+    expect(r.insufficient.map((b) => b.key)).toContain('reworkRate')
+  })
+
+  it('配置真驱动：同一份 6/16 数据，settings 把 minVerdicts 调到 10 → alert:true；删掉回 false', () => {
+    insertExecution({ status: 'completed' })
+    for (let i = 0; i < 6; i++) insertVerdict('suggest')
+    for (let i = 0; i < 10; i++) insertVerdict('approve')
+
+    expect(runL1Aggregation().alert).toBe(false)
+
+    __test_resetAlertState()
+    writeEvalAlertConfig({ minVerdicts: 10 })
+    expect(runL1Aggregation().alert).toBe(true)
+
+    __test_resetAlertState()
+    getDb().prepare(`DELETE FROM settings WHERE key = 'eval_alert_config'`).run()
+    expect(settingsRepo.getSetting('eval_alert_config')).toBeUndefined()
+    expect(runL1Aggregation().alert).toBe(false)
+  })
+
+  it('suggestRate / rejectRate 共用返工率门：两张卡的分档来源唯一', () => {
+    insertExecution({ status: 'completed' })
+    for (let i = 0; i < 30; i++) insertVerdict('reject')
+    const r = runL1Aggregation()
+    expect(r.broken.find((b) => b.key === 'reworkRate')!.value).toBeCloseTo(1, 5)
   })
 })
 
@@ -298,7 +389,7 @@ describe('runL1Aggregation — 滞回告警', () => {
  * 三个 `EVAL_ALERT_*` 键在立票读数里**连一处 env 级测试都没有**（本仓此前唯一有
  * 坏值守卫的是 `AGENT_HARD_TIMEOUT_MS`，见 `serial.hard-timeout-disabled.test.ts` A1）。
  *
- * 断言打在**真接线点**：`alertThresholds()` 是这三个键的唯一 env 读取点，
+ * 断言打在**真接线点**：`alertThresholds()` 是这三个键的 env 读取点，
  * `runL1Aggregation` 是阈值的真消费函数（滞回状态机的破线判定）。两者都断——
  * 只断前者的话，「值对了但没进状态机」不会红。
  */
@@ -307,7 +398,6 @@ describe('env 坏值回归：EVAL_ALERT_* 三键', () => {
     setDb(createTestDb())
     initRepository(getDb())
     seedBase()
-    roomEmit.mockClear()
     __test_resetAlertState()
   })
 
@@ -320,6 +410,7 @@ describe('env 坏值回归：EVAL_ALERT_* 三键', () => {
   /**
    * 每键一组，`seed` 造的**只有本键会破线**的数据。另两键在用例里显式钉默认值
    * ——不钉的话告警可能是被别的键打破的，本键的断言就测不到本键（假绿）。
+   * 样本门降为 1：本组测的是阈值解析，不是样本门。
    */
   const CASES = [
     {
@@ -361,6 +452,8 @@ describe('env 坏值回归：EVAL_ALERT_* 三键', () => {
       vi.stubEnv('EVAL_ALERT_SUCCESS_RATE', '0.8')
       vi.stubEnv('EVAL_ALERT_TIMEOUT_RATE', '0.1')
       vi.stubEnv('EVAL_ALERT_REWORK_RATE', '0.3')
+      vi.stubEnv('EVAL_ALERT_MIN_EXECUTIONS', '1')
+      vi.stubEnv('EVAL_ALERT_MIN_VERDICTS', '1')
       c.seed()
 
       const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
@@ -377,16 +470,15 @@ describe('env 坏值回归：EVAL_ALERT_* 三键', () => {
         expect(alertThresholds()[c.field]).toBe(c.fallback)
         // 承重面：坏值若解析成 NaN，`m.successRate < NaN` / `m.timeoutRate > NaN` 一类
         // 比较恒假 ⇒ 破线判定静默失效、告警永不触发。这条把「值对了」推到「状态机真破线」。
-        expect(runL1Aggregation(bus).alert).toBe(true)
+        expect(runL1Aggregation().alert).toBe(true)
         // 正对照：坏值必须出声（否则下面的「不新增」恒真）。条数 = 读取次数，不作断言。
         expect(warns().length).toBeGreaterThan(0)
         const afterBad = warns().length
 
         __test_resetAlertState() // 上一轮已进 alerting；不复位则第二轮无转换沿、断言恒假
-        roomEmit.mockClear()
         vi.stubEnv(c.key, '')
         expect(alertThresholds()[c.field]).toBe(c.fallback)
-        expect(runL1Aggregation(bus).alert).toBe(true)
+        expect(runL1Aggregation().alert).toBe(true)
         expect(warns().length).toBe(afterBad) // 空串：调用次数可变，warn 一条都不许新增
       } finally {
         stdoutSpy.mockRestore()

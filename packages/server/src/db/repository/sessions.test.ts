@@ -239,8 +239,9 @@ describe('sessions repo — handoff 去重守卫', () => {
       expect(activeIds).toContain('s-live')
       expect(activeIds).not.toContain('s-gone')
 
-      // `listAllSessions` 是**系统链路**口径（评估告警播报靠它），过滤塞进去 = 让归档
-      // 静默改变无关子系统的行为。这条断言就是那个不变量的守卫。
+      // `listAllSessions` 是**系统链路**口径（系统链路的覆盖面仍含归档会话；评估告警
+      // 已改由 /api/eval/l1-metrics 供横幅与评估中心读取，不再经 messages），过滤塞进去
+      // = 让归档静默改变无关子系统的行为。这条断言就是那个不变量的守卫。
       const allIds = sessionsRepo.listAllSessions().map((r) => r.id)
       expect(allIds).toContain('s-live')
       expect(allIds).toContain('s-gone')

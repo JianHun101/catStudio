@@ -335,11 +335,12 @@ async function main(): Promise<void> {
   const stopOneBotOutbound = startOneBotOutbound()
 
   // W1 L1 聚合定时器：每小时跑一轮八口径聚合 + 滞回告警判定（同步函数，
-  // 失败不阻塞主流程——聚合器内部已 per-session 防御，外层再兜一层防崩溃）
+  // 失败不阻塞主流程——聚合结果不落会话、不广播，告警面由 /api/eval/l1-metrics
+  // 供给评估中心与全局横幅；外层兜一层防崩溃）
   const l1Timer = setInterval(
     () => {
       try {
-        runL1Aggregation(bus)
+        runL1Aggregation()
       } catch (err: any) {
         log.error('L1 aggregation crashed (non-blocking)', { error: err.message })
       }
@@ -348,7 +349,7 @@ async function main(): Promise<void> {
   )
   // 启动后立即跑一轮（不等首个整点，重启后状态机已清空、首轮即恢复判定基线）
   try {
-    runL1Aggregation(bus)
+    runL1Aggregation()
   } catch (err: any) {
     log.error('L1 initial aggregation failed (non-blocking)', { error: err.message })
   }

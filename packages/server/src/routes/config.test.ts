@@ -8,8 +8,10 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { buildTestApp, isolatedTestDir } from '../test-helpers.js'
+import { buildTestApp, createTestDb, isolatedTestDir } from '../test-helpers.js'
 import { shouldHandoff } from '../handoff/index.js'
+import { setDb, resetDb, getDb } from '../db/index.js'
+import { initRepository } from '../db/repository/index.js'
 import type { FastifyInstance } from 'fastify'
 
 /**
@@ -32,6 +34,9 @@ describe('config routes (context thresholds)', () => {
     rmSync(cfgTmpDir, { recursive: true, force: true })
     vi.stubEnv('RESTART_FILES_DIR', cfgTmpDir)
     vi.stubEnv('MAX_CONTEXT_TOKENS', '128000')
+    // 评估告警配置落 settings 表——本文件同时覆盖 context（文件）与 eval-alert（DB）两组端点
+    setDb(createTestDb())
+    initRepository(getDb())
     app = await buildTestApp()
     const { configRoutes } = await import('./config.js')
     await app.register(configRoutes)
@@ -41,6 +46,7 @@ describe('config routes (context thresholds)', () => {
     vi.unstubAllEnvs()
     rmSync(cfgTmpDir, { recursive: true, force: true })
     await app.close()
+    resetDb()
   })
 
   describe('GET /api/config/context', () => {
@@ -183,6 +189,90 @@ describe('config routes (context thresholds)', () => {
       vi.stubEnv('HANDOFF_THRESHOLD', '0.8')
       expect(shouldHandoff(102400)).toBe(true) // 128000*0.8=102400
       expect(shouldHandoff(102399)).toBe(false)
+    })
+  })
+
+  describe('评估告警阈值（GET/POST /api/config/eval-alert）', () => {
+    beforeEach(() => {
+      // 五键显式清空 = 正常兜底面，防跑批进程继承 .env 造成假读数
+      for (const k of [
+        'EVAL_ALERT_SUCCESS_RATE',
+        'EVAL_ALERT_TIMEOUT_RATE',
+        'EVAL_ALERT_REWORK_RATE',
+        'EVAL_ALERT_MIN_EXECUTIONS',
+        'EVAL_ALERT_MIN_VERDICTS',
+      ]) {
+        vi.stubEnv(k, '')
+      }
+    })
+
+    const getEvalAlert = async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/config/eval-alert' })
+      expect(res.statusCode).toBe(200)
+      return JSON.parse(res.body)
+    }
+
+    it('GET 缺省 → 默认值 + source 全 env', async () => {
+      const body = await getEvalAlert()
+      expect(body.ok).toBe(true)
+      expect(body.config).toEqual({
+        successRate: 0.8,
+        timeoutRate: 0.1,
+        reworkRate: 0.3,
+        minExecutions: 20,
+        minVerdicts: 30,
+      })
+      expect(Object.values(body.source)).toEqual(['env', 'env', 'env', 'env', 'env'])
+    })
+
+    it('POST 部分字段只改那一项，未传字段仍跟 env；POST 后 GET 一致', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/config/eval-alert',
+        payload: { minVerdicts: 10 },
+      })
+      expect(res.statusCode).toBe(200)
+      const posted = JSON.parse(res.body)
+      expect(posted.config.minVerdicts).toBe(10)
+      expect(posted.source.minVerdicts).toBe('settings')
+      expect(posted.config.successRate).toBe(0.8)
+      expect(posted.source.successRate).toBe('env')
+
+      const got = await getEvalAlert()
+      expect(got.config.minVerdicts).toBe(10)
+      expect(got.source.minVerdicts).toBe('settings')
+    })
+
+    it('reworkRate: 80（百分比而非小数）→ 400，不做隐式换算', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/config/eval-alert',
+        payload: { reworkRate: 80 },
+      })
+      expect(res.statusCode).toBe(400)
+      expect(JSON.parse(res.body).error).toContain('reworkRate')
+      // 校验失败零副作用：GET 仍是默认值
+      expect((await getEvalAlert()).config.reworkRate).toBe(0.3)
+    })
+
+    it('minVerdicts: -1 → 400', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/config/eval-alert',
+        payload: { minVerdicts: -1 },
+      })
+      expect(res.statusCode).toBe(400)
+    })
+
+    it('空 body / 未知字段 → 400', async () => {
+      for (const payload of [{}, { minVerdict: 10 }]) {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/config/eval-alert',
+          payload,
+        })
+        expect(res.statusCode, JSON.stringify(payload)).toBe(400)
+      }
     })
   })
 })

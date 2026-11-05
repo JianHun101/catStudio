@@ -64,7 +64,12 @@ import {
 import type { SpanRow, LlmSpanDetail } from '../db/repository/index.js'
 import { extractCitationMarkers } from '../memory/citationMarkers.js'
 import { episodeStats } from '../eval/episodes.js'
-import { aggregateMetrics, WINDOW_DAYS } from '../eval/l1-aggregator.js'
+import {
+  aggregateMetrics,
+  alertThresholds,
+  evaluateBreaches,
+  WINDOW_DAYS,
+} from '../eval/l1-aggregator.js'
 import { buildChains } from '../eval/chain-query.js'
 import { agreementRate, spearman } from '../eval/phase0.js'
 import { envNumber } from '../env-number.js'
@@ -257,16 +262,28 @@ export async function evalRoutes(app: FastifyInstance): Promise<void> {
   })
 
   /**
-   * L1 八口径聚合（P1-A）。
+   * L1 八口径聚合（P1-A）+ 样本门分档。
    *
    * 路径**必须**是 `l1-metrics`——`/api/eval/aggregates`（上方）已被 L2 按猫评分聚合占用，
    * 撞名会静默覆盖。
    *
-   * **纯读**：只调 `aggregateMetrics()`，**不得**触发 `runL1Aggregation()` 的滞回状态机
-   * 与告警投递——那是定时任务的事，被一次 GET 顺带触发 = 假告警。
+   * **纯读**：只调 `aggregateMetrics()` + 纯函数 `evaluateBreaches()`，**不得**触发
+   * `runL1Aggregation()` 的滞回状态机——那是定时任务的事，被一次 GET 顺带触发 = 假告警。
+   * 返回 `thresholds` / `breaches` / `insufficient`：破线与样本不足的分档由服务端算，
+   * 前端不重算（同一规则只留一处实现）。评估告警改由本端点供评估中心与全局横幅读取，
+   * 不再经 `messages` 落会话。
    */
   app.get('/api/eval/l1-metrics', async (_req, reply) => {
-    return reply.send({ windowDays: WINDOW_DAYS, ...aggregateMetrics() })
+    const metrics = aggregateMetrics()
+    const thresholds = alertThresholds()
+    const { broken, insufficient } = evaluateBreaches(metrics, thresholds)
+    return reply.send({
+      windowDays: WINDOW_DAYS,
+      ...metrics,
+      thresholds,
+      breaches: broken,
+      insufficient,
+    })
   })
 
   /**
