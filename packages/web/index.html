@@ -29,10 +29,11 @@
         --bg-session: #1a1611; /* 会话栏（居中） */
         --bg-paper: #14110e; /* 主区（纸面） */
 
-        /* B·改：线的三档 alpha —— 结构线 = 0 条（不设 token）；分区线 / 交互线各一档。
+        /* B·改：线的三档 alpha —— 结构线 = 0 条（不设 token）；分区线 / 交互线 / 交互线状态档。
            同一 alpha 不得跨语义层级复用（归不了档的线一律删）。 */
         --line-partition: rgba(230, 221, 208, 0.08); /* 分区线：同栏内语义不同的两块 */
         --line-interactive: rgba(230, 221, 208, 0.16); /* 交互线：输入框 / 可折叠块边界 / 焦点环 */
+        --line-interactive-strong: rgba(230, 221, 208, 0.26); /* 交互线的 hover / 聚焦状态档 */
 
         /* Borders */
         --border-subtle: #292420; /* 隐式分隔 */
@@ -123,9 +124,10 @@
         --bg-session: #f1eae0; /* 会话栏（居中） */
         --bg-paper: #fbf8f2; /* 主区（纸面） */
 
-        /* B·改：线的三档 alpha（结构线 = 0 条；只有分区线 / 交互线两档） */
+        /* B·改：线的三档 alpha（结构线 = 0 条；分区线 / 交互线 / 交互线状态档） */
         --line-partition: rgba(60, 48, 40, 0.08); /* 分区线 */
         --line-interactive: rgba(60, 48, 40, 0.16); /* 交互线 */
+        --line-interactive-strong: rgba(60, 48, 40, 0.24); /* 交互线的 hover / 聚焦状态档 */
 
         /* Borders */
         --border-subtle: #e0d6c7;

@@ -542,6 +542,8 @@ describe('SessionAgentsPanel R4 · 弱化卡与内联 trace', () => {
     // 面板自身不再滚动
     const panelBlock = /\.session-agents-panel\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
     expect(panelBlock).toMatch(/overflow:\s*hidden/)
+    // 线 token 单源：页脚分区线吃全局 --line-partition
+    expect(source).toContain('background: var(--line-partition)')
 
     wrapper.unmount()
   })

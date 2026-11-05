@@ -662,19 +662,18 @@ async function removeAgent(agentId: string): Promise<void> {
   /* 顶 padding 归零：头行必须贴面板顶缘，否则 48px 头行被 14px padding 顶下去，
      与主区顶栏 / 会话栏头行错位（验收：三条头行 getBoundingClientRect().top 相等）。 */
   padding: 0 12px;
-  /* B·改 的三档中性面/线：组件内只引用语义名，浅/深主题各一套值。
-     不占 index.html 的全局 token（票① 正在并行改那批），也不复用 --bg-deep/--bg-base
-     ——它们被全站多处消费，改值会牵连别处。 */
+  /* B·改 的中性面：组件内只引用语义名，浅/深主题各一套值。
+     线不在此自持——统一吃 index.html 的 --line-partition / --line-interactive /
+     --line-interactive-strong；也不复用 --bg-deep/--bg-base（它们被全站多处消费，
+     改值会牵连别处）。 */
   --panel-tint-1: rgba(60, 48, 40, 0.035);
   --panel-tint-2: rgba(60, 48, 40, 0.055);
-  --panel-line-weak: rgba(60, 48, 40, 0.09);
   --panel-expand-bg: rgba(200, 144, 96, 0.1);
 }
 
 [data-theme='dark'] .session-agents-panel {
   --panel-tint-1: rgba(230, 221, 208, 0.045);
   --panel-tint-2: rgba(230, 221, 208, 0.07);
-  --panel-line-weak: rgba(230, 221, 208, 0.1);
   --panel-expand-bg: rgba(212, 165, 116, 0.09);
 }
 
@@ -1256,7 +1255,7 @@ async function removeAgent(agentId: string): Promise<void> {
   left: 12px;
   right: 12px;
   height: 1px;
-  background: var(--panel-line-weak);
+  background: var(--line-partition);
 }
 
 .foot-row {

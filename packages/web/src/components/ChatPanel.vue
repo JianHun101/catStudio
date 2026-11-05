@@ -1985,11 +1985,9 @@ const messageViews = computed<MessageView[]>(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  /* B·改 的三档中性面/线（组件内语义名，浅/深各一套值）。不新增全局 token：
-     票① 正在并行改 index.html 的那批，本票只在组件作用域内自持。 */
-  --ui-line-weak: rgba(60, 48, 40, 0.09);
-  --ui-line-mid: rgba(60, 48, 40, 0.16);
-  --ui-line-strong: rgba(60, 48, 40, 0.24);
+  /* B·改 的两档中性面（组件内语义名，浅/深各一套值）。
+     线 token 不在此自持——统一吃 index.html 的 --line-partition / --line-interactive /
+     --line-interactive-strong（全局唯一真相源，避免同一 alpha 多套名字并存）。 */
   --ui-tint-1: rgba(60, 48, 40, 0.035);
   --ui-tint-2: rgba(60, 48, 40, 0.055);
   --ui-accent-wash: rgba(200, 144, 96, 0.05);
@@ -1998,9 +1996,6 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 [data-theme='dark'] .chat-panel {
-  --ui-line-weak: rgba(230, 221, 208, 0.1);
-  --ui-line-mid: rgba(230, 221, 208, 0.17);
-  --ui-line-strong: rgba(230, 221, 208, 0.26);
   --ui-tint-1: rgba(230, 221, 208, 0.045);
   --ui-tint-2: rgba(230, 221, 208, 0.07);
   --ui-accent-wash: rgba(212, 165, 116, 0.07);
@@ -2020,7 +2015,7 @@ const messageViews = computed<MessageView[]>(() => {
   flex: none;
   padding: 0 16px;
   border-bottom: none;
-  background: var(--bg-deep);
+  background: var(--bg-paper);
   white-space: nowrap;
 }
 
@@ -2292,7 +2287,7 @@ const messageViews = computed<MessageView[]>(() => {
 /* ─── Context Warning Banner（80% 告警）────── */
 
 /* 横幅 sticky 贴顶：相对 .chat-messages-wrapper 滚动容器粘住——不滚动时仍在消息流最顶，
-   滚动后贴顶始终可见（position: sticky 对 flex item 生效）。背景补实底（半透明黄 + bg-deep），
+   滚动后贴顶始终可见（position: sticky 对 flex item 生效）。背景补实底（半透明黄 + 主区底色 bg-paper），
    防止滚动经过的消息文字从横幅下方透出；z-index 保证覆盖层序 */
 .context-warning-banner {
   position: sticky;
@@ -2305,7 +2300,7 @@ const messageViews = computed<MessageView[]>(() => {
   padding: 8px 14px;
   margin-bottom: 8px;
   border-radius: var(--radius-md);
-  background: linear-gradient(rgba(224, 158, 70, 0.12), rgba(224, 158, 70, 0.12)), var(--bg-deep);
+  background: linear-gradient(rgba(224, 158, 70, 0.12), rgba(224, 158, 70, 0.12)), var(--bg-paper);
   border: 1px solid rgba(224, 158, 70, 0.35);
   color: var(--accent-yellow);
   font-size: 12px;
@@ -2329,7 +2324,7 @@ const messageViews = computed<MessageView[]>(() => {
   padding: 8px 14px;
   margin-bottom: 8px;
   border-radius: var(--radius-md);
-  background: linear-gradient(rgba(224, 90, 70, 0.14), rgba(224, 90, 70, 0.14)), var(--bg-deep);
+  background: linear-gradient(rgba(224, 90, 70, 0.14), rgba(224, 90, 70, 0.14)), var(--bg-paper);
   border: 1px solid rgba(224, 90, 70, 0.4);
   color: var(--accent-red);
   font-size: 12px;
@@ -2366,7 +2361,7 @@ const messageViews = computed<MessageView[]>(() => {
   font-size: 11px;
   color: var(--text-muted);
   opacity: 0.65;
-  background: var(--bg-deep);
+  background: var(--bg-paper);
   padding: 2px 16px;
   border-radius: 10px;
 }
@@ -2537,7 +2532,7 @@ const messageViews = computed<MessageView[]>(() => {
   flex: none;
   width: 100%;
   border-top: none;
-  background: linear-gradient(to top, var(--bg-deep) 70%, transparent);
+  background: linear-gradient(to top, var(--bg-paper) 70%, transparent);
   padding-top: 16px;
 }
 
@@ -2560,7 +2555,7 @@ const messageViews = computed<MessageView[]>(() => {
   min-height: 124px;
   padding: 13px 14px 10px;
   background: var(--bg-surface);
-  border: 1px solid var(--ui-line-mid);
+  border: 1px solid var(--line-interactive);
   border-radius: var(--radius-lg);
   box-shadow: var(--ui-shadow-card);
   transition:
@@ -2569,7 +2564,7 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .input-plate:hover {
-  border-color: var(--ui-line-strong);
+  border-color: var(--line-interactive-strong);
 }
 
 .input-plate:focus-within {
@@ -3290,6 +3285,7 @@ const messageViews = computed<MessageView[]>(() => {
   top: 1px;
   width: 4px;
   height: 8px;
+  /* 勾选符号用最深底做镂空——是前景色，不是「与主区同色」的面，保持 --bg-deep */
   border: solid var(--bg-deep);
   border-width: 0 1.5px 1.5px 0;
   transform: rotate(45deg);
@@ -3909,6 +3905,7 @@ const messageViews = computed<MessageView[]>(() => {
   padding: 0 7px;
   border: 1px solid var(--border-default);
   border-radius: 99px;
+  /* 徽章比气泡再深一档（内嵌感），不属于「与主区同色」的面，保持 --bg-deep */
   background: var(--bg-deep);
   color: var(--text-secondary);
   font-family: var(--font-mono);
@@ -4081,10 +4078,11 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 /* ─── Thinking Block (collapsible) ────────── */
-/* 思考过程块（B·改）：外描边降到极淡一条（交互线，表示「可折叠」），底改同色系淡底。 */
+/* 思考过程块（B·改）：外描边降到极淡一条（分区线档 0.08；可折叠性由 summary/chevron 承担），
+   底改同色系淡底。 */
 .chat-panel .thinking-block {
   margin: 6px 0;
-  border: 1px solid var(--ui-line-weak);
+  border: 1px solid var(--line-partition);
   border-radius: var(--radius-sm);
   background: var(--ui-accent-wash);
   overflow: hidden;
@@ -4095,7 +4093,7 @@ const messageViews = computed<MessageView[]>(() => {
 
 .chat-panel .thinking-block[open],
 .chat-panel .thinking-block.open {
-  border-color: var(--ui-line-mid);
+  border-color: var(--line-interactive);
   background: var(--ui-accent-wash-open);
 }
 
@@ -4189,7 +4187,7 @@ const messageViews = computed<MessageView[]>(() => {
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-secondary);
-  border-top: 1px solid var(--ui-line-weak);
+  border-top: 1px solid var(--line-partition);
 }
 
 /* 修复列表序号被 overflow:hidden 裁剪的问题（历史 thinking-content + 流式 fold-thinking
@@ -4222,7 +4220,7 @@ const messageViews = computed<MessageView[]>(() => {
   /* 工具行之间靠 4px 间隙分开，不靠线（B·改） */
   gap: 4px;
   padding: 2px 10px 10px;
-  border-top: 1px solid var(--ui-line-weak);
+  border-top: 1px solid var(--line-partition);
   /* 横向兜底，不是主修：overflow-y 一旦不是 visible，未声明的 overflow-x 会被强制计算成
      auto —— 本容器天生就能出横条，有 1px 溢出就冒。主修是让代码块自己滚、行内 code 折行
      （见上方三组规则）。本行只是不让任何漏网内容把横条顶出来，不是「新增内容源免修」的
@@ -4293,7 +4291,7 @@ const messageViews = computed<MessageView[]>(() => {
   flex-direction: column;
   gap: 4px;
   padding: 8px 12px 10px;
-  border-top: 1px solid var(--ui-line-weak);
+  border-top: 1px solid var(--line-partition);
 }
 
 /* 消息气泡内渲染的图片 */

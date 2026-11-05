@@ -241,7 +241,7 @@ describe('ChatPanel 80% 告警横幅（阈值来自配置）', () => {
     // 静态源断言锚定 sticky 实现（同文件既有 ?raw 范式）；背景实底防滚动文字透出
     expect(source).toMatch(/\.context-warning-banner[\s\S]{0,160}position: sticky/)
     expect(source).toMatch(/position: sticky;\s*top: 0;\s*z-index: 10/)
-    expect(source).toMatch(/\.context-warning-banner[\s\S]{0,300}var\(--bg-deep\)/)
+    expect(source).toMatch(/\.context-warning-banner[\s\S]{0,300}var\(--bg-paper\)/)
   })
 
   it('横幅文案含告警线/交接线占位（warnThreshold/handoffThreshold 来自 store.contextConfig）', () => {
@@ -282,7 +282,7 @@ describe('ChatPanel 交接失败横幅（HANDOFF_FAILED 可见化——单 A ser
     expect(bannerBlock![0]).toContain('position: sticky')
     expect(bannerBlock![0]).toContain('top: 0')
     expect(bannerBlock![0]).toContain('z-index: 10')
-    expect(bannerBlock![0]).toContain('var(--bg-deep)')
+    expect(bannerBlock![0]).toContain('var(--bg-paper)')
     expect(bannerBlock![0]).toContain('var(--accent-red)')
   })
 
@@ -1980,7 +1980,7 @@ describe('ChatPanel B·改 中栏：线降级为色带/淡底，输入板是唯�
     // 结构：textarea 与按钮同属一块输入板（不再是 textarea 与按钮并排的裸行）
     expect(source).toContain('class="input-plate"')
     const plate = /\.input-plate\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
-    expect(plate).toMatch(/border:\s*1px solid var\(--ui-line-mid\)/)
+    expect(plate).toMatch(/border:\s*1px solid var\(--line-interactive\)/)
     expect(plate).toMatch(/min-height:\s*124px/)
     expect(plate).toMatch(/padding:\s*13px 14px 10px/)
     // 聚焦有可辨环（暖色环，不是另一条灰线）
@@ -2029,9 +2029,16 @@ describe('ChatPanel B·改 中栏：线降级为色带/淡底，输入板是唯�
 
   it('思考块：去重描边改极淡底（0.06–0.08 档）', () => {
     const thinking = /\.chat-panel \.thinking-block\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
-    expect(thinking).toMatch(/border:\s*1px solid var\(--ui-line-weak\)/)
+    expect(thinking).toMatch(/border:\s*1px solid var\(--line-partition\)/)
     expect(thinking).toContain('background: var(--ui-accent-wash)')
     // 旧的重描边值退役
     expect(thinking).not.toContain('rgba(180, 160, 140, 0.3)')
+  })
+
+  it('线 token 单源：统一吃 index.html 三档，且三档各有消费者', () => {
+    // 分区线（思考块外框/内部分隔）、交互线（输入板/展开态）、状态档（输入板 hover）
+    expect(source).toContain('border: 1px solid var(--line-partition)')
+    expect(source).toContain('border: 1px solid var(--line-interactive)')
+    expect(source).toContain('border-color: var(--line-interactive-strong)')
   })
 })
