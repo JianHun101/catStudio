@@ -622,6 +622,24 @@ function onInput(e: Event): void {
   detectSkill(ta.value, ta.selectionStart)
 }
 
+/**
+ * 输入框随内容长高（B·改：默认约 3 行，8 行 → 约 230px 外高）。
+ *
+ * 先归零成 `auto` 再读 `scrollHeight`——textarea 自身的滚动高度才是内容真实高度；
+ * 不归零时读到的是「当前高度」与内容的较大值，删行后不会缩回去。
+ */
+function autoGrow(): void {
+  const ta = textareaRef.value
+  if (!ta) return
+  ta.style.height = 'auto'
+  ta.style.height = `${ta.scrollHeight}px`
+}
+
+// 覆盖所有改动输入值的路径：键入（v-model）、@/技能补全回填、发送后清空。
+watch(input, () => {
+  void nextTick(autoGrow)
+})
+
 // ─── Image Attachments ──────────────────────
 
 const MAX_IMAGES = 4
@@ -1696,140 +1714,149 @@ const messageViews = computed<MessageView[]>(() => {
       </div>
     </div>
 
-    <!-- Input：外层铺满主区（边框/底色通栏），内层 840px 居中——与聊天列同列宽 -->
+    <!-- Input：外层铺满主区（无硬切线，上缘改渐隐），内层 840px 居中——与聊天列同列宽。
+         B·改：输入板保留线框（交互面），默认约 3 行高、随内容长高；按钮收进板内右下角。 -->
     <div class="chat-input-area">
       <div class="chat-input-box">
-        <div class="input-wrapper">
-          <!-- 待发送图片预览 -->
-          <div v-if="pastedImages.length" class="image-preview-row">
-            <div v-for="(src, idx) in pastedImages" :key="idx" class="image-preview-item">
-              <img :src="src" :alt="`待发送图片${idx + 1}`" />
-              <button
-                class="image-preview-remove"
-                :aria-label="`移除图片${idx + 1}`"
-                @click="removeImage(idx)"
+        <div class="input-plate">
+          <div class="input-wrapper">
+            <!-- 待发送图片预览 -->
+            <div v-if="pastedImages.length" class="image-preview-row">
+              <div v-for="(src, idx) in pastedImages" :key="idx" class="image-preview-item">
+                <img :src="src" :alt="`待发送图片${idx + 1}`" />
+                <button
+                  class="image-preview-remove"
+                  :aria-label="`移除图片${idx + 1}`"
+                  @click="removeImage(idx)"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <textarea
+              ref="textareaRef"
+              v-model="input"
+              class="chat-input"
+              :placeholder="
+                store.activeSessionId
+                  ? '输入消息… @猫咪名 提及  /技能名 触发  （可直接粘贴图片）'
+                  : '请先选择会话'
+              "
+              :disabled="!store.activeSessionId"
+              rows="3"
+              @input="onInput"
+              @keydown="onKeydown"
+              @paste="onPaste"
+            ></textarea>
+
+            <div
+              v-if="mentionActive && !skillActive && mentionSuggestions.length > 0"
+              class="mention-dropdown"
+            >
+              <div
+                v-for="(agent, idx) in mentionSuggestions"
+                :key="agent.id"
+                class="mention-item"
+                :class="{ active: idx === mentionIndex }"
+                @mousedown.prevent="selectMention(idx)"
+                @mouseenter="mentionIndex = idx"
               >
-                ×
-              </button>
+                <span class="mention-avatar">{{ agent.avatar }}</span>
+                <span class="mention-name">{{ agent.name }}</span>
+                <span class="mention-hint">tab</span>
+              </div>
             </div>
-          </div>
-
-          <textarea
-            ref="textareaRef"
-            v-model="input"
-            class="chat-input"
-            :placeholder="
-              store.activeSessionId
-                ? '输入消息… @猫咪名 提及  /技能名 触发  （可直接粘贴图片）'
-                : '请先选择会话'
-            "
-            :disabled="!store.activeSessionId"
-            rows="2"
-            @input="onInput"
-            @keydown="onKeydown"
-            @paste="onPaste"
-          ></textarea>
-
-          <div
-            v-if="mentionActive && !skillActive && mentionSuggestions.length > 0"
-            class="mention-dropdown"
-          >
             <div
-              v-for="(agent, idx) in mentionSuggestions"
-              :key="agent.id"
-              class="mention-item"
-              :class="{ active: idx === mentionIndex }"
-              @mousedown.prevent="selectMention(idx)"
-              @mouseenter="mentionIndex = idx"
+              v-if="mentionActive && !skillActive && mentionSuggestions.length === 0"
+              class="mention-dropdown mention-empty"
             >
-              <span class="mention-avatar">{{ agent.avatar }}</span>
-              <span class="mention-name">{{ agent.name }}</span>
-              <span class="mention-hint">tab</span>
+              <span>未找到匹配的猫咪</span>
             </div>
-          </div>
-          <div
-            v-if="mentionActive && !skillActive && mentionSuggestions.length === 0"
-            class="mention-dropdown mention-empty"
-          >
-            <span>未找到匹配的猫咪</span>
+
+            <!-- / 技能补全下拉（数据源见 useSkillCommand；skill 本体仍由 CLI 原生消费） -->
+            <div
+              v-if="skillActive && skillSuggestions.length > 0"
+              class="mention-dropdown skill-dropdown"
+            >
+              <div
+                v-for="(skill, idx) in skillSuggestions"
+                :key="skill.name"
+                class="mention-item"
+                :class="{ active: idx === skillIndex }"
+                @mousedown.prevent="selectSkillItem(idx)"
+                @mouseenter="skillIndex = idx"
+              >
+                <span class="skill-name">/{{ skill.name }}</span>
+                <span class="skill-desc" :title="skill.description">{{ skill.description }}</span>
+                <span class="mention-hint">tab</span>
+              </div>
+            </div>
+            <div
+              v-else-if="skillActive && skillsLoaded"
+              class="mention-dropdown mention-empty skill-dropdown"
+            >
+              <span>无匹配技能（skill 由 CLI 原生触发，可继续输入）</span>
+            </div>
+            <!-- 清单不可用时的兜底提示——「端点没取到」≠「没这个词」，不冒充「无匹配」 -->
+            <div v-else-if="skillActive" class="skill-tip">
+              <span
+                >skill 由 CLI 原生触发：输入 /skill-name 或由 agent 自主调用，服务端不再注入</span
+              >
+            </div>
           </div>
 
-          <!-- / 技能补全下拉（数据源见 useSkillCommand；skill 本体仍由 CLI 原生消费） -->
-          <div
-            v-if="skillActive && skillSuggestions.length > 0"
-            class="mention-dropdown skill-dropdown"
-          >
-            <div
-              v-for="(skill, idx) in skillSuggestions"
-              :key="skill.name"
-              class="mention-item"
-              :class="{ active: idx === skillIndex }"
-              @mousedown.prevent="selectSkillItem(idx)"
-              @mouseenter="skillIndex = idx"
+          <!-- 板内底栏：图片入口与发送按钮收在右下角（输入板是唯一保留线框的交互面） -->
+          <div class="input-bar">
+            <button
+              class="btn-image"
+              :disabled="!store.activeSessionId || sending || pastedImages.length >= MAX_IMAGES"
+              aria-label="添加图片"
+              title="添加图片（或直接 Ctrl+V 粘贴，最多 4 张）"
+              @click="fileInputRef?.click()"
             >
-              <span class="skill-name">/{{ skill.name }}</span>
-              <span class="skill-desc" :title="skill.description">{{ skill.description }}</span>
-              <span class="mention-hint">tab</span>
-            </div>
-          </div>
-          <div
-            v-else-if="skillActive && skillsLoaded"
-            class="mention-dropdown mention-empty skill-dropdown"
-          >
-            <span>无匹配技能（skill 由 CLI 原生触发，可继续输入）</span>
-          </div>
-          <!-- 清单不可用时的兜底提示——「端点没取到」≠「没这个词」，不冒充「无匹配」 -->
-          <div v-else-if="skillActive" class="skill-tip">
-            <span>skill 由 CLI 原生触发：输入 /skill-name 或由 agent 自主调用，服务端不再注入</span>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <rect
+                  x="1.5"
+                  y="2.5"
+                  width="13"
+                  height="11"
+                  rx="1.5"
+                  stroke="currentColor"
+                  stroke-width="1.3"
+                />
+                <circle cx="5.5" cy="6" r="1.3" stroke="currentColor" stroke-width="1.2" />
+                <path
+                  d="M2.5 12.5l3.5-3.5 2.5 2.5 2-2 3 3"
+                  stroke="currentColor"
+                  stroke-width="1.2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <input
+              ref="fileInputRef"
+              type="file"
+              accept="image/*"
+              multiple
+              class="hidden-file-input"
+              @change="onFileSelect"
+            />
+
+            <span class="input-bar-spacer"></span>
+            <button
+              class="btn-send"
+              :disabled="
+                (!input.trim() && pastedImages.length === 0) || !store.activeSessionId || sending
+              "
+              aria-label="发送消息"
+              @click="handleSend"
+            >
+              {{ sending ? '…' : '发送' }}
+            </button>
           </div>
         </div>
-
-        <button
-          class="btn-image"
-          :disabled="!store.activeSessionId || sending || pastedImages.length >= MAX_IMAGES"
-          aria-label="添加图片"
-          title="添加图片（或直接 Ctrl+V 粘贴，最多 4 张）"
-          @click="fileInputRef?.click()"
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <rect
-              x="1.5"
-              y="2.5"
-              width="13"
-              height="11"
-              rx="1.5"
-              stroke="currentColor"
-              stroke-width="1.3"
-            />
-            <circle cx="5.5" cy="6" r="1.3" stroke="currentColor" stroke-width="1.2" />
-            <path
-              d="M2.5 12.5l3.5-3.5 2.5 2.5 2-2 3 3"
-              stroke="currentColor"
-              stroke-width="1.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-        </button>
-        <input
-          ref="fileInputRef"
-          type="file"
-          accept="image/*"
-          multiple
-          class="hidden-file-input"
-          @change="onFileSelect"
-        />
-
-        <button
-          class="btn-send"
-          :disabled="
-            (!input.trim() && pastedImages.length === 0) || !store.activeSessionId || sending
-          "
-          aria-label="发送消息"
-          @click="handleSend"
-        >
-          {{ sending ? '…' : '发送' }}
-        </button>
       </div>
     </div>
 
@@ -1958,12 +1985,33 @@ const messageViews = computed<MessageView[]>(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* B·改 的三档中性面/线（组件内语义名，浅/深各一套值）。不新增全局 token：
+     票① 正在并行改 index.html 的那批，本票只在组件作用域内自持。 */
+  --ui-line-weak: rgba(60, 48, 40, 0.09);
+  --ui-line-mid: rgba(60, 48, 40, 0.16);
+  --ui-line-strong: rgba(60, 48, 40, 0.24);
+  --ui-tint-1: rgba(60, 48, 40, 0.035);
+  --ui-tint-2: rgba(60, 48, 40, 0.055);
+  --ui-accent-wash: rgba(200, 144, 96, 0.05);
+  --ui-accent-wash-open: rgba(200, 144, 96, 0.08);
+  --ui-shadow-card: 0 1px 2px rgba(60, 48, 40, 0.05);
+}
+
+[data-theme='dark'] .chat-panel {
+  --ui-line-weak: rgba(230, 221, 208, 0.1);
+  --ui-line-mid: rgba(230, 221, 208, 0.17);
+  --ui-line-strong: rgba(230, 221, 208, 0.26);
+  --ui-tint-1: rgba(230, 221, 208, 0.045);
+  --ui-tint-2: rgba(230, 221, 208, 0.07);
+  --ui-accent-wash: rgba(212, 165, 116, 0.07);
+  --ui-accent-wash-open: rgba(212, 165, 116, 0.1);
+  --ui-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
 /* ─── Header ────────────────────────────── */
 
-/* 主区顶栏：48px 定高 + 下边框——与会话栏头行、右栏「成员 · N」同一水平线。
-   旧值（padding 16px 20px + 两端对齐的 actions 区）随「清空」按钮移除一并收敛。 */
+/* 主区顶栏：48px 定高——与会话栏头行、右栏「成员 · N」同一水平线。
+   B·改：去下边框，底色与主区同色（结构靠底色分层，不靠线）。 */
 .chat-header {
   display: flex;
   align-items: center;
@@ -1971,8 +2019,8 @@ const messageViews = computed<MessageView[]>(() => {
   height: 48px;
   flex: none;
   padding: 0 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-base);
+  border-bottom: none;
+  background: var(--bg-deep);
   white-space: nowrap;
 }
 
@@ -2484,48 +2532,81 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Input Area ────────────────────────── */
 
-/* 外层：铺满主区宽度，边框与底色通栏（改版前 max-width 直接落在此层，
-   边框只画到 800px，主区两侧露出断口） */
+/* 外层：铺满主区宽度。B·改：删 1px 硬切线，改上缘渐隐（不留分割线）。 */
 .chat-input-area {
   flex: none;
   width: 100%;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-deep);
+  border-top: none;
+  background: linear-gradient(to top, var(--bg-deep) 70%, transparent);
+  padding-top: 16px;
 }
 
-/* 内层：840px 居中，与 `.chat-messages-inner` 同宽同 padding——输入框与聊天列左缘对齐 */
+/* 内层：840px 居中，与 `.chat-messages-inner` 同宽同 padding——输入板与聊天列左缘对齐 */
 .chat-input-box {
   display: flex;
-  gap: 10px;
-  padding: 14px 24px;
+  padding: 0 24px 18px;
   max-width: 840px;
   margin: 0 auto;
   width: 100%;
 }
 
-.input-wrapper {
+/* 输入板：**唯一保留线框的交互面**（alpha 0.16 静置 / 0.24 hover / 聚焦暖色环）。
+   默认约 3 行高（min-height 124px），随内容长高（textarea 由 autoGrow 撑开）。 */
+.input-plate {
   flex: 1;
-  position: relative;
-}
-
-.chat-input {
-  width: 100%;
-  padding: 10px 14px;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 124px;
+  padding: 13px 14px 10px;
   background: var(--bg-surface);
-  color: var(--text-primary);
-  font-family: inherit;
-  line-height: 1.5;
-  resize: none;
-  outline: none;
+  border: 1px solid var(--ui-line-mid);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--ui-shadow-card);
   transition:
     border-color var(--ease-out),
     box-shadow var(--ease-out);
 }
 
-.chat-input:hover:not(:disabled) {
-  border-color: var(--border-focus);
+.input-plate:hover {
+  border-color: var(--ui-line-strong);
+}
+
+.input-plate:focus-within {
+  border-color: rgba(180, 130, 80, 0.65);
+  box-shadow: 0 0 0 3px rgba(180, 130, 80, 0.1);
+}
+
+[data-theme='dark'] .input-plate:focus-within {
+  border-color: rgba(212, 165, 116, 0.65);
+  box-shadow: 0 0 0 3px rgba(212, 165, 116, 0.12);
+}
+
+/* 包裹层高度由 textarea 的行高驱动（flex:none——若让它 flex:1 伸展，自动长高时
+   flex-basis:0 会压过 inline height，8 行也撑不开输入板）。 */
+.input-wrapper {
+  flex: none;
+  position: relative;
+}
+
+/* textarea 自身无边框/底色——线框归输入板（一整个可输入面，不是两个同心矩形）。
+   `height: auto` + min-height 3 行；autoGrow 写 inline height 后由它驱动板高。 */
+.chat-input {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 64px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  resize: none;
+  outline: none;
+  overflow-y: auto;
 }
 
 .chat-input:disabled {
@@ -2535,6 +2616,20 @@ const messageViews = computed<MessageView[]>(() => {
 
 .chat-input::placeholder {
   color: var(--text-muted-frozen);
+}
+
+/* 板内底栏：图片入口与发送按钮落在右下角 */
+.input-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  /* 板高有余量时把底栏压到右下角（发送按钮落点） */
+  margin-top: auto;
+}
+
+.input-bar-spacer {
+  flex: 1;
 }
 
 /* ─── Image Attachments ──────────────────── */
@@ -2664,24 +2759,23 @@ const messageViews = computed<MessageView[]>(() => {
 
 .btn-image {
   flex-shrink: 0;
-  width: 36px;
+  width: 28px;
+  height: 28px;
   border: none;
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  align-self: flex-end;
-  padding: 8px 0;
+  padding: 0;
   transition: all var(--ease-out);
 }
 
 .btn-image:hover:not(:disabled) {
   color: var(--accent-text);
-  border-color: var(--accent-text);
-  box-shadow: var(--shadow-sm);
+  background: var(--ui-tint-1);
 }
 
 .btn-image:disabled {
@@ -3454,18 +3548,20 @@ const messageViews = computed<MessageView[]>(() => {
   margin-left: 4px;
 }
 
+/* 气泡（B·改）：去边框——agent 白底 + 极轻阴影，user 暖底。
+   层级靠底色与留白承担，不再描边。 */
 .chat-panel .msg-bubble {
   padding: 10px 14px;
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  border: none;
+  box-shadow: var(--ui-shadow-card);
   position: relative;
 }
 
 .chat-panel .message.user .msg-bubble {
   background: var(--accent-msg-bg);
-  border-color: var(--accent-msg-border);
+  border: none;
   border-top-right-radius: 4px;
 }
 
@@ -3965,8 +4061,15 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 /* ─── Streaming Message ──────────────────── */
+/* 流式 / 占位气泡：保留虚线边框——它不是结构分割线，是「这轮还没落定」的状态视觉语言
+   （B·改去掉的是静态气泡的边框；虚线是运行态标识，两者不同语义层级）。 */
 .chat-panel .message.streaming .msg-bubble {
-  border-style: dashed;
+  border: 1px dashed rgba(180, 130, 80, 0.28);
+  box-shadow: none;
+}
+
+[data-theme='dark'] .chat-panel .message.streaming .msg-bubble {
+  border-color: rgba(212, 165, 116, 0.32);
 }
 
 /* 占位气泡正文：思考动点（与流式思考折叠块 header 同款动点组件）。
@@ -3978,11 +4081,12 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 /* ─── Thinking Block (collapsible) ────────── */
+/* 思考过程块（B·改）：外描边降到极淡一条（交互线，表示「可折叠」），底改同色系淡底。 */
 .chat-panel .thinking-block {
   margin: 6px 0;
-  border: 1px solid rgba(180, 160, 140, 0.3);
+  border: 1px solid var(--ui-line-weak);
   border-radius: var(--radius-sm);
-  background: rgba(180, 160, 140, 0.06);
+  background: var(--ui-accent-wash);
   overflow: hidden;
   transition:
     border-color var(--ease-out),
@@ -3991,8 +4095,8 @@ const messageViews = computed<MessageView[]>(() => {
 
 .chat-panel .thinking-block[open],
 .chat-panel .thinking-block.open {
-  border-color: rgba(180, 160, 140, 0.45);
-  background: rgba(180, 160, 140, 0.1);
+  border-color: var(--ui-line-mid);
+  background: var(--ui-accent-wash-open);
 }
 
 .chat-panel .thinking-summary {
@@ -4015,7 +4119,7 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 .chat-panel .thinking-summary:hover {
-  background: rgba(180, 160, 140, 0.1);
+  background: var(--ui-tint-2);
   color: var(--text-secondary);
 }
 
@@ -4085,7 +4189,7 @@ const messageViews = computed<MessageView[]>(() => {
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-secondary);
-  border-top: 1px solid rgba(180, 160, 140, 0.18);
+  border-top: 1px solid var(--ui-line-weak);
 }
 
 /* 修复列表序号被 overflow:hidden 裁剪的问题（历史 thinking-content + 流式 fold-thinking
@@ -4115,9 +4219,10 @@ const messageViews = computed<MessageView[]>(() => {
 .chat-panel .stream-fold-body {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  /* 工具行之间靠 4px 间隙分开，不靠线（B·改） */
+  gap: 4px;
   padding: 2px 10px 10px;
-  border-top: 1px solid rgba(180, 160, 140, 0.18);
+  border-top: 1px solid var(--ui-line-weak);
   /* 横向兜底，不是主修：overflow-y 一旦不是 visible，未声明的 overflow-x 会被强制计算成
      auto —— 本容器天生就能出横条，有 1px 溢出就冒。主修是让代码块自己滚、行内 code 折行
      （见上方三组规则）。本行只是不让任何漏网内容把横条顶出来，不是「新增内容源免修」的
@@ -4143,7 +4248,8 @@ const messageViews = computed<MessageView[]>(() => {
 .chat-panel .stream-fold-inner {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  /* B·改：条目间 4px（工具行靠色块边界分开，不靠线）——与 base 同值 */
+  gap: 4px;
 }
 
 .chat-panel .stream-fold-inner > * {
@@ -4187,7 +4293,7 @@ const messageViews = computed<MessageView[]>(() => {
   flex-direction: column;
   gap: 4px;
   padding: 8px 12px 10px;
-  border-top: 1px solid rgba(180, 160, 140, 0.18);
+  border-top: 1px solid var(--ui-line-weak);
 }
 
 /* 消息气泡内渲染的图片 */
