@@ -50,25 +50,26 @@ skill 只管切票，谁调用谁指定往哪落。
 
 本目录**只应存在在飞票与挂账票**。下表是清理后的存量清点——**每行必须答出「什么动作能把它从清单上拿掉」**：只增不减的清单会让「活完了就清」不可判（判据见 `docs/lessons/open-items-list-needs-status-bits.md`）。每目录的 `status:` frontmatter 是机器面，本表是理由面。
 
-| 目录                     | 留存理由                                                                                                                                                         | 拿掉它的动作                                        |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `db-schema-governance`   | 设计面已在 `docs/plans/db-schema-governance.md`，余下**全是未派的执行队列**（票 6 批二 / 票 8 / 根治剩两刀）+ 一处重启待批                                       | 三批执行完并各自收口                                |
-| `autocommit-blocking`    | 格 2（异步 + 树锁，WIP 分支 `wip/autocommit-async-ge2`）/ 格 3 半落 / OQ「auto-commit 要不要跑人类提交门禁」**未裁**                                             | 店长裁「续做 or 判弃」，WIP 分支一并处置            |
-| `commit-uuid-gate`       | 判据与多态已落代码 + `CONTRIBUTING.md`；OQ-C（`.husky/` 四钩子 git mode 实测仍全 `100644`）带钉死触发条件                                                        | 改 mode 落盘，**或**明文判「本仓不面向 Linux 检出」 |
-| `docs-run-status-gate`   | G2/G3 已由本活承接（票面已登记）；**G4 pre-push 硬闸未派未落**                                                                                                   | G4 落地并收口                                       |
-| `hook-p3-followups`      | F1/F2 未落地（F3/F4 已随 `run-conclusions-float-up` 段 3a 落）                                                                                                   | F1/F2 派活收口                                      |
-| `a2a-memory-gate`        | OQ-1（补填提醒以 `role='user'` 落库，全落门外）/ OQ-3（预存 flake）/ **OQ-4（模块环检测守卫票从未开出）**                                                        | OQ-4 立票；OQ-1/OQ-3 转挂账                         |
-| `frontend-perf`          | OQ1（重进长会话 O(N)，触发条件 = `getSessionHistory` 上限放宽到 >200 或用户再报卡）/ T2（服务端 typing 节流）——均带钉死触发条件                                  | 触发条件命中后处理                                  |
-| `taste-skill`            | 两份诊断报告的多条发现项**未修且无票跟踪**（M-1 / M-4 / M-7 / M-8 等）                                                                                           | 立票 / 转挂账 / 判弃——三选一                        |
-| `test-git-env-pollution` | 7 条观察项，其中 ⑥抢收竞态窗、⑦兜底投递假阳性明写「**是否立票待裁**」                                                                                            | 两条先裁；其余 5 条转挂账                           |
-| `closeout-gate`          | 段 2 单点 2 裁决「**先把判据表上浮 `docs/plans/` 再清**」（判弃须先证被现有收口链取代，举证成本高）；活自 09-16 立票未派                                         | 判据表上浮后清目录                                  |
-| `dispatch-deferral`      | 内容已上浮 `docs/plans/execution-tail-concurrency.md`，但 **V4 验收未闭**（读数见下节）                                                                          | V4 残留行分类完 + 店长豁免或订正后清                |
-| `chat-input-compact`     | 活已闭（PR #221 → dev `71db490e`，收口记录见 `closeout.md`），余 **P3×3** 未处置：`172` 是派生值无推导注释 / 上限单源无测试锁 / `scrollbar-width: thin` 一帧重排 | P3×3 逐条处置或明文判弃后清目录                     |
+| 目录                     | 留存理由                                                                                                                                                                                                                             | 拿掉它的动作                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| `db-schema-governance`   | 设计面已在 `docs/plans/db-schema-governance.md`，余下**全是未派的执行队列**（票 6 批二 / 票 8 / 根治剩两刀）+ 一处重启待批                                                                                                           | 三批执行完并各自收口                                |
+| `autocommit-blocking`    | 格 2（异步 + 树锁，WIP 分支 `wip/autocommit-async-ge2`）/ 格 3 半落 / OQ「auto-commit 要不要跑人类提交门禁」**未裁**                                                                                                                 | 店长裁「续做 or 判弃」，WIP 分支一并处置            |
+| `commit-uuid-gate`       | 判据与多态已落代码 + `CONTRIBUTING.md`；OQ-C（`.husky/` 四钩子 git mode 实测仍全 `100644`）带钉死触发条件                                                                                                                            | 改 mode 落盘，**或**明文判「本仓不面向 Linux 检出」 |
+| `docs-run-status-gate`   | G2/G3 已由本活承接（票面已登记）；**G4 pre-push 硬闸未派未落**                                                                                                                                                                       | G4 落地并收口                                       |
+| `hook-p3-followups`      | F1/F2 未落地（F3/F4 已随 `run-conclusions-float-up` 段 3a 落）                                                                                                                                                                       | F1/F2 派活收口                                      |
+| `a2a-memory-gate`        | OQ-1（补填提醒以 `role='user'` 落库，全落门外）/ OQ-3（预存 flake）/ **OQ-4（模块环检测守卫票从未开出）**                                                                                                                            | OQ-4 立票；OQ-1/OQ-3 转挂账                         |
+| `frontend-perf`          | OQ1（重进长会话 O(N)，触发条件 = `getSessionHistory` 上限放宽到 >200 或用户再报卡）/ T2（服务端 typing 节流）——均带钉死触发条件                                                                                                      | 触发条件命中后处理                                  |
+| `taste-skill`            | 两份诊断报告的多条发现项**未修且无票跟踪**（M-1 / M-4 / M-7 / M-8 等）                                                                                                                                                               | 立票 / 转挂账 / 判弃——三选一                        |
+| `test-git-env-pollution` | 7 条观察项，其中 ⑥抢收竞态窗、⑦兜底投递假阳性明写「**是否立票待裁**」                                                                                                                                                                | 两条先裁；其余 5 条转挂账                           |
+| `closeout-gate`          | 段 2 单点 2 裁决「**先把判据表上浮 `docs/plans/` 再清**」（判弃须先证被现有收口链取代，举证成本高）；活自 09-16 立票未派                                                                                                             | 判据表上浮后清目录                                  |
+| `dispatch-deferral`      | 内容已上浮 `docs/plans/execution-tail-concurrency.md`，但 **V4 验收未闭**（读数见下节）                                                                                                                                              | V4 残留行分类完 + 店长豁免或订正后清                |
+| `chat-input-compact`     | 活已闭（PR #221 → dev `71db490e`，收口记录见 `closeout.md`），余 **P3×3** 未处置：`172` 是派生值无推导注释 / 上限单源无测试锁 / `scrollbar-width: thin` 一帧重排                                                                     | P3×3 逐条处置或明文判弃后清目录                     |
+| `eval-alert-config`      | 活已闭（PR #222 → dev `3b74332a`，收口记录见 `closeout.md`），余 **P3×5** 未处置：基线前移无回归门 / 基线缺失分支无用例 /「无改动」复用成功样式 / l1-metrics 纯读用例退化为恒真门（`routes/eval.test.ts`）/ env 生效值无法被 UI 钉住 | P3×5 逐条处置或明文判弃后清目录                     |
 
 在飞（随各自收口清，不单独登记触发条件）：`run-conclusions-float-up`（本活）· `handoff-double-frame` · `message-date-timestamp` · `scroll-stick-bottom` · `memory-retrieval-improvement` · `summary-inject-outside-replace`。
 
 > 后两条 = 段 3c 新建的**承接票**（记忆检索改进 / 交接摘要注入落在占位符替换面之外），自带票面与验收，故只在「在飞」登记、不进上表。
-> **清点对账**（2026-10-13 段 3c 原账 = 上表 **11** + 在飞 **6** = **17**）。**2026-11-05 补账**：上表 **12** + 在飞 **6** + 未入账 **1**（`ui-b-refresh`，关票历史、待清或补账）= **19** = `ls -d docs/run/*/` 实测。新增目录必须同批进此账，否则「只增不减」会让「活完了就清」不可判。
+> **清点对账**（2026-10-13 段 3c 原账 = 上表 **11** + 在飞 **6** = **17**）。**2026-11-05 补账**：上表 **13** + 在飞 **6** + 未入账 **1**（`ui-b-refresh`，关票历史、待清或补账）= **20** = `ls -d docs/run/*/` 实测。新增目录必须同批进此账，否则「只增不减」会让「活完了就清」不可判。
 
 ### 段 3c 实测：`dispatch-deferral` 的 V4 读数**未确认沉淀**（该目录因此留）
 
