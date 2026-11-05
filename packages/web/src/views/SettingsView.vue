@@ -666,6 +666,17 @@ async function saveIronLaws(): Promise<void> {
 const evalAlertRate = ref({ successRate: 80, timeoutRate: 10, reworkRate: 30 })
 const evalAlertMinExecutions = ref(20)
 const evalAlertMinVerdicts = ref(30)
+/** 表单口径（告警线百分比、门限条数）——基线与之同口径，逐字段直接比较 */
+interface EvalAlertFormValues {
+  successRate: number
+  timeoutRate: number
+  reworkRate: number
+  minExecutions: number
+  minVerdicts: number
+}
+/** 加载/保存成功时的生效值——保存只提交与之不同的字段。未改字段不写进 settings，
+ *  继续走 env 兜底，不会被冻结成保存那一刻的值（P2-1）。 */
+const evalAlertBaseline = ref<EvalAlertFormValues | null>(null)
 const evalAlertSource = ref<Record<EvalAlertField, 'settings' | 'env'> | null>(null)
 const evalAlertLoading = ref(true)
 const evalAlertSaving = ref(false)
@@ -678,6 +689,16 @@ function pctOf(rate: number): number {
   return Number((rate * 100).toFixed(2))
 }
 
+function currentEvalAlertForm(): EvalAlertFormValues {
+  return {
+    successRate: evalAlertRate.value.successRate,
+    timeoutRate: evalAlertRate.value.timeoutRate,
+    reworkRate: evalAlertRate.value.reworkRate,
+    minExecutions: evalAlertMinExecutions.value,
+    minVerdicts: evalAlertMinVerdicts.value,
+  }
+}
+
 function applyEvalAlertConfig(cfg: EvalAlertConfig): void {
   evalAlertRate.value = {
     successRate: pctOf(cfg.successRate),
@@ -686,6 +707,8 @@ function applyEvalAlertConfig(cfg: EvalAlertConfig): void {
   }
   evalAlertMinExecutions.value = cfg.minExecutions
   evalAlertMinVerdicts.value = cfg.minVerdicts
+  // 生效值即新基线——保存成功后基线随服务端回包更新
+  evalAlertBaseline.value = currentEvalAlertForm()
 }
 
 async function loadEvalAlertConfig(): Promise<void> {
@@ -728,19 +751,38 @@ function validateEvalAlertForm(): boolean {
   return true
 }
 
+/** 与基线逐字段比较，只拼实际改动的字段（告警线换回小数）；无改动返回 null。
+ *  基线缺失（配置尚未加载成功）同样返回 null——此时表单只是默认值，提交会把 env 兜底
+ *  冻结成默认值，宁可不发请求。 */
+function buildEvalAlertPatch(): Partial<EvalAlertConfig> | null {
+  const base = evalAlertBaseline.value
+  if (!base) return null
+  const next = currentEvalAlertForm()
+  const patch: Partial<EvalAlertConfig> = {}
+  if (next.successRate !== base.successRate) patch.successRate = next.successRate / 100
+  if (next.timeoutRate !== base.timeoutRate) patch.timeoutRate = next.timeoutRate / 100
+  if (next.reworkRate !== base.reworkRate) patch.reworkRate = next.reworkRate / 100
+  if (next.minExecutions !== base.minExecutions) patch.minExecutions = next.minExecutions
+  if (next.minVerdicts !== base.minVerdicts) patch.minVerdicts = next.minVerdicts
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
 async function saveEvalAlertConfig(): Promise<void> {
   evalAlertFormError.value = ''
   evalAlertSaved.value = ''
   if (!validateEvalAlertForm()) return
+  const patch = buildEvalAlertPatch()
+  if (!patch) {
+    if (evalAlertBaseline.value) {
+      evalAlertSaved.value = '没有改动需要保存'
+    } else {
+      evalAlertFormError.value = '配置尚未加载完成，请稍后重试'
+    }
+    return
+  }
   evalAlertSaving.value = true
   try {
-    const res = await api.saveEvalAlertConfig({
-      successRate: evalAlertRate.value.successRate / 100,
-      timeoutRate: evalAlertRate.value.timeoutRate / 100,
-      reworkRate: evalAlertRate.value.reworkRate / 100,
-      minExecutions: evalAlertMinExecutions.value,
-      minVerdicts: evalAlertMinVerdicts.value,
-    })
+    const res = await api.saveEvalAlertConfig(patch)
     applyEvalAlertConfig(res.config)
     evalAlertSource.value = res.source
     evalAlertSaved.value = '已保存——下一轮聚合（最长 1 小时）生效，无需重启'
