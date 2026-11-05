@@ -623,16 +623,21 @@ function onInput(e: Event): void {
 }
 
 /**
- * 输入框随内容长高（B·改：默认约 3 行，8 行 → 约 230px 外高）。
+ * 输入框随内容长高（默认 2 行，上限 8 行 / 172px 后框内滚动）。
  *
  * 先归零成 `auto` 再读 `scrollHeight`——textarea 自身的滚动高度才是内容真实高度；
  * 不归零时读到的是「当前高度」与内容的较大值，删行后不会缩回去。
+ *
+ * 上限**只在 CSS `max-height` 写一次**，这里只读不算（`getComputedStyle`）：
+ * 解析不出（`none` / 空字符串 → `NaN`）时不钳制。
  */
 function autoGrow(): void {
   const ta = textareaRef.value
   if (!ta) return
   ta.style.height = 'auto'
-  ta.style.height = `${ta.scrollHeight}px`
+  const cap = Number.parseFloat(window.getComputedStyle(ta).maxHeight)
+  const grown = Number.isNaN(cap) ? ta.scrollHeight : Math.min(ta.scrollHeight, cap)
+  ta.style.height = `${grown}px`
 }
 
 // 覆盖所有改动输入值的路径：键入（v-model）、@/技能补全回填、发送后清空。
@@ -1715,7 +1720,8 @@ const messageViews = computed<MessageView[]>(() => {
     </div>
 
     <!-- Input：外层铺满主区（无硬切线，上缘改渐隐），内层 840px 居中——与聊天列同列宽。
-         B·改：输入板保留线框（交互面），默认约 3 行高、随内容长高；按钮收进板内右下角。 -->
+         B·改：输入板保留线框（交互面），默认 2 行高、随内容长到 8 行封顶后框内滚动；
+         按钮收进板内右下角。 -->
     <div class="chat-input-area">
       <div class="chat-input-box">
         <div class="input-plate">
@@ -1744,7 +1750,7 @@ const messageViews = computed<MessageView[]>(() => {
                   : '请先选择会话'
               "
               :disabled="!store.activeSessionId"
-              rows="3"
+              rows="2"
               @input="onInput"
               @keydown="onKeydown"
               @paste="onPaste"
@@ -2546,13 +2552,13 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 /* 输入板：**唯一保留线框的交互面**（alpha 0.16 静置 / 0.24 hover / 聚焦暖色环）。
-   默认约 3 行高（min-height 124px），随内容长高（textarea 由 autoGrow 撑开）。 */
+   默认 2 行高（min-height 104px），随内容长高（textarea 由 autoGrow 撑开）。 */
 .input-plate {
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  min-height: 124px;
+  min-height: 104px;
   padding: 13px 14px 10px;
   background: var(--bg-surface);
   border: 1px solid var(--line-interactive);
@@ -2585,12 +2591,14 @@ const messageViews = computed<MessageView[]>(() => {
 }
 
 /* textarea 自身无边框/底色——线框归输入板（一整个可输入面，不是两个同心矩形）。
-   `height: auto` + min-height 3 行；autoGrow 写 inline height 后由它驱动板高。 */
+   `height: auto` + min-height 2 行；上限 8 行（172px）后框内滚动（overflow-y: auto）。
+   autoGrow 写 inline height 后由它驱动板高，钳制读的就是这里的 max-height。 */
 .chat-input {
   display: block;
   width: 100%;
   height: auto;
-  min-height: 64px;
+  min-height: 44px;
+  max-height: 172px;
   padding: 0;
   border: none;
   border-radius: 0;
@@ -2602,6 +2610,7 @@ const messageViews = computed<MessageView[]>(() => {
   resize: none;
   outline: none;
   overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .chat-input:disabled {

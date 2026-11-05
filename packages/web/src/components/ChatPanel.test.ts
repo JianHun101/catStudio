@@ -1976,26 +1976,81 @@ describe('消息时间戳按日分级（fmtMsgTime / fmtDateSep 单源）', () =
 
 // ─── B·改 面板层 · 中栏线纪律（票② 2.2 / AC6）────────────────────────────
 describe('ChatPanel B·改 中栏：线降级为色带/淡底，输入板是唯一保留线框的交互面', () => {
-  it('AC6 输入板：保留线框（交互线）+ 默认约 3 行高 + 随内容长高', () => {
+  it('AC6 输入板：保留线框（交互线）+ 默认 2 行高 + 随内容长高', () => {
     // 结构：textarea 与按钮同属一块输入板（不再是 textarea 与按钮并排的裸行）
     expect(source).toContain('class="input-plate"')
     const plate = /\.input-plate\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
     expect(plate).toMatch(/border:\s*1px solid var\(--line-interactive\)/)
-    expect(plate).toMatch(/min-height:\s*124px/)
+    expect(plate).toMatch(/min-height:\s*104px/)
     expect(plate).toMatch(/padding:\s*13px 14px 10px/)
     // 聚焦有可辨环（暖色环，不是另一条灰线）
     expect(source).toContain('.input-plate:focus-within')
     expect(source).toContain('box-shadow: 0 0 0 3px rgba(180, 130, 80, 0.1)')
 
-    // 默认 3 行、可长高：rows=3 + autoGrow 归零重读 scrollHeight
-    expect(source).toContain('rows="3"')
+    // 默认 2 行、可长高：rows=2 + autoGrow 归零重读 scrollHeight
+    expect(source).toContain('rows="2"')
     expect(source).toContain('function autoGrow')
     expect(source).toContain("ta.style.height = 'auto'")
-    expect(source).toContain('ta.style.height = `${ta.scrollHeight}px`')
+    expect(source).toContain('Math.min(ta.scrollHeight, cap)')
     // textarea 自身无边框（线框归整块板，不出现两个同心矩形）
     const ta = /\.chat-input \s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
     expect(ta).toMatch(/border:\s*none/)
-    expect(ta).toMatch(/min-height:\s*64px/)
+    expect(ta).toMatch(/min-height:\s*44px/)
+    // 8 行封顶：上限只在 CSS 写一次，autoGrow 读的就是它
+    expect(ta).toMatch(/max-height:\s*172px/)
+  })
+
+  it('autoGrow 行为：读 CSS max-height 钳制（300→172、120→120、none 不钳制）', async () => {
+    // 有活跃会话，否则 textarea 是 disabled，输入事件不驱动 v-model
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'ts', agentIds: [], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    const wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    const ta = wrapper.find('textarea.chat-input').element as HTMLTextAreaElement
+    expect(ta).toBeTruthy()
+
+    // 只把 getComputedStyle 的 maxHeight 换掉（其余属性走真实现）——jsdom 无布局，
+    // scrollHeight 恒 0，故逐例用 defineProperty 注入内容高度。
+    const realGetComputedStyle = window.getComputedStyle.bind(window)
+    let cap = '172px'
+    window.getComputedStyle = new Proxy(realGetComputedStyle, {
+      apply(target, thisArg, args: [Element, string?]) {
+        const style = Reflect.apply(target, thisArg, args) as CSSStyleDeclaration
+        return new Proxy(style, {
+          get(t, prop) {
+            if (prop === 'maxHeight') return cap
+            const v = Reflect.get(t, prop)
+            return typeof v === 'function' ? v.bind(t) : v
+          },
+        })
+      },
+    }) as typeof window.getComputedStyle
+
+    /** 输入一个「新值」触发 v-model → watch(input) → nextTick(autoGrow)，return inline height */
+    async function growWith(nextValue: string, scroll: number): Promise<string> {
+      Object.defineProperty(ta, 'scrollHeight', { configurable: true, value: scroll })
+      ta.value = nextValue
+      await wrapper.find('textarea.chat-input').trigger('input')
+      await nextTick()
+      await nextTick()
+      return ta.style.height
+    }
+
+    try {
+      // 超过上限 → 钳到 172（8 行封顶，超出部分框内滚动）
+      expect(await growWith('a', 300)).toBe('172px')
+      // 未到上限 → 跟随内容高度
+      expect(await growWith('ab', 120)).toBe('120px')
+      // 上限解析不出（none）→ 不钳制
+      cap = 'none'
+      expect(await growWith('abc', 300)).toBe('300px')
+    } finally {
+      window.getComputedStyle = realGetComputedStyle
+      wrapper.unmount()
+    }
   })
 
   it('AC6 发送按钮移到输入板右下角（板内 input-bar 之后）', () => {
