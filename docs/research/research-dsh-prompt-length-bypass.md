@@ -1,5 +1,7 @@
 # 调研笔记：dsh prompt 长度规避（file/stdin 通道 + MCP 外置实测）
 
+> **Superseded（2026-10-21）**：`@deepseek-ai/dsh@0.2.1-rc.2` 起 headless 原生支持 stdin 任务输入，本调研的 `--patch` 覆盖 `headless-runner.config.task` 绕法已废弃；现行实现见 `packages/server/src/llm/dsh.ts` 的 stdin 传输。
+
 > 调研单：dsh prompt 长度规避调研（ds猫），配 flash猫 的 opencode 侧调研，共同汇总成「32K 规避统一方案」ADR。
 > 关联：ADR 0007（外部工具形态选型前置检查单）——本调研按「能力对账前置 / 假设标红+实测对称 / 简单形态默认 / 决策留痕」四步执行。
 > 调研对象：`@deepseek-ai/dsh@0.1.0-rc.6`（锁死版本），dsh 适配器 `packages/server/src/llm/dsh.ts`。

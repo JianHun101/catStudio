@@ -1,3 +1,7 @@
+---
+status: active
+---
+
 # T-1 `autocommit-blocking` —— auto-commit 的同步阻塞止血
 
 **状态**：实施中（worktree `D:/Game/ai/catstudy-autocommit-blocking`，分支 `fix/autocommit-blocking`）

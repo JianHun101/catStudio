@@ -1,6 +1,17 @@
 ---
 name: request-review
-description: 发起审查请求前的前置门槛与轮次规则。六条 BLOCKED 门槛不满足则请求发不出去；同型 finding 二犯触发 failure-mode audit；同对象 ≥3 轮停手升级到需求/方案层。Use when a code change has passed self-check and you are about to request review. Not for writing the review conclusion, or when you are the reviewer. Output a dispatch-ready review request (template + evidence) or a BLOCKED list.
+description: >
+  发起审查请求前的门槛与轮次规则（BLOCKED 六条 / 同型 audit / ≥3 轮升级）
+  Use when: a code change has passed self-check and you are about to request review.
+  Not for: writing the review conclusion, or when you are the reviewer.
+  Output: a dispatch-ready review request (template + evidence) or a BLOCKED list.
+# prettier-ignore
+triggers:
+  - "发起审查"
+  - "请求审查"
+  - "审查门槛"
+  - "提交审查"
+  - "轮次规则"
 ---
 
 # request-review

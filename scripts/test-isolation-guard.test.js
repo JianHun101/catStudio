@@ -673,7 +673,7 @@ describe('V12 双模式：隔离路径恒为绝对且不落仓库内', () => {
 })
 
 /**
- * V23（票 `docs/run/precommit-scope/tickets-residual.md` §四 · 单A）—— `LOG_FILE` 双模式。
+ * V23（票 `precommit-scope` 残余 §四 · 单A）—— `LOG_FILE` 双模式。
  *
  * 被判面 = 「测试跑批的日志文件落在**本仓库之外**、且**随仓库根变化**」。failure 形态同
  * RESTART_FILES_DIR：相对路径经 `logger.ts` 的 `path.resolve(override)` 按 **cwd** 解析 ⇒

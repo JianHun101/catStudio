@@ -5535,8 +5535,8 @@ describe('runAgentReply — 技能发现面注入（甲案）', () => {
   })
 })
 
-// ─── 运行时长心跳（headless 黑盒可观测性）────────────────
-// dsh 等 headless 适配器整轮不 yield chunk，前端「回复中」标签静止。心跳周期重发
+// ─── 运行时长心跳（首个 chunk 到达前的静默期 / 非流式路径 / A2A）────────────────
+// 首个 chunk 到达前、非流式路径与 A2A 触发时没有流式内容，前端「回复中」标签静止。心跳周期重发
 // MESSAGE_AGENT_STATUS（status 不变、startedAt 相同），前端显示「回复中 · 已 N 秒」。
 // 本块用 fake timer 推进（不真等 10s），钉死三条：流未结束重发且 startedAt 一致 /
 // 流完成不再发 / abort 路径 timer 清无泄漏。

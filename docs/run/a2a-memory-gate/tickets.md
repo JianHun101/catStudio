@@ -1,3 +1,7 @@
+---
+status: active
+---
+
 # T-1 `a2a-memory-gate` —— a2a 时不检索【相关记忆】
 
 **基线**：`session/15f84dfe @ 3bbe3f4`（店长派活单实测行号）；**实施基线** = `dev @ 4fc7a5f`

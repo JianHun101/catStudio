@@ -5,7 +5,7 @@ import { useChatStore } from '@/stores/chat'
 
 /**
  * 猫咪设置抽屉（R4 屏③）——从右边缘滑出 360px，改完立刻在右侧面板看到效果
- * （形态参考 docs/run/eval-system/prototypes/R3-right-panel-v2.html 屏③，照形态不照代码）。
+ * （形态参考 eval-system 原型 R3 右栏屏③，照形态不照代码）。
  *
  * ⚠️ 字段与分组**逐项对齐 AgentEditModal.vue**（同一批配置项，未新造字段）。
  *
@@ -80,7 +80,7 @@ const providerHint = computed(() => {
     case 'opencode':
       return '需要安装 opencode CLI 并 opencode auth login；本地认证无需填 key；模型填 provider/model 格式（如 deepseek/deepseek-v4-pro）'
     case 'dsh':
-      return '需要安装 dsh CLI: npm i -g @deepseek-ai/dsh@0.1.0-rc.6；本地 credentials 落盘认证，key 可留空（填了则复用 DS_KEY 注入，留空走 dsh 本地 credentials 兜底）；模型填 deepseek-chat'
+      return '需要安装 dsh CLI: npm i -g @deepseek-ai/dsh@0.2.1-rc.2；本地 credentials 落盘认证，key 可留空（填了则复用 DS_KEY 注入，留空走 dsh 本地 credentials 兜底）；模型填 deepseek-chat'
     case 'ollama':
       return '本地 Ollama 服务，key 可留空；模型填已拉取模型名（如 qwen3.5:9b）；Base URL 默认 http://127.0.0.1:11434'
     case 'openai':

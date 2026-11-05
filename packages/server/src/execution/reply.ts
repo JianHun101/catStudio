@@ -84,7 +84,7 @@ import type { EngineState } from './state.js'
 
 const log = createLogger('socketio')
 
-/** 运行时长心跳间隔（从 socketio.ts 随迁；headless 黑盒可观测性） */
+/** 运行时长心跳间隔（从 socketio.ts 随迁；覆盖首个 chunk 到达前的静默期 / 非流式路径 / A2A） */
 const HEARTBEAT_INTERVAL_MS = 10_000
 
 /** 工具 input/output 落库单值截断上限（字符）——只防爆存储，工具名/状态恒全量可查 */
@@ -1304,9 +1304,9 @@ export async function runAgentReply(
     },
   })
 
-  // ── 运行时长心跳（headless 黑盒可观测性）────────────────
-  // dsh 等 headless 适配器在子进程 close 前一个 chunk 都不 yield，上面那个
-  // 「回复中」状态从第一秒到最后 107 秒一动不动——用户无法判断进程是还在跑
+  // ── 运行时长心跳（首个 chunk 到达前的静默期 / 非流式路径 / A2A）────────────────
+  // 首个 chunk 到达前的上下文组装与整步思考、非流式路径、A2A 触发时，上面那个
+  // 「回复中」状态可能长时间一动不动——用户无法判断进程是还在跑
   // 还是已经死了。周期重发 MESSAGE_AGENT_STATUS（status 不变、startedAt 相同），
   // 前端据此显示「回复中 · 已 N 秒」N 递增。
   // 落点放在 runAgentReply 而非适配器层：所有适配器统一受益，零新增 socket 事件、

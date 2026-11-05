@@ -1,3 +1,7 @@
+---
+status: active
+---
+
 # taste skill 安装（票 A · flash猫）
 
 > 状态：票 A 已收口（PR #80 → dev `d192df9`）。§3 豁免**已获店长裁决批准**；§7.2 的 provenance 缺口**已随票 C 删句、随票 E 更正存在性并恢复 ignore 规则**（原判「该文件不存在」经复核有误）——本档为在飞留痕，口径已上浮 `skills/BOOTSTRAP.md`「同步溯源」。

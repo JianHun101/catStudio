@@ -1,5 +1,5 @@
 /**
- * `scripts/closeout-dupcheck.mjs` 的判据矩阵 —— 票 `docs/run/docs-single-writer/tickets.md`
+ * `scripts/closeout-dupcheck.mjs` 的判据矩阵 —— 票 `docs-single-writer`
  * §三 逐格覆盖（V1–V6、V9；V7 真仓读数走 CLI 人工留痕，见下）。
  *
  * 三条防「矩阵退化成测了个常量」的结构性断言：

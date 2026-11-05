@@ -1,6 +1,17 @@
 ---
 name: to-spec
-description: Turn the current conversation into a spec and publish it to the destination the calling context designates — no interview, just synthesis of what you've already discussed.
+description: >
+  把 grilling 出的需求写成可证伪 spec
+  Use when: a requirement or a grilled plan needs to be written up as a spec before tickets are cut.
+  Not for: exploring fuzzy ideas that still need grilling, or breaking a settled spec into tickets (use to-tickets).
+  Output: a published spec with falsifiable requirements and explicit acceptance signals.
+# prettier-ignore
+triggers:
+  - "写成规格"
+  - "整理需求"
+  - "规格文档"
+  - "需求落稿"
+  - "归纳结论"
 disable-model-invocation: true
 ---
 

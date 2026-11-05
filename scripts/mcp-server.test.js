@@ -569,7 +569,8 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
         properties: {
           table: {
             type: 'string',
-            enum: ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge'],
+            // 票 A：`server_boots` 进白名单 ⇒ 冻结基线同步（快照跟随真实载荷，不是放宽断言）
+            enum: ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge', 'server_boots'],
           },
           conditions: {
             type: 'array',
@@ -722,6 +723,15 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     for (const re of ROUTING_PATTERNS) expect(text).not.toMatch(re)
   })
 
+  it('13 份白名单技能正文零路由（A5：ROUTING_PATTERNS 全量扫，含 frontmatter）', () => {
+    for (const name of SKILL_WHITELIST) {
+      const text = readSkillDoc(name)
+      for (const re of ROUTING_PATTERNS) {
+        expect(re.test(text), `${name} 命中路由黑名单 ${re}`).not.toBe(true)
+      }
+    }
+  })
+
   // F1 实证：路由行曾藏在技能**引用的 ref** 里（ADR §5 合并时漏剥末行），当前恰好没被踩到。
   // 本断言把零路由守卫从 SKILL.md 扩到它引用的共享 ref——同一形状的洞不再只靠运气。
   //
@@ -847,6 +857,16 @@ describe('技能读盘契约（readSkill / getSkillsRoot / findRepoRoot / listSk
     expect(r.ok).toBe(true)
     for (const name of SKILL_WHITELIST) {
       expect(r.text).toContain(name)
+    }
+  })
+
+  it('listSkills 每条为 `- <name>: <是什么>｜何时：...｜触发：...`（A4 双消费者同源）', () => {
+    const r = listSkills()
+    expect(r.ok).toBe(true)
+    const lines = r.text.split('\n').filter((line) => line.startsWith('- '))
+    expect(lines).toHaveLength(SKILL_WHITELIST.length)
+    for (const line of lines) {
+      expect(line).toMatch(/^- [a-z-]+: .+｜何时：.+｜触发：.+$/)
     }
   })
 })

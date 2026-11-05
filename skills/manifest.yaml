@@ -75,11 +75,6 @@ skills:
     description: |
       需求/规格进入实施前的自查门（前半个门，对称后端 quality-gate）。
       检查需求可证伪性、验收信号、边界/契约/验收是否钉死，通过后才能拆票/实施。
-    triggers:
-      - 'spec gate'
-      - '需求自查'
-      - '规格检查'
-      - '开工前检查'
     output: 'Gate Report（PASS/FAIL + Gate A/B/C 逐项结果）'
     prev: 'grilling/to-spec'
     next: 'to-tickets/implement'
@@ -101,11 +96,6 @@ skills:
     description: |
       代码变更提交审查前的自查门。
       检查编码规范、测试覆盖、架构边界、安全性和未完成项。
-    triggers:
-      - '自查'
-      - 'quality gate'
-      - '提交前检查'
-      - '检查一下代码'
     output: 'Quality Gate Report（通过/未通过 + 逐项结果）'
     next: 'review（作者按 request-review 发起，审查者承担）'
     refs:
@@ -123,11 +113,6 @@ skills:
       发起审查请求前的前置门槛与轮次规则。
       六条 BLOCKED 门槛不满足则请求发不出去；同型 finding 二犯触发 failure-mode audit；
       同对象 ≥3 轮停手升级到需求/方案层。
-    triggers:
-      - '发起审查'
-      - '请求审查'
-      - 'request review'
-      - '提交审查'
     output: '可投递的审查请求（模板 + 自检证据）或 BLOCKED 清单'
     next: 'receive-review'
     refs:
@@ -143,11 +128,6 @@ skills:
     description: |
       接收并处理审查反馈。
       逐项核实审查发现，按 P1/P2/P3 分类处理，拒绝表演性同意。
-    triggers:
-      - '处理审查'
-      - 'receive review'
-      - '审查反馈'
-      - '@审查者 的审查结果'
     output: '修复确认表（逐项状态 + 测试结果）'
     next: 'implement (❌打回重做)'
     refs:

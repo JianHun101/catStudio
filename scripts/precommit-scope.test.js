@@ -1,5 +1,5 @@
 /**
- * `scripts/precommit-scope.mjs` 的判据矩阵 —— 票 `docs/run/precommit-scope/tickets.md` §三
+ * `scripts/precommit-scope.mjs` 的判据矩阵 —— 票 `precommit-scope` §三
  * 逐格覆盖（V1–V7、V9）。纯函数，无 I/O（唯一的 I/O 面 `projectNameOf` 单列在最后一组）。
  *
  * 两条防恒真的结构性断言（不做这两条，整张矩阵会退化成「测了个常量」）：
@@ -200,7 +200,7 @@ describe('resolveScopes · 并集 / 优先级 / 边界', () => {
 })
 
 /**
- * V21–V22（票 `docs/run/precommit-scope/tickets-residual.md` §四 · 单B）
+ * V21–V22（票 `precommit-scope` 残余 §四 · 单B）
  * —— 命中 `packages/**` scope ⇒ 追加 `scripts`（V14 护栏在岗）。
  *
  * 为什么不并进上面那张矩阵：上面的格子测的是「逐条路径 → scope」的**映射**，本组测的是

@@ -148,9 +148,9 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * Agent 回复计时表（`sessionId:agentId` 键控）——气泡 footer「回复中 · 已 N 秒」的唯一数据源。
    *
-   * 与 `typingStates` 的分工：typing 是**流式内容**通道（无内容即无条目，headless 适配器
-   * 整轮空转），本表是**执行存活性**通道（执行一开跑就有条目）——A2A 与 headless 执行
-   * 靠它在聊天气泡上可见。表是**全局**的（含其他会话的并行执行条目），故渲染面一律走
+   * 与 `typingStates` 的分工：typing 是**流式内容**通道（无内容即无条目，首个 chunk 到达前 /
+   * 非流式路径都属此类），本表是**执行存活性**通道（执行一开跑就有条目）——A2A 与无流式内容
+   * 的执行靠它在聊天气泡上可见。表是**全局**的（含其他会话的并行执行条目），故渲染面一律走
    * `currentReplyTimerFor`（只认当前会话）而非直接 get。
    */
   const replyTimers = ref<Map<string, ReplyTimerEntry>>(new Map())

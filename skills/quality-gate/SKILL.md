@@ -1,6 +1,17 @@
 ---
 name: quality-gate
-description: 代码变更提交审查前的自查门。检查编码规范、测试覆盖、架构边界、安全性和未完成项。通过后由作者按 request-review 自行发起审查请求。Use when a code change is finished and needs a self-check before review. Not for pure conversation without code changes, exploration, or when already inside the review loop. Output a Quality Gate Report (PASS/FAIL with per-item results).
+description: >
+  代码提交审查前的自查门（后半个门）
+  Use when: a code change is finished and needs a self-check before review.
+  Not for: pure conversation without code changes, exploration, or when already inside the review loop.
+  Output: a Quality Gate Report (PASS/FAIL with per-item results).
+# prettier-ignore
+triggers:
+  - "提交前自查"
+  - "质量门"
+  - "代码检查"
+  - "审查前检查"
+  - "完成度核对"
 ---
 
 # quality-gate

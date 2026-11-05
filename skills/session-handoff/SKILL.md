@@ -1,6 +1,17 @@
 ---
 name: session-handoff
-description: Compact the current conversation into a handoff document for another agent to pick up. Use when work crosses sessions, another agent needs your context, or you are handing a task to a fresh session. Not for sending a review request for finished work (the author sends that via request-review), or for project-internal summaries (use session-summary). Output a handoff document in the OS temp directory with suggested skills.
+description: >
+  会话压缩交接（跨会话把上下文传给下一棒）
+  Use when: work crosses sessions, another agent needs your context, or you are handing a task to a fresh session.
+  Not for: sending a review request for finished work (the author sends that via request-review), or for project-internal summaries (use session-summary).
+  Output: a handoff document in the OS temp directory with suggested skills.
+# prettier-ignore
+triggers:
+  - "会话交接"
+  - "上下文压缩"
+  - "交接文档"
+  - "换会话"
+  - "任务转交"
 argument-hint: 'What will the next session be used for?'
 disable-model-invocation: true
 ---

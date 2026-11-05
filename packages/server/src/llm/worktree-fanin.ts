@@ -18,7 +18,7 @@
  * preflight 钉死在 dev，冲突没别处可去——会话 worktree 是唯一能安全承载 fan-in
  * 冲突的地方。⇒ `fanInCatBranches` 的 `cwd` 是**必填**（见下）。
  *
- * 判据全部来自 Phase S 模拟勘验（`docs/run/multi-cat-isolation/sim-report.md`，
+ * 判据全部来自 Phase S 模拟勘验（票 `multi-cat-isolation`；隔离模型见 `docs/adr/0015-per-cat-worktree-isolation.md`，
  * 12 格实跑），不是推演：
  * - S3-1（阻断级）枚举必须带 `*`——裸前缀命中 0 条且**全链静默**
  * - S3-2 冲突码不止 `UU`（`AA`/`UU` 可并存）⇒ 守卫判 `MERGE_HEAD`，不按码枚举

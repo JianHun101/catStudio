@@ -1,6 +1,17 @@
 ---
 name: implement
-description: Implement a piece of work based on a spec or set of tickets. Use when the requirements are settled and the work is ready to build, ideally with a spec and one ticket in a fresh session. Not for fuzzy ideas that still need investigation (use wayfinder) or prototype exploration (use prototype). Output working code that satisfies the spec/ticket acceptance criteria.
+description: >
+  按 spec/工单实施，产出满足验收的代码
+  Use when: the requirements are settled and the work is ready to build, ideally with a spec and one ticket in a fresh session.
+  Not for: fuzzy ideas that still need investigation (use wayfinder) or prototype exploration (use prototype).
+  Output: working code that satisfies the spec/ticket acceptance criteria.
+# prettier-ignore
+triggers:
+  - "按票实施"
+  - "写代码"
+  - "落地改动"
+  - "执行工单"
+  - "编码实现"
 disable-model-invocation: true
 ---
 

@@ -72,7 +72,7 @@ const QUERY_DB_TOOL = {
     properties: {
       table: {
         type: 'string',
-        enum: ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge'],
+        enum: ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge', 'server_boots'],
         description: '白名单表名',
       },
       conditions: {
@@ -344,7 +344,14 @@ export function validateSearchParams(args) {
  *
  * 返回 { ok: true, table, conditions, limit } 或 { ok: false, reason }。
  */
-export const QUERY_DB_TABLES = ['messages', 'execution_logs', 'sessions', 'agents', 'knowledge']
+export const QUERY_DB_TABLES = [
+  'messages',
+  'execution_logs',
+  'sessions',
+  'agents',
+  'knowledge',
+  'server_boots',
+]
 const QUERY_DB_OPS = ['=', '>', '<', 'LIKE']
 
 export function validateQueryDbParams(args) {

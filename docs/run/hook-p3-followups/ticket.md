@@ -1,3 +1,7 @@
+---
+status: active
+---
+
 # hook 面 P3 挂账票（fixture-hook-leak 收口遗留）
 
 > 来源：fixture-hook-leak 票（PR #204 → dev `826d38b0`）审查 P3 观察项，吐槽猫提出、店长收口时裁决挂账。

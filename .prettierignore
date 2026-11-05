@@ -2,10 +2,11 @@
 # "*": prettier --write 会扫到 staged 的 pnpm-lock.yaml，锁文件必须豁免）。
 pnpm-lock.yaml
 
-# 逐字 vendor 的外部技能正文（上游镜像目录）：prettier 会重排 markdown 表层
-# （表格对齐 / `*` 列表符 → `-` / `*强调*` → `_强调_` / 补空行），使内容与上游不再
-# 逐字节一致——而本仓对该目录的验收判据正是「与上游 sha256 一致」。
-# 故本目录不由本仓格式化；要改内容请改上游后重新 vendor（约定见 skills/BOOTSTRAP.md「同步溯源」）。
+# 正文逐字 vendor 的外部技能（上游镜像目录），frontmatter 已本地改造（四段 + triggers，
+# 见 skills-lock.json 的 `frontmatterAdapted: true`），正文改动仍须回上游重新 vendor。
+# prettier 会重排 markdown 表层（表格对齐 / `*` 列表符 → `-` / `*强调*` → `_强调_` / 补空行），
+# 使正文与上游不再逐字节一致——而本仓对正文的验收判据正是「与上游 sha256 一致」。
+# 故本目录仍不由本仓格式化（约定见 skills/BOOTSTRAP.md「同步溯源」）。
 skills/design-taste-frontend/
 
 # 跑批报告是 `scripts/eval/retrieval-baseline.mjs` 的**生成物**，且是它 B1 验收的
