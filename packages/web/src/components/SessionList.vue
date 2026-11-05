@@ -175,9 +175,13 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   padding: 12px 10px;
 }
 
-/* 头行：48px 定高 + 下边框——与主区顶栏、右栏「成员 · N」同一水平线。
+/* 头行：48px 定高——与主区顶栏、右栏「成员 · N」同一水平线。
+   B·改：下边框退役，改头行同底色 + 底缘渐隐；滚动内容不会撞出一条硬切线。
    nowrap 保 236px 窄栏内不折行（折行会把 48px 撑破、三条头行错位）。 */
 .section-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   height: 48px;
   flex: none;
   display: flex;
@@ -185,13 +189,25 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   justify-content: space-between;
   gap: 8px;
   padding: 0 14px;
-  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-session);
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.6px;
   white-space: nowrap;
+}
+
+/* 头行底缘渐隐：盖住滚动内容的「一刀切」断口，不引入任何线（结构线 0 条）。 */
+.section-header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -16px;
+  height: 16px;
+  background: linear-gradient(to bottom, var(--bg-session), transparent);
+  pointer-events: none;
 }
 
 .section-header-label {
@@ -282,22 +298,10 @@ async function handleArchive(id: string, archived: boolean): Promise<void> {
   color: var(--text-primary);
 }
 
+/* 选中态：只留 accent 淡底 + 文字加深（B·改：左缘 3px 竖条已退役，不新增替代线）。 */
 .session-item.active {
-  background: var(--bg-surface);
+  background: var(--accent-soft);
   color: var(--text-primary);
-  box-shadow: var(--shadow-sm);
-  position: relative;
-}
-
-.session-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 3px;
-  background: var(--accent);
-  border-radius: 0 2px 2px 0;
 }
 
 .session-body {
