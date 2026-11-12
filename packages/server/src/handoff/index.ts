@@ -12,6 +12,8 @@ import { v4 as uuid } from 'uuid'
 import { estimateTokens } from '@cat-study/shared'
 import { chatComplete } from '../llm/complete.js'
 import { sessions as sessionsRepo, messages as messagesRepo } from '../db/repository/index.js'
+import type { MessageWithAgentName } from '../db/repository/types.js'
+import { parseCompressedSummaries, lastReadySummary } from '../execution/context.js'
 import { createLogger } from '../logger.js'
 import { envNumber } from '../env-number.js'
 import { readRawContextConfig } from '../config/context-config.js'
@@ -20,6 +22,8 @@ import type { HandoffBus } from '../execution/bus.js'
 const log = createLogger('handoff')
 
 const HANDOFF_SYSTEM_PROMPT = `你是一个会话交接助手。你需要对整个对话做一个完整的总结，确保新会话中的 AI 助手能够无缝接续。
+
+输入可能包含「此前对话摘要」段——它是更早对话的有损压缩，请把它与「此后新增的对话」合并成一份完整总结，不要只总结新增部分。
 
 总结应包含：
 1. **对话主题**：这段对话在讨论什么
@@ -30,19 +34,89 @@ const HANDOFF_SYSTEM_PROMPT = `你是一个会话交接助手。你需要对整�
 
 输出格式：使用以上 5 个小标题组织，用简洁中文。控制在 500-1000 字。`
 
+/** 摘要输入单页条数——串读分页大小（不是上限：不足一页才停止） */
+const SUMMARY_INPUT_PAGE_SIZE = 200
+
+/** 摘要生成结果：正文 + 本次生成**实际覆盖**的边界元数据（写回 compressed_summaries） */
+export interface GeneratedSummary {
+  summary: string
+  /** 生成时点读到的最后一条消息 id；会话无消息时为 null */
+  coveredToId: string | null
+  /** 上述消息的 created_at（ISO）；无消息时为 null */
+  coveredToAt: string | null
+  /** 该摘要累计覆盖的消息条数（增量 = 旧条目累计 + 本次新增） */
+  coveredCount: number
+}
+
+const EMPTY_SUMMARY: GeneratedSummary = {
+  summary: '',
+  coveredToId: null,
+  coveredToAt: null,
+  coveredCount: 0,
+}
+
 /**
- * 生成全量会话总结。
+ * 分页串读摘要输入消息（时间正序，**无条数上限**）。
+ *
+ * `afterId` 为上一份摘要的覆盖边界：只读其后的新增消息（增量）。
+ * 边界消息已不存在（如回退删除）→ 退回全量重读——宁可多花一次成本，
+ * 也绝不静默丢早期消息（旧条目只有 `coveredThrough` 数字时同样走全量）。
+ */
+function readSummaryInputMessages(
+  sessionId: string,
+  afterId: string | null
+): MessageWithAgentName[] {
+  let after: { createdAt: string; id: string } | null = null
+  if (afterId) {
+    const cursor = messagesRepo.getMessageInSession(afterId, sessionId)
+    if (cursor) after = { createdAt: cursor.created_at, id: cursor.id }
+  }
+
+  const all: MessageWithAgentName[] = []
+  for (;;) {
+    const page = messagesRepo.getMessagesWithAgentNamePage(
+      sessionId,
+      after,
+      SUMMARY_INPUT_PAGE_SIZE
+    )
+    all.push(...page)
+    if (page.length < SUMMARY_INPUT_PAGE_SIZE) break
+    const last = page[page.length - 1]
+    after = { createdAt: last.created_at, id: last.id }
+  }
+  return all
+}
+
+/**
+ * 生成会话总结（交接用 / 摘要替代压缩用）。
+ *
+ * 增量策略：若存在上一份**就绪**摘要且带 `coveredToId`，输入 = 旧摘要正文 +
+ * 该边界之后的新增消息；否则全量重读（自愈——旧版条目没有 id 边界，或摘要输入
+ * 曾经被 300 条上限截断）。
+ *
+ * 覆盖边界由**读消息那一刻**的最后一条确定，调用方不得另取——否则边界与输入不一致。
+ *
  * @param maxTokens - 输出 token 上限（默认 1500 = handoff 交接用；摘要替代传 2000）
  */
 export async function generateFullSummary(
   sessionId: string,
   maxTokens: number = 1500
-): Promise<string> {
-  // 取最新 N 条消息，不截断每条内容（deepseek-v4-flash 有 1M 上下文）
-  const allMessages = messagesRepo.getMessagesWithAgentName(sessionId)
-  allMessages.reverse() // 恢复时间正序
+): Promise<GeneratedSummary> {
+  const prior = lastReadySummary(
+    parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
+  )
+  const priorBoundary = prior?.coveredToId ?? null
+  const inputMessages = readSummaryInputMessages(sessionId, priorBoundary)
 
-  const conversationText = allMessages
+  const last = inputMessages.length > 0 ? inputMessages[inputMessages.length - 1] : null
+  const coveredToId = last?.id ?? null
+  const coveredToAt = last?.created_at ?? null
+  const newCount = inputMessages.length
+  const coveredCount = priorBoundary
+    ? (prior?.coveredCount ?? prior?.coveredThrough ?? 0) + newCount
+    : newCount
+
+  const conversationText = inputMessages
     .map((m) => {
       if (m.role === 'user') return `用户：${m.content}`
       const name = m.agent_name || '助手'
@@ -50,13 +124,19 @@ export async function generateFullSummary(
     })
     .join('\n')
 
+  // 增量输入：旧摘要正文作前缀（它代表更早对话），新增消息跟在后面。
+  // 注意不用 `prior.coveredToId` 作分支条件（该条目可能因边界消息已删而退回全量）。
+  const summaryInput = priorBoundary
+    ? `【此前对话摘要（有损压缩，覆盖至消息 #${priorBoundary}）】\n${prior?.content ?? ''}\n\n【此后新增的对话】\n${conversationText}`
+    : conversationText
+
   const apiKey = process.env.SUMMARY_API_KEY
   if (!apiKey) {
     log.warn('no summary api key, skipping handoff')
-    return ''
+    return EMPTY_SUMMARY
   }
 
-  const summary = await chatComplete(HANDOFF_SYSTEM_PROMPT, conversationText, {
+  const summary = await chatComplete(HANDOFF_SYSTEM_PROMPT, summaryInput, {
     apiKey,
     model: process.env.SUMMARY_MODEL || 'deepseek-v4-flash',
     baseUrl: process.env.SUMMARY_BASE_URL || 'https://api.deepseek.com',
@@ -65,7 +145,7 @@ export async function generateFullSummary(
     timeoutMs: 30_000,
   })
 
-  return summary
+  return { summary, coveredToId, coveredToAt, coveredCount }
 }
 
 export interface HandoffResult {
@@ -230,11 +310,11 @@ export async function performHandoff(
       return null
     }
 
-    // 5. 生成全量总结
+    // 5. 生成全量总结（增量输入：旧摘要 + 边界之后的新增消息）
     log.info('generating full summary for handoff', { sessionId })
-    const summary = await generateFullSummary(sessionId)
+    const { summary } = await generateFullSummary(sessionId)
     if (!summary) {
-      // 无 API key（generateFullSummary 返回 ''）——失败必须对前端可见
+      // 无 API key / 空结果（generateFullSummary 返回空 summary）——失败必须对前端可见
       //（用户报「交接线到了没触发」的根因之一就是静默失败）
       emitHandoffFailed(sessionId, bus, '摘要 API Key 未配置（SUMMARY_API_KEY 与 DS_KEY 均为空）')
       return null
