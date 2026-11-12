@@ -543,7 +543,8 @@ export function summarizeMissDistances({ scores, maxDistance }) {
   let corpusAbsent = 0
   let outsideWindow = 0
   // 只进 summary、md 不单列：池外条目的名次已在窗外，阈值不是更紧约束，故其距离 ≥ 阈值
-  // 不重复计成「阈值杀」；字段保留供 JSON 消费方看分布（本票不删字段、不改统计）。
+  // 不重复计成「阈值杀」；字段只进 `summarizeMissDistances` 的返回值（md 判词/测试用），
+  // `buildReportJson` 不序列化它。
   let outsideWindowOverThreshold = 0
   let noReading = 0
   for (const s of scores) {

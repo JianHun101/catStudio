@@ -123,7 +123,7 @@ RRF 关键词权重 0.8。**结论是负的，整支已回滚**——`packages/`
 > `-miss-attribution` 后缀的文件**即使留在根目录也不会被 `listRetrievalReports` 列出**；
 > 放 `experiments/` 只是不让两类产物混在一处，不承担「防止顶掉正式位」的职责。
 > 它是同一天基线的**归因拆分视图**；跨报告比 recall 请用根目录那两份。
-> 判据要点：`outside-window` 的锚点**在库**、**今天 4/4 的 `bestDist` 都 < 0.6**；代码允许
+> 判据要点：`outside-window` 的锚点**在库**、**771 正式基线 4/4（759 快照 3/3）的 `bestDist` 都 < 0.6**；代码允许
 > 池外条目 `overThreshold=true`（名次已在窗外，阈值不是更紧约束），池外归因优先于阈值归因。
 > 它们只是全库名次 ≥ 20 ⇒ **补语料救不了**，药方是改排序或扩池/名额；只有 `corpus-absent`
 > （`chunks` 查无此节）才是真覆盖洞。
@@ -132,8 +132,28 @@ RRF 关键词权重 0.8。**结论是负的，整支已回滚**——`packages/`
 > `git show 19976148:docs/eval/retrieval-baseline-2026-11-12.json` 回查）、本组归因拆分
 > **759** 行、重生成后的正式基线 **771** 行。**跨快照只能比 headline**（real/constructed recall、
 > 负例、阈值前命中）——`bestRank`/`bestDist` 是语料规模的函数，755/759/771 之间不可逐位对。
-> **桶归属同样是语料规模的函数**：`not_topk` / `below_topk` / `outside-window` 的计数不可与 759
-> 快照逐桶对（例：G09 在 759 快照是 `below_topk rank=18`，到 771 语料变成 `outside-window rank=28`）。
+> **桶归属同样是语料规模的函数**：759 → 771 是 `below_topk` **4 → 3**、`outside-window`
+> **3 → 4**；`not_topk` 两快照同为 **8**、没变（例：G09 在 759 快照是 `below_topk rank=18`，
+> 到 771 语料变成 `outside-window rank=28`）。桶计数不可跨快照逐桶对。
+
+### 计票与名额实验（2026-11-12，759 行 / 45 文档，14 份）
+
+产出脚本：`scripts/eval/retrieval-baseline.mjs`。回答的问题：**改写、召回口径与 topK 名额各让出多少召回、又换来多少预算截断**。
+七臂全部跑在同一份 **759 行 / 45 文档**的库、同一黄金集（59 条 / 67 锚点）上；`real` / `constructed` 是
+`groups.*.hit / expectTotal`（命中锚点数 / 应命中锚点数），「撞预算截断」是 `scores[].truncated` 求和。
+
+| 臂            | topK | real      | constructed | 撞预算截断 | 结论                                               |
+| ------------- | ---- | --------- | ----------- | ---------- | -------------------------------------------------- |
+| `rewrite-on`  | 5    | **12/20** | **31/37**   | 1          | 对照臂（dev 现状：改写开）                         |
+| `rewrite-off` | 5    | 13/20     | 29/37       | 1          | 关改写：real +1、constructed −2，合计 43→42        |
+| `recall-max`  | 5    | 12/20     | 28/37       | 2          | real 持平、constructed −3，合计 43→40              |
+| `topk6`       | 6    | 13/20     | 33/37       | 2          | 相对 rewrite-on：real +1、constructed +2，截断 1→2 |
+| `topk7`       | 7    | 13/20     | 33/37       | 5          | 与 topk6 同分，截断 2→5                            |
+| `topk8`       | 8    | 15/20     | 33/37       | 10         | real 再 +2、constructed 持平，截断 5→10            |
+| `topk10`      | 10   | **16/20** | **35/37**   | 15         | 召回最高（16/20、35/37），截断 10→15               |
+
+> 这 14 份是 **759 行快照**，与根目录 **771 正式基线不同源**：只能在这 7 臂内部横向比较，
+> 不能拿绝对值直接对正式基线。`listRetrievalReports` 不递归子目录，它们**不是正式基线**。
 
 ### 黄金集本体
 
