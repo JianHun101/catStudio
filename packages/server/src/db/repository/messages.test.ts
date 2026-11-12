@@ -713,4 +713,26 @@ describe('getSessionHistory — 首屏取最新一页', () => {
 
     expect(messagesRepo.getSessionHistory('s1').map((r) => r.id)).toEqual(ids)
   })
+
+  it('同 created_at：按 id DESC 取窗口再反转 ASC（显式 tie-break 由源码断言钉住）', () => {
+    const at = new Date(Date.UTC(2026, 0, 2, 0, 0, 0)).toISOString()
+    const ins = db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+       VALUES (?, 's1', 'user', ?, '[]', ?)`
+    )
+    // 插入序（rowid 序）= c,a,b，故意与 id 字典序不同：没有显式 tie-break 时
+    // 同 created_at 的行会退回扫描序，窗口就可能取错。
+    for (const id of ['m-c', 'm-a', 'm-b']) ins.run(id, `msg-${id}`, at)
+
+    // 全量：DESC 窗口 → c,b,a，反转后 ASC = a,b,c（不是插入序 c,a,b）
+    expect(messagesRepo.getSessionHistory('s1').map((r) => r.id)).toEqual(['m-a', 'm-b', 'm-c'])
+    // 窗口 limit=2：DESC 取 c,b → 反转 = b,c（不是 a,b）
+    expect(messagesRepo.getSessionHistory('s1', 2).map((r) => r.id)).toEqual(['m-b', 'm-c'])
+
+    // 行为面之外再钉源码：真实 schema 的 idx_messages_session 第三列就是 id
+    // （session_id, created_at, id），索引扫描在 DESC 下天然给出 id DESC——**删掉 SQL 里的
+    // `, id DESC` 行级结果不变**，上两条断言打不红变异。故 tie-break 的判别面只能是这条
+    // 源码断言（删掉即红），不能假装行级用例覆盖了它。
+    expect(messagesRepo.getSessionHistory.toString()).toContain('ORDER BY created_at DESC, id DESC')
+  })
 })
