@@ -20,7 +20,7 @@ import { CHUNK_VECTOR_METRIC_FIX_SEQUENCE, MIGRATIONS } from '../migrations.js'
 import { initRepository } from './index.js'
 import { chunks as chunksRepo } from './index.js'
 import { vectorToBlob } from '../../memory/index.js'
-import { ftsTokenize } from './fts.js'
+import { bigramTokenize } from './fts.js'
 
 /** 契约列清单（票己正文「`chunks` 列清单 —— 一次到位（X2）」逐列抄录） */
 const CONTRACT_COLUMNS: Array<{
@@ -96,11 +96,11 @@ function oneHot(i: number): number[] {
   return v
 }
 
-/** 写 FTS 行（写入侧同步归票庚/票辛，测试侧照 `syncChunkFts` 的预分词范式手写） */
+/** 写 FTS 行（写入侧同步归票庚/票辛，测试侧照 memories.ts 的 bigram 预分词范式手写） */
 function writeFtsRow(chunkId: number, text: string): void {
   getDb()
     .prepare('INSERT INTO chunks_fts (rowid, content) VALUES (?, ?)')
-    .run(chunkId, ftsTokenize(text).join(' '))
+    .run(chunkId, bigramTokenize(text).join(' '))
 }
 
 /** 写向量行（⚠️ vec0 PK 必须传 BigInt——JS number 会被 better-sqlite3 绑成 REAL 而被拒） */
@@ -264,9 +264,6 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       'deleteChunksByDocPaths',
       'deleteStaleChunkRows',
       'probeChunkVectorCandidates',
-      // 纯计分函数（2026-11-12 · FTS-1 返工）：不发 SQL、不返回召回，只给两处计分点
-      // 提供同一公式；导出只为断言权重（见「RRF 通道权重」用例）。
-      'rrfScore',
     ]
 
     function exportFunctionBodies(src: string): Map<string, string> {
@@ -464,7 +461,7 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       vec: (getDb().prepare('SELECT COUNT(*) c FROM chunk_vectors').get() as { c: number }).c,
     })
 
-    it('G1/G2：FTS 行内容 = 预分词串（非原文），rowid = chunks.rowid', () => {
+    it('G1/G2：FTS 行内容 = bigram 预分词串（非原文），rowid = chunks.rowid', () => {
       const { id } = chunksRepo.upsertChunkWithIndexes(chunkInput(), vectorToBlob(oneHot(0)))
 
       const fts = getDb().prepare('SELECT rowid, content FROM chunks_fts').all() as Array<{
@@ -473,14 +470,14 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       }>
       expect(fts).toHaveLength(1)
       expect(fts[0].rowid).toBe(id)
-      // 原文（含空格）本身不是预分词串：断言两者不等 + 是空格 join 的词项
+      // 原文（含空格）本身不是 bigram 串：断言两者不等 + 是空格 join 的 bigram
       const raw = `${chunkInput().body} ${chunkInput().breadcrumb}`
       expect(fts[0].content).not.toBe(raw)
-      expect(fts[0].content).toBe(ftsTokenize(raw).join(' '))
+      expect(fts[0].content).toBe(bigramTokenize(raw).join(' '))
     })
 
     it('G1 反例：FTS 行写成原文 ⇒ 关键词通道零命中（静默失败）', () => {
-      // 手写「照原文写」的错误形态，证明读侧确实依赖预分词 —— 这条用例是
+      // 手写「照原文写」的错误形态，证明读侧确实依赖 bigram —— 这条用例是
       // 让「G1 地雷」从口头约定变成可复现事实
       const bare = chunksRepo.upsertChunk(chunkInput({ contentHash: 'bare' }))
       getDb()
@@ -497,29 +494,6 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       const hits = chunksRepo.searchChunksByKeyword('关键词', 10)
       expect(hits).toHaveLength(1)
       expect(hits[0].body).toBe('扫描器写入侧的关键词命中用例')
-    })
-
-    it('关键词通道端到端（OR 语义）：长查询只要有一个词项在片里就命中', () => {
-      // 这条查询在 v1（AND + 跨语言 bigram）下必 0 行：要求「关键词通道为什么没有召回」
-      // 的全部 bigram（含 道为/么没/有召 这类跨词边界碎片）同片出现。v2 的 OR 语义下
-      // 「关键词通道」这一段词项就足以把它送进候选池（排序仍由 bm25 定）。
-      chunksRepo.upsertChunkWithIndexes(
-        chunkInput({ body: '关键词通道对这三条查询整体失效', contentHash: 'or-e2e' }),
-        vectorToBlob(oneHot(0))
-      )
-      const hits = chunksRepo.searchChunksByKeyword('关键词通道为什么没有召回', 10)
-      expect(hits).toHaveLength(1)
-      expect(hits[0].content_hash).toBe('or-e2e')
-    })
-
-    it('关键词通道端到端：ASCII 标识符按整词命中（v2 不再切成 re/et/tr 碎片）', () => {
-      chunksRepo.upsertChunkWithIndexes(
-        chunkInput({ body: '流水落在 retrieval_events 表里', contentHash: 'ascii-e2e' }),
-        vectorToBlob(oneHot(0))
-      )
-      const hits = chunksRepo.searchChunksByKeyword('retrieval_events 怎么查', 10)
-      expect(hits).toHaveLength(1)
-      expect(hits[0].content_hash).toBe('ascii-e2e')
     })
 
     it('R6 §B2 档3：驱动抛非 Error（字符串）时诊断单源可判「FTS 缺表」⇒ 降级 []，不误上抛', () => {
@@ -590,52 +564,6 @@ describe('chunks repo（票己 · 段三索引表）', () => {
       ])
       expect(parsed[0].kind).toBe('commit')
       expect(parsed[0].ref).toBe('d555732')
-    })
-  })
-
-  describe('RRF 通道权重（2026-11-12 · FTS-1 返工）', () => {
-    /**
-     * 权重 0.8 不是扫出来的：`0.8/61 = 0.01311` 落在 vector 第 15~19 名（`1/76`~`1/80`）
-     * 之间——关键词头名能挤掉向量尾部、挤不掉向量头部。这三个断言就是那条机制的
-     * 可失败形式：改回 1.0 时第一条当场红。
-     */
-    it('权重 0.8：keyword rank0 低于 vector rank0，且夹在 vector 第 15~16 名之间', () => {
-      expect(chunksRepo.HYBRID_KEYWORD_WEIGHT).toBe(0.8)
-      const kw0 = chunksRepo.rrfScore(0, chunksRepo.HYBRID_KEYWORD_WEIGHT)
-      expect(kw0).toBeLessThan(chunksRepo.rrfScore(0)) // < 1/61
-      expect(kw0).toBeLessThan(chunksRepo.rrfScore(15)) // < 1/76
-      expect(kw0).toBeGreaterThan(chunksRepo.rrfScore(16)) // > 1/77
-    })
-
-    it('双通道命中 = vector 分 + 0.8 × keyword 分（相加，不是取大）', () => {
-      const dual = chunksRepo.rrfScore(0) + chunksRepo.rrfScore(0, chunksRepo.HYBRID_KEYWORD_WEIGHT)
-      expect(dual).toBeCloseTo(1.8 / 61, 12)
-    })
-
-    it('w=1.0 恢复旧式（参数化基线）：keyword 与 vector 同分', () => {
-      expect(chunksRepo.rrfScore(0, 1)).toBe(1 / 61)
-      expect(chunksRepo.rrfScore(3, 1)).toBe(1 / 64)
-    })
-
-    it('端到端：混合检索真实产出的双通道分 = vector + 0.8×keyword', () => {
-      // A 与查询向量同向（vector rank 0）且正文含查询词（keyword rank 0）⇒ both；
-      // B 只有向量命中。断言 A 的融合分恰是两项之和 —— 证明权重接在真实计分点上，
-      // 不是只存在于 `rrfScore` 的孤立公式里。
-      const { id: aId } = chunksRepo.upsertChunkWithIndexes(
-        chunkInput({ body: '权重实验的关键词命中片', contentHash: 'w-a' }),
-        vectorToBlob(oneHot(0))
-      )
-      chunksRepo.upsertChunkWithIndexes(
-        chunkInput({ docPath: 'docs/adr/0002-b.md', body: '只有向量命中', contentHash: 'w-b' }),
-        vectorToBlob(oneHot(1))
-      )
-      const hits = chunksRepo.searchChunksHybrid(vectorToBlob(oneHot(0)), '权重实验', 5, 1.5)
-      const hit = hits.find((h) => h.row.id === aId)
-      expect(hit).toBeTruthy()
-      expect(hit!.channel).toBe('both')
-      expect(hit!.vectorRank).toBe(0)
-      expect(hit!.keywordRank).toBe(0)
-      expect(hit!.rrfScore).toBeCloseTo(1 / 61 + 0.8 / 61, 12)
     })
   })
 

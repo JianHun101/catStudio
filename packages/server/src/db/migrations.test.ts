@@ -20,7 +20,6 @@ import {
   MAIN_DB_REPAIR_ENTRY_NAMES,
   type Migration,
 } from './migrations.js'
-import { ftsTokenize } from './repository/fts.js'
 
 /**
  * 誊写校验的归一函数：判**词法**，不判排版。空白唯一承载语义的地方是字符串字面量，
@@ -1607,78 +1606,6 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(mig).toContain(
         `CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(updated_at DESC) WHERE archived_at IS NULL`
       )
-    })
-  })
-
-  // ─── 票 FTS-1 · chunks_fts 分词器 v2 存量重建 ──────────────────────
-  describe('票 FTS-1 · chunks_fts 分词器 v2 存量重建', () => {
-    const ENTRY = 'chunks_fts rebuild (FTS 分词器 v2：中文 bigram + ASCII 整词)'
-    const BODY = '关键词通道对这三条查询整体失效，落在 retrieval_events 表里'
-    const BREADCRUMB = 'docs/adr/0001-a.md > 决策'
-    const EXPECTED = ftsTokenize(`${BODY} ${BREADCRUMB}`).join(' ')
-
-    /** 建全量结构 + 台账，塞一片 + 一段旧切分内容，再删该条台账 = 「旧索引 + 台账缺该条」 */
-    function seedMissingLedgerEntry(): {
-      db: Database.Database
-      rowid: number
-    } {
-      const db = makeFreshDb()
-      setDb(db)
-      initDb()
-      // ⚠️ **id 显式从 999 起**，不用空库自增的 1：真实库 `chunks.id` 从历史累积值续（dev 库
-      // 实测 889 起），而 FTS5 在 rowid 绑定失败时会**自动分配 1..N**——id=1 的夹具恰好与
-      // 自动分配重合，会把「rowid 断链」这条真 bug 盖成绿。
-      const rowid = 999
-      db.prepare(
-        `INSERT INTO chunks (id, doc_path, section_anchor, content_hash, origin_id, part_index, part_total, body, breadcrumb)
-         VALUES (?, 'docs/adr/0001-a.md', '## 决策', 'h1', 'blob1', 1, 1, ?, ?)`
-      ).run(rowid, BODY, BREADCRUMB)
-      db.prepare('INSERT INTO chunks_fts (rowid, content) VALUES (?, ?)').run(rowid, '旧 v1 分词串')
-      db.prepare('DELETE FROM schema_migrations WHERE name = ?').run(ENTRY)
-      return { db, rowid }
-    }
-
-    it('台账缺该条 → 真执行：内容按 v2 分词重算、行数与 chunks 对齐', () => {
-      const { db, rowid } = seedMissingLedgerEntry()
-      initDb()
-
-      const row = db.prepare('SELECT content FROM chunks_fts WHERE rowid = ?').get(rowid) as {
-        content: string
-      }
-      expect(row.content).toBe(EXPECTED)
-      expect(row.content).not.toBe('旧 v1 分词串')
-      // 行数与 rowid **一一对齐**（不是只要「数量相等」——FTS5 自动分配会给出数量相等但错位的行）
-      expect(db.prepare('SELECT rowid FROM chunks_fts ORDER BY rowid').all()).toEqual(
-        db.prepare('SELECT id AS rowid FROM chunks ORDER BY id').all()
-      )
-      // 台账已补登
-      expect(db.prepare('SELECT 1 FROM schema_migrations WHERE name = ?').get(ENTRY)).toBeDefined()
-    })
-
-    it('再跑一次：台账拦住 ⇒ 内容不变（不会二次重算漂移）', () => {
-      const { db, rowid } = seedMissingLedgerEntry()
-      initDb()
-      const before = (
-        db.prepare('SELECT content FROM chunks_fts WHERE rowid = ?').get(rowid) as {
-          content: string
-        }
-      ).content
-
-      initDb()
-
-      const after = (
-        db.prepare('SELECT content FROM chunks_fts WHERE rowid = ?').get(rowid) as {
-          content: string
-        }
-      ).content
-      expect(after).toBe(before)
-    })
-
-    it('空库（chunks 零行）跑该条不抛，chunks_fts 保持 0 行', () => {
-      const db = makeFreshDb()
-      setDb(db)
-      expect(() => initDb()).not.toThrow()
-      expect((db.prepare('SELECT COUNT(*) n FROM chunks_fts').get() as { n: number }).n).toBe(0)
     })
   })
 })

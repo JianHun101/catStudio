@@ -18,8 +18,8 @@ evidence:
 > 1. **检索引擎换链**：原主链（对话原话实时嵌入 `memories` 表）**已整体退役**——写口与 `memories` 表双删（migration `drop memories chain tables`）。现检索语料是**白名单 MD 文档**（`docs/adr/` `docs/lessons/` `docs/plans/`，见 `scripts/flywheel/scan.mjs` 的 `SCAN_PREFIXES`）的切片，进 `chunks` 三表；**MD 是唯一写入口**。正文「消息 → 向量 → 搜索 `memories` 表 → top-K 注入」这句描述的管线已不存在，**不要照它找 `memories`**。
 > 2. **入口与时机**：检索入口为 `retrieveMemoryContext()`（`memory/index.ts`，正文与旧注写的 `buildMemoryContext()` **已不存在**）。检索时机**不变**——仍是 Agent 被调度回复时（`execution/reply.ts` 的 `retrieveMemoryContext` 调用处），非用户发言后立即触发。
 > 3. **Embedding 落在独立进程**：模型仍是本地 Transformers.js（`Xenova/bge-small-zh-v1.5`，512 维），可经 `MEMORY_EMBEDDING_MODEL` 更换、`HF_ENDPOINT` 切换镜像；但**跑在独立 sidecar 进程**（`scripts/flywheel/embed-server.mjs`，随 server 启停、只监听 `127.0.0.1`，主进程经 HTTP 调用）——正文 Consequences 里「Embedding 由本地模型**在进程内**生成」原为撰写时状态，**已按现况改文**，模型不进主进程内存。
-> 4. **关键词通道分词器 v2（2026-11-12 · 票 FTS-1）**：FTS5 一侧的切分与查询语义变了——索引侧由「跨语言一刀切 bigram」改为**中文 bigram + ASCII 整词**（camelCase 子词化、单个字母丢弃），查询侧由 AND 改为 **OR**；存量 `chunks_fts` 由一次性迁移 `chunks_fts rebuild` 重算（向量/嵌入不动）。**选型不变**（仍是向量 + 关键词 RRF 混合）——改的是关键词通道的召回可达性，不是语义能力；正文「FTS5 缺乏语义理解」这一判断不受影响。
-> 5. **关键词通道 RRF 权重 0.8（2026-11-12 · FTS-1 返工）**：查询侧改 OR 后，关键词通道每查询产出 20 个候选，而原 RRF 式 `1/(k+rank+1)` 与通道无关 ⇒ 纯关键词第 0 名与向量第 0 名同分，把向量通道相关但排名靠后的片挤出 20 片池（实测 G41 两锚点距离 0.297/0.328，不是阈值问题）。给关键词项乘 0.8 后，其头名落在向量第 15~19 名之间——挤掉向量尾部、不挤向量头部；双通道命中仍相加。选型不变，改的是融合层「两通道精度相当」这一隐含假设。
+>
+> **已回滚实验（2026-11-12 · 票 FTS-1，不改选型）**：曾试「中文 bigram + ASCII 整词」分词器 v2 与查询侧 AND→OR，并给关键词通道 RRF 项乘 0.8，以抑制宽匹配候选挤出向量通道尾部。**受控实验硬门未过**——real **11/20**（门槛 ≥12）、G41 两锚点 0/2 → **1/2**（未全回）、G09 1/1 → 0/1；「关键词头名落在向量第 15~19 名之间 ⇒ 不挤向量头部」这一机制推断**被证伪**：融合是跨多条查询累积分后取节名额，单查询位次推不出节排名。代码已逐字节回滚到 `77ebf86`（`packages/` 与 `scripts/eval`），运行态与正文一致。三臂读数与产物留档在 `docs/eval/experiments/retrieval-baseline-2026-11-12-fts-or-*`。**没有新证据不要再提「调关键词权重」**；要再动融合层，先给出能解释跨查询累积排序的机制读数。
 
 Agent 记忆采用 embedding 向量检索而非全文搜索（FTS5）或纯摘要方案。Agent 被调度回复时触发检索：消息 → embedding 向量 → 余弦相似度搜索 `memories` 表 → top-K 相关记忆注入推理 prompt。
 

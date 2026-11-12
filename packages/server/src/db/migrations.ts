@@ -67,7 +67,6 @@
  */
 import type Database from 'better-sqlite3'
 import { rebuildTable, type RebuildColumn } from './rebuild.js'
-import { ftsTokenize } from './repository/fts.js'
 
 /** 一条迁移：`name` 台账主键 / `sql` 正文（checksum 原文）/ `verify` 可选矫正探针 */
 export interface Migration {
@@ -528,9 +527,8 @@ const BASELINE_MIGRATIONS: ReadonlyArray<Migration> = [
     },
   },
   {
-    // 关键词通道：content 列存 `ftsTokenize` 预分词串（中文 bigram + ASCII 整词，空格
-    // join，两侧对称），tokenize='unicode61' 按空格切回 token（零中文分词器依赖）；
-    // rowid 映射 chunks.rowid，检索 JOIN 取原文
+    // 关键词通道：content 列存 bigram 预分词串（空格 join，两侧对称），tokenize='unicode61'
+    // 按空格切回 token（零中文分词器依赖）；rowid 映射 chunks.rowid，检索 JOIN 取原文
     name: 'chunks_fts table (FTS5 关键词通道)',
     sql: `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
         content,
@@ -862,58 +860,6 @@ function rebuildMigration(opts: {
         ...(opts.columnMap === undefined ? {} : { columnMap: opts.columnMap }),
         ...(opts.allowDropped === undefined ? {} : { allowDropped: opts.allowDropped }),
       })
-      record()
-    },
-  }
-}
-
-/**
- * `chunks_fts` 存量重建条目的工厂（FTS 分词器 v2）。
- *
- * 为什么需要一条**数据迁移**：`chunks_fts.content` 存的是**预分词串**，不是原文投影。
- * 扫描器按 `origin_id` 增量比对 ⇒ 内容没变的文档会被判「已入库」跳过，**不重建就永远
- * 停在旧切分**。向量侧不动（嵌入模型没变），故本条目只重算 FTS 一个面。
- *
- * 形态与 `rebuildMigration` 同族但**不共用**：`rebuildTable` 走的是 `DROP` + `RENAME`
- * 的整表重建，而这里是「同一张虚拟表、按 `chunks` 行重灌内容」，没有列形状变更。
- * `sql` 仍然必填——它是 checksum 正文；hook 里 `exec` 的 DDL 直接取自同一变量
- * （`opts.ddl`），与 `rebuildMigration` 的 `sql === createSql` 是同一个结构保证。
- *
- * 事务边界：runner 对 `run` 条目**不包事务**（见 `Migration.run` 的契约），故
- * `CREATE VIRTUAL TABLE IF NOT EXISTS`（幂等 DDL）在事务外先执行，`DELETE` + 逐行
- * `INSERT` 包在 hook 自己的事务里——中途崩 = 内容整体回滚，下次启动整条重跑。
- * `record()` 在事务提交后调用（runner 靠「台账有没有本行」判漏登记）。
- */
-function ftsRebuildMigration(opts: { name: string; ticket: string; ddl: string }): Migration {
-  return {
-    name: opts.name,
-    ticket: opts.ticket,
-    sql: opts.ddl,
-    run: (db, record) => {
-      db.exec(opts.ddl)
-      // 前置对象不存在 = 无事可做（老库可能连 `chunks` 都没建过——基线若真跑过它会在）。
-      // 不能直接 SELECT：缺表会抛，把一条「无内容可重建」的迁移变成拒启。
-      const hasChunks =
-        db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks'`).get() !==
-        undefined
-      // ⚠️ 必须 `SELECT id AS rowid`：`chunks.id` 是 `INTEGER PRIMARY KEY`（= rowid 别名），
-      // SQLite 对 `SELECT rowid …` 返回的列名是 `id`，better-sqlite3 的结果对象因此没有
-      // `rowid` 键（实测 dev 库副本：插入拿到 undefined ⇒ FTS5 自动分配 1..N，与 chunks
-      // 的真实 rowid 断链，JOIN 后关键词通道恒空）。空库 id 恰好从 1 起，夹具会掩盖它。
-      const rows = hasChunks
-        ? (db.prepare('SELECT id AS rowid, body, breadcrumb FROM chunks').all() as Array<{
-            rowid: number
-            body: string
-            breadcrumb: string
-          }>)
-        : []
-      db.transaction(() => {
-        db.prepare('DELETE FROM chunks_fts').run()
-        const insert = db.prepare('INSERT INTO chunks_fts (rowid, content) VALUES (?, ?)')
-        for (const row of rows) {
-          insert.run(row.rowid, ftsTokenize(`${row.body} ${row.breadcrumb}`).join(' '))
-        }
-      })()
       record()
     },
   }
@@ -1374,25 +1320,6 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
       node_version TEXT
     )`,
   },
-
-  // ── 票 FTS-1 · 关键词通道分词器 v2（2026-11-12）───────────────────────────
-  // 存量重建：`chunks_fts` 内容按 `ftsTokenize`（中文 bigram + ASCII 整词）重算。
-  // 为什么必须重建而不是等扫描器：扫描器按 `origin_id` 增量比对，内容没变的文档会被
-  // 跳过 ⇒ 不重建就永远停在旧切分（查询侧已是 v2，两侧不对称 = 相对旧库的召回退步）。
-  // `chunks` 行数不动（752 片量级，逐行 INSERT，秒级）；向量/嵌入一律不碰。
-  // ⚠️ **改分词器必须追加新的重建条目**——`ftsTokenize` 换了切分口径而不加迁移，存量
-  // 索引会永远停在旧切分（扫描器按内容 SHA 增量，内容没变就跳过）。没有版本号常数兜底，
-  // 执行者只有本数组里的条目。
-  ftsRebuildMigration({
-    name: 'chunks_fts rebuild (FTS 分词器 v2：中文 bigram + ASCII 整词)',
-    ticket: 'FTS-1',
-    // 与基线 `chunks_fts` 条目同形的 `IF NOT EXISTS` DDL：本条目只作 checksum 正文，
-    // runner 对 `run` 条目不执行 `sql`；hook 里 exec 的也是同一份正文（工厂结构保证）。
-    ddl: `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-        content,
-        tokenize='unicode61'
-      )`,
-  }),
 ]
 
 /**

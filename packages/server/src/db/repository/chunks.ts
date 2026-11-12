@@ -13,7 +13,7 @@
  */
 import type Database from 'better-sqlite3'
 import type { ChunkRow } from './types.js'
-import { buildFtsQuery, ftsTokenize } from './fts.js'
+import { buildFtsQuery, bigramTokenize } from './fts.js'
 import { messageOf } from '../../utils.js'
 
 let db: Database.Database
@@ -126,8 +126,8 @@ export function upsertChunk(input: ChunkUpsertInput): number {
  * 通道上永久不可见，且**静默**）。
  *
  * 三条下游契约地雷在此处落地（票庚 ⑧，全部实测取证）：
- *   - **G1**：`chunks_fts.content` 存 **`ftsTokenize` 预分词串**（`body + ' ' + breadcrumb`，
- *     中文 bigram + ASCII 整词），与查询侧 `buildFtsQuery` 对称。照原文写 ⇒ MATCH 恒空且不报错。
+ *   - **G1**：`chunks_fts.content` 存 **bigram 预分词串**（`body + ' ' + breadcrumb`），
+ *     与查询侧 `buildFtsQuery` 对称。照原文写 ⇒ MATCH 恒空且不报错。
  *   - **G2**：FTS 行 `rowid` = `chunks.rowid`（读侧 `JOIN chunks c ON c.rowid = f.rowid`）。
  *     先删后插——内容变了必须整行重建，否则残留旧 bigram。
  *   - **G3**：vec0 主键必须传 `BigInt`（`db/index.ts` 建表注释：better-sqlite3 把 JS
@@ -217,7 +217,7 @@ function syncChunkFts(rowid: number, body: string, breadcrumb: string): void {
   db.prepare('DELETE FROM chunks_fts WHERE rowid = ?').run(rowid)
   db.prepare('INSERT INTO chunks_fts (rowid, content) VALUES (?, ?)').run(
     rowid,
-    ftsTokenize(`${body} ${breadcrumb}`).join(' ')
+    bigramTokenize(`${body} ${breadcrumb}`).join(' ')
   )
 }
 
@@ -379,13 +379,13 @@ export function getChunksBySection(docPath: string, sectionAnchor: string): Chun
     .all(docPath, sectionAnchor) as ChunkRow[]
 }
 
-/** 关键词通道检索结果（FTS 表 content 列存的是预分词串，不可直接输出 ⇒ JOIN 取原文） */
+/** 关键词通道检索结果（FTS 表 content 列存的是 bigram 预分词串，不可直接输出 ⇒ JOIN 取原文） */
 export type ChunkKeywordSearchResult = ChunkRow
 
 /**
- * 关键词通道：词项 MATCH（OR 语义）+ bm25 排序。
+ * 关键词通道：bigram 查询词 MATCH + bm25 排序。
  *
- * 分词**复用 `fts.ts` 的 `ftsTokenize`/`buildFtsQuery`**（不另发明）——
+ * 分词**复用 `fts.ts` 的 `bigramTokenize`/`buildFtsQuery`**（不另发明）——
  * 与 `chunks_fts` 写入侧同一套切分，两侧对称是 MATCH 能命中的前提。
  * 无可用查询词 → 空结果（调用方降级纯向量）；FTS 表缺失（老库/手搓 schema）同样
  * 静默降级，其他 SQL 错误照抛（不掩盖真实问题）。
@@ -449,36 +449,6 @@ export const HYBRID_POOL_PER_QUERY = 20
 /** RRF 融合常数 k（控制排名分衰减速度） */
 const RRF_K = 60
 
-/**
- * 关键词通道的 RRF 权重（2026-11-12 · 受控实验，FTS-1 返工）。
- *
- * RRF 原式 `1/(k+rank+1)` 与通道无关 ⇒ keyword 第 0 名与 vector 第 0 名同分。AND 语义
- * 下关键词通道恒空、这个偏差不可见；查询侧改 OR 后关键词通道每查询产出 20 个候选，
- * 纯关键词 rank 0~4 落在 `1/61`~`1/65`，恰好压过向量通道中后段——把向量通道真正相关
- * 的尾部挤出 `HYBRID_POOL_PER_QUERY`（G41 两锚点 distance 0.297/0.328，不是阈值问题，
- * 是池位被宽匹配候选挤掉）。
- *
- * **0.8 由机制导出、不是扫参**：`0.8/61 = 0.01311` 落在 vector 第 15~19 名
- * （`1/76`~`1/80`）之间——关键词头名能挤掉向量尾部，挤不掉向量头部（vector rank ≤ 4
- * ⇒ `1/65 ≥ 0.01538`）。双通道命中仍按两项相加，关键词的「精确匹配确认」价值不丢。
- * 不取 0.5：`0.5/61 = 0.0082` 低于全部向量候选 ⇒ 纯关键词候选永远排在向量之后，
- * OR 带来的新增召回能力归零。
- *
- * ⚠️ 纯关键词降级路径（`searchChunksKeywordScored`）**不乘该权重**：那条路径没有向量
- * 通道可比，权重只是整体缩放同一通道内的分数，不改变通道内排序与跨查询合并的相对关系。
- */
-export const HYBRID_KEYWORD_WEIGHT = 0.8
-
-/**
- * 单通道 RRF 分：`weight / (RRF_K + rank + 1)`。`weight` 缺省 1 = 原式。
- *
- * 导出只为可测（权重断言不必复刻常数链）；生产调用点只有 `searchChunksHybrid` 与
- * `searchChunksKeywordScored` 两处，别在别处再造一个计分公式。
- */
-export function rrfScore(rank: number, weight = 1): number {
-  return weight / (RRF_K + rank + 1)
-}
-
 /** 通道身份（P2 §二①）：该片是哪条通道召回的 */
 export type ChunkHitChannel = 'vector' | 'keyword' | 'both'
 
@@ -509,8 +479,7 @@ export interface ChunkHybridHit {
  *
  * W1 契约：本模块的 RRF 形态与本文件的 `RRF_K` / `HYBRID_CHANNEL_TOP_N` 同源
  * （两个常数原先借住在别处的共享底座模块，随 2026-09-14 拆解就地定义在唯一消费方）：
- * - 两通道都命中的片：RRF 分相加（关键词那一项已乘 `HYBRID_KEYWORD_WEIGHT`），
- *   distance 取向量通道真值，`channel='both'`
+ * - 两通道都命中的片：RRF 分相加，distance 取向量通道真值，`channel='both'`
  * - 纯关键词命中：`channel='keyword'`（distance 的内存态哨兵值见上）
  * - 通道容错：关键词通道空结果 / FTS 表缺失 → 结果即纯向量 topK（`channel='vector'`）
  *
@@ -540,12 +509,10 @@ export function searchChunksHybrid(
   }
   const scores = new Map<number, Scored>()
   vectorHits.forEach((row, i) => {
-    scores.set(row.id, { score: rrfScore(i), row, vectorRank: i, keywordRank: null })
+    scores.set(row.id, { score: 1 / (RRF_K + i + 1), row, vectorRank: i, keywordRank: null })
   })
   keywordHits.forEach((hit, i) => {
-    // 关键词通道乘通道权重（见 `HYBRID_KEYWORD_WEIGHT`）：修的是「两通道精度被假设
-    // 相等」这一融合层缺陷，不是调参——OR 只是把它暴露出来。
-    const kwScore = rrfScore(i, HYBRID_KEYWORD_WEIGHT)
+    const kwScore = 1 / (RRF_K + i + 1)
     const existing = scores.get(hit.id)
     if (existing) {
       existing.score += kwScore
@@ -577,9 +544,8 @@ export function searchChunksHybrid(
  * **同形状**，让「整趟嵌入挂了」的降级路径与混合路径在跨查询合并层拿到**同一种
  * 类型** ⇒ 合并逻辑零分支、零类型守卫。
  *
- * 分数公式与混合路径**同一条**（`rrfScore(rank)`，即 `1 / (RRF_K + rank + 1)`），但
- * **不乘 `HYBRID_KEYWORD_WEIGHT`**：降级路径没有向量通道可比，权重只会整体缩放同一
- * 通道内的分数，不改变通道内排序与跨查询合并的相对关系，乘了反而让读数多一个隐形旋钮。
+ * 分数公式与混合路径**同一条**（`1 / (RRF_K + rank_in_channel + 1)`，见
+ * `searchChunksHybrid` 的 `kwScore`）：降级路径只有关键词通道那一项，无需另立分支。
  *
  * ⚠️ 两条**明写禁止**（R1-b §三）——这是本函数**计分面**仅有的两条静默错误路径
  * （都表现为「结果悄悄错」而不抛错；本函数还产出 `vectorRank` / `channel` /
@@ -600,7 +566,7 @@ export function searchChunksKeywordScored(
 ): ChunkHybridHit[] {
   return searchChunksByKeyword(query, pool).map((hit, i) => ({
     row: { ...hit, distance: maxDistance },
-    rrfScore: rrfScore(i),
+    rrfScore: 1 / (RRF_K + i + 1),
     vectorRank: null,
     keywordRank: i,
     channel: 'keyword',

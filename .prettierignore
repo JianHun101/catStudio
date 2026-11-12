@@ -14,4 +14,4 @@ skills/design-taste-frontend/
 # 于是「提交进库的那一份」与「脚本再跑出来的那一份」不再逐字节相同——复跑必然
 # 产生 diff 噪声，而那种噪声的正确处理方式不是「认了」，是让生成物留在格式化面外。
 # 要改报告形态请改渲染函数（`renderReport`），改了重跑脚本即可。
-docs/eval/retrieval-baseline-*.md
+docs/eval/**/retrieval-baseline-*.md

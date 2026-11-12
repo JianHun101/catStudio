@@ -18,7 +18,7 @@
 `RETRIEVAL_REPO_MARKER`）——它缺席则报告目录解析不出来。另有多处硬编码路径引用本目录文件名。
 **要挪文件先扫消费面**，别按「目录整洁」的直觉动。
 
-## 文件清单（26 份，不含本 README）
+## 文件清单（17 份，不含本 README；回滚实验另见 `experiments/`）
 
 ### 记忆检索归因数据附录（2026-09-28）
 
@@ -75,23 +75,37 @@ cross-encoder 重排能否拿回 topK 放大才够得着的锚点**。生产链�
 产出脚本：`scripts/eval/retrieval-baseline.mjs`（pnpm `eval:retrieval:baseline`）。回答的问题：
 **多少**——黄金集的 recall 与阈值前命中率。
 
-| 文件                                                            | 一句话                                                                                                                                                                                            |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `retrieval-baseline-2026-09-19.md`                              | R10 首跑基线。语料 395 行/13 文档；real recall **0.5833**、constructed **0.8261**；未召回锚点**零处**被距离阈值杀。**本批无 `.json` 副产品**（该副产品 09-20 批才加）                             |
-| `retrieval-baseline-2026-09-20.md`                              | 同脚本重跑，语料 410 行/19 文档；两组 recall 与 09-19 **逐字相同**（语料增了但黄金集锚点面没变）                                                                                                  |
-| `retrieval-baseline-2026-09-20.json`                            | 同批读数的机器面，**评估中心「检索」tab 的取数口**（前端 `/api/eval/retrieval/*` 只读端点）                                                                                                       |
-| `retrieval-baseline-2026-11-12.md`                              | 黄金集 v2（59 条）基线。语料 755 行 / 45 文档；real recall **0.5588**（n=17）、constructed **0.8378**（n=37）；阈值前命中 0（阈值一条都没杀）；负例 5/5 判红；canary ✅。lessons 域首次进逐条明细 |
-| `retrieval-baseline-2026-11-12.json`                            | 同批读数的机器面，内含 `goldenData.meta`（`goldenRevision=2`、覆盖域 `adr 8 / lessons 13 / plans 7`、负例结论）与 `params.topK/topKSource`                                                        |
-| `retrieval-baseline-2026-11-12-fts-or.md` / `.json`             | FTS-1 首跑（分词器 v2 + OR，关键词通道未加权）。语料 755 行 / 45 文档；real 11/20、constructed 36/37、负例 5/5、阈值前 0。G41 两锚点被关键词宽匹配挤出融合池                                      |
-| `retrieval-baseline-2026-11-12-fts-or-and-control.md` / `.json` | FTS-1 返工对照臂：**查询侧改回 AND**（同一份 760 行重建索引）。real **12/20**、constructed 31/37、负例 5/5。回答「OR 之前水位」                                                                   |
-| `retrieval-baseline-2026-11-12-fts-or-w10-control.md` / `.json` | 同批对照臂：OR + 权重 1.0（= 首跑语义，换到 760 行索引复跑）。real 11/20、constructed 36/37，逐条与 `-fts-or` 一致                                                                                |
-| `retrieval-baseline-2026-11-12-fts-or-w08.md` / `.json`         | **本票主产物**：OR + 关键词通道 RRF 权重 0.8。real 11/20（G41 0/2 → 1/2，但 G09 1/1 → 0/1）、constructed 36/37 → 35/37。**硬门未过**，结论见对照说明                                              |
-| `retrieval-baseline-2026-11-12-fts-or-controls.md`              | 三臂对照说明：汇总表、AND↔OR 与 w=1.0↔w=0.8 的逐条 diff、G41 通道位次诊断、回滚建议                                                                                                               |
+| 文件                                 | 一句话                                                                                                                                                                                            |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retrieval-baseline-2026-09-19.md`   | R10 首跑基线。语料 395 行/13 文档；real recall **0.5833**、constructed **0.8261**；未召回锚点**零处**被距离阈值杀。**本批无 `.json` 副产品**（该副产品 09-20 批才加）                             |
+| `retrieval-baseline-2026-09-20.md`   | 同脚本重跑，语料 410 行/19 文档；两组 recall 与 09-19 **逐字相同**（语料增了但黄金集锚点面没变）                                                                                                  |
+| `retrieval-baseline-2026-09-20.json` | 同批读数的机器面，**评估中心「检索」tab 的取数口**（前端 `/api/eval/retrieval/*` 只读端点）                                                                                                       |
+| `retrieval-baseline-2026-11-12.md`   | 黄金集 v2（59 条）基线。语料 755 行 / 45 文档；real recall **0.5588**（n=17）、constructed **0.8378**（n=37）；阈值前命中 0（阈值一条都没杀）；负例 5/5 判红；canary ✅。lessons 域首次进逐条明细 |
+| `retrieval-baseline-2026-11-12.json` | 同批读数的机器面，内含 `goldenData.meta`（`goldenRevision=2`、覆盖域 `adr 8 / lessons 13 / plans 7`、负例结论）与 `params.topK/topKSource`                                                        |
 
-> `.json` 的消费面窄而硬：`routes/eval.ts` 的 `REPORT_FILE_RE` 认
-> `retrieval-baseline-<date>[-<variant>].json`——**同日多份只展示 `writtenAt` 最新那份**
-> （日期选择器只有日期一个维度，变体不单列）；改名或改前缀即从报告列表里消失。
+> `.json` 的消费面窄而硬：`routes/eval.ts` 的 `REPORT_FILE_RE` **只认**
+> `retrieval-baseline-<date>.json` 这一种文件名——改名或改前缀即从报告列表里消失。
 > v2 的 real 只有 **17 条 ⇒ 1 条 ≈ 5.9 个百分点**，别把 `0.5588` 当四位精度的结论。
+
+### 已回滚实验记录（`experiments/`，11 份）
+
+FTS-1 票（`feat/fts-or-tokenizer-v2`）的受控实验：关键词通道分词器 v2 + 查询侧 AND→OR +
+RRF 关键词权重 0.8。**结论是负的，整支已回滚**——`packages/` 与 `scripts/eval` 逐字节回到
+`77ebf86`，运行态与 dev 一致。本组产物只作**回滚依据**保留，**不是任何一天的正式基线**：
+`listRetrievalReports` 不递归子目录，评估中心扫不到 `experiments/`。
+
+| 文件                                                            | 一句话                                                                                                                                                                                       |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retrieval-baseline-2026-11-12-fts-or.md` / `.json`             | 首跑（分词器 v2 + OR，关键词通道未加权）。语料 **758 行** / 45 文档（temp 扫描副本）；real 11/20、constructed 36/37、负例 5/5、阈值前 0。G41 两锚点被关键词宽匹配挤出融合池                  |
+| `retrieval-baseline-2026-11-12-fts-or-and-control.md` / `.json` | 对照臂：**查询侧改回 AND**（760 行重建索引）。real **12/20**、constructed 31/37、负例 5/5。回答「OR 之前水位」                                                                               |
+| `retrieval-baseline-2026-11-12-fts-or-w10-control.md` / `.json` | 对照臂：OR + 权重 1.0（760 行）。real 11/20、constructed 36/37，逐条与首跑一致                                                                                                               |
+| `retrieval-baseline-2026-11-12-fts-or-w08.md` / `.json`         | 主实验臂：OR + 权重 0.8（760 行）。real 11/20（G41 0/2 → 1/2，G09 1/1 → 0/1）、constructed 35/37。**硬门未过，已回滚**                                                                       |
+| `retrieval-baseline-2026-11-12-fts-or-controls.md`              | 三臂汇总表、AND↔OR 与 w=1.0↔w=0.8 的逐条 diff、G41 通道位次诊断、回滚建议；含「单查询 vector rank 推不出跨查询合并后的节排名」这条机制修正                                                   |
+| `retrieval-baseline-2026-11-12-rollback-verify.md` / `.json`    | **回滚后复核**（代码逐字节回到 `77ebf86`、索引按 bigram 重扫）。759 行 / 45 文档；real **12/20**（集均 0.5588）、constructed **31/37**、负例 5/5、阈值前 0、canary ✅。证明回滚回到 dev 水位 |
+
+> **同一天这批产物的语料不是一个**：首跑是 **758 行**临时副本，三臂是 **760 行**分支库，
+> 回滚复核是 **759 行**（按当前文档重扫 2 篇）。**11/20 与 12/20 只能在 760 那三臂内部比**，
+> 不能拿首跑或回滚复核直接对；回滚复核只用于回答「回到 dev 水位了吗」。
 
 ### 黄金集本体
 

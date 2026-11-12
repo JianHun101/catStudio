@@ -22,7 +22,7 @@ import {
   sessions as sessionsRepo,
   messages as messagesRepo,
 } from '../db/repository/index.js'
-import { ftsTokenize } from '../db/repository/fts.js'
+import { bigramTokenize } from '../db/repository/fts.js'
 import { resetRetrievalTopK, setRetrievalTopK } from '../config/retrieval.js'
 import { getLogLevel, setLogLevel } from '../logger.js'
 import type { EmbedResult } from './embedding-client.js'
@@ -82,7 +82,7 @@ function seedChunk(opts: {
   })
   getDb()
     .prepare('INSERT INTO chunks_fts (rowid, content) VALUES (?, ?)')
-    .run(id, ftsTokenize(`${opts.body} ${breadcrumb}`).join(' '))
+    .run(id, bigramTokenize(`${opts.body} ${breadcrumb}`).join(' '))
   getDb()
     .prepare('INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)')
     .run(BigInt(id), memoryModule.vectorToBlob(vecAt(opts.angle)))
