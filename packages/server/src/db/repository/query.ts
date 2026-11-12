@@ -7,7 +7,8 @@
  *   2. 列名白名单 = 返回列白名单（一套表定义两用）——conditions.column 必须 ∈
  *      该表可查列，校验后双引号包裹；SELECT 只投影白名单列
  *   3. 敏感列硬剔除：agents 排除 llm_api_key / llm_base_url / system_prompt
- *      （密钥绝不能进模型视野）；knowledge 排除 embedding BLOB
+ *      （密钥绝不能进模型视野）；sessions 排除 running_summary（B-5：整会话
+ *      对话摘要，跨会话读取没有正当场景）；knowledge 排除 embedding BLOB
  *      （512-dim 向量与检索语义无关且体积大）；value 全部 `?` 参数化绑定
  *      （memories 表已随段三接线下线，不再在白名单内）
  *
@@ -23,6 +24,7 @@
  *     候选与回表两个函数见 `getMessageQueryCandidates` / `getMessageQueryRowsByIds`
  *   - B-3 起 `queryTable` 对 messages 直接 throw：本函数不再提供无可见性过滤的
  *     全量读口，messages 必须走端点那两条闭合函数（候选 SQL 已排除 role=system）
+ *   - B-5 起回表 SQL 也排除 role=system：读层兜底，防绕过候选直调把 system 通告读出
  */
 import type Database from 'better-sqlite3'
 
@@ -74,7 +76,6 @@ const QUERY_TABLE_SCHEMAS_DEF = {
       'title',
       'agent_ids',
       'broadcast_mode',
-      'running_summary',
       'handoff_from',
       'summary_msg_id',
       'created_at',
@@ -296,6 +297,8 @@ export function getMessageQueryCandidates(
  *
  * 可见性过滤后只对最终一页的 id 回表，避免把不可见行的正文读出内存；
  * 同时二次限定 `session_id`，即使调用方拿别的会话 id 也取不到。
+ * `role != 'system'` 是读层兜底（与候选 SQL、`getSessionMessagesRange` 同口径）：
+ * 调用方目前只传候选 id，但绕过候选直调本函数也不该把 system 通告读出来。
  */
 export function getMessageQueryRowsByIds(
   sessionId: string,
@@ -307,7 +310,7 @@ export function getMessageQueryRowsByIds(
   const rows = db
     .prepare(
       `SELECT ${schema.columns.join(', ')} FROM messages
-       WHERE session_id = ? AND id IN (${placeholders})`
+       WHERE session_id = ? AND role != 'system' AND id IN (${placeholders})`
     )
     .all(sessionId, ...ids) as Record<string, string | number | null>[]
   const byId = new Map(rows.map((r) => [String(r.id), r]))
