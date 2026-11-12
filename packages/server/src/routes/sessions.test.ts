@@ -888,4 +888,248 @@ describe('Session Routes', () => {
       })
     })
   })
+
+  // ─── 右栏历史面板：facets / search（两个只读端点）───────────────
+
+  describe('GET /api/sessions/:id/messages/facets', () => {
+    let sid = ''
+
+    const seed = (
+      id: string,
+      role: 'user' | 'agent' | 'system',
+      content: string,
+      createdAt: string,
+      agentId: string | null = null
+    ) => {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+           VALUES (?, ?, ?, ?, ?, '[]', ?)`
+        )
+        .run(id, sid, agentId, role, content, createdAt)
+    }
+
+    beforeEach(async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '历史 facets', agentIds: [agentId1] },
+      })
+      sid = JSON.parse(create.body).id
+      seed('f1', 'user', '晚间', '2026-11-12T22:30:00.000Z')
+      seed('f2', 'agent', '清晨', '2026-11-12T01:00:00.000Z', agentId1)
+      seed('f3', 'system', '重启完成', '2026-11-01T03:00:00.000Z')
+    })
+
+    it('UTC 22:30 在 tzOffset=480 落 11-13、在 0 落 11-12；days DESC；total 含 system', async () => {
+      const sh = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/facets?tzOffset=480`,
+      })
+      expect(sh.statusCode).toBe(200)
+      expect(JSON.parse(sh.body)).toEqual({
+        total: 3,
+        days: [
+          { date: '2026-11-13', count: 1 },
+          { date: '2026-11-12', count: 1 },
+          { date: '2026-11-01', count: 1 },
+        ],
+        months: [{ month: '2026-11' }],
+      })
+
+      const utc = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/facets?tzOffset=0`,
+      })
+      const body = JSON.parse(utc.body)
+      expect(body.days[0]).toEqual({ date: '2026-11-12', count: 2 })
+      expect(body.total).toBe(3)
+    })
+
+    it('边界：9999 clamp 到 840；非数字 → 400 且 reason 可诊断', async () => {
+      const clamped = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/facets?tzOffset=9999`,
+      })
+      const at840 = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/facets?tzOffset=840`,
+      })
+      expect(clamped.statusCode).toBe(200)
+      expect(JSON.parse(clamped.body)).toEqual(JSON.parse(at840.body))
+
+      const bad = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/facets?tzOffset=abc`,
+      })
+      expect(bad.statusCode).toBe(400)
+      expect(JSON.parse(bad.body).error).toContain('tzOffset')
+    })
+
+    it('会话不存在 → 404', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/sessions/nonexistent/messages/facets',
+      })
+      expect(res.statusCode).toBe(404)
+    })
+  })
+
+  describe('GET /api/sessions/:id/messages/search', () => {
+    let sid = ''
+
+    const seed = (
+      id: string,
+      role: 'user' | 'agent' | 'system',
+      content: string,
+      createdAt: string,
+      agentId: string | null = null
+    ) => {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+           VALUES (?, ?, ?, ?, ?, '[]', ?)`
+        )
+        .run(id, sid, agentId, role, content, createdAt)
+    }
+
+    beforeEach(async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '历史 search', agentIds: [agentId1, agentId2] },
+      })
+      sid = JSON.parse(create.body).id
+      seed('q1', 'user', '进度 100% 了', '2026-11-10T10:00:00.000Z')
+      seed('q2', 'user', '进度 100x 了', '2026-11-10T10:01:00.000Z')
+      seed('q3', 'agent', '文件 a_b 已生成', '2026-11-10T10:02:00.000Z', agentId1)
+      seed('q4', 'user', '文件 axb 不存在', '2026-11-10T10:03:00.000Z')
+      seed('q5', 'agent', '路径 C:\\tmp 可用', '2026-11-10T10:04:00.000Z', agentId2)
+      seed('q6', 'user', '路径 C:tmp 不存在', '2026-11-10T10:05:00.000Z')
+    })
+
+    it('q 校验：缺失 / 空白 / 201 字符 → 400 且 reason 可诊断', async () => {
+      const missing = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search`,
+      })
+      expect(missing.statusCode).toBe(400)
+      expect(JSON.parse(missing.body).error).toContain('q')
+
+      const blank = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent('   ')}`,
+      })
+      expect(blank.statusCode).toBe(400)
+
+      const long = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search?q=${'x'.repeat(201)}`,
+      })
+      expect(long.statusCode).toBe(400)
+      expect(JSON.parse(long.body).error).toContain('200')
+    })
+
+    it('limit 夹取：0 → 1；1000 → 100', async () => {
+      for (let i = 0; i < 120; i++) {
+        const hh = String(i % 24).padStart(2, '0')
+        const ss = String(i % 10).padStart(2, '0')
+        seed(`many-${i}`, 'user', `批量命中 ${i}`, `2026-11-11T${hh}:00:${ss}.000Z`)
+      }
+      const one = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent('批量命中')}&limit=0`,
+      })
+      expect(JSON.parse(one.body).rows).toHaveLength(1)
+
+      const capped = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent('批量命中')}&limit=1000`,
+      })
+      const cappedBody = JSON.parse(capped.body)
+      expect(cappedBody.rows).toHaveLength(100)
+      expect(cappedBody.total).toBe(120)
+    })
+
+    it('转义语料：100% / a_b / C:\\tmp 都只命中字面量', async () => {
+      const ids = async (q: string) => {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent(q)}`,
+        })
+        return JSON.parse(res.body).rows.map((r: any) => r.id)
+      }
+      expect(await ids('100%')).toEqual(['q1'])
+      expect(await ids('a_b')).toEqual(['q3'])
+      expect(await ids('C:\\tmp')).toEqual(['q5'])
+    })
+
+    it('total 不受 before 影响（rows 变少、total 不变）；limit=1 时 total 仍全量', async () => {
+      const all = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent('文件')}`,
+      })
+      expect(JSON.parse(all.body).total).toBe(2)
+
+      const before = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent('文件')}&before=q4`,
+      })
+      const beforeBody = JSON.parse(before.body)
+      expect(beforeBody.rows.map((r: any) => r.id)).toEqual(['q3'])
+      expect(beforeBody.total).toBe(2)
+
+      const limited = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent('文件')}&limit=1`,
+      })
+      const limitedBody = JSON.parse(limited.body)
+      expect(limitedBody.rows).toHaveLength(1)
+      expect(limitedBody.total).toBe(2)
+    })
+
+    it('投影逐字一致：同一条消息在 /messages 与 /search 的键集与值完全相等', async () => {
+      getDb()
+        .prepare(
+          `INSERT INTO messages
+             (id, session_id, agent_id, role, content, mentions, images, thinking_content, tool_content, task_id, created_at)
+           VALUES ('proj-1', ?, ?, 'agent', '带全字段的回复', '["店长阿暹"]', '["data:image/png;base64,AAA"]',
+                   '想过', '[{"id":"c1","name":"t","status":"completed"}]', 'task-1', '2026-11-10T11:00:00.000Z')`
+        )
+        .run(sid, agentId1)
+
+      const list = JSON.parse(
+        (await app.inject({ method: 'GET', url: `/api/sessions/${sid}/messages` })).body
+      ) as any[]
+      const search = JSON.parse(
+        (
+          await app.inject({
+            method: 'GET',
+            url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent('带全字段')}`,
+          })
+        ).body
+      ).rows as any[]
+
+      const a = list.find((m) => m.id === 'proj-1')!
+      const b = search.find((m) => m.id === 'proj-1')!
+      expect(b).toEqual(a)
+      expect(Object.keys(b).sort()).toEqual(Object.keys(a).sort())
+      expect(b.images).toEqual(['data:image/png;base64,AAA'])
+      expect(b.taskId).toBe('task-1')
+    })
+
+    it('会话不存在 → 404；before 为空串 → 400', async () => {
+      const missing = await app.inject({
+        method: 'GET',
+        url: '/api/sessions/nonexistent/messages/search?q=x',
+      })
+      expect(missing.statusCode).toBe(404)
+
+      const emptyBefore = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/search?q=文件&before=`,
+      })
+      expect(emptyBefore.statusCode).toBe(400)
+    })
+  })
 })

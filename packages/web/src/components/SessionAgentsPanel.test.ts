@@ -17,6 +17,10 @@ vi.mock('@/composables/useApi', () => ({
     getSessionTraces: vi.fn(),
     getEvalSpans: vi.fn(),
     updateSessionAgents: vi.fn(),
+    // C-2：右栏「历史」页的数据源（切页时子组件会拉）
+    getSessionMessageFacets: vi.fn(),
+    getSessionMessages: vi.fn(),
+    searchSessionMessages: vi.fn(),
   },
 }))
 
@@ -265,6 +269,12 @@ describe('SessionAgentsPanel R4 · 弱化卡与内联 trace', () => {
       execId === 'e1' ? { ok: true, spans: spansFixture } : { ok: true, spans: [] }
     )
     vi.mocked(api.updateSessionAgents).mockResolvedValue({ ok: true } as never)
+    vi.mocked(api.getSessionMessageFacets).mockResolvedValue({
+      total: 0,
+      days: [],
+      months: [],
+    })
+    vi.mocked(api.getSessionMessages).mockResolvedValue([])
   })
 
   async function mountPanel(): Promise<VueWrapper> {
@@ -575,5 +585,93 @@ describe('SessionAgentsPanel R4 · 弱化卡与内联 trace', () => {
   it('B·改 AC8 emoji 零替换：面板不新增 SVG，头像仍读 agent.avatar', () => {
     expect(source).not.toContain('<svg')
     expect(source).toContain('{{ agent.avatar }}')
+  })
+})
+
+// ─── C-2：右栏两页（成员 / 历史，同列切 tab）─────────────────────────
+
+describe('SessionAgentsPanel C-2 · 成员 / 历史 同列切页', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 'S', agentIds: ['a1'], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = [{ id: 'a1', name: '店长', avatar: '🐱' }] as never
+    vi.mocked(api.getSessionTraces).mockResolvedValue({ ok: true, traces: [] })
+    vi.mocked(api.getSessionMessageFacets).mockResolvedValue({
+      total: 0,
+      days: [],
+      months: [],
+    })
+    vi.mocked(api.getSessionMessages).mockResolvedValue([])
+  })
+
+  async function mountPanel(): Promise<VueWrapper> {
+    const wrapper = mount(SessionAgentsPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    return wrapper as VueWrapper
+  }
+
+  it('默认成员页；点「历史」切页：历史占满同一栏、页脚（广播开关）隐藏', async () => {
+    const wrapper = await mountPanel()
+    expect(wrapper.find('.right-body').exists()).toBe(true)
+    expect(wrapper.find('.session-history-panel').exists()).toBe(false)
+
+    const tabs = wrapper.findAll('.panel-tab')
+    expect(tabs.map((t) => t.text().replace(/\s+/g, ' '))).toEqual(['成员 · 1', '历史'])
+    await tabs[1].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.session-history-panel').exists()).toBe(true)
+    expect(wrapper.find('.right-body').exists()).toBe(false)
+    // 历史页隐藏底部广播开关（它是成员区的操作）
+    expect(wrapper.find('.panel-footer').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('Esc 不响应、无关闭按钮；切回成员页后广播开关回来', async () => {
+    const wrapper = await mountPanel()
+    await wrapper.findAll('.panel-tab')[1].trigger('click')
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(wrapper.find('.session-history-panel').exists()).toBe(true)
+    expect(wrapper.findAll('.panel-tab')[1].classes()).toContain('on')
+
+    await wrapper.findAll('.panel-tab')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.panel-footer').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('Ctrl+K 开历史页；顶部 🔍 同效', async () => {
+    const wrapper = await mountPanel()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))
+    await flushPromises()
+    expect(wrapper.find('.session-history-panel').exists()).toBe(true)
+
+    await wrapper.findAll('.panel-tab')[0].trigger('click')
+    await flushPromises()
+    await wrapper.find('.head-search').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.session-history-panel').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('宽度不变：面板根不设宽、历史页 width:100%；App.vue 仍只挂本面板（列宽由 App 的 grid 决定）', () => {
+    const panelRoot = /\.session-agents-panel\s*\{([^}]*)\}/.exec(source)?.[1] ?? ''
+    expect(panelRoot).not.toMatch(/(^|[\s;])width:/)
+    // 历史页挂在本面板内（不是新列 / 新浮层）
+    expect(source).toContain('SessionHistoryPanel')
+    expect(source).toContain('v-if="activeTab === \'history\'"')
   })
 })
