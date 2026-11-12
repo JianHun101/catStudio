@@ -9,8 +9,8 @@
 | --- | --- |
 | 报告 schema | 1 |
 | 库路径 | `D:\Game\ai\catStudy\packages\server\data\cat-study-dev.db` |
-| chunks 行数 / doc_path 数 | 755 / 45 |
-| 黄金集 | `D:\Game\ai\catStudy-sessions\7531d744-ds猫\docs\eval\retrieval-golden.json`（version=1，entries=59：real=17 / constructed=37 / negative=5） |
+| chunks 行数 / doc_path 数 | 771 / 45 |
+| 黄金集 | `D:\Game\ai\catStudy\docs\eval\retrieval-golden.json`（version=1，entries=59：real=17 / constructed=37 / negative=5） |
 | 黄金集冻结基点 | `0dc33fbb9012b543a23a775129fe9630732ed375` |
 | 语料新鲜度（golden-check） | liveDocs=45，rotten=0 |
 | 索引新鲜度（`chunks.origin_id` vs 工作树 `git hash-object`） | 45/45 份同步（stale=0） |
@@ -29,71 +29,78 @@
 
 > 「集均」= 各条算术平均（票面 §一 口径）；「合计」= 总命中 / 总应命中（micro，防长条目被短条目稀释）。阈值前命中率 = `expect` 里**被距离阈值（0.6）挡下**的节占比，来源 = 探针池 + 逐查询重搜补测（探针池只取**首个嵌入成功的查询**，光靠它看不见改写查询那条路上的阈值拦截）。
 
-> **未召回锚点读数**（「阈值该不该松」的直接证据；本次逐查询重搜覆盖 **15** 条条目）：未进注入集 **15** 处，其中 **12** 处取到真实向量距离（流水自带 8 处 + 重搜补测 4 处，后者取其各查询池内的**最小**距离 = 它最好的一次机会）、**最大 0.4968**（出处见明细行 `dist=`）。距离 ≥ 阈值的有 **0** 处 ⇒ **阈值一条都没杀**，松阈值救不回任何一条未召回锚点——瓶颈在融合 topK 排序与真实覆盖洞。连重搜（阈值放宽到 1）都够不着的 **3** 处 = 真覆盖洞。
+> **未召回锚点读数**（「阈值该不该松」的直接证据；本次逐查询重搜覆盖 **15** 条条目，另对未命中锚点做**宽向量召回 top-200**）：未进注入集 **15** 处，其中 **15** 处取到真实向量距离（流水自带 8 处 + 重搜补测 3 处 + 宽召回补测 4 处，后两者取其各查询池内的**最小**距离 = 它最好的一次机会）、**最大 0.4998**（出处见明细行 `dist=` / `bestDist=`）。距离 ≥ 阈值的有 **0** 处（不含池外条目）⇒ **阈值一条都没杀**——瓶颈不在阈值，本次也**没有真覆盖洞**（`corpus-absent` 0 处）：全部未命中都是排序/名额截断（池外 4 处）——补语料救不了。
+
+| 状态 | 处数 | bestRank | bestDist | windowN |
+| --- | --- | --- | --- | --- |
+| outside-window | 4 | 23 / 151 / 43 / 28 | 0.4998 / 0.3881 / 0.4848 / 0.4448 | 20 |
+| corpus-absent | 0 | — | — | — |
+
+> **池外 ≠ 覆盖洞**：`outside-window` = 该节**在库**、`bestDist` 在阈值内（或窗口是更紧的约束），但全库 `bestRank` ≥ `windowN`（每查询融合池出口 = `HYBRID_POOL_PER_QUERY` 片）——补语料救不了它，要先改排序，或把池/名额扩到覆盖它的名次。`corpus-absent` = `chunks` 表按 `(doc_path, section_anchor)` **查无此节**，才是真覆盖洞。`bestRank` 是宽向量召回列表的**下标（0 起）**，与重搜的 `rank` 同口径；`>N` = 宽召回边界外（名次只会更后，仍属池外）；「宽召回未返回」= 该锚点没出现在宽召回结果里（超过 top-N 或最小距离 ≥ 宽召回阈值），此时**不给名次**。
 
 ## 三、逐条明细 — real
 
-| id | reason | 应命中 | 命中 | recall | 阈值前命中 | 未进注入集的锚点（归因） |
-| --- | --- | --- | --- | --- | --- | --- |
-| G01 | ok | 1 | 1 | 1.0000 | 0 | — |
-| G02 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.6 检索（`searchChunksHybrid`）（not-recalled） |
-| G03 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/memory-flywheel.md :: 4. 票单全表（14 张，全部收口）（not-recalled） |
-| G04 | ok | 1 | 1 | 1.0000 | 0 | — |
-| G05 | ok | 1 | 1 | 1.0000 | 0 | — |
-| G06 | ok | 1 | 1 | 1.0000 | 0 | — |
-| G07 | ok | 1 | 1 | 1.0000 | 0 | — |
-| G08 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/episode-evaluation-v2.md :: 6. 实施拆活（审 ✅ 后派）（not-recalled） |
-| G09 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/episode-evaluation-v2.md :: 4. closure 状态机 + 改进闭环（below_topk q1 rank=18 dist=0.4898） |
-| G10 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/review-chain-anchor.md :: 一、问题陈述 > 一个时序事实（决定了兜底放哪）（below_topk q1 rank=4 dist=0.3913） |
-| G11 | ok | 1 | 1 | 1.0000 | 0 | — |
-| G12 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/review-chain-anchor.md :: 三、用户故事（not_topk dist=0.2920） |
-| G41 | ok | 2 | 2 | 1.0000 | 0 | — |
-| G42 | ok | 1 | 1 | 1.0000 | 0 | — |
-| G43 | ok | 1 | 0 | 0.0000 | 0 | docs/lessons/silent-no-op-changes.md :: 形态③：配置写在了已不消费的键位上（not_topk dist=0.4968） |
-| G44 | ok | 2 | 2 | 1.0000 | 0 | — |
-| G45 | ok | 2 | 1 | 0.5000 | 0 | docs/plans/eval-system.md :: 4. 记忆检索的采集：三表（not_topk dist=0.4551） |
+| id | reason | 应命中 | 命中 | recall | 阈值前命中 | 未进注入集的锚点（归因） | 池外读数（bestRank / bestDist / windowN） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| G01 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| G02 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.6 检索（`searchChunksHybrid`）（outside-window dist=0.4998） | 23 / 0.4998 / 20 |
+| G03 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/memory-flywheel.md :: 4. 票单全表（14 张，全部收口）（outside-window dist=0.3881） | 151 / 0.3881 / 20 |
+| G04 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| G05 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| G06 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| G07 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| G08 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/episode-evaluation-v2.md :: 6. 实施拆活（审 ✅ 后派）（outside-window dist=0.4848） | 43 / 0.4848 / 20 |
+| G09 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/episode-evaluation-v2.md :: 4. closure 状态机 + 改进闭环（outside-window dist=0.4448） | 28 / 0.4448 / 20 |
+| G10 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/review-chain-anchor.md :: 一、问题陈述 > 一个时序事实（决定了兜底放哪）（below_topk q1 rank=4 dist=0.3913） | — |
+| G11 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| G12 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/review-chain-anchor.md :: 三、用户故事（not_topk dist=0.2920） | — |
+| G41 | ok | 2 | 2 | 1.0000 | 0 | — | — |
+| G42 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| G43 | ok | 1 | 0 | 0.0000 | 0 | docs/lessons/silent-no-op-changes.md :: 形态③：配置写在了已不消费的键位上（not_topk dist=0.4968） | — |
+| G44 | ok | 2 | 2 | 1.0000 | 0 | — | — |
+| G45 | ok | 2 | 1 | 0.5000 | 0 | docs/plans/eval-system.md :: 4. 记忆检索的采集：三表（not_topk dist=0.4551） | — |
 
 ## 四、逐条明细 — constructed
 
-| id | reason | 应命中 | 命中 | recall | 阈值前命中 | 未进注入集的锚点（归因） |
-| --- | --- | --- | --- | --- | --- | --- |
-| C01 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C02 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C03 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C05 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C06 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C07 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C08 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C09 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C10 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C11 | ok | 1 | 0 | 0.0000 | 0 | docs/adr/0013-c3-outbound-bus-not-adopted.md :: #tombstone（not_topk dist=0.4504） |
-| C12 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C13 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C14 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C15 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C16 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C18 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C19 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C20 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C21 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C23 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C24 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.3 扫描器（`scripts/flywheel/scan.mjs`）（below_topk q1 rank=3 dist=0.4662） |
-| C26 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C27 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C41 | ok | 1 | 0 | 0.0000 | 0 | docs/lessons/distance-threshold-cannot-separate-relevance.md :: 正解（not_topk dist=0.3942） |
-| C42 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C43 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C44 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C45 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C46 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C47 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C48 | ok | 1 | 0 | 0.0000 | 0 | docs/lessons/family-boundary-by-failure-mechanism.md :: 机制（not_topk dist=0.4513） |
-| C49 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C50 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C51 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C52 | ok | 1 | 0 | 0.0000 | 0 | docs/lessons/criterion-blind-spot-looks-like-truth.md :: 通则（not_topk dist=0.3923） |
-| C53 | ok | 1 | 1 | 1.0000 | 0 | — |
-| C54 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/eval-system.md :: 6. 检索评估尺：黄金集与跑批（below_topk q3 rank=2 dist=0.4100） |
+| id | reason | 应命中 | 命中 | recall | 阈值前命中 | 未进注入集的锚点（归因） | 池外读数（bestRank / bestDist / windowN） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| C01 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C02 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C03 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C05 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C06 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C07 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C08 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C09 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C10 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C11 | ok | 1 | 0 | 0.0000 | 0 | docs/adr/0013-c3-outbound-bus-not-adopted.md :: #tombstone（not_topk dist=0.4504） | — |
+| C12 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C13 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C14 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C15 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C16 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C18 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C19 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C20 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C21 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C23 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C24 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/memory-flywheel.md :: 2. 主链形态（七段，逐段钉死） > 2.3 扫描器（`scripts/flywheel/scan.mjs`）（below_topk q1 rank=3 dist=0.4662） | — |
+| C26 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C27 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C41 | ok | 1 | 0 | 0.0000 | 0 | docs/lessons/distance-threshold-cannot-separate-relevance.md :: 正解（not_topk dist=0.3942） | — |
+| C42 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C43 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C44 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C45 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C46 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C47 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C48 | ok | 1 | 0 | 0.0000 | 0 | docs/lessons/family-boundary-by-failure-mechanism.md :: 机制（not_topk dist=0.4513） | — |
+| C49 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C50 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C51 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C52 | ok | 1 | 0 | 0.0000 | 0 | docs/lessons/criterion-blind-spot-looks-like-truth.md :: 通则（not_topk dist=0.3923） | — |
+| C53 | ok | 1 | 1 | 1.0000 | 0 | — | — |
+| C54 | ok | 1 | 0 | 0.0000 | 0 | docs/plans/eval-system.md :: 6. 检索评估尺：黄金集与跑批（below_topk q3 rank=1 dist=0.3902） | — |
 
 ## 五、负例判红清单
 
@@ -120,9 +127,9 @@
 
 | 归因 | 处数 | 药方 |
 | --- | --- | --- |
-| not_topk | 8 | 调 topK 或看排序（探针池里过闸了，但没进融合 topK） |
-| below_topk | 4 | 调 topK 或调池深（被某条查询召回过、也过了阈值，输在跨查询合并后的 topK 截断——与 not_topk 同药方，只是发现路径不同） |
-| not-recalled | 3 | **覆盖洞**（任何一条查询的融合池都够不着，阈值放宽到 1 也一样）——先补语料/补锚点，不是调参能救的 |
+| not_topk | 8 | 调 topK 或看排序/池深（距离已过闸，但没进融合 topK 或每查询融合池——探针池与宽召回两个发现路径同药方） |
+| below_topk | 3 | 调 topK 或调池深（被某条查询召回过、也过了阈值，输在跨查询合并后的 topK 截断——与 not_topk 同药方，只是发现路径不同） |
+| outside-window | 4 | **池外**（该节在库、`bestDist` 在阈值内或窗口更紧，但全库 `bestRank` ≥ 池窗口 `HYBRID_POOL_PER_QUERY`）——补语料救不了；改排序，或把池/名额扩到覆盖它的名次 |
 
 > 未召回归因合计 15 **处**（全部落在已登记值域内）。**口径**：含负例条目的 `expect` 锚点——§ 三 的两张明细表只列 real / constructed，故两张表的未命中数之和会小于本表的合计（差额 = 负例的未命中）。计数单位 = **(条目, 锚点) 对**，去重后 15 个不同锚点。
 

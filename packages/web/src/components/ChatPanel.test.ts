@@ -2330,6 +2330,43 @@ describe('C-1 消息流懒加载', () => {
     expect(store.hasMoreOlder).toBe(false)
   })
 
+  it('重试按钮刻意不补偿滚动锚定（点按钮即看更早内容，视口停在原处）', async () => {
+    const store = setup()
+    store.hasMoreOlder = true
+    const { container, el } = await mountPanel()
+    pin(el, { scrollTop: 800, scrollHeight: 1000, clientHeight: 400 })
+    await container.trigger('scroll') // 建立上次读数 800（不触发）
+
+    loadSpy().mockRejectedValueOnce(new Error('Failed to fetch'))
+    pin(el, { scrollTop: 200 })
+    await container.trigger('scroll')
+    await flushPromises()
+    const retry = wrapper!.find('.older-status-error')
+    expect(retry.exists()).toBe(true)
+
+    // 重试成功：前插 50 条让内容高度从 1000 长到 1400；按钮路径**不**补 scrollTop
+    loadSpy().mockImplementationOnce(async () => {
+      pin(el, { scrollHeight: 1400 })
+      return [
+        {
+          id: 'm0',
+          sessionId: 's1',
+          agentId: null,
+          role: 'user',
+          content: '更早一条',
+          mentions: [],
+          createdAt: '2025-12-31T23:59:59.000Z',
+        } as Message,
+      ]
+    })
+    const beforeTop = el.scrollTop
+    await retry.trigger('click')
+    await flushPromises()
+
+    expect(el.scrollTop).toBe(beforeTop)
+    expect(store.messages[0].id).toBe('m0')
+  })
+
   it('顺序：翻页请求 pending 期间贴底判定已更新（新消息显示「N 条新消息」，不抢滚动条）', async () => {
     const store = setup()
     store.hasMoreOlder = true
