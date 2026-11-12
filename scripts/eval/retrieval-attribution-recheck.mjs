@@ -796,6 +796,17 @@ function anchorShort(anchor) {
 }
 
 /**
+ * §一 的「参数生效值 / 来源」行。
+ *
+ * `topKSource` 是 JSON 报告的新键：旧报告 / 旧 ctx 没有它 ⇒ 渲染 `n/a`，不把 absence
+ * 当成某个具体来源。抽成导出的纯函数是为了让「缺字段 → n/a」「有值 → 原样」两条分支
+ * 都能真断言（静态 grep `?? 'n/a'` 测不到分支行为）。
+ */
+export function renderParamSourceRow({ maxDistance, topK, topKSource }) {
+  return `| MEMORY_MAX_DISTANCE / TOP_K（生效值 / 来源） | ${maxDistance} / ${topK} / ${topKSource ?? 'n/a'} |`
+}
+
+/**
  * 渲染诊断报告（Markdown）。纯函数——同输入必同输出（`--date` 注入日期）。
  *
  * ⚠️ 每次读数都必须带上**它是怎么来的**（真跑 / 重建）：两类读数混在一张表里
@@ -857,9 +868,7 @@ export function renderDiagnosis(ctx) {
       .map(([k, v]) => `${k}=${v}`)
       .join(' / ')}） |`
   )
-  L.push(
-    `| MEMORY_MAX_DISTANCE / TOP_K（生效值 / 来源） | ${params.maxDistance} / ${params.topK} / ${params.topKSource ?? 'n/a'} |`
-  )
+  L.push(renderParamSourceRow(params))
   // 端口**号**不进报告（每跑一个随机值，写进去就破「同输入同输出」）——与 baseline 同款：
   // 只报**供给形态**与「有没有真握手」，不报那个数。
   L.push(
