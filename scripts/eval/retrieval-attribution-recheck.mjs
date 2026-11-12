@@ -1116,7 +1116,7 @@ export function renderDiagnosis(ctx) {
   L.push('### 6.1 `MEMORY_TOP_K`（**真跑链段**，端到端读数）')
   L.push('')
   L.push(
-    '| MEMORY_TOP_K | real recall | constructed recall | 恢复的未召回锚点 | **受影响条目平均注入节数** | 全 40 条新增注入节 | **预算截断条目** |'
+    `| MEMORY_TOP_K | real recall | constructed recall | 恢复的未召回锚点 | **受影响条目平均注入节数** | 全 ${goldenEntries} 条新增注入节 | **预算截断条目** |`
   )
   L.push('| --- | --- | --- | --- | --- | --- | --- |')
   for (const row of topkReal) {
@@ -1129,7 +1129,7 @@ export function renderDiagnosis(ctx) {
     '> **代价面**：`MEMORY_TOP_K` 是**全局**旋钮——它同时抬高每一次检索的注入节数，' +
       '而注入预算 `MEMORY_CONTEXT_TOKEN_BUDGET` 是硬上限。' +
       `「受影响条目平均注入节数」与 §6.3 的选择器变体**同分母**（都只数本次漏检那 ${anchors.length} 条所属的条目），可直接比性价比；` +
-      '「全 40 条新增注入节」是全局成本面；**「预算截断条目」逐档实测**——>0 即说明该档的收益开始被预算吃掉' +
+      `「全 ${goldenEntries} 条新增注入节」是全局成本面；**「预算截断条目」逐档实测**——>0 即说明该档的收益开始被预算吃掉` +
       '（生产档是 ' +
       budget.truncatedEntries +
       ' 条）。'
@@ -1156,7 +1156,7 @@ export function renderDiagnosis(ctx) {
       '「前 `MEMORY_TOP_K` 个**不同节**」），故「实际注入节数 < `MEMORY_TOP_K`」只可能来自' +
       `**融合池里不同节本身不足 ${params.topK}**` +
       '——不再是「同节多片占掉名额」。' +
-      `本批 40 条里，注入节数 < ${params.topK} 的有 **${spec.slotWaste.length}** 条` +
+      `本批 ${goldenEntries} 条里，注入节数 < ${params.topK} 的有 **${spec.slotWaste.length}** 条` +
       (spec.slotWaste.length > 0
         ? `（${spec.slotWaste.map((w) => `${w.entryId}:${w.sections}`).join(' / ')}）`
         : '')
@@ -1408,6 +1408,8 @@ export async function main(argv = process.argv.slice(2)) {
     process.stderr.write(`[eval:retrieval:recheck] 读不到黄金集 ${goldenFile}: ${msgOf(err)}\n`)
     return 2
   }
+  // 报告里的「全 N 条」逐处从这里派生——写死条数在黄金集扩集后会变成陈旧报价（v2：40 → 59）。
+  const goldenEntries = goldenData.entries.length
 
   const dbPath = path.resolve(
     args.db ?? path.join(root, 'packages/server', 'data', 'cat-study-dev.db')
@@ -2519,7 +2521,7 @@ export async function main(argv = process.argv.slice(2)) {
         const prodAvg = topkReal.find((r) => r.isProduction)?.avgSectionsAffected
         return (
           `**读数**：本条在 T3 时是**重建读数**，现已在生产落地（W2-c/T4，\`memory/index.ts\`）⇒ 本节改读**落地后**。` +
-          `落地后实注入节数 < ${topK} 的只剩 **${waste}** 条（40 条中；成因见 §6.3 首段，已不是「同节多片占名额」）。` +
+          `落地后实注入节数 < ${topK} 的只剩 **${waste}** 条（${goldenEntries} 条中；成因见 §6.3 首段，已不是「同节多片占名额」）。` +
           `重建侧同语义（K=${topK}）恢复 **${kK ? kK.recovered : 'n/a'}/${anchors.length}**、平均注入 **${kK ? kK.avgSections.toFixed(2) : 'n/a'}** 节，` +
           `与 §6.1「生产现值」档真跑（平均 ${typeof prodAvg === 'number' ? prodAvg.toFixed(2) : 'n/a'} 节）**逐值一致**。`
         )
@@ -2531,7 +2533,7 @@ export async function main(argv = process.argv.slice(2)) {
         '风险面「同一节的多片本可各占一个名额、把该节不同片段分别带进来」在整节返回（Decisions 14）下不成立——**该判断未被证伪**。',
       '',
       `**可证伪判据**（T4 已逐条验过）：① 真跑恢复数若 **少于** 重建读数 ⇒ 重建失真或改动跑偏（T4：两侧逐值一致）；` +
-        `② 全量 40 条逐条比对**不得有任何一组的 recall 下降**（T4 实测 200 组 0 下降）；` +
+        `② 全量 ${goldenEntries} 条逐条比对**不得有任何一组的 recall 下降**（T4 实测 200 组 0 下降）；` +
         `③ 若变体 A 在 ${topK} 档恢复 0 处，则本候选作废 —— ⚠️ **本次读数恰为 0 处**（§6.3 变体 A），` +
         `按此判据本候选在**本批**上就「救回未召回锚点」这个目的而言收益为 0（与 T4 §七 同向）。`,
       '',
@@ -2574,7 +2576,7 @@ export async function main(argv = process.argv.slice(2)) {
       '',
       '**代价**：三者皆模块私有 `const`（无 env 旋钮），落地要改 `db/repository/chunks.ts` 的混合检索核心参数。',
       '',
-      `**可证伪判据**：真跑（改常量后重跑 40 条）若恢复数 > 0，则本节"已排除"的结论被证伪——届时以真跑为准。`,
+      `**可证伪判据**：真跑（改常量后重跑 ${goldenEntries} 条）若恢复数 > 0，则本节"已排除"的结论被证伪——届时以真跑为准。`,
       '',
       `### 候选 5｜查询侧：修关键词通道的 AND 语义 / 改写器（**诊断已给出机制，修法待票**）`,
       '',

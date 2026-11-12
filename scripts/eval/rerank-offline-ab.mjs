@@ -777,7 +777,7 @@ export function renderReport(ctx) {
 
 /** 计时面报告（**不可复现**，A4 不管它）。单独落文件，理由见主报告 §六。 */
 export function renderLatencyReport(ctx) {
-  const { date, dbPath, latency, arms } = ctx
+  const { date, dbPath, latency, arms, goldenEntries } = ctx
   const L = []
   L.push(`# R13a 延迟与降级率（${date}）`)
   L.push('')
@@ -871,7 +871,7 @@ export function renderLatencyReport(ctx) {
   L.push('> 本表是「若接上、给定子预算」的推演，**不作 R13a 的判据**。')
   L.push('>')
   L.push(
-    `> ⚠️ 活库面用的是**均对数**（${latency.meanPairsPerEntry} 对/条）——那 40 条金标查询的池深` +
+    `> ⚠️ 活库面用的是**均对数**（${latency.meanPairsPerEntry} 对/条）——那 ${goldenEntries} 条金标查询的池深` +
       '**不代表真实流量**的池深分布。要精确推演得先采真实流量的池深，本票没采。'
   )
   L.push('')
@@ -1537,6 +1537,7 @@ export async function main(argv = process.argv.slice(2)) {
       quantCrosscheck,
       flips,
       goldenVersion: goldenData.version,
+      goldenEntries: goldenData.entries.length,
       params: { liveTopK, maxDistance, liveTopKRows },
       arms,
       anchors: anchorRows,

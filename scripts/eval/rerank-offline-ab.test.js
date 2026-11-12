@@ -452,6 +452,7 @@ describe('renderLatencyReport —— 交叉核对证据迁移', () => {
   const base = {
     date: '2026-09-22',
     dbPath: 'D:\\x\\snap.db',
+    goldenEntries: 40,
     arms: [{ hit: 27 }, { hit: 29 }, { hit: 23 }],
     latency: {
       rerankP50: 1,
@@ -515,6 +516,14 @@ describe('renderLatencyReport —— 交叉核对证据迁移', () => {
     // 反向锁：有人把 localStamp 挪进 renderReport，这条与上面那条「逐字节相同」会一起红。
     expect(renderLatencyReport(base)).toMatch(/实测时刻：/)
     expect(renderReport(detCtx())).not.toMatch(/实测时刻：/)
+  })
+
+  it('A3 ③ 池深告警的黄金集条数从 ctx 派生（v2 换集后不得再报「40 条」）', () => {
+    // 承重：写死 40 时，v2（59 条）报告会把池深告警的分母印错——读数看着正常，只是对象换了一批。
+    const md59 = renderLatencyReport({ ...base, goldenEntries: 59 })
+    expect(md59).toContain('那 59 条金标查询')
+    expect(md59).not.toContain('那 40 条金标查询')
+    expect(renderLatencyReport({ ...base, goldenEntries: 40 })).toContain('那 40 条金标查询')
   })
 })
 
