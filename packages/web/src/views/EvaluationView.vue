@@ -1197,7 +1197,10 @@ onUnmounted(() => {
             }}
             份同步
           </span>
-          <span>TOP_K {{ retrievalReport.params.topK }}</span>
+          <span
+            >TOP_K {{ retrievalReport.params.topK }} / 来源
+            {{ retrievalReport.params.topKSource ?? 'n/a' }}</span
+          >
           <span>MAX_DISTANCE {{ retrievalReport.params.maxDistance }}</span>
           <span
             >嵌入 {{ retrievalReport.embed.model ?? 'n/a' }}/{{

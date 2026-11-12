@@ -19,7 +19,8 @@
  * 走 `runRetrievalChain`（R10 §A2 抽出的**改写之后**链段）——R9 冻结的 `rewritten`
  * 是文本数组，而生产入口 `retrieveMemoryContext` 只吃 `triggerContent`、改写器内嵌
  * 其中，外部没法喂冻结查询。故本脚本**不复制链段**（复制一份必然与生产静默漂移，
- * 基线数字就不再代表生产行为），参数/阈值/预算全与生产同源（都读 env）。
+ * 基线数字就不再代表生产行为），参数/阈值/预算全与生产同源：topK 经设置访问器
+ * （settings 表 `memory_top_k` > `MEMORY_TOP_K` > 默认 3），阈值/预算读 env。
  *
  * ## 三条硬闸（票面 §三 + §修订 #1）
  *
@@ -696,7 +697,9 @@ export function renderReport(ctx) {
     `| 索引新鲜度（\`chunks.origin_id\` vs 工作树 \`git hash-object\`） | ${indexFreshness.checked - indexFreshness.stale}/${indexFreshness.checked} 份同步（stale=${indexFreshness.stale}） |`
   )
   L.push(`| MEMORY_MAX_DISTANCE | ${params.maxDistance} |`)
-  L.push(`| MEMORY_TOP_K | ${params.topK} |`)
+  // topK 不再只读 env：设置页可覆盖。报告必须同时写**生效值**与**来源**，否则
+  // 「recall 掉了」分不清是语料变了还是有人把设置页的 topK 改小了。
+  L.push(`| TOP_K（生效值 / 来源） | ${params.topK} / ${params.topKSource ?? 'n/a'} |`)
   L.push(`| 探针池 MAX_PROBE_N | ${params.probeN} |`)
   L.push(`| 嵌入模型 / 维度 | ${embed.model ?? 'n/a'} / ${embed.dim ?? 'n/a'} |`)
   // 供给形态也按**实测**报（`embed.handshaked` = sidecar 握手是否回报了监听端口）：
@@ -1045,6 +1048,9 @@ export async function main(argv = process.argv.slice(2)) {
   const { runRetrievalChain, currentRetrievalParams, vectorToBlob } = await import(
     pathToFileURL(path.join(root, 'packages/server/src/memory/index.js')).href
   )
+  const { getRetrievalConfig } = await import(
+    pathToFileURL(path.join(root, 'packages/server/src/config/retrieval.js')).href
+  )
   const { startEmbeddingSidecar, stopEmbeddingSidecar, getEmbeddingStatus, embedText } =
     await import(pathToFileURL(path.join(root, 'packages/server/src/memory/embedding.js')).href)
 
@@ -1205,7 +1211,12 @@ export async function main(argv = process.argv.slice(2)) {
       groups[kind] = summarizeGroup(scores.filter((s) => s.kind === kind))
     }
     const negatives = scores.filter((s) => s.kind === 'negative')
-    const params = currentRetrievalParams()
+    // 生效值 + 来源一起进快照：只报 topK 数字的话，设置页改过、env 改过两种历史
+    // 会写成同一行，跨报告对比时无法区分「参数变了」与「语料变了」。
+    const params = {
+      ...currentRetrievalParams(),
+      topKSource: getRetrievalConfig().topKSource,
+    }
     // ⚠️ 这一个 `const` 是 md 与 json **两份视图的唯一数字来源**——改成内联字面量、
     // 或让 json 那边自己再拼一份，两份读数就会各自漂移（且只在逐条对表时看得出来）。
     const reportCtx = {

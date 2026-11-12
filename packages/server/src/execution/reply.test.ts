@@ -241,7 +241,8 @@ describe('execution/reply — R1 检索流水埋点', () => {
   // ─── 验收 6：超时路径 ──────────────────────────────
   it("验收 6 · 检索超时（memoryResult===null）⇒ reason='timeout'，不 NULL 也不抛", () => {
     const { triggerMessageId, agentId } = seedRunningExecution()
-    // 参数快照这条路径**无 stats 可依** ⇒ 走 `currentRetrievalParams()`（现读 env）。
+    // 参数快照这条路径**无 stats 可依** ⇒ 走 `currentRetrievalParams()`（现读生效配置
+    // settings > env > 默认；本用例无 settings 行 ⇒ env 那一档生效）。
     // 故断言必须钉在**本用例自己设的**值上，两重理由：
     // - 钉回默认值（3 / 0.6）是假绿门——「读 env」与「写死默认值」两种实现都能过；
     //   钉非默认值（4 / 0.7）才证「快照记的是**当时生效**的参数」。
@@ -266,7 +267,8 @@ describe('execution/reply — R1 检索流水埋点', () => {
     // 超时那次没有内测值 ⇒ 落外侧计时；候选/查询为空但**行仍在**（不是无痕）
     expect(ev.retrieval_ms).toBe(10_002)
     expect((getDb().prepare('SELECT COUNT(*) AS n FROM retrieval_queries').get() as any).n).toBe(0)
-    // 参数快照仍带（现读 env，单一来源 currentRetrievalParams）——断的正是上面钉的值
+    // 参数快照仍带（现读生效配置、单一来源 currentRetrievalParams；无 settings 行时
+    // env 生效）——断的正是上面钉的值
     expect(ev.threshold_max_distance).toBe(0.7)
     expect(ev.param_top_k).toBe(4)
   })

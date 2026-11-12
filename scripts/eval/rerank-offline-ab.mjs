@@ -89,7 +89,8 @@ import { loadEnvFile } from './freeze-rewrite.mjs'
 /** 报告 schema（形态变更时递增） */
 export const RERANK_AB_REPORT_SCHEMA = 1
 
-/** 臂① 现状（生产 `MEMORY_TOP_K` 默认值） */
+/** 臂① 冻结对照档（2026-09 跑批时期的生产默认值；生产现值以 `liveTopK` 现读为准，
+ *  受 settings `memory_top_k` > env > 默认的访问器支配，不再等同 `ARM1_TOPK`） */
 export const ARM1_TOPK = 3
 /** 臂② 最便宜替代（一行配置） */
 export const ARM2_TOPK = 5

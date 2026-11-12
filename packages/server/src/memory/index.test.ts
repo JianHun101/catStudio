@@ -23,6 +23,7 @@ import {
   messages as messagesRepo,
 } from '../db/repository/index.js'
 import { bigramTokenize } from '../db/repository/fts.js'
+import { resetRetrievalTopK, setRetrievalTopK } from '../config/retrieval.js'
 import { getLogLevel, setLogLevel } from '../logger.js'
 import type { EmbedResult } from './embedding-client.js'
 
@@ -1628,6 +1629,37 @@ describe('memory', () => {
         stdoutSpy.mockRestore()
         setLogLevel(prevLevel)
       }
+    })
+  })
+
+  describe('设置页 topK：settings 覆盖 env、下一轮检索立即生效', () => {
+    afterEach(() => {
+      delete process.env.MEMORY_TOP_K
+    })
+
+    it('env=2 时写 settings=4 → 下一次 retrieval 的 paramTopK=4、注入 4 节；DELETE → 回 env=2', async () => {
+      // 5 个**互不同节**的小片，距离全 0（必然过阈值）⇒ 注入几节只由 topK 决定
+      for (let i = 1; i <= 5; i++) {
+        seedChunk({ docPath: `docs/adr/010${i}-s.md`, body: `猫咖设置${i}`, angle: 0 })
+      }
+      process.env.MEMORY_TOP_K = '2'
+      process.env.MEMORY_MAX_DISTANCE = '0.6'
+
+      const fromEnv = await memoryModule.retrieveMemoryContext(Q)
+      expect(fromEnv.stats.paramTopK).toBe(2)
+      expect(fromEnv.sections).toHaveLength(2)
+
+      // 不重启、不重载模块——同一进程内写 settings 行，下一次检索就换档
+      expect(setRetrievalTopK(4).topKSource).toBe('settings')
+      const fromSettings = await memoryModule.retrieveMemoryContext(Q)
+      expect(fromSettings.stats.paramTopK).toBe(4)
+      expect(fromSettings.sections).toHaveLength(4)
+
+      // 删行回落 env
+      expect(resetRetrievalTopK().topKSource).toBe('env')
+      const backToEnv = await memoryModule.retrieveMemoryContext(Q)
+      expect(backToEnv.stats.paramTopK).toBe(2)
+      expect(backToEnv.sections).toHaveLength(2)
     })
   })
 })

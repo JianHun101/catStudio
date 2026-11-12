@@ -20,8 +20,20 @@ vi.mock('@/composables/useApi', () => ({
     getIronLaws: vi.fn(),
     getEvalAlertConfig: vi.fn(),
     saveEvalAlertConfig: vi.fn(),
+    getRetrievalConfig: vi.fn(),
+    saveRetrievalConfig: vi.fn(),
+    resetRetrievalConfig: vi.fn(),
   },
 }))
+
+/** 检索配置默认回包（三档优先级里的默认档） */
+const retrievalDefault = {
+  topK: 3,
+  topKSource: 'default' as const,
+  envTopK: null,
+  defaultTopK: 3,
+  maxDistance: 0.6,
+}
 
 /**
  * Verify SettingsView.vue — 全屏设置中心（左侧栏底部齿轮进入，左右分栏经典结构）。
@@ -94,6 +106,7 @@ describe('SettingsView 左右分栏结构（猫咪管理 / IM 接入 / 系统配
     expect(source).toContain('initCtxConfig()')
     expect(source).toContain('loadSummaryConfig()')
     expect(source).toContain('loadEvalAlertConfig()')
+    expect(source).toContain('loadRetrievalConfig()')
   })
 })
 
@@ -192,6 +205,19 @@ describe('SettingsView 系统配置（评估告警——GET/POST /api/config/eva
       config: { ...evalAlertConfig },
       source: { ...evalAlertSource },
     })
+    vi.mocked(api.getRetrievalConfig).mockResolvedValue({ ...retrievalDefault })
+    vi.mocked(api.saveRetrievalConfig).mockReset()
+    vi.mocked(api.saveRetrievalConfig).mockResolvedValue({
+      ok: true,
+      ...retrievalDefault,
+      topK: 7,
+      topKSource: 'settings',
+    })
+    vi.mocked(api.resetRetrievalConfig).mockReset()
+    vi.mocked(api.resetRetrievalConfig).mockResolvedValue({
+      ok: true,
+      ...retrievalDefault,
+    })
   })
 
   it('只改审查判词门限 → POST 请求体只有 minVerdicts 一个键', async () => {
@@ -223,6 +249,161 @@ describe('SettingsView 系统配置（评估告警——GET/POST /api/config/eva
 
     expect(api.saveEvalAlertConfig).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('没有改动需要保存')
+    wrapper.unmount()
+  })
+})
+
+describe('SettingsView 系统配置（检索配置——GET/POST/DELETE /api/config/retrieval）', () => {
+  beforeEach(() => {
+    // 挂载即拉齐七份数据——全部给最小合法回包，避免未处理 rejection 污染用例。
+    vi.mocked(api.getConnectorBindings).mockResolvedValue({ ok: true, bindings: [] })
+    vi.mocked(api.getOneBotStatus).mockResolvedValue({
+      ok: true,
+      enabled: false,
+      apiBase: '',
+      running: false,
+      autoStart: false,
+      launchCmdConfigured: false,
+      launchReady: false,
+      tokenConfigured: false,
+      tokenMasked: '',
+    })
+    vi.mocked(api.getNapcatConfig).mockResolvedValue({
+      ok: true,
+      napcatPath: '',
+      pathExists: null,
+      autoStart: false,
+    })
+    vi.mocked(api.getContextConfig).mockResolvedValue({
+      warnThreshold: 0.8,
+      handoffThreshold: 0.9,
+      maxContextTokens: 128000,
+    })
+    vi.mocked(api.getSummaryConfig).mockResolvedValue({
+      summaryModel: 'deepseek-v4-flash',
+      summaryBaseUrl: '',
+      summaryApiKeyMasked: '',
+      hasKey: false,
+      needsRestart: false,
+    })
+    vi.mocked(api.getIronLaws).mockResolvedValue({ coder: 'coder', reviewer: 'reviewer' })
+    vi.mocked(api.getEvalAlertConfig).mockResolvedValue({
+      ok: true,
+      config: {
+        successRate: 0.8,
+        timeoutRate: 0.1,
+        reworkRate: 0.3,
+        minExecutions: 20,
+        minVerdicts: 30,
+      },
+      source: {
+        successRate: 'env',
+        timeoutRate: 'env',
+        reworkRate: 'env',
+        minExecutions: 'env',
+        minVerdicts: 'env',
+      },
+    })
+    vi.mocked(api.getRetrievalConfig).mockResolvedValue({ ...retrievalDefault })
+    vi.mocked(api.saveRetrievalConfig).mockReset()
+    vi.mocked(api.saveRetrievalConfig).mockResolvedValue({
+      ok: true,
+      ...retrievalDefault,
+      topK: 7,
+      topKSource: 'settings',
+    })
+    vi.mocked(api.resetRetrievalConfig).mockReset()
+    vi.mocked(api.resetRetrievalConfig).mockResolvedValue({ ok: true, ...retrievalDefault })
+  })
+
+  const findTopKInput = (wrapper: ReturnType<typeof mount>) => {
+    const row = wrapper.findAll('.frow').find((r) => r.text().includes('注入节数上限'))
+    expect(row, '未找到注入节数上限输入行').toBeTruthy()
+    return row!.find('input.input-ctx')
+  }
+  const effectiveRow = (wrapper: ReturnType<typeof mount>) =>
+    wrapper.findAll('.kv').find((k) => k.text().includes('当前生效值'))
+
+  it('新卡含 topK 输入 + 保存 + 恢复默认，且两条必须写进卡片的文案在场', () => {
+    expect(source).toContain('<div class="section-title">检索配置</div>')
+    expect(source).toContain('v-model.number="retrievalTopK"')
+    expect(source).toContain('saveRetrievalConfig')
+    expect(source).toContain('resetRetrievalConfig')
+    expect(source).toContain('调大只增加注入量与成本')
+    expect(source).toContain('不解决「池里没有相关片」')
+    expect(source).toContain('本仓定量清算结论是主病灶在语料覆盖，不在名额')
+    expect(source).toContain('超出上下文预算会被截断，实际注入可能少于设定值')
+    expect(source).toContain('下一轮检索立即生效，无需重启')
+  })
+
+  it('刷新后显示 settings 档的生效值 7 与来源「设置页」', async () => {
+    vi.mocked(api.getRetrievalConfig).mockResolvedValue({
+      ...retrievalDefault,
+      topK: 7,
+      topKSource: 'settings',
+      envTopK: 4,
+    })
+    const wrapper = mount(SettingsView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+
+    expect((findTopKInput(wrapper).element as HTMLInputElement).value).toBe('7')
+    expect(findTopKInput(wrapper).element.closest('.frow')!.textContent).toContain('设置页')
+    expect(effectiveRow(wrapper)!.text()).toContain('7')
+    wrapper.unmount()
+  })
+
+  it('保存 → POST 带 topK；成功后生效值与来源更新为服务端回包', async () => {
+    const wrapper = mount(SettingsView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+
+    await findTopKInput(wrapper).setValue(7)
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存检索配置'))
+    expect(saveBtn, '未找到保存检索配置按钮').toBeTruthy()
+    await saveBtn!.trigger('click')
+    await flushPromises()
+
+    expect(api.saveRetrievalConfig).toHaveBeenCalledTimes(1)
+    expect(api.saveRetrievalConfig).toHaveBeenCalledWith(7)
+    expect(wrapper.text()).toContain('已保存——下一轮检索立即生效，无需重启')
+    expect(effectiveRow(wrapper)!.text()).toContain('7')
+    expect(effectiveRow(wrapper)!.text()).toContain('设置页')
+    wrapper.unmount()
+  })
+
+  it('恢复默认 → DELETE；回包 default 后显示默认来源', async () => {
+    vi.mocked(api.getRetrievalConfig).mockResolvedValue({
+      ...retrievalDefault,
+      topK: 7,
+      topKSource: 'settings',
+    })
+    const wrapper = mount(SettingsView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+
+    const resetBtn = wrapper.findAll('button').find((b) => b.text().includes('恢复默认'))
+    expect(resetBtn, '未找到恢复默认按钮').toBeTruthy()
+    await resetBtn!.trigger('click')
+    await flushPromises()
+
+    expect(api.resetRetrievalConfig).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('已恢复默认——下一轮检索立即生效，无需重启')
+    expect(effectiveRow(wrapper)!.text()).toContain('默认（3）')
+    wrapper.unmount()
+  })
+
+  it('保存失败 → 回显错误，生效值/来源不显示新值', async () => {
+    vi.mocked(api.saveRetrievalConfig).mockRejectedValue(new Error('服务器错误：topK 越界'))
+    const wrapper = mount(SettingsView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+
+    await findTopKInput(wrapper).setValue(9)
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存检索配置'))
+    await saveBtn!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('服务器错误：topK 越界')
+    // 生效值仍是加载时的 3 / 默认——错误回包不得把表单输入当生效值
+    expect(effectiveRow(wrapper)!.text()).toContain('3')
+    expect(effectiveRow(wrapper)!.text()).toContain('默认（3）')
     wrapper.unmount()
   })
 })
@@ -638,7 +819,7 @@ describe('SettingsView 系统配置（铁律可编辑——GET/POST /api/iron-la
   })
 })
 
-describe('SettingsView 系统配置区布局（三卡统一间距 + 每卡统一标题）', () => {
+describe('SettingsView 系统配置区布局（五卡统一间距 + 每卡统一标题）', () => {
   // 病灶（用户反馈「观感割裂」）：三张 .ctx-card 无间距、后两张紧贴，且只有第一张有
   // .section-title——另外两张卡片看起来「挂」在上一张下面。修法为每卡包一层
   // .config-section（标题 + 卡片），间距由 .system-pane 的 flex gap 统一给。
@@ -667,18 +848,18 @@ describe('SettingsView 系统配置区布局（三卡统一间距 + 每卡统一
     return hit ? { selectorText: hit[1], body: hit[2] } : null
   }
 
-  it('四张卡片各包一层 config-section——标题与卡片一一对应，数量不匹配即布局回退', () => {
+  it('五张卡片各包一层 config-section——标题与卡片一一对应，数量不匹配即布局回退', () => {
     const pane = systemPaneTemplate()
     // 三者必须同数：任一为 0 或数量不等，说明有卡片漏包 / 有标题游离在层外
-    expect(pane.match(/class="config-section"/g)).toHaveLength(4)
-    expect(pane.match(/class="ctx-card"/g)).toHaveLength(4)
-    expect(pane.match(/class="section-title"/g)).toHaveLength(4)
+    expect(pane.match(/class="config-section"/g)).toHaveLength(5)
+    expect(pane.match(/class="ctx-card"/g)).toHaveLength(5)
+    expect(pane.match(/class="section-title"/g)).toHaveLength(5)
   })
 
-  it('每层的标题先于卡片且文本对应（上下文阈值配置 / 摘要配置 / 铁律 / 评估告警）', () => {
+  it('每层的标题先于卡片且文本对应（上下文阈值配置 / 检索配置 / 摘要配置 / 铁律 / 评估告警）', () => {
     const chunks = systemPaneTemplate().split('class="config-section"').slice(1)
-    expect(chunks).toHaveLength(4)
-    const expectedTitles = ['上下文阈值配置', '摘要配置', '铁律', '评估告警']
+    expect(chunks).toHaveLength(5)
+    const expectedTitles = ['上下文阈值配置', '检索配置', '摘要配置', '铁律', '评估告警']
     chunks.forEach((chunk, i) => {
       const titleIdx = chunk.indexOf('class="section-title"')
       const cardIdx = chunk.indexOf('class="ctx-card"')
@@ -693,7 +874,7 @@ describe('SettingsView 系统配置区布局（三卡统一间距 + 每卡统一
     })
   })
 
-  it('三卡间距来自 .system-pane 的 flex gap 26px', () => {
+  it('五卡间距来自 .system-pane 的 flex gap 26px', () => {
     const paneLayout = cssRule('.system-pane', 'flex-direction')
     expect(paneLayout, '.system-pane 未见 flex 布局规则').not.toBeNull()
     expect(paneLayout!.body).toContain('display: flex')
@@ -837,9 +1018,10 @@ describe('SettingsView T3 设置页对齐改版（票面 §二 规格）', () =>
     expect(source).toContain('class="src"')
   })
 
-  it('每张配置卡带「什么时候生效」副标题（四卡各一条）', () => {
-    expect(source.match(/class="card-sub"/g)).toHaveLength(4)
+  it('每张配置卡带「什么时候生效」副标题（五卡各一条）', () => {
+    expect(source.match(/class="card-sub"/g)).toHaveLength(5)
     expect(source).toContain('保存后立即生效，重启后仍保持。')
+    expect(source).toContain('下一轮检索立即生效，无需重启。')
     expect(source).toContain('保存后需重启 server 才生效（写 .env）。')
     expect(source).toContain('保存后下一轮回复即生效，无需重启。')
     expect(source).toContain('下一轮聚合（最长 1 小时）生效，无需重启。')

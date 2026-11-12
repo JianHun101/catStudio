@@ -293,7 +293,13 @@ export interface RetrievalReport {
   liveDocs: number
   rotten: number
   indexFreshness: { checked: number; stale: number }
-  params: { topK: number; maxDistance: number; probeN: number }
+  /** `topKSource` 是 2026-11 起新增的来源读数；旧报告 JSON 没有该字段 ⇒ 可选 */
+  params: {
+    topK: number
+    maxDistance: number
+    probeN: number
+    topKSource?: 'settings' | 'env' | 'default'
+  }
   /** `handshaked` 是**加工后的布尔**，不是端口号本身——端口每跑一变，落进产物就破 B1
    *  （见跑批脚本 `reportCtx.embed` 的注释）。布尔承载「这次跑批有没有握手到 sidecar」
    *  这个信号（md 侧渲染它）；**界面只消费上面的 `model` / `dim`**，端口号没有消费方。
@@ -330,6 +336,25 @@ export interface EvalAlertConfigResponse {
   ok: boolean
   config: EvalAlertConfig
   source: Record<EvalAlertField, 'settings' | 'env'>
+}
+
+/** 检索 topK 的生效来源（settings 表 `memory_top_k` > `MEMORY_TOP_K` > 默认 3） */
+export type RetrievalTopKSource = 'settings' | 'env' | 'default'
+
+/** GET /api/config/retrieval 响应：生效 topK + 来源 + 回落/默认读数 */
+export interface RetrievalConfig {
+  topK: number
+  topKSource: RetrievalTopKSource
+  /** env 读数（未设置 / 空串 / 坏值 ⇒ null） */
+  envTopK: number | null
+  defaultTopK: number
+  /** 距离阈值只读回显（本票不开放配置） */
+  maxDistance: number
+}
+
+/** POST/DELETE /api/config/retrieval 响应（带 ok 外壳） */
+export interface RetrievalConfigResponse extends RetrievalConfig {
+  ok: true
 }
 
 /** 一条破线 / 样本不足读数（服务端 `ThresholdBreach` 原样） */
@@ -825,6 +850,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(partial),
     }),
+
+  // 检索配置（GET/POST/DELETE /api/config/retrieval——settings 表优先、env 回落、默认 3；
+  // 保存/恢复后下一轮检索立即生效，无需重启。只开放 topK，maxDistance 只读回显）
+  getRetrievalConfig: () => request<RetrievalConfig>('/config/retrieval'),
+
+  saveRetrievalConfig: (topK: number) =>
+    request<RetrievalConfigResponse>('/config/retrieval', {
+      method: 'POST',
+      body: JSON.stringify({ topK }),
+    }),
+
+  resetRetrievalConfig: () =>
+    request<RetrievalConfigResponse>('/config/retrieval', { method: 'DELETE' }),
 
   // 铁律读写（GET/POST /api/iron-laws——settings 表优先、常量兜底；编辑后下一轮回复立即生效）
   getIronLaws: () => request<IronLaws>('/iron-laws'),

@@ -42,4 +42,18 @@ describe('db/repository/settings', () => {
     expect(settingsRepo.getSetting('iron_laws_coder')).toBe('coder')
     expect(settingsRepo.getSetting('iron_laws_reviewer')).toBe('reviewer')
   })
+
+  it('deleteSetting 删指定 key，不动其他 key', () => {
+    settingsRepo.setSetting('iron_laws_coder', 'coder')
+    settingsRepo.setSetting('iron_laws_reviewer', 'reviewer')
+    settingsRepo.deleteSetting('iron_laws_coder')
+    expect(settingsRepo.getSetting('iron_laws_coder')).toBeUndefined()
+    expect(settingsRepo.getSetting('iron_laws_reviewer')).toBe('reviewer')
+  })
+
+  it('deleteSetting 缺失 key 幂等 no-op（重复删不抛错）', () => {
+    expect(() => settingsRepo.deleteSetting('no-such-key')).not.toThrow()
+    expect(() => settingsRepo.deleteSetting('no-such-key')).not.toThrow()
+    expect(settingsRepo.getSetting('no-such-key')).toBeUndefined()
+  })
 })

@@ -851,7 +851,7 @@ describe('renderReport — 确定性与内容面', () => {
     liveDocs: 13,
     rotten: 0,
     indexFreshness: { checked: 13, stale: 0 },
-    params: { maxDistance: 0.6, topK: 3, probeN: 20 },
+    params: { maxDistance: 0.6, topK: 3, probeN: 20, topKSource: 'env' },
     embed: { model: 'm', dim: 512, handshaked: true },
     groups: {
       real: {
@@ -991,6 +991,17 @@ describe('renderReport — 确定性与内容面', () => {
     expect(md).toContain(`schema | ${BASELINE_REPORT_SCHEMA}`)
     // 时间量不进报告：耗时/端口出现即破坏 B1（同树同库两跑字节一致）
     expect(md).not.toMatch(/retrievalMs|耗时|ms\b/)
+  })
+
+  it('topK 行同时报生效值与来源（不能把 env 当唯一来源）', () => {
+    const md = renderReport(ctx())
+    expect(md).toContain('| TOP_K（生效值 / 来源） | 3 / env |')
+    // 旧标签退役——只写 MEMORY_TOP_K 会把设置页/默认档误报成 env
+    expect(md).not.toContain('| MEMORY_TOP_K |')
+    // 来源缺失（旧 JSON）不炸渲染，显式 n/a
+    expect(renderReport({ ...ctx(), params: { maxDistance: 0.6, topK: 3, probeN: 20 } })).toContain(
+      '| TOP_K（生效值 / 来源） | 3 / n/a |'
+    )
   })
 
   it('归因表遍历值域：数据里出现的键必须被列出（不许静默吞）', () => {

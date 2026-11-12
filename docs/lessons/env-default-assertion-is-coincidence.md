@@ -27,7 +27,7 @@ evidence:
 
 ## 现象
 
-一条用例写 `expect(params.topK).toBe(3)`，真源是 `envNumber('MEMORY_TOP_K', 3)` 这类现读 env 的写法。
+一条用例写 `expect(params.topK).toBe(3)`，真源是现读参数（`MEMORY_TOP_K` 这一档由 `envNumber` 读；2026-11 起 topK 走 settings > env > 默认的访问器，`memory_top_k` 行存在时 env 不再是真源）。
 
 - env 未设 ⇒ 真源回落到 `3` ⇒ 断言过 ✅
 - 但**把 `3` 写死在实现里** ⇒ 断言同样过 ✅
@@ -47,7 +47,7 @@ C 单的两处**当时没红**，各自靠一种巧合：
 
 ## 正解
 
-钉**非默认值**：`vi.stubEnv('MEMORY_TOP_K', '4')`（真源默认 `3`）、
+钉**非默认值**：`vi.stubEnv('MEMORY_TOP_K', '4')`（真源默认 `3`；测试库无 `memory_top_k` 行时 env 才是生效档）、
 `vi.stubEnv('MEMORY_MAX_DISTANCE', '0.7')`（默认 `0.6`）、
 `vi.stubEnv('EVAL_CHAIN_SLOW_MS', '600000')`（默认 `300000`）、
 `vi.stubEnv('EVAL_LABEL_MIN_COUNT', '50')`（默认 `30`），断言读数是**我设的那个值**。
