@@ -38,6 +38,7 @@ import {
   judgeThresholdCounterControl,
   judgeKillZoneExistence,
   parseArgs,
+  renderParamSourceRow,
 } from './retrieval-attribution-recheck.mjs'
 
 // ─── 手搓夹具 ─────────────────────────────────────────
@@ -1040,10 +1041,33 @@ describe('静态源断言 — settings 覆盖 env 的拒出闸**位置即语义*
   })
 
   it('闸用的是报告同一个 `params.topKSource`（不另起一次访问器读，防两处口径漂移）', () => {
-    const guardBlock = lines.slice(
-      lines.findIndex((l) => l.includes("'settings-overrides-env'")) - 6,
-      lines.findIndex((l) => l.includes("'settings-overrides-env'")) + 1
-    )
-    expect(guardBlock.join('\n')).toContain('params.topKSource')
+    // 锚定守卫所在的 `if (` 行本身，窗口只取该行 ±1——上方注释增删不会让窗口滑动
+    // （旧写法用拒出行 −6 的硬编码窗口，加一行注释就可能滑到别处造成假绿/假红）。
+    const refuseIdx = lines.findIndex((l) => l.includes("'settings-overrides-env'"))
+    expect(refuseIdx).toBeGreaterThan(-1)
+    let guardIfIdx = -1
+    for (let i = refuseIdx; i >= 0; i--) {
+      if (/^\s*if \(.*\{\s*$/.test(lines[i])) {
+        guardIfIdx = i
+        break
+      }
+    }
+    expect(guardIfIdx).toBeGreaterThan(-1)
+    const guardWindow = lines.slice(Math.max(0, guardIfIdx - 1), guardIfIdx + 2).join('\n')
+    expect(guardWindow).toContain('params.topKSource')
+  })
+})
+
+// ─── §一 参数行：来源缺字段回落 `n/a`（行为断言，不是静态 grep） ──────
+
+describe('renderParamSourceRow — 生效值 / 来源两种分支都真渲染', () => {
+  it('`params` 缺 `topKSource`（旧报告 JSON / 旧 ctx）⇒ 渲染 `n/a`', () => {
+    const row = renderParamSourceRow({ maxDistance: 0.6, topK: 3 })
+    expect(row).toBe('| MEMORY_MAX_DISTANCE / TOP_K（生效值 / 来源） | 0.6 / 3 / n/a |')
+  })
+
+  it("有来源值 `'settings'` ⇒ 原样渲染该值（不回落 `n/a`）", () => {
+    const row = renderParamSourceRow({ maxDistance: 0.6, topK: 7, topKSource: 'settings' })
+    expect(row).toBe('| MEMORY_MAX_DISTANCE / TOP_K（生效值 / 来源） | 0.6 / 7 / settings |')
   })
 })
