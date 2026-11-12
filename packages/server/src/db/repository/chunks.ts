@@ -424,7 +424,7 @@ const HYBRID_CHANNEL_TOP_N = 20
  *
  * 与 `HYBRID_CHANNEL_TOP_N` 同量级是刻意的：两通道各召回 20 片，双通道命中是
  * **打分相加**而非扩容 ⇒ 一趟查询最多 20 个候选。这里是**查询级出口**的截断，
- * 与「最终注入几**节**」（调用方的 `MEMORY_TOP_K`，见 `memory/index.ts` 的末次截断——
+ * 与「最终注入几**节**」（调用方的 topK：设置页 `memory_top_k` / `MEMORY_TOP_K`，见 `memory/index.ts` 的末次截断——
  * W2-c 起按**节**计名额，不再是 `slice(0, topK)` 切片）
  * 是两回事——把后者当前者用，第 4~20 名连参与跨查询合并的资格都没有。
  *

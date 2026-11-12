@@ -208,6 +208,7 @@ pnpm flywheel:reindex    # 全量重建索引（删表 → 重扫 → 逐行等�
 ```
 
 - `MEMORY_ENABLED`（本机 `true`）/ `MEMORY_EMBEDDING_MODEL` / `MEMORY_CONTEXT_TOKEN_BUDGET`（默认 8000）/ `MEMORY_TOP_K` / `MEMORY_MAX_DISTANCE`。
+- `MEMORY_TOP_K` 可由设置页写入 settings 表 `memory_top_k` 时**优先生效，env 为回落**（再回落代码默认 3）；改完下一轮检索立即生效（检索链每次调用现读，无需重启）。
 - `EMBED_SIDECAR_PORT`（本机 `3210`，默认 `0` = OS 分配）——**只管主 server**；扫描器侧恒动态。
 
 > **已作废，勿拧**（旧写口退役 / §2.8）：`MEMORY_DEDUP_ENABLED` / `MEMORY_DEDUP_THRESHOLD`

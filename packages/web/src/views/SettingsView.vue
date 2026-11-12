@@ -9,6 +9,8 @@ import {
   type EvalAlertField,
   type NapcatBrowseEntry,
   type OneBotStatus,
+  type RetrievalConfig,
+  type RetrievalTopKSource,
 } from '@/composables/useApi'
 import AgentEditModal from '../components/AgentEditModal.vue'
 import SubNav from '../components/SubNav.vue'
@@ -793,8 +795,93 @@ async function saveEvalAlertConfig(): Promise<void> {
   }
 }
 
+// ─── 系统配置：检索配置（GET/POST/DELETE /api/config/retrieval——settings 优先、env 回落）──
+// 只开放 topK（1..10 整数）；maxDistance 只读回显。保存后下一轮检索立即生效，无需重启。
+const retrievalTopK = ref(3)
+const retrievalConfig = ref<RetrievalConfig | null>(null)
+const retrievalLoading = ref(true)
+const retrievalSaving = ref(false)
+const retrievalResetting = ref(false)
+const retrievalError = ref('')
+const retrievalFormError = ref('')
+const retrievalSaved = ref('')
+
+const retrievalBusy = computed(() => retrievalSaving.value || retrievalResetting.value)
+
+/** 来源短标签（设置页显示「当前来源」；默认档带上默认值，免得只看到「默认」不知道是几） */
+function retrievalSourceLabel(cfg: RetrievalConfig | null): string {
+  if (!cfg) return ''
+  const map: Record<RetrievalTopKSource, string> = {
+    settings: '设置页',
+    env: '环境变量',
+    default: `默认（${cfg.defaultTopK}）`,
+  }
+  return map[cfg.topKSource]
+}
+
+function applyRetrievalConfig(cfg: RetrievalConfig): void {
+  retrievalConfig.value = cfg
+  retrievalTopK.value = cfg.topK
+}
+
+async function loadRetrievalConfig(): Promise<void> {
+  retrievalLoading.value = true
+  retrievalError.value = ''
+  try {
+    const res = await api.getRetrievalConfig()
+    if (disposed) return
+    applyRetrievalConfig(res)
+  } catch (err: any) {
+    if (!disposed) retrievalError.value = err.message || '检索配置读取失败'
+  } finally {
+    if (!disposed) retrievalLoading.value = false
+  }
+}
+
+/** 前端校验对齐后端契约：1..10 整数——不通过不发请求（后端同样会 400） */
+function validateRetrievalTopK(): boolean {
+  const v = retrievalTopK.value
+  if (!(typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 10)) {
+    retrievalFormError.value = 'topK 必须是 1~10 的整数'
+    return false
+  }
+  return true
+}
+
+async function saveRetrievalConfig(): Promise<void> {
+  retrievalFormError.value = ''
+  retrievalSaved.value = ''
+  if (!validateRetrievalTopK()) return
+  retrievalSaving.value = true
+  try {
+    const res = await api.saveRetrievalConfig(retrievalTopK.value)
+    // 只有服务端回包成功才应用新值——失败时表单保留用户输入、生效值/来源不动
+    applyRetrievalConfig(res)
+    retrievalSaved.value = '已保存——下一轮检索立即生效，无需重启'
+  } catch (err: any) {
+    retrievalFormError.value = err.message || '保存失败'
+  } finally {
+    retrievalSaving.value = false
+  }
+}
+
+async function resetRetrievalConfig(): Promise<void> {
+  retrievalFormError.value = ''
+  retrievalSaved.value = ''
+  retrievalResetting.value = true
+  try {
+    const res = await api.resetRetrievalConfig()
+    applyRetrievalConfig(res)
+    retrievalSaved.value = '已恢复默认——下一轮检索立即生效，无需重启'
+  } catch (err: any) {
+    retrievalFormError.value = err.message || '恢复默认失败'
+  } finally {
+    retrievalResetting.value = false
+  }
+}
+
 onMounted(() => {
-  // 设置页为常驻视图（v-show 切类保持挂载）——一次拉齐六份数据
+  // 设置页为常驻视图（v-show 切类保持挂载）——一次拉齐七份数据
   loadBindings()
   refresh()
   loadConfig()
@@ -802,6 +889,7 @@ onMounted(() => {
   loadSummaryConfig()
   loadIronLaws()
   loadEvalAlertConfig()
+  loadRetrievalConfig()
 })
 onUnmounted(() => {
   disposed = true
@@ -1354,6 +1442,71 @@ onUnmounted(() => {
                 <div class="form-actions">
                   <button class="btn btn-create" :disabled="ctxSaving" @click="saveCtxConfig">
                     {{ ctxSaving ? '保存中…' : '保存阈值' }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="config-section">
+            <div class="section-title">检索配置</div>
+            <div class="card-sub">下一轮检索立即生效，无需重启。</div>
+            <!-- 检索配置（topK；settings 表 memory_top_k 优先、MEMORY_TOP_K 回落、默认 3） -->
+            <div class="ctx-card">
+              <div class="ctx-info">
+                每轮记忆检索最多注入的「节」数（topK）。调大只增加注入量与成本，不解决「池里没有相关片」——
+                本仓定量清算结论是主病灶在语料覆盖，不在名额；超出上下文预算会被截断，实际注入可能少于设定值。
+              </div>
+
+              <div v-if="retrievalLoading" class="list-hint">加载中…</div>
+              <div v-else-if="retrievalError" class="error-msg">{{ retrievalError }}</div>
+              <template v-else>
+                <div class="frow">
+                  <span class="label">
+                    注入节数上限（topK）
+                    <span class="src-tag">{{ retrievalSourceLabel(retrievalConfig) }}</span>
+                  </span>
+                  <div class="ctl">
+                    <input
+                      v-model.number="retrievalTopK"
+                      type="number"
+                      min="1"
+                      max="10"
+                      step="1"
+                      class="input input-ctx"
+                      :disabled="retrievalBusy"
+                    />
+                  </div>
+                </div>
+
+                <div class="kv">
+                  <span class="k">当前生效值</span>
+                  <span class="v">{{ retrievalConfig?.topK ?? '—' }}</span>
+                  <span class="src">{{ retrievalSourceLabel(retrievalConfig) }}</span>
+                </div>
+
+                <div class="ctx-hint">
+                  取值 1~10 的整数。优先使用设置页的值；未设置时回落到环境变量
+                  MEMORY_TOP_K，再回落到代码默认 3。恢复默认 = 删除设置页的值，回落环境变量/默认。
+                </div>
+
+                <div v-if="retrievalFormError" class="error-msg">{{ retrievalFormError }}</div>
+                <div v-if="retrievalSaved" class="ok-msg">{{ retrievalSaved }}</div>
+
+                <div class="form-actions">
+                  <button
+                    class="btn btn-create"
+                    :disabled="retrievalBusy"
+                    @click="saveRetrievalConfig"
+                  >
+                    {{ retrievalSaving ? '保存中…' : '保存检索配置' }}
+                  </button>
+                  <button
+                    class="btn btn-stop"
+                    :disabled="retrievalBusy"
+                    @click="resetRetrievalConfig"
+                  >
+                    {{ retrievalResetting ? '恢复中…' : '恢复默认' }}
                   </button>
                 </div>
               </template>
@@ -1979,6 +2132,7 @@ select.input {
 .form-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   margin-top: 4px;
 }
 

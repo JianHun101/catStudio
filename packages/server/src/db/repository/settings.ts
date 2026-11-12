@@ -26,3 +26,11 @@ export function setSetting(key: string, value: string): void {
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
   ).run(key, value)
 }
+
+/**
+ * 删除一个 key。缺失 key 是**幂等 no-op**（`DELETE` 影响 0 行不报错）——
+ * 「恢复默认」端点重复点击不应 404 或 500。
+ */
+export function deleteSetting(key: string): void {
+  db.prepare('DELETE FROM settings WHERE key = ?').run(key)
+}

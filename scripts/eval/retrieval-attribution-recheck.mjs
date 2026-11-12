@@ -856,7 +856,9 @@ export function renderDiagnosis(ctx) {
       .map(([k, v]) => `${k}=${v}`)
       .join(' / ')}） |`
   )
-  L.push(`| MEMORY_MAX_DISTANCE / MEMORY_TOP_K | ${params.maxDistance} / ${params.topK} |`)
+  L.push(
+    `| MEMORY_MAX_DISTANCE / TOP_K（生效值 / 来源） | ${params.maxDistance} / ${params.topK} / ${params.topKSource ?? 'n/a'} |`
+  )
   // 端口**号**不进报告（每跑一个随机值，写进去就破「同输入同输出」）——与 baseline 同款：
   // 只报**供给形态**与「有没有真握手」，不报那个数。
   L.push(
@@ -1426,6 +1428,9 @@ export async function main(argv = process.argv.slice(2)) {
   const { runRetrievalChain, currentRetrievalParams, vectorToBlob } = await import(
     pathToFileURL(path.join(root, 'packages/server/src/memory/index.js')).href
   )
+  const { getRetrievalConfig } = await import(
+    pathToFileURL(path.join(root, 'packages/server/src/config/retrieval.js')).href
+  )
   const { startEmbeddingSidecar, stopEmbeddingSidecar, getEmbeddingStatus, embedText } =
     await import(pathToFileURL(path.join(root, 'packages/server/src/memory/embedding.js')).href)
   const { buildFtsQuery } = await import(
@@ -1470,7 +1475,10 @@ export async function main(argv = process.argv.slice(2)) {
   try {
     const dbRows = db.prepare('SELECT count(*) AS c FROM chunks').get().c
     const dbDocs = db.prepare('SELECT count(DISTINCT doc_path) AS c FROM chunks').get().c
-    const params = currentRetrievalParams()
+    const params = {
+      ...currentRetrievalParams(),
+      topKSource: getRetrievalConfig().topKSource,
+    }
     const maxDistance = params.maxDistance
     const topK = params.topK
 
@@ -2044,6 +2052,17 @@ export async function main(argv = process.argv.slice(2)) {
 
     // ─── 旋钮实验台 ─────────────────────────────────────
     // 6.1 MEMORY_TOP_K：**真跑链段**（改 env 单变量，用完还原）
+    // ⚠️ topK 的生效档现在是 settings > env > 默认：设置表存在 `memory_top_k` 行时，
+    // 下面改 env 不会生效，整列读数会贴在同一值上（静默假读数）。扫描前先判来源，
+    // 命中 settings 就拒出报告——本脚本 readonly 打开库，删不掉那行，只能让人换副本库重跑。
+    if (getRetrievalConfig().topKSource === 'settings') {
+      return refuse(
+        'settings-overrides-env',
+        {},
+        '设置表存在 memory_top_k（来源=settings），MEMORY_TOP_K 扫描会被设置页覆盖；' +
+          '请在副本库删除该行（或改回环境变量驱动）后重跑'
+      )
+    }
     const topkReal = []
     const baselineSectionCount = new Map(
       perEntry.map((p) => [p.entry.id, p.result.sections.length])

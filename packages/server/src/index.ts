@@ -24,6 +24,7 @@ import { messageRoutes } from './routes/messages.js'
 import { connectorRoutes } from './routes/connectors.js'
 import { configRoutes } from './routes/config.js'
 import { summaryConfigRoutes } from './routes/config-summary.js'
+import { retrievalConfigRoutes } from './routes/retrieval-config.js'
 import { internalRoutes } from './routes/internal.js'
 import { evalRoutes } from './routes/eval.js'
 import { ironLawRoutes } from './routes/iron-laws.js'
@@ -316,6 +317,7 @@ async function main(): Promise<void> {
   await app.register(connectorRoutes)
   await app.register(configRoutes)
   await app.register(summaryConfigRoutes)
+  await app.register(retrievalConfigRoutes)
   await app.register(internalRoutes)
   await app.register(evalRoutes)
   await app.register(ironLawRoutes)

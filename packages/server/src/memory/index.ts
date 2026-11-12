@@ -26,7 +26,8 @@
  *                    （总开关关时**不用**本档：那时门没决定任何事，一律 `not-enabled`）
  *
  * 环境变量:
- *   MEMORY_TOP_K                — 末次截断名额，按**节**计（默认 3；W2-c 前按**片**计）
+ *   MEMORY_TOP_K                — 末次截断名额，按**节**计（设置页 `memory_top_k` 优先，
+ *                                 env 为回落，代码默认 3；W2-c 前按**片**计）
  *   MEMORY_MAX_DISTANCE         — 检索距离下限（默认 0.6）
  *   MEMORY_CONTEXT_TOKEN_BUDGET — 注入预算硬上限（默认 8000）
  *   MEMORY_A2A_ENABLED          — a2a 触发时是否仍检索【相关记忆】（默认关），见 shouldSkipA2aMemory
@@ -49,7 +50,7 @@ import type {
 import { embedText, getEmbeddingStatus, isMemoryEnabled } from './embedding.js'
 import { rewriteRetrievalQueries } from './query-rewrite.js'
 import { createLogger } from '../logger.js'
-import { envNumber } from '../env-number.js'
+import { getRetrievalConfig } from '../config/retrieval.js'
 
 const log = createLogger('memory')
 
@@ -168,17 +169,17 @@ export interface RetrievalParamsSnapshot {
 
 /**
  * 本次检索的参数快照。单一来源——检索链与 `execution/reply.ts` 的超时/抛错
- * 路径（拿不到 `MemoryContextResult` 时）都取它，避免两处各读一遍 env 漂移。
+ * 路径（拿不到 `MemoryContextResult` 时）都取它，避免两处各读一遍参数漂移。
+ *
+ * topK / maxDistance 都经 `getRetrievalConfig()`：settings 表 `memory_top_k` 优先、
+ * env 回落、代码默认 3——**每次调用现读**，所以设置页保存后下一轮检索立即生效。
+ * 取整语义（原 `Math.trunc`）收在访问器里（`readEnvTopK`），`topK ≤ 0` 仍注入空集。
  */
 export function currentRetrievalParams(): RetrievalParamsSnapshot {
+  const cfg = getRetrievalConfig()
   return {
-    // topK 保持**整数**语义（原 `parseInt`）：`Math.trunc` 在调用点做，`envNumber`
-    // 形状固定两参不带模式开关。原先切片点 `slice(0, topK)` 会自行取整，W2-c 改成按
-    // **节**计名额后截断点不再切片 ⇒ 取整改由这里的 `Math.trunc` 独自承担（`topK ≤ 0`
-    // ⇒ 空集，见末次截断那轮循环的界判）。显式化是为了 `RetrievalParamsSnapshot`
-    // 快照里读到的就是真实生效的整数。
-    topK: Math.trunc(envNumber('MEMORY_TOP_K', 3)),
-    maxDistance: envNumber('MEMORY_MAX_DISTANCE', 0.6),
+    topK: cfg.topK,
+    maxDistance: cfg.maxDistance,
     probeN: MAX_PROBE_N,
   }
 }
@@ -367,9 +368,9 @@ export async function retrieveMemoryContext(triggerContent: string): Promise<Mem
  *
  * 抽出它的唯一理由是**注入查询集**：改写器原先内嵌在 `retrieveMemoryContext` 里，
  * 导出签名只吃 `triggerContent`，外部无法喂冻结改写（R10 跑批要的正是这个）。
- * 参数 / 阈值 / 预算仍**只读 env**（`currentRetrievalParams` /
- * `MEMORY_CONTEXT_TOKEN_BUDGET`），**不为抽取新增任何旋钮**——生产与跑批的口径
- * 因此自动同源，不会各自漂移。
+ * 参数 / 阈值 / 预算与生产同源（`currentRetrievalParams` 经 settings > env > 默认的
+ * 访问器现读；预算读 `MEMORY_CONTEXT_TOKEN_BUDGET`），**这里不另造旋钮**——生产与
+ * 跑批的口径因此自动同源，不会各自漂移。
  *
  * @param rawQueries 待检索的查询串。**`rawQueries[0]` 必须是原始查询**——探针池的
  *   「原话优先」语义（取首个嵌入成功者）依赖顺序。重复项在入口去重（幂等）：同一
@@ -505,8 +506,8 @@ export async function runRetrievalChain(
     //
     // 与 W2-c 之前的 `.slice(0, topK)` 的对照（**别读成「逐字同义」**）：
     //   `topK = 0` ⇒ 两边都是空集（同义）；`topK < 0` ⇒ **有意收紧**：`.slice(0, -1)`
-    //   是数组**负索引**语义（保留末尾 n-1 条，纯属意外），本处一律空集。`envNumber`
-    //   明写「不加区间钳位：`0` / 负数原样生效」⇒ 负数确实走得到这里，这条差异是刻意
+    //   是数组**负索引**语义（保留末尾 n-1 条，纯属意外），本处一律空集。env 回落的
+    //   `envNumber` 明写「不加区间钳位：`0` / 负数原样生效」⇒ 负数确实走得到这里，这条差异是刻意
     //   的不是遗漏（用例 `W2-c-2` 把 0 与 -1 两档都钉了）。
     if (ordered.length >= params.topK) break
     const key = `${s.row.doc_path}\0${s.row.section_anchor}`

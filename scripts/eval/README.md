@@ -77,6 +77,8 @@ stderr——本仓 logger 写 stdout，混流会毁掉机器通道。全部支�
 - 产物：缺省落 `docs/run/eval-system/T3-retrieval-optimization-diagnosis.md`（**不在 `docs/eval/`**）
 - 前置：tsx + 库 + sidecar + 黄金集
 - 只读保证：库 readonly 打开；`MEMORY_TOP_K` 扫描期临时改 env、**用完即还原**；
+  ⚠️ topK 现在 settings > env > 默认，**设置表若已有 `memory_top_k` 行，改 env 不再生效**——脚本会
+  在扫描前检测到并拒出报告（读数会整列贴在同一值，属静默假读数）；
   另三个融合参数是模块私有常量，只能在重建层做反事实，报告里**明标**为重建读数
 
 ## 测试
