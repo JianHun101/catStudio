@@ -93,17 +93,18 @@ export interface FoldNoticeMeta {
  */
 export function buildFoldNotice(meta: FoldNoticeMeta): string {
   const lines = [`会话标识：${meta.sessionId}（仅供审计，无需在回答中提及）`]
+  const lossy = '本摘要为有损压缩，原文完整保存在本会话中（system 通知不参与折叠与回查）。'
   if (meta.coveredToId) {
     const at = meta.coveredToAt ? `，边界时间：${meta.coveredToAt}` : ''
-    lines.push(`折叠范围：本会话消息 #${meta.coveredToId} 之前的历史已折叠为下列摘要${at}`)
+    lines.push(`折叠范围：本会话对话消息 #${meta.coveredToId} 之前的历史已折叠为下列摘要${at}`)
     lines.push(
-      '本摘要为有损压缩，原文完整保存在本会话中。需要核对原文时，可调用 query_session_messages 工具，' +
+      `${lossy}需要核对原文时，可调用 query_session_messages 工具，` +
         `以 before=${meta.coveredToId} 为游标回查被折叠区间的消息。`
     )
   } else {
     lines.push('折叠范围：边界未记录（旧版摘要条目）')
     lines.push(
-      '本摘要为有损压缩，原文完整保存在本会话中。需要核对原文时，可调用 query_session_messages 工具，' +
+      `${lossy}需要核对原文时，可调用 query_session_messages 工具，` +
         '以 before 游标向前翻阅被折叠区间的消息。'
     )
   }

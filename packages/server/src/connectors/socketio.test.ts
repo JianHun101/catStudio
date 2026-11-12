@@ -6763,22 +6763,19 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     expect(readCompressed()[0].content).toBe('')
   })
 
-  it('A2b 降级：SUMMARY_API_KEY 置空 + 超预算 → 注入 [历史折叠（降级）]', async () => {
-    const savedKey = process.env.SUMMARY_API_KEY
-    process.env.SUMMARY_API_KEY = ''
-    try {
-      insertHistory(11) // ~16400 token > 预算 13720（MAX=14000）→ 确实发生截断
-      const chatStream = await runCompressReply('msg-nokey-trunc')
-      const msgs = lastMessages(chatStream)
-      expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
-      const degraded = msgs.find((m) => m.content?.includes('[历史折叠（降级）]'))
-      expect(degraded).toBeDefined()
-      expect(degraded!.content).toContain('query_session_messages')
-      expect(degraded!.content).toMatch(/截断 \d+ 条/)
-    } finally {
-      if (savedKey === undefined) delete process.env.SUMMARY_API_KEY
-      else process.env.SUMMARY_API_KEY = savedKey
-    }
+  it('A2b 降级：生成返回空摘要（mock）+ 超预算 → 注入 [历史折叠（降级）]', async () => {
+    // mock 边界：本文件顶层 `vi.mock('../handoff/index.js')` 把 generateFullSummary 整个替身化，
+    // 默认替身返回空摘要（= 生成失败语义）。因此这里**测不到**「SUMMARY_API_KEY 为空」这条
+    // 真实 no-key 路径——置空 env 对替身无效。真实 no-key 路径由
+    // handoff/index.test.ts「无 API key → 空摘要 + 空边界」覆盖。
+    insertHistory(11) // ~16400 token > 预算 13720（MAX=14000）→ 确实发生截断
+    const chatStream = await runCompressReply('msg-nokey-trunc')
+    const msgs = lastMessages(chatStream)
+    expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
+    const degraded = msgs.find((m) => m.content?.includes('[历史折叠（降级）]'))
+    expect(degraded).toBeDefined()
+    expect(degraded!.content).toContain('query_session_messages')
+    expect(degraded!.content).toMatch(/截断 \d+ 条/)
   })
 
   it('A2b 不假报：摘要失败但未发生截断 → 不含降级标记', async () => {

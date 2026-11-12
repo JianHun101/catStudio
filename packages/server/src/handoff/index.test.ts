@@ -635,6 +635,42 @@ describe('handoff', () => {
       expect(result.coveredToId).toBe(MSG_ID(TOTAL))
     })
 
+    it('边界消息被删 → continuingFrom=null：全量重读、不带旧摘要前缀、不写旧边界、coveredCount 重算', async () => {
+      // 仅 4 条，边界 m2 随后被删（模拟回退删除）——旧条目仍声称覆盖至 m2。
+      const stmt = db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES (?, 's-chain', 'user', ?, '[]', ?)`
+      )
+      for (let i = 1; i <= 4; i++) stmt.run(MSG_ID(i), MSG_BODY(i), MSG_AT(i))
+      setSummaries([
+        {
+          id: 'entry-1',
+          createdAt: MSG_AT(2),
+          tokenCount: 5,
+          content: '旧摘要特征串',
+          coveredThrough: 2,
+          coveredToId: MSG_ID(2),
+          coveredToAt: MSG_AT(2),
+          coveredCount: 2,
+        },
+      ])
+      db.prepare('DELETE FROM messages WHERE id = ?').run(MSG_ID(2))
+
+      const result = await generateFullSummary('s-chain', 2000)
+
+      const prompt = lastPrompt()
+      // 边界没命中 ⇒ 旧摘要不得作前缀，也不得写「覆盖至 #m2」
+      expect(prompt).not.toContain('旧摘要特征串')
+      expect(prompt).not.toContain(`覆盖至消息 #${MSG_ID(2)}`)
+      // 全量重读：存活消息一条不落
+      expect(prompt).toContain(MSG_BODY(1))
+      expect(prompt).toContain(MSG_BODY(3))
+      expect(prompt).toContain(MSG_BODY(4))
+      // 全量语义下计数从本次输入重算（不是 旧 coveredCount 2 + 3）
+      expect(result.coveredCount).toBe(3)
+      expect(result.coveredToId).toBe(MSG_ID(4))
+    })
+
     it('边界元数据由读消息那一刻的末条确定（coveredToId/coveredToAt/coveredCount）', async () => {
       insertMessages()
 
