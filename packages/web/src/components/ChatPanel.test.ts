@@ -2240,7 +2240,7 @@ describe('C-1 消息流懒加载', () => {
     expect(el.scrollTop).toBe(500)
   })
 
-  it('状态条：加载中提示 / 已到开头 / 空会话不显示', async () => {
+  it('状态条：加载中提示 / 已到开头 / 空会话（只有合成消息）不显示', async () => {
     const store = setup()
     store.hasMoreOlder = true
     await mountPanel()
@@ -2257,10 +2257,119 @@ describe('C-1 消息流懒加载', () => {
     await nextTick()
     expect(wrapper!.text()).toContain('已到会话开头')
 
-    // 空会话是「空场」不是「翻到了开头」
-    store.messages = []
+    // 真实空会话的形态：只有 welcome 合成消息 = 空场，不是「翻到了开头」
+    store.messages = [
+      {
+        id: 'welcome-s1',
+        sessionId: 's1',
+        agentId: null,
+        role: 'system',
+        content: '欢迎',
+        mentions: [],
+        createdAt: '2026-01-01T00:00:00.000Z',
+      } as Message,
+    ]
     await nextTick()
     expect(wrapper!.text()).not.toContain('已到会话开头')
+
+    // 广播开关提示（broadcast- 本地合成、不落库）同样不算「有真实消息」
+    store.messages = [
+      {
+        id: 'broadcast-1',
+        sessionId: 's1',
+        agentId: null,
+        role: 'system',
+        content: '📢 广播模式已开启',
+        mentions: [],
+        createdAt: '2026-01-01T00:00:01.000Z',
+      } as Message,
+    ]
+    await nextTick()
+    expect(wrapper!.text()).not.toContain('已到会话开头')
+
+    // 一条真实消息 + 封口 → 显示（与上一条只差「落库消息」，证明判据不是恒真/恒假）
+    store.messages = [
+      ...store.messages,
+      {
+        id: 'm-real',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '真消息',
+        mentions: [],
+        createdAt: '2026-01-01T00:00:02.000Z',
+      } as Message,
+    ]
+    await nextTick()
+    expect(wrapper!.text()).toContain('已到会话开头')
+  })
+
+  it('失败态：文案可点重试，点击后 olderError 复位并重新请求', async () => {
+    const store = setup()
+    store.hasMoreOlder = true
+    const { container, el } = await mountPanel()
+    pin(el, { scrollTop: 800, scrollHeight: 1000, clientHeight: 400 })
+    await container.trigger('scroll') // 建立上次读数 800（此时不触发）
+
+    loadSpy().mockRejectedValueOnce(new Error('Failed to fetch'))
+    pin(el, { scrollTop: 200 })
+    await container.trigger('scroll')
+    await flushPromises()
+
+    const btn = wrapper!.find('.older-status-error')
+    expect(btn.exists()).toBe(true)
+    expect(btn.text()).toContain('加载更早消息失败，点此重试')
+    expect(store.olderError).toContain('HTTP 接口请求失败')
+
+    loadSpy().mockResolvedValueOnce([]) // 重试成功（空页 = 确认到底）
+    await btn.trigger('click')
+    await flushPromises()
+
+    expect(loadSpy()).toHaveBeenCalledTimes(2)
+    expect(store.olderError).toBeNull()
+    expect(store.hasMoreOlder).toBe(false)
+  })
+
+  it('顺序：翻页请求 pending 期间贴底判定已更新（新消息显示「N 条新消息」，不抢滚动条）', async () => {
+    const store = setup()
+    store.hasMoreOlder = true
+    const { container, el } = await mountPanel()
+    pin(el, { scrollTop: 600, scrollHeight: 1000, clientHeight: 400 })
+    await container.trigger('scroll') // 建立上次读数 600（贴底，不触发翻页）
+    expect(loadSpy()).not.toHaveBeenCalled()
+
+    let resolve!: (rows: Message[]) => void
+    loadSpy().mockReturnValueOnce(
+      new Promise<Message[]>((r) => {
+        resolve = r
+      })
+    )
+    pin(el, { scrollTop: 200 })
+    await container.trigger('scroll') // 真向上滚 → 发请求并挂起
+    expect(store.loadingOlder).toBe(true)
+
+    // 请求还没回来时追加新消息：贴底判定若拖到 await 之后，isAtBottom 仍是旧值 true → 抢滚动条
+    store.messages = [
+      ...store.messages,
+      {
+        id: 'm-new',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '待到达的新消息',
+        mentions: [],
+        createdAt: '2026-01-01T00:00:30.000Z',
+      } as Message,
+    ]
+    await nextTick()
+    await flushPromises()
+
+    const indicator = wrapper!.find('.scroll-down-btn')
+    expect(indicator.classes()).not.toContain('scroll-down-btn--hidden')
+    expect(indicator.text()).toContain('1 条新消息')
+
+    resolve([])
+    await flushPromises()
   })
 
   it('F｜日期分隔吸顶：position: sticky + top: 0，且层级低于告警横幅、不吃点击', () => {

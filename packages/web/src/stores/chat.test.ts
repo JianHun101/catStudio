@@ -277,6 +277,31 @@ describe('chatStore', () => {
       expect(store.loadingMessages).toBe(false)
     })
 
+    it('命中缓存时 hasMoreOlder 按缓存里的非合成消息数判初值（不再无条件 false）', () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2', title: 'S2' }]
+      const welcome = { ...mockMessage, id: 'welcome-s1', role: 'system' as const, sessionId: 's1' }
+      const real = (n: number): Message[] =>
+        Array.from({ length: n }, (_, i) => ({
+          ...mockMessage,
+          id: `c${i + 1}`,
+          sessionId: 's1',
+        })) as Message[]
+
+      // 200 条非合成 + 1 条合成 → 满页 ⇒ 切回时 hasMoreOlder 应为 true
+      store.activeSessionId = 's1'
+      store.messages = [welcome, ...real(200)]
+      store.joinSession('s2') // 缓存 s1
+      store.joinSession('s1') // 命中缓存
+      expect(store.messages).toHaveLength(201)
+      expect(store.hasMoreOlder).toBe(true)
+
+      // 10 条非合成 + 1 条合成 → 不足一页 ⇒ false
+      store.messages = [welcome, ...real(10)]
+      store.joinSession('s2')
+      store.joinSession('s1')
+      expect(store.hasMoreOlder).toBe(false)
+    })
+
     it('SESSION_HISTORY 权威校正后更新缓存（补切走期间增量，防缓存陈旧）', () => {
       store.sessions = [mockSession, { ...mockSession, id: 's2', title: 'S2' }]
       store.activeSessionId = 's1'
@@ -1728,7 +1753,7 @@ describe('chatStore', () => {
       ])
     })
 
-    it('不足一页即封口；已封口或并发中不再发请求', async () => {
+    it('不足一页即封口；已封口不再发请求', async () => {
       store.activeSessionId = 's1'
       store.messages = msgs(5, 10)
       store.hasMoreOlder = true
@@ -1740,12 +1765,29 @@ describe('chatStore', () => {
 
       await store.loadOlderMessages() // 已封口 ⇒ no-op
       expect(mockGetSessionMessages).toHaveBeenCalledTimes(1)
+    })
 
-      // 并发保护：loadingOlder 为真时直接 return（滚动事件会成簇触发）
+    it('并发调两次只发一次请求，两个调用复用同一个在途 Promise（C-3 契约 6）', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(5, 10)
       store.hasMoreOlder = true
-      store.loadingOlder = true
-      await store.loadOlderMessages()
+      let resolve!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((r) => {
+          resolve = r
+        })
+      )
+
+      const p1 = store.loadOlderMessages()
+      const p2 = store.loadOlderMessages()
       expect(mockGetSessionMessages).toHaveBeenCalledTimes(1)
+      expect(store.loadingOlder).toBe(true)
+
+      resolve(msgs(3, 7).reverse()) // m8..m10
+      expect(await p1).toBe(true)
+      expect(await p2).toBe(true)
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(1)
+      expect(store.loadingOlder).toBe(false)
     })
 
     it('等待期间切了会话 → 丢弃这一页，不串进新会话', async () => {
@@ -1795,6 +1837,41 @@ describe('chatStore', () => {
       expect(store.messages.some((m) => m.id === 'm30')).toBe(true)
       expect(store.focusMessageId).toBe('m30')
       expect(store.focusNonce).toBe(1)
+    })
+
+    it('reveal 在途：复用滚动已触发的同一次翻页，命中即返回 true（不空转到轮次上限）', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(20, 100) // m101..m120
+      store.hasMoreOlder = true
+      let resolve!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((r) => {
+          resolve = r
+        })
+      )
+
+      const inFlight = store.loadOlderMessages() // 用户上滚触发的那一页
+      const reveal = store.revealMessage('m90') // 目标正好落在这一页
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(1)
+
+      resolve(msgs(50, 50).reverse()) // m51..m100
+      expect(await reveal).toBe(true)
+      expect(await inFlight).toBe(true)
+      expect(store.focusMessageId).toBe('m90')
+      // 在途请求被复用，没有为 reveal 再发一次同游标请求
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(1)
+    })
+
+    it('reveal 遇失败页：不空转到上限，当轮即返回 false', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(20, 100)
+      store.hasMoreOlder = true
+      mockGetSessionMessages.mockRejectedValueOnce(new Error('Failed to fetch'))
+
+      expect(await store.revealMessage('m90')).toBe(false)
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(1)
+      // 失败态留给 UI 重试入口，不用无进展的重试掩盖
+      expect(store.olderError).toContain('HTTP 接口请求失败')
     })
 
     it('D｜已加载目标：直接发焦点信号，不再翻页', async () => {
