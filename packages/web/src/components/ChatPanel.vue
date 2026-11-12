@@ -2,7 +2,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import type { Directive } from 'vue'
 import type { Message, StreamSegment, ToolCallInfo, ExecutionMeta } from '@cat-study/shared'
-import { useChatStore, type AgentStatusEntry } from '@/stores/chat'
+import { useChatStore, isSyntheticHead, type AgentStatusEntry } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { useSkillCommand } from '@/composables/useSkillCommand'
 import { useTheme } from '@/composables/useTheme'
@@ -342,6 +342,14 @@ const OLDER_TRIGGER_DISTANCE = 300
 let lastScrollTop = 0
 
 /**
+ * 「已到会话开头」的渲染前提：至少一条**落库**消息。
+ *
+ * 真实空会话也必有 `welcome-*` 合成消息（`activeMessages.length > 0` 恒真），若只按长度判，
+ * 新会话会显示「已到会话开头」——那是终点提示，不是空场提示。
+ */
+const hasRealMessages = computed(() => store.activeMessages.some((m) => !isSyntheticHead(m)))
+
+/**
  * 主消息区滚动：贴底跟随的判据 + 向上滚到近顶时拉一页更早历史。
  *
  * **只在用户主动向上滚时触发**：初次挂载 / 切会话 / 追加新消息都是程序性位移
@@ -349,6 +357,9 @@ let lastScrollTop = 0
  *
  * 前插会让内容整体下移，故加载前记 `scrollHeight`、加载后把差值补进 `scrollTop`——
  * 用户正在读的那一行留在原位（滚动锚定），否则视口会突然跳到别处。
+ *
+ * `checkScrollPosition()` 必须在 `await` **之前**先跑一次：翻页可能耗时，等待期间到达的
+ * 新消息要按「用户已滚上去」处理（显示「N 条新消息」），而不是拿旧的贴底判定去抢滚动条。
  */
 async function onMessagesScroll(): Promise<void> {
   const el = chatContainer.value
@@ -363,6 +374,8 @@ async function onMessagesScroll(): Promise<void> {
     ) {
       const beforeHeight = el.scrollHeight
       const beforeTop = el.scrollTop
+      // 先落「是否贴底」的判定，再等网络（末尾再算一次兜底）
+      checkScrollPosition()
       await store.loadOlderMessages()
       await nextTick()
       if (chatContainer.value === el) {
@@ -1531,11 +1544,20 @@ const messageViews = computed<MessageView[]>(() => {
           <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>
         </div>
 
-        <!-- 懒加载状态条（C-1）：正在向前翻页 / 已到会话开头。消息数为 0 时不显示——
-             那是「新会话空场」而不是「翻到了开头」 -->
+        <!-- 懒加载状态条（C-1 / C-3）：正在向前翻页 / 失败可重试 / 已到会话开头。
+             末态只在**至少一条落库消息**时显示——真实空会话必有 welcome 合成消息，
+             只按条数判会把「空场」显示成「翻到了开头」。loadingOlder 优先级最高。 -->
         <div v-if="store.loadingOlder" class="older-status" role="status">正在加载更早消息…</div>
+        <button
+          v-else-if="store.olderError"
+          type="button"
+          class="older-status older-status-error"
+          @click="store.loadOlderMessages()"
+        >
+          加载更早消息失败，点此重试
+        </button>
         <div
-          v-else-if="!store.hasMoreOlder && store.activeMessages.length > 0"
+          v-else-if="!store.hasMoreOlder && hasRealMessages"
           class="older-status older-status-done"
         >
           已到会话开头
@@ -2458,6 +2480,19 @@ const messageViews = computed<MessageView[]>(() => {
 .older-status-done {
   background: transparent;
   opacity: 0.6;
+}
+
+/* 失败可重试：沿用细条形态，但换成可点击的红色系——静默失败会让用户以为「到底了」 */
+.older-status-error {
+  border: none;
+  font: inherit;
+  font-size: 11px;
+  color: var(--accent-red);
+  cursor: pointer;
+}
+
+.older-status-error:hover {
+  text-decoration: underline;
 }
 
 /* ─── 回退分隔线（T1）───────────────────── */

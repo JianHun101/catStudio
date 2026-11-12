@@ -229,9 +229,13 @@ N=9 → **0ms** · N=56 → **200ms** · N=201 → **539 / 540 / 785 / 795ms**�
 
 ### 票单勘误两处（实测推翻派活口径，非执行缺失）
 
-1. **「300 条」在真实加载路径不可达** —— `packages/server/src/db/repository/messages.ts:92`
-   `getSessionHistory(sessionId, limit = 200)` 为 `ORDER BY created_at ASC LIMIT 200`，取**最早** 200 条。
-   A1 用 200 条本身没错；A5 的「300 条」读作「**满载 200 条**」。
+1. **「300 条」在真实加载路径不可达**（**C-1 前**的口径；C-1 起首屏语义已改，见段末现状）——
+   `packages/server/src/db/repository/messages.ts` 的 `getSessionHistory(sessionId, limit = 200)`
+   **当时**为 `ORDER BY created_at ASC LIMIT 200`，取**最早** 200 条。
+   A1 用 200 条本身没错（当时的会话本就 ≤200）；A5 的「300 条」读作「**满载 200 条**」。
+   **现状（C-1 起）**：`getSessionHistory` 改为 `ORDER BY created_at DESC, id DESC LIMIT 200`
+   后再反转为 ASC，取**最新** 200 条；更早的消息由前端带 `before` 游标分页回补（懒加载）。
+   本单的读数（N=201、一次性 539–795ms）与 OQ1 裁决仍然成立——每次仍只渲染一页 200 条。
 2. **自证闸判据不足：「状态码 200」≠「在测含本次改动的代码」** —— vite 的 SPA fallback 对**不存在的模块**
    也回 `200 + text/html + index.html`（实测 `:5173` 对 `/src/components/MessageItem.vue` 正是如此）。
    闸已升级为 **content-type + 模块特征双重断言**。**状态码不是内容**——同「验证面必须与被判面同面」。

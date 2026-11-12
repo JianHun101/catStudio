@@ -28,6 +28,7 @@ import {
   MISS_RX,
   RECHECK_MAX_DISTANCE,
   REPO_ROOT,
+  WIDE_RECALL_TOP_N,
   anchorKey,
   buildCanaries,
   buildRecheckIndex,
@@ -433,6 +434,126 @@ describe('scoreEntry — 重搜把 below_topk 从覆盖洞里拆出来', () => {
   })
 })
 
+describe('scoreEntry — 宽向量召回把「池外」与「缺节」拆开', () => {
+  const wideFor = (a, w) => new Map([[anchorKey(a.doc_path, a.section_anchor), w]])
+  const wide = (over = {}) => ({
+    queryIndex: 0,
+    rank: 0,
+    channel: 'vector',
+    distance: 0.4,
+    keywordHit: false,
+    ...over,
+  })
+  const corpus = (...anchors) =>
+    new Set(anchors.map((a) => anchorKey(a.doc_path, a.section_anchor)))
+
+  it('在库、距离在阈值内、但名次 ≥ 池窗口 ⇒ outside-window（带 bestRank/bestDist/windowN）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: new Map(),
+      wideIndex: wideFor(A, wide({ rank: 23, distance: 0.4998 })),
+      corpusAnchors: corpus(A),
+      windowN: 20,
+    })
+    expect(s.details[0]).toMatchObject({
+      status: 'outside-window',
+      drop: null,
+      source: 'wide',
+      bestRank: 23,
+      bestDist: 0.4998,
+      windowN: 20,
+      distance: 0.4998,
+    })
+    // 读数只用于归因：命中数 / 阈值前命中**一格都不动**
+    expect(s.hit).toBe(0)
+    expect(s.preThreshold).toBe(0)
+  })
+
+  it('`chunks` 表查无此节 ⇒ corpus-absent（真覆盖洞，不是池外）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: new Map(),
+      wideIndex: new Map(),
+      corpusAnchors: corpus(B), // 只有 B，没有 A
+      windowN: 20,
+    })
+    expect(s.details[0]).toMatchObject({ status: 'corpus-absent', drop: null })
+  })
+
+  it('在库、名次 < 池窗口却仍未被重搜收下 ⇒ not_topk（融合层截断，与 not_topk 同药方）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: new Map(),
+      wideIndex: wideFor(A, wide({ rank: 5, distance: 0.4 })),
+      corpusAnchors: corpus(A),
+      windowN: 20,
+    })
+    expect(s.details[0]).toMatchObject({ status: 'not_topk', drop: null, bestRank: 5 })
+  })
+
+  it('名次在窗口外时，即使距离 ≥ 阈值也判 outside-window 且 preThreshold 不变（松阈值也进不了池）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: new Map(),
+      wideIndex: wideFor(A, wide({ rank: 151, distance: 0.8 })),
+      corpusAnchors: corpus(A),
+      windowN: 20,
+    })
+    expect(s.details[0]).toMatchObject({
+      status: 'outside-window',
+      overThreshold: true,
+      bestRank: 151,
+    })
+    expect(s.preThreshold).toBe(0) // 旧口径会把它记成 threshold，从而虚增阈值前命中
+  })
+
+  it('在库、但宽召回 top-N 也没看见 ⇒ outside-window + 名次 >N（仍属池外，不是缺节）', () => {
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: new Map(),
+      wideIndex: new Map(),
+      corpusAnchors: corpus(A),
+      windowN: 20,
+    })
+    expect(s.details[0]).toMatchObject({
+      status: 'outside-window',
+      bestRank: null,
+      bestDist: null,
+      beyondWideRecall: 200,
+      windowN: 20,
+    })
+  })
+
+  it('未传语料索引 ⇒ 退回旧口径 not-recalled（窄用例不被迫造语料集）', () => {
+    const s = scoreEntry({ entry: entry(), result: result(), recheck: new Map() })
+    expect(s.details[0].status).toBe('not-recalled')
+  })
+
+  it('bestRank / bestDist **同源**：取最小距离那一趟，名次跟着它走（不许跨查询拼）', () => {
+    const idx = buildRecheckIndex({
+      perQuery: [
+        [poolHit(A.doc_path, A.section_anchor, 151, { distance: 0.3881 })],
+        [],
+        [poolHit(A.doc_path, A.section_anchor, 76, { distance: 0.4451 })],
+      ],
+    })
+    const s = scoreEntry({
+      entry: entry(),
+      result: result(),
+      recheck: new Map(),
+      wideIndex: idx,
+      corpusAnchors: corpus(A),
+      windowN: 20,
+    })
+    expect(s.details[0]).toMatchObject({ queryIndex: 0, bestRank: 151, bestDist: 0.3881 })
+  })
+})
+
 describe('rescoreWithRecheck — 评分接线：重搜**真的被接上**', () => {
   /**
    * 这组测的是**接线**，不是纯函数语义（后者在上一组已穷举）。
@@ -525,8 +646,46 @@ describe('rescoreWithRecheck — 评分接线：重搜**真的被接上**', () =
     // 分数必须来自接线函数，且生产的嵌入器真被绑上去（而非另起一个未接线的分叉）
     expect(loop).toMatch(/=\s*await rescoreWithRecheck\(\{/)
     expect(loop).toContain('embed: embedText')
+    // 宽向量召回与语料在场性也必须接上——漏一个，`outside-window` 就静默退回 `not-recalled`
+    expect(loop).toContain('wideSearch:')
+    expect(loop).toContain('searchChunksByVector')
+    expect(loop).toContain('corpusAnchors,')
+    expect(loop).toContain('windowN,')
     // 旁路面：循环里不得再**直接**调 scoreEntry 打分——那正是「重搜被静默关掉」的形态
     expect(loop).not.toContain('scoreEntry(')
+  })
+
+  it('给了 wideSearch ⇒ 同批跑宽向量召回并改判 outside-window（top-N 透到检索层）', async () => {
+    const wideCalls = []
+    const out = await rescoreWithRecheck({
+      entry: entry(),
+      result: result(),
+      queries: ['q0'],
+      embed: async () => ({ ok: true, vector: [1] }),
+      search: () => [], // 重搜 20 片池里没有
+      wideSearch: (vector, topK, maxDistance) => {
+        wideCalls.push({ topK, maxDistance })
+        return [
+          // 前 23 片占位：把目标锚点顶到 rank 23（下标 23）
+          ...Array.from({ length: 23 }, (_, i) => ({
+            doc_path: `pad${i}.md`,
+            section_anchor: `p${i}`,
+            distance: 0.1,
+          })),
+          { doc_path: A.doc_path, section_anchor: A.section_anchor, distance: 0.4998 },
+        ]
+      },
+      corpusAnchors: new Set([anchorKey(A.doc_path, A.section_anchor)]),
+      windowN: 20,
+    })
+    expect(out.rechecked).toBe(true)
+    expect(out.score.details[0]).toMatchObject({
+      status: 'outside-window',
+      bestRank: 23,
+      bestDist: 0.4998,
+      windowN: 20,
+    })
+    expect(wideCalls).toEqual([{ topK: WIDE_RECALL_TOP_N, maxDistance: RECHECK_MAX_DISTANCE }])
   })
 })
 
@@ -539,15 +698,17 @@ describe('summarizeMissDistances — §二 结论的证据面', () => {
     ...over,
   })
 
-  it('三分类互斥且穷尽：有向量距离 / 仅关键词 / 够不着；距离按来源分列', () => {
+  it('四分类互斥且穷尽：有向量距离 / 仅关键词 / 缺节 / 无读数；距离按来源分列', () => {
     const r = summarizeMissDistances({
       scores: [
         {
           details: [
             det({ distance: 0.5, channel: 'vector', source: 'trace' }),
             det({ distance: 0.9, channel: 'both', source: 'recheck' }),
+            det({ distance: 0.45, channel: 'vector', source: 'wide', status: 'outside-window' }),
             det({ distance: null, channel: 'keyword' }),
-            det({ distance: null, channel: null }), // not-recalled：连重搜都没够着
+            det({ status: 'corpus-absent', drop: null }), // 库里没有
+            det({ distance: null, channel: null, status: 'not-recalled' }), // 旧口径兜底：无读数
             det({ status: 'injected', drop: null }), // 命中的不算
           ],
         },
@@ -555,17 +716,44 @@ describe('summarizeMissDistances — §二 结论的证据面', () => {
       maxDistance: 0.6,
     })
     expect(r).toEqual({
-      total: 4,
+      total: 6,
       keywordOnly: 1,
-      vectorKnown: 2,
+      vectorKnown: 3,
       fromTrace: 1,
       fromRecheck: 1,
-      atOrAboveThreshold: 1,
-      unreachable: 1,
+      fromWide: 1,
+      atOrAboveThreshold: 1, // 只有 trace 那条 0.9；outside-window 不计入（名次已出窗）
       maxDistance: 0.9,
+      corpusAbsent: 1,
+      outsideWindow: 1,
+      outsideWindowOverThreshold: 0,
+      noReading: 1,
     })
-    // 三分类必须是个划分（否则报告里「合计 N 处」与三个子数对不上账）
-    expect(r.keywordOnly + r.vectorKnown + r.unreachable).toBe(r.total)
+    // 四分类必须是个划分（否则报告里「合计 N 处」与子数对不上账）
+    expect(r.keywordOnly + r.vectorKnown + r.corpusAbsent + r.noReading).toBe(r.total)
+  })
+
+  it('outside-window 即使距离 ≥ 阈值也不进阈值桶（松阈值也进不了池 ⇒ 反向药方）', () => {
+    const r = summarizeMissDistances({
+      scores: [
+        {
+          details: [
+            det({
+              distance: 0.8,
+              channel: 'vector',
+              source: 'wide',
+              status: 'outside-window',
+              overThreshold: true,
+            }),
+          ],
+        },
+      ],
+      maxDistance: 0.6,
+    })
+    expect(r.atOrAboveThreshold).toBe(0)
+    expect(r.outsideWindow).toBe(1)
+    expect(r.outsideWindowOverThreshold).toBe(1)
+    expect(r.vectorKnown).toBe(1)
   })
 
   it('全在阈值内 ⇒ atOrAboveThreshold = 0（报告里那句「阈值一条都没杀」的判据）', () => {
@@ -577,10 +765,10 @@ describe('summarizeMissDistances — §二 结论的证据面', () => {
     expect(r.maxDistance).toBe(0.5427)
   })
 
-  it('一个距离都没有 ⇒ maxDistance = null（不是 -Infinity / NaN）', () => {
+  it('一个距离都没有 ⇒ maxDistance = null（不是 -Infinity / NaN），记 noReading', () => {
     const r = summarizeMissDistances({ scores: [{ details: [det()] }], maxDistance: 0.6 })
     expect(r.maxDistance).toBe(null)
-    expect(r.unreachable).toBe(1)
+    expect(r.noReading).toBe(1)
   })
 
   it('空集 ⇒ 全零、不抛', () => {
@@ -590,9 +778,13 @@ describe('summarizeMissDistances — §二 结论的证据面', () => {
       vectorKnown: 0,
       fromTrace: 0,
       fromRecheck: 0,
+      fromWide: 0,
       atOrAboveThreshold: 0,
-      unreachable: 0,
       maxDistance: null,
+      corpusAbsent: 0,
+      outsideWindow: 0,
+      outsideWindowOverThreshold: 0,
+      noReading: 0,
     })
   })
 })
@@ -779,9 +971,31 @@ describe('checkAttributionCoverage — 归因值域自检', () => {
 
   it('值域表的键与链段实际会产出的值逐字对齐（防未来加值静默）', () => {
     // droppedReason 的三个 probe 值与一个 final 值 + 本脚本自造的 below_topk / not-recalled
-    for (const k of ['threshold', 'status', 'not_topk', 'budget', 'below_topk', 'not-recalled']) {
+    // + 宽向量召回拆出的 outside-window / corpus-absent
+    for (const k of [
+      'threshold',
+      'status',
+      'not_topk',
+      'budget',
+      'below_topk',
+      'not-recalled',
+      'outside-window',
+      'corpus-absent',
+    ]) {
       expect(MISS_RX).toHaveProperty(k)
     }
+  })
+
+  it('池外 / 缺节这两个新状态也在值域内（漏登记会让汇总表静默少两整类）', () => {
+    const c = checkAttributionCoverage([
+      {
+        details: [
+          { status: 'outside-window', drop: null },
+          { status: 'corpus-absent', drop: null },
+        ],
+      },
+    ])
+    expect(c.ok).toBe(true)
   })
 
   it('重搜判出来的 below_topk 也在值域内（它是本脚本自造的状态，最易漏登记）', () => {
@@ -925,11 +1139,38 @@ describe('renderReport — 确定性与内容面', () => {
             drop: null,
             distance: 0.45,
             channel: 'vector',
+            source: 'recheck',
             queryIndex: 1,
             rank: 5,
           },
-          // 覆盖洞：连重搜都够不着 ⇒ 无距离、无通道
-          { docPath: 'd4', sectionAnchor: 's4', status: 'not-recalled', drop: null },
+          // 真覆盖洞：`chunks` 表查无此节 ⇒ corpus-absent（不再是笼统的 not-recalled）
+          { docPath: 'd4', sectionAnchor: 's4', status: 'corpus-absent', drop: null },
+        ],
+        forbidHit: [],
+      },
+      {
+        id: 'C03',
+        kind: 'constructed',
+        reason: 'ok',
+        expectTotal: 1,
+        hit: 0,
+        recall: 0,
+        preThreshold: 0,
+        details: [
+          {
+            docPath: 'd5',
+            sectionAnchor: 's5',
+            status: 'outside-window',
+            drop: null,
+            source: 'wide',
+            channel: 'vector',
+            distance: 0.4998,
+            bestRank: 23,
+            bestDist: 0.4998,
+            windowN: 20,
+            queryIndex: 0,
+            rank: 23,
+          },
         ],
         forbidHit: [],
       },
@@ -1026,13 +1267,25 @@ describe('renderReport — 确定性与内容面', () => {
     expect(ok).not.toMatch(/端口\D{0,8}\d{2,}/)
   })
 
-  it('§二 带未召回锚点读数：最大距离 / 阈值杀几条 / 真覆盖洞三个数都从数据算', () => {
+  it('§二 带未召回锚点读数：最大距离 / 阈值杀几条 / 池外三列都从数据算', () => {
     const md = renderReport(ctx())
     expect(md).toContain('未召回锚点读数')
     expect(md).toContain('最大 0.7500')
     expect(md).toContain('距离 ≥ 阈值的有 **1** 处')
+    // 池外 vs 缺节：三列（bestRank / bestDist / windowN）逐个来自明细，不是字面量
+    expect(md).toContain('| 状态 | 处数 | bestRank | bestDist | windowN |')
+    expect(md).toContain('| outside-window | 1 | 23 | 0.4998 | 20 |')
+    expect(md).toContain('| corpus-absent | 1 | — | — | — |')
+    // 旧判词退役：不再把「重搜够不着」一律叫「真覆盖洞」
+    expect(md).not.toContain('都够不着的 **1** 处 = 真覆盖洞')
+    expect(md).toContain('池外 ≠ 覆盖洞')
+  })
+
+  it('§三/§四 明细带「池外读数」列（bestRank / bestDist / windowN 摊到行上，可逐条核）', () => {
+    const md = renderReport(ctx())
+    expect(md).toContain('| 池外读数（bestRank / bestDist / windowN） |')
     expect(md).toContain(
-      `连重搜（阈值放宽到 ${RECHECK_MAX_DISTANCE}）都够不着的 **1** 处 = 真覆盖洞`
+      '| C03 | ok | 1 | 0 | 0.0000 | 0 | d5 :: s5（outside-window dist=0.4998） | 23 / 0.4998 / 20 |'
     )
   })
 
@@ -1046,8 +1299,8 @@ describe('renderReport — 确定性与内容面', () => {
 
   it('§七 计数单位 = (条目, 锚点) 对，并给出**去重后**的锚点数', () => {
     const md = renderReport(ctx())
-    expect(md).toContain('未召回归因合计 3 **处**')
-    expect(md).toContain('去重后 3 个不同锚点')
+    expect(md).toContain('未召回归因合计 4 **处**')
+    expect(md).toContain('去重后 4 个不同锚点')
   })
 })
 
