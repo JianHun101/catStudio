@@ -104,7 +104,12 @@ vi.mock('../handoff/index.js', () => ({
   shouldHandoff: vi.fn(() => false),
   performHandoff: vi.fn().mockResolvedValue(undefined),
   injectSummaryIntoSystem: vi.fn((s: string) => s),
-  generateFullSummary: vi.fn(),
+  generateFullSummary: vi.fn(async () => ({
+    summary: '',
+    coveredToId: null,
+    coveredToAt: null,
+    coveredCount: 0,
+  })),
 }))
 
 vi.mock('../git/diff-collector.js', () => ({

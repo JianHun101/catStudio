@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { getRelevantMessages } from './context.js'
+import {
+  getRelevantMessages,
+  buildFoldNotice,
+  buildSummaryBlockMessage,
+  SUMMARY_PREFIX,
+} from './context.js'
 
 function userMsg(content: string, mentions: string[] = []) {
   return {
@@ -138,5 +143,78 @@ describe('getRelevantMessages', () => {
       expect(result).toHaveLength(1)
       expect(result[0].content).toBe('吐槽猫过来')
     })
+  })
+})
+
+describe('buildFoldNotice — 折叠声明（字段契约 + 反向断言）', () => {
+  const META = {
+    sessionId: 'sess-abc',
+    coveredToId: 'msg-200',
+    coveredToAt: '2026-11-12T08:00:00.123Z',
+  }
+
+  it('声明含会话标识、覆盖边界消息 id、边界时间、有损声明、回查工具与 before 游标', () => {
+    const notice = buildFoldNotice(META)
+
+    expect(notice).toContain('sess-abc')
+    expect(notice).toMatch(/折叠范围.*#msg-200/)
+    expect(notice).toContain(META.coveredToAt)
+    expect(notice).toContain('有损')
+    expect(notice).toContain('原文完整保存在本会话')
+    expect(notice).toContain('query_session_messages')
+    expect(notice).toContain('before=msg-200')
+    expect(notice).toContain('仅供审计，无需在回答中提及')
+  })
+
+  it('反向断言：不出现 sessionId= / 传入会话 id / 查其他会话（不提示跨会话通道）', () => {
+    const notice = buildFoldNotice(META)
+
+    expect(notice).not.toContain('sessionId=')
+    expect(notice).not.toContain('传入会话 id')
+    expect(notice).not.toContain('查其他会话')
+  })
+
+  it('不写全局条数、不写 #1–#N 区间（per-agent 折叠面不同，边界才是全局统一的）', () => {
+    const notice = buildFoldNotice(META)
+
+    expect(notice).not.toMatch(/#1[–-]?#?\d*/)
+    expect(notice).not.toMatch(/共\s*\d+\s*条/)
+  })
+
+  it('旧条目无 coveredToId → 写「边界未记录」，不编造边界与游标值', () => {
+    const notice = buildFoldNotice({ sessionId: 'sess-abc' })
+
+    expect(notice).toContain('边界未记录')
+    expect(notice).toContain('query_session_messages')
+    expect(notice).toContain('before')
+    expect(notice).not.toContain('before=')
+    expect(notice).not.toMatch(/#\s*\d+/)
+  })
+})
+
+describe('buildSummaryBlockMessage — 输出顺序', () => {
+  it('SUMMARY_PREFIX → 折叠声明 → 分隔线 → 摘要，顺序钉死', () => {
+    const notice = buildFoldNotice({
+      sessionId: 'sess-abc',
+      coveredToId: 'msg-200',
+      coveredToAt: '2026-11-12T08:00:00.123Z',
+    })
+    const msg = buildSummaryBlockMessage('摘要正文', notice)
+    const content = msg.content as string
+
+    expect(msg.role).toBe('user')
+    const prefixIdx = content.indexOf(SUMMARY_PREFIX)
+    const noticeIdx = content.indexOf('折叠范围')
+    const sepIdx = content.indexOf('────────')
+    const summaryIdx = content.indexOf('摘要正文')
+
+    expect(prefixIdx).toBe(0)
+    expect(noticeIdx).toBeGreaterThan(prefixIdx)
+    expect(sepIdx).toBeGreaterThan(noticeIdx)
+    expect(summaryIdx).toBeGreaterThan(sepIdx)
+  })
+
+  it('无声明时保持旧形状（前缀 + 摘要）', () => {
+    expect(buildSummaryBlockMessage('摘要正文').content).toBe(`${SUMMARY_PREFIX}\n摘要正文`)
   })
 })

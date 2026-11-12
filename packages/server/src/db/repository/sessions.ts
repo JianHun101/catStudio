@@ -60,9 +60,13 @@ export function getSessionSummaryState(id: string):
 
 // ─── 摘要替代压缩（compressed_summaries）──────────────────
 
-/** 压缩摘要条目形状（与 sessions.compressed_summaries 存储一致）。
+/** 压缩摘要条目形状（与 sessions.compressed_summaries 存储一致）——**全仓唯一定义处**。
+ *
  * content 空串 = 异步生成中的 pending；coveredThrough = 生成时点会话消息总数
  * （消费侧判定覆盖边界：其后的新增消息超出保留窗口容量 → 重新生成）。
+ *
+ * 三枚可选字段是「摘要链」的权威边界：生成时**读消息那一刻**的末条消息 id / 时间 /
+ * 累计覆盖条数。coveredThrough 只保留兼容（旧条目没有 id 边界，重生成时走全量自愈）。
  */
 export interface CompressedSummaryEntry {
   id: string
@@ -70,6 +74,9 @@ export interface CompressedSummaryEntry {
   tokenCount: number
   content: string
   coveredThrough: number
+  coveredToId?: string
+  coveredToAt?: string
+  coveredCount?: number
 }
 
 /**
@@ -109,7 +116,13 @@ export function appendCompressedSummary(id: string, entry: CompressedSummaryEntr
 export function updateCompressedSummary(
   id: string,
   entryId: string,
-  patch: { tokenCount: number; content: string }
+  patch: {
+    tokenCount: number
+    content: string
+    coveredToId?: string
+    coveredToAt?: string
+    coveredCount?: number
+  }
 ): void {
   const current = getCompressedSummaries(id)
   if (!current) return

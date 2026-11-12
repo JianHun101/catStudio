@@ -7,6 +7,7 @@ import {
   nextHandoffTitle,
   performHandoff,
   resolveHandoffTarget,
+  generateFullSummary,
 } from './index.js'
 import { createTestDb, isolatedTestDir } from '../test-helpers.js'
 import { setDb, resetDb } from '../db/index.js'
@@ -529,6 +530,135 @@ describe('handoff', () => {
       })
       // 成功路径的全局通知不被触发（这是失败路径）
       expect(mockBus.emitSessionHandoff).not.toHaveBeenCalled()
+    })
+  })
+
+  // ─── generateFullSummary — 摘要链（增量 / 自愈 / 边界元数据）──────────
+  describe('generateFullSummary — 摘要链', () => {
+    let db: Database.Database
+
+    /** 500 条消息：id/正文/created_at 全部可区分，且条数 > 旧的 300 条上限 */
+    const TOTAL = 500
+    const MSG_ID = (i: number) => `m-${String(i).padStart(4, '0')}`
+    const MSG_BODY = (i: number) => `消息正文-${String(i).padStart(3, '0')}`
+    const MSG_AT = (i: number) => new Date(Date.UTC(2026, 7, 1, 0, 0, 0, i)).toISOString()
+
+    function insertMessages(sessionId = 's-chain'): void {
+      const stmt = db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES (?, ?, 'user', ?, '[]', ?)`
+      )
+      const tx = db.transaction(() => {
+        for (let i = 1; i <= TOTAL; i++) {
+          stmt.run(MSG_ID(i), sessionId, MSG_BODY(i), MSG_AT(i))
+        }
+      })
+      tx()
+    }
+
+    function setSummaries(entries: unknown[], sessionId = 's-chain'): void {
+      db.prepare('UPDATE sessions SET compressed_summaries = ? WHERE id = ?').run(
+        JSON.stringify(entries),
+        sessionId
+      )
+    }
+
+    function lastPrompt(): string {
+      const calls = vi.mocked(chatComplete).mock.calls
+      return calls[calls.length - 1][1] as string
+    }
+
+    beforeEach(() => {
+      db = createTestDb()
+      setDb(db)
+      initRepository(db)
+      db.prepare(`INSERT INTO sessions (id, title, agent_ids) VALUES ('s-chain', '链', '[]')`).run()
+      process.env.SUMMARY_API_KEY = 'test-key'
+      vi.mocked(chatComplete).mockReset()
+      vi.mocked(chatComplete).mockResolvedValue('合并后的新摘要')
+    })
+
+    afterEach(() => {
+      resetDb()
+      delete process.env.SUMMARY_API_KEY
+      vi.clearAllMocks()
+    })
+
+    it('增量：输入 = 旧摘要正文 + coveredToId 之后的新增消息（不回喂边界之前正文）', async () => {
+      insertMessages()
+      setSummaries([
+        {
+          id: 'entry-1',
+          createdAt: MSG_AT(200),
+          tokenCount: 5,
+          content: '旧摘要特征串',
+          coveredThrough: 200,
+          coveredToId: MSG_ID(200),
+          coveredToAt: MSG_AT(200),
+          coveredCount: 200,
+        },
+      ])
+
+      const result = await generateFullSummary('s-chain', 2000)
+
+      const prompt = lastPrompt()
+      expect(prompt).toContain('旧摘要特征串')
+      expect(prompt).toContain(MSG_BODY(201))
+      expect(prompt).toContain(MSG_BODY(500))
+      // 边界之前（含边界本身）的正文不得作为输入回喂
+      expect(prompt).not.toContain(MSG_BODY(200))
+      expect(prompt).not.toContain(MSG_BODY(1))
+      // 累计覆盖数 = 旧条目 200 + 新增 300
+      expect(result.coveredCount).toBe(TOTAL)
+      expect(result.coveredToId).toBe(MSG_ID(500))
+    })
+
+    it('自愈：旧条目只有 coveredThrough（无 coveredToId）→ 全量重读，早期消息不丢（>300 条亦全读）', async () => {
+      insertMessages()
+      setSummaries([
+        {
+          id: 'entry-legacy',
+          createdAt: MSG_AT(200),
+          tokenCount: 5,
+          content: '旧版摘要',
+          coveredThrough: 200,
+        },
+      ])
+
+      const result = await generateFullSummary('s-chain', 2000)
+
+      const prompt = lastPrompt()
+      // 第 1 条正文出现 = 分页串读读到了最早的 300 条之外
+      expect(prompt).toContain(MSG_BODY(1))
+      expect(prompt).toContain(MSG_BODY(TOTAL))
+      expect(result.coveredCount).toBe(TOTAL)
+      expect(result.coveredToId).toBe(MSG_ID(TOTAL))
+    })
+
+    it('边界元数据由读消息那一刻的末条确定（coveredToId/coveredToAt/coveredCount）', async () => {
+      insertMessages()
+
+      const result = await generateFullSummary('s-chain', 2000)
+
+      expect(result.summary).toBe('合并后的新摘要')
+      expect(result.coveredToId).toBe(MSG_ID(TOTAL))
+      expect(result.coveredToAt).toBe(MSG_AT(TOTAL))
+      expect(result.coveredCount).toBe(TOTAL)
+    })
+
+    it('无 API key → 空摘要 + 空边界（调用方据此走降级，不落假条目）', async () => {
+      insertMessages()
+      process.env.SUMMARY_API_KEY = ''
+
+      const result = await generateFullSummary('s-chain', 2000)
+
+      expect(result).toEqual({
+        summary: '',
+        coveredToId: null,
+        coveredToAt: null,
+        coveredCount: 0,
+      })
+      expect(chatComplete).not.toHaveBeenCalled()
     })
   })
 })

@@ -464,6 +464,100 @@ describe('messages repo — getSessionMessagesRange（方案 3 A 读层地基）
   })
 })
 
+describe('messages repo — getMessagesWithAgentNamePage（摘要输入分页串读）', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
+    db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES ('agent-a', '猫A', 'p', 'sk-test')`
+    ).run()
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  const insertMsg = (row: {
+    id: string
+    role?: string
+    agentId?: string | null
+    content: string
+    createdAt: string
+  }) => {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+       VALUES (?, 's1', ?, ?, ?, '[]', ?)`
+    ).run(row.id, row.agentId ?? null, row.role ?? 'user', row.content, row.createdAt)
+  }
+
+  it('时间正序 + 带 agent_name + system 排除', () => {
+    insertMsg({ id: 'm1', content: 'old', createdAt: '2026-09-01T10:00:00.000Z' })
+    insertMsg({
+      id: 'm2',
+      agentId: 'agent-a',
+      role: 'agent',
+      content: 'mid',
+      createdAt: '2026-09-01T12:00:00.000Z',
+    })
+    insertMsg({
+      id: 'm-sys',
+      role: 'system',
+      content: 'sys',
+      createdAt: '2026-09-01T13:00:00.000Z',
+    })
+
+    const rows = messagesRepo.getMessagesWithAgentNamePage('s1', null)
+    expect(rows.map((r) => r.id)).toEqual(['m1', 'm2'])
+    expect(rows[1].agent_name).toBe('猫A')
+  })
+
+  it('游标串读：按页取完全量，不重叠不遗漏（含同 created_at 的 id tie-break）', () => {
+    for (let i = 1; i <= 5; i++) {
+      insertMsg({
+        id: `m${i}`,
+        content: `c${i}`,
+        createdAt: '2026-09-01T10:00:00.000Z', // 全部同秒 → 只能靠 id 定序
+      })
+    }
+
+    const all: string[] = []
+    let after: { createdAt: string; id: string } | null = null
+    for (;;) {
+      const page = messagesRepo.getMessagesWithAgentNamePage('s1', after, 2)
+      all.push(...page.map((r) => r.id))
+      if (page.length < 2) break
+      const last = page[page.length - 1]
+      after = { createdAt: last.created_at, id: last.id }
+    }
+
+    expect(all).toEqual(['m1', 'm2', 'm3', 'm4', 'm5'])
+    expect(new Set(all).size).toBe(all.length)
+  })
+
+  it('after 排他（边界消息本身不重复读）', () => {
+    insertMsg({ id: 'm1', content: 'a', createdAt: '2026-09-01T10:00:00.000Z' })
+    insertMsg({ id: 'm2', content: 'b', createdAt: '2026-09-01T11:00:00.000Z' })
+    insertMsg({ id: 'm3', content: 'c', createdAt: '2026-09-01T12:00:00.000Z' })
+
+    const rows = messagesRepo.getMessagesWithAgentNamePage('s1', {
+      createdAt: '2026-09-01T11:00:00.000Z',
+      id: 'm2',
+    })
+    expect(rows.map((r) => r.id)).toEqual(['m3'])
+  })
+
+  it('limit 越界防御性钳制（0/超大 → 1/1000，不抛）', () => {
+    insertMsg({ id: 'm1', content: 'x', createdAt: '2026-09-01T10:00:00.000Z' })
+    expect(() => messagesRepo.getMessagesWithAgentNamePage('s1', null, 5000)).not.toThrow()
+    expect(messagesRepo.getMessagesWithAgentNamePage('s1', null, 5000).length).toBe(1)
+    expect(messagesRepo.getMessagesWithAgentNamePage('s1', null, 0).length).toBe(1)
+  })
+})
+
 describe('messages repo — 时间口径（票 5，spec §4.2 ⑤-a/⑤-c）', () => {
   let db: Database.Database
 

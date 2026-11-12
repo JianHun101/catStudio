@@ -64,6 +64,7 @@ import {
   countReadySummaries,
   lastReadySummary,
   buildSummaryBlockMessage,
+  buildFoldNotice,
   applySummaryReplace,
   SUMMARY_KEEP_RECENT,
   SUMMARY_MIN_TOKENS,
@@ -100,6 +101,23 @@ const MAX_TOOL_IO_CHARS = 4000
  */
 export const TASK_HISTORY_MAX_MESSAGES = 30
 export const TASK_HISTORY_BUDGET_TOKENS = 12_000
+
+/**
+ * 摘要生成结果的边界元数据 → `compressed_summaries` 条目的补丁字段。
+ * 无边界（会话无消息）时不写这些键，避免用 undefined 覆盖旧值。
+ */
+function summaryBoundaryPatch(generated: {
+  coveredToId: string | null
+  coveredToAt: string | null
+  coveredCount: number
+}): { coveredToId?: string; coveredToAt?: string; coveredCount?: number } {
+  if (!generated.coveredToId) return {}
+  return {
+    coveredToId: generated.coveredToId,
+    coveredToAt: generated.coveredToAt ?? undefined,
+    coveredCount: generated.coveredCount,
+  }
+}
 
 /**
  * 同锚历史截取（纯函数，T-G 验收④）——时间正序进、时间正序出。
@@ -616,6 +634,9 @@ export async function runAgentReply(
   const summaryReplaceEnabled = process.env.SUMMARY_REPLACE_HISTORY !== '0'
   let messagesForTruncation: typeof relevantMessages = relevantMessages
   let summaryBlockMsg: LLMMessage | null = null
+  // 摘要生成**失败**（无 key / 空结果 / 抛错）标记：只有「确实发生截断」时才据此
+  // 注入降级标记；未发生截断不注入（契约 A2b：不许假报）。
+  let summaryFailure = false
   if (summaryReplaceEnabled && preTruncationTokens >= SUMMARY_MIN_TOKENS) {
     const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
     const ratio = preTruncationTokens / maxTokens
@@ -634,7 +655,14 @@ export async function runAgentReply(
       if (ready && !coverageGap) {
         // 消费既有就绪块——块覆盖到生成时点全部消息、保留窗口容得下新增 → 零 LLM 调用
         messagesForTruncation = applySummaryReplace(relevantMessages, ready.content).kept
-        summaryBlockMsg = buildSummaryBlockMessage(ready.content)
+        summaryBlockMsg = buildSummaryBlockMessage(
+          ready.content,
+          buildFoldNotice({
+            sessionId,
+            coveredToId: ready.coveredToId,
+            coveredToAt: ready.coveredToAt,
+          })
+        )
         log.info('summary replace: consumed ready block', {
           traceId,
           agentId: agent.id,
@@ -654,23 +682,32 @@ export async function runAgentReply(
           coveredThrough: messagesRepo.countBySession(sessionId),
         })
         try {
-          const summary = await generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
-          if (summary) {
+          const generated = await generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
+          if (generated.summary) {
             sessionsRepo.updateCompressedSummary(sessionId, entryId, {
-              tokenCount: estimateTokens(summary),
-              content: summary,
+              tokenCount: estimateTokens(generated.summary),
+              content: generated.summary,
+              ...summaryBoundaryPatch(generated),
             })
-            messagesForTruncation = applySummaryReplace(relevantMessages, summary).kept
-            summaryBlockMsg = buildSummaryBlockMessage(summary)
+            messagesForTruncation = applySummaryReplace(relevantMessages, generated.summary).kept
+            summaryBlockMsg = buildSummaryBlockMessage(
+              generated.summary,
+              buildFoldNotice({
+                sessionId,
+                coveredToId: generated.coveredToId,
+                coveredToAt: generated.coveredToAt,
+              })
+            )
             log.info('summary replace: sync generated', {
               traceId,
               agentId: agent.id,
               sessionId,
-              summaryTokens: estimateTokens(summary),
+              summaryTokens: estimateTokens(generated.summary),
               totalCompressed: readyCount + 1,
             })
           } else {
             // 无 key / 空摘要：降级普通截断 + 留痕（不阻塞主流程）
+            summaryFailure = true
             log.warn('summary replace skipped (no summary generated), fallback to truncation', {
               traceId,
               agentId: agent.id,
@@ -678,6 +715,7 @@ export async function runAgentReply(
             })
           }
         } catch (err: any) {
+          summaryFailure = true
           log.warn('summary replace sync failed, fallback to truncation', {
             traceId,
             agentId: agent.id,
@@ -696,8 +734,8 @@ export async function runAgentReply(
           coveredThrough: messagesRepo.countBySession(sessionId),
         })
         generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
-          .then((summary) => {
-            if (!summary) {
+          .then((generated) => {
+            if (!generated.summary) {
               log.warn('summary replace async skipped (no summary generated)', {
                 traceId,
                 agentId: agent.id,
@@ -706,14 +744,15 @@ export async function runAgentReply(
               return
             }
             sessionsRepo.updateCompressedSummary(sessionId, entryId, {
-              tokenCount: estimateTokens(summary),
-              content: summary,
+              tokenCount: estimateTokens(generated.summary),
+              content: generated.summary,
+              ...summaryBoundaryPatch(generated),
             })
             log.info('summary replace async completed', {
               traceId,
               agentId: agent.id,
               sessionId,
-              summaryTokens: estimateTokens(summary),
+              summaryTokens: estimateTokens(generated.summary),
             })
           })
           .catch((err: any) => {
@@ -757,6 +796,20 @@ export async function runAgentReply(
     truncatedMessages.push(messagesForTruncation[i])
   }
   truncatedMessages.reverse() // 恢复时间正序
+  // 降级标记（A2b）：摘要**确实失败**且 token 预算**确实截断**了消息时才注入——
+  // 没有截断就没有信息损失，不许假报；标记里带截断条数与回查工具，让模型知道自己
+  // 正在看一份不完整的历史，而不是把截断后的上下文当全集。
+  const truncatedAway = messagesForTruncation.length - truncatedMessages.length
+  const foldDegradedMsg: LLMMessage | null =
+    summaryFailure && truncatedAway > 0
+      ? {
+          role: 'user',
+          content:
+            '[历史折叠（降级）]\n' +
+            `本轮摘要压缩失败，已截断 ${truncatedAway} 条较早消息（原文完整保存在本会话中）。` +
+            '需要核对原文时，可调用 query_session_messages 工具，以 before 游标向前翻阅。',
+        }
+      : null
   // E2 收口：item_count = 压缩/截断后**实际进 prompt** 的消息条数（单位：条）
   trace.endSpan(compressHandle, 'ok', { itemCount: truncatedMessages.length })
 
@@ -848,8 +901,11 @@ export async function runAgentReply(
     { role: 'system', content: finalSystemPrompt },
     ...dynamicHints.map((h) => ({ role: 'system' as const, content: h })),
     // 摘要块放消息数组最前（user 段第一，system 段之后）——独立于 runningSummary
-    // （system 段注入 :2286），两段不共享状态（分层互不耦合钉死）
+    // （后者注入 system 段，见 `injectSummaryIntoSystem` 调用处），两段不共享状态
+    // （分层互不耦合钉死）。
+    // 降级标记与摘要块互斥：有块说明没降级。
     ...(summaryBlockMsg ? [summaryBlockMsg] : []),
+    ...(foldDegradedMsg ? [foldDegradedMsg] : []),
     ...truncatedMessages.map((m: any, idx: number) => {
       const isLast = idx === truncatedMessages.length - 1
 
