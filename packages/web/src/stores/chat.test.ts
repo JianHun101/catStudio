@@ -1927,6 +1927,113 @@ describe('chatStore', () => {
       await pendingA
     })
 
+    it('C-5｜A→B→A 后旧请求成功返回：旧页不进 A 的数组，也不清 A 的 loadingOlder', async () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2' }]
+      store.activeSessionId = 's1'
+      store.messages = msgs(200) // m1..m200（缓存命中时仍判「还有更早」）
+      store.hasMoreOlder = true
+      let resolveOld!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveOld = resolve
+        })
+      )
+      const pendingOld = store.loadOlderMessages() // 代际 0、会话 s1
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(1, 's1', { before: 'm1', limit: 50 })
+
+      store.joinSession('s2') // 代际 1
+      store.messages = msgs(20, 200)
+      store.hasMoreOlder = true
+      store.joinSession('s1') // 代际 2，缓存命中 → m1..m200
+      expect(ids(store.messages)).toEqual(ids(msgs(200)))
+
+      // A 重新开始一页（代际 2）——旧请求收尾时不许把它打掉
+      let resolveNew!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveNew = resolve
+        })
+      )
+      const pendingNew = store.loadOlderMessages()
+      expect(store.loadingOlder).toBe(true)
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(2)
+
+      // 旧请求现在返回：sessionId 已重新对上 s1，只有代际判据能挡住
+      resolveOld(msgs(50, 900).reverse())
+      expect(await pendingOld).toBe(false)
+      expect(ids(store.messages)).toEqual(ids(msgs(200)))
+      expect(store.loadingOlder).toBe(true)
+
+      resolveNew([])
+      expect(await pendingNew).toBe(true)
+      expect(store.loadingOlder).toBe(false)
+    })
+
+    it('C-5｜A→B→A 后旧请求失败：不写 A 的 olderError，也不清 A 的 loadingOlder', async () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2' }]
+      store.activeSessionId = 's1'
+      store.messages = msgs(200)
+      store.hasMoreOlder = true
+      let rejectOld!: (err: Error) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((_, reject) => {
+          rejectOld = reject
+        })
+      )
+      const pendingOld = store.loadOlderMessages()
+
+      store.joinSession('s2')
+      store.messages = msgs(20, 200)
+      store.hasMoreOlder = true
+      store.joinSession('s1')
+
+      let resolveNew!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveNew = resolve
+        })
+      )
+      const pendingNew = store.loadOlderMessages()
+      expect(store.loadingOlder).toBe(true)
+
+      rejectOld(new Error('Failed to fetch'))
+      expect(await pendingOld).toBe(false)
+      // 旧世界的失败不得落到当前会话，也不得替当前请求收掉 loading
+      expect(store.olderError).toBeNull()
+      expect(store.loadingOlder).toBe(true)
+
+      resolveNew([])
+      await pendingNew
+      expect(store.olderError).toBeNull()
+      expect(store.loadingOlder).toBe(false)
+    })
+
+    it('C-5｜SESSION_HISTORY 整体替换历史后上滚：不复用旧 Promise，必须发新请求', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(200)
+      store.hasMoreOlder = true
+      let resolveOld!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveOld = resolve
+        })
+      )
+      const pendingOld = store.loadOlderMessages() // 代际 0
+
+      // 重连：服务端重发 SESSION_HISTORY，历史整体替换（代际 +1、句柄清空）
+      sessionHistoryHandler()({ messages: msgs(200), welcome: welcome() })
+
+      mockGetSessionMessages.mockReturnValueOnce([])
+      const pending = store.loadOlderMessages()
+      // 先同步判调用次数：若沿用旧句柄，这里拿到的就是那笔永不落定的旧 Promise
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(2)
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(2, 's1', { before: 'm1', limit: 50 })
+      expect(await pending).toBe(true)
+
+      resolveOld([])
+      expect(await pendingOld).toBe(false)
+    })
+
     it('C-4｜await 期间消息数组被替换：前插点重算到合成头之后，原消息不丢', async () => {
       store.activeSessionId = 's1'
       store.messages = msgs(5, 10) // m11..m15
