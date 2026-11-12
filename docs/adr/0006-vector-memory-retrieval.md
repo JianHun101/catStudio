@@ -19,6 +19,7 @@ evidence:
 > 2. **入口与时机**：检索入口为 `retrieveMemoryContext()`（`memory/index.ts`，正文与旧注写的 `buildMemoryContext()` **已不存在**）。检索时机**不变**——仍是 Agent 被调度回复时（`execution/reply.ts` 的 `retrieveMemoryContext` 调用处），非用户发言后立即触发。
 > 3. **Embedding 落在独立进程**：模型仍是本地 Transformers.js（`Xenova/bge-small-zh-v1.5`，512 维），可经 `MEMORY_EMBEDDING_MODEL` 更换、`HF_ENDPOINT` 切换镜像；但**跑在独立 sidecar 进程**（`scripts/flywheel/embed-server.mjs`，随 server 启停、只监听 `127.0.0.1`，主进程经 HTTP 调用）——正文 Consequences 里「Embedding 由本地模型**在进程内**生成」原为撰写时状态，**已按现况改文**，模型不进主进程内存。
 > 4. **关键词通道分词器 v2（2026-11-12 · 票 FTS-1）**：FTS5 一侧的切分与查询语义变了——索引侧由「跨语言一刀切 bigram」改为**中文 bigram + ASCII 整词**（camelCase 子词化、单个字母丢弃），查询侧由 AND 改为 **OR**；存量 `chunks_fts` 由一次性迁移 `chunks_fts rebuild` 重算（向量/嵌入不动）。**选型不变**（仍是向量 + 关键词 RRF 混合）——改的是关键词通道的召回可达性，不是语义能力；正文「FTS5 缺乏语义理解」这一判断不受影响。
+> 5. **关键词通道 RRF 权重 0.8（2026-11-12 · FTS-1 返工）**：查询侧改 OR 后，关键词通道每查询产出 20 个候选，而原 RRF 式 `1/(k+rank+1)` 与通道无关 ⇒ 纯关键词第 0 名与向量第 0 名同分，把向量通道相关但排名靠后的片挤出 20 片池（实测 G41 两锚点距离 0.297/0.328，不是阈值问题）。给关键词项乘 0.8 后，其头名落在向量第 15~19 名之间——挤掉向量尾部、不挤向量头部；双通道命中仍相加。选型不变，改的是融合层「两通道精度相当」这一隐含假设。
 
 Agent 记忆采用 embedding 向量检索而非全文搜索（FTS5）或纯摘要方案。Agent 被调度回复时触发检索：消息 → embedding 向量 → 余弦相似度搜索 `memories` 表 → top-K 相关记忆注入推理 prompt。
 

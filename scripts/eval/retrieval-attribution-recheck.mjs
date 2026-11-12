@@ -1969,8 +1969,10 @@ export async function main(argv = process.argv.slice(2)) {
       const parts = []
       if (kwAllDead) {
         parts.push(
-          `**关键词通道对这三条查询整体失效**（逐条 0 行命中），可直接归因到 AND 语义下不存在的 bigram：${kwDeadReason.map((t) => `\`${t}\``).join(' / ')}。` +
-            '⇒ 「关键词通道结构上够不着」成立，且比"够不着某一个片"更重：**整条通道没跑**。'
+          `**关键词通道对这三条查询整体失效**（逐条 0 行命中）。查询侧已是 **OR 语义**——任一词项命中即可进池——0 行说明这些查询的词项在**可召回片里全部缺席**` +
+            `（语料内不存在的词项：${kwDeadReason.map((t) => `\`${t}\``).join(' / ')}；status 过滤 / 索引陈旧同现象，见 §4.4）。` +
+            `⇒ 「关键词通道结构上够不着」成立，且比"够不着某一个片"更重：**整条通道对这三条查询 0 行**。` +
+            `（这不是 v1 那种「AND 要求所有 bigram 同片」的连接问题——OR 下任一词项都能开口子。）`
         )
       }
       if (reach) {
@@ -2019,8 +2021,8 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     // ─── 全批关键词通道体检（把 G03 的单点读数放到全批分布里，不升格为因果） ───
-    // 只报**事实计数**：「多少条查询的关键词通道 0 行」「其中多少条能用『有词项不在语料里』
-    // 解释」。后者是充分不必要条件（AND 语义下还可能是「词项分散在不同片里」）——
+    // 只报**事实计数**：「多少条查询的关键词通道 0 行」「其中多少条含『语料里不存在的词项』」。
+    // 后者是充分不必要条件（OR 语义下 0 行也可能是候选被 status 过滤掉 / 索引陈旧）——
     // 报告里必须这么写，否则一行计数就会被读成因果。
     const termCountCache = new Map()
     const countTermMemo = (term) => {
@@ -2070,7 +2072,7 @@ export async function main(argv = process.argv.slice(2)) {
       /** 反事实：剔掉不可命中词项后**能**召回的查询数（本报告的修法候选 5 的读数面） */
       revivedByUsableOnly: channelRows.filter((r) => r.hits === 0 && (r.usableHits ?? 0) > 0)
         .length,
-      /** 词项全可用却仍然 0 行（分散在不同片 ⇒ AND 无从满足） */
+      /** 词项全可用却仍然 0 行（OR 下任一词项即可开口 ⇒ 只剩 status 过滤 / 索引陈旧） */
       deadWithNoAbsentTerm: channelRows.filter((r) => r.hits === 0 && r.absent === 0).length,
       avgTerms: channelRows.reduce((s, r) => s + r.terms, 0) / (channelRows.length || 1),
       topAbsentTerms: [...absentTermFreq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12),

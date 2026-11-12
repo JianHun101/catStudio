@@ -154,8 +154,17 @@ export interface SessionTraceDto {
 // 「把磁盘上已有的报告读出来」，**零计算、零 LLM、零写**——页面上的数字永远是
 // 「上一次跑批」的快照，不是当前水位。前端在 tab 顶部明写这句话。
 
-/** 报告文件名的契约形状：`retrieval-baseline-<YYYY-MM-DD>.json`（`--out` 换扩展名而来）。 */
-const REPORT_FILE_RE = /^retrieval-baseline-(\d{4}-\d{2}-\d{2})\.json$/
+/**
+ * 报告文件名的契约形状：`retrieval-baseline-<YYYY-MM-DD>[-<variant>].json`（`--out`
+ * 换扩展名而来）。`variant` 是同日多配置对照时的后缀（如 `fts-or` / `fts-or-w08`）：
+ * 无后缀 = 最基础形态，向后兼容旧产物；有后缀的也是同一个「按日期定位」契约的扩展，
+ * 不是新契约——`?date=` 仍只认日期，同日多份的取舍见 `listRetrievalReports`。
+ *
+ * `variant` 只收安全字符（字母/数字/点/下划线/连字符）——文件名来自 `readdir`，本无
+ * 路径穿越面，但让形状闸挡在解析层，后续若有人把文件名拼进路径不会突然多一个洞。
+ */
+const REPORT_FILE_RE =
+  /^retrieval-baseline-(\d{4}-\d{2}-\d{2})(?:-([A-Za-z0-9][A-Za-z0-9._-]*))?\.json$/
 
 /** `?date=` 的形状闸。**它同时是路径穿越的闸**：date 会拼进文件名，`../../x` 这类
  *  必须在这条正则上就死掉——别指望「拼出来的文件多半不存在」兜底。 */
@@ -201,7 +210,27 @@ export interface RetrievalReportSummary {
 }
 
 /**
- * 列出全部报告，**日期倒序**。
+ * 同日多份报告谁代表这一天：`writtenAt` 降序取最新；`writtenAt` 相同（或都取不到）
+ * 再按文件名倒序。**必须是全序**——`readdir` 的顺序由文件系统给，不保证稳定，漏进
+ * 响应会让「最新报告」在两次请求间跳位。
+ */
+function isNewerReport(a: RetrievalReportSummary, b: RetrievalReportSummary): boolean {
+  if (a.writtenAt !== b.writtenAt) {
+    // 取不到 mtime 的（stat 失败）排在已知时刻之后 = 视为更旧
+    if (a.writtenAt === null) return false
+    if (b.writtenAt === null) return true
+    return a.writtenAt > b.writtenAt
+  }
+  return a.file > b.file
+}
+
+/**
+ * 列出全部报告，**日期倒序**；同一天只出**最新那一份**。
+ *
+ * 同日多份的入口只有 `?date=` 一个维度，无法区分变体 ⇒ 若把三份同日的都列出来，
+ * 日期选择器会出现重复项、且选中哪份取决于排序（UI 读数与仓库读数再次分叉）。
+ * 故这里按 `writtenAt` 取最新那份代表该日期；其余同日产物仍在磁盘与 `docs/eval/README.md`
+ * 索引里可查，只是不经本端点暴露。
  *
  * 目录读不到 ⇒ 空数组：「还没跑过批」是正常状态，不是错误（`docs/eval/` 在产物布局
  * 或裁剪过的检出里本就可能缺席）。单个文件 `stat` 失败 ⇒ 保留该条、`writtenAt` 给
@@ -214,7 +243,7 @@ export function listRetrievalReports(dir: string): RetrievalReportSummary[] {
   } catch {
     return []
   }
-  const out: RetrievalReportSummary[] = []
+  const latestByDate = new Map<string, RetrievalReportSummary>()
   for (const name of names) {
     const m = REPORT_FILE_RE.exec(name)
     if (!m) continue
@@ -224,14 +253,11 @@ export function listRetrievalReports(dir: string): RetrievalReportSummary[] {
     } catch {
       writtenAt = null
     }
-    out.push({ date: m[1], file: name, writtenAt })
+    const summary: RetrievalReportSummary = { date: m[1], file: name, writtenAt }
+    const prev = latestByDate.get(m[1])
+    if (prev === undefined || isNewerReport(summary, prev)) latestByDate.set(m[1], summary)
   }
-  // 同日多份按文件名倒序：**显式 tie-break**，别把 `readdir` 的顺序（文件系统给的，
-  // 不保证稳定）漏进响应——同一目录两次请求给出不同顺序会让日期选择器跳位。
-  return out.sort((a, b) => {
-    if (a.date !== b.date) return a.date < b.date ? 1 : -1
-    return a.file < b.file ? 1 : -1
-  })
+  return [...latestByDate.values()].sort((a, b) => (a.date < b.date ? 1 : -1))
 }
 
 export async function evalRoutes(app: FastifyInstance): Promise<void> {

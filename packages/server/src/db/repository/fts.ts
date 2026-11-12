@@ -38,11 +38,13 @@ const CJK_RE = /[㐀-䶿一-鿿豈-﫿]/
 const ASCII_WORD_RE = /[A-Za-z0-9]/
 
 /**
- * 分词器版本号 —— **`chunks_fts` 存量内容的切分口径**。索引侧与查询侧共用同一份实现，
- * 两侧版本必须同源；迁移条目 `chunks_fts rebuild` 按它重算存量（扫描器按 `origin_id`
- * 增量比对，内容没变的文档会被跳过，不重建就永远停在旧切分）。
+ * ⚠️ **改本文件的分词规则 = 必须同时在 `migrations.ts` 的 `APPENDED_MIGRATIONS` 末尾
+ * 追加一条 `chunks_fts rebuild` 迁移**（照 `ftsRebuildMigration` 工厂）。理由：扫描器按
+ * `origin_id`（内容 blob SHA）增量比对，分词器变了而文档内容没变 ⇒ 存量 `chunks_fts`
+ * 会被整批跳过，索引侧与查询侧的分词口径不同源，关键词通道静默劣化。
+ * （曾有一个分词器版本号常数声称承担这件事，但它零消费者——真正的执行者是迁移条目
+ * 本身，故删除，避免给人「改分词器会自动触发重建」的假安全感。）
  */
-export const FTS_TOKENIZER_VERSION = 2
 
 /**
  * 单条查询的词项上限。OR 语义下词项越多候选池越宽，但 **BM25 选人、`LIMIT` 截池**——

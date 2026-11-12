@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { v4 as uuid } from 'uuid'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1680,6 +1688,69 @@ describe('Eval Routes', () => {
       expect(reports[0].file).toBe('retrieval-baseline-2026-09-20.json')
       // `writtenAt` 取自**文件 mtime**（报告本体按 B1 零时间量），必须是可解析的 ISO
       expect(Number.isFinite(Date.parse(reports[0].writtenAt!))).toBe(true)
+    })
+
+    it('同日多份（含变体后缀）：只出 writtenAt 最新那份，且 `?date=` 取到它', async () => {
+      // 普通名与带后缀名同日并存：旧产物 09-20 上午写，变体 09-20 下午写（mtime 钉死，
+      // 不靠文件系统写入次序）。变体正文的 recallMean 刻意不同 ⇒ 张冠李戴当场红。
+      const variant = join(dir, 'retrieval-baseline-2026-09-20-fts-or.json')
+      writeFileSync(
+        variant,
+        JSON.stringify({
+          schema: 1,
+          date: '2026-09-20',
+          groups: { real: { recallMean: 0.75 }, constructed: { recallMean: 0.9 } },
+          scores: [],
+        })
+      )
+      utimesSync(
+        join(dir, 'retrieval-baseline-2026-09-20.json'),
+        new Date('2026-09-20T08:00:00Z'),
+        new Date('2026-09-20T08:00:00Z')
+      )
+      utimesSync(variant, new Date('2026-09-20T16:00:00Z'), new Date('2026-09-20T16:00:00Z'))
+
+      const res = await app.inject({ method: 'GET', url: '/api/eval/retrieval/reports' })
+      expect(res.statusCode).toBe(200)
+      const { reports } = JSON.parse(res.body) as {
+        reports: Array<{ date: string; file: string; writtenAt: string | null }>
+      }
+      // 日期维度不重复（日期选择器的 key 就是 date）；09-20 只留最新那份
+      expect(reports.map((r) => r.date)).toEqual(['2026-09-20', '2026-09-19'])
+      expect(reports[0].file).toBe('retrieval-baseline-2026-09-20-fts-or.json')
+
+      // 缺省 = 最新那份，且内容读的是变体（不是旧同名文件换个标签）
+      const latest = await app.inject({ method: 'GET', url: '/api/eval/retrieval/report' })
+      expect(latest.statusCode).toBe(200)
+      const body = JSON.parse(latest.body) as {
+        file: string
+        report: { groups: { real: { recallMean: number } } }
+      }
+      expect(body.file).toBe('retrieval-baseline-2026-09-20-fts-or.json')
+      expect(body.report.groups.real.recallMean).toBe(0.75)
+
+      // 显式 `?date=` 仍只按日期定位 ⇒ 同样落到该日最新那份
+      const byDate = await app.inject({
+        method: 'GET',
+        url: '/api/eval/retrieval/report?date=2026-09-20',
+      })
+      expect(byDate.statusCode).toBe(200)
+      expect((JSON.parse(byDate.body) as { file: string }).file).toBe(
+        'retrieval-baseline-2026-09-20-fts-or.json'
+      )
+    })
+
+    it('变体后缀不匹配形状闸（空后缀 / 非法首字符）⇒ 不进清单', async () => {
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-18-.json'), reportBody('2026-09-18'))
+      writeFileSync(join(dir, 'retrieval-baseline-2026-09-17-_x.json'), reportBody('2026-09-17'))
+      const res = await app.inject({ method: 'GET', url: '/api/eval/retrieval/reports' })
+      expect(res.statusCode).toBe(200)
+      const dates = (JSON.parse(res.body) as { reports: Array<{ date: string }> }).reports.map(
+        (r) => r.date
+      )
+      expect(dates).not.toContain('2026-09-18')
+      // `_x` 首字符是下划线：正则要求后缀以字母/数字开头
+      expect(dates).not.toContain('2026-09-17')
     })
 
     it('空清单是 200 + `[]`，**不是 404**（「还没跑过批」不是错误）', async () => {

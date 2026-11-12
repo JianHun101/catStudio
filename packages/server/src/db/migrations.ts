@@ -528,8 +528,9 @@ const BASELINE_MIGRATIONS: ReadonlyArray<Migration> = [
     },
   },
   {
-    // 关键词通道：content 列存 bigram 预分词串（空格 join，两侧对称），tokenize='unicode61'
-    // 按空格切回 token（零中文分词器依赖）；rowid 映射 chunks.rowid，检索 JOIN 取原文
+    // 关键词通道：content 列存 `ftsTokenize` 预分词串（中文 bigram + ASCII 整词，空格
+    // join，两侧对称），tokenize='unicode61' 按空格切回 token（零中文分词器依赖）；
+    // rowid 映射 chunks.rowid，检索 JOIN 取原文
     name: 'chunks_fts table (FTS5 关键词通道)',
     sql: `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
         content,
@@ -1379,6 +1380,9 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
   // 为什么必须重建而不是等扫描器：扫描器按 `origin_id` 增量比对，内容没变的文档会被
   // 跳过 ⇒ 不重建就永远停在旧切分（查询侧已是 v2，两侧不对称 = 相对旧库的召回退步）。
   // `chunks` 行数不动（752 片量级，逐行 INSERT，秒级）；向量/嵌入一律不碰。
+  // ⚠️ **改分词器必须追加新的重建条目**——`ftsTokenize` 换了切分口径而不加迁移，存量
+  // 索引会永远停在旧切分（扫描器按内容 SHA 增量，内容没变就跳过）。没有版本号常数兜底，
+  // 执行者只有本数组里的条目。
   ftsRebuildMigration({
     name: 'chunks_fts rebuild (FTS 分词器 v2：中文 bigram + ASCII 整词)',
     ticket: 'FTS-1',
