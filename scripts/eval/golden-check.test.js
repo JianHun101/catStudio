@@ -68,7 +68,10 @@ describe('validateGoldenSet — schema', () => {
     const r = validateGoldenSet(goldenRaw)
     expect(r.errors).toEqual([])
     expect(r.ok).toBe(true)
-    expect(goldenRaw.entries).toHaveLength(40)
+    // 不写死 v1 的 40 条：v2 扩集是正当变更，本条要守的是「条目数与 meta.counts 自洽」，
+    // 不是某个历史规模。
+    const { real, constructed, negative } = goldenRaw.meta.counts
+    expect(goldenRaw.entries).toHaveLength(real + constructed + negative)
     expect(r.byKind).toEqual(goldenRaw.meta.counts)
     expect(Object.keys(r.byKind).sort()).toEqual([...GOLDEN_KINDS].sort())
   })
@@ -173,12 +176,18 @@ describe('checkGoldenSet — 锚点存在性（含真空性反对照）', () => 
       segment: segmentDocument,
     })
 
-  it('仓内真身 45 个锚点全部解析到活块；白名单内过不了准入的文件进 skippedDocs', () => {
+  it('仓内真身全部锚点解析到活块；白名单内过不了准入的文件进 skippedDocs', () => {
     const idx = index()
     const { rotten, checked } = checkGoldenSet({ data: goldenRaw, index: idx })
 
     expect(rotten).toEqual([])
-    expect(checked).toBe(45)
+    // 同理不写死锚点数：从真身自身推导，守的是「核了多少 = 条目里写了多少」，
+    // 扩集时不会被历史规模绑死。
+    const expectedAnchors = goldenRaw.entries.reduce(
+      (n, e) => n + (e.expect?.length ?? 0) + (e.forbid?.length ?? 0),
+      0
+    )
+    expect(checked).toBe(expectedAnchors)
     // 白名单文件里过不了准入的——不是活块，但要让调用方能把
     // 「锚点指着准入不过的文件」与「锚点拼错」分开。
     //
