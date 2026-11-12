@@ -1420,10 +1420,12 @@ describe('internal route-signals', () => {
         },
         { kind: 'text', content: '这是正文' },
       ]
+      // mentions 带「实施猫」：店长回复 @ 了调用方 → 按可见性规则对实施猫可见
+      //（A-2 起回读在返回前闭合上下文过滤，无 @ 的其他猫回复不再可见）
       db.prepare(
         `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, segments, created_at)
-         VALUES ('msg-reply-1', ?, 'agent-store', 'agent', '这是正文', '[]', ?, '2026-09-01 10:00:00')`
-      ).run('session-1', JSON.stringify(segs))
+         VALUES ('msg-reply-1', ?, 'agent-store', 'agent', '这是正文', ?, ?, '2026-09-01 10:00:00')`
+      ).run('session-1', JSON.stringify(['实施猫']), JSON.stringify(segs))
       db.prepare(
         `INSERT INTO messages (id, session_id, role, content, mentions, images, created_at)
          VALUES ('msg-user-1', ?, 'user', '看图', '[]', ?, '2026-09-01 09:00:00')`
@@ -1667,6 +1669,134 @@ describe('internal route-signals', () => {
           method: 'POST',
           url: '/api/internal/session-messages',
           payload: smBody({ before: 'ghost-message' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        expect(JSON.parse(res.body)).toEqual({ ok: true, messages: [], total: 0 })
+      })
+    })
+
+    describe('可见性过滤（A-2：回读不得绕过上下文隔离）', () => {
+      /** 插一行消息：agentId null = 用户消息（agent 回复必须带 agentId） */
+      const insertRow = (
+        id: string,
+        agentId: string | null,
+        role: 'user' | 'agent',
+        content: string,
+        mentions: string[],
+        createdAt: string
+      ) => {
+        const db = getDb()
+        if (agentId) {
+          db.prepare(
+            `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+             VALUES (?, 'session-1', ?, ?, ?, ?, ?)`
+          ).run(id, agentId, role, content, JSON.stringify(mentions), createdAt)
+        } else {
+          db.prepare(
+            `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+             VALUES (?, 'session-1', ?, ?, ?, ?)`
+          ).run(id, role, content, JSON.stringify(mentions), createdAt)
+        }
+      }
+
+      it('实施猫读不到「用户只 @ 吐槽猫」与「吐槽猫未 @ 实施猫的回复」；广播模式打开回复可见性', async () => {
+        await mockActive()
+        insertRow('vi-user-b', null, 'user', '只对吐槽猫说', ['吐槽猫'], '2026-09-02 10:00:00')
+        insertRow(
+          'vi-reviewer',
+          'agent-reviewer',
+          'agent',
+          '吐槽猫的回复',
+          [],
+          '2026-09-02 09:00:00'
+        )
+        insertRow('vi-broadcast', null, 'user', '广播消息', [], '2026-09-02 08:00:00')
+
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        // 定向用户消息与其他猫未 @ 本猫的回复均不可见；只剩无 @ 的广播用户消息
+        expect(JSON.parse(res.body).messages.map((m: any) => m.messageId)).toEqual(['vi-broadcast'])
+
+        // 广播模式：**其他猫的回复**打开可见性；定向用户消息仍按隔离规则隐藏
+        //（与 AGENTS.md「上下文过滤」一致——广播只作用于 agent 回复）
+        getDb().prepare(`UPDATE sessions SET broadcast_mode = 1 WHERE id = 'session-1'`).run()
+        const res2 = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody(),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(JSON.parse(res2.body).messages.map((m: any) => m.messageId)).toEqual([
+          'vi-reviewer',
+          'vi-broadcast',
+        ])
+      })
+
+      it('过滤后候选不足一页 → 用最旧行游标继续向更早翻，不返回空批次', async () => {
+        await mockActive()
+        // 新→旧：4 条对实施猫不可见，最后一条是自己可见的旧回复
+        insertRow('pg-a1', null, 'user', 'A1 定向吐槽猫', ['吐槽猫'], '2026-09-03 10:05:00')
+        insertRow(
+          'pg-a2',
+          'agent-store',
+          'agent',
+          'A2 店长回复未 @ 实施猫',
+          [],
+          '2026-09-03 10:04:00'
+        )
+        insertRow('pg-a3', null, 'user', 'A3 定向店长', ['店长'], '2026-09-03 10:03:00')
+        insertRow(
+          'pg-a4',
+          'agent-reviewer',
+          'agent',
+          'A4 吐槽猫回复未 @ 实施猫',
+          [],
+          '2026-09-03 10:02:00'
+        )
+        insertRow('pg-a5', null, 'user', 'A5 定向吐槽猫', ['吐槽猫'], '2026-09-03 10:01:00')
+        insertRow(
+          'pg-visible',
+          'agent-impl',
+          'agent',
+          '实施猫自己的旧回复',
+          [],
+          '2026-09-03 10:00:00'
+        )
+
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ limit: 2 }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        // 前两页候选全被过滤时不能提前返回空页，须继续翻到更早的可见消息
+        expect(body.messages.map((m: any) => m.messageId)).toEqual(['pg-visible'])
+        expect(body.total).toBe(1)
+      })
+
+      it('确无可见消息 → 空数组（不是被过滤截断的假空页）', async () => {
+        await mockActive()
+        insertRow('nv-user', null, 'user', '只对吐槽猫说', ['吐槽猫'], '2026-09-04 10:00:00')
+        insertRow(
+          'nv-reviewer',
+          'agent-reviewer',
+          'agent',
+          '吐槽猫的回复',
+          [],
+          '2026-09-04 09:00:00'
+        )
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody(),
           headers: { 'x-signal-token': VALID_TOKEN },
         })
         expect(res.statusCode).toBe(200)
