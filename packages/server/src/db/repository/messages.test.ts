@@ -653,3 +653,64 @@ describe('messages repo — 时间口径（票 5，spec §4.2 ⑤-a/⑤-c）', (
     ).toEqual(['m-ms'])
   })
 })
+
+// ─── 前端首屏历史：取**最新**一页（票 C-1 懒加载接线的服务端半边）────────────
+// 旧实现是 `ORDER BY created_at ASC LIMIT ?`——语义是「取最早 200 条」，长会话里
+// 用户刷新后看到的反而是**最旧**的 200 条、最新消息一条都不在，与「向上翻看更早」相反。
+describe('getSessionHistory — 首屏取最新一页', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  /** 造 n 条消息，created_at 严格递增（毫秒即序号，定序可判）；返回 id 升序数组 */
+  function seed(n: number): string[] {
+    const ins = db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+       VALUES (?, 's1', 'user', ?, '[]', ?)`
+    )
+    const ids: string[] = []
+    for (let i = 1; i <= n; i++) {
+      const id = `m-${String(i).padStart(4, '0')}`
+      // 第 i 条的毫秒位 = i（n ≤ 250，不会溢出秒位）
+      ins.run(id, `msg-${i}`, new Date(Date.UTC(2026, 0, 1, 0, 0, 0, i)).toISOString())
+      ids.push(id)
+    }
+    return ids
+  }
+
+  it('A｜250 条会话返回最新 200 条：含第 250、不含第 1，且顺序 ASC', () => {
+    const ids = seed(250)
+
+    const rows = messagesRepo.getSessionHistory('s1')
+
+    expect(rows).toHaveLength(200)
+    // 最新一条在场、最早一条不在——「刷新先看到最新」
+    expect(rows.map((r) => r.id)).toContain(ids[249])
+    expect(rows.map((r) => r.id)).not.toContain(ids[0])
+    // 窗口是末尾 200 条，且返回前已反转为 ASC（渲染序：旧 → 新）
+    expect(rows.map((r) => r.id)).toEqual(ids.slice(50))
+    expect(rows[0].id).toBe(ids[50])
+    expect(rows[199].id).toBe(ids[249])
+  })
+
+  it('limit 显式传入时同样取最新 N 条（签名与返回类型不变）', () => {
+    const ids = seed(10)
+
+    expect(messagesRepo.getSessionHistory('s1', 3).map((r) => r.id)).toEqual(ids.slice(7))
+  })
+
+  it('不足一页时原样全量返回（顺序 ASC）', () => {
+    const ids = seed(5)
+
+    expect(messagesRepo.getSessionHistory('s1').map((r) => r.id)).toEqual(ids)
+  })
+})

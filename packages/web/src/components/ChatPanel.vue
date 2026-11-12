@@ -335,6 +335,46 @@ function scrollToBottom(smooth = false): void {
   }
 }
 
+// ─── 懒加载更早历史（向上滚动触发 + 滚动锚定）────────────
+/** 距容器顶部小于此值且本次在向上滚，才拉更早一页（300 ≈ 一屏高处提前量） */
+const OLDER_TRIGGER_DISTANCE = 300
+/** 上一次真实滚动的 scrollTop——「向上滚」的判据；切会话复位，防首帧钳位滚动被误读 */
+let lastScrollTop = 0
+
+/**
+ * 主消息区滚动：贴底跟随的判据 + 向上滚到近顶时拉一页更早历史。
+ *
+ * **只在用户主动向上滚时触发**：初次挂载 / 切会话 / 追加新消息都是程序性位移
+ * （scrollTop 不变或增大），若只判「scrollTop < 300」一进长会话就会把全历史拉光。
+ *
+ * 前插会让内容整体下移，故加载前记 `scrollHeight`、加载后把差值补进 `scrollTop`——
+ * 用户正在读的那一行留在原位（滚动锚定），否则视口会突然跳到别处。
+ */
+async function onMessagesScroll(): Promise<void> {
+  const el = chatContainer.value
+  if (el) {
+    const prevTop = lastScrollTop
+    lastScrollTop = el.scrollTop
+    if (
+      el.scrollTop < OLDER_TRIGGER_DISTANCE &&
+      el.scrollTop < prevTop &&
+      store.hasMoreOlder &&
+      !store.loadingOlder
+    ) {
+      const beforeHeight = el.scrollHeight
+      const beforeTop = el.scrollTop
+      await store.loadOlderMessages()
+      await nextTick()
+      if (chatContainer.value === el) {
+        // 只补「新增内容」的高度：页内容为空时 delta=0，不产生位移
+        el.scrollTop = beforeTop + (el.scrollHeight - beforeHeight)
+        lastScrollTop = el.scrollTop
+      }
+    }
+  }
+  checkScrollPosition()
+}
+
 // New messages arrive → scroll if at bottom; otherwise show indicator
 // watch 源用最后一条消息 id（比 length 精确：消息内容更新不改 id 不触发滚动）。
 // C5 移除其中「隐式当成功」的 sending 复位——按钮复位改由 store.sendStatus 独占驱动。
@@ -377,6 +417,9 @@ watch(
 watch(
   () => store.activeSessionId,
   () => {
+    // 懒加载锚点复位：切会话时容器 scrollTop 会被钳回 0，不重置上一次读数的话，
+    // 这个「钳位」会被误判成用户向上滚 → 一进会话就把历史拉光
+    lastScrollTop = 0
     setTimeout(() => scrollToBottom(), 50)
   }
 )
@@ -1443,7 +1486,7 @@ const messageViews = computed<MessageView[]>(() => {
     </div>
 
     <!-- Messages -->
-    <div ref="chatContainer" class="chat-messages-wrapper" @scroll.passive="checkScrollPosition">
+    <div ref="chatContainer" class="chat-messages-wrapper" @scroll.passive="onMessagesScroll">
       <div ref="messagesInner" class="chat-messages-inner" aria-live="polite">
         <!-- 80% 告警横幅：任一 agent 上下文超过告警线（实时数据驱动，阈值来自配置） -->
         <div v-if="warnedAgents.length" class="context-warning-banner" role="alert">
@@ -1486,6 +1529,16 @@ const messageViews = computed<MessageView[]>(() => {
           <p v-if="store.sessions.length > 0">从左侧选择一个会话开始聊天</p>
           <p v-else>点击左下角按钮创建一个新会话</p>
           <p class="empty-hint">在消息中使用 @猫咪名字 来指定谁来回复</p>
+        </div>
+
+        <!-- 懒加载状态条（C-1）：正在向前翻页 / 已到会话开头。消息数为 0 时不显示——
+             那是「新会话空场」而不是「翻到了开头」 -->
+        <div v-if="store.loadingOlder" class="older-status" role="status">正在加载更早消息…</div>
+        <div
+          v-else-if="!store.hasMoreOlder && store.activeMessages.length > 0"
+          class="older-status older-status-done"
+        >
+          已到会话开头
         </div>
 
         <TransitionGroup name="msg">
@@ -2356,11 +2409,20 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Date Separator ────────────────────── */
 
+/* 日期分组吸顶（C-1）：滚动时当前时间段的日期头贴在消息区上沿，滚过即被下一段替换；
+   分组逻辑本身不变（dateSepIndices 仍是「与上一条不同天」才出）。
+   实底 bg-paper 防止正文从字下透出；z-index 低于两条告警横幅（10）、高于普通消息（无 z-index）；
+   pointer-events:none 让滚到下面的气泡操作按钮仍可点（本元素无任何交互）。 */
 .date-separator {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  pointer-events: none;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 12px 0 4px;
+  background: var(--bg-paper);
 }
 
 .date-separator span {
@@ -2378,6 +2440,24 @@ const messageViews = computed<MessageView[]>(() => {
 
 .date-sep-system span {
   background: transparent;
+}
+
+/* ─── 懒加载状态条（更早历史）──────────── */
+/* 居中细条，不占消息流视觉层级：加载中给「还在拉」的反馈，封口时给「真的到开头了」的终点感。 */
+.older-status {
+  align-self: center;
+  flex-shrink: 0;
+  padding: 4px 12px;
+  margin-bottom: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-radius: 10px;
+  background: var(--bg-hover);
+}
+
+.older-status-done {
+  background: transparent;
+  opacity: 0.6;
 }
 
 /* ─── 回退分隔线（T1）───────────────────── */
