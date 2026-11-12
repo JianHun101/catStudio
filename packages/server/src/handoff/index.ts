@@ -44,7 +44,13 @@ export interface GeneratedSummary {
   coveredToId: string | null
   /** 上述消息的 created_at（ISO）；无消息时为 null */
   coveredToAt: string | null
-  /** 该摘要累计覆盖的消息条数（增量 = 旧条目累计 + 本次新增） */
+  /**
+   * 该摘要链**实际覆盖**的消息条数，不是无条件累加：
+   * - 增量链（`continuingFrom` 非 null）= 旧条目累计 + 本次新增；
+   * - 全量重读（无旧边界 / 旧边界消息已被删）= 本次输入条数（不叠加旧条目，
+   *   否则会把已不可定位的旧覆盖重复计入）。
+   * 删消息后本值可能比上一份摘要小，属预期语义。
+   */
   coveredCount: number
 }
 
@@ -55,44 +61,61 @@ const EMPTY_SUMMARY: GeneratedSummary = {
   coveredCount: 0,
 }
 
+/** 摘要输入：消息列表 + **实际生效**的增量起点 */
+interface SummaryInput {
+  messages: MessageWithAgentName[]
+  /**
+   * 实际增量起点（上一份摘要的覆盖边界）：
+   * - 非 null = 本次是增量，输入只含该边界之后的消息；
+   * - null = 本次为**全量重读**（无旧条目 / 旧条目没有 id 边界 / 边界消息已被删），
+   *   调用方不得再写「覆盖至 #旧边界」。
+   */
+  continuingFrom: string | null
+}
+
 /**
  * 分页串读摘要输入消息（时间正序，**无条数上限**）。
  *
  * `afterId` 为上一份摘要的覆盖边界：只读其后的新增消息（增量）。
  * 边界消息已不存在（如回退删除）→ 退回全量重读——宁可多花一次成本，
  * 也绝不静默丢早期消息（旧条目只有 `coveredThrough` 数字时同样走全量）。
+ *
+ * `continuingFrom` 必须以**边界消息实际命中**为准：只有 afterId 非空且
+ * `getMessageInSession` 查到时才返回 afterId，否则返回 null。生成侧据此
+ * 决定是否拼旧摘要前缀、是否累加 `coveredCount`（见 `generateFullSummary`）。
  */
-function readSummaryInputMessages(
-  sessionId: string,
-  afterId: string | null
-): MessageWithAgentName[] {
+function readSummaryInputMessages(sessionId: string, afterId: string | null): SummaryInput {
   let after: { createdAt: string; id: string } | null = null
+  let continuingFrom: string | null = null
   if (afterId) {
     const cursor = messagesRepo.getMessageInSession(afterId, sessionId)
-    if (cursor) after = { createdAt: cursor.created_at, id: cursor.id }
+    if (cursor) {
+      after = { createdAt: cursor.created_at, id: cursor.id }
+      continuingFrom = cursor.id
+    }
   }
 
-  const all: MessageWithAgentName[] = []
+  const messages: MessageWithAgentName[] = []
   for (;;) {
     const page = messagesRepo.getMessagesWithAgentNamePage(
       sessionId,
       after,
       SUMMARY_INPUT_PAGE_SIZE
     )
-    all.push(...page)
+    messages.push(...page)
     if (page.length < SUMMARY_INPUT_PAGE_SIZE) break
     const last = page[page.length - 1]
     after = { createdAt: last.created_at, id: last.id }
   }
-  return all
+  return { messages, continuingFrom }
 }
 
 /**
  * 生成会话总结（交接用 / 摘要替代压缩用）。
  *
- * 增量策略：若存在上一份**就绪**摘要且带 `coveredToId`，输入 = 旧摘要正文 +
- * 该边界之后的新增消息；否则全量重读（自愈——旧版条目没有 id 边界，或摘要输入
- * 曾经被 300 条上限截断）。
+ * 增量策略：若存在上一份**就绪**摘要且带 `coveredToId`、且该边界消息仍存在，
+ * 输入 = 旧摘要正文 + 该边界之后的新增消息；否则全量重读（自愈——旧版条目没有
+ * id 边界、边界消息已被回退删除，或摘要输入曾经被 300 条上限截断）。
  *
  * 覆盖边界由**读消息那一刻**的最后一条确定，调用方不得另取——否则边界与输入不一致。
  *
@@ -106,13 +129,19 @@ export async function generateFullSummary(
     parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
   )
   const priorBoundary = prior?.coveredToId ?? null
-  const inputMessages = readSummaryInputMessages(sessionId, priorBoundary)
+  const { messages: inputMessages, continuingFrom } = readSummaryInputMessages(
+    sessionId,
+    priorBoundary
+  )
 
   const last = inputMessages.length > 0 ? inputMessages[inputMessages.length - 1] : null
   const coveredToId = last?.id ?? null
   const coveredToAt = last?.created_at ?? null
   const newCount = inputMessages.length
-  const coveredCount = priorBoundary
+  // 只有**边界消息仍存在**（continuingFrom 非 null）才算增量、才累加旧计数；
+  // 边界缺失/已删 ⇒ 本次输入是全量，计数必须从本次重算，不能沿用旧条目的
+  // coveredCount（否则会凭空多算旧条目覆盖的条数）。
+  const coveredCount = continuingFrom
     ? (prior?.coveredCount ?? prior?.coveredThrough ?? 0) + newCount
     : newCount
 
@@ -125,9 +154,10 @@ export async function generateFullSummary(
     .join('\n')
 
   // 增量输入：旧摘要正文作前缀（它代表更早对话），新增消息跟在后面。
-  // 注意不用 `prior.coveredToId` 作分支条件（该条目可能因边界消息已删而退回全量）。
-  const summaryInput = priorBoundary
-    ? `【此前对话摘要（有损压缩，覆盖至消息 #${priorBoundary}）】\n${prior?.content ?? ''}\n\n【此后新增的对话】\n${conversationText}`
+  // 判据用 `continuingFrom`（边界命中的事实），不用 `priorBoundary`（旧条目的
+  // 声称）——边界消息已删时后者仍非空，会把「其实没读到的更早对话」写成已覆盖。
+  const summaryInput = continuingFrom
+    ? `【此前对话摘要（有损压缩，覆盖至消息 #${continuingFrom}）】\n${prior?.content ?? ''}\n\n【此后新增的对话】\n${conversationText}`
     : conversationText
 
   const apiKey = process.env.SUMMARY_API_KEY

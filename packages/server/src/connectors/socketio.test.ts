@@ -6413,6 +6413,12 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
   /** 驱动一轮 runAgentReply，返回捕获 llmMessages 的 chatStream spy */
   async function runCompressReply(msgId: string): Promise<ReturnType<typeof vi.fn>> {
     const mod = await import('./socketio.js')
+    // 引擎是 createSocketIO 建立的模块单例（非模块顶层）。全量跑时前序 describe 已建好；
+    // 单跑本组（`-t` 过滤）时前序用例被 skip、引擎仍为 null → 按需自建，免顺序依赖。
+    if (!getExecutionEngine()) {
+      mod.__test_resetEngine()
+      mod.createSocketIO(createServer())
+    }
     const { getAgentState } = await import('../dispatch/index.js')
     const { getAdapterForAgent } = await import('../llm/registry.js')
     const { generateFullSummary } = await import('../handoff/index.js')
@@ -6480,8 +6486,12 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     }
   }
 
-  // 本 describe 挂在顶层 describe 之外——自建 DB（照顶层 beforeEach 模式），
-  // 不依赖顶层 socket 连接回调（executeAgentsSerial 只消费 mockIo）
+  /** 生成失败替身：空摘要 + 空边界（= 生成失败语义，消费侧按失败处理） */
+  const EMPTY_GEN = { summary: '', coveredToId: null, coveredToAt: null, coveredCount: 0 }
+
+  // 本 describe 挂在顶层 describe 之外——自建 DB（照顶层 beforeEach 模式），也不依赖
+  // 顶层 connection 回调；但引擎是 createSocketIO 建立的模块单例，runCompressReply 内
+  // 按需自建（见该函数），否则单跑本组会拿到 null 引擎。
   beforeEach(() => {
     vi.clearAllMocks()
     socketHandlers.clear()
@@ -6763,28 +6773,29 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     expect(readCompressed()[0].content).toBe('')
   })
 
-  it('A2b 降级：SUMMARY_API_KEY 置空 + 超预算 → 注入 [历史折叠（降级）]', async () => {
-    const savedKey = process.env.SUMMARY_API_KEY
-    process.env.SUMMARY_API_KEY = ''
-    try {
-      insertHistory(11) // ~16400 token > 预算 13720（MAX=14000）→ 确实发生截断
-      const chatStream = await runCompressReply('msg-nokey-trunc')
-      const msgs = lastMessages(chatStream)
-      expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
-      const degraded = msgs.find((m) => m.content?.includes('[历史折叠（降级）]'))
-      expect(degraded).toBeDefined()
-      expect(degraded!.content).toContain('query_session_messages')
-      expect(degraded!.content).toMatch(/截断 \d+ 条/)
-    } finally {
-      if (savedKey === undefined) delete process.env.SUMMARY_API_KEY
-      else process.env.SUMMARY_API_KEY = savedKey
-    }
+  it('A2b 降级：生成返回空摘要（mock）+ 超预算 → 注入 [历史折叠（降级）]', async () => {
+    // mock 边界：本文件顶层 `vi.mock('../handoff/index.js')` 把 generateFullSummary 整个替身化，
+    // 这里显式把替身钉成「空摘要」= 生成失败语义。因此本用例**测不到**「SUMMARY_API_KEY 为空」
+    // 这条真实 no-key 路径——置空 env 对该替身无效。真实 no-key 路径由
+    // handoff/index.test.ts「无 API key → 空摘要 + 空边界」覆盖。
+    const { generateFullSummary } = await import('../handoff/index.js')
+    vi.mocked(generateFullSummary).mockResolvedValue(EMPTY_GEN)
+    insertHistory(11) // ~16400 token > 预算 13720（MAX=14000）→ 确实发生截断
+    const chatStream = await runCompressReply('msg-nokey-trunc')
+    const msgs = lastMessages(chatStream)
+    expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
+    const degraded = msgs.find((m) => m.content?.includes('[历史折叠（降级）]'))
+    expect(degraded).toBeDefined()
+    expect(degraded!.content).toContain('query_session_messages')
+    expect(degraded!.content).toMatch(/截断 \d+ 条/)
   })
 
   it('A2b 不假报：摘要失败但未发生截断 → 不含降级标记', async () => {
-    const savedKey = process.env.SUMMARY_API_KEY
+    // mock 边界同上：显式钉成空摘要（= 失败语义），不走真实 no-key；置空 SUMMARY_API_KEY
+    // 对顶层替身无效，故不设该 env（真实 no-key 见 handoff/index.test.ts）。
+    const { generateFullSummary } = await import('../handoff/index.js')
+    vi.mocked(generateFullSummary).mockResolvedValue(EMPTY_GEN)
     const savedMax = process.env.MAX_CONTEXT_TOKENS
-    process.env.SUMMARY_API_KEY = ''
     // 16,400 token：ratio 0.82 ≥ 0.75 走同步生成（失败），但 < 预算 19,600 → 不截断
     process.env.MAX_CONTEXT_TOKENS = '20000'
     try {
@@ -6794,8 +6805,6 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
       expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
       expect(msgs.some((m) => m.content?.includes('[历史折叠（降级）]'))).toBe(false)
     } finally {
-      if (savedKey === undefined) delete process.env.SUMMARY_API_KEY
-      else process.env.SUMMARY_API_KEY = savedKey
       if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
       else process.env.MAX_CONTEXT_TOKENS = savedMax
     }
