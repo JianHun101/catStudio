@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import { api } from '@/composables/useApi'
 import type { SpanDto, SessionTraceDto } from '@/composables/useApi'
@@ -14,6 +14,7 @@ import {
   type WfRow,
 } from '@/utils/spanLayout'
 import AgentSettingsDrawer from './AgentSettingsDrawer.vue'
+import SessionHistoryPanel from './SessionHistoryPanel.vue'
 
 /**
  * 会话右侧边栏——clowder-ai 精简评估面板（低密度分区卡片，评估会话当前状态用）。
@@ -34,6 +35,32 @@ import AgentSettingsDrawer from './AgentSettingsDrawer.vue'
  * 链路 tab 同一份真相源），本文件不得内联任何几何换算。
  */
 const store = useChatStore()
+
+// ─── 右栏内两页：成员 / 历史（同列切 tab，不做抽屉、浮层、宽度动画）───
+//
+// 历史页是**同一栏里的一个页面**：亮着时替换成员页的内容，右栏宽度由 App.vue 的 grid
+// 决定（本面板不设宽、不动画、不位移、不加遮罩）；Esc 不响应、无关闭按钮。
+// `Ctrl+K` 与顶部 🔍 只是「切到历史页」的入口，不是另一个面板。
+const activeTab = ref<'members' | 'history'>('members')
+
+function openHistory(): void {
+  activeTab.value = 'history'
+}
+
+function onGlobalKeydown(ev: KeyboardEvent): void {
+  if (ev.key.toLowerCase() !== 'k' || !(ev.ctrlKey || ev.metaKey)) return
+  if (ev.altKey || ev.shiftKey) return
+  // 输入框里也不拦？——历史页的入口不该被「正在打字」吞掉，但输入框内的 Ctrl+K
+  // 是系统级动作（部分浏览器=地址栏搜索），故只在非输入态接管。
+  const el = ev.target as HTMLElement | null
+  const tag = el?.tagName?.toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || el?.isContentEditable) return
+  ev.preventDefault()
+  openHistory()
+}
+
+onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 
 // ─── 会话成员（按 activeSession.agentIds 过滤全量 agents）───
 const memberAgents = computed(() => {
@@ -392,13 +419,31 @@ async function removeAgent(agentId: string): Promise<void> {
   <div class="session-agents-panel">
     <!-- 头行：48px，与主区顶栏、会话栏头行同一水平线（治「左右侧面板上方空缺」）。
          会话无关（空态也渲染，读数 0）——头行恒在，三条头行才在任何状态下都对得齐。
-         B·改：统计卡退役，数字并入本行；队列 chip 仅当存在排队时出现（0 排队不占位）。 -->
+         B·改：统计卡退役，数字并入本行；队列 chip 仅当存在排队时出现（0 排队不占位）。
+         右栏两页：成员 / 历史——tab 就在头行里，切页不换列、不位移。 -->
     <div class="panel-head">
-      <span class="head-title">成员 · {{ memberAgents.length }}</span>
-      <span v-if="store.activeSessionId" class="inline-stats">
+      <button
+        class="panel-tab"
+        :class="{ on: activeTab === 'members' }"
+        @click="activeTab = 'members'"
+      >
+        成员 · {{ memberAgents.length }}
+      </button>
+      <button class="panel-tab" :class="{ on: activeTab === 'history' }" @click="openHistory">
+        历史
+      </button>
+      <span v-if="activeTab === 'members' && store.activeSessionId" class="inline-stats">
         消息 {{ messageStats.total }} · 回复 {{ messageStats.agent }}
         <span v-if="totalQueued > 0" class="head-queue-chip">队列 {{ totalQueued }}</span>
       </span>
+      <button
+        class="head-search"
+        title="搜索历史（Ctrl+K）"
+        aria-label="打开历史"
+        @click="openHistory"
+      >
+        🔍
+      </button>
     </div>
 
     <!-- 无会话空态（不报错，静默提示） -->
@@ -408,226 +453,233 @@ async function removeAgent(agentId: string): Promise<void> {
     </div>
 
     <template v-else>
-      <!-- 成员区：本面板唯一的滚动容器。页脚在它外面 ⇒ 不随列表滚走（固定态）。 -->
-      <div class="right-body">
-        <!-- 会话成员卡列表（R4 弱化卡：一行、头像独立热区、状态收成色点） -->
-        <div class="member-list">
-          <div v-for="agent in memberAgents" :key="agent.id" class="member-item">
-            <!-- 整卡是展开热区；头像按钮 @click.stop 独占自己的热区（两者互不触发）。
+      <!-- 历史页：同一栏内整页替换成员区（不是叠层）。广播开关在历史页隐藏——
+           它是成员区的操作，历史页不该露出一个作用于别处的开关。 -->
+      <SessionHistoryPanel v-if="activeTab === 'history'" :session-id="store.activeSessionId" />
+
+      <template v-else>
+        <!-- 成员区：本面板唯一的滚动容器。页脚在它外面 ⇒ 不随列表滚走（固定态）。 -->
+        <div class="right-body">
+          <!-- 会话成员卡列表（R4 弱化卡：一行、头像独立热区、状态收成色点） -->
+          <div class="member-list">
+            <div v-for="agent in memberAgents" :key="agent.id" class="member-item">
+              <!-- 整卡是展开热区；头像按钮 @click.stop 独占自己的热区（两者互不触发）。
                键盘可达：头像与移除都是真 button，卡片体是 Enter/Space 可触发。 -->
-            <div
-              class="member-card slim"
-              :class="{ expanded: isTraceExpanded(agent.id) }"
-              role="button"
-              tabindex="0"
-              :aria-expanded="isTraceExpanded(agent.id)"
-              @click="toggleExpand(agent.id)"
-              @keydown.enter.prevent="toggleExpand(agent.id)"
-              @keydown.space.prevent="toggleExpand(agent.id)"
-            >
-              <button
-                class="avatar-btn"
-                :title="`打开 ${agent.name} 的设置`"
-                :aria-label="`打开 ${agent.name} 的设置`"
-                @click.stop="openDrawer(agent.id)"
+              <div
+                class="member-card slim"
+                :class="{ expanded: isTraceExpanded(agent.id) }"
+                role="button"
+                tabindex="0"
+                :aria-expanded="isTraceExpanded(agent.id)"
+                @click="toggleExpand(agent.id)"
+                @keydown.enter.prevent="toggleExpand(agent.id)"
+                @keydown.space.prevent="toggleExpand(agent.id)"
               >
-                {{ agent.avatar }}
-              </button>
-              <span class="member-name">{{ agent.name }}</span>
-              <div class="slim-right">
-                <span v-if="queueFor(agent.id) > 0" class="queue-badge"
-                  >队列 {{ queueFor(agent.id) }}</span
-                >
-                <!-- 状态中文 label 收成 7px 色点（色义不变）；语义走 aria-label，屏幕阅读器仍读得出 -->
-                <span
-                  class="status-dot"
-                  :class="statusFor(agent.id) === 'idle' ? 'dot-idle' : 'dot-busy'"
-                  :aria-label="statusLabel(statusFor(agent.id))"
-                  role="img"
-                ></span>
-                <span class="member-tokens">{{ tokensText(agent.id) }}</span>
                 <button
-                  class="btn-remove"
-                  title="从会话移除"
-                  aria-label="移除"
-                  @click.stop="removeAgent(agent.id)"
+                  class="avatar-btn"
+                  :title="`打开 ${agent.name} 的设置`"
+                  :aria-label="`打开 ${agent.name} 的设置`"
+                  @click.stop="openDrawer(agent.id)"
                 >
-                  ✕
+                  {{ agent.avatar }}
                 </button>
-                <span class="slim-chev">▸</span>
-              </div>
-            </div>
-
-            <!-- 内联 trace（屏②）：按时间顺序、默认全列、段名悬浮出说明 -->
-            <div v-if="isTraceExpanded(agent.id)" class="trace-inline">
-              <div class="ti-head">
-                <span class="ti-title"
-                  >执行 trace<button
-                    class="info-btn"
-                    aria-label="字段说明"
-                    @click.stop="toggleFields(agent.id)"
+                <span class="member-name">{{ agent.name }}</span>
+                <div class="slim-right">
+                  <span v-if="queueFor(agent.id) > 0" class="queue-badge"
+                    >队列 {{ queueFor(agent.id) }}</span
                   >
-                    !
-                  </button></span
-                >
-                <span class="ti-status" :class="traceStatusClass(agent.id)">{{
-                  traceStatusText(agent.id)
-                }}</span>
-                <span v-if="traceTotalText(agent.id)" class="ti-total">{{
-                  traceTotalText(agent.id)
-                }}</span>
-              </div>
-
-              <!-- 字段总说明（`!` 点开；内容来自 spanLayout 的 FIELD_DOCS 单源） -->
-              <div v-if="fieldsOpenAgentId === agent.id" class="ti-fields">
-                <div v-for="d in FIELD_DOCS" :key="d.key" class="ti-field">
-                  <span class="ti-fname">{{ d.name }}</span>
-                  <span class="ti-fdesc">{{ d.desc }}</span>
-                </div>
-              </div>
-
-              <div v-if="traceLoading" class="ti-nodata">执行记录加载中…</div>
-              <div v-else-if="traceError" class="ti-err">{{ traceError }}</div>
-              <div v-else-if="!traceByAgent.get(agent.id)" class="ti-nodata">本会话暂无执行</div>
-
-              <!-- 在飞：段在执行收尾才一次性落库 ⇒ 此刻库里一行段都没有。
-                 这不是「0ms」也不是「空白」——必须显式说明。 -->
-              <template v-else-if="traceRunning(agent.id)">
-                <div class="ti-nodata">采集中 · 段未落库</div>
-                <div class="ti-foot">
-                  段在一次执行<b>收尾时</b>才一次性落库 ⇒ 正在跑的执行此刻<b>库里一行段都没有</b>。
-                </div>
-              </template>
-
-              <div v-else-if="spanLoading[agent.id]" class="ti-nodata">段数据加载中…</div>
-              <div v-else-if="spanError[agent.id]" class="ti-err">
-                段数据加载失败：{{ spanError[agent.id] }}
-              </div>
-              <div v-else-if="!waterfalls[agent.id]" class="ti-nodata">无段数据（存量行）</div>
-
-              <template v-else>
-                <!-- 段条本身即时间轴（left/width 全部来自 spanLayout 的几何量） -->
-                <div class="segbar">
+                  <!-- 状态中文 label 收成 7px 色点（色义不变）；语义走 aria-label，屏幕阅读器仍读得出 -->
                   <span
-                    v-for="r in visibleRows(agent.id).shown"
-                    :key="r.key"
-                    class="seg"
-                    :class="[`ph-${r.phase}`, { 'seg-err': r.bad }]"
-                    :style="{ left: `${r.leftPct}%`, width: `${r.widthPct}%` }"
+                    class="status-dot"
+                    :class="statusFor(agent.id) === 'idle' ? 'dot-idle' : 'dot-busy'"
+                    :aria-label="statusLabel(statusFor(agent.id))"
+                    role="img"
                   ></span>
+                  <span class="member-tokens">{{ tokensText(agent.id) }}</span>
+                  <button
+                    class="btn-remove"
+                    title="从会话移除"
+                    aria-label="移除"
+                    @click.stop="removeAgent(agent.id)"
+                  >
+                    ✕
+                  </button>
+                  <span class="slim-chev">▸</span>
                 </div>
+              </div>
 
-                <!-- 段清单：**按时间顺序**（上→下 = 执行先后）；默认全列 -->
-                <div class="seglist">
-                  <div v-for="r in visibleRows(agent.id).shown" :key="r.key" class="segrow">
-                    <span class="swatch" :class="[`ph-${r.phase}`, { 'sw-err': r.bad }]"></span>
-                    <span
-                      class="segn"
-                      @mouseenter="onSegTip(r.name, $event)"
-                      @mouseleave="hideTip()"
-                      >{{ r.name }}</span
+              <!-- 内联 trace（屏②）：按时间顺序、默认全列、段名悬浮出说明 -->
+              <div v-if="isTraceExpanded(agent.id)" class="trace-inline">
+                <div class="ti-head">
+                  <span class="ti-title"
+                    >执行 trace<button
+                      class="info-btn"
+                      aria-label="字段说明"
+                      @click.stop="toggleFields(agent.id)"
                     >
-                    <span v-if="r.bad" class="segflag">{{ r.status }}</span>
-                    <span v-if="r.ttftText" class="segttft">首字 {{ r.ttftText }}</span>
-                    <span class="segd">{{ fmtMs(r.durationMs) }}</span>
-                    <span class="segp">{{ r.sharePct }}</span>
-                  </div>
-                  <div v-if="microSummary(agent.id)" class="segrow rest">
-                    <span class="swatch sw-rest"></span>
-                    <span class="segn">已折叠 {{ microSummary(agent.id)!.count }} 个微段</span>
-                    <span class="segd">{{ microSummary(agent.id)!.text }}</span>
-                    <span class="segp">{{ microSummary(agent.id)!.pct }}</span>
-                  </div>
-                </div>
-                <button class="ti-more" @click.stop="toggleCompact(agent.id)">
-                  {{
-                    compactAgents[agent.id]
-                      ? `展开全部 ${kidRows(agent.id).length} 段（时间序）`
-                      : '折叠微段'
-                  }}
-                </button>
-
-                <!-- 轴外段：不进瀑布、不计总时长，只作单行标注（文案由 spanLayout 组装） -->
-                <div v-for="o in waterfalls[agent.id].outside" :key="o.key" class="ti-outside">
-                  {{ o.text }}
+                      !
+                    </button></span
+                  >
+                  <span class="ti-status" :class="traceStatusClass(agent.id)">{{
+                    traceStatusText(agent.id)
+                  }}</span>
+                  <span v-if="traceTotalText(agent.id)" class="ti-total">{{
+                    traceTotalText(agent.id)
+                  }}</span>
                 </div>
 
-                <div class="ti-foot">
-                  总时长只认根段 invoke_agent；段是嵌套的，子段之和会超过它。
+                <!-- 字段总说明（`!` 点开；内容来自 spanLayout 的 FIELD_DOCS 单源） -->
+                <div v-if="fieldsOpenAgentId === agent.id" class="ti-fields">
+                  <div v-for="d in FIELD_DOCS" :key="d.key" class="ti-field">
+                    <span class="ti-fname">{{ d.name }}</span>
+                    <span class="ti-fdesc">{{ d.desc }}</span>
+                  </div>
                 </div>
-              </template>
+
+                <div v-if="traceLoading" class="ti-nodata">执行记录加载中…</div>
+                <div v-else-if="traceError" class="ti-err">{{ traceError }}</div>
+                <div v-else-if="!traceByAgent.get(agent.id)" class="ti-nodata">本会话暂无执行</div>
+
+                <!-- 在飞：段在执行收尾才一次性落库 ⇒ 此刻库里一行段都没有。
+                 这不是「0ms」也不是「空白」——必须显式说明。 -->
+                <template v-else-if="traceRunning(agent.id)">
+                  <div class="ti-nodata">采集中 · 段未落库</div>
+                  <div class="ti-foot">
+                    段在一次执行<b>收尾时</b>才一次性落库 ⇒
+                    正在跑的执行此刻<b>库里一行段都没有</b>。
+                  </div>
+                </template>
+
+                <div v-else-if="spanLoading[agent.id]" class="ti-nodata">段数据加载中…</div>
+                <div v-else-if="spanError[agent.id]" class="ti-err">
+                  段数据加载失败：{{ spanError[agent.id] }}
+                </div>
+                <div v-else-if="!waterfalls[agent.id]" class="ti-nodata">无段数据（存量行）</div>
+
+                <template v-else>
+                  <!-- 段条本身即时间轴（left/width 全部来自 spanLayout 的几何量） -->
+                  <div class="segbar">
+                    <span
+                      v-for="r in visibleRows(agent.id).shown"
+                      :key="r.key"
+                      class="seg"
+                      :class="[`ph-${r.phase}`, { 'seg-err': r.bad }]"
+                      :style="{ left: `${r.leftPct}%`, width: `${r.widthPct}%` }"
+                    ></span>
+                  </div>
+
+                  <!-- 段清单：**按时间顺序**（上→下 = 执行先后）；默认全列 -->
+                  <div class="seglist">
+                    <div v-for="r in visibleRows(agent.id).shown" :key="r.key" class="segrow">
+                      <span class="swatch" :class="[`ph-${r.phase}`, { 'sw-err': r.bad }]"></span>
+                      <span
+                        class="segn"
+                        @mouseenter="onSegTip(r.name, $event)"
+                        @mouseleave="hideTip()"
+                        >{{ r.name }}</span
+                      >
+                      <span v-if="r.bad" class="segflag">{{ r.status }}</span>
+                      <span v-if="r.ttftText" class="segttft">首字 {{ r.ttftText }}</span>
+                      <span class="segd">{{ fmtMs(r.durationMs) }}</span>
+                      <span class="segp">{{ r.sharePct }}</span>
+                    </div>
+                    <div v-if="microSummary(agent.id)" class="segrow rest">
+                      <span class="swatch sw-rest"></span>
+                      <span class="segn">已折叠 {{ microSummary(agent.id)!.count }} 个微段</span>
+                      <span class="segd">{{ microSummary(agent.id)!.text }}</span>
+                      <span class="segp">{{ microSummary(agent.id)!.pct }}</span>
+                    </div>
+                  </div>
+                  <button class="ti-more" @click.stop="toggleCompact(agent.id)">
+                    {{
+                      compactAgents[agent.id]
+                        ? `展开全部 ${kidRows(agent.id).length} 段（时间序）`
+                        : '折叠微段'
+                    }}
+                  </button>
+
+                  <!-- 轴外段：不进瀑布、不计总时长，只作单行标注（文案由 spanLayout 组装） -->
+                  <div v-for="o in waterfalls[agent.id].outside" :key="o.key" class="ti-outside">
+                    {{ o.text }}
+                  </div>
+
+                  <div class="ti-foot">
+                    总时长只认根段 invoke_agent；段是嵌套的，子段之和会超过它。
+                  </div>
+                </template>
+              </div>
+            </div>
+            <div v-if="memberAgents.length === 0" class="member-empty">
+              会话暂无猫咪——点下方「添加猫咪」
             </div>
           </div>
-          <div v-if="memberAgents.length === 0" class="member-empty">
-            会话暂无猫咪——点下方「添加猫咪」
-          </div>
+          <div v-if="actionError" class="error-msg">{{ actionError }}</div>
         </div>
-        <div v-if="actionError" class="error-msg">{{ actionError }}</div>
-      </div>
 
-      <!-- 固定页脚：广播开关 + 添加猫咪（从退役的「会话配置」折叠卡与虚线大按钮迁来）。
+        <!-- 固定页脚：广播开关 + 添加猫咪（从退役的「会话配置」折叠卡与虚线大按钮迁来）。
            页脚在滚动容器之外 ⇒ 成员列表滚 500px 它也纹丝不动。 -->
-      <div class="panel-footer">
-        <div class="foot-row">
-          <div class="foot-grow">
-            <div class="foot-title">广播模式</div>
-            <div class="foot-hint">关闭时仅被 @ 的 Agent 可见</div>
-          </div>
-          <button
-            class="foot-add"
-            @click="openPicker"
-            :disabled="addableAgents.length === 0"
-            title="添加猫咪到会话"
-          >
-            ＋ 添加猫咪
-          </button>
-          <button
-            class="toggle-switch"
-            :class="{ on: store.broadcastMode }"
-            role="switch"
-            :aria-checked="store.broadcastMode"
-            :title="store.broadcastMode ? '关闭广播模式' : '开启广播模式'"
-            @click="store.toggleBroadcast()"
-          >
-            <span class="toggle-knob"></span>
-          </button>
-        </div>
-      </div>
-
-      <!-- 多选弹层 -->
-      <div v-if="pickerOpen" class="picker-overlay" @click.self="closePicker">
-        <div class="picker" role="dialog" aria-modal="true" aria-label="添加猫咪到会话">
-          <div class="picker-header">
-            <h3>添加猫咪到会话</h3>
-            <button class="btn-close" @click="closePicker">✕</button>
-          </div>
-          <div v-if="addableAgents.length === 0" class="picker-hint">所有猫咪都已在会话中</div>
-          <div v-else class="picker-list">
-            <label v-for="agent in addableAgents" :key="agent.id" class="picker-row">
-              <input
-                type="checkbox"
-                :checked="selectedAddIds.includes(agent.id)"
-                @change="togglePick(agent.id)"
-              />
-              <span class="picker-avatar">{{ agent.avatar }}</span>
-              <span class="picker-name">{{ agent.name }}</span>
-            </label>
-          </div>
-          <div class="picker-footer">
-            <span v-if="selectedAddIds.length" class="pick-count"
-              >已选 {{ selectedAddIds.length }} 只</span
-            >
-            <button class="btn btn-cancel" @click="closePicker">取消</button>
+        <div class="panel-footer">
+          <div class="foot-row">
+            <div class="foot-grow">
+              <div class="foot-title">广播模式</div>
+              <div class="foot-hint">关闭时仅被 @ 的 Agent 可见</div>
+            </div>
             <button
-              class="btn btn-ok"
-              :disabled="selectedAddIds.length === 0 || adding"
-              @click="confirmAdd"
+              class="foot-add"
+              @click="openPicker"
+              :disabled="addableAgents.length === 0"
+              title="添加猫咪到会话"
             >
-              {{ adding ? '添加中…' : '确认添加' }}
+              ＋ 添加猫咪
+            </button>
+            <button
+              class="toggle-switch"
+              :class="{ on: store.broadcastMode }"
+              role="switch"
+              :aria-checked="store.broadcastMode"
+              :title="store.broadcastMode ? '关闭广播模式' : '开启广播模式'"
+              @click="store.toggleBroadcast()"
+            >
+              <span class="toggle-knob"></span>
             </button>
           </div>
         </div>
-      </div>
+
+        <!-- 多选弹层 -->
+        <div v-if="pickerOpen" class="picker-overlay" @click.self="closePicker">
+          <div class="picker" role="dialog" aria-modal="true" aria-label="添加猫咪到会话">
+            <div class="picker-header">
+              <h3>添加猫咪到会话</h3>
+              <button class="btn-close" @click="closePicker">✕</button>
+            </div>
+            <div v-if="addableAgents.length === 0" class="picker-hint">所有猫咪都已在会话中</div>
+            <div v-else class="picker-list">
+              <label v-for="agent in addableAgents" :key="agent.id" class="picker-row">
+                <input
+                  type="checkbox"
+                  :checked="selectedAddIds.includes(agent.id)"
+                  @change="togglePick(agent.id)"
+                />
+                <span class="picker-avatar">{{ agent.avatar }}</span>
+                <span class="picker-name">{{ agent.name }}</span>
+              </label>
+            </div>
+            <div class="picker-footer">
+              <span v-if="selectedAddIds.length" class="pick-count"
+                >已选 {{ selectedAddIds.length }} 只</span
+              >
+              <button class="btn btn-cancel" @click="closePicker">取消</button>
+              <button
+                class="btn btn-ok"
+                :disabled="selectedAddIds.length === 0 || adding"
+                @click="confirmAdd"
+              >
+                {{ adding ? '添加中…' : '确认添加' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
     </template>
 
     <!-- 设置抽屉（屏③）：点成员卡头像开；面板本体保留在左侧可见 -->
@@ -695,8 +747,48 @@ async function removeAgent(agentId: string): Promise<void> {
   white-space: nowrap;
 }
 
-.head-title {
+.panel-tab {
   flex: none;
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--ease-out),
+    color var(--ease-out);
+}
+
+.panel-tab:hover {
+  background: var(--bg-hover);
+}
+
+.panel-tab.on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* 历史页入口（Ctrl+K 同效）：常驻的小图标按钮，不占宽度 */
+.head-search {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.head-search:hover {
+  background: var(--bg-hover);
 }
 
 /* 内联统计：统计卡退役后数字的落点（右对齐、弱化、等宽数字） */
