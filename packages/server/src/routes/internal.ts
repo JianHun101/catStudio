@@ -50,6 +50,7 @@ import {
 } from '../dispatch/mention-policy.js'
 import { embedText } from '../memory/embedding.js'
 import { vectorToBlob } from '../memory/index.js'
+import { getRelevantMessages } from '../execution/context.js'
 import { toIsoDb } from '../db/repository/time.js'
 import { createPr } from '../git/create-pr.js'
 import { parseJsonArray, parseJsonValue, messageOf } from '../utils.js'
@@ -129,6 +130,16 @@ interface SessionMessageBlock {
   content: string
   tool?: ToolCallInfo
   images?: string[]
+}
+
+/** 会话消息回读的出参条目（与 SessionMessageBlock 配套，同样只被 mcp-server 消费）。 */
+interface SessionMessageItem {
+  messageId: string
+  role: string
+  agentId: string | null
+  agentName: string | null
+  createdAt: string
+  blocks: SessionMessageBlock[]
 }
 
 const QUERY_OPS = new Set<QueryOp>(['=', '>', '<', 'LIKE'])
@@ -764,34 +775,64 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // ── 5. 回读（200）——通用能力，无角色白名单（历史回读不限角色，不加 403）。
-    // A 地基共用：调 getSessionMessagesRange（同一读层查询函数），agentName 单独
-    // JOIN agents 批量补名（行内无 agent 名列）。before 消息缺失 → 空批次自然停翻。
-    const rows = messagesRepo.getSessionMessagesRange(sessionId, {
-      limit,
-      before: before ?? undefined,
-      from: from ?? undefined,
-      to: to ?? undefined,
-      agentId: agentIdFilter ?? undefined,
-    })
-    // 批量补 agent 名（去重查一次；缺失 agent（悬空 FK）→ null）
-    const agentIds = [...new Set(rows.map((r) => r.agent_id).filter((x): x is string => !!x))]
-    const nameById = new Map(
-      (agentIds.length > 0 ? agentsRepo.listAgentsByIds(agentIds) : []).map((a) => [a.id, a.name])
-    )
-    const messages = rows
-      .map((r) => {
+    // A-2：返回前按运行期上下文规则闭合可见性（getRelevantMessages）——否则本工具
+    // 会成为绕过隔离的越权通道（猫 A 能读到「用户只对猫 B 说的话」与「猫 B 未 @ A
+    // 的回复」）。过滤必须在**分页之前**闭合：候选页过滤后不足 limit 时，用本页
+    // 最旧行的消息 id 继续向更早翻，直到凑满或确无更早行；空数组只在确无可见消息
+    // 时返回，不因过滤让模型误判已到底。before 消息缺失 → 空批次自然停翻。
+    const callerRow = agentsRepo.getAgentById(agentId)
+    if (!callerRow) {
+      return reply
+        .status(404)
+        .send({ ok: false, reason: `agent ${agentId} 不存在，会话消息回读被拒` })
+    }
+    const broadcastMode = sessionsRepo.getSessionBroadcastMode(sessionId)
+    const messages: SessionMessageItem[] = []
+    let cursor = before ?? undefined
+    let pages = 0
+    while (messages.length < limit) {
+      const rows = messagesRepo.getSessionMessagesRange(sessionId, {
+        limit,
+        before: cursor,
+        from: from ?? undefined,
+        to: to ?? undefined,
+        agentId: agentIdFilter ?? undefined,
+      })
+      if (rows.length === 0) break
+      pages++
+      const visibleRows = getRelevantMessages(
+        rows,
+        agentId,
+        callerRow.name,
+        broadcastMode
+      ) as MessageRow[]
+      // 批量补 agent 名（去重查一次；缺失 agent（悬空 FK）→ null）
+      const agentIds = [
+        ...new Set(visibleRows.map((r) => r.agent_id).filter((x): x is string => !!x)),
+      ]
+      const nameById = new Map(
+        (agentIds.length > 0 ? agentsRepo.listAgentsByIds(agentIds) : []).map((a) => [a.id, a.name])
+      )
+      for (const r of visibleRows) {
         const images = parseJsonArray(r.images)
         const blocks = buildMessageBlocks(r, images, kinds)
-        return {
+        // kinds 过滤后无块的消息不返回，也不占本页配额
+        if (blocks.length === 0) continue
+        messages.push({
           messageId: r.id,
           role: r.role,
           agentId: r.agent_id || null,
           agentName: r.agent_id ? (nameById.get(r.agent_id) ?? null) : null,
           createdAt: toIsoDb(r.created_at),
           blocks,
-        }
-      })
-      .filter((m) => (kinds ? m.blocks.length > 0 : true))
+        })
+        if (messages.length >= limit) break
+      }
+      // 本批不足一页 = 已到最早一行，无更早可翻
+      if (rows.length < limit) break
+      // 游标用本批**最旧行**（不是最旧可见消息）——不可见的行也必须跨过，否则原地打转
+      cursor = rows[rows.length - 1].id
+    }
     const total = messages.length
     log.info('session messages read', {
       sessionId,
@@ -803,7 +844,7 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       to: to ?? undefined,
       agentIdFilter: agentIdFilter ?? undefined,
       kinds: kinds ? [...kinds] : undefined,
-      rows: rows.length,
+      pages,
       messages: total,
     })
     return reply.send({ ok: true, messages, total })
