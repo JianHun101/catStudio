@@ -102,7 +102,7 @@ export function buildUnsupportedMessage(version) {
     '',
     '受影响：本进程承载的**全部** MCP 工具面 —— 猫会失去结构化投递与技能自取能力：',
     '  post_message（投递下一棒）/ read_skill、list_skills（技能自取）/',
-    '  search_knowledge（知识库检索）/ query_db、query_session_messages（排障取证）/',
+    '  search_knowledge（知识库检索）/ query_db（排障取证）/ query_session_messages（回查被折叠历史）/',
     '  list_session_members（会话成员）/ request_user_action（请求用户介入）/ create_pr（提 PR）',
     '',
     `修复：升级 Node 到 >= ${MIN_NODE_VERSION}（package.json 的 engines.node 已声明该下限）。`,

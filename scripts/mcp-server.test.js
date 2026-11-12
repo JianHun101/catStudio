@@ -524,6 +524,14 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
     expect(ls?.inputSchema).toEqual({ type: 'object', properties: {} })
   })
 
+  it('query_session_messages 描述含「折叠区间回查」语义（A-2：摘要块出现时引导翻原文）', () => {
+    const tool = MCP_TOOLS.find((t) => t.name === QUERY_SESSION_MESSAGES_TOOL_NAME)
+    expect(tool?.description).toContain('回查被折叠区间的原文')
+    expect(tool?.description).toContain('before')
+    // 回读返回已按上下文过滤——描述须让模型知道看不到的是隔离而非缺数据
+    expect(tool?.description).toContain('本猫上下文可见')
+  })
+
   it('工具 2 护栏①：瘦身后六把既有工具 JSON.stringify 合计 ≤ 3400（防回卷）', () => {
     // 目标集 = 六把既有工具（list_session_members 是工具 1 新增、独立小体量）；
     // 派活单验收「六把合计 ≤ 3400」字面落地。放 vitest 不放 hook（hooks 根修同思路）。

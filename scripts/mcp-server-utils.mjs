@@ -192,9 +192,10 @@ const CREATE_PR_TOOL = {
 const QUERY_SESSION_MESSAGES_TOOL = {
   name: QUERY_SESSION_MESSAGES_TOOL_NAME,
   description:
-    '回读当前会话历史消息（agent 中途回看的语境通道）。' +
+    '回读当前会话历史消息（agent 中途回看的语境通道；仅返回本猫上下文可见的消息）。' +
     '返回 messages（含 role/agentName/createdAt/blocks——原生结构化块 kind ∈ text/thinking/tool 交错）。' +
     'limit 1-100 默认 20；before 传消息 id 翻更早；from/to 时间窗；kinds 留指定块；agentIdFilter 只看某 agent。' +
+    '出现 [历史摘要（压缩）] 块时，用它回查被折叠区间的原文；before 游标可翻到任意更早消息。' +
     '勿回读自己刚写的连续 thinking（防复读），勿整段照抄。',
   inputSchema: {
     type: 'object',
