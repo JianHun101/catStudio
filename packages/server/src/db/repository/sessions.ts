@@ -66,7 +66,9 @@ export function getSessionSummaryState(id: string):
  * （消费侧判定覆盖边界：其后的新增消息超出保留窗口容量 → 重新生成）。
  *
  * 三枚可选字段是「摘要链」的权威边界：生成时**读消息那一刻**的末条消息 id / 时间 /
- * 累计覆盖条数。coveredThrough 只保留兼容（旧条目没有 id 边界，重生成时走全量自愈）。
+ * **实际覆盖**的消息条数（增量链 = 旧条目累计 + 本次新增；无边界或边界消息已被删的
+ * 全量重读 = 本次输入条数，不叠加旧条目，故可能比上一份小——这是预期语义）。
+ * coveredThrough 只保留兼容（旧条目没有 id 边界，重生成时走全量自愈）。
  */
 export interface CompressedSummaryEntry {
   id: string
