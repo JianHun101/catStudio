@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import source from './ChatPanel.vue?raw'
 import statusLabelSource from './AgentStatusLabel.vue?raw'
 import ChatPanel from './ChatPanel.vue'
 import { useChatStore } from '@/stores/chat'
+import { api } from '@/composables/useApi'
 import { renderMarkdown } from '@/utils/markdown'
 import type { Message, StreamSegment } from '@cat-study/shared'
 
@@ -2095,5 +2096,191 @@ describe('ChatPanel B·改 中栏：线降级为色带/淡底，输入板是唯�
     expect(source).toContain('border: 1px solid var(--line-partition)')
     expect(source).toContain('border: 1px solid var(--line-interactive)')
     expect(source).toContain('border-color: var(--line-interactive-strong)')
+  })
+})
+
+// ─── C-1 消息流懒加载接线（向上滚触发 / 锚定 / 状态条 / 日期吸顶）──────────────
+describe('C-1 消息流懒加载', () => {
+  let wrapper: VueWrapper | null = null
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.spyOn(api, 'getSessionMessages').mockResolvedValue([])
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = null
+    vi.restoreAllMocks()
+  })
+
+  /** 分页口替身（mock 边界 = 网络） */
+  const loadSpy = () => vi.mocked(api.getSessionMessages)
+
+  function setup(count = 2): ReturnType<typeof useChatStore> {
+    const store = useChatStore()
+    store.sessions = [{ id: 's1', title: 't', agentIds: [], broadcastMode: false } as never]
+    store.activeSessionId = 's1'
+    store.agents = []
+    store.messages = Array.from({ length: count }, (_, i) => ({
+      id: `m${i + 1}`,
+      sessionId: 's1',
+      agentId: null,
+      role: 'user',
+      content: `msg-${i + 1}`,
+      mentions: [],
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, i + 1)).toISOString(),
+    })) as never
+    return store
+  }
+
+  async function mountPanel() {
+    wrapper = mount(ChatPanel, {
+      props: { leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await nextTick()
+    const container = wrapper.find('.chat-messages-wrapper')
+    const el = container.element as HTMLElement
+    return { container, el }
+  }
+
+  /**
+   * jsdom 无布局：scrollHeight/clientHeight 恒 0。把滚动几何钉成**可写**属性，
+   * 组件回的 `el.scrollTop = …`（锚定补偿）才落得进读数——只读 defineProperty 会静默丢弃。
+   */
+  function pin(
+    el: HTMLElement,
+    values: { scrollTop?: number; scrollHeight?: number; clientHeight?: number }
+  ): void {
+    for (const [key, value] of Object.entries(values)) {
+      Object.defineProperty(el, key, { configurable: true, writable: true, value })
+    }
+  }
+
+  it('E｜初次挂载 / 切会话 / 追加新消息都不触发；只有向上滚才触发', async () => {
+    const store = setup()
+    store.hasMoreOlder = true
+    const { container, el } = await mountPanel()
+    pin(el, { scrollTop: 0, scrollHeight: 1000, clientHeight: 400 })
+
+    // ① 初次挂载：scrollTop=0 且没有「变小」——一进长会话不许把全历史拉光
+    await container.trigger('scroll')
+    expect(loadSpy()).not.toHaveBeenCalled()
+
+    // ② 追加新消息后的贴底跟随（scrollTop 增大）
+    store.messages = [
+      ...store.messages,
+      {
+        id: 'm-new',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '新消息',
+        mentions: [],
+        createdAt: '2026-01-01T00:00:09.000Z',
+      } as Message,
+    ]
+    await nextTick()
+    pin(el, { scrollTop: 900 })
+    await container.trigger('scroll')
+    expect(loadSpy()).not.toHaveBeenCalled()
+
+    // ③ 切会话：容器 scrollTop 被钳回 0——若锚点不复位，会被误读成「用户向上滚」
+    store.activeSessionId = 's2'
+    await nextTick()
+    pin(el, { scrollTop: 0 })
+    await container.trigger('scroll')
+    expect(loadSpy()).not.toHaveBeenCalled()
+
+    // ④ 真向上滚（近顶 + 本次小于上次）才拉一页
+    store.activeSessionId = 's1'
+    store.hasMoreOlder = true
+    await nextTick()
+    pin(el, { scrollTop: 800 })
+    await container.trigger('scroll') // 建立「上次在 800」——此时还不该拉
+    expect(loadSpy()).not.toHaveBeenCalled()
+    pin(el, { scrollTop: 200 })
+    await container.trigger('scroll')
+    await flushPromises()
+    expect(loadSpy()).toHaveBeenCalledTimes(1)
+    expect(loadSpy()).toHaveBeenCalledWith('s1', { before: 'm1', limit: 50 })
+  })
+
+  it('C｜滚动锚定：加载后 scrollTop 相对位移 = 新增内容高度（视口不跳）', async () => {
+    const store = setup()
+    store.hasMoreOlder = true
+    const { container, el } = await mountPanel()
+    pin(el, { scrollTop: 500, scrollHeight: 1000, clientHeight: 400 })
+    await container.trigger('scroll') // 建立上次读数 500（≥300，不触发）
+    expect(loadSpy()).not.toHaveBeenCalled()
+
+    // 分页请求发出 = 内容前插发生的那一刻：高度从 1000 长到 1400（真实浏览器的 DOM 增长）
+    loadSpy().mockImplementationOnce(async () => {
+      pin(el, { scrollHeight: 1400 })
+      return [
+        {
+          id: 'm0',
+          sessionId: 's1',
+          agentId: null,
+          role: 'user',
+          content: '更早一条',
+          mentions: [],
+          createdAt: '2025-12-31T23:59:59.000Z',
+        } as Message,
+      ]
+    })
+    // 用户此刻在 100
+    pin(el, { scrollTop: 100 })
+    await container.trigger('scroll')
+    await flushPromises()
+
+    expect(loadSpy()).toHaveBeenCalledTimes(1)
+    // 100 + (1400 − 1000) = 500：内容整体下移 400，滚动位置同步补 400
+    expect(el.scrollTop).toBe(500)
+  })
+
+  it('状态条：加载中提示 / 已到开头 / 空会话不显示', async () => {
+    const store = setup()
+    store.hasMoreOlder = true
+    await mountPanel()
+
+    expect(wrapper!.text()).not.toContain('正在加载更早消息')
+    expect(wrapper!.text()).not.toContain('已到会话开头')
+
+    store.loadingOlder = true
+    await nextTick()
+    expect(wrapper!.text()).toContain('正在加载更早消息…')
+
+    store.loadingOlder = false
+    store.hasMoreOlder = false
+    await nextTick()
+    expect(wrapper!.text()).toContain('已到会话开头')
+
+    // 空会话是「空场」不是「翻到了开头」
+    store.messages = []
+    await nextTick()
+    expect(wrapper!.text()).not.toContain('已到会话开头')
+  })
+
+  it('F｜日期分隔吸顶：position: sticky + top: 0，且层级低于告警横幅、不吃点击', () => {
+    const block = source.match(/\.date-separator \{[\s\S]*?\n\}/)
+    expect(block).toBeTruthy()
+    expect(block![0]).toContain('position: sticky')
+    expect(block![0]).toContain('top: 0')
+    expect(block![0]).toContain('z-index: 5')
+    // 不吃点击：滚到日期条下方的气泡操作按钮仍可点
+    expect(block![0]).toContain('pointer-events: none')
+    // 两条告警横幅仍是 10（日期条 5 < 10，不盖住横幅）
+    expect(source).toContain('z-index: 10')
+    // 分组逻辑不动：仍是「与上一条不同天才出」
+    expect(source).toContain('if (prevDate !== currDate) indices.add(i)')
+  })
+
+  it('接线：滚动入口是 onMessagesScroll（懒加载与贴底判据同一处，漏接即静默失效）', () => {
+    expect(source).toContain('@scroll.passive="onMessagesScroll"')
+    expect(source).not.toContain('@scroll.passive="checkScrollPosition"')
+    expect(source).toContain('const OLDER_TRIGGER_DISTANCE = 300')
+    expect(source).toContain('store.loadOlderMessages()')
   })
 })

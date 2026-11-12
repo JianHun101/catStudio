@@ -98,16 +98,22 @@ export function getAgentRepliesAfter(sessionId: string, afterCreatedAt: string):
     .all(sessionId, 'agent', afterCreatedAt) as MessageRow[]
 }
 
-/** 获取会话的历史消息（用于前端加载，含 system 消息如「重启完成」等需用户可见，限制条数） */
+/** 获取会话的历史消息（用于前端首屏加载，含 system 消息如「重启完成」等需用户可见）。
+ *
+ *  **取最新 limit 条**再反转为 ASC：首屏要的是「刷新后先看到最新」，不是「最早一页」。
+ *  旧实现是 `ORDER BY created_at ASC LIMIT ?`——长会话里刷新后停在最早 200 条，最新的
+ *  反而一条都不在；向上翻看更早由前端带 `before` 走 `getSessionMessagesRange` 补。
+ *  `id DESC` 是必需 tie-break：并发写会同毫秒、老库整秒行折成 `.000Z` 后全同值。 */
 export function getSessionHistory(sessionId: string, limit: number = 200): MessageRow[] {
-  return db
+  const rows = db
     .prepare(
       `SELECT * FROM messages
        WHERE session_id = ?
-       ORDER BY created_at ASC
+       ORDER BY created_at DESC, id DESC
        LIMIT ?`
     )
     .all(sessionId, limit) as MessageRow[]
+  return rows.reverse()
 }
 
 /** 跨会话最新 agent 消息（倒序，Phase 0 候选样本收集用——不限会话挑 DS 族回复） */

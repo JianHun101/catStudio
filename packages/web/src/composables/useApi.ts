@@ -1,4 +1,4 @@
-import type { ExecutionMeta } from '@cat-study/shared'
+import type { ExecutionMeta, Message } from '@cat-study/shared'
 
 const BASE = '/api'
 const DEFAULT_TIMEOUT = 10_000 // 10s，确保重试循环能推进
@@ -752,6 +752,16 @@ export const api = {
 
   markSessionRead: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}/read`, { method: 'POST' }),
+
+  // 会话历史翻页（懒加载更早消息）：`before` 是排他消息 id 游标，返回**严格早于**它的一批。
+  // wire 形状与既有 GET /sessions/:id/messages 一致（DESC 数组）；前插所需的 ASC 反转由调用方做。
+  getSessionMessages: (id: string, opts: { before?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams()
+    if (opts.before) q.set('before', opts.before)
+    if (opts.limit !== undefined) q.set('limit', String(opts.limit))
+    const query = q.toString()
+    return request<Message[]>(`/sessions/${id}/messages${query ? `?${query}` : ''}`)
+  },
 
   // 执行元数据（气泡 footer 耗时/token 的落库稳定数据源——execution_logs.message_id 关联回复消息，
   // GET /api/sessions/:id/executions，camelCase 由 server 转换；空 session 返回 { executions: [] }）
