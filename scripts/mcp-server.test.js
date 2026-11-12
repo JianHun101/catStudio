@@ -193,6 +193,13 @@ describe('validateQueryDbParams (query_db)', () => {
     expect([...tool.inputSchema.properties.table.enum].sort()).toEqual([...QUERY_DB_TABLES].sort())
   })
 
+  it('query_db 描述含 messages 可见性语义（B-1：回读/查表同一隔离边界）', () => {
+    const tool = MCP_TOOLS.find((t) => t.name === QUERY_DB_TOOL_NAME)
+    expect(tool?.description).toContain('messages 表返回本猫可见消息')
+    expect(tool?.description).toContain('限当前会话')
+    expect(tool?.description).toContain('传其他 session_id')
+  })
+
   it('表名非白名单（sqlite_master/不存在表/非字符串/缺省）→ 错误文本', () => {
     for (const bad of ['sqlite_master', 'users', 123, undefined]) {
       const r = validateQueryDbParams({ table: bad })
@@ -527,7 +534,11 @@ describe('MCP_TOOLS 工具面（tools/list 常驻载荷——工具 1+2 合成�
   it('query_session_messages 描述含「折叠区间回查」语义（A-2：摘要块出现时引导翻原文）', () => {
     const tool = MCP_TOOLS.find((t) => t.name === QUERY_SESSION_MESSAGES_TOOL_NAME)
     expect(tool?.description).toContain('回查被折叠区间的原文')
-    expect(tool?.description).toContain('before')
+    // P3-2：断言折叠语义**完整句**——旧的 `toContain('before')` 是空断言
+    //（描述里 limit/翻页本来就有 before，删掉折叠句也照样绿）
+    expect(tool?.description).toContain(
+      '出现 [历史摘要（压缩）] 块时，用它回查被折叠区间的原文；before 游标可翻到任意更早消息'
+    )
     // 回读返回已按上下文过滤——描述须让模型知道看不到的是隔离而非缺数据
     expect(tool?.description).toContain('本猫上下文可见')
   })

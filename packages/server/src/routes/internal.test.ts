@@ -64,6 +64,30 @@ const insertFixture = () => {
   ).run('session-1', '测试会话', JSON.stringify(['agent-store', 'agent-impl', 'agent-reviewer']))
 }
 
+/** 插一行会话消息：agentId null = 用户消息（agent 回复必须带 agentId）。
+ *  session-messages / db-query 两个端点的可见性用例共用同一夹具形态。 */
+const insertRow = (
+  id: string,
+  agentId: string | null,
+  role: 'user' | 'agent',
+  content: string,
+  mentions: string[],
+  createdAt: string
+) => {
+  const db = getDb()
+  if (agentId) {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+       VALUES (?, 'session-1', ?, ?, ?, ?, ?)`
+    ).run(id, agentId, role, content, JSON.stringify(mentions), createdAt)
+  } else {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+       VALUES (?, 'session-1', ?, ?, ?, ?)`
+    ).run(id, role, content, JSON.stringify(mentions), createdAt)
+  }
+}
+
 const VALID_TOKEN = 'token-abc-123'
 
 /** 合法请求体（发送者 = 实施猫，目标 = 店长——implementer 白名单 {store, reviewer} 内） */
@@ -831,7 +855,7 @@ describe('internal route-signals', () => {
     })
 
     describe('查询成功路径（200）', () => {
-      it('无条件查 messages → 最近在前（created_at DESC）+ total 全量计数', async () => {
+      it('无条件查 messages → 最近在前（created_at DESC）+ total 为可见全量', async () => {
         await mockActive()
         insertDbQueryFixture()
         const res = await app.inject({
@@ -843,12 +867,10 @@ describe('internal route-signals', () => {
         expect(res.statusCode).toBe(200)
         const body = JSON.parse(res.body)
         expect(body.ok).toBe(true)
-        expect(body.total).toBe(3)
-        expect(body.rows.map((r: { id: string }) => r.id)).toEqual([
-          'msg-recent',
-          'msg-mid',
-          'msg-old',
-        ])
+        // B-1：messages 表按上下文过滤。msg-mid 是店长的回复且未 @ 实施猫
+        //（非广播模式）⇒ 不可见；msg-old / msg-recent 是无 @ 的用户消息 ⇒ 可见。
+        expect(body.total).toBe(2)
+        expect(body.rows.map((r: { id: string }) => r.id)).toEqual(['msg-recent', 'msg-old'])
       })
 
       it('条件 AND 过滤 + LIKE 模糊匹配正确', async () => {
@@ -916,7 +938,7 @@ describe('internal route-signals', () => {
         expect(res.statusCode).not.toBe(200)
       })
 
-      it('limit 截断 + total 仍为全量', async () => {
+      it('limit 截断 + total 仍为可见全量', async () => {
         await mockActive()
         insertDbQueryFixture()
         const res = await app.inject({
@@ -929,7 +951,8 @@ describe('internal route-signals', () => {
         const body = JSON.parse(res.body)
         expect(body.rows).toHaveLength(1)
         expect(body.rows[0].id).toBe('msg-recent')
-        expect(body.total).toBe(3)
+        // 3 条匹配消息中 1 条不可见 ⇒ total = 2（不是 SQL 全量 3）
+        expect(body.total).toBe(2)
       })
 
       it('execution_logs 用 started_at DESC 排序（无 created_at 列）', async () => {
@@ -974,7 +997,7 @@ describe('internal route-signals', () => {
         })
         expect(res.statusCode).toBe(200)
         expect(JSON.parse(res.body).total).toBe(0)
-        // 表未被 DROP——再查一次仍 200
+        // 表未被 DROP——再查一次仍 200（可见计数：msg-mid 对实施猫不可见）
         const res2 = await app.inject({
           method: 'POST',
           url: '/api/internal/db-query',
@@ -982,7 +1005,7 @@ describe('internal route-signals', () => {
           headers: { 'x-signal-token': VALID_TOKEN },
         })
         expect(res2.statusCode).toBe(200)
-        expect(JSON.parse(res2.body).total).toBe(3)
+        expect(JSON.parse(res2.body).total).toBe(2)
       })
 
       it('无命中 → 200 + rows: [] + total: 0（不报错）', async () => {
@@ -998,6 +1021,138 @@ describe('internal route-signals', () => {
         })
         expect(res.statusCode).toBe(200)
         expect(JSON.parse(res.body)).toEqual({ ok: true, rows: [], total: 0 })
+      })
+    })
+
+    describe('messages 可见性收敛（B-1：查询不得绕过上下文隔离）', () => {
+      /** 验收 A/C 共用数据（新→旧）：
+       *  u1 用户定向吐槽猫 / a1 吐槽猫回复未 @ 实施猫 / u3 用户定向实施猫 /
+       *  u2 用户广播 / a2 实施猫自己的回复 */
+      const insertVisibilityFixture = () => {
+        insertRow('b1-u1', null, 'user', '只对吐槽猫说', ['吐槽猫'], '2026-09-05 10:05:00')
+        insertRow('b1-a1', 'agent-reviewer', 'agent', '吐槽猫的回复', [], '2026-09-05 10:04:00')
+        insertRow('b1-u3', null, 'user', '对实施猫说', ['实施猫'], '2026-09-05 10:03:00')
+        insertRow('b1-u2', null, 'user', '广播消息', [], '2026-09-05 10:02:00')
+        insertRow('b1-a2', 'agent-impl', 'agent', '实施猫自己的回复', [], '2026-09-05 10:01:00')
+      }
+
+      it('A 隔离：rows 恰为 u2/u3/a2，不含 u1/a1，total=3', async () => {
+        await mockActive()
+        insertVisibilityFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'messages', limit: 50 }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        const ids = body.rows.map((r: { id: string }) => r.id)
+        expect(ids).toEqual(['b1-u3', 'b1-u2', 'b1-a2'])
+        expect(ids).not.toContain('b1-u1')
+        expect(ids).not.toContain('b1-a1')
+        expect(body.total).toBe(3)
+      })
+
+      it('B limit=1 → 返回最新可见那条（u3），不返回空页', async () => {
+        await mockActive()
+        insertVisibilityFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'messages', limit: 1 }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        // 最新两条（u1/a1）都不可见；若 SQL 先 LIMIT 再过滤，此处会是空页。
+        expect(body.rows.map((r: { id: string }) => r.id)).toEqual(['b1-u3'])
+        expect(body.total).toBe(3)
+      })
+
+      it('C 广播模式：其他猫回复可见（a1 打开）；定向用户消息 u1 仍按隔离规则不可见', async () => {
+        await mockActive()
+        insertVisibilityFixture()
+        getDb().prepare(`UPDATE sessions SET broadcast_mode = 1 WHERE id = 'session-1'`).run()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'messages', limit: 50 }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        // ⚠️ 派活单验收 C 写「返回 5 条全部」，与契约 2 指定的 getRelevantMessages
+        // 不变量冲突：广播只打开**其他猫的回复**，定向用户消息（u1 @ 的是吐槽猫）
+        // 始终不可见。按契约 2 实现，此处如实断言 4 条，并把该验收差异上报裁决。
+        expect(body.rows.map((r: { id: string }) => r.id)).toEqual([
+          'b1-a1',
+          'b1-u3',
+          'b1-u2',
+          'b1-a2',
+        ])
+        expect(body.rows.map((r: { id: string }) => r.id)).not.toContain('b1-u1')
+        expect(body.total).toBe(4)
+      })
+
+      it('D 跨会话条件 → 400 且 reason 含「当前执行会话」；同会话条件视为重复 → 结果一致', async () => {
+        await mockActive()
+        insertVisibilityFixture()
+        const foreign = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({
+            table: 'messages',
+            conditions: [{ column: 'session_id', op: '=', value: 'session-other' }],
+          }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(foreign.statusCode).toBe(400)
+        expect(JSON.parse(foreign.body).reason).toContain('当前执行会话')
+
+        const same = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({
+            table: 'messages',
+            conditions: [{ column: 'session_id', op: '=', value: 'session-1' }],
+          }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(same.statusCode).toBe(200)
+        expect(JSON.parse(same.body).rows.map((r: { id: string }) => r.id)).toEqual([
+          'b1-u3',
+          'b1-u2',
+          'b1-a2',
+        ])
+      })
+
+      it('E total = 过滤后可见匹配数（1 条不可见 + 2 条可见 → 2，不是 SQL 全量 3）', async () => {
+        await mockActive()
+        insertDbQueryFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'messages', limit: 50 }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(200)
+        const body = JSON.parse(res.body)
+        expect(body.rows.map((r: { id: string }) => r.id)).toEqual(['msg-recent', 'msg-old'])
+        expect(body.total).toBe(2)
+      })
+
+      it('H 活跃流存在但 caller 不在 agents 表 → 404（fail-closed）', async () => {
+        await mockActive()
+        insertVisibilityFixture()
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({ table: 'messages', agentId: 'agent-ghost' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(404)
+        expect(JSON.parse(res.body).reason).toContain('不存在')
       })
     })
   })
@@ -1677,29 +1832,6 @@ describe('internal route-signals', () => {
     })
 
     describe('可见性过滤（A-2：回读不得绕过上下文隔离）', () => {
-      /** 插一行消息：agentId null = 用户消息（agent 回复必须带 agentId） */
-      const insertRow = (
-        id: string,
-        agentId: string | null,
-        role: 'user' | 'agent',
-        content: string,
-        mentions: string[],
-        createdAt: string
-      ) => {
-        const db = getDb()
-        if (agentId) {
-          db.prepare(
-            `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
-             VALUES (?, 'session-1', ?, ?, ?, ?, ?)`
-          ).run(id, agentId, role, content, JSON.stringify(mentions), createdAt)
-        } else {
-          db.prepare(
-            `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
-             VALUES (?, 'session-1', ?, ?, ?, ?)`
-          ).run(id, role, content, JSON.stringify(mentions), createdAt)
-        }
-      }
-
       it('实施猫读不到「用户只 @ 吐槽猫」与「吐槽猫未 @ 实施猫的回复」；广播模式打开回复可见性', async () => {
         await mockActive()
         insertRow('vi-user-b', null, 'user', '只对吐槽猫说', ['吐槽猫'], '2026-09-02 10:00:00')
@@ -1801,6 +1933,19 @@ describe('internal route-signals', () => {
         })
         expect(res.statusCode).toBe(200)
         expect(JSON.parse(res.body)).toEqual({ ok: true, messages: [], total: 0 })
+      })
+
+      it('H 活跃流存在但 caller 不在 agents 表 → 404（fail-closed）', async () => {
+        await mockActive()
+        insertRow('h-user', null, 'user', '广播消息', [], '2026-09-04 10:00:00')
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/session-messages',
+          payload: smBody({ agentId: 'agent-ghost' }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(404)
+        expect(JSON.parse(res.body).reason).toContain('不存在')
       })
     })
   })

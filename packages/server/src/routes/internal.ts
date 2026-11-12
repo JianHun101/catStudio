@@ -39,7 +39,11 @@ import {
   query as queryRepo,
 } from '../db/repository/index.js'
 import type { MessageRow } from '../db/repository/index.js'
-import { QUERY_TABLE_SCHEMAS, type QueryOp } from '../db/repository/query.js'
+import {
+  QUERY_TABLE_SCHEMAS,
+  type QueryOp,
+  type MessageQueryCandidate,
+} from '../db/repository/query.js'
 import { getActiveStream } from '../connectors/socketio.js'
 import { storeRouteSignal } from '../llm/route-signals.js'
 import { storeUserRequestSignal } from '../llm/user-request-signals.js'
@@ -468,7 +472,69 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       })
     }
 
-    // ── 5. 白名单参数化查询（200）——queryTable 内部仍是安全执行点 ──
+    // ── 5. 查询（200）——其余表走 queryTable；messages 表先闭合可见性再分页 ──
+    if (table === 'messages') {
+      // 契约 1：messages 只能查当前执行流会话。显式传别的 session_id 是**越权尝试**，
+      // 必须 400 明说——静默返空会让模型读成「没有数据」。同会话值视为重复条件后剥掉。
+      const foreignSession = conditions.find(
+        (c: { column: string; value: string }) =>
+          c.column === 'session_id' && c.value !== stream.sessionId
+      )
+      if (foreignSession) {
+        return reply.status(400).send({
+          ok: false,
+          reason: `messages 表仅可查当前执行会话（${stream.sessionId}），不能查其他会话（${foreignSession.value}）`,
+        })
+      }
+      // 契约 2：可见性按运行期规则闭合，caller 缺失 fail-closed（与 session-messages 同款）。
+      const callerRow = agentsRepo.getAgentById(agentId)
+      if (!callerRow) {
+        return reply
+          .status(404)
+          .send({ ok: false, reason: `agent ${agentId} 不存在，数据库查询被拒` })
+      }
+      const effectiveConditions = conditions.filter(
+        (c: { column: string }) => c.column !== 'session_id'
+      )
+      let visible: MessageQueryCandidate[]
+      let rows: Record<string, string | number | null>[]
+      try {
+        // 契约 3：先取全部匹配候选（只投影判定列），过滤后再截 limit——
+        // 反过来「SQL LIMIT 再过滤」会在 limit=1 且最新一条不可见时返回空页，
+        // 模型会误判已到底。
+        const candidates = queryRepo.getMessageQueryCandidates(
+          stream.sessionId,
+          effectiveConditions
+        )
+        visible = getRelevantMessages(
+          candidates,
+          agentId,
+          callerRow.name,
+          sessionsRepo.getSessionBroadcastMode(stream.sessionId)
+        ) as MessageQueryCandidate[]
+        // 契约 4：total = 过滤后可见匹配总数；rows 只回表最终一页（白名单全列）
+        rows = queryRepo.getMessageQueryRowsByIds(
+          stream.sessionId,
+          visible.slice(0, limit).map((r) => r.id)
+        )
+      } catch (err: any) {
+        const detail = messageOf(err) ?? '未知错误'
+        log.error('db query failed', { error: detail, sessionId, agentId, msgId, table })
+        return reply.status(500).send({ ok: false, reason: `数据库查询异常: ${detail}` })
+      }
+      log.info('db query', {
+        sessionId,
+        agentId,
+        msgId,
+        table,
+        conditions: effectiveConditions.length,
+        limit,
+        hits: rows.length,
+        total: visible.length,
+      })
+      return reply.send({ ok: true, rows, total: visible.length })
+    }
+
     let result
     try {
       // table 已过 `in QUERY_TABLE_SCHEMAS` 校验——窄化回字面量联合类型
