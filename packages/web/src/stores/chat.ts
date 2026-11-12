@@ -59,9 +59,22 @@ const REVEAL_MAX_ROUNDS = 50
  * 「已到会话开头」，懒加载整条失效。也不参与「全局 ASC」——createdAt 是客户端 now()。
  *
  * 也用于「已到会话开头」的渲染判据：只有合成消息的会话是**空场**，不是「翻到了开头」。
+ *
+ * 命名用「非持久化」而不是「头部」：广播开关提示挂在数组**尾部**，只按「头部合成消息」
+ * 理解会在加判据时漏掉尾部那条。
  */
-export function isSyntheticHead(m: Message): boolean {
+export function isNonPersistedSynthetic(m: Message): boolean {
   return m.id.startsWith('welcome-') || m.id.startsWith('handoff-') || m.id.startsWith('broadcast-')
+}
+
+/**
+ * 第一条**落库**消息的下标（-1 = 数组里全是合成消息）。
+ *
+ * 同一个判据服务两处：①翻页游标要取「最早一条落库消息」；②`await` 之后的重算插入点。
+ * 两处各写一遍 `findIndex` 会让「哪些消息不算数」这个规则出现两个载体。
+ */
+export function firstPersistedIndex(list: Message[]): number {
+  return list.findIndex((m) => !isNonPersistedSynthetic(m))
 }
 
 /** 安全读上次选中会话 id（SSR/test 环境容错，失败返回 null） */
@@ -219,10 +232,17 @@ export const useChatStore = defineStore('chat', () => {
    * 翻页收到空批次即封口。契约允许**一次多余的空请求**——用精确 hasMore 换 wire 契约改动不划算。
    */
   const hasMoreOlder = ref(false)
-  /** 是否正在拉取更早历史（**UI 状态条数据源**；请求去重的唯一句柄是在途 Promise，见 `loadOlderMessages`） */
+  /** 是否正在拉取更早历史（**UI 状态条数据源**；请求去重的唯一句柄是带会话归属的在途记录，见 `loadOlderMessages`） */
   const loadingOlder = ref(false)
   /** 拉取更早历史失败的用户可读原因（null = 无错误） */
   const olderError = ref<string | null>(null)
+  /**
+   * 在途的翻页请求。`loadingOlder` 是给 UI 的布尔投影，真正的**去重句柄**是这条带会话归属的记录：
+   * 滚动事件会成簇触发，同一会话的第二次调用必须复用同一次请求（否则同一游标被并发拉两次）；
+   * 切过会话后旧请求的结果会被丢弃，**不能**再让新会话复用（否则新会话的首滚拿到一个
+   * 解析为 false 的旧 Promise，白滚一次）。
+   */
+  let inflightOlder: { sessionId: string; promise: Promise<boolean> } | null = null
   /**
    * 消息本地缓存：sessionId → 消息数组。切走时存当前数组引用，切回命中则立即渲染（不亮 skeleton）；
    * SESSION_HISTORY 到达后做权威全量校正（补切走期间非活跃会话的增量）。引用语义安全：
@@ -462,6 +482,8 @@ export const useChatStore = defineStore('chat', () => {
     hasMoreOlder.value = false
     loadingOlder.value = false
     olderError.value = null
+    // 旧会话的在途请求作废：它的结果会按 sessionId 丢弃，句柄不能留给新会话复用
+    inflightOlder = null
     const cached = sessionMessages.get(sessionId)
     if (cached) {
       // 命中缓存：立即渲染、不亮 skeleton；SESSION_HISTORY 仍会回来做权威全量校正
@@ -469,7 +491,8 @@ export const useChatStore = defineStore('chat', () => {
       loadingMessages.value = false
       // 缓存同样带「有没有更早」的信息：按缓存里的**非合成**消息数判初值，不能无条件 false
       // （否则切回一个 200 条的长会话会先显示「已到会话开头」，直到 SESSION_HISTORY 到达才纠正）
-      hasMoreOlder.value = cached.filter((m) => !isSyntheticHead(m)).length >= INITIAL_HISTORY_LIMIT
+      hasMoreOlder.value =
+        cached.filter((m) => !isNonPersistedSynthetic(m)).length >= INITIAL_HISTORY_LIMIT
     } else {
       messages.value = []
       loadingMessages.value = true // 等待 SESSION_HISTORY 到达
@@ -503,28 +526,25 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 在途的翻页请求。`loadingOlder` 是给 UI 的布尔投影，真正的**去重句柄**是这个 Promise：
-   * 滚动事件会成簇触发，第二次调用必须复用同一次请求（否则同一游标被并发拉两次）。
-   */
-  let inflightOlder: Promise<boolean> | null = null
-
-  /**
    * 加载更早一页历史：以当前已加载的**最早一条落库消息** id 作 `before`（排他游标）前插。
    *
    * - 前插保持全局 ASC：wire 返回 DESC（与既有 `/messages` 一致），这里反转后再拼。
    * - 合成头部（欢迎语/交接摘要）留在最前：它们不落库，挪到中间会与时间序打架。
-   * - 空批次才封口；已有在途请求时**返回同一个 Promise**（滚动事件成簇触发，不重复拉同游标）。
-   * - 等待期间切了会话就丢弃这一页（否则旧会话的消息会串进新会话数组）。
+   * - 空批次才封口；**同一会话**已有在途请求时返回同一个 Promise（滚动事件成簇触发，不重复拉同游标）。
+   * - 等待期间切了会话就丢弃这一页（否则旧会话的消息会串进新会话数组）；旧请求的收尾也不许
+   *   动新会话的 `loadingOlder` / `olderError`（见 catch / finally 的句柄判据）。
    *
    * @returns true = 本次确实完成一次推进（拿到一页，或确认到底并封口）；false = 未推进
    *          （无会话 / 已封口 / 失败 / 切会话丢弃）。`revealMessage` 靠它判断是否还要再翻，
    *          避免「在途请求被 no-op 吞掉 → 空转 50 轮后误报找不到」。
    */
   function loadOlderMessages(): Promise<boolean> {
-    if (inflightOlder) return inflightOlder
     const sessionId = activeSessionId.value
-    if (!sessionId || !hasMoreOlder.value) return Promise.resolve(false)
-    const realStart = messages.value.findIndex((m) => !isSyntheticHead(m))
+    if (!sessionId) return Promise.resolve(false)
+    // 只复用**同一会话**的在途请求：别的会话那笔的结果会被会话判据丢弃，复用它等于白滚一次
+    if (inflightOlder && inflightOlder.sessionId === sessionId) return inflightOlder.promise
+    if (!hasMoreOlder.value) return Promise.resolve(false)
+    const realStart = firstPersistedIndex(messages.value)
     if (realStart < 0) {
       // 一条落库消息都没有：没有可定位的游标（欢迎语不落库）——按「已到开头」封口
       hasMoreOlder.value = false
@@ -533,6 +553,12 @@ export const useChatStore = defineStore('chat', () => {
     const before = messages.value[realStart].id
     loadingOlder.value = true
     olderError.value = null
+    // 先占槽、再发请求：同步落定的替身也不会让「在途」记录漏成永不清除
+    const handle: { sessionId: string; promise: Promise<boolean> } = {
+      sessionId,
+      promise: Promise.resolve(false), // 占位，下面赋成真正的 task
+    }
+    inflightOlder = handle
     const task = (async (): Promise<boolean> => {
       try {
         const rows = await api.getSessionMessages(sessionId, { before, limit: OLDER_PAGE_SIZE })
@@ -541,35 +567,38 @@ export const useChatStore = defineStore('chat', () => {
           hasMoreOlder.value = false
           return true // 确认到底也是推进：把 hasMoreOlder 收敛成 false
         }
+        // 插入点必须在 `await` **之后**重算：等待期间消息数组可能被整体替换（会话内交接会重排
+        // 头部合成消息），沿用请求发起时的下标会把新页插到合成头部之前。
+        const insertAt = firstPersistedIndex(messages.value)
         const known = new Set(messages.value.map((m) => m.id))
         const fresh = rows.filter((m) => !known.has(m.id)).reverse()
         if (fresh.length > 0) {
-          messages.value = [
-            ...messages.value.slice(0, realStart),
-            ...fresh,
-            ...messages.value.slice(realStart),
-          ]
+          const at = insertAt < 0 ? messages.value.length : insertAt
+          messages.value = [...messages.value.slice(0, at), ...fresh, ...messages.value.slice(at)]
           sessionMessages.set(sessionId, messages.value)
         }
         // 不足一页 ⇒ 服务端已没有更早的行（SQL 先切页再返回，条数即事实）
         if (rows.length < OLDER_PAGE_SIZE) hasMoreOlder.value = false
         return true
       } catch (err: any) {
-        olderError.value = friendlyError(err)
+        // 切走后的失败属于旧会话：写进新会话的错误态会让它显示一条无来由的失败
+        if (activeSessionId.value === sessionId) olderError.value = friendlyError(err)
         return false
       } finally {
-        loadingOlder.value = false
+        // 只收自己这一笔：句柄仍是本次请求，说明没有别的会话/请求接管 loadingOlder。
+        // 切会话（joinSession 已置空句柄）或新会话已发新请求（句柄被替换）时都不许动。
+        if (inflightOlder === handle) loadingOlder.value = false
       }
     })()
-    inflightOlder = task
+    handle.promise = task
     // 清句柄必须晚于赋值：若请求同步落定（替身同步抛错），这里注册的回调仍在微任务里执行，
-    // 不会把刚赋上的 Promise 漏成永久「在途」
+    // 不会把刚赋上的记录漏成永久「在途」
     void task.then(
       () => {
-        if (inflightOlder === task) inflightOlder = null
+        if (inflightOlder === handle) inflightOlder = null
       },
       () => {
-        if (inflightOlder === task) inflightOlder = null
+        if (inflightOlder === handle) inflightOlder = null
       }
     )
     return task
