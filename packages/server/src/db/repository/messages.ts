@@ -293,21 +293,37 @@ export function countBySession(sessionId: string): number {
   return row?.cnt || 0
 }
 
-/** 获取带 Agent 名称的消息（用于交接总结） */
-export function getMessagesWithAgentName(
+/**
+ * 摘要输入分页串读：按 `(created_at, id)` **正序**取一页带 Agent 名称的消息。
+ *
+ * 摘要生成必须读**全量**（旧的 `limit=300` 会让第 300 条之前的早期信息静默丢失），
+ * 但一次性 `SELECT *` 全表在长会话里内存尖峰同样不可取——调用方（handoff）按页
+ * 串读直到返回不足 `limit`。
+ *
+ * @param after 排他游标（上一页末条）；null = 从会话最早一条开始
+ * @param limit 单页条数（1-1000）
+ */
+export function getMessagesWithAgentNamePage(
   sessionId: string,
-  limit: number = 300
+  after: { createdAt: string; id: string } | null,
+  limit = 200
 ): MessageWithAgentName[] {
+  const rawLimit = Number.isFinite(limit) ? Math.min(1000, Math.max(1, Math.floor(limit))) : 200
+  const cursorClause = after ? 'AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))' : ''
+  const params: Array<string | number> = after
+    ? [sessionId, after.createdAt, after.createdAt, after.id, rawLimit]
+    : [sessionId, rawLimit]
   return db
     .prepare(
       `SELECT m.*, a.name as agent_name
        FROM messages m
        LEFT JOIN agents a ON m.agent_id = a.id
        WHERE m.session_id = ? AND m.role != 'system'
-       ORDER BY m.created_at DESC
+       ${cursorClause}
+       ORDER BY m.created_at ASC, m.id ASC
        LIMIT ?`
     )
-    .all(sessionId, limit) as MessageWithAgentName[]
+    .all(...params) as MessageWithAgentName[]
 }
 
 /**

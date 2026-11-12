@@ -61,7 +61,12 @@ vi.mock('../handoff/index.js', () => ({
   shouldHandoff: vi.fn(() => false),
   performHandoff: vi.fn(async () => {}),
   injectSummaryIntoSystem: vi.fn((s: string) => s),
-  generateFullSummary: vi.fn(async () => null),
+  generateFullSummary: vi.fn(async () => ({
+    summary: '',
+    coveredToId: null,
+    coveredToAt: null,
+    coveredCount: 0,
+  })),
 }))
 // **partial factory**：`currentRetrievalParams` / `skippedRetrievalResult` 等导出必须留真
 // ——`recordRetrievalTrace` 消费前者，整包替换会让同文件的 R1 用例当场 TypeError。
