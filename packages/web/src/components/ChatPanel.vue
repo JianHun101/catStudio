@@ -1550,8 +1550,9 @@ const messageViews = computed<MessageView[]>(() => {
              末态只在**至少一条落库消息**时显示——真实空会话必有 welcome 合成消息，
              只按条数判会把「空场」显示成「翻到了开头」。loadingOlder 优先级最高。 -->
         <div v-if="store.loadingOlder" class="older-status" role="status">正在加载更早消息…</div>
-        <!-- 重试按钮**刻意不补偿滚动锚定**：用户点它就是要看刚补进来的更早内容，
-             视口停在原处即可；滚轮触发的路径才走 `onMessagesScroll` 的高度差补偿。 -->
+        <!-- 点击重试**不做 JS 锚定补偿**：用户点它就是要看刚补进来的更早内容，视口停在原处即可；
+             滚轮触发的路径才走 `onMessagesScroll` 的高度差补偿。真机观测到的 −42px 是错误按钮
+             消失的高度，不能当作原生 scroll anchoring 的证据（更不是本组件补了位移）。 -->
         <button
           v-else-if="store.olderError"
           type="button"

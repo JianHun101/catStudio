@@ -73,7 +73,7 @@ export function isNonPersistedSynthetic(m: Message): boolean {
  * 同一个判据服务两处：①翻页游标要取「最早一条落库消息」；②`await` 之后的重算插入点。
  * 两处各写一遍 `findIndex` 会让「哪些消息不算数」这个规则出现两个载体。
  */
-export function firstPersistedIndex(list: Message[]): number {
+function firstPersistedIndex(list: Message[]): number {
   return list.findIndex((m) => !isNonPersistedSynthetic(m))
 }
 
@@ -243,6 +243,14 @@ export const useChatStore = defineStore('chat', () => {
    * 解析为 false 的旧 Promise，白滚一次）。
    */
   let inflightOlder: { sessionId: string; promise: Promise<boolean> } | null = null
+  /**
+   * 会话代际：切会话 / 历史被整体替换时自增。翻页请求发起时捕获当前代际，
+   * 收尾时按代际判「还是不是同一个世界」。
+   *
+   * 为什么不用 `sessionId` 判：A→B→A 时旧请求的 sessionId 会与当前会话**重新对上**，
+   * 只按会话判会让旧页穿回 A 的数组、旧失败写进 A 的错误态。代际是单调量，切回也对不上。
+   */
+  let sessionEpoch = 0
   /**
    * 消息本地缓存：sessionId → 消息数组。切走时存当前数组引用，切回命中则立即渲染（不亮 skeleton）；
    * SESSION_HISTORY 到达后做权威全量校正（补切走期间非活跃会话的增量）。引用语义安全：
@@ -474,6 +482,8 @@ export const useChatStore = defineStore('chat', () => {
     // 切走前把当前消息存入缓存（存数组引用，后续 messages.value 重新赋值不会改旧引用）
     if (switching) {
       sessionMessages.set(activeSessionId.value!, messages.value)
+      // 换代：旧会话仍在途的翻页请求从此属于上一个世界，其结果（含失败）一律不许落地
+      sessionEpoch++
     }
     activeSessionId.value = sessionId
     writeActiveSessionId(sessionId) // 记住本次选中会话（刷新恢复用）
@@ -532,7 +542,7 @@ export const useChatStore = defineStore('chat', () => {
    * - 合成头部（欢迎语/交接摘要）留在最前：它们不落库，挪到中间会与时间序打架。
    * - 空批次才封口；**同一会话**已有在途请求时返回同一个 Promise（滚动事件成簇触发，不重复拉同游标）。
    * - 等待期间切了会话就丢弃这一页（否则旧会话的消息会串进新会话数组）；旧请求的收尾也不许
-   *   动新会话的 `loadingOlder` / `olderError`（见 catch / finally 的句柄判据）。
+   *   动新会话的 `loadingOlder` / `olderError`（见 catch / finally 的代际判据）。
    *
    * @returns true = 本次确实完成一次推进（拿到一页，或确认到底并封口）；false = 未推进
    *          （无会话 / 已封口 / 失败 / 切会话丢弃）。`revealMessage` 靠它判断是否还要再翻，
@@ -544,6 +554,8 @@ export const useChatStore = defineStore('chat', () => {
     // 只复用**同一会话**的在途请求：别的会话那笔的结果会被会话判据丢弃，复用它等于白滚一次
     if (inflightOlder && inflightOlder.sessionId === sessionId) return inflightOlder.promise
     if (!hasMoreOlder.value) return Promise.resolve(false)
+    // 发起时捕获代际：成功 / 空页封口 / 失败 / 收尾四条路径都按它判「这一页还属于当前世界吗」
+    const epoch = sessionEpoch
     const realStart = firstPersistedIndex(messages.value)
     if (realStart < 0) {
       // 一条落库消息都没有：没有可定位的游标（欢迎语不落库）——按「已到开头」封口
@@ -562,6 +574,8 @@ export const useChatStore = defineStore('chat', () => {
     const task = (async (): Promise<boolean> => {
       try {
         const rows = await api.getSessionMessages(sessionId, { before, limit: OLDER_PAGE_SIZE })
+        // 代际变了 ⇒ 这一页属于旧会话/旧历史，丢弃（A→B→A 时 sessionId 会重新对上，只有代际分得清）
+        if (epoch !== sessionEpoch) return false
         if (activeSessionId.value !== sessionId) return false
         if (!Array.isArray(rows) || rows.length === 0) {
           hasMoreOlder.value = false
@@ -581,13 +595,15 @@ export const useChatStore = defineStore('chat', () => {
         if (rows.length < OLDER_PAGE_SIZE) hasMoreOlder.value = false
         return true
       } catch (err: any) {
-        // 切走后的失败属于旧会话：写进新会话的错误态会让它显示一条无来由的失败
-        if (activeSessionId.value === sessionId) olderError.value = friendlyError(err)
+        // 换代后的失败属于旧世界：写进当前会话的错误态会让它显示一条无来由的失败
+        if (epoch === sessionEpoch && activeSessionId.value === sessionId) {
+          olderError.value = friendlyError(err)
+        }
         return false
       } finally {
-        // 只收自己这一笔：句柄仍是本次请求，说明没有别的会话/请求接管 loadingOlder。
-        // 切会话（joinSession 已置空句柄）或新会话已发新请求（句柄被替换）时都不许动。
-        if (inflightOlder === handle) loadingOlder.value = false
+        // 只收自己这一笔：代际一致才说明没有别的会话/历史替换接管 loadingOlder。
+        // 切会话与 SESSION_HISTORY 都已自行把 loadingOlder 置 false，旧请求不许再动它。
+        if (epoch === sessionEpoch) loadingOlder.value = false
       }
     })()
     handle.promise = task
@@ -1023,6 +1039,11 @@ export const useChatStore = defineStore('chat', () => {
     // 批量历史消息加载（服务端 JOIN_SESSION 响应）
     // 一次性替换 messages 数组，避免逐条 NEW_MESSAGE 导致的多次渲染和闪烁
     socket.on(Events.SESSION_HISTORY, (data: { messages: Message[]; welcome: Message }) => {
+      // 历史被整体替换 = 换代：旧代际的翻页结果一律作废（重连路径下 sessionId 会与当前会话
+      // 重新对上，只有代际分得清）。句柄同步清掉——不清会让同会话上滚复用一个永不亮
+      // loadingOlder 的旧 Promise。
+      sessionEpoch++
+      inflightOlder = null
       const all: Message[] = []
       if (data.welcome) {
         all.push(data.welcome)
