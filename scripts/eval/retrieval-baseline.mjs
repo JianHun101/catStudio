@@ -542,6 +542,8 @@ export function summarizeMissDistances({ scores, maxDistance }) {
   let max = null
   let corpusAbsent = 0
   let outsideWindow = 0
+  // 只进 summary、md 不单列：池外条目的名次已在窗外，阈值不是更紧约束，故其距离 ≥ 阈值
+  // 不重复计成「阈值杀」；字段保留供 JSON 消费方看分布（本票不删字段、不改统计）。
   let outsideWindowOverThreshold = 0
   let noReading = 0
   for (const s of scores) {
@@ -929,7 +931,7 @@ export function renderReport(ctx) {
       ? String(d.bestRank)
       : typeof d.beyondWideRecall === 'number'
         ? `>${d.beyondWideRecall}`
-        : `宽召回未返回（>${WIDE_RECALL_TOP_N} 或距离 ≥ 宽召回上限）`
+        : '宽召回未返回（超出宽召回 top-N 或距离 ≥ 宽召回上限）'
   const outsideRanks = outsideRows.map(rankText).join(' / ') || '—'
   const outsideDists = outsideRows.map((d) => fmt4(d.bestDist)).join(' / ') || '—'
   const outsideWindows =

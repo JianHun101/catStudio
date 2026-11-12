@@ -1332,7 +1332,7 @@ describe('renderReport — 确定性与内容面', () => {
       },
     ]
     const md = renderReport(c)
-    expect(md).toContain('宽召回未返回（>200 或距离 ≥ 宽召回上限）')
+    expect(md).toContain('宽召回未返回（超出宽召回 top-N 或距离 ≥ 宽召回上限）')
     expect(md).not.toContain('| outside-window | 1 | >200 |')
   })
 
