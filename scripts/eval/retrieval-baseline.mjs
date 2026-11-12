@@ -600,7 +600,8 @@ export function summarizeMissDistances({ scores, maxDistance }) {
 export const MISS_RX = {
   threshold: '松阈值（MEMORY_MAX_DISTANCE）',
   status: '查该节状态（死知识/废弃）',
-  not_topk: '调 topK 或看排序（探针池里过闸了，但没进融合 topK）',
+  not_topk:
+    '调 topK 或看排序/池深（距离已过闸，但没进融合 topK 或每查询融合池——探针池与宽召回两个发现路径同药方）',
   budget: '加注入预算（进了融合 topK，整节放不下）',
   section_dup: '同节已有更优片代表（整节照样注入，属正常）',
   below_topk:
@@ -920,10 +921,15 @@ export function renderReport(ctx) {
   const corpusAbsentRows = scores.flatMap((s) =>
     s.details.filter((d) => d.status === 'corpus-absent')
   )
+  // 名次文本只在**真有读数**时给数字：`beyondWideRecall` 缺失说明这份明细（或旧产物）
+  // 没记宽召回深度，此时不能拿当前常量冒充它的边界——写成「宽召回未返回」并注明两种可能
+  // （名次在 top-N 之外，或最小距离就 ≥ 宽召回阈值），不承诺具体名次。
   const rankText = (d) =>
     typeof d.bestRank === 'number'
       ? String(d.bestRank)
-      : `>${d.beyondWideRecall ?? WIDE_RECALL_TOP_N}`
+      : typeof d.beyondWideRecall === 'number'
+        ? `>${d.beyondWideRecall}`
+        : `宽召回未返回（>${WIDE_RECALL_TOP_N} 或距离 ≥ 宽召回上限）`
   const outsideRanks = outsideRows.map(rankText).join(' / ') || '—'
   const outsideDists = outsideRows.map((d) => fmt4(d.bestDist)).join(' / ') || '—'
   const outsideWindows =
@@ -942,7 +948,8 @@ export function renderReport(ctx) {
       '但全库 `bestRank` ≥ `windowN`（每查询融合池出口 = `HYBRID_POOL_PER_QUERY` 片）——补语料救不了它，' +
       '要先改排序，或把池/名额扩到覆盖它的名次。`corpus-absent` = `chunks` 表按 `(doc_path, section_anchor)`' +
       ' **查无此节**，才是真覆盖洞。`bestRank` 是宽向量召回列表的**下标（0 起）**，与重搜的 `rank` 同口径；' +
-      `\`>${WIDE_RECALL_TOP_N}\` = 宽召回边界外（名次只会更后，仍属池外）。`
+      '`>N` = 宽召回边界外（名次只会更后，仍属池外）；「宽召回未返回」= 该锚点没出现在宽召回结果里' +
+      '（超过 top-N 或最小距离 ≥ 宽召回阈值），此时**不给名次**。'
   )
   L.push('')
 

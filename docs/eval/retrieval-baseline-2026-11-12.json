@@ -2,9 +2,9 @@
   "schema": 1,
   "date": "2026-11-12",
   "dbPath": "D:\\Game\\ai\\catStudy\\packages\\server\\data\\cat-study-dev.db",
-  "dbRows": 755,
+  "dbRows": 771,
   "dbDocs": 45,
-  "goldenFile": "D:\\Game\\ai\\catStudy-sessions\\7531d744-ds猫\\docs\\eval\\retrieval-golden.json",
+  "goldenFile": "D:\\Game\\ai\\catStudy\\docs\\eval\\retrieval-golden.json",
   "goldenData": {
     "version": 1,
     "meta": {
@@ -1303,8 +1303,17 @@
         {
           "docPath": "docs/plans/memory-flywheel.md",
           "sectionAnchor": "2. 主链形态（七段，逐段钉死） > 2.6 检索（`searchChunksHybrid`）",
-          "status": "not-recalled",
-          "drop": null
+          "source": "wide",
+          "channel": "vector",
+          "distance": 0.4997972846031189,
+          "queryIndex": 0,
+          "rank": 23,
+          "bestRank": 23,
+          "bestDist": 0.4997972846031189,
+          "windowN": 20,
+          "status": "outside-window",
+          "drop": null,
+          "overThreshold": false
         }
       ],
       "forbidHit": []
@@ -1324,8 +1333,17 @@
         {
           "docPath": "docs/plans/memory-flywheel.md",
           "sectionAnchor": "4. 票单全表（14 张，全部收口）",
-          "status": "not-recalled",
-          "drop": null
+          "source": "wide",
+          "channel": "vector",
+          "distance": 0.3880777359008789,
+          "queryIndex": 0,
+          "rank": 151,
+          "bestRank": 151,
+          "bestDist": 0.3880777359008789,
+          "windowN": 20,
+          "status": "outside-window",
+          "drop": null,
+          "overThreshold": false
         }
       ],
       "forbidHit": []
@@ -1429,8 +1447,17 @@
         {
           "docPath": "docs/plans/episode-evaluation-v2.md",
           "sectionAnchor": "6. 实施拆活（审 ✅ 后派）",
-          "status": "not-recalled",
-          "drop": null
+          "source": "wide",
+          "channel": "vector",
+          "distance": 0.48482611775398254,
+          "queryIndex": 3,
+          "rank": 43,
+          "bestRank": 43,
+          "bestDist": 0.48482611775398254,
+          "windowN": 20,
+          "status": "outside-window",
+          "drop": null,
+          "overThreshold": false
         }
       ],
       "forbidHit": []
@@ -1450,13 +1477,17 @@
         {
           "docPath": "docs/plans/episode-evaluation-v2.md",
           "sectionAnchor": "4. closure 状态机 + 改进闭环",
-          "source": "recheck",
-          "distance": 0.4897945821285248,
+          "source": "wide",
           "channel": "vector",
-          "queryIndex": 1,
-          "rank": 18,
-          "status": "below_topk",
-          "drop": null
+          "distance": 0.4448413550853729,
+          "queryIndex": 0,
+          "rank": 28,
+          "bestRank": 28,
+          "bestDist": 0.4448413550853729,
+          "windowN": 20,
+          "status": "outside-window",
+          "drop": null,
+          "overThreshold": false
         }
       ],
       "forbidHit": []
@@ -2448,10 +2479,10 @@
           "docPath": "docs/plans/eval-system.md",
           "sectionAnchor": "6. 检索评估尺：黄金集与跑批",
           "source": "recheck",
-          "distance": 0.40999653935432434,
+          "distance": 0.39023664593696594,
           "channel": "vector",
           "queryIndex": 3,
-          "rank": 2,
+          "rank": 1,
           "status": "below_topk",
           "drop": null
         }
