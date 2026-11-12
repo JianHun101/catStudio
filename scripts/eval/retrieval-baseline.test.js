@@ -529,7 +529,7 @@ describe('scoreEntry — 宽向量召回把「池外」与「缺节」拆开', (
     })
   })
 
-  it('未传语料索引 ⇒ 退回旧口径 not-recalled（窄用例不被迫造语料集）', () => {
+  it('未传 `corpusAnchors` 的旧口径兜底（窄用例不被迫造语料集）', () => {
     const s = scoreEntry({ entry: entry(), result: result(), recheck: new Map() })
     expect(s.details[0].status).toBe('not-recalled')
   })
@@ -1295,6 +1295,45 @@ describe('renderReport — 确定性与内容面', () => {
     const md = renderReport(c)
     expect(md).toContain('阈值一条都没杀')
     expect(md).not.toContain('松阈值可救回')
+  })
+
+  it('`corpus-absent` = 0 时 §二 不写「瓶颈在真实覆盖洞」（判词由读数翻转，不是常量结论）', () => {
+    const c = ctx()
+    const only = c.scores[2]
+    // 去掉唯一那条 corpus-absent，只留 below_topk：阈值杀 0 且无缺节 ⇒ 应判「全是排序/名额截断」
+    c.scores = [{ ...only, details: only.details.filter((d) => d.status !== 'corpus-absent') }]
+    const md = renderReport(c)
+    expect(md).toContain('没有真覆盖洞')
+    expect(md).toContain('补语料救不了')
+    expect(md).not.toContain('瓶颈在融合 topK 排序与真实覆盖洞')
+  })
+
+  it('`beyondWideRecall` 缺失时不拿当前常量冒充它的名次边界（写「宽召回未返回」）', () => {
+    const c = ctx()
+    const only = c.scores[2]
+    c.scores = [
+      {
+        ...only,
+        details: [
+          // 旧产物 / 未记深度的明细：bestRank 无读数且没有 beyondWideRecall
+          {
+            docPath: 'd6',
+            sectionAnchor: 's6',
+            status: 'outside-window',
+            drop: null,
+            source: 'wide',
+            channel: 'vector',
+            distance: null,
+            bestRank: null,
+            bestDist: null,
+            windowN: 20,
+          },
+        ],
+      },
+    ]
+    const md = renderReport(c)
+    expect(md).toContain('宽召回未返回（>200 或距离 ≥ 宽召回上限）')
+    expect(md).not.toContain('| outside-window | 1 | >200 |')
   })
 
   it('§七 计数单位 = (条目, 锚点) 对，并给出**去重后**的锚点数', () => {
