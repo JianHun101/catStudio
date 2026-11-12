@@ -2,7 +2,7 @@
 
 > **Superseded（2026-10-21）**：`@deepseek-ai/dsh@0.2.1-rc.2` 起 headless 原生支持 stdin 任务输入，本调研的 `--patch` 覆盖 `headless-runner.config.task` 绕法已废弃；现行实现见 `packages/server/src/llm/dsh.ts` 的 stdin 传输。
 
-> **Superseded（2026-11-12，B-1/B-3）**：本笔记 §二关于「query_db 能读取全量 session 历史」的结论已被推翻——`POST /api/internal/db-query` 的 `messages` 表自 B-1 起**强制当前执行会话**（传其他 `session_id` 返回 400），返回前按运行期上下文规则过滤，**只返回本猫可见消息**（`role=system` 自 B-3 起也排除）；跨会话 / 全量原文回读改走 `query_session_messages`（带 `before` 消息 id 游标翻页）。§二结论段与方案矩阵对应行已按此改写，其余章节保留当时调研口径。
+> **Superseded（2026-11-12，B-1/B-3/B-5）**：本笔记 §二关于「query_db 能读取全量 session 历史」的结论已被推翻——`POST /api/internal/db-query` 的 `messages` 表自 B-1 起**强制当前执行会话**（传其他 `session_id` 返回 400），返回前按运行期上下文规则过滤，**只返回本猫可见消息**（`role=system` 自 B-3 起也排除）；同一会话内更早或被折叠区间的可见消息可经 `query_session_messages` 回查（`before` 消息 id 游标）；该工具没有 sessionId 参数，跨会话不可读，也不存在全量原文回读通道。§二结论段与方案矩阵对应行已按此改写，其余章节保留当时调研口径。
 
 > 调研单：dsh prompt 长度规避调研（ds猫），配 flash猫 的 opencode 侧调研，共同汇总成「32K 规避统一方案」ADR。
 > 关联：ADR 0007（外部工具形态选型前置检查单）——本调研按「能力对账前置 / 假设标红+实测对称 / 简单形态默认 / 决策留痕」四步执行。
@@ -72,7 +72,7 @@ Commands: web [options] [args...]
 
 ### 实测输出
 
-无 live 实测（cat-study server 未运行）。机制层证据充分：**B-1 后只能拉「当前执行会话 + 本猫可见」的 messages（每次 ≤100 条 + total 提示翻页）；跨会话 / 全量原文回读走 `query_session_messages`（`before` 消息 id 游标）。**
+无 live 实测（cat-study server 未运行）。机制层证据充分：**B-1 后只能拉「当前执行会话 + 本猫可见」的 messages（每次 ≤100 条 + total 提示翻页）；同一会话内更早或被折叠区间的可见消息可经 `query_session_messages` 回查（`before` 消息 id 游标）；该工具没有 sessionId 参数，跨会话不可读，也不存在全量原文回读通道。**
 
 ### 「猫是否主动查全」——行为层，当前不成立
 

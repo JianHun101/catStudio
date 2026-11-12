@@ -1,11 +1,12 @@
 /**
- * query repo — messages 可见性收敛的两个取数函数（B-1）。
+ * query repo — messages 可见性收敛的两个取数函数（B-1）+ 列白名单收窄（B-5）。
  *
  * `queryTable` 的六表白名单 SQL 由 routes/internal.test.ts 端到端覆盖；本文件只测
  * 新增的 messages 专用取数层：
  *   - getMessageQueryCandidates：只投影可见性判定需要的五列、按 created_at/id DESC
  *     排序、不截 limit（截断归调用方在过滤后做）
  *   - getMessageQueryRowsByIds：按传入 id 顺序回表白名单全列，且二次限定会话
+ *   - B-5：sessions 投影列摘掉 running_summary；回表 SQL 兜底排除 role=system
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
@@ -101,6 +102,23 @@ describe('query repo — messages 取数层（B-1）', () => {
     })
   })
 
+  describe('QUERY_TABLE_SCHEMAS（B-5：sessions 摘掉 running_summary）', () => {
+    it('sessions 投影键不含 running_summary，其余列与 orderBy 原样', () => {
+      expect([...queryRepo.QUERY_TABLE_SCHEMAS.sessions.columns]).toEqual([
+        'id',
+        'title',
+        'agent_ids',
+        'broadcast_mode',
+        'handoff_from',
+        'summary_msg_id',
+        'created_at',
+        'updated_at',
+      ])
+      expect(queryRepo.QUERY_TABLE_SCHEMAS.sessions.columns).not.toContain('running_summary')
+      expect(queryRepo.QUERY_TABLE_SCHEMAS.sessions.orderBy).toBe('created_at')
+    })
+  })
+
   describe('getMessageQueryRowsByIds', () => {
     it('按传入 id 顺序回表白名单全列（含 content），snake_case 原样', () => {
       const rows = queryRepo.getMessageQueryRowsByIds('s1', ['m2', 'm1'])
@@ -112,6 +130,15 @@ describe('query repo — messages 取数层（B-1）', () => {
 
     it('二次限定会话：拿别的会话 id 也取不到', () => {
       expect(queryRepo.getMessageQueryRowsByIds('s1', ['m3'])).toEqual([])
+    })
+
+    it('读层兜底排除 role=system：直接喂 system 消息 id 也取不到（不经候选）', () => {
+      insertMessage('m-sys', 's1', null, 'system', '重启完成通知', [], '2026-09-03 10:00:00')
+      expect(queryRepo.getMessageQueryRowsByIds('s1', ['m-sys'])).toEqual([])
+      // 同批的普通消息仍正常返回——证明排除的是 system，不是把整批打成空
+      expect(queryRepo.getMessageQueryRowsByIds('s1', ['m-sys', 'm1']).map((r) => r.id)).toEqual([
+        'm1',
+      ])
     })
 
     it('空 ids → 空数组（不发 SQL）', () => {

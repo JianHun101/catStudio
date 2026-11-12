@@ -788,6 +788,23 @@ describe('internal route-signals', () => {
         expect(JSON.parse(res.body).reason).toContain('column')
       })
 
+      it('sessions.running_summary 已摘出白名单（B-5）→ 条件引用该列 400，reason 不回显该列', async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/internal/db-query',
+          payload: qBody({
+            table: 'sessions',
+            conditions: [{ column: 'running_summary', op: '=', value: 'x' }],
+          }),
+          headers: { 'x-signal-token': VALID_TOKEN },
+        })
+        expect(res.statusCode).toBe(400)
+        const reason = JSON.parse(res.body).reason as string
+        expect(reason).toContain('column')
+        // 可诊断但不再把该列列进「可查列」清单（否则等于告诉模型换个姿势还能查）
+        expect(reason).not.toContain('running_summary')
+      })
+
       it('conditions op 非法 / value 非字符串拒', async () => {
         const badOp = await app.inject({
           method: 'POST',
