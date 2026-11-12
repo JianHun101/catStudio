@@ -1823,6 +1823,158 @@ describe('chatStore', () => {
       expect(store.messages).toHaveLength(5)
     })
 
+    it('OQ-3｜切会话后旧请求失败：B 首滚发新请求，A 的失败不写 B 的错误态、不清 B 的 loading', async () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2' }]
+      store.activeSessionId = 's1'
+      store.messages = msgs(20, 100) // m101..m120
+      store.hasMoreOlder = true
+      let rejectA!: (err: Error) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((_, reject) => {
+          rejectA = reject
+        })
+      )
+
+      const pendingA = store.loadOlderMessages()
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(1, 's1', { before: 'm101', limit: 50 })
+
+      // 用户切到 B：B 的首屏消息已在、还有更早
+      store.joinSession('s2')
+      store.messages = msgs(20, 200) // m201..m220
+      store.hasMoreOlder = true
+      let resolveB!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveB = resolve
+        })
+      )
+
+      const pendingB = store.loadOlderMessages()
+      // B 的首滚必须发出**以 B 为会话**的新请求，而不是复用 A 的在途 Promise
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(2)
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(2, 's2', { before: 'm201', limit: 50 })
+      expect(store.loadingOlder).toBe(true)
+
+      rejectA(new Error('Failed to fetch'))
+      await pendingA
+
+      // 旧会话的收尾只属于旧会话：不把失败写进 B，也不把 B 的加载态打掉
+      expect(store.olderError).toBeNull()
+      expect(store.loadingOlder).toBe(true)
+
+      resolveB(msgs(3, 217).reverse()) // m218..m220
+      expect(await pendingB).toBe(true)
+      expect(store.loadingOlder).toBe(false)
+    })
+
+    it('OQ-3｜切会话后旧请求成功返回：同样不清 B 的 loadingOlder', async () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2' }]
+      store.activeSessionId = 's1'
+      store.messages = msgs(20, 100)
+      store.hasMoreOlder = true
+      let resolveA!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveA = resolve
+        })
+      )
+      const pendingA = store.loadOlderMessages()
+
+      store.joinSession('s2')
+      store.messages = msgs(20, 200)
+      store.hasMoreOlder = true
+      let resolveB!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveB = resolve
+        })
+      )
+      const pendingB = store.loadOlderMessages()
+
+      resolveA([]) // 旧会话确认到底——不得把 B 的 loadingOlder 一起收掉
+      await pendingA
+      expect(store.loadingOlder).toBe(true)
+
+      resolveB([])
+      await pendingB
+      expect(store.loadingOlder).toBe(false)
+    })
+
+    it('OQ-3｜切回原会话不复用已被丢弃的旧请求（joinSession 必须清句柄）', async () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2' }]
+      store.activeSessionId = 's1'
+      store.messages = msgs(200) // m1..m200，切回来时缓存仍判「还有更早」
+      store.hasMoreOlder = true
+      let resolveA!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveA = resolve
+        })
+      )
+      const pendingA = store.loadOlderMessages() // 发起后一直挂起
+
+      store.joinSession('s2')
+      store.joinSession('s1') // 切回：缓存命中，hasMoreOlder=true
+
+      mockGetSessionMessages.mockReturnValueOnce([])
+      await store.loadOlderMessages()
+
+      // 旧 Promise 会按切会话判据丢弃；不清句柄就会把它当成 s1 的在途请求复用 → 这里只发过 1 次
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(2)
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(2, 's1', { before: 'm1', limit: 50 })
+
+      resolveA([])
+      await pendingA
+    })
+
+    it('C-4｜await 期间消息数组被替换：前插点重算到合成头之后，原消息不丢', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(5, 10) // m11..m15
+      store.hasMoreOlder = true
+      let resolve!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((r) => {
+          resolve = r
+        })
+      )
+      const pending = store.loadOlderMessages()
+
+      // 等待期间会话内交接重排头部（合成消息不落库）——请求发起时 realStart 还是 0
+      store.messages = [{ ...mockMessage, id: 'handoff-s1', role: 'system' }, ...msgs(5, 10)]
+      resolve(msgs(2, 0).reverse()) // m1,m2
+      await pending
+
+      expect(ids(store.messages)).toEqual([
+        'handoff-s1',
+        'm1',
+        'm2',
+        'm11',
+        'm12',
+        'm13',
+        'm14',
+        'm15',
+      ])
+    })
+
+    it('C-4｜await 期间只剩合成消息：插入点落空时追加，不丢合成头', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(5, 10)
+      store.hasMoreOlder = true
+      let resolve!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((r) => {
+          resolve = r
+        })
+      )
+      const pending = store.loadOlderMessages()
+
+      store.messages = [{ ...mockMessage, id: 'welcome-s1', role: 'system' }]
+      resolve(msgs(2, 0).reverse())
+      await pending
+
+      expect(ids(store.messages)).toEqual(['welcome-s1', 'm1', 'm2'])
+    })
+
     it('D｜未加载目标：向前翻页到命中 → 发焦点信号并返回 true', async () => {
       store.activeSessionId = 's1'
       store.messages = msgs(20, 100)

@@ -2,7 +2,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import type { Directive } from 'vue'
 import type { Message, StreamSegment, ToolCallInfo, ExecutionMeta } from '@cat-study/shared'
-import { useChatStore, isSyntheticHead, type AgentStatusEntry } from '@/stores/chat'
+import { useChatStore, isNonPersistedSynthetic, type AgentStatusEntry } from '@/stores/chat'
 import { useMention } from '@/composables/useMention'
 import { useSkillCommand } from '@/composables/useSkillCommand'
 import { useTheme } from '@/composables/useTheme'
@@ -347,7 +347,9 @@ let lastScrollTop = 0
  * 真实空会话也必有 `welcome-*` 合成消息（`activeMessages.length > 0` 恒真），若只按长度判，
  * 新会话会显示「已到会话开头」——那是终点提示，不是空场提示。
  */
-const hasRealMessages = computed(() => store.activeMessages.some((m) => !isSyntheticHead(m)))
+const hasRealMessages = computed(() =>
+  store.activeMessages.some((m) => !isNonPersistedSynthetic(m))
+)
 
 /**
  * 主消息区滚动：贴底跟随的判据 + 向上滚到近顶时拉一页更早历史。
@@ -1111,8 +1113,8 @@ let memoryRefsSeq = 0
 /**
  * 单次批量口的 id 上限，**必须与 server 的 `MAX_MESSAGE_IDS`（`routes/memory.ts`）同值**——
  * 超限 server 端是一整条 400（不静默截断），那会让整个会话的记忆行全灭。
- * 会话历史本身上限 200（`getSessionHistory` 默认 limit），故只有「长驻会话持续追加到
- * 200 条以上」才触发；触发时**取最近 200 条并留痕**（不静默丢）。
+ * 首屏上限 200（`getSessionHistory` 默认 limit）；懒加载会把总加载量推过 200，超限只取最近
+ * 200 条并留痕（不静默丢）——别把这句读成「全程硬上限」。
  */
 const MEMORY_REFS_MAX_IDS = 200
 
@@ -1548,6 +1550,8 @@ const messageViews = computed<MessageView[]>(() => {
              末态只在**至少一条落库消息**时显示——真实空会话必有 welcome 合成消息，
              只按条数判会把「空场」显示成「翻到了开头」。loadingOlder 优先级最高。 -->
         <div v-if="store.loadingOlder" class="older-status" role="status">正在加载更早消息…</div>
+        <!-- 重试按钮**刻意不补偿滚动锚定**：用户点它就是要看刚补进来的更早内容，
+             视口停在原处即可；滚轮触发的路径才走 `onMessagesScroll` 的高度差补偿。 -->
         <button
           v-else-if="store.olderError"
           type="button"
