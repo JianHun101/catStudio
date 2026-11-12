@@ -36,14 +36,27 @@
  *   注入真库，且以 `readonly + fileMustExist` 打开——「静默建一个空库跑出全零」在这条
  *   打开方式下不是纪律问题，是**物理不可达**。
  *
- * ## 归因：`below_topk` 与覆盖洞的分野（本脚本唯一自己发起的检索调用）
+ * ## 归因：`below_topk` / `outside-window` / `corpus-absent` 的分野（本脚本自己发起的检索调用）
  *
  * 候选流水有两个**结构性盲区**：`probe` 池只取首个嵌入成功的查询、`final` 只留跨查询
  * 合并后的 topK ⇒「被某条改写查询召回却排不进 topK」与「压根没召回」在流水里同形，
  * 而两者药方相反。故对**流水两条路都没出现**的锚点补一次**逐查询重搜**
- * （`collectRecheckPools`，阈值放宽到 `RECHECK_MAX_DISTANCE`）：够得着 ⇒ `below_topk`，
- * 够不着 ⇒ `not-recalled`（真覆盖洞）。重搜用的是库层现成导出 `searchChunksHybrid`
- * （与生产同源），**不复制链段**——链段仍只有 `runRetrievalChain` 一个出处。
+ * （`collectRecheckPools`，阈值放宽到 `RECHECK_MAX_DISTANCE`）：够得着 ⇒ `below_topk`。
+ *
+ * 重搜本身还有一个盲区：它的出口是**每查询融合池**（`HYBRID_POOL_PER_QUERY` 片），
+ * 所以「在库、距离也在阈值内、只是全库排得后」与「库里根本没有这一节」仍会一起落进
+ * `not-recalled`，而前者补语料毫无用处。故对重搜也没收下的锚点再补一次**宽向量召回**
+ * （`searchChunksByVector`，`WIDE_RECALL_TOP_N` 片，阈值仍用 `RECHECK_MAX_DISTANCE`）：
+ *
+ *   - `chunks` 表按 `(doc_path, section_anchor)` 查无此行 ⇒ `corpus-absent`（**真覆盖洞**）；
+ *   - 在库、`bestRank >= HYBRID_POOL_PER_QUERY` ⇒ `outside-window`（池外：补语料救不了，
+ *     需要改排序或把池/名额扩到覆盖它的名次）。
+ *
+ * `bestRank` / `bestDist` **同源**：取该锚点所有查询里**距离最小**的那一趟，名次与距离
+ * 来自同一趟（`buildRecheckIndex` 的口径），明细同时带 `windowN`。宽召回**不反推阈值**：
+ * 它的读数只用于「池外 / 缺节」拆分，绝不让任何一条的 `hit` / `recall` / `preThreshold`
+ * 变化——`outside-window` 即使 `bestDist` 也 ≥ 阈值，仍记 `overThreshold` 而不进阈值桶，
+ * 因为名次已在窗口外，松阈值同样进不了池。
  *
  * ## 嵌入供给（票面「必判」第一条，已实测定案）
  *
@@ -97,6 +110,16 @@ import { loadEnvFile } from './freeze-rewrite.mjs'
 /** 报告里 `schema` 字段的唯一合法值（报告形态变更时递增，便于历史报告比对） */
 export const BASELINE_REPORT_SCHEMA = 1
 
+/**
+ * 宽向量召回的深度：只用来回答「这一节**在库**吗、全库排第几」，
+ * 不用于反推阈值（见文件头「归因」）。
+ *
+ * 为什么是 200：既有 759 片语料里，被判 `not-recalled` 的三个锚点实测名次
+ * 23 / 151 / 35 都落在其中；再深就只是把「池外」读成更大的数字，不改变归类。
+ * 名次是**列表下标（0 起）**——与 `buildRecheckIndex` 的 `rank` 同口径。
+ */
+export const WIDE_RECALL_TOP_N = 200
+
 /** 必中 canary 的 id */
 export const CANARY_HIT_ID = 'CANARY-HIT'
 /** 必不中 canary 的 id */
@@ -146,7 +169,12 @@ export function localDate(d = new Date()) {
  *   - `budget`       进了融合 topK，但整节放不进预算 ⇒ 药是「加预算」
  *   - `below_topk`   流水两条路都没出现，但**逐查询重搜**能召回且过阈值
  *                    ⇒ 药是「调 topK/池深」（判别面见 `buildRecheckIndex`）
- *   - `not-recalled` 重搜（阈值放宽到 1）也够不着 ⇒ 药是「覆盖洞」
+ *   - `outside-window` 流水与重搜都没收下，但**宽向量召回**能看见：该节**在库**、
+ *                    `bestDist` 在阈值内、`bestRank >= windowN` ⇒ 药是「改排序 / 扩名额」，
+ *                    **不是**补语料
+ *   - `corpus-absent` `chunks` 表按 `(doc_path, section_anchor)` 查无此行 ⇒ 药是「补语料」
+ *   - `not-recalled` 旧口径兜底：未传语料索引（`corpusAnchors`）时保留「两条路都没出现」；
+ *                    主路径已把它拆成 `outside-window` / `corpus-absent`
  *
  * `section_dup` 不会出现在未命中归因里：同节已有更优片代表时**整节照样注入**
  * （整节返回），故该锚点必落在 `S` 内。
@@ -154,8 +182,20 @@ export function localDate(d = new Date()) {
  * @param recheck 逐查询重搜索引（`buildRecheckIndex` 产物）。**缺省 `null` = 关掉重搜**，
  *   此时「流水两条路都没出现」一律落 `not-recalled`——那是分不开 `below_topk` 的旧口径，
  *   跑批主流程恒传入；缺省值只服务「不关心该子类」的窄用例。
+ * @param wideIndex 宽向量召回索引（`buildRecheckIndex` 产物，形状同 `recheck`）。缺省
+ *   `null` = 不做池外拆分。
+ * @param corpusAnchors `chunks` 表里全部 `(doc_path, section_anchor)` 的 `anchorKey` 集。
+ *   缺省 `null` = 语料在场性未测（旧口径 `not-recalled` 兜底）。
+ * @param windowN 池窗口（= 库层 `HYBRID_POOL_PER_QUERY`，由 `main` 传入；测试可显式给）。
  */
-export function scoreEntry({ entry, result, recheck = null }) {
+export function scoreEntry({
+  entry,
+  result,
+  recheck = null,
+  wideIndex = null,
+  corpusAnchors = null,
+  windowN = null,
+}) {
   const injected = new Set(result.sections.map((s) => anchorKey(s.docPath, s.sectionAnchor)))
   const probes = new Map()
   const finals = new Map()
@@ -214,6 +254,54 @@ export function scoreEntry({ entry, result, recheck = null }) {
       return blockedByThreshold
         ? { ...hit, status: 'dropped', drop: 'threshold' }
         : { ...hit, status: 'below_topk', drop: null }
+    }
+    // 重搜也没收下：先答「库里到底有没有这一节」。`corpusAnchors` 缺省 = 未测，走旧口径。
+    const inCorpus = corpusAnchors ? corpusAnchors.has(k) : null
+    if (inCorpus === false) {
+      return { ...at, status: 'corpus-absent', drop: null }
+    }
+    // 在库（或未测在场性）时，再看宽向量召回的名次：这是「池外」与「缺节」的分界。
+    const w = wideIndex?.get(k)
+    if (w && typeof w.distance === 'number') {
+      const outside = windowN === null || w.rank >= windowN
+      const wideAt = {
+        ...at,
+        source: 'wide',
+        channel: 'vector',
+        distance: w.distance,
+        queryIndex: w.queryIndex,
+        rank: w.rank,
+        bestRank: w.rank,
+        bestDist: w.distance,
+        windowN,
+      }
+      if (outside) {
+        return {
+          ...wideAt,
+          status: 'outside-window',
+          drop: null,
+          // 名次已在窗口外 ⇒ 阈值不是更紧的约束；记下但不进阈值桶（`preThreshold` 不变）
+          overThreshold: maxDistance !== null && w.distance >= maxDistance,
+        }
+      }
+      // 在 20 片池窗口内却仍未被重搜池收下 ⇒ 融合层截断（与 `not_topk` 同药方）
+      return { ...wideAt, status: 'not_topk', drop: null }
+    }
+    if (inCorpus === true) {
+      // 在库，但宽召回 top-N 也没看见：名次只会更后，仍属池外，只是名次无读数。
+      return {
+        ...at,
+        status: 'outside-window',
+        drop: null,
+        source: 'wide',
+        channel: 'vector',
+        distance: null,
+        bestRank: null,
+        bestDist: null,
+        windowN,
+        overThreshold: false,
+        beyondWideRecall: WIDE_RECALL_TOP_N,
+      }
     }
     return { ...at, status: 'not-recalled', drop: null }
   })
@@ -374,8 +462,21 @@ export function buildRecheckIndex({ perQuery }) {
  * `rechecked` 与 `score` **一起返回**：调用方据它累计「跑过重搜的条目」（进报告的自述
  * 行）。合一返回是为了不让调用方自己再判一遍——两处判据一旦分叉，报告就会说一套、
  * 实际做另一套。
+ *
+ * 给了 `wideSearch` 时**同批**再跑一趟宽向量召回：它只在「重搜也没收下」的锚点上
+ * 起作用，把 `not-recalled` 拆成 `outside-window` / `corpus-absent`。`corpusAnchors`
+ * 是 `chunks` 表的锚点集（`main` 传入）；缺省 `null` 时该拆分关闭，退回旧口径。
  */
-export async function rescoreWithRecheck({ entry, result, queries, embed, search }) {
+export async function rescoreWithRecheck({
+  entry,
+  result,
+  queries,
+  embed,
+  search,
+  wideSearch = null,
+  corpusAnchors = null,
+  windowN = null,
+}) {
   const score = scoreEntry({ entry, result })
   if (!score.details.some((d) => d.status !== 'injected')) return { score, rechecked: false }
   const perQuery = await collectRecheckPools({
@@ -384,8 +485,32 @@ export async function rescoreWithRecheck({ entry, result, queries, embed, search
     embed,
     search,
   })
+  // 宽向量召回用**同一个 `collectRecheckPools` 骨架**：只把 `search` 换成「库层向量口 +
+  // 固定 top-N」的适配器，池内 rank / distance 的生成口径就与重搜**逐字同源**——两处
+  // 各写一套 map 迟早会长出「一边 0 起、一边 1 起」这种没法对账的名次。
+  let wideIndex = null
+  if (wideSearch) {
+    const widePerQuery = await collectRecheckPools({
+      queries,
+      maxDistance: RECHECK_MAX_DISTANCE,
+      embed,
+      search: (vector, _q, maxDistance) =>
+        wideSearch(vector, WIDE_RECALL_TOP_N, maxDistance).map((row) => ({
+          row,
+          channel: 'vector',
+        })),
+    })
+    wideIndex = buildRecheckIndex({ perQuery: widePerQuery })
+  }
   return {
-    score: scoreEntry({ entry, result, recheck: buildRecheckIndex({ perQuery }) }),
+    score: scoreEntry({
+      entry,
+      result,
+      recheck: buildRecheckIndex({ perQuery }),
+      wideIndex,
+      corpusAnchors,
+      windowN,
+    }),
     rechecked: true,
   }
 }
@@ -393,13 +518,18 @@ export async function rescoreWithRecheck({ entry, result, queries, embed, search
 /**
  * **未召回锚点的距离读数**（§二 结论「阈值该不该松」的依据面）——纯函数。
  *
- * 距离有两个来源、合并计：① 流水（probe / final 行自带距离）；② 逐查询重搜
- * （取该锚点**各查询池内的最小**向量距离，见 `buildRecheckIndex`）。两处都是**同一把尺**
+ * 距离有三个来源、合并计：① 流水（probe / final 行自带距离）；② 逐查询重搜
+ * （取该锚点**各查询池内的最小**向量距离，见 `buildRecheckIndex`）；③ 宽向量召回
+ * （同口径，补的是重搜 20 片窗口外的那批）。三处都是**同一把尺**
  * （`searchChunksByVector` 的真距离），故可直接取最大值——这个最大值答的是
  * 「**最好的一次机会**里最差的那个」，它 < 阈值 ⇒ 阈值一条都没杀。
  *
- * 三分类互斥且穷尽：`keywordOnly`（只有关键词通道捞到，无距离概念）、`vectorKnown`
- * （有真距离）、其余 = 连放宽阈值都够不着 = `unreachable`（**真覆盖洞**）。
+ * 四分类互斥且穷尽：`keywordOnly`（只有关键词通道捞到，无距离概念）、`vectorKnown`
+ * （有真距离）、`corpusAbsent`（`chunks` 查无此节）、`noReading`（在库但连宽召回
+ * 也没看见名次，或未测）。`outsideWindow` 是**状态子集**，与四分类正交。
+ *
+ * `outside-window` 即使距离 ≥ 阈值也**不计入** `atOrAboveThreshold`：它的名次已在
+ * 池窗口外，松阈值同样进不了池 ⇒ 把它算成「松阈值可救」会给出反向药方。
  */
 export function summarizeMissDistances({ scores, maxDistance }) {
   let total = 0
@@ -407,34 +537,57 @@ export function summarizeMissDistances({ scores, maxDistance }) {
   let vectorKnown = 0
   let fromTrace = 0
   let fromRecheck = 0
+  let fromWide = 0
   let atOrAboveThreshold = 0
   let max = null
+  let corpusAbsent = 0
+  let outsideWindow = 0
+  let outsideWindowOverThreshold = 0
+  let noReading = 0
   for (const s of scores) {
     for (const d of s.details) {
       if (d.status === 'injected') continue
       total += 1
+      if (d.status === 'corpus-absent') {
+        corpusAbsent += 1
+        continue
+      }
+      if (d.status === 'outside-window') {
+        outsideWindow += 1
+        if (d.overThreshold === true) outsideWindowOverThreshold += 1
+      }
       if (d.channel === 'keyword') {
         keywordOnly += 1
         continue
       }
-      if (typeof d.distance !== 'number') continue
+      if (typeof d.distance !== 'number') {
+        noReading += 1
+        continue
+      }
       vectorKnown += 1
       if (d.source === 'recheck') fromRecheck += 1
+      else if (d.source === 'wide') fromWide += 1
       else fromTrace += 1
       max = max === null ? d.distance : Math.max(max, d.distance)
-      if (maxDistance !== null && d.distance >= maxDistance) atOrAboveThreshold += 1
+      if (d.status !== 'outside-window' && maxDistance !== null && d.distance >= maxDistance) {
+        atOrAboveThreshold += 1
+      }
     }
   }
-  // `total` 三分类**互斥且穷尽**：有向量距离 / 仅关键词通道（无距离概念）/ 连重搜都够不着
+  // `total` 四分类**互斥且穷尽**：有向量距离 / 仅关键词通道 / 缺节 / 无读数
   return {
     total,
     keywordOnly,
     vectorKnown,
     fromTrace,
     fromRecheck,
+    fromWide,
     atOrAboveThreshold,
-    unreachable: total - keywordOnly - vectorKnown,
     maxDistance: max,
+    corpusAbsent,
+    outsideWindow,
+    outsideWindowOverThreshold,
+    noReading,
   }
 }
 
@@ -452,8 +605,12 @@ export const MISS_RX = {
   section_dup: '同节已有更优片代表（整节照样注入，属正常）',
   below_topk:
     '调 topK 或调池深（被某条查询召回过、也过了阈值，输在跨查询合并后的 topK 截断——与 not_topk 同药方，只是发现路径不同）',
+  'outside-window':
+    '**池外**（该节在库、`bestDist` 在阈值内或窗口更紧，但全库 `bestRank` ≥ 池窗口 `HYBRID_POOL_PER_QUERY`）——补语料救不了；改排序，或把池/名额扩到覆盖它的名次',
+  'corpus-absent':
+    '**真覆盖洞**（`chunks` 表按 `(doc_path, section_anchor)` 查无此节）——补语料/补锚点，不是调参能救的',
   'not-recalled':
-    '**覆盖洞**（任何一条查询的融合池都够不着，阈值放宽到 1 也一样）——先补语料/补锚点，不是调参能救的',
+    '**旧口径兜底**（未传语料索引：主路径已把「在库但排得后」拆成 `outside-window`、把「库里没有」拆成 `corpus-absent`；本键只在窄用例出现）',
 }
 
 /**
@@ -740,18 +897,52 @@ export function renderReport(ctx) {
   // 而是「未召回锚点各自的距离」这个更硬的读数。
   const missDist = summarizeMissDistances({ scores, maxDistance })
   L.push(
-    `> **未召回锚点读数**（「阈值该不该松」的直接证据；本次逐查询重搜覆盖 **${recheck.entries}** 条条目）：` +
+    `> **未召回锚点读数**（「阈值该不该松」的直接证据；本次逐查询重搜覆盖 **${recheck.entries}** 条条目，` +
+      `另对未命中锚点做**宽向量召回 top-${WIDE_RECALL_TOP_N}**）：` +
       `未进注入集 **${missDist.total}** 处，其中 ` +
-      `**${missDist.vectorKnown}** 处取到真实向量距离（流水自带 ${missDist.fromTrace} 处 + 重搜补测 ${missDist.fromRecheck} 处，` +
-      `后者取其各查询池内的**最小**距离 = 它最好的一次机会）、**最大 ${fmt4(missDist.maxDistance)}**（出处见明细行 \`dist=\`）` +
+      `**${missDist.vectorKnown}** 处取到真实向量距离（流水自带 ${missDist.fromTrace} 处 + 重搜补测 ${missDist.fromRecheck} 处 + 宽召回补测 ${missDist.fromWide} 处，` +
+      `后两者取其各查询池内的**最小**距离 = 它最好的一次机会）、**最大 ${fmt4(missDist.maxDistance)}**（出处见明细行 \`dist=\` / \`bestDist=\`）` +
       (missDist.keywordOnly > 0
         ? `；另 **${missDist.keywordOnly}** 处仅关键词通道召回（无距离概念）`
         : '') +
-      `。距离 ≥ 阈值的有 **${missDist.atOrAboveThreshold}** 处 ⇒ ` +
+      `。距离 ≥ 阈值的有 **${missDist.atOrAboveThreshold}** 处（不含池外条目）⇒ ` +
       (missDist.atOrAboveThreshold === 0
-        ? '**阈值一条都没杀**，松阈值救不回任何一条未召回锚点——瓶颈在融合 topK 排序与真实覆盖洞。'
-        : `松阈值可救回这 ${missDist.atOrAboveThreshold} 处。`) +
-      `连重搜（阈值放宽到 ${RECHECK_MAX_DISTANCE}）都够不着的 **${missDist.unreachable}** 处 = 真覆盖洞。`
+        ? '**阈值一条都没杀**——瓶颈不在阈值，' +
+          (missDist.corpusAbsent === 0
+            ? `本次也**没有真覆盖洞**（\`corpus-absent\` 0 处）：全部未命中都是排序/名额截断（池外 ${missDist.outsideWindow} 处）——补语料救不了。`
+            : `瓶颈在融合 topK 排序与真实覆盖洞（\`corpus-absent\` ${missDist.corpusAbsent} 处）。`)
+        : `松阈值可救回这 ${missDist.atOrAboveThreshold} 处。`)
+  )
+  L.push('')
+  // 池外 vs 缺节的**判别读数**：`not-recalled` 一句话把「在库但排得后」与「库里没有」
+  // 混成同一类，药方却相反（改排序 vs 补语料）。这三列就是拆开的直接证据。
+  const outsideRows = scores.flatMap((s) => s.details.filter((d) => d.status === 'outside-window'))
+  const corpusAbsentRows = scores.flatMap((s) =>
+    s.details.filter((d) => d.status === 'corpus-absent')
+  )
+  const rankText = (d) =>
+    typeof d.bestRank === 'number'
+      ? String(d.bestRank)
+      : `>${d.beyondWideRecall ?? WIDE_RECALL_TOP_N}`
+  const outsideRanks = outsideRows.map(rankText).join(' / ') || '—'
+  const outsideDists = outsideRows.map((d) => fmt4(d.bestDist)).join(' / ') || '—'
+  const outsideWindows =
+    [...new Set(outsideRows.map((d) => d.windowN).filter((n) => typeof n === 'number'))].join(
+      ' / '
+    ) || '—'
+  L.push('| 状态 | 处数 | bestRank | bestDist | windowN |')
+  L.push('| --- | --- | --- | --- | --- |')
+  L.push(
+    `| outside-window | ${outsideRows.length} | ${outsideRanks} | ${outsideDists} | ${outsideWindows} |`
+  )
+  L.push(`| corpus-absent | ${corpusAbsentRows.length} | — | — | — |`)
+  L.push('')
+  L.push(
+    '> **池外 ≠ 覆盖洞**：`outside-window` = 该节**在库**、`bestDist` 在阈值内（或窗口是更紧的约束），' +
+      '但全库 `bestRank` ≥ `windowN`（每查询融合池出口 = `HYBRID_POOL_PER_QUERY` 片）——补语料救不了它，' +
+      '要先改排序，或把池/名额扩到覆盖它的名次。`corpus-absent` = `chunks` 表按 `(doc_path, section_anchor)`' +
+      ' **查无此节**，才是真覆盖洞。`bestRank` 是宽向量召回列表的**下标（0 起）**，与重搜的 `rank` 同口径；' +
+      `\`>${WIDE_RECALL_TOP_N}\` = 宽召回边界外（名次只会更后，仍属池外）。`
   )
   L.push('')
 
@@ -766,15 +957,27 @@ export function renderReport(ctx) {
   for (const kind of ['real', 'constructed']) {
     H(`逐条明细 — ${kind}`)
     L.push('')
-    L.push('| id | reason | 应命中 | 命中 | recall | 阈值前命中 | 未进注入集的锚点（归因） |')
-    L.push('| --- | --- | --- | --- | --- | --- | --- |')
+    L.push(
+      '| id | reason | 应命中 | 命中 | recall | 阈值前命中 | 未进注入集的锚点（归因） | 池外读数（bestRank / bestDist / windowN） |'
+    )
+    L.push('| --- | --- | --- | --- | --- | --- | --- | --- |')
     for (const s of scores.filter((x) => x.kind === kind)) {
       const miss = s.details
         .filter((d) => d.status !== 'injected')
         .map((d) => `${d.docPath} :: ${d.sectionAnchor}（${missLabel(d)}）`)
         .join('<br>')
+      // §三/§四 与 §二 同源：这里只把 `outside-window` 明细的三个读数逐个摊开，
+      // 不做二次计算（`bestRank` / `bestDist` / `windowN` 都是 `scoreEntry` 落的原值）。
+      const wideRead =
+        s.details
+          .filter((d) => d.status === 'outside-window')
+          .map(
+            (d) =>
+              `${rankText(d)} / ${fmt4(d.bestDist)} / ${typeof d.windowN === 'number' ? d.windowN : 'n/a'}`
+          )
+          .join('<br>') || '—'
       L.push(
-        `| ${s.id} | ${s.reason} | ${s.expectTotal} | ${s.hit} | ${fmt4(s.recall)} | ${s.preThreshold} | ${miss || '—'} |`
+        `| ${s.id} | ${s.reason} | ${s.expectTotal} | ${s.hit} | ${fmt4(s.recall)} | ${s.preThreshold} | ${miss || '—'} | ${wideRead} |`
       )
     }
     L.push('')
@@ -1157,6 +1360,17 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     // ─── 逐条跑批 ───────────────────────────────────────
+    // 「这一节在库吗」的判据面：`chunks` 表里**实际存在**的锚点集（不是工作树 MD，
+    // 也不是 golden-check 的 live 索引——后者只说明「文档里有这一节」，答不了「索引里
+    // 有没有被收进来」）。缺了这一层，`outside-window` 与 `corpus-absent` 就又混成
+    // 一句 `not-recalled`，而两者的药方相反。
+    const corpusAnchors = new Set(
+      db
+        .prepare('SELECT doc_path AS docPath, section_anchor AS sectionAnchor FROM chunks')
+        .all()
+        .map((row) => anchorKey(row.docPath, row.sectionAnchor))
+    )
+    const windowN = chunksRepo.HYBRID_POOL_PER_QUERY
     const results = []
     const scores = []
     const rechecked = []
@@ -1166,7 +1380,8 @@ export async function main(argv = process.argv.slice(2)) {
       results.push({ id: entry.id, result: r })
       // 逐条评分：这条有**任何**未注入锚点就走逐查询重搜——`below_topk` 的判别需要它，
       // §二 的「最小距离」读数也需要它（已有归因的锚点虽不改判，读数要换成紧界）。
-      // 判据与接线都在 `rescoreWithRecheck` 里（那里可注入假 embed/search 单测）。
+      // 重搜还没收下的锚点再走宽向量召回，把「池外」与「缺节」拆开（`outside-window` /
+      // `corpus-absent`）。判据与接线都在 `rescoreWithRecheck` 里（可注入假实现单测）。
       const { score, rechecked: didRecheck } = await rescoreWithRecheck({
         entry,
         result: r,
@@ -1179,6 +1394,10 @@ export async function main(argv = process.argv.slice(2)) {
             chunksRepo.HYBRID_POOL_PER_QUERY,
             maxDistance
           ),
+        wideSearch: (vector, topK, maxDistance) =>
+          chunksRepo.searchChunksByVector(vectorToBlob(vector), topK, maxDistance),
+        corpusAnchors,
+        windowN,
       })
       if (didRecheck) rechecked.push(entry.id)
       scores.push(score)
