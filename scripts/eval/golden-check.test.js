@@ -181,13 +181,17 @@ describe('checkGoldenSet — 锚点存在性（含真空性反对照）', () => 
     const { rotten, checked } = checkGoldenSet({ data: goldenRaw, index: idx })
 
     expect(rotten).toEqual([])
-    // 同理不写死锚点数：从真身自身推导，守的是「核了多少 = 条目里写了多少」，
-    // 扩集时不会被历史规模绑死。
+    // 规模守卫走 `meta.anchorCount` 这个**独立登记**的读数，不用从 entries 现算的派生式：
+    // 派生式与 `checkGoldenSet` 同源，后者漏数锚点时它跟着一起错 ⇒ 恒真。
+    // 两条断言各挡一个失效方向：
+    //   ① 登记数与条目自洽 —— 扩集忘更新 anchorCount ⇒ 红；
+    //   ② 实核数 == 登记数 —— `checkGoldenSet` 漏数锚点 ⇒ 红（这才是原 `45` 守的规模面）。
     const expectedAnchors = goldenRaw.entries.reduce(
       (n, e) => n + (e.expect?.length ?? 0) + (e.forbid?.length ?? 0),
       0
     )
-    expect(checked).toBe(expectedAnchors)
+    expect(goldenRaw.meta.anchorCount).toBe(expectedAnchors)
+    expect(checked).toBe(goldenRaw.meta.anchorCount)
     // 白名单文件里过不了准入的——不是活块，但要让调用方能把
     // 「锚点指着准入不过的文件」与「锚点拼错」分开。
     //

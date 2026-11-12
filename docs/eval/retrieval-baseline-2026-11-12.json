@@ -14,6 +14,7 @@
       "frozenCorpusRef": "0dc33fbb9012b543a23a775129fe9630732ed375",
       "rewriteSource": "memory/query-rewrite.ts :: rewriteRetrievalQueries（freeze-rewrite.mjs 产出，禁手写）",
       "counts": { "real": 17, "constructed": 37, "negative": 5 },
+      "anchorCount": 67,
       "selectionGaps": [
         "v1 的域偏斜在 v2 仍未完全消解：v1 real 12 条为 adr 1 / plans 11；v2 追加 real 5 条，主锚落 lessons 4 篇（distance-threshold / missing-dispatch / silent-no-op / review-branch）+ plans 1 篇（eval-system），仍无 adr 域新增（活库里 adr 域可答事件稀少，按票面「相关的不够就照实少写、不凑数」）。",
         "constructed 14 条按票面指定语料逐篇出题（12 张 lessons + ADR 0015 + plans/eval-system），覆盖的是「语料里有权威答案」的面，不代表线上真实提问分布。"
