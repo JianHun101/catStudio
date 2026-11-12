@@ -18,6 +18,9 @@
  *   - LIKE 的 % 由模型自己写在 value 里，服务端不自动包裹
  *   - 无命中返回 rows: []，不报错；total = 全量匹配数（LIMIT 前），
  *     给模型「还有更多」的信号
+ *   - messages 表例外（B-1）：会话由端点强制为当前执行流，返回前按运行期上下文
+ *     规则过滤可见性，故 total = **过滤后可见匹配数**、limit 在过滤后截断；
+ *     候选与回表两个函数见 `getMessageQueryCandidates` / `getMessageQueryRowsByIds`
  */
 import type Database from 'better-sqlite3'
 
@@ -94,6 +97,10 @@ const QUERY_TABLE_SCHEMAS_DEF = {
       'created_at',
     ],
     orderBy: 'created_at',
+    // 同毫秒连写（并发落库 / 迁毫秒前的整秒行）会撞 created_at ⇒ 用主键 id 定序。
+    // 与 `getSessionMessagesRange` 的 `created_at DESC, id DESC` 同口径；其余 5 张表
+    // 不写 tiebreak ⇒ 它们的 ORDER BY 文本逐字不变。
+    tiebreak: 'id',
   },
   // ⚠️ 原 `memories` 条目已删除（票辛 ⑥）：该表已 DROP，白名单里留着它会让
   // query_db(table='memories') 从「表名不在白名单」的明确拒绝，退化成
@@ -221,4 +228,76 @@ export function queryTable(params: QueryTableParams): QueryTableResult {
     .get(...values) as { n: number }
 
   return { rows, total: totalRow.n }
+}
+
+/** messages 可见性判定只需的五列（分页前过滤用；不投影正文，避免整会话原文进出一次） */
+const MESSAGE_QUERY_CANDIDATE_COLUMNS = 'id, created_at, role, agent_id, mentions'
+
+/** `getMessageQueryCandidates` 的行形状——正是 `getRelevantMessages` 判定可见性所需字段 */
+export interface MessageQueryCandidate {
+  id: string
+  created_at: string
+  role: string
+  agent_id: string | null
+  mentions: string | null
+}
+
+/**
+ * 按会话取 messages 候选行（**不截 limit**，调用方过滤可见性后再截）。
+ *
+ * `session_id` 是强制条件，不接受放进 conditions：端点已把重复的 `session_id`
+ * 条件剥掉、只允许当前执行会话；这里再挡一次，防绕过端点的直调改写会话边界。
+ * 排序与 `getSessionMessagesRange` 同口径（`created_at DESC, id DESC`），
+ * 保证「过滤 → 截断」后的页内顺序与回读工具一致。
+ */
+export function getMessageQueryCandidates(
+  sessionId: string,
+  conditions: readonly QueryCondition[] = []
+): MessageQueryCandidate[] {
+  const schema = QUERY_TABLE_SCHEMAS.messages
+  for (const c of conditions) {
+    if (!schema.columns.includes(c.column)) {
+      throw new Error(`query_db 列不在白名单: messages.${c.column}`)
+    }
+    if (c.column === 'session_id') {
+      throw new Error('query_db messages 会话条件由端点强制，不得混入 conditions')
+    }
+  }
+  const whereSql =
+    conditions.length > 0
+      ? `AND ${conditions.map((c) => `"${c.column}" ${c.op} ?`).join(' AND ')}`
+      : ''
+  const values: Array<string | number> = conditions.map((c) => c.value)
+  return db
+    .prepare(
+      `SELECT ${MESSAGE_QUERY_CANDIDATE_COLUMNS} FROM messages
+       WHERE session_id = ? ${whereSql}
+       ORDER BY created_at DESC, id DESC`
+    )
+    .all(sessionId, ...values) as MessageQueryCandidate[]
+}
+
+/**
+ * 按 id 批量取 messages 的白名单全列（返回顺序 = 传入 ids 顺序）。
+ *
+ * 可见性过滤后只对最终一页的 id 回表，避免把不可见行的正文读出内存；
+ * 同时二次限定 `session_id`，即使调用方拿别的会话 id 也取不到。
+ */
+export function getMessageQueryRowsByIds(
+  sessionId: string,
+  ids: readonly string[]
+): Record<string, string | number | null>[] {
+  if (ids.length === 0) return []
+  const schema = QUERY_TABLE_SCHEMAS.messages
+  const placeholders = ids.map(() => '?').join(', ')
+  const rows = db
+    .prepare(
+      `SELECT ${schema.columns.join(', ')} FROM messages
+       WHERE session_id = ? AND id IN (${placeholders})`
+    )
+    .all(sessionId, ...ids) as Record<string, string | number | null>[]
+  const byId = new Map(rows.map((r) => [String(r.id), r]))
+  return ids
+    .map((id) => byId.get(id))
+    .filter((r): r is Record<string, string | number | null> => !!r)
 }

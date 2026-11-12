@@ -66,7 +66,8 @@ const QUERY_DB_TOOL = {
   description:
     '查猫咖数据库表（排障取证，替代 raw SQL；表/列白名单服务端强制）。' +
     'table 传白名单表；conditions 过滤（AND 连接；op ∈ =/>/</LIKE，LIKE 的 % 写进 value）；' +
-    'limit 1-100 默认 50；返回 snake_case 原样。',
+    'limit 1-100 默认 50；返回 snake_case 原样。' +
+    'messages 表返回本猫可见消息、限当前会话，传其他 session_id 即拒。',
   inputSchema: {
     type: 'object',
     properties: {

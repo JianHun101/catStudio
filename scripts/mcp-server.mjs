@@ -28,6 +28,8 @@
  * query_db 是白名单表查询通道（query_db Phase 1）：排障取证的窄通道——
  * 表名/列名双白名单（服务端 QUERY_TABLE_SCHEMAS 权威校验）+ value 参数化，
  * 敏感列（agents.llm_api_key 等、embedding BLOB）硬剔除，模型不可注入。
+ * messages 表查询按运行期上下文过滤闭合：只返回本猫可见的消息、强制当前
+ * 执行会话，传其他 session_id 会被 400 拒绝（与 session-messages 回读同款边界）。
  *
  * 用法：node scripts/mcp-server.mjs（由 Claude Code CLI 作为 MCP server 拉起）。
  * 参数校验纯函数在 mcp-server-utils.mjs（无 shebang，供 vitest 直接 import——
