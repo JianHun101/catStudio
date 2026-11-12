@@ -34,6 +34,8 @@ const mockGetSessionExecutions = vi.fn().mockResolvedValue({ executions: [] })
 const mockRollbackSession = vi.fn()
 /** SESSION_HANDOFF handler 拉新会话详情用（双框幂等用例） */
 const mockGetSession = vi.fn()
+/** 懒加载更早历史分页口（GET /sessions/:id/messages?before=…） */
+const mockGetSessionMessages = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -51,6 +53,7 @@ vi.mock('@/composables/useApi', () => ({
     getSessionExecutions: mockGetSessionExecutions,
     rollbackSession: mockRollbackSession,
     getSession: mockGetSession,
+    getSessionMessages: mockGetSessionMessages,
   },
 }))
 
@@ -1637,6 +1640,199 @@ describe('chatStore', () => {
 
       expect(store.activeSessionId).toBeNull()
       expect(localStorage.getItem('catstudy.activeSessionId')).toBeNull()
+    })
+  })
+
+  // ─── 懒加载更早历史（票 C-1）──────────────────────────
+  describe('懒加载更早历史（C-1）', () => {
+    const welcome = (): Message => ({ ...mockMessage, id: 'welcome-s1', role: 'system' })
+
+    /** 造 n 条消息，id 从 `offset+1` 起、createdAt 毫秒位即序号（严格 ASC） */
+    function msgs(n: number, offset = 0): Message[] {
+      return Array.from({ length: n }, (_, i) => ({
+        id: `m${i + 1 + offset}`,
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: `msg-${i + 1 + offset}`,
+        mentions: [],
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, i + 1 + offset)).toISOString(),
+      })) as Message[]
+    }
+
+    const ids = (list: Message[]): string[] => list.map((m) => m.id)
+
+    function sessionHistoryHandler(): (data: { messages: Message[]; welcome: Message }) => void {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.SESSION_HISTORY)?.[1] as
+        ((data: { messages: Message[]; welcome: Message }) => void) | undefined
+      expect(handler).toBeDefined()
+      return handler!
+    }
+
+    it('hasMoreOlder 初值 = 首屏是否拿满一页（200 条留口，不足即封口）', () => {
+      store.activeSessionId = 's1'
+      sessionHistoryHandler()({ messages: msgs(199), welcome: welcome() })
+      expect(store.hasMoreOlder).toBe(false)
+
+      sessionHistoryHandler()({ messages: msgs(200), welcome: welcome() })
+      expect(store.hasMoreOlder).toBe(true)
+
+      // 合成头部不计入服务端页大小：199 条真实 + welcome 仍不足一页
+      sessionHistoryHandler()({ messages: msgs(199), welcome: welcome() })
+      expect(store.hasMoreOlder).toBe(false)
+    })
+
+    it('B｜连翻到开头：前插保持全局 ASC、无重复 id、空页封口', async () => {
+      store.activeSessionId = 's1'
+      // 会话 120 条；首屏只载最新 20 条（长会话的首屏窗口），更早 100 条分两页 50+50，再一页空
+      store.messages = msgs(20, 100)
+      store.hasMoreOlder = true
+      mockGetSessionMessages
+        .mockResolvedValueOnce(msgs(50, 50).reverse()) // m51..m100（wire 是 DESC）
+        .mockResolvedValueOnce(msgs(50, 0).reverse()) // m1..m50
+        .mockResolvedValueOnce([]) // 空页 ⇒ 封口
+
+      await store.loadOlderMessages()
+      await store.loadOlderMessages()
+      expect(store.hasMoreOlder).toBe(true) // 两页都拿满，仍可能有更早
+      await store.loadOlderMessages()
+
+      expect(ids(store.messages)).toEqual(ids(msgs(120)))
+      expect(new Set(ids(store.messages)).size).toBe(120)
+      expect(store.hasMoreOlder).toBe(false)
+      // 契约允许一次多余的空请求：第三页用于确认到底
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(3)
+      // 游标是**当前最旧一条**，且排他
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(1, 's1', { before: 'm101', limit: 50 })
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(2, 's1', { before: 'm51', limit: 50 })
+    })
+
+    it('合成头部（欢迎语/交接摘要）不作 before 游标，且保持在数组最前', async () => {
+      store.activeSessionId = 's1'
+      store.messages = [welcome(), ...msgs(5, 10)] // welcome + m11..m15
+      store.hasMoreOlder = true
+      mockGetSessionMessages.mockResolvedValueOnce(msgs(2, 0).reverse()) // m1,m2
+
+      await store.loadOlderMessages()
+
+      expect(mockGetSessionMessages).toHaveBeenCalledWith('s1', { before: 'm11', limit: 50 })
+      expect(ids(store.messages)).toEqual([
+        'welcome-s1',
+        'm1',
+        'm2',
+        'm11',
+        'm12',
+        'm13',
+        'm14',
+        'm15',
+      ])
+    })
+
+    it('不足一页即封口；已封口或并发中不再发请求', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(5, 10)
+      store.hasMoreOlder = true
+      mockGetSessionMessages.mockResolvedValueOnce(msgs(3, 7).reverse()) // m8..m10（不足 50）
+
+      await store.loadOlderMessages()
+      expect(store.hasMoreOlder).toBe(false)
+      expect(ids(store.messages).slice(0, 3)).toEqual(['m8', 'm9', 'm10'])
+
+      await store.loadOlderMessages() // 已封口 ⇒ no-op
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(1)
+
+      // 并发保护：loadingOlder 为真时直接 return（滚动事件会成簇触发）
+      store.hasMoreOlder = true
+      store.loadingOlder = true
+      await store.loadOlderMessages()
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(1)
+    })
+
+    it('等待期间切了会话 → 丢弃这一页，不串进新会话', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(20, 100)
+      store.hasMoreOlder = true
+      let resolve!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((r) => {
+          resolve = r
+        })
+      )
+
+      const pending = store.loadOlderMessages()
+      store.activeSessionId = 's2' // 用户切走
+      resolve(msgs(50, 50).reverse())
+      await pending
+
+      expect(ids(store.messages)).toEqual(ids(msgs(20, 100)))
+      expect(store.loadingOlder).toBe(false)
+    })
+
+    it('失败 → olderError 存可读文案，loadingOlder 复位，消息数组不动', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(5, 10)
+      store.hasMoreOlder = true
+      mockGetSessionMessages.mockRejectedValueOnce(new Error('Failed to fetch'))
+
+      await store.loadOlderMessages()
+
+      expect(store.olderError).toContain('HTTP 接口请求失败')
+      expect(store.loadingOlder).toBe(false)
+      expect(store.messages).toHaveLength(5)
+    })
+
+    it('D｜未加载目标：向前翻页到命中 → 发焦点信号并返回 true', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(20, 100)
+      store.hasMoreOlder = true
+      mockGetSessionMessages
+        .mockResolvedValueOnce(msgs(50, 50).reverse()) // m51..m100
+        .mockResolvedValueOnce(msgs(50, 0).reverse()) // m1..m50
+
+      const found = await store.revealMessage('m30') // 第 2 页才出现
+
+      expect(found).toBe(true)
+      expect(store.messages.some((m) => m.id === 'm30')).toBe(true)
+      expect(store.focusMessageId).toBe('m30')
+      expect(store.focusNonce).toBe(1)
+    })
+
+    it('D｜已加载目标：直接发焦点信号，不再翻页', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(5)
+
+      expect(await store.revealMessage('m3')).toBe(true)
+      expect(store.focusMessageId).toBe('m3')
+      expect(mockGetSessionMessages).not.toHaveBeenCalled()
+    })
+
+    it('D｜目标不存在：不死循环，轮次 ≤ 50 且返回 false', async () => {
+      store.activeSessionId = 's1'
+      store.messages = msgs(20, 100)
+      store.hasMoreOlder = true
+      // 每页都拿满 50 条新 id（hasMoreOlder 恒真）——只能靠轮次上限收敛
+      let call = 0
+      mockGetSessionMessages.mockImplementation(async () => msgs(50, 1000 + call++ * 50).reverse())
+
+      const found = await store.revealMessage('m-not-exist')
+
+      expect(found).toBe(false)
+      expect(mockGetSessionMessages.mock.calls.length).toBeLessThanOrEqual(50)
+      expect(mockGetSessionMessages.mock.calls.length).toBe(50)
+    })
+
+    it('切会话复位懒加载状态（不沿用旧会话的「还有更早」）', () => {
+      store.sessions = [mockSession, { ...mockSession, id: 's2' }]
+      store.activeSessionId = 's1'
+      store.hasMoreOlder = true
+      store.loadingOlder = true
+      store.olderError = '上次失败'
+
+      store.joinSession('s2')
+
+      expect(store.hasMoreOlder).toBe(false)
+      expect(store.loadingOlder).toBe(false)
+      expect(store.olderError).toBeNull()
     })
   })
 })
