@@ -44,7 +44,13 @@ export interface GeneratedSummary {
   coveredToId: string | null
   /** 上述消息的 created_at（ISO）；无消息时为 null */
   coveredToAt: string | null
-  /** 该摘要累计覆盖的消息条数（增量 = 旧条目累计 + 本次新增） */
+  /**
+   * 该摘要链**实际覆盖**的消息条数，不是无条件累加：
+   * - 增量链（`continuingFrom` 非 null）= 旧条目累计 + 本次新增；
+   * - 全量重读（无旧边界 / 旧边界消息已被删）= 本次输入条数（不叠加旧条目，
+   *   否则会把已不可定位的旧覆盖重复计入）。
+   * 删消息后本值可能比上一份摘要小，属预期语义。
+   */
   coveredCount: number
 }
 
