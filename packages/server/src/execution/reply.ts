@@ -276,7 +276,8 @@ export function recordRetrievalTrace(args: {
       agentId: args.agentId,
       taskId: args.taskId,
       createdAt: new Date().toISOString(),
-      // 参数快照：有 stats 就取同一趟读到的值；超时/抛错路径无 stats，现读 env
+      // 参数快照：有 stats 就取同一趟读到的值；超时/抛错路径无 stats，现读生效配置
+      // （settings > env > 默认，单一来源 `currentRetrievalParams`）
       thresholdMaxDistance: stats?.thresholdMaxDistance ?? params.maxDistance,
       paramTopK: stats?.paramTopK ?? params.topK,
       paramProbeN: stats?.paramProbeN ?? params.probeN,

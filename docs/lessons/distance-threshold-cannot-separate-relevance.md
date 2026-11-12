@@ -61,7 +61,7 @@ evidence:
 
 ## 正解
 
-**两个旋钮都不动**（`MEMORY_MAX_DISTANCE` 保持 0.6；`MEMORY_TOP_K` 维持 5——**5 是活库 `.env` 的取值**，
+**两个旋钮都不动**（`MEMORY_MAX_DISTANCE` 保持 0.6；`MEMORY_TOP_K` 维持 5——**5 是当时活库的生效读数（当时来自 `.env`）**，
 **代码默认是 3**（topK 走 settings 表 `memory_top_k` > `MEMORY_TOP_K` > 默认 3 的访问器，
 env 那一档由 `envNumber` 读，`.env.example` 也写 3），引用时别把 5 读成默认值）。
 真因是**语料覆盖**：47 条空手事件里，28 条（60%）主题属本仓、但真实规格落在白名单扫描面

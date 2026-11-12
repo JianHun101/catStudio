@@ -376,7 +376,7 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     liveDocs: 19,
     rotten: 0,
     indexFreshness: { checked: 19, stale: 0 },
-    params: { topK: 3, maxDistance: 0.6, probeN: 20 },
+    params: { topK: 3, maxDistance: 0.6, probeN: 20, topKSource: 'env' },
     embed: { model: 'Xenova/bge-small-zh-v1.5', dim: 512, handshaked: true },
     groups: {
       real: {
@@ -1232,6 +1232,8 @@ describe('EvaluationView 挂载测试（mock useApi）', () => {
     expect(text).toContain('58%')
     expect(text).toContain('83%')
     expect(text).toContain('36') // 真实组应命中锚点总数
+    // 快照必须回报 topK 的**生效来源**：只看数值分不清语料/参数谁变了
+    expect(text).toContain('TOP_K 3 / 来源 env')
     // ③ 归因分布：键 = `drop ?? status`，计数单位 =（条目, 锚点）对
     expect(text).toContain('未召回归因分布')
     expect(text).toContain('not-recalled')

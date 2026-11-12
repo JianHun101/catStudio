@@ -1011,3 +1011,39 @@ describe('静态源断言 — 嵌入失败全局闸的**位置即语义**', () =
     expect(src).toContain('embedTally.failed += 1')
   })
 })
+
+describe('静态源断言 — settings 覆盖 env 的拒出闸**位置即语义**', () => {
+  const lines = readFileSync(
+    path.join(REPO_ROOT, 'scripts/eval/retrieval-attribution-recheck.mjs'),
+    'utf8'
+  ).split('\n')
+
+  /** 非注释行里的 `process.env.MEMORY_TOP_K = ...`（旋钮实验台改 env 的位置） */
+  const envRewriteLines = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => /process\.env\.MEMORY_TOP_K\s*=/.test(l) && !/^\s*(\*|\/\/)/.test(l))
+
+  it('`settings-overrides-env` 拒出先于**任何** `MEMORY_TOP_K` 环境变量改写', () => {
+    // 闸若落在扫描之后：改 env 不生效 ⇒ 整列读数贴同一值（静默假读数），
+    // 而且报告是「拒出」的，没人会去看那批废读数。位置就是语义。
+    expect(envRewriteLines.length).toBeGreaterThan(0)
+    const guardIdx = lines.findIndex((l) => l.includes("'settings-overrides-env'"))
+    expect(guardIdx).toBeGreaterThan(-1)
+    expect(guardIdx).toBeLessThan(Math.min(...envRewriteLines.map(({ i }) => i)))
+  })
+
+  it('拒出也先于起嵌入 sidecar（白跑一整轮 + 冷启动成本）', () => {
+    const guardIdx = lines.findIndex((l) => l.includes("'settings-overrides-env'"))
+    const sidecarIdx = lines.findIndex((l) => /await startEmbeddingSidecar\(\)/.test(l))
+    expect(sidecarIdx).toBeGreaterThan(-1)
+    expect(guardIdx).toBeLessThan(sidecarIdx)
+  })
+
+  it('闸用的是报告同一个 `params.topKSource`（不另起一次访问器读，防两处口径漂移）', () => {
+    const guardBlock = lines.slice(
+      lines.findIndex((l) => l.includes("'settings-overrides-env'")) - 6,
+      lines.findIndex((l) => l.includes("'settings-overrides-env'")) + 1
+    )
+    expect(guardBlock.join('\n')).toContain('params.topKSource')
+  })
+})

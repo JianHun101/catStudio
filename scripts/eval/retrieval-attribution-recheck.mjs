@@ -87,7 +87,8 @@ import { loadEnvFile } from './freeze-rewrite.mjs'
 export const DIAG_REPORT_SCHEMA = 1
 
 /**
- * `MEMORY_TOP_K` 真跑扫描的取值。3 = 生产现值（对照组）；其余为候选。
+ * `MEMORY_TOP_K` 真跑扫描的取值。3 = **冻结对照档**（生产现值以报告 `params.topK` 为准，
+ * 受 settings `memory_top_k` > env > 默认的访问器支配，不再等同 3）；其余为候选。
  * 值域不宜再大：`MEMORY_CONTEXT_TOKEN_BUDGET`（默认 8000）会开始咬人，
  * 而「靠调大 topK 救回一条」若以撑爆预算是代价，那它就不是一条便宜药方。
  */
@@ -1482,6 +1483,19 @@ export async function main(argv = process.argv.slice(2)) {
     const maxDistance = params.maxDistance
     const topK = params.topK
 
+    // ─── 静默假读数硬闸（先于一切扫描，也先于起 sidecar） ─────
+    // topK 的生效档现在是 settings > env > 默认：设置表存在 `memory_top_k` 行时，
+    // 下面旋钮实验台改 env 不会生效，整列读数会贴在同一值上（静默假读数）。
+    // 本脚本 readonly 打开库，删不掉那行，只能让人换副本库重跑。
+    if (params.topKSource === 'settings') {
+      return refuse(
+        'settings-overrides-env',
+        {},
+        '设置表存在 memory_top_k（来源=settings），MEMORY_TOP_K 扫描会被设置页覆盖；' +
+          '请在副本库删除该行（或改回环境变量驱动）后重跑'
+      )
+    }
+
     await startEmbeddingSidecar()
     const embedStatus = getEmbeddingStatus()
     if (!embedStatus.ok) {
@@ -2052,17 +2066,7 @@ export async function main(argv = process.argv.slice(2)) {
 
     // ─── 旋钮实验台 ─────────────────────────────────────
     // 6.1 MEMORY_TOP_K：**真跑链段**（改 env 单变量，用完还原）
-    // ⚠️ topK 的生效档现在是 settings > env > 默认：设置表存在 `memory_top_k` 行时，
-    // 下面改 env 不会生效，整列读数会贴在同一值上（静默假读数）。扫描前先判来源，
-    // 命中 settings 就拒出报告——本脚本 readonly 打开库，删不掉那行，只能让人换副本库重跑。
-    if (getRetrievalConfig().topKSource === 'settings') {
-      return refuse(
-        'settings-overrides-env',
-        {},
-        '设置表存在 memory_top_k（来源=settings），MEMORY_TOP_K 扫描会被设置页覆盖；' +
-          '请在副本库删除该行（或改回环境变量驱动）后重跑'
-      )
-    }
+    // settings 覆盖 env 的硬闸已在 `main()` 起 sidecar 前拒出（见上方「静默假读数硬闸」）。
     const topkReal = []
     const baselineSectionCount = new Map(
       perEntry.map((p) => [p.entry.id, p.result.sections.length])
