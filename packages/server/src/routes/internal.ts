@@ -474,11 +474,20 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
 
     // ── 5. 查询（200）——其余表走 queryTable；messages 表先闭合可见性再分页 ──
     if (table === 'messages') {
-      // 契约 1：messages 只能查当前执行流会话。显式传别的 session_id 是**越权尝试**，
-      // 必须 400 明说——静默返空会让模型读成「没有数据」。同会话值视为重复条件后剥掉。
-      const foreignSession = conditions.find(
-        (c: { column: string; value: string }) =>
-          c.column === 'session_id' && c.value !== stream.sessionId
+      // 契约 1：messages 只能查当前执行流会话。session_id 条件只接受 `=`：非 `=`
+      //（>/</LIKE）在语义上就不是「定位会话」，静默剥掉会让模型以为条件生效，
+      // 故 400 明说只接受 `=`。`=` 且值 ≠ 当前会话是**越权尝试**，必须 400 明说
+      //——静默返空会让模型读成「没有数据」。同会话值视为重复条件后剥掉。
+      const sessionConds = conditions.filter((c: { column: string }) => c.column === 'session_id')
+      const nonEqSession = sessionConds.find((c: { op: string }) => c.op !== '=')
+      if (nonEqSession) {
+        return reply.status(400).send({
+          ok: false,
+          reason: `messages 表的 session_id 条件只接受 =（当前执行会话），不支持 ${nonEqSession.op}`,
+        })
+      }
+      const foreignSession = sessionConds.find(
+        (c: { value: string }) => c.value !== stream.sessionId
       )
       if (foreignSession) {
         return reply.status(400).send({
