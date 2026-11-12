@@ -81,6 +81,13 @@ describe('query repo — messages 取数层（B-1）', () => {
       expect(rows.slice(0, 2).map((r) => r.id)).toEqual(['m-b', 'm-a'])
     })
 
+    it('排除 role=system（与 getRecentMessages / getSessionMessagesRange 同口径）', () => {
+      insertMessage('m-sys', 's1', null, 'system', '重启完成通知', [], '2026-09-03 10:00:00')
+      const rows = queryRepo.getMessageQueryCandidates('s1')
+      expect(rows.map((r) => r.id)).toEqual(['m2', 'm1'])
+      expect(rows.map((r) => r.id)).not.toContain('m-sys')
+    })
+
     it('拒绝把 session_id 混进 conditions（会话边界由调用方强制）', () => {
       expect(() =>
         queryRepo.getMessageQueryCandidates('s1', [{ column: 'session_id', op: '=', value: 's2' }])

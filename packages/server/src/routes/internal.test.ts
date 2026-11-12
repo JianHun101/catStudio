@@ -1034,9 +1034,17 @@ describe('internal route-signals', () => {
         insertRow('b1-u3', null, 'user', '对实施猫说', ['实施猫'], '2026-09-05 10:03:00')
         insertRow('b1-u2', null, 'user', '广播消息', [], '2026-09-05 10:02:00')
         insertRow('b1-a2', 'agent-impl', 'agent', '实施猫自己的回复', [], '2026-09-05 10:01:00')
+        // B-3 契约 1：system 通告不是对话，不进「本猫可见消息」。放最新一条——
+        // 若候选 SQL 漏掉 `role != 'system'`，它会排在结果首位、下面各用例立刻转红。
+        getDb()
+          .prepare(
+            `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+             VALUES ('b1-sys', 'session-1', 'system', '重启完成通知', '[]', '2026-09-05 10:06:00')`
+          )
+          .run()
       }
 
-      it('A 隔离：rows 恰为 u2/u3/a2，不含 u1/a1，total=3', async () => {
+      it('A 隔离：rows 恰为 u2/u3/a2，不含 u1/a1/sys，total=3', async () => {
         await mockActive()
         insertVisibilityFixture()
         const res = await app.inject({
@@ -1051,6 +1059,7 @@ describe('internal route-signals', () => {
         expect(ids).toEqual(['b1-u3', 'b1-u2', 'b1-a2'])
         expect(ids).not.toContain('b1-u1')
         expect(ids).not.toContain('b1-a1')
+        expect(ids).not.toContain('b1-sys')
         expect(body.total).toBe(3)
       })
 
@@ -1125,6 +1134,24 @@ describe('internal route-signals', () => {
           'b1-u2',
           'b1-a2',
         ])
+      })
+
+      it('C session_id 条件只接受 =：非 =（> / LIKE）→ 400 且 reason 明写只接受 =', async () => {
+        await mockActive()
+        insertVisibilityFixture()
+        for (const op of ['>', 'LIKE'] as const) {
+          const res = await app.inject({
+            method: 'POST',
+            url: '/api/internal/db-query',
+            payload: qBody({
+              table: 'messages',
+              conditions: [{ column: 'session_id', op, value: 'session-1' }],
+            }),
+            headers: { 'x-signal-token': VALID_TOKEN },
+          })
+          expect(res.statusCode).toBe(400)
+          expect(JSON.parse(res.body).reason).toContain('只接受 =')
+        }
       })
 
       it('E total = 过滤后可见匹配数（1 条不可见 + 2 条可见 → 2，不是 SQL 全量 3）', async () => {
