@@ -21,6 +21,8 @@
  *   - messages 表例外（B-1）：会话由端点强制为当前执行流，返回前按运行期上下文
  *     规则过滤可见性，故 total = **过滤后可见匹配数**、limit 在过滤后截断；
  *     候选与回表两个函数见 `getMessageQueryCandidates` / `getMessageQueryRowsByIds`
+ *   - B-3 起 `queryTable` 对 messages 直接 throw：本函数不再提供无可见性过滤的
+ *     全量读口，messages 必须走端点那两条闭合函数（候选 SQL 已排除 role=system）
  */
 import type Database from 'better-sqlite3'
 
@@ -98,8 +100,9 @@ const QUERY_TABLE_SCHEMAS_DEF = {
     ],
     orderBy: 'created_at',
     // 同毫秒连写（并发落库 / 迁毫秒前的整秒行）会撞 created_at ⇒ 用主键 id 定序。
-    // 与 `getSessionMessagesRange` 的 `created_at DESC, id DESC` 同口径；其余 5 张表
-    // 不写 tiebreak ⇒ 它们的 ORDER BY 文本逐字不变。
+    // 与 `getSessionMessagesRange` 的 `created_at DESC, id DESC` 同口径。本表此前无
+    // tiebreak；`server_boots` 的 `tiebreak: 'rowid'` 是既有登记——本次未改其余表
+    //（agents/sessions/knowledge/execution_logs）的 ORDER BY 文本。
     tiebreak: 'id',
   },
   // ⚠️ 原 `memories` 条目已删除（票辛 ⑥）：该表已 DROP，白名单里留着它会让
@@ -136,8 +139,9 @@ const QUERY_TABLE_SCHEMAS_DEF = {
   },
   // 启动账本（票 A）：只追加的进程身份流水。`started_at` 是 ISO 毫秒，快速连启会撞
   // 同一值 ⇒ 复合排序键 `started_at DESC, rowid DESC` 保证「后插入的先返回」。
-  // tie-break 与 orderBy 一样登记在同一表定义内（`tiebreak` 可选，其余 5 张表不写
-  // ⇒ 它们的 ORDER BY 文本逐字不变）。`rowid` 只参与 ORDER BY、不进投影列，故列
+  // tie-break 与 orderBy 一样登记在同一表定义内（`tiebreak` 可选）。`messages` 的
+  // `tiebreak: 'id'` 是 B-1 登记的；本次未改其余表（agents/sessions/knowledge/
+  // execution_logs）的 ORDER BY 文本。`rowid` 只参与 ORDER BY、不进投影列，故列
   // 白名单里不需要它。
   server_boots: {
     columns: [
@@ -193,8 +197,16 @@ export interface QueryTableResult {
  * 入参假设已由端点校验（400 层）——本函数仍是安全执行点：表名经 schema map
  * 解析（非白名单 key 直接 throw，防绕过端点直调）；列名逐一校验后双引号包裹
  * （列名只来自白名单常量，无注入面）；value 全部 `?` 绑定。
+ *
+ * messages 例外：本函数**不提供** messages 查询（直接 throw）——可见性必须在
+ * 返回前闭合（见 `getMessageQueryCandidates`），绕过端点直调也不该拿到全量原文。
  */
 export function queryTable(params: QueryTableParams): QueryTableResult {
+  if (params.table === 'messages') {
+    throw new Error(
+      'query_db messages 表必须走可见性闭合分支（getMessageQueryCandidates），不得直调 queryTable'
+    )
+  }
   // as const 常量是只读字面量元组——宽化为 readonly string[] 供 includes/join 使用
   const schema: QueryTableSchema = QUERY_TABLE_SCHEMAS[params.table]
   if (!schema) {
@@ -247,6 +259,8 @@ export interface MessageQueryCandidate {
  *
  * `session_id` 是强制条件，不接受放进 conditions：端点已把重复的 `session_id`
  * 条件剥掉、只允许当前执行会话；这里再挡一次，防绕过端点的直调改写会话边界。
+ * `role != 'system'` 与 `getRecentMessages` / `getSessionMessagesRange` 三处同口径：
+ * system 通告是运维信息、不是对话，不参与「本猫可见消息」。
  * 排序与 `getSessionMessagesRange` 同口径（`created_at DESC, id DESC`），
  * 保证「过滤 → 截断」后的页内顺序与回读工具一致。
  */
@@ -271,7 +285,7 @@ export function getMessageQueryCandidates(
   return db
     .prepare(
       `SELECT ${MESSAGE_QUERY_CANDIDATE_COLUMNS} FROM messages
-       WHERE session_id = ? ${whereSql}
+       WHERE session_id = ? AND role != 'system' ${whereSql}
        ORDER BY created_at DESC, id DESC`
     )
     .all(sessionId, ...values) as MessageQueryCandidate[]

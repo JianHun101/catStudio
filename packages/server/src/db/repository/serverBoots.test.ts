@@ -7,8 +7,8 @@
  * 2. **追加不覆盖（V4）**：连写两行 ⇒ 总行数 +2，旧行仍在、主键不同。
  * 3. **query_db 真值 + 列白名单**：返回恰为 14 个白名单列，不多不少。
  * 4. **复合排序（V8）**：同 `started_at` 两行 ⇒ 后插入的（rowid 大）先返回。
- * 5. **反例（真空性）**：其余表不带 tie-break，查询照常不报错——证明 `tiebreak`
- *    是可选分支，没有把既有 5 张表拖进新路径。
+ * 5. **反例（真空性）**：不带 tie-break 的表查询照常不报错；`messages` 直调
+ *    `queryTable` 必须 throw——可见性闭合分支之外不再留全量读口。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestDb } from '../../test-helpers.js'
@@ -97,8 +97,10 @@ describe('db/repository/serverBoots', () => {
     ).toEqual([second, first])
   })
 
-  it('反例：其余表不带 tie-break，queryTable 照常工作（可选分支不拖累既有表）', () => {
+  it('反例：不带 tie-break 的表照常工作；messages 直调 queryTable → throw', () => {
+    // sessions 未登记 tiebreak——可选分支不拖累既有表
     expect(queryRepo.queryTable({ table: 'sessions', limit: 5 })).toEqual({ rows: [], total: 0 })
-    expect(queryRepo.queryTable({ table: 'messages', limit: 5 })).toEqual({ rows: [], total: 0 })
+    // B-3：messages 必须走可见性闭合分支，仓库层不再提供无过滤全量读口
+    expect(() => queryRepo.queryTable({ table: 'messages', limit: 5 })).toThrow(/可见性闭合分支/)
   })
 })
