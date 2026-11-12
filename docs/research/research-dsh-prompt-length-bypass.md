@@ -38,8 +38,8 @@ Commands: web [options] [args...]
 
 ### 源码证据
 
-- `dsh-headless/lib/startup.js:21-25`：`headlessCommand()` 只声明 `argument("[task...]")`，`program.args.join(" ")`（第 35 行）——**纯 positional，无 file/stdin 选项**。
-- `dsh-cmdline/lib/index.js:26-30`：`provideCmdline` 把 launcher 解析后的 args 原样冻结为 `cmdlineArgs` snapshot——launcher 不替 app 解析任何 task 相关 flag，app 自己声明（`parseCmdline` 第 54-66 行）。launcher 侧也**无 file/stdin 通道**。
+- `dsh-headless/lib/startup.js` 的 `headlessCommand()`：只声明 `argument("[task...]")`，并在 `program.args.join(" ")` 处取任务文本——**纯 positional，无 file/stdin 选项**。
+- `dsh-cmdline/lib/index.js` 的 `provideCmdline`：把 launcher 解析后的 args 原样冻结为 `cmdlineArgs` snapshot——launcher 不替 app 解析任何 task 相关 flag，task 相关 flag 由 app 自己的 `parseCmdline` 声明。launcher 侧也**无 file/stdin 通道**。
 - headless 相关插件清单（`cordis.patch.yml` + `package.json`）：`headless-startup`（解析 positional → provide `HEADLESS_STARTUP_SERVICE`）、`headless-runner`（读 `config.task`）——不存在读文件/读 stdin 的插件。
 
 ### 实测输出
@@ -60,7 +60,7 @@ Commands: web [options] [args...]
 
 ### 源码证据
 
-- MCP server `scripts/mcp-server.mjs`（dsh 适配器 patch 已挂 `mcp-catstudy`，stdio）：`query_db` 工具参数 `{ table, conditions, limit }`，`limit` 1-100 默认 50；工具描述明示「查最近消息直接 {table:"messages"} 即可（created_at DESC）」。
+- MCP server `scripts/mcp-server.mjs`（dsh 适配器 patch 已挂 `mcp-catstudy`，stdio）：`query_db` 工具参数 `{ table, conditions, limit }`，`limit` 1-100 默认 50。工具描述在 `eb54cfeb` 之前曾明示「查最近消息直接 {table:"messages"} 即可（created_at DESC）」（当时描述，该句已删除）；现状是 `messages` 表只返回本猫上下文可见消息、强制限当前执行会话，传其他 `session_id` 返回 400。
 - 服务端执行层 `packages/server/src/db/repository/query.ts`：`messages` 表白名单含 `session_id / role / content / created_at / mentions / task_id / dispatch_state` 等，`orderBy: 'created_at'` DESC；`conditions` 支持 `= / > / < / LIKE` 多条件 AND；`limit` 1-100 默认 50。**B-1 起 messages 的取数改走 `getMessageQueryCandidates`（`queryTable` 对 messages 直接 throw，B-3 收口）；B-3 起候选 SQL 另加 `role != 'system'`。**
 - 端点 `POST /api/internal/db-query`——MCP server 经 `fetch` 调内部端点，鉴权链与 post_message 同款（`x-signal-token` + 信号三要素）。**B-1 起 messages 分支强制 `session_id = 当前执行流`，并按 `getRelevantMessages` 过滤可见性后再分页。**
 
@@ -92,11 +92,11 @@ Commands: web [options] [args...]
 
 ### 源码证据
 
-- `profile-boot-DG5t9aNs.js:166-198` `composeProfile`：patch 层序 = bundle → profile → home → **`--patch` overlays 最后**，`rows` Map 按 `row.id` **最后写胜**。overlay 行 `- id: headless-runner` 直接覆盖 bundle 里该 loader entry。
+- `profile-boot-DG5t9aNs.js` 的 `composeProfile`：patch 层序 = bundle → profile → home → **`--patch` overlays 最后**，`rows` Map 按 `row.id` **最后写胜**。overlay 行 `- id: headless-runner` 直接覆盖 bundle 里该 loader entry。
 - 合并语义（实测 dump 证明）：`name`/`inject` 保留（深度合并），仅 `config.task` 被覆盖——**不是整行替换**。
-- `dsh-headless/lib/index.js:105-113`：`apply(ctx, config)` → `run(ctx, config.task, io)`——**runner 的 task 来源是 `config.task`**（bundle 默认 `!!js ctx.headlessStartup.task` 只是引用服务；覆盖后即字面量，不再读服务）。
-- `dsh-headless/lib/startup.js:36`：`if (task.trim() === "") program.error(...)`——startup 插件仍要求**非空 positional**（否则拒绝启动），但 runner 忽略其内容。→ 需留一个 dummy positional（如 `run`）。
-- loader `!!js` 求值：`cordis-plugin-loader/lib/index.js:279` `new Function("ctx","expr", "with(ctx){return eval(expr)}")`——`process` 全局可达（headless bundle 自带 `!!js process.env.DSH_TOOLS_MODE` / `!!js process.env.DSH_PERMISSION_MODE` 实证）。**但字面量方案不需要 `!!js`**（覆盖后 config.task 是普通字符串，无求值路径），dsh.ts 既有「不依赖 !!js env 求值」红项不触发。
+- `dsh-headless/lib/index.js` 的 `apply(ctx, config)` 调用 `run(ctx, config.task, io)`——**runner 的 task 来源是 `config.task`**（bundle 默认 `!!js ctx.headlessStartup.task` 只是引用服务；覆盖后即字面量，不再读服务）。
+- `dsh-headless/lib/startup.js` 的任务校验分支：`if (task.trim() === "") program.error(...)`——startup 插件仍要求**非空 positional**（否则拒绝启动），但 runner 忽略其内容。→ 需留一个 dummy positional（如 `run`）。
+- loader `!!js` 求值：`cordis-plugin-loader/lib/index.js` 中构造 `new Function("ctx","expr", "with(ctx){return eval(expr)}")` 的求值点——`process` 全局可达（headless bundle 自带 `!!js process.env.DSH_TOOLS_MODE` / `!!js process.env.DSH_PERMISSION_MODE` 实证）。**但字面量方案不需要 `!!js`**（覆盖后 config.task 是普通字符串，无求值路径），dsh.ts 既有「不依赖 !!js env 求值」红项不触发。
 
 ### 实测输出（`--dump-config` 静态 + 运行时）
 
