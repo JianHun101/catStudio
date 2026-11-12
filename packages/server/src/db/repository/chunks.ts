@@ -13,7 +13,7 @@
  */
 import type Database from 'better-sqlite3'
 import type { ChunkRow } from './types.js'
-import { buildFtsQuery, bigramTokenize } from './fts.js'
+import { buildFtsQuery, ftsTokenize } from './fts.js'
 import { messageOf } from '../../utils.js'
 
 let db: Database.Database
@@ -126,8 +126,8 @@ export function upsertChunk(input: ChunkUpsertInput): number {
  * 通道上永久不可见，且**静默**）。
  *
  * 三条下游契约地雷在此处落地（票庚 ⑧，全部实测取证）：
- *   - **G1**：`chunks_fts.content` 存 **bigram 预分词串**（`body + ' ' + breadcrumb`），
- *     与查询侧 `buildFtsQuery` 对称。照原文写 ⇒ MATCH 恒空且不报错。
+ *   - **G1**：`chunks_fts.content` 存 **`ftsTokenize` 预分词串**（`body + ' ' + breadcrumb`，
+ *     中文 bigram + ASCII 整词），与查询侧 `buildFtsQuery` 对称。照原文写 ⇒ MATCH 恒空且不报错。
  *   - **G2**：FTS 行 `rowid` = `chunks.rowid`（读侧 `JOIN chunks c ON c.rowid = f.rowid`）。
  *     先删后插——内容变了必须整行重建，否则残留旧 bigram。
  *   - **G3**：vec0 主键必须传 `BigInt`（`db/index.ts` 建表注释：better-sqlite3 把 JS
@@ -217,7 +217,7 @@ function syncChunkFts(rowid: number, body: string, breadcrumb: string): void {
   db.prepare('DELETE FROM chunks_fts WHERE rowid = ?').run(rowid)
   db.prepare('INSERT INTO chunks_fts (rowid, content) VALUES (?, ?)').run(
     rowid,
-    bigramTokenize(`${body} ${breadcrumb}`).join(' ')
+    ftsTokenize(`${body} ${breadcrumb}`).join(' ')
   )
 }
 
@@ -379,13 +379,13 @@ export function getChunksBySection(docPath: string, sectionAnchor: string): Chun
     .all(docPath, sectionAnchor) as ChunkRow[]
 }
 
-/** 关键词通道检索结果（FTS 表 content 列存的是 bigram 预分词串，不可直接输出 ⇒ JOIN 取原文） */
+/** 关键词通道检索结果（FTS 表 content 列存的是预分词串，不可直接输出 ⇒ JOIN 取原文） */
 export type ChunkKeywordSearchResult = ChunkRow
 
 /**
- * 关键词通道：bigram 查询词 MATCH + bm25 排序。
+ * 关键词通道：词项 MATCH（OR 语义）+ bm25 排序。
  *
- * 分词**复用 `fts.ts` 的 `bigramTokenize`/`buildFtsQuery`**（不另发明）——
+ * 分词**复用 `fts.ts` 的 `ftsTokenize`/`buildFtsQuery`**（不另发明）——
  * 与 `chunks_fts` 写入侧同一套切分，两侧对称是 MATCH 能命中的前提。
  * 无可用查询词 → 空结果（调用方降级纯向量）；FTS 表缺失（老库/手搓 schema）同样
  * 静默降级，其他 SQL 错误照抛（不掩盖真实问题）。

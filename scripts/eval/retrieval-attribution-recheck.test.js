@@ -99,8 +99,9 @@ describe('splitFtsTerms — 按引号解析，不按空格切', () => {
     expect(splitFtsTerms('"票己" "己以"')).toEqual(['票己', '己以'])
   })
 
-  it('含空白的 bigram **不被劈开**（按空格切会把它拆成两个，于是「跨词边界」这一类永远统计不到）', () => {
-    // `buildFtsQuery('seed data')` 会产出 `"d "` 与 `" d"` 这两个含空白的词项
+  it('含空白的词项 **不被劈开**（按空格切会把它拆成两个，于是「跨词边界」这一类永远统计不到）', () => {
+    // v1 bigram 时代 `buildFtsQuery('seed data')` 会产出 `"d "` 与 `" d"` 这两个含空白的词项；
+    // v2 分词器已不产出它们，但解析器仍须守「词项可含空白」这条形态契约（旧表达式输入兼容）
     const expr = '"se" "d " " d" "da"'
     expect(splitFtsTerms(expr)).toEqual(['se', 'd ', ' d', 'da'])
     // 负对照：朴素 split(' ') 会得到 6 段且没有一段含空白——这正是首版 `anySpacedTerm` 恒为 0 的成因
@@ -139,6 +140,14 @@ describe('probeFtsTerms — 可命中 / 语料外 / 跨词边界 三分类', () 
   it('`usableMatchExpr` 只用可用词项重拼（反事实探针的输入）', () => {
     const r = probeFtsTerms({ matchExpr: '"甲" "乙" "丙 "', countTerm })
     expect(r.usableMatchExpr).toBe('"甲"')
+  })
+
+  it('`usableMatchExpr` 的连接符与 buildFtsQuery 同源：**OR**（多可用词项）', () => {
+    // 票面验收：反事实表达式必须是 OR 形态——v1 这里是空格 join（AND），
+    // 在 OR 的生产语义下它会测出与生产不同的命中集。
+    const allPresent = (t) => (['甲', '乙', '丙'].includes(t) ? 1 : 0)
+    const r = probeFtsTerms({ matchExpr: '"甲" OR "乙" OR "丙"', countTerm: allPresent })
+    expect(r.usableMatchExpr).toBe('"甲" OR "乙" OR "丙"')
   })
 
   it('全部词项都不可用 ⇒ usableMatchExpr = null（不产出一个空 MATCH 去撞 FTS 语法错）', () => {

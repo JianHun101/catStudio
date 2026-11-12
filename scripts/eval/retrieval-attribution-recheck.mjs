@@ -661,18 +661,16 @@ export function summarizeProductionFace(rows) {
 // ─── 纯函数：关键词通道可达性（G03 复核的核心） ──────────
 
 /**
- * 把 `buildFtsQuery` 的 MATCH 表达式拆回**单个 bigram 词项**。
+ * 把 `buildFtsQuery` 的 MATCH 表达式拆回**单个词项**。
  *
- * 表达式形态由 `fts.ts` 固定：每个词项引号包裹、空格 join（AND 语义）。
- * 拆回来的用途是**逐词项判在不在语料里**——AND 语义下，只要有一个词项在
- * 语料里不存在，**整条查询的关键词通道返回 0 行**，而故障现象与「这个词项
- * 有歧义」完全一样（都是 0 行），不拆开就分不清「单个词项够不着」与
- * 「整条通道被一个生词打死」。
+ * 表达式形态由 `fts.ts` 固定：每个词项引号包裹、` OR ` join（v2 起；v1 是空格 join = AND）。
+ * 拆回来的用途是**逐词项判在不在语料里**——它给的是词项级可达性，而不是整条查询的
+ * 判定：v2 的 OR 语义下任一词项命中即进候选池，词项是否在语料里只影响 BM25 权重。
  *
- * ⚠️ **必须按引号解析，不能 `split(' ')`**：bigram 自身可能含空白（`"seed data"` 切出
- * `d␣` / `␣d`），按空格切会把一个词项劈成两半——于是「含空白的词项」这一类
+ * ⚠️ **必须按引号解析，不能 `split(' ')`**：词项自身可能含空白（中文 bigram 跨到空格
+ * 边界时会切出 `d␣` / `␣d`），按空格切会把一个词项劈成两半——于是「含空白的词项」这一类
  * **永远统计不到**，而报告会据此给出一个恒为 0 的假读数（首版实测踩过：
- * `anySpacedTerm` 报 0，真值非 0）。`buildFtsQuery` 已把含引号的 bigram 过滤掉，
+ * `anySpacedTerm` 报 0，真值非 0）。`buildFtsQuery` 已把含引号的词项过滤掉，
  * 故按 `"..."` 配对解析对本表达式形态是完备的。
  */
 export function splitFtsTerms(matchExpr) {
@@ -689,15 +687,17 @@ export function splitFtsTerms(matchExpr) {
 /**
  * 逐词项统计语料内命中数（`countTerm` 由调用方注入真 SQL —— 纯函数不持 db）。
  *
- * 三类分解，各有各的药方：
- *   - `absent`：该 bigram 在语料里**一次都没出现** ⇒ AND 语义下整条查询必 0 行
- *   - `spaced`：该 bigram **含空白**（跨词边界的 bigram，如 `"seed data"` 切出的
- *     `"d "` / `" d"`）——索引侧存的是「bigram 空格 join」的预分词串，跨词边界的
- *     bigram 落进存串后会被 tokenizer 当分隔符切开，**结构上不可还原**
+ * 三类分解（诊断口径，**不是**整条查询的生死判据）：
+ *   - `absent`：该词项在语料里**一次都没出现**。v1（AND）下这是整条查询 0 行的充分条件；
+ *     v2（OR）下它只是不贡献命中，其余可用词项照常进候选池
+ *   - `spaced`：该词项**含空白**（跨词边界的碎片，如 `"seed data"` 切出的 `"d "` / `" d"`）
+ *     ——索引侧的预分词串以空格分 token，这类碎片落进去会被当分隔符切开，**结构上不可还原**
  *   - 其余 = 可用词项（`usable`）
  *
- * `usableMatchExpr` = 只用可用词项重拼的 AND 表达式——**反事实探针**：拿它去 MATCH，
- * 得到的就是「若把这批不可命中的词项剔掉，这条查询本来能召回多少」。
+ * `usableMatchExpr` = 只用可用词项重拼的 MATCH 表达式，**连接符与 `buildFtsQuery` 同源
+ * （OR）**，否则反事实探针测的就不是生产查询形态。注意 OR 语义下它与原表达式的命中集
+ * 相同（absent 词项本就不贡献命中）——该字段因此退化为「重拼校验」，不再是 v1 意义上的
+ * 「剔词后能否召回」反事实。
  */
 export function probeFtsTerms({ matchExpr, countTerm, hitsOf }) {
   const terms = splitFtsTerms(matchExpr)
@@ -718,7 +718,7 @@ export function probeFtsTerms({ matchExpr, countTerm, hitsOf }) {
       absent.push(t)
     }
   }
-  const usableMatchExpr = usable.length > 0 ? usable.map((t) => `"${t}"`).join(' ') : null
+  const usableMatchExpr = usable.length > 0 ? usable.map((t) => `"${t}"`).join(' OR ') : null
   return {
     terms,
     absent,
@@ -980,10 +980,11 @@ export function renderDiagnosis(ctx) {
   L.push('### 4.1 关键词通道：为什么够不着')
   L.push('')
   L.push(
-    '索引侧（`chunks_fts`）存的是 **bigram 预分词串**（相邻两字成组，空格 join，见 `db/repository/fts.ts`）；' +
-      '查询侧由 `buildFtsQuery` 把查询切成同样的 bigram、逐个引号包裹、以 **AND 语义**（空格 join）连起来 ' +
-      '⇒ **任何一个 bigram 在语料里不存在，整条查询的关键词通道就返回 0 行**。' +
-      '这一点是"单个词够不着"与"整条通道被打死"的分水岭，故下表逐词项列。'
+    '索引侧（`chunks_fts`）存的是 **`ftsTokenize` 预分词串**（中文相邻两字成组 + ASCII 整词，空格 join，见 `db/repository/fts.ts`）；' +
+      '查询侧由 `buildFtsQuery` 把查询切成同样的词项、逐个引号包裹、以 **OR 语义**（` OR ` join）连起来 ' +
+      '⇒ **任一词项命中即进候选池**，由 bm25 排序与 `LIMIT` 截池做取舍。' +
+      '（v1 是 AND 语义：任何一个 bigram 不在语料里，整条查询就返回 0 行——实测 dev 库 4,010/4,025 条查询零命中，' +
+      '这是本票把查询侧改成 OR 的动因。）下表逐词项列的是**词项级可达性**：OR 下语料外词项只稀释 BM25 权重，不再决定整条查询的生死。'
   )
   L.push('')
   L.push('| 查询 | MATCH 词项数 | 关键词通道命中 | **语料内不存在的词项** |')
@@ -1046,36 +1047,36 @@ export function renderDiagnosis(ctx) {
   L.push('### 4.4 全批关键词通道体检（把单点放进分布里，**不升格为因果**）')
   L.push('')
   L.push(
-    `把黄金集全部条目的全部查询（去重前，共 ${channelHealth.queries} 条查询串，平均 ${channelHealth.avgTerms.toFixed(1)} 个 bigram 词项）逐条过一遍关键词通道：`
+    `把黄金集全部条目的全部查询（去重前，共 ${channelHealth.queries} 条查询串，平均 ${channelHealth.avgTerms.toFixed(1)} 个词项）逐条过一遍关键词通道：`
   )
   L.push('')
   L.push('| 读数 | 值 |')
   L.push('| --- | --- |')
   L.push(`| 关键词通道**命中 0 行**的查询 | **${channelHealth.dead}** / ${channelHealth.queries} |`)
   L.push(
-    `| 其中「有语料外 bigram」可解释的 | **${channelHealth.deadWithAbsentTerm}** / ${channelHealth.dead} |`
+    `| 其中「含语料内不存在的词项」的 | **${channelHealth.deadWithAbsentTerm}** / ${channelHealth.dead} |`
   )
   L.push(
-    `| 词项**全部**在语料里、却仍 0 行（词项分散在不同片，AND 无从满足） | ${channelHealth.deadWithNoAbsentTerm} / ${channelHealth.dead} |`
+    `| 词项**全部**在语料里、却仍 0 行（status 过滤 / 索引陈旧，非名额问题） | ${channelHealth.deadWithNoAbsentTerm} / ${channelHealth.dead} |`
   )
   L.push(
-    `| 含至少一个**跨词边界** bigram（含空白，索引侧被 tokenizer 切开）的查询 | ${channelHealth.anySpacedTerm} / ${channelHealth.queries} |`
+    `| 含至少一个**跨词边界碎片**（含空白，索引侧被 tokenizer 切开）的查询 | ${channelHealth.anySpacedTerm} / ${channelHealth.queries} |`
   )
   L.push(
     `| **反事实**：剔掉不可命中词项后**能**召回的 0 行查询 | **${channelHealth.revivedByUsableOnly}** / ${channelHealth.dead} |`
   )
   L.push('')
   L.push(
-    '> **口径**：AND 语义下「有语料外 bigram」⟹「0 行」是**充分条件**，故第二行是可归因的那部分；' +
-      '反向不成立——词项全在语料里、但分散在不同片里，同样会 0 行（AND 要求同一片内全中），' +
-      '第三行量的正是这类。第四行的「跨词边界 bigram」是一条**结构性**缺陷面：' +
-      '索引侧存的是「bigram 空格 join」的预分词串，`seed data` 切出的 `d␣` / `␣d` 这类 bigram ' +
-      '在存储串里会被 tokenizer 当分隔符切开，**无法还原**。第五行是**修法候选 5 的读数面**：' +
-      '把不可命中的词项剔掉重试，能救回多少条查询。'
+    '> **口径（v2 · OR 语义）**：查询侧任一词项命中即进候选池，故「含语料外词项」**不再是** 0 行的充分条件，' +
+      '第二行只是「能与 0 行同时出现」的分布读数，不能读成因果。真正能让 OR 查询 0 行的只剩两类：' +
+      '**全部词项都不在语料里**，或**候选全被 status 过滤挡掉**（索引陈旧时同现象）。' +
+      '第四行的「跨词边界碎片」在 v2 分词器下**结构上恒 0**（中文按连续 CJK 段切 bigram、ASCII 按整词，' +
+      '都不产出含空白的词项）——保留该行是为与 v1 报告对照。' +
+      '第五行同理：OR 下剔词不改变命中集（absent 词项本就不贡献命中），该读数退化为 v1 时代的口径残留。'
   )
   L.push('')
   L.push(
-    '高频语料外 bigram（按出现条数）：' +
+    '高频语料外词项（按出现条数）：' +
       channelHealth.topAbsentTerms.map(([t, n]) => `\`${t}\`×${n}`).join(' / ')
   )
   L.push('')
@@ -2578,22 +2579,23 @@ export async function main(argv = process.argv.slice(2)) {
       '',
       `**可证伪判据**：真跑（改常量后重跑 ${goldenEntries} 条）若恢复数 > 0，则本节"已排除"的结论被证伪——届时以真跑为准。`,
       '',
-      `### 候选 5｜查询侧：修关键词通道的 AND 语义 / 改写器（**诊断已给出机制，修法待票**）`,
+      `### 候选 5｜查询侧：关键词通道 **OR 语义（本票 FTS-1 已落地）** / 改写器（待票）`,
       '',
-      `**读数**：关键词通道在**全批 ${channelHealth.queries} 条查询里 ${channelHealth.dead} 条命中 0 行**（§4.4）——` +
-        `其中 ${channelHealth.revivedByUsableOnly} 条**只要剔掉不可命中的词项就能召回**（反事实实测）；` +
-        `G03 的三条查询**逐条 0 行**，且它的锚点在向量通道里其实够得着（§4.2）。` +
+      `**读数**：关键词通道在**全批 ${channelHealth.queries} 条查询里 ${channelHealth.dead} 条命中 0 行**（§4.4，v2 分词器 + OR 查询）。` +
+        `**v1（AND 时代）的对照读数**：4,010/4,025 条查询 0 行（dev 库），其中一批剔掉不可命中词项就能召回；` +
+        `本票已把查询侧改成 OR——若新基线的 dead 数与 v1 相比没有显著下降，说明分词器/存量迁移没生效，应先查那条，别再谈排序。` +
+        `G03 的三条查询在 v1 下**逐条 0 行**，且它的锚点在向量通道里其实够得着（§4.2）。` +
         ` ｜ 活改写器（另一条查询侧子路）恢复 ${liveRewrite.ran ? `**${liveRewrite.recovered}/${liveRewrite.n}**` : '未跑'}（§七）。`,
       '',
-      '**代价**：(a) 关键词通道改「剔词重试 / OR 排序」要重跑全量并防"召回暴涨稀释精度"——' +
-        '本报告的**反事实命中数**只答"能不能召回"，**不答**"召回进来会不会稀释"，后者必须另测；' +
+      '**代价**：(a) OR 已落地，代价是召回面变宽——**是否稀释精度**不由本报告回答，' +
+        '由新基线「real / constructed / 负例」三组读数与 v1 逐组对比回答（硬门：real ≥12/20、constructed ≥31/37、负例 5/5 仍红）；' +
         `(b) 改写器当前 temperature=0.3 不可复现，要先定死随机性才谈得上基线——` +
         `且本次单抽样实测恢复 **${liveRewrite.ran ? `${liveRewrite.recovered}/${liveRewrite.n}` : '未跑'}**，` +
         '这一路的证据强度止于「单次抽样」，不足以支撑立票。',
       '',
-      '**可证伪判据**：① 关键词通道改「剔词重试」后，**必须**给出"哪些查询的召回数暴涨"的读数' +
-        '（暴涨 = 稀释风险；只看 G03 一条会漏掉这个副作用）；' +
-        '② 若剔词重试后 G03 的锚点仍然进不了注入集（它的 RRF 分本就极低），则**不得**以"救 G03"为由立票；' +
+      '**可证伪判据**：① 新基线的 real 命中数若低于 12/20、或 constructed 低于 31/37、或负例不再 5/5 红，' +
+        '则 OR 改法被证伪，应按票面回滚（`git revert` + 重启）；' +
+        '② 若 G03 的锚点在 OR 后仍然进不了注入集（它的 RRF 分本就极低），则**不得**以"救 G03"为由再改查询侧；' +
         '③ 改写器的收益若只在单次抽样上成立（重跑两次结果不稳），则**不得**作为修法依据。',
       '',
     ].join('\n')
