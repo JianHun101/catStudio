@@ -630,7 +630,10 @@ export async function runAgentReply(
   // 长会话消息超阈值时把旧消息压成摘要块（保留最近 10 条/30k 双保险），
   // 替代「超预算直接丢消息」的截断——压缩优先于截断，替换后仍超预算才走截断。
   // 0.60 预压缩异步生成（本轮零阻塞，下一轮构建消费）；0.75 强制同步生成（本轮生效）。
-  // 压缩只是延迟交接不是取消交接：达 SUMMARY_COMPRESS_LIMIT 上限后走既有 handoff/截断。
+  // 折叠**永不停止**：SUMMARY_COMPRESS_LIMIT 是「保留块数」上限（有界存储），不是
+  // 生成次数上限——超限丢最旧一块、继续生成新块，prompt 里始终是「一块摘要 + 最近 N 条」。
+  // 交接退化为异常兜底：摘要生成连续失败（无摘要可替换）、或注入记忆/知识库后真实
+  // prompt 仍超预算时，才走既有 handoff/截断。
   const summaryReplaceEnabled = process.env.SUMMARY_REPLACE_HISTORY !== '0'
   let messagesForTruncation: typeof relevantMessages = relevantMessages
   let summaryBlockMsg: LLMMessage | null = null
@@ -640,7 +643,9 @@ export async function runAgentReply(
   if (summaryReplaceEnabled && preTruncationTokens >= SUMMARY_MIN_TOKENS) {
     const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
     const ratio = preTruncationTokens / maxTokens
-    const compressLimit = parseInt(process.env.SUMMARY_COMPRESS_LIMIT || '3', 10)
+    // SUMMARY_COMPRESS_LIMIT = 数组**保留条数**上限（不是生成次数上限）；下限钉 1，
+    // 0 会把压缩块裁空、下一轮退回全量重读——那比多留一块贵得多。
+    const compressLimit = Math.max(1, parseInt(process.env.SUMMARY_COMPRESS_LIMIT || '3', 10) || 3)
     const entries = parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
     const readyCount = countReadySummaries(entries)
     const ready = lastReadySummary(entries)
@@ -651,7 +656,7 @@ export async function runAgentReply(
       ready != null &&
       (typeof ready.coveredThrough !== 'number' ||
         messagesRepo.countBySession(sessionId) - ready.coveredThrough > SUMMARY_KEEP_RECENT - 1)
-    if (readyCount < compressLimit && ratio >= SUMMARY_PRE_COMPRESS_RATIO) {
+    if (ratio >= SUMMARY_PRE_COMPRESS_RATIO) {
       if (ready && !coverageGap) {
         // 消费既有就绪块——块覆盖到生成时点全部消息、保留窗口容得下新增 → 零 LLM 调用
         messagesForTruncation = applySummaryReplace(relevantMessages, ready.content).kept
@@ -681,6 +686,8 @@ export async function runAgentReply(
           content: '',
           coveredThrough: messagesRepo.countBySession(sessionId),
         })
+        // 有界存储：先裁到保留上限再生成——刚 append 的 pending 在末尾，必被保住
+        sessionsRepo.trimCompressedSummaries(sessionId, compressLimit)
         try {
           const generated = await generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
           if (generated.summary) {
@@ -733,6 +740,8 @@ export async function runAgentReply(
           content: '',
           coveredThrough: messagesRepo.countBySession(sessionId),
         })
+        // 有界存储：同同步路径——pending 在末尾必被保住，超限只丢最旧的就绪块
+        sessionsRepo.trimCompressedSummaries(sessionId, compressLimit)
         generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
           .then((generated) => {
             if (!generated.summary) {

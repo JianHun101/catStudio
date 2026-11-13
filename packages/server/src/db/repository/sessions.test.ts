@@ -180,6 +180,71 @@ describe('sessions repo — handoff 去重守卫', () => {
     })
   })
 
+  // ─── 摘要替代压缩 · 有界存储（D-3「折叠续命」）──────────────────────
+  describe('trimCompressedSummaries — 保留块数上限（不是生成次数上限）', () => {
+    const append = (sessionId: string, id: string, content: string) =>
+      sessionsRepo.appendCompressedSummary(sessionId, {
+        id,
+        createdAt: '2026-08-01T00:00:00.000Z',
+        tokenCount: 1,
+        content,
+        coveredThrough: 1,
+      })
+    const readContents = (sessionId: string): string[] =>
+      JSON.parse(sessionsRepo.getCompressedSummaries(sessionId) ?? '[]').map(
+        (e: { content: string }) => e.content
+      )
+
+    it('超限只丢最旧、末条恒为最新（keep=1）', () => {
+      insertSession('s-trim-1')
+      append('s-trim-1', 'e1', 'a')
+      append('s-trim-1', 'e2', 'b')
+      append('s-trim-1', 'e3', 'c')
+
+      sessionsRepo.trimCompressedSummaries('s-trim-1', 1)
+
+      expect(readContents('s-trim-1')).toEqual(['c'])
+    })
+
+    it('keep 大于当前条数 → 一条不丢（顺序不变）', () => {
+      insertSession('s-trim-2')
+      append('s-trim-2', 'e1', 'a')
+      append('s-trim-2', 'e2', 'b')
+
+      sessionsRepo.trimCompressedSummaries('s-trim-2', 5)
+
+      expect(readContents('s-trim-2')).toEqual(['a', 'b'])
+    })
+
+    it('keep=0 绝不裁到 0 条（下限钉 1，否则下一轮退回全量重读）', () => {
+      insertSession('s-trim-3')
+      append('s-trim-3', 'e1', 'a')
+      append('s-trim-3', 'e2', 'b')
+
+      sessionsRepo.trimCompressedSummaries('s-trim-3', 0)
+
+      expect(readContents('s-trim-3')).toEqual(['b'])
+    })
+
+    it('JSON 损坏 → 不抛、原样不动（读取侧同容错口径）', () => {
+      insertSession('s-trim-4')
+      db.prepare(`UPDATE sessions SET compressed_summaries = '{oops' WHERE id = 's-trim-4'`).run()
+
+      expect(() => sessionsRepo.trimCompressedSummaries('s-trim-4', 1)).not.toThrow()
+      expect(sessionsRepo.getCompressedSummaries('s-trim-4')).toBe('{oops')
+    })
+
+    it('坏 keep 参数（NaN）→ 不裁（不猜成 1 条）', () => {
+      insertSession('s-trim-5')
+      append('s-trim-5', 'e1', 'a')
+      append('s-trim-5', 'e2', 'b')
+
+      sessionsRepo.trimCompressedSummaries('s-trim-5', Number.NaN)
+
+      expect(readContents('s-trim-5')).toEqual(['a', 'b'])
+    })
+  })
+
   // ─── 票 7 · 归档（用户态「删除」= 归档）────────────────────────────
   describe('sessions repo — 归档', () => {
     const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
