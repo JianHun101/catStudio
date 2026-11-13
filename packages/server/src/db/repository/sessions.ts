@@ -120,6 +120,10 @@ export function appendCompressedSummary(id: string, entry: CompressedSummaryEntr
  * 下限 1 条：**绝不裁到 0 条**（0 条 = 下一轮退回全量重读，等于把折叠重置，成本更高）。
  * 刚 append 的 pending 在数组末尾，因此必然被保住（回填按 entryId 定位，不依赖位置）。
  * JSON 损坏视为无历史，静默跳过（与读取侧同容错口径）。
+ *
+ * 代价（`keep=1` 时）：本函数在生成**之前**调用，`keep=1` 的数组裁完只剩本轮 pending，
+ * `generateFullSummary` 读不到 `lastReadySummary` → 每次退化为全量重读（一次成本）。
+ * 默认 3 不受影响：裁到 3 条时上一块就绪摘要仍在数组里，增量前缀可用。
  */
 export function trimCompressedSummaries(id: string, keep: number): void {
   if (!Number.isFinite(keep)) return // 坏参数不猜：宁可不动，也不裁到 1 条
@@ -142,6 +146,10 @@ export function trimCompressedSummaries(id: string, keep: number): void {
  * 按 entryId 回填一条 pending 条目（异步生成完成后的落库点）。
  * 按 id 定位而非"末条"——多条 pending 并存（生成慢 + 消息增长快）时
  * 各生成各回填自家条目，不错位覆盖（竞态根治）。
+ *
+ * 返回布尔：true = 条目仍在数组里并已写入；false = 没写成（条目已被 trim 裁掉 /
+ * 无历史 / JSON 损坏）。调用方必须区分——生成成功但回填落空时不能打「completed」，
+ * 否则日志谎报（D-3 审查 P3-5）。
  */
 export function updateCompressedSummary(
   id: string,
@@ -153,20 +161,22 @@ export function updateCompressedSummary(
     coveredToAt?: string
     coveredCount?: number
   }
-): void {
+): boolean {
   const current = getCompressedSummaries(id)
-  if (!current) return
+  if (!current) return false
   try {
     const arr = JSON.parse(current) as CompressedSummaryEntry[]
-    if (!Array.isArray(arr) || arr.length === 0) return
+    if (!Array.isArray(arr) || arr.length === 0) return false
     const idx = arr.findIndex((e) => e.id === entryId)
-    if (idx === -1) return // 条目已被清理/不存在 → 静默跳过
+    if (idx === -1) return false // 条目已被清理/不存在 → 静默跳过
     arr[idx] = { ...arr[idx], ...patch }
     db.prepare(
       `UPDATE sessions SET compressed_summaries = ?, updated_at = datetime('now') WHERE id = ?`
     ).run(JSON.stringify(arr), id)
+    return true
   } catch {
     // JSON 损坏视为无历史，静默跳过（读取侧同样容错）
+    return false
   }
 }
 
