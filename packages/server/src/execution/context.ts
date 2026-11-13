@@ -179,6 +179,8 @@ export interface FoldedContextInput {
   messages: any[]
   summaryEntries: CompressedSummaryEntry[]
   maxTokens: number
+  /** 执行期开关：`SUMMARY_REPLACE_HISTORY === '0'` 时整段不压缩（传 false）。 */
+  summaryReplaceEnabled: boolean
 }
 
 /**
@@ -188,12 +190,24 @@ export interface FoldedContextInput {
  * 于是刷新页面后右侧成员面板显示的是「未折叠历史」的超高值（实测 131%），而真实
  * prompt 只有 2 万多 token。本函数是纯函数：同一份输入执行期怎么压，这里就怎么算。
  *
- * 语义（与 `reply.ts` 的进入条件逐条对齐）：
- * - `raw < SUMMARY_MIN_TOKENS` 或 `raw/maxTokens < SUMMARY_PRE_COMPRESS_RATIO`
+ * 语义（与 `reply.ts` 的进入条件逐条对齐，闸门**只数消息**）：
+ * - `summaryReplaceEnabled === false` → 执行期整段不压缩，返回 raw；
+ * - `messageTokens < SUMMARY_MIN_TOKENS` 或 `messageTokens/maxTokens < SUMMARY_PRE_COMPRESS_RATIO`
  *   → 执行期不会压缩，返回 raw；
  * - 否则取**最后一个就绪块**（content 非空），无就绪块（含只有 pending / JSON 坏）
  *   → 返回 raw；
  * - 有就绪块 → `system + 摘要块 + 最近窗口`，并与 raw 取 min（估算绝不高报）。
+ *
+ * 口径要点（与 `reply.ts` 的 `preTruncationTokens` 一致）：
+ * - system prompt **不参与** 8k / 60% 闸门，只计入返回值。否则会出现「面板已折叠、
+ *   执行期没压缩」的低报——低报会掩盖真实水位，比高报更危险。
+ * - 误配 `MAX_CONTEXT_TOKENS=0` 时 `ratio=Infinity` 判真（与执行期一样会压缩）；
+ *   `MAX_CONTEXT_TOKENS` 非数字时 `ratio=NaN` 判假（与执行期一样不压缩）。
+ *
+ * 已知窗口差（不属本函数可修范围）：输入 `messages` 由调用方给——join 用
+ * `getSessionHistory` 的 200 条窗口（含 role=system），执行期用 `getRecentMessages`
+ * 的 500 条（排除 system）+ task 历史。会话超出调用窗口时，两边输入不同，估算以
+ * 调用方给的 `messages` 为准。
  *
  * 注意：摘要块按**不带折叠声明**的形状估算，声明文本（约百 token 级）不计入——
  * 这是刻意留的少量低估，好过在 join 分支复制一份声明构建逻辑。
@@ -203,19 +217,23 @@ export function estimateFoldedContextTokens({
   messages,
   summaryEntries,
   maxTokens,
+  summaryReplaceEnabled,
 }: FoldedContextInput): number {
-  let raw = estimateTokens(systemPrompt)
-  for (const m of messages) raw += estimateTokens(m.content) + 50
+  const systemTokens = estimateTokens(systemPrompt)
+  let messageTokens = 0
+  for (const m of messages) messageTokens += estimateTokens(m.content) + 50
+  const raw = systemTokens + messageTokens
 
-  if (raw < SUMMARY_MIN_TOKENS) return raw
-  if (!Number.isFinite(maxTokens) || maxTokens <= 0) return raw
-  if (raw / maxTokens < SUMMARY_PRE_COMPRESS_RATIO) return raw
+  if (!summaryReplaceEnabled) return raw
+  // 闸门只数消息：与 reply.ts 的 preTruncationTokens 同口径（不含 system prompt）。
+  if (messageTokens < SUMMARY_MIN_TOKENS) return raw
+  if (!(messageTokens / maxTokens >= SUMMARY_PRE_COMPRESS_RATIO)) return raw
 
   const ready = lastReadySummary(summaryEntries)
   if (!ready) return raw
 
   const { kept } = applySummaryReplace(messages, ready.content)
-  let folded = estimateTokens(systemPrompt)
+  let folded = systemTokens
   folded += estimateTokens(buildSummaryBlockMessage(ready.content).content)
   for (const m of kept) folded += estimateTokens(m.content) + 50
   return Math.min(raw, folded)

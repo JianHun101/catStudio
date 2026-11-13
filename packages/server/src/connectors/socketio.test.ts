@@ -584,6 +584,51 @@ describe('socketio connector', () => {
       }
     })
 
+    it('CONTEXT_WINDOW_STATS：SUMMARY_REPLACE_HISTORY=0 时不折叠，逐字等于逐条累加（开关口径对齐）', () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      const savedSwitch = process.env.SUMMARY_REPLACE_HISTORY
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      process.env.SUMMARY_REPLACE_HISTORY = '0'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500)
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-off-${i}`, long, `2026-08-01 00:02:${String(i).padStart(2, '0')}`)
+        }
+        // 库里有就绪块，但开关关闭 ⇒ join 必须忽略它，返回未折叠 raw
+        db.prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`).run(
+          JSON.stringify([
+            {
+              id: 'fold-off',
+              createdAt: '2026-08-01T00:00:00Z',
+              tokenCount: 100,
+              content: '历史摘要内容'.repeat(20),
+              coveredThrough: 24,
+            },
+          ])
+        )
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        expect(statsCall[1].contextTokens).toBe(
+          estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        )
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+        if (savedSwitch === undefined) delete process.env.SUMMARY_REPLACE_HISTORY
+        else process.env.SUMMARY_REPLACE_HISTORY = savedSwitch
+      }
+    })
+
     it('CONTEXT_WINDOW_STATS 无摘要时逐字等于旧逐条累加公式（回归门）', () => {
       const savedMax = process.env.MAX_CONTEXT_TOKENS
       process.env.MAX_CONTEXT_TOKENS = '128000'
