@@ -651,7 +651,7 @@ describe('SessionAgentsPanel C-2 · 成员 / 历史 同列切页', () => {
     wrapper.unmount()
   })
 
-  it('Ctrl+K 开历史页；顶部 🔍 同效', async () => {
+  it('Ctrl+K 与「历史」tab 开历史页；头行只有两个 tab、无独立放大镜', async () => {
     const wrapper = await mountPanel()
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))
@@ -660,9 +660,16 @@ describe('SessionAgentsPanel C-2 · 成员 / 历史 同列切页', () => {
 
     await wrapper.findAll('.panel-tab')[0].trigger('click')
     await flushPromises()
-    await wrapper.find('.head-search').trigger('click')
+    await wrapper.findAll('.panel-tab')[1].trigger('click')
     await flushPromises()
     expect(wrapper.find('.session-history-panel').exists()).toBe(true)
+
+    // 头行的独立放大镜入口已删：只剩「成员 / 历史」两个 tab 按钮。
+    // 用结构断言（按钮数 + 都是 tab）而不是引用被删的类名——多一个图标按钮就会红。
+    const headButtons = wrapper.find('.panel-head').findAll('button')
+    expect(headButtons).toHaveLength(2)
+    expect(headButtons.every((b) => b.classes().includes('panel-tab'))).toBe(true)
+    expect(wrapper.find('.panel-head').text()).not.toContain('\u{1F50D}')
 
     wrapper.unmount()
   })
