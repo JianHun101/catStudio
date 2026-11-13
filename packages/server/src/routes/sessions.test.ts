@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTestDb, buildTestApp } from '../test-helpers.js'
 import { setDb, resetDb, getDb } from '../db/index.js'
-import { initRepository } from '../db/repository/index.js'
+import { initRepository, messageSearch } from '../db/repository/index.js'
 import type { FastifyInstance } from 'fastify'
 import { Events } from '@cat-study/shared'
 import { setExecutionEngine, __test_reset as __resetEngine } from '../execution/registry.js'
@@ -1212,18 +1212,63 @@ describe('Session Routes', () => {
       expect(body.total).toBe(1)
     })
 
-    it('before 为空串 → 400；会话不存在 → 404', async () => {
+    it('before/from/to 为空串 → 400；会话不存在 → 404', async () => {
       const emptyBefore = await app.inject({
         method: 'GET',
         url: `/api/sessions/${sid}/messages/browse?before=`,
       })
       expect(emptyBefore.statusCode).toBe(400)
 
+      const emptyFrom = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?from=`,
+      })
+      expect(emptyFrom.statusCode).toBe(400)
+      expect(JSON.parse(emptyFrom.body).error).toContain('from')
+
+      const emptyTo = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?to=`,
+      })
+      expect(emptyTo.statusCode).toBe(400)
+      expect(JSON.parse(emptyTo.body).error).toContain('to')
+
       const missing = await app.inject({
         method: 'GET',
         url: '/api/sessions/nonexistent/messages/browse',
       })
       expect(missing.statusCode).toBe(404)
+    })
+
+    it('limit clamp：0 → 1 条、1000 → 100 条（seed 105 条真钉上界）', async () => {
+      // beforeEach 已 seed 3 条；再补 102 条凑 105（时间递增，确保排序确定）
+      const base = Date.parse('2026-11-09T00:00:00.000Z')
+      for (let i = 4; i <= 105; i += 1) {
+        seed(`br-${i}`, 'user', `第 ${i} 条`, new Date(base + i * 60_000).toISOString())
+      }
+
+      const zero = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?limit=0`,
+      })
+      expect(zero.statusCode).toBe(200)
+      const zeroBody = JSON.parse(zero.body)
+      expect(zeroBody.rows).toHaveLength(1)
+      expect(zeroBody.total).toBe(105)
+
+      // 端点自己必须把上界压到 100：仓库层 `clampLimit` 也夹 [1,100]，只看 rows 条数时
+      // 两层任一层都能兜住（端点写成 1000 仍绿）；故同时断言传给仓库的 limit 已是 100。
+      const limitSpy = vi.spyOn(messageSearch, 'listSessionMessages')
+      const thousand = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?limit=1000`,
+      })
+      expect(thousand.statusCode).toBe(200)
+      const thousandBody = JSON.parse(thousand.body)
+      expect(thousandBody.rows).toHaveLength(100)
+      expect(thousandBody.total).toBe(105)
+      expect(limitSpy).toHaveBeenCalledWith(sid, expect.objectContaining({ limit: 100 }))
+      limitSpy.mockRestore()
     })
   })
 })

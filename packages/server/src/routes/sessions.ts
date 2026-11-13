@@ -542,8 +542,8 @@ function emitArchived(id: string): SessionConfig {
 
 /** 消息行 → 前端 wire 形状（11 字段）。
  *
- *  `/messages` 与 `/messages/search` **共用这一份**：投影是前端消费的契约，抄第二份必然
- *  漂移（一个端点加了字段、另一个没加，前端拿到两种形状）。 */
+ *  `/messages`、`/messages/browse`、`/messages/search` **共用这一份**：投影是前端消费的
+ *  契约，抄第二份必然漂移（一个端点加了字段、另一个没加，前端拿到两种形状）。 */
 function toMessageDto(r: MessageRow) {
   const msgImages: string[] = parseJsonArray(r.images)
   return {
