@@ -265,6 +265,32 @@ describe('SessionHistoryPanel · 取数口径', () => {
     wrapper.unmount()
   })
 
+  it('搜索按钮是线性 SVG 图标：无 emoji，点击仍触发搜索', async () => {
+    vi.mocked(api.searchSessionMessages).mockResolvedValue({ rows: [], total: 0 })
+    const wrapper = await mountPanel()
+
+    const btn = wrapper.find('.hist-search-btn')
+    expect(btn.exists()).toBe(true)
+    const svg = btn.find('svg')
+    expect(svg.exists()).toBe(true)
+    expect(svg.attributes('aria-hidden')).toBe('true')
+    expect(svg.attributes('width')).toBe('16')
+    expect(svg.attributes('height')).toBe('16')
+    expect(btn.text()).not.toContain('\u{1F50D}')
+    expect(btn.text()).toBe('')
+
+    await wrapper.find('.hist-search-input').setValue('端口')
+    await btn.trigger('click')
+    await flushPromises()
+
+    expect(api.searchSessionMessages).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ q: '端口' })
+    )
+
+    wrapper.unmount()
+  })
+
   it('发送者命中同样高亮（搜猫名时卡上至少有一处 <mark>，不是只有正文）', async () => {
     vi.mocked(api.searchSessionMessages).mockResolvedValue({
       rows: [msg('m1', 'agent', '与关键字无关的正文', at(dayA, 10), 'a1')],
