@@ -291,10 +291,12 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 否则在 Agent 首次回复前一直显示"等待首次回复…"。
       const broadcastMode = !!sessionMeta?.broadcast_mode
       const maxContext = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
+      // 与执行期 `reply.ts` 同一开关口径：'0' 关闭摘要替换。关闭时不读库、不折叠。
+      const summaryReplaceEnabled = process.env.SUMMARY_REPLACE_HISTORY !== '0'
       // 摘要条目在循环外按会话读一次（同一会话所有 Agent 共用），循环内只做纯估算
-      const summaryEntries = parseCompressedSummaries(
-        sessionsRepo.getCompressedSummaries(sessionId)
-      )
+      const summaryEntries = summaryReplaceEnabled
+        ? parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
+        : []
       for (const agentId of agentIds) {
         const agent = agentsRepo.getAgentById(agentId)
         if (!agent) continue
@@ -307,6 +309,7 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
           messages: relevant,
           summaryEntries,
           maxTokens: maxContext,
+          summaryReplaceEnabled,
         })
 
         socket.emit(Events.CONTEXT_WINDOW_STATS, {

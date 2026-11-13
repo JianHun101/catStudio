@@ -244,12 +244,19 @@ describe('estimateFoldedContextTokens — join 分支折叠窗口估算', () => 
     }
   }
 
-  function rawOf(messages: any[]) {
-    return estimateTokens(SYSTEM) + messages.reduce((s, m) => s + estimateTokens(m.content) + 50, 0)
+  function rawOf(messages: any[], systemPrompt = SYSTEM) {
+    return (
+      estimateTokens(systemPrompt) +
+      messages.reduce((s, m) => s + estimateTokens(m.content) + 50, 0)
+    )
   }
 
-  it('有就绪块且 raw ≥ 60% → 返回 system + 摘要块 + 最近窗口，且严格小于 raw', () => {
-    const messages = msgs(20) // raw = 4 + 20×1550 = 31,004；0.6×40,000 = 24,000
+  function messageTokensOf(messages: any[]) {
+    return messages.reduce((s, m) => s + estimateTokens(m.content) + 50, 0)
+  }
+
+  it('有就绪块且消息 ≥ 60% → 返回 system + 摘要块 + 最近窗口，且严格小于 raw', () => {
+    const messages = msgs(20) // 消息 20×1550 = 31,000；0.6×40,000 = 24,000
     const summary = '摘要内容'
     const folded = estimateFoldedContextTokens({
       systemPrompt: SYSTEM,
@@ -257,6 +264,7 @@ describe('estimateFoldedContextTokens — join 分支折叠窗口估算', () => 
       // 末尾一条 pending（content 空）不得顶掉就绪块
       summaryEntries: [entry(summary), entry('')],
       maxTokens: 40_000,
+      summaryReplaceEnabled: true,
     })
 
     // 公式面：system + 摘要块 + 最近 10 条（单条 1550 < 30k 预算 ⇒ 恰保留 10 条）
@@ -271,6 +279,64 @@ describe('estimateFoldedContextTokens — join 分支折叠窗口估算', () => 
     expect(folded).toBeLessThan(rawOf(messages) * 0.6)
   })
 
+  it('SUMMARY_REPLACE_HISTORY 关闭 → 即使有就绪块也逐字返回 raw', () => {
+    const messages = msgs(20) // 消息 31,000 ≥ 60%，默认路径会折叠
+    expect(
+      estimateFoldedContextTokens({
+        systemPrompt: SYSTEM,
+        messages,
+        summaryEntries: [entry('摘要内容')],
+        maxTokens: 40_000,
+        summaryReplaceEnabled: false,
+      })
+    ).toBe(rawOf(messages))
+  })
+
+  it('60% 闸门只数消息：system 使 raw 超 60% 而消息未超 → 返回 raw', () => {
+    const messages = msgs(15) // 消息 15×1550 = 23,250；23,250/40,000 = 0.58125
+    const bigSystem = '猫'.repeat(600) // est 900；raw = 24,150 = 0.60375
+    const raw = rawOf(messages, bigSystem)
+    // 判别力：raw 过 60% 而消息不过——旧口径（把 system 算进闸门）会折叠成 1 万多
+    expect(messageTokensOf(messages) / 40_000).toBeLessThan(0.6)
+    expect(raw / 40_000).toBeGreaterThanOrEqual(0.6)
+
+    expect(
+      estimateFoldedContextTokens({
+        systemPrompt: bigSystem,
+        messages,
+        summaryEntries: [entry('摘要内容')],
+        maxTokens: 40_000,
+        summaryReplaceEnabled: true,
+      })
+    ).toBe(raw)
+  })
+
+  it('8k 闸门只数消息：system 使 raw 超 8k 而消息未超 → 返回 raw', () => {
+    // 12 条 × 650（400 字 + 50 开销）= 7,800 < 8,000；超出保留窗口 10 条，
+    // 折叠后确实变小，才能让「误用 raw 过闸门」暴露成低报。
+    const messages = Array.from({ length: 12 }, () => ({
+      role: 'user',
+      content: '猫'.repeat(400),
+    }))
+    const bigSystem = '猫'.repeat(1300) // est 1,950；raw = 9,750
+    const raw = rawOf(messages, bigSystem)
+    // maxTokens 取 12,000 让消息比例 0.65 过 60% 闸门，隔离出 8k 闸门这一条
+    const maxTokens = 12_000
+    expect(messageTokensOf(messages) / maxTokens).toBeGreaterThanOrEqual(0.6)
+    expect(messageTokensOf(messages)).toBeLessThan(8_000)
+    expect(raw).toBeGreaterThanOrEqual(8_000)
+
+    expect(
+      estimateFoldedContextTokens({
+        systemPrompt: bigSystem,
+        messages,
+        summaryEntries: [entry('摘要内容')],
+        maxTokens,
+        summaryReplaceEnabled: true,
+      })
+    ).toBe(raw)
+  })
+
   it('无就绪块 → 逐字等于 raw', () => {
     const messages = msgs(20)
     expect(
@@ -279,6 +345,7 @@ describe('estimateFoldedContextTokens — join 分支折叠窗口估算', () => 
         messages,
         summaryEntries: [],
         maxTokens: 40_000,
+        summaryReplaceEnabled: true,
       })
     ).toBe(rawOf(messages))
   })
@@ -291,6 +358,7 @@ describe('estimateFoldedContextTokens — join 分支折叠窗口估算', () => 
         messages,
         summaryEntries: [entry(''), entry('')],
         maxTokens: 40_000,
+        summaryReplaceEnabled: true,
       })
     ).toBe(rawOf(messages))
   })
@@ -304,31 +372,34 @@ describe('estimateFoldedContextTokens — join 分支折叠窗口估算', () => 
         messages,
         summaryEntries: parseCompressedSummaries('{not-json'),
         maxTokens: 40_000,
+        summaryReplaceEnabled: true,
       })
     ).toBe(rawOf(messages))
   })
 
-  it('raw < 8k → 即使有就绪块也返回 raw（执行期此时不压缩）', () => {
-    const messages = msgs(3) // raw ≈ 4,654 < 8,000
+  it('消息 < 8k → 即使有就绪块也返回 raw（执行期此时不压缩）', () => {
+    const messages = msgs(3) // 消息 ≈ 4,650 < 8,000
     expect(
       estimateFoldedContextTokens({
         systemPrompt: SYSTEM,
         messages,
         summaryEntries: [entry('摘要内容')],
         maxTokens: MAX,
+        summaryReplaceEnabled: true,
       })
     ).toBe(rawOf(messages))
   })
 
-  it('raw ≥ 8k 但低于 60% 阈值 → 即使有就绪块也返回 raw', () => {
-    const messages = msgs(10) // raw ≈ 15,504；0.6×128,000 = 76,800
-    expect(rawOf(messages)).toBeGreaterThanOrEqual(8_000)
+  it('消息 ≥ 8k 但低于 60% 阈值 → 即使有就绪块也返回 raw', () => {
+    const messages = msgs(10) // 消息 ≈ 15,500；0.6×128,000 = 76,800
+    expect(messageTokensOf(messages)).toBeGreaterThanOrEqual(8_000)
     expect(
       estimateFoldedContextTokens({
         systemPrompt: SYSTEM,
         messages,
         summaryEntries: [entry('摘要内容')],
         maxTokens: MAX,
+        summaryReplaceEnabled: true,
       })
     ).toBe(rawOf(messages))
   })
