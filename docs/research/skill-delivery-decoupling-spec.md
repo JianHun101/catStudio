@@ -4,7 +4,7 @@
 
 ## Problem Statement
 
-投递方向（「这单给谁」）焊死在 skill 内容里——`request-review` 教「作者**@审查者**」（base `skills/request-review/SKILL.md:68`、描述 L3 `@mentioning the paired reviewer`），`handoff` 教「末尾行首**@审查者 请审查**」（catstudy `handoff/SKILL.md:67`）。这一焊，三类病根实测集齐（旧注入层注释自证，request-review 因之停用）：
+投递方向（「这单给谁」）焊死在 skill 内容里——**当时**的 `request-review` 教「作者**@审查者**」（`skills/request-review/SKILL.md` 的描述 `@mentioning the paired reviewer`），`handoff` 教「末尾行首**@审查者 请审查**」。**现状**：两者均已剥投递，`@审查者` 在 `skills/` 仅剩 `receive-review/SKILL.md` 一处，`handoff` 技能已更名为 `session-handoff`。这一焊，三类病根实测集齐（旧注入层注释自证，request-review 因之停用）：
 
 1. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（旧注入层 skill 注入晚于 `packages/server/src/execution/reply.ts` 调用 `resolveRolePlaceholders()` 的时机），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 的直接原因）。
 2. **与铁律一冲突**：铁律说「审查由 post-commit hook 机械触发、agent 只补填」，skill 却说「作者自己 @审查者」——内容自打架。
@@ -76,11 +76,11 @@
 ## 改哪些文件（勘察后的真实锚点）
 
 - `packages/server/src/seed-data.ts` — 共通铁律层出口检查段**承载物**（`COMMON_IRON_LAWS` 文本，含投递信号出口检查）。`packages/server/src/config/iron-laws.ts` — **访问器**（`ironLawForRole` 按 role 从 settings 优先读取、回退 seed-data 常量）。铁律拼入 `execution/reply.ts` 的 `baseSystemPrompt`、经 `resolveRolePlaceholders()` 解析。
-- `packages/server/src/execution/reply.ts` — 投递信号产出 + 消费的接缝；`baseSystemPrompt`/`finalSystemPrompt` 组装；skill 块 append 晚于占位符替换（这正是字面 @ 不被解析的根）。
+- `packages/server/src/execution/reply.ts` — 投递信号产出 + 消费的接缝；`baseSystemPrompt`/`finalSystemPrompt` 组装。**现状**：`skillDirectorySection` 先拼进 `baseSystemPrompt`（合并串 `systemPromptWithDirectory`），再对该合并串调用 `resolveRolePlaceholders`——技能目录段在**替换面内**。旧结论「技能块在占位符替换之后才追加」描述的是已拆除的旧注入层，当时字面 @ 不被解析的根因正是那套注入顺序。
 - `scripts/mcp-server-utils.mjs` — `read_skill`/`list_skills`/`SKILL_CATALOG`（P2 流程链 9 技能——request-review 于 2026-09-10 回流，见 ADR 0014 §5 修订；注入层改造后 server 不再全文注入，模型经 read_skill 自取正文——单级路径，**不建两级注入**）。
 - `skills/request-review/SKILL.md`（base）— 剥「选择审查者/@审查者/@mentioning the paired reviewer」路由；`refs/review-request-template.md` 相对引用**悬空**，修正为共享 `skills/refs/review-request-template.md`。
-- `skills/catstudy/handoff/SKILL.md` — 剥「行首@审查者 请审查」；`../../refs/...` 统一指向共享 `skills/refs/`。
-- `skills/catstudy/request-review/SKILL.md`、`skills/catstudy/handoff/SKILL.md` — 投递型定制层：**淘汰**（投递外移后 no reason）；领域型重写（`quality-gate`、`receive-review`）与共享 `cat-roles.md` 保留。
+- 当时的 catstudy `handoff` 定制层（`skills/catstudy/handoff/`，已随投递外移淘汰；现为 `skills/session-handoff`）— 剥「行首@审查者 请审查」；`../../refs/...` 统一指向共享 `skills/refs/`。
+- 当时的 `skills/catstudy/request-review/`、`skills/catstudy/handoff/` — 投递型定制层：**已淘汰**（投递外移后 no reason）；领域型重写（`quality-gate`、`receive-review`）与共享 `cat-roles.md` 保留。
 - DB：新增 `flow_state` 字段（`packages/server/src/db/` 迁移）→ 用于契约③。
 
 ## 测试决策
