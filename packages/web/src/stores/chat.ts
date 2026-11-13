@@ -238,9 +238,9 @@ export const useChatStore = defineStore('chat', () => {
   const olderError = ref<string | null>(null)
   /**
    * 在途的翻页请求。`loadingOlder` 是给 UI 的布尔投影，真正的**去重句柄**是这条带会话归属的记录：
-   * 滚动事件会成簇触发，同一会话的第二次调用必须复用同一次请求（否则同一游标被并发拉两次）；
-   * 切过会话后旧请求的结果会被丢弃，**不能**再让新会话复用（否则新会话的首滚拿到一个
-   * 解析为 false 的旧 Promise，白滚一次）。
+   * 滚动事件会成簇触发，同一会话同一代际内的第二次调用必须复用同一次请求（否则同一游标被并发拉两次）；
+   * 任何一次 `joinSession`（含同 id 重入）都会换代，旧请求结果一律丢弃；句柄随即置空，
+   * **不能**再被下一次上滚复用（否则会拿到一个解析为 false 的旧 Promise，白滚一次）。
    */
   let inflightOlder: { sessionId: string; promise: Promise<boolean> } | null = null
   /**
@@ -543,8 +543,8 @@ export const useChatStore = defineStore('chat', () => {
    *
    * - 前插保持全局 ASC：wire 返回 DESC（与既有 `/messages` 一致），这里反转后再拼。
    * - 合成头部（欢迎语/交接摘要）留在最前：它们不落库，挪到中间会与时间序打架。
-   * - 空批次才封口；**同一会话**已有在途请求时返回同一个 Promise（滚动事件成簇触发，不重复拉同游标）。
-   * - 等待期间切了会话就丢弃这一页（否则旧会话的消息会串进新会话数组）；旧请求的收尾也不许
+   * - 空批次才封口；**同一代际**已有在途请求时返回同一个 Promise（滚动事件成簇触发，不重复拉同游标）。
+   * - 等待期间换了会话、或同 id 重入换代，就丢弃这一页（否则旧会话的消息会串进新会话数组）；旧请求的收尾也不许
    *   动新会话的 `loadingOlder` / `olderError`（见 catch / finally 的代际判据）。
    *
    * @returns true = 本次确实完成一次推进（拿到一页，或确认到底并封口）；false = 未推进
@@ -554,7 +554,8 @@ export const useChatStore = defineStore('chat', () => {
   function loadOlderMessages(): Promise<boolean> {
     const sessionId = activeSessionId.value
     if (!sessionId) return Promise.resolve(false)
-    // 只复用**同一会话**的在途请求：别的会话那笔的结果会被会话判据丢弃，复用它等于白滚一次
+    // 只复用**同一会话**的在途请求（句柄已在 joinSession / SESSION_HISTORY 处清空，这里的
+    // sessionId 比较仅作跨会话防御）：别的会话那笔的结果会被代际判据丢弃，复用它等于白滚一次
     if (inflightOlder && inflightOlder.sessionId === sessionId) return inflightOlder.promise
     if (!hasMoreOlder.value) return Promise.resolve(false)
     // 发起时捕获代际：成功 / 空页封口 / 失败 / 收尾四条路径都按它判「这一页还属于当前世界吗」
