@@ -9,7 +9,7 @@
 
 import { Server as HttpServer } from 'node:http'
 import { Server as SocketServer } from 'socket.io'
-import { Events, estimateTokens } from '@cat-study/shared'
+import { Events } from '@cat-study/shared'
 import type { SendMessageAck, ToolCallInfo, StreamSegment } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
@@ -42,7 +42,11 @@ import {
   RESTART_CONFIRMED_TTL_MS,
 } from '../restart-request.js'
 import type { RestartRequestFile } from '../restart-request.js'
-import { getRelevantMessages } from '../execution/context.js'
+import {
+  estimateFoldedContextTokens,
+  getRelevantMessages,
+  parseCompressedSummaries,
+} from '../execution/context.js'
 import { createExecutionEngine } from '../execution/serial.js'
 import type { StreamState } from '../execution/state.js'
 import { toIsoDb } from '../db/repository/time.js'
@@ -287,15 +291,23 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
       // 否则在 Agent 首次回复前一直显示"等待首次回复…"。
       const broadcastMode = !!sessionMeta?.broadcast_mode
       const maxContext = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
+      // 摘要条目在循环外按会话读一次（同一会话所有 Agent 共用），循环内只做纯估算
+      const summaryEntries = parseCompressedSummaries(
+        sessionsRepo.getCompressedSummaries(sessionId)
+      )
       for (const agentId of agentIds) {
         const agent = agentsRepo.getAgentById(agentId)
         if (!agent) continue
 
         const relevant = getRelevantMessages(rows, agentId, agent.name, broadcastMode)
-        let estimatedTokens = estimateTokens(agent.system_prompt || '')
-        for (const m of relevant) {
-          estimatedTokens += estimateTokens(m.content) + 50 // role 前缀开销
-        }
+        // 必须按**折叠窗口**估算：执行期 `reply.ts` 会先做摘要替换再数 token，
+        // join 若逐条累加全部历史，刷新后右侧面板会回到「未折叠」的超高值（E-1）。
+        const estimatedTokens = estimateFoldedContextTokens({
+          systemPrompt: agent.system_prompt || '',
+          messages: relevant,
+          summaryEntries,
+          maxTokens: maxContext,
+        })
 
         socket.emit(Events.CONTEXT_WINDOW_STATS, {
           sessionId,

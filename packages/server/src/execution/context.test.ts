@@ -5,10 +5,13 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { estimateTokens } from '@cat-study/shared'
 import {
   getRelevantMessages,
   buildFoldNotice,
   buildSummaryBlockMessage,
+  estimateFoldedContextTokens,
+  parseCompressedSummaries,
   SUMMARY_PREFIX,
 } from './context.js'
 
@@ -218,5 +221,115 @@ describe('buildSummaryBlockMessage — 输出顺序', () => {
 
   it('无声明时保持旧形状（前缀 + 摘要）', () => {
     expect(buildSummaryBlockMessage('摘要正文').content).toBe(`${SUMMARY_PREFIX}\n摘要正文`)
+  })
+})
+
+describe('estimateFoldedContextTokens — join 分支折叠窗口估算', () => {
+  const SYSTEM = 'You are a cat.'
+  const LONG = '猫'.repeat(1000) // 1500 token + 50 开销
+  const MAX = 128_000
+
+  function msgs(count: number) {
+    return Array.from({ length: count }, (_, i) => ({ role: 'user', content: LONG }))
+  }
+
+  /** 与生产一致的就绪条目形状（content 非空 = ready） */
+  function entry(content: string, coveredThrough = 20) {
+    return {
+      id: `s-${content.length}`,
+      createdAt: '2026-08-01T00:00:00Z',
+      tokenCount: 10,
+      content,
+      coveredThrough,
+    }
+  }
+
+  function rawOf(messages: any[]) {
+    return estimateTokens(SYSTEM) + messages.reduce((s, m) => s + estimateTokens(m.content) + 50, 0)
+  }
+
+  it('有就绪块且 raw ≥ 60% → 返回 system + 摘要块 + 最近窗口，且严格小于 raw', () => {
+    const messages = msgs(20) // raw = 4 + 20×1550 = 31,004；0.6×40,000 = 24,000
+    const summary = '摘要内容'
+    const folded = estimateFoldedContextTokens({
+      systemPrompt: SYSTEM,
+      messages,
+      // 末尾一条 pending（content 空）不得顶掉就绪块
+      summaryEntries: [entry(summary), entry('')],
+      maxTokens: 40_000,
+    })
+
+    // 公式面：system + 摘要块 + 最近 10 条（单条 1550 < 30k 预算 ⇒ 恰保留 10 条）
+    const kept = messages.slice(-10)
+    const expected =
+      estimateTokens(SYSTEM) +
+      estimateTokens(buildSummaryBlockMessage(summary).content) +
+      kept.reduce((s, m) => s + estimateTokens(m.content) + 50, 0)
+
+    expect(folded).toBe(expected)
+    expect(folded).toBeLessThan(rawOf(messages))
+    expect(folded).toBeLessThan(rawOf(messages) * 0.6)
+  })
+
+  it('无就绪块 → 逐字等于 raw', () => {
+    const messages = msgs(20)
+    expect(
+      estimateFoldedContextTokens({
+        systemPrompt: SYSTEM,
+        messages,
+        summaryEntries: [],
+        maxTokens: 40_000,
+      })
+    ).toBe(rawOf(messages))
+  })
+
+  it('只有 pending（content 空）→ 逐字等于 raw', () => {
+    const messages = msgs(20)
+    expect(
+      estimateFoldedContextTokens({
+        systemPrompt: SYSTEM,
+        messages,
+        summaryEntries: [entry(''), entry('')],
+        maxTokens: 40_000,
+      })
+    ).toBe(rawOf(messages))
+  })
+
+  it('JSON 损坏（解析为空数组）→ 逐字等于 raw', () => {
+    const messages = msgs(20)
+    expect(parseCompressedSummaries('{not-json')).toEqual([])
+    expect(
+      estimateFoldedContextTokens({
+        systemPrompt: SYSTEM,
+        messages,
+        summaryEntries: parseCompressedSummaries('{not-json'),
+        maxTokens: 40_000,
+      })
+    ).toBe(rawOf(messages))
+  })
+
+  it('raw < 8k → 即使有就绪块也返回 raw（执行期此时不压缩）', () => {
+    const messages = msgs(3) // raw ≈ 4,654 < 8,000
+    expect(
+      estimateFoldedContextTokens({
+        systemPrompt: SYSTEM,
+        messages,
+        summaryEntries: [entry('摘要内容')],
+        maxTokens: MAX,
+      })
+    ).toBe(rawOf(messages))
+  })
+
+  it('raw ≥ 8k 但低于 60% 阈值 → 即使有就绪块也返回 raw', () => {
+    const messages = msgs(10) // raw ≈ 15,504；0.6×128,000 = 76,800
+    expect(rawOf(messages)).toBeGreaterThanOrEqual(8_000)
+    expect(
+      estimateFoldedContextTokens({
+        systemPrompt: SYSTEM,
+        messages,
+        summaryEntries: [entry('摘要内容')],
+        maxTokens: MAX,
+      })
+    ).toBe(rawOf(messages))
   })
 })
