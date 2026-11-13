@@ -76,7 +76,7 @@ Commands: web [options] [args...]
 
 ### 「猫是否主动查全」——行为层，当前不成立
 
-机制支持「按需回查」，但当前各猫 `systemPrompt`（`buildDemoAgents` 里按名字生成的常量）只写「MCP 三工具 post_message/search_knowledge/query_db」，**没有「启动时先拉历史 / 上下文不足时主动回查」指令**——今天各猫不会主动拉全历史。若 MCP 外置定稿，需在 systemPrompt 补「启动即查该 session 最近 N 条 + 关键上下文」指令（行为层改造，非机制层）。
+机制支持「按需回查」，但本文写作时（2026-08-17）各猫 `systemPrompt`（`buildDemoAgents` 里按名字生成的常量）只写「MCP 三工具 post_message/search_knowledge/query_db」，**没有「启动时先拉历史 / 上下文不足时主动回查」指令**——当时各猫不会主动拉全历史。若 MCP 外置定稿，需在 systemPrompt 补「启动即查该 session 最近 N 条 + 关键上下文」指令（行为层改造，非机制层）。
 
 ### 结论
 

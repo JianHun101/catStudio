@@ -8,7 +8,7 @@
 
 ## 0. 背景与问题定义
 
-opencode `run` 以 positional `[message..]` 传 prompt，Windows CreateProcess 命令行总长限 32K（Node spawn 实测 `ENAMETOOLONG`）。生产适配器（opencode.ts:43 `PROMPT_ARG_MAX = 30000`）超限时 `messagesToPromptBounded` 保尾砍旧历史——内容截断导致传输不完全（用户观察到的 `{"promptLen":45101,"max":30000}` 日志即此兜底）。目标：找到规避方案，最好与 dsh 侧统一（统一候选 = MCP 工具面外置）。
+opencode `run` 以 positional `[message..]` 传 prompt，Windows CreateProcess 命令行总长限 32K（Node spawn 实测 `ENAMETOOLONG`）。生产适配器（`opencode.ts` 的 `PROMPT_ARG_MAX = 30000`）超限时 `messagesToPromptBounded` 保尾砍旧历史——内容截断导致传输不完全（用户观察到的 `{"promptLen":45101,"max":30000}` 日志即此兜底）。目标：找到规避方案，最好与 dsh 侧统一（统一候选 = MCP 工具面外置）。
 
 **对标 ADR 0007 检查单**：本次为调研（选项探测），每项标「假设 / 实测 / 结论」，三源证据（`--help` / 官方文档 / 实测输出）。
 
@@ -87,7 +87,7 @@ opencode run --agent build --auto --format json -m deepseek/deepseek-v4-flash "�
 
 **实测输出原文**：`{"type":"text","text":"UNIQUE_MARKER_8f3a2b",...}`（agent 模式同样答对）
 
-**结论**：agent 模式（生产 `--agent build --auto` 同款）下 `-f` 同样完整注入——适配器换 `-f` 通道时**零形态冲突**。注意：opencode.ts:173-176 注释记录 `-f` 是贪婪选项、须排在 prompt 之后——实施时须遵守该参数序。
+**结论**：agent 模式（生产 `--agent build --auto` 同款）下 `-f` 同样完整注入——适配器换 `-f` 通道时**零形态冲突**。注意：`opencode.ts` 中 `-f` 参数序的注释记录它「是贪婪选项、须排在 prompt 之后」——实施时须遵守该参数序。
 
 ## 3. 实测2：`--variant` 思考深度旋钮
 

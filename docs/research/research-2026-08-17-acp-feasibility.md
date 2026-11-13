@@ -119,7 +119,7 @@ id:3 result: {"stopReason":"end_turn",...}
 
 **结论**：硬超时/停止按钮的 ACP 映射走 **session/close**（协议文档声明 close = cancel 进行中工作 + 释放资源），`session/cancel` 是协议 v1 的规范方法但 opencode 未实现——**适配器必须用 close 而非 cancel**，这是与 claude-agent-acp 等其它实现的行为差异点（需在适配器层做兼容分支或统一用 close）。
 
-### 3.4 每轮 model 切换（契约：socketio.ts:2742 传 options.model）
+### 3.4 每轮 model 切换（契约：`runAgentReply()` 的 `adapter.chatStream()` 传 `model: agent.llmModel`）
 
 `session/set_config_option` 实测：`{sessionId, configId:'model', value:'deepseek/deepseek-v4-flash'}` → 返回完整 configOptions，`currentValue` 变为目标 model → 后续 prompt 走该 model。
 
@@ -127,7 +127,7 @@ id:3 result: {"stopReason":"end_turn",...}
 
 ## 4. 接口契约判定：`chatStream(messages, options) → AsyncIterable<Chunk>`
 
-### 4.1 契约要点（socketio.ts:2741-2767 调用点）
+### 4.1 契约要点（`runAgentReply()` 内的 `adapter.chatStream()` 调用点）
 
 ```
 adapter.chatStream(llmMessages, {
@@ -140,17 +140,17 @@ adapter.chatStream(llmMessages, {
 
 ### 4.2 ACP client 实现契约的映射方案
 
-| chatStream 侧                       | ACP 侧                                                                             |
-| ----------------------------------- | ---------------------------------------------------------------------------------- |
-| messages（全量上下文）              | `session/prompt` 的 prompt 数组（JSON body，天然绕 32K——**不需要 -f/保尾砍历史**） |
-| options.model                       | `session/set_config_option`（每轮切换）                                            |
-| options.signal.abort（硬超时/停止） | `session/close`（实测 stopReason:"cancelled"）                                     |
-| options.cwd（会话 worktree 隔离）   | `session/new` 的 cwd                                                               |
-| options.context（MCP env 透传）     | `session/new` 的 `mcpServers[].env`（实测 6 变量全透传）                           |
-| Chunk{content, kind:'text'}         | `agent_message_chunk`                                                              |
-| Chunk{content, kind:'thinking'}     | `agent_thought_chunk` → `[思考]` 前缀（对齐 opencode.ts:402）                      |
-| 工具反馈 chunk                      | `tool_call`/`tool_call_update` → `[工具]` 前缀（对齐 opencode.ts:404-425）         |
-| done:true                           | `stopReason:"end_turn"` 后 yield done                                              |
+| chatStream 侧                       | ACP 侧                                                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------------------------ |
+| messages（全量上下文）              | `session/prompt` 的 prompt 数组（JSON body，天然绕 32K——**不需要 -f/保尾砍历史**）         |
+| options.model                       | `session/set_config_option`（每轮切换）                                                    |
+| options.signal.abort（硬超时/停止） | `session/close`（实测 stopReason:"cancelled"）                                             |
+| options.cwd（会话 worktree 隔离）   | `session/new` 的 cwd                                                                       |
+| options.context（MCP env 透传）     | `session/new` 的 `mcpServers[].env`（实测 6 变量全透传）                                   |
+| Chunk{content, kind:'text'}         | `agent_message_chunk`                                                                      |
+| Chunk{content, kind:'thinking'}     | `agent_thought_chunk` → `[思考]` 前缀（对齐 `opencode.ts` 的 thinking 通道处理）           |
+| 工具反馈 chunk                      | `tool_call`/`tool_call_update` → `[工具]` 前缀（对齐 `opencode.ts` 的 tool_call 通道处理） |
+| done:true                           | `stopReason:"end_turn"` 后 yield done                                                      |
 
 **判定：ACP client 可以实现 `chatStream → AsyncIterable<Chunk>` 契约，dispatch 层（slot/FIFO/context filtering/记忆注入）零改动**——只需新增一个 ACP 适配器（如 acp.ts），实现同一个 LLMAdapter 接口。
 
