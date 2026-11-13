@@ -2034,6 +2034,54 @@ describe('chatStore', () => {
       expect(await pendingOld).toBe(false)
     })
 
+    it('C-7｜同会话重入（joinSession 同一 id）换代：旧请求不插页、不清新请求的 loadingOlder', async () => {
+      // 首屏经 SESSION_HISTORY 落缓存，同 id 重入时能命中缓存恢复消息数组
+      store.activeSessionId = 's1'
+      sessionHistoryHandler()({ messages: msgs(20, 100), welcome: welcome() })
+      const initialIds = ids(store.messages) // [welcome-s1, m101..m120]
+      store.hasMoreOlder = true // 模拟长会话留口（首屏只有 20 条，不足一页）
+      let resolveOld!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveOld = resolve
+        })
+      )
+      const pendingOld = store.loadOlderMessages() // 代际 E、会话 s1
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(1, 's1', { before: 'm101', limit: 50 })
+      expect(store.loadingOlder).toBe(true)
+
+      // 用户在会话列表里点了当前会话：同 id、switching=false，仍必须换代（否则旧请求的 finally
+      // 会看到 epoch 未变，把下面这笔新请求的 loadingOlder 清掉、并把旧页插进数组）
+      store.joinSession('s1')
+      expect(ids(store.messages)).toEqual(initialIds) // 命中缓存，同会话重入不清空
+      store.hasMoreOlder = true // 缓存里的 20 条非合成消息不满一页，这里按长会话继续留口
+
+      let resolveNew!: (rows: Message[]) => void
+      mockGetSessionMessages.mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveNew = resolve
+        })
+      )
+      const pendingNew = store.loadOlderMessages()
+      expect(mockGetSessionMessages).toHaveBeenCalledTimes(2)
+      expect(mockGetSessionMessages).toHaveBeenNthCalledWith(2, 's1', { before: 'm101', limit: 50 })
+      expect(store.loadingOlder).toBe(true)
+
+      // 旧代的页现在返回：sessionId 与当前会话相同，只有代际判据能挡住
+      resolveOld(msgs(50, 50).reverse()) // m51..m100
+      expect(await pendingOld).toBe(false)
+      expect(ids(store.messages)).toEqual(initialIds) // 旧页未插入
+      expect(store.loadingOlder).toBe(true) // 新请求的加载态不被旧请求收掉
+      expect(store.olderError).toBeNull()
+
+      // 新代请求正常落地
+      resolveNew(msgs(50, 50).reverse()) // m51..m100
+      expect(await pendingNew).toBe(true)
+      expect(store.loadingOlder).toBe(false)
+      expect(ids(store.messages).slice(0, 3)).toEqual(['welcome-s1', 'm51', 'm52'])
+      expect(store.messages).toHaveLength(initialIds.length + 50)
+    })
+
     it('C-4｜await 期间消息数组被替换：前插点重算到合成头之后，原消息不丢', async () => {
       store.activeSessionId = 's1'
       store.messages = msgs(5, 10) // m11..m15
