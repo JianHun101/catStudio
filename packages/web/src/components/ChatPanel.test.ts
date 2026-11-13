@@ -2330,7 +2330,7 @@ describe('C-1 消息流懒加载', () => {
     expect(store.hasMoreOlder).toBe(false)
   })
 
-  it('重试按钮刻意不补偿滚动锚定（点按钮即看更早内容，视口停在原处）', async () => {
+  it('重试不做 JS 锚定补偿；真机 −42px 是错误按钮消失的高度，不是原生 scroll anchoring 的证据', async () => {
     const store = setup()
     store.hasMoreOlder = true
     const { container, el } = await mountPanel()
@@ -2344,7 +2344,8 @@ describe('C-1 消息流懒加载', () => {
     const retry = wrapper!.find('.older-status-error')
     expect(retry.exists()).toBe(true)
 
-    // 重试成功：前插 50 条让内容高度从 1000 长到 1400；按钮路径**不**补 scrollTop
+    // 重试成功：前插 50 条让内容高度从 1000 长到 1400；按钮路径**不**补 scrollTop。
+    // 真机上按钮消失本身会让读数 −42px，那是按钮高度，与滚动锚定无关，不能拿它证明有补偿。
     loadSpy().mockImplementationOnce(async () => {
       pin(el, { scrollHeight: 1400 })
       return [
