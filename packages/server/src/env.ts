@@ -157,9 +157,10 @@ process.env.EVAL_CHAIN_SLOW_MS ??= '300000'
 //   替代「超预算直接丢消息」的截断。上下文 <8k token 不压缩。
 process.env.SUMMARY_REPLACE_HISTORY ??= '1'
 
-// SUMMARY_COMPRESS_LIMIT — 累计压缩次数上限（默认 3，只计生成成功的块）：
-//   达上限后不再生成新摘要块，超阈值走既有 handoff/截断路径——
-//   压缩只是延迟交接，不是取消交接（防无限压缩饿死 handoff）
+// SUMMARY_COMPRESS_LIMIT — `compressed_summaries` 数组的**保留块数**上限（默认 3）：
+//   折叠不因达到上限而停止——超限时丢最旧一块、继续生成新块（有界存储），
+//   prompt 里始终是「一块摘要 + 最近保留消息」。交接只在摘要生成连续失败、
+//   或真实 prompt 仍超预算时兜底触发。
 process.env.SUMMARY_COMPRESS_LIMIT ??= '3'
 
 // ─── 会话交接配置 ──────────────────────────────
