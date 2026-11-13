@@ -19,7 +19,7 @@ vi.mock('@/composables/useApi', () => ({
     updateSessionAgents: vi.fn(),
     // C-2：右栏「历史」页的数据源（切页时子组件会拉）
     getSessionMessageFacets: vi.fn(),
-    getSessionMessages: vi.fn(),
+    getSessionBrowseMessages: vi.fn(),
     searchSessionMessages: vi.fn(),
   },
 }))
@@ -274,7 +274,7 @@ describe('SessionAgentsPanel R4 · 弱化卡与内联 trace', () => {
       days: [],
       months: [],
     })
-    vi.mocked(api.getSessionMessages).mockResolvedValue([])
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({ rows: [], total: 0 })
   })
 
   async function mountPanel(): Promise<VueWrapper> {
@@ -607,7 +607,7 @@ describe('SessionAgentsPanel C-2 · 成员 / 历史 同列切页', () => {
       days: [],
       months: [],
     })
-    vi.mocked(api.getSessionMessages).mockResolvedValue([])
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({ rows: [], total: 0 })
   })
 
   async function mountPanel(): Promise<VueWrapper> {

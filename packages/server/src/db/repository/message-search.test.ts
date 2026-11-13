@@ -3,7 +3,7 @@
  *
  * 覆盖：日期按 tzOffset 分组（不是截 UTC）、月份由 days 聚合、total 含 system、
  * LIKE 转义顺序（`\` → `%` → `_`）、total 不受 before/limit 影响、游标不在本会话 → 空页、
- * 发送者名匹配（前端契约「搜索匹配正文与发送者」）。
+ * 发送者名匹配（前端契约「搜索匹配正文与发送者」）、browse 含 system 且与 facets 同口径。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
@@ -98,6 +98,101 @@ describe('message-search repo — 历史面板查询', () => {
         repo.getSessionMessageFacets('s1', 840)
       )
     })
+
+    it('负偏移（西半球）：UTC 01:00 在 tzOffset=-480 落前一天', () => {
+      const f = repo.getSessionMessageFacets('s1', -480)
+      // m2 = 2026-11-12T01:00Z → 本地 2026-11-11 17:00；m1 22:30Z → 本地 14:30 同日
+      expect(f.days).toContainEqual({ date: '2026-11-11', count: 1 })
+      // m3 = 2026-11-01T03:00Z → 本地 2026-10-31 19:00（跨月也按本地日期归组）
+      expect(f.days).toContainEqual({ date: '2026-10-31', count: 1 })
+      expect(f.months).toEqual([{ month: '2026-11' }, { month: '2026-10' }])
+    })
+
+    it('system-only 日期：facets 计数与 browse 列表同一口径（不会「写 1 条、点进去空」）', () => {
+      // m3 是 system，且独占 2026-11-01
+      const f = repo.getSessionMessageFacets('s1', 0)
+      expect(f.days.find((d) => d.date === '2026-11-01')).toEqual({
+        date: '2026-11-01',
+        count: 1,
+      })
+      const browse = repo.listSessionMessages('s1', {
+        from: '2026-11-01T00:00:00.000Z',
+        to: '2026-11-01T23:59:59.999Z',
+      })
+      expect(browse.rows.map((r) => r.id)).toEqual(['m3'])
+      expect(browse.rows[0].role).toBe('system')
+      expect(browse.total).toBe(1)
+    })
+  })
+
+  describe('listSessionMessages（browse，含 system）', () => {
+    beforeEach(() => {
+      insert('b-1', 'user', '第一条', '2026-11-10T10:00:00.000Z')
+      insert('b-2', 'agent', '第二条', '2026-11-10T10:01:00.000Z', 'agent-a')
+      insert('b-3', 'system', '重启完成', '2026-11-10T10:02:00.000Z')
+      insert('b-4', 'user', '第四条', '2026-11-10T10:03:00.000Z')
+      // 同毫秒并发写：只比时间会漏行/重行，必须 id DESC 兜底
+      insert('b-5a', 'user', '同秒 A', '2026-11-10T10:04:00.000Z')
+      insert('b-5b', 'user', '同秒 B', '2026-11-10T10:04:00.000Z')
+    })
+
+    it('含 system；排序 created_at DESC, id DESC（同毫秒按 id 兜底）', () => {
+      const rows = repo.listSessionMessages('s1', { limit: 100 }).rows
+      expect(rows.map((r) => r.id)).toEqual(['b-5b', 'b-5a', 'b-4', 'b-3', 'b-2', 'b-1'])
+      expect(rows.some((r) => r.role === 'system')).toBe(true)
+    })
+
+    it('total = 窗口内全量；before/limit 只收窄 rows', () => {
+      const all = repo.listSessionMessages('s1', { limit: 100 })
+      expect(all.total).toBe(6)
+      expect(all.rows).toHaveLength(6)
+
+      const one = repo.listSessionMessages('s1', { limit: 1 })
+      expect(one.rows.map((r) => r.id)).toEqual(['b-5b'])
+      expect(one.total).toBe(6)
+
+      const before = repo.listSessionMessages('s1', { before: 'b-5a' })
+      expect(before.rows.map((r) => r.id)).toEqual(['b-4', 'b-3', 'b-2', 'b-1'])
+      expect(before.total).toBe(6)
+    })
+
+    it('同毫秒 + before 游标：翻页不重不漏（与 messages.test.ts 的同构 tie-break 断言对称）', () => {
+      // b-5a / b-5b 同 created_at：只比时间会漏行，必须 (created_at, id) 复合游标
+      const p1 = repo.listSessionMessages('s1', { limit: 1 })
+      expect(p1.rows.map((r) => r.id)).toEqual(['b-5b'])
+      const p2 = repo.listSessionMessages('s1', { limit: 1, before: 'b-5b' })
+      expect(p2.rows.map((r) => r.id)).toEqual(['b-5a'])
+      const p3 = repo.listSessionMessages('s1', { before: 'b-5a' })
+      expect(p3.rows.map((r) => r.id)).toEqual(['b-4', 'b-3', 'b-2', 'b-1'])
+      expect([...p1.rows, ...p2.rows, ...p3.rows].map((r) => r.id)).toEqual([
+        'b-5b',
+        'b-5a',
+        'b-4',
+        'b-3',
+        'b-2',
+        'b-1',
+      ])
+    })
+
+    it('时间窗 from/to 收窄结果，且 total 同步收窄', () => {
+      const r = repo.listSessionMessages('s1', {
+        from: '2026-11-10T10:01:00.000Z',
+        to: '2026-11-10T10:02:00.000Z',
+      })
+      expect(r.rows.map((x) => x.id)).toEqual(['b-3', 'b-2'])
+      expect(r.total).toBe(2)
+    })
+
+    it('游标不在本会话 → rows 空但 total 仍是窗口总数', () => {
+      const r = repo.listSessionMessages('s1', { before: '不存在' })
+      expect(r.rows).toEqual([])
+      expect(r.total).toBe(6)
+    })
+
+    it('limit 夹取 [1,100]：0 → 1、1000 → 100', () => {
+      expect(repo.listSessionMessages('s1', { limit: 0 }).rows).toHaveLength(1)
+      expect(repo.listSessionMessages('s1', { limit: 1000 }).rows).toHaveLength(6)
+    })
   })
 
   describe('searchSessionMessages', () => {
@@ -118,9 +213,23 @@ describe('message-search repo — 历史面板查询', () => {
       expect(ids('C:\\tmp')).toEqual(['s-5'])
     })
 
-    it('排序 created_at DESC, id DESC；system 照常返回', () => {
-      const rows = repo.searchSessionMessages('s1', { q: '重启' }).rows
-      expect(rows.map((r) => r.id)).toEqual(['sys-1'])
+    it('排序 created_at DESC, id DESC（多行 + 同毫秒按 id 兜底）；system 照常返回', () => {
+      // 多行排序：10:05 在 10:04 之前
+      expect(repo.searchSessionMessages('s1', { q: '路径' }).rows.map((r) => r.id)).toEqual([
+        's-6',
+        's-5',
+      ])
+      // 同毫秒并发写：只比时间会漏行/重行
+      insert('z-a', 'user', '同秒命中', '2026-11-10T12:00:00.000Z')
+      insert('z-b', 'user', '同秒命中', '2026-11-10T12:00:00.000Z')
+      expect(repo.searchSessionMessages('s1', { q: '同秒命中' }).rows.map((r) => r.id)).toEqual([
+        'z-b',
+        'z-a',
+      ])
+      // system 照常返回
+      expect(repo.searchSessionMessages('s1', { q: '重启' }).rows.map((r) => r.id)).toEqual([
+        'sys-1',
+      ])
     })
 
     it('total 不受 before/limit 影响；rows 受 before 约束', () => {

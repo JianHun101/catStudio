@@ -16,7 +16,7 @@ import type { Message } from '@cat-study/shared'
 vi.mock('@/composables/useApi', () => ({
   api: {
     getSessionMessageFacets: vi.fn(),
-    getSessionMessages: vi.fn(),
+    getSessionBrowseMessages: vi.fn(),
     searchSessionMessages: vi.fn(),
   },
 }))
@@ -24,41 +24,49 @@ vi.mock('@/composables/useApi', () => ({
 /**
  * 右栏历史面板（C-2）。
  *
- * 几何口径：jsdom 没有布局引擎（`offsetHeight` / `clientHeight` 恒为 0），故用
- * **原型 getter 模拟 CSS 口径**：卡片 141px、日期头 24px、间距 6px——与 SFC 里的
- * `.hist-card`（8+8 padding、10px meta、5 行 × 13px × 1.62 ≈ 105px）同量级。
- * 900 → 5 条、1080 → 7 条正是原型定稿的实测基准，此处用同一组几何钉死。
+ * 几何口径：jsdom 没有布局引擎，故用 getter 模拟真实浏览器的**实测值**——结果区高度
+ * 716px（1440×900）/ 896px（1440×1080）来自 `scripts/shots/probe-c2.mjs` 在 Chromium
+ * 里量出的 `.hist-results` 尺寸，不是窗口高度。卡片高度按正文长度分三档（短 55 /
+ * 中 97 / 长 139，量级取自同一次探针），日期头 21px——不再是「所有卡固定 141px +
+ * 结果区等于窗口高度」的恒等式；那个 mock 曾把 5/7 自证成真，实际 652px 里装不下。
  */
-const CARD_H = 141
-const DAY_H = 24
-const ITEM_GAP = 4
+const RESULTS_900 = 716
+const RESULTS_1080 = 896
 const HIST_GAP = 6
+const DAY_BLOCK = 21 // 日期头 + 卡内间距（探针：item 118.14 − card 97.14）
 
-let viewportH = 900
+let resultsH = RESULTS_900
 
-function itemHeight(el: HTMLElement): number {
-  const hasDay = Array.from(el.children).some((c) => c.classList.contains('hist-day'))
-  return CARD_H + (hasDay ? DAY_H + ITEM_GAP : 0)
+function bodyLen(el: HTMLElement): number {
+  return (el.querySelector('.hc-body')?.textContent ?? '').trim().length
+}
+
+/** 与探针里的三档内容长度对应：短 55 / 中 97 / 长 139 */
+function cardHeight(len: number): number {
+  return len > 100 ? 139 : len > 30 ? 97 : 55
 }
 
 beforeEach(() => {
-  viewportH = 900
+  resultsH = RESULTS_900
   Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
     configurable: true,
     get(this: HTMLElement) {
-      if (this.classList.contains('hist-card')) return CARD_H
-      if (this.classList.contains('hist-day')) return DAY_H
-      if (this.classList.contains('hist-item')) return itemHeight(this)
+      if (this.classList.contains('clipped')) return 0
+      if (this.classList.contains('hist-card')) return cardHeight(bodyLen(this))
+      if (this.classList.contains('hist-day')) return 17
+      if (this.classList.contains('hist-item')) {
+        return cardHeight(bodyLen(this)) + (this.querySelector('.hist-day') ? DAY_BLOCK : 0)
+      }
       return 0
     },
   })
   Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
     configurable: true,
     get(this: HTMLElement) {
-      return this.classList.contains('hist-results') ? viewportH : 0
+      return this.classList.contains('hist-results') ? resultsH : 0
     },
   })
-  // 浏览器口径：scrollHeight = max(内容高度, clientHeight)——内容不超高时两者相等
+  // 只累加**未被裁掉**的项——不是 `max(clientHeight, …)` 的恒等式，装页算法装不下时这里会超
   Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
     configurable: true,
     get(this: HTMLElement) {
@@ -66,8 +74,7 @@ beforeEach(() => {
       const items = Array.from(this.querySelectorAll<HTMLElement>('.hist-item')).filter(
         (i) => !i.classList.contains('clipped')
       )
-      const content = items.reduce((sum, i) => sum + i.offsetHeight + HIST_GAP, 0)
-      return Math.max(viewportH, content)
+      return items.reduce((sum, i) => sum + i.offsetHeight + HIST_GAP, 0)
     },
   })
 })
@@ -115,8 +122,49 @@ function twelveMessages(): Message[] {
   )
 }
 
+/**
+ * 27 条真实量级的历史（与探针同构：短/中/长三档混排、含 system、同一天）。
+ * 716px 结果区装 8 条、896px 装 10 条——这是真实 Chromium 的读数，不是窗口高度。
+ */
+function historyMessages(): Message[] {
+  const base = Date.parse(at(dayA, 12, 0))
+  return Array.from({ length: 27 }, (_, i) => {
+    const n = 27 - i
+    const content =
+      n % 7 === 0
+        ? `第${n}条：` +
+          '这是一段比较长的消息内容，用来模拟真实聊天里五行正文的卡片，包含部署、回滚、测试与环境。'.repeat(
+            3
+          )
+        : n % 3 === 0
+          ? `第${n}条：` + '中等长度的消息，大概两到三行，带一些上下文。'.repeat(2)
+          : `第${n}条：短消息 ${n}`
+    return msg(
+      `m-${n}`,
+      n % 9 === 0 ? 'system' : n % 2 === 0 ? 'agent' : 'user',
+      content,
+      new Date(base - i * 60_000).toISOString(),
+      n % 2 === 0 ? 'a1' : null
+    )
+  })
+}
+
+/** 10 条短消息（全部一屏装得下），用于角色筛选 */
+function shortAlternating(): Message[] {
+  return Array.from({ length: 10 }, (_, i) =>
+    msg(
+      `s${i + 1}`,
+      i % 2 === 0 ? 'user' : 'agent',
+      `短 ${i + 1}`,
+      at(dayA, 10, 9 - i),
+      i % 2 === 0 ? null : 'a1'
+    )
+  )
+}
+
 const facetsFixture = {
-  total: 15,
+  // total = days 之和（之前写 15 与 4+3+1 不一致，会被下一个读者当真实数据）
+  total: 8,
   days: [
     { date: dayA, count: 4 },
     { date: dayB, count: 3 },
@@ -153,15 +201,18 @@ describe('SessionHistoryPanel · 取数口径', () => {
     vi.clearAllMocks()
     setupStore()
     vi.mocked(api.getSessionMessageFacets).mockResolvedValue(facetsFixture)
-    vi.mocked(api.getSessionMessages).mockResolvedValue(twelveMessages())
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
+      rows: historyMessages(),
+      total: 27,
+    })
     vi.mocked(api.searchSessionMessages).mockResolvedValue({ rows: [], total: 0 })
   })
 
-  it('初始加载：facets 带本地时区偏移，浏览模式走 /messages（不带 q）', async () => {
+  it('初始加载：facets 带本地时区偏移，浏览模式走 /messages/browse（含 system，带 total）', async () => {
     const wrapper = await mountPanel()
 
     expect(api.getSessionMessageFacets).toHaveBeenCalledWith('s1', -new Date().getTimezoneOffset())
-    expect(api.getSessionMessages).toHaveBeenCalledWith(
+    expect(api.getSessionBrowseMessages).toHaveBeenCalledWith(
       's1',
       expect.objectContaining({ limit: 50 })
     )
@@ -170,13 +221,16 @@ describe('SessionHistoryPanel · 取数口径', () => {
       '全部',
       '11月13日',
       '11月12日',
-      `+1 更早`,
+      '选择日期',
+      '+1 更早',
     ])
+    // 浏览模式也有 total：分页条不再只有搜索模式能显示总数
+    expect(wrapper.find('.hp-index').text()).toContain('共 27 条')
 
     wrapper.unmount()
   })
 
-  it('搜索：Enter 提交后走 /search，命中处高亮 <mark>，sender 显示猫名', async () => {
+  it('搜索：Enter 提交后走 /search，正文命中处高亮 <mark>，sender 显示猫名', async () => {
     vi.mocked(api.searchSessionMessages).mockResolvedValue({
       rows: [
         msg('m1', 'agent', '部署失败：端口被占用', at(dayA, 10), 'a1'),
@@ -204,35 +258,53 @@ describe('SessionHistoryPanel · 取数口径', () => {
     wrapper.unmount()
   })
 
-  it('筛选 我 / 猫咪：只留对应角色，且回第 1 页', async () => {
+  it('发送者命中同样高亮（搜猫名时卡上至少有一处 <mark>，不是只有正文）', async () => {
+    vi.mocked(api.searchSessionMessages).mockResolvedValue({
+      rows: [msg('m1', 'agent', '与关键字无关的正文', at(dayA, 10), 'a1')],
+      total: 1,
+    })
     const wrapper = await mountPanel()
-    expect(wrapper.findAll('.hist-item').length).toBe(12)
+
+    await wrapper.find('.hist-search-input').setValue('ds猫')
+    await wrapper.find('.hist-search-input').trigger('keydown.enter')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+
+    expect(wrapper.findAll('.hc-body mark')).toHaveLength(0)
+    expect(wrapper.findAll('.hc-sender mark').map((m) => m.text())).toEqual(['ds猫'])
+
+    wrapper.unmount()
+  })
+
+  it('筛选 我 / 猫咪：只留对应角色，且回第 1 页', async () => {
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
+      rows: shortAlternating(),
+      total: 10,
+    })
+    const wrapper = await mountPanel()
+    expect(wrapper.findAll('.hist-item:not(.clipped)').length).toBe(10)
 
     await wrapper.findAll('.hist-filter')[1].trigger('click')
     await flushPromises()
     await nextTick()
     await nextTick()
     const users = wrapper.findAll('.hist-item:not(.clipped) .hc-body').map((b) => b.text())
-    expect(users).toEqual([
-      '第 1 条内容',
-      '第 3 条内容',
-      '第 5 条内容',
-      '第 7 条内容',
-      '第 9 条内容',
-    ])
+    expect(users).toEqual(['短 1', '短 3', '短 5', '短 7', '短 9'])
 
     await wrapper.findAll('.hist-filter')[2].trigger('click')
     await flushPromises()
     await nextTick()
     await nextTick()
+    const agents = wrapper.findAll('.hist-item:not(.clipped) .hc-body').map((b) => b.text())
+    expect(agents).toEqual(['短 2', '短 4', '短 6', '短 8', '短 10'])
     expect(wrapper.find('.hc-sender').text()).toBe('ds猫')
-    expect(wrapper.text()).toContain('第 2 条内容')
 
     wrapper.unmount()
   })
 
   it('空结果两种文案分开：无日期 → 没有匹配的消息；有日期 → 这一天没有消息', async () => {
-    vi.mocked(api.getSessionMessages).mockResolvedValue([])
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({ rows: [], total: 0 })
     const wrapper = await mountPanel()
     expect(wrapper.find('.hist-state').text()).toBe('没有匹配的消息')
 
@@ -245,7 +317,26 @@ describe('SessionHistoryPanel · 取数口径', () => {
     wrapper.unmount()
   })
 
-  it('搜索模式分页条显示匹配总数（total 是服务端口径，不受 limit 影响）', async () => {
+  it('搜索 + 日期同时为空：搜索词优先（不误报「这一天没有消息」）', async () => {
+    const wrapper = await mountPanel()
+
+    await wrapper.find('.hist-search-input').setValue('不存在')
+    await wrapper.find('.hist-search-input').trigger('keydown.enter')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.find('.hist-state').text()).toBe('没有匹配的消息')
+
+    await wrapper.findAll('.hist-date-chip')[1].trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.find('.hist-state').text()).toBe('没有匹配的消息')
+
+    wrapper.unmount()
+  })
+
+  it('搜索模式分页条显示匹配总数；角色筛选时注明未计筛选', async () => {
     vi.mocked(api.searchSessionMessages).mockResolvedValue({
       rows: twelveMessages().slice(0, 5),
       total: 42,
@@ -257,6 +348,13 @@ describe('SessionHistoryPanel · 取数口径', () => {
     await nextTick()
     await nextTick()
     expect(wrapper.find('.hp-index').text()).toContain('共 42 条')
+    expect(wrapper.find('.hp-note').exists()).toBe(false)
+
+    await wrapper.findAll('.hist-filter')[1].trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.find('.hp-note').text()).toContain('未计角色筛选')
 
     wrapper.unmount()
   })
@@ -267,12 +365,28 @@ describe('SessionHistoryPanel · 日期条与三级弹层', () => {
     vi.clearAllMocks()
     setupStore()
     vi.mocked(api.getSessionMessageFacets).mockResolvedValue(facetsFixture)
-    vi.mocked(api.getSessionMessages).mockResolvedValue(twelveMessages())
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
+      rows: historyMessages(),
+      total: 27,
+    })
+  })
+
+  it('「选择日期」入口常驻，点开同一个三级弹层，「全部时间」可收起', async () => {
+    const wrapper = await mountPanel()
+
+    await wrapper.find('.hist-date-chip.picker').trigger('click')
+    expect(wrapper.find('.hist-datepicker').exists()).toBe(true)
+    expect(wrapper.find('.dp-year').text()).toBe(`${Y} 年`)
+
+    await wrapper.find('.dp-all').trigger('click')
+    expect(wrapper.find('.hist-datepicker').exists()).toBe(false)
+
+    wrapper.unmount()
   })
 
   it('选老日期：弹层 年 → 月 → 日，选中后替换进日期条并高亮，回第 1 页', async () => {
     const wrapper = await mountPanel()
-    vi.mocked(api.getSessionMessages).mockClear()
+    vi.mocked(api.getSessionBrowseMessages).mockClear()
 
     await wrapper.find('.hist-date-chip.more').trigger('click')
     expect(wrapper.find('.hist-datepicker').exists()).toBe(true)
@@ -295,15 +409,15 @@ describe('SessionHistoryPanel · 日期条与三级弹层', () => {
       .findAll('.hist-date-chip')
       .find((c) => c.text() === `${Y - 1}年12月18日`)!
     expect(selected.classes()).toContain('on')
-    // 服务端按本地日窗口收窄（from/to 都传）
-    expect(api.getSessionMessages).toHaveBeenCalledWith(
+    // 服务端按本地日窗口收窄（from/to 都传），并走含 system 的 browse
+    expect(api.getSessionBrowseMessages).toHaveBeenCalledWith(
       's1',
       expect.objectContaining({
         from: expect.any(String),
         to: expect.any(String),
       })
     )
-    expect(wrapper.find('.hp-index').text()).toBe('第 1 页')
+    expect(wrapper.find('.hp-index').text()).toBe('第 1 页 · 共 27 条')
     expect(wrapper.find('.hist-datepicker').exists()).toBe(false)
 
     wrapper.unmount()
@@ -315,7 +429,10 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
     vi.clearAllMocks()
     setupStore()
     vi.mocked(api.getSessionMessageFacets).mockResolvedValue(facetsFixture)
-    vi.mocked(api.getSessionMessages).mockResolvedValue(twelveMessages())
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
+      rows: historyMessages(),
+      total: 27,
+    })
   })
 
   function stubResizeObserver(): Array<() => void> {
@@ -331,22 +448,29 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
     return observed
   }
 
-  it('900 高装 5 条、1080 高装 7 条（其余 clipped），结果区不内滚', async () => {
+  it('真实结果区高度：716px 装 8 条、896px 装 10 条；结果区不内滚', async () => {
     const observed = stubResizeObserver()
-    viewportH = 900
+    resultsH = RESULTS_900
     const wrapper = await mountPanel()
-    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(5)
-    expect(wrapper.findAll('.hist-item.clipped')).toHaveLength(7)
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(8)
+    expect(wrapper.findAll('.hist-item.clipped')).toHaveLength(19)
 
     const el = wrapper.find('.hist-results').element as HTMLElement
+    // clientHeight 是真实结果区高度，不是窗口高度
+    expect(el.clientHeight).toBe(RESULTS_900)
     expect(el.scrollHeight).toBeLessThanOrEqual(el.clientHeight)
+    // 装页是紧的：剩余空间不足以再塞下一张短卡（55+6）
+    expect(el.clientHeight - el.scrollHeight).toBeLessThan(61)
 
-    viewportH = 1080
+    resultsH = RESULTS_1080
     observed.forEach((cb) => cb())
     await flushPromises()
     await nextTick()
     await nextTick()
-    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(7)
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(10)
+    const el2 = wrapper.find('.hist-results').element as HTMLElement
+    expect(el2.clientHeight).toBe(RESULTS_1080)
+    expect(el2.scrollHeight).toBeLessThanOrEqual(el2.clientHeight)
 
     vi.unstubAllGlobals()
     wrapper.unmount()
@@ -355,19 +479,19 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
   it('尺寸变化重排：条数变多，且锚定原屏首条（页起点不动）', async () => {
     const observed = stubResizeObserver()
 
-    viewportH = 900
+    resultsH = RESULTS_900
     const wrapper = await mountPanel()
     const firstBefore = wrapper.findAll('.hist-item:not(.clipped) .hc-body')[0].text()
-    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(5)
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(8)
 
-    viewportH = 1080
+    resultsH = RESULTS_1080
     expect(observed.length).toBeGreaterThan(0)
     observed.forEach((cb) => cb())
     await flushPromises()
     await nextTick()
     await nextTick()
 
-    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(7)
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(10)
     expect(wrapper.findAll('.hist-item:not(.clipped) .hc-body')[0].text()).toBe(firstBefore)
 
     vi.unstubAllGlobals()
@@ -378,27 +502,33 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
     const page1 = Array.from({ length: 50 }, (_, i) =>
       msg(`p1-${i}`, 'user', `第一页 ${i}`, at(dayA, 10, i))
     )
-    vi.mocked(api.getSessionMessages).mockResolvedValueOnce(page1)
-    vi.mocked(api.getSessionMessages).mockResolvedValueOnce([])
+    // 服务端 DESC：最新在前（p2-4 在 9:04）
+    const page2 = Array.from({ length: 5 }, (_, i) =>
+      msg(`p2-${4 - i}`, 'user', `第二页 ${4 - i}`, at(dayA, 9, 4 - i))
+    )
+    vi.mocked(api.getSessionBrowseMessages)
+      .mockResolvedValueOnce({ rows: page1, total: 50 })
+      .mockResolvedValueOnce({ rows: page2, total: 50 })
+      .mockResolvedValue({ rows: page1, total: 50 })
     const wrapper = await mountPanel()
 
-    // 一屏只显示 5 条；下一页游标 = 第 5 条（不是第 50 条）
-    const fifth = wrapper.findAll('.hist-item:not(.clipped) .hc-body')[4].text()
+    // 一屏只显示 11 条；下一页游标 = 第 11 条（不是第 50 条）
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(11)
     await wrapper.findAll('.hp-btn')[1].trigger('click')
     await flushPromises()
     await nextTick()
     await nextTick()
 
-    const secondCall = vi.mocked(api.getSessionMessages).mock.calls[1][1] as any
-    expect(secondCall.before).toBe('p1-4')
-    expect(fifth).toContain('第一页 4')
-    expect(wrapper.find('.hp-index').text()).toBe('第 2 页')
+    const secondCall = vi.mocked(api.getSessionBrowseMessages).mock.calls[1][1] as any
+    expect(secondCall.before).toBe('p1-10')
+    expect(wrapper.find('.hp-index').text()).toBe('第 2 页 · 共 50 条')
+    expect(wrapper.find('.hc-body').text()).toBe('第二页 4')
 
     await wrapper.findAll('.hp-btn')[0].trigger('click')
     await flushPromises()
     await nextTick()
     await nextTick()
-    expect(wrapper.find('.hp-index').text()).toBe('第 1 页')
+    expect(wrapper.find('.hp-index').text()).toBe('第 1 页 · 共 50 条')
 
     wrapper.unmount()
   })
@@ -407,8 +537,9 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
     const page1 = Array.from({ length: 50 }, (_, i) =>
       msg(`p1-${i}`, 'user', `第一页 ${i}`, at(dayA, 10, i))
     )
-    vi.mocked(api.getSessionMessages).mockResolvedValueOnce(page1)
-    vi.mocked(api.getSessionMessages).mockRejectedValueOnce(new Error('网络抖了一下'))
+    vi.mocked(api.getSessionBrowseMessages)
+      .mockResolvedValueOnce({ rows: page1, total: 50 })
+      .mockRejectedValueOnce(new Error('网络抖了一下'))
     const wrapper = await mountPanel()
 
     await wrapper.findAll('.hp-btn')[1].trigger('click')
@@ -417,19 +548,92 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
     await nextTick()
 
     // 旧页仍在（不是空态），错误在独立一行
-    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(5)
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(11)
     expect(wrapper.findAll('.hist-reveal-err').map((e) => e.text())).toContain('网络抖了一下')
+
+    wrapper.unmount()
+  })
+
+  it('角色筛选把整页筛空：提示「继续翻页」，下一页按钮仍能发出请求（不是死路）', async () => {
+    let calls = 0
+    vi.mocked(api.getSessionBrowseMessages).mockImplementation(async () => {
+      calls++
+      if (calls <= 11) {
+        return {
+          rows: Array.from({ length: 50 }, (_, j) =>
+            msg(`a-${calls}-${j}`, 'agent', `猫 ${calls}-${j}`, at(dayA, 10, j), 'a1')
+          ),
+          total: 500,
+        }
+      }
+      return { rows: [], total: 500 }
+    })
+    const wrapper = await mountPanel()
+
+    await wrapper.findAll('.hist-filter')[1].trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    // 首屏 role=all 取 1 个 chunk 就够 TARGET_ROWS；切「我」后连取 MAX_CHUNKS=10 个 chunk
+    expect(calls).toBe(11)
+    expect(wrapper.find('.hist-state').text()).toBe('本页没有匹配，继续翻页')
+
+    await wrapper.findAll('.hp-btn')[1].trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(calls).toBe(12)
+    const twelfth = vi.mocked(api.getSessionBrowseMessages).mock.calls[11][1] as any
+    expect(twelfth.before).toBe('a-11-49')
 
     wrapper.unmount()
   })
 })
 
-describe('SessionHistoryPanel · 跳转主区', () => {
+describe('SessionHistoryPanel · 过期响应与跳转主区', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     setupStore()
     vi.mocked(api.getSessionMessageFacets).mockResolvedValue(facetsFixture)
-    vi.mocked(api.getSessionMessages).mockResolvedValue(twelveMessages())
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
+      rows: twelveMessages(),
+      total: 12,
+    })
+    vi.mocked(api.searchSessionMessages).mockResolvedValue({ rows: [], total: 0 })
+  })
+
+  it('浏览请求未回时按 Enter 搜索：旧响应晚到不得覆盖新结果', async () => {
+    let resolveBrowse!: (v: { rows: Message[]; total: number }) => void
+    vi.mocked(api.getSessionBrowseMessages).mockReturnValue(
+      new Promise((resolve) => {
+        resolveBrowse = resolve as never
+      }) as never
+    )
+    const wrapper = mount(SessionHistoryPanel, {
+      props: { sessionId: 's1' },
+      global: { plugins: [pinia] },
+    })
+    await nextTick()
+
+    vi.mocked(api.searchSessionMessages).mockResolvedValue({
+      rows: [msg('s-1', 'user', '搜索命中', at(dayA, 10))],
+      total: 1,
+    })
+    await wrapper.find('.hist-search-input').setValue('命中')
+    await wrapper.find('.hist-search-input').trigger('keydown.enter')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.text()).toContain('搜索命中')
+
+    resolveBrowse({ rows: twelveMessages(), total: 12 })
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.text()).toContain('搜索命中')
+    expect(wrapper.text()).not.toContain('第 1 条内容')
+
+    wrapper.unmount()
   })
 
   it('点结果调 store.revealMessage(id)；面板保持打开；返回 false 显式提示', async () => {
@@ -447,6 +651,37 @@ describe('SessionHistoryPanel · 跳转主区', () => {
     await wrapper.findAll('.hist-card')[1].trigger('click')
     await flushPromises()
     expect(wrapper.find('.hist-reveal-err').text()).toBe('该消息已在会话开头之前')
+
+    wrapper.unmount()
+  })
+
+  it('revealMessage 失败且有 olderError 时显示真实错误，不归因成「开头之前」', async () => {
+    const store = useChatStore()
+    const spy = vi.spyOn(store, 'revealMessage').mockResolvedValue(false)
+    store.olderError = '网络断了'
+    const wrapper = await mountPanel()
+
+    await wrapper.find('.hist-card').trigger('click')
+    await flushPromises()
+    expect(spy).toHaveBeenCalled()
+    expect(wrapper.find('.hist-reveal-err').text()).toBe('网络断了')
+
+    wrapper.unmount()
+  })
+
+  it('system 结果不可跳转：给专门文案，不白翻 50 轮后误报「开头之前」', async () => {
+    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
+      rows: [msg('sys-1', 'system', '重启完成', at(dayA, 10))],
+      total: 1,
+    })
+    const store = useChatStore()
+    const spy = vi.spyOn(store, 'revealMessage').mockResolvedValue(false)
+    const wrapper = await mountPanel()
+
+    await wrapper.find('.hist-card').trigger('click')
+    await flushPromises()
+    expect(spy).not.toHaveBeenCalled()
+    expect(wrapper.find('.hist-reveal-err').text()).toBe('系统通知不在主消息流中显示')
 
     wrapper.unmount()
   })

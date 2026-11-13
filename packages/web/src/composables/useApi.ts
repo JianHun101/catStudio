@@ -788,6 +788,23 @@ export const api = {
       `/sessions/${id}/messages/facets?tzOffset=${encodeURIComponent(String(tzOffset))}`
     ),
 
+  // 右栏历史面板的**默认列表**（无搜索词）：与 `/messages` 不同，本端点含 system
+  // （人看的历史视图是全貌），并返回 `total`（日期条计数与列表同一口径）。
+  getSessionBrowseMessages: (
+    id: string,
+    opts: { before?: string; limit?: number; from?: string; to?: string } = {}
+  ) => {
+    const q = new URLSearchParams()
+    if (opts.before) q.set('before', opts.before)
+    if (opts.limit !== undefined) q.set('limit', String(opts.limit))
+    if (opts.from) q.set('from', opts.from)
+    if (opts.to) q.set('to', opts.to)
+    const query = q.toString()
+    return request<{ rows: Message[]; total: number }>(
+      `/sessions/${id}/messages/browse${query ? `?${query}` : ''}`
+    )
+  },
+
   // 右栏历史面板的全文搜索：`q` 必填（服务端校验 trim 非空、≤200），rows 投影与 /messages 逐字一致，
   // `total` 是匹配总数（不受 before/limit 影响，用于「更多」判断）。
   searchSessionMessages: (

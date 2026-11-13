@@ -331,6 +331,47 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     return rows.map(toMessageDto)
   })
 
+  // ─── GET /api/sessions/:id/messages/browse — 历史面板默认列表 ──
+  //
+  // 右栏历史面板**无搜索词**时的取数口。与 `/messages` 的关键差异：本端点**含 system**
+  // （人看的历史视图是全貌，运维通告也在历史里），且额外返回 `total`——面板的日期条
+  // 计数来自 facets（同样含 system），两处必须同一口径，否则「日期条写 1 条、点进去空」。
+  // 分页/时间窗语义与 `/search` 逐字一致；行投影复用 `toMessageDto`。
+
+  app.get('/api/sessions/:id/messages/browse', async (req, reply) => {
+    const id = (req.params as any).id
+
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    const q = (req.query as any) ?? {}
+    const parsedLimit = parseInt(q.limit ?? '', 10)
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 50
+
+    const before = q.before
+    if (before !== undefined && (typeof before !== 'string' || !before.trim())) {
+      return reply.status(400).send({ error: 'before 必须是非空字符串（消息 id 游标）' })
+    }
+    const from = q.from
+    if (from !== undefined && (typeof from !== 'string' || !from.trim())) {
+      return reply.status(400).send({ error: 'from 必须是非空字符串（created_at 下界）' })
+    }
+    const to = q.to
+    if (to !== undefined && (typeof to !== 'string' || !to.trim())) {
+      return reply.status(400).send({ error: 'to 必须是非空字符串（created_at 上界）' })
+    }
+
+    const result = messageSearchRepo.listSessionMessages(id, {
+      limit,
+      before: before ?? undefined,
+      from: from ?? undefined,
+      to: to ?? undefined,
+    })
+
+    return { rows: result.rows.map(toMessageDto), total: result.total }
+  })
+
   // ─── GET /api/sessions/:id/messages/facets — 历史面板日期索引 ──
   //
   // 右栏历史面板的日期条：哪些天/月有消息、各多少条。**按 `tzOffset` 换算后分组**，
