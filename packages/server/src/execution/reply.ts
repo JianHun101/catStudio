@@ -645,7 +645,9 @@ export async function runAgentReply(
     const ratio = preTruncationTokens / maxTokens
     // SUMMARY_COMPRESS_LIMIT = 数组**保留条数**上限（不是生成次数上限）；下限钉 1，
     // 0 会把压缩块裁空、下一轮退回全量重读——那比多留一块贵得多。
-    const compressLimit = Math.max(1, parseInt(process.env.SUMMARY_COMPRESS_LIMIT || '3', 10) || 3)
+    // 解析：非数字回落 3；0/负数取下限 1（旧写法 `|| 3` 会把显式的 0 静默吃成 3）。
+    const rawCompressLimit = parseInt(process.env.SUMMARY_COMPRESS_LIMIT ?? '3', 10)
+    const compressLimit = Number.isFinite(rawCompressLimit) ? Math.max(1, rawCompressLimit) : 3
     const entries = parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
     const readyCount = countReadySummaries(entries)
     const ready = lastReadySummary(entries)
@@ -696,6 +698,10 @@ export async function runAgentReply(
               content: generated.summary,
               ...summaryBoundaryPatch(generated),
             })
+            // 观测值按**裁剪后**重新计数：trim 可能刚丢弃最旧块，readyCount + 1 会高报
+            const totalCompressed = countReadySummaries(
+              parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
+            )
             messagesForTruncation = applySummaryReplace(relevantMessages, generated.summary).kept
             summaryBlockMsg = buildSummaryBlockMessage(
               generated.summary,
@@ -710,7 +716,7 @@ export async function runAgentReply(
               agentId: agent.id,
               sessionId,
               summaryTokens: estimateTokens(generated.summary),
-              totalCompressed: readyCount + 1,
+              totalCompressed,
             })
           } else {
             // 无 key / 空摘要：降级普通截断 + 留痕（不阻塞主流程）
@@ -752,11 +758,21 @@ export async function runAgentReply(
               })
               return
             }
-            sessionsRepo.updateCompressedSummary(sessionId, entryId, {
+            const updated = sessionsRepo.updateCompressedSummary(sessionId, entryId, {
               tokenCount: estimateTokens(generated.summary),
               content: generated.summary,
               ...summaryBoundaryPatch(generated),
             })
+            if (!updated) {
+              // 条目已被后续 append + trim 裁掉（keep 小 + 生成慢）：生成成功但没落库，
+              // 不能打 completed 谎报（D-3 审查 P3-5）。
+              log.warn('summary replace async skipped (pending already trimmed)', {
+                traceId,
+                agentId: agent.id,
+                sessionId,
+              })
+              return
+            }
             log.info('summary replace async completed', {
               traceId,
               agentId: agent.id,
