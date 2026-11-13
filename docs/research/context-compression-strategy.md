@@ -3,6 +3,7 @@
 > 研究日期：2026-07-19
 > 作者：店长
 > 目标：在节省 token 的同时支持更长的连续对话
+> 注：源码位置已去行号、按当前实现标注（研究当时 `runAgentReply` 位于 `connectors/socketio.ts`）。
 
 ---
 
@@ -20,21 +21,21 @@
 
 关键文件：
 
-- `packages/server/src/connectors/socketio.ts:720-1074` — `runAgentReply()` 上下文构建主函数
+- `packages/server/src/execution/reply.ts` 的 `runAgentReply()` — 上下文构建主函数
 - `packages/server/src/memory/index.ts` — 向量记忆的存储/检索/注入
-- `packages/server/src/llm/cli-utils.ts:98-116` — CLI 适配器的 `messagesToPrompt()` 纯文本转换
-- `packages/server/src/llm/deepseek.ts:26-151` — DeepSeek HTTP API 适配器
-- `packages/server/src/seed-data.ts:42-86` — 铁律（IRON_LAWS）定义
+- `packages/server/src/llm/cli-utils.ts` 的 `messagesToPrompt()` — CLI 适配器的纯文本转换
+- `packages/server/src/llm/deepseek.ts` 的 `DeepSeekAdapter` — DeepSeek HTTP API 适配器
+- `packages/server/src/seed-data.ts` 的 `COMMON_IRON_LAWS` — 铁律（IRON_LAWS）共通层定义
 
 ### 1.2 Token 消耗瓶颈（按严重程度排序）
 
-| 瓶颈                   | 位置                     | 浪费原因                                                                                                | 预估占比 |
-| ---------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------- | -------- |
-| **铁律 system prompt** | `seed-data.ts:42-86`     | 每次 LLM 调用都完整重复，约 800-1200 字符                                                               | ~15%     |
-| **旧消息逐字保留**     | `socketio.ts:755-764`    | 超过 50 轮的旧消息对当前对话几乎无价值，但仍占用 token                                                  | ~40%     |
-| **角色前缀包装**       | `socketio.ts:854-887`    | 每条消息加 `【某某】说：`、`用户（@了X）对你说：` 前缀，短消息场景下开销占比高                          | ~10%     |
-| **向量记忆去重不充分** | `memory/index.ts:76-120` | 仅按余弦距离去重，不检查语义重复，可能注入相似记忆                                                      | ~5%      |
-| **无 token 计数**      | 全局                     | 用 `content.length`（字符数）替代 token 计数，误差 3-5 倍（中文每个字 0.5-2 token），无法准确的窗口管理 | N/A      |
+| 瓶颈                   | 位置                                  | 浪费原因                                                                                                | 预估占比 |
+| ---------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------- | -------- |
+| **铁律 system prompt** | `seed-data.ts` 的 `COMMON_IRON_LAWS`  | 每次 LLM 调用都完整重复，约 800-1200 字符                                                               | ~15%     |
+| **旧消息逐字保留**     | `execution/reply.ts` 的消息裁剪段     | 超过 50 轮的旧消息对当前对话几乎无价值，但仍占用 token                                                  | ~40%     |
+| **角色前缀包装**       | `execution/reply.ts` 的角色前缀开销段 | 每条消息加 `【某某】说：`、`用户（@了X）对你说：` 前缀，短消息场景下开销占比高                          | ~10%     |
+| **向量记忆去重不充分** | `memory/index.ts` 的检索去重段        | 仅按余弦距离去重，不检查语义重复，可能注入相似记忆                                                      | ~5%      |
+| **无 token 计数**      | 全局                                  | 用 `content.length`（字符数）替代 token 计数，误差 3-5 倍（中文每个字 0.5-2 token），无法准确的窗口管理 | N/A      |
 
 ### 1.3 现有保护措施
 
@@ -176,7 +177,7 @@ for 每条消息（从新到旧）:
    - 对 HTTP 适配器（DeepSeek）：用 `tiktoken` 或 DeepSeek 兼容的 tokenizer
    - 对 CLI 适配器（Claude/Codex）：用字符估算 `Math.ceil(chineseChars * 0.75 + nonChinese * 0.25)`
    - 导出 `countTokens(text: string): number` 和 `countMessagesTokens(messages: LLMMessage[]): number`
-2. 替换 `socketio.ts:895` 和 `socketio.ts:998` 中的 `content.length` 为 `countTokens()`
+2. 替换 `runAgentReply()` 里以 `content.length` 累加估算上下文长度的几处为 `countTokens()`
 3. 新增环境变量：`MAX_CONTEXT_TOKENS`（默认 6000）、`CONTEXT_TOKEN_WARN_THRESHOLD`（默认 0.8）
 
 ### 阶段二：Token 感知滑动窗口（优先级高，2-3 天）
