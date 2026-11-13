@@ -527,6 +527,92 @@ describe('socketio connector', () => {
       expect(history[0].sessionId).toBe('session-1')
     })
 
+    it('CONTEXT_WINDOW_STATS 按折叠窗口估算：有就绪摘要块时显著低于逐条累加', async () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500) // 3750 token + 50 开销
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-${i}`, long, `2026-08-01 00:00:${String(i).padStart(2, '0')}`)
+        }
+        const summary = '历史摘要内容'.repeat(20) // 就绪块（content 非空）
+        db.prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`).run(
+          JSON.stringify([
+            {
+              id: 'fold-1',
+              createdAt: '2026-08-01T00:00:00Z',
+              tokenCount: 100,
+              content: summary,
+              coveredThrough: 24,
+            },
+          ])
+        )
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        const stats = statsCall[1]
+        const raw = estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        expect(stats.maxContextTokens).toBe(128000)
+        expect(stats.contextTokens).toBeLessThan(128000 * 0.8)
+        // 判别力核心：旧口径 = raw(≈91k, 71% 窗口) 也能过 <80% 那条，必须再钉 < raw×0.6
+        expect(stats.contextTokens).toBeLessThan(raw * 0.6)
+
+        // 与公式对齐：system + 摘要块 + 最近窗口（kept 由折叠函数自身给出）
+        const { applySummaryReplace, buildSummaryBlockMessage } =
+          await import('../execution/context.js')
+        const kept = applySummaryReplace(
+          Array.from({ length: 24 }, () => ({ role: 'user', content: long })),
+          summary
+        ).kept
+        const expected =
+          estimateTokens('You are a cat.') +
+          estimateTokens(buildSummaryBlockMessage(summary).content) +
+          kept.reduce((s: number, m: any) => s + estimateTokens(m.content) + 50, 0)
+        expect(stats.contextTokens).toBe(expected)
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+      }
+    })
+
+    it('CONTEXT_WINDOW_STATS 无摘要时逐字等于旧逐条累加公式（回归门）', () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500)
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-nosum-${i}`, long, `2026-08-01 00:01:${String(i).padStart(2, '0')}`)
+        }
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        expect(statsCall[1].contextTokens).toBe(
+          estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        )
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+      }
+    })
+
     it('SESSION_HISTORY 恢复带 segments（新消息时间序交错随历史重放）', () => {
       const db = getDb()
       const segs = [

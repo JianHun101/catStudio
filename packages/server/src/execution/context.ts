@@ -173,6 +173,54 @@ export function applySummaryReplace(messages: any[], summary: string): { kept: a
   return { kept }
 }
 
+/** 折叠窗口 token 估算的输入面（`connectors/socketio.ts` join 分支消费）。 */
+export interface FoldedContextInput {
+  systemPrompt: string
+  messages: any[]
+  summaryEntries: CompressedSummaryEntry[]
+  maxTokens: number
+}
+
+/**
+ * 按**折叠窗口**估算上下文 token（与执行期 `reply.ts` 的压缩口径对齐）。
+ *
+ * 背景：join 分支旧实现把 system_prompt + 全部可见消息逐条累加，不套用摘要折叠替换，
+ * 于是刷新页面后右侧成员面板显示的是「未折叠历史」的超高值（实测 131%），而真实
+ * prompt 只有 2 万多 token。本函数是纯函数：同一份输入执行期怎么压，这里就怎么算。
+ *
+ * 语义（与 `reply.ts` 的进入条件逐条对齐）：
+ * - `raw < SUMMARY_MIN_TOKENS` 或 `raw/maxTokens < SUMMARY_PRE_COMPRESS_RATIO`
+ *   → 执行期不会压缩，返回 raw；
+ * - 否则取**最后一个就绪块**（content 非空），无就绪块（含只有 pending / JSON 坏）
+ *   → 返回 raw；
+ * - 有就绪块 → `system + 摘要块 + 最近窗口`，并与 raw 取 min（估算绝不高报）。
+ *
+ * 注意：摘要块按**不带折叠声明**的形状估算，声明文本（约百 token 级）不计入——
+ * 这是刻意留的少量低估，好过在 join 分支复制一份声明构建逻辑。
+ */
+export function estimateFoldedContextTokens({
+  systemPrompt,
+  messages,
+  summaryEntries,
+  maxTokens,
+}: FoldedContextInput): number {
+  let raw = estimateTokens(systemPrompt)
+  for (const m of messages) raw += estimateTokens(m.content) + 50
+
+  if (raw < SUMMARY_MIN_TOKENS) return raw
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) return raw
+  if (raw / maxTokens < SUMMARY_PRE_COMPRESS_RATIO) return raw
+
+  const ready = lastReadySummary(summaryEntries)
+  if (!ready) return raw
+
+  const { kept } = applySummaryReplace(messages, ready.content)
+  let folded = estimateTokens(systemPrompt)
+  folded += estimateTokens(buildSummaryBlockMessage(ready.content).content)
+  for (const m of kept) folded += estimateTokens(m.content) + 50
+  return Math.min(raw, folded)
+}
+
 export {
   SUMMARY_KEEP_RECENT,
   SUMMARY_KEEP_TOKENS,
