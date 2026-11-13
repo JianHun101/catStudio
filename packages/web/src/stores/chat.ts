@@ -244,8 +244,8 @@ export const useChatStore = defineStore('chat', () => {
    */
   let inflightOlder: { sessionId: string; promise: Promise<boolean> } | null = null
   /**
-   * 会话代际：切会话 / 历史被整体替换时自增。翻页请求发起时捕获当前代际，
-   * 收尾时按代际判「还是不是同一个世界」。
+   * 会话代际：**每次进入 `joinSession`（含同会话重入）** / 历史被整体替换时自增。
+   * 翻页请求发起时捕获当前代际，收尾时按代际判「还是不是同一个世界」。
    *
    * 为什么不用 `sessionId` 判：A→B→A 时旧请求的 sessionId 会与当前会话**重新对上**，
    * 只按会话判会让旧页穿回 A 的数组、旧失败写进 A 的错误态。代际是单调量，切回也对不上。
@@ -482,9 +482,11 @@ export const useChatStore = defineStore('chat', () => {
     // 切走前把当前消息存入缓存（存数组引用，后续 messages.value 重新赋值不会改旧引用）
     if (switching) {
       sessionMessages.set(activeSessionId.value!, messages.value)
-      // 换代：旧会话仍在途的翻页请求从此属于上一个世界，其结果（含失败）一律不许落地
-      sessionEpoch++
     }
+    // 换代：**每次进入 joinSession 都换**（同会话重入也换）。下方无条件复位 loadingOlder / 清句柄，
+    // 只有代际同步变，旧请求的 finally 才不会把新请求的 loadingOlder 清掉。旧的在途翻页请求从此
+    // 属于上一个世界，其结果（含失败）一律不许落地。
+    sessionEpoch++
     activeSessionId.value = sessionId
     writeActiveSessionId(sessionId) // 记住本次选中会话（刷新恢复用）
     handoffFailed.value = null // 切会话清除旧会话的交接失败横幅
@@ -492,7 +494,8 @@ export const useChatStore = defineStore('chat', () => {
     hasMoreOlder.value = false
     loadingOlder.value = false
     olderError.value = null
-    // 旧会话的在途请求作废：它的结果会按 sessionId 丢弃，句柄不能留给新会话复用
+    // 旧的在途请求作废：它的结果按**代际**丢弃（同会话重入时 sessionId 会重新对上，只有代际分得清），
+    // 句柄不能留给下一次上滚复用
     inflightOlder = null
     const cached = sessionMessages.get(sessionId)
     if (cached) {
@@ -602,7 +605,7 @@ export const useChatStore = defineStore('chat', () => {
         return false
       } finally {
         // 只收自己这一笔：代际一致才说明没有别的会话/历史替换接管 loadingOlder。
-        // 切会话与 SESSION_HISTORY 都已自行把 loadingOlder 置 false，旧请求不许再动它。
+        // joinSession 与 SESSION_HISTORY 都已自行把 loadingOlder 置 false，旧请求不许再动它。
         if (epoch === sessionEpoch) loadingOlder.value = false
       }
     })()
