@@ -657,6 +657,18 @@ export interface ExecutionDetailResponse {
   } | null
 }
 
+/**
+ * 右栏历史面板的日期索引（`GET /api/sessions/:id/messages/facets`）。
+ *
+ * `date` / `month` 是**按 tzOffset 换算后**的本地日期，前端直接展示，不再二次换算；
+ * `total` 含 system（人看的历史视图不排除运维通告）。
+ */
+export interface SessionMessageFacets {
+  total: number
+  days: Array<{ date: string; count: number }>
+  months: Array<{ month: string }>
+}
+
 export const api = {
   // Agents
   getAgents: () => request<any[]>('/agents'),
@@ -755,12 +767,59 @@ export const api = {
 
   // 会话历史翻页（懒加载更早消息）：`before` 是排他消息 id 游标，返回**严格早于**它的一批。
   // wire 形状与既有 GET /sessions/:id/messages 一致（DESC 数组）；前插所需的 ASC 反转由调用方做。
-  getSessionMessages: (id: string, opts: { before?: string; limit?: number } = {}) => {
+  // `from`/`to` 是 created_at 时间窗（右栏历史面板按日浏览时用），服务端按整秒含入归一。
+  getSessionMessages: (
+    id: string,
+    opts: { before?: string; limit?: number; from?: string; to?: string } = {}
+  ) => {
     const q = new URLSearchParams()
     if (opts.before) q.set('before', opts.before)
     if (opts.limit !== undefined) q.set('limit', String(opts.limit))
+    if (opts.from) q.set('from', opts.from)
+    if (opts.to) q.set('to', opts.to)
     const query = q.toString()
     return request<Message[]>(`/sessions/${id}/messages${query ? `?${query}` : ''}`)
+  },
+
+  // 右栏历史面板的日期索引：哪些天/月有消息、各多少条（`tzOffset` = 分钟，东八区 480）。
+  // 分组由服务端按偏移换算后做——前端拿到的 date 就是本地日期，不再二次换算。
+  getSessionMessageFacets: (id: string, tzOffset: number) =>
+    request<SessionMessageFacets>(
+      `/sessions/${id}/messages/facets?tzOffset=${encodeURIComponent(String(tzOffset))}`
+    ),
+
+  // 右栏历史面板的**默认列表**（无搜索词）：与 `/messages` 不同，本端点含 system
+  // （人看的历史视图是全貌），并返回 `total`（日期条计数与列表同一口径）。
+  getSessionBrowseMessages: (
+    id: string,
+    opts: { before?: string; limit?: number; from?: string; to?: string } = {}
+  ) => {
+    const q = new URLSearchParams()
+    if (opts.before) q.set('before', opts.before)
+    if (opts.limit !== undefined) q.set('limit', String(opts.limit))
+    if (opts.from) q.set('from', opts.from)
+    if (opts.to) q.set('to', opts.to)
+    const query = q.toString()
+    return request<{ rows: Message[]; total: number }>(
+      `/sessions/${id}/messages/browse${query ? `?${query}` : ''}`
+    )
+  },
+
+  // 右栏历史面板的全文搜索：`q` 必填（服务端校验 trim 非空、≤200），rows 投影与 /messages 逐字一致，
+  // `total` 是匹配总数（不受 before/limit 影响，用于「更多」判断）。
+  searchSessionMessages: (
+    id: string,
+    opts: { q: string; limit?: number; before?: string; from?: string; to?: string }
+  ) => {
+    const q = new URLSearchParams()
+    q.set('q', opts.q)
+    if (opts.limit !== undefined) q.set('limit', String(opts.limit))
+    if (opts.before) q.set('before', opts.before)
+    if (opts.from) q.set('from', opts.from)
+    if (opts.to) q.set('to', opts.to)
+    return request<{ rows: Message[]; total: number }>(
+      `/sessions/${id}/messages/search?${q.toString()}`
+    )
   },
 
   // 执行元数据（气泡 footer 耗时/token 的落库稳定数据源——execution_logs.message_id 关联回复消息，

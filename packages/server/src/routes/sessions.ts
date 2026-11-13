@@ -13,10 +13,11 @@ import {
   sessions as sessionsRepo,
   agents as agentsRepo,
   messages as messagesRepo,
+  messageSearch as messageSearchRepo,
   executionLogs as execLogsRepo,
   sessionReadState as readStateRepo,
 } from '../db/repository/index.js'
-import type { SessionRow } from '../db/repository/index.js'
+import type { MessageRow, SessionRow } from '../db/repository/index.js'
 import { normalizeIsoMs } from '../db/repository/clock.js'
 import { getIO } from '../connectors/socketio.js'
 import { toIsoDb } from '../db/repository/time.js'
@@ -327,23 +328,126 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       to: to ?? undefined,
     })
 
-    return rows.map((r) => {
-      const msgImages: string[] = parseJsonArray(r.images)
-      return {
-        id: r.id,
-        sessionId: r.session_id,
-        agentId: r.agent_id || null,
-        role: r.role,
-        content: r.content,
-        images: msgImages.length > 0 ? msgImages : undefined,
-        mentions: JSON.parse(r.mentions || '[]'),
-        taskId: r.task_id || null,
-        thinkingContent: r.thinking_content || undefined,
-        toolContent: parseJsonValue<ToolCallInfo[]>(r.tool_content),
-        segments: parseJsonValue<StreamSegment[]>(r.segments),
-        createdAt: toIsoDb(r.created_at),
-      }
+    return rows.map(toMessageDto)
+  })
+
+  // ─── GET /api/sessions/:id/messages/browse — 历史面板默认列表 ──
+  //
+  // 右栏历史面板**无搜索词**时的取数口。与 `/messages` 的关键差异：本端点**含 system**
+  // （人看的历史视图是全貌，运维通告也在历史里），且额外返回 `total`——面板的日期条
+  // 计数来自 facets（同样含 system），两处必须同一口径，否则「日期条写 1 条、点进去空」。
+  // 分页/时间窗语义与 `/search` 逐字一致；行投影复用 `toMessageDto`。
+
+  app.get('/api/sessions/:id/messages/browse', async (req, reply) => {
+    const id = (req.params as any).id
+
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    const q = (req.query as any) ?? {}
+    const parsedLimit = parseInt(q.limit ?? '', 10)
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 50
+
+    const before = q.before
+    if (before !== undefined && (typeof before !== 'string' || !before.trim())) {
+      return reply.status(400).send({ error: 'before 必须是非空字符串（消息 id 游标）' })
+    }
+    const from = q.from
+    if (from !== undefined && (typeof from !== 'string' || !from.trim())) {
+      return reply.status(400).send({ error: 'from 必须是非空字符串（created_at 下界）' })
+    }
+    const to = q.to
+    if (to !== undefined && (typeof to !== 'string' || !to.trim())) {
+      return reply.status(400).send({ error: 'to 必须是非空字符串（created_at 上界）' })
+    }
+
+    const result = messageSearchRepo.listSessionMessages(id, {
+      limit,
+      before: before ?? undefined,
+      from: from ?? undefined,
+      to: to ?? undefined,
     })
+
+    return { rows: result.rows.map(toMessageDto), total: result.total }
+  })
+
+  // ─── GET /api/sessions/:id/messages/facets — 历史面板日期索引 ──
+  //
+  // 右栏历史面板的日期条：哪些天/月有消息、各多少条。**按 `tzOffset` 换算后分组**，
+  // 不是截 UTC 日期——否则东八区的晚间消息会错落到前一天（静默错位）。
+  // `total` 含 system：这是给人看的历史视图，运维通告也在历史里。
+
+  app.get('/api/sessions/:id/messages/facets', async (req, reply) => {
+    const id = (req.params as any).id
+
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    const raw = (req.query as any)?.tzOffset
+    let tzOffset = 0
+    if (raw !== undefined && raw !== '') {
+      const n = Number(raw)
+      if (!Number.isFinite(n)) {
+        return reply
+          .status(400)
+          .send({ error: 'tzOffset 必须是数字（分钟，UTC 偏移，如东八区 480）' })
+      }
+      tzOffset = Math.max(-840, Math.min(840, Math.trunc(n)))
+    }
+
+    return messageSearchRepo.getSessionMessageFacets(id, tzOffset)
+  })
+
+  // ─── GET /api/sessions/:id/messages/search — 历史面板全文搜索 ──
+  //
+  // rows 的投影**复用 `/messages` 的 `toMessageDto`**（不另写第二份 11 字段映射：
+  // 两处映射必然漂移）；`total` 是该 q + 时间窗的匹配总数，不受 before/limit 影响。
+
+  app.get('/api/sessions/:id/messages/search', async (req, reply) => {
+    const id = (req.params as any).id
+
+    if (!sessionsRepo.getSessionById(id)) {
+      return reply.status(404).send({ error: 'Session not found' })
+    }
+
+    const q = (req.query as any) ?? {}
+    const term = typeof q.q === 'string' ? q.q : ''
+    if (!term.trim()) {
+      return reply.status(400).send({ error: '搜索词 q 必填，且 trim 后不能为空' })
+    }
+    if (term.trim().length > 200) {
+      return reply.status(400).send({ error: '搜索词 q 长度不得超过 200 字符' })
+    }
+
+    // `parseInt(...) || 50` 会把合法值 0 折成 50（'0' 是真值串），故显式判 NaN：
+    // 缺省 / 非数字 → 50，数字才进 clamp [1,100]
+    const parsedLimit = parseInt(q.limit ?? '', 10)
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 50
+
+    const before = q.before
+    if (before !== undefined && (typeof before !== 'string' || !before.trim())) {
+      return reply.status(400).send({ error: 'before 必须是非空字符串（消息 id 游标）' })
+    }
+    const from = q.from
+    if (from !== undefined && (typeof from !== 'string' || !from.trim())) {
+      return reply.status(400).send({ error: 'from 必须是非空字符串（created_at 下界）' })
+    }
+    const to = q.to
+    if (to !== undefined && (typeof to !== 'string' || !to.trim())) {
+      return reply.status(400).send({ error: 'to 必须是非空字符串（created_at 上界）' })
+    }
+
+    const result = messageSearchRepo.searchSessionMessages(id, {
+      q: term,
+      limit,
+      before: before ?? undefined,
+      from: from ?? undefined,
+      to: to ?? undefined,
+    })
+
+    return { rows: result.rows.map(toMessageDto), total: result.total }
   })
 
   // ─── GET /api/sessions/:id/executions — 执行元数据（耗时/token 展示投影）──
@@ -434,6 +538,28 @@ function emitArchived(id: string): SessionConfig {
     /* emit 失败不影响响应 */
   }
   return config
+}
+
+/** 消息行 → 前端 wire 形状（11 字段）。
+ *
+ *  `/messages` 与 `/messages/search` **共用这一份**：投影是前端消费的契约，抄第二份必然
+ *  漂移（一个端点加了字段、另一个没加，前端拿到两种形状）。 */
+function toMessageDto(r: MessageRow) {
+  const msgImages: string[] = parseJsonArray(r.images)
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    agentId: r.agent_id || null,
+    role: r.role,
+    content: r.content,
+    images: msgImages.length > 0 ? msgImages : undefined,
+    mentions: JSON.parse(r.mentions || '[]'),
+    taskId: r.task_id || null,
+    thinkingContent: r.thinking_content || undefined,
+    toolContent: parseJsonValue<ToolCallInfo[]>(r.tool_content),
+    segments: parseJsonValue<StreamSegment[]>(r.segments),
+    createdAt: toIsoDb(r.created_at),
+  }
 }
 
 function toSessionConfig(row: SessionRow): SessionConfig {
