@@ -4,7 +4,7 @@
 
 ## Problem Statement
 
-投递方向（「这单给谁」）焊死在 skill 内容里——**当时**的 `request-review` 教「作者**@审查者**」（`skills/request-review/SKILL.md` 的描述 `@mentioning the paired reviewer`），`handoff` 教「末尾行首**@审查者 请审查**」。**现状**：两者均已剥投递，`@审查者` 在 `skills/` 仅剩 `receive-review/SKILL.md` 一处，`handoff` 技能已更名为 `session-handoff`。这一焊，三类病根实测集齐（旧注入层注释自证，request-review 因之停用）：
+投递方向（「这单给谁」）焊死在 skill 内容里——**当时**的 `request-review` 教「作者**@审查者**」（`skills/request-review/SKILL.md` 的描述 `@mentioning the paired reviewer`），`handoff` 教「末尾行首**@审查者 请审查**」。**现状**：两者均已剥投递，`@审查者` 在 `skills/` 已零命中（`receive-review/SKILL.md` 的修复确认模板已改为 `post_message` 投递说明），`handoff` 技能已更名为 `session-handoff`。这一焊，三类病根实测集齐（旧注入层注释自证，request-review 因之停用）：
 
 1. **字面不解析 → 静默丢单**：`@审查者` 字面在 skill 块 append 后才进文本（旧注入层 skill 注入晚于 `packages/server/src/execution/reply.ts` 调用 `resolveRolePlaceholders()` 的时机），mention 精确匹配落空 → 投递静默丢失（吐槽猫审查 P1 的直接原因）。
 2. **与铁律一冲突**：铁律说「审查由 post-commit hook 机械触发、agent 只补填」，skill 却说「作者自己 @审查者」——内容自打架。
