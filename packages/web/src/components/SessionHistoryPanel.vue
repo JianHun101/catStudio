@@ -13,7 +13,8 @@ import type { Message } from '@cat-study/shared'
  *   不位移、不加遮罩）；与成员页同列切 tab，Esc 不响应、无关闭按钮。
  *
  * 数据来源：
- *   - 默认（无搜索词）：`GET /api/sessions/:id/messages`（与主区同一读层，按 created_at DESC）；
+ *   - 默认（无搜索词）：`GET /api/sessions/:id/messages/browse`——**含 system**，与日期条
+ *     facets 的计数同一口径（用 `/messages` 会丢 system，日期条写 1 条、点进去空）；
  *   - 有搜索词：`GET /api/sessions/:id/messages/search`（q 必填，rows 与 /messages 投影逐字一致）；
  *   - 日期条：`GET /api/sessions/:id/messages/facets`（按 tzOffset 换算后分组）。
  *
@@ -58,7 +59,7 @@ const visibleCount = ref(0)
 const loading = ref(false)
 const error = ref('')
 const hasMore = ref(false)
-/** 搜索模式的匹配总数（服务端 total）；浏览模式为 null（/messages 不返回 total） */
+/** 当前模式的匹配总数（服务端 total）：browse 与 search 都返回，翻页时不随 before 缩水 */
 const matchTotal = ref<number | null>(null)
 const pageIndex = ref(0)
 /** 每页起始游标：`cursors[i]` = 第 i 页请求时的 before（首页为 null） */
@@ -179,43 +180,73 @@ function pickDate(date: string | null): void {
 
 // ─── 取数 ──────────────────────────────────────────────
 
+/**
+ * 一次取数的**不可变快照**。`loadPage` 在发起时捕获它，`fetchChunk` 只读快照——
+ * 不在每个 chunk 里重新读 `appliedQuery` / `selectedDate`：首屏请求未回时按 Enter
+ * 搜新词，旧请求会带着新词取数，晚到后把浏览结果写回（旧实现的实际缺陷）。
+ */
+interface LoadSnapshot {
+  sessionId: string
+  q: string
+  from?: string
+  to?: string
+  role: RoleFilter
+}
+
 function currentWindow(): { from?: string; to?: string } {
   return selectedDate.value ? dayRange(selectedDate.value) : {}
 }
 
-/** 取一段（服务端 DESC：最新在前）。q 为空走 /messages（与主区同口径），否则走 /search。
- *  `total` 只有搜索模式有（`/messages` 不返回）；它用于分页条的「共 N 条」读数。 */
+/** 快照里的角色筛选（不复用响应式的 `roleMatches`：结果必须由发起时的快照决定） */
+function roleMatchesIn(role: RoleFilter, m: Message): boolean {
+  if (role === 'all') return true
+  if (role === 'user') return m.role === 'user'
+  return m.role === 'agent'
+}
+
+/** 取一段（服务端 DESC：最新在前）。q 为空走 /browse（含 system，与 facets 同口径），
+ *  否则走 /search。两条端点都返回 `total`（分页条的「共 N 条」读数）。 */
 async function fetchChunk(
-  before: string | null
-): Promise<{ rows: Message[]; total: number | null }> {
-  const id = props.sessionId
-  const { from, to } = currentWindow()
-  if (appliedQuery.value.trim()) {
-    const res = await api.searchSessionMessages(id, {
-      q: appliedQuery.value.trim(),
+  before: string | null,
+  snap: LoadSnapshot
+): Promise<{ rows: Message[]; total: number }> {
+  if (snap.q) {
+    const res = await api.searchSessionMessages(snap.sessionId, {
+      q: snap.q,
       limit: CHUNK,
       before: before ?? undefined,
-      from,
-      to,
+      from: snap.from,
+      to: snap.to,
     })
     return { rows: res.rows, total: res.total }
   }
-  const rows = await api.getSessionMessages(id, {
+  return api.getSessionBrowseMessages(snap.sessionId, {
     limit: CHUNK,
     before: before ?? undefined,
-    from,
-    to,
+    from: snap.from,
+    to: snap.to,
   })
-  return { rows, total: null }
 }
 
 /**
  * 加载一页。
  * 连取多个 chunk，直到角色筛选后凑到一屏目标（TARGET_ROWS）或服务端没有更早的行——
- * 否则「筛完这页空」会被模型/用户读成「没有匹配」。
+ * 否则「筛完这页空」会被读成「没有匹配」。
+ *
+ * **过期守门**：`loadSeq` 每次发起递增；任何 await 之后 token 不一致就整段丢弃。
+ * 切搜索词/日期/角色、切会话都会发起新请求并递增 token，旧响应绝不写回（P3-2）。
  */
+let loadSeq = 0
+
 async function loadPage(before: string | null): Promise<void> {
-  const sessionId = props.sessionId
+  const token = ++loadSeq
+  const snap: LoadSnapshot = {
+    sessionId: props.sessionId,
+    q: appliedQuery.value.trim(),
+    ...currentWindow(),
+    role: roleFilter.value,
+  }
+  const stillCurrent = (): boolean => token === loadSeq && props.sessionId === snap.sessionId
   loading.value = true
   error.value = ''
   try {
@@ -225,9 +256,8 @@ async function loadPage(before: string | null): Promise<void> {
     const collected: Message[] = []
     const seen = new Set<string>()
     for (let i = 0; i < MAX_CHUNKS; i++) {
-      const chunk = await fetchChunk(cursor)
-      // 会话在请求途中被切走：迟到响应直接丢弃（不写已换会话的 ref）
-      if (props.sessionId !== sessionId) return
+      const chunk = await fetchChunk(cursor, snap)
+      if (!stillCurrent()) return
       if (i === 0) total = chunk.total
       for (const m of chunk.rows) {
         if (seen.has(m.id)) continue
@@ -244,18 +274,18 @@ async function loadPage(before: string | null): Promise<void> {
         break
       }
       cursor = last.id
-      if (collected.filter(roleMatches).length >= TARGET_ROWS) break
+      if (collected.filter((m) => roleMatchesIn(snap.role, m)).length >= TARGET_ROWS) break
     }
-    if (props.sessionId !== sessionId) return
+    if (!stillCurrent()) return
     candidates.value = collected
     matchTotal.value = total
     hasMore.value = !exhausted
     await refit()
   } catch (err: any) {
-    if (props.sessionId !== sessionId) return
+    if (!stillCurrent()) return
     error.value = err?.message || '历史加载失败'
   } finally {
-    if (props.sessionId === sessionId) loading.value = false
+    if (stillCurrent()) loading.value = false
   }
 }
 
@@ -269,16 +299,20 @@ async function resetAndLoad(): Promise<void> {
   await loadPage(null)
 }
 
+/** facets 的过期守门：会话切走后旧响应不得覆盖新会话的日期条 */
+let facetsSeq = 0
+
 async function loadFacets(): Promise<void> {
   if (!props.sessionId) return
+  const token = ++facetsSeq
   const sessionId = props.sessionId
   try {
     const res = await api.getSessionMessageFacets(sessionId, TZ_OFFSET)
-    if (props.sessionId !== sessionId) return
+    if (token !== facetsSeq || props.sessionId !== sessionId) return
     facets.value = res
   } catch {
     // 日期条拉不到只影响日期筛选入口，不影响结果列表——不把整页打成错误态
-    if (props.sessionId === sessionId) facets.value = null
+    if (token === facetsSeq && props.sessionId === sessionId) facets.value = null
   }
 }
 
@@ -378,10 +412,15 @@ function setRole(role: RoleFilter): void {
 
 const rendered = computed(() => visibleCandidates.value.slice(0, visibleCount.value))
 
-/** 当前页最后一条可见消息——下一页的游标（不用候选末条，否则被裁掉的那几条会漏读） */
+/** 当前页最后一条可见消息——下一页的游标（不用候选末条，否则被裁掉的那几条会漏读）。
+ *
+ *  角色筛选可能把整页筛空（候选 500 条、可见 0 条）：此时 `rendered` 为空，若返回 null
+ *  下一页按钮就是死的（点按无请求）。未穷尽时退到**候选末条**——本页已经扫到的最旧一条，
+ *  用它的 id 继续向更早翻；这样「本页无匹配」只是提示，不是死路。 */
 function nextCursor(): string | null {
   const last = rendered.value[rendered.value.length - 1]
-  return last?.id ?? null
+  if (last) return last.id
+  return hasMore.value ? (candidates.value[candidates.value.length - 1]?.id ?? null) : null
 }
 
 async function nextPage(): Promise<void> {
@@ -427,18 +466,41 @@ function highlight(raw: string): Array<{ text: string; hit: boolean }> {
   return out.length > 0 ? out : [{ text, hit: false }]
 }
 
-/** 点结果 → 主区补载并高亮（本面板保持打开；找不到就明说，不静默） */
+/** 点结果 → 主区补载并高亮（本面板保持打开；找不到就明说，不静默）。
+ *
+ *  - **system 消息不进主消息流**（`SESSION_HISTORY` / `/messages` 都是 `role != 'system'`
+ *    口径）：调用 `revealMessage` 会白翻 50 轮后误报「已在开头之前」。system 结果不可跳转，
+ *    直接给专门文案。
+ *  - `revealMessage` 也因网络失败返回 false：`olderError` 有值时把真实错误显示出来，
+ *    不再把一切 false 都归因成「开头之前」。 */
 async function pick(m: Message): Promise<void> {
   revealError.value = ''
+  if (m.role === 'system') {
+    revealError.value = '系统通知不在主消息流中显示'
+    return
+  }
   const ok = await store.revealMessage(m.id)
-  if (!ok) revealError.value = '该消息已在会话开头之前'
+  if (!ok) revealError.value = store.olderError || '该消息已在会话开头之前'
 }
 
 watch([appliedQuery, selectedDate, roleFilter], () => {
   revealError.value = ''
 })
 
-const emptyText = computed(() => (selectedDate.value ? '这一天没有消息' : '没有匹配的消息'))
+/**
+ * 结果区空态。三种情形分开：
+ * - 角色筛选把**本页**筛空但服务端还有更早行 → 「本页没有匹配，继续翻页」（不是死路）；
+ * - 搜索词存在 → 「没有匹配的消息」优先（搜索 + 日期同时为空时，用户先看到的是搜索条件）；
+ * - 只有日期 → 「这一天没有消息」。
+ */
+const emptyText = computed(() => {
+  if (visibleCandidates.value.length === 0 && candidates.value.length > 0 && hasMore.value) {
+    return '本页没有匹配，继续翻页'
+  }
+  if (appliedQuery.value.trim()) return '没有匹配的消息'
+  if (selectedDate.value) return '这一天没有消息'
+  return '没有匹配的消息'
+})
 </script>
 
 <template>
@@ -494,6 +556,10 @@ const emptyText = computed(() => (selectedDate.value ? '这一天没有消息' :
         @click="pickDate(selectedDayChip.date)"
       >
         {{ dayLabel(selectedDayChip.date) }}
+      </button>
+      <!-- 契约点名的「选择日期」入口：与 +N 更早 打开同一个三级弹层，文案不靠猜 -->
+      <button class="hist-date-chip picker" aria-label="选择日期" @click="openDatePicker">
+        选择日期
       </button>
       <button
         v-if="olderDays.length > 0"
@@ -560,7 +626,12 @@ const emptyText = computed(() => (selectedDate.value ? '这一天没有消息' :
           <article class="hist-card" @click="pick(m)">
             <div class="hc-meta">
               <span class="hc-time">{{ localTime(m.createdAt) }}</span>
-              <span class="hc-sender">{{ senderOf(m) }}</span>
+              <span class="hc-sender">
+                <template v-for="(p, k) in highlight(senderOf(m))" :key="k">
+                  <mark v-if="p.hit">{{ p.text }}</mark>
+                  <template v-else>{{ p.text }}</template>
+                </template>
+              </span>
             </div>
             <p class="hc-body">
               <template v-for="(p, k) in highlight(m.content)" :key="k">
@@ -586,7 +657,11 @@ const emptyText = computed(() => (selectedDate.value ? '这一天没有消息' :
         上一页
       </button>
       <span class="hp-index">
-        第 {{ pageIndex + 1 }} 页<span v-if="matchTotal !== null"> · 共 {{ matchTotal }} 条</span>
+        第 {{ pageIndex + 1 }} 页<template v-if="matchTotal !== null">
+          · 共 {{ matchTotal }} 条<span v-if="roleFilter !== 'all'" class="hp-note"
+            >（未计角色筛选）</span
+          ></template
+        >
       </span>
       <button class="hp-btn" :disabled="!hasMore || loading" @click="nextPage">下一页</button>
     </div>
@@ -785,7 +860,7 @@ const emptyText = computed(() => (selectedDate.value ? '这一天没有消息' :
   text-underline-offset: 2px;
 }
 
-/* 结果区：**不内滚**。装不下由 fitNow 裁掉，翻页给下一页。 */
+/* 结果区：**不内滚**。装不下由 refit/measure 裁掉，翻页给下一页。 */
 .hist-results {
   flex: 1;
   min-height: 0;
@@ -840,6 +915,14 @@ const emptyText = computed(() => (selectedDate.value ? '这一天没有消息' :
 .hc-sender {
   font-weight: 600;
   color: var(--text-secondary);
+}
+
+/* 发送者名也可能命中搜索词（服务端按 agents.name LIKE 匹配）——命中处同样高亮，
+   否则「搜 ds猫 能搜到、卡上却找不到一处高亮」。 */
+.hc-sender mark {
+  background: rgba(212, 168, 84, 0.35);
+  color: inherit;
+  border-radius: 2px;
 }
 
 /* 5 行正文：13px / 1.62（与原型定稿同口径），超出裁切 */
@@ -917,5 +1000,17 @@ const emptyText = computed(() => (selectedDate.value ? '这一天没有消息' :
 .hp-index {
   font-size: 10px;
   color: var(--text-muted);
+}
+
+.hp-note {
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
+/* 「选择日期」入口：常驻文本 chip（不依赖 +N 更早 才出现），与日期 chip 同款 */
+.hist-date-chip.picker {
+  color: var(--text-secondary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 </style>

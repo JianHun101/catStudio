@@ -1132,4 +1132,98 @@ describe('Session Routes', () => {
       expect(emptyBefore.statusCode).toBe(400)
     })
   })
+
+  // ─── 右栏历史面板：默认列表（browse，含 system）───────────────
+
+  describe('GET /api/sessions/:id/messages/browse', () => {
+    let sid = ''
+
+    const seed = (
+      id: string,
+      role: 'user' | 'agent' | 'system',
+      content: string,
+      createdAt: string,
+      agentId: string | null = null
+    ) => {
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, agent_id, role, content, mentions, created_at)
+           VALUES (?, ?, ?, ?, ?, '[]', ?)`
+        )
+        .run(id, sid, agentId, role, content, createdAt)
+    }
+
+    beforeEach(async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '历史 browse', agentIds: [agentId1] },
+      })
+      sid = JSON.parse(create.body).id
+      seed('br-1', 'user', '第一条', '2026-11-10T10:00:00.000Z')
+      seed('br-2', 'agent', '第二条', '2026-11-10T10:01:00.000Z', agentId1)
+      seed('br-3', 'system', '重启完成', '2026-11-01T03:00:00.000Z')
+    })
+
+    it('含 system；total = 窗口内全量，before/limit 只收窄 rows', async () => {
+      const all = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse`,
+      })
+      expect(all.statusCode).toBe(200)
+      const body = JSON.parse(all.body)
+      expect(body.total).toBe(3)
+      expect(body.rows.map((r: any) => r.id)).toEqual(['br-2', 'br-1', 'br-3'])
+      expect(body.rows.some((r: any) => r.role === 'system')).toBe(true)
+
+      const one = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?limit=1`,
+      })
+      const oneBody = JSON.parse(one.body)
+      expect(oneBody.rows.map((r: any) => r.id)).toEqual(['br-2'])
+      expect(oneBody.total).toBe(3)
+
+      const before = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?before=br-2`,
+      })
+      const beforeBody = JSON.parse(before.body)
+      expect(beforeBody.rows.map((r: any) => r.id)).toEqual(['br-1', 'br-3'])
+      expect(beforeBody.total).toBe(3)
+    })
+
+    it('system-only 日：facets 计数与 browse 列表同一口径（不会「写 1 条、点进去空」）', async () => {
+      const facets = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/facets?tzOffset=0`,
+      })
+      const day = JSON.parse(facets.body).days.find((d: any) => d.date === '2026-11-01')
+      expect(day).toEqual({ date: '2026-11-01', count: 1 })
+
+      const browse = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?from=${encodeURIComponent(
+          '2026-11-01T00:00:00.000Z'
+        )}&to=${encodeURIComponent('2026-11-01T23:59:59.999Z')}`,
+      })
+      const body = JSON.parse(browse.body)
+      expect(body.rows.map((r: any) => r.id)).toEqual(['br-3'])
+      expect(body.total).toBe(1)
+    })
+
+    it('before 为空串 → 400；会话不存在 → 404', async () => {
+      const emptyBefore = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?before=`,
+      })
+      expect(emptyBefore.statusCode).toBe(400)
+
+      const missing = await app.inject({
+        method: 'GET',
+        url: '/api/sessions/nonexistent/messages/browse',
+      })
+      expect(missing.statusCode).toBe(404)
+    })
+  })
 })

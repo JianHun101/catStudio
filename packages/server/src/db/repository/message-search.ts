@@ -1,5 +1,5 @@
 /**
- * 会话历史视图的两个**只读**查询（右栏历史面板的服务端底座）。
+ * 会话历史视图的三个**只读**查询（右栏历史面板的服务端底座）。
  *
  * 与 `messages.ts` / `query.ts` 的分工：
  *   - `query.ts` 是**猫的排障通道**（可见性按上下文过滤、强制当前会话）；
@@ -8,7 +8,7 @@
  *   - 也因此这些函数不走 `messages.ts`（那一侧的口径是「agent 可读的消息」，
  *     `getSessionMessagesRange` 等一律排除 system），SQL 与投影范围都不同。
  *
- * 两个函数都只被 `routes/sessions.ts` 消费；行投影（11 字段 DTO）在路由层，本文件只出
+ * 三个函数都只被 `routes/sessions.ts` 消费；行投影（11 字段 DTO）在路由层，本文件只出
  * `MessageRow`，避免同一个 wire 形状出现两处拼装点。
  */
 import type Database from 'better-sqlite3'
@@ -120,6 +120,108 @@ export interface SearchSessionMessagesResult {
   total: number
 }
 
+/** 浏览模式（无搜索词）的分页参数。`role` 不是服务端过滤维（前端在候选里筛）。 */
+export interface ListSessionMessagesOptions {
+  limit?: number
+  /** 排他游标：严格早于该消息（与 `getSessionMessagesRange` 的 before 同语义） */
+  before?: string
+  from?: string
+  to?: string
+}
+
+export interface ListSessionMessagesResult {
+  rows: MessageRow[]
+  /** 该 `from`/`to` 窗口内的消息总数——**不受 before/limit 影响** */
+  total: number
+}
+
+/** limit 夹取：缺省/非数字 → 50，数字 → [1,100]（与 search 端点同一口径） */
+function clampLimit(raw: number | undefined): number {
+  return raw !== undefined && Number.isFinite(raw)
+    ? Math.min(100, Math.max(1, Math.floor(raw)))
+    : 50
+}
+
+/**
+ * 时间窗 + 会话条件。**与 `messages.ts` 的 `getSessionMessagesRange` 同源口径**：
+ * - 下界 `toIsoDb`、上界 `toIsoDbUpper`（省略小数秒按整秒含入，否则同秒 `.001~.999` 静默丢）；
+ * - `session_id = ?` 恒定，不提供跨会话读口。
+ * 本文件不能 import 那个函数（它按 agent 可见性口径排 system），但游标与时间窗的归一
+ * 必须逐字同源——改一侧时另一侧要同步（双行测试在 `message-search.test.ts` 与
+ * `messages.test.ts` 各钉一条同构造）。
+ */
+function rangeWhere(
+  sessionId: string,
+  opts: { from?: string; to?: string }
+): { where: string[]; params: Array<string | number> } {
+  const where: string[] = ['m.session_id = ?']
+  const params: Array<string | number> = [sessionId]
+  if (opts.from !== undefined) {
+    where.push('m.created_at >= ?')
+    params.push(toIsoDb(opts.from))
+  }
+  if (opts.to !== undefined) {
+    where.push('m.created_at <= ?')
+    params.push(toIsoDbUpper(opts.to))
+  }
+  return { where, params }
+}
+
+/**
+ * 在已闭合的 where 上取一页（DESC + id tie-break）。
+ *
+ * 游标不在本会话 → 位置不可定 → 空页（与 `getSessionMessagesRange` 同款：客户端据此
+ * 自然停止翻页，而不是从头再取一页）。
+ */
+function selectPage(
+  where: string[],
+  params: Array<string | number>,
+  sessionId: string,
+  before: string | undefined,
+  limit: number
+): MessageRow[] {
+  const pageWhere = [...where]
+  const pageParams = [...params]
+  if (before) {
+    const cursor = db
+      .prepare('SELECT created_at, id FROM messages WHERE id = ? AND session_id = ?')
+      .get(before, sessionId) as { created_at: string; id: string } | undefined
+    if (!cursor) return []
+    pageWhere.push('(m.created_at < ? OR (m.created_at = ? AND m.id < ?))')
+    pageParams.push(cursor.created_at, cursor.created_at, cursor.id)
+  }
+  pageParams.push(limit)
+  return db
+    .prepare(
+      `SELECT m.* FROM messages m
+       WHERE ${pageWhere.join(' AND ')}
+       ORDER BY m.created_at DESC, m.id DESC
+       LIMIT ?`
+    )
+    .all(...pageParams) as MessageRow[]
+}
+
+/**
+ * 浏览模式：会话内（可带时间窗）的消息分页，**含 system**。
+ *
+ * 这是右栏历史面板的默认列表——人是看会话全貌的，运维通告（重启完成等）也在历史里；
+ * `getSessionMessagesRange` 的 `role != 'system'` 是猫的上下文口径，不适用于本视图。
+ * facets 的 `total/days` 也是全量计数，两处必须同一口径，否则会出现「日期条写 1 条、
+ * 点进去空」的自相矛盾。
+ */
+export function listSessionMessages(
+  sessionId: string,
+  opts: ListSessionMessagesOptions = {}
+): ListSessionMessagesResult {
+  const limit = clampLimit(opts.limit)
+  const { where, params } = rangeWhere(sessionId, opts)
+  const totalRow = db
+    .prepare(`SELECT COUNT(*) AS cnt FROM messages m WHERE ${where.join(' AND ')}`)
+    .get(...params) as { cnt: number }
+  const rows = selectPage(where, params, sessionId, opts.before, limit)
+  return { rows, total: totalRow?.cnt ?? 0 }
+}
+
 /**
  * 按正文（或发送者名）搜会话内消息。
  *
@@ -133,56 +235,19 @@ export function searchSessionMessages(
   sessionId: string,
   opts: SearchSessionMessagesOptions
 ): SearchSessionMessagesResult {
-  const rawLimit = opts.limit ?? 50
-  const limit = Number.isFinite(rawLimit) ? Math.min(100, Math.max(1, Math.floor(rawLimit))) : 50
+  const limit = clampLimit(opts.limit)
   const like = `%${escapeLikeTerm(opts.q.trim())}%`
 
-  const where: string[] = [
-    'm.session_id = ?',
-    `(m.content LIKE ? ESCAPE '\\'
-      OR EXISTS (SELECT 1 FROM agents a WHERE a.id = m.agent_id AND a.name LIKE ? ESCAPE '\\'))`,
-  ]
-  const params: Array<string | number> = [sessionId, like, like]
-
-  // 时间窗归一与 `getSessionMessagesRange` 同源：秒级串与 ISO 混比会静默错序
-  if (opts.from !== undefined) {
-    where.push('m.created_at >= ?')
-    params.push(toIsoDb(opts.from))
-  }
-  if (opts.to !== undefined) {
-    where.push('m.created_at <= ?')
-    // 上界走 `toIsoDbUpper`：省略小数秒的输入按「整秒含入」折算（`.999`），
-    // 否则同一秒里 `.001~.999` 的消息会静默从结果里消失
-    params.push(toIsoDbUpper(opts.to))
-  }
+  const { where, params } = rangeWhere(sessionId, opts)
+  where.push(`(m.content LIKE ? ESCAPE '\\'
+      OR EXISTS (SELECT 1 FROM agents a WHERE a.id = m.agent_id AND a.name LIKE ? ESCAPE '\\'))`)
+  params.push(like, like)
 
   const whereSql = where.join(' AND ')
   const totalRow = db
     .prepare(`SELECT COUNT(*) AS cnt FROM messages m WHERE ${whereSql}`)
     .get(...params) as { cnt: number }
 
-  const pageWhere = [...where]
-  const pageParams = [...params]
-  if (opts.before) {
-    // 游标不在本会话 → 位置不可定 → 空页（与 getSessionMessagesRange 同款：
-    // 客户端据此自然停止翻页，而不是从头再取一页）
-    const cursor = db
-      .prepare('SELECT created_at, id FROM messages WHERE id = ? AND session_id = ?')
-      .get(opts.before, sessionId) as { created_at: string; id: string } | undefined
-    if (!cursor) return { rows: [], total: totalRow?.cnt ?? 0 }
-    pageWhere.push('(m.created_at < ? OR (m.created_at = ? AND m.id < ?))')
-    pageParams.push(cursor.created_at, cursor.created_at, cursor.id)
-  }
-  pageParams.push(limit)
-
-  const rows = db
-    .prepare(
-      `SELECT m.* FROM messages m
-       WHERE ${pageWhere.join(' AND ')}
-       ORDER BY m.created_at DESC, m.id DESC
-       LIMIT ?`
-    )
-    .all(...pageParams) as MessageRow[]
-
+  const rows = selectPage(where, params, sessionId, opts.before, limit)
   return { rows, total: totalRow?.cnt ?? 0 }
 }
