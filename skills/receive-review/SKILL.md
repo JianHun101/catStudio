@@ -95,9 +95,11 @@ triggers:
 | P3-1 | P3 | {描述} | ❌ dropped | 理由: {为什么不修} |
 
 测试: pnpm test → N passed, 0 failed
-
-@审查者 修复完成，请确认
 ```
+
+**投递**：修复完成后用 `post_message` 投给本次审查猫——`targetCats` 传实际审查猫的完整猫名，正文写「修复完成，请确认」。
+
+**不要写行首 `@` 角色占位符**：技能正文由 `read_skill` 读盘原样返回，不经过 `resolveRolePlaceholders`，字面占位符（`@` 加角色名）不会被替换成真名；mention 解析是精确匹配猫名，行首 `@` 落空即静默丢单。
 
 ## 禁止的行为
 
