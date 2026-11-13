@@ -25,9 +25,9 @@ vi.mock('@/composables/useApi', () => ({
  * 右栏历史面板（C-2）。
  *
  * 几何口径：jsdom 没有布局引擎，故用 getter 模拟真实浏览器的**实测值**——结果区高度
- * 716px（1440×900）/ 896px（1440×1080）来自 `scripts/shots/probe-c2.mjs` 在 Chromium
- * 里量出的 `.hist-results` 尺寸，不是窗口高度。卡片高度按正文长度分三档（短 55 /
- * 中 97 / 长 139，量级取自同一次探针），日期头 21px——不再是「所有卡固定 141px +
+ * 716px（1440×900）/ 896px（1440×1080）是 Chromium 里的实测读数（探针为 gitignored 临时
+ * 脚本，未入库；读数与复现见 PR #243 / 收口记录），不是窗口高度。卡片高度按正文长度分三档
+ * （短 55 / 中 97 / 长 139，量级取自同一次探针），日期头 21px——不再是「所有卡固定 141px +
  * 结果区等于窗口高度」的恒等式；那个 mock 曾把 5/7 自证成真，实际 652px 里装不下。
  */
 const RESULTS_900 = 716
@@ -162,6 +162,12 @@ function shortAlternating(): Message[] {
   )
 }
 
+/**
+ * 两种 mock 场景**互不校验**，别把两处 `total` 当同一份数据：
+ * - `facetsFixture` 服务「日期条」场景：8 条（days 4+3+1），只驱动日期 chip 与弹层；
+ * - browse mock 服务「一屏装页」场景：27 条（`historyMessages()` 全量），只驱动装页/翻页。
+ * 两个 fixture 的 total 天然不等；要改就改各自场景，不要为凑一致去改编页数据。
+ */
 const facetsFixture = {
   // total = days 之和（之前写 15 与 4+3+1 不一致，会被下一个读者当真实数据）
   total: 8,
@@ -203,6 +209,7 @@ describe('SessionHistoryPanel · 取数口径', () => {
     vi.mocked(api.getSessionMessageFacets).mockResolvedValue(facetsFixture)
     vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
       rows: historyMessages(),
+      // 装页场景 27 条：与 facetsFixture 的 8 条不是同一份数据（见上方 fixture 说明）
       total: 27,
     })
     vi.mocked(api.searchSessionMessages).mockResolvedValue({ rows: [], total: 0 })
@@ -367,6 +374,7 @@ describe('SessionHistoryPanel · 日期条与三级弹层', () => {
     vi.mocked(api.getSessionMessageFacets).mockResolvedValue(facetsFixture)
     vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
       rows: historyMessages(),
+      // 装页场景 27 条：与 facetsFixture 的 8 条不是同一份数据（见上方 fixture 说明）
       total: 27,
     })
   })
@@ -431,6 +439,7 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
     vi.mocked(api.getSessionMessageFacets).mockResolvedValue(facetsFixture)
     vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
       rows: historyMessages(),
+      // 装页场景 27 条：与 facetsFixture 的 8 条不是同一份数据（见上方 fixture 说明）
       total: 27,
     })
   })
@@ -646,11 +655,14 @@ describe('SessionHistoryPanel · 过期响应与跳转主区', () => {
     expect(spy).toHaveBeenCalledWith('m1')
     expect(wrapper.find('.session-history-panel').exists()).toBe(true)
     expect(wrapper.find('.hist-reveal-err').exists()).toBe(false)
+    expect(wrapper.find('.hist-reveal-note').exists()).toBe(false)
 
     spy.mockResolvedValue(false)
     await wrapper.findAll('.hist-card')[1].trigger('click')
     await flushPromises()
     expect(wrapper.find('.hist-reveal-err').text()).toBe('该消息已在会话开头之前')
+    // 真实失败留在红色错误态，不落到中性说明里
+    expect(wrapper.find('.hist-reveal-note').exists()).toBe(false)
 
     wrapper.unmount()
   })
@@ -681,7 +693,9 @@ describe('SessionHistoryPanel · 过期响应与跳转主区', () => {
     await wrapper.find('.hist-card').trigger('click')
     await flushPromises()
     expect(spy).not.toHaveBeenCalled()
-    expect(wrapper.find('.hist-reveal-err').text()).toBe('系统通知不在主消息流中显示')
+    // 中性说明走 .hist-reveal-note（muted 色），不能落到 .hist-reveal-err 红态上
+    expect(wrapper.find('.hist-reveal-note').text()).toBe('系统通知不在主消息流中显示')
+    expect(wrapper.find('.hist-reveal-err').exists()).toBe(false)
 
     wrapper.unmount()
   })
@@ -705,5 +719,12 @@ describe('SessionHistoryPanel · 形态值（静态）', () => {
     expect(body).toMatch(/font-size:\s*13px/)
     expect(body).toMatch(/line-height:\s*1\.62/)
     expect(body).toMatch(/-webkit-line-clamp:\s*5/)
+  })
+
+  it('system 中性说明用 muted 色，红色错误态保留 accent-red（两类不混用）', () => {
+    const note = /\.hist-reveal-note\s*\{([^}]*)\}/.exec(panelSource)?.[1] ?? ''
+    expect(note).toMatch(/color:\s*var\(--text-muted\)/)
+    const err = /\.hist-reveal-err\s*\{([^}]*)\}/.exec(panelSource)?.[1] ?? ''
+    expect(err).toMatch(/color:\s*var\(--accent-red\)/)
   })
 })

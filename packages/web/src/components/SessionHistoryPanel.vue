@@ -66,7 +66,10 @@ const pageIndex = ref(0)
 const cursors = ref<Array<string | null>>([null])
 
 const resultsEl = ref<HTMLElement | null>(null)
+/** 真的跳转失败（红色错误态） */
 const revealError = ref('')
+/** 中性说明（如 system 结果不可跳转）：不是错误，用 muted 色，不与红态混用 */
+const revealNote = ref('')
 
 const datePickerOpen = ref(false)
 const pickerYear = ref(new Date().getFullYear())
@@ -390,6 +393,7 @@ watch(
     selectedDate.value = null
     datePickerOpen.value = false
     revealError.value = ''
+    revealNote.value = ''
     query.value = ''
     appliedQuery.value = ''
     roleFilter.value = 'all'
@@ -472,11 +476,15 @@ function highlight(raw: string): Array<{ text: string; hit: boolean }> {
  *    口径）：调用 `revealMessage` 会白翻 50 轮后误报「已在开头之前」。system 结果不可跳转，
  *    直接给专门文案。
  *  - `revealMessage` 也因网络失败返回 false：`olderError` 有值时把真实错误显示出来，
- *    不再把一切 false 都归因成「开头之前」。 */
+ *    不再把一切 false 都归因成「开头之前」。
+ *  - system 的「不可跳转」是**中性说明**（`revealNote`，muted 色），不是错误；真实跳转
+ *    失败才进 `revealError`（红色）。两者别混用同一 class。
+ */
 async function pick(m: Message): Promise<void> {
   revealError.value = ''
+  revealNote.value = ''
   if (m.role === 'system') {
-    revealError.value = '系统通知不在主消息流中显示'
+    revealNote.value = '系统通知不在主消息流中显示'
     return
   }
   const ok = await store.revealMessage(m.id)
@@ -485,6 +493,7 @@ async function pick(m: Message): Promise<void> {
 
 watch([appliedQuery, selectedDate, roleFilter], () => {
   revealError.value = ''
+  revealNote.value = ''
 })
 
 /**
@@ -647,6 +656,7 @@ const emptyText = computed(() => {
       <div v-else class="hist-state">{{ emptyText }}</div>
     </div>
 
+    <div v-if="revealNote" class="hist-reveal-note">{{ revealNote }}</div>
     <div v-if="revealError" class="hist-reveal-err">{{ revealError }}</div>
     <!-- 翻页失败：旧一页还在时不能把结果区打成错误态（否则已读内容消失），单独一行提示 -->
     <div v-if="error && rendered.length > 0" class="hist-reveal-err">{{ error }}</div>
@@ -964,6 +974,14 @@ const emptyText = computed(() => {
   flex: none;
   font-size: 10px;
   color: var(--accent-red);
+  padding: 2px;
+}
+
+/* 中性说明（system 结果不可跳转）：不是错误，用 muted 色，别让用户读成故障 */
+.hist-reveal-note {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-muted);
   padding: 2px;
 }
 
