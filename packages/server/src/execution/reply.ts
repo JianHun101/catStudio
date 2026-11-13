@@ -643,8 +643,10 @@ export async function runAgentReply(
   if (summaryReplaceEnabled && preTruncationTokens >= SUMMARY_MIN_TOKENS) {
     const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
     const ratio = preTruncationTokens / maxTokens
-    // SUMMARY_COMPRESS_LIMIT = 数组**保留条数**上限（不是生成次数上限）；下限钉 1，
-    // 0 会把压缩块裁空、下一轮退回全量重读——那比多留一块贵得多。
+    // SUMMARY_COMPRESS_LIMIT = 数组**保留条数**上限（不是生成次数上限）；下限钉 1。
+    // 0 若不被夹会裁空数组（下一轮退回全量重读）；keep=1 时先裁后生成会让
+    // `generateFullSummary` 读不到 `lastReadySummary`、退化为每次全量重读
+    // （代价详见 `trimCompressedSummaries` docstring）。
     // 解析：非数字回落 3；0/负数取下限 1（旧写法 `|| 3` 会把显式的 0 静默吃成 3）。
     const rawCompressLimit = parseInt(process.env.SUMMARY_COMPRESS_LIMIT ?? '3', 10)
     const compressLimit = Number.isFinite(rawCompressLimit) ? Math.max(1, rawCompressLimit) : 3
@@ -766,11 +768,14 @@ export async function runAgentReply(
             if (!updated) {
               // 条目已被后续 append + trim 裁掉（keep 小 + 生成慢）：生成成功但没落库，
               // 不能打 completed 谎报（D-3 审查 P3-5）。
-              log.warn('summary replace async skipped (pending already trimmed)', {
-                traceId,
-                agentId: agent.id,
-                sessionId,
-              })
+              log.warn(
+                'summary replace async skipped (pending not persisted: trimmed or write failed)',
+                {
+                  traceId,
+                  agentId: agent.id,
+                  sessionId,
+                }
+              )
               return
             }
             log.info('summary replace async completed', {

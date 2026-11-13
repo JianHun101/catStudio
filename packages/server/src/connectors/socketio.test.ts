@@ -527,6 +527,137 @@ describe('socketio connector', () => {
       expect(history[0].sessionId).toBe('session-1')
     })
 
+    it('CONTEXT_WINDOW_STATS 按折叠窗口估算：有就绪摘要块时显著低于逐条累加', async () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500) // 3750 token + 50 开销
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-${i}`, long, `2026-08-01 00:00:${String(i).padStart(2, '0')}`)
+        }
+        const summary = '历史摘要内容'.repeat(20) // 就绪块（content 非空）
+        db.prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`).run(
+          JSON.stringify([
+            {
+              id: 'fold-1',
+              createdAt: '2026-08-01T00:00:00Z',
+              tokenCount: 100,
+              content: summary,
+              coveredThrough: 24,
+            },
+          ])
+        )
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        const stats = statsCall[1]
+        const raw = estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        expect(stats.maxContextTokens).toBe(128000)
+        expect(stats.contextTokens).toBeLessThan(128000 * 0.8)
+        // 判别力核心：旧口径 = raw(≈91k, 71% 窗口) 也能过 <80% 那条，必须再钉 < raw×0.6
+        expect(stats.contextTokens).toBeLessThan(raw * 0.6)
+
+        // 与公式对齐：system + 摘要块 + 最近窗口（kept 由折叠函数自身给出）
+        const { applySummaryReplace, buildSummaryBlockMessage } =
+          await import('../execution/context.js')
+        const kept = applySummaryReplace(
+          Array.from({ length: 24 }, () => ({ role: 'user', content: long })),
+          summary
+        ).kept
+        const expected =
+          estimateTokens('You are a cat.') +
+          estimateTokens(buildSummaryBlockMessage(summary).content) +
+          kept.reduce((s: number, m: any) => s + estimateTokens(m.content) + 50, 0)
+        expect(stats.contextTokens).toBe(expected)
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+      }
+    })
+
+    it('CONTEXT_WINDOW_STATS：SUMMARY_REPLACE_HISTORY=0 时不折叠，逐字等于逐条累加（开关口径对齐）', () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      const savedSwitch = process.env.SUMMARY_REPLACE_HISTORY
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      process.env.SUMMARY_REPLACE_HISTORY = '0'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500)
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-off-${i}`, long, `2026-08-01 00:02:${String(i).padStart(2, '0')}`)
+        }
+        // 库里有就绪块，但开关关闭 ⇒ join 必须忽略它，返回未折叠 raw
+        db.prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`).run(
+          JSON.stringify([
+            {
+              id: 'fold-off',
+              createdAt: '2026-08-01T00:00:00Z',
+              tokenCount: 100,
+              content: '历史摘要内容'.repeat(20),
+              coveredThrough: 24,
+            },
+          ])
+        )
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        expect(statsCall[1].contextTokens).toBe(
+          estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        )
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+        if (savedSwitch === undefined) delete process.env.SUMMARY_REPLACE_HISTORY
+        else process.env.SUMMARY_REPLACE_HISTORY = savedSwitch
+      }
+    })
+
+    it('CONTEXT_WINDOW_STATS 无摘要时逐字等于旧逐条累加公式（回归门）', () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500)
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-nosum-${i}`, long, `2026-08-01 00:01:${String(i).padStart(2, '0')}`)
+        }
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        expect(statsCall[1].contextTokens).toBe(
+          estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        )
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+      }
+    })
+
     it('SESSION_HISTORY 恢复带 segments（新消息时间序交错随历史重放）', () => {
       const db = getDb()
       const segs = [
@@ -6489,6 +6620,17 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
   /** 生成失败替身：空摘要 + 空边界（= 生成失败语义，消费侧按失败处理） */
   const EMPTY_GEN = { summary: '', coveredToId: null, coveredToAt: null, coveredCount: 0 }
 
+  /**
+   * 复位摘要生成替身：`mockReset()` 会清掉实现在内的全部状态（含前序用例留下的
+   * 「永不 resolve」挂起实现），随后恢复默认空摘要。用例间必须复位——`clearAllMocks`
+   * 只清调用记录、不清实现，永挂 mock 会静默泄漏到后续用例（D-4 审查 P3-1）。
+   */
+  async function resetSummaryGenerator(): Promise<void> {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    vi.mocked(generateFullSummary).mockReset()
+    vi.mocked(generateFullSummary).mockResolvedValue(EMPTY_GEN)
+  }
+
   // 本 describe 挂在顶层 describe 之外——自建 DB（照顶层 beforeEach 模式），也不依赖
   // 顶层 connection 回调；但引擎是 createSocketIO 建立的模块单例，runCompressReply 内
   // 按需自建（见该函数），否则单跑本组会拿到 null 引擎。
@@ -6517,7 +6659,8 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     process.env.SUMMARY_REPLACE_HISTORY = '1'
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    await resetSummaryGenerator()
     resetDb()
     if (savedMaxCtx === undefined) delete process.env.MAX_CONTEXT_TOKENS
     else process.env.MAX_CONTEXT_TOKENS = savedMaxCtx
@@ -6870,7 +7013,7 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
       resolveA(genResult('summary-A'))
       await vi.waitFor(() => {
         expect(logWarn).toHaveBeenCalledWith(
-          'summary replace async skipped (pending already trimmed)',
+          'summary replace async skipped (pending not persisted: trimmed or write failed)',
           expect.anything()
         )
       })
@@ -7151,5 +7294,17 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     expect(generateFullSummary).not.toHaveBeenCalled()
     const msgs = lastMessages(chatStream)
     expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
+  })
+
+  it('resetSummaryGenerator 清掉永挂实现，恢复默认空摘要（防 mock 泄漏）', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    // 永挂实现：若复位无效，下面的 race 会走超时分支（变异 = 复位函数体改空 → 本用例红）
+    vi.mocked(generateFullSummary).mockReturnValue(new Promise(() => {}) as any)
+    await resetSummaryGenerator()
+    const settled = await Promise.race([
+      generateFullSummary('session-1', 2000),
+      new Promise((r) => setTimeout(() => r('TIMEOUT'), 100)),
+    ])
+    expect(settled).toEqual(EMPTY_GEN)
   })
 })
