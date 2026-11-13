@@ -6575,6 +6575,17 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
   /** 生成失败替身：空摘要 + 空边界（= 生成失败语义，消费侧按失败处理） */
   const EMPTY_GEN = { summary: '', coveredToId: null, coveredToAt: null, coveredCount: 0 }
 
+  /**
+   * 复位摘要生成替身：`mockReset()` 会清掉实现在内的全部状态（含前序用例留下的
+   * 「永不 resolve」挂起实现），随后恢复默认空摘要。用例间必须复位——`clearAllMocks`
+   * 只清调用记录、不清实现，永挂 mock 会静默泄漏到后续用例（D-4 审查 P3-1）。
+   */
+  async function resetSummaryGenerator(): Promise<void> {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    vi.mocked(generateFullSummary).mockReset()
+    vi.mocked(generateFullSummary).mockResolvedValue(EMPTY_GEN)
+  }
+
   // 本 describe 挂在顶层 describe 之外——自建 DB（照顶层 beforeEach 模式），也不依赖
   // 顶层 connection 回调；但引擎是 createSocketIO 建立的模块单例，runCompressReply 内
   // 按需自建（见该函数），否则单跑本组会拿到 null 引擎。
@@ -6603,7 +6614,8 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     process.env.SUMMARY_REPLACE_HISTORY = '1'
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    await resetSummaryGenerator()
     resetDb()
     if (savedMaxCtx === undefined) delete process.env.MAX_CONTEXT_TOKENS
     else process.env.MAX_CONTEXT_TOKENS = savedMaxCtx
@@ -6956,7 +6968,7 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
       resolveA(genResult('summary-A'))
       await vi.waitFor(() => {
         expect(logWarn).toHaveBeenCalledWith(
-          'summary replace async skipped (pending already trimmed)',
+          'summary replace async skipped (pending not persisted: trimmed or write failed)',
           expect.anything()
         )
       })
@@ -7237,5 +7249,17 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     expect(generateFullSummary).not.toHaveBeenCalled()
     const msgs = lastMessages(chatStream)
     expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
+  })
+
+  it('resetSummaryGenerator 清掉永挂实现，恢复默认空摘要（防 mock 泄漏）', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    // 永挂实现：若复位无效，下面的 race 会走超时分支（变异 = 复位函数体改空 → 本用例红）
+    vi.mocked(generateFullSummary).mockReturnValue(new Promise(() => {}) as any)
+    await resetSummaryGenerator()
+    const settled = await Promise.race([
+      generateFullSummary('session-1', 2000),
+      new Promise((r) => setTimeout(() => r('TIMEOUT'), 100)),
+    ])
+    expect(settled).toEqual(EMPTY_GEN)
   })
 })

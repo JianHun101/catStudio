@@ -148,8 +148,8 @@ export function trimCompressedSummaries(id: string, keep: number): void {
  * 各生成各回填自家条目，不错位覆盖（竞态根治）。
  *
  * 返回布尔：true = 条目仍在数组里并已写入；false = 没写成（条目已被 trim 裁掉 /
- * 无历史 / JSON 损坏）。调用方必须区分——生成成功但回填落空时不能打「completed」，
- * 否则日志谎报（D-3 审查 P3-5）。
+ * 无历史 / JSON 损坏 / **DB 写入抛错也返回 false，不抛给调用方**）。调用方必须区分——
+ * 生成成功但回填落空时不能打「completed」，否则日志谎报（D-3 审查 P3-5）。
  */
 export function updateCompressedSummary(
   id: string,
