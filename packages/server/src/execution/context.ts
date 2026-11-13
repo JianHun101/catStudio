@@ -122,7 +122,12 @@ export function parseCompressedSummaries(raw: string | null): CompressedSummaryE
   }
 }
 
-/** 压缩计数 = 生成成功的块数（content 非空的条目；pending/失败残留不计，不消耗上限） */
+/**
+ * 就绪块计数 = 生成成功的块数（content 非空的条目；pending/失败残留不计）。
+ *
+ * 只用于观测（日志里的 `totalCompressed`）——**不再作生成 gate**：保留上限由
+ * `SUMMARY_COMPRESS_LIMIT`（数组条数）在有界存储侧执行，达到上限也继续生成新块。
+ */
 export function countReadySummaries(entries: CompressedSummaryEntry[]): number {
   return entries.filter((e) => e.content.trim() !== '').length
 }

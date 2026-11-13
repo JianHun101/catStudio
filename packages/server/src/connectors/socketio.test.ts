@@ -6810,10 +6810,11 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     }
   })
 
-  it('验收5：达上限（SUMMARY_COMPRESS_LIMIT）后不再生成新块，走既有截断/handoff', async () => {
+  it('验收5：达保留上限仍继续折叠（不再因累计生成次数停压）→ 新块生成、末条最新', async () => {
     const { generateFullSummary } = await import('../handoff/index.js')
+    // 保留上限 2 条：预置 2 条就绪块 = 已达上限。旧实现（readyCount < compressLimit）
+    // 会在这里整段跳过压缩分支——本用例就是那个 gate 的回归门。
     process.env.SUMMARY_COMPRESS_LIMIT = '2'
-    // 预置 2 条 ready 条目（已达上限）
     getDb()
       .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
       .run(
@@ -6822,13 +6823,82 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
           { createdAt: '2026-08-01T00:00:01Z', tokenCount: 10, content: 's2' },
         ])
       )
+    insertHistory(11) // ratio 1.17 ≥ 0.75 + 无 coveredThrough ⇒ 覆盖间隙为真 → 同步重生成
+    vi.mocked(generateFullSummary).mockResolvedValue(genResult('rollover summary'))
+
+    const chatStream = await runCompressReply('msg-limit')
+    // 判别力核心：达到保留上限仍必须生成（旧 gate 下这里是 0 次）
+    expect(generateFullSummary).toHaveBeenCalled()
+    const msgs = lastMessages(chatStream)
+    expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(true)
+    expect(msgs.some((m) => m.content?.includes('rollover summary'))).toBe(true)
+    // 有界：预置 2 条 + 新增 1 条 → 裁回 2 条，末条是新摘要（最旧一块被丢）
+    const entries = readCompressed()
+    expect(entries.length).toBeLessThanOrEqual(2)
+    expect(entries[entries.length - 1].content).toBe('rollover summary')
+    // 注：本用例 MAX_CONTEXT=14000，压缩后（块 + 最近 10 条）仍超预算，
+    // 会走「真实 prompt 超预算」兜底交接——那是保留的异常兜底，不属于本用例断言面。
+    // 「不交接」的判别力在下一组 90% 阈值用例里（MAX=40000，压缩后回落）。
+  })
+
+  it('达保留上限且无覆盖间隙 → 只消费既有块，零生成', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    process.env.SUMMARY_COMPRESS_LIMIT = '2'
+    getDb()
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
+      .run(
+        JSON.stringify([
+          {
+            createdAt: '2026-08-01T00:00:00Z',
+            tokenCount: 10,
+            content: 'ready summary',
+            // 远大于当前消息数 ⇒ 覆盖间隙为假 ⇒ 消费分支（零 LLM 调用）
+            coveredThrough: 9999,
+          },
+        ])
+      )
     insertHistory(11)
     vi.mocked(generateFullSummary).mockResolvedValue(genResult('should not be used'))
 
-    const chatStream = await runCompressReply('msg-limit')
+    const chatStream = await runCompressReply('msg-consume')
     expect(generateFullSummary).not.toHaveBeenCalled()
     const msgs = lastMessages(chatStream)
-    expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
+    expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(true)
+    expect(msgs.some((m) => m.content?.includes('ready summary'))).toBe(true)
+  })
+
+  it('折叠续命 ⇒ 压缩后 token 回落，90% 交接不再触发（performHandoff 不被调用）', async () => {
+    const { generateFullSummary, performHandoff, shouldHandoff } =
+      await import('../handoff/index.js')
+    const savedMax = process.env.MAX_CONTEXT_TOKENS
+    // 60 条 LONG_MSG ≈ 89k token（raw 远超 90%），压缩后 = 保留最近 10 条 ≈ 14.9k
+    process.env.MAX_CONTEXT_TOKENS = '40000' // 90% = 36000
+    process.env.SUMMARY_COMPRESS_LIMIT = '2'
+    getDb()
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
+      .run(
+        JSON.stringify([
+          { createdAt: '2026-08-01T00:00:00Z', tokenCount: 10, content: 's1' },
+          { createdAt: '2026-08-01T00:00:01Z', tokenCount: 10, content: 's2' },
+        ])
+      )
+    // 顶层替身默认 () => false（等于永不交接，判不出差异）——这里换成真实的 90% 阈值表达式
+    vi.mocked(shouldHandoff).mockImplementation((t: number) => t >= 40000 * 0.9)
+    try {
+      insertHistory(60)
+      vi.mocked(generateFullSummary).mockResolvedValue(genResult('rollover summary'))
+
+      const chatStream = await runCompressReply('msg-renewal')
+      expect(generateFullSummary).toHaveBeenCalled()
+      const msgs = lastMessages(chatStream)
+      expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(true)
+      // 判别力：raw > 90% 且压缩后 < 90%，仍未交接
+      expect(performHandoff).not.toHaveBeenCalled()
+    } finally {
+      vi.mocked(shouldHandoff).mockImplementation(() => false)
+      if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+      else process.env.MAX_CONTEXT_TOKENS = savedMax
+    }
   })
 
   it('验收6：摘要块不落 messages 表；sessions.compressed_summaries 正确 append', async () => {

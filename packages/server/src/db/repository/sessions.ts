@@ -111,6 +111,34 @@ export function appendCompressedSummary(id: string, entry: CompressedSummaryEntr
 }
 
 /**
+ * 有界存储：`compressed_summaries` 只保留最新 `keep` 条（数组顺序 = 追加顺序，最新在末尾）。
+ *
+ * 语义是**保留块数上限**，不是「累计生成次数上限」：超限时丢最旧的一块并继续折叠。
+ * 旧实现用生成次数做 gate，第 `keep+1` 块之后压缩分支被整段跳过，历史 token 只涨不降，
+ * 于是每一轮都撞交接阈值——那不是「保留最近几块」，是「压缩三次后放弃」。
+ *
+ * 下限 1 条：**绝不裁到 0 条**（0 条 = 下一轮退回全量重读，等于把折叠重置，成本更高）。
+ * 刚 append 的 pending 在数组末尾，因此必然被保住（回填按 entryId 定位，不依赖位置）。
+ * JSON 损坏视为无历史，静默跳过（与读取侧同容错口径）。
+ */
+export function trimCompressedSummaries(id: string, keep: number): void {
+  if (!Number.isFinite(keep)) return // 坏参数不猜：宁可不动，也不裁到 1 条
+  const current = getCompressedSummaries(id)
+  if (!current) return
+  try {
+    const arr = JSON.parse(current) as CompressedSummaryEntry[]
+    if (!Array.isArray(arr)) return
+    const limit = Math.max(1, Math.trunc(keep))
+    if (arr.length <= limit) return
+    db.prepare(
+      `UPDATE sessions SET compressed_summaries = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(JSON.stringify(arr.slice(-limit)), id)
+  } catch {
+    // JSON 损坏视为无历史，静默跳过（读取侧同样容错）
+  }
+}
+
+/**
  * 按 entryId 回填一条 pending 条目（异步生成完成后的落库点）。
  * 按 id 定位而非"末条"——多条 pending 并存（生成慢 + 消息增长快）时
  * 各生成各回填自家条目，不错位覆盖（竞态根治）。
