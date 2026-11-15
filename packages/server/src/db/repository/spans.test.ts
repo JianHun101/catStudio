@@ -55,11 +55,36 @@ const indexNames = () =>
     }>
   ).map((r) => r.name)
 
+/**
+ * 父执行链（agent + session + 触发消息 + `execution_logs` 行）。
+ *
+ * 票 TR-1 起 `spans.execution_id` 是**真 FK**（→ execution_logs.id，CASCADE）：写口用例
+ * 必须给 `exec-1` 造父行，否则 `insertExecTrace` 会先撞执行 FK，把「parent_span_id 违规
+ * 被吞」这类用例变成假绿（失败原因不是它声称的那个）。
+ */
+function seedExecution(executionId: string): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT OR IGNORE INTO agents (id, name, system_prompt, llm_api_key)
+     VALUES ('a-trace', 'ds猫', 'p', 'k')`
+  ).run()
+  db.prepare(`INSERT OR IGNORE INTO sessions (id, title) VALUES ('s-trace', 't')`).run()
+  db.prepare(
+    `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+     VALUES ('m-trace', 's-trace', 'user', 'x', '[]')`
+  ).run()
+  db.prepare(
+    `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status)
+     VALUES (?, 's-trace', 'a-trace', 'm-trace', 'completed')`
+  ).run(executionId)
+}
+
 describe('db/repository/spans — R2 段五落库面', () => {
   beforeEach(() => {
     setDb(createTestDb())
     initDb()
     initRepository(getDb())
+    seedExecution('exec-1')
   })
 
   afterEach(() => {

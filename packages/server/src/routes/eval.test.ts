@@ -744,8 +744,31 @@ describe('Eval Routes', () => {
       }
     }
 
+    /**
+     * 父执行链（agent + session + 触发消息 + `execution_logs` 行）。
+     * 票 TR-1 起 `spans.execution_id` 是**真 FK**（→ execution_logs.id，CASCADE），
+     * `insertExecTrace` 不能再拿裸 executionId 落段。固定 id 避开 `seedAgent` 的 name UNIQUE。
+     */
+    function seedExecutionRow(executionId: string): void {
+      const db = getDb()
+      db.prepare(
+        `INSERT OR IGNORE INTO agents (id, name, system_prompt, llm_api_key)
+         VALUES ('a-spans', 'ds猫', 'p', 'k')`
+      ).run()
+      db.prepare(`INSERT OR IGNORE INTO sessions (id, title) VALUES ('s-spans', 't')`).run()
+      db.prepare(
+        `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+         VALUES (?, 's-spans', 'user', 'x', '[]')`
+      ).run(`trig-${executionId}`)
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status)
+         VALUES (?, 's-spans', 'a-spans', ?, 'completed')`
+      ).run(executionId, `trig-${executionId}`)
+    }
+
     /** 落一次执行的段——走**真实写口** `insertExecTrace`（拓扑序 / 事务 / FK 都用真的） */
     function seedTrace(rows: SpanInput[]): void {
+      for (const id of new Set(rows.map((r) => r.executionId))) seedExecutionRow(id)
       expect(spansRepo.insertExecTrace(rows)).toBe(true)
     }
 

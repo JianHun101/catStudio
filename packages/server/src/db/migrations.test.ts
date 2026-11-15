@@ -86,6 +86,10 @@ const BASELINE_SHAPE_DIVERGENCE = new Set<string>([
   'table:episode_attributions',
   'table:review_verdicts',
   'table:review_parse_failures',
+  // 票 TR-1：retrieval_events / spans 重建（仅 `execution_id` 补 FK，列/索引原样）
+  // ——FK 子句进了 `sqlite_master` 原文，文本必然与冻结基准分叉，形状单列在 TR-1 用例组。
+  'table:retrieval_events',
+  'table:spans',
 ])
 
 /** 台账全量（name → note） */
@@ -573,6 +577,10 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
         REPAIR_NAME,
         // 「主库形态」也是 T1 上船前的库：T1 条目从未发生（见 PRE_T1_APPENDED_NET_OBJECTS）
         'session_groups 表 + sessions.group_id/deleted_at + 活跃索引替换（T1 分组两轴）',
+        // TR-1 也要摘：它的清孤儿条目假定 retrieval_events/spans 已存在（真实主库上由
+        // 紧随其前的补建条目先建回来）。本夹具故意让那 14 件从未发生，若把 TR-1 留在
+        // 里面，构造阶段就会撞 `no such table` —— 那是**夹具失真**，不是被测路径。
+        ...MIGRATIONS.filter((m) => m.ticket === 'TR-1').map((m) => m.name),
       ])
       applyMigrations(
         db,
@@ -1846,6 +1854,242 @@ describe('db/migrations —— 迁移机制立闸（票 1）', () => {
       expect(() =>
         insert.run('g3', '同名组', '2026-01-04T00:00:00.000Z', '2026-01-04T00:00:00.000Z')
       ).not.toThrow()
+    })
+  })
+
+  // ─── 票 TR-1 · trace 孤儿洞补齐（execution_id FK）────────────────────────
+  describe('票 TR-1 · retrieval_events / spans 的 execution_id FK', () => {
+    const TR1_ENTRIES = MIGRATIONS.filter((m) => m.ticket === 'TR-1')
+    const TR1_NAMES = [
+      'TR-1 清理 retrieval_events 孤儿（补 FK 前置）',
+      'rebuild retrieval_events（execution_id → execution_logs ON DELETE CASCADE）',
+      'TR-1 清理 spans 孤儿（补 FK 前置）',
+      'rebuild spans（execution_id → execution_logs ON DELETE CASCADE）',
+    ]
+
+    /** 「TR-1 之前」的库：台账齐全，只差本票 4 条（不是「老库」——老库路径不在此测） */
+    function makePreTr1Db(): Database.Database {
+      const db = makeFreshDb()
+      const start = MIGRATIONS.findIndex((m) => m.ticket === 'TR-1')
+      applyMigrations(db, MIGRATIONS.slice(0, start))
+      return db
+    }
+
+    /**
+     * 一条最小父执行链：session + agent + 触发消息 + `execution_logs` 行。
+     * `execution_logs` 的三条既有 FK 要求它们真实存在——夹具不能只插执行行。
+     */
+    function seedExecution(db: Database.Database, executionId: string): void {
+      db.prepare(`INSERT OR IGNORE INTO sessions (id, title) VALUES ('s-1', 't')`).run()
+      db.prepare(
+        `INSERT OR IGNORE INTO agents (id, name, system_prompt, llm_api_key)
+         VALUES ('a-1', 'ds猫', 'p', 'k')`
+      ).run()
+      db.prepare(
+        `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+         VALUES ('m-trig', 's-1', 'user', 'x', '[]')`
+      ).run()
+      db.prepare(
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status, started_at)
+         VALUES (?, 's-1', 'a-1', 'm-trig', 'completed', '2026-11-15T00:00:00.000Z')`
+      ).run(executionId)
+    }
+
+    /** 一条完整 event 链：event → query → candidate。`executionId` 的父行由调用方决定插不插。 */
+    function seedEventChain(db: Database.Database, executionId: string): void {
+      const rid = Number(
+        db
+          .prepare(
+            `INSERT INTO retrieval_events
+               (execution_id, created_at, threshold_max_distance, param_top_k, reason)
+             VALUES (?, '2026-11-15T00:00:00.000Z', 0.6, 3, 'ok')`
+          )
+          .run(executionId).lastInsertRowid
+      )
+      const qid = Number(
+        db
+          .prepare(
+            `INSERT INTO retrieval_queries (retrieval_id, query_index, query_text, query_embed_ok)
+             VALUES (?, 0, '原话', 1)`
+          )
+          .run(rid).lastInsertRowid
+      )
+      db.prepare(
+        `INSERT INTO retrieval_candidates
+           (query_id, source, doc_path, section_anchor, content_hash, injected)
+         VALUES (?, 'final', 'docs/adr/0002-b.md', '## 决策', 'h-1', 1)`
+      ).run(qid)
+    }
+
+    /** 一条完整 span 链：根 span → 子 span（`llm.chat`）→ span_llm。 */
+    function seedSpanChain(db: Database.Database, executionId: string, prefix: string): void {
+      const rootId = `${prefix}-root`
+      db.prepare(
+        `INSERT INTO spans (span_id, chain_id, execution_id, name, start_at, duration_ms, status)
+         VALUES (?, 'c-1', ?, 'invoke_agent', '2026-11-15T00:00:00.000Z', 5, 'ok')`
+      ).run(rootId, executionId)
+      const llmId = `${prefix}-llm`
+      db.prepare(
+        `INSERT INTO spans
+           (span_id, parent_span_id, chain_id, execution_id, name, start_at, duration_ms, status)
+         VALUES (?, ?, 'c-1', ?, 'llm.chat', '2026-11-15T00:00:01.000Z', 3, 'ok')`
+      ).run(llmId, rootId, executionId)
+      db.prepare(
+        `INSERT INTO span_llm (span_id, provider, model, stream) VALUES (?, 'deepseek', 'm', 1)`
+      ).run(llmId)
+    }
+
+    const count = (db: Database.Database, table: string, executionId: string): number =>
+      (
+        db
+          .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE execution_id = ?`)
+          .get(executionId) as {
+          n: number
+        }
+      ).n
+
+    const countBySpan = (db: Database.Database, prefix: string): number =>
+      (
+        db.prepare(`SELECT COUNT(*) AS n FROM span_llm WHERE span_id LIKE ?`).get(`${prefix}%`) as {
+          n: number
+        }
+      ).n
+
+    it('4 条条目形态：清理/重建成对出现，顺序固定（先清孤儿再重建）', () => {
+      expect(TR1_ENTRIES.map((m) => m.name)).toEqual(TR1_NAMES)
+      // 重建条目必须走工厂（`sql` 与 `createSql` 同源），清理条目是纯 SQL
+      expect(TR1_ENTRIES.map((m) => (m.run === undefined ? 'sql' : 'run'))).toEqual([
+        'sql',
+        'run',
+        'sql',
+        'run',
+      ])
+    })
+
+    it('A1 老库升级：清存量孤儿 + 重建两表，正常链一行不少、FK 指向 execution_logs(id) CASCADE', () => {
+      const db = makePreTr1Db()
+      // 前置：TR-1 之前「没有这条 FK」——否则下面「补上了」是恒真
+      const before = db.pragma('foreign_key_list(retrieval_events)') as Array<{ from: string }>
+      expect(before.filter((f) => f.from === 'execution_id')).toHaveLength(0)
+
+      // 正常链 + 孤儿链（孤儿 = 父执行已不在，子行由既有 CASCADE 随删）
+      seedExecution(db, 'e-live')
+      seedEventChain(db, 'e-live')
+      seedEventChain(db, 'e-gone')
+      seedSpanChain(db, 'e-live', 'live')
+      seedSpanChain(db, 'e-gone', 'gone')
+
+      setDb(db)
+      initDb()
+
+      // 孤儿链 0 行；正常链一行不少
+      expect(count(db, 'retrieval_events', 'e-gone')).toBe(0)
+      expect(count(db, 'retrieval_events', 'e-live')).toBe(1)
+      expect(
+        (db.prepare('SELECT COUNT(*) AS n FROM retrieval_queries').get() as { n: number }).n
+      ).toBe(1)
+      expect(
+        (db.prepare('SELECT COUNT(*) AS n FROM retrieval_candidates').get() as { n: number }).n
+      ).toBe(1)
+      expect(count(db, 'spans', 'e-gone')).toBe(0)
+      expect(count(db, 'spans', 'e-live')).toBe(2)
+      expect((db.prepare('SELECT COUNT(*) AS n FROM span_llm').get() as { n: number }).n).toBe(1)
+
+      // FK 形状：两表各一条 execution_id → execution_logs.id / CASCADE
+      for (const table of ['retrieval_events', 'spans']) {
+        const fks = db.pragma(`foreign_key_list(${table})`) as Array<{
+          table: string
+          from: string
+          to: string
+          on_delete: string
+        }>
+        const execFk = fks.find((f) => f.from === 'execution_id')
+        expect(execFk, `${table}.execution_id`).toBeDefined()
+        expect(execFk).toMatchObject({
+          table: 'execution_logs',
+          to: 'id',
+          on_delete: 'CASCADE',
+        })
+      }
+      // spans 的自引用原样保留（NO ACTION）
+      const spanFks = db.pragma('foreign_key_list(spans)') as Array<{
+        from: string
+        on_delete: string
+      }>
+      expect(spanFks.find((f) => f.from === 'parent_span_id')?.on_delete).toBe('NO ACTION')
+    })
+
+    it('A2 负例：FK 开启时插不存在的 execution_id → 两表都抛 FOREIGN KEY constraint failed', () => {
+      setDb(makeFreshDb())
+      initDb()
+      const db = getDb()
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO retrieval_events
+               (execution_id, created_at, threshold_max_distance, param_top_k, reason)
+             VALUES ('ghost', '2026-11-15T00:00:00.000Z', 0.6, 3, 'ok')`
+          )
+          .run()
+      ).toThrowError(/FOREIGN KEY constraint failed/)
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO spans (span_id, execution_id, name, start_at, duration_ms, status)
+             VALUES ('s-ghost', 'ghost', 'invoke_agent', '2026-11-15T00:00:00.000Z', 1, 'ok')`
+          )
+          .run()
+      ).toThrowError(/FOREIGN KEY constraint failed/)
+
+      expect(
+        (db.prepare('SELECT COUNT(*) AS n FROM retrieval_events').get() as { n: number }).n
+      ).toBe(0)
+      expect((db.prepare('SELECT COUNT(*) AS n FROM spans').get() as { n: number }).n).toBe(0)
+    })
+
+    it('A3 级联：删一条 execution_logs → 该执行全链 0 行，另一执行一行不少', () => {
+      setDb(makeFreshDb())
+      initDb()
+      const db = getDb()
+
+      for (const id of ['e-A', 'e-B']) {
+        seedExecution(db, id)
+        seedEventChain(db, id)
+        seedSpanChain(db, id, id)
+      }
+
+      expect(() => db.prepare('DELETE FROM execution_logs WHERE id = ?').run('e-A')).not.toThrow()
+
+      // A：event/query/candidate + spans/span_llm 全 0
+      expect(count(db, 'retrieval_events', 'e-A')).toBe(0)
+      expect(count(db, 'spans', 'e-A')).toBe(0)
+      expect(countBySpan(db, 'e-A')).toBe(0)
+      // B：一行不少
+      expect(count(db, 'retrieval_events', 'e-B')).toBe(1)
+      expect(count(db, 'spans', 'e-B')).toBe(2)
+      expect(countBySpan(db, 'e-B')).toBe(1)
+      expect(
+        (
+          db
+            .prepare(
+              `SELECT COUNT(*) AS n FROM retrieval_candidates rc
+               JOIN retrieval_queries rq ON rq.id = rc.query_id
+               JOIN retrieval_events re ON re.id = rq.retrieval_id
+               WHERE re.execution_id = 'e-B'`
+            )
+            .get() as { n: number }
+        ).n
+      ).toBe(1)
+    })
+
+    it('A7 台账：4 条都真执行（note 为空）；空表 initDb 不报错', () => {
+      setDb(makeFreshDb())
+      expect(() => initDb()).not.toThrow()
+
+      const rows = ledger(getDb()).filter((r) => TR1_NAMES.includes(r.name))
+      expect(rows).toHaveLength(TR1_NAMES.length)
+      for (const row of rows) expect(row.note, row.name).toBeNull()
     })
   })
 })
