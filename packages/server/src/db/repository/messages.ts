@@ -300,6 +300,33 @@ export function countBySession(sessionId: string): number {
 }
 
 /**
+ * 批量取每个会话**最后一条消息**的 `created_at`（T6：列表行「最后消息时间」）。
+ *
+ * `MAX(created_at)` 分组一次取全量——**禁止逐会话查**（N 个会话就是 N 次往返，
+ * 列表首屏立刻变成 N+1）。返回 Map：无消息的会话不出现（调用方按 `?? null` 投影）。
+ *
+ * 比较/返回口径：`messages.created_at` 自票 5 起是 ISO 毫秒，入参已是 ISO。SQL 的
+ * `MAX(created_at)` 是**字符串比较**，秒级与 ISO 在同一天混存时会选错行（`' '` < `'T'`）；
+ * 那是存储面的迁移问题，需要在 SQL 内先归一，不能靠本函数兜。这里的 `toIsoDb` 只做
+ * **返回形态**归一（纯秒级老行折成 `.000Z`），保证 wire 面只有 ISO 一种形态。
+ */
+export function getLastMessageAtBySessionIds(sessionIds: readonly string[]): Map<string, string> {
+  const result = new Map<string, string>()
+  if (sessionIds.length === 0) return result
+  const placeholders = sessionIds.map(() => '?').join(', ')
+  const rows = db
+    .prepare(
+      `SELECT session_id, MAX(created_at) AS last_at
+       FROM messages
+       WHERE session_id IN (${placeholders})
+       GROUP BY session_id`
+    )
+    .all(...sessionIds) as Array<{ session_id: string; last_at: string }>
+  for (const row of rows) result.set(row.session_id, toIsoDb(row.last_at))
+  return result
+}
+
+/**
  * 摘要输入分页串读：按 `(created_at, id)` **正序**取一页带 Agent 名称的消息。
  *
  * 摘要生成必须读**全量**（旧的 `limit=300` 会让第 300 条之前的早期信息静默丢失），

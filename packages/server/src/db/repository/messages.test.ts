@@ -9,7 +9,7 @@
  *   - 存量 NULL 行兼容
  *   - fire-and-forget（写入失败不抛）
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import { createTestDb } from '../../test-helpers.js'
 import { setDb, resetDb, getDb, initDb } from '../index.js'
@@ -734,5 +734,76 @@ describe('getSessionHistory — 首屏取最新一页', () => {
     // `, id DESC` 行级结果不变**，上两条断言打不红变异。故 tie-break 的判别面只能是这条
     // 源码断言（删掉即红），不能假装行级用例覆盖了它。
     expect(messagesRepo.getSessionHistory.toString()).toContain('ORDER BY created_at DESC, id DESC')
+  })
+})
+
+// ─── T6：批量取每会话最后一条消息时间（列表行「最后消息时间」）──────────────
+describe('getLastMessageAtBySessionIds — 一次 GROUP BY 取全量', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    const ins = db.prepare('INSERT INTO sessions (id, title) VALUES (?, ?)')
+    for (const id of ['s1', 's2', 's3']) ins.run(id, `会话-${id}`)
+    const insMsg = db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+       VALUES (?, ?, 'user', 'x', '[]', ?)`
+    )
+    // s1 三条（乱序插入，MAX 取后两条里最大的 10:00）；s2 一条；s3 无消息
+    insMsg.run('m1', 's1', '2026-02-01T09:00:00.000Z')
+    insMsg.run('m2', 's1', '2026-02-01T10:00:00.000Z')
+    insMsg.run('m3', 's1', '2026-02-01T08:00:00.000Z')
+    insMsg.run('m4', 's2', '2026-01-05T00:00:00.000Z')
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  it('每会话取 MAX(created_at)；无消息的会话不在 Map 里', () => {
+    const map = messagesRepo.getLastMessageAtBySessionIds(['s1', 's2', 's3'])
+
+    expect(map.get('s1')).toBe('2026-02-01T10:00:00.000Z')
+    expect(map.get('s2')).toBe('2026-01-05T00:00:00.000Z')
+    expect(map.has('s3')).toBe(false)
+  })
+
+  it('空入参零查询（返回空 Map，不拼出 `IN ()` 语法错误）', () => {
+    expect(messagesRepo.getLastMessageAtBySessionIds([]).size).toBe(0)
+  })
+
+  it('跨会话互不串：只查给定 id，未请求的会话不出现', () => {
+    const map = messagesRepo.getLastMessageAtBySessionIds(['s2'])
+
+    expect([...map.keys()]).toEqual(['s2'])
+  })
+
+  it('秒级老行归一到 ISO 毫秒（wire 面只有一种形态）', () => {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+       VALUES ('m-old', 's3', 'user', 'x', '[]', '2026-03-01 12:00:00')`
+    ).run()
+
+    expect(messagesRepo.getLastMessageAtBySessionIds(['s3']).get('s3')).toBe(
+      '2026-03-01T12:00:00.000Z'
+    )
+  })
+
+  it('SQL 只发一条 GROUP BY（没有逐会话循环查的形态）', () => {
+    const sql = messagesRepo.getLastMessageAtBySessionIds.toString()
+
+    expect(sql).toContain('GROUP BY session_id')
+    expect(sql).toContain('MAX(created_at)')
+  })
+
+  it('三个会话仍只 prepare 一次（N 个会话不是 N 次查询）', () => {
+    const spy = vi.spyOn(db, 'prepare')
+
+    messagesRepo.getLastMessageAtBySessionIds(['s1', 's2', 's3'])
+
+    expect(spy).toHaveBeenCalledTimes(1)
+    spy.mockRestore()
   })
 })

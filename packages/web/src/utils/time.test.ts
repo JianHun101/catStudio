@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { normalizeUtc, parseUtc, fmtUtcShort, fmtUtcFull, fmtMsgTime, fmtDateSep } from './time'
+import {
+  normalizeUtc,
+  parseUtc,
+  fmtUtcShort,
+  fmtUtcFull,
+  fmtMsgTime,
+  fmtDateSep,
+  fmtSessionTime,
+} from './time'
 import timeSource from './time.ts?raw'
 
 /**
@@ -234,7 +242,50 @@ describe('静态源：分档顺序不能重排（昨天必须先于跨年判定�
     // 计数跑在 codeSource 上：注释里提一次 `dayBucket(` 就能给这条 `>= 3` 添余量、
     // 掩掉真删一处消费——与上一条守卫同一失效机制（判据面混入注释），故同批收掉。
     expect(codeSource).toContain('function dayBucket(')
-    expect(codeSource.match(/dayBucket\(/g)!.length).toBeGreaterThanOrEqual(3) // 定义 + 两处消费
+    expect(codeSource.match(/dayBucket\(/g)!.length).toBeGreaterThanOrEqual(4) // 定义 + 三处消费
     expect(codeSource).toContain('yesterday.setDate(yesterday.getDate() - 1)')
+  })
+})
+
+// ─── 会话列表行的最后消息时间（T6）───────────────────────────────────────
+describe('fmtSessionTime：会话行四档（今天/昨天/同年/跨年）', () => {
+  const now = at(2026, 10, 13, 12, 0)
+
+  it('今天 → `HH:mm`（不带日期前缀）', () => {
+    expect(fmtSessionTime(isoAt(2026, 10, 13, 0, 5), now)).toBe('00:05')
+    expect(fmtSessionTime(isoAt(2026, 10, 13, 11, 59), at(2026, 10, 13, 23, 59))).toBe('11:59')
+  })
+
+  it('昨天 → 只显示字面量 `昨天`（列表行窄，不带到分钟）', () => {
+    expect(fmtSessionTime(isoAt(2026, 10, 12, 23, 59), at(2026, 10, 13, 0, 1))).toBe('昨天')
+  })
+
+  it('同年更早 → `M月D日`（月日不补零）', () => {
+    const msg = at(2026, 3, 5, 10, 0)
+    expect(fmtSessionTime(iso(msg), now)).toBe(`${msg.getMonth() + 1}月${msg.getDate()}日`)
+  })
+
+  it('跨年 → `YYYY/M/D`（与消息流的「YYYY年M月D日」区分：列表行更短）', () => {
+    const msg = at(2025, 6, 5, 10, 0)
+    expect(fmtSessionTime(iso(msg), now)).toBe(
+      `${msg.getFullYear()}/${msg.getMonth() + 1}/${msg.getDate()}`
+    )
+  })
+
+  it('跨年边界「昨天」优先（与 fmtMsgTime / fmtDateSep 同一 dayBucket）', () => {
+    expect(fmtSessionTime(isoAt(2025, 12, 31, 22, 30), at(2026, 1, 1, 8, 0))).toBe('昨天')
+  })
+
+  it('null / undefined / 空串 / 无法解析 → 空串（行内不显示，不回显原始串）', () => {
+    expect(fmtSessionTime(null, now)).toBe('')
+    expect(fmtSessionTime(undefined, now)).toBe('')
+    expect(fmtSessionTime('', now)).toBe('')
+    expect(fmtSessionTime('不是时间', now)).toBe('')
+  })
+
+  it('吃 SQLite 无后缀串（与列表 API 的两种形态同源）', () => {
+    const msg = at(2026, 10, 13, 9, 30)
+    const sqlite = msg.toISOString().replace('T', ' ').slice(0, 19)
+    expect(fmtSessionTime(sqlite, now)).toBe('09:30')
   })
 })

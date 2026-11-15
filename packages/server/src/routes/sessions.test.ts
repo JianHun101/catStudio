@@ -165,6 +165,68 @@ describe('Session Routes', () => {
         expect(ids, `includeArchived=${v}`).toContain(id)
       }
     })
+
+    // ─── T6：最后消息时间（列表行展示的数据源）─────────────────────────
+    it('lastMessageAt = 最后一条消息的 created_at（不区分角色）；空会话为 null', async () => {
+      const busy = await createSession('有消息的')
+      const empty = await createSession('空会话')
+      const db = getDb()
+      const ins = db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES (?, ?, ?, 'x', '[]', ?)`
+      )
+      ins.run('m-early', busy, 'user', '2026-02-01T09:00:00.000Z')
+      ins.run('m-late', busy, 'agent', '2026-02-01T10:30:00.000Z')
+
+      const res = await app.inject({ method: 'GET', url: '/api/sessions' })
+      const list = JSON.parse(res.body) as Array<{
+        id: string
+        lastMessageAt: string | null
+      }>
+
+      expect(list.find((s) => s.id === busy)!.lastMessageAt).toBe('2026-02-01T10:30:00.000Z')
+      // 形态钉死：ISO 毫秒 UTC（与 messages.created_at 同形），不补 `Z`、更不能 `ZZ`。
+      const late = list.find((s) => s.id === busy)!.lastMessageAt!
+      expect(late).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      expect(late).not.toContain('ZZ')
+      expect(list.find((s) => s.id === empty)!.lastMessageAt).toBeNull()
+    })
+
+    it('includeArchived 分支同样挂 lastMessageAt（两条路径不漏）', async () => {
+      const id = await createSession('兼容分支也带')
+      getDb()
+        .prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES ('m-arch', ?, 'user', 'x', '[]', '2026-03-04T05:06:07.000Z')`
+        )
+        .run(id)
+
+      const res = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
+      const list = JSON.parse(res.body) as Array<{ id: string; lastMessageAt: string | null }>
+
+      expect(list.find((s) => s.id === id)!.lastMessageAt).toBe('2026-03-04T05:06:07.000Z')
+      const value = list.find((s) => s.id === id)!.lastMessageAt!
+      expect(value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      expect(value).not.toContain('ZZ')
+    })
+
+    it('多会话各取各的最后时间，不串号', async () => {
+      const a = await createSession('A')
+      const b = await createSession('B')
+      const db = getDb()
+      const ins = db.prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES (?, ?, 'user', 'x', '[]', ?)`
+      )
+      ins.run('m-a', a, '2026-01-01T00:00:00.000Z')
+      ins.run('m-b', b, '2026-01-02T00:00:00.000Z')
+
+      const res = await app.inject({ method: 'GET', url: '/api/sessions' })
+      const list = JSON.parse(res.body) as Array<{ id: string; lastMessageAt: string | null }>
+
+      expect(list.find((s) => s.id === a)!.lastMessageAt).toBe('2026-01-01T00:00:00.000Z')
+      expect(list.find((s) => s.id === b)!.lastMessageAt).toBe('2026-01-02T00:00:00.000Z')
+    })
   })
 
   describe('POST /api/sessions/:id/archive | /unarchive', () => {

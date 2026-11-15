@@ -277,7 +277,7 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 回收站条目（`GET /api/sessions/trash`，服务端已滤过期）。条目粒度 = 删除动作粒度：
    * `kind:'group'` 与 `kind:'session'` 两段互不重叠——整组删除的成员不会在会话段重复出现。
-   * 头行 `🗑 N` 读 `trashEntries.length`（两段条目数之和，不是会话总数）。
+   * 头行回收站按钮读 `trashEntries.length`（两段条目数之和，不是会话总数）。
    */
   const trashEntries = ref<TrashEntry[]>([])
   /**
@@ -404,6 +404,13 @@ export const useChatStore = defineStore('chat', () => {
   const confirmingRestartMessageId = ref<string | null>(null)
   const pendingHandoffSummary = ref<string | null>(null) // handoff 摘要，等待 SESSION_HISTORY 到达后注入
   let handoffJoining = false // S8: 防止 handoff 重入（两次 SESSION_HANDOFF 先后到达时相互覆盖）
+  /**
+   * 同一父会话的 handoff 子会话只保留最新一条。`SESSION_HANDOFF` 到达时先按
+   * `handoffFrom` 摘掉旧子会话，但随后 `joinSession` 会触发 `fetchSessions()`——
+   * 服务端列表只过滤 `deleted_at`、不按 `handoffFrom` 过滤，旧子会话会被带回来。
+   * 把父子映射记下来，在每次列表重拉落地后重放剔除（多父会话也各自保留最新一条）。
+   */
+  const handoffPrunes = new Map<string, string>()
   /** 交接失败横幅数据（HANDOFF_FAILED 事件——摘要生成失败可见化；仅当前会话生效，收到新消息/切会话/手动关闭清除） */
   const handoffFailed = ref<{ sessionId: string; reason: string } | null>(null)
 
@@ -617,7 +624,7 @@ export const useChatStore = defineStore('chat', () => {
       dataReady.value = true
       dataError.value = ''
       // 分组与回收站都是列表的二级数据：独立失败域，拉不到不阻断会话列表
-      // （左栏退化为全未分组；头行 🗑 计数退化为 0，进回收站后仍是权威重拉）。
+      // （左栏退化为全未分组；头行回收站计数退化为 0，进回收站后仍是权威重拉）。
       void fetchGroups()
       void fetchTrash()
 
@@ -655,6 +662,10 @@ export const useChatStore = defineStore('chat', () => {
     // 切走前把当前消息存入缓存（存数组引用，后续 messages.value 重新赋值不会改旧引用）
     if (switching) {
       sessionMessages.set(activeSessionId.value!, messages.value)
+      // 第六条一致性路径（票单契约 6）：离开期间会话收到的回复只广播到它自己的房间，
+      // 本 tab 不在房间里收不到 `NEW_MESSAGE`，行内时间会停在切走前。切回另一个会话时
+      // 用列表端点校准一次——首屏自动 join（active 为 null）与同会话重入不算切换。
+      void fetchSessions()
     }
     // 换代：**每次进入 joinSession 都换**（同会话重入也换）。下方无条件复位 loadingOlder / 清句柄，
     // 只有代际同步变，旧请求的 finally 才不会把新请求的 loadingOlder 清掉。旧的在途翻页请求从此
@@ -954,6 +965,12 @@ export const useChatStore = defineStore('chat', () => {
       log.error('clearSessionMessages API failed', { error: String(err) })
       throw err
     }
+    // 行内时间与剩余消息一致：清空后该会话没有消息，`lastMessageAt` 归零。
+    // 服务端同时全局广播 SESSION_MESSAGES_CLEARED（多 tab / 当前 tab 都走同一投影）。
+    const rowIdx = sessions.value.findIndex((s) => s.id === id)
+    if (rowIdx >= 0) {
+      sessions.value[rowIdx] = { ...sessions.value[rowIdx]!, lastMessageAt: null }
+    }
     // 如果清空的是当前活跃会话，清空本地消息
     if (activeSessionId.value === id) {
       messages.value = []
@@ -984,6 +1001,9 @@ export const useChatStore = defineStore('chat', () => {
       messageStatus.value = nextStatus
       setRollbackMark(id, messageId, res.removedCount)
     }
+    // 行内时间必须以服务端为准重拉：本地 `messages` 含合成 `welcome-<id>`（createdAt 是
+    // 加入房间的时刻，不是落库消息时间），拿末条重算会把行时间拨到错误值。
+    void fetchSessions()
     return res.removedCount
   }
 
@@ -1045,12 +1065,28 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 重放 handoff 陈旧子会话剔除。本地事件路径与每次 `fetchSessions` 落地后共用同一判据：
+   * 同一父会话只保留最新子会话，其余同父条目摘掉。服务端列表不按 `handoffFrom` 过滤，
+   * 所以重拉后必须再过滤一次，否则刚摘掉的旧框会被权威列表带回来。
+   */
+  function pruneHandoffChildren(): void {
+    if (handoffPrunes.size === 0) return
+    sessions.value = sessions.value.filter((s) => {
+      for (const [oldSessionId, newSessionId] of handoffPrunes) {
+        if (s.handoffFrom === oldSessionId && s.id !== newSessionId) return false
+      }
+      return true
+    })
+  }
+
+  /**
    * 重拉会话列表。多 tab 的「移动会话」只改归属、不发 `SESSION_UPDATE` 到全局，
    * 收到 `GROUPS_CHANGED` 时光重拉组不够——行还留在旧组。失败静默（下一轮事件/刷新兜底）。
    */
   async function fetchSessions(): Promise<void> {
     try {
       sessions.value = await api.getSessions(showArchived.value)
+      pruneHandoffChildren()
     } catch (err) {
       log.error('fetchSessions failed', { error: String(err) })
     }
@@ -1214,6 +1250,8 @@ export const useChatStore = defineStore('chat', () => {
       const res = await api.restoreSession(pending.sessionId)
       trashEntries.value = trashEntries.value.filter((e) => e.id !== pending.sessionId)
       if (res.session) insertSessionSorted(res.session)
+      // 恢复响应不带 `lastMessageAt`（只有列表端点聚合），插回后必须重拉，行内时间才回来。
+      void fetchSessions()
       return true
     } catch (err) {
       reportTrashFailure(err)
@@ -1228,6 +1266,7 @@ export const useChatStore = defineStore('chat', () => {
       trashEntries.value = trashEntries.value.filter((e) => e.id !== id)
       if (res.session) insertSessionSorted(res.session)
       if (undoToast.value?.sessionId === id) dismissUndoToast()
+      void fetchSessions()
       return true
     } catch (err) {
       reportTrashFailure(err)
@@ -1243,6 +1282,8 @@ export const useChatStore = defineStore('chat', () => {
       for (const session of res.sessions ?? []) insertSessionSorted(session)
       // 组名可能因重名被改成「（恢复）」——以服务端为准
       void fetchGroups()
+      // 同批会话的行内时间同理只能从列表端点拿。
+      void fetchSessions()
       return true
     } catch (err) {
       reportTrashFailure(err)
@@ -1477,6 +1518,16 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(Events.NEW_MESSAGE, (msg: Message) => {
       // 防止重复消息
       if (messages.value.some((m) => m.id === msg.id)) return
+      // T6：列表行「最后消息时间」随消息落库即时更新。不在这里补，正在聊的会话要等
+      // 下次 fetchSessions（切组 / 移组 / 多 tab 事件 / 刷新）才更新，行上会长期显示旧时间。
+      // 比较后再写：重放/乱序帧不能把时间往回拨。
+      const rowIdx = sessions.value.findIndex((s) => s.id === msg.sessionId)
+      if (rowIdx >= 0) {
+        const row = sessions.value[rowIdx]!
+        if (!row.lastMessageAt || row.lastMessageAt < msg.createdAt) {
+          sessions.value[rowIdx] = { ...row, lastMessageAt: msg.createdAt }
+        }
+      }
       // 本猫回复落库 = 该执行结束（服务端顺序：NEW_MESSAGE 先于 done 广播）。清计时**按消息
       // 自身 sessionId**、且**不随「是否当前会话」分叉**：用户已切走时那条执行同样结束了，
       // 漏清只会在全局表里攒下永不渲染的僵尸条目（键控保证它不会漏进当前视图，但没必要留）。
@@ -1616,7 +1667,15 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(Events.SESSION_UPDATE, (session: SessionConfig) => {
       const idx = sessions.value.findIndex((s) => s.id === session.id)
       if (idx >= 0) {
-        sessions.value[idx] = session
+        // PATCH（改名/改成员）不聚合 `lastMessageAt`，不能整个对象替换——否则行内时间被抹掉。
+        // 用 `in` 而不是 `??`：区分「字段缺失」（保留旧值）与「显式 null」（真的没有消息了）。
+        const prev = sessions.value[idx]!
+        sessions.value[idx] = {
+          ...prev,
+          ...session,
+          lastMessageAt:
+            'lastMessageAt' in session ? (session.lastMessageAt ?? null) : prev.lastMessageAt,
+        }
       } else {
         sessions.value.push(session)
       }
@@ -1684,6 +1743,8 @@ export const useChatStore = defineStore('chat', () => {
         for (const session of data.sessions ?? []) insertSessionSorted(session)
         const restored = new Set((data.sessions ?? []).map((s) => s.id))
         if (undoToast.value && restored.has(undoToast.value.sessionId)) dismissUndoToast()
+        // 广播里的 `session` 不带 `lastMessageAt`；行内时间只能从列表端点重拉。
+        void fetchSessions()
         void fetchTrash()
       }
     )
@@ -1700,6 +1761,11 @@ export const useChatStore = defineStore('chat', () => {
     )
 
     socket.on(Events.SESSION_MESSAGES_CLEARED, (data: { sessionId: string }) => {
+      // 行内时间与剩余消息一致：清空后该会话没有消息。命中守卫——不在列表里的会话不新建行。
+      const idx = sessions.value.findIndex((s) => s.id === data.sessionId)
+      if (idx >= 0) {
+        sessions.value[idx] = { ...sessions.value[idx]!, lastMessageAt: null }
+      }
       if (activeSessionId.value === data.sessionId) {
         messages.value = []
       }
@@ -1715,6 +1781,9 @@ export const useChatStore = defineStore('chat', () => {
         removedIds: string[]
         removedCount: number
       }) => {
+        // 回退会改该会话的最后一条消息：行内时间必须从列表端点重拉（本地 `messages` 含
+        // 合成 welcome，末条时间不可信）。非当前会话也要刷——多 tab 下行时间同样要落。
+        void fetchSessions()
         if (activeSessionId.value !== data.sessionId) return
         const removed = new Set(data.removedIds ?? [])
         messages.value = messages.value.filter((m) => !removed.has(m.id))
@@ -1858,10 +1927,10 @@ export const useChatStore = defineStore('chat', () => {
           .then((newSession) => {
             // 陈旧条目剔除（幂等）：同一 oldSessionId 的历史交接产物先摘掉——重复交接事件
             // 的 newSessionId 每次不同，只按 id 判重会漏（列表里并排两条同名框）。
-            // handoffFrom 由 GET /api/sessions/:id 透传（toSessionConfig）。
-            sessions.value = sessions.value.filter(
-              (s) => !(s.handoffFrom === data.oldSessionId && s.id !== newSession.id)
-            )
+            // handoffFrom 由 GET /api/sessions/:id 透传（toSessionConfig）。映射记下来，
+            // 之后 `joinSession` 触发的列表重拉落地时会重放同一条剔除（pruneHandoffChildren）。
+            handoffPrunes.set(data.oldSessionId, newSession.id)
+            pruneHandoffChildren()
             // 添加到会话列表
             const exists = sessions.value.some((s) => s.id === newSession.id)
             if (!exists) {
