@@ -14,6 +14,8 @@ defineProps<{
   checked: boolean
   unread: number
   groups: SessionGroup[]
+  /** 回收站接线是否就绪（T2 前 false：行菜单的删除入口禁用） */
+  trashEnabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -41,6 +43,7 @@ const emit = defineEmits<{
     <SessionActionsMenu
       :session="session"
       :groups="groups"
+      :trash-enabled="trashEnabled"
       @move="emit('move', $event)"
       @trash="emit('trash')"
     />
@@ -74,6 +77,13 @@ const emit = defineEmits<{
 .session-row:hover .row-check,
 .session-row.selected .row-check {
   opacity: 1;
+}
+
+/* 触屏无 hover：复选框恒显，否则没有可点入口 */
+@media (hover: none) {
+  .row-check {
+    opacity: 1;
+  }
 }
 
 /* 行操作 ⋯：悬停整行才亮（`.session-actions` 是 SessionActionsMenu 的根节点，

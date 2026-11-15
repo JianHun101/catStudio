@@ -42,9 +42,9 @@ function session(groupId: string | null): GroupedSession {
 
 let wrapper: VueWrapper | null = null
 
-function mountMenu(groupId: string | null = 'g1'): VueWrapper {
+function mountMenu(groupId: string | null = 'g1', trashEnabled = true): VueWrapper {
   wrapper = mount(SessionActionsMenu, {
-    props: { session: session(groupId), groups: GROUPS },
+    props: { session: session(groupId), groups: GROUPS, trashEnabled },
     attachTo: document.body,
   })
   return wrapper
@@ -178,5 +178,19 @@ describe('SessionActionsMenu 点击兜底与选择目标', () => {
 
     expect(w.emitted('trash')).toHaveLength(1)
     expect(w.find('.row-menu').exists()).toBe(false)
+  })
+
+  it('回收站未接线（T2 前）：移入回收站为禁用态，点击不 emit', async () => {
+    const w = mountMenu('g1', false)
+    await w.find('.row-more').trigger('click')
+    const trashItem = w.findAll('.menu-item')[1]!
+
+    expect(trashItem.attributes('aria-disabled')).toBe('true')
+    expect(trashItem.classes()).toContain('disabled')
+    expect(trashItem.attributes('title')).toContain('回收站暂未启用')
+
+    await trashItem.trigger('click')
+
+    expect(w.emitted('trash')).toBeUndefined()
   })
 })

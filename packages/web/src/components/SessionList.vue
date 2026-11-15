@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useChatStore } from '@/stores/chat'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useChatStore, TRASH_ENABLED, formatTrashFailures, moveActionError } from '@/stores/chat'
 import { api, type GroupedSession, type SessionGroup } from '@/composables/useApi'
 import SessionCreateModal from './SessionCreateModal.vue'
 import SessionRow from './SessionRow.vue'
@@ -71,12 +71,16 @@ async function moveOne(sessionId: string, groupId: string | null): Promise<void>
   try {
     await store.moveSessionToGroup(sessionId, groupId)
   } catch (err: any) {
-    listError.value = err?.message || '移动到分组失败'
+    listError.value = moveActionError(err)
   }
 }
 
 async function trashOne(sessionId: string): Promise<void> {
   listError.value = ''
+  if (!TRASH_ENABLED) {
+    listError.value = '回收站暂未启用'
+    return
+  }
   const failed = await store.trashSessions([sessionId])
   if (failed.length > 0) listError.value = failed[0]!.message
 }
@@ -171,6 +175,28 @@ async function submitCreateGroup(): Promise<void> {
 const batchMoveOpen = ref(false)
 const batchError = ref('')
 
+/** 打开批量归组浮层时收起组头菜单；两者互斥，不叠在一起。 */
+function toggleBatchMove(): void {
+  batchMoveOpen.value = !batchMoveOpen.value
+  if (batchMoveOpen.value) openGroupMenuId.value = null
+}
+
+/**
+ * 选中集随会话列表收敛：另一 tab 删掉已选会话后，头行不能还显示「已选 N」、
+ * 批量动作也不能再对不存在的 id 发请求。
+ */
+watch(
+  () => store.sessions.map((s) => s.id),
+  (ids) => {
+    if (selectedIds.value.size === 0) return
+    const alive = new Set(ids)
+    const next = new Set([...selectedIds.value].filter((id) => alive.has(id)))
+    if (next.size === selectedIds.value.size) return
+    selectedIds.value = next
+    if (next.size === 0) batchMoveOpen.value = false
+  }
+)
+
 async function batchMove(groupId: string | null): Promise<void> {
   batchError.value = ''
   const ids = [...selectedIds.value]
@@ -178,15 +204,23 @@ async function batchMove(groupId: string | null): Promise<void> {
     await store.batchMoveToGroup(ids, groupId)
     clearSelection()
   } catch (err: any) {
-    batchError.value = err?.message || '批量归组失败'
+    batchError.value = moveActionError(err)
   }
 }
 
 async function batchTrash(): Promise<void> {
   batchError.value = ''
+  if (!TRASH_ENABLED) {
+    batchError.value = '回收站暂未启用'
+    return
+  }
   const failed = await store.trashSessions([...selectedIds.value])
   clearSelection()
-  if (failed.length > 0) listError.value = failed[0]!.message
+  if (failed.length > 0) {
+    // 部分失败：成功项已移出列表，失败项保留并逐条点名（不整批回滚、不静默吞）
+    const titleOf = (id: string) => store.sessions.find((s) => s.id === id)?.title ?? id
+    listError.value = formatTrashFailures(failed, titleOf)
+  }
 }
 
 // ─── 删组确认 ───────────────────────────────────────────────────────
@@ -248,6 +282,11 @@ function openDeleteGroup(group: SessionGroup): void {
 
 async function confirmDeleteGroup(mode: 'dissolve' | 'trash'): Promise<void> {
   if (!deleteTarget.value) return
+  if (mode === 'trash' && !TRASH_ENABLED) {
+    // 防御：第二项在 T2 前是禁用态，不允许任何路径落到旧物理删除
+    deleteError.value = '回收站暂未启用'
+    return
+  }
   deleteSubmitting.value = true
   deleteError.value = ''
   try {
@@ -308,11 +347,18 @@ function closeCreate(): void {
           <button
             class="batch-btn batch-move-trigger"
             :aria-expanded="batchMoveOpen"
-            @click.stop="batchMoveOpen = !batchMoveOpen"
+            @click.stop="toggleBatchMove"
           >
             归组
           </button>
-          <button class="batch-btn danger" @click.stop="batchTrash">删除</button>
+          <button
+            class="batch-btn danger"
+            :disabled="!TRASH_ENABLED"
+            :title="TRASH_ENABLED ? undefined : '回收站暂未启用'"
+            @click.stop="batchTrash"
+          >
+            删除
+          </button>
           <button class="batch-btn" @click.stop="clearSelection">取消</button>
         </span>
       </template>
@@ -462,6 +508,7 @@ function closeCreate(): void {
               :checked="selectedIds.has(s.id)"
               :unread="store.unreadCounts.get(s.id) ?? 0"
               :groups="store.groups"
+              :trash-enabled="TRASH_ENABLED"
               @select="toggleSelect(s.id)"
               @join="store.joinSession(s.id)"
               @move="moveOne(s.id, $event)"
@@ -485,6 +532,7 @@ function closeCreate(): void {
             :checked="selectedIds.has(s.id)"
             :unread="store.unreadCounts.get(s.id) ?? 0"
             :groups="store.groups"
+            :trash-enabled="TRASH_ENABLED"
             @select="toggleSelect(s.id)"
             @join="store.joinSession(s.id)"
             @move="moveOne(s.id, $event)"
@@ -525,6 +573,7 @@ function closeCreate(): void {
       :group="deleteTarget"
       :sessions="deleteSessions"
       :blocked="deleteBlocked"
+      :trash-enabled="TRASH_ENABLED"
       :submitting="deleteSubmitting"
       :error="deleteError"
       @cancel="deleteTarget = null"
@@ -812,6 +861,13 @@ function closeCreate(): void {
 .group-header:hover .group-menu-trigger,
 .group-menu-trigger[aria-expanded='true'] {
   opacity: 1;
+}
+
+/* 触屏无 hover：组头 ⋯ 恒显，否则无法打开组菜单 */
+@media (hover: none) {
+  .group-menu-trigger {
+    opacity: 1;
+  }
 }
 
 .group-menu-trigger:hover {

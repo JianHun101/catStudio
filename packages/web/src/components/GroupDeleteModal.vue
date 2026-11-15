@@ -11,16 +11,24 @@ import type { GroupedSession, SessionGroup } from '@/composables/useApi'
  * 3. **切换选项不重建弹窗 DOM、不重播动画**——两个选项与确认按钮始终是同一批节点，
  *    切换只改 class/文案，不用 `:key` 绑模式（否则每次切换都销毁重建，动画重播）。
  */
-const props = defineProps<{
-  group: SessionGroup
-  sessions: GroupedSession[]
-  /** 阻塞第二项的成员（忙碌 / 已绑定外部群）；空 = 第二项可选 */
-  blocked: Array<{ id: string; title: string; reason: 'busy' | 'bound'; platform?: string }>
-  /** 提交中（禁用按钮防重复） */
-  submitting?: boolean
-  /** 服务端拒绝原因（409 等），就地显示、弹窗不关 */
-  error?: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    group: SessionGroup
+    sessions: GroupedSession[]
+    /** 阻塞第二项的成员（忙碌 / 已绑定外部群）；空 = 第二项可选 */
+    blocked: Array<{ id: string; title: string; reason: 'busy' | 'bound'; platform?: string }>
+    /** 提交中（禁用按钮防重复） */
+    submitting?: boolean
+    /** 服务端拒绝原因（409 等），就地显示、弹窗不关 */
+    error?: string
+    /**
+     * 回收站接线是否就绪（T2 前 false）。`DELETE /sessions/:id` 还是物理删除时，
+     * 「连同会话一起移入回收站」不可选——只留可逆的「仅解散」。
+     */
+    trashEnabled?: boolean
+  }>(),
+  { trashEnabled: true }
+)
 
 const emit = defineEmits<{
   (e: 'cancel'): void
@@ -29,8 +37,10 @@ const emit = defineEmits<{
 
 const mode = ref<'dissolve' | 'trash'>('dissolve')
 
-/** 空组只能解散；有阻塞成员时第二项不可选 */
-const canTrash = computed(() => props.sessions.length > 0 && props.blocked.length === 0)
+/** 空组只能解散；有阻塞成员或回收站未接线时第二项不可选 */
+const canTrash = computed(
+  () => props.trashEnabled && props.sessions.length > 0 && props.blocked.length === 0
+)
 
 const blockedText = computed(() =>
   props.blocked
@@ -42,11 +52,11 @@ const blockedText = computed(() =>
     .join('；')
 )
 
-/** 阻塞名单晚到（绑定查询异步）时，别让用户停在「已选第二项但按钮被禁用」的死状态 */
+/** 阻塞名单晚到（绑定查询异步）或回收站未接线时，别让用户停在「已选第二项但按钮被禁用」的死状态 */
 watch(
-  () => props.blocked.length,
-  (n) => {
-    if (n > 0 && mode.value === 'trash') mode.value = 'dissolve'
+  () => [props.blocked.length, props.trashEnabled] as const,
+  ([n, enabled]) => {
+    if ((n > 0 || !enabled) && mode.value === 'trash') mode.value = 'dissolve'
   }
 )
 </script>
@@ -81,6 +91,9 @@ watch(
         </button>
       </div>
 
+      <p v-if="!trashEnabled && sessions.length > 0" class="trash-hint">
+        回收站暂未启用，当前只能选择「仅解散」。
+      </p>
       <p v-if="blocked.length" class="blocked-hint">
         第二项不可用：{{ blockedText }}。请先停止执行或解绑外部群。
       </p>
@@ -191,7 +204,8 @@ watch(
 }
 
 .blocked-hint,
-.empty-hint {
+.empty-hint,
+.trash-hint {
   margin-top: 10px;
   font-size: 11px;
   line-height: 1.5;
@@ -201,7 +215,8 @@ watch(
   color: var(--accent-red);
 }
 
-.empty-hint {
+.empty-hint,
+.trash-hint {
   color: var(--text-muted);
 }
 

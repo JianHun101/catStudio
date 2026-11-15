@@ -98,7 +98,12 @@ afterEach(() => {
 })
 
 describe('SessionList 分组渲染', () => {
-  it('活组按 createdAt 序 + 未分组最后；组头显示会话数', async () => {
+  it('活组按 createdAt 序 + 未分组最后；组头计数按本地会话现算', async () => {
+    // 判别力：故意打乱数组序、并把 sessionCount 写成错值——排序/计数任一走错即红
+    store.groups = [
+      { ...GROUPS[1]!, sessionCount: 99 },
+      { ...GROUPS[0]!, sessionCount: 42 },
+    ]
     const w = mountList()
     await flushPromises()
 
@@ -150,7 +155,10 @@ describe('SessionList 批量归组', () => {
     await w.find('.row-check input').trigger('change')
     expect(w.find('.section-header').text()).toContain('已选 1')
     expect(w.find('.batch-move-trigger').exists()).toBe(true)
-    expect(w.findAll('.batch-btn').map((b) => b.text())).toEqual(['归组', '删除', '取消'])
+    const batchButtons = w.findAll('.batch-btn')
+    expect(batchButtons.map((b) => b.text())).toEqual(['归组', '删除', '取消'])
+    // T2 前回收站未接线：批量删除必须是禁用态（现有 DELETE 还是物理删除）
+    expect(batchButtons[1]!.attributes('disabled')).toBeDefined()
 
     await w.find('.batch-move-trigger').trigger('click')
     const targets = w.findAll('.batch-move-item').map((b) => b.text())
@@ -161,6 +169,20 @@ describe('SessionList 批量归组', () => {
 
     expect(spy).toHaveBeenCalledWith(['s1'], 'g2')
     // 完成后清空选择 → 头行回到常态
+    expect(w.find('.section-header').text()).not.toContain('已选')
+  })
+
+  it('已选会话被外部移除 → 自动收敛选中集，头行不残留「已选 N」', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    await w.find('.row-check input').trigger('change')
+    expect(w.find('.section-header').text()).toContain('已选 1')
+
+    // 另一 tab 删掉 s1（store.sessions 变化，组件 watch 收敛）
+    store.sessions = store.sessions.filter((s) => s.id !== 's1')
+    await flushPromises()
+
     expect(w.find('.section-header').text()).not.toContain('已选')
   })
 })
@@ -226,6 +248,16 @@ describe('SessionList 删组确认', () => {
     expect(modal.find('.blocked-hint').text()).toContain('已绑定外部群')
   })
 
+  it('回收站未接线（T2 前）：第二项置灰、提示未启用，不依赖忙碌/绑定', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    const modal = await openDeleteModal(w)
+    expect(modal.findAll('.mode-option')[1]!.attributes('disabled')).toBeDefined()
+    expect(modal.find('.trash-hint').text()).toContain('回收站暂未启用')
+    expect(modal.find('.mode-option.active').text()).toContain('仅解散')
+  })
+
   it('重名就地报错、输入框不关', async () => {
     vi.spyOn(store, 'renameGroup').mockRejectedValue({ body: { error: 'GROUP_NAME_TAKEN' } })
     const w = mountList()
@@ -242,6 +274,21 @@ describe('SessionList 删组确认', () => {
 
     expect(w.find('.rename-input').exists()).toBe(true)
     expect(w.find('.inline-error').text()).toContain('分组名已存在')
+  })
+})
+
+describe('SessionList 行菜单删除入口', () => {
+  it('回收站未接线（T2 前）：移入回收站禁用，点击不触发删除', async () => {
+    const spy = vi.spyOn(store, 'trashSessions')
+    const w = mountList()
+    await flushPromises()
+
+    await w.findAll('.row-more')[0]!.trigger('click')
+    const trashItem = w.findAll('.row-menu .menu-item')[1]!
+    expect(trashItem.attributes('aria-disabled')).toBe('true')
+
+    await trashItem.trigger('click')
+    expect(spy).not.toHaveBeenCalled()
   })
 })
 

@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import type { GroupedSession, SessionGroup } from '@/composables/useApi'
 
@@ -14,10 +14,15 @@ import type { GroupedSession, SessionGroup } from '@/composables/useApi'
  * 定位用 `position: fixed`：左栏 `.panel-left` / `.panel-inner` 都是 `overflow: hidden`，
  * 绝对定位的侧框会被裁掉。fixed 元素不受无 transform 祖先的 overflow 裁剪。
  */
-const props = defineProps<{
-  session: GroupedSession
-  groups: SessionGroup[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    session: GroupedSession
+    groups: SessionGroup[]
+    /** 回收站接线是否就绪（T2 前 false：入口禁用，绝不落到旧的物理删除） */
+    trashEnabled?: boolean
+  }>(),
+  { trashEnabled: true }
+)
 
 const emit = defineEmits<{
   (e: 'move', groupId: string | null): void
@@ -141,6 +146,7 @@ function pickMove(groupId: string | null): void {
 }
 
 function pickTrash(): void {
+  if (!props.trashEnabled) return
   emit('trash')
   closeAll()
 }
@@ -180,7 +186,16 @@ onBeforeUnmount(() => {
         <span>移动到分组</span>
         <span class="menu-chevron" aria-hidden="true">›</span>
       </div>
-      <div class="menu-item danger" role="menuitem" @click="pickTrash">移入回收站</div>
+      <div
+        class="menu-item danger"
+        :class="{ disabled: !trashEnabled }"
+        role="menuitem"
+        :aria-disabled="!trashEnabled"
+        :title="trashEnabled ? undefined : '回收站暂未启用'"
+        @click="pickTrash"
+      >
+        移入回收站
+      </div>
 
       <div
         v-if="subOpen"
@@ -282,6 +297,16 @@ onBeforeUnmount(() => {
 
 .menu-item.danger:hover {
   background: var(--accent-soft);
+}
+
+.menu-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.menu-item.disabled:hover {
+  background: transparent;
+  color: var(--accent-red);
 }
 
 .menu-chevron {

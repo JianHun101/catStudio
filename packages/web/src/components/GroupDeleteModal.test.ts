@@ -63,6 +63,22 @@ describe('GroupDeleteModal 默认仅解散', () => {
   })
 })
 
+describe('GroupDeleteModal 回收站未接线（T2 前）', () => {
+  it('第二项置灰、只留「仅解散」，并给出未启用提示', async () => {
+    const w = mount(GroupDeleteModal, {
+      props: { group: GROUP, sessions: SESSIONS, blocked: [], trashEnabled: false },
+    })
+
+    const options = w.findAll('.mode-option')
+    expect(options[1]!.attributes('disabled')).toBeDefined()
+    expect(w.find('.trash-hint').text()).toContain('回收站暂未启用')
+    expect(w.find('.mode-option.active').text()).toContain('仅解散')
+
+    await w.find('.btn-confirm').trigger('click')
+    expect(w.emitted('confirm')?.[0]).toEqual(['dissolve'])
+  })
+})
+
 describe('GroupDeleteModal 忙碌 / 绑定成员', () => {
   it('阻塞成员让第二项置灰，红字点名原因', () => {
     const w = mount(GroupDeleteModal, {

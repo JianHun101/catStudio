@@ -1,4 +1,9 @@
-import type { ExecutionMeta, Message, SessionConfig } from '@cat-study/shared'
+import type {
+  ExecutionMeta,
+  Message,
+  SessionConfig,
+  SessionGroup as SharedSessionGroup,
+} from '@cat-study/shared'
 
 const BASE = '/api'
 const DEFAULT_TIMEOUT = 10_000 // 10s，确保重试循环能推进
@@ -85,28 +90,13 @@ export interface MemoryRefsEntry {
 }
 
 /**
- * 分组实体（契约：`docs/plans/session-groups-trash.md` §3.1）。
- *
- * ⚠️ **过渡类型**：T1 会把同名类型放进 `@cat-study/shared`。本票（T3）的文件边界不含
- * `packages/shared/**`（T1 正在改同一文件），故先在网络边界处本地声明；T1 合入后这里
- * 改为 `import type { SessionGroup } from '@cat-study/shared'` 并删掉本定义即可——
- * 字段逐个对齐 spec，没有第二套语义。
+ * 分组实体（契约：`docs/plans/session-groups-trash.md` §3.1）。T1 落地后直接用 shared 的
+ * 类型，不再保留第二份「过渡类型」——字段漂移的窗口就此关闭。
  */
-export interface SessionGroup {
-  id: string
-  name: string
-  collapsed: boolean
-  createdAt: string
-  updatedAt: string
-  /** 组内未删除会话数（服务端计数；前端头部徽标按本地 `sessions` 现算，避免移组后过期） */
-  sessionCount: number
-}
+export type SessionGroup = SharedSessionGroup
 
-/** 会话 + 所属分组。同上：T1 给 `SessionConfig` 加 `groupId` 后收敛为 `SessionConfig`。 */
-export interface GroupedSession extends SessionConfig {
-  /** 未分组 = null/缺省 */
-  groupId?: string | null
-}
+/** 会话 + 所属分组（T1 起 `SessionConfig.groupId` 已是 `string | null`）。 */
+export type GroupedSession = SessionConfig
 
 /** 连接器绑定行——后端 snake_case 原样返回（routes/connectors.ts，无 camelCase 转换） */
 export interface ConnectorBinding {
