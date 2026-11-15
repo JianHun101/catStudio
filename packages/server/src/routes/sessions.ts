@@ -11,6 +11,7 @@ import {
 } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
+  sessionGroups as sessionGroupsRepo,
   agents as agentsRepo,
   messages as messagesRepo,
   messageSearch as messageSearchRepo,
@@ -53,17 +54,15 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send(toSessionConfig(row!))
   })
 
-  // ─── GET /api/sessions — 列出会话（默认过滤已归档）───
-
-  app.get('/api/sessions', async (req) => {
-    // 归档默认过滤（spec §4.1「列表默认过滤 + 『显示已归档』开关」）。开关走显式参数：
-    // 任何非空且非 '0'/'false' 的值都算开——前端只传 '1'，宽松解析是为了手工 curl 时不踩坑。
-    const raw = (req.query as any)?.includeArchived
-    const includeArchived =
-      raw !== undefined && raw !== '' && raw !== '0' && raw !== 'false' && raw !== false
-    const rows = includeArchived
-      ? sessionsRepo.listAllSessions()
-      : sessionsRepo.listActiveSessions()
+  // ─── GET /api/sessions — 列出会话（未删除；归档不再过滤）───
+  //
+  // 票 7 的「默认过滤已归档」已退役（ADR 0016）：收纳由分组折叠承担，归档不影响列表。
+  // `includeArchived` 作为兼容参数被接受但**不再改变取数口径**——一律走
+  // `listActiveSessions()`（未删除）。这同时堵住一个将来会漏的口子：`listAllSessions()`
+  // 按 spec §4.3 要**含**回收站里的行，T2 写入 deleted_at 后若还接在这里，用户面列表会
+  // 把回收站会话带出来。参数本身留到归档面清退票（T5）再删。
+  app.get('/api/sessions', async () => {
+    const rows = sessionsRepo.listActiveSessions()
     return rows.map((row) => {
       const session = toSessionConfig(row)
       // Compute unread count: messages created after last_read_at
@@ -105,19 +104,18 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: parsed.error.flatten() })
     }
 
-    const { title, addAgentIds, removeAgentIds, broadcastMode } = parsed.data
+    const { title, addAgentIds, removeAgentIds, broadcastMode, groupId } = parsed.data
 
-    // 支持重命名
-    if (title !== undefined) {
-      sessionsRepo.updateSessionTitle(id, title)
+    // ── 先校验完再写 ──────────────────────────────────────────────
+    // 任一 400 都不该留下半截更新：四个动作（改名 / 广播 / 归组 / 成员）现在统一走
+    // 「校验 → 写入」两段，避免「先改了标题、后面成员校验失败」这种部分生效。
+    // 移动到分组（`groupId=null` = 回未分组）的组必须存在且未删；不做「静默落未分组」——
+    // 前端传了一个不存在的组 id 是 bug，静默吞掉会让它以为成功。
+    if (groupId !== undefined && groupId !== null && !sessionGroupsRepo.getGroupById(groupId)) {
+      return reply.status(400).send({ error: 'GROUP_NOT_FOUND' })
     }
 
-    // 支持切换广播模式
-    if (broadcastMode !== undefined) {
-      sessionsRepo.updateSessionBroadcastMode(id, broadcastMode)
-    }
-
-    // 支持增加/移除 Agent
+    let nextAgentIds: string[] | undefined
     if (addAgentIds?.length || removeAgentIds?.length) {
       const currentIds: string[] = JSON.parse(row.agent_ids || '[]')
 
@@ -130,17 +128,36 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const removeSet = new Set(removeAgentIds || [])
-      const newIds = currentIds
+      nextAgentIds = currentIds
         .filter((aid) => !removeSet.has(aid))
         .concat(addAgentIds || [])
         // 去重
         .filter((aid, i, arr) => arr.indexOf(aid) === i)
 
-      if (newIds.length === 0) {
+      if (nextAgentIds.length === 0) {
         return reply.status(400).send({ error: '会话至少需要一只猫咪' })
       }
+    }
 
-      sessionsRepo.updateSessionAgentIds(id, JSON.stringify(newIds))
+    // ── 写入 ──────────────────────────────────────────────────────
+    // 支持重命名
+    if (title !== undefined) {
+      sessionsRepo.updateSessionTitle(id, title)
+    }
+
+    // 支持切换广播模式
+    if (broadcastMode !== undefined) {
+      sessionsRepo.updateSessionBroadcastMode(id, broadcastMode)
+    }
+
+    // 移动到分组（不动 `updated_at`：分组是组织动作，不是会话活跃）
+    if (groupId !== undefined) {
+      sessionsRepo.updateSessionGroup(id, groupId)
+    }
+
+    // 支持增加/移除 Agent
+    if (nextAgentIds !== undefined) {
+      sessionsRepo.updateSessionAgentIds(id, JSON.stringify(nextAgentIds))
     }
 
     // emit 通知前端
@@ -572,6 +589,7 @@ function toSessionConfig(row: SessionRow): SessionConfig {
     updatedAt: row.updated_at.replace(' ', 'T') + 'Z',
     handoffFrom: row.handoff_from || null,
     runningSummary: row.running_summary || null,
+    groupId: row.group_id ?? null,
     archivedAt: row.archived_at ? toIsoDb(row.archived_at) : null,
   }
 }

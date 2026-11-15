@@ -123,7 +123,7 @@ describe('Session Routes', () => {
       expect(JSON.parse(res.body)).toHaveLength(2)
     })
 
-    // ─── 票 7 · 归档默认过滤 ─────────────────────────────
+    // ─── 票 7 · 归档 → T1 起退役（归档不再影响列表；T5 才删接口） ─────
     const createSession = async (title: string): Promise<string> => {
       const res = await app.inject({
         method: 'POST',
@@ -133,35 +133,34 @@ describe('Session Routes', () => {
       return JSON.parse(res.body).id as string
     }
 
-    it('默认滤掉已归档会话；?includeArchived=1 全量返回', async () => {
+    it('归档不再从默认列表隐藏（T1：收纳由分组折叠承担）；includeArchived 兼容参数仍可传', async () => {
       const keep = await createSession('留着')
-      const gone = await createSession('归档的')
+      const archived = await createSession('归档的')
 
       const archive = await app.inject({
         method: 'POST',
-        url: `/api/sessions/${gone}/archive`,
+        url: `/api/sessions/${archived}/archive`,
       })
       expect(archive.statusCode).toBe(200)
 
       const def = await app.inject({ method: 'GET', url: '/api/sessions' })
       const defIds = (JSON.parse(def.body) as Array<{ id: string }>).map((s) => s.id)
       expect(defIds).toContain(keep)
-      expect(defIds).not.toContain(gone)
+      // T1 起 `listActiveSessions` 只排除 `deleted_at`；归档列冻结、不参与可见性
+      expect(defIds).toContain(archived)
 
       const all = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
       const allIds = (JSON.parse(all.body) as Array<{ id: string }>).map((s) => s.id)
-      expect(allIds).toContain(keep)
-      expect(allIds).toContain(gone)
+      expect(allIds).toEqual(expect.arrayContaining([keep, archived]))
     })
 
-    it('includeArchived 的宽松解析：`0`/`false` 视为关（手工 curl 不踩坑）', async () => {
-      const gone = await createSession('归档的-2')
-      await app.inject({ method: 'POST', url: `/api/sessions/${gone}/archive` })
-
+    it('includeArchived 的宽松解析仍不误伤：`0`/`false`/空串都返回未删除会话', async () => {
+      const id = await createSession('兼容参数')
       for (const v of ['0', 'false', '']) {
         const res = await app.inject({ method: 'GET', url: `/api/sessions?includeArchived=${v}` })
+        expect(res.statusCode, `includeArchived=${v}`).toBe(200)
         const ids = (JSON.parse(res.body) as Array<{ id: string }>).map((s) => s.id)
-        expect(ids, `includeArchived=${v}`).not.toContain(gone)
+        expect(ids, `includeArchived=${v}`).toContain(id)
       }
     })
   })
@@ -281,6 +280,104 @@ describe('Session Routes', () => {
         payload: { broadcastMode: true },
       })
       expect(res.statusCode).toBe(404)
+    })
+
+    it('groupId 移动到分组：200 返回新 groupId，且不改 updated_at', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '移动测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO session_groups (id, name, created_at, updated_at)
+         VALUES ('g-1', '小说连载', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+      ).run()
+      db.prepare(`UPDATE sessions SET updated_at = '2020-01-01 00:00:00' WHERE id = ?`).run(id)
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: 'g-1' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body).groupId).toBe('g-1')
+      expect(
+        db.prepare(`SELECT group_id, updated_at FROM sessions WHERE id = ?`).get(id) as {
+          group_id: string | null
+          updated_at: string
+        }
+      ).toEqual({ group_id: 'g-1', updated_at: '2020-01-01 00:00:00' })
+
+      // `groupId: null` 回未分组
+      const back = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: null },
+      })
+      expect(back.statusCode).toBe(200)
+      expect(JSON.parse(back.body).groupId).toBeNull()
+    })
+
+    it('groupId 指向不存在/已删组 → 400 GROUP_NOT_FOUND，原分组不变', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '坏组', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO session_groups (id, name, created_at, updated_at, deleted_at)
+         VALUES ('g-dead', '已删组', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+                 '2026-01-02T00:00:00.000Z')`
+      ).run()
+
+      for (const groupId of ['g-missing', 'g-dead']) {
+        const res = await app.inject({
+          method: 'PATCH',
+          url: `/api/sessions/${id}`,
+          payload: { groupId },
+        })
+        expect(res.statusCode, groupId).toBe(400)
+        expect(JSON.parse(res.body)).toEqual({ error: 'GROUP_NOT_FOUND' })
+      }
+      expect(
+        (
+          db.prepare(`SELECT group_id FROM sessions WHERE id = ?`).get(id) as {
+            group_id: string | null
+          }
+        ).group_id
+      ).toBeNull()
+    })
+
+    it('GET 列表与详情都带 groupId（wire 契约）', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '带组', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO session_groups (id, name, created_at, updated_at)
+         VALUES ('g-2', '组二', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+      ).run()
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: 'g-2' },
+      })
+
+      const list = await app.inject({ method: 'GET', url: '/api/sessions' })
+      const row = (JSON.parse(list.body) as Array<{ id: string; groupId: string | null }>).find(
+        (s) => s.id === id
+      )
+      expect(row?.groupId).toBe('g-2')
+
+      const detail = await app.inject({ method: 'GET', url: `/api/sessions/${id}` })
+      expect(JSON.parse(detail.body).groupId).toBe('g-2')
     })
   })
 
