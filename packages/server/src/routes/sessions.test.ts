@@ -185,6 +185,10 @@ describe('Session Routes', () => {
       }>
 
       expect(list.find((s) => s.id === busy)!.lastMessageAt).toBe('2026-02-01T10:30:00.000Z')
+      // 形态钉死：ISO 毫秒 UTC（与 messages.created_at 同形），不补 `Z`、更不能 `ZZ`。
+      const late = list.find((s) => s.id === busy)!.lastMessageAt!
+      expect(late).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      expect(late).not.toContain('ZZ')
       expect(list.find((s) => s.id === empty)!.lastMessageAt).toBeNull()
     })
 
@@ -201,6 +205,9 @@ describe('Session Routes', () => {
       const list = JSON.parse(res.body) as Array<{ id: string; lastMessageAt: string | null }>
 
       expect(list.find((s) => s.id === id)!.lastMessageAt).toBe('2026-03-04T05:06:07.000Z')
+      const value = list.find((s) => s.id === id)!.lastMessageAt!
+      expect(value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      expect(value).not.toContain('ZZ')
     })
 
     it('多会话各取各的最后时间，不串号', async () => {

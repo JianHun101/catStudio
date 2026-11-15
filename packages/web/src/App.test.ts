@@ -290,7 +290,7 @@ describe('App.vue 回收站中心区视图（T4）', () => {
     expect(appSource).toContain("if (showTrash.value) return 'trash'")
   })
 
-  it('左栏头行 🗑 投 open-trash；点会话投 open-session → App 关回收站', () => {
+  it('左栏头行回收站按钮投 open-trash；点会话投 open-session → App 关回收站', () => {
     expect(appSource).toContain('@open-trash="openTrash"')
     expect(appSource).toContain('@open-session="closeTrash"')
     expect(appSource).toContain('function closeTrash()')

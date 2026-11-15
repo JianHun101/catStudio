@@ -344,6 +344,9 @@ describe('SessionList 回收站入口（T4/T6）', () => {
     expect(source).toContain('stroke="currentColor"')
     const buttonCss = source.match(/\.head-trash \{[\s\S]*?\n\}/)![0]
     expect(buttonCss).toContain('height: 24px')
+    expect(buttonCss).toContain('min-width: 24px')
+    expect(buttonCss).toContain('width: auto')
+    expect(buttonCss).toContain('padding: 0 4px')
     expect(buttonCss).toContain('border: 1px solid var(--border-subtle)')
     expect(buttonCss).not.toContain('position: absolute')
     const countCss = source.match(/\.head-trash-count \{[\s\S]*?\n\}/)?.[0] ?? ''
