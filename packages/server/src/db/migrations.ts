@@ -1397,6 +1397,95 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
       indexExists(db, 'idx_sessions_live') &&
       indexExists(db, 'idx_sessions_trash'),
   },
+
+  // ── 票 TR-1 · trace 孤儿洞补齐（retrieval_events / spans 的 execution_id FK）──
+  //
+  // 问题：段四/段五两段流水表只以 `execution_id` **文本列**挂在执行上，没有 FK。父执行行
+  // 一删（`purgeMessageDependents` / 回退 / 清空会话都会删 `execution_logs`），这些子行
+  // 不会随删，只静默变孤儿。dev 库实测存量 85 条 events + 718 条 spans（时间跨度约两个月）。
+  //
+  // **为什么先删再重建、顺序固定**：`rebuildTable` 收尾会跑 `foreign_key_check(本表)`，
+  // 存量孤儿会让它拒建、server 直接拒启。故每条重建前必须有一条纯 SQL 的清孤儿条目。
+  // 两类孤儿都按「父执行已不存在」判定——retrieval_queries/candidates 与 span_llm 由既有
+  // 的 `ON DELETE CASCADE` 随父行删掉，本票不碰它们的定义。
+  //
+  // **为什么是 CASCADE 而不是 RESTRICT**：这两张表是**诊断流水**，不是业务实体。父执行
+  // 被删时「保留子行」没有语义（没有任何页面能回指进一个不存在的执行），而 RESTRICT 会给
+  // 既有删除路径新增一条阻塞边（删会话/回退/seed --reset 会从「删得掉」变成 500）。CASCADE
+  // 正是「trace 全链只需一条 DELETE execution_logs」的机制来源。
+  //
+  // **刻意不动**：`session_id` / `agent_id`（查询便利列，非本票）、`spans.parent_span_id`
+  // 的删除动作（自引用树内关系，NO ACTION 原样保留）、`purgeMessageDependents`（CASCADE 后
+  // 显式删是双保险，改它等于把两条删除路径绑在一起）。
+  //
+  // 索引正文直接取基线条目原文（`baselineEntrySql`）：重建 = DROP + RENAME，索引随旧表
+  // 消失，而建索引的迁移早已登记、不会重跑；抄一份正文就是同一批物体两份定义。
+  {
+    name: 'TR-1 清理 retrieval_events 孤儿（补 FK 前置）',
+    ticket: 'TR-1',
+    sql: `DELETE FROM retrieval_events
+ WHERE NOT EXISTS (SELECT 1 FROM execution_logs el WHERE el.id = retrieval_events.execution_id)`,
+  },
+  rebuildMigration({
+    name: 'rebuild retrieval_events（execution_id → execution_logs ON DELETE CASCADE）',
+    ticket: 'TR-1',
+    table: 'retrieval_events',
+    // 列序与基线形状逐字一致，唯一改动是 `execution_id` 的 REFERENCES 子句。
+    ddl: `CREATE TABLE IF NOT EXISTS retrieval_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      execution_id TEXT NOT NULL REFERENCES execution_logs(id) ON DELETE CASCADE,
+      session_id TEXT,
+      agent_id TEXT,
+      task_id TEXT,
+      created_at TEXT NOT NULL,
+      threshold_max_distance REAL NOT NULL,
+      param_top_k INTEGER NOT NULL,
+      param_probe_n INTEGER,
+      reason TEXT NOT NULL,
+      retrieval_ms INTEGER,
+      context_tokens INTEGER,
+      budget_tokens INTEGER,
+      truncated INTEGER,
+      param_pool_n INTEGER
+    );
+    ${baselineEntrySql('idx_retrieval_events_execution')};
+    ${baselineEntrySql('idx_retrieval_events_created')};
+    ${baselineEntrySql('idx_retrieval_events_task')}`,
+  }),
+  {
+    name: 'TR-1 清理 spans 孤儿（补 FK 前置）',
+    ticket: 'TR-1',
+    sql: `DELETE FROM spans
+ WHERE NOT EXISTS (SELECT 1 FROM execution_logs el WHERE el.id = spans.execution_id)`,
+  },
+  rebuildMigration({
+    name: 'rebuild spans（execution_id → execution_logs ON DELETE CASCADE）',
+    ticket: 'TR-1',
+    table: 'spans',
+    // 列序与基线形状逐字一致；`parent_span_id REFERENCES spans(span_id)` 原样保留
+    // （NO ACTION），只给 `execution_id` 补父执行 FK。
+    ddl: `CREATE TABLE IF NOT EXISTS spans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      span_id TEXT NOT NULL UNIQUE,
+      parent_span_id TEXT REFERENCES spans(span_id),
+      chain_id TEXT,
+      execution_id TEXT NOT NULL REFERENCES execution_logs(id) ON DELETE CASCADE,
+      session_id TEXT,
+      agent_id TEXT,
+      name TEXT NOT NULL,
+      operation_name TEXT,
+      start_at TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      error_type TEXT,
+      error_message TEXT,
+      item_count INTEGER
+    );
+    ${baselineEntrySql('idx_spans_execution')};
+    ${baselineEntrySql('idx_spans_chain')};
+    ${baselineEntrySql('idx_spans_start')};
+    ${baselineEntrySql('idx_spans_name')}`,
+  }),
 ]
 
 /**
