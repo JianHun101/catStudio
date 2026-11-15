@@ -498,6 +498,21 @@ describe('socketio connector', () => {
       expect(call[1].welcome.content).not.toContain('@店长')
     })
 
+    it('已删（回收站）会话 → 拒绝 join、不推历史、回 ERROR（T2）', () => {
+      getDb()
+        .prepare(`UPDATE sessions SET deleted_at = '2026-01-02T00:00:00.000Z' WHERE id = ?`)
+        .run('session-1')
+
+      const handlers = socketHandlers.get(Events.JOIN_SESSION)
+      handlers![0]('session-1')
+
+      expect(mockSocketJoin).not.toHaveBeenCalledWith('session:session-1')
+      expect(mockSocketEmit).toHaveBeenCalledWith(Events.ERROR, {
+        message: '会话不存在或已删除',
+      })
+      expect(mockSocketEmit).not.toHaveBeenCalledWith(Events.SESSION_HISTORY, expect.anything())
+    })
+
     it('includes history messages in SESSION_HISTORY', () => {
       // 插入历史消息
       const db = getDb()

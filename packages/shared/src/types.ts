@@ -80,6 +80,32 @@ export interface SessionGroup {
   sessionCount: number
 }
 
+/** 回收站条目（`GET /api/sessions/trash` 返回项）。
+ *
+ *  **粒度 = 删除动作粒度**（ADR 0016 D3）：整组删 = 一条 `kind:'group'`，单删 = 一条
+ *  `kind:'session'`。实现不得按 `group_id` 聚合——否则组内早先单删的会话会被并进组记录、
+ *  恢复时一起复活。 */
+export interface TrashEntry {
+  kind: 'group' | 'session'
+  /** 组条目 = group.id；会话条目 = session.id */
+  id: string
+  /** 组名 / 会话标题 */
+  name: string
+  /** ISO 毫秒 UTC（删除动作时刻） */
+  deletedAt: string
+  /** ISO 毫秒 UTC，= deletedAt + 7d（服务端算，不信任本机时钟） */
+  purgeAfter: string
+  /** ceil((purgeAfter - now) / 1d)，1..7（过期的条目列表已滤掉） */
+  daysLeft: number
+  /** 组条目 = 同批会话数；会话条目 = 1 */
+  sessionCount: number
+  messageCount: number
+  /** 会话条目：原组 id（组已删也保留）；组条目 = null */
+  groupId: string | null
+  /** 会话条目：原组名；组条目 = null */
+  groupName: string | null
+}
+
 // ─── Message ────────────────────────────────────────
 
 /**

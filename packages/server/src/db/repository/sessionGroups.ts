@@ -52,16 +52,28 @@ export function listGroups(): SessionGroupWithCount[] {
     .all() as SessionGroupWithCount[]
 }
 
-/** 按 id 取**活组**（已删组当作不存在——T1 尚未写 deleted_at，语义先钉住）。 */
+/** 按 id 取**活组**（已删组当作不存在——用户面默认口径）。 */
 export function getGroupById(id: string): SessionGroupRow | undefined {
   return db.prepare('SELECT * FROM session_groups WHERE id = ? AND deleted_at IS NULL').get(id) as
     SessionGroupRow | undefined
 }
 
-/** 按名字取活组（组名唯一索引只约束活组）。 */
+/** 按 id 取组（**含回收站里的已删组**）——只给恢复 / 彻底删除 / 回收站列表用。 */
+export function getGroupByIdIncludingDeleted(id: string): SessionGroupRow | undefined {
+  return db.prepare('SELECT * FROM session_groups WHERE id = ?').get(id) as
+    SessionGroupRow | undefined
+}
+
+/**
+ * 按名字取活组（组名唯一索引只约束活组）。
+ *
+ * **`COLLATE NOCASE` 与 spec §2.1 的判定口径同形**：`Work` 与 `work` 算重名（只折叠
+ * ASCII 大小写，中文不受影响）。路由的建组 / 改名 / 恢复重名判定全部经这里，不在调用侧
+ * 各写一份大小写折叠——两处各写就是同一规则的平行真相源。
+ */
 export function getGroupByName(name: string): SessionGroupRow | undefined {
   return db
-    .prepare('SELECT * FROM session_groups WHERE name = ? AND deleted_at IS NULL')
+    .prepare('SELECT * FROM session_groups WHERE name = ? COLLATE NOCASE AND deleted_at IS NULL')
     .get(name) as SessionGroupRow | undefined
 }
 
@@ -105,4 +117,79 @@ export function dissolveGroup(id: string): void {
     db.prepare('DELETE FROM session_groups WHERE id = ?').run(id)
   })
   run()
+}
+
+// ─── 回收站（T2；ADR 0016 D3）───────────────────────────
+
+/** 组内**未删除**会话 id（`withSessions=1` 的守卫面与批次取值都靠它）。 */
+export function listLiveSessionIdsInGroup(groupId: string): string[] {
+  return (
+    db
+      .prepare('SELECT id FROM sessions WHERE group_id = ? AND deleted_at IS NULL')
+      .all(groupId) as Array<{ id: string }>
+  ).map((r) => r.id)
+}
+
+/**
+ * 整组删除（组软删 + 同批会话同一时间戳），**单事务**。
+ *
+ * 只给 `deleted_at IS NULL` 的会话打标记：组内更早单独删除的会话时间戳不同，属于
+ * 独立的「会话条目」，不随整组恢复（ADR D3）。组 id 不变，`updated_at` 更新为动作时刻。
+ *
+ * @returns 本次真正进回收站的会话 id（供路由发 `SESSION_TRASHED`）
+ */
+export function trashGroup(id: string, deletedAt: string): { sessionIds: string[] } {
+  const run = db.transaction(() => {
+    const sessionIds = listLiveSessionIdsInGroup(id)
+    db.prepare(
+      'UPDATE session_groups SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL'
+    ).run(deletedAt, deletedAt, id)
+    db.prepare('UPDATE sessions SET deleted_at = ? WHERE group_id = ? AND deleted_at IS NULL').run(
+      deletedAt,
+      id
+    )
+    return sessionIds
+  })
+  return { sessionIds: run() }
+}
+
+/**
+ * 恢复已删组：**只清与组同批的会话**（`deleted_at` 字符串精确相等），组内更早单删的
+ * 会话留在回收站（ADR D3）。
+ *
+ * 重名先行改名、再清 `deleted_at` 是契约（spec §4.2）：顺序反了会在清标志那步撞
+ * `ux_session_groups_name_live`。两步同一事务，中间态对其他连接不可见。
+ *
+ * `updated_at` 更新为恢复时刻（组自身的状态变更）；会话 `updated_at` 一律不动。
+ */
+export function restoreGroup(
+  id: string,
+  deletedAt: string,
+  nextName?: string
+): { sessionIds: string[] } {
+  const run = db.transaction(() => {
+    const sessionIds = (
+      db
+        .prepare('SELECT id FROM sessions WHERE group_id = ? AND deleted_at = ?')
+        .all(id, deletedAt) as Array<{ id: string }>
+    ).map((r) => r.id)
+    if (nextName !== undefined) {
+      db.prepare('UPDATE session_groups SET name = ? WHERE id = ?').run(nextName, id)
+    }
+    db.prepare('UPDATE session_groups SET deleted_at = NULL, updated_at = ? WHERE id = ?').run(
+      nowIso(),
+      id
+    )
+    db.prepare('UPDATE sessions SET deleted_at = NULL WHERE group_id = ? AND deleted_at = ?').run(
+      id,
+      deletedAt
+    )
+    return sessionIds
+  })
+  return { sessionIds: run() }
+}
+
+/** 硬删组行（仅解散 / 彻底删除共用；会话归属由调用方在同一事务外先处理）。 */
+export function deleteGroupRow(id: string): void {
+  db.prepare('DELETE FROM session_groups WHERE id = ?').run(id)
 }

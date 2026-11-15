@@ -16,6 +16,7 @@ import type Database from 'better-sqlite3'
 import { setRepoDb as setAgentsDb } from './agents.js'
 import { setRepoDb as setSessionsDb } from './sessions.js'
 import { setRepoDb as setSessionGroupsDb } from './sessionGroups.js'
+import { setRepoDb as setTrashDb } from './trash.js'
 import { setRepoDb as setMessagesDb } from './messages.js'
 import { setRepoDb as setMessageSearchDb } from './message-search.js'
 import { setRepoDb as setKnowledgeDb } from './knowledge.js'
@@ -41,6 +42,7 @@ export function initRepository(db: Database.Database): void {
   setAgentsDb(db)
   setSessionsDb(db)
   setSessionGroupsDb(db)
+  setTrashDb(db)
   setMessagesDb(db)
   setMessageSearchDb(db)
   setKnowledgeDb(db)
@@ -66,6 +68,7 @@ export function initRepository(db: Database.Database): void {
 export * as agents from './agents.js'
 export * as sessions from './sessions.js'
 export * as sessionGroups from './sessionGroups.js'
+export * as trash from './trash.js'
 export * as messages from './messages.js'
 export * as messageSearch from './message-search.js'
 export * as knowledge from './knowledge.js'
