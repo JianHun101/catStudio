@@ -180,7 +180,7 @@ describe('SessionActionsMenu 点击兜底与选择目标', () => {
     expect(w.find('.row-menu').exists()).toBe(false)
   })
 
-  it('回收站未接线（T2 前）：移入回收站为禁用态，点击不 emit', async () => {
+  it('关闸（trashEnabled:false）：移入回收站为禁用态，点击不 emit', async () => {
     const w = mountMenu('g1', false)
     await w.find('.row-more').trigger('click')
     const trashItem = w.findAll('.menu-item')[1]!
@@ -192,5 +192,18 @@ describe('SessionActionsMenu 点击兜底与选择目标', () => {
     await trashItem.trigger('click')
 
     expect(w.emitted('trash')).toBeUndefined()
+  })
+
+  it('漏传 trashEnabled → 默认禁用（fail-safe，不是默认放行）', async () => {
+    wrapper = mount(SessionActionsMenu, {
+      props: { session: session('g1'), groups: GROUPS },
+      attachTo: document.body,
+    })
+    await wrapper.find('.row-more').trigger('click')
+    const trashItem = wrapper.findAll('.menu-item')[1]!
+
+    expect(trashItem.attributes('aria-disabled')).toBe('true')
+    await trashItem.trigger('click')
+    expect(wrapper.emitted('trash')).toBeUndefined()
   })
 })

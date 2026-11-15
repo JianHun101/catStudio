@@ -22,12 +22,12 @@ const props = withDefaults(
     /** 服务端拒绝原因（409 等），就地显示、弹窗不关 */
     error?: string
     /**
-     * 回收站接线是否就绪（T2 前 false）。`DELETE /sessions/:id` 还是物理删除时，
-     * 「连同会话一起移入回收站」不可选——只留可逆的「仅解散」。
+     * 回收站接线是否就绪（T4 起生产恒 true）。默认 **false**（fail-safe）：漏传时
+     * 只给可逆的「仅解散」，不让危险动作可达。
      */
     trashEnabled?: boolean
   }>(),
-  { trashEnabled: true }
+  { trashEnabled: false }
 )
 
 const emit = defineEmits<{

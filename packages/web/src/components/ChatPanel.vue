@@ -1442,6 +1442,24 @@ const messageViews = computed<MessageView[]>(() => {
 
 <template>
   <div class="chat-panel">
+    <!-- 单删撤销 toast（T4）：5 秒窗口由 store 计时；批量删除不产生。定位 fixed，
+         不随聊天滚动区移动（宿主只做 toast，不承载回收站视图）。 -->
+    <div v-if="store.undoToast" class="undo-trash-toast" role="status">
+      <span class="undo-trash-text">
+        「{{ store.undoToast.title }}」已移入回收站 · 剩 {{ store.undoToast.daysLeft }} 天
+      </span>
+      <button type="button" class="undo-trash-action" @click="store.undoLastTrash()">撤销</button>
+      <button
+        type="button"
+        class="undo-trash-close"
+        title="关闭"
+        aria-label="关闭撤销提示"
+        @click="store.dismissUndoToast()"
+      >
+        ✕
+      </button>
+    </div>
+
     <!-- Header -->
     <div class="chat-header">
       <div class="chat-header-left">
@@ -2067,6 +2085,59 @@ const messageViews = computed<MessageView[]>(() => {
 </template>
 
 <style scoped>
+/* ─── 单删撤销 toast（T4）────────────────── */
+
+.undo-trash-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  z-index: 800;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, calc(100vw - 48px));
+  padding: 9px 14px;
+  transform: translateX(-50%);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.undo-trash-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.undo-trash-action {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--accent-text);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.undo-trash-action:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.undo-trash-close {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .chat-panel {
   display: flex;
   flex-direction: column;

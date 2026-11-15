@@ -14,7 +14,7 @@ defineProps<{
   checked: boolean
   unread: number
   groups: SessionGroup[]
-  /** 回收站接线是否就绪（T2 前 false：行菜单的删除入口禁用） */
+  /** 回收站接线是否就绪（默认 false = fail-safe；生产由 SessionList 显式传入开关） */
   trashEnabled?: boolean
 }>()
 

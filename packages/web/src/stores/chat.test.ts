@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import type { Message, AgentRuntimeState, SessionConfig, AgentConfig } from '@cat-study/shared'
+import type {
+  Message,
+  AgentRuntimeState,
+  SessionConfig,
+  AgentConfig,
+  TrashEntry,
+} from '@cat-study/shared'
 import { Events } from '@cat-study/shared'
 
 // ── Mock socket ──────────────────────────────────
@@ -42,6 +48,12 @@ const mockCreateSessionGroup = vi.fn()
 const mockUpdateSessionGroup = vi.fn()
 const mockDeleteSessionGroup = vi.fn()
 const mockMoveSessionToGroup = vi.fn()
+const mockGetTrash = vi.fn()
+const mockRestoreSession = vi.fn()
+const mockPurgeSession = vi.fn()
+const mockRestoreSessionGroup = vi.fn()
+const mockPurgeSessionGroup = vi.fn()
+const mockEmptyTrash = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -65,6 +77,12 @@ vi.mock('@/composables/useApi', () => ({
     updateSessionGroup: mockUpdateSessionGroup,
     deleteSessionGroup: mockDeleteSessionGroup,
     moveSessionToGroup: mockMoveSessionToGroup,
+    getTrash: mockGetTrash,
+    restoreSession: mockRestoreSession,
+    purgeSession: mockPurgeSession,
+    restoreSessionGroup: mockRestoreSessionGroup,
+    purgeSessionGroup: mockPurgeSessionGroup,
+    emptyTrash: mockEmptyTrash,
   },
 }))
 
@@ -123,6 +141,7 @@ describe('chatStore', () => {
     vi.clearAllMocks()
     localStorage.clear() // 会话记忆测试：每个用例从干净的 localStorage 开始
     mockGetSessionGroups.mockResolvedValue({ groups: [] })
+    mockGetTrash.mockResolvedValue({ entries: [] })
     setActivePinia(createPinia())
 
     // Import store dynamically
@@ -2345,15 +2364,16 @@ describe('chatStore', () => {
       expect(store.activeSessionId).toBe('s2')
     })
 
-    it('trashSessions：T2 接线前不落到旧物理 DELETE，逐条返回未启用', async () => {
+    it('trashSessions 显式关闸：不落到旧物理 DELETE，逐条返回未启用', async () => {
       store.sessions = [
         grouped('s1', null, '2026-01-03T00:00:00.000Z'),
         grouped('s2', null, '2026-01-02T00:00:00.000Z'),
       ]
 
-      const failed = await store.trashSessions(['s1', 's2'])
+      // 默认 TRASH_ENABLED=true；显式传 false = T2 前守卫的等价值
+      const failed = await store.trashSessions(['s1', 's2'], { enabled: false })
 
-      // 关键判别力：现有 DELETE 还是物理删除，T2 前一条都不能发
+      // 关键判别力：关闸时一条删除 API 都不发
       expect(mockDeleteSession).not.toHaveBeenCalled()
       expect(failed).toEqual([
         { id: 's1', message: '回收站暂未启用' },
@@ -2423,6 +2443,174 @@ describe('chatStore', () => {
       expect(text).toContain('2 个会话未能移入回收站')
       expect(text).toContain('「甲会话」正在执行')
       expect(text).toContain('「乙会话」已绑定外部群')
+    })
+
+    // ─── T4 回收站：单删撤销 / 两段投影 / 恢复清除 ───────────────────
+
+    const trashEntry = (over: Partial<TrashEntry> = {}): TrashEntry => ({
+      kind: 'session',
+      id: 's1',
+      name: '会话 s1',
+      deletedAt: '2026-01-05T00:00:00.000Z',
+      purgeAfter: '2026-01-12T00:00:00.000Z',
+      daysLeft: 7,
+      sessionCount: 1,
+      messageCount: 3,
+      groupId: null,
+      groupName: null,
+      ...over,
+    })
+
+    it('fetchData 顺带拉回收站（头行 🗑 N 的初值，独立失败域）', async () => {
+      mockGetAgents.mockResolvedValue([])
+      mockGetSessions.mockResolvedValue([mockSession])
+      mockGetTrash.mockResolvedValue({
+        entries: [trashEntry(), trashEntry({ kind: 'group', id: 'g1', name: '小说连载' })],
+      })
+
+      await store.fetchData()
+
+      expect(store.trashEntries).toHaveLength(2)
+    })
+
+    it('单删成功 → 5 秒撤销 toast；撤销后会话按 updatedAt 插回列表', async () => {
+      vi.useFakeTimers()
+      try {
+        const s1 = grouped('s1', null, '2026-01-03T00:00:00.000Z')
+        const s2 = grouped('s2', null, '2026-01-02T00:00:00.000Z')
+        store.sessions = [s1, s2]
+        store.activeSessionId = 's1'
+        mockDeleteSession.mockResolvedValue({
+          id: 's1',
+          deletedAt: '2026-01-05T00:00:00.000Z',
+          purgeAfter: '2026-01-12T00:00:00.000Z',
+        })
+        mockRestoreSession.mockResolvedValue({ session: s1, groupId: null })
+
+        await store.trashSessions(['s1'], { undo: true })
+
+        expect(store.undoToast).toMatchObject({ sessionId: 's1', daysLeft: 7 })
+        expect(store.activeSessionId).toBe('s2')
+
+        await store.undoLastTrash()
+
+        expect(store.undoToast).toBeNull()
+        expect(mockRestoreSession).toHaveBeenCalledWith('s1')
+        expect(store.sessions.map((s) => s.id)).toEqual(['s1', 's2'])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('撤销 toast 5 秒自动消失；新单删替换旧计时器', async () => {
+      vi.useFakeTimers()
+      try {
+        store.sessions = [
+          grouped('s1', null, '2026-01-03T00:00:00.000Z'),
+          grouped('s2', null, '2026-01-02T00:00:00.000Z'),
+        ]
+        mockDeleteSession.mockResolvedValue({ id: 's1', deletedAt: 'x', purgeAfter: 'y' })
+
+        await store.trashSessions(['s1'], { undo: true })
+        vi.advanceTimersByTime(4999)
+        expect(store.undoToast).not.toBeNull()
+        vi.advanceTimersByTime(1)
+        expect(store.undoToast).toBeNull()
+
+        // 新单删开新窗口
+        await store.trashSessions(['s2'], { undo: true })
+        expect(store.undoToast).toMatchObject({ sessionId: 's2' })
+        vi.advanceTimersByTime(4999)
+        expect(store.undoToast).not.toBeNull()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('批量删除不提供撤销（只有单条行删除才开 toast）', async () => {
+      store.sessions = [
+        grouped('s1', null, '2026-01-03T00:00:00.000Z'),
+        grouped('s2', null, '2026-01-02T00:00:00.000Z'),
+      ]
+      mockDeleteSession.mockResolvedValue({ id: 's1', deletedAt: 'x', purgeAfter: 'y' })
+
+      await store.trashSessions(['s1', 's2'])
+
+      expect(store.undoToast).toBeNull()
+      expect(store.sessions).toEqual([])
+    })
+
+    it('恢复单条：条目移出回收站、会话回列表；404 时提示并重拉回收站（不静默）', async () => {
+      const s1 = grouped('s1', null, '2026-01-03T00:00:00.000Z')
+      store.trashEntries = [trashEntry()]
+      mockRestoreSession.mockResolvedValueOnce({ session: s1, groupId: null })
+
+      await store.restoreTrashSession('s1')
+
+      expect(store.trashEntries).toEqual([])
+      expect(store.sessions.map((s) => s.id)).toEqual(['s1'])
+
+      // 已被另一 tab 清掉 → 404：可见提示 + 重拉
+      store.trashEntries = [trashEntry({ id: 's9', name: '旧会话' })]
+      mockRestoreSession.mockRejectedValueOnce({
+        status: 404,
+        message: '资源不存在：Session not in trash',
+      })
+      const ok = await store.restoreTrashSession('s9')
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(ok).toBe(false)
+      expect(store.errorMessage).toContain('过期或已被清除')
+      expect(mockGetTrash).toHaveBeenCalled()
+    })
+
+    it('恢复整组：同批会话回列表、组重拉（组名可能被改成「（恢复）」）', async () => {
+      const s1 = grouped('s1', 'g1', '2026-01-03T00:00:00.000Z')
+      store.trashEntries = [trashEntry({ kind: 'group', id: 'g1', name: '小说连载' })]
+      mockRestoreSessionGroup.mockResolvedValue({ group: groupsFixture[0], sessions: [s1] })
+      mockGetSessionGroups.mockResolvedValue({ groups: groupsFixture })
+
+      const ok = await store.restoreTrashGroup('g1')
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(ok).toBe(true)
+      expect(store.trashEntries).toEqual([])
+      expect(store.sessions.map((s) => s.id)).toEqual(['s1'])
+      expect(mockGetSessionGroups).toHaveBeenCalled()
+    })
+
+    it('永久删除单条 / 清空回收站：条目同步移除', async () => {
+      store.trashEntries = [trashEntry({ id: 's1' }), trashEntry({ id: 's2' })]
+      mockPurgeSession.mockResolvedValue({ id: 's1' })
+
+      expect(await store.purgeTrashSession('s1')).toBe(true)
+      expect(store.trashEntries.map((e) => e.id)).toEqual(['s2'])
+
+      mockEmptyTrash.mockResolvedValue({ purged: { groups: 0, sessions: 1 } })
+      expect(await store.emptyTrash()).toBe(true)
+      expect(store.trashEntries).toEqual([])
+    })
+
+    it('session-restored / session-purged 广播 → 列表与回收站投影（多 tab）', async () => {
+      const s1 = grouped('s1', null, '2026-01-03T00:00:00.000Z')
+      store.sessions = [grouped('s2', null, '2026-01-02T00:00:00.000Z')]
+      const restored = mockOn.mock.calls.find((c) => c[0] === 'session-restored')?.[1] as (d: {
+        groupId: string | null
+        sessions: SessionConfig[]
+      }) => void
+
+      restored({ groupId: null, sessions: [s1] })
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(store.sessions.map((s) => s.id)).toEqual(['s1', 's2'])
+      expect(mockGetTrash).toHaveBeenCalled()
+
+      const purged = mockOn.mock.calls.find((c) => c[0] === 'session-purged')?.[1] as (d: {
+        sessionIds: string[]
+        groupIds: string[]
+      }) => void
+      purged({ sessionIds: ['s1'], groupIds: [] })
+      expect(mockGetTrash).toHaveBeenCalledTimes(2)
     })
 
     it('删当前会话 → 切到下一条可见会话，跳过折叠组里的隐藏行', async () => {

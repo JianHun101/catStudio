@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import appSource from './App.vue?raw'
 import chatPanelSource from './components/ChatPanel.vue?raw'
+import sessionListSource from './components/SessionList.vue?raw'
+import trashViewSource from './components/TrashView.vue?raw'
 
 /**
  * Verify the global settings entry (App.vue 52px 图标轨道齿轮 → SettingsView).
@@ -199,9 +201,9 @@ describe('App.vue T4 全局轨道统一（票面 ui-redesign T4）', () => {
     expect(main![0]).toContain('min-width: 0')
   })
 
-  it('激活态单源：currentView 四值派生，四个按钮各挂 .on + aria-current', () => {
+  it('激活态单源：currentView 五值派生（T4 增加 trash），四个按钮各挂 .on + aria-current', () => {
     expect(appSource).toMatch(
-      /const currentView = computed<'chat' \| 'trace' \| 'eval' \| 'settings'>\(/
+      /const currentView = computed<'chat' \| 'trace' \| 'eval' \| 'settings' \| 'trash'>\(/
     )
     // 硬编码激活态已退役——留着它，打开设置页时 💬 仍是亮的
     expect(appSource).not.toContain('class="rail-btn on"')
@@ -230,10 +232,11 @@ describe('App.vue T4 全局轨道统一（票面 ui-redesign T4）', () => {
     }
   })
 
-  it('覆盖层不再自带关闭按钮：App.vue 里一个 @close 都不剩', () => {
-    // 三个覆盖层的 ✕ 与各自 SFC 里的 `close` emit 同批退役
-    // （「✕ 清零 / 弹窗级关闭按钮保留」由三个视图自己的静态断言覆盖）
-    expect(appSource).not.toContain('@close')
+  it('三个全屏覆盖层不再自带关闭按钮（回收站「返回聊天」不算覆盖层关闭）', () => {
+    // 三个全屏页的 ✕ 与各自 SFC 里的 `close` emit 同批退役；T4 的 TrashView
+    // 是中心区视图，它的 @close（返回聊天）是合法入口，不在此列。
+    expect(appSource).not.toMatch(/<(SettingsView|EvaluationView|TraceView)[^>]*@close/)
+    expect(appSource).toContain('@close="closeTrash"')
   })
 })
 
@@ -242,5 +245,68 @@ describe('ChatPanel 会话区无设置入口残留', () => {
     expect(chatPanelSource).not.toContain('btn-bindings')
     expect(chatPanelSource).not.toContain('showBindings')
     expect(chatPanelSource).not.toContain('ConnectorBindingsModal')
+  })
+})
+
+describe('App.vue 回收站中心区视图（T4）', () => {
+  it('showTrash 默认关闭；TrashView 在中心区 v-if（不是全屏覆盖层）', () => {
+    expect(appSource).toContain('const showTrash = ref(false)')
+    expect(appSource).toContain("import TrashView from './components/TrashView.vue'")
+    // 中心区唯一开关：TrashView 与 ChatPanel 同处 .panel-center，v-if / v-else 互斥
+    const center = appSource.match(/<div class="center-content">[\s\S]*?<\/div>\s*<\/main>/)
+    expect(center, '未找到中心区内容块').toBeTruthy()
+    expect(center![0]).toContain('<TrashView v-if="showTrash"')
+    expect(center![0]).toContain('<ChatPanel')
+    // 三栏布局保留：回收站不是 anyOverlayOpen 的一员（否则左栏消失、点会话回聊天不可达）
+    expect(appSource).toMatch(
+      /anyOverlayOpen = computed\(\(\) => showSettings\.value \|\| showEval\.value \|\| showTrace\.value\)/
+    )
+    expect(appSource).not.toContain('showTrash.value || showSettings.value')
+  })
+
+  it('回收站与三个全屏 view 互斥：openTrash 清三者，open* 反向清 showTrash', () => {
+    const trash = appSource.match(/function openTrash\(\)[\s\S]*?\n\}/)
+    expect(trash, '未找到 openTrash').toBeTruthy()
+    expect(trash![0]).toContain('if (showTrash.value) return')
+    for (const o of ['showSettings', 'showEval', 'showTrace']) {
+      expect(trash![0], `openTrash 未关 ${o}`).toContain(`${o}.value = false`)
+    }
+    for (const fn of ['openTrace', 'openSettings', 'openEval', 'openChat']) {
+      const body = appSource.match(new RegExp(`function ${fn}\\([^)]*\\)[\\s\\S]*?\\n\\}`))
+      expect(body, `未找到 ${fn}`).toBeTruthy()
+      expect(body![0], `${fn} 未关 showTrash`).toContain('showTrash.value = false')
+    }
+  })
+
+  it('currentView 五值派生（回收站算一个视图，轨道无激活项）', () => {
+    expect(appSource).toMatch(
+      /const currentView = computed<'chat' \| 'trace' \| 'eval' \| 'settings' \| 'trash'>\(/
+    )
+    expect(appSource).toContain("if (showTrash.value) return 'trash'")
+  })
+
+  it('左栏头行 🗑 投 open-trash；点会话投 open-session → App 关回收站', () => {
+    expect(appSource).toContain('@open-trash="openTrash"')
+    expect(appSource).toContain('@open-session="closeTrash"')
+    expect(appSource).toContain('function closeTrash()')
+    expect(sessionListSource).toContain("emit('open-trash')")
+    expect(sessionListSource).toContain("emit('open-session')")
+  })
+
+  it('回收站两段：按 kind 分组、组条目不给单条恢复/清除', () => {
+    expect(trashViewSource).toContain("e.kind === 'group'")
+    expect(trashViewSource).toContain("e.kind === 'session'")
+    expect(trashViewSource).toContain('整组删除 ·')
+    expect(trashViewSource).toContain('单个会话 ·')
+    // 组条目行只渲染组级动作；单条动作只在会话条目分支里
+    expect(trashViewSource).toContain('restoreTrashGroup')
+    expect(trashViewSource).toContain('purgeTrashGroup')
+  })
+
+  it('ChatPanel 只做撤销 toast 宿主，不承载回收站视图', () => {
+    expect(chatPanelSource).toContain('store.undoToast')
+    expect(chatPanelSource).toContain('store.undoLastTrash()')
+    expect(chatPanelSource).not.toContain('TrashView')
+    expect(chatPanelSource).not.toContain('trashEntries')
   })
 })
