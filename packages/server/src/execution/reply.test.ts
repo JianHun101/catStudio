@@ -31,12 +31,15 @@ import {
   executionLogs as execLogsRepo,
   retrievalEvents as retrievalRepo,
   traceDetails as traceDetailsRepo,
+  messages as messagesRepo,
 } from '../db/repository/index.js'
 import { HYBRID_POOL_PER_QUERY } from '../db/repository/chunks.js'
 import { memoryRoutes } from '../routes/memory.js'
 import { getAdapterForAgent } from '../llm/registry.js'
 import { retrieveMemoryContext, buildKnowledgeContext } from '../memory/index.js'
 import type { MemoryContextResult } from '../memory/index.js'
+import { setRuntimeInstance, __test_resetRuntimeInstance } from '../runtime-instance.js'
+import { buildRuntimeSelfCheck } from './hints.js'
 
 // ─── 协作者 mock（只 mock 边界：LLM 适配器 / 子进程 / 外部 HTTP）──────────────
 // 组装式用例（下方「M1 广播前连线」）要跑**真** `runAgentReply`：DB、仓储、bus 捕获、
@@ -740,6 +743,7 @@ describe('execution/reply — T2 执行追踪详情', () => {
 
   afterEach(() => {
     resetDb()
+    __test_resetRuntimeInstance()
     vi.clearAllMocks()
   })
 
@@ -836,8 +840,16 @@ describe('execution/reply — T2 执行追踪详情', () => {
       })
     })
 
-    it('★承重★ 八节落库，且每节内容**真出现在送进适配器的那串 prompt 里**', async () => {
+    it('★承重★ 九节落库，且每节内容**真出现在送进适配器的那串 prompt 里**', async () => {
       seedT2()
+      // 承重用例必须注册实例：不注册时 `buildRuntimeSelfCheck` 返回 null，第九节是空串，
+      // 下面循环的 `if (content !== '')` 会直接跳过——只加 key 照样全绿，自检行没被覆盖。
+      setRuntimeInstance({
+        bootId: 'c79a40db-1111-4222-8333-444455556666',
+        startedAt: '2026-11-15T15:19:16.838Z',
+        gitSha: '62c8b9b4aabbccddeeff00112233445566778899',
+        gitDirty: 0,
+      })
       await run()
 
       const metas = traceDetailsRepo.getPromptSectionMetas(EXEC_ID)
@@ -850,6 +862,7 @@ describe('execution/reply — T2 执行追踪详情', () => {
         'running_summary',
         'memory',
         'knowledge',
+        'runtime_self_check',
       ])
 
       const read = (k: string) => traceDetailsRepo.getPromptSection(EXEC_ID, k) ?? ''
@@ -868,6 +881,7 @@ describe('execution/reply — T2 执行追踪详情', () => {
         'running_summary',
         'memory',
         'knowledge',
+        'runtime_self_check',
       ]) {
         const content = read(key)
         if (content !== '') {
@@ -879,6 +893,10 @@ describe('execution/reply — T2 执行追踪详情', () => {
       // 变成一个恒真的假绿门（本仓栽过：判据面扫不到东西时静默全绿）
       expect(read('memory')).toBe('\n\n【相关记忆】\n1. 正文')
       expect(read('knowledge')).toBe('\n\n【知识库】\n1. 条目')
+      // 承重用例的 `seedT2()` 不插入本猫历史回复 ⇒ 锚点为 null ⇒ 第九节落「无法判定」档，
+      // 仍非空、仍进承重循环（「已重启 / 未重启」两档逐字文案由 A4 覆盖）。
+      expect(read('runtime_self_check')).toContain('[运行时自检]')
+      expect(read('runtime_self_check')).toContain('无法判定是否重启。')
       // 系统提示节 = 猫自己的人格的**占位符已替换**形态
       expect(read('system_prompt')).toBe('你是测试猫')
 
@@ -892,6 +910,10 @@ describe('execution/reply — T2 执行追踪详情', () => {
       const metaByKey = new Map(metas.map((m) => [m.section_key, m]))
       expect(metaByKey.get('memory')!.status).toBe('injected')
       expect(metaByKey.get('memory')!.char_count).toBe(read('memory').length)
+      expect(metaByKey.get('runtime_self_check')!.status).toBe('injected')
+      expect(metaByKey.get('runtime_self_check')!.char_count).toBe(
+        read('runtime_self_check').length
+      )
       // 本夹具没走摘要（`shouldHandoff` 恒 false、`summaryBlockMsg` 恒 null）⇒ 两节 empty
       expect(metaByKey.get('summary_block')!.status).toBe('empty')
       expect(metaByKey.get('running_summary')!.status).toBe('empty')
@@ -943,5 +965,190 @@ describe('execution/reply — T2 执行追踪详情', () => {
       expect(SRC.split('buildSkillDirectorySection()').length - 1).toBe(1)
       expect(SRC.split('const skillDirectorySection =').length - 1).toBe(1)
     })
+
+    it('自检段追加在最终 token 复核**之前**（两条锚各自全文件唯一）', () => {
+      // 变量固定命名 `runtimeSelfCheck`，让「自检行在最终 token 复核之前」有可 grep 的唯一锚；
+      // 把追加块挪到复核之后，这条静态断言即红。
+      for (const anchor of [
+        '${runtimeSelfCheck}',
+        'const finalStats = estimateMessageTokens(llmMessages)',
+      ]) {
+        expect(SRC.split(anchor).length - 1, `锚不唯一：${anchor}`).toBe(1)
+      }
+      expect(SRC.indexOf('${runtimeSelfCheck}')).toBeLessThan(
+        SRC.indexOf('const finalStats = estimateMessageTokens(llmMessages)')
+      )
+    })
+  })
+})
+
+// ─── 票 B：唤醒自检注入（契约 D / 验收 A6、A7）────────────────────────────
+//
+// 组装式：真 `runAgentReply` + 真 DB + 捕获 chatStream 入参；只换掉会 spawn 子进程 /
+// 连外部服务的协作者（与上方 M1 / T2 同款边界）。
+describe('execution/reply — 唤醒自检注入', () => {
+  const AGENT_ID = 'agent-rt'
+  const SESSION_ID = 'sess-rt'
+  const TRIGGER_ID = 'm-trigger-rt'
+  const EXEC_ID = 'log-rt'
+  const ANCHOR_AT = '2026-11-15T10:00:00.000Z'
+
+  const runtimeInstance = {
+    bootId: 'c79a40db-1111-4222-8333-444455556666',
+    startedAt: '2026-11-15T15:19:16.838Z',
+    gitSha: '62c8b9b4aabbccddeeff00112233445566778899',
+    gitDirty: 0,
+  }
+
+  const agent = {
+    id: AGENT_ID,
+    name: 'ds猫',
+    avatar: '🐱',
+    systemPrompt: '你是测试猫',
+    llmProvider: 'deepseek',
+    llmModel: 'deepseek-v4-pro',
+    llmApiKey: 'sk-test',
+  } as any
+
+  let captured: Array<{ role: string; content: string }> = []
+
+  function makeBus() {
+    return {
+      emitMessage: vi.fn(),
+      emitSystemNotice: vi.fn(),
+      emitTyping: vi.fn(),
+      emitAgentMessageStatus: vi.fn(),
+      emitMessageUpdated: vi.fn(),
+      emitContextWindowStats: vi.fn(),
+      emitSessionHandoff: vi.fn(),
+      emitHandoffFailed: vi.fn(),
+      emitSessionDeleted: vi.fn(),
+    } as any
+  }
+
+  /** 造一份干净现场（测试「追加式」时同一用例里要重建两次） */
+  function seed(): void {
+    setDb(createTestDb())
+    initDb()
+    initRepository(getDb())
+    __test_resetRuntimeInstance()
+    captured = []
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, 'ds猫', 'p', 'k')`
+    ).run(AGENT_ID)
+    db.prepare(`INSERT INTO sessions (id, title) VALUES (?, 't')`).run(SESSION_ID)
+    // 锚点：本猫更早的一条发言（重启前）
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, agent_id, content, mentions, created_at)
+       VALUES (?, ?, 'agent', ?, 'earlier', '[]', ?)`
+    ).run('m-earlier', SESSION_ID, AGENT_ID, ANCHOR_AT)
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', '@ds猫 干活', '["ds猫"]')`
+    ).run(TRIGGER_ID, SESSION_ID)
+    execLogsRepo.insertExecutionLog(EXEC_ID, SESSION_ID, AGENT_ID, TRIGGER_ID, 'trace-rt')
+
+    vi.mocked(retrieveMemoryContext).mockResolvedValue(makeResult())
+    // 非空知识库：与 T2 快照套件的 `beforeEach` 同款承重条件。若留空，`if (knowledgeContext)`
+    // 不追加，自检行即使被挪到 knowledge 之前也仍「以自检段结尾」——A6 会变成假绿。
+    vi.mocked(buildKnowledgeContext).mockResolvedValue('\n\n【知识库】\n1. 条目')
+    vi.mocked(getAdapterForAgent).mockReturnValue({
+      chatStream: vi.fn(async function* (messages: any[]) {
+        captured = messages.map((m) => ({ role: m.role, content: m.content }))
+        yield { content: '收到', kind: 'text' }
+      }),
+    } as any)
+  }
+
+  function run() {
+    return runAgentReply(
+      createEngineState(),
+      makeBus(),
+      SESSION_ID,
+      agent,
+      { id: TRIGGER_ID, content: '@ds猫 干活', mentions: ['ds猫'], fromAgent: false },
+      'trace-rt',
+      undefined,
+      createExecTrace({
+        executionId: EXEC_ID,
+        chainId: null,
+        sessionId: SESSION_ID,
+        agentId: AGENT_ID,
+      })
+    )
+  }
+
+  beforeEach(() => {
+    seed()
+  })
+
+  afterEach(() => {
+    resetDb()
+    __test_resetRuntimeInstance()
+    vi.clearAllMocks()
+  })
+
+  it('未注册实例 → 不注入（既有 system prompt 一字不变，A6 追加式半边）', async () => {
+    await run()
+    expect(captured[0].role).toBe('system')
+    expect(captured[0].content).not.toContain('[运行时自检]')
+  })
+
+  it('注册实例 → `llmMessages[0].content` 以 `[运行时自检]` 段结尾（A6 主判据）', async () => {
+    setRuntimeInstance(runtimeInstance)
+    await run()
+
+    const selfCheck = buildRuntimeSelfCheck(runtimeInstance, ANCHOR_AT)!
+    expect(captured[0].role).toBe('system')
+    expect(captured[0].content.endsWith(selfCheck)).toBe(true)
+    expect(captured[0].content).toContain('[运行时自检] 进程 boot=c79a40db')
+    // 位置断言：自检段必须在非空知识库段**之后**。只断「以自检段结尾」时，knowledge 为空
+    // 的装配会让「自检挪到 knowledge 之前」也全绿（假绿，P2-1）。
+    expect(captured[0].content.indexOf('【知识库】')).toBeGreaterThan(-1)
+    expect(captured[0].content.indexOf('【知识库】')).toBeLessThan(
+      captured[0].content.indexOf('[运行时自检]')
+    )
+  })
+
+  it('追加式：注册后的串 = 未注册时的串 + `\\n\\n` + 自检段（既有内容不重排）', async () => {
+    await run()
+    const baseline = captured[0].content
+
+    seed()
+    setRuntimeInstance(runtimeInstance)
+    await run()
+
+    const selfCheck = buildRuntimeSelfCheck(runtimeInstance, ANCHOR_AT)!
+    expect(captured[0].content).toBe(`${baseline}\n\n${selfCheck}`)
+  })
+
+  it('自检段仍落在**第一条** system message，dynamicHints 不受影响（A6 位置）', async () => {
+    setRuntimeInstance(runtimeInstance)
+    await run()
+
+    const systemMsgs = captured.filter((m) => m.role === 'system')
+    expect(systemMsgs.length).toBeGreaterThan(1) // 自检之外还有动态提示
+    expect(systemMsgs[0].content).toContain('[运行时自检]')
+    expect(systemMsgs.slice(1).some((m) => m.content.includes('[运行时自检]'))).toBe(false)
+  })
+
+  it('锚点查询抛错 → 退化为无法判定档，回复照发、不冒泡（A7）', async () => {
+    setRuntimeInstance(runtimeInstance)
+    const spy = vi.spyOn(messagesRepo, 'getLastAgentMessageAt').mockImplementation(() => {
+      throw new Error('boom')
+    })
+    try {
+      const res = await run()
+      expect(res.content).toBe('收到')
+      expect(captured[0].content).toContain('[运行时自检]')
+      expect(
+        captured[0].content.endsWith(
+          '本会话没有你更早的发言，或时间取不到/无法解析，无法判定是否重启。'
+        )
+      ).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

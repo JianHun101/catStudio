@@ -79,7 +79,9 @@ import {
   resolveRolePlaceholders,
   buildDynamicHints,
   buildSkillDirectorySection,
+  buildRuntimeSelfCheck,
 } from './hints.js'
+import { getRuntimeInstance } from '../runtime-instance.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 import type { EngineState } from './state.js'
 
@@ -239,6 +241,25 @@ function findRunningExecutionId(
 }
 
 /**
+ * 唤醒自检的锚点取数（票 B 契约 B / 验收 A7）——查询失败一律 `null`，**不冒泡**。
+ *
+ * `null` 会让 `buildRuntimeSelfCheck` 走「无法判定」档：自检行是常驻证据，
+ * 不能反过来成为执行失败源。失败不静默，留一条 warn。
+ */
+function resolveLastOwnMessageAt(sessionId: string, agentId: string): string | null {
+  try {
+    return messagesRepo.getLastAgentMessageAt(sessionId, agentId)
+  } catch (err: any) {
+    log.warn('运行自检锚点查询失败（退化为无法判定档，不影响本轮回复）', {
+      sessionId,
+      agentId,
+      error: err?.message,
+    })
+    return null
+  }
+}
+
+/**
  * 检索流水落盘（P2 / R1）——**三处口径与既有代码逐字同源**，不是重新推导：
  *
  * · `taskId` = `triggerMsg.taskId || traceId`：与写回复消息那一行
@@ -328,7 +349,7 @@ export function recordRetrievalTrace(args: {
  * prompt 快照的**节键**（值域闭集）——前端按它逐节拉正文
  * （`GET /api/eval/prompt-section?key=`），故键一旦发布就是契约，改键 = 改 API。
  *
- * 分节口径 = **注入面的一次切分**，八节互不重叠、并集 = `llmMessages[0].content`
+ * 分节口径 = **注入面的一次切分**，九节互不重叠、并集 = `llmMessages[0].content`
  * 的构成成分 + 若干独立 system/消息块。刻意**不含对话消息**：正文即对话区，
  * 再快照一份是纯冗余（消息面由 `context_decisions` 逐条承载）。
  */
@@ -341,6 +362,7 @@ export const TRACE_SECTION_KEYS = {
   runningSummary: 'running_summary',
   memory: 'memory',
   knowledge: 'knowledge',
+  runtimeSelfCheck: 'runtime_self_check',
 } as const
 
 /** 节键 → 展示名。前端不硬编码中文（改文案不必动前端），由读口随清单下发 */
@@ -353,6 +375,7 @@ const TRACE_SECTION_LABELS: Record<string, string> = {
   [TRACE_SECTION_KEYS.runningSummary]: '增量摘要（交接续跑）',
   [TRACE_SECTION_KEYS.memory]: '相关记忆',
   [TRACE_SECTION_KEYS.knowledge]: '知识库',
+  [TRACE_SECTION_KEYS.runtimeSelfCheck]: '唤醒自检',
 }
 
 /** 节键的**展示序**（= 它在 prompt 里的位置序，非字母序） */
@@ -365,6 +388,7 @@ const TRACE_SECTION_ORDER: string[] = [
   TRACE_SECTION_KEYS.runningSummary,
   TRACE_SECTION_KEYS.memory,
   TRACE_SECTION_KEYS.knowledge,
+  TRACE_SECTION_KEYS.runtimeSelfCheck,
 ]
 
 /** 组装一节的写口输入（空串 → `empty`，调用方只需给原文） */
@@ -887,6 +911,19 @@ export async function runAgentReply(
     triggerMsg.authorName
   )
 
+  // ── 唤醒自检（票 B 契约 C/D）──────────────────────────────
+  // 文本在 system prompt 组装完成后生成（拿得到本会话本猫的锚点）；**追加位置**以
+  // `llmMessages[0].content` 的**末尾**为准——它在 memory / knowledge 两段注入之后
+  // 才真正落笔（见下方「唤醒自检落笔」），否则两段注入会追加到自检行之后，A6
+  // 「llmMessages[0].content 以 [运行时自检] 段结尾」不成立。
+  //
+  // `getRuntimeInstance()` 为 null（测试进程 / CLI 兜底 / 启动采集失败）→ 不注入，
+  // 既有 system prompt 一字不变（追加式，A6）。未注册时连锚点都不查。
+  const runtimeInstance = getRuntimeInstance()
+  const runtimeSelfCheck = runtimeInstance
+    ? buildRuntimeSelfCheck(runtimeInstance, resolveLastOwnMessageAt(sessionId, agent.id))
+    : null
+
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
   const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages, {
     // 链锚 = 触发消息的 messages.task_id（T-E 后 ingest 必落此列）。缺省 = 存量无锚
@@ -1212,6 +1249,18 @@ export async function runAgentReply(
     })
   }
 
+  // ── 唤醒自检落笔（票 B 契约 D / 验收 A6）────────────────────
+  // 放在 memory / knowledge 注入**之后**：那两段是 `llmMessages[0].content + 注入块`，
+  // 若自检行早一步落笔就会被挤到中间，A6 的「以自检段结尾」不成立。
+  // 注入位置仍是**第一条 system message**，`\n\n` 连接；不坐 `dynamicHints`
+  // （那里有「超限当最旧先丢」的观察项，常驻证据不能坐可被丢掉的位置）。
+  if (runtimeSelfCheck) {
+    llmMessages[0] = {
+      ...llmMessages[0],
+      content: `${llmMessages[0].content}\n\n${runtimeSelfCheck}`,
+    }
+  }
+
   // ── 最终 token 预算复核 ──────────────────────────
   // summary + memory + 知识库注入后重新估算总 token。
   // 超预算时不丢弃任何上下文，直接触发会话交接（fire-and-forget）——
@@ -1335,6 +1384,9 @@ export async function runAgentReply(
         memoryResult?.stats?.truncated ? 'truncated' : undefined
       ),
       traceSection(TRACE_SECTION_KEYS.knowledge, knowledgeContext),
+      // 自检行取了 `buildRuntimeSelfCheck` 的原文（不含连接用的 `\n\n`）；未注册实例
+      // / 返回 null 时传空串 ⇒ 本节记 `empty`，但键仍在（并集不变量不因未注入而破）。
+      traceSection(TRACE_SECTION_KEYS.runtimeSelfCheck, runtimeSelfCheck ?? ''),
     ],
   })
 
