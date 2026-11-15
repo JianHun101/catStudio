@@ -1654,6 +1654,10 @@ describe('T1 同会话回退', () => {
       if (url.includes('/rollback')) {
         return { ok: true, messageId: 'm2', removedIds: ['m3', 'm4'], removedCount: 2 }
       }
+      // T6：回退成功后 store 会重拉会话列表（行内时间），这里给回当前列表而不是记忆对象
+      if (url.includes('/sessions') && !url.includes('/sessions/')) {
+        return store.sessions
+      }
       // 记忆引用批量口：给存活的 agent 消息 m2 一条命中
       return {
         m2: {

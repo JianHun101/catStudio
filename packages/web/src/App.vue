@@ -71,7 +71,7 @@ function openEval(): void {
   showTrash.value = false
 }
 
-/** 打开回收站（左栏头行 🗑）。与三个全屏页互斥；底层三栏保留（只换中心区内容）。 */
+/** 打开回收站（左栏头行回收站按钮）。与三个全屏页互斥；底层三栏保留（只换中心区内容）。 */
 function openTrash(): void {
   if (showTrash.value) return
   showTrash.value = true
