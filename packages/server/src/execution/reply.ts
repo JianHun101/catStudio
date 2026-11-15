@@ -349,7 +349,7 @@ export function recordRetrievalTrace(args: {
  * prompt 快照的**节键**（值域闭集）——前端按它逐节拉正文
  * （`GET /api/eval/prompt-section?key=`），故键一旦发布就是契约，改键 = 改 API。
  *
- * 分节口径 = **注入面的一次切分**，八节互不重叠、并集 = `llmMessages[0].content`
+ * 分节口径 = **注入面的一次切分**，九节互不重叠、并集 = `llmMessages[0].content`
  * 的构成成分 + 若干独立 system/消息块。刻意**不含对话消息**：正文即对话区，
  * 再快照一份是纯冗余（消息面由 `context_decisions` 逐条承载）。
  */
@@ -362,6 +362,7 @@ export const TRACE_SECTION_KEYS = {
   runningSummary: 'running_summary',
   memory: 'memory',
   knowledge: 'knowledge',
+  runtimeSelfCheck: 'runtime_self_check',
 } as const
 
 /** 节键 → 展示名。前端不硬编码中文（改文案不必动前端），由读口随清单下发 */
@@ -374,6 +375,7 @@ const TRACE_SECTION_LABELS: Record<string, string> = {
   [TRACE_SECTION_KEYS.runningSummary]: '增量摘要（交接续跑）',
   [TRACE_SECTION_KEYS.memory]: '相关记忆',
   [TRACE_SECTION_KEYS.knowledge]: '知识库',
+  [TRACE_SECTION_KEYS.runtimeSelfCheck]: '唤醒自检',
 }
 
 /** 节键的**展示序**（= 它在 prompt 里的位置序，非字母序） */
@@ -386,6 +388,7 @@ const TRACE_SECTION_ORDER: string[] = [
   TRACE_SECTION_KEYS.runningSummary,
   TRACE_SECTION_KEYS.memory,
   TRACE_SECTION_KEYS.knowledge,
+  TRACE_SECTION_KEYS.runtimeSelfCheck,
 ]
 
 /** 组装一节的写口输入（空串 → `empty`，调用方只需给原文） */
@@ -1381,6 +1384,9 @@ export async function runAgentReply(
         memoryResult?.stats?.truncated ? 'truncated' : undefined
       ),
       traceSection(TRACE_SECTION_KEYS.knowledge, knowledgeContext),
+      // 自检行取了 `buildRuntimeSelfCheck` 的原文（不含连接用的 `\n\n`）；未注册实例
+      // / 返回 null 时传空串 ⇒ 本节记 `empty`，但键仍在（并集不变量不因未注入而破）。
+      traceSection(TRACE_SECTION_KEYS.runtimeSelfCheck, runtimeSelfCheck ?? ''),
     ],
   })
 

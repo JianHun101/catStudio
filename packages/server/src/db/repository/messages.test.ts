@@ -866,11 +866,13 @@ describe('messages repo — getLastAgentMessageAt（票 B 锚点）', () => {
     expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-1')).toBe('2026-11-15T10:00:00.000Z')
   })
 
-  it('同一毫秒多条按 id 倒序 tie-break（与列表排序同口径）', () => {
-    insMsg('m-a', 's1', 'agent', 'agent-1', '2026-11-15T10:00:00.000Z')
-    insMsg('m-z', 's1', 'agent', 'agent-1', '2026-11-15T10:00:00.000Z')
+  it('多条按 created_at 倒序取最近一条（显式错开时间；走 idx_messages_session 无临时排序）', () => {
+    // 契约 B：`id` 是 UUID v4，同毫秒下 `id DESC` 只是稳定 tie-break、不是插入序；
+    // 故「最近一条」必须用错开的 created_at 断言，不能拿同毫秒两条反推插入顺序。
+    insMsg('m-old', 's1', 'agent', 'agent-1', '2026-11-15T10:00:00.000Z')
+    insMsg('m-new', 's1', 'agent', 'agent-1', '2026-11-15T12:00:00.000Z')
+    insMsg('m-mid', 's1', 'agent', 'agent-1', '2026-11-15T11:00:00.000Z')
 
-    // 取 created_at，同值下无法从返回值区分——用执行计划反证走的是复合索引
     const plan = db
       .prepare(
         `EXPLAIN QUERY PLAN SELECT created_at FROM messages
@@ -878,8 +880,11 @@ describe('messages repo — getLastAgentMessageAt（票 B 锚点）', () => {
          ORDER BY created_at DESC, id DESC LIMIT 1`
       )
       .all('s1', 'agent-1') as Array<{ detail: string }>
-    expect(plan.map((p) => p.detail).join(' ')).toContain('idx_messages_session')
-    expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-1')).toBe('2026-11-15T10:00:00.000Z')
+    const planText = plan.map((p) => p.detail).join(' ')
+    expect(planText).toContain('idx_messages_session')
+    expect(planText).not.toContain('TEMP B-TREE')
+
+    expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-1')).toBe('2026-11-15T12:00:00.000Z')
   })
 
   it('返回**原始值**不归一化（秒级老行原样透出，归一在比较侧做）', () => {
