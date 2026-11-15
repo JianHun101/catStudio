@@ -38,6 +38,8 @@ export const SessionUpdateSchema = z.object({
   addAgentIds: z.array(z.string()).optional(),
   removeAgentIds: z.array(z.string()).optional(),
   broadcastMode: z.boolean().optional(),
+  /** 移动到分组；`null` = 回未分组。组是否存在/已删由路由查库判定（400），schema 只管形状 */
+  groupId: z.string().min(1).nullable().optional(),
 })
 
 /**

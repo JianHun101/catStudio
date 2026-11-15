@@ -323,12 +323,12 @@ describe('handoff', () => {
 
     const insertSession = (
       id: string,
-      opts: { handoffFrom?: string; runningSummary?: string | null } = {}
+      opts: { handoffFrom?: string; runningSummary?: string | null; groupId?: string | null } = {}
     ) => {
       db.prepare(
-        `INSERT INTO sessions (id, title, handoff_from, running_summary)
-         VALUES (?, 'test', ?, ?)`
-      ).run(id, opts.handoffFrom ?? null, opts.runningSummary ?? null)
+        `INSERT INTO sessions (id, title, handoff_from, running_summary, group_id)
+         VALUES (?, 'test', ?, ?, ?)`
+      ).run(id, opts.handoffFrom ?? null, opts.runningSummary ?? null, opts.groupId ?? null)
     }
 
     /**
@@ -449,6 +449,34 @@ describe('handoff', () => {
       expect(childrenOf('parent-mixed')).toHaveLength(2)
       expect(mockBus.emitSessionDeleted).not.toHaveBeenCalled()
       expect(mockBus.emitSessionHandoff).not.toHaveBeenCalled()
+    })
+
+    it('子会话继承父会话 group_id；父未分组时子也未分组（交接链归组，ADR 0016 D6）', async () => {
+      db.prepare(
+        `INSERT INTO session_groups (id, name, created_at, updated_at)
+         VALUES ('g-handoff', '交接链', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+      ).run()
+      insertSession('parent-grouped', { groupId: 'g-handoff' })
+      const grouped = await performHandoff('parent-grouped', mockBus)
+      expect(grouped).not.toBeNull()
+      expect(
+        (
+          db.prepare(`SELECT group_id FROM sessions WHERE id = ?`).get(grouped!.newSessionId) as {
+            group_id: string | null
+          }
+        ).group_id
+      ).toBe('g-handoff')
+
+      insertSession('parent-ungrouped')
+      const ungrouped = await performHandoff('parent-ungrouped', mockBus)
+      expect(ungrouped).not.toBeNull()
+      expect(
+        (
+          db.prepare(`SELECT group_id FROM sessions WHERE id = ?`).get(ungrouped!.newSessionId) as {
+            group_id: string | null
+          }
+        ).group_id
+      ).toBeNull()
     })
 
     it('重复交接：连续两次都不产生第二条子会话（同一父会话只留一条）', async () => {

@@ -181,26 +181,29 @@ export function updateCompressedSummary(
 }
 
 /**
- * **全量**会话（含已归档），按最近活跃排序。
+ * **全量**会话（含已归档、含回收站里的已删行），按最近活跃排序。
  *
- * 与 `listActiveSessions()` 的分工是刻意的：这个函数是「系统链路」口径——归档只改
- * **用户态列表可见性**，不动任何系统链路（系统链路的覆盖面仍含归档会话；评估告警
- * 已改由 `/api/eval/l1-metrics` 供横幅与评估中心读取，不再经 `messages`）。把过滤
- * 塞进这里 = 让归档静默改变无关子系统的行为。
+ * 与 `listActiveSessions()` 的分工是刻意的：这个函数是「系统链路」口径——用户态删除
+ * 只改**用户面列表可见性**，不动评估/审计等内部链路（spec §4.3）。把 `deleted_at`
+ * 过滤塞进这里 = 让回收站静默改变无关子系统的行为。
  */
 export function listAllSessions(): SessionRow[] {
   return db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as SessionRow[]
 }
 
 /**
- * **活跃**会话（`archived_at IS NULL`），按最近活跃排序——用户态列表的默认口径（票 7）。
+ * **活跃**会话（`deleted_at IS NULL`），按最近活跃排序——用户态列表的默认口径。
  *
- * WHERE 与部分索引 `idx_sessions_active` 的谓词逐字同形（部分索引要生效，查询的 WHERE
+ * 票 7 的 `archived_at IS NULL` 已退役（分组两轴模型，ADR 0016）：归档只是旧模型里
+ * 「收起来」的落点，现在由分组折叠承担，**不再影响列表可见性**；列表只排除已进回收站
+ * 的会话。
+ *
+ * WHERE 与部分索引 `idx_sessions_live` 的谓词逐字同形（部分索引要生效，查询的 WHERE
  * 必须蕴含索引谓词）。改这个 WHERE 前先看那条索引的注释。
  */
 export function listActiveSessions(): SessionRow[] {
   return db
-    .prepare('SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY updated_at DESC')
+    .prepare('SELECT * FROM sessions WHERE deleted_at IS NULL ORDER BY updated_at DESC')
     .all() as SessionRow[]
 }
 
@@ -286,19 +289,32 @@ export function insertSession(
   agentIds: string[],
   broadcastMode?: number,
   handoffFrom?: string,
-  runningSummary?: string
+  runningSummary?: string,
+  groupId?: string | null
 ): void {
   db.prepare(
-    `INSERT INTO sessions (id, title, agent_ids, broadcast_mode, handoff_from, running_summary)
-     VALUES (?, ?, ?, ?, ?, ?)`
+    `INSERT INTO sessions (id, title, agent_ids, broadcast_mode, handoff_from, running_summary, group_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     title,
     JSON.stringify(agentIds),
     broadcastMode ?? 0,
     handoffFrom ?? null,
-    runningSummary ?? null
+    runningSummary ?? null,
+    groupId ?? null
   )
+}
+
+/**
+ * 移动会话到分组（`groupId=null` = 回未分组）。
+ *
+ * **不动 `updated_at`**：分组是组织动作，不是会话活跃。跟着动会让被移动的会话凭空跳到
+ * 列表最前——左栏按 `updated_at DESC` 排序，一次整理动作就重排整屏。
+ * 组是否存在/已删由路由判定（400）；本函数只管落库。
+ */
+export function updateSessionGroup(id: string, groupId: string | null): void {
+  db.prepare('UPDATE sessions SET group_id = ? WHERE id = ?').run(groupId, id)
 }
 
 export function upsertDemoSession(

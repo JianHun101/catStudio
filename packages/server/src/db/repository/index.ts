@@ -15,6 +15,7 @@ import type Database from 'better-sqlite3'
 // 导入各实体的 setRepoDb
 import { setRepoDb as setAgentsDb } from './agents.js'
 import { setRepoDb as setSessionsDb } from './sessions.js'
+import { setRepoDb as setSessionGroupsDb } from './sessionGroups.js'
 import { setRepoDb as setMessagesDb } from './messages.js'
 import { setRepoDb as setMessageSearchDb } from './message-search.js'
 import { setRepoDb as setKnowledgeDb } from './knowledge.js'
@@ -39,6 +40,7 @@ import { setRepoDb as setServerBootsDb } from './serverBoots.js'
 export function initRepository(db: Database.Database): void {
   setAgentsDb(db)
   setSessionsDb(db)
+  setSessionGroupsDb(db)
   setMessagesDb(db)
   setMessageSearchDb(db)
   setKnowledgeDb(db)
@@ -63,6 +65,7 @@ export function initRepository(db: Database.Database): void {
 // 按实体分组导出，调用方用 repo.agents.xxx / repo.sessions.xxx 等
 export * as agents from './agents.js'
 export * as sessions from './sessions.js'
+export * as sessionGroups from './sessionGroups.js'
 export * as messages from './messages.js'
 export * as messageSearch from './message-search.js'
 export * as knowledge from './knowledge.js'
@@ -90,6 +93,7 @@ export type {
   PromptSectionMeta,
 } from './traceDetails.js'
 export type { SessionTraceRow } from './executionLogs.js'
+export type { SessionGroupRow, SessionGroupWithCount } from './sessionGroups.js'
 
 // Row 类型也一并导出
 export type {

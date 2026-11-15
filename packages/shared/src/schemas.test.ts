@@ -4,6 +4,7 @@ import {
   AgentCreateSchema,
   AgentUpdateSchema,
   SessionCreateSchema,
+  SessionUpdateSchema,
   MessageSendSchema,
   EmbeddingConfigSchema,
 } from './schemas.js'
@@ -168,6 +169,28 @@ describe('SessionCreateSchema', () => {
       title: '测试',
     })
     expect(result.success).toBe(false)
+  })
+})
+
+// ─── SessionUpdateSchema ───────────────────────────
+
+describe('SessionUpdateSchema', () => {
+  it('保留 groupId（Zod 默认剥未知键，剥了就是 200 但没动）', () => {
+    const parsed = SessionUpdateSchema.parse({ groupId: 'g-1' })
+    expect(parsed.groupId).toBe('g-1')
+  })
+
+  it('groupId: null 与缺省可区分', () => {
+    const cleared = SessionUpdateSchema.parse({ groupId: null })
+    expect(cleared.groupId).toBeNull()
+    expect('groupId' in cleared).toBe(true)
+
+    const untouched = SessionUpdateSchema.parse({})
+    expect('groupId' in untouched).toBe(false)
+  })
+
+  it('rejects empty groupId', () => {
+    expect(SessionUpdateSchema.safeParse({ groupId: '' }).success).toBe(false)
   })
 })
 

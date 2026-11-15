@@ -90,6 +90,7 @@ const mockSession: SessionConfig = {
   broadcastMode: false,
   createdAt: '2024-01-01',
   updatedAt: '2024-01-01',
+  groupId: null,
 }
 
 const mockMessage: Message = {
