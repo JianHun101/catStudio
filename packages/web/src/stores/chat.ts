@@ -655,6 +655,10 @@ export const useChatStore = defineStore('chat', () => {
     // 切走前把当前消息存入缓存（存数组引用，后续 messages.value 重新赋值不会改旧引用）
     if (switching) {
       sessionMessages.set(activeSessionId.value!, messages.value)
+      // 第六条一致性路径（票单契约 6）：离开期间会话收到的回复只广播到它自己的房间，
+      // 本 tab 不在房间里收不到 `NEW_MESSAGE`，行内时间会停在切走前。切回另一个会话时
+      // 用列表端点校准一次——首屏自动 join（active 为 null）与同会话重入不算切换。
+      void fetchSessions()
     }
     // 换代：**每次进入 joinSession 都换**（同会话重入也换）。下方无条件复位 loadingOlder / 清句柄，
     // 只有代际同步变，旧请求的 finally 才不会把新请求的 loadingOlder 清掉。旧的在途翻页请求从此
