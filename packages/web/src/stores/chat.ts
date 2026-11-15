@@ -12,7 +12,12 @@ import type {
   ExecutionMeta,
 } from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
-import { api, type ContextConfig } from '@/composables/useApi'
+import {
+  api,
+  type ContextConfig,
+  type GroupedSession,
+  type SessionGroup,
+} from '@/composables/useApi'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('chatStore')
@@ -146,7 +151,15 @@ export function replyTimerKey(sessionId: string, agentId: string): string {
 export const useChatStore = defineStore('chat', () => {
   // ─── State ────────────────────────────────
 
-  const sessions = ref<SessionConfig[]>([])
+  const sessions = ref<GroupedSession[]>([])
+  /**
+   * 活分组（`created_at ASC`，服务端序）。T3 只做左栏需要的部分：列表 + CRUD + 折叠 +
+   * 移组投影；回收站条目与撤销 toast 归 T4。
+   *
+   * 组内会话数**不直接读 `group.sessionCount`** 渲染：移组后它必然过期。左栏按本地
+   * `sessions` 现算（见 SessionList 的 `grouped`），服务端字段留给其它消费方/校验。
+   */
+  const groups = ref<SessionGroup[]>([])
   const activeSessionId = ref<string | null>(null)
   /** 「显示已归档」开关（spec §4.1）。默认关 = 列表只显活跃会话 */
   const showArchived = ref(false)
@@ -447,6 +460,8 @@ export const useChatStore = defineStore('chat', () => {
       unreadCounts.value = counts
       dataReady.value = true
       dataError.value = ''
+      // 分组是列表的二级数据：独立失败域，拉不到不阻断会话列表（左栏退化为全未分组）。
+      void fetchGroups()
 
       // 自动选中会话：优先恢复上次选中的（localStorage），不在列表则回退第一个
       if (!activeSessionId.value && sessionList.length > 0) {
@@ -814,7 +829,7 @@ export const useChatStore = defineStore('chat', () => {
     return res.removedCount
   }
 
-  /** 删除会话 */
+  /** 删除会话（物理删除路径；软删进回收站走 `trashSessions`） */
   async function deleteSession(id: string): Promise<void> {
     try {
       await api.deleteSession(id)
@@ -822,22 +837,144 @@ export const useChatStore = defineStore('chat', () => {
       log.error('deleteSession API failed', { error: String(err) })
       throw err
     }
-    sessions.value = sessions.value.filter((s) => s.id !== id)
-    // 如果删除的是当前活跃会话，切换到第一个可用会话
-    if (activeSessionId.value === id) {
+    projectRemovedSessions(new Set([id]))
+  }
+
+  /**
+   * 分组事件的 wire 名。契约 §3.3 只给了事件**常量名**，没钉 wire 字符串；而
+   * `@cat-study/shared` 的 `Events` 由 T2 追加（本票不碰 shared）。既有事件全是
+   * kebab-case（`session-deleted` / `session-archived`），故先按惯例接 `session-trashed` /
+   * `groups-changed`，同时兼容常量名——两种拼法只会有一种真的被服务端 emit。
+   * T2 定稿后改为 `Events.X` 并删掉别名。
+   */
+  const GROUPS_CHANGED_EVENTS = ['groups-changed', 'GROUPS_CHANGED'] as const
+  const SESSION_TRASHED_EVENTS = ['session-trashed', 'SESSION_TRASHED'] as const
+
+  /**
+   * 会话从本地列表移除的共同投影（单删 / 批量删 / 整组删共用）：清未读与消息缓存，
+   * 当前会话被移除时切到下一条可见会话（无则空态）。
+   */
+  function projectRemovedSessions(removed: Set<string>): void {
+    if (removed.size === 0) return
+    sessions.value = sessions.value.filter((s) => !removed.has(s.id))
+    for (const id of removed) unreadCounts.value.delete(id)
+    if (activeSessionId.value && removed.has(activeSessionId.value)) {
       const next = sessions.value[0]
       if (next) {
         joinSession(next.id)
       } else {
         activeSessionId.value = null
         messages.value = []
-        writeActiveSessionId(null) // 无可用会话 → 清除记忆，防刷新回已删会话
+        writeActiveSessionId(null)
       }
     }
-    // 防删会话后缓存残留（Map 无界增长）——必须在 joinSession 之后删：
-    // 活跃会话删除路径上 joinSession 的切走缓存会把被删会话的数组重新塞回 Map，
-    // 若在 joinSession 之前删会被立即撤销（吐槽猫 review 发现的孤儿条目内存泄漏）
-    sessionMessages.delete(id)
+    // 必须在 joinSession 之后删缓存：切走缓存会把被删会话的数组塞回 Map
+    for (const id of removed) sessionMessages.delete(id)
+  }
+
+  // ─── 分组（会话管理 v2，T3）────────────────────────────────────────
+
+  /** 拉活组。失败只记日志——分组是列表的二级数据，不该让会话列表跟着报错。 */
+  async function fetchGroups(): Promise<void> {
+    try {
+      const res = await api.getSessionGroups()
+      groups.value = res.groups ?? []
+    } catch (err) {
+      log.error('fetchGroups failed', { error: String(err) })
+    }
+  }
+
+  /** 新建分组（服务端重名 409；错误向上抛，调用侧就地显示且保留输入框）。 */
+  async function createGroup(name: string): Promise<SessionGroup> {
+    const group = await api.createSessionGroup(name.trim())
+    groups.value = [...groups.value, group]
+    return group
+  }
+
+  /** 改名。重名 409 向上抛，调用侧就地报错、输入框不关。 */
+  async function renameGroup(id: string, name: string): Promise<void> {
+    const updated = await api.updateSessionGroup(id, { name: name.trim() })
+    groups.value = groups.value.map((g) => (g.id === id ? updated : g))
+  }
+
+  /**
+   * 折叠 / 展开（折叠态落服务端，多 tab 一致）。
+   * 先本地乐观更新再 PATCH：失败回滚并向上抛，避免「点了没反应」。
+   */
+  async function setGroupCollapsed(id: string, collapsed: boolean): Promise<void> {
+    const prev = groups.value.find((g) => g.id === id)
+    if (!prev || prev.collapsed === collapsed) return
+    groups.value = groups.value.map((g) => (g.id === id ? { ...g, collapsed } : g))
+    try {
+      const updated = await api.updateSessionGroup(id, { collapsed })
+      groups.value = groups.value.map((g) => (g.id === id ? updated : g))
+    } catch (err) {
+      groups.value = groups.value.map((g) => (g.id === id ? prev : g))
+      throw err
+    }
+  }
+
+  /**
+   * 会话归组 / 回未分组。**只改 `groupId` 字段，不重排**：分组是组织动作，
+   * 服务端不改 `updated_at`，前端也不许按它重排（票面验收：移组不改排序）。
+   */
+  async function moveSessionToGroup(sessionId: string, groupId: string | null): Promise<void> {
+    await api.moveSessionToGroup(sessionId, groupId)
+    sessions.value = sessions.value.map((s) => (s.id === sessionId ? { ...s, groupId } : s))
+  }
+
+  /** 批量归组（一次动作）。失败时重拉列表对齐服务端，再把错误抛给调用侧。 */
+  async function batchMoveToGroup(ids: string[], groupId: string | null): Promise<void> {
+    const unique = [...new Set(ids)]
+    try {
+      await Promise.all(unique.map((id) => api.moveSessionToGroup(id, groupId)))
+    } catch (err) {
+      void fetchData(true)
+      throw err
+    }
+    sessions.value = sessions.value.map((s) => (unique.includes(s.id) ? { ...s, groupId } : s))
+  }
+
+  /**
+   * 移入回收站（单条或批量）。T2 起 `DELETE /sessions/:id` 是软删；T4 会在这条路径上
+   * 加 5 秒撤销 toast。本票只做「移出列表 + 切走当前会话」的投影。
+   *
+   * 逐条调用并收集失败（忙碌 409 / 绑定 409 是**逐条**判定），不因一条失败把已成功的回滚。
+   */
+  async function trashSessions(ids: string[]): Promise<Array<{ id: string; message: string }>> {
+    const unique = [...new Set(ids)]
+    const failed: Array<{ id: string; message: string }> = []
+    for (const id of unique) {
+      try {
+        await api.deleteSession(id)
+      } catch (err: any) {
+        log.error('trashSessions failed', { id, error: String(err) })
+        failed.push({ id, message: err?.message || '删除失败' })
+      }
+    }
+    const removed = new Set(unique.filter((id) => !failed.some((f) => f.id === id)))
+    projectRemovedSessions(removed)
+    return failed
+  }
+
+  /**
+   * 删组：`withSessions=false` = 仅解散（会话回未分组）；`true` = 组与同批会话一起进回收站。
+   * 409（忙碌/绑定）整批原子拒绝，错误向上抛给确认框就地显示。
+   */
+  async function deleteGroup(id: string, withSessions: boolean): Promise<void> {
+    await api.deleteSessionGroup(id, withSessions)
+    groups.value = groups.value.filter((g) => g.id !== id)
+    if (withSessions) {
+      const removed = new Set(
+        sessions.value.filter((s) => (s.groupId ?? null) === id).map((s) => s.id)
+      )
+      projectRemovedSessions(removed)
+    } else {
+      // 仅解散：会话回未分组，顺序不动（组内更早单删的会话本就不在 sessions 里）
+      sessions.value = sessions.value.map((s) =>
+        (s.groupId ?? null) === id ? { ...s, groupId: null } : s
+      )
+    }
   }
 
   /**
@@ -1199,6 +1336,24 @@ export const useChatStore = defineStore('chat', () => {
       applyArchived(data.sessionId, data.archivedAt ?? null)
     })
 
+    // 分组变更（建组 / 改名 / 折叠）→ 组列表刷新。口径在服务端，本地不拼半份结构。
+    for (const ev of GROUPS_CHANGED_EVENTS) {
+      socket.on(ev, () => {
+        void fetchGroups()
+      })
+    }
+
+    // 删除动作（单删 / 整组删）→ 会话移出列表、组移出组列。T4 会在同一事件上补回收站视图。
+    for (const ev of SESSION_TRASHED_EVENTS) {
+      socket.on(ev, (data: { sessionIds?: string[]; groupIds?: string[] }) => {
+        projectRemovedSessions(new Set(data.sessionIds ?? []))
+        if (data.groupIds?.length) {
+          const gone = new Set(data.groupIds)
+          groups.value = groups.value.filter((g) => !gone.has(g.id))
+        }
+      })
+    }
+
     socket.on(Events.SESSION_MESSAGES_CLEARED, (data: { sessionId: string }) => {
       if (activeSessionId.value === data.sessionId) {
         messages.value = []
@@ -1422,6 +1577,15 @@ export const useChatStore = defineStore('chat', () => {
     showArchived,
     setShowArchived,
     setArchived,
+    groups,
+    fetchGroups,
+    createGroup,
+    renameGroup,
+    setGroupCollapsed,
+    moveSessionToGroup,
+    batchMoveToGroup,
+    trashSessions,
+    deleteGroup,
     fetchData,
     joinSession,
     sendMessage,

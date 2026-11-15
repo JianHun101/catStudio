@@ -36,6 +36,12 @@ const mockRollbackSession = vi.fn()
 const mockGetSession = vi.fn()
 /** 懒加载更早历史分页口（GET /sessions/:id/messages?before=…） */
 const mockGetSessionMessages = vi.fn()
+// ── T3 分组（会话管理 v2）──
+const mockGetSessionGroups = vi.fn()
+const mockCreateSessionGroup = vi.fn()
+const mockUpdateSessionGroup = vi.fn()
+const mockDeleteSessionGroup = vi.fn()
+const mockMoveSessionToGroup = vi.fn()
 
 vi.mock('@/composables/useApi', () => ({
   api: {
@@ -54,6 +60,11 @@ vi.mock('@/composables/useApi', () => ({
     rollbackSession: mockRollbackSession,
     getSession: mockGetSession,
     getSessionMessages: mockGetSessionMessages,
+    getSessionGroups: mockGetSessionGroups,
+    createSessionGroup: mockCreateSessionGroup,
+    updateSessionGroup: mockUpdateSessionGroup,
+    deleteSessionGroup: mockDeleteSessionGroup,
+    moveSessionToGroup: mockMoveSessionToGroup,
   },
 }))
 
@@ -110,6 +121,7 @@ describe('chatStore', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     localStorage.clear() // 会话记忆测试：每个用例从干净的 localStorage 开始
+    mockGetSessionGroups.mockResolvedValue({ groups: [] })
     setActivePinia(createPinia())
 
     // Import store dynamically
@@ -2217,6 +2229,163 @@ describe('chatStore', () => {
       expect(store.hasMoreOlder).toBe(false)
       expect(store.loadingOlder).toBe(false)
       expect(store.olderError).toBeNull()
+    })
+  })
+
+  // ─── T3：分组状态、动作与事件投影（会话管理 v2）────────────────────
+  describe('T3 分组', () => {
+    const groupsFixture = [
+      {
+        id: 'g1',
+        name: '小说连载',
+        collapsed: false,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sessionCount: 1,
+      },
+      {
+        id: 'g2',
+        name: '归档',
+        collapsed: true,
+        createdAt: '2026-01-02T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        sessionCount: 0,
+      },
+    ]
+
+    const grouped = (id: string, groupId: string | null, updatedAt: string): any => ({
+      id,
+      title: `会话 ${id}`,
+      agentIds: ['a1'],
+      broadcastMode: false,
+      createdAt: updatedAt,
+      updatedAt,
+      groupId,
+    })
+
+    it('fetchGroups 写入活组（服务端序）', async () => {
+      mockGetSessionGroups.mockResolvedValue({ groups: groupsFixture })
+      await store.fetchGroups()
+      expect(store.groups.map((g) => g.id)).toEqual(['g1', 'g2'])
+    })
+
+    it('fetchGroups 失败不抛错、不覆盖已有组（二级数据静默降级）', async () => {
+      store.groups = groupsFixture
+      mockGetSessionGroups.mockRejectedValue(new Error('boom'))
+      await expect(store.fetchGroups()).resolves.toBeUndefined()
+      expect(store.groups).toHaveLength(2)
+    })
+
+    it('fetchData 顺带拉组（独立失败域：组失败不阻断会话列表）', async () => {
+      mockGetAgents.mockResolvedValue([])
+      mockGetSessions.mockResolvedValue([mockSession])
+      mockGetSessionGroups.mockResolvedValue({ groups: groupsFixture })
+      await store.fetchData()
+      expect(store.sessions).toHaveLength(1)
+      expect(store.groups.map((g) => g.id)).toEqual(['g1', 'g2'])
+    })
+
+    it('moveSessionToGroup：只改 groupId，不重排（updatedAt 序不由前端触碰）', async () => {
+      const a = grouped('s1', null, '2026-01-03T00:00:00.000Z')
+      const b = grouped('s2', null, '2026-01-01T00:00:00.000Z')
+      store.sessions = [a, b]
+      mockMoveSessionToGroup.mockResolvedValue({ ...a, groupId: 'g1' })
+
+      await store.moveSessionToGroup('s1', 'g1')
+
+      expect(store.sessions.map((s) => s.id)).toEqual(['s1', 's2'])
+      expect(store.sessions[0]!.groupId).toBe('g1')
+      expect(store.sessions[0]!.updatedAt).toBe(a.updatedAt)
+    })
+
+    it('batchMoveToGroup：一次动作逐条 PATCH，全部成功后更新 groupId 且保持顺序', async () => {
+      store.sessions = [
+        grouped('s1', null, '2026-01-03T00:00:00.000Z'),
+        grouped('s2', null, '2026-01-02T00:00:00.000Z'),
+      ]
+      mockMoveSessionToGroup.mockImplementation(async (id: string, groupId: string | null) => ({
+        id,
+        groupId,
+      }))
+
+      await store.batchMoveToGroup(['s1', 's2'], 'g1')
+
+      expect(mockMoveSessionToGroup).toHaveBeenCalledTimes(2)
+      expect(store.sessions.map((s) => s.id)).toEqual(['s1', 's2'])
+      expect(store.sessions.every((s) => s.groupId === 'g1')).toBe(true)
+    })
+
+    it('deleteGroup(false) 仅解散：组消失、会话回未分组、顺序不变', async () => {
+      store.groups = groupsFixture
+      store.sessions = [grouped('s1', 'g1', '2026-01-03T00:00:00.000Z')]
+      mockDeleteSessionGroup.mockResolvedValue({ mode: 'dissolve', id: 'g1' })
+
+      await store.deleteGroup('g1', false)
+
+      expect(mockDeleteSessionGroup).toHaveBeenCalledWith('g1', false)
+      expect(store.groups.map((g) => g.id)).toEqual(['g2'])
+      expect(store.sessions[0]!.groupId).toBeNull()
+      expect(store.sessions[0]!.id).toBe('s1')
+    })
+
+    it('deleteGroup(true) 整组进回收站：同批会话移出列表、活跃会话切走', async () => {
+      store.groups = groupsFixture
+      store.sessions = [
+        grouped('s1', 'g1', '2026-01-03T00:00:00.000Z'),
+        grouped('s2', null, '2026-01-02T00:00:00.000Z'),
+      ]
+      store.activeSessionId = 's1'
+      mockDeleteSessionGroup.mockResolvedValue({ mode: 'trash', id: 'g1' })
+
+      await store.deleteGroup('g1', true)
+
+      expect(mockDeleteSessionGroup).toHaveBeenCalledWith('g1', true)
+      expect(store.sessions.map((s) => s.id)).toEqual(['s2'])
+      expect(store.activeSessionId).toBe('s2')
+    })
+
+    it('trashSessions：成功的移出列表，失败的返回原因（409 不静默）', async () => {
+      store.sessions = [
+        grouped('s1', null, '2026-01-03T00:00:00.000Z'),
+        grouped('s2', null, '2026-01-02T00:00:00.000Z'),
+      ]
+      mockDeleteSession.mockImplementation(async (id: string) => {
+        if (id === 's2') throw new Error('会话正在执行')
+        return { ok: true }
+      })
+
+      const failed = await store.trashSessions(['s1', 's2'])
+
+      expect(store.sessions.map((s) => s.id)).toEqual(['s2'])
+      expect(failed).toEqual([{ id: 's2', message: '会话正在执行' }])
+    })
+
+    it('SESSION_TRASHED 广播 → 会话与组同时从列表移除（多 tab 投影）', () => {
+      store.sessions = [
+        grouped('s1', 'g1', '2026-01-03T00:00:00.000Z'),
+        grouped('s2', 'g1', '2026-01-02T00:00:00.000Z'),
+      ]
+      store.groups = groupsFixture
+      const handler = mockOn.mock.calls.find((c) => c[0] === 'SESSION_TRASHED')?.[1] as (d: {
+        sessionIds: string[]
+        groupIds: string[]
+      }) => void
+
+      handler({ sessionIds: ['s1', 's2'], groupIds: ['g1'] })
+
+      expect(store.sessions).toEqual([])
+      expect(store.groups.map((g) => g.id)).toEqual(['g2'])
+    })
+
+    it('GROUPS_CHANGED 广播 → 重拉组列表（建组/改名/折叠的多 tab 同步）', async () => {
+      mockGetSessionGroups.mockResolvedValue({ groups: groupsFixture })
+      const handler = mockOn.mock.calls.find((c) => c[0] === 'GROUPS_CHANGED')?.[1] as () => void
+
+      handler()
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(mockGetSessionGroups).toHaveBeenCalled()
+      expect(store.groups.map((g) => g.id)).toEqual(['g1', 'g2'])
     })
   })
 })
