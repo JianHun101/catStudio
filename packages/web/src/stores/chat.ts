@@ -1500,9 +1500,6 @@ export const useChatStore = defineStore('chat', () => {
       if (activeSessionId.value) {
         socket.emit(Events.JOIN_SESSION, activeSessionId.value)
         socket.emit('get-agent-states')
-        // 断线期间会话房间的 NEW_MESSAGE 本 tab 收不到，行内时间无人校准；重连即按列表
-        // 端点补一次（与切会话同一条一致性路径，列表端点是行内时间的唯一权威）。
-        void fetchSessions()
       }
     })
     socket.on('disconnect', () => {
@@ -1867,9 +1864,6 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(
       Events.MESSAGE_RETRACTED,
       (data: { sessionId: string; messageId: string; agentReplyIds: string[] }) => {
-        // 撤回也是删消息路径：被删的可能是最后一条，行内时间必须从列表端点重拉校准，
-        // 不能停在已删除那条的 created_at 上（多 tab 下同样要落）。
-        void fetchSessions()
         // 从本地消息列表移除被撤回的消息和所有关联的 agent 回复
         const idsToRemove = new Set([data.messageId, ...data.agentReplyIds])
         messages.value = messages.value.filter((m) => !idsToRemove.has(m.id))
