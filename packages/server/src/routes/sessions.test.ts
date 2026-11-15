@@ -508,6 +508,7 @@ describe('Session Routes', () => {
         snapshot: () => slots,
         abortAgent: vi.fn(() => true),
         cancelQueuedCommand: vi.fn(() => 0),
+        disposeSession: vi.fn(),
       } as unknown as ExecutionEngine & ExecutionEngineTestHooks
     }
 
@@ -594,15 +595,18 @@ describe('Session Routes', () => {
       expect(rowOf(id).deleted_at).toBeNull()
     })
 
-    it('只有 idle 槽位（仍留 sessionId）不算忙：可以删除', async () => {
+    it('只有 idle 槽位（仍留 sessionId）不算忙：可以删除，且删后清槽位一次', async () => {
       const id = await newSession('空闲槽位')
-      setExecutionEngine(
-        stubEngine([{ agentId: agentId1, sessionId: id, status: 'idle', queueLength: 0 }])
-      )
+      const engine = stubEngine([
+        { agentId: agentId1, sessionId: id, status: 'idle', queueLength: 0 },
+      ])
+      setExecutionEngine(engine)
 
       const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
       expect(res.statusCode).toBe(200)
       expect(rowOf(id).deleted_at).not.toBeNull()
+      expect(engine.disposeSession).toHaveBeenCalledTimes(1)
+      expect(engine.disposeSession).toHaveBeenCalledWith(id)
     })
 
     it('绑定外部群 → 409 SESSION_BOUND，绑定行与 deleted_at 都不变', async () => {
@@ -686,9 +690,13 @@ describe('Session Routes', () => {
       ).toBe(409)
 
       await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
+      const engine = stubEngine([])
+      setExecutionEngine(engine)
       const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}/purge` })
       expect(res.statusCode).toBe(200)
       expect(JSON.parse(res.body)).toEqual({ id })
+      expect(engine.disposeSession).toHaveBeenCalledTimes(1)
+      expect(engine.disposeSession).toHaveBeenCalledWith(id)
       expect(db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE id = ?').get(id)).toEqual({
         n: 0,
       })
@@ -742,9 +750,14 @@ describe('Session Routes', () => {
       const single = await newSession('单个')
       await app.inject({ method: 'DELETE', url: `/api/sessions/${single}` })
 
+      const engine = stubEngine([])
+      setExecutionEngine(engine)
       const res = await app.inject({ method: 'DELETE', url: '/api/trash' })
       expect(res.statusCode).toBe(200)
       expect(JSON.parse(res.body)).toEqual({ purged: { groups: 1, sessions: 2 } })
+      expect(engine.disposeSession).toHaveBeenCalledTimes(2)
+      expect(engine.disposeSession).toHaveBeenCalledWith(inGroup)
+      expect(engine.disposeSession).toHaveBeenCalledWith(single)
       expect(getDb().prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 0 })
       expect(getDb().prepare('SELECT COUNT(*) AS n FROM session_groups').get()).toEqual({ n: 0 })
       expect(mockEmit).toHaveBeenCalledWith(Events.SESSION_PURGED, {
@@ -1109,6 +1122,7 @@ describe('Session Routes', () => {
         snapshot: () => slots,
         abortAgent: vi.fn(() => true),
         cancelQueuedCommand: vi.fn(() => 0),
+        disposeSession: vi.fn(),
       } as unknown as ExecutionEngine & ExecutionEngineTestHooks
     }
 

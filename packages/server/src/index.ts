@@ -13,9 +13,9 @@ import {
   sessions as sessionsRepo,
   executionLogs as execLogsRepo,
   serverBoots as serverBootsRepo,
-  trash as trashRepo,
 } from './db/repository/index.js'
 import { createSocketIO } from './connectors/socketio.js'
+import { runTrashPurge } from './trash-purge.js'
 import { replayStuckUserMessages, REPLAY_STUCK_WINDOW_MINUTES } from './execution/recovery.js'
 import { getExecutionBus } from './execution/registry.js'
 import { startOneBotOutbound } from './connectors/onebotOutbound.js'
@@ -190,16 +190,6 @@ async function main(): Promise<void> {
   //     启动（回收站是旁路，不该成为新的启动失败源）。probe 模式在
   //     `trashRepo.purgeExpiredTrash` 内部跳过（探针库是副本，清扫会真实删行）。
   //     定时器句柄留给 shutdown 清理，防热启动/测试进程内重复计时器。
-  const runTrashPurge = (phase: 'startup' | 'hourly'): void => {
-    try {
-      const result = trashRepo.purgeExpiredTrash()
-      if (result.skipped !== 'probe' && (result.groups > 0 || result.sessions > 0)) {
-        log.info('trash purge', { phase, ...result })
-      }
-    } catch (err: any) {
-      log.error('trash purge crashed (non-blocking)', { phase, error: messageOf(err) })
-    }
-  }
   runTrashPurge('startup')
   const trashPurgeTimer = setInterval(() => runTrashPurge('hourly'), 60 * 60 * 1000)
 

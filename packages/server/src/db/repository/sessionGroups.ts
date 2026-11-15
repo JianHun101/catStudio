@@ -121,11 +121,13 @@ export function dissolveGroup(id: string): void {
 
 // ─── 回收站（T2；ADR 0016 D3）───────────────────────────
 
-/** 组内**未删除**会话 id（`withSessions=1` 的守卫面与批次取值都靠它）。 */
+/** 组内**未删除**会话 id（`withSessions=1` 的守卫面与批次取值都靠它；`updated_at DESC` 与列表同序）。 */
 export function listLiveSessionIdsInGroup(groupId: string): string[] {
   return (
     db
-      .prepare('SELECT id FROM sessions WHERE group_id = ? AND deleted_at IS NULL')
+      .prepare(
+        'SELECT id FROM sessions WHERE group_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC, id ASC'
+      )
       .all(groupId) as Array<{ id: string }>
   ).map((r) => r.id)
 }
@@ -140,10 +142,16 @@ export function listLiveSessionIdsInGroup(groupId: string): string[] {
  */
 export function trashGroup(id: string, deletedAt: string): { sessionIds: string[] } {
   const run = db.transaction(() => {
+    // 先软删组行并检查 changes：并发下组已被别的请求删掉时，不能再把「当前还活着的
+    // 会话」按新时间戳打进另一个批次（它们会既不属于旧批次、也不该被这次动作复活）。
+    const groupUpdate = db
+      .prepare(
+        'UPDATE session_groups SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL'
+      )
+      .run(deletedAt, deletedAt, id)
+    if (groupUpdate.changes === 0) return []
+
     const sessionIds = listLiveSessionIdsInGroup(id)
-    db.prepare(
-      'UPDATE session_groups SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL'
-    ).run(deletedAt, deletedAt, id)
     db.prepare('UPDATE sessions SET deleted_at = ? WHERE group_id = ? AND deleted_at IS NULL').run(
       deletedAt,
       id

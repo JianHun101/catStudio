@@ -255,6 +255,7 @@ describe('Session Group Routes（T1）', () => {
         snapshot: () => slots,
         abortAgent: vi.fn(() => true),
         cancelQueuedCommand: vi.fn(() => 0),
+        disposeSession: vi.fn(),
       } as unknown as ExecutionEngine & ExecutionEngineTestHooks
     }
 
@@ -268,6 +269,8 @@ describe('Session Group Routes（T1）', () => {
       insertSession('s-live-b', g.id)
       insertSession('s-earlier', g.id, '2026-01-01T00:00:00.000Z')
       mockEmit.mockClear()
+      const engine = stubEngine([])
+      setExecutionEngine(engine)
 
       const res = await app.inject({
         method: 'DELETE',
@@ -275,6 +278,12 @@ describe('Session Group Routes（T1）', () => {
       })
       expect(res.statusCode).toBe(200)
       expect(JSON.parse(res.body)).toEqual({ mode: 'trash', id: g.id })
+
+      // 整组删成功后逐成员清槽位；早先单删的会话不属于本批，不碰
+      expect(engine.disposeSession).toHaveBeenCalledTimes(2)
+      expect(engine.disposeSession).toHaveBeenCalledWith('s-live-a')
+      expect(engine.disposeSession).toHaveBeenCalledWith('s-live-b')
+      expect(engine.disposeSession).not.toHaveBeenCalledWith('s-earlier')
 
       const db = getDb()
       const group = db.prepare('SELECT * FROM session_groups WHERE id = ?').get(g.id) as {
@@ -427,10 +436,14 @@ describe('Session Group Routes（T1）', () => {
       insertSession('s-earlier', 'g-purge', '2026-01-01T00:00:00.000Z')
       makeTrashedGroup('g-purge', ['s-batch'])
       mockEmit.mockClear()
+      const engine = stubEngine([])
+      setExecutionEngine(engine)
 
       const res = await app.inject({ method: 'DELETE', url: '/api/session-groups/g-purge/purge' })
       expect(res.statusCode).toBe(200)
       expect(JSON.parse(res.body)).toEqual({ id: 'g-purge' })
+      expect(engine.disposeSession).toHaveBeenCalledTimes(1)
+      expect(engine.disposeSession).toHaveBeenCalledWith('s-batch')
       expect(groupRow('g-purge')).toBeUndefined()
       expect(getDb().prepare('SELECT 1 FROM sessions WHERE id = ?').get('s-batch')).toBeUndefined()
       // 早先单删的会话属会话条目，不随组条目清除

@@ -225,6 +225,29 @@ describe('sessionGroups repo — T2 回收站', () => {
     ).toBe('2026-01-01T00:00:00.000Z')
   })
 
+  it('trashGroup 组已被删（并发）→ changes=0 早退，不再给活会话打新批次时间戳', () => {
+    insertGroup('g1', '组', '2026-02-01T00:00:00.000Z')
+    insertSession('s-live', 'g1')
+
+    const { sessionIds } = groupsRepo.trashGroup('g1', '2026-03-01T00:00:00.000Z')
+    expect(sessionIds).toEqual([])
+    expect(
+      (
+        db.prepare(`SELECT deleted_at FROM sessions WHERE id = 's-live'`).get() as {
+          deleted_at: string | null
+        }
+      ).deleted_at
+    ).toBeNull()
+    // 组保留首次删除的时间戳
+    expect(
+      (
+        db.prepare(`SELECT deleted_at FROM session_groups WHERE id = 'g1'`).get() as {
+          deleted_at: string
+        }
+      ).deleted_at
+    ).toBe('2026-02-01T00:00:00.000Z')
+  })
+
   it('restoreGroup 只清同批；可先改名；组 updated_at 更新、会话 updated_at 不动', () => {
     insertGroup('g1', '旧名', '2026-02-01T00:00:00.000Z')
     insertSession('s-batch', 'g1', '2026-02-01T00:00:00.000Z')
