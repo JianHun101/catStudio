@@ -82,10 +82,10 @@ export function buildRuntimeSelfCheck(
 ```
 [运行时自检] 进程 boot=<8位>，启动于 <ISO>，代码 git=<12位>，工作树=<干净|有改动|未知>。你上次在本会话发言于 <ISO>——之后进程已重启过。上一轮所见的进程状态可能已失效：在说「还没重启 / 要重启 / 重启没生效」之前先按本行核对；若你在等重启批准，视为已生效。
 [运行时自检] 进程 boot=<8位>，启动于 <ISO>，代码 git=<12位>，工作树=<干净|有改动|未知>。你上次在本会话发言于 <ISO>——之后未重启。
-[运行时自检] 进程 boot=<8位>，启动于 <ISO>，代码 git=<12位>，工作树=<干净|有改动|未知>。本会话没有你更早的发言，或时间无法解析，无法判定是否重启。
+[运行时自检] 进程 boot=<8位>，启动于 <ISO>，代码 git=<12位>，工作树=<干净|有改动|未知>。本会话没有你更早的发言，或时间取不到/无法解析，无法判定是否重启。
 ```
 
-- **第三档同时覆盖「无锚点」与「解析失败」**：`lastOwnMessageAt === null`（没发过言 / 历史不在库里）与任一侧过 `normalizeIsoMs` 后 `Date.parse` 为 `NaN`（非时间串）都落这一档，文案写「没有你更早的发言，或时间无法解析」——不能只说「没有发言」，否则格式坏掉时文案在说假话。
+- **第三档同时覆盖「无锚点」「查询失败」「解析失败」**：`lastOwnMessageAt === null`（没发过言 / 历史不在库里）、`getLastAgentMessageAt` 抛错后 fail-soft 得到的 `null`、以及任一侧过 `normalizeIsoMs` 后 `Date.parse` 为 `NaN`（非时间串）都落这一档。文案写「没有你更早的发言，或时间取不到/无法解析」——不能只说「没有发言」（查询失败不是没发过言），也不能只说「无法解析」（抛错不是格式坏），否则文案在对应分支上说假话。
 - **`工作树` 三态固定出现，不是可选后缀**：`gitDirty === 0` → `工作树=干净`；`=== 1` → `工作树=有改动`；`=== null` → `工作树=未知`。三档文案都带这个字段——`null`（采集失败）与 `0`（干净）**不得同形**；`gitDirty === 1` 但判定为「未重启 / 无法判定」时脏树也必须可见。
 - **`normalizeIsoMs` 只归一空格整秒**：它只把 `YYYY-MM-DD HH:MM:SS` 补成 `...T...000Z`；空格+毫秒（`YYYY-MM-DD HH:MM:SS.SSS`）与省略毫秒的 ISO 串都**原样透传**，不要当已归一的形态用。A5 只用它认的那一档；混入别的形态会把时区差误判成时间差。
 - 文案里**不出现运行时长/相对时间**（如 "已运行 3 小时"）：那会让同一进程内每轮注入串都不同，prompt 快照与缓存每轮失效。
@@ -101,7 +101,10 @@ export function buildRuntimeSelfCheck(
 - 取锚点的查询失败 = `null`（fail-soft），不阻塞本次执行。
 - **进 T2 快照**：自检行进了 `llmMessages[0].content`，而快照口径是「各节并集 = `llmMessages[0].content` 的构成成分」，不进节就破坏并集不变量。故 `TRACE_SECTION_KEYS` 新增 `runtimeSelfCheck: 'runtime_self_check'`，`TRACE_SECTION_LABELS` 加展示名，`TRACE_SECTION_ORDER` 排在 `knowledge` 之后，`recordTraceDetails` 的 `sections` 追加 `traceSection(TRACE_SECTION_KEYS.runtimeSelfCheck, runtimeSelfCheckSection)`。理由与 churn 裁决见「决策留痕 · OQ-3」。
 - **第九节的 content 取 `buildRuntimeSelfCheck` 返回值原文**（不含连接用的 `\n\n`）；`instance === null` / 返回 `null` 时传空串，`traceSection` 记为 `empty`。未注册实例的用例里第九节仍存在、只是 `empty`——不要写成「没有第九节」。
-- **`reply.test.ts` 的同批改动只有两处**：`'★承重★ 八节落库'` 用例里的 `section_key` 精确数组从八项加到九项（名字同改「九节」）；承重 `for (const key of [...])` 循环加入 `'runtime_self_check'`，让「快照内容逐字节出现在真注入串里」这条判据也覆盖自检行。其余既有断言一字不动。
+- **承重用例必须先注册实例**：`'★承重★ 八节落库…'`（改名「九节」）在 `run()` 前 `setRuntimeInstance(...)`，在 `finally` 或该 `describe` 的 `afterEach` 里 `__test_resetRuntimeInstance()`（二者任选，但必须在该用例结束后必然执行），`section_key` 精确数组从八项加到九项，承重 `for (const key of [...])` 循环加入 `'runtime_self_check'`。**不注册实例时 `buildRuntimeSelfCheck` 返回 `null`、第九节是空串，循环里的 `if (content !== '')` 会直接跳过**——只加 key 照样全绿，自检行没被「快照内容逐字节出现在真注入串里」覆盖。注册写进用例本身，不依赖外层用例残留的实例。该用例的 `seedT2()` 不插入本猫历史回复，`getLastAgentMessageAt` 返回 `null`，第九节落「无法判定」档——仍非空、仍进承重循环；「已重启 / 未重启」两档的逐字文案由 A4 覆盖，承重用例不需要另造锚点。
+- **「未注册实例」拆成独立用例**：不在承重用例里混跑，单独构造「不注册实例」的装配，断言 `llmMessages[0].content` 不含 `[运行时自检]` 且既有 system prompt 内容一字不变（追加式）；注册路径的 A6 主判据另用一条。
+- **落点硬点组加先后锚**：`reply.test.ts` 的 T2 快照套件里「落点硬点（静态源断言）」组（与 `recordTraceDetails` 写口调用点同组的那一个，不是 M1 那个同名组）补一条——`SRC.indexOf('${runtimeSelfCheck}')` < `SRC.indexOf('const finalStats = estimateMessageTokens(llmMessages)')`，两个锚各自全文件唯一。否则「自检行在最终 token 复核之前」只是说明文字，实施者把追加挪到复核之后仍全绿；同时自检追加变量固定命名 `runtimeSelfCheck`，让这条静态断言有可 grep 的唯一锚。
+- **既有断言只动两处**：承重 `section_key` 数组（八→九）与承重循环（加 `runtime_self_check`）。新增用例（未注册拆分、落点先后锚）不算改动既有断言。另**必须改 `reply.ts` 分节注释里的「八节」为「九节」**（`TRACE_SECTION_KEYS` 上方的注释：「八节互不重叠、并集 = `llmMessages[0].content`」）——这是第三处允许动的既有文本，漏改会留一句假话。
 
 ## 改哪些文件（边界）
 
@@ -126,12 +129,12 @@ export function buildRuntimeSelfCheck(
 - [ ] A1 **注册表**：`setRuntimeInstance` 后 `getRuntimeInstance` 返回同一对象；`__test_resetRuntimeInstance` 后返回 `null`。
 - [ ] A2 **启动账本返回双值**：`insertServerBoot` 返回 `{ bootId, startedAt }`，且 `startedAt` 与落库行 `started_at` 逐字相等；`bootId` 与落库行 `boot_id` 逐字相等。测试断言取 `.bootId` / `.startedAt`；**禁止用 `not.toBe` 判两次返回的对象**（对象引用必然不同，断言恒真）——要判两次启动的主键不同就显式比 `.bootId`。
 - [ ] A3 **锚点取数**：同一会话内本猫多条回复 + 其他猫回复 + 用户消息混合，`getLastAgentMessageAt` 只取本猫最近一条；无本猫回复返回 `null`；不返回其他猫的时间。测试必须显式错开各条的 `created_at`（`id` 是 UUID v4，同毫秒下 `id DESC` 不是插入序）。
-- [ ] A4 **三档文案**：`buildRuntimeSelfCheck` 对「已重启 / 未重启 / 无锚点」分别产出契约 C 的逐字文案；三档均带 `工作树=` 字段，`gitDirty` 的 `0` / `1` / `null` 各断言一次（`null` 不得写成「干净」）；`instance === null` 返回 `null`。
+- [ ] A4 **三档文案**：`buildRuntimeSelfCheck` 对「已重启 / 未重启 / 无锚点」分别产出契约 C 的逐字文案；三档均带 `工作树=` 字段，`gitDirty` 的 `0` / `1` / `null` 各断言一次（`null` 不得写成「干净」）；其中**至少一条是「未重启 + `gitDirty === 1`」**——只按「已重启+1 / 未重启+0 / 无锚点+null」最小组合测不到契约 C 的「未重启 / 无法判定档也必须看见脏树」。`instance === null` 返回 `null`。
 - [ ] A5 **边界不误判**：`bootStartedAt === lastOwnMessageAt` → 未重启；秒级 `YYYY-MM-DD HH:MM:SS` 与 ISO 毫秒同一时刻 → 未重启（走 `normalizeIsoMs`）；任一侧非时间串 → 无法判定档，不抛错。
-- [ ] A6 **注入落点**：注册实例后跑 `runAgentReply` 的既有测试装配（其 `beforeEach` 已 mock 非空记忆与知识库），`llmMessages[0].content`（system）以 `[运行时自检]` 段结尾；未注册实例时**不含**该段，且既有 system prompt 内容一字不变（追加式）。同一用例断言 `recordTraceDetails` 的 `sections` 含 `runtime_self_check` 节（九节）。
+- [ ] A6 **注入落点**：注册实例后跑 `runAgentReply` 的既有测试装配（其 `beforeEach` 已 mock 非空记忆与知识库），`llmMessages[0].content`（system）以 `[运行时自检]` 段结尾。**未注册实例的断言拆成独立用例**（独立装配，不与注册跑法混）：`llmMessages[0].content` 不含该段，且既有 system prompt 内容一字不变（追加式）。注册路径另断言 `recordTraceDetails` 的 `sections` 含 `runtime_self_check` 节（九节）且 content 非空。
 - [ ] A7 **不阻塞**：`getLastAgentMessageAt` 抛错时该次执行照常进行（自检行退化为无法判定档，不冒泡）。
 - [ ] A8 **既有测试零回归**：`hints.test.ts` / `reply.test.ts` / `messages.test.ts` / `serverBoots.test.ts` 及 server 全量绿。唯一允许动的既有断言是契约 D 点名的两处（八→九节数组、承重循环加 `runtime_self_check`）；其余既有断言零改动，新增用例不算回归。
-- [ ] A9 **复述面**：`git grep -n '运行时自检'` 除 `docs/run/**` 外，命中集合 ⊆ {`packages/server/src/execution/hints.ts`, `hints.test.ts`, `reply.test.ts`, `AGENTS.md`}，且必含 `hints.ts`；`runtime-instance.ts` / `reply.ts` 只要求符号引用（`buildRuntimeSelfCheck`），不要求字面。无残留旧口径（「每次先 query_db 查 boot」一类）。
+- [ ] A9 **复述面**：`git grep -n '进程 boot='` 除 `docs/run/**` 外，**非测试的实现文件**只允许命中 `packages/server/src/execution/hints.ts`（三档文案的唯一来源）；`*.test.ts` 允许以断言形式出现（`hints.test.ts` / `reply.test.ts` 都会引期望串）。这是「有没有第二份文案」的判别式——注释里的解释性提及不会误伤，测试断言不算第二份文案。`git grep -n '运行时自检'` 除 `docs/run/**` 外允许出现在 `AGENTS.md`、`hints.ts`、`hints.test.ts`、`reply.test.ts`，以及 `reply.ts` / `runtime-instance.ts` / `runtime-instance.test.ts` 的**注释**（解释性提及不计为第二份文案）。`runtime-instance.ts` / `reply.ts` 只要求符号引用 `buildRuntimeSelfCheck`，不要求字面。无残留旧口径（「每次先 query_db 查 boot」一类）。
 
 ## OQ（裁决记录，2026-11-15 店长）
 
