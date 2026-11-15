@@ -305,9 +305,10 @@ export function countBySession(sessionId: string): number {
  * `MAX(created_at)` 分组一次取全量——**禁止逐会话查**（N 个会话就是 N 次往返，
  * 列表首屏立刻变成 N+1）。返回 Map：无消息的会话不出现（调用方按 `?? null` 投影）。
  *
- * 比较/返回口径：`messages.created_at` 自票 5 起是 ISO 毫秒，但老夹具与老库可能仍是
- * 秒级 `datetime('now')`；这里走 `toIsoDb` 归一，保证 wire 面只有 ISO 一种形态
- * （与 `toSessionConfig` 的时间字段同源，前端按字符串比较也安全）。
+ * 比较/返回口径：`messages.created_at` 自票 5 起是 ISO 毫秒，入参已是 ISO。SQL 的
+ * `MAX(created_at)` 是**字符串比较**，秒级与 ISO 在同一天混存时会选错行（`' '` < `'T'`）；
+ * 那是存储面的迁移问题，需要在 SQL 内先归一，不能靠本函数兜。这里的 `toIsoDb` 只做
+ * **返回形态**归一（纯秒级老行折成 `.000Z`），保证 wire 面只有 ISO 一种形态。
  */
 export function getLastMessageAtBySessionIds(sessionIds: readonly string[]): Map<string, string> {
   const result = new Map<string, string>()

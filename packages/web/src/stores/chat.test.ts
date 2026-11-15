@@ -1625,6 +1625,46 @@ describe('chatStore', () => {
       expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-01T00:00:00.000Z')
     })
 
+    it('MESSAGE_RETRACTED 删掉最后一条后重拉列表校准行内时间', async () => {
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.MESSAGE_RETRACTED
+      )?.[1] as ((data: any) => void) | undefined
+      expect(handler).toBeDefined()
+      store.activeSessionId = 's1'
+      store.messages = [
+        { id: 'm1', sessionId: 's1', role: 'user', content: '一' },
+        { id: 'm2', sessionId: 's1', role: 'agent', content: '二' },
+      ] as never
+      store.sessions = [{ ...mockSession, lastMessageAt: '2026-01-05T00:00:00.000Z' }]
+      mockGetSessions.mockResolvedValue([
+        { ...mockSession, lastMessageAt: '2026-01-01T00:00:00.000Z' },
+      ])
+
+      handler!({ sessionId: 's1', messageId: 'm1', agentReplyIds: ['m2'] })
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(store.messages).toEqual([])
+      expect(mockGetSessions).toHaveBeenCalled()
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-01T00:00:00.000Z')
+    })
+
+    it('重连（connect）时重拉列表校准行内时间（断线期间的房间广播收不到）', async () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === 'connect')?.[1] as
+        (() => void) | undefined
+      expect(handler).toBeDefined()
+      store.activeSessionId = 's1'
+      store.sessions = [{ ...mockSession, lastMessageAt: '2026-01-02T00:00:00.000Z' }]
+      mockGetSessions.mockResolvedValue([
+        { ...mockSession, lastMessageAt: '2026-01-03T00:00:00.000Z' },
+      ])
+
+      handler!()
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(mockGetSessions).toHaveBeenCalledTimes(1)
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-03T00:00:00.000Z')
+    })
+
     it('SESSION_MESSAGES_CLEARED 把该会话行 lastMessageAt 置 null（不只清当前消息）', () => {
       const handler = mockOn.mock.calls.find(
         (call) => call[0] === Events.SESSION_MESSAGES_CLEARED
@@ -2750,6 +2790,9 @@ describe('chatStore', () => {
       expect(store.trashEntries).toEqual([])
       expect(store.sessions.map((s) => s.id)).toEqual(['s1'])
       expect(mockGetSessionGroups).toHaveBeenCalled()
+      // 整组恢复同批回填行内时间：恢复响应不带 lastMessageAt，必须靠 fetchSessions
+      expect(mockGetSessions).toHaveBeenCalled()
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-03T08:00:00.000Z')
     })
 
     it('永久删除单条 / 清空回收站：条目同步移除', async () => {
