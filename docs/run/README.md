@@ -66,7 +66,9 @@ skill 只管切票，谁调用谁指定往哪落。
 | `chat-input-compact`     | 活已闭（PR #221 → dev `71db490e`，收口记录见 `closeout.md`），余 **P3×3** 未处置：`172` 是派生值无推导注释 / 上限单源无测试锁 / `scrollbar-width: thin` 一帧重排                                                                     | P3×3 逐条处置或明文判弃后清目录                     |
 | `eval-alert-config`      | 活已闭（PR #222 → dev `3b74332a`，收口记录见 `closeout.md`），余 **P3×5** 未处置：基线前移无回归门 / 基线缺失分支无用例 /「无改动」复用成功样式 / l1-metrics 纯读用例退化为恒真门（`routes/eval.test.ts`）/ env 生效值无法被 UI 钉住 | P3×5 逐条处置或明文判弃后清目录                     |
 
-在飞（随各自收口清，不单独登记触发条件）：`run-conclusions-float-up`（本活）· `handoff-double-frame` · `message-date-timestamp` · `scroll-stick-bottom` · `memory-retrieval-improvement` · `summary-inject-outside-replace`。
+在飞（随各自收口清，不单独登记触发条件）：`run-conclusions-float-up`（本活）· `handoff-double-frame` · `message-date-timestamp` · `scroll-stick-bottom` · `memory-retrieval-improvement` · `summary-inject-outside-replace` · `session-groups-trash`（2026-11-15 新立）。
+
+> **2026-11-15 补账**：新增 `session-groups-trash`（分组 + 回收站两轴模型），当前应为上表 **13** + 在飞 **7** + 未入账 **1**（`ui-b-refresh`）= **21**；该活收口时按本文件规矩清目录。
 
 > 后两条 = 段 3c 新建的**承接票**（记忆检索改进 / 交接摘要注入落在占位符替换面之外），自带票面与验收，故只在「在飞」登记、不进上表。
 > **清点对账**（2026-10-13 段 3c 原账 = 上表 **11** + 在飞 **6** = **17**）。**2026-11-05 补账**：上表 **13** + 在飞 **6** + 未入账 **1**（`ui-b-refresh`，关票历史、待清或补账）= **20** = `ls -d docs/run/*/` 实测。新增目录必须同批进此账，否则「只增不减」会让「活完了就清」不可判。
