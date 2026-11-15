@@ -1003,6 +1003,21 @@ describe('chatStore', () => {
       expect(store.messages).toEqual([mockMessage])
     })
 
+    it('NEW_MESSAGE 即时更新列表行 lastMessageAt（不往回拨）', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.NEW_MESSAGE)?.[1] as
+        ((msg: Message) => void) | undefined
+      expect(handler).toBeDefined()
+      store.activeSessionId = 's1'
+      store.sessions = [{ ...mockSession, lastMessageAt: '2026-01-01T00:00:00.000Z' }]
+
+      handler!({ ...mockMessage, id: 'm-new', createdAt: '2026-01-02T00:00:00.000Z' })
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-02T00:00:00.000Z')
+
+      // 乱序/重放帧：更早的 created_at 不能把行上时间拨回去
+      handler!({ ...mockMessage, id: 'm-old', createdAt: '2025-12-31T00:00:00.000Z' })
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-02T00:00:00.000Z')
+    })
+
     it('SESSION_HISTORY replaces messages in one batch', () => {
       // Pre-populate with some stale messages
       store.messages = [

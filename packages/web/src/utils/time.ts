@@ -125,3 +125,31 @@ export function fmtDateSep(raw: string | number, now: Date): string {
         : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
   }
 }
+
+/** **会话列表行**的最后消息时间（本地时区，`now` 为参照时刻）：
+ *
+ *  | 相对 `now` | 产物 |
+ *  | --- | --- |
+ *  | 今天 | `HH:mm` |
+ *  | 昨天 | `昨天` |
+ *  | 同年、更早 | `M月D日` |
+ *  | 跨年 | `YYYY/M/D` |
+ *
+ *  与 `fmtMsgTime` / `fmtDateSep` 共用 `dayBucket`，分档语义同源；区别只在产物粒度——
+ *  列表行窄，昨天与更早都不带时刻（`title` 由调用方给完整时间）。
+ *  空值 / 解析失败 → `''`（行内不显示，不回显原始串）。 */
+export function fmtSessionTime(raw: string | number | null | undefined, now: Date): string {
+  if (raw === null || raw === undefined) return ''
+  const d = toLocalDate(raw)
+  if (!d) return ''
+  switch (dayBucket(d, now)) {
+    case 0:
+      return `${p2(d.getHours())}:${p2(d.getMinutes())}`
+    case 1:
+      return '昨天'
+    default:
+      return d.getFullYear() === now.getFullYear()
+        ? `${d.getMonth() + 1}月${d.getDate()}日`
+        : `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+  }
+}

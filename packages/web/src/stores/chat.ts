@@ -1477,6 +1477,16 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(Events.NEW_MESSAGE, (msg: Message) => {
       // 防止重复消息
       if (messages.value.some((m) => m.id === msg.id)) return
+      // T6：列表行「最后消息时间」随消息落库即时更新。不在这里补，正在聊的会话要等
+      // 下次 fetchSessions（切组 / 移组 / 多 tab 事件 / 刷新）才更新，行上会长期显示旧时间。
+      // 比较后再写：重放/乱序帧不能把时间往回拨。
+      const rowIdx = sessions.value.findIndex((s) => s.id === msg.sessionId)
+      if (rowIdx >= 0) {
+        const row = sessions.value[rowIdx]!
+        if (!row.lastMessageAt || row.lastMessageAt < msg.createdAt) {
+          sessions.value[rowIdx] = { ...row, lastMessageAt: msg.createdAt }
+        }
+      }
       // 本猫回复落库 = 该执行结束（服务端顺序：NEW_MESSAGE 先于 done 广播）。清计时**按消息
       // 自身 sessionId**、且**不随「是否当前会话」分叉**：用户已切走时那条执行同样结束了，
       // 漏清只会在全局表里攒下永不渲染的僵尸条目（键控保证它不会漏进当前视图，但没必要留）。

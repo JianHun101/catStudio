@@ -71,11 +71,14 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const rows = hasIncludeArchived
       ? sessionsRepo.listAllSessionsExcludingDeleted()
       : sessionsRepo.listActiveSessions()
+    // 最后消息时间：一次 GROUP BY 批量取，不逐会话查（T6 契约）
+    const lastMessageAt = messagesRepo.getLastMessageAtBySessionIds(rows.map((row) => row.id))
     return rows.map((row) => {
       const session = toSessionConfig(row)
       // Compute unread count: messages created after last_read_at
       const lastRead = readStateRepo.getLastReadAt(row.id) || row.created_at
       session.unreadCount = messagesRepo.countMessagesAfter(row.id, lastRead)
+      session.lastMessageAt = lastMessageAt.get(row.id) ?? null
       return session
     })
   })
