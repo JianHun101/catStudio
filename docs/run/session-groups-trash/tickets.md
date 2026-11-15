@@ -38,8 +38,8 @@ status: active
 
 - [ ] 产出 `workspace/getSessionById-audit.md`（gitignored，**不提交**）。
 - [ ] 覆盖 `git grep -n "getSessionById" packages/server/src -- ':!*.test.ts'` 的**全部**调用点：
-      **29 个调用点 + 1 个定义行**（`db/repository/sessions.ts`），分布在 **8 个调用方文件**；
-      条目数与 grep 输出逐条对齐，并注明「定义行不计入调用」。
+      **28 个生产调用点 + 1 个定义行 + 1 行注释 = 30 行**（定义行在 `db/repository/sessions.ts`），
+      分布在 **8 个调用方文件**；条目数与 grep 输出逐条对齐，并注明「定义行与注释行不计入调用」。
 - [ ] 每条给：文件、所在函数、上下文一句、分类（活 / 含删）、理由。
 - [ ] 给出「必须改用 `getSessionByIdIncludingDeleted`」的最终清单（预期：回收站列表 / 恢复 /
       清除 / 清扫 / **DELETE 的幂等回读**；其余全走默认）。
@@ -112,7 +112,9 @@ z.string().nullable().optional()`**；不加则 Zod 默认剥未知键，`PATCH`
   `purgeSession`；`getHandoffChild` / `getEmptyHandoffChild` 加 `deleted_at IS NULL`；
   `listAllSessionsExcludingDeleted`（或等价谓词））
 - `packages/server/src/db/repository/trash.ts`（新建：`purgeExpiredTrash(now = Date.now())`，
-  同时扫会话与组两类主体；`index.ts` 只调它，不自带 SQL）
+  同时扫会话与组两类主体；不直接接触 `index.ts`，不自带调度）
+- `packages/server/src/trash-purge.ts`（新建：`runTrashPurge(phase)` —— 调 `purgeExpiredTrash()`，
+  发 `SESSION_PURGED` / `GROUPS_CHANGED`，逐成员清引擎槽位）
 - `packages/server/src/db/repository/sessionGroups.ts`（`trashGroup` / `restoreGroup` /
   `purgeGroup` / `dissolveGroup` / `listGroups`）
 - `packages/server/src/routes/sessions.ts`（DELETE / trash / restore / purge；409 守卫；
@@ -122,7 +124,8 @@ z.string().nullable().optional()`**；不加则 Zod 默认剥未知键，`PATCH`
 - `packages/server/src/connectors/socketio.ts`（join 拒绝已删）
 - `packages/server/src/handoff/index.ts`（已删父/子边界）
 - `packages/server/src/db/repository/connectorBindings.ts` 或调用侧（拒绝绑定已删会话）
-- `packages/server/src/index.ts`（启动清扫 + `setInterval` 每小时；probe 模式跳过）
+- `packages/server/src/index.ts`（启动 + `setInterval` 每小时都只调 `runTrashPurge`；
+  probe 模式跳过）
 - `packages/shared/src/types.ts` + `events.ts`（`TrashEntry`、四个事件；`SESSION_ARCHIVED`
   **本票不动**，留给 T5）
 - 对应 `*.test.ts`
