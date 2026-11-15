@@ -307,3 +307,55 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 - [ ] 收口登记清账：`App.vue` 首字节无 BOM；`ChatPanel` 滚动恢复回归（含隐藏期间
       `activeSessionId` 变更边缘）绿；启动接线三处有静态源断言；`trash-purge.ts` 不再
       import `routes/**`。
+
+---
+
+## T6 · 会话列表可读性（真机验收反馈三项）
+
+**What to build:** 修三条真机反馈：① 回收站入口不显眼、emoji 不符合极简；② 聊天区顶部
+多个日期分隔叠成一摞、遮住文字；③ 会话行缺最后消息时间。
+
+**Blocked by:** None（dev `5ea45514` 上开工；先 `git -C <worktree> merge --ff-only
+session/17d152b0`，拿到本票与 spec 增补）。
+
+**改哪些文件（边界）:**
+
+- `packages/shared/src/types.ts`：`SessionConfig` 加 `lastMessageAt?: string | null`。
+- `packages/server/src/db/repository/messages.ts`：新增按 sessionId 批量取
+  `MAX(created_at)` 的函数（一次 `GROUP BY`，禁止 N+1）+ 同文件测试。
+- `packages/server/src/routes/sessions.ts`：`GET /api/sessions` 两分支（默认 /
+  `includeArchived`）都挂 `lastMessageAt` + `sessions.test.ts`。
+- `packages/web/src/components/SessionList.vue`：头行回收站按钮换 15px 线稿 SVG、
+  条目数内联；删 `.head-badge` 绝对定位角标 + `SessionList.test.ts`。
+- `packages/web/src/components/SessionRow.vue`：第二行右侧显示最后消息时间 + 新建
+  `SessionRow.test.ts`。
+- `packages/web/src/utils/time.ts` + `time.test.ts`：新增会话时间分档格式化。
+- `packages/web/src/components/ChatPanel.vue` + `ChatPanel.test.ts`：日期分隔去掉
+  `position: sticky` / `top` / `z-index`，保留日期分组文案。
+- **不改**：分组/回收站语义、表结构/迁移、`App.vue`、`TrashView.vue`、T5 归档面。
+
+**契约（钉死）:**
+
+- `lastMessageAt` = 该会话最后一条消息（user/agent/system 都算）的 `created_at`，
+  ISO 8601；无消息 = `null`；只在 `GET /api/sessions` 返回，其他端点不必带。
+- 只做**一次** `GROUP BY` 批量查询，不允许逐会话查。
+- 行内时间：今天 `HH:mm`；昨天 `昨天`；同年 `M月D日`；跨年 `YYYY/M/D`。本地时区，
+  `title` 给完整 `YYYY-MM-DD HH:mm`；无消息不显示。
+- 回收站按钮：与 `＋` 同为 24px 方形、同边框/悬停；15px 线稿 SVG、`currentColor`；
+  emoji 与绝对定位角标全删；计数有内容时内联在图标右侧。
+- 日期分隔：不吸顶（无 sticky/top/z-index）；不新增 JS 吸顶；分组逻辑（与上一条不同天
+  才出）不变。
+- 列表排序不动（仍 `updated_at DESC`）。
+
+**验收（行为可验证）:**
+
+- [ ] API：两条消息的会话 `lastMessageAt` = 最后一条 `created_at`；空会话 `null`；
+      `includeArchived` 分支同样带；查询次数为 1（repo 测试/spy）。
+- [ ] 行内时间：今天显示 `HH:mm`，昨天/同年/跨年按分档；无消息不显示；`title` 完整时间。
+- [ ] 回收站按钮：DOM 无 `🗑` emoji、有 SVG；空/非空两态；计数内联不压图标；点击仍发
+      `open-trash`。
+- [ ] 顶部：滚到跨多个日期的位置，最多一个日期分隔可见、无半截日期文字；`.date-separator`
+      不含 `position: sticky`。
+- [ ] 真机：`CATSTUDY_PROBE_MODE=1`、独立端口（server 3212 / web 5177）起 worktree 实例，
+      1280×900 Playwright 截图三张（列表行时间、回收站入口、跨日期滚动顶部），pageerror 0。
+- [ ] `pnpm lint` 三包绿；server + web 全量测试绿；`git show --check` 干净。
