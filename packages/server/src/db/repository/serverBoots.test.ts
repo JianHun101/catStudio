@@ -43,7 +43,7 @@ describe('db/repository/serverBoots', () => {
   })
 
   it('插入一行：boot_id 是 UUID、started_at 是 ISO 毫秒 UTC、字段逐一落库', () => {
-    const bootId = serverBootsRepo.insertServerBoot(
+    const { bootId, startedAt } = serverBootsRepo.insertServerBoot(
       bootInfo({ probe_mode: 1, git_dirty: 1, dirty_summary: '?? a.txt' })
     )
     expect(bootId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
@@ -52,6 +52,8 @@ describe('db/repository/serverBoots', () => {
     expect(rows).toHaveLength(1)
     const row = rows[0]
     expect(row.boot_id).toBe(bootId)
+    // 票 B 契约 A：返回值与落库行**逐字相等**（时间只取一次，不做「大约相等」）
+    expect(startedAt).toBe(row.started_at)
     expect(row.started_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
     expect(row.pid).toBe(1234)
     expect(row.port).toBe(3200)
@@ -64,8 +66,8 @@ describe('db/repository/serverBoots', () => {
   })
 
   it('追加不覆盖（V4）：连写两行 ⇒ 旧行仍在、返回总数 2', () => {
-    const first = serverBootsRepo.insertServerBoot(bootInfo())
-    const second = serverBootsRepo.insertServerBoot(bootInfo())
+    const first = serverBootsRepo.insertServerBoot(bootInfo()).bootId
+    const second = serverBootsRepo.insertServerBoot(bootInfo()).bootId
     expect(first).not.toBe(second)
     expect(serverBootsRepo.countServerBoots()).toBe(2)
     const ids = serverBootsRepo.listServerBoots(10).map((r) => r.boot_id)
@@ -73,7 +75,7 @@ describe('db/repository/serverBoots', () => {
   })
 
   it('query_db：server_boots 返回恰为 14 个白名单列，值可读', () => {
-    const bootId = serverBootsRepo.insertServerBoot(bootInfo())
+    const { bootId } = serverBootsRepo.insertServerBoot(bootInfo())
     const result = queryRepo.queryTable({ table: 'server_boots', limit: 10 })
     expect(result.total).toBe(1)
     expect(result.rows).toHaveLength(1)
@@ -85,8 +87,8 @@ describe('db/repository/serverBoots', () => {
   })
 
   it('复合排序（V8）：同 started_at 两行 ⇒ 后插入的先返回（rowid DESC tie-break）', () => {
-    const first = serverBootsRepo.insertServerBoot(bootInfo())
-    const second = serverBootsRepo.insertServerBoot(bootInfo())
+    const first = serverBootsRepo.insertServerBoot(bootInfo()).bootId
+    const second = serverBootsRepo.insertServerBoot(bootInfo()).bootId
     // 把两行的时间钉成同一值——模拟同毫秒连启（正常路径里 nowIso 可能撞同一毫秒）
     const same = '2026-11-04T00:00:00.000Z'
     getDb().prepare('UPDATE server_boots SET started_at = ?').run(same)

@@ -79,7 +79,9 @@ import {
   resolveRolePlaceholders,
   buildDynamicHints,
   buildSkillDirectorySection,
+  buildRuntimeSelfCheck,
 } from './hints.js'
+import { getRuntimeInstance } from '../runtime-instance.js'
 import type { EngineBus, HandoffBus } from './bus.js'
 import type { EngineState } from './state.js'
 
@@ -236,6 +238,25 @@ function findRunningExecutionId(
   return execLogsRepo
     .getLogsByTriggerMessage(triggerMessageId)
     .find((r) => r.agent_id === agentId && r.session_id === sessionId && r.status === 'running')?.id
+}
+
+/**
+ * 唤醒自检的锚点取数（票 B 契约 B / 验收 A7）——查询失败一律 `null`，**不冒泡**。
+ *
+ * `null` 会让 `buildRuntimeSelfCheck` 走「无法判定」档：自检行是常驻证据，
+ * 不能反过来成为执行失败源。失败不静默，留一条 warn。
+ */
+function resolveLastOwnMessageAt(sessionId: string, agentId: string): string | null {
+  try {
+    return messagesRepo.getLastAgentMessageAt(sessionId, agentId)
+  } catch (err: any) {
+    log.warn('运行自检锚点查询失败（退化为无法判定档，不影响本轮回复）', {
+      sessionId,
+      agentId,
+      error: err?.message,
+    })
+    return null
+  }
 }
 
 /**
@@ -887,6 +908,19 @@ export async function runAgentReply(
     triggerMsg.authorName
   )
 
+  // ── 唤醒自检（票 B 契约 C/D）──────────────────────────────
+  // 文本在 system prompt 组装完成后生成（拿得到本会话本猫的锚点）；**追加位置**以
+  // `llmMessages[0].content` 的**末尾**为准——它在 memory / knowledge 两段注入之后
+  // 才真正落笔（见下方「唤醒自检落笔」），否则两段注入会追加到自检行之后，A6
+  // 「llmMessages[0].content 以 [运行时自检] 段结尾」不成立。
+  //
+  // `getRuntimeInstance()` 为 null（测试进程 / CLI 兜底 / 启动采集失败）→ 不注入，
+  // 既有 system prompt 一字不变（追加式，A6）。未注册时连锚点都不查。
+  const runtimeInstance = getRuntimeInstance()
+  const runtimeSelfCheck = runtimeInstance
+    ? buildRuntimeSelfCheck(runtimeInstance, resolveLastOwnMessageAt(sessionId, agent.id))
+    : null
+
   // 动态上下文指令：根据当前场景注入系统级提示（审查循环、交接触发等）
   const dynamicHints = buildDynamicHints(agent, triggerMsg.content, relevantMessages, {
     // 链锚 = 触发消息的 messages.task_id（T-E 后 ingest 必落此列）。缺省 = 存量无锚
@@ -1210,6 +1244,18 @@ export async function runAgentReply(
       totalContextChars: llmMessages.reduce((sum, m) => sum + m.content.length, 0),
       totalContextTokens: contextTokenStats.total + knowledgeTokens,
     })
+  }
+
+  // ── 唤醒自检落笔（票 B 契约 D / 验收 A6）────────────────────
+  // 放在 memory / knowledge 注入**之后**：那两段是 `llmMessages[0].content + 注入块`，
+  // 若自检行早一步落笔就会被挤到中间，A6 的「以自检段结尾」不成立。
+  // 注入位置仍是**第一条 system message**，`\n\n` 连接；不坐 `dynamicHints`
+  // （那里有「超限当最旧先丢」的观察项，常驻证据不能坐可被丢掉的位置）。
+  if (runtimeSelfCheck) {
+    llmMessages[0] = {
+      ...llmMessages[0],
+      content: `${llmMessages[0].content}\n\n${runtimeSelfCheck}`,
+    }
   }
 
   // ── 最终 token 预算复核 ──────────────────────────

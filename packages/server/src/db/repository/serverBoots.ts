@@ -25,14 +25,25 @@ export interface ServerBootRow extends BootInfo {
   started_at: string
 }
 
+/** 写入层产出的身份双值——`started_at` 与落库行逐字相同（票 B 契约 A） */
+export interface InsertServerBootResult {
+  bootId: string
+  startedAt: string
+}
+
 /**
- * 落一行启动账本，返回本次 `boot_id`。
+ * 落一行启动账本，返回本次 `bootId` 与 `startedAt`。
  *
  * `boot_id` 在写入层用 `randomUUID()` 生成（采集层不关心主键）；`started_at` 走
  * 全库统一的时间生成点 `nowIso()`（ISO 毫秒 UTC）。
+ *
+ * **时间只取一次**：`started_at` 先落到局部变量，同一值既进 INSERT 又进返回值。
+ * 若让调用方再取一次 `nowIso()`，两个值会在毫秒级分叉，`server_boots` 与注入行
+ * 就不再是同一份读数（票 B 契约 A 的逐字相等判据）。
  */
-export function insertServerBoot(info: BootInfo): string {
+export function insertServerBoot(info: BootInfo): InsertServerBootResult {
   const bootId = randomUUID()
+  const startedAt = nowIso()
   db.prepare(
     `INSERT INTO server_boots
        (boot_id, started_at, pid, port, cwd, module_file, mode, probe_mode,
@@ -40,7 +51,7 @@ export function insertServerBoot(info: BootInfo): string {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     bootId,
-    nowIso(),
+    startedAt,
     info.pid,
     info.port,
     info.cwd,
@@ -54,7 +65,7 @@ export function insertServerBoot(info: BootInfo): string {
     info.db_file,
     info.node_version
   )
-  return bootId
+  return { bootId, startedAt }
 }
 
 /** 最近 N 次启动（倒序；对账取首行 = 当前进程） */
