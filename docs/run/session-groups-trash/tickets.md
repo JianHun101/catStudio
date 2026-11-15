@@ -274,7 +274,10 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 
 **What to build:** 把归档的最后一层用户面与代码面拆掉，确保「两条轴」没有第二套入口。
 
-**Blocked by:** T1（服务端已改）、T2（`includeArchived` 分支已改）、T3（前端不再用归档）。
+**Blocked by:** T1（服务端已改）、T2（`includeArchived` 分支已改）、T3（前端不再用归档）、
+T6（同文件：`routes/sessions.ts` 的 `includeArchived` 分支、`SessionList.vue`、
+`stores/chat.ts`、`App.vue`、`ChatPanel.vue`）。T6 先合入；T5 开工时 rebase 到含 T6 的
+session 分支，冲突由店长仲裁。
 
 **改哪些文件（边界）:**
 
@@ -315,8 +318,11 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 **What to build:** 修三条真机反馈：① 回收站入口不显眼、emoji 不符合极简；② 聊天区顶部
 多个日期分隔叠成一摞、遮住文字；③ 会话行缺最后消息时间。
 
-**Blocked by:** None（dev `5ea45514` 上开工；先 `git -C <worktree> merge --ff-only
-session/17d152b0`，拿到本票与 spec 增补）。
+**Blocked by:** None（从 `session/17d152b0` 的最新尖开工，基线 `5ea45514` + 本票 docs
+补丁）。开工前把 worktree 对齐该尖：先 `git merge --ff-only session/17d152b0`；若因本
+worktree 留着旧 T2 提交而失败，确认 `git status --porcelain` 为空后
+`git reset --hard session/17d152b0`（只允许在实施 worktree 内这么做）。不得带着旧 T2
+提交开工。
 
 **改哪些文件（边界）:**
 
@@ -324,38 +330,93 @@ session/17d152b0`，拿到本票与 spec 增补）。
 - `packages/server/src/db/repository/messages.ts`：新增按 sessionId 批量取
   `MAX(created_at)` 的函数（一次 `GROUP BY`，禁止 N+1）+ 同文件测试。
 - `packages/server/src/routes/sessions.ts`：`GET /api/sessions` 两分支（默认 /
-  `includeArchived`）都挂 `lastMessageAt` + `sessions.test.ts`。
+  `includeArchived`）都在 `toSessionConfig(row)` **之后**挂 `lastMessageAt`；不把字段
+  塞进 `toSessionConfig`、不追加 `Z` + `sessions.test.ts`。
 - `packages/web/src/components/SessionList.vue`：头行回收站按钮换 15px 线稿 SVG、
-  条目数内联；删 `.head-badge` 绝对定位角标 + `SessionList.test.ts`。
+  条目数内联；删 `.head-badge` 绝对定位角标 + `SessionList.test.ts`（含用例名复述面）。
 - `packages/web/src/components/SessionRow.vue`：第二行右侧显示最后消息时间 + 新建
   `SessionRow.test.ts`。
-- `packages/web/src/utils/time.ts` + `time.test.ts`：新增会话时间分档格式化。
+- `packages/web/src/utils/time.ts` + `time.test.ts`：新增 `fmtSessionTime(raw, now)`，
+  复用 `parseUtc` 与同文件私有 `dayBucket`，`now` 显式入参；跨年 `YYYY/M/D` 是有意的
+  紧凑写法（与日期分隔的 `YYYY年M月D日` 不同），不另写 `new Date()` 解析。
+- `packages/web/src/stores/chat.ts` + `chat.test.ts`：`lastMessageAt` 的客户端一致性
+  五条路径（见契约）。
 - `packages/web/src/components/ChatPanel.vue` + `ChatPanel.test.ts`：日期分隔去掉
-  `position: sticky` / `top` / `z-index`，保留日期分组文案。
-- **不改**：分组/回收站语义、表结构/迁移、`App.vue`、`TrashView.vue`、T5 归档面。
+  `position: sticky` / `top` / `z-index`，保留日期分组文案；**F 用例当前断言 sticky，
+  必须反向改成「无 sticky/top/z-index」**；CSS 上方「日期分组吸顶（C-1）」注释同批删。
+- 复述面同批扫（只改文案/用例名，不改结构）：`packages/web/src/App.vue` 的
+  「左栏头行 🗑」注释、`App.test.ts` / `SessionList.test.ts` / `chat.test.ts` 用例名里的
+  `🗑`，以及 `SessionList.vue` / `stores/chat.ts` 注释里的 `🗑`，统一改成「回收站按钮」。
+  `App.vue` 只动这一行注释，**不动 BOM/结构**（BOM 与 T5 同批）。
+- **不改**：分组/回收站语义、表结构/迁移、`TrashView.vue`（空态 `🗑️` 不在本票范围，
+  「禁用 emoji」只约束左栏入口）、T5 归档面、列表排序（T7 另票）。
 
 **契约（钉死）:**
 
 - `lastMessageAt` = 该会话最后一条消息（user/agent/system 都算）的 `created_at`，
-  ISO 8601；无消息 = `null`；只在 `GET /api/sessions` 返回，其他端点不必带。
-- 只做**一次** `GROUP BY` 批量查询，不允许逐会话查。
+  **ISO 8601 毫秒 UTC**（与 `messages.created_at` 同形，如 `2026-11-15T08:45:34.218Z`），
+  不再补 `Z`；无消息 = `null`；只在 `GET /api/sessions` 返回，其他端点不必带。
+- 挂载层：`GET /api/sessions` 的两条分支各自在 `toSessionConfig(row)` 结果上赋值
+  `session.lastMessageAt = map.get(row.id) ?? null`；`toSessionConfig` 本体一字不改。
+  测试断言值匹配 `/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/`，且无 `ZZ`。
+- 只做**一次** `GROUP BY` 批量查询，不允许逐会话查；验收的「查询次数为 1」只指新增的
+  `lastMessageAt` 聚合（repo spy），**既有 `unreadCount` 的逐会话查询不动**。
+- 客户端一致性（`stores/chat.ts`，五条路径）：
+  1. `SESSION_UPDATE` 合并保留旧值：`{ ...prev, ...incoming, lastMessageAt:
+incoming.lastMessageAt ?? prev.lastMessageAt }`（PATCH 不聚合，不能整个对象替换）；
+  2. 单条/整组恢复、撤销成功后 `fetchSessions()`（服务端恢复响应不带该字段；插入后必须
+     重拉，行内时间才回来）；
+  3. `SESSION_MESSAGES_CLEARED`：把该会话的 `lastMessageAt` 置 `null`（不只清当前消息）；
+  4. `SESSION_ROLLED_BACK`：`fetchSessions()` 重拉（**不要**用本地 `messages` 末条重算——
+     数组里含服务端合成的 `welcome-<id>` 消息，`createdAt` 是加入房间的时刻，不是落库
+     消息的时间）；不得留旧值；
+  5. `NEW_MESSAGE`：命中会话（当前会话必命中）置 `lastMessageAt = msg.createdAt`。
+     多 tab 下非当前会话收不到 `NEW_MESSAGE`（房间广播），验收按「当前会话即时、其余
+     刷新/切回后一致」收窄，不另加全局事件。
 - 行内时间：今天 `HH:mm`；昨天 `昨天`；同年 `M月D日`；跨年 `YYYY/M/D`。本地时区，
   `title` 给完整 `YYYY-MM-DD HH:mm`；无消息不显示。
-- 回收站按钮：与 `＋` 同为 24px 方形、同边框/悬停；15px 线稿 SVG、`currentColor`；
-  emoji 与绝对定位角标全删；计数有内容时内联在图标右侧。
+- 回收站按钮：`height: 24px; min-width: 24px; width: auto; padding: 0 4px`，与 `＋`
+  同边框/悬停；15px 线稿 SVG、`currentColor`；emoji 与绝对定位角标全删；计数有内容时
+  内联在图标右侧（同一按钮、约 3px 间距），宽度随内容增长，空态 24×24。
+  条目数 = 回收站条目数（组条目算 1，与回收站两段一致），不是会话数。
+- `aria-label`：非空「回收站，N 项」；空「回收站」。
 - 日期分隔：不吸顶（无 sticky/top/z-index）；不新增 JS 吸顶；分组逻辑（与上一条不同天
-  才出）不变。
+  才出）不变。两天消息同屏时两个分隔同时可见是正常的，验收只查「不重叠/不互遮」。
 - 列表排序不动（仍 `updated_at DESC`）。
 
 **验收（行为可验证）:**
 
 - [ ] API：两条消息的会话 `lastMessageAt` = 最后一条 `created_at`；空会话 `null`；
-      `includeArchived` 分支同样带；查询次数为 1（repo 测试/spy）。
+      `includeArchived` 分支同样带；值是 ISO 毫秒 UTC、无 `ZZ`；新增聚合只查 1 次
+      （repo spy），既有 `unreadCount` 查询次数不变。
 - [ ] 行内时间：今天显示 `HH:mm`，昨天/同年/跨年按分档；无消息不显示；`title` 完整时间。
-- [ ] 回收站按钮：DOM 无 `🗑` emoji、有 SVG；空/非空两态；计数内联不压图标；点击仍发
-      `open-trash`。
-- [ ] 顶部：滚到跨多个日期的位置，最多一个日期分隔可见、无半截日期文字；`.date-separator`
-      不含 `position: sticky`。
+- [ ] 客户端一致性：改名/改成员（`SESSION_UPDATE`）后时间还在；单条恢复与撤销后时间
+      回来；整组恢复后时间回来；清空后时间消失；回退后（`fetchSessions` 重拉）与 DB
+      剩余消息一致；当前会话收 `NEW_MESSAGE` 后时间即时更新。
+- [ ] 回收站按钮：DOM 无 `🗑` emoji（`packages/web/src` 非测试面 `git grep '🗑'` 只允许
+      `TrashView.vue` 空态）、有 SVG；空/非空两态；计数内联不压图标、按钮宽度随内容；
+      `aria-label` 非空含条目数、空态仅「回收站」；点击仍发 `open-trash`。
+- [ ] 顶部：滚到跨多个日期的位置，没有两个日期分隔停在同一位置/互相遮挡，没有被另一个
+      分隔遮掉一半的文字（视口自然裁切不算）；`.date-separator` 不含
+      `position: sticky` / `top` / `z-index`；F 用例已反向改写。
 - [ ] 真机：`CATSTUDY_PROBE_MODE=1`、独立端口（server 3212 / web 5177）起 worktree 实例，
-      1280×900 Playwright 截图三张（列表行时间、回收站入口、跨日期滚动顶部），pageerror 0。
+      1280×900 Playwright 截图三张（列表行时间、回收站入口、跨日期滚动顶部），另走三步：
+      改成员/改名后时间还在、撤销恢复后时间回来、清空后时间消失；pageerror 0。
 - [ ] `pnpm lint` 三包绿；server + web 全量测试绿；`git show --check` 干净。
+
+---
+
+## T7 · 列表排序按最后消息时间（登记，未开工）
+
+**Blocked by:** T6（`lastMessageAt` 与列表投影先落地）、T5（`includeArchived` 分支退役）。
+
+**What to build:** 把会话列表排序从 `updated_at DESC` 换成「最后活动」口径
+`COALESCE(lastMessageAt, updatedAt) DESC`；是否只算猫回复（`role='agent'`）由产品定，
+定稿前不动。
+
+**约束:** 秒级 `updated_at` 与 ISO 毫秒 `lastMessageAt` **不得同框比较**；先在 SQL 内
+归一到同一形态再排序；排序键要能被 `idx_sessions_live` 覆盖或另建索引，验收附
+`EXPLAIN QUERY PLAN`。
+
+**验收（待立项时细化）:** 行内时间与排序一致；多 tab / 分组内顺序稳定；`EXPLAIN` 走
+索引；无 `includeArchived` 分支。
