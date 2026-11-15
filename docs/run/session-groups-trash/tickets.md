@@ -227,8 +227,11 @@ Map<sessionId, AgentRuntimeState>>`，判 `status === 'busy' || queueLength > 0`
 - `packages/web/src/App.vue`（**中心区切换宿主**：`showTrash` 与既有 `showSettings` /
   `showEval` / `showTrace` 同构，互斥；点 🗑 进回收站、点会话回聊天）+ `App.test.ts`
 - `packages/web/src/components/SessionList.vue`（头行 🗑 N 入口）
-- `packages/web/src/components/ChatPanel.vue`（**只做**当前会话被删→切走/空态、撤销 toast
-  宿主；**不**承载回收站视图，也不做中心区条件渲染）
+- `packages/web/src/components/SessionCreateModal.vue`（创建成功 `emit('created')`；回收站
+  视图下由 `SessionList` 关弹窗并投递 `open-session`，中心区切回聊天）
+- `packages/web/src/components/ChatPanel.vue`（**只做**当前会话被删→切走/空态；**不**承载
+  回收站视图，也不做中心区条件渲染。撤销 toast 的宿主在 `App.vue` 根级——回收站/三个
+  全屏页打开时 `ChatPanel` 被 `v-show` 隐藏，toast 挂在其内会一起被藏住）
 - `packages/web/src/stores/chat.ts`（trash state、restore/purge/empty、`SESSION_TRASHED/
 SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 - `packages/web/src/composables/useApi.ts`（trash API）
@@ -251,6 +254,20 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 - [ ] 过期/已清除的恢复返回 404 时，前端刷新回收站并提示。
 - [ ] 测试：至少覆盖「撤销」「两段分组不串」「切走」「事件投影」。
 
+**收口登记（P3，不阻断，T5 顺手处理）:**
+
+- `App.vue` 首字节 BOM：Vite/tsc 会剥掉、测试全绿；不为此改写已受审且真机探针通过的
+  `a0cf02f2` 树，T5 与其他 web 收尾同批删。
+- `ChatPanel` 保活/滚动恢复无仓库内回归测试：`App.test.ts` 只钉静态源（`v-show` /
+  `:hidden`），探针未测 scroll。T5 补组件级用例，或探针步骤「滚到中间 → 进回收站 →
+  返回 → `scrollTop` 恢复」。
+- 同一处边缘：隐藏期间 `activeSessionId` 若变化（另一 tab 删掉当前会话），切回可能把旧
+  会话的 `scrollTop` 恢复到新会话；只在隐藏前用户向上滚过时触发，与上条同批修。
+- `trashLoadError` 仅在列表为空时提示；已有条目时刷新失败保留旧列表（已接受）。
+- `trash-purge.ts` 反依赖 `routes/sessionGroups.ts` 的 `emitGroupsChanged`；启动接线
+  （`runTrashPurge('startup')` / `setInterval` / `clearInterval`）无测试。同属 T5
+  「helper 迁出路由层 + 静态源断言」。
+
 ---
 
 ## T5 · 归档面清退（契约收尾）
@@ -269,6 +286,10 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
   （删 `SESSION_ARCHIVED`）、`events.test.ts`
 - `packages/web/src/components/SessionList.vue` 残留、`stores/chat.ts`（`applyArchived` /
   `showArchived` 全删）、`useApi.ts`（archive 调用）
+- `packages/web/src/App.vue`（仅删首字节 BOM）、`packages/web/src/components/ChatPanel.vue`
+  （补滚动恢复回归；`activeSessionId` 在隐藏期间变化时贴底）
+- `packages/server/src/trash-purge.ts` / `routes/sessionGroups.ts`：把 `emitGroupsChanged`
+  迁到 `connectors/` 或独立 `broadcast.ts`，两处共用；补启动接线静态源断言
 - 旧归档测试用例（删或改成「已退役」断言）
 - **不改**`: 表结构（列保留）、迁移条目（历史 checksum 不能动）。
 
@@ -283,3 +304,6 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 - [ ] `pnpm lint` 三包绿；server + web 全量测试绿。
 - [ ] dev 库迁移后的 37 条归档会话仍在「归档」组、可正常打开、删除；无任何归档入口。
 - [ ] `archived_at` 列仍在（`PRAGMA table_info`），迁移 checksum 未变。
+- [ ] 收口登记清账：`App.vue` 首字节无 BOM；`ChatPanel` 滚动恢复回归（含隐藏期间
+      `activeSessionId` 变更边缘）绿；启动接线三处有静态源断言；`trash-purge.ts` 不再
+      import `routes/**`。
