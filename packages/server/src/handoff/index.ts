@@ -367,7 +367,11 @@ export async function performHandoff(
         tokenCount: estimateTokens(summary),
         roundCount: 0,
         createdAt: new Date().toISOString(),
-      })
+      }),
+      // 交接链归到同一组（ADR 0016 D6）：「合并一系列会话」= 归组，不是物理拼消息。
+      // 父会话未分组时子会话也落未分组；父会话已删的边界由 T2 的默认排除语义接管
+      // （已删父会话不再被交接引擎读到，不会产出子会话）。
+      oldSession.group_id
     )
 
     log.info('handoff session created', {

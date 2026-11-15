@@ -25,6 +25,9 @@ export const Events = {
   // 受影响的是所有正在看列表的客户端，不只是待在那个会话里的。
   SESSION_ARCHIVED: 'session-archived',
   SESSION_MESSAGES_CLEARED: 'session-messages-cleared',
+  // 服务器→客户端：分组结构变化（建组 / 改名 / 折叠 / 解散）。payload 为 `{}`——
+  // 组列表结构影响所有看左栏的客户端，故全局广播；前端收到后重拉 `GET /api/session-groups`。
+  GROUPS_CHANGED: 'groups-changed',
   // 服务器→客户端：同会话回退（T1）。payload `{ sessionId, messageId, removedIds, removedCount }`
   // ——`removedIds` 是权威删除集（服务端按 (created_at, id) 定序算出），前端**按 id 删**而不是
   // 自己按时间戳重算：两处各算一次就是「同一规则两处措辞」，且并发同毫秒时两边会分叉。

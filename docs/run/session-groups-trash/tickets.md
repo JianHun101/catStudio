@@ -37,13 +37,14 @@ status: active
 **Blocked by:** None — 可立即开始。
 
 - [ ] 产出 `workspace/getSessionById-audit.md`（gitignored，**不提交**）。
-- [ ] 覆盖 `git grep -n "getSessionById" packages/server/src -- ':!*.test.ts'` 的**全部**调用点，
-      条目数与 grep 输出逐条对齐。
+- [ ] 覆盖 `git grep -n "getSessionById" packages/server/src -- ':!*.test.ts'` 的**全部**调用点：
+      **29 个调用点 + 1 个定义行**（`db/repository/sessions.ts`），分布在 **8 个调用方文件**；
+      条目数与 grep 输出逐条对齐，并注明「定义行不计入调用」。
 - [ ] 每条给：文件、所在函数、上下文一句、分类（活 / 含删）、理由。
-- [ ] 给出「必须改用 `getSessionByIdIncludingDeleted`」的最终清单（预期：回收站列表/恢复/
-      清除/清扫；其余全走默认）。
+- [ ] 给出「必须改用 `getSessionByIdIncludingDeleted`」的最终清单（预期：回收站列表 / 恢复 /
+      清除 / 清扫 / **DELETE 的幂等回读**；其余全走默认）。
 - [ ] 指出可合并/可删除的调用点（顺手项，不强制改）。
-- [ ] 明确 `routes/sessions.ts` 的 17 处逐条归属。
+- [ ] 明确 `routes/sessions.ts` 的 **16** 处逐条归属。
 
 ---
 
@@ -64,6 +65,9 @@ status: active
 - `packages/server/src/routes/sessionGroups.ts`（新建）+ 路由注册处
 - `packages/server/src/routes/sessions.ts`（`PATCH` 收 `groupId`；`GET` 返回 `groupId`）
 - `packages/shared/src/types.ts`（`SessionConfig.groupId`、`SessionGroup`）
+- `packages/shared/src/schemas.ts`（**`SessionUpdateSchema` 加 `groupId:
+z.string().nullable().optional()`**；不加则 Zod 默认剥未知键，`PATCH` 返回 200 但没动）
+  - `schemas.test.ts`
 - `packages/server/src/handoff/index.ts`（子会话继承父 `group_id`）
 - 对应 `*.test.ts`（同目录 co-located）
 - **不改**`: 回收站语义（T2）、前端（T3）、归档面清退（T5）。
@@ -79,11 +83,18 @@ status: active
 - [ ] `PATCH` 改名/折叠生效且落库；`GET` 返回 `sessionCount`；顺序按 `created_at ASC`。
 - [ ] `PATCH /api/sessions/:id { groupId }` 移动成功；不存在/已删组 400；`groupId=null` 回未分组；
       **`updated_at` 不变**。
+- [ ] `SessionUpdateSchema` 单测：带 `groupId` 的 body 解析后字段仍在（防 Zod 剥未知键 →
+      200 但没动）；`groupId: null` 与缺省可区分。
 - [ ] `DELETE /api/session-groups/:id`（仅解散）：组行消失、会话 `group_id=NULL`、
       `deleted_at` 仍 NULL。
 - [ ] handoff 子会话自动继承父 `group_id`（父在组内 / 父未分组两例）。
-- [ ] `EXPLAIN QUERY PLAN` 活跃列表走 `idx_sessions_live`；组内查询走 `idx_sessions_group`。
+- [ ] `EXPLAIN QUERY PLAN` 活跃列表走 `idx_sessions_live`（组内查询的索引读数挪到 T2 的整组
+      删除 `UPDATE ... WHERE group_id=?`，T1 没有对应查询）。
 - [ ] 迁移测试覆盖：新库、老库、已迁移库重跑；断言 `archived_at` 冻结。
+
+**收口注意：** T1 把 `listActiveSessions` 谓词换成 `deleted_at IS NULL` 后，旧前端默认列表会
+多出 37 条归档会话（T3 尚未上）；T3 的「移入回收站」若早于 T2 接线，会接到旧的物理删除。
+因此 **T1→T2→T3→T4 在同一集成分支按序验，整体一次合入 dev；任何一票都不单独发。**
 
 ---
 
@@ -98,10 +109,14 @@ status: active
 
 - `packages/server/src/db/repository/sessions.ts`（`getSessionById` 默认排除已删；
   新增 `getSessionByIdIncludingDeleted`；`trashSession` / `restoreSession` / `listTrash` /
-  `purgeSession`；`getHandoffChild` / `getEmptyHandoffChild` 加 `deleted_at IS NULL`）
+  `purgeSession`；`getHandoffChild` / `getEmptyHandoffChild` 加 `deleted_at IS NULL`；
+  `listAllSessionsExcludingDeleted`（或等价谓词））
+- `packages/server/src/db/repository/trash.ts`（新建：`purgeExpiredTrash(now = Date.now())`，
+  同时扫会话与组两类主体；`index.ts` 只调它，不自带 SQL）
 - `packages/server/src/db/repository/sessionGroups.ts`（`trashGroup` / `restoreGroup` /
   `purgeGroup` / `dissolveGroup` / `listGroups`）
-- `packages/server/src/routes/sessions.ts`（DELETE / trash / restore / purge；409 守卫）
+- `packages/server/src/routes/sessions.ts`（DELETE / trash / restore / purge；409 守卫；
+  **`GET /api/sessions` 的 `includeArchived` 分支改用排除已删的查询**）
 - `packages/server/src/routes/sessionGroups.ts`（`?withSessions=1`、restore、purge）
 - `packages/server/src/execution/registry.ts` 的只读使用处（忙碌判据，不改调度）
 - `packages/server/src/connectors/socketio.ts`（join 拒绝已删）
@@ -115,18 +130,30 @@ status: active
 **验收（行为可验证）:**
 
 - [ ] `DELETE /api/sessions/:id`：列表消失、`/api/sessions/trash` 出现，
-      `purgeAfter = deletedAt + 7d`，消息条数不变；重复删除 `deletedAt` 不变。
+      `purgeAfter = deletedAt + 7d`，消息条数不变；**重复删除仍 200 且 `deletedAt` 不变**
+      （`DELETE` 用 `IncludingDeleted` 读，守卫只在 `deleted_at IS NULL` 时跑）。
 - [ ] 忙/排队 → 409 `SESSION_BUSY`，`deleted_at` 仍 NULL；绑定外部群 → 409
       `SESSION_BOUND`，绑定行不变。
 - [ ] 恢复：回原组、`updated_at` 不变；原组已删/已清除 → `groupId=null`；过期 → 404。
 - [ ] 整组删除：组与同批会话 `deleted_at` 字符串相等；id 不变；任一会话忙 → 409，
-      **组与会话一行都没改**；恢复只清同批，早先单删的会话不复活。
+      **组与会话一行都没改**；恢复只清同批，早先单删的会话不复活；组内零未删会话时
+      `?withSessions=1` 返回 `mode: 'dissolve'`，不产生空组条目。
 - [ ] 仅解散：组硬删、会话 `group_id=null`、`deleted_at` 仍 NULL。
+- [ ] 组条目成员单条 restore/purge/DELETE → 409 `SESSION_IN_TRASH_GROUP`；组恢复/组清除成功。
+- [ ] `/api/sessions/trash` 不返回已过期但尚未清扫的条目（`deleted_at <= cutoff`），
+      避免「剩 0 天还能点恢复、点了 404」。
+- [ ] 恢复同名：存在同名活组（含仅大小写不同）→ 先改名（`（恢复）`，≤24 字）再清
+      `deleted_at`，不撞 `ux_session_groups_name_live`。
 - [ ] 到期边界：`now-7d+1min` 保留、`now-7d-1min` 清除；会话/消息/执行日志/依赖行一起消失；
-      probe 模式不执行。
+      **组条目到期：组行 + 同批会话消失，早先单删的会话仍在**；probe 模式不执行。
+- [ ] `purgeExpiredTrash(now)` 可注入时钟单测（不靠 `sleep`/真实时钟）；零同批组只删组行。
 - [ ] 彻底删除活会话 → 409；清空回收站后条目与组行全消失。
 - [ ] `getSessionById` 对已删返回 undefined、`IncludingDeleted` 返回；join、handoff 复用、
       绑定写入都拒绝已删会话。
+- [ ] `GET /api/sessions?includeArchived=1` 不返回已删行；`listAllSessions` 的
+      「系统链路口径」注释同批改掉。
+- [ ] `EXPLAIN QUERY PLAN`：整组删除 `UPDATE ... WHERE group_id=? AND deleted_at IS NULL`
+      走 `idx_sessions_group`；回收站列表走 `idx_sessions_trash`。
 - [ ] 事件：单删/整组删发 `SESSION_TRASHED`；恢复发 `SESSION_RESTORED`；清除/清扫发
       `SESSION_PURGED`；payload 形状按 spec §3.3。
 
@@ -137,7 +164,10 @@ status: active
 **What to build:** 左栏从平铺列表变成「分组 + 未分组」：折叠、移动会话、批量勾选归组、
 删组确认框（默认仅解散）、新建分组固定在底部。悬停「移动到分组」出侧框，指针离开即收起。
 
-**Blocked by:** None（契约已锁，可与 T1/T2 并行）；集成分支上依赖 T1 的接口。
+**Blocked by:** T1（组接口）+ T2（回收站接口）。UI 骨架可先写，但**审查前必须
+`git -C <worktree> merge session/17d152b0-ds猫`（T1 所在分支）或 rebase 到它**，T2 落地后再验
+「移入回收站 / 批量删除」——**T2 之前禁止把菜单接到现有 `DELETE`**（那还是物理删除）。
+凡涉及落库、`sessionCount`、折叠持久化的验收都在集成分支上验，不用 mock 代替。
 
 **改哪些文件（边界）:**
 
@@ -149,6 +179,15 @@ status: active
 - `packages/web/src/components/SessionList.test.ts` 等 co-located 测试
 - **不改**`: 回收站主区（T4）、server（T1/T2）、归档接口（T5）。
 
+**两条实现约束（别等审查才发现）:**
+
+- **侧框必须跳出左栏**：`.panel-left` / `.panel-inner` 是 `overflow: hidden`，在行内展开会被
+  裁剪。用 `position: fixed` 或 `Teleport`（`ChatPanel` 有先例），按触发项矩形定位。
+- **忙碌/绑定的数据源**：忙碌读 `chat.ts` 的 `agentStates`（`Map<agentId,
+Map<sessionId, AgentRuntimeState>>`，判 `status === 'busy' || queueLength > 0`；idle 槽位仍留
+  sessionId，不能只看有没有槽位）；绑定调 `api.getConnectorBindings()` 取全量后按
+  `binding.sessionId` 过滤（该接口没有 sessionId 参数）。**不要**等 409 回来再置灰。
+
 **验收（行为可验证）:**
 
 - [ ] 左栏渲染活组（created_at 序）+「未分组」最后；组头显示会话数；折叠点击 PATCH 落库，
@@ -156,12 +195,16 @@ status: active
 - [ ] 每行只有一个 `⋯`：`移动到分组 ›` / `移入回收站`；无归档按钮、无「显示已归档」开关。
 - [ ] 悬停「移动到分组」→ 侧框出现、主菜单不关；指针移到别处/空白 → 侧框收起、主菜单仍在；
       指针进入侧框 → 保持；点击触发项也能打开；选目标后两级同关。
+- [ ] 侧框**真机几何**不被裁剪：侧框右边界超出 236px 左栏仍完整可见（不是只断言 state）。
 - [ ] 当前所在组不在目标列表；未分组会话不出现多余的「未分组」。
 - [ ] 行首悬停出复选框；勾选后头行变「已选 N ｜ 归组 ｜ 删除 ｜ 取消」；批量归组一次成功，
       完成后清空选择。
+- [ ] 批量删除 = N 次单条 `DELETE`；某条 409（忙碌/绑定）时其余照删，失败项保留在列表并
+      toast 点名（不整批回滚，不静默吞）。
 - [ ] 组头 `⋯`：重命名 / 删除分组…；重名就地报错，输入框不关。
 - [ ] 删组确认：默认「仅解散」；第二项文案带会话数、选中后主按钮变红；忙碌/绑定成员让
-      第二项置灰并红字点名；空组只有「仅解散」；切换选项不重建弹窗 DOM、不重播动画。
+      第二项置灰并红字点名（数据源见上，不靠 409 后置灰）；空组只有「仅解散」；切换选项不
+      重建弹窗 DOM、不重播动画。
 - [ ] 新建分组固定在侧栏底部：列表滚动不带走、建组/删组位置不跳。
 - [ ] 删组/移会话都不改 `updatedAt` 排序（前端投影不触碰）。
 - [ ] 测试：至少覆盖「侧框离开即收」「批量归组」「默认仅解散」「忙碌组第二项不可选」；
@@ -173,13 +216,16 @@ status: active
 **What to build:** 「回收站」是一个主区视图：两段（整组删除 / 单个会话）、每行恢复/永久删除、
 清空回收站；单删 5 秒撤销；多 tab 通过 socket 同步。
 
-**Blocked by:** T3（复用左栏头行入口与项目结构）。
+**Blocked by:** T2（回收站接口）+ T3（复用左栏头行入口与项目结构）。
 
 **改哪些文件（边界）:**
 
 - `packages/web/src/components/TrashView.vue`（新建）
+- `packages/web/src/App.vue`（**中心区切换宿主**：`showTrash` 与既有 `showSettings` /
+  `showEval` / `showTrace` 同构，互斥；点 🗑 进回收站、点会话回聊天）+ `App.test.ts`
 - `packages/web/src/components/SessionList.vue`（头行 🗑 N 入口）
-- `packages/web/src/components/ChatPanel.vue`（当前会话被删→切走/空态；撤销 toast 宿主）
+- `packages/web/src/components/ChatPanel.vue`（**只做**当前会话被删→切走/空态、撤销 toast
+  宿主；**不**承载回收站视图，也不做中心区条件渲染）
 - `packages/web/src/stores/chat.ts`（trash state、restore/purge/empty、`SESSION_TRASHED/
 SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 - `packages/web/src/composables/useApi.ts`（trash API）
@@ -188,10 +234,13 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 
 **验收（行为可验证）:**
 
-- [ ] 头行显示 `🗑 N`（空时只显示图标）；点击切到回收站主区，再点会话回到聊天。
+- [ ] 头行显示 `🗑 N`（空时只显示图标）；点击切到回收站主区，再点会话回到聊天；
+      切换由 `App.vue` 的中心区状态驱动（`ChatPanel` 里不出现第二套视图）。
 - [ ] 两段列表：「整组删除」每条显示组名、会话数、消息数、删除时间、剩余天数；
       「单个会话」显示标题、原组名、消息数、剩余天数；同批会话不出现在第二段。
-- [ ] 每行悬停出「恢复 / 永久删除」；永久删除二次确认；清空回收站二次确认。
+- [ ] 「整组删除」段的成员不出现「恢复 / 永久删除」单条按钮（组级动作 409）；两段的
+      恢复/清除分别打对应接口。
+- [ ] 「单个会话」段每行悬停出「恢复 / 永久删除」；永久删除二次确认；清空回收站二次确认。
 - [ ] 单删：行消失 + 5 秒 toast「已移入回收站 · 剩 7 天 / 撤销」；点撤销恢复；
       toast 5 秒自动消失；删当前会话自动切到下一个。
 - [ ] 整组恢复后组回到列表、同批会话回组；早先单删的会话仍留在回收站。
@@ -205,7 +254,7 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 
 **What to build:** 把归档的最后一层用户面与代码面拆掉，确保「两条轴」没有第二套入口。
 
-**Blocked by:** T1（服务端已改）、T3（前端不再用归档）。
+**Blocked by:** T1（服务端已改）、T2（`includeArchived` 分支已改）、T3（前端不再用归档）。
 
 **改哪些文件（边界）:**
 
@@ -224,6 +273,10 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 
 - [ ] 全仓 `git grep archivedAt` 在 `packages/**` 非测试面零命中；`git grep archiveSession`
       零命中；`SESSION_ARCHIVED` 零命中。
+- [ ] snake_case 面另扫：`archived_at` 只在迁移 / 测试 / `PRAGMA` 断言命中，运行时代码零命中
+      （`archivedAt` 驼峰 grep 抓不到 migrations 与 repo 里的下划线写法）。
+- [ ] 复述面同批扫：`listActiveSessions` / `listAllSessions` 的 docstring、`migrations.ts` 里
+      `idx_sessions_active` 的历史注释、`routes/sessions.ts` 的归档段注释。
 - [ ] `pnpm lint` 三包绿；server + web 全量测试绿。
 - [ ] dev 库迁移后的 37 条归档会话仍在「归档」组、可正常打开、删除；无任何归档入口。
 - [ ] `archived_at` 列仍在（`PRAGMA table_info`），迁移 checksum 未变。

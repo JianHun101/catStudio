@@ -20,6 +20,7 @@ import { getExecutionBus } from './execution/registry.js'
 import { startOneBotOutbound } from './connectors/onebotOutbound.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
+import { sessionGroupRoutes } from './routes/sessionGroups.js'
 import { messageRoutes } from './routes/messages.js'
 import { connectorRoutes } from './routes/connectors.js'
 import { configRoutes } from './routes/config.js'
@@ -313,6 +314,7 @@ async function main(): Promise<void> {
   // REST API 路由
   await app.register(agentRoutes)
   await app.register(sessionRoutes)
+  await app.register(sessionGroupRoutes)
   await app.register(messageRoutes)
   await app.register(connectorRoutes)
   await app.register(configRoutes)

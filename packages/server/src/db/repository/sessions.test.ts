@@ -360,29 +360,48 @@ describe('sessions repo — handoff 去重守卫', () => {
       expect(row?.updated_at).toBe('2020-01-01 00:00:00')
     })
 
-    it('listActiveSessions 滤掉归档；listAllSessions 含归档（系统链路口径不变）', () => {
+    it('listActiveSessions 只排除已软删（deleted_at）；归档不再影响列表；listAllSessions 含已删', () => {
       insertSession('s-live')
-      insertSession('s-gone')
-      sessionsRepo.archiveSession('s-gone')
+      insertSession('s-archived')
+      insertSession('s-trashed')
+      // 归档列冻结：T1 起它不参与可见性判定（收纳由分组折叠承担）
+      db.prepare(`UPDATE sessions SET archived_at = '2026-01-01T00:00:00.000Z' WHERE id = ?`).run(
+        's-archived'
+      )
+      db.prepare(`UPDATE sessions SET deleted_at = '2026-01-01T00:00:00.000Z' WHERE id = ?`).run(
+        's-trashed'
+      )
 
       const activeIds = sessionsRepo.listActiveSessions().map((r) => r.id)
       expect(activeIds).toContain('s-live')
-      expect(activeIds).not.toContain('s-gone')
+      expect(activeIds).toContain('s-archived')
+      expect(activeIds).not.toContain('s-trashed')
 
-      // `listAllSessions` 是**系统链路**口径（系统链路的覆盖面仍含归档会话；评估告警
-      // 已改由 /api/eval/l1-metrics 供横幅与评估中心读取，不再经 messages），过滤塞进去
-      // = 让归档静默改变无关子系统的行为。这条断言就是那个不变量的守卫。
+      // `listAllSessions` 是**系统链路**口径：回收站里的行也要在（spec §4.3），
+      // 过滤塞进去 = 让用户态删除静默改变评估/审计的行为。
       const allIds = sessionsRepo.listAllSessions().map((r) => r.id)
       expect(allIds).toContain('s-live')
-      expect(allIds).toContain('s-gone')
+      expect(allIds).toContain('s-archived')
+      expect(allIds).toContain('s-trashed')
     })
 
-    it('取消归档后回到活跃列表', () => {
-      insertSession('s-back')
-      sessionsRepo.archiveSession('s-back')
-      expect(sessionsRepo.listActiveSessions().map((r) => r.id)).not.toContain('s-back')
-      sessionsRepo.unarchiveSession('s-back')
-      expect(sessionsRepo.listActiveSessions().map((r) => r.id)).toContain('s-back')
+    it('updateSessionGroup 移动组不改 updated_at（分组是组织动作，不是会话活跃）', () => {
+      insertSession('s-move')
+      pinUpdatedAt('s-move')
+      db.prepare(
+        `INSERT INTO session_groups (id, name, created_at, updated_at)
+         VALUES ('g-move', '目标组', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+      ).run()
+
+      sessionsRepo.updateSessionGroup('s-move', 'g-move')
+
+      const row = sessionsRepo.getSessionById('s-move')
+      expect(row?.group_id).toBe('g-move')
+      expect(row?.updated_at).toBe('2020-01-01 00:00:00')
+      // 移回未分组同样不动 updated_at
+      sessionsRepo.updateSessionGroup('s-move', null)
+      expect(sessionsRepo.getSessionById('s-move')?.group_id).toBeNull()
+      expect(sessionsRepo.getSessionById('s-move')?.updated_at).toBe('2020-01-01 00:00:00')
     })
   })
 })

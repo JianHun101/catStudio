@@ -61,8 +61,23 @@ export interface SessionConfig {
   handoffFrom?: string | null
   /** 运行中的增量摘要（JSON 字符串，SessionSummary） */
   runningSummary?: string | null
+  /** 所属分组 id；null = 未分组（单归属：一个会话最多属于一个组） */
+  groupId: string | null
   /** 归档时刻（ISO 8601）；null/缺省 = 活跃。归档 = 用户态「删除」的替代，数据全留 */
   archivedAt?: string | null
+}
+
+/** 会话分组（左栏收纳单位；单归属、无嵌套、不建 position，按 createdAt 排序）。 */
+export interface SessionGroup {
+  id: string
+  name: string
+  /** 折叠态落在服务端：多 tab 一致，迁移出的「归档」组默认折叠 */
+  collapsed: boolean
+  /** ISO 毫秒 UTC */
+  createdAt: string
+  updatedAt: string
+  /** 组内**未删除**会话数（回收站里的会话不计入） */
+  sessionCount: number
 }
 
 // ─── Message ────────────────────────────────────────
