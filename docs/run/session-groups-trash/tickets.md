@@ -227,8 +227,11 @@ Map<sessionId, AgentRuntimeState>>`，判 `status === 'busy' || queueLength > 0`
 - `packages/web/src/App.vue`（**中心区切换宿主**：`showTrash` 与既有 `showSettings` /
   `showEval` / `showTrace` 同构，互斥；点 🗑 进回收站、点会话回聊天）+ `App.test.ts`
 - `packages/web/src/components/SessionList.vue`（头行 🗑 N 入口）
-- `packages/web/src/components/ChatPanel.vue`（**只做**当前会话被删→切走/空态、撤销 toast
-  宿主；**不**承载回收站视图，也不做中心区条件渲染）
+- `packages/web/src/components/SessionCreateModal.vue`（创建成功 `emit('created')`；回收站
+  视图下由 `SessionList` 关弹窗并投递 `open-session`，中心区切回聊天）
+- `packages/web/src/components/ChatPanel.vue`（**只做**当前会话被删→切走/空态；**不**承载
+  回收站视图，也不做中心区条件渲染。撤销 toast 的宿主在 `App.vue` 根级——回收站/三个
+  全屏页打开时 `ChatPanel` 被 `v-show` 隐藏，toast 挂在其内会一起被藏住）
 - `packages/web/src/stores/chat.ts`（trash state、restore/purge/empty、`SESSION_TRASHED/
 SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 - `packages/web/src/composables/useApi.ts`（trash API）
@@ -251,6 +254,20 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 - [ ] 过期/已清除的恢复返回 404 时，前端刷新回收站并提示。
 - [ ] 测试：至少覆盖「撤销」「两段分组不串」「切走」「事件投影」。
 
+**收口登记（P3，不阻断，T5 顺手处理）:**
+
+- `App.vue` 首字节 BOM：Vite/tsc 会剥掉、测试全绿；不为此改写已受审且真机探针通过的
+  `a0cf02f2` 树，T5 与其他 web 收尾同批删。
+- `ChatPanel` 保活/滚动恢复无仓库内回归测试：`App.test.ts` 只钉静态源（`v-show` /
+  `:hidden`），探针未测 scroll。T5 补组件级用例，或探针步骤「滚到中间 → 进回收站 →
+  返回 → `scrollTop` 恢复」。
+- 同一处边缘：隐藏期间 `activeSessionId` 若变化（另一 tab 删掉当前会话），切回可能把旧
+  会话的 `scrollTop` 恢复到新会话；只在隐藏前用户向上滚过时触发，与上条同批修。
+- `trashLoadError` 仅在列表为空时提示；已有条目时刷新失败保留旧列表（已接受）。
+- `trash-purge.ts` 反依赖 `routes/sessionGroups.ts` 的 `emitGroupsChanged`；启动接线
+  （`runTrashPurge('startup')` / `setInterval` / `clearInterval`）无测试。同属 T5
+  「helper 迁出路由层 + 静态源断言」。
+
 ---
 
 ## T5 · 归档面清退（契约收尾）
@@ -269,6 +286,10 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
   （删 `SESSION_ARCHIVED`）、`events.test.ts`
 - `packages/web/src/components/SessionList.vue` 残留、`stores/chat.ts`（`applyArchived` /
   `showArchived` 全删）、`useApi.ts`（archive 调用）
+- `packages/web/src/App.vue`（仅删首字节 BOM）、`packages/web/src/components/ChatPanel.vue`
+  （补滚动恢复回归；`activeSessionId` 在隐藏期间变化时贴底）
+- `packages/server/src/trash-purge.ts` / `routes/sessionGroups.ts`：把 `emitGroupsChanged`
+  迁到 `connectors/` 或独立 `broadcast.ts`，两处共用；补启动接线静态源断言
 - 旧归档测试用例（删或改成「已退役」断言）
 - **不改**`: 表结构（列保留）、迁移条目（历史 checksum 不能动）。
 
@@ -283,3 +304,58 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 - [ ] `pnpm lint` 三包绿；server + web 全量测试绿。
 - [ ] dev 库迁移后的 37 条归档会话仍在「归档」组、可正常打开、删除；无任何归档入口。
 - [ ] `archived_at` 列仍在（`PRAGMA table_info`），迁移 checksum 未变。
+- [ ] 收口登记清账：`App.vue` 首字节无 BOM；`ChatPanel` 滚动恢复回归（含隐藏期间
+      `activeSessionId` 变更边缘）绿；启动接线三处有静态源断言；`trash-purge.ts` 不再
+      import `routes/**`。
+
+---
+
+## T6 · 会话列表可读性（真机验收反馈三项）
+
+**What to build:** 修三条真机反馈：① 回收站入口不显眼、emoji 不符合极简；② 聊天区顶部
+多个日期分隔叠成一摞、遮住文字；③ 会话行缺最后消息时间。
+
+**Blocked by:** None（dev `5ea45514` 上开工；先 `git -C <worktree> merge --ff-only
+session/17d152b0`，拿到本票与 spec 增补）。
+
+**改哪些文件（边界）:**
+
+- `packages/shared/src/types.ts`：`SessionConfig` 加 `lastMessageAt?: string | null`。
+- `packages/server/src/db/repository/messages.ts`：新增按 sessionId 批量取
+  `MAX(created_at)` 的函数（一次 `GROUP BY`，禁止 N+1）+ 同文件测试。
+- `packages/server/src/routes/sessions.ts`：`GET /api/sessions` 两分支（默认 /
+  `includeArchived`）都挂 `lastMessageAt` + `sessions.test.ts`。
+- `packages/web/src/components/SessionList.vue`：头行回收站按钮换 15px 线稿 SVG、
+  条目数内联；删 `.head-badge` 绝对定位角标 + `SessionList.test.ts`。
+- `packages/web/src/components/SessionRow.vue`：第二行右侧显示最后消息时间 + 新建
+  `SessionRow.test.ts`。
+- `packages/web/src/utils/time.ts` + `time.test.ts`：新增会话时间分档格式化。
+- `packages/web/src/components/ChatPanel.vue` + `ChatPanel.test.ts`：日期分隔去掉
+  `position: sticky` / `top` / `z-index`，保留日期分组文案。
+- **不改**：分组/回收站语义、表结构/迁移、`App.vue`、`TrashView.vue`、T5 归档面。
+
+**契约（钉死）:**
+
+- `lastMessageAt` = 该会话最后一条消息（user/agent/system 都算）的 `created_at`，
+  ISO 8601；无消息 = `null`；只在 `GET /api/sessions` 返回，其他端点不必带。
+- 只做**一次** `GROUP BY` 批量查询，不允许逐会话查。
+- 行内时间：今天 `HH:mm`；昨天 `昨天`；同年 `M月D日`；跨年 `YYYY/M/D`。本地时区，
+  `title` 给完整 `YYYY-MM-DD HH:mm`；无消息不显示。
+- 回收站按钮：与 `＋` 同为 24px 方形、同边框/悬停；15px 线稿 SVG、`currentColor`；
+  emoji 与绝对定位角标全删；计数有内容时内联在图标右侧。
+- 日期分隔：不吸顶（无 sticky/top/z-index）；不新增 JS 吸顶；分组逻辑（与上一条不同天
+  才出）不变。
+- 列表排序不动（仍 `updated_at DESC`）。
+
+**验收（行为可验证）:**
+
+- [ ] API：两条消息的会话 `lastMessageAt` = 最后一条 `created_at`；空会话 `null`；
+      `includeArchived` 分支同样带；查询次数为 1（repo 测试/spy）。
+- [ ] 行内时间：今天显示 `HH:mm`，昨天/同年/跨年按分档；无消息不显示；`title` 完整时间。
+- [ ] 回收站按钮：DOM 无 `🗑` emoji、有 SVG；空/非空两态；计数内联不压图标；点击仍发
+      `open-trash`。
+- [ ] 顶部：滚到跨多个日期的位置，最多一个日期分隔可见、无半截日期文字；`.date-separator`
+      不含 `position: sticky`。
+- [ ] 真机：`CATSTUDY_PROBE_MODE=1`、独立端口（server 3212 / web 5177）起 worktree 实例，
+      1280×900 Playwright 截图三张（列表行时间、回收站入口、跨日期滚动顶部），pageerror 0。
+- [ ] `pnpm lint` 三包绿；server + web 全量测试绿；`git show --check` 干净。

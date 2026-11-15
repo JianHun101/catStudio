@@ -89,6 +89,7 @@ dev 库预期：60 会话 / 37 归档 → 默认列表 23 条 + 折叠的「归�
 interface SessionConfig {
   // 既有字段不变
   groupId: string | null // 新增
+  lastMessageAt?: string | null // 新增：最后一条消息的 created_at（ISO 8601）；无消息 = null
   archivedAt?: string | null // 冻结保留到「归档面清退」票，前端不再消费
 }
 
@@ -119,7 +120,7 @@ interface TrashEntry {
 
 | 方法 / 路径                                     | 语义                                                             | 成功                                                | 失败                                                                                    |
 | ----------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `GET /api/sessions`                             | 未删除会话，按 `updated_at DESC`，带 `groupId`                   | `SessionConfig[]`                                   | —                                                                                       |
+| `GET /api/sessions`                             | 未删除会话，按 `updated_at DESC`，带 `groupId` / `lastMessageAt` | `SessionConfig[]`                                   | —                                                                                       |
 | `PATCH /api/sessions/:id`                       | 既有字段 + `groupId: string \| null`                             | `SessionConfig`                                     | 404 会话不存在/已删；400 组不存在或已删                                                 |
 | `DELETE /api/sessions/:id`                      | 移入回收站（幂等）                                               | `{ id, deletedAt, purgeAfter }`                     | 404 从未存在/已清除；409 busy/bound                                                     |
 | `GET /api/sessions/trash`                       | 未过期条目（`deleted_at > cutoff`），`deletedAt DESC`            | `{ entries: TrashEntry[] }`                         | —                                                                                       |
@@ -216,7 +217,7 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**；组内零�
 ### 4.4 前端定稿
 
 ```
-┌ 会话 ─────────────── 🗑 2 ── ＋ ┐
+┌ 会话 ────────────── ▣ 2 ── ＋ ┐
 │ ▾ 小说连载                  2   │
 │    猫咖夜话                  ⋯  │
 │    第三章卡住了              ⋯  │
@@ -228,7 +229,16 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**；组内零�
 └──────────────────────────────────┘
 ```
 
-- 头行只有 `会话` + `🗑 N` + `＋`；回收站入口在头行（有内容显示 `N`）。
+- 头行只有 `会话` + 回收站按钮 + `＋`。回收站入口用 **15px 线稿 SVG 垃圾桶**（`currentColor`、
+  1.3–1.6 stroke），**禁用 emoji**；按钮与 `＋` 同为 24px 方形（同一边框与悬停）。条目数
+  **内联在图标右侧**（同一按钮内的数字），不用绝对定位角标；空时只有图标。
+- 会话行第二行：`N 只猫咪` 在左，**最后消息时间**在右（本地时区：今天 `HH:mm`、昨天
+  `昨天`、同年 `M月D日`、跨年 `YYYY/M/D`；`title` 给完整 `YYYY-MM-DD HH:mm`）；无消息
+  不显示。数据源 `SessionConfig.lastMessageAt` = 该会话最后一条消息（不区分角色）。
+- **日期分隔不吸顶**：日期分隔保留在消息流中，但不得 `position: sticky`。原因：同一滚动
+  容器内多个日期头都 sticky 会在顶部叠成一摞（后面的盖住前面的，只露出半行文字），且
+  滚到旧消息时顶部仍显示最新日期，语义错误。将来若要做吸顶，必须按日期分段包裹、每段
+  独立 sticky 容器；不在本单做。
 - **新建分组固定在侧栏底部**（不跟列表滚动、建组/删组不跳位）。
 - 每行只留一个 `⋯`：`移动到分组 ›` / `移入回收站`。
 - **「移动到分组」悬停出侧框**：指针在主菜单该行或侧框内时侧框保持；指针离开两者
@@ -282,6 +292,14 @@ deleted_at IS NULL` 的 `EXPLAIN QUERY PLAN` 走 `idx_sessions_group`（T2 验�
     组条目仍完整；经组恢复/组清除则成功。
 21. **恢复重名顺序**：存在同名活组时，组恢复成功、名变为 `name（恢复）`（≤24 字），
     不抛唯一索引冲突（`COLLATE NOCASE` 下 `Name`/`name` 也算同名）。
+22. **最后消息时间**：`GET /api/sessions` 每项带 `lastMessageAt`（该会话最后一条消息的
+    `created_at`，无消息 `null`）；新消息落库后列表行时间更新；会话行显示本地时区的
+    `HH:mm` / `昨天` / `M月D日` / `YYYY/M/D`，无消息不显示；多 tab 刷新一致。
+23. **顶部不重叠**：滚到任意位置，聊天区顶部不存在两个日期分隔叠在一起、也不存在被遮掉
+    一半的文字；日期分隔不吸顶（随消息流移出视口），且不再用 `z-index: 5` 遮内容。
+24. **回收站入口**：头行按钮内是 15px 线稿垃圾桶 SVG（`currentColor`），不是 emoji；按钮
+    24px 方形、与 `＋` 同一边框/悬停；有内容时条目数内联在图标右侧，与图标/`＋` 不重叠；
+    空时仅图标；点击仍打开回收站；`aria-label` 含条目数。
 
 ## 六、不在范围内
 
