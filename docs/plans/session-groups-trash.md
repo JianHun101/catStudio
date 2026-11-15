@@ -26,7 +26,7 @@ CREATE TABLE session_groups (
   deleted_at TEXT                        -- ISO 毫秒 UTC；NULL = 活组
 );
 CREATE UNIQUE INDEX ux_session_groups_name_live
-  ON session_groups(name) WHERE deleted_at IS NULL;
+  ON session_groups(name COLLATE NOCASE) WHERE deleted_at IS NULL;
 
 ALTER TABLE sessions ADD COLUMN group_id TEXT
   REFERENCES session_groups(id) ON DELETE SET NULL;
@@ -43,26 +43,42 @@ DROP INDEX IF EXISTS idx_sessions_active;
   会整片判反。截止串由 JS 算好再传。
 - `sessions.group_id` 用 `ON DELETE SET NULL`：组被硬删（仅解散）时会话自动落未分组。
 - `session_groups` 行数在几十量级，排序字段不另建索引。
-- `archived_at` 列**保留但冻结**：不读、不写、不 DROP；`idx_sessions_active` 退役。
+- 组名唯一索引带 `COLLATE NOCASE`（只折叠 ASCII 大小写，中文名不受影响）：`Work` 与 `work`
+  算重名；判定面与索引谓词必须同形。
+- `archived_at` 列**保留但冻结**：**运行时代码**不读、不写、不 DROP（迁移、`PRAGMA` 与测试
+  断言除外）；`idx_sessions_active` 退役。
 
 ### 2.2 迁移：旧归档 → 普通组「归档」
 
 同一迁移条目内，在建表/加列之后执行：
 
-1. 若存在 `archived_at IS NOT NULL` 的会话，且没有同名活组「归档」→ 建组
-   `id='legacy-archive'`、`name='归档'`、`collapsed=1`、时间为 ISO 毫秒。
-2. 把这些会话的 `group_id` 指向该组（已存在同名活组则指向它）。
+1. 若存在 `archived_at IS NOT NULL` 的会话 → 建组 `id='legacy-archive'`、`name='归档'`、
+   `collapsed=1`、时间为 ISO 毫秒。
+2. 把这些会话的 `group_id` 指向该组。
 3. 不清空 `archived_at`（冻结），不改 `updated_at`。
+
+> `session_groups` 与本迁移在同一个条目里新建，迁移前不可能有同名活组；「已存在同名活组」
+> 分支是死代码，不写。
 
 dev 库预期：60 会话 / 37 归档 → 默认列表 23 条 + 折叠的「归档 37」，一条不少。
 
 ### 2.3 清扫
 
 - `purgeAfter = deleted_at + 7×24h`，**服务端算**（`new Date(deleted_at).getTime() + 7d`）。
-- 服务启动扫一次 + 每小时一次；选 `deleted_at <= cutoff`（cutoff 由 JS 生成 ISO 毫秒串）。
-- **每条会话一个事务**，单条失败记日志继续；probe 模式（`CATSTUDY_PROBE_MODE=1`）跳过。
+- 清扫主体是**两类**：会话（`sessions.deleted_at <= cutoff`）与组
+  （`session_groups.deleted_at <= cutoff`）。契约是一个可注入时钟的导出函数
+  `purgeExpiredTrash(now = Date.now())`（放 `db/repository/trash.ts`）；`index.ts` 只负责
+  启动扫一次 + 每小时调它，不自带 SQL——否则「±1 分钟」这类边界没有测试缝。
+- cutoff 由 JS 生成 ISO 毫秒串后传入，**不**与秒级列（`created_at/updated_at`）同框比较。
+- **归属不重叠**：整组删除产生的同批会话（`group_id` 指向一个 `deleted_at` 与之字符串相等的组）
+  归**组条目**清；其余已删会话归**会话条目**清。同一行不会被两条路径各清一次。
+- 组条目：先逐条清同批会话（`deleted_at = 组.deleted_at`，精确相等；组内更早单删的会话
+  不碰，它属于会话条目），同批全部清完后**最后一个事务**删组行；同批为 0（防御分支）
+  直接删组行。组行删除失败则该组条目下轮重试，已清的会话不会复活。
+- 会话条目：**每条会话一个事务**，单条失败记日志继续。
 - 物理清除顺序复用现有链：执行日志 → 消息（自带消息侧子行）→ 会话依赖
-  （`purgeSessionDependents`）→ 会话行；整组到期时最后删组行。
+  （`purgeSessionDependents`）→ 会话行。
+- probe 模式（`CATSTUDY_PROBE_MODE=1`）跳过；失败只影响该条目，下一轮重试。
 
 ## 三、接口契约
 
@@ -90,7 +106,7 @@ interface TrashEntry {
   name: string // 组名 / 会话标题
   deletedAt: string // ISO 毫秒
   purgeAfter: string // ISO 毫秒，= deletedAt + 7d
-  daysLeft: number // ceil((purgeAfter - now) / 1d)，0..7
+  daysLeft: number // ceil((purgeAfter - now) / 1d)，1..7（过期的条目列表已滤掉）
   sessionCount: number // 组条目 = 同批会话数；会话条目 = 1
   messageCount: number
   groupId: string | null // 会话条目：原组 id（组已删也保留）；组条目 = null
@@ -100,40 +116,55 @@ interface TrashEntry {
 
 ### 3.2 路由
 
-| 方法 / 路径                                     | 语义                                           | 成功                                                | 失败                                    |
-| ----------------------------------------------- | ---------------------------------------------- | --------------------------------------------------- | --------------------------------------- |
-| `GET /api/sessions`                             | 未删除会话，按 `updated_at DESC`，带 `groupId` | `SessionConfig[]`                                   | —                                       |
-| `PATCH /api/sessions/:id`                       | 既有字段 + `groupId: string \| null`           | `SessionConfig`                                     | 404 会话不存在/已删；400 组不存在或已删 |
-| `DELETE /api/sessions/:id`                      | 移入回收站（幂等）                             | `{ id, deletedAt, purgeAfter }`                     | 404；409 busy/bound                     |
-| `GET /api/sessions/trash`                       | 回收站条目，按 `deletedAt DESC`                | `{ entries: TrashEntry[] }`                         | —                                       |
-| `POST /api/sessions/:id/restore`                | 恢复单条                                       | `{ session, groupId }`（原组已删则 `groupId=null`） | 404（不在回收站/已清除）                |
-| `DELETE /api/sessions/:id/purge`                | 彻底删除单条                                   | `{ id }`                                            | 404；409 未删除                         |
-| `GET /api/session-groups`                       | 活组，按 `created_at ASC`                      | `{ groups: SessionGroup[] }`                        | —                                       |
-| `POST /api/session-groups`                      | 新建 `{ name }`                                | 201 `SessionGroup`                                  | 400 名字非法；409 重名                  |
-| `PATCH /api/session-groups/:id`                 | `{ name?, collapsed? }`                        | `SessionGroup`                                      | 404；409 重名                           |
-| `DELETE /api/session-groups/:id`                | 不带 `withSessions` = 仅解散                   | `{ mode: 'dissolve', id }`                          | 404；409 busy/bound                     |
-| `DELETE /api/session-groups/:id?withSessions=1` | 组软删 + 同批会话进回收站                      | `{ mode: 'trash', id }`                             | 404；409 busy/bound（**一行不改**）     |
-| `POST /api/session-groups/:id/restore`          | 恢复整组（只清同批）                           | `{ group, sessions }`                               | 404（组不在回收站/已清除）              |
-| `DELETE /api/session-groups/:id/purge`          | 彻底删除已删组 + 同批会话                      | `{ id }`                                            | 404；409 组未删除                       |
-| `DELETE /api/trash`                             | 清空回收站                                     | `{ purged: { groups: number, sessions: number } }`  | —                                       |
+| 方法 / 路径                                     | 语义                                                             | 成功                                                | 失败                                       |
+| ----------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------ |
+| `GET /api/sessions`                             | 未删除会话，按 `updated_at DESC`，带 `groupId`                   | `SessionConfig[]`                                   | —                                          |
+| `PATCH /api/sessions/:id`                       | 既有字段 + `groupId: string \| null`                             | `SessionConfig`                                     | 404 会话不存在/已删；400 组不存在或已删    |
+| `DELETE /api/sessions/:id`                      | 移入回收站（幂等）                                               | `{ id, deletedAt, purgeAfter }`                     | 404 从未存在/已清除；409 busy/bound        |
+| `GET /api/sessions/trash`                       | 未过期条目（`deleted_at > cutoff`），`deletedAt DESC`            | `{ entries: TrashEntry[] }`                         | —                                          |
+| `POST /api/sessions/:id/restore`                | 恢复单条                                                         | `{ session, groupId }`（原组已删则 `groupId=null`） | 404（不在回收站/已清除）；409 属于整组删除 |
+| `DELETE /api/sessions/:id/purge`                | 彻底删除单条                                                     | `{ id }`                                            | 404；409 未删除 / 属于整组删除             |
+| `GET /api/session-groups`                       | 活组，按 `created_at ASC`                                        | `{ groups: SessionGroup[] }`                        | —                                          |
+| `POST /api/session-groups`                      | 新建 `{ name }`                                                  | 201 `SessionGroup`                                  | 400 名字非法；409 重名                     |
+| `PATCH /api/session-groups/:id`                 | `{ name?, collapsed? }`                                          | `SessionGroup`                                      | 404；409 重名                              |
+| `DELETE /api/session-groups/:id`                | 不带 `withSessions` = 仅解散（不动会话，**无 busy/bound 守卫**） | `{ mode: 'dissolve', id }`                          | 404                                        |
+| `DELETE /api/session-groups/:id?withSessions=1` | 组软删 + 同批会话进回收站（零未删会话降级为仅解散）              | `{ mode: 'trash' \| 'dissolve', id }`               | 404；409 busy/bound（**一行不改**）        |
+| `POST /api/session-groups/:id/restore`          | 恢复整组（只清同批）                                             | `{ group, sessions }`                               | 404（组不在回收站/已清除）                 |
+| `DELETE /api/session-groups/:id/purge`          | 彻底删除已删组 + 同批会话                                        | `{ id }`                                            | 404；409 组未删除                          |
+| `DELETE /api/trash`                             | 清空回收站                                                       | `{ purged: { groups: number, sessions: number } }`  | —                                          |
 
 - **路由顺序**：`GET /api/sessions/trash` 必须注册在 `GET /api/sessions/:id` 之前（静态路由
   优先，但显式顺序是契约的一部分，避免以后换路由库时被 `:id='trash'` 吞掉）。
 - **404 面**：已删会话的详情、消息、搜索、标记已读、回退、绑定一律 404（或等价「不存在」），
-  只有 `/restore`、`/purge`、`/trash` 例外。
-- 组名规则：`trim()` 后 1–24 字，空/超长 400；活组重名 409 `{ error: 'GROUP_NAME_TAKEN' }`。
+  例外只有 `/restore`、`/purge`、`/trash`，**以及 `DELETE /api/sessions/:id` 的幂等重复调用**。
+- **幂等删除的读取口径**：`DELETE` 先按 `getSessionByIdIncludingDeleted` 读——从未存在/已清除 →
+  404；已删且不是整组条目成员 → 200 返回**首次** `deletedAt`（不重置 7 天计时）。
+  已删且属于某次整组删除（所在组 `deleted_at` 与之相等）→ 409
+  `SESSION_IN_TRASH_GROUP`（它已作为组条目在回收站里，单删没有可撤销的动作）。
+  忙碌/绑定守卫**只在**
+  `deleted_at IS NULL` 时跑，第二次删除不会被自己的忙碌状态挡回 409。
+- **整组条目成员**：属于某次整组删除的会话，只能经组级恢复/清除处理；对单条调用
+  restore/purge（以及重复 DELETE 一个已删成员）→ 409
+  `{ error: 'SESSION_IN_TRASH_GROUP', groupId }`。否则组条目计数与恢复粒度会对不上。
+- **零未删会话 + `withSessions=1`**：组内没有未删除会话（含空组）→ 不产生回收站条目，
+  按「仅解散」返回 `{ mode: 'dissolve', id }`；只有至少一条未删会话才进 `mode: 'trash'`。
+  由此组条目**恒有 ≥1 条同批会话**（T4 的 `sessionCount` 不会显示 0）。
+- 组名规则：`trim()` 后 1–24 字，空/超长 400；活组重名 409 `{ error: 'GROUP_NAME_TAKEN' }`，
+  重名判定与唯一索引同用 `COLLATE NOCASE`。
+- **恢复重名顺序**：先改组名、再清 `deleted_at`（同一事务）；顺序反了会在清标志那步撞
+  部分唯一索引。追加的 `（恢复）`/`（恢复 N）` 计入 24 字上限，超长截断组原名（不截后缀）。
 - 忙碌/绑定 409 形状：
   `{ error: 'SESSION_BUSY' | 'SESSION_BOUND', sessions: [{ id, title, reason: 'busy' | 'bound', platform?, externalId? }] }`。
   整组删除时 `sessions` 只列阻塞成员。
 
 ### 3.3 事件
 
-| 事件               | payload                                                  | 广播 | 触发                             |
-| ------------------ | -------------------------------------------------------- | ---- | -------------------------------- |
-| `SESSION_TRASHED`  | `{ sessionIds: string[], groupIds: string[] }`           | 全局 | 单删 / 整组删                    |
-| `SESSION_RESTORED` | `{ groupId: string \| null, sessions: SessionConfig[] }` | 全局 | 单条恢复 / 整组恢复              |
-| `SESSION_PURGED`   | `{ sessionIds: string[], groupIds: string[] }`           | 全局 | 到期清扫 / 彻底删除 / 清空回收站 |
-| `GROUPS_CHANGED`   | `{}`                                                     | 全局 | 建组 / 改名 / 折叠               |
+| 事件               | payload                                                  | 广播 | 触发                                                                    |
+| ------------------ | -------------------------------------------------------- | ---- | ----------------------------------------------------------------------- |
+| `SESSION_TRASHED`  | `{ sessionIds: string[], groupIds: string[] }`           | 全局 | 单删 / 整组删                                                           |
+| `SESSION_RESTORED` | `{ groupId: string \| null, sessions: SessionConfig[] }` | 全局 | 单条恢复 / 整组恢复                                                     |
+| `SESSION_PURGED`   | `{ sessionIds: string[], groupIds: string[] }`           | 全局 | 到期清扫 / 彻底删除 / 清空回收站                                        |
+| `GROUPS_CHANGED`   | `{}`                                                     | 全局 | 任何组结构/归属变化：建组、改名、折叠、移动会话、仅解散、整组删、组恢复 |
 
 - `SESSION_ARCHIVED` 退役（在「归档面清退」票删除常量与前端 `applyArchived`）。
 - `SESSION_DELETED` 保留给「handoff 空壳清理」等物理删除路径。
@@ -146,31 +177,40 @@ interface TrashEntry {
 - 忙碌判据：执行注册表 `snapshot()` 中，该会话存在 `status === 'busy' || queueLength > 0`
   的 agent。**不能**写成「槽位里留着 sessionId 就算忙」——idle 槽位仍留 sessionId，会永远 409。
 - 绑定判据：`listBindingsBySession(id)` 非空。绑定接口本身也要拒绝已删会话。
-- 单删幂等：`UPDATE ... SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`，重复调用
-  返回首次时间戳。
+- 单删幂等：`UPDATE ... SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`；已删则回读
+  `getSessionByIdIncludingDeleted` 拿首次时间戳（见 §3.2「幂等删除的读取口径」）。
 - 整组删除在同一事务内：组 `deleted_at` + `UPDATE sessions SET deleted_at=?
-WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**。
+WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**；组内零未删会话时整组删除
+  降级为仅解散（§3.2），不建回收站条目。
+- `session_groups.updated_at`：改名 / 折叠 / 恢复 / 整组删除都更新它；**移动会话不改组**的
+  `updated_at`（组内容变了但组本身没变），只更新会话的 `group_id`，且不改会话 `updated_at`。
 
 ### 4.2 恢复与清除
 
 - 整组恢复：只清 `sessions.deleted_at = group.deleted_at` 的那批；组 `deleted_at=NULL`；
-  若存在同名活组，组名改成 `name（恢复）`（仍冲突则 `（恢复 2）`…）。
-- 单条恢复：原组是活组 → 回原组；原组已删/已清除 → `groupId=null` 并提示。
+  若存在同名活组（`COLLATE NOCASE`），**先把组名改成 `name（恢复）`（仍冲突则 `（恢复 2）`…），
+  再清 `deleted_at`**——两步同一事务，顺序反了会撞部分唯一索引。
+- 单条恢复：原组是活组 → 回原组；原组已删/已清除 → `groupId=null` 并提示。属于整组删除的
+  成员不走单条接口（409 `SESSION_IN_TRASH_GROUP`），只能整组恢复。
 - 恢复**不改** `updated_at`（不凭空跳到列表顶部）。
-- 已过期但清扫尚未跑到：恢复接口仍按 `deleted_at` 判断，过期视为不存在（404）。
-- 彻底删除只接受 `deleted_at IS NOT NULL` 的行；活会话 409。
-- 清空回收站 = 对全部条目执行彻底删除（组条目连同同批会话）。
+- 已过期但清扫尚未跑到：`/trash` 列表按 `deleted_at > cutoff` 过滤（用户看不到「剩 0 天却
+  还能点恢复」的条目）；恢复接口按 `deleted_at` 判断，过期视为不存在（404）。
+- 彻底删除只接受 `deleted_at IS NOT NULL` 的行；活会话 409；整组删除的成员走组级清除。
+- 清空回收站 = 对全部条目执行彻底删除（组条目连同同批会话；含过期未扫条目）。
 
 ### 4.3 系统链路过滤（必须同批）
 
 - `getSessionById(id)` 默认加 `deleted_at IS NULL`；
-  `getSessionByIdIncludingDeleted(id)` 只给回收站 / 恢复 / 清除 / 清扫。
+  `getSessionByIdIncludingDeleted(id)` 只给回收站 / 恢复 / 清除 / 清扫 / **单删幂等回读**。
 - `getHandoffChild`、`getEmptyHandoffChild` 排除已删子会话（否则回收站里的交接子会话
   会被重新拿来用）。
 - `connectors/socketio.ts` 的 join 分支拒绝已删会话。
 - 绑定写入（`upsertConnectorBinding` 的调用侧）拒绝已删会话。
-- `listAllSessions()` 仍为「系统链路」口径：**含**已删会话，只给评估/审计等内部路径；
-  用户面列表一律 `listActiveSessions()`。
+- `listAllSessions()` 目前**唯一**生产调用点是 `GET /api/sessions?includeArchived=1`
+  （`routes/sessions.ts`），**不是**评估/审计内部路径。T2 起该分支必须排除已删行
+  （新增 `listAllSessionsExcludingDeleted()` 或等价谓词），否则回收站会话会从用户面列表
+  漏出。`listAllSessions()` 本身留到 T5 与 `includeArchived` 参数一起清。
+  `routes/sessions.ts` 共 16 处 `getSessionById` 调用，全量清单以 T0 审计为准。
 
 ### 4.4 前端定稿
 
@@ -204,20 +244,21 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**。
 ## 五、验收标准（行为可验证）
 
 1. **迁移**：在含 37 条归档的 dev 副本上启动 → 默认列表 23 条 + 折叠「归档 37」；
-   37 条 `group_id` 全指向该组，`archived_at` 仍非空且无代码读写。
+   37 条 `group_id` 全指向该组，`archived_at` 仍非空，且运行时代码不读写它（迁移/测试除外）。
 2. **建组/改折叠**：新建「测试组」→ 列表出现；`PATCH collapsed=true` → 重载页面仍折叠；
    重名 → 409，输入框不关。
 3. **移动会话**：`PATCH groupId` → 行落入目标组；`groupId=null` → 回未分组；
    `updated_at` 不变。
 4. **handoff 继承**：从组内会话交接 → 子会话 `group_id` = 父组；父会话已删 → 子会话未分组。
 5. **单删**：`DELETE` 后默认列表无它、`/trash` 有它、`purgeAfter = deletedAt + 7d`、
-   消息条数不变；连点两次 `deletedAt` 不变。
+   消息条数不变；连点两次第二次仍 200 且 `deletedAt` 不变（不是 404）。
 6. **忙碌 409**：有猫 busy/排队时删除 → 409，`deleted_at` 仍 NULL。
 7. **绑定 409**：绑定 QQ 群的会话删除 → 409，绑定行与 `deleted_at` 都不变。
 8. **恢复**：回到原组、消息完整、`updatedAt` 不变；原组已删 → `groupId=null`；
    过期/已清除 → 404。
 9. **整组删除**：组内会话全部进回收站且 `deleted_at` 两两相等；组行 `deleted_at` 同值；
-   任一会话忙碌 → 409 且**一行都没改**；恢复后组 id 不变，组内更早单删的会话**不复活**。
+   任一会话忙碌 → 409 且**一行都没改**；恢复后组 id 不变，组内更早单删的会话**不复活**；
+   `/trash` 里只出现一条组条目，同批成员不在「单个会话」段重复出现。
 10. **仅解散**：组行消失、会话 `group_id=NULL`、`deleted_at` 仍 NULL。
 11. **到期边界**：`now-7d+1min` 不删；`now-7d-1min` 被清，且会话、消息、执行日志、
     四类依赖行一起消失；probe 模式不执行清扫。
@@ -226,9 +267,20 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**。
     join 已删会话、handoff 复用已删子会话、给已删会话写绑定均被拒。
 14. **前端**：悬停「移动到分组」出侧框；指针移到别处或空白处 → 侧框收起、主菜单还在；
     指针进入侧框 → 保持；批量勾选归组一次成功；删组确认默认仅解散。
-15. **多 tab**：删除/恢复/整组删/清空在另一 tab 实时反映；`GROUPS_CHANGED` 后组列表刷新。
+15. **多 tab**：删除/恢复/整组删/清空在另一 tab 实时反映；`GROUPS_CHANGED` 后组列表刷新
+    （移动会话、仅解散也发）。
 16. **索引**：`EXPLAIN QUERY PLAN` 中活跃列表走 `idx_sessions_live`，回收站走
-    `idx_sessions_trash`，组内查询走 `idx_sessions_group`；无 `idx_sessions_active` 残留。
+    `idx_sessions_trash`；无 `idx_sessions_active` 残留。
+17. **组内索引**：整组删除的 `UPDATE sessions SET deleted_at=? WHERE group_id=? AND
+deleted_at IS NULL` 的 `EXPLAIN QUERY PLAN` 走 `idx_sessions_group`（T2 验，不在 T1 验）。
+18. **`includeArchived` 不漏删**：`GET /api/sessions?includeArchived=1` 不返回 `deleted_at`
+    非空的行（T2 起，T5 删参数）。
+19. **组条目到期**：整组删除后调 `purgeExpiredTrash(now = 组.deleted_at + 7d + 1min)` →
+    组行与同批会话行消失；组内更早单删的会话仍在（属会话条目）；零同批防御分支只删组行。
+20. **组条目成员只走组级**：对组条目成员单条 restore/purge/DELETE → 409 `SESSION_IN_TRASH_GROUP`，
+    组条目仍完整；经组恢复/组清除则成功。
+21. **恢复重名顺序**：存在同名活组时，组恢复成功、名变为 `name（恢复）`（≤24 字），
+    不抛唯一索引冲突（`COLLATE NOCASE` 下 `Name`/`name` 也算同名）。
 
 ## 六、不在范围内
 
@@ -245,7 +297,7 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**。
 - **跳 grilling**：用户在四轮原型（ds猫 / flash猫 / 吐槽猫 / 店长合成）后直接拍板
   「按这版开票」，需求已由原型与五条实测事实压过，不再单跑 grill。
 - **Gate B 契约**：边界 = 本文 §六；契约 = §二 表结构 + §三 接口/事件 + §四 行为规则；
-  验收 = §五 16 条。
+  验收 = §五 21 条。
 - **推翻的历史口径**：`db-schema-governance.md` §4.1「删除 = 归档」在本文件生效日反转；
   该 spec 已同步加指针，不再作为现行口径引用。
 - **店长自我推翻两处**：确认框不提供停止按钮（v1 只 409）；回收站退出记忆检索是伪任务，
@@ -263,12 +315,13 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**。
 ### Gate B · 契约锁定
 
 ✅ 边界见 §六（含明确不做项）；契约见 §二/§三/§四（DDL、接口表、409 形状、事件 payload、
-前端交互）；验收见 §五（16 条均可执行）。
+前端交互）；验收见 §五（21 条均可执行）。
 
 ### Gate C · 反向证明
 
-✅ 16 条全过可反证四条故事：故事 1 ← 验收 1/2/3/16；故事 2 ← 5/6/7/8/11/12/13；
-故事 3 ← 9/10/14；故事 4 ← 3/4/14。无未被验收覆盖的故事。
+✅ 21 条全过可反证四条故事：故事 1 ← 验收 1/2/3/16；故事 2 ← 5/6/7/8/11/12/13/15/18/19/21；
+故事 3 ← 9/10/14/15/20；故事 4 ← 3/4/14。17 是索引支撑项（性能回归），不单独反证故事；
+无未被验收覆盖的故事。
 
 ### Gate Result
 
