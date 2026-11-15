@@ -390,6 +390,32 @@ describe('SessionList 底部新建分组', () => {
   })
 })
 
+describe('SessionList 新建会话（T4：回收站打开时创建后回聊天）', () => {
+  it('创建成功 → 投 open-session 并关闭弹窗（App 据此退出回收站）', async () => {
+    store.agents = [{ id: 'a1', name: 'ds猫', avatar: '🐱', llmProvider: 'deepseek' } as never]
+    const create = vi.spyOn(store, 'createSession').mockResolvedValue(undefined)
+    // 全局 test-setup 把新建弹窗 stub 了；本用例要真走一遍「创建成功」，局部关掉 stub
+    wrapper = mount(SessionList, {
+      global: {
+        plugins: [pinia],
+        stubs: { SessionCreateModal: false },
+        directives: { focus: { mounted() {} } },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.find('.btn-new-session-header').trigger('click')
+    await wrapper.find('.modal .input').setValue('回收站里新建的会话')
+    await wrapper.find('.agent-select-item').trigger('click')
+    await wrapper.find('.btn-create').trigger('click')
+    await flushPromises()
+
+    expect(create).toHaveBeenCalledWith('回收站里新建的会话', ['a1'])
+    expect(wrapper.emitted('open-session')).toHaveLength(1)
+    expect(wrapper.find('.modal').exists()).toBe(false)
+  })
+})
+
 describe('SessionList 静态结构（归档面已退场）', () => {
   it('无归档按钮 / 无「显示已归档」开关 / 不读 showArchived', () => {
     expect(source).not.toContain('session-archive')

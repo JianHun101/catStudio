@@ -359,6 +359,17 @@ function closeCreate(): void {
   showCreate.value = false
   store.fetchData(true) // 创建会话后刷新列表（force：dataReady 已就绪，不 force 会静默失效）
 }
+
+/**
+ * 新建会话成功：关弹窗 + 刷新列表 + 通知 App 回聊天。
+ * 回收站视图下左栏 `＋` 仍可见，创建成功后中心区还停在回收站会让人以为「没生效」；
+ * 不要用 App watch `activeSessionId` 兜——在回收站里删掉当前会话也会改它，会误关回收站。
+ */
+function onSessionCreated(): void {
+  showCreate.value = false
+  emit('open-session')
+  store.fetchData(true)
+}
 </script>
 
 <template>
@@ -605,7 +616,7 @@ function closeCreate(): void {
       <button v-else class="btn-new-group" @click="startCreateGroup">＋ 新建分组</button>
     </div>
 
-    <SessionCreateModal v-if="showCreate" @close="closeCreate" />
+    <SessionCreateModal v-if="showCreate" @close="closeCreate" @created="onSessionCreated" />
 
     <GroupDeleteModal
       v-if="deleteTarget"

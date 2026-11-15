@@ -252,11 +252,16 @@ describe('App.vue 回收站中心区视图（T4）', () => {
   it('showTrash 默认关闭；TrashView 在中心区 v-if（不是全屏覆盖层）', () => {
     expect(appSource).toContain('const showTrash = ref(false)')
     expect(appSource).toContain("import TrashView from './components/TrashView.vue'")
-    // 中心区唯一开关：TrashView 与 ChatPanel 同处 .panel-center，v-if / v-else 互斥
+    // 中心区唯一开关：TrashView 与 ChatPanel 同处 .panel-center
     const center = appSource.match(/<div class="center-content">[\s\S]*?<\/div>\s*<\/main>/)
     expect(center, '未找到中心区内容块').toBeTruthy()
     expect(center![0]).toContain('<TrashView v-if="showTrash"')
     expect(center![0]).toContain('<ChatPanel')
+    // P2-1：ChatPanel 只隐藏、不卸载（v-show）。`v-if/v-else` 会销毁重组件，
+    // 草稿/粘贴图/在途发送守卫/阅读位置都是它的本地态，销毁即丢。
+    expect(center![0]).toContain('v-show="!showTrash"')
+    expect(center![0]).toContain(':hidden="showTrash"')
+    expect(center![0]).not.toMatch(/<ChatPanel\s+v-(?:else|if)/)
     // 三栏布局保留：回收站不是 anyOverlayOpen 的一员（否则左栏消失、点会话回聊天不可达）
     expect(appSource).toMatch(
       /anyOverlayOpen = computed\(\(\) => showSettings\.value \|\| showEval\.value \|\| showTrace\.value\)/
@@ -303,9 +308,13 @@ describe('App.vue 回收站中心区视图（T4）', () => {
     expect(trashViewSource).toContain('purgeTrashGroup')
   })
 
-  it('ChatPanel 只做撤销 toast 宿主，不承载回收站视图', () => {
-    expect(chatPanelSource).toContain('store.undoToast')
-    expect(chatPanelSource).toContain('store.undoLastTrash()')
+  it('单删撤销 toast 宿在 App 根级（回收站/全屏页打开时也可见），ChatPanel 不承载', () => {
+    // P3-1：toast 若留在 ChatPanel 内，进回收站时 v-show 把它一起藏住，5 秒窗口静默过期
+    expect(appSource).toContain('store.undoToast')
+    expect(appSource).toContain('store.undoLastTrash()')
+    expect(appSource).toContain('store.dismissUndoToast()')
+    expect(chatPanelSource).not.toContain('store.undoToast')
+    expect(chatPanelSource).not.toContain('undo-trash-toast')
     expect(chatPanelSource).not.toContain('TrashView')
     expect(chatPanelSource).not.toContain('trashEntries')
   })
