@@ -18,8 +18,10 @@ import {
   buildHandoffTriggerHint,
   buildTriggerFocusHint,
   buildSkillDirectorySection,
+  buildRuntimeSelfCheck,
   resolveRolePlaceholders,
 } from './hints.js'
+import type { RuntimeInstance } from '../runtime-instance.js'
 
 describe('hints', () => {
   beforeEach(async () => {
@@ -711,5 +713,88 @@ describe('buildSkillDirectorySection', () => {
       expect(triggers.length).toBeGreaterThanOrEqual(3)
       expect(triggers.length).toBeLessThanOrEqual(6)
     }
+  })
+})
+
+// ─── 唤醒自检行（票 B 契约 C）─────────────────────────────────────────────
+describe('buildRuntimeSelfCheck', () => {
+  const instance = (over: Partial<RuntimeInstance> = {}): RuntimeInstance => ({
+    bootId: 'c79a40db-1111-4222-8333-444455556666',
+    startedAt: '2026-11-15T15:19:16.838Z',
+    gitSha: '62c8b9b4aabbccddeeff00112233445566778899',
+    gitDirty: 0,
+    ...over,
+  })
+
+  const head =
+    '[运行时自检] 进程 boot=c79a40db，启动于 2026-11-15T15:19:16.838Z，代码 git=62c8b9b4aabb。'
+
+  it('未注册实例 → null（测试进程 / CLI 兜底 / 采集失败都不注入）', () => {
+    expect(buildRuntimeSelfCheck(null, '2026-11-15T10:00:00.000Z')).toBeNull()
+    expect(buildRuntimeSelfCheck(null, null)).toBeNull()
+  })
+
+  it('已重启（启动时刻严格大于锚点）→ 逐字契约文案（A4）', () => {
+    expect(buildRuntimeSelfCheck(instance(), '2026-11-15T10:00:00.000Z')).toBe(
+      `${head}你上次在本会话发言于 2026-11-15T10:00:00.000Z——之后进程已重启过。` +
+        '上一轮所见的进程状态可能已失效：在说「还没重启 / 要重启 / 重启没生效」之前先按本行核对；' +
+        '若你在等重启批准，视为已生效。'
+    )
+  })
+
+  it('未重启（启动更早）→ 逐字契约文案（A4）', () => {
+    expect(buildRuntimeSelfCheck(instance(), '2026-11-15T20:00:00.000Z')).toBe(
+      `${head}你上次在本会话发言于 2026-11-15T20:00:00.000Z——之后未重启。`
+    )
+  })
+
+  it('相等 → 未重启（A5：严格大于才算重启）', () => {
+    expect(buildRuntimeSelfCheck(instance(), '2026-11-15T15:19:16.838Z')).toBe(
+      `${head}你上次在本会话发言于 2026-11-15T15:19:16.838Z——之后未重启。`
+    )
+  })
+
+  it('秒级 `YYYY-MM-DD HH:MM:SS` 与 ISO 毫秒同刻 → 未重启（走 normalizeIsoMs，A5）', () => {
+    expect(
+      buildRuntimeSelfCheck(
+        instance({ startedAt: '2026-11-15T15:19:16.000Z' }),
+        '2026-11-15 15:19:16'
+      )
+    ).toBe(
+      '[运行时自检] 进程 boot=c79a40db，启动于 2026-11-15T15:19:16.000Z，代码 git=62c8b9b4aabb。' +
+        '你上次在本会话发言于 2026-11-15T15:19:16.000Z——之后未重启。'
+    )
+  })
+
+  it('无锚点 → 无法判定文案（A4 / A5）', () => {
+    expect(buildRuntimeSelfCheck(instance(), null)).toBe(
+      `${head}本会话没有你更早的发言，无法判定是否重启。`
+    )
+  })
+
+  it('锚点是非时间串 → 无法判定档，不抛错（A5）', () => {
+    expect(() => buildRuntimeSelfCheck(instance(), 'not-a-time')).not.toThrow()
+    expect(buildRuntimeSelfCheck(instance(), 'not-a-time')).toBe(
+      `${head}本会话没有你更早的发言，无法判定是否重启。`
+    )
+  })
+
+  it('gitDirty === 1 才带「（工作树有未提交改动）」；0 与 null 都不带（A4）', () => {
+    const dirty = buildRuntimeSelfCheck(instance({ gitDirty: 1 }), '2026-11-15T20:00:00.000Z')
+    expect(dirty).toContain('代码 git=62c8b9b4aabb（工作树有未提交改动）。')
+
+    const clean = buildRuntimeSelfCheck(instance({ gitDirty: null }), '2026-11-15T20:00:00.000Z')
+    expect(clean).not.toContain('工作树有未提交改动')
+  })
+
+  it('gitSha === null → 写「未知」，不写空串（A4）', () => {
+    expect(buildRuntimeSelfCheck(instance({ gitSha: null }), '2026-11-15T20:00:00.000Z')).toContain(
+      '代码 git=未知。'
+    )
+  })
+
+  it('文案不出现运行时长 / 相对时间（同进程内每轮稳定，A4）', () => {
+    const text = buildRuntimeSelfCheck(instance(), '2026-11-15T10:00:00.000Z')!
+    expect(text).not.toMatch(/已运行|小时|分钟前|天前/)
   })
 })

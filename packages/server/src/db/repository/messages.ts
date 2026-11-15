@@ -300,6 +300,31 @@ export function countBySession(sessionId: string): number {
 }
 
 /**
+ * 本会话中该 agent **最近一条回复**的 `created_at`（票 B 契约 B；原始值，不归一化）。
+ *
+ * 用途：唤醒自检的对比锚点——回答「自**你**上次说话以来，进程重启过没有」。
+ * 不用触发消息做锚：用户重启后再发消息的场景会恒判「未重启」，恰好错过要治的事故。
+ *
+ * 不用上下文里的消息数组：`relevantMessages` 是可见性过滤 + 折叠压缩后的窗口，
+ * 长会话里本猫上一条发言可能已不在窗口内——而那恰是「等重启」最常发生的位置。
+ * 锚点必须查库。
+ *
+ * 排序 `created_at DESC, id DESC` 与列表同口径：同一毫秒多条时靠 `id` 定序。
+ * 走既有 `idx_messages_session(session_id, created_at, id)`。
+ */
+export function getLastAgentMessageAt(sessionId: string, agentId: string): string | null {
+  const row = db
+    .prepare(
+      `SELECT created_at FROM messages
+       WHERE session_id = ? AND agent_id = ? AND role = 'agent'
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(sessionId, agentId) as { created_at: string } | undefined
+  return row?.created_at ?? null
+}
+
+/**
  * 批量取每个会话**最后一条消息**的 `created_at`（T6：列表行「最后消息时间」）。
  *
  * `MAX(created_at)` 分组一次取全量——**禁止逐会话查**（N 个会话就是 N 次往返，
