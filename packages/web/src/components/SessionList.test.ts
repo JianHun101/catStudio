@@ -10,11 +10,14 @@ import { useChatStore } from '@/stores/chat'
 import { api } from '@/composables/useApi'
 import type { GroupedSession, SessionGroup } from '@/composables/useApi'
 
-// 组件只消费 api 对象；本票用到的只有绑定查询（删组确认的阻塞判据）
+// 组件只消费 api 对象；本票用到的有绑定查询、删除与回收站重拉
 vi.mock('@/composables/useApi', () => ({
   api: {
     getConnectorBindings: vi.fn(),
     getSessionGroups: vi.fn(),
+    deleteSession: vi.fn(),
+    getTrash: vi.fn(),
+    markSessionRead: vi.fn(),
   },
 }))
 
@@ -69,8 +72,9 @@ let pinia: ReturnType<typeof createPinia>
 let store: ReturnType<typeof useChatStore>
 let wrapper: VueWrapper | null = null
 
-function mountList(): VueWrapper {
+function mountList(props: Record<string, unknown> = {}): VueWrapper {
   wrapper = mount(SessionList, {
+    props,
     global: {
       plugins: [pinia],
       // v-focus 是全局指令；单测里给个空实现即可（不测聚焦行为）
@@ -84,6 +88,13 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(api.getConnectorBindings).mockResolvedValue({ ok: true, bindings: [] } as any)
   vi.mocked(api.getSessionGroups).mockResolvedValue({ groups: [] } as any)
+  vi.mocked(api.deleteSession).mockResolvedValue({
+    id: 's1',
+    deletedAt: '2026-01-05T00:00:00.000Z',
+    purgeAfter: '2026-01-12T00:00:00.000Z',
+  } as any)
+  vi.mocked(api.getTrash).mockResolvedValue({ entries: [] } as any)
+  vi.mocked(api.markSessionRead).mockResolvedValue({ ok: true } as any)
   pinia = createPinia()
   setActivePinia(pinia)
   store = useChatStore()
@@ -157,8 +168,8 @@ describe('SessionList 批量归组', () => {
     expect(w.find('.batch-move-trigger').exists()).toBe(true)
     const batchButtons = w.findAll('.batch-btn')
     expect(batchButtons.map((b) => b.text())).toEqual(['归组', '删除', '取消'])
-    // T2 前回收站未接线：批量删除必须是禁用态（现有 DELETE 还是物理删除）
-    expect(batchButtons[1]!.attributes('disabled')).toBeDefined()
+    // T2 已接线：批量删除默认可用（关闸形态用 `trashEnabled: false` 单独钉，见下）
+    expect(batchButtons[1]!.attributes('disabled')).toBeUndefined()
 
     await w.find('.batch-move-trigger').trigger('click')
     const targets = w.findAll('.batch-move-item').map((b) => b.text())
@@ -248,8 +259,8 @@ describe('SessionList 删组确认', () => {
     expect(modal.find('.blocked-hint').text()).toContain('已绑定外部群')
   })
 
-  it('回收站未接线（T2 前）：第二项置灰、提示未启用，不依赖忙碌/绑定', async () => {
-    const w = mountList()
+  it('关闸（trashEnabled:false）：第二项置灰、提示未启用，不依赖忙碌/绑定', async () => {
+    const w = mountList({ trashEnabled: false })
     await flushPromises()
 
     const modal = await openDeleteModal(w)
@@ -278,9 +289,9 @@ describe('SessionList 删组确认', () => {
 })
 
 describe('SessionList 行菜单删除入口', () => {
-  it('回收站未接线（T2 前）：移入回收站禁用，点击不触发删除', async () => {
+  it('关闸（trashEnabled:false）：移入回收站禁用，点击不触发删除', async () => {
     const spy = vi.spyOn(store, 'trashSessions')
-    const w = mountList()
+    const w = mountList({ trashEnabled: false })
     await flushPromises()
 
     await w.findAll('.row-more')[0]!.trigger('click')
@@ -289,6 +300,68 @@ describe('SessionList 行菜单删除入口', () => {
 
     await trashItem.trigger('click')
     expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('单条删除 → trashSessions 带 undo:true（5 秒撤销只给单删）', async () => {
+    const spy = vi.spyOn(store, 'trashSessions').mockResolvedValue([])
+    const w = mountList()
+    await flushPromises()
+
+    await w.findAll('.row-more')[0]!.trigger('click')
+    await w.findAll('.row-menu .menu-item')[1]!.trigger('click')
+
+    expect(spy).toHaveBeenCalledWith(['s1'], { enabled: true, undo: true })
+  })
+
+  it('批量删除 → trashSessions 不带 undo（批量不提供撤销）', async () => {
+    const spy = vi.spyOn(store, 'trashSessions').mockResolvedValue([])
+    const w = mountList()
+    await flushPromises()
+
+    await w.find('.row-check input').trigger('change')
+    await w.findAll('.batch-btn')[1]!.trigger('click')
+
+    expect(spy).toHaveBeenCalledWith(['s1'], { enabled: true })
+  })
+})
+
+describe('SessionList 回收站入口（T4）', () => {
+  it('头行 🗑 显示条目数；空时只留图标', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    expect(w.find('.head-trash').exists()).toBe(true)
+    expect(w.find('.head-badge').exists()).toBe(false)
+
+    store.trashEntries = [
+      {
+        kind: 'session',
+        id: 's9',
+        name: '旧会话',
+        deletedAt: '2026-01-05T00:00:00.000Z',
+        purgeAfter: '2026-01-12T00:00:00.000Z',
+        daysLeft: 7,
+        sessionCount: 1,
+        messageCount: 1,
+        groupId: null,
+        groupName: null,
+      },
+    ]
+    await flushPromises()
+
+    expect(w.find('.head-badge').text()).toBe('1')
+    expect(w.find('.head-trash').attributes('title')).toContain('回收站（1 项）')
+  })
+
+  it('点 🗑 向 App 投 open-trash；点会话向 App 投 open-session', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    await w.find('.head-trash').trigger('click')
+    expect(w.emitted('open-trash')).toHaveLength(1)
+
+    await w.findAllComponents(SessionRow)[0]!.find('.session-item').trigger('click')
+    expect(w.emitted('open-session')).toHaveLength(1)
   })
 })
 

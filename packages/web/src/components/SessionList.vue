@@ -9,8 +9,30 @@ import { createLogger } from '@/utils/logger'
 
 const log = createLogger('SessionList')
 
+/**
+ * 回收站接线开关的可注入副本（默认跟随 store 的 `TRASH_ENABLED`）。生产由 App 默认打开；
+ * 测试可显式传 `false` 复现「T2 前删除入口全禁用」的守卫形态。
+ */
+const props = withDefaults(defineProps<{ trashEnabled?: boolean }>(), {
+  trashEnabled: TRASH_ENABLED,
+})
+
+const emit = defineEmits<{
+  (e: 'open-trash'): void
+  (e: 'open-session'): void
+}>()
+
 const store = useChatStore()
 const showCreate = ref(false)
+
+/** 头行 `🗑 N`：N = 回收站条目数（整组段 + 会话段之和，不是会话总数） */
+const trashCount = computed(() => store.trashEntries.length)
+
+/** 行点击 = 用户主动切回聊天：通知 App 关掉中心区的回收站视图 */
+function onRowJoin(id: string): void {
+  emit('open-session')
+  store.joinSession(id)
+}
 
 /**
  * 左栏 = 「分组 + 未分组」（T3 票面）。
@@ -77,11 +99,14 @@ async function moveOne(sessionId: string, groupId: string | null): Promise<void>
 
 async function trashOne(sessionId: string): Promise<void> {
   listError.value = ''
-  if (!TRASH_ENABLED) {
+  if (!props.trashEnabled) {
     listError.value = '回收站暂未启用'
     return
   }
-  const failed = await store.trashSessions([sessionId])
+  const failed = await store.trashSessions([sessionId], {
+    enabled: props.trashEnabled,
+    undo: true,
+  })
   if (failed.length > 0) listError.value = failed[0]!.message
 }
 
@@ -210,11 +235,14 @@ async function batchMove(groupId: string | null): Promise<void> {
 
 async function batchTrash(): Promise<void> {
   batchError.value = ''
-  if (!TRASH_ENABLED) {
+  if (!props.trashEnabled) {
     batchError.value = '回收站暂未启用'
     return
   }
-  const failed = await store.trashSessions([...selectedIds.value])
+  // 批量删除不提供撤销（票面契约）：`undo` 缺省 false
+  const failed = await store.trashSessions([...selectedIds.value], {
+    enabled: props.trashEnabled,
+  })
   clearSelection()
   if (failed.length > 0) {
     // 部分失败：成功项已移出列表，失败项保留并逐条点名（不整批回滚、不静默吞）
@@ -282,8 +310,8 @@ function openDeleteGroup(group: SessionGroup): void {
 
 async function confirmDeleteGroup(mode: 'dissolve' | 'trash'): Promise<void> {
   if (!deleteTarget.value) return
-  if (mode === 'trash' && !TRASH_ENABLED) {
-    // 防御：第二项在 T2 前是禁用态，不允许任何路径落到旧物理删除
+  if (mode === 'trash' && !props.trashEnabled) {
+    // 防御：关闸态下第二项不可选，不允许任何路径落到删除 API
     deleteError.value = '回收站暂未启用'
     return
   }
@@ -338,7 +366,7 @@ function closeCreate(): void {
        左栏收起时 `.panel-left` 整块 `display:none`（App.vue），该分支 DOM 永不可见 = 死代码。 -->
   <div class="session-list">
     <!-- 头行：48px，与主区顶栏、右栏「成员 · N」同一水平线。
-         形态按 spec §4.4：`会话` +（回收站入口由 T4 追加在此处）+ `＋`。
+         形态按 spec §4.4：`会话` + `🗑 N`（T4 回收站入口）+ `＋`。
          批量选择态整行临时变成 `已选 N ｜ 归组 ｜ 删除 ｜ 取消`。 -->
     <div class="section-header">
       <template v-if="selecting">
@@ -353,8 +381,8 @@ function closeCreate(): void {
           </button>
           <button
             class="batch-btn danger"
-            :disabled="!TRASH_ENABLED"
-            :title="TRASH_ENABLED ? undefined : '回收站暂未启用'"
+            :disabled="!trashEnabled"
+            :title="trashEnabled ? undefined : '回收站暂未启用'"
             @click.stop="batchTrash"
           >
             删除
@@ -365,6 +393,17 @@ function closeCreate(): void {
       <template v-else>
         <span class="section-header-label">会话</span>
         <span class="section-header-right">
+          <!-- 回收站入口：有内容显示条目数，空时只留图标（spec §4.4 头行三件：会话/🗑/＋） -->
+          <button
+            class="head-trash"
+            :class="{ 'has-items': trashCount > 0 }"
+            :title="trashCount > 0 ? `回收站（${trashCount} 项）` : '回收站'"
+            :aria-label="trashCount > 0 ? `回收站，${trashCount} 项` : '回收站'"
+            @click="emit('open-trash')"
+          >
+            <span class="head-trash-icon" aria-hidden="true">🗑</span>
+            <span v-if="trashCount > 0" class="head-badge">{{ trashCount }}</span>
+          </button>
           <!-- 新建会话：头行右侧小号 ＋（spec §4.4 头行只留 会话 / 🗑N / ＋） -->
           <button
             class="btn-new-session-header"
@@ -508,9 +547,9 @@ function closeCreate(): void {
               :checked="selectedIds.has(s.id)"
               :unread="store.unreadCounts.get(s.id) ?? 0"
               :groups="store.groups"
-              :trash-enabled="TRASH_ENABLED"
+              :trash-enabled="trashEnabled"
               @select="toggleSelect(s.id)"
-              @join="store.joinSession(s.id)"
+              @join="onRowJoin(s.id)"
               @move="moveOne(s.id, $event)"
               @trash="trashOne(s.id)"
             />
@@ -532,9 +571,9 @@ function closeCreate(): void {
             :checked="selectedIds.has(s.id)"
             :unread="store.unreadCounts.get(s.id) ?? 0"
             :groups="store.groups"
-            :trash-enabled="TRASH_ENABLED"
+            :trash-enabled="trashEnabled"
             @select="toggleSelect(s.id)"
-            @join="store.joinSession(s.id)"
+            @join="onRowJoin(s.id)"
             @move="moveOne(s.id, $event)"
             @trash="trashOne(s.id)"
           />
@@ -573,7 +612,7 @@ function closeCreate(): void {
       :group="deleteTarget"
       :sessions="deleteSessions"
       :blocked="deleteBlocked"
-      :trash-enabled="TRASH_ENABLED"
+      :trash-enabled="trashEnabled"
       :submitting="deleteSubmitting"
       :error="deleteError"
       @cancel="deleteTarget = null"
@@ -643,6 +682,48 @@ function closeCreate(): void {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 回收站入口：图标 + 条目数角标（空时只有图标）。悬停高亮与 ＋ 同款。 */
+.head-trash {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all var(--ease-out);
+}
+
+.head-trash:hover,
+.head-trash.has-items {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.head-badge {
+  position: absolute;
+  top: -4px;
+  right: -5px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-subtle);
+  color: var(--accent-text);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 12px;
+  text-align: center;
 }
 
 /* 新建会话按钮：头行右侧小号（spec §4.4 头行 ＋），hover 时 accent 高亮 */

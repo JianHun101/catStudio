@@ -99,7 +99,8 @@ evidence:
 
 - `purgeAfter = deleted_at + 7×24h`，**服务端计算**（不信任前端时钟），接口按需返回。
 - 服务启动扫一次 + 每小时扫一次；清扫主体**两类**：会话与组。契约是可注入时钟的导出函数
-  `purgeExpiredTrash(now = Date.now())`（`index.ts` 只调它）；**每条会话一个事务**，失败记
+  `purgeExpiredTrash(now = Date.now())`（由 `trash-purge.ts` 的 `runTrashPurge` 调度，
+  `index.ts` 只调 `runTrashPurge`）；**每条会话一个事务**，失败记
   日志继续；probe 模式跳过。整组删除的同批会话归组条目清（`deleted_at` 与组精确相等），
   其余已删会话归会话条目清，同一行不会被两条路径各清一次。
 - 物理清除复用现有链：执行日志 → 消息（自带子行）→ 会话依赖（flow / verdict /

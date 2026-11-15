@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import type { GroupedSession, SessionGroup } from '@/composables/useApi'
 
@@ -18,10 +18,13 @@ const props = withDefaults(
   defineProps<{
     session: GroupedSession
     groups: SessionGroup[]
-    /** 回收站接线是否就绪（T2 前 false：入口禁用，绝不落到旧的物理删除） */
+    /**
+     * 回收站接线是否就绪（T4 起生产恒 true）。默认 **false**（fail-safe）：漏传时
+     * 藏起危险动作，而不是放行；要显式打开。
+     */
     trashEnabled?: boolean
   }>(),
-  { trashEnabled: true }
+  { trashEnabled: false }
 )
 
 const emit = defineEmits<{

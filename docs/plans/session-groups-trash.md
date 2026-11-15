@@ -67,8 +67,9 @@ dev 库预期：60 会话 / 37 归档 → 默认列表 23 条 + 折叠的「归�
 - `purgeAfter = deleted_at + 7×24h`，**服务端算**（`new Date(deleted_at).getTime() + 7d`）。
 - 清扫主体是**两类**：会话（`sessions.deleted_at <= cutoff`）与组
   （`session_groups.deleted_at <= cutoff`）。契约是一个可注入时钟的导出函数
-  `purgeExpiredTrash(now = Date.now())`（放 `db/repository/trash.ts`）；`index.ts` 只负责
-  启动扫一次 + 每小时调它，不自带 SQL——否则「±1 分钟」这类边界没有测试缝。
+  `purgeExpiredTrash(now = Date.now())`（放 `db/repository/trash.ts`）；调度收在
+  `trash-purge.ts` 的 `runTrashPurge(phase)`（广播与引擎槽位清理也在那里），`index.ts` 只负责
+  启动扫一次 + 每小时调 `runTrashPurge`，不自带 SQL——否则「±1 分钟」这类边界没有测试缝。
 - cutoff 由 JS 生成 ISO 毫秒串后传入，**不**与秒级列（`created_at/updated_at`）同框比较。
 - **归属不重叠**：整组删除产生的同批会话（`group_id` 指向一个 `deleted_at` 与之字符串相等的组）
   归**组条目**清；其余已删会话归**会话条目**清。同一行不会被两条路径各清一次。
@@ -116,22 +117,22 @@ interface TrashEntry {
 
 ### 3.2 路由
 
-| 方法 / 路径                                     | 语义                                                             | 成功                                                | 失败                                       |
-| ----------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------ |
-| `GET /api/sessions`                             | 未删除会话，按 `updated_at DESC`，带 `groupId`                   | `SessionConfig[]`                                   | —                                          |
-| `PATCH /api/sessions/:id`                       | 既有字段 + `groupId: string \| null`                             | `SessionConfig`                                     | 404 会话不存在/已删；400 组不存在或已删    |
-| `DELETE /api/sessions/:id`                      | 移入回收站（幂等）                                               | `{ id, deletedAt, purgeAfter }`                     | 404 从未存在/已清除；409 busy/bound        |
-| `GET /api/sessions/trash`                       | 未过期条目（`deleted_at > cutoff`），`deletedAt DESC`            | `{ entries: TrashEntry[] }`                         | —                                          |
-| `POST /api/sessions/:id/restore`                | 恢复单条                                                         | `{ session, groupId }`（原组已删则 `groupId=null`） | 404（不在回收站/已清除）；409 属于整组删除 |
-| `DELETE /api/sessions/:id/purge`                | 彻底删除单条                                                     | `{ id }`                                            | 404；409 未删除 / 属于整组删除             |
-| `GET /api/session-groups`                       | 活组，按 `created_at ASC`                                        | `{ groups: SessionGroup[] }`                        | —                                          |
-| `POST /api/session-groups`                      | 新建 `{ name }`                                                  | 201 `SessionGroup`                                  | 400 名字非法；409 重名                     |
-| `PATCH /api/session-groups/:id`                 | `{ name?, collapsed? }`                                          | `SessionGroup`                                      | 404；409 重名                              |
-| `DELETE /api/session-groups/:id`                | 不带 `withSessions` = 仅解散（不动会话，**无 busy/bound 守卫**） | `{ mode: 'dissolve', id }`                          | 404                                        |
-| `DELETE /api/session-groups/:id?withSessions=1` | 组软删 + 同批会话进回收站（零未删会话降级为仅解散）              | `{ mode: 'trash' \| 'dissolve', id }`               | 404；409 busy/bound（**一行不改**）        |
-| `POST /api/session-groups/:id/restore`          | 恢复整组（只清同批）                                             | `{ group, sessions }`                               | 404（组不在回收站/已清除）                 |
-| `DELETE /api/session-groups/:id/purge`          | 彻底删除已删组 + 同批会话                                        | `{ id }`                                            | 404；409 组未删除                          |
-| `DELETE /api/trash`                             | 清空回收站                                                       | `{ purged: { groups: number, sessions: number } }`  | —                                          |
+| 方法 / 路径                                     | 语义                                                             | 成功                                                | 失败                                                                                    |
+| ----------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `GET /api/sessions`                             | 未删除会话，按 `updated_at DESC`，带 `groupId`                   | `SessionConfig[]`                                   | —                                                                                       |
+| `PATCH /api/sessions/:id`                       | 既有字段 + `groupId: string \| null`                             | `SessionConfig`                                     | 404 会话不存在/已删；400 组不存在或已删                                                 |
+| `DELETE /api/sessions/:id`                      | 移入回收站（幂等）                                               | `{ id, deletedAt, purgeAfter }`                     | 404 从未存在/已清除；409 busy/bound                                                     |
+| `GET /api/sessions/trash`                       | 未过期条目（`deleted_at > cutoff`），`deletedAt DESC`            | `{ entries: TrashEntry[] }`                         | —                                                                                       |
+| `POST /api/sessions/:id/restore`                | 恢复单条                                                         | `{ session, groupId }`（原组已删则 `groupId=null`） | 404（不在回收站/已清除）；409 属于整组删除                                              |
+| `DELETE /api/sessions/:id/purge`                | 彻底删除单条                                                     | `{ id }`                                            | 404；409 未删除 / 属于整组删除                                                          |
+| `GET /api/session-groups`                       | 活组，按 `created_at ASC`                                        | `{ groups: SessionGroup[] }`                        | —                                                                                       |
+| `POST /api/session-groups`                      | 新建 `{ name }`                                                  | 201 `SessionGroup`                                  | 400 名字非法；409 重名                                                                  |
+| `PATCH /api/session-groups/:id`                 | `{ name?, collapsed? }`                                          | `SessionGroup`                                      | 404；409 重名                                                                           |
+| `DELETE /api/session-groups/:id`                | 不带 `withSessions` = 仅解散（不动会话，**无 busy/bound 守卫**） | `{ mode: 'dissolve', id }`                          | 404                                                                                     |
+| `DELETE /api/session-groups/:id?withSessions=1` | 组软删 + 同批会话进回收站（零未删会话降级为仅解散）              | `{ mode: 'trash' \| 'dissolve', id }`               | 404；409 busy/bound（**一行不改**）                                                     |
+| `POST /api/session-groups/:id/restore`          | 恢复整组（只清同批）                                             | `{ group, sessions }`                               | 404（组不在回收站/已清除）                                                              |
+| `DELETE /api/session-groups/:id/purge`          | 彻底删除已删组 + 同批会话                                        | `{ id }`                                            | 404；409 组未删除；500 `GROUP_PURGE_INCOMPLETE`（组行未清成；同批会话已先清，下轮重试） |
+| `DELETE /api/trash`                             | 清空回收站                                                       | `{ purged: { groups: number, sessions: number } }`  | —                                                                                       |
 
 - **路由顺序**：`GET /api/sessions/trash` 必须注册在 `GET /api/sessions/:id` 之前（静态路由
   优先，但显式顺序是契约的一部分，避免以后换路由库时被 `:id='trash'` 吞掉）。
