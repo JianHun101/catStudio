@@ -280,6 +280,12 @@ export const useChatStore = defineStore('chat', () => {
    * 头行 `🗑 N` 读 `trashEntries.length`（两段条目数之和，不是会话总数）。
    */
   const trashEntries = ref<TrashEntry[]>([])
+  /**
+   * 最近一次回收站拉取失败的原因（`null` = 无错误）。与 `trashEntries` 分开存：
+   * 拉取失败**不清空**已有条目（旧读数比伪装成「空」好），由 TrashView 区分
+   * 「回收站是空的」与「没拉到」两种状态。
+   */
+  const trashLoadError = ref<string | null>(null)
   /** 单删的 5 秒撤销 toast（批量删除没有撤销，见 `trashSessions`） */
   const undoToast = ref<UndoTrashToast | null>(null)
   const activeSessionId = ref<string | null>(null)
@@ -1053,13 +1059,17 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 重拉回收站。失败只记日志：回收站是列表的二级数据，不该让左栏跟着报错；
    * 头行计数会保留上一次读数，用户进回收站时动作路径会再拉一次。
+   * 但失败原因要落 `trashLoadError`——否则首次进回收站接口失败会被渲染成
+   * 「回收站是空的」，把「不知道」伪装成「空的」。
    */
   async function fetchTrash(): Promise<void> {
     try {
       const res = await api.getTrash()
       trashEntries.value = res.entries ?? []
+      trashLoadError.value = null
     } catch (err) {
       log.error('fetchTrash failed', { error: String(err) })
+      trashLoadError.value = err instanceof Error ? err.message : String(err)
     }
   }
 
@@ -1666,18 +1676,28 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     // 恢复（单条 / 整组）→ 会话按 updatedAt 插回列表；整组恢复另有 GROUPS_CHANGED 刷组。
+    // 若恢复的正是本 tab 撤销 toast 指向的会话（另一 tab 已恢复），toast 立即撤掉——
+    // 否则用户点「撤销」才吃 404。
     socket.on(
       Events.SESSION_RESTORED,
       (data: { groupId: string | null; sessions?: SessionConfig[] }) => {
         for (const session of data.sessions ?? []) insertSessionSorted(session)
+        const restored = new Set((data.sessions ?? []).map((s) => s.id))
+        if (undoToast.value && restored.has(undoToast.value.sessionId)) dismissUndoToast()
         void fetchTrash()
       }
     )
 
     // 彻底删除 / 清空 / 到期清扫 → 回收站条目重拉（会话本就不在活列表里，无需投影）。
-    socket.on(Events.SESSION_PURGED, () => {
-      void fetchTrash()
-    })
+    // 命中的是撤销 toast 那条（别处已清掉）时同步撤 toast，不留死入口。
+    socket.on(
+      Events.SESSION_PURGED,
+      (data: { sessionIds?: string[]; groupIds?: string[] } = {}) => {
+        const purged = new Set(data.sessionIds ?? [])
+        if (undoToast.value && purged.has(undoToast.value.sessionId)) dismissUndoToast()
+        void fetchTrash()
+      }
+    )
 
     socket.on(Events.SESSION_MESSAGES_CLEARED, (data: { sessionId: string }) => {
       if (activeSessionId.value === data.sessionId) {
@@ -1912,6 +1932,7 @@ export const useChatStore = defineStore('chat', () => {
     trashSessions,
     deleteGroup,
     trashEntries,
+    trashLoadError,
     fetchTrash,
     undoToast,
     undoLastTrash,

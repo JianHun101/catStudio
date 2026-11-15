@@ -2613,6 +2613,38 @@ describe('chatStore', () => {
       expect(mockGetTrash).toHaveBeenCalledTimes(2)
     })
 
+    it('另一 tab 恢复 / 清除同一条 → 本 tab 撤销 toast 自动撤（不留死入口）', () => {
+      const restored = mockOn.mock.calls.find((c) => c[0] === 'session-restored')?.[1] as (d: {
+        groupId: string | null
+        sessions: SessionConfig[]
+      }) => void
+      store.undoToast = { sessionId: 's1', title: '会话 s1', daysLeft: 7 }
+      restored({ groupId: null, sessions: [grouped('s1', null, '2026-01-03T00:00:00.000Z')] })
+      expect(store.undoToast).toBeNull()
+
+      const purged = mockOn.mock.calls.find((c) => c[0] === 'session-purged')?.[1] as (d: {
+        sessionIds: string[]
+        groupIds: string[]
+      }) => void
+      store.undoToast = { sessionId: 's2', title: '会话 s2', daysLeft: 7 }
+      purged({ sessionIds: ['s2'], groupIds: [] })
+      expect(store.undoToast).toBeNull()
+    })
+
+    it('fetchTrash 失败 → 保留旧条目并置错误态；下次成功清除错误', async () => {
+      store.trashEntries = [trashEntry()]
+      mockGetTrash.mockRejectedValueOnce(new Error('boom'))
+      await store.fetchTrash()
+      expect(store.trashLoadError).toBe('boom')
+      // 失败不清空旧读数（旧条目好过伪装成「空的」）
+      expect(store.trashEntries).toHaveLength(1)
+
+      mockGetTrash.mockResolvedValueOnce({ entries: [] })
+      await store.fetchTrash()
+      expect(store.trashLoadError).toBeNull()
+      expect(store.trashEntries).toEqual([])
+    })
+
     it('删当前会话 → 切到下一条可见会话，跳过折叠组里的隐藏行', async () => {
       store.groups = [
         { ...groupsFixture[1]!, collapsed: true },

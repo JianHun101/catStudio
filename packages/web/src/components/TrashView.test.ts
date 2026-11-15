@@ -110,6 +110,19 @@ describe('TrashView 两段列表', () => {
     await flushPromises()
     expect(store.fetchTrash).toHaveBeenCalled()
   })
+
+  it('拉取失败且无条目 → 错误态 + 重试（不把「不知道」伪装成「空的」）', async () => {
+    store.trashEntries = []
+    store.trashLoadError = 'Failed to fetch'
+    const w = mountView()
+    await flushPromises()
+
+    expect(w.text()).toContain('回收站加载失败')
+    expect(w.text()).not.toContain('回收站是空的')
+    await w.find('.trash-empty .retry').trigger('click')
+    // onMounted 一次 + 点重试一次
+    expect(store.fetchTrash).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('TrashView 动作', () => {
@@ -172,6 +185,30 @@ describe('TrashView 动作', () => {
     await flushPromises()
 
     expect(w.find('.trash-modal').exists()).toBe(true)
+  })
+
+  it('请求在途时点遮罩不关确认框（关掉不会取消已发出的请求）', async () => {
+    store.trashEntries = [SESSION_ENTRY]
+    let resolvePurge!: (v: boolean) => void
+    vi.spyOn(store, 'purgeTrashSession').mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolvePurge = resolve
+        })
+    )
+    const w = mountView()
+    await flushPromises()
+
+    await w.find('.trash-item .row-btn.danger').trigger('click')
+    await w.find('.trash-btn.danger-solid').trigger('click')
+    await flushPromises()
+
+    await w.find('.trash-modal-overlay').trigger('click')
+    expect(w.find('.trash-modal').exists()).toBe(true)
+
+    resolvePurge(true)
+    await flushPromises()
+    expect(w.find('.trash-modal').exists()).toBe(false)
   })
 
   it('「返回聊天」向 App 投 close', async () => {

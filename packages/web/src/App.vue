@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import SessionList from './components/SessionList.vue'
 import ChatPanel from './components/ChatPanel.vue'
@@ -165,6 +165,25 @@ onUnmounted(() => {
     </div>
   </Transition>
 
+  <!-- 单删撤销 toast（T4）：宿在 App 根级而非 ChatPanel 内——回收站/三个全屏页打开时
+       ChatPanel 被隐藏（v-show），toast 挂在它里面会一起被藏住，5 秒窗口静默过期。
+       计时与动作都在 store（`undoToast` / `undoLastTrash`），这里只渲染。 -->
+  <div v-if="store.undoToast" class="undo-trash-toast" role="status">
+    <span class="undo-trash-text">
+      「{{ store.undoToast.title }}」已移入回收站 · 剩 {{ store.undoToast.daysLeft }} 天
+    </span>
+    <button type="button" class="undo-trash-action" @click="store.undoLastTrash()">撤销</button>
+    <button
+      type="button"
+      class="undo-trash-close"
+      title="关闭"
+      aria-label="关闭撤销提示"
+      @click="store.dismissUndoToast()"
+    >
+      ✕
+    </button>
+  </div>
+
   <!-- 全局评估告警横幅（自包含：自己拉 l1-metrics；破线才渲染） -->
   <EvalAlertBanner @open-eval="openEval" />
 
@@ -269,14 +288,18 @@ onUnmounted(() => {
 
         <main class="panel-center">
           <div class="center-content">
-            <!-- 回收站是中心区视图（T4）：左栏/右栏保留，只换中心区；点任一会话回聊天 -->
-            <TrashView v-if="showTrash" @close="closeTrash" />
+            <!-- 回收站是中心区视图（T4）：左栏/右栏保留，只换中心区；点任一会话回聊天。
+                 ChatPanel 用 **v-show 保活、不卸载**（P2-1）：草稿、粘贴图、`sending` 发送中
+                 守卫、阅读位置都是组件本地态，`v-if/v-else` 销毁重建会一并丢掉（在途发送
+                 回来还能重复发）。`hidden` 通知它切回时恢复阅读位置。 -->
             <ChatPanel
-              v-else
+              v-show="!showTrash"
               :left-sidebar-open="leftOpen"
+              :hidden="showTrash"
               @toggle-left-sidebar="toggleLeft"
               @open-trace="openTrace"
             />
+            <TrashView v-if="showTrash" @close="closeTrash" />
           </div>
         </main>
 
@@ -290,6 +313,59 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* ─── 单删撤销 toast（T4，根级宿主）────────── */
+
+.undo-trash-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  z-index: 800;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, calc(100vw - 48px));
+  padding: 9px 14px;
+  transform: translateX(-50%);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.undo-trash-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.undo-trash-action {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--accent-text);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.undo-trash-action:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.undo-trash-close {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 /* ─── Error Toast ─────────────────────────── */
 
 .error-toast {

@@ -79,6 +79,12 @@ function askEmpty(): void {
   }
 }
 
+/** 点遮罩关闭确认框：请求在途时不响应（关门不会取消已发出的请求，只会让状态对不上）。 */
+function closeConfirm(): void {
+  if (busy.value) return
+  confirmState.value = null
+}
+
 async function runConfirm(): Promise<void> {
   const pending = confirmState.value
   if (!pending || busy.value) return
@@ -120,7 +126,16 @@ async function runConfirm(): Promise<void> {
         </div>
       </header>
 
-      <div v-if="store.trashEntries.length === 0" class="trash-empty">
+      <div v-if="store.trashLoadError && store.trashEntries.length === 0" class="trash-empty">
+        <div class="trash-empty-icon" aria-hidden="true">⚠️</div>
+        <p>回收站加载失败</p>
+        <p class="hint">{{ store.trashLoadError }}</p>
+        <button type="button" class="trash-btn retry" :disabled="busy" @click="store.fetchTrash()">
+          重试
+        </button>
+      </div>
+
+      <div v-else-if="store.trashEntries.length === 0" class="trash-empty">
         <div class="trash-empty-icon" aria-hidden="true">🗑️</div>
         <p>回收站是空的</p>
         <p class="hint">删除的会话与分组会在这里保留 7 天</p>
@@ -206,7 +221,7 @@ async function runConfirm(): Promise<void> {
     </div>
 
     <!-- 二次确认（永久删除 / 清空）：组件内弹窗，不用 window.confirm -->
-    <div v-if="confirmState" class="trash-modal-overlay" @click.self="confirmState = null">
+    <div v-if="confirmState" class="trash-modal-overlay" @click.self="closeConfirm">
       <div class="trash-modal" role="dialog" aria-modal="true" :aria-label="confirmState.title">
         <h3 class="trash-modal-title">{{ confirmState.title }}</h3>
         <p class="trash-modal-body">{{ confirmState.body }}</p>
@@ -483,6 +498,10 @@ async function runConfirm(): Promise<void> {
 .trash-empty .hint {
   font-size: 11px;
   opacity: 0.8;
+}
+
+.trash-empty .retry {
+  margin-top: 10px;
 }
 
 .trash-modal-overlay {
