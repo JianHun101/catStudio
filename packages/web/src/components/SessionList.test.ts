@@ -325,13 +325,35 @@ describe('SessionList 行菜单删除入口', () => {
   })
 })
 
-describe('SessionList 回收站入口（T4）', () => {
-  it('头行 🗑 显示条目数；空时只留图标', async () => {
+describe('SessionList 回收站入口（T4/T6）', () => {
+  it('头行回收站是 15px 线稿 SVG（不是 emoji）；空时只有图标', async () => {
     const w = mountList()
     await flushPromises()
 
     expect(w.find('.head-trash').exists()).toBe(true)
+    expect(w.find('.head-trash svg').exists()).toBe(true)
+    expect(w.find('.head-trash').text()).not.toContain('🗑')
     expect(w.find('.head-badge').exists()).toBe(false)
+    expect(w.find('.head-trash-count').exists()).toBe(false)
+    expect(w.find('.head-trash').attributes('aria-label')).toBe('回收站')
+
+    // 静态源：15px、currentColor、无 emoji；按钮 24px 方形同 ＋；计数内联（非绝对定位角标）
+    expect(source).not.toContain('🗑')
+    expect(source).toContain('width="15"')
+    expect(source).toContain('height="15"')
+    expect(source).toContain('stroke="currentColor"')
+    const buttonCss = source.match(/\.head-trash \{[\s\S]*?\n\}/)![0]
+    expect(buttonCss).toContain('height: 24px')
+    expect(buttonCss).toContain('border: 1px solid var(--border-subtle)')
+    expect(buttonCss).not.toContain('position: absolute')
+    const countCss = source.match(/\.head-trash-count \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(countCss).not.toContain('position: absolute')
+    expect(source).not.toContain('.head-badge')
+  })
+
+  it('有条目时计数内联在图标右侧（同一按钮内的数字）', async () => {
+    const w = mountList()
+    await flushPromises()
 
     store.trashEntries = [
       {
@@ -349,11 +371,16 @@ describe('SessionList 回收站入口（T4）', () => {
     ]
     await flushPromises()
 
-    expect(w.find('.head-badge').text()).toBe('1')
+    const count = w.find('.head-trash-count')
+    expect(count.exists()).toBe(true)
+    expect(count.text()).toBe('1')
+    // 计数是按钮的直接子节点、且在 svg 之后（不叠在图标上）
+    expect(count.element.parentElement).toBe(w.find('.head-trash').element)
     expect(w.find('.head-trash').attributes('title')).toContain('回收站（1 项）')
+    expect(w.find('.head-trash').attributes('aria-label')).toBe('回收站，1 项')
   })
 
-  it('点 🗑 向 App 投 open-trash；点会话向 App 投 open-session', async () => {
+  it('点回收站向 App 投 open-trash；点会话向 App 投 open-session', async () => {
     const w = mountList()
     await flushPromises()
 

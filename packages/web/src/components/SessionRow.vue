@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { GroupedSession, SessionGroup } from '@/composables/useApi'
+import { fmtSessionTime, fmtUtcFull } from '@/utils/time'
 import SessionActionsMenu from './SessionActionsMenu.vue'
 
 /**
@@ -8,7 +10,7 @@ import SessionActionsMenu from './SessionActionsMenu.vue'
  *
  * 行首复选框由父级控制显隐（悬停/已选），本组件只负责 checked 态与事件。
  */
-defineProps<{
+const props = defineProps<{
   session: GroupedSession
   active: boolean
   checked: boolean
@@ -24,6 +26,22 @@ const emit = defineEmits<{
   (e: 'move', groupId: string | null): void
   (e: 'trash'): void
 }>()
+
+/**
+ * 第二行右侧的「最后消息时间」（T6）。数据源是服务端的 `lastMessageAt`
+ * （最后一条消息的 `created_at`）——**不是 `updatedAt`**：后者只在改名/改成员/压缩时变，
+ * 新消息不碰它，拿来当最后回复时间会显示陈旧值。
+ *
+ * 无消息 / 解析失败 → 不渲染时间，第二行只剩「N 只猫咪」。
+ * `title` 给完整本地时间（列表行只放得下四档短格式）。
+ */
+const lastMessageTime = computed<{ text: string; title: string } | null>(() => {
+  const raw = props.session.lastMessageAt
+  if (!raw) return null
+  const text = fmtSessionTime(raw, new Date())
+  if (!text) return null
+  return { text, title: fmtUtcFull(raw) }
+})
 </script>
 
 <template>
@@ -34,7 +52,12 @@ const emit = defineEmits<{
     <button class="session-item" :class="{ active }" :title="session.title" @click="emit('join')">
       <div class="session-body">
         <span class="session-title">{{ session.title }}</span>
-        <span class="session-meta">{{ session.agentIds.length }} 只猫咪</span>
+        <span class="session-meta">
+          <span class="session-cats">{{ session.agentIds.length }} 只猫咪</span>
+          <span v-if="lastMessageTime" class="session-time" :title="lastMessageTime.title">{{
+            lastMessageTime.text
+          }}</span>
+        </span>
       </div>
       <span v-if="unread > 0 && !active" class="unread-badge">{{
         unread > 99 ? '99+' : unread
@@ -137,6 +160,7 @@ const emit = defineEmits<{
 }
 
 .session-body {
+  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -149,10 +173,30 @@ const emit = defineEmits<{
   text-overflow: ellipsis;
 }
 
+/* 第二行：左「N 只猫咪」、右「最后消息时间」（T6）。两端对齐靠 flex，
+   不是绝对定位——时间永远不会压到左侧文字上，窄栏里左侧先省略。 */
 .session-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 1px;
+}
+
+.session-cats {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-time {
+  flex: none;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .unread-badge {

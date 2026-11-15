@@ -2099,7 +2099,7 @@ describe('ChatPanel B·改 中栏：线降级为色带/淡底，输入板是唯�
   })
 })
 
-// ─── C-1 消息流懒加载接线（向上滚触发 / 锚定 / 状态条 / 日期吸顶）──────────────
+// ─── C-1 消息流懒加载接线（向上滚触发 / 锚定 / 状态条 / 日期分隔不吸顶）──────────────
 describe('C-1 消息流懒加载', () => {
   let wrapper: VueWrapper | null = null
 
@@ -2410,16 +2410,15 @@ describe('C-1 消息流懒加载', () => {
     await flushPromises()
   })
 
-  it('F｜日期分隔吸顶：position: sticky + top: 0，且层级低于告警横幅、不吃点击', () => {
+  it('F｜日期分隔不吸顶：无 position: sticky / top / z-index，且不吃点击', () => {
     const block = source.match(/\.date-separator \{[\s\S]*?\n\}/)
     expect(block).toBeTruthy()
-    expect(block![0]).toContain('position: sticky')
-    expect(block![0]).toContain('top: 0')
-    expect(block![0]).toContain('z-index: 5')
+    // T6：多个日期头同容器 sticky 会在顶部叠成一摞、只露半行字——必须留在消息流里
+    expect(block![0]).not.toContain('position: sticky')
+    expect(block![0]).not.toMatch(/(^|[\s;{])top:/)
+    expect(block![0]).not.toContain('z-index')
     // 不吃点击：滚到日期条下方的气泡操作按钮仍可点
     expect(block![0]).toContain('pointer-events: none')
-    // 两条告警横幅仍是 10（日期条 5 < 10，不盖住横幅）
-    expect(source).toContain('z-index: 10')
     // 分组逻辑不动：仍是「与上一条不同天才出」
     expect(source).toContain('if (prevDate !== currDate) indices.add(i)')
   })
