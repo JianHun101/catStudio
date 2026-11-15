@@ -791,6 +791,8 @@ describe('chatStore', () => {
       store.activeSessionId = 's1'
 
       mockDeleteSession.mockResolvedValue({ ok: true })
+      // 删除活跃会话 → 切到下一个会触发 fetchSessions（第六条路径），给服务端权威列表
+      mockGetSessions.mockResolvedValue([s2])
       await store.deleteSession('s1')
 
       expect(store.sessions).toEqual([s2])
@@ -819,6 +821,8 @@ describe('chatStore', () => {
       store.sessions = [mockSession, s2]
       store.activeSessionId = 's1'
       mockArchiveSession.mockResolvedValue({ ...mockSession, archivedAt: ARCHIVED_AT })
+      // 归档活跃会话 → 切到下一个触发 fetchSessions（第六条路径）：默认列表不含本轮读数
+      mockGetSessions.mockResolvedValue([s2])
 
       await store.setArchived('s1', true)
 
@@ -989,6 +993,53 @@ describe('chatStore', () => {
 
       expect(store.unreadCounts.has('s1')).toBe(false)
       expect(mockMarkSessionRead).toHaveBeenCalledWith('s1')
+    })
+  })
+
+  describe('joinSession 列表行时间校准（第六条一致性路径）', () => {
+    it('首屏只拉一次列表；切走再切回后行时间与服务端一致', async () => {
+      const s1 = { ...mockSession, id: 's1', lastMessageAt: '2026-01-02T00:00:00.000Z' }
+      const s2 = {
+        ...mockSession,
+        id: 's2',
+        title: 'S2',
+        lastMessageAt: '2026-01-03T00:00:00.000Z',
+      }
+      mockGetAgents.mockResolvedValue([mockAgent])
+      mockGetSessions.mockResolvedValue([s1, s2])
+
+      // 首屏：一次列表 + 自动 join 第一个——自动 join 是「非切换」，不得再拉一次
+      await store.fetchData()
+      expect(mockGetSessions).toHaveBeenCalledTimes(1)
+      expect(store.activeSessionId).toBe('s1')
+
+      // 同会话重入也不重拉
+      store.joinSession('s1')
+      expect(mockGetSessions).toHaveBeenCalledTimes(1)
+
+      // 切到 B（switching 为真）→ 校准一次
+      store.joinSession('s2')
+      await new Promise((r) => setTimeout(r, 0))
+      expect(mockGetSessions).toHaveBeenCalledTimes(2)
+
+      // 再切到 A：离开 B
+      store.joinSession('s1')
+      await new Promise((r) => setTimeout(r, 0))
+      expect(mockGetSessions).toHaveBeenCalledTimes(3)
+
+      // 离开 B 期间服务端给 B 落了一条回复（房间广播，本 tab 不在 B 房间收不到 NEW_MESSAGE）
+      mockGetSessions.mockResolvedValue([s1, { ...s2, lastMessageAt: '2026-01-04T09:30:00.000Z' }])
+      expect(store.sessions.find((s) => s.id === 's2')!.lastMessageAt).toBe(
+        '2026-01-03T00:00:00.000Z'
+      )
+
+      // 切回 B：joinSession → fetchSessions，左栏行时间校准到服务端值
+      store.joinSession('s2')
+      await new Promise((r) => setTimeout(r, 0))
+      expect(mockGetSessions).toHaveBeenCalledTimes(4)
+      expect(store.sessions.find((s) => s.id === 's2')!.lastMessageAt).toBe(
+        '2026-01-04T09:30:00.000Z'
+      )
     })
   })
 
@@ -1475,6 +1526,11 @@ describe('chatStore', () => {
         title: '测试会话（1）',
         handoffFrom: 'old-1',
       })
+      // 交接后切到新会话触发 fetchSessions（第六条路径）：服务端列表含新会话
+      mockGetSessions.mockResolvedValue([
+        { ...mockSession, id: 'child-new', title: '测试会话（1）', handoffFrom: 'old-1' },
+        { ...mockSession, id: 'old-1', title: '测试会话' },
+      ])
 
       handoffHandler()!({
         oldSessionId: 'old-1',
@@ -1498,6 +1554,12 @@ describe('chatStore', () => {
         title: '测试会话（1）',
         handoffFrom: 'old-1',
       })
+      // 同上：切到新会话触发 fetchSessions，给含新会话的服务端列表（顺序与断言一致）
+      mockGetSessions.mockResolvedValue([
+        { ...mockSession, id: 'child-new', title: '测试会话（1）', handoffFrom: 'old-1' },
+        { ...mockSession, id: 'other-child', title: '别的会话（1）', handoffFrom: 'other-parent' },
+        { ...mockSession, id: 'old-1', title: '测试会话' },
+      ])
 
       handoffHandler()!({
         oldSessionId: 'old-1',
@@ -2434,6 +2496,8 @@ describe('chatStore', () => {
       ]
       store.activeSessionId = 's1'
       mockDeleteSessionGroup.mockResolvedValue({ mode: 'trash', id: 'g1' })
+      // 活跃会话随组进回收站 → 切到 s2 触发 fetchSessions（第六条路径）：服务端只剩 s2
+      mockGetSessions.mockResolvedValue([grouped('s2', null, '2026-01-02T00:00:00.000Z')])
 
       await store.deleteGroup('g1', true)
 
