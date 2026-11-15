@@ -1,85 +1,292 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import source from './SessionList.vue?raw'
+import sessionRowSource from './SessionRow.vue?raw'
+import SessionList from './SessionList.vue'
+import SessionRow from './SessionRow.vue'
+import GroupDeleteModal from './GroupDeleteModal.vue'
+import { useChatStore } from '@/stores/chat'
+import { api } from '@/composables/useApi'
+import type { GroupedSession, SessionGroup } from '@/composables/useApi'
+
+// 组件只消费 api 对象；本票用到的只有绑定查询（删组确认的阻塞判据）
+vi.mock('@/composables/useApi', () => ({
+  api: {
+    getConnectorBindings: vi.fn(),
+    getSessionGroups: vi.fn(),
+  },
+}))
 
 /**
- * Verify SessionList.vue's B2 layout changes (新建会话上移 + 去云朵 icon).
- *
- * Static verification tests — they read the SFC source via Vite's `?raw`
- * import to confirm the expected patterns exist. Regression protection for
- * 用户需求：新建会话按钮从底部 footer 移到「会话」标题行右侧（图1「添加成员」范式）；
- * 会话行 💬 云朵 icon 删除、标题占满行宽。
+ * T3 票面验收：左栏「分组 + 未分组」、批量归组、删组默认仅解散、忙碌组第二项不可选、
+ * 新建分组固定底部、无归档入口。
  */
 
-describe('SessionList 新建会话按钮上移（标题行右侧）', () => {
-  it('新建按钮在 section-header 内（section-header-right），点击开弹窗', () => {
-    expect(source).toMatch(/<div class="section-header">[\s\S]*?class="section-header-right"/)
+const GROUPS: SessionGroup[] = [
+  {
+    id: 'g1',
+    name: '小说连载',
+    collapsed: false,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    sessionCount: 2,
+  },
+  {
+    id: 'g2',
+    name: '归档',
+    collapsed: false,
+    createdAt: '2026-01-02T00:00:00.000Z',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+    sessionCount: 0,
+  },
+]
+
+function session(
+  id: string,
+  title: string,
+  groupId: string | null,
+  updatedAt: string
+): GroupedSession {
+  return {
+    id,
+    title,
+    agentIds: ['a1'],
+    broadcastMode: false,
+    createdAt: updatedAt,
+    updatedAt,
+    groupId,
+  }
+}
+
+const SESSIONS: GroupedSession[] = [
+  session('s1', '猫咖夜话', 'g1', '2026-01-03T00:00:00.000Z'),
+  session('s2', '第三章卡住了', 'g1', '2026-01-02T00:00:00.000Z'),
+  session('s3', '深夜调试', null, '2026-01-01T00:00:00.000Z'),
+]
+
+let pinia: ReturnType<typeof createPinia>
+let store: ReturnType<typeof useChatStore>
+let wrapper: VueWrapper | null = null
+
+function mountList(): VueWrapper {
+  wrapper = mount(SessionList, {
+    global: {
+      plugins: [pinia],
+      // v-focus 是全局指令；单测里给个空实现即可（不测聚焦行为）
+      directives: { focus: { mounted() {} } },
+    },
+  })
+  return wrapper
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(api.getConnectorBindings).mockResolvedValue({ ok: true, bindings: [] } as any)
+  vi.mocked(api.getSessionGroups).mockResolvedValue({ groups: [] } as any)
+  pinia = createPinia()
+  setActivePinia(pinia)
+  store = useChatStore()
+  vi.spyOn(store, 'fetchData').mockResolvedValue(undefined)
+  store.groups = GROUPS
+  store.sessions = SESSIONS
+})
+
+afterEach(() => {
+  wrapper?.unmount()
+  wrapper = null
+})
+
+describe('SessionList 分组渲染', () => {
+  it('活组按 createdAt 序 + 未分组最后；组头显示会话数', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    const names = w.findAll('.group-name').map((n) => n.text())
+    expect(names).toEqual(['小说连载', '归档', '未分组'])
+    const counts = w.findAll('.group-count').map((n) => n.text())
+    expect(counts).toEqual(['2', '0', '1'])
+
+    // 行归属：组内两行 + 未分组一行
+    const rows = w.findAllComponents(SessionRow)
+    expect(rows).toHaveLength(3)
+    expect(w.text()).toContain('空分组')
+  })
+
+  it('折叠点击 PATCH 落库（服务端折叠态，多 tab 一致）', async () => {
+    const spy = vi.spyOn(store, 'setGroupCollapsed').mockResolvedValue(undefined)
+    const w = mountList()
+    await flushPromises()
+
+    await w.findAll('.group-toggle')[0]!.trigger('click')
+
+    expect(spy).toHaveBeenCalledWith('g1', true)
+  })
+
+  it('折叠后组内会话行不渲染，展开后恢复', async () => {
+    vi.spyOn(store, 'setGroupCollapsed').mockImplementation(async (id, collapsed) => {
+      store.groups = store.groups.map((g) => (g.id === id ? { ...g, collapsed } : g))
+    })
+    const w = mountList()
+    await flushPromises()
+    expect(w.findAllComponents(SessionRow)).toHaveLength(3)
+
+    await w.findAll('.group-toggle')[0]!.trigger('click')
+    await flushPromises()
+    expect(w.findAllComponents(SessionRow)).toHaveLength(1)
+
+    await w.findAll('.group-toggle')[0]!.trigger('click')
+    await flushPromises()
+    expect(w.findAllComponents(SessionRow)).toHaveLength(3)
+  })
+})
+
+describe('SessionList 批量归组', () => {
+  it('勾选后头行变「已选 N ｜ 归组 ｜ 删除 ｜ 取消」，归组一次成功后清空选择', async () => {
+    const spy = vi.spyOn(store, 'batchMoveToGroup').mockResolvedValue(undefined)
+    const w = mountList()
+    await flushPromises()
+
+    await w.find('.row-check input').trigger('change')
+    expect(w.find('.section-header').text()).toContain('已选 1')
+    expect(w.find('.batch-move-trigger').exists()).toBe(true)
+    expect(w.findAll('.batch-btn').map((b) => b.text())).toEqual(['归组', '删除', '取消'])
+
+    await w.find('.batch-move-trigger').trigger('click')
+    const targets = w.findAll('.batch-move-item').map((b) => b.text())
+    expect(targets).toEqual(['小说连载', '归档', '未分组'])
+
+    await w.findAll('.batch-move-item')[1]!.trigger('click')
+    await flushPromises()
+
+    expect(spy).toHaveBeenCalledWith(['s1'], 'g2')
+    // 完成后清空选择 → 头行回到常态
+    expect(w.find('.section-header').text()).not.toContain('已选')
+  })
+})
+
+describe('SessionList 删组确认', () => {
+  async function openDeleteModal(w: VueWrapper): Promise<VueWrapper> {
+    await w.findAll('.group-menu-trigger')[0]!.trigger('click')
+    await w.find('.group-menu-item.danger').trigger('click')
+    await flushPromises()
+    return w.findComponent(GroupDeleteModal)
+  }
+
+  it('默认「仅解散」，确认后调 deleteGroup(id, false)', async () => {
+    const spy = vi.spyOn(store, 'deleteGroup').mockResolvedValue(undefined)
+    const w = mountList()
+    await flushPromises()
+
+    const modal = await openDeleteModal(w)
+    expect(modal.exists()).toBe(true)
+    expect(modal.find('.mode-option.active').text()).toContain('仅解散')
+
+    await modal.find('.btn-confirm').trigger('click')
+    await flushPromises()
+
+    expect(spy).toHaveBeenCalledWith('g1', false)
+    expect(w.findComponent(GroupDeleteModal).exists()).toBe(false)
+  })
+
+  it('忙碌成员让第二项置灰并红字点名', async () => {
+    store.agentStates = new Map([
+      ['a1', new Map([['s1', { agentId: 'a1', sessionId: 's1', status: 'busy', queueLength: 0 }]])],
+    ]) as any
+    const w = mountList()
+    await flushPromises()
+
+    const modal = await openDeleteModal(w)
+    const options = modal.findAll('.mode-option')
+    expect(options[1]!.attributes('disabled')).toBeDefined()
+    expect(modal.find('.blocked-hint').text()).toContain('猫咖夜话')
+    expect(modal.find('.blocked-hint').text()).toContain('正在执行')
+  })
+
+  it('绑定外部群的成员同样让第二项置灰', async () => {
+    vi.mocked(api.getConnectorBindings).mockResolvedValue({
+      ok: true,
+      bindings: [
+        {
+          id: 'b1',
+          platform: 'qq',
+          external_type: 'group',
+          external_id: '123',
+          session_id: 's2',
+          created_at: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    } as any)
+    const w = mountList()
+    await flushPromises()
+
+    const modal = await openDeleteModal(w)
+    expect(modal.findAll('.mode-option')[1]!.attributes('disabled')).toBeDefined()
+    expect(modal.find('.blocked-hint').text()).toContain('第三章卡住了')
+    expect(modal.find('.blocked-hint').text()).toContain('已绑定外部群')
+  })
+
+  it('重名就地报错、输入框不关', async () => {
+    vi.spyOn(store, 'renameGroup').mockRejectedValue({ body: { error: 'GROUP_NAME_TAKEN' } })
+    const w = mountList()
+    await flushPromises()
+
+    await w.findAll('.group-menu-trigger')[0]!.trigger('click')
+    await w.find('.group-menu-item').trigger('click')
+    const input = w.find('.rename-input')
+    expect(input.exists()).toBe(true)
+
+    await input.setValue('归档')
+    await w.find('.rename-row .mini-btn').trigger('click')
+    await flushPromises()
+
+    expect(w.find('.rename-input').exists()).toBe(true)
+    expect(w.find('.inline-error').text()).toContain('分组名已存在')
+  })
+})
+
+describe('SessionList 底部新建分组', () => {
+  it('新建分组在滚动容器之外（列表滚动不带走、建组/删组位置不跳）', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    expect(w.find('.session-items .new-group-footer').exists()).toBe(false)
+    expect(w.find('.session-list > .new-group-footer').exists()).toBe(true)
+    expect(w.find('.new-group-footer').text()).toContain('新建分组')
+  })
+
+  it('输入组名提交 → createGroup(name) 并把输入态收起', async () => {
+    const spy = vi.spyOn(store, 'createGroup').mockResolvedValue(GROUPS[0]!)
+    const w = mountList()
+    await flushPromises()
+
+    await w.find('.btn-new-group').trigger('click')
+    await w.find('.new-group-input').setValue('新组')
+    await w.find('.new-group-form').trigger('submit')
+    await flushPromises()
+
+    expect(spy).toHaveBeenCalledWith('新组')
+    expect(w.find('.btn-new-group').exists()).toBe(true)
+  })
+})
+
+describe('SessionList 静态结构（归档面已退场）', () => {
+  it('无归档按钮 / 无「显示已归档」开关 / 不读 showArchived', () => {
+    expect(source).not.toContain('session-archive')
+    expect(source).not.toContain('btn-toggle-archived')
+    expect(source).not.toContain('showArchived')
+  })
+
+  it('头行只有「会话」/批量条 + ＋；组菜单两项', () => {
+    expect(source).toContain('class="section-header-label">会话')
     expect(source).toContain('class="btn-new-session-header"')
-    expect(source).toContain('@click="showCreate = true"')
-    expect(source).toContain('<span>新建</span>')
+    expect(source).toContain('重命名分组')
+    expect(source).toContain('删除分组…')
   })
 
-  it('底部 footer 新建按钮已移除（无 panel-footer / btn-new-session）', () => {
-    expect(source).not.toContain('panel-footer')
-    expect(source).not.toContain('btn-new-session"')
-  })
-
-  it('空态提示改为「点击上方按钮创建」', () => {
-    expect(source).toContain('点击上方按钮创建')
-    expect(source).not.toContain('点击下方按钮创建')
-  })
-})
-
-describe('SessionList 会话行去云朵 icon', () => {
-  it('会话行无 💬 图标（session-icon 类与 emoji 已删），标题占满行宽', () => {
-    expect(source).not.toContain('class="session-icon"')
-    expect(source).not.toMatch(/session-item[\s\S]{0,200}💬/)
-  })
-
-  it('折叠态图标列已整支删除（与 .panel-left 的 display:none 同条件 ⇒ DOM 永不可见）', () => {
-    expect(source).not.toContain('collapsed')
-  })
-})
-
-describe('SessionList B·改全局框架：选中态=底色、头行无线', () => {
-  it('会话项选中态用 accent 淡底，不再生成左缘竖条 pseudo', () => {
-    const activeRule = source.match(/\.session-item\.active\s*\{[\s\S]*?\}/)
-    expect(activeRule, '未找到 .session-item.active 规则').toBeTruthy()
-    expect(activeRule![0]).toContain('background: var(--accent-soft)')
-    expect(source).not.toContain('.session-item.active::before')
-  })
-
-  it('会话栏头行不画 border-bottom，改同底色 + sticky（结构线 0 条）', () => {
-    const headerRule = source.match(/\.section-header\s*\{[\s\S]*?\}/)
-    expect(headerRule, '未找到 .section-header 规则').toBeTruthy()
-    expect(headerRule![0]).toContain('position: sticky')
-    expect(headerRule![0]).toContain('background: var(--bg-session)')
-    expect(headerRule![0]).not.toContain('border-bottom')
-  })
-})
-
-describe('SessionList 归档入口（票 7，spec §4.1 用户态删除 = 归档）', () => {
-  it('会话行有归档按钮，且物理删除按钮已移除（不再提供一键永久删除入口）', () => {
-    expect(source).toContain('class="session-archive"')
-    expect(source).toContain('handleArchive')
-    expect(source).not.toContain('class="session-delete"')
-    expect(source).not.toContain('handleDelete')
-    // 「永久删除」的措辞随之消失（确认框文案是产品决策最直白的落点）
-    expect(source).not.toContain('消息将被永久删除')
-  })
-
-  it('按钮语义随归档态二分：归档 ↔ 取消归档', () => {
-    expect(source).toContain("s.archivedAt ? '取消归档' : '归档会话'")
-    expect(source).toContain('@click="handleArchive(s.id, !s.archivedAt)"')
-  })
-
-  it('标题行有「已归档」开关，点击切换 store.setShowArchived', () => {
-    expect(source).toContain('class="btn-toggle-archived"')
-    expect(source).toContain('@click="store.setShowArchived(!store.showArchived)"')
-    expect(source).toContain(':aria-pressed="store.showArchived"')
-  })
-
-  it('已归档行有可见标记（不是只靠按钮语义区分）', () => {
-    expect(source).toContain('class="session-archived-tag"')
-    expect(source).toMatch(/v-if="s\.archivedAt"/)
+  it('行操作交给唯一 ⋯ 菜单（SessionActionsMenu），不在行内散落按钮', () => {
+    expect(source).toContain('<SessionRow')
+    expect(sessionRowSource).toContain('<SessionActionsMenu')
+    expect(source).not.toContain('session-delete')
   })
 })

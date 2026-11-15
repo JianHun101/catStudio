@@ -1,4 +1,4 @@
-import type { ExecutionMeta, Message } from '@cat-study/shared'
+import type { ExecutionMeta, Message, SessionConfig } from '@cat-study/shared'
 
 const BASE = '/api'
 const DEFAULT_TIMEOUT = 10_000 // 10s，确保重试循环能推进
@@ -82,6 +82,30 @@ export interface MemoryRefsEntry {
   markers: number[]
   /** 代码字面量（围栏 / 内联码）内的号——诊断列，**前端不渲染**（见 server `citationMarkers.ts`） */
   markersInCode: number[]
+}
+
+/**
+ * 分组实体（契约：`docs/plans/session-groups-trash.md` §3.1）。
+ *
+ * ⚠️ **过渡类型**：T1 会把同名类型放进 `@cat-study/shared`。本票（T3）的文件边界不含
+ * `packages/shared/**`（T1 正在改同一文件），故先在网络边界处本地声明；T1 合入后这里
+ * 改为 `import type { SessionGroup } from '@cat-study/shared'` 并删掉本定义即可——
+ * 字段逐个对齐 spec，没有第二套语义。
+ */
+export interface SessionGroup {
+  id: string
+  name: string
+  collapsed: boolean
+  createdAt: string
+  updatedAt: string
+  /** 组内未删除会话数（服务端计数；前端头部徽标按本地 `sessions` 现算，避免移组后过期） */
+  sessionCount: number
+}
+
+/** 会话 + 所属分组。同上：T1 给 `SessionConfig` 加 `groupId` 后收敛为 `SessionConfig`。 */
+export interface GroupedSession extends SessionConfig {
+  /** 未分组 = null/缺省 */
+  groupId?: string | null
 }
 
 /** 连接器绑定行——后端 snake_case 原样返回（routes/connectors.ts，无 camelCase 转换） */
@@ -745,6 +769,37 @@ export const api = {
     }),
 
   deleteSession: (id: string) => request<any>(`/sessions/${id}`, { method: 'DELETE' }),
+
+  // ─── 分组（会话管理 v2，T3）───────────────────────────────────────────
+  // 契约：`docs/plans/session-groups-trash.md` §3.2。移动会话复用既有
+  // `PATCH /sessions/:id`（只多一个 `groupId` 字段），不另开端点。
+  getSessionGroups: () => request<{ groups: SessionGroup[] }>('/session-groups'),
+
+  createSessionGroup: (name: string) =>
+    request<SessionGroup>('/session-groups', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  updateSessionGroup: (id: string, data: { name?: string; collapsed?: boolean }) =>
+    request<SessionGroup>(`/session-groups/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  /** 不带 `withSessions` = 仅解散（组行消失、会话回未分组）；带 = 组与同批会话一起进回收站。 */
+  deleteSessionGroup: (id: string, withSessions = false) =>
+    request<{ mode: 'dissolve' | 'trash'; id: string }>(
+      `/session-groups/${id}${withSessions ? '?withSessions=1' : ''}`,
+      { method: 'DELETE' }
+    ),
+
+  /** 会话归组（`groupId=null` = 回未分组）。服务端不该改 `updated_at`，前端也不重排。 */
+  moveSessionToGroup: (sessionId: string, groupId: string | null) =>
+    request<GroupedSession>(`/sessions/${sessionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ groupId }),
+    }),
 
   // 归档（用户态「删除」的替代形态：数据全留，只从默认列表隐藏）
   archiveSession: (id: string) => request<any>(`/sessions/${id}/archive`, { method: 'POST' }),
