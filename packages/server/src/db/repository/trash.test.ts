@@ -119,7 +119,12 @@ describe('trash repo — 回收站列表 / 清扫（T2）', () => {
     ).run()
 
     const result = trashRepo.purgeExpiredTrash(NOW)
-    expect(result).toMatchObject({ groups: 0, sessions: 1 })
+    expect(result).toMatchObject({
+      groups: 0,
+      sessions: 1,
+      sessionIds: ['s-purged'],
+      groupIds: [],
+    })
     expect(db.prepare('SELECT 1 FROM sessions WHERE id = ?').get('s-kept')).toBeDefined()
     expect(db.prepare('SELECT 1 FROM sessions WHERE id = ?').get('s-purged')).toBeUndefined()
     expect(db.prepare('SELECT 1 FROM messages WHERE id = ?').get('m-purged')).toBeUndefined()
@@ -138,7 +143,13 @@ describe('trash repo — 回收站列表 / 清扫（T2）', () => {
     insertSession('s-earlier', '早先单删', { groupId: 'g-old', deletedAt: iso(NOW - 3 * DAY) })
 
     const result = trashRepo.purgeExpiredTrash(NOW)
-    expect(result).toMatchObject({ groups: 1 })
+    expect(result).toMatchObject({
+      groups: 1,
+      sessionIds: ['s-batch'],
+      groupIds: ['g-old'],
+    })
+    // 早先单删的会话未到期，不属于本批
+    expect(result.sessionIds).not.toContain('s-earlier')
     expect(db.prepare('SELECT 1 FROM session_groups WHERE id = ?').get('g-old')).toBeUndefined()
     expect(db.prepare('SELECT 1 FROM sessions WHERE id = ?').get('s-batch')).toBeUndefined()
     expect(db.prepare('SELECT 1 FROM sessions WHERE id = ?').get('s-earlier')).toBeDefined()
@@ -147,7 +158,12 @@ describe('trash repo — 回收站列表 / 清扫（T2）', () => {
   it('零同批组（防御分支）：只删组行，不报错', () => {
     insertGroup('g-empty', '空组', iso(NOW - 8 * DAY))
     const result = trashRepo.purgeExpiredTrash(NOW)
-    expect(result).toMatchObject({ groups: 1, sessions: 0 })
+    expect(result).toMatchObject({
+      groups: 1,
+      sessions: 0,
+      sessionIds: [],
+      groupIds: ['g-empty'],
+    })
     expect(db.prepare('SELECT 1 FROM session_groups WHERE id = ?').get('g-empty')).toBeUndefined()
   })
 
@@ -156,7 +172,13 @@ describe('trash repo — 回收站列表 / 清扫（T2）', () => {
     vi.stubEnv('CATSTUDY_PROBE_MODE', '1')
 
     const result = trashRepo.purgeExpiredTrash(NOW)
-    expect(result).toMatchObject({ skipped: 'probe', groups: 0, sessions: 0 })
+    expect(result).toMatchObject({
+      skipped: 'probe',
+      groups: 0,
+      sessions: 0,
+      sessionIds: [],
+      groupIds: [],
+    })
     expect(db.prepare('SELECT 1 FROM sessions WHERE id = ?').get('s-old')).toBeDefined()
   })
 

@@ -204,11 +204,15 @@ export function purgeGroupBatch(group: SessionGroupRow): {
 export function purgeExpiredTrash(now: number = Date.now()): {
   groups: number
   sessions: number
+  /** 本次实际清掉的会话 id（供接线段发 `SESSION_PURGED` 并清引擎槽位） */
+  sessionIds: string[]
+  /** 本次实际删掉的组 id（供接线段发 `SESSION_PURGED` / `GROUPS_CHANGED`） */
+  groupIds: string[]
   skipped?: 'probe'
 } {
   if (isProbeMode()) {
     log.warn('探针模式：跳过回收站到期清扫（不删副本库行）')
-    return { groups: 0, sessions: 0, skipped: 'probe' }
+    return { groups: 0, sessions: 0, sessionIds: [], groupIds: [], skipped: 'probe' }
   }
 
   const cutoff = trashCutoff(now)
@@ -222,11 +226,17 @@ export function purgeExpiredTrash(now: number = Date.now()): {
 
   let purgedGroups = 0
   let purgedSessions = 0
+  const groupIds: string[] = []
+  const sessionIds: string[] = []
   for (const group of groups) {
     try {
       const r = purgeGroupBatch(group)
       purgedSessions += r.sessionIds.length
-      if (r.groupPurged) purgedGroups++
+      sessionIds.push(...r.sessionIds)
+      if (r.groupPurged) {
+        purgedGroups++
+        groupIds.push(group.id)
+      }
     } catch (err: any) {
       log.error('purge expired group failed (will retry next round)', {
         groupId: group.id,
@@ -251,6 +261,7 @@ export function purgeExpiredTrash(now: number = Date.now()): {
     try {
       purgeSessionRecord(id)
       purgedSessions++
+      sessionIds.push(id)
     } catch (err: any) {
       log.error('purge expired session failed (will retry next round)', {
         sessionId: id,
@@ -259,7 +270,7 @@ export function purgeExpiredTrash(now: number = Date.now()): {
     }
   }
 
-  return { groups: purgedGroups, sessions: purgedSessions }
+  return { groups: purgedGroups, sessions: purgedSessions, sessionIds, groupIds }
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   type SessionGroupRow,
 } from '../db/repository/index.js'
 import { getIO } from '../connectors/socketio.js'
+import { getExecutionEngine } from '../execution/registry.js'
 import { toSessionConfig } from './session-config.js'
 import { blockerError, getSessionBlocker } from './trash-guard.js'
 
@@ -191,6 +192,10 @@ export async function sessionGroupRoutes(app: FastifyInstance): Promise<void> {
 
     const deletedAt = new Date().toISOString()
     const { sessionIds } = groupsRepo.trashGroup(id, deletedAt)
+    const engine = getExecutionEngine()
+    if (engine) {
+      for (const sid of sessionIds) engine.disposeSession(sid)
+    }
     emitGlobal(Events.SESSION_TRASHED, { sessionIds, groupIds: [id] })
     emitGroupsChanged()
     return { mode: 'trash', id }
@@ -241,6 +246,10 @@ export async function sessionGroupRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const result = trashRepo.purgeGroupBatch(group)
+    const engine = getExecutionEngine()
+    if (engine) {
+      for (const sid of result.sessionIds) engine.disposeSession(sid)
+    }
     if (result.sessionIds.length > 0 || result.groupPurged) {
       emitGlobal(Events.SESSION_PURGED, {
         sessionIds: result.sessionIds,

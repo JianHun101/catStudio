@@ -565,6 +565,9 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
     const deletedAt = new Date().toISOString()
     sessionsRepo.trashSession(id, deletedAt)
+    // 软删成功后清引擎槽位（C1：槽位只增不减；忙碌守卫已挡掉在跑的会话，这里收的是
+    // idle 残留槽位）。disposeSession 只清内存，不中断 stream——与「先停后删」是两件事。
+    getExecutionEngine()?.disposeSession(id)
     emitGlobal(Events.SESSION_TRASHED, { sessionIds: [id], groupIds: [] })
     return { id, deletedAt, purgeAfter: trashRepo.purgeAfterOf(deletedAt) }
   })
@@ -608,6 +611,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     }
 
     trashRepo.purgeSessionRecord(id)
+    getExecutionEngine()?.disposeSession(id)
     emitGlobal(Events.SESSION_PURGED, { sessionIds: [id], groupIds: [] })
     return { id }
   })
@@ -617,6 +621,10 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   // 含过期未清扫的条目：用户点「清空」时不该留下「已过期但还没到整点清扫」的残余。
   app.delete('/api/trash', async () => {
     const { groupIds, sessionIds } = trashRepo.emptyTrash()
+    const engine = getExecutionEngine()
+    if (engine) {
+      for (const id of sessionIds) engine.disposeSession(id)
+    }
     if (sessionIds.length > 0 || groupIds.length > 0) {
       emitGlobal(Events.SESSION_PURGED, { sessionIds, groupIds })
     }
