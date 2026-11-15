@@ -1,4 +1,9 @@
-import type { ExecutionMeta, Message } from '@cat-study/shared'
+import type {
+  ExecutionMeta,
+  Message,
+  SessionConfig,
+  SessionGroup as SharedSessionGroup,
+} from '@cat-study/shared'
 
 const BASE = '/api'
 const DEFAULT_TIMEOUT = 10_000 // 10s，确保重试循环能推进
@@ -83,6 +88,15 @@ export interface MemoryRefsEntry {
   /** 代码字面量（围栏 / 内联码）内的号——诊断列，**前端不渲染**（见 server `citationMarkers.ts`） */
   markersInCode: number[]
 }
+
+/**
+ * 分组实体（契约：`docs/plans/session-groups-trash.md` §3.1）。T1 落地后直接用 shared 的
+ * 类型，不再保留第二份「过渡类型」——字段漂移的窗口就此关闭。
+ */
+export type SessionGroup = SharedSessionGroup
+
+/** 会话 + 所属分组（T1 起 `SessionConfig.groupId` 已是 `string | null`）。 */
+export type GroupedSession = SessionConfig
 
 /** 连接器绑定行——后端 snake_case 原样返回（routes/connectors.ts，无 camelCase 转换） */
 export interface ConnectorBinding {
@@ -745,6 +759,37 @@ export const api = {
     }),
 
   deleteSession: (id: string) => request<any>(`/sessions/${id}`, { method: 'DELETE' }),
+
+  // ─── 分组（会话管理 v2，T3）───────────────────────────────────────────
+  // 契约：`docs/plans/session-groups-trash.md` §3.2。移动会话复用既有
+  // `PATCH /sessions/:id`（只多一个 `groupId` 字段），不另开端点。
+  getSessionGroups: () => request<{ groups: SessionGroup[] }>('/session-groups'),
+
+  createSessionGroup: (name: string) =>
+    request<SessionGroup>('/session-groups', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  updateSessionGroup: (id: string, data: { name?: string; collapsed?: boolean }) =>
+    request<SessionGroup>(`/session-groups/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  /** 不带 `withSessions` = 仅解散（组行消失、会话回未分组）；带 = 组与同批会话一起进回收站。 */
+  deleteSessionGroup: (id: string, withSessions = false) =>
+    request<{ mode: 'dissolve' | 'trash'; id: string }>(
+      `/session-groups/${id}${withSessions ? '?withSessions=1' : ''}`,
+      { method: 'DELETE' }
+    ),
+
+  /** 会话归组（`groupId=null` = 回未分组）。服务端不该改 `updated_at`，前端也不重排。 */
+  moveSessionToGroup: (sessionId: string, groupId: string | null) =>
+    request<GroupedSession>(`/sessions/${sessionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ groupId }),
+    }),
 
   // 归档（用户态「删除」的替代形态：数据全留，只从默认列表隐藏）
   archiveSession: (id: string) => request<any>(`/sessions/${id}/archive`, { method: 'POST' }),
