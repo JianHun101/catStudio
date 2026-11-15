@@ -733,6 +733,7 @@ function onSessionCreated(): void {
   gap: 4px;
   height: 24px;
   min-width: 24px;
+  width: auto;
   padding: 0 4px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
