@@ -727,7 +727,7 @@ describe('buildRuntimeSelfCheck', () => {
   })
 
   const head =
-    '[运行时自检] 进程 boot=c79a40db，启动于 2026-11-15T15:19:16.838Z，代码 git=62c8b9b4aabb。'
+    '[运行时自检] 进程 boot=c79a40db，启动于 2026-11-15T15:19:16.838Z，代码 git=62c8b9b4aabb，工作树=干净。'
 
   it('未注册实例 → null（测试进程 / CLI 兜底 / 采集失败都不注入）', () => {
     expect(buildRuntimeSelfCheck(null, '2026-11-15T10:00:00.000Z')).toBeNull()
@@ -761,35 +761,51 @@ describe('buildRuntimeSelfCheck', () => {
         '2026-11-15 15:19:16'
       )
     ).toBe(
-      '[运行时自检] 进程 boot=c79a40db，启动于 2026-11-15T15:19:16.000Z，代码 git=62c8b9b4aabb。' +
+      '[运行时自检] 进程 boot=c79a40db，启动于 2026-11-15T15:19:16.000Z，代码 git=62c8b9b4aabb，工作树=干净。' +
         '你上次在本会话发言于 2026-11-15T15:19:16.000Z——之后未重启。'
     )
   })
 
   it('无锚点 → 无法判定文案（A4 / A5）', () => {
     expect(buildRuntimeSelfCheck(instance(), null)).toBe(
-      `${head}本会话没有你更早的发言，无法判定是否重启。`
+      `${head}本会话没有你更早的发言，或时间取不到/无法解析，无法判定是否重启。`
     )
   })
 
   it('锚点是非时间串 → 无法判定档，不抛错（A5）', () => {
     expect(() => buildRuntimeSelfCheck(instance(), 'not-a-time')).not.toThrow()
     expect(buildRuntimeSelfCheck(instance(), 'not-a-time')).toBe(
-      `${head}本会话没有你更早的发言，无法判定是否重启。`
+      `${head}本会话没有你更早的发言，或时间取不到/无法解析，无法判定是否重启。`
     )
   })
 
-  it('gitDirty === 1 才带「（工作树有未提交改动）」；0 与 null 都不带（A4）', () => {
-    const dirty = buildRuntimeSelfCheck(instance({ gitDirty: 1 }), '2026-11-15T20:00:00.000Z')
-    expect(dirty).toContain('代码 git=62c8b9b4aabb（工作树有未提交改动）。')
+  it('工作树三态固定出现：0=干净、1=有改动、null=未知（A4，0 与 null 不同形）', () => {
+    const clean = buildRuntimeSelfCheck(instance({ gitDirty: 0 }), '2026-11-15T20:00:00.000Z')!
+    expect(clean).toContain('工作树=干净。')
 
-    const clean = buildRuntimeSelfCheck(instance({ gitDirty: null }), '2026-11-15T20:00:00.000Z')
-    expect(clean).not.toContain('工作树有未提交改动')
+    const dirty = buildRuntimeSelfCheck(instance({ gitDirty: 1 }), '2026-11-15T20:00:00.000Z')!
+    expect(dirty).toContain('工作树=有改动。')
+
+    const unknown = buildRuntimeSelfCheck(instance({ gitDirty: null }), '2026-11-15T20:00:00.000Z')!
+    expect(unknown).toContain('工作树=未知。')
+    expect(unknown).not.toContain('工作树=干净')
+  })
+
+  it('未重启 + gitDirty === 1：脏树必须可见（A4 非最小组合）', () => {
+    const text = buildRuntimeSelfCheck(instance({ gitDirty: 1 }), '2026-11-15T20:00:00.000Z')!
+    expect(text).toContain('工作树=有改动。')
+    expect(text.endsWith('之后未重启。')).toBe(true)
+  })
+
+  it('无法判定档也带工作树字段，且脏树可见（A4）', () => {
+    const text = buildRuntimeSelfCheck(instance({ gitDirty: 1 }), null)!
+    expect(text).toContain('工作树=有改动。')
+    expect(text).toContain('无法判定是否重启。')
   })
 
   it('gitSha === null → 写「未知」，不写空串（A4）', () => {
     expect(buildRuntimeSelfCheck(instance({ gitSha: null }), '2026-11-15T20:00:00.000Z')).toContain(
-      '代码 git=未知。'
+      '代码 git=未知，工作树=干净。'
     )
   })
 

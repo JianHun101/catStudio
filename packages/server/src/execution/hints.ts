@@ -349,18 +349,20 @@ export function buildRuntimeSelfCheck(
 
   const boot = instance.bootId.slice(0, 8)
   const git = instance.gitSha === null ? '未知' : instance.gitSha.slice(0, 12)
-  const dirtyMark = instance.gitDirty === 1 ? '（工作树有未提交改动）' : ''
-  const head = `[运行时自检] 进程 boot=${boot}，启动于 ${instance.startedAt}，代码 git=${git}${dirtyMark}。`
+  // 工作树三态固定出现，不是可选后缀：`0`（干净）与 `null`（采集失败）**不得同形**，
+  // 否则采集失败会被读成「工作树干净」（票 B 契约 C / 验收 A4）。
+  const dirty = instance.gitDirty === 1 ? '有改动' : instance.gitDirty === 0 ? '干净' : '未知'
+  const head = `[运行时自检] 进程 boot=${boot}，启动于 ${instance.startedAt}，代码 git=${git}，工作树=${dirty}。`
 
   if (lastOwnMessageAt === null) {
-    return `${head}本会话没有你更早的发言，无法判定是否重启。`
+    return `${head}本会话没有你更早的发言，或时间取不到/无法解析，无法判定是否重启。`
   }
 
   const bootMs = Date.parse(normalizeIsoMs(instance.startedAt))
   const lastMs = Date.parse(normalizeIsoMs(lastOwnMessageAt))
   if (Number.isNaN(bootMs) || Number.isNaN(lastMs)) {
     // 非时间串：不猜（「无法判定」档），也不抛——自检行不能成为执行失败源。
-    return `${head}本会话没有你更早的发言，无法判定是否重启。`
+    return `${head}本会话没有你更早的发言，或时间取不到/无法解析，无法判定是否重启。`
   }
 
   const lastShown = normalizeIsoMs(lastOwnMessageAt)
