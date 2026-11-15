@@ -66,11 +66,38 @@ function countRows(table: string): number {
   return (getDb().prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
 }
 
+/**
+ * 父执行链：agent + session + 触发消息 + `execution_logs` 行。
+ *
+ * 票 TR-1 起 `retrieval_events.execution_id` 是**真 FK**（→ execution_logs.id，CASCADE），
+ * 写口测试不能再拿裸 id 当执行——夹具必须造父行，否则测的只是「FK 拒绝」而不是写口行为。
+ * 固定 id 与用例自己的 `agent-1` / `sess-1` 错开，避免撞 UNIQUE。
+ */
+function seedExecution(executionId: string): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT OR IGNORE INTO agents (id, name, system_prompt, llm_api_key)
+     VALUES ('a-trace', 'ds猫', 'p', 'k')`
+  ).run()
+  db.prepare(`INSERT OR IGNORE INTO sessions (id, title) VALUES ('s-trace', 't')`).run()
+  db.prepare(
+    `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+     VALUES ('m-trace', 's-trace', 'user', 'x', '[]')`
+  ).run()
+  db.prepare(
+    `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status)
+     VALUES (?, 's-trace', 'a-trace', 'm-trace', 'completed')`
+  ).run(executionId)
+}
+
 describe('retrievalEvents 写口', () => {
   beforeEach(() => {
     setDb(createTestDb())
     initDb()
     initRepository(getDb())
+    // 本文件所有写口用例的默认执行 id（`exec-2` 出现在 param_pool_n 用例里）
+    seedExecution('exec-1')
+    seedExecution('exec-2')
   })
 
   afterEach(() => {
