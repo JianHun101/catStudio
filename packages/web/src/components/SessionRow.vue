@@ -79,6 +79,13 @@ const emit = defineEmits<{
   opacity: 1;
 }
 
+/* 触屏无 hover：复选框恒显，否则没有可点入口 */
+@media (hover: none) {
+  .row-check {
+    opacity: 1;
+  }
+}
+
 /* 行操作 ⋯：悬停整行才亮（`.session-actions` 是 SessionActionsMenu 的根节点，
    带本组件的 scope 标记，故这条规则写在这里而不是祖父级 SessionList）。
    触屏无 hover：媒体查询不生效，按钮恒显，避免没有悬停入口。 */

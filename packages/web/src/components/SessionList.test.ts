@@ -98,7 +98,12 @@ afterEach(() => {
 })
 
 describe('SessionList 分组渲染', () => {
-  it('活组按 createdAt 序 + 未分组最后；组头显示会话数', async () => {
+  it('活组按 createdAt 序 + 未分组最后；组头计数按本地会话现算', async () => {
+    // 判别力：故意打乱数组序、并把 sessionCount 写成错值——排序/计数任一走错即红
+    store.groups = [
+      { ...GROUPS[1]!, sessionCount: 99 },
+      { ...GROUPS[0]!, sessionCount: 42 },
+    ]
     const w = mountList()
     await flushPromises()
 
@@ -164,6 +169,20 @@ describe('SessionList 批量归组', () => {
 
     expect(spy).toHaveBeenCalledWith(['s1'], 'g2')
     // 完成后清空选择 → 头行回到常态
+    expect(w.find('.section-header').text()).not.toContain('已选')
+  })
+
+  it('已选会话被外部移除 → 自动收敛选中集，头行不残留「已选 N」', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    await w.find('.row-check input').trigger('change')
+    expect(w.find('.section-header').text()).toContain('已选 1')
+
+    // 另一 tab 删掉 s1（store.sessions 变化，组件 watch 收敛）
+    store.sessions = store.sessions.filter((s) => s.id !== 's1')
+    await flushPromises()
+
     expect(w.find('.section-header').text()).not.toContain('已选')
   })
 })

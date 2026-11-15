@@ -44,10 +44,55 @@ export async function removeSessionsSequentially(
       await remove(id)
     } catch (err: any) {
       log.error('remove session failed', { id, error: String(err) })
-      failed.push({ id, message: err?.message || '删除失败' })
+      failed.push({ id, message: trashFailureReason(err) })
     }
   }
   return failed
+}
+
+/**
+ * 删除失败的用户可读原因：服务端 409 的机器码（`SESSION_BUSY` 等）不能直接甩给用户；
+ * 未知码保留原始 message，便于排障。批量删除逐条判定，用同一映射。
+ */
+export function trashFailureReason(err: any): string {
+  const code = err?.body?.error
+  switch (code) {
+    case 'SESSION_BUSY':
+      return '正在执行'
+    case 'SESSION_BOUND':
+      return '已绑定外部群'
+    case 'SESSION_IN_TRASH_GROUP':
+      return '属于已删除的分组，请在回收站恢复整个分组'
+    case 'GROUP_NOT_FOUND':
+      return '分组不存在或已被删除'
+    default:
+      return err?.message || '删除失败'
+  }
+}
+
+/** 批量删除部分失败文案：逐条点名，不聚合掉任何一条（成功项已移出列表）。 */
+export function formatTrashFailures(
+  failed: Array<{ id: string; message: string }>,
+  titleOf: (id: string) => string
+): string {
+  return `${failed.length} 个会话未能移入回收站：${failed
+    .map((f) => `「${titleOf(f.id)}」${f.message}`)
+    .join('；')}`
+}
+
+/** 移动失败的用户可读原因（与删除区分措辞，避免「无法移入回收站」出现在移动路径）。 */
+export function moveActionError(err: any): string {
+  const code = err?.body?.error
+  switch (code) {
+    case 'GROUP_NOT_FOUND':
+      return '分组不存在或已被删除'
+    case 'SESSION_BUSY':
+      return '会话正在执行，无法移动'
+    case 'SESSION_BOUND':
+      return '会话已绑定外部群，无法移动'
+    default:
+      return err?.message || '移动到分组失败'
+  }
 }
 
 /** 将技术错误信息转为用户可读的中文提示 */
@@ -879,6 +924,18 @@ export const useChatStore = defineStore('chat', () => {
   const SESSION_TRASHED_EVENTS = ['session-trashed', 'SESSION_TRASHED'] as const
 
   /**
+   * 列表里第一条**可见**会话：折叠组内的行不渲染，切过去等于落到看不见的行
+   * （spec §4.4「下一个可见会话」）。未知 groupId 按未分组处理，仍算可见。
+   */
+  function firstVisibleSession(): GroupedSession | undefined {
+    const collapsed = new Set(groups.value.filter((g) => g.collapsed).map((g) => g.id))
+    return sessions.value.find((s) => {
+      const gid = s.groupId ?? null
+      return !gid || !collapsed.has(gid)
+    })
+  }
+
+  /**
    * 会话从本地列表移除的共同投影（单删 / 批量删 / 整组删共用）：清未读与消息缓存，
    * 当前会话被移除时切到下一条可见会话（无则空态）。
    */
@@ -887,7 +944,7 @@ export const useChatStore = defineStore('chat', () => {
     sessions.value = sessions.value.filter((s) => !removed.has(s.id))
     for (const id of removed) unreadCounts.value.delete(id)
     if (activeSessionId.value && removed.has(activeSessionId.value)) {
-      const next = sessions.value[0]
+      const next = firstVisibleSession()
       if (next) {
         joinSession(next.id)
       } else {
@@ -909,6 +966,33 @@ export const useChatStore = defineStore('chat', () => {
       groups.value = res.groups ?? []
     } catch (err) {
       log.error('fetchGroups failed', { error: String(err) })
+    }
+  }
+
+  /**
+   * 重拉会话列表。多 tab 的「移动会话」只改归属、不发 `SESSION_UPDATE` 到全局，
+   * 收到 `GROUPS_CHANGED` 时光重拉组不够——行还留在旧组。失败静默（下一轮事件/刷新兜底）。
+   */
+  async function fetchSessions(): Promise<void> {
+    try {
+      sessions.value = await api.getSessions(showArchived.value)
+    } catch (err) {
+      log.error('fetchSessions failed', { error: String(err) })
+    }
+  }
+
+  /**
+   * 目标组折叠时自动展开：否则移过去的行立刻不可见（原型契约）。
+   * 展开是体验增强，失败只记日志，不反噬已成功的移组。
+   */
+  async function expandGroupIfCollapsed(groupId: string | null): Promise<void> {
+    if (!groupId) return
+    const group = groups.value.find((g) => g.id === groupId)
+    if (!group || !group.collapsed) return
+    try {
+      await setGroupCollapsed(groupId, false)
+    } catch (err) {
+      log.error('expand target group failed', { groupId, error: String(err) })
     }
   }
 
@@ -949,6 +1033,7 @@ export const useChatStore = defineStore('chat', () => {
   async function moveSessionToGroup(sessionId: string, groupId: string | null): Promise<void> {
     await api.moveSessionToGroup(sessionId, groupId)
     sessions.value = sessions.value.map((s) => (s.id === sessionId ? { ...s, groupId } : s))
+    await expandGroupIfCollapsed(groupId)
   }
 
   /** 批量归组（一次动作）。失败时重拉列表对齐服务端，再把错误抛给调用侧。 */
@@ -961,6 +1046,7 @@ export const useChatStore = defineStore('chat', () => {
       throw err
     }
     sessions.value = sessions.value.map((s) => (unique.includes(s.id) ? { ...s, groupId } : s))
+    await expandGroupIfCollapsed(groupId)
   }
 
   /**
@@ -1342,29 +1428,20 @@ export const useChatStore = defineStore('chat', () => {
     )
 
     socket.on(Events.SESSION_DELETED, (data: { sessionId: string }) => {
-      sessions.value = sessions.value.filter((s) => s.id !== data.sessionId)
-      // S9: 清理已删除会话的未读计数，避免 Map 内存泄漏
-      unreadCounts.value.delete(data.sessionId)
-      if (activeSessionId.value === data.sessionId) {
-        const next = sessions.value[0]
-        if (next) {
-          joinSession(next.id)
-        } else {
-          activeSessionId.value = null
-          messages.value = []
-          writeActiveSessionId(null) // 无可用会话 → 清除记忆，防刷新回已删会话
-        }
-      }
+      // 与单删/批量删共用同一投影：清未读、切到下一条**可见**会话、清消息缓存
+      projectRemovedSessions(new Set([data.sessionId]))
     })
 
     socket.on(Events.SESSION_ARCHIVED, (data: { sessionId: string; archivedAt: string | null }) => {
       applyArchived(data.sessionId, data.archivedAt ?? null)
     })
 
-    // 分组变更（建组 / 改名 / 折叠）→ 组列表刷新。口径在服务端，本地不拼半份结构。
+    // 分组变更（建组 / 改名 / 折叠 / 移动 / 解散）→ 组与会话双刷。
+    // 只刷组不够：移动会话后组列表不变，行还留在旧组（多 tab 不同步）。
     for (const ev of GROUPS_CHANGED_EVENTS) {
       socket.on(ev, () => {
         void fetchGroups()
+        void fetchSessions()
       })
     }
 
