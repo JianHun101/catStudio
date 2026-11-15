@@ -61,8 +61,49 @@ export interface SessionConfig {
   handoffFrom?: string | null
   /** 运行中的增量摘要（JSON 字符串，SessionSummary） */
   runningSummary?: string | null
+  /** 所属分组 id；null = 未分组（单归属：一个会话最多属于一个组） */
+  groupId: string | null
   /** 归档时刻（ISO 8601）；null/缺省 = 活跃。归档 = 用户态「删除」的替代，数据全留 */
   archivedAt?: string | null
+}
+
+/** 会话分组（左栏收纳单位；单归属、无嵌套、不建 position，按 createdAt 排序）。 */
+export interface SessionGroup {
+  id: string
+  name: string
+  /** 折叠态落在服务端：多 tab 一致，迁移出的「归档」组默认折叠 */
+  collapsed: boolean
+  /** ISO 毫秒 UTC */
+  createdAt: string
+  updatedAt: string
+  /** 组内**未删除**会话数（回收站里的会话不计入） */
+  sessionCount: number
+}
+
+/** 回收站条目（`GET /api/sessions/trash` 返回项）。
+ *
+ *  **粒度 = 删除动作粒度**（ADR 0016 D3）：整组删 = 一条 `kind:'group'`，单删 = 一条
+ *  `kind:'session'`。实现不得按 `group_id` 聚合——否则组内早先单删的会话会被并进组记录、
+ *  恢复时一起复活。 */
+export interface TrashEntry {
+  kind: 'group' | 'session'
+  /** 组条目 = group.id；会话条目 = session.id */
+  id: string
+  /** 组名 / 会话标题 */
+  name: string
+  /** ISO 毫秒 UTC（删除动作时刻） */
+  deletedAt: string
+  /** ISO 毫秒 UTC，= deletedAt + 7d（服务端算，不信任本机时钟） */
+  purgeAfter: string
+  /** ceil((purgeAfter - now) / 1d)，1..7（过期的条目列表已滤掉） */
+  daysLeft: number
+  /** 组条目 = 同批会话数；会话条目 = 1 */
+  sessionCount: number
+  messageCount: number
+  /** 会话条目：原组 id（组已删也保留）；组条目 = null */
+  groupId: string | null
+  /** 会话条目：原组名；组条目 = null */
+  groupName: string | null
 }
 
 // ─── Message ────────────────────────────────────────

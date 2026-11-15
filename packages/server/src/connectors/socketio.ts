@@ -202,6 +202,17 @@ export function createSocketIO(httpServer: HttpServer): SocketServer {
     // ─── Session: join ───────────────────────────
 
     socket.on(Events.JOIN_SESSION, (sessionId: string) => {
+      // T2：回收站里的会话不再是一条可打开的会话——不 join、不推历史，显式回 ERROR。
+      // 用默认 `getSessionById`（已删 → undefined），不点对点判 deleted_at：同一把尺子
+      // 与约 30 处存在性检查共用，漏判一处就是「删了还能进」。
+      if (!sessionsRepo.getSessionById(sessionId)) {
+        log.warn('join rejected: session not found or trashed', {
+          socketId: socket.id,
+          sessionId,
+        })
+        socket.emit(Events.ERROR, { message: '会话不存在或已删除' })
+        return
+      }
       socket.join(`session:${sessionId}`)
       log.info('joined session', { socketId: socket.id, sessionId })
 

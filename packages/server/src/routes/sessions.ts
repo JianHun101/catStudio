@@ -11,15 +11,20 @@ import {
 } from '@cat-study/shared'
 import {
   sessions as sessionsRepo,
+  sessionGroups as sessionGroupsRepo,
   agents as agentsRepo,
   messages as messagesRepo,
   messageSearch as messageSearchRepo,
   executionLogs as execLogsRepo,
   sessionReadState as readStateRepo,
+  trash as trashRepo,
 } from '../db/repository/index.js'
 import type { MessageRow, SessionRow } from '../db/repository/index.js'
 import { normalizeIsoMs } from '../db/repository/clock.js'
 import { getIO } from '../connectors/socketio.js'
+import { emitGroupsChanged } from './sessionGroups.js'
+import { blockerError, getSessionBlocker } from './trash-guard.js'
+import { toSessionConfig } from './session-config.js'
 import { toIsoDb } from '../db/repository/time.js'
 import { getExecutionEngine } from '../execution/registry.js'
 import { createLogger } from '../logger.js'
@@ -53,16 +58,18 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send(toSessionConfig(row!))
   })
 
-  // ─── GET /api/sessions — 列出会话（默认过滤已归档）───
-
+  // ─── GET /api/sessions — 列出会话（未删除；归档不再过滤）───
+  //
+  // 票 7 的「默认过滤已归档」已退役（ADR 0016）：收纳由分组折叠承担，归档不影响列表。
+  // `includeArchived` 作为兼容参数被接受但**不再改变「归档是否可见」**——两种取值都
+  // 排除回收站（`deleted_at IS NOT NULL`），区别只是取数函数的名字：默认走
+  // `listActiveSessions()`，显式传参走 `listAllSessionsExcludingDeleted()`。参数本身
+  // 留到归档面清退票（T5）再删；T2 起两条路径都不能漏出回收站会话（spec §4.3，验收 18）。
   app.get('/api/sessions', async (req) => {
-    // 归档默认过滤（spec §4.1「列表默认过滤 + 『显示已归档』开关」）。开关走显式参数：
-    // 任何非空且非 '0'/'false' 的值都算开——前端只传 '1'，宽松解析是为了手工 curl 时不踩坑。
-    const raw = (req.query as any)?.includeArchived
-    const includeArchived =
-      raw !== undefined && raw !== '' && raw !== '0' && raw !== 'false' && raw !== false
-    const rows = includeArchived
-      ? sessionsRepo.listAllSessions()
+    const hasIncludeArchived =
+      (req.query as Record<string, unknown> | undefined)?.includeArchived !== undefined
+    const rows = hasIncludeArchived
+      ? sessionsRepo.listAllSessionsExcludingDeleted()
       : sessionsRepo.listActiveSessions()
     return rows.map((row) => {
       const session = toSessionConfig(row)
@@ -72,6 +79,12 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       return session
     })
   })
+
+  // ─── GET /api/sessions/trash — 回收站条目（未过期）──────────
+  //
+  // **必须注册在 GET /api/sessions/:id 之前**（spec §3.2 路由顺序契约）：静态段优先是
+  // 现在的路由器行为，但显式顺序才是契约——换路由库时 `:id='trash'` 不会把它吞掉。
+  app.get('/api/sessions/trash', async () => ({ entries: trashRepo.listTrash() }))
 
   // ─── GET /api/sessions/:id — 获取会话详情 ───────────
 
@@ -105,19 +118,18 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: parsed.error.flatten() })
     }
 
-    const { title, addAgentIds, removeAgentIds, broadcastMode } = parsed.data
+    const { title, addAgentIds, removeAgentIds, broadcastMode, groupId } = parsed.data
 
-    // 支持重命名
-    if (title !== undefined) {
-      sessionsRepo.updateSessionTitle(id, title)
+    // ── 先校验完再写 ──────────────────────────────────────────────
+    // 任一 400 都不该留下半截更新：四个动作（改名 / 广播 / 归组 / 成员）现在统一走
+    // 「校验 → 写入」两段，避免「先改了标题、后面成员校验失败」这种部分生效。
+    // 移动到分组（`groupId=null` = 回未分组）的组必须存在且未删；不做「静默落未分组」——
+    // 前端传了一个不存在的组 id 是 bug，静默吞掉会让它以为成功。
+    if (groupId !== undefined && groupId !== null && !sessionGroupsRepo.getGroupById(groupId)) {
+      return reply.status(400).send({ error: 'GROUP_NOT_FOUND' })
     }
 
-    // 支持切换广播模式
-    if (broadcastMode !== undefined) {
-      sessionsRepo.updateSessionBroadcastMode(id, broadcastMode)
-    }
-
-    // 支持增加/移除 Agent
+    let nextAgentIds: string[] | undefined
     if (addAgentIds?.length || removeAgentIds?.length) {
       const currentIds: string[] = JSON.parse(row.agent_ids || '[]')
 
@@ -130,17 +142,40 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const removeSet = new Set(removeAgentIds || [])
-      const newIds = currentIds
+      nextAgentIds = currentIds
         .filter((aid) => !removeSet.has(aid))
         .concat(addAgentIds || [])
         // 去重
         .filter((aid, i, arr) => arr.indexOf(aid) === i)
 
-      if (newIds.length === 0) {
+      if (nextAgentIds.length === 0) {
         return reply.status(400).send({ error: '会话至少需要一只猫咪' })
       }
+    }
 
-      sessionsRepo.updateSessionAgentIds(id, JSON.stringify(newIds))
+    // ── 写入 ──────────────────────────────────────────────────────
+    // 支持重命名
+    if (title !== undefined) {
+      sessionsRepo.updateSessionTitle(id, title)
+    }
+
+    // 支持切换广播模式
+    if (broadcastMode !== undefined) {
+      sessionsRepo.updateSessionBroadcastMode(id, broadcastMode)
+    }
+
+    // 移动到分组（不动 `updated_at`：分组是组织动作，不是会话活跃）。
+    // `groupChanged` 只在**归属真的变了**时为真：同值 PATCH（前端重放/双击）不该广播，
+    // 否则每次无关更新都让所有 tab 重拉一遍组列表。
+    const currentGroupId = row.group_id ?? null
+    const groupChanged = groupId !== undefined && (groupId ?? null) !== currentGroupId
+    if (groupId !== undefined) {
+      sessionsRepo.updateSessionGroup(id, groupId)
+    }
+
+    // 支持增加/移除 Agent
+    if (nextAgentIds !== undefined) {
+      sessionsRepo.updateSessionAgentIds(id, JSON.stringify(nextAgentIds))
     }
 
     // emit 通知前端
@@ -151,6 +186,9 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     } catch {
       /* emit 失败不影响响应 */
     }
+    // 组归属变化是**全局**结构变化（左栏所有 tab 都要重拉组列表）；与 SESSION_UPDATE
+    // 的会话房间广播不是一回事，两者都发、互不替代。
+    if (groupChanged) emitGroupsChanged()
     return config
   })
 
@@ -495,31 +533,103 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true }
   })
 
-  // ─── DELETE /api/sessions/:id — 删除会话 ────────────
-
+  // ─── DELETE /api/sessions/:id — 移入回收站（幂等）─────
+  //
+  // 与票 7 的物理删除是**语义反转**：只写 `sessions.deleted_at`，消息 / 执行日志 / 绑定
+  // 依赖全留 7 天。读取口径（spec §3.2）：
+  // - 从未存在 / 已彻底清除 → 404；
+  // - 已删且不是整组条目成员 → 200 返回**首次** `deletedAt`（不重置 7 天计时）；
+  // - 已删且属于某次整组删除 → 409 `SESSION_IN_TRASH_GROUP`（它已作为组条目在回收站里）；
+  // - 忙碌 / 绑定守卫**只在 `deleted_at IS NULL` 时跑**（第二次删除不会被自己的忙碌挡回）。
   app.delete('/api/sessions/:id', async (req, reply) => {
     const id = (req.params as any).id
+    const row = sessionsRepo.getSessionByIdIncludingDeleted(id)
+    if (!row) return reply.status(404).send({ error: 'Session not found' })
 
-    if (!sessionsRepo.getSessionById(id)) {
-      return reply.status(404).send({ error: 'Session not found' })
+    if (row.deleted_at !== null) {
+      const groupId = groupBatchOf(row)
+      if (groupId !== null) {
+        return reply.status(409).send({ error: 'SESSION_IN_TRASH_GROUP', groupId })
+      }
+      return {
+        id,
+        deletedAt: row.deleted_at,
+        purgeAfter: trashRepo.purgeAfterOf(row.deleted_at),
+      }
     }
 
-    // 删除关联数据（按外键依赖顺序）
-    execLogsRepo.deleteExecutionLogsBySession(id)
-    messagesRepo.deleteMessagesBySession(id)
-    sessionsRepo.deleteSession(id)
+    const blocker = getSessionBlocker(row)
+    if (blocker) {
+      return reply.status(409).send({ error: blockerError([blocker]), sessions: [blocker] })
+    }
 
-    // C1 dispose：同步清理引擎内该会话全部槽位——否则 (agentId, sessionId)
-    // 槽位只增不减，连续开/关会话 snapshot 膨胀（OQ1 审查缺口）
+    const deletedAt = new Date().toISOString()
+    sessionsRepo.trashSession(id, deletedAt)
+    // 软删成功后清引擎槽位（C1：槽位只增不减；忙碌守卫已挡掉在跑的会话，这里收的是
+    // idle 残留槽位）。disposeSession 只清内存，不中断 stream——与「先停后删」是两件事。
     getExecutionEngine()?.disposeSession(id)
+    emitGlobal(Events.SESSION_TRASHED, { sessionIds: [id], groupIds: [] })
+    return { id, deletedAt, purgeAfter: trashRepo.purgeAfterOf(deletedAt) }
+  })
 
-    // 通知所有已连接的客户端（支持多 tab 同步）
-    const io = getIO()
-    if (io) {
-      io.emit(Events.SESSION_DELETED, { sessionId: id })
+  // ─── POST /api/sessions/:id/restore — 恢复单条 ────────
+  app.post('/api/sessions/:id/restore', async (req, reply) => {
+    const id = (req.params as any).id
+    const row = sessionsRepo.getSessionByIdIncludingDeleted(id)
+    if (!row || row.deleted_at === null) {
+      return reply.status(404).send({ error: 'Session not in trash' })
+    }
+    const batchGroupId = groupBatchOf(row)
+    if (batchGroupId !== null) {
+      return reply.status(409).send({ error: 'SESSION_IN_TRASH_GROUP', groupId: batchGroupId })
+    }
+    if (isExpired(row.deleted_at)) {
+      return reply.status(404).send({ error: 'Session not in trash' })
     }
 
-    return { ok: true }
+    // 原组还活着 → 回原组；已删 / 已清除 → 落未分组（spec §4.2）
+    const targetGroupId =
+      row.group_id !== null && sessionGroupsRepo.getGroupById(row.group_id) ? row.group_id : null
+    sessionsRepo.restoreSession(id, targetGroupId)
+    const restored = sessionsRepo.getSessionByIdIncludingDeleted(id)!
+    const config = toSessionConfig(restored)
+    emitGlobal(Events.SESSION_RESTORED, { groupId: targetGroupId, sessions: [config] })
+    return { session: config, groupId: targetGroupId }
+  })
+
+  // ─── DELETE /api/sessions/:id/purge — 彻底删除单条 ────
+  app.delete('/api/sessions/:id/purge', async (req, reply) => {
+    const id = (req.params as any).id
+    const row = sessionsRepo.getSessionByIdIncludingDeleted(id)
+    if (!row) return reply.status(404).send({ error: 'Session not found' })
+    if (row.deleted_at === null) {
+      return reply.status(409).send({ error: 'SESSION_NOT_TRASHED' })
+    }
+    const batchGroupId = groupBatchOf(row)
+    if (batchGroupId !== null) {
+      return reply.status(409).send({ error: 'SESSION_IN_TRASH_GROUP', groupId: batchGroupId })
+    }
+
+    trashRepo.purgeSessionRecord(id)
+    getExecutionEngine()?.disposeSession(id)
+    emitGlobal(Events.SESSION_PURGED, { sessionIds: [id], groupIds: [] })
+    return { id }
+  })
+
+  // ─── DELETE /api/trash — 清空回收站 ───────────────────
+  //
+  // 含过期未清扫的条目：用户点「清空」时不该留下「已过期但还没到整点清扫」的残余。
+  app.delete('/api/trash', async () => {
+    const { groupIds, sessionIds } = trashRepo.emptyTrash()
+    const engine = getExecutionEngine()
+    if (engine) {
+      for (const id of sessionIds) engine.disposeSession(id)
+    }
+    if (sessionIds.length > 0 || groupIds.length > 0) {
+      emitGlobal(Events.SESSION_PURGED, { sessionIds, groupIds })
+    }
+    if (groupIds.length > 0) emitGroupsChanged()
+    return { purged: { groups: groupIds.length, sessions: sessionIds.length } }
   })
 }
 
@@ -538,6 +648,29 @@ function emitArchived(id: string): SessionConfig {
     /* emit 失败不影响响应 */
   }
   return config
+}
+
+/** 已删会话所属的「整组删除」组 id：组与会话 `deleted_at` **精确相等**才是同批。
+ *
+ *  组内更早单删的会话时间戳不同 → 返回 null，它属于独立的会话条目（ADR D3 不变量）。 */
+function groupBatchOf(row: SessionRow): string | null {
+  if (row.deleted_at === null || row.group_id === null) return null
+  const group = sessionGroupsRepo.getGroupByIdIncludingDeleted(row.group_id)
+  return group && group.deleted_at === row.deleted_at ? group.id : null
+}
+
+/** 已过期（`deleted_at <= now-7d`）：列表已滤掉，恢复接口按「不存在」处理（spec §4.2）。 */
+function isExpired(deletedAt: string): boolean {
+  return deletedAt <= trashRepo.trashCutoff()
+}
+
+/** 全局广播（列表级 UI 态）；emit 失败不影响已提交的写操作。 */
+function emitGlobal(event: string, payload: unknown): void {
+  try {
+    getIO()?.emit(event, payload)
+  } catch {
+    /* emit 失败不影响响应 */
+  }
 }
 
 /** 消息行 → 前端 wire 形状（11 字段）。
@@ -559,19 +692,5 @@ function toMessageDto(r: MessageRow) {
     toolContent: parseJsonValue<ToolCallInfo[]>(r.tool_content),
     segments: parseJsonValue<StreamSegment[]>(r.segments),
     createdAt: toIsoDb(r.created_at),
-  }
-}
-
-function toSessionConfig(row: SessionRow): SessionConfig {
-  return {
-    id: row.id,
-    title: row.title,
-    agentIds: JSON.parse(row.agent_ids || '[]'),
-    broadcastMode: !!row.broadcast_mode,
-    createdAt: row.created_at.replace(' ', 'T') + 'Z',
-    updatedAt: row.updated_at.replace(' ', 'T') + 'Z',
-    handoffFrom: row.handoff_from || null,
-    runningSummary: row.running_summary || null,
-    archivedAt: row.archived_at ? toIsoDb(row.archived_at) : null,
   }
 }

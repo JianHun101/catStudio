@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import SessionList from './components/SessionList.vue'
 import ChatPanel from './components/ChatPanel.vue'
@@ -6,6 +6,7 @@ import SessionAgentsPanel from './components/SessionAgentsPanel.vue'
 import SettingsView from './views/SettingsView.vue'
 import EvaluationView from './views/EvaluationView.vue'
 import TraceView from './views/TraceView.vue'
+import TrashView from './components/TrashView.vue'
 import EvalAlertBanner from './components/EvalAlertBanner.vue'
 import { useChatStore } from '@/stores/chat'
 
@@ -20,15 +21,24 @@ const showEval = ref(false)
 /** 全屏执行追踪 view 切换（T2）——入口在根级轨道 ⚙，另有气泡 footer ⚙ 带预选进入 */
 const showTrace = ref(false)
 
+/**
+ * 回收站视图（T4）。它与三个全屏页**互斥**，但**不是覆盖层**：回收站是中心区视图
+ * （左栏会话列表保留，点任一会话即回到聊天）。因此它决定 `.panel-center` 渲染什么，
+ * 而不是把整块 `.app-layout` 藏起来——否则「点会话回聊天」没有入口。
+ */
+const showTrash = ref(false)
+
 /** 气泡 ⚙ 进来时预选的执行 id（轨道直接进来为 null = 只看列表不预选） */
 const tracePreselect = ref<string | null>(null)
 
 /** 轨道四按钮的激活态单源：无覆盖层 = 聊天。`.on` 与 `aria-current` 都读它——
- *  两处各判一次的话，加第五个视图时必有一处漏改且不报错（复述面分叉老形态）。 */
-const currentView = computed<'chat' | 'trace' | 'eval' | 'settings'>(() => {
+ *  两处各判一次的话，加第五个视图时必有一处漏改且不报错（复述面分叉老形态）。
+ *  回收站也算一个视图（`trash`），但轨道没有对应按钮，故四种激活态之外不亮任何一项。 */
+const currentView = computed<'chat' | 'trace' | 'eval' | 'settings' | 'trash'>(() => {
   if (showSettings.value) return 'settings'
   if (showEval.value) return 'eval'
   if (showTrace.value) return 'trace'
+  if (showTrash.value) return 'trash'
   return 'chat'
 })
 
@@ -40,6 +50,7 @@ function openTrace(executionId: string | null = null): void {
   showTrace.value = true
   showSettings.value = false
   showEval.value = false
+  showTrash.value = false
 }
 
 /** 打开设置页（T4：轨道齿轮）。互斥与幂等同 `openTrace`。 */
@@ -48,6 +59,7 @@ function openSettings(): void {
   showSettings.value = true
   showEval.value = false
   showTrace.value = false
+  showTrash.value = false
 }
 
 /** 打开评估中心（T4：轨道 📊）。 */
@@ -56,14 +68,30 @@ function openEval(): void {
   showEval.value = true
   showSettings.value = false
   showTrace.value = false
+  showTrash.value = false
 }
 
-/** 回聊天（轨道 💬）：关掉全部覆盖层——这就是「轨道即导航」的返回手段（✕ 已退役）。
+/** 打开回收站（左栏头行 🗑）。与三个全屏页互斥；底层三栏保留（只换中心区内容）。 */
+function openTrash(): void {
+  if (showTrash.value) return
+  showTrash.value = true
+  showSettings.value = false
+  showEval.value = false
+  showTrace.value = false
+}
+
+/** 关闭回收站回聊天（点「返回聊天」或左栏任一会话时调用）。 */
+function closeTrash(): void {
+  showTrash.value = false
+}
+
+/** 回聊天（轨道 💬）：关掉全部覆盖层与回收站——这就是「轨道即导航」的返回手段（✕ 已退役）。
  *  `app-layout` 是 v-show ⇒ 切回零重建；顺带清预选，使「轨道进追踪页」恒为只看列表。 */
 function openChat(): void {
   showSettings.value = false
   showEval.value = false
   showTrace.value = false
+  showTrash.value = false
   tracePreselect.value = null
 }
 
@@ -75,7 +103,9 @@ function onTraceJump(messageId: string, sessionId: string): void {
   store.requestFocusMessage(messageId)
 }
 
-/** 任何全屏 view 开着时，底层三栏布局不显示（保活靠 v-show——切回来零重建） */
+/** 任何**全屏**视图开着时，底层三栏布局不显示（保活靠 v-show——切回来零重建）。
+ *  回收站（`showTrash`）不在此列：它是中心区视图，左栏必须保留（点会话回聊天）；
+ *  它与三个全屏页的互斥由 `open*` 函数逐个清理保证，不是靠这个开关。 */
 const anyOverlayOpen = computed(() => showSettings.value || showEval.value || showTrace.value)
 
 /** User manually toggled the left sidebar — once set, auto-hide on narrow windows
@@ -134,6 +164,25 @@ onUnmounted(() => {
       <button class="error-toast-close" @click="store.dismissError" title="关闭">✕</button>
     </div>
   </Transition>
+
+  <!-- 单删撤销 toast（T4）：宿在 App 根级而非 ChatPanel 内——回收站/三个全屏页打开时
+       ChatPanel 被隐藏（v-show），toast 挂在它里面会一起被藏住，5 秒窗口静默过期。
+       计时与动作都在 store（`undoToast` / `undoLastTrash`），这里只渲染。 -->
+  <div v-if="store.undoToast" class="undo-trash-toast" role="status">
+    <span class="undo-trash-text">
+      「{{ store.undoToast.title }}」已移入回收站 · 剩 {{ store.undoToast.daysLeft }} 天
+    </span>
+    <button type="button" class="undo-trash-action" @click="store.undoLastTrash()">撤销</button>
+    <button
+      type="button"
+      class="undo-trash-close"
+      title="关闭"
+      aria-label="关闭撤销提示"
+      @click="store.dismissUndoToast()"
+    >
+      ✕
+    </button>
+  </div>
 
   <!-- 全局评估告警横幅（自包含：自己拉 l1-metrics；破线才渲染） -->
   <EvalAlertBanner @open-eval="openEval" />
@@ -233,17 +282,24 @@ onUnmounted(() => {
       <div v-show="!anyOverlayOpen" class="app-layout" :class="{ 'left-closed': !leftOpen }">
         <aside class="panel-left">
           <div class="panel-inner">
-            <SessionList />
+            <SessionList @open-trash="openTrash" @open-session="closeTrash" />
           </div>
         </aside>
 
         <main class="panel-center">
           <div class="center-content">
+            <!-- 回收站是中心区视图（T4）：左栏/右栏保留，只换中心区；点任一会话回聊天。
+                 ChatPanel 用 **v-show 保活、不卸载**（P2-1）：草稿、粘贴图、`sending` 发送中
+                 守卫、阅读位置都是组件本地态，`v-if/v-else` 销毁重建会一并丢掉（在途发送
+                 回来还能重复发）。`hidden` 通知它切回时恢复阅读位置。 -->
             <ChatPanel
+              v-show="!showTrash"
               :left-sidebar-open="leftOpen"
+              :hidden="showTrash"
               @toggle-left-sidebar="toggleLeft"
               @open-trace="openTrace"
             />
+            <TrashView v-if="showTrash" @close="closeTrash" />
           </div>
         </main>
 
@@ -257,6 +313,59 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* ─── 单删撤销 toast（T4，根级宿主）────────── */
+
+.undo-trash-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  z-index: 800;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, calc(100vw - 48px));
+  padding: 9px 14px;
+  transform: translateX(-50%);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.undo-trash-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.undo-trash-action {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--accent-text);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.undo-trash-action:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.undo-trash-close {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 /* ─── Error Toast ─────────────────────────── */
 
 .error-toast {

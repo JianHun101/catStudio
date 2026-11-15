@@ -55,7 +55,17 @@ describe('Events', () => {
     expect(Events.SESSION_ROLLED_BACK).toBe('session-rolled-back')
   })
 
-  it('has exactly 28 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(28)
+  it('has GROUPS_CHANGED server→client event（T1 分组结构变化）', () => {
+    expect(Events.GROUPS_CHANGED).toBe('groups-changed')
+  })
+
+  it('has 回收站三事件（T2 软删 / 恢复 / 彻底清除）', () => {
+    expect(Events.SESSION_TRASHED).toBe('session-trashed')
+    expect(Events.SESSION_RESTORED).toBe('session-restored')
+    expect(Events.SESSION_PURGED).toBe('session-purged')
+  })
+
+  it('has exactly 32 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(32)
   })
 })

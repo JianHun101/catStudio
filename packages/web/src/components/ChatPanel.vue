@@ -20,9 +20,18 @@ import ToolRow from './ToolRow.vue'
 
 const log = createLogger('ChatPanel')
 
-const props = defineProps<{
-  leftSidebarOpen: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    leftSidebarOpen: boolean
+    /**
+     * 中心区切到回收站时为 true（App 用 `v-show` 隐藏本组件，**不卸载**）。
+     * 隐藏期间草稿/粘贴图/`sending` 等本地态原样保留；只有滚动位置会因
+     * `display:none` 丢失，由下面的 watch 在切回时恢复。
+     */
+    hidden?: boolean
+  }>(),
+  { hidden: false }
+)
 
 const emit = defineEmits<{
   toggleLeftSidebar: []
@@ -389,6 +398,37 @@ async function onMessagesScroll(): Promise<void> {
   }
   checkScrollPosition()
 }
+
+// ─── 回收站切换（App 用 v-show 隐藏）时的阅读位置保持 ──────────
+//
+// 进回收站只是隐藏本组件、**不卸载**（草稿、粘贴图、在途发送守卫都靠这一点）。
+// 但 `display:none` 期间滚动容器的 `scrollTop` 会被浏览器丢掉，切回后一律回到顶部/底部；
+// 故隐藏前记位置、切回后下一帧恢复。隐藏前本来就贴底的话直接贴回底——期间可能到了
+// 新消息，恢复到旧 scrollTop 会停在半截、看着像「卡住了」。
+let savedScrollTop = 0
+let savedAtBottom = true
+
+watch(
+  () => props.hidden,
+  async (hidden, wasHidden) => {
+    if (hidden) {
+      savedScrollTop = chatContainer.value?.scrollTop ?? 0
+      savedAtBottom = isAtBottom.value
+      return
+    }
+    if (!wasHidden) return
+    await nextTick()
+    if (savedAtBottom) {
+      scrollToBottom()
+      return
+    }
+    const el = chatContainer.value
+    if (!el) return
+    el.scrollTop = savedScrollTop
+    lastScrollTop = el.scrollTop
+    checkScrollPosition()
+  }
+)
 
 // New messages arrive → scroll if at bottom; otherwise show indicator
 // watch 源用最后一条消息 id（比 length 精确：消息内容更新不改 id 不触发滚动）。
@@ -2067,6 +2107,8 @@ const messageViews = computed<MessageView[]>(() => {
 </template>
 
 <style scoped>
+/* ─── 单删撤销 toast 已上移 App 根级（T4：v-show 隐藏时也可见，避免 5 秒窗口静默过期）── */
+
 .chat-panel {
   display: flex;
   flex-direction: column;

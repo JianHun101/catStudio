@@ -50,6 +50,8 @@ describe('Session Routes', () => {
     // Import and register routes (must be after mock is set up)
     const { sessionRoutes } = await import('./sessions.js')
     await app.register(sessionRoutes)
+    mockEmit.mockClear()
+    mockRoomEmit.mockClear()
   })
 
   afterEach(async () => {
@@ -123,7 +125,7 @@ describe('Session Routes', () => {
       expect(JSON.parse(res.body)).toHaveLength(2)
     })
 
-    // ─── 票 7 · 归档默认过滤 ─────────────────────────────
+    // ─── 票 7 · 归档 → T1 起退役（归档不再影响列表；T5 才删接口） ─────
     const createSession = async (title: string): Promise<string> => {
       const res = await app.inject({
         method: 'POST',
@@ -133,35 +135,34 @@ describe('Session Routes', () => {
       return JSON.parse(res.body).id as string
     }
 
-    it('默认滤掉已归档会话；?includeArchived=1 全量返回', async () => {
+    it('归档不再从默认列表隐藏（T1：收纳由分组折叠承担）；includeArchived 兼容参数仍可传', async () => {
       const keep = await createSession('留着')
-      const gone = await createSession('归档的')
+      const archived = await createSession('归档的')
 
       const archive = await app.inject({
         method: 'POST',
-        url: `/api/sessions/${gone}/archive`,
+        url: `/api/sessions/${archived}/archive`,
       })
       expect(archive.statusCode).toBe(200)
 
       const def = await app.inject({ method: 'GET', url: '/api/sessions' })
       const defIds = (JSON.parse(def.body) as Array<{ id: string }>).map((s) => s.id)
       expect(defIds).toContain(keep)
-      expect(defIds).not.toContain(gone)
+      // T1 起 `listActiveSessions` 只排除 `deleted_at`；归档列冻结、不参与可见性
+      expect(defIds).toContain(archived)
 
       const all = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
       const allIds = (JSON.parse(all.body) as Array<{ id: string }>).map((s) => s.id)
-      expect(allIds).toContain(keep)
-      expect(allIds).toContain(gone)
+      expect(allIds).toEqual(expect.arrayContaining([keep, archived]))
     })
 
-    it('includeArchived 的宽松解析：`0`/`false` 视为关（手工 curl 不踩坑）', async () => {
-      const gone = await createSession('归档的-2')
-      await app.inject({ method: 'POST', url: `/api/sessions/${gone}/archive` })
-
+    it('includeArchived 的宽松解析仍不误伤：`0`/`false`/空串都返回未删除会话', async () => {
+      const id = await createSession('兼容参数')
       for (const v of ['0', 'false', '']) {
         const res = await app.inject({ method: 'GET', url: `/api/sessions?includeArchived=${v}` })
+        expect(res.statusCode, `includeArchived=${v}`).toBe(200)
         const ids = (JSON.parse(res.body) as Array<{ id: string }>).map((s) => s.id)
-        expect(ids, `includeArchived=${v}`).not.toContain(gone)
+        expect(ids, `includeArchived=${v}`).toContain(id)
       }
     })
   })
@@ -282,57 +283,492 @@ describe('Session Routes', () => {
       })
       expect(res.statusCode).toBe(404)
     })
+
+    it('groupId 移动到分组：200 返回新 groupId，且不改 updated_at', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '移动测试', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO session_groups (id, name, created_at, updated_at)
+         VALUES ('g-1', '小说连载', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+      ).run()
+      db.prepare(`UPDATE sessions SET updated_at = '2020-01-01 00:00:00' WHERE id = ?`).run(id)
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: 'g-1' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body).groupId).toBe('g-1')
+      expect(
+        db.prepare(`SELECT group_id, updated_at FROM sessions WHERE id = ?`).get(id) as {
+          group_id: string | null
+          updated_at: string
+        }
+      ).toEqual({ group_id: 'g-1', updated_at: '2020-01-01 00:00:00' })
+
+      // `groupId: null` 回未分组
+      const back = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: null },
+      })
+      expect(back.statusCode).toBe(200)
+      expect(JSON.parse(back.body).groupId).toBeNull()
+    })
+
+    it('groupId 指向不存在/已删组 → 400 GROUP_NOT_FOUND，原分组不变', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '坏组', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO session_groups (id, name, created_at, updated_at, deleted_at)
+         VALUES ('g-dead', '已删组', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+                 '2026-01-02T00:00:00.000Z')`
+      ).run()
+
+      for (const groupId of ['g-missing', 'g-dead']) {
+        const res = await app.inject({
+          method: 'PATCH',
+          url: `/api/sessions/${id}`,
+          payload: { groupId },
+        })
+        expect(res.statusCode, groupId).toBe(400)
+        expect(JSON.parse(res.body)).toEqual({ error: 'GROUP_NOT_FOUND' })
+      }
+      expect(
+        (
+          db.prepare(`SELECT group_id FROM sessions WHERE id = ?`).get(id) as {
+            group_id: string | null
+          }
+        ).group_id
+      ).toBeNull()
+    })
+
+    it('GET 列表与详情都带 groupId（wire 契约）', async () => {
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '带组', agentIds: [agentId1] },
+      })
+      const { id } = JSON.parse(create.body)
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO session_groups (id, name, created_at, updated_at)
+         VALUES ('g-2', '组二', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+      ).run()
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: 'g-2' },
+      })
+
+      const list = await app.inject({ method: 'GET', url: '/api/sessions' })
+      const row = (JSON.parse(list.body) as Array<{ id: string; groupId: string | null }>).find(
+        (s) => s.id === id
+      )
+      expect(row?.groupId).toBe('g-2')
+
+      const detail = await app.inject({ method: 'GET', url: `/api/sessions/${id}` })
+      expect(JSON.parse(detail.body).groupId).toBe('g-2')
+    })
+
+    // ─── T1 收尾（P2-2 的 T1 半边）：移动会话要广播 GROUPS_CHANGED ─────────
+    // 组归属是左栏结构：只发会话房间的 SESSION_UPDATE 时，别的 tab 的组会话数不会变。
+    const countGroupsChanged = () =>
+      mockEmit.mock.calls.filter((c: unknown[]) => c[0] === Events.GROUPS_CHANGED).length
+
+    const createSessionForMove = async (): Promise<string> => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { title: '移动广播', agentIds: [agentId1] },
+      })
+      return JSON.parse(res.body).id
+    }
+
+    const createGroupRow = (id: string, name: string) => {
+      getDb()
+        .prepare(
+          `INSERT INTO session_groups (id, name, created_at, updated_at)
+           VALUES (?, ?, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+        )
+        .run(id, name)
+    }
+
+    it('groupId 真变化 → 全局 GROUPS_CHANGED 恰好 1 次（SESSION_UPDATE 仍发房间）', async () => {
+      const id = await createSessionForMove()
+      createGroupRow('g-move', '目标组')
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: 'g-move' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(countGroupsChanged()).toBe(1)
+      expect(mockEmit).toHaveBeenCalledWith(Events.GROUPS_CHANGED, {})
+      expect(mockRoomEmit).toHaveBeenCalledWith(
+        Events.SESSION_UPDATE,
+        expect.objectContaining({ id, groupId: 'g-move' })
+      )
+    })
+
+    it('groupId 同值 → 0 次 GROUPS_CHANGED（前端重放不触发全量刷新）', async () => {
+      const id = await createSessionForMove()
+      createGroupRow('g-same', '同值组')
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: 'g-same' },
+      })
+      mockEmit.mockClear()
+
+      const again = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { groupId: 'g-same' },
+      })
+      expect(again.statusCode).toBe(200)
+      expect(countGroupsChanged()).toBe(0)
+    })
+
+    it('只改 title / 成员 → 0 次 GROUPS_CHANGED', async () => {
+      const id = await createSessionForMove()
+      const title = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { title: '只改名' },
+      })
+      expect(title.statusCode).toBe(200)
+      expect(countGroupsChanged()).toBe(0)
+
+      const members = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${id}`,
+        payload: { addAgentIds: [agentId2] },
+      })
+      expect(members.statusCode).toBe(200)
+      expect(countGroupsChanged()).toBe(0)
+    })
   })
 
-  describe('DELETE /api/sessions/:id', () => {
-    it('deletes a session and returns ok', async () => {
-      const create = await app.inject({
+  // ═══ T2 · 回收站：软删 / 恢复 / 彻底删除 / 守卫 / 列表 ═════════════
+  describe('T2 回收站', () => {
+    const DAY = 24 * 60 * 60 * 1000
+
+    const newSession = async (title = '回收站测试'): Promise<string> => {
+      const res = await app.inject({
         method: 'POST',
         url: '/api/sessions',
-        payload: { title: '删除测试', agentIds: [agentId1] },
+        payload: { title, agentIds: [agentId1] },
       })
-      const { id } = JSON.parse(create.body)
+      return JSON.parse(res.body).id as string
+    }
+
+    const insertGroup = (id: string, name: string, deletedAt: string | null = null) => {
+      getDb()
+        .prepare(
+          `INSERT INTO session_groups (id, name, created_at, updated_at, deleted_at)
+           VALUES (?, ?, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ?)`
+        )
+        .run(id, name, deletedAt)
+    }
+
+    const setDeletedAt = (id: string, deletedAt: string | null) => {
+      getDb().prepare('UPDATE sessions SET deleted_at = ? WHERE id = ?').run(deletedAt, id)
+    }
+
+    const rowOf = (id: string) =>
+      getDb().prepare('SELECT * FROM sessions WHERE id = ?').get(id) as {
+        deleted_at: string | null
+        group_id: string | null
+        updated_at: string
+      }
+
+    const trashIds = async (): Promise<string[]> => {
+      const res = await app.inject({ method: 'GET', url: '/api/sessions/trash' })
+      expect(res.statusCode).toBe(200)
+      return (JSON.parse(res.body).entries as Array<{ kind: string; id: string }>)
+        .filter((e) => e.kind === 'session')
+        .map((e) => e.id)
+    }
+
+    function stubEngine(slots: Array<Record<string, unknown>>) {
+      return {
+        snapshot: () => slots,
+        abortAgent: vi.fn(() => true),
+        cancelQueuedCommand: vi.fn(() => 0),
+        disposeSession: vi.fn(),
+      } as unknown as ExecutionEngine & ExecutionEngineTestHooks
+    }
+
+    afterEach(() => {
+      __resetEngine()
+    })
+
+    it('单删 = 软删：列表消失、进 /trash、purgeAfter = deletedAt+7d、消息一条不少', async () => {
+      const id = await newSession('软删')
+      const db = getDb()
+      db.prepare(
+        "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', ?, 'user', 'hi')"
+      ).run(id)
 
       const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
       expect(res.statusCode).toBe(200)
-      expect(JSON.parse(res.body)).toEqual({ ok: true })
+      const body = JSON.parse(res.body)
+      expect(body).toMatchObject({ id })
+      expect(Date.parse(body.purgeAfter) - Date.parse(body.deletedAt)).toBe(7 * DAY)
 
-      // 确认已删除
-      const get = await app.inject({ method: 'GET', url: `/api/sessions/${id}` })
-      expect(get.statusCode).toBe(404)
+      // 消息仍在（软删的唯一判据是 sessions.deleted_at）
+      expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE id = 'm1'").get()).toEqual({
+        n: 1,
+      })
+      // 详情 / 列表 / includeArchived 都当不存在
+      expect((await app.inject({ method: 'GET', url: `/api/sessions/${id}` })).statusCode).toBe(404)
+      const list = await app.inject({ method: 'GET', url: '/api/sessions' })
+      expect((JSON.parse(list.body) as Array<{ id: string }>).map((s) => s.id)).not.toContain(id)
+      const all = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
+      expect((JSON.parse(all.body) as Array<{ id: string }>).map((s) => s.id)).not.toContain(id)
+
+      // /trash 一条会话条目，带原组（无组 = null）与消息数
+      const trash = await app.inject({ method: 'GET', url: '/api/sessions/trash' })
+      const entries = JSON.parse(trash.body).entries as Array<Record<string, any>>
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({
+        kind: 'session',
+        id,
+        name: '软删',
+        sessionCount: 1,
+        messageCount: 1,
+        groupId: null,
+        groupName: null,
+      })
+      expect(entries[0].daysLeft).toBe(7)
+      // 事件
+      expect(mockEmit).toHaveBeenCalledWith(Events.SESSION_TRASHED, {
+        sessionIds: [id],
+        groupIds: [],
+      })
     })
 
-    it('cascades to messages and execution_logs', async () => {
-      const create = await app.inject({
-        method: 'POST',
-        url: '/api/sessions',
-        payload: { title: '级联测试', agentIds: [agentId1] },
-      })
-      const { id } = JSON.parse(create.body)
+    it('重复 DELETE 幂等：仍 200、返回**首次** deletedAt、不重置 7 天计时', async () => {
+      const id = await newSession('幂等删除')
+      const first = JSON.parse(
+        (await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })).body
+      )
+      mockEmit.mockClear()
 
-      // 手动插入消息和执行日志
-      const db = (await import('../db/index.js')).getDb()
+      const second = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
+      expect(second.statusCode).toBe(200)
+      const body = JSON.parse(second.body)
+      expect(body.deletedAt).toBe(first.deletedAt)
+      expect(body.purgeAfter).toBe(first.purgeAfter)
+      expect(mockEmit).not.toHaveBeenCalledWith(Events.SESSION_TRASHED, expect.anything())
+    })
+
+    it('忙 / 排队 → 409 SESSION_BUSY，deleted_at 仍 NULL', async () => {
+      const id = await newSession('忙碌')
+      setExecutionEngine(
+        stubEngine([
+          // idle 槽位仍留 sessionId —— 不得判忙
+          { agentId: agentId2, sessionId: id, status: 'idle', queueLength: 0 },
+          // 真忙
+          { agentId: agentId1, sessionId: id, status: 'busy', queueLength: 0 },
+        ])
+      )
+
+      const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
+      expect(res.statusCode).toBe(409)
+      const body = JSON.parse(res.body)
+      expect(body.error).toBe('SESSION_BUSY')
+      expect(body.sessions[0]).toMatchObject({ id, reason: 'busy' })
+      expect(rowOf(id).deleted_at).toBeNull()
+    })
+
+    it('只有 idle 槽位（仍留 sessionId）不算忙：可以删除，且删后清槽位一次', async () => {
+      const id = await newSession('空闲槽位')
+      const engine = stubEngine([
+        { agentId: agentId1, sessionId: id, status: 'idle', queueLength: 0 },
+      ])
+      setExecutionEngine(engine)
+
+      const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
+      expect(res.statusCode).toBe(200)
+      expect(rowOf(id).deleted_at).not.toBeNull()
+      expect(engine.disposeSession).toHaveBeenCalledTimes(1)
+      expect(engine.disposeSession).toHaveBeenCalledWith(id)
+    })
+
+    it('绑定外部群 → 409 SESSION_BOUND，绑定行与 deleted_at 都不变', async () => {
+      const id = await newSession('已绑定')
+      const db = getDb()
       db.prepare(
-        "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', ?, 'user', 'hello')"
+        `INSERT INTO connector_bindings (id, platform, external_type, external_id, session_id, created_at)
+         VALUES ('b1', 'qq', 'group', '555', ?, '2026-01-01T00:00:00.000Z')`
+      ).run(id)
+
+      const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
+      expect(res.statusCode).toBe(409)
+      const body = JSON.parse(res.body)
+      expect(body.error).toBe('SESSION_BOUND')
+      expect(body.sessions[0]).toMatchObject({
+        id,
+        reason: 'bound',
+        platform: 'qq',
+        externalId: '555',
+      })
+      expect(rowOf(id).deleted_at).toBeNull()
+      expect(db.prepare('SELECT COUNT(*) AS n FROM connector_bindings').get()).toEqual({ n: 1 })
+    })
+
+    it('恢复：回原组、不改 updated_at；原组已删 → groupId=null；过期 → 404', async () => {
+      const id = await newSession('恢复')
+      insertGroup('g-live', '活组')
+      getDb()
+        .prepare(
+          "UPDATE sessions SET group_id = 'g-live', updated_at = '2020-01-01 00:00:00' WHERE id = ?"
+        )
+        .run(id)
+      await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
+
+      const res = await app.inject({ method: 'POST', url: `/api/sessions/${id}/restore` })
+      expect(res.statusCode).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.groupId).toBe('g-live')
+      expect(body.session).toMatchObject({ id, groupId: 'g-live' })
+      expect(rowOf(id)).toMatchObject({
+        deleted_at: null,
+        group_id: 'g-live',
+        updated_at: '2020-01-01 00:00:00',
+      })
+      expect(mockEmit).toHaveBeenCalledWith(Events.SESSION_RESTORED, {
+        groupId: 'g-live',
+        sessions: [expect.objectContaining({ id, groupId: 'g-live' })],
+      })
+
+      // 会话仍属已删组（组软删但会话未进组批次）→ 恢复落未分组
+      const id2 = await newSession('原组已删')
+      insertGroup('g-dead', '已删组', '2026-01-02T00:00:00.000Z')
+      getDb().prepare("UPDATE sessions SET group_id = 'g-dead' WHERE id = ?").run(id2)
+      await app.inject({ method: 'DELETE', url: `/api/sessions/${id2}` })
+      const res2 = await app.inject({ method: 'POST', url: `/api/sessions/${id2}/restore` })
+      expect(res2.statusCode).toBe(200)
+      expect(JSON.parse(res2.body).groupId).toBeNull()
+
+      // 过期 → 404（列表也已滤掉）
+      const id3 = await newSession('过期')
+      setDeletedAt(id3, new Date(Date.now() - 8 * DAY).toISOString())
+      expect(
+        (await app.inject({ method: 'POST', url: `/api/sessions/${id3}/restore` })).statusCode
+      ).toBe(404)
+      expect(await trashIds()).not.toContain(id3)
+    })
+
+    it('彻底删除：活会话 409；已删会话连同消息 / 执行日志 / 依赖行一起消失', async () => {
+      const id = await newSession('彻底删除')
+      const db = getDb()
+      db.prepare(
+        "INSERT INTO messages (id, session_id, role, content) VALUES ('m1', ?, 'user', 'hi')"
       ).run(id)
       db.prepare(
-        `
-        INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status)
-        VALUES ('log1', ?, ?, 'm1', 'completed')
-      `
+        `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status)
+         VALUES ('log1', ?, ?, 'm1', 'completed')`
       ).run(id, agentId1)
 
-      // 删除
-      const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
-      expect(res.statusCode).toBe(200)
+      expect(
+        (await app.inject({ method: 'DELETE', url: `/api/sessions/${id}/purge` })).statusCode
+      ).toBe(409)
 
-      // 确认消息和日志已级联删除
-      const msg = db.prepare("SELECT * FROM messages WHERE id = 'm1'").get()
-      expect(msg).toBeUndefined()
-      const logRow = db.prepare("SELECT * FROM execution_logs WHERE id = 'log1'").get()
-      expect(logRow).toBeUndefined()
+      await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })
+      const engine = stubEngine([])
+      setExecutionEngine(engine)
+      const res = await app.inject({ method: 'DELETE', url: `/api/sessions/${id}/purge` })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({ id })
+      expect(engine.disposeSession).toHaveBeenCalledTimes(1)
+      expect(engine.disposeSession).toHaveBeenCalledWith(id)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE id = ?').get(id)).toEqual({
+        n: 0,
+      })
+      expect(db.prepare('SELECT COUNT(*) AS n FROM messages WHERE session_id = ?').get(id)).toEqual(
+        { n: 0 }
+      )
+      expect(
+        db.prepare('SELECT COUNT(*) AS n FROM execution_logs WHERE session_id = ?').get(id)
+      ).toEqual({ n: 0 })
+      expect(mockEmit).toHaveBeenCalledWith(Events.SESSION_PURGED, {
+        sessionIds: [id],
+        groupIds: [],
+      })
+      // 已清除 = 不存在，再删除 404
+      expect((await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })).statusCode).toBe(
+        404
+      )
     })
 
+    it('整组条目成员：单条 restore / purge / DELETE 全部 409 SESSION_IN_TRASH_GROUP', async () => {
+      const id = await newSession('组条目成员')
+      const ts = '2026-01-02T00:00:00.000Z'
+      insertGroup('g-trash', '已删组', ts)
+      getDb()
+        .prepare("UPDATE sessions SET group_id = 'g-trash', deleted_at = ? WHERE id = ?")
+        .run(ts, id)
+
+      for (const [method, url] of [
+        ['POST', `/api/sessions/${id}/restore`],
+        ['DELETE', `/api/sessions/${id}/purge`],
+        ['DELETE', `/api/sessions/${id}`],
+      ] as const) {
+        const res = await app.inject({ method, url })
+        expect(res.statusCode, `${method} ${url}`).toBe(409)
+        expect(JSON.parse(res.body)).toMatchObject({
+          error: 'SESSION_IN_TRASH_GROUP',
+          groupId: 'g-trash',
+        })
+      }
+      // 一条都没被改
+      expect(rowOf(id)).toMatchObject({ deleted_at: ts, group_id: 'g-trash' })
+    })
+
+    it('清空回收站：组条目连同等批会话、单个会话条目全部消失', async () => {
+      const ts = '2026-01-02T00:00:00.000Z'
+      insertGroup('g-clear', '清空组', ts)
+      const inGroup = await newSession('组内')
+      getDb()
+        .prepare("UPDATE sessions SET group_id = 'g-clear', deleted_at = ? WHERE id = ?")
+        .run(ts, inGroup)
+      const single = await newSession('单个')
+      await app.inject({ method: 'DELETE', url: `/api/sessions/${single}` })
+
+      const engine = stubEngine([])
+      setExecutionEngine(engine)
+      const res = await app.inject({ method: 'DELETE', url: '/api/trash' })
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toEqual({ purged: { groups: 1, sessions: 2 } })
+      expect(engine.disposeSession).toHaveBeenCalledTimes(2)
+      expect(engine.disposeSession).toHaveBeenCalledWith(inGroup)
+      expect(engine.disposeSession).toHaveBeenCalledWith(single)
+      expect(getDb().prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 0 })
+      expect(getDb().prepare('SELECT COUNT(*) AS n FROM session_groups').get()).toEqual({ n: 0 })
+      expect(mockEmit).toHaveBeenCalledWith(Events.SESSION_PURGED, {
+        sessionIds: expect.arrayContaining([inGroup, single]),
+        groupIds: ['g-clear'],
+      })
+      expect(mockEmit).toHaveBeenCalledWith(Events.GROUPS_CHANGED, {})
+    })
+  })
+
+  describe('DELETE /api/sessions/:id (旧物理删除用例已由 T2 回收站替换)', () => {
     it('returns 404 for nonexistent session', async () => {
       const res = await app.inject({ method: 'DELETE', url: '/api/sessions/nonexistent' })
       expect(res.statusCode).toBe(404)
@@ -686,6 +1122,7 @@ describe('Session Routes', () => {
         snapshot: () => slots,
         abortAgent: vi.fn(() => true),
         cancelQueuedCommand: vi.fn(() => 0),
+        disposeSession: vi.fn(),
       } as unknown as ExecutionEngine & ExecutionEngineTestHooks
     }
 

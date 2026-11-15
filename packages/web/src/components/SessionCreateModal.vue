@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useChatStore } from '@/stores/chat'
 
-const emit = defineEmits(['close'])
+const emit = defineEmits<{ (e: 'close'): void; (e: 'created'): void }>()
 const store = useChatStore()
 
 const title = ref('')
@@ -30,7 +30,9 @@ async function handleCreate(): Promise<void> {
   error.value = ''
   try {
     await store.createSession(title.value.trim(), [...selectedAgents.value])
-    emit('close')
+    // `created` 而不是 `close`：调用侧要区分「取消」与「真的建成了」——回收站视图下
+    // 创建成功必须切回聊天（新建的会话已在 store 里 join，中心区得跟过去）。
+    emit('created')
   } catch (err: any) {
     error.value = err.message || '创建失败'
   } finally {

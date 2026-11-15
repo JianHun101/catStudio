@@ -12,10 +12,123 @@ import type {
   ExecutionMeta,
 } from '@cat-study/shared'
 import { useSocket } from '@/composables/useSocket'
-import { api, type ContextConfig } from '@/composables/useApi'
+import {
+  api,
+  type ContextConfig,
+  type GroupedSession,
+  type SessionGroup,
+  type TrashEntry,
+} from '@/composables/useApi'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('chatStore')
+
+/**
+ * 回收站接线开关（T4 起为 `true`）：T2 已把 `DELETE /api/sessions/:id` 从物理删除翻成
+ * 软删进回收站，故删除入口全线可达。
+ *
+ * 保留这个常量而不是删掉，是为了留一个**可注入的关闸**：`trashSessions(ids, { enabled })`
+ * 显式传 `false` 时逐条返回「未启用」、一条删除 API 都不发（守卫回归用）；
+ * 组件侧 `trashEnabled: false` 仍能把危险动作置灰。默认值即本常量。
+ */
+export const TRASH_ENABLED = true
+
+/**
+ * 逐条执行删除并收集失败（批量删除的部分失败语义）：一条被 409 挡住不整批回滚，
+ * 已成功的保留、失败项带原因返回，由调用侧点名。执行器注入，关闸态也能钉住行为。
+ */
+export async function removeSessionsSequentially(
+  ids: string[],
+  remove: (id: string) => Promise<unknown>
+): Promise<Array<{ id: string; message: string }>> {
+  const failed: Array<{ id: string; message: string }> = []
+  for (const id of [...new Set(ids)]) {
+    try {
+      await remove(id)
+    } catch (err: any) {
+      log.error('remove session failed', { id, error: String(err) })
+      failed.push({ id, message: trashFailureReason(err) })
+    }
+  }
+  return failed
+}
+
+/**
+ * 删除失败的用户可读原因：服务端 409 的机器码（`SESSION_BUSY` 等）不能直接甩给用户；
+ * 未知码保留原始 message，便于排障。批量删除逐条判定，用同一映射。
+ */
+export function trashFailureReason(err: any): string {
+  const code = err?.body?.error
+  switch (code) {
+    case 'SESSION_BUSY':
+      return '正在执行'
+    case 'SESSION_BOUND':
+      return '已绑定外部群'
+    case 'SESSION_IN_TRASH_GROUP':
+      return '属于已删除的分组，请在回收站恢复整个分组'
+    case 'GROUP_NOT_FOUND':
+      return '分组不存在或已被删除'
+    default:
+      return err?.message || '删除失败'
+  }
+}
+
+/** 批量删除部分失败文案：逐条点名，不聚合掉任何一条（成功项已移出列表）。 */
+export function formatTrashFailures(
+  failed: Array<{ id: string; message: string }>,
+  titleOf: (id: string) => string
+): string {
+  return `${failed.length} 个会话未能移入回收站：${failed
+    .map((f) => `「${titleOf(f.id)}」${f.message}`)
+    .join('；')}`
+}
+
+/**
+ * 回收站动作失败的用户可读原因（恢复/永久删除/清空）。404 的语义是「过期或已被清除」——
+ * 列表已按 `deleted_at > cutoff` 过滤，仍撞 404 只有一个解释：另一 tab 刚清掉了它。
+ * 调用侧统一走 `reportTrashFailure`：提示 + 重拉回收站，不静默。
+ */
+export function trashActionError(err: any): string {
+  const code = err?.body?.error
+  switch (code) {
+    case 'SESSION_IN_TRASH_GROUP':
+      return '属于已删除的分组，请在回收站恢复整个分组'
+    case 'GROUP_PURGE_INCOMPLETE':
+      return '分组未能完全清除，稍后会自动重试'
+    case 'GROUP_NOT_TRASHED':
+    case 'SESSION_NOT_TRASHED':
+      return '该条目已不在回收站'
+    default:
+      if (err?.status === 404) return '条目已过期或已被清除'
+      return err?.message || '回收站操作失败'
+  }
+}
+
+/**
+ * 撤销 toast 的剩余天数：用服务端返回的 `deletedAt` / `purgeAfter` 差值（恒 7d）算，
+ * **不读本机时钟**（前端时钟不可信，且刚删的条目必是满 7 天）。字段缺失时按 7 兜底。
+ */
+function undoDaysLeft(deletedAt: string | null, purgeAfter: string | null): number {
+  if (!deletedAt || !purgeAfter) return 7
+  const span = Date.parse(purgeAfter) - Date.parse(deletedAt)
+  if (!Number.isFinite(span) || span <= 0) return 7
+  return Math.min(7, Math.max(1, Math.ceil(span / 86_400_000)))
+}
+
+/** 移动失败的用户可读原因（与删除区分措辞，避免「无法移入回收站」出现在移动路径）。 */
+export function moveActionError(err: any): string {
+  const code = err?.body?.error
+  switch (code) {
+    case 'GROUP_NOT_FOUND':
+      return '分组不存在或已被删除'
+    case 'SESSION_BUSY':
+      return '会话正在执行，无法移动'
+    case 'SESSION_BOUND':
+      return '会话已绑定外部群，无法移动'
+    default:
+      return err?.message || '移动到分组失败'
+  }
+}
 
 /** 将技术错误信息转为用户可读的中文提示 */
 function friendlyError(err: any): string {
@@ -133,6 +246,12 @@ export type AgentStatusEntry = {
  */
 export type ReplyTimerEntry = { startedAt: number; lastBeatAt: number }
 
+/** 单删后的撤销 toast 载荷（5 秒窗口；`daysLeft` 固定 7——刚删的条目必是满 7 天）。 */
+export type UndoTrashToast = { sessionId: string; title: string; daysLeft: number }
+
+/** 撤销窗口（毫秒）。新单删替换旧计时器；批量删除不产生 toast。 */
+const UNDO_TRASH_WINDOW_MS = 5000
+
 /**
  * 计时表键 = `${sessionId}:${agentId}`。析出为纯函数：读、写、清三面共用同一拼法，
  * 任何一处手写模板串都会静默漏配（清不掉 → 僵尸条目）。
@@ -146,7 +265,29 @@ export function replyTimerKey(sessionId: string, agentId: string): string {
 export const useChatStore = defineStore('chat', () => {
   // ─── State ────────────────────────────────
 
-  const sessions = ref<SessionConfig[]>([])
+  const sessions = ref<GroupedSession[]>([])
+  /**
+   * 活分组（`created_at ASC`，服务端序）：列表 + CRUD + 折叠 + 移组投影。
+   * 回收站条目与撤销 toast 在下方独立的 `trashEntries` / `undoToast`。
+   *
+   * 组内会话数**不直接读 `group.sessionCount`** 渲染：移组后它必然过期。左栏按本地
+   * `sessions` 现算（见 SessionList 的 `grouped`），服务端字段留给其它消费方/校验。
+   */
+  const groups = ref<SessionGroup[]>([])
+  /**
+   * 回收站条目（`GET /api/sessions/trash`，服务端已滤过期）。条目粒度 = 删除动作粒度：
+   * `kind:'group'` 与 `kind:'session'` 两段互不重叠——整组删除的成员不会在会话段重复出现。
+   * 头行 `🗑 N` 读 `trashEntries.length`（两段条目数之和，不是会话总数）。
+   */
+  const trashEntries = ref<TrashEntry[]>([])
+  /**
+   * 最近一次回收站拉取失败的原因（`null` = 无错误）。与 `trashEntries` 分开存：
+   * 拉取失败**不清空**已有条目（旧读数比伪装成「空」好），由 TrashView 区分
+   * 「回收站是空的」与「没拉到」两种状态。
+   */
+  const trashLoadError = ref<string | null>(null)
+  /** 单删的 5 秒撤销 toast（批量删除没有撤销，见 `trashSessions`） */
+  const undoToast = ref<UndoTrashToast | null>(null)
   const activeSessionId = ref<string | null>(null)
   /** 「显示已归档」开关（spec §4.1）。默认关 = 列表只显活跃会话 */
   const showArchived = ref(false)
@@ -286,6 +427,34 @@ export const useChatStore = defineStore('chat', () => {
   /** 手动关闭交接失败横幅 */
   function dismissHandoffFailed(): void {
     handoffFailed.value = null
+  }
+
+  // ─── 单删撤销（T4）────────────────────────────
+  //
+  // 单条删除是**可逆**动作，5 秒内给一次撤销；批量删除不提供撤销（票面契约：
+  // 失败项逐条点名，不整批回滚）。新单删替换旧计时器——同一时刻只留一个可撤销动作，
+  // 否则旧 toast 的 5 秒窗口与新的混在一起，用户点「撤销」时说不清撤的是哪一条。
+  let undoTimer: ReturnType<typeof setTimeout> | null = null
+
+  function clearUndoTimer(): void {
+    if (undoTimer !== null) {
+      clearTimeout(undoTimer)
+      undoTimer = null
+    }
+  }
+
+  function dismissUndoToast(): void {
+    clearUndoTimer()
+    undoToast.value = null
+  }
+
+  function scheduleUndoToast(next: UndoTrashToast): void {
+    clearUndoTimer()
+    undoToast.value = next
+    undoTimer = setTimeout(() => {
+      undoToast.value = null
+      undoTimer = null
+    }, UNDO_TRASH_WINDOW_MS)
   }
 
   const messageStatus = ref<Map<string, AgentStatusEntry[]>>(new Map())
@@ -447,6 +616,10 @@ export const useChatStore = defineStore('chat', () => {
       unreadCounts.value = counts
       dataReady.value = true
       dataError.value = ''
+      // 分组与回收站都是列表的二级数据：独立失败域，拉不到不阻断会话列表
+      // （左栏退化为全未分组；头行 🗑 计数退化为 0，进回收站后仍是权威重拉）。
+      void fetchGroups()
+      void fetchTrash()
 
       // 自动选中会话：优先恢复上次选中的（localStorage），不在列表则回退第一个
       if (!activeSessionId.value && sessionList.length > 0) {
@@ -814,7 +987,7 @@ export const useChatStore = defineStore('chat', () => {
     return res.removedCount
   }
 
-  /** 删除会话 */
+  /** 删除会话（物理删除路径；软删进回收站走 `trashSessions`） */
   async function deleteSession(id: string): Promise<void> {
     try {
       await api.deleteSession(id)
@@ -822,22 +995,319 @@ export const useChatStore = defineStore('chat', () => {
       log.error('deleteSession API failed', { error: String(err) })
       throw err
     }
-    sessions.value = sessions.value.filter((s) => s.id !== id)
-    // 如果删除的是当前活跃会话，切换到第一个可用会话
-    if (activeSessionId.value === id) {
-      const next = sessions.value[0]
+    projectRemovedSessions(new Set([id]))
+  }
+
+  /**
+   * 列表里第一条**可见**会话：折叠组内的行不渲染，切过去等于落到看不见的行
+   * （spec §4.4「下一个可见会话」）。未知 groupId 按未分组处理，仍算可见。
+   */
+  function firstVisibleSession(): GroupedSession | undefined {
+    const collapsed = new Set(groups.value.filter((g) => g.collapsed).map((g) => g.id))
+    return sessions.value.find((s) => {
+      const gid = s.groupId ?? null
+      return !gid || !collapsed.has(gid)
+    })
+  }
+
+  /**
+   * 会话从本地列表移除的共同投影（单删 / 批量删 / 整组删共用）：清未读与消息缓存，
+   * 当前会话被移除时切到下一条可见会话（无则空态）。
+   */
+  function projectRemovedSessions(removed: Set<string>): void {
+    if (removed.size === 0) return
+    sessions.value = sessions.value.filter((s) => !removed.has(s.id))
+    for (const id of removed) unreadCounts.value.delete(id)
+    if (activeSessionId.value && removed.has(activeSessionId.value)) {
+      const next = firstVisibleSession()
       if (next) {
         joinSession(next.id)
       } else {
         activeSessionId.value = null
         messages.value = []
-        writeActiveSessionId(null) // 无可用会话 → 清除记忆，防刷新回已删会话
+        writeActiveSessionId(null)
       }
     }
-    // 防删会话后缓存残留（Map 无界增长）——必须在 joinSession 之后删：
-    // 活跃会话删除路径上 joinSession 的切走缓存会把被删会话的数组重新塞回 Map，
-    // 若在 joinSession 之前删会被立即撤销（吐槽猫 review 发现的孤儿条目内存泄漏）
-    sessionMessages.delete(id)
+    // 必须在 joinSession 之后删缓存：切走缓存会把被删会话的数组塞回 Map
+    for (const id of removed) sessionMessages.delete(id)
+  }
+
+  // ─── 分组（会话管理 v2，T3）────────────────────────────────────────
+
+  /** 拉活组。失败只记日志——分组是列表的二级数据，不该让会话列表跟着报错。 */
+  async function fetchGroups(): Promise<void> {
+    try {
+      const res = await api.getSessionGroups()
+      groups.value = res.groups ?? []
+    } catch (err) {
+      log.error('fetchGroups failed', { error: String(err) })
+    }
+  }
+
+  /**
+   * 重拉会话列表。多 tab 的「移动会话」只改归属、不发 `SESSION_UPDATE` 到全局，
+   * 收到 `GROUPS_CHANGED` 时光重拉组不够——行还留在旧组。失败静默（下一轮事件/刷新兜底）。
+   */
+  async function fetchSessions(): Promise<void> {
+    try {
+      sessions.value = await api.getSessions(showArchived.value)
+    } catch (err) {
+      log.error('fetchSessions failed', { error: String(err) })
+    }
+  }
+
+  /**
+   * 重拉回收站。失败只记日志：回收站是列表的二级数据，不该让左栏跟着报错；
+   * 头行计数会保留上一次读数，用户进回收站时动作路径会再拉一次。
+   * 但失败原因要落 `trashLoadError`——否则首次进回收站接口失败会被渲染成
+   * 「回收站是空的」，把「不知道」伪装成「空的」。
+   */
+  async function fetchTrash(): Promise<void> {
+    try {
+      const res = await api.getTrash()
+      trashEntries.value = res.entries ?? []
+      trashLoadError.value = null
+    } catch (err) {
+      log.error('fetchTrash failed', { error: String(err) })
+      trashLoadError.value = err instanceof Error ? err.message : String(err)
+    }
+  }
+
+  /**
+   * 恢复后的会话按 `updatedAt DESC` 插回列表（服务端列表序）。恢复**不改** `updated_at`
+   * （spec §4.2），所以不能 unshift 到顶部——那会让它凭空跳到列表第一位。
+   */
+  function insertSessionSorted(session: GroupedSession): void {
+    if (sessions.value.some((s) => s.id === session.id)) return
+    const idx = sessions.value.findIndex((s) => s.updatedAt < session.updatedAt)
+    if (idx < 0) sessions.value = [...sessions.value, session]
+    else sessions.value = [...sessions.value.slice(0, idx), session, ...sessions.value.slice(idx)]
+  }
+
+  /** 回收站动作失败：可见提示 + 重拉回收站（过期 404 / 已被别处清掉都要刷新，不静默）。 */
+  function reportTrashFailure(err: any): void {
+    log.error('trash action failed', { error: String(err) })
+    showError(trashActionError(err))
+    void fetchTrash()
+  }
+
+  /**
+   * 目标组折叠时自动展开：否则移过去的行立刻不可见（原型契约）。
+   * 展开是体验增强，失败只记日志，不反噬已成功的移组。
+   */
+  async function expandGroupIfCollapsed(groupId: string | null): Promise<void> {
+    if (!groupId) return
+    const group = groups.value.find((g) => g.id === groupId)
+    if (!group || !group.collapsed) return
+    try {
+      await setGroupCollapsed(groupId, false)
+    } catch (err) {
+      log.error('expand target group failed', { groupId, error: String(err) })
+    }
+  }
+
+  /** 新建分组（服务端重名 409；错误向上抛，调用侧就地显示且保留输入框）。 */
+  async function createGroup(name: string): Promise<SessionGroup> {
+    const group = await api.createSessionGroup(name.trim())
+    groups.value = [...groups.value, group]
+    return group
+  }
+
+  /** 改名。重名 409 向上抛，调用侧就地报错、输入框不关。 */
+  async function renameGroup(id: string, name: string): Promise<void> {
+    const updated = await api.updateSessionGroup(id, { name: name.trim() })
+    groups.value = groups.value.map((g) => (g.id === id ? updated : g))
+  }
+
+  /**
+   * 折叠 / 展开（折叠态落服务端，多 tab 一致）。
+   * 先本地乐观更新再 PATCH：失败回滚并向上抛，避免「点了没反应」。
+   */
+  async function setGroupCollapsed(id: string, collapsed: boolean): Promise<void> {
+    const prev = groups.value.find((g) => g.id === id)
+    if (!prev || prev.collapsed === collapsed) return
+    groups.value = groups.value.map((g) => (g.id === id ? { ...g, collapsed } : g))
+    try {
+      const updated = await api.updateSessionGroup(id, { collapsed })
+      groups.value = groups.value.map((g) => (g.id === id ? updated : g))
+    } catch (err) {
+      groups.value = groups.value.map((g) => (g.id === id ? prev : g))
+      throw err
+    }
+  }
+
+  /**
+   * 会话归组 / 回未分组。**只改 `groupId` 字段，不重排**：分组是组织动作，
+   * 服务端不改 `updated_at`，前端也不许按它重排（票面验收：移组不改排序）。
+   */
+  async function moveSessionToGroup(sessionId: string, groupId: string | null): Promise<void> {
+    await api.moveSessionToGroup(sessionId, groupId)
+    sessions.value = sessions.value.map((s) => (s.id === sessionId ? { ...s, groupId } : s))
+    await expandGroupIfCollapsed(groupId)
+  }
+
+  /** 批量归组（一次动作）。失败时重拉列表对齐服务端，再把错误抛给调用侧。 */
+  async function batchMoveToGroup(ids: string[], groupId: string | null): Promise<void> {
+    const unique = [...new Set(ids)]
+    try {
+      await Promise.all(unique.map((id) => api.moveSessionToGroup(id, groupId)))
+    } catch (err) {
+      void fetchData(true)
+      throw err
+    }
+    sessions.value = sessions.value.map((s) => (unique.includes(s.id) ? { ...s, groupId } : s))
+    await expandGroupIfCollapsed(groupId)
+  }
+
+  /**
+   * 移入回收站（单条或批量）。T2 起 `DELETE /sessions/:id` 是软删，不再物理删除。
+   *
+   * - `enabled` 可注入（默认 `TRASH_ENABLED`）：显式 `false` 时逐条返回「未启用」，
+   *   一条删除 API 都不发——这是「关闸时绝不落删除」守卫的回归缝。
+   * - `undo` 只给**单条删除**（行菜单）：成功后开 5 秒撤销 toast；批量删除不提供撤销。
+   * - 逐条调用、收集失败（忙碌 409 / 绑定 409 是逐条判定），一条失败不回滚已成功的。
+   */
+  async function trashSessions(
+    ids: string[],
+    opts: { enabled?: boolean; undo?: boolean } = {}
+  ): Promise<Array<{ id: string; message: string }>> {
+    const unique = [...new Set(ids)]
+    if (!(opts.enabled ?? TRASH_ENABLED)) {
+      return unique.map((id) => ({ id, message: '回收站暂未启用' }))
+    }
+    const undoable = opts.undo === true && unique.length === 1
+    const single = undoable ? sessions.value.find((s) => s.id === unique[0]) : undefined
+    let singleDeletedAt: string | null = null
+    let singlePurgeAfter: string | null = null
+    const failed = await removeSessionsSequentially(unique, async (id) => {
+      const res = await api.deleteSession(id)
+      if (undoable) {
+        singleDeletedAt = res?.deletedAt ?? null
+        singlePurgeAfter = res?.purgeAfter ?? null
+      }
+      return res
+    })
+    const removed = new Set(unique.filter((id) => !failed.some((f) => f.id === id)))
+    projectRemovedSessions(removed)
+    if (undoable && removed.size === 1) {
+      scheduleUndoToast({
+        sessionId: unique[0]!,
+        // 标题必须在 `projectRemovedSessions` 之前取：移除后 `sessions` 里就查不到它了
+        title: single?.title ?? unique[0]!,
+        // 剩几天用服务端返回的 deletedAt/purgeAfter 算（差值恒 7d，不依赖本机时钟）
+        daysLeft: undoDaysLeft(singleDeletedAt, singlePurgeAfter),
+      })
+    }
+    if (removed.size > 0) void fetchTrash()
+    return failed
+  }
+
+  /**
+   * 撤销单删：恢复刚删的那条并撤回 toast。条目已过期/被别处清掉 → 404，
+   * 统一走 `reportTrashFailure`（可见提示 + 重拉回收站），不静默。
+   */
+  async function undoLastTrash(): Promise<boolean> {
+    const pending = undoToast.value
+    if (!pending) return false
+    dismissUndoToast()
+    try {
+      const res = await api.restoreSession(pending.sessionId)
+      trashEntries.value = trashEntries.value.filter((e) => e.id !== pending.sessionId)
+      if (res.session) insertSessionSorted(res.session)
+      return true
+    } catch (err) {
+      reportTrashFailure(err)
+      return false
+    }
+  }
+
+  /** 恢复单条会话（仅 `kind:'session'` 条目；组条目成员走 `restoreTrashGroup`）。 */
+  async function restoreTrashSession(id: string): Promise<boolean> {
+    try {
+      const res = await api.restoreSession(id)
+      trashEntries.value = trashEntries.value.filter((e) => e.id !== id)
+      if (res.session) insertSessionSorted(res.session)
+      if (undoToast.value?.sessionId === id) dismissUndoToast()
+      return true
+    } catch (err) {
+      reportTrashFailure(err)
+      return false
+    }
+  }
+
+  /** 恢复整组：组 id 不变、只清同批会话（组内更早单删的会话留在回收站）。 */
+  async function restoreTrashGroup(id: string): Promise<boolean> {
+    try {
+      const res = await api.restoreSessionGroup(id)
+      trashEntries.value = trashEntries.value.filter((e) => e.id !== id)
+      for (const session of res.sessions ?? []) insertSessionSorted(session)
+      // 组名可能因重名被改成「（恢复）」——以服务端为准
+      void fetchGroups()
+      return true
+    } catch (err) {
+      reportTrashFailure(err)
+      return false
+    }
+  }
+
+  /** 永久删除单条会话。 */
+  async function purgeTrashSession(id: string): Promise<boolean> {
+    try {
+      await api.purgeSession(id)
+      trashEntries.value = trashEntries.value.filter((e) => e.id !== id)
+      if (undoToast.value?.sessionId === id) dismissUndoToast()
+      return true
+    } catch (err) {
+      reportTrashFailure(err)
+      return false
+    }
+  }
+
+  /** 永久删除整组（组行 + 同批会话）。 */
+  async function purgeTrashGroup(id: string): Promise<boolean> {
+    try {
+      await api.purgeSessionGroup(id)
+      trashEntries.value = trashEntries.value.filter((e) => e.id !== id)
+      return true
+    } catch (err) {
+      reportTrashFailure(err)
+      return false
+    }
+  }
+
+  /** 清空回收站（含过期未清扫条目）。 */
+  async function emptyTrash(): Promise<boolean> {
+    try {
+      await api.emptyTrash()
+      trashEntries.value = []
+      dismissUndoToast()
+      return true
+    } catch (err) {
+      reportTrashFailure(err)
+      return false
+    }
+  }
+
+  /**
+   * 删组：`withSessions=false` = 仅解散（会话回未分组）；`true` = 组与同批会话一起进回收站。
+   * 409（忙碌/绑定）整批原子拒绝，错误向上抛给确认框就地显示。
+   */
+  async function deleteGroup(id: string, withSessions: boolean): Promise<void> {
+    await api.deleteSessionGroup(id, withSessions)
+    groups.value = groups.value.filter((g) => g.id !== id)
+    if (withSessions) {
+      const removed = new Set(
+        sessions.value.filter((s) => (s.groupId ?? null) === id).map((s) => s.id)
+      )
+      projectRemovedSessions(removed)
+      // 整组删除产生一条组条目：计数/列表以服务端为准（本端的 DELETE 响应只给 mode/id）
+      void fetchTrash()
+    } else {
+      // 仅解散：会话回未分组，顺序不动（组内更早单删的会话本就不在 sessions 里）
+      sessions.value = sessions.value.map((s) =>
+        (s.groupId ?? null) === id ? { ...s, groupId: null } : s
+      )
+    }
   }
 
   /**
@@ -1180,24 +1650,54 @@ export const useChatStore = defineStore('chat', () => {
     )
 
     socket.on(Events.SESSION_DELETED, (data: { sessionId: string }) => {
-      sessions.value = sessions.value.filter((s) => s.id !== data.sessionId)
-      // S9: 清理已删除会话的未读计数，避免 Map 内存泄漏
-      unreadCounts.value.delete(data.sessionId)
-      if (activeSessionId.value === data.sessionId) {
-        const next = sessions.value[0]
-        if (next) {
-          joinSession(next.id)
-        } else {
-          activeSessionId.value = null
-          messages.value = []
-          writeActiveSessionId(null) // 无可用会话 → 清除记忆，防刷新回已删会话
-        }
-      }
+      // 与单删/批量删共用同一投影：清未读、切到下一条**可见**会话、清消息缓存
+      projectRemovedSessions(new Set([data.sessionId]))
     })
 
     socket.on(Events.SESSION_ARCHIVED, (data: { sessionId: string; archivedAt: string | null }) => {
       applyArchived(data.sessionId, data.archivedAt ?? null)
     })
+
+    // 分组变更（建组 / 改名 / 折叠 / 移动 / 解散 / 整组删 / 组恢复）→ 组与会话双刷。
+    // 只刷组不够：移动会话后组列表不变，行还留在旧组（多 tab 不同步）。
+    socket.on(Events.GROUPS_CHANGED, () => {
+      void fetchGroups()
+      void fetchSessions()
+    })
+
+    // 删除动作（单删 / 整组删）→ 会话移出列表、组移出组列、回收站条目重拉。
+    socket.on(Events.SESSION_TRASHED, (data: { sessionIds?: string[]; groupIds?: string[] }) => {
+      projectRemovedSessions(new Set(data.sessionIds ?? []))
+      if (data.groupIds?.length) {
+        const gone = new Set(data.groupIds)
+        groups.value = groups.value.filter((g) => !gone.has(g.id))
+      }
+      void fetchTrash()
+    })
+
+    // 恢复（单条 / 整组）→ 会话按 updatedAt 插回列表；整组恢复另有 GROUPS_CHANGED 刷组。
+    // 若恢复的正是本 tab 撤销 toast 指向的会话（另一 tab 已恢复），toast 立即撤掉——
+    // 否则用户点「撤销」才吃 404。
+    socket.on(
+      Events.SESSION_RESTORED,
+      (data: { groupId: string | null; sessions?: SessionConfig[] }) => {
+        for (const session of data.sessions ?? []) insertSessionSorted(session)
+        const restored = new Set((data.sessions ?? []).map((s) => s.id))
+        if (undoToast.value && restored.has(undoToast.value.sessionId)) dismissUndoToast()
+        void fetchTrash()
+      }
+    )
+
+    // 彻底删除 / 清空 / 到期清扫 → 回收站条目重拉（会话本就不在活列表里，无需投影）。
+    // 命中的是撤销 toast 那条（别处已清掉）时同步撤 toast，不留死入口。
+    socket.on(
+      Events.SESSION_PURGED,
+      (data: { sessionIds?: string[]; groupIds?: string[] } = {}) => {
+        const purged = new Set(data.sessionIds ?? [])
+        if (undoToast.value && purged.has(undoToast.value.sessionId)) dismissUndoToast()
+        void fetchTrash()
+      }
+    )
 
     socket.on(Events.SESSION_MESSAGES_CLEARED, (data: { sessionId: string }) => {
       if (activeSessionId.value === data.sessionId) {
@@ -1422,6 +1922,26 @@ export const useChatStore = defineStore('chat', () => {
     showArchived,
     setShowArchived,
     setArchived,
+    groups,
+    fetchGroups,
+    createGroup,
+    renameGroup,
+    setGroupCollapsed,
+    moveSessionToGroup,
+    batchMoveToGroup,
+    trashSessions,
+    deleteGroup,
+    trashEntries,
+    trashLoadError,
+    fetchTrash,
+    undoToast,
+    undoLastTrash,
+    dismissUndoToast,
+    restoreTrashSession,
+    restoreTrashGroup,
+    purgeTrashSession,
+    purgeTrashGroup,
+    emptyTrash,
     fetchData,
     joinSession,
     sendMessage,

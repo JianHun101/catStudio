@@ -15,11 +15,13 @@ import {
   serverBoots as serverBootsRepo,
 } from './db/repository/index.js'
 import { createSocketIO } from './connectors/socketio.js'
+import { runTrashPurge } from './trash-purge.js'
 import { replayStuckUserMessages, REPLAY_STUCK_WINDOW_MINUTES } from './execution/recovery.js'
 import { getExecutionBus } from './execution/registry.js'
 import { startOneBotOutbound } from './connectors/onebotOutbound.js'
 import { agentRoutes } from './routes/agents.js'
 import { sessionRoutes } from './routes/sessions.js'
+import { sessionGroupRoutes } from './routes/sessionGroups.js'
 import { messageRoutes } from './routes/messages.js'
 import { connectorRoutes } from './routes/connectors.js'
 import { configRoutes } from './routes/config.js'
@@ -182,6 +184,15 @@ async function main(): Promise<void> {
     log.warn('启动账本写入失败（不阻塞启动）', { error: messageOf(err) })
   }
 
+  // 1.2 回收站到期清扫（T2；spec §2.3）：启动扫一次 + 每小时一次。
+  //
+  //     放在 `initRepository()` 之后、`listen` 之前：库就绪才可扫；失败只记日志、不阻塞
+  //     启动（回收站是旁路，不该成为新的启动失败源）。probe 模式在
+  //     `trashRepo.purgeExpiredTrash` 内部跳过（探针库是副本，清扫会真实删行）。
+  //     定时器句柄留给 shutdown 清理，防热启动/测试进程内重复计时器。
+  runTrashPurge('startup')
+  const trashPurgeTimer = setInterval(() => runTrashPurge('hourly'), 60 * 60 * 1000)
+
   // 1.5 启动时修复：将上一次异常退出遗留的 running 状态标记为 failed
   //     （参照 clowder-ai StartupReconciler）
   //
@@ -313,6 +324,7 @@ async function main(): Promise<void> {
   // REST API 路由
   await app.register(agentRoutes)
   await app.register(sessionRoutes)
+  await app.register(sessionGroupRoutes)
   await app.register(messageRoutes)
   await app.register(connectorRoutes)
   await app.register(configRoutes)
@@ -441,6 +453,8 @@ async function main(): Promise<void> {
     clearInterval(episodeTimer)
     // 静默丢重放定时器（同款防重复定时器）
     clearInterval(replayTimer)
+    // 回收站到期清扫定时器（T2 同款防重复定时器）
+    clearInterval(trashPurgeTimer)
     io.close()
     await app.close()
     // 清理自己 spawn 的常驻子进程（llama-server / ollama serve / codex-proxy）——

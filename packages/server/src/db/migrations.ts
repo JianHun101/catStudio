@@ -44,7 +44,9 @@
  * 票 1 的 fix-forward 补建（补主库缺失的 `retrieval_*` / `spans` 五表九索引，OQ1 实测 +
  * 店长裁决 ②）、票 2 的三条索引（spec §3.2）、票 5 的 `messages` 重建（spec §4.4 纪律 7
  * 过程式通道）、票 6 批一的 D3 归一 + 7 张叶子表重建（B 范围 FK/CHECK/时间口径）、票 7 的
- * `sessions.archived_at` 列与活跃列表部分索引（spec §4.1 归档）——来龙去脉见各条上方注释。
+ * `sessions.archived_at` 列与活跃列表部分索引（spec §4.1 归档）、T1 的分组两轴模型
+ * （`session_groups` + `sessions.group_id/deleted_at` + 活跃索引换 `idx_sessions_live`）
+ * ——来龙去脉见各条上方注释。
  * （上句原以「当前挂着十五条，」开头，票 10 已删——那是**每次追加都要改的计数**，而数量
  * 早已被 `toHaveLength` 断言钉死，留着只是一处人人要碰的必撞点。）
  *
@@ -62,8 +64,10 @@
  *   并入基线列清单，老库「缺列」这条路径根本不成立（旧机制每次启动全量重跑，缺列会
  *   以 SELECT 报错的形式当场暴露，不会静默）。**基线集里一条 ALTER 都不剩**——`ADD
  *   COLUMN` 没有 `IF NOT EXISTS`，正因如此压扁时全部并进了建表列清单；追加区新增的
- *   `sessions.archived_at` 是台账立闸后**唯一**的加列条目，故它挂探针是特例而非常态
- *   （详见上节第二类触发场景）。
+ *   `sessions.archived_at` 是台账立闸后**第一条**加列条目，故它挂探针是特例而非常态
+ *   （详见上节第二类触发场景）。票 7 之后 `T1（分组两轴模型）` 又加了两列
+ *   （`sessions.group_id` / `sessions.deleted_at`），同一条迁移里还建表/换索引，故它的
+ *   探针判「整条效果是否已齐」而非单列存在性（见该条目 `verify`）。
  */
 import type Database from 'better-sqlite3'
 import { rebuildTable, type RebuildColumn } from './rebuild.js'
@@ -153,6 +157,14 @@ function tableSql(db: Database.Database, name: string): string | undefined {
 function columnExists(db: Database.Database, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
   return rows.some((r) => r.name === column)
+}
+
+/** 某索引是否已存在（`sqlite_master` 口径，部分索引同样是 `type='index'`）。 */
+function indexExists(db: Database.Database, name: string): boolean {
+  return (
+    db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`).get(name) !==
+    undefined
+  )
 }
 
 /**
@@ -1319,6 +1331,71 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
       db_file TEXT,
       node_version TEXT
     )`,
+  },
+
+  // ── T1 · 分组两轴模型（分组管收纳 + 回收站管删除；spec `session-groups-trash`）──
+  //
+  // **一条多语句迁移**：建表 + 唯一索引 + 两列 + 三条索引 + 退役旧索引 + 旧归档迁组。
+  // runner 把整条包在一个 `BEGIN IMMEDIATE` 里，任一句失败整体回滚（`db/index.ts`）。
+  //
+  // 归组数据迁移为什么也在这条里：它就是「旧归档 → 普通组『归档』」的同一件事，
+  // 拆成两条会留下「表建好了、数据没迁」的中间态窗口（进程在两条之间崩 ⇒ 下次启动
+  // 第二条照跑，但第一条已登记；拆分本身不增加可恢复性，只增加一个半成品态）。
+  //
+  // 时间口径：新列/新表一律 ISO 毫秒 UTC。`SQL_NOW_ISO` 是 SQL 侧此刻（条目正文被
+  // checksum 冻结，插不了 JS 值）；**绝不**拿它和秒级的 `sessions.created_at/updated_at`
+  // 同框比较——ISO 首位 `T` 恒大于秒级串的空格，比较会整片判反。
+  //
+  // **探针判据 = 整条效果是否已齐**：`ADD COLUMN` 没有 `IF NOT EXISTS`，一个「结构已齐
+  // 但台账无行」的库（人工 SQL 补过 / 台账上船前的历史遗留 / 测试夹具）若真执行会
+  // `duplicate column name` 永久拒启。探针只查**正向结构**（表、两列、四索引），刻意
+  // **不查** `idx_sessions_active` 是否已不存在：查它就是「负向效果」，会让结构已齐的库
+  // 因一条残留索引反复真执行、再撞 duplicate column。真实老库没有这些结构 ⇒ 探针 false
+  // ⇒ 真执行；台账有行的库在探针之前就按 checksum 跳过了。
+  {
+    name: 'session_groups 表 + sessions.group_id/deleted_at + 活跃索引替换（T1 分组两轴）',
+    ticket: 'T1',
+    sql: `CREATE TABLE IF NOT EXISTS session_groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      collapsed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_session_groups_name_live
+      ON session_groups(name) WHERE deleted_at IS NULL;
+    ALTER TABLE sessions ADD COLUMN group_id TEXT
+      REFERENCES session_groups(id) ON DELETE SET NULL;
+    ALTER TABLE sessions ADD COLUMN deleted_at TEXT;
+    CREATE INDEX IF NOT EXISTS idx_sessions_group ON sessions(group_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_live
+      ON sessions(updated_at DESC) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_sessions_trash
+      ON sessions(deleted_at) WHERE deleted_at IS NOT NULL;
+    DROP INDEX IF EXISTS idx_sessions_active;
+    INSERT OR IGNORE INTO session_groups (id, name, collapsed, created_at, updated_at)
+      SELECT 'legacy-archive', '归档', 1, ${SQL_NOW_ISO}, ${SQL_NOW_ISO}
+      WHERE EXISTS (SELECT 1 FROM sessions WHERE archived_at IS NOT NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM session_groups WHERE name = '归档' AND deleted_at IS NULL
+        );
+    UPDATE sessions
+       SET group_id = (
+         SELECT id FROM session_groups
+          WHERE name = '归档' AND deleted_at IS NULL
+          ORDER BY created_at, id LIMIT 1
+       )
+     WHERE archived_at IS NOT NULL
+       AND group_id IS NULL`,
+    verify: (db) =>
+      tableSql(db, 'session_groups') !== undefined &&
+      columnExists(db, 'sessions', 'group_id') &&
+      columnExists(db, 'sessions', 'deleted_at') &&
+      indexExists(db, 'ux_session_groups_name_live') &&
+      indexExists(db, 'idx_sessions_group') &&
+      indexExists(db, 'idx_sessions_live') &&
+      indexExists(db, 'idx_sessions_trash'),
   },
 ]
 
