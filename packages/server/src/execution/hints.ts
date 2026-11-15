@@ -16,6 +16,8 @@ import {
 } from '../eval/review-verdict-markers.js'
 import type { ReviewVerdict, ReviewVerdictMarker } from '../eval/review-verdict-markers.js'
 import { getLatestChainVerdict } from '../eval/chain-verdicts.js'
+import { normalizeIsoMs } from '../db/repository/clock.js'
+import type { RuntimeInstance } from '../runtime-instance.js'
 
 /**
  * 取**最后出现**的判词标记（审查结论总在消息末尾，正文可能引用/讨论这些标记）。
@@ -319,6 +321,53 @@ export function buildSkillDirectorySection(): string {
     ...SKILL_WHITELIST.map((name) => `- ${name}: ${SKILL_CATALOG[name]}`),
     '对应场景先调 MCP 工具 read_skill 取正文再动手，正文即该技能定义（含使用时机/输出/前置门槛）。',
   ].join('\n')
+}
+
+/**
+ * 唤醒自检行（票 B 契约 C）——当前进程身份 + 「自本猫上次发言以来有没有重启」。
+ *
+ * **为什么要有这一行**：对话记忆不是运行时状态的证据。重启申请只活在会话记忆里时，
+ * 用户已经重启、猫还在「等批准」。判据（clowder-ai Runtime Preflight Gate）本身是对的，
+ * 但靠人手跑命令就仍要「记得」；本函数把它做成随每次唤醒机械注入的读数。
+ *
+ * 三档文案是**逐字契约**（票 B 契约 C），不要在调用点再拼一遍：
+ * - 已重启：启动时刻**严格大于**锚点。
+ * - 未重启：相等或更早。相等也算未重启——同一毫秒内的启动晚于发言在物理上不成立。
+ * - 无法判定：`instance === null`（测试进程 / CLI 兜底 / 采集失败）返回 null 不注入；
+ *   无锚点、任一侧非时间串时注入「无法判定」文案，不猜。
+ *
+ * **不出现运行时长/相对时间**：那会让同一进程内每轮注入串都不同，prompt 快照与缓存
+ * 每轮失效（票 B 契约 C）。
+ *
+ * @returns 注入行；`instance === null` 时不注入（返回 null）
+ */
+export function buildRuntimeSelfCheck(
+  instance: RuntimeInstance | null,
+  lastOwnMessageAt: string | null
+): string | null {
+  if (instance === null) return null
+
+  const boot = instance.bootId.slice(0, 8)
+  const git = instance.gitSha === null ? '未知' : instance.gitSha.slice(0, 12)
+  const dirtyMark = instance.gitDirty === 1 ? '（工作树有未提交改动）' : ''
+  const head = `[运行时自检] 进程 boot=${boot}，启动于 ${instance.startedAt}，代码 git=${git}${dirtyMark}。`
+
+  if (lastOwnMessageAt === null) {
+    return `${head}本会话没有你更早的发言，无法判定是否重启。`
+  }
+
+  const bootMs = Date.parse(normalizeIsoMs(instance.startedAt))
+  const lastMs = Date.parse(normalizeIsoMs(lastOwnMessageAt))
+  if (Number.isNaN(bootMs) || Number.isNaN(lastMs)) {
+    // 非时间串：不猜（「无法判定」档），也不抛——自检行不能成为执行失败源。
+    return `${head}本会话没有你更早的发言，无法判定是否重启。`
+  }
+
+  const lastShown = normalizeIsoMs(lastOwnMessageAt)
+  if (bootMs > lastMs) {
+    return `${head}你上次在本会话发言于 ${lastShown}——之后进程已重启过。上一轮所见的进程状态可能已失效：在说「还没重启 / 要重启 / 重启没生效」之前先按本行核对；若你在等重启批准，视为已生效。`
+  }
+  return `${head}你上次在本会话发言于 ${lastShown}——之后未重启。`
 }
 
 /**

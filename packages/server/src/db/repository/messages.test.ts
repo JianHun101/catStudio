@@ -807,3 +807,84 @@ describe('getLastMessageAtBySessionIds — 一次 GROUP BY 取全量', () => {
     spy.mockRestore()
   })
 })
+
+// ─── 票 B 契约 B：唤醒自检锚点 ─────────────────────────────
+describe('messages repo — getLastAgentMessageAt（票 B 锚点）', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb()
+    setDb(db)
+    initRepository(db)
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s1', 'test')").run()
+    db.prepare("INSERT INTO sessions (id, title) VALUES ('s2', 'test2')").run()
+    const insAgent = db.prepare(
+      `INSERT INTO agents (id, name, system_prompt, llm_api_key) VALUES (?, ?, 'p', 'sk-test')`
+    )
+    for (const id of ['agent-1', 'agent-a', 'agent-b']) insAgent.run(id, `猫-${id}`)
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  function insMsg(
+    id: string,
+    sessionId: string,
+    role: 'user' | 'agent' | 'system',
+    agentId: string | null,
+    createdAt: string
+  ): void {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, agent_id, content, mentions, created_at)
+       VALUES (?, ?, ?, ?, 'x', '[]', ?)`
+    ).run(id, sessionId, role, agentId, createdAt)
+  }
+
+  it('本猫多条 + 他猫 + 用户混合：只取本猫最近一条，不返回他猫时间', () => {
+    insMsg('m1', 's1', 'agent', 'agent-1', '2026-11-15T10:00:00.000Z')
+    insMsg('m2', 's1', 'user', null, '2026-11-15T11:00:00.000Z')
+    insMsg('m3', 's1', 'agent', 'agent-a', '2026-11-15T12:00:00.000Z')
+    insMsg('m4', 's1', 'agent', 'agent-1', '2026-11-15T13:00:00.000Z')
+    insMsg('m5', 's1', 'agent', 'agent-1', '2026-11-15T09:00:00.000Z')
+
+    expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-1')).toBe('2026-11-15T13:00:00.000Z')
+    expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-a')).toBe('2026-11-15T12:00:00.000Z')
+  })
+
+  it('本会话没有本猫回复 → null（用户消息不冒充锚点）', () => {
+    insMsg('m1', 's1', 'user', null, '2026-11-15T10:00:00.000Z')
+    insMsg('m2', 's1', 'agent', 'agent-a', '2026-11-15T11:00:00.000Z')
+
+    expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-1')).toBeNull()
+  })
+
+  it('只在本会话内查：别处会话的回复不算', () => {
+    insMsg('m1', 's1', 'agent', 'agent-1', '2026-11-15T10:00:00.000Z')
+    insMsg('m2', 's2', 'agent', 'agent-1', '2026-11-15T20:00:00.000Z')
+
+    expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-1')).toBe('2026-11-15T10:00:00.000Z')
+  })
+
+  it('同一毫秒多条按 id 倒序 tie-break（与列表排序同口径）', () => {
+    insMsg('m-a', 's1', 'agent', 'agent-1', '2026-11-15T10:00:00.000Z')
+    insMsg('m-z', 's1', 'agent', 'agent-1', '2026-11-15T10:00:00.000Z')
+
+    // 取 created_at，同值下无法从返回值区分——用执行计划反证走的是复合索引
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT created_at FROM messages
+         WHERE session_id = ? AND agent_id = ? AND role = 'agent'
+         ORDER BY created_at DESC, id DESC LIMIT 1`
+      )
+      .all('s1', 'agent-1') as Array<{ detail: string }>
+    expect(plan.map((p) => p.detail).join(' ')).toContain('idx_messages_session')
+    expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-1')).toBe('2026-11-15T10:00:00.000Z')
+  })
+
+  it('返回**原始值**不归一化（秒级老行原样透出，归一在比较侧做）', () => {
+    insMsg('m-old', 's1', 'agent', 'agent-1', '2026-11-15 10:00:00')
+
+    expect(messagesRepo.getLastAgentMessageAt('s1', 'agent-1')).toBe('2026-11-15 10:00:00')
+  })
+})

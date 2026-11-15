@@ -51,6 +51,7 @@ import { stopOllamaIfSpawned } from './llm/ollama.js'
 import { stopProxyIfSpawned } from './llm/cli-utils.js'
 import { messageOf } from './utils.js'
 import { collectBootInfo } from './boot-info.js'
+import { setRuntimeInstance } from './runtime-instance.js'
 
 const log = createLogger('server')
 
@@ -178,7 +179,15 @@ async function main(): Promise<void> {
   // `module_file` 传 `import.meta.url` 反推的**真实模块路径**（不是 cwd）。
   try {
     const bootInfo = collectBootInfo(fileURLToPath(import.meta.url), { port: PORT })
-    const bootId = serverBootsRepo.insertServerBoot(bootInfo)
+    const { bootId, startedAt } = serverBootsRepo.insertServerBoot(bootInfo)
+    // 票 B 契约 A：入库成功后立刻把**同一份**身份注册进进程内存（唯一写入点）。
+    // `startedAt` 取写入层返回的双值，不在此重取时间——重取会与落库行毫秒级分叉。
+    setRuntimeInstance({
+      bootId,
+      startedAt,
+      gitSha: bootInfo.git_sha,
+      gitDirty: bootInfo.git_dirty,
+    })
     log.info('server boot', { boot_id: bootId, ...bootInfo })
   } catch (err: any) {
     log.warn('启动账本写入失败（不阻塞启动）', { error: messageOf(err) })
