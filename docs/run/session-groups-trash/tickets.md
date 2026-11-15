@@ -277,7 +277,9 @@ SESSION_RESTORED/SESSION_PURGED` 处理、5 秒撤销）
 **Blocked by:** T1（服务端已改）、T2（`includeArchived` 分支已改）、T3（前端不再用归档）、
 T6（同文件：`routes/sessions.ts` 的 `includeArchived` 分支、`shared/types.ts`（T6 加
 `lastMessageAt`、T5 删 `archivedAt`）、`SessionList.vue`、`stores/chat.ts`、`App.vue`、
-`ChatPanel.vue`，以及两边都会动的 `App.test.ts` / `SessionList.test.ts` / `chat.test.ts`）。
+`ChatPanel.vue`；测试面 T6 已改 `chat.test.ts`，`App.test.ts` / `SessionList.test.ts`
+只可能涉及——`git grep -i archiv` 在 `App.test.ts` 零命中、`SessionList.test.ts` 仅
+「无归档按钮」反向断言，T5 不要预设这两个必须改）。
 T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店长仲裁。
 
 **改哪些文件（边界）:**
@@ -333,8 +335,8 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
   `MAX(created_at)` 的函数（一次 `GROUP BY`，禁止 N+1）+ 同文件测试。
 - `packages/server/src/routes/sessions.ts`：`GET /api/sessions` 两分支（默认 /
   `includeArchived`）共用的 `rows.map` 里、`toSessionConfig(row)` **之后**挂
-  `lastMessageAt`；不把字段塞进 `toSessionConfig`、不再拼接 `Z`（值本身已带一个 `Z`）
-  - `sessions.test.ts`。
+  `lastMessageAt`；不把字段塞进 `toSessionConfig`、不再拼接 `Z`（值本身已带一个 `Z`）；
+  同文件 `sessions.test.ts` 补形态断言。
 - `packages/web/src/components/SessionList.vue`：头行回收站按钮换 15px 线稿 SVG、
   条目数内联；删 `.head-badge` 绝对定位角标 + `SessionList.test.ts`（含用例名复述面）。
 - `packages/web/src/components/SessionRow.vue`：第二行右侧显示最后消息时间 + 新建
@@ -393,7 +395,7 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
 - 回收站按钮：高度恒 24px、与 `＋` 同边框/悬停；15px 线稿 SVG、`currentColor`；emoji 与
   绝对定位角标全删。几何两态（`box-sizing: border-box`，15px 图标 + 1px 边框）：
   **空态 `width: 24px; padding: 0`**（内容宽 22px，实打实 24×24）；有计数时
-  `min-width: 24px; width: auto; padding: 0 4px`，计数内联在图标右侧（同一按钮、约 3px
+  `min-width: 24px; width: auto; padding: 0 4px`，计数内联在图标右侧（同一按钮、`gap: 4px`
   间距），宽度随内容增长。条目数 = 回收站条目数（组条目算 1，与回收站两段一致），不是会话数。
 - `aria-label`：非空「回收站，N 项」；空「回收站」。
 - 日期分隔：不吸顶（无 sticky/top/z-index）；不新增 JS 吸顶；分组逻辑（与上一条不同天
@@ -407,10 +409,15 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
       （repo spy），既有 `unreadCount` 查询次数不变。
 - [ ] 行内时间：今天显示 `HH:mm`，昨天/同年/跨年按分档；无消息不显示；`title` 完整时间。
 - [ ] 客户端一致性：改名/改成员（`SESSION_UPDATE`）后时间还在；`SESSION_UPDATE` 带显式
-      `null` 时时间被清掉（`in` 判定生效）；单条恢复与撤销后时间回来；整组恢复后时间
-      回来；清空后时间消失；回退后（`fetchSessions` 重拉）与 DB 剩余消息一致；当前会话收
+      `null` 时时间被清掉（`in` 判定生效）；单条恢复与撤销后时间回来；整组恢复后时间回来
+      （`chat.test.ts` 的整组恢复用例要显式断言 `lastMessageAt`，不能只断言会话回列表）；
+      清空后时间消失；回退后（`fetchSessions` 重拉）与 DB 剩余消息一致；当前会话收
       `NEW_MESSAGE` 后时间即时更新；**切到别的会话再切回后行时间与服务端一致**
-      （`joinSession` → `fetchSessions` 那条）。
+      （`joinSession` → `fetchSessions` 那条）；**首屏自动 join 与同会话重入不额外拉列表**
+      （同一用例断言 `fetchSessions` 调用次数：首屏恰 1 次）。
+- [ ] 已知边界（不验收、不另开票）：断线重连只重发 `JOIN_SESSION`、不回填列表，当前会话
+      行时间随下次切回/刷新校正；撤回最新消息（`MESSAGE_RETRACTED`）不在六条路径内，行内
+      时间停在被删条，随下次刷新/切回校正。
 - [ ] 回收站按钮：DOM 无 `🗑` emoji（`packages/web/src` 非测试面 `git grep '🗑'` 只允许
       `TrashView.vue` 空态）、有 SVG；空/非空两态；计数内联不压图标、按钮宽度随内容；
       `aria-label` 非空含条目数、空态仅「回收站」；点击仍发 `open-trash`。
@@ -420,7 +427,9 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
 - [ ] 真机：`CATSTUDY_PROBE_MODE=1`、独立端口（server 3212 / web 5177）起 worktree 实例，
       1280×900 Playwright 截图三张（列表行时间、回收站入口、跨日期滚动顶部），另走四步：
       改成员/改名后时间还在、撤销恢复后时间回来、清空后时间消失、**B 收回复 → 切 A →
-      切回 B → 行时间更新**（`joinSession` 重拉那条）；pageerror 0。
+      切回 B → 行时间更新**（`joinSession` 重拉那条）；第四步必须带对照：**不点进 B、只看
+      左栏行**时行时间不更新，证明该断言有分辨力（否则只证明「点进去会刷新」，证不了切回
+      路径）；pageerror 0。
       跨日期断言用「两个 `.date-separator` 的矩形不相交/不互遮」判定，**不得用「顶部
       N px 内最多一个」**——两天消息同屏两个可见是正常的，那种断言会误红。
 - [ ] `pnpm lint` 三包绿；server + web 全量测试绿；`git show --check` 干净。
