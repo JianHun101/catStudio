@@ -527,6 +527,137 @@ describe('socketio connector', () => {
       expect(history[0].sessionId).toBe('session-1')
     })
 
+    it('CONTEXT_WINDOW_STATS 按折叠窗口估算：有就绪摘要块时显著低于逐条累加', async () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500) // 3750 token + 50 开销
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-${i}`, long, `2026-08-01 00:00:${String(i).padStart(2, '0')}`)
+        }
+        const summary = '历史摘要内容'.repeat(20) // 就绪块（content 非空）
+        db.prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`).run(
+          JSON.stringify([
+            {
+              id: 'fold-1',
+              createdAt: '2026-08-01T00:00:00Z',
+              tokenCount: 100,
+              content: summary,
+              coveredThrough: 24,
+            },
+          ])
+        )
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        const stats = statsCall[1]
+        const raw = estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        expect(stats.maxContextTokens).toBe(128000)
+        expect(stats.contextTokens).toBeLessThan(128000 * 0.8)
+        // 判别力核心：旧口径 = raw(≈91k, 71% 窗口) 也能过 <80% 那条，必须再钉 < raw×0.6
+        expect(stats.contextTokens).toBeLessThan(raw * 0.6)
+
+        // 与公式对齐：system + 摘要块 + 最近窗口（kept 由折叠函数自身给出）
+        const { applySummaryReplace, buildSummaryBlockMessage } =
+          await import('../execution/context.js')
+        const kept = applySummaryReplace(
+          Array.from({ length: 24 }, () => ({ role: 'user', content: long })),
+          summary
+        ).kept
+        const expected =
+          estimateTokens('You are a cat.') +
+          estimateTokens(buildSummaryBlockMessage(summary).content) +
+          kept.reduce((s: number, m: any) => s + estimateTokens(m.content) + 50, 0)
+        expect(stats.contextTokens).toBe(expected)
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+      }
+    })
+
+    it('CONTEXT_WINDOW_STATS：SUMMARY_REPLACE_HISTORY=0 时不折叠，逐字等于逐条累加（开关口径对齐）', () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      const savedSwitch = process.env.SUMMARY_REPLACE_HISTORY
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      process.env.SUMMARY_REPLACE_HISTORY = '0'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500)
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-off-${i}`, long, `2026-08-01 00:02:${String(i).padStart(2, '0')}`)
+        }
+        // 库里有就绪块，但开关关闭 ⇒ join 必须忽略它，返回未折叠 raw
+        db.prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`).run(
+          JSON.stringify([
+            {
+              id: 'fold-off',
+              createdAt: '2026-08-01T00:00:00Z',
+              tokenCount: 100,
+              content: '历史摘要内容'.repeat(20),
+              coveredThrough: 24,
+            },
+          ])
+        )
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        expect(statsCall[1].contextTokens).toBe(
+          estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        )
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+        if (savedSwitch === undefined) delete process.env.SUMMARY_REPLACE_HISTORY
+        else process.env.SUMMARY_REPLACE_HISTORY = savedSwitch
+      }
+    })
+
+    it('CONTEXT_WINDOW_STATS 无摘要时逐字等于旧逐条累加公式（回归门）', () => {
+      const savedMax = process.env.MAX_CONTEXT_TOKENS
+      process.env.MAX_CONTEXT_TOKENS = '128000'
+      try {
+        const db = getDb()
+        const long = '猫'.repeat(2500)
+        const insert = db.prepare(
+          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+           VALUES (?, 'session-1', 'user', ?, '[]', ?)`
+        )
+        for (let i = 0; i < 24; i++) {
+          insert.run(`ctx-nosum-${i}`, long, `2026-08-01 00:01:${String(i).padStart(2, '0')}`)
+        }
+
+        socketHandlers.get(Events.JOIN_SESSION)![0]('session-1')
+
+        const statsCall = mockSocketEmit.mock.calls.find(
+          (c: any[]) => c[0] === Events.CONTEXT_WINDOW_STATS
+        )!
+        expect(statsCall).toBeDefined()
+        expect(statsCall[1].contextTokens).toBe(
+          estimateTokens('You are a cat.') + 24 * (estimateTokens(long) + 50)
+        )
+      } finally {
+        if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+        else process.env.MAX_CONTEXT_TOKENS = savedMax
+      }
+    })
+
     it('SESSION_HISTORY 恢复带 segments（新消息时间序交错随历史重放）', () => {
       const db = getDb()
       const segs = [
@@ -6489,6 +6620,17 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
   /** 生成失败替身：空摘要 + 空边界（= 生成失败语义，消费侧按失败处理） */
   const EMPTY_GEN = { summary: '', coveredToId: null, coveredToAt: null, coveredCount: 0 }
 
+  /**
+   * 复位摘要生成替身：`mockReset()` 会清掉实现在内的全部状态（含前序用例留下的
+   * 「永不 resolve」挂起实现），随后恢复默认空摘要。用例间必须复位——`clearAllMocks`
+   * 只清调用记录、不清实现，永挂 mock 会静默泄漏到后续用例（D-4 审查 P3-1）。
+   */
+  async function resetSummaryGenerator(): Promise<void> {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    vi.mocked(generateFullSummary).mockReset()
+    vi.mocked(generateFullSummary).mockResolvedValue(EMPTY_GEN)
+  }
+
   // 本 describe 挂在顶层 describe 之外——自建 DB（照顶层 beforeEach 模式），也不依赖
   // 顶层 connection 回调；但引擎是 createSocketIO 建立的模块单例，runCompressReply 内
   // 按需自建（见该函数），否则单跑本组会拿到 null 引擎。
@@ -6517,7 +6659,8 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     process.env.SUMMARY_REPLACE_HISTORY = '1'
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    await resetSummaryGenerator()
     resetDb()
     if (savedMaxCtx === undefined) delete process.env.MAX_CONTEXT_TOKENS
     else process.env.MAX_CONTEXT_TOKENS = savedMaxCtx
@@ -6810,10 +6953,11 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     }
   })
 
-  it('验收5：达上限（SUMMARY_COMPRESS_LIMIT）后不再生成新块，走既有截断/handoff', async () => {
+  it('验收5：达保留上限仍继续折叠（不再因累计生成次数停压）→ 新块生成、末条最新', async () => {
     const { generateFullSummary } = await import('../handoff/index.js')
+    // 保留上限 2 条：预置 2 条就绪块 = 已达上限。旧实现（readyCount < compressLimit）
+    // 会在这里整段跳过压缩分支——本用例就是那个 gate 的回归门。
     process.env.SUMMARY_COMPRESS_LIMIT = '2'
-    // 预置 2 条 ready 条目（已达上限）
     getDb()
       .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
       .run(
@@ -6822,13 +6966,282 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
           { createdAt: '2026-08-01T00:00:01Z', tokenCount: 10, content: 's2' },
         ])
       )
+    insertHistory(11) // ratio 1.17 ≥ 0.75 + 无 coveredThrough ⇒ 覆盖间隙为真 → 同步重生成
+    vi.mocked(generateFullSummary).mockResolvedValue(genResult('rollover summary'))
+
+    const chatStream = await runCompressReply('msg-limit')
+    // 判别力核心：达到保留上限仍必须生成（旧 gate 下这里是 0 次）
+    expect(generateFullSummary).toHaveBeenCalled()
+    const msgs = lastMessages(chatStream)
+    expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(true)
+    expect(msgs.some((m) => m.content?.includes('rollover summary'))).toBe(true)
+    // 有界：预置 2 条 + 新增 1 条 → 裁回 2 条，末条是新摘要（最旧一块被丢）
+    const entries = readCompressed()
+    expect(entries.length).toBeLessThanOrEqual(2)
+    expect(entries[entries.length - 1].content).toBe('rollover summary')
+    // P3-4：观测日志按**裁剪后**重新计数——trim 已丢最旧一块，`readyCount + 1` 会高报成 3
+    const syncLog = logInfo.mock.calls.find(([msg]) => msg === 'summary replace: sync generated')
+    expect(syncLog).toBeDefined()
+    expect((syncLog![1] as { totalCompressed: number }).totalCompressed).toBeLessThanOrEqual(2)
+    // 注：本用例 MAX_CONTEXT=14000，压缩后（块 + 最近 10 条）仍超预算，
+    // 会走「真实 prompt 超预算」兜底交接——那是保留的异常兜底，不属于本用例断言面。
+    // 「不交接」的判别力在下一组 90% 阈值用例里（MAX=40000，压缩后回落）。
+  })
+
+  it('pending 被后续 append 裁掉后回填 → false + warn，不谎报 completed', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    const savedMax = process.env.MAX_CONTEXT_TOKENS
+    process.env.MAX_CONTEXT_TOKENS = '34000' // 0.60 阈值 20400、0.75 阈值 25500
+    process.env.SUMMARY_COMPRESS_LIMIT = '1' // keep=1：第二轮 append 把第一轮的 pending 裁掉
+    try {
+      insertHistory(14) // ratio ≈ 0.615 ∈ [0.60, 0.75) → 异步
+      let resolveA!: (r: ReturnType<typeof genResult>) => void
+      let resolveB!: (r: ReturnType<typeof genResult>) => void
+      vi.mocked(generateFullSummary)
+        .mockImplementationOnce(() => new Promise((r) => (resolveA = r)) as any)
+        .mockImplementationOnce(() => new Promise((r) => (resolveB = r)) as any)
+
+      await runCompressReply('msg-trim-pending-1')
+      insertHistory(1) // ratio ≈ 0.70，仍异步
+      await runCompressReply('msg-trim-pending-2')
+
+      const pending = readCompressed()
+      expect(pending).toHaveLength(1) // A 的 pending 已被 B 的 append + trim 裁掉
+      expect(pending[0].content).toBe('')
+
+      // A 回填：entryId 已不在数组 → update false → 必须 warn，不能打 completed
+      resolveA(genResult('summary-A'))
+      await vi.waitFor(() => {
+        expect(logWarn).toHaveBeenCalledWith(
+          'summary replace async skipped (pending not persisted: trimmed or write failed)',
+          expect.anything()
+        )
+      })
+
+      // B 回填：条目仍在 → true → completed（全程唯一一次）
+      resolveB(genResult('summary-B'))
+      await vi.waitFor(() => {
+        expect(readCompressed()[0].content).toBe('summary-B')
+      })
+      expect(
+        logInfo.mock.calls.filter(([msg]) => msg === 'summary replace async completed')
+      ).toHaveLength(1)
+    } finally {
+      if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+      else process.env.MAX_CONTEXT_TOKENS = savedMax
+    }
+  })
+
+  it('达保留上限且无覆盖间隙 → 只消费既有块，零生成', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    process.env.SUMMARY_COMPRESS_LIMIT = '2'
+    // 预置 **keep 条**（2 条）= 真正到达保留上限。只预置 1 条时旧 gate
+    // `readyCount < compressLimit` 仍为真，用例测不到「达上限仍消费」——D-3 审查 P3-1。
+    getDb()
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
+      .run(
+        JSON.stringify([
+          {
+            id: 'consume-1',
+            createdAt: '2026-08-01T00:00:00Z',
+            tokenCount: 10,
+            content: 'ready summary 1',
+            // 远大于当前消息数 ⇒ 覆盖间隙为假 ⇒ 消费分支（零 LLM 调用）
+            coveredThrough: 9999,
+          },
+          {
+            id: 'consume-2',
+            createdAt: '2026-08-01T00:00:01Z',
+            tokenCount: 10,
+            content: 'ready summary 2',
+            coveredThrough: 9999,
+          },
+        ])
+      )
     insertHistory(11)
     vi.mocked(generateFullSummary).mockResolvedValue(genResult('should not be used'))
 
-    const chatStream = await runCompressReply('msg-limit')
+    const chatStream = await runCompressReply('msg-consume')
+    // 判别力：旧 gate（readyCount < compressLimit）下 2 < 2 为假 → 整段压缩被跳过、
+    // 摘要块根本不会进 prompt，下一行断言即红。
     expect(generateFullSummary).not.toHaveBeenCalled()
     const msgs = lastMessages(chatStream)
-    expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
+    expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(true)
+    expect(msgs.some((m) => m.content?.includes('ready summary 2'))).toBe(true)
+    // 消费路径不 append → 数组保持 2 条，不超上限
+    expect(readCompressed()).toHaveLength(2)
+  })
+
+  it('异步路径（0.60–0.75）也裁到保留上限，末尾是本轮新 pending', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    process.env.SUMMARY_COMPRESS_LIMIT = '2'
+    // 异步分支只在 ready == null 时可达：就绪块非空时，无间隙走消费、有间隙走同步生成。
+    // 因此用 2 条 **pending** 预置到保留上限（pending 也是数组条目、同样占保留位）。
+    getDb()
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
+      .run(
+        JSON.stringify([
+          {
+            id: 'pend-old-1',
+            createdAt: '2026-08-01T00:00:00Z',
+            tokenCount: 0,
+            content: '',
+            coveredThrough: 1,
+          },
+          {
+            id: 'pend-old-2',
+            createdAt: '2026-08-01T00:00:01Z',
+            tokenCount: 0,
+            content: '',
+            coveredThrough: 1,
+          },
+        ])
+      )
+    insertHistory(6) // ratio ≈ 0.64 ∈ [0.60, 0.75) → 异步分支
+    // 生成挂起，让本轮 pending 留在数组里供断言
+    vi.mocked(generateFullSummary).mockReturnValue(new Promise(() => {}) as any)
+
+    await runCompressReply('msg-async-trim')
+
+    const entries = readCompressed()
+    // 判别力：只删异步路径的 trimCompressedSummaries → 这里变 3 条（2 预置 + 1 新 pending）
+    expect(entries.length).toBeLessThanOrEqual(2)
+    expect(entries[entries.length - 1].id).not.toBe('pend-old-1')
+    expect(entries[entries.length - 1].id).not.toBe('pend-old-2')
+    expect(entries[entries.length - 1].content).toBe('')
+  })
+
+  it('SUMMARY_COMPRESS_LIMIT=0 → 下限 1（不被 || 3 吃成 3）', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    // 预置 2 条就绪块 + coveredThrough=1 → 覆盖间隙为真 → 强制同步生成（本轮 append + trim）
+    getDb()
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
+      .run(
+        JSON.stringify([
+          {
+            id: 'l0-1',
+            createdAt: '2026-08-01T00:00:00Z',
+            tokenCount: 10,
+            content: 's1',
+            coveredThrough: 1,
+          },
+          {
+            id: 'l0-2',
+            createdAt: '2026-08-01T00:00:01Z',
+            tokenCount: 10,
+            content: 's2',
+            coveredThrough: 1,
+          },
+        ])
+      )
+    process.env.SUMMARY_COMPRESS_LIMIT = '0'
+    insertHistory(11)
+    vi.mocked(generateFullSummary).mockResolvedValue(genResult('limit-zero summary'))
+
+    await runCompressReply('msg-limit-zero')
+
+    // 0 → 1：2 预置 + 本轮 append → 裁到 1 条（旧 `|| 3` 会裁到 3、留下 3 条）
+    expect(readCompressed()).toHaveLength(1)
+    expect(readCompressed()[0].content).toBe('limit-zero summary')
+  })
+
+  it('SUMMARY_COMPRESS_LIMIT=-5 → 下限 1', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    getDb()
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
+      .run(
+        JSON.stringify([
+          {
+            id: 'ln-1',
+            createdAt: '2026-08-01T00:00:00Z',
+            tokenCount: 10,
+            content: 's1',
+            coveredThrough: 1,
+          },
+          {
+            id: 'ln-2',
+            createdAt: '2026-08-01T00:00:01Z',
+            tokenCount: 10,
+            content: 's2',
+            coveredThrough: 1,
+          },
+        ])
+      )
+    process.env.SUMMARY_COMPRESS_LIMIT = '-5'
+    insertHistory(11)
+    vi.mocked(generateFullSummary).mockResolvedValue(genResult('negative summary'))
+
+    await runCompressReply('msg-limit-negative')
+
+    expect(readCompressed()).toHaveLength(1)
+    expect(readCompressed()[0].content).toBe('negative summary')
+  })
+
+  it('SUMMARY_COMPRESS_LIMIT=abc → 回落默认 3', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    getDb()
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
+      .run(
+        JSON.stringify([
+          {
+            id: 'la-1',
+            createdAt: '2026-08-01T00:00:00Z',
+            tokenCount: 10,
+            content: 's1',
+            coveredThrough: 1,
+          },
+          {
+            id: 'la-2',
+            createdAt: '2026-08-01T00:00:01Z',
+            tokenCount: 10,
+            content: 's2',
+            coveredThrough: 1,
+          },
+        ])
+      )
+    process.env.SUMMARY_COMPRESS_LIMIT = 'abc'
+    insertHistory(11)
+    vi.mocked(generateFullSummary).mockResolvedValue(genResult('fallback summary'))
+
+    await runCompressReply('msg-limit-abc')
+
+    // 3 条上限：2 预置 + 本轮 append = 3，不裁
+    expect(readCompressed()).toHaveLength(3)
+    expect(readCompressed()[2].content).toBe('fallback summary')
+  })
+
+  it('折叠续命 ⇒ 压缩后 token 回落，90% 交接不再触发（performHandoff 不被调用）', async () => {
+    const { generateFullSummary, performHandoff, shouldHandoff } =
+      await import('../handoff/index.js')
+    const savedMax = process.env.MAX_CONTEXT_TOKENS
+    // 60 条 LONG_MSG ≈ 89k token（raw 远超 90%），压缩后 = 保留最近 10 条 ≈ 14.9k
+    process.env.MAX_CONTEXT_TOKENS = '40000' // 90% = 36000
+    process.env.SUMMARY_COMPRESS_LIMIT = '2'
+    getDb()
+      .prepare(`UPDATE sessions SET compressed_summaries = ? WHERE id = 'session-1'`)
+      .run(
+        JSON.stringify([
+          { createdAt: '2026-08-01T00:00:00Z', tokenCount: 10, content: 's1' },
+          { createdAt: '2026-08-01T00:00:01Z', tokenCount: 10, content: 's2' },
+        ])
+      )
+    // 顶层替身默认 () => false（等于永不交接，判不出差异）——这里换成真实的 90% 阈值表达式
+    vi.mocked(shouldHandoff).mockImplementation((t: number) => t >= 40000 * 0.9)
+    try {
+      insertHistory(60)
+      vi.mocked(generateFullSummary).mockResolvedValue(genResult('rollover summary'))
+
+      const chatStream = await runCompressReply('msg-renewal')
+      expect(generateFullSummary).toHaveBeenCalled()
+      const msgs = lastMessages(chatStream)
+      expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(true)
+      // 判别力：raw > 90% 且压缩后 < 90%，仍未交接
+      expect(performHandoff).not.toHaveBeenCalled()
+    } finally {
+      vi.mocked(shouldHandoff).mockImplementation(() => false)
+      if (savedMax === undefined) delete process.env.MAX_CONTEXT_TOKENS
+      else process.env.MAX_CONTEXT_TOKENS = savedMax
+    }
   })
 
   it('验收6：摘要块不落 messages 表；sessions.compressed_summaries 正确 append', async () => {
@@ -6881,5 +7294,17 @@ describe('摘要替代压缩 — SUMMARY_REPLACE_HISTORY', () => {
     expect(generateFullSummary).not.toHaveBeenCalled()
     const msgs = lastMessages(chatStream)
     expect(msgs.some((m) => m.content?.includes('[历史摘要（压缩）]'))).toBe(false)
+  })
+
+  it('resetSummaryGenerator 清掉永挂实现，恢复默认空摘要（防 mock 泄漏）', async () => {
+    const { generateFullSummary } = await import('../handoff/index.js')
+    // 永挂实现：若复位无效，下面的 race 会走超时分支（变异 = 复位函数体改空 → 本用例红）
+    vi.mocked(generateFullSummary).mockReturnValue(new Promise(() => {}) as any)
+    await resetSummaryGenerator()
+    const settled = await Promise.race([
+      generateFullSummary('session-1', 2000),
+      new Promise((r) => setTimeout(() => r('TIMEOUT'), 100)),
+    ])
+    expect(settled).toEqual(EMPTY_GEN)
   })
 })

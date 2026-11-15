@@ -514,7 +514,7 @@ const emptyText = computed(() => {
 
 <template>
   <div class="session-history-panel">
-    <!-- 搜索框：Enter 或点 🔍 提交；清空后回车回到浏览模式 -->
+    <!-- 搜索框：Enter 或点搜索按钮提交；清空后回车回到浏览模式 -->
     <div class="hist-search">
       <input
         v-model="query"
@@ -525,7 +525,15 @@ const emptyText = computed(() => {
         @keydown.enter.prevent="applySearch"
       />
       <button class="hist-search-btn" title="搜索" aria-label="搜索" @click="applySearch">
-        🔍
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="6.8" cy="6.8" r="4.1" stroke="currentColor" stroke-width="1.3" fill="none" />
+          <path
+            d="M9.8 9.8 L13 13"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linecap="round"
+          />
+        </svg>
       </button>
     </div>
 
@@ -721,18 +729,21 @@ const emptyText = computed(() => {
 
 .hist-search-btn {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 26px;
   height: 26px;
   border: none;
   border-radius: 7px;
   background: transparent;
-  font-size: 12px;
-  line-height: 1;
+  color: var(--text-muted);
   cursor: pointer;
 }
 
 .hist-search-btn:hover {
   background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .hist-filters {

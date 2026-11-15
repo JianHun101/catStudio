@@ -40,7 +40,7 @@ const store = useChatStore()
 //
 // 历史页是**同一栏里的一个页面**：亮着时替换成员页的内容，右栏宽度由 App.vue 的 grid
 // 决定（本面板不设宽、不动画、不位移、不加遮罩）；Esc 不响应、无关闭按钮。
-// `Ctrl+K` 与顶部 🔍 只是「切到历史页」的入口，不是另一个面板。
+// `Ctrl+K` 与「历史」tab 只是「切到历史页」的入口，不是另一个面板；头行不再放独立放大镜。
 const activeTab = ref<'members' | 'history'>('members')
 
 function openHistory(): void {
@@ -436,14 +436,6 @@ async function removeAgent(agentId: string): Promise<void> {
         消息 {{ messageStats.total }} · 回复 {{ messageStats.agent }}
         <span v-if="totalQueued > 0" class="head-queue-chip">队列 {{ totalQueued }}</span>
       </span>
-      <button
-        class="head-search"
-        title="搜索历史（Ctrl+K）"
-        aria-label="打开历史"
-        @click="openHistory"
-      >
-        🔍
-      </button>
     </div>
 
     <!-- 无会话空态（不报错，静默提示） -->
@@ -772,23 +764,6 @@ async function removeAgent(agentId: string): Promise<void> {
 .panel-tab.on {
   background: var(--accent-soft);
   color: var(--accent-text);
-}
-
-/* 历史页入口（Ctrl+K 同效）：常驻的小图标按钮，不占宽度 */
-.head-search {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.head-search:hover {
-  background: var(--bg-hover);
 }
 
 /* 内联统计：统计卡退役后数字的落点（右对齐、弱化、等宽数字） */

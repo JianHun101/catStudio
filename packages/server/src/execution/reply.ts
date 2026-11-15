@@ -630,7 +630,10 @@ export async function runAgentReply(
   // 长会话消息超阈值时把旧消息压成摘要块（保留最近 10 条/30k 双保险），
   // 替代「超预算直接丢消息」的截断——压缩优先于截断，替换后仍超预算才走截断。
   // 0.60 预压缩异步生成（本轮零阻塞，下一轮构建消费）；0.75 强制同步生成（本轮生效）。
-  // 压缩只是延迟交接不是取消交接：达 SUMMARY_COMPRESS_LIMIT 上限后走既有 handoff/截断。
+  // 折叠**永不停止**：SUMMARY_COMPRESS_LIMIT 是「保留块数」上限（有界存储），不是
+  // 生成次数上限——超限丢最旧一块、继续生成新块，prompt 里始终是「一块摘要 + 最近 N 条」。
+  // 交接退化为异常兜底：摘要生成连续失败（无摘要可替换）、或注入记忆/知识库后真实
+  // prompt 仍超预算时，才走既有 handoff/截断。
   const summaryReplaceEnabled = process.env.SUMMARY_REPLACE_HISTORY !== '0'
   let messagesForTruncation: typeof relevantMessages = relevantMessages
   let summaryBlockMsg: LLMMessage | null = null
@@ -640,7 +643,13 @@ export async function runAgentReply(
   if (summaryReplaceEnabled && preTruncationTokens >= SUMMARY_MIN_TOKENS) {
     const maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '128000', 10)
     const ratio = preTruncationTokens / maxTokens
-    const compressLimit = parseInt(process.env.SUMMARY_COMPRESS_LIMIT || '3', 10)
+    // SUMMARY_COMPRESS_LIMIT = 数组**保留条数**上限（不是生成次数上限）；下限钉 1。
+    // 0 若不被夹会裁空数组（下一轮退回全量重读）；keep=1 时先裁后生成会让
+    // `generateFullSummary` 读不到 `lastReadySummary`、退化为每次全量重读
+    // （代价详见 `trimCompressedSummaries` docstring）。
+    // 解析：非数字回落 3；0/负数取下限 1（旧写法 `|| 3` 会把显式的 0 静默吃成 3）。
+    const rawCompressLimit = parseInt(process.env.SUMMARY_COMPRESS_LIMIT ?? '3', 10)
+    const compressLimit = Number.isFinite(rawCompressLimit) ? Math.max(1, rawCompressLimit) : 3
     const entries = parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
     const readyCount = countReadySummaries(entries)
     const ready = lastReadySummary(entries)
@@ -651,7 +660,7 @@ export async function runAgentReply(
       ready != null &&
       (typeof ready.coveredThrough !== 'number' ||
         messagesRepo.countBySession(sessionId) - ready.coveredThrough > SUMMARY_KEEP_RECENT - 1)
-    if (readyCount < compressLimit && ratio >= SUMMARY_PRE_COMPRESS_RATIO) {
+    if (ratio >= SUMMARY_PRE_COMPRESS_RATIO) {
       if (ready && !coverageGap) {
         // 消费既有就绪块——块覆盖到生成时点全部消息、保留窗口容得下新增 → 零 LLM 调用
         messagesForTruncation = applySummaryReplace(relevantMessages, ready.content).kept
@@ -681,6 +690,8 @@ export async function runAgentReply(
           content: '',
           coveredThrough: messagesRepo.countBySession(sessionId),
         })
+        // 有界存储：先裁到保留上限再生成——刚 append 的 pending 在末尾，必被保住
+        sessionsRepo.trimCompressedSummaries(sessionId, compressLimit)
         try {
           const generated = await generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
           if (generated.summary) {
@@ -689,6 +700,10 @@ export async function runAgentReply(
               content: generated.summary,
               ...summaryBoundaryPatch(generated),
             })
+            // 观测值按**裁剪后**重新计数：trim 可能刚丢弃最旧块，readyCount + 1 会高报
+            const totalCompressed = countReadySummaries(
+              parseCompressedSummaries(sessionsRepo.getCompressedSummaries(sessionId))
+            )
             messagesForTruncation = applySummaryReplace(relevantMessages, generated.summary).kept
             summaryBlockMsg = buildSummaryBlockMessage(
               generated.summary,
@@ -703,7 +718,7 @@ export async function runAgentReply(
               agentId: agent.id,
               sessionId,
               summaryTokens: estimateTokens(generated.summary),
-              totalCompressed: readyCount + 1,
+              totalCompressed,
             })
           } else {
             // 无 key / 空摘要：降级普通截断 + 留痕（不阻塞主流程）
@@ -733,6 +748,8 @@ export async function runAgentReply(
           content: '',
           coveredThrough: messagesRepo.countBySession(sessionId),
         })
+        // 有界存储：同同步路径——pending 在末尾必被保住，超限只丢最旧的就绪块
+        sessionsRepo.trimCompressedSummaries(sessionId, compressLimit)
         generateFullSummary(sessionId, SUMMARY_BLOCK_TOKENS)
           .then((generated) => {
             if (!generated.summary) {
@@ -743,11 +760,24 @@ export async function runAgentReply(
               })
               return
             }
-            sessionsRepo.updateCompressedSummary(sessionId, entryId, {
+            const updated = sessionsRepo.updateCompressedSummary(sessionId, entryId, {
               tokenCount: estimateTokens(generated.summary),
               content: generated.summary,
               ...summaryBoundaryPatch(generated),
             })
+            if (!updated) {
+              // 条目已被后续 append + trim 裁掉（keep 小 + 生成慢）：生成成功但没落库，
+              // 不能打 completed 谎报（D-3 审查 P3-5）。
+              log.warn(
+                'summary replace async skipped (pending not persisted: trimmed or write failed)',
+                {
+                  traceId,
+                  agentId: agent.id,
+                  sessionId,
+                }
+              )
+              return
+            }
             log.info('summary replace async completed', {
               traceId,
               agentId: agent.id,
