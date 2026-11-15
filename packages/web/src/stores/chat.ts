@@ -277,7 +277,7 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 回收站条目（`GET /api/sessions/trash`，服务端已滤过期）。条目粒度 = 删除动作粒度：
    * `kind:'group'` 与 `kind:'session'` 两段互不重叠——整组删除的成员不会在会话段重复出现。
-   * 头行 `🗑 N` 读 `trashEntries.length`（两段条目数之和，不是会话总数）。
+   * 头行回收站按钮读 `trashEntries.length`（两段条目数之和，不是会话总数）。
    */
   const trashEntries = ref<TrashEntry[]>([])
   /**
@@ -617,7 +617,7 @@ export const useChatStore = defineStore('chat', () => {
       dataReady.value = true
       dataError.value = ''
       // 分组与回收站都是列表的二级数据：独立失败域，拉不到不阻断会话列表
-      // （左栏退化为全未分组；头行 🗑 计数退化为 0，进回收站后仍是权威重拉）。
+      // （左栏退化为全未分组；头行回收站计数退化为 0，进回收站后仍是权威重拉）。
       void fetchGroups()
       void fetchTrash()
 
@@ -954,6 +954,12 @@ export const useChatStore = defineStore('chat', () => {
       log.error('clearSessionMessages API failed', { error: String(err) })
       throw err
     }
+    // 行内时间与剩余消息一致：清空后该会话没有消息，`lastMessageAt` 归零。
+    // 服务端同时全局广播 SESSION_MESSAGES_CLEARED（多 tab / 当前 tab 都走同一投影）。
+    const rowIdx = sessions.value.findIndex((s) => s.id === id)
+    if (rowIdx >= 0) {
+      sessions.value[rowIdx] = { ...sessions.value[rowIdx]!, lastMessageAt: null }
+    }
     // 如果清空的是当前活跃会话，清空本地消息
     if (activeSessionId.value === id) {
       messages.value = []
@@ -984,6 +990,9 @@ export const useChatStore = defineStore('chat', () => {
       messageStatus.value = nextStatus
       setRollbackMark(id, messageId, res.removedCount)
     }
+    // 行内时间必须以服务端为准重拉：本地 `messages` 含合成 `welcome-<id>`（createdAt 是
+    // 加入房间的时刻，不是落库消息时间），拿末条重算会把行时间拨到错误值。
+    void fetchSessions()
     return res.removedCount
   }
 
@@ -1214,6 +1223,8 @@ export const useChatStore = defineStore('chat', () => {
       const res = await api.restoreSession(pending.sessionId)
       trashEntries.value = trashEntries.value.filter((e) => e.id !== pending.sessionId)
       if (res.session) insertSessionSorted(res.session)
+      // 恢复响应不带 `lastMessageAt`（只有列表端点聚合），插回后必须重拉，行内时间才回来。
+      void fetchSessions()
       return true
     } catch (err) {
       reportTrashFailure(err)
@@ -1228,6 +1239,7 @@ export const useChatStore = defineStore('chat', () => {
       trashEntries.value = trashEntries.value.filter((e) => e.id !== id)
       if (res.session) insertSessionSorted(res.session)
       if (undoToast.value?.sessionId === id) dismissUndoToast()
+      void fetchSessions()
       return true
     } catch (err) {
       reportTrashFailure(err)
@@ -1243,6 +1255,8 @@ export const useChatStore = defineStore('chat', () => {
       for (const session of res.sessions ?? []) insertSessionSorted(session)
       // 组名可能因重名被改成「（恢复）」——以服务端为准
       void fetchGroups()
+      // 同批会话的行内时间同理只能从列表端点拿。
+      void fetchSessions()
       return true
     } catch (err) {
       reportTrashFailure(err)
@@ -1626,7 +1640,15 @@ export const useChatStore = defineStore('chat', () => {
     socket.on(Events.SESSION_UPDATE, (session: SessionConfig) => {
       const idx = sessions.value.findIndex((s) => s.id === session.id)
       if (idx >= 0) {
-        sessions.value[idx] = session
+        // PATCH（改名/改成员）不聚合 `lastMessageAt`，不能整个对象替换——否则行内时间被抹掉。
+        // 用 `in` 而不是 `??`：区分「字段缺失」（保留旧值）与「显式 null」（真的没有消息了）。
+        const prev = sessions.value[idx]!
+        sessions.value[idx] = {
+          ...prev,
+          ...session,
+          lastMessageAt:
+            'lastMessageAt' in session ? (session.lastMessageAt ?? null) : prev.lastMessageAt,
+        }
       } else {
         sessions.value.push(session)
       }
@@ -1694,6 +1716,8 @@ export const useChatStore = defineStore('chat', () => {
         for (const session of data.sessions ?? []) insertSessionSorted(session)
         const restored = new Set((data.sessions ?? []).map((s) => s.id))
         if (undoToast.value && restored.has(undoToast.value.sessionId)) dismissUndoToast()
+        // 广播里的 `session` 不带 `lastMessageAt`；行内时间只能从列表端点重拉。
+        void fetchSessions()
         void fetchTrash()
       }
     )
@@ -1710,6 +1734,11 @@ export const useChatStore = defineStore('chat', () => {
     )
 
     socket.on(Events.SESSION_MESSAGES_CLEARED, (data: { sessionId: string }) => {
+      // 行内时间与剩余消息一致：清空后该会话没有消息。命中守卫——不在列表里的会话不新建行。
+      const idx = sessions.value.findIndex((s) => s.id === data.sessionId)
+      if (idx >= 0) {
+        sessions.value[idx] = { ...sessions.value[idx]!, lastMessageAt: null }
+      }
       if (activeSessionId.value === data.sessionId) {
         messages.value = []
       }
@@ -1725,6 +1754,9 @@ export const useChatStore = defineStore('chat', () => {
         removedIds: string[]
         removedCount: number
       }) => {
+        // 回退会改该会话的最后一条消息：行内时间必须从列表端点重拉（本地 `messages` 含
+        // 合成 welcome，末条时间不可信）。非当前会话也要刷——多 tab 下行时间同样要落。
+        void fetchSessions()
         if (activeSessionId.value !== data.sessionId) return
         const removed = new Set(data.removedIds ?? [])
         messages.value = messages.value.filter((m) => !removed.has(m.id))

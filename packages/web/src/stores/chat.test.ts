@@ -142,6 +142,9 @@ describe('chatStore', () => {
     localStorage.clear() // 会话记忆测试：每个用例从干净的 localStorage 开始
     mockGetSessionGroups.mockResolvedValue({ groups: [] })
     mockGetTrash.mockResolvedValue({ entries: [] })
+    // 恢复/撤销/清空/回退后会 fire-and-forget 重拉列表（T6 行内时间一致性）；给默认空列表，
+    // 免得未显式设置的用例把 sessions 写成 undefined。
+    mockGetSessions.mockResolvedValue([])
     setActivePinia(createPinia())
 
     // Import store dynamically
@@ -1018,6 +1021,28 @@ describe('chatStore', () => {
       expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-02T00:00:00.000Z')
     })
 
+    it('SESSION_UPDATE 合并不抹行内时间（PATCH 不聚合；显式 null 才清）', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.SESSION_UPDATE)?.[1] as
+        ((session: SessionConfig) => void) | undefined
+      expect(handler).toBeDefined()
+      store.sessions = [
+        {
+          ...mockSession,
+          title: '旧名',
+          lastMessageAt: '2026-01-02T00:00:00.000Z',
+        },
+      ]
+
+      // PATCH 响应不带 lastMessageAt（字段缺失）→ 保留旧值，其余字段照常合并
+      handler!({ ...mockSession, title: '新名' })
+      expect(store.sessions[0]!.title).toBe('新名')
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-02T00:00:00.000Z')
+
+      // 显式 null 表示「真的没有消息了」→ 置空，不能当成「字段缺失」保留旧值
+      handler!({ ...mockSession, title: '新名', lastMessageAt: null })
+      expect(store.sessions[0]!.lastMessageAt).toBeNull()
+    })
+
     it('SESSION_HISTORY replaces messages in one batch', () => {
       // Pre-populate with some stale messages
       store.messages = [
@@ -1518,6 +1543,44 @@ describe('chatStore', () => {
 
       expect(store.messages.map((m) => m.id)).toEqual(['m1'])
       expect(store.rollbackMarks.get('s1')).toBeUndefined()
+    })
+
+    it('SESSION_ROLLED_BACK 重拉列表校准行内时间（不用本地 welcome 末条重算）', async () => {
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.SESSION_ROLLED_BACK
+      )?.[1] as ((data: any) => void) | undefined
+      store.sessions = [{ ...mockSession, lastMessageAt: '2026-01-05T00:00:00.000Z' }]
+      mockGetSessions.mockResolvedValue([
+        { ...mockSession, lastMessageAt: '2026-01-01T00:00:00.000Z' },
+      ])
+
+      // 非当前会话也要重拉：多 tab 下别的会话被回退，行内时间同样得落
+      store.activeSessionId = 's2'
+      handler!({ sessionId: 's1', messageId: 'm1', removedIds: ['m2'], removedCount: 1 })
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(mockGetSessions).toHaveBeenCalled()
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-01T00:00:00.000Z')
+    })
+
+    it('SESSION_MESSAGES_CLEARED 把该会话行 lastMessageAt 置 null（不只清当前消息）', () => {
+      const handler = mockOn.mock.calls.find(
+        (call) => call[0] === Events.SESSION_MESSAGES_CLEARED
+      )?.[1] as ((data: { sessionId: string }) => void) | undefined
+      expect(handler).toBeDefined()
+      store.sessions = [
+        { ...mockSession, id: 's1', lastMessageAt: '2026-01-05T00:00:00.000Z' },
+        { ...mockSession, id: 's2', lastMessageAt: '2026-01-04T00:00:00.000Z' },
+      ]
+      store.activeSessionId = 's2'
+
+      // 非当前会话被清空（多 tab）：也要落，且不新建/误删行
+      handler!({ sessionId: 's1' })
+      expect(store.sessions).toHaveLength(2)
+      expect(store.sessions.find((s) => s.id === 's1')!.lastMessageAt).toBeNull()
+      expect(store.sessions.find((s) => s.id === 's2')!.lastMessageAt).toBe(
+        '2026-01-04T00:00:00.000Z'
+      )
     })
 
     it('RESTART_STATUS pending → 按钮保持 pending（join 广播的当前状态不被当 none 打掉）', () => {
@@ -2476,7 +2539,7 @@ describe('chatStore', () => {
       ...over,
     })
 
-    it('fetchData 顺带拉回收站（头行 🗑 N 的初值，独立失败域）', async () => {
+    it('fetchData 顺带拉回收站（头行回收站按钮的初值，独立失败域）', async () => {
       mockGetAgents.mockResolvedValue([])
       mockGetSessions.mockResolvedValue([mockSession])
       mockGetTrash.mockResolvedValue({
@@ -2501,6 +2564,7 @@ describe('chatStore', () => {
           purgeAfter: '2026-01-12T00:00:00.000Z',
         })
         mockRestoreSession.mockResolvedValue({ session: s1, groupId: null })
+        mockGetSessions.mockResolvedValue([s1, s2])
 
         await store.trashSessions(['s1'], { undo: true })
 
@@ -2559,8 +2623,10 @@ describe('chatStore', () => {
       const s1 = grouped('s1', null, '2026-01-03T00:00:00.000Z')
       store.trashEntries = [trashEntry()]
       mockRestoreSession.mockResolvedValueOnce({ session: s1, groupId: null })
+      mockGetSessions.mockResolvedValue([{ ...s1, lastMessageAt: '2026-01-03T09:00:00.000Z' }])
 
       await store.restoreTrashSession('s1')
+      await new Promise((r) => setTimeout(r, 0))
 
       expect(store.trashEntries).toEqual([])
       expect(store.sessions.map((s) => s.id)).toEqual(['s1'])
@@ -2579,11 +2645,39 @@ describe('chatStore', () => {
       expect(mockGetTrash).toHaveBeenCalled()
     })
 
+    it('恢复 / 撤销后重拉列表回填行内时间（恢复响应不带 lastMessageAt）', async () => {
+      const s1 = grouped('s1', null, '2026-01-03T00:00:00.000Z')
+      mockRestoreSession.mockResolvedValue({ session: s1, groupId: null })
+      mockGetSessions.mockResolvedValue([{ ...s1, lastMessageAt: '2026-01-03T09:30:00.000Z' }])
+
+      // 撤销路径：toast 指向刚删的会话
+      store.sessions = [s1]
+      store.undoToast = { sessionId: 's1', title: '会话 s1', daysLeft: 7 }
+      expect(await store.undoLastTrash()).toBe(true)
+      await new Promise((r) => setTimeout(r, 0))
+      expect(mockGetSessions).toHaveBeenCalled()
+      expect(store.sessions.find((s) => s.id === 's1')!.lastMessageAt).toBe(
+        '2026-01-03T09:30:00.000Z'
+      )
+
+      // 恢复路径：从回收站恢复单条
+      mockGetSessions.mockClear()
+      store.sessions = []
+      store.trashEntries = [trashEntry()]
+      expect(await store.restoreTrashSession('s1')).toBe(true)
+      await new Promise((r) => setTimeout(r, 0))
+      expect(mockGetSessions).toHaveBeenCalled()
+      expect(store.sessions.find((s) => s.id === 's1')!.lastMessageAt).toBe(
+        '2026-01-03T09:30:00.000Z'
+      )
+    })
+
     it('恢复整组：同批会话回列表、组重拉（组名可能被改成「（恢复）」）', async () => {
       const s1 = grouped('s1', 'g1', '2026-01-03T00:00:00.000Z')
       store.trashEntries = [trashEntry({ kind: 'group', id: 'g1', name: '小说连载' })]
       mockRestoreSessionGroup.mockResolvedValue({ group: groupsFixture[0], sessions: [s1] })
       mockGetSessionGroups.mockResolvedValue({ groups: groupsFixture })
+      mockGetSessions.mockResolvedValue([{ ...s1, lastMessageAt: '2026-01-03T08:00:00.000Z' }])
 
       const ok = await store.restoreTrashGroup('g1')
       await new Promise((r) => setTimeout(r, 0))
@@ -2608,7 +2702,9 @@ describe('chatStore', () => {
 
     it('session-restored / session-purged 广播 → 列表与回收站投影（多 tab）', async () => {
       const s1 = grouped('s1', null, '2026-01-03T00:00:00.000Z')
-      store.sessions = [grouped('s2', null, '2026-01-02T00:00:00.000Z')]
+      const s2 = grouped('s2', null, '2026-01-02T00:00:00.000Z')
+      store.sessions = [s2]
+      mockGetSessions.mockResolvedValue([s1, s2])
       const restored = mockOn.mock.calls.find((c) => c[0] === 'session-restored')?.[1] as (d: {
         groupId: string | null
         sessions: SessionConfig[]
@@ -2619,6 +2715,7 @@ describe('chatStore', () => {
 
       expect(store.sessions.map((s) => s.id)).toEqual(['s1', 's2'])
       expect(mockGetTrash).toHaveBeenCalled()
+      expect(mockGetSessions).toHaveBeenCalled()
 
       const purged = mockOn.mock.calls.find((c) => c[0] === 'session-purged')?.[1] as (d: {
         sessionIds: string[]
