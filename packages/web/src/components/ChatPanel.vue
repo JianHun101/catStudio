@@ -2478,14 +2478,12 @@ const messageViews = computed<MessageView[]>(() => {
 
 /* ─── Date Separator ────────────────────── */
 
-/* 日期分组吸顶（C-1）：滚动时当前时间段的日期头贴在消息区上沿，滚过即被下一段替换；
-   分组逻辑本身不变（dateSepIndices 仍是「与上一条不同天」才出）。
-   实底 bg-paper 防止正文从字下透出；z-index 低于两条告警横幅（10）、高于普通消息（无 z-index）；
+/* 日期分隔（T6 起**不吸顶**）：留在消息流里随滚动移出视口。
+   不在本元素上做 sticky——同一滚动容器内多个日期头都 sticky 会在顶部叠成一摞
+   （后面的盖住前面的，只露出半行文字），且滚到旧消息时顶部仍显示最新日期，语义错误。
+   将来若要做吸顶，必须按日期分段包裹、每段独立 sticky 容器，不在本单做。
    pointer-events:none 让滚到下面的气泡操作按钮仍可点（本元素无任何交互）。 */
 .date-separator {
-  position: sticky;
-  top: 0;
-  z-index: 5;
   pointer-events: none;
   display: flex;
   align-items: center;
