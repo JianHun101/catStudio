@@ -1514,7 +1514,7 @@ describe('chatStore', () => {
       mockOn.mock.calls.find((call) => call[0] === Events.SESSION_HANDOFF)?.[1] as
         ((data: any) => void) | undefined
 
-    it('SESSION_HANDOFF 剔除同一父会话的陈旧交接条目（重复交接不再并排两个同名框）', async () => {
+    it('SESSION_HANDOFF 剔除同一父会话的陈旧交接条目（重拉后仍不复活）', async () => {
       store.sessions = [
         { ...mockSession, id: 'child-old', title: '测试会话（1）', handoffFrom: 'old-1' },
         { ...mockSession, id: 'old-1', title: '测试会话' },
@@ -1526,8 +1526,11 @@ describe('chatStore', () => {
         title: '测试会话（1）',
         handoffFrom: 'old-1',
       })
-      // 交接后切到新会话触发 fetchSessions（第六条路径）：服务端列表含新会话
+      // 服务端列表只过滤 deleted_at、不按 handoffFrom 过滤：旧子会话会被权威列表带回来。
+      // 故意把 child-old 放进返回，钉住「重拉落地后重放剔除」——少了重放，最终列表会被
+      // mock 里的 child-old 顶掉。
       mockGetSessions.mockResolvedValue([
+        { ...mockSession, id: 'child-old', title: '测试会话（1）', handoffFrom: 'old-1' },
         { ...mockSession, id: 'child-new', title: '测试会话（1）', handoffFrom: 'old-1' },
         { ...mockSession, id: 'old-1', title: '测试会话' },
       ])
@@ -1538,7 +1541,34 @@ describe('chatStore', () => {
         summary: '摘要',
       })
       await flush()
+      await flush()
 
+      expect(mockGetSessions).toHaveBeenCalled()
+      expect(store.sessions.map((s) => s.id)).toEqual(['child-new', 'old-1'])
+    })
+
+    it('SESSION_HANDOFF 不在父会话时只做本地剔除、不触发列表重拉', async () => {
+      store.sessions = [
+        { ...mockSession, id: 'child-old', title: '测试会话（1）', handoffFrom: 'old-1' },
+        { ...mockSession, id: 'old-1', title: '测试会话' },
+      ]
+      store.activeSessionId = 'other'
+      mockGetSession.mockResolvedValue({
+        ...mockSession,
+        id: 'child-new',
+        title: '测试会话（1）',
+        handoffFrom: 'old-1',
+      })
+
+      handoffHandler()!({
+        oldSessionId: 'old-1',
+        newSessionId: 'child-new',
+        summary: '摘要',
+      })
+      await flush()
+
+      // 不在旧父会话里不 join，也就没有第六条路径的重拉；本地剔除仍需生效
+      expect(mockGetSessions).not.toHaveBeenCalled()
       expect(store.sessions.map((s) => s.id)).toEqual(['child-new', 'old-1'])
     })
 
