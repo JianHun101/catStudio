@@ -30,7 +30,9 @@ evidence:
 4. 作为用户，我要本机老库升级后基线补登记、不重复执行，以便平稳上船。
 5. 作为维护者，我要静默失败型（重建类）迁移挂探针、效果缺失才真执行，以便历史债被兜住。
 6. 作为维护者，我要主查询路径 `EXPLAIN QUERY PLAN` 无全表扫，以便查询性能有索引兜底。
-7. 作为用户，我要「删除会话」= 归档（数据保留、列表清爽），以便数据价值不丢。
+7. ~~作为用户，我要「删除会话」= 归档（数据保留、列表清爽），以便数据价值不丢。~~
+   **2026-11-15 反转**：分组管收纳、回收站管删除（7 天软删），见 ADR 0016 与
+   `docs/plans/session-groups-trash.md`；本 spec §4.1 的归档口径仅作历史留痕。
 8. 作为用户，我要删除一只仍在会话里的猫时被明确拦住并告知它在哪些会话，以便走显式路径而不是留下悬空引用。
 9. 作为维护者，我要记录时间全库单一口径、由 repository 统一生成，以便口径永不分裂。
 10. 作为维护者，我要会话成员关系是一张表（有序、防重、引用完整），而不是 JSON 字符串。
@@ -100,7 +102,7 @@ evidence:
 - **FK 补齐**：核心引用链补齐（已存在：messages→sessions、execution_logs→sessions/agents、session_read_state→sessions CASCADE、episode_attributions→episodes、retrieval 系、spans 系；已知缺口：messages.agent_id→agents、review_verdicts 各引用、connector_bindings.session_id、episodes 各引用、flow_states/flow_state_events.session_id——实施时逐表审计定稿；**票 3 审计补链（D2 拍板 2026-09-17，九条全纳）**：review_parse_failures.message_id、episode_attributions.delivery_message_id、execution_logs.message_id、execution_logs.triggered_by_message_id、sessions.summary_msg_id、retrieval_events.session_id、retrieval_events.agent_id、spans.session_id、spans.agent_id——其中含 DDL 已具 FK 但存量有孤儿的链，孤儿随 D1 删除后约束归位）。**已登记松耦合一律不加**：chunks 派生投影、retrieval_candidates.chunk_id（仅诊断）、eval_scores / user_feedback。
 - **前置孤儿审计**：重建加 FK 会校验存量——先对各候选关系跑「子表 LEFT JOIN 父表 IS NULL」出孤儿报告（量级 + 样本），只读可重复。
 - **孤儿处理（用户拍板）**：审计先行，报告出来用户拍板，**默认倾向删除**（开发阶段、疑似没删干净的残渣）；若量大或涉核心资产（如 messages），回收容所方案（占位父行，一行不丢）。报告留痕。
-- **删除策略**：物理删除全 **RESTRICT**；CASCADE 仅纯成员关系行（session_agents）。**用户态「删除」= 归档**：sessions 加 `archived_at`（NULL=活跃），`ALTER TABLE ADD COLUMN` 轻迁移 + 部分索引；前端列表默认过滤 + 「显示已归档」开关；**归档不动记忆检索**（归档会话照常可被记忆系统检索）。
+- **删除策略**（2026-11-15 反转）：物理删除全 **RESTRICT**；CASCADE 仅纯成员关系行（session_agents）。**「用户态删除 = 归档」已退役**——改为「分组管收纳 + 回收站 7 天软删」，现行口径见 ADR 0016 与 `docs/plans/session-groups-trash.md`（`sessions.archived_at` 冻结、不读不写、不 DROP；`idx_sessions_active` 由 `idx_sessions_live` 取代）。以下归档描述只作历史留痕，实施不得再照此扩写：~~sessions 加 `archived_at`（NULL=活跃），前端列表默认过滤 + 「显示已归档」开关；归档不动记忆检索~~。
 - **删除被拦的行为契约**：删被引用的 agent → repository **先查后删**（先查引用，命中则不执行 DELETE，抛领域错误并携带会话清单）→ API 返回 **409 + 结构化错误体**（非 500）→ 前端引导「先从会话移除，或归档」。验收：删除被引用 agent 返回 409 + 会话清单；无引用时正常成功。
 - **CHECK**：封闭枚举才 CHECK（判据：取值集合封闭、由代码常量定义；代价是扩容须重建表）。已存在：messages.role、execution_logs.status、review_verdicts.verdict、review_parse_failures.reason、eval_scores.sample_reason、connector_bindings.external_type、episodes 三列、episode_attributions 两列；已知缺口：messages.dispatch_state。清单实施时对照代码常量定稿。
   **值域实测更正（2026-09-17，票 5/6 开工前真库读数）**：`dispatch_state` 真实值域 = `'queued' | 'running' | 'done'`（`repository/messages.ts` 类型签名），两库实测 `done` 1079/1342 行、`NULL` 746/1161——派活初稿写的 `completed/failed` 系笔误（那组值属 `execution_logs.status`），照字面落 CHECK 会让 `setDispatchState` 撞约束而其为 fire-and-forget ⇒ 队列持久化静默失效。定稿：`CHECK (dispatch_state IN ('queued','running','done'))` + NULL 放行。
