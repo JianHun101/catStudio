@@ -14,7 +14,28 @@ export function setRepoDb(dbInst: Database.Database): void {
 
 // ─── 查询 ──────────────────────────────────────────────
 
+/**
+ * 按 id 取**活会话**（`deleted_at IS NULL`）——用户面读取的默认口径。
+ *
+ * 软删（回收站）后这里一律返回 `undefined`：详情 / 消息 / 搜索 / 标记已读 / 回退 /
+ * 绑定写入 / socket join 等约 30 处「存在性检查」因此自动拒绝已删会话，不必点对点
+ * 加过滤（漏一处就会把回收站会话当活跃的，T0 审计见 `workspace/getSessionById-audit.md`）。
+ *
+ * 需要看已删行的**只有**回收站 / 恢复 / 彻底删除 / 清扫 / 单删幂等回读五类，
+ * 一律显式走 `getSessionByIdIncludingDeleted`——名字长到无法在评审里忽略。
+ */
 export function getSessionById(id: string): SessionRow | undefined {
+  return db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(id) as
+    SessionRow | undefined
+}
+
+/**
+ * 按 id 取会话（**含回收站里的已删行**）。
+ *
+ * 消费面是封闭的五类：`GET /api/sessions/trash`、单条恢复、单条彻底删除、到期清扫、
+ * `DELETE /api/sessions/:id` 的幂等回读。其余任何读取都该用默认的 `getSessionById`。
+ */
+export function getSessionByIdIncludingDeleted(id: string): SessionRow | undefined {
   return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined
 }
 
@@ -183,12 +204,26 @@ export function updateCompressedSummary(
 /**
  * **全量**会话（含已归档、含回收站里的已删行），按最近活跃排序。
  *
- * 与 `listActiveSessions()` 的分工是刻意的：这个函数是「系统链路」口径——用户态删除
- * 只改**用户面列表可见性**，不动评估/审计等内部链路（spec §4.3）。把 `deleted_at`
- * 过滤塞进这里 = 让回收站静默改变无关子系统的行为。
+ * 与 `listActiveSessions()` 的分工是刻意的：这个函数是「系统链路/审计」口径，保留历史行；
+ * **但它不再有生产调用方**——T1 起 `GET /api/sessions?includeArchived=1` 走
+ * `listAllSessionsExcludingDeleted()`，用户面不能漏出回收站会话（spec §4.3 / 验收 18）。
+ * 留到 T5 与 `includeArchived` 参数一起删。
  */
 export function listAllSessions(): SessionRow[] {
   return db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as SessionRow[]
+}
+
+/**
+ * **含归档、不含回收站**的会话（`deleted_at IS NULL`）——`includeArchived=1` 的兼容口径。
+ *
+ * 归档语义已退役（ADR 0016），`archived_at` 不参与可见性；这个函数与
+ * `listActiveSessions()` 今天返回同一批行，分开只为让「`includeArchived` 这一支也必须
+ * 排除已删」在代码里显式可读，而不是靠「反正另一个函数已经排除了」的巧合。
+ */
+export function listAllSessionsExcludingDeleted(): SessionRow[] {
+  return db
+    .prepare('SELECT * FROM sessions WHERE deleted_at IS NULL ORDER BY updated_at DESC')
+    .all() as SessionRow[]
 }
 
 /**
@@ -219,6 +254,7 @@ export function getHandoffChild(parentSessionId: string): { id: string } | undef
     .prepare(
       `SELECT s.id FROM sessions s
        WHERE s.handoff_from = ?
+         AND s.deleted_at IS NULL
          AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)`
     )
     .get(parentSessionId) as { id: string } | undefined
@@ -238,6 +274,7 @@ export function getEmptyHandoffChild(parentSessionId: string): { id: string } | 
     .prepare(
       `SELECT s.id FROM sessions s
        WHERE s.handoff_from = ?
+         AND s.deleted_at IS NULL
          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
        ORDER BY s.created_at DESC
        LIMIT 1`
@@ -315,6 +352,37 @@ export function insertSession(
  */
 export function updateSessionGroup(id: string, groupId: string | null): void {
   db.prepare('UPDATE sessions SET group_id = ? WHERE id = ?').run(groupId, id)
+}
+
+// ─── 回收站（T2；ADR 0016 D3/D4）───────────────────────
+
+/**
+ * 软删一条会话（幂等）：**只写 `deleted_at`**，消息 / 执行日志 / 依赖行全留。
+ *
+ * `deleted_at IS NULL` 守卫保证重复调用不重置 7 天计时——首次删除时刻就是保留期起点。
+ * `updated_at` 不动：删除是可见性动作，不是会话活跃（与归档同款口径）。
+ *
+ * @returns `changes > 0` = 本次真的打上时间戳；0 = 原本就已删（调用方回读首次时间）
+ */
+export function trashSession(id: string, deletedAt: string): { changes: number } {
+  return db
+    .prepare('UPDATE sessions SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
+    .run(deletedAt, id) as { changes: number }
+}
+
+/**
+ * 恢复一条已删会话：清 `deleted_at`，并把 `group_id` 落到调用方判定的目标组。
+ *
+ * 目标组是否还活着由路由判定（原组已删/已清除 → null）；本函数只管落库。
+ * **不动 `updated_at`**：恢复是撤销删除，不该让会话凭空跳到列表顶部。
+ * `deleted_at IS NOT NULL` 守卫让「已恢复/从未删除」的行成为 no-op。
+ */
+export function restoreSession(id: string, groupId: string | null): { changes: number } {
+  return db
+    .prepare(
+      'UPDATE sessions SET deleted_at = NULL, group_id = ? WHERE id = ? AND deleted_at IS NOT NULL'
+    )
+    .run(groupId, id) as { changes: number }
 }
 
 export function upsertDemoSession(

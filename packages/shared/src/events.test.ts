@@ -59,7 +59,13 @@ describe('Events', () => {
     expect(Events.GROUPS_CHANGED).toBe('groups-changed')
   })
 
-  it('has exactly 29 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(29)
+  it('has 回收站三事件（T2 软删 / 恢复 / 彻底清除）', () => {
+    expect(Events.SESSION_TRASHED).toBe('session-trashed')
+    expect(Events.SESSION_RESTORED).toBe('session-restored')
+    expect(Events.SESSION_PURGED).toBe('session-purged')
+  })
+
+  it('has exactly 32 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(32)
   })
 })

@@ -140,6 +140,26 @@ describe('Connector Routes', () => {
       expect(res.statusCode).toBe(404)
     })
 
+    it('POST 已删（回收站）会话 → 404，绑定行不写入（T2）', async () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, title, agent_ids, created_at, updated_at, deleted_at)
+         VALUES ('session-trash', 's', '[]', datetime('now'), datetime('now'), '2026-01-02T00:00:00.000Z')`
+      ).run()
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/bindings',
+        payload: {
+          platform: 'qq',
+          externalType: 'group',
+          externalId: '1',
+          sessionId: 'session-trash',
+        },
+      })
+      expect(res.statusCode).toBe(404)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM connector_bindings').get()).toEqual({ n: 0 })
+    })
+
     it('GET lists bindings, optionally filtered by platform', async () => {
       insertBoundFixture()
       const db = getDb()

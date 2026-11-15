@@ -377,8 +377,8 @@ describe('sessions repo — handoff 去重守卫', () => {
       expect(activeIds).toContain('s-archived')
       expect(activeIds).not.toContain('s-trashed')
 
-      // `listAllSessions` 是**系统链路**口径：回收站里的行也要在（spec §4.3），
-      // 过滤塞进去 = 让用户态删除静默改变评估/审计的行为。
+      // `listAllSessions` 保留历史行（含已删），但 T2 起**不再有生产读取方**：
+      // 用户面（`includeArchived`）走 `listAllSessionsExcludingDeleted`，本函数留到 T5 删。
       const allIds = sessionsRepo.listAllSessions().map((r) => r.id)
       expect(allIds).toContain('s-live')
       expect(allIds).toContain('s-archived')
@@ -403,5 +403,104 @@ describe('sessions repo — handoff 去重守卫', () => {
       expect(sessionsRepo.getSessionById('s-move')?.group_id).toBeNull()
       expect(sessionsRepo.getSessionById('s-move')?.updated_at).toBe('2020-01-01 00:00:00')
     })
+  })
+})
+
+// ─── T2 · 读取口径 / 回收站写入 / 交接子会话过滤 ──────────────────────
+
+describe('sessions repo — T2 回收站语义', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb()
+    setDb(db)
+    initRepository(db)
+  })
+
+  afterEach(() => {
+    resetDb()
+  })
+
+  const insertSession = (
+    id: string,
+    opts: { handoffFrom?: string; groupId?: string | null } = {}
+  ) => {
+    db.prepare(
+      `INSERT INTO sessions (id, title, handoff_from, group_id, updated_at)
+       VALUES (?, 'test', ?, ?, '2020-01-01 00:00:00')`
+    ).run(id, opts.handoffFrom ?? null, opts.groupId ?? null)
+  }
+
+  const insertMessage = (id: string, sessionId: string) => {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions)
+       VALUES (?, ?, 'user', 'hello', '[]')`
+    ).run(id, sessionId)
+  }
+
+  it('getSessionById 默认排除已删；IncludingDeleted 返回同一行', () => {
+    insertSession('s1')
+    expect(sessionsRepo.getSessionById('s1')).toBeDefined()
+    sessionsRepo.trashSession('s1', '2026-01-02T00:00:00.000Z')
+
+    expect(sessionsRepo.getSessionById('s1')).toBeUndefined()
+    const row = sessionsRepo.getSessionByIdIncludingDeleted('s1')
+    expect(row?.id).toBe('s1')
+    expect(row?.deleted_at).toBe('2026-01-02T00:00:00.000Z')
+  })
+
+  it('listAllSessionsExcludingDeleted 不含已删；listAllSessions 保留历史行', () => {
+    insertSession('s-live')
+    insertSession('s-trashed')
+    sessionsRepo.trashSession('s-trashed', '2026-01-02T00:00:00.000Z')
+
+    expect(sessionsRepo.listActiveSessions().map((r) => r.id)).toEqual(['s-live'])
+    expect(sessionsRepo.listAllSessionsExcludingDeleted().map((r) => r.id)).toEqual(['s-live'])
+    expect(
+      sessionsRepo
+        .listAllSessions()
+        .map((r) => r.id)
+        .sort()
+    ).toEqual(['s-live', 's-trashed'])
+  })
+
+  it('trashSession 幂等：第二次不改首次时间戳；restoreSession 清标记、落目标组、不动 updated_at', () => {
+    insertSession('s1')
+    db.prepare(
+      `INSERT INTO session_groups (id, name, created_at, updated_at)
+       VALUES ('g1', '组', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+    ).run()
+
+    expect(sessionsRepo.trashSession('s1', '2026-01-02T00:00:00.000Z').changes).toBe(1)
+    expect(sessionsRepo.trashSession('s1', '2026-01-03T00:00:00.000Z').changes).toBe(0)
+    expect(sessionsRepo.getSessionByIdIncludingDeleted('s1')?.deleted_at).toBe(
+      '2026-01-02T00:00:00.000Z'
+    )
+
+    expect(sessionsRepo.restoreSession('s1', 'g1').changes).toBe(1)
+    const row = sessionsRepo.getSessionById('s1')
+    expect(row?.deleted_at).toBeNull()
+    expect(row?.group_id).toBe('g1')
+    expect(row?.updated_at).toBe('2020-01-01 00:00:00')
+
+    // 已恢复的行再恢复是 no-op（不会把 group_id 又改一遍）
+    expect(sessionsRepo.restoreSession('s1', null).changes).toBe(0)
+    expect(sessionsRepo.getSessionById('s1')?.group_id).toBe('g1')
+  })
+
+  it('getHandoffChild / getEmptyHandoffChild 跳过回收站里的子会话', () => {
+    insertSession('parent')
+    insertSession('child-real', { handoffFrom: 'parent' })
+    insertMessage('m1', 'child-real')
+    expect(sessionsRepo.getHandoffChild('parent')).toEqual({ id: 'child-real' })
+
+    sessionsRepo.trashSession('child-real', '2026-01-02T00:00:00.000Z')
+    // 真子会话已删 → 不再算「已交接」；空壳查询也不得把已删壳当可复用
+    expect(sessionsRepo.getHandoffChild('parent')).toBeUndefined()
+
+    insertSession('child-empty', { handoffFrom: 'parent' })
+    expect(sessionsRepo.getEmptyHandoffChild('parent')).toEqual({ id: 'child-empty' })
+    sessionsRepo.trashSession('child-empty', '2026-01-02T00:00:00.000Z')
+    expect(sessionsRepo.getEmptyHandoffChild('parent')).toBeUndefined()
   })
 })
