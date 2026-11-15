@@ -25,7 +25,7 @@ const emit = defineEmits<{
 const store = useChatStore()
 const showCreate = ref(false)
 
-/** 头行 `🗑 N`：N = 回收站条目数（整组段 + 会话段之和，不是会话总数） */
+/** 头行回收站入口的计数：N = 回收站条目数（整组段 + 会话段之和，不是会话总数） */
 const trashCount = computed(() => store.trashEntries.length)
 
 /** 行点击 = 用户主动切回聊天：通知 App 关掉中心区的回收站视图 */
@@ -377,7 +377,7 @@ function onSessionCreated(): void {
        左栏收起时 `.panel-left` 整块 `display:none`（App.vue），该分支 DOM 永不可见 = 死代码。 -->
   <div class="session-list">
     <!-- 头行：48px，与主区顶栏、右栏「成员 · N」同一水平线。
-         形态按 spec §4.4：`会话` + `🗑 N`（T4 回收站入口）+ `＋`。
+         形态按 spec §4.4：`会话` + 回收站按钮（线稿图标 + 内联计数）+ `＋`。
          批量选择态整行临时变成 `已选 N ｜ 归组 ｜ 删除 ｜ 取消`。 -->
     <div class="section-header">
       <template v-if="selecting">
@@ -404,7 +404,8 @@ function onSessionCreated(): void {
       <template v-else>
         <span class="section-header-label">会话</span>
         <span class="section-header-right">
-          <!-- 回收站入口：有内容显示条目数，空时只留图标（spec §4.4 头行三件：会话/🗑/＋） -->
+          <!-- 回收站入口（T6）：15px 线稿 SVG（非 emoji），与 ＋ 同 24px 方形/边框/悬停；
+               条目数内联在图标右侧（不是绝对定位角标，不压图标）；空时只有图标。 -->
           <button
             class="head-trash"
             :class="{ 'has-items': trashCount > 0 }"
@@ -412,10 +413,38 @@ function onSessionCreated(): void {
             :aria-label="trashCount > 0 ? `回收站，${trashCount} 项` : '回收站'"
             @click="emit('open-trash')"
           >
-            <span class="head-trash-icon" aria-hidden="true">🗑</span>
-            <span v-if="trashCount > 0" class="head-badge">{{ trashCount }}</span>
+            <svg
+              class="head-trash-icon"
+              width="15"
+              height="15"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M2.5 4.5h11M6 4.5V3.2a.7.7 0 0 1 .7-.7h2.6a.7.7 0 0 1 .7.7v1.3"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M4 4.5l.55 8.2a1 1 0 0 0 1 .9h4.9a1 1 0 0 0 1-.9L12 4.5"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M6.7 7v3.6M9.3 7v3.6"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span v-if="trashCount > 0" class="head-trash-count">{{ trashCount }}</span>
           </button>
-          <!-- 新建会话：头行右侧小号 ＋（spec §4.4 头行只留 会话 / 🗑N / ＋） -->
+          <!-- 新建会话：头行右侧小号 ＋（spec §4.4 头行只留 会话 / 回收站 / ＋） -->
           <button
             class="btn-new-session-header"
             title="新建会话"
@@ -695,46 +724,49 @@ function onSessionCreated(): void {
   gap: 8px;
 }
 
-/* 回收站入口：图标 + 条目数角标（空时只有图标）。悬停高亮与 ＋ 同款。 */
+/* 回收站入口（T6）：与 ＋ 同 24px 方形、同边框/悬停；计数内联在图右侧，
+   空时只有图标（`padding: 0` 保持 24×24 正方形）。 */
 .head-trash {
-  position: relative;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
+  gap: 4px;
   height: 24px;
-  padding: 0;
-  border: 1px solid transparent;
+  min-width: 24px;
+  padding: 0 4px;
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 11px;
+  font-weight: 600;
   line-height: 1;
   cursor: pointer;
   transition: all var(--ease-out);
 }
 
-.head-trash:hover,
-.head-trash.has-items {
-  color: var(--text-secondary);
-  background: var(--bg-hover);
+.head-trash:not(.has-items) {
+  padding: 0;
+  width: 24px;
 }
 
-.head-badge {
-  position: absolute;
-  top: -4px;
-  right: -5px;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  border: 1px solid var(--border-subtle);
+.head-trash.has-items {
+  color: var(--text-secondary);
+}
+
+.head-trash:hover {
+  border-color: var(--accent-text);
   color: var(--accent-text);
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 12px;
-  text-align: center;
+  background: var(--accent-soft);
+}
+
+.head-trash-icon {
+  flex: none;
+  display: block;
+}
+
+.head-trash-count {
+  font-variant-numeric: tabular-nums;
 }
 
 /* 新建会话按钮：头行右侧小号（spec §4.4 头行 ＋），hover 时 accent 高亮 */
