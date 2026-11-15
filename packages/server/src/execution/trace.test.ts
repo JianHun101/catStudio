@@ -21,9 +21,35 @@ const SERVER_SRC = path.resolve(HERE, '..')
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * 父执行链（agent + session + 触发消息 + `execution_logs` 行）。
+ *
+ * 票 TR-1 起 `spans.execution_id` 是**真 FK**（→ execution_logs.id，CASCADE）：采集器
+ * 落库必须有父执行行。夹具用固定 id，且每个被采集的 executionId 各造一行——本条也顺手
+ * 覆盖「并发三个执行体」那组用例的三个 id。
+ */
+function seedExecution(executionId: string): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT OR IGNORE INTO agents (id, name, system_prompt, llm_api_key)
+     VALUES ('a-trace', 'ds猫', 'p', 'k')`
+  ).run()
+  db.prepare(`INSERT OR IGNORE INTO sessions (id, title) VALUES ('s-trace', 't')`).run()
+  db.prepare(
+    `INSERT OR IGNORE INTO messages (id, session_id, role, content, mentions)
+     VALUES ('m-trace', 's-trace', 'user', 'x', '[]')`
+  ).run()
+  db.prepare(
+    `INSERT INTO execution_logs (id, session_id, agent_id, triggered_by_message_id, status)
+     VALUES (?, 's-trace', 'a-trace', 'm-trace', 'completed')`
+  ).run(executionId)
+}
+
 function makeTrace(over?: Partial<{ executionId: string; chainId: string | null }>) {
+  const executionId = over?.executionId ?? 'exec-1'
+  seedExecution(executionId)
   return createExecTrace({
-    executionId: over?.executionId ?? 'exec-1',
+    executionId,
     chainId: over?.chainId === undefined ? 'chain-1' : over.chainId,
     sessionId: 'sess-1',
     agentId: 'agent-1',

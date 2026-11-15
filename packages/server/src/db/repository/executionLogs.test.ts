@@ -924,4 +924,55 @@ describe('T2 执行追踪列表读口', () => {
     // 触发消息 id 不是回复 id——反查面刻意不含它（一条 @ 可触发多只猫）
     expect(repo.getExecutionByReplyMessageId('m-trig', SESSION)).toBeUndefined()
   })
+
+  // 票 TR-1：`execution_id` 补 FK（ON DELETE CASCADE）后，删执行行**一条语句**带走整条
+  // trace——这正是本票要的语义。此处走仓储的删除入口（真实 SQLite + 真 FK），不是手写 DELETE。
+  it('TR-1 级联：删执行行带走 retrieval_* / spans / span_llm，全链零孤儿且不抛', () => {
+    const db = getDb()
+    const rid = Number(
+      db
+        .prepare(
+          `INSERT INTO retrieval_events
+             (execution_id, created_at, threshold_max_distance, param_top_k, reason)
+           VALUES ('ex-ok', '2026-09-27T06:00:00.000Z', 0.6, 3, 'ok')`
+        )
+        .run().lastInsertRowid
+    )
+    const qid = Number(
+      db
+        .prepare(
+          `INSERT INTO retrieval_queries (retrieval_id, query_index, query_text, query_embed_ok)
+           VALUES (?, 0, '原话', 1)`
+        )
+        .run(rid).lastInsertRowid
+    )
+    db.prepare(
+      `INSERT INTO retrieval_candidates
+         (query_id, source, doc_path, section_anchor, content_hash, injected)
+       VALUES (?, 'final', 'docs/a.md', '## 一', 'h1', 1)`
+    ).run(qid)
+    db.prepare(
+      `INSERT INTO spans (span_id, execution_id, name, start_at, duration_ms, status)
+       VALUES ('sp-root', 'ex-ok', 'invoke_agent', '2026-09-27T06:00:00.000Z', 8400, 'ok')`
+    ).run()
+    db.prepare(
+      `INSERT INTO span_llm (span_id, provider, model, stream) VALUES ('sp-root', 'deepseek', 'm', 1)`
+    ).run()
+
+    expect(() => repo.deleteExecutionLogsBySession(SESSION)).not.toThrow()
+
+    for (const table of [
+      'execution_logs',
+      'retrieval_events',
+      'retrieval_queries',
+      'retrieval_candidates',
+      'spans',
+      'span_llm',
+    ]) {
+      expect(
+        (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n,
+        table
+      ).toBe(0)
+    }
+  })
 })
