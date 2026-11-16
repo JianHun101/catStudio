@@ -68,8 +68,6 @@ export interface SessionConfig {
    * 仅 `GET /api/sessions` 返回（列表行展示用）；`updated_at` 不随消息更新，不能替代。
    */
   lastMessageAt?: string | null
-  /** 归档时刻（ISO 8601）；null/缺省 = 活跃。归档 = 用户态「删除」的替代，数据全留 */
-  archivedAt?: string | null
 }
 
 /** 会话分组（左栏收纳单位；单归属、无嵌套、不建 position，按 createdAt 排序）。 */

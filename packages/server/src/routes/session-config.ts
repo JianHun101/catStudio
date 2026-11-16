@@ -8,7 +8,6 @@
  */
 import type { SessionConfig } from '@cat-study/shared'
 import type { SessionRow } from '../db/repository/index.js'
-import { toIsoDb } from '../db/repository/time.js'
 
 export function toSessionConfig(row: SessionRow): SessionConfig {
   return {
@@ -21,6 +20,5 @@ export function toSessionConfig(row: SessionRow): SessionConfig {
     handoffFrom: row.handoff_from || null,
     runningSummary: row.running_summary || null,
     groupId: row.group_id ?? null,
-    archivedAt: row.archived_at ? toIsoDb(row.archived_at) : null,
   }
 }
