@@ -70,8 +70,6 @@ export interface SessionConfig {
    * 决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分 user/agent/system」作废）。
    */
   lastMessageAt?: string | null
-  /** 归档时刻（ISO 8601）；null/缺省 = 活跃。归档 = 用户态「删除」的替代，数据全留 */
-  archivedAt?: string | null
 }
 
 /** 会话分组（左栏收纳单位；单归属、无嵌套、不建 position，按 createdAt 排序）。 */

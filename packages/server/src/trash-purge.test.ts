@@ -7,6 +7,7 @@
  * `trash-purge.ts` 才能测。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { Events } from '@cat-study/shared'
 
 const { mockPurge, mockGetIO, mockDispose, mockGroupsChanged } = vi.hoisted(() => ({
@@ -21,7 +22,7 @@ vi.mock('./connectors/socketio.js', () => ({ getIO: mockGetIO }))
 vi.mock('./execution/registry.js', () => ({
   getExecutionEngine: () => ({ disposeSession: mockDispose }),
 }))
-vi.mock('./routes/sessionGroups.js', () => ({ emitGroupsChanged: mockGroupsChanged }))
+vi.mock('./connectors/broadcast.js', () => ({ emitGroupsChanged: mockGroupsChanged }))
 
 import { runTrashPurge } from './trash-purge.js'
 
@@ -119,5 +120,21 @@ describe('runTrashPurge — 清扫接线（P2-1 / P2-2）', () => {
 
     expect(() => runTrashPurge('hourly')).not.toThrow()
     expect(mockEmit).not.toHaveBeenCalled()
+  })
+})
+
+describe('启动接线静态源断言（T5 收口项）', () => {
+  const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
+
+  it('index.ts 启动扫一次 + 每小时定时 + shutdown 清理定时器', () => {
+    const src = read('./index.ts')
+    expect(src).toContain("runTrashPurge('startup')")
+    expect(src).toContain("setInterval(() => runTrashPurge('hourly')")
+    expect(src).toContain('clearInterval(trashPurgeTimer)')
+  })
+
+  it('trash-purge.ts 不反向依赖 routes/**（广播 helper 已下沉 connectors）', () => {
+    const src = read('./trash-purge.ts')
+    expect(src).not.toMatch(/from ['"]\.\/routes\//)
   })
 })

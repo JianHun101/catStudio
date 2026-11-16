@@ -310,79 +310,17 @@ describe('sessions repo — handoff 去重守卫', () => {
     })
   })
 
-  // ─── 票 7 · 归档（用户态「删除」= 归档）────────────────────────────
-  describe('sessions repo — 归档', () => {
-    const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-
+  // ─── T1 · 分组移动 ─────────────────────────────────
+  describe('sessions repo — 分组移动', () => {
     /**
-     * 把 `updated_at` 钉成哨兵值——「归档不动 updated_at」这条断言若不做这件事就是**恒真**的：
-     * 插入与归档发生在同一秒内，`datetime('now')` 前后同值，改了也看不出来。
+     * 把 `updated_at` 钉成哨兵值——「移动分组不动 updated_at」这条断言若不做这件事就是
+     * **恒真**的：插入与移动发生在同一秒内，`datetime('now')` 前后同值，改了也看不出来。
      */
     const pinUpdatedAt = (id: string, ts = '2020-01-01 00:00:00') =>
       db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(ts, id)
 
-    it('archiveSession 写 ISO 毫秒 archived_at（⑤-c 记录时间口径）', () => {
-      insertSession('s-a1')
-      sessionsRepo.archiveSession('s-a1')
-      const row = sessionsRepo.getSessionById('s-a1')
-      expect(row?.archived_at).toMatch(ISO_MS)
-    })
-
-    it('archiveSession 不动 updated_at（归档是可见性开关，不是会话活动）', () => {
-      insertSession('s-a2')
-      pinUpdatedAt('s-a2')
-      sessionsRepo.archiveSession('s-a2')
-      expect(sessionsRepo.getSessionById('s-a2')?.updated_at).toBe('2020-01-01 00:00:00')
-    })
-
-    it('archiveSession 幂等：重复归档不改写首次归档时刻', () => {
-      insertSession('s-a3')
-      sessionsRepo.archiveSession('s-a3')
-      const first = sessionsRepo.getSessionById('s-a3')?.archived_at
-      // 拉开时间差再归档一次：若实现是「无条件覆盖」，两次读数会不同
-      db.prepare(`UPDATE sessions SET archived_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`).run(
-        's-a3'
-      )
-      sessionsRepo.archiveSession('s-a3')
-      sessionsRepo.archiveSession('s-a3')
-      expect(sessionsRepo.getSessionById('s-a3')?.archived_at).toBe('2000-01-01T00:00:00.000Z')
-      // 反向对照：上面不是「怎么写都行」——首归档确实写过值（哨兵是后来手工改的）
-      expect(first).toMatch(ISO_MS)
-    })
-
-    it('unarchiveSession 归 NULL，且同样不动 updated_at', () => {
-      insertSession('s-a4')
-      sessionsRepo.archiveSession('s-a4')
-      pinUpdatedAt('s-a4')
-      sessionsRepo.unarchiveSession('s-a4')
-      const row = sessionsRepo.getSessionById('s-a4')
-      expect(row?.archived_at).toBeNull()
-      expect(row?.updated_at).toBe('2020-01-01 00:00:00')
-    })
-
-    it('listActiveSessions 只排除已软删（deleted_at）；归档不再影响列表；listAllSessions 含已删', () => {
-      insertSession('s-live')
-      insertSession('s-archived')
-      insertSession('s-trashed')
-      // 归档列冻结：T1 起它不参与可见性判定（收纳由分组折叠承担）
-      db.prepare(`UPDATE sessions SET archived_at = '2026-01-01T00:00:00.000Z' WHERE id = ?`).run(
-        's-archived'
-      )
-      db.prepare(`UPDATE sessions SET deleted_at = '2026-01-01T00:00:00.000Z' WHERE id = ?`).run(
-        's-trashed'
-      )
-
-      const activeIds = sessionsRepo.listActiveSessions().map((r) => r.id)
-      expect(activeIds).toContain('s-live')
-      expect(activeIds).toContain('s-archived')
-      expect(activeIds).not.toContain('s-trashed')
-
-      // `listAllSessions` 保留历史行（含已删），但 T2 起**不再有生产读取方**：
-      // 用户面（`includeArchived`）走 `listAllSessionsExcludingDeleted`，本函数留到 T5 删。
-      const allIds = sessionsRepo.listAllSessions().map((r) => r.id)
-      expect(allIds).toContain('s-live')
-      expect(allIds).toContain('s-archived')
-      expect(allIds).toContain('s-trashed')
+    it('归档 API 已退役：sessions repo 不再导出任何 archive 动作', () => {
+      expect(Object.keys(sessionsRepo).filter((name) => /archiv/i.test(name))).toEqual([])
     })
 
     it('updateSessionGroup 移动组不改 updated_at（分组是组织动作，不是会话活跃）', () => {
@@ -449,19 +387,12 @@ describe('sessions repo — T2 回收站语义', () => {
     expect(row?.deleted_at).toBe('2026-01-02T00:00:00.000Z')
   })
 
-  it('listAllSessionsExcludingDeleted 不含已删；listAllSessions 保留历史行', () => {
+  it('listActiveSessions 只返回未删会话', () => {
     insertSession('s-live')
     insertSession('s-trashed')
     sessionsRepo.trashSession('s-trashed', '2026-01-02T00:00:00.000Z')
 
     expect(sessionsRepo.listActiveSessions().map((r) => r.id)).toEqual(['s-live'])
-    expect(sessionsRepo.listAllSessionsExcludingDeleted().map((r) => r.id)).toEqual(['s-live'])
-    expect(
-      sessionsRepo
-        .listAllSessions()
-        .map((r) => r.id)
-        .sort()
-    ).toEqual(['s-live', 's-trashed'])
   })
 
   it('trashSession 幂等：第二次不改首次时间戳；restoreSession 清标记、落目标组、不动 updated_at', () => {

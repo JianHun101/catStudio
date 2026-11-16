@@ -5,7 +5,6 @@ import {
   SessionUpdateSchema,
   SessionRollbackSchema,
   Events,
-  type SessionConfig,
   type ToolCallInfo,
   type StreamSegment,
 } from '@cat-study/shared'
@@ -22,7 +21,7 @@ import {
 import type { MessageRow, SessionRow } from '../db/repository/index.js'
 import { normalizeIsoMs } from '../db/repository/clock.js'
 import { getIO } from '../connectors/socketio.js'
-import { emitGroupsChanged } from './sessionGroups.js'
+import { emitGroupsChanged } from '../connectors/broadcast.js'
 import { blockerError, getSessionBlocker } from './trash-guard.js'
 import { toSessionConfig } from './session-config.js'
 import { toIsoDb } from '../db/repository/time.js'
@@ -58,19 +57,12 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send(toSessionConfig(row!))
   })
 
-  // ─── GET /api/sessions — 列出会话（未删除；归档不再过滤）───
+  // ─── GET /api/sessions — 列出未删除会话 ──────────────
   //
-  // 票 7 的「默认过滤已归档」已退役（ADR 0016）：收纳由分组折叠承担，归档不影响列表。
-  // `includeArchived` 作为兼容参数被接受但**不再改变「归档是否可见」**——两种取值都
-  // 排除回收站（`deleted_at IS NOT NULL`），区别只是取数函数的名字：默认走
-  // `listActiveSessions()`，显式传参走 `listAllSessionsExcludingDeleted()`。参数本身
-  // 留到归档面清退票（T5）再删；T2 起两条路径都不能漏出回收站会话（spec §4.3，验收 18）。
-  app.get('/api/sessions', async (req) => {
-    const hasIncludeArchived =
-      (req.query as Record<string, unknown> | undefined)?.includeArchived !== undefined
-    const rows = hasIncludeArchived
-      ? sessionsRepo.listAllSessionsExcludingDeleted()
-      : sessionsRepo.listActiveSessions()
+  // 归档面已清退（T5）：旧模型「删除 = 归档」退役（ADR 0016），
+  // 列表只排除回收站（`deleted_at IS NOT NULL`）。
+  app.get('/api/sessions', async () => {
+    const rows = sessionsRepo.listActiveSessions()
     // 最后消息时间：一次 GROUP BY 批量取，不逐会话查（T6 契约）
     const lastMessageAt = messagesRepo.getLastMessageAtBySessionIds(rows.map((row) => row.id))
     return rows.map((row) => {
@@ -193,31 +185,6 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     // 的会话房间广播不是一回事，两者都发、互不替代。
     if (groupChanged) emitGroupsChanged()
     return config
-  })
-
-  // ─── POST /api/sessions/:id/archive — 归档 ──────────
-  // 用户态「删除」的替代形态：数据全留（会话 / 消息 / 成员照常可查），只从默认列表隐藏。
-
-  app.post('/api/sessions/:id/archive', async (req, reply) => {
-    const id = (req.params as any).id
-    if (!sessionsRepo.getSessionById(id)) {
-      return reply.status(404).send({ error: 'Session not found' })
-    }
-
-    sessionsRepo.archiveSession(id)
-    return reply.send(emitArchived(id))
-  })
-
-  // ─── POST /api/sessions/:id/unarchive — 取消归档 ────
-
-  app.post('/api/sessions/:id/unarchive', async (req, reply) => {
-    const id = (req.params as any).id
-    if (!sessionsRepo.getSessionById(id)) {
-      return reply.status(404).send({ error: 'Session not found' })
-    }
-
-    sessionsRepo.unarchiveSession(id)
-    return reply.send(emitArchived(id))
   })
 
   // ─── DELETE /api/sessions/:id/messages — 清空消息 ────
@@ -634,23 +601,6 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     if (groupIds.length > 0) emitGroupsChanged()
     return { purged: { groups: groupIds.length, sessions: sessionIds.length } }
   })
-}
-
-/** 归档态变化后：全局广播 + 返回新配置（`archivedAt` 一律过归一器——列已是 ISO，但接口
- *  形态统一走 `toIsoDb` 免得日后有人把这里换成秒级列时静默漂移）。 */
-function emitArchived(id: string): SessionConfig {
-  const row = sessionsRepo.getSessionById(id)!
-  const config = toSessionConfig(row)
-  try {
-    // 全局广播（非会话房间）——归档改的是列表可见性，受影响的是所有看列表的客户端
-    getIO()?.emit(Events.SESSION_ARCHIVED, {
-      sessionId: id,
-      archivedAt: config.archivedAt ?? null,
-    })
-  } catch {
-    /* emit 失败不影响响应 */
-  }
-  return config
 }
 
 /** 已删会话所属的「整组删除」组 id：组与会话 `deleted_at` **精确相等**才是同批。

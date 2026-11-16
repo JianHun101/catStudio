@@ -4,7 +4,6 @@
 import type Database from 'better-sqlite3'
 import { purgeSessionDependents } from './dependents.js'
 import type { SessionRow } from './types.js'
-import { nowIso } from './time.js'
 
 let db: Database.Database
 
@@ -202,35 +201,9 @@ export function updateCompressedSummary(
 }
 
 /**
- * **全量**会话（含已归档、含回收站里的已删行），按最近活跃排序。
+ * **活跃**会话（`deleted_at IS NULL`），按最近活跃排序——用户态列表的唯一口径。
  *
- * 与 `listActiveSessions()` 的分工是刻意的：这个函数是「系统链路/审计」口径，保留历史行；
- * **但它不再有生产调用方**——T1 起 `GET /api/sessions?includeArchived=1` 走
- * `listAllSessionsExcludingDeleted()`，用户面不能漏出回收站会话（spec §4.3 / 验收 18）。
- * 留到 T5 与 `includeArchived` 参数一起删。
- */
-export function listAllSessions(): SessionRow[] {
-  return db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as SessionRow[]
-}
-
-/**
- * **含归档、不含回收站**的会话（`deleted_at IS NULL`）——`includeArchived=1` 的兼容口径。
- *
- * 归档语义已退役（ADR 0016），`archived_at` 不参与可见性；这个函数与
- * `listActiveSessions()` 今天返回同一批行，分开只为让「`includeArchived` 这一支也必须
- * 排除已删」在代码里显式可读，而不是靠「反正另一个函数已经排除了」的巧合。
- */
-export function listAllSessionsExcludingDeleted(): SessionRow[] {
-  return db
-    .prepare('SELECT * FROM sessions WHERE deleted_at IS NULL ORDER BY updated_at DESC')
-    .all() as SessionRow[]
-}
-
-/**
- * **活跃**会话（`deleted_at IS NULL`），按最近活跃排序——用户态列表的默认口径。
- *
- * 票 7 的 `archived_at IS NULL` 已退役（分组两轴模型，ADR 0016）：归档只是旧模型里
- * 「收起来」的落点，现在由分组折叠承担，**不再影响列表可见性**；列表只排除已进回收站
+ * 归档面已清退（T5，ADR 0016）：旧模型的「删除 = 归档」不复存在，列表只排除已进回收站
  * 的会话。
  *
  * WHERE 与部分索引 `idx_sessions_live` 的谓词逐字同形（部分索引要生效，查询的 WHERE
@@ -360,7 +333,7 @@ export function updateSessionGroup(id: string, groupId: string | null): void {
  * 软删一条会话（幂等）：**只写 `deleted_at`**，消息 / 执行日志 / 依赖行全留。
  *
  * `deleted_at IS NULL` 守卫保证重复调用不重置 7 天计时——首次删除时刻就是保留期起点。
- * `updated_at` 不动：删除是可见性动作，不是会话活跃（与归档同款口径）。
+ * `updated_at` 不动：删除是可见性动作，不是会话活跃。
  *
  * @returns `changes > 0` = 本次真的打上时间戳；0 = 原本就已删（调用方回读首次时间）
  */
@@ -423,32 +396,6 @@ export function updateSessionAgentIds(id: string, agentIdsJson: string): void {
 
 export function updateSessionTimestamp(id: string): void {
   db.prepare(`UPDATE sessions SET updated_at = datetime('now') WHERE id = ?`).run(id)
-}
-
-// ─── 归档（票 7；spec §4.1「用户态『删除』= 归档」）──────────
-//
-// 两条**都不动 `updated_at`**，这是有意的：`updated_at` 是「会话活跃度」（消息进出 /
-// 成员变更），列表按它排序；归档只是可见性开关，不是会话活动。跟着动会让归档的会话在
-// 「显示已归档」列表里凭空跳到最前、取消归档后又赖在顶部——与「最近活跃」的语义打架。
-
-/**
- * 归档会话（幂等）。**首次归档时刻为准**：对已归档的会话重复调用不改写 `archived_at`
- * （`AND archived_at IS NULL`），否则一个 UI 重复点击就把原始归档时间冲掉了。
- *
- * `archived_at` 是**事件时间**（归档动作发生时刻），但仍由 repository 生成而非调用方传入
- * ——⑤-c 的例外只对「调用方能说出更准时刻」的事件时间开放，归档没有这种情形，走 `nowIso()`
- * 与全库记录时间同口径（ISO 毫秒 UTC）。
- */
-export function archiveSession(id: string): void {
-  db.prepare('UPDATE sessions SET archived_at = ? WHERE id = ? AND archived_at IS NULL').run(
-    nowIso(),
-    id
-  )
-}
-
-/** 取消归档（幂等）——`archived_at` 归 NULL 即回到活跃态，无其他副作用。 */
-export function unarchiveSession(id: string): void {
-  db.prepare('UPDATE sessions SET archived_at = NULL WHERE id = ?').run(id)
 }
 
 export function updateSessionRunningSummary(

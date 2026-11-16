@@ -15,6 +15,7 @@ import {
   type SessionGroupRow,
 } from '../db/repository/index.js'
 import { getIO } from '../connectors/socketio.js'
+import { emitGroupsChanged } from '../connectors/broadcast.js'
 import { getExecutionEngine } from '../execution/registry.js'
 import { toSessionConfig } from './session-config.js'
 import { blockerError, getSessionBlocker } from './trash-guard.js'
@@ -27,18 +28,6 @@ function normalizeGroupName(raw: unknown): string | null {
   const name = raw.trim()
   if (name.length < 1 || name.length > GROUP_NAME_MAX) return null
   return name
-}
-
-/** 组结构变化后全局广播（受影响的是所有正在看左栏的客户端）。emit 失败不影响响应。
- *
- *  导出给 `routes/sessions.ts` 的 PATCH 复用：**移动会话**也改变组的成员归属，左栏所有
- *  客户端都要重拉组列表；两处各写一份 `getIO()?.emit(...)` 就是同一规则的平行真相源。 */
-export function emitGroupsChanged(): void {
-  try {
-    getIO()?.emit(Events.GROUPS_CHANGED, {})
-  } catch {
-    /* emit 失败不影响响应 */
-  }
 }
 
 /** 全局广播（回收站三事件都是列表级 UI 态）。 */

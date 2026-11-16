@@ -17,7 +17,7 @@ import { Events } from '@cat-study/shared'
 import { trash as trashRepo } from './db/repository/index.js'
 import { getIO } from './connectors/socketio.js'
 import { getExecutionEngine } from './execution/registry.js'
-import { emitGroupsChanged } from './routes/sessionGroups.js'
+import { emitGroupsChanged } from './connectors/broadcast.js'
 import { createLogger } from './logger.js'
 import { messageOf } from './utils.js'
 

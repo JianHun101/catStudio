@@ -407,6 +407,9 @@ async function onMessagesScroll(): Promise<void> {
 // 新消息，恢复到旧 scrollTop 会停在半截、看着像「卡住了」。
 let savedScrollTop = 0
 let savedAtBottom = true
+/** 隐藏前的会话 id：隐藏期间当前会话可能被别的 tab 删掉、store 已切到新会话，
+ *  此时把旧会话的 scrollTop 恢复到新会话会停在半截——判据见下方 watch。 */
+let savedSessionId: string | null = null
 
 watch(
   () => props.hidden,
@@ -414,11 +417,13 @@ watch(
     if (hidden) {
       savedScrollTop = chatContainer.value?.scrollTop ?? 0
       savedAtBottom = isAtBottom.value
+      savedSessionId = store.activeSessionId
       return
     }
     if (!wasHidden) return
     await nextTick()
-    if (savedAtBottom) {
+    // 隐藏期间换过会话（或本来就贴底）：旧位置不属于当前内容，贴底比「恢复到半截」正确。
+    if (savedAtBottom || store.activeSessionId !== savedSessionId) {
       scrollToBottom()
       return
     }
