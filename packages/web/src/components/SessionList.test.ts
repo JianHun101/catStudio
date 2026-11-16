@@ -498,7 +498,7 @@ describe('会话列表滚动条（index.html 全局样式）', () => {
     )
   })
 
-  it('轨道宽度仍固定 10px（显隐不引起行宽跳动）', () => {
+  it('WebKit 轨道宽度声明仍为 10px（显隐只改颜色；实际宽度由浏览器决定，不是渲染实测）', () => {
     const block = designTokens.match(/::-webkit-scrollbar\s*\{[^}]*\}/s)
 
     expect(block).toBeTruthy()

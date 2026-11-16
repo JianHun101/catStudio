@@ -364,7 +364,7 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
   **决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分角色」作废）**。值已是
   **ISO 8601 毫秒 UTC** 串（与 `messages.created_at` 同形，如 `2026-11-15T08:45:34.218Z`），
   **含且仅含一个 `Z`，不得再拼接 `Z`**（拼了会得到 `...ZZ`，前端 `new Date` 判 Invalid）；
-  无消息 = `null`；只在 `GET /api/sessions` 返回，其他端点不必带。
+  无对话消息 = `null`；只在 `GET /api/sessions` 返回，其他端点不必带。
 - 挂载层：`GET /api/sessions` 的两条取数分支（`listActiveSessions` /
   `listAllSessionsExcludingDeleted`）共用同一个 `rows.map`：在 `toSessionConfig(row)` 之后
   赋值一次 `session.lastMessageAt = map.get(row.id) ?? null`，两条路径同时覆盖；
@@ -383,9 +383,11 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
   4. `SESSION_ROLLED_BACK`：`fetchSessions()` 重拉（**不要**用本地 `messages` 末条重算——
      数组里含服务端合成的 `welcome-<id>` 消息，`createdAt` 是加入房间的时刻，不是落库
      消息的时间）；不得留旧值；
-  5. `NEW_MESSAGE`：命中会话（当前会话必命中）置 `lastMessageAt = msg.createdAt`；赋值
-     单调，不倒退。多 tab 下非当前会话收不到 `NEW_MESSAGE`（房间广播），验收按「当前会话
-     即时、其余刷新/切回后一致」收窄，不另加全局事件；
+  5. `NEW_MESSAGE`：`msg.role === 'system'` 不推进 `lastMessageAt`（系统通告不计入，
+     口径见上方契约与决策留痕）；user/agent 命中会话（当前会话必命中）时置
+     `lastMessageAt = msg.createdAt`；赋值单调，不倒退。多 tab 下非当前会话收不到
+     `NEW_MESSAGE`（房间广播），验收按「当前会话即时、其余刷新/切回后一致」收窄，
+     不另加全局事件；
   6. **切回**：`joinSession` 切到**另一个**会话（`switching` 为真）时调一次
      `fetchSessions()`；首屏自动 join 与同会话重入不重拉。这是「切回后一致」的唯一落点；
      不要靠 `SESSION_HISTORY` 反推行内时间（历史窗口是「最新 200 条」的实现细节，列表行

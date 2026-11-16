@@ -89,8 +89,10 @@ dev 库预期：60 会话 / 37 归档 → 默认列表 23 条 + 折叠的「归�
 interface SessionConfig {
   // 既有字段不变
   groupId: string | null // 新增
-  // 新增：最后一条消息的 created_at，ISO 8601 毫秒 UTC（与 messages.created_at 同形）；
-  // 无消息 = null。只有 GET /api/sessions 填充，其他端点不保证带。
+  // 新增：最后一条**对话消息**（user/agent；系统通告不计入）的 created_at，
+  // ISO 8601 毫秒 UTC（与 messages.created_at 同形）；只有系统通告的会话 = null。
+  // 决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分角色」作废）。
+  // 只有 GET /api/sessions 填充，其他端点不保证带。
   lastMessageAt?: string | null
   archivedAt?: string | null // 冻结保留到「归档面清退」票，前端不再消费
 }

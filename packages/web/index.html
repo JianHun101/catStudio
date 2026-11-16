@@ -244,8 +244,9 @@
       }
 
       /* 会话列表：滑块默认透明，指针进入列表才显色。用 background-color
-         （不写 background 简写），避免覆盖 background-clip / border；
-         轨道仍固定 10px，显隐不引起行宽跳动。 */
+         （不写 background 简写），避免覆盖 background-clip / border。
+         显隐只改颜色、不改布局声明；WebKit 的 10px 轨道声明在下方全局块
+         （实际宽度由浏览器按 scrollbar-color / scrollbar-width 决定）。 */
       .session-items {
         scrollbar-width: thin;
         scrollbar-color: transparent transparent;

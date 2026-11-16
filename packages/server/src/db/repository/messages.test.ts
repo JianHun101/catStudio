@@ -737,7 +737,7 @@ describe('getSessionHistory — 首屏取最新一页', () => {
   })
 })
 
-// ─── T6：批量取每会话最后一条消息时间（列表行「最后消息时间」）──────────────
+// ─── T6：批量取每会话最后一条对话消息时间（user/agent；系统通告不计入）──────
 describe('getLastMessageAtBySessionIds — 一次 GROUP BY 取全量', () => {
   let db: Database.Database
 
