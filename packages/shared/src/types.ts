@@ -64,12 +64,12 @@ export interface SessionConfig {
   /** 所属分组 id；null = 未分组（单归属：一个会话最多属于一个组） */
   groupId: string | null
   /**
-   * 最后一条消息的 `created_at`（ISO 8601，不区分 user/agent/system）；无消息 = null。
-   * 仅 `GET /api/sessions` 返回（列表行展示用）；`updated_at` 不随消息更新，不能替代。
+   * 最后一条**对话消息**（user/agent；系统通告不计入）的 `created_at`（ISO 8601）；
+   * 只有系统通告的会话 = null。仅 `GET /api/sessions` 返回（列表行展示用）；
+   * `updated_at` 不随消息更新，不能替代。
+   * 决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分 user/agent/system」作废）。
    */
   lastMessageAt?: string | null
-  /** 归档时刻（ISO 8601）；null/缺省 = 活跃。归档 = 用户态「删除」的替代，数据全留 */
-  archivedAt?: string | null
 }
 
 /** 会话分组（左栏收纳单位；单归属、无嵌套、不建 position，按 createdAt 排序）。 */

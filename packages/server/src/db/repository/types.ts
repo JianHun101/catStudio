@@ -41,8 +41,6 @@ export interface SessionRow {
   summary_msg_id: string | null
   created_at: string
   updated_at: string
-  /** ISO 毫秒（归档时刻）；NULL = 活跃（票 7）。归档已退役、列冻结（ADR 0016） */
-  archived_at: string | null
   /** 所属分组 id；NULL = 未分组（T1 分组两轴模型） */
   group_id: string | null
   /** ISO 毫秒（进回收站时刻）；NULL = 未删除（T2 起写入，T1 只建列） */

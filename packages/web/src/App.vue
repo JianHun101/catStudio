@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import SessionList from './components/SessionList.vue'
 import ChatPanel from './components/ChatPanel.vue'

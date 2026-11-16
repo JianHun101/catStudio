@@ -47,10 +47,6 @@ describe('Events', () => {
     expect(Events.HANDOFF_FAILED).toBe('handoff-failed')
   })
 
-  it('has SESSION_ARCHIVED server→client event（票 7 归档态变化广播）', () => {
-    expect(Events.SESSION_ARCHIVED).toBe('session-archived')
-  })
-
   it('has SESSION_ROLLED_BACK server→client event（T1 同会话回退）', () => {
     expect(Events.SESSION_ROLLED_BACK).toBe('session-rolled-back')
   })
@@ -65,7 +61,7 @@ describe('Events', () => {
     expect(Events.SESSION_PURGED).toBe('session-purged')
   })
 
-  it('has exactly 32 event constants', () => {
-    expect(Object.keys(Events)).toHaveLength(32)
+  it('has exactly 31 event constants', () => {
+    expect(Object.keys(Events)).toHaveLength(31)
   })
 })

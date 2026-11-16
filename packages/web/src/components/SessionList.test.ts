@@ -3,6 +3,7 @@ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import source from './SessionList.vue?raw'
 import sessionRowSource from './SessionRow.vue?raw'
+import designTokens from '../../index.html?raw'
 import SessionList from './SessionList.vue'
 import SessionRow from './SessionRow.vue'
 import GroupDeleteModal from './GroupDeleteModal.vue'
@@ -464,5 +465,43 @@ describe('SessionList 静态结构（归档面已退场）', () => {
     expect(source).toContain('<SessionRow')
     expect(sessionRowSource).toContain('<SessionActionsMenu')
     expect(source).not.toContain('session-delete')
+  })
+})
+
+describe('会话列表滚动条（index.html 全局样式）', () => {
+  it('去掉滚动条两端的箭头按钮（全局）', () => {
+    const block = designTokens.match(/::-webkit-scrollbar-button\s*\{[^}]*\}/s)
+
+    expect(block).toBeTruthy()
+    expect(block![0]).toContain('display: none')
+    expect(block![0]).toContain('width: 0')
+    expect(block![0]).toContain('height: 0')
+  })
+
+  it('.session-items 滑块默认透明、hover 显色；用 background-color 不用简写', () => {
+    expect(designTokens).toMatch(
+      /\.session-items::-webkit-scrollbar-thumb\s*\{[^}]*background-color:\s*transparent/
+    )
+    expect(designTokens).toMatch(
+      /\.session-items:hover::-webkit-scrollbar-thumb\s*\{[^}]*background-color:\s*var\(--border-table\)/
+    )
+    // 简写会把 background-clip: content-box 重置掉，滑块会被拉成满宽
+    expect(designTokens).not.toMatch(
+      /\.session-items::-webkit-scrollbar-thumb\s*\{[^}]*background:\s*transparent/
+    )
+    // Firefox 侧同步：默认透明、hover 显色
+    expect(designTokens).toMatch(
+      /\.session-items\s*\{[^}]*scrollbar-color:\s*transparent transparent/s
+    )
+    expect(designTokens).toMatch(
+      /\.session-items:hover\s*\{[^}]*scrollbar-color:\s*var\(--border-table\) transparent/s
+    )
+  })
+
+  it('WebKit 轨道宽度声明仍为 10px（显隐只改颜色；实际宽度由浏览器决定，不是渲染实测）', () => {
+    const block = designTokens.match(/::-webkit-scrollbar\s*\{[^}]*\}/s)
+
+    expect(block).toBeTruthy()
+    expect(block![0]).toContain('width: 10px')
   })
 })

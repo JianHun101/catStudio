@@ -43,6 +43,6 @@ export interface HandoffBus {
   /** HANDOFF_FAILED — 会话房间 */
   emitHandoffFailed(p: HandoffFailedPayload): void
   /** SESSION_DELETED — **全局**广播（非房间）：清理陈旧空壳子会话后通知前端摘掉那条框。
-   *  会话列表是全局 UI 态（同 `routes/sessions.ts` 删除端点），故与 SESSION_ARCHIVED 同款。 */
+   *  会话列表是全局 UI 态（同 `routes/sessions.ts` 的删除端点），故走全局广播。 */
   emitSessionDeleted(sessionId: string): void
 }

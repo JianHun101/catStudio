@@ -125,7 +125,7 @@ describe('Session Routes', () => {
       expect(JSON.parse(res.body)).toHaveLength(2)
     })
 
-    // ─── 票 7 · 归档 → T1 起退役（归档不再影响列表；T5 才删接口） ─────
+    /** 列表测试共用的建会话 helper。 */
     const createSession = async (title: string): Promise<string> => {
       const res = await app.inject({
         method: 'POST',
@@ -135,39 +135,8 @@ describe('Session Routes', () => {
       return JSON.parse(res.body).id as string
     }
 
-    it('归档不再从默认列表隐藏（T1：收纳由分组折叠承担）；includeArchived 兼容参数仍可传', async () => {
-      const keep = await createSession('留着')
-      const archived = await createSession('归档的')
-
-      const archive = await app.inject({
-        method: 'POST',
-        url: `/api/sessions/${archived}/archive`,
-      })
-      expect(archive.statusCode).toBe(200)
-
-      const def = await app.inject({ method: 'GET', url: '/api/sessions' })
-      const defIds = (JSON.parse(def.body) as Array<{ id: string }>).map((s) => s.id)
-      expect(defIds).toContain(keep)
-      // T1 起 `listActiveSessions` 只排除 `deleted_at`；归档列冻结、不参与可见性
-      expect(defIds).toContain(archived)
-
-      const all = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
-      const allIds = (JSON.parse(all.body) as Array<{ id: string }>).map((s) => s.id)
-      expect(allIds).toEqual(expect.arrayContaining([keep, archived]))
-    })
-
-    it('includeArchived 的宽松解析仍不误伤：`0`/`false`/空串都返回未删除会话', async () => {
-      const id = await createSession('兼容参数')
-      for (const v of ['0', 'false', '']) {
-        const res = await app.inject({ method: 'GET', url: `/api/sessions?includeArchived=${v}` })
-        expect(res.statusCode, `includeArchived=${v}`).toBe(200)
-        const ids = (JSON.parse(res.body) as Array<{ id: string }>).map((s) => s.id)
-        expect(ids, `includeArchived=${v}`).toContain(id)
-      }
-    })
-
     // ─── T6：最后消息时间（列表行展示的数据源）─────────────────────────
-    it('lastMessageAt = 最后一条消息的 created_at（不区分角色）；空会话为 null', async () => {
+    it('lastMessageAt = 最后一条对话消息（user/agent）的 created_at，系统通告不计入；空会话为 null', async () => {
       const busy = await createSession('有消息的')
       const empty = await createSession('空会话')
       const db = getDb()
@@ -177,6 +146,8 @@ describe('Session Routes', () => {
       )
       ins.run('m-early', busy, 'user', '2026-02-01T09:00:00.000Z')
       ins.run('m-late', busy, 'agent', '2026-02-01T10:30:00.000Z')
+      // 更晚的系统通告（如评估告警广播）不能顶掉最后对话时间
+      ins.run('m-system', busy, 'system', '2026-11-05T04:10:58.135Z')
 
       const res = await app.inject({ method: 'GET', url: '/api/sessions' })
       const list = JSON.parse(res.body) as Array<{
@@ -190,24 +161,6 @@ describe('Session Routes', () => {
       expect(late).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
       expect(late).not.toContain('ZZ')
       expect(list.find((s) => s.id === empty)!.lastMessageAt).toBeNull()
-    })
-
-    it('includeArchived 分支同样挂 lastMessageAt（两条路径不漏）', async () => {
-      const id = await createSession('兼容分支也带')
-      getDb()
-        .prepare(
-          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
-           VALUES ('m-arch', ?, 'user', 'x', '[]', '2026-03-04T05:06:07.000Z')`
-        )
-        .run(id)
-
-      const res = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
-      const list = JSON.parse(res.body) as Array<{ id: string; lastMessageAt: string | null }>
-
-      expect(list.find((s) => s.id === id)!.lastMessageAt).toBe('2026-03-04T05:06:07.000Z')
-      const value = list.find((s) => s.id === id)!.lastMessageAt!
-      expect(value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
-      expect(value).not.toContain('ZZ')
     })
 
     it('多会话各取各的最后时间，不串号', async () => {
@@ -227,70 +180,19 @@ describe('Session Routes', () => {
       expect(list.find((s) => s.id === a)!.lastMessageAt).toBe('2026-01-01T00:00:00.000Z')
       expect(list.find((s) => s.id === b)!.lastMessageAt).toBe('2026-01-02T00:00:00.000Z')
     })
-  })
 
-  describe('POST /api/sessions/:id/archive | /unarchive', () => {
-    const createSession = async (title: string): Promise<string> => {
-      const res = await app.inject({
-        method: 'POST',
-        url: '/api/sessions',
-        payload: { title, agentIds: [agentId1] },
-      })
-      return JSON.parse(res.body).id as string
-    }
-
-    it('归档返回带 archivedAt 的会话配置，并全局广播 SESSION_ARCHIVED', async () => {
-      const id = await createSession('归档广播')
-      const res = await app.inject({ method: 'POST', url: `/api/sessions/${id}/archive` })
-
-      expect(res.statusCode).toBe(200)
-      const body = JSON.parse(res.body)
-      expect(body.archivedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
-
-      const { getIO } = await import('../connectors/socketio.js')
-      const emit = (getIO() as unknown as { emit: ReturnType<typeof vi.fn> }).emit
-      expect(emit).toHaveBeenCalledWith('session-archived', {
-        sessionId: id,
-        archivedAt: body.archivedAt,
-      })
-    })
-
-    it('取消归档返回 archivedAt=null，会话回到默认列表', async () => {
-      const id = await createSession('取消归档')
-      await app.inject({ method: 'POST', url: `/api/sessions/${id}/archive` })
-
-      const res = await app.inject({ method: 'POST', url: `/api/sessions/${id}/unarchive` })
-      expect(res.statusCode).toBe(200)
-      expect(JSON.parse(res.body).archivedAt).toBeNull()
+    it('旧归档行（archived_at 非空）仍在列表、可打开、可删除（迁移数据不丢）', async () => {
+      const id = await createSession('旧归档行')
+      getDb()
+        .prepare(`UPDATE sessions SET archived_at = '2026-01-01T00:00:00.000Z' WHERE id = ?`)
+        .run(id)
 
       const list = await app.inject({ method: 'GET', url: '/api/sessions' })
-      const ids = (JSON.parse(list.body) as Array<{ id: string }>).map((s) => s.id)
-      expect(ids).toContain(id)
-    })
-
-    it('归档**不删数据**：会话详情与消息照常可查（用户态删除 = 归档）', async () => {
-      const id = await createSession('数据全留')
-      const db = (await import('../db/index.js')).getDb()
-      db.prepare(
-        `INSERT INTO messages (id, session_id, role, content) VALUES ('m-keep', ?, 'user', '原话')`
-      ).run(id)
-
-      await app.inject({ method: 'POST', url: `/api/sessions/${id}/archive` })
-
-      const detail = await app.inject({ method: 'GET', url: `/api/sessions/${id}` })
-      expect(detail.statusCode).toBe(200)
-      expect(JSON.parse(detail.body).archivedAt).toMatch(/Z$/)
-
-      const msgs = await app.inject({ method: 'GET', url: `/api/sessions/${id}/messages` })
-      expect(msgs.statusCode).toBe(200)
-      expect(JSON.parse(msgs.body)).toHaveLength(1)
-    })
-
-    it('会话不存在 → 404（两个端点都是）', async () => {
-      for (const action of ['archive', 'unarchive']) {
-        const res = await app.inject({ method: 'POST', url: `/api/sessions/nope/${action}` })
-        expect(res.statusCode, action).toBe(404)
-      }
+      expect((JSON.parse(list.body) as Array<{ id: string }>).map((s) => s.id)).toContain(id)
+      expect((await app.inject({ method: 'GET', url: `/api/sessions/${id}` })).statusCode).toBe(200)
+      expect((await app.inject({ method: 'DELETE', url: `/api/sessions/${id}` })).statusCode).toBe(
+        200
+      )
     })
   })
 
@@ -595,12 +497,10 @@ describe('Session Routes', () => {
       expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE id = 'm1'").get()).toEqual({
         n: 1,
       })
-      // 详情 / 列表 / includeArchived 都当不存在
+      // 详情 / 列表都当不存在
       expect((await app.inject({ method: 'GET', url: `/api/sessions/${id}` })).statusCode).toBe(404)
       const list = await app.inject({ method: 'GET', url: '/api/sessions' })
       expect((JSON.parse(list.body) as Array<{ id: string }>).map((s) => s.id)).not.toContain(id)
-      const all = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
-      expect((JSON.parse(all.body) as Array<{ id: string }>).map((s) => s.id)).not.toContain(id)
 
       // /trash 一条会话条目，带原组（无组 = null）与消息数
       const trash = await app.inject({ method: 'GET', url: '/api/sessions/trash' })

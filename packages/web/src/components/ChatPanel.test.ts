@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import source from './ChatPanel.vue?raw'
 import statusLabelSource from './AgentStatusLabel.vue?raw'
+import designTokens from '../../index.html?raw'
 import ChatPanel from './ChatPanel.vue'
 import { useChatStore } from '@/stores/chat'
 import { api } from '@/composables/useApi'
@@ -2432,5 +2433,124 @@ describe('C-1 消息流懒加载', () => {
     expect(source).not.toContain('@scroll.passive="checkScrollPosition"')
     expect(source).toContain('const OLDER_TRIGGER_DISTANCE = 300')
     expect(source).toContain('store.loadOlderMessages()')
+  })
+
+  it('滚动条只去箭头、滑块保持常显（聊天区没有自动隐藏覆盖）', () => {
+    const buttonBlock = designTokens.match(/::-webkit-scrollbar-button\s*\{[^}]*\}/s)
+    expect(buttonBlock).toBeTruthy()
+    expect(buttonBlock![0]).toContain('display: none')
+
+    // .session-items 的「默认透明」不能误伤聊天区
+    expect(designTokens).not.toMatch(
+      /\.chat-messages-wrapper(?::hover)?::-webkit-scrollbar-thumb\s*\{[^}]*background-color:\s*transparent/
+    )
+    expect(designTokens).not.toMatch(
+      /\.chat-messages-wrapper\s*\{[^}]*scrollbar-color:\s*transparent/s
+    )
+  })
+})
+
+// ─── T5 收口：App 用 v-show 隐藏 ChatPanel 时的阅读位置恢复 ───────────────
+//
+// 回归缺口（T4 收口登记）：进回收站只是隐藏、不卸载，`display:none` 期间浏览器会丢掉
+// 滚动容器的 `scrollTop`。原实现只保存位置；隐藏期间当前会话若被别的 tab 删掉、store
+// 已切到新会话，切回时会把旧会话的位置恢复到新会话上。下面的用例把「同会话恢复」与
+// 「换会话改贴底」两态钉死。
+describe('ChatPanel 隐藏/恢复滚动位置（回收站 v-show）', () => {
+  let wrapper: VueWrapper | null = null
+
+  const scrollTo = () => Element.prototype.scrollTo as unknown as ReturnType<typeof vi.fn>
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = null
+  })
+
+  function setup(): ReturnType<typeof useChatStore> {
+    const store = useChatStore()
+    store.sessions = [
+      { id: 's1', title: 't1', agentIds: [], broadcastMode: false } as never,
+      { id: 's2', title: 't2', agentIds: [], broadcastMode: false } as never,
+    ]
+    store.activeSessionId = 's1'
+    store.agents = []
+    store.messages = [
+      {
+        id: 'm1',
+        sessionId: 's1',
+        agentId: null,
+        role: 'user',
+        content: '一条消息',
+        mentions: [],
+        createdAt: '2026-01-01T00:00:00.000Z',
+      } as Message,
+    ]
+    return store
+  }
+
+  /** 挂载并把滚动几何钉在「长会话、用户向上滚过」的位置 */
+  async function mountAt(scrollTop: number) {
+    wrapper = mount(ChatPanel, {
+      props: { hidden: false, leftSidebarOpen: true },
+      global: { stubs: { Teleport: true } },
+    })
+    await nextTick()
+    const container = wrapper.find('.chat-messages-wrapper')
+    const el = container.element as HTMLElement
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, writable: true, value: 2000 })
+    Object.defineProperty(el, 'clientHeight', { configurable: true, writable: true, value: 400 })
+    el.scrollTop = scrollTop
+    await container.trigger('scroll') // 建立 isAtBottom / lastScrollTop 读数
+    return { el, container }
+  }
+
+  it('隐藏前向上滚过、期间会话不变：切回恢复原 scrollTop（不贴底）', async () => {
+    setup()
+    const { el } = await mountAt(200)
+
+    await wrapper!.setProps({ hidden: true })
+    await nextTick()
+    el.scrollTop = 0 // display:none 后浏览器丢掉位置
+    scrollTo().mockClear()
+
+    await wrapper!.setProps({ hidden: false })
+    await nextTick()
+    await flushPromises()
+
+    expect(el.scrollTop).toBe(200)
+    expect(scrollTo()).not.toHaveBeenCalled()
+  })
+
+  it('隐藏期间 activeSessionId 变了：不把旧会话位置恢复到新会话，改为贴底', async () => {
+    const store = setup()
+    const { el } = await mountAt(200)
+
+    await wrapper!.setProps({ hidden: true })
+    await nextTick()
+    store.activeSessionId = 's2' // 模拟别的 tab 删掉当前会话、store 已切走
+    el.scrollTop = 0
+    scrollTo().mockClear()
+
+    await wrapper!.setProps({ hidden: false })
+    await nextTick()
+    await flushPromises()
+
+    // 判据是 scrollToBottom 的调用（jsdom 的 scrollTo 桩不改 scrollTop）
+    expect(scrollTo()).toHaveBeenCalledWith({ top: 2000, behavior: 'auto' })
+  })
+
+  it('隐藏前本来就贴底：切回仍贴底（隐藏期间可能到了新消息）', async () => {
+    setup()
+    await mountAt(1600) // 2000 - 1600 - 400 = 0 → 贴底
+
+    await wrapper!.setProps({ hidden: true })
+    await nextTick()
+    scrollTo().mockClear()
+
+    await wrapper!.setProps({ hidden: false })
+    await nextTick()
+    await flushPromises()
+
+    expect(scrollTo()).toHaveBeenCalledWith({ top: 2000, behavior: 'auto' })
   })
 })

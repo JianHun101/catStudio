@@ -1201,15 +1201,9 @@ ALTER TABLE review_parse_failures_rebuilt RENAME TO review_parse_failures`,
     verify: (db) => columnExists(db, 'sessions', 'archived_at'),
   },
   {
-    // 部分索引：只索引**活跃**会话（归档行不进索引，列表默认查询也不需要它们）。
-    // 正文与 `listActiveSessions()` 的 WHERE 逐字对应——部分索引要生效，查询的 WHERE 必须
-    // **蕴含**索引谓词，`archived_at IS NULL` 两边同形是最稳的写法。
-    //
-    // 实测（dev 库副本，30 会话）：加索引前 `SCAN sessions | USE TEMP B-TREE FOR ORDER BY`；
-    // 加索引后 `SCAN sessions USING INDEX idx_sessions_active`——**排序临时 B 树消失**，
-    // 按索引序直出。注意这条查询**没有等值约束**（列表要全量），故计划里的 `SCAN … USING
-    // INDEX` 是「按序扫索引」而非退化——判据是 B 树消失，不是 SCAN 字样消失（与票 2 三条
-    // 等值索引的判据形状不同，别照搬）。`listAllSessions()`（无过滤）计划不变，零回归。
+    // 历史条目：票 7 的「用户态删除 = 归档」模型已退役（ADR 0016），`idx_sessions_active`
+    // 已被 T1 迁移 DROP。这里只保留 checksum 冻结的原始 SQL，不再描述现行查询计划；
+    // 活跃列表现在的索引是 T1 的 `idx_sessions_live`（谓词 `deleted_at IS NULL`）。
     name: 'idx_sessions_active（活跃会话列表部分索引）',
     ticket: 'T7',
     sql: `CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(updated_at DESC) WHERE archived_at IS NULL`,
