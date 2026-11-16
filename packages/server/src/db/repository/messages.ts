@@ -325,10 +325,15 @@ export function getLastAgentMessageAt(sessionId: string, agentId: string): strin
 }
 
 /**
- * 批量取每个会话**最后一条消息**的 `created_at`（T6：列表行「最后消息时间」）。
+ * 批量取每个会话**最后一条对话消息（user/agent）**的 `created_at`（T6：列表行
+ * 「最后消息时间」）。
+ *
+ * 系统通告（广播、重启告警）不代表会话活动，**不计入**——2026-11-15 真机反馈：历史
+ * 「评估告警」广播把 48 个会话的时间钉在同一秒，列表全显示 11月5日（原「不区分角色」
+ * 口径作废）。只有系统通告的会话因此不出现，调用方按 `?? null` 投影成「无时间」。
  *
  * `MAX(created_at)` 分组一次取全量——**禁止逐会话查**（N 个会话就是 N 次往返，
- * 列表首屏立刻变成 N+1）。返回 Map：无消息的会话不出现（调用方按 `?? null` 投影）。
+ * 列表首屏立刻变成 N+1）。返回 Map：无对话消息的会话不出现。
  *
  * 比较/返回口径：`messages.created_at` 自票 5 起是 ISO 毫秒，入参已是 ISO。SQL 的
  * `MAX(created_at)` 是**字符串比较**，秒级与 ISO 在同一天混存时会选错行（`' '` < `'T'`）；
@@ -343,7 +348,7 @@ export function getLastMessageAtBySessionIds(sessionIds: readonly string[]): Map
     .prepare(
       `SELECT session_id, MAX(created_at) AS last_at
        FROM messages
-       WHERE session_id IN (${placeholders})
+       WHERE session_id IN (${placeholders}) AND role <> 'system'
        GROUP BY session_id`
     )
     .all(...sessionIds) as Array<{ session_id: string; last_at: string }>

@@ -242,8 +242,10 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**；组内零�
     空时「回收站」。
 - 会话行第二行：`N 只猫咪` 在左，**最后消息时间**在右（本地时区：今天 `HH:mm`、昨天
   `昨天`、同年 `M月D日`、跨年 `YYYY/M/D`；`title` 给完整 `YYYY-MM-DD HH:mm`）；无消息
-  不显示。数据源 `SessionConfig.lastMessageAt` = 该会话最后一条消息（不区分角色，
-  系统通告也算；只有系统通告的会话也会显示时间）。跨年用紧凑 `YYYY/M/D` 是有意的
+  不显示。数据源 `SessionConfig.lastMessageAt` = 该会话最后一条**对话消息**（user/agent）
+  的 `created_at`；系统通告（广播、重启告警）不代表会话活动，**不计入**，只有系统通告的
+  会话因此不显示时间。**决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分角色」
+  作废）**，历史通告把 48 个会话的时间钉在同一秒。跨年用紧凑 `YYYY/M/D` 是有意的
   （行宽所限，与日期分隔的 `YYYY年M月D日` 不同）。**行内时间不是排序键**：列表仍按
   `updated_at DESC`，两者不一致是已知取舍；排序切换另票（T7），不在 T6 内改。
 - **日期分隔不吸顶**：日期分隔保留在消息流中，但不得 `position: sticky`。原因：同一滚动
@@ -303,8 +305,9 @@ deleted_at IS NULL` 的 `EXPLAIN QUERY PLAN` 走 `idx_sessions_group`（T2 验�
     组条目仍完整；经组恢复/组清除则成功。
 21. **恢复重名顺序**：存在同名活组时，组恢复成功、名变为 `name（恢复）`（≤24 字），
     不抛唯一索引冲突（`COLLATE NOCASE` 下 `Name`/`name` 也算同名）。
-22. **最后消息时间**：`GET /api/sessions` 每项带 `lastMessageAt`（该会话最后一条消息的
-    `created_at`；值已是 ISO 毫秒 UTC 串，**含且仅含一个 `Z`，不得再拼接 `Z`**；无消息
+22. **最后消息时间**：`GET /api/sessions` 每项带 `lastMessageAt`（该会话最后一条**对话
+    消息**（user/agent；系统通告不计入）的 `created_at`；值已是 ISO 毫秒 UTC 串，**含且仅含
+    一个 `Z`，不得再拼接 `Z`**；无对话消息
     `null`）；**当前会话**新消息落库后行内时间即时更新，其余会话在刷新/**切回**/
     `GROUPS_CHANGED` 重拉后一致——「切回」的落点是 `joinSession` 切到另一个会话时重拉列表
     （首屏自动 join 与同会话重入不重拉；`NEW_MESSAGE` 是房间广播，非当前会话收不到，

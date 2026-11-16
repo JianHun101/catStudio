@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import source from './ChatPanel.vue?raw'
 import statusLabelSource from './AgentStatusLabel.vue?raw'
+import designTokens from '../../index.html?raw'
 import ChatPanel from './ChatPanel.vue'
 import { useChatStore } from '@/stores/chat'
 import { api } from '@/composables/useApi'
@@ -2432,6 +2433,20 @@ describe('C-1 消息流懒加载', () => {
     expect(source).not.toContain('@scroll.passive="checkScrollPosition"')
     expect(source).toContain('const OLDER_TRIGGER_DISTANCE = 300')
     expect(source).toContain('store.loadOlderMessages()')
+  })
+
+  it('滚动条只去箭头、滑块保持常显（聊天区没有自动隐藏覆盖）', () => {
+    const buttonBlock = designTokens.match(/::-webkit-scrollbar-button\s*\{[^}]*\}/s)
+    expect(buttonBlock).toBeTruthy()
+    expect(buttonBlock![0]).toContain('display: none')
+
+    // .session-items 的「默认透明」不能误伤聊天区
+    expect(designTokens).not.toMatch(
+      /\.chat-messages-wrapper(?::hover)?::-webkit-scrollbar-thumb\s*\{[^}]*background-color:\s*transparent/
+    )
+    expect(designTokens).not.toMatch(
+      /\.chat-messages-wrapper\s*\{[^}]*scrollbar-color:\s*transparent/s
+    )
   })
 })
 

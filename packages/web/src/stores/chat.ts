@@ -1447,11 +1447,15 @@ export const useChatStore = defineStore('chat', () => {
       // T6：列表行「最后消息时间」随消息落库即时更新。不在这里补，正在聊的会话要等
       // 下次 fetchSessions（切组 / 移组 / 多 tab 事件 / 刷新）才更新，行上会长期显示旧时间。
       // 比较后再写：重放/乱序帧不能把时间往回拨。
-      const rowIdx = sessions.value.findIndex((s) => s.id === msg.sessionId)
-      if (rowIdx >= 0) {
-        const row = sessions.value[rowIdx]!
-        if (!row.lastMessageAt || row.lastMessageAt < msg.createdAt) {
-          sessions.value[rowIdx] = { ...row, lastMessageAt: msg.createdAt }
+      // 系统通告（广播、重启告警）不代表会话活动，不推进行内时间——与服务端聚合口径一致
+      // （2026-11-15 真机反馈：历史通告会把整列时间钉在同一秒）。
+      if (msg.role !== 'system') {
+        const rowIdx = sessions.value.findIndex((s) => s.id === msg.sessionId)
+        if (rowIdx >= 0) {
+          const row = sessions.value[rowIdx]!
+          if (!row.lastMessageAt || row.lastMessageAt < msg.createdAt) {
+            sessions.value[rowIdx] = { ...row, lastMessageAt: msg.createdAt }
+          }
         }
       }
       // 本猫回复落库 = 该执行结束（服务端顺序：NEW_MESSAGE 先于 done 广播）。清计时**按消息
