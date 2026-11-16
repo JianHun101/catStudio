@@ -333,8 +333,8 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
 - `packages/shared/src/types.ts`：`SessionConfig` 加 `lastMessageAt?: string | null`。
 - `packages/server/src/db/repository/messages.ts`：新增按 sessionId 批量取
   `MAX(created_at)` 的函数（一次 `GROUP BY`，禁止 N+1）+ 同文件测试。
-- `packages/server/src/routes/sessions.ts`：`GET /api/sessions` 两分支（默认 /
-  `includeArchived`）共用的 `rows.map` 里、`toSessionConfig(row)` **之后**挂
+- `packages/server/src/routes/sessions.ts`：`GET /api/sessions` 单路径（T5 后已无
+  `includeArchived`）的 `rows.map` 里、`toSessionConfig(row)` **之后**挂
   `lastMessageAt`；不把字段塞进 `toSessionConfig`、不再拼接 `Z`（值本身已带一个 `Z`）；
   同文件 `sessions.test.ts` 补形态断言。
 - `packages/web/src/components/SessionList.vue`：头行回收站按钮换 15px 线稿 SVG、
@@ -361,17 +361,17 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
 **契约（钉死）:**
 
 - `lastMessageAt` = 该会话最后一条**对话消息**（user/agent；系统通告不计入）的 `created_at`；
-  **决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分角色」作废）**。值已是
+  **决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分 user/agent/system」作废）**。值已是
   **ISO 8601 毫秒 UTC** 串（与 `messages.created_at` 同形，如 `2026-11-15T08:45:34.218Z`），
   **含且仅含一个 `Z`，不得再拼接 `Z`**（拼了会得到 `...ZZ`，前端 `new Date` 判 Invalid）；
   无对话消息 = `null`；只在 `GET /api/sessions` 返回，其他端点不必带。
-- 挂载层：`GET /api/sessions` 的两条取数分支（`listActiveSessions` /
-  `listAllSessionsExcludingDeleted`）共用同一个 `rows.map`：在 `toSessionConfig(row)` 之后
-  赋值一次 `session.lastMessageAt = map.get(row.id) ?? null`，两条路径同时覆盖；
+- 挂载层：`GET /api/sessions` 单路径（`listActiveSessions`；T5 后已无
+  `listAllSessionsExcludingDeleted`）的 `rows.map`：在 `toSessionConfig(row)` 之后
+  赋值一次 `session.lastMessageAt = map.get(row.id) ?? null`；
   `toSessionConfig` 本体一字不改。测试断言值匹配
   `/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/`，且无 `ZZ`。
 - 只做**一次** `GROUP BY` 批量查询，不允许逐会话查；验收的「查询次数为 1」只指新增的
-  `lastMessageAt` 聚合（repo spy，**每条分支每请求各 1 次，不是端点总计 1 次**），
+  `lastMessageAt` 聚合（repo spy，**每次请求 1 次，不是端点总计 1 次**），
   **既有 `unreadCount` 的逐会话查询不动**。
 - 客户端一致性（`stores/chat.ts`，六条路径）：
   1. `SESSION_UPDATE` 合并保留旧值——不能整个对象替换（PATCH 不带该字段）：
@@ -408,8 +408,8 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
 **验收（行为可验证）:**
 
 - [ ] API：两条消息的会话 `lastMessageAt` = 最后一条 `created_at`；空会话 `null`；
-      `includeArchived` 分支同样带；值是 ISO 毫秒 UTC、无 `ZZ`；新增聚合只查 1 次
-      （repo spy），既有 `unreadCount` 查询次数不变。
+      `GET /api/sessions` 单路径带（T5 后已无 `includeArchived` 分支）；值是 ISO 毫秒 UTC、
+      无 `ZZ`；新增聚合只查 1 次（repo spy），既有 `unreadCount` 查询次数不变。
 - [ ] 行内时间：今天显示 `HH:mm`，昨天/同年/跨年按分档；无消息不显示；`title` 完整时间。
 - [ ] 客户端一致性：改名/改成员（`SESSION_UPDATE`）后时间还在；`SESSION_UPDATE` 带显式
       `null` 时时间被清掉（`in` 判定生效）；单条恢复与撤销后时间回来；整组恢复后时间回来

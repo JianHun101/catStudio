@@ -91,10 +91,9 @@ interface SessionConfig {
   groupId: string | null // 新增
   // 新增：最后一条**对话消息**（user/agent；系统通告不计入）的 created_at，
   // ISO 8601 毫秒 UTC（与 messages.created_at 同形）；只有系统通告的会话 = null。
-  // 决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分角色」作废）。
+  // 决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分 user/agent/system」作废）。
   // 只有 GET /api/sessions 填充，其他端点不保证带。
   lastMessageAt?: string | null
-  archivedAt?: string | null // 冻结保留到「归档面清退」票，前端不再消费
 }
 
 interface SessionGroup {
@@ -212,11 +211,9 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**；组内零�
   会被重新拿来用）。
 - `connectors/socketio.ts` 的 join 分支拒绝已删会话。
 - 绑定写入（`upsertConnectorBinding` 的调用侧）拒绝已删会话。
-- `listAllSessions()` 目前**唯一**生产调用点是 `GET /api/sessions?includeArchived=1`
-  （`routes/sessions.ts`），**不是**评估/审计内部路径。T2 起该分支必须排除已删行
-  （新增 `listAllSessionsExcludingDeleted()` 或等价谓词），否则回收站会话会从用户面列表
-  漏出。`listAllSessions()` 本身留到 T5 与 `includeArchived` 参数一起清。
-  `routes/sessions.ts` 共 16 处 `getSessionById` 调用，全量清单以 T0 审计为准。
+- `listAllSessions()` / `listAllSessionsExcludingDeleted()` 与 `includeArchived` 参数
+  已随 T5 删除；`GET /api/sessions` 只剩 `listActiveSessions()` 单路径（`deleted_at IS NULL`），
+  不存在第二条取数分支。`routes/sessions.ts` 的 `getSessionById` 调用点以 T0 审计为准。
 
 ### 4.4 前端定稿
 
@@ -246,9 +243,9 @@ WHERE group_id=? AND deleted_at IS NULL`，**同一 ISO 毫秒串**；组内零�
   `昨天`、同年 `M月D日`、跨年 `YYYY/M/D`；`title` 给完整 `YYYY-MM-DD HH:mm`）；无消息
   不显示。数据源 `SessionConfig.lastMessageAt` = 该会话最后一条**对话消息**（user/agent）
   的 `created_at`；系统通告（广播、重启告警）不代表会话活动，**不计入**，只有系统通告的
-  会话因此不显示时间。**决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分角色」
-  作废）**，历史通告把 48 个会话的时间钉在同一秒。跨年用紧凑 `YYYY/M/D` 是有意的
-  （行宽所限，与日期分隔的 `YYYY年M月D日` 不同）。**行内时间不是排序键**：列表仍按
+  会话因此不显示时间。**决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分
+  user/agent/system」作废）**，历史通告把 48 个会话的时间钉在同一秒。跨年用紧凑
+  `YYYY/M/D` 是有意的（行宽所限，与日期分隔的 `YYYY年M月D日` 不同）。**行内时间不是排序键**：列表仍按
   `updated_at DESC`，两者不一致是已知取舍；排序切换另票（T7），不在 T6 内改。
 - **日期分隔不吸顶**：日期分隔保留在消息流中，但不得 `position: sticky`。原因：同一滚动
   容器内多个日期头都 sticky 会在顶部叠成一摞（后面的盖住前面的，只露出半行文字），且
