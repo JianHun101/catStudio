@@ -233,7 +233,6 @@
          the actual scrolling element. scrollbar-color IS
          inherited, so it stays on html as a global default. */
       .chat-messages-wrapper,
-      .session-items,
       .agent-cards,
       .collapsed-sessions,
       .collapsed-agents,
@@ -244,10 +243,29 @@
         scrollbar-color: var(--border-table) transparent;
       }
 
+      /* 会话列表：滑块默认透明，指针进入列表才显色。用 background-color
+         （不写 background 简写），避免覆盖 background-clip / border；
+         轨道仍固定 10px，显隐不引起行宽跳动。 */
+      .session-items {
+        scrollbar-width: thin;
+        scrollbar-color: transparent transparent;
+      }
+
+      .session-items:hover {
+        scrollbar-color: var(--border-table) transparent;
+      }
+
       /* WebKit */
       ::-webkit-scrollbar {
         width: 10px;
         height: 10px;
+      }
+
+      /* 去掉滚动条两端的箭头按钮：默认会渲染一对方块，纯视觉噪音 */
+      ::-webkit-scrollbar-button {
+        display: none;
+        width: 0;
+        height: 0;
       }
 
       ::-webkit-scrollbar-track {
@@ -264,6 +282,14 @@
       ::-webkit-scrollbar-thumb:hover {
         background: var(--text-muted);
         border-width: 1px;
+      }
+
+      .session-items::-webkit-scrollbar-thumb {
+        background-color: transparent;
+      }
+
+      .session-items:hover::-webkit-scrollbar-thumb {
+        background-color: var(--border-table);
       }
 
       ::-webkit-scrollbar-corner {

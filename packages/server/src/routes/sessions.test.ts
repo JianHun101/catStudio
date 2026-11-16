@@ -167,7 +167,7 @@ describe('Session Routes', () => {
     })
 
     // ─── T6：最后消息时间（列表行展示的数据源）─────────────────────────
-    it('lastMessageAt = 最后一条消息的 created_at（不区分角色）；空会话为 null', async () => {
+    it('lastMessageAt = 最后一条对话消息（user/agent）的 created_at，系统通告不计入；空会话为 null', async () => {
       const busy = await createSession('有消息的')
       const empty = await createSession('空会话')
       const db = getDb()
@@ -177,6 +177,8 @@ describe('Session Routes', () => {
       )
       ins.run('m-early', busy, 'user', '2026-02-01T09:00:00.000Z')
       ins.run('m-late', busy, 'agent', '2026-02-01T10:30:00.000Z')
+      // 更晚的系统通告（如评估告警广播）不能顶掉最后对话时间
+      ins.run('m-system', busy, 'system', '2026-11-05T04:10:58.135Z')
 
       const res = await app.inject({ method: 'GET', url: '/api/sessions' })
       const list = JSON.parse(res.body) as Array<{
@@ -192,14 +194,14 @@ describe('Session Routes', () => {
       expect(list.find((s) => s.id === empty)!.lastMessageAt).toBeNull()
     })
 
-    it('includeArchived 分支同样挂 lastMessageAt（两条路径不漏）', async () => {
+    it('includeArchived 分支同样挂 lastMessageAt（两条路径不漏）且同样排除系统通告', async () => {
       const id = await createSession('兼容分支也带')
-      getDb()
-        .prepare(
-          `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
-           VALUES ('m-arch', ?, 'user', 'x', '[]', '2026-03-04T05:06:07.000Z')`
-        )
-        .run(id)
+      const ins = getDb().prepare(
+        `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+         VALUES (?, ?, ?, 'x', '[]', ?)`
+      )
+      ins.run('m-arch', id, 'user', '2026-03-04T05:06:07.000Z')
+      ins.run('m-arch-system', id, 'system', '2026-11-05T04:10:58.135Z')
 
       const res = await app.inject({ method: 'GET', url: '/api/sessions?includeArchived=1' })
       const list = JSON.parse(res.body) as Array<{ id: string; lastMessageAt: string | null }>

@@ -1072,6 +1072,40 @@ describe('chatStore', () => {
       expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-02T00:00:00.000Z')
     })
 
+    it('NEW_MESSAGE 不推进系统通告的行内时间（只有对话消息算会话活动）', () => {
+      const handler = mockOn.mock.calls.find((call) => call[0] === Events.NEW_MESSAGE)?.[1] as
+        ((msg: Message) => void) | undefined
+      expect(handler).toBeDefined()
+      store.activeSessionId = 's1'
+      store.sessions = [{ ...mockSession, lastMessageAt: '2026-01-02T00:00:00.000Z' }]
+
+      // 重启告警 / 广播等系统通告：时间更晚，但不得顶掉上一条对话时间
+      handler!({
+        ...mockMessage,
+        id: 'm-system',
+        role: 'system',
+        createdAt: '2026-11-05T04:10:58.135Z',
+      })
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-02T00:00:00.000Z')
+
+      // user/agent 对话消息照旧推进（比较后再写）
+      handler!({
+        ...mockMessage,
+        id: 'm-user',
+        role: 'user',
+        createdAt: '2026-01-03T00:00:00.000Z',
+      })
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-03T00:00:00.000Z')
+      handler!({
+        ...mockMessage,
+        id: 'm-agent',
+        role: 'agent',
+        agentId: 'a1',
+        createdAt: '2026-01-04T00:00:00.000Z',
+      })
+      expect(store.sessions[0]!.lastMessageAt).toBe('2026-01-04T00:00:00.000Z')
+    })
+
     it('SESSION_UPDATE 合并不抹行内时间（PATCH 不聚合；显式 null 才清）', () => {
       const handler = mockOn.mock.calls.find((call) => call[0] === Events.SESSION_UPDATE)?.[1] as
         ((session: SessionConfig) => void) | undefined
