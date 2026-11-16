@@ -310,28 +310,42 @@ describe('SessionHistoryPanel · 取数口径', () => {
     wrapper.unmount()
   })
 
-  it('筛选 我 / 猫咪：只留对应角色，且回第 1 页', async () => {
-    vi.mocked(api.getSessionBrowseMessages).mockResolvedValue({
-      rows: shortAlternating(),
-      total: 10,
+  it('筛选 我 / 猫咪：role 下推服务端、每次切换只发 1 次请求、total 用服务端筛后值', async () => {
+    vi.mocked(api.getSessionBrowseMessages).mockImplementation(async (_id: string, opts: any) => {
+      const rows = shortAlternating()
+      if (opts?.role === 'user') return { rows: rows.filter((m) => m.role === 'user'), total: 5 }
+      if (opts?.role === 'agent') return { rows: rows.filter((m) => m.role === 'agent'), total: 5 }
+      return { rows, total: 10 }
     })
     const wrapper = await mountPanel()
     expect(wrapper.findAll('.hist-item:not(.clipped)').length).toBe(10)
+    expect(api.getSessionBrowseMessages).toHaveBeenCalledTimes(1)
 
     await wrapper.findAll('.hist-filter')[1].trigger('click')
     await flushPromises()
     await nextTick()
     await nextTick()
+    // 角色筛选只多发 1 次请求（不是旧实现那样连取最多 10 段补空页）
+    expect(api.getSessionBrowseMessages).toHaveBeenCalledTimes(2)
+    const userCall = vi.mocked(api.getSessionBrowseMessages).mock.calls[1][1] as any
+    expect(userCall.role).toBe('user')
     const users = wrapper.findAll('.hist-item:not(.clipped) .hc-body').map((b) => b.text())
     expect(users).toEqual(['短 1', '短 3', '短 5', '短 7', '短 9'])
+    expect(wrapper.find('.hp-index').text()).toContain('共 5 条')
+    // 注记随「服务端已按角色过滤」一起删除：分页条只剩页码与 total
+    expect(wrapper.find('.hp-note').exists()).toBe(false)
 
     await wrapper.findAll('.hist-filter')[2].trigger('click')
     await flushPromises()
     await nextTick()
     await nextTick()
+    expect(api.getSessionBrowseMessages).toHaveBeenCalledTimes(3)
+    const agentCall = vi.mocked(api.getSessionBrowseMessages).mock.calls[2][1] as any
+    expect(agentCall.role).toBe('agent')
     const agents = wrapper.findAll('.hist-item:not(.clipped) .hc-body').map((b) => b.text())
     expect(agents).toEqual(['短 2', '短 4', '短 6', '短 8', '短 10'])
     expect(wrapper.find('.hc-sender').text()).toBe('ds猫')
+    expect(wrapper.find('.hp-index').text()).toContain('共 5 条')
 
     wrapper.unmount()
   })
@@ -369,10 +383,12 @@ describe('SessionHistoryPanel · 取数口径', () => {
     wrapper.unmount()
   })
 
-  it('搜索模式分页条显示匹配总数；角色筛选时注明未计筛选', async () => {
-    vi.mocked(api.searchSessionMessages).mockResolvedValue({
-      rows: twelveMessages().slice(0, 5),
-      total: 42,
+  it('搜索 + 角色筛选：role 下推 /search，分页条用服务端筛后 total（无「未计筛选」注记）', async () => {
+    vi.mocked(api.searchSessionMessages).mockImplementation(async (_id: string, opts: any) => {
+      if (opts?.role === 'user') {
+        return { rows: [msg('u-1', 'user', '我的命中', at(dayA, 9))], total: 7 }
+      }
+      return { rows: twelveMessages().slice(0, 5), total: 42 }
     })
     const wrapper = await mountPanel()
     await wrapper.find('.hist-search-input').setValue('内容')
@@ -387,7 +403,11 @@ describe('SessionHistoryPanel · 取数口径', () => {
     await flushPromises()
     await nextTick()
     await nextTick()
-    expect(wrapper.find('.hp-note').text()).toContain('未计角色筛选')
+    const roleCall = vi.mocked(api.searchSessionMessages).mock.calls.at(-1)![1] as any
+    expect(roleCall.role).toBe('user')
+    // total 直接取服务端筛后值，不再出现「未计角色筛选」的注记
+    expect(wrapper.find('.hp-index').text()).toContain('共 7 条')
+    expect(wrapper.find('.hp-note').exists()).toBe(false)
 
     wrapper.unmount()
   })
@@ -588,41 +608,6 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
 
     wrapper.unmount()
   })
-
-  it('角色筛选把整页筛空：提示「继续翻页」，下一页按钮仍能发出请求（不是死路）', async () => {
-    let calls = 0
-    vi.mocked(api.getSessionBrowseMessages).mockImplementation(async () => {
-      calls++
-      if (calls <= 11) {
-        return {
-          rows: Array.from({ length: 50 }, (_, j) =>
-            msg(`a-${calls}-${j}`, 'agent', `猫 ${calls}-${j}`, at(dayA, 10, j), 'a1')
-          ),
-          total: 500,
-        }
-      }
-      return { rows: [], total: 500 }
-    })
-    const wrapper = await mountPanel()
-
-    await wrapper.findAll('.hist-filter')[1].trigger('click')
-    await flushPromises()
-    await nextTick()
-    await nextTick()
-    // 首屏 role=all 取 1 个 chunk 就够 TARGET_ROWS；切「我」后连取 MAX_CHUNKS=10 个 chunk
-    expect(calls).toBe(11)
-    expect(wrapper.find('.hist-state').text()).toBe('本页没有匹配，继续翻页')
-
-    await wrapper.findAll('.hp-btn')[1].trigger('click')
-    await flushPromises()
-    await nextTick()
-    await nextTick()
-    expect(calls).toBe(12)
-    const twelfth = vi.mocked(api.getSessionBrowseMessages).mock.calls[11][1] as any
-    expect(twelfth.before).toBe('a-11-49')
-
-    wrapper.unmount()
-  })
 })
 
 describe('SessionHistoryPanel · 过期响应与跳转主区', () => {
@@ -752,5 +737,22 @@ describe('SessionHistoryPanel · 形态值（静态）', () => {
     expect(note).toMatch(/color:\s*var\(--text-muted\)/)
     const err = /\.hist-reveal-err\s*\{([^}]*)\}/.exec(panelSource)?.[1] ?? ''
     expect(err).toMatch(/color:\s*var\(--accent-red\)/)
+  })
+
+  it('分页条 nowrap 兜底；角色筛选二次过滤 / 注记 / 补空页逻辑已清零', () => {
+    const pager = /\.hist-pager\s*\{([^}]*)\}/.exec(panelSource)?.[1] ?? ''
+    expect(pager).toMatch(/white-space:\s*nowrap/)
+
+    const btn = /\.hp-btn\s*\{([^}]*)\}/.exec(panelSource)?.[1] ?? ''
+    expect(btn).toMatch(/flex:\s*none/)
+    expect(btn).toMatch(/white-space:\s*nowrap/)
+
+    const index = /\.hp-index\s*\{([^}]*)\}/.exec(panelSource)?.[1] ?? ''
+    expect(index).toMatch(/white-space:\s*nowrap/)
+
+    expect(panelSource).not.toContain('hp-note')
+    expect(panelSource).not.toContain('未计角色筛选')
+    expect(panelSource).not.toContain('roleMatches')
+    expect(panelSource).not.toContain('MAX_CHUNKS')
   })
 })

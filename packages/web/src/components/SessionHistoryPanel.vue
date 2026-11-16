@@ -13,10 +13,12 @@ import type { Message } from '@cat-study/shared'
  *   不位移、不加遮罩）；与成员页同列切 tab，Esc 不响应、无关闭按钮。
  *
  * 数据来源：
- *   - 默认（无搜索词）：`GET /api/sessions/:id/messages/browse`——**含 system**，与日期条
- *     facets 的计数同一口径（用 `/messages` 会丢 system，日期条写 1 条、点进去空）；
+ *   - 默认（无搜索词）：`GET /api/sessions/:id/messages/browse`——`role` 缺省时**含 system**，
+ *     与日期条 facets 的计数同一口径（用 `/messages` 会丢 system，日期条写 1 条、点进去空）；
  *   - 有搜索词：`GET /api/sessions/:id/messages/search`（q 必填，rows 与 /messages 投影逐字一致）；
- *   - 日期条：`GET /api/sessions/:id/messages/facets`（按 tzOffset 换算后分组）。
+ *   - 角色筛选（全部 / 我 / 猫咪）：`role` 由服务端过滤，`total` 也按同一 WHERE 统计——
+ *     前端不做二次过滤，也不靠「多取几段」补空页；
+ *   - 日期条：`GET /api/sessions/:id/messages/facets`（按 tzOffset 换算后分组，不随 role 收缩）。
  *
  * 分页 = 一屏：把候选行全渲染 → 量每项（含日期头）实际高度 → 只保留装得下的那几项。
  * **结果区不得内滚**（`overflow: hidden` + 只渲染装得下的项），翻页由游标推进，
@@ -29,10 +31,6 @@ const store = useChatStore()
 
 /** 单次向服务端取的条数（与分页游标配合；一屏装不下就留给下一页） */
 const CHUNK = 50
-/** 一页目标候选数：比一屏多，便于按实际高度裁；不是页大小 */
-const TARGET_ROWS = 20
-/** 翻页时最多连取几个 chunk（角色筛选会把整段过滤成空，需要往下补） */
-const MAX_CHUNKS = 10
 /** 卡片间距，与 `.hist-item` 的 margin-bottom 同源（量高度时加回） */
 const HIST_GAP = 6
 
@@ -74,17 +72,6 @@ const revealNote = ref('')
 const datePickerOpen = ref(false)
 const pickerYear = ref(new Date().getFullYear())
 const pickerMonth = ref<string | null>(null)
-
-// ─── 角色筛选（全部 / 我 / 猫咪）────────────────────────────
-// 服务端没有 role 参数（契约只钉了 q/limit/before/from/to），故在取回的候选里过滤；
-// 取数时按一屏目标连取多段，避免「筛完这一页是空的」被读成「没有匹配」。
-function roleMatches(m: Message): boolean {
-  if (roleFilter.value === 'all') return true
-  if (roleFilter.value === 'user') return m.role === 'user'
-  return m.role === 'agent'
-}
-
-const visibleCandidates = computed(() => candidates.value.filter(roleMatches))
 
 // ─── 日期口径 ──────────────────────────────────────────
 
@@ -185,8 +172,8 @@ function pickDate(date: string | null): void {
 
 /**
  * 一次取数的**不可变快照**。`loadPage` 在发起时捕获它，`fetchChunk` 只读快照——
- * 不在每个 chunk 里重新读 `appliedQuery` / `selectedDate`：首屏请求未回时按 Enter
- * 搜新词，旧请求会带着新词取数，晚到后把浏览结果写回（旧实现的实际缺陷）。
+ * 不在每个请求里重新读 `appliedQuery` / `selectedDate` / `roleFilter`：首屏请求未回时
+ * 按 Enter 搜新词，旧请求会带着新词取数，晚到后把浏览结果写回（旧实现的实际缺陷）。
  */
 interface LoadSnapshot {
   sessionId: string
@@ -200,41 +187,36 @@ function currentWindow(): { from?: string; to?: string } {
   return selectedDate.value ? dayRange(selectedDate.value) : {}
 }
 
-/** 快照里的角色筛选（不复用响应式的 `roleMatches`：结果必须由发起时的快照决定） */
-function roleMatchesIn(role: RoleFilter, m: Message): boolean {
-  if (role === 'all') return true
-  if (role === 'user') return m.role === 'user'
-  return m.role === 'agent'
-}
-
-/** 取一段（服务端 DESC：最新在前）。q 为空走 /browse（含 system，与 facets 同口径），
- *  否则走 /search。两条端点都返回 `total`（分页条的「共 N 条」读数）。 */
+/** 取一段（服务端 DESC：最新在前）。q 为空走 /browse，否则走 /search。
+ *  `role` 下推服务端：`all` 不传（含 system），其余原样传。两条端点都返回 `total`
+ *  （分页条的「共 N 条」读数，已按同一 role 条件统计）。 */
 async function fetchChunk(
   before: string | null,
   snap: LoadSnapshot
 ): Promise<{ rows: Message[]; total: number }> {
+  const role = snap.role === 'all' ? undefined : snap.role
   if (snap.q) {
-    const res = await api.searchSessionMessages(snap.sessionId, {
+    return api.searchSessionMessages(snap.sessionId, {
       q: snap.q,
       limit: CHUNK,
       before: before ?? undefined,
       from: snap.from,
       to: snap.to,
+      role,
     })
-    return { rows: res.rows, total: res.total }
   }
   return api.getSessionBrowseMessages(snap.sessionId, {
     limit: CHUNK,
     before: before ?? undefined,
     from: snap.from,
     to: snap.to,
+    role,
   })
 }
 
 /**
- * 加载一页。
- * 连取多个 chunk，直到角色筛选后凑到一屏目标（TARGET_ROWS）或服务端没有更早的行——
- * 否则「筛完这页空」会被读成「没有匹配」。
+ * 加载一页 = 单次请求。角色过滤已下推服务端，返回的 rows 就是该筛选下的结果，
+ * 前端不再二次过滤、也不为「本页被筛空」连取多段。
  *
  * **过期守门**：`loadSeq` 每次发起递增；任何 await 之后 token 不一致就整段丢弃。
  * 切搜索词/日期/角色、切会话都会发起新请求并递增 token，旧响应绝不写回（P3-2）。
@@ -253,36 +235,11 @@ async function loadPage(before: string | null): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    let cursor = before
-    let exhausted = false
-    let total: number | null = null
-    const collected: Message[] = []
-    const seen = new Set<string>()
-    for (let i = 0; i < MAX_CHUNKS; i++) {
-      const chunk = await fetchChunk(cursor, snap)
-      if (!stillCurrent()) return
-      if (i === 0) total = chunk.total
-      for (const m of chunk.rows) {
-        if (seen.has(m.id)) continue
-        seen.add(m.id)
-        collected.push(m)
-      }
-      if (chunk.rows.length < CHUNK) {
-        exhausted = true
-        break
-      }
-      const last = chunk.rows[chunk.rows.length - 1]
-      if (!last) {
-        exhausted = true
-        break
-      }
-      cursor = last.id
-      if (collected.filter((m) => roleMatchesIn(snap.role, m)).length >= TARGET_ROWS) break
-    }
+    const chunk = await fetchChunk(before, snap)
     if (!stillCurrent()) return
-    candidates.value = collected
-    matchTotal.value = total
-    hasMore.value = !exhausted
+    candidates.value = chunk.rows
+    matchTotal.value = chunk.total
+    hasMore.value = chunk.rows.length === CHUNK
     await refit()
   } catch (err: any) {
     if (!stillCurrent()) return
@@ -328,7 +285,7 @@ async function loadFacets(): Promise<void> {
  * 稳态下结果区 `clientHeight === scrollHeight`（裁掉的项 `display: none`，不占高度）。
  */
 async function refit(): Promise<void> {
-  visibleCount.value = visibleCandidates.value.length
+  visibleCount.value = candidates.value.length
   await nextTick()
   measure()
 }
@@ -361,7 +318,7 @@ function measure(): void {
 }
 
 watch(
-  () => visibleCandidates.value,
+  () => candidates.value,
   () => {
     void refit()
   }
@@ -414,13 +371,12 @@ function setRole(role: RoleFilter): void {
   void resetAndLoad()
 }
 
-const rendered = computed(() => visibleCandidates.value.slice(0, visibleCount.value))
+const rendered = computed(() => candidates.value.slice(0, visibleCount.value))
 
 /** 当前页最后一条可见消息——下一页的游标（不用候选末条，否则被裁掉的那几条会漏读）。
  *
- *  角色筛选可能把整页筛空（候选 500 条、可见 0 条）：此时 `rendered` 为空，若返回 null
- *  下一页按钮就是死的（点按无请求）。未穷尽时退到**候选末条**——本页已经扫到的最旧一条，
- *  用它的 id 继续向更早翻；这样「本页无匹配」只是提示，不是死路。 */
+ *  正常情况下装页至少保留 1 条，`rendered` 非空；退到候选末条只为「还没量到高度」
+ *  这类瞬态兜底——下一页按钮不因量高失败而变成死键。 */
 function nextCursor(): string | null {
   const last = rendered.value[rendered.value.length - 1]
   if (last) return last.id
@@ -497,15 +453,12 @@ watch([appliedQuery, selectedDate, roleFilter], () => {
 })
 
 /**
- * 结果区空态。三种情形分开：
- * - 角色筛选把**本页**筛空但服务端还有更早行 → 「本页没有匹配，继续翻页」（不是死路）；
+ * 结果区空态。服务端已按 role 过滤，空页就是该范围无匹配（不再有「本页被筛空、
+ * 继续翻页」这一中间态）。两种文案分开：
  * - 搜索词存在 → 「没有匹配的消息」优先（搜索 + 日期同时为空时，用户先看到的是搜索条件）；
  * - 只有日期 → 「这一天没有消息」。
  */
 const emptyText = computed(() => {
-  if (visibleCandidates.value.length === 0 && candidates.value.length > 0 && hasMore.value) {
-    return '本页没有匹配，继续翻页'
-  }
   if (appliedQuery.value.trim()) return '没有匹配的消息'
   if (selectedDate.value) return '这一天没有消息'
   return '没有匹配的消息'
@@ -626,16 +579,14 @@ const emptyText = computed(() => {
     <div ref="resultsEl" class="hist-results">
       <template v-if="rendered.length > 0">
         <div
-          v-for="(m, i) in visibleCandidates"
+          v-for="(m, i) in candidates"
           :key="m.id"
           class="hist-item"
           :class="{ clipped: i >= visibleCount }"
           data-hist-item
         >
           <div
-            v-if="
-              i === 0 || localDate(m.createdAt) !== localDate(visibleCandidates[i - 1].createdAt)
-            "
+            v-if="i === 0 || localDate(m.createdAt) !== localDate(candidates[i - 1].createdAt)"
             class="hist-day"
           >
             {{ localDate(m.createdAt).slice(0, 4) }}-{{ localDate(m.createdAt).slice(5, 10) }}
@@ -676,9 +627,7 @@ const emptyText = computed(() => {
       </button>
       <span class="hp-index">
         第 {{ pageIndex + 1 }} 页<template v-if="matchTotal !== null">
-          · 共 {{ matchTotal }} 条<span v-if="roleFilter !== 'all'" class="hp-note"
-            >（未计角色筛选）</span
-          ></template
+          · 共 {{ matchTotal }} 条</template
         >
       </span>
       <button class="hp-btn" :disabled="!hasMore || loading" @click="nextPage">下一页</button>
@@ -1003,9 +952,12 @@ const emptyText = computed(() => {
   justify-content: space-between;
   gap: 6px;
   padding: 2px;
+  /* 单行槽位兜底：文案变长时也不折行（折行会把 26px 撑成 42px、按钮换行） */
+  white-space: nowrap;
 }
 
 .hp-btn {
+  flex: none;
   border: none;
   border-radius: 6px;
   padding: 3px 9px;
@@ -1014,6 +966,7 @@ const emptyText = computed(() => {
   font-size: 11px;
   color: var(--accent-text);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .hp-btn:hover:not(:disabled) {
@@ -1029,11 +982,7 @@ const emptyText = computed(() => {
 .hp-index {
   font-size: 10px;
   color: var(--text-muted);
-}
-
-.hp-note {
-  color: var(--text-muted);
-  opacity: 0.85;
+  white-space: nowrap;
 }
 
 /* 「选择日期」入口：常驻文本 chip（不依赖 +N 更早 才出现），与日期 chip 同款 */

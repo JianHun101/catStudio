@@ -31,6 +31,18 @@ import { parseJsonArray, parseJsonValue } from '../utils.js'
 
 const log = createLogger('sessions')
 
+/**
+ * 解析历史面板共享的 `role` 查询参数（browse / search 同一口径）。
+ *
+ * 缺省 = 不过滤（含 system，与加参数前完全一致）；只接受 `user` / `agent`，
+ * 其余取值（含空串、`system`、`all`）一律 400——不做大小写/空格归一，避免拼写变体混入。
+ */
+function parseRoleFilter(raw: unknown): { role?: 'user' | 'agent'; error?: string } {
+  if (raw === undefined) return {}
+  if (raw === 'user' || raw === 'agent') return { role: raw }
+  return { error: 'role 只接受 user / agent（缺省 = 不过滤）' }
+}
+
 export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   // ─── POST /api/sessions — 创建会话 ──────────────────
 
@@ -341,9 +353,10 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
   // ─── GET /api/sessions/:id/messages/browse — 历史面板默认列表 ──
   //
-  // 右栏历史面板**无搜索词**时的取数口。与 `/messages` 的关键差异：本端点**含 system**
-  // （人看的历史视图是全貌，运维通告也在历史里），且额外返回 `total`——面板的日期条
-  // 计数来自 facets（同样含 system），两处必须同一口径，否则「日期条写 1 条、点进去空」。
+  // 右栏历史面板**无搜索词**时的取数口。与 `/messages` 的关键差异：`role` 缺省时**含 system**
+  // （人看的历史视图是全貌，运维通告也在历史里），且额外返回 `total`。
+  // `role=user|agent` 时 rows 与 total 同口径（筛选下推服务端，前端不再二次过滤）。
+  // 日期条 facets 是独立维度（回答「哪几天有消息」），不随 role 收缩。
   // 分页/时间窗语义与 `/search` 逐字一致；行投影复用 `toMessageDto`。
 
   app.get('/api/sessions/:id/messages/browse', async (req, reply) => {
@@ -356,6 +369,11 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const q = (req.query as any) ?? {}
     const parsedLimit = parseInt(q.limit ?? '', 10)
     const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 50
+
+    const roleFilter = parseRoleFilter(q.role)
+    if (roleFilter.error) {
+      return reply.status(400).send({ error: roleFilter.error })
+    }
 
     const before = q.before
     if (before !== undefined && (typeof before !== 'string' || !before.trim())) {
@@ -375,6 +393,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       before: before ?? undefined,
       from: from ?? undefined,
       to: to ?? undefined,
+      role: roleFilter.role,
     })
 
     return { rows: result.rows.map(toMessageDto), total: result.total }
@@ -411,7 +430,8 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   // ─── GET /api/sessions/:id/messages/search — 历史面板全文搜索 ──
   //
   // rows 的投影**复用 `/messages` 的 `toMessageDto`**（不另写第二份 11 字段映射：
-  // 两处映射必然漂移）；`total` 是该 q + 时间窗的匹配总数，不受 before/limit 影响。
+  // 两处映射必然漂移）；`total` 是该 q + 时间窗 + role 的匹配总数，不受 before/limit 影响。
+  // `role` 与 browse 同一解析口径：缺省不过滤，非法值 400。
 
   app.get('/api/sessions/:id/messages/search', async (req, reply) => {
     const id = (req.params as any).id
@@ -427,6 +447,11 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     }
     if (term.trim().length > 200) {
       return reply.status(400).send({ error: '搜索词 q 长度不得超过 200 字符' })
+    }
+
+    const roleFilter = parseRoleFilter(q.role)
+    if (roleFilter.error) {
+      return reply.status(400).send({ error: roleFilter.error })
     }
 
     // `parseInt(...) || 50` 会把合法值 0 折成 50（'0' 是真值串），故显式判 NaN：
@@ -453,6 +478,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       before: before ?? undefined,
       from: from ?? undefined,
       to: to ?? undefined,
+      role: roleFilter.role,
     })
 
     return { rows: result.rows.map(toMessageDto), total: result.total }
