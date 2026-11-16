@@ -791,11 +791,36 @@ describe('getLastMessageAtBySessionIds — 一次 GROUP BY 取全量', () => {
     )
   })
 
-  it('SQL 只发一条 GROUP BY（没有逐会话循环查的形态）', () => {
+  it('系统通告不推进：agent 10-16 + system 11-05 → 仍取 10-16', () => {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+       VALUES ('m-agent', 's2', 'agent', 'x', '[]', '2026-10-16T02:08:33.094Z')`
+    ).run()
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+       VALUES ('m-sys', 's2', 'system', '评估告警', '[]', '2026-11-05T04:10:58.135Z')`
+    ).run()
+
+    expect(messagesRepo.getLastMessageAtBySessionIds(['s2']).get('s2')).toBe(
+      '2026-10-16T02:08:33.094Z'
+    )
+  })
+
+  it('只有系统通告的会话不在 Map 里（不显示时间，而不是显示通告时间）', () => {
+    db.prepare(
+      `INSERT INTO messages (id, session_id, role, content, mentions, created_at)
+       VALUES ('m-only-sys', 's3', 'system', '评估告警', '[]', '2026-11-05T04:10:58.135Z')`
+    ).run()
+
+    expect(messagesRepo.getLastMessageAtBySessionIds(['s3']).has('s3')).toBe(false)
+  })
+
+  it('SQL 只发一条 GROUP BY（没有逐会话循环查的形态），且排除 system', () => {
     const sql = messagesRepo.getLastMessageAtBySessionIds.toString()
 
     expect(sql).toContain('GROUP BY session_id')
     expect(sql).toContain('MAX(created_at)')
+    expect(sql).toContain("role <> 'system'")
   })
 
   it('三个会话仍只 prepare 一次（N 个会话不是 N 次查询）', () => {

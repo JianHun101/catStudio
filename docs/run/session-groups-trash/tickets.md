@@ -360,7 +360,8 @@ T6 先合入；T5 开工时 rebase 到含 T6 的 session 分支，冲突由店�
 
 **契约（钉死）:**
 
-- `lastMessageAt` = 该会话最后一条消息（user/agent/system 都算）的 `created_at`；值已是
+- `lastMessageAt` = 该会话最后一条**对话消息**（user/agent；系统通告不计入）的 `created_at`；
+  **决策留痕：2026-11-15 真机反馈——系统通告不计入（原「不区分角色」作废）**。值已是
   **ISO 8601 毫秒 UTC** 串（与 `messages.created_at` 同形，如 `2026-11-15T08:45:34.218Z`），
   **含且仅含一个 `Z`，不得再拼接 `Z`**（拼了会得到 `...ZZ`，前端 `new Date` 判 Invalid）；
   无消息 = `null`；只在 `GET /api/sessions` 返回，其他端点不必带。
