@@ -3,7 +3,8 @@
  *
  * 覆盖：日期按 tzOffset 分组（不是截 UTC）、月份由 days 聚合、total 含 system、
  * LIKE 转义顺序（`\` → `%` → `_`）、total 不受 before/limit 影响、游标不在本会话 → 空页、
- * 发送者名匹配（前端契约「搜索匹配正文与发送者」）、browse 含 system 且与 facets 同口径。
+ * 发送者名匹配（前端契约「搜索匹配正文与发送者」）、browse 含 system 且与 facets 同口径、
+ * `role` 过滤与 total 同一 WHERE（browse/search 两侧、翻页不让 total 缩水）。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
@@ -193,6 +194,35 @@ describe('message-search repo — 历史面板查询', () => {
       expect(repo.listSessionMessages('s1', { limit: 0 }).rows).toHaveLength(1)
       expect(repo.listSessionMessages('s1', { limit: 1000 }).rows).toHaveLength(6)
     })
+
+    it('role 过滤：user 4 条 / agent 1 条，rows 与 total 同口径；before 与时间窗都不让 total 缩水', () => {
+      const users = repo.listSessionMessages('s1', { role: 'user', limit: 100 })
+      expect(users.rows.map((r) => r.id)).toEqual(['b-5b', 'b-5a', 'b-4', 'b-1'])
+      expect(users.total).toBe(4)
+
+      const agents = repo.listSessionMessages('s1', { role: 'agent', limit: 100 })
+      expect(agents.rows.map((r) => r.id)).toEqual(['b-2'])
+      expect(agents.total).toBe(1)
+
+      // 缺省不含 role 条件 → 仍含 system，行为与加参数前一致
+      expect(repo.listSessionMessages('s1', { limit: 100 }).total).toBe(6)
+
+      const p1 = repo.listSessionMessages('s1', { role: 'user', limit: 2 })
+      expect(p1.rows.map((r) => r.id)).toEqual(['b-5b', 'b-5a'])
+      expect(p1.total).toBe(4)
+      const p2 = repo.listSessionMessages('s1', { role: 'user', limit: 2, before: 'b-5a' })
+      expect(p2.rows.map((r) => r.id)).toEqual(['b-4', 'b-1'])
+      expect(p2.total).toBe(4)
+      expect([...p1.rows, ...p2.rows].map((r) => r.id)).toEqual(['b-5b', 'b-5a', 'b-4', 'b-1'])
+
+      const window = repo.listSessionMessages('s1', {
+        role: 'user',
+        from: '2026-11-10T10:00:00.000Z',
+        to: '2026-11-10T10:03:00.000Z',
+      })
+      expect(window.rows.map((r) => r.id)).toEqual(['b-4', 'b-1'])
+      expect(window.total).toBe(window.rows.length)
+    })
   })
 
   describe('searchSessionMessages', () => {
@@ -270,6 +300,33 @@ describe('message-search repo — 历史面板查询', () => {
     it('limit 夹取 [1,100]：0 → 1、1000 → 100', () => {
       expect(repo.searchSessionMessages('s1', { q: '进度', limit: 0 }).rows).toHaveLength(1)
       expect(repo.searchSessionMessages('s1', { q: '进度', limit: 1000 }).rows).toHaveLength(2)
+    })
+
+    it('role 过滤：q 同时命中 user/agent 时 total 只算该角色；before 翻页不让 total 缩水', () => {
+      // q='文件'：s-3 = agent、s-4 = user
+      const agents = repo.searchSessionMessages('s1', { q: '文件', role: 'agent' })
+      expect(agents.rows.map((r) => r.id)).toEqual(['s-3'])
+      expect(agents.total).toBe(1)
+
+      const users = repo.searchSessionMessages('s1', { q: '文件', role: 'user' })
+      expect(users.rows.map((r) => r.id)).toEqual(['s-4'])
+      expect(users.total).toBe(1)
+
+      // 缺省不带 role → 两种角色都算
+      expect(repo.searchSessionMessages('s1', { q: '文件' }).total).toBe(2)
+
+      // q='100' 命中两条 user：limit 只收窄 rows，total 恒 2
+      const p1 = repo.searchSessionMessages('s1', { q: '100', role: 'user', limit: 1 })
+      expect(p1.rows.map((r) => r.id)).toEqual(['s-2'])
+      expect(p1.total).toBe(2)
+      const p2 = repo.searchSessionMessages('s1', {
+        q: '100',
+        role: 'user',
+        limit: 1,
+        before: 's-2',
+      })
+      expect(p2.rows.map((r) => r.id)).toEqual(['s-1'])
+      expect(p2.total).toBe(2)
     })
   })
 })

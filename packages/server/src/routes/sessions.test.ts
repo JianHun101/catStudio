@@ -1487,6 +1487,38 @@ describe('Session Routes', () => {
       expect(limitedBody.total).toBe(2)
     })
 
+    it('role 过滤：user / agent 各自 rows 与 total 同口径；缺省不过滤；非法值 400', async () => {
+      const get = (role?: string) =>
+        app.inject({
+          method: 'GET',
+          url: `/api/sessions/${sid}/messages/search?q=${encodeURIComponent('文件')}${
+            role === undefined ? '' : `&role=${encodeURIComponent(role)}`
+          }`,
+        })
+
+      const all = await get()
+      expect(all.statusCode).toBe(200)
+      expect(JSON.parse(all.body).total).toBe(2)
+
+      const user = await get('user')
+      expect(user.statusCode).toBe(200)
+      const userBody = JSON.parse(user.body)
+      expect(userBody.rows.map((r: any) => r.id)).toEqual(['q4'])
+      expect(userBody.total).toBe(1)
+
+      const agent = await get('agent')
+      expect(agent.statusCode).toBe(200)
+      const agentBody = JSON.parse(agent.body)
+      expect(agentBody.rows.map((r: any) => r.id)).toEqual(['q3'])
+      expect(agentBody.total).toBe(1)
+
+      for (const bad of ['system', 'all', '']) {
+        const res = await get(bad)
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).error).toContain('role')
+      }
+    })
+
     it('投影逐字一致：同一条消息在 /messages 与 /search 的键集与值完全相等', async () => {
       getDb()
         .prepare(
@@ -1590,6 +1622,46 @@ describe('Session Routes', () => {
       const beforeBody = JSON.parse(before.body)
       expect(beforeBody.rows.map((r: any) => r.id)).toEqual(['br-1', 'br-3'])
       expect(beforeBody.total).toBe(3)
+    })
+
+    it('role 过滤：rows 与 total 同口径；before 翻页不让 total 缩水；非法值 400', async () => {
+      // 再补两条 user（br-4/br-5 更新），让 user 侧共有 3 条、可验证翻页 total 不缩水
+      seed('br-4', 'user', '第四条', '2026-11-10T10:03:00.000Z')
+      seed('br-5', 'user', '第五条', '2026-11-10T10:04:00.000Z')
+
+      const p1 = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?role=user&limit=2`,
+      })
+      expect(p1.statusCode).toBe(200)
+      const p1Body = JSON.parse(p1.body)
+      expect(p1Body.rows.map((r: any) => r.id)).toEqual(['br-5', 'br-4'])
+      expect(p1Body.total).toBe(3)
+
+      const p2 = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?role=user&limit=2&before=br-4`,
+      })
+      const p2Body = JSON.parse(p2.body)
+      expect(p2Body.rows.map((r: any) => r.id)).toEqual(['br-1'])
+      expect(p2Body.total).toBe(3)
+
+      const agent = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sid}/messages/browse?role=agent`,
+      })
+      const agentBody = JSON.parse(agent.body)
+      expect(agentBody.rows.map((r: any) => r.id)).toEqual(['br-2'])
+      expect(agentBody.total).toBe(1)
+
+      for (const bad of ['system', 'all', '']) {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/sessions/${sid}/messages/browse?role=${encodeURIComponent(bad)}`,
+        })
+        expect(res.statusCode).toBe(400)
+        expect(JSON.parse(res.body).error).toContain('role')
+      }
     })
 
     it('system-only 日：facets 计数与 browse 列表同一口径（不会「写 1 条、点进去空」）', async () => {

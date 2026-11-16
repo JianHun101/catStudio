@@ -861,17 +861,25 @@ export const api = {
       `/sessions/${id}/messages/facets?tzOffset=${encodeURIComponent(String(tzOffset))}`
     ),
 
-  // 右栏历史面板的**默认列表**（无搜索词）：与 `/messages` 不同，本端点含 system
-  // （人看的历史视图是全貌），并返回 `total`（日期条计数与列表同一口径）。
+  // 右栏历史面板的**默认列表**（无搜索词）：与 `/messages` 不同，`role` 缺省时含 system
+  // （人看的历史视图是全貌），并返回 `total`（列表与 total 同一 WHERE）。
+  // `role=user|agent` 时过滤与 total 都下推服务端，前端不再二次过滤。
   getSessionBrowseMessages: (
     id: string,
-    opts: { before?: string; limit?: number; from?: string; to?: string } = {}
+    opts: {
+      before?: string
+      limit?: number
+      from?: string
+      to?: string
+      role?: 'user' | 'agent'
+    } = {}
   ) => {
     const q = new URLSearchParams()
     if (opts.before) q.set('before', opts.before)
     if (opts.limit !== undefined) q.set('limit', String(opts.limit))
     if (opts.from) q.set('from', opts.from)
     if (opts.to) q.set('to', opts.to)
+    if (opts.role) q.set('role', opts.role)
     const query = q.toString()
     return request<{ rows: Message[]; total: number }>(
       `/sessions/${id}/messages/browse${query ? `?${query}` : ''}`
@@ -879,10 +887,17 @@ export const api = {
   },
 
   // 右栏历史面板的全文搜索：`q` 必填（服务端校验 trim 非空、≤200），rows 投影与 /messages 逐字一致，
-  // `total` 是匹配总数（不受 before/limit 影响，用于「更多」判断）。
+  // `total` 是匹配总数（不受 before/limit 影响，用于「更多」判断）；`role` 与列表同一口径。
   searchSessionMessages: (
     id: string,
-    opts: { q: string; limit?: number; before?: string; from?: string; to?: string }
+    opts: {
+      q: string
+      limit?: number
+      before?: string
+      from?: string
+      to?: string
+      role?: 'user' | 'agent'
+    }
   ) => {
     const q = new URLSearchParams()
     q.set('q', opts.q)
@@ -890,6 +905,7 @@ export const api = {
     if (opts.before) q.set('before', opts.before)
     if (opts.from) q.set('from', opts.from)
     if (opts.to) q.set('to', opts.to)
+    if (opts.role) q.set('role', opts.role)
     return request<{ rows: Message[]; total: number }>(
       `/sessions/${id}/messages/search?${q.toString()}`
     )

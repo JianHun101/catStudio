@@ -4,7 +4,8 @@
  * 与 `messages.ts` / `query.ts` 的分工：
  *   - `query.ts` 是**猫的排障通道**（可见性按上下文过滤、强制当前会话）；
  *   - 本文件是**给人看的历史视图**：不套 `getRelevantMessages`、不按 agent 过滤，
- *     `role='system'` 照常返回——人看的是会话全貌，不是某只猫的上下文。
+ *     缺省 `role='system'` 照常返回——人看的是会话全貌，不是某只猫的上下文；
+ *     右栏筛选「我 / 猫咪」时由调用方传 `role`，过滤与 `total` 在同一 WHERE 里（同口径）。
  *   - 也因此这些函数不走 `messages.ts`（那一侧的口径是「agent 可读的消息」，
  *     `getSessionMessagesRange` 等一律排除 system），SQL 与投影范围都不同。
  *
@@ -104,6 +105,9 @@ export function getSessionMessageFacets(
   }
 }
 
+/** 角色过滤的合法值域（`system` 不在其中：缺省 = 不过滤，才含 system） */
+export type SessionMessageRole = 'user' | 'agent'
+
 export interface SearchSessionMessagesOptions {
   /** 搜索词（必填、trim 后非空、≤200 字符；校验在路由层，本函数只按原样使用） */
   q: string
@@ -112,26 +116,30 @@ export interface SearchSessionMessagesOptions {
   before?: string
   from?: string
   to?: string
+  /** 角色过滤；缺省 = 不过滤（含 system）。值域校验在路由层 */
+  role?: SessionMessageRole
 }
 
 export interface SearchSessionMessagesResult {
   rows: MessageRow[]
-  /** 该 `q` + `from`/`to` 的匹配总数——**不受 before/limit 影响**（单独 COUNT，不拿 rows.length 冒充） */
+  /** 该 `q` + `from`/`to` + `role` 的匹配总数——**不受 before/limit 影响** */
   total: number
 }
 
-/** 浏览模式（无搜索词）的分页参数。`role` 不是服务端过滤维（前端在候选里筛）。 */
+/** 浏览模式（无搜索词）的分页参数。 */
 export interface ListSessionMessagesOptions {
   limit?: number
   /** 排他游标：严格早于该消息（与 `getSessionMessagesRange` 的 before 同语义） */
   before?: string
   from?: string
   to?: string
+  /** 角色过滤；缺省 = 不过滤（含 system）。值域校验在路由层 */
+  role?: SessionMessageRole
 }
 
 export interface ListSessionMessagesResult {
   rows: MessageRow[]
-  /** 该 `from`/`to` 窗口内的消息总数——**不受 before/limit 影响** */
+  /** 该 `from`/`to` + `role` 条件下的消息总数——**不受 before/limit 影响** */
   total: number
 }
 
@@ -165,6 +173,20 @@ function rangeWhere(
     params.push(toIsoDbUpper(opts.to))
   }
   return { where, params }
+}
+
+/**
+ * 角色过滤：把条件追加到**同一个 where 数组**，rows 与 total 因此共用一份 WHERE。
+ * 缺省不追加（含 system）；具体值域由路由层校验，本层只认 `user` / `agent`。
+ */
+function applyRoleFilter(
+  where: string[],
+  params: Array<string | number>,
+  role: SessionMessageRole | undefined
+): void {
+  if (role === undefined) return
+  where.push('m.role = ?')
+  params.push(role)
 }
 
 /**
@@ -202,12 +224,12 @@ function selectPage(
 }
 
 /**
- * 浏览模式：会话内（可带时间窗）的消息分页，**含 system**。
+ * 浏览模式：会话内（可带时间窗与角色）的消息分页，**缺省含 system**。
  *
  * 这是右栏历史面板的默认列表——人是看会话全貌的，运维通告（重启完成等）也在历史里；
+ * 筛选「我 / 猫咪」时传 `role`，`rows` 与 `total` 走同一个 WHERE（total 不会停留在全量）。
  * `getSessionMessagesRange` 的 `role != 'system'` 是猫的上下文口径，不适用于本视图。
- * facets 的 `total/days` 也是全量计数，两处必须同一口径，否则会出现「日期条写 1 条、
- * 点进去空」的自相矛盾。
+ * facets 的 `total/days` 是全量计数（facets 不随 role 收缩），二者只在缺省口径下同源。
  */
 export function listSessionMessages(
   sessionId: string,
@@ -215,6 +237,7 @@ export function listSessionMessages(
 ): ListSessionMessagesResult {
   const limit = clampLimit(opts.limit)
   const { where, params } = rangeWhere(sessionId, opts)
+  applyRoleFilter(where, params, opts.role)
   const totalRow = db
     .prepare(`SELECT COUNT(*) AS cnt FROM messages m WHERE ${where.join(' AND ')}`)
     .get(...params) as { cnt: number }
@@ -227,7 +250,8 @@ export function listSessionMessages(
  *
  * - 排序 `created_at DESC, id DESC`：与既有 `/messages` 同口径（同毫秒并发写、老库整秒行
  *   折成同值，只比时间会漏行/重行）。
- * - `total` 单独 `COUNT(*)`：翻页时 total 不随 `before` 缩水。
+ * - `total` 单独 `COUNT(*)`：翻页时 total 不随 `before` 缩水；`role` 过滤计入同一个 WHERE，
+ *   所以 total 与 rows 的角色口径一致。
  * - 发送者名匹配：前端契约要求「搜索匹配正文与发送者」，而正文 LIKE 单独无法覆盖
  *   只记得猫名的场景；用 `EXISTS` 子查询而不是 JOIN——一条消息最多一行，不会因 JOIN 放大。
  */
@@ -239,6 +263,7 @@ export function searchSessionMessages(
   const like = `%${escapeLikeTerm(opts.q.trim())}%`
 
   const { where, params } = rangeWhere(sessionId, opts)
+  applyRoleFilter(where, params, opts.role)
   where.push(`(m.content LIKE ? ESCAPE '\\'
       OR EXISTS (SELECT 1 FROM agents a WHERE a.id = m.agent_id AND a.name LIKE ? ESCAPE '\\'))`)
   params.push(like, like)
