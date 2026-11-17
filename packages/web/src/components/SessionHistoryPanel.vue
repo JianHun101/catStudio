@@ -56,12 +56,14 @@ const candidates = ref<Message[]>([])
 const visibleCount = ref(0)
 const loading = ref(false)
 const error = ref('')
-const hasMore = ref(false)
 /** 当前模式的匹配总数（服务端 total）：browse 与 search 都返回，翻页时不随 before 缩水 */
 const matchTotal = ref<number | null>(null)
 const pageIndex = ref(0)
 /** 每页起始游标：`cursors[i]` = 第 i 页请求时的 before（首页为 null） */
 const cursors = ref<Array<string | null>>([null])
+/** 每页起点之前「已显示过的匹配数」：与 `cursors` 等长、同生命周期（首页为 0）。
+ *  `pageOffsets[i] + 本页显示数` 就是翻页终点判据里的累计位次。 */
+const pageOffsets = ref<number[]>([0])
 
 const resultsEl = ref<HTMLElement | null>(null)
 /** 真的跳转失败（红色错误态） */
@@ -239,7 +241,6 @@ async function loadPage(before: string | null): Promise<void> {
     if (!stillCurrent()) return
     candidates.value = chunk.rows
     matchTotal.value = chunk.total
-    hasMore.value = chunk.rows.length === CHUNK
     await refit()
   } catch (err: any) {
     if (!stillCurrent()) return
@@ -252,9 +253,9 @@ async function loadPage(before: string | null): Promise<void> {
 async function resetAndLoad(): Promise<void> {
   pageIndex.value = 0
   cursors.value = [null]
+  pageOffsets.value = [0]
   candidates.value = []
   visibleCount.value = 0
-  hasMore.value = false
   matchTotal.value = null
   await loadPage(null)
 }
@@ -373,6 +374,23 @@ function setRole(role: RoleFilter): void {
 
 const rendered = computed(() => candidates.value.slice(0, visibleCount.value))
 
+/** 本页实际显示的条数。正常取 `visibleCount`；量高前的瞬态（`rendered` 为空但已有候选）
+ *  退回 `candidates.length`，与 `nextCursor` 的末条兜底保持同一口径。 */
+function shownOnCurrentPage(): number {
+  if (visibleCount.value > 0) return visibleCount.value
+  return candidates.value.length > 0 ? candidates.value.length : 0
+}
+
+/** 是否还有下一页：按服务端 `total` 与「本页起点位次 + 本页已显示条数」判定终点，
+ *  不再用「一次取满 CHUNK 条」推测——不足 50 条但超过一屏时，取满判据会把按钮锁死。
+ *  `matchTotal` 未回来时不放行（同首页加载中禁用）。 */
+const hasMore = computed(() => {
+  const total = matchTotal.value
+  if (total === null) return false
+  const offset = pageOffsets.value[pageIndex.value] ?? 0
+  return offset + shownOnCurrentPage() < total
+})
+
 /** 当前页最后一条可见消息——下一页的游标（不用候选末条，否则被裁掉的那几条会漏读）。
  *
  *  正常情况下装页至少保留 1 条，`rendered` 非空；退到候选末条只为「还没量到高度」
@@ -386,7 +404,12 @@ function nextCursor(): string | null {
 async function nextPage(): Promise<void> {
   const cursor = nextCursor()
   if (!cursor || loading.value || !hasMore.value) return
+  // 先取本页游标，再按当前页位次推出下一页起点；顺序反了会把位次算成下一页的
   cursors.value = [...cursors.value.slice(0, pageIndex.value + 1), cursor]
+  pageOffsets.value = [
+    ...pageOffsets.value.slice(0, pageIndex.value + 1),
+    (pageOffsets.value[pageIndex.value] ?? 0) + shownOnCurrentPage(),
+  ]
   pageIndex.value += 1
   await loadPage(cursor)
 }

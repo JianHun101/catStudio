@@ -163,6 +163,15 @@ function shortAlternating(): Message[] {
 }
 
 /**
+ * 模拟服务端按 `before` 游标分页：`all` 为 DESC（最新在前），`before` = 上一页最后一条可见 id。
+ * 每页最多 50 条、`total` 恒为全量——翻页终点必须按 total 判，不能按 rows.length 判。
+ */
+function sliceByBefore(all: Message[], before?: string): Message[] {
+  const start = before ? all.findIndex((m) => m.id === before) + 1 : 0
+  return all.slice(start, start + 50)
+}
+
+/**
  * 两种 mock 场景**互不校验**，别把两处 `total` 当同一份数据：
  * - `facetsFixture` 服务「日期条」场景：8 条（days 4+3+1），只驱动日期 chip 与弹层；
  * - browse mock 服务「一屏装页」场景：27 条（`historyMessages()` 全量），只驱动装页/翻页。
@@ -605,6 +614,121 @@ describe('SessionHistoryPanel · 一屏装页（不内滚）', () => {
     // 旧页仍在（不是空态），错误在独立一行
     expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(11)
     expect(wrapper.findAll('.hist-reveal-err').map((e) => e.text())).toContain('网络抖了一下')
+
+    wrapper.unmount()
+  })
+
+  it('49 条（不足 CHUNK 但超过一屏）：下一页可点，逐页翻到第 5 页末页才禁用', async () => {
+    const rows49 = Array.from({ length: 49 }, (_, i) =>
+      msg(`u-${i}`, 'user', `第 ${i} 条`, at(dayA, 10, 48 - i))
+    )
+    vi.mocked(api.getSessionBrowseMessages).mockImplementation(async (_id, opts: any) => ({
+      rows: sliceByBefore(rows49, opts?.before),
+      total: rows49.length,
+    }))
+    const wrapper = await mountPanel()
+
+    // 复现点：rows.length = 49 < CHUNK(50)，旧判据会让下一页直接禁用
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(11)
+    expect(wrapper.find('.hp-index').text()).toBe('第 1 页 · 共 49 条')
+    expect((wrapper.findAll('.hp-btn')[1].element as HTMLButtonElement).disabled).toBe(false)
+
+    // 连点 4 次：游标逐页推进（取每屏最后一条，不是第 50 条），total 始终 49
+    for (const expectedBefore of ['u-10', 'u-21', 'u-32', 'u-43']) {
+      await wrapper.findAll('.hp-btn')[1].trigger('click')
+      await flushPromises()
+      await nextTick()
+      await nextTick()
+      const call = vi.mocked(api.getSessionBrowseMessages).mock.calls.at(-1)![1] as any
+      expect(call.before).toBe(expectedBefore)
+      expect(wrapper.find('.hp-index').text()).toContain('共 49 条')
+    }
+
+    expect(wrapper.find('.hp-index').text()).toBe('第 5 页 · 共 49 条')
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(5)
+    expect((wrapper.findAll('.hp-btn')[1].element as HTMLButtonElement).disabled).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('22 条整屏倍数：第 2 页下一页禁用，只发 2 次请求，不出现第 3 页空页', async () => {
+    const rows22 = Array.from({ length: 22 }, (_, i) =>
+      msg(`u-${i}`, 'user', `第 ${i} 条`, at(dayA, 10, 21 - i))
+    )
+    vi.mocked(api.getSessionBrowseMessages).mockImplementation(async (_id, opts: any) => ({
+      rows: sliceByBefore(rows22, opts?.before),
+      total: rows22.length,
+    }))
+    const wrapper = await mountPanel()
+
+    await wrapper.findAll('.hp-btn')[1].trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+
+    expect(wrapper.find('.hp-index').text()).toBe('第 2 页 · 共 22 条')
+    expect(wrapper.findAll('.hist-item:not(.clipped)')).toHaveLength(11)
+    expect((wrapper.findAll('.hp-btn')[1].element as HTMLButtonElement).disabled).toBe(true)
+    // 第 2 页已显示完 total，不再多发一次请求换一页空结果
+    expect(api.getSessionBrowseMessages).toHaveBeenCalledTimes(2)
+
+    wrapper.unmount()
+  })
+
+  it('第 2 页切「我」：回第 1 页、不带 before、位次归零；筛后仍超一屏则下一页可用', async () => {
+    const users = Array.from({ length: 22 }, (_, i) =>
+      msg(`u-${i}`, 'user', `我 ${i}`, at(dayA, 10, 21 - i))
+    )
+    const agents = Array.from({ length: 5 }, (_, i) =>
+      msg(`a-${i}`, 'agent', `猫 ${i}`, at(dayA, 9, 4 - i), 'a1')
+    )
+    const all = [...users, ...agents]
+    vi.mocked(api.getSessionBrowseMessages).mockImplementation(async (_id, opts: any) => {
+      const pool = opts?.role === 'user' ? users : all
+      return { rows: sliceByBefore(pool, opts?.before), total: pool.length }
+    })
+    const wrapper = await mountPanel()
+
+    await wrapper.findAll('.hp-btn')[1].trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+    expect(wrapper.find('.hp-index').text()).toBe('第 2 页 · 共 27 条')
+
+    await wrapper.findAll('.hist-filter')[1].trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+
+    const call = vi.mocked(api.getSessionBrowseMessages).mock.calls.at(-1)![1] as any
+    expect(call.role).toBe('user')
+    expect(call.before).toBeUndefined()
+    expect(wrapper.find('.hp-index').text()).toBe('第 1 页 · 共 22 条')
+    // 位次归零后按筛后 total 复判：22 > 一屏 11 ⇒ 下一页仍可用
+    expect((wrapper.findAll('.hp-btn')[1].element as HTMLButtonElement).disabled).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('全部口径不变：50 条候选 / total=268 时下一页可用，游标取第 11 条不取第 50 条', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) =>
+      msg(`p-${i}`, 'user', `消息 ${i}`, at(dayA, 10, 49 - i))
+    )
+    vi.mocked(api.getSessionBrowseMessages).mockImplementation(async (_id, opts: any) => ({
+      rows: sliceByBefore(rows, opts?.before),
+      total: 268,
+    }))
+    const wrapper = await mountPanel()
+
+    expect((wrapper.findAll('.hp-btn')[1].element as HTMLButtonElement).disabled).toBe(false)
+    await wrapper.findAll('.hp-btn')[1].trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+
+    const call = vi.mocked(api.getSessionBrowseMessages).mock.calls.at(-1)![1] as any
+    expect(call.before).toBe('p-10')
+    expect(wrapper.find('.hp-index').text()).toBe('第 2 页 · 共 268 条')
 
     wrapper.unmount()
   })
