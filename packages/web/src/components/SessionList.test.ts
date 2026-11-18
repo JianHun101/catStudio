@@ -164,6 +164,7 @@ describe('SessionList 批量归组', () => {
     const w = mountList()
     await flushPromises()
 
+    await w.find('.head-multi').trigger('click')
     await w.find('.row-check input').trigger('change')
     expect(w.find('.section-header').text()).toContain('已选 1')
     expect(w.find('.batch-move-trigger').exists()).toBe(true)
@@ -184,10 +185,11 @@ describe('SessionList 批量归组', () => {
     expect(w.find('.section-header').text()).not.toContain('已选')
   })
 
-  it('已选会话被外部移除 → 自动收敛选中集，头行不残留「已选 N」', async () => {
+  it('已选会话被外部移除 → 收敛选中集，保持模式并显示「已选 0」', async () => {
     const w = mountList()
     await flushPromises()
 
+    await w.find('.head-multi').trigger('click')
     await w.find('.row-check input').trigger('change')
     expect(w.find('.section-header').text()).toContain('已选 1')
 
@@ -195,7 +197,73 @@ describe('SessionList 批量归组', () => {
     store.sessions = store.sessions.filter((s) => s.id !== 's1')
     await flushPromises()
 
-    expect(w.find('.section-header').text()).not.toContain('已选')
+    // 模式不自动退出：头行留在「已选 0」，用户点「取消」才回常态
+    expect(w.find('.section-header').text()).toContain('已选 0')
+    expect(w.find('.head-multi').exists()).toBe(false)
+  })
+})
+
+describe('SessionList 选择模式（默认不占位）', () => {
+  it('默认态：无复选框、无 selecting 行、头行是「会话」，多选按钮存在', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    expect(w.find('.row-check input').exists()).toBe(false)
+    expect(w.find('.session-row.selecting').exists()).toBe(false)
+    expect(w.find('.head-multi').exists()).toBe(true)
+    expect(w.find('.section-header-label').text()).toBe('会话')
+  })
+
+  it('点「多选」进入：所有行出现复选框、头行「已选 0」；「取消」退出并清空', async () => {
+    const w = mountList()
+    await flushPromises()
+
+    await w.find('.head-multi').trigger('click')
+    expect(w.findAll('.session-row.selecting')).toHaveLength(3)
+    expect(w.findAll('.row-check input')).toHaveLength(3)
+    expect(w.find('.section-header').text()).toContain('已选 0')
+    expect(w.findAll('.batch-btn').map((b) => b.text())).toEqual(['归组', '删除', '取消'])
+
+    await w.findAll('.row-check input')[0]!.trigger('change')
+    expect(w.find('.section-header').text()).toContain('已选 1')
+
+    await w.findAll('.batch-btn').at(-1)!.trigger('click')
+    expect(w.find('.row-check input').exists()).toBe(false)
+    expect(w.find('.section-header').text()).toContain('会话')
+
+    // 退出时选中集清空：再进模式是「已选 0」
+    await w.find('.head-multi').trigger('click')
+    expect(w.find('.section-header').text()).toContain('已选 0')
+  })
+
+  it('模式内点整行勾选：不调 joinSession，仍在模式内', async () => {
+    const join = vi.spyOn(store, 'joinSession').mockResolvedValue(undefined)
+    const w = mountList()
+    await flushPromises()
+
+    await w.find('.head-multi').trigger('click')
+    const row = w.findAllComponents(SessionRow)[0]!
+
+    await row.find('.session-item').trigger('click')
+    expect(w.find('.section-header').text()).toContain('已选 1')
+    expect(join).not.toHaveBeenCalled()
+
+    await row.find('.session-item').trigger('click')
+    expect(w.find('.section-header').text()).toContain('已选 0')
+    expect(w.find('.head-multi').exists()).toBe(false)
+  })
+
+  it('动画源：复选框宽度过渡 + 头行淡入，均尊重 reduced-motion', () => {
+    expect(sessionRowSource).toContain('.session-row.selecting .row-check')
+    expect(sessionRowSource).toMatch(/width:\s*22px/)
+    expect(sessionRowSource).toMatch(/transition:\s*[\s\S]*?width var\(--ease-out\)/)
+    expect(sessionRowSource).toContain('@media (prefers-reduced-motion: reduce)')
+    expect(sessionRowSource).not.toContain('.session-row:hover .row-check')
+    expect(sessionRowSource).not.toContain('@media (hover: none)')
+
+    expect(source).toContain('@keyframes header-in')
+    expect(source).toContain('animation: header-in')
+    expect(source).toContain('@media (prefers-reduced-motion: reduce)')
   })
 })
 
@@ -319,6 +387,7 @@ describe('SessionList 行菜单删除入口', () => {
     const w = mountList()
     await flushPromises()
 
+    await w.find('.head-multi').trigger('click')
     await w.find('.row-check input').trigger('change')
     await w.findAll('.batch-btn')[1]!.trigger('click')
 
@@ -454,8 +523,9 @@ describe('SessionList 静态结构（归档面已退场）', () => {
     expect(source).not.toContain('showArchived')
   })
 
-  it('头行只有「会话」/批量条 + ＋；组菜单两项', () => {
+  it('头行是「会话」/多选/＋；组菜单两项', () => {
     expect(source).toContain('class="section-header-label">会话')
+    expect(source).toContain('class="head-multi"')
     expect(source).toContain('class="btn-new-session-header"')
     expect(source).toContain('重命名分组')
     expect(source).toContain('删除分组…')
@@ -467,6 +537,23 @@ describe('SessionList 静态结构（归档面已退场）', () => {
     expect(source).not.toContain('session-delete')
   })
 })
+
+/** 用花括号配对取 CSS 块内容（去掉最外层括号）；找不到返回 null。 */
+function cssBlock(src: string, opener: string): string | null {
+  const start = src.indexOf(opener)
+  if (start < 0) return null
+  const open = src.indexOf('{', start)
+  if (open < 0) return null
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}') {
+      depth--
+      if (depth === 0) return src.slice(open + 1, i)
+    }
+  }
+  return null
+}
 
 describe('会话列表滚动条（index.html 全局样式）', () => {
   it('去掉滚动条两端的箭头按钮（全局）', () => {
@@ -503,5 +590,21 @@ describe('会话列表滚动条（index.html 全局样式）', () => {
 
     expect(block).toBeTruthy()
     expect(block![0]).toContain('width: 10px')
+  })
+
+  it('标准滚动条属性只在 Firefox 分支（@supports not selector）里生效', () => {
+    const block = cssBlock(designTokens, '@supports not (selector(::-webkit-scrollbar))')
+
+    expect(block).toBeTruthy()
+    expect(block).toContain('scrollbar-width: thin')
+    expect(block).toContain('scrollbar-color: var(--border-table) transparent')
+    expect(block).toContain('.session-items')
+    expect(block).toContain('scrollbar-color: transparent transparent')
+
+    // Chromium 一旦在全局看到裸的 scrollbar-width / scrollbar-color 就会旁路 WebKit 定制，
+    // 所以这两条声明只能待在上面的 Firefox-only 块里。
+    const outside = designTokens.replace(block!, '')
+    expect(outside).not.toMatch(/scrollbar-width\s*:/)
+    expect(outside).not.toMatch(/scrollbar-color\s*:/)
   })
 })

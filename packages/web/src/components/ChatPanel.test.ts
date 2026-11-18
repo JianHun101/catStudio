@@ -2448,6 +2448,30 @@ describe('C-1 消息流懒加载', () => {
       /\.chat-messages-wrapper\s*\{[^}]*scrollbar-color:\s*transparent/s
     )
   })
+
+  it('.chat-input 的标准滚动条属性只在 Firefox 分支生效', () => {
+    const start = source.indexOf('@supports not (selector(::-webkit-scrollbar))')
+    expect(start).toBeGreaterThan(-1)
+
+    // 花括号配对取块内容（不能正则到第一个 }：块里还有嵌套规则）
+    const open = source.indexOf('{', start)
+    let depth = 0
+    let end = open
+    for (; end < source.length; end++) {
+      if (source[end] === '{') depth++
+      else if (source[end] === '}') {
+        depth--
+        if (depth === 0) break
+      }
+    }
+    const block = source.slice(open + 1, end)
+
+    expect(block).toContain('.chat-input')
+    expect(block).toContain('scrollbar-width: thin')
+
+    // Chromium 一旦看到裸的 scrollbar-width 就旁路 ::-webkit-scrollbar-*（箭头回来）
+    expect(source.replace(block, '')).not.toMatch(/scrollbar-width\s*:/)
+  })
 })
 
 // ─── T5 收口：App 用 v-show 隐藏 ChatPanel 时的阅读位置恢复 ───────────────
