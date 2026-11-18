@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import SessionRow from './SessionRow.vue'
+import source from './SessionRow.vue?raw'
 import type { GroupedSession } from '@/composables/useApi'
 
 /**
@@ -43,9 +44,17 @@ function session(overrides: Partial<GroupedSession> = {}): GroupedSession {
   }
 }
 
-function mountRow(s: GroupedSession) {
+function mountRow(s: GroupedSession, extra: Record<string, unknown> = {}) {
   return mount(SessionRow, {
-    props: { session: s, active: false, checked: false, unread: 0, groups: [] },
+    props: {
+      session: s,
+      active: false,
+      checked: false,
+      unread: 0,
+      groups: [],
+      selectMode: false,
+      ...extra,
+    },
   })
 }
 
@@ -90,5 +99,49 @@ describe('SessionRow 最后消息时间（T6）', () => {
     const w = mountRow(session({ lastMessageAt: '不是时间' }))
 
     expect(w.find('.session-time').exists()).toBe(false)
+  })
+})
+
+describe('SessionRow 选择模式与未读红点', () => {
+  it('默认态：不渲染 input、行不带 selecting', () => {
+    const w = mountRow(session())
+
+    expect(w.find('.row-check input').exists()).toBe(false)
+    expect(w.find('.session-row').classes()).not.toContain('selecting')
+  })
+
+  it('selectMode=true：input 出现、行加 selecting、点击整行只投 select', async () => {
+    const w = mountRow(session(), { selectMode: true })
+
+    expect(w.find('.row-check input').exists()).toBe(true)
+    expect(w.find('.session-row').classes()).toContain('selecting')
+
+    await w.find('.session-item').trigger('click')
+    expect(w.emitted('select')).toHaveLength(1)
+    expect(w.emitted('join')).toBeUndefined()
+  })
+
+  it('未读 3 且非 active：6px 红点 + title 条数，红点无文本', () => {
+    const w = mountRow(session(), { unread: 3 })
+    const dot = w.find('.unread-dot')
+
+    expect(dot.exists()).toBe(true)
+    expect(dot.attributes('title')).toBe('3 条未读')
+    expect(dot.text()).toBe('')
+    expect(w.find('.unread-badge').exists()).toBe(false)
+  })
+
+  it('active 或未读为 0：不渲染红点', () => {
+    expect(mountRow(session(), { unread: 3, active: true }).find('.unread-dot').exists()).toBe(
+      false
+    )
+    expect(mountRow(session(), { unread: 0 }).find('.unread-dot').exists()).toBe(false)
+  })
+
+  it('源里没有旧数字徽标；红点固定 6px', () => {
+    expect(source).not.toContain('unread-badge')
+    expect(source).toContain('.unread-dot')
+    expect(source).toMatch(/\.unread-dot\s*\{[^}]*width:\s*6px/s)
+    expect(source).toMatch(/\.unread-dot\s*\{[^}]*height:\s*6px/s)
   })
 })

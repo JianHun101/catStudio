@@ -70,7 +70,15 @@ const sections = computed<{ groups: GroupSection[]; ungrouped: GroupedSession[] 
 // ─── 批量选择（组件局部态，不进 store）───────────────────────────────
 
 const selectedIds = ref<Set<string>>(new Set())
-const selecting = computed(() => selectedIds.value.size > 0)
+/**
+ * 显式选择模式：默认不占行首复选框，由头行「多选」按钮进入。
+ * 不再用 `selectedIds.size > 0` 推导——外部删光已选会话时要保持模式（头行显示「已选 0」）。
+ */
+const selecting = ref(false)
+
+function enterSelect(): void {
+  selecting.value = true
+}
 
 function toggleSelect(id: string): void {
   const next = new Set(selectedIds.value)
@@ -81,6 +89,7 @@ function toggleSelect(id: string): void {
 
 function clearSelection(): void {
   selectedIds.value = new Set()
+  selecting.value = false
   batchMoveOpen.value = false
 }
 
@@ -207,8 +216,8 @@ function toggleBatchMove(): void {
 }
 
 /**
- * 选中集随会话列表收敛：另一 tab 删掉已选会话后，头行不能还显示「已选 N」、
- * 批量动作也不能再对不存在的 id 发请求。
+ * 选中集随会话列表收敛：另一 tab 删掉已选会话后，批量动作不能再对不存在的 id 发请求。
+ * 只收敛选中集、不退出选择模式——头行留在「已选 0」，由用户点「取消」或继续选。
  */
 watch(
   () => store.sessions.map((s) => s.id),
@@ -377,10 +386,10 @@ function onSessionCreated(): void {
        左栏收起时 `.panel-left` 整块 `display:none`（App.vue），该分支 DOM 永不可见 = 死代码。 -->
   <div class="session-list">
     <!-- 头行：48px，与主区顶栏、右栏「成员 · N」同一水平线。
-         形态按 spec §4.4：`会话` + 回收站按钮（线稿图标 + 内联计数）+ `＋`。
+         形态按 spec §4.4：`会话` + 回收站按钮（线稿图标 + 内联计数）+ 多选 + `＋`。
          批量选择态整行临时变成 `已选 N ｜ 归组 ｜ 删除 ｜ 取消`。 -->
     <div class="section-header">
-      <template v-if="selecting">
+      <div v-if="selecting" class="header-state">
         <span class="section-header-label">已选 {{ selectedIds.size }}</span>
         <span class="batch-actions">
           <button
@@ -400,8 +409,8 @@ function onSessionCreated(): void {
           </button>
           <button class="batch-btn" @click.stop="clearSelection">取消</button>
         </span>
-      </template>
-      <template v-else>
+      </div>
+      <div v-else class="header-state">
         <span class="section-header-label">会话</span>
         <span class="section-header-right">
           <!-- 回收站入口（T6）：15px 线稿 SVG（非 emoji），与 ＋ 同 24px 方形/边框/悬停；
@@ -444,7 +453,28 @@ function onSessionCreated(): void {
             </svg>
             <span v-if="trashCount > 0" class="head-trash-count">{{ trashCount }}</span>
           </button>
-          <!-- 新建会话：头行右侧小号 ＋（spec §4.4 头行只留 会话 / 回收站 / ＋） -->
+          <!-- 多选入口：默认不占行首复选框，点它才进选择模式；图标是「方框 + 对勾」 -->
+          <button class="head-multi" title="多选会话" aria-label="多选会话" @click="enterSelect">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect
+                x="2.5"
+                y="3"
+                width="11"
+                height="10"
+                rx="1.5"
+                stroke="currentColor"
+                stroke-width="1.3"
+              />
+              <path
+                d="M5 8l2 2 4-4"
+                stroke="currentColor"
+                stroke-width="1.3"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <!-- 新建会话：头行右侧小号 ＋（spec §4.4 头行只留 会话 / 回收站 / 多选 / ＋） -->
           <button
             class="btn-new-session-header"
             title="新建会话"
@@ -461,7 +491,7 @@ function onSessionCreated(): void {
             </svg>
           </button>
         </span>
-      </template>
+      </div>
 
       <!-- 批量归组浮层（头行 sticky 定位，不占列表滚动） -->
       <div v-if="batchMoveOpen && selecting" class="batch-move" @click.stop>
@@ -585,6 +615,7 @@ function onSessionCreated(): void {
               :session="s"
               :active="store.activeSessionId === s.id"
               :checked="selectedIds.has(s.id)"
+              :select-mode="selecting"
               :unread="store.unreadCounts.get(s.id) ?? 0"
               :groups="store.groups"
               :trash-enabled="trashEnabled"
@@ -609,6 +640,7 @@ function onSessionCreated(): void {
             :session="s"
             :active="store.activeSessionId === s.id"
             :checked="selectedIds.has(s.id)"
+            :select-mode="selecting"
             :unread="store.unreadCounts.get(s.id) ?? 0"
             :groups="store.groups"
             :trash-enabled="trashEnabled"
@@ -718,6 +750,35 @@ function onSessionCreated(): void {
   flex: none;
 }
 
+/* 两态内容根：切换时只做轻微上移淡入（不混合布局、不做拉伸）；头行恒 48px。 */
+.header-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  animation: header-in var(--ease-out);
+}
+
+@keyframes header-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header-state {
+    animation: none;
+  }
+}
+
 .section-header-right {
   display: flex;
   align-items: center;
@@ -770,7 +831,8 @@ function onSessionCreated(): void {
   font-variant-numeric: tabular-nums;
 }
 
-/* 新建会话按钮：头行右侧小号（spec §4.4 头行 ＋），hover 时 accent 高亮 */
+/* 头行方形按钮：新建会话 ＋ 与多选（同 24×24、同边框/悬停，hover 时 accent 高亮） */
+.head-multi,
 .btn-new-session-header {
   display: flex;
   align-items: center;
@@ -786,6 +848,7 @@ function onSessionCreated(): void {
   transition: all var(--ease-out);
 }
 
+.head-multi:hover,
 .btn-new-session-header:hover {
   border-color: var(--accent-text);
   color: var(--accent-text);

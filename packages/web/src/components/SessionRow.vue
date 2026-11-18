@@ -8,7 +8,7 @@ import SessionActionsMenu from './SessionActionsMenu.vue'
  * 左栏的一行会话（T3）。分组区与「未分组」区共用同一个渲染单元——两处各抄一份
  * 行结构与操作菜单，必然在下次改交互时漂移。
  *
- * 行首复选框由父级控制显隐（悬停/已选），本组件只负责 checked 态与事件。
+ * 行首复选框由父级的显式选择模式（`selectMode`）控制显隐；本组件负责 checked 态与事件。
  */
 const props = defineProps<{
   session: GroupedSession
@@ -16,6 +16,8 @@ const props = defineProps<{
   checked: boolean
   unread: number
   groups: SessionGroup[]
+  /** 选择模式：默认 false（行首复选框不占位、不渲染 input） */
+  selectMode?: boolean
   /** 回收站接线是否就绪（默认 false = fail-safe；生产由 SessionList 显式传入开关） */
   trashEnabled?: boolean
 }>()
@@ -47,13 +49,22 @@ const lastMessageTime = computed<{ text: string; title: string } | null>(() => {
 </script>
 
 <template>
-  <div class="session-row" :class="{ selected: checked }">
+  <div class="session-row" :class="{ selected: checked, selecting: selectMode }">
     <label class="row-check" :title="checked ? '取消选择' : '选择会话'" @click.stop>
-      <input type="checkbox" :checked="checked" @change="emit('select')" />
+      <!-- 默认态不渲染 input：宽度藏起来但还能被程序化勾选，等于假隐藏 -->
+      <input v-if="selectMode" type="checkbox" :checked="checked" @change="emit('select')" />
     </label>
-    <button class="session-item" :class="{ active }" :title="session.title" @click="emit('join')">
+    <button
+      class="session-item"
+      :class="{ active }"
+      :title="session.title"
+      @click="selectMode ? emit('select') : emit('join')"
+    >
       <div class="session-body">
-        <span class="session-title">{{ session.title }}</span>
+        <span class="session-title-row">
+          <span class="session-title">{{ session.title }}</span>
+          <span v-if="unread > 0 && !active" class="unread-dot" :title="`${unread} 条未读`"></span>
+        </span>
         <span class="session-meta">
           <span class="session-cats">{{ session.agentIds.length }} 只猫咪</span>
           <span v-if="lastMessageTime" class="session-time" :title="lastMessageTime.title">{{
@@ -61,9 +72,6 @@ const lastMessageTime = computed<{ text: string; title: string } | null>(() => {
           }}</span>
         </span>
       </div>
-      <span v-if="unread > 0 && !active" class="unread-badge">{{
-        unread > 99 ? '99+' : unread
-      }}</span>
     </button>
     <SessionActionsMenu
       :session="session"
@@ -87,28 +95,31 @@ const lastMessageTime = computed<{ text: string; title: string } | null>(() => {
   background: var(--bg-hover);
 }
 
-/* 行首复选框：悬停 / 已选时才出现（spec §4.4：悬停行首出复选框） */
+/* 选择模式里勾中的整行高亮，不只靠行首小方框 */
+.session-row.selected {
+  background: var(--accent-soft);
+}
+
+/* 行首复选框：默认不占位，进入选择模式才展开到 22px（input 也只在模式内渲染）。 */
 .row-check {
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
+  width: 0;
   opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
   cursor: pointer;
-  transition: opacity var(--ease-out);
+  transition:
+    width var(--ease-out),
+    opacity var(--ease-out);
 }
 
-.session-row:hover .row-check,
-.session-row.selected .row-check {
+.session-row.selecting .row-check {
+  width: 22px;
   opacity: 1;
-}
-
-/* 触屏无 hover：复选框恒显，否则没有可点入口 */
-@media (hover: none) {
-  .row-check {
-    opacity: 1;
-  }
+  pointer-events: auto;
 }
 
 /* 行操作 ⋯：悬停整行才亮（`.session-actions` 是 SessionActionsMenu 的根节点，
@@ -132,6 +143,11 @@ const lastMessageTime = computed<{ text: string; title: string } | null>(() => {
   height: 13px;
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+/* 选择模式下隐藏行尾 ⋯：整行点击已经在勾选，两个目标叠在一起会点错 */
+.session-row.selecting .session-actions {
+  display: none;
 }
 
 .session-item {
@@ -168,7 +184,17 @@ const lastMessageTime = computed<{ text: string; title: string } | null>(() => {
   flex-direction: column;
 }
 
+/* 标题行：标题省略号 + 行尾未读红点（红点不参与收缩，标题先截） */
+.session-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .session-title {
+  flex: 1;
+  min-width: 0;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
@@ -201,18 +227,19 @@ const lastMessageTime = computed<{ text: string; title: string } | null>(() => {
   white-space: nowrap;
 }
 
-.unread-badge {
-  flex-shrink: 0;
-  min-width: 20px;
-  height: 18px;
-  padding: 1px 6px;
-  border-radius: 10px;
+/* 未读：只留 6px 红点（条数进 hover 提示），不再和日期抢第二行的位置 */
+.unread-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
   background: var(--accent-red);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 18px;
-  text-align: center;
-  white-space: nowrap;
+  margin-right: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-check {
+    transition: none;
+  }
 }
 </style>

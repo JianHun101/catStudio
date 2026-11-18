@@ -2775,7 +2775,14 @@ const messageViews = computed<MessageView[]>(() => {
   resize: none;
   outline: none;
   overflow-y: auto;
-  scrollbar-width: thin;
+}
+
+/* 标准滚动条属性只给 Firefox：Chromium 121+ 一旦接受 scrollbar-width 就会忽略
+   ::-webkit-scrollbar-*，箭头按钮重新出现。selector() 判定见 index.html 同名块。 */
+@supports not (selector(::-webkit-scrollbar)) {
+  .chat-input {
+    scrollbar-width: thin;
+  }
 }
 
 .chat-input:disabled {

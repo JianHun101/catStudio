@@ -231,29 +231,35 @@
 
       /* Firefox — scrollbar-width is NOT inherited, must be on
          the actual scrolling element. scrollbar-color IS
-         inherited, so it stays on html as a global default. */
-      .chat-messages-wrapper,
-      .agent-cards,
-      .collapsed-sessions,
-      .collapsed-agents,
-      .modal,
-      .panel-inner,
-      .mention-dropdown {
-        scrollbar-width: thin;
-        scrollbar-color: var(--border-table) transparent;
-      }
+         inherited, so it stays on html as a global default.
 
-      /* 会话列表：滑块默认透明，指针进入列表才显色。用 background-color
-         （不写 background 简写），避免覆盖 background-clip / border。
-         显隐只改颜色、不改布局声明；WebKit 的 10px 轨道声明在下方全局块
-         （实际宽度由浏览器按 scrollbar-color / scrollbar-width 决定）。 */
-      .session-items {
-        scrollbar-width: thin;
-        scrollbar-color: transparent transparent;
-      }
+         Chromium 121+ 一旦接受 scrollbar-width / scrollbar-color 就切到标准滚动条，
+         会忽略整套 ::-webkit-scrollbar-*（箭头按钮随之回来）。selector() 判定：
+         Chromium 支持 ::-webkit-scrollbar → 不进此块；Firefox 不支持 → 进。 */
+      @supports not (selector(::-webkit-scrollbar)) {
+        .chat-messages-wrapper,
+        .agent-cards,
+        .collapsed-sessions,
+        .collapsed-agents,
+        .modal,
+        .panel-inner,
+        .mention-dropdown {
+          scrollbar-width: thin;
+          scrollbar-color: var(--border-table) transparent;
+        }
 
-      .session-items:hover {
-        scrollbar-color: var(--border-table) transparent;
+        /* 会话列表：滑块默认透明，指针进入列表才显色。用 background-color
+           （不写 background 简写），避免覆盖 background-clip / border。
+           显隐只改颜色、不改布局声明；WebKit 的 10px 轨道声明在下方全局块
+           （实际宽度由浏览器按 scrollbar-color / scrollbar-width 决定）。 */
+        .session-items {
+          scrollbar-width: thin;
+          scrollbar-color: transparent transparent;
+        }
+
+        .session-items:hover {
+          scrollbar-color: var(--border-table) transparent;
+        }
       }
 
       /* WebKit */
