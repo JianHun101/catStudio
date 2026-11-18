@@ -1,0 +1,1337 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>原型 · 会话列表四处 UI 调整（2026-11-18）</title>
+    <style>
+      :root {
+        --bg-deep: #f8f4ed;
+        --bg-base: #efe8dd;
+        --bg-surface: #ffffff;
+        --bg-hover: #e8dfd2;
+        --bg-session: #f1eae0;
+        --bg-paper: #fbf8f2;
+        --border-subtle: #e0d6c7;
+        --border-default: #d4c8b2;
+        --border-table: #c4b69c;
+        --text-primary: #3c3028;
+        --text-secondary: #6b5c4a;
+        --text-muted: #706153;
+        --accent: #c89060;
+        --accent-soft: rgba(180, 130, 80, 0.12);
+        --accent-red: #d04458;
+        --radius-md: 10px;
+        --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+        --font-sans:
+          'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: var(--bg-deep);
+        color: var(--text-primary);
+        font: 14px/1.6 var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+        padding: 32px 24px 80px;
+      }
+      /* 改后滚动条：只用 WebKit 伪元素，没有上下箭头按钮。
+         下面的 .old-scroll 走标准属性，用来复现「现在」的样子。 */
+      ::-webkit-scrollbar {
+        width: 12px;
+        height: 12px;
+      }
+      ::-webkit-scrollbar-button {
+        display: none;
+        width: 0;
+        height: 0;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--border-table);
+        border: 3px solid transparent;
+        background-clip: content-box;
+        border-radius: 6px;
+      }
+      .old-scroll {
+        scrollbar-width: thin;
+        scrollbar-color: var(--border-table) transparent;
+      }
+
+      .page {
+        max-width: 1180px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 20px;
+        font-weight: 600;
+        margin: 0 0 6px;
+      }
+      .lead {
+        font-size: 13px;
+        color: var(--text-secondary);
+        max-width: 780px;
+        margin: 0 0 4px;
+      }
+      .lead code {
+        font-size: 12px;
+        background: var(--bg-base);
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+      .toc {
+        display: flex;
+        gap: 18px;
+        font-size: 12px;
+        margin: 14px 0 0;
+      }
+      .toc a {
+        color: var(--text-muted);
+        text-decoration: none;
+        border-bottom: 1px dashed var(--border-default);
+        padding-bottom: 1px;
+      }
+      .toc a:hover {
+        color: var(--text-primary);
+      }
+
+      .block {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: 14px;
+        padding: 22px 24px 24px;
+        margin-top: 22px;
+      }
+      .block-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 4px;
+      }
+      .block-head h2 {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0;
+      }
+      .tag {
+        font: 11px/1.4 var(--font-sans);
+        color: var(--text-muted);
+        border: 1px solid var(--border-default);
+        border-radius: 20px;
+        padding: 1px 8px;
+      }
+      .block-desc {
+        font-size: 12.5px;
+        color: var(--text-secondary);
+        margin: 0 0 18px;
+        max-width: 820px;
+      }
+      .compare {
+        display: flex;
+        gap: 56px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+      .pane {
+        width: 236px;
+        flex: none;
+      }
+      .pane.wide {
+        width: 420px;
+      }
+      .pane-label {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-size: 12px;
+        color: var(--text-secondary);
+      }
+      .pane-label b {
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      .pane-label .dim {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .pane-note {
+        font-size: 11.5px;
+        color: var(--text-muted);
+        margin: 8px 0 0;
+      }
+
+      /* ── 会话栏模拟 ─────────────────────────── */
+      .session-app {
+        width: 236px;
+        height: 430px;
+        background: var(--bg-session);
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      .app-head {
+        flex: none;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 10px 0 14px;
+        border-bottom: 1px solid transparent;
+      }
+      .app-head .head-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      .head-actions {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+      .icon-btn {
+        width: 24px;
+        height: 24px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .icon-btn:hover {
+        background: var(--bg-hover);
+        color: var(--text-secondary);
+      }
+      .icon-btn svg {
+        display: block;
+      }
+      .batch-actions {
+        display: none;
+        align-items: center;
+        gap: 8px;
+        font-size: 11.5px;
+      }
+      .batch-actions button {
+        border: none;
+        background: transparent;
+        font: inherit;
+        color: var(--text-secondary);
+        cursor: pointer;
+        padding: 2px 3px;
+        border-radius: 4px;
+      }
+      .batch-actions button:hover {
+        background: var(--bg-hover);
+        color: var(--text-primary);
+      }
+      .batch-actions .danger {
+        color: var(--accent-red);
+      }
+      .session-app.selecting .head-label.normal,
+      .session-app.selecting .head-actions {
+        display: none;
+      }
+      .session-app.selecting .batch-actions {
+        display: flex;
+        width: 100%;
+        justify-content: space-between;
+        padding-right: 4px;
+      }
+      /* 只有进入选择模式，行首复选框才出现并常显；此时才占 22px */
+      #next-app:not(.selecting) .scheck {
+        display: none;
+      }
+      .session-app.selecting .scheck {
+        display: flex;
+        opacity: 1;
+        pointer-events: none;
+      }
+      .srow.picked {
+        background: var(--accent-soft);
+      }
+      /* 选择模式下不显示行操作菜单，避免和勾选抢点击 */
+      .session-app.selecting .smore {
+        display: none;
+      }
+      .session-items {
+        flex: 1;
+        overflow-y: auto;
+        padding: 0 8px 10px;
+      }
+      .group-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--text-muted);
+        padding: 8px 6px 4px;
+      }
+      .group-label .count {
+        margin-left: auto;
+      }
+      .srow {
+        display: flex;
+        align-items: stretch;
+        border-radius: var(--radius-md);
+      }
+      .srow:hover {
+        background: var(--bg-hover);
+      }
+      .scheck {
+        flex: none;
+        width: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0;
+        cursor: pointer;
+      }
+      .srow:hover .scheck {
+        opacity: 1;
+      }
+      .scheck input {
+        width: 13px;
+        height: 13px;
+        margin: 0;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+      /* 现状 pane 的「占位」可视化开关 */
+      body.show-placeholder .pane.now .scheck {
+        opacity: 1;
+        outline: 1px dashed var(--accent-red);
+        outline-offset: -1px;
+        background: rgba(208, 68, 88, 0.06);
+      }
+      body.show-placeholder .pane.now .scheck input {
+        visibility: hidden;
+      }
+      .sitem {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 6px;
+        border: none;
+        background: transparent;
+        font: inherit;
+        text-align: left;
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        color: var(--text-secondary);
+      }
+      .sitem.active {
+        background: var(--accent-soft);
+        color: var(--text-primary);
+      }
+      .sbody {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .stitle-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .stitle {
+        flex: 1;
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .smeta {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 1px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .scats {
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .stime {
+        flex: none;
+        white-space: nowrap;
+      }
+      .smore {
+        flex: none;
+        width: 22px;
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 14px;
+        cursor: pointer;
+        opacity: 0;
+        border-radius: 6px;
+      }
+      .srow:hover .smore {
+        opacity: 1;
+      }
+
+      /* 徽标 A：现状 */
+      .badge-a {
+        flex: none;
+        min-width: 20px;
+        height: 18px;
+        padding: 1px 6px;
+        border-radius: 10px;
+        background: var(--accent-red);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 18px;
+        text-align: center;
+      }
+      /* 徽标 B：小号数字，标题行右端 */
+      .badge-b {
+        flex: none;
+        min-width: 16px;
+        height: 15px;
+        padding: 0 4px;
+        border-radius: 8px;
+        background: var(--accent-red);
+        color: #fff;
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 15px;
+        text-align: center;
+      }
+      /* 徽标 C：纯红点，标题行右端 */
+      .badge-c {
+        flex: none;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent-red);
+        margin-right: 2px;
+      }
+      .no-badge {
+        visibility: hidden;
+      }
+
+      /* ── 未读三案 ───────────────────────────── */
+      .case-row {
+        display: flex;
+        gap: 36px;
+        flex-wrap: wrap;
+      }
+      .case {
+        width: 300px;
+        flex: none;
+      }
+      .case h3 {
+        font-size: 12.5px;
+        font-weight: 600;
+        margin: 0 0 2px;
+      }
+      .case h3 em {
+        font-style: normal;
+        color: var(--text-muted);
+        font-weight: 400;
+      }
+      .case .case-note {
+        font-size: 11.5px;
+        color: var(--text-muted);
+        margin: 6px 0 0;
+      }
+      .case .case-demo {
+        background: var(--bg-session);
+        border: 1px solid var(--border-subtle);
+        border-radius: 10px;
+        padding: 8px;
+      }
+      .case .srow + .srow {
+        margin-top: 1px;
+      }
+      .case .scheck {
+        display: none;
+      }
+
+      /* ── 聊天区新消息浮标 ─────────────────────── */
+      .chat-demo {
+        position: relative;
+        width: 380px;
+        height: 230px;
+        background: var(--bg-paper);
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      .chat-scroll {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px 18px 8px;
+      }
+      .date-sep {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        color: var(--text-muted);
+        opacity: 0.7;
+        padding: 8px 0 10px;
+      }
+      .bubble-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .bubble {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: 10px;
+        padding: 7px 11px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        max-width: 250px;
+      }
+      .bubble.mine {
+        margin-left: auto;
+        background: var(--accent-soft);
+        border-color: transparent;
+      }
+      .chat-foot {
+        flex: none;
+        display: flex;
+        justify-content: center;
+        padding: 0 0 12px;
+      }
+      .ping-now {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 6px 14px;
+        border: 1px solid var(--border-default);
+        border-radius: 20px;
+        background: var(--bg-surface);
+        color: var(--text-secondary);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        box-shadow: var(--shadow-md);
+      }
+      .ping-a {
+        width: 28px;
+        height: 28px;
+        border: 1px solid var(--border-default);
+        border-radius: 50%;
+        background: var(--bg-surface);
+        color: var(--text-secondary);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: var(--shadow-md);
+        position: relative;
+      }
+      .ping-a .dot {
+        position: absolute;
+        top: -1px;
+        right: -1px;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent-red);
+        border: 1.5px solid var(--bg-paper);
+      }
+      .ping-b {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        height: 24px;
+        padding: 0 9px;
+        border: 1px solid var(--border-default);
+        border-radius: 12px;
+        background: var(--bg-surface);
+        color: var(--text-secondary);
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+        box-shadow: var(--shadow-md);
+      }
+      .ping-b .count {
+        color: var(--accent-red);
+        font-weight: 600;
+      }
+      .hint-line {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 6px;
+      }
+
+      /* ── 滚动条对照 ─────────────────────────── */
+      .sb-demo {
+        width: 280px;
+        height: 190px;
+        overflow-y: scroll;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 12px;
+        color: var(--text-secondary);
+      }
+      .sb-demo p {
+        margin: 0 0 10px;
+      }
+      .sb-caption {
+        font-size: 11.5px;
+        color: var(--text-muted);
+        margin-top: 8px;
+      }
+      .root-cause {
+        margin-top: 20px;
+        padding: 12px 14px;
+        background: var(--bg-base);
+        border-radius: 8px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        max-width: 820px;
+      }
+      .root-cause b {
+        color: var(--text-primary);
+      }
+      .divider {
+        height: 1px;
+        background: var(--border-subtle);
+        margin: 18px 0;
+      }
+      .toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        user-select: none;
+      }
+      .toggle input {
+        accent-color: var(--accent);
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <h1>原型 · 会话列表四处 UI 调整</h1>
+      <p class="lead">
+        这是可交互原型，不是真实页面。四处问题分开给：① 滚动条箭头（已定位根因）、②
+        会话前的复选框、③ 未读提示大小、④ 新消息提示挤日期。下面每块都能直接看、直接点。
+      </p>
+      <p class="lead">
+        说明：① 的对照在 Chromium/Edge 下才看得出差别（Firefox 本来就没有那两个箭头）。
+        滚动条、按钮、字号都是按右栏真实尺寸（236px 宽）画的。
+      </p>
+      <div class="toc">
+        <a href="#s1">① 滚动条箭头</a>
+        <a href="#s2">② 会话前复选框</a>
+        <a href="#s3">③ 未读提示</a>
+        <a href="#s4">④ 聊天区新消息</a>
+      </div>
+
+      <!-- ① 滚动条 -->
+      <section class="block" id="s1">
+        <div class="block-head">
+          <h2>① 滚动条上下的箭头</h2>
+          <span class="tag">根因已找到 · 改一行 CSS 面</span>
+        </div>
+        <p class="block-desc">
+          左右两个都是真的滚动容器，内容一样。左边「现在」会看到上下箭头和两端按钮；右边「改后」只剩
+          4px 滑块，没有按钮。聊天区和左栏是同一处样式，一处修两边都好。
+        </p>
+        <div class="compare">
+          <div>
+            <div class="pane-label"><b>现在</b><span class="dim">标准滚动条属性在生效</span></div>
+            <div class="sb-demo old-scroll">
+              <p>问题盘查 · 11:21</p>
+              <p>mysql · 昨天</p>
+              <p>猫咖闲聊 · 11月16日</p>
+              <p>agentCli优化 · 11月9日</p>
+              <p>前端优化 · 11月5日</p>
+              <p>简历更新 · 昨天</p>
+              <p>表设计 · 10月14日</p>
+              <p>mcp · 9月29日</p>
+            </div>
+            <p class="sb-caption">箭头是浏览器默认滚动条的按钮，不是我们画的。</p>
+          </div>
+          <div>
+            <div class="pane-label">
+              <b>改后</b><span class="dim">只用 ::-webkit-scrollbar 定制</span>
+            </div>
+            <div class="sb-demo">
+              <p>问题盘查 · 11:21</p>
+              <p>mysql · 昨天</p>
+              <p>猫咖闲聊 · 11月16日</p>
+              <p>agentCli优化 · 11月9日</p>
+              <p>前端优化 · 11月5日</p>
+              <p>简历更新 · 昨天</p>
+              <p>表设计 · 10月14日</p>
+              <p>mcp · 9月29日</p>
+            </div>
+            <p class="sb-caption">无箭头、无方块，滑块默认半透明。</p>
+          </div>
+        </div>
+        <div class="root-cause">
+          <b>为什么之前写了 <code>::-webkit-scrollbar-button { display: none }</code> 还没用：</b>
+          会话列表和聊天区又同时设了 <code>scrollbar-width: thin</code> 与
+          <code>scrollbar-color</code>。Chromium 121 起，这两个标准属性一旦出现，整块
+          <code>::-webkit-scrollbar-*</code> 定制就被忽略，浏览器回落到系统默认滚动条 —— Windows
+          上默认滚动条两端就是带箭头的。所以那行 <code>display:none</code> 等于没写。
+          修法：把标准属性只留给 Firefox（用 <code>@supports</code> 包住），Chromium 走纯 WebKit
+          定制。
+        </div>
+      </section>
+
+      <!-- ② 会话前复选框 -->
+      <section class="block" id="s2">
+        <div class="block-head">
+          <h2>② 会话前的复选框 → 改成按钮触发</h2>
+          <span class="tag">可点 · 右边点「多选」试试</span>
+        </div>
+        <p class="block-desc">
+          现在每行行首恒留 22px
+          给复选框（平时透明，悬停才显形），等于每行都白占一截。改后：默认完全没有这块 ——
+          标题从行首起排；头行右侧加一个「多选」图标按钮，点下去才进入选择模式，复选框这时才出现，
+          头行同时变成「已选 N ｜ 归组 ｜ 删除 ｜ 取消」。再点「取消」退出。
+        </p>
+        <div class="compare">
+          <div class="pane now">
+            <div class="pane-label"><b>现在</b><span class="dim">行首恒占 22px</span></div>
+            <div class="session-app old-scroll">
+              <div class="app-head">
+                <span class="head-label">会话</span>
+                <span class="head-actions">
+                  <button class="icon-btn" title="回收站">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                      <path
+                        d="M2.5 4.5h11M6 4.5V3.2a.7.7 0 0 1 .7-.7h2.6a.7.7 0 0 1 .7.7v1.3"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M4 4.5l.55 8.2a1 1 0 0 0 1 .9h4.9a1 1 0 0 0 1-.9L12 4.5"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M6.7 7v3.6M9.3 7v3.6"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </button>
+                  <button class="icon-btn" title="新建会话">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                      <path
+                        d="M8 3v10M3 8h10"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </button>
+                </span>
+              </div>
+              <div class="session-items">
+                <div class="group-label"><span>未分组</span><span class="count">9</span></div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem active">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">问题盘查</span></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span><span class="stime">11:21</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">mysql</span></span>
+                      <span class="smeta"
+                        ><span class="scats">1 只猫咪</span><span class="stime">昨天</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">猫咖闲聊（1）</span></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span
+                        ><span class="stime">11月16日</span></span
+                      >
+                    </span>
+                    <span class="badge-a">4</span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">agentCli优化（1）</span></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span><span class="stime">11月9日</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">前端优化（1）</span></span>
+                      <span class="smeta"
+                        ><span class="scats">5 只猫咪</span><span class="stime">11月5日</span></span
+                      >
+                    </span>
+                    <span class="badge-a">2</span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">简历更新（1）</span></span>
+                      <span class="smeta"
+                        ><span class="scats">5 只猫咪</span><span class="stime">昨天</span></span
+                      >
+                    </span>
+                    <span class="badge-a">2</span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">表设计（1）</span></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span
+                        ><span class="stime">10月14日</span></span
+                      >
+                    </span>
+                    <span class="badge-a">1</span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">用户文件夹替换</span></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span
+                        ><span class="stime">10月14日</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+              </div>
+            </div>
+            <p class="pane-note">
+              <label class="toggle"
+                ><input type="checkbox" id="show-placeholder" /> 用虚线标出被占的 22px</label
+              >
+            </p>
+          </div>
+
+          <div class="pane">
+            <div class="pane-label">
+              <b>改后</b><span class="dim">默认无复选框 · 按钮触发</span>
+            </div>
+            <div class="session-app" id="next-app">
+              <div class="app-head">
+                <span class="head-label normal">会话</span>
+                <span class="head-actions">
+                  <button class="icon-btn" title="回收站">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                      <path
+                        d="M2.5 4.5h11M6 4.5V3.2a.7.7 0 0 1 .7-.7h2.6a.7.7 0 0 1 .7.7v1.3"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M4 4.5l.55 8.2a1 1 0 0 0 1 .9h4.9a1 1 0 0 0 1-.9L12 4.5"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M6.7 7v3.6M9.3 7v3.6"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </button>
+                  <button class="icon-btn" id="multi-btn" title="多选">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                      <rect
+                        x="2.5"
+                        y="3"
+                        width="11"
+                        height="10"
+                        rx="1.5"
+                        stroke="currentColor"
+                        stroke-width="1.3"
+                      />
+                      <path
+                        d="M5 8l2 2 4-4"
+                        stroke="currentColor"
+                        stroke-width="1.3"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </svg>
+                  </button>
+                  <button class="icon-btn" title="新建会话">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                      <path
+                        d="M8 3v10M3 8h10"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </button>
+                </span>
+                <span class="batch-actions">
+                  <span class="head-label">已选 <span id="sel-count">0</span></span>
+                  <span style="display: flex; gap: 6px; align-items: center">
+                    <button>归组</button>
+                    <button class="danger">删除</button>
+                    <button id="cancel-btn">取消</button>
+                  </span>
+                </span>
+              </div>
+              <div class="session-items" id="next-items">
+                <div class="group-label"><span>未分组</span><span class="count">9</span></div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem active">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">问题盘查</span></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span><span class="stime">11:21</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">mysql</span></span>
+                      <span class="smeta"
+                        ><span class="scats">1 只猫咪</span><span class="stime">昨天</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"
+                        ><span class="stitle">猫咖闲聊（1）</span
+                        ><span class="badge-c" title="4 条新消息"></span
+                      ></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span
+                        ><span class="stime">11月16日</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">agentCli优化（1）</span></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span><span class="stime">11月9日</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"
+                        ><span class="stitle">前端优化（1）</span
+                        ><span class="badge-c" title="2 条新消息"></span
+                      ></span>
+                      <span class="smeta"
+                        ><span class="scats">5 只猫咪</span><span class="stime">11月5日</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"
+                        ><span class="stitle">简历更新（1）</span
+                        ><span class="badge-c" title="2 条新消息"></span
+                      ></span>
+                      <span class="smeta"
+                        ><span class="scats">5 只猫咪</span><span class="stime">昨天</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"
+                        ><span class="stitle">表设计（1）</span
+                        ><span class="badge-c" title="1 条新消息"></span
+                      ></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span
+                        ><span class="stime">10月14日</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+                <div class="srow">
+                  <label class="scheck"><input type="checkbox" /></label>
+                  <button class="sitem">
+                    <span class="sbody">
+                      <span class="stitle-row"><span class="stitle">用户文件夹替换</span></span>
+                      <span class="smeta"
+                        ><span class="scats">4 只猫咪</span
+                        ><span class="stime">10月14日</span></span
+                      >
+                    </span>
+                  </button>
+                  <button class="smore">⋯</button>
+                </div>
+              </div>
+            </div>
+            <p class="pane-note">点右上角「多选」进入选择模式；点「取消」退出。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ③ 未读提示 -->
+      <section class="block" id="s3">
+        <div class="block-head">
+          <h2>③ 未读提示的大小与位置</h2>
+          <span class="tag">三案 · 等拍板</span>
+        </div>
+        <p class="block-desc">
+          现在那个红色数字块挂在行尾、和第二行的「日期」同一水平带，宽 20px，日期只能往左让。
+          三个方向：A 保持原位、只缩小；B 缩小并挪到第一行；C 只留一个 6px 红点，日期完全不受影响。
+          三行用的都是真实右栏宽度，可以横着比。
+        </p>
+        <div class="case-row">
+          <div class="case">
+            <h3>A · 现状 <em>20×18，行尾</em></h3>
+            <div class="case-demo">
+              <div class="srow">
+                <button class="sitem">
+                  <span class="sbody">
+                    <span class="stitle-row"><span class="stitle">猫咖闲聊（1）</span></span>
+                    <span class="smeta"
+                      ><span class="scats">4 只猫咪</span><span class="stime">11月16日</span></span
+                    >
+                  </span>
+                  <span class="badge-a">4</span>
+                </button>
+              </div>
+              <div class="srow">
+                <button class="sitem">
+                  <span class="sbody">
+                    <span class="stitle-row"><span class="stitle">前端优化（1）</span></span>
+                    <span class="smeta"
+                      ><span class="scats">5 只猫咪</span><span class="stime">11月5日</span></span
+                    >
+                  </span>
+                  <span class="badge-a">2</span>
+                </button>
+              </div>
+            </div>
+            <p class="case-note">红色块占 20px，日期被往左挤；视觉上也最重。</p>
+          </div>
+
+          <div class="case">
+            <h3>B · 小号数字 <em>16×15，标题行右端</em></h3>
+            <div class="case-demo">
+              <div class="srow">
+                <button class="sitem">
+                  <span class="sbody">
+                    <span class="stitle-row"
+                      ><span class="stitle">猫咖闲聊（1）</span><span class="badge-b">4</span></span
+                    >
+                    <span class="smeta"
+                      ><span class="scats">4 只猫咪</span><span class="stime">11月16日</span></span
+                    >
+                  </span>
+                </button>
+              </div>
+              <div class="srow">
+                <button class="sitem">
+                  <span class="sbody">
+                    <span class="stitle-row"
+                      ><span class="stitle">前端优化（1）</span><span class="badge-b">2</span></span
+                    >
+                    <span class="smeta"
+                      ><span class="scats">5 只猫咪</span><span class="stime">11月5日</span></span
+                    >
+                  </span>
+                </button>
+              </div>
+            </div>
+            <p class="case-note">数字还看得见，日期这一行彻底让开；标题可用宽度少 16px。</p>
+          </div>
+
+          <div class="case">
+            <h3>C · 只留红点 <em>6px，标题行右端</em></h3>
+            <div class="case-demo">
+              <div class="srow">
+                <button class="sitem">
+                  <span class="sbody">
+                    <span class="stitle-row"
+                      ><span class="stitle">猫咖闲聊（1）</span
+                      ><span class="badge-c" title="4 条新消息"></span
+                    ></span>
+                    <span class="smeta"
+                      ><span class="scats">4 只猫咪</span><span class="stime">11月16日</span></span
+                    >
+                  </span>
+                </button>
+              </div>
+              <div class="srow">
+                <button class="sitem">
+                  <span class="sbody">
+                    <span class="stitle-row"
+                      ><span class="stitle">前端优化（1）</span
+                      ><span class="badge-c" title="2 条新消息"></span
+                    ></span>
+                    <span class="smeta"
+                      ><span class="scats">5 只猫咪</span><span class="stime">11月5日</span></span
+                    >
+                  </span>
+                </button>
+              </div>
+            </div>
+            <p class="case-note">最安静；条数放进 hover 提示（title），不再占行内宽度。</p>
+          </div>
+        </div>
+        <div class="root-cause">
+          <b>我的建议是 C。</b>未读提示要回答的是「有没有新东西」，不是「有几条」；真要数量，hover
+          或者点进去都看得到。B 也能用，代价是标题少 16px —— 右栏只有 236px，标题本来就常被截。 A
+          只是把同一个问题缩小，日期还是被挤。
+        </div>
+      </section>
+
+      <!-- ④ 聊天区新消息 -->
+      <section class="block" id="s4">
+        <div class="block-head">
+          <h2>④ 聊天区的「N 条新消息」</h2>
+          <span class="tag">若你指的是这个 · 三档大小</span>
+        </div>
+        <p class="block-desc">
+          左栏那个是「会话未读数」，聊天区这个是「你往上翻时，底下又来了新消息」的回跳按钮。
+          两者不是同一个东西。如果你说的「挤占日期位置」是左栏的，看 ③ 就够；如果指的是聊天区这个，
+          这里给三档。它浮在消息流底部，尺寸大时会把底部的日期分隔线顶上去一截。
+        </p>
+        <div class="case-row">
+          <div class="case" style="width: 400px">
+            <h3>现在 <em>31px 高 · 107px 宽</em></h3>
+            <div class="chat-demo">
+              <div class="chat-scroll">
+                <div class="date-sep">11月18日</div>
+                <div class="bubble-row">
+                  <div class="bubble">这条已经看过了，往上翻是历史。</div>
+                </div>
+                <div class="bubble-row"><div class="bubble mine">我想回看前面那段。</div></div>
+                <div class="bubble-row"><div class="bubble">好，你往上翻。</div></div>
+              </div>
+              <div class="chat-foot">
+                <button class="ping-now">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M4 6l4 4 4-4"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  <span>3 条新消息</span>
+                </button>
+              </div>
+            </div>
+            <p class="case-note">文字 + 图标 + 内边距都大，底部占一整行。</p>
+          </div>
+
+          <div class="case" style="width: 400px">
+            <h3>A · 圆钮 <em>28×28</em></h3>
+            <div class="chat-demo">
+              <div class="chat-scroll">
+                <div class="date-sep">11月18日</div>
+                <div class="bubble-row">
+                  <div class="bubble">这条已经看过了，往上翻是历史。</div>
+                </div>
+                <div class="bubble-row"><div class="bubble mine">我想回看前面那段。</div></div>
+                <div class="bubble-row"><div class="bubble">好，你往上翻。</div></div>
+              </div>
+              <div class="chat-foot">
+                <button class="ping-a" title="3 条新消息">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M4 6l4 4 4-4"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  <span class="dot"></span>
+                </button>
+              </div>
+            </div>
+            <p class="case-note">只剩箭头，右上角一个小红点；条数进 title。最不挡日期。</p>
+          </div>
+
+          <div class="case" style="width: 400px">
+            <h3>B · 矮胶囊 <em>24px 高 · 约 92px 宽</em></h3>
+            <div class="chat-demo">
+              <div class="chat-scroll">
+                <div class="date-sep">11月18日</div>
+                <div class="bubble-row">
+                  <div class="bubble">这条已经看过了，往上翻是历史。</div>
+                </div>
+                <div class="bubble-row"><div class="bubble mine">我想回看前面那段。</div></div>
+                <div class="bubble-row"><div class="bubble">好，你往上翻。</div></div>
+              </div>
+              <div class="chat-foot">
+                <button class="ping-b">
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M4 6l4 4 4-4"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  <span class="count">3</span><span>条新消息</span>
+                </button>
+              </div>
+            </div>
+            <p class="case-note">保留文字，字号 11、高度 24；比现在矮 7px。</p>
+          </div>
+        </div>
+      </section>
+
+      <div class="divider"></div>
+      <p class="hint-line">
+        原型文件：docs/run/proto-session-ui-2026-11-18.html · 只用来判断，不提交、不改真实页面。
+      </p>
+    </div>
+
+    <script>
+      // ② 多选模式
+      const app = document.getElementById('next-app')
+      const items = document.getElementById('next-items')
+      const multiBtn = document.getElementById('multi-btn')
+      const cancelBtn = document.getElementById('cancel-btn')
+      const selCount = document.getElementById('sel-count')
+
+      function selectedRows() {
+        return [...items.querySelectorAll('.srow')].filter((r) => r.classList.contains('picked'))
+      }
+      function syncCount() {
+        selCount.textContent = String(selectedRows().length)
+      }
+      multiBtn.addEventListener('click', () => {
+        app.classList.add('selecting')
+      })
+      cancelBtn.addEventListener('click', () => {
+        app.classList.remove('selecting')
+        items.querySelectorAll('.srow').forEach((r) => {
+          r.classList.remove('picked')
+          const cb = r.querySelector('input[type="checkbox"]')
+          if (cb) cb.checked = false
+        })
+        syncCount()
+      })
+      // 选择模式：点整行 = 勾选；非选择模式 = 点进会话（原型里不做事）
+      items.addEventListener('click', (e) => {
+        const row = e.target.closest('.srow')
+        if (!row) return
+        if (!app.classList.contains('selecting')) return
+        e.preventDefault()
+        const cb = row.querySelector('input[type="checkbox"]')
+        row.classList.toggle('picked')
+        if (cb) cb.checked = row.classList.contains('picked')
+        syncCount()
+      })
+
+      // ② 现状 pane：标出被占的 22px
+      const ph = document.getElementById('show-placeholder')
+      ph.addEventListener('change', () => {
+        document.body.classList.toggle('show-placeholder', ph.checked)
+      })
+    </script>
+  </body>
+</html>
